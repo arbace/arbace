@@ -23,6 +23,9 @@
 #           compared with test/ocaml/floors.tsv and fail on a drop; --record (roundtrip, types|lambda|dumps, spec-check) rewrites it
 #   bin/repr-ocaml embed-check    the sources a shipped build embeds (arbace/j2g/embed.ae) are keyed (bin/lib/version.bash)
 #                                 and none is repr/ocaml's (test/ocaml/embed_check.ae)
+#   bin/repr-ocaml c2j-check      repr/ocaml's namespaces and arbace.o2j compiled by c2j alone on the tools' host (bin/lib/crops/c2j-check;
+#                                 OC165 (a) embeds oi alone, so this says only that repr/ocaml would compile, and keeps o2j's compile
+#                                 checked; about 15 s, 1 GB)
 #   bin/repr-ocaml read [-o DIR] FILE...   FILE.ml/.mli to OCaml forms (mode :lines) under DIR (default
 #                                 .tmp/repr-ocaml/forms/NAME.ae): the helper's dump, converted, read back
 #   bin/repr-ocaml print [-o DIR] FORMS.ae...   forms to OCaml text under DIR (default .tmp/repr-ocaml/printed)
@@ -34,6 +37,15 @@
 #                                 rejects is classed against test/ocaml/roundtrip-known.edn (--record
 #                                 rewrites it); runs at most N (default 4) helper processes, one Arbace
 #                                 run per step, GOMEMLIMIT 1500MiB
+#                                 The negative controls (GT9; test/ocaml/roundtrip-controls.txt, REPR_OCAML_CONTROLS): each line
+#                                 `CORPUS ID SUBJECT REFERENCE` crosses one file's print with another's original through each level's own
+#                                 judge (the trees' compare, with --text the cmp of the :full print, with --cmi the .cmi's cmp); it must
+#                                 differ (`control ID fails as it must`), else the run fails (rt_controls)
+#   bin/repr-ocaml roundtrip --record-results [--corpus ID]... [CORPUS...]
+#                                 O8: the round trip with --text, then each corpus's rows of the read level's record
+#                                 test/ocaml/read-results.edn and the print level's test/ocaml/print-results.edn (bin/reap's
+#                                 OCaml read and print cells), the corpus's earlier rows replaced, the others kept; a corpus
+#                                 whose round trip fails is not recorded. CORPUS `opam`: the ten :opam-* corpora; `all`: every one
 #   bin/repr-ocaml roundtrip --spec   the same over the spec's worked examples (doc/ocaml/SPEC.md)
 #   bin/repr-ocaml check          the round trip over the default corpora and the spec's examples
 #   bin/repr-ocaml read --full [-o DIR] FILE...   mode :full (O3): the forms with the file's text in the metadata's
@@ -45,6 +57,12 @@
 #   bin/repr-ocaml roundtrip --cmi [CORPUS...]    O3: and the .cmi level: each file compiled by ocamlc -c from the original's
 #                                 directory and from the print's, the .cmi bytes equal (a file the original does not compile
 #                                 alone is counted: its first error is in .tmp/repr-ocaml/rt/NAME/cmi/skipped.txt)
+#   bin/repr-ocaml roundtrip --cmi-only [CORPUS...]   GT9: only the .cmi level (the helper's dump, mode :full's print and cmp, ocamlc on the
+#                                 originals and the prints): not the tree level, the :lines print and its redump; the corpus's other
+#                                 part runs the tree level (gate: stdlib and samples run --cmi whole, the rest tree level and, in the clean run, --cmi-only)
+#   bin/repr-ocaml roundtrip --only-list FILE [CORPUS...]   GT9: only the files FILE lists (ids CORPUS/FILE one a line, as test/ocaml/
+#                                 read-results.edn names them), each corpus its own; every judge leaves out what was not run; the floors are
+#                                 not checked; not with --record, --record-results or --spec (the gate's rotation, GTS223)
 #   bin/repr-ocaml roundtrip --cmi-lines [CORPUS...]  and the :lines print's .cmi with -no-keep-locs equal to the original's
 #                                 with -no-keep-locs
 #   bin/repr-ocaml types|lambda|dumps [--jobs N] [--loc] [--simplify] [CORPUS...]
@@ -96,6 +114,8 @@ DEFAULT_DUMPS_CORPORA=(samples stdlib compiler-sources compiler-backend whiml te
 DEFAULT_RT_CORPORA=(stdlib compiler-sources compiler-backend samples)
 floor() {
   local kind=$1 c=$2 n=$3 want
+  # GT9: a run of an --only-list's files counts less than the corpus: nothing to compare with the floor, nothing recorded
+  if [ -n "${ONLY_LIST:-}" ]; then echo "  floor $kind $c: $n, a partial run (--only-list), not checked"; return 0; fi
   # a corpus compiles at least one file, and --record does not record a count of 0 (re-review 049)
   if [ "$n" -le 0 ]; then echo "  FLOOR $kind $c: $n, nothing compiles"; return 1; fi
   if [ "${RECORD:-}" = 1 ]; then
@@ -365,6 +385,15 @@ rt_one() {
   local t0=$SECONDS
   OUT="$w/orig" SUF=.ae xargs -a "$list" -P "$jobs" -n 1 bash -c 'dump_one "$0"'
   local t1=$SECONDS
+  # GT9 --cmi-only: only the .cmi level (mode :full's print, then ocamlc on the originals and the prints): the :lines print, its
+  # redump and the tree comparison are the corpus's other part's
+  if [ -n "${CMI_ONLY:-}" ]; then
+    echo "  $name: dump $((t1 - t0)) s (--cmi-only: the tree level left out)"
+    local rc=0
+    rt_text "$name" "$base" "$list" || rc=1
+    rt_cmi "$name" "$base" "$list" || rc=1
+    return $rc
+  fi
   rt_arbace print --root "$w/orig" -o "$w/printed" > "$w/print.log" || { tail -20 "$w/print.log"; }
   local t2=$SECONDS
   # the printed file's dump: its name is the original's
@@ -376,6 +405,45 @@ rt_one() {
   echo "  $name: dump $((t1 - t0)) s, print $((t2 - t1)) s, redump $((t3 - t2)) s"
   if [ -n "${TEXT:-}" ]; then rt_text "$name" "$base" "$list" || rc=1; fi
   if [ -n "${CMI:-}" ]; then rt_cmi "$name" "$base" "$list" || rc=1; fi
+  rt_controls "$name" "$base" "$list" || rc=1
+  return $rc
+}
+
+# rt_controls NAME BASE LISTFILE: the round trip's negative controls (GT9, GTS218 (a); doc/GATE-SURVEY.md, "As built: GT9's controls"),
+# test/ocaml/roundtrip-controls.txt (REPR_OCAML_CONTROLS): lines `CORPUS ID SUBJECT REFERENCE` (files of the corpus, both round-tripping),
+# run after the levels the run did, each level judged by its own judge on the SUBJECT's artifact crossed with the REFERENCE's original,
+# which must differ: the trees (O2: `compare`, arbace.repr.ocaml, the subject's printed dump as the candidate against the reference's dump
+# as the original, no known file), with --text the :full print against the reference's source (cmp), with --cmi the print's .cmi against
+# the reference's original's (cmp). A level the same is `control passed`; one with no level compared is `control not judged`; both fail the
+# run; a control whose files the corpus or the list lacks is left. No control is a file of the run's report.
+rt_controls() {
+  local name=$1 base=$2 list=$3 w="$root/.tmp/repr-ocaml/rt/$1" file="${REPR_OCAML_CONTROLS:-$root/test/ocaml/roundtrip-controls.txt}" rc=0
+  local c id sub ref d lv same sb rb
+  [ -f "$file" ] || return 0
+  while read -r c id sub ref _; do
+    case $c in ''|'#'*) continue ;; esac
+    [ "$c" = "$name" ] || continue
+    if ! grep -qx -- "$sub" "$list" || ! grep -qx -- "$ref" "$list"; then echo "  control $id left: $sub or $ref is not in the list"; continue; fi
+    if [ ! -f "$w/orig/$ref.ae" ] || [ ! -f "$w/cand/$sub.ae" ] || [ ! -f "$w/orig/$sub.ae" ]; then echo "  control $id left: $sub or $ref has no dump of the original or of the print"; continue; fi
+    d="$w/ctl/$(echo "$id" | tr / _)"
+    rm -rf "$d"; mkdir -p "$d/orig/$(dirname "$sub")" "$d/cand/$(dirname "$sub")"
+    cp "$w/orig/$ref.ae" "$d/orig/$sub.ae"; cp "$w/cand/$sub.ae" "$d/cand/$sub.ae"
+    lv=""; same=""
+    if rt_arbace compare --orig "$d/orig" --cand "$d/cand" > "$d/compare.log" 2>&1; then same="$same trees"; fi
+    lv="trees"
+    if [ -n "${TEXT:-}" ] && [ -f "$w/full/$sub" ]; then
+      lv="$lv text"; if cmp -s "$base/$ref" "$w/full/$sub"; then same="$same text"; fi
+    fi
+    if [ -n "${CMI:-}" ]; then
+      case $sub in *.mli) sb="${sub%.mli}.cmi" ;; *) sb="${sub%.ml}.cmi" ;; esac
+      case $ref in *.mli) rb="${ref%.mli}.cmi" ;; *) rb="${ref%.ml}.cmi" ;; esac
+      if [ -f "$w/cmi/print/$sb" ] && [ -f "$w/cmi/orig/$rb" ]; then
+        lv="$lv cmi"; if cmp -s "$w/cmi/orig/$rb" "$w/cmi/print/$sb"; then same="$same cmi"; fi
+      fi
+    fi
+    if [ -n "$same" ]; then echo "  control passed: $id ($sub against $ref) is the same at:$same"; rc=1
+    else echo "  control $id fails as it must (${lv# } differ)"; fi
+  done < "$file"
   return $rc
 }
 
@@ -397,7 +465,7 @@ rt_text() {
   rm -rf "$w/full" "$w/full-forms"
   local extra=(); [ "${RECORD:-}" = 1 ] && extra+=(--record)
   rt_arbace full --src "$base" --parse "$w/orig" --layout "$w/layout" --out "$w/full" --forms "$w/full-forms" \
-    --known "$root/test/ocaml/full-known.edn" --rt-known "$root/test/ocaml/roundtrip-known.edn" "${extra[@]}" || rc=1
+    --known "$root/test/ocaml/full-known.edn" --rt-known "$root/test/ocaml/roundtrip-known.edn" --report "$w/full-report.edn" "${extra[@]}" || rc=1
   local n=0 bad=0 rel
   while read -r rel; do
     [ -f "$w/full/$rel" ] || continue
@@ -601,18 +669,62 @@ cmd_roundtrip() {
       --jobs) shift; REPR_OCAML_JOBS=$1 ;;
       --spec) spec=1 ;;
       --text) TEXT=1 ;;
+      --record-results) TEXT=1; RESULTS=1 ;;
+      --corpus) shift; ids+=("$1") ;;
       --cmi) TEXT=1; CMI=1 ;;
+      --cmi-only) TEXT=1; CMI=1; CMI_ONLY=1 ;;
+      --only-list) shift; ONLY_LIST=$1 ;;
       --cmi-lines) TEXT=1; CMI=1; CMI_LINES=1 ;;
       *) ids+=("$1") ;;
     esac
     shift
   done
   [ ${#ids[@]} = 0 ] && [ -z "$spec" ] && ids=("${DEFAULT_RT_CORPORA[@]}")
+  if [ -n "${ONLY_LIST:-}" ]; then
+    [ -f "$ONLY_LIST" ] || { echo "repr-ocaml: --only-list $ONLY_LIST: no such file" >&2; return 2; }
+    if [ "${RECORD:-}" = 1 ] || [ -n "${RESULTS:-}" ]; then echo "repr-ocaml: --only-list with --record or --record-results would drop the rows it did not run" >&2; return 2; fi
+    spec=""
+  fi
+  # O8: the names `opam` (the ten :opam-* corpora) and `all` (every corpus of test/ocaml/corpora.edn), for the gate's parts
+  local x ex=()
+  for x in "${ids[@]}"; do
+    case $x in
+      opam) while read -r c _; do case $c in opam-*) ex+=("$c") ;; esac; done < <(corpus_rows) ;;
+      all) while read -r c _; do ex+=("$c"); done < <(corpus_rows) ;;
+      *) ex+=("$x") ;;
+    esac
+  done
+  ids=("${ex[@]}")
   for id in "${ids[@]}"; do
     list="$root/.tmp/repr-ocaml/rt-$id.list"; mkdir -p "$(dirname "$list")"
     corpus_list "$id" > "$list"
+    # GT9 --only-list FILE: the ids CORPUS/FILE (as test/ocaml/read-results.edn names them) the run is limited to; a corpus with none
+    # of them is not run; the judges leave out what the run did not run (compare and full judge the dumps present, floors are not checked)
+    if [ -n "${ONLY_LIST:-}" ]; then
+      sed "s|^|$id/|" "$list" | grep -Fxf "$ONLY_LIST" | sed "s|^$id/||" > "$list.only" || true
+      mv "$list.only" "$list"
+      [ -s "$list" ] || { echo "== $id: no file of $ONLY_LIST"; continue; }
+    fi
     echo "== $id ($(wc -l < "$list") files)"
-    rt_one "$id" "$CORPUS_BASE" "$list" || bad=1
+    local one=0 flog="$root/.tmp/repr-ocaml/rt-$id.out" st
+    mkdir -p "$(dirname "$flog")"
+    set +e; rt_one "$id" "$CORPUS_BASE" "$list" 2>&1 | tee "$flog"; st=${PIPESTATUS[0]}; set -e
+    [ "$st" = 0 ] || { bad=1; one=1; }
+    # GT9: the failed files as ids, one a line, for the gate's rotation (:failed-re "^FAILED (.+)$"): CORPUS/FILE as the records name them
+    if [ "$st" != 0 ]; then
+      sed -nE -e 's/^(DIFF|UNSTABLE|FAIL|UNEXPECTED REJECT) ([^ ]+).*$/\2/p' -e 's/^ *(CMI|CMP) differs: ([^ ]+)$/\2/p' \
+        -e 's/^GONE \(listed, no longer occurs\) ([^ ]+).*$/\1/p' "$flog" | LC_ALL=C sort -u | sed "s|^|FAILED $id/|"
+    fi
+    # O8 (--record-results): the corpus's rows of the read and print levels' records, from a run that passed
+    if [ "${RESULTS:-}" = 1 ]; then
+      if [ $one = 0 ]; then
+        rt_arbace results --corpus "$id" --list "$list" --compare "$root/.tmp/repr-ocaml/rt/$id/report.edn" \
+          --full "$root/.tmp/repr-ocaml/rt/$id/full-report.edn" --read "$root/test/ocaml/read-results.edn" \
+          --print "$root/test/ocaml/print-results.edn" || bad=1
+      else
+        echo "  $id: not recorded (the round trip failed)"
+      fi
+    fi
   done
   if [ -n "$spec" ]; then
     echo "== spec examples"
@@ -663,5 +775,6 @@ case "${1:-}" in
   samples) cmd_samples ;;
   spec-check) shift; cmd_spec_check "$@" ;;
   embed-check) cmd_embed_check ;;
+  c2j-check) exec "$root/bin/lib/crops/c2j-check" ocaml ;;
   *) sed -n '2,40p' "$0"; exit 2 ;;
 esac

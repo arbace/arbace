@@ -8,6 +8,11 @@
 # is tools/cirun (bin/ci cirun-build), outside Arbace's executable; on an executable built with ci, CI_EXE runs
 # the node programs by `arbace -m arbace.c.repl run-nodes` instead (the heavy list's). The negative control (GTS81 (a),
 # test/c/controls.edn, :level :run; the AOT judge's too): a program's run against another's gcc run must not pass.
+# Under ARBACE_COVER_DIR (doc/GATE-SURVEY.md, GT8.3, GTS206 (a); bin/lib/cover.bash, bin/cover): the node programs run on
+# the cover build's executable (cover_exe, in place of CI_EXE and cirun), each with its GOCOVERDIR, ARBACE_COVER_DIR/ci/ID,
+# its budget CI_COVER_BUDGET_X times (default 2); with CI_COVER_READ=1 also the read level, each program read, checked
+# and built by its own nodes-list process on the cover build, ARBACE_COVER_DIR/ci-read/ID (repr/c, the checker, the
+# builder; about a second more a program), in place of the tools' host's one process
 #
 # Usage: bin/ci check [--corpus C,...] [--only LIST] [--record] [--judge] [--resume]
 #   --corpus   the run corpora (default those test/c/ref-gcc15.edn records)
@@ -24,6 +29,8 @@ root=$(cd "$(dirname "$0")/../../.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
 . "$root/bin/lib/tools.bash"
 . "$root/bin/lib/ci/budget.bash"
+. "$root/bin/lib/gate-cache.bash"
+. "$root/bin/lib/cover.bash" # ARBACE_COVER_DIR: the cover build, a GOCOVERDIR per program (GT8.3)
 # CI_EXE as a path from the caller's directory, made absolute before the cd's (run1 runs it from a directory of its
 # own: C9.2's step 5 names target/arbace-go/amd64/arbace; queue 118); a bare name is looked up on PATH as before
 case ${CI_EXE:-} in
@@ -63,7 +70,30 @@ jobs=${CI_JOBS:-4}; [ "$jobs" -gt 4 ] && jobs=4
 cirun=${CIRUN:-$root/.tmp/ci/cirun}
 # CI_EXE (C9, CS103): an executable built with ci runs each node program in its own process (arbace -m arbace.c.repl run-nodes
 # FILE, arbace.lang.CInterp's native), against the same results as tools/cirun's (one loader); no cirun build then
-runner=$cirun; [ -z "${CI_EXE:-}" ] || runner="$CI_EXE -m arbace.c.repl run-nodes"
+# the gate's executable is built from the checkout, so it runs compiled: the stage-0 variables (ARBACE_PATH_FIRST,
+# ARBACE_NO_AOT, ARBACE_NO_IMAGE, which the gate sets until the re-seed after the backlog) unset on it, so that each
+# program's budget is its run's, not the evaluated runtime's load (review 184, finding 2; the user's (a), 2026-11-03)
+# GT8.3: under ARBACE_COVER_DIR the cover build's executable, whatever CI_EXE names (cirun is not covered)
+cover_x=1
+if [ -n "${ARBACE_COVER_DIR:-}" ]; then
+  CI_EXE=$(cover_exe "$root") || exit 1
+  cover_x=${CI_COVER_BUDGET_X:-2}
+  echo "ci check: coverage into $ARBACE_COVER_DIR (ci${CI_COVER_READ:+, ci-read}) on $CI_EXE" >&2
+fi
+runner=$cirun; [ -z "${CI_EXE:-}" ] || runner="env -u ARBACE_PATH_FIRST -u ARBACE_NO_AOT -u ARBACE_NO_IMAGE $CI_EXE -m arbace.c.repl run-nodes"
+# read1 LINE: under coverage (CI_COVER_READ) one program of todo.tsv read, checked and built by its own process on the
+# cover build, its node program moved into WORK, its nodes.tsv line printed
+read1() {
+  local rw c
+  rw=$(mktemp -d "$work/read.XXXXXX")
+  printf '%s\n' "$1" > "$rw/one.tsv"
+  c=$(cover_env ci-read "${1%%$'\t'*}")
+  (cd "$root" && export "$c" && env -u ARBACE_PATH_FIRST -u ARBACE_NO_AOT -u ARBACE_NO_IMAGE "$CI_EXE" -m arbace.c.run test/c/host nodes-list "$rw" "$rw/one.tsv" 1) > "$rw/log" 2>&1
+  cover_settle ci-read "${1%%$'\t'*}"
+  (cd "$rw" && find . -name '*.nodes' -type f) | while IFS= read -r f; do mkdir -p "$(dirname "$work/$f")"; mv -f "$rw/$f" "$work/$f"; done
+  if [ -s "$rw/nodes.tsv" ]; then grep . "$rw/nodes.tsv"; else printf '%s\tbuild-error\t\tnodes-list: %s\n' "${1%%$'\t'*}" "$(tail -1 "$rw/log" | tr '\t' ' ' | cut -c1-200)"; fi
+  rm -rf "$rw"
+}
 mkdir -p "$work"
 IFS=, read -r -a ids <<< "$corpora"
 # the last run's subset (review 027, finding 3): a run with --only leaves CORPUS/subset, which --judge reads, so
@@ -92,7 +122,8 @@ if [ -z "$judge" ]; then
     mkdir -p "$d/nodes"
     if [ -n "$only" ]; then printf '%s\n' "$only" > "$d/subset"; else rm -f "$d/subset"; fi
     if [ ! -s "$d/gcc.list" ]; then
-      arbace_tool -m arbace.repr.c.ppcheck lists "$work" "$roots" "$id" > "$d.lists.log" 2>&1 || { cat "$d.lists.log"; exit 1; }
+      # GT8 (review 188, L2): the run corpora's lists whole whatever the caller exported (their --only is their own)
+      REPR_C_ONLY= arbace_tool -m arbace.repr.c.ppcheck lists "$work" "$roots" "$id" > "$d.lists.log" 2>&1 || { cat "$d.lists.log"; exit 1; }
     fi
     base=$(cat "$d/base.txt")
     # ID BASE STD ARGS READNAME, the programs gcc built
@@ -106,7 +137,11 @@ if [ -z "$judge" ]; then
       { i = c "/" $1; if (i in skip) next; if (only != "" && !(i in want)) next
         print i "\t" b "\t" $2 "\t" $3 "\t" $4 }' "$d/gcc.list" > "$d/list.tsv"
     awk -F'\t' 'BEGIN { while ((getline l < ARGV[2]) > 0) done[l] = 1; ARGV[2] = "" } !($1 in done)' "$d/list.tsv" "$d/done.txt" > "$d/todo.tsv"
-    if [ -s "$d/todo.tsv" ]; then
+    if [ -s "$d/todo.tsv" ] && [ -n "${ARBACE_COVER_DIR:-}" ] && [ -n "${CI_COVER_READ:-}" ]; then
+      export -f read1 cover_env cover_settle; export work root CI_EXE ARBACE_COVER_DIR
+      tr '\n' '\0' < "$d/todo.tsv" | xargs -0 -P "$jobs" -I{} bash -c 'read1 "$1"' _ {} > "$work/nodes.tsv"
+      cat "$work/nodes.tsv" >> "$d/nodes.tsv" && rm -f "$work/nodes.tsv"
+    elif [ -s "$d/todo.tsv" ]; then
       (cd "$root" && arbace_tool -m arbace.c.run test/c/host nodes-list "$work" "$d/todo.tsv" "$threads") > "$d/nodes.log" 2>&1
       [ -f "$work/nodes.tsv" ] && cat "$work/nodes.tsv" >> "$d/nodes.tsv" && rm -f "$work/nodes.tsv"
     fi
@@ -114,7 +149,9 @@ if [ -z "$judge" ]; then
     run1() { # ID
       local i=$1 f=$work/$1.nodes rd st sum bytes
       rd=$(mktemp -d "$work/run.XXXXXX")
-      (cd "$rd" && timeout "$(ci_budget "$i")" $runner "$f" < "$work/empty-stdin" > out 2> err); st=$?
+      (cd "$rd" && { [ -z "${ARBACE_COVER_DIR:-}" ] || export "$(cover_env ci "$i")"; } \
+         && timeout "$(( $(ci_budget "$i") * cover_x ))" $runner "$f" < "$work/empty-stdin" > out 2> err); st=$?
+      cover_settle ci "$i"
       [ $st = 124 ] && st=timeout
       sum=$(sha256sum < "$rd/out" | cut -d' ' -f1); bytes=$(wc -c < "$rd/out")
       printf '%s\t%s\t%s\t%s\t%s\n' "$i" "$st" "$sum" "$bytes" "$(grep -m1 '^\(cirun: \(fault\|internal\)\|fatal error: \|runtime: \)' "$rd/err" | cut -c1-200 | tr '\t' ' ')"
@@ -122,7 +159,7 @@ if [ -z "$judge" ]; then
       # the disk: a node program holds musl's linked part (about 0.4 MB); kept when it did not exit 0
       [ -n "${CI_KEEP_NODES:-}" ] || [ "$st" != 0 ] || rm -f "$f"
     }
-    export -f run1 ci_budget; export work cirun root runner
+    export -f run1 ci_budget cover_env cover_settle; export work cirun root runner cover_x
     # the runs appended (--resume keeps the earlier ones), only those of todo.tsv
     [ -n "$resume" ] || : > "$d/run.tsv"
     awk -F'\t' 'BEGIN { while ((getline l < ARGV[2]) > 0) { split(l, f, "\t"); t[f[1]] = 1 }; ARGV[2] = "" } $2 == "ok" && ($1 in t) && !seen[$1]++ {print $1}' "$d/nodes.tsv" "$d/todo.tsv" \
@@ -137,4 +174,7 @@ if [ -z "$judge" ]; then
     done
   done
 fi
-arbace_tool -m arbace.c.run test/c/host judge "$work" test/c/ref-gcc15.edn test/c/divergences.edn "${record:+--record}" "${ids[@]}"
+# the judges' reference (the user, 2026-11-07): each case's own verdict where it has one, gcc's run for the rest
+. "$root/bin/lib/ci/selfref.bash"
+runref=$(c_run_ref) || exit 1
+arbace_tool -m arbace.c.run test/c/host judge "$work" "$runref" test/c/divergences.edn "${record:+--record}" "${ids[@]}"

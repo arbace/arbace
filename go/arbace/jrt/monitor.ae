@@ -106,11 +106,18 @@ when the header changed meanwhile.\n"
     (.Unlock (.-mu m))
     m))
 
-(go/method enter "enter takes the monitor for me, then drops the ref the caller took.\n"
-  [^{:tag (* monitor)} m ^uint64 me]
+(go/method enter "enter takes the monitor for me, then drops the ref the caller took; on is the Java
+object entered (nil: the header alone is known), what management.ae records a contended entry as blocked on.\n"
+  [^{:tag (* monitor)} m ^uint64 me ^any on]
   (.Lock (.-mu m))
-  (while (and (!= (.-owner m) 0) (!= (.-owner m) me))
-    (.Wait (.-entry m)))
+  (when (and (!= (.-owner m) 0) (!= (.-owner m) me))
+    ;; contended: the thread is BLOCKED on the monitor's object (management.ae)
+    (let [t (CurrentThread)]
+      (when (== on nil) (set! on (.-obj m)))
+      (waitBegin t wsBlocked on)
+      (while (and (!= (.-owner m) 0) (!= (.-owner m) me))
+        (.Wait (.-entry m)))
+      (waitEnd t)))
   (if (== (.-owner m) me)
     (inc! (.-count m))
     (do
@@ -143,6 +150,18 @@ monitor o's header names is deflated; the inflated lock word changes only under 
     (freeMonitor m)))
 
 (go/method monitorEnter [^{:tag (* Object)} o]
+  (.monitorEnterX o nil))
+
+(go/method monitorEnterX
+  "monitorEnterX enters o's monitor, x the Java object whose header o is (nil when unknown: management.ae's
+lock of a blocked thread is then the header); once ThreadMXBean is made (management.ae's trackLocks), the
+entry is recorded among the thread's held monitors.\n"
+  [^{:tag (* Object)} o ^any x]
+  (.monitorEnter0 o x)
+  (when (.Load trackLocks)
+    (heldPush (CurrentThread) o x)))
+
+(go/method monitorEnter0 [^{:tag (* Object)} o ^any x]
   (let [me (currentThreadID)]
     (while true
       (let [w (atomic/LoadUint64 (addr (.-hdr o)))
@@ -167,18 +186,25 @@ monitor o's header names is deflated; the inflated lock word changes only under 
                 :else
                 (let [m (.inflate o w owner (conv int64 count) true)]
                   (when (!= m nil)
-                    (.enter m me)
+                    (.enter m me x)
                     (return))))))
           (default
             (let [m (.lookupMonitor o w)]
               (when (!= m nil)
-                (.enter m me)
+                (.enter m me x)
                 (return)))))))))
 
 (go/func illegalMonitorState ^Throwable_I []
   (IllegalMonitorStateException_New_String (Str "current thread is not owner")))
 
-(go/method monitorExit [^{:tag (* Object)} o]
+(go/method monitorExit
+  "monitorExit leaves o's monitor (management.ae's held monitors updated when tracked).\n"
+  [^{:tag (* Object)} o]
+  (.monitorExit0 o)
+  (when (.Load trackLocks)
+    (heldPop (CurrentThread) o)))
+
+(go/method monitorExit0 [^{:tag (* Object)} o]
   (let [me (currentThreadID)]
     (while true
       (let [w (atomic/LoadUint64 (addr (.-hdr o)))
@@ -247,7 +273,9 @@ ready) until phase 2's Thread sets it; a receive means the thread was interrupte
   interruptChan
   (fn ^{:tag (chan :recv (struct))} [] nil))
 
-(go/method monitorWait [^{:tag (* Object)} o ^{:tag time/Duration} d]
+(go/method monitorWait
+  "monitorWait is Object.wait on o for d (0: no limit), x the Java object (management.ae's lock).\n"
+  [^{:tag (* Object)} o ^{:tag time/Duration} d ^any x]
   (let [me (currentThreadID)
         m (.ownedMonitor o me)
         wt (addr (lit waiter :ch (make (chan (struct)))))]
@@ -258,24 +286,34 @@ ready) until phase 2's Thread sets it; a receive means the thread was interrupte
       (set! (.-waiters m) (append (.-waiters m) wt))
       (.Signal (.-entry m))
       (.Unlock (.-mu m))
-      (let [interrupted false]
+      (let [interrupted false
+            th (CurrentThread)]
+        ;; WAITING or TIMED_WAITING on o, then BLOCKED until the monitor is free again (management.ae)
         (if (> d 0)
           (let [t (time/NewTimer d)]
+            (waitBegin th wsTimed x)
             (select
               (case (<! (.-ch wt)))
               (case (<! (.-C t)))
               (case (<! (interruptChan)) (set! interrupted true)))
+            (waitEnd th)
             (.Stop t))
-          (select
-            (case (<! (.-ch wt)))
-            (case (<! (interruptChan)) (set! interrupted true))))
+          (do
+            (waitBegin th wsWaiting x)
+            (select
+              (case (<! (.-ch wt)))
+              (case (<! (interruptChan)) (set! interrupted true)))
+            (waitEnd th)))
         (.Lock (.-mu m))
         (range [i x (.-waiters m)]
           (when (== x wt)
             (set! (.-waiters m) (append (subslice (.-waiters m) _ i) (spread (subslice (.-waiters m) (+ i 1)))))
             (break)))
-        (while (!= (.-owner m) 0)
-          (.Wait (.-entry m)))
+        (when (!= (.-owner m) 0)
+          (waitBegin th wsBlocked x)
+          (while (!= (.-owner m) 0)
+            (.Wait (.-entry m)))
+          (waitEnd th))
         (set! (.-owner m) me)
         (set! (.-count m) saved)
         (dec! (.-refs m))
@@ -315,7 +353,7 @@ ready) until phase 2's Thread sets it; a receive means the thread was interrupte
   "MonitorEnter is monitorenter: (locking x ...), synchronized methods. NullPointerException
 on null.\n"
   [^any x]
-  (.monitorEnter (header x)))
+  (.monitorEnterX (header x) x))
 
 (go/func MonitorExit
   "MonitorExit is monitorexit; IllegalMonitorStateException when the current thread does not
@@ -324,7 +362,7 @@ own x's monitor.\n"
   (.monitorExit (header x)))
 
 (go/func Wait "Wait is Object.wait().\n" [^any x]
-  (.monitorWait (.Self_Object (asObject x)) 0))
+  (.monitorWait (.Self_Object (asObject x)) 0 x))
 
 (go/func WaitTimeout
   "WaitTimeout is Object.wait(long, int): millis 0 and nanos 0 wait forever.\n"
@@ -338,7 +376,7 @@ own x's monitor.\n"
       (if (> millis 9223372036854)
         (set! d (conv time/Duration 9223372036854775807))
         (set! d (+ (* (conv time/Duration millis) time/Millisecond) (conv time/Duration nanos))))
-      (.monitorWait o d))))
+      (.monitorWait o d x))))
 
 (go/func Notify "Notify is Object.notify().\n" [^any x]
   (.monitorNotify (.Self_Object (asObject x)) false))

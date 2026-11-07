@@ -30,6 +30,11 @@ printf '{:gate "%s" :javac "%s" :prog-units "none" :prog-rest "%s" :javac-prog-u
   $z $z $z $z $z $z $z $z $z > "$t/hosts.edn"
 mkdir -p "$t/store"
 . "$root/bin/lib/tools.bash"
+# GT9 (GTS210 (a)): the table's :host-ids hosts beside, zeros too (bin/gate's gate_host_ids adds those a step names), so that a
+# crop's steps on its own host plan here without this fixture naming it
+for h in $(cd "$root" && arbace_tool -p "$root/test" -m gate.crops host-names "${GATE_STEPS:-$root/test/gate/steps.edn}"); do
+  grep -q ":$h \"" "$t/hosts.edn" || sed -i "\$ s/}\$/ :$h \"$z\"}/" "$t/hosts.edn"
+done
 planned=0
 if (cd "$root" && arbace_tool -p "$root/test" -m gate.plan plan "$root" "$t" "$t/store" full) > "$t/plan.out" 2>&1; then planned=1; fi
 # decl NAME: the step's declaration line of its material
@@ -56,11 +61,19 @@ if [ ! -s "$t/h/stub.log" ] && grep -q 'DEFERRED' "$t/h/out" && grep -q 't1 t2' 
 : > "$t/h/outs/java-judge/held.txt"; hrun env
 if [ ! -s "$t/h/stub.log" ] && grep -q 'no test held' "$t/h/out"; then ok "java-held with nothing held: runs nothing"; else no "java-held, nothing held"; fi
 
+# GT8: java-judge judges the results files its :uses name (GATE_USES: the levels' parts, or their rotated checks)
+jcmd=$(awk -F'\t' '$1 == "java-judge" { print $NF }' "$t/plan.tsv")
+: > "$t/h/stub.log"
+(cd "$t/h" && STUBLOG="$t/h/stub.log" GATE_OUTS=/o GATE_OUT=/j GATE_USES="java-read.jls/results.tsv java-read.jls/audited java-interp.jls.sub/results.tsv" bash -c "$jcmd") > "$t/h/out" 2>&1
+if grep -qx 'STUB --judge --held /j/held.txt /o/java-read.jls/results.tsv /o/java-interp.jls.sub/results.tsv' "$t/h/stub.log"; then ok "java-judge: the results files of GATE_USES"; else no "java-judge's command: $(cat "$t/h/stub.log" "$t/h/out")"; fi
+
 # finding 2: the audited marker of every producer is in java-judge's key (a results file alone is not: an
 # unaudited rerun with the same rows would find the audited pass). java-check-judge uses the whole directory
 # of java-check, the marker included
+# (GT8: the levels parted by corpus, each part's marker: java-read.jdk-run/audited, ...)
 for p in java-read java-interp java-classes java-diagnostics java-compiled-full java-print; do
-  if decl java-judge | grep -q "\"$p/audited\""; then ok "java-judge's key has $p/audited"; else no "java-judge's key has $p/audited"; fi
+  np=$(cut -f1 "$t/plan.tsv" | grep -c "^$p\\.")
+  if [ "$np" -gt 0 ] && [ "$(decl java-judge | grep -oE "\"$p\\.[a-z-]+/audited\"" | sort -u | wc -l)" = "$np" ]; then ok "java-judge's key has $p's parts' audited ($np)"; else no "java-judge's key has $p's parts' audited ($np parts)"; fi
 done
 if decl java-check-judge | grep -q ':uses \["java-check"\]'; then ok "java-check-judge uses java-check's whole output (its marker too)"; else no "java-check-judge uses java-check's whole output"; fi
 

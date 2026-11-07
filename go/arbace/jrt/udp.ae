@@ -1,0 +1,256 @@
+;; jrt: datagram sockets and the host's network interfaces (doc/go/JRT-NOTES.md, "Datagrams"; F11
+;; of doc/classes/JAVA-DEFERRED-TRIAGE.md): the natives of jdk.internal.jrt.HostDatagram
+;; (overlay/jdk/java.base/jdk/internal/jrt/HostDatagram.java), under java.net's
+;; HostDatagramSocketImpl and the variants of DatagramSocket, NetworkInterface and
+;; InterfaceAddress. A datagram socket is a handle of net.ae's table (netSock's c a *net.UDPConn), so
+;; that HostNet's close0, available0, address0, port0, setOption0 and getOption0 serve it. What
+;; Go's net cannot do (SO_REUSEADDR before the bind, peeking, connecting by the kernel, group
+;; membership, the interfaces) is UDPHost, an interface a Host may implement besides NetHost
+;; (OSHost does on Linux: udp_linux.ae); a host without it has no datagrams, every native fails
+;; with HostNet.UNSUPPORTED (the box's host, unchanged).
+(in-ns 'go.arbace.jrt)
+
+(go/file "udp.go"
+  :imports [[errors "errors"] [net "net"] [syscall "syscall"] [time "time"]])
+
+(go/type UDPHost
+  "UDPHost is the datagram side of a host's network.\n"
+  (interface
+    (^{:doc "ListenUDP opens a UDP socket bound to address (host:port; an empty host: every address,
+both families), SO_REUSEADDR and SO_REUSEPORT set before the bind as asked.\n"}
+      ListenUDP [^string address ^bool reuseAddr ^bool reusePort] :results [(* net/UDPConn) error])
+    (^{:doc "Peek is the next datagram of c, left queued, copied into p (the rest discarded): its
+length, sender and port; it waits for one under c's read deadline.\n"}
+      Peek [^{:tag (* net/UDPConn)} c ^{:tag (slice byte)} p] :results [int net/IP int error])
+    (^{:doc "ConnectUDP connects c to a at the kernel (what it receives is filtered, an unreachable
+port reported; sending to another address stays allowed), or dissolves it when a is nil.\n"}
+      ConnectUDP ^error [^{:tag (* net/UDPConn)} c ^{:tag (* net/UDPAddr)} a])
+    (^{:doc "Membership joins (or leaves) multicast group (4 or 16 bytes) on c at the interface of
+index ifindex (0: the kernel's choice), from source (nil: any source).\n"}
+      Membership ^error [^{:tag (* net/UDPConn)} c ^{:tag net/IP} group ^int ifindex ^{:tag net/IP} source
+                         ^bool join])
+    (^{:doc "Interfaces are the host's network interfaces.\n"}
+      Interfaces [] :results [(slice net/Interface) error])))
+
+;; HostDatagram.PORT_UNREACHABLE
+(go/const
+  [^{:tag int32 :val -14} netPortUnreachable -14])
+
+;; jrt's option numbers beside SocketOptions' (HostDatagram.OPT_MULTICAST_*), SO_BROADCAST's
+(go/const
+  [^{:val 32} optBroadcast 32]
+  [^{:val 8193} optMcastTTL 0x2001]
+  [^{:val 8194} optMcastLoop 0x2002]
+  [^{:val 8195} optMcastIf 0x2003])
+
+(go/func udpHost "udpHost is the current host's datagram network, if it has one.\n"
+  [] :results [UDPHost bool]
+  (let [(values u ok) (assert UDPHost (CurrentHost))]
+    (return u ok)))
+
+(go/func udpSock "udpSock is the UDP socket of handle h, or nil when it is closed or no UDP socket.\n"
+  ^{:tag (* net/UDPConn)} [^int32 h]
+  (let [c (conn h)]
+    (when (== c nil)
+      (return nil))
+    (let [(values u ok) (assert (* net/UDPConn) c)]
+      (when (not ok)
+        (return nil))
+      u)))
+
+(go/func udpFailed "udpFailed is failed, an unreachable port (ECONNREFUSED) its own kind.\n"
+  ^int32 [^{:tag (* RefArray)} errs ^error err]
+  (let [^syscall/Errno errno 0]
+    (when (and (errors/As err (addr errno)) (== errno syscall/ECONNREFUSED))
+      (return (setError errs netPortUnreachable "ICMP Port Unreachable"))))
+  (failed errs err false))
+
+(go/func udpAddr "udpAddr is the address of host (an IP literal) and port.\n"
+  [^{:tag (* String)} host ^int32 port] :results [(* net/UDPAddr) error]
+  (net/ResolveUDPAddr "udp" (joinHostPort host port)))
+
+(go/func udpBytes "udpBytes is b's bytes as a Go slice (a copy); nil for null.\n"
+  ^{:tag (slice byte)} [^{:tag (* ByteArray)} b]
+  (when (== b nil)
+    (return nil))
+  (let [p (make (slice byte) (len (.-A b)))]
+    (range [i x (.-A b)]
+      (aset p i (conv byte x)))
+    p))
+
+(go/func byteArrayOf "byteArrayOf is a new byte[] of p.\n"
+  ^{:tag (* ByteArray)} [^{:tag (slice byte)} p]
+  (let [b (NewByteArray (conv int32 (len p)))]
+    (range [i x p]
+      (aset (.-A b) i (conv int8 x)))
+    b))
+
+(go/func HostDatagram_Open0_String_I_Z_Z_String1__I_native
+  "HostDatagram_Open0_String_I_Z_Z_String1__I_native opens a UDP socket bound to host (an IP literal,
+null for every address of both families) and port, with SO_REUSEADDR and SO_REUSEPORT set before the
+bind as asked: a handle, or an error kind with its text in error[0].\n"
+  ^int32 [^{:tag (* String)} host ^int32 port ^bool reuseAddr ^bool reusePort ^{:tag (* RefArray)} errs]
+  (let [(values uh ok) (udpHost)]
+    (when (not ok)
+      (return (setError errs netUnsupported "Network not available")))
+    (let [(values c err) (.ListenUDP uh (joinHostPort host port) reuseAddr reusePort)]
+      (when (!= err nil)
+        (return (failed errs err false)))
+      (addSock (addr (lit netSock :c c))))))
+
+(go/func HostDatagram_Send0_I_B1_I_I_String_I_String1__I_native
+  "HostDatagram_Send0_I_B1_I_I_String_I_String1__I_native sends len bytes of b from off on socket h to
+host and port, or to the connected peer when host is null: 0, or an error kind (a message too long is
+the JVM's own text).\n"
+  ^int32 [^int32 h ^{:tag (* ByteArray)} b ^int32 off ^int32 n ^{:tag (* String)} host ^int32 port
+          ^{:tag (* RefArray)} errs]
+  (let [c (udpSock h)]
+    (when (== c nil)
+      (return (setError errs netClosed "Socket closed")))
+    (let [p (byteView b off n)
+          ^error err nil]
+      (if (== host nil)
+        (set! (values _ err) (.Write c p))
+        (let [(values a aerr) (udpAddr host port)]
+          (if (!= aerr nil)
+            (set! err aerr)
+            (set! (values _ err) (.WriteToUDP c p a)))))
+      (when (!= err nil)
+        (return (udpFailed errs err)))
+      0)))
+
+(go/func HostDatagram_Receive0_I_B1_I_I_I_Z_B2_I1_String1__I_native
+  "HostDatagram_Receive0_I_B1_I_I_I_Z_B2_I1_String1__I_native receives a datagram on socket h into b at
+off (at most len bytes; the rest of a longer one is discarded), waiting up to timeout ms (0: no
+limit), leaving it queued when peek: its length, its sender's address in from[0] and port in port[0],
+or an error kind.\n"
+  ^int32 [^int32 h ^{:tag (* ByteArray)} b ^int32 off ^int32 n ^int32 timeout ^bool peek
+          ^{:tag (* RefArray)} from ^{:tag (* IntArray)} port ^{:tag (* RefArray)} errs]
+  (let [c (udpSock h)]
+    (when (== c nil)
+      (return (setError errs netClosed "Socket closed")))
+    (if (> timeout 0)
+      (.SetReadDeadline c (.Add (time/Now) (millis timeout)))
+      (.SetReadDeadline c (lit time/Time)))
+    (let [p (byteView b off n)
+          ^int k 0
+          ^net/IP ip nil
+          ^int pt 0
+          ^error err nil]
+      (if peek
+        (let [(values uh ok) (udpHost)]
+          (when (not ok)
+            (return (setError errs netUnsupported "Network not available")))
+          (set! (values k ip pt err) (.Peek uh c p)))
+        (let [(values k2 ua err2) (.ReadFromUDP c p)]
+          (set! k k2)
+          (set! err err2)
+          (when (and (== err nil) (!= ua nil))
+            (set! ip (.-IP ua))
+            (set! pt (.-Port ua)))))
+      (when (!= err nil)
+        (return (udpFailed errs err)))
+      (when (> (len (.-A from)) 0)
+        (aset (.-A from) 0 (ipBytes ip)))
+      (when (> (len (.-A port)) 0)
+        (aset (.-A port) 0 (conv int32 pt)))
+      (conv int32 k))))
+
+(go/func HostDatagram_Connect0_I_String_I_String1__I_native
+  "HostDatagram_Connect0_I_String_I_String1__I_native connects socket h to host (an IP literal) and port
+at the kernel, or dissolves the association when host is null: 0, or an error kind.\n"
+  ^int32 [^int32 h ^{:tag (* String)} host ^int32 port ^{:tag (* RefArray)} errs]
+  (let [c (udpSock h)
+        (values uh ok) (udpHost)]
+    (when (== c nil)
+      (return (setError errs netClosed "Socket closed")))
+    (when (not ok)
+      (return (setError errs netUnsupported "Network not available")))
+    (let [^{:tag (* net/UDPAddr)} a nil]
+      (when (!= host nil)
+        (let [(values ua err) (udpAddr host port)]
+          (when (!= err nil)
+            (return (failed errs err false)))
+          (set! a ua)))
+      (let [err (.ConnectUDP uh c a)]
+        (when (!= err nil)
+          (return (udpFailed errs err)))
+        0))))
+
+(go/func HostDatagram_Join0_I_B1_I_B1_Z_String1__I_native
+  "HostDatagram_Join0_I_B1_I_B1_Z_String1__I_native joins (or leaves) multicast group (4 or 16 bytes) on
+socket h at the interface of index ifindex (0: the kernel's choice), from source (null: any): 0, or an
+error kind.\n"
+  ^int32 [^int32 h ^{:tag (* ByteArray)} group ^int32 ifindex ^{:tag (* ByteArray)} source ^bool join
+          ^{:tag (* RefArray)} errs]
+  (let [c (udpSock h)
+        (values uh ok) (udpHost)]
+    (when (== c nil)
+      (return (setError errs netClosed "Socket closed")))
+    (when (not ok)
+      (return (setError errs netUnsupported "Network not available")))
+    (let [err (.Membership uh c (conv net/IP (udpBytes group)) (conv int ifindex) (conv net/IP (udpBytes source)) join)]
+      (when (!= err nil)
+        (return (failed errs err false)))
+      0)))
+
+(go/func ifaceRow "ifaceRow is interface ifc as HostDatagram.Row reads it: name, int[] {index, flags,
+mtu}, hardware address, addresses, prefix lengths, broadcast addresses.\n"
+  ^{:tag (* RefArray)} [^{:tag (* net/Interface)} ifc]
+  (let [(values addrs _) (.Addrs ifc)
+        ips (make (slice net/IP) 0 (len addrs))
+        masks (make (slice net/IPMask) 0 (len addrs))]
+    (range [_ a addrs]
+      (let [(values ipn ok) (assert (* net/IPNet) a)]
+        (when ok
+          (set! ips (append ips (.-IP ipn)))
+          (set! masks (append masks (.-Mask ipn))))))
+    (let [n (conv int32 (len ips))
+          row (NewRefArray Object_class 6)
+          nums (NewIntArray 3)
+          bytes (.ArrayClass Prim_byte)
+          list (NewRefArray bytes n)
+          plen (NewIntArray n)
+          bcast (NewRefArray bytes n)]
+      (aset (.-A nums) 0 (conv int32 (.-Index ifc)))
+      (aset (.-A nums) 1 (conv int32 (bit-and (conv int (.-Flags ifc)) 31)))
+      (aset (.-A nums) 2 (conv int32 (.-MTU ifc)))
+      (aset (.-A row) 0 (Str (.-Name ifc)))
+      (aset (.-A row) 1 nums)
+      (when (> (len (.-HardwareAddr ifc)) 0)
+        (aset (.-A row) 2 (byteArrayOf (conv (slice byte) (.-HardwareAddr ifc)))))
+      (range [i ip ips]
+        (aset (.-A list) i (ipBytes ip))
+        (let [(values ones _) (.Size (aget masks i))
+              v4 (.To4 ip)
+              m (aget masks i)]
+          (aset (.-A plen) i (conv int32 ones))
+          ;; the IPv4 broadcast address of an interface that has one: the address with the host bits set
+          (when (and (!= v4 nil) (== (len m) 4) (!= (bit-and (conv int (.-Flags ifc)) (conv int net/FlagBroadcast)) 0))
+            (let [bb (NewByteArray 4)]
+              (for [j 0] (< j 4) (inc! j)
+                (aset (.-A bb) j (conv int8 (bit-or (aget v4 j) (bit-xor (aget m j) 255)))))
+              (aset (.-A bcast) i bb)))))
+      (aset (.-A row) 3 list)
+      (aset (.-A row) 4 plen)
+      (aset (.-A row) 5 bcast)
+      row)))
+
+(go/func HostDatagram_Interfaces0_String1__O1_native
+  "HostDatagram_Interfaces0_String1__O1_native is the host's network interfaces, each an Object[] of its
+name, int[] {index, flags, mtu}, hardware address (null when it has none), addresses (byte[][]),
+prefix lengths (int[]) and broadcast addresses (byte[][], null entries for none); or null with the
+reason in error[0].\n"
+  ^{:tag (* RefArray)} [^{:tag (* RefArray)} errs]
+  (let [(values uh ok) (udpHost)]
+    (when (not ok)
+      (setError errs netUnsupported "Network not available")
+      (return nil))
+    (let [(values ifs err) (.Interfaces uh)]
+      (when (!= err nil)
+        (failed errs err false)
+        (return nil))
+      (let [rows (NewRefArray Object_class (conv int32 (len ifs)))]
+        (range [i ifc ifs]
+          (aset (.-A rows) i (ifaceRow (addr ifc))))
+        rows))))

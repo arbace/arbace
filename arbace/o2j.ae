@@ -84,11 +84,28 @@
               :when (= 'defclass (hd form))
               :let [cls (name (second form))]
               m (rest form)
-              :when (and (= 'method (hd m)) (str/starts-with? (name (second m)) "caml_"))
+              ;; the C runtime's caml_* primitives, and the Str library's re_* (otherlibs/str/strstubs.c's names, ExtStrRe)
+              :when (and (= 'method (hd m)) (or (str/starts-with? (name (second m)) "caml_") (str/starts-with? (name (second m)) "re_")))
               :let [params (first (filter vector? (drop 2 m)))]]
           [(name (second m)) [(symbol (str "ocaml.rt." cls)) (count params)]])))
 
 (def ^:dynamic *externals* {})
+
+;; the compiled level (OC93 (a)): a program's own units in a package of their own (ocaml.p<N>), the library's in ocaml.u;
+;; *pkg* the package of the program's units, *own* their names (the globals that name them are theirs, not the library's)
+(def ^:dynamic *pkg* "ocaml.u")
+(def ^:dynamic *own* #{})
+;; the compiled level's files: each unit's file starts (in-ns 'PKG) and its imports, a package's namespace file
+;; (ocaml/u.ae, ocaml/p<N>.ae) apart, as j2g's trees take them (a file whose first form is ns is a package file)
+(def ^:dynamic *in-ns* false)
+
+(defn pkg-of "The package of unit m's class." [m] (if (contains? *own* m) *pkg* "ocaml.u"))
+
+(defn- header-forms [pkg imports]
+  (if *in-ns*
+    (cond-> [(list 'in-ns (list 'quote (symbol pkg)))]
+      imports (conj (list 'import (list 'quote imports))))
+    [(if imports (list 'ns (symbol pkg) (list :import imports)) (list 'ns (symbol pkg)))]))
 
 (defn load-externals! [dir] (alter-var-root #'*externals* (constantly (runtime-externals (io/file dir)))))
 
@@ -245,10 +262,15 @@
     (if (and tail? self (= 'var (hd f)) (= (second f) (:id self)) (= (count args) (:arity self)))
       (do (reset! (:used self) true)
           (with-args ctx args (fn [as] (apply list 'continue (:label self) as))))
+      ;; a tail call of another function of the letrec group (OC84 (c)): a TailCall the group function's entry bounces
+      (if (and tail? (:group ctx) (= 'var (hd f)) (= (get (:group ctx) (second f)) (count args)))
+        (do (reset! (:tails ctx) true)
+            (with-args ctx (into [f] args)
+                       (fn [as] (list 'new 'ocaml.rt.TailCall (first as) (list 'new 'Object/1 (vec (rest as)))))))
       ;; arguments right to left, then the function
       (if (simple? f)
         (with-args ctx args (fn [as] (call-form (expr ctx f false) as)))
-        (with-args ctx (into [f] args) (fn [as] (call-form (first as) (rest as))))))))
+        (with-args ctx (into [f] args) (fn [as] (call-form (first as) (rest as)))))))))
 
 ;; ---- functions
 
@@ -262,7 +284,7 @@
 (defn- closure-class!
   "Defines the member class of function node f (its free variables fields, self-id's references
   `this`); returns [class-sym free-ids]."
-  [ctx f self-id]
+  [ctx f self-id & [group]]
   (let [[kind ps _ body] (node-body f)
         cls (fresh "F")
         free (remove #(= % self-id) (free-ids f))
@@ -274,9 +296,25 @@
                    (when self-id {self-id 'this}))
         used (atom false)
         lbl (keyword (str "self" (swap! (:n *unit*) inc)))
-        ictx {:env env :exits {} :self (when self-id {:id self-id :label lbl :used used :arity arity})}
+        tails (atom false)
+        ictx {:env env :exits {} :self (when self-id {:id self-id :label lbl :used used :arity arity})
+              :group (not-empty (dissoc group self-id)) :tails tails}
         b (realize (expr ictx body true))
-        b (if @used (list 'label lbl (list 'loop (vec (mapcat (fn [p] [p p]) params)) b)) b)]
+        ;; a self tail call's loop ticks each turn (Rt/tick: other domains get the lock)
+        b (if @used (list 'label lbl (list 'loop (vec (mapcat (fn [p] [p p]) params)) (list 'do (list 'ocaml.rt.Rt/tick) b))) b)
+        ;; a function of a letrec group of several (OC84 (c)): its body the method tb, which returns a TailCall for a tail call
+        ;; of another of the group; its entry calls tb and bounces (Rt/bounce: each TailCall's function's tb in turn, in one
+        ;; frame). Every function of such a group has a tb, being a TailCall's target or not
+        _ (when (:group ictx) (reset! tails true))
+        a (symbol "args$")
+        tb (when @tails
+             (list 'method (with-meta 'tb {:public true}) ['this (with-meta a {:tag 'Object/1})]
+                   (list 'let (vec (mapcat (fn [i p] [p (list 'aget a i)]) (range) params)) b)))
+        b (if @tails (list 'ocaml.rt.Rt/bounce (list '.tb 'this (list 'new 'Object/1 params))) b)
+        ;; the call depth (OC92 (a)): counted on entry, given back on the way out (an exception's way out is the handler's,
+        ;; trywith-node)
+        r (fresh "r$")
+        b (list 'do (list 'ocaml.rt.Rt/enter) (list 'let [r b] (list 'ocaml.rt.Rt/leave) r))]
     (when (= kind :tupled) (throw (ex-info "tupled function" {})))
     (swap! (:classes *unit*) conj
            (concat
@@ -285,7 +323,8 @@
             [(concat (list 'constructor (with-meta (into ['this] fields) {:public true})
                            (list 'super. arity))
                      (for [fl fields] (list 'set! (list (symbol (str ".-" fl)) 'this) fl)))
-             (method-for arity params b)]))
+             (method-for arity params b)]
+            (when tb [tb])))
     [cls free]))
 
 (defn- function-node [ctx f]
@@ -297,7 +336,9 @@
         idset (set ids)
         syms (into {} (for [id ids] [id (munge-id id)]))
         ctx2 (update ctx :env merge syms)
-        made (for [[id f] bs] (let [[cls free] (closure-class! ctx2 f id)] [id cls free]))
+        ;; the group's functions and their arities (OC84 (c): their tail calls of each other bounce)
+        group (into {} (for [[id f] bs :when (= 'function (hd f))] [id (count (second (node-body f)))]))
+        made (for [[id f] bs] (let [[cls free] (closure-class! ctx2 f id group)] [id cls free]))
         made (doall made)]
     (list 'let (vec (mapcat (fn [[id cls free]]
                               [(syms id) (apply list (symbol (str cls "."))
@@ -435,7 +476,8 @@
       (= n "poll") a
       (effect-prims n) (apply list (symbol "ocaml.rt.Effects" (name (effect-prims n))) as)
       (or (str/starts-with? n "Bigarray.") (str/starts-with? n "bigarray.")) (external (bigarray-ext n (count as)) as)
-      (str/starts-with? n "caml_") (external n as)
+      ;; an external of the C runtime (caml_*) or one the runtime defines under a library's own C name (Str's re_*)
+      (or (str/starts-with? n "caml_") (contains? *externals* n)) (external n as)
       :else (do (note-missing! (str "%" n)) (list 'throw (rt 'unsupported n))))))
 
 (defn- prim-node [ctx [^String n args] tail?]
@@ -443,7 +485,7 @@
     (str/starts-with? n "global ")
     (let [g (global-name (subs n 7))]
       (cond (predefs g) (symbol "ocaml.rt.Rt" g)
-            :else (symbol (str "ocaml.u." (class-name g)) "G")))
+            :else (symbol (str (pkg-of g) "." (class-name g)) "G")))
     (#{"&&" "||" "sequand" "sequor"} n) (rt 'b (test-form ctx (list 'prim n args)))
     :else (with-args ctx args (fn [as] (prim-value n as)))))
 
@@ -515,10 +557,13 @@
               (concat (list 'do) (map (fn [v t] (list 'set! v t)) vars ts) [(list 'break label)]))))))
 
 (defn- trywith-node [ctx [body id handler] tail?]
-  (let [e (fresh "e$") s (munge-id id)]
-    (list 'try (expr ctx body false)
-          (list 'catch 'Throwable e
-                (list 'let [s (rt 'exnValue e)] (expr (assoc-in ctx [:env id] s) handler tail?))))))
+  (let [e (fresh "e$") s (munge-id id) d (fresh "d$")]
+    ;; the handler runs at the depth the try was entered at (the calls the exception left were not given back)
+    (list 'let [d 'ocaml.rt.Rt/depth]
+          (list 'try (expr ctx body false)
+                (list 'catch 'Throwable e
+                      (list 'set! 'ocaml.rt.Rt/depth d)
+                      (list 'let [s (rt 'exnValue e)] (expr (assoc-in ctx [:env id] s) handler tail?)))))))
 
 (defn- for-node [ctx [id lo hi dir body]]
   (let [l (fresh "lo$") h (fresh "hi$") i (fresh "i$") s (munge-id id)
@@ -526,6 +571,7 @@
     (list 'let [l (expr ctx lo false) h (expr ctx hi false)]
           (list 'when (list (if up '<= '>=) (rt 'l l) (rt 'l h))
                 (list 'loop [(with-meta i {:tag 'long}) (rt 'l l)]
+                      (list 'ocaml.rt.Rt/tick)
                       (list 'let [s (list 'Long/valueOf i)] (expr (assoc-in ctx [:env id] s) body false))
                       (list 'when (list 'not (list '== i (rt 'l h)))
                             (list 'recur (list (if up 'unchecked-inc 'unchecked-dec) i)))))
@@ -554,7 +600,7 @@
       ifthenelse (let [[c t f] b] (list 'if (test-form ctx c) (expr ctx t tail?) (expr ctx f tail?)))
       sequence (let [xs (flatten-seq x)]
                  (concat (list 'do) (map #(expr ctx % false) (butlast xs)) [(expr ctx (last xs) tail?)]))
-      while (let [[c body] b] (list 'do (list 'while (test-form ctx c) (expr ctx body false)) UNIT))
+      while (let [[c body] b] (list 'do (list 'while (test-form ctx c) (list 'ocaml.rt.Rt/tick) (expr ctx body false)) UNIT))
       for (for-node ctx b)
       assign (let [[id e] b] (list 'do (list 'set! (lookup ctx id) (expr ctx e false)) UNIT))
       send (let [[kind m o args] b
@@ -576,7 +622,7 @@
   runtime lacks with their counts."
   [{:keys [name code]}]
   (let [cls (symbol (class-name name))]
-    (binding [*unit* {:class (symbol (str "ocaml.u." cls)) :name name :n (atom 0)
+    (binding [*unit* {:class (symbol (str (pkg-of name) "." cls)) :name name :n (atom 0)
                       :classes (atom []) :consts (atom []) :missing (atom {})}]
       (let [[_ [body]] (node-body code)
             init (realize (expr {:env {} :exits {}} body false))
@@ -588,22 +634,44 @@
                    classes
                    [(list 'method (with-meta 'init {:public true :static true}) (with-meta [] {:tag 'void})
                           (list 'set! 'G init))])]
-        [[(list 'ns 'ocaml.u (list :import (list 'ocaml.rt 'Rt 'Block 'Closure 'Exn)))
-          (realize klass)]
+        [(conj (header-forms (pkg-of name) (list 'ocaml.rt 'Rt 'Block 'Closure 'Exn))
+               (realize klass))
          @(:missing *unit*)]))))
 
 (defn main-forms
   "The program's main class: inits, the units' initialisation in link order as one Runnable, and
   main, Main/run's ending and the status."
   [units]
-  [(list 'ns 'ocaml.u)
-   (list 'defclass (with-meta 'M__main {:public true})
-         (list 'method (with-meta 'inits {:public true :static true}) (with-meta [] {:tag 'Runnable})
-               (concat (list 'lambda 'Runnable [])
-                       (for [u units] (list (symbol (str "ocaml.u." (class-name u)) "init")))
-                       [nil]))
-         (list 'method (with-meta 'main {:public true :static true}) (with-meta [(with-meta 'args {:tag 'String/1})] {:tag 'void})
-               (list 'System/exit (list 'ocaml.rt.Main/run 'args (list 'ocaml.u.M__main/inits)))))])
+  (conj (header-forms *pkg* nil)
+        (list 'defclass (with-meta 'M__main {:public true})
+              (list 'method (with-meta 'inits {:public true :static true}) (with-meta [] {:tag 'Runnable})
+                    (concat (list 'lambda 'Runnable [])
+                            (for [u units] (list (symbol (str (pkg-of u) "." (class-name u)) "init")))
+                            [nil]))
+              (list 'method (with-meta 'main {:public true :static true}) (with-meta [(with-meta 'args {:tag 'String/1})] {:tag 'void})
+                    (list 'System/exit (list 'ocaml.rt.Main/run 'args (list (symbol (str *pkg* ".M__main") "inits"))))))))
+
+(defn shard-forms
+  "The compiled level's dispatcher (OC93 (a)): the class ocaml.u.Shard, whose main runs the program the environment
+  variable O2J_PROG names (a package's last part, p<N>) with the command line, argv.(0) O2J_ARGV0 when set."
+  [pkgs]
+  (let [p (symbol "p$") a (symbol "a0$")]
+    (conj (header-forms "ocaml.u" nil)
+          (list 'defclass (with-meta 'Shard {:public true})
+                (list 'method (with-meta 'main {:public true :static true}) (with-meta [(with-meta 'args {:tag 'String/1})] {:tag 'void})
+                      (list 'let [(with-meta p {:tag 'String}) '(System/getenv "O2J_PROG")
+                                  (with-meta a {:tag 'String}) '(System/getenv "O2J_ARGV0")]
+                            (list 'when (list 'and (list 'some? a) (list '> '(alength args) 0)) (list 'aset 'args 0 a))
+                            (concat (list 'cond)
+                                    (mapcat (fn [pk] [(list '.equals (list 'java-str (last (str/split pk #"\."))) p)
+                                                      (list (symbol (str pk ".M__main") "main") 'args)])
+                                            pkgs)
+                                    [:else (list 'do (list '.println 'System/err (list 'java-str "o2j: no program " p)) '(System/exit 126))])))))))
+
+(defn package-forms
+  "A package's namespace file for the compiled level's trees (j2g skips it: its first form is ns)."
+  [pkg]
+  [(list 'ns (symbol pkg))])
 
 (defn write-forms [^File f forms header]
   (io/make-parents f)
@@ -629,8 +697,10 @@
     (vec (sort (disj (into @acc (:required u)) (:name u))))))
 
 (defn link
-  "The library units programs' units need, in lib-order; deps: unit -> the units it needs."
-  [lib-order deps prog-units]
+  "The library units programs' units need, in lib-order; deps: unit -> the units it needs. FORCED: library units the program
+  links whatever it names (the compiled level's libraries outside the stdlib, OT26 (a): a program that includes unix links
+  Unix and UnixLabels as oi and the light level do), with the units they need."
+  [lib-order deps prog-units & [forced]]
   (let [progs (set (map :name prog-units))
         need (volatile! #{})]
     (letfn [(visit [n]
@@ -638,16 +708,12 @@
                 (when-not (contains? deps n) (throw (ex-info (str "no unit " n " in the library") {:unit n})))
                 (vswap! need conj n)
                 (run! visit (deps n))))]
+      (run! visit forced)
       (doseq [u prog-units] (run! visit (unit-refs u))))
     (filterv @need lib-order)))
 
-(defn translate-program
-  "A program's units (DUMPS, in order) translated into OD with its main class and OD/files.txt,
-  the files to define in order: the library's units it needs (LO's) first."
-  [lo od dumps]
-  (let [{:keys [order deps]} (read-string (slurp (io/file lo "deps.edn")))
-        us (mapv #(read-dump (io/file %)) dumps)
-        libs (link order deps us)]
+(defn- translate-units [lo od us libs]
+  (do
     (doseq [u us]
       (let [[forms missing] (translate-unit u)]
         (write-forms (io/file od (str (:name u) ".ae")) forms
@@ -659,6 +725,19 @@
                                        (for [u us] (.getPath (io/file od (str (:name u) ".ae"))))
                                        [(.getPath (io/file od "M__main.ae"))]))
                "\n"))))
+
+(defn translate-program
+  "A program's units (DUMPS, in order) translated into OD with its main class and OD/files.txt,
+  the files to define in order: the library's units it needs (LO's) first. PKG (the compiled level, OC93 (a)) the
+  package of its units and main class, else ocaml.u."
+  [lo od dumps & [pkg]]
+  (let [{:keys [order deps]} (read-string (slurp (io/file lo "deps.edn")))
+        ;; an entry @UNIT names a library unit the program links (OT26 (a)), the others its own units' dumps
+        forced (for [d dumps :when (str/starts-with? d "@")] (subs d 1))
+        us (mapv #(read-dump (io/file %)) (remove #(str/starts-with? % "@") dumps))
+        libs (link order deps us forced)]
+    (binding [*pkg* (or pkg "ocaml.u") *own* (if pkg (set (map :name us)) #{})]
+      (translate-units lo od us libs))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; the command line: o2j unit DUMP OUT, o2j main OUT UNIT...
@@ -672,16 +751,21 @@
                (write-forms (io/file o) forms (str "Translated by arbace.o2j from the Lambda of " (:name u) ". Regenerate rather than edit."))
                (doseq [[n c] (sort missing)] (println (str "missing\t" (:name u) "\t" n "\t" c)))))
     ;; lib LAMBDA-DIR OUT-DIR: every unit of LAMBDA-DIR/order.txt translated, OUT-DIR/deps.edn
-    "lib" (let [[ld od] args
-                order (str/split-lines (slurp (io/file ld "order.txt")))
-                deps (into {} (for [n order]
-                                (let [u (read-dump (io/file ld (str n ".ae")))
-                                      [forms missing] (translate-unit u)]
-                                  (write-forms (io/file od (str n ".ae")) forms
-                                               (str "Translated by arbace.o2j from the Lambda of " n ". Regenerate rather than edit."))
-                                  (doseq [[m c] (sort missing)] (println (str "missing\t" n "\t" m "\t" c)))
-                                  [n (unit-refs u)])))]
-            (spit (io/file od "deps.edn") (pr-str {:order order :deps deps})))
+    ;; (lib LAMBDA-DIR OUT-DIR DUMP...: the DUMPs' units after the stdlib's, in their order: the compiled level's libraries outside
+    ;; the stdlib, unix, threads, compiler-libs, lib/testing, translated once into ocaml.u, OT26 (a))
+    "lib" (let [[ld od & extra] args
+                files (concat (for [n (str/split-lines (slurp (io/file ld "order.txt")))] (io/file ld (str n ".ae")))
+                              (map io/file extra))
+                ;; one unit read at a time (the library's Lambda is not held at once)
+                pairs (vec (for [f files]
+                             (let [u (read-dump f)
+                                   n (:name u)
+                                   [forms missing] (translate-unit u)]
+                               (write-forms (io/file od (str n ".ae")) forms
+                                            (str "Translated by arbace.o2j from the Lambda of " n ". Regenerate rather than edit."))
+                               (doseq [[m c] (sort missing)] (println (str "missing\t" n "\t" m "\t" c)))
+                               [n (unit-refs u)])))]
+            (spit (io/file od "deps.edn") (pr-str {:order (mapv first pairs) :deps (into {} pairs)})))
     ;; prog LIB-OUT OUT-DIR DUMP...: the program's units translated into OUT-DIR, its main class,
     ;; OUT-DIR/files.txt the files to define in order
     "prog" (let [[lo od & dumps] args] (translate-program lo od dumps))
@@ -693,6 +777,23 @@
                 (try (translate-program lo od dumps)
                      (catch Throwable e
                        (println (str "refused\t" od "\t" (str/replace (str (.getMessage e)) #"\s+" " ")))))))
+    ;; the compiled level (OC93 (a)): clib LAMBDA-DIR OUT-DIR as lib, the units' files in j2g's tree style (*in-ns*);
+    ;; cprogs LIB-OUT LIST: LIST's lines PKG OUT-DIR DUMP... (tabs), each a program as prog's in package PKG (ocaml.p<N>), in
+    ;; the tree style, a refusal as progs'; shard OUT-DIR PKG...: OUT-DIR/ocaml/u/Shard.ae, the dispatcher, and the packages'
+    ;; namespace files OUT-DIR/ocaml/u.ae, OUT-DIR/ocaml/p<N>.ae
+    "clib" (binding [*in-ns* true] (apply -main "lib" args))
+    "cprogs" (let [[lo lst] args]
+               (binding [*in-ns* true]
+                 (doseq [line (str/split-lines (slurp lst)) :when (seq line)
+                         :let [[pkg od & dumps] (str/split line #"\t")]]
+                   (try (translate-program lo od dumps pkg)
+                        (catch Throwable e
+                          (println (str "refused\t" od "\t" (str/replace (str (.getMessage e)) #"\s+" " "))))))))
+    "shard" (let [[o & pkgs] args]
+              (binding [*in-ns* true]
+                (write-forms (io/file o "ocaml/u/Shard.ae") (shard-forms pkgs) "The compiled level's dispatcher, by arbace.o2j.")
+                (doseq [p (cons "ocaml.u" pkgs)]
+                  (write-forms (io/file o (str (str/replace p "." "/") ".ae")) (package-forms p) "A package of the compiled level, by arbace.o2j."))))
     "main" (let [[o & units] args]
              (write-forms (io/file o) (main-forms units) "The program's main class, by arbace.o2j."))
     (do (println "usage: o2j lib LAMBDA-DIR OUT-DIR | prog LIB-OUT OUT-DIR DUMP... | unit DUMP OUT [DUMP OUT...] | main OUT UNIT...") (System/exit 2))))

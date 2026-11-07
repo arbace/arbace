@@ -1809,3 +1809,119 @@ picks).
 - **OC131 (a):** the dependency-order build not now; the streams stay sequential.
 - **OC160 (a):** a light `oi-divergences` step in the merge's essential gate (the four judgments of the committed
   records, stage 0).
+
+
+## As built: O8 (write-ahead) (2026-11-03)
+
+Milestone O8, the fifth row: OCaml's four cells of the REAP matrix, its classes, its gate steps and their budget. Built on the branch
+`ocaml-o8` from main `a25d12d1`, held until after the tag `arbace-reaps-4-crops-v1` and merged then with `scheme-sm9` and `cpp-cx10` as
+further rows (light tier: stage 0 the main checkout's, at most 4 jobs; no gate run, no build of Arbace's executables, no lock). It
+follows doc/C23-SURVEY.md's "As built: C8, the fourth row" and the two rows built the same day (SM9's `4ff31506`, CX10's `501bde40`,
+`5889aa52`). OC1-OC160 decided as recorded above bind it: OC67 (a) (oi's essential subset), OC95 (a) (no AOT essential step until the
+compiled level), OC112 (b) (the expect check a step), OC120 (b) with OC130 (b) (the judges' tests a step), OC160 (a) (`oi-divergences`).
+
+**The row** (`test/reap/cells.edn`'s `:ocaml`, the reader `:ocaml` in `test/reap/main.ae`: rows `[ID RESULT REASON ...]` with RESULT a
+string, as every OCaml record writes them; `bin/reap`: 20 of 20 cells checked, 0 problems; `test/reap/matrix.edn` recorded):
+
+| cell | sources | pass / by design / deferred |
+|---|---|---|
+| read | repr/ocaml's round trip, the read level: each file of the 16 corpora (3,162) read by ocamlc 5.5.0's own parser (`tools/ocdump` on compiler-libs) and its dump converted to forms; new record `test/ocaml/read-results.edn` | 3,082 / 80 / 0 |
+| eval | `bin/oi check` (556 rows), `bin/oi suite check` (108) | 360 / 114 / 190 |
+| AOT | `bin/oi check --aot`, `suite check --aot`: the light level (OC87 (a)), the same cases as eval's | 337 / 108 / 219 |
+| print | the round trip's print level: each file the read level passes printed from its forms, the print's dump the original's tree, printed again the same text, mode `:full` back to the original byte for byte; new record `test/ocaml/print-results.edn` | 3,080 / 0 / 2 |
+
+The classes: eval and AOT keep O5-O7's files (`divergences{,-suite,-aot,-suite-aot}.edn`; their `:kind :corpus` maps to by design and
+`:light` to deferred through the cells' `:kind-map`); new `divergences-read.edn` (`:oracle-rejects`, the 78 files ocamlc's parser
+rejects: the testsuite's parse-error and lexer tests, the opam set's build scripts and cppo input; `:templates`, the stdlib's two macro
+templates; both by design) and `divergences-print.edn` (`:string-bytes`, deferred: `lexing/newlines.ml`'s CR LF in a string and re's
+`test_pcre.ml`'s byte 255, which the `:lines` printer does not keep; mode `:full` prints the first back, and refuses the second as not UTF-8).
+The `.cmi` level runs in the same step (`--cmi`) but is not a cell's count: its floors (`test/ocaml/floors.tsv`) are its record.
+
+**The tools.** `bin/repr-ocaml roundtrip --record-results [--corpus ID]... [CORPUS...]` (with `--text`): after a corpus's round trip passes,
+its rows of the two records are replaced and the other corpora's kept (`arbace.repr.ocaml`'s verb `results`, from `compare`'s and `full`'s
+`--report`); a printer's failure (a file not printed, printed text the oracle rejects, a print not stable) is never recorded. The corpus names
+`opam` (the ten `:opam-*`) and `all`. `bin/oi check [--aot]`, `bin/oi suite check [--aot]` take `--only-list FILE` (ids one a line, `#`
+comments; the judgment's `-only` mode, as `--only RE`): the essential subset and the rotation's lists. `bin/oi judges-test`: OC120 (b)'s
+tests (`judges_test`, `repr_levels_test`, `floors_test`, `oi_key_test`, `aot_oi_column_test`), OC130 (b)'s `dumps_determinism_test` (two
+runs) and OC112 (b)'s `bin/oi suite expect` against `ref-expect.edn`, the first failure's status returned.
+
+**Found on the way** (each fixed on the branch): `test/ocaml/full-known.edn` was empty while mode `:full` refuses re's `test_pcre.ml` (not
+UTF-8): `roundtrip --text opam-re` failed since O7 (O7's "`:full` text equal for all 522" counted 522 of 523 without the failure); the
+record now holds it. `judges_test.bash` ran its 46 cases and exited 1: its EXIT trap returns the last command's status, a `grep -q ... &&`
+that found nothing (now an `if`). `repr_levels_test.bash`'s floor case ("no count recorded fails") took `floor` out of `bin/repr-ocaml`
+without the default corpora's lists, so since re-review 030's rule (a corpus outside them is not checked) it passed what it means to
+fail (now with the lists, on a default corpus). Neither test had a gate step, so neither failure was seen.
+
+**The gate steps** (`test/gate/steps.edn`; the groups `:ocaml`, `:ocaml-run`, `:ocaml-aot`; the host `:ocaml` in `bin/lib/gate-run.bash`,
+ocamlc's and ocamlopt's versions and digests, compiler-libs' and the installed stdlib's archives; `test/gate/audited-test.bash` and
+`gate-tests-test.bash` give it, 18 of 18 and passed):
+
+| step | tier | command | measured (light, this host) |
+|---|---|---|---|
+| `oi-essential` | essential, chain `oi-essential` | `bin/oi test`, `repl-check`, `check --only-list test/ocaml/essential-check.txt` (OC67 (a): the basic and effects directories, 57 programs, and the control's two) | 8 + 2 + 69 s |
+| `oi-divergences` | essential, after it | the four judgments of the records (OC160 (a)) | 2 s |
+| `ocaml-read-essential` | essential, chain of its own | `bin/repr-ocaml corpus check`, `roundtrip --cmi samples stdlib`, `--spec`, `spec-check`, `embed-check` | 65 s |
+| `ocaml-roundtrip` | `--full`, chain `ocaml-full`, parts stdlib, compiler-sources, compiler-backend, testsuite, whiml, samples, opam | `bin/repr-ocaml roundtrip --cmi --corpus {part}` | 12.4 min all parts |
+| `ocaml-dumps` | `--full` | `bin/repr-ocaml dumps`, `samples` | 198 + 1 s |
+| `oi-check` | `--full` | `bin/oi check`, `suite check`, `suite rollup` | 405 + 176 + 23 s (3 jobs) |
+| `oi-aot` | `--full`, part `run`, `:rotate` | `bin/oi check --aot` | 75 min whole (O6's run); subset (28 programs) 79 s |
+| `oi-suite-aot` | `--full`, part `suite`, `:rotate` | `bin/oi suite check --aot` | about 30 min whole (O7's); subset (14) 226 s |
+| `ocaml-judges` | `--full` | `bin/oi judges-test` | 9.5 min |
+
+No AOT essential step (OC95 (a)). The rotation (`:rotate`, branch `gt8-nightly`'s format): `test/ocaml/subsets.edn`'s subsets (the run
+corpus: the control's two programs, one program of each non-speed class, the effects directory; the suite: the control's two, one of each
+class, one load program per opam package) nightly, a seventh of the rest a night. Two things stand between it and gt8-nightly's planner
+(OC161): the records' ids carry no part prefix (`asmcomp/compare`, not `run/asmcomp/compare`) and their lines begin with a space, so
+`record-ids` finds none; with nothing found the part is not rotated and runs whole, which is safe but over the share.
+
+**The budget** (GT8, GTS201 (a): 35 minutes nightly, 2.4 hours clean, a crop). Essential: two chains of about 80 and 65 s, beside the
+others. Nightly, with the AOT parts rotated: the round trip 12.4 min, the dumps 3.3 min, oi's checks 10.1 min, the AOT run part
+1.3 + (75 - 1.3) / 7 = about 12 min, the suite's 3.8 + (30 - 3.8) / 7 = about 7.5 min, the judges 9.5: about 55 min, over the share
+by 20 (OC166). Clean (GTS204 (a): every part, the rotated ones on their subsets): about 40 min; whole, with the AOT parts whole,
+about 140 min, within 2.4 hours. Peaks: 1.5 GB (the round trip), 1 GB (the light level a process).
+
+**Tonight's runs** (none was run whole by day but the round trip): `bin/oi check --aot` whole (75 min, to check the record still holds on
+this branch: oi's key moved with `bin/lib/oi/suite.bash`, so the AOT level reruns oi's rows first), `bin/oi suite check --aot` whole (30
+min), then `bin/oi pins --attest` from those runs' keys (the attested rows' keys are from O7's runs: `bin/oi divergences` notes them as
+possibly stale); `bin/gate --audit oi-essential ocaml-read-essential oi-divergences` (the declarations); the essential gate on the merge.
+
+**Conflicts with the held rows** (`scheme-sm9` `4ff31506`, `cpp-cx10` `5889aa52`; each block of this branch is apart, but these lines are
+edited by two or three of the branches): `test/reap/cells.edn`'s `:languages` and `:names` (one line each in all three) and the cells map's
+last line (`... roundtrip-results.edn"}]}}}`, each row appended after C's print cell), the readers' comment (CX10's `:c-known` lines,
+SM9's after `:text-known`, this branch's before `:c-known`); `test/reap/main.ae`: the readers inserted before ";; the cases a source must have"
+(SM9's `:scheme`, this branch's `:ocaml`); `test/gate/steps.edn`: the `reap` step's `:inputs` last line and `:summary` (all three);
+`bin/lib/gate-run.bash`: the hosts' last `printf ... }\n` line (all three) and the id functions inserted before `plan_inputs` (all three);
+`test/gate/audited-test.bash`'s and `gate-tests-test.bash`'s hosts lines (SM9; CX10 left them, so its `:cxx` needs them at the merge);
+the Makefile's `reap` line (SM9); `CLAUDE.md`: the REAP paragraph's end, the other crops' "runs them." line, the essential gate's
+"`--full` all of `test/programs/`)" sentence and the `--full` paragraph's "in `bin/gate --pins`)" sentence (all three). `bin/reap`'s header
+comment is SM9's and CX10's alone (this branch leaves it).
+
+**Shipped files changed**: none (`arbace/repr/ocaml.ae` is not embedded; `go/`, `overlay/`, `jdk/`, `seed/` untouched). `arbace/repr/ocaml.ae`
+is under `arbace/`, so the steps whose inputs name `arbace/` whole (java-compiled, suite-aot, j2g-edge, gate-tests) rerun once.
+
+**Proposals** (OC161 onward; options, the recommended one first; none decided)
+
+- **OC161 The rotation's ids.** (a) gt8-nightly's `record-ids` and `corpus-subset` take the `:rotate` map's `:prefix` (default `PART/`;
+  OCaml's `""`) and a record line's leading space, a two-line change in `test/gate/plan.ae`, made at the merge; (b) OCaml's records written
+  with a part prefix (`run/...`, `suite/...`): every record, known file and pin rewritten; (c) no rotation, the AOT parts whole nightly
+  (105 min). *Recommended: (a)*.
+- **OC162 The subsets' rule.** The subsets are by hand (the control, one per class, a spread), not GTS205 (a)'s blocks. (a) a cover build of
+  oi's driver (`go build -cover`, GTS206 (a)) and of o2j's runtime run at night over the corpora, the subsets recomputed to reach every
+  block, kept by key; (b) by hand, as built. *Recommended: (a)* after the tag, with the other crops' cover builds.
+- **OC163 An AOT essential step.** (a) none until the compiled level (OC95 (a), as built); (b) the light level's subset of the run corpus
+  (`subsets.edn`'s `:run`, 79 s) in the essential gate now. *Recommended: (a)*: the light level is not what ships, and the nightly subset
+  runs it each night.
+- **OC164 The corpora's place.** Each checkout (a worktree, the clean clone) fetches the tarballs into its own `.tmp/repr-ocaml` (6 MB over
+  the network, 4 s here). (a) as SM9 did, the main checkout's `.tmp/repr-ocaml/src` read by every checkout, the extraction its own, the pins
+  checked as now, and `bin/gate --pins` running `bin/repr-ocaml corpus check`; (b) as built. *Recommended: (a)*: the clean run needs no
+  network.
+- **OC165 Embedding (CS250's line).** C++ and Scheme embed at the first re-seed after the tag (the user, 2026-11-03). (a) OCaml joins with
+  oi alone: `go/arbace/oi` listed in goi's table and `arbace.ocaml.oi` (O5's heavy list items 1-2), `bin/oi` on the shipped program, the
+  light driver's TamaGo build gone; repr/ocaml and o2j stay evaluated (both need the host's compiler-libs, through `tools/ocdump`, and change
+  most); (b) all of OCaml's (repr/ocaml, o2j, `jdk/ocaml/`, oi): every OCaml change then reruns the builds and the embedded steps; (c) none
+  until O9 and the compiled level. *Recommended: (a)*: oi's package is OCaml's REPL, the part a user of the shipped program runs, and has
+  not changed since O6's fixes; the tamago build constraints of `ext_sys.ae`, `ext_io.ae` (O5's item 3) are needed first.
+- **OC166 The nightly share.** About 55 minutes against 35. (a) rotate `oi-check` (the run corpus, 556 rows) and the round trip's
+  testsuite part too (both need OC161 (a)), and the judges' expect check (3 min of the 9.5) in the clean run only: about 44 minutes;
+  (b) the light level at 4 processes in the gate (`O2J_JOBS=4`: its records were made at 2, the timeouts under more load to be checked);
+  (c) accept the overrun until the compiled level replaces the light one (OC87). *Recommended: (a)*, then (c) for what remains.

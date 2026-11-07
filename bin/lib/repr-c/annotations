@@ -9,8 +9,11 @@
 # gaps, not compared) and the checker gives no error on a file gcc accepts; else test/repr/c/annot-known.edn lists
 # it with its class, or it fails (arbace.repr.c.annot). Writes only under .tmp/ci-annot/ (CI_ANNOT_WORK).
 #
-# Usage: bin/ci annotations [--corpus C,...] [--record] [--resume] [--judge]
+# Usage: bin/ci annotations [--corpus C,...] [--only LIST] [--record] [--resume] [--judge]
 #   --corpus   test/c/corpora.edn's ids (default every corpus read in place, `all`; lua's tarball not)
+#   --only     GT8: a file of ids CORPUS/NAME (bin/lib/repr-c/only.bash), those files alone, judged on what the run holds
+#              (a known entry of a file not run is not stale, a control whose files are not run is left); not with --record
+#              or --resume; --judge --record after a partial run is refused too
 #   --record   the known file's entries of the corpora rewritten from the files that do not pass (one of no class printed,
 #              left out and the run failed), then judged again,
 #              and the results file test/repr/c/annot-results.edn (CS240 (a): every file's row [ID RESULT REASON];
@@ -30,24 +33,36 @@ set -uo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
 . "$root/bin/lib/tools.bash"
+. "$root/bin/lib/repr-c/only.bash"
 cd "$root"
 
 all=c23conf,c23,torture-execute,torture-execute-mirror,torture-compile,tcc-tests2,tcc-pp,compcert,mir,cxgo,benchmarksgame,sqlite,zlib,quickjs,gcc-c23,gcc-cpp-c23,gcc-c23-sub,gcc-gnu23,gcc-embed,gcc-va-opt,gcc-bitint
-corpora=$all record= resume= judge_only=
+corpora=$all record= resume= judge_only= only=
 while [ $# -gt 0 ]; do
   case $1 in
     --corpus) corpora=$2; shift 2 ;;
+    --only) only=$2; shift 2 ;;
     --record) record=1; shift ;;
     --resume) resume=1; shift ;;
     --judge) judge_only=1; shift ;;
-    *) sed -n '12,19p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+    *) sed -n '12,22p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
   esac
 done
 [ "$corpora" = all ] && corpora=$all
+unset REPR_C_ONLY
+[ -z "$only" ] || c_only_set "$only" "$corpora" "ci annotations"
+[ -z "$record" ] || c_only_refuse "ci annotations" --record
+[ -z "$resume" ] || c_only_refuse "ci annotations" "--resume (a kept corpus's lists)"
+# review 188, L4: --judge judges the last run as it was listed
+[ -z "$judge_only" ] || c_only_refuse "ci annotations" "--judge (the last run's own list)"
 work=${CI_ANNOT_WORK:-$root/.tmp/ci-annot}
 threads=${REPR_C_THREADS:-6}
 export REPR_C_THREADS=$threads GOMEMLIMIT=${GOMEMLIMIT:-6GiB}
 mkdir -p "$work"
+# a partial run's judgment never records (review 027's rule for the run level): --judge --record after an --only run
+if [ -n "$record" ] && { [ -n "$judge_only" ] || [ -n "$resume" ]; } && c_only_marked "$work" "$corpora"; then
+  echo "ci annotations: --judge --record: the last run was partial (--only; CORPUS/only.txt)" >&2; exit 2
+fi
 # the main checkout: a worktree's (.tmp/worktrees/NAME) or the clean run's clone's (.tmp/gate-clean/SHA, also of a worktree), else this one (queue 150)
 cmain=${root%%/.tmp/gate-clean/*}; cmain=${cmain%%/.tmp/worktrees/*}
 gowhim=${GOWHIM:-$(cd "$cmain/.." && pwd)/go-whim}
@@ -63,7 +78,8 @@ todo=() fresh=()
 for id in "${ids[@]}"; do
   [ -n "$judge_only" ] && continue
   todo+=("$id")
-  if [ -n "$resume" ] && [ -s "$work/$id/list.jsonl" ] && [ -d "$work/$id/cc" ]; then continue; fi
+  # review 188, L3: a corpus a partial run left is listed again (a whole --resume is whole)
+  if [ -n "$resume" ] && [ -s "$work/$id/list.jsonl" ] && [ -d "$work/$id/cc" ] && [ ! -f "$work/$id/only.txt" ]; then continue; fi
   rm -rf "${work:?}/$id"; fresh+=("$id")
 done
 [ ${#fresh[@]} = 0 ] || arbace_tool -m arbace.repr.c.ppcheck lists "$work" "$roots" "${fresh[@]}" || exit 1
@@ -72,7 +88,7 @@ done
 ccdump_chunk() { # DIR CHUNK
   local d=$1 c=$2 st cur
   while :; do
-    GOMAXPROCS=2 timeout "${REPR_C_CCDUMP_TIMEOUT:-600}" "$ccdump" -mode types -host test/c/host -list "$c" \
+    GOMAXPROCS=2 timeout "${REPR_C_CCDUMP_TIMEOUT:-600}" "$ccdump" -mode types -host "${ARBACE_C_HOST:-$root/test/c/host}" -list "$c" \
       -o "$d/cc" -base "$(cat "$d/base.txt")" -skip-done -current "$c.current" > "$c.log" 2>&1
     st=$?
     [ $st = 0 ] && return 0
@@ -107,6 +123,10 @@ if [ -n "$record" ]; then
   [ $rst = 0 ] || status=1
   arbace_tool -m arbace.repr.c.annot judge "$work" "${ids[@]}" 2> "$work/judge.err" || status=1
   # CS240 (a): every file's row [ID RESULT REASON] (the passes bin/reap counts), the other corpora's rows kept
-  arbace_tool -m arbace.repr.c.results annot "$work" "${REPR_C_RESULTS_FILE:-test/repr/c/annot-results.edn}" "${ids[@]}" 2> "$work/results.err" || status=1
+  rf=${REPR_C_RESULTS_FILE:-test/repr/c/annot-results.edn}
+  arbace_tool -m arbace.repr.c.results annot "$work" "$rf" "${ids[@]}" 2> "$work/results.err" || status=1
+  # CSP5 (doc/CROPS-SCORE.md): no host path in the record, the checkout as ${root} (the reasons name the corpora's files;
+  # here, not in arbace.repr.c.results, which is embedded: gate_key)
+  [ ! -f "$rf" ] || { mainroot=$(cd "$(git -C "$root" rev-parse --git-common-dir)/.." && pwd); sed -i -e "s|$root/|\${root}/|g" -e "s|$mainroot/|\${root}/|g" "$rf"; }
 fi
 exit $status

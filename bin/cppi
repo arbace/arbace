@@ -13,7 +13,7 @@
 #   bin/cppi runtime OUT.c      the runtime of exceptions printed as C
 #   bin/cppi testsuite          libstdc++-v3/testsuite extracted from the pinned gcc 15.2.0 tarball into .tmp/cppi/gcc/
 #                               (REPR_CPP_GCC_TARBALL, default the main checkout's .tmp/c1/gcc/gcc-15.2.0.tar.xz)
-#   bin/cppi list samples|runtime|samples+runtime|libstdcxx [--sample N]
+#   bin/cppi list samples|runtime|samples+runtime|essential|libstdcxx [--sample N]
 #                               a check list on the standard output (NAME, STD, ARGS, PATH, tab-separated; a first line `#list KEY` names the recorded list
 #                               it is, `#part NAME` a part of one; `samples+runtime`: the recorded `samples`): test/cpp/samples,
 #                               test/cpp/runtime/samples (CX7), or
@@ -43,6 +43,14 @@
 #                               name it defines one clang's IR defines; against test/cpp/codegen/known.edn (arbace.cpp.codegen's
 #                               judge: WORK/results.tsv, WORK/summary.edn). The runtime need not be at the checkout's key: both
 #                               routes link the same one
+#   bin/cppi lower-corpus samples|libstdcxx-every-15th [WORK] [--only-list FILE] [lower-check's options]
+#                               lower-check over a recorded list of test/cpp/lower-results.edn, made by its key (CX10: the gate's cpp-lower
+#                               parts; the testsuite extracted first when it is not; WORK default .tmp/cppi/lower-KEY; --only-list FILE (GT9,
+#                               the gate's rotation): only the names FILE lists, one a line, a partial run: held to the record's results by
+#                               name, not to the whole list; a failing file prints as `  failing: NAME ...`)
+#   bin/cppi lower-essential [WORK] [lower-check's options]
+#                               lower-check over test/cpp/essential-lower.txt's programs (CX10: the gate's cpp-lower-essential; `bin/cppi list
+#                               essential`, a part never held to the record; WORK default .tmp/cppi/essential)
 #   bin/cppi selftest [--accept-skips] [NAME...] the checks' own tests (test/cpp/selftest/NAME.sh: the review 007 cases; ARBACE_HOST_EXE=/bin/true: the dry mode, which skips the tests that need the tools and exits 3, 0 with --accept-skips)
 # The judges are arbace.cpp.check's (apart from the lowering, so they are not in the runtime's key).
 #   bin/cppi lower-check LIST WORK [--jobs N] [--runtime OUT] [--recorded KEY|none|auto]
@@ -59,12 +67,27 @@
 #                               fails on a recorded name missing from it or a count other than the record's (review 018, R4)
 #                               and on its negative control (GTS81 (a), test/cpp/controls.edn): a sample's lowered run judged
 #                               against another's original run must differ (selftest controls)
+#   bin/cppi run [--std S] [OPTION...] FILE.cpp [-- ARG...]
+#                               FILE (one translation unit) compiled to IR by the oracle, lowered, read and built by ci with the
+#                               lowered runtime and musl (arbace.cpp.run), run by ci's back end with ARG...; its status the command's
+#   bin/cppi runtime-ci [OUT]   the lowered runtime's units read by repr/c as ci's library, OUT/ci (CX8; keyed)
+#   bin/cppi record-ref [--corpus C,...] [--only] [--sample N] [--ids LIST]
+#                               g++ 15.2's -O0 runs of the run corpora recorded, test/cpp/ref-gxx15.edn (bin/lib/cppi/record-ref)
+#   bin/cppi check [--corpus C,...] [--only LIST] [--sample N] [--record] [--judge] [--resume]
+#                               the run corpora on ci against g++'s runs, every non-pass in a class of test/cpp/divergences.edn,
+#                               against test/cpp/check-linux-amd64.edn (bin/lib/cppi/check, its header; CX8)
+#   bin/cppi check --aot [the same options]
+#                               the same programs' node programs translated by cf2g and built by TamaGo's go, against g++'s runs
+#                               and test/cpp/check-aot-linux-amd64.edn, classes divergences-aot.edn then divergences.edn
+#                               (bin/lib/cppi/check-aot)
+#   bin/cppi divergences [--aot] [--sample N]  the recorded check (or the sampling's record, check[-aot]-every-N) judged against the classes
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
 . "$root/bin/lib/tools.bash"
-main_checkout=$root
-case $root in */.tmp/worktrees/*) main_checkout=${root%%/.tmp/worktrees/*} ;; esac
+# the main checkout: a worktree's (.tmp/worktrees/NAME) or the clean run's clone's (.tmp/gate-clean/SHA), else this one (CX10, as C's
+# tools since queue 150)
+main_checkout=${root%%/.tmp/gate-clean/*}; main_checkout=${main_checkout%%/.tmp/worktrees/*}
 export GOMAXPROCS=${GOMAXPROCS:-4} GOMEMLIMIT=${GOMEMLIMIT:-1500MiB}
 ts_root=$root/.tmp/cppi/gcc/gcc-15.2.0/libstdc++-v3/testsuite
 GCC_FLAGS="-std=gnu23 -O0 -w -fno-builtin -fno-strict-aliasing -ffp-contract=off"
@@ -83,6 +106,11 @@ list_samples() {
   local f
   [ "${1:-}" = body ] || echo "#part samples"
   for f in "$root"/test/cpp/samples/*.cpp; do printf '%s\t%s\t%s\t%s\n' "samples/$(basename "$f")" c++23 "" "$f"; done
+}
+
+list_essential() { # CX10: test/cpp/essential-lower.txt's files of the samples and the runtime's samples, a part (never held to a record)
+  echo "#part essential"
+  { list_samples body; list_runtime body; } | awk -F'\t' 'NR == FNR { if ($0 !~ /^#/ && $0 != "") want[$0] = 1; next } ($1 in want)' "$root/test/cpp/essential-lower.txt" -
 }
 
 list_runtime() { # CX7's samples of the runtime (test/cpp/runtime/samples)
@@ -174,7 +202,9 @@ rt_ir() { # rt_ir UNIT SOURCE STD FLAGS: one runtime unit's IR (cwd the tarball'
   local u=$1 src=$2 std=$3 fl=$4 d=$rt/units/$1 shim
   rm -rf "$d"; mkdir -p "$d" # no level file of an earlier build stands for this one's
   shim=$(grep -F -x -A1 "$src" "$rt/shims.txt" | sed -n 2p || true)
-  [ -n "$shim" ] && src=$root/test/cpp/runtime/shims/$shim
+  # the shim named relative to the tarball's root, where clang runs: the IR's ModuleID and source_filename are the path as
+  # given, which no -ffile-prefix-map rewrites, so an absolute one made the IR's digest the checkout's place (CX8)
+  [ -n "$shim" ] && src=$(realpath --relative-to="$gcc_root" "$root/test/cpp/runtime/shims/$shim")
   local maps="-ffile-prefix-map=$gcc_root/= -ffile-prefix-map=$rt/gen/=gen/ -ffile-prefix-map=$root/test/cpp/runtime/=test/cpp/runtime/"
   # shellcheck disable=SC2086
   if [ "$std" = c ]; then
@@ -185,6 +215,10 @@ rt_ir() { # rt_ir UNIT SOURCE STD FLAGS: one runtime unit's IR (cwd the tarball'
         -isystem /usr/include/c++/15.2.0/backward -I"$rt/gen" -Ilibgcc -Ilibstdc++-v3/libsupc++ -I"$(dirname "$2")" $fl "$src" -o "$d/x.ll"
       echo $? > "$d/ir.status" ) 2>&1 | cap "$d/ir.log"
   fi
+  # CX10: a shim's IR names its source by its absolute path in the module's ID and source_filename, which -ffile-prefix-map does not
+  # touch: written relative to the checkout as the maps write the rest, so test/cpp/runtime/ir.sha256 holds in any checkout (it held
+  # cpp-cx7's worktree path: assert_fail.cc's and random.cc's digests differed everywhere else)
+  [ "$(cat "$d/ir.status")" = 0 ] && sed -i "1,2s|$root/test/cpp/runtime/|test/cpp/runtime/|" "$d/x.ll"
   [ "$(cat "$d/ir.status")" = 0 ] && ( cd "$d" && timeout 600 clang -c x.ll -o x.o ) 2>&1 | cap "$d/obj.log"
   return 0
 }
@@ -199,7 +233,7 @@ rt_two() { # rt_two UNIT: the print's object against the IR's, gcc -O0 on the lo
   if [ -f "$d/lowered.c" ]; then
     # shellcheck disable=SC2086
     ( cd "$d" && timeout 900 gcc $GCC_FLAGS -c lowered.c -o lowered.o; echo $? > gcc.status ) 2>&1 | cap "$d/gcc.log"
-    [ -n "${CPPI_KEEP:-}" ] || rm -f "$d/lowered.c"
+    # the lowered C kept: bin/cppi runtime-ci reads it as ci's library (CX8)
   fi
   return 0
 }
@@ -301,6 +335,52 @@ runtime_build() {
 disk_ok() { # the light tier's disk rule: stop past 80% (CPPI_DISK_MAX)
   local u; u=$(df --output=pcent "$root" | tail -1 | tr -dc 0-9)
   [ "$u" -le "${CPPI_DISK_MAX:-80}" ] || { echo "lower-check: the disk is at $u%, stopping" >&2; exit 3; }
+}
+
+runtime_ci() { # runtime_ci [OUT]: OUT/ci, the lowered runtime's units read by repr/c as ci's library (CX8; arbace.cpp.run's
+  # read-lib), made again when its key (OUT's key, the reader's sources and opts: arbace/cpp/run.ae, repr/c, test/c/host)
+  # changed; runtime-build first when OUT is not at the checkout's key. Prints OUT/ci.
+  local out=${1:-${CPPI_RUNTIME:-$root/.tmp/cppi/runtime}} k u
+  if ! runtime_key_check "$out" 2>"$TMPDIR/cppi-rtkey.log" || [ ! -f "$out/rt.c" ] \
+     || cut -f1 "$out/units.tsv" | while read -r u; do [ -f "$out/units/$u/lowered.c" ] || echo missing; done | grep -q missing; then
+    echo "runtime-ci: the runtime in $out is not at the checkout's key (or has no lowered C): runtime-build" >&2
+    ( runtime_build "$out" ) >&2 || exit 1
+  fi
+  out=$(cd "$out" && pwd)
+  # the reader's key (its sources and options) apart from the runtime's: a unit read by the same reader from the same lowered C is
+  # read again to the same forms (cppi-deferred)
+  rk=$( (cd "$root" && sed -n '/^;; runtime-ci-key begin/,/^;; runtime-ci-key end/p' arbace/cpp/run.ae | sha256sum
+         find arbace/repr/c.ae arbace/repr/c arbace/c/musl.ae test/c/host test/cpp/runtime/ci -type f | LC_ALL=C sort | xargs sha256sum) | sha256sum | cut -d' ' -f1)
+  k=$( { cat "$out/key"; (cd "$root" && sed -n '/^;; runtime-ci-key begin/,/^;; runtime-ci-key end/p' arbace/cpp/run.ae | sha256sum
+                                 find arbace/repr/c.ae arbace/repr/c arbace/c/musl.ae test/c/host test/cpp/runtime/ci -type f | LC_ALL=C sort | xargs sha256sum); } | sha256sum | cut -d' ' -f1)
+  if [ "$(cat "$out/ci/key" 2>"$TMPDIR/cppi-cikey.err")" != "$k" ]; then
+    { cut -f1 "$out/units.tsv" | while read -r u; do printf '%s\t%s\n' "$u" "$out/units/$u/lowered.c"; done; printf 'cx-rt\t%s\n' "$out/rt.c"; } > "$TMPDIR/cppi-ci-list.$$"
+    cut -f2 "$TMPDIR/cppi-ci-list.$$" | xargs sha256sum | awk '{ print $1 }' | paste "$TMPDIR/cppi-ci-list.$$" - | cut -f1,3 > "$TMPDIR/cppi-ci-sums.$$"
+    if [ "$(cat "$out/ci/reader-key" 2>"$TMPDIR/cppi-cikey.err")" = "$rk" ] && [ -f "$out/ci/units.sha256" ] && [ -f "$out/ci/read.tsv" ]; then
+      # the same reader: only the units whose lowered C changed are read again (read-lib keeps the rows read.tsv says are read;
+      # the index is made again from every unit), seconds after a lowering change that touches a few units, not the whole read
+      awk -F'\t' 'NR == FNR { old[$1] = $2; next } old[$1] != $2 { print $1 }' "$out/ci/units.sha256" "$TMPDIR/cppi-ci-sums.$$" > "$TMPDIR/cppi-ci-changed.$$"
+      awk -F'\t' 'NR == FNR { ch[$1] = 1; next } !($1 in ch)' "$TMPDIR/cppi-ci-changed.$$" "$out/ci/read.tsv" > "$out/ci/read.tsv.new"
+      mv "$out/ci/read.tsv.new" "$out/ci/read.tsv"; rm -f "$out/ci/key"
+      echo "runtime-ci: reading $(wc -l < "$TMPDIR/cppi-ci-changed.$$") changed units of the lowered runtime into $out/ci" >&2
+    else
+      rm -rf "$out/ci"; mkdir -p "$out/ci"
+      echo "runtime-ci: reading the lowered runtime into $out/ci (about 3 minutes)" >&2
+    fi
+    mv "$TMPDIR/cppi-ci-list.$$" "$out/ci/list.tsv"; rm -f "$TMPDIR/cppi-ci-changed.$$"
+    (cd "$root" && GOMEMLIMIT=${CPPI_CI_MEMLIMIT:-6GiB} arbace_tool -m arbace.cpp.run read-lib "$out/ci" "$out/ci/list.tsv" "${CPPI_JOBS:-4}") > "$out/ci/read.log" 2>&1 \
+      || { grep -v -E 'Reflection|recur arg|Auto-boxing' "$out/ci/read.log" | tail -5 >&2; exit 1; }
+    # ci's overrides (test/cpp/runtime/ci/*.c, arbace.cpp.run's libs-fn links them before the runtime): C for ci of what the
+    # lowered runtime does in a way ci cannot (clang's inline va_arg)
+    mkdir -p "$out/ci/over"
+    for f in "$root"/test/cpp/runtime/ci/*.c; do printf '%s	%s
+' "ci/$(basename "$f" .c)" "$f"; done > "$out/ci/over/list.tsv"
+    (cd "$root" && GOMEMLIMIT=${CPPI_CI_MEMLIMIT:-6GiB} arbace_tool -m arbace.cpp.run read-lib "$out/ci/over" "$out/ci/over/list.tsv" 1) > "$out/ci/over/read.log" 2>&1 \
+      || { grep -v -E 'Reflection|recur arg|Auto-boxing' "$out/ci/over/read.log" | tail -5 >&2; exit 1; }
+    mv "$TMPDIR/cppi-ci-sums.$$" "$out/ci/units.sha256"; echo "$rk" > "$out/ci/reader-key"
+    echo "$k" > "$out/ci/key"
+  fi
+  echo "$out/ci"
 }
 
 lower_check() {
@@ -451,11 +531,46 @@ case ${1:-} in
           samples) list_samples ;;
           runtime) list_runtime ;;
           samples+runtime) echo "#list samples"; list_samples body; list_runtime body ;;
+          essential) list_essential ;;
           libstdcxx) n=15; [ "${3:-}" = --sample ] && n=$4; list_libstdcxx "$n" ;;
-          *) echo "list: samples, runtime or libstdcxx" >&2; exit 2 ;;
+          *) echo "list: samples, runtime, samples+runtime, essential or libstdcxx" >&2; exit 2 ;;
         esac ;;
   lower-check) shift; lower_check "$@" ;;
   codegen) shift; codegen_one "$@" ;;
   codegen-check) shift; codegen_check "$@" ;;
+  runtime-ci) shift; runtime_ci "$@" ;;
+  record-ref) shift; exec "$root/bin/lib/cppi/record-ref" "$@" ;;
+  check) shift
+    for a in "$@"; do [ "$a" = --aot ] && { args=(); for b in "$@"; do [ "$b" = --aot ] || args+=("$b"); done; exec "$root/bin/lib/cppi/check-aot" "${args[@]}"; }; done
+    exec "$root/bin/lib/cppi/check" "$@" ;;
+  divergences) shift; lvl=eval; n=; [ "${1:-}" = --aot ] && { lvl=aot; shift; }; [ "${1:-}" = --sample ] && n=${2:?--sample N}
+                arbace_tool -m arbace.cpp.check divergences "$lvl" $n ;;
+  run) shift; exec "$root/bin/lib/cppi/run" "$@" ;;
+  lower-corpus) shift; k=${1:?lower-corpus KEY [WORK] [--only-list FILE]: samples or libstdcxx-every-15th}; shift; w=$root/.tmp/cppi/lower-$k
+                case ${1:-} in ""|--*) ;; *) w=$1; shift ;; esac
+                # GT9 --only-list FILE (the gate's rotation): the names FILE lists, one a line, as test/cpp/lower-results.edn names them
+                only_list=""; rest=()
+                while [ $# -gt 0 ]; do
+                  case $1 in
+                    --only-list) [ -f "${2:-}" ] || { echo "lower-corpus: no list ${2:-}" >&2; exit 2; }; only_list=$2; shift 2 ;;
+                    *) rest+=("$1"); shift ;;
+                  esac
+                done
+                set -- "${rest[@]+"${rest[@]}"}"
+                case $k in
+                  samples) { echo "#list samples"; list_samples body; list_runtime body; } > "$TMPDIR/cppi-$k.list" ;;
+                  libstdcxx-every-15th) [ -d "$ts_root" ] || testsuite; list_libstdcxx 15 > "$TMPDIR/cppi-$k.list" ;;
+                  *) echo "lower-corpus: samples or libstdcxx-every-15th, the recorded lists of test/cpp/lower-results.edn" >&2; exit 2 ;;
+                esac
+                if [ -n "$only_list" ]; then
+                  # a partial run: the key's list cut to the names (the header kept, so the list is of its key), held to the record's :files
+                  # by name (a recorded :pass that does not pass fails) but not to the whole list (--recorded none: no count, no missing names)
+                  awk -F'\t' 'NR == FNR { want[$0] = 1; next } /^#/ || ($1 in want)' "$only_list" "$TMPDIR/cppi-$k.list" > "$TMPDIR/cppi-$k.only"
+                  grep -q -v -e '^#' -e '^$' "$TMPDIR/cppi-$k.only" || { echo "lower-corpus: $only_list names no file of $k" >&2; exit 2; }
+                  lower_check "$TMPDIR/cppi-$k.only" "$w" --recorded none "$@"; exit $?
+                fi
+                lower_check "$TMPDIR/cppi-$k.list" "$w" --recorded "$k" "$@" ;;
+  lower-essential) shift; w=${1:-$root/.tmp/cppi/essential}; [ $# -gt 0 ] && shift
+                   list_essential > "$TMPDIR/cppi-essential.list"; lower_check "$TMPDIR/cppi-essential.list" "$w" "$@" ;;
   *) sed -n '2,/^set -e/p' "$0" | sed '$d;s/^# \{0,1\}//' >&2; exit 2 ;;
 esac

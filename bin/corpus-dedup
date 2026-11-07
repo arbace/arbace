@@ -1,0 +1,82 @@
+#!/bin/bash
+# The corpora's duplicates (GT8, the test budget; VM report 156, queue 171): every corpus a gate step reads,
+# per crop, its units (files, or a test's files) hashed byte for byte and, with --normalize, after dropping
+# comments and white space by the language's own reader (C arbace.repr.c.lex, Go repr/go's native reader,
+# Java arbace.repr.java.lex, Clojure the reader; a file the reader refuses by a white-space normalization,
+# counted apart), reported per corpus, across corpora and crops and per check (the gate's step or part:
+# the units it reads twice, the first in corpora order kept, the count saved and the clean record's wall
+# apportioned, est). The logic: gate.dedup (test/gate/dedup.ae) on the tools' host. Finds and reports only.
+# Usage: bin/corpus-dedup [--crop c,go,java,clojure] [--normalize] [--groups] [--manifest FILE]
+#   --crop       the crops (default all four)
+#   --normalize  the normalized level too
+#   --groups     every duplicate group listed (default the 10 largest per crop and level)
+#   --manifest   a made-up manifest of corpora in place of the crops' (the tool's test,
+#                test/gate/corpus-dedup-test.bash)
+# Roots (a root missing or not at its pin leaves its corpora "not reached", with why):
+#   CORPUS_DEDUP_GOMODCACHE  ccorpus2's module cache (default TamaGo's go env GOMODCACHE)
+#   CORPUS_DEDUP_GCC         gcc 15.2.0's extracted tree (default bin/repr-c gcc-tests)
+#   ARBACE_GOROOT            $GOROOT (default /root/tamago-go), its test/ checked against seed/goroot-test.sha256
+#   JDK                      jdk26u's checkout at the platform's pin (default /root/jdk26u)
+#   CORPUS_DEDUP_CLJ_SUITE   Clojure's checkout at bin/clojure-tests' rev (default the main checkout's
+#                            .tmp/clojure-tests/baseline/clojure)
+#   CORPUS_DEDUP_CLJ_LIBS    the suite's library jars, checked by bin/clojure-tests' SHA-1s (default the main
+#                            checkout's .tmp/clojure-tests/lib)
+#   CORPUS_DEDUP_JOBS        threads (default 8)
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/tools.bash"
+cd "$root"
+cmain=${root%%/.tmp/gate-clean/*}; cmain=${cmain%%/.tmp/worktrees/*}
+
+crops=c,go,java,clojure normalize=false groups=false manifest=
+while [ $# -gt 0 ]; do
+  case $1 in
+    --crop) crops=$2; shift 2 ;;
+    --normalize) normalize=true; shift ;;
+    --groups) groups=true; shift ;;
+    --manifest) manifest=$(cd "$(dirname "$2")" && pwd)/$(basename "$2"); shift 2 ;;
+    *) sed -n '2,/^set -/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2; exit 2 ;;
+  esac
+done
+q() { printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"; }
+has() { case ,$crops, in *,$1,*) return 0 ;; esac; return 1; }
+goroot=${ARBACE_GOROOT:-/root/tamago-go}
+gomod= gcc= jdk= frozen= suite= libs=
+if [ -z "$manifest" ]; then
+  if has c; then
+    gomod=${CORPUS_DEDUP_GOMODCACHE:-$(GOFLAGS= "$goroot/bin/go" env GOMODCACHE 2> /dev/null || echo "no go at $goroot")}
+    gcc=${CORPUS_DEDUP_GCC:-$(bin/repr-c gcc-tests 2> "$TMPDIR/corpus-dedup-gcc.err" || echo "gcc-tests failed: $(tail -1 "$TMPDIR/corpus-dedup-gcc.err")")}
+  fi
+  if has go && [ -d "$goroot/test" ]; then
+    want=$(grep -v '^#' seed/goroot-test.sha256 | awk 'NF {print $1; exit}')
+    have=$(cd "$goroot" && find test -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-64)
+    [ "$have" = "$want" ] || goroot="\$GOROOT/test of $goroot is not seed/goroot-test.sha256's ($have)"
+  fi
+  if has java; then
+    jdk=${JDK:-/root/jdk26u}
+    pin=$(sed -n 's/^pin=\([0-9a-f]*\).*/\1/p' bin/java-check)
+    c=$(git -C "$jdk" rev-parse HEAD 2> /dev/null || echo none)
+    [ "$c" = "$pin" ] || jdk="jdk26u at $pin: $jdk is at $c"
+  fi
+  if has java || has clojure; then frozen=$(frozen_clojure 2> "$TMPDIR/corpus-dedup-frozen.err") || frozen="the frozen tree: $(tail -1 "$TMPDIR/corpus-dedup-frozen.err")"; fi
+  if has clojure; then
+    suite=${CORPUS_DEDUP_CLJ_SUITE:-$cmain/.tmp/clojure-tests/baseline/clojure}
+    rev=$(sed -n 's/^rev=\([0-9a-f]*\).*/\1/p' bin/clojure-tests)
+    c=$(git -C "$suite" rev-parse HEAD 2> /dev/null || echo none)
+    [ "$c" = "$rev" ] || suite="clojure at $rev: $suite is at $c"
+    lib=${CORPUS_DEDUP_CLJ_LIBS:-$cmain/.tmp/clojure-tests/lib}
+    libs=$TMPDIR/corpus-dedup/libs
+    rm -rf "$libs"; mkdir -p "$libs"
+    while read -r coord sha; do
+      j=$lib/$(basename "$(dirname "$coord")")-$(basename "$coord").jar
+      if [ ! -f "$j" ]; then libs="no $j"; break; fi
+      if [ "$(sha1sum "$j" | cut -d' ' -f1)" != "$sha" ]; then libs="$j is not bin/clojure-tests' SHA-1 $sha"; break; fi
+      n=$(basename "$j" .jar); mkdir -p "$libs/$n"; unzip -q -o "$j" -d "$libs/$n"
+    done < <(grep '^org/clojure/[^ ]* [0-9a-f]\{40\}$' bin/clojure-tests)
+  fi
+fi
+cfg="{:checkout $(q "$root") :crops [$(echo "$crops" | sed 's/[^,]*/"&"/g; s/,/ /g')] :normalize $normalize :groups $groups
+ :jobs ${CORPUS_DEDUP_JOBS:-8} :gomodcache $(q "$gomod") :gcc $(q "$gcc") :goroot $(q "$goroot") :jdk $(q "$jdk")
+ :frozen $(q "$frozen") :clj-suite $(q "$suite") :clj-libs $(q "$libs")${manifest:+ :manifest $(q "$manifest")}}"
+arbace_tool -p "$root/test" -m gate.dedup report "$cfg"

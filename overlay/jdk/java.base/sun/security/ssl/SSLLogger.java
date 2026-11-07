@@ -1,0 +1,703 @@
+/*
+ * Copyright (c) 2018, 2025, Oracle and/or its affiliates. All rights reserved.
+ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+ *
+ * This code is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License version 2 only, as
+ * published by the Free Software Foundation.  Oracle designates this
+ * particular file as subject to the "Classpath" exception as provided
+ * by Oracle in the LICENSE file that accompanied this code.
+ *
+ * This code is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+ * version 2 for more details (a copy is included in the LICENSE file that
+ * accompanied this code).
+ *
+ * You should have received a copy of the GNU General Public License version
+ * 2 along with this work; if not, write to the Free Software Foundation,
+ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+ *
+ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+ * or visit www.oracle.com if you need additional information or have any
+ * questions.
+ */
+
+/*
+ * Arbace (overlay/jdk, doc/classes/JAVA-DEFERRED-TRIAGE.md, F3, "As built: F3 (write-ahead)"):
+ * jrt's sun.security.ssl.SSLLogger, jdk26u's (https://github.com/openjdk/jdk26u at baf63fb,
+ * src/java.base/share/classes/sun/security/ssl/SSLLogger.java) transcribed with what the Go build
+ * lacks taken out: java.lang.System is jrt's hand-written class, which has no nested System.Logger,
+ * System.Logger.Level or System.LoggerFinder (JCS138, JCS155), so the class implements no
+ * System.Logger: its Level is a nested enum of the same constants, names and severities, its log
+ * methods are System.Logger's two abstract ones with the two defaults SSLLogger calls written out,
+ * and when javax.net.debug is empty the messages go to java.util.logging's logger "javax.net.ssl",
+ * as the JDK's System.getLogger gives it with java.logging present (its LoggerFinder over
+ * java.util.logging, the levels mapped as sun.util.logging.PlatformLogger maps them), reached by
+ * reflection (java.base does not read java.logging; jrt has one class registry); the caller is read
+ * from a Throwable's stack trace, not StackWalker (absent until F20). Copyright (c) Oracle and/or
+ * its affiliates, under the GNU General Public License version 2 with the Classpath Exception, as
+ * the notice above says (LICENSE.md).
+ */
+package sun.security.ssl;
+
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.PrintStream;
+import java.lang.reflect.Method;
+import java.nio.ByteBuffer;
+import java.security.cert.Certificate;
+import java.security.cert.Extension;
+import java.security.cert.X509Certificate;
+import java.text.MessageFormat;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
+
+import jdk.internal.vm.annotation.ForceInline;
+import sun.security.util.HexDumpEncoder;
+import sun.security.util.Debug;
+import sun.security.x509.*;
+
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static sun.security.ssl.Utilities.LINE_SEP;
+
+/**
+ * Implementation of SSL logger.
+ *
+ * If the system property "javax.net.debug" is not defined, the debug logging
+ * is turned off.  If the system property "javax.net.debug" is defined as
+ * empty, the debug logger is specified by System.getLogger("javax.net.ssl"),
+ * and applications can customize and configure the logger or use external
+ * logging mechanisms.  If the system property "javax.net.debug" is defined
+ * and non-empty, a private debug logger implemented in this class is used.
+ */
+public final class SSLLogger {
+    /** System.Logger.Level's constants, names and severities (jrt's System has no System.Logger). */
+    enum Level {
+        ALL(Integer.MIN_VALUE),
+        TRACE(400),
+        DEBUG(500),
+        INFO(800),
+        WARNING(900),
+        ERROR(1000),
+        OFF(Integer.MAX_VALUE);
+
+        private final int severity;
+
+        Level(int severity) {
+            this.severity = severity;
+        }
+
+        public final String getName() {
+            return name();
+        }
+
+        public final int getSeverity() {
+            return severity;
+        }
+    }
+
+    // the private debug logger, when javax.net.debug is not empty
+    private static final SSLLogger logger;
+    // java.util.logging's logger "javax.net.ssl" and its log(Level, String), when it is empty
+    private static final Object julLogger;
+    private static final Method julLog;
+    private static final Method julIsLoggable;
+    private static final Object[] julLevels;
+    private static final String property;
+    private static final boolean isOn;
+
+    private final String loggerName;
+    private final boolean useCompactFormat;
+
+
+    static {
+        String p = System.getProperty("javax.net.debug");
+        if (p != null) {
+            if (p.isEmpty()) {
+                property = "";
+                logger = null;
+                Object l = null;
+                Method lg = null, il = null;
+                Object[] lv = null;
+                try {
+                    Class<?> lc = Class.forName("java.util.logging.Logger");
+                    Class<?> vc = Class.forName("java.util.logging.Level");
+                    l = lc.getMethod("getLogger", String.class).invoke(null, "javax.net.ssl");
+                    lg = lc.getMethod("log", vc, String.class);
+                    il = lc.getMethod("isLoggable", vc);
+                    // ALL, TRACE, DEBUG, INFO, WARNING, ERROR, OFF as PlatformLogger maps them
+                    String[] names = {"ALL", "FINER", "FINE", "INFO", "WARNING", "SEVERE", "OFF"};
+                    lv = new Object[names.length];
+                    for (int i = 0; i < names.length; i++) {
+                        lv[i] = vc.getField(names[i]).get(null);
+                    }
+                } catch (ReflectiveOperationException | RuntimeException e) {
+                    l = null;
+                }
+                julLogger = l;
+                julLog = lg;
+                julIsLoggable = il;
+                julLevels = lv;
+            } else {
+                property = p.toLowerCase(Locale.ENGLISH);
+                if (property.equals("help")) {
+                    help();
+                }
+
+                logger = new SSLLogger("javax.net.ssl", p);
+                julLogger = null;
+                julLog = null;
+                julIsLoggable = null;
+                julLevels = null;
+            }
+            isOn = true;
+        } else {
+            property = null;
+            logger = null;
+            julLogger = null;
+            julLog = null;
+            julIsLoggable = null;
+            julLevels = null;
+            isOn = false;
+        }
+    }
+
+    private SSLLogger(String loggerName, String options) {
+        this.loggerName = loggerName;
+        options = options.toLowerCase(Locale.ENGLISH);
+        this.useCompactFormat = !options.contains("expand");
+    }
+
+    /**
+     * Return true if the "javax.net.debug" property contains the
+     * debug check points, or System.Logger is used.
+     */
+    public static boolean isOn(String checkPoints) {
+        if (property == null) {              // debugging is turned off
+            return false;
+        } else if (property.isEmpty()) {     // use System.Logger
+            return true;
+        }                                   // use provider logger
+
+        String[] options = checkPoints.split(",");
+        for (String option : options) {
+            option = option.trim();
+            if (!SSLLogger.hasOption(option)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    @ForceInline
+    public static boolean isOn() {
+        return isOn;
+    }
+
+    private static boolean hasOption(String option) {
+        option = option.toLowerCase(Locale.ENGLISH);
+        if (property.contains("all")) {
+            return true;
+        } else {
+            // remove first occurrence of "sslctx" since
+            // it interferes with search for "ssl"
+            String modified = property.replaceFirst("sslctx", "");
+            if (modified.contains("ssl")) {
+                // don't enable data and plaintext options by default
+                if (!(option.equals("data")
+                        || option.equals("packet")
+                        || option.equals("plaintext"))) {
+                    return true;
+                }
+            }
+        }
+
+        return property.contains(option);
+    }
+
+    public static void severe(String msg, Object... params) {
+        SSLLogger.log0(Level.ERROR, msg, params);
+    }
+
+    public static void warning(String msg, Object... params) {
+        SSLLogger.log0(Level.WARNING, msg, params);
+    }
+
+    public static void info(String msg, Object... params) {
+        SSLLogger.log0(Level.INFO, msg, params);
+    }
+
+    public static void fine(String msg, Object... params) {
+        SSLLogger.log0(Level.DEBUG, msg, params);
+    }
+
+    public static void finer(String msg, Object... params) {
+        SSLLogger.log0(Level.TRACE, msg, params);
+    }
+
+    public static void finest(String msg, Object... params) {
+        SSLLogger.log0(Level.TRACE, msg, params);
+    }
+
+    private static void log0(Level level, String msg, Object... params) {
+        if (logger != null && logger.isLoggable(level)) {
+            // System.Logger's defaults log(level, msg) and log(level, format, params)
+            if (params == null || params.length == 0) {
+                logger.log(level, (ResourceBundle)null, msg, (Object[])null);
+            } else {
+                try {
+                    String formatted =
+                            SSLSimpleFormatter.formatParameters(params);
+                    // use the customized log method for SSLLogger
+                    logger.log(level, (ResourceBundle)null, msg, formatted);
+                } catch (Exception exp) {
+                    // ignore it, just for debugging.
+                }
+            }
+        } else if (julLogger != null) {
+            try {
+                Object jl = julLevels[level.ordinal()];
+                if (!(Boolean)julIsLoggable.invoke(julLogger, jl)) {
+                    return;
+                }
+                if (params == null || params.length == 0) {
+                    julLog.invoke(julLogger, jl, msg);
+                } else {
+                    String formatted =
+                            SSLSimpleFormatter.formatParameters(params);
+                    julLog.invoke(julLogger, jl, msg + ":" + LINE_SEP + formatted);
+                }
+            } catch (Exception exp) {
+                // ignore it, just for debugging.
+            }
+        }
+    }
+
+    private static void help() {
+        System.err.println();
+        System.err.println("help           print the help messages");
+        System.err.println("expand         expand debugging information");
+        System.err.println();
+        System.err.println("all            turn on all debugging");
+        System.err.println("ssl            turn on ssl debugging");
+        System.err.println();
+        System.err.println("The following can be used with ssl:");
+        System.err.println("\trecord       enable per-record tracing");
+        System.err.println("\thandshake    print each handshake message");
+        System.err.println("\tkeygen       print key generation data");
+        System.err.println("\tsession      print session activity");
+        System.err.println("\tdefaultctx   print default SSL initialization");
+        System.err.println("\tsslctx       print SSLContext tracing");
+        System.err.println("\tsessioncache print session cache tracing");
+        System.err.println("\tkeymanager   print key manager tracing");
+        System.err.println("\ttrustmanager print trust manager tracing");
+        System.err.println("\tpluggability print pluggability tracing");
+        System.err.println();
+        System.err.println("\thandshake debugging can be widened with:");
+        System.err.println("\tdata         hex dump of each handshake message");
+        System.err.println("\tverbose      verbose handshake message printing");
+        System.err.println();
+        System.err.println("\trecord debugging can be widened with:");
+        System.err.println("\tplaintext    hex dump of record plaintext");
+        System.err.println("\tpacket       print raw SSL/TLS packets");
+        System.err.println();
+        System.exit(0);
+    }
+
+    static String toString(Object... params) {
+        try {
+            return SSLSimpleFormatter.formatParameters(params);
+        } catch (Exception exp) {
+            return "unexpected exception thrown: " + exp.getMessage();
+        }
+    }
+
+    // Logs a warning message and always returns false. This method
+    // can be used as an OR Predicate to add a log in a stream filter.
+    public static boolean logWarning(String option, String s) {
+        if (SSLLogger.isOn() && SSLLogger.isOn(option)) {
+            SSLLogger.warning(s);
+        }
+        return false;
+    }
+
+    public String getName() {
+        return loggerName;
+    }
+
+    public boolean isLoggable(Level level) {
+        return level != Level.OFF;
+    }
+
+    public void log(Level level,
+                    ResourceBundle rb, String message, Throwable thrwbl) {
+        if (isLoggable(level)) {
+            try {
+                String formatted =
+                        SSLSimpleFormatter.format(this, level, message, thrwbl);
+                System.err.write(formatted.getBytes(UTF_8));
+            } catch (Exception exp) {
+                // ignore it, just for debugging.
+            }
+        }
+    }
+
+    public void log(Level level,
+                    ResourceBundle rb, String message, Object... params) {
+        if (isLoggable(level)) {
+            try {
+                String formatted =
+                        SSLSimpleFormatter.format(this, level, message, params);
+                System.err.write(formatted.getBytes(UTF_8));
+            } catch (Exception exp) {
+                // ignore it, just for debugging.
+            }
+        }
+    }
+
+    private static class SSLSimpleFormatter {
+        private static final String PATTERN = "yyyy-MM-dd kk:mm:ss.SSS z";
+        private static final DateTimeFormatter dateTimeFormat =
+                DateTimeFormatter.ofPattern(PATTERN, Locale.ENGLISH)
+                .withZone(ZoneId.systemDefault());
+
+        private static final MessageFormat basicCertFormat = new MessageFormat(
+                """
+                        "version"            : "v{0}",
+                        "serial number"      : "{1}",
+                        "signature algorithm": "{2}",
+                        "issuer"             : "{3}",
+                        "not before"         : "{4}",
+                        "not  after"         : "{5}",
+                        "subject"            : "{6}",
+                        "subject public key" : "{7}"
+                        """,
+                Locale.ENGLISH);
+
+        private static final MessageFormat extendedCertFormat =
+                new MessageFormat(
+                        """
+                                "version"            : "v{0}",
+                                "serial number"      : "{1}",
+                                "signature algorithm": "{2}",
+                                "issuer"             : "{3}",
+                                "not before"         : "{4}",
+                                "not  after"         : "{5}",
+                                "subject"            : "{6}",
+                                "subject public key" : "{7}",
+                                "extensions"         : [
+                                {8}
+                                ]
+                                """,
+                        Locale.ENGLISH);
+
+        private static final MessageFormat messageFormatNoParas =
+                new MessageFormat(
+                        """
+                                '{'
+                                  "logger"      : "{0}",
+                                  "level"       : "{1}",
+                                  "thread id"   : "{2}",
+                                  "thread name" : "{3}",
+                                  "time"        : "{4}",
+                                  "caller"      : "{5}",
+                                  "message"     : "{6}"
+                                '}'
+                                """,
+                        Locale.ENGLISH);
+
+        private static final MessageFormat messageCompactFormatNoParas =
+                new MessageFormat(
+                        "{0}|{1}|{2}|{3}|{4}|{5}|{6}" + LINE_SEP,
+                        Locale.ENGLISH);
+
+        private static final MessageFormat messageFormatWithParas =
+                new MessageFormat(
+                        """
+                                '{'
+                                  "logger"      : "{0}",
+                                  "level"       : "{1}",
+                                  "thread id"   : "{2}",
+                                  "thread name" : "{3}",
+                                  "time"        : "{4}",
+                                  "caller"      : "{5}",
+                                  "message"     : "{6}",
+                                  "specifics"   : [
+                                {7}
+                                  ]
+                                '}'
+                                """,
+                        Locale.ENGLISH);
+
+        private static final MessageFormat messageCompactFormatWithParas =
+                new MessageFormat(
+                        """
+                                {0}|{1}|{2}|{3}|{4}|{5}|{6} (
+                                {7}
+                                )
+                                """,
+                        Locale.ENGLISH);
+
+        private static final MessageFormat keyObjectFormat = new MessageFormat(
+                """
+                        "{0}" : '{'
+                        {1}'}'
+                        """,
+                Locale.ENGLISH);
+
+        // INFO: [TH: 123450] 2011-08-20 23:12:32.3225 PDT
+        //     log message
+        //     log message
+        //     ...
+        private static String format(SSLLogger logger, Level level,
+                                     String message, Object... parameters) {
+
+            if (parameters == null || parameters.length == 0) {
+                Object[] messageFields = {
+                    logger.loggerName,
+                    level.getName(),
+                    Utilities.toHexString(Thread.currentThread().threadId()),
+                    Thread.currentThread().getName(),
+                    dateTimeFormat.format(Instant.now()),
+                    formatCaller(),
+                    message
+                };
+
+                if (logger.useCompactFormat) {
+                    return messageCompactFormatNoParas.format(messageFields);
+                } else {
+                    return messageFormatNoParas.format(messageFields);
+                }
+            }
+
+            Object[] messageFields = {
+                    logger.loggerName,
+                    level.getName(),
+                    Utilities.toHexString(Thread.currentThread().threadId()),
+                    Thread.currentThread().getName(),
+                    dateTimeFormat.format(Instant.now()),
+                    formatCaller(),
+                    message,
+                    (logger.useCompactFormat ?
+                            formatParameters(parameters) :
+                            Utilities.indent(formatParameters(parameters)))
+            };
+
+            if (logger.useCompactFormat) {
+                return messageCompactFormatWithParas.format(messageFields);
+            } else {
+                return messageFormatWithParas.format(messageFields);
+            }
+        }
+
+        private static String formatCaller() {
+            // the first frame outside SSLLogger and System, from a Throwable's stack trace
+            for (StackTraceElement f : new Throwable().getStackTrace()) {
+                if (f.getClassName().startsWith("sun.security.ssl.SSLLogger") ||
+                        f.getClassName().startsWith("java.lang.System")) {
+                    continue;
+                }
+                return f.getFileName() + ":" + f.getLineNumber();
+            }
+            return "unknown caller";
+        }
+
+        private static String formatParameters(Object... parameters) {
+            StringBuilder builder = new StringBuilder(512);
+            boolean isFirst = true;
+            for (Object parameter : parameters) {
+                if (isFirst) {
+                    isFirst = false;
+                } else {
+                    builder.append("," + LINE_SEP);
+                }
+
+                if (parameter instanceof Throwable) {
+                    builder.append(formatThrowable((Throwable) parameter));
+                } else if (parameter instanceof Certificate) {
+                    builder.append(formatCertificate((Certificate) parameter));
+                } else if (parameter instanceof ByteArrayInputStream) {
+                    builder.append(formatByteArrayInputStream(
+                            (ByteArrayInputStream) parameter));
+                } else if (parameter instanceof ByteBuffer) {
+                    builder.append(formatByteBuffer((ByteBuffer) parameter));
+                } else if (parameter instanceof byte[]) {
+                    builder.append(formatByteArrayInputStream(
+                            new ByteArrayInputStream((byte[]) parameter)));
+                } else if (parameter instanceof Map.Entry) {
+                    @SuppressWarnings("unchecked")
+                    Map.Entry<String, ?> mapParameter =
+                            (Map.Entry<String, ?>) parameter;
+                    builder.append(formatMapEntry(mapParameter));
+                } else {
+                    builder.append(formatObject(parameter));
+                }
+            }
+
+            return builder.toString();
+        }
+
+        // "throwable": {
+        //   ...
+        // }
+        private static String formatThrowable(Throwable throwable) {
+            StringBuilder builder = new StringBuilder(512);
+            ByteArrayOutputStream bytesOut = new ByteArrayOutputStream();
+            try (PrintStream out = new PrintStream(bytesOut)) {
+                throwable.printStackTrace(out);
+                builder.append(Utilities.indent(bytesOut.toString()));
+            }
+            Object[] fields = {
+                    "throwable",
+                    builder.toString()
+            };
+
+            return keyObjectFormat.format(fields);
+        }
+
+        // "certificate": {
+        //   ...
+        // }
+        private static String formatCertificate(Certificate certificate) {
+
+            if (!(certificate instanceof X509Certificate)) {
+                return Utilities.indent(certificate.toString());
+            }
+
+            StringBuilder builder = new StringBuilder(512);
+            try {
+                X509CertImpl x509 =
+                        X509CertImpl.toImpl((X509Certificate) certificate);
+                X509CertInfo certInfo = x509.getInfo();
+                CertificateExtensions certExts = certInfo.getExtensions();
+                if (certExts == null) {
+                    Object[] certFields = {
+                        x509.getVersion(),
+                        Debug.toString(x509.getSerialNumber()),
+                        x509.getSigAlgName(),
+                        x509.getIssuerX500Principal().toString(),
+                        dateTimeFormat.format(x509.getNotBefore().toInstant()),
+                        dateTimeFormat.format(x509.getNotAfter().toInstant()),
+                        x509.getSubjectX500Principal().toString(),
+                        x509.getPublicKey().getAlgorithm()
+                        };
+                    builder.append(Utilities.indent(
+                            basicCertFormat.format(certFields)));
+                } else {
+                    StringBuilder extBuilder = new StringBuilder(512);
+                    boolean isFirst = true;
+                    for (Extension certExt : certExts.getAllExtensions()) {
+                        if (isFirst) {
+                            isFirst = false;
+                        } else {
+                            extBuilder.append("," + LINE_SEP);
+                        }
+                        extBuilder.append("{" + LINE_SEP +
+                            Utilities.indent(certExt.toString()) + LINE_SEP +"}");
+                    }
+                    Object[] certFields = {
+                        x509.getVersion(),
+                        Debug.toString(x509.getSerialNumber()),
+                        x509.getSigAlgName(),
+                        x509.getIssuerX500Principal().toString(),
+                        dateTimeFormat.format(x509.getNotBefore().toInstant()),
+                        dateTimeFormat.format(x509.getNotAfter().toInstant()),
+                        x509.getSubjectX500Principal().toString(),
+                        x509.getPublicKey().getAlgorithm(),
+                        Utilities.indent(extBuilder.toString())
+                        };
+                    builder.append(Utilities.indent(
+                            extendedCertFormat.format(certFields)));
+                }
+            } catch (Exception ce) {
+                // ignore the exception
+            }
+
+            Object[] fields = {
+                    "certificate",
+                    builder.toString()
+            };
+
+            return Utilities.indent(keyObjectFormat.format(fields));
+        }
+
+        private static String formatByteArrayInputStream(
+                ByteArrayInputStream bytes) {
+            StringBuilder builder = new StringBuilder(512);
+
+            try (ByteArrayOutputStream bytesOut = new ByteArrayOutputStream()) {
+                HexDumpEncoder hexEncoder = new HexDumpEncoder();
+                hexEncoder.encodeBuffer(bytes, bytesOut);
+
+                builder.append(Utilities.indent(bytesOut.toString()));
+            } catch (IOException ioe) {
+                // ignore it, just for debugging.
+            }
+
+            return builder.toString();
+        }
+
+        private static String formatByteBuffer(ByteBuffer byteBuffer) {
+            StringBuilder builder = new StringBuilder(512);
+            try (ByteArrayOutputStream bytesOut = new ByteArrayOutputStream()) {
+                HexDumpEncoder hexEncoder = new HexDumpEncoder();
+                hexEncoder.encodeBuffer(byteBuffer.duplicate(), bytesOut);
+                builder.append(Utilities.indent(bytesOut.toString()));
+            } catch (IOException ioe) {
+                // ignore it, just for debugging.
+            }
+
+            return builder.toString();
+        }
+
+        private static String formatMapEntry(Map.Entry<String, ?> entry) {
+            String key = entry.getKey();
+            Object value = entry.getValue();
+
+            String formatted;
+            if (value instanceof String) {
+                // "key": "value"
+                formatted = "\"" + key + "\": \"" + value + "\"";
+            } else if (value instanceof String[] strings) {
+                // "key": [ "string a",
+                //          "string b",
+                //          "string c"
+                //        ]
+                StringBuilder builder = new StringBuilder(512);
+                builder.append("\"" + key + "\": [" + LINE_SEP);
+                int len = strings.length;
+                for (int i = 0; i < len; i++) {
+                    String string = strings[i];
+                    builder.append("      \"" + string + "\"");
+                    if (i != len - 1) {
+                        builder.append(",");
+                    }
+                    builder.append(LINE_SEP);
+                }
+                builder.append("      ]");
+
+                formatted = builder.toString();
+            } else if (value instanceof byte[]) {
+                formatted = "\"" + key + "\": \"" +
+                        Utilities.toHexString((byte[]) value) + "\"";
+            } else if (value instanceof Byte) {
+                formatted = "\"" + key + "\": \"" +
+                        HexFormat.of().toHexDigits((byte) value) + "\"";
+            } else {
+                formatted = "\"" + key + "\": " +
+                        "\"" + value.toString() + "\"";
+            }
+
+            return Utilities.indent(formatted);
+        }
+
+        private static String formatObject(Object obj) {
+            return obj.toString();
+        }
+    }
+}

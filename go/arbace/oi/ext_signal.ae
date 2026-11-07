@@ -1,0 +1,448 @@
+(in-ns 'go.arbace.oi) (go/file "ext_signal.go" :imports [
+    [os "os"]
+    [signal "os/signal"]
+    [filepath "path/filepath"]
+    [strings "strings"]
+    [sync "sync"]
+    [atomic "sync/atomic"]
+    [syscall "syscall"]
+    [time "time"]
+    [unsafe "unsafe"]])
+
+;; Signals and processes (doc/ocaml/DEFERRED-TRIAGE.md, §3 fix 7, OT18 (a), "As built: OT9's fixes 6-8"): the signals of
+;; runtime/signals.c and otherlibs/unix's signals.c, kill.c, spawn.c, wait.c, itimer.c and select.c (OCaml 5.5.0, LGPL-2.1
+;; with the linking exception; read for their behaviour, written anew over Go's os/signal and syscall). No fork (OT1 (a)).
+;;
+;; A signal the program handles (Sys.signal's Signal_handle) or blocks is caught by os/signal, recorded as pending
+;; (sigPending, a bit a signal) and delivered at a safe point of a thread whose mask (Thread.sigmask, Unix.sigprocmask:
+;; one mask a thread, a new thread inheriting its creator's) does not block it: at the calls' and loops' ticks (apply.go)
+;; and at the end of the externals that unblock or send a signal. A thread blocked in a read, a write, a select, a sleep
+;; or a wait polls its descriptor and its own wake pipe, which the signal's arrival writes: woken with a signal it may
+;; take, it runs the handlers and the call ends with EINTR as C's would (a channel's read or write retries, as io.c's).
+;; A pending signal whose action is the default one, once unblocked, is raised again with the default action.
+
+(go/type pollFd "pollFd is struct pollfd.\n" (struct
+    ^int32 fd
+    ^int16 events
+    ^int16 revents))
+
+(go/const
+  [pollIn 0x1]
+  [pollPri 0x2]
+  [pollOut 0x4]
+  [pollErr 0x8]
+  [pollHup 0x10]
+  [pollNval 0x20])
+
+(go/var
+  [^atomic/Uint64 sigPending]
+  [^atomic/Uint64 sigWatched]
+  [^{:tag (array 64 atomic/Uint64)} sigArrived]
+  [^sync/Mutex sigMu]
+  [^{:tag (chan os/Signal)} sigCh]
+  [sigWaiters (make (map (* Thread) bool))])
+
+(go/func sigBit ^uint64 [^int n] (<< (conv uint64 1) (conv uint n)))
+
+(go/func sigWatch "sigWatch has os/signal catch signal n (a handler is installed, or a thread blocks it).\n" [^int n]
+  (when (or (<= n 0) (>= n 64) (== n (conv int syscall/SIGKILL)) (== n (conv int syscall/SIGSTOP)))
+    (return))
+  (.Lock sigMu)
+  (defer (.Unlock sigMu))
+  (when (== sigCh nil)
+    (set! sigCh (make (chan os/Signal) 64))
+    (go (sigDispatch sigCh)))
+  (when (== (bit-and (.Load sigWatched) (sigBit n)) 0)
+    (signal/Notify sigCh (conv syscall/Signal n))
+    (.Or sigWatched (sigBit n))))
+
+(go/func sigDispatch "sigDispatch records each signal os/signal catches and wakes the threads blocked in a call.\n" [^{:tag (chan os/Signal)} ch]
+  (range [s ch]
+    (when [(values sg ok) (assert syscall/Signal s)] ok
+      (when (< (conv int sg) 64)
+        (.Add (aget sigArrived (conv int sg)) 1))
+      (.Or sigPending (sigBit (conv int sg)))
+      (.Lock sigMu)
+      (range [t _ sigWaiters]
+        (when (> (.-wakeW t) 0)
+          (syscall/Write (.-wakeW t) (lit (slice byte) 0))))
+      (.Unlock sigMu))))
+
+(go/func sigSetAction "sigSetAction follows Sys.signal's new action for signal n: 0 the default, 1 ignored, 2 a handler.\n" [^int n ^int act]
+  (when (or (<= n 0) (>= n 64))
+    (return))
+  (switch act
+    (case [2] (sigWatch n))
+    (case [1]
+      (.Lock sigMu)
+      (signal/Ignore (conv syscall/Signal n))
+      (.And sigWatched (bit-not (sigBit n)))
+      (.Unlock sigMu))
+    (default
+      (.Lock sigMu)
+      (when (!= (bit-and (.Load sigWatched) (sigBit n)) 0)
+        (signal/Reset (conv syscall/Signal n))
+        (.And sigWatched (bit-not (sigBit n))))
+      (.Unlock sigMu))))
+
+(go/method deliverable "deliverable is the pending signals th's mask lets it take.\n" ^uint64 [^{:tag (* Thread)} th]
+  (bit-and (.Load sigPending) (bit-not (.-sigmask th))))
+
+(go/func sigDefault "sigDefault raises signal n again with its default action (a pending signal no handler takes).\n" [^int n]
+  (when (== n (conv int syscall/SIGCHLD)) (return))
+  (when (== n (conv int syscall/SIGWINCH)) (return))
+  (when (== n (conv int syscall/SIGURG)) (return))
+  (when (== n (conv int syscall/SIGCONT)) (return))
+  (flushStdQuiet)
+  (.Lock sigMu)
+  (signal/Reset (conv syscall/Signal n))
+  (.And sigWatched (bit-not (sigBit n)))
+  (.Unlock sigMu)
+  (syscall/Kill (os/Getpid) (conv syscall/Signal n))
+  (time/Sleep (* 50 time/Millisecond)))
+
+(go/method processSignals "processSignals runs the handlers of the pending signals th may take (caml_process_pending_signals).\n" [^{:tag (* Thread)} th]
+  (when (or (== th nil) (.-insig th))
+    (return))
+  (while true
+    (let [p (.deliverable th)]
+      (when (== p 0)
+        (return))
+      (let [n 1]
+        (while (== (bit-and p (sigBit n)) 0)
+          (inc! n))
+        (let [old (.Load sigPending)]
+          (when (not (.CompareAndSwap sigPending old (bit-and old (bit-not (sigBit n)))))
+            (continue)))
+        (let [st (addr (aget signalStates n))]
+          (switch (.-act st)
+            (case [2]
+              (let [h (.-handler st)]
+                ((fn []
+                  (set! (.-insig th) true)
+                  (defer ((fn [] (set! (.-insig th) false))))
+                  (.Apply th h (revConvertSignal n))))))
+            (case [1])
+            (default (sigDefault n))))))))
+
+(go/method wakePipe "wakePipe makes th's wake pipe (non-blocking, close-on-exec) at its first blocking call with signals in play.\n" [^{:tag (* Thread)} th]
+  (when (> (.-wakeW th) 0)
+    (return))
+  (let [p (make (slice int) 2)]
+    (when [err (syscall/Pipe2 p (bit-or syscall/O_NONBLOCK syscall/O_CLOEXEC))] (== err nil)
+      (set! (.-wakeR th) (aget p 0))
+      (set! (.-wakeW th) (aget p 1)))))
+
+(go/func ppoll "ppoll is ppoll(2) over fds, a timeout in seconds (negative: none); its count or errno.\n" [^{:tag (slice pollFd)} fds ^float64 timeout] :results [int syscall/Errno]
+  (let [^syscall/Timespec ts (zero syscall/Timespec)
+        tp (conv uintptr 0)
+        fp (conv uintptr 0)]
+    (when (>= timeout 0)
+      (set! ts (syscall/NsecToTimespec (conv int64 (* timeout 1e9))))
+      (set! tp (conv uintptr (unsafe/Pointer (addr ts)))))
+    (when (> (len fds) 0)
+      (set! fp (conv uintptr (unsafe/Pointer (addr (aget fds 0))))))
+    (let [(values r _ e) (syscall/Syscall6 syscall/SYS_PPOLL fp (conv uintptr (len fds)) tp 0 0 0)]
+      (return (conv int r) e))))
+
+(go/func ppollRetry "ppollRetry is ppoll restarted after the interruptions of Go's own signals (its preemption), the timeout kept.\n" [^{:tag (slice pollFd)} fds ^float64 timeout] :results [int syscall/Errno]
+  (let [deadline (.Add (time/Now) (conv time/Duration (* timeout 1e9)))]
+    (while true
+      (let [(values n e) (ppoll fds timeout)]
+        (when (!= e syscall/EINTR)
+          (return n e))
+        (when (>= timeout 0)
+          (set! timeout (.Seconds (time/Until deadline)))
+          (when (< timeout 0)
+            (set! timeout 0)))))))
+
+(go/func sigInPlay "sigInPlay is whether a signal is caught: then the blocking calls poll the threads' wake pipes.\n" ^bool []
+  (!= (.Load sigWatched) 0))
+
+(go/func waitFds "waitFds waits outside the interpreter's lock until one of fds is ready, the timeout passes (seconds, negative: none) or a\nsignal th may take arrives (interrupted: true). The wake pipe is polled only when signals are in play.\n"
+  [^{:tag (* Thread)} th ^{:tag (slice pollFd)} fds ^float64 timeout] :results [^int n ^bool intr ^syscall/Errno e]
+  (when (or (== th nil) (not (sigInPlay)))
+    (Blocking (fn [] (set! (values n e) (ppollRetry fds timeout))))
+    (return n false e))
+  (.wakePipe th)
+  (when (== (.-wakeW th) 0)
+    (Blocking (fn [] (set! (values n e) (ppollRetry fds timeout))))
+    (return n false e))
+  (let [all (append (lit (slice pollFd) (lit pollFd :fd (conv int32 (.-wakeR th)) :events pollIn)) (spread fds))
+        deadline (.Add (time/Now) (conv time/Duration (* timeout 1e9)))]
+    (.Lock sigMu)
+    (aset sigWaiters th true)
+    (.Unlock sigMu)
+    (defer ((fn []
+      (.Lock sigMu)
+      (delete sigWaiters th)
+      (.Unlock sigMu))))
+    (while true
+      (when (!= (.deliverable th) 0)
+        (return 0 true 0))
+      (let [left timeout]
+        (when (>= timeout 0)
+          (set! left (.Seconds (time/Until deadline)))
+          (when (< left 0)
+            (set! left 0)))
+        (Blocking (fn [] (set! (values n e) (ppoll all left))))
+        (let [buf (make (slice byte) 64)]
+          (while true
+            (let [(values k _) (syscall/Read (.-wakeR th) buf)]
+              (when (<= k 0)
+                (break)))))
+        (when (== e syscall/EINTR)
+          (continue))
+        (when (!= e 0)
+          (return 0 false e))
+        (when (!= (.deliverable th) 0)
+          (return 0 true 0))
+        (when (!= (.-revents (aget all 0)) 0)
+          (set! (.-revents (aget all 0)) 0)
+          (set! n (- n 1)))
+        (when (or (> n 0) (and (>= timeout 0) (<= left 0)))
+          (copy fds (subslice all 1))
+          (return n false 0))))))
+
+(go/func waitFd "waitFd waits until fd is ready for events or a signal th may take arrives: true when interrupted.\n" ^bool [^{:tag (* Thread)} th ^int fd ^int16 events]
+  (when (or (== th nil) (not (sigInPlay)))
+    (return false))
+  (let [fds (lit (slice pollFd) (lit pollFd :fd (conv int32 fd) :events events))
+        (values _ intr _) (waitFds th fds -1)]
+    intr))
+
+(go/func interruptedCall "interruptedCall runs th's handlers after a call a signal interrupted and raises Unix_error (EINTR, fn, \"\").\n" [^{:tag (* Thread)} th ^string fn]
+  (.processSignals th)
+  (RaiseUnixError syscall/EINTR fn ""))
+
+(go/func sigList "sigList is a mask as the list of OCaml's signal numbers.\n" ^Value [^uint64 m]
+  (let [^{:tag (slice Value)} out nil]
+    (for [n 1] (< n 64) (inc! n)
+      (when (!= (bit-and m (sigBit n)) 0)
+        (set! out (append out (revConvertSignal n)))))
+    (List (spread out))))
+
+(go/func sigMaskOf "sigMaskOf is a list of OCaml's signal numbers as a mask.\n" ^uint64 [^Value l]
+  (let [m (conv uint64 0)]
+    (range [_ s (listInts l)]
+      (let [n (convertSignal s)]
+        (when (or (<= n 0) (>= n 64))
+          (InvalidArg "Unix.sigprocmask: invalid signal"))
+        (set! m (bit-or m (sigBit n)))))
+    m))
+
+(go/func sigprocmask "sigprocmask changes th's mask: 0 SIG_SETMASK, 1 SIG_BLOCK, 2 SIG_UNBLOCK; it returns the old one.\n" ^uint64 [^{:tag (* Thread)} th ^int how ^uint64 m]
+  (let [old (.-sigmask th)]
+    (switch how
+      (case [0] (set! (.-sigmask th) m))
+      (case [1] (set! (.-sigmask th) (bit-or old m)))
+      (default (set! (.-sigmask th) (bit-and old (bit-not m)))))
+    ;; a blocked signal is caught, so that it waits as pending rather than taking its default action
+    (for [n 1] (< n 64) (inc! n)
+      (when (!= (bit-and (.-sigmask th) (sigBit n)) 0)
+        (sigWatch n)))
+    old))
+
+(go/func waitStatus "waitStatus is a wait status as Unix.process_status.\n" ^Value [^syscall/WaitStatus ws]
+  (switch
+    (case [(.Exited ws)] (return (NewBlock 0 (.ExitStatus ws))))
+    (case [(.Signaled ws)] (return (NewBlock 1 (revConvertSignal (conv int (.Signal ws))))))
+    (case [(.Stopped ws)] (return (NewBlock 2 (revConvertSignal (conv int (.StopSignal ws)))))))
+  (NewBlock 0 0))
+
+(go/func lookPath "lookPath is cmd found in PATH as execvp finds it (a name holding a slash is itself).\n" ^string [^string cmd ^{:tag (slice string)} env]
+  (when (strings/Contains cmd "/")
+    (return cmd))
+  (let [path (os/Getenv "PATH")]
+    (range [_ kv env]
+      (when (strings/HasPrefix kv "PATH=")
+        (set! path (subslice kv 5))))
+    (when (== path "")
+      (set! path "/bin:/usr/bin"))
+    (range [_ dir (filepath/SplitList path)]
+      (when (== dir "")
+        (set! dir "."))
+      (let [p (filepath/Join dir cmd)
+            ^syscall/Stat_t st (zero syscall/Stat_t)]
+        (when (and (== (syscall/Stat p (addr st)) nil) (== (bit-and (.-Mode st) syscall/S_IFMT) syscall/S_IFREG)
+                   (== (syscall/Access p 1) nil))
+          (return p))))
+    cmd))
+
+(go/func strArray "strArray is an OCaml string array as Go strings.\n" ^{:tag (slice string)} [^Value v]
+  (let [^{:tag (slice string)} out nil]
+    (when [(values b ok) (assert (* Block) v)] ok
+      (range [_ x (.-F b)]
+        (set! out (append out (GoString x)))))
+    out))
+
+(go/type itimerval "itimerval is struct itimerval.\n" (struct
+    ^syscall/Timeval interval
+    ^syscall/Timeval value))
+
+(go/func tvSeconds ^float64 [^syscall/Timeval t] (+ (conv float64 (.-Sec t)) (/ (conv float64 (.-Usec t)) 1e6)))
+
+(go/func secondsTv ^syscall/Timeval [^float64 f] (syscall/NsecToTimeval (conv int64 (* f 1e9))))
+
+(go/func setitimer "setitimer is setitimer(2): which's new interval and value (seconds); the old ones.\n" [^int which ^float64 interval ^float64 value] :results [float64 float64]
+  (let [nv (lit itimerval :interval (secondsTv interval) :value (secondsTv value))
+        ^itimerval ov (zero itimerval)]
+    (when (== which 0)
+      (when (or (> value 0) (> interval 0))
+        (sigWatchIfHandled (conv int syscall/SIGALRM))))
+    (let [(values _ _ e) (syscall/Syscall syscall/SYS_SETITIMER (conv uintptr which) (conv uintptr (unsafe/Pointer (addr nv))) (conv uintptr (unsafe/Pointer (addr ov))))]
+      (when (!= e 0)
+        (RaiseUnixError e "setitimer" "")))
+    (return (tvSeconds (.-interval ov)) (tvSeconds (.-value ov)))))
+
+(go/func sigWatchIfHandled "sigWatchIfHandled watches signal n when the program handles it (a timer about to fire).\n" [^int n]
+  (when (== (.-act (aget signalStates n)) 2)
+    (sigWatch n)))
+
+(go/func init []
+  (let [r RegisterExt]
+    (r "caml_unix_kill" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+      (let [pid (AsInt (aget a 0))
+            n (convertSignal (AsInt (aget a 1)))
+            self (or (== pid 0) (== pid (os/Getpid)))
+            seen (conv uint64 0)]
+        (when (and (> n 0) (< n 64))
+          (set! seen (.Load (aget sigArrived n))))
+        (when [err (syscall/Kill pid (conv syscall/Signal n))] (!= err nil)
+          (RaiseUnixError (errnoOf err) "kill" ""))
+        ;; a signal sent to the process itself is delivered before kill returns, as the kernel does to the caller
+        (when (and self (> n 0) (< n 64) (!= (bit-and (.Load sigWatched) (sigBit n)) 0))
+          (let [until (.Add (time/Now) time/Second)]
+            (while (and (== (.Load (aget sigArrived n)) seen) (.Before (time/Now) until))
+              (Blocking (fn [] (time/Sleep (* 100 time/Microsecond)))))))
+        (.processSignals th)
+        Unit)))
+    (r "caml_unix_sigprocmask" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+      (let [old (sigprocmask th (AsInt (aget a 0)) (sigMaskOf (aget a 1)))]
+        (.processSignals th)
+        (sigList old))))
+    (r "caml_unix_sigpending" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+      (sigList (bit-and (.Load sigPending) (.-sigmask th)))))
+    (r "caml_unix_sigsuspend" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+      (let [old (.-sigmask th)]
+        (set! (.-sigmask th) (sigMaskOf (aget a 0)))
+        (for [n 1] (< n 64) (inc! n)
+          (when (!= (bit-and (.-sigmask th) (sigBit n)) 0)
+            (sigWatch n)))
+        (while (== (.deliverable th) 0)
+          (waitFds th nil 0.05))
+        ((fn []
+          (defer ((fn [] (set! (.-sigmask th) old))))
+          (.processSignals th)))
+        (RaiseUnixError syscall/EINTR "sigsuspend" "")
+        Unit)))
+    (r "caml_unix_sigwait" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+      (let [set (sigMaskOf (aget a 0))]
+        (for [n 1] (< n 64) (inc! n)
+          (when (!= (bit-and set (sigBit n)) 0)
+            (sigWatch n)))
+        (while true
+          (let [p (bit-and (.Load sigPending) set)]
+            (when (!= p 0)
+              (let [n 1]
+                (while (== (bit-and p (sigBit n)) 0)
+                  (inc! n))
+                (let [old (.Load sigPending)]
+                  (when (.CompareAndSwap sigPending old (bit-and old (bit-not (sigBit n))))
+                    (return (revConvertSignal n))))))
+            (Blocking (fn [] (time/Sleep (* 200 time/Microsecond)))))))))
+    (r "caml_unix_alarm" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+      (let [(values _ old) (setitimer 0 0 (conv float64 (AsInt (aget a 0))))
+            s (conv int old)]
+        (when (> (- old (conv float64 s)) 0)
+          (inc! s))
+        s)))
+    (r "caml_unix_setitimer" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+      (let [f (.-F (AsBlock (aget a 1)))
+            (values i v) (setitimer (AsInt (aget a 0)) (AsFloat (aget f 0)) (AsFloat (aget f 1)))]
+        (addr (lit FloatArray :F (lit (slice float64) i v))))))
+    (r "caml_unix_getitimer" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+      (let [^itimerval ov (zero itimerval)
+            (values _ _ e) (syscall/Syscall syscall/SYS_GETITIMER (conv uintptr (AsInt (aget a 0))) (conv uintptr (unsafe/Pointer (addr ov))) 0)]
+        (when (!= e 0)
+          (RaiseUnixError e "getitimer" ""))
+        (addr (lit FloatArray :F (lit (slice float64) (tvSeconds (.-interval ov)) (tvSeconds (.-value ov))))))))
+    ;; spawn.c: caml_unix_spawn (cmd, args, env option, usepath, redirections [| stdin; stdout; stderr |])
+    (r "caml_unix_spawn" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+      (let [cmd (GoString (aget a 0))
+            args (strArray (aget a 1))
+            env (os/Environ)
+            red (.-F (AsBlock (aget a 4)))]
+        (when [(values b ok) (assert (* Block) (aget a 2))] ok
+          (set! env (strArray (aget (.-F b) 0))))
+        (let [path cmd]
+          (when (Truth (aget a 3))
+            (set! path (lookPath cmd env)))
+          (let [attr (addr (lit syscall/ProcAttr :Env env
+                                :Files (lit (slice uintptr) (conv uintptr (AsInt (aget red 0))) (conv uintptr (AsInt (aget red 1))) (conv uintptr (AsInt (aget red 2))))))
+                pid 0 ^error err nil]
+            (Blocking (fn [] (set! (values pid err) (syscall/ForkExec path args attr))))
+            (when (!= err nil)
+              (RaiseUnixError (errnoOf err) "create_process" cmd))
+            pid)))))
+    (r "caml_unix_waitpid" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+      (let [fl 0
+            pid (AsInt (aget a 1))]
+        (range [_ f (listInts (aget a 0))]
+          (if (== f 0)
+            (set! fl (bit-or fl syscall/WNOHANG))
+            (set! fl (bit-or fl syscall/WUNTRACED))))
+        (let [^syscall/WaitStatus ws (zero syscall/WaitStatus)
+              r 0 ^error err nil]
+          (Blocking (fn [] (set! (values r err) (syscall/Wait4 pid (addr ws) fl nil))))
+          (when (!= err nil)
+            (RaiseUnixError (errnoOf err) "waitpid" ""))
+          (.processSignals th)
+          (when (== r 0)
+            (return (Tuple 0 (NewBlock 0 0))))
+          (Tuple r (waitStatus ws))))))
+    (r "caml_unix_wait" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+      (let [^syscall/WaitStatus ws (zero syscall/WaitStatus)
+            r 0 ^error err nil]
+        (Blocking (fn [] (set! (values r err) (syscall/Wait4 -1 (addr ws) 0 nil))))
+        (when (!= err nil)
+          (RaiseUnixError (errnoOf err) "wait" ""))
+        (Tuple r (waitStatus ws)))))
+    (r "caml_unix_execv" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+      (let [p (GoString (aget a 0))]
+        (flushStdQuiet)
+        (RaiseUnixError (errnoOf (syscall/Exec p (strArray (aget a 1)) (os/Environ))) "execv" p)
+        Unit)))
+    (r "caml_unix_execve" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+      (let [p (GoString (aget a 0))]
+        (flushStdQuiet)
+        (RaiseUnixError (errnoOf (syscall/Exec p (strArray (aget a 1)) (strArray (aget a 2)))) "execve" p)
+        Unit)))
+    (r "caml_unix_execvp" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+      (let [p (GoString (aget a 0))
+            env (os/Environ)]
+        (flushStdQuiet)
+        (RaiseUnixError (errnoOf (syscall/Exec (lookPath p env) (strArray (aget a 1)) env)) "execvp" p)
+        Unit)))
+    (r "caml_unix_execvpe" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+      (let [p (GoString (aget a 0))
+            env (strArray (aget a 2))]
+        (flushStdQuiet)
+        (RaiseUnixError (errnoOf (syscall/Exec (lookPath p env) (strArray (aget a 1)) env)) "execvp" p)
+        Unit)))
+    (r "caml_unix_setsid" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+      (let [(values pid err) (syscall/Setsid)]
+        (when (!= err nil)
+          (RaiseUnixError (errnoOf err) "setsid" ""))
+        pid)))
+    (r "caml_unix_nice" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+      (let [inc (AsInt (aget a 0))
+            (values cur err) (syscall/Getpriority syscall/PRIO_PROCESS 0)]
+        (when (!= err nil)
+          (RaiseUnixError (errnoOf err) "nice" ""))
+        ;; the raw getpriority returns 20 - nice
+        (let [n (+ (- 20 cur) inc)]
+          (when (!= inc 0)
+            (when [err (syscall/Setpriority syscall/PRIO_PROCESS 0 n)] (!= err nil)
+              (RaiseUnixError (errnoOf err) "nice" "")))
+          n))))))

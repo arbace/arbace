@@ -1,0 +1,269 @@
+(in-ns 'go.arbace.oi) (go/file "ext_str_re.go" :imports [])
+
+;; The Str library's matcher (DEFERRED-TRIAGE §3 item 10): otherlibs/str/strstubs.c of OCaml 5.5.0 (the release tarball;
+;; LGPL-2.1 with the OCaml linking exception), its backtracking interpreter re_match of the programs otherlibs/str/str.ml
+;; compiles, ported rule for rule: the opcodes, the backtrack stack of program points and undo records, the progress
+;; registers, the groups, and re_string_match, re_partial_match, re_search_forward, re_search_backward and
+;; re_replacement_text. A compiled regexp is str.ml's record { prog : int array; cpool : string array; normtable : string;
+;; numgroups : int; numregisters : int; startchars : int }. Positions are indexes into the subject (-1 where C has NULL).
+
+(go/const
+  [reChar 0]
+  [reCharNorm 1]
+  [reString 2]
+  [reStringNorm 3]
+  [reCharClass 4]
+  [reBol 5]
+  [reEol 6]
+  [reWordBoundary 7]
+  [reBegGroup 8]
+  [reEndGroup 9]
+  [reRefGroup 10]
+  [reAccept 11]
+  [reSimpleOpt 12]
+  [reSimpleStar 13]
+  [reSimplePlus 14]
+  [reGoto 15]
+  [rePushBack 16]
+  [reSetMark 17]
+  [reCheckProgress 18])
+
+(go/var ^{:doc "reWordLetters is strstubs.c's re_word_letters: letters, digits, underscore and Latin-1's accented letters.\n"}
+  reWordLetters (lit (slice byte)
+    0x00 0x00 0x00 0x00 0x00 0x00 0xFF 0x03 0xFE 0xFF 0xFF 0x87 0xFE 0xFF 0xFF 0x07
+    0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0xFF 0xFF 0x7F 0xFF 0xFF 0xFF 0x7F 0xFF))
+
+(go/func reIsWordLetter ^bool [^byte c]
+  (== (bit-and (>> (aget reWordLetters (>> c 3)) (bit-and c 7)) 1) 1))
+
+(go/func reInSet "reInSet is In_bitset: bit c of the 32-byte set s.\n" ^bool [^{:tag (slice byte)} s ^byte c]
+  (== (bit-and (>> (aget s (>> c 3)) (bit-and c 7)) 1) 1))
+
+(go/func reCString "reCString is the bytes of a constant pool string up to its first NUL, as C's String_val reads it.\n"
+  ^{:tag (slice byte)} [^Value v]
+  (let [b (.-B (AsBytes v))]
+    (range [i c b]
+      (when (== c 0)
+        (return (subslice b _ i))))
+    b))
+
+(go/func reMatch "reMatch is re_match: the groups' positions (an int array) on success, nil on failure.\n"
+  ^Value [^{:tag (* Block)} re ^{:tag (slice byte)} s ^int txt ^bool partial]
+  (let [prog (.-F (AsBlock (aget (.-F re) 0)))
+        cpool (.-F (AsBlock (aget (.-F re) 1)))
+        norm (.-B (AsBytes (aget (.-F re) 2)))
+        numgroups (AsInt (aget (.-F re) 3))
+        numregs (AsInt (aget (.-F re) 4))
+        end (len s)
+        groups (make (slice int) (* 2 (max numgroups 1)))
+        regs (make (slice int) (max numregs 1))
+        ;; the backtrack stack: kind 0 a program point (pc, txt), 1 a group bound's undo (slot, old), 2 a register's (reg, old)
+        ^{:tag (slice int)} sk nil
+        ^{:tag (slice int)} sa nil
+        ^{:tag (slice int)} sb nil
+        pc 0]
+    (range [i groups] (aset groups i -1))
+    (range [i regs] (aset regs i -1))
+    (aset groups 0 txt)
+    (while true
+      (let [instr (AsInt (aget prog pc))
+            arg (>> instr 8)
+            fail false
+            prefix false
+            accept false]
+        (inc! pc)
+        (switch (bit-and instr 0xFF)
+          (case [reChar]
+            (cond (== txt end) (set! prefix true)
+                  (!= (conv int (aget s txt)) arg) (set! fail true)
+                  :else (inc! txt)))
+          (case [reCharNorm]
+            (cond (== txt end) (set! prefix true)
+                  (!= (conv int (aget norm (aget s txt))) arg) (set! fail true)
+                  :else (inc! txt)))
+          (case [reString reStringNorm]
+            (let [cs (reCString (aget cpool arg))
+                  nm (== (bit-and instr 0xFF) reStringNorm)]
+              (range [_ c cs]
+                (when (== txt end)
+                  (set! prefix true)
+                  (break))
+                (let [t (aget s txt)]
+                  (when nm (set! t (aget norm t)))
+                  (when (!= c t)
+                    (set! fail true)
+                    (break)))
+                (inc! txt))))
+          (case [reCharClass]
+            (cond (== txt end) (set! prefix true)
+                  (not (reInSet (.-B (AsBytes (aget cpool arg))) (aget s txt))) (set! fail true)
+                  :else (inc! txt)))
+          (case [reBol]
+            (when (and (> txt 0) (!= (aget s (- txt 1)) 10))
+              (set! fail true)))
+          (case [reEol]
+            (when (and (< txt end) (!= (aget s txt) 10))
+              (set! fail true)))
+          (case [reWordBoundary]
+            (cond (== txt 0) (cond (== txt end) (set! prefix true)
+                                   (not (reIsWordLetter (aget s 0))) (set! fail true))
+                  (== txt end) (when (not (reIsWordLetter (aget s (- txt 1)))) (set! fail true))
+                  :else (when (== (reIsWordLetter (aget s (- txt 1))) (reIsWordLetter (aget s txt))) (set! fail true))))
+          (case [reBegGroup reEndGroup]
+            (let [slot (* 2 arg)]
+              (when (== (bit-and instr 0xFF) reEndGroup) (inc! slot))
+              (set! sk (append sk 1))
+              (set! sa (append sa slot))
+              (set! sb (append sb (aget groups slot)))
+              (aset groups slot txt)))
+          (case [reRefGroup]
+            (let [gs (aget groups (* 2 arg))
+                  ge (aget groups (+ (* 2 arg) 1))]
+              (if (or (== gs -1) (== ge -1))
+                (set! fail true)
+                (for [k gs] (< k ge) (inc! k)
+                  (when (== txt end)
+                    (set! prefix true)
+                    (break))
+                  (when (!= (aget s k) (aget s txt))
+                    (set! fail true)
+                    (break))
+                  (inc! txt)))))
+          (case [reAccept] (set! accept true))
+          (case [reSimpleOpt]
+            (let [set (.-B (AsBytes (aget cpool arg)))]
+              (when (and (< txt end) (reInSet set (aget s txt)))
+                (inc! txt))))
+          (case [reSimpleStar]
+            (let [set (.-B (AsBytes (aget cpool arg)))]
+              (while (and (< txt end) (reInSet set (aget s txt)))
+                (inc! txt))))
+          (case [reSimplePlus]
+            (let [set (.-B (AsBytes (aget cpool arg)))]
+              (cond (== txt end) (set! prefix true)
+                    (not (reInSet set (aget s txt))) (set! fail true)
+                    :else (do (inc! txt)
+                              (while (and (< txt end) (reInSet set (aget s txt)))
+                                (inc! txt))))))
+          (case [reGoto] (set! pc (+ pc arg)))
+          (case [rePushBack]
+            (set! sk (append sk 0))
+            (set! sa (append sa (+ pc arg)))
+            (set! sb (append sb txt)))
+          (case [reSetMark]
+            (set! sk (append sk 2))
+            (set! sa (append sa arg))
+            (set! sb (append sb (aget regs arg)))
+            (aset regs arg txt))
+          (case [reCheckProgress]
+            (when (== (aget regs arg) txt)
+              (set! fail true)))
+          (default (panic "impossible case in re_match")))
+        ;; prefix_match: the end of the text met; a partial match accepts there
+        (when prefix
+          (if partial (set! accept true) (set! fail true)))
+        (when accept
+          (aset groups 1 txt)
+          (let [res (make (slice Value) (* 2 numgroups))]
+            (for [i 0] (< i numgroups) (inc! i)
+              (let [a (aget groups (* 2 i)) b (aget groups (+ (* 2 i) 1))]
+                (if (or (== a -1) (== b -1))
+                  (do (aset res (* 2 i) -1) (aset res (+ (* 2 i) 1) -1))
+                  (do (aset res (* 2 i) a) (aset res (+ (* 2 i) 1) b)))))
+            (return (addr (lit Block :Tag 0 :F res)))))
+        ;; backtrack: to the most recent program point, the undo records on the way applied
+        (when fail
+          (while true
+            (let [n (len sk)]
+              (when (== n 0)
+                (return nil))
+              (let [k (aget sk (- n 1)) a (aget sa (- n 1)) b (aget sb (- n 1))]
+                (set! sk (subslice sk _ (- n 1)))
+                (set! sa (subslice sa _ (- n 1)))
+                (set! sb (subslice sb _ (- n 1)))
+                (when (== k 0)
+                  (set! pc a)
+                  (set! txt b)
+                  (break))
+                (if (== k 1) (aset groups a b) (aset regs a b))))))))))
+
+(go/func reAt "reAt is the subject's byte at i, 0 at its end (an OCaml string's final padding byte, which strstubs.c reads there).\n"
+  ^byte [^{:tag (slice byte)} s ^int i]
+  (when (>= i (len s))
+    (return 0))
+  (aget s i))
+
+(go/func reSearch "reSearch is re_search_forward (dir 1) and re_search_backward (dir -1).\n"
+  ^Value [^{:tag (* Block)} re ^{:tag (slice byte)} s ^int txt ^int dir]
+  (let [end (len s)
+        sc (AsInt (aget (.-F re) 5))
+        ^{:tag (slice byte)} starts nil]
+    (when (!= sc -1)
+      (set! starts (.-B (AsBytes (aget (.-F (AsBlock (aget (.-F re) 1))) sc)))))
+    (while (and (>= txt 0) (<= txt end))
+      (when (!= starts nil)
+        (if (> dir 0)
+          (while (and (< txt end) (== (aget starts (aget s txt)) 0)) (inc! txt))
+          (while (and (> txt 0) (== (aget starts (reAt s txt)) 0)) (dec! txt))))
+      (let [r (reMatch re s txt false)]
+        (when (!= r nil)
+          (return r)))
+      (set! txt (+ txt dir)))
+    (emptyArray)))
+
+(go/func reReplacement "reReplacement is re_replacement_text.\n" ^Value [^Value repl ^Value groups ^Value orig]
+  (let [p (.-B (AsBytes repl))
+        g (.-F (AsBlock groups))
+        o (.-B (AsBytes orig))
+        ^{:tag (slice byte)} out nil
+        n (len p)]
+    (for [i 0] (< i n) (inc! i)
+      (let [c (aget p i)]
+        (if (!= c 92)
+          (set! out (append out c))
+          (do
+            (when (== (+ i 1) n)
+              (Failwith "Str.replace: illegal backslash sequence"))
+            (inc! i)
+            (set! c (aget p i))
+            (cond
+              (== c 92) (set! out (append out 92))
+              (and (>= c 48) (<= c 57))
+              (let [d (conv int (- c 48))]
+                (when (>= (* d 2) (len g))
+                  (Failwith "Str.replace: reference to unmatched group"))
+                (let [st (AsInt (aget g (* d 2))) en (AsInt (aget g (+ (* d 2) 1)))]
+                  (when (== st -1)
+                    (Failwith "Str.replace: reference to unmatched group"))
+                  (set! out (append out (spread (subslice o st en))))))
+              :else (set! out (append out 92 c)))))))
+    (addr (lit Bytes :B (append (make (slice byte) 0 (len out)) (spread out))))))
+
+(go/func init []
+  (let [r RegisterExt]
+    (r "re_string_match" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [s (.-B (AsBytes (aget a 1))) pos (AsInt (aget a 2))]
+        (when (or (< pos 0) (> pos (len s)))
+          (InvalidArg "Str.string_match"))
+        (let [res (reMatch (AsBlock (aget a 0)) s pos false)]
+          (when (== res nil) (return (emptyArray)))
+          res))))
+    (r "re_partial_match" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [s (.-B (AsBytes (aget a 1))) pos (AsInt (aget a 2))]
+        (when (or (< pos 0) (> pos (len s)))
+          (InvalidArg "Str.string_partial_match"))
+        (let [res (reMatch (AsBlock (aget a 0)) s pos true)]
+          (when (== res nil) (return (emptyArray)))
+          res))))
+    (r "re_search_forward" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [s (.-B (AsBytes (aget a 1))) pos (AsInt (aget a 2))]
+        (when (or (< pos 0) (> pos (len s)))
+          (InvalidArg "Str.search_forward"))
+        (reSearch (AsBlock (aget a 0)) s pos 1))))
+    (r "re_search_backward" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [s (.-B (AsBytes (aget a 1))) pos (AsInt (aget a 2))]
+        (when (or (< pos 0) (> pos (len s)))
+          (InvalidArg "Str.search_backward"))
+        (reSearch (AsBlock (aget a 0)) s pos -1))))
+    (r "re_replacement_text" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (reReplacement (aget a 0) (aget a 1) (aget a 2))))))

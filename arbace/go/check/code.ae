@@ -684,7 +684,7 @@
                          (if (= '... n)
                            (do (err! f :BadDotDotDotSyntax "invalid use of [...] array (outside a composite literal)") :invalid)
                            (let [len (array-length cx n)]
-                             (if (neg? len) :invalid [:array len el]))))
+                             (if (neg? len) :invalid (e/size-type! f [:array len el])))))
           (= 'map h) (let [k (typexpr cx (nth f 1)) v (typexpr cx (nth f 2))]
                        (when (and (t/valid? k) (not (t/tparam? k)))
                          ;; checked later: the key type may not be complete yet (go/types' later)
@@ -692,8 +692,8 @@
                                  (fn []
                                    (when-not (t/comparable? k)
                                      (err! f :IncomparableMapKey "invalid map key type %s" (t/type-str k))))))
-                       [:map k v])
-          (= 'chan h) (chan-type cx f)
+                       (e/size-type! f [:map k v]))
+          (= 'chan h) (e/size-type! f (chan-type cx f))
           (= 'func h) (let [[_ ps rs] f
                             [sig pss rss] (signature cx (if rs [ps :results rs] [ps]) nil)]
                         (dup-params! pss rss)
@@ -838,6 +838,52 @@
         (when-not (and (vector? lt) (= :slice (nth lt 0)))
           (err! pv :InvalidSyntaxTree "variadic parameter must be a slice"))))
     [[:func (mapv :type ps) (mapv :type rs) variadic] ps rs more (boolean (and results-v (some :name rs)))]))
+
+;;; gc's size checks (GOI-SPEC.md, "Since v1: gc's size checks")
+
+(def ^:private max-width
+  "gc's types.MaxWidth on amd64 and arm64 (ssagen's Arch.MAXWIDTH): 1<<50."
+  (bit-shift-left 1 50))
+
+(defn size-errors
+  "gc's errors of its types' sizes (cmd/compile/internal/types/size.go, CalcSize and
+  CalcArraySize), which go/types does not report: over the types recorded by e/size-type!
+  (recs, [form type file line] each), an array type larger than the address space (its length
+  beyond (MaxWidth - 1) / its element's size), a channel's element of 64 kB or more, a map's
+  element or key of 2 GB or more, as FILE:LINE: MESSAGE lines sorted by position. gc computes
+  each type's size once, at the position it is first read: an array, struct or channel type
+  written in place is a type of its own, each occurrence reported; a map or channel type of a
+  named or basic element is one type, reported at its first occurrence."
+  [recs]
+  (let [seen (java.util.HashSet.)
+        forms (java.util.IdentityHashMap.)
+        size (fn [ty] (try (t/sizeof ty) (catch Throwable _ 0)))
+        own? (fn [ty] (or (keyword? ty) (t/named? ty)))
+        msgs (fn [ty]
+               (case (nth ty 0)
+                 :array (let [n (long (nth ty 1)) es (size (nth ty 2))]
+                          (when (and (pos? es) (> n (quot (dec max-width) es)))
+                            [(str "type " (t/type-str ty) " larger than address space")]))
+                 :chan (let [es (size (nth ty 2))]
+                         (when (or (neg? es) (>= es 65536))
+                           ["channel element type too large (>64kB)"]))
+                 :map (let [vs (size (nth ty 2)) ks (size (nth ty 1))]
+                        (cond-> []
+                          (or (neg? vs) (>= vs 2147483648)) (conj "map element type too large")
+                          (or (neg? ks) (>= ks 2147483648)) (conj "map key type too large")))
+                 nil))]
+    (->> (for [[f ty file line] recs
+               :when line
+               :let [k (if (and (#{:chan :map} (nth ty 0)) (own? (nth ty 2)) (or (= :chan (nth ty 0)) (own? (nth ty 1))))
+                         [(nth ty 0) (t/canon ty)]
+                         nil)]
+               :when (if k (.add seen k) (nil? (.put forms f true)))
+               m (msgs ty)]
+           [file line m])
+         (sort-by (fn [[file line]] [(or file "") line]))
+         (map (fn [[file line m]] (str file ":" line ": " m)))
+         distinct
+         vec)))
 
 (load "code_expr")
 (load "infer")

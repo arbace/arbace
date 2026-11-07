@@ -1,0 +1,181 @@
+(in-ns 'go.arbace.oi) (go/file "ext_unix.go" :imports [
+    [net "net"]
+    [os "os"]
+    [strings "strings"]
+    [syscall "syscall"]
+    [time "time"]])
+
+;; The Unix library's core externals (doc/ocaml/DEFERRED-TRIAGE.md, §4 item 2, "As built: OT9's second fix"): the
+;; caml_unix_* primitives otherlibs/unix's unix.ml (OCaml 5.5.0, LGPL-2.1 with the linking exception) declares, those of its
+;; initialisation and of the core (errors, the environment, process ids, time, sleeping, the working directory, stat), over
+;; Go's syscall and os. A caml_unix_* primitive not here fails at its call as every external oi lacks ("external ... is
+;; not implemented", prim.go). The error codes are the constructors of Unix.error in unix.mli's order (the constant ones;
+;; EUNKNOWNERR of int for the rest), as unixsupport.c's table maps errno to them; Unix_error is the exception unix.ml
+;; registers as "Unix.Unix_error".
+
+(go/var ^{:doc "unixErrors are the errnos of Unix.error's constant constructors, in their order (E2BIG is 0).\n"}
+  unixErrors (lit (slice syscall/Errno)
+    syscall/E2BIG syscall/EACCES syscall/EAGAIN syscall/EBADF syscall/EBUSY syscall/ECHILD syscall/EDEADLK syscall/EDOM
+    syscall/EEXIST syscall/EFAULT syscall/EFBIG syscall/EINTR syscall/EINVAL syscall/EIO syscall/EISDIR syscall/EMFILE
+    syscall/EMLINK syscall/ENAMETOOLONG syscall/ENFILE syscall/ENODEV syscall/ENOENT syscall/ENOEXEC syscall/ENOLCK
+    syscall/ENOMEM syscall/ENOSPC syscall/ENOSYS syscall/ENOTDIR syscall/ENOTEMPTY syscall/ENOTTY syscall/ENXIO syscall/EPERM
+    syscall/EPIPE syscall/ERANGE syscall/EROFS syscall/ESPIPE syscall/ESRCH syscall/EXDEV syscall/EWOULDBLOCK
+    syscall/EINPROGRESS syscall/EALREADY syscall/ENOTSOCK syscall/EDESTADDRREQ syscall/EMSGSIZE syscall/EPROTOTYPE
+    syscall/ENOPROTOOPT syscall/EPROTONOSUPPORT syscall/ESOCKTNOSUPPORT syscall/EOPNOTSUPP syscall/EPFNOSUPPORT
+    syscall/EAFNOSUPPORT syscall/EADDRINUSE syscall/EADDRNOTAVAIL syscall/ENETDOWN syscall/ENETUNREACH syscall/ENETRESET
+    syscall/ECONNABORTED syscall/ECONNRESET syscall/ENOBUFS syscall/EISCONN syscall/ENOTCONN syscall/ESHUTDOWN
+    syscall/ETOOMANYREFS syscall/ETIMEDOUT syscall/ECONNREFUSED syscall/EHOSTDOWN syscall/EHOSTUNREACH syscall/ELOOP
+    syscall/EOVERFLOW))
+
+(go/func unixErrorValue "unixErrorValue is errno e as a Unix.error: the first constructor of its errno, else EUNKNOWNERR e.\n"
+  ^Value [^syscall/Errno e]
+  (range [i x unixErrors]
+    (when (== x e)
+      (return i)))
+  (addr (lit Block :Tag 0 :F (lit (slice Value) (conv int e)))))
+
+(go/func unixErrno "unixErrno is a Unix.error as its errno.\n" ^syscall/Errno [^Value v]
+  (when [(values b ok) (assert (* Block) v)] ok
+    (return (conv syscall/Errno (AsInt (aget (.-F b) 0)))))
+  (let [i (AsInt v)]
+    (when (and (>= i 0) (< i (len unixErrors)))
+      (return (aget unixErrors i)))
+    (conv syscall/Errno 0)))
+
+(go/func RaiseUnixError "RaiseUnixError raises Unix.Unix_error (e, fn, arg), the exception unix.ml registers.\n"
+  [^syscall/Errno e ^string fn ^string arg]
+  (let [(values v ok) (NamedValue "Unix.Unix_error")]
+    (when (not ok)
+      (InvalidArg "Exception Unix.Unix_error not initialized, please link unix.cma"))
+    (let [ctor v]
+      (when [(values b ok) (assert (* Block) v)] (and ok (== (.-Tag b) 0))
+        (set! ctor (aget (.-F b) 0)))
+      (Raise (addr (lit Block :Tag 0 :F (lit (slice Value) ctor (unixErrorValue e) (Str fn) (Str arg))))))))
+
+(go/func unixFail "unixFail raises Unix_error for err (a Go error) of fn on arg.\n" [^error err ^string fn ^string arg]
+  (RaiseUnixError (errnoOf err) fn arg))
+
+(go/func unixFloatTime "unixFloatTime is t as seconds since the epoch.\n" ^float64 [^syscall/Timespec t]
+  (+ (conv float64 (.-Sec t)) (/ (conv float64 (.-Nsec t)) 1e9)))
+
+(go/func unixStat "unixStat is the record Unix.stats of st (unix.mli's field order).\n" ^Value [^{:tag (* syscall/Stat_t)} st]
+  (let [kind 0
+        m (bit-and (.-Mode st) syscall/S_IFMT)]
+    (switch m
+      (case [syscall/S_IFREG] (set! kind 0))
+      (case [syscall/S_IFDIR] (set! kind 1))
+      (case [syscall/S_IFCHR] (set! kind 2))
+      (case [syscall/S_IFBLK] (set! kind 3))
+      (case [syscall/S_IFLNK] (set! kind 4))
+      (case [syscall/S_IFIFO] (set! kind 5))
+      (case [syscall/S_IFSOCK] (set! kind 6)))
+    (Tuple (conv int (.-Dev st)) (conv int (.-Ino st)) kind (conv int (bit-and (.-Mode st) 07777)) (conv int (.-Nlink st))
+           (conv int (.-Uid st)) (conv int (.-Gid st)) (conv int (.-Rdev st)) (conv int (.-Size st))
+           (unixFloatTime (.-Atim st)) (unixFloatTime (.-Mtim st)) (unixFloatTime (.-Ctim st)))))
+
+(go/func unixTm "unixTm is the record Unix.tm of t.\n" ^Value [^time/Time t]
+  (Tuple (.Second t) (.Minute t) (.Hour t) (.Day t) (- (conv int (.Month t)) 1) (- (.Year t) 1900)
+         (conv int (.Weekday t)) (- (.YearDay t) 1) (Bool (.IsDST t))))
+
+(go/func unixTime "unixTime is a float of seconds as a time.Time (its fraction kept to the nanosecond).\n" ^time/Time [^float64 f]
+  (let [s (conv int64 f)]
+    (when (and (< f 0) (!= (conv float64 s) f))
+      (set! s (- s 1)))
+    (time/Unix s (conv int64 (* (- f (conv float64 s)) 1e9)))))
+
+(go/func init []
+  (let [r RegisterExt]
+    (r "caml_unix_error_message" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (Str (errnoString (unixErrno (aget a 0))))))
+    (r "caml_unix_environment" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [^{:tag (slice Value)} fs nil]
+        (range [_ kv (os/Environ)]
+          (set! fs (append fs (Str kv))))
+        (addr (lit Block :Tag 0 :F fs)))))
+    (r "caml_unix_unsafe_environment" (aget Externals "caml_unix_environment"))
+    (r "caml_unix_putenv" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [k (GoString (aget a 0)) v (GoString (aget a 1))]
+        (when (or (not (cSafe (aget a 0))) (not (cSafe (aget a 1))) (== k "") (strings/Contains k "="))
+          (RaiseUnixError syscall/EINVAL "putenv" k))
+        (when [err (os/Setenv k v)] (!= err nil)
+          (unixFail err "putenv" k))
+        Unit)))
+    (r "caml_unix_unsetenv" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [k (GoString (aget a 0))]
+        (when (or (not (cSafe (aget a 0))) (== k "") (strings/Contains k "="))
+          (RaiseUnixError syscall/EINVAL "unsetenv" k))
+        (os/Unsetenv k)
+        Unit)))
+    (r "caml_unix_getpid" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (os/Getpid)))
+    (r "caml_unix_getppid" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (os/Getppid)))
+    (r "caml_unix_getuid" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (os/Getuid)))
+    (r "caml_unix_geteuid" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (os/Geteuid)))
+    (r "caml_unix_getgid" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (os/Getgid)))
+    (r "caml_unix_getegid" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (os/Getegid)))
+    (r "caml_unix_umask" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (syscall/Umask (AsInt (aget a 0)))))
+    ;; time(2): whole seconds, as a float
+    (r "caml_unix_time" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (conv float64 (.Unix (time/Now)))))
+    (r "caml_unix_gettimeofday" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [t (time/Now)]
+        (+ (conv float64 (.Unix t)) (/ (conv float64 (/ (.Nanosecond t) 1000)) 1e6)))))
+    (r "caml_unix_gmtime" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (unixTm (.UTC (unixTime (AsFloat (aget a 0)))))))
+    (r "caml_unix_localtime" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (unixTm (.Local (unixTime (AsFloat (aget a 0)))))))
+    (r "caml_unix_mktime" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [f (.-F (AsBlock (aget a 0)))
+            t (time/Date (+ (AsInt (aget f 5)) 1900) (conv time/Month (+ (AsInt (aget f 4)) 1)) (AsInt (aget f 3))
+                         (AsInt (aget f 2)) (AsInt (aget f 1)) (AsInt (aget f 0)) 0 time/Local)]
+        (Tuple (conv float64 (.Unix t)) (unixTm t)))))
+    (r "caml_unix_times" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [^syscall/Rusage self (zero syscall/Rusage)
+            ^syscall/Rusage kids (zero syscall/Rusage)
+            tv (fn ^float64 [^syscall/Timeval t] (+ (conv float64 (.-Sec t)) (/ (conv float64 (.-Usec t)) 1e6)))]
+        (syscall/Getrusage syscall/RUSAGE_SELF (addr self))
+        (syscall/Getrusage syscall/RUSAGE_CHILDREN (addr kids))
+        (addr (lit FloatArray :F (lit (slice float64) (tv (.-Utime self)) (tv (.-Stime self)) (tv (.-Utime kids)) (tv (.-Stime kids))))))))
+    ;; sleep (a float of seconds since OCaml 4.12's sleepf), outside the interpreter's lock
+    (r "caml_unix_sleep" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+      (let [d (AsFloat (aget a 0))]
+        (when (> d 0)
+          (if (not (sigInPlay))
+            (Blocking (fn [] (time/Sleep (conv time/Duration (* d 1e9)))))
+            ;; with signals in play the sleep is a wait on the thread's wake pipe: a signal it takes runs its handlers
+            ;; and the sleep goes on for the time left (unix_sleep's EINTR loop)
+            (let [deadline (.Add (time/Now) (conv time/Duration (* d 1e9)))]
+              (while true
+                (let [left (.Seconds (time/Until deadline))]
+                  (when (<= left 0)
+                    (break))
+                  (let [(values _ intr _) (waitFds th nil left)]
+                    (when intr
+                      (.processSignals th))))))))
+        Unit)))
+    (r "caml_unix_getcwd" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [(values d err) (syscall/Getwd)]
+        (when (!= err nil)
+          (unixFail err "getcwd" ""))
+        (Str d))))
+    (r "caml_unix_chdir" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [p (GoString (aget a 0))]
+        (when [e (sysCall (fn ^error [] (syscall/Chdir p)))] (!= e 0)
+          (RaiseUnixError e "chdir" p))
+        Unit)))
+    (r "caml_unix_stat" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [p (GoString (aget a 0))
+            ^syscall/Stat_t st (zero syscall/Stat_t)]
+        (when [e (sysCall (fn ^error [] (syscall/Stat p (addr st))))] (!= e 0)
+          (RaiseUnixError e "stat" p))
+        (unixStat (addr st)))))
+    (r "caml_unix_lstat" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [p (GoString (aget a 0))
+            ^syscall/Stat_t st (zero syscall/Stat_t)]
+        (when [e (sysCall (fn ^error [] (syscall/Lstat p (addr st))))] (!= e 0)
+          (RaiseUnixError e "lstat" p))
+        (unixStat (addr st)))))
+    ;; an inet_addr is its 4 or 16 bytes, as a string (unix.ml's initialisation makes inet_addr_any and the loopbacks)
+    (r "caml_unix_inet_addr_of_string" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [ip (net/ParseIP (GoString (aget a 0)))]
+        (when (== ip nil)
+          (Failwith "inet_addr_of_string"))
+        (when [v4 (.To4 ip)] (and (!= v4 nil) (not (strings/Contains (GoString (aget a 0)) ":")))
+          (return (addr (lit Bytes :B (conv (slice byte) v4)))))
+        (addr (lit Bytes :B (conv (slice byte) (.To16 ip)))))))))

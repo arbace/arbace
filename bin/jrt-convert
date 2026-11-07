@@ -30,7 +30,8 @@
 #             $JRT_WORK/src/java.base (the tree repr/java and javac read); sources.txt lists them
 #   generate  the files the JDK build generates (CharacterData*, CaseFolding,
 #             IndicConjunctBreak; java.nio's heap buffers, ScopedMemoryAccess; the CLDR
-#             locale data of java.base, GensrcCLDR in make/modules/java.base/Gensrc.gmk) made as
+#             locale data of java.base, GensrcCLDR in make/modules/java.base/Gensrc.gmk; since F1
+#             the JCA's fields of sun.security.util.math.intpoly, its INTPOLY_GEN_DONE) made as
 #             make/modules/java.base/gensrc/GensrcCharacterData.gmk, GensrcRegex.gmk,
 #             GensrcBuffer.gmk and GensrcScopedMemoryAccess.gmk make them: the build tools of
 #             make/jdk/src/classes/build/tools/ (generatecharacter, generateextraproperties, spp,
@@ -42,7 +43,8 @@
 #             its boot JDK's, is taken when they differ by its entries alone, :boot-jdk); and the resource data
 #             the program embeds (uniName.dat as Gendata.gmk makes it, ICU's nfc.nrm and
 #             nfkc.nrm; the time-zone database lib/tzdb.dat as GendataTZDB.gmk makes it; the
-#             security properties conf/security/java.security as Gendata.gmk makes them)
+#             security properties conf/security/java.security as Gendata.gmk makes them; java.util.logging's
+#             conf/logging.properties as java.logging's Copy.gmk installs it)
 #             into $JRT_WORK/data, compared with the build's jdk/modules (jdk/lib for lib/)
 #   convert   bin/repr-java read-jdk --check: the tree into Java forms, $JRT_WORK/conv (java.base,
 #             attributed with --patch-module against the platform of javac on Arbace, the JDK
@@ -149,7 +151,8 @@ gen_tools="build.tools.generatecharacter.GenerateCharacter build.tools.generatec
   build.tools.generatecharacter.CharacterName build.tools.generateextraproperties.GenerateExtraProperties
   build.tools.spp.Spp build.tools.cldrconverter.CLDRConverter build.tools.generatelsrequivmaps.EquivMapsGenerator
   build.tools.tzdb.TzdbZoneRulesCompiler build.tools.generatecurrencydata.GenerateCurrencyData
-  build.tools.generatebreakiteratordata.GenerateBreakIteratorData build.tools.makejavasecurity.MakeJavaSecurity"
+  build.tools.generatebreakiteratordata.GenerateBreakIteratorData build.tools.makejavasecurity.MakeJavaSecurity
+  build.tools.intpoly.FieldGen"
 gen_script() {
   local c
   echo ';; bin/jrt-convert'"'"'s generate step: a JDK build tool'"'"'s main (JN7)'
@@ -158,6 +161,10 @@ gen_script() {
   for c in $gen_tools; do echo "    \"$c\" ($c/main a)"; done
   echo '    (do (println "jrt-convert: no tool" c) (System/exit 2))))'
 }
+# since F4 (doc/classes/JAVA-DEFERRED-TRIAGE.md): java.base's security messages' compiler
+gen_tools="$gen_tools build.tools.compileproperties.CompileProperties"
+# since F8 (doc/classes/JAVA-DEFERRED-TRIAGE.md): java.base's charset tables' generator
+gen_tools="$gen_tools build.tools.charsetmapping.Main"
 
 generate() {
   local tree=$1 out tools=$2 u c t f
@@ -223,16 +230,16 @@ generate() {
     case $1 in float|double) [ "$2" = U ] || echo "$(title "$1").$1ToRaw$(title "$(memtype "$1")")Bits";; esac; }
   nbytes() { case $(lbpv "$1") in 0) echo one;; 1) echo two;; 2) echo four;; 3) echo eight;; esac; }
   nbytes1() { case $(lbpv "$1") in 0) echo zero;; 1) echo one;; 2) echo three;; 3) echo seven;; esac; }
-  # SetupGenBuffer NAME TEMPLATE TYPE BYTE_ORDER (read-write; BYTES_PER_VALUE as the make file
-  # passes it, with an empty log2: "(1 << )")
+  # SetupGenBuffer NAME TEMPLATE TYPE BYTE_ORDER [R] (read-write, or read-only with R: READ_ONLY
+  # true, the keys ro and RW=R; BYTES_PER_VALUE as the make file passes it, with an empty log2: "(1 << )")
   genbuffer() {
-    local name=$1 tpl=$2 ty=$3 bo=$4 o=$out/java/nio/$1.java swaptype
-    local keys=(-K"$ty" -Krw -Kbo"$bo")
+    local name=$1 tpl=$2 ty=$3 bo=$4 rw=${5:-} o=$out/java/nio/$1.java swaptype
+    local keys=(-K"$ty" -K"$([ "$rw" = R ] && echo ro || echo rw)" -Kbo"$bo")
     case $ty in float|double) keys+=(-KfloatingPointType);; *) keys+=(-KintegralType);; esac
     [ "$ty" = char ] && keys+=(-KstreamableType)
     if [ "$bo" = U ]; then swaptype=$(title "$ty"); else swaptype=$(title "$(memtype "$ty")"); fi
     [ "$name" = ByteBuffer ] && o=$o.bin-snippet.tmp
-    spp "${keys[@]}" -Dtype="$ty" -DBO="$bo" -DRW= -DLG_BYTES_PER_VALUE="$(lbpv "$ty")" \
+    spp "${keys[@]}" -Dtype="$ty" -DBO="$bo" -DRW="$rw" -DLG_BYTES_PER_VALUE="$(lbpv "$ty")" \
       -DBYTES_PER_VALUE="(1 << )" -Da="$(art "$ty")" -DA="$(title "$(art "$ty")")" \
       -Dfulltype="$(fulltype "$ty")" -DFulltype="$(title "$(fulltype "$ty")")" \
       -Dmemtype="$(memtype "$ty")" -DMemtype="$(title "$(memtype "$ty")")" \
@@ -263,6 +270,23 @@ generate() {
   genbuffer ByteBufferAsCharBufferL ByteBufferAs-X-Buffer char L &&
   genbuffer ByteBufferAsIntBufferB ByteBufferAs-X-Buffer int B &&
   genbuffer ByteBufferAsIntBufferL ByteBufferAs-X-Buffer int L || return 1
+  # F7 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F7 (write-ahead)"): the other types' buffers
+  # and their views of a byte buffer, and every type's read-only heap buffer and views
+  # (SetupGenerateBuffersWithRO's, the direct ones but jrt's own DirectByteBuffer left out)
+  local t T
+  for t in long short float double; do
+    T=${t^}
+    genbuffer "${T}Buffer" X-Buffer "$t" "" && genbuffer "Heap${T}Buffer" Heap-X-Buffer "$t" "" &&
+    genbuffer "ByteBufferAs${T}BufferB" ByteBufferAs-X-Buffer "$t" B &&
+    genbuffer "ByteBufferAs${T}BufferL" ByteBufferAs-X-Buffer "$t" L || return 1
+  done
+  for t in byte char int long short float double; do
+    T=${t^}
+    genbuffer "Heap${T}BufferR" Heap-X-Buffer "$t" "" R || return 1
+    [ "$t" = byte ] && continue
+    genbuffer "ByteBufferAs${T}BufferRB" ByteBufferAs-X-Buffer "$t" B R &&
+    genbuffer "ByteBufferAs${T}BufferRL" ByteBufferAs-X-Buffer "$t" L R || return 1
+  done
   # GensrcScopedMemoryAccess.gmk: the template, then a snippet per type (SCOPED_TYPES' order)
   local smasnips=() ty k sma=$out/jdk/internal/misc/ScopedMemoryAccess.java
   for ty in boolean byte short char int long float double; do
@@ -303,6 +327,44 @@ generate() {
     "$jdk/src/java.base/share/data/lsrdata/language-subtag-registry.txt" \
     "$out/sun/util/locale/LocaleEquivalentMaps.java" \
     "$(sed -n 's/^COPYRIGHT_YEAR := *//p' "$conf" 2>"$quiet" || echo 2026)" || return 1
+  # the security and auth messages of sun.security.util.ResourcesMgr (doc/classes/JAVA-DEFERRED-TRIAGE.md,
+  # F4: Subject's, the principals', LoginContext's and ConfigFile's texts), as make/modules/java.base/
+  # Gensrc.gmk makes them (SECURITY_RESOURCES: TOOL_COMPILEPROPERTIES, build.tools.compileproperties.
+  # CompileProperties, each .properties into a ListResourceBundle); the root locale's alone (JCS139)
+  local sr=$c/sun/security/util/resources
+  mkdir -p "$out/sun/security/util/resources"
+  "${java[@]}" build.tools.compileproperties.CompileProperties -quiet \
+    -compile "$sr/security.properties" "$out/sun/security/util/resources/security.java" ListResourceBundle \
+    -compile "$sr/auth.properties" "$out/sun/security/util/resources/auth.java" ListResourceBundle || return 1
+  # the charsets (doc/classes/JAVA-DEFERRED-TRIAGE.md, F8): CharsetDecoder and CharsetEncoder as
+  # make/modules/java.base/gensrc/GensrcCharsetCoder.gmk makes them (build.tools.spp.Spp on
+  # Charset-X-Coder.java.template with its keys and replacements), and sun.nio.cs's StandardCharsets
+  # and table-driven charsets for linux as GensrcCharsetMapping.gmk makes them (TOOL_CHARSETMAPPING,
+  # build.tools.charsetmapping.Main, on make/data/charsetmapping's charsets and stdcs-linux, into
+  # a directory of its own, from which the closure's files are taken)
+  local csd=$c/java/nio/charset/Charset-X-Coder.java.template cso=$tools/charsetmapping-out
+  mkdir -p "$out/java/nio/charset" "$out/sun/nio/cs" "$cso"
+  spp -Kdecoder -DA='A' -Da='a' -DCode='Decode' -Dcode='decode' -DitypesPhrase='bytes in a specific charset' \
+    -DotypesPhrase='sixteen-bit Unicode characters' -Ditype='byte' -Dotype='character' -DItype='Byte' \
+    -DOtype='Char' -Dcoder='decoder' -DCoder='Decoder' -Dcoding='decoding' -DOtherCoder='Encoder' \
+    -DreplTypeName='string' -DreplType='String' -DreplFQType='java.lang.String' -DreplLength='length()' \
+    -DItypesPerOtype='CharsPerByte' -DnotLegal='not legal for this charset' -Dotypes-per-itype='chars-per-byte' \
+    -DoutSequence='Unicode character' -i"$csd" -o"$out/java/nio/charset/CharsetDecoder.java" &&
+  spp -Kencoder -DA='An' -Da='an' -DCode='Encode' -Dcode='encode' -DitypesPhrase='sixteen-bit Unicode characters' \
+    -DotypesPhrase='bytes in a specific charset' -Ditype='character' -Dotype='byte' -DItype='Char' \
+    -DOtype='Byte' -Dcoder='encoder' -DCoder='Encoder' -Dcoding='encoding' -DOtherCoder='Decoder' \
+    -DreplTypeName='byte array' -DreplType='byte[]' -DreplFQType='byte[]' -DreplLength='length' \
+    -DItypesPerOtype='BytesPerChar' -DnotLegal='not a legal sixteen-bit Unicode sequence' \
+    -Dotypes-per-itype='bytes-per-char' -DoutSequence='byte sequence in the given charset' \
+    -i"$csd" -o"$out/java/nio/charset/CharsetEncoder.java" &&
+  "${java[@]}" build.tools.charsetmapping.Main "$jdk/make/data/charsetmapping" "$cso" stdcs charsets stdcs-linux \
+    "$c/sun/nio/cs/StandardCharsets.java.template" "$jdk/src/jdk.charsets/share/classes/sun/nio/cs/ext" \
+    "$t/build/tools/charsetmapping" > "$tools/charsetmapping.log" || return 1
+  while read -r _ kind rel; do
+    if [ "$kind" = gensrc ] && [ -f "$cso/${rel#sun/nio/cs/}" ] && [ "${rel%/*}" = sun/nio/cs ]; then
+      cp "$cso/${rel#sun/nio/cs/}" "$out/$rel"
+    fi
+  done < "$work/sources.txt"
   # jdk.localedata's CLDR data (JRT-NOTES.md, "Text and locales"), as
   # make/modules/jdk.localedata/Gensrc.gmk makes it (TOOL_CLDRCONVERTER without -basemodule):
   # every locale's bundles, of which the selection (sources.txt's KIND locales line,
@@ -332,6 +394,16 @@ generate() {
   "${java[@]}" build.tools.generatecharacter.CharacterName "$u/UnicodeData.txt" "$data/java/lang/uniName.dat" &&
   cp "$c/jdk/internal/icu/impl/data/icudata/nfc.nrm" "$c/jdk/internal/icu/impl/data/icudata/nfkc.nrm" \
     "$data/jdk/internal/icu/impl/data/icudata/" || return 1
+  # IDN's StringPrep profile (doc/classes/JAVA-DEFERRED-TRIAGE.md, F3: java.net.IDN for SNIHostName),
+  # sun/net/idn/uidna.spp, a resource of src/java.base/share/classes the build copies
+  mkdir -p "$data/sun/net/idn"
+  cp "$c/sun/net/idn/uidna.spp" "$data/sun/net/idn/" || return 1
+  # the networking defaults (doc/classes/JAVA-DEFERRED-TRIAGE.md, F12: sun.net.NetProperties' proxies,
+  # keep-alive and authentication properties), the image's conf/net.properties as
+  # make/modules/java.base/Copy.gmk makes it: src/java.base/share/conf/net.properties, then the unix one
+  # (NetProperties' variant reads it as the resource conf/net.properties)
+  mkdir -p "$data/conf"
+  cat "$jdk/src/java.base/share/conf/net.properties" "$jdk/src/java.base/unix/conf/net.properties" > "$data/conf/net.properties" || return 1
   # the time-zone database (JRT-NOTES.md, "Time"), the image's lib/tzdb.dat, as
   # make/modules/java.base/gendata/GendataTZDB.gmk makes it: TOOL_TZDB
   # (build.tools.tzdb.TzdbZoneRulesCompiler) with java.time.zone's ZoneRules,
@@ -358,6 +430,14 @@ generate() {
   "${java[@]}" build.tools.generatebreakiteratordata.GenerateBreakIteratorData -o "$data/sun/text/resources" \
     -spec "$u/UnicodeData.txt" || return 1
   cp "$c/jdk/internal/icu/impl/data/icudata/ubidi.icu" "$data/jdk/internal/icu/impl/data/icudata/" || return 1
+  # F16 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F16 (write-ahead)"): ICU's character
+  # properties (uprops.icu), which UCharacterProperty's INSTANCE loads for Bidi's supplementary
+  # characters, and the MIME types sun.net.www.MimeTable reads (the image's
+  # sun/net/www/content-types.properties, src/java.base/unix/classes'), copied as the build copies
+  # resources
+  cp "$c/jdk/internal/icu/impl/data/icudata/uprops.icu" "$data/jdk/internal/icu/impl/data/icudata/" &&
+  mkdir -p "$data/sun/net/www" &&
+  cp "$jdk/src/java.base/unix/classes/sun/net/www/content-types.properties" "$data/sun/net/www/" || return 1
   # the security properties (JRT-NOTES.md, "Security"), the image's conf/security/java.security,
   # as make/modules/java.base/Gendata.gmk makes it: TOOL_MAKEJAVASECURITY
   # (build.tools.makejavasecurity.MakeJavaSecurity) on src/java.base/share/conf/security/
@@ -368,6 +448,15 @@ generate() {
   "${java[@]}" build.tools.makejavasecurity.MakeJavaSecurity \
     "$jdk/src/java.base/share/conf/security/java.security" "$data/conf/security/java.security" \
     linux x86 unlimited || return 1
+  # the JCA's field arithmetic (doc/classes/JAVA-DEFERRED-TRIAGE.md, F1): the fields of
+  # sun.security.util.math.intpoly, as make/modules/java.base/Gensrc.gmk makes them (INTPOLY_GEN_DONE:
+  # TOOL_INTPOLY, build.tools.intpoly.FieldGen, on its header.txt into the gensrc root)
+  "${java[@]}" build.tools.intpoly.FieldGen "$t/build/tools/intpoly/header.txt" "$out" || return 1
+  # java.util.logging's default configuration (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F5
+  # (write-ahead)"), the image's conf/logging.properties, as make/modules/java.logging/Copy.gmk
+  # installs it: a copy of src/java.logging/share/conf/logging.properties (LogManager's variant
+  # reads it as the resource conf/logging.properties)
+  cp "$jdk/src/java.logging/share/conf/logging.properties" "$data/conf/logging.properties" || return 1
   # every gensrc file of the closure is made
   while read -r _ kind rel; do
     case $kind in gensrc|gensrc:*|jrtgen) [ ! -f "$out/$rel" ] && { echo "not generated: $rel" >&2; return 1; } ;; esac

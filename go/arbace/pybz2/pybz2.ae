@@ -1,0 +1,654 @@
+(in-ns 'go.arbace.pybz2) ^{:go/comments [[3 1 "// _bz2module.c: Copyright (c) the Python Software Foundation, under the PSF License Agreement for Python 3.14"] [4 1 "// (LICENSE.md). The port to Go: Copyright (c) the Arbace authors, under the same license."] [6 1 "// The module _bz2 (queue 208; doc/python/PYTHON-SURVEY.md, \"As built: 208\"; PYS22 (a)): CPython 3.14.10's"] [7 1 "// Modules/_bz2module.c (with Modules/clinic/_bz2module.c.h's argument parsing) ported statement for statement over"] [8 1 "// libbzip2 1.0.8 itself, the C library built by ci's builder (arbace/clib/bzip2's node program) and called through"] [9 1 "// arbace/clib: BZ2Compressor (compress, flush) and BZ2Decompressor (decompress with max_length, eof, unused_data,"] [10 1 "// needs_input). bz2.py, BZ2File and bz2.open are the tarball's Python over it. Its C names are kept (compress,"] [11 1 "// decompress_buf, decompress, catch_bz2_error, the _impl functions)."] [12 1 "//"] [13 1 "// How the C maps onto Go here:"] [14 1 "//"] [15 1 "//   - The bz_stream and the decompressor's input buffer are C memory in the library's program (malloc'd there);"] [16 1 "//     the stream's fields are read and written at their offsets, which the C side's pybz2_layout gives and the"] [17 1 "//     glue checks once (bzsLayout). A Py_buffer's bytes are copied into C memory for the call (data), as the"] [18 1 "//     caller's buffer CPython hands to libbzip2 directly."] [19 1 "//   - The output buffer (_BlocksOutputBuffer, pycore_blocks_output_buffer.h) is C memory of one block at a"] [20 1 "//     time: each block's bytes are copied out to Go when the next is allocated and at the end, so the block"] [21 1 "//     sizes libbzip2 sees (and so its calls) are CPython's."] [22 1 "//   - bzalloc/bzfree are NULL: libbzip2's default allocator, musl's malloc in the program (CPython's"] [23 1 "//     BZ2_Malloc/BZ2_Free are PyMem_RawMalloc/Free; the difference is invisible to Python)."] [24 1 "//   - Locks: the caller holds pyi's GIL around every call (the library's one C thread is shared), so"] [25 1 "//     ACQUIRE_LOCK/RELEASE_LOCK and Py_BEGIN/END_ALLOW_THREADS have no counterpart."] [26 1 "//   - Deallocation: a finalizer (runtime.SetFinalizer) queues BZ2_bz*End and the frees on the library"] [27 1 "//     (clib.Lib.Defer), run before its next call under the GIL."] [39 1 "// bzlib.h's action and return codes."] [75 1 "// bzsOffsets are bz_stream's size and fields' offsets as the glue assumes them (pybz2_layout's order)."] [84 1 "// bz2 is the library's program, opened on the module's first use; its layout checked against the glue's."] [99 17 "// bz_stream *, C memory"] [106 27 "// bz_stream *, C memory"] [111 27 "// char *, C memory"] [113 2 "// bzs->avail_in is only 32 bit, so we store the true length separately. Conversion and looping is"] [114 2 "// encapsulated in decompress_buf()"] [120 1 "// The stream's fields."] [129 1 "// newStream is a zeroed bz_stream (bzalloc, bzfree and opaque NULL: libbzip2's default allocator)."] [139 1 "// Blocks output buffer wrappers (pycore_blocks_output_buffer.h): the block sizes."] [143 1 "// _BlocksOutputBuffer: the finished blocks' bytes in Go, the current block in C memory."] [146 19 "// the current block, C memory"] [153 1 "// OutputBuffer_InitAndGrow: the first block, max_length's when smaller; next_out and avail_out set."] [183 1 "// flushBlock copies the current block's bytes before avail_out into data and frees it."] [194 1 "// OutputBuffer_Grow: the next block (its size the table's, max_length's rest when smaller); -1 on failure."] [229 1 "// OutputBuffer_GetDataSize: the bytes written so far."] [234 1 "// OutputBuffer_Finish: the bytes object."] [240 1 "// OutputBuffer_OnError frees the current block."] [248 1 "/* Helper functions. */"] [250 1 "// catch_bz2_error gives the exception for an error code, nil for a success."] [274 1 "// cbytes is a copy of data in C memory (malloc'd; 0 for no bytes), the Py_buffer libbzip2 reads."] [287 1 "/* BZ2Compressor class. */"] [300 3 "/* On a 64-bit system, len might not fit in avail_in (an unsigned int). Do compression in chunks of no\n\t\t   more than UINT_MAX bytes each. */"] [306 3 "/* In regular compression mode, stop when input data is exhausted. */"] [321 3 "/* In flushing mode, stop when all buffered data has been flushed. */"] [374 1 "/* BZ2Decompressor class. */"] [376 1 "/*\nDecompress data of length d->bzs_avail_in_real in d->bzs.next_in. The output buffer is allocated dynamically\n\n\tand returned. At most max_length bytes are returned, so some of the input may not be consumed.\n\td->bzs.next_in and d->bzs_avail_in_real are updated to reflect the consumed input.\n*/"] [390 3 "/* On a 64-bit system, buffer length might not fit in avail_out, so we do decompression in chunks of no\n\t\t   more than UINT_MAX bytes each. Note that the expression for `avail` is guaranteed to be positive, so\n\t\t   the cast is safe. */"] [425 23 "// the caller's buffer in C memory (freed at the end)"] [427 2 "/* Prepend unconsumed input if necessary */"] [429 3 "/* Number of bytes we can append to input buffer */"] [432 3 "/* Number of bytes we can append if we move existing contents to beginning of buffer (overwriting\n\t\t   consumed input) */"] [440 4 "/* Assign to temporary variable first, so we don't lose address of allocated buffer if realloc\n\t\t\t   fails */"] [450 66 "// memmove"] [484 3 "/* If we did not use the input buffer, we now have to copy the tail from the caller's buffer into the\n\t\t   input buffer */"] [488 4 "/* Discard buffer if it's too small (resizing it may needlessly copy the current contents) */"] [494 4 "/* Allocate if necessary */"] [504 4 "/* Copy tail */"] [505 66 "// memcpy"] [516 3 "// Re-entering BZ2_bzDecompress() after an error can write out of bounds."] [544 1 "/* Module initialization. */"] [550 3 "// a C type's instance with state and no __getstate__ (object_getstate): \"cannot pickle 'TP_NAME' object\""] [641 1 "// methO checks a METH_O method's one argument (args[0] is self)."]] :go/pos {:name [1 9] :package [1 1]} :go/semis [[89 46] [317 37] [360 36] [397 35] [529 36] [571 46] [578 40]]} (go/file "pybz2.go" :imports [
+
+    ;; _bz2module.c: Copyright (c) the Python Software Foundation, under the PSF License Agreement for Python 3.14
+    ;; (LICENSE.md). The port to Go: Copyright (c) the Arbace authors, under the same license.
+
+    ;; The module _bz2 (queue 208; doc/python/PYTHON-SURVEY.md, "As built: 208"; PYS22 (a)): CPython 3.14.10's
+    ;; Modules/_bz2module.c (with Modules/clinic/_bz2module.c.h's argument parsing) ported statement for statement over
+    ;; libbzip2 1.0.8 itself, the C library built by ci's builder (arbace/clib/bzip2's node program) and called through
+    ;; arbace/clib: BZ2Compressor (compress, flush) and BZ2Decompressor (decompress with max_length, eof, unused_data,
+    ;; needs_input). bz2.py, BZ2File and bz2.open are the tarball's Python over it. Its C names are kept (compress,
+    ;; decompress_buf, decompress, catch_bz2_error, the _impl functions).
+    ;;
+    ;; How the C maps onto Go here:
+    ;;
+    ;;   - The bz_stream and the decompressor's input buffer are C memory in the library's program (malloc'd there);
+    ;;     the stream's fields are read and written at their offsets, which the C side's pybz2_layout gives and the
+    ;;     glue checks once (bzsLayout). A Py_buffer's bytes are copied into C memory for the call (data), as the
+    ;;     caller's buffer CPython hands to libbzip2 directly.
+    ;;   - The output buffer (_BlocksOutputBuffer, pycore_blocks_output_buffer.h) is C memory of one block at a
+    ;;     time: each block's bytes are copied out to Go when the next is allocated and at the end, so the block
+    ;;     sizes libbzip2 sees (and so its calls) are CPython's.
+    ;;   - bzalloc/bzfree are NULL: libbzip2's default allocator, musl's malloc in the program (CPython's
+    ;;     BZ2_Malloc/BZ2_Free are PyMem_RawMalloc/Free; the difference is invisible to Python).
+    ;;   - Locks: the caller holds pyi's GIL around every call (the library's one C thread is shared), so
+    ;;     ACQUIRE_LOCK/RELEASE_LOCK and Py_BEGIN/END_ALLOW_THREADS have no counterpart.
+    ;;   - Deallocation: a finalizer (runtime.SetFinalizer) queues BZ2_bz*End and the frees on the library
+    ;;     (clib.Lib.Defer), run before its next call under the GIL.
+
+
+    ^{:go/apos {1 [30 2]} :go/pos {:lparen [29 8] :rparen [35 1] :tok-pos [29 1]}} [runtime "runtime"]
+
+    ^{:go/apos {1 [32 2]}} [clib "arbace/clib"]
+    ^{:go/apos {1 [33 2]}} [bzip2 "arbace/clib/bzip2"]
+    ^{:go/apos {1 [34 4]}} [^{:go/pos {:name-pos [34 2]}} . "arbace/py"]])
+
+
+^{:go/apos {2 [37 21]} :go/pos {:tok-pos [37 1]}} (go/const ^{:val "_bz2" :go/pos {:name-pos [37 7]}} MODULE_NAME "_bz2")
+
+
+^{:go/pos {:doc [39 1] :lparen [40 7] :rparen [59 1] :tok-pos [40 1]}} (go/const "bzlib.h's action and return codes.\n"
+  ^{:go/apos {1 [41 14]}} [^{:val 0 :go/pos {:name-pos [41 2]}} BZ_RUN 0]
+  ^{:go/apos {1 [42 14]}} [^{:val 1 :go/pos {:name-pos [42 2]}} BZ_FLUSH 1]
+  ^{:go/apos {1 [43 14]}} [^{:val 2 :go/pos {:name-pos [43 2]}} BZ_FINISH 2]
+
+  ^{:go/apos {1 [45 24]}} [^{:val 0 :go/pos {:name-pos [45 2]}} BZ_OK 0]
+  ^{:go/apos {1 [46 24]}} [^{:val 1 :go/pos {:name-pos [46 2]}} BZ_RUN_OK 1]
+  ^{:go/apos {1 [47 24]}} [^{:val 2 :go/pos {:name-pos [47 2]}} BZ_FLUSH_OK 2]
+  ^{:go/apos {1 [48 24]}} [^{:val 3 :go/pos {:name-pos [48 2]}} BZ_FINISH_OK 3]
+  ^{:go/apos {1 [49 24]}} [^{:val 4 :go/pos {:name-pos [49 2]}} BZ_STREAM_END 4]
+  ^{:go/apos {1 [50 24]}} [^{:val -1 :go/pos {:name-pos [50 2]}} BZ_SEQUENCE_ERROR -1]
+  ^{:go/apos {1 [51 24]}} [^{:val -2 :go/pos {:name-pos [51 2]}} BZ_PARAM_ERROR -2]
+  ^{:go/apos {1 [52 24]}} [^{:val -3 :go/pos {:name-pos [52 2]}} BZ_MEM_ERROR -3]
+  ^{:go/apos {1 [53 24]}} [^{:val -4 :go/pos {:name-pos [53 2]}} BZ_DATA_ERROR -4]
+  ^{:go/apos {1 [54 24]}} [^{:val -5 :go/pos {:name-pos [54 2]}} BZ_DATA_ERROR_MAGIC -5]
+  ^{:go/apos {1 [55 24]}} [^{:val -6 :go/pos {:name-pos [55 2]}} BZ_IO_ERROR -6]
+  ^{:go/apos {1 [56 24]}} [^{:val -7 :go/pos {:name-pos [56 2]}} BZ_UNEXPECTED_EOF -7]
+  ^{:go/apos {1 [57 24]}} [^{:val -8 :go/pos {:name-pos [57 2]}} BZ_OUTBUFF_FULL -8]
+  ^{:go/apos {1 [58 24]}} [^{:val -9 :go/pos {:name-pos [58 2]}} BZ_CONFIG_ERROR -9])
+
+
+^{:go/pos {:lparen [61 7] :rparen [73 1] :tok-pos [61 1]}} (go/const
+  ^{:go/apos {1 [62 22]} :go/atext {1 "0xffffffff"}} [^{:val 4294967295 :go/pos {:name-pos [62 2]}} UINT_MAX 0xffffffff]
+  [^{:val 9223372036854775807 :go/pos {:name-pos [63 2]}} PY_SSIZE_T_MAX ^{:go/apos {2 [63 30]} :go/pos {:op-pos [63 28]}} (- ^{:go/apos {1 [63 22] 2 [63 25]} :go/pos {:op-pos [63 23]}} (<< 1 63) 1)]
+  ^{:go/apos {1 [64 22]}} [^{:val 80 :go/pos {:name-pos [64 2]}} sizeof_bz_stream 80]
+  ^{:go/apos {1 [65 22]}} [^{:val 0 :go/pos {:name-pos [65 2]}} off_next_in 0]
+  ^{:go/apos {1 [66 22]}} [^{:val 8 :go/pos {:name-pos [66 2]}} off_avail_in 8]
+  ^{:go/apos {1 [67 22]}} [^{:val 24 :go/pos {:name-pos [67 2]}} off_next_out 24]
+  ^{:go/apos {1 [68 22]}} [^{:val 32 :go/pos {:name-pos [68 2]}} off_avail_out 32]
+  ^{:go/apos {1 [69 22]}} [^{:val 36 :go/pos {:name-pos [69 2]}} off_total_out_lo 36]
+  ^{:go/apos {1 [70 22]}} [^{:val 48 :go/pos {:name-pos [70 2]}} off_state 48]
+  ^{:go/apos {1 [71 22]}} [^{:val 9 :go/pos {:name-pos [71 2]}} layoutFields 9]
+  ^{:go/apos {1 [72 22]} :go/atext {1 "0x7fffffffffffffff"}} [^{:val 9223372036854775807 :go/pos {:name-pos [72 2]}} OUTPUT_BUFFER_MAX 0x7fffffffffffffff])
+
+
+
+^{:go/pos {:doc [75 1] :tok-pos [76 1]}} (go/var ^{:doc "bzsOffsets are bz_stream's size and fields' offsets as the glue assumes them (pybz2_layout's order).\n" :go/pos {:name-pos [76 5]}} bzsOffsets ^{:go/apos {3 [76 60] 4 [76 63] 5 [76 66] 6 [76 70] 7 [76 74] 8 [76 78] 9 [76 82] 10 [76 86] 11 [76 90]} :go/pos {:lbrace [76 41] :rbrace [76 92]}} (lit ^{:go/pos {:lbrack [76 18]}} (array ^{:go/apos {2 [76 34]} :go/pos {:op-pos [76 32]}} (+ ^{:go/pos {:name-pos [76 19]}} layoutFields 1) ^{:go/pos {:name-pos [76 36]}} int64) ^{:go/pos {:name-pos [76 42]}} sizeof_bz_stream 0 8 12 16 24 32 36 40 48))
+
+^{:go/pos {:lparen [78 5] :rparen [82 1] :tok-pos [78 1]}} (go/var
+  [^{:go/pos {:name-pos [79 2]}} bz2CompressorType ^{:go/apos {1 [79 39] 2 [79 56] 3 [79 61]} :go/pos {:lparen [79 38] :rparen [79 62]}} (^{:go/pos {:name-pos [79 24]}} NewBuiltinType "BZ2Compressor" nil 0)]
+  [^{:go/pos {:name-pos [80 2]}} bz2DecompressorType ^{:go/apos {1 [80 39] 2 [80 58] 3 [80 63]} :go/pos {:lparen [80 38] :rparen [80 64]}} (^{:go/pos {:name-pos [80 24]}} NewBuiltinType "BZ2Decompressor" nil 0)]
+  [^{:tag ^{:go/pos {:star [81 22]}} (* ^{:go/pos {:dot [81 27] :name-pos [81 28] :x-pos [81 23]}} clib/Lib) :go/pos {:name-pos [81 2]}} lib])
+
+
+
+^{:go/pos {:doc [84 1] :func [85 1] :lbrace [85 22] :rbrace [96 1] :return [95 2]}} (go/func ^{:go/pos {:name-pos [85 6]}} bz2 "bz2 is the library's program, opened on the module's first use; its layout checked against the glue's.\n" ^{:tag ^{:go/pos {:star [85 12]}} (* ^{:go/pos {:dot [85 17] :name-pos [85 18] :x-pos [85 13]}} clib/Lib) :go/pos {:closing [85 10] :opening [85 9]}} []
+  ^{:go/pos {:if [86 2] :lbrace [86 16] :rbrace [94 2]}} (when ^{:go/apos {2 [86 12]} :go/pos {:op-pos [86 9]}} (== ^{:go/pos {:name-pos [86 5]}} lib nil)
+    (let [^{:go/pos {:name-pos [87 3] :tok-pos [87 5]}} l ^{:go/apos {1 [87 18]} :go/pos {:lparen [87 17] :rparen [87 38]}} (^{:go/pos {:dot [87 12] :name-pos [87 13] :x-pos [87 8]}} clib/Open "bzip2" ^{:go/pos {:dot [87 32] :name-pos [87 33] :x-pos [87 27]}} bzip2/Nodes)]
+      ^{:go/pos {:for [88 3] :lbrace [88 35] :range [88 18] :rbrace [92 3] :tok-pos [88 15]}} (range [^{:go/pos {:name-pos [88 7]}} k ^{:go/pos {:name-pos [88 10]}} want ^{:go/pos {:name-pos [88 24]}} bzsOffsets]
+        ^{:go/pos {:if [89 4] :lbrace [89 60] :rbrace [91 4]}} (when [^{:go/pos {:name-pos [89 7] :tok-pos [89 11]}} got ^{:go/apos {2 [89 21]} :go/pos {:dot [89 15] :lparen [89 20] :name-pos [89 16] :rparen [89 45]}} (.Call ^{:go/pos {:name-pos [89 14]}} l "pybz2_layout" ^{:go/pos {:lparen [89 42] :rparen [89 44]}} (conv ^{:go/pos {:name-pos [89 37]}} int64 ^{:go/pos {:name-pos [89 43]}} k))] ^{:go/pos {:op-pos [89 52]}} (!= ^{:go/pos {:name-pos [89 48]}} got ^{:go/pos {:name-pos [89 55]}} want)
+          ^{:go/pos {:lparen [90 10] :rparen [90 80]}} (^{:go/pos {:name-pos [90 5]}} panic ^{:go/apos {1 [90 22]} :go/pos {:lparen [90 21] :rparen [90 79]}} (^{:go/pos {:name-pos [90 11]}} ExtSprintf "_bz2: bz_stream's layout %d is %d, not %d" ^{:go/pos {:name-pos [90 67]}} k ^{:go/pos {:name-pos [90 70]}} got ^{:go/pos {:name-pos [90 75]}} want))))
+
+
+      ^{:go/pos {:tok-pos [93 7]}} (set! ^{:go/pos {:name-pos [93 3]}} lib ^{:go/pos {:name-pos [93 9]}} l)))
+
+  ^{:go/pos {:name-pos [95 9]}} lib)
+
+
+^{:go/pos {:tok-pos [98 1]}} (go/type ^{:go/pos {:name-pos [98 6]}} BZ2Compressor ^{:go/pos {:lbrace [98 27] :rbrace [101 1] :struct [98 20]}} (struct
+    ^{:tag ^{:go/pos {:name-pos [99 10]}} uint64 :go/pos {:name-pos [99 2]}} bzs ; bz_stream *, C memory
+    ^{:tag ^{:go/pos {:name-pos [100 10]}} bool :go/pos {:name-pos [100 2]}} flushed))
+
+
+^{:go/pos {:func [103 1] :lbrace [103 36] :rbrace [103 63] :return [103 38]}} (go/method ^{:go/pos {:name-pos [103 23]}} Type ^{:tag ^{:go/pos {:star [103 30]}} (* ^{:go/pos {:name-pos [103 31]}} Type) :go/pos {:closing [103 28] :opening [103 27] :recv-closing [103 21] :recv-opening [103 6]}} [^{:go/pos {:star [103 7]}} (* ^{:go/pos {:name-pos [103 8]}} BZ2Compressor)] ^{:go/pos {:name-pos [103 45]}} bz2CompressorType)
+
+^{:go/pos {:tok-pos [105 1]}} (go/type ^{:go/pos {:name-pos [105 6]}} BZ2Decompressor ^{:go/pos {:lbrace [105 29] :rbrace [116 1] :struct [105 22]}} (struct
+    ^{:tag ^{:go/pos {:name-pos [106 20]}} uint64 :go/pos {:name-pos [106 2]}} bzs ; bz_stream *, C memory
+    ^{:tag ^{:go/pos {:name-pos [107 20]}} int32 :go/pos {:name-pos [107 2]}} bzerror
+    ^{:tag ^{:go/pos {:name-pos [108 20]}} bool :go/pos {:name-pos [108 2]}} eof
+    ^{:tag ^{:go/pos {:name-pos [109 20]}} Object :go/pos {:name-pos [109 2]}} unused_data
+    ^{:tag ^{:go/pos {:name-pos [110 20]}} bool :go/pos {:name-pos [110 2]}} needs_input
+    ^{:tag ^{:go/pos {:name-pos [111 20]}} uint64 :go/pos {:name-pos [111 2]}} input_buffer ; char *, C memory
+    ^{:tag ^{:go/pos {:name-pos [112 20]}} uint64 :go/pos {:name-pos [112 2]}} input_buffer_size
+
+
+    ^{:tag ^{:go/pos {:name-pos [115 20]}} uint64 :doc "bzs->avail_in is only 32 bit, so we store the true length separately. Conversion and looping is\nencapsulated in decompress_buf()\n" :go/pos {:name-pos [115 2]}} bzs_avail_in_real))
+
+
+^{:go/pos {:func [118 1] :lbrace [118 38] :rbrace [118 67] :return [118 40]}} (go/method ^{:go/pos {:name-pos [118 25]}} Type ^{:tag ^{:go/pos {:star [118 32]}} (* ^{:go/pos {:name-pos [118 33]}} Type) :go/pos {:closing [118 30] :opening [118 29] :recv-closing [118 23] :recv-opening [118 6]}} [^{:go/pos {:star [118 7]}} (* ^{:go/pos {:name-pos [118 8]}} BZ2Decompressor)] ^{:go/pos {:name-pos [118 47]}} bz2DecompressorType)
+
+
+^{:go/pos {:doc [120 1] :func [121 1] :lbrace [121 35] :rbrace [121 74] :return [121 37]}} (go/func ^{:go/pos {:name-pos [121 6]}} next_in "The stream's fields.\n" ^{:tag ^{:go/pos {:name-pos [121 26]}} uint64 :go/pos {:closing [121 24] :opening [121 13]}} [^{:tag ^{:go/pos {:name-pos [121 18]}} uint64 :go/pos {:name-pos [121 14]}} bzs] ^{:go/pos {:dot [121 47] :lparen [121 54] :name-pos [121 48] :rparen [121 72]}} (.Load64 ^{:go/pos {:name-pos [121 44]}} lib ^{:go/pos {:op-pos [121 59]}} (+ ^{:go/pos {:name-pos [121 55]}} bzs ^{:go/pos {:name-pos [121 61]}} off_next_in)))
+^{:go/pos {:func [122 1] :lbrace [122 35] :rbrace [122 69]}} (go/func ^{:go/pos {:name-pos [122 6]}} set_next_in ^{:go/pos {:closing [122 31] :opening [122 17]}} [^{:tag ^{:go/pos {:name-pos [122 25]}} uint64 :go/pos {:name-pos [122 18]}} bzs ^{:tag ^{:go/pos {:name-pos [122 25]}} uint64 :go/pos {:name-pos [122 23]}} p] ^{:go/pos {:dot [122 40] :lparen [122 48] :name-pos [122 41] :rparen [122 67]}} (.Store64 ^{:go/pos {:name-pos [122 37]}} lib ^{:go/pos {:op-pos [122 52]}} (+ ^{:go/pos {:name-pos [122 49]}} bzs ^{:go/pos {:name-pos [122 53]}} off_next_in) ^{:go/pos {:name-pos [122 66]}} p))
+^{:go/pos {:func [123 1] :lbrace [123 35] :rbrace [123 83] :return [123 37]}} (go/func ^{:go/pos {:name-pos [123 6]}} avail_in ^{:tag ^{:go/pos {:name-pos [123 27]}} uint64 :go/pos {:closing [123 25] :opening [123 14]}} [^{:tag ^{:go/pos {:name-pos [123 19]}} uint64 :go/pos {:name-pos [123 15]}} bzs] ^{:go/pos {:lparen [123 50] :rparen [123 81]}} (conv ^{:go/pos {:name-pos [123 44]}} uint64 ^{:go/pos {:dot [123 54] :lparen [123 61] :name-pos [123 55] :rparen [123 80]}} (.Load32 ^{:go/pos {:name-pos [123 51]}} lib ^{:go/pos {:op-pos [123 66]}} (+ ^{:go/pos {:name-pos [123 62]}} bzs ^{:go/pos {:name-pos [123 68]}} off_avail_in))))
+^{:go/pos {:func [124 1] :lbrace [124 35] :rbrace [124 78]}} (go/func ^{:go/pos {:name-pos [124 6]}} set_avail_in ^{:go/pos {:closing [124 32] :opening [124 18]}} [^{:tag ^{:go/pos {:name-pos [124 26]}} uint64 :go/pos {:name-pos [124 19]}} bzs ^{:tag ^{:go/pos {:name-pos [124 26]}} uint64 :go/pos {:name-pos [124 24]}} n] ^{:go/pos {:dot [124 40] :lparen [124 48] :name-pos [124 41] :rparen [124 76]}} (.Store32 ^{:go/pos {:name-pos [124 37]}} lib ^{:go/pos {:op-pos [124 52]}} (+ ^{:go/pos {:name-pos [124 49]}} bzs ^{:go/pos {:name-pos [124 53]}} off_avail_in) ^{:go/pos {:lparen [124 73] :rparen [124 75]}} (conv ^{:go/pos {:name-pos [124 67]}} uint32 ^{:go/pos {:name-pos [124 74]}} n)))
+^{:go/pos {:func [125 1] :lbrace [125 35] :rbrace [125 70]}} (go/func ^{:go/pos {:name-pos [125 6]}} set_next_out ^{:go/pos {:closing [125 32] :opening [125 18]}} [^{:tag ^{:go/pos {:name-pos [125 26]}} uint64 :go/pos {:name-pos [125 19]}} bzs ^{:tag ^{:go/pos {:name-pos [125 26]}} uint64 :go/pos {:name-pos [125 24]}} p] ^{:go/pos {:dot [125 40] :lparen [125 48] :name-pos [125 41] :rparen [125 68]}} (.Store64 ^{:go/pos {:name-pos [125 37]}} lib ^{:go/pos {:op-pos [125 52]}} (+ ^{:go/pos {:name-pos [125 49]}} bzs ^{:go/pos {:name-pos [125 53]}} off_next_out) ^{:go/pos {:name-pos [125 67]}} p))
+^{:go/pos {:func [126 1] :lbrace [126 35] :rbrace [126 84] :return [126 37]}} (go/func ^{:go/pos {:name-pos [126 6]}} avail_out ^{:tag ^{:go/pos {:name-pos [126 28]}} uint64 :go/pos {:closing [126 26] :opening [126 15]}} [^{:tag ^{:go/pos {:name-pos [126 20]}} uint64 :go/pos {:name-pos [126 16]}} bzs] ^{:go/pos {:lparen [126 50] :rparen [126 82]}} (conv ^{:go/pos {:name-pos [126 44]}} uint64 ^{:go/pos {:dot [126 54] :lparen [126 61] :name-pos [126 55] :rparen [126 81]}} (.Load32 ^{:go/pos {:name-pos [126 51]}} lib ^{:go/pos {:op-pos [126 66]}} (+ ^{:go/pos {:name-pos [126 62]}} bzs ^{:go/pos {:name-pos [126 68]}} off_avail_out))))
+^{:go/pos {:func [127 1] :lbrace [127 35] :rbrace [127 79]}} (go/func ^{:go/pos {:name-pos [127 6]}} set_avail_out ^{:go/pos {:closing [127 33] :opening [127 19]}} [^{:tag ^{:go/pos {:name-pos [127 27]}} uint64 :go/pos {:name-pos [127 20]}} bzs ^{:tag ^{:go/pos {:name-pos [127 27]}} uint64 :go/pos {:name-pos [127 25]}} n] ^{:go/pos {:dot [127 40] :lparen [127 48] :name-pos [127 41] :rparen [127 77]}} (.Store32 ^{:go/pos {:name-pos [127 37]}} lib ^{:go/pos {:op-pos [127 52]}} (+ ^{:go/pos {:name-pos [127 49]}} bzs ^{:go/pos {:name-pos [127 53]}} off_avail_out) ^{:go/pos {:lparen [127 74] :rparen [127 76]}} (conv ^{:go/pos {:name-pos [127 68]}} uint32 ^{:go/pos {:name-pos [127 75]}} n)))
+
+
+^{:go/pos {:doc [129 1] :func [130 1] :lbrace [130 25] :rbrace [136 1] :return [135 2]}} (go/func ^{:go/pos {:name-pos [130 6]}} newStream "newStream is a zeroed bz_stream (bzalloc, bzfree and opaque NULL: libbzip2's default allocator).\n" ^{:tag ^{:go/pos {:name-pos [130 18]}} uint64 :go/pos {:closing [130 16] :opening [130 15]}} []
+  (let [^{:go/pos {:name-pos [131 2] :tok-pos [131 4]}} p ^{:go/pos {:dot [131 10] :lparen [131 17] :name-pos [131 11] :rparen [131 34]}} (.Malloc ^{:go/pos {:name-pos [131 7]}} lib ^{:go/pos {:name-pos [131 18]}} sizeof_bz_stream)]
+    ^{:go/pos {:if [132 2] :lbrace [132 12] :rbrace [134 2]}} (when ^{:go/apos {2 [132 10]} :go/pos {:op-pos [132 7]}} (!= ^{:go/pos {:name-pos [132 5]}} p 0)
+      ^{:go/apos {3 [133 17]} :go/pos {:dot [133 8] :lparen [133 13] :name-pos [133 9] :rparen [133 36]}} (.Fill ^{:go/pos {:dot [133 6] :name-pos [133 7]}} (.-M ^{:go/pos {:name-pos [133 3]}} lib) ^{:go/pos {:name-pos [133 14]}} p 0 ^{:go/pos {:name-pos [133 20]}} sizeof_bz_stream))
+
+    ^{:go/pos {:name-pos [135 9]}} p))
+
+^{:go/pos {:func [137 1] :lbrace [137 42] :rbrace [137 79] :return [137 44]}} (go/func ^{:go/pos {:name-pos [137 6]}} call ^{:tag ^{:go/pos {:name-pos [137 36]}} int32 :go/pos {:closing [137 34] :opening [137 10]}} [^{:tag ^{:go/pos {:name-pos [137 16]}} string :go/pos {:name-pos [137 11]}} name & ^{:tag ^{:go/pos {:ellipsis [137 26]}} (slice ^{:go/pos {:name-pos [137 29]}} int64) :go/pos {:name-pos [137 24]}} a] ^{:go/pos {:lparen [137 56] :rparen [137 77]}} (conv ^{:go/pos {:name-pos [137 51]}} int32 ^{:go/pos {:dot [137 60] :ellipsis [137 73] :lparen [137 65] :name-pos [137 61] :rparen [137 76]}} (.Call ^{:go/pos {:name-pos [137 57]}} lib ^{:go/pos {:name-pos [137 66]}} name (spread ^{:go/pos {:name-pos [137 72]}} a))))
+
+
+^{:go/pos {:doc [139 1] :tok-pos [140 1]}} (go/var ^{:doc "Blocks output buffer wrappers (pycore_blocks_output_buffer.h): the block sizes.\n" :go/pos {:name-pos [140 5]}} BUFFER_BLOCK_SIZE ^{:go/pos {:lbrace [140 32] :rbrace [141 93]}} (lit ^{:go/pos {:lbrack [140 25]}} (slice ^{:go/pos {:name-pos [140 27]}} int64) ^{:go/apos {1 [140 33] 2 [140 39]} :go/pos {:op-pos [140 36]}} (<< 32 10) ^{:go/apos {1 [140 43] 2 [140 49]} :go/pos {:op-pos [140 46]}} (<< 64 10) ^{:go/apos {1 [140 53] 2 [140 60]} :go/pos {:op-pos [140 57]}} (<< 256 10) ^{:go/apos {1 [140 64] 2 [140 69]} :go/pos {:op-pos [140 66]}} (<< 1 20) ^{:go/apos {1 [140 73] 2 [140 78]} :go/pos {:op-pos [140 75]}} (<< 4 20) ^{:go/apos {1 [140 82] 2 [140 87]} :go/pos {:op-pos [140 84]}} (<< 8 20) ^{:go/apos {1 [140 91] 2 [140 97]} :go/pos {:op-pos [140 94]}} (<< 16 20) ^{:go/apos {1 [140 101] 2 [140 107]} :go/pos {:op-pos [140 104]}} (<< 16 20)
+    ^{:go/apos {1 [141 2] 2 [141 8]} :go/pos {:op-pos [141 5]}} (<< 32 20) ^{:go/apos {1 [141 12] 2 [141 18]} :go/pos {:op-pos [141 15]}} (<< 32 20) ^{:go/apos {1 [141 22] 2 [141 28]} :go/pos {:op-pos [141 25]}} (<< 32 20) ^{:go/apos {1 [141 32] 2 [141 38]} :go/pos {:op-pos [141 35]}} (<< 32 20) ^{:go/apos {1 [141 42] 2 [141 48]} :go/pos {:op-pos [141 45]}} (<< 64 20) ^{:go/apos {1 [141 52] 2 [141 58]} :go/pos {:op-pos [141 55]}} (<< 64 20) ^{:go/apos {1 [141 62] 2 [141 69]} :go/pos {:op-pos [141 66]}} (<< 128 20) ^{:go/apos {1 [141 73] 2 [141 80]} :go/pos {:op-pos [141 77]}} (<< 128 20) ^{:go/apos {1 [141 84] 2 [141 91]} :go/pos {:op-pos [141 88]}} (<< 256 20)))
+
+
+^{:go/pos {:doc [143 1] :tok-pos [144 1]}} (go/type ^{:go/pos {:name-pos [144 6]}} _BlocksOutputBuffer "_BlocksOutputBuffer: the finished blocks' bytes in Go, the current block in C memory.\n" ^{:go/pos {:lbrace [144 33] :rbrace [151 1] :struct [144 26]}} (struct
+    ^{:tag ^{:go/pos {:lbrack [145 12]}} (slice ^{:go/pos {:name-pos [145 14]}} byte) :go/pos {:name-pos [145 2]}} data
+    ^{:tag ^{:go/pos {:name-pos [146 12]}} uint64 :go/pos {:name-pos [146 2]}} block ; the current block, C memory
+    ^{:tag ^{:go/pos {:name-pos [147 12]}} int64 :go/pos {:name-pos [147 2]}} blockSize
+    ^{:tag ^{:go/pos {:name-pos [148 12]}} int64 :go/pos {:name-pos [148 2]}} allocated
+    ^{:tag ^{:go/pos {:name-pos [149 12]}} int64 :go/pos {:name-pos [149 2]}} max
+    ^{:tag ^{:go/pos {:name-pos [150 12]}} int :go/pos {:name-pos [150 2]}} n))
+
+
+
+^{:go/pos {:doc [153 1] :func [154 1] :lbrace [154 96] :rbrace [168 1] :return [167 2]}} (go/func ^{:go/pos {:name-pos [154 6]}} OutputBuffer_InitAndGrow "OutputBuffer_InitAndGrow: the first block, max_length's when smaller; next_out and avail_out set.\n" ^{:tag ^{:go/pos {:name-pos [154 90]}} int64 :go/pos {:closing [154 88] :opening [154 30]}} [^{:tag ^{:go/pos {:star [154 38]}} (* ^{:go/pos {:name-pos [154 39]}} _BlocksOutputBuffer) :go/pos {:name-pos [154 31]}} buffer ^{:tag ^{:go/pos {:name-pos [154 71]}} int64 :go/pos {:name-pos [154 60]}} max_length ^{:tag ^{:go/pos {:name-pos [154 82]}} uint64 :go/pos {:name-pos [154 78]}} bzs]
+  (let [^{:go/pos {:name-pos [155 2] :tok-pos [155 13]}} block_size ^{:go/apos {2 [155 34]} :go/pos {:lbrack [155 33] :rbrack [155 35]}} (aget ^{:go/pos {:name-pos [155 16]}} BUFFER_BLOCK_SIZE 0)]
+    ^{:go/pos {:if [156 2] :lbrace [156 48] :rbrace [158 2]}} (when ^{:go/pos {:op-pos [156 21]}} (and ^{:go/apos {1 [156 5]} :go/pos {:op-pos [156 7]}} (<= 0 ^{:go/pos {:name-pos [156 10]}} max_length) ^{:go/pos {:op-pos [156 35]}} (< ^{:go/pos {:name-pos [156 24]}} max_length ^{:go/pos {:name-pos [156 37]}} block_size))
+      ^{:go/pos {:tok-pos [157 14]}} (set! ^{:go/pos {:name-pos [157 3]}} block_size ^{:go/pos {:name-pos [157 16]}} max_length))
+
+    ^{:go/pos {:tok-pos [159 13]}} (set! ^{:go/pos {:dot [159 8] :name-pos [159 9]}} (.-max ^{:go/pos {:name-pos [159 2]}} buffer) ^{:go/pos {:name-pos [159 15]}} max_length)
+    ^{:go/apos {2 [160 13]} :go/pos {:tok-pos [160 11]}} (set! ^{:go/pos {:dot [160 8] :name-pos [160 9]}} (.-n ^{:go/pos {:name-pos [160 2]}} buffer) 1)
+    ^{:go/pos {:if [161 2] :lbrace [161 34] :rbrace [163 2]}} (when ^{:go/pos {:op-pos [161 5]}} (not ^{:go/pos {:dot [161 12] :lparen [161 21] :name-pos [161 13] :rparen [161 32]}} (.newBlock ^{:go/pos {:name-pos [161 6]}} buffer ^{:go/pos {:name-pos [161 22]}} block_size))
+      ^{:go/apos {1 [162 10]} :go/pos {:return [162 3]}} (return -1))
+
+    ^{:go/pos {:tok-pos [164 19]}} (set! ^{:go/pos {:dot [164 8] :name-pos [164 9]}} (.-allocated ^{:go/pos {:name-pos [164 2]}} buffer) ^{:go/pos {:name-pos [164 21]}} block_size)
+    ^{:go/pos {:lparen [165 14] :rparen [165 32]}} (^{:go/pos {:name-pos [165 2]}} set_next_out ^{:go/pos {:name-pos [165 15]}} bzs ^{:go/pos {:dot [165 26] :name-pos [165 27]}} (.-block ^{:go/pos {:name-pos [165 20]}} buffer))
+    ^{:go/pos {:lparen [166 15] :rparen [166 39]}} (^{:go/pos {:name-pos [166 2]}} set_avail_out ^{:go/pos {:name-pos [166 16]}} bzs ^{:go/pos {:lparen [166 27] :rparen [166 38]}} (conv ^{:go/pos {:name-pos [166 21]}} uint64 ^{:go/pos {:name-pos [166 28]}} block_size))
+    ^{:go/pos {:name-pos [167 9]}} block_size))
+
+
+^{:go/pos {:func [170 1] :lbrace [170 62] :rbrace [181 1] :return [180 2]}} (go/method ^{:go/pos {:name-pos [170 36]}} newBlock ^{:tag ^{:go/pos {:name-pos [170 57]}} bool :go/pos {:closing [170 55] :opening [170 44] :recv-closing [170 34] :recv-opening [170 6]}} [^{:tag ^{:go/pos {:star [170 14]}} (* ^{:go/pos {:name-pos [170 15]}} _BlocksOutputBuffer) :go/pos {:name-pos [170 7]}} buffer ^{:tag ^{:go/pos {:name-pos [170 50]}} int64 :go/pos {:name-pos [170 45]}} size]
+  (let [^{:go/pos {:name-pos [171 2] :tok-pos [171 4]}} n ^{:go/pos {:name-pos [171 7]}} size]
+    ^{:go/pos {:if [172 2] :lbrace [172 12] :rbrace [174 2]}} (when ^{:go/apos {2 [172 10]} :go/pos {:op-pos [172 7]}} (== ^{:go/pos {:name-pos [172 5]}} n 0)
+      ^{:go/apos {2 [173 7]} :go/pos {:tok-pos [173 5]}} (set! ^{:go/pos {:name-pos [173 3]}} n 1))
+
+    ^{:go/apos {4 [180 9]}} (let [^{:go/pos {:name-pos [175 2] :tok-pos [175 4]}} p ^{:go/pos {:dot [175 10] :lparen [175 17] :name-pos [175 11] :rparen [175 27]}} (.Malloc ^{:go/pos {:name-pos [175 7]}} lib ^{:go/pos {:lparen [175 24] :rparen [175 26]}} (conv ^{:go/pos {:name-pos [175 18]}} uint64 ^{:go/pos {:name-pos [175 25]}} n))]
+      ^{:go/pos {:if [176 2] :lbrace [176 12] :rbrace [178 2]}} (when ^{:go/apos {2 [176 10]} :go/pos {:op-pos [176 7]}} (== ^{:go/pos {:name-pos [176 5]}} p 0)
+        ^{:go/apos {1 [177 10]} :go/pos {:return [177 3]}} (return false))
+
+      ^{:go/pos {:tok-pos [179 33]}} (set! (values ^{:go/pos {:dot [179 8] :name-pos [179 9]}} (.-block ^{:go/pos {:name-pos [179 2]}} buffer) ^{:go/pos {:dot [179 22] :name-pos [179 23]}} (.-blockSize ^{:go/pos {:name-pos [179 16]}} buffer)) (values ^{:go/pos {:name-pos [179 35]}} p ^{:go/pos {:name-pos [179 38]}} size))
+      true)))
+
+
+
+^{:go/pos {:doc [183 1] :func [184 1] :lbrace [184 61] :rbrace [192 1]}} (go/method ^{:go/pos {:name-pos [184 36]}} flushBlock "flushBlock copies the current block's bytes before avail_out into data and frees it.\n" ^{:go/pos {:closing [184 59] :opening [184 46] :recv-closing [184 34] :recv-opening [184 6]}} [^{:tag ^{:go/pos {:star [184 14]}} (* ^{:go/pos {:name-pos [184 15]}} _BlocksOutputBuffer) :go/pos {:name-pos [184 7]}} buffer ^{:tag ^{:go/pos {:name-pos [184 53]}} uint64 :go/pos {:name-pos [184 47]}} avail]
+  ^{:go/pos {:if [185 2] :lbrace [185 23] :rbrace [187 2]}} (when ^{:go/apos {2 [185 21]} :go/pos {:op-pos [185 18]}} (== ^{:go/pos {:dot [185 11] :name-pos [185 12]}} (.-block ^{:go/pos {:name-pos [185 5]}} buffer) 0)
+    ^{:go/pos {:return [186 3]}} (return))
+
+  (let [^{:go/pos {:name-pos [188 2] :tok-pos [188 7]}} used ^{:go/pos {:op-pos [188 35]}} (- ^{:go/pos {:lparen [188 16] :rparen [188 33]}} (conv ^{:go/pos {:name-pos [188 10]}} uint64 ^{:go/pos {:dot [188 23] :name-pos [188 24]}} (.-blockSize ^{:go/pos {:name-pos [188 17]}} buffer)) ^{:go/pos {:name-pos [188 37]}} avail)]
+    ^{:go/pos {:tok-pos [189 14]}} (set! ^{:go/pos {:dot [189 8] :name-pos [189 9]}} (.-data ^{:go/pos {:name-pos [189 2]}} buffer) ^{:go/pos {:ellipsis [189 64] :lparen [189 22] :rparen [189 67]}} (^{:go/pos {:name-pos [189 16]}} append ^{:go/pos {:dot [189 29] :name-pos [189 30]}} (.-data ^{:go/pos {:name-pos [189 23]}} buffer) (spread ^{:go/pos {:dot [189 39] :lparen [189 44] :name-pos [189 40] :rparen [189 63]}} (.Read ^{:go/pos {:name-pos [189 36]}} lib ^{:go/pos {:dot [189 51] :name-pos [189 52]}} (.-block ^{:go/pos {:name-pos [189 45]}} buffer) ^{:go/pos {:name-pos [189 59]}} used))))
+    ^{:go/pos {:dot [190 5] :lparen [190 10] :name-pos [190 6] :rparen [190 23]}} (.Free ^{:go/pos {:name-pos [190 2]}} lib ^{:go/pos {:dot [190 17] :name-pos [190 18]}} (.-block ^{:go/pos {:name-pos [190 11]}} buffer))
+    ^{:go/apos {2 [191 17]} :go/pos {:tok-pos [191 15]}} (set! ^{:go/pos {:dot [191 8] :name-pos [191 9]}} (.-block ^{:go/pos {:name-pos [191 2]}} buffer) 0)))
+
+
+
+^{:go/pos {:doc [194 1] :func [195 1] :lbrace [195 71] :rbrace [227 1] :return [226 2]}} (go/func ^{:go/pos {:name-pos [195 6]}} OutputBuffer_Grow "OutputBuffer_Grow: the next block (its size the table's, max_length's rest when smaller); -1 on failure.\n" ^{:tag ^{:go/pos {:name-pos [195 65]}} int64 :go/pos {:closing [195 63] :opening [195 23]}} [^{:tag ^{:go/pos {:star [195 31]}} (* ^{:go/pos {:name-pos [195 32]}} _BlocksOutputBuffer) :go/pos {:name-pos [195 24]}} buffer ^{:tag ^{:go/pos {:name-pos [195 57]}} uint64 :go/pos {:name-pos [195 53]}} bzs]
+  ^{:go/pos {:if [196 2] :lbrace [196 25] :rbrace [198 2]}} (when ^{:go/apos {2 [196 23]} :go/pos {:op-pos [196 20]}} (!= ^{:go/pos {:lparen [196 14] :rparen [196 18]}} (^{:go/pos {:name-pos [196 5]}} avail_out ^{:go/pos {:name-pos [196 15]}} bzs) 0)
+    ^{:go/apos {1 [197 9]} :go/pos {:lparen [197 8] :rparen [197 49]}} (^{:go/pos {:name-pos [197 3]}} panic "_bz2: OutputBuffer_Grow with room left"))
+
+  (let [^{:tag ^{:go/pos {:name-pos [199 17]}} int64 :go/pos {:name-pos [199 6] :tok-pos [199 2]}} block_size (zero ^{:go/pos {:name-pos [199 17]}} int64)]
+    ^{:go/pos {:else-lbrace [202 9] :else-rbrace [204 2] :if [200 2] :lbrace [200 39] :rbrace [202 2]}} (if ^{:go/pos {:op-pos [200 14]}} (< ^{:go/pos {:dot [200 11] :name-pos [200 12]}} (.-n ^{:go/pos {:name-pos [200 5]}} buffer) ^{:go/pos {:lparen [200 19] :rparen [200 37]}} (^{:go/pos {:name-pos [200 16]}} len ^{:go/pos {:name-pos [200 20]}} BUFFER_BLOCK_SIZE))
+      ^{:go/pos {:tok-pos [201 14]}} (set! ^{:go/pos {:name-pos [201 3]}} block_size ^{:go/pos {:lbrack [201 33] :rbrack [201 42]}} (aget ^{:go/pos {:name-pos [201 16]}} BUFFER_BLOCK_SIZE ^{:go/pos {:dot [201 40] :name-pos [201 41]}} (.-n ^{:go/pos {:name-pos [201 34]}} buffer)))
+
+      ^{:go/pos {:tok-pos [203 14]}} (set! ^{:go/pos {:name-pos [203 3]}} block_size ^{:go/pos {:lbrack [203 33] :rbrack [203 58]}} (aget ^{:go/pos {:name-pos [203 16]}} BUFFER_BLOCK_SIZE ^{:go/apos {2 [203 57]} :go/pos {:op-pos [203 56]}} (- ^{:go/pos {:lparen [203 37] :rparen [203 55]}} (^{:go/pos {:name-pos [203 34]}} len ^{:go/pos {:name-pos [203 38]}} BUFFER_BLOCK_SIZE) 1))))
+
+    ^{:go/pos {:if [205 2] :lbrace [205 21] :rbrace [213 2]}} (when ^{:go/apos {2 [205 19]} :go/pos {:op-pos [205 16]}} (>= ^{:go/pos {:dot [205 11] :name-pos [205 12]}} (.-max ^{:go/pos {:name-pos [205 5]}} buffer) 0)
+      (let [^{:go/pos {:name-pos [206 3] :tok-pos [206 8]}} rest ^{:go/pos {:op-pos [206 22]}} (- ^{:go/pos {:dot [206 17] :name-pos [206 18]}} (.-max ^{:go/pos {:name-pos [206 11]}} buffer) ^{:go/pos {:dot [206 30] :name-pos [206 31]}} (.-allocated ^{:go/pos {:name-pos [206 24]}} buffer))]
+        ^{:go/pos {:if [207 3] :lbrace [207 16] :rbrace [209 3]}} (when ^{:go/apos {2 [207 14]} :go/pos {:op-pos [207 11]}} (<= ^{:go/pos {:name-pos [207 6]}} rest 0)
+          ^{:go/apos {1 [208 10]} :go/pos {:lparen [208 9] :rparen [208 51]}} (^{:go/pos {:name-pos [208 4]}} panic "_bz2: OutputBuffer_Grow past max_length"))
+
+        ^{:go/pos {:if [210 3] :lbrace [210 24] :rbrace [212 3]}} (when ^{:go/pos {:op-pos [210 17]}} (> ^{:go/pos {:name-pos [210 6]}} block_size ^{:go/pos {:name-pos [210 19]}} rest)
+          ^{:go/pos {:tok-pos [211 15]}} (set! ^{:go/pos {:name-pos [211 4]}} block_size ^{:go/pos {:name-pos [211 17]}} rest))))
+
+
+    ^{:go/pos {:if [214 2] :lbrace [214 53] :rbrace [217 2]}} (when ^{:go/pos {:op-pos [214 16]}} (> ^{:go/pos {:name-pos [214 5]}} block_size ^{:go/pos {:op-pos [214 35]}} (- ^{:go/pos {:name-pos [214 18]}} OUTPUT_BUFFER_MAX ^{:go/pos {:dot [214 42] :name-pos [214 43]}} (.-allocated ^{:go/pos {:name-pos [214 36]}} buffer)))
+      ^{:go/apos {2 [215 26]} :go/pos {:lparen [215 8] :rparen [215 61]}} (^{:go/pos {:name-pos [215 3]}} Raise ^{:go/pos {:name-pos [215 9]}} MemoryErrorType "Unable to allocate output buffer.")
+      ^{:go/apos {1 [216 10]} :go/pos {:return [216 3]}} (return -1))
+
+    ^{:go/apos {2 [218 20]} :go/pos {:dot [218 8] :lparen [218 19] :name-pos [218 9] :rparen [218 21]}} (.flushBlock ^{:go/pos {:name-pos [218 2]}} buffer 0)
+    ^{:go/pos {:if [219 2] :lbrace [219 34] :rbrace [221 2]}} (when ^{:go/pos {:op-pos [219 5]}} (not ^{:go/pos {:dot [219 12] :lparen [219 21] :name-pos [219 13] :rparen [219 32]}} (.newBlock ^{:go/pos {:name-pos [219 6]}} buffer ^{:go/pos {:name-pos [219 22]}} block_size))
+      ^{:go/apos {1 [220 10]} :go/pos {:return [220 3]}} (return -1))
+
+    ^{:go/pos {:tok-pos [222 10]}} (inc! ^{:go/pos {:dot [222 8] :name-pos [222 9]}} (.-n ^{:go/pos {:name-pos [222 2]}} buffer))
+    ^{:go/pos {:tok-pos [223 19]}} (set! ^{:go/pos {:dot [223 8] :name-pos [223 9]}} (.-allocated ^{:go/pos {:name-pos [223 2]}} buffer) + ^{:go/pos {:name-pos [223 22]}} block_size)
+    ^{:go/pos {:lparen [224 14] :rparen [224 32]}} (^{:go/pos {:name-pos [224 2]}} set_next_out ^{:go/pos {:name-pos [224 15]}} bzs ^{:go/pos {:dot [224 26] :name-pos [224 27]}} (.-block ^{:go/pos {:name-pos [224 20]}} buffer))
+    ^{:go/pos {:lparen [225 15] :rparen [225 39]}} (^{:go/pos {:name-pos [225 2]}} set_avail_out ^{:go/pos {:name-pos [225 16]}} bzs ^{:go/pos {:lparen [225 27] :rparen [225 38]}} (conv ^{:go/pos {:name-pos [225 21]}} uint64 ^{:go/pos {:name-pos [225 28]}} block_size))
+    ^{:go/pos {:name-pos [226 9]}} block_size))
+
+
+
+^{:go/pos {:doc [229 1] :func [230 1] :lbrace [230 80] :rbrace [232 1] :return [231 2]}} (go/func ^{:go/pos {:name-pos [230 6]}} OutputBuffer_GetDataSize "OutputBuffer_GetDataSize: the bytes written so far.\n" ^{:tag ^{:go/pos {:name-pos [230 74]}} int64 :go/pos {:closing [230 72] :opening [230 30]}} [^{:tag ^{:go/pos {:star [230 38]}} (* ^{:go/pos {:name-pos [230 39]}} _BlocksOutputBuffer) :go/pos {:name-pos [230 31]}} buffer ^{:tag ^{:go/pos {:name-pos [230 66]}} uint64 :go/pos {:name-pos [230 60]}} avail]
+  ^{:go/pos {:op-pos [231 26]}} (- ^{:go/pos {:dot [231 15] :name-pos [231 16]}} (.-allocated ^{:go/pos {:name-pos [231 9]}} buffer) ^{:go/pos {:lparen [231 33] :rparen [231 39]}} (conv ^{:go/pos {:name-pos [231 28]}} int64 ^{:go/pos {:name-pos [231 34]}} avail)))
+
+
+
+^{:go/pos {:doc [234 1] :func [235 1] :lbrace [235 76] :rbrace [238 1] :return [237 2]}} (go/func ^{:go/pos {:name-pos [235 6]}} OutputBuffer_Finish "OutputBuffer_Finish: the bytes object.\n" ^{:tag ^{:go/pos {:name-pos [235 69]}} Object :go/pos {:closing [235 67] :opening [235 25]}} [^{:tag ^{:go/pos {:star [235 33]}} (* ^{:go/pos {:name-pos [235 34]}} _BlocksOutputBuffer) :go/pos {:name-pos [235 26]}} buffer ^{:tag ^{:go/pos {:name-pos [235 61]}} uint64 :go/pos {:name-pos [235 55]}} avail]
+  ^{:go/pos {:dot [236 8] :lparen [236 19] :name-pos [236 9] :rparen [236 25]}} (.flushBlock ^{:go/pos {:name-pos [236 2]}} buffer ^{:go/pos {:name-pos [236 20]}} avail)
+  ^{:go/pos {:lparen [237 17] :rparen [237 29]}} (^{:go/pos {:name-pos [237 9]}} NewBytes ^{:go/pos {:dot [237 24] :name-pos [237 25]}} (.-data ^{:go/pos {:name-pos [237 18]}} buffer)))
+
+
+
+^{:go/pos {:doc [240 1] :func [241 1] :lbrace [241 56] :rbrace [246 1]}} (go/func ^{:go/pos {:name-pos [241 6]}} OutputBuffer_OnError "OutputBuffer_OnError frees the current block.\n" ^{:go/pos {:closing [241 54] :opening [241 26]}} [^{:tag ^{:go/pos {:star [241 34]}} (* ^{:go/pos {:name-pos [241 35]}} _BlocksOutputBuffer) :go/pos {:name-pos [241 27]}} buffer]
+  ^{:go/pos {:if [242 2] :lbrace [242 23] :rbrace [245 2]}} (when ^{:go/apos {2 [242 21]} :go/pos {:op-pos [242 18]}} (!= ^{:go/pos {:dot [242 11] :name-pos [242 12]}} (.-block ^{:go/pos {:name-pos [242 5]}} buffer) 0)
+    ^{:go/pos {:dot [243 6] :lparen [243 11] :name-pos [243 7] :rparen [243 24]}} (.Free ^{:go/pos {:name-pos [243 3]}} lib ^{:go/pos {:dot [243 18] :name-pos [243 19]}} (.-block ^{:go/pos {:name-pos [243 12]}} buffer))
+    ^{:go/apos {2 [244 18]} :go/pos {:tok-pos [244 16]}} (set! ^{:go/pos {:dot [244 9] :name-pos [244 10]}} (.-block ^{:go/pos {:name-pos [244 3]}} buffer) 0)))
+
+
+
+;; /* Helper functions. */
+
+
+^{:go/pos {:doc [250 1] :func [251 1] :lbrace [251 43] :rbrace [272 1]}} (go/func ^{:go/pos {:name-pos [251 6]}} catch_bz2_error "catch_bz2_error gives the exception for an error code, nil for a success.\n" ^{:tag ^{:go/pos {:name-pos [251 37]}} error :go/pos {:closing [251 35] :opening [251 21]}} [^{:tag ^{:go/pos {:name-pos [251 30]}} int32 :go/pos {:name-pos [251 22]}} bzerror]
+  ^{:go/pos {:lbrace [252 17] :rbrace [271 2] :switch [252 2]}} (switch ^{:go/pos {:name-pos [252 9]}} bzerror
+    ^{:go/pos {:case [253 2] :colon [253 65]}} (case [^{:go/pos {:name-pos [253 7]}} BZ_OK ^{:go/pos {:name-pos [253 14]}} BZ_RUN_OK ^{:go/pos {:name-pos [253 25]}} BZ_FLUSH_OK ^{:go/pos {:name-pos [253 38]}} BZ_FINISH_OK ^{:go/pos {:name-pos [253 52]}} BZ_STREAM_END]
+      ^{:go/apos {1 [254 10]} :go/pos {:return [254 3]}} (return nil))
+    ^{:go/pos {:case [255 2] :colon [255 22]}} (case [^{:go/pos {:name-pos [255 7]}} BZ_CONFIG_ERROR]
+      ^{:go/pos {:return [256 3]}} (return ^{:go/apos {2 [256 33]} :go/pos {:lparen [256 15] :rparen [256 70]}} (^{:go/pos {:name-pos [256 10]}} Raise ^{:go/pos {:name-pos [256 16]}} SystemErrorType "libbzip2 was not compiled correctly")))
+    ^{:go/pos {:case [257 2] :colon [257 21]}} (case [^{:go/pos {:name-pos [257 7]}} BZ_PARAM_ERROR]
+      ^{:go/pos {:return [258 3]}} (return ^{:go/apos {2 [258 32]} :go/pos {:lparen [258 15] :rparen [258 88]}} (^{:go/pos {:name-pos [258 10]}} Raise ^{:go/pos {:name-pos [258 16]}} ValueErrorType "Internal error - invalid parameters passed to libbzip2")))
+    ^{:go/pos {:case [259 2] :colon [259 19]}} (case [^{:go/pos {:name-pos [259 7]}} BZ_MEM_ERROR]
+      ^{:go/pos {:return [260 3]}} (return ^{:go/pos {:lparen [260 18] :rparen [260 48]}} (^{:go/pos {:name-pos [260 10]}} ExtRaise ^{:go/pos {:lparen [260 31] :rparen [260 47]}} (^{:go/pos {:name-pos [260 19]}} NewException ^{:go/pos {:name-pos [260 32]}} MemoryErrorType))))
+    ^{:go/pos {:case [261 2] :colon [261 41]}} (case [^{:go/pos {:name-pos [261 7]}} BZ_DATA_ERROR ^{:go/pos {:name-pos [261 22]}} BZ_DATA_ERROR_MAGIC]
+      ^{:go/pos {:return [262 3]}} (return ^{:go/apos {2 [262 29]} :go/pos {:lparen [262 15] :rparen [262 50]}} (^{:go/pos {:name-pos [262 10]}} Raise ^{:go/pos {:name-pos [262 16]}} OSErrorType "Invalid data stream")))
+    ^{:go/pos {:case [263 2] :colon [263 18]}} (case [^{:go/pos {:name-pos [263 7]}} BZ_IO_ERROR]
+      ^{:go/pos {:return [264 3]}} (return ^{:go/apos {2 [264 29]} :go/pos {:lparen [264 15] :rparen [264 48]}} (^{:go/pos {:name-pos [264 10]}} Raise ^{:go/pos {:name-pos [264 16]}} OSErrorType "Unknown I/O error")))
+    ^{:go/pos {:case [265 2] :colon [265 24]}} (case [^{:go/pos {:name-pos [265 7]}} BZ_UNEXPECTED_EOF]
+      ^{:go/pos {:return [266 3]}} (return ^{:go/apos {2 [266 30]} :go/pos {:lparen [266 15] :rparen [266 99]}} (^{:go/pos {:name-pos [266 10]}} Raise ^{:go/pos {:name-pos [266 16]}} EOFErrorType "Compressed file ended before the logical end-of-stream was detected")))
+    ^{:go/pos {:case [267 2] :colon [267 24]}} (case [^{:go/pos {:name-pos [267 7]}} BZ_SEQUENCE_ERROR]
+      ^{:go/pos {:return [268 3]}} (return ^{:go/apos {2 [268 34]} :go/pos {:lparen [268 15] :rparen [268 98]}} (^{:go/pos {:name-pos [268 10]}} Raise ^{:go/pos {:name-pos [268 16]}} RuntimeErrorType "Internal error - Invalid sequence of commands sent to libbzip2")))
+    ^{:go/pos {:case [269 2] :colon [269 9]}} (default
+      ^{:go/pos {:return [270 3]}} (return ^{:go/apos {2 [270 30]} :go/pos {:lparen [270 16] :rparen [270 77]}} (^{:go/pos {:name-pos [270 10]}} Raisef ^{:go/pos {:name-pos [270 17]}} OSErrorType "Unrecognized error from libbzip2: %d" ^{:go/pos {:name-pos [270 70]}} bzerror)))))
+
+
+
+
+^{:go/pos {:doc [274 1] :func [275 1] :lbrace [275 33] :rbrace [285 1] :return [284 2]}} (go/func ^{:go/pos {:name-pos [275 6]}} cbytes "cbytes is a copy of data in C memory (malloc'd; 0 for no bytes), the Py_buffer libbzip2 reads.\n" ^{:tag ^{:go/pos {:name-pos [275 26]}} uint64 :go/pos {:closing [275 24] :opening [275 12]}} [^{:tag ^{:go/pos {:lbrack [275 18]}} (slice ^{:go/pos {:name-pos [275 20]}} byte) :go/pos {:name-pos [275 13]}} data]
+  ^{:go/pos {:if [276 2] :lbrace [276 20] :rbrace [278 2]}} (when ^{:go/apos {2 [276 18]} :go/pos {:op-pos [276 15]}} (== ^{:go/pos {:lparen [276 8] :rparen [276 13]}} (^{:go/pos {:name-pos [276 5]}} len ^{:go/pos {:name-pos [276 9]}} data) 0)
+    ^{:go/apos {1 [277 10]} :go/pos {:return [277 3]}} (return 0))
+
+  (let [^{:go/pos {:name-pos [279 2] :tok-pos [279 4]}} p ^{:go/pos {:dot [279 10] :lparen [279 17] :name-pos [279 11] :rparen [279 35]}} (.Malloc ^{:go/pos {:name-pos [279 7]}} lib ^{:go/pos {:lparen [279 24] :rparen [279 34]}} (conv ^{:go/pos {:name-pos [279 18]}} uint64 ^{:go/pos {:lparen [279 28] :rparen [279 33]}} (^{:go/pos {:name-pos [279 25]}} len ^{:go/pos {:name-pos [279 29]}} data)))]
+    ^{:go/pos {:if [280 2] :lbrace [280 12] :rbrace [282 2]}} (when ^{:go/apos {2 [280 10]} :go/pos {:op-pos [280 7]}} (== ^{:go/pos {:name-pos [280 5]}} p 0)
+      ^{:go/apos {1 [281 10]} :go/pos {:return [281 3]}} (return 0))
+
+    ^{:go/pos {:dot [283 5] :lparen [283 11] :name-pos [283 6] :rparen [283 19]}} (.Write ^{:go/pos {:name-pos [283 2]}} lib ^{:go/pos {:name-pos [283 12]}} p ^{:go/pos {:name-pos [283 15]}} data)
+    ^{:go/pos {:name-pos [284 9]}} p))
+
+
+;; /* BZ2Compressor class. */
+
+^{:go/pos {:func [289 1] :lbrace [289 89] :rbrace [327 1]}} (go/func ^{:go/pos {:name-pos [289 6]}} compress ^{:go/pos {:closing [289 71] :opening [289 14]}} [^{:tag ^{:go/pos {:star [289 17]}} (* ^{:go/pos {:name-pos [289 18]}} BZ2Compressor) :go/pos {:name-pos [289 15]}} c ^{:tag ^{:go/pos {:name-pos [289 38]}} uint64 :go/pos {:name-pos [289 33]}} data ^{:tag ^{:go/pos {:name-pos [289 51]}} uint64 :go/pos {:name-pos [289 46]}} len_ ^{:tag ^{:go/pos {:name-pos [289 66]}} int32 :go/pos {:name-pos [289 59]}} action] :results ^{:go/pos {:closing [289 87] :opening [289 73]}} [^{:go/pos {:name-pos [289 74]}} Object ^{:go/pos {:name-pos [289 82]}} error]
+  (let [^{:tag ^{:go/pos {:name-pos [290 13]}} _BlocksOutputBuffer :go/pos {:name-pos [290 6] :tok-pos [290 2]}} buffer (zero ^{:go/pos {:name-pos [290 13]}} _BlocksOutputBuffer)
+      ^{:go/pos {:name-pos [291 2] :tok-pos [291 6]}} bzs ^{:go/pos {:dot [291 10] :name-pos [291 11]}} (.-bzs ^{:go/pos {:name-pos [291 9]}} c)]
+    ^{:go/pos {:if [292 2] :lbrace [292 52] :rbrace [295 2]}} (when ^{:go/apos {2 [292 50]} :go/pos {:op-pos [292 48]}} (< ^{:go/apos {2 [292 39]} :go/pos {:lparen [292 29] :rparen [292 46]}} (^{:go/pos {:name-pos [292 5]}} OutputBuffer_InitAndGrow ^{:go/pos {:op-pos [292 30]}} (addr ^{:go/pos {:name-pos [292 31]}} buffer) -1 ^{:go/pos {:name-pos [292 43]}} bzs) 0)
+      ^{:go/pos {:lparen [293 23] :rparen [293 31]}} (^{:go/pos {:name-pos [293 3]}} OutputBuffer_OnError ^{:go/pos {:op-pos [293 24]}} (addr ^{:go/pos {:name-pos [293 25]}} buffer))
+      ^{:go/apos {1 [294 10]} :go/pos {:return [294 3]}} (return nil ^{:go/pos {:lparen [294 23] :rparen [294 53]}} (^{:go/pos {:name-pos [294 15]}} ExtRaise ^{:go/pos {:lparen [294 36] :rparen [294 52]}} (^{:go/pos {:name-pos [294 24]}} NewException ^{:go/pos {:name-pos [294 37]}} MemoryErrorType))))
+
+    ^{:go/pos {:lparen [296 13] :rparen [296 23]}} (^{:go/pos {:name-pos [296 2]}} set_next_in ^{:go/pos {:name-pos [296 14]}} bzs ^{:go/pos {:name-pos [296 19]}} data)
+    ^{:go/apos {2 [297 20]} :go/pos {:lparen [297 14] :rparen [297 21]}} (^{:go/pos {:name-pos [297 2]}} set_avail_in ^{:go/pos {:name-pos [297 15]}} bzs 0)
+    ^{:go/pos {:for [298 2] :lbrace [298 6] :rbrace [325 2]}} (while true
+      (let [^{:tag ^{:go/pos {:name-pos [299 15]}} int32 :go/pos {:name-pos [299 7] :tok-pos [299 3]}} bzerror (zero ^{:go/pos {:name-pos [299 15]}} int32)]
+        ;; /* On a 64-bit system, len might not fit in avail_in (an unsigned int). Do compression in chunks of no
+        ;; more than UINT_MAX bytes each. */
+        ^{:go/pos {:if [302 3] :lbrace [302 37] :rbrace [305 3]}} (when ^{:go/pos {:op-pos [302 25]}} (and ^{:go/apos {2 [302 23]} :go/pos {:op-pos [302 20]}} (== ^{:go/pos {:lparen [302 14] :rparen [302 18]}} (^{:go/pos {:name-pos [302 6]}} avail_in ^{:go/pos {:name-pos [302 15]}} bzs) 0) ^{:go/apos {2 [302 35]} :go/pos {:op-pos [302 33]}} (> ^{:go/pos {:name-pos [302 28]}} len_ 0))
+          ^{:go/pos {:lparen [303 16] :rparen [303 41]}} (^{:go/pos {:name-pos [303 4]}} set_avail_in ^{:go/pos {:name-pos [303 17]}} bzs ^{:go/pos {:lparen [303 25] :rparen [303 40]}} (^{:go/pos {:name-pos [303 22]}} min ^{:go/pos {:name-pos [303 26]}} len_ ^{:go/pos {:name-pos [303 32]}} UINT_MAX))
+          ^{:go/pos {:tok-pos [304 9]}} (set! ^{:go/pos {:name-pos [304 4]}} len_ - ^{:go/pos {:lparen [304 20] :rparen [304 24]}} (^{:go/pos {:name-pos [304 12]}} avail_in ^{:go/pos {:name-pos [304 21]}} bzs)))
+
+        ;; /* In regular compression mode, stop when input data is exhausted. */
+        ^{:go/pos {:if [307 3] :lbrace [307 45] :rbrace [309 3]}} (when ^{:go/pos {:op-pos [307 23]}} (and ^{:go/pos {:op-pos [307 13]}} (== ^{:go/pos {:name-pos [307 6]}} action ^{:go/pos {:name-pos [307 16]}} BZ_RUN) ^{:go/apos {2 [307 43]} :go/pos {:op-pos [307 40]}} (== ^{:go/pos {:lparen [307 34] :rparen [307 38]}} (^{:go/pos {:name-pos [307 26]}} avail_in ^{:go/pos {:name-pos [307 35]}} bzs) 0))
+          ^{:go/pos {:tok-pos [308 4]}} (break))
+
+        ^{:go/pos {:if [310 3] :lbrace [310 26] :rbrace [315 3]}} (when ^{:go/apos {2 [310 24]} :go/pos {:op-pos [310 21]}} (== ^{:go/pos {:lparen [310 15] :rparen [310 19]}} (^{:go/pos {:name-pos [310 6]}} avail_out ^{:go/pos {:name-pos [310 16]}} bzs) 0)
+          ^{:go/pos {:if [311 4] :lbrace [311 43] :rbrace [314 4]}} (when ^{:go/apos {2 [311 41]} :go/pos {:op-pos [311 39]}} (< ^{:go/pos {:lparen [311 24] :rparen [311 37]}} (^{:go/pos {:name-pos [311 7]}} OutputBuffer_Grow ^{:go/pos {:op-pos [311 25]}} (addr ^{:go/pos {:name-pos [311 26]}} buffer) ^{:go/pos {:name-pos [311 34]}} bzs) 0)
+            ^{:go/pos {:lparen [312 25] :rparen [312 33]}} (^{:go/pos {:name-pos [312 5]}} OutputBuffer_OnError ^{:go/pos {:op-pos [312 26]}} (addr ^{:go/pos {:name-pos [312 27]}} buffer))
+            ^{:go/apos {1 [313 12]} :go/pos {:return [313 5]}} (return nil ^{:go/pos {:lparen [313 25] :rparen [313 55]}} (^{:go/pos {:name-pos [313 17]}} ExtRaise ^{:go/pos {:lparen [313 38] :rparen [313 54]}} (^{:go/pos {:name-pos [313 26]}} NewException ^{:go/pos {:name-pos [313 39]}} MemoryErrorType)))))
+
+
+        ^{:go/pos {:tok-pos [316 11]}} (set! ^{:go/pos {:name-pos [316 3]}} bzerror ^{:go/apos {1 [316 18]} :go/pos {:lparen [316 17] :rparen [316 61]}} (^{:go/pos {:name-pos [316 13]}} call "BZ2_bzCompress" ^{:go/pos {:lparen [316 41] :rparen [316 45]}} (conv ^{:go/pos {:name-pos [316 36]}} int64 ^{:go/pos {:name-pos [316 42]}} bzs) ^{:go/pos {:lparen [316 53] :rparen [316 60]}} (conv ^{:go/pos {:name-pos [316 48]}} int64 ^{:go/pos {:name-pos [316 54]}} action)))
+        ^{:go/pos {:if [317 3] :lbrace [317 50] :rbrace [320 3]}} (when [^{:go/pos {:name-pos [317 6] :tok-pos [317 10]}} err ^{:go/pos {:lparen [317 28] :rparen [317 36]}} (^{:go/pos {:name-pos [317 13]}} catch_bz2_error ^{:go/pos {:name-pos [317 29]}} bzerror)] ^{:go/apos {2 [317 46]} :go/pos {:op-pos [317 43]}} (!= ^{:go/pos {:name-pos [317 39]}} err nil)
+          ^{:go/pos {:lparen [318 24] :rparen [318 32]}} (^{:go/pos {:name-pos [318 4]}} OutputBuffer_OnError ^{:go/pos {:op-pos [318 25]}} (addr ^{:go/pos {:name-pos [318 26]}} buffer))
+          ^{:go/apos {1 [319 11]} :go/pos {:return [319 4]}} (return nil ^{:go/pos {:name-pos [319 16]}} err))
+
+        ;; /* In flushing mode, stop when all buffered data has been flushed. */
+        ^{:go/pos {:if [322 3] :lbrace [322 54] :rbrace [324 3]}} (when ^{:go/pos {:op-pos [322 26]}} (and ^{:go/pos {:op-pos [322 13]}} (== ^{:go/pos {:name-pos [322 6]}} action ^{:go/pos {:name-pos [322 16]}} BZ_FINISH) ^{:go/pos {:op-pos [322 37]}} (== ^{:go/pos {:name-pos [322 29]}} bzerror ^{:go/pos {:name-pos [322 40]}} BZ_STREAM_END))
+          ^{:go/pos {:tok-pos [323 4]}} (break))))
+
+
+    ^{:go/apos {2 [326 55]} :go/pos {:return [326 2]}} (return ^{:go/pos {:lparen [326 28] :rparen [326 52]}} (^{:go/pos {:name-pos [326 9]}} OutputBuffer_Finish ^{:go/pos {:op-pos [326 29]}} (addr ^{:go/pos {:name-pos [326 30]}} buffer) ^{:go/pos {:lparen [326 47] :rparen [326 51]}} (^{:go/pos {:name-pos [326 38]}} avail_out ^{:go/pos {:name-pos [326 48]}} bzs)) nil)))
+
+
+^{:go/pos {:func [329 1] :lbrace [329 89] :rbrace [340 1]}} (go/func ^{:go/pos {:name-pos [329 6]}} _bz2_BZ2Compressor_compress_impl ^{:go/pos {:closing [329 71] :opening [329 38]}} [^{:tag ^{:go/pos {:star [329 44]}} (* ^{:go/pos {:name-pos [329 45]}} BZ2Compressor) :go/pos {:name-pos [329 39]}} self ^{:tag ^{:go/pos {:lbrack [329 65]}} (slice ^{:go/pos {:name-pos [329 67]}} byte) :go/pos {:name-pos [329 60]}} data] :results ^{:go/pos {:closing [329 87] :opening [329 73]}} [^{:go/pos {:name-pos [329 74]}} Object ^{:go/pos {:name-pos [329 82]}} error]
+  ^{:go/pos {:if [330 2] :lbrace [330 18] :rbrace [332 2]}} (when ^{:go/pos {:dot [330 9] :name-pos [330 10]}} (.-flushed ^{:go/pos {:name-pos [330 5]}} self)
+    ^{:go/apos {1 [331 10]} :go/pos {:return [331 3]}} (return nil ^{:go/apos {2 [331 37]} :go/pos {:lparen [331 20] :rparen [331 66]}} (^{:go/pos {:name-pos [331 15]}} Raise ^{:go/pos {:name-pos [331 21]}} ValueErrorType "Compressor has been flushed")))
+
+  (let [^{:go/pos {:name-pos [333 2] :tok-pos [333 4]}} p ^{:go/pos {:lparen [333 13] :rparen [333 18]}} (^{:go/pos {:name-pos [333 7]}} cbytes ^{:go/pos {:name-pos [333 14]}} data)]
+    ^{:go/pos {:if [334 2] :lbrace [334 29] :rbrace [336 2]}} (when ^{:go/pos {:op-pos [334 12]}} (and ^{:go/apos {2 [334 10]} :go/pos {:op-pos [334 7]}} (== ^{:go/pos {:name-pos [334 5]}} p 0) ^{:go/apos {2 [334 27]} :go/pos {:op-pos [334 25]}} (> ^{:go/pos {:lparen [334 18] :rparen [334 23]}} (^{:go/pos {:name-pos [334 15]}} len ^{:go/pos {:name-pos [334 19]}} data) 0))
+      ^{:go/apos {1 [335 10]} :go/pos {:return [335 3]}} (return nil ^{:go/pos {:lparen [335 23] :rparen [335 53]}} (^{:go/pos {:name-pos [335 15]}} ExtRaise ^{:go/pos {:lparen [335 36] :rparen [335 52]}} (^{:go/pos {:name-pos [335 24]}} NewException ^{:go/pos {:name-pos [335 37]}} MemoryErrorType))))
+
+    (let [^{:go/pos {:tok-pos [337 9]}} (values ^{:go/pos {:name-pos [337 2]}} r ^{:go/pos {:name-pos [337 5]}} err) ^{:go/pos {:lparen [337 20] :rparen [337 55]}} (^{:go/pos {:name-pos [337 12]}} compress ^{:go/pos {:name-pos [337 21]}} self ^{:go/pos {:name-pos [337 27]}} p ^{:go/pos {:lparen [337 36] :rparen [337 46]}} (conv ^{:go/pos {:name-pos [337 30]}} uint64 ^{:go/pos {:lparen [337 40] :rparen [337 45]}} (^{:go/pos {:name-pos [337 37]}} len ^{:go/pos {:name-pos [337 41]}} data)) ^{:go/pos {:name-pos [337 49]}} BZ_RUN)]
+      ^{:go/pos {:dot [338 5] :lparen [338 10] :name-pos [338 6] :rparen [338 12]}} (.Free ^{:go/pos {:name-pos [338 2]}} lib ^{:go/pos {:name-pos [338 11]}} p)
+      ^{:go/pos {:return [339 2]}} (return ^{:go/pos {:name-pos [339 9]}} r ^{:go/pos {:name-pos [339 12]}} err))))
+
+
+^{:go/pos {:func [342 1] :lbrace [342 73] :rbrace [348 1] :return [347 2]}} (go/func ^{:go/pos {:name-pos [342 6]}} _bz2_BZ2Compressor_flush_impl ^{:go/pos {:closing [342 55] :opening [342 35]}} [^{:tag ^{:go/pos {:star [342 41]}} (* ^{:go/pos {:name-pos [342 42]}} BZ2Compressor) :go/pos {:name-pos [342 36]}} self] :results ^{:go/pos {:closing [342 71] :opening [342 57]}} [^{:go/pos {:name-pos [342 58]}} Object ^{:go/pos {:name-pos [342 66]}} error]
+  ^{:go/pos {:if [343 2] :lbrace [343 18] :rbrace [345 2]}} (when ^{:go/pos {:dot [343 9] :name-pos [343 10]}} (.-flushed ^{:go/pos {:name-pos [343 5]}} self)
+    ^{:go/apos {1 [344 10]} :go/pos {:return [344 3]}} (return nil ^{:go/apos {2 [344 37]} :go/pos {:lparen [344 20] :rparen [344 63]}} (^{:go/pos {:name-pos [344 15]}} Raise ^{:go/pos {:name-pos [344 21]}} ValueErrorType "Repeated call to flush()")))
+
+  ^{:go/apos {2 [346 17]} :go/pos {:tok-pos [346 15]}} (set! ^{:go/pos {:dot [346 6] :name-pos [346 7]}} (.-flushed ^{:go/pos {:name-pos [346 2]}} self) true)
+  ^{:go/apos {2 [347 24] 3 [347 27]} :go/pos {:lparen [347 17] :rparen [347 39]}} (^{:go/pos {:name-pos [347 9]}} compress ^{:go/pos {:name-pos [347 18]}} self 0 0 ^{:go/pos {:name-pos [347 30]}} BZ_FINISH))
+
+
+^{:go/pos {:func [350 1] :lbrace [350 65] :rbrace [372 1]}} (go/func ^{:go/pos {:name-pos [350 6]}} _bz2_BZ2Compressor_impl ^{:go/pos {:closing [350 47] :opening [350 29]}} [^{:tag ^{:go/pos {:name-pos [350 44]}} int :go/pos {:name-pos [350 30]}} compresslevel] :results ^{:go/pos {:closing [350 63] :opening [350 49]}} [^{:go/pos {:name-pos [350 50]}} Object ^{:go/pos {:name-pos [350 58]}} error]
+  ^{:go/pos {:if [351 2] :lbrace [351 49] :rbrace [353 2]}} (when ^{:go/pos {:op-pos [351 5]}} (not ^{:go/parens [[[351 6] [351 47]]] :go/pos {:op-pos [351 26]}} (and ^{:go/apos {1 [351 7]} :go/pos {:op-pos [351 9]}} (<= 1 ^{:go/pos {:name-pos [351 12]}} compresslevel) ^{:go/apos {2 [351 46]} :go/pos {:op-pos [351 43]}} (<= ^{:go/pos {:name-pos [351 29]}} compresslevel 9)))
+    ^{:go/apos {1 [352 10]} :go/pos {:return [352 3]}} (return nil ^{:go/apos {2 [352 37]} :go/pos {:lparen [352 20] :rparen [352 76]}} (^{:go/pos {:name-pos [352 15]}} Raise ^{:go/pos {:name-pos [352 21]}} ValueErrorType "compresslevel must be between 1 and 9")))
+
+  (let [^{:go/pos {:name-pos [354 2] :tok-pos [354 4]}} l ^{:go/pos {:lparen [354 10] :rparen [354 11]}} (^{:go/pos {:name-pos [354 7]}} bz2)
+      ^{:go/pos {:name-pos [355 2] :tok-pos [355 7]}} self ^{:go/pos {:op-pos [355 10]}} (addr ^{:go/acolon {2 [355 28]} :go/apos {2 [355 25]} :go/pos {:lbrace [355 24] :rbrace [355 41]}} (lit ^{:go/pos {:name-pos [355 11]}} BZ2Compressor :bzs ^{:go/pos {:lparen [355 39] :rparen [355 40]}} (^{:go/pos {:name-pos [355 30]}} newStream)))]
+    ^{:go/pos {:if [356 2] :lbrace [356 19] :rbrace [358 2]}} (when ^{:go/apos {2 [356 17]} :go/pos {:op-pos [356 14]}} (== ^{:go/pos {:dot [356 9] :name-pos [356 10]}} (.-bzs ^{:go/pos {:name-pos [356 5]}} self) 0)
+      ^{:go/apos {1 [357 10]} :go/pos {:return [357 3]}} (return nil ^{:go/pos {:lparen [357 23] :rparen [357 53]}} (^{:go/pos {:name-pos [357 15]}} ExtRaise ^{:go/pos {:lparen [357 36] :rparen [357 52]}} (^{:go/pos {:name-pos [357 24]}} NewException ^{:go/pos {:name-pos [357 37]}} MemoryErrorType))))
+
+    (let [^{:go/pos {:name-pos [359 2] :tok-pos [359 10]}} bzerror ^{:go/apos {1 [359 18] 4 [359 79] 5 [359 82]} :go/pos {:lparen [359 17] :rparen [359 83]}} (^{:go/pos {:name-pos [359 13]}} call "BZ2_bzCompressInit" ^{:go/pos {:lparen [359 45] :rparen [359 54]}} (conv ^{:go/pos {:name-pos [359 40]}} int64 ^{:go/pos {:dot [359 50] :name-pos [359 51]}} (.-bzs ^{:go/pos {:name-pos [359 46]}} self)) ^{:go/pos {:lparen [359 62] :rparen [359 76]}} (conv ^{:go/pos {:name-pos [359 57]}} int64 ^{:go/pos {:name-pos [359 63]}} compresslevel) 0 0)]
+      ^{:go/pos {:if [360 2] :lbrace [360 49] :rbrace [363 2]}} (when [^{:go/pos {:name-pos [360 5] :tok-pos [360 9]}} err ^{:go/pos {:lparen [360 27] :rparen [360 35]}} (^{:go/pos {:name-pos [360 12]}} catch_bz2_error ^{:go/pos {:name-pos [360 28]}} bzerror)] ^{:go/apos {2 [360 45]} :go/pos {:op-pos [360 42]}} (!= ^{:go/pos {:name-pos [360 38]}} err nil)
+        ^{:go/pos {:dot [361 4] :lparen [361 9] :name-pos [361 5] :rparen [361 18]}} (.Free ^{:go/pos {:name-pos [361 3]}} l ^{:go/pos {:dot [361 14] :name-pos [361 15]}} (.-bzs ^{:go/pos {:name-pos [361 10]}} self))
+        ^{:go/apos {1 [362 10]} :go/pos {:return [362 3]}} (return nil ^{:go/pos {:name-pos [362 15]}} err))
+
+      (let [^{:go/pos {:name-pos [364 2] :tok-pos [364 6]}} bzs ^{:go/pos {:dot [364 13] :name-pos [364 14]}} (.-bzs ^{:go/pos {:name-pos [364 9]}} self)]
+        ^{:go/pos {:lparen [365 22] :rparen [370 3]}} (^{:go/pos {:dot [365 9] :name-pos [365 10] :x-pos [365 2]}} runtime/SetFinalizer ^{:go/pos {:name-pos [365 23]}} self ^{:go/pos {:func [365 29] :lbrace [365 50] :rbrace [370 2]}} (fn ^{:go/pos {:closing [365 48] :opening [365 33]}} [^{:go/pos {:star [365 34]}} (* ^{:go/pos {:name-pos [365 35]}} BZ2Compressor)]
+            ^{:go/pos {:dot [366 4] :lparen [366 10] :name-pos [366 5] :rparen [369 4]}} (.Defer ^{:go/pos {:name-pos [366 3]}} l ^{:go/pos {:func [366 11] :lbrace [366 18] :rbrace [369 3]}} (fn ^{:go/pos {:closing [366 16] :opening [366 15]}} []
+                ^{:go/apos {1 [367 9]} :go/pos {:lparen [367 8] :rparen [367 40]}} (^{:go/pos {:name-pos [367 4]}} call "BZ2_bzCompressEnd" ^{:go/pos {:lparen [367 35] :rparen [367 39]}} (conv ^{:go/pos {:name-pos [367 30]}} int64 ^{:go/pos {:name-pos [367 36]}} bzs))
+                ^{:go/pos {:dot [368 5] :lparen [368 10] :name-pos [368 6] :rparen [368 14]}} (.Free ^{:go/pos {:name-pos [368 4]}} l ^{:go/pos {:name-pos [368 11]}} bzs)))))
+
+
+        ^{:go/apos {2 [371 15]} :go/pos {:return [371 2]}} (return ^{:go/pos {:name-pos [371 9]}} self nil)))))
+
+
+;; /* BZ2Decompressor class. */
+
+
+
+
+
+
+
+^{:go/pos {:doc [376 1] :func [382 1] :lbrace [382 75] :rbrace [419 1]}} (go/func ^{:go/pos {:name-pos [382 6]}} decompress_buf "Decompress data of length d->bzs_avail_in_real in d->bzs.next_in. The output buffer is allocated dynamically\n\n\tand returned. At most max_length bytes are returned, so some of the input may not be consumed.\n\td->bzs.next_in and d->bzs_avail_in_real are updated to reflect the consumed input.\n" ^{:go/pos {:closing [382 57] :opening [382 20]}} [^{:tag ^{:go/pos {:star [382 23]}} (* ^{:go/pos {:name-pos [382 24]}} BZ2Decompressor) :go/pos {:name-pos [382 21]}} d ^{:tag ^{:go/pos {:name-pos [382 52]}} int64 :go/pos {:name-pos [382 41]}} max_length] :results ^{:go/pos {:closing [382 73] :opening [382 59]}} [^{:go/pos {:name-pos [382 60]}} Object ^{:go/pos {:name-pos [382 68]}} error]
+  (let [^{:tag ^{:go/pos {:name-pos [383 13]}} _BlocksOutputBuffer :go/pos {:name-pos [383 6] :tok-pos [383 2]}} buffer (zero ^{:go/pos {:name-pos [383 13]}} _BlocksOutputBuffer)
+      ^{:go/pos {:name-pos [384 2] :tok-pos [384 6]}} bzs ^{:go/pos {:dot [384 10] :name-pos [384 11]}} (.-bzs ^{:go/pos {:name-pos [384 9]}} d)]
+    ^{:go/pos {:if [385 2] :lbrace [385 60] :rbrace [388 2]}} (when ^{:go/apos {2 [385 58]} :go/pos {:op-pos [385 56]}} (< ^{:go/pos {:lparen [385 29] :rparen [385 54]}} (^{:go/pos {:name-pos [385 5]}} OutputBuffer_InitAndGrow ^{:go/pos {:op-pos [385 30]}} (addr ^{:go/pos {:name-pos [385 31]}} buffer) ^{:go/pos {:name-pos [385 39]}} max_length ^{:go/pos {:name-pos [385 51]}} bzs) 0)
+      ^{:go/pos {:lparen [386 23] :rparen [386 31]}} (^{:go/pos {:name-pos [386 3]}} OutputBuffer_OnError ^{:go/pos {:op-pos [386 24]}} (addr ^{:go/pos {:name-pos [386 25]}} buffer))
+      ^{:go/apos {1 [387 10]} :go/pos {:return [387 3]}} (return nil ^{:go/pos {:lparen [387 23] :rparen [387 53]}} (^{:go/pos {:name-pos [387 15]}} ExtRaise ^{:go/pos {:lparen [387 36] :rparen [387 52]}} (^{:go/pos {:name-pos [387 24]}} NewException ^{:go/pos {:name-pos [387 37]}} MemoryErrorType))))
+
+    ^{:go/pos {:for [389 2] :lbrace [389 6] :rbrace [417 2]}} (while true
+      ;; /* On a 64-bit system, buffer length might not fit in avail_out, so we do decompression in chunks of no
+      ;; more than UINT_MAX bytes each. Note that the expression for `avail` is guaranteed to be positive, so
+      ;; the cast is safe. */
+      ^{:go/pos {:lparen [393 15] :rparen [393 55]}} (^{:go/pos {:name-pos [393 3]}} set_avail_in ^{:go/pos {:name-pos [393 16]}} bzs ^{:go/pos {:lparen [393 24] :rparen [393 54]}} (^{:go/pos {:name-pos [393 21]}} min ^{:go/pos {:dot [393 26] :name-pos [393 27]}} (.-bzs_avail_in_real ^{:go/pos {:name-pos [393 25]}} d) ^{:go/pos {:name-pos [393 46]}} UINT_MAX))
+      ^{:go/pos {:tok-pos [394 23]}} (set! ^{:go/pos {:dot [394 4] :name-pos [394 5]}} (.-bzs_avail_in_real ^{:go/pos {:name-pos [394 3]}} d) - ^{:go/pos {:lparen [394 34] :rparen [394 38]}} (^{:go/pos {:name-pos [394 26]}} avail_in ^{:go/pos {:name-pos [394 35]}} bzs))
+      (let [^{:go/pos {:name-pos [395 3] :tok-pos [395 9]}} bzret ^{:go/apos {1 [395 17]} :go/pos {:lparen [395 16] :rparen [395 47]}} (^{:go/pos {:name-pos [395 12]}} call "BZ2_bzDecompress" ^{:go/pos {:lparen [395 42] :rparen [395 46]}} (conv ^{:go/pos {:name-pos [395 37]}} int64 ^{:go/pos {:name-pos [395 43]}} bzs))]
+        ^{:go/pos {:tok-pos [396 23]}} (set! ^{:go/pos {:dot [396 4] :name-pos [396 5]}} (.-bzs_avail_in_real ^{:go/pos {:name-pos [396 3]}} d) + ^{:go/pos {:lparen [396 34] :rparen [396 38]}} (^{:go/pos {:name-pos [396 26]}} avail_in ^{:go/pos {:name-pos [396 35]}} bzs))
+        ^{:go/pos {:if [397 3] :lbrace [397 48] :rbrace [402 3]}} (when [^{:go/pos {:name-pos [397 6] :tok-pos [397 10]}} err ^{:go/pos {:lparen [397 28] :rparen [397 34]}} (^{:go/pos {:name-pos [397 13]}} catch_bz2_error ^{:go/pos {:name-pos [397 29]}} bzret)] ^{:go/apos {2 [397 44]} :go/pos {:op-pos [397 41]}} (!= ^{:go/pos {:name-pos [397 37]}} err nil)
+          ^{:go/pos {:tok-pos [398 14]}} (set! ^{:go/pos {:dot [398 5] :name-pos [398 6]}} (.-bzerror ^{:go/pos {:name-pos [398 4]}} d) ^{:go/pos {:name-pos [398 16]}} bzret)
+          ^{:go/apos {2 [399 20]} :go/pos {:tok-pos [399 18]}} (set! ^{:go/pos {:dot [399 5] :name-pos [399 6]}} (.-needs_input ^{:go/pos {:name-pos [399 4]}} d) false)
+          ^{:go/pos {:lparen [400 24] :rparen [400 32]}} (^{:go/pos {:name-pos [400 4]}} OutputBuffer_OnError ^{:go/pos {:op-pos [400 25]}} (addr ^{:go/pos {:name-pos [400 26]}} buffer))
+          ^{:go/apos {1 [401 11]} :go/pos {:return [401 4]}} (return nil ^{:go/pos {:name-pos [401 16]}} err))
+
+        ^{:go/cond [[[403 3] [403 29] [406 3]] [[406 10] [406 38] [408 3]] [[408 10] [408 33] [416 3]]] :go/pos {:if [403 3]}} (cond ^{:go/pos {:op-pos [403 12]}} (== ^{:go/pos {:name-pos [403 6]}} bzret ^{:go/pos {:name-pos [403 15]}} BZ_STREAM_END) ^{:go/pos {:lbrace [403 29] :rbrace [406 3]}} (do
+            ^{:go/apos {2 [404 12]} :go/pos {:tok-pos [404 10]}} (set! ^{:go/pos {:dot [404 5] :name-pos [404 6]}} (.-eof ^{:go/pos {:name-pos [404 4]}} d) true)
+            ^{:go/pos {:tok-pos [405 4]}} (break))
+          ^{:go/apos {2 [406 36]} :go/pos {:op-pos [406 33]}} (== ^{:go/pos {:dot [406 14] :name-pos [406 15]}} (.-bzs_avail_in_real ^{:go/pos {:name-pos [406 13]}} d) 0)
+          ^{:go/pos {:tok-pos [407 4]}} (break)
+          ^{:go/apos {2 [408 31]} :go/pos {:op-pos [408 28]}} (== ^{:go/pos {:lparen [408 22] :rparen [408 26]}} (^{:go/pos {:name-pos [408 13]}} avail_out ^{:go/pos {:name-pos [408 23]}} bzs) 0) ^{:go/pos {:lbrace [408 33] :rbrace [416 3]}} (do
+            ^{:go/pos {:if [409 4] :lbrace [409 71] :rbrace [411 4]}} (when ^{:go/pos {:op-pos [409 57]}} (== ^{:go/pos {:lparen [409 31] :rparen [409 55]}} (^{:go/pos {:name-pos [409 7]}} OutputBuffer_GetDataSize ^{:go/pos {:op-pos [409 32]}} (addr ^{:go/pos {:name-pos [409 33]}} buffer) ^{:go/pos {:lparen [409 50] :rparen [409 54]}} (^{:go/pos {:name-pos [409 41]}} avail_out ^{:go/pos {:name-pos [409 51]}} bzs)) ^{:go/pos {:name-pos [409 60]}} max_length)
+              ^{:go/pos {:tok-pos [410 5]}} (break))
+
+            ^{:go/pos {:if [412 4] :lbrace [412 43] :rbrace [415 4]}} (when ^{:go/apos {2 [412 41]} :go/pos {:op-pos [412 39]}} (< ^{:go/pos {:lparen [412 24] :rparen [412 37]}} (^{:go/pos {:name-pos [412 7]}} OutputBuffer_Grow ^{:go/pos {:op-pos [412 25]}} (addr ^{:go/pos {:name-pos [412 26]}} buffer) ^{:go/pos {:name-pos [412 34]}} bzs) 0)
+              ^{:go/pos {:lparen [413 25] :rparen [413 33]}} (^{:go/pos {:name-pos [413 5]}} OutputBuffer_OnError ^{:go/pos {:op-pos [413 26]}} (addr ^{:go/pos {:name-pos [413 27]}} buffer))
+              ^{:go/apos {1 [414 12]} :go/pos {:return [414 5]}} (return nil ^{:go/pos {:lparen [414 25] :rparen [414 55]}} (^{:go/pos {:name-pos [414 17]}} ExtRaise ^{:go/pos {:lparen [414 38] :rparen [414 54]}} (^{:go/pos {:name-pos [414 26]}} NewException ^{:go/pos {:name-pos [414 39]}} MemoryErrorType))))))))
+
+
+
+    ^{:go/apos {2 [418 55]} :go/pos {:return [418 2]}} (return ^{:go/pos {:lparen [418 28] :rparen [418 52]}} (^{:go/pos {:name-pos [418 9]}} OutputBuffer_Finish ^{:go/pos {:op-pos [418 29]}} (addr ^{:go/pos {:name-pos [418 30]}} buffer) ^{:go/pos {:lparen [418 47] :rparen [418 51]}} (^{:go/pos {:name-pos [418 38]}} avail_out ^{:go/pos {:name-pos [418 48]}} bzs)) nil)))
+
+
+^{:go/pos {:func [421 1] :lbrace [421 84] :rbrace [510 1]}} (go/func ^{:go/pos {:name-pos [421 6]}} decompress ^{:go/pos {:closing [421 66] :opening [421 16]}} [^{:tag ^{:go/pos {:star [421 19]}} (* ^{:go/pos {:name-pos [421 20]}} BZ2Decompressor) :go/pos {:name-pos [421 17]}} d ^{:tag ^{:go/pos {:lbrack [421 42]}} (slice ^{:go/pos {:name-pos [421 44]}} byte) :go/pos {:name-pos [421 37]}} data ^{:tag ^{:go/pos {:name-pos [421 61]}} int64 :go/pos {:name-pos [421 50]}} max_length] :results ^{:go/pos {:closing [421 82] :opening [421 68]}} [^{:go/pos {:name-pos [421 69]}} Object ^{:go/pos {:name-pos [421 77]}} error]
+  (let [^{:tag ^{:go/pos {:name-pos [422 26]}} bool :go/pos {:name-pos [422 6] :tok-pos [422 2]}} input_buffer_in_use (zero ^{:go/pos {:name-pos [422 26]}} bool)
+      ^{:go/pos {:name-pos [423 2] :tok-pos [423 6]}} bzs ^{:go/pos {:dot [423 10] :name-pos [423 11]}} (.-bzs ^{:go/pos {:name-pos [423 9]}} d)
+      ^{:go/pos {:name-pos [424 2] :tok-pos [424 7]}} len_ ^{:go/pos {:lparen [424 16] :rparen [424 26]}} (conv ^{:go/pos {:name-pos [424 10]}} uint64 ^{:go/pos {:lparen [424 20] :rparen [424 25]}} (^{:go/pos {:name-pos [424 17]}} len ^{:go/pos {:name-pos [424 21]}} data))
+      ^{:tag ^{:go/pos {:name-pos [425 16]}} uint64 :go/pos {:name-pos [425 6] :tok-pos [425 2]}} call_data (zero ^{:go/pos {:name-pos [425 16]}} uint64)] ; the caller's buffer in C memory (freed at the end)
+
+    ;; /* Prepend unconsumed input if necessary */
+    ^{:go/pos {:else-lbrace [456 9] :else-rbrace [464 2] :if [428 2] :lbrace [428 23] :rbrace [456 2]}} (if ^{:go/apos {2 [428 21]} :go/pos {:op-pos [428 18]}} (!= ^{:go/pos {:lparen [428 12] :rparen [428 16]}} (^{:go/pos {:name-pos [428 5]}} next_in ^{:go/pos {:name-pos [428 13]}} bzs) 0)
+      ;; /* Number of bytes we can append to input buffer */
+      (let [^{:go/pos {:name-pos [430 3] :tok-pos [430 13]}} avail_now ^{:go/pos {:op-pos [430 55]}} (- ^{:go/parens [[[430 16] [430 53]]] :go/pos {:op-pos [430 32]}} (+ ^{:go/pos {:dot [430 18] :name-pos [430 19]}} (.-input_buffer ^{:go/pos {:name-pos [430 17]}} d) ^{:go/pos {:dot [430 35] :name-pos [430 36]}} (.-input_buffer_size ^{:go/pos {:name-pos [430 34]}} d)) ^{:go/parens [[[430 57] [430 92]]] :go/pos {:op-pos [430 71]}} (+ ^{:go/pos {:lparen [430 65] :rparen [430 69]}} (^{:go/pos {:name-pos [430 58]}} next_in ^{:go/pos {:name-pos [430 66]}} bzs) ^{:go/pos {:dot [430 74] :name-pos [430 75]}} (.-bzs_avail_in_real ^{:go/pos {:name-pos [430 73]}} d)))
+
+          ;; /* Number of bytes we can append if we move existing contents to beginning of buffer (overwriting
+          ;; consumed input) */
+          ^{:go/pos {:name-pos [434 3] :tok-pos [434 15]}} avail_total ^{:go/pos {:op-pos [434 38]}} (- ^{:go/pos {:dot [434 19] :name-pos [434 20]}} (.-input_buffer_size ^{:go/pos {:name-pos [434 18]}} d) ^{:go/pos {:dot [434 41] :name-pos [434 42]}} (.-bzs_avail_in_real ^{:go/pos {:name-pos [434 40]}} d))]
+
+        ^{:go/cond [[[436 3] [436 25] [449 3]] [[449 10] [449 30] [452 3]]] :go/pos {:if [436 3]}} (cond ^{:go/pos {:op-pos [436 18]}} (< ^{:go/pos {:name-pos [436 6]}} avail_total ^{:go/pos {:name-pos [436 20]}} len_)
+          (let [^{:go/pos {:name-pos [437 4] :tok-pos [437 11]}} offset ^{:go/pos {:op-pos [437 27]}} (- ^{:go/pos {:lparen [437 21] :rparen [437 25]}} (^{:go/pos {:name-pos [437 14]}} next_in ^{:go/pos {:name-pos [437 22]}} bzs) ^{:go/pos {:dot [437 30] :name-pos [437 31]}} (.-input_buffer ^{:go/pos {:name-pos [437 29]}} d))
+              ^{:go/pos {:name-pos [438 4] :tok-pos [438 13]}} new_size ^{:go/pos {:op-pos [438 43]}} (- ^{:go/pos {:op-pos [438 36]}} (+ ^{:go/pos {:dot [438 17] :name-pos [438 18]}} (.-input_buffer_size ^{:go/pos {:name-pos [438 16]}} d) ^{:go/pos {:name-pos [438 38]}} len_) ^{:go/pos {:name-pos [438 45]}} avail_now)
+
+              ;; /* Assign to temporary variable first, so we don't lose address of allocated buffer if realloc
+              ;; fails */
+              ^{:go/pos {:name-pos [442 4] :tok-pos [442 8]}} tmp ^{:go/pos {:dot [442 14] :lparen [442 22] :name-pos [442 15] :rparen [442 68]}} (.Realloc ^{:go/pos {:name-pos [442 11]}} lib ^{:go/pos {:dot [442 24] :name-pos [442 25]}} (.-input_buffer ^{:go/pos {:name-pos [442 23]}} d) ^{:go/pos {:dot [442 40] :name-pos [442 41]}} (.-input_buffer_size ^{:go/pos {:name-pos [442 39]}} d) ^{:go/pos {:name-pos [442 60]}} new_size)]
+            ^{:go/pos {:if [443 4] :lbrace [443 16] :rbrace [445 4]}} (when ^{:go/apos {2 [443 14]} :go/pos {:op-pos [443 11]}} (== ^{:go/pos {:name-pos [443 7]}} tmp 0)
+              ^{:go/apos {1 [444 12]} :go/pos {:return [444 5]}} (return nil ^{:go/pos {:lparen [444 25] :rparen [444 55]}} (^{:go/pos {:name-pos [444 17]}} ExtRaise ^{:go/pos {:lparen [444 38] :rparen [444 54]}} (^{:go/pos {:name-pos [444 26]}} NewException ^{:go/pos {:name-pos [444 39]}} MemoryErrorType))))
+
+            ^{:go/pos {:tok-pos [446 19]}} (set! ^{:go/pos {:dot [446 5] :name-pos [446 6]}} (.-input_buffer ^{:go/pos {:name-pos [446 4]}} d) ^{:go/pos {:name-pos [446 21]}} tmp)
+            ^{:go/pos {:tok-pos [447 24]}} (set! ^{:go/pos {:dot [447 5] :name-pos [447 6]}} (.-input_buffer_size ^{:go/pos {:name-pos [447 4]}} d) ^{:go/pos {:name-pos [447 26]}} new_size)
+            ^{:go/pos {:lparen [448 15] :rparen [448 42]}} (^{:go/pos {:name-pos [448 4]}} set_next_in ^{:go/pos {:name-pos [448 16]}} bzs ^{:go/pos {:op-pos [448 35]}} (+ ^{:go/pos {:dot [448 22] :name-pos [448 23]}} (.-input_buffer ^{:go/pos {:name-pos [448 21]}} d) ^{:go/pos {:name-pos [448 36]}} offset)))
+          ^{:go/pos {:op-pos [449 23]}} (< ^{:go/pos {:name-pos [449 13]}} avail_now ^{:go/pos {:name-pos [449 25]}} len_) ^{:go/pos {:lbrace [449 30] :rbrace [452 3]}} (do
+            ^{:go/pos {:dot [450 9] :lparen [450 14] :name-pos [450 10] :rparen [450 64]}} (.Move ^{:go/pos {:dot [450 7] :name-pos [450 8]}} (.-M ^{:go/pos {:name-pos [450 4]}} lib) ^{:go/pos {:dot [450 16] :name-pos [450 17]}} (.-input_buffer ^{:go/pos {:name-pos [450 15]}} d) ^{:go/pos {:lparen [450 38] :rparen [450 42]}} (^{:go/pos {:name-pos [450 31]}} next_in ^{:go/pos {:name-pos [450 39]}} bzs) ^{:go/pos {:dot [450 46] :name-pos [450 47]}} (.-bzs_avail_in_real ^{:go/pos {:name-pos [450 45]}} d)) ; memmove
+            ^{:go/pos {:lparen [451 15] :rparen [451 35]}} (^{:go/pos {:name-pos [451 4]}} set_next_in ^{:go/pos {:name-pos [451 16]}} bzs ^{:go/pos {:dot [451 22] :name-pos [451 23]}} (.-input_buffer ^{:go/pos {:name-pos [451 21]}} d))))
+
+        ^{:go/pos {:dot [453 6] :lparen [453 12] :name-pos [453 7] :rparen [453 51]}} (.Write ^{:go/pos {:name-pos [453 3]}} lib ^{:go/pos {:op-pos [453 25]}} (+ ^{:go/pos {:lparen [453 20] :rparen [453 24]}} (^{:go/pos {:name-pos [453 13]}} next_in ^{:go/pos {:name-pos [453 21]}} bzs) ^{:go/pos {:dot [453 27] :name-pos [453 28]}} (.-bzs_avail_in_real ^{:go/pos {:name-pos [453 26]}} d)) ^{:go/pos {:name-pos [453 47]}} data)
+        ^{:go/pos {:tok-pos [454 23]}} (set! ^{:go/pos {:dot [454 4] :name-pos [454 5]}} (.-bzs_avail_in_real ^{:go/pos {:name-pos [454 3]}} d) + ^{:go/pos {:name-pos [454 26]}} len_)
+        ^{:go/apos {2 [455 25]} :go/pos {:tok-pos [455 23]}} (set! ^{:go/pos {:name-pos [455 3]}} input_buffer_in_use true))
+      ^{:go/pos {:lbrace [456 9] :rbrace [464 2]}} (do
+        ^{:go/pos {:tok-pos [457 13]}} (set! ^{:go/pos {:name-pos [457 3]}} call_data ^{:go/pos {:lparen [457 21] :rparen [457 26]}} (^{:go/pos {:name-pos [457 15]}} cbytes ^{:go/pos {:name-pos [457 22]}} data))
+        ^{:go/pos {:if [458 3] :lbrace [458 33] :rbrace [460 3]}} (when ^{:go/pos {:op-pos [458 21]}} (and ^{:go/apos {2 [458 19]} :go/pos {:op-pos [458 16]}} (== ^{:go/pos {:name-pos [458 6]}} call_data 0) ^{:go/apos {2 [458 31]} :go/pos {:op-pos [458 29]}} (> ^{:go/pos {:name-pos [458 24]}} len_ 0))
+          ^{:go/apos {1 [459 11]} :go/pos {:return [459 4]}} (return nil ^{:go/pos {:lparen [459 24] :rparen [459 54]}} (^{:go/pos {:name-pos [459 16]}} ExtRaise ^{:go/pos {:lparen [459 37] :rparen [459 53]}} (^{:go/pos {:name-pos [459 25]}} NewException ^{:go/pos {:name-pos [459 38]}} MemoryErrorType))))
+
+        ^{:go/pos {:lparen [461 14] :rparen [461 29]}} (^{:go/pos {:name-pos [461 3]}} set_next_in ^{:go/pos {:name-pos [461 15]}} bzs ^{:go/pos {:name-pos [461 20]}} call_data)
+        ^{:go/pos {:tok-pos [462 23]}} (set! ^{:go/pos {:dot [462 4] :name-pos [462 5]}} (.-bzs_avail_in_real ^{:go/pos {:name-pos [462 3]}} d) ^{:go/pos {:name-pos [462 25]}} len_)
+        ^{:go/apos {2 [463 25]} :go/pos {:tok-pos [463 23]}} (set! ^{:go/pos {:name-pos [463 3]}} input_buffer_in_use false)))
+
+    ^{:go/pos {:defer [465 2]}} (defer ^{:go/pos {:dot [465 11] :lparen [465 16] :name-pos [465 12] :rparen [465 26]}} (.Free ^{:go/pos {:name-pos [465 8]}} lib ^{:go/pos {:name-pos [465 17]}} call_data))
+
+    (let [^{:go/pos {:tok-pos [467 14]}} (values ^{:go/pos {:name-pos [467 2]}} result ^{:go/pos {:name-pos [467 10]}} err) ^{:go/pos {:lparen [467 31] :rparen [467 45]}} (^{:go/pos {:name-pos [467 17]}} decompress_buf ^{:go/pos {:name-pos [467 32]}} d ^{:go/pos {:name-pos [467 35]}} max_length)]
+      ^{:go/pos {:if [468 2] :lbrace [468 16] :rbrace [471 2]}} (when ^{:go/apos {2 [468 12]} :go/pos {:op-pos [468 9]}} (!= ^{:go/pos {:name-pos [468 5]}} err nil)
+        ^{:go/apos {2 [469 20]} :go/pos {:lparen [469 14] :rparen [469 21]}} (^{:go/pos {:name-pos [469 3]}} set_next_in ^{:go/pos {:name-pos [469 15]}} bzs 0)
+        ^{:go/apos {1 [470 10]} :go/pos {:return [470 3]}} (return nil ^{:go/pos {:name-pos [470 15]}} err))
+
+
+      ^{:go/cond [[[473 2] [473 11] [478 2]] [[478 9] [478 37] [481 2]] [nil [481 9] [508 2]]] :go/pos {:if [473 2]}} (cond ^{:go/pos {:dot [473 6] :name-pos [473 7]}} (.-eof ^{:go/pos {:name-pos [473 5]}} d) ^{:go/pos {:lbrace [473 11] :rbrace [478 2]}} (do
+          ^{:go/apos {2 [474 19]} :go/pos {:tok-pos [474 17]}} (set! ^{:go/pos {:dot [474 4] :name-pos [474 5]}} (.-needs_input ^{:go/pos {:name-pos [474 3]}} d) false)
+          ^{:go/pos {:if [475 3] :lbrace [475 30] :rbrace [477 3]}} (when ^{:go/apos {2 [475 28]} :go/pos {:op-pos [475 26]}} (> ^{:go/pos {:dot [475 7] :name-pos [475 8]}} (.-bzs_avail_in_real ^{:go/pos {:name-pos [475 6]}} d) 0)
+            ^{:go/pos {:tok-pos [476 18]}} (set! ^{:go/pos {:dot [476 5] :name-pos [476 6]}} (.-unused_data ^{:go/pos {:name-pos [476 4]}} d) ^{:go/pos {:lparen [476 28] :rparen [476 72]}} (^{:go/pos {:name-pos [476 20]}} NewBytes ^{:go/pos {:dot [476 32] :lparen [476 37] :name-pos [476 33] :rparen [476 71]}} (.Read ^{:go/pos {:name-pos [476 29]}} lib ^{:go/pos {:lparen [476 45] :rparen [476 49]}} (^{:go/pos {:name-pos [476 38]}} next_in ^{:go/pos {:name-pos [476 46]}} bzs) ^{:go/pos {:dot [476 53] :name-pos [476 54]}} (.-bzs_avail_in_real ^{:go/pos {:name-pos [476 52]}} d))))))
+
+        ^{:go/apos {2 [478 35]} :go/pos {:op-pos [478 32]}} (== ^{:go/pos {:dot [478 13] :name-pos [478 14]}} (.-bzs_avail_in_real ^{:go/pos {:name-pos [478 12]}} d) 0) ^{:go/pos {:lbrace [478 37] :rbrace [481 2]}} (do
+          ^{:go/apos {2 [479 20]} :go/pos {:lparen [479 14] :rparen [479 21]}} (^{:go/pos {:name-pos [479 3]}} set_next_in ^{:go/pos {:name-pos [479 15]}} bzs 0)
+          ^{:go/apos {2 [480 19]} :go/pos {:tok-pos [480 17]}} (set! ^{:go/pos {:dot [480 4] :name-pos [480 5]}} (.-needs_input ^{:go/pos {:name-pos [480 3]}} d) true)) :else
+        ^{:go/pos {:lbrace [481 9] :rbrace [508 2]}} (do
+          ^{:go/apos {2 [482 19]} :go/pos {:tok-pos [482 17]}} (set! ^{:go/pos {:dot [482 4] :name-pos [482 5]}} (.-needs_input ^{:go/pos {:name-pos [482 3]}} d) false)
+
+          ;; /* If we did not use the input buffer, we now have to copy the tail from the caller's buffer into the
+          ;; input buffer */
+          ^{:go/pos {:if [486 3] :lbrace [486 27] :rbrace [507 3]}} (when ^{:go/pos {:op-pos [486 6]}} (not ^{:go/pos {:name-pos [486 7]}} input_buffer_in_use)
+
+            ;; /* Discard buffer if it's too small (resizing it may needlessly copy the current contents) */
+            ^{:go/pos {:if [489 4] :lbrace [489 72] :rbrace [492 4]}} (when ^{:go/pos {:op-pos [489 27]}} (and ^{:go/apos {2 [489 25]} :go/pos {:op-pos [489 22]}} (!= ^{:go/pos {:dot [489 8] :name-pos [489 9]}} (.-input_buffer ^{:go/pos {:name-pos [489 7]}} d) 0) ^{:go/pos {:op-pos [489 50]}} (< ^{:go/pos {:dot [489 31] :name-pos [489 32]}} (.-input_buffer_size ^{:go/pos {:name-pos [489 30]}} d) ^{:go/pos {:dot [489 53] :name-pos [489 54]}} (.-bzs_avail_in_real ^{:go/pos {:name-pos [489 52]}} d)))
+              ^{:go/pos {:dot [490 8] :lparen [490 13] :name-pos [490 9] :rparen [490 28]}} (.Free ^{:go/pos {:name-pos [490 5]}} lib ^{:go/pos {:dot [490 15] :name-pos [490 16]}} (.-input_buffer ^{:go/pos {:name-pos [490 14]}} d))
+              ^{:go/apos {2 [491 22]} :go/pos {:tok-pos [491 20]}} (set! ^{:go/pos {:dot [491 6] :name-pos [491 7]}} (.-input_buffer ^{:go/pos {:name-pos [491 5]}} d) 0))
+
+
+            ;; /* Allocate if necessary */
+            ^{:go/pos {:if [495 4] :lbrace [495 27] :rbrace [502 4]}} (when ^{:go/apos {2 [495 25]} :go/pos {:op-pos [495 22]}} (== ^{:go/pos {:dot [495 8] :name-pos [495 9]}} (.-input_buffer ^{:go/pos {:name-pos [495 7]}} d) 0)
+              ^{:go/pos {:tok-pos [496 20]}} (set! ^{:go/pos {:dot [496 6] :name-pos [496 7]}} (.-input_buffer ^{:go/pos {:name-pos [496 5]}} d) ^{:go/pos {:dot [496 25] :lparen [496 32] :name-pos [496 26] :rparen [496 52]}} (.Malloc ^{:go/pos {:name-pos [496 22]}} lib ^{:go/pos {:dot [496 34] :name-pos [496 35]}} (.-bzs_avail_in_real ^{:go/pos {:name-pos [496 33]}} d)))
+              ^{:go/pos {:if [497 5] :lbrace [497 28] :rbrace [500 5]}} (when ^{:go/apos {2 [497 26]} :go/pos {:op-pos [497 23]}} (== ^{:go/pos {:dot [497 9] :name-pos [497 10]}} (.-input_buffer ^{:go/pos {:name-pos [497 8]}} d) 0)
+                ^{:go/apos {2 [498 23]} :go/pos {:lparen [498 17] :rparen [498 24]}} (^{:go/pos {:name-pos [498 6]}} set_next_in ^{:go/pos {:name-pos [498 18]}} bzs 0)
+                ^{:go/apos {1 [499 13]} :go/pos {:return [499 6]}} (return nil ^{:go/pos {:lparen [499 26] :rparen [499 56]}} (^{:go/pos {:name-pos [499 18]}} ExtRaise ^{:go/pos {:lparen [499 39] :rparen [499 55]}} (^{:go/pos {:name-pos [499 27]}} NewException ^{:go/pos {:name-pos [499 40]}} MemoryErrorType))))
+
+              ^{:go/pos {:tok-pos [501 25]}} (set! ^{:go/pos {:dot [501 6] :name-pos [501 7]}} (.-input_buffer_size ^{:go/pos {:name-pos [501 5]}} d) ^{:go/pos {:dot [501 28] :name-pos [501 29]}} (.-bzs_avail_in_real ^{:go/pos {:name-pos [501 27]}} d)))
+
+
+            ;; /* Copy tail */
+            ^{:go/pos {:dot [505 9] :lparen [505 14] :name-pos [505 10] :rparen [505 64]}} (.Move ^{:go/pos {:dot [505 7] :name-pos [505 8]}} (.-M ^{:go/pos {:name-pos [505 4]}} lib) ^{:go/pos {:dot [505 16] :name-pos [505 17]}} (.-input_buffer ^{:go/pos {:name-pos [505 15]}} d) ^{:go/pos {:lparen [505 38] :rparen [505 42]}} (^{:go/pos {:name-pos [505 31]}} next_in ^{:go/pos {:name-pos [505 39]}} bzs) ^{:go/pos {:dot [505 46] :name-pos [505 47]}} (.-bzs_avail_in_real ^{:go/pos {:name-pos [505 45]}} d)) ; memcpy
+            ^{:go/pos {:lparen [506 15] :rparen [506 35]}} (^{:go/pos {:name-pos [506 4]}} set_next_in ^{:go/pos {:name-pos [506 16]}} bzs ^{:go/pos {:dot [506 22] :name-pos [506 23]}} (.-input_buffer ^{:go/pos {:name-pos [506 21]}} d)))))
+
+
+      ^{:go/apos {2 [509 17]} :go/pos {:return [509 2]}} (return ^{:go/pos {:name-pos [509 9]}} result nil))))
+
+
+^{:go/pos {:func [512 1] :lbrace [512 113] :rbrace [520 1] :return [519 2]}} (go/func ^{:go/pos {:name-pos [512 6]}} _bz2_BZ2Decompressor_decompress_impl ^{:go/pos {:closing [512 95] :opening [512 42]}} [^{:tag ^{:go/pos {:star [512 48]}} (* ^{:go/pos {:name-pos [512 49]}} BZ2Decompressor) :go/pos {:name-pos [512 43]}} self ^{:tag ^{:go/pos {:lbrack [512 71]}} (slice ^{:go/pos {:name-pos [512 73]}} byte) :go/pos {:name-pos [512 66]}} data ^{:tag ^{:go/pos {:name-pos [512 90]}} int64 :go/pos {:name-pos [512 79]}} max_length] :results ^{:go/pos {:closing [512 111] :opening [512 97]}} [^{:go/pos {:name-pos [512 98]}} Object ^{:go/pos {:name-pos [512 106]}} error]
+  ^{:go/cond [[[513 2] [513 14] [515 2]] [[515 9] [515 30] [518 2]]] :go/pos {:if [513 2]}} (cond ^{:go/pos {:dot [513 9] :name-pos [513 10]}} (.-eof ^{:go/pos {:name-pos [513 5]}} self)
+    ^{:go/apos {1 [514 10]} :go/pos {:return [514 3]}} (return nil ^{:go/apos {2 [514 35]} :go/pos {:lparen [514 20] :rparen [514 66]}} (^{:go/pos {:name-pos [514 15]}} Raise ^{:go/pos {:name-pos [514 21]}} EOFErrorType "End of stream already reached"))
+    ^{:go/apos {2 [515 28]} :go/pos {:op-pos [515 25]}} (!= ^{:go/pos {:dot [515 16] :name-pos [515 17]}} (.-bzerror ^{:go/pos {:name-pos [515 12]}} self) 0)
+    ;; Re-entering BZ2_bzDecompress() after an error can write out of bounds.
+    ^{:go/apos {1 [517 10]} :go/pos {:return [517 3]}} (return nil ^{:go/apos {2 [517 37]} :go/pos {:lparen [517 20] :rparen [517 86]}} (^{:go/pos {:name-pos [517 15]}} Raise ^{:go/pos {:name-pos [517 21]}} ValueErrorType "Decompressor is unusable after a previous error")))
+
+  ^{:go/pos {:lparen [519 19] :rparen [519 42]}} (^{:go/pos {:name-pos [519 9]}} decompress ^{:go/pos {:name-pos [519 20]}} self ^{:go/pos {:name-pos [519 26]}} data ^{:go/pos {:name-pos [519 32]}} max_length))
+
+
+^{:go/pos {:func [522 1] :lbrace [522 50] :rbrace [542 1]}} (go/func ^{:go/pos {:name-pos [522 6]}} _bz2_BZ2Decompressor_impl ^{:go/pos {:closing [522 32] :opening [522 31]}} [] :results ^{:go/pos {:closing [522 48] :opening [522 34]}} [^{:go/pos {:name-pos [522 35]}} Object ^{:go/pos {:name-pos [522 43]}} error]
+  (let [^{:go/pos {:name-pos [523 2] :tok-pos [523 4]}} l ^{:go/pos {:lparen [523 10] :rparen [523 11]}} (^{:go/pos {:name-pos [523 7]}} bz2)
+      ^{:go/pos {:name-pos [524 2] :tok-pos [524 7]}} self ^{:go/pos {:op-pos [524 10]}} (addr ^{:go/acolon {2 [524 38] 4 [524 57] 6 [524 77]} :go/apos {2 [524 27] 3 [524 40] 4 [524 46] 6 [524 74]} :go/pos {:lbrace [524 26] :rbrace [524 90]}} (lit ^{:go/pos {:name-pos [524 11]}} BZ2Decompressor :needs_input true :unused_data ^{:go/apos {1 [524 68]} :go/pos {:lparen [524 67] :rparen [524 71]}} (^{:go/pos {:name-pos [524 59]}} NewBytes nil) :bzs ^{:go/pos {:lparen [524 88] :rparen [524 89]}} (^{:go/pos {:name-pos [524 79]}} newStream)))]
+    ^{:go/pos {:if [525 2] :lbrace [525 19] :rbrace [527 2]}} (when ^{:go/apos {2 [525 17]} :go/pos {:op-pos [525 14]}} (== ^{:go/pos {:dot [525 9] :name-pos [525 10]}} (.-bzs ^{:go/pos {:name-pos [525 5]}} self) 0)
+      ^{:go/apos {1 [526 10]} :go/pos {:return [526 3]}} (return nil ^{:go/pos {:lparen [526 23] :rparen [526 53]}} (^{:go/pos {:name-pos [526 15]}} ExtRaise ^{:go/pos {:lparen [526 36] :rparen [526 52]}} (^{:go/pos {:name-pos [526 24]}} NewException ^{:go/pos {:name-pos [526 37]}} MemoryErrorType))))
+
+    (let [^{:go/pos {:name-pos [528 2] :tok-pos [528 10]}} bzerror ^{:go/apos {1 [528 18] 3 [528 59] 4 [528 62]} :go/pos {:lparen [528 17] :rparen [528 63]}} (^{:go/pos {:name-pos [528 13]}} call "BZ2_bzDecompressInit" ^{:go/pos {:lparen [528 47] :rparen [528 56]}} (conv ^{:go/pos {:name-pos [528 42]}} int64 ^{:go/pos {:dot [528 52] :name-pos [528 53]}} (.-bzs ^{:go/pos {:name-pos [528 48]}} self)) 0 0)]
+      ^{:go/pos {:if [529 2] :lbrace [529 49] :rbrace [532 2]}} (when [^{:go/pos {:name-pos [529 5] :tok-pos [529 9]}} err ^{:go/pos {:lparen [529 27] :rparen [529 35]}} (^{:go/pos {:name-pos [529 12]}} catch_bz2_error ^{:go/pos {:name-pos [529 28]}} bzerror)] ^{:go/apos {2 [529 45]} :go/pos {:op-pos [529 42]}} (!= ^{:go/pos {:name-pos [529 38]}} err nil)
+        ^{:go/pos {:dot [530 4] :lparen [530 9] :name-pos [530 5] :rparen [530 18]}} (.Free ^{:go/pos {:name-pos [530 3]}} l ^{:go/pos {:dot [530 14] :name-pos [530 15]}} (.-bzs ^{:go/pos {:name-pos [530 10]}} self))
+        ^{:go/apos {1 [531 10]} :go/pos {:return [531 3]}} (return nil ^{:go/pos {:name-pos [531 15]}} err))
+
+      ^{:go/pos {:lparen [533 22] :rparen [540 3]}} (^{:go/pos {:dot [533 9] :name-pos [533 10] :x-pos [533 2]}} runtime/SetFinalizer ^{:go/pos {:name-pos [533 23]}} self ^{:go/pos {:func [533 29] :lbrace [533 54] :rbrace [540 2]}} (fn ^{:go/pos {:closing [533 52] :opening [533 33]}} [^{:tag ^{:go/pos {:star [533 36]}} (* ^{:go/pos {:name-pos [533 37]}} BZ2Decompressor) :go/pos {:name-pos [533 34]}} d]
+          (let [^{:go/pos {:tok-pos [534 11]}} (values ^{:go/pos {:name-pos [534 3]}} bzs ^{:go/pos {:name-pos [534 8]}} in) (values ^{:go/pos {:dot [534 15] :name-pos [534 16]}} (.-bzs ^{:go/pos {:name-pos [534 14]}} d) ^{:go/pos {:dot [534 22] :name-pos [534 23]}} (.-input_buffer ^{:go/pos {:name-pos [534 21]}} d))]
+            ^{:go/pos {:dot [535 4] :lparen [535 10] :name-pos [535 5] :rparen [539 4]}} (.Defer ^{:go/pos {:name-pos [535 3]}} l ^{:go/pos {:func [535 11] :lbrace [535 18] :rbrace [539 3]}} (fn ^{:go/pos {:closing [535 16] :opening [535 15]}} []
+                ^{:go/pos {:dot [536 5] :lparen [536 10] :name-pos [536 6] :rparen [536 13]}} (.Free ^{:go/pos {:name-pos [536 4]}} l ^{:go/pos {:name-pos [536 11]}} in)
+                ^{:go/apos {1 [537 9]} :go/pos {:lparen [537 8] :rparen [537 42]}} (^{:go/pos {:name-pos [537 4]}} call "BZ2_bzDecompressEnd" ^{:go/pos {:lparen [537 37] :rparen [537 41]}} (conv ^{:go/pos {:name-pos [537 32]}} int64 ^{:go/pos {:name-pos [537 38]}} bzs))
+                ^{:go/pos {:dot [538 5] :lparen [538 10] :name-pos [538 6] :rparen [538 14]}} (.Free ^{:go/pos {:name-pos [538 4]}} l ^{:go/pos {:name-pos [538 11]}} bzs))))))
+
+
+      ^{:go/apos {2 [541 15]} :go/pos {:return [541 2]}} (return ^{:go/pos {:name-pos [541 9]}} self nil))))
+
+
+;; /* Module initialization. */
+
+^{:go/pos {:func [546 1] :lbrace [546 13] :rbrace [639 1]}} (go/func ^{:go/pos {:name-pos [546 6]}} init ^{:go/pos {:closing [546 11] :opening [546 10]}} []
+  ^{:go/pos {:for [547 2] :lbrace [547 68] :range [547 14] :rbrace [555 2] :tok-pos [547 11]}} (range [^{:go/pos {:name-pos [547 6]}} _ ^{:go/pos {:name-pos [547 9]}} t ^{:go/pos {:lbrace [547 27] :rbrace [547 66]}} (lit ^{:go/pos {:lbrack [547 20]}} (slice ^{:go/pos {:star [547 22]}} (* ^{:go/pos {:name-pos [547 23]}} Type)) ^{:go/pos {:name-pos [547 28]}} bz2CompressorType ^{:go/pos {:name-pos [547 47]}} bz2DecompressorType)]
+    ^{:go/pos {:tok-pos [548 12]}} (set! ^{:go/pos {:dot [548 4] :name-pos [548 5]}} (.-Module ^{:go/pos {:name-pos [548 3]}} t) ^{:go/pos {:name-pos [548 14]}} MODULE_NAME)
+    ^{:go/pos {:lparen [549 15] :rparen [549 22]}} (^{:go/pos {:name-pos [549 3]}} HideTypeName ^{:go/pos {:dot [549 17] :name-pos [549 18]}} (.-Name ^{:go/pos {:name-pos [549 16]}} t))
+    ;; a C type's instance with state and no __getstate__ (object_getstate): "cannot pickle 'TP_NAME' object"
+    ^{:go/apos {2 [551 16]} :go/pos {:lparen [551 12] :rparen [554 4]}} (^{:go/pos {:name-pos [551 3]}} AddMethod ^{:go/pos {:name-pos [551 13]}} t "__reduce_ex__" ^{:go/pos {:func [551 33] :lbrace [551 80] :rbrace [554 3]}} (fn ^{:go/pos {:closing [551 62] :opening [551 37]}} [^{:tag ^{:go/pos {:lbrack [551 43]}} (slice ^{:go/pos {:name-pos [551 45]}} Object) :go/pos {:name-pos [551 38]}} args ^{:tag ^{:go/pos {:lbrack [551 56]}} (slice ^{:go/pos {:star [551 58]}} (* ^{:go/pos {:name-pos [551 59]}} Str)) :go/pos {:name-pos [551 53]}} kw] :results ^{:go/pos {:closing [551 78] :opening [551 64]}} [^{:go/pos {:name-pos [551 65]}} Object ^{:go/pos {:name-pos [551 73]}} error]
+        (let [^{:go/pos {:name-pos [552 4] :tok-pos [552 6]}} t ^{:go/pos {:dot [552 16] :lparen [552 21] :name-pos [552 17] :rparen [552 22]}} (.Type ^{:go/apos {2 [552 14]} :go/pos {:lbrack [552 13] :rbrack [552 15]}} (aget ^{:go/pos {:name-pos [552 9]}} args 0))]
+          ^{:go/apos {1 [553 11]} :go/pos {:return [553 4]}} (return nil ^{:go/apos {2 [553 38]} :go/pos {:lparen [553 22] :rparen [553 86]}} (^{:go/pos {:name-pos [553 16]}} Raisef ^{:go/pos {:name-pos [553 23]}} TypeErrorType "cannot pickle '%s.%s' object" ^{:go/pos {:dot [553 71] :name-pos [553 72]}} (.-Module ^{:go/pos {:name-pos [553 70]}} t) ^{:go/pos {:dot [553 81] :name-pos [553 82]}} (.-Name ^{:go/pos {:name-pos [553 80]}} t)))))))
+
+
+  ^{:go/apos {2 [556 31]} :go/pos {:lparen [556 11] :rparen [556 75]}} (^{:go/pos {:name-pos [556 2]}} AddToDict ^{:go/pos {:name-pos [556 12]}} bz2CompressorType "__doc__" ^{:go/pos {:lparen [556 48] :rparen [556 74]}} (^{:go/pos {:name-pos [556 42]}} NewStr ^{:go/pos {:name-pos [556 49]}} _bz2_BZ2Compressor__doc__))
+  ^{:go/apos {2 [557 33]} :go/pos {:lparen [557 11] :rparen [557 79]}} (^{:go/pos {:name-pos [557 2]}} AddToDict ^{:go/pos {:name-pos [557 12]}} bz2DecompressorType "__doc__" ^{:go/pos {:lparen [557 50] :rparen [557 78]}} (^{:go/pos {:name-pos [557 44]}} NewStr ^{:go/pos {:name-pos [557 51]}} _bz2_BZ2Decompressor__doc__))
+  (let [^{:go/pos {:name-pos [558 2] :tok-pos [558 7]}} comp ^{:go/pos {:func [558 10] :lbrace [558 40] :rbrace [558 85] :return [558 42]}} (fn ^{:tag ^{:go/pos {:star [558 25]}} (* ^{:go/pos {:name-pos [558 26]}} BZ2Compressor) :go/pos {:closing [558 23] :opening [558 14]}} [^{:tag ^{:go/pos {:name-pos [558 17]}} Object :go/pos {:name-pos [558 15]}} o] ^{:go/pos {:dot [558 67] :lparen [558 68] :rparen [558 83]}} (assert ^{:go/pos {:star [558 69]}} (* ^{:go/pos {:name-pos [558 70]}} BZ2Compressor) ^{:go/pos {:lparen [558 64] :rparen [558 66]}} (^{:go/pos {:name-pos [558 49]}} ExtBuiltinValue ^{:go/pos {:name-pos [558 65]}} o)))
+      ^{:go/pos {:name-pos [559 2] :tok-pos [559 9]}} decomp ^{:go/pos {:func [559 12] :lbrace [559 44] :rbrace [559 91] :return [559 46]}} (fn ^{:tag ^{:go/pos {:star [559 27]}} (* ^{:go/pos {:name-pos [559 28]}} BZ2Decompressor) :go/pos {:closing [559 25] :opening [559 16]}} [^{:tag ^{:go/pos {:name-pos [559 19]}} Object :go/pos {:name-pos [559 17]}} o] ^{:go/pos {:dot [559 71] :lparen [559 72] :rparen [559 89]}} (assert ^{:go/pos {:star [559 73]}} (* ^{:go/pos {:name-pos [559 74]}} BZ2Decompressor) ^{:go/pos {:lparen [559 68] :rparen [559 70]}} (^{:go/pos {:name-pos [559 53]}} ExtBuiltinValue ^{:go/pos {:name-pos [559 69]}} o)))]
+
+    ^{:go/pos {:tok-pos [561 30]}} (set! ^{:go/pos {:dot [561 25] :name-pos [561 26]}} (.-New ^{:go/pos {:dot [561 19] :name-pos [561 20]}} (.-Slots ^{:go/pos {:name-pos [561 2]}} bz2CompressorType)) ^{:go/pos {:func [561 32] :lbrace [561 88] :rbrace [576 2] :return [575 3]}} (fn ^{:go/pos {:closing [561 70] :opening [561 36]}} [^{:tag ^{:go/pos {:star [561 39]}} (* ^{:go/pos {:name-pos [561 40]}} Type) :go/pos {:name-pos [561 37]}} t ^{:tag ^{:go/pos {:lbrack [561 51]}} (slice ^{:go/pos {:name-pos [561 53]}} Object) :go/pos {:name-pos [561 46]}} args ^{:tag ^{:go/pos {:lbrack [561 64]}} (slice ^{:go/pos {:star [561 66]}} (* ^{:go/pos {:name-pos [561 67]}} Str)) :go/pos {:name-pos [561 61]}} kw] :results ^{:go/pos {:closing [561 86] :opening [561 72]}} [^{:go/pos {:name-pos [561 73]}} Object ^{:go/pos {:name-pos [561 81]}} error]
+        ^{:go/pos {:if [562 3] :lbrace [562 18] :rbrace [564 3]}} (when ^{:go/apos {2 [562 16]} :go/pos {:op-pos [562 14]}} (> ^{:go/pos {:lparen [562 9] :rparen [562 12]}} (^{:go/pos {:name-pos [562 6]}} len ^{:go/pos {:name-pos [562 10]}} kw) 0)
+          ^{:go/apos {1 [563 11]} :go/pos {:return [563 4]}} (return nil ^{:go/apos {2 [563 37]} :go/pos {:lparen [563 21] :rparen [563 81]}} (^{:go/pos {:name-pos [563 16]}} Raise ^{:go/pos {:name-pos [563 22]}} TypeErrorType "BZ2Compressor() takes no keyword arguments")))
+
+        ^{:go/pos {:if [565 3] :lbrace [565 20] :rbrace [567 3]}} (when ^{:go/apos {2 [565 18]} :go/pos {:op-pos [565 16]}} (> ^{:go/pos {:lparen [565 9] :rparen [565 14]}} (^{:go/pos {:name-pos [565 6]}} len ^{:go/pos {:name-pos [565 10]}} args) 1)
+          ^{:go/apos {1 [566 11]} :go/pos {:return [566 4]}} (return nil ^{:go/apos {2 [566 38]} :go/pos {:lparen [566 22] :rparen [566 100]}} (^{:go/pos {:name-pos [566 16]}} Raisef ^{:go/pos {:name-pos [566 23]}} TypeErrorType "BZ2Compressor expected at most 1 argument, got %d" ^{:go/pos {:lparen [566 94] :rparen [566 99]}} (^{:go/pos {:name-pos [566 91]}} len ^{:go/pos {:name-pos [566 95]}} args))))
+
+        (let ^{:go/apos {1 [568 20]}} [^{:go/pos {:name-pos [568 3] :tok-pos [568 17]}} compresslevel 9]
+          ^{:go/pos {:if [569 3] :lbrace [569 21] :rbrace [574 3]}} (when ^{:go/apos {2 [569 19]} :go/pos {:op-pos [569 16]}} (== ^{:go/pos {:lparen [569 9] :rparen [569 14]}} (^{:go/pos {:name-pos [569 6]}} len ^{:go/pos {:name-pos [569 10]}} args) 1)
+            (let [^{:tag ^{:go/pos {:name-pos [570 12]}} error :go/pos {:name-pos [570 8] :tok-pos [570 4]}} err (zero ^{:go/pos {:name-pos [570 12]}} error)]
+              ^{:go/pos {:if [571 4] :lbrace [571 59] :rbrace [573 4]}} (when [^{:go/pos {:tok-pos [571 26]}} (set! (values ^{:go/pos {:name-pos [571 7]}} compresslevel ^{:go/pos {:name-pos [571 22]}} err) ^{:go/pos {:lparen [571 37] :rparen [571 45]}} (^{:go/pos {:name-pos [571 28]}} ExtIntArg ^{:go/apos {2 [571 43]} :go/pos {:lbrack [571 42] :rbrack [571 44]}} (aget ^{:go/pos {:name-pos [571 38]}} args 0)))] ^{:go/apos {2 [571 55]} :go/pos {:op-pos [571 52]}} (!= ^{:go/pos {:name-pos [571 48]}} err nil)
+                ^{:go/apos {1 [572 12]} :go/pos {:return [572 5]}} (return nil ^{:go/pos {:name-pos [572 17]}} err))))
+
+
+          ^{:go/pos {:lparen [575 33] :rparen [575 47]}} (^{:go/pos {:name-pos [575 10]}} _bz2_BZ2Compressor_impl ^{:go/pos {:name-pos [575 34]}} compresslevel))))
+
+    ^{:go/apos {2 [577 31]} :go/pos {:lparen [577 11] :rparen [586 3]}} (^{:go/pos {:name-pos [577 2]}} AddMethod ^{:go/pos {:name-pos [577 12]}} bz2CompressorType "compress" ^{:go/pos {:func [577 43] :lbrace [577 90] :rbrace [586 2] :return [585 3]}} (fn ^{:go/pos {:closing [577 72] :opening [577 47]}} [^{:tag ^{:go/pos {:lbrack [577 53]}} (slice ^{:go/pos {:name-pos [577 55]}} Object) :go/pos {:name-pos [577 48]}} args ^{:tag ^{:go/pos {:lbrack [577 66]}} (slice ^{:go/pos {:star [577 68]}} (* ^{:go/pos {:name-pos [577 69]}} Str)) :go/pos {:name-pos [577 63]}} kw] :results ^{:go/pos {:closing [577 88] :opening [577 74]}} [^{:go/pos {:name-pos [577 75]}} Object ^{:go/pos {:name-pos [577 83]}} error]
+        ^{:go/pos {:if [578 3] :lbrace [578 53] :rbrace [580 3]}} (when [^{:go/pos {:name-pos [578 6] :tok-pos [578 10]}} err ^{:go/apos {1 [578 19]} :go/pos {:lparen [578 18] :rparen [578 39]}} (^{:go/pos {:name-pos [578 13]}} methO "compress" ^{:go/pos {:name-pos [578 31]}} args ^{:go/pos {:name-pos [578 37]}} kw)] ^{:go/apos {2 [578 49]} :go/pos {:op-pos [578 46]}} (!= ^{:go/pos {:name-pos [578 42]}} err nil)
+          ^{:go/apos {1 [579 11]} :go/pos {:return [579 4]}} (return nil ^{:go/pos {:name-pos [579 16]}} err))
+
+        (let [^{:go/pos {:tok-pos [581 13]}} (values ^{:go/pos {:name-pos [581 3]}} data ^{:go/pos {:name-pos [581 9]}} err) ^{:go/pos {:lparen [581 29] :rparen [581 37]}} (^{:go/pos {:name-pos [581 16]}} ExtDataBuffer ^{:go/apos {2 [581 35]} :go/pos {:lbrack [581 34] :rbrack [581 36]}} (aget ^{:go/pos {:name-pos [581 30]}} args 1))]
+          ^{:go/pos {:if [582 3] :lbrace [582 17] :rbrace [584 3]}} (when ^{:go/apos {2 [582 13]} :go/pos {:op-pos [582 10]}} (!= ^{:go/pos {:name-pos [582 6]}} err nil)
+            ^{:go/apos {1 [583 11]} :go/pos {:return [583 4]}} (return nil ^{:go/pos {:name-pos [583 16]}} err))
+
+          ^{:go/pos {:lparen [585 42] :rparen [585 62]}} (^{:go/pos {:name-pos [585 10]}} _bz2_BZ2Compressor_compress_impl ^{:go/pos {:lparen [585 47] :rparen [585 55]}} (^{:go/pos {:name-pos [585 43]}} comp ^{:go/apos {2 [585 53]} :go/pos {:lbrack [585 52] :rbrack [585 54]}} (aget ^{:go/pos {:name-pos [585 48]}} args 0)) ^{:go/pos {:name-pos [585 58]}} data))))
+
+    ^{:go/apos {2 [587 31]} :go/pos {:lparen [587 11] :rparen [595 3]}} (^{:go/pos {:name-pos [587 2]}} AddMethod ^{:go/pos {:name-pos [587 12]}} bz2CompressorType "flush" ^{:go/pos {:func [587 40] :lbrace [587 87] :rbrace [595 2] :return [594 3]}} (fn ^{:go/pos {:closing [587 69] :opening [587 44]}} [^{:tag ^{:go/pos {:lbrack [587 50]}} (slice ^{:go/pos {:name-pos [587 52]}} Object) :go/pos {:name-pos [587 45]}} args ^{:tag ^{:go/pos {:lbrack [587 63]}} (slice ^{:go/pos {:star [587 65]}} (* ^{:go/pos {:name-pos [587 66]}} Str)) :go/pos {:name-pos [587 60]}} kw] :results ^{:go/pos {:closing [587 85] :opening [587 71]}} [^{:go/pos {:name-pos [587 72]}} Object ^{:go/pos {:name-pos [587 80]}} error]
+        ^{:go/pos {:if [588 3] :lbrace [588 18] :rbrace [590 3]}} (when ^{:go/apos {2 [588 16]} :go/pos {:op-pos [588 14]}} (> ^{:go/pos {:lparen [588 9] :rparen [588 12]}} (^{:go/pos {:name-pos [588 6]}} len ^{:go/pos {:name-pos [588 10]}} kw) 0)
+          ^{:go/apos {1 [589 11]} :go/pos {:return [589 4]}} (return nil ^{:go/apos {2 [589 37]} :go/pos {:lparen [589 21] :rparen [589 87]}} (^{:go/pos {:name-pos [589 16]}} Raise ^{:go/pos {:name-pos [589 22]}} TypeErrorType "BZ2Compressor.flush() takes no keyword arguments")))
+
+        ^{:go/pos {:if [591 3] :lbrace [591 21] :rbrace [593 3]}} (when ^{:go/apos {2 [591 19]} :go/pos {:op-pos [591 16]}} (!= ^{:go/pos {:lparen [591 9] :rparen [591 14]}} (^{:go/pos {:name-pos [591 6]}} len ^{:go/pos {:name-pos [591 10]}} args) 1)
+          ^{:go/apos {1 [592 11]} :go/pos {:return [592 4]}} (return nil ^{:go/apos {2 [592 38]} :go/pos {:lparen [592 22] :rparen [592 104]}} (^{:go/pos {:name-pos [592 16]}} Raisef ^{:go/pos {:name-pos [592 23]}} TypeErrorType "BZ2Compressor.flush() takes no arguments (%d given)" ^{:go/apos {2 [592 103]} :go/pos {:op-pos [592 102]}} (- ^{:go/pos {:lparen [592 96] :rparen [592 101]}} (^{:go/pos {:name-pos [592 93]}} len ^{:go/pos {:name-pos [592 97]}} args) 1))))
+
+        ^{:go/pos {:lparen [594 39] :rparen [594 53]}} (^{:go/pos {:name-pos [594 10]}} _bz2_BZ2Compressor_flush_impl ^{:go/pos {:lparen [594 44] :rparen [594 52]}} (^{:go/pos {:name-pos [594 40]}} comp ^{:go/apos {2 [594 50]} :go/pos {:lbrack [594 49] :rbrack [594 51]}} (aget ^{:go/pos {:name-pos [594 45]}} args 0)))))
+
+
+    ^{:go/pos {:tok-pos [597 32]}} (set! ^{:go/pos {:dot [597 27] :name-pos [597 28]}} (.-New ^{:go/pos {:dot [597 21] :name-pos [597 22]}} (.-Slots ^{:go/pos {:name-pos [597 2]}} bz2DecompressorType)) ^{:go/pos {:func [597 34] :lbrace [597 90] :rbrace [605 2] :return [604 3]}} (fn ^{:go/pos {:closing [597 72] :opening [597 38]}} [^{:tag ^{:go/pos {:star [597 41]}} (* ^{:go/pos {:name-pos [597 42]}} Type) :go/pos {:name-pos [597 39]}} t ^{:tag ^{:go/pos {:lbrack [597 53]}} (slice ^{:go/pos {:name-pos [597 55]}} Object) :go/pos {:name-pos [597 48]}} args ^{:tag ^{:go/pos {:lbrack [597 66]}} (slice ^{:go/pos {:star [597 68]}} (* ^{:go/pos {:name-pos [597 69]}} Str)) :go/pos {:name-pos [597 63]}} kw] :results ^{:go/pos {:closing [597 88] :opening [597 74]}} [^{:go/pos {:name-pos [597 75]}} Object ^{:go/pos {:name-pos [597 83]}} error]
+        ^{:go/pos {:if [598 3] :lbrace [598 28] :rbrace [600 3]}} (when ^{:go/apos {2 [598 26]} :go/pos {:op-pos [598 24]}} (> ^{:go/pos {:op-pos [598 15]}} (- ^{:go/pos {:lparen [598 9] :rparen [598 14]}} (^{:go/pos {:name-pos [598 6]}} len ^{:go/pos {:name-pos [598 10]}} args) ^{:go/pos {:lparen [598 19] :rparen [598 22]}} (^{:go/pos {:name-pos [598 16]}} len ^{:go/pos {:name-pos [598 20]}} kw)) 0)
+          ^{:go/apos {1 [599 11]} :go/pos {:return [599 4]}} (return nil ^{:go/apos {2 [599 37]} :go/pos {:lparen [599 21] :rparen [599 86]}} (^{:go/pos {:name-pos [599 16]}} Raise ^{:go/pos {:name-pos [599 22]}} TypeErrorType "BZ2Decompressor() takes no positional arguments")))
+
+        ^{:go/pos {:if [601 3] :lbrace [601 18] :rbrace [603 3]}} (when ^{:go/apos {2 [601 16]} :go/pos {:op-pos [601 14]}} (> ^{:go/pos {:lparen [601 9] :rparen [601 12]}} (^{:go/pos {:name-pos [601 6]}} len ^{:go/pos {:name-pos [601 10]}} kw) 0)
+          ^{:go/apos {1 [602 11]} :go/pos {:return [602 4]}} (return nil ^{:go/apos {2 [602 37]} :go/pos {:lparen [602 21] :rparen [602 83]}} (^{:go/pos {:name-pos [602 16]}} Raise ^{:go/pos {:name-pos [602 22]}} TypeErrorType "BZ2Decompressor() takes no keyword arguments")))
+
+        ^{:go/pos {:lparen [604 35] :rparen [604 36]}} (^{:go/pos {:name-pos [604 10]}} _bz2_BZ2Decompressor_impl)))
+
+    ^{:go/apos {2 [606 33]} :go/pos {:lparen [606 11] :rparen [628 3]}} (^{:go/pos {:name-pos [606 2]}} AddMethod ^{:go/pos {:name-pos [606 12]}} bz2DecompressorType "decompress" ^{:go/pos {:func [606 47] :lbrace [606 94] :rbrace [628 2] :return [627 3]}} (fn ^{:go/pos {:closing [606 76] :opening [606 51]}} [^{:tag ^{:go/pos {:lbrack [606 57]}} (slice ^{:go/pos {:name-pos [606 59]}} Object) :go/pos {:name-pos [606 52]}} args ^{:tag ^{:go/pos {:lbrack [606 70]}} (slice ^{:go/pos {:star [606 72]}} (* ^{:go/pos {:name-pos [606 73]}} Str)) :go/pos {:name-pos [606 67]}} kw] :results ^{:go/pos {:closing [606 92] :opening [606 78]}} [^{:go/pos {:name-pos [606 79]}} Object ^{:go/pos {:name-pos [606 87]}} error]
+        (let [^{:go/pos {:tok-pos [607 10]}} (values ^{:go/pos {:name-pos [607 3]}} a ^{:go/pos {:name-pos [607 6]}} err) ^{:go/apos {1 [607 26] 5 [607 86]} :go/pos {:lparen [607 25] :rparen [607 87]}} (^{:go/pos {:name-pos [607 13]}} ExtParseArgs "decompress" ^{:go/apos {2 [607 45]} :go/pos {:lbrack [607 44] :rbrack [607 47]}} (subslice ^{:go/pos {:name-pos [607 40]}} args 1) ^{:go/pos {:name-pos [607 50]}} kw ^{:go/apos {2 [607 63] 3 [607 71]} :go/pos {:lbrace [607 62] :rbrace [607 83]}} (lit ^{:go/pos {:lbrack [607 54]}} (slice ^{:go/pos {:name-pos [607 56]}} string) "data" "max_length") 1)]
+          ^{:go/pos {:if [608 3] :lbrace [608 17] :rbrace [610 3]}} (when ^{:go/apos {2 [608 13]} :go/pos {:op-pos [608 10]}} (!= ^{:go/pos {:name-pos [608 6]}} err nil)
+            ^{:go/apos {1 [609 11]} :go/pos {:return [609 4]}} (return nil ^{:go/pos {:name-pos [609 16]}} err))
+
+          (let [^{:go/pos {:tok-pos [611 13]}} (values ^{:go/pos {:name-pos [611 3]}} data ^:assign ^{:go/pos {:name-pos [611 9]}} err) ^{:go/pos {:lparen [611 29] :rparen [611 34]}} (^{:go/pos {:name-pos [611 16]}} ExtDataBuffer ^{:go/apos {2 [611 32]} :go/pos {:lbrack [611 31] :rbrack [611 33]}} (aget ^{:go/pos {:name-pos [611 30]}} a 0))]
+            ^{:go/pos {:if [612 3] :lbrace [612 17] :rbrace [614 3]}} (when ^{:go/apos {2 [612 13]} :go/pos {:op-pos [612 10]}} (!= ^{:go/pos {:name-pos [612 6]}} err nil)
+              ^{:go/apos {1 [613 11]} :go/pos {:return [613 4]}} (return nil ^{:go/pos {:name-pos [613 16]}} err))
+
+            (let [^{:go/pos {:name-pos [615 3] :tok-pos [615 14]}} max_length ^{:go/apos {2 [615 23]} :go/pos {:lparen [615 22] :rparen [615 25]}} (conv ^{:go/pos {:name-pos [615 17]}} int64 -1)]
+              ^{:go/pos {:if [616 3] :lbrace [616 18] :rbrace [626 3]}} (when ^{:go/apos {2 [616 14]} :go/pos {:op-pos [616 11]}} (!= ^{:go/apos {2 [616 8]} :go/pos {:lbrack [616 7] :rbrack [616 9]}} (aget ^{:go/pos {:name-pos [616 6]}} a 1) nil)
+                (let [^{:go/pos {:tok-pos [617 11]}} (values ^{:go/pos {:name-pos [617 4]}} i ^{:go/pos {:name-pos [617 7]}} err) ^{:go/pos {:lparen [617 19] :rparen [617 24]}} (^{:go/pos {:name-pos [617 14]}} Index ^{:go/apos {2 [617 22]} :go/pos {:lbrack [617 21] :rbrack [617 23]}} (aget ^{:go/pos {:name-pos [617 20]}} a 1))]
+                  ^{:go/pos {:if [618 4] :lbrace [618 18] :rbrace [620 4]}} (when ^{:go/apos {2 [618 14]} :go/pos {:op-pos [618 11]}} (!= ^{:go/pos {:name-pos [618 7]}} err nil)
+                    ^{:go/apos {1 [619 12]} :go/pos {:return [619 5]}} (return nil ^{:go/pos {:name-pos [619 17]}} err))
+
+                  (let [^{:go/pos {:tok-pos [621 10]}} (values ^{:go/pos {:name-pos [621 4]}} v ^{:go/pos {:name-pos [621 7]}} ok) ^{:go/pos {:dot [621 14] :lparen [621 20] :name-pos [621 15] :rparen [621 21]}} (.Int64 ^{:go/pos {:name-pos [621 13]}} i)]
+                    ^{:go/pos {:if [622 4] :lbrace [622 11] :rbrace [624 4]}} (when ^{:go/pos {:op-pos [622 7]}} (not ^{:go/pos {:name-pos [622 8]}} ok)
+                      ^{:go/apos {1 [623 12]} :go/pos {:return [623 5]}} (return nil ^{:go/apos {2 [623 42]} :go/pos {:lparen [623 22] :rparen [623 88]}} (^{:go/pos {:name-pos [623 17]}} Raise ^{:go/pos {:name-pos [623 23]}} OverflowErrorType "Python int too large to convert to C ssize_t")))
+
+                    ^{:go/pos {:tok-pos [625 15]}} (set! ^{:go/pos {:name-pos [625 4]}} max_length ^{:go/pos {:name-pos [625 17]}} v))))
+
+              ^{:go/pos {:lparen [627 46] :rparen [627 80]}} (^{:go/pos {:name-pos [627 10]}} _bz2_BZ2Decompressor_decompress_impl ^{:go/pos {:lparen [627 53] :rparen [627 61]}} (^{:go/pos {:name-pos [627 47]}} decomp ^{:go/apos {2 [627 59]} :go/pos {:lbrack [627 58] :rbrack [627 60]}} (aget ^{:go/pos {:name-pos [627 54]}} args 0)) ^{:go/pos {:name-pos [627 64]}} data ^{:go/pos {:name-pos [627 70]}} max_length))))))
+
+    ^{:go/apos {2 [629 33] 4 [629 111]} :go/pos {:lparen [629 11] :rparen [629 114]}} (^{:go/pos {:name-pos [629 2]}} AddGetSet ^{:go/pos {:name-pos [629 12]}} bz2DecompressorType "eof" ^{:go/pos {:func [629 40] :lbrace [629 71] :rbrace [629 108]}} (fn ^{:go/pos {:closing [629 53] :opening [629 44]}} [^{:tag ^{:go/pos {:name-pos [629 47]}} Object :go/pos {:name-pos [629 45]}} o] :results ^{:go/pos {:closing [629 69] :opening [629 55]}} [^{:go/pos {:name-pos [629 56]}} Object ^{:go/pos {:name-pos [629 64]}} error] ^{:go/apos {2 [629 104]} :go/pos {:return [629 73]}} (return ^{:go/pos {:lparen [629 87] :rparen [629 101]}} (^{:go/pos {:name-pos [629 80]}} NewBool ^{:go/pos {:dot [629 97] :name-pos [629 98]}} (.-eof ^{:go/pos {:lparen [629 94] :rparen [629 96]}} (^{:go/pos {:name-pos [629 88]}} decomp ^{:go/pos {:name-pos [629 95]}} o))) nil)) nil)
+    ^{:go/apos {2 [630 33] 4 [630 118]} :go/pos {:lparen [630 11] :rparen [630 121]}} (^{:go/pos {:name-pos [630 2]}} AddGetSet ^{:go/pos {:name-pos [630 12]}} bz2DecompressorType "unused_data" ^{:go/pos {:func [630 48] :lbrace [630 79] :rbrace [630 115]}} (fn ^{:go/pos {:closing [630 61] :opening [630 52]}} [^{:tag ^{:go/pos {:name-pos [630 55]}} Object :go/pos {:name-pos [630 53]}} o] :results ^{:go/pos {:closing [630 77] :opening [630 63]}} [^{:go/pos {:name-pos [630 64]}} Object ^{:go/pos {:name-pos [630 72]}} error] ^{:go/apos {2 [630 111]} :go/pos {:return [630 81]}} (return ^{:go/pos {:dot [630 97] :name-pos [630 98]}} (.-unused_data ^{:go/pos {:lparen [630 94] :rparen [630 96]}} (^{:go/pos {:name-pos [630 88]}} decomp ^{:go/pos {:name-pos [630 95]}} o)) nil)) nil)
+    ^{:go/apos {2 [631 33] 4 [631 127]} :go/pos {:lparen [631 11] :rparen [631 130]}} (^{:go/pos {:name-pos [631 2]}} AddGetSet ^{:go/pos {:name-pos [631 12]}} bz2DecompressorType "needs_input" ^{:go/pos {:func [631 48] :lbrace [631 79] :rbrace [631 124]}} (fn ^{:go/pos {:closing [631 61] :opening [631 52]}} [^{:tag ^{:go/pos {:name-pos [631 55]}} Object :go/pos {:name-pos [631 53]}} o] :results ^{:go/pos {:closing [631 77] :opening [631 63]}} [^{:go/pos {:name-pos [631 64]}} Object ^{:go/pos {:name-pos [631 72]}} error] ^{:go/apos {2 [631 120]} :go/pos {:return [631 81]}} (return ^{:go/pos {:lparen [631 95] :rparen [631 117]}} (^{:go/pos {:name-pos [631 88]}} NewBool ^{:go/pos {:dot [631 105] :name-pos [631 106]}} (.-needs_input ^{:go/pos {:lparen [631 102] :rparen [631 104]}} (^{:go/pos {:name-pos [631 96]}} decomp ^{:go/pos {:name-pos [631 103]}} o))) nil)) nil)
+
+    ^{:go/pos {:lparen [633 23] :rparen [638 3]}} (^{:go/pos {:name-pos [633 2]}} RegisterBuiltinModule ^{:go/pos {:name-pos [633 24]}} MODULE_NAME ^{:go/pos {:func [633 37] :lbrace [633 71] :rbrace [638 2]}} (fn ^{:go/pos {:closing [633 52] :opening [633 41]}} [^{:tag ^{:go/pos {:star [633 45]}} (* ^{:go/pos {:name-pos [633 46]}} Interp) :go/pos {:name-pos [633 42]}} in] :results ^{:go/pos {:closing [633 69] :opening [633 54]}} [^{:go/pos {:star [633 55]}} (* ^{:go/pos {:name-pos [633 56]}} Module) ^{:go/pos {:name-pos [633 64]}} error]
+        (let [^{:go/pos {:name-pos [634 3] :tok-pos [634 5]}} d ^{:go/pos {:lparen [634 16] :rparen [634 28]}} (^{:go/pos {:name-pos [634 8]}} ExtModNS ^{:go/pos {:name-pos [634 17]}} MODULE_NAME)]
+          ^{:go/apos {2 [635 12]} :go/pos {:dot [635 4] :lparen [635 11] :name-pos [635 5] :rparen [635 46]}} (.SetStr ^{:go/pos {:name-pos [635 3]}} d "BZ2Compressor" ^{:go/pos {:name-pos [635 29]}} bz2CompressorType)
+          ^{:go/apos {2 [636 12]} :go/pos {:dot [636 4] :lparen [636 11] :name-pos [636 5] :rparen [636 50]}} (.SetStr ^{:go/pos {:name-pos [636 3]}} d "BZ2Decompressor" ^{:go/pos {:name-pos [636 31]}} bz2DecompressorType)
+          ^{:go/apos {2 [637 47]} :go/pos {:return [637 3]}} (return ^{:go/pos {:op-pos [637 10]}} (addr ^{:go/acolon {2 [637 22] 4 [637 41]} :go/apos {2 [637 18] 4 [637 37]} :go/pos {:lbrace [637 17] :rbrace [637 44]}} (lit ^{:go/pos {:name-pos [637 11]}} Module :Name ^{:go/pos {:name-pos [637 24]}} MODULE_NAME :Dict ^{:go/pos {:name-pos [637 43]}} d)) nil))))))
+
+
+
+
+^{:go/apos {6 [649 9]} :go/pos {:doc [641 1] :func [642 1] :lbrace [642 57] :rbrace [650 1] :return [649 2]}} (go/func ^{:go/pos {:name-pos [642 6]}} methO "methO checks a METH_O method's one argument (args[0] is self).\n" ^{:tag ^{:go/pos {:name-pos [642 51]}} error :go/pos {:closing [642 49] :opening [642 11]}} [^{:tag ^{:go/pos {:name-pos [642 17]}} string :go/pos {:name-pos [642 12]}} name ^{:tag ^{:go/pos {:lbrack [642 30]}} (slice ^{:go/pos {:name-pos [642 32]}} Object) :go/pos {:name-pos [642 25]}} args ^{:tag ^{:go/pos {:lbrack [642 43]}} (slice ^{:go/pos {:star [642 45]}} (* ^{:go/pos {:name-pos [642 46]}} Str)) :go/pos {:name-pos [642 40]}} kw]
+  ^{:go/pos {:if [643 2] :lbrace [643 17] :rbrace [645 2]}} (when ^{:go/apos {2 [643 15]} :go/pos {:op-pos [643 13]}} (> ^{:go/pos {:lparen [643 8] :rparen [643 11]}} (^{:go/pos {:name-pos [643 5]}} len ^{:go/pos {:name-pos [643 9]}} kw) 0)
+    ^{:go/pos {:return [644 3]}} (return ^{:go/apos {2 [644 32]} :go/pos {:lparen [644 16] :rparen [644 85]}} (^{:go/pos {:name-pos [644 10]}} Raisef ^{:go/pos {:name-pos [644 17]}} TypeErrorType "BZ2Compressor.%s() takes no keyword arguments" ^{:go/pos {:name-pos [644 81]}} name)))
+
+  ^{:go/pos {:if [646 2] :lbrace [646 20] :rbrace [648 2]}} (when ^{:go/apos {2 [646 18]} :go/pos {:op-pos [646 15]}} (!= ^{:go/pos {:lparen [646 8] :rparen [646 13]}} (^{:go/pos {:name-pos [646 5]}} len ^{:go/pos {:name-pos [646 9]}} args) 2)
+    ^{:go/pos {:return [647 3]}} (return ^{:go/apos {2 [647 32]} :go/pos {:lparen [647 16] :rparen [647 109]}} (^{:go/pos {:name-pos [647 10]}} Raisef ^{:go/pos {:name-pos [647 17]}} TypeErrorType "BZ2Compressor.%s() takes exactly one argument (%d given)" ^{:go/pos {:name-pos [647 92]}} name ^{:go/apos {2 [647 108]} :go/pos {:op-pos [647 107]}} (- ^{:go/pos {:lparen [647 101] :rparen [647 106]}} (^{:go/pos {:name-pos [647 98]}} len ^{:go/pos {:name-pos [647 102]}} args) 1))))
+
+  nil)
+
+
+^{:go/apos {2 [652 35]} :go/pos {:tok-pos [652 1]}} (go/const ^{:val "BZ2Compressor(compresslevel=9, /)\n--\n\nCreate a compressor object for compressing data incrementally.\n\n  compresslevel\n    Compression level, as a number between 1 and 9.\n\nFor one-shot compression, use the compress() function instead." :go/pos {:name-pos [652 7]}} _bz2_BZ2Compressor__doc__ "BZ2Compressor(compresslevel=9, /)\n--\n\nCreate a compressor object for compressing data incrementally.\n\n  compresslevel\n    Compression level, as a number between 1 and 9.\n\nFor one-shot compression, use the compress() function instead.")
+
+^{:go/apos {2 [654 37]} :go/pos {:tok-pos [654 1]}} (go/const ^{:val "BZ2Decompressor()\n--\n\nCreate a decompressor object for decompressing data incrementally.\n\nFor one-shot decompression, use the decompress() function instead." :go/pos {:name-pos [654 7]}} _bz2_BZ2Decompressor__doc__ "BZ2Decompressor()\n--\n\nCreate a decompressor object for decompressing data incrementally.\n\nFor one-shot decompression, use the decompress() function instead.")

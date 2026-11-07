@@ -122,6 +122,8 @@
   (field ^:static ^:final ^Keyword staticKey (Keyword/intern nil "static"))
 
   (field ^:static ^:final ^Keyword arglistsKey (Keyword/intern nil "arglists"))
+  ;; CDR2: the mark of a call InvokeExpr.parse has typed by its arglist's primitive return
+  (field ^:static ^:final ^Keyword PRIM_CAST_KEY (Keyword/intern "arbace.lang.Compiler" "prim-cast"))
 
   (field ^:static ^:final ^Symbol INVOKE_STATIC (Symbol/intern "invokeStatic"))
 
@@ -1509,7 +1511,20 @@
       match))
 
   (defclass ^:abstract ^:static MethodExpr
-    :extends HostExpr)
+    :extends HostExpr
+
+    ;; CDR2: an argument for a primitive parameter typed as MethodExpr.emitTypedArgs types it
+    ;; (Compiler.maybePrimitiveType: its getJavaClass, so that a tag that does not fit the
+    ;; expression's primitive throws "Cannot coerce long to int, use a cast instead" when the
+    ;; call is analyzed, as Clojure's emit does; the evaluator emits nothing)
+    (method ^:static checkTypedArgs ^void [^java.lang.reflect.Method m ^IPersistentVector args]
+      (when (some? m)
+        (let [ps (.getParameterTypes m)]
+          (loop [^int i 0]
+            (when (and (< i (alength ps)) (< i (.count args)))
+              (when (.isPrimitive (aget ps i))
+                (arbace.lang.Compiler/maybePrimitiveType (cast Expr (.nth args i))))
+              (recur (unchecked-inc-int i))))))))
 
   (defclass ^:static InstanceMethodExpr
     :extends MethodExpr
@@ -1550,7 +1565,8 @@
       (set! (.-tag this) tag)
       (set! (.-tailPosition this) tailPosition)
       (set! (.-method this) resolvedMethod)
-      (set! (.-qualifyingClass this) qualifyingClass))
+      (set! (.-qualifyingClass this) qualifyingClass)
+      (MethodExpr/checkTypedArgs method args))
 
     (constructor ^:public [this ^String source ^int line ^int column ^Symbol tag ^Expr target
                            ^Class qualifyingClass ^String methodName ^IPersistentVector args
@@ -1613,7 +1629,8 @@
                 (.format
                   (RT/errPrintWriter)
                   "Reflection warning, %s:%d:%d - call to method %s can't be resolved (target class is unknown).\n"
-                  (new Object/1 [(.deref SOURCE_PATH) line column methodName])))))))
+                  (new Object/1 [(.deref SOURCE_PATH) line column methodName]))))))
+      (MethodExpr/checkTypedArgs method args))
 
     (method ^:public eval [this]
       (try
@@ -1725,7 +1742,8 @@
                  (StaticMethodExpr/isBoxedMath method))
         (.format (RT/errPrintWriter)
                  "Boxed math warning, %s:%d:%d - call: %s.\n"
-                 (new Object/1 [(.deref SOURCE_PATH) line column (.toString method)]))))
+                 (new Object/1 [(.deref SOURCE_PATH) line column (.toString method)])))
+      (MethodExpr/checkTypedArgs method args))
 
     (constructor ^:public [this ^String source ^int line ^int column ^Symbol tag ^Class c
                            ^String methodName ^IPersistentVector args ^boolean tailPosition]
@@ -1774,7 +1792,8 @@
                      (StaticMethodExpr/isBoxedMath method))
             (.format (RT/errPrintWriter)
                      "Boxed math warning, %s:%d:%d - call: %s.\n"
-                     (new Object/1 [(.deref SOURCE_PATH) line column (.toString method)]))))))
+                     (new Object/1 [(.deref SOURCE_PATH) line column (.toString method)])))))
+      (MethodExpr/checkTypedArgs method args))
 
     ;; *unchecked-math* :warn-on-boxed: jrt's reflection has no annotations. The methods of
     ;; Numbers marked ^{WarnBoxedMath false}, by name (each name's overloads are all marked)
@@ -3185,7 +3204,12 @@
                 (when (some? s)
                   (let [args (cast IPersistentVector (.first s))]
                     (if (== (.count args) arity)
-                        (let [primc (FnMethod/primInterface args)]
+                        (let [primc (FnMethod/primInterface args)
+                              ;; CDR2 (doc/CLOJURE-DESIGN-REVIEW.md): an arglist returning ^long or
+                              ;; ^double types the call as Clojure's .invokePrim does, without a
+                              ;; primitive interface (Q1 (a)): (RT/longCast (f args)), the inner call
+                              ;; marked so that it stays a plain invoke
+                              primCast (FnMethod/primReturnCast args)]
                           (when (some? primc)
                             (return
                               (arbace.lang.Compiler/analyze
@@ -3200,6 +3224,21 @@
                                                    RT/TAG_KEY
                                                    (Symbol/intern primc)))
                                                (.next form)))
+                                           (cast
+                                             IPersistentMap
+                                             (RT/conj (RT/meta v) (RT/meta form)))))))
+                          (when (and (some? primCast) (nil? (RT/get (RT/meta form) PRIM_CAST_KEY)))
+                            (return
+                              (arbace.lang.Compiler/analyze
+                                context
+                                (.withMeta (cast
+                                             IObj
+                                             (RT/list (Symbol/intern "arbace.lang.RT" primCast)
+                                                      (.withMeta (cast IObj form)
+                                                                 (^[Object/1] RT/map
+                                                                   PRIM_CAST_KEY Boolean/TRUE
+                                                                   RT/LINE_KEY (RT/get (RT/meta form) RT/LINE_KEY)
+                                                                   RT/COLUMN_KEY (RT/get (RT/meta form) RT/COLUMN_KEY)))))
                                            (cast
                                              IPersistentMap
                                              (RT/conj (RT/meta v) (RT/meta form))))))))
@@ -3712,6 +3751,17 @@
     ;; primitive interface, so callers call invoke; the evaluator converts ^long and ^double
     ;; parameters and returns
     (method ^:public ^:static primInterface ^String [^IPersistentVector arglist] nil)
+
+    ;; CDR2: the RT cast typing a call of a fn whose arglist returns ^long (longCast) or ^double
+    ;; (doubleCast), as Clojure's invokePrim of IFn$...L or ...D types it; nil otherwise (another
+    ;; primitive's tag, which Clojure's primInterface refuses, is left an Object call here)
+    (method ^:public ^:static primReturnCast ^String [^IPersistentVector arglist]
+      (let [t (arbace.lang.Compiler/tagOf arglist)
+            c (when (instance? Symbol t) (arbace.lang.Compiler/primClass (cast Symbol t)))]
+        (cond
+          (identical? c Long/TYPE) "longCast"
+          (identical? c Double/TYPE) "doubleCast"
+          :else nil)))
 
     (method ^:static parse ^FnMethod [^ObjExpr objx ^ISeq form ^:mutable rettag]
       (let [parms (cast IPersistentVector (RT/first form))

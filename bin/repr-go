@@ -93,7 +93,7 @@
 #                                 run by goi. The native read's summary gives them as the message
 #                                 of a file go/parser rejects; goi's check judges the error tests
 #                                 on them (and arbace.go.run --errorcheck --gc-front merges them)
-#   bin/repr-go native-check [--fresh] [--headers] [CORPUS...]
+#   bin/repr-go native-check [--fresh] [--headers] [--only FILE | --record-ids] [CORPUS...]
 #                                 the native reader against the helper over the corpora (default
 #                                 all): repr/go's corpora above (std with linux-errtest) and the
 #                                 vendored trees' sources (bin/lib/repr-go/native-corpus:
@@ -112,7 +112,17 @@
 #                                 empty, or that the helper dumped nothing of, fails; --headers: the loader alone,
 #                                 the headers and the sets, no parse (seconds); exits non-zero on
 #                                 a difference that test/repr/go/native-known.edn does not list;
-#                                 report in .tmp/repr-go/native-check[-headers].report.edn
+#                                 report in .tmp/repr-go/native-check[-headers].report.edn.
+#                                 --only FILE (GT8, the gate's rotation): the ids CORPUS/KEY of
+#                                 FILE alone (one a line; KEY a dump's key), a partial check (the
+#                                 others neither checked nor missing; its report :partial, which
+#                                 bin/reap record-native-check refuses); --record-ids: no check,
+#                                 test/repr/go/native-check-ids.edn's lines of the corpora written
+#                                 from the helper's dumps (the rotation's universe)
+#                                 The negative controls (GTS81 (a), doc/GATE-SURVEY.md "As built: GTS88 (b)"):
+#                                 test/repr/go/native-controls.edn (REPR_GO_NATIVE_CONTROLS), a crossed pair of
+#                                 dumps judged by each level's own comparison, which must differ; a control that
+#                                 passes exits 1, one whose dumps are not in the run is left (CONTROL rows)
 #   bin/repr-go roundtrip [[GOOS/]ARCH] [--goos GOOS] [--record]
 #                                 the round trip: convert std and $GOROOT/test's programs for
 #                                 GOOS/ARCH (default tamago/amd64; GOOS tamago or linux, ARCH
@@ -133,13 +143,18 @@
 #                                 bin/repr-go check --dirtests (levels tree, export, code, run),
 #                                 reference test/repr/go/roundtrip-dirtest-[GOOS-]ARCH.edn, known
 #                                 differences test/repr/go/roundtrip-dirtest-known.edn
+#                                 The negative controls (test/repr/go/roundtrip-controls.txt,
+#                                 REPR_GO_ROUNDTRIP_CONTROLS; bin/repr-go check --controls): a package's or program's
+#                                 candidate against another entry's original must fail the tree level; a control that
+#                                 passes fails the run (CONTROL rows)
 #   bin/repr-go roundtrip --text [[GOOS/]ARCH] [--tests|--dirs]
 #                                 the text level (doc/go/SPEC.md §3.1): convert the same corpora
 #                                 with --full, print them in the full layout into
 #                                 .tmp/repr-go/cand-text-[GOOS-]ARCH (or cand-text-tests) and compare
 #                                 every printed file with its original byte for byte; no build.
 #                                 Exits non-zero when a file differs that the known differences
-#                                 (with reasons) test/repr/go/roundtrip-text-known.edn do not list
+#                                 (with reasons) test/repr/go/roundtrip-text-known.edn do not list; its controls: a
+#                                 printed file against another file's original, byte for byte, must differ
 #   bin/repr-go print [--layout lines|gofmt] [--no-line-directives] [--line-file]
 #                     [--src DIR [--build]] [--gofmt] FORMS.ae OUTDIR
 #                                 the printer: Go forms -> Go source (doc/go/SPEC.md §12,
@@ -473,19 +488,57 @@ native_read() {
 # corpora (default all of native_corpora; arbace.repr.go.annotate), or the headers alone
 # (--headers: arbace.repr.go.parse)
 native_check() {
-  local fresh="" headers="" specs=() c native_ns=arbace.repr.go.annotate
+  local fresh="" headers="" specs=() c native_ns=arbace.repr.go.annotate only="" record_ids="" corpora=()
   while [ $# -gt 0 ]; do
     case $1 in
       --fresh) fresh=1; shift ;;
       --headers) headers=--headers; native_ns=arbace.repr.go.parse; shift ;;
-      *) break ;;
+      --only) only=$(realpath -m "$2"); shift 2 ;;
+      --record-ids) record_ids=1; shift ;;
+      -*) echo "native-check: unknown option $1" >&2; return 2 ;;
+      *) corpora+=("$1"); shift ;;
     esac
   done
-  [ $# -gt 0 ] || set -- $native_corpora
-  for c in "$@"; do specs+=("$(native_dumps "$c" "$fresh")"); done
+  [ ${#corpora[@]} -gt 0 ] || corpora=($native_corpora)
+  if [ -n "$only" ]; then
+    [ -f "$only" ] || { echo "native-check: --only $only: no such file" >&2; return 2; }
+    [ -z "$record_ids" ] || { echo "native-check: --record-ids writes every id of its corpora: no --only" >&2; return 2; }
+  fi
+  for c in "${corpora[@]}"; do specs+=("$(native_dumps "$c" "$fresh")") || return 1; done
+  # --record-ids (GT8, the rotation's universe): the helper's dumps of each corpus (the check's denominator), one id
+  # CORPUS/KEY a line, into test/repr/go/native-check-ids.edn, the other corpora's lines kept; no check run
+  if [ -n "$record_ids" ]; then native_record_ids "${specs[@]}"; return; fi
   mkdir -p "$root/.tmp/repr-go"
-  native_run check $headers --known "$root/test/repr/go/native-known.edn" \
+  # the negative controls (GTS81 (a)): not the headers' check
+  local controls=()
+  [ -n "$headers" ] || controls=(--controls "${REPR_GO_NATIVE_CONTROLS:-$root/test/repr/go/native-controls.edn}")
+  native_run check $headers --known "$root/test/repr/go/native-known.edn" ${only:+--only "$only"} \
+    ${controls[@]+"${controls[@]}"} \
     --report "${REPR_GO_NATIVE_REPORT:-$root/.tmp/repr-go/native-check${headers:+-headers}.report.edn}" "${specs[@]}"
+}
+
+# native_record_ids SPEC...: test/repr/go/native-check-ids.edn's lines of the specs' corpora written afresh from their
+# helper's dumps (the keys of the .edn files under each spec's :dumps), the other corpora's lines kept
+native_record_ids() {
+  local f=$root/test/repr/go/native-check-ids.edn t sp name dumps
+  t=$root/.tmp/repr-go/native-check-ids.$$; mkdir -p "$root/.tmp/repr-go"
+  : > "$t.new"; : > "$t.names"
+  for sp in "$@"; do
+    name=$(sed -n 's/^{:name "\([^"]*\)".*/\1/p' "$sp") dumps=$(sed -n 's/.*:dumps "\([^"]*\)".*/\1/p' "$sp" | head -1)
+    dumps=${dumps%/}
+    [ -n "$name" ] && [ -d "$dumps" ] || { echo "native-check --record-ids: $sp: no :name or no dumps directory" >&2; return 1; }
+    echo "$name" >> "$t.names"
+    (cd "$dumps" && find . -name '*.edn' -type f | sed 's|^\./||; s|\.edn$||') | LC_ALL=C sort \
+      | awk -v n="$name" '{ printf "[\"%s/%s\"]\n", n, $0 }' >> "$t.new"
+  done
+  [ -f "$f" ] && grep '^\["' "$f" | awk -F'"' 'NR == FNR { drop[$0] = 1; next } { split($2, a, "/"); if (!(a[1] in drop)) print }' "$t.names" - >> "$t.new"
+  { echo ";; bin/repr-go native-check's ids (GT8, doc/GATE-SURVEY.md, \"As built: GT8 (the tools' lists)\"): per corpus its helper's"
+    echo ";; dumps, the check's denominator, one [\"CORPUS/KEY\"] a line (KEY a dump's key: a package's path, a program's file),"
+    echo ";; the universe of the gate's rotation of repr-go-native (bin/repr-go native-check CORPUS --only LIST). Written by"
+    echo ";; bin/repr-go native-check --record-ids [CORPUS...] from the helper's dumps (made when missing), no check run."
+    echo "["; LC_ALL=C sort -u "$t.new"; echo "]"; } > "$f"
+  echo "native-check --record-ids: $(grep -c '^\["' "$f") ids in $f ($(paste -sd' ' "$t.names") written afresh)"
+  rm -f "$t.new" "$t.names"
 }
 
 convert_main() {
@@ -553,6 +606,27 @@ convert() {
   fi
 }
 
+# roundtrip_text_controls CAND: the text level's negative controls (GTS81 (a); test/repr/go/roundtrip-controls.txt, the
+# lines "text SUBJECT REFERENCE"): the printed file CAND/SUBJECT against the original GOROOT/REFERENCE, byte for byte (the
+# level's comparison of a file with its own original), which must differ; a control that passes fails (status 1); one whose
+# printed file is not in the candidate is left
+roundtrip_text_controls() {
+  local cand=$1 f=${REPR_GO_ROUNDTRIP_CONTROLS:-$root/test/repr/go/roundtrip-controls.txt} kind subj ref n=0 held=0 left=0 bad=0
+  while read -r kind subj ref _; do
+    [ "$kind" = text ] || continue
+    n=$((n + 1))
+    if [ ! -f "$cand/$subj" ] || [ ! -f "$goroot/$ref" ]; then
+      echo "CONTROL left text $subj vs $ref (not in this run)"; left=$((left + 1))
+    elif cmp -s "$cand/$subj" "$goroot/$ref"; then
+      echo "CONTROL FAILED text $subj vs $ref: the comparison passes what differs"; bad=$((bad + 1))
+    else
+      echo "CONTROL ok text $subj vs $ref"; held=$((held + 1))
+    fi
+  done < "$f"
+  echo "text controls (${f#$root/}): $n, $held hold, $left left, $bad fail"
+  [ "$bad" -eq 0 ]
+}
+
 # roundtrip_text GOOS ARCH PREFIX WITH_TESTS DIRS: the text level (roundtrip --text)
 roundtrip_text() {
   local goos=$1 arch=$2 prefix=$3 with_tests=$4 dirs=$5 cand status=0 s t0 t1 known
@@ -587,6 +661,7 @@ roundtrip_text() {
   done
   t1=$(date +%s.%N)
   printf 'roundtrip --text %s: %.1f s\n' "$goos/$arch${with_tests:+ with tests}${dirs:+, directory tests}" "$(echo "$t1 - $t0" | bc)"
+  roundtrip_text_controls "$cand" || status=1
   return $status
 }
 
@@ -616,7 +691,7 @@ roundtrip() {
   fi
   cand=$root/.tmp/repr-go/cand-$prefix$arch
   ref=$root/test/repr/go/roundtrip-$prefix$arch.edn
-  check=("$root/bin/repr-go" check --goos "$goos" --arch "$arch")
+  check=("$root/bin/repr-go" check --goos "$goos" --arch "$arch" --controls "${REPR_GO_ROUNDTRIP_CONTROLS:-$root/test/repr/go/roundtrip-controls.txt}")
   if [ -n "$with_tests" ]; then
     [ "$goos/$arch" = tamago/amd64 ] || { echo "roundtrip --tests: tamago/amd64 only (the corpus tests)" >&2; return 2; }
     cand=$root/.tmp/repr-go/cand-tests

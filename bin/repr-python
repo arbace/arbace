@@ -1,0 +1,847 @@
+#!/bin/bash
+# repr/python, Python's bridge (doc/python/PYTHON-SURVEY.md, doc/python/SPEC.md): so far (PY1) the spec's checks,
+# the oracle's pin and the corpora's pins. Out of gate_key and the gate (PYS18); nothing here builds Arbace: stage 0
+# only reads data (test/python/*.ae), the oracle (the host's python3, isolated: -I -S -B) runs tools/pydump's scripts,
+# which read the corpora's files as data and never import them.
+#
+#   bin/repr-python pins --fetch   the CPython 3.14.10 tarball into .tmp/repr-python/src/ (downloaded once, through a
+#                                  temporary name, checked by its SHA-256 and SHA-512 from test/python/corpora.edn) and
+#                                  extracted into .tmp/repr-python/Python-3.14.10; the site-packages apks of
+#                                  tools/pydump/apks.sha256 for the host's architecture (REPR_PYTHON_ARCHES="x86_64
+#                                  aarch64" for both) into .tmp/repr-python/apks/ARCH, checked, extracted (not
+#                                  installed) into .tmp/repr-python/site-packages/ARCH; REPR_PYTHON_SRC names a
+#                                  directory to take the tarball and the apks from (ARCH/FILE) before the network
+#                                  and pyperformance 1.14.0's sdist (the speed reference, decided 2026-11-03) into
+#                                  .tmp/repr-python/pyperformance-1.14.0, checked by its SHA-256 and size
+#   bin/repr-python pins --count   every corpus's measures (files, lines, digest, tests, rejected files) as
+#                                  tools/pydump/corpus.py gives them now
+#   bin/repr-python pins --check   the pins hold: the oracle (tools/pydump/PYTHON_VERSION: its version, sys.version,
+#                                  the installed apk's name and checksum for the host's architecture), the tarball's
+#                                  SHA-256 and SHA-512, pyperformance's SHA-256, the reference files' SHA-256, every fetched apk's SHA-256; and
+#                                  every corpus's measures equal test/python/corpora.edn's (fetches first)
+#   bin/repr-python spec-check     doc/python/SPEC.md's checklist against the tarball's Parser/Python.asdl and the
+#                                  oracle's ast module, its worked examples parsed and compiled by the oracle with their
+#                                  heads present (tools/pydump/spec_check.py), and its forms blocks read by Arbace's
+#                                  reader on stage 0 (test/python/read_forms.ae)
+#   bin/repr-python samples        test/python/samples/: every file parsed (plain and with type comments) and
+#                                  compiled by the oracle, the samples together covering every node class of the ast
+#   bin/repr-python read [-o DIR] [--reader helper|native] FILE...
+#                                  PY2: each .py to Python forms in mode :lines (DIR/NAME.ae, default
+#                                  .tmp/repr-python/forms): a dump converted by arbace.repr.python, by default
+#                                  the native reader's (PY9b; the default since PY9, queue 201: its trees and errors
+#                                  equal to ast.parse's on the samples), no CPython; --reader helper (REPR_PYTHON_READER):
+#                                  tools/pydump/pydump.py's, the oracle's
+#   bin/repr-python print [-o DIR] FORMS.ae... forms to Python text (DIR/NAME less .ae, default .tmp/repr-python/printed)
+#   bin/repr-python roundtrip [--record] [--jobs N] [CORPUS...]
+#                                  PY2's round trip (survey §5.2, levels 1-3) over corpora of test/python/corpora.edn
+#                                  (default samples stdlib site-packages lib-test): the helper's dump of each file, the
+#                                  converter and the printer (one Arbace run on stage 0, the namespaces evaluated from the
+#                                  checkout), the helper's dump of each printed file, then per file: 1 the forms equal, 2
+#                                  ast.dump equal, 3 the code without positions equal; a file that does not pass every
+#                                  level is judged against test/python/roundtrip-known.edn (--record rewrites the corpus's
+#                                  entries: a file the writer cannot class by rule is printed, not written, exit 3).
+#                                  Each stage's time and peak RSS per file and per process into
+#                                  .tmp/repr-python/rt/CORPUS/ (costs.edn); --record also writes the corpora's costs into
+#                                  test/python/roundtrip-costs.edn. The helper's stages run in N processes (default 2)
+#   bin/repr-python roundtrip --text [--record] [--jobs N] [CORPUS...]
+#                                  PY3, mode :full: each file also read in mode :full (every node's :pos, the tokens), the
+#                                  forms checked against the tokens (positions on tokens' edges, leaves equal to their
+#                                  tokens) and, without positions, equal to the :lines read; printed from the forms read
+#                                  back (the tokens' text in the file's encoding), then level 4 (the print's bytes equal
+#                                  the original's) and level 5 (marshal of the compiled code equal, positions included),
+#                                  against test/python/full-known.edn; costs into test/python/roundtrip-text-costs.edn
+#   bin/repr-python lex-check [--record] [--jobs N] [--mutants N|--no-mutants] [CORPUS...]
+#                                  PY9a: the native lexer (arbace.repr.python.lex) against CPython's C tokenizer: every
+#                                  file of the corpora (default samples stdlib site-packages lib-test, and lex-errors:
+#                                  test/python/lex-errors/, a file per tokenizer message or path) dumped by
+#                                  tools/pydump/tokdump.py (the encoding, tokenize's stream and the parser's, the error
+#                                  that ends one) and by the port (arbace.repr.python.lexcheck), line for line equal or
+#                                  known (test/python/lex-check-known.edn); a negative control; then N mutants' files
+#                                  (default 2,000, two mutants of 3 edits each, seed 26: the error paths) the same way.
+#                                  Work in .tmp/repr-python/lex/CORPUS/ (ref/, out/files.tsv, out/diff/)
+#   bin/repr-python pegen [--check]  PY9b: arbace/repr/python/parser.ae generated from the tarball's Grammar/python.gram
+#                                  (arbace.repr.python.pegen, pegen's analyses and an Arbace back end; the actions
+#                                  translated from C over Parser/Python.asdl's fields), or generated again and compared
+#   bin/repr-python parse-check [--record] [--full] [--jobs N] [--mutants N|--no-mutants] [CORPUS...]
+#                                  PY9b: the native reader (arbace.repr.python.native: the generated parser, the tree
+#                                  written as the helper's dump) against tools/pydump/pydump.py tree (ast.parse) over the
+#                                  corpora as lex-check's, then the mutants, the dumps byte for byte equal or known
+#                                  (test/python/parse-check-known.edn). --full: mode :full (every node's position, the
+#                                  tokens) against pydump.py tree --full. Work in .tmp/repr-python/parse{,-full}/CORPUS/
+#   bin/repr-python ast-check [--limit N] [--mode M] [CORPUS...]
+#                                  PY9 (queue 201): pyi's _ast on the native reader: each file's answer to compile()'s
+#                                  PyCF_ONLY_AST in tools/pyi/ast_json.py's form, natively (arbace.repr.python.astjson)
+#                                  and by CPython (tools/pydump/astdump.py), byte for byte (default samples lex-errors
+#                                  syntax-errors; --limit: each corpus's first N files)
+#   The round trips, lex-check and parse-check (queue 201, PY10's R1): --only-list FILE runs the files of FILE (CORPUS/NAME
+#   a line) and judges them alone (a known entry of a file not run kept, also by --record); a failing file is printed FAIL
+#   CORPUS/NAME, a tab and why; --record also writes the results file test/python/{roundtrip,full,lex-check,parse-check}-results.edn
+#   (rows ["CORPUS FILE" :pass|:known|:fail REASON], arbace.repr.python.results, bin/reap's); each judges the negative
+#   controls of test/python/controls-read.edn (GTS81 (a), queue 212: per corpus a crossed pair of passing files, the
+#   subject's output judged by the check's own judge against the reference's expected result, which must fail;
+#   "control passed:" or "control not judged:" fails the run, a pair --only-list left out is printed as left).
+#   parse-check's corpora also syntax-errors (PY9:
+#   tools/pydump/syntax_cases.py, CPython's own syntax-error cases from the tarball's Lib/test)
+#   bin/repr-python check          spec-check, samples, then the round trips (:lines, then --text) over the default corpora
+#   bin/repr-python records record|verify [--sample N] [CORPUS...|outcomes]
+#                                  queue 213: the oracle's records (test/python/records/) made by the checks in mode record
+#                                  (by hand, on the host with python3) or checked in mode verify (the oracle tier's)
+# The oracle (queue 213; doc/ORACLE-RECORDS-SURVEY.md, "As built: Python"; tools/pydump/records.bash): REPR_PYTHON_ORACLE
+# records (the default with the shared tooling, test/oracle-records/oracle.bash: no python3; the originals' dumps, the
+# syntax-errors corpus and the verdicts of spec-check and samples from test/python/records/, a missing or stale entry a
+# failure; the round trips' print read natively, levels 2, 3 and 5 the oracle tier's; pins --check without the oracle's
+# pin, the tests and the rejected files), live (python3 as before: every level; the oracle tier), record (live, and what
+# it answered recorded: the main host, by hand), verify (live, each answer against its record: the oracle tier's verify).
+# Environment: REPR_PYTHON_CORPORA, REPR_PYTHON_PIN_VERSION, REPR_PYTHON_APKS, REPR_PYTHON_SPEC name other copies of
+# test/python/corpora.edn, tools/pydump/PYTHON_VERSION, tools/pydump/apks.sha256, doc/python/SPEC.md (negative controls);
+# REPR_PYTHON_CONTROLS another test/python/controls-read.edn.
+# Seconds each, but the first --fetch (a 24 MB download, and 3.6 MB of apks per architecture).
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+cd "$root"
+
+# the files read, overridable for the checks' negative controls (a tampered copy must fail)
+CORPORA="${REPR_PYTHON_CORPORA:-$root/test/python/corpora.edn}"
+PIN_VERSION="${REPR_PYTHON_PIN_VERSION:-$root/tools/pydump/PYTHON_VERSION}"
+APKS="${REPR_PYTHON_APKS:-$root/tools/pydump/apks.sha256}"
+# the read and print checks' negative controls (GTS81 (a), queue 212): crossed pairs per corpus
+CONTROLS_READ="${REPR_PYTHON_CONTROLS:-$root/test/python/controls-read.edn}"
+SPEC="${REPR_PYTHON_SPEC:-$root/doc/python/SPEC.md}"
+WORK="$root/.tmp/repr-python"
+
+die() { echo "repr-python: $*" >&2; exit 1; }
+
+# stage 0 reads the data: ARBACE_HOST_EXE, else the checkout's stage 0, else the main checkout's (never built here)
+arbace_exe() {
+  if [ -n "${ARBACE_HOST_EXE:-}" ]; then echo "$ARBACE_HOST_EXE"; return; fi
+  local arch main
+  case $(uname -m) in x86_64) arch=amd64 ;; aarch64) arch=arm64 ;; *) arch=$(uname -m) ;; esac
+  if [ -x "$root/target/seed/$arch/arbace" ]; then echo "$root/target/seed/$arch/arbace"; return; fi
+  main=$(cd "$(git rev-parse --git-common-dir)/.." && pwd)
+  if [ -x "$main/target/seed/$arch/arbace" ]; then echo "$main/target/seed/$arch/arbace"; return; fi
+  die "no stage 0 (bin/seed --build, or ARBACE_HOST_EXE)"
+}
+
+# py SCRIPT ARGS...: a script of tools/pydump on the oracle, isolated; python3 looked for here only (queue 213)
+need_python() { type -P python3 >/dev/null || die "no python3 (the oracle, doc/ALPINE.md): ${1:-this verb} runs it"; }
+python3() { need_python; command python3 "$@"; }
+py() { local s=$1; shift; python3 -I -S -B "$root/tools/pydump/$s" "$@"; }
+# the oracle's records (queue 213): REPR_PYTHON_ORACLE records|live|record, tools/pydump/records.bash
+. "$root/tools/pydump/records.bash"
+
+# rows: test/python/corpora.edn as tab-separated rows (test/python/corpora_rows.ae), read once by load_rows
+ROWS="$WORK/corpora-rows.tsv"
+load_rows() {
+  mkdir -p "$WORK"
+  "$(arbace_exe)" "$root/test/python/corpora_rows.ae" "$CORPORA" > "$ROWS.part.$$" || die "test/python/corpora.edn cannot be read"
+  mv "$ROWS.part.$$" "$ROWS"
+}
+rows() { cat "$ROWS"; }
+pin() { rows | awk -F'\t' -v k="$1" -v f="$2" '$1 == "pin" && $2 == k && $3 == f { print $4 }'; }
+
+host_arch() { uname -m; }
+arches() { echo "${REPR_PYTHON_ARCHES:-$(host_arch)}"; }
+sha256() { sha256sum < "$1" | cut -c1-64; }
+
+# main_root: the main checkout of a linked worktree (.tmp/worktrees/W) or of the gate's clean clone (.tmp/gate-clean/SHA),
+# else this checkout
+main_root() { local m=${root%%/.tmp/gate-clean/*}; echo "${m%%/.tmp/worktrees/*}"; }
+
+# fetch URL OUT SRC-NAME: through a temporary name, so that a failed download leaves no file (queue 152's lesson); from
+# REPR_PYTHON_SRC/SRC-NAME when there, else (GTS212 (a), queue 212: bin/gate drops REPR_PYTHON_SRC, and the clean run has
+# no network) the main checkout's copy at OUT's own path under it, else the network; the callers check the pins after
+fetch() {
+  local url=$1 out=$2 name m; name=$(basename "$out"); m=$(main_root)
+  mkdir -p "$(dirname "$out")"
+  if [ -n "${REPR_PYTHON_SRC:-}" ] && [ -f "$REPR_PYTHON_SRC/$3" ]; then
+    cp "$REPR_PYTHON_SRC/$3" "$out.part.$$"
+  elif [ "$m" != "$root" ] && [ -f "$m/${out#"$root"/}" ]; then
+    cp "$m/${out#"$root"/}" "$out.part.$$"
+  else
+    curl -fsSL -m 600 -o "$out.part.$$" "$url" || { rm -f "$out.part.$$"; die "download failed: $url"; }
+  fi
+  mv "$out.part.$$" "$out"
+}
+
+TOP() { echo "$root/$(pin cpython-3.14.10 extracted-into)"; }
+
+fetch_tarball() {
+  local tb url sha sha5 top
+  tb="$root/$(pin cpython-3.14.10 fetched-into)"; url=$(pin cpython-3.14.10 url)
+  sha=$(pin cpython-3.14.10 sha256); sha5=$(pin cpython-3.14.10 sha512); top=$(TOP)
+  if [ ! -f "$tb" ] || [ "$(sha256 "$tb")" != "$sha" ]; then rm -f "$tb"; fetch "$url" "$tb" "$(basename "$tb")"; fi
+  [ "$(sha256 "$tb")" = "$sha" ] || die "$tb: SHA-256 $(sha256 "$tb"), pinned $sha"
+  [ "$(sha512sum < "$tb" | cut -c1-128)" = "$sha5" ] || die "$tb: SHA-512 differs from the pin"
+  if [ "$(cat "$top/.extracted" 2>/dev/null)" != "$sha" ]; then
+    rm -rf "$top"; mkdir -p "$top"
+    tar -xJf "$tb" -C "$top" --strip-components=1
+    echo "$sha" > "$top/.extracted"
+  fi
+  echo "cpython-3.14.10: $tb (SHA-256 and SHA-512 ok), extracted into ${top#$root/}"
+}
+
+fetch_apks() {
+  local mirror arch sha rel f dir key
+  mirror=$(pin site-packages mirror)
+  for arch in $(arches); do
+    dir="$WORK/apks/$arch"; mkdir -p "$dir"
+    key=$(grep "  $arch/" "$APKS" | sha256sum | cut -c1-64)
+    [ -n "$(grep "  $arch/" "$APKS" || true)" ] || die "tools/pydump/apks.sha256 pins no apk for $arch"
+    while read -r sha rel; do
+      case $rel in "$arch"/*) ;; *) continue ;; esac
+      f="$dir/$(basename "$rel")"
+      if [ ! -f "$f" ] || [ "$(sha256 "$f")" != "$sha" ]; then
+        rm -f "$f"
+        # rel is ARCH/REPO/FILE; the mirror's layout is REPO/ARCH/FILE
+        local repo=${rel#*/}; repo=${repo%%/*}
+        fetch "$mirror/$repo/$arch/$(basename "$rel")" "$f" "$arch/$(basename "$rel")"
+      fi
+      [ "$(sha256 "$f")" = "$sha" ] || die "$f: SHA-256 differs from tools/pydump/apks.sha256's $sha (moving the pin is a recorded decision; REPR_PYTHON_SRC names a directory holding the pinned apks)"
+    done < "$APKS"
+    local out="$WORK/site-packages/$arch"
+    if [ "$(cat "$out/.extracted" 2>/dev/null)" != "$key" ]; then
+      rm -rf "$out"; mkdir -p "$out"
+      while read -r sha rel; do
+        case $rel in "$arch"/*) tar --warning=no-unknown-keyword -xzf "$dir/$(basename "$rel")" -C "$out" usr ;; esac
+      done < "$APKS"
+      echo "$key" > "$out/.extracted"
+    fi
+    echo "site-packages: $(grep -c "  $arch/" "$APKS") apks for $arch (SHA-256 ok), extracted into ${out#$root/}"
+  done
+}
+
+# fetch_pyperformance: pyperformance 1.14.0's sdist (the speed reference, decided 2026-11-03), checked by its SHA-256 and
+# size, extracted into .tmp/repr-python/pyperformance-1.14.0 (read in place)
+fetch_pyperformance() {
+  local tb url sha top bytes
+  tb="$root/$(pin pyperformance-1.14.0 fetched-into)"; url=$(pin pyperformance-1.14.0 url)
+  sha=$(pin pyperformance-1.14.0 sha256); bytes=$(pin pyperformance-1.14.0 bytes); top="$root/$(pin pyperformance-1.14.0 extracted-into)"
+  if [ ! -f "$tb" ] || [ "$(sha256 "$tb")" != "$sha" ]; then rm -f "$tb"; fetch "$url" "$tb" "$(basename "$tb")"; fi
+  [ "$(sha256 "$tb")" = "$sha" ] || die "$tb: SHA-256 $(sha256 "$tb"), pinned $sha"
+  [ "$(stat -c %s "$tb")" = "$bytes" ] || die "$tb: $(stat -c %s "$tb") bytes, pinned $bytes"
+  if [ "$(cat "$top/.extracted" 2>/dev/null)" != "$sha" ]; then
+    rm -rf "$top"; mkdir -p "$top"
+    tar -xzf "$tb" -C "$top" --strip-components=1
+    echo "$sha" > "$top/.extracted"
+  fi
+  echo "pyperformance-1.14.0: $tb (SHA-256 and size ok), extracted into ${top#$root/}"
+}
+
+cmd_fetch() { fetch_tarball; fetch_pyperformance; fetch_apks; }
+
+# measures: one line per corpus, "ID FILES LINES DIGEST TESTS", and the rejected files, as they are now
+measure() {
+  local kind id base paths excl f l d t b arch
+  arch=$(host_arch)
+  while IFS=$'\t' read -r kind id base paths excl f l d t; do
+    [ "$kind" = corpus ] || continue
+    case $base in
+      pin:cpython-3.14.10) b=$(TOP) ;;
+      pin:site-packages) b="$WORK/site-packages/$arch" ;;
+      root:*) b="$root/${base#root:}" ;;
+      *) die "corpus $id: unknown base $base" ;;
+    esac
+    local -a args=()
+    IFS=, read -ra pa <<< "$paths"; args+=("${pa[@]}")
+    if [ "$excl" != - ]; then IFS=, read -ra ea <<< "$excl"; for e in "${ea[@]}"; do args+=(--exclude "$e"); done; fi
+    local c tests=-
+    c=$(count_files "$b" "${args[@]}")
+    if type -P python3 >/dev/null; then
+      if [ "$t" != - ]; then tests=$(cd "$b" && py corpus.py tests "$b" "${args[@]}"); fi
+      printf 'corpus\t%s\t%s\t%s\n' "$id" "$(echo "$c" | tr ' ' '\t')" "$tests"
+      (cd "$b" && py corpus.py rejected "$b" "${args[@]}") | sed "s/^/rejected\t$id\t/"
+    else printf 'corpus\t%s\t%s\n' "$id" "$(echo "$c" | tr ' ' '\t')"; fi
+  done < <(rows)
+}
+
+# count_files BASE PATH... [--exclude PATH]...: corpus.py count without python3: FILES LINES DIGEST (the SHA-256 of
+# sha256sum's lines of the selected files, in their order)
+count_files() {
+  local b=$1 l; shift
+  pyrec_list "$b" "$@" > "$TMPDIR/count.list"
+  l=$( (cd "$b" && tr '\n' '\0' < "$TMPDIR/count.list" | xargs -0 -r cat) | wc -l)
+  echo "$(wc -l < "$TMPDIR/count.list") $l $( (cd "$b" && tr '\n' '\0' < "$TMPDIR/count.list" | xargs -0 -r sha256sum) | sha256sum | cut -c1-64)"
+}
+
+cmd_count() {
+  cmd_fetch >/dev/null
+  measure | awk -F'\t' '$1 == "corpus" { printf "%-14s files %5s lines %7s digest %s tests %s\n", $2, $3, $4, substr($5, 1, 16), $6 }
+                        $1 == "rejected" { printf "  rejected %s: %s (%s) %s\n", $2, $3, $4, $5 }'
+}
+
+check_oracle() {
+  local bad=0 want have arch inst
+  want=$(awk '$1 == "version" { print $2 }' "$PIN_VERSION")
+  have=$(python3 -I -c 'import platform; print(platform.python_version())')
+  [ "$want" = "$have" ] || { echo "  the oracle is Python $have, tools/pydump/PYTHON_VERSION pins $want"; bad=1; }
+  want=$(sed -n 's/^sys\.version //p' "$PIN_VERSION")
+  have=$(python3 -I -c 'import sys; print(sys.version)')
+  [ "$want" = "$have" ] || { echo "  the oracle's sys.version is '$have', pinned '$want'"; bad=1; }
+  arch=$(host_arch)
+  want="$(awk '$1 == "apk" { print $2 }' "$PIN_VERSION") $(awk -v a="$arch" '$1 == "apk-checksum" && $2 == a { print $3 }' "$PIN_VERSION")"
+  inst=$(awk 'BEGIN { RS = ""; FS = "\n" } { p = v = c = ""; for (i = 1; i <= NF; i++) { if ($i ~ /^P:/) p = substr($i, 3); if ($i ~ /^V:/) v = substr($i, 3); if ($i ~ /^C:/) c = substr($i, 3) } if (p == "python3") print "python3-" v, c }' /lib/apk/db/installed 2>/dev/null || true)
+  [ "$want" = "$inst" ] || { echo "  the installed python3 apk is '${inst:-none}', pinned '$want' for $arch"; bad=1; }
+  [ $bad = 0 ] && echo "  oracle: Python $(python3 -I -c 'import platform; print(platform.python_version())'), apk $inst ($arch), as pinned"
+  return $bad
+}
+
+cmd_check() {
+  local bad=0 path sha top
+  # queue 213 (ORS1 (a), as bin/gate --pins for gcc): without python3 the oracle's pin and the corpora's tests and rejected
+  # files (CPython's ast) are the oracle tier's; the files, lines and digests are checked here
+  if type -P python3 >/dev/null; then check_oracle || bad=1
+  else echo "  oracle: no python3 here: its pin, and the corpora's tests and rejected files, are the oracle tier's (bin/repr-python pins --check where python3 is)"; fi
+  cmd_fetch | sed 's/^/  /'
+  top=$(TOP)
+  while IFS=$'\t' read -r kind path sha; do
+    [ "$kind" = file ] || continue
+    [ "$(sha256 "$top/$path")" = "$sha" ] || { echo "  $path: SHA-256 differs from the pin"; bad=1; }
+  done < <(rows)
+  grep -q 'PY_VERSION *"3.14.10"' "$top/Include/patchlevel.h" || { echo "  the tarball's PY_VERSION is not 3.14.10"; bad=1; }
+  local want have
+  if type -P python3 >/dev/null; then
+    want=$(rows | awk -F'\t' '$1 == "corpus" { print $1 "\t" $2 "\t" $6 "\t" $7 "\t" $8 "\t" $9 } $1 == "rejected"' | LC_ALL=C sort)
+  else want=$(rows | awk -F'\t' '$1 == "corpus" { print $1 "\t" $2 "\t" $6 "\t" $7 "\t" $8 }' | LC_ALL=C sort); fi
+  have=$(measure | LC_ALL=C sort)
+  if [ "$want" != "$have" ]; then
+    echo "  the corpora's measures differ from test/python/corpora.edn (< recorded, > now):"
+    diff <(echo "$want") <(echo "$have") | sed 's/^/    /' || true
+    bad=1
+  else
+    if type -P python3 >/dev/null; then echo "  corpora: $(echo "$have" | grep -c '^corpus') corpora, their files, lines, digests, tests and rejected files as recorded"
+    else echo "  corpora: $(echo "$have" | grep -c '^corpus') corpora, their files, lines and digests as recorded (tests and rejected files: python3's)"; fi
+  fi
+  # the site-packages of every other fetched architecture: the same .py files (corpora.edn's claim)
+  local arch rec got
+  rec=$(rows | awk -F'\t' '$1 == "corpus" && $2 == "site-packages" { print $6 " " $7 " " $8 }')
+  for arch in $(arches); do
+    [ "$arch" = "$(host_arch)" ] && continue
+    got=$(count_files "$WORK/site-packages/$arch" usr/lib/python3.14/site-packages)
+    if [ "$got" = "$rec" ]; then echo "  site-packages of $arch: the same files, lines and digest"
+    else echo "  site-packages of $arch: $got, recorded $rec"; bad=1; fi
+  done
+  if [ $bad = 0 ]; then echo "pins --check: $(type -P python3 >/dev/null && echo "the oracle, ")the tarball, the apks and the corpora hold"; else echo "pins --check: FAILED"; return 1; fi
+}
+
+cmd_spec_check() {
+  fetch_tarball >/dev/null
+  local out="$WORK/spec-check" bad=0
+  rm -rf "$out"; mkdir -p "$out"
+  # the oracle's verdict (spec_check.py: the checklist against Python.asdl and CPython's ast, the examples parsed) live or
+  # recorded (queue 213), keyed by the spec, the ASDL and the script; the forms blocks written by awk as the script writes them
+  pyrec_outcome spec-check "$(pyrec_key "$SPEC" "$(TOP)/Parser/Python.asdl" "$root/tools/pydump/spec_check.py")" \
+    command python3 -I -S -B "$root/tools/pydump/spec_check.py" "$SPEC" "$(TOP)/Parser/Python.asdl" "$out" || bad=1
+  awk -v out="$out" '/^```forms$/ { f = sprintf("%s/%03d.forms", out, n++); inb = 1; printf "" > f; next }
+                     inb && /^```$/ { inb = 0; close(f); next } inb { print > f }' "$SPEC"
+  "$(arbace_exe)" "$root/test/python/read_forms.ae" "$out" || bad=1
+  return $bad
+}
+
+# samples: every sample parsed and compiled by the oracle, the node classes covered (corpus.py samples), live or recorded
+cmd_samples() {
+  local s="$root/test/python/samples"
+  pyrec_outcome samples "$(pyrec_key "$root/tools/pydump/corpus.py" $(ls "$s"/*.py))" \
+    bash -c 'cd "$1" && command python3 -I -S -B "$2" samples . .' - "$s" "$root/tools/pydump/corpus.py"
+}
+
+
+# ---- PY2: read, print, round trip ----
+
+KNOWN="${REPR_PYTHON_KNOWN:-$root/test/python/roundtrip-known.edn}"
+FULL_KNOWN="${REPR_PYTHON_FULL_KNOWN:-$root/test/python/full-known.edn}"
+COSTS="$root/test/python/roundtrip-costs.edn"
+TEXT_COSTS="$root/test/python/roundtrip-text-costs.edn"
+RT="$WORK/rt"
+
+# py_arbace VERB ARGS...: repr/python's command namespace on stage 0, evaluated from the checkout
+py_arbace() {
+  ARBACE_PATH="$root" GOMEMLIMIT=${REPR_PYTHON_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${REPR_PYTHON_THREADS:-4} \
+    "$(arbace_exe)" -m arbace.repr.python "$@"
+}
+
+# timed NAME CMD...: CMD's wall seconds appended to $STAGES as "NAME SECONDS" (its peak RSS is in its per-file TSV:
+# each process's high-water mark after each file)
+timed() {
+  local name=$1; shift
+  local t0 t1 rc=0
+  t0=$(date +%s.%N)
+  "$@" || rc=$?
+  t1=$(date +%s.%N)
+  echo "$name $(awk -v a="$t0" -v b="$t1" 'BEGIN { printf "%.2f", b - a }')" >> "$STAGES"
+  return $rc
+}
+
+# dump_parallel CORPUS BASE LIST OUT TSV: the helper's tree mode (FULL: tree --full) over LIST, in $JOBS processes or from
+# the records (tools/pydump/records.bash), the TSV sorted
+dump_parallel() {
+  PYREC_JOBS=$JOBS pyrec_dump "$([ -n "${FULL:-}" ] && echo full || echo tree)" "$@"
+}
+
+# native_dumps BASE LIST OUT TSV (queue 213): the printed files read by the native reader (records mode: the print's levels
+# that need CPython are the oracle tier's), the TSV in the helper's columns: REL STATUS - - - SHA (level 4's) 0 0 0
+native_dumps() {
+  local base=$1 list=$2 out=$3 tsv=$4
+  parsecheck dump --base "$base" --list "$list" --out "$out" > "$tsv.native"
+  (cd "$base" && tr '\n' '\0' < "$list" | xargs -0 -r sha256sum) | awk '{ r = substr($0, 67); sub(/^\*/, "", r); print r "\t" substr($0, 1, 64) }' > "$tsv.sha"
+  awk -F'\t' -v OFS='\t' 'NR == FNR { sha[$1] = $2; next } { st = ($2 ~ /^refused/) ? $2 : $2; print $1, st, "-", "-", "-", sha[$1], 0, 0, 0 }' "$tsv.sha" "$tsv.native" | LC_ALL=C sort > "$tsv"
+}
+
+# costs TSV...: per stage file (REL ... SECONDS RSS), the stage's seconds, mean, p50, p95, max with its file and peak RSS, as
+# tools/pydump/corpus.py costs prints them (queue 213: awk, no python3)
+costs() {
+  local f first=1
+  printf '['
+  for f in "$@"; do
+    [ $first = 1 ] || printf '\n '; first=0
+    local stage; stage=$(basename "$f"); stage=${stage%.*}
+    if [ ! -s "$f" ]; then printf '{:stage "%s" :files 0}' "$(basename "$f")"; continue; fi
+    awk -F'\t' '{ print $(NF-1) "\t" $1 "\t" $NF }' "$f" | LC_ALL=C sort -t "$(printf '\t')" -k1,1g -k2,2 | awk -F'\t' -v st="$stage" '
+      { s[NR] = $1; r[NR] = $2; tot += $1; if ($3 + 0 > peak) peak = $3 + 0 }
+      END { n = NR; q5 = int(0.5 * n); if (q5 > n - 1) q5 = n - 1; q95 = int(0.95 * n); if (q95 > n - 1) q95 = n - 1
+            printf "{:stage \"%s\" :files %d :seconds %.2f :mean %.4f :p50 %.4f :p95 %.4f :max %.4f :max-file \"%s\" :peak-kib %d}", st, n, tot, tot / n, s[q5 + 1], s[q95 + 1], s[n], r[n], peak }'
+  done
+  printf ']\n'
+}
+
+corpus_base() { # ID -> the base directory and the arguments of corpus.py
+  local id=$1 kind cid base paths excl
+  while IFS=$'\t' read -r kind cid base paths excl _; do
+    [ "$kind" = corpus ] && [ "$cid" = "$id" ] || continue
+    case $base in
+      pin:cpython-3.14.10) echo "$(TOP)" ;;
+      pin:site-packages) echo "$WORK/site-packages/$(host_arch)" ;;
+      root:*) echo "$root/${base#root:}" ;;
+    esac
+    echo "$paths"; echo "$excl"; return 0
+  done < <(rows)
+  die "no corpus $id in test/python/corpora.edn"
+}
+
+# --only-list FILE (queue 201, PY10's R1): a partial run, the files of FILE (CORPUS/NAME a line) of each corpus; only_filter
+# keeps a corpus's listed files in its list (none: the corpus is not run)
+ONLY=""
+only_filter() { # LIST ID
+  [ -n "$ONLY" ] || return 0
+  local t="$1.all"; mv "$1" "$t"
+  grep -v '^#' "$ONLY" | sed -n "s|^$2/||p" | LC_ALL=C sort -u > "$1.names"
+  grep -Fxf "$1.names" "$t" > "$1" || true
+  [ -s "$1" ]
+}
+
+roundtrip_one() {
+  local id=$1 record=$2
+  local -a info; mapfile -t info < <(corpus_base "$id")
+  local base=${info[0]} d="$RT$TEXT/$id" known=$KNOWN
+  [ -n "$TEXT" ] && known=$FULL_KNOWN
+  local -a args=(); IFS=, read -ra pa <<< "${info[1]}"; args+=("${pa[@]}")
+  if [ "${info[2]}" != - ]; then IFS=, read -ra ea <<< "${info[2]}"; for e in "${ea[@]}"; do args+=(--exclude "$e"); done; fi
+  rm -rf "$d"; mkdir -p "$d"
+  STAGES="$d/stages.txt"; : > "$STAGES"
+  pyrec_list "$base" "${args[@]}" > "$d/list"
+  only_filter "$d/list" "$id" || { echo "roundtrip $id: no file of --only-list"; return 0; }
+  timed helper-orig dump_parallel "$id" "$base" "$d/list" "$d/orig" "$d/helper-orig.tsv" \
+    || { echo "roundtrip $id: FAILED: no reference (the oracle's records, above)"; return 1; }
+  if [ -n "$TEXT" ]; then
+    # mode :full (PY3): the dumps in mode :full beside the :lines ones, converted, woven, printed from the tokens
+    FULL=1 timed helper-full dump_parallel "$id" "$base" "$d/list" "$d/full" "$d/helper-full.tsv" \
+      || { echo "roundtrip --text $id: FAILED: no reference (the oracle's records, above)"; return 1; }
+    timed convert-print py_arbace convert-full --dumps "$d/full" --lines "$d/orig" --forms "$d/forms" --printed "$d/printed" \
+      --tsv "$d/convert-print.tsv"
+  else
+    timed convert-print py_arbace convert --dumps "$d/orig" --forms "$d/forms" --printed "$d/printed" --tsv "$d/convert-print.tsv"
+  fi
+  (cd "$d/printed" && find . -type f | sed 's|^\./||' | LC_ALL=C sort) > "$d/printed.list"
+  # the print: the helper's dumps live (levels 2, 3 and 5 judged), the native reader's in records mode (level 1 and 4;
+  # 2, 3 and 5 the oracle tier's, compare --deferred: queue 213)
+  local deferred=""
+  if pyrec_live; then timed helper-printed pyrec_run_helper tree "$d/printed" "$d/printed.list" "$d/cand" "$d/helper-printed.tsv"
+  else deferred=1; timed native-printed native_dumps "$d/printed" "$d/printed.list" "$d/cand" "$d/helper-printed.tsv"; fi
+  local rc=0
+  timed compare py_arbace compare --corpus "$id" --orig "$d/orig" --cand "$d/cand" --orig-tsv "$d/helper-orig.tsv" \
+    --cand-tsv "$d/helper-printed.tsv" --convert-tsv "$d/convert-print.tsv" --known "$known" --results "$d/results.edn" --controls "$CONTROLS_READ" \
+    ${record:+--record} ${TEXT:+--text} ${ONLY:+--partial} ${deferred:+--deferred} \
+    ${record:+--results-file "$root/test/python/$([ -n "$TEXT" ] && echo full || echo roundtrip)-results.edn"} || rc=$?
+  { echo "{:corpus :$id :jobs $JOBS"
+    echo " :wall-seconds {$(awk '{ printf "%s\"%s\" %s", (NR > 1 ? " " : ""), $1, $2 }' "$STAGES")}"
+    echo " :per-file $(costs "$d/helper-orig.tsv" ${TEXT:+"$d/helper-full.tsv"} "$d/convert-print.tsv" "$d/helper-printed.tsv")}"; } > "$d/costs.edn"
+  awk '{ printf "  %-15s %8.2f s\n", $1, $2 }' "$STAGES"
+  return $rc
+}
+
+cmd_roundtrip() {
+  local record="" ids=() rc=0 worst=0 costs=$COSTS
+  JOBS=2; TEXT=""
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --record) record=1; shift ;;
+      --text) TEXT=-text; costs=$TEXT_COSTS; shift ;;
+      --only-list) ONLY=$(cd "$(dirname "$2")" && pwd)/$(basename "$2"); shift 2 ;;
+      --jobs) JOBS=$2; shift 2 ;;
+      *) ids+=("$1"); shift ;;
+    esac
+  done
+  [ ${#ids[@]} -gt 0 ] || ids=(samples stdlib site-packages lib-test)
+  [ -z "$record" ] || pyrec_live || die "roundtrip --record judges every level: the live oracle (REPR_PYTHON_ORACLE=live)"
+  fetch_tarball >/dev/null; fetch_apks >/dev/null
+  for id in "${ids[@]}"; do
+    rc=0; roundtrip_one "$id" "$record" || rc=$?
+    [ $rc -gt $worst ] && worst=$rc
+  done
+  if [ -n "$record" ]; then
+    { echo ";; The round trip's costs per corpus (bin/repr-python roundtrip ${TEXT:+--text }--record; GT8's budget): each stage's wall seconds"
+      echo ";; (the helper's in :jobs processes), and per file each stage's seconds (total, mean, p50, p95, max and its file)"
+      echo ";; and :peak-kib, the largest peak RSS of the stage's processes (each process's high-water mark after each file:"
+      echo ";; ru_maxrss for the helper, VmHWM for stage 0). Measured where the record was made (:host); machine-dependent,"
+      echo ";; not a reference: the main host's GT8 costs are its own run's."
+      echo "{:host \"$(uname -m), $(nproc) CPUs\" :date \"$(date -u +%F)\""
+      echo " :corpora"
+      echo " ["
+      for id in "${ids[@]}"; do [ -f "$RT$TEXT/$id/costs.edn" ] && sed 's/^/  /' "$RT$TEXT/$id/costs.edn"; done
+      echo " ]}"; } > "$costs"
+  fi
+  return $worst
+}
+
+cmd_read() {
+  local out="$WORK/forms" tmp="$WORK/read" f reader=${REPR_PYTHON_READER:-native}
+  while [ $# -gt 0 ]; do
+    case $1 in
+      -o) out=$2; shift 2 ;;
+      --reader) reader=$2; shift 2 ;;
+      *) break ;;
+    esac
+  done
+  rm -rf "$tmp"; mkdir -p "$tmp/src"
+  for f in "$@"; do cp "$f" "$tmp/src/$(basename "$f")"; done
+  (cd "$tmp/src" && ls) > "$tmp/list"
+  case $reader in
+    helper) need_python "read --reader helper"; py pydump.py tree --base "$tmp/src" --list "$tmp/list" --out "$tmp/dumps" --tsv "$tmp/dumps.tsv" ;;
+    # PY9b: the native reader (no CPython): the generated parser's dumps, the helper's text
+    native) parsecheck dump --base "$tmp/src" --list "$tmp/list" --out "$tmp/dumps" > "$tmp/dumps.tsv" ;;
+    *) die "read: --reader helper|native" ;;
+  esac
+  py_arbace convert --dumps "$tmp/dumps" --forms "$out" --printed "$tmp/printed" --tsv "$tmp/convert.tsv"
+  awk -F'\t' '$2 != "ok" { print "  " $1 ": " $2 }' "$tmp/convert.tsv"
+}
+
+cmd_print() {
+  local out="$WORK/printed" f
+  if [ "${1:-}" = "-o" ]; then out=$2; shift 2; fi
+  for f in "$@"; do b=$(basename "$f"); py_arbace print "$f" "$out/${b%.ae}"; echo "${out#$root/}/${b%.ae}"; done
+}
+
+# ---- PY9a: the native lexer against CPython's tokenizer ----
+
+LEX_KNOWN="${REPR_PYTHON_LEX_KNOWN:-$root/test/python/lex-check-known.edn}"
+LEX="$WORK/lex"
+
+lexcheck() {
+  ARBACE_PATH="$root" GOMEMLIMIT=${REPR_PYTHON_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${REPR_PYTHON_THREADS:-4} \
+    "$(arbace_exe)" -m arbace.repr.python.lexcheck "$@"
+}
+
+# tokdump CORPUS BASE LIST OUT: the helper's token dumps over LIST in $JOBS processes, or from the records
+tokdump() {
+  PYREC_JOBS=$JOBS pyrec_dump tok "$1" "$2" "$3" "$4" "$4.tsv"
+}
+# the records' corpus of a check's corpus: the mutants of each check are its own
+rec_corpus() { if [ "$1" = mutants ]; then echo "mutants-$2"; else echo "$1"; fi; }
+
+lex_one() { # ID BASE LIST
+  local id=$1 base=$2 list=$3 d="$LEX/$1" rc=0
+  rm -rf "$d/ref" "$d/out"; mkdir -p "$d"
+  if [ -n "$ONLY" ]; then cp "$list" "$d/list.only"; list="$d/list.only"; only_filter "$list" "$id" || { echo "lex-check $id: no file of --only-list"; return 0; }; fi
+  tokdump "$(rec_corpus "$id" lex)" "$base" "$list" "$d/ref" \
+    || { echo "lex-check $id: FAILED: no reference (the oracle's records, above)"; return 1; }
+  lexcheck check --corpus "$id" --base "$base" --list "$list" --ref "$d/ref" --out "$d/out" --known "$LEX_KNOWN" --controls "$CONTROLS_READ" \
+    --jobs "$JOBS" ${record:+--record} ${ONLY:+--partial} ${record:+--results-file "$root/test/python/lex-check-results.edn"} || rc=$?
+  return $rc
+}
+
+cmd_lex_check() {
+  local record="" ids=() nmut=2000 worst=0 rc id
+  JOBS=3
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --record) record=1; shift ;;
+      --only-list) ONLY=$(cd "$(dirname "$2")" && pwd)/$(basename "$2"); shift 2 ;;
+      --jobs) JOBS=$2; shift 2 ;;
+      --mutants) nmut=$2; shift 2 ;;
+      --no-mutants) nmut=0; shift ;;
+      *) ids+=("$1"); shift ;;
+    esac
+  done
+  [ ${#ids[@]} -gt 0 ] || ids=(samples stdlib site-packages lib-test lex-errors)
+  fetch_tarball >/dev/null; fetch_apks >/dev/null
+  local pools=()
+  for id in "${ids[@]}"; do
+    if [ "$id" = lex-errors ]; then
+      # the tokenizer's own error cases (test/python/lex-errors/: one file a message or path), not a corpus of corpora.edn
+      mkdir -p "$LEX/$id"
+      (cd "$root/test/python/lex-errors" && ls | LC_ALL=C sort) > "$LEX/$id/list"
+      rc=0; lex_one "$id" "$root/test/python/lex-errors" "$LEX/$id/list" || rc=$?
+      [ $rc -gt $worst ] && worst=$rc
+      continue
+    fi
+    local -a info; mapfile -t info < <(corpus_base "$id")
+    local -a args=(); IFS=, read -ra pa <<< "${info[1]}"; args+=("${pa[@]}")
+    if [ "${info[2]}" != - ]; then IFS=, read -ra ea <<< "${info[2]}"; for e in "${ea[@]}"; do args+=(--exclude "$e"); done; fi
+    mkdir -p "$LEX/$id"
+    pyrec_list "${info[0]}" "${args[@]}" > "$LEX/$id/list"
+    { echo "${info[0]}"; cat "$LEX/$id/list"; } > "$LEX/$id/pool"
+    pools+=("$LEX/$id/pool")
+    rc=0; lex_one "$id" "${info[0]}" "$LEX/$id/list" || rc=$?
+    [ $rc -gt $worst ] && worst=$rc
+  done
+  if [ "$nmut" != 0 ] && [ ${#pools[@]} -gt 0 ]; then
+    rm -rf "$LEX/mutants"
+    lexcheck mutants --out "$LEX/mutants" --seed 26 --files "$nmut" --per 2 --edits 3 "${pools[@]}" || return 1
+    rc=0; lex_one mutants "$LEX/mutants/src" "$LEX/mutants/list" || rc=$?
+    [ $rc -gt $worst ] && worst=$rc
+  fi
+  return $worst
+}
+
+# ---- PY9b: the native parser against ast.parse ----
+
+PARSE_KNOWN="${REPR_PYTHON_PARSE_KNOWN:-$root/test/python/parse-check-known.edn}"
+PARSE="$WORK/parse"
+GRAMMAR_ARGS() { local t; t=$(TOP); echo "$t/Grammar/python.gram $t/Parser/Python.asdl $t/Grammar/Tokens"; }
+
+parsecheck() {
+  ARBACE_PATH="$root" GOMEMLIMIT=${REPR_PYTHON_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${REPR_PYTHON_THREADS:-4} \
+    "$(arbace_exe)" -m arbace.repr.python.parsecheck "$@"
+}
+
+# pegen [--check]: the parser generated from the tarball's grammar into arbace/repr/python/parser.ae, or compared with it
+cmd_pegen() {
+  fetch_tarball >/dev/null
+  local verb=generate; [ "${1:-}" = --check ] && verb=check
+  # shellcheck disable=SC2046
+  ARBACE_PATH="$root" "$(arbace_exe)" -m arbace.repr.python.pegen $verb $(GRAMMAR_ARGS) "$root/arbace/repr/python/parser.ae"
+}
+
+# syntax_cases DIR: CPython's syntax-error cases written into DIR, their list on stdout: tools/pydump/syntax_cases.py live, or
+# the records' (the corpus's inputs are in its pack, keyed by the script and the tarball's pin: queue 213)
+syntax_cases() {
+  local key; key="src:$(pyrec_sha16 "$root/tools/pydump/syntax_cases.py"):$(pin cpython-3.14.10 sha256 | cut -c1-16)"
+  if pyrec_live; then
+    py syntax_cases.py --src "$(TOP)" --out "$1" > "$1.list"
+    pyrec_stage_src syntax-errors "$1" "$1.list" "$key"
+    if [ "$PYREC_MODE" = verify ]; then
+      # the generated corpus against its record, as a whole
+      local r="$1.rec" d=0; rm -rf "$r"; mkdir -p "$PYREC_VSTATE"
+      if pyrec_src syntax-errors "$r" "$key" > "$r.list" 2>"$r.err" && cmp -s "$1.list" "$r.list" && diff -r "$1" "$r" >/dev/null; then :
+      else d=1; echo "verify: syntax-errors src: DIFFERS from the record"; fi
+      echo "syntax-errors src 1 $d" >> "$PYREC_VSTATE/tally"
+    fi
+    cat "$1.list"
+  else pyrec_src syntax-errors "$1" "$key"; fi
+}
+
+parse_one() { # ID BASE LIST
+  local id=$1 base=$2 list=$3 d="$PARSE/$1" rc=0
+  rm -rf "$d/ref" "$d/out"; mkdir -p "$d"
+  if [ -n "$ONLY" ]; then cp "$list" "$d/list.only"; list="$d/list.only"; only_filter "$list" "$id" || { echo "parse-check $id: no file of --only-list"; return 0; }; fi
+  FULL=$PFULL dump_parallel "$(rec_corpus "$id" parse)" "$base" "$list" "$d/ref" "$d/ref.tsv" \
+    || { echo "parse-check $id: FAILED: no reference (the oracle's records, above)"; return 1; }
+  parsecheck check --corpus "$id" --base "$base" --list "$list" --ref "$d/ref" --out "$d/out" --known "$PARSE_KNOWN" --controls "$CONTROLS_READ" \
+    --jobs "$JOBS" ${record:+--record} ${PFULL:+--full} ${ONLY:+--partial} \
+    ${record:+--results-file "$root/test/python/parse-check-results.edn"} || rc=$?
+  return $rc
+}
+
+cmd_parse_check() {
+  local record="" ids=() nmut=2000 worst=0 rc id
+  JOBS=3; PFULL=
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --record) record=1; shift ;;
+      --full) PFULL=1; PARSE="$WORK/parse-full"; shift ;;
+      --only-list) ONLY=$(cd "$(dirname "$2")" && pwd)/$(basename "$2"); shift 2 ;;
+      --jobs) JOBS=$2; shift 2 ;;
+      --mutants) nmut=$2; shift 2 ;;
+      --no-mutants) nmut=0; shift ;;
+      *) ids+=("$1"); shift ;;
+    esac
+  done
+  [ ${#ids[@]} -gt 0 ] || ids=(samples stdlib site-packages lib-test lex-errors syntax-errors)
+  fetch_tarball >/dev/null; fetch_apks >/dev/null
+  local pools=()
+  for id in "${ids[@]}"; do
+    mkdir -p "$PARSE/$id"
+    if [ "$id" = lex-errors ]; then
+      (cd "$root/test/python/lex-errors" && ls | LC_ALL=C sort) > "$PARSE/$id/list"
+      rc=0; parse_one "$id" "$root/test/python/lex-errors" "$PARSE/$id/list" || rc=$?
+      [ $rc -gt $worst ] && worst=$rc
+      continue
+    fi
+    if [ "$id" = syntax-errors ]; then
+      # CPython's own syntax-error cases (tools/pydump/syntax_cases.py: test_syntax's doctests, the sources the tests'
+      # error checks compile), a file each, generated from the pinned tarball's Lib/test
+      rm -rf "$PARSE/$id/src"
+      syntax_cases "$PARSE/$id/src" > "$PARSE/$id/list" || { echo "parse-check $id: FAILED: no corpus (the oracle's records, above)"; worst=1; continue; }
+      rc=0; parse_one "$id" "$PARSE/$id/src" "$PARSE/$id/list" || rc=$?
+      [ $rc -gt $worst ] && worst=$rc
+      continue
+    fi
+    local -a info; mapfile -t info < <(corpus_base "$id")
+    local -a args=(); IFS=, read -ra pa <<< "${info[1]}"; args+=("${pa[@]}")
+    if [ "${info[2]}" != - ]; then IFS=, read -ra ea <<< "${info[2]}"; for e in "${ea[@]}"; do args+=(--exclude "$e"); done; fi
+    pyrec_list "${info[0]}" "${args[@]}" > "$PARSE/$id/list"
+    { echo "${info[0]}"; cat "$PARSE/$id/list"; } > "$PARSE/$id/pool"
+    pools+=("$PARSE/$id/pool")
+    rc=0; parse_one "$id" "${info[0]}" "$PARSE/$id/list" || rc=$?
+    [ $rc -gt $worst ] && worst=$rc
+  done
+  if [ "$nmut" != 0 ] && [ ${#pools[@]} -gt 0 ]; then
+    rm -rf "$PARSE/mutants"
+    parsecheck mutants --out "$PARSE/mutants" --seed 26 --files "$nmut" --per 2 --edits 3 "${pools[@]}" || return 1
+    rc=0; parse_one mutants "$PARSE/mutants/src" "$PARSE/mutants/list" || rc=$?
+    [ $rc -gt $worst ] && worst=$rc
+  fi
+  return $worst
+}
+
+# ---- PY9: pyi's _ast on the native reader against compile()'s PyCF_ONLY_AST ----
+
+# ast-check [--limit N] [--mode M] [CORPUS...]: each file's answer to pyi's "ast:" compile (tools/pydump/astdump.py on
+# CPython, arbace.repr.python.astjson natively) byte for byte; CORPUS a corpus of corpora.edn, lex-errors or
+# syntax-errors; --limit: the first N files of each (a sample). Files that are not UTF-8 are left out (pyi's sources are
+# text). Work in .tmp/repr-python/ast/CORPUS/
+cmd_ast_check() {
+  local ids=() limit=0 mode=exec id worst=0
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --limit) limit=$2; shift 2 ;;
+      --mode) mode=$2; shift 2 ;;
+      *) ids+=("$1"); shift ;;
+    esac
+  done
+  [ ${#ids[@]} -gt 0 ] || ids=(samples lex-errors syntax-errors)
+  need_python "ast-check (astdump.py; not a gate step)"
+  fetch_tarball >/dev/null; fetch_apks >/dev/null
+  local AST="$WORK/ast"
+  for id in "${ids[@]}"; do
+    local d="$AST/$id" base
+    rm -rf "$d"; mkdir -p "$d"
+    case $id in
+      lex-errors) base="$root/test/python/lex-errors"; (cd "$base" && ls | LC_ALL=C sort) > "$d/all" ;;
+      syntax-errors) base="$d/src"; py syntax_cases.py --src "$(TOP)" --out "$base" > "$d/all" ;;
+      *) local -a info; mapfile -t info < <(corpus_base "$id"); base=${info[0]}
+         local -a args=(); IFS=, read -ra pa <<< "${info[1]}"; args+=("${pa[@]}")
+         if [ "${info[2]}" != - ]; then IFS=, read -ra ea <<< "${info[2]}"; for e in "${ea[@]}"; do args+=(--exclude "$e"); done; fi
+         pyrec_list "$base" "${args[@]}" > "$d/all" ;;
+    esac
+    # UTF-8 files only
+    (if [ "$limit" != 0 ]; then head -n "$limit" "$d/all"; else cat "$d/all"; fi) | python3 -I -S -B -c '
+import sys
+for rel in sys.stdin.read().split("\n"):
+    if rel:
+        try:
+            open(sys.argv[1] + "/" + rel, "rb").read().decode("utf-8")
+            print(rel)
+        except UnicodeDecodeError:
+            pass' "$base" > "$d/list"
+    py astdump.py --base "$base" --list "$d/list" --out "$d/ref" --mode "$mode"
+    ARBACE_PATH="$root" GOMEMLIMIT=${REPR_PYTHON_GOMEMLIMIT:-1500MiB} "$(arbace_exe)" -m arbace.repr.python.astjson dump \
+      --base "$base" --list "$d/list" --out "$d/out" --mode "$mode" 2> "$d/stderr" || { echo "ast-check $id: the native run failed"; worst=1; continue; }
+    local n=0 eq=0 bad=()
+    while IFS= read -r rel; do
+      n=$((n + 1))
+      if cmp -s "$d/ref/$rel.json" "$d/out/$rel.json"; then eq=$((eq + 1)); else bad+=("$rel"); fi
+    done < "$d/list"
+    echo "ast-check $id: $n files ($mode): equal $eq, differ ${#bad[@]}"
+    for rel in "${bad[@]:0:20}"; do echo "  DIFFER $rel"; done
+    [ ${#bad[@]} -eq 0 ] || worst=1
+  done
+  return $worst
+}
+
+# records record|verify [--sample N] [CORPUS...|outcomes]... (queue 213; doc/ORACLE-RECORDS-SURVEY.md "As built: Python"): every
+# record a gate step reads, made (record: by hand, on the host with python3, ORS5 (a)) or checked against python3 afresh
+# (verify: the oracle tier's), by the checks themselves in that mode (tools/pydump/records.bash). CORPUS: samples, synthetic,
+# errors, lex-errors, syntax-errors, stdlib, site-packages, lib-test, mutants (default every one, then outcomes); outcomes:
+# spec-check's and samples' verdicts, bin/pyi gen --check's, runtime check's smoke runs and REPL sessions, wheels check's
+# CPython runs and pip's layout. --sample N (verify): the round trips, lex-check and parse-check over N files of each big
+# corpus, evenly spread (bin/pyi's scope-check and compile-check whole only on the essential corpora)
+cmd_records() {
+  local mode=${1:-}; shift || true
+  case $mode in record|verify) ;; *) die "usage: bin/repr-python records record|verify [--sample N] [CORPUS...|outcomes]" ;; esac
+  local sample="" ids=() id rc=0
+  while [ $# -gt 0 ]; do case $1 in --sample) sample=$2; shift 2 ;; *) ids+=("$1"); shift ;; esac; done
+  [ ${#ids[@]} -gt 0 ] || ids=(samples synthetic errors lex-errors syntax-errors stdlib site-packages lib-test mutants outcomes)
+  need_python "records $mode"
+  [ -f "$PYREC_LIB" ] || die "records $mode: no $PYREC_LIB (the shared tooling, oracle-records-c)"
+  local rp="$root/bin/repr-python" pyi="$root/bin/pyi" o=() t0=$SECONDS
+  # record: every verb stages into one directory, packed once at the end (a corpus's pack made once, not once a verb)
+  if [ "$mode" = record ]; then export PYREC_STAGE="$WORK/records-stage.$$" PYREC_DEFER_FLUSH=1; rm -rf "$PYREC_STAGE"; fi
+  run() { echo "== records $mode: $*"; REPR_PYTHON_ORACLE=$mode "$@" > "$WORK/records-$mode.log" 2>&1 || {
+            grep -q '^pyrec\|^UNRECORDED\|^STALE\|^REFUSED\|FAILED' "$WORK/records-$mode.log" && rc=1; true; }
+          grep '^verify\|^oracle: packed\|^pyrec\|UNRECORDED\|STALE\|REFUSED' "$WORK/records-$mode.log" || true; }
+  for id in "${ids[@]}"; do
+    o=()
+    if [ -n "$sample" ] && [ "$mode" = verify ]; then
+      case $id in stdlib|site-packages|lib-test)
+        local -a info; mapfile -t info < <(corpus_base "$id")
+        local -a args=(); IFS=, read -ra pa <<< "${info[1]}"; args+=("${pa[@]}")
+        if [ "${info[2]}" != - ]; then IFS=, read -ra ea <<< "${info[2]}"; for e in "${ea[@]}"; do args+=(--exclude "$e"); done; fi
+        pyrec_list "${info[0]}" "${args[@]}" | awk -v n="$sample" -v id="$id" '{ a[NR] = $0 } END { for (i = 0; i < n && i < NR; i++) print id "/" a[int(i * NR / n) + 1] }' > "$WORK/records-sample-$id.txt"
+        o=(--only-list "$WORK/records-sample-$id.txt") ;;
+      esac
+    fi
+    case $id in
+      samples) run "$rp" roundtrip samples; run "$rp" roundtrip --text samples; run "$rp" lex-check --no-mutants samples
+               run "$rp" parse-check --no-mutants samples; run "$rp" parse-check --full --no-mutants samples
+               run "$pyi" scope-check samples; run "$pyi" compile-check --full samples ;;
+      synthetic|errors) run "$pyi" scope-check "$id"; run "$pyi" compile-check "$id"; run "$pyi" compile-check --full "$id" ;;
+      lex-errors) run "$rp" lex-check --no-mutants lex-errors; run "$rp" parse-check --no-mutants lex-errors; run "$rp" parse-check --full --no-mutants lex-errors ;;
+      syntax-errors) run "$rp" parse-check --no-mutants syntax-errors; run "$rp" parse-check --full --no-mutants syntax-errors ;;
+      stdlib|site-packages|lib-test)
+        run "$rp" roundtrip ${o[@]+"${o[@]}"} "$id"; run "$rp" roundtrip --text ${o[@]+"${o[@]}"} "$id"
+        run "$rp" lex-check --no-mutants ${o[@]+"${o[@]}"} "$id"; run "$rp" parse-check --no-mutants ${o[@]+"${o[@]}"} "$id"
+        run "$rp" parse-check --full --no-mutants ${o[@]+"${o[@]}"} "$id"
+        [ ${#o[@]} -gt 0 ] || { run "$pyi" scope-check "$id"; run "$pyi" compile-check --full "$id"; } ;;
+      mutants) run "$rp" lex-check samples; run "$rp" parse-check --full samples ;;
+      outcomes) run "$rp" spec-check; run "$rp" samples; run "$pyi" gen --check; run "$pyi" runtime check
+                run "$pyi" wheels fetch; run "$pyi" wheels check ;;
+      *) die "records: no corpus $id" ;;
+    esac
+  done
+  if [ "$mode" = record ]; then
+    PYREC_DEFER_FLUSH= PYREC_MODE=record PYREC_VERB="bin/repr-python records record ${ids[*]}" pyrec_flush || rc=1
+  fi
+  echo "records $mode: ${ids[*]}: $((SECONDS - t0)) s$([ $rc = 0 ] || echo ', FAILED')"
+  return $rc
+}
+
+cmd_check_all() {
+  cmd_spec_check && cmd_samples && cmd_roundtrip && cmd_roundtrip --text
+}
+
+PYREC_VERB="bin/repr-python $*"
+trap pyrec_flush_on_exit EXIT
+pyrec_flush_on_exit() { local rc=$?; pyrec_flush || rc=1; exit $rc; }
+case "${1:-}" in pins|spec-check|roundtrip|lex-check|parse-check|ast-check|check) load_rows ;; esac
+case "${1:-}" in
+  pins)
+    case "${2:-}" in
+      --fetch) cmd_fetch ;;
+      --count) cmd_count ;;
+      --check) cmd_check ;;
+      *) sed -n '2,90p' "$0"; exit 2 ;;
+    esac ;;
+  spec-check) cmd_spec_check ;;
+  samples) cmd_samples ;;
+  read) shift; cmd_read "$@" ;;
+  print) shift; cmd_print "$@" ;;
+  roundtrip) shift; cmd_roundtrip "$@" ;;
+  lex-check) shift; cmd_lex_check "$@" ;;
+  parse-check) shift; cmd_parse_check "$@" ;;
+  ast-check) shift; cmd_ast_check "$@" ;;
+  pegen) shift; load_rows; cmd_pegen "$@" ;;
+  check) cmd_check_all ;;
+  records) shift; cmd_records "$@" ;;
+  *) sed -n '2,72p' "$0"; exit 2 ;;
+esac

@@ -2813,7 +2813,7 @@ check; a missing reference is not judged and fails; a selection leaves the contr
 | C `bin/repr-c check --tokens`, `parse-check`, `bin/ci annotations`, `bin/repr-c roundtrip` | P (queue 144; its judges' deftests pass on stage 0, 31 assertions; the runs over the corpora at the window; judged in the `--full` steps `c-tokens`, `c-parse`, `c-annotations`, `c-roundtrip`, their benchmarksgame parts): `test/c/controls.edn` `:lex`, `:pp`, `:gcc-digest`, `:tree`, `:annot`, `:roundtrip`, fannkuchredux.c against fasta-8.c | after the corpora, from the dumps the run keeps: `arbace.repr.c.ppcheck/token-controls` (`same-dump?`, `gcc-digest-agrees?`), `parsecheck/tree-controls` (`same-tree?`; `check-file` keeps the controls' dumps), `annot/annot-controls` (`annot-status`), `rtcheck/roundtrip-controls` (levels 3 and 4 crossed, `judge-row`); each in its judge's exit | not in `files.tsv`, the known files, the results files or the counts | none (the corpus's own dumps) |
 | C++ `bin/cppi runtime-build`, `bin/repr-cpp roundtrip`, `pp-check`; `bin/repr-llvm roundtrip` | M | | | |
 | repr/java `parse-check`, `front-check`, `attr-check`, `nojavac-check`, `roundtrip`, `check --jdk`, `check --suite` | M | | | |
-| repr/go `native-check`, `roundtrip`; repr/clojure `check` | M | | | |
+| repr/go `native-check`, `roundtrip`; repr/clojure `check` | repr/go P (GTS88 (b), below: `test/repr/go/native-controls.edn`, `test/repr/go/roundtrip-controls.txt`); repr/clojure M | | | |
 | `bin/generated-check`, `bin/j2g-edge verify`, `bin/provenance-check`, `bin/reap` | M (VM report 041's GTS110-GTS115 cover them) | | | |
 
 **The pairs**, each checked against the records here: C run, fannkuchredux.c and fasta.c (status 0 both, other stdout
@@ -3278,3 +3278,1524 @@ All (a), as recommended: the essential budget is the gate's wall time; equal per
 the nightly tier every step over its subset plus a rotating slice, seven nights; the clean run over the compressed corpora,
 checking the rotation's record; the C subset rule for every crop; Go's coverage builds kept by key, run at night; synthetic
 corpora against the same references; Java's `speed` curation inside GT8; acceptance as GTS209.
+
+## Decided (2026-11-04, the user): fitting the clean run into one night (GTS227-GTS230)
+
+The analysis (`.tmp/night5/clean-fit.md`, not committed; its estimates): the four crops' clean run serially about
+14.5-18 h (C's four read checks whole, 223 min on the old stage 0; `gate-tests` and C's essential chain; a fresh clone's
+1.35x over the store's medians, Java's levels 1.7x); under 10 h (about 9-9.5 h) only with two memory lanes and Java's
+compiled level on a subset. The user's decisions, each (a):
+
+- **GTS227 Two memory lanes in the clean run.** Lane 1 the big-memory steps one at a time (Java's levels, peaks 48-50 GiB:
+  `java-interp`'s declaration, 2 GiB and not heavy, corrected), lane 2 the small-memory heavy steps beside it (C's seven
+  full checks, 2-9 GiB, CPU-bound); code in `bin/gate` and `bin/lib/gate-run.bash` before the clean run's night.
+- **GTS228 Java's compiled level on its coverage subset** (GTS205 (a)'s rule) in the nightly and clean tiers, from night
+  4's Java compiled coverage; the rest rotates.
+- **GTS229 C's read checks timed after the re-seed** (tokens, tree, annotations, round trip), proxy subsets decided then
+  if they still do not fit.
+- **GTS230 The rotation's record:** one keyed `--full` of the rotated parts on the re-seed's night (a whole run counts for
+  every slice), so the clean run finds the rotation complete.
+
+GTS231-GTS234, decided (a) by the user later the same day: the parked parts kept in the clean run if lane 1 fits; the
+clean clone's caches empty; nothing reused from v2's record; the second night for failures only. Also decided then: the
+re-seed's night runs GTS230's keyed `--full` with the lanes (`--full --concurrent`), and it may run on into the morning
+(keyed: nothing is lost); the clean run the night after.
+
+## As built: GTS227 (a), the memory lanes (write-ahead, branch `gate-lanes`, 2026-11-04)
+
+GTS227 (a) as code, not yet run as a gate (tonight's essential gate on `next` was not touched; no gate ran). Four parts.
+
+**The declarations made true** (`test/gate/steps.edn`'s `:mem-gib`, not in any key). Each step's and part's declaration is now
+at least the largest peak recorded for it: the larger of the largest process's RSS and the process tree's sampled peak, over
+the main store's passes (1,084) and the clean runs' logs (`.tmp/gate-clean/*.logs*/gate/*.mem`, eight runs), 2026-11-04.
+Raised: `java-interp` 2 → 53 (52.4 GiB at the clean run of `1f0cd7b`; now `:heavy true`), `java-compiled-full` 21 → 50 (49.7),
+`repr-java-nojavac` 11 → 34 (its jdk part 33.1), `jrt-convert` 28 → 34 (33.2), `diffcheck` 25 → 31 (30.9), `repr-go` 27 → 30
+(30.0), `suite-aot` 23 → 27 (26.4), `goi` 5 → 14 (13.3), `goi-aot-essential` 1 → 9 (8.8), `goi-check` 2 → 8 (7.9),
+`goi-check-full` 5 → 8 and `goi-aot` 2 → 8 (the whole check's 7.9), `oracle-go` 1 → 5 (4.4), `repr-java` 12 → 16 (15.4),
+`java-compiled` 19 → 22, `programs` 19 → 21, `j2g-edge` 5 → 7, `repr-java-attr` 41 → 43, `repr-java-front` 29 → 31,
+`repr-java-roundtrip` 29 → 30, `javac-tool` 26 → 27, `go-build`, `fixpoint`, `programs-full` 19 → 20, `suite-go` 13 → 14,
+`javac-verify` 8 → 9, `java-check` and `java-fixtures` 1 → 2. Lowered (far above every peak): `java-read` and `java-print` 12 → 4
+(3.5 and 3.0 GiB as whole steps), `c-aot-essential` 6 → 2 (1.8). Per part (a part's `:mem-gib` over its step's, so that a
+small corpus is not taken for its step's largest): repr/java's tree checks' samples 1, baseline 2-3, javac 6-9 (their jdk
+parts the step's), `repr-java-roundtrip.{baseline,samples}` 2 and 1, `repr-java-parse.tests` 3, `repr-go-native`'s parts
+2-24 (its `cmd-*` parts the step's 28). Unmeasured as parts, so from the whole step or C9.2's table: Java's levels' parts,
+C's seven full checks (2-9 GiB), `goi-check-full`. The planner now refuses a non-numeric `:mem-gib` and a step of 16 GiB or
+more without `:heavy` (java-interp's case: outside the lanes it would run beside another heavy step).
+
+**The check that keeps them true**: `bin/gate [--full] --mem-check` (`test/gate/lanes.ae`'s `mem-check`; reads only, keys
+nothing) holds every declaration against the store's passes and the committed clean records (`test/gate/clean-*.edn`): a
+peak over `:mem-gib` x 1.1 + 0.5 GiB fails, as does a step (but `:pre`) without one; a parted step's whole run (an older
+table's record) is held to its parts' largest; a declaration over twice its largest peak and 2 GiB is listed, not failed.
+`test/gate/lanes-test.bash` runs it on the table and the committed clean records (in the gate's `gate-tests`), so a clean
+record committed with a peak over its declaration fails the next gate. Today: 1,166 peaks, none over.
+
+**The scheduler** (`bin/gate-lane`, `bin/lib/gate-run.bash`'s `step`). With `bin/gate --full --concurrent` and the new `bin/gate
+--full --clean --concurrent` (`GATE_LANES=1`), every step of the plan (the builds, the essential and the full checks; the pre
+steps stay one after another) starts through `bin/gate-lane` with its declared `:mem-gib` and its index in the plan. The rule
+(`lane_decide`, a function of the state alone): the waiters in the plan's order; R the declared GiB of the running steps and
+of the waiters looked at so far; a waiter of G GiB is admitted when R + G fits the budget (or R is 0: a step over the budget
+runs alone) and it is not big while a big one is counted; every waiter counts, admitted or not (conservative backfill: a big
+step waiting is never passed by small ones that would delay it). Hence the two lanes: lane 1, the steps of 16 GiB or more
+(`GATE_LANE_BIG_GIB`), one at a time; lane 2, every other step beside it while the sum fits. The budget `GATE_MEM_BUDGET_GIB`
+defaults to MemTotal less `GATE_MEM_RESERVE_GIB` (4): 58 GiB on the 62.7 GiB host. Light steps are admitted too (by their
+declaration, so that the sum is the host's, not the heavy steps' alone). The admission is the lock: the run holds the host's
+big lock once for its whole length (`bin/heavy-lock`, its FIFO; `GATE_CONCURRENT_HELD=1` or `GATE_HEAVY_CMD=env` when the
+caller holds it) and every step runs with `ARBACE_HEAVY_HELD=1`, `:inner` ones too (their declared memory is held for the
+step). `.tmp/heavy`'s slot is the caller's, as before. The state is `.tmp/gate/lanes/` (`run/`, `wait/`, entries pruned by
+their process's start time; `events.tsv`, each wait and admission). The order is deterministic in the sense that the decision
+depends only on who waits and who runs, never on arrival or the poll's race; the actual order is recorded: the clean record
+gains `:lanes {:budget-gib :big-gib}` and, per step, `:mem-gib`, `:lane` and `:start-s` (seconds after the run's start),
+its wall, CPU, peaks and waits as before. In the clean run the essential chains and then the full chains run at once
+(`GATE_FULL_PARALLEL=1`), still audited, every part, the pins and stage 0 first. `GATE_LANES=0` keeps GTS37 (a)'s one heavy
+step at a time for the everyday `--concurrent` (refused with `--clean`); `--clean --concurrent --only` is refused (the
+second night's reruns stay serial).
+
+**The plan's view**: `bin/gate --full [--clean] --concurrent --plan` prints the plan, then each step's lane and a schedule
+simulated by the same rule (`test/gate/lanes.ae`'s `view`: the pre steps and builds one after another, then each phase's
+chains at once with their `:start-after`; durations the median of the main store's passes, else the newest clean record's
+wall, a part of a step the record ran whole getting its share; `GATE_LANES_RECORDS` adds records, a file of estimates among
+them, `GATE_LANES_PREFER=clean` takes the records first), the simulated wall, lane 1's sum and the largest declared sum.
+
+**Tests** (`test/gate/lanes-test.bash`, 21 checks, about 20 s): the rule in both implementations on seven states; five
+synthetic steps (sleeps) through `bin/gate-lane` admitted in the rule's order, never over the budget, one big at a time; a dead
+entry pruned; the runner's `step` admitting through it with `ARBACE_HEAVY_HELD=1` inside, and not without `GATE_LANES`; the
+declarations' check on a made-up table and on the real one; the planner's refusal; the view on a made-up plan (its schedule
+by hand); `bin/gate`'s refused options. Run with the gate's tests it touches (costs, rotation, declared-env, audited,
+gate-tests-test, plan-logic, claude-md, stale-comments, limit, pass-write): passed.
+
+**The estimate** (the view with v2's clean record and a record of estimates, `GATE_LANES_PREFER=clean`: audited, cold walls;
+`gate-tests` 30 min, C's essential chain about 43, C's run checks on their subsets about 20, `c-dg` 11, `goi-check-full` 15,
+`java-interp` on its subset 45, `java-compiled-full` on a subset (GTS228) 100; C's four read checks whole, low 89 min if repr/c
+compiled into the re-seeded stage 0 is 3x faster, high 4.5 h at C9.2's speed): **about 9.6 h** with C's reads low, **about
+12.1 h** with them high (C's chain then the critical path: its 6-9 GiB read steps cannot run beside java-interp's 53 GiB
+within 58), 13.9 h with Java's compiled level whole as well. Lane 1 carries about 6.9 h (8.7 h with compiled whole); the
+declared sum never passes 56 GiB. The C chain first in the plan's order (the table's) would save about 35 min of the high case.
+So GTS229's measurement decides the night: with C's reads under about 2 h the clean run fits 10 h.
+
+**The clean run with the lanes** (night 6, after GTS228's subset and the re-seed; from the main checkout at the candidate):
+
+    .tmp/heavy bin/heavy-lock env GATE_HEAVY_CMD=env bin/gate --full --clean --concurrent --tag arbace-reaps-4-crops-v1
+
+(`.tmp/night5/clean.sh`'s `clean_run` with `--concurrent` added; without the outer `bin/heavy-lock` the gate takes the big
+lock itself, once. The plan first: `bin/gate --full --clean --concurrent --plan`. A failure's second night stays
+`bin/gate --full --clean --tag ... --only failed`, serial.) Risks: an under-declared step is an OOM (the declarations are the
+largest seen, the unmeasured C parts C9.2's); CPU contention lengthens the limited programs' walls (their CPU-time limits
+have wall caps); the audit's strace under concurrency is untried at this scale.
+
+## Decided (2026-11-04, the user): the day and the night (GTS224-GTS226, amending GTS209)
+
+The night shift is nominally 12 hours, 19:00 to 07:00 UTC: gating, testing, working out details and fixing the bugs the
+checks find. The day is for development, design and grand concepts, with sample checks and occasional light gating.
+
+- **GTS224 The nightly tier.** 8 hours of planned runs in the 12-hour night (6 before), 4 hours of slack for the fixes and
+  `--only failed` reruns a night's failures need, so a broken run still ends by 07:00.
+- **GTS225 The clean run.** Within one night (about 10 hours planned: the clean run over GT8's compressed corpora; the
+  whole corpora rotate through the nights), two nights at most (`bin/gate --clean --only` resumes the record; `main`
+  frozen at the candidate between them). A tag's night runs the clean run instead of the nightly. GTS209's acceptance reads
+  so: the four crops' clean run within the night, the nightly within its 8 hours.
+- **GTS226 The staging branch.** By day, merges go to the branch `next` after their sample checks; the night's first step
+  runs the essential gate on `next` and fast-forwards `main` to it (then pushes), so `main` stays gated and the day free of
+  gate runs. The essential gate's 15 minutes stays a goal, off the day's critical path. (Before: the essential gate at each
+  merge into `main`, 2026-10-26.)
+
+## As built: GT8.4, GT8.7 (write-ahead, branch `gt8-nightly`, 2026-11-03)
+
+GTS202 (a), GTS203 (a), GTS204 (a) in the planner's way: the rotation is data in `test/gate/steps.edn`, decided by
+`test/gate/plan.ae`, noted by `bin/lib/gate-run.bash`, its record in the store of passes.
+
+**The declaration.** A parted step names how its tool takes a file list and where the lists come from:
+`:rotate {:only "--only {list}" :universe RECORD :subset CORPORA :failed-re ERE}`. RECORD is the committed record of the
+part's check (one `["ID" ...]` a line; the part's ids are those under `PART/`): the universe is what the check judges, read
+without the corpus's tree. CORPORA's map `:id :PART` gives `:subset` (names under the corpus, as VM report 161 writes them).
+`:only` is appended to `:cmd` (or put at `{only}`), its `{list}` the runner's `"$GATE_LIST"` (the planner's
+`LOGS/rotation/NAME.list`): no path in a key. `:rotate` itself is not keyed: a part run whole keeps its key. Declared today on
+`c-check` and `c-aot` (`bin/ci check [--aot] --only FILE`, ids `CORPUS/NAME`; `:failed-re "^FAIL ([^ ]+).*$"`, the judge's
+`FAIL ID WHY` lines).
+
+**The tiers** (GT8.7). `bin/gate` (essential) is untouched. `bin/gate --full` runs every part whole, as before.
+`bin/gate --nightly [--plan]` (mode `nightly`: `--full`'s phases) expands each rotated part whose subset is smaller than
+its universe into two checks: `NAME.PART.sub`, the subset plus the files that failed since, and `NAME.PART.sK`, one slice of
+the rest. A part with no `:subset` (every crop but C until GT8.3; C too until VM 161's `:subset` lists are merged) is not
+expanded: its key is `--full`'s, so `--nightly` = `--full` for it and the two tiers share its passes. `bin/gate --full
+--clean` (and `--clean --plan`) runs the subsets alone (`--rotation subset`; `GATE_CLEAN_WHOLE=1`: whole parts), after
+`bin/gate --rotation-status` on the shared store passed (`GATE_CLEAN_ROTATION=0`: not required; the record's `:rotation`
+says `:complete`, `:unchecked` or `:whole`).
+
+**Slices.** A file's slice is the first 8 hex digits of its id's SHA-256 mod 7: a function of the name alone, so a file
+added to a corpus changes only its own slice's list, and a re-recorded reason changes none. Each slice is a check of its own
+in the store (`STORE/NAME.PART.sK/KEY.edn`), keyed as any check plus the line `list SHA N` (its list's digest): its passes
+are kept, pruned and reused like any other. The night's slice: among the non-empty slices, one whose latest run failed, else
+one never run, else the one whose latest run is oldest; ties by the night index (the day of the run's start less 12 hours,
+`GATE_NIGHT`), so that an empty store walks s0..s6 in seven nights and a missed night is caught up, not skipped for a week.
+A slice whose key has a pass is skipped as any check (its "skip" noted: the pass holds at that key); a whole part's run
+counts as a run of every slice (below).
+
+**The record.** The runner appends each rotated check's run (pass, fail, or skip at a pass) to
+`STORE/_rotation/NAME.PART.sK.runs` (epoch, date, status, key, list digest, commit, worktree); a failure's files (the log's
+lines `:failed-re` names that are in its list) go to `STORE/_rotation/NAME.PART.failed`, which the planner adds to the
+part's subset and removes from its slice ("a file that fails joins the subset"); a pass of the subset clears those it
+ran. They stay there until they pass, not for ever: a file that should stay is added to the corpus's `:subset` by hand
+(`--rotation-status` lists them). Not noted in the clean run (its store is its clone's).
+
+**A whole part's run counts for every slice** (the coordinator's follow-up, 2026-11-03). A rotated part run whole
+(`--full`, or the clean run with `GATE_CLEAN_WHOLE=1`) keeps `--full`'s key (its universe is unkeyed, `:whole-list`) and is
+noted as `STORE/_rotation/NAME.PART.whole.runs`, its list the universe (its ids sorted, digested). It is a run of every
+slice: for the night's choice any whole run counts (after one `--full` night every slice ran at once, and the night's index
+decides; after a failed whole run every slice's latest run failed); for completeness a whole run counts for a slice when its
+universe is the current one. "With its current list" is then: a slice's own run counts when its list is the slice's list
+now, a whole run when its universe is the universe now (every current slice's list is in it, however the subset and the
+failed files split the rest since); a whole run of another universe (a program added or removed) counts for none. Of the
+two, the later run decides (in the same second, the slice's own). A whole run's failure sends its named files to the
+subset; its pass clears them. The clean run notes its runs in its clone's store, and `clean_launch` appends them to the
+shared store's `_rotation/` (with `GATE_CLEAN_PUBLISH`): one whole `--full` night, or a whole clean run, completes the
+rotation, and the tag need not wait seven nights.
+
+**Completeness** (`bin/gate --rotation-status [--days N]`, `gate.plan rotation-status`): for every rotated part, every
+non-empty slice's latest run *with its current list* passed or skipped at a pass within 7 days, and no file failed since;
+exit 1 otherwise. *At any key*, decided here: a key changes with every change to the code under check, so requiring the
+current key would make the clean run a full run (GTS204 (b), rejected); within the period a regression outside the subsets
+hides at most the week GTS203 (a) accepts, and the subsets, the coverage set of that code, run at the current key in the
+clean run itself. The list's digest is required to match: a file added since a slice's last run has not run.
+
+**Review 181's fixes** (the Mac's review of this branch, `.tmp/mac-queue/reports/181-review-gt8-nightly.md`; its HIGH
+decided (a) by the user, 2026-11-03). These supersede the paragraphs above where they differ.
+- *Which runs count* (finding 1, (a)): only runs of this commit's ancestors from clean trees, for completeness, the night's
+  slice and the failed files. Each run's line ends `SEQ DIRTY` (the gate's `dirty`: `git status --porcelain
+  --untracked-files=no`, as the passes'); the planner reads `LOGS/ancestors.txt` (`git rev-list HEAD`, written by
+  `plan_inputs`) and `rotation-status` takes `--ancestors FILE` (`bin/gate`'s `rotation_check` writes it); a run of
+  another commit or of a dirty tree is dropped (`counts?`). The failed files are an append-only event log,
+  `NAME.PART.failed` lines `SEQ EPOCH ID fail|clear COMMIT DIRTY`: a file has failed when its latest event that counts is
+  a failure, so a branch's failure does not enter main's subset and a branch's pass does not clear main's failure.
+- *Order* (finding 2): every note takes the store's next sequence number (`STORE/_rotation/.seq`) under the store's lock
+  (`.lock`, L1: no lost update), and runs are ordered by it, then the time: the run noted last is the later one, whatever
+  the clock's second. rotation-test runs with `date +%s` frozen.
+- *The night's choice* (findings 3, 4; `choose-slices`): a slice whose latest run failed runs again, and beside it the
+  rotation's slice among the others: first one not covered with its current list (never run, its list changed since its
+  run, its covering run failed or older than the period), then the one whose latest run is oldest by the sequence; ties by
+  the night index. A list change (a program added, a fixed failure's file back in its slice) is covered the next night;
+  a slice failing with no file named (a build failure, a control) no longer starves the other six.
+- *The clean record* (finding 5): `:rotation {:status :complete|:unchecked|:none|:whole :check EVIDENCE}`, EVIDENCE
+  `rotation-status --edn`'s map (`:days`, `:now`, each part's files, subset, failed files and each slice's covering run
+  as `[K N STATUS DATE COMMIT COVERED]`); `:none` when no part rotates (every part ran whole); its text and data kept in
+  `SHA.logs/rotation.{txt,edn}`. The clone's failed events are published with its runs (L2), both renumbered after the
+  shared store's sequence under its lock. `GATE_NOW` is kept by the scrub only with a store of the caller's own (L6).
+- Left: L3 (the judges print 40 `FAIL` lines: the rest join the subset over later runs), L4 (the controls' subjects in
+  every `:subset`, unchecked), L5 (`:subset` names outside the universe dropped silently), L7 (`.runs` never pruned).
+
+**Tests.** `test/gate/rotation-test.bash` (`bin/gate-tests`, needs stage 0): a made-up tree, table and store (40 ids, a
+subset of 4): `--full` whole; the nightly expansion and its command; the slices as the hash rule says, the seven covering the
+rest once; keys over the list (night 7 = night 0, the subset apart, an unrotated part's key = `--full`'s); `:needs` renamed;
+a failure's file into the subset and out of its slice, the failed slice chosen again, the subset's pass clearing it;
+`rotation-status` incomplete (never run), complete, stale after eight days, incomplete with a failed file; the oldest slice
+chosen; a whole part's run: noted with the universe, its key the one without `:rotate`, completing every slice, the night's
+index deciding after it, a later slice failure making it incomplete, a whole failure's file into the subset and its pass
+clearing it, a whole run of another universe counting for none; the clean run's subsets; since review 181 (with
+`date +%s` frozen): another commit's and a dirty tree's runs counting for nothing, an ancestor's counting, another
+commit's failure and pass moving none of this commit's failed files, the evidence (`--edn`, `:none`), the failed slice
+with the rotation's beside it, a changed list run the next night. 44 of 44.
+
+**The tools' file lists** (what a part needs to be rotated). Take one today: `bin/ci check` and `check --aot` (`--only FILE`
+of ids; rotated); `bin/goi check` and `bin/java-check` (`--only REGEX`: a list becomes an alternation, but their steps are not
+parted by corpus and Java's levels feed `java-judge` by `:uses`, so a slice needs the judge to take a partial run: GT8.5's
+per-corpus records first); `bin/ci dg` (`CI_DG_ONLY`, a file, behind `--essential` only). Take none: `bin/ci annotations`,
+`bin/repr-c check --tokens`, `parse-check`, `roundtrip` (C's four read-level steps, about 220 minutes of C's 300); repr/java's
+tree checks (`parse-check`, `front-check`, `attr-check`, `nojavac-check`, `roundtrip`); `bin/repr-go native-check` (packages);
+`bin/clojure-tests`, `bin/oracle`, `bin/diffcheck`, `bin/repr-clojure check`. Each needs an `--only FILE` and a judge that
+leaves out the rows a partial run does not run (as `CI_SUBSET` does), then a `:rotate` line.
+
+**What remains.** VM 161's `:subset` lists merged (then C's 15 run corpora rotate: 229 of 2,260 programs a night plus a
+seventh of the rest), and their amd64 re-measure; `--only` for the tools above, C's read levels first; a `:universe` format
+for crops whose records are not one id a line (goi's, Java's); the controls' subjects kept in every subset (VM 160 did it by
+hand for benchmarksgame: a control whose subject is not in a slice is "left", not failed); `--costs` (GT8.1) to show the
+nightly tier against its budget; the clean record's `:rotation` read by `test/gate/clean.ae`'s `--only` selection (today it
+names the parts' `.sub` checks, as a fresh clean record would); a first real `--nightly`, then seven, before the tag.
+
+## As built: GT8 (the tools' lists) (write-ahead, branch `gt8-lists`, 2026-11-03)
+
+Every corpus tool but C's (another branch's) takes a file list; the planner reads more record shapes.
+
+**The planner** (`test/gate/plan.ae`, `bin/lib/gate-run.bash`). `:rotate` takes `:id-re` (a regex on the record's lines:
+group 1 the id, group 2 when present the part named on the line, the ids then bare, as the `:subset`'s names: Java's
+`ref-jdk26.edn`, the corpus on each test's line; one group: every line's id in the part, goi's records), `:always` (the
+negative controls' subjects, GTS81 (a): in the subset and in every non-empty slice's list, so every run of the part judges
+its controls; ids of the part's universe only) and `:failed-as` (sed's replacement, default `\1`: repr/go's `KIND CORPUS
+KEY` lines give `\2/\3`). `{part}` in a part's `:uses` names its own part's producer, and a `:uses` naming a rotated
+part names its checks. `:judges {:failed-re :failed-as}` on a step that judges rotated checks' saved runs (Java's
+`java-judge`, whose levels' `--save` runs never fail): when it fails, each producer whose list names a failing id is noted
+as failed (`judge_note`: its run a failure, its ids into the part's subset). The runner exports `GATE_USES`.
+`rotation-test` 40 of 40.
+
+**The tools.**
+- repr/go: `bin/repr-go native-check CORPUS --only FILE` (ids `CORPUS/KEY`, a dump's key; the others neither checked
+  nor missing; the report `:partial`, which `bin/reap record-native-check` refuses); `--record-ids` writes
+  `test/repr/go/native-check-ids.edn` (one `["CORPUS/KEY"]` a line, from the helper's dumps, no check: 11,835 ids of the
+  16 corpora not `:clean-only`). `:rotate` on `repr-go-native`.
+- Java: `bin/java-check --list FILE` (test ids, partial); a run of whole corpora (`--corpus` alone) saves `DIR/corpus`
+  and `--judge` (`java.check/report --corpora`) judges it whole within those corpora (`--record` keeps the other
+  corpora's lines). The level steps are parted by corpus (the six run corpora; `langtools-diagnostics` for
+  diagnostics), interp and compiled reading their own corpus's read (`java-read.{part}/forms.sha256`); `java-judge`
+  judges the results files of `GATE_USES`. Cost: the compiled level's shards are per corpus (about 11 programs, not 7).
+  `test/java/corpora-test.bash` (in `bin/gate-tests`), 10 of 10.
+- goi: `bin/goi check [--aot] --list FILE` (a selection; its own results classified by `goi.divergences --partial`;
+  each failing program `   failing: ID`). goi's check is the step `goi-check-full` (one part, `linux-amd64`), apart
+  from `goi` (annotations, the checker's tests); `goi-aot` one part. Not parted by kind: the kind is not on the
+  record's line, and one rotation over the 1,837 ids balances by the hash.
+- Clojure: `--only FILE` for `bin/clojure-tests` (namespaces, both levels), `bin/oracle check` (case ids `FILE:LINE`;
+  `bin/oracle ids`), `bin/diffcheck` (`FILE:LINE`; `--ids`), `bin/repr-clojure check --roundtrip` (`CORPUS:PATH`;
+  `--ids`). Not rotated: `suite-go`, `oracle-go` and `diffcheck` are essential steps; `suite-aot` and `repr-clojure` are
+  unparted and the oracle's, diffcheck's and repr/clojure's universes are generated (`ids`), not committed records.
+
+**What remains.** The `:subset`s (GT8.3) for repr/go, Java and goi: until then their parts run whole in every tier;
+committed id records (or a `:universe-cmd`) for the oracle, diffcheck and repr/clojure; a part for `suite-aot`.
+
+## As built: GT8.3, C's run checks and Clojure's suite on the cover build (write-ahead, branch `gt8-cover2`, 2026-11-03)
+
+GTS205 (a), GTS206 (a) for the two crops the cover build did not reach: one method, the cover build of the gate's key
+(`bin/arbace-go --gate-build --cover`), a GOCOVERDIR per test under `ARBACE_COVER_DIR`, `bin/cover blocks|classes|subset`.
+`bin/lib/cover.bash` is unchanged (its digest is in the cover key): C's and Clojure's packages were already in the build.
+
+**The hooks.** `bin/ci check` (tool `ci`): the node programs on the cover build's `arbace -m arbace.c.repl run-nodes`
+(CInterp's natives over `arbace/ci`, `arbace/crt`) in place of cirun or `CI_EXE`, the budget `CI_COVER_BUDGET_X` (2)
+times; with `CI_COVER_READ=1` also `ci-read`: each program read, checked and built by a `nodes-list` process of its own on
+the cover build (repr/c, the checker, the builder, musl's link). `bin/ci check --aot` (tool `ci-aot`): each shard built
+with `-cover -coverpkg=arbace/ci,arbace/crt,arbace/shard` and the cover build's hook by an overlay; and `ci-cf2g`: each
+program compiled by a `compile-list` process of its own on the cover build (cf2g with the read). `bin/clojure-tests`
+(tool `clojure`): the eval level on the cover build's `arbace-tests`, a GOCOVERDIR per test namespace's process (run
+`cover`); `--aot` (`clojure-aot`): the compiled suite's program built with `cover_go_flags`, its key and run
+(`aot-cover`) apart (wired, not run yet). `bin/cover blocks --pkgs ERE` keeps a level's part of its crop's packages;
+`bin/cover subset` indexes a classed or kept test that wrote no counters (a program refused before its run: tools/cicover's
+rule, every judged program); `bin/cover classes` reads C's records (`.edn` rows) and C's controls (`:level`);
+`bin/cover clojure-classes RESULTS -o OUT [--aot]` classes the suite per namespace as `bin/reap` does
+(`test/cover/clojure_rows.ae`; a namespace of several classes classed by their set).
+
+**The demonstration** (benchmarksgame, 29 programs; the suite, 83 namespaces; at `cc16ac9b`, cover build 5ebb7b5e):
+
+| level | packages | blocks covered | subset | note |
+|---|---|---|---|---|
+| C run (`ci`) | ci, crt | 868 of 2,051 | 11 | the same 11 as `bin/ci cover`'s cirun and corpora.edn's `:subset` |
+| C run (`ci`) | ci, crt, cinterp, c.cinterp, c.repl | 1,129 of 3,495 | 11 | the same |
+| C AOT (`ci-aot`) | ci, crt | 438 of 2,033 | 8 | within the run level's 11 |
+| C cf2g (`ci-cf2g`) | c.cf2g | 5,078 of 12,062 | 7 | adds fasta-2, nbody-7 |
+| C read (`ci-read`) | repr.c.*, c.check, c.build, c.musl | 45,503 of 161,127 | 17 | |
+| Clojure eval (`clojure`) | arbace/lang, the vendored namespaces, c2j | 71,388 of 237,876 | 63 | 75% of the time |
+
+The back end's union is 13 of 29, every level's 21. The run check under coverage, the read compiled: 130 s (stage 0's
+evaluated `nodes-list` and cirun: 1,113 s); the AOT check with cf2g compiled per program: 151 s (stage 0's shard: 935 s).
+So `bin/ci cover` (cirun built with `-cover`) is superseded: the cover build gives the same subset and its read level.
+Clojure's namespaces reduce little: every process loads every test namespace first (about two thirds of its time) and
+each namespace's own tests reach blocks no other reaches; its eval level is 2 min of wall in the essential gate.
+
+**Decided (the user, 2026-11-03).** (1) `bin/ci cover`, `bin/lib/ci/cover` and `tools/cicover` (cirun's `-cover` path and
+its reducer) removed: the cover build is the one method, `tools/covsubset reduce` the reducer. (2) One subset a level in
+`test/c/corpora.edn`: `:subset-run` (the former `:subset`, queue 161's, until the cover build's are recorded),
+`:subset-read`, `:subset-aot`, `:subset-cf2g` (benchmarksgame's recorded from the demonstration above); `:rotate`'s
+`:subset-key` (c-lists') takes a vector, the keys' union: `c-check` `[:subset-run :subset-read]` (the step reads and runs),
+`c-aot` `[:subset-aot :subset-cf2g]`; a corpus with none of its step's keys runs whole (every c-aot part but benchmarksgame
+until tonight's runs). (3) Clojure's eval suite runs whole; only `--aot` gets a coverage subset.
+
+**The night's runs** (from the worktree, one after another; the cover build first, the checkout's key having moved with
+c-lists; `ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1 CI_JOBS=4` for bin/ci):
+
+1. `/root/arbace/.tmp/heavy bin/cover build`: about 25 min.
+2. `ARBACE_COVER_DIR=.tmp/cov-night CI_COVER_READ=1 CI_CHECK_WORK=$PWD/.tmp/ci-check-cov bin/ci check`: the 15 run corpora,
+   2,268 programs at benchmarksgame's 4.5 s a program, about 2 to 3 h.
+3. `ARBACE_COVER_DIR=.tmp/cov-night CI_AOT_WORK=$PWD/.tmp/ci-aot-cov bin/ci check --aot`: about 5 s a program, 2.5 to 3.5 h.
+4. `/root/arbace/.tmp/heavy env ARBACE_COVER_DIR=.tmp/cov-night bin/clojure-tests --aot --no-generative -j 16`: the compiled
+   suite's program with the cover flags (j2g's whole program, about 20 GiB), then its run: about 45 min.
+5. `bin/cover blocks .tmp/cov-night --tool T --pkgs ERE -o .tmp/cov-night/L` for each level (ci ci|crt|cinterp and
+   c.cinterp, c.repl; ci-read repr.c, c.check, c.build, c.musl; ci-aot ci|crt; ci-cf2g c.cf2g; clojure-aot the crop), `bin/cover
+   classes` (C: test/c/divergences.edn, and divergences-aot.edn with divergences.edn for the AOT levels, controls
+   `--control-level run`), `bin/cover clojure-classes test/arbace-go-aot-results.edn --aot`, `bin/cover subset` per corpus:
+   minutes. Then the subsets written as each corpus's four keys.
+
+## As built: GT8 (C's read lists) (write-ahead, branch `c-lists`, 2026-11-03)
+
+C's read-level checks take a file list, so GT8.4's rotation reaches them (about 220 of C's 300 full-check minutes).
+
+**The tools.** `--only LIST` (ids `CORPUS/NAME`, blank and `#` lines apart) on `bin/repr-c check --tokens`, `bin/repr-c
+parse-check`, `bin/repr-c roundtrip` and `bin/ci annotations` (`bin/lib/repr-c/only.bash`: an id outside the corpora, or
+not `CORPUS/NAME`, refused, exit 2; exported as `REPR_C_ONLY`), and on `bin/ci dg` (`CI_DG_ONLY`, which `--essential` used
+alone until now). `arbace.repr.c.ppcheck/lists`, the four checks' common lists, keeps a corpus's listed files and writes
+`WORK/CORPUS/only.txt`, the judges' mark of a partial run; a listed name its corpus does not hold fails the lists. Each
+judge (`ppcheck/check`, `parsecheck/check`, `annot/judge`, `rtcheck/judge`) then judges what the run holds
+(`arbace.repr.c.results`'s `partial-names`, `in-run`): a known entry of a file not run is not stale, and a control whose
+reference the partial run does not hold is left, not "not judged" (a whole run keeps the strict rule). Every judge now
+prints each failing file, and each stale entry, as `FAIL CORPUS/NAME WHY` (at most 40 a corpus, `print-failing`): the
+rotation's `:failed-re`. Refused with a list: `--record` (all five), `--record-gcc`, `--resume` (a kept corpus's lists),
+`--mutants-only` (parse-check; a list draws no mutants), `--essential` (dg); `--judge --record` (annotations) and
+`--resume --record` (roundtrip) after a partial run. Tests: `test/c/judge_test.ae`'s `read-lists-only`,
+`read-partial-judges`, `read-only-refusals` (74 assertions with the five control tests). Shown by hand: the four checks on
+`benchmarksgame/{fannkuchredux,fasta-8,fasta}.c` (15 to 30 s each, every control judged and differing), the token check on
+`fannkuchredux.c` alone (its three controls left), `bin/ci dg --only` on three files of two groups (its control judged).
+
+**The planner.** `:rotate`'s `:id-as` (with `:id-re`: the id is the match replaced, `$1/$2`, ids then under `PART/` as
+without `:id-re`): the results files' `"CORPUS FILE"` rows as `CORPUS/FILE`. `:subset-key` (default `:subset`): the corpus
+map's key that holds the subset, since the run corpora's `:subset` (ci's back end, VM 161) is another check's. rotation-test
+56 of 56 (the case: a results file, a subset under its own key, a name with a slash; C's one pattern, a name with spaces).
+
+**The steps.** `:rotate` on `c-tokens`, `c-parse`, `c-annotations`, `c-roundtrip` (universe the check's results file,
+subset `:subset-tokens`, `:subset-parse`, `:subset-annot`, `:subset-roundtrip`, `:always` the controls' two files,
+`benchmarksgame/fannkuchredux.c` and `fasta-8.c`, `:failed-re "^FAIL ([^[:cntrl:]]+)[[:cntrl:]].*$"`, below). `c-dg` stays whole: one step over
+seven groups, its control crossing two of them (a part per group would leave it in every part).
+
+**The subsets** (GTS205's rule needs the code under check's coverage: repr/c's lexer, preprocessor, parser, converter,
+printer and arbace.c.check). `bin/ci cover`'s method extends in its reducer (`tools/cicover` takes any `KEY N COUNT`
+profile) but not in its measure: ci's back end is a Go program (cirun) built with `-cover`, while repr/c is Arbace code,
+evaluated on stage 0 or compiled into the executable. Proposed: GTS206 (a)'s cover build of the gate's executable
+(`go build -cover -coverpkg` the `aot_arbace_repr_c_*` and `aot_arbace_c_check*` packages, kept by key), the checks run on
+it compiled (not `ARBACE_PATH_FIRST`), one file a process or `runtime/coverage`'s counters cleared and written around each
+file (`REPR_C_THREADS=1`), then `tools/cicover` with KEEP the controls' files and one file per known class. Until then a
+proxy, computed for one corpus: the tree check's `:subset-parse` of benchmarksgame, the cases and token kinds of cc's
+tree dumps (271 over the 52 files; `REPR_C_PARSE_KEEP=1`), reduced by `tools/cicover`: 9 files, 22% of the nodes (with
+parent-child pairs, 1,287 features, 30 files: too fine). It makes `c-parse.benchmarksgame` rotate in `--nightly`.
+
+**Decided** (the user, 2026-11-03). The proxy subset stays, labelled, until the cover build reaches repr/c. A file name may
+hold spaces (`cxgo/main with args.c`): every C judge (the run checks', cf2g's, dg's and the read checks', their controls
+too) prints `FAIL ID`, a tab, `WHY`, and every C step's `:failed-re` is `^FAIL ([^[:cntrl:]]+)[[:cntrl:]].*$` (the id up
+to the tab: the `.rot` file is tab-separated, so no literal tab in the pattern); the runner notes the failed ids one a line
+(`while read`, not word splitting); rotation-test 56 of 56 (one pattern over C's steps; the spaced name noted whole). `c-dg`
+stays one step, unrotated.
+
+**Review 188's fixes** (the Mac's review of `c-lists`, 9adfafe4). The blocker, `test/gate/audited-test-test.bash` taking the
+planner's read of `test/repr/c/parse-check-results.edn` (the rotated `c-parse.benchmarksgame`'s universe) for a bulk read:
+the test now allows every `:universe` the steps table names (read from it), not a path pattern: the planner reads a
+rotated part's universe by design, and a new crop's universe is then allowed without editing the test. The lows: L1 the
+comments; L2 `bin/ci check`, `check --aot` and `bin/ci record-ref` list their corpora with `REPR_C_ONLY` empty; L3 a whole
+`--resume` (roundtrip, annotations) lists a corpus a partial run left again; L4 `bin/ci annotations --judge --only`
+refused; L5 the `:gcc-digest` control not left for a reference outside a partial run (its reference is the recorded
+digest); L6 the planner warns when `:always` names a file of the part its universe lost; L7 every stale entry printed
+after the 40 failures; L8 the refusals' wording; L9 `c-check`'s and `c-aot`'s `:rotate` `:always` their control's two
+files (`benchmarksgame/fannkuchredux.c`, `fasta.c`).
+
+## GT9: the crops' gate (2026-11-04, branch `gate-crops`; GTS210-GTS223 decided)
+
+Decided (2026-11-04, the user): GTS210-GTS223, each its option (a), all implemented after `arbace-reaps-4-crops-v1`'s tag
+(GT9 gates the crops beyond the four; v1's clean run is GT8's).
+
+**The question** (the coordinator, 2026-11-04): seven crops have checks but no gate step: C++ with LLVM IR as its "+1"
+(LLS17), OCaml, Scheme, Haskell, Rust and Python. Only Clojure, Java, Go and C are in `bin/gate`. For each crop, this
+section covers four things. First, the checks of each REAP level and what they cost. Second, what goes in each of
+GT8's tiers. Third, what each check needs before it can be gated. Fourth, the gaps. The section then gives the proposed
+steps, the decisions and the budget over the 10+1 crops. Nothing here was run but `bin/gate --costs` and
+`bin/gate --full --costs` (seconds). Every number below either names where it was measured or is marked *est.*
+(an estimate, to be replaced by the first `--nightly` that runs the crop's steps, GTS222).
+
+**Where things stand.**
+- Three crops already have their steps written ahead, on held branches. Each branch was cut from `a25d12d1`
+  (2026-11-03 06:51), before GT8's planner was merged (`gt8-nightly`, `gt8-lists`, `gt8-cover2`, `c-lists`):
+  - C++: `cpp-cx10`, CX10, CP180-CP184.
+  - Scheme: `scheme-sm9`, SM9, SC230-SC235.
+  - OCaml: `ocaml-o8`, O8, OC161-OC166.
+- The user decided on 2026-11-03 (doc/JOURNAL.md): C++ and Scheme embed at the first re-seed after the tag (CP180,
+  SC230), and CP181-CP184 and SC231-SC235 go as recommended. The three rows stay on their branches until the tag
+  `arbace-reaps-4-crops-v1`. GT9 is therefore the plan for after the tag.
+- OC161-OC166 are not decided.
+- Two crops have read and print on main and their eval on held branches:
+  - Haskell: hsi on `haskell-he1` ⊂ `he4` ⊂ `he4b` ⊂ `haskell-full` ⊂ `haskell-he4d`.
+  - Rust: rsi on `rust-re1` ⊂ `re3` ⊂ `re4`.
+- Python has read, print and a part of eval on main. AOT, the Lib/test runner and the native reader are on the Mac VM's
+  branches (`/root/arbace-mac.git`, `mac/198-python-py8`, `mac/199-python-py9`, `mac/200-python-py6*`).
+- Native readers were made today, all held. Each has a native-check verb:
+  - `ocaml-native`: Menhir ported.
+  - `haskell-native`: a Happy-style generator.
+  - `rust-native`: rustc_parse ported.
+  - `cpp-native`: CX11.
+  - `llvm-read`: repr/llvm's whole grammar, with llvm-as as a third judge.
+- No crop's namespaces are embedded (`arbace/j2g/embed.ae`'s exclusions). Every check below runs evaluated from the
+  checkout on stage 0, and its Go runtime is printed by repr/go and built by TamaGo's go as a light driver. Two
+  exceptions: pyi's runtime is interpreted by goi, and C++'s and Rust's eval run on ci.
+
+**What the gate's own measure says** (`bin/gate --costs`, store at `5e4d011c`):
+- The essential tier is already over its budget: 31m56s of wall against 15m (213%). Its critical path is
+  `gate-tests` 24m, `diffcheck` 20m, `c-check-essential` 20m, `suite-aot-essential` 12m, `java-compiled` 12m and
+  `programs` 9m (medians).
+- The nightly tier's serial sum is 4h44m measured, a lower bound: 147 parts are unmeasured, among them C's 113. GT8's
+  figure for a full night where every step runs is about 11.8 h.
+- The crops' essential steps proposed here are light chains, concurrent with those above. They add CPU, not wall
+  (below). Bringing the tier back under 15 minutes is GT8's work, not GT9's.
+
+### GT9.1 The shares
+
+GTS201 (a) sets equal shares, with the shared steps charged apart (about 10% of each tier). LLS17 (decided 2026-11-03)
+gives LLVM IR half a share, carved from C++'s and Rust's. The `:budgets` keep `:crops 10`.
+
+| tier | budget | the shared 10% | a crop (strict) | GT8's rounding | C++, Rust (strict) | LLVM IR (strict) |
+|---|---|---|---|---|---|---|
+| essential | 15 min wall | | ≤ 2 min of its own chain's wall, warm (GTS215) | | the same | ≤ 1 min |
+| nightly | 6 h serial | 36 min | 32.4 min | about 35 min | 24.3 min | 16.2 min |
+| clean | 24 h | 2.4 h | 2.16 h (130 min) | about 2.4 h | 1.62 h (97 min) | 1.08 h (65 min) |
+
+GT9 plans each crop to the strict column, which leaves GT8's rounding as margin.
+
+The nightly figure is the worst case, where every step runs. The nightly tier is keyed (GTS202 (a)), so a night that
+changes no input of a crop costs that crop nothing.
+
+### GT9.2 The crops, level by level
+
+#### C++ (`bin/repr-cpp`, `bin/cppi`; doc/cpp/CPP-SURVEY.md; branches `cpp-cx8`, `cpp-cx9`, `cpp-cx10`, `cpp-native`)
+
+**Hosts and pins.**
+- Compilers: g++ 15.2.0 and clang++ 23.1.4 (Alpine's clang23; the APKBUILD is pinned to aports `8a39512a`).
+- The gcc 15.2.0 tarball, at `.tmp/c1/gcc/`. The hotspot corpus reads `/root/jdk26u`.
+- `bin/repr-cpp host check` (99 KB of header digests, `test/cpp/host/`) and `pins check`.
+- On `cpp-cx10`: the host `:cxx` (`gate_cxx_id`) and `bin/gate --pins` running both of those checks.
+
+| level | check | corpus (files) | record | cost | where |
+|---|---|---|---|---|---|
+| read | `repr-cpp pp-check` (tokens against g++ -E and clang) | cpp-lexical 19, gxx-dg every 10th 1,807, libstdcxx-headers every 8th 108 | `pp-check-results.edn` (cx10: 1,903 pass, 30 known), `pp-check-known.edn` | 2 + 52 + 62 s warm; 15 + 507 + 407 s cold | CX10, CX2.3 |
+| read | `repr-cpp dg` (DejaGnu error tests against g++'s errors, through clang) | dg-error 4,597, preprocess 71, modules 1,181 | `check-dg-linux-amd64.edn` (3,359 of 4,566 pass, the rest in 9 classes) | dg-error about 6 min, preprocess under 30 s, modules about 3 min (*est.*, CX9.4) | cpp-cx9 |
+| read | `repr-cpp native-check LIST WORK` (CX11: clang's AST without the oracle) | samples 9, gxx-a 62, gxx-b 163 | `native-known.edn` | 977 files in 101 s | cpp-native |
+| eval | `cppi lower-check` (lowered C on gcc, against the original's run) | samples+runtime 16, libstdcxx every 15th 234 | `lower-results.edn` (map), `controls.edn` | samples 36-40 s; the 15th about 16 min at 4 jobs; `runtime-build` 4-5 min when stale | CX7 |
+| eval | `cppi check` (on ci, against g++ -O0) | samples, runtime, libstdcxx 3,504, gxx-dg-run about 1,680 | `check-linux-amd64.edn` (14 rows: 10 pass, 4 classed) | 15-60 s a program (ci's build 59 s a libstdcxx program); libstdcxx whole about 23 h at 3 threads | cpp-cx8 |
+| AOT | `cppi check --aot` (cf2g) | the same | `check-aot-linux-amd64.edn` (14 rows) | 30-60 s more a program | cpp-cx8 |
+| print | `repr-cpp roundtrip-corpus KEY` (forms, `:full` bytes, g++ and clang objects) | gxx-dg every 10th, old-deja every 10th, c-c++-common every 10th, libstdcxx-testsuite every 40th, samples | `roundtrip-results/` (2 lists recorded, 2 pending) | 8 min; 33 s; a few minutes each (*est.*); 35 s | CP124, CX10 |
+| (tests) | `cppi selftest` | 25 shell tests | | unmeasured | |
+
+**Tiers.**
+- Essential: cx10's chain, measured at 9 s + 21 s + 35 s + 27 s, about 1.5 min warm (6 min when the lowered runtime is
+  stale). Proposed additions: `native-check samples` (*est.* 10 s), and at CX8's merge three programs on ci and one
+  compiled (*est.* 1 to 1.5 min warm). To stay near 2 minutes, the lowered runtime moves out of the check's wall into
+  a keyed build step, `cpp-runtime` (GTS215).
+- Nightly, *est.* 24 min against 24.3:
+  - selftest: 2 min
+  - tokens, the samplings whole (warm): 2 min
+  - dg-error: subset and a seventh, 3 min
+  - preprocess and modules: 3.5 min
+  - round trip: subset and a seventh, 4 min
+  - lowering: subset and a seventh, 4 min
+  - ci check: subset and a seventh, 4 min
+  - AOT subset: 1 min
+  - native-check: 0.5 min
+- Clean, *est.* 55 min against 97, the rotated parts at their subsets (GTS204 (a)):
+  - the subsets of dg, the round trip, the lowering, ci and AOT, with selftest, native-check, preprocess and modules:
+    about 30 min
+  - the token oracle cold: 15.5 min (2 with GTS217 (a))
+  - the lowered runtime: 4.5 min
+  - ci's builds cold: *est.* 5 min
+
+**Needs first.**
+- A rebase onto GT8's planner (GTS213).
+- CP181 (a), as decided: `--only` and one-row-a-line records for `roundtrip-corpus`, `lower-corpus`, `dg` and
+  `cppi check`.
+- Subsets (`:subset-tokens`, `-dg`, `-roundtrip`, `-lower`, `-run`, `-aot`) by GTS205 (a)'s rule. The lowering is
+  evaluated Arbace code, so its coverage waits for CP180's embedding; ci's blocks are already covered by the cover build
+  (GTS214).
+- A negative control for the round trip, dg (CP214) and native-check (GTS218).
+- CX8's and CX9's merge.
+
+**Gaps.**
+- Eval and AOT have only 14 recorded programs, and no subset or essential list.
+- dg has no control and no subset.
+- The round trip's two pending lists (c-c++-common, libstdcxx 40th), the samples and HotSpot are unrecorded.
+- selftest is unmeasured.
+
+#### LLVM IR, the +1 (`bin/repr-llvm`; doc/llvm/LLVM-CROP-SURVEY.md, LL1-LL9 after the tag; branch `llvm-read`)
+
+**Hosts.** The llvm23 tools at `/usr/lib/llvm23/bin` (`llvm-as`, `opt`, `lli`, `FileCheck`). They are not hashed by
+any host identity and not pinned beyond the clang apk; `REPR_LLVM_AS` names `llvm-as`. The llvm-project 23.1.4
+tarball is not on disk.
+
+| level | check | corpus | record | cost | where |
+|---|---|---|---|---|---|
+| read, print | `repr-llvm roundtrip LIST WORK`: forms, print, forms again, `clang -c` objects equal; on `llvm-read`, also llvm-as's bitcode and the objects for the module's own triple | C++'s IR: the lowered runtime's 198 units (38 MB, `test/cpp/runtime/ir.sha256`), the libstdcxx 15th; the probes: 450 torture modules at -O2 | none (no `test/llvm/`) | 450 modules in 44 s at 4 threads; 449 of 450 | the survey's P5 |
+| eval, AOT | none (llvmi is LL4-LL6) | | | | |
+
+**Tiers** (LLS17's half share).
+- Interim, until LL1:
+  - Essential, *est.* 20 s: the round trip of a dozen of the runtime's units.
+  - Nightly, *est.* 2 min: the 198 units and the libstdcxx 15th's IR.
+  - Clean: the same, with the torture probes.
+- Later, the survey's §11.2: essential 30 s (synthetic modules and three llvmi programs); nightly 16 min (`llvm/test`'s
+  coverage subset and a seventh: the whole is about 40,000 modules, *est.* 67 min); clean 65 min.
+
+**Needs first.**
+- A `:llvm` host (the tools' versions and digests).
+- `test/llvm/corpora.edn` (LL1).
+- A record of one row a line, `--only`, and a control.
+
+**Gaps.** Eval and AOT. Records of any kind.
+
+#### OCaml (`bin/repr-ocaml`, `bin/oi`; doc/ocaml/OCAML-SURVEY.md; branches `ocaml-o8`, `ocaml-native`)
+
+**Hosts and corpora.**
+- `ocamlc` and `ocamlopt` 5.5.0 (Alpine's `ocaml5`, `ocaml5-compiler-libs`), pinned by `tools/ocdump/OCAML_VERSION`.
+- The `:ocaml` host is on o8 only.
+- Corpora: 16, 3,162 files, fetched per checkout into `.tmp/repr-ocaml`. OC164 proposes sharing them (GTS212).
+
+| level | check | corpus | record | cost | where |
+|---|---|---|---|---|---|
+| read, print | `repr-ocaml roundtrip --cmi --corpus P` | 7 parts, 3,162 files | `read-results.edn` (3,082 pass, 80 by design), `print-results.edn` (3,080 pass, 2 deferred), `roundtrip-known`, `full-known`, `floors.tsv` | 12.4 min whole (the `.cmi` level 1-4 min a corpus) | o8 |
+| read | `repr-ocaml dumps`, `samples` (typed and Lambda dumps) | | `dumps-known.edn` | 3.3 min | o8 |
+| read | `repr-ocaml native-check [--list FILE]`, `menhir --check` | samples, stdlib 150, compiler sources 248 | none | menhir 2.5 s; stdlib 48 s, compiler sources 118 s; the testsuite (1,862), whiml and opam not run | ocaml-native |
+| eval | `oi check`, `oi suite check`, `suite rollup` | run corpus 556 rows, suite 108 | `check-oi.edn` (273 pass, the rest classed), `check-suite-oi.edn` | 6m37s-7 min at 3 jobs; 2m53s; 23 s | o8 |
+| AOT (light: o2j's Java forms interpreted) | `oi check --aot`, `oi suite check --aot` | the same | `check-aot.edn` (251 pass, 21 slow, 37 classed), `check-suite-aot.edn` | 75 min whole at 2 processes; 30 min; subsets 79 s (28 programs) and 226 s (14) | o8 |
+| (tests) | `oi judges-test`, with `suite expect` | | `ref-expect.edn` | 9.5 min (expect about 3 of it) | o8 |
+
+**Tiers.**
+- Essential: o8's two chains, measured. `oi-essential` takes 8 + 2 + 69 s, then `oi-divergences` 2 s; beside it,
+  `ocaml-read-essential` takes 65 s; about 82 s of wall. Proposed addition: `menhir --check` and
+  `native-check samples` (*est.* 10 s, OC171).
+- Nightly. o8's own estimate is about 55 min against 35. Proposed, *est.* 35 min against 32.4 (over by 3, the judges'
+  tests the margin):
+  - round trip: the `.cmi` level on stdlib and samples only, whole in the clean run; 7 min
+  - dumps: 3.3 min
+  - `oi check` rotated (OC166) and suite whole: 5.5 min
+  - `oi-aot` subset and a seventh at 4 processes, *est.* about half of the 2-process time (GTS216): 6 min
+  - `oi-suite-aot` the same: 4 min
+  - native-check (stdlib and compiler sources): 3 min
+  - judges-test without `suite expect`, which moves to the clean run's `:clean-only` part: 6.5 min when its inputs
+    change
+- Clean, *est.* 55 min against 130: o8's 40 min with the subsets, plus the `.cmi` rest and `suite expect` as
+  `:clean-only` parts (*est.* 8), plus the fetch and ocdump's build (*est.* 5). Whole, about 140 min.
+
+**Needs first.**
+- A rebase. OC161's `:prefix` is superseded by main's `:id-re`: the default already allows the leading space, and one
+  group puts every id in the part.
+- Coverage subsets (OC162). oi's driver is a Go program, so `go build -cover` reaches it today (GTS214). o2j and
+  repr/ocaml are evaluated.
+- OCaml's pins in `bin/gate --pins` (OC164).
+- A read and print control (GATE-SURVEY.md's line 2812 marks them missing).
+
+**Gaps.**
+- The compiled AOT level, O9, is not built. The AOT cell is the light level.
+- The native reader has no record, no step and no control.
+- `pins-attested.tsv` may be stale.
+
+#### Scheme (`bin/repr-scheme`, `bin/si`; doc/scheme/SCHEME-SURVEY.md; branch `scheme-sm9`)
+
+**Hosts and corpora.**
+- Chez 10.3.0 (Alpine's `chez-scheme-10.3.0-r2`) and Chibi 0.12.0 (`chibi-scheme-0.12-r0`). The hosts `:chez` and
+  `:chibi` are on sm9.
+- The corpora live in `.tmp/scheme/corpora` (13 MB), each file pinned by SHA-256 in `test/scheme/corpora.edn`.
+- whimsical is read in place from `/root/go-whim` at `80c49bf5`, checked by its tree's hash. `bin/gate --pins` does
+  not check it.
+
+| level | check | corpus | record | cost | where |
+|---|---|---|---|---|---|
+| read | `repr-scheme check --corpus C` (against live Chez) | 1,364 files and probes, 7 Unicode scans | `check-read-results.edn` (1,371 rows, all pass) | 108 s whole | SM9 |
+| eval | `si check`, `test`, `fixpoint`, `check-suite`, `vendor verify`, `boot --check` | 48 R6RS programs, the expander's checks | `check-linux-amd64.edn` | 108 + 54 + 50 + 105 + 1 + 43 s | SM9 |
+| eval | `si r7rs`, `r7rs --chibi-test`, `chibi-tests`, `srfi`, `corpora` | Chibi's suite 1,225 tests, SRFIs 11 programs | `check-r7rs-*`, `check-srfi-*`, `check-chibi-tests-*` | about 49 s | SM9 |
+| eval | `si ecraven`, `si mats` | 58 benchmarks; Chez's mats, 37 files | `check-ecraven-*`, `check-mats-*` | about 33 min and 6m36s whole | SM9 |
+| AOT | `si check --aot`, `si srfi --aot` | 45 programs | `check-aot-linux-amd64.edn` | 164 + 88 s | SM9 |
+| print | `repr-scheme roundtrip --corpus C` | 1,364 | `roundtrip-results.edn` | 97 s (whimsical 70 s) | SM9 |
+
+**Tiers.**
+- Essential: measured. 66 s + 35 s in one chain and 41 s in the other, about 1.7 min of wall.
+- Nightly: SM9's estimate is 23 min against 32.4, ecraven and mats rotated.
+- Clean: *est.* 30 min against 130. Whole, about 55 min (*est.*: SM9's whole runs were planned, not made).
+
+**Needs first.**
+- A rebase. SC233's `record-ids` extension is superseded by `:id-re "^\\{:id \"([^\"]+)\""`.
+- SC234: Chez's boot files and Chibi's version in `--pins`, with whimsical's tree.
+- SC235: one file a class in the mats subset.
+- Coverage subsets by GTS205 at GT8's coverage round (SC231 (b)).
+
+**Gaps.** No control for read, print, ecraven or mats. The subsets were chosen by time, not by coverage.
+
+#### Haskell (`bin/repr-haskell`; hsi on `haskell-he4d`; doc/haskell/HASKELL-NOTES.md, HASKELL-EVAL-SURVEY.md; branch `haskell-native`)
+
+**Hosts and corpora.**
+- GHC 9.14.1 (Alpine's `ghc-9.14.1-r2`), pinned by `tools/hsdump/GHC_VERSION`. The helper `.tmp/hsdump/hsdump` is
+  79 MB; its build time is unrecorded.
+- The corpus is the source tarball (34 MB, its SHA-256 in `corpus-ghc-9.14.1.edn`).
+- On he4d, the testsuite tarball (8.1 MB) and nofib at `d4750745`.
+- No host identity; no pins check in `--pins`.
+
+| level | check | corpus | record | cost | where |
+|---|---|---|---|---|---|
+| read, print | `repr-haskell roundtrip` (trees and lines), `--layout-only`, `--iface`, `--text` | 1,345 modules | known files only (`{}` but `--text`'s 14 entries); no results file | 65 s, 19-25 s, 254 s, 141 s (616 s through the heavy slot) | HASKELL-NOTES, HR26-HR28 |
+| (tests) | `repr-haskell test` | 9 steps | | 15-37 s | R1, R5 |
+| read | `repr-haskell native-check [LIST]`, `tables --check` | `native-check.txt` 54 modules | none | 21 s with the helper (7.6 s native); 3.7 s | haskell-native |
+| eval | `hsi check [--only @FILE]` | samples 18, synthetic 37, testsuite-core 701 | `check-hsi.edn` (650 of 756 pass, 94 classes), `hsi-controls.txt` (4 pairs) | 2m19s at 8 jobs; 4m35-55s at 3; essential (123) 10 s warm; peaks 7.3 and 9.7 GB on two programs | haskell-he4d |
+| AOT | none (HE8) | | | | |
+
+**Tiers.**
+- Essential, *est.* 1.2 min: `test`, native-check and `tables --check` (measured separately: 37 + 21 + 4 s), plus hsi's
+  essential list after he4d's merge (10 s warm, the two big-memory programs left out).
+- Nightly, *est.* 21 min against 32.4. The four round-trip levels whole take 10 min; nothing needs rotating. The rest:
+  native-check over the corpus (*est.* 3-7 min, from 0.1-0.3 s a module), hsi whole (5 min).
+- Clean, *est.* 50 min against 130. The same, plus cold costs: hsdump's build (*est.* 10 min), the STG dumps
+  (about 4 min for the boot libraries, measured; 10-15 min for all 41 packages, *est.*) and the fetches.
+
+**Needs first.**
+- A `:ghc` host: `ghc --version`, the libdir and the ghc library's unit id, already in `.tmp/hsdump/key`.
+- The tarballs' pins in `--pins`.
+- Results files written by the whole runs, so that `bin/reap` can judge a row (GTS219).
+- A read and print control.
+- he4d's merge.
+- `--only FILE`: today there is `--only REGEX` on the tree and text levels, and none on `--iface` (GTS223).
+
+**Gaps.** AOT. The REAP row. The two whole-corpus native checks. A coverage subset for hsi: go/arbace/hs is a Go
+program, so the cover method reaches it.
+
+#### Rust (`bin/repr-rust`; rsi on `rust-re4`; doc/rust/RUST-NOTES.md, RUST-EVAL-SURVEY.md; branch `rust-native`)
+
+**Hosts and corpora.**
+- rustc 1.99.1 (Alpine's), pinned by `tools/rsdump/RUSTC_VERSION`. rustc-dev and rust-src are fetched apks, pinned by
+  `tools/rsdump/apks.sha256`.
+- The UI tarball, pinned in its corpus file. The 402 crates, pinned by `crates-2026-10-18.sha256`.
+- rsi also needs clang 23.1.4 and gcc.
+- No host identity; no pins in `--pins`.
+
+| level | check | corpus | record | cost | where |
+|---|---|---|---|---|---|
+| read, print | `repr-rust roundtrip [--text] [--pretty] CORPUS` | std 1,074, library 1,902, compiler 2,167, crates 8,254, UI about 19,948 | known files a corpus and level (13,396 of 13,397; UI 19,939 of 19,942) | all levels of the four syntax corpora 52 min at 32 jobs; std 3 levels 3 min; UI 70 + 25 + 95 s | RR1, RR4, RR5 |
+| read | `roundtrip --iface` (rustdoc's JSON) | 512 crates | 511 of 512 | crate set 74 s beyond the tree level; the rest in the 52 min | RR4 |
+| (tests) | `repr-rust test` | 10 cases | | 58 s | 2026-11-03 |
+| read | `repr-rust native-check [FILE...]` | `native-check.txt` 68 files | none | 45 s (53 s `--full`) | rust-native |
+| eval (the round trip's behaviour) | `roundtrip --run`, `--std`, `--code` | UI's 3,718 run-pass programs; std, library, compiler | known files a level | `--run` 127 s; `--std` 48 + 67 s; `--code` std 140 s, library 144 s, compiler 374 s, UI 100 s | RR5, RR6 |
+| eval (Arbace runs) | `rsi check` (rustc's IR lowered, on ci) | 5 samples; UI every 40th 93 | `check-linux-amd64.edn` (5 rows), `controls.edn` (1) | ci build about 13 s a program warm; std's read for ci 100 min wall, 340 CPU-min, 7 GiB; whole UI about 5.5 h at 3 threads | rust-re4 |
+| AOT | `rsi check --aot` | `panics.rs` | | 1,088 s for one program | rust-re4 |
+
+**Tiers.**
+- Essential, *est.* 1.5 min:
+  - `test`, trimmed to its sample cases per RUST-EVAL-SURVEY §10.2: *est.* 30 s
+  - native-check over the 8 samples: *est.* 10 s
+  - after re4's merge, three programs from recorded IR on ci: *est.* 45 s
+- Nightly, *est.* 24 min against 24.3:
+  - std, all three levels: 3 min
+  - UI, tree and text: 3 min
+  - library, compiler and crates rotated (the subset and a seventh of their 23 min): 5 min
+  - `--iface` for std: 1 min
+  - `--run`, `--std`, `--code std`: 6.5 min
+  - native-check: 1 min
+  - rsi's subset and a seventh: 4.5 min
+- Clean, *est.* 170 min against 97 until the lowering is compiled:
+  - the subsets and the rotation's record: about 40 min (round trips 10, `--iface`'s `:clean-only` crates 6, the
+    behaviour levels with `--code` on library and compiler 18, native-check and rsi 6)
+  - AOT on one program, `:clean-only`: 18 min
+  - rsdump's build: *est.* 10 min
+  - std's read for ci, cold: 100 min (Arbace's own product, so GTS217 (a) builds it fresh)
+
+  CP180 and LLS16's embedding of repr/llvm and the lowering is the remedy: *est.* 75 min after, assuming the compiled
+  lowering is 5 to 10 times the evaluated one (unmeasured). AOT stays in the clean run alone until RES34's per-unit
+  translation.
+
+**Needs first.**
+- A `:rustc` host: rustc's `--version -v` and `librustc_driver`'s digest.
+- The pins in `--pins`.
+- `--only FILE` and a judge for partial runs. Today the known files are whole-corpus: an absent listed entry fails
+  (GTS223).
+- Results files (GTS219).
+- re4's merge, then the whole UI record on ci (5.5 h, one night under the heavy lock).
+- GTS217 for std's IR.
+
+**Gaps.**
+- AOT, which costs 18 min a program.
+- The REAP row.
+- Read and print have no control (only `test` has a built-in negative).
+- The native reader's corpus-wide check.
+
+#### Python (`bin/repr-python`, `bin/pyi`; doc/python/; the Mac VM's branches)
+
+**Hosts and corpora.**
+- python3 3.14.10 (Alpine's `python3-3.14.10-r1`), pinned by `tools/pydump/PYTHON_VERSION` with the apk's checksum.
+- The tarball (24 MB), 20 site-packages apks and pyperformance 1.14.0, in `.tmp/repr-python`.
+- `bin/repr-python pins --check` exists. No host identity.
+- **Every cost below was measured on the Mac VM (aarch64, 8 CPUs, loaded). None was measured on this host.**
+
+| level | check | corpus | record | cost (VM) | where |
+|---|---|---|---|---|---|
+| read | `repr-python roundtrip [CORPUS...]` (forms, ast.dump, code) | samples 6, stdlib 720, site-packages 921, lib-test 1,153 | `roundtrip-known.edn`, `roundtrip-costs.edn` | about 4.5 min at 2 jobs | main |
+| read | `pyi scope-check`, `compile-check [--full]` | 2,980 files | `scope-known`, `compile-known` (empty) | unmeasured | main |
+| read | `repr-python lex-check`, `parse-check [--full]` (PY9: pegen) | the same, plus 3,846 mutants | `lex-check-known`, `parse-check-known` | 6.5 min; 11.5-13 min | mac/199-python-py9 |
+| eval | `pyi gen --check`, `record-ref --check`, `runtime check` | synthetic 145, samples, pyi's 14-45 programs | `ref-cpython314.edn` | 7.7 s (record-ref); runtime check unmeasured (pyi on goi) | main |
+| eval | `pyi lib-test [--aot] [MODULE...]` | language-core 11 modules, stdlib-tests 72, asyncio 35 | `lib-test-known.edn` (py6a, py6core: 10,677 methods, 7,334 equal, 0 failing) | 57 modules about 140 min at 4 jobs; asyncio `--aot` 20 min | mac/200-python-py6core |
+| eval | `pyi lib-test-all` | regrtest's 538 modules, 34,195 methods | `ref-cpython314-lib-test-all.edn` (8,179 failing, unclassed) | 2h50 at 2 jobs | mac/200-python-py6i |
+| AOT | `pyi check --aot [--no-pyi] [--only ID]` | 151 programs | `divergences-aot.edn` (123 pass, 28 classed); `check-aot-linux-ARCH.edn` not committed | 17 min with pyi on goi, about 1 min `--no-pyi` | mac/198-python-py8 |
+| print | `repr-python roundtrip --text` (`:full` bytes, marshal) | the same as read | `full-known.edn` | about 8.5 min | main |
+| (speed) | `pyi bench` | pyperformance's 71 | `bench-aot-linux-arm64.edn` | about 7 min | py8 |
+
+**Tiers** (*est.*, scaled 1:1 from the VM pending GTS222's amd64 measure).
+- Essential, *est.* 1.5 min:
+  - spec-check, samples, the round trip and `--text` on samples
+  - `gen --check`
+  - scope-check and compile-check on samples, synthetic and errors
+  - `check --aot --no-pyi` on a subset of 20
+- Nightly, *est.* 30 min against 32.4:
+  - round trips (both modes): subset and a seventh, 3 min
+  - scope-check and compile-check: 5 min
+  - lex-check and parse-check: subset and a seventh, 4 min (the mutants in the clean run)
+  - lib-test on the compiled driver (`--aot`), module subset and a seventh: 15 min
+  - `check --aot --no-pyi`, whole: 1 min
+  - runtime check: 2 min
+- Clean, *est.* 60 min against 130:
+  - the subsets: 30 min
+  - the `:clean-only` parts: `check --aot` with pyi on goi (17) and the bench (7)
+  - the fetches and pydump: 5 min
+
+  `lib-test-all` (2h50) is covered by the rotation's record.
+
+**Needs first.**
+- PY6, PY8 and PY9 merged from the Mac.
+- PY7, the coverage subset. The survey designs it: pyi on goi is invisible to `go build -cover`, so the subset needs
+  goi's own counters or the compiled driver built with `-cover` (GTS214).
+- PY10: the row, `cells.edn`'s `:python`, and the steps.
+- A `:python` host; the pins in `--pins`; amd64's measures.
+
+**Gaps.**
+- No `--only FILE` anywhere but `check --aot --only ID`.
+- No subsets.
+- `lib-test-all` has 8,179 unclassed failures.
+- No control for the round trips or for scope-check and compile-check.
+- AOT is recorded only on arm64.
+
+### GT9.3 What every crop needs first
+
+1. **The rebase onto GT8's planner** (GTS213). `cpp-cx10`, `scheme-sm9` and `ocaml-o8` predate `:id-re`, `:subset-key`,
+   `:always`, `:crops` and `--costs`. Each adds its own printf line to `plan_inputs`' `hosts.edn` (`:cxx`, `:chez`
+   and `:chibi`, `:ocaml`), so the three merges conflict on one line. `test/gate/costs.ae` knows only
+   `#{:clojure :java :go :c :shared}`, and `--costs` fails on a step in no crop.
+2. **The hosts** (GTS210): `:cxx`, `:llvm`, `:ocaml`, `:chez`, `:chibi`, `:ghc`, `:rustc` and `:python`.
+3. **The pins** (GTS211) and **the corpora's place** (GTS212). Every crop fetches outside the checkout: C++'s gcc
+   tarball and `/root/jdk26u`; OCaml's tarball and opam; Scheme's files and go-whim; GHC's tarballs and nofib; Rust's
+   apks, crates and UI tarball; CPython's tarball, apks and pyperformance. Only C's pins are in `bin/gate --pins`.
+4. **Lists and partial judges** (GTS223). Every corpus check must take `--only FILE`, with a judge that leaves out the
+   rows a partial run did not run. Today only C, C++'s `pp-check` (cx10), OCaml's `--only-list` (o8), Scheme's three
+   (sm9), Haskell's native-check and Python's `check --aot` (one id) have one.
+5. **Coverage subsets** (GTS214). The cover build reaches compiled Go: the crops' Go runtimes as light drivers (oi,
+   si's scm, hsi's hs, ci for C++ and Rust), but not their evaluated Arbace namespaces, nor pyi on goi.
+6. **Controls** (GTS218). Every read and print family but Python's native reader and C++'s lowering lacks one.
+7. **Results files** (GTS219). Haskell's, Rust's and Python's read and print levels have only known files.
+
+### GT9.4 The proposed steps (not applied to `test/gate/steps.edn`)
+
+A verb or option marked `NEW` is not built. A branch-proposed entry is kept as written there, with GT9's changes
+marked. The `:summary` patterns are the branches' where they exist, else *proposed*.
+
+```clojure
+;; ---- groups (beside :c's)
+:cpp ["bin/repr-cpp" "bin/lib/repr-cpp/" "bin/cppi" "arbace/repr/cpp.ae" "arbace/repr/cpp/" "arbace/repr/llvm.ae" "arbace/repr/llvm/"
+      "arbace/cpp/" "tools/cxxdump/" "test/cpp/" "test/repr/cpp/"]                                      ; cpp-cx10's
+:llvm ["bin/repr-llvm" "arbace/repr/llvm.ae" "arbace/repr/llvm/" "test/cpp/runtime/" "test/llvm/"]   ; test/llvm/ at LL1 (NEW)
+:scheme ["bin/si" "bin/repr-scheme" "arbace/repr/scheme.ae" "arbace/repr/scheme/" "arbace/scheme/" "scheme/" "test/scheme/"
+         "tools/schemedump/" "tools/psyntax/"]                                                           ; scheme-sm9's
+:scheme-run ["go/arbace/scm.ae" "go/arbace/scm/" "bin/build-go" "bin/lib/build-go/"]
+:ocaml ["bin/oi" "bin/lib/oi/" "bin/repr-ocaml" "bin/lib/limit.bash" "arbace/repr/ocaml.ae" "arbace/repr/ocaml/" "tools/ocdump/"
+        "test/ocaml/"]                                                                                   ; ocaml-o8's
+:ocaml-run ["go/arbace/oi.ae" "go/arbace/oi/" "bin/repr-go" "bin/lib/repr-go-host.bash" "bin/lib/repr-go/"]
+:ocaml-aot ["jdk/ocaml/"]
+:haskell ["bin/repr-haskell" "bin/lib/repr-haskell/" "arbace/repr/haskell.ae" "arbace/repr/haskell/" "tools/hsdump/" "test/haskell/"]
+:hsi ["bin/hsi" "bin/lib/hsi/" "go/arbace/hs.ae" "go/arbace/hs/" "go/arbace/libm.ae" "go/arbace/libm/"]  ; at haskell-he4d's merge
+:rust ["bin/repr-rust" "bin/lib/repr-rust/" "arbace/repr/rust.ae" "arbace/repr/rust/" "tools/rsdump/" "test/rust/"]
+:rsi ["bin/rsi" "bin/lib/rsi/" "arbace/rust/" :cpp]          ; at rust-re4's merge; the shared lowering (arbace/cpp/lower.ae) reruns both
+:python ["bin/repr-python" "arbace/repr/python.ae" "arbace/repr/python/" "tools/pydump/" "test/python/"]
+:pyi ["bin/pyi" "arbace/python.ae" "arbace/python/" "go/arbace/py.ae" "go/arbace/py/" :goi]
+
+;; ---- the essential tier: one or two light chains a crop (GTS215: <= 2 min warm, <= 4 threads, <= 3 GiB, no lock)
+;; reap gains the rows' records: "test/cpp/*.edn" "test/ocaml/*.edn" "test/scheme/*.edn" "test/haskell/*.edn" "test/rust/*.edn"
+;; "test/python/*.edn" "test/llvm/*.edn", :summary ["^\\| (Clojure|Java|Go|C|C\\+\\+|LLVM IR|OCaml|Scheme|Haskell|Rust|Python) \\||^reap: [0-9]+ of" 12]
+{:name cpp-runtime :phase :build :kind :build :mem-gib 3            ; GT9: out of cpp-lower-essential's wall (4-5 min when stale)
+ :cmd "bin/cppi runtime-build && bin/cppi runtime-ci"}            ; runtime-ci at cpp-cx8's merge
+{:name cpp-read-essential :mem-gib 2 :phase :essential :chain cpp-essential
+ :cmd "bin/repr-cpp pp-check --essential && bin/repr-cpp native-check samples .tmp/gate/cpp-native"   ; native-check: cpp-native's
+ :hosts [:stage0 :cxx] :never-loads [arbace.j2g] :pins ["test/cpp/corpora.edn"] :inputs [:lib-tools :tools :cpp]
+ :summary ["^(cpp-lexical|gxx-dg|libstdcxx-headers): [0-9]+ files,|failing|stale|native" 5]}
+{:name cpp-print-essential :mem-gib 2 :phase :essential :chain cpp-essential :needs [cpp-read-essential]
+ :cmd "bin/repr-cpp roundtrip-corpus gxx-dg-essential && bin/repr-cpp roundtrip-corpus samples"
+ :hosts [:stage0 :go :cxx] :never-loads [arbace.j2g] :pins ["test/cpp/corpora.edn"] :inputs [:lib-tools :tools :cpp]
+ :summary ["^\\{:files|failing|^rtcheck: the run" 4]}
+{:name cpp-lower-essential :mem-gib 3 :phase :essential :chain cpp-essential :needs [cpp-print-essential cpp-runtime]
+ :cmd "bin/cppi lower-essential"
+ :hosts [:stage0 :cxx :gcc] :never-loads [arbace.j2g] :pins ["test/cpp/corpora.edn"] :inputs [:lib-tools :tools :cpp]
+ :summary ["^lower-check|pass|failing|FAIL" 4]}
+{:name cpp-check-essential :mem-gib 3 :phase :essential :chain cpp-essential :needs [cpp-lower-essential]   ; at cpp-cx8's merge
+ :cmd "bin/cppi check --only test/cpp/essential-check.txt && bin/cppi check --aot --only test/cpp/essential-aot.txt"  ; NEW lists
+ :hosts [:stage0 :go :cxx :gcc] :never-loads [arbace.j2g] :pins ["test/cpp/corpora.edn"] :inputs [:lib-tools :tools :cpp :c-run]
+ :summary ["programs|pass|FAIL|control" 4]}
+{:name llvm-essential :mem-gib 2 :phase :essential :chain llvm-essential :needs [cpp-runtime]
+ :cmd "bin/repr-llvm roundtrip test/llvm/essential.txt .tmp/gate/llvm-essential"     ; NEW list: a dozen runtime units (interim)
+ :hosts [:stage0 :cxx :llvm] :never-loads [arbace.j2g] :inputs [:lib-tools :tools :llvm]
+ :summary ["same|differ|FAIL" 3]}
+{:name oi-essential :mem-gib 2 :phase :essential :chain oi-essential                  ; ocaml-o8's
+ :cmd "bin/oi test && bin/oi repl-check && bin/oi check --only-list test/ocaml/essential-check.txt"
+ :hosts [:stage0 :go :ocaml] :never-loads [arbace.j2g] :pins ["test/ocaml/corpora.edn"] :inputs [:lib-base :lib-tools :tools :ocaml :ocaml-run]
+ :summary ["^ok|repl-check|programs:|failing|FAILING|control" 6]}
+{:name oi-divergences :mem-gib 1 :phase :essential :chain oi-essential :needs [oi-essential]
+ :cmd "bin/oi divergences && bin/oi divergences --aot && bin/oi suite divergences && bin/oi suite divergences --aot"
+ :hosts [:stage0] :never-loads [arbace.j2g] :inputs [:lib-base :ocaml] :summary ["pass, [0-9]+ failing|^oi: pins: [0-9]|FAILING" 6]}
+{:name ocaml-read-essential :mem-gib 2 :phase :essential :chain ocaml-read-essential
+ :cmd "bin/repr-ocaml roundtrip --cmi samples stdlib && bin/repr-ocaml roundtrip --spec && bin/repr-ocaml spec-check && bin/repr-ocaml embed-check && bin/repr-ocaml menhir --check && bin/repr-ocaml native-check samples"
+ ;; GT9: corpus check moves to bin/gate --pins (GTS211); menhir and native-check: ocaml-native's (OC171)
+ :hosts [:stage0 :ocaml] :never-loads [arbace.j2g] :pins ["test/ocaml/corpora.edn"]
+ :inputs [:lib-base :lib-tools :tools :ocaml "arbace/j2g/embed.ae" "bin/lib/version.bash"]
+ :summary ["^compare: |^full: |cmi: |spec|embed|menhir|native|FAIL|DIFF|GONE" 10]}
+{:name si-essential :mem-gib 2 :phase :essential :chain scheme-essential               ; scheme-sm9's
+ :cmd "bin/si unit && bin/si test --si && bin/si check --only test/scheme/essential-check.txt && bin/si r7rs && bin/si srfi"
+ :hosts [:stage0 :go] :never-loads [arbace.j2g] :pins ["test/scheme/corpora.edn"] :inputs [:lib-tools :tools :scheme :scheme-run]
+ :summary ["^ok|programs pass|^r7rs:|^srfi:|regressions:|FAILING|control passed|control not" 8]}
+{:name si-aot-essential :mem-gib 2 :phase :essential :chain scheme-essential :needs [si-essential]
+ :cmd "bin/si check --aot --only test/scheme/essential-aot.txt"
+ :hosts [:stage0 :go] :never-loads [arbace.j2g] :pins ["test/scheme/corpora.edn"] :inputs [:lib-tools :tools :scheme :scheme-run]
+ :summary ["programs pass|programs: the compiled|regressions:|FAILING|control passed|control not" 6]}
+{:name scheme-read-essential :mem-gib 2 :phase :essential :chain scheme-read-essential
+ :cmd "set -f; c='--corpus probes --corpus racket-r6rs --corpus larceny-r6rs --corpus chibi-r7rs --corpus srfi-*'; bin/repr-scheme check $c && bin/repr-scheme roundtrip $c && bin/repr-scheme spec-check && bin/si corpora files"
+ :hosts [:stage0 :chez] :never-loads [arbace.j2g] :pins ["test/scheme/corpora.edn"] :inputs [:lib-tools :tools :scheme]
+ :summary ["^files and probes|^roundtrip:|^spec examples|files; |UNLISTED|GONE|SCAN|FAIL" 6]}
+{:name haskell-read-essential :mem-gib 2 :phase :essential :chain haskell-essential
+ :cmd "bin/repr-haskell test && bin/repr-haskell tables --check && bin/repr-haskell native-check"   ; tables, native-check: haskell-native's
+ :hosts [:stage0 :ghc] :never-loads [arbace.j2g] :pins ["test/haskell/corpus-ghc-9.14.1.edn"] :inputs [:lib-tools :tools :haskell]
+ :summary ["ok|equal|differ|FAIL" 4]}                                                    ; proposed
+{:name hsi-essential :mem-gib 3 :phase :essential :chain haskell-essential :needs [haskell-read-essential]   ; at he4d's merge
+ :cmd "bin/hsi check --only @test/haskell/hsi/essential.txt"     ; the list less the programs above 3 GiB (Loop 7.3, T16846 9.7)
+ :hosts [:stage0 :go :ghc] :never-loads [arbace.j2g] :pins ["test/haskell/eval-corpora.edn"] :inputs [:lib-tools :tools :haskell :hsi]
+ :summary ["pass|fail|control|FAIL" 4]}
+{:name rust-read-essential :mem-gib 2 :phase :essential :chain rust-essential
+ :cmd "bin/repr-rust test --samples && bin/repr-rust native-check test/rust/sample/*.rs"   ; NEW --samples (RUST-EVAL-SURVEY §10.2)
+ :hosts [:stage0 :rustc] :never-loads [arbace.j2g] :pins ["test/rust/corpus-rustc-1.99.1.edn" "tools/rsdump/apks.sha256"]
+ :inputs [:lib-tools :tools :rust] :summary ["ok|equal|differ|FAIL" 4]}
+{:name rsi-essential :mem-gib 3 :phase :essential :chain rust-essential :needs [rust-read-essential cpp-runtime]   ; at re4's merge
+ :cmd "bin/rsi check --only test/rust/essential-check.txt"        ; NEW list: three programs from recorded IR on ci
+ :hosts [:stage0 :go :rustc :cxx :gcc] :never-loads [arbace.j2g] :inputs [:lib-tools :tools :rust :rsi :c-run]
+ :summary ["pass|fail|control|FAIL" 4]}
+{:name python-read-essential :mem-gib 2 :phase :essential :chain python-essential
+ :cmd "bin/repr-python spec-check && bin/repr-python samples && bin/repr-python roundtrip samples && bin/repr-python roundtrip --text samples && bin/pyi gen --check && bin/pyi scope-check samples synthetic errors && bin/pyi compile-check samples synthetic errors"
+ :hosts [:stage0 :python] :never-loads [arbace.j2g] :pins ["test/python/corpora.edn" "tools/pydump/PYTHON_VERSION"]
+ :inputs [:lib-tools :tools :python :pyi] :summary ["equal|differ|FAIL|known" 6]}
+{:name pyi-essential :mem-gib 2 :phase :essential :chain python-essential :needs [python-read-essential]   ; at py8's merge
+ :cmd "bin/pyi check --aot --no-pyi --only-list test/python/essential-aot.txt"           ; NEW --only-list and list (20 programs)
+ :hosts [:stage0 :go :python] :never-loads [arbace.j2g] :inputs [:lib-tools :tools :python :pyi]
+ :summary ["pass|classed|failing|control" 4]}
+
+;; ---- the full tier (nightly: :rotate'd parts as subset + a seventh; clean: subsets, :clean-only parts, the rotation's record)
+;; C++ (cpp-cx10's, then CX8/CX9/CX11's; CP181 (a): every list --only and one row a line)
+{:name cpp-selftest :mem-gib 3 :phase :full :chain cpp-full :cmd "bin/cppi selftest"
+ :hosts [:stage0 :go :cxx :gcc] :never-loads [arbace.j2g] :pins ["test/cpp/corpora.edn"] :inputs [:lib-tools :tools :cpp]
+ :summary ["tests?,|pass|fail|FAIL" 4]}
+{:name cpp-tokens :mem-gib 2 :phase :full :chain cpp-full :cmd "bin/repr-cpp pp-check --corpus {part}"
+ :hosts [:stage0 :cxx] :never-loads [arbace.j2g] :pins ["test/cpp/corpora.edn"] :inputs [:lib-tools :tools :cpp]
+ :parts [{:part cpp-lexical} {:part gxx-dg :cmd "bin/repr-cpp pp-check --corpus gxx-dg --sample 10"}
+         {:part libstdcxx-headers :cmd "bin/repr-cpp pp-check --corpus libstdcxx-headers --sample 8"}]
+ :summary ["^(cpp-lexical|gxx-dg|libstdcxx-headers): [0-9]+ files,|failing|stale" 4]
+ :rotate {:only "--only {list}" :universe "test/repr/cpp/pp-check-results.edn" :subset "test/cpp/corpora.edn" :subset-key :subset-tokens
+          :failed-re "^FAIL ([^[:cntrl:]]+)[[:cntrl:]].*$"}}                ; NEW: the judges print FAIL ID<TAB>WHY, as C's
+{:name cpp-dg :mem-gib 3 :phase :full :chain cpp-full :cmd "bin/repr-cpp dg --corpus {part}"    ; cpp-cx9's verb
+ :hosts [:stage0 :cxx] :never-loads [arbace.j2g] :pins ["test/cpp/corpora.edn"] :inputs [:lib-tools :tools :cpp]
+ :parts [{:part dg-error}]
+ :summary ["pass|class|FAIL|stale" 4]
+ :rotate {:only "--only {list}" :universe "test/cpp/check-dg-linux-amd64.edn" :id-re "^\\[\"([^\"]+)\"" :subset "test/cpp/corpora.edn"
+          :subset-key :subset-dg :always ["gxx-dg/CONTROL-SUBJECT.C" "gxx-dg/CONTROL-REF.C"]   ; NEW: CP214's control
+          :failed-re "^FAIL ([^[:cntrl:]]+)[[:cntrl:]].*$"}}
+{:name cpp-dg-other :mem-gib 3 :phase :full :chain cpp-full
+ :cmd "bin/repr-cpp dg --corpus preprocess && bin/repr-cpp dg --corpus modules"
+ :hosts [:stage0 :cxx] :never-loads [arbace.j2g] :pins ["test/cpp/corpora.edn"] :inputs [:lib-tools :tools :cpp]
+ :summary ["pass|class|FAIL|stale" 4]}
+{:name cpp-roundtrip :mem-gib 3 :phase :full :chain cpp-full :cmd "bin/repr-cpp roundtrip-corpus {part}"
+ :hosts [:stage0 :go :cxx] :never-loads [arbace.j2g] :pins ["test/cpp/corpora.edn"] :inputs [:lib-tools :tools :cpp]
+ :parts [{:part gxx-dg-every-10} {:part gxx-old-deja-every-10} {:part c-c++-common-every-10} {:part libstdcxx-testsuite-every-40}
+         {:part samples}]
+ :summary ["^\\{:files|failing|^rtcheck: the run|^roundtrip:" 4]
+ :rotate {:only "--only {list}" :universe "test/repr/cpp/roundtrip-results.edn" :subset "test/cpp/corpora.edn"   ; NEW: --only, one file of rows
+          :subset-key :subset-roundtrip :failed-re "^FAIL ([^[:cntrl:]]+)[[:cntrl:]].*$"}}
+{:name cpp-lower :mem-gib 3 :phase :full :chain cpp-full :needs [cpp-runtime] :cmd "bin/cppi lower-corpus {part}"
+ :hosts [:stage0 :cxx :gcc] :never-loads [arbace.j2g] :pins ["test/cpp/corpora.edn"] :inputs [:lib-tools :tools :cpp]
+ :parts [{:part samples} {:part libstdcxx-every-15th}]
+ :summary ["^lower-check|pass|failing|FAIL" 4]
+ :rotate {:only "--only {list}" :universe "test/cpp/lower-results.edn" :subset "test/cpp/corpora.edn" :subset-key :subset-lower   ; NEW
+          :always ["samples/bitfields.cpp" "samples/io.cpp"] :failed-re "^FAIL ([^[:cntrl:]]+)[[:cntrl:]].*$"}}
+{:name cpp-native :mem-gib 3 :phase :full :chain cpp-full :cmd "bin/repr-cpp native-check {part} .tmp/gate/cpp-native-{part}"
+ :hosts [:stage0 :cxx] :never-loads [arbace.j2g] :pins ["test/cpp/corpora.edn"] :inputs [:lib-tools :tools :cpp]
+ :parts [{:part gxx-a} {:part gxx-b}] :summary ["equal|differ|improve|FAIL" 4]}
+{:name cpp-check :mem-gib 3 :phase :full :chain cpp-full :needs [cpp-runtime] :cmd "bin/cppi check --corpus {part}"   ; cpp-cx8's
+ :hosts [:stage0 :go :cxx :gcc] :never-loads [arbace.j2g] :pins ["test/cpp/corpora.edn"] :inputs [:lib-tools :tools :cpp :c-run]
+ :parts [{:part samples} {:part runtime} {:part libstdcxx} {:part gxx-dg-run}]
+ :summary ["programs|pass|FAIL|control" 4]
+ :rotate {:only "--only {list}" :universe "test/cpp/check-linux-amd64.edn" :subset "test/cpp/corpora.edn" :subset-key :subset-run
+          :always ["samples/bitfields.cpp" "samples/io.cpp"] :failed-re "^FAIL ([^[:cntrl:]]+)[[:cntrl:]].*$"}}
+{:name cpp-aot :mem-gib 4 :phase :full :chain cpp-full :needs [cpp-check] :cmd "bin/cppi check --aot --corpus {part}"
+ :hosts [:stage0 :go :cxx :gcc] :never-loads [arbace.j2g] :pins ["test/cpp/corpora.edn"] :inputs [:lib-tools :tools :cpp :c-run]
+ :parts [{:part samples} {:part runtime} {:part libstdcxx} {:part gxx-dg-run}]
+ :summary ["programs|pass|FAIL|control" 4]
+ :rotate {:only "--only {list}" :universe "test/cpp/check-aot-linux-amd64.edn" :subset "test/cpp/corpora.edn" :subset-key :subset-aot
+          :always ["samples/bitfields.cpp" "samples/io.cpp"] :failed-re "^FAIL ([^[:cntrl:]]+)[[:cntrl:]].*$"}}
+;; LLVM IR, interim until LL1-LL6 (GTS221)
+{:name llvm-roundtrip :mem-gib 3 :phase :full :chain llvm-full :needs [cpp-runtime] :cmd "bin/repr-llvm roundtrip-corpus {part}"   ; NEW verb
+ :hosts [:stage0 :cxx :llvm] :never-loads [arbace.j2g] :pins ["test/cpp/corpora.edn"] :inputs [:lib-tools :tools :llvm]
+ :parts [{:part runtime-units} {:part libstdcxx-every-15th} {:part torture-o2 :clean-only true}]
+ :summary ["same|differ|FAIL" 3]}
+;; OCaml (ocaml-o8's, rotated with main's :id-re; OC166's moves)
+{:name ocaml-roundtrip :mem-gib 2 :phase :full :chain ocaml-full :cmd "bin/repr-ocaml roundtrip --corpus {part}"   ; GT9: --cmi only below
+ :hosts [:stage0 :ocaml] :never-loads [arbace.j2g] :pins ["test/ocaml/corpora.edn"] :inputs [:lib-base :lib-tools :tools :ocaml]
+ :parts [{:part stdlib :cmd "bin/repr-ocaml roundtrip --cmi --corpus stdlib"} {:part samples :cmd "bin/repr-ocaml roundtrip --cmi --corpus samples"}
+         {:part compiler-sources} {:part compiler-backend} {:part testsuite} {:part whiml} {:part opam}
+         {:part cmi-rest :clean-only true :cmd "bin/repr-ocaml roundtrip --cmi-only compiler-sources compiler-backend testsuite whiml opam"}]  ; NEW --cmi-only
+ :summary ["^compare: |^full: |cmi: |FAIL|DIFF|GONE|UNSTABLE|FLOOR" 6]}
+{:name ocaml-dumps :mem-gib 2 :phase :full :chain ocaml-full :cmd "bin/repr-ocaml dumps && bin/repr-ocaml samples"
+ :hosts [:stage0 :ocaml] :never-loads [arbace.j2g] :pins ["test/ocaml/corpora.edn"] :inputs [:lib-base :lib-tools :tools :ocaml]
+ :summary ["^dumps|FLOOR|unstable|FAIL|ok" 6]}
+{:name ocaml-native :mem-gib 2 :phase :full :chain ocaml-full
+ :cmd "bin/repr-ocaml menhir --verify && bin/repr-ocaml native-check {only} {part}"   ; ocaml-native's verbs; NEW: --list within a corpus
+ :hosts [:stage0 :ocaml] :never-loads [arbace.j2g] :pins ["test/ocaml/corpora.edn"] :inputs [:lib-base :lib-tools :tools :ocaml]
+ :parts [{:part stdlib} {:part compiler-sources} {:part testsuite} {:part whiml} {:part opam}]
+ :summary ["equal|differ|rejected|FAIL" 4]
+ :rotate {:only "--list {list}" :universe "test/ocaml/native-check-ids.edn" :subset "test/ocaml/subsets.edn" :subset-key :subset-native   ; NEW ids, subset
+          :failed-re "^FAIL ([^[:cntrl:]]+)[[:cntrl:]].*$"}}
+{:name oi-check :mem-gib 2 :phase :full :chain ocaml-full :cmd "bin/oi check {only} && bin/oi suite check && bin/oi suite rollup"
+ :hosts [:stage0 :go :ocaml] :never-loads [arbace.j2g] :pins ["test/ocaml/corpora.edn"] :inputs [:lib-base :lib-tools :tools :ocaml :ocaml-run]
+ :parts [{:part run}]
+ :summary ["programs:|pass, [0-9]+ failing|FAILING|CHANGED|GONE|control|rollup" 8]
+ :rotate {:only "--only-list {list}" :universe "test/ocaml/check-oi.edn" :subset "test/ocaml/subsets.edn" :subset-key :subset-oi   ; OC166; :id-re's default
+          :failed-re "^FAILING ([^ :]+):.*$"}}
+{:name oi-aot :mem-gib 4 :phase :full :chain ocaml-full :needs [oi-check] :cmd "env OI_JOBS=4 bin/oi check --aot"   ; GTS216: 4 processes
+ :hosts [:stage0 :go :ocaml] :never-loads [arbace.j2g] :pins ["test/ocaml/corpora.edn"] :inputs [:lib-base :lib-tools :tools :ocaml :ocaml-run :ocaml-aot]
+ :parts [{:part run}] :summary ["^o2j: [0-9]+ programs|pass, [0-9]+ failing|FAILING|CHANGED|GONE|control" 6]
+ :rotate {:only "--only-list {list}" :universe "test/ocaml/check-aot.edn" :subset "test/ocaml/subsets.edn" :failed-re "^FAILING ([^ :]+):.*$"}}
+{:name oi-suite-aot :mem-gib 4 :phase :full :chain ocaml-full :needs [oi-check] :cmd "env OI_JOBS=4 bin/oi suite check --aot"
+ :hosts [:stage0 :go :ocaml] :never-loads [arbace.j2g] :pins ["test/ocaml/corpora.edn"] :inputs [:lib-base :lib-tools :tools :ocaml :ocaml-run :ocaml-aot]
+ :parts [{:part suite}] :summary ["^o2j: [0-9]+ programs|pass, [0-9]+ failing|FAILING|CHANGED|GONE|control" 6]
+ :rotate {:only "--only-list {list}" :universe "test/ocaml/check-suite-aot.edn" :subset "test/ocaml/subsets.edn" :failed-re "^FAILING ([^ :]+):.*$"}}
+{:name ocaml-judges :mem-gib 2 :phase :full :chain ocaml-full :needs [oi-aot] :cmd "bin/oi judges-test --no-expect"   ; NEW --no-expect
+ :hosts [:stage0 :go :ocaml] :never-loads [arbace.j2g] :pins ["test/ocaml/corpora.edn"] :inputs [:lib-base :lib-tools :tools :ocaml :ocaml-run :ocaml-aot]
+ :parts [{:part tests} {:part expect :clean-only true :cmd "bin/oi suite expect"}] :summary ["ok|FAIL|cases|expect" 8]}
+;; Scheme (scheme-sm9's; SC233 by :id-re)
+{:name scheme-read :mem-gib 2 :phase :full :chain scheme-full :cmd "bin/repr-scheme check --corpus {part}"
+ :hosts [:stage0 :chez] :never-loads [arbace.j2g] :pins ["test/scheme/corpora.edn"] :inputs [:lib-tools :tools :scheme]
+ :parts [{:part probes} {:part scans} {:part racket-r6rs} {:part larceny-r6rs} {:part chibi-r7rs} {:part whimsical}
+         {:part srfi :cmd "bin/repr-scheme check --corpus 'srfi-*'"}]
+ :summary ["^files and probes|^scan |UNLISTED|GONE|SCAN" 4]}
+{:name scheme-roundtrip :mem-gib 2 :phase :full :chain scheme-full :cmd "bin/repr-scheme roundtrip --corpus {part}"
+ :hosts [:stage0] :never-loads [arbace.j2g] :pins ["test/scheme/corpora.edn"] :inputs [:lib-tools :tools :scheme]
+ :parts [{:part probes} {:part racket-r6rs} {:part larceny-r6rs} {:part chibi-r7rs} {:part whimsical}
+         {:part srfi :cmd "bin/repr-scheme roundtrip --corpus 'srfi-*'"}] :summary ["^roundtrip:|FAIL" 3]}
+{:name si-check :mem-gib 2 :phase :full :chain scheme-full
+ :cmd "bin/si check && bin/si test && bin/si fixpoint && bin/si check-suite && bin/si vendor verify && bin/si boot --check"
+ :hosts [:stage0 :go :chez] :never-loads [arbace.j2g] :pins ["test/scheme/corpora.edn"] :inputs [:lib-tools :tools :scheme :scheme-run]
+ :summary ["programs pass|regressions:|FAILING|control passed|control not|of 6 of psyntax|expanded:|bootstrap gives" 8]}
+{:name si-aot :mem-gib 2 :phase :full :chain scheme-full :needs [si-check] :cmd "bin/si check --aot && bin/si srfi --aot"
+ :hosts [:stage0 :go] :never-loads [arbace.j2g] :pins ["test/scheme/corpora.edn"] :inputs [:lib-tools :tools :scheme :scheme-run]
+ :summary ["programs pass|programs: the compiled|regressions:|FAILING|^srfi --aot|^FAIL" 6]}
+{:name si-corpora :mem-gib 2 :phase :full :chain scheme-full
+ :cmd "bin/si r7rs && bin/si r7rs --chibi-test && bin/si chibi-tests && bin/si srfi && bin/si corpora files && bin/si corpora divergences"
+ :hosts [:stage0 :go :chibi] :never-loads [arbace.j2g] :pins ["test/scheme/corpora.edn"] :inputs [:lib-tools :tools :scheme :scheme-run]
+ :summary ["^r7rs|^srfi:|regressions:|FAILING|files; |results pass" 8]}
+{:name si-ecraven :mem-gib 2 :phase :full :chain scheme-full :cmd "bin/si ecraven"         ; SC232 (b): the record's :timeout a benchmark
+ :hosts [:stage0 :go] :never-loads [arbace.j2g] :pins ["test/scheme/corpora.edn"] :inputs [:lib-tools :tools :scheme :scheme-run]
+ :parts [{:part ecraven}] :summary ["results pass|regressions:|FAILING|BAD RUN" 4]
+ :rotate {:only "--only {list}" :universe "test/scheme/check-ecraven-linux-amd64.edn" :id-re "^\\{:id \"ecraven/([^\"]+)\"" :subset "test/scheme/subsets.edn"
+          :failed-re "^ +[A-Za-z]+ [a-z-]+ ecraven/([^ :]+).*$"}}
+{:name si-mats :mem-gib 2 :phase :full :chain scheme-full :cmd "bin/si mats"
+ :hosts [:stage0 :go] :never-loads [arbace.j2g] :pins ["test/scheme/corpora.edn"] :inputs [:lib-tools :tools :scheme :scheme-run]
+ :parts [{:part mats}] :summary ["^mats:|regressions:|FAILING" 4]
+ :rotate {:only "--only {list}" :universe "test/scheme/check-mats-linux-amd64.edn" :id-re "^\\{:id \"mats/([^\"]+)\"" :subset "test/scheme/subsets.edn"
+          :failed-re "^ +[A-Za-z]+ [a-z-]+ mats/([^ :]+).*$"}}
+;; Haskell (whole: 10 min, no rotation)
+{:name haskell-roundtrip :mem-gib 3 :phase :full :chain haskell-full :cmd "bin/repr-haskell roundtrip {part}"
+ :hosts [:stage0 :ghc] :never-loads [arbace.j2g] :pins ["test/haskell/corpus-ghc-9.14.1.edn"] :inputs [:lib-tools :tools :haskell]
+ :parts [{:part tree :cmd "bin/repr-haskell roundtrip"}                  ; NEW: judged against a committed results file too (GTS219)
+         {:part layout :cmd "bin/repr-haskell roundtrip --layout-only"}
+         {:part iface :cmd "bin/repr-haskell roundtrip --iface"} {:part text :cmd "bin/repr-haskell roundtrip --text"}]
+ :summary ["equal|known|differ|FAIL" 4]}
+{:name haskell-native :mem-gib 2 :phase :full :chain haskell-full :cmd "bin/repr-haskell native-check test/haskell/native-check-corpus.txt"   ; NEW list
+ :hosts [:stage0 :ghc] :never-loads [arbace.j2g] :pins ["test/haskell/corpus-ghc-9.14.1.edn"] :inputs [:lib-tools :tools :haskell]
+ :summary ["equal|differ|FAIL" 3]}
+{:name hsi-check :heavy true :mem-gib 10 :phase :full :chain haskell-full                  ; T16846's 9.7 GB
+ :cmd "bin/hsi check --corpus samples,synthetic,testsuite-core --jobs 8"
+ :hosts [:stage0 :go :ghc] :never-loads [arbace.j2g] :pins ["test/haskell/eval-corpora.edn"] :inputs [:lib-tools :tools :haskell :hsi]
+ :summary ["pass|fail|hsi|control|FAIL" 4]}
+;; Rust
+{:name rust-roundtrip :mem-gib 4 :phase :full :chain rust-full :cmd "bin/repr-rust roundtrip --text --pretty {only} {part}"   ; NEW --only-list
+ :hosts [:stage0 :rustc] :never-loads [arbace.j2g] :inputs [:lib-tools :tools :rust]
+ :parts [{:part rustc-1.99.1 :pins ["test/rust/corpus-rustc-1.99.1.edn"]} {:part rustc-1.99.1-library :pins ["test/rust/corpus-rustc-1.99.1-library.edn"]}
+         {:part rustc-1.99.1-compiler :pins ["test/rust/corpus-rustc-1.99.1-compiler.edn"]}
+         {:part crates-2026-10-18 :pins ["test/rust/corpus-crates-2026-10-18.edn" "test/rust/crates-2026-10-18.sha256"]}
+         {:part rustc-1.99.1-ui :pins ["test/rust/corpus-rustc-1.99.1-ui.edn"]}]
+ :summary ["equal|known|differ|FAIL" 4]
+ :rotate {:only "--only-list {list}" :universe "test/rust/roundtrip-ids.edn" :subset "test/rust/subsets.edn" :subset-key :subset-roundtrip   ; NEW ids, subsets
+          :failed-re "^FAIL ([^[:cntrl:]]+)[[:cntrl:]].*$"}}
+{:name rust-iface :mem-gib 4 :phase :full :chain rust-full :cmd "bin/repr-rust roundtrip --iface {part}"
+ :hosts [:stage0 :rustc] :never-loads [arbace.j2g] :pins ["test/rust/corpus-rustc-1.99.1.edn"] :inputs [:lib-tools :tools :rust]
+ :parts [{:part rustc-1.99.1} {:part rustc-1.99.1-library :clean-only true} {:part rustc-1.99.1-compiler :clean-only true}
+         {:part crates-2026-10-18 :clean-only true}] :summary ["equal|known|differ|FAIL" 4]}
+{:name rust-behaviour :mem-gib 4 :phase :full :chain rust-full
+ :hosts [:stage0 :rustc :gcc] :never-loads [arbace.j2g] :pins ["test/rust/corpus-rustc-1.99.1-ui.edn"] :inputs [:lib-tools :tools :rust]
+ :cmd "bin/repr-rust roundtrip {part}"
+ :parts [{:part run :cmd "bin/repr-rust roundtrip --run-only rustc-1.99.1-ui"} {:part std :cmd "bin/repr-rust roundtrip --std --run-only rustc-1.99.1-ui"}
+         {:part code-std :cmd "bin/repr-rust roundtrip --code-only rustc-1.99.1"} {:part code-ui :cmd "bin/repr-rust roundtrip --code-only rustc-1.99.1-ui"}
+         {:part code-library :clean-only true :cmd "bin/repr-rust roundtrip --code-only rustc-1.99.1-library"}
+         {:part code-compiler :clean-only true :cmd "bin/repr-rust roundtrip --code-only rustc-1.99.1-compiler"}]
+ :summary ["same|differ|known|FAIL" 4]}
+{:name rust-native :mem-gib 2 :phase :full :chain rust-full :cmd "bin/repr-rust native-check --corpus {part} {only}"   ; NEW --corpus, --list, ids
+ :hosts [:stage0 :rustc] :never-loads [arbace.j2g] :inputs [:lib-tools :tools :rust]
+ :parts [{:part rustc-1.99.1} {:part crates-2026-10-18}] :summary ["equal|differ|FAIL" 3]
+ :rotate {:only "--list {list}" :universe "test/rust/native-check-ids.edn" :subset "test/rust/subsets.edn" :subset-key :subset-native
+          :failed-re "^FAIL ([^[:cntrl:]]+)[[:cntrl:]].*$"}}
+{:name rsi-check :mem-gib 4 :phase :full :chain rust-full :needs [cpp-runtime] :cmd "bin/rsi check --set {part} {only}"   ; at re4's merge; NEW --only-list
+ :hosts [:stage0 :go :rustc :cxx :gcc] :never-loads [arbace.j2g] :inputs [:lib-tools :tools :rust :rsi :c-run]
+ :parts [{:part samples} {:part run}] :summary ["pass|fail|class|control" 4]
+ :rotate {:only "--only-list {list}" :universe "test/rust/check-linux-amd64.edn" :subset "test/rust/subsets.edn" :subset-key :subset-run
+          :always ["test/rust/eval/std.rs" "test/rust/eval/panics.rs"] :failed-re "^FAIL ([^[:cntrl:]]+)[[:cntrl:]].*$"}}
+{:name rsi-aot :mem-gib 6 :phase :full :chain rust-full :needs [rsi-check] :cmd "bin/rsi check --aot --set {part}"
+ :hosts [:stage0 :go :rustc :cxx :gcc] :never-loads [arbace.j2g] :inputs [:lib-tools :tools :rust :rsi :c-run]
+ :parts [{:part samples :clean-only true}] :summary ["pass|fail|class" 3]}   ; 18 min a program until RES34
+;; Python (at PY6/PY8/PY9's merge; PY7's subsets; PY10's row)
+{:name python-roundtrip :mem-gib 2 :phase :full :chain python-full :cmd "bin/repr-python roundtrip {only} {part} && bin/repr-python roundtrip --text {only} {part}"  ; NEW --only-list
+ :hosts [:stage0 :python] :never-loads [arbace.j2g] :pins ["test/python/corpora.edn"] :inputs [:lib-tools :tools :python]
+ :parts [{:part stdlib} {:part site-packages} {:part lib-test}] :summary ["equal|known|differ|FAIL" 4]
+ :rotate {:only "--only-list {list}" :universe "test/python/roundtrip-ids.edn" :subset "test/python/corpora.edn" :subset-key :subset-roundtrip
+          :failed-re "^FAIL ([^[:cntrl:]]+)[[:cntrl:]].*$"}}
+{:name python-front :mem-gib 2 :phase :full :chain python-full :cmd "bin/pyi scope-check {part} && bin/pyi compile-check --full {part}"
+ :hosts [:stage0 :python] :never-loads [arbace.j2g] :pins ["test/python/corpora.edn"] :inputs [:lib-tools :tools :python :pyi]
+ :parts [{:part stdlib} {:part site-packages} {:part lib-test}] :summary ["equal|known|differ|FAIL" 4]}
+{:name python-native :mem-gib 2 :phase :full :chain python-full   ; py9's verbs
+ :hosts [:stage0 :python] :never-loads [arbace.j2g] :pins ["test/python/corpora.edn"] :inputs [:lib-tools :tools :python]
+ :cmd "bin/repr-python lex-check {only} && bin/repr-python parse-check --full {only}"   ; NEW --only-list on both
+ :parts [{:part corpora} {:part mutants :clean-only true :cmd "bin/repr-python parse-check --mutants-only"}]   ; NEW --mutants-only
+ :summary ["equal|differ|rejected|FAIL" 4]
+ :rotate {:only "--only-list {list}" :universe "test/python/native-ids.edn" :subset "test/python/corpora.edn" :subset-key :subset-native
+          :failed-re "^FAIL ([^[:cntrl:]]+)[[:cntrl:]].*$"}}
+{:name pyi-check :mem-gib 3 :phase :full :chain python-full :cmd "bin/pyi runtime check && bin/pyi record-ref --check && bin/pyi check --aot --no-pyi"
+ :hosts [:stage0 :go :python] :never-loads [arbace.j2g] :pins ["test/python/corpora.edn"] :inputs [:lib-tools :tools :python :pyi]
+ :parts [{:part light} {:part with-pyi :clean-only true :cmd "bin/pyi check --aot"}] :summary ["pass|classed|failing|control" 4]}
+{:name pyi-lib-test :mem-gib 4 :phase :full :chain python-full :cmd "bin/pyi lib-test --aot --corpus {part} {only}"   ; NEW --only-list (modules)
+ :hosts [:stage0 :go :python] :never-loads [arbace.j2g] :pins ["test/python/corpora.edn"] :inputs [:lib-tools :tools :python :pyi]
+ :parts [{:part language-core} {:part stdlib-tests} {:part lib-test-asyncio} {:part lib-test-all}]
+ :summary ["equal|classed|failing|control" 4]
+ :rotate {:only "--only-list {list}" :universe "test/python/lib-test-modules.edn" :subset "test/python/corpora.edn" :subset-key :subset-lib-test   ; NEW: modules
+          :always ["test_bool" "test_int"] :failed-re "^FAIL ([^[:cntrl:]]+)[[:cntrl:]].*$"}}
+{:name pyi-bench :mem-gib 3 :phase :full :chain python-full :cmd "bin/pyi bench"
+ :hosts [:stage0 :go :python] :never-loads [arbace.j2g] :inputs [:lib-tools :tools :python :pyi]
+ :parts [{:part pyperformance :clean-only true}] :summary ["benchmarks|classed|FAIL" 3]}
+
+;; :crops (test/gate/costs.ae's known set gains these keys)
+:cpp [cpp-runtime cpp-read-essential cpp-print-essential cpp-lower-essential cpp-check-essential cpp-selftest cpp-tokens cpp-dg
+      cpp-dg-other cpp-roundtrip cpp-lower cpp-native cpp-check cpp-aot]
+:llvm [llvm-essential llvm-roundtrip]
+:ocaml [oi-essential oi-divergences ocaml-read-essential ocaml-roundtrip ocaml-dumps ocaml-native oi-check oi-aot oi-suite-aot ocaml-judges]
+:scheme [si-essential si-aot-essential scheme-read-essential scheme-read scheme-roundtrip si-check si-aot si-corpora si-ecraven si-mats]
+:haskell [haskell-read-essential hsi-essential haskell-roundtrip haskell-native hsi-check]
+:rust [rust-read-essential rsi-essential rust-roundtrip rust-iface rust-behaviour rust-native rsi-check rsi-aot]
+:python [python-read-essential pyi-essential python-roundtrip python-front python-native pyi-check pyi-lib-test pyi-bench]
+```
+
+Notes on the block:
+- `{only}` in a `:cmd` is the planner's placement (`test/gate/plan.ae`): the rotation's fragment there, with `{list}` the
+  runner's list; removed in a whole run.
+- The universes named `NEW` (`*-ids.edn`, `lib-test-modules.edn`) are committed id records, one `["ID"]` a line, written
+  by each tool's `--record-ids` (repr/go's way, GT8's "the tools' lists").
+- `:hosts` `:llvm`, `:ghc`, `:rustc` and `:python` are proposed (GTS210). `:cxx`, `:chez`, `:chibi` and `:ocaml` are
+  on the branches.
+
+### GT9.5 Proposals (GTS210-GTS223)
+
+- **GTS210 The crops' host identities.**
+  - (a) One table, `:host-ids` in `test/gate/steps.edn` (each host's commands, their version flag, the files hashed
+    through `readlink -f`, a digest list such as `test/cpp/host/headers.sha256`), read by one function in
+    `bin/lib/gate-run.bash`. `:gcc` moves into it.
+  - (b) One bash function a host, as `:gcc`, `:cxx` (cx10), `:chez` and `:chibi` (sm9) and `:ocaml` (o8) are written.
+  - *Recommended: (a)*. Eight new hosts as eight functions and eight printf lines are three merge conflicts now and four
+    more later. As data, the audit can check that a host names a file that exists. The table stays out of the key, as
+    `:crops` is.
+- **GTS211 The crops' pins in `bin/gate --pins`.**
+  - (a) Each crop's command gets one `pins --check` verb, run by `bin/gate --pins` (and the clean run's first step) and
+    recorded in the clean record's map. The verbs: `bin/repr-cpp pins check` with `host check`,
+    `bin/repr-ocaml corpus check`, Scheme's apk versions and boot files and whimsical's tree (SC234),
+    `bin/repr-haskell corpus check` with `bin/hsi pins --check`, `bin/repr-rust pins --check` (NEW: the apks, crates
+    and UI tarball), `bin/repr-python pins --check`, and llvm23's tools (NEW).
+  - (b) Each step's `:pins` files alone, the content of the pin files without checking the fetched trees.
+  - *Recommended: (a)*: C's way (`bin/gate --pins`, the user, 2026-11-02). The essential steps then do no pin work
+    (o8's `corpus check` leaves `ocaml-read-essential`).
+- **GTS212 Where the crops' corpora live.**
+  - (a) One directory a crop in the main checkout's `.tmp/` (`.tmp/scheme/corpora`, `.tmp/repr-ocaml/src`,
+    `.tmp/repr-haskell/corpus`, `.tmp/repr-rust`, `.tmp/repr-python`, C++'s `.tmp/c1/gcc`). Worktrees and the clean
+    clone read it, each file checked against its pin at use, as sm9 does and OC164 proposes.
+  - (b) Each checkout fetches its own; the clean run needs the network.
+  - *Recommended: (a)*. The fetches are pinned data, not the product, and a clean run without network is reproducible.
+    The pins check (GTS211) is what makes sharing safe.
+- **GTS213 The three written branches onto GT8's planner.**
+  - (a) Rebase `cpp-cx10`, `scheme-sm9` and `ocaml-o8` onto main before their merge after the tag. In the rebase:
+    - OC161's `:prefix` and SC233's `record-ids` extension become `:id-re`;
+    - each crop gets its `:crops` entry and `costs.ae`'s known set;
+    - the hosts follow GTS210.
+  - (b) Merge them as written and extend the planner for them.
+  - *Recommended: (a)*. Main's planner already reads both record shapes: `:id-re`'s default allows leading space, and
+    one group puts every id in the part.
+- **GTS214 Coverage subsets for code the cover build does not reach.**
+  - (a) Now: `go build -cover` on each crop's own Go program, the same method and reducer as GT8.3 (`bin/cover`,
+    `tools/covsubset`). The programs: oi's driver, si's scm driver, hsi's `go/arbace/hs`, ci for C++'s and Rust's runs,
+    pyi's compiled driver (py8). For the evaluated read and print namespaces, labelled proxies until each crop embeds
+    (C's parse-check proxy: the oracle's node kinds; GT8's "C's read lists" decision).
+  - (b) Block counters in Arbace's evaluator for evaluated namespaces: a second method.
+  - (c) No subsets until each crop embeds.
+  - *Recommended: (a)*. The user made the cover build the one method (GT8.3). Embedding is decided for C++ and Scheme
+    at the first re-seed after the tag, and then the proxies give way.
+- **GTS215 The crops in the essential tier.**
+  - (a) Each crop gets one or two chains of its own, at most 2 minutes of wall warm (LLVM 1), at most 4 threads and
+    3 GiB, never `:heavy`. Its cold costs are `:build` steps keyed by their own keys, run before the checks: C++'s
+    lowered runtime (4-5 min), the helpers' builds (ocdump, hsdump, rsdump, pydump), si's and oi's drivers.
+  - (b) The crops enter the essential tier only after it is back under 15 minutes.
+  - *Recommended: (a)*. The measure is the tier's wall (GTS200 (a)) and the crops' chains are off its critical path
+    (24 min today). They add *est.* 11 minutes of chain wall × 4 threads, about 45 CPU-minutes, against today's
+    8.6 CPU-hours (+9%). The tier's overrun is GT8's to cut, and a crop kept out of every merge's check regresses
+    unseen.
+- **GTS216 The crops' full chains at night.**
+  - (a) The crops' light chains (every step at most 4 GiB) run concurrently beside the serial heavy chain
+    (`GATE_FULL_PARALLEL=1` by chain for them only; their `:mem-gib` summed at most 24 GiB). Light steps may raise
+    their jobs at night (OCaml's AOT at 4 processes, Haskell's hsi at 8). The budget is still charged per crop as its
+    serial sum (GTS201's share), with the wall reported.
+  - (b) Everything serial (GTS13 (a)).
+  - *Recommended: (a)*. GTS13 (a) was about the heavy steps overloading 62 GB; the crops' steps peak at 1-3 GB. The
+    host has 64 cores and the night is otherwise idle.
+- **GTS217 The clean run's caches of the crops' oracles.**
+  - (a) Outputs of the pinned host tools reused by key from the shared store: helper dumps (GHC's, rustc's, clang's,
+    CPython's), g++'s and gcc's references, rustc's std IR. The key covers the host's identity, the pins and the
+    helper's sources, checked by digest. Arbace's own products (the lowered runtime, std's read for ci, forms, prints)
+    are built fresh.
+  - (b) Everything fresh.
+  - (c) Everything by key.
+  - *Recommended: (a)*. The references are not the code under check; rebuilding them adds hours (C++'s token oracle
+    cold 15 min against 2 warm; GHC's STG dumps; rustc's IR) and proves nothing about Arbace. (c) would let the clean
+    run skip what it exists to check.
+- **GTS218 Negative controls before a step enters the gate.**
+  - (a) Each crop family gets one control before its step is gated (GTS81 (a)), judged by the family's own judge:
+    a file's printed output against another file's original, for read and print (OCaml, Haskell, Rust, Python, C++'s
+    round trip and dg, LLVM, Scheme's read, print, ecraven and mats).
+  - (b) Controls at the tag.
+  - *Recommended: (a)*. A gated check with no control can pass vacuously, which is the failure GTS81 was made for.
+- **GTS219 The rows' records.**
+  - (a) Each crop's read and print levels keep a results file written by the whole runs (`--record-results`, CS240 (a),
+    CP182 (a)), which `bin/reap` judges. The gate judges and never records.
+  - (b) The known files alone.
+  - *Recommended: (a)*. The matrix judges from records. Haskell, Rust and Python have none, and a known file says
+    nothing of the passes.
+- **GTS220 The order of entry.**
+  - (a) By readiness, each crop with its REAP row:
+    1. after the tag: Scheme (sm9), C++ (cx10, then CX8 and CX9), OCaml (o8);
+    2. then Haskell's read and print now, hsi at he4d's merge;
+    3. then Rust's read and print now, rsi at re4's merge;
+    4. Python at PY6, PY8 and PY9's merge from the Mac;
+    5. LLVM IR's interim step now, its row at LL6.
+  - (b) All at once at the re-seed that embeds them.
+  - *Recommended: (a)*. Each entry is measured before the next. (b) puts seven crops' first failures in one night.
+- **GTS221 LLVM IR before LL1.**
+  - (a) An interim step: repr/llvm's round trip over C++'s pinned runtime IR and the libstdcxx 15th, charged to LLVM's
+    half share. The torture probes go in the clean run.
+  - (b) No step until LL1-LL6.
+  - *Recommended: (a)*. `llvm-read` changes the whole reader, and nothing checks it today but C++'s steps, indirectly.
+- **GTS222 Measure before the shares bind.**
+  - (a) Each crop's step costs come from its first two `--nightly` runs on this host. Python's are re-measured on amd64
+    (all of its are the Mac VM's). `--costs` reports a crop over its share from then on.
+  - (b) GT9's estimates bind at once.
+  - *Recommended: (a)*. Over half of GT9's nightly figures are estimates. GTS209's acceptance is on measures.
+- **GTS223 The crops' file lists.**
+  - (a) Every corpus check takes `--only FILE` (ids one a line), with a judge that leaves out what a partial run did not
+    run (C's `lists`, `partial-names`), and a committed universe: the results file one row a line, or the corpus's ids
+    (`--record-ids`, repr/go's way).
+  - (b) The regex `--only` that Haskell and Rust have, an alternation built by the runner.
+  - *Recommended: (a)*. GT8 made it the rule ("the tools' lists"). Today's regexes take no list, and Haskell's and
+    Rust's known files fail a partial run on an entry it did not run.
+
+### GT9.6 The budget over the 10+1 crops
+
+The essential column is the crop's own chains' wall, warm. The nightly column is the worst-case night, every step
+running, serial. The clean column has no audit overhead. The four gated crops are given at today's measure and at GT8's
+target, since compressing them is GT8's work.
+
+| crop | essential (wall) | nightly | its share | clean | its share | status |
+|---|---|---|---|---|---|---|
+| Clojure | 36m serial sum (concurrent) | about 33 min today (GT8, `504ab60d`) | 32.4 | GT8's | 130 | gated |
+| Java | 13m serial sum | about 258 min today | 32.4 | GT8's | 130 | gated, over |
+| Go | 3m | about 75 min today | 32.4 | GT8's | 130 | gated, over |
+| C | 32m serial sum | about 300 min today | 32.4 | GT8's | 130 | gated, over |
+| C++ | 1.5 min measured; 3 *est.* with CX8 | 24 *est.* | 24.3 | 55 *est.* | 97 | cx10 written |
+| LLVM IR | 0.3 *est.* | 2 interim, 16 at LL6 *est.* | 16.2 | 5 interim, 65 *est.* | 65 | none |
+| OCaml | 1.4 measured | 35 *est.* (o8: 55 as written) | 32.4 | 55 *est.* | 130 | o8 written |
+| Scheme | 1.7 measured | 23 *est.* (SM9) | 32.4 | 30 *est.* | 130 | sm9 written |
+| Haskell | 1.2 *est.* | 21 *est.* | 32.4 | 50 *est.* | 130 | none |
+| Rust | 1.5 *est.* | 24 *est.* | 24.3 | 170 *est.* before the lowering is embedded, 75 after | 97 | none |
+| Python | 1.5 *est.* (VM) | 30 *est.* (VM) | 32.4 | 60 *est.* (VM) | 130 | none |
+| **seven new, summed** | **about 11 min of chain wall, about 45 CPU-min** | **173 *est.*** (LLVM at 16) | **194** | **485 *est.*** (Rust before embedding, LLVM at 65) | **779** | |
+| **the four at GT8's target** | (the tier's 32m wall today) | **130** (4 × 32.4) | 130 | **520** (4 × 130) | 520 | |
+| **the shared steps** | | **36** | 36 | **144** | 144 | |
+| **10+1, summed** | **essential: the tier's wall, plus about 9% of its CPU** | **339 min = 5.65 h** | **6 h** | **1,149 min = 19.2 h** | **24 h** | |
+
+**The two conditions.**
+- The sum holds only if the four gated crops meet GT8's acceptance. Today they take about 11 h a night: Java and C are
+  each five to nine times their share.
+- Of the new crops, OCaml's nightly is over its share (*est.* 35 against 32.4). Rust's clean run is over its share
+  (*est.* 170 against 97) until CP180's embedding compiles the lowering (*est.* 75 after).
+
+Any concurrency under GTS216 (a) lowers the nightly wall, not the charged sums.
+
+### GT9.7 The biggest gaps
+
+1. **Eval and AOT barely exist on main for four of the seven.**
+   - C++'s are on `cpp-cx8`, 14 programs.
+   - Rust's: rsi on `rust-re4`, 5 samples; its AOT costs 18 minutes a program.
+   - Haskell's hsi is on `haskell-he4d`, and Haskell has no AOT at all (HE8).
+   - Python's AOT and Lib/test runner are on the Mac's branches.
+   - OCaml's AOT is the light level, not the compiled one (O9).
+   - LLVM IR has neither (LL4-LL6).
+2. **Nothing of the seven is embedded.** The cover build cannot see the evaluated namespaces, so no crop has a GTS205
+   subset of its read and print code. The subsets in hand were chosen by time or by hand: OCaml's 28 and 14, Scheme's
+   ecraven and mats, Haskell's 123, cx10's essential lists.
+3. **No host identity or pins check on main for any of the seven.** The four on branches (`:cxx`, `:chez`, `:chibi`,
+   `:ocaml`) each conflict with the others.
+4. **`--only FILE` and partial judges** are missing from Haskell, Rust and Python and from C++'s round trip, lowering
+   and run checks. No universe record exists for Haskell, Rust, Python or the native readers.
+5. **No negative control** for most read and print families, among them OCaml, Haskell, Rust, Python, C++'s round trip
+   and dg, Scheme's read and print, and LLVM.
+6. **The costs are estimates.**
+   - Python's were measured only on an aarch64 VM.
+   - C++'s selftest, Python's scope-check, compile-check and runtime check, Haskell's helper build and the native
+     readers' corpus-wide runs are unmeasured.
+   - SM9's and o8's whole runs were planned, not made.
+## As built: GT9 (write-ahead, branch `gt9-build`, 2026-11-05)
+
+GT9 ("GT9: the crops' gate", on `gate-crops`, GTS210-GTS223 decided (a) by the user, 2026-11-04) built in the light tier: no
+gate run, only `bin/gate --plan`, `--full --plan`, `--nightly --plan` and the gate's own light tests. Four commits on `next`
+(`67031fa2`):
+
+1. **The tooling** (`0a7e7fbb`), generic, in no key of the four crops (the runner `bin/lib/gate-run.bash`, `gate-cache.bash` and
+   the planner `test/gate/plan.ae` are in every key: none of them is touched):
+   - **GTS210 (a), the hosts as data.** `test/gate/steps.edn`'s `:host-ids`: a host, a vector of items `[OP ARG ...]` (`:require`,
+     `:version`, `:version-any`, `:lines`, `:exe`, `:prog`, `:dir`, `:file`, `:digest-list`; `${NAME:-DEFAULT}` from the environment).
+     The identity is the SHA-256 of the items' lines, `none` when a `:require` command is missing. `bin/gate`'s `gate_host_id`
+     computes it; `gate_host_ids` adds to the plan's `hosts.edn` the table's hosts that a step names and `plan_inputs` does not
+     write (`test/gate/crops.ae`'s `host-recipes` prints their recipes from stage 0). `bin/gate` wraps the runner's
+     `plan_inputs` (every plan: `run_plan`, the audit's, the clean run's). Nine hosts: `:gcc` (the recipe of `gate_gcc_id` item for
+     item, the same identity, `crops-test`), `:cxx`, `:ocaml`, `:chez`, `:chibi` (the identities of `cpp-cx10`'s `gate_cxx_id`,
+     `ocaml-o8`'s `gate_ocaml_id` and `scheme-sm9`'s `gate_scheme_id`, equal on this host, checked 2026-11-05), and the new
+     `:llvm`, `:ghc`, `:rustc`, `:python`. All eight crop hosts computed in 3.6 s (2 s of it `librustc_driver`'s 70 MB); on `next`
+     none is computed (no step names one), so `hosts.edn` is byte for byte as before. The test fixtures
+     (`audited-test`, `gate-tests-test`) take the table's hosts, so a crop's merge edits neither.
+   - **GTS211 (a), the pins.** `:crop-pins`, one `[CROP "WHAT" "COMMAND"]` a line, read by `bin/gate`'s awk (the clean run's pins
+     step runs before stage 0 exists; `crops-test` checks the awk reading equals `gate.crops pins`). `bin/gate --pins` runs the
+     commands of the crops that have a step in `:crops` and records them in its map as `:crops [...]` (absent while none is
+     gated: `--pins`' output on `next` is as before).
+   - **GTS216 (a), the night's light chains.** In `bin/gate --full` and `--nightly` (not the clean run, not `--concurrent`, whose
+     lanes run every chain at once; `GATE_CROPS_CONCURRENT=0` off) a `:full` chain runs beside the serial run when every step is a
+     new crop's, none `:heavy`, each declares at most `:night-concurrent :max-step-gib` (4), its `:needs` stay in the chain or
+     outside the full phase and no other chain needs it; admitted in order while the chains' peaks sum to at most `:max-gib` (24).
+     `gate.crops concurrent` decides it (in `bin/gate`, unkeyed: the order decides no outcome); `--plan` says which chains.
+   - **GT9.1, GTS215, GTS222 in `--costs`.** `:budgets :new-crops` (the seven), `:shares` (C++ and Rust 0.75, LLVM IR 0.5; the four
+     and the seven sum to `:crops` 10), `:chain-s` 120 (`:chain-s-by {:llvm 60}`), `:essential-mem-gib` 3. `bin/gate --costs`
+     knows the new crops, weights their shares, says "over, measuring (GTS222: K of N rows with two passes)" in place of OVER
+     until each row of the crop's tier has two passes, and prints each new crop's essential chains against their limit.
+   - **The GT9 rules** (`gate.crops check`, also among `--costs`' problems and checked on `steps.edn` by `crops-test`): every new
+     crop's step declares `:mem-gib`; its essential checks at most 3 GiB and never `:heavy` (GTS215); every check names its negative
+     control in `:controls` (GTS218: a file among the step's `:inputs`, or `{:waived "WHY"}`); `:host-ids`' ops and files,
+     `:crop-pins`' crops, the shares' sum.
+   - **The fragments' splice** (`gate.crops splice TABLE FRAGMENT`): a fragment's sections (`;;@ groups`, `steps`, `crops`,
+     `controls`) put above `steps.edn`'s markers; a crop already in `:crops` gets the fragment's names appended to its vector.
+2. **The keys commit** (`100f8e0b`; PYS30 (a), the user 2026-11-04, the merge rehearsal's §2): one list,
+   `bin/lib/version.bash`'s `arbace_crop_paths` (48 `find -path` patterns: the crops' namespaces repr/{haskell, rust, ocaml,
+   scheme, python, cpp, llvm} and `arbace/{scheme,python,cpp,rust}`, their Go forms `go/arbace/{oi,scm,scminterp,py,expat,pyexpat,
+   hs,libm}`, OCaml's `jdk/ocaml/`, and `bin/lib/{oi,repr-cpp,cppi,rsi,hsi,si,pyi,repr-haskell,repr-rust,repr-ocaml,repr-scheme,
+   repr-python,repr-llvm}`), left out by `gate_key`, `gate_rest_key`, `arbace_runtime_key`, `arbace_embedded_sources`,
+   `arbace_javac_key` and `arbace_javac_rest_key`. `arbace/j2g/embed.ae`'s `excluded` gains `arbace/rust` (rsi's, not on `next`);
+   `test/gate/audit.ae`'s four hosts take the list (`crop-rules`). `gate-key-crops-test` (256 checks): a new file under each of the
+   48 patterns moves none of the three keys, a change to an embedded path (the runtime, jrt, ci, an embedded namespace, the JDK's
+   forms) moves those that hash it, repr/java moves the javac key alone, and embed.ae and the audit name the list alike; run against
+   the old `version.bash` it fails 12 checks. **What moves once** (computed on `next`'s tree, the keys' file lists before and after):
+   - `gate_key` and `gate_rest_key`: their file lists are identical before and after; they move once by the bytes of
+     `bin/lib/version.bash` and `bin/arbace-go` themselves. Every step on `:gate` and `:prog` reruns once (a rebuild of the
+     executables, about 8 min, and the night's checks on them).
+   - `arbace_runtime_key`: 1,461 → 1,424 files, `jdk/ocaml/` out (37 files, o2j's Java, no executable's): the compiled namespaces'
+     key (`aot.key`) moves once, so that night's build takes the two-run path (+3 min).
+   - `arbace_javac_key`: 4,990 → 4,888 files (the crops' namespaces, `jdk/ocaml/`, `bin/lib/oi`, `bin/lib/repr-cpp`): javac's tool
+     rebuilds once and every step on `:javac` and `:javac-prog` reruns once.
+   - Steps on stage 0 alone (C's light and full checks, Java's judgment, reap, provenance) keep their keys: `bin/gate --full --plan`
+     rekeys 100 of 228 steps at the plan (the `:prog` steps whose build is pending show as unchanged and rekey once it is made).
+   From then on a crop's commit under the list moves none of the three keys. Measured in the scratch merges below: with o8, sm9 and
+   the crops' controls overlaid, no step on `:javac` or `:gate` changes key.
+3. **The fragments** (`34ec256f`, then their fixes): `test/gate/crops/*.edn`, each for its merge plan batch, checked in a scratch
+   merge (below).
+
+### The per-crop steps (test/gate/crops/*.edn)
+
+Each fragment is GT9.4's block made to fit the branches as they are: only verbs that exist on the branch it applies to (GT9.4's
+`NEW` verbs, `--only-list`s and id records stay out, as `:clean-only` parts or not at all, until they exist), GTS213 (a)'s rebase
+done in the fragment (OC161's `:prefix` and SC233's record reading become an `:id-re` of one group, ids bare as the subsets name
+them), each crop's `:crops` entry, its controls, and no step's host but the table's. To apply after a batch's merges:
+
+    arbace_tool -p test -m gate.crops splice test/gate/steps.edn test/gate/crops/CROP.edn > .tmp/steps.edn && mv .tmp/steps.edn test/gate/steps.edn
+
+and in the merge take `next`'s side of `bin/lib/gate-run.bash` (the branches' `gate_*_id` functions are `:host-ids` entries),
+of `test/gate/audited-test.bash` and `gate-tests-test.bash` (their fixtures follow the table), and of the branches' `steps.edn`
+hunks but `reap`'s (its `:inputs` and `:summary` per row), which stay. `bin/gate --plan` and `--full --plan` after, then
+`gate.crops check`.
+
+| fragment | batch | essential (chain wall, warm) | nightly, worst case | share | clean | share | notes |
+|---|---|---|---|---|---|---|---|
+| `ocaml.edn` (o8) | 1 | 1.4 min measured (o8) | 27 *est.* (GT9's verbs: `--cmi-only`, `--no-expect`, `:subset-oi`, `--only-list`; was 48) | 32.4 | 45 *est.* | 130 | within the share with `gt9v-ocaml` |
+| `scheme.edn` (sm9) | 1 | 1.7 measured | 23 *est.* (SM9) | 32.4 | 30 *est.* | 130 | ecraven and mats rotated (checked: `.sub` and a slice planned) |
+| `cpp.edn` (cx8, cx9, cx10) | 1 | 1.5 measured + ci samples *est.* 1 = 2.5 | 28 *est.* (was 33: gxx-dg round trip rotated) | 24.3 | 55 *est.* | 97 | the lowering's libstdcxx 15th (rotated), the compiled runtime programs and dg's modules `:clean-only`; `cpp-runtime` a build step; over by about 4 (GTS246) |
+| `llvm-rust.edn` (re4, llvm-read) | 2 | Rust 1.3 *est.* (`test --samples` about 35 s, three ci programs) | Rust 22 *est.*; LLVM 1-2 | 24.3; 16.2 | Rust 40 + rsi-aot 18 *est.*; LLVM 5 | 97; 65 | library, compiler and crates' round trips `:clean-only` until `--only-list`; LLVM's list is LL1's |
+| `natives.edn` (ocaml-native, rust-native) | 3 | +10 s each *est.* | OCaml +3, Rust +1 | | | | joins the crops' chains and vectors |
+| `haskell.edn` (he4d, haskell-native) | 4 | 1.2 *est.* (37 + 21 + 4 + 10 s) | 12.5 *est.* (round trips 10, hsi 2.3 at 8 jobs, heavy, its own chain) | 32.4 | 50 *est.* | 130 | |
+| `cpp-native.edn` | 5 | +10 s *est.* | +2 (977 files in 101 s) | | | | |
+| `python.edn` (mac/201) | P | 0.7 (VM) | 30 *est.* (VM) | 32.4 | 60 *est.* | 130 | the round trips and parse-check wait for R1's controls |
+
+The nightly figures are worst cases (every step run); the tier is keyed (GTS202 (a)) and the crops' light chains run beside
+the serial run (GTS216 (a)), so their wall is not the four crops'. Every figure but the measured is to be replaced by the first
+two `--nightly` runs after the batch (GTS222 (a)): `--costs` says "measuring" until then.
+
+**The scratch merges** (`.tmp/gt9/scratch.sh` in the worktree: a temporary worktree of `gt9-build`, the branches' changed files
+overlaid (not `test/gate/`, the runner, docs, CLAUDE.md, the Makefile), the fragments spliced, `gate.crops check`, the three
+plans, every key compared with `gt9-build`'s own plan, the worktree removed). Results, 2026-11-05, against `gt9-build` with the keys commit:
+
+| scratch | branches overlaid | `gate.crops check` | plans (essential, full, nightly rows) | concurrent chains | keys of the four crops' and shared steps that change |
+|---|---|---|---|---|---|
+| ocaml | o8, crop-controls | 0 problems | 29, 243, 279 | ocaml-full | reap and c-judge-test (o8's `test/reap/`), and the six steps declaring `"arbace/"` (GTS241) |
+| scheme | sm9, crop-controls | 0 | 29, 249, 285 | scheme-full | the same |
+| cpp | cx8, cx9, cx10, crop-controls | 0 | 31, 251, ... | cpp-full | also everything on `:gate`, `:prog` and C's steps: cx9's `arbace/c/dg.ae` and `test/c/judge_test.ae` (C's own code, embedded) |
+| llvmrust | cx8-10, re4, llvm-read, crop-controls | 0 | 33, 262, ... | cpp-full, llvm-full (rust-full once rsi-aot left its chain) | as cpp |
+| natives | o8, cx8-10, re4, llvm-read, ocaml-native, rust-native, the controls | 0 | 38, 279, ... | ocaml-full, cpp-full, rust-full, llvm-full | as cpp |
+| haskell | he4d, haskell-native, the controls | 0 | 28, ... | haskell-full | also everything on `:gate` and `:prog`: he4d's `bin/arbace-go` |
+| cppnative | cx8-10, cpp-native2, the controls | 0 | 32, 251, ... | cpp-full | as cpp |
+| python | mac/201-python-py7-py11 | 0 | 29, 235, ... | python-full | as ocaml (none of `:gate`'s: Python's `bin/arbace-go` hunk is not on this branch head) |
+| all | every branch above | 0 | 47, 317, 355 | all seven (peaks 23 GiB of 24) | the union of the above |
+
+Found and fixed on the way: OCaml's AOT rotations needed an `:id-re` of one group (the planner refused the subsets' bare names
+against the default reading); Python's rotated steps (`pyi-check-aot-goi`, `pyi-check`) need amd64 records that batch P's night
+writes (the planner refuses a missing universe), so they wait for that night; `rsi-aot` (6 GiB) left `rust-full` for a chain of its
+own; the splice appends a later batch's steps to a gated crop's vector. In every scratch no step on `:javac` changes key through a
+crop's files (before the keys commit, o8's overlay alone moved the javac key and every repr/java step).
+
+### GT9's verbs (branch `gt9-verbs`, 2026-11-05)
+
+The verbs the fragments left out or made `:clean-only`, each on a branch of its own from the crop's branch (`gt9v-CROP`; to merge with the crop's
+branch, before the fragment's splice). Each was checked on samples in the light tier (stage 0 by `ARBACE_HOST_EXE`, a few files, no corpus run).
+
+| branch (from) | verbs | checked |
+|---|---|---|
+| `gt9v-ocaml` (`ocaml-o8`) | `bin/repr-ocaml roundtrip --only-list FILE` (ids CORPUS/FILE as `read-results.edn` writes them; each corpus its own, one with none of them is not run; the judges leave out what was not run: compare and full judge the dumps present, the floors are not checked; refused with `--record`, `--record-results`; its failed files printed `FAILED CORPUS/FILE` for the rotation), `--cmi-only` (the helper's dump, mode :full's print and cmp, ocamlc on the originals and the prints: the tree level, the `:lines` print and its redump left out), `bin/oi judges-test --no-expect` (suite expect's whole run and judges_test's two whole-run cases, about 9 of the 9.5 minutes, left out; their `--only` cases stay), `test/ocaml/subsets.edn`'s `:subset-oi` and `:subset-roundtrip` | 6 files of stdlib with `--cmi` and `--cmi-only` (4.5 s and 2.6 s, 3 of 3 cmi equal); whiml whole: `--cmi` 100 s, `--cmi-only` 53 s; a planted known entry gives `GONE ...` and `FAILED samples/core.ml`, exit 1; `judges_test.bash` with the skip: 46 cases run, 0 FAIL, 3.2 min |
+| `gt9v-cpp` (`cpp-cx10`) | `bin/repr-cpp roundtrip-corpus KEY --only-list FILE` (the key's list cut to the CORPUS/NAME ids, `roundtrip --partial`: the recorded results and the oracle's record held for those files alone, no recording; failing ids `FAIL CORPUS/NAME`), `bin/cppi lower-corpus KEY --only-list FILE` (`--recorded none`: held to the record's `:files` by name, not to the whole list; `  failing: NAME` as always), `test/cpp/subsets.edn` (`:subset-roundtrip` of gxx-dg-every-10, 57 files; `:subset-lower` of libstdcxx-every-15th, 30 files) | 4 gxx-dg files 13 s, all four levels pass, `results-missing 0`; 2 samples and 4 libstdcxx programs lowered, 4 of 4 pass (49 s of which the util library 30 s); the runtime built (198 of 198, 3.6 min) for it |
+| `gt9v-scheme` (`scheme-sm9`) | `bin/repr-scheme pins check` (346 corpus files and licenses at their SHA-256 without a fetch, whimsical's tree, Chez's version and boot files, Chibi's version: `test/scheme/corpora.edn`'s `:reference` gains `:chibi` and `:boot`), `roundtrip --only-list FILE` (keys CORPUS/PATH and probe/ID as `roundtrip-results.edn`; a partial run; `FAILED KEY`) | pins 4.8 s, a wrong Chibi makes it fail (exit 1); two keys round-tripped, 1 s |
+| `gt9v-llvm` (`llvm-verify3`) | `bin/repr-llvm pins check` (llvm-as, opt, lli, FileCheck, clang at 23.1.4, the pinned packages installed, `test/llvm`'s 478 probes there and its known file's ids in the list) | 0.7 s; `REPR_LLVM_BIN` wrong fails |
+| `gt9v-rust` (`rust-re5`) | `bin/repr-rust test --samples` (cases 1-4 and 6-8: no rustdoc comparison, no program built and run), `roundtrip --only-list FILE` (the corpus files named, as one `--only` regex of those names alone), `pins check` (rustc, its driver library and rustdoc at `RUSTC_VERSION`; each pinned apk, crate and the UI tarball that is there at its SHA-256, the rest said, not a failure) | `test --samples` 34-42 s of 68 s, 0 FAIL; 404 pinned files at their SHA-256; two files of std round-tripped, 9 s |
+| `gt9v-haskell` (`haskell-he5`) | `bin/repr-haskell roundtrip --only-list FILE` (ids PKG/FILE as `corpus list` prints them) | two modules of ghc-internal, 2 of 2 equal, 52 s (the helper's build included) |
+
+The fragments use them (`test/gate/crops/`): OCaml's `ocaml-roundtrip` (the `:subset-roundtrip` rotation of testsuite, compiler-sources and compiler-backend on
+`read-results.edn`'s ids, `--text` there, `--cmi` on stdlib and samples whole, the `.cmi` level of the others the `:clean-only` part `cmi-rest`) and
+`ocaml-judges` (`tests`: `--no-expect`, nightly; `expect`: the whole, `:clean-only`); `oi-check`'s `:subset-oi` now exists (it ran whole before); C++'s
+`cpp-roundtrip-dg` (gxx-dg-every-10, its own step: its universe is that results file) and `cpp-lower`'s libstdcxx part (rotated, `:clean-only`);
+Rust's `rust-read-essential` on `test --samples`; the three `:crop-pins` commands exist. Planned in scratch merges (`.tmp/gt9v/scratch.sh`, the
+procedure above with the `gt9v-*` branches): `gate.crops check` 0 problems for ocaml, cpp, llvmrust, scheme; the nightly plan rotates (OCaml: testsuite
+243 + 211, compiler-sources and backend, oi-check.run 28 + 84; C++: gxx-dg 57 + 249); all eight fragments with every branch: 0 problems, plans of 47, 317 and 360 rows (355 before; the five slices), all seven chains beside the serial run; `crops-test` ok.
+
+**What the costs become** (estimates, as the table above: replaced by the first two `--nightly` runs, GTS222):
+
+| crop | nightly before | now | share | how |
+|---|---|---|---|---|
+| OCaml | 48 | about 27 | 32.4 | round trip 12.4 to about 5.5 (`.cmi` on stdlib and samples only, three corpora rotated), oi-check 10.1 to about 4.5 (the run corpus 28 + 84 of 556), judges 9.5 to about 4 (`--no-expect`), the AOT parts at `O2J_JOBS=4` about 6 and 3.8 |
+| C++ | 33 | about 28 | 24.3 | gxx-dg round trip 8 to about 2 (its 745 oracle rejections cost nothing); the libstdcxx lowering stays out of the night (rotated, clean run only: a night's rotation is 4-5 minutes) |
+| Scheme | 23 | 23 | 32.4 | unchanged, within the share |
+| Rust | 22 + 1 | 22 | 24.3 | `test --samples` takes 30 seconds off the essential chain (about 1.3 min against 1.7); the library, compiler and crates round trips stay `:clean-only` |
+| Haskell | 12.5 | 12.5 | 32.4 | unchanged; `--only-list` is there for a rotation |
+| LLVM IR | 1-2 | 1-2 | 16.2 | unchanged; `pins check` joins `--pins` |
+
+**Not built, and why.**
+- **Coverage subsets (GTS205 (a)) for C++ and OCaml.** The rule needs a cover build that reaches the code under check. OCaml's oi driver and o2j's runtime
+  are Go built with `-cover`, but repr/ocaml, o2j's front end and the converters are Arbace namespaces evaluated on stage 0, which Go's counters do not
+  see; C++'s lowering and repr/cpp likewise (the proposal GTS206 (a), compiled with `-coverpkg` and run one file a process, is C's method, not built for
+  them). No cover build was made (the day's rules: no builds, no corpus runs). The subsets above are by hand, labelled: every non-pass of the record, one
+  file of each class, a spread (every 8th, 10th or 20th).
+- **C++'s cx8 and cx9 levels** (`bin/cppi check`'s libstdcxx and dg-run parts, dg's modules): their verbs live on `cpp-cx8` and `cpp-cx9`, which are not
+  ancestors of `cpp-cx10`; `--only` is there on cx8's `check`, but the records are one row a line only there (CP181 (a)), and no universe exists to rotate by.
+- **Rust's library, compiler and crates round trips** and **Haskell's** rotate only with a universe of ids (one a line) and a subset: `--only-list` is built, the
+  universe is not (Rust's corpora record their files as vectors on one line). Rust is already near its share.
+- **`pins check` for Haskell, Python** (not asked); Rust's `pins --check` of the table's earlier spelling is `pins check`, `--check` accepted.
+
+**Proposed (none decided)**
+
+- **GTS246 C++'s nightly share.** About 28 minutes against 24.3 with the libstdcxx lowering in the clean run only. (a) accept until GTS222's two nights say;
+  (b) run the lowering's rotation nightly (remove `:clean-only`: +4-5 minutes, 33 in all) and raise C++'s share from 0.75 to 1.0 of the four (`:shares`);
+  (c) rotate cx9's dg-error (6 minutes) too, once cx9's lists are one row a line. *Recommended: (a), then (c).*
+- **GTS247 Rust's and Haskell's id universes.** (a) a generated file of ids one a line per corpus (`bin/repr-rust corpus list`, `bin/repr-haskell corpus list`
+  to `test/*/roundtrip-ids.edn`, regenerated by the vendoring tools) so the round trips rotate; (b) leave them whole or `:clean-only`. *Recommended: (b)
+  until a share is exceeded; (a) then.*
+
+### The night commands
+
+Per batch, after its merges and the splice (the day's sample checks first: `bin/gate --plan`, `--full --plan`, `gate.crops
+check`, `test/gate/crops-test.bash`, `test/gate/gate-key-crops-test.bash`):
+
+    bin/gate --pins                       # the gated crops' pins verbs (GTS211), with the four's
+    bin/gate --nightly                    # the crops' light chains beside the serial run (the plan names them)
+    bin/gate --full --costs --last 2      # after the second night: the crops' rows measured, their shares binding (GTS222)
+
+The keys commit's own night is a rekey of the executables, javac's tool and their steps (above), best merged with batch 1, whose
+night rekeys them anyway (cx9's `arbace/c/dg.ae`, the rows' `bin/arbace-go` and `bin/goi` edits).
+
+### Proposed (none decided)
+
+- **GTS240 The move into the runner.** The hosts' wrapper, `gate_host_id` and the concurrent chains live in `bin/gate` so that GT9
+  rekeys nothing. (a) Move them into `bin/lib/gate-run.bash` (and drop `gate_gcc_id`: `:gcc` from the table, the same identity)
+  with the runner's next change that rekeys every step anyway; cost: none beyond that change. (b) Leave them in `bin/gate`; cost:
+  a host's recipe code outside the keyed logic (a bug in it changes identities, which is what rekeys, but no key names the code).
+  *Recommended: (a).*
+- **GTS241 The steps that declare all of `arbace/`.** `java-compiled` (heavy, 22 GiB), `suite-aot-essential`, `suite-aot`, `j2g-edge`,
+  `repr-clojure` and `gate-tests` declare `"arbace/"` whole, so every crop commit under the list reruns them (seen in every scratch
+  merge). (a) A group `:crop-out` with the list's rules, appended to their `:inputs`, after `bin/gate --audit` of each confirms
+  it reads no crop file (night, the audit's cost: those steps' runtime under strace); cost: one rekey of the six. (b) Leave them;
+  cost: about 1.5 h of step seconds a night with a crop commit. *Recommended: (a), the night after the keys commit.*
+- **GTS242 The waived controls.** C++'s token oracle and dg, Scheme's ecraven, mats and R7RS/SRFI suites, Rust's behaviour levels
+  enter with `{:waived ...}` (no cheap crossed pair; GT9.8's "Not covered"). (a) A control each before the rotation's first full
+  week (C++'s dg: CP214's pair; Scheme's ecraven and mats: a benchmark's output judged against another's reference); (b) accept
+  the waivers. *Recommended: (a) for dg, ecraven and mats; (b) for the token oracle and Rust's behaviour levels.*
+- **GTS243 The planner's requests.** Python's `:slice-re` (PY11-PREP's REQUEST cc463c8d) and GT9.4's `{only}`-shaped universes
+  need `test/gate/plan.ae`. (a) Batch them with GTS240's runner change (one rekey); (b) one at a time. *Recommended: (a).*
+- **GTS244 Pins verbs that need stage 0.** `bin/hsi pins --check` evaluates on stage 0; in the clean run's pins step (before stage
+  0) it would build it. (a) The clean run runs the crops' pins after stage 0 (a second pins step, `bin/gate --pins --crops`); (b)
+  require Arbace-free pins verbs. *Recommended: (a).*
+- **GTS245 The hosts' cost in every plan.** A plan with every crop gated hashes the eight crop hosts (3.6 s). (a) Accept; (b) cache
+  an identity by its files' sizes and mtimes. *Recommended: (a).*
+
+## Decided (2026-11-05, the user)
+
+GTS240-GTS245, each as recommended: the hosts wrapper and concurrency into gate-run.bash with the runner's next all-rekeying change; the six arbace/ steps narrowed by :crop-out after a night --audit; the real controls built and the two waivers accepted; the planner's requests batched with GTS240; crop pins verbs needing stage 0 run after it in the clean run; 3.6 s a plan for the hosts' identities accepted.
+
+## Decided (2026-11-05, the user)
+
+GTS246 (a): C++'s overshoot accepted until GTS222's first two nightly runs, then cx9's dg-error rotated; GTS247: Rust's and Haskell's round trips whole or :clean-only until a share is exceeded, then their ids files generated.
+
+## As merged: GT9 in merge plan batch 1 (2026-11-07, branch `batch1`)
+
+`gt9-build` and `gt9-verbs` merged after the rows (cx8-cx10, sm9, o8 with their `gt9v-*` branches) and before Python's line;
+the fragments `cpp`, `scheme` and `ocaml` spliced; `gate.crops check` 0 problems. Changes to the fragments at the merge:
+`cpp-c2j` and `scheme-c2j` (e6f88eb3) moved from `:shared` to `:cpp` and `:scheme` with waived controls (compile checks, as
+`c-c2j`); C++'s `cpp-check-essential`, `cpp-check` and `cpp-aot` took `cppi-check`'s measured commands and parts (held to its
+records: samples-runtime and the gxx-dg-run sampling), so `cpp-check`'s 8 GiB takes `cpp-full` out of the night's concurrent
+chains (only `scheme-full` and `ocaml-full` run beside the serial run); the round trips' controls are `crop-controls`' three
+commits for C++/LLVM, OCaml and Scheme, picked. `arbace_crop_paths` gained `bin/lib/crops/*` and pyi's lazy modules.
+`mac/192-rotation-records` (SC233 (a), OC161 (a)) is not redone: the fragments read Scheme's and OCaml's records by an `:id-re`
+of one group (GTS213 (a)), which covers it. `python.edn` waits for Python's records night and the planner's `:slice-re`
+(GTS243 (a), with GTS240).
+
+## As built: GTS88 (b), repr/go's controls (write-ahead, branch `go-controls`, 2026-11-07)
+
+GTS81 (a)'s controls for repr/go's two check families, the Go crop's last missing ones (the Go crop's controls 0.25,
+`bin/crops-score`); and the one path in the Go crop's records.
+
+- **`bin/repr-go native-check`** (`test/repr/go/native-controls.edn`, one map a control: `:id`, `:subject`, `:reference`,
+  `:levels`): the native read of the subject's dump judged by each level's own comparison against the helper's dump of the
+  reference, which must differ: E-tree (`ps/diff` of the trees), E-ann (`same-package` of the annotated conversions),
+  E-forms (`forms-diff`: the `.ae` text in modes `:lines` and `:full`). `check-job` keeps what the controls' jobs
+  need (`kept`, registered from `--controls` before the run: the native tree, the helper's dump, both conversions, whether the
+  job's own comparison passed); `arbace.repr.go.annotate/control-verdicts` judges after the corpora. A level whose comparison
+  passes what differs prints `CONTROL FAILED` and counts as an unknown difference (exit 1); a level whose parts are missing (a
+  corpus or id not in the run, `--only`, the rotation) or whose subject's own comparison did not pass is left (`CONTROL left`).
+  Not in the headers' check, the records (`native-check-results.edn`), the known differences or the counts; the report gets
+  `:controls`. Four pairs, `amd64` errors/io and container/list/ring, `test` helloworld/printbig, `dirtest` closure5.dir/a
+  and ddd2.dir/ddd2, all pass their own comparison; their ids are `repr-go-native`'s `:rotate :always`, so each part that
+  holds them judges them in every tier (`REPR_GO_NATIVE_CONTROLS` names another file).
+- **`bin/repr-go roundtrip`** (`test/repr/go/roundtrip-controls.txt`, lines `KIND SUBJECT REFERENCE`): `package` and `test`
+  controls in `bin/lib/repr-go/check --controls FILE`: tools/gocmp compares the subject's candidate with the original of the
+  reference (a package's files staged under the reference's names in order, gocmp pairing files by name), which must fail at
+  the tree level (the row prints all three levels); the subject must be in the run and pass the tree level, else left.
+  `text` controls in `roundtrip --text` (`roundtrip_text_controls`): the printed file of the candidate against another file's
+  original under GOROOT, `cmp` (the text level's comparison is byte for byte). A control that passes fails the run (the
+  check's EXIT trap, whatever else the run decides; the text controls' status). The `--dirs` and `--tests` runs leave the
+  `package` and `test` controls (their subjects are not in those corpora): no directory-test control yet.
+- **Proved on samples** (`test/repr/go/controls-test.bash`, light, 16 s): native-check over `test/helloworld.go` and
+  `test/printbig.go` with the real control (exit 0, `CONTROL ok`, held at tree, ann and forms) and with a fabricated one that
+  crosses a program with itself (exit 1, `CONTROL FAILED`); the round trip's check over container/list and container/ring
+  likewise (a real control exit 0, a package against itself exit 1); `bin/repr-go read --full --print --text` of the two
+  packages with the real tree and text controls (`ok`), a fabricated text control (`FAILED`, status 1). The whole corpora's
+  runs are the night's.
+- **The record with a path**: `test/goi/check-aot-linux-amd64.edn`'s one row naming `/root/tamago-go/test/...` (gc's
+  "label already defined at PATH", `fixedbugs/issue14006.go`) now holds `${GOROOT}/test/...`: `bin/goi`'s `no_forms_row`
+  writes the Go tree's path as `${GOROOT}` in the message (`test/goi/judge-test.bash` checks it); no reader takes the message
+  but the divergences classes' pattern, which stops before it.
+- The change is to `arbace/repr/go/annotate.ae`, which the executables embed: the gate's key changes (all builds rerun).

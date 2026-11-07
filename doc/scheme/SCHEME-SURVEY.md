@@ -3174,3 +3174,196 @@ SC201 (SC211), SC202 (SC210), SC205 (accepted: the SC180 batch's commit landed a
   place of the `single-prims` list.
 - **SC200 (b):** the small identifiers of io.ms's rest added; the buffers stay out.
 - **SC203** was not asked: VM task 105 built its recommended (b), the larceny `.input` files pinned (`mac/105-sm1`).
+
+## As built: SM9 (write-ahead) (2026-11-03)
+
+Scheme's row of the REAP matrix (§9) and its gate steps. Branch `scheme-sm9` from main `a25d12d1`, held until after the tag
+`arbace-reaps-4-crops-v1` (C++'s CX10, branch `cpp-cx10`, adds its row beside it: the edits to `test/reap/cells.edn`,
+`test/gate/steps.edn` and the Makefile are separate blocks, and `bin/reap` counts the rows `cells.edn` has). Not the milestone's
+tag (SC13): the re-seed and the fixpoint are SM9's second half (the embedding, below). The budget is GT8's (doc/GATE-SURVEY.md,
+GTS200-GTS209): about 35 minutes nightly and 2.4 hours clean for a crop.
+
+### What was built
+
+- **The row** (`test/reap/cells.edn`, `[:scheme LEVEL]`; `test/reap/main.ae`'s reader `:scheme`): Scheme's records are one map a
+  case (`{:id :verdict :items [{:item "KIND ID DETAIL" :class K}]}`); each item an entry of its case, its result the item's first word
+  and its reason the rest, so the classes' `:match` finds the item whole; `:count :tests` for the records that count tests
+  (`:pass`, or `:pass-path`, Chibi's tests' `[:si :pass]`); the class an item records must be the one the matrix finds (a new problem
+  kind); `:same-cases` reads map records too. The cells:
+
+  | cell | sources (the check's, then beside) | classes |
+  |---|---|---|
+  | read | `bin/repr-scheme check`: `test/scheme/check-read-results.edn` (new) | `test/scheme/divergences-read.edn` (new, empty) |
+  | eval | `bin/si check`, `r7rs`, `srfi`, `chibi-tests`, `ecraven`; beside: `mats`, `r7rs --chibi-test` | `divergences.edn`, the corpora's `divergences-corpora.edn` |
+  | AOT | `bin/si check --aot` (`:same-cases` the eval check's programs) | `divergences-aot.edn`, then `divergences.edn` |
+  | print | `bin/repr-scheme roundtrip`: `test/scheme/roundtrip-results.edn` (new; `:refuse [:fail :error]`) | `test/scheme/divergences-print.edn` (new, empty) |
+
+- **The read and print records**: `bin/repr-scheme check --record` writes, beside `check-known.edn`, a row `[KEY RESULT REASON]` a file,
+  probe and scan (`CORPUS/PATH`, `probe/ID`, `scan/KIND`; a known difference `:known`); `roundtrip --record` a row a file and probe.
+  Whole runs only. Recorded here: 1,371 rows (1,364 files and probes, 7 scans), 1,364 rows, all passing.
+- **Parts**: `bin/repr-scheme check|roundtrip --corpus ID` (repeatable; an id of `corpora.edn`, a glob `srfi-*`, `probes`, `scans`), a
+  partial check judging a known entry only when its key was read, `--record` refused; `bin/si check --only FILE` (ids one a line),
+  `bin/si ecraven --only LIST` and `bin/si mats --only LIST` (the record's ids, GT8.4's lists); a partial ecraven run is judged against
+  the record of the benchmarks it ran alone (as SC182 (b)'s mats; before, `bin/si ecraven NAME` reported every other benchmark absent).
+- **The corpora's directory**: a linked worktree's and the gate's clean clone's `bin/repr-scheme` and `bin/si` use the main checkout's
+  `.tmp/scheme/corpora` (every file checked against its pin at each fetch), as go-whim's checkout already was.
+- **The hosts** `:chez` (Chez's version line, executable and boot files) and `:chibi` (Chibi's `-V` line and executable) in
+  `bin/lib/gate-run.bash`'s `hosts.edn`; the steps that run them live name them (the read check, `boot --check`, `chibi-tests`).
+- **The essential subsets**: `test/scheme/essential-check.txt` (every program but `larceny/fib`, 77 s of the check's 108 s: its 10^7
+  calls are speed), `test/scheme/essential-aot.txt` (11: the controls' four, each AOT class, a compile-time rejection, call/cc,
+  the tower, a tail loop, `racket/base`); the read level's: every corpus but whimsical (3 MB, 70 s of the round trip), no scans.
+- **The steps** (`test/gate/steps.edn`, groups `:scheme`, `:scheme-run`; the `reap` step reads `test/scheme/*.edn`):
+
+  | step | phase, chain | runs | measured (2026-11-03, loaded host) |
+  |---|---|---|---|
+  | `si-essential` | essential, `scheme-essential` | `bin/si unit`, `test --si`, `check --only essential-check.txt`, `r7rs`, `srfi` | 66 s, 1.0 GB |
+  | `si-aot-essential` | essential, after it | `check --aot --only essential-aot.txt` | 35 s, 0.8 GB |
+  | `scheme-read-essential` | essential, `scheme-read-essential` | read check and round trip but whimsical, `spec-check`, `corpora files` | 41 s |
+  | `scheme-read` (7 parts) | full, `scheme-full` | `check --corpus {part}`: probes, scans, the two R6RS suites, Chibi's, whimsical, the SRFIs | 108 s whole |
+  | `scheme-roundtrip` (6 parts) | full | `roundtrip --corpus {part}` | 97 s whole (whimsical 70) |
+  | `si-check` | full | `check`, `test`, `fixpoint`, `check-suite`, `vendor verify`, `boot --check` | 108 + 54 + 50 + 105 + 1 + 43 s |
+  | `si-aot` | full | `check --aot`, `srfi --aot` | 164 + 88 s |
+  | `si-corpora` | full | `r7rs`, `r7rs --chibi-test`, `chibi-tests`, `srfi`, `corpora files`, `divergences` | 6 + 14 + 9 + 18 + 1 + 1 s |
+  | `si-ecraven` (part `ecraven`) | full, `:rotate` | `SI_TIMEOUT=300 bin/si ecraven` | about 33 min whole (the record's seconds: 1,103 s run, three 300 s limits) |
+  | `si-mats` (part `mats`) | full, `:rotate` | `bin/si mats` | 6 m 36 s whole (SC213's); the subset 39 s |
+
+  The essential gate gains about 1.7 minutes of wall in two chains (2.4 minutes summed). The nightly tier: about 23 minutes (the
+  parts' overhead, about 8 s each, included; ecraven's subset about a minute and a seventh of the rest about 5 minutes on average,
+  the mats' subset 39 s and a seventh of the rest about a minute), within the 35. The clean run, every part whole: about 55 minutes,
+  within the 2.4 hours. The rotation's subsets are `test/scheme/subsets.edn` (ecraven: the 39 benchmarks under 5 s and read0; mats:
+  14 files of few mats); the `:rotate` keys are gt8-nightly's format, inert on main until that planner merges.
+- **Makefile**: `repr-scheme`, `repr-scheme-roundtrip-record`, `si-essential`, `si-aot-essential`, `scheme-read-essential`,
+  `scheme-essential`; `repr-scheme-record`'s line names the new record. CLAUDE.md: the row, the steps, the crops' line.
+
+### The row, numbers (pass / by design / deferred)
+
+| | read | eval | AOT | print |
+|---|---|---|---|---|
+| Scheme | 1,371 / 0 / 0 | 2,815 / 2 / 13 | 45 / 1 / 2 | 1,364 / 0 / 0 |
+
+Eval: `bin/si check` 47 programs and 1 (`chez-conditions`, design); Chibi's suite 1,216 tests and 9 (`r7rs-float-printing`, deferred);
+the SRFIs 1,231 checks; Chibi's own tests 267 and 1 (`chibi-optional-fallback`, deferred); ecraven 54 and 4 (`ecraven-reader-corners`
+design, `ecraven-too-slow` 3 deferred). Beside: the mats 300 mats pass, 1,468 items in 23 classes; Chibi's (chibi test) as Chibi's
+suite. AOT: 45 programs, `chez-conditions` 1, `syntax-constants` 2 (deferred, SC90). `bin/reap`: 20 of 20 cells checked, 0 problems;
+no class pending; `test/reap/matrix.edn` recorded.
+
+One record was stale and is recorded again: `check-aot-linux-amd64.edn` lacked `si/ports-pushback` (added to the check's programs
+after the AOT record), which the row's `:same-cases` found; `bin/si check --aot --record` (164 s) passes it compiled.
+
+### The embedding question
+
+Scheme is evaluated from the checkout and out of `gate_key` (`arbace/j2g/embed.ae`'s exclusions, `bin/lib/version.bash`); its eval
+and AOT levels run si's light driver (`go/arbace/scm` built alone), not Arbace's executable. The decisions point both ways: SC14 (a)
+puts a re-seed at SM9's tag, SC61 (a) with SC33 and SC49 ship si through `arbace.lang.SchemeInterp` with psyntax, the reader and
+`arbace/scheme/` embedded "at the heavy window", and CS250's line puts Scheme's embedding at "a later re-seed, when their rows come".
+The row as built needs no embedding: its records are the light path's. Proposed (SC230), not decided.
+
+### Proposals (SC230 onward; none decided)
+
+- **SC230 The embedding.** (a) the row on the light path until Scheme's heavy window, then SC61's shipped path, the steps moved to
+  the `:prog` hosts and the records remade on it, batched into the re-seed of the next tag (CS250 (a)'s batching, with C++ and
+  OCaml); (b) embed with this branch's merge (a re-seed of its own); (c) keep the light path as the row's reference for good, the
+  shipped path a `:beside` source. *Recommended: (a)*.
+- **SC231 The essential subsets.** (a) as built (1.7 minutes of wall); (b) GTS205 (a)'s rule computed: `go/arbace/scm`'s blocks from a
+  cover build of the light driver (GTS206), every class and control with a program, the rest out; (c) smaller by hand (the si chain
+  under a minute). *Recommended: (a) now, (b) at GT8's coverage round*.
+- **SC232 ecraven's limits.** (a) `--full` at `SI_TIMEOUT=300` (33 minutes whole, the clean run's), the subset nightly; (b) the record's
+  `:timeout` per benchmark used by the runner (60 s for most: about 20 minutes whole); (c) ecraven compiled on the AOT path (SM7's
+  halving), its own record. *Recommended: (b), then (c)*.
+- **SC233 The rotation over Scheme's records.** gt8-nightly's planner reads a record's ids from `["ID"` rows. (a) its `record-ids`
+  also reads `{:id "ID"` rows (one line); (b) Scheme's records rewritten as rows. *Recommended: (a)*.
+- **SC234 The references' pins.** (a) `bin/gate --pins` checks Chez's apk version and boot files and Chibi's version beside the hosts'
+  identities; (b) the hosts alone (built). *Recommended: (a)*.
+- **SC235 The subsets' class coverage.** The mats' and ecraven's subsets are chosen by time; 23 mats classes and `ecraven-too-slow` have
+  no file in them. (a) one file per class added (the too-slow class's cheapest is 300 s); (b) left to the rotation's week.
+  *Recommended: (a) for the mats, (b) for ecraven-too-slow*.
+
+### Tonight's runs (whole corpora; none by day)
+
+1. `bin/gate --audit si-essential si-aot-essential scheme-read-essential` (the declarations unaudited), then the essential gate on the
+   branch (`bin/lib/gate-run.bash` changed: every key moves).
+2. `bin/gate --full --only` the Scheme steps (or their commands by hand under `.tmp/heavy`): `si-ecraven` whole at `SI_TIMEOUT=300`
+   (33 minutes), `si-mats` (7), `si-check` (6), `scheme-read` and `scheme-roundtrip` every part (4), `si-aot` (4), `si-corpora` (1):
+   about 55 minutes, the clean figure measured.
+3. `bin/si ecraven --record` at SC232's limits if decided, and `bin/reap --record` after.
+
+### Rule slips, and checks not run
+
+None known. Not run: the gate itself (`bin/gate --plan` and `--full --plan` only: every Scheme step planned, no table problem), the
+audit, ecraven and the mats whole (their subsets only: 3 benchmarks, 14 mat files), arm64.
+
+## Decided (the user, 2026-11-07): a test's own verdict is a judge
+
+The crops' independence (bin/crops-score, doc/CROPS-SCORE.md) counts what a crop's checks compare with at check time, its judge. The
+user decided, 2026-11-07: a test's own verdict counts as a judge no toolchain made (score 1); Chez's and Chibi's recorded outputs move to the
+oracle tier (re-recorded by hand at a tag); a test without an own verdict keeps the recorded output (0.5); a live toolchain run at check
+time is 0. Scheme's checks judge by the test's own verdict wherever it has one: Chez's mats report their pass or fail, Chibi's r7rs-tests and
+its own tests of the libraries report per test, the SRFIs' programs print a report line, ecraven's benchmarks check their result, the R6RS suites'
+programs report "N tests passed" or the failing expressions.
+
+## As built: SCS1, the scores' round (2026-11-07, branch scheme-90)
+
+Goal: Scheme above 90% on all three of `bin/crops-score`'s measures (at `mac/scheme-smr7`: completeness 98.3, maturity 87.5, independence 80.0).
+
+### Negative controls for every check family (maturity)
+
+`arbace.scheme.controls` and `test/scheme/controls.edn` (GTS81 (a); bin/si check's own are `test/scheme/si/controls.edn`). A control is a case
+(`:subject`) judged against a reference case's (`:reference`, or the edit of a run) by the family's own judge, which must find it; a `:sanity` entry
+is the converse (the run that agrees is not found: a judge that finds everything controls nothing). The judges are the functions the checks
+call, refactored out of the commands for it (`r7rs-result`, `srfi-judge`, `chibi-test-result`, `bench-item`, `ck/compare-file`, `roundtrip-file`);
+the reasons found are the regress lines (`arbace.scheme.regress`) of the judged run against the judge's result for the reference case's own run, so a
+control uses the check's two judgments, the test's own verdict and the record's. Nothing is run: a run is made from the family's record.
+
+| family | check | controls | sanity |
+|---|---|---|---|
+| r7rs | `bin/si r7rs` | a test fails (own verdict), fails where Chez and Chibi pass (against-references), a run cut short (count), a crash | the run again |
+| srfi | `bin/si srfi` | srfi-13's report as srfi-1's (counts), a FAIL line, no report line, a crash | srfi-1 again |
+| chibi-tests | `bin/si chibi-tests` | diff-test's marks as optional-test's, a failing mark, fewer marks than Chibi's, a crash | diff again |
+| ecraven | `bin/si ecraven` | INCORRECT, no result line, a timeout | a correct result |
+| read | `bin/repr-scheme check` | another text's data, a datum fewer, other offsets, another `write`, an error Chez does not raise and the reverse | the text against its own dump |
+| roundtrip | `bin/repr-scheme roundtrip` | the printed-back text against another text, against one with a newline more | the text against itself |
+
+The read check's reference is Chez's dump, made live by the check; a control has no Chez, so the dump of the reference text, made by Arbace's reader in
+dump.ss's shape, stands in (the judge, `ck/compare-file`, is the same). Wiring: each check ends with `(ctl/run FAMILY found-fn)` in its exit code
+(`max`), so a control that passes, passes for another reason than `:expect`, or whose judge throws fails the check; `bin/si corpora controls-test`
+(in `si-essential`) is the wiring's test: for each family a judge that finds nothing, one that finds everything and one that throws must each fail
+the family's controls, as must a family with no control or no sanity entry. `bin/si corpora controls [FAMILY...]`, `bin/repr-scheme controls`
+run them alone (7 s, 0.5 GB).
+
+### The own-verdict judge (independence)
+
+`arbace.scheme.check/own-verdict` (bin/si check's judge for the R6RS suites' programs, `:suite`): the run's test report alone, no reference.
+`bin/si own [--aot] [--list]` compares it with the recorded-output judge (`items-of`) program by program on the last check's runs. At
+`scheme-smr7`'s check (49 programs, fib out): 27 judged by their own verdict (55.1%); of them 22 agree on a pass, 0 on a fail, 3 are failures the
+recorded-output judge passes because Chez fails the same tests (`racket/base` 5 of 2,049, `racket/exceptions` 1 of 12, `racket/io/ports` 2 of 399:
+`chez-fails-too`), 2 end with the same error in both (`racket/run`, `racket/test`: the library `(tests r6rs run)` is not found by either:
+`chez-errors-too`), and 0 pass their own verdict where the recorded-output judge finds an item. The other 22 (Larceny's 12 and si's own 10 programs: they print values, no report) have none. The compiled check (essential subset, 11 programs): 4 by their own verdict, 2 agree on a pass, 1 on a fail
+(`racket/syntax-case` refused), 1 `chez-fails-too` (`racket/base`). The records: 27 of 50 programs in `check-linux-amd64.edn` and in
+`check-aot-linux-amd64.edn`. Not an own verdict's blind spot: a run that stops early with status 0 reports fewer tests, which only the recorded count
+sees (`count` items); the recorded-output judge stays beside.
+
+Share of cases judged by their own verdict, per check: `bin/si check` 27 of 50 programs (54%), `check --aot` 27 of 50 (54%), `r7rs` 1,232 of 1,232
+tests, `srfi` 1,231 of 1,231 checks (11 programs), `chibi-tests` 268 of 268, `ecraven` 58 of 58 benchmarks, `mats` (Chez's, beside the row) all, `roundtrip`
+1,364 of 1,364 files (the original text), the read check 0 of 1,371 (Chez's dump).
+
+`bin/si chibi-tests` no longer runs chibi-scheme at check time: Chibi's marks are the record's (`check-chibi-tests-linux-amd64.edn`), `--chibi` runs the
+host's Chibi afresh (by hand, with `--record`, at a tag); `si-corpora` loses `:chibi` from its hosts. Stub run (chibi-scheme and chez first on PATH,
+exiting 99): `bin/si chibi-tests`, `r7rs`, `srfi`, `corpora controls-test` exit 0 and call no stub.
+
+### The numbers
+
+Scored by `bin/crops-score --ref scheme-90 --crop scheme` with the rules and facts patches applied in a scratch worktree of `mac/crops-score`
+(`.tmp/crops-rules.diff`, `.tmp/independence.diff` in the branch's worktree; crops.edn and independence.edn are not on this branch):
+completeness 98.3 (98.8), maturity 87.5 to 100.0 (controls 2 of 8 families to 8 of 8), independence 80.0 to 95.0 (judge 0 to 0.75).
+The judge's 0.75 is the cases' mean: read 1,371 cases at 0 (live Chez dumps), roundtrip 1,364 at 1, `check` and `--aot` 50 each at 0.77 (27 own, 23
+recorded), r7rs 1,232, srfi 1,231, chibi-tests 268, ecraven 58 at 1: 4,230 of 5,624.
+
+### Proposed
+
+- **SCS2 The read check's Chez dumps.** The only judge term at 0 is the read check (Chez's dumps live). (a) the pack `scheme-chez-dumps` of
+  `mac/oracle-records-cpp2` (dumps recorded by hand at a tag, the check reads them: 0.5, judge 0.82); (b) a digest per file of Chez's dump,
+  compared with the digest of Arbace's rendering in dump.ss's shape (small record, no first difference on a failure); (c) leave. *Recommended: (a), with the
+  merge of that branch.*
+- **SCS3 Judge by the own verdict alone for the suites.** (a) as built (the recorded-output judge beside, the own verdict reported); (b) the suites' programs
+  judged by their own verdict only, the 5 programs that Chez fails too classed (`chez-fails-too`, `chez-errors-too`), Chez's run for the programs without a
+  report alone. *Recommended: (b) when the records are next remade (a night's run): the recorded runs of the 27 programs then leave the oracle tier's reach.*

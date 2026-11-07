@@ -83,12 +83,26 @@
 
 (defn classes [path] (read-string (slurp path)))
 
-(defn class-of [cls [result reason]]
-  (when (not= result "pass")
-    (let [line (str result " " reason)]
-      (first (for [c cls :when (some #(re-find % line) (:match c))] (:id c))))))
+;; a class that lists :programs takes only the programs it names (goi's format, test/reap/main.ae's classify):
+;; the decisions by program of doc/ocaml/DEFERRED-TRIAGE.md (OT2-OT6)
+(defn class-of
+  ([cls row] (class-of cls nil row))
+  ([cls id [result reason]]
+   (when (not= result "pass")
+     (let [line (str result " " reason)]
+       (first (for [c cls :when (and (some #(re-find % line) (:match c))
+                                     (or (nil? (:programs c)) (some #{id} (:programs c))))]
+                (:id c)))))))
 
 (defn results-text [rows]
+  (if (= (System/getenv "O2J_LEVEL") "compiled")
+    (str ";; The AOT level's results over the run corpus at the compiled level (bin/oi check --aot --level compiled --record;\n"
+         ";; doc/ocaml/DEFERRED-TRIAGE.md, \"As built: OT9's first fix\", OT8 (a)): [PROGRAM RESULT REASON OI], the results as\n"
+         ";; check-aot.edn's (the light level's), the programs translated by o2j and j2g and built by bin/build-go, judged by\n"
+         ";; test/ocaml/divergences-aot-compiled.edn's classes. Read with the Clojure reader.\n"
+         "[\n"
+         (apply str (for [row rows] (str " " (pr-str (vec row)) "\n")))
+         "]\n")
   (str ";; The AOT level's results over the run corpus (bin/oi check --aot --record; doc/ocaml/OCAML-SURVEY.md,\n"
        ";; \"As built: O6 (write-ahead)\"): [PROGRAM RESULT REASON OI], RESULT pass, fail (judged by\n"
        ";; test/ocaml/divergences-aot.edn's classes), refused (o2j does not translate it), class (its header puts it\n"
@@ -97,11 +111,11 @@
        ";; the light one: the Java forms interpreted on stage 0 (OC87). Read with the Clojure reader.\n"
        "[\n"
        (apply str (for [row rows] (str " " (pr-str (vec row)) "\n")))
-       "]\n"))
+       "]\n")))
 
 (defn summary [rows cls]
   (let [by (frequencies (map second rows))
-        classed (for [[id res reason] rows :when (not= res "pass")] [id (class-of cls [res reason])])
+        classed (for [[id res reason] rows :when (not= res "pass")] [id (class-of cls id [res reason])])
         unclassed (filter (comp nil? second) classed)]
     (println (str "o2j: " (count rows) " programs: " (pr-str (into (sorted-map) by))))
     (println (str "o2j: against oi: " (pr-str (into (sorted-map) (frequencies (map #(nth % 3 "-") rows))))))
@@ -149,9 +163,12 @@
             (println (str "o2j: no oi rows " oi-tsv " (bin/oi makes them for the same programs)")) (System/exit 2))
         ois (into {} (for [row (tsv oi-tsv)] [(first row) row]))
         only? (str/ends-with? mode "-only")
-        ids (if only? (keys runs) (keys corp))
-        known (known-of (str (.getParent (java.io.File. ^String results-edn)) "/aot-known.edn"))
-        slow (slow-of (str (.getParent (java.io.File. ^String results-edn)) "/aot-slow.edn"))
+        ;; a selection records its runs and its programs the header classes (OI_SELECTED, bin/oi's selected rows; as oi_check.ae)
+        sel (when-let [p (System/getenv "OI_SELECTED")] (when (.exists (java.io.File. ^String p)) (map first (tsv p))))
+        ids (if only? (distinct (concat (keys runs) (filter #(= :class (:kind (corp %))) sel))) (keys corp))
+        ;; the compiled level's own (O2J_KNOWN, O2J_SLOW: bin/oi check --aot --level compiled), else the light level's beside RESULTS
+        known (known-of (or (System/getenv "O2J_KNOWN") (str (.getParent (java.io.File. ^String results-edn)) "/aot-known.edn")))
+        slow (slow-of (or (System/getenv "O2J_SLOW") (str (.getParent (java.io.File. ^String results-edn)) "/aot-slow.edn")))
         rows (binding [*known* known *slow* slow]
                (vec (for [id ids] (conj (into [id] (with-known id (result-of id (corp id) rf runs) (get runs id))) (vs-oi id runs ois)))))
         _ (doseq [[id res] rows :when (and (= res "pass") (contains? known id))]

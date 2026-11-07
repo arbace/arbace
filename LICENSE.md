@@ -165,6 +165,14 @@ covers what.
   same tree's `src/cmd/compile/internal/syntax/`), its namespace and import path renamed
   `arbace/repr/go/internal/syntax` by `arbace.repr.go.syntax/copy-texts`, nothing else changed:
   Copyright The Go Authors, under Go's BSD 3-Clause License (text below); each file's notice kept.
+- `arbace/go/escape.ae` (doc/go/GOI-SPEC.md, "Since v1: gc's escape analysis and inliner"): a port to Arbace of
+  gc's escape analysis and inliner from TamaGo's go1.27.1 tree (above: `VERSION` "go1.27.1"):
+  `src/cmd/compile/internal/escape/` (`escape.go`, `graph.go`, `solve.go`, `expr.go`, `stmt.go`, `assign.go`,
+  `call.go`, `utils.go`, `leaks.go`), `inline/inl.go`, `inline/interleaved/interleaved.go`,
+  `devirtualize/devirtualize.go`, `ir/scc.go`, `ir/reassignment.go`, `ir/fmt.go`, `types/fmt.go`,
+  `loopvar/loopvar.go`, `typecheck/stmt.go`, `typecheck/subr.go` (`convertOp`), `walk/expr.go`,
+  `noder/writer.go` and `ssagen/intrinsics.go` (the amd64 entries of its table, as data), written anew in
+  Arbace after them: Copyright The Go Authors, under Go's BSD 3-Clause License (text below).
 - `go/arbace/repr/go/gcsyntax/errors.ae` (doc/go/GO-PARSER-SURVEY.md, "As built: GPS41 (c)"):
   besides Arbace's own driver, a port of gc's noder's pragma handling from TamaGo's go1.27.1 tree
   (above: `VERSION` "go1.27.1"): `src/cmd/compile/internal/noder/noder.go` (`pragma`,
@@ -175,6 +183,47 @@ covers what.
   configuration fixed: package `p`, linux/amd64, outside the standard library and the runtime)
   and read into Go forms by `bin/repr-go read`: Copyright The Go Authors, under Go's BSD 3-Clause
   License (text below).
+- `arbace/python/scope.ae` (pyi's scope analysis, doc/python/PYI-SPEC.md §2; doc/python/PYTHON-SURVEY.md, "As built:
+  PY5a"): a port to Arbace of CPython 3.14.10's `Python/symtable.c` (the symbol table's two passes, its mangling and its
+  messages) and of `Python/future.c`'s `future_parse` and `future_check_features`, from the release tarball
+  https://www.python.org/ftp/python/3.14.10/Python-3.14.10.tar.xz (SHA-256
+  `de414a57119abef52784d8993e341d53aed635fc2b05c2607d9f98a2c5b72032`), by hand on 2026-11-03: Copyright (c) 2001 Python
+  Software Foundation, All Rights Reserved, under the PSF License Agreement for Python 3.14 (text below, the tarball's
+  `LICENSE` whole). `arbace/python.ae` and the rest of `arbace/python/` are Arbace's own, under the Eclipse Public License 1.0.
+- `arbace/repr/python/lex.ae` (repr/python's native lexer; doc/python/PYTHON-SURVEY.md, "As built: PY9a"): a port to Arbace
+  of CPython 3.14.10's C tokenizer, `Parser/lexer/lexer.c` and `state.c`, the errors of `Parser/tokenizer/helpers.c`,
+  `Parser/tokenizer/readline_tokenizer.c`'s underflow, `Python/Python-tokenize.c`'s iterator and `Lib/tokenize.py`'s
+  `detect_encoding`, from the same release tarball, by hand on 2026-11-03: Copyright (c) 2001 Python Software Foundation,
+  All Rights Reserved, under the PSF License Agreement for Python 3.14 (text below). Likewise since PY9b ("As built: PY9b"):
+  `arbace/repr/python/pegen.ae` (a port of `Tools/peg_generator/pegen`'s metagrammar, `grammar.py`, `parser_generator.py`,
+  `sccutils.py` and `c_generator.py`'s code shapes), `arbace/repr/python/peg.ae` (of `Parser/pegen.c` and
+  `Parser/action_helpers.c`) and `arbace/repr/python/parser.ae` (generated from `Grammar/python.gram`, its actions
+  translated), from the same tarball; since queue 202 (202c) `arbace/repr/python/ucn.ae` (of `Modules/unicodedata.c`'s
+  `_getcode` and its DAWG lookup, from the same tarball). The rest of `arbace/repr/python/` and `tools/pydump/` are
+  Arbace's own, under the Eclipse Public License 1.0.
+- `go/arbace/py/builtins_csv.ae` and `builtins_mmap.ae` (queue 204, PYS22 (a): pyi's modules `_csv` and `mmap`;
+  doc/python/PYTHON-SURVEY.md, "As built: 204"): ports to Go of CPython 3.14.10's `Modules/_csv.c` with
+  `Modules/clinic/_csv.c.h`, and of `Modules/mmapmodule.c`'s UNIX paths with `Modules/clinic/mmapmodule.c.h`, from the same release
+  tarball, by hand on 2026-11-05: Copyright (c) 2001 Python Software Foundation, All Rights Reserved, under the PSF
+  License Agreement for Python 3.14 (text below).
+- `go/arbace/py/builtins_faulthandler.ae`, `builtins_lsprof.ae`, `builtins_termios.ae`, `builtins_tracemalloc.ae` and
+  `monitoring.ae` (queue 220, PYS22 (a): pyi's modules `faulthandler`, `_lsprof`, `termios`, `_tracemalloc` and
+  sys.monitoring's call-family events; doc/python/PYTHON-SURVEY.md, "As built: 220"): ports to Go of CPython 3.14.10's
+  `Modules/faulthandler.c` with `Python/traceback.c`'s dump functions, `Modules/_lsprof.c` with
+  `Modules/clinic/_lsprof.c.h`, `Modules/termios.c` with `Modules/clinic/termios.c.h`, `Modules/_tracemalloc.c` with
+  `Python/tracemalloc.c`'s API, and `Python/instrumentation.c`'s and `Python/legacy_tracing.c`'s call events, from the
+  same release tarball, by hand on 2026-11-05: Copyright (c) 2001 Python Software Foundation, All Rights Reserved,
+  under the PSF License Agreement for Python 3.14 (text below).
+- `go/arbace/py/builtins_ssl.ae`, `builtins_ssl_cert.ae` and `builtins_ssl_conn.ae` (queue 209, PYS22 (a): pyi's module
+  `_ssl` over Go's crypto/tls; doc/python/PYTHON-SURVEY.md, "As built: 209"): written after CPython 3.14.10's
+  `Modules/_ssl.c`, `Modules/clinic/_ssl.c.h`, `Modules/_ssl/cert.c` and `Modules/_ssl/distrusted_spki.h` (its digests
+  copied), from the same release tarball, by hand on 2026-11-05: Copyright (c) 2001 Python Software Foundation, All
+  Rights Reserved, under the PSF License Agreement for Python 3.14 (text below). The OIDs, NIDs and names of
+  `sslObjects` and the alert reasons are the values OpenSSL 3.5 gives for them (facts of its interface, read through
+  CPython's `_ssl.txt2obj`; queue 217 added the alerts of the verification codes, the security levels' bits and the
+  cipher-string rules as OpenSSL 3.5 shows them through CPython); the pipe adapter, the cipher-string evaluator and the DER walker are Arbace's own, under the
+  Eclipse Public License 1.0, as are the test certificates `test/python/pyi/ssl/` (made on 2026-11-05 with
+  `openssl req`/`x509`; `ssl/levels/` by queue 217 the same way).
 - `go/arbace/oi.ae` and `go/arbace/oi/` (oi, the interpreter of OCaml's Lambda; doc/ocaml/OCAML-SURVEY.md, "As
   built: O5 (write-ahead)"): the interpreter's core (values, the compiler of Lambda, application, exceptions,
   effects, the toplevel) is Arbace's own, under the Eclipse Public License 1.0; the externals are ports to Go
@@ -186,8 +235,22 @@ covers what.
   (sys.c, signals.c, gc_ctrl.c, weak.c, finalise.c, backtrace.c, memprof.c, domain.c), `ext_digest.ae`
   (md5.c, blake2.c, bigarray.c's minimal part, the LXM generator of random.ml's runtime), `ext_lex.ae`
   (lexing.c, parsing.c), `ext_bigstring.ae` (bigarray.c), and the parts of `ext.ae`, `ext_domain.ae`,
-  `exn.ae`, `run.ae` and `thread.ae` that follow obj.c, sync.c, domain.c, fiber.c and printexc.c: under the
-  GNU Lesser General Public License version 2.1 with the OCaml LGPL linking exception (below). The test
+  `exn.ae`, `run.ae` and `thread.ae` that follow obj.c, sync.c, domain.c, fiber.c and printexc.c, and `ext_unix.ae`
+  (the Unix library's core, otherlibs/unix's `unixsupport.c`'s error table and the C stubs of the externals unix.ml
+  declares; doc/ocaml/DEFERRED-TRIAGE.md, "As built: OT9's second fix"), `ext_unix_fd.ae` (otherlibs/unix's C stubs of
+  descriptors, files and directories), `ext_thread.ae` (otherlibs/systhreads' `st_stubs.c`; "As built: OT9's next
+  three fixes"), `ext_unix_sock.ae` (otherlibs/unix's C stubs of sockets, the host database and select) and `ext_signal.ae`
+  (runtime/signals.c and otherlibs/unix's signals.c, kill.c, spawn.c, wait.c, itimer.c; "As built: OT9's fixes 6-8"), `ext_str_re.ae`
+  (otherlibs/str's `strstubs.c`) and `ext_bigarray.ae` (bigarray.c's compare, serialization, float16 and reshape, otherlibs/unix's
+  `mmap_unix.c`; "As built: OT21-OT26 and fixes 9-11"): under the
+  GNU Lesser General Public License version 2.1 with the OCaml LGPL linking exception (below). The Unix library's
+  OCaml units (`otherlibs/unix/unix.mli`, `unix_unix.ml`, `unixLabels.ml{,i}` of the same tarball, same license) are not
+  copied into the tree: `bin/oi stdlib` compiles them from the pinned tarball into `.tmp/oi/unixlib/`, and the threads
+  library's (`otherlibs/systhreads/thread.ml{,i}`, `event.ml{,i}`) into `.tmp/oi/threadlib/`, and compiler-libs' units of
+  `utils/` the triage's programs need (`config.fixed.ml`, `config.common.ml.in`, `build_path_prefix_map`, `format_doc`, `misc`,
+  `identifiable`, `numbers`, `strongly_connected_components`, `stable_matching`, `compression`; since OT21 (b) all of ocamlcommon's
+  `utils/` but `domainstate` and `parsing/`, with `boot/menhir/parser.ml` and `menhirLib.ml`) into `.tmp/oi/complib/`, and the Str
+  library's `otherlibs/str/str.ml{,i}` into `.tmp/oi/strlib/`. The test
   data `test/ocaml/oi/testdata/` and the tables in `go/arbace/oi/lexdata*_test.ae` and `parsedata_test.ae`
   are outputs of the host's OCaml 5.5.0 (ocaml, ocamllex, ocamlyacc) over Arbace's own test programs.
 - `jdk/ocaml/` (OCaml's runtime as Java forms, the package `ocaml.rt`; doc/ocaml/OCAML-SURVEY.md, "As built: O6
@@ -199,7 +262,9 @@ covers what.
   (extern.c, intern.c), `ExtIo`, `Channel`, `Fd` (io.c, sys.c's open and close), `ExtSys` (sys.c, signals.c), `ExtGc`
   (gc_ctrl.c, weak.c, finalise.c, backtrace.c, memprof.c), `ExtDigest`, `Blake2` (md5.c, blake2.c), `ExtLxm`
   (the LXM generator), `ExtBigarray`, `BigArray` (bigarray.c's part oi has), `ExtLex` (lexing.c, parsing.c), and the
-  parts of `ExtCore`, `Effects` and `Fiber` that follow obj.c, alloc.c, lazy.c, sync.c, domain.c and fiber.c:
+  parts of `ExtCore`, `Effects` and `Fiber` that follow obj.c, alloc.c, lazy.c, sync.c, domain.c and fiber.c, and `ExtUnix`
+  (oi's `ext_unix.ae`, above), `ExtSignal` and `ExtProc` (oi's `ext_signal.ae`'s part Java allows; "As built: OT9's fixes 6-8"),
+  `ExtStrRe` and `BaOps` (oi's `ext_str_re.ae` and `ext_bigarray.ae`'s part but the file mapping):
   under the GNU Lesser General Public License version 2.1 with the OCaml LGPL linking exception (below).
 - The opam set of the OCaml crop (test/ocaml/corpora.edn, the pins `:opam-NAME`; doc/ocaml/OCAML-SURVEY.md, "As built: O7"):
   sources of ten opam packages, fetched at pinned versions into `.tmp/` and read in place by the checks, **not distributed**
@@ -231,10 +296,12 @@ covers what.
   from jrt's own Java (`jdk/provenance.edn` records the commit; `jdk/sources.txt` lists each
   file's origin, which each form file's first line also names):
   - `jdk/forms/`: Java forms converted by repr/java from jdk26u's Java sources (the closure of
-    java.base's files jrt translates, 815 of `src/java.base/share/classes` (since JC6b), 6 of
+    java.base's files jrt translates, 815 of `src/java.base/share/classes` (since JC6b; 1,150 since
+    F1, the JCA, doc/classes/JAVA-DEFERRED-TRIAGE.md, once `bin/jrt-convert update` has run), 6 of
     `src/java.base/unix/classes`, 2 of `src/java.sql/share/classes`), from the 31 sources the JDK
     build generates (`CharacterData*`, java.nio's buffers, `ScopedMemoryAccess`, the CLDR locale
-    data, `LocaleEquivalentMaps`: generated by `bin/jrt-convert` with jdk26u's build tools from
+    data, `LocaleEquivalentMaps`; 41 since F1, the JCA's fields of `sun.security.util.math.intpoly`
+    made by the build's `FieldGen`: generated by `bin/jrt-convert` with jdk26u's build tools from
     jdk26u's data, as the build generates them) and from `jdk/internal/jrt/LocaleDataIndex`
     (generated by `test/jrt/jrt_sources.ae`): Copyright (c) Oracle and/or its affiliates, under
     the GNU General Public License version 2 with the Classpath Exception (text below), with the
@@ -295,6 +362,62 @@ covers what.
   1995-2026 Jean-loup Gailly and Mark Adler, and the Arbace authors for the ports, under the zlib
   License (section "zlib: zlib License" below); their public APIs follow jdk26u's documented
   `java.util.zip.Deflater` and `Inflater`.
+- `go/arbace/py/zlib_zutil.ae`, `zlib_deflate.ae`, `zlib_trees.ae`, `zlib_inflate.ae` (queue 200, PY6d: pyi's module
+  `zlib`): zlib 1.3.2's deflate and inflate ported to Go from the two Java ports above and, for the paths they leave
+  out (deflate_rle, Z_FIXED, the gzip wrapper, inflate's gzip header), zlib's C (deflate.c, trees.c, inflate.c,
+  inftrees.c): Copyright (C) 1995-2026 Jean-loup Gailly and Mark Adler, and the Arbace authors for the port, under the
+  zlib License (section "zlib: zlib License" below).
+- `go/arbace/expat.ae`, `go/arbace/expat/` (queue 202e: expat for pyi's module `pyexpat`): Expat 2.9.0 (`Modules/expat/`
+  of the CPython 3.14.10 release tarball, https://www.python.org/ftp/python/3.14.10/Python-3.14.10.tar.xz, SHA-256
+  `de414a57...b72032`; xmlparse.c's first line names Expat's commit `e3ca8454...` "2.9.0+"), its `xmlparse.c`,
+  `xmltok.c`, `xmltok_impl.c`, `xmltok_ns.c`, `xmlrole.c`, `xcs.c`, `siphash.h` and the headers they need ported to Go
+  statement for statement; and `go/arbace/pyexpat.ae` and `go/arbace/pyexpat/` (package `arbace/pyexpat`), a port of the same tarball's `Modules/pyexpat.c`
+  (under the PSF License Agreement, section "CPython: the PSF License Agreement for Python 3.14" below). Expat:
+  Copyright (c) 1998-2000 Thai Open Source Software Center Ltd and Clark Cooper, Copyright (c) 2001-2025 Expat
+  maintainers, each file with its own list of copyright holders, and the Arbace authors for the port, under the MIT
+  License (section "Expat: MIT License" below); but `go/arbace/expat/siphash.ae`, siphash.h's port (SipHash-2-4 by
+  William Ahern after Jean-Philippe Aumasson's and Daniel J. Bernstein's reference implementation), under the CC0 1.0
+  Universal Public Domain Dedication its notice states (https://creativecommons.org/publicdomain/zero/1.0/).
+- `go/arbace/clib/bzip2.ae`, `go/arbace/clib/bzip2/` (queue 208: the C library of pyi's module `_bz2`, generated by
+  `bin/pyi-clib build bzip2`): bzip2 1.0.8's library (`blocksort.c`, `huffman.c`, `crctable.c`, `randtable.c`,
+  `compress.c`, `decompress.c`, `bzlib.c` and their headers, of
+  https://github.com/python/cpython-source-deps/archive/refs/tags/bzip2-1.0.8.tar.gz, SHA-256 `ab8d1b0c...7427e2`, the
+  tarball CPython 3.14.10's `Misc/externals.spdx.json` pins), built by ci's builder into one node program with the part
+  of musl 1.2.6 it reaches (https://musl.libc.org/releases/musl-1.2.6.tar.gz, test/c/corpora.edn's pin) and
+  `tools/pyi/clib/bzip2/pybz2.c` (Arbace's own): bzip2 Copyright (C) 1996-2019 Julian R Seward, under bzip2's license
+  (section "bzip2: its license" below); musl Copyright (C) 2005-2020 Rich Felker, et al., under the MIT License (section
+  "musl: MIT License" below). `go/arbace/pybz2.ae` and `go/arbace/pybz2/` (package `arbace/pybz2`), a port of the
+  CPython 3.14.10 tarball's `Modules/_bz2module.c` (under the PSF License Agreement, section "CPython: the PSF License
+  Agreement for Python 3.14" below); `go/arbace/clib.ae`, `go/arbace/clib/clib.ae` and `clib_test.ae`, the host they
+  run on, Arbace's own.
+- `go/arbace/clib/xz.ae`, `go/arbace/clib/xz/` (queue 208: the C library of pyi's module `_lzma`, generated by
+  `bin/pyi-clib build xz`): XZ Utils 5.2.5's liblzma (`src/liblzma`'s `liblzma.la` files and `src/common/tuklib_physmem.c`, of
+  https://github.com/python/cpython-source-deps/archive/refs/tags/xz-5.2.5.tar.gz, SHA-256 `a15c168e...ad282`, the tarball
+  CPython 3.14.10's `Misc/externals.spdx.json` pins), built by ci's builder with the part of musl 1.2.6 it reaches and
+  `tools/pyi/clib/xz/pylzma.c` (Arbace's own; `tools/pyi/clib/xz/config.h` is the tarball's configure's output): liblzma
+  is in the public domain (section "XZ Utils: its licensing" below), musl under the MIT License (section "musl: MIT
+  License" below). `go/arbace/pylzma.ae` and `go/arbace/pylzma/` (package `arbace/pylzma`), a port of the CPython
+  3.14.10 tarball's `Modules/_lzmamodule.c` (under the PSF License Agreement, section "CPython: the PSF License
+  Agreement for Python 3.14" below).
+- `go/arbace/clib/zstd.ae`, `go/arbace/clib/zstd/` (queue 208: the C library of pyi's module `_zstd`, generated by
+  `bin/pyi-clib build zstd`): zstd 1.5.7's library (`lib/common`, `lib/compress`, `lib/decompress`, `lib/dictBuilder`, of
+  https://github.com/python/cpython-source-deps/archive/refs/tags/zstd-1.5.7.tar.gz, SHA-256 `f24b5247...499c8e`, the
+  tarball CPython 3.14.10's `Misc/externals.spdx.json` pins), built by ci's builder with the part of musl 1.2.6 it reaches
+  and `tools/pyi/clib/zstd/pyzstd.c` (Arbace's own): Copyright (c) Meta Platforms, Inc. and affiliates, under the BSD
+  License of its `LICENSE` (zstd is dual licensed, BSD or GPLv2; taken under the BSD License, section "zstd: BSD
+  License" below), musl under the MIT License (section "musl: MIT License" below). `go/arbace/pyzstd.ae` and
+  `go/arbace/pyzstd/` (package `arbace/pyzstd`, queue 215), a port of the CPython 3.14.10 tarball's `Modules/_zstd/`
+  (under the PSF License Agreement, section "CPython: the PSF License Agreement for Python 3.14" below);
+  `tools/pyi/clib/refmod.bash`, Arbace's own, builds that tarball's `Modules/_zstd` unchanged for the reference (not kept).
+- `go/arbace/clib/sqlite.ae`, `go/arbace/clib/sqlite/` (queue 215: the C library of pyi's module `_sqlite3`, generated by
+  `bin/pyi-clib build sqlite`; 215's DECISION 1 (a), the user 2026-11-05): SQLite 3.50.4's amalgamation (`sqlite3.c`,
+  `sqlite3.h` of https://github.com/python/cpython-source-deps/archive/refs/tags/sqlite-3.50.4.0.tar.gz, SHA-256
+  `fb5ab81f...31e8d0`, the tarball CPython 3.14.10's `Misc/externals.spdx.json` pins), built by ci's builder with the part of
+  musl 1.2.6 it reaches and `tools/pyi/clib/sqlite/pysqlite.c` (Arbace's own): SQLite is in the public domain (section
+  "SQLite: public domain" below), musl under the MIT License (section "musl: MIT License" below). `go/arbace/pysqlite3.ae`
+  and `go/arbace/pysqlite3/` (package `arbace/pysqlite3`), a port of the CPython 3.14.10 tarball's `Modules/_sqlite/`
+  (Copyright (C) 2004-2010 Gerhard Häring, under the zlib-style notice its files carry, and the Python Software Foundation,
+  under the PSF License Agreement, section "CPython: the PSF License Agreement for Python 3.14" below).
 - `overlay/jdk/`: jrt's own Java sources and Go-build variants of JDK classes (doc/go/JRT-NOTES.md,
   "Phase 2C"; `overlay/jdk/javac/`, those of javac's tool build, doc/classes/JAVA-FRONTEND-SURVEY.md,
   JN2), written for Arbace in place of jdk26u's files of the same names (from their
@@ -335,16 +458,25 @@ covers what.
   `overlay/jdk/java.base/sun/security/provider/SeedGenerator.java` its `getSystemEntropy` and
   `longToByteArray` (`sun/security/provider/SeedGenerator.java`), and the variants
   `overlay/jdk/variants/Provider.ae`, `Security.ae`, `ProviderConfig.ae`, `SunEntries.ae`,
-  `SunJCE.ae`, `DigestBase.ae` and `NativePRNG.ae` keep the code of the jdk26u methods they
+  `DigestBase.ae` and `NativePRNG.ae` keep the code of the jdk26u methods they
   replace (`java/security/Provider.java`, `Security.java`, `sun/security/jca/ProviderConfig.java`,
-  `sun/security/provider/SunEntries.java`, `com/sun/crypto/provider/SunJCE.java`,
+  `sun/security/provider/SunEntries.java`,
   `sun/security/provider/DigestBase.java`,
-  `src/java.base/unix/classes/sun/security/provider/NativePRNG.java`) where they keep it:
-  Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2
-  with the Classpath Exception (text below); the rest of those files, the digests' variants
-  (`MD5.ae`, `SHA.ae`, `SHA2.ae`, `SHA5.ae`, `SHA3.ae`), `jdk/internal/jrt/HostRandom.java`,
-  `sun/security/provider/JrtServices.java` and `com/sun/crypto/provider/JceServices.java` are Arbace's
-  own.
+  `src/java.base/unix/classes/sun/security/provider/NativePRNG.java`) where they keep it, and since
+  the JCA (doc/classes/JAVA-DEFERRED-TRIAGE.md, F1; `SunJCE.ae` removed, jdk26u's `SunJCE` whole) the
+  variants `PBES2Core.ae`, `HmacPKCS12PBECore.ae`, `PBMAC1Core.ae`, `HKDFKeyDerivation.ae`,
+  `ConstructKeys.ae`, `DESKey.ae`, `DESedeKey.ae`, `PBEKey.ae`, `PBKDF2KeyImpl.ae`
+  (`com/sun/crypto/provider/`), `KeyUtil.ae`, `ECUtil.ae` (`sun/security/util/`) and `PKCS8Key.ae`
+  (`sun/security/pkcs/PKCS8Key.java`) keep the members they replace as repr/java converts them, and
+  `overlay/jdk/java.base/javax/crypto/JceSecurityManager.java` the names and signatures of jdk26u's
+  `javax/crypto/JceSecurityManager.java`: Copyright (c) Oracle and/or its affiliates, under the GNU
+  General Public License version 2 with the Classpath Exception (text below); the rest of those
+  files, the digests' variants (`MD5.ae`, `SHA.ae`, `SHA2.ae`, `SHA5.ae`, `SHA3.ae`), the JCA's
+  variants that only cut or set (`SecretKeySpec.ae`, `EncodedKeySpec.ae`, `SealedObject.ae`,
+  `Signature.ae`, `GaloisCounterMode.ae`), `jdk/internal/jrt/HostRandom.java`,
+  `jdk/internal/jrt/CryptoAccess.java`, `sun/security/provider/JrtServices.java`,
+  `com/sun/crypto/provider/JceServices.java` and `sun/security/rsa/RsaServices.java` (their service
+  class names are jdk26u's providers') are Arbace's own.
 - `overlay/jdk/java.base/jdk/internal/jrt/HostPath.java` (doc/go/JRT-NOTES.md, "Files") holds code
   transcribed from https://github.com/openjdk/jdk26u at `baf63fb`
   (`src/java.base/unix/classes/sun/nio/fs/UnixPath.java`: the path operations, its header names
@@ -406,12 +538,67 @@ covers what.
   `jdk/internal/jrt/ZipAccess.java`, `Utf8Coder.java`, the variants `ZipCoder.ae`, `ZipUtils.ae`,
   `JarFileFactory.ae` and `go/arbace/jrt/checksum.ae` are Arbace's own (zlib's adler32 algorithm
   in `checksum.ae` written from RFC 1950).
+- java.util.logging (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F5 (write-ahead)"; recorded by the
+  rule of B7): the variants `overlay/jdk/variants/LogManager.ae`, `Logger.ae`, `Level.ae`,
+  `LogRecord.ae`, `SimpleFormatter.ae` and `LoggingFileHandler.ae` keep the code of the jdk26u members
+  they replace (https://github.com/openjdk/jdk26u at `baf63fb`,
+  `src/java.logging/share/classes/java/util/logging/LogManager.java`, `Logger.java`, `Level.java`,
+  `LogRecord.java`, `FileHandler.java`, and `src/java.base/share/classes/jdk/internal/logger/SimpleConsoleLogger.java`,
+  whose `Formatting.getSimpleFormat` and `isFilteredFrame` `SimpleFormatter.ae` and `LogRecord.ae`
+  transcribe) where they keep it: Copyright (c) Oracle and/or its affiliates, under the GNU General
+  Public License version 2 with the Classpath Exception (text below); the rest of those files and
+  `overlay/jdk/java.base/sun/util/logging/internal/LoggingProviderImpl.java` (jrt's own, with jdk26u's
+  names and signatures of its access interface) are Arbace's own.
 - `overlay/jdk/variants/TreeMap.ae` (doc/go/JAVA-BASE.md, amendment JB2): its two
   `buildFromIterator` methods are jdk26u's `buildFromSorted` (https://github.com/openjdk/jdk26u
   at `baf63fb`, `src/java.base/share/classes/java/util/TreeMap.java`) without the deserializing
   branch, and its other members keep the code of the members they replace: Copyright (c) Oracle
   and/or its affiliates, under the GNU General Public License version 2 with the Classpath
   Exception (text below), by the rule of B7; the rest of the file is Arbace's own.
+- Permissions, JAAS's core and PKI (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F4 (write-ahead)",
+  "As built: F2 (write-ahead)"; recorded by the rule of B7): the variants
+  `overlay/jdk/variants/Password.ae`, `PasswordCallback.ae`, `LoginContext.ae`, `Configuration.ae`,
+  `FilePermission.ae` (F4), `SignatureAccess.ae`, `X500Principal.ae`, `X500Name.ae`,
+  `SignatureUtil.ae`, `JceKeyProtector.ae`, `PKCS12KeyStore.ae`, `Sun.ae` and `SunEntriesPki.ae` (F2)
+  keep the jdk26u members they replace or add (https://github.com/openjdk/jdk26u at `baf63fb`, the
+  classes' files of `src/java.base/share/classes`) as repr/java converts them, with the changes they
+  name: Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2
+  with the Classpath Exception (text below); the rest of those files, the variants `Subject.ae`,
+  `PortConfig.ae`, `RegisteredDomain.ae` and `OCSP.ae`, and
+  `overlay/jdk/java.base/jdk/internal/event/EventHelper.java` (with jdk26u's names and signatures),
+  `jdk/internal/jrt/PkiAccess.java` and `sun/security/provider/PkiServices.java` (its service class
+  names are jdk26u's providers') are Arbace's own. Their jdk26u sources join `jdk/forms/` (the
+  closure's files above) once `bin/jrt-convert update` has run: 86 files of permission-sources (69
+  of `src/java.base/share/classes`, 1 of `src/java.base/unix/classes`, 15 of
+  `src/jdk.security.auth/share/classes`, 1 of `src/java.logging/share/classes`) and the 2 security
+  message bundles the build's `CompileProperties` generates, and 219 of pki-sources (218 of
+  `src/java.base/share/classes`, 1 of `src/jdk.security.auth/share/classes`).
+- JC9b's small members, charsets, file channels and datagrams (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built:
+  F16 (write-ahead)", "As built: F8 (write-ahead)", "As built: F7 (write-ahead)", "As built: F11 (write-ahead)";
+  recorded by the rule of B7): jdk26u's files (https://github.com/openjdk/jdk26u at `baf63fb`) transcribed with
+  the changes their headers name, `overlay/jdk/java.base/java/util/concurrent/atomic/AtomicIntegerFieldUpdater.java`,
+  `AtomicLongFieldUpdater.java`, `AtomicReferenceFieldUpdater.java` (F16) and `java/nio/channels/FileChannel.java`
+  (F7); `java/nio/DirectByteBuffer.java` and `DirectByteBufferR.java` (F7), derived from the JDK build's generated
+  `HeapByteBuffer.java` and `HeapByteBufferR.java` (`make/modules/java.base/gensrc/GensrcBuffer.gmk` over
+  `src/java.base/share/classes/java/nio/Heap-X-Buffer.java.template`); `java/nio/MappedByteBuffer.java` and
+  `sun/nio/ch/FileChannelImpl.java` (F7), which keep jdk26u's public members' documented behaviour, checks,
+  messages and some of their code, and `java/io/FileInputStream.java` and `FileOutputStream.java`, jdk26u's
+  `getChannel` and the channel's close; the variants `overlay/jdk/variants/Timer.ae`, `PropertyResourceBundle.ae`
+  (F16), `Charset.ae`, `CsStandardCharsets.ae`, `CsStringUTF16.ae`, `GB18030.ae` (F8),
+  `AbstractInterruptibleChannel.ae`, `RandomAccessFile.ae`'s close (F7) and `DatagramSocket.ae` (F11), which keep
+  the jdk26u members they replace as repr/java converts them: Copyright (c) Oracle and/or its affiliates, under
+  the GNU General Public License version 2 with the Classpath Exception (text below); the rest of those files,
+  `overlay/jdk/java.base/jdk/internal/jrt/FieldUpdaters.java`, `java/sql/DriverManager.java` (with jdk26u's
+  names and signatures), the variant `Scanner.ae` (F16), `sun/nio/cs/JrtCharsets.java` (its class names are
+  jdk26u's charsets'), `jdk/internal/jrt/CharsetStrings.java` (F8), `jdk/internal/jrt/HostFileChannels.java`
+  (F7), `java/net/HostDatagramSocketImpl.java`, `jdk/internal/jrt/HostDatagram.java` and the variants
+  `NetworkInterface.ae`, `InterfaceAddress.ae` (F11) are Arbace's own. Their jdk26u sources join `jdk/forms/`
+  once `bin/jrt-convert update` has run: 27 files of small-members-sources (19 of `src/java.base/share/classes`,
+  5 of `src/java.sql/share/classes`, 3 of `src/java.sql.rowset/share/classes`), 42 of charset-sources and the 51
+  charset sources the build's `Spp` and charsetmapping tool generate (charset-gensrc), 23 of channel-sources and
+  35 generated buffers (added-gensrc), and 12 of datagram-sources (11 of `src/java.base/share/classes`, 1 of
+  `src/java.base/unix/classes`); the data `uprops.icu` (ICU's, under the Unicode License V3 as jdk26u's
+  `legal/icu.md` says, beside `ubidi.icu`) and `sun/net/www/content-types.properties`.
 - Other Go-build variants (J2G-SPEC §4.6; recorded by the rule of B7):
   `overlay/jdk/variants/AbstractChronology.ae`, `BitSet.ae`, `CRC32.ae`, `Collectors.ae`,
   `File.ae`, `FileHandler.ae`, `ParseUtil.ae`, `TimeZone.ae`, `TzdbZoneRulesProvider.ae`,
@@ -427,6 +614,50 @@ covers what.
   (`java/lang/System.java`): Copyright (c) Oracle and/or its affiliates, under the GNU General
   Public License version 2 with the Classpath Exception (text below); the rest of those files is
   Arbace's own.
+- TLS (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F3 (write-ahead)"; recorded by the rule of B7): the
+  variants `overlay/jdk/variants/SSLContext.ae`, `SNIHostName.ae`, `SSLSocketImpl.ae`,
+  `InetAddressAccess.ae` and `ProviderConfigJsse.ae` keep the jdk26u members they replace or add
+  (https://github.com/openjdk/jdk26u at `baf63fb`, the classes' files of `src/java.base/share/classes`)
+  as repr/java converts them, with the changes they name, and `overlay/jdk/java.base/sun/security/ssl/SSLLogger.java`
+  is jdk26u's `SSLLogger.java` transcribed with the changes its header names: Copyright (c) Oracle and/or
+  its affiliates, under the GNU General Public License version 2 with the Classpath Exception (text
+  below), as its notice says; the rest of the variants, `overlay/jdk/java.base/sun/security/ssl/JsseServices.java`
+  (its service class names are jdk26u's SunJSSE's) and `jdk/internal/jrt/NetAccess.java` are Arbace's own.
+  Their jdk26u sources join `jdk/forms/` (the converted closure, under the same license as above): 205 of
+  tls-sources (`src/java.base/share/classes`); the resource data `sun/net/idn/uidna.spp` joins `jdk/data/`
+  (the resource data's item below).
+- URL and HTTP's classes (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F12 (write-ahead)"; recorded by the
+  rule of B7): the variants `overlay/jdk/variants/DefaultProxySelector.ae`, `HttpClient.ae`,
+  `HttpConnectSocketImpl.ae`, `HttpCookieAccess.ae` and `HttpURLConnectionImpl.ae` keep the jdk26u members
+  they replace (https://github.com/openjdk/jdk26u at `baf63fb`, the classes' files of
+  `src/java.base/share/classes`) as repr/java converts them, with the changes they name, and
+  `overlay/jdk/java.base/sun/util/logging/PlatformLogger.java` is jdk26u's `PlatformLogger.java` transcribed
+  with the changes its header names, its `JulBridge` from jdk26u's
+  `src/java.logging/share/classes/sun/util/logging/internal/LoggingProviderImpl.java`: Copyright (c) Oracle
+  and/or its affiliates, under the GNU General Public License version 2 with the Classpath Exception (text
+  below), as its notice says; the rest of the variants (`ProxySelector.ae`, `NetProperties.ae` too),
+  `overlay/jdk/java.base/jdk/internal/misc/InnocuousThread.java` (written after jdk26u's documented
+  factories) and NetAccess's cookie access are Arbace's own. Their jdk26u sources join `jdk/forms/` (the
+  converted closure, under the same license as above): 82 of http-sources (`src/java.base/share/classes`);
+  `conf/net.properties` joins `jdk/data/` (the resource data's item below).
+- javax.script's API and JNDI's names (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F19 (write-ahead)"; recorded by
+  the rule of B7): the variants `overlay/jdk/variants/ScriptEngineManager.ae`, `VersionHelper.ae` and
+  `NamingManager.ae` keep the jdk26u members they replace (https://github.com/openjdk/jdk26u at `baf63fb`,
+  `src/java.scripting/share/classes`, `src/java.naming/share/classes`) as repr/java converts them, with the changes
+  they name: Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2 with the
+  Classpath Exception (text below); the rest of the variants is Arbace's own. Their jdk26u sources join `jdk/forms/`
+  (the converted closure, under the same license): 63 of naming-script-sources.
+- java.lang.management without JMX (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F13 (write-ahead)";
+  recorded by the rule of B7): `overlay/jdk/java.base/java/lang/management/{ManagementFactory,ThreadInfo,LockInfo,MonitorInfo,MemoryUsage}.java`
+  `overlay/jdk/java.base/sun/management/{ManagementFactoryHelper,VMManagementImpl}.java` and
+  `overlay/jdk/java.base/com/sun/management/internal/OperatingSystemImpl.java` are jdk26u's files
+  (https://github.com/openjdk/jdk26u at `baf63fb`, `src/java.management/share/classes`, and
+  `src/jdk.management/unix/classes` for the last) transcribed with the changes their headers name: Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2 with
+  the Classpath Exception (text below), as their notices say; the variants `overlay/jdk/variants/ThreadImpl.ae` and
+  `BaseOperatingSystemImpl.ae`, `com/sun/management/internal/JrtPlatformBeans.java`, the
+  skeletons `overlay/jdk/java.base/javax/management/ObjectName.java` and `openmbean/CompositeData.java` (written for
+  JMX's documented signatures), `jdk/internal/jrt/HostManagement.java` and `go/arbace/jrt/management{,_linux,_tamago}.ae` are Arbace's
+  own (written for jdk26u's documented natives and Linux's /proc and syscalls). Their jdk26u sources join `jdk/forms/` (the converted closure, under the same license): 29 of management-sources.
 - `go/arbace/jrt/fdlibm.ae` and the `FdLibm` part of `go/arbace/jrt/math.ae` (`Log`, `Cbrt`,
   `Pow`): jrt's hand-written Go forms porting, as written, https://github.com/openjdk/jdk26u at
   `baf63fb`, `src/java.base/share/classes/java/lang/FdLibm.java` (doc/go/JRT-NOTES.md, phase 1
@@ -467,6 +698,8 @@ covers what.
   Arbace's own, under the Eclipse Public License 1.0.
 - `test/c/run/` (ci's own run programs) and `test/c/judge/` (the small files of ci's judges' tests, doc/C23-SURVEY.md,
   "As built: review 006's fixes"): Arbace's own, under the Eclipse Public License 1.0.
+- `test/c/synth/` (synth-c23, C23's synthetic programs construct by construct, their table and generator, queue 172,
+  doc/GATE-SURVEY.md GT8.6): Arbace's own, under the Eclipse Public License 1.0.
 - `arbace/repr/java/lex.ae` and `arbace/repr/java/parse.ae` (repr/java's native lexer and parser,
   doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN8"): Arbace forms porting, method by method,
   https://github.com/openjdk/jdk26u at `baf63fb`, `src/jdk.compiler/share/classes/com/sun/tools/javac/`'s
@@ -603,6 +836,14 @@ covers what.
     `src/java.base/share/classes/jdk/internal/icu/impl/data/icudata/`: ICU4J's normalization data
     (ICU 78.1, as jdk26u's `src/java.base/share/legal/icu.md` records), under the ICU4J License,
     the Unicode License V3 (text below);
+  - `sun/net/idn/uidna.spp` (doc/classes/JAVA-DEFERRED-TRIAGE.md, F3: java.net.IDN), copied from
+    jdk26u's `src/java.base/share/classes/sun/net/idn/`: ICU4J's StringPrep profile for IDNA (RFC 3491),
+    under the ICU4J License, the Unicode License V3 (text below), as jdk26u's
+    `src/java.base/share/legal/icu.md` records ICU's data;
+  - `conf/net.properties` (doc/classes/JAVA-DEFERRED-TRIAGE.md, F12: sun.net.NetProperties' defaults), as
+    `make/modules/java.base/Copy.gmk` makes it: jdk26u's `src/java.base/share/conf/net.properties` followed
+    by `src/java.base/unix/conf/net.properties`, Copyright (c) Oracle and/or its affiliates, under the GNU
+    General Public License version 2 with the Classpath Exception (text below), as their notices say;
   - `java/lang/uniName.dat`, generated as the JDK build generates it
     (`make/modules/java.base/Gendata.gmk`: jdk26u's build tool
     `make/jdk/src/classes/build/tools/generatecharacter/CharacterName.java` run on
@@ -779,8 +1020,8 @@ covers what.
   psyntax, the R6RS library and syntax-case system of Abdulaziz Ghuloum and R. Kent Dybvig, as Ikarus
   Scheme carried it (https://github.com/lambdaconservatory/ikarus at
   `1f2b250ed9e8cb1c2466c939a9a305461db71739`, `scheme/psyntax.*.ss`, each file's notice kept), as Scheme
-  forms; `psyntax.pp.ae` is generated from them (psyntax expanded by itself), and `tools/psyntax/boot.ss`
-  follows the structure of `psyntax-buildscript.ss` of the portable psyntax-r6rs (revision 4, 2007, by the
+  forms; `psyntax.pp.ae` is generated from them (psyntax expanded by itself), and `tools/psyntax/boot.ss` and
+  `tools/psyntax/boot-si.sps` (its program on si itself, SMR7b) follow the structure of `psyntax-buildscript.ss` of the portable psyntax-r6rs (revision 4, 2007, by the
   same authors): all under the MIT License below ("psyntax"). `compat.ae`, `internal.ae`, `patches.edn`,
   `tools/psyntax/chez/`, `tools/psyntax/run.ss` and `tools/psyntax/expand.ss` are Arbace's own, under the
   Eclipse Public License 1.0 (Ikarus's own `psyntax.compat.ss`, under the GPL version 3, is not vendored).
@@ -2847,4 +3088,689 @@ DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
 THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
 THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+## Expat: MIT License
+
+The `COPYING` of Expat 2.9.0 as CPython 3.14.10 vendors it (`Modules/expat/COPYING`); it covers `go/arbace/expat.ae`
+and `go/arbace/expat/` (above):
+
+```
+Copyright (c) 1998-2000 Thai Open Source Software Center Ltd and Clark Cooper
+Copyright (c) 2001-2025 Expat maintainers
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be included
+in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+## bzip2: its license
+
+The `LICENSE` of bzip2 1.0.8 (the tarball above); it covers bzip2's part of `go/arbace/clib/bzip2.ae` and
+`go/arbace/clib/bzip2/` (above):
+
+```
+--------------------------------------------------------------------------
+
+This program, "bzip2", the associated library "libbzip2", and all
+documentation, are copyright (C) 1996-2019 Julian R Seward.  All
+rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+
+2. The origin of this software must not be misrepresented; you must 
+   not claim that you wrote the original software.  If you use this 
+   software in a product, an acknowledgment in the product 
+   documentation would be appreciated but is not required.
+
+3. Altered source versions must be plainly marked as such, and must
+   not be misrepresented as being the original software.
+
+4. The name of the author may not be used to endorse or promote 
+   products derived from this software without specific prior written 
+   permission.
+
+THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS
+OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+Julian Seward, jseward@acm.org
+bzip2/libbzip2 version 1.0.8 of 13 July 2019
+
+--------------------------------------------------------------------------
+```
+
+## XZ Utils: its licensing
+
+The `COPYING` of XZ Utils 5.2.5 (the tarball above), whole; liblzma, the part `go/arbace/clib/xz.ae` and
+`go/arbace/clib/xz/` hold, is in the public domain:
+
+```
+XZ Utils Licensing
+==================
+
+    Different licenses apply to different files in this package. Here
+    is a rough summary of which licenses apply to which parts of this
+    package (but check the individual files to be sure!):
+
+      - liblzma is in the public domain.
+
+      - xz, xzdec, and lzmadec command line tools are in the public
+        domain unless GNU getopt_long had to be compiled and linked
+        in from the lib directory. The getopt_long code is under
+        GNU LGPLv2.1+.
+
+      - The scripts to grep, diff, and view compressed files have been
+        adapted from gzip. These scripts and their documentation are
+        under GNU GPLv2+.
+
+      - All the documentation in the doc directory and most of the
+        XZ Utils specific documentation files in other directories
+        are in the public domain.
+
+      - Translated messages are in the public domain.
+
+      - The build system contains public domain files, and files that
+        are under GNU GPLv2+ or GNU GPLv3+. None of these files end up
+        in the binaries being built.
+
+      - Test files and test code in the tests directory, and debugging
+        utilities in the debug directory are in the public domain.
+
+      - The extra directory may contain public domain files, and files
+        that are under various free software licenses.
+
+    You can do whatever you want with the files that have been put into
+    the public domain. If you find public domain legally problematic,
+    take the previous sentence as a license grant. If you still find
+    the lack of copyright legally problematic, you have too many
+    lawyers.
+
+    As usual, this software is provided "as is", without any warranty.
+
+    If you copy significant amounts of public domain code from XZ Utils
+    into your project, acknowledging this somewhere in your software is
+    polite (especially if it is proprietary, non-free software), but
+    naturally it is not legally required. Here is an example of a good
+    notice to put into "about box" or into documentation:
+
+        This software includes code from XZ Utils <https://tukaani.org/xz/>.
+
+    The following license texts are included in the following files:
+      - COPYING.LGPLv2.1: GNU Lesser General Public License version 2.1
+      - COPYING.GPLv2: GNU General Public License version 2
+      - COPYING.GPLv3: GNU General Public License version 3
+
+    Note that the toolchain (compiler, linker etc.) may add some code
+    pieces that are copyrighted. Thus, it is possible that e.g. liblzma
+    binary wouldn't actually be in the public domain in its entirety
+    even though it contains no copyrighted code from the XZ Utils source
+    package.
+
+    If you have questions, don't hesitate to ask the author(s) for more
+    information.
+```
+
+## SQLite: public domain
+
+The notice every file of SQLite 3.50.4's amalgamation (the tarball above) carries, as `sqlite3.c` opens `sqliteInt.h`:
+
+```
+** The author disclaims copyright to this source code.  In place of
+** a legal notice, here is a blessing:
+**
+**    May you do good and not evil.
+**    May you find forgiveness for yourself and forgive others.
+**    May you share freely, never taking more than you give.
+```
+
+## zstd: BSD License
+
+The `LICENSE` of zstd 1.5.7 (the tarball above), whole; it covers zstd's part of `go/arbace/clib/zstd.ae` and
+`go/arbace/clib/zstd/`:
+
+```
+BSD License
+
+For Zstandard software
+
+Copyright (c) Meta Platforms, Inc. and affiliates. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+ * Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+ * Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+ * Neither the name Facebook, nor Meta, nor the names of its contributors may
+   be used to endorse or promote products derived from this software without
+   specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+## musl: MIT License
+
+The `COPYRIGHT` of musl 1.2.6 (https://musl.libc.org/releases/musl-1.2.6.tar.gz, test/c/corpora.edn's pin), whole; it
+covers musl's part of the node programs in `go/arbace/clib/` (above):
+
+```
+musl as a whole is licensed under the following standard MIT license:
+
+----------------------------------------------------------------------
+Copyright © 2005-2020 Rich Felker, et al.
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+----------------------------------------------------------------------
+
+Authors/contributors include:
+
+A. Wilcox
+Ada Worcester
+Alex Dowad
+Alex Suykov
+Alexander Monakov
+Andre McCurdy
+Andrew Kelley
+Anthony G. Basile
+Aric Belsito
+Arvid Picciani
+Bartosz Brachaczek
+Benjamin Peterson
+Bobby Bingham
+Boris Brezillon
+Brent Cook
+Chris Spiegel
+Clément Vasseur
+Daniel Micay
+Daniel Sabogal
+Daurnimator
+David Carlier
+David Edelsohn
+Denys Vlasenko
+Dmitry Ivanov
+Dmitry V. Levin
+Drew DeVault
+Emil Renner Berthing
+Fangrui Song
+Felix Fietkau
+Felix Janda
+Gianluca Anzolin
+Hauke Mehrtens
+He X
+Hiltjo Posthuma
+Isaac Dunham
+Jaydeep Patil
+Jens Gustedt
+Jeremy Huntwork
+Jo-Philipp Wich
+Joakim Sindholt
+John Spencer
+Julien Ramseier
+Justin Cormack
+Kaarle Ritvanen
+Khem Raj
+Kylie McClain
+Leah Neukirchen
+Luca Barbato
+Luka Perkov
+Lynn Ochs
+M Farkas-Dyck (Strake)
+Mahesh Bodapati
+Markus Wichmann
+Masanori Ogino
+Michael Clark
+Michael Forney
+Mikhail Kremnyov
+Natanael Copa
+Nicholas J. Kain
+orc
+Pascal Cuoq
+Patrick Oppenlander
+Petr Hosek
+Petr Skocik
+Pierre Carrier
+Reini Urban
+Rich Felker
+Richard Pennington
+Ryan Fairfax
+Samuel Holland
+Segev Finer
+Shiz
+sin
+Solar Designer
+Stefan Kristiansson
+Stefan O'Rear
+Szabolcs Nagy
+Timo Teräs
+Trutz Behn
+Will Dietz
+William Haddon
+William Pitcock
+
+Portions of this software are derived from third-party works licensed
+under terms compatible with the above MIT license:
+
+The TRE regular expression implementation (src/regex/reg* and
+src/regex/tre*) is Copyright © 2001-2008 Ville Laurikari and licensed
+under a 2-clause BSD license (license text in the source files). The
+included version has been heavily modified by Rich Felker in 2012, in
+the interests of size, simplicity, and namespace cleanliness.
+
+Much of the math library code (src/math/* and src/complex/*) is
+Copyright © 1993,2004 Sun Microsystems or
+Copyright © 2003-2011 David Schultz or
+Copyright © 2003-2009 Steven G. Kargl or
+Copyright © 2003-2009 Bruce D. Evans or
+Copyright © 2008 Stephen L. Moshier or
+Copyright © 2017-2018 Arm Limited
+and labelled as such in comments in the individual source files. All
+have been licensed under extremely permissive terms.
+
+The ARM memcpy code (src/string/arm/memcpy.S) is Copyright © 2008
+The Android Open Source Project and is licensed under a two-clause BSD
+license. It was taken from Bionic libc, used on Android.
+
+The AArch64 memcpy and memset code (src/string/aarch64/*) are
+Copyright © 1999-2019, Arm Limited.
+
+The implementation of DES for crypt (src/crypt/crypt_des.c) is
+Copyright © 1994 David Burren. It is licensed under a BSD license.
+
+The implementation of blowfish crypt (src/crypt/crypt_blowfish.c) was
+originally written by Solar Designer and placed into the public
+domain. The code also comes with a fallback permissive license for use
+in jurisdictions that may not recognize the public domain.
+
+The smoothsort implementation (src/stdlib/qsort.c) is Copyright © 2011
+Lynn Ochs and is licensed under an MIT-style license.
+
+The x86_64 port was written by Nicholas J. Kain and is licensed under
+the standard MIT terms.
+
+The mips and microblaze ports were originally written by Richard
+Pennington for use in the ellcc project. The original code was adapted
+by Rich Felker for build system and code conventions during upstream
+integration. It is licensed under the standard MIT terms.
+
+The mips64 port was contributed by Imagination Technologies and is
+licensed under the standard MIT terms.
+
+The powerpc port was also originally written by Richard Pennington,
+and later supplemented and integrated by John Spencer. It is licensed
+under the standard MIT terms.
+
+All other files which have no copyright comments are original works
+produced specifically for use as part of this library, written either
+by Rich Felker, the main author of the library, or by one or more
+contibutors listed above. Details on authorship of individual files
+can be found in the git version control history of the project. The
+omission of copyright and license comments in each file is in the
+interest of source tree size.
+
+In addition, permission is hereby granted for all public header files
+(include/* and arch/*/bits/*) and crt files intended to be linked into
+applications (crt/*, ldso/dlstart.c, and arch/*/crt_arch.h) to omit
+the copyright notice and permission notice otherwise required by the
+license, and to use these files without any requirement of
+attribution. These files include substantial contributions from:
+
+Bobby Bingham
+John Spencer
+Nicholas J. Kain
+Rich Felker
+Richard Pennington
+Stefan Kristiansson
+Szabolcs Nagy
+
+all of whom have explicitly granted such permission.
+
+This file previously contained text expressing a belief that most of
+the files covered by the above exception were sufficiently trivial not
+to be subject to copyright, resulting in confusion over whether it
+negated the permissions granted in the license. In the spirit of
+permissive licensing, and of not having licensing issues being an
+obstacle to adoption, that text has been removed.
+```
+
+## CPython: the PSF License Agreement for Python 3.14
+
+The `LICENSE` of the CPython 3.14.10 release tarball, whole (its history and the licenses it carries):
+
+```
+A. HISTORY OF THE SOFTWARE
+==========================
+
+Python was created in the early 1990s by Guido van Rossum at Stichting
+Mathematisch Centrum (CWI, see https://www.cwi.nl) in the Netherlands
+as a successor of a language called ABC.  Guido remains Python's
+principal author, although it includes many contributions from others.
+
+In 1995, Guido continued his work on Python at the Corporation for
+National Research Initiatives (CNRI, see https://www.cnri.reston.va.us)
+in Reston, Virginia where he released several versions of the
+software.
+
+In May 2000, Guido and the Python core development team moved to
+BeOpen.com to form the BeOpen PythonLabs team.  In October of the same
+year, the PythonLabs team moved to Digital Creations, which became
+Zope Corporation.  In 2001, the Python Software Foundation (PSF, see
+https://www.python.org/psf/) was formed, a non-profit organization
+created specifically to own Python-related Intellectual Property.
+Zope Corporation was a sponsoring member of the PSF.
+
+All Python releases are Open Source (see https://opensource.org for
+the Open Source Definition).  Historically, most, but not all, Python
+releases have also been GPL-compatible; the table below summarizes
+the various releases.
+
+    Release         Derived     Year        Owner       GPL-
+                    from                                compatible? (1)
+
+    0.9.0 thru 1.2              1991-1995   CWI         yes
+    1.3 thru 1.5.2  1.2         1995-1999   CNRI        yes
+    1.6             1.5.2       2000        CNRI        no
+    2.0             1.6         2000        BeOpen.com  no
+    1.6.1           1.6         2001        CNRI        yes (2)
+    2.1             2.0+1.6.1   2001        PSF         no
+    2.0.1           2.0+1.6.1   2001        PSF         yes
+    2.1.1           2.1+2.0.1   2001        PSF         yes
+    2.1.2           2.1.1       2002        PSF         yes
+    2.1.3           2.1.2       2002        PSF         yes
+    2.2 and above   2.1.1       2001-now    PSF         yes
+
+Footnotes:
+
+(1) GPL-compatible doesn't mean that we're distributing Python under
+    the GPL.  All Python licenses, unlike the GPL, let you distribute
+    a modified version without making your changes open source.  The
+    GPL-compatible licenses make it possible to combine Python with
+    other software that is released under the GPL; the others don't.
+
+(2) According to Richard Stallman, 1.6.1 is not GPL-compatible,
+    because its license has a choice of law clause.  According to
+    CNRI, however, Stallman's lawyer has told CNRI's lawyer that 1.6.1
+    is "not incompatible" with the GPL.
+
+Thanks to the many outside volunteers who have worked under Guido's
+direction to make these releases possible.
+
+
+B. TERMS AND CONDITIONS FOR ACCESSING OR OTHERWISE USING PYTHON
+===============================================================
+
+Python software and documentation are licensed under the
+Python Software Foundation License Version 2.
+
+Starting with Python 3.8.6, examples, recipes, and other code in
+the documentation are dual licensed under the PSF License Version 2
+and the Zero-Clause BSD license.
+
+Some software incorporated into Python is under different licenses.
+The licenses are listed with code falling under that license.
+
+
+PYTHON SOFTWARE FOUNDATION LICENSE VERSION 2
+--------------------------------------------
+
+1. This LICENSE AGREEMENT is between the Python Software Foundation
+("PSF"), and the Individual or Organization ("Licensee") accessing and
+otherwise using this software ("Python") in source or binary form and
+its associated documentation.
+
+2. Subject to the terms and conditions of this License Agreement, PSF hereby
+grants Licensee a nonexclusive, royalty-free, world-wide license to reproduce,
+analyze, test, perform and/or display publicly, prepare derivative works,
+distribute, and otherwise use Python alone or in any derivative version,
+provided, however, that PSF's License Agreement and PSF's notice of copyright,
+i.e., "Copyright (c) 2001 Python Software Foundation; All Rights Reserved"
+are retained in Python alone or in any derivative version prepared by Licensee.
+
+3. In the event Licensee prepares a derivative work that is based on
+or incorporates Python or any part thereof, and wants to make
+the derivative work available to others as provided herein, then
+Licensee hereby agrees to include in any such work a brief summary of
+the changes made to Python.
+
+4. PSF is making Python available to Licensee on an "AS IS"
+basis.  PSF MAKES NO REPRESENTATIONS OR WARRANTIES, EXPRESS OR
+IMPLIED.  BY WAY OF EXAMPLE, BUT NOT LIMITATION, PSF MAKES NO AND
+DISCLAIMS ANY REPRESENTATION OR WARRANTY OF MERCHANTABILITY OR FITNESS
+FOR ANY PARTICULAR PURPOSE OR THAT THE USE OF PYTHON WILL NOT
+INFRINGE ANY THIRD PARTY RIGHTS.
+
+5. PSF SHALL NOT BE LIABLE TO LICENSEE OR ANY OTHER USERS OF PYTHON
+FOR ANY INCIDENTAL, SPECIAL, OR CONSEQUENTIAL DAMAGES OR LOSS AS
+A RESULT OF MODIFYING, DISTRIBUTING, OR OTHERWISE USING PYTHON,
+OR ANY DERIVATIVE THEREOF, EVEN IF ADVISED OF THE POSSIBILITY THEREOF.
+
+6. This License Agreement will automatically terminate upon a material
+breach of its terms and conditions.
+
+7. Nothing in this License Agreement shall be deemed to create any
+relationship of agency, partnership, or joint venture between PSF and
+Licensee.  This License Agreement does not grant permission to use PSF
+trademarks or trade name in a trademark sense to endorse or promote
+products or services of Licensee, or any third party.
+
+8. By copying, installing or otherwise using Python, Licensee
+agrees to be bound by the terms and conditions of this License
+Agreement.
+
+
+BEOPEN.COM LICENSE AGREEMENT FOR PYTHON 2.0
+-------------------------------------------
+
+BEOPEN PYTHON OPEN SOURCE LICENSE AGREEMENT VERSION 1
+
+1. This LICENSE AGREEMENT is between BeOpen.com ("BeOpen"), having an
+office at 160 Saratoga Avenue, Santa Clara, CA 95051, and the
+Individual or Organization ("Licensee") accessing and otherwise using
+this software in source or binary form and its associated
+documentation ("the Software").
+
+2. Subject to the terms and conditions of this BeOpen Python License
+Agreement, BeOpen hereby grants Licensee a non-exclusive,
+royalty-free, world-wide license to reproduce, analyze, test, perform
+and/or display publicly, prepare derivative works, distribute, and
+otherwise use the Software alone or in any derivative version,
+provided, however, that the BeOpen Python License is retained in the
+Software, alone or in any derivative version prepared by Licensee.
+
+3. BeOpen is making the Software available to Licensee on an "AS IS"
+basis.  BEOPEN MAKES NO REPRESENTATIONS OR WARRANTIES, EXPRESS OR
+IMPLIED.  BY WAY OF EXAMPLE, BUT NOT LIMITATION, BEOPEN MAKES NO AND
+DISCLAIMS ANY REPRESENTATION OR WARRANTY OF MERCHANTABILITY OR FITNESS
+FOR ANY PARTICULAR PURPOSE OR THAT THE USE OF THE SOFTWARE WILL NOT
+INFRINGE ANY THIRD PARTY RIGHTS.
+
+4. BEOPEN SHALL NOT BE LIABLE TO LICENSEE OR ANY OTHER USERS OF THE
+SOFTWARE FOR ANY INCIDENTAL, SPECIAL, OR CONSEQUENTIAL DAMAGES OR LOSS
+AS A RESULT OF USING, MODIFYING OR DISTRIBUTING THE SOFTWARE, OR ANY
+DERIVATIVE THEREOF, EVEN IF ADVISED OF THE POSSIBILITY THEREOF.
+
+5. This License Agreement will automatically terminate upon a material
+breach of its terms and conditions.
+
+6. This License Agreement shall be governed by and interpreted in all
+respects by the law of the State of California, excluding conflict of
+law provisions.  Nothing in this License Agreement shall be deemed to
+create any relationship of agency, partnership, or joint venture
+between BeOpen and Licensee.  This License Agreement does not grant
+permission to use BeOpen trademarks or trade names in a trademark
+sense to endorse or promote products or services of Licensee, or any
+third party.  As an exception, the "BeOpen Python" logos available at
+http://www.pythonlabs.com/logos.html may be used according to the
+permissions granted on that web page.
+
+7. By copying, installing or otherwise using the software, Licensee
+agrees to be bound by the terms and conditions of this License
+Agreement.
+
+
+CNRI LICENSE AGREEMENT FOR PYTHON 1.6.1
+---------------------------------------
+
+1. This LICENSE AGREEMENT is between the Corporation for National
+Research Initiatives, having an office at 1895 Preston White Drive,
+Reston, VA 20191 ("CNRI"), and the Individual or Organization
+("Licensee") accessing and otherwise using Python 1.6.1 software in
+source or binary form and its associated documentation.
+
+2. Subject to the terms and conditions of this License Agreement, CNRI
+hereby grants Licensee a nonexclusive, royalty-free, world-wide
+license to reproduce, analyze, test, perform and/or display publicly,
+prepare derivative works, distribute, and otherwise use Python 1.6.1
+alone or in any derivative version, provided, however, that CNRI's
+License Agreement and CNRI's notice of copyright, i.e., "Copyright (c)
+1995-2001 Corporation for National Research Initiatives; All Rights
+Reserved" are retained in Python 1.6.1 alone or in any derivative
+version prepared by Licensee.  Alternately, in lieu of CNRI's License
+Agreement, Licensee may substitute the following text (omitting the
+quotes): "Python 1.6.1 is made available subject to the terms and
+conditions in CNRI's License Agreement.  This Agreement together with
+Python 1.6.1 may be located on the internet using the following
+unique, persistent identifier (known as a handle): 1895.22/1013.  This
+Agreement may also be obtained from a proxy server on the internet
+using the following URL: http://hdl.handle.net/1895.22/1013".
+
+3. In the event Licensee prepares a derivative work that is based on
+or incorporates Python 1.6.1 or any part thereof, and wants to make
+the derivative work available to others as provided herein, then
+Licensee hereby agrees to include in any such work a brief summary of
+the changes made to Python 1.6.1.
+
+4. CNRI is making Python 1.6.1 available to Licensee on an "AS IS"
+basis.  CNRI MAKES NO REPRESENTATIONS OR WARRANTIES, EXPRESS OR
+IMPLIED.  BY WAY OF EXAMPLE, BUT NOT LIMITATION, CNRI MAKES NO AND
+DISCLAIMS ANY REPRESENTATION OR WARRANTY OF MERCHANTABILITY OR FITNESS
+FOR ANY PARTICULAR PURPOSE OR THAT THE USE OF PYTHON 1.6.1 WILL NOT
+INFRINGE ANY THIRD PARTY RIGHTS.
+
+5. CNRI SHALL NOT BE LIABLE TO LICENSEE OR ANY OTHER USERS OF PYTHON
+1.6.1 FOR ANY INCIDENTAL, SPECIAL, OR CONSEQUENTIAL DAMAGES OR LOSS AS
+A RESULT OF MODIFYING, DISTRIBUTING, OR OTHERWISE USING PYTHON 1.6.1,
+OR ANY DERIVATIVE THEREOF, EVEN IF ADVISED OF THE POSSIBILITY THEREOF.
+
+6. This License Agreement will automatically terminate upon a material
+breach of its terms and conditions.
+
+7. This License Agreement shall be governed by the federal
+intellectual property law of the United States, including without
+limitation the federal copyright law, and, to the extent such
+U.S. federal law does not apply, by the law of the Commonwealth of
+Virginia, excluding Virginia's conflict of law provisions.
+Notwithstanding the foregoing, with regard to derivative works based
+on Python 1.6.1 that incorporate non-separable material that was
+previously distributed under the GNU General Public License (GPL), the
+law of the Commonwealth of Virginia shall govern this License
+Agreement only as to issues arising under or with respect to
+Paragraphs 4, 5, and 7 of this License Agreement.  Nothing in this
+License Agreement shall be deemed to create any relationship of
+agency, partnership, or joint venture between CNRI and Licensee.  This
+License Agreement does not grant permission to use CNRI trademarks or
+trade name in a trademark sense to endorse or promote products or
+services of Licensee, or any third party.
+
+8. By clicking on the "ACCEPT" button where indicated, or by copying,
+installing or otherwise using Python 1.6.1, Licensee agrees to be
+bound by the terms and conditions of this License Agreement.
+
+        ACCEPT
+
+
+CWI LICENSE AGREEMENT FOR PYTHON 0.9.0 THROUGH 1.2
+--------------------------------------------------
+
+Copyright (c) 1991 - 1995, Stichting Mathematisch Centrum Amsterdam,
+The Netherlands.  All rights reserved.
+
+Permission to use, copy, modify, and distribute this software and its
+documentation for any purpose and without fee is hereby granted,
+provided that the above copyright notice appear in all copies and that
+both that copyright notice and this permission notice appear in
+supporting documentation, and that the name of Stichting Mathematisch
+Centrum or CWI not be used in advertising or publicity pertaining to
+distribution of the software without specific, written prior
+permission.
+
+STICHTING MATHEMATISCH CENTRUM DISCLAIMS ALL WARRANTIES WITH REGARD TO
+THIS SOFTWARE, INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
+FITNESS, IN NO EVENT SHALL STICHTING MATHEMATISCH CENTRUM BE LIABLE
+FOR ANY SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT
+OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+ZERO-CLAUSE BSD LICENSE FOR CODE IN THE PYTHON DOCUMENTATION
+----------------------------------------------------------------------
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY
+AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
+LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
+OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
+PERFORMANCE OF THIS SOFTWARE.
 ```

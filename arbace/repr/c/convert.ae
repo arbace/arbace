@@ -49,6 +49,13 @@
 (def ^:dynamic *cx* nil)
 (defn- cx [k] (get *cx* k))
 
+(def ^:dynamic *include-inside*
+  "Queue 178: when true, a declaration whose other files' tokens all come from headers its own extent includes is the main
+  file's (included-inside?), not refused as :split-declaration. ci's libc read binds it (arbace.c.musl/read-one: five of
+  musl 1.2.6's sources include a table inside a declaration); the corpora's reads keep the refusal, since such a form
+  prints the table inline and the text levels need its #include."
+  false)
+
 (defn- main-tok? [t] (and (instance? PTok t) (some? (.-pf ^PTok t)) (identical? (.-pf ^PTok t) (cx :main-file))))
 
 ;; Each node's extent: [minSeq maxSeq minMainPo maxMainEnd main? other?] over its tokens (a token from a
@@ -319,6 +326,9 @@
 (defn float-literal
   "A floating constant's form (§8.3)."
   [^String text]
+  ;; an integer imaginary constant (GNU's 2i: _Complex int), which cc's parser takes as a floating one: the integer's form
+  (if (re-matches #"(0[xXbB][0-9a-fA-F']+|[0-9']+)[uUlL]*[ijIJ][uUlL]*" text)
+    (int-literal text)
   (let [s (digits-clean text)
         hex (or (.startsWith s "0x") (.startsWith s "0X"))
         [_ body suffix] (if hex
@@ -344,7 +354,7 @@
                       (and (not hex) (zero? (.compareTo (java.math.BigDecimal. (Double/toString d)) (java.math.BigDecimal. ^String body)))) (shortest-double d)
                       :else exact)))
         form (if t (list 'lit t v) v)]
-    (if imag (list 'imaginary form) form)))
+    (if imag (list 'imaginary form) form))))
 
 ;; Character constants and string literals: their code units
 
@@ -1237,11 +1247,40 @@
   (let [lbrace (g owner :Token)
         bis (vec (remove #(func-injected? % lbrace) (map #(g % :BlockItem) (chain bil :BlockItemList))))
         own (when lbrace (.-pf ^PTok lbrace))
-        out (ArrayList.)]
+        out (ArrayList.)
+        ;; CS274 (a): consecutive statements one invocation made whole (no directive between them): the first printed as the
+        ;; invocation, the others not (C3b.1's one statement extended)
+        ^HashMap groups (cx :groups)
+        multi (HashMap.)
+        _ (when groups
+            (loop [i 0]
+              (when (< i (count bis))
+                (let [bi (bis i)
+                      r (rng bi)
+                      gr (when (and (= (cs bi) :BlockItemStmt) (has-main? bi) (not (has-other? bi))) (.get groups (aget r 0)))
+                      j (when (and gr (< (aget r 1) (long (:max gr))) (not (.contains ^HashSet (cx :claimed) (aget r 0))))
+                          (loop [j (inc i)]
+                            (when (< j (count bis))
+                              (let [b2 (bis j) r2 (rng b2)]
+                                (cond
+                                  (or (not= (cs b2) :BlockItemStmt) (not (has-main? b2)) (has-other? b2) (seq (dirs-at owner j))) nil
+                                  (= (aget r2 1) (long (:max gr))) j
+                                  (< (aget r2 1) (long (:max gr))) (recur (inc j))
+                                  :else nil)))))]
+                  (if j
+                    (do (.put multi i [(:text gr) j]) (.add ^HashSet (cx :claimed) (aget r 0)) (recur (inc j)))
+                    (recur (inc i)))))))
+        mark! (fn [from t]
+                (doseq [k (range from (.size out))]
+                  (let [[kind f] (.get out k)]
+                    (.set out k [kind (addm f (if (= k from) {:c/macro-stmt t} {:c/macro-part true}))]))))
+        pending (atom nil)]
     (doseq [[i bi] (map-indexed vector bis)]
       (doseq [df (dirs-at owner i)] (.add out [:stmt df]))
-      ;; an item an #include inside the body brought in is the directive's
-      (when (or (nil? own) (some #(identical? (.-pf ^PTok %) own) (take 64 (node-tokens bi))))
+      (when-let [[t j] (.get multi i)] (reset! pending [(.size out) t j]))
+      ;; an item an #include inside the body brought in is the directive's; under *include-inside* (ci's read, CS275 (b)) the
+      ;; body's own item, as the libc's tables are the declaration's
+      (when (or *include-inside* (nil? own) (some #(identical? (.-pf ^PTok %) own) (take 64 (node-tokens bi))))
         (case (cs bi)
           :BlockItemDecl (let [d (g bi :Declaration)
                                t (group-of d)
@@ -1250,7 +1289,9 @@
                              (.add out [:decl (at d f)])))
           :BlockItemStmt (doseq [s (stmt-items (g bi :Statement))] (.add out [(if (and (seq? s) (= (first s) 'c/attr-decl)) :stmt :stmt) s]))
           :BlockItemLabel (.add out [:decl (Lv (cons 'c/local-labels (map #(keyword (tsrc (g % :Token2))) (chain (g (g bi :LabelDeclaration) :IdentifierList) :IdentifierList))))])
-          :BlockItemFuncDef (.add out [:decl (function-definition (g bi :DeclarationSpecifiers) (g bi :Declarator) nil (g bi :CompoundStatement) nil bi)]))))
+          :BlockItemFuncDef (.add out [:decl (function-definition (g bi :DeclarationSpecifiers) (g bi :Declarator) nil (g bi :CompoundStatement) nil bi)])))
+      (when-let [[from t j] @pending]
+        (when (= i j) (mark! from t) (reset! pending nil))))
     (doseq [df (dirs-at owner (count bis))] (.add out [:stmt df]))
     (vec out)))
 
@@ -1549,6 +1590,20 @@
         active (remove (fn [d] (and (not (.get fam (:off d)))
                                     (some (fn [[a b]] (< a (:off d) b)) inactive-ranges)))
                        active)
+        ;; CS275 (a): an executed family's group the main pass skipped, kept as its text (a c/directive of the lines between
+        ;; the family's two lines), for a file that includes itself, whose second pass takes it: placed with its family
+        active (sort-by :off (concat active
+                       (for [[a b] inactive-ranges
+                             :let [la (first (filter #(= (:off %) a) dls))
+                                   start (long (or (:end la) b))
+                                   ^bytes src (cx :main-bytes)]
+                             :when (< start (long b))
+                             :let [t (utf8-decode (String. src (int start) (int (- (long b) start)) "ISO-8859-1"))
+                                   t (if (.endsWith ^String t "\n") (subs t 0 (dec (count t))) t)]
+                             :when (not (str/blank? t))]
+                         (do (.put fam start (.get fam a))
+                             (.put fam-lines (.get fam a) (conj (.get fam-lines (.get fam a)) start))
+                             {:off start :inactive t}))))
         placed (IdentityHashMap.)
         where (HashMap.)
         place! (fn [owner items d]
@@ -1607,7 +1662,8 @@
               :when (and w (not (.contains drop (:off d))))]
         (let [[owner idx] w
               ^HashMap m (or (.get placed owner) (let [m (HashMap.)] (.put placed owner m) m))]
-          (.put m idx (conj (or (.get m idx) []) [(:off d) (vary-meta (directive-form d) assoc :line (line-of (:off d)))])))))
+          (.put m idx (conj (or (.get m idx) []) [(:off d) (vary-meta (if-let [t (:inactive d)] (list 'c/directive t) (directive-form d))
+                                                                         assoc :line (line-of (:off d)))])))))
     placed))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -1683,32 +1739,50 @@
         (recur)))
     (vec (sort-by #(.-seq ^PTok %) out))))
 
-(defn- header-root
-  "The main-file #include that brought `file` in (the layer's entries), its offset, or nil."
-  [^String file]
-  (let [^HashMap from (cx :enter-from)]
-    (loop [f file seen #{}]
-      (when-let [[parent off] (.get from f)]
-        (cond
-          (= parent (cx :main-name)) off
-          (seen parent) nil
-          :else (recur parent (conj seen f)))))))
+(defn entry-at
+  "queue 157 (review 130's finding 4): the entry a token of seq `sq` came from, by the parser's `entries` ([[seq entry] ...] in seq
+  order, each the first token of a run in one entry): the index in the layer of its file's enter record, nil for the main file's."
+  [entries sq]
+  (let [v entries]
+    (loop [lo 0 hi (dec (count v)) r nil]
+      (if (> lo hi)
+        r
+        (let [mid (quot (+ lo hi) 2) [s e] (nth v mid)]
+          (if (<= (long s) (long sq)) (recur (inc mid) hi e) (recur lo (dec mid) r)))))))
+
+(defn entry-root
+  "queue 157: the main file's #include an entry (an index in `layer`) descends from, by its enter records' :in, its offset, or nil."
+  [layer idx]
+  (loop [i idx n 0]
+    (when (and i (< n 64))
+      (let [e (nth layer i)]
+        (if (nil? (:in e)) (:off e) (recur (:in e) (inc n)))))))
 
 (defn- item-file [n] (when-let [t (first (node-tokens n))] (when-let [^CFile f (.-pf ^PTok t)] (.-name f))))
 (defn- item-off [n] (when-let [t (first (node-tokens n))] (.-po ^PTok t)))
+(defn- item-seq [n] (when-let [t (first (node-tokens n))] (.-seq ^PTok t)))
 
 (defn sys-changes
   "queue 136 (review 130's findings 2, 3): the preprocessor's system status changes (its layer's {:directive \"system\"}
-  records: a `#pragma GCC system_header`, a linemarker) by file, {path [[off system?] ...]} in offset order; a file
-  entered twice records its changes twice, the first record at an offset kept."
+  records: a `#pragma GCC system_header`, a linemarker) by entry (queue 157: the index of the file's enter record, as each entry
+  of a file entered twice executes its own), {entry [[off system?] ...]} in offset order, the first record at an offset kept."
   [layer]
   (into {} (for [[p m] (reduce (fn [m e]
                                  (if (= (:directive e) "system")
-                                   (update m (:file e) (fn [o] (let [o (or o (sorted-map))]
+                                   (update m (:entry e) (fn [o] (let [o (or o (sorted-map))]
                                                                  (if (contains? o (:off e)) o (assoc o (:off e) (boolean (:system e)))))))
                                    m))
                                {} layer)]
              [p (vec m)])))
+
+(defn sys-at
+  "queue 136 (review 130's findings 2, 3): a header form's system status: `base` (its entry's) as the preprocessor's changes `cs`
+  of its entry ([[off system?] ...] in offset order: a `#pragma GCC system_header`, a linemarker) before the form's offset `off`
+  leave it (libcpp: a pragma or a linemarker changes the status from the next line on)."
+  [base cs off]
+  (if (and off (seq cs))
+    (reduce (fn [s [co cv]] (if (< (long co) (long off)) cv s)) base cs)
+    base))
 
 (defn sha16 ^String [^String s]
   (let [d (.digest (java.security.MessageDigest/getInstance "SHA-256") (.getBytes s "UTF-8"))]
@@ -1735,6 +1809,27 @@
     :ExternalDeclarationEmpty []
     (refuse :declaration (str "external declaration " (cs ed)) ed)))
 
+
+(defn- included-inside?
+  "Queue 178: whether every token of the declaration `n` from another file than the main one comes from a file the main
+  file includes inside the declaration's extent (or one such a file includes): a table an initializer or a member list
+  includes, musl's src/errno/strerror.c including __strerror.h three times, ctype's punct.h, locale's codepages.h. The
+  declaration is the main file's then, its header tokens' nodes with no line of their own (pos-of); a declaration a
+  header begins or ends stays refused (:split-declaration)."
+  [layer ^String main-name n]
+  (let [lo (min-po n) hi (max-end n)
+        enters (filter #(= "enter" (:directive %)) layer)
+        direct (set (keep #(when (and (= main-name (:from %)) (<= lo (long (:off %)) hi)) (:path %)) enters))
+        inside (loop [s direct]
+                 (let [s2 (into s (keep #(when (contains? s (:from %)) (:path %)) enters))]
+                   (if (= s2 s) s (recur s2))))]
+    (and (seq inside)
+         (every? (fn [t] (let [^CFile f (.-pf ^PTok t)]
+                           (or (nil? f) (identical? f (cx :main-file)) (contains? inside (.-name f))
+                               ;; the main file entered again (pp's *reentry*: MAIN#again), included inside the declaration
+                               (and (= (.-name f) (str main-name "#again")) (contains? inside main-name)))))
+                 (filter #(instance? PTok %) (node-tokens n))))))
+
 (defn convert
   "The forms of a parse `r` ({:tree :layer}, arbace.repr.c.parse) of the main file `main-name` (its bytes
   `main-bytes`) read at the standard `std` (a keyword): {:forms [the main unit's forms], :units {ns
@@ -1748,72 +1843,118 @@
           main-file (some (fn [ed] (some (fn [t] (when (and (instance? PTok t) (.-pf ^PTok t) (= (.-name ^CFile (.-pf ^PTok t)) main-name)) (.-pf ^PTok t)))
                                          (node-tokens ed)))
                           eds)
-          enter-from (HashMap.)
           unit-of-off (HashMap.)]
-      (when (some #(and (= (:directive %) "enter") (= (:path %) main-name)) (:layer r))
+      ;; CS275 (b): ci's read (*include-inside*) takes the re-entered main file as a file of its own (the preprocessor gives it
+      ;; a CFile of its own); the text levels keep the refusal
+      (when (and (not *include-inside*) (not arbace.repr.c.pp/*reentry*)
+                 (some #(and (= (:directive %) "enter") (= (:path %) main-name)) (:layer r)))
         (refuse :self-include "the main file includes itself: its tokens are the main file's twice"))
-      (doseq [e (:layer r) :when (= (:directive e) "enter")]
-        (when-not (.containsKey enter-from (:path e))
-          (.put enter-from (:path e) [(:from e) (:off e)])))
       (binding [*cx* {:ranges ranges :main-file main-file :main-name main-name :main-bytes main-bytes :std std
                       :pieces parse/strlit-pieces :typedefs (atom {}) :claimed (HashSet.)
-                      :enter-from enter-from :unit-of-off unit-of-off :line-starts (line-starts main-bytes)}]
+                      :unit-of-off unit-of-off :line-starts (line-starts main-bytes)}]
         (compute-ranges! ranges tree)
         (let [groups (when main-file (compute-groups! (tu-tokens tree)))
               eds (vec (remove #(contains? #{"<builtin>" "<predefined>"} (item-file %)) eds))
+              ;; CS275 (a): a declaration whose other files' tokens all come from files it includes inside it is the main file's
+              ;; when each such #include stands between the items of a statement list (the print writes it there, the
+              ;; included items left to it: block-items); judged once the directives are placed (split-later)
+              split-later (ArrayList.)
               _ (doseq [ed eds]
                   (when (and (has-other? ed) (has-main? ed))
-                    (refuse :split-declaration "a declaration that begins in one file and ends in another" ed)))
+                    (cond
+                      (not (included-inside? (:layer r) main-name ed))
+                      (refuse :split-declaration "a declaration that begins in one file and ends in another" ed)
+                      *include-inside* nil
+                      :else (.add split-later ed))))
               main-eds (vec (filter has-main? eds))
               ;; header units first (their typedefs are the main file's too): each main-file include's
               ;; items, by the include that brought their file in
               hforms (java.util.LinkedHashMap.)
-              ;; review 110's finding 1: the file of each of a unit's forms (a nested header's are its own), for the checker
-              ;; to judge each by its own file's system status
-              hfiles (java.util.HashMap.)
-              ;; queue 136: each of a unit's forms' offset in its file, and the files' status changes, for the checker to judge a
-              ;; form by its place after a pragma or a linemarker (review 130's findings 2, 3)
-              hoffs (java.util.HashMap.)
-              chg (sys-changes (:layer r))
-              ;; each header's first enter record: {path {:system s :from includer}}
-              file-info (reduce (fn [m e] (if (or (not= (:directive e) "enter") (contains? m (:path e)))
-                                            m
-                                            (assoc m (:path e) {:system (boolean (:system e)) :from (:from e)})))
-                                {} (:layer r))
+              ;; queue 157 (review 130's finding 4): each of a unit's forms' system status, as the checker judges it: its entry's (the
+              ;; enter record of the entry its first token came from, the parser's :entries; a nested header's its own, review 110's
+              ;; finding 1), as the pp's changes in that entry before the form's offset leave it (a pragma, a linemarker: queue 136,
+              ;; review 130's findings 2, 3). Each entry of a header entered twice is judged by its own status, its forms in the unit of
+              ;; the main file's #include it descends from
+              hsys (java.util.HashMap.)
+              layer (vec (:layer r))
+              entries (vec (:entries r))
+              chg (sys-changes layer)
+              ;; each header's first enter record (a form whose first token is not its entry's file's, a macro's from another file:
+              ;; judged by its file's first entry, as before)
+              first-entry (reduce (fn [m [i e]] (if (or (not= (:directive e) "enter") (contains? m (:path e))) m (assoc m (:path e) i)))
+                                  {} (map-indexed vector layer))
               units (java.util.LinkedHashMap.)]
           (doseq [ed eds :when (not (has-main? ed))]
-            (let [file (item-file ed)]
-              (when-let [off (header-root file)]
+            (let [file (item-file ed)
+                  ;; the main file entered again (pp's *reentry*) is entered by the path it was included by
+                  file (if (and file (= file (str main-name "#again"))) main-name file)
+                  e (when-let [sq (item-seq ed)] (entry-at entries sq))
+                  e (if (and e (= (:path (nth layer e)) file)) e (get first-entry file))]
+              (when-let [off (when e (entry-root layer e))]
                 (let [^ArrayList a (or (.get hforms off) (let [a (ArrayList.)] (.put hforms off a) a))
-                      ^ArrayList af (or (.get hfiles off) (let [a (ArrayList.)] (.put hfiles off a) a))
-                      ^ArrayList ao (or (.get hoffs off) (let [a (ArrayList.)] (.put hoffs off a) a))
-                      fo (item-off ed)
+                      ^ArrayList asys (or (.get hsys off) (let [a (ArrayList.)] (.put hsys off a) a))
+                      sys (sys-at (boolean (:system (nth layer e))) (get chg e) (item-off ed))
                       fs (external ed)]
                   (.addAll a fs)
-                  (doseq [_ fs] (.add af file) (.add ao fo))))))
+                  (doseq [_ fs] (.add asys sys))))))
           (doseq [e (:layer r) :when (and (= (:directive e) "enter") (= (:from e) main-name))]
             (let [fs (vec (or (.get hforms (:off e)) []))
-                  ffs (vec (or (.get hfiles (:off e)) []))
-                  fos (vec (or (.get hoffs (:off e)) []))
-                  ns (str "c.h." (sha16 (str/join "\n" (map #(binding [*print-meta* true] (pr-str %)) fs))))]
+                  fsys (vec (or (.get hsys (:off e)) []))
+                  text (str/join "\n" (map #(binding [*print-meta* true] (pr-str %)) fs))
+                  ns (str "c.h." (sha16 text))
+                  ;; queue 157: an include whose forms an earlier include's unit already has (an unguarded header entered twice) is a
+                  ;; unit of its own, checked at its own #include with its own statuses (gcc judges each entry); its name hashed with
+                  ;; its rank among them (the first keeps the name of its forms alone, as every unit whose forms no other unit has)
+                  ns (if (seq fs)
+                       (loop [k 1 n ns] (if (.containsKey units n) (recur (inc k) (str "c.h." (sha16 (str text "\n#" k)))) n))
+                       ns)]
               (.put unit-of-off (:off e) ns)
-              (.put units ns (cond-> {:header (:raw e) :path (:path e) :system (boolean (:system e)) :forms fs
-                                      :form-offs fos :sys-changes (select-keys chg (distinct (cons (:path e) ffs)))}
-                               (some #(not= % (:path e)) ffs)
-                               (assoc :form-files ffs
-                                      ;; the forms' files and their includers up to the top header (a pragma's status is inherited)
-                                      :files (select-keys file-info
-                                                          (distinct (mapcat (fn [f] (take-while #(and % (not= % main-name))
-                                                                                                (take 64 (iterate #(:from (get file-info %)) f))))
-                                                                            (distinct ffs)))))))))
+              (.put units ns {:header (:raw e) :path (:path e) :system (boolean (:system e)) :forms fs :form-sys fsys})))
           (binding [*cx* (assoc *cx* :groups groups)]
-            (let [placed (place-directives! main-eds (:layer r))]
+            (let [placed (place-directives! main-eds (:layer r))
+                  placed-offs (set (for [^HashMap m (vals placed) [_ ds] m [off _] ds] off))
+                  _ (doseq [ed split-later
+                            :let [lo (min-po ed) hi (max-end ed)]
+                            e (:layer r)
+                            :when (and (= "enter" (:directive e)) (= main-name (:from e)) (<= lo (long (:off e)) hi))]
+                      (when-not (contains? placed-offs (:off e))
+                        (refuse :split-declaration "a declaration that begins in one file and ends in another" ed)))]
               (binding [*cx* (assoc *cx* :placed placed)]
                 (let [out (ArrayList.)
-                      items (ArrayList.)]
+                      items (ArrayList.)
+                      ;; CS274 (a): consecutive items one invocation made whole (their tokens exactly the invocation's, no
+                      ;; directive between them): the first form printed as the invocation (:c/macro-stmt), the others not
+                      ;; printed (:c/macro-part); one item alone is external's (C3b.1)
+                      multi (HashMap.) ; index of the first item -> [text index of the last]
+                      _ (when groups
+                          (loop [i 0]
+                            (when (< i (count main-eds))
+                              (let [ed (nth main-eds i)
+                                    r (rng ed)
+                                    gr (when (and (has-main? ed) (not (has-other? ed))) (.get ^HashMap groups (aget r 0)))
+                                    j (when (and gr (< (aget r 1) (long (:max gr))))
+                                        (loop [j (inc i)]
+                                          (when (< j (count main-eds))
+                                            (let [e2 (nth main-eds j) r2 (rng e2)]
+                                              (cond
+                                                (or (not (has-main? e2)) (has-other? e2) (seq (placed-at :top j))) nil
+                                                (= (aget r2 1) (long (:max gr))) j
+                                                (< (aget r2 1) (long (:max gr))) (recur (inc j))
+                                                :else nil)))))]
+                                (if j
+                                  (do (.put multi i [(:text gr) j]) (.add ^HashSet (cx :claimed) (aget r 0)) (recur (inc j)))
+                                  (recur (inc i)))))))
+                      part-until (atom -1)]
                   (doseq [[i ed] (map-indexed vector main-eds)]
                     (doseq [[off df] (placed-at :top i)] (.add out df) (.add items [off df]))
-                    (let [fs (external ed)]
+                    (let [fs (external ed)
+                          fs (cond
+                               (.containsKey multi i)
+                               (let [[t j] (.get multi i)]
+                                 (reset! part-until j)
+                                 (vec (cons (addm (first fs) {:c/macro-stmt t}) (map #(addm % {:c/macro-part true}) (rest fs)))))
+                               (<= i (long @part-until)) (mapv #(addm % {:c/macro-part true}) fs)
+                               :else fs)]
                       (doseq [f fs] (.add out f))
                       (when (seq fs) (.add items [(min-po ed) (first fs)]))))
                   (doseq [[off df] (placed-at :top (count main-eds))] (.add out df) (.add items [off df]))

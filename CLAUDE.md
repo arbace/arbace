@@ -30,7 +30,7 @@ Direction:
   toolchain as forms (`tamago/cmd/`, 2026-10-15).
 - goi, the interpreter of Go forms at the REPL, complete for Go 1.27.1 (GR1-GR10), a milestone on
   main (tag `arbace-interprets-go1.27.1-v1`, 2026-10-20): `$GOROOT/test`'s programs against gc,
-  1,471 of 1,837 pass at the tag (1,620 in `test/goi/check-linux-amd64.edn` since), none fail, the rest in the recorded classes of `bin/goi divergences`
+  1,471 of 1,837 pass at the tag (1,664 in `test/goi/check-linux-amd64.edn` since, 2026-11-04), none fail, the rest in the recorded classes of `bin/goi divergences`
   (doc/go/GOI-SPEC.md, "v1's divergences"); the same in the box on amd64 and in the emulated arm64
   VM. Then REAP, read, eval, AOT and print for Clojure, Java and Go, a milestone on main (tag
   `arbace-reaps-3-crops-v1`, 2026-10-27): the matrix of `bin/reap`, 12 of 12 cells checked, none failing,
@@ -38,7 +38,11 @@ Direction:
   milestone on main (tag `arbace-reaps-3-crops-v2`, 2026-11-01): the same matrix, 12 of 12 cells checked, none failing,
   every non-pass in a recorded class (doc/FULL-SUPPORT-SURVEY.md, "REAP v2's divergences"), with the efficient gate
   (doc/GATE-SURVEY.md, GT1-GT7), its clean run in a fresh clone recorded in
-  `test/gate/clean-arbace-reaps-3-crops-v2.edn`. Parked (the user,
+  `test/gate/clean-arbace-reaps-3-crops-v2.edn`. Then REAP for four crops, C joining (doc/C23-SURVEY.md, C8, C9), a
+  milestone on main (tag `arbace-reaps-4-crops-v1`, 2026-11-07): the matrix's 16 of 16 cells checked, none
+  failing, every non-pass in a recorded class (doc/FULL-SUPPORT-SURVEY.md, "REAP v3's divergences"), on the seed that
+  embeds C (`d5548e72`, verified 2026-11-05) and an audited clean run of the four crops over GT8's compressed corpora
+  within its budget (doc/GATE-SURVEY.md, GT8), recorded in `test/gate/clean-arbace-reaps-4-crops-v1.edn`. Parked (the user,
   2026-10-26): the box, the macOS UI, the iOS app (repr/haskell and repr/rust parked then too, unparked by the user
   2026-11-03: crops in progress again, as OCaml, Scheme and C++; Python surveyed). Now: doc/AGENDA.md.
 - Long term: Arbace is a standalone ecosystem, not binary compatible with Java. Java stays
@@ -110,7 +114,12 @@ Prior art:
   `test/arbace-go-aot-results.edn` (classes `test/clojure/divergences-aot.edn`), the two levels'
   disagreements listed (`bin/gate --full`'s `suite-aot`).
 - `bin/reap` (and `make reap`; REAP1, doc/FULL-SUPPORT-SURVEY.md, RPS3, RPS13): the REAP matrix,
-  read, eval, AOT and print for Clojure, Java, Go and C (four rows, 16 cells since C8, doc/C23-SURVEY.md §10), judged from the
+  read, eval, AOT and print for Clojure, Java, Go, C, C++, Scheme, OCaml and Python (eight rows, 32 cells since merge plan batch 1,
+  2026-11-07, the rows' branches merged: four rows, 16 cells since C8, doc/C23-SURVEY.md §10; C++'s since CX10,
+  doc/cpp/CPP-SURVEY.md, "As built: CX10 (write-ahead)", "As built: cppi-check": C++'s read the token check's `test/repr/cpp/pp-check-known.edn` with its results
+  `pp-check-results.edn` (`:c-known`'s `:id-sep "/"`) and CX9's dg record, eval and AOT CX8's `test/cpp/check{,-aot}-linux-amd64.edn` and the sampling's
+  `check{,-aot}-every-25-linux-amd64.edn` (cppi-check; the lowering's `test/cpp/lower-results.edn` beside, reader `:cpp-lower`), print the round trip's `test/repr/cpp/roundtrip-results/`
+  and known file (reader `:cpp-roundtrip`), classes `test/cpp/divergences{,-read,-aot,-print,-dg,-lower}.edn`), judged from the
   checks' recorded results alone (no runs): the cells and their sources in `test/reap/cells.edn`, the judging in
   `test/reap/main.ae`, each level's classes in `test/goi/divergences.edn`'s format
   (`test/clojure/divergences{,-read,-aot,-print}.edn`, `test/repr/go/divergences-{read,print}.edn`,
@@ -118,9 +127,42 @@ Prior art:
   records `test/c/check{-linux-amd64,-aot-linux-amd64,-dg-linux-amd64}.edn` and the known files of `test/repr/c/`, the reader
   `:c-known`; Go's read numbers `test/repr/go/native-check-results.edn`,
   `bin/reap record-native-check`); the C known files' results files (`test/repr/c/{pp-check,parse-check,annot,roundtrip}-results.edn`,
-  CS240 (a)) do not exist until the full runs write them: C's read and print cells count their non-passes only until then; a cell whose check
+  CS240 (a)), written by the full runs' `--record` since C9.2's window (2026-11-02), give C's read and print cells their passes; a cell whose check
   is not recorded yet prints "no check yet".
+  Scheme's row since SM9 (doc/scheme/SCHEME-SURVEY.md, "As built: SM9 (write-ahead)"): its records one map a case
+  (`test/scheme/check{,-aot,-r7rs,-srfi,-chibi-tests,-ecraven,-mats}-linux-amd64.edn`, the reader `:scheme`, the class an item records
+  held to the matrix's), repr/scheme's read and print records `test/scheme/{check-read,roundtrip}-results.edn` (`bin/repr-scheme check
+  --record`, `roundtrip --record`, whole runs), classes `test/scheme/divergences{,-aot,-corpora,-read,-print}.edn`; the mats and Chibi's
+  own (chibi test) beside; the row counts as many rows as `cells.edn` has.
+  OCaml's row since O8 (doc/ocaml/OCAML-SURVEY.md, "As built: O8 (write-ahead)"): the reader `:ocaml` (rows
+  `[ID RESULT REASON ...]`, RESULT a string), eval `test/ocaml/check-oi.edn` and `check-suite-oi.edn` (oi against ocamlc's recorded
+  runs), AOT `check-aot.edn` and `check-suite-aot.edn` (the light level, OC87 (a)), read and print `test/ocaml/{read,print}-results.edn`
+  (repr/ocaml's round trip over the 16 corpora against ocamlc's own parser, `bin/repr-ocaml roundtrip --record-results`, a corpus's rows
+  replaced, from a passing run), classes `test/ocaml/divergences{,-suite,-aot,-suite-aot,-read,-print}.edn` (`:corpus` by design,
+  `:light` deferred).
+  Python's row since PY10 (doc/python/PYTHON-SURVEY.md §10.1, "As built: PY10"; the Mac VM's line): read repr/python's `:lines`
+  round trip and the native reader's token and tree checks (`test/python/{roundtrip,lex-check,parse-check}-known.edn` with their
+  results files), eval `bin/pyi check` over Lib/test (`test/python/check-lib-test-linux-amd64.edn`, against CPython 3.14.10's
+  `ref-cpython314-lib-test*.edn`, reader `:results` with `:py-ref`) and pyi's compiled loop, AOT `bin/pyi check --aot`
+  (`check-aot-linux-amd64.edn`, reader `:pyi-aot`), print the `:full` round trip; eval and AOT "no check yet" until Python's amd64
+  records night writes them.
   `bin/clojure-tests --divergences [RESULTS]` judges a suite run per test against the Clojure classes.
+- `bin/crops-score` (and `make crops-score`; doc/CROPS-SCORE.md): each of the eleven crops' completeness (the REAP cells'
+  pass / (pass + by design + deferred + pending) from a tree's `test/reap/matrix.edn`), maturity (a checklist measured on the
+  tree: cells recorded, none unclassed, negative controls, gate steps, a REAP row, records without a host path) and
+  independence (per stage, read, eval, AOT, print and judge, the reviewed facts of `test/crops/independence.edn`
+  cross-checked with the tree's gate steps' toolchain hosts), from the records alone: the checkout, `--ref REF` (git show)
+  or `--newest` (each crop's newest held branch on the remote mac); `crops.score` (`test/crops/score.ae`), its crops
+  `test/crops/crops.edn`; the scores of the checkout recorded in `test/crops/scores.edn` (`--record`; any difference fails),
+  completeness also without by design (CSP4); the essential step `crops-score` (`--judge --strict`, beside `reap`; CSP1 (b),
+  the user, 2026-11-06).
+- `c/`: Arbace's own C target, x86_64-linux-musl (c/README.md; doc/C23-SURVEY.md, "As built: C's own target"): `c/include/`
+  (Arbace's headers, clean-room from C23 and the AMD64 ABI) and `c/target/` (the description repr/c reads: predefined macros
+  and `__has_` answers made by `test/c/target.ae` from `abi.edn` and `dialect.edn`, `bin/repr-c target gen|verify|oracle`),
+  with musl 1.2.6's headers from its tarball, assembled into a sysroot by `bin/lib/repr-c/sysroot.bash` (`ARBACE_C_SYSROOT`,
+  read by repr/c's preprocessor and tools/ccdump); the default (`ARBACE_C_TARGET=gcc`: gcc's recorded `test/c/host/` and the
+  host's headers, the oracle tier's). C's checks judge each test by its own verdict (the user, 2026-11-07; `test/c/selfref.ae`,
+  `bin/ci selfref`; `ARBACE_C_JUDGE=gcc`: gcc's runs and records, by hand); no C step runs gcc.
 - `LICENSE.md` holds all licenses: their full texts and which files each covers. Licenses are
   stated nowhere else, apart from the notices source files came with, which stay. Extend it when
   vendoring from a new source.
@@ -222,8 +264,8 @@ Prior art:
     token for token against cc run by the helper `tools/ccdump` over `test/c/corpora.edn` and against gcc
     (`bin/repr-c check`, `parse-check`; the parse level's reference is gcc's acceptance, CS61; the Makefile's
     `repr-c-*`), embedded and compiled with the program since C9 (CS100 (b), doc/C23-SURVEY.md "As built: C9 (preparation)"), with ci's `arbace/c` and
-    `arbace.lang.CInterp`, so in `gate_key` (the committed seed predates it: stage 0 built from the seed evaluates them from the
-    checkout, the executables built from this tree carry them, until the re-seed); `arbace/repr/c/` also holds `convert`, `print`, `layout` and
+    `arbace.lang.CInterp`, so in `gate_key` (the seed embeds them compiled since C9.2's re-seed, `1fe1063f`: a change to them reruns
+    the whole `--full`, and stage 0 evaluates a changed one from the checkout until the next re-seed); `arbace/repr/c/` also holds `convert`, `print`, `layout` and
     `annot` (`bin/repr-c read`, `print`, `roundtrip`). ci, C's eval (doc/C23-SURVEY.md §6; `bin/ci`: `run`, `check`, `check --aot`, `dg`,
     `annotations`, `repl-session`, `c2j-check`, `cinterp-check`, `judge-test`; `arbace/c.ae` and `arbace/c/`: the checker, the builder,
     musl 1.2.6 as C forms, cf2g's Go; `go/arbace/{ci,cinterp,crt}`, its back end; `tools/cirun`, the light path; the Makefile's `ci-*`).
@@ -231,12 +273,45 @@ Prior art:
     `c-dg-essential`, `c-check-essential`, `c-aot-essential`, `c-c23` in the essential gate, and `c-c2j` (C9 preparation: `bin/ci c2j-check`,
     ci's and repr/c's namespaces compiled by c2j alone), `c-judge-test` in `--full`; the
     subsets `test/c/essential-{dg,check,aot}.txt`) and its row of `bin/reap` is judged by the `reap` step. C's full runs (`bin/ci check`,
-    `check --aot`, `dg`, `annotations`, `bin/repr-c check --tokens`, `parse-check`, `roundtrip`) are in no gate step: their records are
-    recorded by hand (`--record`) and `bin/reap` judges the records.
+    `check --aot`, `dg`, `annotations`, `bin/repr-c check --tokens`, `parse-check`, `roundtrip`) are heavy `--full` steps since 2026-11-02,
+    which judge the records and never `--record`: the records are recorded by hand (`--record`), and `bin/reap` judges them.
   - The other crops, repr/ocaml (`bin/repr-ocaml`, `bin/oi`), repr/scheme (`bin/repr-scheme`, `bin/si`), repr/cpp and repr/llvm
-    (`bin/repr-cpp`, `bin/repr-llvm`, `bin/cppi`): their namespaces (`arbace/repr/{ocaml,scheme,cpp,llvm}`, `arbace/scheme/`,
-    `arbace/cpp/`) are evaluated from the checkout, not embedded and out of `gate_key` (`arbace/j2g/embed.ae`'s exclusions); no gate step
-    runs them.
+    (`bin/repr-cpp`, `bin/repr-llvm`, `bin/cppi`), repr/python and pyi (`bin/repr-python`, `bin/pyi`; doc/python/PYTHON-SURVEY.md, the
+    Mac VM's line, merged with batch 1): their namespaces (`arbace/repr/{ocaml,scheme,cpp,llvm,python}`, `arbace/scheme/`, `arbace/cpp/`,
+    `arbace/python/`) are evaluated from the checkout, not embedded (`arbace/j2g/embed.ae`'s exclusions; pyi's embedding waits for the
+    re-seed window W, PYS18 (a)), and out of every key: since the keys commit (PYS30 (a), the user 2026-11-04; batch 1, 2026-11-07)
+    one list, `bin/lib/version.bash`'s `arbace_crop_paths` (the crops' namespaces, their Go forms `go/arbace/{oi,scm,scminterp,py,
+    expat,pyexpat,hs,libm}` and pyi's lazy modules `go/arbace/{clib,pybz2,pylzma,pyzstd,pyssl,pysqlite3}`, OCaml's `jdk/ocaml/`, the
+    crops' script libraries `bin/lib/{oi,repr-cpp,cppi,rsi,hsi,si,pyi,repr-*,crops}`), is left out by `gate_key`, `gate_rest_key`,
+    `arbace_runtime_key`, `arbace_embedded_sources`, `arbace_javac_key` and `arbace_javac_rest_key`, and the audit's hosts take it
+    (`test/gate/audit.ae`'s `crop-rules`; `test/gate/gate-key-crops-test.bash`): a crop's commit under it moves none of the keys.
+    Since batch 1, C++'s, Scheme's and OCaml's steps are in the gate (GT9, doc/GATE-SURVEY.md, "As built: GT9 (write-ahead)",
+    GTS210-GTS223, GTS240-GTS247): spliced into `test/gate/steps.edn` from their fragments `test/gate/crops/{cpp,scheme,ocaml}.edn`
+    (`gate.crops splice`, `test/gate/crops.ae`; `gate.crops check`: every new crop's step declares `:mem-gib`, its essential checks
+    at most 3 GiB, every check a negative control in `:controls` or a waiver), their hosts as data (`:host-ids` `:cxx :chez :chibi
+    :ocaml`, beside `:gcc`; `bin/gate`'s `gate_host_id`), their pins `:crop-pins` (`bin/gate --pins`), their light `:full` chains
+    beside the serial run (`:night-concurrent`, GTS216; `bin/gate --plan` names them), their budgets `:new-crops` and `:shares`
+    (`bin/gate --costs`); the rotations take GT9's verbs (`--only-list`, `--cmi-only`, `--no-expect`; test/{ocaml,cpp}/subsets.edn).
+    The fragments of later batches (llvm-rust, natives, haskell, cpp-native, python) wait in `test/gate/crops/`.
+    C++'s since CX10 (doc/cpp/CPP-SURVEY.md, "As built: CX10 (write-ahead)"), on stage 0 with the host's g++
+    and clang++ (the host `:cxx`; `bin/gate --pins` runs `bin/repr-cpp pins check` and `host check`, `:crop-pins :cpp`):
+    essential `cpp-read-essential` (`bin/repr-cpp pp-check --essential`, `test/cpp/essential-read.txt`; `--only FILE`, CORPUS/NAME a line,
+    `--record-results`), `cpp-print-essential` (`bin/repr-cpp roundtrip-corpus gxx-dg-essential` and `samples`: a recorded list made by its
+    key, `test/cpp/essential-print.txt` held to `roundtrip-results/gxx-dg-essential.edn`), `cpp-lower-essential` (`bin/cppi lower-essential`,
+    `test/cpp/essential-lower.txt`), about 2 minutes warm; `--full` `cpp-selftest`, `cpp-tokens`, `cpp-roundtrip` and `cpp-lower` (`bin/cppi
+    lower-corpus KEY`), a part a recorded list; `make cpp-essential`. Since cppi-check (2026-11-05; "As built: cppi-check") CX8's run checks too:
+    essential `cpp-check-essential` (`bin/cppi check --only test/cpp/essential-check.txt`; cppi-check's `cpp-aot-essential`, 4 GiB, is not a step: GTS215's 3 GiB), `--full` `cpp-check` and
+    `cpp-aot`, parts the recorded corpora samples and runtime (`test/cpp/check{,-aot}-linux-amd64.edn`) and the sampling `--sample 25` of gxx-dg-run
+    (`test/cpp/check{,-aot}-every-25-linux-amd64.edn`: a `--sample N` run is held to and `--record`ed into its own record), against g++ 15.2's runs
+    `test/cpp/ref-gxx15.edn` (reap's `:ref-corpora`); CX9's `cpp-dg` (`bin/repr-cpp dg`), `cpp-runtime` (the lowered runtime, a build step), `cpp-roundtrip-dg` (rotated) and `cpp-c2j` with GT9's fragment.
+    Scheme's since SM9: repr/scheme against Chez 10.3.0 run live (the host `:chez`) and si's light driver
+    (`go/arbace/scm` built alone by TamaGo's go, not Arbace's executable) against Chez's and Chibi's recorded runs, the corpora fetched
+    by pin into the main checkout's `.tmp/scheme/corpora` (a worktree's and the clean clone's too); `--corpus ID` (`bin/repr-scheme
+    check`, `roundtrip`) and `--only LIST` (`bin/si check`, `ecraven`, `mats`) select parts, a partial run judged on what it ran.
+    OCaml's since O8: repr/ocaml against the host's OCaml 5.5.0 (the host `:ocaml`: ocamlc, ocamlopt, compiler-libs,
+    the oracle `tools/ocdump` built live) and oi's light driver (`go/arbace/oi` built alone by TamaGo's go) against ocamlc's and
+    ocamlopt's recorded runs, the corpora fetched by pin into the checkout's `.tmp/repr-ocaml`; `--corpus ID` (`bin/repr-ocaml
+    roundtrip`; `opam`, `all`) and `--only-list FILE` (`bin/oi check [--aot]`, `suite check [--aot]`) select parts.
   - `arbace/repr/clojure{.ae,/}`: `arbace.repr.clojure`, Clojure's bridge (`doc/REPR-CLOJURE.md`;
     `bin/repr-clojure read`, `print`, `roundtrip`, `check`): Clojure source into Arbace's, the
     names of the vendored Clojure, `.clj`/`.cljc` into `.ae`, a table of rules for the dialects'
@@ -320,7 +395,7 @@ Prior art:
   mixed) against their runs (`bin/gate` the `mixed` sample and `bad-go`, the one that must not build, `make programs-essential`; `--full` all). Its namespaces are compiled to Go (`ARBACE_AOT=1`, the
   default since S6; `ARBACE_AOT=0`: evaluated from the image of prepared namespaces, as before):
   by the host when its runtime (`bin/lib/version.bash`'s `arbace_runtime_key`: `arbace/lang`,
-  `go`, `overlay/jdk`, `jdk` but j2g's edge, `jdk/javac/`, `jdk/provenance.edn` and `overlay/jdk/javac/`) is the checkout's, one j2g run, started as the host
+  `go`, `overlay/jdk`, `jdk` but j2g's edge, `jdk/javac/`, `jdk/provenance.edn`, `overlay/jdk/javac/` and `arbace_crop_paths`) is the checkout's, one j2g run, started as the host
   compiles them (SA160), about 2.5 to 3 minutes; else by a first build of the program, two runs, about
   5.5 minutes (after a change to the runtime). The test build reuses the shipped build's compiled namespaces when made from the same sources and
   runtime (`target/arbace-go/aot.key`); `bin/build-go` keeps a cache of printed packages
@@ -367,11 +442,15 @@ Prior art:
   before the first line), the JDK's runs recorded as data (`test/java/ref-jdk26.edn`, `--record-ref` with
   the system's JDK, `--only` keeping and checking every other line; the check needs no JVM), the levels `read` (repr/java on javac's tool executable), `nread` (JFS123 (b), outside the gate: the read without javac, `bin/repr-java read --no-javac`, its forms against `read`'s byte for byte, `test/java/check-nread.edn`, `make java-check-nread`),
   `interp` (each package required file by file as the REPL loads it, `--load do` the one-`do` mode, and
-  `main` run on the executable, `test/java/run.ae`; status and stdout's digest, also with identity hash
-  codes masked, against the JDK's), `compiled` (JC2, "As built: JC2": the tests translated by j2g in
+  `main` run on the executable, `test/java/run.ae`; since JCV1 (the user's decision of 2026-11-07, "As built: JCV1")
+  a test `test/java/verdicts.edn` marks `:status` (`bin/java-check verdicts`: its source set can fail by itself, or it prints
+  nothing) judged by its own verdict, jtreg's (status 0, no other thread's exception uncaught), the rest (`:stdout`) by
+  status and stdout's digest, also with identity hash codes masked, against the JDK's), `compiled` (JC2, "As built: JC2": the tests translated by j2g in
   shards of programs, `bin/j2g --program` with the build's compiled namespaces (`program_base`'s, RPS161 (b); `JAVA_CHECK_AOT` overrides) and `bin/build-go`, a
   test j2g refuses or whose Go does not compile taken out, each `main` run on its program) and `classes`
-  (javac on Arbace's class files against the JDK javac's), results against `test/java/check-LEVEL.edn` (`--record`),
+  (javac on Arbace's class files against the JDK javac's; since JCV1 javac's acceptance, the digest the oracle tier's), results
+  against `test/java/check-LEVEL.edn` (`--record`; the JDK's record's judgment, rows `LEVEL.jdk`, is the oracle tier's, by hand at a tag:
+  `bin/java-check --judge --oracle [--latest-saved]` against `test/java/oracle/`),
   every test not passing in a class of `test/java/divergences.edn`; the namespace `java.check`
   (`test/java/check.ae`) on the tools' host; the essential subset's forms committed in `test/java/forms/`
   (`--forms verify|update`); `diagnostics` (JC3, "As built: JC3"): langtools' golden-diagnostics tests
@@ -452,10 +531,9 @@ Prior art:
   the worktree's `target/seed`, `bin/seed --link`, GTS83 (a)), the executable and the test build by stage 0 (`bin/arbace-go
   --gate-build`, cached by key in `ARBACE_GATE_EXES/KEY20` (`KEY20` the first 20 characters of `bin/arbace-go --gate-key`; the one function `bin/lib/gate-cache.bash`'s `arbace_gate_cache` computes it for the gate and for the scripts run by hand; `ARBACE_GATE_CACHE` overrides, and a miss replaces only a directory of its own making, built beside it and swapped in under a lock, so a second run waits and then hits), and keyed by a hash of what they are built from,
   `gate_key`: `arbace/` less the namespaces no executable embeds (`bin/lib/version.bash`'s `arbace_embedded_sources`:
-  repr/java, repr/haskell, repr/rust, repr/ocaml, repr/scheme, `arbace/scheme`, repr/cpp, repr/llvm,
-  `arbace/cpp`), `go/` less the crops' Go forms (`go/arbace/{oi,scm}`; ci's, cinterp's and crt's are in it since C9: j2g copies them into the program), `overlay/` and `jdk/` less
+  repr/java and `arbace_crop_paths`' namespaces), `go/` less the crops' Go forms (`arbace_crop_paths`'; ci's, cinterp's and crt's are in it since C9: j2g copies them into the program), `overlay/` and `jdk/` less
   javac's world, `jdk/platform/`, OCaml's `jdk/ocaml/` and the provenance files, `x509roots/`, the fixtures' forms,
-  `bin/lib` (less the repr checks', the crops' `ci/`, `oi/`, `repr-cpp/` and `gate-run.bash`; queue 111: no build
+  `bin/lib` (less the repr checks', C's `ci/`, `arbace_crop_paths`' libraries and `gate-run.bash`; queue 111: no build
   reads them), since GT7 `tamago/goroot` and `tools/godump` (goi's table), the build's scripts, the
   seed's and Go's pins, Go's `VERSION` and `ARBACE_HOST_EXE`'s bytes when set; seconds when unchanged, else two Go-hosted builds, about 8 minutes: the
   test build reuses the executable's compiled namespaces), then
@@ -473,7 +551,7 @@ Prior art:
   since GP7 repr/go's generated Go forms, the dumper `go/arbace/repr/go/godump` and the renamed copy of gc's
   syntax `go/arbace/repr/go/internal/syntax`, regenerated and compared with the committed files), and since 2026-10-24 `bin/j2g-edge verify` on the
   frozen JVM (j2g's edge recorded afresh: an embedded namespace's new JDK class makes `jdk/edge.edn`
-  stale), and `bin/reap` (REAP1: the REAP matrix judged from the checks' recorded results, seconds), and since REAP8 the new levels' essential subsets (doc/FULL-SUPPORT-SURVEY.md, "As built: REAP8"): `bin/goi check --aot --essential` (`test/goi/essential-aot.txt`), `bin/java-check --essential-compiled` (the essential tests that pass compiled, one program cached by key) and `bin/clojure-tests --aot --essential` (`test/clojure/essential-aot.txt`'s namespaces compiled alone, cached by key), and since REAP7b `bin/arbace-go --build-program --check mixed` (a user's program of the three languages, its Go package compiled through its own goi table, built on the gate's executable, cached by key, and run; `--full` all of `test/programs/`), the heavy steps, the whole-program j2g runs among them, one at a time under the heavy lock. `bin/gate --full` adds, one after another (concurrently by chain with
+  stale), and `bin/reap` (REAP1: the REAP matrix judged from the checks' recorded results, seconds), and since REAP8 the new levels' essential subsets (doc/FULL-SUPPORT-SURVEY.md, "As built: REAP8"): `bin/goi check --aot --essential` (`test/goi/essential-aot.txt`), `bin/java-check --essential-compiled` (the essential tests that pass compiled, one program cached by key) and `bin/clojure-tests --aot --essential` (`test/clojure/essential-aot.txt`'s namespaces compiled alone, cached by key), and since REAP7b `bin/arbace-go --build-program --check mixed` (a user's program of the three languages, its Go package compiled through its own goi table, built on the gate's executable, cached by key, and run; `--full` all of `test/programs/`), and since SM9 Scheme's essential subsets, about 1.5 minutes in two chains (`si-essential`: `bin/si unit`, `test --si`, `check --only test/scheme/essential-check.txt` with the negative controls, `r7rs`, `srfi`; `si-aot-essential`: `check --aot --only test/scheme/essential-aot.txt`; `scheme-read-essential`: repr/scheme's read check and round trip over every corpus but whimsical, `spec-check`, `bin/si corpora files`; the hosts `:chez` and `:chibi`, Chez's and Chibi's identities, in `bin/lib/gate-run.bash`), and since O8 OCaml's essential subsets, about 1.5 minutes in two chains (`oi-essential`: `bin/oi test`, `repl-check`, `check --only-list test/ocaml/essential-check.txt`, OC67 (a), with the negative control; `oi-divergences`: the four judgments of the records, OC160 (a); `ocaml-read-essential`: `bin/repr-ocaml corpus check`, `roundtrip --cmi samples stdlib`, `--spec`, `spec-check`, `embed-check`; no AOT step, OC95 (a); the host `:ocaml` in `bin/lib/gate-run.bash`), the heavy steps, the whole-program j2g runs among them, one at a time under the heavy lock. `bin/gate --full` adds, one after another (concurrently by chain with
   `GATE_FULL_PARALLEL=1`): javac's tool (`bin/javac-vendor tool`, built once per `arbace_javac_key`
   and kept by that key in `ARBACE_GATE_EXES/javac-KEY`, j2g on the gate's executable) and javac on Arbace (`bin/javac-vendor
   check --from`: the tool build's own j2g run, javac's world translated once; `verify`:
@@ -494,7 +572,7 @@ Prior art:
   `bin/arbace-go --fixpoint --g1 "$GATE_CACHE"` (G1 the gate's build, `ARBACE_GATE_EXES/KEY20`, G2 and G3 built; `GATE_FRESH_G1=1`: G1 built afresh; a `--g1` directory not at the checkout's `gate_key` builds G1 too, three Go-hosted builds), then `bin/clojure-tests --aot` (Clojure's suite compiled, REAP3), then `bin/arbace-go --build-program --check` (every sample, REAP7b); repr/go's round trips (`bin/repr-go roundtrip amd64`, `linux/amd64`, and
   `--text amd64`, each again with `--dirs`: mode `:full` printed back to the original text, byte for byte; then `bin/repr-go native-check --fresh`: the native reader's headers and trees equal to the helper's over every corpus, its raw forms resolved by the final ones, and the final forms of its dumps annotated by goi's checker equal to the helper's, as data and as `.ae` text in both modes), `bin/x509roots-vendor verify`, `check` (in the `repr-go` step); goi (`bin/goi
   annotations`, `test --gc`, `check --jobs 8`, then `check --aot --jobs 8`, after repr/go's round trips); then repr/clojure's
-  (`bin/repr-clojure check`, `--suite`, `--roundtrip`); and last C's: `bin/ci judge-test`, then since 2026-11-02 its full checks as heavy steps, a part a corpus, judged against the records and never `--record` (`bin/ci check` on the gate's executable, `check --aot`, `dg`, `annotations`, `bin/repr-c check --tokens`, `parse-check`, `roundtrip`; doc/C23-SURVEY.md, "As built: C's full checks in the gate"; C's pins, gcc's and musl's tarballs and `test/c/host/`, in `bin/gate --pins`). Parked by the user, 2026-10-26, and out
+  (`bin/repr-clojure check`, `--suite`, `--roundtrip`); and last C's: `bin/ci judge-test`, then since 2026-11-02 its full checks as heavy steps, a part a corpus, judged against the records and never `--record` (`bin/ci check` on the gate's executable, `check --aot`, `dg`, `annotations`, `bin/repr-c check --tokens`, `parse-check`, `roundtrip`; doc/C23-SURVEY.md, "As built: C's full checks in the gate"; C's pins, gcc's and musl's tarballs and `test/c/host/`, in `bin/gate --pins`); then Scheme's (SM9, light, about 25 minutes nightly and 55 whole): `scheme-read`, `scheme-roundtrip` a part a corpus (the probes, the scans, the SRFIs as one), `si-check` (with `bin/si test`, `fixpoint`, `check-suite`, `vendor verify`, `boot --check` on Chez), `si-aot` (with `srfi --aot`), `si-corpora` (R7RS's, the SRFIs, Chibi's tests on Chibi, `corpora files|divergences`), `si-ecraven` (`SI_TIMEOUT=300`) and `si-mats`, these two with GT8.4's `:rotate` over `test/scheme/subsets.edn`. Then OCaml's (O8, light, the chain `ocaml-full`): `ocaml-roundtrip` a part a corpus (`--cmi`: the trees, `:full` byte for byte, the `.cmi`; the opam set one part), `ocaml-dumps`, `oi-check` (with `suite check`, `suite rollup`), `oi-aot` and `oi-suite-aot` (the light level, GT8.4's `:rotate` over `test/ocaml/subsets.edn`), `ocaml-judges` (`bin/oi judges-test`: OC120 (b)'s tests, OC130 (b), OC112 (b)'s expect check). Parked by the user, 2026-10-26, and out
   of `--full` (kept as they are, run by hand with their scripts and Makefile targets, revisited later
   piece by piece): the box (`bin/arbace-go --build --box` with `bin/tamago-vendor check`, the box's smoke test, oracle
   subset, `bin/box-suite`, `bin/goi check --box`, `bin/box-vendor roundtrip`, `kvm-tests`, `purego-check`),
@@ -517,12 +595,13 @@ Prior art:
   repo, path and commit/tag for anything studied or vendored. Never edit or delete past entries.
   Correct them with a new entry. Write it so the progress could be recreated from it. At each
   freeze, and after the milestones `arbace-inside-itself-v1`, `arbace-interprets-go1.27.1-v1`,
-  `arbace-reaps-3-crops-v1` and `arbace-reaps-3-crops-v2`,
+  `arbace-reaps-3-crops-v1`, `arbace-reaps-3-crops-v2` and `arbace-reaps-4-crops-v1`,
   main's journal started over, by the user's decision: the history up to 2026-10-08 is on
   `arbace-for-java-26`, from then to 2026-10-11 on `arbace-for-golang`, from then to 2026-10-15 at
   the tag `arbace-inside-itself-v1`, from then to 2026-10-20 at the tag
   `arbace-interprets-go1.27.1-v1`, from then to 2026-10-27 at the tag `arbace-reaps-3-crops-v1`, from then to
-  2026-11-01 at the tag `arbace-reaps-3-crops-v2`, and all of it in git.
+  2026-11-01 at the tag `arbace-reaps-3-crops-v2`, from then to 2026-11-07 at the tag `arbace-reaps-4-crops-v1`, and
+  all of it in git.
 - When vendoring code from prior art, record its origin (repo, path, revision) in the journal and
   next to the vendored code (for `arbace/`, which holds only `.ae` files: `doc/ARBACE.md`), and
   its license in `LICENSE.md`.

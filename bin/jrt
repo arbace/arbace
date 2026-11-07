@@ -37,7 +37,9 @@
 #        bin/jrt modules [--check]
 #            regenerate go/arbace/jrt/module_table.ae, the package-to-module table of Class.getModule
 #            (RPS80 (b)): the packages of the named modules but java.base that jdk/javac/sources.txt
-#            lists (java.compiler, java.xml, jdk.compiler, jdk.internal.opt), from the sources' lists
+#            lists (java.compiler, java.xml, jdk.compiler, jdk.internal.opt), and the other modules'
+#            files jdk/sources.txt compiles into java.base (KIND share:MODULE, but jdk.localedata's:
+#            java.sql, java.xml, java.desktop; CDR4), from the sources' lists
 #            alone (no JVM); --check requires the committed file to be what it makes
 #        bin/jrt print OUTDIR
 #            print the module (with tests) into OUTDIR/mod only
@@ -98,12 +100,35 @@ print_module() {
 # (arbace/box/print.ae; GOI-SPEC.md, "As built: GC81"), and stops on a package it does not name
 overlay_pkgs="runtime reflect"
 
-# make_overlay: the patched runtime and reflect printed from overlay/go (when missing or older
-# than their forms) and the overlay file naming them; prints the overlay file's path
+# overlay_key: a hash of what the printed overlay depends on (queue 162, audit 037 finding 3; the older test
+# was mtime alone, so a print by an older host, or from before a printer's change, was reused): overlay/go's
+# files (names and bytes), the printer's sources in the checkout (arbace/repr/go.ae and arbace/repr/go/,
+# bin/repr-go, bin/lib/repr-go-host.bash; a source that differs from the executable's embedded copy is loaded
+# from the checkout, so they decide the print), the bytes of the executable that prints (REPR_GO_EXE, else the
+# tools' host: an embedded, compiled copy of the printer that the checkout's sources do not differ from prints
+# as its own build does), the toolchain's VERSION and its path (the overlay file names $goroot/src/...), the
+# packages and the print layout
+overlay_key() {
+  local exe
+  exe=${REPR_GO_EXE:-$(. "$root/bin/lib/host.bash" && arbace_host_exe)} || return 1
+  {
+    echo "packages $overlay_pkgs layout gofmt goroot $goroot"
+    echo "goroot-version $(sha256sum < "$goroot/VERSION" | cut -c1-64)"
+    echo "host $(sha256sum < "$exe" | cut -c1-64)"
+    find overlay/go -type f | LC_ALL=C sort | xargs -d '\n' sha256sum
+    { echo arbace/repr/go.ae; find arbace/repr/go -type f; echo bin/repr-go; echo bin/lib/repr-go-host.bash; } \
+      | LC_ALL=C sort | xargs -d '\n' sha256sum
+  } | sha256sum | cut -c1-64
+}
+
+# make_overlay: the patched runtime and reflect printed from overlay/go (when missing or when overlay.key
+# differs from overlay_key) and the overlay file naming them; prints the overlay file's path
 make_overlay() {
   local dir=$work/overlay
   local json=$dir/overlay.json
-  if [ ! -f "$json" ] || [ -n "$(find overlay/go -newer "$json")" ] || ! grep -q "\"$goroot/src/reflect/" "$json"; then
+  local key
+  key=$(overlay_key) || return 1
+  if [ ! -f "$json" ] || [ "$(cat "$dir/overlay.key" 2>/dev/null)" != "$key" ]; then
     echo "== the patched runtime and reflect (overlay/go/runtime.ae, reflect.ae)" >&2
     rm -rf "$dir"; mkdir -p "$dir"
     local pkg
@@ -122,6 +147,8 @@ make_overlay() {
       printf '}}\n'
     } > "$json.new"
     mv "$json.new" "$json"
+    # the key last, through a temporary name: an interrupted print is redone
+    echo "$key" > "$dir/overlay.key.new" && mv "$dir/overlay.key.new" "$dir/overlay.key"
   fi
   echo "$json"
 }
@@ -231,7 +258,8 @@ case $cmd in
       echo '(go/var ^string modulePackages'
       printf '  "'
       cat jdk/sources.txt jdk/javac/sources.txt |
-        awk '$1 != "java.base" && $1 != "buildtools" { n = split($3, a, "/"); p = a[1]; for (i = 2; i < n; i++) p = p "." a[i]; print p " " $1 }' |
+        awk '{ m = $1; if ($2 ~ /^share:/ && $2 != "share:jdk.localedata") m = substr($2, 7) }
+             m != "java.base" && m != "buildtools" { n = split($3, a, "/"); p = a[1]; for (i = 2; i < n; i++) p = p "." a[i]; print p " " m }' |
         LC_ALL=C sort -u
       echo '")'
     } > "$tmp"

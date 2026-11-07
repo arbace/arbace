@@ -1,0 +1,66 @@
+#!/bin/bash
+# A crop's namespaces compiled by c2j alone, on the tools' host (doc/cpp/CPP-SURVEY.md, doc/scheme/SCHEME-SURVEY.md,
+# doc/ocaml/OCAML-SURVEY.md, "As built: the embedding's preparation"; CP180 (a), SC230 (a), OC165): the first re-seed after
+# arbace-reaps-4-crops-v1 embeds the crop's namespaces and compiles them with the program (c2j's first compile of them), so a
+# construct c2j has no back end for would stop that build after hours. As bin/ci c2j-check is C's (doc/C23-SURVEY.md, "As built:
+# C9 (preparation)"): the crop's namespaces required on the host with ARBACE_COMPILE (their units recorded), then
+# arbace.c2j.main/run over the crop's own sources, no j2g and no Go build (a minute or less, 2 GB): every source must load and
+# compile. ARBACE_NO_AOT=1 and ARBACE_PATH_FIRST=1 as bin/lib/program.bash's host_compile: a host that embeds the namespaces compiled
+# (after the re-seed) would record no units; the checkout's sources are analyzed afresh.
+# Usage: bin/lib/crops/c2j-check cpp|scheme|ocaml     (bin/repr-cpp c2j-check, bin/repr-scheme c2j-check, bin/repr-ocaml c2j-check)
+#        Exit status 0 when every source of the crop loaded and compiled; the report: .tmp/c2j-CROP/compile.log
+set -uo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/tools.bash"
+. "$root/bin/lib/host.bash"
+cd "$root"
+crop=${1:-}
+# each crop's sources (the paths embed.ae's exclusions name, less the C forms of arbace/cpp/rt/, which are data, not namespaces)
+case $crop in
+  cpp) paths="arbace/repr/cpp.ae arbace/repr/cpp arbace/repr/llvm.ae arbace/repr/llvm arbace/cpp" ;;
+  scheme) paths="arbace/repr/scheme.ae arbace/repr/scheme arbace/scheme" ;;
+  # OC165 (a): oi (go/arbace/oi) is OCaml's embedded part, repr/ocaml stays evaluated; arbace.o2j is embedded already. Both are
+  # compiled here, so that the check also says what OC165 (b) would meet
+  ocaml) paths="arbace/repr/ocaml.ae arbace/repr/ocaml arbace/o2j.ae" ;;
+  *) echo "usage: bin/lib/crops/c2j-check cpp|scheme|ocaml" >&2; exit 2 ;;
+esac
+w=$root/.tmp/c2j-$crop
+rm -rf "$w"; mkdir -p "$w"
+# the sources: the .ae files with an (ns) line (as j2g's namespaces.txt lists the embedded ones)
+srcs=$(for p in $paths; do find "$p" -name '*.ae'; done | LC_ALL=C sort | while read -r f; do grep -q '^(ns\( \|$\)' "$f" && echo "$f"; done)
+n_src=$(printf '%s\n' "$srcs" | grep -c .)
+nss=$(printf '%s\n' "$srcs" | sed 's/\.ae$//; s|/|.|g; s/_/-/g' | tr '\n' ' ')
+quoted=$(printf '%s\n' "$srcs" | sed 's/.*/"&"/' | tr '\n' ' ')
+cat > "$w/compile.ae" <<A
+(doseq [n (quote [$nss])]
+  (try (binding [*warn-on-reflection* true] (require n)) (catch Throwable e (println "aot: not loaded:" n (.getMessage e)))))
+(require (quote arbace.c2j.main))
+(let [ours (set [$quoted])
+      srcs (vec (distinct (filter ours (map #(aget ^objects % 0) (arbace.lang.Compiler\$AST/units)))))
+      r (arbace.c2j.main/run "$w/out" srcs)]
+  (println "aot:" (count (:compiled r)) "sources compiled," (:classes r) "classes;" (count (:failed r)) "failed")
+  (doseq [s (remove (set srcs) (sort ours))] (println "aot: no units:" s))
+  (doseq [[s m] (:failed r)] (println "aot: not compiled:" s m))
+  (shutdown-agents)
+  (System/exit 0))
+A
+host=$(arbace_host_exe) || exit 1
+t0=$(date +%s)
+GOMEMLIMIT=${GOMEMLIMIT:-3GiB} GOGC=200 ARBACE_COMPILE=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1 ARBACE_PATH_FIRST=1 ARBACE_PATH=$root ARBACE_AOT_ROOT=$root \
+  ARBACE_ROOT=$root ARBACE_PREPARE=$w/compile.image "$host" "$w/compile.ae" > "$w/compile.log" 2>&1 \
+  || { tail -20 "$w/compile.log" >&2; echo "c2j-check $crop: the host failed" >&2; exit 1; }
+grep '^aot:' "$w/compile.log"
+# the crop's own reflection warnings (*warn-on-reflection* bound true over its loads; the embedded namespaces' are not counted):
+# a reflective call runs in the Go build only for a class and member of the closed world, so each is fixed by a hint
+printf '%s\n' "$srcs" | sed 's/[.]/[.]/g; s/^/^Reflection warning, /; s/$/:/' > "$w/own.txt"
+grep -f "$w/own.txt" "$w/compile.log" > "$w/reflection.txt"
+refl=$(grep -c . "$w/reflection.txt")
+[ "$refl" = 0 ] || { echo "c2j-check: the crop's reflection warnings ($w/reflection.txt):"; sed 's/^Reflection warning, /  /' "$w/reflection.txt"; }
+n=$(sed -n 's/^aot: \([0-9]*\) sources compiled.* \([0-9]*\) failed$/\1 \2/p' "$w/compile.log")
+set -- $n
+bad=$(grep -c '^aot: \(not loaded\|no units\):' "$w/compile.log")
+if [ -n "${1:-}" ] && [ "${2:-1}" = 0 ] && [ "$bad" = 0 ] && [ "$refl" = 0 ] && [ "$1" = "$n_src" ]; then
+  echo "c2j-check $crop: ok ($1 of $n_src sources, $(( $(date +%s) - t0 )) s)"; exit 0
+fi
+echo "c2j-check $crop: FAILED (${1:-?} of $n_src sources compiled, ${2:-?} failed, $bad not loaded or without units, $refl reflection warnings; $w/compile.log)" >&2; exit 1

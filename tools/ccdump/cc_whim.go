@@ -28,5 +28,9 @@ func newConfig(h *host) (*Config, error) {
 	defer hostMu.Unlock()
 	cc.SetHost(&cc.Host{CC: "gcc", Predefined: h.predefined, IncludePaths: h.include, SysIncludePaths: h.sysInclude})
 	defer cc.SetHost(nil)
-	return cc.NewConfig("linux", "amd64")
+	cfg, err := cc.NewConfig("linux", "amd64")
+	if err == nil && sysroot != nil {
+		cfg.FS = sysroot
+	}
+	return cfg, err
 }

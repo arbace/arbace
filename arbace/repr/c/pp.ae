@@ -254,12 +254,14 @@
   (when-some [t (slot c TOS)] (.add ^ArrayList (.-stack c) t))
   (slot! c TOS v))
 
-(deftype Included [^String using sys ^String path])
+;; queue 157 (review 130's finding 4): `entry` the index in the layer of the enter record that entered the file (nil for the main
+;; file), which tells the entries of a header entered twice apart (their tokens share one CFile)
+(deftype Included [^String using sys ^String path entry])
 
 ;; the main file's Included: no directory (an #include_next there searches the whole chain, as gcc's does) and not a system
 ;; header. enter! pushes it for the main file, so the main file's status comes back when its first header is left (before, the
 ;; slot kept the last header's, and a header the main file included after a system header was taken for a system header)
-(def ^:private main-included (Included. nil false nil))
+(def ^:private main-included (Included. nil false nil nil))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Paths (Go's path/filepath on Unix)
@@ -291,9 +293,30 @@
   ^String [^String p]
   (let [i (.lastIndexOf p "/")] (clean (if (neg? i) "" (subs p 0 (inc i))))))
 
+;; ORS9 (a) (doc/ORACLE-RECORDS-SURVEY.md on mac/oracle-records-cpp2, "As built: the tooling and C"), carried for Arbace's own
+;; target (c/README.md): ARBACE_C_SYSROOT names a directory holding the headers under their absolute paths with roots.txt (the
+;; target's search directories; bin/lib/repr-c/sysroot.bash's c_sysroot): a file under one of those roots is read from it
+;; alone, never from the host, and keeps its own name in every output; "/" or unset, the host's files as before.
+(def ^:private sysroot
+  (let [s (System/getenv "ARBACE_C_SYSROOT")]
+    (when (and s (not= s "") (not= s "/")) (str/replace s #"/+$" ""))))
+
+(def ^:private sysroot-roots
+  (delay (when sysroot
+           (vec (for [l (str/split-lines (slurp (str sysroot "/roots.txt"))) :let [l (str/trim l)] :when (not= l "")]
+                  (str/replace l #"/+$" ""))))))
+
+(defn- sysroot-file
+  "The file a name under the sysroot's roots is read from, nil for any other name."
+  ^java.io.File [^String name]
+  (when (and sysroot (some #(or (= name %) (.startsWith name (str % "/"))) @sysroot-roots))
+    (java.io.File. (str sysroot name))))
+
 (defn- resolve-file ^java.io.File [^Cpp c ^String name]
   (let [f (java.io.File. name)]
-    (if (.isAbsolute f) f (java.io.File. (str (:base (.-cfg c))) name))))
+    (if (.isAbsolute f)
+      (or (sysroot-file (.getPath f)) f)
+      (java.io.File. (str (:base (.-cfg c))) name))))
 
 (defn- has-file? [^Cpp c ^String name]
   (let [f (resolve-file c name)] (and (.exists f) (not (.isDirectory f)))))
@@ -413,7 +436,8 @@
 (defn- parse-file
   "The groups of `name` (read from `file`), and its errors."
   [^String name ^java.io.File file trigraphs?]
-  (.add ^java.util.Set opened (.getAbsolutePath file))
+  (.add ^java.util.Set opened (let [p (.getAbsolutePath file)]
+                                (if (and sysroot (.startsWith p (str sysroot "/"))) (subs p (count sysroot)) p)))
   (let [bs (lex/read-bytes (.getPath file))
         key [name (java.util.Arrays/hashCode bs) (alength bs) (if (number? trigraphs?) trigraphs? (boolean trigraphs?))]]
     (or (.get ^java.util.concurrent.ConcurrentHashMap file-cache key)
@@ -425,10 +449,18 @@
           (.put ^java.util.concurrent.ConcurrentHashMap file-cache key r)
           r))))
 
+(def ^:dynamic *reentry*
+  "Arbace (CS275 (b)): when true (ci's read, arbace.c.run), the main file entered again (#include __FILE__) is read as a file
+  of its own, named MAIN#again, so that the converter and the directives' placement tell the re-entered copy from the main
+  file; false (the text levels, the token and tree checks): cc's single file."
+  false)
+
 (defn- group
   "cpp.group: the groups of the source `name` (the text `text` when given), parsed once a unit; nil
   when it cannot be read."
-  [^Cpp c ^String name text]
+  [^Cpp c ^String name0 text]
+  (let [again (and *reentry* (nil? text) (= name0 (slot c MAIN)) (slot c MAIN-MADE))
+        name (if again (str name0 "#again") name0)]
   (or (.get ^HashMap (.-groups c) name)
       (let [_ (when (slot c MAIN-MADE) (slot! c EOF-NOPOS true))
             _ (when (= name (slot c MAIN)) (slot! c MAIN-MADE true))
@@ -437,13 +469,13 @@
                       f (lex/new-file name (.getBytes ^String text "ISO-8859-1"))
                       p (Parser. (lex/scanner f (fn [m] (.add errs m)) (:trigraphs (.-cfg c))) (object-array 2) (fn [m] (.add errs m)))]
                   [(p-group p false) (vec errs)])
-                (let [f (resolve-file c name)]
+                (let [f (resolve-file c name0)]
                   (when (and (.isFile f) (.canRead f))
                     (parse-file name f (:trigraphs (.-cfg c))))))]
         (when r
           (doseq [e (r 1)] (eh c e))
           (.put ^HashMap (.-groups c) name (r 0))
-          (r 0)))))
+          (r 0))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Macros
@@ -478,7 +510,9 @@
   [^Cpp c ^Tok t ^String nm]
   (if-let [m (.get ^HashMap (.-macros c) nm)]
     (case nm
-      "__FILE__" (builtin-macro t :STRINGLITERAL (go-quote (nth (lex/tok-position t) 0)))
+      "__FILE__" (builtin-macro t :STRINGLITERAL (go-quote (let [^String f (nth (lex/tok-position t) 0)]
+                                                             ;; the main file entered again (*reentry*) is still the main file
+                                                             (if (.endsWith f "#again") (subs f 0 (- (count f) 6)) f))))
       "__LINE__" (builtin-macro t :PPNUMBER (str (nth (lex/tok-position t) 1)))
       m)
     (cond
@@ -765,7 +799,12 @@
       (let [^Tok t (peek ls)
             ^Tok r0 (if (seq rs) (rs 0) lex/eof-tok)
             cxx (:cxx (.-cfg c))
-            text (str (.-src t) (.-src r0))
+            c23 (#{:c23 :gnu23 :c2y :gnu2y} (:std (.-cfg c)))
+            ;; Arbace (queue 173's digraphs): C23's `::` (6.4.7) is one token to gcc, two adjacent `:` to the C lexer;
+            ;; pasted, its text is the left operand's (`::` ## `>` is "::>", no token, as gcc says, not the digraph `:>`)
+            scope? (and c23 (not cxx) (= (.-src t) ":") (>= (count ls) 2)
+                        (let [^Tok p (ls (- (count ls) 2))] (and (= (.-ch p) \:) (= (.-src p) ":"))))
+            text (str (when scope? ":") (.-src t) (.-src r0))
             lexed (when (and cxx (seq rs) (pos? (.length ^String (.-src r0)))) (lexed-token text (:trigraphs (.-cfg c))))
             k (cond
                 lexed (.-ch ^Tok lexed) ; Arbace (CX2): C++'s paste gives whatever the lexer reads the text as
@@ -775,7 +814,7 @@
         (if (and (seq rs) (pos? (.length ^String (.-src r0)))
                  (not (if cxx lexed (single-token? text)))
                  ;; Arbace (CS143): `::` is a token in C23 (6.4.7)
-                 (not (and (= text "::") (#{:c23 :gnu23 :c2y :gnu2y} (:std (.-cfg c))))))
+                 (not (and (= text "::") c23)))
           (do (eh c (str (pos-str t) ": pasting \"" (.-src t) "\" and \"" (.-src r0)
                          "\" does not give a valid preprocessing token"))
               (-> ls (conj sp-tok) (into rs)))
@@ -1410,9 +1449,9 @@
 
 (defn- enter!
   "A file's groups pushed after the included marker, as cpp.include does (`pth` the file's path, its CFile's name)."
-  [^Cpp c g ^String using sysdir ^String pth]
+  [^Cpp c g ^String using sysdir ^String pth entry]
   (push! c (or (slot c INCLUDED) main-included))
-  (slot! c INCLUDED (Included. using (boolean sysdir) pth))
+  (slot! c INCLUDED (Included. using (boolean sysdir) pth entry))
   (push! c [:leave])
   (slot! c DEPTH (inc (long (slot c DEPTH))))
   (push! c g))
@@ -1463,10 +1502,14 @@
                   (let [sysdir (or sysdir cur-sys)]
                   (if (.contains ^HashSet (.-once c) pth)
                     nil ; Arbace: #pragma once (gcc's), which cc ignores
-                    (do ;; Arbace (C3b): the inclusion recorded for the converter's header units
-                        (record! c {:directive "enter" :path pth :raw raw :system (boolean sysdir) :off (.-po ^Tok (line 0))
-                                    :from (when-let [^CFile f (.-pf ^Tok (line 0))] (.-name f))})
-                        (enter! c g using sysdir pth))))
+                    ;; Arbace (C3b): the inclusion recorded for the converter's header units; queue 157 (review 130's finding 4): with
+                    ;; :in, the includer's entry (its enter record's index in the layer, nil for the main file), and the new entry's index
+                    ;; kept in its Included, so the parser can tell which entry each token came from (arbace.repr.c.parse's :entries)
+                    (let [entry (.size ^ArrayList (.-layer c))]
+                      (record! c {:directive "enter" :path pth :raw raw :system (boolean sysdir) :off (.-po ^Tok (line 0))
+                                  :from (when-let [^CFile f (.-pf ^Tok (line 0))] (.-name f))
+                                  :in (when-let [^Included cur (slot c INCLUDED)] (.-entry cur))})
+                      (enter! c g using sysdir pth entry))))
                   (do (eh c (str (pos-str s0) ": include file not found: " raw)) (slot! c CLOSED true)))))))))))
 
 (declare embed-params)
@@ -1720,10 +1763,10 @@
       "GCC" (when (and (> (count x) 3) (= (src (x 3)) "system_header"))
               (let [^Included cur (slot c INCLUDED)]
                 (when (and cur (.-using cur))
-                  (slot! c INCLUDED (Included. (.-using cur) true (.-path cur)))
+                  (slot! c INCLUDED (Included. (.-using cur) true (.-path cur) (.-entry cur)))
                   (let [^Tok t (x 0)]
                     (when (= (some-> ^CFile (.-pf t) .-name) (.-path cur))
-                      (record! c {:directive "system" :file (.-path cur) :off (.-po t) :system true}))))))
+                      (record! c {:directive "system" :file (.-path cur) :entry (.-entry cur) :off (.-po t) :system true}))))))
       nil)))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -1759,8 +1802,8 @@
         ^Included cur (slot c INCLUDED)
         ^Tok t (first line)]
     (when (and (some? s) cur (.-using cur) (= (some-> ^CFile (.-pf t) .-name) (.-path cur)))
-      (slot! c INCLUDED (Included. (.-using cur) s (.-path cur)))
-      (record! c {:directive "system" :file (.-path cur) :off (.-po t) :system s}))))
+      (slot! c INCLUDED (Included. (.-using cur) s (.-path cur) (.-entry cur)))
+      (record! c {:directive "system" :file (.-path cur) :entry (.-entry cur) :off (.-po t) :system s}))))
 
 (defn next-line
   "cpp.nextLine: the next text line, the directives before it executed."
@@ -1935,6 +1978,9 @@
         last (object-array 1)]
     {:errors (.-errs c)
      :layer (.-layer c) ; Arbace (C3b): the directives the converter places
+     ;; queue 157: the entry the stream is in (the index in the layer of the current file's enter record, nil in the main file), which
+     ;; the parser asks at each token
+     :entry (fn [] (when-let [^Included i (slot c INCLUDED)] (.-entry i)))
      :next (fn []
              (if (slot c CLOSED)
                (let [^Tok l (aget last 0)]

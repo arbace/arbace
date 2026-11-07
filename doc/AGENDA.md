@@ -1,7 +1,9 @@
 # Agenda
 
 The current state of the work. This file is rewritten as things change. For the history, see
-[JOURNAL.md](JOURNAL.md) (since 2026-11-01), the journals at the tags
+[JOURNAL.md](JOURNAL.md) (since 2026-11-07), the journals at the tags
+[`arbace-reaps-4-crops-v1`](https://github.com/arbace/arbace/blob/arbace-reaps-4-crops-v1/doc/JOURNAL.md)
+(2026-11-01 to 2026-11-07),
 [`arbace-reaps-3-crops-v2`](https://github.com/arbace/arbace/blob/arbace-reaps-3-crops-v2/doc/JOURNAL.md)
 (2026-10-27 to 2026-11-01),
 [`arbace-reaps-3-crops-v1`](https://github.com/arbace/arbace/blob/arbace-reaps-3-crops-v1/doc/JOURNAL.md)
@@ -13,17 +15,19 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## State
 
-- The bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (`a59cc441…`, committed `1fe1063f`,
-  2026-11-02: C9.2's re-seed, embedding C: `arbace/c`, `arbace/repr/c`, `arbace.lang.CInterp`), the program printed by
-  the Go-hosted fixpoint, its toolchain (TamaGo's go1.27.1) pinned by `seed/goroot.sha256`; `bin/seed --verify` passed
-  (stage 0 = G1 = G2 = G3, `606d45e6…`). `bin/seed --check`, `--build` (stage 0), `--make`, `--verify`.
+- The bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (`d5548e72…`, committed `496d3348`,
+  2026-11-05: the re-seed before the tag, C only: the backlog, the digraphs, the crops' Go forms out of the runtime's and
+  javac's keys; before it `a59cc441…`, 2026-11-02, C9.2's, embedding C), the program printed by the Go-hosted fixpoint,
+  its toolchain (TamaGo's go1.27.1) pinned by `seed/goroot.sha256`; `bin/seed --verify` passed (stage 0 = G1 = G2 = G3,
+  `d503777b…`). `bin/seed --check`, `--build` (stage 0), `--make`, `--verify`.
 - Stage 0 hosts every Arbace tool (c2j, j2g, repr/go, repr/clojure, build/go, the suite's runner, ci and repr/c),
   compiled into it; `bin/arbace-go --build` is a Go-hosted build, `--fixpoint` the chain G1 → G2 → G3. The program's
   namespaces are compiled to Go (`ARBACE_AOT=1`, since S6).
-- The REAP matrix (`bin/reap`): four crops, Clojure, Java 26, Go 1.27.1 and C (C23 against gcc 15.2), 16 of 16 cells
-  checked, none failing, every non-pass in a recorded class ([FULL-SUPPORT-SURVEY.md](FULL-SUPPORT-SURVEY.md), "REAP
-  v3's divergences"). The other crops (OCaml, Scheme, C++23, net/http) have their checks and classes, out of the matrix
-  and of the gate.
+- The REAP matrix (`bin/reap`): four crops at the tag, Clojure, Java 26, Go 1.27.1 and C (C23 against gcc 15.2), 16 of 16
+  cells checked, none failing, every non-pass in a recorded class ([FULL-SUPPORT-SURVEY.md](FULL-SUPPORT-SURVEY.md), "REAP
+  v3's divergences"); with batch 1 (below) eight rows, C++, Scheme, OCaml and Python joining, 30 of 32 cells checked. The
+  other crops (Haskell, Rust, LLVM IR, net/http) have their checks and classes, out of the matrix and of the gate; since
+  2026-11-04 every crop has a native reader (on held branches for OCaml, Haskell, Rust, C++).
 - The gate is keyed and audited (GT1-GT7, [GATE-SURVEY.md](GATE-SURVEY.md)); since 2026-11-02 `bin/gate --full` runs C's
   seven full checks as heavy steps (about 7 to 8 hours more, serial).
 - The JVM (Java 26 from jdk26u's own build, 2026-11-02) runs only the frozen jar of `arbace-for-java-26-v4` (pinned by
@@ -54,57 +58,280 @@ The current state of the work. This file is rewritten as things change. For the 
 - **`arbace-reaps-3-crops-v1`** (2026-10-27) and **`-v2`** (2026-11-01, at `c4f85ace`): REAP for Clojure, Java 26 and
   Go 1.27.1, 12 of 12 cells; v2 with the gate made efficient and run clean in a fresh clone
   (`test/gate/clean-arbace-reaps-3-crops-v2.edn`).
-- **`arbace-reaps-4-crops-v1`** (not yet tagged: it waits for GT8 and the backlog, the user, 2026-11-03; TODO(tag): the date and the commit): C the fourth row
-  (C1-C9, [C23-SURVEY.md](C23-SURVEY.md)): read 5,201 / 232 / 50, eval 2,049 / 124 / 87, AOT 2,058 / 115 / 87, print
-  4,767 / 6 / 83 (pass / by design / deferred); 16 of 16 cells, none failing ("REAP v3's divergences"). The merge
-  window after v2 (the gate's branches and audits, the crops, JN10), C8, C9 and its re-seed window (C9.2: the seed
-  `1fe1063f` verified, the records written and classified, CS265-CS268), the keyed `bin/gate --full` with C's full
-  checks (TODO(tag): its result). Its record: an audited clean run of the four crops over GT8's compressed corpora, within budget (the user, 2026-11-03).
+- **`arbace-reaps-4-crops-v1`** (2026-11-07, at `a4a84533`; the record's commit `99873f98`): C the fourth row
+  (C1-C9, [C23-SURVEY.md](C23-SURVEY.md)): read 5,201 / 231 / 51, eval 2,111 / 124 / 33,
+  AOT 2,120 / 115 / 33, print 4,768 / 5 / 78 (pass / by design / deferred); 16 of 16 cells, none failing ("REAP v3's
+  divergences"). The merge window after v2 (the gate's branches and audits, the crops, JN10), C8, C9 and its re-seed window
+  (C9.2, the seed `1fe1063f`), GT8 and the backlog, the re-seed of 2026-11-05 (seed `d5548e72`, verified). Its record: an
+  audited clean run of the four crops over GT8's compressed corpora (`test/gate/clean-arbace-reaps-4-crops-v1.edn`):
+  passed, 234 steps clean, every audited one ok, over three runs in two nights (77,700 s: the first run 39,146 s, then two
+  `--only` reruns), the budget's two nights at most.
 
-## Now: GT8, the test budget, and the backlog, before the tag (the user, 2026-11-03)
+## Done: the tag `arbace-reaps-4-crops-v1` (2026-11-07)
 
-The user's decision of 2026-11-02: the checks get a budget before the next crops, so that every crop's full check runs
-in bounded time. The tiers, for all ten planned crops (Clojure, Java, Go, C, C++, OCaml, Scheme, Haskell, Rust, Python):
+The clean run's record passed (2026-11-07 04:24 UTC, at `99873f98`); tagged at `a4a84533` (the essential gate passed on it)
+at the user's go-ahead, and the journal started over. Next: "After the tag" below. How it got there: The tag waited for GT8 and the backlog (the user, 2026-11-03), and stands on an audited
+clean run of the four crops over GT8's compressed corpora within budget. The backlog is merged; GT8's tooling is on main (dedup, coverage subsets for C,
+goi and Java's interpreted level, the nightly rotation, the tiers, `bin/gate --costs`).
+
+The budgets (the user, 2026-11-04, GTS224-GTS226, GATE-SURVEY.md "Decided (2026-11-04)"):
 
 | tier | budget | when |
 |---|---|---|
-| essential | at most 15 minutes | every merge (the essential gate) |
-| nightly | at most 6 hours | each night, a keyed `--full` over compressed corpora |
-| clean | at most 24 hours | a fresh clone, every step audited, at a tag |
+| essential | at most 15 minutes (a goal) | each night's first step, on `next` (the staging branch); by hand rarely by day |
+| nightly | 8 hours planned in the 12-hour night shift, 4 of slack for fixes and reruns | each night, a keyed `--nightly` over compressed corpora |
+| clean | one night (about 10 hours planned), two at most | a fresh clone, every step audited, at a tag; it replaces that night's nightly |
 
-The methods: deduplication (byte-identical and equivalent files counted once: `torture-execute-mirror`'s collapse, VM
-report 156, the first case, GATE-SURVEY.md's note beside GT7), coverage subsets (the files that keep every back-end
-block, every kept class, the controls and one per class: VM reports 160 and 161; the user, 2026-11-02: optimise for
-those, keep every deferred and gap program, a `:subset` per corpus), rotation (the rest of a corpus over the nights),
-and synthetic corpora where a corpus is large and repetitive. Heavy runs at night, development by day. The Mac peer takes
-small development tasks. Nothing of GT8 is written yet: its survey first (GATE-SURVEY.md, a GT8 section).
+The night shift is 19:00-07:00 UTC, for gating, testing, details and the bugs the checks find; the day is for development
+and design with sample checks. Day merges go to the branch `next` after their sample checks; the night's first step gates
+`next` (the essential gate) and fast-forwards `main` to it.
 
-## The backlog, before the tag, in this order
+The nights to the tag:
 
-1. **The Mac VM's held branches** (each built and reported, held because repr/c or ci is embedded and a change reruns
-   the whole `--full`), merged one at a time with their main-host checks:
-   - 154 (`mac/154-builtins`, ci's missing builtins): first re-record its 7 `ref-gcc15` lines on amd64 (they came from
-     aarch64's gcc: `bin/ci record-ref --corpus ci-run --only ...`), check the hand-written record rows, then
-     `bin/ci c2j-check`;
-   - 164 (`mac/164-bitint-wide`, `_BitInt` wider than 64 bits, the `:wide` class; carries 154's two commits: after 154);
-   - 155 (`mac/155-float128`, `_Float128`/`_Float64x` compared exactly);
-   - 157 (`mac/157-headers`, C header gaps 4 and 5; no recorded result moves);
-   - 158 (`mac/158-transparent-union`, the checker's redeclaration through a `transparent_union` parameter): re-record
-     the torture-compile annotations here (ccdump);
-   - 159 (`mac/159-rt-control`, the round trip's levels 1-2 control): judge benchmarksgame's known file on amd64 (the
-     `nbody-8` entry is VM-only); its docs (GATE-SURVEY.md, C23-SURVEY.md's controls paragraph);
-   - 161 (`mac/161-subsets`, coverage subsets of all C run corpora): six amd64 `bin/ci cover` runs here;
-   - 162 (`mac/162-overlay-key`, the overlay keyed by its inputs): `bin/jrt overlay` twice on the main host;
-   - 163 (`mac/163-c-keys`, the C steps keyed by the namespaces they load): confirmed by `bin/gate --audit` on the listed
-     steps;
-   - 165 (`mac/165-vla-aot`, VLAs at AOT: 9 of 18 `:vla` programs pass).
-2. **CS268 (a)**, the `--record` writers' guess narrowed (VM task 167, `mac/167-cs268`).
-3. **CS221 (a) with CS232 (a)**, conflicting specifiers printed as written, `:bad-specs-print` emptied (VM task 168).
-4. **Java's `speed` curated** (GTS102): the per-test limits lowered after the next clean run, the catch-all's timeouts
-   judged one by one.
-5. The night-fix review (VM task 166) and its findings.
-6. The journal starts over after the tag (the user's rule), as after v2: JOURNAL.md's header, README's documentation
-   line.
+1. **Night 4 (2026-11-04):** `next` gated and `main` fast-forwarded (the day/night decisions, goi's classes and frames:
+   1,664 of 1,837); the cover build; Java compiled and Clojure AOT coverage; the first real `bin/gate --nightly`, measured
+   by `bin/gate --costs` (`.tmp/night4/`).
+2. **Night 5 (2026-11-04/05): done.** The re-seed (`.tmp/night5/reseed.sh`, C only, with the digraph commit
+   8dfd5840; the crops' Go forms out of `arbace_runtime_key` and `arbace_javac_key`; the PATH_FIRST trio removed after)
+   passed every step: seed `d5548e72`, verify `d503777b`, main at d86cb874a. The keyed `--full --concurrent` runs from
+   03:14 to at most 16:00.
+3. **Night 5's clean run (2026-11-05/06) and night 6's two `--only` reruns (2026-11-06/07): passed** (REAP v3's caveats,
+   FULL-SUPPORT-SURVEY.md). The plan was: `next` gated and fast-forwarded first (with `java-compiled-subset`, GTS228, and
+   `audit-race`, the reducer race of night 5's first gate); GTS229 (C's reads timed) by day from the keyed `--full`'s
+   logs; then the clean run of the four crops, `.tmp/night5/clean.sh`, estimated about 12 hours, over one night's plan
+   (the options to fit it: `.tmp/night5/clean-fit.md`). Then the tag, by hand, on the record.
+
+## Batch 1 (merged on `batch1`, 2026-11-07, for tonight's night; not yet on `next`)
+
+Merge plan batch 1 (`.tmp/tag-v2/merge-plan-rehearsal-1105.md` §4 step 1, `merge-plan.md` §3), on `e16e4c1d`, one merge
+commit a branch: `cpp-cx8`, `cpp-cx9`, `cpp-cx10` + `gt9v-cpp`, `scheme-sm9` + `gt9v-scheme`, `ocaml-o8` + `gt9v-ocaml`,
+`e6f88eb3` (embed-crops 1-2: the crops' c2j checks), `gate-crops`, `zed-survey`, `java-deferred-triage`,
+`go-design-review`, `gt9-build` (with the keys commit `100f8e0b`, PYS30 (a)) and `gt9-verbs`, three of `crop-controls`'
+commits picked (C++/LLVM, OCaml, Scheme: the fragments name their controls), GT9's fragments `cpp`, `scheme`, `ocaml`
+spliced, `mac/201-python-py7-py11` (`7df8864b`; W2's embedding and the REQUESTs into goi, crt and the planner left out,
+below), `crops-score` with its after-tag patch for goi (CSP5), and `cppi-check` (C++'s eval and AOT cells; not in the
+plan, needed by the C++ row: `bin/reap` had 180 problems without it). Not done: `mac/192`'s redo (superseded: GT9's
+fragments read SC233's and OC161's records by an `:id-re` of one group, GTS213 (a)).
+
+- `bin/reap`: eight rows, 32 cells, 30 checked (Python's eval and AOT "no check yet" until its amd64 records), 0 problems.
+- `bin/crops-score` (main → batch1; completeness / maturity / independence): C++ 0 / 0 / 20 → 75.4 / 90.2 / 20; OCaml
+  0 / 0 / 20 → 75.6 / 100 / 20; Scheme 0 / 0 / 80 → 98.3 / 87.5 / 80; Python 0 / 0 / 20 → 0 / 83.3 / 20; Go 93.9 / 86.0 →
+  94.1 / 87.5; C maturity 95.8 → 100; Java maturity 98.3 → 100; Haskell, Rust, LLVM IR 0 (their rows are later batches').
+- Keys (first 12 hex): main gate `0276a6db9960`, runtime `f29a38759450`, javac `a3300f566f6c`; after the keys commit
+  `98ffc164199f`, `c40e01ac561c`, `8c9a6a206dd7`; at batch1's head `d42c7a5dd92d`, `c40e01ac561c`, `ab86bd52d01b` (moved
+  after the keys commit only by `bin/lib/version.bash`'s list gaining pyi's lazy modules and `bin/goi`'s CSP5 patch;
+  the runtime key not since).
+- Tonight (`bin/gate --full --plan`: 288 steps, 272 run, 2 skip; about 10.2 h of measured step seconds, serial, plus the
+  builds and the three new crops' first passes, about 1.3 h estimated (GT9): about 11.5 h, over the 8 h plan): every
+  step on `:gate`, `:prog`, `:javac` and `:javac-prog` (the keys commit, `bin/arbace-go`, `bin/goi`, embed.ae), C's
+  steps (crops-score's CSP5 records and scripts are among their inputs, 2.1 h), and the new crops' 59 never passed.
+
+### Proposed (batch 1)
+
+1. **Tonight's fit.** (a) The essential gate, `bin/reap`, `crops-score` and the three crops' chains tonight, the rest of
+   `--full` the night after (keyed: what passed is kept); cost: a second night. (b) Leave CSP5's C part (crops-score's
+   rewritten `test/c/ref-gcc15.edn`, `test/repr/c/{annot,roundtrip}-results.edn` and their writers) for the re-seed window
+   W, which reruns C anyway; saves C's 2.1 h tonight; cost: C's maturity 100 → 95.8 until W, a revert commit now.
+   (c) Run `--full` whole into the slack (about 11.5 h). *Recommended: (a).*
+2. **The deferred parts of Python's branch.** Left out of the merge (taken as next's side, so a later merge of the branch
+   does not bring them; they are cherry-picked): W2's embedding `101c0d03`, `a420fa0d`, `0525fa89` (with `7ab5364b`'s
+   `bin/pyi table-check`, merged but failing until then), the REQUESTs `656dfcdc` and `c9047d52` (goi's), `3db255c5` (crt for
+   tamago), `cc463c8d` (the planner's `:slice-re`). (a) The embedding and goi's and crt's REQUESTs at W (PYS18 (a)), the
+   planner's with GTS240's runner change (GTS243 (a)), and `test/gate/crops/python.edn` spliced after Python's records
+   night; (b) the REQUESTs now, on a day branch with their owners' sample checks; cost: a gate rekey of goi's and C's steps.
+   *Recommended: (a).*
+3. **cppi-check's `cpp-aot-essential`** (4 GiB measured) is not a step: GTS215 (a) holds a new crop's essential checks to
+   3 GiB. (a) Leave it out (the AOT level is checked in `--full`'s `cpp-aot`); (b) run it at `CPPI_THREADS=1` and measure;
+   (c) raise C++'s essential limit. *Recommended: (a), then (b).*
+4. **cppi-check outside the plan.** Merged because the C++ row needs it (its records, the sampling, the cells); the
+   2026-11-06 branch `cppi-deferred` (CP230-CP231, on `cppi-check`) is a clean descendant of batch 1's and the next C++ step.
+   (a) Merge `cppi-deferred` with the next batch's day; (b) with batch 1 before tonight. *Recommended: (a).*
+5. **Candidates of the 2026-11-06 day branches** (clean on batch 1's branches, no later batch's ancestry, not merged):
+   `cppi-deferred` (on cx8-10, cppi-check), `ocaml-libs4` (on o8), `scheme-smr7` (on sm9), `java-jc9c` (on
+   java-deferred-triage); independent of every batch (on main's line): `clojure-cdr`, `goi-escape`, `c-deferred`.
+   (a) A batch 1b day for them after tonight's gate; (b) each with its crop's later batch. *Recommended: (a) for the four
+   on batch 1's branches (they extend its rows), (b) for the three others.*
+
+### Decided (the user, 2026-11-07)
+
+- Proposal 1 (tonight's fit): moot. The night shift is nominally 12 hours (19:00-07:00), overflow into the morning allowed
+  to 12:00; tonight runs the whole keyed `bin/gate --full` after the essential gate.
+- Proposal 2: Python's deferred parts at the re-seed window W (PYS18 (a)), the planner's `:slice-re` with GTS240, the python
+  fragment after Python's records night: (a).
+- Proposal 3: `cpp-aot-essential` stays out of the essential tier; measured tonight at `CPPI_THREADS=1`, added if it fits
+  3 GiB.
+- Proposals 4 and 5: all seven 2026-11-06 day branches into batch 1 today, so that one rekey night carries them:
+  `cppi-deferred`, `ocaml-libs4`, `scheme-smr7`, `java-jc9c`, `clojure-cdr`, `goi-escape`, `c-deferred`.
+
+### Batch 1, second part (the main session's `go-controls`, then the seven, 2026-11-07)
+
+On `f7696201` (the main session's merge of `go-controls`: Go's controls, Clojure and Go above 90% on all three), one merge
+commit each, at their heads: `cppi-deferred` 948a17e7 (clean), `ocaml-libs4` 628555d4 (Makefile), `scheme-smr7` 9b672f2f
+(`steps.edn`: GT9's Scheme steps kept, smr7's one change applied: `si-check` without `:chez`), `java-jc9c` e92a1c8e (clean),
+`clojure-cdr` 67adb0ff (clean), `goi-escape` 91d3eb40 (`bin/goi`'s flags: goi-escape's `-m`/`-d=` handling with
+go-design-review's judged `-race`; `test/goi/check-linux-amd64.edn` merged row by row, no row changed on both sides),
+`c-deferred` 61406468 (journal). None contains 53794ed6.
+
+- Keys (12 hex): at `f7696201` gate `30011618c1ec`, runtime `c40e01ac561c`, javac `ba31e02c1c3c`; at the end `1f886836e11e`,
+  `4cd0885457fb`, `c97e87dc55a5`. Moved by: `ocaml-libs4` (`arbace/o2j.ae`: gate, javac), `java-jc9c` (jrt, j2g, javac's world:
+  all three), `clojure-cdr` (`Compiler.ae`, jrt, j2g, `overlay/jdk`: all three), `goi-escape` (goi: gate, javac), `c-deferred`
+  (ci, crt, repr/c: all three); `cppi-deferred` and `scheme-smr7` moved none.
+- `bin/reap`: 30 of 32 cells checked, **1 problem until tonight's C++ record**: `runtime/deferred.cpp` is in g++'s reference
+  (cppi-deferred) and not yet in `test/cpp/check-linux-amd64.edn` ("the records are not written by hand", its doc). The matrix
+  was recorded with that one reference row held out for the run only, so every cell holds its records' numbers; the cells that
+  wait for the night's records stay as their branches recorded them (goi-escape's hand-written rows, ocaml-libs4's, smr7's
+  mats, clojure-cdr's suite counts), Python's eval and AOT "no check yet". `bin/crops-score --judge --strict`: 0 problems.
+- Scores (completeness / maturity / independence): Clojure 99.0 / 96.3 / 100, Java 72.6 / 100 / 90, Go 94.9 / 95.8 / 100,
+  C 95.1 / 100 / 20, C++ 75.4 / 91.7 / 20, OCaml 80.9 / 100 / 20, Scheme 98.4 / 87.5 / 80, Python 0 / 83.3 / 20, Haskell
+  0 / 8.3 / 20, Rust 0 / 8.3 / 20, LLVM IR 0 / 4.2 / 40.
+- `bin/gate --plan`: 40 steps, 34 run; `--full --plan`: 288 steps, 274 run, 8 after; about 10.3 h of measured step seconds
+  (Java 4.8, C 2.1, Go 1.7, shared 1.0, Clojure 0.7) plus the builds and the three crops' first passes (about 1.3 h): about
+  11.6 h, before the conversion below and the records after.
+
+### Tonight, in order (heavy ones under `bin/heavy-lock`; one heavy job at a time)
+
+0. Before the gate, else its builds and `j2g-edge` fail: `java-jc9c`'s variants (F2, F3, F4, F12, F13) and `clojure-cdr`'s
+   world (CDR4) name classes `jdk/forms` does not hold yet ("not mergeable before its night", JAVA-DEFERRED-TRIAGE), with
+   JC9's F1, F5 and JC9b since the third part. First the joint javac check of JC9's lists against jrt's overlays (JC9b's
+   `.tmp/jc9b/all9/run.sh` in its worktree, a minute, 1 GB). One conversion takes every area: `REPR_JAVA_EXE=<the newest .tmp/gate-exe/javac-*/arbace-javac> REPR_JAVA_STALE_OK=1
+   bin/jrt-convert update` (heavy, the javac tool), `bin/jrt modules`, `bin/j2g-edge update` (frozen JVM), `bin/javac-vendor
+   edge`, `bin/generated-check` (the module table), commit. Then `CPPI_THREADS=2 bin/cppi check --record` and `--aot --record`
+   (samples and runtime, about 4 GB), `bin/reap --record`, `bin/crops-score --record`, commit: `bin/reap`'s one problem clears.
+1. The essential gate on `next`; `bin/gate --pins`.
+2. `bin/gate --full`, keyed (above).
+3. The records the merged branches ask for, after the gate:
+   - goi: `bin/goi check --record` whole (goi-escape's 96 rows confirmed), `bin/goi divergences`.
+   - C (c-deferred): `bin/ci check --record`, `check --aot --record`, `bin/ci annotations --only` the touched files,
+     `bin/repr-c roundtrip --record`.
+   - C++: `bin/cppi check --only test/cpp/essential-check.txt` and `--aot`; `cpp-aot-essential` measured at `CPPI_THREADS=1`
+     (added if within 3 GiB); `bin/cppi check --corpus libstdcxx --sample 25 --record` and `--aot` (about 10 GB, 50 min and
+     1.5 h); `bin/cppi record-ref --corpus gxx-dg-run` (1 h) and `check --corpus gxx-dg-run --record` (40 min); its `--aot`
+     (about 8 h) is a night of its own.
+   - OCaml (ocaml-libs4's list): `bin/oi record-ref`, `suite record-ref`, `check --record`, `suite check --record`,
+     `check --aot --record`, `suite check --aot --record`, `O2J_SHARD=8 ... --level compiled --record` both (4 to 5 h, up to
+     10.8 GB a shard), `bin/oi pins --attest`, the divergences.
+   - Scheme (smr7): `bin/si ecraven` whole (`SI_TIMEOUT=300`), `bin/si mats --record` whole.
+   - Clojure (clojure-cdr): unskip java-interop's test-dot and test-bean, the suite re-recorded on the test build, `bin/clojure-tests
+     --aot` (unskip genclass and the two), `bin/oracle check`, `bin/diffcheck`; CDR1's locale trial optional.
+   - Java (java-jc9c): the smoke programs and `bin/java-check --levels interp,compiled` on F12's and F13's areas, `--save`.
+   - Last: `bin/reap --record`, `bin/crops-score --record`.
+4. Python's amd64 records: a night of their own (as in part one).
+
+### Proposed (batch 1, second part)
+
+6. **java-jc9c without its prerequisites.** Its doc merges it "after `next` holds JC9 and JC9b" (F1 `java-jc9-jca`, F5
+   `java-jc9-logging`, `java-jc9b`, `java-jc9b-natives`: none is on main or in batch 1; PKI and TLS need F1's JCA). Merged as
+   decided, it may leave tonight's conversion or build failing, which would stop the whole night. (a) Revert its merge today
+   (`git revert -m 1 5c67e7145`) and give the JC9 line its own day and conversion night; cost: Java's F2-F4, F12, F13 wait.
+   (b) Merge the four prerequisites into batch 1 today (6, 4, 8 and 11 commits; conflicts in the triage doc, `arbace/j2g/model.ae`,
+   Java's and Clojure's classes, `cells.edn`, `DriverManager.java`, `go/arbace/jrt.ae`); cost: about an hour by day, a larger
+   conversion tonight. (c) Keep it and try step 0; on a failure revert it at night. *Recommended: (a).*
+
+### Decided (the user, 2026-11-07, second round)
+
+- Proposal 6: (b), JC9's four prerequisites merged today; if tonight's conversion fails, the main session reverts `java-jc9c`
+  and the four and runs the gate without them (the commits below).
+- `java-judge` (JCV1) and `scheme-90` (SCS1) merged; crops-score's mixed stage is the case-weighted mean (doc/CROPS-SCORE.md,
+  "Decided (the user, 2026-11-07): a mixed stage"); JCV2 to be built (JCV5, JCV6 not now); SCS2 (a): the scheme-chez-dumps pack
+  when `oracle-records-cpp2` merges (not today).
+
+### Batch 1, third part (JC9's four, java-judge, scheme-90, 2026-11-07)
+
+Merge commits (for a revert at night, newest first: `git revert -m 1 ID` each, in this order; `java-judge`'s merge interleaves
+`bin/java-check`'s F6 lines with JCV1's, so `java-jc9c`'s revert there may need a hand fix):
+
+| branch | head | merge commit on batch1 |
+|---|---|---|
+| `java-jc9b-natives` | f89e8e9c | `fb4689814` |
+| `java-jc9b` | 51b320c1 | `418af3c7b` |
+| `java-jc9-logging` | b8a1951c | `ef37fdb03` |
+| `java-jc9-jca` | a4a8e546 | `7d49a3249` |
+| `java-jc9c` (part two) | e92a1c8e | `5c67e7145` |
+
+Then `java-judge` 3ab550e0 (`b4216bacc`) and `scheme-90` 43b39f4a (`eb49dcddc`), crops-score's mixed stage (`a6a10d703`).
+
+- Resolutions of note: `DriverManager.java` (both added) clojure-cdr's, F16's java.sql files out of `small-members-sources`
+  (CDR4 holds them); `jrt_sources.ae` jca-sources and logging-sources both; `go/arbace/jrt.ae`'s lists both; Java's records
+  rederived by `bin/java-check rejudge-records` (equal to java-judge's but t05507, its hand edit kept); JCV1's patch applied to
+  `test/crops/independence.edn`; scheme-90's controls replace crop-controls' picked Scheme controls (`test/scheme/repr-controls.edn`
+  removed, the steps name `test/scheme/controls.edn`), gt9v-scheme's `--only-list` applied again on scheme-90's
+  `arbace/repr/scheme.ae`; scheme-90's two diffs applied (crops.edn's rules, independence.edn); `si-corpora` without `:chibi`, as
+  scheme-90 declares it (else Scheme's judge was refuted).
+- Keys (12 hex): at `1dd5bcc71` gate `1f886836e11e`, runtime `4cd0885457fb`, javac `c97e87dc55a5`; at the end `2f25331ada6f`,
+  `b74523271f12`, `f221ad0dfe97`, moved by JC9's four (jrt, jrt's closure, overlay/jdk: all three); java-judge, scheme-90 and
+  crops-score's change moved none.
+- `bin/reap`: 30 of 32 checked, the one problem as before (deferred.cpp until tonight's C++ record); Java eval 1,864 / 335 /
+  1,123, AOT 1,937 / 308 / 1,077 (JCV1). `bin/crops-score --judge --strict`: 0 problems.
+- Scores: Clojure 99.0 / 96.3 / 100, Java 72.9 / 100 / 99.7, Go 94.9 / 95.8 / 100, C 95.1 / 100 / 20, C++ 75.4 / 91.7 / 20,
+  OCaml 80.9 / 100 / 20, Scheme 98.4 / 100 / 95.0, Python 0 / 83.3 / 20, Haskell 0 / 8.3 / 20, Rust 0 / 8.3 / 20, LLVM IR
+  0 / 4.2 / 40.
+- Plans: essential 40 steps, 34 run; `--full` 288, 274 run, 8 after; about 10.3 h measured plus about 1.3 h (unchanged).
+- Tonight's step 0 conversion (above) now also carries F1, F5 and JC9b (F16, F8, F7, F11): one `bin/jrt-convert update` for every
+  area; JC9b's doc notes that F5's `Logger`/`LogRecord` called `ResourceBundle.getBundle(String, Locale, ClassLoader)`, which jrt's
+  overlay lacked (its "Findings": the joint javac check `.tmp/jc9b/all9/run.sh` before the conversion, a minute, 1 GB).
+- **JCV2 not built here**: 15 golden files reviewed line by line against the JLS sections the programs cite, their output to be
+  produced first (the reference records only digests), and `verdicts.edn`/`run.ae` taught a `:golden` kind for them: a
+  reviewing task of its own (an agent, Opus), after tonight's gate.
+
+## After the tag
+
+- **The held branches, in batches into `next`** (`.tmp/tag-v2/merge-plan.md`): the crops' rows (batch 1, above), the LLVM IR line (the reader's gaps, `:full`, the verifier, the lowering of
+  `-g` IR), the native readers with their error messages (OCaml: Menhir's tables generated from parser.mly; Haskell:
+  Happy's from Parser.y, a clean-room traditional cpp; Rust: rustc's parser rule for rule; C++: CX11 with a minimal Sema
+  and the tree check), the negative controls, Python's amd64 records night and PY11 (its
+  line merged in batch 1), and the re-seed window W (the evaluator's speed, the embedding of C++, Scheme and OCaml's oi).
+- **GT9** (the crops' gate, GTS210-GTS223 decided (a)), CS268, LLS1-LLS16.
+- Python on the Mac VM: 202 done (`mac/201-python-py7-py11` 9540946b); queued 203-206 (the user, 2026-11-05, in order):
+  202's lows, `_csv` and `mmap` as Go ports (PYS22), pinned wheels and the installer (PYS23-PYS25), `bin/pyi c2j-check`.
+- **The day's deep-thinking work (the user, 2026-11-05; agents on branches, sample checks only, held for after the tag):**
+  1. OCaml's typer and Translcore ported (OC4 (b)'s route): oi without the host's `ocamlc` (`ocaml-typer`; started).
+  2. C++ without clang: Sema's rest and a code generator into the LLVM IR forms, the design and a first slice
+     (`cpp-codegen`; started).
+  3. The crops' oracles recorded as data, so no gate needs a host toolchain (GHC, rustc, clang, ocamlc, Chez, python3): a
+     design with proposals (after the keyed `--full`).
+  4. Java eval's 1,220 deferred cases triaged by root cause, ranked by tests per day, the top fixes planned
+     (`java-deferred-triage`; started).
+  5. Haskell's hsi from HE4d: the boot libraries and the C they call (HE5-HE7).
+  6. Rust's eval from RE4 (RE5 on).
+  7. Go eval's 173 by-design cases reviewed for what is reachable (`gc-flags`' 98: gc's `-m` diagnostics).
+  8. GT9 built on a branch (GTS210-GTS223 (a)): the crops' gate steps and keys, checked by `--plan` and gate-tests
+     (`gt9-build`; started).
+  9. The merge plan's batches 0-5 rehearsed against `next`: conflicts, key changes, order, nights.
+- **The second round (the user, 2026-11-05):**
+  1. The crops' oracles recorded as data, no gate needing a host toolchain: the design (`oracle-records`; started).
+  2. OCaml's typer T7 (Simplif) and T8 (the module system, the stdlib typed natively) (`ocaml-typer2`; started).
+  3. C++'s codegen G2: exceptions, lambdas, multiple and virtual inheritance, bit-fields, unions, member pointers, SysV
+     passing (`cpp-codegen2`; started).
+  4. Haskell without GHC: a survey of the smallest route from the native reader to STG (HES21 (b)).
+  5. Java JC9 F1, the JCA: closures, overlays, edge and judging areas prepared for the night's conversion
+     (`java-jc9-jca`; started).
+  6. goi's liveness: dead slots and `uintptrescapes`.
+  7. Scheme's maturity review: R7RS-small's and the corpora's SRFIs' gaps ranked.
+  8. GT9's missing verbs: `--only-list`, `--cmi-only`, `--no-expect`, `test --samples`, `pins check`, C++ and OCaml subsets
+     (`gt9-verbs`; started).
+  9. The re-seed window W prepared: eval-speed rebased, pyi's embedding planned, the two nights scripted (`window-w`;
+     started).
+  10. LLVM IR's LLS1-LLS19: a decision sheet with fresh recommendations.
+- **For the bottom crops (the user, 2026-11-05; C++, Rust, Haskell, OCaml, LLVM IR):**
+  1. Rust without rustc: a survey of the route from the native reader to rsi's IR (`rust-frontend-survey`; started).
+  2. RES34: std translated once per key by cf2g, designed and proved on one crate (`rust-res34`; started).
+  3. Rust's REAP row: read and print cells from the round trips (`rust-row`; started, with 7 and 9).
+  4. C++'s eval and AOT cells: `bin/cppi check` over g++'s run corpus, its classes and record (`cppi-check`; started).
+  5. C++ print's 914 by-design cases reviewed.
+  6. Haskell HE8: AOT, STG to Go forms, designed with a first slice (`haskell-he8`; started).
+  7. Haskell's REAP row (`haskell-row`; started).
+  8. OCaml's deferred cases triaged (190 at eval, 219 at AOT).
+  9. LLVM IR's REAP row (`llvm-row`; started).
+- **The bottom crops, third round (the user, 2026-11-05):**
+  1. OCaml OT9 fixes 6-8: sockets, processes and signals (OT18), compiler-libs (`ocaml-libs3`; started).
+  2. OCaml T11, the run corpus and the REPL on the native path (after T10, running on `ocaml-t10`).
+  3. C++ CPR1: the print cell reads the oracle's rejections natively, with cpp-native2 merged; CPR4 at its re-record (`cpp-cpr1`;
+     started).
+  4. C++ G4, the library headers (`cpp-g4`; running).
+  5. Haskell HF5/HF6: the match compiler, CorePrep, CoreToStg and Unarise ported; programs run on hsi from our STG
+     (`haskell-hf56`; started).
+  6. LLVM LLS21: the ci builtins and the function pointer's return width (`ci-lls21`; started).
+  7. Rust: a night script for rsi's records (runtime-ci, aot-lib, check and check --aot, record-ref).
 
 ## Open
 
@@ -115,7 +342,9 @@ small development tasks. Nothing of GT8 is written yet: its survey first (GATE-S
   source's fix waits for the next re-seed.
 - The box can no longer build the program: `go/arbace/crt` calls `syscall.Access` and `syscall.Stat_t`, which TamaGo's
   syscall lacks (C9.2's hazard (e)); for the box's revival.
-- Waiting for the user: none known; each survey's "Proposed" sections not marked "Decided" are the list.
+- Waiting for the user: the clean run's fit and the rotation's state in its record (after night 4's numbers); each
+  survey's "Proposed" sections not marked "Decided" are the rest. Parked by the user: Zed (doc/ZED-SURVEY.md on
+  `zed-survey`).
 - Working rules: subagents on Sonnet for as much as possible, Opus for the hard parts (the user, 2026-10-25/26); one
   20 GiB job at a time on the host; Go's build cache trimmed when the disk fills.
 

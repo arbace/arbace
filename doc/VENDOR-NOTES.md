@@ -1062,6 +1062,38 @@ step 4 (2026-10-07); the others came with later work, as each says:
     `SAXParserFactory`). `arbace.java.browse-ui` (a Swing window) stays out: `browse-url` reaches
     it only after the browser commands and `java.awt.Desktop` fail. Clojure's suite's `metadata`
     and `java.javadoc` namespaces run (`test/arbace-go-results.edn`).
+31. **CDR3: gen-class at run time** (2026-11-06; doc/CLOJURE-DESIGN-REVIEW.md, CDR3, the user's
+    decision of 2026-11-05). `arbace/genclass.ae`: `gen-class` (a no-op since item 23) expands to
+    `(arbace.core/gen-class* 'OPTIONS)` (the options with `:impl-ns` the expanding namespace), which
+    builds the class Clojure's `generate-class` builds (clojure/clojure `src/clj/clojure/genclass.clj`
+    at `98d735fab02f`, the suite's revision: `filter-methods`, `non-private-methods`,
+    `protected-final-methods`, `instance-methods`, `ctor-sigs`, `overload-name`, `find-field`,
+    `validate-generate-class-options` ported, prefixed `gc-` where `core_proxy.ae` has a name) as a
+    Java form (`defclass`) and defines it with the Java forms' interpreter, evaluated in the namespace
+    `arbace.genclass`: the private static `Var` fields, the static initializer interning them and
+    requiring the implementing namespace when it is not loaded, the constructors with `:init`,
+    `:state`, `:post-init` and `:factory`, the forwarding methods (the var's fn, else the
+    superclass's method or `UnsupportedOperationException` with Clojure's message), `:methods`
+    (`:static` ones too), `:main`, `:exposes`, `:exposes-methods`. An interface's default method is
+    set afterwards by `Compiler$CFGo/setMethod` for dispatch only, answering `Compiler$Dyn`'s super
+    marker without a fn, so j2g's Dyn runs the default (the interpreter cannot call a world
+    interface's `Iface.super`). Annotations are not written; a superclass the Java forms cannot
+    extend gives a class of that name extending Object whose constructor throws. `gen-interface`
+    resolves a hinted class name it cannot find as munged (`-` to `_`): Clojure's names it in the
+    descriptor without loading it. Clojure's suite's `genclass` and `genclass.examples` run: 6 of 8
+    tests pass, `protected-final-access` errs (a `ClassLoader` subclass), `gen-interface-source-file`
+    is skipped (ASM).
+32. **CDR2: the evaluator's primitive typing** (2026-11-06; doc/CLOJURE-DESIGN-REVIEW.md, CDR2 (a), the user's
+    decision of 2026-11-05; Q1 (a) kept: no fn has a primitive interface). `arbace/lang/Compiler.ae`:
+    `InvokeExpr.parse` types a call of a var whose arglist of the call's arity returns `^long` or `^double`
+    (`FnMethod.primReturnCast`) as Clojure's `.invokePrim` of `IFn$...L` or `...D` types it, by analyzing it as
+    `(arbace.lang.RT/longCast (f args))` (`doubleCast`), the inner call marked (`PRIM_CAST_KEY`) so that it stays
+    a plain `invoke`, the form's and the var's metadata on the cast as Clojure puts them on `.invokePrim`; and
+    `MethodExpr.checkTypedArgs`, called by `InstanceMethodExpr`'s and `StaticMethodExpr`'s constructors, types each
+    argument of a primitive parameter as `MethodExpr.emitTypedArgs` does (`maybePrimitiveType`, so a tag that
+    does not fit, `^int` on a long, throws Clojure's "Cannot coerce long to int, use a cast instead" when the
+    call is analyzed: the evaluator emits nothing). So a `recur` of another type to a loop local bound to such
+    a call warns, and compilation's `primitive-return-decl` and `incorrect-primitive-type-hint-throws` pass.
 
 ## Dialect divergences
 
@@ -1114,8 +1146,8 @@ the runtime-visible renames are listed once, as repr/clojure's mechanical part.
   and the rest, the field `__arbaceFnMap`) say `arbace`, not `clojure`.
 - **`reify` of Go interfaces** (hand change 29): `reify` accepts a Go interface of goi's table
   among its specs (upstream has no Go); its object is also an `arbace.lang.GoReify`.
-- **Without the JVM** (hand change 23, D13): `gen-class` does nothing and `ns`'s `:gen-class`
-  is ignored; `compile` writes no class files; interfaces, protocols' interfaces, proxies and
+- **Without the JVM** (hand change 23, D13): `gen-class` defines its class when evaluated, not
+  when compiling (since hand change 31; until then it did nothing and `ns`'s `:gen-class` was ignored); `compile` writes no class files; interfaces, protocols' interfaces, proxies and
   deftypes are made at run time with no class file, so annotations in their metadata are carried
   by none; `add-classpath` throws, `*loader*` is nil, and no `DynamicClassLoader` exists;
   `:direct-linking` is ignored; `arbace.reflect`'s `AsmReflector` throws; the namespaces

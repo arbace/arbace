@@ -164,6 +164,35 @@ public final class Main {
         return run(argv, new PrintWriter(System.err, true));
     }
 
+    /**
+     * javac's command line against the platform javax.tools' system compiler attributes against
+     * (SystemCompiler's property jdk.internal.jrt.javac.platform, each of its directories a
+     * --platform), its diagnostics to err: what com.sun.tools.javac.Main's compile methods do on
+     * javac's tool (their variant, overlay/jdk/javac/variants/JavacMain.ae; F6,
+     * doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F6"). An I/O error is a bad command line's
+     * status, 2, its message on err.
+     */
+    public static int runOnPlatform(String[] argv, PrintWriter err) {
+        List<String> args = new ArrayList<>();
+        String p = System.getProperty(SystemCompiler.PLATFORM);
+        if (p != null && !p.isEmpty()) {
+            for (String d : p.split(File.pathSeparator)) {
+                args.add("--platform");
+                args.add(d);
+            }
+        }
+        for (String a : argv) {
+            args.add(a);
+        }
+        try {
+            return run(args.toArray(new String[0]), err);
+        } catch (IOException e) {
+            err.println("error: " + e.getMessage());
+            err.flush();
+            return 2;
+        }
+    }
+
     public static void main(String[] args) throws IOException {
         System.exit(run(args));
     }

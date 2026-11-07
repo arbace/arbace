@@ -1,0 +1,813 @@
+# OCaml's deferred cases, triaged by root cause (2026-11-05)
+
+The REAP matrix's OCaml cells at `ocaml-o8` (`test/reap/matrix.edn`): **eval 360 pass / 114 by design / 190 deferred**,
+**AOT 337 / 108 / 219** (the light level, OC87). This triage asks what the 190 and 219 deferred programs really wait for,
+groups them by root cause rather than by the class of `test/ocaml/divergences*.edn` that files them, counts them, estimates
+days per fix, ranks the fixes and designs the first five far enough to start. It follows doc/classes/JAVA-DEFERRED-TRIAGE.md
+(branch `java-deferred-triage`). Nothing was built and no corpus was run: the records (`test/ocaml/check-{oi,aot,suite-oi,suite-aot}.edn`
+and the five classes files), the testsuite's sources (the `ocaml-5.5.0` tarball's `testsuite/tests` and `otherlibs/`, read in place), oi's
+code (`go/arbace/oi`, 11.6k lines of Go forms) and the AOT runtime (`jdk/ocaml/ocaml/rt`, 4.9k lines of Java forms) were read; two
+one-line probes of `bin/oi run` (light) confirm the first finding below.
+
+## Summary
+
+- The deferred classes are **header classes, not causes**. `:multi-file` (93) and `:libraries` (90) are 183 of the 190 eval
+  deferred; the rest is `:bigarray` 3, `:header-flags` 2 and the suite's `Marshal` with closures 2. At AOT the 29 programs of the light
+  level (`:light-speed` 26, `:light-depth` 3) come on top (219).
+- **Nothing outside the stdlib is in oi at all.** `Thread`, `Unix`, `Str` are "Unbound module" (probe: `Thread.create` and `Unix.sleepf`
+  programs); oi's registry holds 347 externals, none `unix_*`, `caml_thread_*` or `caml_re_*` (mutex, condition, domain and effects are there).
+  So every library is a fix of the same shape (its units compiled into the library set, its externals registered, twice: oi's Go and the AOT
+  runtime's Java forms, +50% to +100% for the mirror at AOT).
+- **79 of the 190 can never pass in oi's design** and should move to by design (Proposed OT1-OT7): the compiler's output tests (19), ocamltest's
+  tools (15), tests that run a program the test built (4), `OCAMLRUNPARAM` backtrace references (2), `Unix.fork` (4), runtime events (6),
+  Dynlink (6), C stubs that use the runtime's internals (21), `Marshal`'s Closures flag (2). That leaves **111 deferred at eval, 140 at AOT**.
+- **The ranking by tests per day** (days = eval; the AOT mirror in the table): the compiled level (29 AOT-only tests, 4.8 a day), the Unix core
+  (9, 4.5), the harness for multi-module tests, data files and flags (13, 4.3), Unix descriptors and files (17, 4.3), threads (15, 3.75). These five,
+  **19 days eval + 8 AOT**, unblock at most **54 programs at eval and 83 at AOT**; with the calibration of the Java triage (0.7 of
+  "alone" regained) about **38 at eval (360 to about 400 pass)** and **58 at AOT (337 to about 395)**.
+- **The typer** (branches `ocaml-typer`, `ocaml-typer2`: doc/ocaml/TYPER.md, T1-T12) changes none of the runtime fixes (externals are the same
+  whoever produces Lambda) and four others (section 5); its biggest consequence is that it could reopen the by-design backtraces (28 tests).
+
+## 1. Method
+
+**The classification, reproduced.** A script over the records and classes (first class of the file whose `:match` finds "RESULT REASON";
+`:kind-map {:corpus :design :light :deferred}`) gives the matrix's numbers: eval = `check-oi.edn` + `check-suite-oi.edn`: 273 + 87 pass; the
+deferred 93 + 90 + 3 + 2 (check) + 2 (suite) = 190; AOT 251 + 86 pass, the same 188 + 2 plus 29 light = 219.
+
+**The causes.** For each of the 183 header-class programs the test's source was read (and for a `modules` list the directory's `.ml` and `.c`
+files): which library it includes, which `Unix.*`, `Thread.*`, `Str.*` functions it calls, which C stubs it builds. Every program gets a set of
+causes; the columns of section 2 are as the Java triage's: **touches**, **alone** (the only cause: unblocked if it alone were fixed), **+deps**
+(unblocked by it with its prerequisites), **design** (it also needs something by design: `Unix.fork`, `Printexc` backtraces, the GC's counters,
+weak and ephemerons, plugins, the compiler's output).
+
+**Calibration.** "Unblocked" means the library exists; a test can still fail on a behaviour (timing, `torture`, `Gc` counters). The Java triage
+measured 0.7 of "alone" regained; this plan uses the same factor. oi's passes show the base rate: of the 556 programs of the run corpus 247 are classed by header and not run; of the other 309, 273 pass (88%).
+
+## 2. The causes: touches, alone, +deps, design (eval; AOT the same plus the light level)
+
+| cause | what it is | touches | alone | +deps | design |
+|---|---|---:|---:|---:|---:|
+| `c-stubs` | the test builds C stubs (`modules = x.c`) | 41 | 41 | 41 | 21 (runtime internals, OT6) |
+| `compiler-output` | `compile_only`, `-dshape`, `setup-ocamlopt.byte-build-env`, dumpobj | 19 | 19 | 19 | 19 (OT2) |
+| `tool` | ocamldoc 5, caml-tex 2, lexyacc, debugger, ocamldep, objinfo, scripts, toplevel | 15 | 15 | 15 | 15 (OT3) |
+| `multi-ml` | `modules = a.ml b.ml ...`, `readonly_files` of modules (no C) | 11 | 11 | 11 | 0 |
+| `compiler-libs` | `include ocamlcommon`/`config` (Misc, Parsetree, Location...), plus `-I $ocamlsrcdir/parsing` | 9 (+1) | 9 | 9 | 0 |
+| `thread` | `Thread`, `Event` (systhreads) | 29 | 14 | 15 | 6 (4 fork, 2 Gc counters) |
+| `unix-fd` | pipes, read/write, dup, openfile, stat, truncate, utimes, symlink, select, channels of descriptors | 29 | 10 | 12 | 3 |
+| `unix-min` | `sleep`, `sleepf`, `gettimeofday`, `getpid`, `environment`, errors | 21 | 9 | 9 | 1 |
+| `unix-proc` | `waitpid`, `create_process`, `open_process*`, `kill`, `alarm`, `sigprocmask`, signals | 13 | 2 | 10 | 0 |
+| `unix-sock` | sockets (3 threaded servers, `recvfrom`, `gethostbyaddr`) | 7 | 3 | 4 | 0 |
+| `dynlink` | `Dynlink.loadfile` of plugins the test builds | 6 | 6 | 6 | 6 (OT5) |
+| `runtime-events` | `Runtime_events` (the GC's ring, a consumer reading the file) | 6 | 6 | 6 | 6 (OT4) |
+| `fork` | `Unix.fork` | 4 | 0 | 0 | 4 (OT1) |
+| `subprocess` | the test runs a program it built (`reflector.ml`, `myecho.ml`, `cmdline_prog.ml`) | 4 | 4 | 4 | 0 (OT3) |
+| `bigarray` | `bigarray.c` beyond the stdlib's minimum (3 of the class; `map_file`, `read_bigarray`, 2 of unix's; 4 C stubs) | 3 (+2, +4) | 3 | 3 | 0 |
+| `str` | `Str` (strstubs.c, str.ml) | 2 | 2 | 2 | 0 |
+| `backtrace-ref` | `reference = $` of backtrace tests | 2 | 2 | 2 | 2 |
+| `readonly-data` | `readonly_files` of data (`basic-io-2/io`) | 1 | 1 | 1 | 0 |
+| `flags` | `-safer-matching` (the other, `-I`, is compiler-libs) | 1 | 1 | 1 | 0 |
+| `marshal-closures` | `Marshal.Closures` (suite) | 2 | 2 | 2 | 2 (OT7) |
+| `light` (AOT only) | the light level: 26 over the CPU limit, 3 over the 10,000-frame depth | 0 / 29 | 29 | 29 | 0 |
+
+(+deps: `thread` after `unix-min`; `unix-fd` after `unix-min`; `unix-sock` after `unix-fd`; `unix-proc` after `unix-min` and `unix-fd`.)
+The 67 programs of `include unix|systhreads` split by what they call: threads alone 14, descriptors alone 10, the core alone 9, and a long tail
+of combinations (the columns above count the combinations under each cause). **The `:libraries` class hides four different jobs.**
+
+What the largest causes contain:
+
+- **Unix** (67 programs with systhreads). Of ~130 externals only a few are common: `close` 15, `pipe` 10, `read` 8, `sleep` 8, `getpid` 5, `kill` 5,
+  `fork` 5, `write` 5, `out_channel_of_descr` 5, `Unix_error` 10 (its registered exception). The 9 "core" programs need only `sleep`/`sleepf`/`getpid`/
+  `gettimeofday`/`environment`/`Unix_error`: `parallel/backup_thread`, `domain_*_spawn_burn` (3), `poll`, `recommended_domain_count_unix`, `lib-random/parallel`,
+  `lib-systhreads/multicore_lifecycle`, `lib-unix/win-env/test_env`.
+- **Threads** (29): `Thread.create` 28, `join` 22, `delay` 12, `yield` 6, `self`, `id`, `Thread.sigmask` 2; `Event` (`bank`, `sockets`).
+  `thread.ml` has 97 lines and 8 externals; `st_stubs.c` 1,099 lines. oi's domains are goroutines already (`thread.ae`) under an interpreter lock; a systhread
+  is a goroutine of the same domain under that lock (the master lock), released in blocking calls.
+- **C stubs** (41): 21 touch the runtime's internals (global roots, the C thread registration, custom blocks' finalizers, `caml_startup` embedding, the
+  runtime-events consumer, locale, Windows); 20 use the stable C API (callbacks 10, `external` with 15 arguments, `[@unboxed]` externals 2, exceptions from C,
+  BLAKE2's self test, `Marshal`'s helper 2, bigarray stubs 3).
+
+## 3. Fixes, days and ranking
+
+Days: eval (oi) + AOT mirror (the Java runtime `jdk/ocaml/ocaml/rt`, checked at the light level; the compiled level shares it). Sources of the
+estimates: the C line counts of the library (unix 142 non-Windows files, 12.9k lines but most are 20 to 100 line wrappers; `st_stubs.c` 1,099; `strstubs.c`
+550; `bigarray.c` 1,395; `runtime_events.c` 872 + the consumer 1,344) at the pace of the existing externals (oi's 11.6k lines were O3-O5), and the
+checks' time. **Rate** = tests unblocked (the `+deps`-closure's new tests, design ones excluded) per eval day.
+
+| # | fix | tests (eval = AOT) | days eval + AOT | tests/day | needs |
+|--:|---|---:|---:|---:|---|
+| 1 | **compiled level** (AOT's reference check): o2j per-program package, depth counter, shards, record | 29 (AOT only) | 6 + 0 | 4.8 | j2g's world items (heavy list 2), a night window |
+| 2 | **Unix core**: the `Unix` unit, `Unix_error`, time, pid, environment, unlisted externals failing at call | 9 | 2 + 1 | 4.5 | none |
+| 3 | **harness**: multi-module programs, readonly data, flags | 13 (11 + 1 + 1) | 3 + 0.5 | 4.3 | none |
+| 4 | **Unix descriptors and files** (the fd syscalls, `*_channel_of_descr`, stat family, select, `isatty`) | 17 (12 + 5 with threads) | 4 + 2 | 4.3 | 2 (and 5 for the 5) |
+| 5 | **threads**: `Thread`, `Event`, the master lock, `delay`/`yield`/`join`, `Thread.sigmask` | 15 | 4 + 2 | 3.75 | 2 |
+| 6 | Unix sockets (`socket` .. `recv`, `getsockname`, `gethostbyaddr`) | 7 | 2 + 1 | 3.5 | 4 |
+| 7 | Unix processes and signals, no fork (`waitpid`, `create_process`, `open_process*`, `kill`, `alarm`, `sigprocmask`, signal handlers) | 13 | 4 + 2 | 3.25 | 4 |
+| 8 | compiler-libs (`Misc`, `Config`, `Parsetree`, `Location`, `Lexing`) as library units | 10 | 4 + 1.5 | 2.5 | the compiled sources of the tarball's `utils/` and `parsing/` |
+| 9 | C API shim on ci (callbacks, unboxed externals, exceptions, strings) | 20 | 10 + 4 | 2.0 | ci, a clean-room `caml/*.h` |
+| 10 | `Str` | 2 | 2 + 1 | 1.0 | none |
+| 11 | bigarray.c (kinds, layouts, overflow, marshalling) | 3 (+2 unix, +4 C) | 3 + 1.5 | 1.0 | 4 for `map_file` |
+
+Total 1-11: eval **44 + 16.5 AOT mirror = about 61 days**, **109 tests at eval, 138 at AOT** (item 1 is AOT only); every fix after 7 is under 2.6 tests a day. The first five (1-5):
+**19 days eval (+ 8 AOT mirror)**, **54 tests at eval (13 + 9 + 17 + 15), 83 at AOT** (adding the 29 light). 0.7 × alone: about 38 / 58.
+After every fix and every Proposed move, the deferred programs left are the tails (the timing tests such as `torture`, programs that also touch the GC's counters).
+
+## 4. The first five, designed
+
+**1. The compiled level.** The AOT cell's 29 deferred (26 over the OC87 CPU limit, 3 over the 10,000-frame depth) are the light level's: Arbace's Java
+forms interpreted on stage 0, about ten times slower than oi. The heavy list of the survey ("As built: O6", items 1-4) is the work: (a) the depth counter of
+OC92 (a) in the translated code (a counter in each call, raising `Stack_overflow` at the interpreted limit, 200,000 as oi's OC69); (b) o2j's per-program
+package `ocaml.p<N>.M_<Unit>` and the stdlib's units once in `ocaml.u` (OC93 (a)), the run corpus in shards of a few dozen programs, `bin/j2g --program`,
+`bin/build-go`; (c) `bin/oi check --aot --level compiled` (to write) judged by `test/ocaml/o2j_check.ae` against ocamlopt's runs, recorded as
+`test/ocaml/check-aot-compiled.edn`, its classes the light level's less `:light-*`; (d) j2g's edge for the classes the runtime asks of the JDK
+(`SynchronousQueue`, `ThreadLocal`, `RandomAccessFile`, `Files`, `BigDecimal`, `ProcessBuilder`): `bin/j2g-edge update`, `bin/jrt-convert update`; (e) the
+gate step `oi-aot` (heavy, OC95). First day: the depth counter and one shard; the rest follows the measure of the shard. Risk: the 26 are programs
+of 10^7 steps and more; expect 20 to 24 to pass, the rest `tailcalls`/`chi2`-like over the limit even compiled. **Decision needed**: OT8 (the AOT cell judged at the compiled level).
+
+**2. The Unix core.** (a) Load `otherlibs/unix`'s OCaml units (`unix.ml`, `unixLabels.ml`; `-I +unix`) into the library set as the stdlib's are (`bin/oi stdlib`:
+oi's library is the units' Lambda dumped by ocdump; add the two units and the `Unix` alias module); today ocamlc prints the alert "unix subdirectory ... added to the search path" for a
+program, the `-I +unix` flag silences it (the harness passes it for `include unix`). (b) Externals in a new `ext_unix.ae`: registered under their C names (`unix_sleep`,
+the names as the units declare them (`caml_unix_*` in 5.x); get the list from the units: `bin/oi aot-lib` reports missing ones, as for the stdlib), the core ones real (time, `gettimeofday`, `getpid`,
+`getppid`, `environment`, `getenv`/`putenv`/`unsetenv`, `sleep`/`sleepf`, `times`, `error_message`), every other `unix_*` registered as a stub raising
+`Unix_error(ENOSYS, name, "")` so the unit links. (c) `Unix_error`: `Callback.register_exception "Unix.Unix_error"` and the errno table of
+`unixsupport.c` (the 68 error constructors from Go's `syscall.Errno`; `unix_error_message` the C library's strerror text: Go's `syscall.Errno.Error()` differs in case for a few, a table). (d) AOT: the same in a new `ExtUnix.ae` and `Fd.ae`'s table. Probe `lib-unix/win-env/test_env`, `parallel/backup_thread`.
+Tests: the 9 above. Checks: `bin/oi check --only` over them, then `--aot`.
+
+**3. The harness.** Three header features of `test/ocaml/oi_check.ae` and the oracle's invocation (ocdump): (a) `modules = "a.ml b.ml"` (and the `readonly_files` that name
+modules): each listed `.ml` compiled in order, the earlier ones' interfaces on the path, each unit's Lambda added to the library set before the main file's; the
+reference run is ocamlc's on the same link (recorded by `bin/oi check --record-ref` on a host with ocamlc). The 11 programs: `badly-ordered-deps/coccinelle`, `basic-modules/main`,
+`basic-multdef/usemultdef`, `basic-private/tlength`, `link-test/test`, `memory-model/{forbidden,publish}`, `misc-kb/kbmain`, `raise-counts/main`, `required-external/main`,
+`typing-shadowing-of-pervasives-submodules/redefine_largefile` (`link-test` uses `external_for_pack`: packs are not units: leave it in the class if it does not link). (b) `readonly_files` of data: copy to the run's cwd (`basic-io-2/io`).
+(c) `flags = -safer-matching`: ocdump's compiler flags passthrough (`basic-more/safer_matching`). AOT: o2j already makes a package a unit per `M_<Unit>`: the light level's check translates each unit, 0.5 day.
+The `modules` programs of `basic-modules/main` and `basic-multdef/usemultdef` already pass in the suite check as other cases (`check-suite-oi.edn`): the harness unifies them.
+
+**4. Unix descriptors and files.** OCaml's `Unix.file_descr` is an `int` on Unix, and oi's channels already wrap real descriptors with `syscall` (`ext_io.ae`: "a buffered file
+descriptor with the C runtime's exact buffering"), so the table is the OS's: `unix_read`/`write` (with the Unix library's 64 KiB limit and `EINTR` loop), `pipe`, `dup`, `dup2`, `close`,
+`openfile` (flags list to `O_*`), `lseek`, `fstat`/`stat`/`lstat` (the record of 12 fields, `st_kind` from the mode), `truncate`/`ftruncate`, `rename`, `unlink`, `mkdir`, `symlink`, `readlink`, `realpath`,
+`utimes`, `chmod`, `isatty`, `select`, `set_nonblock`/`clear_nonblock`, `lockf`, `in_channel_of_descr`/`out_channel_of_descr` (a Channel on the descriptor: `Channel.fd` exists) and
+`descr_of_*_channel`. Each is a few lines over `syscall` (the TamaGo build has `syscall` for linux; oi builds only on it). Blocking calls run with the interpreter lock released (the same hook as threads' item 5).
+The 17 programs: 10 `lib-unix/common/*` and `isatty`, `realpath`, `lib-channels/close_during_flush`, `lib-threads/{close,fileio,torture}`, `parallel/{backup_thread_pipe,multicore_systhreads}`; 4 of them wait for threads.
+Design question: `Unix.fork` (OT1) is kept out. AOT: `Fd.ae`'s table over `RandomAccessFile`/`FileChannel` (no raw descriptors on the JVM's API): the compiled level through Go's `syscall` would be direct; at the light level,
+the Java forms' `jrt` has only `FileDescriptor`: expect 3 of the 5 mirrored days to be in this.
+
+**5. Threads.** Compile `otherlibs/systhreads`'s `thread.ml`, `event.ml` (no `Mutex`/`Condition`/`Semaphore`: the stdlib's) into the library set; externals `caml_thread_initialize/cleanup/new/self/id/
+join/yield/exit`, `thread_uncaught_exception`, `set_current_thread_name`; `Thread.delay` is `Unix.sleepf` (item 2). Semantics: a thread is a goroutine of its domain under the master lock; the lock is released at
+blocking sections (the sleeps, channel reads, `select`, `Mutex.lock`'s wait, `Condition.wait`, `join`) and at an `yield` and, in OCaml, by the tick thread every 50 ms: oi's interpreter has a lock that serialises channels
+today, so threads reuse it, with a preemption count at calls' polls (as signals' polling in `ext_sys.ae`). `Thread.id` is a counter; a thread's uncaught exception printed by `Thread.default_uncaught_exception_handler`. The 4 fork
+programs and `callstack`/`boundscheck`/`moved_while_blocking` (backtraces and counters) stay out. AOT: `Gil.ae` and `TState.ae` exist in the Java runtime; Java forms threads map to `java.lang.Thread` (j2g's `ThreadLocal`).
+
+## 5. What the typer work changes (ocaml-typer: T1-T6 done, 36 of 36 samples; ocaml-typer2: T7 Simplif, T8 the module system, 44 of 44; T9-T12 ahead)
+
+| cause | effect of a native front end |
+|---|---|
+| Unix, threads, sockets, descriptors, Str, bigarray, C shim | **none**: the externals and the runtime are the same whoever makes Lambda. They are needed in oi whether `ocdump` or the typer compiles the library's units; once T8 compiles stdlib units natively, `otherlibs` (`unix.ml`, `thread.ml`, `str.ml`) follow the same route (T8 "the stdlib's own .ml typed and translated natively"; each unit's Lambda equal to the oracle's). Until then they keep ocdump, which needs a host `ocamlc` with `-I +unix`. |
+| harness: multi-module | **helps**: the typer's `Env` reads interfaces natively (no `.cmi` files), so a `modules` list needs the typer to keep each unit's signature in the environment, not a file; T8 gives `Typemod` and `Includemod`. After T8 the harness has no ocamlc at all. |
+| compiler-libs | **helps and hurts**: finding 4 of the O7 review (the host's compiler-libs were compiled against its own stdlib: 7 tests run on the installed stdlib instead of the tree's, with other digests) disappears when the units are compiled from the tarball's sources by the typer. But `utils/` and `parsing/` use GADTs, first-class modules and polymorphic variants: T10. The fix 8 waits for T10; the AOT mirror is the translation of the units. |
+| flags | `-safer-matching` is Matching's own flag: free once `Matching` is the typer's (T1-T6 ported it). |
+| compiler-output (19) | T12 (errors, shapes, `-dshape`, `-dsource`) makes these comparable to the compiler's reference files as a **typer check**, not a program run: they belong to the typer's classes (TYPER.md section 5), not to oi's run corpus (OT2). |
+| backtraces (by design: 23 `ocamlrunparam`, 3 + 2 backtraces: 28) | **reopens** OC11 (a): `Translcore` generates `Levent` events when compiled with `-g` and the native Lambda can keep them, which ocdump's dump does not; a shadow stack of events would give Printexc's backtraces, byte for byte on the common programs. About 6 to 8 days after T11. Not a Proposed item now. |
+| C shim | the typer reads `external` declarations' attributes (`[@unboxed]`, `[@untagged]`, `[@@noalloc]`) as Translprim does: the same primitives descriptions as ocdump's. |
+| dynlink | the typer compiles a plugin and its `.cmi` natively: no `.cmo`, so Dynlink's CRC checks stay out (OT5). |
+
+## 6. Proposed (OT1-OT10; options with costs, a recommendation each, none decided)
+
+- **OT1 `Unix.fork`.** (a) by design: Go cannot fork a multithreaded process (the runtime's threads and the interpreter's goroutines do not survive in the child); oi's `Unix.fork` raises `Unix_error(ENOSYS)`; 4 tests (`lib-systhreads/testfork`, `testfork2`, `lib-unix/common/fork_cleanup`, `fork_cleanup_systhreads`) and the one in `lib-runtime-events`; (b) `fork` by re-exec of oi with the program's state replayed: no, nothing is
+  deterministic. *Recommended: (a)*.
+- **OT2 The compiler's output tests.** (a) by design for oi's run corpus (19: `shape-index/*` 12, `uid-deps`, `uids`, `no-alias-deps`, `syntactic-arity/*` 3, `tool-dumpobj`: they compare the compiler's `-dshape`, `-bin-annot`, `.cmt` or ocamlopt's allocation, no program runs), judged with the typer (T12) as its own check
+  later; (b) deferred until T12. *Recommended: (a)*, the typer's classes of TYPER.md §5 own them.
+- **OT3 ocamltest's tools and programs the test builds.** (a) by design (15 tools: ocamldoc 5, caml-tex 2, lexyacc, debugger, ocamldep shadowing, ocamlobjinfo, `self-contained-toplevel`, 2 `script`, `use_runtime = false`; and 4 `subprocess`: `reflector.ml`, `myecho.ml`, `cmdline_prog.ml`, which the test compiles and runs with `Sys.command`/`Unix.create_process`: oi would need itself as an executable of the program); (b) the subprocess 4 as work (a `bin/oi exec` the harness installs: 3 days). *Recommended: (a)* for all 19 and the `reference = $` 2 (backtraces, OC11 (a)).
+- **OT4 Runtime events.** (a) by design (6): the ring of the runtime's own events (GC phases, `Runtime_events.User` events through a memory-mapped file read by a consumer: 2,200 lines of C) observes the GC, which oi's values do not have (OC64: the counters stay at zero); (b) a user-events-only subset (2 of 6 tests): 3 days. *Recommended: (a)*.
+- **OT5 Dynlink.** (a) by design (6): `Dynlink.loadfile` of a `.cmo`/`.cmxs` the test builds, with the CRC checks of interfaces and the unit table the error messages print; oi has Lambda in memory, no bytecode files; (b) a `loadfile` of an oi unit (a Lambda file) with the unit names: 5 days, the 6 tests would still differ in the messages. *Recommended: (a)*.
+- **OT6 C stubs.** (a) by design for the 21 that use the runtime's internals (`embedded/cmcaml`, `gc-roots` 3, `ephe-c-api`, `c-api` 3, the thread registrations 3, `statmemprof` 2, `regression/pr3612` and `pr11865`, `locale`, `win-stat`, `output-complete-obj/test2`, `lib-runtime-events/test`, `lib-dynlink-native`, `backtrace_c_exn`), (b) also for the 20 of the stable C API; (c) a C API shim on ci for the 20 (10 + 4 days): `value` as an int (tagged ints as OCaml's, blocks as handles of a table), a clean-room
+  `caml/mlvalues.h`, `memory.h`, `callback.h`, `alloc.h`, `fail.h` over oi's Values; the stubs' C compiled by `arbace.c`. *Recommended: (a) for the 21 and (c) kept as item 9 of the ranking, last in the order*: it is 2.0 tests a day and the biggest risk.
+- **OT7 `Marshal` with Closures.** (a) by design (2, suite: `lib-marshal/fuzzy`, `runtime-objects/Tests`): closures marshal as code pointers and program digests (O7, OC103); (b) a code-pointer scheme keyed by the program's Lambda digest: 3 days for 2 tests. *Recommended: (a)*.
+- **OT8 The AOT cell's level.** (a) the compiled level when recorded (fix 1), the light level kept as the quick check and its classes `:light-*` by design; the matrix's AOT cell judged from the compiled record (the 29 light rows no longer counted); (b) both levels counted: the light level's 29 stay deferred. *Recommended: (a)*; the 3 depth programs are fixed by the compiled level's stack (OC92) and the 26 speed ones by its speed.
+- **OT9 The order of the libraries.** OC63 (a) says unix and str, then bigarray, then systhreads; the counts say unix core, the harness, descriptors, threads, sockets, processes, then compiler-libs; Str (1.0 a day) and bigarray (1.0) after the C shim. (a) as ranked here; (b) OC63's order. *Recommended: (a)*; it supersedes OC63's order only.
+- **OT10 Where the library units live.** (a) the units of `otherlibs` (`unix.ml`, `thread.ml`, `event.ml`, `str.ml`, `compiler-libs`) built into the library set like the stdlib, every program of every check loading them (a start-up cost: the stdlib's 10 CPU seconds at the light level, OC88, are shared per process; Unix is 4,000 lines of OCaml); (b) loaded only for a program that names them (`include unix`, found by the header or by the program's free modules), the way the stdlib's units are loaded on demand. *Recommended: (b)*: no cost for the 273 passing programs, and the AOT's `ocaml.u` package stays the stdlib's.
+
+## 7. After all of it
+
+If OT1-OT9 are accepted and items 1-11 built (about 61 days): eval 360 + at most 109 = **469 pass** at best, 114 + 79 = **193 by design**, 2 deferred; AOT 337 + at most 138
+= **475**, 108 + 79 = **187 by design**, 5 deferred. With the 0.7 factor on the new passes: eval about **436**, AOT about **434**, the 30% that fail on a behaviour staying deferred (about 33 and 41).
+The first five alone, 19 days: eval 360 to about 400, AOT 337 to about 395.
+
+## Decided (2026-11-05, the user)
+
+OT1-OT10 as recommended: Unix.fork, the compiler-output tests, ocamltest's tools and subprocess tests, runtime events, Dynlink, the 21 C-stub tests on the runtime's internals and Marshal's closures by design (the 20 on the stable API to a ci shim later); the AOT cell judged at the compiled level; the library order of §4 (superseding OC63); library units loaded on demand.
+
+## As built: OT9's first two fixes (2026-11-05, branch `ocaml-libs1`)
+
+Built on the light tier of the day (no gate, no build of Arbace's executables, no corpus run, stage 0 of main as the tools' host): each
+check a list of programs (`--only-list`), the compiled level's builds one shard at a time.
+
+### Fix 1: the compiled AOT level (§4 item 1; OT8 (a))
+
+**What is in the tree**
+
+- `bin/oi check --aot --level compiled [--record] [--only RE | --only-list FILE]` (and `bin/oi suite check --aot --level compiled`, the suite
+  corpus's units): the programs dumped as the light level dumps them, translated by o2j in the compiled style (`o2j clib`, `cprogs`: each
+  program's units in a package `ocaml.p<N>`, the library's in `ocaml.u`, OC93 (a); unit files that start `(in-ns ...)`, as j2g's trees take
+  them), in shards of `O2J_SHARD` programs (default 8); a shard is one Go program: the runtime `jdk/ocaml/`, the library units its programs
+  link and theirs, the dispatcher `ocaml.u.Shard` (`o2j shard`: the program `O2J_PROG=p<N>` names, argv.(0) `O2J_ARGV0`) and the main
+  package `test/ocaml/o2j/main` (`jrt.RunMain`), translated by `bin/j2g --jdk jdk/forms --input FORMS --root ocaml.u.Shard#main --main ...`
+  (**the JDK's forms alone: no Arbace runtime, no compiled namespaces, no base build**, so a shard's j2g is a light run) and built by
+  `bin/build-go`; a shard that does not build is split in two until the program that fails is alone (its row `refused: j2g ...` or
+  `refused: build ...`). Each program runs alone in its directory under `limited_cpu` (`OI_TIMEOUT`, one Go thread). Judged by
+  `test/ocaml/o2j_check.ae` (`O2J_LEVEL`, `O2J_KNOWN`, `O2J_SLOW`) against ocamlopt's runs and oi's: `test/ocaml/check-aot-compiled.edn`,
+  `check-suite-aot-compiled.edn`, classes `divergences-aot-compiled.edn`, `divergences-suite-aot-compiled.edn` (the light level's less its
+  `:light` classes, plus `:compiled-depth`), known `aot-compiled-known.edn`, slow `aot-compiled-slow.edn`; `bin/oi divergences --compiled`;
+  `O2J_KEEP=1` keeps the shards' executables; `make oi-check-compiled`.
+- The depth counter (OC92 (a)): every function o2j writes counts its calls (`Rt/enter`, `Rt/leave`), Stack_overflow beyond `Rt/DEPTH_LIMIT`
+  (200,000, oi's; `O2J_DEPTH_LIMIT` overrides it for measurements), a handler puts back the depth its `try` was entered at; the depth is the
+  lock holder's (`Gil` keeps each thread's in a `ThreadLocal` while it waits).
+- Mutual tail calls (OC84 (c), which the compiled level's corpus showed: `basic/tailcalls`' 10^7 mutual steps): the functions of a letrec
+  group of several have their body as the method `tb`; a tail call of another function of the group returns a `TailCall` (`jdk/ocaml/ocaml/rt/
+  TailCall.ae`) and the entry bounces (`Rt/bounce`), in one frame.
+- Preemption: oi's tick (a call's or a loop's turn, every 128 while other domains run: `Rt/tick` in each function's entry, self-tail loop,
+  `while` and `for`) and a fair `Gil/yield` (the lock given up until another thread took it): `parallel/pingpong`, `churn` (domains spinning on a
+  reference) and `lazy/lazy3` no longer wait forever.
+- The runtime as j2g's world needs it (no `arbace.lang`): `=` on objects (`.equals`), a double's `(long ...)` (`unchecked-long`), `/` and
+  `unchecked-subtract` on primitives (`Rt`, `Compare`, `ExtSys`: the light level's interpreter took Clojure's meaning); MD5 as the runtime's own
+  (`Md5.ae`, RFC 1321: `MessageDigest` asks java.security's file, which a compiled program does not embed) and the random seed from
+  `/dev/urandom` (not `SecureRandom`).
+- **Finding**: `-m arbace.o2j` ran stage 0's **embedded** copy of o2j, not the checkout's (`RT.toolSource` loads a tool's namespace from the
+  checkout only under `arbace/j2g/`, `arbace/repr/`, `arbace/build/`, `arbace/c2j/`, `arbace/go/`). Until today the two were the same file (main's
+  `9c68df54d`), so O6-O8's records are unaffected; `bin/oi`'s `o2j` now runs `test/ocaml/o2j/tool.ae`, which loads `arbace/o2j.ae` from the
+  checkout (and is in `o2j_key`).
+- **A bug of oi's and the runtime's, found by the compiled level** (`opam/uutf/test_uutf`, which neither the light level nor oi had reached
+  within the limit): `caml_blit_bytes`/`caml_fill_bytes` of 0 bytes at an offset past the end raised "index out of bounds" (C's memmove of 0
+  bytes reads nothing; uutf's encoder blits 0 bytes at an empty buffer's end): `ext_str.ae`, `ExtStr.ae` return at once for 0 bytes.
+- The light level's batch ends after a program that leaves domains running (status 4; the driver runs the rest in a new process):
+  `parallel/backup_thread`'s domain wrote into the next program's output.
+
+**The numbers** (the 29 programs of the light level's classes, OT8: 24 of the run corpus, 5 of the suite's)
+
+| | |
+|---|---|
+| run corpus, the light level's 24 (26 speed and 3 depth, less the suite's 5) | **23 pass**, 1 `:compiled-depth` (`parallel/test_issue_11094`: its 100,000 nested effect handlers overflow 200,000 calls; it passes at 1,000,000, OT11) |
+| suite corpus, the light level's 5 | **3 pass** (`lib-dynarray/test`, `lib-floatarray/floatarray`, `lib-random/chi2`), `callback/test_gc_alarm` known gc (its alarm is a finaliser, never run: OC68 (a)), `opam/uutf/test_uutf` `:compiled-speed` (120 s of CPU; slow at oi too) after a bug fix (below) |
+| **the 29 together** | **26 pass**, 3 classed (depth, gc, speed); the AOT cell's 29 deferred programs (OT8) become 26 passes and 3 non-passes in a class |
+| oi's essential subset (`test/ocaml/essential-check.txt`, 58 programs, shards of 20) | **58 pass**, all 58 the same as oi (the light level: 57 and one `:light-speed`); a shard of 20: j2g 120 to 160 s, 2.5 to 2.7 GB; the build 120 to 180 s, 3.2 to 4.2 GB |
+| the record, `check-aot-compiled.edn` | 91 programs (the 24, the 10 Unix ones, the 58 less one in both lists): **87 pass**, 4 classed, 0 failing |
+| against oi | 22 of the 24 the same, 2 differ (the depth program, and `basic/tailcalls`' timing) |
+| a shard of 8 programs | j2g 140 to 235 s, 2.5 to 3.6 GB peak (`GOMEMLIMIT=1700MiB`, 4 Go threads); `bin/build-go` 160 to 220 s, **3.2 to 4.2 GB** peak (gc compiling the shard's one large package `arbace/lang`: 1,640 classes, the JDK's translations with OCaml's); a program 0.1 to 97 s |
+| the slowest | `lazy/lazy7` 97 s, `lazy/lazy5` 65 s, `basic/tailcalls` 54 s, `lazy/lazy3` 47 s of wall time (under the 120 s of CPU) |
+
+### Fix 2: the Unix library's core (§4 item 2; OT10 (b))
+
+- `bin/oi stdlib` compiles the pinned tarball's `otherlibs/unix/unix.mli`, `unix_unix.ml` (as `unix.ml`) and `unixLabels.ml{,i}` (`-nolabels`, its
+  Makefile's `EXTRACAMLFLAGS`) against the installed stdlib, as `lib/testing`, and dumps their Lambda into `.tmp/oi/unixlib/` (`Unix.ae`,
+  `UnixLabels.ae`); the header `include unix` (and `hasunix`) is now a program's include (`bin/lib/oi/header.awk`), whose dump is typed against
+  that `unix.cmi` and which runs with the two units before its own (`bin/oi`'s `inc_I`, `inc_units`: loaded only for the programs that include
+  unix, OT10 (b)); `bin/oi record-ref` records with `-I +unix unix.cma`/`unix.cmxa` (and `record-ref-only`: `--only` merges).
+- oi: `go/arbace/oi/ext_unix.ae`: `Unix_error` (the 68 constant constructors in unix.mli's order, their Linux errnos, `EUNKNOWNERR` for the
+  rest; raised through the exception unix.ml registers), `error_message` (oi's strerror texts, Go's), `environment`, `putenv`, `unsetenv`,
+  `getpid`, `getppid`, `get[e]uid`, `get[e]gid`, `umask`, `time`, `gettimeofday`, `gmtime`, `localtime`, `mktime`, `times`, `sleep` (outside the
+  interpreter's lock), `getcwd`, `chdir`, `stat`, `lstat`, and `inet_addr_of_string` (unix.ml's initialisation calls it). Any other
+  `caml_unix_*` fails at its call, as every external oi lacks: the new class `:unix-unported` (divergences.edn, -aot, -aot-compiled).
+- The AOT runtime: `jdk/ocaml/ocaml/rt/ExtUnix.ae`, the same less `gmtime`, `localtime`, `mktime`, `times` and the ids: Java's limits are met
+  by an environment overlay (`ExtUnix/env`, which `ExtSys`'s getenv reads first), `ExtSys/cwd` for chdir, and a `stat` whose kind,
+  permissions (as the running user may read, write, run), size and times are the file's and whose other ints are 0.
+- **The count corrected**: of the triage's 9 "core alone" programs, `lib-unix/win-env/test_env` is Windows-only (`target-windows`, a
+  `stubs.c`), `lib-systhreads/multicore_lifecycle` needs threads (fix 5) and `parallel/recommended_domain_count_unix` pipes and processes
+  (`open_process_full`, fixes 4 and 7); 6 pass, and 2 the triage counted elsewhere pass too (`parallel/major_gc_wait_backup`,
+  `lib-unix/common/test_unixlabels`).
+
+| level | the 24 programs `include unix` now runs (systhreads' stay a class) |
+|---|---|
+| eval (oi) | **8 pass**: `parallel/backup_thread`, `domain_parallel_spawn_burn`, `domain_parallel_spawn_burn_gc_set`, `domain_serial_spawn_burn`, `poll`, `major_gc_wait_backup`, `lib-random/parallel`, `lib-unix/common/test_unixlabels`; 16 `:unix-unported` |
+| AOT, light | **7 pass**, 2 `:light-speed` (`major_gc_wait_backup`, `mctest`: `aot-slow.edn`), 15 `:unix-unported` |
+| AOT, compiled | of the 8 and 2 unported (`--only-list`, one shard): **7 pass**, `major_gc_wait_backup` known gc (`Gc.quick_stat`'s major collections: zeros in the runtime, OC64 (a); Go's `NumGC` in oi), 2 `:unix-unported` |
+
+The run corpus: 309 to **333 run programs**; oi **273 to 281 pass** (`bin/oi divergences`: 0 failing); the light level **251 to 258**
+(`bin/oi divergences --aot`: 0 failing).
+
+### Checks run (all light, by list)
+
+`bin/oi check --only-list` (the 24 Unix programs, `--record`; `test/ocaml/essential-check.txt`: 58 pass), `bin/oi record-ref --only-list`
+(the 24), `bin/oi check --aot --only-list` (the 24, recorded), `bin/oi check --aot --level compiled --only-list` (the light level's 24,
+`--record`; the 10 failing and the depth program again; the 10 Unix programs), `bin/oi suite check --aot --level compiled --only-list` (the
+5, `--record`; 2 again after the blit fix), `bin/oi test` (go vet, go test: ok, after each change of oi), `bin/oi divergences --compiled` (30 pass of 34,
+0 failing; the suite's 3 of 5, 0 failing), `bin/oi divergences`, `divergences --aot`,
+`bin/oi check --aot --only-list test/ocaml/essential-check.txt` (the light level after the runtime's changes: no row changed),
+`O2J_SHARD=20 bin/oi check --aot --level compiled --only-list test/ocaml/essential-check.txt --record` (58 pass), `make check-makefile`,
+`bin/oi run`/`aot-run` probes (depth, mutual tail calls, a domain spinning, the Unix core against ocamlopt's output byte for byte), an MD5
+check against `md5sum`. **Not run**: the gate, any corpus run, `bin/arbace-go`; the light records of the programs that do not include unix
+were not rerun after the runtime's changes (the tick, the letrec groups' `tb`, `Md5`), nor oi's after `ext_unix` (the night's runs below).
+
+### The night's record commands (in this order; heavy: the compiled level)
+
+    bin/oi check --record                         # oi, the run corpus (333 programs; ext_unix, the header)
+    bin/oi suite check --record                   # oi, the suite corpus
+    bin/oi check --aot --record                   # the light level: the runtime changed (tick, tb, Md5)
+    bin/oi suite check --aot --record
+    O2J_SHARD=20 bin/oi check --aot --level compiled --record        # the compiled level, every run program: 17 shards, about 2 h (a shard of 20
+                                                                     # costs as one of 8: j2g 2.7 GB, the build 4.2 GB at most)
+    O2J_SHARD=20 bin/oi suite check --aot --level compiled --record  # and the suite's
+    bin/oi divergences && bin/oi divergences --aot && bin/oi divergences --compiled && bin/oi pins
+
+then OT8 (a)'s matrix change: `test/reap/cells.edn`'s OCaml AOT cell from `check-aot-compiled.edn` and `check-suite-aot-compiled.edn` (with
+their classes), `bin/reap record`. Until the compiled record covers the corpus the cell stays the light level's.
+
+### Proposed (OT11-OT15; none decided)
+
+- **OT11 The compiled level's depth limit.** (a) 200,000 calls, oi's (OC69 (a)), as built: `parallel/test_issue_11094` in `:compiled-depth`;
+  (b) 1,000,000 (Go's goroutine stacks grow to 1 GB: the program passes in 2.6 GB of memory; a deep plain recursion's cost per call to be
+  measured); (c) count only the calls of non-tail positions. *Recommended: (a)*, (b) if the night's whole corpus shows more programs over
+  200,000 that ocamlopt's stack holds.
+- **OT12 The compiled level in the gate.** (a) a `--full` step `oi-aot-compiled`, heavy (its builds take 3 to 4 GB), GT8.4's `:rotate` over
+  `test/ocaml/subsets.edn`, and `bin/oi divergences --compiled` in the essential `oi-divergences`; (b) by hand at night only. *Recommended: (a)*
+  once the night's record exists (OC95 (a) named the compiled level's subset as the AOT essential step: later, with its time measured).
+- **OT13 Unix's error texts.** oi's and the runtime's `error_message` are Go's texts (glibc's wording); the reference ocamlopt runs on musl,
+  whose texts differ for some errnos. (a) Go's, a class when a test prints one; (b) musl's table (68 strings). *Recommended: (b)* with fix 4,
+  whose tests print errors.
+- **OT14 The JDK's resource data in compiled programs.** (a) the runtime avoids the classes that read them (as built: `Md5`, `/dev/urandom`);
+  (b) embed `jdk/data` in the main package as j2g's `--program` does. *Recommended: (a)*: the runtime's world stays small.
+- **OT15 The compiled level's builds.** A shard's build peaks at 3 to 4 GB (one package of 1,640 classes). (a) at night under the heavy lock;
+  (b) the JDK's translated classes in a package of their own built once (the shards share jrt's and the JDK's compiled objects in Go's cache).
+  *Recommended: (a) now, (b) when the gate step is added*: it would turn a shard into j2g plus a small link.
+
+## As built: OT9's next three fixes (2026-11-05, branch `ocaml-libs2`)
+
+Built on the light tier of the day, as the first two (no gate, no build of Arbace's executables, no corpus run, stage 0 of main as the
+tools' host): each check a list of programs (`--only-list`), the records merged (`--record` with a list), the compiled level one shard at
+a time. The AOT runtime's mirror of fixes 4 and 5 (`jdk/ocaml/ocaml/rt`) is the section "The AOT mirror" below.
+
+### Fix 3: the harness (§4 item 3)
+
+- **One row a program across the two corpora.** A program the run corpus's header reading (`bin/lib/oi/header.awk`) classes but the
+  suite's reading (`actions.awk`: `modules`, `readonly_files`, explicit build steps) runs is now the suite corpus's alone: `bin/oi corpus`
+  leaves it out, so `bin/oi suite corpus` takes it. Before, 6 programs (`basic-modules/main`, `basic-multdef/usemultdef`,
+  `basic-private/tlength`, `misc-kb/kbmain`, `raise-counts/main`, `typing-shadowing-of-pervasives-submodules/redefine_largefile`) passed
+  in the suite and were deferred in the run corpus at once: the matrix's eval and AOT cells counted them twice. Their stale run-corpus
+  rows (and those of the 7 other moved programs) are dropped from `check-oi.edn` and `check-aot.edn`.
+- `readonly_files` of data of any plain name (a C file stays a class): `basic-io-2/io`; `not-bsd` (a platform filter):
+  `memory-model/{forbidden,publish}`; `flags = -safer-matching`, passed through by the oracle (`tools/ocdump`'s new `-safer-matching`,
+  `Clflags.safer_matching`): `basic-more/safer_matching` (run corpus).
+- **ocamltest's explicit build steps** (`actions.awk`'s build mode): from `setup-ocamlc.byte-build-env` to its `check-program-output`, the
+  modules compiled one by one, a library made of some (`program = "lib.cma"`, `-a`), the program linked from `all_modules` and run: the
+  run's units are the link's, a library expanded to its modules (`badly-ordered-deps/coccinelle`, `required-external/main`). A pack
+  (`-pack`), a second executable (OT3's subprocess tests: `lib-filename/quotecommand`) and steps that end without a run stay classes;
+  ocamltest's `${test_build_directory}` no longer splits the header (an argument naming it stays a class).
+- One place for a program's libraries, both corpora: `inc_I`, `inc_units`, `inc_ref` (the reference compilers' flags) in `bin/oi`;
+  `bin/oi suite record-ref --only-list` merges (`record-ref-only`), as the run corpus's did; the suite reads `include unix` and
+  `include systhreads` too.
+- `link-test/test` stays a class (packs: `-for-pack P`, `-pack`, a pack is not a unit of oi's): **12 of the 13** run.
+
+| level | the 13 |
+|---|---|
+| eval (oi) | **12 pass**: 6 new (`basic-more/safer_matching` in the run corpus; `basic-io-2/io`, `memory-model/forbidden`, `memory-model/publish`, `badly-ordered-deps/coccinelle`, `required-external/main` in the suite), 6 already passing in the suite now counted once; `link-test/test` a class |
+| AOT, light | the 6 new: **4 pass**, `memory-model/{forbidden,publish}` `:light-speed` (`aot-slow.edn`: 10^6 iterations of a litmus test each, over 120 s interpreted) |
+
+### Fix 4: Unix's descriptors and files (§4 item 4)
+
+- oi: `go/arbace/oi/ext_unix_fd.ae`, over Go's syscall, a `Unix.file_descr` the OS's descriptor: `open` (the `open_flag` list, `O_CLOEXEC`
+  as asked), `close`, `fsync`, `read`, `write` (the whole buffer, retried; `EAGAIN` after a partial write returns the count), `single_write`,
+  the bigarray read and write, `in_channel_of_descr`/`out_channel_of_descr` (oi's channels over the descriptor), `lseek` and its 64-bit form,
+  `truncate`, `ftruncate`, `fstat` and the `LargeFile` stats, `isatty` (`TCGETS`), `unlink`, `rename`, `link`, `realpath`, `chmod`, `fchmod`,
+  `access`, `dup`, `dup2` (`?cloexec`), `set_nonblock`/`clear_nonblock`, the close-on-exec flags, `mkdir`, `rmdir`, `mkfifo`, `readlink`,
+  `symlink`, `has_symlink`, `utimes` (0.0 and 0.0: now), `pipe`, the directories (`opendir` reads getdents64's entries, `.` and `..` among
+  them, `readdir`, `rewinddir`, `closedir`), `Unix._exit` (no `at_exit`, the channels not flushed). Each call that may block runs outside the
+  interpreter's lock (the other threads and domains run meanwhile). `select`, `lockf`, the processes, signals and sockets stay
+  `:unix-unported` (fixes 6 and 7).
+- `Unix.fork` by design, OT1 (a): the class `:unix-fork` (`:kind :design`) in the six run-level classes files.
+- `lib-channels/close_during_flush` needs a signal (`Unix.alarm`'s handler empties a full pipe a write blocks on): without it the exit's
+  flush blocks until the wall cap (4 × `OI_TIMEOUT`); a known entry (`oi-known.edn`, "unix:"), `:unix-unported` until fix 7.
+
+| level | |
+|---|---|
+| eval, run corpus (the 16 `:unix-unported` of fix 2) | **6 pass**: `lib-unix/common/{dup,bigarrays,rename,truncate}`, `lib-unix/realpath/test`, `parallel/backup_thread_pipe`; 10 classed: `fork_cleanup` (`:unix-fork`), `process_pid`, `pipe_eof`, `parallel/recommended_domain_count_unix` (`create_process`, fix 7), `channel_of`, `gethostbyaddr` (sockets, fix 6), `lib-sys/signal` (`kill`), `parallel/mctest` (`select`), `lib-bigarray-file/mapfile` (`map_file`, fix 11), `close_during_flush` (above) |
+| eval, suite (newly read: `include unix`) | **3 pass**: `lib-unix/common/{append,utimes,uexit}`; 5 classed: `getaddrinfo`, `sigwait` (`sigprocmask`), `recvfrom_unix` (sockets), `multicore_fork_domain_alone{,2}` (`:unix-fork`) |
+
+### Fix 5: threads (§4 item 5)
+
+- `bin/oi stdlib` compiles `otherlibs/systhreads`' `thread.ml{,i}` and `event.ml{,i}` against unix.cmi into `.tmp/oi/threadlib/` (`Thread.ae`,
+  `Event.ae`), loaded after Unix's units by the programs that `include systhreads` (OT10 (b)); `hassysthreads` is read, and a later
+  alternative that skips (`{ include systhreads; hassysthreads; }{ reason = ...; skip; ... }`, lib-threads' headers) leaves the first.
+- oi: `go/arbace/oi/ext_thread.ae`: a thread is a goroutine of its domain under the interpreter's lock, which plays OCaml's master lock (given
+  up in the blocking calls and at the calls' polls while more than one goroutine runs, as the tick thread's forced yield); `Thread.t` the block
+  `[| id |]`, `join` waits outside the lock; threads first take the lock in the order they were created (OCaml's master lock is a FIFO:
+  `lib-threads/tls`); `caml_thread_uncaught_exception` prints st_stubs.c's message; `exit` in a thread ends the process; an internal error in a
+  thread is reported as the main program's. Mutex and Condition are the stdlib's (ext_domain.go, already); `Thread.delay` is `Unix.sleepf`.
+
+| level | the 28 run-corpus and 7 suite programs `include systhreads` now runs |
+|---|---|
+| eval, run corpus | **17 pass**: `lib-domain/DLS_thread_safety`, `lib-systhreads/{boundscheck,multicore_lifecycle,testpreempt}`, `lib-threads/{bank,beat,bufchan,close,fileio,mutex_errors,pr7638,prodcons,prodcons2,swapchan,tls,torture}`, `parallel/multicore_systhreads`; 11 classed: 3 `:unix-fork` (`testfork`, `testfork2`, `fork_cleanup_systhreads`), 5 `:unix-unported` (sockets: `pr4466`, `pr5325`, `sockets`; `sigprocmask`: `eintr`, `threadsigmask`), `backtrace/callstack` (backtraces), `statmemprof/moved_while_blocking` (gc), `parallel/fib_threads` (speed: fib 42 on four domains, `oi-slow.edn`) |
+| eval, suite | **4 pass**: `lib-channels/input_all`, `lib-systhreads/testyield`, `lib-threads/backtrace_threads`, `lib-threads/pr8857`; 3 classed (`parallel/catch_break`'s `sigprocmask`, 2 statmemprof gc) |
+
+### The numbers (eval)
+
+The run corpus 333 to **362 run programs** (543 with a `.reference` in it: 13 moved to the suite), oi **281 to 305 pass**, 0 failing
+(`bin/oi divergences`); the suite corpus 98 to **118 run programs**, **87 to 99 pass**, 0 failing (`bin/oi suite divergences`). The matrix's
+eval cell (`check-oi.edn` + `check-suite-oi.edn`) **368 to 404 pass**, the 6 double-counted programs counted once. oi's essential subset: 58 of 58.
+
+### The AOT mirror (fixes 4 and 5; branch `ocaml-libs2-aot`, merged)
+
+- `jdk/ocaml/ocaml/rt/ExtUnixFd.ae` mirrors `ext_unix_fd.ae` over `Fd.ae`'s table: open (the flag list), close, read, write, single_write (the
+  64 KiB cap), the bigarray read and write, the channels of a descriptor, lseek, truncate, ftruncate, fstat and the `LargeFile` stats, unlink,
+  rename, realpath, chmod and fchmod (the owner's bits: `java.io.File`'s), access, dup, dup2, the non-blocking flag, mkdir, rmdir, utimes (the
+  modification time), pipe, the directories, `_exit`. Java's limits: no descriptors of the OS, so a pipe is the runtime's own (`Pipe.ae`: a
+  64 KiB buffer two table entries share, a reader waiting under the lock's condition while a writer remains, 0 when none does, `EPIPE` when no
+  reader remains, `EAGAIN` for a non-blocking end); `dup` and `dup2` share an entry with a reference count; `fsync` and the close-on-exec flags
+  do nothing; `isatty` is false; `has_symlink` false, and `link`, `symlink`, `readlink`, `mkfifo` stay `:unix-unported` (jrt's `Files` has no
+  links). No JDK class beyond those the runtime used already.
+- `ExtThread.ae` mirrors `ext_thread.ae`: a Java thread of its domain (`TState` with the parent's `Dom`) under the Gil, counted in
+  `Effects/domainsRunning` while it runs (so `Rt/tick` yields), started in creation order, `join` waiting under the Gil's condition, a
+  thread's fatal error the program's. `exit` in a thread is `System/exit`: right at the compiled level, it would end the light level's batch
+  process (no checked program does it).
+- New classes: `:thread-schedule` (by design, OC11: `lib-threads/tls`, whose ocamlopt run printed the threads in another order than ocamlc's
+  and the `.reference`; `lib-systhreads/testyield`, `Thread.yield`'s hand-off under the runtime's lock) in the four AOT classes files;
+  `lib-systhreads/boundscheck` known gc (its loop waits for 1,000 minor collections, which the runtime's `Gc.quick_stat` counts as zero, OC64 (a)).
+- **A reference bug found by the mirror**: `bin/oi record-ref` ran ocamlc's and ocamlopt's programs in one directory, so the second run met the
+  first one's files (`lib-unix/realpath/test`'s `mkdir "test_dir"` failed with `EEXIST`; `lib-unix/common/append`'s file had grown): each
+  compiler's program now runs in a directory of its own (`ref_one`, `suite_ref_one`); the two rows re-recorded. A whole `record-ref` may move
+  other ocamlopt rows the same way (the night's commands).
+
+| level | fix 3 (the 6 new) | fix 4 | fix 5 |
+|---|---|---|---|
+| AOT, light | 4 pass, 2 `:light-speed` | run corpus 6 of 6 pass; suite `append`, `utimes`, `uexit` pass | run corpus 14 pass of oi's 17 (`tls` schedule, `prodcons2` depth, `boundscheck` gc); suite 2 of 4 (`input_all` `:light-speed`, `testyield` schedule) |
+| AOT, compiled | 5 pass, `memory-model/forbidden` `:compiled-speed` (`aot-compiled-slow.edn`) | 6 of 6, suite 3 of 3 | 15 of 17 (`tls` schedule, `boundscheck` gc); suite 3 of 4 (`testyield` schedule) |
+
+The records: the light level 258 to **279 pass** (run corpus) and 86 to **94** (suite), 0 failing (`bin/oi divergences --aot`, `suite divergences
+--aot`); the compiled level's records 87 to **109 pass** of the run corpus's rows and 3 to **13** of the suite's, 0 failing (`bin/oi divergences
+--compiled`). **A compiled shard of 23 thread programs peaked at 10.8 GB in `bin/build-go`** (605 s; a shard of 8 suite programs 4.0 GB, of 5
+3.6 GB): threads' programs make the shard's package larger than the essential subset's 20 (4.2 GB). The night's `O2J_SHARD=20` must take
+this into account (OT20).
+
+### Checks run (all by list, 2026-11-05)
+
+`bin/oi record-ref --only-list` and `suite record-ref --only-list` (the newly run programs; realpath and append again after the directory fix),
+`bin/oi check --record --only-list` (45 programs: fixes 3 to 5's run-corpus programs and fix 2's 16 unported; 24 pass, 0 failing),
+`bin/oi suite check --record --only-list` (20; 12 pass, 0 failing), `bin/oi check --only-list test/ocaml/essential-check.txt` (58 of 58),
+`bin/oi test` (go vet, go test: ok), the light level `bin/oi check --aot --record --only-list` and `suite check --aot` over the same programs
+(the essential subset: 57 pass and one `:light-speed`, as before), the compiled level `bin/oi check --aot --level compiled --record
+--only-list` (one shard of 1 and one of 23) and `suite check --aot --level compiled` (shards of 5 and 8), `bin/oi divergences`, `suite
+divergences`, `divergences --aot`, `suite divergences --aot`, `divergences --compiled` (0 failing each), `make check-makefile`. **Not run**:
+the gate, any whole corpus, `bin/arbace-go`; the compiled level over the essential subset after the runtime's changes (`Fd`, threads); the
+light and compiled rows of programs outside the lists after the runtime's changes (the night's commands).
+
+### The night's record commands (after this branch; in this order, the compiled level heavy)
+
+The lists run today merged their rows into the records; the whole corpora were not rerun. A whole run re-records them (the corpus
+files changed: 13 programs moved to the suite, 28 thread programs and 15 suite programs newly run; the runtime and oi changed):
+
+    bin/oi record-ref && bin/oi suite record-ref    # the references of every run program (today: only the newly run ones, by list)
+    bin/oi check --record                           # oi, the run corpus (362 programs)
+    bin/oi suite check --record                     # oi, the suite corpus (118 programs)
+    bin/oi check --aot --record                     # the light level: the runtime changed (Fd, ExtUnix, threads)
+    bin/oi suite check --aot --record
+    O2J_SHARD=8 bin/oi check --aot --level compiled --record         # every run program: about 45 shards, 4 to 5 h (OT20: a shard
+    O2J_SHARD=8 bin/oi suite check --aot --level compiled --record   # of thread programs builds in up to 10.8 GB at 23 programs)
+    bin/oi pins --attest                            # the pins of the new known entries, from those runs' rows
+    bin/oi divergences && bin/oi suite divergences && bin/oi divergences --aot && bin/oi divergences --compiled && bin/oi pins
+    bin/reap record                                 # the OCaml row: eval and AOT cells
+
+### Proposed (OT16-OT20; none decided)
+
+- **OT16 `lib-channels/close_during_flush` until signals.** It needs `Unix.alarm`'s handler to empty a full pipe; without it oi's (and the
+  runtime's) exit flush blocks until the wall cap, 4 × `OI_TIMEOUT` (8 minutes of one job slot a whole run). (a) as built: a known entry,
+  the wall cap paid each whole run; (b) the run corpus's header reading classes the tests that call `Unix.alarm` or `Sys.signal` with
+  `include unix` until fix 7 (a grep of the source, 6 programs, no run); (c) oi's fatal-path flush skips a descriptor whose write would
+  block (a divergence from C's runtime, which blocks too). *Recommended: (b)* until fix 7: no cost a night, and the class says why.
+- **OT17 Threads' scheduling.** As built, threads first take the lock in their creation order and then compete for Go's mutex, which is not
+  FIFO; OCaml's master lock hands over to waiters in order, which racy-output tests print (17 pass, none fails on order today). (a) as built;
+  (b) a ticket lock for the interpreter's lock (FIFO hand-over at every release): half a day, a few percent slower under contention.
+  *Recommended: (a)*, (b) when a test needs it.
+- **OT18 Signals of threads and processes** (`sigprocmask`, `sigwait`, `Thread.sigmask`, `alarm`, `kill`: `lib-systhreads/{eintr,threadsigmask}`,
+  `parallel/catch_break`, `lib-unix/common/sigwait`, `lib-sys/signal`, `close_during_flush`). oi records handlers but delivers no signal
+  (ext_sys.go). (a) in fix 7 (processes and signals), with Go's os/signal delivering to the program's handlers at the calls' polls;
+  (b) by design. *Recommended: (a)*, as the triage's ranking has it.
+- **OT19 `link-test/test` (packs).** (a) a class (`-pack`: a pack is a module of modules oi's units do not have); (b) packs as units
+  (o2j's and oi's linker making `P.M` the pack's fields): 1 test, 1 day. *Recommended: (a)*.
+- **OT20 The compiled level's shards of thread programs.** A shard of 23 programs, 17 of them threads', peaked at 10.8 GB in its build (gc on
+  one package). (a) `O2J_SHARD=8` for the whole night's run (about 45 shards, 4 to 5 h); (b) shards sized by the programs' translated size
+  (o2j's output bytes), a cap of about 4 GB; (c) OT15 (b), the JDK's classes and the runtime in a package built once. *Recommended: (b)*
+  tonight with a cap, (c) with the gate step.
+
+## Decided (2026-11-05, the user: OT16-OT20)
+
+OT16 (b): the programs calling alarm or Sys.signal classed by a source grep; OT17 (a): creation-order thread start; OT18 (a): signals in fix 7; OT19 (a): link-test's packs a class; OT20: (b) compiled shards sized by translated size with a 4 GB cap tonight, (c) the JDK classes built once later.
+
+## As built: OT9's fixes 6-8 (2026-11-05, branch `ocaml-libs3`)
+
+Built on the light tier of the day, as fixes 1-5 (no gate, no build of Arbace's executables, no corpus run, stage 0 of main as the
+tools' host), each check a list of programs (`--only-list`), the records merged.
+
+### Fix 6: sockets (§3 item 6)
+
+- oi: `go/arbace/oi/ext_unix_sock.ae` over Go's syscall: `socket`, `socketpair`, `accept`, `bind`, `connect`, `listen`, `shutdown`,
+  `getsockname`, `getpeername`, `recv`, `recvfrom`, `send`, `sendto`, `getsockopt`/`setsockopt` (the four option tables of sockopt.c and
+  `SO_ERROR`'s `error option`), `string_of_inet_addr`, `gethostname`, `gethostbyname`, `gethostbyaddr` (Go's net: /etc/hosts first),
+  `getprotobyname`/`number`, `getservbyname`/`port` (/etc/protocols, /etc/services), `getaddrinfo`, `getnameinfo`, and `select` over
+  ppoll(2) (the three lists ready in their order, `EBADF` for a closed descriptor). A sockaddr is `ADDR_UNIX` (tag 0) or `ADDR_INET`
+  (tag 1); Unix sockets and datagrams are real. The channels of a descriptor check channels.c's stream semantics (a datagram socket
+  or a closed descriptor raises, `lib-unix/common/channel_of`). Localhost only: nothing in the lists leaves the host.
+- AOT runtime: `jdk/ocaml/ocaml/rt/Sock.ae`, TCP over java.net (a socket is made by its use: bind records the address, listen makes
+  the ServerSocket, connect the Socket), Fd's entries carrying a socket (Fd's read, write and close dispatch to it), select by the bytes
+  available (a listening socket by a connection accepted ahead), `gethostbyaddr`; a datagram socket is made (for the channels' check)
+  but carries nothing; Unix sockets stay oi's.
+
+### Fix 7: processes and signals, no fork (§3 item 7; OT18 (a))
+
+- oi: `go/arbace/oi/ext_signal.ae`. A signal the program handles or blocks is caught by os/signal and recorded as pending (a bit a
+  signal); it is delivered at a safe point of a thread whose mask does not block it: the calls' and loops' ticks (apply.go: one atomic
+  load a tick), and the end of the externals that send or unblock one (`kill` of the process itself waits for its signal's arrival, by
+  a count, as the kernel delivers to the caller before kill returns). One mask a thread (`Thread.sigmask` is `Unix.sigprocmask`), a new
+  thread and a new domain inheriting their creator's. A thread blocked in a read, a write, a select, `accept`, `recv`, a sleep or
+  `sigsuspend` polls its descriptor and a wake pipe of its own, which the signal's arrival writes; woken with a signal it may take, it
+  runs the handlers and the call ends with `EINTR` (`Unix.read`: `Unix_error (EINTR, ...)` after the handlers, `lib-systhreads/eintr`;
+  a channel's read or write retries, as io.c does: `lib-channels/close_during_flush`, whose alarm handler empties the full pipe). The
+  wake pipe is polled only while a signal is caught (no cost otherwise). `kill`, `sigprocmask`, `sigpending`, `sigsuspend`, `sigwait`,
+  `alarm`, `setitimer`/`getitimer` (real kernel timers), `spawn` (create_process, open_process*, system: ForkExec with the three
+  redirections, `PATH` searched for `usepath`), `waitpid` (`WNOHANG`, `WUNTRACED`), `wait`, `execv`/`execve`/`execvp`/`execvpe`,
+  `setsid`, `nice`. A pending signal whose action is the default one, once unblocked, is raised again with that action. `exit` in a
+  domain now ends the process (it was an internal error: `parallel/mctest`, which also needed `select`).
+- AOT runtime: Java receives no signal of the OS, so `ExtSignal.ae` mirrors the signals a program sends itself (`kill` of its own pid,
+  `alarm`'s timer thread, counted among the running domains while armed so that the ticks let it in), delivered at `Rt/tick` and at the
+  end of `kill` and `sigprocmask`; one mask a thread (TState's `sigmask`, inherited by threads and domains); a runtime pipe's wait is
+  interrupted by a signal its thread takes (Pipe: the handlers run, `EINTR`; Channel's flush retries). `ExtProc.ae`: `spawn` over
+  ProcessBuilder (a redirection to the runtime's own pipe pumped by a thread holding the pipe's end), `waitpid`, `wait`. The
+  interruption of sleeps and sockets, and signals between processes, stay oi's (OT24). The runtime's `recommended_domain_count` is
+  oi's 1 (it said 128, above the host's processors: `parallel/recommended_domain_count_unix`).
+- `lib-unix/kill/unix_kill`'s platform filter `not_macos_amd64_tsan` is read (header.awk, actions.awk): one more run program.
+- OT16 (b) was not built: fix 7 makes it moot (`close_during_flush` passes; its known entry is dropped from `oi-known.edn`).
+
+### Fix 8: compiler-libs, as far as the list needs (§3 item 8)
+
+- `bin/oi stdlib` builds compiler-libs' units of `utils/` from the pinned tarball into `.tmp/oi/complib/` (`complib_build`,
+  `COMPLIB_UNITS`: Config from `config.fixed.ml` and `config.common.ml.in` with the host's magic numbers, Build_path_prefix_map,
+  Format_doc, Misc, Identifiable, Numbers, Strongly_connected_components, Stable_matching, Compression), compiled against the installed
+  stdlib as unix's units are; the headers' `include config` and `include ocamlcommon` load them (`inc_units`, `inc_I`; the reference
+  compilers link `-I +compiler-libs ocamlcommon.cma`/`.cmxa`); `binary_modules` is read. oi and the runtime gain
+  `caml_sys_get_stdlib_dirs` and `caml_zstd_initialize` (no zstd: Marshal's Compression flag ignored, as a runtime built without it).
+- `parsing/`'s units (Location, Lexer, Parser, ...) need ocamllex's and menhir's generated sources and, per §5, T10's typer:
+  `formatting/errors_batch` is in the new deferred class `:compiler-libs-parser` (divergences.edn, -aot, -aot-compiled);
+  `parsetree/test` (`readonly_files`) and `ast-invariants/test` (`${ocamlsrcdir}`) stay header classes.
+
+### The lists and the results
+
+Run corpus (`.tmp` lists of the day, named here): fix 6 `lib-threads/{pr4466,pr5325,sockets}`, `lib-unix/common/{channel_of,
+gethostbyaddr}`; fix 7 `lib-unix/common/{pipe_eof,process_pid}`, `parallel/{recommended_domain_count_unix,mctest}`, `lib-sys/signal`,
+`lib-systhreads/{eintr,threadsigmask}`, `lib-channels/close_during_flush`, `lib-unix/kill/unix_kill`; fix 8 `utils/{edit_distance,
+find_first_mono,overflow_detection,test_strongly_connected_components}`, `misc/stable_matching_test`, `lib-marshal/compressed`,
+`formatting/errors_batch`. Suite corpus: `lib-unix/common/{getaddrinfo,sigwait}`, `lib-unix/unix-socket/recvfrom_unix`,
+`parallel/catch_break`.
+
+| level | fix 6 | fix 7 | fix 8 |
+|---|---|---|---|
+| eval (oi) | run 5 of 5, suite 2 of 2 | run 9 of 9, suite 2 of 2 | 6 of 7 (`errors_batch` `:compiler-libs-parser`) |
+| AOT, compiled | not run (below) | not run (below) | the 4 utils/ programs pass (one shard); the rest not run |
+| AOT, light | run 5 of 5; suite `getaddrinfo` passes, `recvfrom_unix` known unix (Unix sockets, OT23) | run 8 of 9 (`mctest` `:light-speed`, as before); suite 2 of 2 | 5 of 7 (`stable_matching_test` `:light-speed`, `aot-slow.edn`; `errors_batch` the class) |
+
+The numbers (from the records, all judgments 0 failing): eval, the run corpus **305 to 325 pass** (`:unix-unported` 1 left at eval,
+`lib-bigarray-file/mapfile`'s `map_file`, fix 11), the suite **99 to 103**; the AOT light level, the run corpus **279 to 297**, the suite
+**94 to 97**; the compiled level's records **109 to 113** (the utils/ shard, run twice: 4 of 4).
+
+**The compiled level's memory.** A shard of the four utils/ programs (no unix) built at a **7.5 GB peak** (j2g 238 s, 3.6 GB; the
+build 454 s), and again at **7.7 GB** after Fd stopped referring to Sock (Fd now holds a socket as an Object with its streams and
+closer, so that only a program that makes a socket reaches Sock and java.net: j2g's report lists neither Sock nor ExtProc for the
+shard, the peak unchanged). The cause is compiler-libs' units, translated into each program's package as a program's own units
+(o2j's `cprogs`: about 750 KB of Java forms a program, the four programs' 3.0 MB, `shards.tsv`, against the whole stdlib's 3.6 MB in
+`ocaml.u`). OT26.
+
+**The compiled level was not recorded for fixes 6-7's programs today.** A shard of five of the list's socket and thread programs built
+in 410 s at a **6.1 GB peak** (j2g 200 s, 3.2 GB): above the day's 4 GB cap, so the run was stopped (OT25). The night's commands run
+the whole level.
+
+### Checks run (all by list, 2026-11-05)
+
+`bin/oi record-ref --only-list` (`unix_kill`; the fix 8 programs), `bin/oi check --record --only-list` (fixes 6-7's 15 run programs:
+14 pass, then `unix_kill`; fix 8's 7: 6 pass), `bin/oi suite check --record --only-list` (4 of 4), `bin/oi check --only-list
+test/ocaml/essential-check.txt` (58 of 58), `bin/oi test` (go vet, go test: ok), `bin/oi divergences`, `suite divergences` (0 failing),
+`bin/oi check --aot --record --only-list` (the 21: 18 pass, `mctest` slow, `stable_matching_test` timed out, then rerun alone with
+`aot-slow.edn`), `bin/oi suite check --aot --record --only-list` (3 of 4, `recvfrom_unix` rerun with its known entry), `bin/oi check
+--aot --only-list test/ocaml/essential-check.txt` (57 pass, 1 `:light-speed`: as before, no regression from the runtime's changes),
+`bin/oi check --aot --level compiled` (one shard of five stopped at its 6.1 GB build; one shard of the four utils/ programs, below),
+`bin/oi run`-level probes of the runtime (`test/ocaml/o2j/run.ae --batch` on single programs). **Not run**: the gate, any whole
+corpus, `bin/arbace-go`; the compiled level of the fixes 6-7 programs and of the suite's.
+
+### The night's record commands (after this branch; in this order, the compiled level heavy)
+
+The lists' rows were merged into the records; the whole corpora were not rerun. oi changed (signals at the ticks, the wake pipes,
+the externals' thread note), the runtime changed (Rt/tick reads the pending signals; Fd's sockets), `bin/oi` changed (the stdlib's key:
+the next run rebuilds the library set with compiler-libs' units), and two programs became run programs (`lib-unix/kill/unix_kill`, the
+utils/ and ocamlcommon programs):
+
+    bin/oi record-ref && bin/oi suite record-ref    # every run program's references (today: the newly run ones, by list)
+    bin/oi check --record                           # oi, the run corpus (370 programs)
+    bin/oi suite check --record                     # oi, the suite corpus
+    bin/oi check --aot --record                     # the light level: the runtime changed
+    bin/oi suite check --aot --record
+    O2J_SHARD=4 bin/oi check --aot --level compiled --record         # shards of 4 (OT25 (a): 6.1 GB for 5 unix programs); each shard's
+    O2J_SHARD=4 bin/oi suite check --aot --level compiled --record   # bytes and peaks in .tmp/o6/compiled/shards.tsv, OT22's measure
+    bin/oi pins --attest
+    bin/oi divergences && bin/oi suite divergences && bin/oi divergences --aot && bin/oi divergences --compiled && bin/oi pins
+    bin/reap record
+
+### OT20 (b): shards by translated size
+
+`bin/oi check --aot --level compiled` can end a shard by its programs' translated bytes: `O2J_SHARD_BYTES` (each program's `out`
+directory and the library units it links, counted once a program; `c2_bytes`), with `O2J_SHARD` still the most programs a shard;
+every shard's bytes, j2g's and the build's wall seconds and peak memory are written to `.tmp/o6/compiled/shards.tsv` (`c2_measure`).
+No default cap is set: the measure of the day's shards is too small to choose one (OT22).
+
+### Proposed (OT21-OT26; none decided)
+
+- **OT21 compiler-libs' parser.** `formatting/errors_batch`, `parsetree/test` and `ast-invariants/test` need parsing/'s units.
+  (a) wait for T10 (§5: the typer compiles them natively); (b) now, by the oracle as utils/ is built: `boot/menhir/parser.ml` (the
+  tarball's generated parser), `lexer.mll` by the host's ocamllex, parsing/'s other modules and the utils/ ones they need (Warnings,
+  Clflags, Load_path, Terminfo...) dumped by ocdump into `.tmp/oi/complib/`, plus the harness's `readonly_files = source.ml` and
+  `${ocamlsrcdir}` (the tarball's root): about 1 day, 3 programs at eval (`ast-invariants` walks the whole tree: slow at the light
+  level). *Recommended: (b)*: no dependency on T10 (ocdump is the oracle already), and the units are reused when T10 lands.
+- **OT22 The shards' byte cap.** (a) set `O2J_SHARD_BYTES`'s default from tonight's `shards.tsv` (the bytes for which the build peaks
+  under 4 GB), then drop `O2J_SHARD=8` from the night's commands; (b) keep shards by count. *Recommended: (a)* after the night.
+- **OT23 Sockets at the AOT levels beyond TCP.** Java has no Unix sockets and the runtime's datagram sockets carry nothing
+  (`lib-unix/unix-socket/recvfrom_unix`). (a) a class by design for the AOT levels (`:unix-java`: Unix sockets, datagrams,
+  `getaddrinfo` beyond numeric hosts); (b) the compiled level over Go's syscall (OT15 (b)'s world: the runtime's sockets as Go
+  forms): 2 days for 1 program. *Recommended: (a)*.
+- **OT25 The compiled shards of the programs that include unix.** Their package holds the Unix library's units, translated into each
+  program's package as compiler-libs' are (OT26), and java.net's or ProcessBuilder's JDK classes for those that reach Sock or
+  ExtProc (6.1 GB for five such programs). (a) shards of at most 3 for the programs that include unix, by OT20 (b)'s bytes
+  once calibrated; (b) the library units in `ocaml.u` once (OT26 (a)'s change, unix and threads too) and OT15 (b)/OT20 (c)'s JDK package built once;
+  (c) the AOT levels' sockets and processes by design (classes), the runtime without them. *Recommended: (a)* tonight, then (b).
+- **OT26 compiler-libs' units at the compiled level.** (a) translate them once into `ocaml.u` as the stdlib's (o2j `clib` with the
+  complib units, the programs that include config or ocamlcommon linking them from there): half a day, the shard's size back to its
+  programs'; (b) shards of one for these programs (7 programs, 7 builds a night). *Recommended: (a)*.
+- **OT24 Signals between processes at the AOT levels.** Java receives no OS signal: `kill` of another pid raises `EPERM`, a signal
+  from outside is not seen. (a) by design at the AOT levels (no program of the lists needs it); (b) the compiled level over
+  os/signal (as oi). *Recommended: (a)*.
+
+## Decided (2026-11-05, the user: OT21-OT26)
+
+OT21 (b): compiler-libs' parser now through ocdump; OT22 (a): the shard byte cap from tonight's shards.tsv; OT23 (a), OT24 (a): Unix sockets and datagrams, and signals between processes, by design at AOT; OT25: at most 3 unix programs a shard tonight, then the library units built once; OT26 (a): compiler-libs' units translated once into ocaml.u.
+
+## As built: OT21-OT26 and the decided classes, fixes 9-11 in part (2026-11-06, branch `ocaml-libs4`)
+
+Built on the light tier of the day, as fixes 1-8 (no gate, no build of Arbace's executables, no corpus run, stage 0 of main as the
+tools' host), each check a list of programs (`--only-list`), the records merged.
+
+### The decided classes (OT1-OT7, OT23, OT24)
+
+OT1-OT7 were decided on 2026-11-05 but only OT1's `:unix-fork` was in the classes files. Now, in the six run-level classes files
+(`divergences{,-aot,-aot-compiled,-suite,-suite-aot,-suite-aot-compiled}.edn`), before `:multi-file`:
+
+- by design: `:compiler-output` (OT2 (a), 19 programs: `shape-index/*`, `uid-deps`, `uids`, `no-alias-deps`, `syntactic-arity/*`,
+  `tool-dumpobj`), `:ocamltest-tools` (OT3 (a): 13 tools' tests, the 4 subprocess tests and the 2 `reference = $` backtrace tests),
+  `:runtime-events` (OT4 (a), every `include runtime_events`: 7), `:dynlink` (OT5 (a), every `include dynlink`: 6),
+  `:c-runtime-internals` (OT6 (a), the 21 of §6), `:marshal-closures` now `:design` (OT7 (a)), and at the AOT levels `:unix-java`
+  (OT23 (a), OT24 (a): `lib-unix/unix-socket/recvfrom_unix` and `recvfrom_linux`, the known reason `unix-java: ...`);
+- deferred: `:c-api` (OT6 (c)), the C stubs on the stable API (every other `modules`/`readonly_files` naming a `.c` or `.f` file:
+  25 programs), DEFERRED-TRIAGE's item 9.
+
+A class may list `:programs` (goi's format, `test/reap/main.ae`'s classify): the judges `test/ocaml/oi_check.ae`, `o2j_check.ae` and
+`testsuite_check.ae` read it. OT3's two "script" tools of the triage are not among them: their scripts only check the platform
+(below). Two harness bugs were found on the way: a `--only-list` record kept the class rows' reasons of the last whole run (the class
+rows of a selection are now recorded from the header reading, `OI_SELECTED`), and an empty selection ran one empty program (`xargs -r`).
+
+### OT21 (b): compiler-libs' parser
+
+- `bin/oi stdlib`'s compiler-libs are ocamlcommon's `utils/` (all but `domainstate`, which the C preprocessor generates and only the
+  back ends use) and `parsing/` in the Makefile's link order (`utils_SOURCES`, `parsing_SOURCES`): `boot/menhir/parser.ml` with
+  `MenhirLib` renamed `CamlinternalMenhirLib` as the Makefile does (taken from the pinned tarball when the tree lacks it), `lexer.ml`
+  by the host's ocamllex, `parsetree.mli` alone; 44 units, Parser's Lambda 16.7 MB.
+- A program links the units its dump requires and theirs (`complib_need`: the closure over the dumps' `lambda-program` required lists,
+  in link order), as ocamlc links from `ocamlcommon.cma`; before, every utils/ unit was linked.
+- The headers' `${ocamlsrcdir}` is the pinned tree (`@OCAMLSRCDIR@` in the corpus files, the path in the rows the runs read), and
+  `-I ${ocamlsrcdir}/parsing` (`/toplevel`) flags are dropped: compiler-libs' interfaces are on the path. The suite's reading takes
+  `include ocamlcommon` and copies the `.ml` files a header names as `readonly_files` (data: `parsetree/test`'s `source.ml`).
+- A bug fixed on the way: `inc_units` shifted its arguments in the compiler-libs branch, so a program that included both compiler-libs
+  and lib/testing ran without Testing.
+
+| program | eval | AOT, light |
+|---|---|---|
+| `formatting/errors_batch` | pass | pass (105 s) |
+| `parsing/change_start_loc` | pass | pass (240 s of the batch) |
+| `parsetree/test` (suite) | pass (13 s) | `:light-speed` (`aot-slow.edn`) |
+| `ast-invariants/test` (parses the whole tree) | `:speed` (211 s, `oi-slow.edn`) | `:light-speed` |
+
+### OT22, OT25, OT26: the compiled level's shards
+
+- OT26 (a) and OT25 (b): `o2j clib LAMBDA-DIR OUT-DIR DUMP...` translates the stdlib's units and, after them, the libraries outside it
+  (unix, threads, Str, compiler-libs, lib/testing) once into `ocaml.u` (`bin/oi aot-clib`); a program's row of `cprogs.list` names the
+  library units of its includes as `@UNIT` (linked from `ocaml.u` with the units they need, o2j's `link` with forced roots), no
+  longer translated into its own package. Proof by translation (the build needs more than the day's 2 GiB): `utils/edit_distance`'s
+  package 23 KB (about 750 KB before).
+- OT25 (a): a shard holds at most `O2J_SHARD_UNIX` (default 3) programs that include unix.
+- `O2J_PLAN_ONLY=1`: the shards planned and their bytes written (`.tmp/o6/compiled/plan.tsv`, `shards.tsv`), nothing built.
+- OT22 (a) waits for tonight's `shards.tsv`.
+
+### The harness: redirections and the platform's scripts
+
+- `stdin = "/dev/null"` and `stderr = "/dev/null"` are the run's `@stdin=null` and `@stderr=null` (header.awk, actions.awk), which every
+  runner (oi, the references, both AOT levels) applies through `run_redirected` (an empty file as the input, the error output into a file
+  apart): `lib-unix/common/dup2`, `lib-unix/isatty/isatty_std`.
+- ocamltest's precondition scripts that only check the platform are decided as ocamltest's run decides them here:
+  `test-runtime-cleanup.sh` and `is-linux.sh` pass (no `OCAMLRUNPARAM` c=1; Linux), `has-execvpe.sh` skips (the C library has execvpe:
+  `lib-unix/unix-execvpe/exec` is `header: skip`, by design); `output = "${test_build_directory}/program-output"` with
+  `stdout = "${output}"` is ocamltest's default: `lib-threads/sieve`, `lib-unix/unix-socket/recvfrom_linux` (suite) run.
+- oi's Unix sockets take Linux's abstract names (a leading NUL, Go's leading `@`): `recvfrom_linux` passes at eval; at the AOT levels
+  it is `:unix-java`.
+
+### Fix 10: Str
+
+- oi: `go/arbace/oi/ext_str_re.ae`, otherlibs/str's `strstubs.c` ported rule for rule: `re_match`'s backtracking interpreter (the 19
+  opcodes, the stack of program points and undo records, the progress registers, the groups, partial matches), the searches with the
+  start characters' table, `re_replacement_text`; `str.ml` built by `bin/oi stdlib` into `.tmp/oi/strlib/`, loaded for `include str`
+  (`hasstr` read). The AOT runtime: `ExtStrRe.ae`, the same; o2j now calls an external the runtime defines under a library's own C
+  name (`re_*`), not only `caml_*`.
+- `lib-str/t01` (the regex suite, 2,270 bytes of output) and `lib-str/parallel`: pass at eval and at the light level.
+
+### Fix 11: Bigarray
+
+- oi: `go/arbace/oi/ext_bigarray.ae`, bigarray.c's `caml_ba_compare`, `caml_ba_serialize`/`caml_ba_deserialize` (the `_bigarr02` custom
+  block: CODE_CUSTOM_LEN, the sizes, the dimensions, the elements by kind, the 32/64-bit choice of int and nativeint elements), the
+  float16 kind (stores rounded to nearest even, `caml_float_to_float16`), `caml_ba_reshape`'s checks (overflow: a mismatch), and in
+  ext_digest.go the Fortran layout's `sub` (the last dimension, from 1) and `slice` (the last indices, the offset `caml_ba_offset`'s);
+  `Unix.map_file` (mmap_unix.c) by mmap(2) itself, the elements read from the mapping and the stores written through it.
+- The AOT runtime: `BaOps.ae` (compare, serialization, float16, reshape), `ExtBigarray`'s sub and slice, and `Unix.map_file` without
+  mmap (the region read through the descriptor's file, a shared array's stores written through a RandomAccessFile of its own).
+- `lib-bigarray/bigarrays`, `reshape_overflow`, `lib-marshal/marshal_bigarray`: pass at eval and at the light level;
+  `lib-bigarray-file/mapfile`: passes at eval and at the light level.
+- Not ported: stores through a sub-array or a slice of a mapped array, and `fill`/`blit` into one, do not reach the file; NaN's
+  unordered flag of compare (`compare_unordered`) is not kept.
+
+### Also on the way
+
+- `lib-unix/win-socketpair/test` (`has-afunix.sh`) is `target-windows`; `link-test/test` is the class `:packs` (OT19 (a), by design).
+- Records brought up to date by list: the light level's rows of `backtrace/callstack`, `parallel/fib_threads`,
+  `statmemprof/moved_while_blocking` (stale since fix 5: now `:backtraces`, `:light-speed`, `:gc-and-memory` as oi's) and
+  `lib-unix/common/fork_cleanup` (`:unix-fork`); the four suite programs the light level had not run
+  (`multicore_fork_domain_alone{,2}`, `statmemprof/{blocking_in_callback,thread_exit_in_callback}`: the matrix's one problem of the
+  day); `recvfrom_linux` and `parsetree/test` dropped from the run corpus's records (they are the suite's); the opam set's not-run
+  reasons that said "needs unix".
+- oi's essential subset: 58 of 58; the light level's: 57 pass and one `:light-speed`, as before (no change of a row).
+
+### The numbers (from the records, `bin/reap`; every judgment 0 failing)
+
+| cell | 2026-11-05 (`ocaml-libs3`) | now |
+|---|---|---|
+| eval | 428 pass / 125 by design / 118 deferred | **441 / 205 / 25** |
+| AOT (the light level until OT8's compiled record) | 394 / 114 / 159 | **405 / 202 / 64** |
+
+The eval cell's 25 deferred are all `:c-api` (OT27). The AOT cell's 64: the same 25, and 39 of the light level (`:light-speed` 34,
+`:light-depth` 4, the suite's 1) that the compiled level judges (OT8 (a), the night's record; fix 1 measured 26 of 29 such programs
+passing compiled). With the night's whole runs the cells move by what the lists did not cover (the stdlib's key changed, so every row
+is rerun); expected: eval about 441 / 205 / 25, AOT at the compiled level about 440 / 205 / 30.
+
+### Checks run (all by list, 2026-11-06)
+
+`bin/oi check --record --only-list` and `--aot --record --only-list` over each fix's programs and the class rows (164), `bin/oi suite
+check [--aot] --record --only-list` (parsetree/test, recvfrom_linux, the opam rows, the four unrun suite programs), `bin/oi record-ref` and
+`suite record-ref --only-list` for the newly run programs, `bin/oi check --only-list test/ocaml/essential-check.txt` (58 of 58) and its
+light level (57 pass, 1 `:light-speed`, no row changed), `bin/oi test` (go vet, go test: ok), `bin/oi judges-test` (the judges' tests,
+the dumps' determinism, the expect check: pass; the pins' tests count the attested rows instead of a fixed 39), `bin/oi suite rollup
+--record` (0 files without a result or a class; `divergences-testsuite.edn` reads `exit_status`, `arguments`, `ocamlc_flags` and
+`windows-`), `bin/oi divergences` (all five judgments, 0 failing), `bin/oi pins` (40 pins attested), `bin/oi aot-clib` (430 MB, 22 s),
+`O2J_PLAN_ONLY=1 bin/oi check --aot --level compiled --only-list` (six programs), `bin/reap`, `make check-makefile`. **Not run**: the gate,
+any whole corpus, a compiled shard's build (over the day's 2 GiB), `bin/arbace-go`.
+
+### Proposed (OT27-OT29; none decided)
+
+- **OT27 The C API shim's route** (item 9, the 25 programs of `:c-api`: callbacks 12, `[@unboxed]`/many-argument externals 3,
+  exceptions from C, Marshal's helpers 2, bigarrays from C 3, BLAKE2's self test, `cloexec`'s fd status helper, `delayintr`'s SIGINT
+  sender, `recommended_domain_count`). Each test's C is a few dozen lines over `caml/mlvalues.h`, `alloc.h`, `memory.h`,
+  `callback.h`, `fail.h`, `bigarray.h`. (a) ci (Arbace's C, `arbace/c`) interprets the stubs against a clean-room `caml/*.h` whose
+  macros and functions call back into oi's values (a `value` a handle of a table, tagged ints as OCaml's): it needs oi and ci in one
+  executable, which only the shipped program gives (oi embedded at the re-seed, the heavy list); 10 days eval + 4 AOT as §3 estimated,
+  after the embedding; (b) the same over a subprocess protocol between the oi driver and the tools' host running ci (a callback a round
+  trip): no embedding, about 12 days, slow (the callback tests make 10^5 crossings); (c) each test's stubs ported by hand to Go forms as
+  externals of a test library loaded with the program: about 3 days, but no C runs and no C API is checked (the tests then check oi's
+  callbacks, not the stubs); (d) by design. *Recommended: (a)*, built after oi is embedded; the 25 stay `:c-api` (deferred) until then.
+- **OT28 A mapped array's views.** oi writes a mapped array's stores through its mapping and the runtime through a file of its own,
+  but a `sub`, `slice`, `reshape` or `change_layout` of it, and `fill` and `blit` into it, change only the elements (no checked program
+  does it). (a) as built; (b) the views share the mapping (their offset into it) and fill and blit write through: half a day each
+  level. *Recommended: (a)*, (b) with the first test that needs it.
+- **OT29 ast-invariants and parsetree at the light level.** `ast-invariants/test` parses the compiler's whole tree (211 s on oi, the
+  limit 120) and `parsetree/test` takes the light level over its limit: by design as speed (`:speed`, `:light-speed`). (a) as built;
+  (b) a limit of their own (OC67's limits per program): 2 programs, a night slot. *Recommended: (a)*; the compiled level (OT8) is their
+  AOT judgment.
+
+### The night's record commands (after this branch; the compiled level heavy, after the night's clean run)
+
+The lists' rows were merged into the records; the whole corpora were not rerun. oi changed (Str, Bigarray, map_file, abstract socket
+names), the runtime changed (ExtStrRe, BaOps, ExtBigarray, Compare, Marshal), o2j changed (`clib`'s libraries, `@UNIT`, the externals of a
+library's own name), `bin/oi` and the header readings changed (the stdlib's key: the library set is rebuilt with Str and the parser), and
+the run corpus has 377 run programs (541 with a `.reference`), the suite 120:
+
+    bin/oi record-ref && bin/oi suite record-ref     # every run program's references (today: the newly run ones, by list)
+    bin/oi check --record                            # oi, the run corpus
+    bin/oi suite check --record                      # oi, the suite corpus
+    bin/oi check --aot --record                      # the light level
+    bin/oi suite check --aot --record
+    O2J_PLAN_ONLY=1 bin/oi check --aot --level compiled          # the shards' plan and bytes, nothing built (seconds)
+    O2J_SHARD=4 bin/oi check --aot --level compiled --record     # OT25 (a): at most 3 unix programs a shard; OT26 (a): the
+    O2J_SHARD=4 bin/oi suite check --aot --level compiled --record  # libraries in ocaml.u once; shards.tsv is OT22's measure
+    bin/oi pins --attest
+    bin/oi divergences && bin/oi suite divergences && bin/oi divergences --aot && bin/oi suite divergences --aot && bin/oi divergences --compiled
+    bin/reap record
+
+## Decided (2026-11-06, the user: OT27-OT29)
+
+- **OT27 (a):** the C API shim through ci: the 25 `:c-api` tests' stubs interpreted by ci against a clean-room `caml/*.h`, after
+  oi is embedded in the shipped program (about 10 days at eval and 4 at AOT, after the embedding); the 25 stay deferred until then.
+- **OT28 (a):** writes through a `sub`/`slice` view of a mapped bigarray stay as built (no checked program does it).
+- **OT29 (a):** `ast-invariants` and `parsetree` stay in the speed classes; the compiled level is their AOT judgment.

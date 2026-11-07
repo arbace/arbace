@@ -95,7 +95,7 @@
 (defn- cmd-record-ref [[dir]]
   (let [runs (vec (for [{:keys [id]} (programs) :let [r (run-of dir id)] :when r]
                     {:id id :status (:status r) :out (normalise-gensym (:out r)) :err (first-line (:err r))}))
-        old-text (when (.exists (java.io.File. (ref-file))) (slurp (ref-file)))
+        old-text (when (.exists (java.io.File. ^String (ref-file))) (slurp (ref-file)))
         old (when old-text (read-string old-text))
         vf (java.io.File. (str dir "/chez.version"))
         vp (version-plan (header-version old-text) (when (.exists vf) (not-empty (str/trim (slurp vf))))
@@ -233,6 +233,59 @@
                   [(str "differs " id " line " (inc i) ": " (pr-str (nth ol i nil)) " for " (pr-str (nth tl i nil)))]
                   err-items)))))))))
 
+;; SCS1 (the user's decision of 2026-11-07, doc/scheme/SCHEME-SURVEY.md "Decided (the user, 2026-11-07)"): a test's own verdict counts
+;; as a judge no toolchain made. A program of the R6RS suites (:suite) reports its own pass or fail, test by test; si's own
+;; programs and Larceny's print values, which only a reference (Chez's recorded run) can judge. own-verdict is the first kind's
+;; judge alone, no reference; agreement measures it against the recorded-output judge (items-of) program by program.
+
+(defn own-verdict
+  "The own verdict of a run r of program p, no reference consulted: [:pass DETAIL] or [:fail DETAIL] for a program with a test
+  report (:suite), nil for a program that has none. It passes when the run ended with status 0, reported at least one test and
+  no test failed; a run with no report is a failure (a run that stops early with status 0 reports fewer tests, which this judge
+  cannot know: that is the recorded-output judge's count item)."
+  [{:keys [suite]} r]
+  (when suite
+    (cond (nil? r) [:fail "not run"]
+          (:refused r) [:fail (str "refused: " (:refused r))]
+          :else (let [rep (suite-report (:out r))]
+                  (cond (nil? rep) [:fail (str "no test report, status " (:status r))]
+                        (seq (:failures rep)) [:fail (str (count (:failures rep)) " of " (:tests rep) " tests failed")]
+                        (not= 0 (:status r)) [:fail (str "status " (:status r) " after " (:tests rep) " tests")]
+                        (zero? (:tests rep)) [:fail "no test"]
+                        :else [:pass (str (:tests rep) " tests passed")])))))
+
+(defn agreement-kind
+  "How the own verdict own ([V DETAIL] or nil) and the recorded-output judge's items (empty: pass) relate for one program:
+  :no-own (the program has no own verdict), :agree-pass, :agree-fail, :own-pass-ref-fail (the recorded-output judge finds an item
+  beside the report), or, when the recorded-output judge passes what fails its own tests (it compares with Chez's run and Chez
+  fails them too), :chez-fails-too (Chez's run reports the same failing tests) or :chez-errors-too (neither run reaches a report:
+  Chez ends with the same error, e.g. a library of the suite it does not find). ref: Chez's recorded run."
+  [own items ref]
+  (cond (nil? own) :no-own
+        (and (= :pass (first own)) (empty? items)) :agree-pass
+        (and (= :fail (first own)) (seq items)) :agree-fail
+        (= :fail (first own)) (if (suite-report (:out ref)) :chez-fails-too :chez-errors-too)
+        :else :own-pass-ref-fail))
+
+(defn- cmd-own
+  "own DIR: the runs of DIR (bin/si check's .tmp/si/runs, or --aot's) judged by their own verdicts and by the recorded outputs,
+  the share judged by their own verdict, and the disagreements by kind (with --list, each program)."
+  [[dir & opts]]
+  (let [refs (into {} (map (juxt :id identity) (read-string (slurp (path "test/scheme/si/ref-chez.edn")))))
+        rows (vec (for [p (programs) :let [r (run-of dir (:id p))] :when r
+                        :let [items (vec (items-of p r (refs (:id p)))) own (own-verdict p r)]]
+                    {:id (:id p) :own own :items items :kind (agreement-kind own items (refs (:id p)))}))
+        by (group-by :kind rows)
+        n (count rows) k (count (remove #(= :no-own (:kind %)) rows))]
+    (println (str n " programs run, " k " judged by their own verdict (" (format "%.1f" (* 100.0 (/ k (max n 1)))) "%), " (- n k)
+                  " without one (Chez's recorded run is their judge)"))
+    (doseq [kind [:agree-pass :agree-fail :chez-fails-too :chez-errors-too :own-pass-ref-fail :no-own]]
+      (println (str "  " (name kind) ": " (count (by kind))))
+      (when (or (some #{"--list"} opts) (#{:chez-fails-too :chez-errors-too :own-pass-ref-fail} kind))
+        (doseq [{:keys [id own items]} (by kind)]
+          (println (str "    " id (when own (str " [" (name (first own)) " " (second own) "]")) (when (seq items) (str " items: " (first items))))))))
+    0))
+
 (def ^:dynamic *aot* false)
 
 (defn load-classes []
@@ -306,6 +359,15 @@
 (defn- recorded-results []
   (let [f (java.io.File. ^String (results-file))] (when (.exists f) (vec (read-string (slurp f))))))
 
+(defn- own-line
+  "SCS1: one line a judgment: the programs of this run that have an own verdict, and how many of them pass it (the run is not
+  failed by it: the recorded-output judge's classes decide; `own` lists the disagreements)."
+  [dir only]
+  (let [rows (for [p (programs) :when (or (empty? only) (contains? only (:id p))) :let [r (run-of dir (:id p))] :when r]
+               (own-verdict p r))
+        n (count rows) k (count (remove nil? rows)) ok (count (filter #(= :pass (first %)) (remove nil? rows)))]
+    (println (str "own verdicts: " k " of " n " programs report their own pass or fail (the rest are judged by Chez's recorded run), " ok " of them pass; bin/si own lists the disagreements"))))
+
 (defn- cmd-judge [[dir & opts]]
   (let [only (set (map second (filter #(= "--only" (first %)) (partition 2 1 opts))))
         results (judge dir only)
@@ -317,6 +379,7 @@
     (doseq [{:keys [id verdict items]} results]
       (println (name verdict) id (if (seq items) (str "(" (count items) " items)") "")))
     (when recording? (write-results results) (println "wrote" (results-file)))
+    (own-line dir only)
     (max (summary results) (rg/regress-code rec results recording? (load-classes)) (controls-code dir only))))
 
 (defn- cmd-compare
@@ -354,6 +417,7 @@
              "record-ref" (cmd-record-ref args)
              "judge" (binding [*aot* (boolean (some #{"--aot"} args))] (max (cmd-judge (remove #{"--aot"} args)) (duplicates-code)))
              "compare" (cmd-compare args)
+             "own" (cmd-own args)
              "ref-test" (cmd-ref-test)
              "divergences" (binding [*aot* (boolean (some #{"--aot"} args))] (cmd-divergences (remove #{"--aot"} args)))
              (do (println "usage: arbace.scheme.check record-ref DIR | judge DIR [--record] [--aot] | compare SI-DIR AOT-DIR | divergences [--aot] [RESULTS] | ref-test") 2))]

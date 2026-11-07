@@ -1,0 +1,314 @@
+(ns gate.costs
+  "bin/gate --costs (GT8.1, queue 170): each step's cost over time, per crop and per tier, against the
+  budgets. Not in any key (it decides nothing of a run: it reads the store of passes and the latest run's
+  logs and prints).
+
+  -main costs ROOT STORE LOGS MODE N FORMAT
+      ROOT the checkout (its test/gate/steps.edn, GATE_STEPS another table), STORE the store of passes
+      (STORE/NAME/KEY.edn: :secs :cpu-s :maxrss-kib :date :commit :worktree :dirty; a part NAME.PART), LOGS
+      the latest run's logs (NAME.mem: :wall-s :cpu-s :maxrss-kib), MODE essential (the steps of the
+      phases :pre, :build and :essential) or full (every step and part, the :clean-only ones too), N the
+      passes per step (the latest first), FORMAT text or tsv.
+
+  Per step and part: the last N passes' wall, CPU and peak RSS, median and max; a step with no pass (a
+  build, a :pre step, an :always one: the store records checks alone) its latest run's NAME.mem, marked
+  mem; neither: unmeasured. NAME.mem files of steps the table does not hold (bin/gate's own pre-step
+  outside) are rows of crop :shared, tier essential. Its tier is essential (:pre, :build, :essential) or
+  full (:full), its crop the table's :crops ({CROP [STEP ...]}: a step's parts are its crop's; a step in
+  none is crop ?, said). Then the sums per crop and per tier, of the medians (a serial sum), against the
+  table's :budgets ({:crops C :essential-s S :nightly-s S :clean-s S}): the essential tier against
+  :essential-s by the measured wall (the median) of the last N runs that ran every essential check (the
+  store knows a run: the passes of one commit and worktree whose intervals [date - secs, date] meet, within
+  120 s, and cover every essential check the store has a pass of; the checks' span, without the pre steps
+  and the builds, which the store does not record), else by the sum, saying which; with full the nightly run (the essential
+  and full tiers, the :clean-only parts not) and the clean run (every step and part; the audit's overhead
+  not measured) by their serial sums; each crop against its share: its tier's budget less the shared
+  steps' sum, over :crops (the full tier's budget the nightly one less the essential tier's sum).
+  GT9 (\"As built: GT9 (write-ahead)\"): the crops of :budgets :new-crops are known too, each share weighted by :shares (LLVM IR
+  0.5, C++ and Rust 0.75; GT9.1); a new crop's share binds once every one of its rows of the tier has two passes (GTS222 (a): until
+  then \"measuring\" in place of OVER); its essential chains' walls (the medians' sum a chain, warm) against :chain-s (:chain-s-by
+  a crop; GTS215 (a)); the table's GT9 rules (test/gate/crops.ae's problems) among the problems."
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io]
+            [gate.crops :as crops])
+  (:import (java.io File PushbackReader)))
+
+(defn- read-file [^String f]
+  (with-open [r (PushbackReader. (io/reader f))]
+    (read r)))
+
+;; ---- the table
+
+(defn rows-of
+  "the table's steps and parts, in order: [{:name :step :tier :phase :kind :crop :clean-only}]"
+  [{:keys [steps crops]}]
+  (let [crop-of (into {} (for [[c ns] crops n ns] [(str n) c]))]
+    (vec (mapcat (fn [s]
+                   (let [nm (str (:name s))
+                         base {:step nm :phase (:phase s) :kind (or (:kind s) :check) :chain (str (or (:chain s) nm))
+                               :tier (if (= :full (:phase s)) :full :essential)
+                               :crop (get crop-of nm)}]
+                     (if-let [ps (:parts s)]
+                       (for [p ps] (assoc base :name (str nm "." (:part p)) :clean-only (boolean (:clean-only p))))
+                       [(assoc base :name nm :clean-only false)])))
+                 steps))))
+
+(defn problems
+  "the :crops' problems: a step in no crop or in two, a name that is no step, an unknown crop (the four, :shared and
+  :budgets :new-crops are known)"
+  [{:keys [steps crops] :as table}]
+  (let [names (map (comp str :name) steps)
+        known (set names)
+        listed (for [[c ns] crops n ns] [c (str n)])
+        freq (frequencies (map second listed))]
+    (vec (concat
+          (for [[c _] crops :when (not ((crops/known-crops table) c))] (str ":crops: unknown crop " c))
+          (for [[c n] listed :when (not (known n))] (str ":crops " c ": " n " is no step"))
+          (for [[n k] freq :when (> k 1)] (str ":crops: " n " is in " k " crops"))
+          (for [n names :when (not (freq n))] (str ":crops: " n " is in no crop"))))))
+
+;; ---- the measurements
+
+(defn- epoch
+  "seconds since 1970 of an ISO date YYYY-MM-DDTHH:MM:SSZ (record_pass's date -u), or nil"
+  [d]
+  (when-let [[_ y mo dd h mi s] (re-matches #"(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)Z" (str d))]
+    (let [[y mo dd h mi s] (map #(Long/parseLong ^String %) [y mo dd h mi s])
+          ;; days from the civil date (H. Hinnant's days_from_civil)
+          y (if (<= mo 2) (dec y) y)
+          era (quot (if (>= y 0) y (- y 399)) 400)
+          yoe (- y (* era 400))
+          doy (+ (quot (+ (* 153 (+ mo (if (> mo 2) -3 9))) 2) 5) (dec dd))
+          doe (+ (* yoe 365) (quot yoe 4) (- (quot yoe 100)) doy)
+          days (+ (* era 146097) doe -719468)]
+      (+ (* days 86400) (* h 3600) (* mi 60) s))))
+
+(defn passes
+  "NAME's passes in STORE, the latest first (a KEY.edn that reads, kept under its own :key)"
+  [store nm]
+  (let [d (File. (str store "/" nm))
+        fs (when (.isDirectory d) (.listFiles d))]
+    (->> fs
+         (filter #(let [n (.getName ^File %)] (and (str/ends-with? n ".edn") (not (str/starts-with? n ".")))))
+         (keep #(try (let [r (read-file (.getPath ^File %))]
+                       (when (and (map? r) (= (.getName ^File %) (str (:key r) ".edn"))) r))
+                     (catch Throwable _ nil)))
+         (sort-by #(str (:date %)))
+         reverse
+         vec)))
+
+(defn- mem-of [logs nm]
+  (let [f (File. (str logs "/" nm ".mem"))]
+    (when (.isFile f)
+      (try (let [m (read-file (.getPath f))]
+             (when (map? m) {:secs (:wall-s m) :cpu-s (:cpu-s m) :maxrss-kib (:maxrss-kib m)}))
+           (catch Throwable _ nil)))))
+
+(defn- num? [x] (number? x))
+
+(defn median [xs]
+  (let [v (vec (sort (filter num? xs))) n (count v)]
+    (cond (zero? n) nil
+          (odd? n) (nth v (quot n 2))
+          :else (/ (+ (double (nth v (dec (quot n 2)))) (double (nth v (quot n 2)))) 2.0))))
+
+(defn- most [xs] (let [v (filter num? xs)] (when (seq v) (apply max v))))
+
+(defn measure
+  "a row's measurement: its last N passes, else the latest run's NAME.mem"
+  [row store logs n]
+  (let [ps (take n (passes store (:name row)))
+        samples (if (seq ps) ps (when-let [m (mem-of logs (:name row))] [m]))
+        src (cond (seq ps) "store" samples "mem" :else nil)]
+    (assoc row :src src :n (count samples)
+           :wall-med (median (map :secs samples)) :wall-max (most (map :secs samples))
+           :cpu-med (median (map :cpu-s samples)) :cpu-max (most (map :cpu-s samples))
+           :peak-med (median (map :maxrss-kib samples)) :peak-max (most (map :maxrss-kib samples)))))
+
+(defn runs
+  "the store's runs that ran every one of CHECKS (names) the store has a pass of: per commit, worktree and
+  dirty, the passes of CHECKS whose intervals [date - secs, date] meet within 120 s, as {:commit :worktree
+  :start :end :wall}, the latest first"
+  [store checks]
+  (let [ivs (for [c checks p (passes store c)
+                  :let [e (epoch (:date p)) s (:secs p)]
+                  :when (and e (num? s))]
+              {:step c :end e :start (- e (long s)) :g [(:commit p) (:worktree p) (:dirty p)]})
+        ;; a check never passed (new, or failing since) is no condition: no run could hold it
+        need (set (map :step ivs))
+        sessions (fn [xs]
+                   (reduce (fn [acc iv]
+                             (let [cur (peek acc)]
+                               (if (and cur (<= (:start iv) (+ (:end cur) 120)))
+                                 (conj (pop acc) (-> cur (update :end max (:end iv)) (update :steps conj (:step iv))))
+                                 (conj acc {:start (:start iv) :end (:end iv) :steps #{(:step iv)}}))))
+                           [] (sort-by :start xs)))]
+    (->> (group-by :g ivs)
+         (mapcat (fn [[[c w] xs]]
+                   (for [s (sessions xs) :when (= need (:steps s))]
+                     {:commit c :worktree w :start (:start s) :end (:end s) :wall (- (:end s) (:start s))})))
+         (sort-by :end)
+         reverse
+         vec)))
+
+;; ---- printing
+
+(defn- mmss [x]
+  (if (num? x)
+    (let [s (Math/round (double x)) h (quot s 3600) m (quot (rem s 3600) 60) ss (rem s 60)]
+      (if (pos? h) (format "%dh%02dm%02ds" h m ss) (format "%dm%02ds" m ss)))
+    "-"))
+
+(defn- gib [kib] (if (num? kib) (format "%.1f GiB" (/ (double kib) 1048576.0)) "-"))
+
+(defn- tsv-num [x] (cond (nil? x) "-" (integer? x) (str x) :else (format "%.1f" (double x))))
+
+(defn- sum-of [rows k] (reduce + 0 (keep k rows)))
+
+(defn- pct [a b] (if (and (num? b) (pos? b)) (format "%d%%" (Math/round (/ (* 100.0 a) b))) "-"))
+
+(defn costs [root store logs mode n fmt]
+  (let [table (read-file (or (System/getenv "GATE_STEPS") (str root "/test/gate/steps.edn")))
+        full? (= mode "full")
+        {:keys [crops essential-s nightly-s clean-s] :or {crops 10}} (:budgets table)
+        probs (into (problems table) (crops/problems root table))
+        newc (set (crops/new-crops table))
+        shares (:shares (:budgets table))
+        rows (rows-of table)
+        known (set (map :name rows))
+        ;; NAME.mem of steps the table does not hold (bin/gate's own pre-step outside)
+        extra (let [d (File. (str logs))]
+                (for [^File f (sort-by #(.getName ^File %) (or (when (.isDirectory d) (seq (.listFiles d))) []))
+                      :let [nm (.getName f)]
+                      :when (str/ends-with? nm ".mem")
+                      :let [s (subs nm 0 (- (count nm) 4))]
+                      :when (not (known s))]
+                  {:name s :step s :phase :pre :kind :always :tier :essential :crop :shared :clean-only false :extra true}))
+        rows (concat rows extra)
+        rows (if full? rows (filter #(= :essential (:tier %)) rows))
+        rows (mapv #(measure % store logs n) rows)
+        crop-name (fn [r] (if (:crop r) (name (:crop r)) "?"))
+        tier-name (fn [r] (name (:tier r)))
+        nightly (remove :clean-only rows)
+        ess (filter #(= :essential (:tier %)) nightly)
+        ess-checks (map :name (filter #(and (= :check (:kind %)) (not (:extra %))) ess))
+        rs (take n (runs store ess-checks))
+        ess-sum (sum-of ess :wall-med)
+        ess-measured (when (seq rs) (median (map :wall rs)))
+        unmeasured (fn [rs] (count (remove :src rs)))
+        crop-order (vec (distinct (concat [:clojure :java :go :c :shared] (crops/new-crops table) (keep :crop rows) [nil])))
+        sum-line (fn [label rs budget]
+                   {:label label :wall (sum-of rs :wall-med) :cpu (sum-of rs :cpu-med) :n (count rs)
+                    :unmeasured (unmeasured rs) :budget budget})
+        ;; a crop's share of a tier's budget: the budget less the shared steps' sum, over :crops crops (the
+        ;; essential tier's budget is its own; the full tier's, the nightly budget less the essential tier's sum)
+        shared-of (fn [tier] (sum-of (filter #(and (= :shared (:crop %)) (= tier (:tier %))) nightly) :wall-med))
+        tier-budget (fn [tier] (if (= tier :essential)
+                                 essential-s
+                                 (when nightly-s (- nightly-s (sum-of ess :wall-med)))))
+        crop-sums (for [c crop-order
+                        :let [rc (filter #(= c (:crop %)) nightly)]
+                        :when (seq rc)
+                        tier (if full? [:essential :full] [:essential])
+                        :let [rt (filter #(= tier (:tier %)) rc)]
+                        :when (seq rt)]
+                    (assoc (sum-line (str (if c (name c) "?") " " (name tier)) rt
+                                     (when-let [b (tier-budget tier)]
+                                       (when (not= c :shared) (* (double (get shares c 1)) (/ (double (- b (shared-of tier))) crops)))))
+                           ;; GTS222 (a): a new crop's share binds once each of its rows has two passes in the store
+                           :measuring (when (newc c)
+                                        (let [k (count (filter #(and (= "store" (:src %)) (>= (:n %) 2)) rt))]
+                                          (when (< k (count rt)) [k (count rt)])))))
+        ;; GTS215 (a): the new crops' essential chains, each the medians' sum of its checks (warm), against :chain-s
+        chain-sums (for [c (crops/new-crops table)
+                         [ch rs] (group-by :chain (filter #(and (= c (:crop %)) (= :essential (:phase %)) (= :check (:kind %))) rows))]
+                     {:label (str (name c) " " ch) :wall (sum-of rs :wall-med) :n (count rs) :unmeasured (unmeasured rs)
+                      :budget (get (:chain-s-by (:budgets table)) c (:chain-s (:budgets table) 120))})
+        tier-sums (concat
+                   [(assoc (sum-line "essential" ess essential-s)
+                           :measured ess-measured :runs rs)]
+                   (when full?
+                     [(sum-line "full" (filter #(= :full (:tier %)) nightly) nil)
+                      (sum-line "nightly (essential + full, serial)" nightly nightly-s)
+                      (sum-line "clean (every part, serial, without the audit's overhead)" rows clean-s)]))]
+    (if (= fmt "tsv")
+      (do
+        (println (str/join "\t" ["kind" "name" "tier" "crop" "n" "src" "wall_med_s" "wall_max_s" "cpu_med_s" "cpu_max_s"
+                                 "peak_med_kib" "peak_max_kib" "budget_s"]))
+        (doseq [r rows]
+          (println (str/join "\t" ["step" (:name r) (tier-name r) (crop-name r) (:n r) (or (:src r) "unmeasured")
+                                   (tsv-num (:wall-med r)) (tsv-num (:wall-max r)) (tsv-num (:cpu-med r)) (tsv-num (:cpu-max r))
+                                   (tsv-num (:peak-med r)) (tsv-num (:peak-max r)) "-"])))
+        (doseq [s crop-sums]
+          (println (str/join "\t" ["crop" (:label s) "-" "-" (:n s) (str (:unmeasured s) " unmeasured")
+                                   (tsv-num (:wall s)) "-" (tsv-num (:cpu s)) "-" "-" "-" (tsv-num (:budget s))])))
+        (doseq [s chain-sums]
+          (println (str/join "\t" ["chain" (:label s) "essential" "-" (:n s) (str (:unmeasured s) " unmeasured")
+                                   (tsv-num (:wall s)) "-" "-" "-" "-" "-" (tsv-num (:budget s))])))
+        (doseq [s tier-sums]
+          (println (str/join "\t" ["tier" (:label s) "-" "-" (:n s) (str (:unmeasured s) " unmeasured")
+                                   (tsv-num (:wall s)) "-" (tsv-num (:cpu s)) "-" "-" "-" (tsv-num (:budget s))]))
+          (when (:measured s)
+            (println (str/join "\t" ["tier-measured" (:label s) "-" "-" (count (:runs s)) "store"
+                                     (tsv-num (:measured s)) (tsv-num (most (map :wall (:runs s)))) "-" "-" "-" "-"
+                                     (tsv-num (:budget s))])))))
+      (do
+        (println (str "gate costs (" mode "): " (count rows) " steps and parts, the last " n " passes each; store " store
+                      ", the latest run's logs " logs))
+        (println (format "   %-40s %-9s %-7s %2s %-5s %9s %9s %9s %9s %8s %8s"
+                         "step" "tier" "crop" "n" "src" "wall med" "wall max" "cpu med" "cpu max" "peak med" "peak max"))
+        (doseq [r rows]
+          (println (format "   %-40s %-9s %-7s %2s %-5s %9s %9s %9s %9s %8s %8s"
+                           (str (:name r) (when (:clean-only r) " (clean)")) (tier-name r) (crop-name r) (:n r)
+                           (or (:src r) "-")
+                           (if (:src r) (mmss (:wall-med r)) "unmeasured") (mmss (:wall-max r))
+                           (mmss (:cpu-med r)) (mmss (:cpu-max r))
+                           (str/replace (gib (:peak-med r)) " GiB" "G") (str/replace (gib (:peak-max r)) " GiB" "G"))))
+        (println (str "per crop (the medians' serial sum; a crop's share: its tier's budget less the shared steps', over "
+                      crops " crops; the full tier's budget the nightly one less the essential tier's sum):"))
+        (doseq [s crop-sums]
+          (println (format "   %-24s %10s  cpu %10s  %3d steps%s%s" (:label s) (mmss (:wall s)) (mmss (:cpu s)) (:n s)
+                           (if (pos? (:unmeasured s)) (str ", " (:unmeasured s) " unmeasured") "")
+                           (if (:budget s)
+                             (str "; share " (mmss (:budget s)) " (" (pct (:wall s) (:budget s)) ")"
+                                  (when (> (:wall s) (:budget s))
+                                    (if-let [[k m] (:measuring s)]
+                                      (str " over, measuring (GTS222: " k " of " m " rows with two passes)")
+                                      " OVER")))
+                             ""))))
+        (when (seq chain-sums)
+          (println "the new crops' essential chains (GTS215: each at most its :chain-s of wall, warm; the checks' medians summed):")
+          (doseq [s chain-sums]
+            (println (format "   %-32s %10s  %3d steps%s; limit %s%s" (:label s) (mmss (:wall s)) (:n s)
+                             (if (pos? (:unmeasured s)) (str ", " (:unmeasured s) " unmeasured") "")
+                             (mmss (:budget s)) (if (> (:wall s) (:budget s)) " OVER" "")))))
+        (println "per tier, against the budgets:")
+        (doseq [s tier-sums
+                :let [measured (:measured s)
+                      v (or measured (:wall s))
+                      b (:budget s)]]
+          (println (str "   " (:label s) ": " (mmss v)
+                        (cond
+                          measured (str " measured (the median wall of the last " (count (:runs s))
+                                        " runs that ran every essential check, the checks' span, without the pre steps and builds;"
+                                        " the latest at " (let [c (str (:commit (first (:runs s))))] (subs c 0 (min 8 (count c)))) ": "
+                                        (mmss (:wall (first (:runs s)))) "; the serial sum " (mmss (:wall s)) ")")
+                          (= "essential" (:label s)) " the serial sum (no run in the store ran every essential check)"
+                          :else " the serial sum")
+                        (str ", cpu " (mmss (:cpu s)) ", " (:n s) " steps")
+                        (when (pos? (:unmeasured s)) (str ", " (:unmeasured s) " unmeasured"))
+                        (when b (str "; budget " (mmss b) " (" (pct v b) ")"
+                                     (cond (> v b) " OVER"
+                                           (and (not measured) (pos? (:unmeasured s))) " ok so far (a lower bound: unmeasured steps)"
+                                           :else " ok"))))))
+        (when (seq probs)
+          (println (str "the table's :crops: " (count probs) " problem(s):"))
+          (doseq [p probs] (println (str "   " p))))))
+    (when (seq probs) (System/exit 1))))
+
+(defn -main [& args]
+  (case (first args)
+    "costs" (let [[_ root store logs mode n fmt] args]
+              (costs root store logs mode (Long/parseLong (str n)) (or fmt "text")))
+    (do (println "usage: gate.costs costs ROOT STORE LOGS MODE N text|tsv")
+        (System/exit 2))))

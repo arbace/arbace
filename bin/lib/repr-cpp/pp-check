@@ -8,9 +8,15 @@
 #     known file's :lex lists it.
 # Run through bin/repr-cpp pp-check (from the repository root); writes only under .tmp/repr-cpp-check/ (REPR_CPP_CHECK_WORK).
 #
-# Usage: bin/repr-cpp pp-check [--corpus C,...] [--sample N] [--level lex,pp] [--record] [--record-known]
+# Usage: bin/repr-cpp pp-check [--corpus C,...] [--sample N | --only FILE | --essential] [--level lex,pp] [--record] [--record-known] [--record-results]
 #   --corpus   test/cpp/corpora.edn's ids (default cpp-lexical,gxx-dg,libstdcxx-headers; `all`: every corpus that is read in place from gcc's tarball)
 #   --sample   every Nth file of each corpus (default 1: all)
+#   --only     the files FILE names, CORPUS/NAME a line (CX10; the corpora its names', the gate's rotated lists, GT8.4): a subset's run, its known
+#              entries held for its own files alone; --essential: --only test/cpp/essential-read.txt (the gate's cpp-read-essential)
+#   --lists-only  the corpora's lists made (WORK/ID/gxx.list, roundtrip.list) and no check (bin/repr-cpp roundtrip-corpus; with --only,
+#              --essential-key heads the round trip's list CORPUS-essential, else CORPUS-only)
+#   --record-results  test/repr/cpp/pp-check-results.edn's rows of the corpora run written from the check (CX10, refused for --only or a failing
+#              file): the read cell's passes, bin/reap; run over the recorded samplings (cpp-lexical whole, gxx-dg --sample 10, libstdcxx-headers --sample 8)
 #   --level    lex (the raw tokens against clang's), pp (the stream against g++'s); default both
 #   --record   g++ -E -P and clang's raw-token dump run on every file (4 at a time, nice), the digests of the
 #              corpora rewritten (the other corpora's lines kept), then the check again
@@ -28,20 +34,34 @@ root=$(cd "$(dirname "$0")/../../.." && pwd)
 . "$root/bin/lib/tools.bash"
 cd "$root"
 
-corpora=cpp-lexical,gxx-dg,libstdcxx-headers levels=lex,pp record= recknown= sample=1 addmissing= redigest=
+corpora=cpp-lexical,gxx-dg,libstdcxx-headers levels=lex,pp record= recknown= sample=1 addmissing= redigest= only= okey= recresults= listsonly=
 while [ $# -gt 0 ]; do
   case $1 in
     --corpus) corpora=$2; shift 2 ;;
     --sample) sample=$2; shift 2 ;;
+    --only) only=$2; okey=only; shift 2 ;;
+    --essential) only=$root/test/cpp/essential-read.txt; okey=essential; shift ;;
+    --essential-key) okey=essential; shift ;;
+    --lists-only) listsonly=1; shift ;;
+    --record-results) recresults=1; shift ;;
     --level) levels=$2; shift 2 ;;
     --record) record=1; shift ;;
     --record-known) recknown=1; shift ;;
     --redigest) redigest=1; record=1; shift ;;
     --add-missing) addmissing=1; shift ;;
-    *) sed -n '14,24p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+    *) sed -n '11,28p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
   esac
 done
 [ "$corpora" = all ] && corpora=cpp-lexical,gxx-dg,gxx-old-deja,c-c++-common,libstdcxx-testsuite,libstdcxx-headers
+if [ -n "$only" ]; then
+  # CX10: the corpora the list's names are under, the list given to `lists` as {:only FILE :key K}
+  only=$(cd "$(dirname "$only")" && pwd)/$(basename "$only")
+  [ -f "$only" ] || { echo "pp-check: no list $only" >&2; exit 2; }
+  [ -z "$record$recknown$recresults" ] || { echo "pp-check: --only is a subset's run: no --record, --record-known or --record-results" >&2; exit 2; }
+  corpora=$(grep -v -e '^#' -e '^[[:space:]]*$' "$only" | cut -d/ -f1 | awk '!s[$0]++' | paste -sd, -)
+  [ -n "$corpora" ] || { echo "pp-check: $only names no file" >&2; exit 2; }
+  sample="{:only \"$only\" :key \"$okey\"}"
+fi
 export GOMAXPROCS=${GOMAXPROCS:-4} GOMEMLIMIT=${GOMEMLIMIT:-1500MiB}
 export REPR_CPP_THREADS=${REPR_CPP_THREADS:-4}
 work=${REPR_CPP_CHECK_WORK:-$root/.tmp/repr-cpp-check}
@@ -50,8 +70,9 @@ epoch=$(sed -n 's/^ *:epoch \([0-9]*\).*/\1/p' test/cpp/host/host.edn)
 
 # gcc's tarball, checked against the pin, its corpora's directories extracted
 gccdir=$root/.tmp/cpp-gcc
-main=$root
-case $root in */.tmp/worktrees/*) main=${root%%/.tmp/worktrees/*} ;; esac
+# the main checkout: a worktree's (.tmp/worktrees/NAME) or the clean run's clone's (.tmp/gate-clean/SHA, also of a worktree), else this
+# one (CX10, as C's tools since queue 150)
+main=${root%%/.tmp/gate-clean/*}; main=${main%%/.tmp/worktrees/*}
 tb=${REPR_CPP_GCC_TARBALL:-$main/.tmp/c1/gcc/gcc-15.2.0.tar.xz}
 if [ ! -f "$gccdir/.extracted" ]; then
   want=$(sed -n '/:gcc-15.2.0/,/:sha256/p' test/cpp/corpora.edn | sed -n 's/.*:sha256 "\([0-9a-f]*\)".*/\1/p' | head -1)
@@ -73,6 +94,8 @@ for id in "${ids[@]}"; do
   if [ -n "$redigest" ]; then :; elif [ -n "$record" ]; then rm -rf "${work:?}/$id"; else rm -rf "${work:?}/$id/port" "${work:?}/$id/files.tsv"; fi
 done
 arbace_tool -m arbace.repr.cpp.ppcheck lists "$work" "$roots" "$sample" "${ids[@]}" || exit 1
+# CX10: the lists alone (WORK/ID/roundtrip.list, bin/repr-cpp roundtrip-corpus)
+[ -z "$listsonly" ] || exit 0
 
 # gxx_run DIR NAME STD ARGS READ: g++ -E -P of one file, its status beside; clang's raw tokens likewise
 gxx_run() {
@@ -139,5 +162,9 @@ if [ -n "$recknown" ]; then
   arbace_tool -m arbace.repr.cpp.ppcheck record-known "$work" "${ids[@]}" || exit 1
   status=0
   check_all
+fi
+if [ -n "$recresults" ]; then
+  [ "$status" = 0 ] || { echo "pp-check: a file fails: --record-results not written" >&2; exit 1; }
+  arbace_tool -m arbace.repr.cpp.ppcheck record-results "$work" "$root/test/repr/cpp/pp-check-results.edn" "${ids[@]}" || exit 1
 fi
 exit $status

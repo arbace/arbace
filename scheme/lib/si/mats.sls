@@ -11,13 +11,16 @@
 ;;;; condition, as Chez's mat.ss asks; review 009, finding 9: it passed whatever it did). Returns (STATUS COUNT DETAIL): STATUS pass or fail, COUNT the clauses
 ;;;; run, DETAIL the first failing clause "N: why".
 (library (si mats)
-  (export run-mat set-evaluator! set-clause-ms! watchdog == fl~= ~= nan pi +pi +pi/2 +pi/4 -pi -pi/2 -pi/4 +e -e)
-  (import (rnrs) (rnrs mutable-pairs) (only (psyntax system $all) watchdog r7rs-write))
+  (export run-mat set-evaluator! set-clause-ms! watchdog == fl~= ~= nan pi +pi +pi/2 +pi/4 -pi -pi/2 -pi/4 +e -e
+          *fuzz* cfl~= equivalent-expansion? windows? embedded? pb? mkfile $record->vector patch-exec-path $cat_flush find-source retry-for-spurious)
+  (import (except (rnrs) with-output-to-file) (rnrs mutable-pairs) (only (psyntax system $all) watchdog r7rs-write)
+          (only (chezscheme) cfl-real-part cfl-imag-part gensym? box? unbox pretty-print with-output-to-file machine-type
+                csv7:record-type-field-names csv7:record-field-accessor source-directories))
 
   (define == eqv?)
   (define fl~=
     (case-lambda
-      ((x y) (fl~= x y 1e-14))
+      ((x y) (fl~= x y (fuzz)))
       ((x y fuzz)
        (cond ((and (fl>=? (flabs x) 2.0) (fl>=? (flabs y) 2.0)) (fl~= (fl/ x 2.0) (fl/ y 2.0) fuzz))
              ((and (fl<? 0.0 (flabs x) 1.0) (fl<? 0.0 (flabs y) 1.0)) (fl~= (fl* x 2.0) (fl* y 2.0) fuzz))
@@ -26,6 +29,60 @@
     (or (= x y)
         (and (fl~= (inexact (real-part x)) (inexact (real-part y)))
              (fl~= (inexact (imag-part x)) (inexact (imag-part y))))))
+  ;; SMR7: the rest of mat.ss's helpers the mats call, written for Arbace from their use: *fuzz* (fl~='s default tolerance), cfl~= (both
+  ;; parts fl~=), equivalent-expansion? (two expansions equal up to a consistent renaming of gensyms, a procedure in either one the
+  ;; predicate for the other's datum; on a mismatch it prints both, as mat.ss does), the machine predicates (si is a6le: none), mkfile
+  ;; (each expression pretty-printed into a file, replacing it), $record->vector (a record as #(NAME FIELD ...)), $cat_flush
+  ;; *fuzz* is mat.ss's top-level variable: the mats change it (fluid-let), so the export is a variable transformer over a cell
+  (define fuzz-cell (vector 1e-14))
+  (define (fuzz) (vector-ref fuzz-cell 0))
+  (define (set-fuzz! v) (vector-set! fuzz-cell 0 v))
+  (define-syntax *fuzz*
+    (make-variable-transformer
+      (lambda (x)
+        (syntax-case x (set!)
+          ((set! _ v) (syntax (set-fuzz! v)))
+          ((_ e ...) (syntax ((fuzz) e ...)))
+          (_ (identifier? x) (syntax (fuzz)))))))
+  ;; si runs on x86_64 (a6le): no retry loop, as mat.ss's for a6
+  (define-syntax retry-for-spurious (syntax-rules () ((_ e) e)))
+  (define (cfl~= x y)
+    (and (fl~= (cfl-real-part x) (cfl-real-part y))
+         (fl~= (cfl-imag-part x) (cfl-imag-part y))))
+  (define (equivalent-expansion? x y)
+    (let ((alist '()))
+      (define (e? x y)
+        (cond ((procedure? x) (x y))
+              ((procedure? y) (y x))
+              ((eqv? x y) #t)
+              ((pair? x) (and (pair? y) (e? (car x) (car y)) (e? (cdr x) (cdr y))))
+              ((or (and (gensym? x) (symbol? y)) (and (gensym? y) (symbol? x)))
+               (let ((a (assq x alist)))
+                 (if a (eq? y (cdr a)) (begin (set! alist (cons (cons x y) alist)) #t))))
+              ((string? x) (and (string? y) (string=? x y)))
+              ((bytevector? x) (and (bytevector? y) (bytevector=? x y)))
+              ((vector? x) (and (vector? y) (= (vector-length x) (vector-length y))
+                                (let loop ((i 0)) (or (= i (vector-length x)) (and (e? (vector-ref x i) (vector-ref y i)) (loop (+ i 1)))))))
+              ((box? x) (and (box? y) (e? (unbox x) (unbox y))))
+              (else #f)))
+      (or (e? x y)
+          (begin (display "failure in equivalent-expansion?:\n") (pretty-print x) (display "is not equivalent to\n") (pretty-print y) #f))))
+  (define (windows?) #f)
+  (define (embedded?) #f)
+  (define (pb?) #f)
+  (define (patch-exec-path p) p)
+  (define $cat_flush "./cat_flush")
+  (define (mkfile filename . exprs)
+    (with-output-to-file filename (lambda () (for-each pretty-print exprs)) 'replace))
+  (define ($record->vector x)
+    (let* ((rtd (record-rtd x)) (names (csv7:record-type-field-names rtd)))
+      (list->vector (cons (record-type-name rtd)
+                          (let loop ((i 0) (n names))
+                            (if (null? n) '() (cons ((csv7:record-field-accessor rtd i) x) (loop (+ i 1) (cdr n)))))))))
+  ;; the file a mat names, found in the source directories (the work directory has every corpus file)
+  (define (find-source fn)
+    (or (exists (lambda (d) (let ((f (if (string=? d ".") fn (string-append d "/" fn)))) (and (file-exists? f) f))) (source-directories))
+        (error 'find-source "file not found" fn)))
   (define (nan) (/ 0.0 0.0))
   (define pi (* (asin 1.0) 2))
   (define +pi 3.141592653589793)

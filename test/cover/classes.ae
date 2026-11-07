@@ -1,0 +1,45 @@
+;; bin/cover classes (doc/GATE-SURVEY.md, GT8.3, GTS205 (a)): each test's class for the subset's reducer.
+;; Arguments: DIVERGENCES RESULTS LEVEL CONTROLS OUT [CONTROL-LEVEL] (LEVEL and CONTROLS may be empty). RESULTS: rows ID [LEVEL]
+;; RESULT REASON, tab-separated (or an .edn record of rows [ID RESULT REASON], C's); a non-pass takes the first class of DIVERGENCES that names it in :tests or whose
+;; :match finds "RESULT REASON" (and whose :level, when it has one, is the row's), as test/goi/divergences.ae and
+;; java.check/classify judge. Writes OUT.classes (ID, CLASS: the class's id, - for a pass, unclassed-RESULT for a
+;; non-pass in no class) and OUT.keep: the tests of a class whose :kind is in keep-kinds (GTS205 (a)'s "every
+;; deferred and gap file": the kinds whose work remains, by crop's vocabulary; the user's decision of review 182's
+;; finding 1, (a), 2026-11-03: Java's :world, :interp, :analysis, :repl, :repr-java, :j2g, :javac, :other and
+;; :deferred, C's :deferred and :gap; :design, :speed and :harness, and goi's classes, all :design, one test a
+;; class), and the controls' subjects and references: an .edn of maps with :subject and :reference,
+;; test/java/controls.edn (C's test/c/controls.edn: :level), or lines LEVEL ID SUBJECT REFERENCE, test/goi/controls.txt, those of CONTROL-LEVEL
+;; (default interp) alone. DIVERGENCES: one file or several, comma-separated, read in order as one list of classes (the
+;; AOT levels' judge reads test/c/divergences-aot.edn with divergences.edn: review 195's medium 3); a non-pass in no class
+;; is named on the standard error (counted, the first five ids).
+(def keep-kinds #{:deferred :gap :world :interp :analysis :repl :repr-java :j2g :javac :other})
+
+(let [[div res level controls out clevel] *command-line-args*
+      clevel (or (not-empty clevel) "interp")
+      cls (vec (mapcat #(read-string (slurp %)) (remove empty? (arbace.string/split div #","))))
+      lv (when (seq level) (keyword level))
+      ;; RESULTS ending in .edn: a record of rows [ID RESULT REASON] (test/c/check-linux-amd64.edn's, GT8.3's C hook)
+      rows (if (.endsWith ^String res ".edn")
+             (for [[id r why] (read-string (slurp res))] [id nil (name r) (str why)])
+             (for [l (arbace.string/split-lines (slurp res)) :let [f (arbace.string/split l #"\t")] :when (>= (count f) 2)]
+             (let [[id a b c] f] (if (#{"interp" "compiled" "read" "nread" "classes" "print" "diagnostics"} a) [id a b (or c "")] [id nil a (or b "")]))))
+      klass (fn [[id l r why]]
+              (when-not (= r "pass")
+                (let [s (str r " " why)]
+                  (first (for [c cls :when (or (nil? (:level c)) (nil? l) (= (name (:level c)) l))
+                               :when (or (some #{id} (:tests c)) (some #(re-find % s) (:match c)))] c)))))
+      cs (for [r rows :when (or (nil? lv) (nil? (second r)) (= (name lv) (second r)))] [(first r) (klass r) (nth r 2)])
+      ctl (when (seq controls)
+            (if (.endsWith controls ".edn")
+              (mapcat (juxt :subject :reference) (filter #(or (some #{(keyword clevel)} (:levels %)) (= (keyword clevel) (:level %))) (read-string (slurp controls))))
+              (for [l (arbace.string/split-lines (slurp controls)) :when (and (seq l) (not (.startsWith l "#")))
+                    :when (= clevel (first (arbace.string/split (arbace.string/trim l) #"\s+")))
+                    x (drop 2 (arbace.string/split (arbace.string/trim l) #"\s+"))] x)))]
+  (spit (str out ".classes") (apply str (for [[id c r] cs] (str id "\t" (if c (name (:id c)) (if (= r "pass") "-" (str "unclassed-" r))) "\n"))))
+  (spit (str out ".keep") (apply str (for [x (distinct (concat (for [[id c] cs :when (keep-kinds (:kind c))] id) ctl))] (str x "\n"))))
+  (let [un (for [[id c r] cs :when (and (nil? c) (not= r "pass"))] id)]
+    (when (seq un)
+      (binding [*out* *err*]
+        (println "cover classes: warning:" (count un) "non-pass row(s) in no class of" div (str "(" (arbace.string/join " " (take 5 un)) (when (> (count un) 5) " ...") ")")))))
+  (println "classes:" (count (filter second cs)) "of" (count cs) "rows classed;" (count (distinct (keep #(some-> % second :id) cs))) "classes;"
+           (count (filter #(keep-kinds (:kind (second %))) cs)) "in a kept kind;" (count ctl) "control ids"))

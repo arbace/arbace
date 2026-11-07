@@ -1,0 +1,77 @@
+;; Go-build variant of java.util.logging.LogManager (J2G-SPEC §4.6; doc/classes/JAVA-DEFERRED-TRIAGE.md,
+;; "As built: F5 (write-ahead)"): read by j2g only.
+;; - The JDK reads its default configuration from $JAVA_HOME/conf/logging.properties; the Go build
+;;   embeds the same file (bin/jrt-convert copies it as make/modules/java.logging/Copy.gmk does) as
+;;   the resource conf/logging.properties, which readConfiguration and updateConfiguration(Function)
+;;   read through Class.getResourceAsStream when java.util.logging.config.file is not set (set, the
+;;   named file is read as the JDK reads it).
+;; - There is no context class loader (one registry of classes, J2G-SPEC §10.3): the manager's and
+;;   the configuration class's names are looked up in the system loader alone, whose failure the
+;;   JDK reports the same way once both loaders failed.
+;; - The shutdown hook is a Thread(String): the five-argument constructor (no thread group, no
+;;   inherited thread locals) is not jrt's.
+;; - Without System.Logger (JCS136) there is no bootstrap logger to redirect:
+;;   readPrimordialConfiguration does not call BootstrapLogger.redirectTemporaryLoggers. (The static
+;;   initializer registers LoggingProviderAccess with jrt's own LoggingProviderImpl, overlay/jdk/
+;;   java.base/sun/util/logging/internal, which holds the access and no finder.)
+;; The replacing members keep jdk26u's code where they keep it (baf63fb,
+;; src/java.logging/share/classes/java/util/logging/LogManager.java; Copyright (c) Oracle and/or its
+;; affiliates, GPL 2 with the Classpath Exception: LICENSE.md); the rest Copyright (c) the Arbace
+;; authors; Eclipse Public License 1.0.
+(in-ns 'java.util.logging)
+
+(j2g/variant LogManager
+  (method ^:private ^:static initLogManager ^LogManager []
+    (let [^:mutable ^LogManager mgr nil
+          ^:mutable ^String cname nil]
+      (try
+        (set! cname (System/getProperty "java.util.logging.manager"))
+        (when (some? cname)
+          (let [tmp (.newInstance (.loadClass (ClassLoader/getSystemClassLoader) cname))]
+            (set! mgr (cast LogManager tmp))))
+        (catch Exception ex
+          (.println System/err (java-str "Could not load Logmanager \"" cname "\""))
+          (.printStackTrace ex)))
+      (when (nil? mgr) (set! mgr (LogManager.)))
+      mgr))
+
+  (method ^:private readPrimordialConfiguration ^void [this]
+    (when-not readPrimordialConfiguration
+      (when (some? System/out)
+        (set! readPrimordialConfiguration true)
+        (try
+          (.readConfiguration this)
+          (catch Exception ex
+            (java-assert false
+              (java-str "Exception raised while reading logging configuration: " ex)))))))
+
+  (method ^:public readConfiguration :throws [IOException] ^void [this]
+    (let [cname (System/getProperty "java.util.logging.config.class")]
+      (when (some? cname)
+        (try
+          (let [^{:tag (Class ?)} clz (.loadClass (ClassLoader/getSystemClassLoader) cname)
+                witness (.newInstance clz)]
+            (return))
+          (catch Exception ex
+            (.println System/err (java-str "Logging configuration class \"" cname "\" failed"))
+            (.println System/err (java-str "" ex)))))
+      (with-resources [^InputStream in (.openConfiguration this)] (.readConfiguration this in))))
+
+  (method ^:public updateConfiguration :throws [IOException] ^void [this
+                                                                    ^{:tag (Function String (BiFunction String String String))} mapper]
+    (.ensureLogManagerInitialized this)
+    (.drainLoggerRefQueueBounded this)
+    (with-resources [^InputStream in (.openConfiguration this)]
+      (.updateConfiguration this in mapper)))
+
+  (j2g/add
+    (method ^:private openConfiguration :throws [IOException] ^InputStream [this]
+      (if (some? (System/getProperty "java.util.logging.config.file"))
+          (FileInputStream. (.getConfigurationFileName this))
+          (let [in (.getResourceAsStream LogManager "/conf/logging.properties")]
+            (when (nil? in) (throw (java.io.FileNotFoundException. "conf/logging.properties")))
+            in)))))
+
+(j2g/variant LogManager$Cleaner
+  (constructor ^:private [this]
+    (super. "Logging-Cleaner")))

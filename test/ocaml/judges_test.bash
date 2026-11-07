@@ -115,11 +115,14 @@ out=$(cd "$root" && OI_EXPECT_RECORD=$W/ref-expect.tampered bin/oi suite expect 
 expect "expect: a run that differs from the record fails" 1 'not in the record' "$out" $st
 
 # re-review 030's finding 1: a whole run equals the committed record (rows), and a header edit alone is not a difference
+# (GT9: OI_JUDGES_NO_EXPECT, from bin/oi judges-test --no-expect, leaves out the two whole runs; their two cases are counted as run)
+if [ -z "${OI_JUDGES_NO_EXPECT:-}" ]; then
 out=$(cd "$root" && bin/oi suite expect 2>&1); st=$?
 expect "expect: a whole run passes against the committed record" 0 'equals the record' "$out" $st
 { echo ';; another header'; grep -v '^;;' "$root/test/ocaml/ref-expect.edn"; } > "$W/ref-expect.header"
 out=$(cd "$root" && OI_EXPECT_RECORD=$W/ref-expect.header bin/oi suite expect 2>&1); st=$?
 expect "expect: a header edit alone is not a difference" 0 'equals the record' "$out" $st
+else echo "skip the two whole runs of expect (OI_JUDGES_NO_EXPECT)"; cases=$((cases + 2)); fi
 
 # re-review 030's finding 6: a missing record is an error, an --only that matches nothing says so
 out=$(cd "$root" && OI_EXPECT_RECORD=$W/no-such-record bin/oi suite expect --only "$only" 2>&1); st=$?
@@ -169,7 +172,7 @@ awk -F'\t' '$0 !~ /^#/ && $1 == "oi" { print $2 "\t" $3 "\t" $4 "\t1\t1.0\t" }' 
 awk -F'\t' '$0 !~ /^#/ && $1 == "aot" { print $2 "\t" $3 "\t" $4 "\t1\t1.0\t" }' "$root/test/ocaml/pins-attested.tsv" > "$R/o6/check-aot.tsv"
 echo corpus > "$R/oi/corpus.tsv"; echo fake1 > "$R/oi/check.tsv.key"; echo fake1 > "$R/o6/check-aot.tsv.key"
 out=$(cd "$root" && OI_PINS_RUNS=$R OI_PINS_FAKE_KEY=fake1 OI_PINS_ATTESTED=$W/pins.attest bin/oi pins --attest 2>&1); st=$?
-expect "pins: --attest from current runs attests every pin" 0 '39 attested' "$out" $st
+expect "pins: --attest from current runs attests every pin" 0 "$(grep -vc '^#' "$root/test/ocaml/pins-attested.tsv") attested" "$out" $st
 grep -v '^#' "$W/pins.attest" > "$W/pins.got"; grep -v '^#' "$root/test/ocaml/pins-attested.tsv" > "$W/pins.want"
 cmp -s "$W/pins.got" "$W/pins.want" || { echo "FAIL pins: the attested rows differ from the committed ones"; bad=1; }
 echo stale > "$R/o6/check-aot.tsv.key"; rm -f "$W/pins.attest2"
@@ -181,5 +184,5 @@ expect "pins: --attest skips a run made by another key and refuses" 2 'aot progr
 out=$(cd "$root" && OI_PINS_RUNS=$R OI_PINS_FAKE_KEY=fake1 OI_PINS_ATTESTED=$W/pins.oldkey bin/oi pins 2>&1); st=$?
 expect "pins: a header key that is not the current run's is noted" 0 'note: the attested rows of the oi program run come from key bbbbbbbbbbbb, the current key is fake1' "$out" $st
 out=$(cd "$root" && OI_PINS_RUNS=$W/no-runs OI_PINS_FAKE_KEY=fake1 OI_PINS_ATTESTED=$W/pins.oldkey bin/oi pins 2>&1); st=$?
-expect "pins: with no run present nothing is compared" 0 '^oi: pins: 39 pins, each attested' "$out" $st
-echo "$out" | grep -q 'note:' && { echo "FAIL pins: a note with no run present"; bad=1; }
+expect "pins: with no run present nothing is compared" 0 "^oi: pins: $(grep -vc '^#' "$root/test/ocaml/pins-attested.tsv") pins, each attested" "$out" $st
+if echo "$out" | grep -q 'note:'; then echo "FAIL pins: a note with no run present"; bad=1; fi

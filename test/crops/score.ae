@@ -1,0 +1,451 @@
+(ns crops.score
+  "bin/crops-score (doc/CROPS-SCORE.md): each crop's completeness, maturity and independence as
+  percentages, from the recorded results alone (no runs), like bin/reap. The tree scored is the
+  checkout (default) or a ref's (--ref REF: read by git show, no checkout); --newest scores each
+  crop on its newest held branch (test/crops/crops.edn's :branches, the newest ref with the crop's
+  REAP row).
+
+  Completeness: per cell (read, eval, AOT, print) pass / (pass + by design + deferred + pending) of
+  the tree's REAP matrix record, test/reap/matrix.edn (bin/reap's judging of the checks' records,
+  which bin/reap keeps equal to them; --judge recomputes the checkout's with reap.main's own
+  judging and fails on a difference); a cell not checked, or a crop with no row, counts 0 and is
+  flagged; the crop's is the mean of its four cells.
+  Maturity: the checklist of doc/CROPS-SCORE.md, each item an equal share, each measured on the
+  tree: the four cells recorded, none unclassed, negative controls of the cells' check families
+  (test/crops/crops.edn's :controls rules), gate steps (essential and --full, test/gate/steps.edn,
+  half for a GT9 fragment test/gate/crops/CROP.edn only), a REAP row, records without an absolute
+  path.
+  Independence: per stage (read, eval, AOT, print, judge) the reviewed facts of
+  test/crops/independence.edn (1, 0.5, 0), cross-checked with the tree's gate steps: a stage whose
+  named steps run on a toolchain host (:hosts, outside the oracle tier) scores 0 whatever the
+  claim, and the disagreement is flagged.
+
+  -main [--ref REF | --newest] [--crop C] [--tsv] [--input FILE]... [--judge] [--strict]"
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io])
+  (:import (java.io File)))
+
+(def ^:dynamic *root* ".")
+
+(def levels [:read :eval :aot :print])
+(def stages [:read :eval :aot :print :judge])
+(def level-names {:read "read" :eval "eval" :aot "AOT" :print "print" :judge "judge"})
+
+;; ---- the tree: the checkout or a ref
+
+(defn- sh
+  "Runs CMD in the checkout; {:exit :out}."
+  [& cmd]
+  (let [pb (ProcessBuilder. ^java.util.List (vec cmd))]
+    (.directory pb (File. ^String *root*))
+    (.redirectErrorStream pb false)
+    (let [p (.start pb) out (slurp (.getInputStream p))]
+      {:exit (.waitFor p) :out out})))
+
+(defn- git [& args] (apply sh "git" "-C" *root* args))
+
+(defn- tree
+  "A ref's tree (its files by git ls-tree), or the checkout's (nil: its files asked one by one, so that the gate's
+  audit sees only the files the scores read)."
+  [ref]
+  (if ref
+    (let [r (git "ls-tree" "-r" "--name-only" ref)]
+      (when-not (zero? (:exit r)) (throw (ex-info (str "crops-score: no ref " ref) {})))
+      {:ref ref :files (set (remove str/blank? (str/split-lines (:out r))))})
+    {:ref nil}))
+
+(defn- has? [t f]
+  (if (:ref t) (contains? (:files t) f) (.isFile (File. ^String (str *root* "/" f)))))
+
+(defn- fragment-files [t]
+  (sort (if (:ref t)
+          (filter #(re-matches #"test/gate/crops/[^/]+\.edn" %) (:files t))
+          (for [^File x (or (seq (.listFiles (File. ^String (str *root* "/test/gate/crops")))) [])
+                :when (re-matches #"[^/]+\.edn" (.getName x))]
+            (str "test/gate/crops/" (.getName x))))))
+
+(def ^:private cache (atom {}))
+
+(defn- text
+  "F's text in tree T, or nil."
+  [t f]
+  (when (has? t f)
+    (let [k [(:ref t) f]]
+      (or (@cache k)
+          (let [s (if (:ref t)
+                    (let [r (git "show" (str (:ref t) ":" f))] (when (zero? (:exit r)) (:out r)))
+                    (let [x (File. ^String (str *root* "/" f))] (when (.isFile x) (slurp x))))]
+            (swap! cache assoc k s)
+            s)))))
+
+(defn- edn [t f] (when-let [s (text t f)] (read-string s)))
+
+(defn- read-file [f]
+  (read-string (slurp (if (str/starts-with? f "/") f (str *root* "/" f)))))
+
+;; ---- the REAP row
+
+(defn- matrix
+  "The tree's matrix records by cell, with --input's records over them."
+  [t inputs]
+  (merge (into {} (for [r (edn t "test/reap/matrix.edn")] [(:cell r) (assoc r :from "test/reap/matrix.edn")]))
+         (into {} (for [[f rs] inputs r rs] [(:cell r) (assoc r :from f)]))))
+
+(defn- cases [r] (+ (:pass r 0) (:design r 0) (:deferred r 0) (:pending r 0)))
+
+(defn- cell-score [r]
+  (cond (nil? r) {:score 0.0 :flag "no row"}
+        (not (:checked r)) {:score 0.0 :flag "no check yet"}
+        (zero? (cases r)) {:score 0.0 :flag "no case"}
+        (and (seq (remove :absent (:sources r))) (every? #(nil? (:pass %)) (remove :absent (:sources r))))
+        {:score (double (/ (:pass r) (cases r))) :flag "passes not recorded: its sources record only their non-passes"}
+        :else {:score (double (/ (:pass r) (cases r)))}))
+
+(defn- meant
+  "CSP4 (a cell's completeness of what is meant to pass): pass / (pass + deferred + pending), by design out."
+  [r]
+  (let [d (+ (:pass r 0) (:deferred r 0) (:pending r 0))]
+    (if (and r (:checked r) (pos? d)) (double (/ (:pass r) d)) 0.0)))
+
+(defn- completeness [crop m]
+  (let [cells (for [l levels :let [r (m [crop l])]] (merge {:level l :record r :meant (meant r)} (cell-score r)))]
+    {:cells cells :score (/ (reduce + (map :score cells)) (count levels))
+     :meant (/ (reduce + (map :meant cells)) (count levels))}))
+
+;; ---- maturity
+
+(defn- cells-spec [t] (edn t "test/reap/cells.edn"))
+
+(defn- crop-sources
+  "The crop's cells' sources in the tree's test/reap/cells.edn, each with its :level."
+  [spec crop]
+  (for [l levels s (get-in spec [:cells [crop l] :sources])] (assoc s :level l)))
+
+(defn- record-files [t sources]
+  (distinct (for [s sources k [:file :results :known :ref-runs :ref :same-cases :upstream]
+                  :let [f (get s k)] :when (and (string? f) (has? t f))]
+              f)))
+
+(defn- steps-of
+  "Every step of the tree: test/gate/steps.edn's (:where :steps) and the GT9 fragments'
+  test/gate/crops/*.edn (:where :fragment), each with its crop of the table's :crops."
+  [t]
+  (let [spec (edn t "test/gate/steps.edn")
+        crop-of (into {} (for [[c ns] (:crops spec) n ns] [(str n) c]))
+        main (for [s (:steps spec)] (assoc s :where :steps :crop (crop-of (str (:name s)))))
+        frags (for [f (fragment-files t)
+                    :let [s (text t f)
+                          sec (fn [nm] (second (re-find (re-pattern (str "(?s);;@ " nm "\n(.*?)(?:\n;;@ |\\z)")) s)))
+                          steps (when-let [x (sec "steps")] (read-string (str "[" x "\n]")))
+                          crops (when-let [x (sec "crops")] (read-string (str "{" x "\n}")))
+                          fc (into {} (for [[c ns] crops n ns] [(str n) c]))]
+                    st steps]
+                (assoc st :where :fragment :file f :crop (fc (str (:name st)))))]
+    (let [named (set (map #(str (:name %)) main))]
+      ;; a fragment's step whose name steps.edn has is the planner's: steps.edn's wins (the fragment's is a merge's draft)
+      (concat main (remove #(named (str (:name %))) frags)))))
+
+(defn- crop-steps [cfg steps]
+  (filter (fn [s] (let [n (str (:name s))]
+                    (and (or (= (:id cfg) (:crop s)) (and (:steps cfg) (re-find (:steps cfg) n)))
+                         (not (and (:exclude-steps cfg) (re-find (:exclude-steps cfg) n))))))
+          steps))
+
+(defn- item [id title value evidence] {:id id :title title :value (double value) :evidence evidence})
+
+(defn- maturity [t cfg config m steps]
+  (let [crop (:id cfg)
+        spec (cells-spec t)
+        row? (some #{crop} (:languages spec))
+        sources (crop-sources spec crop)
+        checks (remove #(or (= :beside (:role %)) (:until %)) sources)
+        recs (for [l levels :let [r (m [crop l])] :when r] r)
+        checked (filter :checked recs)
+        unclassed (for [r checked s (:sources r)
+                        :when (and (not (:absent s)) (not= (:not s) (reduce + (map second (:classes s)))))]
+                    (str (name (second (:cell r))) ": " (:name s)))
+        covered (fn [s] (some (fn [rule]
+                                (and (re-find (:source rule) (:name s))
+                                     (when-let [x (text t (:file rule))]
+                                       (if (:match rule) (re-find (:match rule) x) true))
+                                     rule))
+                              (:controls cfg)))
+        ctl (for [s checks] [s (covered s)])
+        cs (crop-steps cfg steps)
+        live (remove #(= :oracle (:phase %)) cs)
+        in-steps (filter #(= :steps (:where %)) live)
+        part (fn [ph] (cond (some #(= ph (:phase %)) in-steps) 0.5
+                            (some #(= ph (:phase %)) live) 0.25
+                            :else 0))
+        files (record-files t sources)
+        abs (for [f files :let [x (some-> (text t f) (#(reduce (fn [a r] (str/replace a r "")) % (:abs-path-allow config))))
+                               hit (when x (re-find (:abs-path config) x))]
+                  :when hit]
+              (str f " (" (if (string? hit) hit (first hit)) ")"))
+        items [(item :cells "the four cells recorded" (/ (count checked) 4)
+                     (str (count checked) " of 4 cells checked in test/reap/matrix.edn"
+                          (when-let [x (seq (remove #(:checked (m [crop %])) levels))]
+                            (str "; not: " (str/join ", " (map level-names x))))))
+               (item :classed "every non-pass in a class" (if (and (seq checked) (empty? unclassed)) 1 0)
+                     (cond (empty? checked) "no checked cell"
+                           (seq unclassed) (str "unclassed: " (str/join "; " unclassed))
+                           :else (str "every source's classes sum to its non-passes"
+                                      (let [p (reduce + (map #(:pending % 0) checked))]
+                                        (when (pos? p) (str "; " p " pending the user's decision"))))))
+               (item :controls "negative controls for its check families"
+                     (if (seq checks) (/ (count (filter second ctl)) (count checks)) 0)
+                     (if (empty? checks) "no check family (no REAP row)"
+                         (str (count (filter second ctl)) " of " (count checks) " check families"
+                              (when-let [x (seq (remove second ctl))]
+                                (str "; none for: " (str/join "; " (map #(str (level-names (:level (first %))) " " (:name (first %))) x))))
+                              (when-let [x (seq (distinct (keep #(:file (second %)) ctl)))]
+                                (str "; controls " (str/join ", " x))))))
+               (item :gate "gate steps: essential and --full" (+ (part :essential) (part :full))
+                     (if (empty? cs) "no step in test/gate/steps.edn or test/gate/crops/"
+                         (str (str/join ", " (for [ph [:essential :full :oracle]
+                                                   :let [x (filter #(= ph (:phase %)) cs)] :when (seq x)]
+                                               (str (count x) " " (name ph)
+                                                    (let [fr (count (filter #(= :fragment (:where %)) x))]
+                                                      (when (pos? fr) (str " (" fr " in a GT9 fragment only)"))))))
+                              (when (empty? in-steps) "; none planned in test/gate/steps.edn"))))
+               (item :reap "a REAP row (test/reap/cells.edn)" (if row? 1 0)
+                     (if row? (str "row " crop ", " (count sources) " sources") "no row"))
+               (item :pins "records reproducible (no host or path in a record)"
+                     (if (seq files) (/ (- (count files) (count abs)) (count files)) 0)
+                     (cond (empty? files) "no record"
+                           (seq abs) (str (count abs) " of " (count files) " records hold an absolute path: " (str/join "; " abs))
+                           :else (str (count files) " records, no absolute path")))]]
+    {:items items :score (/ (reduce + (map :value items)) (count items))}))
+
+;; ---- independence
+
+;; The user's decision of 2026-11-07 (doc/CROPS-SCORE.md, "Decided (the user, 2026-11-07)"): a stage whose cases are judged
+;; partly by their own verdict (1) and partly by a recorded reference (0.5), or live (0), scores the case-weighted mean. The
+;; facts give the counts as :cases {CHECK [N SCORE] ...} (Scheme's) or :mixed {:own N :jdk-record M} (Java's: own 1, the
+;; JDK's record 0.5); with neither, the fact's stated :score stands.
+(defn- mixed-score [f]
+  (cond (and (map? (:cases f)) (number? (get-in f [:cases :self])) (number? (get-in f [:cases :recorded])))
+        ;; C's form (c-indep-b1): {:self N :recorded M}, (N + 0.5 M) / (N + M)
+        (let [o (get-in f [:cases :self]) r (get-in f [:cases :recorded]) n (+ o r)]
+          (when (pos? n) [(double (/ (+ o (* 0.5 r)) n)) n]))
+        (map? (:cases f))
+        (let [cs (vals (:cases f)) n (reduce + (map first cs))]
+          (when (pos? n) [(double (/ (reduce + (map (fn [[k v]] (* k v)) cs)) n)) n]))
+        (and (number? (get-in f [:mixed :own])) (number? (get-in f [:mixed :jdk-record])))
+        (let [o (get-in f [:mixed :own]) j (get-in f [:mixed :jdk-record]) n (+ o j)]
+          (when (pos? n) [(double (/ (+ o (* 0.5 j)) n)) n]))))
+
+(defn- independence [t cfg config ind steps]
+  (let [crop (:id cfg)
+        facts (get ind crop)
+        at (get-in facts [:at (or (:ref t) "checkout")])
+        tool-hosts (set (:toolchain-hosts config))
+        by-name (group-by #(str (:name %)) steps)
+        rows (for [st stages
+                   :let [f (merge (get-in facts [:stages st]) (get at st))
+                         named (mapcat #(by-name (str %)) (:steps f))
+                         live (remove #(= :oracle (:phase %)) named)
+                         hosted (for [s live h (:hosts s) :when (tool-hosts h)] [(:name s) h])
+                         [mixed nmixed] (mixed-score f)
+                         stated (:score f)
+                         claim (if mixed (/ (Math/round (* 1000.0 mixed)) 1000.0) stated)
+                         score (cond (nil? claim) 0.0
+                                     (and (seq hosted) (pos? claim)) 0.0
+                                     :else (double claim))
+                         check (cond (nil? claim) "no fact (test/crops/independence.edn)"
+                                     (seq hosted) (str (if (pos? claim) "CLAIM REFUTED: " "steps agree: ")
+                                                       (str/join ", " (for [[n h] hosted] (str n " on " h))))
+                                     (seq live) (if (zero? claim)
+                                                  (str "claim 0 though " (str/join ", " (map :name live)) " name no toolchain host")
+                                                  (str "steps agree: " (str/join ", " (map :name live)) " on no toolchain host"))
+                                     :else "claimed (no step of the tree runs it)")
+                         check (if mixed
+                                 (str check "; the case-weighted mean of " nmixed " cases"
+                                      (when (and (number? stated) (> (Math/abs (- (double stated) mixed)) 0.005))
+                                        (str " (the fact states " stated ")")))
+                                 check)]]
+               {:stage st :score score :fact f :check check})]
+    {:stages rows :score (/ (reduce + (map :score rows)) (count rows))
+     :facts-of (cond (nil? (:ref t)) "the checkout" at (:ref t) :else (str "the checkout (no :at for " (:ref t) ")"))
+     :refuted (filter #(str/starts-with? (:check %) "CLAIM REFUTED") rows)}))
+
+;; ---- the newest held branch
+
+(defn- newest-ref [cfg]
+  (let [out (:out (git "for-each-ref" "--sort=-committerdate" "--format=%(refname:short)" "refs/remotes/mac"))
+        refs (filter #(and (:branches cfg) (re-find (:branches cfg) %)) (str/split-lines out))]
+    (first (filter (fn [r] (let [t (tree r)]
+                             (some #{(:id cfg)} (:languages (cells-spec t)))))
+                   refs))))
+
+;; ---- output
+
+(defn- pct [x] (format "%.1f%%" (* 100.0 (double x))))
+
+(defn- score-crop [cfg config ind ref inputs]
+  (let [t (tree ref)
+        m (matrix t inputs)
+        steps (steps-of t)]
+    {:crop cfg :ref (or ref "checkout")
+     :completeness (completeness (:id cfg) m)
+     :maturity (maturity t cfg config m steps)
+     :independence (independence t cfg config ind steps)}))
+
+(defn- cell-text [c]
+  (let [r (:record c)]
+    (str (level-names (:level c)) " " (pct (:score c)) " (" (pct (:meant c)) " without by design)"
+         (if r (str " (" (:pass r) " pass / " (:design r) " design / " (:deferred r) " deferred / " (:pending r) " pending)") "")
+         (when (:flag c) (str " [" (:flag c) "]")))))
+
+(defn- print-details [s]
+  (let [cfg (:crop s)]
+    (println (str "## " (:name cfg) " (" (:ref s) ")"))
+    (println (str "completeness " (pct (get-in s [:completeness :score])) "; " (pct (get-in s [:completeness :meant]))
+                  " of what is meant to pass (by design out, CSP4):"))
+    (doseq [c (get-in s [:completeness :cells])] (println (str "   " (cell-text c))))
+    (println (str "maturity " (pct (get-in s [:maturity :score])) ":"))
+    (doseq [i (get-in s [:maturity :items])]
+      (println (str "   " (pct (:value i)) "  " (:title i) ": " (:evidence i))))
+    (println (str "independence " (pct (get-in s [:independence :score])) " (facts of " (get-in s [:independence :facts-of]) "):"))
+    (doseq [r (get-in s [:independence :stages]) :let [f (:fact r)]]
+      (println (str "   " (level-names (:stage r)) " " (let [x (double (:score r))] (if (== x (Math/rint x)) (str x) (format "%.3f" x))) ": " (or (:tool f) "?")
+                    (when (seq (:host f)) (str "; host " (str/join " " (map name (:host f)))))
+                    (when (:why f) (str "; " (:why f)))
+                    (let [{:keys [self recorded]} (:cases f)]
+                      (when (and (number? self) (number? recorded))
+                        (str "; " self " cases by their own verdict, " recorded " by a toolchain's record: (" self " + 0.5 x " recorded ") / " (+ self recorded))))
+                    " [" (:check r) "]")))
+    (println)))
+
+(defn- tsv [scores]
+  (println (str/join "\t" (concat ["crop" "ref" "completeness" "maturity" "independence" "completeness-meant"]
+                                  (for [l levels k ["pass" "design" "deferred" "pending"]] (str (name l) "-" k))
+                                  (map #(str "m-" (name %)) [:cells :classed :controls :gate :reap :pins])
+                                  (map #(str "i-" (name %)) stages))))
+  (doseq [s scores]
+    (println (str/join "\t" (concat [(name (get-in s [:crop :id])) (:ref s)
+                                     (format "%.3f" (get-in s [:completeness :score]))
+                                     (format "%.3f" (get-in s [:maturity :score]))
+                                     (format "%.3f" (get-in s [:independence :score]))
+                                     (format "%.3f" (get-in s [:completeness :meant]))]
+                                    (for [c (get-in s [:completeness :cells]) k [:pass :design :deferred :pending]]
+                                      (if (:record c) (get (:record c) k 0) ""))
+                                    (map #(format "%.2f" (:value %)) (get-in s [:maturity :items]))
+                                    (map #(str (:score %)) (get-in s [:independence :stages])))))))
+
+(defn- table [scores]
+  (println "| crop | ref | completeness | (without by design) | maturity | independence |")
+  (println "|---|---|---|---|---|---|")
+  (doseq [s scores]
+    (println (str "| " (get-in s [:crop :name]) " | " (:ref s) " | " (pct (get-in s [:completeness :score]))
+                  " | " (pct (get-in s [:completeness :meant])) " | " (pct (get-in s [:maturity :score])) " | " (pct (get-in s [:independence :score])) " |"))))
+
+(defn- judge-check
+  "--judge: the checkout's matrix judged afresh by reap.main (its readers and judging), against
+  test/reap/matrix.edn; the differences."
+  []
+  (require 'reap.main)
+  (let [spec (read-file "test/reap/cells.edn")
+        judge @(ns-resolve 'reap.main 'judge-cell)
+        record @(ns-resolve 'reap.main 'cell-record)
+        old (into {} (for [r (read-file "test/reap/matrix.edn")] [(:cell r) r]))]
+    (with-bindings {(ns-resolve (quote reap.main) (quote *root*)) *root*}
+      (doall
+       (for [[k c] (:cells spec)
+             :let [r (record k (judge c)) o (old k)]
+             :when (not= (select-keys r [:checked :pass :design :deferred :pending])
+                         (select-keys o [:checked :pass :design :deferred :pending]))]
+         (str (pr-str k) ": judged " (pr-str (select-keys r [:pass :design :deferred :pending]))
+              ", recorded " (pr-str (select-keys o [:pass :design :deferred :pending]))))))))
+
+;; ---- the record (CSP1 (b)): test/crops/scores.edn, the checkout's scores; any difference fails until --record writes it
+
+(def ^:private scores-file "test/crops/scores.edn")
+
+(defn- f4 [x] (format "%.4f" (double x)))
+
+(defn- score-line
+  "A crop's scores as its record's line: the three (and CSP4's), each cell's counts, each item, each stage."
+  [s]
+  (str " {:crop " (get-in s [:crop :id])
+       " :completeness " (f4 (get-in s [:completeness :score])) " :meant " (f4 (get-in s [:completeness :meant]))
+       " :maturity " (f4 (get-in s [:maturity :score])) " :independence " (f4 (get-in s [:independence :score]))
+       "\n  :cells " (pr-str (vec (for [c (get-in s [:completeness :cells]) :let [r (:record c)]]
+                                   [(:level c) (boolean (:checked r)) (:pass r 0) (:design r 0) (:deferred r 0) (:pending r 0)])))
+       "\n  :items " (pr-str (vec (for [i (get-in s [:maturity :items])] [(:id i) (symbol (f4 (:value i)))])))
+       "\n  :stages " (pr-str (vec (for [r (get-in s [:independence :stages])] [(:stage r) (symbol (f4 (:score r)))]))) "}"))
+
+(defn- scores-text [scores]
+  (str ";; bin/crops-score's record (doc/CROPS-SCORE.md, CSP1 (b), the user's decision of 2026-11-06): the checkout's scores per\n"
+       ";; crop, as bin/crops-score computes them from the records (completeness, CSP4's without by design, maturity,\n"
+       ";; independence; each cell's checked, pass, design, deferred, pending; each maturity item; each stage). bin/crops-score\n"
+       ";; fails on any difference from it (the gate's crops-score step), so that every change of a score is made on purpose;\n"
+       ";; bin/crops-score --record writes it. Read with the Clojure reader.\n"
+       "[\n" (str/join "\n" (map score-line scores)) "\n]\n"))
+
+(defn- record-lines
+  "The record's lines by crop: the crop's id and its text, as score-line writes it."
+  []
+  (let [f (File. ^String (str *root* "/" scores-file))]
+    (when (.isFile f)
+      (into {} (for [[_ id body] (re-seq #"(?ms)^ \{:crop :([a-z]+) (.*?)\}$" (slurp f))]
+                 [(keyword id) (str " {:crop :" id " " body "}")])))))
+
+(defn- record-diffs [scores]
+  (let [old (record-lines)]
+    (if-not old
+      [(str "no " scores-file " (bin/crops-score --record writes it)")]
+      (for [s scores :let [id (get-in s [:crop :id]) now (score-line s) was (old id)]
+            :when (not= now was)]
+        (str scores-file ": " (name id) (if was (str " differs:\n      now " (str/replace now "\n" " ") "\n      was " (str/replace was "\n" " "))
+                                            " not recorded"))))))
+
+(defn- parse-args [args]
+  (loop [o {:inputs []} [a & r] args]
+    (case a
+      nil o
+      "--ref" (recur (assoc o :ref (first r)) (rest r))
+      "--crop" (recur (assoc o :crop (keyword (first r))) (rest r))
+      "--input" (recur (update o :inputs conj (first r)) (rest r))
+      "--newest" (recur (assoc o :newest true) r)
+      "--tsv" (recur (assoc o :tsv true) r)
+      "--judge" (recur (assoc o :judge true) r)
+      "--strict" (recur (assoc o :strict true) r)
+      "--record" (recur (assoc o :record true) r)
+      (throw (ex-info (str "crops-score: unknown argument " a) {})))))
+
+(defn -main [& args]
+  (binding [*root* (or (System/getenv "CROPS_ROOT") ".")]
+    (let [o (parse-args args)
+          config (read-file "test/crops/crops.edn")
+          ind (read-file "test/crops/independence.edn")
+          inputs (for [f (:inputs o) :let [x (read-file f)]] [f (if (map? x) (:cells x) x)])
+          cfgs (filter #(or (nil? (:crop o)) (= (:crop o) (:id %))) (:crops config))
+          _ (when (empty? cfgs) (throw (ex-info (str "crops-score: no crop " (:crop o)) {})))
+          scores (doall (for [c cfgs]
+                          (score-crop c config ind (if (:newest o) (or (newest-ref c) (:ref o)) (:ref o)) inputs)))
+          refuted (for [s scores r (get-in s [:independence :refuted])]
+                    (str (get-in s [:crop :name]) " " (level-names (:stage r)) " (" (:ref s) "): " (:check r)))
+          own? (and (nil? (:ref o)) (not (:newest o)) (empty? (:inputs o)))
+          _ (when (and (:record o) (not (and own? (nil? (:crop o)))))
+              (throw (ex-info "crops-score: --record records the checkout's scores of every crop (no --ref, --newest, --input, --crop)" {})))
+          judged (when (:judge o) (map #(str "test/reap/matrix.edn: " %) (judge-check)))
+          diffs (when (and own? (not (:record o))) (record-diffs scores))
+          problems (concat judged (when (:strict o) refuted) diffs)]
+      (when (and (:record o) (empty? judged) (or (not (:strict o)) (empty? refuted)))
+        (spit (str *root* "/" scores-file) (scores-text scores))
+        (println (str "crops-score: wrote " scores-file)))
+      (if (:tsv o)
+        (tsv scores)
+        (do (println "crops-score: completeness, maturity and independence per crop (doc/CROPS-SCORE.md),")
+            (println "             from the recorded results alone")
+            (println)
+            (table scores)
+            (println)
+            (doseq [s scores] (print-details s))
+            (println (str "crops-score: " (count scores) " crops; " (count refuted) " facts refuted by the gate's steps"
+                          (when (seq refuted) " (scored 0)") "; " (count problems) " problems"))
+            (doseq [x refuted] (println (str "   refuted: " x)))))
+      (doseq [p problems] (binding [*out* *err*] (println (str "   " p))))
+      (shutdown-agents)
+      (System/exit (if (empty? problems) 0 1)))))

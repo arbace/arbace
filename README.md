@@ -116,7 +116,17 @@ ARBACE_BOX_NET=loopback $B                             # with a network: loopbac
 ARBACE_BOX_ARCHES=amd64,arm64 bin/arbace-go --build --box && bin/box-arm64-vm check
 ```
 
-## Three crops: read, eval, AOT and print
+## Four crops: read, eval, AOT and print
+
+The tag `arbace-reaps-4-crops-v1` (2026-11-07, on main) marks REAP for a fourth crop, C (C23, ISO/IEC 9899:2024,
+against gcc 15.2's testsuites, with musl 1.2.6; [doc/C23-SURVEY.md](doc/C23-SURVEY.md)), beside Clojure, Java 26
+and Go 1.27.1: C read into C forms by ports of a C front end's lexer, preprocessor and parser, interpreted at the
+REPL by ci, compiled ahead of time into Go, and printed back to C, on a seed that embeds it (`d5548e72`, verified).
+`bin/reap` prints the matrix; none of its 16 cells fails, and every case that does not pass is in a recorded class
+([doc/FULL-SUPPORT-SURVEY.md](doc/FULL-SUPPORT-SURVEY.md), "REAP v3's divergences", v2's beside it). C's cases
+passing: read 5,201, eval 2,111, AOT 2,120, print 4,768. The tag stands on an audited clean run of the four crops in a
+fresh clone over GT8's compressed corpora (`test/gate/clean-arbace-reaps-4-crops-v1.edn`: 234 steps passed clean,
+every audited one with its audit ok, over three runs in two nights).
 
 The tag `arbace-reaps-3-crops-v2` (2026-11-01, on main) marks REAP for Clojure, Java 26 and Go 1.27.1 as
 v1 did, and its second round: the same four levels, each language read into Arbace's forms, evaluated at the
@@ -207,8 +217,8 @@ seed was printed from (the seed's `SEED.edn`).
 - [doc/AGENDA.md](doc/AGENDA.md): where the work stands and what comes next
 - [doc/go/FREEZE.md](https://github.com/arbace/arbace/blob/arbace-for-golang/doc/go/FREEZE.md)
   (on `arbace-for-golang`): Arbace for Golang: build, run, verify, the frozen branch
-- [doc/JOURNAL.md](doc/JOURNAL.md): every decision and action, append-only (since 2026-11-01;
-  the earlier history at the tags `arbace-reaps-3-crops-v2`, `arbace-reaps-3-crops-v1`, `arbace-interprets-go1.27.1-v1` and
+- [doc/JOURNAL.md](doc/JOURNAL.md): every decision and action, append-only (since 2026-11-07;
+  the earlier history at the tags `arbace-reaps-4-crops-v1`, `arbace-reaps-3-crops-v2`, `arbace-reaps-3-crops-v1`, `arbace-interprets-go1.27.1-v1` and
   `arbace-inside-itself-v1` and on the frozen branches)
 - [doc/classes/SPEC.md](doc/classes/SPEC.md): the Java forms
 - [doc/go/B1-PLAN.md](doc/go/B1-PLAN.md): the Go executable's plan; [doc/go/J2G-SPEC.md](doc/go/J2G-SPEC.md),

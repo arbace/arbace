@@ -31,7 +31,10 @@
                                     without positions and the file names; a file the helper rejects is
                                     classed (kind, message, class) against FILE (test/ocaml/
                                     roundtrip-known.edn), a printed file the helper rejects is a failure;
-                                    with --printed the forms of CAND printed again equal the printed text"
+                                    with --printed the forms of CAND printed again equal the printed text
+    results --corpus ID --list FILE --compare REPORT --full REPORT --read OUT --print OUT
+                                    O8: one corpus's rows of the read and print levels' records (test/ocaml/
+                                    read-results.edn, print-results.edn) from compare's and full's --report"
   (:require [arbace.repr.ocaml.convert :as cv]
             [arbace.repr.ocaml.lambda :as lm]
             [arbace.repr.ocaml.print :as pr]
@@ -137,7 +140,7 @@
         files (files-under orig ".ae")
         names (set (map #(strip-ae (rel orig %)) files))
         known (if (get opts "--record") {} (select-keys known-all names))
-        ok (atom 0) rejects (atom {}) diffs (atom {}) fails (atom []) unstable (atom 0)]
+        ok (atom 0) rejects (atom {}) diffs (atom {}) fails (atom []) unstable (atom 0) unstable-files (atom [])]
     (doseq [f files]
       (let [r (strip-ae (rel orig f))
             a (cv/convert (slurp f))]
@@ -159,7 +162,7 @@
                           (when printed
                             (let [pf (str printed "/" r)
                                   again (pr/print-file b)]
-                              (when-not (= again (slurp pf)) (swap! unstable inc)
+                              (when-not (= again (slurp pf)) (swap! unstable inc) (swap! unstable-files conj r)
                                 (println "UNSTABLE" r))))))))))))))
     (let [unexpected-rej (remove (fn [[r v]] (= (select-keys (get known r) [:class :kind :message]) (select-keys v [:class :kind :message]))) @rejects)
           unexpected-diff (remove (fn [[r v]] (= (select-keys (get known r) [:class :at :orig :printed :message]) v)) @diffs)
@@ -175,7 +178,8 @@
                     (count @fails) " failures, " @unstable " unstable"))
       (when (get opts "--report")
         (spit-mk (get opts "--report")
-                 (pr-str {:files n :equal @ok :rejected @rejects :differ @diffs :failures @fails :unstable @unstable})))
+                 (pr-str {:files n :equal @ok :rejected @rejects :differ @diffs :failures @fails :unstable @unstable
+                          :unstable-files @unstable-files})))
       ;; a record accepts the helper's rejections and the trees' differences (data about the corpus), not the printer's own failures:
       ;; a file not printed or printed to text the helper rejects, or a print that is not stable (review 008's finding 8)
       (let [print-failures (filter (fn [[_ v]] (#{:not-printed :printed-rejected} (:class v))) @diffs)]
@@ -235,6 +239,9 @@
       (println (str "full: " (count files) " files: " @ok " text equal, "
                     (count (filter #(= :helper-rejected (:class %)) (vals @rejects))) " rejected by the parse (the round trip's classes), "
                     (count counted) " classed here " (pr-str (frequencies (map :class (vals counted)))) ", " (count @fails) " failures"))
+      ;; O8: the level's outcome per file, for the print level's record (bin/repr-ocaml roundtrip --record-results, results)
+      (when (get opts "--report")
+        (spit-mk (get opts "--report") (pr-str {:files (count files) :equal @ok :rejected @rejects :failures @fails})))
       (when (get opts "--record")
         (spit-mk known-file (str ";; recorded by `bin/repr-ocaml roundtrip --text --record`: the files mode :full classes (layout dump rejected)\n"
                                  (str "{" (str/join "\n " (map (fn [[k v]] (str (pr-str k) " " (pr-str v))) (into (sorted-map) (merge (apply dissoc known-all names) counted)))) "}") "\n")))
@@ -284,13 +291,71 @@
       (println " heads:" (pr-str (into (sorted-map) (map (fn [[k v]] [(str k) v]) counts))))
       (System/exit (if (and (zero? err) (zero? unstable) (empty? stale)) 0 1)))))
 
+;; ---- O8: the read and print levels' records ----
+
+(def ^:private results-header
+  {:read (str ";; repr/ocaml's read level (bin/repr-ocaml roundtrip --record-results; doc/ocaml/OCAML-SURVEY.md, \"As built: O8\n"
+              ";; (write-ahead)\"): every file of the corpora read, [ID RESULT REASON], ID CORPUS/FILE (FILE relative to the corpus's\n"
+              ";; base, as test/ocaml/roundtrip-known.edn names it); RESULT pass (the oracle's parser, tools/ocdump on compiler-libs, read\n"
+              ";; it and its dump converted to OCaml forms) or reject (the oracle rejects it: REASON \"CLASS KIND: MESSAGE\"). Classes\n"
+              ";; test/ocaml/divergences-read.edn; bin/reap's OCaml read cell. Read with the Clojure reader.\n")
+   :print (str ";; repr/ocaml's print level (bin/repr-ocaml roundtrip --record-results; doc/ocaml/OCAML-SURVEY.md, \"As built: O8\n"
+               ";; (write-ahead)\"): every file the read level passes, [ID RESULT REASON]; RESULT pass (printed from its forms, the\n"
+               ";; print's dump the original's tree, printed again the same text, and mode :full printed back to the original byte for\n"
+               ";; byte), diff (the trees differ: REASON the first difference), reject (mode :full's layout dump rejected), fail (the\n"
+               ";; printer's failure, never recorded: REASON its class). Classes test/ocaml/divergences-print.edn; bin/reap's OCaml\n"
+               ";; print cell. Read with the Clojure reader.\n")})
+
+(defn- write-results [^String f k id rows]
+  (let [pre (str id "/")
+        old (if (.exists (File. f)) (read-string (slurp f)) [])
+        kept (remove #(str/starts-with? (str (first %)) pre) old)
+        all (sort-by first (concat kept rows))]
+    (spit-mk f (str (get results-header k) "[\n" (apply str (for [r all] (str " " (pr-str (vec r)) "\n"))) "]\n"))))
+
+(defn- do-results
+  "results --corpus ID --list FILE --compare REPORT --full REPORT --read OUT --print OUT: one corpus's rows of the read and
+  print levels (the round trip's compare report and mode :full's) written into the records OUT, the corpus's earlier rows
+  replaced and every other corpus's kept; a printer's failure is no row to record (exit 1, nothing written)"
+  [{:keys [opts]}]
+  (let [id (get opts "--corpus")
+        names (remove str/blank? (str/split-lines (slurp (get opts "--list"))))
+        c (read-string (slurp (get opts "--compare")))
+        fu (read-string (slurp (get opts "--full")))
+        unstable (set (:unstable-files c))
+        one-line (fn [x] (str/replace (str x) #"\s+" " "))
+        read-rows (for [r names]
+                    (if-let [v (get (:rejected c) r)]
+                      [(str id "/" r) "reject" (one-line (str (name (:class v)) " " (name (:kind v)) ": " (:message v)))]
+                      [(str id "/" r) "pass" ""]))
+        print-rows (for [r names :when (not (get (:rejected c) r))]
+                     (let [d (get (:differ c) r) fr (get (:rejected fu) r) ff (get (:failures fu) r)]
+                       (cond
+                         (and d (= :diff (:class d)))
+                         [(str id "/" r) "diff" (one-line (str "at " (pr-str (:at d)) ": " (:orig d) " printed " (:printed d)))]
+                         d [(str id "/" r) "fail" (one-line (str (name (:class d)) ": " (:message d)))]
+                         (unstable r) [(str id "/" r) "fail" "unstable: printed again, another text"]
+                         ff [(str id "/" r) "fail" (one-line (str (name (:class ff)) ": " (:message ff)))]
+                         (and fr (not= :helper-rejected (:class fr)))
+                         [(str id "/" r) "reject" (one-line (str (name (:class fr)) " " (name (:kind fr)) ": " (:message fr)))]
+                         :else [(str id "/" r) "pass" ""])))
+        bad (filter #(= "fail" (second %)) print-rows)]
+    (doseq [r bad] (println "NOT RECORDED (the printer's failure)" (pr-str r)))
+    (if (seq bad)
+      (System/exit 1)
+      (do (write-results (get opts "--read") :read id read-rows)
+          (write-results (get opts "--print") :print id print-rows)
+          (println (str "results " id ": read " (count (filter #(= "pass" (second %)) read-rows)) " of " (count read-rows)
+                        " pass, print " (count (filter #(= "pass" (second %)) print-rows)) " of " (count print-rows) " pass"))))))
+
 (defn -main [& args]
   (let [[verb & more] args
         pa (fn [wv] (parse-args more wv))]
     (case verb
       "read" (do-read (pa #{"-o" "--root"}))
       "print" (do-print (pa #{"-o" "--root"}))
-      "full" (do-full (pa #{"--src" "--parse" "--layout" "--out" "--forms" "--known" "--rt-known"}))
+      "full" (do-full (pa #{"--src" "--parse" "--layout" "--out" "--forms" "--known" "--rt-known" "--report"}))
       "dumps" (do-dumps (pa #{"--mode" "--root" "--again" "--known" "--times"}))
       "compare" (do-compare (pa #{"--orig" "--cand" "--printed" "--known" "--report"}))
+      "results" (do-results (pa #{"--corpus" "--list" "--compare" "--full" "--read" "--print"}))
       (do (println "usage: -m arbace.repr.ocaml read|print|compare ...") (System/exit 2)))))

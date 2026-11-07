@@ -1,6 +1,6 @@
 (ns reap.main
   "bin/reap (doc/FULL-SUPPORT-SURVEY.md, REAP1, RPS3, RPS13): the REAP matrix, read, eval, AOT and
-  print for Clojure, Java, Go and C, from the checks' recorded results alone (no runs). The cells and
+  print for Clojure, Java, Go, C, C++, Scheme, OCaml and Python (and the rows test/reap/cells.edn adds), from the checks' recorded results alone (no runs). The cells and
   their sources are data, test/reap/cells.edn; each source's reference gives its passing cases and
   its non-passing ones (read-source), each non-pass falls into a class of its classes file, the
   first whose :match finds \"RESULT REASON\" (test/goi/divergences.edn's format), and the matrix
@@ -155,7 +155,8 @@
 (defmethod read-source :repr-clojure-known [src]
   {:pass nil
    :entries (vec (for [[corpus files] (dissoc (read-edn (:file src)) :counts) [f why] files]
-                   (entry (str (name corpus) " " f) :known (str (name corpus) ": " why))))
+                   ;; a corpus keyed [CHECK CORPUS] (bin/pyi scope-check's and compile-check's known files) named CHECK/CORPUS
+                   (entry (str (if (vector? corpus) (str/join "/" (map name corpus)) (name corpus)) " " f) :known (str (name corpus) ": " why))))
    :detail "the known file only: its corpora's passing files are not recorded"})
 
 (defmethod read-source :native-check [src]
@@ -216,14 +217,17 @@
   (let [m (read-edn (:file src))
         secs (or (:sections src) [(:section src)])
         cls (:classes m)
+        ;; :id-sep (C++'s token check, CX10): the separator of a case's corpus and file, "corpus/file" as C++'s records and
+        ;; the rotation's lists (GT8.4) name them; default " " (C's)
+        sep (or (:id-sep src) " ")
         all (vec (for [sec secs
                        :let [texts (if (contains? cls sec) (get cls sec) cls)]
                        [corpus files] (get m sec)
                        [f v] (sort-by key files)]
-                   (entry (str (name corpus) " " f) :known
+                   (entry (str (name corpus) sep f) :known
                           (str (name (:class v)) ": " (str/replace (str (get texts (:class v))) #"\s+" " ")))))
         ex (set (:exclude-corpora src))
-        counted? (fn [^String id] (not (ex (first (str/split id #" " 2)))))
+        counted? (fn [^String id] (not (ex (first (str/split id (re-pattern (java.util.regex.Pattern/quote sep)) 2)))))
         es (filterv #(counted? (:id %)) all)
         rows (when (exists? (:results src)) (read-edn (:results src)))
         crows (filter #(counted? (first %)) rows)
@@ -237,6 +241,83 @@
       {:pass nil :entries es :sections-missing missing
        :detail (str "the known file only: the check's passing files are not recorded there"
                     (when (:results src) (str " (" (:results src) " not written yet)")) excluded)})))
+
+;; C++'s round trip (CX10; doc/cpp/CPP-SURVEY.md, "As built: CX10 (write-ahead)"): bin/repr-cpp roundtrip's recorded results,
+;; one file a list, :results-dir/KEY.edn (CP124 (b): {:key :summary :files {CORPUS/NAME verdict}}, the verdict :pass,
+;; the essential lists' KEY-essential.edn (subsets of the others, the gate's) not counted, nor CORPUS-every-N.edn beside CORPUS-all.edn,
+;; [:known CLASS] (a bare :known the old format), :oracle-rejects or :oracle-fails), and the known file (:file,
+;; test/repr/cpp/roundtrip-known.edn: :classes, :files CORPUS/NAME -> CLASS). Two parts of one check:
+;;   :part :recorded  the recorded lists' files, each a case: the passes counted, a known one "CLASS: the class text" (the record's
+;;                    class; the known file's when the record has none), the oracle's verdicts "oracle-rejects: ..." and
+;;                    "oracle-fails: ...". A problem: a record whose :summary :files is not its count of files, a file in two
+;;                    records, a recorded class the known file gives another class (CP172 (b)'s check, which the run makes, read
+;;                    here from the records); a recorded known file the known file no longer lists is counted as recorded (an
+;;                    improvement until the list's next --record-results, CP164 (c)) and said in the detail
+;;   :part :unrecorded the known file's files no record holds (the corpora pending.edn names, HotSpot's, the samples': lists
+;;                    without a record), each a non-pass; their passes are not recorded (the cell's count partial)
+
+(defn- cpp-records [src]
+  (let [d (File. ^String (path (:results-dir src)))
+        fs (sort-by #(.getName ^File %) (or (seq (.listFiles d)) []))
+        names (set (map #(.getName ^File %) fs))]
+    (vec (for [^File f fs
+               :let [n (.getName f)
+                     every (re-matches #"(.*)-every-\d+\.edn" n)]
+               ;; the essential lists' records (gxx-dg-essential.edn: a subset of a recorded list, the gate's) are not counted again,
+               ;; nor a sampling's (CORPUS-every-N.edn) when the corpus' whole list is recorded (CORPUS-all.edn: CX9's
+               ;; gxx-modules-all holds gxx-modules-every-10's files; cppi-check, 2026-11-05)
+               :when (and (str/ends-with? n ".edn") (not= n "pending.edn") (not (str/ends-with? n "-essential.edn"))
+                          (not (and every (contains? names (str (second every) "-all.edn")))))]
+           (assoc (read-edn (str (:results-dir src) "/" n)) :file n)))))
+
+(defmethod read-source :cpp-roundtrip [src]
+  (let [known (read-edn (:file src))
+        texts (:classes known)
+        kfiles (:files known)
+        text (fn [c] (str (name c) ": " (str/replace (str (get texts c)) #"\s+" " ")))
+        recs (cpp-records src)
+        recorded (frequencies (mapcat #(keys (:files %)) recs))]
+    (if (= :unrecorded (:part src))
+      (let [es (vec (for [[f c] (sort-by key kfiles) :when (not (contains? recorded f))]
+                      (entry f :known (text c))))]
+        {:pass nil :entries es
+         :detail (str (count es) " of the known file's " (count kfiles) " files in no record of " (:results-dir src)
+                      "; their lists' passes are not recorded")})
+      (let [rv (fn [x] (if (vector? x) (first x) x))
+            rc (fn [x] (when (vector? x) (second x)))
+            rows (for [r recs [f v] (:files r)] [f v (:file r)])
+            es (vec (for [[f v] (sort-by first rows) :when (not= :pass (rv v))]
+                      (case (rv v)
+                        :known (entry f :known (text (or (rc v) (get kfiles f) :unclassified)))
+                        :oracle-rejects (entry f :oracle-rejects "oracle-rejects: clang rejects the file with its own diagnostics (recorded by name, roundtrip-oracle.edn)")
+                        :oracle-fails (entry f :oracle-fails "oracle-fails: the oracle's dump failed (a timeout or a crash, recorded by name, roundtrip-oracle.edn)")
+                        (entry f (rv v) (str (name (rv v)) ": a verdict the round trip does not record")))))
+            stale (for [[f v] rows :when (and (= :known (rv v)) (not (contains? kfiles f)))] f)]
+        {:pass (count (filter #(= :pass (rv (second %))) rows)) :entries es
+         :results-problems
+         (vec (concat
+               (for [r recs :let [n (get-in r [:summary :files])] :when (and n (not= n (count (:files r))))]
+                 (str (:name src) ": " (:file r) " records " (count (:files r)) " files, its summary " n))
+               (for [[f k] recorded :when (> k 1)] (str (:name src) ": " f " in " k " records"))
+               (for [[f v] rows :let [c (rc v) kc (get kfiles f)] :when (and c kc (not= c kc))]
+                 (str (:name src) ": " f " recorded as " (name c) " in " (nth (vec (first (filter #(= f (first %)) rows))) 2)
+                      ", the known file's class is " (name kc)))))
+         :detail (str (count recs) " recorded lists (" (str/join ", " (map #(str/replace (:file %) #"\.edn$" "") recs)) ")"
+                      (when (seq stale) (str "; " (count stale) " recorded known the known file no longer lists (improvements until"
+                                             " --record-results): " (str/join " " (take 3 stale)))))}))))
+
+;; C++'s lowering check (CX6, CX7; bin/cppi lower-check, the lowered C forms compiled by gcc -O0 and run, the second judge before
+;; ci): test/cpp/lower-results.edn's :files (NAME -> [STATUS OUTCOME]; :cx6, CX6's summaries, not read) and the known file
+;; (:known, test/cpp/lower-known.edn: NAME -> its class), each file a case, a non-pass "CLASS: OUTCOME"
+
+(defmethod read-source :cpp-lower [src]
+  (let [r (read-edn (:file src))
+        known (if (:known src) (read-edn (:known src)) {})
+        fs (:files r)]
+    {:pass (count (filter #(= :pass (first (val %))) fs)) :ids (vec (keys fs))
+     :entries (vec (for [[f [st out]] (sort-by key fs) :when (not= :pass st)]
+                     (entry f st (str (name (or (get known f) :unclassified)) ": " (name (or out :none))))))
+     :detail (str (count fs) " files of " (str/join ", " (map name (keys (dissoc r :files :prefixes :cx6)))))}))
 
 (defmethod read-source :jforms-excluded [src]
   ;; diffcheck's exclusions (test/diffcheck/jforms-excluded.edn: the Java forms' classes not given
@@ -277,6 +358,41 @@
   {:pass nil :entries (vec (for [[p why] (sort-by key (read-edn (:file src)))] (entry p :known (str "text: " why))))
    :detail "the known file only: the level's passing files are not recorded"})
 
+(defn- scheme-entries
+  "A Scheme record's non-pass items (test/scheme/check*-linux-amd64.edn: {:id :verdict :items [{:item \"KIND ID DETAIL\" :class K}]}):
+  each an entry of the record's id, its result KIND and its reason the rest of the item, so that a class's :match finds the item
+  whole (\"RESULT REASON\"), the class the check recorded kept to be compared (:recorded-class); a non-pass with no item an entry
+  :non-pass no class takes."
+  [r]
+  (if (seq (:items r))
+    (for [{:keys [item class]} (:items r)
+          :let [[k why] (str/split (str item) #" " 2)]]
+      (assoc (entry (:id r) (keyword k) (or why "")) :recorded-class class))
+    [(entry (:id r) :non-pass (str (:id r) ": verdict " (pr-str (:verdict r)) " with no item"))]))
+
+(defmethod read-source :scheme [src]
+  ;; SM9 (doc/scheme/SCHEME-SURVEY.md, \"As built: SM9 (write-ahead)\"): Scheme's records, one map a program, suite or file. :count
+  ;; :verdict (the default): a record is a case, passing when its :verdict is :pass (the :id the case's, its items its non-passes:
+  ;; with :per-file one non-pass of its worst kind); :count :tests: a record counts its tests, :pass (or the path :pass-path) the
+  ;; passing ones, each item a non-passing one (Chibi's suite, the SRFIs' programs, Chibi's own tests, the mats).
+  (let [rows (read-edn (:file src))
+        tests? (= :tests (:count src))]
+    {:pass (if tests?
+             (reduce + (map #(or (get-in % (or (:pass-path src) [:pass])) 0) rows))
+             (count (filter #(= :pass (:verdict %)) rows)))
+     :ids (when-not tests? (mapv :id rows))
+     :entries (vec (mapcat (fn [r] (when (or (not= :pass (:verdict r)) (seq (:items r))) (scheme-entries r))) rows))
+     :detail (str (count rows) (if tests? " records" " cases") " in " (:file src))}))
+;; ---- OCaml's row (O8, doc/ocaml/OCAML-SURVEY.md, "As built: O8 (write-ahead)"): its records' rows are [ID RESULT REASON ...]
+;; with RESULT a string ("pass", "fail", "class", ...: test/ocaml/check-oi.edn, check-aot.edn, check-suite-*.edn,
+;; read-results.edn, print-results.edn), read as :results' rows with the result a keyword; columns past the third
+;; (the AOT level's OI) are not the level's
+(defmethod read-source :ocaml [src]
+  (let [rows (for [[id r why] (read-edn (:file src))] [id (keyword (str r)) why])]
+    {:pass (count (filter #(= :pass (second %)) rows)) :ids (mapv first rows)
+     :entries (vec (for [[id r why] rows :when (not= :pass r)] (entry id r why)))
+     :detail (str (count rows) " rows in " (:file src))}))
+
 ;; the cases a source must have (report 021's finding 1: a shrunk record is a valid record)
 
 (def ^:private ref-ids
@@ -302,16 +418,75 @@
      ;; C's reference runs (bin/ci record-ref): the programs gcc built, whose runs the check judges (queue 122, finding 6)
      (set (for [x (read-forms f) :when (not= :no-build (:status x))] (:id x))))))
 
+(def ^:private py-ref-ids
+  (memoize
+   (fn [files]
+     ;; Python's references (bin/pyi record-ref: one map a line): the synthetic corpus's and the samples' programs
+     ;; (test/python/ref-cpython314.edn, every :id: an excluded reference is a case the judge classes), Lib/test's methods
+     ;; (ref-cpython314-lib-test*.edn: the :outcome lines, the :module and :excluded ones not cases)
+     (set (for [f files x (read-forms f)
+                :when (and (:id x) (not (:module x)) (or (contains? x :status) (and (:outcome x) (not (:excluded x)))))]
+            (:id x))))))
+
+;; Python's row (queue 201, PY10; doc/python/PYTHON-SURVEY.md §10.1, "As built: PY10"): bin/pyi check --aot's record
+;; (test/python/check-aot-linux-ARCH.edn, arbace.python.aot's judge: one map a line, :id, :result :pass, :classed (:class
+;; :as-pyi, :reference-excluded or a class of test/python/divergences-aot.edn) or :failed, :reason, :pyi-ms, :pyi-differs)
+;; read for two levels:
+;;   :column :aot  the compiled run (the AOT level): a pass the record's :pass; a non-pass of the result CLASS, the
+;;                 record's class (:as-pyi, the interpreter's own divergence, the compiled run the loop's and pyi's;
+;;                 :reference-excluded; a class of divergences-aot.edn), its reason the record's; a :failed row the
+;;                 result :failed, "CLASS REASON" (CLASS :differs, :refused, :no-reference: the judge's failures)
+;;   :column :pyi  pyi's run on goi (the eval level's synthetic corpus and samples): a pass a :pass without :pyi-differs; a
+;;                 non-pass :as-pyi (pyi's run the compiled one's, not CPython's), :pyi-differs (the
+;;                 compiled run CPython's, pyi's not: pyi's outcome when the record keeps it, :pyi-outcome), :differs (pyi's outcome in
+;;                 the reason). A record made with --no-pyi (no :pyi-ms anywhere) is a problem at this column: it holds
+;;                 no run of pyi's.
+;;   :column :loop pyi's compiled loop (the eval level's synthetic source in every tier: PY10's DECISION 2, decided: the user,
+;;                 2026-11-04, (a)): read as :aot (a :pass's loop run is the compiled run's, so CPython's; a non-pass the
+;;                 record's class), named as the loop's; pyi on goi's runs judged beside it (:column :pyi, :role :beside).
+(defmethod read-source :pyi-aot [src]
+  (let [rows (read-forms (:file src))
+        col (or (:column src) :aot)
+        es (vec (for [r rows
+                      :let [id (:id r) res (:result r) cls (:class r) why (str (:reason r))]
+                      :when (not (and (= :pass res) (or (#{:aot :loop} col) (not (:pyi-differs r)))))]
+                  (cond
+                    (= :pass res) (entry id :pyi-differs
+                                         (str "the compiled run is CPython's, pyi's on goi is not"
+                                              (when-let [o (:pyi-outcome r)]
+                                                (str ": status " (:status o) ", " (:stderr-last o)))))
+                    (= :failed res) (entry id :failed (str (name (or cls :failed)) " " why))
+                    :else (entry id (or cls :classed) why))))
+        no-pyi (and (= :pyi col) (seq rows) (not-any? :pyi-ms rows))]
+    {:pass (count (filter #(and (= :pass (:result %)) (or (#{:aot :loop} col) (not (:pyi-differs %)))) rows))
+     :ids (mapv :id rows) :entries es
+     :results-problems (when no-pyi [(str (:name src) ": " (:file src) " was recorded with --no-pyi: no run of pyi's to judge")])
+     :detail (str (count rows) " programs in " (:file src) (case col :pyi ", pyi's runs" :loop ", the loop's runs" nil))}))
+
 (defn- case-problems
   "A source's cases (its rows' ids) against those it must have: a :java-check source's against
   :ref's tests of its :level (test/java/ref-jdk26.edn), a :results source's against the programs
   of :same-cases (goi's AOT level against its eval level's) or of :ref-runs (C's eval level against
-  the programs gcc built in test/c/ref-gcc15.edn, every form of it); an id recorded twice is a problem too."
+  the programs gcc built in test/c/ref-gcc15.edn, every form of it; with :ref-corpora, those of the corpora named); an id
+  recorded twice is a problem too."
   [src r]
   (when-let [ids (:ids r)]
     (let [want (cond (:ref src) (ref-ids (:ref src) (= :diagnostics (:level src)))
-                     (:same-cases src) (set (map first (read-edn (:same-cases src))))
+                     ;; Python's (:py-ref, a file or several): the programs every one; Lib/test's methods those of the
+                     ;; modules the record holds (:py-ref-modules: the record is per corpus, a module's methods all or none)
+                     (:py-ref src) (let [all (py-ref-ids (let [x (:py-ref src)] (if (vector? x) x [x])))]
+                                     (if (:py-ref-modules src)
+                                       (let [mods (set (map #(first (str/split (str %) #"/" 2)) ids))]
+                                         (set (filter #(mods (first (str/split % #"/" 2))) all)))
+                                       all))
+                     (:same-cases src) (set (map #(if (map? %) (:id %) (first %)) (read-edn (:same-cases src))))
                      (:ref-runs src) (ref-run-ids (:ref-runs src)))
+          ;; :ref-corpora (C++'s run checks, cppi-check 2026-11-05): the cases wanted are those of these corpora only (a case
+          ;; CORPUS/NAME); test/cpp/ref-gxx15.edn holds the whole corpora samples and runtime and every 25th program of
+          ;; libstdcxx and gxx-dg-run, judged by two records (the whole corpora's and the sampling's, check-every-25)
+          want (if-let [cs (and want (seq (:ref-corpora src)))]
+                 (set (filter (fn [id] (some #(str/starts-with? id (str % "/")) cs)) want))
+                 want)
           have (set ids)
           some-of (fn [xs] (str (str/join " " (take 5 xs)) (when (> (count xs) 5) " ...")))]
       (concat
@@ -322,17 +497,27 @@
                extra (sort (remove want have))]
            (concat
             (when (seq miss)
-              [(str (:name src) ": " (count miss) " cases of " (or (:ref src) (:same-cases src) (:ref-runs src))
+              [(str (:name src) ": " (count miss) " cases of " (or (:ref src) (:py-ref src) (:same-cases src) (:ref-runs src))
                     " not in " (:file src) ": " (some-of miss))])
             (when (seq extra)
               [(str (:name src) ": " (count extra) " cases of " (:file src) " not in "
-                    (or (:ref src) (:same-cases src) (:ref-runs src)) ": " (some-of extra))]))))))))
+                    (or (:ref src) (:py-ref src) (:same-cases src) (:ref-runs src)) ": " (some-of extra))]))))))))
 
 ;; the classes
 
+(defn- py-aot-class
+  "A class of test/python/divergences-aot.edn (arbace.python.aot's judge: {:classes [...]}, a class's :ids its programs,
+  its :match one regex's text) in this file's terms: :ids as :tests, :match a vector of patterns."
+  [c]
+  (cond-> (dissoc c :ids)
+    (:ids c) (update :tests #(vec (concat % (:ids c))))
+    (string? (:match c)) (assoc :match [(re-pattern (:match c))])))
+
 (defn- classes-of [f]
   (cond (vector? f) (vec (mapcat classes-of f))
-        (exists? f) (read-edn f)
+        (exists? f) (let [x (read-edn f)]
+                      ;; a map {:classes [...]}: pyi's AOT's classes file (queue 201, PY10)
+                      (if (map? x) (mapv py-aot-class (:classes x)) x))
         :else []))
 
 (defn- at-level?
@@ -355,6 +540,7 @@
   (let [s (str (name (:result e)) " " (:reason e))
         takes? (fn [re] (or (not= :flaky (:result e)) (str/starts-with? (str re) "^flaky")))]
     (some (fn [c] (when (and (at-level? c (:level e))
+                             (or (nil? (:results c)) (some #{(:result e)} (:results c)))
                              (or (some #{(:id e)} (:tests c)) (some #(and (takes? %) (re-find % s)) (:match c)))
                              (or (nil? (:programs c)) (some #{(:id e)} (:programs c))))
                     c))
@@ -382,10 +568,12 @@
 
 (defn- missing-files
   "The files a source names that are not there: its :file, :upstream, :known, :ref and :same-cases,
-  and the oracle's :expected directory (report 021's finding 3: a directory gone gave no cases)."
+  the oracle's :expected directory, C++'s round trip's :results-dir (report 021's finding 3: a directory gone gave no cases)."
   [src]
   (concat (for [k [:file :upstream :known :ref :same-cases :ref-runs] :let [f (get src k)] :when (and f (not (exists? f)))] f)
-          (when-let [d (:expected src)] (when-not (dir? d) [d]))))
+          (for [f (let [x (:py-ref src)] (if (vector? x) x (when x [x]))) :when (not (exists? f))] f)
+          (when-let [d (:expected src)] (when-not (dir? d) [d]))
+          (when-let [d (:results-dir src)] (when-not (dir? d) [d]))))
 
 (defn- judge-source
   "A source read and judged: its entries with their classes. Every file it names must be there,
@@ -396,7 +584,9 @@
   [cell src]
   (let [file (or (:file src) "")
         miss (missing-files src)
-        not-yet (and (:until src) (= [(:file src)] miss))
+        ;; a check not recorded yet: its :file missing (with it, the files the same milestone writes: :ref-runs,
+        ;; :same-cases; CX10, C++'s eval and AOT cells wait for CX8's record and its references alike)
+        not-yet (and (:until src) (some #{(:file src)} miss))
         present (and (empty? miss) (or (= :repr-clojure-rules (:reader src)) (exists? (:file src))))
         cf (or (:classes src) (:classes cell))]
     (if-not present
@@ -427,6 +617,10 @@
                                 (for [e es :when (some #{(:result e)} (:refuse cell))]
                                   (str (:name src) ": " (:id e) " " (name (:result e)) " " (:reason e)
                                        ": the cell's check refuses the result " (name (:result e)) " whatever its class"))
+;; a Scheme record's item (:scheme): the class its check recorded is the one the matrix finds (SM9)
+                                (for [e es :when (and (:recorded-class e) (:class e) (not= (:recorded-class e) (:id (:class e))))]
+                                  (str (:name src) ": " (:id e) " " (name (:result e)) " " (:reason e) ": recorded in the class "
+                                       (name (:recorded-class e)) ", the matrix finds " (name (:id (:class e)))))
                                 (for [e es :when (nil? (:class e))]
                                   (str (:name src) ": " (:id e) " in no class of " cf ": " (name (:result e)) " " (:reason e)))
                                 (for [c (distinct (keep :class es)) :when (nil? (kind-of cell c))]
@@ -649,8 +843,10 @@
                       "\n   :raw-only [" (str/join "\n              " (map #(pr-str [(str (first %)) (str (second %))]) (:raw-only c))) "]"
                       "\n   :extra [" (str/join "\n           " (map #(pr-str [(str (first %)) (str/join " | " (take 2 (str/split (str (second %)) #" \| ")))]) (:extra c))) "]}"))
                ["  ]}"])]
-    (if (or (empty? want) (seq miss))
-      (do (println (str "reap: " report (if (empty? want) " not judged: no list of corpora" (str " lacks the corpora " (str/join " " miss)))
+    (if (or (empty? want) (seq miss) (:partial r))
+      (do (println (str "reap: " report (cond (empty? want) " not judged: no list of corpora"
+                                                (:partial r) " is a partial check's (native-check --only, GT8)"
+                                                :else (str " lacks the corpora " (str/join " " miss)))
                         " (a run of bin/repr-go native-check over every corpus); " out " not written"))
           false)
       (do (spit out (str (str/join "\n" lines) "\n"))

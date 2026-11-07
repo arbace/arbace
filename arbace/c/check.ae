@@ -135,7 +135,10 @@
     __int128 :int128 unsigned-__int128 :uint128 float :float double :double long-double :ldouble
     _Float16 :float16 _Float32 :float32 _Float64 :float64 _Float128 :float128 _Float32x :float32x
     _Float64x :float64x _Float128x :float128x __bf16 :bf16 _Decimal32 :dec32 _Decimal64 :dec64 _Decimal128 :dec128
-    _Decimal64x :dec64x})
+    _Decimal64x :dec64x
+    ;; GNU's names on x86-64 (review 110's finding 2): __float128 is _Float128 in C, __float80 is long double (x87); the
+    ;; converter writes them for the suffixes q and w and for the type name __float128
+    __float128 :float128 __float80 :ldouble})
 
 (def ^:private int-info
   ;; kind [bits signed rank]
@@ -201,7 +204,7 @@
 
 (defn- ldouble-size [] (long (or (cx :ldouble-size) 16)))
 
-(declare size-of align-of complete-record! vla?)
+(declare size-of align-of complete-record! vla? var-size?)
 
 (defn- bitint-size [n] (cond (<= n 8) 1 (<= n 16) 2 (<= n 32) 4 (<= n 64) 8 :else (* 8 (quot (+ n 63) 64))))
 
@@ -311,6 +314,20 @@
            (or (:vla a) (:vla b) (= (or (:n a) 0) (or (:n b) 0))))
       :else (compatible? a b))))
 
+(defn- union-param-match?
+  "gcc's leniency in a prototype's parameter lists (c-typeck.cc's type_lists_compatible_p): a parameter `u` of a
+  transparent union type, or of a union type with no name (neither a tag nor spelled by a typedef), is compatible with the other's `o` when their sizes are equal and a member's type
+  (unqualified unless an array) is compatible with `o` (`wait (union {union wait *u; int *i} *)` and
+  `wait (union wait *)`; `sendto (__CONST_SOCKADDR_ARG)` and `sendto (const struct sockaddr *)`). Both unqualified."
+  [u o]
+  (and (= :union (:k u))
+       (let [^HashMap r (:rec u)]
+         (and (or (and (nil? (.get r :tag)) (nil? (:typedef-name u))) (:transparent u) (.get r :transparent))
+              (.get r :complete)
+              (let [s (size-of u)] (and (some? s) (= s (size-of o))))
+              (boolean (some (fn [m] (let [mt (:t m)] (compatible? (if (= :array (:k mt)) mt (unq mt)) o)))
+                             (.get r :members)))))))
+
 (defn compatible?
   "Type compatibility (6.2.7), qualifiers compared."
   [a b]
@@ -327,7 +344,9 @@
         :fn (and (compatible? (unq (:ret a)) (unq (:ret b)))
                  (or (not (:proto a)) (not (:proto b))
                      (and (= (count (:params a)) (count (:params b))) (= (boolean (:variadic a)) (boolean (:variadic b)))
-                          (every? true? (map #(compatible? (unq %1) (unq %2)) (:params a) (:params b))))))
+                          (every? true? (map (fn [p q] (let [p (unq p) q (unq q)]
+                                                                         (or (compatible? p q) (union-param-match? p q) (union-param-match? q p))))
+                                             (:params a) (:params b))))))
         (:struct :union :enum) (let [^HashMap ra (:rec a) ^HashMap rb (:rec b)]
                                  (or (identical? ra rb)
                                      (and (= (.get ra :tag) (.get rb :tag)) (some? (.get ra :tag))
@@ -672,7 +691,7 @@
             (.add out (assoc m :off 0 :bitoff (when (:bits m) 0)))))
         (.put r :size (align-up @sz (long @al)))
         (.put r :align @al))
-      (let [off (atom 0) al (atom 1)] ; off in bits
+      (let [off (atom 0) al (atom 1) vseen (atom false)] ; off in bits
         (doseq [m members]
           (let [t (:t m)
                 ta (long (align-of t))
@@ -702,13 +721,20 @@
               (let [o (align-up (quot (+' @off 7) 8) a)
                     s (size-of t)]
                 (swap! al max a)
-                (.add out (assoc m :off o))
+                ;; a member after one of variable size (a VLA, GNU's): its offset is the run time's, :voff (CS106)
+                (.add out (cond-> (assoc m :off o) @vseen (assoc :voff true)))
+                (when (var-size? t) (reset! vseen true))
                 (reset! off (*' 8 (+' o (or s 0))))))))
         (let [al (long @al)
               al (if-let [ra (.get r :min-align)] (max al (long ra)) al)]
           (.put r :size (align-up (quot (+' @off 7) 8) al))
           (.put r :align al))))
     (.put r :members (vec out))
+    ;; GNU's structures of variable size (CS106): a member of variable size makes the record's size the run time's;
+    ;; the builder lays it out again at run time with the members' alignments (member-align: packed, #pragma pack)
+    (.put r :var-size (boolean (some #(var-size? (:t %)) members)))
+    (.put r :packed packed)
+    (.put r :max-align max-align)
     (.put r :complete true)))
 
 (defn- member
@@ -742,6 +768,84 @@
           (let [r (new-rec kind tag)] (.put ^HashMap (:tags (top-scope)) tag r) r)))))
 
 (declare check-struct check-enum)
+
+(defn- int-mode
+  "mode_for_size_tree (size, MODE_INT, limit): the integer mode of `n` bytes, up to TImode, else BLKmode."
+  [n]
+  (if (#{1 2 4 8 16} n) [:int n] :blk))
+
+(defn- int-mode? [m] (and (vector? m) (= :int (first m))))
+
+(defn- mode-precision
+  "GET_MODE_PRECISION of a type-mode."
+  [m]
+  (cond (not (vector? m)) 0
+        (= :int (first m)) (* 8 (long (second m)))
+        (= m [:float :ld]) (if (= 16 (long (size-of {:k :ldouble}))) 80 64)
+        (= :float (first m)) ({:sf 32 :df 64 :hf 16 :bf 16 :tf 128} (second m))
+        (= :dec (first m)) ({:dec32 32 :dec64 64 :dec128 128 :dec64x 128} (second m))
+        (= :complex (first m)) (* 2 (long (mode-precision (second m))))
+        (= :vector (first m)) (* 8 (long (second m)))
+        :else 0))
+
+(defn- type-mode
+  "A model of gcc's TYPE_MODE (x86-64; aarch64 alike for what transparent_union asks): [:int bytes] for the integer
+  classes (pointers too), a float mode per format, a complex or vector mode of its parts, :blk; records by
+  stor-layout.cc's compute_record_mode, arrays by mode_for_array."
+  [t]
+  (case (:k t)
+    (:bool :char :schar :uchar :short :ushort :int :uint :long :ulong :llong :ullong :int128 :uint128 :ptr :nullptr :enum)
+    (int-mode (size-of t))
+    :bitint (int-mode (size-of t))
+    (:float :float32) [:float :sf]
+    (:double :float64 :float32x) [:float :df]
+    (:ldouble :float64x) [:float :ld]
+    :float16 [:float :hf]
+    :bf16 [:float :bf]
+    (:float128 :float128x) [:float :tf]
+    (:dec32 :dec64 :dec128 :dec64x) [:dec (:k t)]
+    :complex [:complex (type-mode (:of t))]
+    :vector [:vector (:n t) (type-mode (:of t))]
+    :array (let [s (size-of t) es (size-of (:of t))]
+             (cond (nil? s) :blk
+                   (= s es) (type-mode (:of t))
+                   :else (int-mode s)))
+    (:struct :union)
+    (let [^HashMap r (:rec t) size (size-of t)
+          prec mode-precision]
+      (if (or (nil? size) (zero? (long size)))
+        :blk
+        (let [mode (reduce (fn [mode m]
+                             (let [ft (:t m)
+                                   tm (type-mode ft)
+                                   ;; layout_decl: a bit-field of an integer mode's width at its boundary takes that mode
+                                   bits (if (:bits m) (long (:bits m)) (when-let [fs (size-of ft)] (* 8 (long fs))))
+                                   fm (if (:bits m) (if (and (zero? (rem bits 8)) (pos? bits)) (int-mode (quot bits 8)) :none) tm)]
+                               (cond
+                                 ;; a member of BLKmode type (not of size 0) makes the record BLKmode
+                                 (and (= tm :blk) (not (and (:bits m) (zero? bits))) (not (= 0 (size-of ft)))) (reduced :blk)
+                                 (nil? bits) (reduced :blk)
+                                 (and (= bits (* 8 (long size))) (not (#{:blk :none} fm)) (> (long (prec fm)) (long (prec mode)))) fm
+                                 :else mode)))
+                           :void (.get r :members))]
+          (cond
+            (= mode :blk) :blk
+            (and (vector? mode) (or (= :struct (:k t)) (int-mode? mode))) mode
+            :else (int-mode size)))))
+    :blk))
+
+(defn- transparent-ok?
+  "Whether gcc keeps transparent_union on the complete union `r` (c-attribs.cc's handle_transparent_union_attribute,
+  c-decl.cc's finish_struct): a first member whose mode (DECL_MODE) is the union's (TYPE_MODE): compute_record_mode
+  gives a union the mode of its widest member as wide as itself only when that mode is an integer one, else the
+  integer mode of its size; so a first member of floating type, or narrower than the union, drops the attribute."
+  [^HashMap r]
+  (let [f (first (.get r :members))
+        um (type-mode {:k :union :rec r})
+        fm (when f (if-let [b (:bits f)]
+                     (let [b (long b)] (when (and (pos? b) (zero? (rem b 8)) (int-mode? (type-mode (:t f)))) (int-mode (quot b 8))))
+                     (type-mode (:t f))))]
+    (boolean (and f (not= um :blk) (= um fm)))))
 
 (defn- spec-attrs-packed [m] (some #(= "packed" (first %)) (apply attrs-of m all-attr-keys)))
 
@@ -968,6 +1072,12 @@
         (when al (.put r :min-align al))
         (when (cx :pack) (feat! :cc-attr-layout))
         (layout! r ms kind packed (cx :pack))
+        ;; a variably modified definition's members (GNU's, CS106): the builder lays it out at run time where it stands,
+        ;; finding its record by its body
+        (when (and (seq body) (vm-type? {:k kind :rec r})) (record! body {:rec r :kind kind}))
+        ;; GNU's transparent_union on the definition: the type itself is transparent (c-attribs.cc)
+        (when (and (= kind :union) (some #(= "transparent_union" (first %)) as) (transparent-ok? r))
+          (.put r :transparent true))
         (.remove r :defining)
         (when redef (.remove redef :redefining))
         (let [t (if (and redef (rec-same? redef r))
@@ -1148,17 +1258,23 @@
           r (if (neg? sh) (.multiply (java.math.BigDecimal. (.toBigInteger m)) (two (- sh))) (.divide (java.math.BigDecimal. (.toBigInteger m)) (two sh)))]
       (if (neg? (.signum x)) (.negate r) r))))
 
-(defn- round-ldouble
-  "The BigDecimal `x` rounded to x87's 64-bit significand (exponents down to -16382), as a BigDecimal."
-  [^java.math.BigDecimal x]
-  (round-exact x 64 -16382))
+(def ^:private wide-formats
+  ;; [significand bits, smallest normal exponent, largest exponent] of the kinds wider than double whose constants keep an
+  ;; exact value (:ld), as on the target (linux-amd64): long double and _Float64x are x87's extended format (a 64-bit
+  ;; significand), _Float128 is IEEE binary128 (113 bits); review 110's finding 2. _Float128x has none (gcc: not supported).
+  {:ldouble [64 -16382 16383] :float64x [64 -16382 16383] :float128 [113 -16382 16383]})
 
-(defn- ld-of
-  "A long double constant's exact value (`round-ldouble`), or nil when it rounds past x87's range (an infinity: gcc and clang
-  accept it, with a warning; review 057's finding 2)."
-  [^java.math.BigDecimal x]
-  (let [r (round-ldouble x)]
-    (when (neg? (.compareTo (.abs r) (java.math.BigDecimal. (.pow (biginteger 2) 16384)))) r)))
+(def ^:private wide-kinds
+  ;; the kinds wider than double: a value of one of them with no exact value (:ld) is not exact (review 079's finding 1a)
+  #{:ldouble :float64x :float128 :float128x})
+
+(defn- exact-of
+  "The exact decimal `x` rounded to the format of the wide kind `k` (`wide-formats`), or nil when it rounds past the format's
+  range (an infinity: gcc and clang accept such a constant, with a warning; review 057's finding 2)."
+  [^java.math.BigDecimal x k]
+  (let [[p emin emax] (wide-formats k)
+        r (round-exact x p emin)]
+    (when (neg? (.compareTo (.abs r) (java.math.BigDecimal. (.pow (biginteger 2) (inc (long emax)))))) r)))
 
 (def ^:private binary-formats
   ;; [significand bits, smallest normal exponent, largest exponent] of the binary object kinds
@@ -1206,8 +1322,12 @@
       (int-type? t) (cond (integer? v) (wrap v t)
                           (instance? Double v) (let [d (double v)]
                                                  (feat! :cc-float-fold)
-                                                 (when-not (or (Double/isNaN d) (Double/isInfinite d))
-                                                   (wrap (bigint (.toBigInteger (java.math.BigDecimal. d))) t)))
+                                                 (cond
+                                                   ;; 6.3.1.2: to bool, 0 when the value compares equal to 0, else 1 (a NaN
+                                                   ;; and an infinity too); never truncated first ((bool)0.5 is 1, queue 173)
+                                                   (= :bool (:k t)) (if (zero? d) 0 1)
+                                                   (or (Double/isNaN d) (Double/isInfinite d)) nil
+                                                   :else (wrap (bigint (.toBigInteger (java.math.BigDecimal. d))) t)))
                           :else nil)
       ;; review 057's finding 4: an integer is rounded once to float, not through a double (2^53 + 2^29 + 1)
       (and (integer? v) (#{:float :float32 :float16 :bf16} (:k t))) (round-big (java.math.BigDecimal. (biginteger v)) (:k t))
@@ -1317,15 +1437,19 @@
       (cmp-ops op)
       (res t-int :v (when (and (arith-type? ta) (arith-type? tb))
                       (let [t (eval-type (usual pa pb))
-                            ;; review 057's finding 4: a long double operand with an exact value is compared exactly
-                            ex (fn [r] (let [v (:v r)]
-                                         (cond (:ld r) (:ld r)
-                                               ;; a long double with no exact value (arithmetic, ?:, an identifier) is not exact (review 079's finding 1a)
-                                               (#{:ldouble :float64x :float128 :float128x} (:k (unq (:t r)))) nil
-                                               (and (instance? Double v) (not (Double/isNaN v)) (not (Double/isInfinite v))) (java.math.BigDecimal. (double v))
-                                               (integer? v) (java.math.BigDecimal. (biginteger v)))))
-                            ea (when (or (:ld ra) (:ld rb)) (ex ra)) eb (when ea (ex rb))]
-                        (if (and ea eb (= :ldouble (:k t)))
+                            ;; review 057's finding 4: a long double operand with an exact value is compared exactly; review 110's
+                            ;; finding 2: in any wide type (long double, _Float64x, _Float128), each operand converted to it exactly
+                            ;; (an integer beyond its significand rounded: ((unsigned __int128)1 << 120) + 1 == 0x1p120L)
+                            wk (wide-formats (:k t))
+                            ex (fn [r] (let [v (:v r)
+                                             e (cond (:ld r) (:ld r)
+                                                     ;; a wide value with no exact value (arithmetic, ?:, an identifier) is not exact (review 079's finding 1a)
+                                                     (wide-kinds (:k (unq (:t r)))) nil
+                                                     (and (instance? Double v) (not (Double/isNaN v)) (not (Double/isInfinite v))) (java.math.BigDecimal. (double v))
+                                                     (integer? v) (java.math.BigDecimal. (biginteger v)))]
+                                         (when e (exact-of e (:k t)))))
+                            ea (when (and wk (or (:ld ra) (:ld rb))) (ex ra)) eb (when ea (ex rb))]
+                        (if (and ea eb)
                           (cmp-val op (.compareTo ^java.math.BigDecimal ea ^java.math.BigDecimal eb) 0)
                           (cmp-val op (conv-val (:v ra) t) (conv-val (:v rb) t))))))
       ('#{and or} op)
@@ -1414,7 +1538,14 @@
           (void-type? ub) (ptr (cond-> t-void (seq q) (assoc :q q)))
           ;; 6.5.15 p6: pointers to qualified or unqualified versions of compatible types give a pointer to the composite
           ;; type with the qualifiers of both (CS141); else gcc's "pointer type mismatch"
-          (or (compatible? ua ub) (compatible-ptr-targets? ua ub)) (ptr (reduce qual ua q))
+          ;; C23 6.2.7's composite of two compatible structures or unions, as far as ci models it: the variably modified
+          ;; one when only one is (gcc's composite_type_internal takes each member's composite: char (*)[] and char
+          ;; (*)[n] give char (*)[n]; gnu23-tag-composite-3, CS106)
+          (or (compatible? ua ub) (compatible-ptr-targets? ua ub))
+          (ptr (reduce qual (if (and (record-type? ua) (record-type? ub) (not (identical? (:rec ua) (:rec ub)))
+                                     (vm-type? ub) (not (vm-type? ua)))
+                              ub ua)
+                       q))
           :else (do (when-not (cx :permissive) (err! "pointer type mismatch in conditional expression")) (ptr (reduce qual ua q)))))
       (ptr-type? ta) ta
       (ptr-type? tb) tb
@@ -1469,6 +1600,62 @@
             (do (err! (str "no member named '" m "' in '" (tstr t) "'")) (res t-invalid)))))
       (do (when-not (= :invalid (:k t)) (err! (str "request for member '" m "' in something not a structure or union"))) (res t-invalid)))))
 
+;; gcc's type-generic bit builtins, C23's <stdbit.h> builtins and __builtin_*_overflow_p folded (queue 126): their
+;; value for constant operands, as gcc folds them (gcc 15.2's extend.texi, "Bit Operation Builtins", "Integer Overflow
+;; Builtins"); the operand taken as its `bits` low bits, unsigned (go/arbace/ci/builtins.ae computes the same at run time)
+
+(defn bit-fold
+  "The value of the bit builtin b (its name less __builtin_: \"popcountg\" ... \"clrsbg\", \"stdc_leading_zeros\" ...
+  \"stdc_rotate_right\") of the constant v, an integer of `bits` bits; z the value clzg and ctzg give for 0 (nil:
+  the width), c a rotate's count."
+  [^String b v bits z c]
+  (let [n (long bits)
+        one BigInteger/ONE
+        m (.subtract (.shiftLeft one (int n)) one)
+        x (.and (biginteger v) m)
+        nx (.xor x m)
+        none? (fn [^BigInteger y] (zero? (.signum y)))
+        len (fn [^BigInteger y] (long (.bitLength y)))
+        tz (fn [^BigInteger y] (if (none? y) n (long (.getLowestSetBit y))))
+        ones (fn [^BigInteger y] (long (.bitCount y)))]
+    (case b
+      "popcountg" (ones x)
+      "parityg" (bit-and (ones x) 1)
+      "clzg" (if (none? x) (or z n) (- n (len x)))
+      "ctzg" (if (none? x) (or z n) (tz x))
+      "ffsg" (if (none? x) 0 (inc (tz x)))
+      "clrsbg" (- n (len (if (.testBit x (int (dec n))) nx x)) 1)
+      "stdc_leading_zeros" (- n (len x))
+      "stdc_leading_ones" (- n (len nx))
+      "stdc_trailing_zeros" (tz x)
+      "stdc_trailing_ones" (tz nx)
+      "stdc_first_leading_zero" (if (none? nx) 0 (inc (- n (len nx))))
+      "stdc_first_leading_one" (if (none? x) 0 (inc (- n (len x))))
+      "stdc_first_trailing_zero" (if (none? nx) 0 (inc (tz nx)))
+      "stdc_first_trailing_one" (if (none? x) 0 (inc (tz x)))
+      "stdc_count_zeros" (- n (ones x))
+      "stdc_count_ones" (ones x)
+      "stdc_has_single_bit" (if (= 1 (ones x)) 1 0)
+      "stdc_bit_width" (len x)
+      "stdc_bit_floor" (if (none? x) 0 (.shiftLeft one (int (dec (len x)))))
+      "stdc_bit_ceil" (if (<= (.compareTo x one) 0) 1 (.and (.shiftLeft one (int (len (.subtract x one)))) m))
+      ("stdc_rotate_left" "stdc_rotate_right")
+      (let [k (long (.mod (biginteger c) (biginteger n)))
+            k (if (= b "stdc_rotate_left") k (mod (- n k) n))]
+        (.and (.or (.shiftLeft x (int k)) (.shiftRight x (int (- n k)))) m)))))
+
+(defn overflow-fold
+  "__builtin_OP_overflow_p's value (OP \"add\", \"sub\" or \"mul\") for the constant operands a and b: 1 when the exact
+  result does not fit an integer of `bits` bits, signed when `signed`, else 0."
+  [^String op a b bits signed]
+  (let [a (biginteger a) b (biginteger b)
+        r (case op "add" (.add a b) "sub" (.subtract a b) (.multiply a b))
+        n (int bits)
+        one BigInteger/ONE
+        lo (if signed (.negate (.shiftLeft one (dec n))) BigInteger/ZERO)
+        hi (.subtract (.shiftLeft one (if signed (dec n) n)) one)]
+    (if (and (>= (.compareTo r lo) 0) (<= (.compareTo r hi) 0)) 0 1)))
+
 (def ^:private builtin-types
   ;; builtins gcc knows and cc's Builtin does not declare: their result types
   {"__builtin_constant_p" t-int "__builtin_choose_expr" nil "__builtin_abort" t-void "__builtin_trap" t-void
@@ -1486,6 +1673,27 @@
 
 (declare ptr-conv! constexpr-check! attr-decl-check! exi)
 
+(def ^:private math-builtin-fns
+  "Queue 178: <math.h>'s functions whose __builtin_ spelling cc's Builtin does not declare, with their prototypes (gcc's,
+  C23 7.12), for the double, float (f) and long double (l) spellings: an undeclared builtin's int result and unpromoted
+  arguments made __builtin_log2(2.75) 0 (CX8). The builder calls musl's function of the name less __builtin_."
+  (let [ld {:k :ldouble}]
+    (into {}
+          (for [[names shape] [[["log2" "exp2" "trunc" "round" "rint" "nearbyint" "cbrt" "expm1" "log1p" "logb"] :f-f]
+                               [["fmin" "fmax" "hypot" "fdim" "remainder"] :ff-f]
+                               [["fma"] :fff-f]
+                               [["ilogb"] :f-int]
+                               [["lround" "lrint"] :f-long]
+                               [["llround" "llrint"] :f-llong]
+                               [["scalbn"] :fi-f]]
+                n names
+                [sfx ft] [["" t-double] ["f" t-float] ["l" ld]]]
+            [(str "__builtin_" n sfx)
+             (let [[ret ps] (case shape
+                              :f-f [ft [ft]] :ff-f [ft [ft ft]] :fff-f [ft [ft ft ft]] :f-int [t-int [ft]]
+                              :f-long [t-long [ft]] :f-llong [t-llong [ft]] :fi-f [ft [ft t-int]])]
+               {:k :fn :ret ret :params ps :variadic false :proto true})]))))
+
 (defn- call
   "A call's result: the callee's result, its arguments checked."
   [f args form]
@@ -1497,7 +1705,7 @@
              (cond
                (or (str/starts-with? fname "__builtin_") (str/starts-with? fname "__sync_") (str/starts-with? fname "__atomic_"))
                (do (feat! :cc-undeclared-builtin)
-                   (res {:k :fn :ret (get builtin-types fname t-int) :params [] :proto false} :builtin fname))
+                   (res (or (math-builtin-fns fname) {:k :fn :ret (get builtin-types fname t-int) :params [] :proto false}) :builtin fname))
                :else (do (when (c99?) (err! (str "implicit declaration of function '" fname "'")))
                          (res (:t (implicit-fn! fname)))))
              (if bk (res (:t bk)) (ex f)))
@@ -1537,6 +1745,56 @@
     ("__builtin_inf" "__builtin_huge_val") (res t-double :v Double/POSITIVE_INFINITY)
     ("__builtin_inff" "__builtin_huge_valf") (res t-float :v Double/POSITIVE_INFINITY)
     ("__builtin_infl" "__builtin_huge_vall") (res {:k :ldouble} :v Double/POSITIVE_INFINITY)
+    ;; queue 126: gcc's type-generic bit builtins and C23's <stdbit.h> builtins (int, unsigned int, bool or the
+    ;; operand's type), folded when the operand is constant; the operand at its own type, a bit-field's width its own
+    ("__builtin_popcountg" "__builtin_parityg" "__builtin_clzg" "__builtin_ctzg" "__builtin_ffsg" "__builtin_clrsbg"
+     "__builtin_stdc_leading_zeros" "__builtin_stdc_leading_ones" "__builtin_stdc_trailing_zeros" "__builtin_stdc_trailing_ones"
+     "__builtin_stdc_first_leading_zero" "__builtin_stdc_first_leading_one" "__builtin_stdc_first_trailing_zero"
+     "__builtin_stdc_first_trailing_one" "__builtin_stdc_count_zeros" "__builtin_stdc_count_ones" "__builtin_stdc_has_single_bit"
+     "__builtin_stdc_bit_width" "__builtin_stdc_bit_floor" "__builtin_stdc_bit_ceil" "__builtin_stdc_rotate_left"
+     "__builtin_stdc_rotate_right")
+    (let [r0 (first ras)
+          t0 (when r0 (unq (decay (unq (:t r0)))))
+          short (subs b 10)
+          rt (cond (#{"stdc_bit_floor" "stdc_bit_ceil" "stdc_rotate_left" "stdc_rotate_right"} short) t0
+                   (= short "stdc_has_single_bit") t-bool
+                   (str/starts-with? short "stdc_") t-uint
+                   :else t-int)
+          bits (when (and t0 (int-type? t0)) (or (:bits r0) (first (int-bits t0))))
+          r1 (second ras)
+          v (when (and bits (integer? (:v r0)) (or (nil? r1) (integer? (:v r1)))
+                       (or r1 (not (#{"stdc_rotate_left" "stdc_rotate_right"} short))))
+              (bit-fold short (:v r0) bits (when (#{"clzg" "ctzg"} short) (:v r1)) (:v r1)))]
+      (if (and rt bits) (res rt :v (when (some? v) (wrap v rt))) (res t-int)))
+    ;; queue 126: __builtin_OP_overflow_p (a, b, c): bool, folded when the three are constant (c's value ignored, but
+    ;; a c with side effects is not folded)
+    ("__builtin_add_overflow_p" "__builtin_sub_overflow_p" "__builtin_mul_overflow_p")
+    (let [[ra rb rc] ras
+          tc (when rc (unq (:t rc)))]
+      (res t-bool :v (when (and tc (int-type? tc) (integer? (:v ra)) (integer? (:v rb)) (some? (:v rc)))
+                       (let [[n s] (int-bits tc)] (overflow-fold (subs b 10 13) (:v ra) (:v rb) n s)))))
+    ;; queue 126: the float and long double spellings of the classification builtins (long double is double, CS35)
+    ("__builtin_isinff" "__builtin_isinfl" "__builtin_isnanf" "__builtin_isnanl" "__builtin_finite" "__builtin_finitef"
+     "__builtin_finitel")
+    (let [v (:v (first ras))
+          x (when (number? v) (if (str/ends-with? b "f") (double (.floatValue ^Double (Double/valueOf (double v)))) (double v)))]
+      (res t-int :v (when x (cond (str/includes? b "isinf") (if (Double/isInfinite x) 1 0)
+                                  (str/includes? b "isnan") (if (Double/isNaN x) 1 0)
+                                  :else (if (or (Double/isInfinite x) (Double/isNaN x)) 0 1)))))
+    ;; queue 126: __builtin_assoc_barrier (x): x, of x's type (gcc folds it in an enumerator's value)
+    "__builtin_assoc_barrier" (let [r0 (first ras)] (res (unq (:t r0)) :v (:v r0)))
+    "__builtin_clear_padding" (res t-void)
+    ;; queue 126: __atomic_always_lock_free (size, p) folded: sizes 1, 2, 4 and 8 at the size's alignment (a null p)
+    ;; or at p's pointed-to type's; __atomic_is_lock_free folded to 1 where that holds, else asked at run time
+    ("__atomic_always_lock_free" "__atomic_is_lock_free")
+    (let [[rs rp] ras
+          n (:v rs)
+          pt (when rp (decay (unq (:t rp))))
+          al (cond (and rp (some? (:v rp)) (zero? (:v rp))) n
+                   (and pt (ptr-type? pt) (not (void-type? (unq (:to pt))))) (align-of (unq (:to pt)))
+                   :else nil)
+          lf (and (integer? n) (#{1 2 4 8} (long n)) al (>= (long al) (long n)))]
+      (res t-bool :v (cond lf 1 (= b "__atomic_always_lock_free") (when (integer? n) 0) :else nil)))
     ;; CS174 (b): decimal infinities and NaNs of the call's type (`__builtin_infd32 ()`, `__builtin_nansd64 ("")`)
     (when-let [[_ w bits] (re-matches #"__builtin_(inf|nan|nans)d(32|64|128)" b)]
       (let [k (case bits "32" :dec32 "64" :dec64 :dec128)]
@@ -1549,7 +1807,7 @@
   [[_ tf v]]
   (let [t (parse-type tf)]
     ;; gcc's -pedantic: the bf16 suffix is not standard; judged on the constant the preprocessor delivers, at its use (review 079's finding 4)
-    (when (= :bf16 (:k (unq t))) (pedwarn! "non-standard suffix on floating constant"))
+    (when (or (= :bf16 (:k (unq t))) ('#{__float128 __float80} tf)) (pedwarn! "non-standard suffix on floating constant"))
     (cond
       (or (string? v) (and (seq? v) ('#{code-units byte-string} (first v))))
       (do (feat! :cc-prefixed-string) (res (arr t (inc (code-unit-count (unq t) v))) :str true))
@@ -1558,12 +1816,13 @@
       (integer? v) (res t :v (if (int-type? t) (wrap v t) v))
       ;; CS174 (b): a decimal constant keeps its digits and exponent (the quantum), :v is its double
       (and (instance? java.math.BigDecimal v) (dec-kinds (:k (unq t)))) (res t :v (.doubleValue ^java.math.BigDecimal v) :dec v)
-      ;; a long double constant also keeps its exact value (a 64-bit significand), which a double object may not hold
-      (and (instance? java.math.BigDecimal v) (= :ldouble (:k (unq t))))
-      (res t :v (.doubleValue ^java.math.BigDecimal v) :ld (ld-of v))
-      ;; the converter writes 0.1L as the double 0.1 when 0.1 is the constant's decimal: its value is that decimal rounded to 64 bits
-      (and (instance? Double v) (= :ldouble (:k (unq t))) (not (Double/isNaN v)) (not (Double/isInfinite v)))
-      (res t :v v :ld (ld-of (java.math.BigDecimal. (Double/toString v))))
+      ;; a long double, _Float64x or _Float128 constant also keeps its exact value (a 64-bit or 113-bit significand, `wide-formats`),
+      ;; which a double object may not hold (review 110's finding 2: _Float128's and _Float64x's too)
+      (and (instance? java.math.BigDecimal v) (wide-formats (:k (unq t))))
+      (res t :v (.doubleValue ^java.math.BigDecimal v) :ld (exact-of v (:k (unq t))))
+      ;; the converter writes 0.1L as the double 0.1 when 0.1 is the constant's decimal: its value is that decimal rounded to the format
+      (and (instance? Double v) (wide-formats (:k (unq t))) (not (Double/isNaN v)) (not (Double/isInfinite v)))
+      (res t :v v :ld (exact-of (java.math.BigDecimal. (Double/toString v)) (:k (unq t))))
       ;; _Float16 and __bf16 constants hold the float nearest their decimal, rounded once (not through a double)
       (and (#{:float16 :bf16} (:k (unq t))) (or (instance? java.math.BigDecimal v) (and (instance? Double v) (not (Double/isNaN v)) (not (Double/isInfinite v)))))
       (res t :v (float-of-exact (if (instance? java.math.BigDecimal v) v (java.math.BigDecimal. (Double/toString v)))))
@@ -1584,6 +1843,16 @@
     (res t-ulong :v (when (and s (not (:vla t))) s) :vla-expr (boolean (:vla t)))))
 
 (defn- vla? [t] (case (:k t) :array (or (:vla t) (vla? (:of t))) false))
+
+(defn var-size?
+  "Whether a type's size is the run time's: a VLA, an array of elements of variable size, a structure or union with a
+  member of variable size (GNU's, CS106)."
+  [t]
+  (let [t (unq t)]
+    (case (:k t)
+      :array (boolean (or (:vla t) (var-size? (:of t))))
+      (:struct :union) (boolean (.get ^HashMap (:rec t) :var-size))
+      false)))
 
 (defn- generic-select [f]
   (let [[_ ctl & assocs] f
@@ -1817,18 +2086,22 @@
                        _ (when (and (= :nullptr (:k (decay (unq (:t r))))) (not (#{:ptr :nullptr :bool :invalid :void} (if (= :enum (:k (unq t))) (:k (enum-under (unq t))) (:k (unq t))))))
                            (err! (str "conversion of nullptr_t to " (tstr (unq t)))))]
                    (emit! (res (unq t) :v (conv-val (:v r) t) :vla-expr (:vla-expr r)
-                               ;; CS235 (a): a long double keeps its exact value through a cast to long double (a double's or an integer's is exact)
-                               :ld (when (= :ldouble (:k (unq t)))
-                                     (let [v (:v r)]
-                                       (cond (:ld r) (:ld r)
-                                             (and (instance? Double v) (not (Double/isNaN v)) (not (Double/isInfinite v))) (java.math.BigDecimal. (double v))
-                                             (integer? v) (round-ldouble (java.math.BigDecimal. (biginteger v)))
-                                             :else nil)))
+                               ;; CS235 (a): a long double keeps its exact value through a cast to long double (a double's or an integer's is exact);
+                               ;; review 110's finding 2: through a cast to any wide kind, rounded to its format ((long double)0.1F128 is 0.1L)
+                               :ld (let [k (:k (unq t))]
+                                     (when (wide-formats k)
+                                       (let [v (:v r)]
+                                         (cond (:ld r) (exact-of (:ld r) k)
+                                               ;; a wide value with no exact value stays inexact (review 079's finding 1a)
+                                               (wide-kinds (:k (decay (unq (:t r))))) nil
+                                               (and (instance? Double v) (not (Double/isNaN v)) (not (Double/isInfinite v))) (java.math.BigDecimal. (double v))
+                                               (integer? v) (exact-of (java.math.BigDecimal. (biginteger v)) k)
+                                               :else nil))))
                                :nfp (or (:nfp r) (float-type? (unq (:t r)))))))
             sizeof (let [r (ex (first args))]
                      (when (bit-field? r) (err! "'sizeof' applied to a bit-field"))
-                     (emit! (if (vla? (:t r)) (res t-ulong) (sizeof-res (:t r)))))
-            sizeof-type (let [t (parse-type (first args))] (emit! (if (vla? t) (res t-ulong) (sizeof-res t))))
+                     (emit! (if (var-size? (:t r)) (res t-ulong) (sizeof-res (:t r)))))
+            sizeof-type (let [t (parse-type (first args))] (emit! (if (var-size? t) (res t-ulong :tt t) (sizeof-res t)))) ; :tt, the builder's (queue 165)
             alignof (let [r (ex (first args))] (when (bit-field? r) (err! "'_Alignof' applied to a bit-field")) (emit! (res t-ulong :v (or (:malign r) (align-of (unq (:t r)))))))
             alignof-type (let [t (parse-type (first args))]
                            (when (incomplete-type? t) (err! "invalid application of 'alignof' to incomplete type"))
@@ -1854,7 +2127,12 @@
             lit (emit! (lit-form f))
             byte-string (emit! (res (arr t-char (inc (byte-string-len args))) :str true))
             imaginary (do (when (< (std-num) 124) (pedwarn-c2y! "imaginary constants are a C2Y feature or GCC extension"))
-                          (emit! (res {:k :complex :of t-double})))
+                          ;; the complex type of the constant's part (GNU's 2i is _Complex int, 2.0fi _Complex float, CS105)
+                          (emit! (res {:k :complex :of (let [a (first args)]
+                                                         (cond
+                                                           (integer? a) (if (<= -2147483648 a 2147483647) t-int t-long)
+                                                           (and (seq? a) (= 'lit (first a))) (unq (parse-type (second a)))
+                                                           :else t-double))})))
             va-arg (let [[ap tf] args
                          t (unq (parse-type tf))]
                      ;; cc's Builtin: (*(T*)__builtin_va_arg_impl(ap))
@@ -1864,15 +2142,16 @@
                            t (parse-type tf)]
                        (feat! :cc-builtin-macro)
                        (doseq [p path] (when-not (keyword? p) (ex p)))
-                       (res t-ulong :v (loop [t (unq t) off 0 ps (seq path)]
+                       ;; :tt, the builder's: an offset through members or elements of variable size is the run time's (CS106)
+                       (res t-ulong :tt t :v (loop [t (unq t) off 0 ps (seq path)]
                                          (if-not ps
                                            off
                                            (let [p (first ps)]
                                              (cond
                                                (and (keyword? p) (record-type? t))
-                                               (if-let [m (member t (name p))] (recur (unq (:t m)) (+ off (long (:off m))) (next ps)) nil)
+                                               (if-let [m (member t (name p))] (when-not (:voff m) (recur (unq (:t m)) (+ off (long (:off m))) (next ps))) nil)
                                                (and (= :array (:k t)) (not (keyword? p)))
-                                               (when-let [i (const-int p)] (recur (unq (:of t)) (+ off (* (long i) (long (or (size-of (unq (:of t))) 0)))) (next ps)))
+                                               (when-let [i (when-not (var-size? (:of t)) (const-int p))] (recur (unq (:of t)) (+ off (* (long i) (long (or (size-of (unq (:of t))) 0)))) (next ps)))
                                                :else nil))))))
             types-compatible? (let [[a b] args ta (unq (parse-type a)) tb (unq (parse-type b))]
                                 ;; cc's Builtin: __ccgo__types_compatible_p((t1){}, (t2){})
@@ -1944,6 +2223,20 @@
   (cond
     (and (= :array (:k old)) (= :array (:k new))) (if (and (nil? (:n new)) (:n old)) (assoc new :n (:n old)) new)
     (and (= :fn (:k old)) (= :fn (:k new)) (not (:proto new)) (:proto old)) old
+    ;; gcc's composite_type: a union parameter one of whose members is the other's type gives the other's type
+    ;; (`wait (union wait *)` preferred), with -Wpedantic's pedwarn
+    (and (= :fn (:k old)) (= :fn (:k new)) (:proto old) (:proto new) (= (count (:params old)) (count (:params new)))
+         (compatible? old new))
+    (let [mv (fn [t] (if (= :array (:k t)) t (unq t)))
+          pick (fn [p q] ; p old's, q new's
+                 (let [up (unq p) uq (unq q)
+                       memb? (fn [u o] (and (= :union (:k u)) (not (identical? (:rec u) (:rec o)))
+                                            (some #(compatible? (mv (:t %)) o) (.get ^HashMap (:rec u) :members))))]
+                   (cond
+                     (memb? up uq) (do (pedwarn! "function types not truly compatible in ISO C") q)
+                     (memb? uq up) (do (pedwarn! "function types not truly compatible in ISO C") p)
+                     :else q)))]
+      (assoc new :params (mapv pick (:params old) (:params new))))
     :else new))
 
 (defn- declare-object!
@@ -2052,11 +2345,16 @@
               (:double :float64) (not= 0 (.compareTo (java.math.BigDecimal. (.doubleValue ^Number v)) (java.math.BigDecimal. (biginteger v))))
               (:float16 :bf16) (let [r (round-to-format (.doubleValue ^Number v) ek)]
                                  (or (Double/isInfinite r) (not= 0 (.compareTo (java.math.BigDecimal. r) (java.math.BigDecimal. (biginteger v))))))
-              ;; x87's 64-bit significand: the bits from the highest to the lowest set one (review 027's finding 8: 1 << 100 fits)
-              :ldouble (let [b (.abs (biginteger v))] (and (pos? (.signum b)) (> (- (.bitLength b) (.getLowestSetBit b)) 64)))
+              ;; x87's 64-bit significand: the bits from the highest to the lowest set one (review 027's finding 8: 1 << 100 fits);
+              ;; binary128's 113 bits for _Float128 (review 110's finding 2)
+              (:ldouble :float64x :float128) (let [b (.abs (biginteger v))]
+                                               (and (pos? (.signum b)) (> (- (.bitLength b) (.getLowestSetBit b)) (long (first (wide-formats ek))))))
               false)
         nr)
       (and (:ld pr) (binary-formats ek)) (when-not (fits-binary? (:ld pr) ek) nr)
+      ;; review 110's finding 2: a wide object holds the exact value only when rounding it to the format changes nothing (0.1F128 is
+      ;; not a long double's value on the target)
+      (and (:ld pr) (wide-formats ek)) (when-not (when-let [e (exact-of (:ld pr) ek)] (zero? (.compareTo ^java.math.BigDecimal e ^java.math.BigDecimal (:ld pr)))) nr)
       (and (instance? Double v) (float-type? pt))
       (let [d (double v)]
         (when (and (not (Double/isNaN d)) (not (Double/isInfinite d))
@@ -2105,8 +2403,11 @@
         (feat! :cc-auto)
         (record! nm (declare-object! n t m :obj nil false)))
       (let [t (vectorize (parse-type (or (:tag m) 'int)) m)
-            t (if (contains? m :c/alignas) (do (exi (:c/alignas m)) t) t)
-            _ (when-let [at (:c/alignas-type m)] (parse-type at))
+            ;; the alignment specifiers' alignment (6.7.6; 0 none), kept in the entry's :m for the builder's layout (queue 173:
+            ;; it laid every object out at its type's alignment)
+            alv (when (contains? m :c/alignas) (:v (exi (:c/alignas m))))
+            alt (when-let [at (:c/alignas-type m)] (align-of (parse-type at)))
+            m (if (or (integer? alv) alt) (assoc m :c/declared-align (max (long (if (integer? alv) alv 0)) (long (or alt 0)))) m)
             empty-init (and (seq? init) (= '(init) init))
             ;; C23: `{}` gives an array of unknown size none (gcc: the zero-size diagnostic), a variable-length array only `{}`
             _ (when (and has-init (not (cx :permissive)) (= :array (:k (unq t))) (nil? (:n (unq t))) (not (:vla (unq t))) empty-init)
@@ -2220,7 +2521,14 @@
         m (meta nm)
         t (vectorize (parse-type tf) m)
         t (if-let [al (some #(when (= "aligned" (first %)) (aligned-value (second %))) (attrs-of m :c/attrs :c/after-attrs :c/decl-attrs))]
-            (assoc t :talign al) t)]
+            (assoc t :talign al) t)
+        ;; transparent_union on a typedef: a transparent copy of a complete union (c-attribs.cc)
+        t (if (and (= :union (:k t)) (some #(= "transparent_union" (first %)) (attrs-of m :c/attrs :c/after-attrs :c/decl-attrs))
+                   (.get ^HashMap (:rec t) :complete) (transparent-ok? (:rec t)))
+            (assoc t :transparent true) t)
+        ;; a union named by a typedef has a TYPE_NAME (set_underlying_type's variant): not tagless to
+        ;; type_lists_compatible_p (union-param-match?)
+        t (if (= :union (:k t)) (assoc t :typedef-name n) t)]
     (attr-args! m)
     (decl-position-attrs! (assoc m :tag tf) :typedef t)
     (when (:c/bad-specs m) (err! "two or more data types in declaration specifiers"))
@@ -2399,15 +2707,6 @@
 
 (declare check-top)
 
-(defn- sys-at
-  "queue 136 (review 130's findings 2, 3): a header form's system status: `base` (its file's entry's) as the preprocessor's
-  changes `cs` of its file ([[off system?] ...] in offset order: a `#pragma GCC system_header`, a linemarker) before the form's
-  offset `off` leave it (libcpp: a pragma or a linemarker changes the status from the next line on)."
-  [base cs off]
-  (if (and off (seq cs))
-    (reduce (fn [s [co cv]] (if (< (long co) (long off)) cv s)) base cs)
-    base))
-
 (defn- check-forms [forms]
   (doseq [f forms] (check-top f)))
 
@@ -2439,43 +2738,22 @@
                                                np (norm p)]
                                            (boolean (some #(str/starts-with? np (str (norm (str %)) "/")) (cx :sys-dirs)))))
                               unit-info (delay (read-info (:path uf)))
-                              ;; review 110's finding 1: a nested header's forms judged by their own file's status (libcpp: system
-                              ;; when found through a system directory or entered from a system header, the pp's records), and by its
-                              ;; own lines' pragma. An includer's pragma counts only before the #include (review 130's finding 1): the pp
-                              ;; makes a header entered after it system, so its enter record says so, and one entered before is not
-                              files (:files uf)
-                              infos (java.util.HashMap.)
-                              info-of (fn [p] (if (= p (:path uf))
-                                                unit-info
-                                                (or (.get infos p) (let [d (delay (read-info p))] (.put infos p d) d))))
-                              sys-of (fn [p]
-                                       (let [fi (get files p)]
-                                         (boolean (and fi (or (:system fi) (:pragma @(info-of p)))))))
-                              ffs (:form-files uf)
-                              ;; queue 136 (review 130's findings 2, 3): the pp's status changes by file and each form's offset in its
-                              ;; file, for a unit read from C: a pragma counts from its place on, not for the lines before it, and
-                              ;; not in an #if 0 or a comment (the line regex's :pragma left out). nil for a unit read back from .ae
-                              ;; (musl's cache): the regex's pragma for the whole file, as before
-                              chg (:sys-changes uf)
-                              offs (:form-offs uf)
-                              nopragma (java.util.IdentityHashMap.)
-                              no-pragma (fn [d] (or (.get nopragma d) (let [n (delay (assoc @d :pragma false))] (.put nopragma d n) n)))]
+                              ;; a unit read from C: each form's status as the converter judged it (:form-sys, arbace.repr.c.convert: its
+                              ;; own entry's, review 110's finding 1 and queue 157's (review 130's finding 4), as the pp's pragmas and
+                              ;; linemarkers before it in that entry leave it, queue 136's), the line regex's :pragma left out. nil for a
+                              ;; unit read back from .ae (musl's cache): the unit's status and the regex's pragma for the whole file, as before
+                              fsys (:form-sys uf)
+                              unit-info (if fsys (delay (assoc (read-info (:path uf)) :pragma false)) unit-info)]
                         (binding [*cx* (assoc *cx* :annotating (atom false))
                                   *unit* (str (or (:path uf) u))
                                   *system-unit* unit-sys
                                   *unit-info* unit-info]
                           ;; each of the unit's forms at its own line, as the main file's are
                           (doseq [[i g] (map-indexed vector (:forms uf))]
-                            (let [ff (when ffs (nth ffs i nil))
-                                  own (and ff (not= ff (:path uf)) (contains? files ff))
-                                  sys (if own (if chg (boolean (:system (get files ff))) (sys-of ff)) *system-unit*)
-                                  sys (if chg (sys-at sys (get chg (or ff (:path uf))) (when offs (nth offs i nil))) sys)
-                                  info (if own (info-of ff) *unit-info*)]
-                              (binding [*line* (or (and (seq? g) (:line (meta g))) *line*)
-                                        *unit-line?* (boolean (and (seq? g) (:line (meta g))))
-                                        *system-unit* sys
-                                        *unit-info* (if chg (no-pragma info) info)]
-                                (check-top g)))))))))
+                            (binding [*line* (or (and (seq? g) (:line (meta g))) *line*)
+                                      *unit-line?* (boolean (and (seq? g) (:line (meta g))))
+                                      *system-unit* (if fsys (boolean (nth fsys i *system-unit*)) *system-unit*)]
+                              (check-top g))))))))
         c/pragma (pragma-pack! f)
         c/asm (feat! :asm)
         (c/define c/undef c/directive c/file c/header) nil

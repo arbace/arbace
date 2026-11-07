@@ -1,0 +1,102 @@
+(ns arbace.repr.python.results
+  "repr/python's checks' results files and partial runs (queue 201, PY10's request R1 to PY9; bin/reap's :c-known reader,
+  CS240 (a)'s rows as C's, arbace.repr.c.results): the round trip (test/python/roundtrip-results.edn, --text
+  test/python/full-results.edn), the token check (lex-check-results.edn) and the tree check (parse-check-results.edn)
+  write, when they record, rows [ID RESULT REASON]: every file run, ID \"CORPUS FILE\", RESULT :pass, :known (the
+  known file accounts for it) or :fail, REASON its status. The corpus's rows of the run replace the file's rows of
+  the same ids, the others are kept. The tree check's :lines and :full runs share a row: its RESULT the worse of the
+  two, its REASON \"lines: S; full: S\".
+
+  A partial run (--only-list FILE: CORPUS/NAME a line, # and blank lines apart) runs the listed files of each corpus;
+  its judge holds the known file's entries of the files run only. A failing file is printed FAIL CORPUS/NAME, a tab and
+  WHY (the rotation reads the id up to the tab).
+
+  The negative controls (GTS81 (a), PY11-PREP's R1; queue 212): test/python/controls-read.edn declares crossed pairs,
+  a corpus's two passing files, the subject and the reference. After its run each check judges the subject's output
+  (its native dump, its print) against the reference's expected result (the helper's dump, the original's) by its own
+  judge, which must fail it: \"control passed:\" (the judge took one file's output for another's) or \"control not
+  judged:\" (the comparison not reached, or the pair not passing itself) fails the check; a pair a selection did not
+  run is printed as left. No control is a row of the results, the known files or the counts."
+  (:require [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(defn- clip [s] (let [s (str/replace (str s) #"\s+" " ")] (if (> (count s) 200) (str (subs s 0 200) "...") s)))
+
+(defn only-names
+  "The names of corpus `corpus` an --only list file holds, a set, or nil without a file"
+  [f corpus]
+  (when (and f (not (str/blank? f)))
+    (let [pre (str (name corpus) "/")]
+      (set (for [l (str/split-lines (slurp f))
+                 :let [l (str/trim l)]
+                 :when (and (str/starts-with? l pre) (not (str/starts-with? l "#")))]
+             (subs l (count pre)))))))
+
+(defn print-fail
+  "FAIL CORPUS/NAME<tab>WHY"
+  [corpus rel why]
+  (println (str "FAIL " (name corpus) "/" rel "\t" (clip why))))
+
+(def ^:private headers
+  {:roundtrip "the round trip (bin/repr-python roundtrip --record): levels 1-3, mode :lines"
+   :full "the round trip in mode :full (bin/repr-python roundtrip --text --record): levels 4-5"
+   :lex "the token check (bin/repr-python lex-check --record): the native lexer against CPython's tokenizer"
+   :parse "the tree check (bin/repr-python parse-check --record, and --full): the native parser against ast.parse"})
+
+(def ^:private rank {:pass 0 :known 1 :fail 2})
+
+(defn write
+  "OUT rewritten with the rows of `corpus` `rows` ([NAME RESULT REASON]); `mode` :lines or :full for the tree check (a
+  row shared by the two runs), nil otherwise"
+  [kind ^String out corpus rows mode]
+  (let [old (if (.exists (java.io.File. out)) (read-string (slurp out)) [])
+        by-id (into {} (map (fn [r] [(first r) r]) old))
+        new (for [[nm r why] rows
+                  :let [id (str (name corpus) " " nm)]]
+              (if mode
+                (let [[_ _r ow] (get by-id id)
+                      parts (into {} (when ow (for [[_ k v] (re-seq #"(lines|full): ([^;]*)" ow)] [k v])))
+                      parts (assoc parts (name mode) (str (name r) " " (str/replace (clip why) ";" ",")))
+                      other (get parts (if (= mode :lines) "full" "lines"))
+                      ores (if other (keyword (first (str/split other #" "))) :pass)
+                      res (if (>= (long (rank r 2)) (long (rank ores 0))) r ores)]
+                  [id res (str/join "; " (for [k ["lines" "full"] :when (get parts k)] (str k ": " (get parts k))))])
+                [id r (clip why)]))
+        ids (set (map first new))
+        all (sort-by first (concat (remove #(ids (first %)) old) new))
+        fr (frequencies (map second new))]
+    (spit out (str ";; " (get headers kind) ": every file run, [ID RESULT REASON], ID \"CORPUS FILE\", RESULT :pass, :known (its\n"
+                   ";; known file accounts for it) or :fail (arbace.repr.python.results; bin/reap counts the passes).\n[\n"
+                   (str/join "\n" (map pr-str all)) "\n]\n"))
+    (println (str "recorded " out ": " (count new) " files of " (name corpus) " " (pr-str (into (sorted-map) fr))))))
+
+(defn read-controls
+  "The crossed pairs of FILE (test/python/controls-read.edn: [{:id :corpus :subject :reference :why}]) for corpus
+  `corpus`; none without a file"
+  [f corpus]
+  (if (and f (not (str/blank? (str f))) (.exists (java.io.File. ^String f)))
+    (vec (filter #(= (name corpus) (str (:corpus %))) (read-string (slurp f))))
+    []))
+
+(defn judge-controls
+  "GTS81 (a): each control of `controls` judged after the run of check `check` on corpus `corpus`. `ran`: the names the
+  run judged; `passed`: those that passed (equal, every level); `judge` (fn [subject reference]), the check's own judge
+  on the crossed pair: :pass when it takes the subject's output for the reference's expected result, [:fail WHY] when
+  it tells them apart, [:not-judged WHY] when it does not reach the comparison. One line a control; the number of
+  controls that fail the check"
+  [check corpus controls ran passed judge]
+  (reduce + 0
+          (for [{:keys [id subject reference]} controls
+                :let [tag (str check " control " id " (" (name corpus) "/" subject " against " (name corpus) "/" reference "'s reference)")]]
+            (cond
+              (not (and (contains? ran subject) (contains? ran reference)))
+              (do (println (str tag ": left, the pair not run")) 0)
+              (not (and (contains? passed subject) (contains? passed reference)))
+              (do (println (str "control not judged: " tag ": the pair does not pass itself")) 1)
+              :else
+              (let [v (judge subject reference)]
+                (cond
+                  (= v :pass) (do (println (str "control passed: " tag ": the judge took one file's output for the other's")) 1)
+                  (= :fail (first v)) (do (println (str tag ": failed as it must: " (clip (second v)))) 0)
+                  :else (do (println (str "control not judged: " tag ": " (clip (second v)))) 1)))))))

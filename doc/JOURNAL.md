@@ -4,10 +4,10 @@ An append-only log of important decisions and actions, oldest first. Never edit 
 a new entry to correct or supersede one. The goal is that the progress could be recreated from this
 log.
 
-This journal starts over after the milestone `arbace-reaps-3-crops-v2`, by the user's decision (2026-10-26). It
+This journal starts over after the milestone `arbace-reaps-4-crops-v1`, by the user's decision (2026-11-07). It
 started over the same way at the two freezes and after the milestones `arbace-inside-itself-v1`,
-`arbace-interprets-go1.27.1-v1` and `arbace-reaps-3-crops-v1`. The history before it is on the frozen branches, at four
-tags, and in git history:
+`arbace-interprets-go1.27.1-v1`, `arbace-reaps-3-crops-v1` and `arbace-reaps-3-crops-v2`. The history before it is on the
+frozen branches, at five tags, and in git history:
 
 - 2026-10-06 to 2026-10-08 (the class forms, j2c, the vendored and self-hosting Clojure, the work
   for Java 26, the g2c survey): on
@@ -40,208 +40,175 @@ tags, and in git history:
   NH1; the OCaml, Scheme and C++23 surveys; the milestone `arbace-reaps-3-crops-v2`): at the tag
   [`arbace-reaps-3-crops-v2`](https://github.com/arbace/arbace/blob/arbace-reaps-3-crops-v2/doc/JOURNAL.md)
   (main's `c4f85ace`).
+- 2026-11-01 to 2026-11-07 (the merge window after v2; C8 and C9, C the fourth row, and its re-seed window; the test
+  budget, GT8's compressed corpora and tiers, the staging branch `next`; the crops unparked and surveyed, OCaml, Scheme,
+  C++, LLVM IR, Haskell, Rust and Python on branches; the re-seed `d5548e72`; the clean run of the four crops and its two
+  reruns; the milestone `arbace-reaps-4-crops-v1`): at the tag
+  [`arbace-reaps-4-crops-v1`](https://github.com/arbace/arbace/blob/arbace-reaps-4-crops-v1/doc/JOURNAL.md)
+  (main's `a4a84533`).
 
-## 2026-11-01: the journal starts over
+## 2026-11-07: the journal starts over
 
-- **The user's decision** of 2026-10-26 (the milestone `arbace-reaps-3-crops-v2`, an annotated tag as v1's, main's
-  journal starting over again), and the goal of 2026-10-28 ("reach milestone arbace-reaps-3-crops-v2"), whose last
-  items were the tag and the journal reset: after the milestone `arbace-reaps-3-crops-v2` (a tag on main, not a
-  freeze, so no branch) this journal starts over.
-  - The earlier one, 871 lines and 34 entries from 2026-10-27 to the tag's entry, is at the tag (linked above).
-  - CLAUDE.md's Records paragraph, the agenda's header and README's documentation list name the six places of the
-    history.
-- **Where things stand** (doc/AGENDA.md): the REAP matrix at the tag, 12 of 12 cells checked, none failing, every
-  non-pass in a recorded class (doc/FULL-SUPPORT-SURVEY.md, "REAP v2's divergences", with its caveat: Java's timeouts by
-  design by the catch-all `speed` class, curated after the tag); the gate keyed (GT1-GT7), its clean record
-  `test/gate/clean-arbace-reaps-3-crops-v2.edn`; the seed `73b0d637`; parked (the user, 2026-10-26): the box,
-  repr/haskell, repr/rust, the macOS UI, the iOS app.
-- **Next:** the merge window, in the order VM rehearsal 7 tested (`mac/112-merge-cp`: the gate's branches, the audits
-  and their fixes, the crops C23, net/http, OCaml, Scheme and C++23, then JN10 with the provenance writers; one
-  essential gate after the gate branches, one `bin/gate --full` at the end), then the batched re-seed, then C23's
-  C3b-C9 toward `arbace-reaps-4-crops-v1`.
+- **The user's decision** of 2026-11-07 ("tag it when the gate passes, then reset the journal"): the milestone
+  `arbace-reaps-4-crops-v1`, an annotated tag as v2's, on main's `a4a84533` (the record's commit `99873f98` with the tag's
+  docs and the record above it, the essential gate passed on it), made by the session at the user's go-ahead; this
+  journal starts over after it.
+  - The earlier one, 474 lines and 18 entries from 2026-11-01 to the tag's entry, is at the tag (linked above).
+  - CLAUDE.md's Records paragraph, the agenda's header and README name the seven places of the history.
+- **Where things stand** (doc/AGENDA.md): the REAP matrix at the tag, 16 of 16 cells checked, none failing, every
+  non-pass in a recorded class (doc/FULL-SUPPORT-SURVEY.md, "REAP v3's divergences"); the clean record
+  `test/gate/clean-arbace-reaps-4-crops-v1.edn` (234 steps, three runs, 77,700 s); the seed `d5548e72`.
+- **Next** (doc/AGENDA.md, "After the tag"): the after-tag fixes (`.tmp/tag-v2/ppcheck-srcdir.patch`: `embed-11.c`'s
+  digest writes `${srcdir}` and `absolute-name` goes; crops-score's CSP5 goi patch), a whole `--full` night to complete
+  the rotation (nine parts incomplete at the tag), then the held branches in batches into `next`
+  (`.tmp/tag-v2/merge-plan.md`; the `arbace/cpp/lower.ae` conflict between `llvm-ll6` and `cppi-deferred`), each batch's
+  night records, and Python's branch from the Mac VM.
 
-## 2026-11-01: the user's decisions after the tag
+## 2026-11-06: the day's work, held for after the tag (recorded after the tag)
 
-The open decision ids of the waiting branches (VM reports 097, 102 and 103, five sheets), asked after the tag. Each
-branch's survey gets its "Decided" section when it merges (the surveys are on the branches, not on main yet).
+Not journaled before the tag (the night's clean rerun held the session). The user, 2026-11-06 07:22: spend the weekly
+allowance on the crops' completeness, maturity and independence. Fifteen Opus agents on branches, sample checks only,
+under the day's rules (light on the host; main frozen until the record), all pushed to `mac` and held for after the tag;
+then further agents as the first finished. Each branch's doc records its work, its proposals and the user's decisions;
+the night commands each needs are in its doc.
 
-- **The gate's audits:** GTS102 (mac/034-gts102): redone on the merged audit-075 and audit-070, the decision kept;
-  GTS140-GTS143 (audit-060): 140 (a), 141 (b), 142 (b), 143 (a) now and (b) at the next record; GTS180 (a)-(e)
-  (audit-075): the source's picks ((a) the bumps lowered after the next clean run, (b) CPU 20 s and wall 90 s if
-  measured under 5 s, else 120 and 480, (c) `:timeout` recorded, (d) kept with `--save` copying
-  `timeout-attempts.tsv`, (e) 137 left); GTS170-GTS173 (audit-070): ratified as built (170 (b), 171 (a), 172 (a), 173
-  (b) after the merge with audit-041); GTS150 (mac/074-clean-judge): (a) kept; GTS130-GTS133 and GTS137 (audit-061):
-  130 (a), 131 (c) then (a), 132 (b), 133 (b) at the next reader change, 137 (a) after the first record;
-  GTS134-GTS136 and GTS138 (audit-065): 134 (a) and 138 (a) as built, 135 (a) regenerated on the host after the crops,
-  136 (b).
-- **C23** (c23-c7): CS236 (a), CS237 (a), CS238 (a); CS239 (a): `-I-` refused, a class of its own.
-- **OCaml** (ocaml-o1): OC130 (b) with OC120 (b), OC131 (a), OC160 (a): a light oi-divergences step in the merge's
-  essential gate.
-- **C++** (cpp-cx7): CP140, CP141, CP152, CP154 (b) (154 once 140 is recorded); CP142 (b), CP143 (a), CP150 (a),
-  CP151 (b), CP153 (a).
-- **Scheme** (scheme-sm1): the 36 ids VM report 102 found decided by what was built (SC20-SC25, SC30-SC32, SC40,
-  SC42-SC46, SC50, SC60, SC62-SC70, SC80, SC81, SC83-SC85, SC91, SC92, SC97, SC99, SC204) confirmed as built, SC66 as
-  built ((b), not the earlier (a)); the 6 moot (SC26, SC47, SC48, SC201, SC202, SC205) superseded by SC112, SC211, SC210
-  and SM5; SC61 (a), SC86 (a), SC93 (b), SC33 and SC49 following (si shipped through arbace.lang.SchemeInterp, at the
-  heavy window); SC90 (b) with SC94 (b); SC95 (d) then (b); SC41 (b) with the next boot batch; SC82 (b), Chibi's
-  srfi/1 suite first, pinned; SC96 (b) and SC98 (b); SC200 (b), the small identifiers. SC203 was not asked: VM task
-  105 built its recommended (b), the larceny inputs pinned (`mac/105-sm1`).
+- **OCaml** (`ocaml-t12`): the native path 244 to 273 of 309, equal to ocamlc's; TY23 (a) built, TY24 (a) prepared
+  (native the default after the night's record). `ocaml-libs4`: eval 428 / 125 / 118 to 441 / 205 / 25, AOT 394 / 114 /
+  159 to 405 / 202 / 64; OT27-OT29 decided.
+- **Haskell** (`haskell-hf7`): programs run from our STG 16 to 60 of 63. `haskell-eval9`: testsuite core 600 to 666 of
+  701, check-hsi 806 of 910, AOT 209 programs; HES80-HES82 decided. `haskell-simpl`: GHC's -O0 simplifier ported, the
+  default; Core 37 to 53 of 61.
+- **Rust** (`rust-rf14`): RF7's collection 1,189 of 1,191 items, RF9a's type checking; `rust-rf9b`: typeck 99.7% on the
+  samples, 99.6% on the crates; RFP14-RFP21 decided. `rust-re6`: threads on ci as goroutines over musl's futexes,
+  posix_spawn, signals, LTO; samples 69 of 69, UI sample 90 of 93; RES46-RES53 proposed.
+- **C++** (`cpp-g5`): P15-P16, new/delete, initializer lists, iostream: the corpus sample 7 to 32 of 42.
+  `cppi-deferred`: long double layout, float atomics, va_arg on ci. `oracle-records-cpp2`: the five packs re-recorded
+  deterministically, ORS28 (b). P17-P19, CP230, CP231 decided.
+- **LLVM IR** (`llvm-ll6`): eval 229 to 519 of 562 modules, AOT recorded, no LLVM tool at check time; LLS23-LLS26 decided
+  (LLS26: the torture IR pack is GPL test data, its text in LICENSE.md).
+- **Scheme** (`scheme-smr7`): psyntax boots on si (no Chez), Chez's format floats ported; mats 436 to 560 pass.
+- **Java** (`java-jc9c`): F6, F12, F13 (java.lang.management), F19 write-ahead; JCS158-JCS161 decided.
+- **Go** (`goi-escape`): gc's escape analysis ported for `-m`: 58 of 96 such tests, goi check 1,664 to 1,722 of 1,837
+  (rows hand-written until the night's `--record`).
+- **C** (`c-deferred`): VLA structs, complex integers, signals, self-include: eval and AOT deferred 33 to 6, print 78 to
+  45; CS274-CS278 decided (CS278 after the tag).
+- **Clojure** (`clojure-cdr`): CDR1-CDR11 built or started; eval 21,053 / 81 / 1 to an expected 21,110 / 18 / 1-2 after
+  the night's conversion and build.
+- **The crops' score** (`crops-score`): `bin/crops-score` (`doc/CROPS-SCORE.md`): completeness, maturity and
+  independence per crop; CSP1-CSP5 decided and built.
+- **Incidents:** `goi-escape`'s hard-linked corpus summaries rewrote main's scratch summaries
+  (`.tmp/repr-go/forms/linux-{test,dirtest,errtest}`, `.tmp/godump/corpus/linux-errtest`; only `:seconds` expected to
+  differ; the clean rerun used its own clone, unaffected); two rule slips
+  (memory peaks of 5.6 and 6.4 GB in a day's check; one `<(...)`).
 
-## 2026-11-01: GTS81 (a) for the crops' checks (write-ahead, queue 064)
+## 2026-11-07: merge plan batch 1 on `batch1` (the rows, the keys commit, GT9, Python, the small ones)
 
-- On `mac/064-gts81` (from `mac/054-merge`, `a69c1dfc`), in the light tier: negative controls, GTS81's crossed pairs, for the
-  crops' checks gate-post-v2 left: `bin/si check` (`test/scheme/si/controls.edn`), `bin/ci check` and `check --aot`, `bin/ci
-  dg` (`test/c/controls.edn`, `:run` and `:dg`), `bin/oi check`, `check --aot`, `suite check`, `suite expect`
-  (`test/ocaml/controls.txt`), `bin/cppi lower-check` (`test/cpp/controls.edn`), `bin/goi check --corpus nethttp`
-  (`test/goi/controls.txt`, LEVEL nethttp). Each judge's control code tested on copies (joker for the `.ae` judges, the shell
-  functions extracted and run alone) over the real data files; no check run (no Arbace executable on the VM). The pairs from
-  the records; the C dg pair's directives read in gcc 15.2's testsuite (gcc-mirror/gcc, `releases/gcc-15.2.0`,
-  `gcc/testsuite/gcc.dg/bitint-75.c`, `c23-attr-syntax-3.c`), the C++ pair's outputs by g++ 15.2 on the VM.
-- The design table, the families still without a control and their proposals: doc/GATE-SURVEY.md, "As built: GTS81 (a), the
-  crops' controls". Alternatives considered: a deliberately failing case of its own per family (a file or program added to
-  each corpus) instead of a crossed pair: rejected as GTS81 did (a case of its own needs its own run, reference and
-  upkeep, and goes through a code path of its own).
+Batch 1 of the held branches' merge plan (`.tmp/tag-v2/merge-plan-rehearsal-1105.md` §4 step 1 and §2, `merge-plan.md` §3,
+§4), merged by a day agent on the branch `batch1` from `e16e4c1d` (main = next, the tag plus the journal's reset), for the
+night's gate; `next` takes it when the night's first step passes. One merge commit a branch, each naming its conflicts and
+their resolutions; the analysis `.tmp/tag-v2/merge-check.sh` rerun on the day's heads first (18 steps, 12 conflicting).
 
-## 2026-11-02: the waiting branches merged, C8, C9's line, `--full` at 504ab60d
+- **The rows.** `cpp-cx8` (6d16c65a), `cpp-cx9` (b2117cc6), `cpp-cx10` (5889aa52), `scheme-sm9` (4ff31506), `ocaml-o8`
+  (de10d3d1), each followed by its GT9 verbs branch (`gt9v-cpp` 0d5cae5f, `gt9v-scheme` 6ba75ecc, `gt9v-ocaml` 58b91bc1: the
+  `--only-list`, `--cmi-only`, `--no-expect`, `pins check` verbs and the subsets the fragments rotate by). As GT9 prescribes
+  (doc/GATE-SURVEY.md, "As built: GT9"), the rows' `bin/lib/gate-run.bash` hunks (their `gate_*_id` functions), the gate
+  tests' host fixtures and their `steps.edn` hunks but `reap`'s were taken as next's: their steps came back from the fragments
+  `test/gate/crops/{cpp,scheme,ocaml}.edn` spliced by `gate.crops splice`, their hosts from `:host-ids`. `test/reap/cells.edn`
+  was rebuilt by hand at Python's merge: o8's merge had put a second header map in place of the readers' comment (a resolution
+  error of this day, repaired there). `test/cpp/runtime/ir.sha256` is CX8's lines (cppi-check's finding: its relative shim
+  path makes CX10's rewrite a no-op), so it needed no runtime build.
+- **The small ones**, clean: `e6f88eb3` (embed-crops 1-2: `cpp-c2j`, `scheme-c2j`, the reflection hints; the steps moved to
+  the `:cpp` and `:scheme` crops, CP190 (a), with waived controls), `gate-crops` (GT9 decided), `zed-survey` (parked),
+  `java-deferred-triage` (JCS128-JCS135), `go-design-review` (goi's records: Go eval 1,664 to 1,673; after the tag, as planned).
+- **The keys commit** came with `gt9-build` (11579f82, its `100f8e0b`: PYS30 (a), `bin/lib/version.bash`'s `arbace_crop_paths`
+  for the six keys, the audit's `crop-rules`), then `gt9-verbs` (67d84a29: GTS246, GTS247). `bin/lib/crops/` (e6f88eb3's c2j
+  script) joined the list instead of its own exclusion. Keys (12 hex): main gate `0276a6db9960`, runtime `f29a38759450`, javac
+  `a3300f566f6c`; after the keys commit `98ffc164199f`, `c40e01ac561c`, `8c9a6a206dd7`; at the end `d42c7a5dd92d`,
+  `c40e01ac561c`, `ab86bd52d01b` (gate and javac moved twice more: pyi's lazy modules added to the list, `bin/goi`'s CSP5
+  patch; the runtime key not).
+- **The controls.** The fragments name the round trips' controls of `crop-controls`, a batch 5 branch: its three commits for
+  C++ and LLVM (01c732aa), OCaml (0807bbbc) and Scheme (defbea23) were picked, not merged (Haskell's and Rust's stay for its
+  merge), `arbace/repr/scheme.ae` resolved by hand (sm9's records and gt9v-scheme's `--only-list` with the controls' helpers).
+  `gate.crops check`: 0 problems.
+- **Python** (`mac/201-python-py7-py11` 7df8864b, PY6-PY10 and queue 202-223, 526 commits) merged whole but for the parts the
+  plan puts later: W2's embedding (101c0d03, a420fa0d, 0525fa89; PYS18 (a): pyi embeds at the re-seed after Python's tag) and
+  the REQUESTs into code of other owners (goi's 656dfcdc and c9047d52, crt's 3db255c5, the planner's cc463c8d: GTS243 (a)
+  batches it with GTS240), taken as next's side; doc/AGENDA.md lists them for their cherry-picks. pyi's lazy modules joined
+  `arbace_crop_paths`. The alternative, merging the embedding now, was rejected: it would rekey the executables for a re-seed
+  that waits, with `bin/pyi c2j-check` (its precondition) not built.
+- **crops-score** (0def98ca: the essential step, CSP1-CSP5) with its after-tag patch `test/crops/after-tag/csp5-goi-goroot.patch`
+  applied after goi's merge, and **cppi-check** (5c31582f, 2026-11-05, not in the plan): without it the C++ row had 180 problems
+  in `bin/reap` (cx10's cells predate cx8's and cx9's records); it is a clean descendant of the rows. Its 4 GiB
+  `cpp-aot-essential` was left out (GTS215's 3 GiB). `mac/192`'s redo was dropped: GT9's fragments supersede it (SC233's and
+  OC161's readings as an `:id-re`, GTS213 (a)).
+- **Checks by day** (stage 0 by `ARBACE_HOST_EXE`, light): `bin/ci judge-test` 104 tests, 0 failures; `test/gate/crops-test`,
+  `gate-key-crops-test`, `rotation-test` (65 of 65), `costs-test`, `lanes-test` (21, 0 failed), `audited-test` (19 of 19),
+  `claude-md-test`, `make check-makefile`; the scheme namespace loads; `bin/gate --plan` and `--full --plan`; `bin/reap --record`:
+  eight rows, 32 cells, 30 checked, 0 problems; `bin/crops-score --record`, `--judge --strict`: 0 problems. Three gate tests
+  expected next's ungated table and were brought to the gated one (crops-test's pins, chains and splice cases; rotation-test's
+  one C pattern; gate-key-crops-test's `bin/lib/crops/`).
+- **The scores** (completeness / maturity / independence, main then batch1): C++ 0 / 0 / 20 to 75.4 / 90.2 / 20, OCaml 0 / 0 / 20
+  to 75.6 / 100 / 20, Scheme 0 / 0 / 80 to 98.3 / 87.5 / 80, Python 0 / 0 / 20 to 0 / 83.3 / 20 (its eval and AOT wait for
+  its records), C maturity 95.8 to 100, Java 98.3 to 100, Go 86.0 to 87.5.
+- **Docs**: CLAUDE.md (bin/reap's eight rows, the other crops' paragraph with Python, the one list, the gated crops), the
+  agenda's batch 1 section and its proposals (tonight's fit, Python's deferred parts, `cpp-aot-essential`, cppi-check outside
+  the plan, the day branches that are candidates for a batch 1b).
 
-- **The merge window** (journal 2026-11-01, "Next"): one merge commit `7d9c84d6` brought in VM rehearsal 7's tested line
-  (`mac/112-merge-cp` `56fbb8cf`: the gate's branches and audits, the crops C23 to `c23-c7`, net/http, OCaml, Scheme and
-  C++23, JN10 with the provenance writers), then C8 (`c23-c8`, `8c61bd89`: C's row of the REAP matrix, 16 of 16 cells;
-  doc/C23-SURVEY.md, "As built: C8, the fourth row") merged at `619f7335`. `bin/gate --full` at `619f7335` failed in 15
-  steps (log `.tmp/merge-gate/full-619f7335.log`); the branch `full-fix` (`504ab60d`, ten commits) fixed them, among them
-  `bin/goi check` in Go's test driver's environment (`1ebd4ee6`; issue21317 and linkobj pass, `c430b01e`) and
-  `:unstable` classes accepted in Java's levels judgment (`a3bd7d31`; the user kept `bin/goi`'s `run_env` and accepted it).
-  `bin/gate --full` passed at `504ab60d` (12:15:08; 85 steps run, 3 skipped, 368m55s).
-- **The user's decisions (2026-11-02), all as recommended:** CS240 (a) at C9 (C's checks write results files at the
-  window), (b) until then; CS241 (a); `:runtime-source` by design (`clojure/bad_def_test.clj`, written at run time, loads
-  from source); the `time_zones` form's relative offsets; `-buildvcs=false` for `tools/gateaudit` at the window; CS250 (a)
-  (the window's order), CS251 (a), CS252 (a), CS253 (b) for v1 and (a) after (musl compiled), CS254 (a) (`062de7d1`); the
-  re-seed for `arbace-reaps-4-crops-v1` embeds C only (`d6051d79`); GTS102's 14 lines set by the audited CPU at 2.5x
-  (`05c2b424`); CS255-CS259 (the re-seed's guards) and CS260-CS264 (C's classes' decisions) all (a) (`6fd02a6e`); VM audit
-  149: `print-classes` narrowed to `test/java/print.ae`'s named kinds, the 72 others the deferred `print-classes-unnamed`
-  (`818ff165`), `speed` keeping its caveat for this tag; VM report 140: C's full checks as heavy `--full` steps, C's pins in
-  `--pins` (`c23-full`, merged `1c78baee`); W1 (the window takes C's line alone), W2 (the window starts when the host is
-  idle), W14 (amd64 only at step 3); the frozen jar and the reference JDK on Java 26 explicitly, from jdk26u's own build
-  (`24585ae8`, `1830be87`; the system default had become OpenJDK 25), the edge recorded again (`1c8e55e2`: 8 classes);
-  go-whim's commit and ccorpus2's module hash in `--pins` (`bc4e4c5a`); the round trip's levels 1-2 control and the C steps'
-  narrowed keys after the tag; `torture-execute-mirror` collapsed to its 101 files (VM report 156, `1a385469`); CS265 (a),
-  CS266 (a), no record writes `:unclassified` (`b7e8e8f6`); the next REAP section is "REAP v3's divergences" (the rounds
-  numbered, not the crops).
-- **C9's line** (`c9-line`, `e56a017d`: C9's preparation, queues 132-139's fixes) and `c23-full` merged on main
-  (`1c78baee`); the essential gate failed on the JVM's version and an intermittent read of the audit (`2a39402a`: fchdir
-  traced), then passed at `2a39402a` (14:46:56, 26 steps run, 11m02s).
+## 2026-11-07: batch 1, the seven day branches (addendum)
 
-## 2026-11-02: the test budget (the user's decision)
+The user decided (2026-11-07, relayed by the main session) on batch 1's proposals: the night runs the whole keyed `bin/gate
+--full` (a nominal 12-hour shift, overflow to 12:00); Python's deferred parts go to the re-seed window W, the planner's with
+GTS240; `cpp-aot-essential` stays out of the essential tier and is measured tonight at `CPPI_THREADS=1`; and all seven
+2026-11-06 day branches go into batch 1, so one rekey night carries them. On the main session's merge of `go-controls`
+(`f7696201`), merged in this order, one commit each: `cppi-deferred` 948a17e7, `ocaml-libs4` 628555d4, `scheme-smr7` 9b672f2f,
+`java-jc9c` e92a1c8e, `clojure-cdr` 67adb0ff, `goi-escape` 91d3eb40, `c-deferred` 61406468. Their conflicts were small (the
+Makefile, `steps.edn`'s Scheme steps, `bin/goi`'s flag cases, goi's record merged row by row); their branch journal entries
+are the main journal's 2026-11-06 entry. Keys at the end: gate `1f886836e11e`, runtime `4cd0885457fb`, javac `c97e87dc55a5`
+(ocaml-libs4, java-jc9c, clojure-cdr, goi-escape and c-deferred move them; doc/AGENDA.md names which). `bin/reap` keeps one
+problem until the night's C++ record (cppi-deferred's `runtime/deferred.cpp`, its reference recorded, its run not); the matrix
+was recorded with that row held out for the run. Found: `java-jc9c` names JC9's other branches (F1, F5, JC9b) as its
+prerequisites, which are on no merged line; the night needs `bin/jrt-convert update` before the gate for it and for
+`clojure-cdr`. Proposed in doc/AGENDA.md (6): revert `java-jc9c`'s merge today and give the JC9 line its own night.
 
-- **Decided:** `arbace-reaps-4-crops-v1` is tagged on C's full steps in a keyed `bin/gate --full` overnight and the audit of
-  C's new steps; **no all-crops clean run** for this tag: it waits for compressed corpora. The next milestone's main thread is
-  **GT8, the test budget**: tiers essential at most 15 minutes, nightly at most 6 hours, clean at most 24 hours, for all ten
-  planned crops (Clojure, Java, Go, C, C++, OCaml, Scheme, Haskell, Rust, Python), by deduplication, coverage subsets,
-  rotation and synthetic corpora; heavy runs at night, development by day; the Mac peer takes small development tasks
-  (154-156, then up to 165).
-- **Why:** v2's clean run took 190,621 s over eight runs for three crops; C's seven full steps add about 7 to 8 hours to
-  `--full` serial; six more crops would multiply that past any night or day. C9.2's row 12 (`--full --clean --tag`, VM report
-  153 F2) is superseded.
-- **Alternatives considered:** the clean run as v2's for this tag (rejected: a day or more of the host for every tag, and the
-  next crops' corpora larger still); C's full checks left out of the gate, recorded by hand only (rejected on VM report 140:
-  §11's C9 asks for `--full` with C's full checks).
-- **Coverage subsets** (VM reports 160, 161): `torture-execute`'s 59 of 1,532 programs keep every back-end block (6% of
-  the wall time); 229 programs over C's run corpora, the subset check 939 to 242 s. The user: optimise for the back end's
-  blocks, the kept classes, the controls and one per class; keep every deferred and gap program; a `:subset` per corpus.
-  Held until after the tag.
+## 2026-11-07: batch 1, JC9's prerequisites, JCV1, SCS1 and the mixed stage (addendum)
 
-## 2026-11-02: C9.2, the re-seed window
+The user decided (2026-11-07, second round): proposal 6 (b), so `java-jc9-jca` (F1) a4a8e546, `java-jc9-logging` (F5)
+b8a1951c, `java-jc9b` 51b320c1 and `java-jc9b-natives` f89e8e9c were merged after `java-jc9c` (the docs' tree: F1, F5, F4, F2,
+F3 and JC9b together, converted in one night); `java-judge` 3ab550e0 (JCV1: each test's own verdict, the JDK's records the
+oracle tier) and `scheme-90` 43b39f4a (SCS1: Scheme's controls for every family and its own-verdict judge); crops-score's mixed
+stage scored as the case-weighted mean (built in `crops.score`, from the facts' case counts); JCV2 to build, left to an agent
+of its own (the golden files need a review against the JLS); SCS2 (a) with `oracle-records-cpp2`. Conflicts: the triage doc
+section by section, `DriverManager.java` (both added; clojure-cdr's kept, F16's java.sql files out of its list), the closure's
+lists, jrt's file lists, `bin/java-check`'s check_one (F6's tool branch with JCV1's verdict lookup), `arbace/repr/scheme.ae`
+(scheme-90's controls in place of crop-controls' picked ones, gt9v-scheme's verb applied again). Java's records were rederived by
+`bin/java-check rejudge-records` and its t05507 edit kept; `si-corpora` lost `:chibi` as scheme-90 declares. Keys at the end:
+gate `2f25331ada6f`, runtime `b74523271f12`, javac `f221ad0dfe97` (JC9's four move them). Scores: Java 72.9 / 100 / 99.7,
+Scheme 98.4 / 100 / 95.0. The merge commits a revert would take are in doc/AGENDA.md.
 
-- **What:** C9.2's steps (doc/C23-SURVEY.md, "As built: C9.2, the re-seed window", with each step's time) from 14:47:25 on
-  main `2a39402a`. Steps 1-5 passed (the executable built from the merged tree, `aot: 156 sources compiled, 14886 classes; 0
-  failed`; `bin/ci check` on it, the 15 run corpora judged, 36 min). Step 7 (`bin/ci annotations --record`) wrote 77
-  `:unclassified` entries: no regression (45 the old writer's, the judge's own classes; 30 error tests gcc rejects at their
-  options, CS265; 2 the checker's, `transparent_union`); step 7a's tree check wrote 335 by the same writer. Main moved to
-  `5de0939b` (the writers fixed, the mirror collapsed, the pins, Java 26 from jdk26u), and 7a ran again (7a2): 3, 276 and 2
-  files of no class, classified by hand (`14873a86`: the 276 C7's decided grammar, the class `:gcc-syntax`, CS267 proposed;
-  `255c9d54`: `:c23-colons`, `:xid-identifier`, `:run-address`, `:bad-specs-print` proposed), merged `b2a4911f`.
-- **The seed:** the fixpoint at `5de0939b` in the clean worktree `seed-c9` (G2 = G3, 35 min; stage 0 = G1 = G2 = G3 is `--verify`'s, below), `bin/seed --make` from G3
-  (the seed `a59cc441…`, commit `1fe1063f`), `bin/seed --verify` passed (the same archive, stage 0 = G1 = G2 = G3
-  `606d45e6…`, 1,724 s). The VM's review of the seed skipped (no VM work overnight, as told the user): `--verify` is the check.
-- **After the seed** (step 11, the night): stage 0 from the new seed, `bin/reap` 16 of 16 with 0 problems, `bin/ci dg
-  --essential` ok; `bin/ci judge-test` failed (3 assertions) and step 11a (`bin/ci check --aot`) found two regressions and one
-  improvement (the next entry). The keyed `bin/gate --full` (step 12) started at 22:59:38 on main `b2a4911f`.
+## 2026-11-07: C's own target and the judge by each test's own verdict, ported onto batch 1 (branch c-indep-b1)
 
-## 2026-11-03: the night's three fixes
+Branch `c-indep-b1` from `mac/batch1` 1dd5bcc71 (the day's merge batch), with C's independence work of branch `c-indep`
+(`mac/c-indep` b84f1a4f1, on `mac/oracle-records-cpp2`) ported onto it, the main session's request: `c-indep` carried
+oracle-records-cpp2's 166 commits beyond the batch. The goal as before: C's independence above 90% without lowering its
+completeness or maturity. On `mac/batch1` C scores 20.0% (every C step on `:gcc`); on `c-indep-b1` 99.7%.
 
-On branch `night-fix` (from `b2a4911f`), not merged while `--full` ran on main:
-
-- `04947f0e`: judge-test's two host-dependent tests (the in-process back end is cinterp's var on the new stage 0; the
-  compiled parser reads 30,000 nested parentheses, so the panic is stood in by `with-redefs`); `arbace/c/repl.ae` left alone
-  (stage 0 runs its embedded copy; a source fix waits for the next re-seed). The AOT record's pass of `20101011-1.c` (in
-  `torture-execute` and its mirror) was stale: it fails with status 136 on the previous seed's stage 0 too (a worktree at
-  `5de0939b`); re-recorded as known `signals`, as at the interpreted level; `c23-float-6.c` now passes. C AOT 2,058 / 115 / 87.
-- `c14a5eca`: the gate's `c-c2j` failed at 02:16 with 0 sources: the host embeds C's namespaces compiled since the re-seed,
-  and their compiled loaders record no units; `bin/ci c2j-check` runs with `ARBACE_NO_AOT=1`, as `bin/lib/program.bash`'s
-  `host_compiles`: 25 sources, 0 failed.
-- `d16ae499`: the classes as the user decided in the morning (the next entry).
-- The night's script was stopped by hand at 05:21 (the user: C's full steps rerun the next night), so the audit of C's steps
-  did not run; the `--full` itself went on with its other steps, stopped by a watcher (`.tmp/window/stop-before-c.sh`) when
-  its first heavy C step started. TODO(tag): the time it stopped and the other steps' outcome.
-
-## 2026-11-03: the user's decisions, and the schedule to the tag
-
-- **CS267 (a)**: `:gcc-syntax` by design (the tree check's constructs cc's parser lacks or reads otherwise, read as gcc does;
-  CS40 (a)'s rule). **CS268 (a)**: the `--record` writers guess `:pp-errors` only when the differing errors are the
-  preprocessor's and never fall back to another check's classes; built **after the tag** (repr/c is embedded: a change reruns
-  the whole `--full`; VM task 167). **`:bad-specs-print` deferred for v1**, CS221 (a) with CS232 (a) after the tag (VM task
-  168). `:c23-colons` and `:xid-identifier` reworded to what still differs since CS143 (a)'s lexer. All in `d16ae499` and
-  doc/C23-SURVEY.md's new section.
-- **Alternatives considered:** CS268 built before the tag (rejected: a whole `--full` again for a writer the tag's records do
-  not depend on, since they were classified by hand); CS221 (a) with CS232 (a) now (rejected for the same cost).
-- **The schedule:** `night-fix` merged into main; C's full steps rerun keyed on the night of 2026-11-03 (the other steps
-  skip at the keys they passed), with the audit of C's new steps; the tag `arbace-reaps-4-crops-v1` on 2026-11-04, its
-  documentation on the branch `tag-docs` ("REAP v3's divergences", doc/v3-record/, the C9.2 section, CLAUDE.md, README, the
-  agenda). The Mac VM's branches 154-165 held until after the tag (doc/AGENDA.md, "After the tag").
-
-## 2026-11-03: GT8 and the backlog before the tag (the user's decision)
-
-- **Decided (the user, 2026-11-03, superseding the schedule of the entry above and the 2026-11-02 test budget's "no
-  all-crops clean run"):** `arbace-reaps-4-crops-v1` waits for GT8, the test budget, and for the whole backlog: the Mac
-  VM's held branches (154, 164, 155, 157, 158, 159, 161, 162, 163, 165, then 167, CS268 (a), and 168, CS221 (a) with
-  CS232 (a)), Java's speed curation (GTS102's per-test limits, the `speed` catch-all's timeouts judged one by one) and the
-  round trip's negative control at levels 1 and 2 (VM report 159). The tag is made on an audited clean run of all four
-  crops in a fresh clone over GT8's compressed corpora, within GT8's budget.
-- **Why:** the held branches change ci, which is embedded (`gate_key`): merged after the tag they would rerun the whole
-  `--full` anyway, and the tag's caveats (Java's `speed`, the round trip's levels 1-2, the coarse C keys, no clean run)
-  are the backlog's own items. Putting them first makes the tag's record carry fewer caveats and a clean run.
-- **Alternatives considered:** the tag on the next morning on a keyed `--full` (the entry above; rejected by the user:
-  the backlog and GT8 would follow it at once and invalidate its runs); GT8 after the tag (the plan of 2026-11-02).
-- **Done at once:** the keyed `--full` stopped by hand in goi's AOT check (05:4x; its passes stay in the store at their
-  keys); `night-fix` merged into main (`d16ae499`) with the parts of `tag-docs` that hold before the tag (the journal, the C9.2
-  section, the AGENDA, the class texts); CLAUDE.md, README and "REAP v3's divergences" stay on `tag-docs` until the tag.
-
-## 2026-11-03: GT8's survey and its decisions
-
-- doc/GATE-SURVEY.md, "GT8, the test budget": the tiers against today's times (essential 11 min; `--full` about 11.8 h
-  serial with C's full checks; v2's clean run 190,621 s for three crops), where the time goes (Java about 258 min, C about
-  300, Go about 75, Clojure about 33), the methods GT8.1-GT8.7 and proposals GTS200-GTS209. **Decided by the user,
-  2026-11-03: all (a).** The Mac VM took GT8.1's cost table (task 170) and GT8.2's duplicate finder (task 171).
-- **Alternatives considered:** per-crop shares by weight (GTS201 (b)), a weekly long run instead of a nightly slice
-  (GTS202 (b)), the full corpora at the clean run (GTS204 (b)), Java's speed curation after GT8 (GTS208 (b)): see the
-  survey's options.
-
-## 2026-11-03: Haskell and Rust unparked; Python's survey
-
-- **Decided (the user, 2026-11-03):** repr/haskell and repr/rust, parked since 2026-10-26, are unparked: crops in progress
-  again, as OCaml, Scheme and C++ are (evaluated from the checkout, out of `gate_key`, no gate step until their row of the
-  matrix fits GT8's budget). An initial survey of Python as the tenth crop starts (doc/python/PYTHON-SURVEY.md).
-- The host still has the pinned toolchains: GHC 9.14.1 (`tools/hsdump/GHC_VERSION`), rustc 1.99.1 `58cf8f9c3`
-  (`tools/rsdump/RUSTC_VERSION`); Python 3.14.10 is the host's (Alpine's) Python.
-
-## 2026-11-03: Python's proposals decided; the Mac VM takes the crop
-
-- doc/python/PYTHON-SURVEY.md (merged `4658fe21`): Python as the tenth crop, milestones PY1-PY11 (about 57 to 98 working
-  days), proposals PYS1-PYS20. **Decided by the user:** all as recommended (CPython 3.14.10 pinned, a dump helper first and
-  a pegen-generated native reader later, pyi on its own IR in `go/arbace/py` with Go's GC and a GIL, the stdlib as forms
-  with about 25 Go ports, AOT to Go forms, `PYTHONHASHSEED=0`, subsets from day one, out of the gate until its row fits
-  the budget), and PYS19: **the Mac VM peer does all of Python**, PY1 to PY11 task by task, from now, reviewed and merged
-  here. The first tasks are 174 (PY1) and 175 (PY2) in the queue.
-- Also today: Haskell and Rust checked after unparking (nothing broke; tests pass, 40 s and 58 s; sample round trips
-  clean; whole text levels about 1 to 1.5 h and 40 to 60 min, night jobs); their eval needs GHC's Core/STG and a lazy
-  runtime, and Rust's MIR and a Miri-like runtime, each a survey of its own.
+- **Ported**: `c/` (Arbace's headers and target description), `test/c/target.ae`, `test/c/selfref.ae` and its exceptions,
+  `bin/lib/ci/selfref.bash`, the two `:run` controls, `ARBACE_C_HOST` in `arbace.repr.c.host/load-host`, the judge switch
+  (`gcc-judge?`; the token check's gcc level, its `:gcc` known entries and the round trip's acceptance), musl's derived
+  configure products, crops-score's mixed judge (the user's case-weighted mean, not on batch1 yet).
+- **Carried from oracle-records-cpp2, the minimal part**: the sysroot (`ARBACE_C_SYSROOT`: `arbace.repr.c.pp`'s
+  `sysroot-file`, ORS9 (a)'s `dbc9a76c2`; `tools/ccdump/sysroot.go` and its two config lines, `c60cb208c`) and the round
+  trip's no-gcc judgment with its deferral of the classes only levels 3-4 give (ORS16's stand-in), now its default.
+  `bin/lib/repr-c/sysroot.bash` is written anew: Arbace's target, or `ARBACE_C_SYSROOT=/` (the host's files) for gcc's.
+- **Left on oracle-records-cpp2**: the packs (`c-headers-gcc15`, `c-musl-1.2.6-x86_64`, `c-roundtrip-orig-*`), the dg record
+  `test/c/ref-dg-gcc15.edn` and `test/c/dgref.ae`, C23's `ref-syntax-gcc15.tsv` and `c23records.ae`, `bin/oracle-records` and
+  `test/oracle-records/`, the planner's `:phase :oracle`. None is needed: on batch1 the oracle tier is gcc run live by hand
+  (`ARBACE_C_TARGET=gcc ARBACE_C_JUDGE=gcc`), as before the records; gmp.h and pcre2.h come from the host's packages by
+  `test/c/host/headers.sha256`'s digests.
+- **New on batch1**: no gcc call at all in the default paths: `bin/lib/ci/dg` skips its gcc runs, `bin/lib/repr-c/check`
+  asks gcc's include directory only for `--record`, `bin/repr-c` only for `host record|check`, `bin/lib/repr-c/c23check` judges
+  C23's files by their own validity (`test/c/c23/expected.edn`'s judge-1 entries the reviewed rejections) with the objects
+  and gcc's acceptance the oracle tier's (`arbace.repr.c.c23check`: an object not compiled is not judged); every C step's
+  `:hosts` loses `:gcc`.
+- **Rekeys** (embedded, gate_key): `arbace/repr/c/host.ae`, `pp.ae`, `ppcheck.ae`, `rtcheck.ae`, `c23check.ae`; stage 0
+  evaluates them from the checkout (repr namespaces are tool sources).

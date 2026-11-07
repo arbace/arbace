@@ -13,7 +13,7 @@
 
 (set! *warn-on-reflection* true)
 
-(def ^:dynamic *musl* nil) ; the musl library (arbace.c.musl/library), when linked
+(def ^:dynamic *musl* nil) ; the musl library, prebuilt (arbace.c.runtime/library), when linked
 
 (defn uses-long-double?
   "Whether a program's main-file forms declare or convert to a long double type (SPEC §12.5's rule for the
@@ -40,7 +40,8 @@
   "The C file `path` (absolute, or relative to `base`) read and checked: a unit, or {:error ...}/{:refused ...}."
   [h opts ^String base ^String path]
   (let [fc (host/file-config opts "gnu23")
-        rd (rc/read-c (host/config h fc base) fc path false)]
+        ;; CS275 (b): a table or the main file itself included inside a declaration is the main file's (as the libc's read)
+        rd (binding [arbace.repr.c.convert/*include-inside* true arbace.repr.c.pp/*reentry* true] (rc/read-c (host/config h fc base) fc path false))]
     (cond
       (:error rd) {:status :read-error :message (str/join "; " (take 3 (:error rd)))}
       (:refused rd) {:status :read-refused :message (str (name (:refused rd)) ": " (:message rd))}
@@ -56,10 +57,9 @@
   {:status :refused :class :message}."
   [units]
   (try
-    (let [cmds (if *musl*
-                 ((resolve 'arbace.c.musl/build-linked) *musl* units)
-                 (build/build-program units))]
-      {:status :ok :text (build/program-text cmds)})
+    {:status :ok :text (if *musl*
+                         ((resolve 'arbace.c.runtime/link-text) *musl* units)
+                         (build/link-text (mapv build/unit-fragment units)))}
     (catch arbace.lang.ExceptionInfo e
       (if-let [c (:ci/refused (ex-data e))]
         {:status :refused :class c :message (.getMessage e)}
@@ -174,6 +174,17 @@
              :when (#{:passes :not-judged} v)]
          [id :fail (str "control " (name v) " (test/c/controls.edn)")])))
 
+(defn report-failing
+  "The failing rows' lines FAIL ID<tab>WHY (the tab the steps' one :failed-re reads): the first 40 printed, every one appended to the file GATE_FAIL_LINES names when
+  it is set (the gate's runner reads it with the log for its step's :failed-re: review 181 L3, so that every failing
+  file of a mass regression joins the rotation's subset at once, not 40 a run)."
+  ([failing] (report-failing failing (System/getenv "GATE_FAIL_LINES")))
+  ([failing file]
+   (let [line (fn [r] (str "FAIL " (first r) "\t" (nth r 2)))]
+     (doseq [r (take 40 failing)] (println (line r)))
+     (when-let [f (not-empty file)]
+       (spit f (apply str (map #(str (line %) "\n") failing)) :append true)))))
+
 (defn- judge
   "judge WORK REF DIVERGENCES [--record] CORPUS...: each program's result against gcc's run and the classes, and against
   the committed record (compare-record)."
@@ -219,7 +230,7 @@
           failing (concat failing (remove #(fids (first %)) (report-record cmp))
                           ;; GTS81 (a): the negative controls (test/c/controls.edn, :run), no row of the results or the record
                           (controls-failing "ci judge" work refs corpora))]
-      (doseq [r (take 40 failing)] (println "FAIL" (first r) (nth r 2)))
+      (report-failing failing)
       (System/exit (if (seq failing) 1 0)))))
 
 (defn -main
@@ -238,7 +249,7 @@
       (if bad
         (do (binding [*out* *err*] (println (str (name (:status bad)) ": " (:message bad)))) (System/exit 1))
         (let [r (binding [*musl* (when-not (System/getenv "CI_NO_MUSL")
-                                   ((requiring-resolve 'arbace.c.musl/library) h (System/getProperty "user.dir")))]
+                                   ((requiring-resolve 'arbace.c.runtime/library) h (System/getProperty "user.dir")))]
                   (nodes us))]
           (if (= :ok (:status r))
             (do (spit out (:text r)) (System/exit 0))
@@ -250,7 +261,7 @@
     (let [[work list threads] args
           h (host/load-host host-dir)
           root (System/getProperty "user.dir")
-          lib ((requiring-resolve 'arbace.c.musl/library) h root)
+          lib ((requiring-resolve 'arbace.c.runtime/library) h root)
           lines (vec (remove str/blank? (str/split-lines (slurp list))))
           q (java.util.concurrent.ConcurrentLinkedQueue. ^java.util.Collection lines)
           out (java.util.concurrent.ConcurrentHashMap.)
