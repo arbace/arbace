@@ -301,8 +301,9 @@ Prior art:
     C++'s since CX10 (doc/cpp/CPP-SURVEY.md, "As built: CX10 (write-ahead)"), on stage 0 with the host's g++
     and clang++ (the host `:cxx`; `bin/gate --pins` runs `bin/repr-cpp pins check` and `host check`, `:crop-pins :cpp`):
     essential `cpp-read-essential` (`bin/repr-cpp pp-check --essential`, `test/cpp/essential-read.txt`; `--only FILE`, CORPUS/NAME a line,
-    `--record-results`), `cpp-print-essential` (`bin/repr-cpp roundtrip-corpus gxx-dg-essential` and `samples`: a recorded list made by its
-    key, `test/cpp/essential-print.txt` held to `roundtrip-results/gxx-dg-essential.edn`), `cpp-lower-essential` (`bin/cppi lower-essential`,
+    `--record-results`), `cpp-print-essential` (`bin/repr-cpp roundtrip-corpus gxx-dg-essential --judge own` and `samples --judge own`: a recorded list made by its
+    key, `test/cpp/essential-print.txt` held to `roundtrip-results/own/gxx-dg-essential.edn`; since cpp-90 judged by the round trip's own levels 1 and 5 on the
+    native parser, no clang, `--judge clang` the oracle tier's; the run checks by each test's own verdict, `test/cpp/selfref.ae`, `CPPI_JUDGE=gxx` g++'s runs), `cpp-lower-essential` (`bin/cppi lower-essential`,
     `test/cpp/essential-lower.txt`), about 2 minutes warm; `--full` `cpp-selftest`, `cpp-tokens`, `cpp-roundtrip` and `cpp-lower` (`bin/cppi
     lower-corpus KEY`), a part a recorded list; `make cpp-essential`. Since cppi-check (2026-11-05; "As built: cppi-check") CX8's run checks too:
     essential `cpp-check-essential` (`bin/cppi check --only test/cpp/essential-check.txt`; cppi-check's `cpp-aot-essential`, 4 GiB, is not a step: GTS215's 3 GiB), `--full` `cpp-check` and

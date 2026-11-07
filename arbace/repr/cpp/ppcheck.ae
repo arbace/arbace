@@ -272,10 +272,10 @@
         cfg (assoc (host/config host (:fc e) base) :missing (:missing host))
         mask (long (:trigraphs cfg))
         key (str id "/" nm)
-        lex-st (when (levels "lex")
-                 (let [lines (try (raw-lines (lex/read-bytes (str base "/" nm)) mask) (catch Throwable x [(str "#panic " x)]))]
-                   (judge (get clang-db key) (lines-digest lines) (contains? known-lex nm) false)))
-        [pp-st dg]
+        lex-dg (when (levels "lex")
+                 (lines-digest (try (raw-lines (lex/read-bytes (str base "/" nm)) mask) (catch Throwable x [(str "#panic " x)]))))
+        lex-st (when lex-dg (judge (get clang-db key) lex-dg (contains? known-lex nm) false))
+        [pp-st dg pp-err]
         (when (levels "pp")
           (let [r (try (pp/preprocess cfg (:read e)) (catch Throwable x {:tokens [] :errors [(str x)] :panic true :crash (str x)}))
                 dg (tokens-digest (unplaced (port-texts r) base))
@@ -285,8 +285,35 @@
                 st (if (:crash r)
                      "crash"
                      (judge (get gxx-db key) dg (contains? known-pp nm) (seq (:errors r))))]
-            [st dg]))]
-    [nm (or lex-st "-") (or pp-st "-") (or dg "-")]))
+            [st dg (boolean (seq (:errors r)))]))]
+    ;; the fifth and sixth: the lex digest and whether the port gave errors, for the negative controls (not in files.tsv)
+    [nm (or lex-st "-") (or pp-st "-") (or dg "-") (or lex-dg "-") pp-err]))
+
+(def controls-file "test/cpp/controls.edn")
+
+(defn controls
+  "The token check's negative controls (doc/GATE-SURVEY.md, GTS81 (a); test/cpp/controls.edn's :level :pp and :lex entries, cpp-90): the
+  :subject's port, judged by the level's own judgment against the :reference's recorded answer (g++ -E's digest at :pp, clang's raw tokens'
+  at :lex), must not agree. A control whose subject is not a file of this run of the corpus `id`, or whose reference has no recorded
+  answer, is left (said); one that agrees is printed and returned (the check fails). The names are CORPUS/NAME."
+  [^String id rs gxx-db clang-db levels]
+  (let [cs (filter #(contains? #{:pp :lex} (:level %)) (if (.exists (java.io.File. ^String controls-file)) (read-string (slurp controls-file)) []))
+        by (into {} (map (juxt first identity) rs))
+        pre (str id "/")]
+    (vec (for [{cid :id :keys [level subject reference]} cs
+               :when (str/starts-with? subject pre)
+               :let [row (get by (subs subject (count pre)))
+                     lv (name level)
+                     rec (get (if (= level :pp) gxx-db clang-db) reference)
+                     v (when (and row (levels lv) rec)
+                         (if (= level :pp)
+                           (judge rec (nth row 3) false (nth row 5))
+                           (judge rec (nth row 4) false false)))]
+               :when (cond (nil? row) false
+                           (nil? v) (do (println (str "control " cid " left: " (if rec "the level not run" (str "no recorded answer for " reference)))) false)
+                           (= v "differ") (do (println (str "control " cid " fails as it must (" lv ": " subject " against " reference "'s record)")) false)
+                           :else (do (println (str "control " cid " passed (" lv ": " v "): the judgment takes what differs")) true))]
+           cid))))
 
 (defn check
   "The check of the corpus `id` under WORK (its lists made, the compilers run): WORK/ID/files.tsv (name, lex
@@ -325,10 +352,11 @@
         stale (concat (for [[nm _] known-pp :when (in-run? nm) :when (not (some (fn [r] (and (= (first r) nm) (= (nth r 2) "known"))) rs))] [:pp nm])
                       (for [[nm _] known-lex :when (in-run? nm) :when (not (some (fn [r] (and (= (first r) nm) (= (nth r 1) "known"))) rs))] [:lex nm]))
         bytes (reduce + (map #(.length (java.io.File. (str base "/" (:name %)))) entries))]
-    (spit (str d "/files.tsv") (str/join (map #(str (str/join "\t" %) "\n") rs)))
+    (spit (str d "/files.tsv") (str/join (map #(str (str/join "\t" (take 4 %)) "\n") rs)))
     (spit (str d "/differ.txt") (str/join (map #(str (first %) "\tlex " (nth % 1) "\tpp " (nth % 2) "\n") (distinct (concat lex-fail pp-fail)))))
     (spit (str d "/missing.tsv") (str/join (map #(str (first %) "\t" (second %) "\n") (sort missing))))
-    (let [report {:corpus id :files (count rs) :bytes bytes :seconds (Math/round (double secs)) :threads threads
+    (let [cfail (controls id rs gxx-db clang-db levels)
+          report {:corpus id :files (count rs) :bytes bytes :seconds (Math/round (double secs)) :threads threads
                   :lex (by 1) :pp (by 2) :lex-failing (count lex-fail) :pp-failing (count pp-fail)
                   :stale-known (vec stale) :missing-has (count missing) :vanished (count vanished)}]
       (spit (str d "/report.edn") (pr-str report))
@@ -338,7 +366,7 @@
                     (when (seq stale) (str "; " (count stale) " known entries stale"))
                     (when (seq vanished) (str "; " (count vanished) " recorded files not in the tree: " (str/join " " (take 5 vanished))))
                     (when (seq missing) (str "; " (count missing) " __has answers not recorded"))))
-      (if (or (seq lex-fail) (seq pp-fail) (seq stale) (seq vanished)) 1 0))))
+      (if (or (seq lex-fail) (seq pp-fail) (seq stale) (seq vanished) (seq cfail)) 1 0))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Recording

@@ -132,6 +132,7 @@
 (def ^:private ^:const THDR 9)
 (def ^:private ^:const USES 11)     ; the special members' uses (arbace.repr.cpp.sema's resolve-uses: an ArrayList)
 (def ^:private ^:const RET 12)      ; the return type of the function whose body is being parsed
+(def ^:private ^:const DECLTYPES 13) ; G4: decltype's operands parsed ({text-without-spaces node}, a HashMap; *full-headers* only)
 (def ^:private ^:const PATTRS 10)   ; the attributes the ptr-operators of the declarator being parsed carried     ; the template header the next declaration is under: its parameters' names (for the injected class name)
 
 (defn- stv [^P p k] (aget ^objects (.-st p) (int k)))
@@ -168,6 +169,11 @@
 ;; the language linkage of the declarations being parsed ("C" inside extern "C"): kept in a function's entity for
 ;; the code generator (arbace.cpp.sema), whose header functions are known by their entities alone
 (def ^:dynamic *linkage* nil)
+
+;; G4 (doc/cpp/CODEGEN.md): the headers' declarations parsed in full, bodies and all, their nodes given with the main
+;; file's (the code generator's mode: arbace.cpp.codegen binds it); a header construct the parser cannot read is dropped
+;; (CPP_HDR_TRACE=1 prints each, its file and offset). Off: the headers skimmed for their names (the converter's mode)
+(def ^:dynamic *full-headers* false)
 
 (defn- in-template?
   "Whether the cursor is in a template (a parameter list with parameters encloses it; an explicit specialization's has none)."
@@ -532,6 +538,18 @@
       :else
       (str (when (:g qn) "::") (str/join "::" (map #(part-str p %) parts))))))
 
+(defn- written-name
+  "A name expression's written parts as clang's DeclRefExpr and MemberExpr keep them (CODEGEN.md P13 (b)): the explicit
+  template arguments of its last part (`:explicitTemplateArgs`, each argument's text; DeclRefExpr::template_arguments)
+  and the nested-name-specifier's parts (`:qualifier`, each part's text with its arguments; `:globalQualifier` for a
+  leading ::)."
+  [^P p qn]
+  (let [parts (:parts qn) lp (peek parts) q (butlast parts)]
+    (cond-> {:_wn true}
+      (:args lp) (assoc :explicitTemplateArgs (mapv #(arg-str p %) (:args lp)))
+      (seq q) (assoc :qualifier (mapv #(part-str p %) q))
+      (:g qn) (assoc :globalQualifier true))))
+
 (defn- name-plain
   "A name's last part's identifier, nil for an operator, a destructor or a qualified name."
   [qn]
@@ -829,6 +847,16 @@
               (and (not (is? p ";")) (not (and allow-for-range (is? p ":")))) :false
               :else :ambig)))))))
 
+(defn- angle-paren-close
+  "The index of the ) closing the ( at token `i`, or nil."
+  [^P p ^long i]
+  (loop [j (inc i) d 1]
+    (let [^T t (tok-at p j)]
+      (cond (identical? :eof (.-k t)) nil
+            (t= t "(") (recur (inc j) (inc d))
+            (t= t ")") (if (= d 1) j (recur (inc j) (dec d)))
+            :else (recur (inc j) d)))))
+
 (defn- tentatively
   "Runs (f p) with the cursor put back after."
   [^P p f]
@@ -925,7 +953,7 @@
 
 (declare parse-expr parse-cast-expr parse-postfix parse-primary parse-braced-init parse-compound-stmt parse-lambda
          parse-type-specs parse-abstract-declarator parse-decl-specs parse-statement build-type parse-param-list
-         declare-params! parse-requires-expr skip-requires-clause! parse-init-clause)
+         declare-params! parse-requires-expr skip-requires-clause! requires-clause! parse-init-clause)
 
 (defn- node
   "A node over the tokens b..e."
@@ -1301,7 +1329,11 @@
         ss (loop [out []] (if (#{:str :udls} (tk (cur p))) (let [s (ts (cur p))] (adv! p) (recur (conj out s))) out))
         e (last-ix p)]
     (if (some #(re-find #"[\"][A-Za-z_][A-Za-z0-9_]*$" %) ss)
-      (node p "UserDefinedLiteral" b e {})
+      ;; (G5: the literal and its ud-suffix for the code generator's literal operator call, [lex.ext]/5)
+      (let [sfx (some #(second (re-find #"[\"]([A-Za-z_][A-Za-z0-9_]*)$" %)) ss)
+            plain (mapv #(str/replace % #"([\"])[A-Za-z_][A-Za-z0-9_]*$" "$1") ss)
+            [v ty n] (try (lit/string-literal plain (.-year p)) (catch Exception _ nil))]
+        (node p "UserDefinedLiteral" b e (if v {:_udl {:k :str :suffix sfx :value v :ty ty :n n}} {})))
       (let [[v ty n] (lit/string-literal ss (.-year p))]
         (node p "StringLiteral" b e {:value v :type {:qualType (str "const " ty "[" n "]")} :valueCategory "lvalue"})))))
 
@@ -1318,7 +1350,13 @@
         (if (and (re-matches #"(?i)[0-9.][0-9a-z.'+-]*?(i|j)(f|l|u|ul|ll|ull)?|(?i)[0-9.][0-9a-z.'+-]*?(f|l)(i|j)" s)
                  (not (sc/lookup (scope p) (str "operator\"\"" (second (re-find #"([A-Za-z_]+)$" s))))))
           (node p "ImaginaryLiteral" i i {})
-          (node p "UserDefinedLiteral" i i {}))))))
+          (let [[_ num sfx] (re-find #"^(.*?)(_[A-Za-z0-9_]*)$" s)]
+            (node p "UserDefinedLiteral" i i
+                  (if num
+                    (if-let [[v] (lit/int-literal num)]
+                      {:_udl {:k :int :suffix sfx :value v}}
+                      (if-let [[v] (lit/float-literal num)] {:_udl {:k :float :suffix sfx :value v}} {}))
+                    {}))))))))
 
 (defn- simple-type-start?
   "A simple-type-specifier begins at the cursor and a ( or { follows it: a functional cast or construction (not a
@@ -1443,7 +1481,10 @@
     (cond
       (identical? k :num) (parse-number p)
       (identical? k :chr) (let [[v ty] (lit/char-literal s (.-year p))] (adv! p) (node p "CharacterLiteral" b b {:value v :type {:qualType ty} :valueCategory "prvalue"}))
-      (identical? k :udlc) (do (adv! p) (node p "UserDefinedLiteral" b b {}))
+      (identical? k :udlc) (do (adv! p)
+                               (let [[_ lit sfx] (re-find #"^(.*')([A-Za-z_][A-Za-z0-9_]*)$" s)
+                                     [v ty] (when lit (try (lit/char-literal lit (.-year p)) (catch Exception _ nil)))]
+                                 (node p "UserDefinedLiteral" b b (if v {:_udl {:k :chr :suffix sfx :value v :ty ty}} {}))))
       (or (identical? k :str) (identical? k :udls)) (parse-string-literal p)
       (t= t "true") (do (adv! p) (node p "CXXBoolLiteralExpr" b b {:value true :type {:qualType "bool"}}))
       (t= t "false") (do (adv! p) (node p "CXXBoolLiteralExpr" b b {:value false :type {:qualType "bool"}}))
@@ -1486,6 +1527,17 @@
             (let [x (with-gt p true (parse-expr p))] (expect! p ")") (node p "CXXTypeidExpr" b (last-ix p) {:inner [x]}))))
       (t= t "requires") (parse-requires-expr p)
       (or (t= t "__func__") (t= t "__FUNCTION__") (t= t "__PRETTY_FUNCTION__")) (do (adv! p) (text-node p "PredefinedExpr" b))
+      ;; G5: __builtin_va_arg(ap, T) for the code generator: its operand and type (clang's VAArgExpr), the node the
+      ;; converter's text all the same
+      (and (= s "__builtin_va_arg") *full-headers* (not (skim? p)) (is-at? p 1 "("))
+      (or (try (adv! p) (adv! p)
+               (let [x (with-gt p true (parse-assign-expr p))]
+                 (when (accept! p ",")
+                   (let [ty (parse-type-id p :paren)]
+                     (when (is? p ")") (adv! p)
+                       (assoc (node p "BuiltinExpr" b (last-ix p) {}) :_vaarg x :_vatype (qt ty))))))
+               (catch arbace.lang.ExceptionInfo _ nil))
+          (do (seek! p b) (adv! p) (skip-balanced! p) (text-node p "BuiltinExpr" b)))
       (and (identical? k :kw) (#{"__builtin_va_arg" "__builtin_offsetof" "__builtin_bit_cast" "__builtin_types_compatible_p" "__builtin_convertvector" "__builtin_choose_expr"} s))
       (do (adv! p) (when (is? p "(") (skip-balanced! p)) (text-node p "BuiltinExpr" b))
       (and (identical? k :id) (is-at? p 1 "(") (trait-name? s) (not (sc/lookup (scope p) s)))
@@ -1502,7 +1554,8 @@
                                                         (and (= :rr (:t a)) (sema/same-class? e (sema/class-ent (:of a)))) :move
                                                         (and (= :lr (:t a)) (sema/same-class? e (sema/class-ent (:of a)))) :copy
                                                         :else nil)))))))
-          (adv! p) (skip-balanced! p) (text-node p "TypeTraitExpr" b))
+          ;; (its tokens' text kept: a macro's expansion has no text of its own in the file, G5)
+          (adv! p) (skip-balanced! p) (assoc (text-node p "TypeTraitExpr" b) :_text (tok-text p b (last-ix p))))
       ;; builtins clang's AST has as expressions of their own, not calls: the converter writes them as their text
       (and (identical? k :id) (is-at? p 1 "(") (re-matches #"__(c11_|opencl_|scoped_|hip_)?atomic_[a-z_]+" s)
            (not (#{"__atomic_thread_fence" "__atomic_signal_fence" "__atomic_always_lock_free" "__atomic_is_lock_free"} s))
@@ -1545,14 +1598,15 @@
           (node p "MemberExpr" b (:e qn) {:name (:s lp) :isArrow false :inner [(node p "DeclRefExpr" b (:e qn) {:referencedDecl {:name ""}})]})
           ;; a value named through a dependent using-declaration in a class template: unresolved (its text)
           (and (:unres en) (= 1 (count (:parts qn))) (not (:g qn)) (or (in-template? p) (dep-this? p)))
-          (node p "UnresolvedMemberExpr" b (:e qn) {})
+          (node p "UnresolvedMemberExpr" b (:e qn) (merge (written-name p qn) {:referencedDecl {:name (:s lp)}}))
           :else
-          (node p "DeclRefExpr" b (:e qn) {:_ent en
+          (node p "DeclRefExpr" b (:e qn) (merge (written-name p qn)
+                                          {:_ent en
                                            :_mfn (when (and (= :fn (:k en)) (= 1 (count (:parts qn))) (not (:g qn)) (:s lp) (or (in-template? p) (dep-this? p))
                                                             (class-member? p (:s lp)))
                                                    en)
                                            :_objdep (dep-this? p)
-                                           :referencedDecl {:name (or (:s lp) (when (:op lp) (if (re-find #"^[a-z]" (:op lp)) (str "operator " (:op lp)) (str "operator" (:op lp)))) "")}})))
+                                           :referencedDecl {:name (or (:s lp) (when (:op lp) (if (re-find #"^[a-z]" (:op lp)) (str "operator " (:op lp)) (str "operator" (:op lp)))) "")}}))))
       :else (perr p "an expression"))))
 
 (defn- member-node [^P p base arrow]
@@ -1566,7 +1620,7 @@
                       (let [e (sc/lookup (scope p) (:s lp))] (when (and (= :fn (:k e)) (class-member? p (:s lp))) [e (dep-this? p)]))
                       (when-let [[ce d] (object-class p base arrow)]
                         (let [e (sc/find-in (:scope ce) (:s lp))] (when (= :fn (:k e)) [e d])))))]
-    (node p "MemberExpr" (nb base) (:e qn) (cond-> {:name nm :isArrow arrow :inner [base]} mfn (assoc :_mfn mfn :_objdep dep)))))
+    (node p "MemberExpr" (nb base) (:e qn) (cond-> (merge (written-name p qn) {:name nm :isArrow arrow :inner [base]}) mfn (assoc :_mfn mfn :_objdep dep)))))
 
 (defn parse-postfix [^P p x]
   (loop [x x]
@@ -1731,7 +1785,10 @@
            (if (:cpp/parse (ex-data x))
              (let [_ (when debug? (binding [*out* *err*] (println "decline:" (ex-message x))))
                    [e _] (skip-statement! p b)]
-               (decline! p (str "statement: " (:why (ex-data x))))
+               (if (main-tok? p b)
+                 (decline! p (str "statement: " (:why (ex-data x))))
+                 (when (System/getenv "CPP_HDR_TRACE")
+                   (binding [*out* *err*] (println "header statement decline:" (.-f (tok-at p b)) (.-o (tok-at p b)) (ex-message x)))))
                (node p "NativeDecline" b (max b (long e)) {}))
              (throw x))))))
 
@@ -1812,8 +1869,16 @@
                   s (sub-statement p)]
               (node p "ForStmt" b (ne s) {:inner [(or init none) (or cv none) c inc s]}))))))))
 
+(declare try-rest)
+
 (defn- parse-try [^P p ^long b]
   (adv! p)
+  (try-rest p))
+
+(defn- try-rest
+  "A try-block's compound statement and handlers, the cursor after `try` (and, in a constructor's function-try-block, after its
+  mem-initializers: [dcl.fct.def.general]/1's `try ctor-initializer? compound-statement handler-seq`): [body handlers]."
+  [^P p]
   (let [body (parse-compound-stmt p)
         hs (loop [out []]
              (if (is? p "catch")
@@ -1984,8 +2049,11 @@
                         :else (perr p "a GNU attribute")))]
             (recur out)))
       (and (or (is? p "alignas") (is? p "_Alignas")) (is-at? p 1 "("))
-      (let [b (ix p)] (adv! p) (skip-balanced! p) (recur (conj out (node p "AlignedAttr" b b {}))))
+      (let [b (ix p)] (adv! p) (skip-balanced! p) (recur (conj out (node p "AlignedAttr" b b {:_arg (tok-text p (+ b 2) (- (ix p) 2))}))))
       (and (is? p "__declspec") (is-at? p 1 "(")) (do (adv! p) (skip-balanced! p) (recur out))
+      ;; an attribute keyword without its parenthesis (`alignas a`, g++.dg's cpp0x/pr96440.C): clang's "expected '('" (ParseAlignmentSpecifier,
+      ;; ParseGNUAttributes); a declaration-specifier loop that asks again would otherwise never advance (cpp-90)
+      (and (contains? attr-kws (ts (cur p))) (sym? (cur p))) (perr p "'(' after the attribute keyword")
       :else out)))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -2087,7 +2155,13 @@
                 (if (and qn (> (count (:parts qn)) 1))
                   (do (seek! p save) (let [qn (parse-name p :parse)] (recur (assoc ds :type {:t :n :s (name-str p qn)}) words)))
                   (do (seek! p save) (adv! p)
-                      (let [ob (ix p)] (skip-balanced! p)
+                      (let [ob (ix p)]
+                        ;; G4: the operand parsed for the code generator's decltype, keyed by its text
+                        (when (and *full-headers* (not (skim? p)))
+                          (let [x (tentatively p (fn [p] (adv! p) (let [x (with-gt p true (parse-expr p))] (when (is? p ")") x))))]
+                            (when (map? x) (let [^HashMap m (stv p DECLTYPES)] (.put m (str/replace (tok-text p (inc ob) (dec (long (or (some-> (angle-paren-close p ob) long) ob))))
+                                                                                                  #"\s+" "") x)))))
+                        (skip-balanced! p)
                         (recur (assoc ds :type {:t :dt :s (tok-text p (inc ob) (- (ix p) 2))}) words))))))
             (and (#{"__typeof__" "__typeof" "typeof"} s) (not has-type) (is-at? p 1 "("))
             (do (adv! p) (let [ob (ix p)] (skip-balanced! p) (recur (assoc ds :type {:t :n :s (str s "(" (tok-text p (inc ob) (- (ix p) 2)) ")")}) words)))
@@ -2224,7 +2298,14 @@
       (is? p "noexcept")
       (do (adv! p)
           (if (is? p "(")
-            (let [ob (ix p)] (skip-balanced! p) (recur (str q " noexcept(" (tok-text-this p (inc ob) (- (ix p) 2)) ")") (assoc m :noexcept true)))
+            (let [ob (ix p)
+                  ;; G5: the operand parsed for the code generator (noexcept(e) evaluated per specialization), keyed by its text
+                  x (when (and *full-headers* (not (skim? p)))
+                      (tentatively p (fn [p] (adv! p) (let [x (with-gt p true (parse-expr p))] (when (is? p ")") x)))))]
+              (skip-balanced! p)
+              (let [txt (tok-text-this p (inc ob) (- (ix p) 2))]
+                (when (map? x) (.put ^HashMap (stv p DECLTYPES) (str "noexcept:" (str/replace txt #"\s+" "")) x))
+                (recur (str q " noexcept(" txt ")") (assoc m :noexcept true))))
             (recur (str q " noexcept") (assoc m :noexcept true))))
       (and (is? p "throw") (is-at? p 1 "("))
       (do (adv! p) (let [ob (ix p)] (skip-balanced! p) (recur (str q " throw(" (tok-text p (inc ob) (- (ix p) 2)) ")") (assoc m :throw true))))
@@ -2476,7 +2557,13 @@
         (let [lp (when qn (peek (:parts qn)))
               nm (:s lp)
               simple (and qn (= 1 (count (:parts qn))) (not (:g qn)))
-              cs (sc/new-scope :class (scope p) nil)
+              ;; a nested class defined outside its class (class locale::_Impl { ... }): its names looked up in the
+              ;; enclosing class's scope first ([class.nest]/3, [basic.lookup.unqual]/9; G5), a lookup scope standing for it
+              qent (when (and qn (> (count (:parts qn)) 1))
+                     (let [ps (butlast (:parts qn))]
+                       (reduce (fn [e part] (when (:scope e) (sc/find-in (:scope e) (:s part))))
+                               (sc/lookup (scope p) (:s (first ps))) (rest ps))))
+              cs (sc/new-scope :class (if (:scope qent) (sc/new-scope :lookup (scope p) qent) (scope p)) nil)
               tmpl (boolean (and hdr (pos? (long (:n hdr))) (nil? (:args lp))))
               ent (cond-> {:k :type :name nm :tag true :class true :scope cs :fields (ArrayList.) :bases-order (ArrayList.)
                            :ftypes (java.util.HashMap.) :union (= kw "union") :info (sema/new-info kw kb)
@@ -2643,14 +2730,17 @@
   (let [run (fn []
               (with-scope p :fparams nil
                 (declare-params! p names types)
-                (let [inits (when (accept! p ":")
+                ;; a function-try-block: `try` before a constructor's mem-initializers ([dcl.fct.def.general]/1; cpp-90: the
+                ;; mem-initializers were looked for first, and `try : m(x) {` was skimmed from the colon)
+                (let [tb (when (is? p "try") (let [b (ix p)] (adv! p) b))
+                      inits (when (accept! p ":")
                               (if (skim? p) (do (skip-until! p #{"{"}) nil)
                                   (let [ce (or cls (:ent (class-ctx p)))] (init-order (ctor-inits p ce) ce))))]
                   (cond
-                    (is? p "try")
+                    tb
                     (if (skim? p)
-                      (do (adv! p) (skip-balanced! p) (loop [] (when (is? p "catch") (adv! p) (skip-balanced! p) (skip-balanced! p) (recur))) [inits nil])
-                      (let [b (ix p) [body hs] (parse-try p b)] [inits (node p "CXXTryStmt" b (ne (peek hs)) {:inner (into [body] hs)})]))
+                      (do (skip-balanced! p) (loop [] (when (is? p "catch") (adv! p) (skip-balanced! p) (skip-balanced! p) (recur))) [inits nil])
+                      (let [[body hs] (try-rest p)] [inits (node p "CXXTryStmt" tb (ne (peek hs)) {:inner (into [body] hs)})]))
                     (skim? p) (do (skip-balanced! p) [inits nil])
                     :else [inits (parse-compound-stmt p)]))))]
     (if cls
@@ -2810,7 +2900,7 @@
                   _ (skip-asm-label! p)
                   virts (virt-specifiers p)
                   as2 (attr-nodes p)
-                  _ (when (is? p "requires") (skip-requires-clause! p))
+                  rc (when (is? p "requires") (requires-clause! p))
                   ev (if (seq virts) (ne (peek virts)) (long (:e d)))
                   [pure dflt del] (when (is? p "=")
                                     (cond (let [^T n (nxt p 1)] (and (identical? :num (.-k n)) (= "0" (.-s n)))) (do (adv! p) (adv! p) [true nil nil])
@@ -2883,12 +2973,14 @@
                             (#{"static" "extern"} (:storage ds)) (assoc :storageClass (:storage ds))
                             (:inline ds) (assoc :inline true)
                             (:constexpr ds) (assoc :constexpr true)
+                            (:consteval ds) (assoc :_consteval true)
                             (:virtual ds) (assoc :virtual true)
                             pure (assoc :pure true)
                             dflt (assoc :explicitlyDefaulted "default")
                             dk (assoc :_dflt dk)
                             del (assoc :explicitlyDeleted true)
                             (:va fs) (assoc :variadic true)
+                            rc (assoc :trailingRequiresClause rc)
                             (:args lp) (assoc :_args (:args lp))))
                   ;; a friend naming a function template's specialization (friend void ns::f<int>();): its arguments
                   n (if (and (:friend ds) (:args lp) (nil? tmpl))
@@ -3015,7 +3107,7 @@
                      (when nm (str nm (when pack "...")))]))
               ;; a type-constraint: a concept's name (with arguments) before the parameter's
               (and (name-start? p) (when-let [[qn _] (scan-name p)] (concept-ent? (:ent qn))))
-              (let [_ (parse-name p (if (skim? p) :scan :parse))
+              (let [tc (parse-name p (if (skim? p) :scan :parse))
                     pack (accept! p "...")
                     nm (when (id? p) (ts (cur p)))
                     ni (if nm (let [i (ix p)] (adv! p) i) (ix p))
@@ -3024,7 +3116,9 @@
                 [(node p "TemplateTypeParmDecl" b (last-ix p)
                        (cond-> {:tagUsed "typename" :loc (loc p ni)
                                 :inner (into [{:kind "ConceptSpecializationExpr"}] (when dflt [{:kind "TemplateArgument" :type {:qualType (qt dflt)}}]))}
-                         nm (assoc :name nm) pack (assoc :isParameterPack true)))
+                         nm (assoc :name nm) pack (assoc :isParameterPack true)
+                         ;; the type-constraint's concept as written (its name's parts; with arguments: their texts)
+                         (and (map? tc) (seq (:parts tc))) (assoc :_tc (mapv :s (:parts tc)) :_tcargs (boolean (:args (peek (:parts tc)))))))
                  (when nm (str nm (when pack "...")))])
               :else
               (let [ds (parse-decl-specs p :tparam)
@@ -3149,38 +3243,52 @@
     (if-not (is? p "<")
       ;; an explicit instantiation: the converter reads it from its text
       (let [b0 (ix p)
-            names (try (skimming p true
-                         (let [ds (parse-decl-specs p :top) d (parse-declarator p :named) fs (fn-suffix-of d)]
-                           (when fs (:names fs))))
-                       (catch arbace.lang.ExceptionInfo _ nil))
+            fi (try (skimming p true
+                      (let [ds (parse-decl-specs p :top) d (parse-declarator p :named) fs (fn-suffix-of d)
+                            qn (:name (last (name-chain d)))]
+                        {:names (when fs (:names fs))
+                         ;; (G5: a function's name and type, for the code generator)
+                         :fname (when (and fs qn) (fn-name p (peek (:parts qn)) false false))
+                         :ftype (when (and fs (ds-type ds)) (try (qt (build-type (ds-type ds) d)) (catch Exception _ nil)))}))
+                    (catch arbace.lang.ExceptionInfo _ nil))
+            names (:names fi)
             _ (seek! p b0)
             _ (skip-until! p #{";"})
             e (last-ix p)]
         (expect! p ";")
-        [(node p "ExplicitInstantiationDecl" hb e
-               (if (some some? names)
-                 {:inner [{:kind "FunctionProtoTypeLoc" :inner (mapv (fn [nm] (cond-> {:kind "ParmVarDecl"} nm (assoc :name nm))) names)}]}
-                 {}))])
+        [(cond-> (node p "ExplicitInstantiationDecl" hb e
+                       (if (some some? names)
+                         {:inner [{:kind "FunctionProtoTypeLoc" :inner (mapv (fn [nm] (cond-> {:kind "ParmVarDecl"} nm (assoc :name nm))) names)}]}
+                         {}))
+           ;; (G5: the code generator's: extern, and the declaration's tokens' text after `template`)
+           *full-headers* (assoc :_extern (boolean ext) :_text (tok-text p b0 e))
+           (and *full-headers* (:fname fi) (:ftype fi)) (assoc :_fname (:fname fi) :_ftype (:ftype fi)))])
       (with-scope p :tparams nil
         (adv! p)
         (let [[ps names] (parse-template-params p)
               _ (expect! p ">")
-              _ (when (is? p "requires") (skip-requires-clause! p))]
+              rc (when (is? p "requires") (requires-clause! p))]
           (cond
             (is? p "template") (parse-template-decl p ctx ob (inc depth))
             (is? p "concept")
             (do (adv! p)
                 (let [nm (ts (cur p)) ni (ix p)]
                   (adv! p) (attr-nodes p) (expect! p "=")
-                  (skip-until! p #{";"})
-                  (let [e (last-ix p)]
+                  (let [cb (ix p)
+                        _ (skip-until! p #{";"})
+                        ce (ix p)
+                        ;; its constraint expression (P14 (b), the code generator's mode: G4)
+                        cx (when (and *full-headers* (not (skim? p)))
+                             (let [x (tentatively p (fn [p] (seek! p cb) (let [x (with-gt p true (parse-expr p))] (when (= (ix p) ce) x))))]
+                               (when (map? x) x)))
+                        e (last-ix p)]
                     (expect! p ";")
                     (sc/declare! (sc/decl-scope (scope p)) {:k :concept :name nm})
-                    [(node p "ConceptDecl" hb e {:name nm :loc (loc p ni) :inner ps})])))
+                    [(node p "ConceptDecl" hb e (cond-> {:name nm :loc (loc p ni) :inner ps} cx (assoc :constraintExpr cx)))])))
             :else
             (do (st! p THDR {:names (vec (remove nil? names)) :n (count names) :params ps})
                 (let [ns (try (parse-external-decl p (if (= ctx :member) :member :top)) (finally (st! p THDR nil)))]
-                  (mapv #(wrap-template p % hb ob ps names depth) ns)))))))))
+                  (mapv #(cond-> (wrap-template p % hb ob ps names depth) rc (assoc :requiresClause rc)) ns)))))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Namespaces, linkage, using, static_assert, export
@@ -3448,6 +3556,7 @@
 (defn- parse-condition-var [^P p ds base]
   (let [d (parse-declarator p :named)
         qn (:name (last (name-chain d)))
+        _ (when-not qn (perr p "a condition's declarator"))
         nm (name-plain qn)
         ty (build-type base d)
         [x init] (cond (accept! p "=") [(parse-init-clause p) "c"]
@@ -3501,13 +3610,57 @@
       :else (perr p "a constraint"))
     (when (or (is? p "&&") (is? p "||")) (adv! p) (recur))))
 
+(defn- requires-clause!
+  "A requires-clause at its `requires` (P14 (b), the code generator's mode): skipped as before, and in full-header mode
+  its constraint-logical-or-expression parsed as an expression node (clang's TemplateParameterList::getRequiresClause,
+  FunctionDecl::getTrailingRequiresClause), or nil when it does not parse as one."
+  [^P p]
+  (let [b (ix p)
+        _ (skip-requires-clause! p)
+        e (ix p)]
+    (when (and *full-headers* (not (skim? p)))
+      (let [x (tentatively p (fn [p] (seek! p (inc b)) (let [x (with-gt p true (parse-expr p))] (when (= (ix p) e) x))))]
+        (when (map? x) x)))))
+
+(defn- parse-requires-body
+  "A requires-expression's parameters and requirements ([expr.prim.req]), the cursor after its `requires`: the node with
+  its requirements as clang's AST has them (SimpleRequirement, TypeRequirement, CompoundRequirement, NestedRequirement:
+  the code generator's mode, G4)."
+  [^P p b]
+  (with-scope p :block nil
+    (let [pl (when (is? p "(") (adv! p) (parse-param-list p))
+          _ (when pl (declare-params! p (:names pl) (:types pl)))
+          _ (expect! p "{")
+          reqs (loop [out []]
+                 (cond
+                   (accept! p "}") out
+                   (is? p "typename") (let [rb (ix p)] (skip-until! p #{";"}) (let [e (last-ix p)] (expect! p ";")
+                                                                                  (recur (conj out {:kind "TypeRequirement" :type {:qualType (tok-text p (inc rb) e)}}))))
+                   (is? p "{") (do (adv! p)
+                                   (let [x (with-gt p true (parse-expr p))]
+                                     (expect! p "}")
+                                     (accept! p "noexcept")
+                                     (skip-until! p #{";"}) (expect! p ";")
+                                     (recur (conj out {:kind "CompoundRequirement" :inner [x]}))))
+                   (is? p "requires") (do (adv! p)
+                                          (let [x (with-gt p true (parse-expr p))] (expect! p ";")
+                                            (recur (conj out {:kind "NestedRequirement" :inner [x]}))))
+                   :else (let [x (with-gt p true (parse-expr p))] (expect! p ";")
+                           (recur (conj out {:kind "SimpleRequirement" :inner [x]})))))]
+      (node p "RequiresExpr" b (last-ix p) {:inner reqs :params (vec (:params pl))}))))
+
 (defn parse-requires-expr [^P p]
   (let [b (ix p)]
     (adv! p)
-    (when (is? p "(") (skip-balanced! p))
-    (when-not (is? p "{") (perr p "a requires-expression's body"))
-    (skip-balanced! p)
-    (text-node p "RequiresExpr" b)))
+    (or (when (and *full-headers* (not (skim? p)))
+          (let [save (ix p)]
+            (try (parse-requires-body p b)
+                 (catch arbace.lang.ExceptionInfo _ (seek! p save) nil))))
+        (do
+          (when (is? p "(") (skip-balanced! p))
+          (when-not (is? p "{") (perr p "a requires-expression's body"))
+          (skip-balanced! p)
+          (text-node p "RequiresExpr" b)))))
 
 (defn parse-lambda [^P p]
   (let [b (ix p)]
@@ -3593,7 +3746,9 @@
                    e (skip-declaration! p b)]
                (when (= (ix p) b) (adv! p))
                (if (or (skim? p) (not (main-tok? p b)))
-                 []
+                 (do (when (and *full-headers* (not (skim? p)) (System/getenv "CPP_HDR_TRACE"))
+                       (binding [*out* *err*] (println "header decline:" (.-f (tok-at p b)) (.-o (tok-at p b)) (ex-message x))))
+                     [])
                  (do (decline! p (str "declaration: " (:why (ex-data x))))
                      [(node p "NativeDecline" b (max b (long e)) {})])))
              (throw x))))))
@@ -3605,7 +3760,7 @@
   (loop [out []]
     (cond
       (or (eof? p) (is? p "}")) out
-      (and (not (skim? p)) (not (main-tok? p (ix p))))
+      (and (not (skim? p)) (not *full-headers*) (not (main-tok? p (ix p))))
       (do (skimming p true
             (loop []
               (when (and (not (eof? p)) (not (main-tok? p (ix p))))
@@ -3673,6 +3828,42 @@
                      (binding [*out* *err*] (println "repr/cpp: the header-skim cache not written:" (ex-message e)))
                      nil)))))))))
 
+(defn- full-headers!
+  "In full-header mode (*full-headers*, the code generator's): the leading run of header tokens parsed in full, its
+  nodes and the parser's state taken from the cache when it holds them (P15 (b), doc/cpp/CODEGEN.md G5: the skim
+  cache's table and key, the run's tokens and `parts`, a key of its own kind), else parsed and written into it:
+  [:hit|:stored|nil nodes]."
+  [^P p parts]
+  (let [n (.-cnt p)
+        k (long (loop [i 0] (if (or (>= i (dec n)) (main-tok? p i)) i (recur (inc i)))))
+        run (fn [] (loop [out []]
+                     (if (and (not (eof? p)) (not (main-tok? p (ix p))))
+                       (recur (if (is? p "}") (do (adv! p) out) (into out (decl-or-decline p :top))))
+                       out)))
+        ;; (opt-in, CPP_FULL_CACHE=1: on the tools' host reading the table back costs about what parsing does, G5.2)
+        dir (when (and parts (= "1" (System/getenv "CPP_FULL_CACHE")) (>= k (long skim-cache-min))) (skim/cache-dir))]
+    (if-not dir
+      [nil (run)]
+      (let [t0 (System/nanoTime)
+            path (str dir "/" (skim/digest (concat ["full"] parts [(.-year p) (.-gnu p) (.-main p) (tokens-text p k)])) ".full")
+            t1 (System/nanoTime)
+            st (try (skim/read-state path) (catch Exception _ nil))
+            _ (when (System/getenv "REPR_CPP_TIME")
+                (binding [*out* *err*] (println (format "repr/cpp native: the full-header key %.2f s, cache read %.2f s" (/ (- t1 t0) 1e9) (/ (- (System/nanoTime) t1) 1e9)))))]
+        (if st
+          (let [[root mt i nodes ^HashMap dts unnamed] st]
+            (st! p SCOPE root) (st! p ROOT root) (st! p MTMPL mt) (seek! p (long i))
+            (.putAll ^HashMap (stv p DECLTYPES) dts) (st! p UNNAMED unnamed)
+            [:hit nodes])
+          (let [root (stv p ROOT)
+                nodes (run)]
+            [(when (and (identical? root (stv p SCOPE)) (nil? (stv p CLS)) (nil? (stv p THDR)))
+               (try (skim/write-state path [root (stv p MTMPL) (ix p) nodes (stv p DECLTYPES) (stv p UNNAMED)]) :stored
+                    (catch Exception e
+                      (binding [*out* *err*] (println "repr/cpp: the full-header cache not written:" (ex-message e)))
+                      nil)))
+             nodes]))))))
+
 (defn parse-unit
   "The main file's top-level declarations as clang's AST nodes, from the parser's tokens `toks` (tokens'):
   {:nodes [...] :declines n :reasons {why n} :skim-cache :hit|:stored|nil}. `main` the main file's name in locations,
@@ -3683,13 +3874,16 @@
   (let [root (sc/new-scope :ns nil {:k :ns :name ""})
         p (P. toks (alength toks) (long-array 1) (object-array 16) main src year gnu)]
     (st! p SCOPE root) (st! p ROOT root) (st! p SKIM false) (st! p MTMPL (HashSet.)) (st! p DECLINES 0) (st! p GTOP true)
-    (st! p UNNAMED 0) (st! p REASONS (HashMap.)) (st! p CLS nil) (st! p THDR nil) (st! p PATTRS (ArrayList.)) (st! p USES (ArrayList.))
+    (st! p UNNAMED 0) (st! p REASONS (HashMap.)) (st! p CLS nil) (st! p THDR nil) (st! p PATTRS (ArrayList.)) (st! p USES (ArrayList.)) (st! p DECLTYPES (HashMap.))
     (doseq [nm builtin-types] (sc/declare! root {:k :type :name nm}))
-    (let [cached (skim-headers! p cache-parts)
-          nodes (loop [out []]
+    (let [[cached pre] (if *full-headers* (full-headers! p cache-parts) [(skim-headers! p cache-parts) []])
+          nodes (loop [out (vec pre)]
                   (let [out (into out (decl-seq p :top))]
                     (if (eof? p) out (do (adv! p) (recur out)))))]
       {:nodes (let [^ArrayList us (stv p USES)
-                    r (when (seq us) (sema/resolve-uses (vec us) year))]
+                    ;; (not in full-header mode: the headers' classes' uses make its graph cyclic; the code generator
+                    ;; decides the exception specifications itself)
+                    r (when (and (seq us) (not *full-headers*)) (sema/resolve-uses (vec us) year))]
                 (if (seq r) (sema/patch-defaulted nodes r) nodes))
-       :declines (stv p DECLINES) :reasons (into {} (stv p REASONS)) :root (stv p ROOT) :skim-cache cached}))))
+       :declines (stv p DECLINES) :reasons (into {} (stv p REASONS)) :root (stv p ROOT) :skim-cache cached
+       :decltypes (into {} (stv p DECLTYPES))}))))

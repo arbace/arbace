@@ -12,7 +12,9 @@
   (:require [arbace.cpp.abi :as abi]
             [arbace.cpp.sema :as sema]
             [arbace.cpp.template]
+            [arbace.cpp.inline :as inl]
             [arbace.repr.cpp.native :as native]
+            [arbace.repr.cpp.parse :as ps]
             [arbace.repr.llvm :as llvm]
             [arbace.cpp.lower :as lower]
             [arbace.string :as str]))
@@ -134,7 +136,9 @@
 (defn field-place
   "The place of field `i` of class `cid` in the object at `base`: its address, or a bit-field's marker."
   [base cid i]
-  (let [f (nth (:fields (abi/cls cid)) i) l (abi/layout cid) uoff (long (nth (:fields l) i))]
+  (let [f (or (get (:fields (abi/cls cid)) i) (fail :codegen "no field " i " of " (:name (abi/cls cid))))
+        l (abi/layout cid)
+        uoff (long (or (get (:fields l) i) (fail :codegen "no laid-out field " i " of " (:name (abi/cls cid)) " (" (count (:fields l)) " laid out)")))]
     (if (:bits f)
       {:bf (offset! base uoff) :shift (- (long (nth (:bitoffs l) i)) (* 8 uoff)) :w (:bits f) :ty (:ty f)}
       (offset! base uoff))))
@@ -153,6 +157,8 @@
 (defn- elem-type [t] (let [t (abi/unq t)] (if (or (abi/scalar? t) (abi/ref? t)) (abi/llvm-type t) (list 'array (abi/size-of t) 'i8))))
 
 (defn- zero-of [t] (let [l (abi/llvm-type t true)] (cond (abi/mfn-ptr? (abi/unq t)) 'zeroinitializer (abi/mptr? (abi/unq t)) -1 (= l 'ptr) 'null (#{'float 'double 'x86_fp80} l) (list 'fp "0.000000e+00") (= l 'i1) false :else 0)))
+
+(defn- zero-mem "A scalar's zero as memory holds it (bool an i8 0)." [t] (let [z (zero-of t)] (if (false? z) 0 z)))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Functions referenced
@@ -258,6 +264,17 @@
 
 (declare nothrow-fn?)
 
+(defn- extern-inst?
+  "Whether the function is a member of a class (or of a class nested in one) an explicit instantiation declaration
+  names (extern template class basic_ostream<char>): the library defines it."
+  [f]
+  (if (:extern-inst f) true
+  (loop [cid (:cls f)]
+    (when cid
+      (let [c (abi/cls cid)]
+        (or (:extern-inst c)
+            (recur (loop [s (:outer c)] (cond (nil? s) nil (:cls s) (:cls s) :else (recur (:parent s)))))))))))
+
 (defn- want-fn!
   "The function's symbol (a constructor's or destructor's variant `v`), its definition queued (or its declaration
   written)."
@@ -267,7 +284,8 @@
     (when c1 (swap! *top* update :c1 (fnil conj #{}) c1))
     (when-not (contains? (:wanted @*top*) [fid v])
       (swap! *top* update :wanted conj [fid v])
-      (if (or (:tbody f) (and (:implicit f) (not (:trivial f))) (and (:defaulted f) (not (:trivial f))) (:tinits f) (:tassign f))
+      (if (and (or (:tbody f) (and (:implicit f) (not (:trivial f))) (and (:defaulted f) (not (:trivial f))) (:tinits f) (:tassign f))
+               (not (and (:tbody f) (not (:implicit f)) (not (:defaulted f)) (extern-inst? f) (not (:always-inline f)))))
         (swap! *top* update :queue conj [fid v])
         (let [[r ps va plan] (fn-sig f v)] (declare! nm r ps :va va :nounwind (nothrow-fn? f) :pattrs (:pattrs plan)))))
     (gsym nm)))
@@ -280,7 +298,8 @@
 (def ^:dynamic *extend* nil) ; atom: a reference's temporary is lifetime-extended into these cleanups
 (def ^:dynamic *extend-now* false) ; the temporary being pushed is the one a declared reference binds
 
-(def ^:dynamic *extend-root* nil) ; the complete temporary a declared reference binds through subobjects ([class.temporary])
+(def ^:dynamic *extend-root* nil)
+(def ^:dynamic *decl-e* nil) ; the prvalue a declared variable is initialized from (a std::initializer_list's array extended) ; the complete temporary a declared reference binds through subobjects ([class.temporary])
 
 (defn- extend-root
   "The expression whose temporary a reference bound to the glvalue `e` extends: `e` itself, or the object whose
@@ -289,12 +308,14 @@
   (loop [e e]
     (case (:op e)
       :field (recur (:obj e))
-      (:base-lv :derived-lv) (recur (:e e))
+      ;; a cast without a user-defined conversion to a glvalue of the operand's object ([class.temporary]/6.6, CWG1376: g++.dg's
+      ;; cpp0x/rv-life.C, static_cast<T&&>(T()) extends the temporary; cpp-90)
+      (:base-lv :derived-lv :reinterpret-lv) (recur (:e e))
       :deref (let [p (:e e)] (if (= :ptradd (:op p)) (recur (:p p)) e))
       :decay (recur (:e e))
       e)))
 
-(declare emit-rv emit-lv emit-into emit-init call-dtor! eh-typeinfo!)
+(declare emit-rv emit-lv emit-into emit-init call-dtor! eh-typeinfo! dealloc-call!)
 
 (defn- nontrivial-dtor? [cid] (and cid (not (sema/trivial-dtor? cid))))
 
@@ -372,8 +393,10 @@
 (defn- run-cleanup-eh! [c]
   (cond
     (:eh-only c) (call-dtor! (:cls c) (:addr c) (:vtt c))
-    (:delete c) (do (declare! "_ZdlPvm" 'void '[ptr i64] :nounwind true)
-                    (emit! (list 'call 'void (gsym "_ZdlPvm") [['ptr (:delete c)] ['i64 (:size c)]] :attrs [:nounwind])))
+    (:delete c) (if (:dealloc c)
+                  (dealloc-call! (:dealloc c) (:delete c) (:size c) (:align c) (:places c))
+                  (do (declare! "_ZdlPvm" 'void '[ptr i64] :nounwind true)
+                      (emit! (list 'call 'void (gsym "_ZdlPvm") [['ptr (:delete c)] ['i64 (:size c)]] :attrs [:nounwind]))))
     :else (run-cleanup! c)))
 
 (defn- clang-call-terminate! []
@@ -532,7 +555,8 @@
       (and (:trivial f) (= :ctor (:kind f)) (empty? (:ps (:ty f)))) nil
       :else
       (let [plan (nth (fn-sig f v) 3)
-            callee (if virtual (vcall-target (:cls f) fid nil obj) (want-fn! fid (if ab 2 v)))]
+            ;; (a virtual destructor called explicitly: its complete-object slot, D1)
+            callee (if virtual (vcall-target (:cls f) fid (when (= :dtor (:kind f)) 1) obj) (want-fn! fid (if ab 2 v)))]
         (binding [*as-base* nil]
           (emit-call! plan callee va (:ty f) inits (when (and (:cls f) (not (:static f))) obj) dest (nothrow-fn? f)
                       (when (takes-vtt? f v) (:vtt ab))))))))
@@ -730,7 +754,17 @@
     (binding [*extend-now* (or *extend-now* (identical? e *extend-root*))] (push-temp-cleanup! (:id (abi/unq (:ty e))) t))
     t))
 
+(declare folds-to short-circuit-branches! cond-branches2!)
+
 (defn- short-circuit! [e]
+  ;; a left operand that folds (ScalarExprEmitter::VisitBinLAnd, VisitBinLOr): the right one alone, or a constant
+  (let [k (folds-to (:l e)) land (= :land (:op e))]
+    (cond
+      (nil? k) (short-circuit-branches! e)
+      (= k land) (emit-rv (:r e))
+      :else (not land))))
+
+(defn- short-circuit-branches! [e]
   (let [land (= :land (:op e))
         rhs (new-label (if land "land.rhs" "lor.rhs")) end (new-label (if land "land.end" "lor.end"))
         a (emit-rv (:l e))
@@ -742,8 +776,14 @@
       (val! (list 'phi 'i1 [(not land) from] [b from2])))))
 
 (defn- cond-branches!
-  "A conditional operator: the operands' values from each branch (by `f`), joined by a phi of type `t` (nil: no value)."
+  "A conditional operator: the operands' values from each branch (by `f`), joined by a phi of type `t` (nil: no value);
+  a condition that folds: the live operand alone (ScalarExprEmitter::VisitAbstractConditionalOperator)."
   [e f t]
+  (if-some [k (folds-to (:c e))]
+    (f (if k (:then e) (:else e)))
+    (cond-branches2! e f t)))
+
+(defn- cond-branches2! [e f t]
   (let [lt (new-label "cond.true") lf (new-label "cond.false") le (new-label "cond.end")
         c (emit-rv (:c e))]
     (condbr! c lt lf)
@@ -763,6 +803,40 @@
              :else (arith! (if (= "++" (:o e)) "+" "-") (abi/underlying t) old 1))]
     (store! t nv a)
     (if (:post e) old a)))
+
+(declare emit-rv)
+
+(defn- place-values
+  "The placement arguments' operands for the parameters `ps` (scalars, pointers and references: an allocation
+  function's placement parameters)."
+  [ps inits]
+  (doseq [p ps] (when (abi/class? (abi/unq p)) (fail :new "a class placement argument by value")))
+  (arg-values ps inits))
+
+(defn- alloc-call!
+  "The call of the allocation function `a` (arbace.cpp.sema's choice) for `size` bytes: its result's operand and the
+  placement arguments' operands (for the matching deallocation function)."
+  [a size]
+  (if-let [fid (:fn a)]
+    (let [f (sema/fnd fid) ps (vec (:ps (:ty f))) k (if (:align a) 2 1)
+          places (place-values (subvec ps k) (:places a))
+          args (vec (concat [['i64 size]] (when (:align a) [['i64 (:align a)]]) places))
+          r (call-insn! 'ptr (if (:va (:ty f)) (list 'fn 'ptr (conj (vec (repeat (count ps) 'ptr)) '&)) 'ptr) (want-fn! fid) args (nothrow-fn? f))]
+      [r places])
+    (let [nm (:sym a) ps (if (:align a) '[i64 i64] '[i64])]
+      (declare! nm 'ptr ps)
+      [(call-insn! 'ptr 'ptr (gsym nm) (vec (concat [['i64 size]] (when (:align a) [['i64 (:align a)]]))) false) []])))
+
+(defn- dealloc-call!
+  "The call of the deallocation function `d` on `p` (`size` and `align` operands when it takes them, the placement
+  arguments' operands for a placement one)."
+  [d p size align places]
+  (let [args (vec (concat [['ptr p]] (when (:size d) [['i64 size]]) (when (:align d) [['i64 align]]) (when (:place d) places)))]
+    (if-let [fid (:fn d)]
+      (call-insn! 'void 'void (want-fn! fid) args (nothrow-fn? (sema/fnd fid)))
+      (let [nm (:sym d)]
+        (declare! nm 'void (mapv first args) :nounwind true)
+        (emit! (list 'call 'void (gsym nm) args :attrs [:nounwind]))))))
 
 (defn emit-rv
   "The operand of the scalar prvalue `e`."
@@ -786,10 +860,20 @@
                     (val! (list 'select ['i1 isnull] ['i64 -1] ['i64 a])))))
     :mcall (if (= :pr (:cat e)) (mcall! e nil) (load! (:ty e) (emit-lv e)))
     :zero-val (zero-of (:ty e))
-    :load (let [x (:e e)]
-            (if (:raw x)
+    :load (let [x (:e e)
+                ;; a const scalar variable of static storage whose initializer folded (sema's global-init): its value, as clang's
+                ;; tryEmitAsConstant emits a DeclRefExpr to a constant-emittable variable (cpp-90; the variable then needs no
+                ;; definition unless its address is taken)
+                cv (when (= :var (:op x))
+                     (let [v (sema/var* (:id x)) gi (:ginit v)]
+                       (when (and (#{:global :member-static} (:storage v)) (:c (:ty v)) (not (abi/ref? (:ty v)))
+                                  (abi/scalar? (abi/unq (:ty v))) (= :expr (:i gi)) (#{:int :float} (:op (:e gi))))
+                         (:e gi))))]
+            (cond
+              cv (emit-rv (assoc cv :ty (:ty e)))
+              (:raw x)
               (val! (list 'load 'ptr ['ptr (if (= :var (:op x)) (var-addr (:id x)) (emit-lv x))] :align 8))
-              (load! (:ty e) (emit-lv x))))
+              :else (load! (:ty e) (emit-lv x))))
     :cast (cast! e)
     :decay (emit-lv (:e e))
     :fnaddr (want-fn! (:fn e))
@@ -837,20 +921,32 @@
     :new (let [et (:et e)
                cid (when (abi/class? (abi/unq et)) (:id (abi/unq et)))
                sz (abi/size-of et)]
-           (if (:n e)
+           (cond
+             ;; new (p) T: the object constructed at p ([new.delete.placement]; clang calls no operator new; G4)
+             (and (:placement e) (not (:n e))) (let [p (emit-rv (:placement e))] (emit-init p et (:init e)) p)
+             (:n e)
              (let [n (emit-rv (:n e))
-                   cookie (nontrivial-dtor? cid)
+                   cookie (if (contains? e :cookie) (:cookie e) (nontrivial-dtor? cid))
+                   ;; the cookie's size (Itanium §2.7: max(sizeof(size_t), alignof(T)))
+                   csz (max 8 (long (abi/align-of et)))
                    bytes (val! (list 'mul 'i64 n sz))
-                   bytes (if cookie (val! (list 'add 'i64 bytes 8)) bytes)
-                   _ (declare! "_Znam" 'ptr '[i64])
-                   raw (call-insn! 'ptr 'ptr (gsym "_Znam") [['i64 bytes]] false)
-                   p (if cookie (do (emit! (list 'store ['i64 n] ['ptr raw] :align 8)) (offset! raw 8)) raw)
+                   bytes (if cookie (val! (list 'add 'i64 bytes csz)) bytes)
+                   ;; (new (p) T[n]: at p, no cookie, Itanium §2.7)
+                   [raw _] (if (:placement e) [(emit-rv (:placement e)) nil] (alloc-call! (or (:alloc e) {:sym "_Znam" :places []}) bytes))
+                   nullable (when-let [fid (:fn (:alloc e))] (and (not (:placement e)) (:noexcept (sema/fnd fid))))
+                   [lend from] (when nullable
+                                 (let [lnn (new-label "new.notnull") lend (new-label "new.cont")
+                                       z (val! (list 'icmp :eq 'ptr raw 'null))
+                                       from (:label @*f*)]
+                                   (condbr! z lend lnn) (close-block!) (start! lnn)
+                                   [lend from]))
+                   p (if cookie (do (emit! (list 'store ['i64 n] ['ptr (offset! raw (- csz 8))] :align 8)) (offset! raw csz)) raw)
                    init (:init e)]
                ;; the elements: the list's, then the rest default-initialized (a loop)
                (let [items (when (= :list (:i init)) (:items init))
                      fill (if (= :list (:i init)) (:fill init) init)]
                  (doseq [[i it] (map-indexed vector items)] (emit-init (offset! p (* i sz)) et it))
-                 (when-not (#{:none} (:i fill))
+                 (when-not (or (nil? fill) (#{:none} (:i fill)))
                    (let [lc (new-label "new.loop") lb (new-label "new.body") le (new-label "new.end")
                          ix (alloca! 'i64 8)]
                      (emit! (list 'store ['i64 (count items)] ['ptr ix] :align 8))
@@ -862,14 +958,31 @@
                        (emit! (list 'store ['i64 (val! (list 'add 'i64 i 1))] ['ptr ix] :align 8))
                        (br! lc)
                        (begin! le)))))
-               p)
-             (do (declare! "_Znwm" 'ptr '[i64])
-                 (let [p (call-insn! 'ptr 'ptr (gsym "_Znwm") [['i64 sz]] false)
-                       d (count (:cleanups @*f*))]
-                   (when (#{:ctor :expr} (:i (:init e))) (swap! *f* update :cleanups conj {:delete p :size sz}))
+               (if nullable
+                 (let [l (:label @*f*)] (begin! lend) (val! (list 'phi 'ptr ['null from] [p l])))
+                 p))
+             :else
+             (let [[p places] (alloc-call! (or (:alloc e) {:sym "_Znwm" :places []}) sz)
+                   d (count (:cleanups @*f*))
+                   ;; a non-throwing allocation function's null result: no initialization ([expr.new]/17)
+                   nullable (when-let [fid (:fn (:alloc e))] (:noexcept (sema/fnd fid)))
+                   [lnn lend from] (when nullable
+                                     (let [lnn (new-label "new.notnull") lend (new-label "new.cont")
+                                           z (val! (list 'icmp :eq 'ptr p 'null))
+                                           from (:label @*f*)]
+                                       (condbr! z lend lnn) (close-block!) (start! lnn)
+                                       [lnn lend from]))]
+               ;; the storage freed when the initialization throws, by the matching deallocation function ([expr.new]/26)
+               (do
+                   (when (and (#{:ctor :expr :list} (:i (:init e))) (or (:dealloc e) (nil? (:alloc e))))
+                     (swap! *f* update :cleanups conj (if (:dealloc e)
+                                                        {:delete p :size sz :dealloc (:dealloc e) :align (abi/align-of et) :places places}
+                                                        {:delete p :size sz})))
                    (emit-init p et (:init e))
                    (swap! *f* update :cleanups #(subvec % 0 d))
-                   p))))
+                   (if nullable
+                     (let [l (:label @*f*)] (begin! lend) (val! (list 'phi 'ptr ['null from] [p l])))
+                     p)))))
     :throw (if-let [t (:ety e)]
              (let [_ (declare! "__cxa_allocate_exception" 'ptr '[i64] :nounwind true)
                    _ (declare! "__cxa_throw" 'void '[ptr ptr ptr])
@@ -886,6 +999,36 @@
                  (emit! '(unreachable))
                  nil))
     :exn-ptr (:exn-adj @*f*)
+    :alloca (val! (list 'alloca 'i8 :count ['i64 (emit-rv (:e e))] :align 16))
+    ;; va_arg as clang's X86_64ABIInfo::EmitVAArg writes it for one INTEGER or SSE eightbyte: from the register save
+    ;; area while gp_offset <= 40 (fp_offset <= 160), else from the overflow area
+    :va-arg (let [t (:ty e)
+                  sse (abi/floating? t)
+                  _ (when (or (abi/class? t) (= :ldouble (abi/bn t)) (> (long (abi/size-of t)) 8)) (fail :va "va_arg of " (pr-str t)))
+                  ap (emit-rv (:e e))
+                  op (if sse (offset! ap 4) ap)
+                  o (val! (list 'load 'i32 ['ptr op] :align 4))
+                  fits (val! (list 'icmp :ule 'i32 o (if sse 160 40)))
+                  lr (new-label "vaarg.in_reg") lm (new-label "vaarg.in_mem") le (new-label "vaarg.end")]
+              (condbr! fits lr lm)
+              (begin! lr)
+              (let [rsa (val! (list 'load 'ptr ['ptr (offset! ap 16)] :align 8))
+                    ar (val! (list 'getelementptr 'i8 ['ptr rsa] ['i32 o]))
+                    _ (emit! (list 'store ['i32 (val! (list 'add 'i32 o (if sse 16 8)))] ['ptr op] :align 4))
+                    fr (:label @*f*)]
+                (br! le) (close-block!) (start! lm)
+                (let [oa (offset! ap 8)
+                      ov (val! (list 'load 'ptr ['ptr oa] :align 8))
+                      _ (emit! (list 'store ['ptr (val! (list 'getelementptr 'i8 ['ptr ov] ['i32 8]))] ['ptr oa] :align 8))
+                      fm (:label @*f*)]
+                  (begin! le)
+                  (let [a (val! (list 'phi 'ptr [ar fr] [ov fm]))]
+                    (load! t a)))))
+    :va (let [nm (case (:which e) :va-start "llvm.va_start.p0" :va-end "llvm.va_end.p0" :va-copy "llvm.va_copy.p0")
+              as (mapv (fn [a] ['ptr (emit-rv a)]) (:args e))]
+          (declare! nm 'void (mapv first as) :nounwind true)
+          (emit! (list 'call 'void (gsym nm) as :attrs [:nounwind]))
+          nil)
     :dyncast (if (:void e)
                ;; dynamic_cast<void*>: the most derived object, by the vtable's offset to top
                (let [p (emit-rv (:e e))]
@@ -902,6 +1045,31 @@
               (condbr! isnull lend lnn)
               (begin! lnn)
               (cond
+                (and (:array e) (:dealloc e))
+                ;; a cookie when the destructor is not trivial or operator delete[] takes the size (Itanium §2.7)
+                (if (:cookie e)
+                  (let [csz (max 8 (long (abi/align-of et)))
+                        raw (offset! p (- csz))
+                        n (val! (list 'load 'i64 ['ptr (offset! p -8)] :align 8))
+                        sz (abi/size-of et)]
+                    (when (nontrivial-dtor? cid)
+                      (let [lc (new-label "delete.loop") lb (new-label "delete.body") ld (new-label "delete.free")
+                            ix (alloca! 'i64 8)]
+                        (emit! (list 'store ['i64 n] ['ptr ix] :align 8))
+                        (begin! lc)
+                        (let [i (val! (list 'load 'i64 ['ptr ix] :align 8)) c (val! (list 'icmp :eq 'i64 i 0))]
+                          (condbr! c ld lb)
+                          (begin! lb)
+                          (let [j (val! (list 'sub 'i64 i 1))]
+                            (emit! (list 'store ['i64 j] ['ptr ix] :align 8))
+                            (call-dtor! cid (val! (list 'getelementptr :inbounds (elem-type et) ['ptr p] ['i64 j])))
+                            (br! lc)))
+                        (begin! ld)))
+                    (dealloc-call! (:dealloc e) raw (val! (list 'add 'i64 (val! (list 'mul 'i64 sz n)) csz)) (abi/align-of et) []))
+                  (dealloc-call! (:dealloc e) p (abi/size-of et) (abi/align-of et) []))
+                (and (:dealloc e) (not (and cid (:dtor (abi/cls cid)) (:virtual (sema/fnd (:dtor (abi/cls cid))))  (not (:global e)))))
+                (do (call-dtor! cid p)
+                    (dealloc-call! (:dealloc e) p (abi/size-of et) (abi/align-of et) []))
                 (:array e)
                 (if (nontrivial-dtor? cid)
                   (let [raw (offset! p -8)
@@ -1000,7 +1168,10 @@
     :icall (if (= :pr (:cat e)) (materialize! e) (icall! e nil))
     :temp-obj (materialize! e)
     :raw (fail :codegen "raw as an lvalue")
-    (fail :codegen "lvalue " (:op e))))
+    ;; (another class prvalue: materialized, [conv.rval])
+    (if (and (= :pr (:cat e)) (abi/class? (abi/unq (:ty e))))
+      (materialize! e)
+      (fail :codegen "lvalue " (:op e)))))
 
 (alter-var-root #'emit-rv (fn [f] (fn [e] (if (= :raw (:op e)) (:v e) (f e)))))
 
@@ -1014,6 +1185,32 @@
     :mcall (mcall! e addr)
     :cond (cond-branches! e #(emit-into % addr) nil)
     :comma (do (emit-rv (:l e)) (emit-into (:r e) addr))
+    ;; <compare>'s orderings: one signed char ([cmp.categories]: libstdc++'s _M_value), a built-in three-way
+    ;; comparison's -1, 0, 1 (partial_ordering's unordered 2) or a constant
+    :ord (emit! (list 'store ['i8 (:v e)] ['ptr addr] :align 1))
+    :cmp3 (let [t (:ct e) a (emit-rv (:l e)) b (emit-rv (:r e))
+                lt (cmp! "<" t a b) eq (cmp! "==" t a b)
+                v (if (abi/floating? t)
+                    (let [gt (cmp! ">" t a b)
+                          x (val! (list 'select ['i1 eq] ['i8 0] ['i8 2]))
+                          y (val! (list 'select ['i1 gt] ['i8 1] ['i8 x]))]
+                      (val! (list 'select ['i1 lt] ['i8 -1] ['i8 y])))
+                    (let [x (val! (list 'select ['i1 eq] ['i8 0] ['i8 1]))]
+                      (val! (list 'select ['i1 lt] ['i8 -1] ['i8 x]))))]
+            (emit! (list 'store ['i8 v] ['ptr addr] :align 1)))
+    ;; std::initializer_list<E>'s prvalue: its backing array (a temporary, CXXStdInitializerListExpr), then
+    ;; libstdc++'s object {const E* _M_array; size_t _M_len}
+    :std-init-list
+    (let [el (:elem e) n (long (:n e)) sz (abi/size-of el)
+          arr (slot! {:k :arr :n (max n 1) :of el})]
+      (doseq [[i it] (map-indexed vector (:items e))] (emit-init (offset! arr (* i sz)) el it))
+      (let [cid (when (abi/class? el) (:id el))]
+        (when (and (pos? n) (nontrivial-dtor? cid))
+          (let [c {:array arr :n n :cls cid}]
+            ;; a declared std::initializer_list's array lives as long as it ([dcl.init.list]/6)
+            (if (and *extend* (identical? e *decl-e*)) (swap! *extend* conj c) (swap! *temps* conj c)))))
+      (emit! (list 'store ['ptr arr] ['ptr addr] :align 8))
+      (emit! (list 'store ['i64 n] ['ptr (offset! addr 8)] :align 8)))
     (if (#{:lv :xv} (:cat e))
       (memcpy! addr (emit-lv e) (abi/size-of (:ty e)))
       (fail :codegen "class prvalue " (:op e)))))
@@ -1061,10 +1258,18 @@
 (defn- push-cleanup! [c] (swap! *f* update :cleanups conj c))
 (defn- cleanup-depth [] (count (:cleanups @*f*)))
 (defn- unwind-to! [^long depth]
-  (doseq [c (reverse (subvec (:cleanups @*f*) depth))] (run-cleanup! c)))
+  ;; each cleanup run with the cleanups below it alone in force (clang's PopCleanupBlock: a cleanup's EH scope is popped before its
+  ;; normal-path code is emitted), so a destructor that throws (noexcept(false)) unwinds through the outer cleanups and handlers,
+  ;; not into its own object's cleanup again (cpp-90: a second destructor call during the unwinding, std::terminate); the stack
+  ;; is put back after, for the jumps that unwind without popping (break, continue, return)
+  (let [all (:cleanups @*f*)]
+    (doseq [i (range (dec (count all)) (dec depth) -1)]
+      (swap! *f* assoc :cleanups (subvec all 0 i))
+      (run-cleanup! (nth all i)))
+    (swap! *f* assoc :cleanups all)))
 (defn- pop-to! [^long depth] (unwind-to! depth) (swap! *f* update :cleanups #(subvec % 0 depth)))
 
-(declare emit-stmt emit-d0! emit-try!)
+(declare emit-stmt emit-d0! emit-try! emit-if-branches!)
 
 (defn- local-decl! [s]
   (let [v (sema/var* (:var s))
@@ -1073,7 +1278,7 @@
         addr (if nrvo (:sret @*f*) (slot! (if (abi/ref? t) (abi/ptr abi/void) t)))]
     (swap! *f* assoc-in [:addr (:var s)] addr)
     (let [ext (atom [])]
-      (with-full (binding [*extend* ext] (emit-init addr t (:init s))))
+      (with-full (binding [*extend* ext *decl-e* (when (= :expr (:i (:init s))) (:e (:init s)))] (emit-init addr t (:init s))))
       (doseq [c @ext] (push-cleanup! c)))
     (when-not nrvo
       (let [bt (loop [t (abi/unq t)] (if (abi/arr? t) (recur (abi/unq (:of t))) t))]
@@ -1089,10 +1294,10 @@
         t (:ty v)
         [s a] (abi/size-align t)
         init (:sinit v)
-        cinit (when (#{:none :zero} (:i init)) (if (abi/scalar? (abi/unq t)) (zero-of t) 'zeroinitializer))
+        cinit (when (#{:none :zero} (:i init)) (if (abi/scalar? (abi/unq t)) (zero-mem t) 'zeroinitializer))
         cexpr (when (and (= :expr (:i init)) (abi/scalar? (abi/unq t))) (let [e (:e init)] (when (#{:int :float :null} (:op e)) (emit-rv e))))
         ltype (if (abi/scalar? (abi/unq t)) (abi/llvm-type t) (list 'array s 'i8))]
-    (add-top! (list 'llvm/global (gsym nm) ltype (or cinit cexpr (if (abi/scalar? (abi/unq t)) (zero-of t) 'zeroinitializer)) :linkage :internal :align a))
+    (add-top! (list 'llvm/global (gsym nm) ltype (or cinit cexpr (if (abi/scalar? (abi/unq t)) (zero-mem t) 'zeroinitializer)) :linkage :internal :align a))
     (when-not (or cinit cexpr)
       ;; the guard ([stmt.dcl]/3, Itanium §3.3.2)
       (let [g (str "_ZGV" (subs nm 2))
@@ -1236,7 +1441,33 @@
     (close-block!) (start! cont)))
 
 ;; the if statement
+(defn- contains-label?
+  "Whether a statement holds a label, or a case or default outside a switch of its own (clang's ContainsLabel)."
+  ([s] (contains-label? s false))
+  ([s in-switch]
+   (cond
+     (map? s) (case (:s s)
+                :label true
+                (:case :default) (or (not in-switch) (some #(contains-label? % in-switch) (vals s)))
+                :switch (boolean (some #(contains-label? % true) (vals s)))
+                (boolean (some #(contains-label? % in-switch) (vals s))))
+     (sequential? s) (boolean (some #(contains-label? % in-switch) s))
+     :else false)))
+
+(defn- folds-to
+  "The condition's folded value (arbace.cpp.sema/fold-mark's :folds): true, false or nil."
+  [c]
+  (:folds c))
+
 (defn- emit-if! [s]
+  ;; a condition that folds: the dead branch not written when it holds no label (CodeGenFunction::EmitIfStmt)
+  (let [k (folds-to (:cond s))
+        [live dead] (if k [(:then s) (:else s)] [(:else s) (:then s)])]
+    (if (and (some? k) (not (contains-label? dead)))
+      (when live (let [d (cleanup-depth)] (emit-stmt live) (when-not (:term @*f*) (unwind-to! d)) (swap! *f* update :cleanups #(subvec % 0 d))))
+      (emit-if-branches! s))))
+
+(defn- emit-if-branches! [s]
   (let [lt (new-label "if.then") le (new-label "if.else") lend (new-label "if.end")
         c (with-full (emit-rv (:cond s)))]
     (condbr! c lt (if (:else s) le lend))
@@ -1681,7 +1912,8 @@
         (when (:personality s) (declare! "__gxx_personality_v0" 'i32 [] :va true))
         (add-top! (apply list 'llvm/define (gsym nm) ret (cond-> params va (conj '&))
                          (concat (linkage-of f)
-                                 (when (nothrow-fn? f) [:attrs [:nounwind]])
+                                 (when (or (nothrow-fn? f) (:always-inline f))
+                                   [:attrs (vec (concat (when (:always-inline f) [:alwaysinline]) (when (nothrow-fn? f) [:nounwind])))])
                                  (when (:personality s) [:personality ['ptr (gsym "__gxx_personality_v0")]])
                                  [:body body])))
         ;; the complete object's constructor and destructor: aliases of the base ones for a strong definition
@@ -1693,22 +1925,42 @@
 (defn emit-d0!
   "The deleting destructor: D2, then operator delete with the object's size."
   [f]
-  (let [nm (abi/mangle-fn f 0)]
-    (declare! "_ZdlPvm" 'void '[ptr i64])
+  (let [nm (abi/mangle-fn f 0)
+        t {:k :class :id (:cls f)}
+        ;; the class's operator delete, else the global sized one (FindDeallocationFunctionForDestructor)
+        d (sema/dtor-dealloc (:cls f))
+        state (atom {:blocks [] :label '%entry :insts [] :n 0 :allocas [] :addr {} :cleanups [] :fn f})]
+    (binding [*f* state]
+      (emit! (list 'call 'void (want-fn! (:id f) 1) [['ptr '%a0]]))
+      (binding [*no-eh* true] (dealloc-call! d '%a0 (abi/size-of t) (abi/align-of t) []))
+      (emit! '(ret void))
+      (close-block!))
     (add-top! (list 'llvm/define (gsym nm) 'void [['ptr '%a0]] :linkage (if (:internal f) :internal :linkonce_odr)
-                    :body [(list 'block nil
-                                 (list 'call 'void (want-fn! (:id f) 1) [['ptr '%a0]])
-                                 (list 'call 'void (gsym "_ZdlPvm") [['ptr '%a0] ['i64 (abi/size-of {:k :class :id (:cls f)})]])
-                                 '(ret void))]))))
+                    :body (vec (:blocks @state))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Vtables and type_info (Itanium §2.5, §2.9.5)
+
+(defn- external-class?
+  "A header's dynamic class whose key function ([basic.def.odr]; Itanium §5.2.3: its first virtual function that is
+  not pure and not inline where it is declared) is not defined here: its vtable and type_info are the runtime's,
+  external (G4: std::exception, std::logic_error)."
+  [cid]
+  (let [c (abi/cls cid)]
+    (and (:header c) (abi/dynamic? cid)
+         (let [k (first (filter (fn [id] (let [f (sema/fnd id)] (and (:virtual f) (not (:pure f)) (not (:inline f)) (not (:implicit f)) (not (:defaulted f)))))
+                                (:methods c)))]
+           (and k (not (:body (sema/fnd k))))))))
 
 (defn- typeinfo! [cid]
   (let [t {:k :class :id cid}
         mn (abi/mangle-type-name t)
         ti (str "_ZTI" mn) ts (str "_ZTS" mn)
         c (abi/cls cid)]
+    (if (external-class? cid)
+      (when-not (contains? (:declared @*top*) ti)
+        (swap! *top* update :declared conj ti)
+        (add-top! (list 'llvm/global (gsym ti) 'ptr :linkage :external :constant true)))
     (when-not (contains? (:declared @*top*) ti)
       (swap! *top* update :declared conj ti ts)
       (add-top! (list 'llvm/global (gsym ts) (list 'array (inc (count mn)) 'i8) (list 'c-string (str mn (char 0))) :linkage :linkonce_odr :constant true :align 1))
@@ -1739,7 +1991,7 @@
                                                       ['i64 (+ (bit-shift-left (long (if (:virtual b) (vbase-offset-offset cid (:cls b)) (nth bl i))) 8)
                                                                (if (= :public (:access b)) 2 0) (if (:virtual b) 1 0))]])
                                            (range) bases))
-                            :linkage :linkonce_odr :constant true :align 8))))))
+                            :linkage :linkonce_odr :constant true :align 8)))))))
     (gsym ti)))
 
 (defn- thunk!
@@ -1794,6 +2046,11 @@
     (gsym nm)))
 
 (defn- group! [grp]
+  (if (and (= (first grp) (second grp)) (external-class? (first grp)))
+    ;; a class whose vtable is the runtime's (its key function not defined here): declared, external (G4)
+    (let [g (apply group-of grp)]
+      (typeinfo! (first grp))
+      (add-top! (list 'llvm/global (gsym (group-name grp)) (list 'array (count (:items g)) 'ptr) :linkage :external :constant true :align 8)))
   (let [[m lid moff] grp
         g (apply group-of grp)
         ti (typeinfo! m)
@@ -1808,7 +2065,7 @@
                                adj ['ptr (thunk! fid v adj)]
                                (= 0 v) (do (want-fn! fid 1) (want-d0! fid) ['ptr (gsym (abi/mangle-fn f 0))])
                                :else ['ptr (want-fn! fid 1)])))))]
-    (add-top! (list 'llvm/global (gsym (group-name grp)) (list 'array (count slots) 'ptr) (apply list 'array slots) :linkage :linkonce_odr :constant true :align 8))))
+    (add-top! (list 'llvm/global (gsym (group-name grp)) (list 'array (count slots) 'ptr) (apply list 'array slots) :linkage :linkonce_odr :constant true :align 8)))))
 
 (defn- vtt! [cid]
   (let [{:keys [entries]} (vtt-layout cid)]
@@ -1828,7 +2085,8 @@
   "The type_info object of the type `t` (a thrown or caught type): a class's own; a fundamental type's and a pointer
   to one's in the runtime (external); a pointer to a class's or an enumeration's written here (Itanium §2.9.5)."
   [t]
-  (let [t (abi/unq t)
+  (let [;; (an array's cv-qualifiers are its elements', dropped as the top level's, [expr.typeid]/4)
+        t ((fn strip [t] (let [t (abi/unq t)] (if (abi/arr? t) (assoc t :of (strip (:of t))) t))) t)
         fundamental? (fn [x] (= :b (:k (abi/unq x))))]
     (cond
       (abi/class? t) (typeinfo! (:id t))
@@ -1854,6 +2112,11 @@
                               :linkage :linkonce_odr :constant true :align 8)))
             (abi/enum? t)
             (add-top! (list 'llvm/global (gsym nm) '(struct ptr ptr) (list 'struct (abi-class-global! "_ZTVN10__cxxabiv116__enum_type_infoE") ['ptr (gsym ts)])
+                            :linkage :linkonce_odr :constant true :align 8))
+            ;; arrays and functions: __array_type_info, __function_type_info, a name alone (Itanium §2.9.5)
+            (or (abi/arr? t) (abi/fn? t))
+            (add-top! (list 'llvm/global (gsym nm) '(struct ptr ptr)
+                            (list 'struct (abi-class-global! (if (abi/arr? t) "_ZTVN10__cxxabiv117__array_type_infoE" "_ZTVN10__cxxabiv120__function_type_infoE")) ['ptr (gsym ts)])
                             :linkage :linkonce_odr :constant true :align 8))
             :else (fail :rtti "type_info of " (pr-str t))))
         (gsym nm)))))
@@ -1954,7 +2217,7 @@
             (cond
               (and leaves (abi/scalar? (abi/unq t)) (<= (count leaves) 1))
               ((if (:internal v) #(swap! *top* assoc-in [:lazy nm] %) add-top!)
-               (apply list 'llvm/global (gsym nm) (abi/llvm-type t) (if (seq leaves) (nth (first leaves) 2) (zero-of t)) (concat link [:align a])))
+               (apply list 'llvm/global (gsym nm) (abi/llvm-type t) (if (seq leaves) (nth (first leaves) 2) (zero-mem t)) (concat link [:align a])))
               leaves
               (let [[ct cv] (leaves-constant leaves s)
                     bt (abi/unq t)]
@@ -1965,12 +2228,20 @@
               :else
               (do (add-top! (apply list 'llvm/global (gsym nm) (if (abi/ref? t) 'ptr (list 'array s 'i8)) (if (abi/ref? t) 'null 'zeroinitializer) (concat link [:align a])))
                   (swap! dyn conj [:init id])))))))
-    (when (seq @dyn)
+    ;; the dynamic initializations by priority (init_priority(N): a function _GLOBAL__I_00000N of its own, clang's), then
+    ;; the functions __attribute__((constructor(N))) names, all in llvm.global_ctors
+    (let [groups (group-by (fn [[_ id]] (long (or (:init-priority (sema/var* id)) 65535))) @dyn)
+          entries (atom [])
+          ;; (the constructor functions first, then the initializations' functions: clang's order, ties at a
+          ;; priority run in it)
+          _ (doseq [[fid f] (sort-by key (:fns prog)) :when (:ctor-attr f) :when (:tbody (sema/fnd fid))]
+              (swap! entries conj [(:ctor-attr f) (let [g (want-fn! fid)] (if (symbol? g) (name g) (second g)))]))]
+     (doseq [[prio items] (sort-by key groups)]
       (let [state (atom {:blocks [] :label '%entry :insts [] :n 0 :allocas [] :addr {} :cleanups [] :loops [] :entry-stores []
                          :fn {:name "init" :ty {:k :fn :ret abi/void :ps []}} :ret-label '%return})
-            nm (str "_GLOBAL__sub_I_" file)]
+            nm (if (= 65535 prio) (str "_GLOBAL__sub_I_" file) (format "_GLOBAL__I_%06d" prio))]
         (binding [*f* state]
-          (doseq [[k id] @dyn]
+          (doseq [[k id] items]
             (let [v (sema/var* id) t (:ty v) addr (gsym (abi/mangle-var v))
                   ;; a template's static member (linkonce_odr, defined in each unit that uses it): initialized once,
                   ;; behind its guard variable _ZGV..., as clang writes it (CODEGEN.md G3)
@@ -2001,9 +2272,11 @@
           (add-top! (apply list 'llvm/define (gsym nm) 'void [] :linkage :internal
                            (concat (when (:personality s) [:personality ['ptr (gsym "__gxx_personality_v0")]])
                                    [:body (vec (concat [entry] (rest blocks) (:pad-blocks s)))])))
-          (add-top! (list 'llvm/global (gsym "llvm.global_ctors") '(array 1 (struct i32 ptr ptr))
-                          (list 'array ['(struct i32 ptr ptr) (list 'struct ['i32 65535] ['ptr (gsym nm)] ['ptr 'null])])
-                          :linkage :appending)))))))
+          (swap! entries conj [prio nm]))))
+     (when (seq @entries)
+       (add-top! (list 'llvm/global (gsym "llvm.global_ctors") (list 'array (count @entries) '(struct i32 ptr ptr))
+                       (apply list 'array (for [[prio nm] @entries] ['(struct i32 ptr ptr) (list 'struct ['i32 prio] ['ptr (gsym nm)] ['ptr 'null])]))
+                       :linkage :appending))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; The module
@@ -2018,6 +2291,9 @@
     (reset! vt-cache {})
     ;; static locals know their function
     (doseq [[fid f] (:fns prog)] (doseq [vid (:statics f)] (swap! sema/*vars* assoc-in [vid :fn-of] fid)))
+    (when-let [nm (System/getenv "CPP_LAYOUT_TRACE")]
+      (doseq [[id c] (:classes prog) :when (some #{(:name c)} (str/split nm #","))]
+        (binding [*out* *err*] (println "layout" nm id (pr-str (:targs c)) (pr-str (dissoc (abi/layout id) :primary)) (pr-str (map (fn [f] [(:name f) (abi/size-of (:ty f))]) (:fields c))) (pr-str (:bases c))))))
     (emit-globals! prog file)
     ;; the definitions: every non-inline function with a body, then what they use
     (doseq [[k id] (:order prog) :when (= k :fn)]
@@ -2042,27 +2318,31 @@
           (recur))))
     (doseq [[nm a] (sort-by key (:aliases @*top*))] (when (contains? (:c1 @*top*) nm) (add-top! a)))
     (when (:dso @*top*) (add-top! (list 'llvm/global (gsym "__dso_handle") 'i8 :linkage :external :visibility :hidden)))
+    ;; clang's -O0 pipeline: the always-inline functions inlined and erased (LLVM's AlwaysInliner, P16 (a))
+    (swap! *top* update :forms inl/always-inline)
     (vec (concat [(list 'llvm/source-filename file)
                   (list 'llvm/datalayout "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128")
                   (list 'llvm/triple "x86_64-alpine-linux-musl")]
                  (:forms @*top*)))))
 
 (defn gen-file
-  "The LLVM forms of the C++ file at `path` (read by the native parser at `std`)."
-  [^String path ^String std]
-  (let [u (native/parse-file path (.getName (java.io.File. path)) std [])
-        _ (when (pos? (long (:declines u 0))) (fail :parse "the native parser declined " (:declines u) " constructs"))
-        src (llvm/latin1 path)
-        prog (sema/analyze-program (:nodes u) (:root u) src)]
-    (gen-module prog (.getName (java.io.File. path)))))
+  "The LLVM forms of the C++ file at `path` (read by the native parser at `std`, with the preprocessor's options `args`: -I, -D ...)."
+  ([^String path ^String std] (gen-file path std []))
+  ([^String path ^String std args]
+  (binding [sema/*main-name* (.getName (java.io.File. path)) sema/*main-dir* (.getParent (.getAbsoluteFile (java.io.File. path))) ps/*full-headers* (not= "0" (System/getenv "CPP_FULL_HEADERS"))]
+    (let [u (native/parse-file path (.getName (java.io.File. path)) std (vec args))
+          _ (when (pos? (long (:declines u 0))) (fail :parse "the native parser declined " (:declines u) " constructs"))
+          src (llvm/latin1 path)
+          prog (binding [sema/*decltypes* (:decltypes u)] (sema/analyze-program (:nodes u) (:root u) src))]
+      (gen-module prog (.getName (java.io.File. path)))))))
 
 (defn gen-one
   "Writes OUT/forms.ae (the LLVM forms), OUT/gen.ll (their IR text) and OUT/gen.c (lowered by arbace.cpp.lower), or
   OUT/gen.refused (the class and the message); the class or nil."
-  [^String path ^String std ^String out]
+  [^String path ^String std ^String out & [args]]
   (.mkdirs (java.io.File. out))
   (try
-    (let [forms (gen-file path std)]
+    (let [forms (gen-file path std (or args []))]
       (spit (str out "/forms.ae") (llvm/module-text (llvm/ns-name-of "gen.ll") forms))
       (llvm/spit-latin1 (str out "/gen.ll") (llvm/print-ll forms))
       (let [r (lower/lower-file forms "gen.c")]
@@ -2144,5 +2424,14 @@
                            (spit (str out "/ref.refused") (str (name (:refused r)) "\n"))
                            (llvm/spit-latin1 (str out "/ref.c") (:c r)))))))
                  (println "generated"))
+    ;; bin/cppi check's route (CPPI_ROUTE=ours|auto, bin/lib/cppi/route.bash): PATH<tab>STD<tab>OUT lines, each program's forms, IR and
+    ;; lowering into OUT (gen.ll, or gen.refused), one process for the list; STD as g++ names it (gnu++17 read as c++17)
+    "gen-batch" (let [[lst] args]
+                  (doseq [l (str/split-lines (slurp lst)) :when (seq l)]
+                    (let [[p std out a] (str/split l #"\t")
+                          c (gen-one p (str/replace (or std "c++23") #"^gnu" "c") out (vec (remove str/blank? (str/split (or a "") #"\s+"))))]
+                      (println (str out "\t" (if c (name c) "ok")))
+                      (flush)))
+                  (shutdown-agents) (System/exit 0))
     "judge" (let [[work known] args] (judge work known))
     (do (println "codegen: gen FILE OUT [--std S], gen-list LIST") (System/exit 2))))

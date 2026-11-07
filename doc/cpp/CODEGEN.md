@@ -1,7 +1,8 @@
 # C++ without the host's clang: Sema and a code generator (cpp-codegen)
 
 Status: survey, plan, the first slice (G1, branch `cpp-codegen`) and the second (G2, branch `cpp-codegen2`, §4a,
-2026-11-05), for the user's acceptance. Words: **the native parser** is CX11's (`arbace.repr.cpp.parse`, [NATIVE.md](NATIVE.md)), whose tree is
+2026-11-05), templates (G3), the first slice of the headers (G4, branch `cpp-g4`, "G4. The headers"), P15, P16 and the
+streams (G5, branch `cpp-g5`, "G5. P15, P16 and the streams" at the end), for the user's acceptance. Words: **the native parser** is CX11's (`arbace.repr.cpp.parse`, [NATIVE.md](NATIVE.md)), whose tree is
 clang's AST as data; **clang's route** is cppi as built (CX6-CX7, [LLVM.md](LLVM.md)): `clang++ -O0 -S -emit-llvm`, the IR
 read as LLVM forms by repr/llvm, lowered to C forms by `arbace.cpp.lower`, compiled by gcc `-O0` with the lowered runtime
 and run; **our route** replaces its first step: the native parser, a semantic analysis of our own (`arbace.cpp.sema`)
@@ -678,3 +679,364 @@ Provenance: the layout and the vtable code were read in `clang/lib/AST/RecordLay
 `LayoutBase`, `LayoutField`) and `clang/lib/AST/VTableBuilder.cpp` (`AddMethods`, `ComputeReturnAdjustmentBaseOffset`,
 `ComputeReturnAdjustment`) and `ItaniumMangle.cpp` (`mangleThunk`) of llvm-project 23.1.4 (the pinned tarball); the code
 is a reimplementation of their rules in Arbace's structures, not a port of their text (P6, P9 as built).
+
+## G4. The headers (branch `cpp-g4`, 2026-11-05)
+
+Status: a first slice of G4, built on `cpp-g2fix` (G1-G3 with G2's fixes; P1-P14 decided), for the user's acceptance. P13
+(b) first, then the headers in P5's order: `<cstdio>`, `<utility>` (`std::move`, `std::forward`, `std::swap`, `std::pair`,
+`std::make_pair`) and `<type_traits>`' common traits by our route at all three levels; `<vector>` (`std::vector<int>`:
+`push_back`, `size`, `operator[]`, `back`, iteration) and `<string>` (`std::string` from a literal, `+=`, `c_str`) at the
+run and native levels, their names differing by the always-inline functions clang inlines at `-O0` (G4.5, P16);
+`<memory>`'s `std::unique_ptr` not yet (inheriting constructors). libstdc++ stays unported: its headers (15.2.0,
+`/usr/include/c++/15.2.0`) are parsed and analyzed as the program's own text is.
+
+Contents: G4.1 P13: the written name in the tree · G4.2 The headers parsed in full · G4.3 What the headers asked of the
+analysis · G4.4 The samples and the numbers · G4.5 What is not done · G4.6 The staged plan · G4.7 Proposed.
+
+### G4.1 P13 (b): the written name in the tree
+
+The native parser's `DeclRefExpr` and `MemberExpr` keep the name as written (`arbace.repr.cpp.parse/written-name`):
+`:explicitTemplateArgs` (each explicit template argument's text, as clang's `DeclRefExpr::template_arguments` holds
+them), `:qualifier` (the nested-name-specifier's parts, each with its arguments: `["ns" "Box<int>"]`) and
+`:globalQualifier` (a leading `::`), with `:_wn` marking a node that has them. `arbace.cpp.sema` reads them instead of
+the main file's text: a name's explicit arguments (`written-targs`, for `f<int>(x)`, `v<int>`, `o.as<double>()`), a
+reference's qualifier (`ref-qualifier`), a member access's (`o.A<int>::f`) and a call's qualification. The converter
+does not read the new fields, so the forms are unchanged: `bin/repr-cpp native-check samples` is 9 of 9 the same, 68 of
+68 items, after the change and at the branch's head.
+
+The other readings of a node's text (a declaration's qualifier before its name, `using` declarations, a lambda's
+captures, a partial specialization's arguments) are now of the node's own file (`sema/text-of`: the main file's text,
+or a header's read once, its comments blanked so that the offsets stay), so they work in headers too; a macro token's
+location is its expansion's.
+
+### G4.2 The headers parsed in full
+
+`arbace.repr.cpp.parse/*full-headers*` (the code generator's mode; `arbace.cpp.codegen/gen-file` binds it,
+`CPP_FULL_HEADERS=0` turns it off): the headers' tokens are parsed as the main file's are (bodies, initializers,
+default arguments), no skim and so no skim cache, and their nodes are given to the analysis with the main file's. A
+header construct the parser cannot read is dropped (a declaration) or kept as a `NativeDecline` statement (in a body)
+without counting as the main file's declines (`CPP_HDR_TRACE=1` prints each with its file and offset). The converter's
+mode is unchanged (the headers skimmed for their names).
+
+The analysis takes the header nodes as the program's (`sema/header-node?`: a node whose file is a header's path):
+
+- a header declaration the analysis refuses is dropped, not the program (`declare-node!`; a use of it fails later as
+  an unknown name; `CPP_HDR_TRACE=1` prints each drop and why); on `<utility>` 66 of its declarations are dropped
+  today (variable template partial specializations, `<compare>`'s corners, conversion function templates), 188 with
+  `<vector>`, 463 with `<memory>`;
+- a header's function definition, a header class's implicit and defaulted members, a header's explicit
+  specialization of a member and a header's variable definition are defined only when used (`:lazy`, `:pending-def`:
+  clang emits an inline function or an inline variable only when odr-used); an implicit member of a header class
+  whose subobjects' members are not viable is deleted ([class.copy.ctor]/10), not refused;
+- `<typeinfo>`'s own `std::type_info` replaces the prelude of G2 when the headers are parsed;
+- the C library's functions are the headers' declarations (`extern "C"` in `<stdio.h>`), not the skim's entities.
+
+The traces for the work on headers: `CPP_HDR_TRACE=1` (the parser's declines and the analysis's drops in headers, the
+function whose body failed, an ambiguous call's candidates), `CPP_TMPL_TRACE=1` (templates and constructor templates
+that drop out, constraints not satisfied, decltype operands left dependent), `CPP_FAIL_STACK=TEXT` and
+`CPP_NC_STACK=1` (the stack of a refusal whose message contains TEXT, of a constant evaluation's failure).
+
+On the 128 samples of `test/cpp/codegen` the full parse costs little: generate and lower 119 s against G3's 111 s (the
+headers are `<cstdio>` and `<typeinfo>`); `<utility>` takes about 15 s to parse and analyze, `<memory>` about 50 s.
+
+### G4.3 What the headers asked of the analysis
+
+Each in the general form the standard gives, found by the samples on libstdc++ 15.2.0 at `-std=c++23`:
+
+| what | where | as built |
+|---|---|---|
+| `decltype(e)` ([dcl.type.decltype]) | `__and_`/`__or_`'s bases `decltype(__detail::__and_fn<_Bn...>(0))` | the parser keeps each operand it parses (`:decltypes` of the unit, by its text); sema analyzes it where the type is resolved (unevaluated) and takes the declared type of an id-expression or member access, else `T&`/`T&&`/`T` by the value category |
+| the type-trait builtins (47 of G3.6 and the ones `<type_traits>` uses under `__has_builtin`) | `__bool_constant<__is_same(_Tp, _Up)>`, `using type = __remove_cv(_Tp);` | `arbace.cpp.template`'s table: 61 value traits (`__is_same`, `__is_class`, `__is_constructible`, `__is_convertible`, `__is_trivially_copyable`, `__is_nothrow_constructible`, ...) and 13 transform traits (`__remove_cv`, `__remove_reference`, `__remove_cvref`, `__decay`, `__add_pointer`, `__add_lvalue_reference`, `__underlying_type`, ...), written from [meta]'s definitions with clang's `SemaTypeTraits.cpp` as the model; constructibility and convertibility asked of the analysis (an initialization of `std::declval`'s expressions, the implicit conversion sequence), the nothrow ones by the called functions' exception specifications; dependent in a signature |
+| a functional cast in a constant (`bool(_Bn::value)`) and a pack in a member's qualifier (`__enable_if_t<bool(_Bn::value)>...`) | `__and_fn` | `const-form`, `expand-type-pack` |
+| a dependent template-id's defaults | `enable_if<C>::type` in a signature | completed in a scope binding the dependent arguments |
+| functionally equivalent redeclarations ([temp.over.link]/5) | `<type_traits>`' `_Require<...> swap(_Tp&, _Tp&)` and `<bits/move.h>`'s `typename enable_if<...>::type swap(...)` | one template when the signatures with the templates' own parameters are equal |
+| requires-clauses (P14 (b), the minimum) | `std::pair`'s constructors | the parser keeps a template head's requires-clause (`:requiresClause` on the template node) and a trailing one (`:trailingRequiresClause` on the function) as expression nodes in full-header mode (a requires-expression inside one not yet: the clause is then skipped as before); a function template's specialization and a class specialization's member whose constraint evaluates false (a constant expression after substitution, G2's constant evaluation, a failure not satisfied) are not candidates |
+| `noexcept(e)` ([except.spec]/2) | `swap`'s `_GLIBCXX_NOEXCEPT_IF(...)` | evaluated where the function is declared; not noexcept when it cannot be |
+| `if consteval` ([stmt.if]/4) | `std::__is_constant_evaluated` | the branch of a context not constant-evaluated |
+| the library functions clang builds in (Builtins.td's `LIBBUILTIN`: `std::move`, `forward`, `move_if_noexcept`, `as_const`, `forward_like`, `addressof`, `__addressof`) | everywhere | the call folded to its argument (a cast, an address), no function emitted, as clang's CodeGen does at `-O0`; `std::__is_constant_evaluated()` (always_inline, which clang inlines at `-O0`) folded to false |
+| a template-id after a qualifier in a template's body (`ns::X<T>::v`) | `std::is_integral<T>::value` | its arguments resolved where the name is written (a G3 bug, also outside headers) |
+| `__builtin_va_list`, GNU attributes in a type's spelling | `<stdio.h>`'s `vprintf`, `__attribute__((noreturn))` | x86-64's `__va_list_tag[1]`; the attributes left out of the type |
+| mangling | `swap`'s `enable_if<...>` | `::std::X<...>` as `St X I...E` in a dependent template-id; an unresolved `sr` name as written (no qualifier, a pack's elements one by one) |
+| concepts ([temp.concept]) and requires-expressions ([expr.prim.req]) | `iterator_traits<_Tp*>`'s `requires is_object_v<_Tp>`, `construct_at`'s `requires { ::new((void*)0) _Tp(std::declval<_Args>()...); }`, `__iterator_traits`' concept-ids | the parser keeps a concept's constraint expression (`:constraintExpr`) and a requires-expression's parameters and requirements (simple, type, compound, nested) in full-header mode; a concept-id is its constraint's satisfaction for its arguments, a requires-expression true when each requirement analyzes (a compound one's return-type requirement not checked) |
+| constrained partial specializations, their redeclarations, SFINAE in their arguments ([temp.spec.partial.match]/2) | `iterator_traits<_Tp*>` declared then defined; `__is_allocator<_Alloc, __void_t<..., decltype(...)>>` | one partial specialization per argument list (its definition kept); after deduction its constraint checked and its arguments substituted again (a failure no match); a cv-qualified parameter (`allocator<const _Tp>`) matched by type |
+| a decltype operand that names a template's own parameters or function parameters | `-> decltype(make_move_iterator(__niter_base(__it.base())))`, `using _Dest = decltype(std::__niter_base(__result))` | a trailing return type resolved with the parameters in scope; an operand that does not analyze in a signature a dependent type, analyzed again at the specialization; a signature naming its own template refused inside (no recursion) |
+| deduced return types ([dcl.spec.auto.general]/11) | `auto __to_address(const _Ptr&)` | the callee's body analyzed at the call; `auto` mangled `Da` |
+| placement new ([new.delete.placement]) | `construct_at`'s `::new((void*)p) T(...)` | the reserved form `new (void*) T`: the object constructed at the argument, no operator new called, as clang's CodeGen does |
+| range-based for over a class ([stmt.ranged]/1) | `for (int x : v)` | `auto&& __range`, `begin()`/`end()` members, `!=`, `++`, `*` by overload resolution |
+| operator function templates (non-members by lookup and ADL, members) | `__normal_iterator`'s `operator==`/`operator-`, `ranges::iter_move`'s `operator()` | their specializations among the candidates; C++20's rewritten `!=` from `==` |
+| `operator->` of a class ([over.ref]) | `unique_ptr`'s | applied until a pointer |
+| inline namespaces ([namespace.def]/7) | `std::__cxx11::basic_string` | their members found in the enclosing namespace |
+| a class template's parameters' defaults on an earlier declaration ([temp.param]/12) | `basic_string` (defaults in `<stringfwd.h>`) | kept when the definition comes; a header declaration that named a specialization before it was defined (`typedef basic_string<char> string`, `char_traits<char>` defined later) declared again after the headers |
+| overloaded out-of-line member templates | `basic_string::_M_construct` for input and forward iterators | matched by their spellings with the parameters' names as positions |
+| using-declarations of dependent bases' members | `using std::__is_integer<_Tp>::__value;` | declared in the specialization; the parser's unresolved member expressions keep their names |
+| a defaulted default constructor's triviality ([class.default.ctor]/3) | `vector() = default` over `_Vector_impl`'s | non-trivial when a base's or member's is |
+| `noexcept(e)`, pseudo-destructor calls, `base()` mem-initializers, static_assert in blocks, a parameter's attributes, `__func__`/`__PRETTY_FUNCTION__` | `destroy_at<int>`, `_Vector_impl() : _Tp_alloc_type()` | as the standard says (`__PRETTY_FUNCTION__` approximated by the name: no run reads the headers' assertion strings) |
+| builtins | `__builtin_expect`, `__builtin_constant_p`, `__builtin_is_constant_evaluated`, `__builtin_unreachable`, `__builtin_addressof`, `__builtin_operator_new`/`delete`, `__builtin_{add,sub,mul}_overflow` | their values; the overflow ones' flag false (a divergence on overflow) |
+| the key function ([basic.def.odr], Itanium §5.2.3) | `std::exception`, `std::logic_error` | a header's dynamic class whose key function is not defined here: its vtable and type_info external, the runtime's |
+| the standard abbreviations (Itanium §5.1.8) | `std::allocator` | `Sa`, `Sb` |
+| mangling of constrained templates (clang 23) | `std::pair`'s constructor templates | `Q <expression> E` after the template arguments: operators, calls, unresolved names with their arguments, the template's own parameters by depth and index (`TL0__`); a requires-expression in it left out (the names then differ) |
+
+None of this is a port: the traits and the rest are written from the standard, clang's functions read as the model
+(P6 (a) outside templates and the ABI); libstdc++ is read as input, never copied.
+
+### G4.4 The samples and the numbers
+
+The eight samples `test/cpp/codegen/hdr-*.cpp` (each with a header comment saying what it exercises): `hdr-cstdio`
+(`printf`, `puts`, `snprintf` through `<cstdio>`'s `std::` and global names), `hdr-move` (`std::move`, `std::forward`),
+`hdr-swap` (`std::swap` of ints, an aggregate and a class with its own moves), `hdr-traits` (31 values of
+`<type_traits>`: `true_type`, `integral_constant`, `is_same`, `is_integral`, `is_pointer`, `is_class`, `remove_cv`,
+`remove_reference`, `decay`, `is_enum`, `is_union`, `is_base_of`, `is_polymorphic`, `is_convertible`,
+`is_constructible`, `add_pointer`, `conditional`, `is_reference`, `is_trivially_copyable`), `hdr-pair`
+(`std::pair`'s constrained constructors, `std::make_pair`), `hdr-vector` (`std::vector<int>`) and `hdr-string`
+(`std::string`).
+
+| check (2026-11-05, light) | result |
+|---|---|
+| `bin/repr-cpp native-check samples` after P13 and at the branch's head (the parser's new fields, its full-header mode off for the converter) | 9 of 9 the same, 68 of 68 items |
+| `bin/cppi codegen-check` over `test/cpp/codegen` (G1-G3's 123 samples, now through the headers parsed in full, and the eight `hdr-*`) | 128 of 130 pass all three levels; `hdr-vector` and `hdr-string` pass the run and native levels and are in `known.edn` (class `always-inline`); generate and lower 237-280 s (G3's 123 alone took about 2 minutes skimming); `known.edn` judged: 0 failing, gcc, clang and runs 12 s |
+| the samples that were on clang's route (`test/cpp/samples`, `test/cpp/runtime/samples`: 16 files, `bin/cppi codegen-check` with clang++ -std=c++23) | **5 of 16 pass all three levels** (G2's 2: `bitfields`, `vexing`; now also `auto`, `classes`, `uncaught`); generate and lower 760 s (`<iostream>` parsed in full in most) |
+
+The 11 others by their first refusal: `decls` and `layouts` have no `main` (the reference does not run); `p1-first`
+`std::vector<int> v{1, 2}` (its initializer-list constructor: `std::initializer_list` not built; refused since the last
+run, which chose another constructor and gave the wrong status); `io` and `hello` `<iostream>` (`std::cout` and the
+streams' classes, G5); `atomics` `std::atomic<int>::fetch_add` (`<atomic>`'s builtins); `threads` and
+`thread-throw` `<thread>` (`std::to_string`, `std::thread`'s invocation); `coroutine` `co_yield` (coroutines);
+`ctor-throw` an attribute in an expression (`NativeAttr`); `library` a construct the parser declines in the main
+file.
+
+### G4.5 What is not done
+
+- **Always-inline functions** (`__attribute__((__always_inline__))`, libstdc++'s `_GLIBCXX_ALWAYS_INLINE` on
+  `__normal_iterator`'s operators, `allocator`'s members, `char_traits`' and the like): clang's AlwaysInliner inlines
+  them even at `-O0` and emits none, and the functions only they called are then unused and not emitted either; we
+  emit them, so `hdr-vector` and `hdr-string` pass the run and native levels and differ in their names (their class
+  `always-inline` in `known.edn`; P16). Only `std::__is_constant_evaluated` is folded.
+- **`<memory>`'s `std::unique_ptr`**: `__uniq_ptr_data` inherits `__uniq_ptr_impl`'s constructors (`using
+  __uniq_ptr_impl<_Tp, _Dp>::__uniq_ptr_impl;`); inheriting constructors ([class.inhctor.init], clang's `CI2` mangling)
+  are not built yet.
+- A requires-expression in a constrained template's mangling (`rq ... E`: `construct_at`'s), the constrained
+  parameters' mangling (`Tk`), a compound requirement's return-type requirement, `explicit(bool)` (read as not
+  explicit), the subsumption ordering of constrained overloads (G3b).
+- The overflow builtins' flag (false: no wider arithmetic yet), `__PRETTY_FUNCTION__`'s text.
+- The parser's declines in the headers (`CPP_HDR_TRACE=1`: 12 on `<utility>`, 20 on `<vector>`, 28 on `<memory>`),
+  among them `__extension__ template<>`, `_Tp(-1) < _Tp(0)` in a template argument list, `__make_integer_seq` and
+  `__type_pack_element` (builtin templates), out-of-line nested classes' scope (`class locale::_Impl` naming
+  `facet`), constrained template parameters (`template<__tuple_like _Tp>`); and the analysis's drops (G4.2).
+- `resolve-uses` (the defaulted members' exception specifications the converter writes) is off in full-header mode:
+  the headers' classes make its graph cyclic.
+
+### G4.6 The staged plan
+
+| stage | what | target | estimate |
+|---|---|---|---|
+| **G4a** (this branch) | G4.1-G4.3 | `<cstdio>`, `<utility>`, `<type_traits>` at three levels; `<vector>`, `<string>` at two | done |
+| **G4b** | always-inline functions inlined as clang does at `-O0` (P16); inheriting constructors; the `rq` mangling; the header declines of G4.5; a cache of the full parse (P15) | `hdr-vector`, `hdr-string` at three levels; `<memory>`'s `unique_ptr`; `<algorithm>`, `<cstring>` | 2-3 |
+| **G4c** | `std::initializer_list`, `<atomic>`'s builtins, `<iostream>`'s classes (with G5), coroutines, threads; the recorded `samples` list | the 9 samples with a `main` still on clang's route (G4.4) | 2-3 |
+
+### G4.7 Proposed
+
+**P15. The headers' cost.** The full parse has no cache: `<memory>`'s headers take about 50 s a file before the
+analysis. (a) As built: parse them each time (the samples' light runs). (b) A cache of the full parse's nodes and
+state keyed as the skim cache is (the tokens' digest, the parser's sources), the nodes written with the state's table;
+costs the nodes' size on disk (several MB a header set) and the skim cache's code extended to nodes. (c) Parse a
+header's body only when the analysis needs it (the plan's first wording: the skim's ranges kept, a definition
+re-parsed on use); costs a second parser entry point and the parser's state at each range, but parses only what is
+used. **Recommended: (b)**, in G4b; (c) not: the analysis needs most of `<type_traits>` anyway.
+
+**P16. Always-inline functions.** (a) Inline them in our code generator as clang's AlwaysInliner does at `-O0`
+(their bodies at the call, their names not emitted); costs an inliner over our LLVM forms (renaming, the return as a
+branch). (b) Emit them `internal` and let the names level ignore internal always-inline definitions; costs a judge
+that is no longer "every name ours is clang's". (c) Fold the few the headers use on hot paths (as `__is_constant_evaluated`
+now). **Recommended: (a)**, in G4b: libstdc++ marks its iterators' and allocators' accessors always-inline under
+`_GLIBCXX_ALWAYS_INLINE`; `hdr-vector` and `hdr-string` need it for their names.
+
+## Decided (2026-11-05, the user: P15, P16)
+
+P15 (b): the full parse's nodes cached as the skim cache does, in G4b; P16 (a): always-inline functions inlined in our code generator as clang's AlwaysInliner does at -O0, in G4b.
+
+## G5. P15, P16 and the streams (branch `cpp-g5`, 2026-11-06)
+
+Status: built on `cpp-g4` (P15 (b) and P16 (a) decided), for the user's acceptance. The aim of the stage (§6's G5, G4b's
+and G4c's items first): the g++ run tests that include C++ library headers compiled by our Sema and code generator,
+run with clang's route's output. Every item below has a sample of `test/cpp/codegen/` or a corpus file that failed
+before and passes at all three levels of `bin/cppi codegen-check` (run, native, names).
+
+Contents: G5.1 P16: LLVM's AlwaysInliner · G5.2 P15: the full parse's cache · G5.3 What the corpus asked ·
+G5.4 The check and the numbers · G5.5 Sources · G5.6 What is not done · G5.7 Proposed.
+
+### G5.1 P16 (a): always-inline functions inlined as LLVM's AlwaysInliner does
+
+`arbace.cpp.inline` (`arbace/cpp/inline.ae`) is a port of llvm-project 23.1.4's `AlwaysInliner.cpp` (`AlwaysInlineImpl`)
+and of the parts of `InlineFunction.cpp` -O0 IR without metadata exercises, over our LLVM forms, run on the module
+after the code generator (`gen-module`): sema marks a function `:always-inline` from GNU's `always_inline` (an
+attribute of any of its declarations), the code generator writes `alwaysinline` in its define's attributes, and the
+pass inlines every call of a viable one (`isInlineViable`: not variadic, not calling itself) -- the callee's own
+always-inline calls first --, then erases each such definition that is discardable (`linkonce_odr`, internal) and no
+longer referenced, until none is (a comdat's functions erased together, as `filterDeadComdatFunctions` leaves them).
+`InlineFunctionImpl`'s parts: the callee's locals renamed (`%x.iN`), its arguments the call's operands (a `byval` one
+copied into an alloca, `HandleByValArgument`), the callee entry block's allocas moved to the caller's entry block
+(the lowering wants them there), each `ret` a branch to the call's continuation whose result is a phi, the split
+block's later phis' incoming edges renamed to its last piece. Through an `invoke` (`HandleInlinedLandingPad`): the
+inlined landing pads take the outer pad's clauses and its cleanup flag, every call that may throw becomes an invoke to
+the outer pad (`HandleCallsInBlockInlinedThroughInvoke`, the block split at it), and a `resume` a branch to the outer
+pad's body, the outer pad split after its `landingpad` whose value is now a phi of it and of the resumed values
+(`forwardResume`, `getInnerResumeDest`). With it `hdr-string` passes all three levels; `hdr-vector`'s always-inline
+names are gone too.
+
+Two of clang's -O0 rules came with it, as the names asked: **constant-folded branches**
+(`CodeGenFunction::ConstantFoldsToSimpleInteger`, `EmitIfStmt`, `VisitBinLAnd`/`VisitBinLOr`,
+`VisitAbstractConditionalOperator`): sema marks a condition that constant-folds (`fold-mark`: G2's evaluator, the
+context not constant-evaluated, `std::is_constant_evaluated()` false) and the code generator writes only the live
+branch when the dead one holds no label -- `char_traits`' `if (std::__is_constant_evaluated())` and the like no longer
+reach `__gnu_cxx::char_traits`; and **`noexcept(e)` per specialization**: the native parser keeps a declaration's
+`noexcept(e)` operand (full-header mode, as decltype's) and sema evaluates it with the parameters in scope, so
+`vector::_S_use_relocate()` is true and `_M_realloc_append` takes clang's relocation path.
+
+### G5.2 P15 (b): the full parse's cache
+
+`arbace.repr.cpp.parse/full-headers!`: in full-header mode the leading run of header tokens is parsed in full, its
+nodes and the parser's state (the scopes, the member templates' names, decltype's and noexcept's operands, the
+unnamed counter, the cursor) written with the skim cache's table (`arbace.repr.cpp.skim`, its key and directory, a
+`.full` file) and read back on a hit. Measured on `hdr-vector` (145k header tokens, light): preprocessing 20 s, the
+full parse 9.6 s without the cache, 25 s when storing it (the table's writing), 8 s on a hit (6.6 s of it reading the
+2.3 MB table back, which on the tools' host costs about what parsing does). The cache is built as decided but
+**opt-in** (`CPP_FULL_CACHE=1`): on by default it would slow every first run by 15 s for 1.6 s on later ones. P17
+proposes what would pay.
+
+### G5.3 What the corpus asked
+
+The corpus of this stage: gcc 15.2.0's `dg-do run` tests of `g++.dg` and `g++.old-deja` that include a C++ library
+header (and no header beyond the standard ones), without options our route does not take (`-fno-exceptions`,
+`-fno-rtti`, modules, coroutines' flags, `dg-additional-*`, `dg-require-*`, xfails, standards before C++20 only), that
+clang accepts at `-std=c++23`: 206 files (`.tmp/cg/hdr-ok.txt` by the rule; not committed, P18). Measured on every
+fifth (42 files: the measure is light, a whole run's 206 files would take about an hour of four jobs). Each item in
+the general form the standard (or clang, where named) gives:
+
+| what | where | as built |
+|---|---|---|
+| allocation and deallocation functions ([expr.new]/9-28, [expr.delete]/7-12; clang's `FindAllocationFunctions`, `resolveAllocationOverload`, `resolveDeallocationOverload`, `FindDeallocationFunction`, `FindUsualDeallocationFunction`, `FindDeallocationFunctionForDestructor`, `doesUsualArrayDeleteWantSize`) | `new7`, `delete7`, `aligned-new1/3`, `anew3`, `new5`, `eh/new2` | a class's own `operator new`/`delete` (static members, [class.free]/1), looked up in the class then globally, overload-resolved with the size, the alignment for an over-aligned type (`align_val_t`, retried without), the placement arguments; the implicit global declarations always there; the reserved placement forms called not (also `new (p) T[n]`, no cookie); the matching deallocation on a throwing initialization (the placement one by its parameters); a nothrow allocation's null check ([expr.new]/17); the array cookie when the destructor is not trivial or `operator delete[]` takes the size, its size `max(8, alignof(T))`; a deleting destructor's operator delete the class's |
+| `alignas` on a class ([dcl.align]) | `aligned-new1` | the class's alignment at least the strictest one written (the parser keeps `alignas`'s argument) |
+| `throw()` | `eh/spec10` | noexcept(true) (C++17's) |
+| `std::initializer_list` ([dcl.init.list]/2-6, [over.match.list], [over.ics.list], [over.best.ics]/4) | `initlist1`, `initlist6`, `initlist-opt6`, `initlist106`, `p1-first` | the backing array (an alloca, its elements copy-initialized, destroyed at the full-expression's end or with a declared `initializer_list`), libstdc++'s object `{_M_array, _M_len}`; initializer-list constructors first, then all constructors with the elements (no copy constructor through a user-defined conversion when the one element is itself a list); a list argument's conversion its worst element's; a braced range of a range for |
+| type-constraints ([temp.param]/4) | `p1-first` (`template<Num T>`) | checked as the concept's satisfaction for the argument; mangled `Tk <name>` (clang 17's) |
+| a local name's substitutions (Itanium §5.1.6) | `hdr-string`'s `_Guard` | one table for the enclosing function's encoding and the entity |
+| constraints' mangling (clang 23's `Q`) | `construct_at` | requires-expressions (`rq`, simple, type and nested requirements: `X`, `T`, `Q`), `nw`/`gs nw` with `pi`, `cv` casts, `sp` pack expansions, qualified unresolved names (`sr <levels> E`); a template parameter one substitution candidate in the constraint and the signature |
+| unresolved names as written | `__relocate_a_1`'s `sr3std24__is_bitwise_relocatableIT_EE5value` | a dependent template-id keeps the count of its written arguments and its qualifier's namespaces (no part of its identity) |
+| `<iostream>` | `hdr-iostream`, `io1`, the corpus's `cout` programs | one candidate set for an operator's members and non-members ([over.match.oper]/3, `resolve-overload*`); the address of a function template deduced from the target type ([temp.deduct.funcaddr]: `std::endl`); member classes defined outside their class template (`basic_ostream<_CharT,_Traits>::sentry`) and outside their class (`class locale::facet`: the parser's lookup scope and sema's); header declarations that failed on a type declared later retried until a round declares nothing more; `static_cast` in constants; type traits' text from their tokens (a macro's expansion: `_GLIBCXX_STD_FACET`); `__c_locale ()` a function type, not a trait; layouts kept only for finished classes |
+| explicit instantiation declarations ([temp.explicit]/10; `CodeGenModule::shouldEmitFunction`) | `<ostream>`'s `extern template class basic_ostream<char>`, `extern template ostream& endl(ostream&)` | the class's (and its member classes') members and static data members, and the function specializations deduced from the declared type, are the library's: declared, not defined, but the always-inline ones |
+| the standard abbreviations (Itanium §5.1.8) | `std::ostream::operator<<(int)`: `_ZNSolsEi` | `So`, `Si`, `Sd`, `Ss`, no substitution candidates |
+| a static member's explicit specialization without an initializer ([temp.expl.spec]/14) | `__timepunct_cache<char>::_S_timezones` | a declaration |
+| variadic functions | `pr45843`, `embed-11` | `va_start`, `va_end`, `va_copy` (LLVM's intrinsics), `__builtin_va_arg` (the parser keeps its operand and type) as clang's `X86_64ABIInfo::EmitVAArg` writes it for one INTEGER or SSE eightbyte; va_list's tag a complete trivial class |
+| builtins | the streams | `__builtin_alloca`, `__builtin_strncpy` and other C library builtins, `__builtin_vsnprintf` |
+| explicit destructor calls ([class.dtor]/14) | `alias-1`, `virtual8` | `p->~T()` the class's destructor, virtually through D1 |
+| user-defined literals ([lex.ext]) | `udlit-embed-quote`, sample `udl` | the literal operator called with the integer's value (`unsigned long long`), the floating literal's (`long double`), the character, the string and its length; mangled `li <source-name>` |
+| brace elision ([dcl.init.aggr]/16) | `pr95493-1`'s `array{x, y, z}`, sample `brace-elision` | a flat list's items distributed over subaggregates; a lone braced item of the class's own type copied (the native parser's semantic form braces it as if elided) |
+| three-way comparison ([expr.spaceship], [class.compare.default], [over.match.oper]/3.4) | `spaceship-synth2b`, sample `spaceship` | the built-in `<=>` (`strong_ordering` for integers and pointers, `partial_ordering` for floating types: libstdc++'s one-byte value); defaulted member and friend `operator<=>` (the common category deduced for `auto`) and the `==` it declares; relational operators rewritten as `(x <=> y) @ 0`; a consteval constructor of an empty class evaluated (`__cmp_cat::__unspec`) |
+| ref-qualified member functions ([dcl.fct]/4, [over.match.funcs]/5) | `pr67600`'s `basic_ostringstream::str() const &` | mangled `R`/`O`, told apart in redeclarations and by the object's value category |
+| conversion sequences | `is_eq(a <=> b)`, `cout << ... << endl` with `<complex>` | a class converted to another by its conversion function (rank user-defined); an overload set holding a function template a non-deduced context ([temp.deduct.call]/6) |
+| layouts | `basic_ostringstream` (`pr67600`) | a layout kept only when the class and every class it holds (bases, members, virtual bases) are finished: one computed while a virtual base was being defined was 48 bytes short |
+| dynamic initialization's order ([basic.start.dynamic]; clang's `EmitCXXGlobalInitFunc`) | `ctor-throw.cpp`, sample `init-priority` | `init_priority(N)` initializations in a function `_GLOBAL__I_00000N` of their own, the `constructor(N)` functions first in `llvm.global_ctors` (clang's order at equal priorities); a variable's attributes no longer taken for its initializer |
+| template corners | `pr95493-1`, `<sstream>`, `move_iterator` | a qualified member type found through the class's bases, dependent ones in the pattern too (`move_iterator<It>::iterator_category` from `__move_iter_cat`); a class template's later declaration's default arguments merged (`<iosfwd>`'s `istreambuf_iterator`, declared again by the headers' retry); a delegating constructor naming the injected-class-name; a constraint's satisfaction that needs itself not satisfied (a depth bound, as clang's "depends on itself") and a constructibility trait's cycle false |
+| smaller | the corpus | `typeid` of arrays and functions (`__array_type_info`, `__function_type_info`), a `bool` global's zero (`i8 0`), GNU's `__alignof__`, a braced range of a range for (`std::initializer_list<E>`) |
+
+### G5.4 The check and the numbers
+
+| check (2026-11-06, light) | result |
+|---|---|
+| `bin/cppi codegen-check` over `test/cpp/codegen` (130 of G1-G4 and nine new: `hdr-iostream`, `va-args`, `tmpl-member-class`, `initlist`, `newdelete-class`, `udl`, `brace-elision`, `spaceship`, `init-priority`) | **138 of 139 pass all three levels** (`hdr-string` now among them); `hdr-vector` passes run and native, known (`trailing-requires`, G5.6); generate and lower 308 s, gcc, clang and runs 12 s |
+| `bin/repr-cpp native-check samples` and `native` after the parser's changes (its new fields underscored, a qualified class definition's lookup scope) | 9 of 9 the same, 68 of 68 items; 1 of 1, 30 of 30 |
+| the corpus's every fifth (42 files, 2 jobs) at the branch's start (G4's head) | **7 of 42** pass all three levels |
+| the same at the branch's head | **32 of 42** (76 %); generate and lower 661 s for the 42 (two jobs for the runs), gcc, clang and runs 6 s; 25, 29 and 30 at intermediate measures of the branch |
+| the samples that were on clang's route (`test/cpp/samples`, `test/cpp/runtime/samples`: 16 files) | **7 of 16** (G4: 5): `auto`, `bitfields`, `classes`, `p1-first`, `vexing`, `uncaught`, and `ctor-throw` (init_priority, constructor attributes); `decls` and `layouts` have no `main`; `hello` an overload set's conversion among `<string>`'s and `<map>`'s `operator<<` candidates, `io` `iterator_traits` of a class iterator in `std::sort`'s internals, `atomics` `__atomic_fetch_sub`, `threads` and `thread-throw` `std::thread`'s invocation, `coroutine` `co_yield`, `library` a parser decline |
+
+The corpus sample's files that do not pass at the branch's head, by their first refusal: coroutines (`func-params-08`,
+`exceptions-test-01-n4849-a`, `co-yield-04-complex-local-state`); `_Destroy`'s local typedef of `iterator_traits<It>::value_type`
+for a class iterator (`asan/pr90570`, `jason/template31`: `std::vector` of a class, G5.6); a class through `...`
+(`pr45843`); C++23's multi-argument `operator[]` (`subscript6`, a parser decline); GNU's `__complex__` (`unchanging1`'s
+`std::complex<double>`); `embed-11` defines a constant global clang folds away (names); `jason/thunk3`'s reference run
+fails (clang's route).
+
+The traces added for the work on headers: `CPP_OP_TRACE=1` (an operator's candidates when none is viable),
+`CPP_LOOKUP_TRACE=NAME` (each scope an unqualified lookup of NAME tries, a variable NAME's declaration, the
+using-directives), `CPP_EXTERN_TRACE=1` (the explicit instantiation declarations of functions and the
+specializations each names), `CPP_LAYOUT_TRACE=NAME,...` (the layouts of the classes so named), `CPP_EQ_TRACE=1` (the
+functional-equivalence check of function template redeclarations).
+
+### G5.5 Sources
+
+- llvm-project at `llvmorg-23.1.4` (commit `7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`, the pinned tarball, extracted into
+  the worktree's `.tmp/llvm/`): `llvm/lib/Transforms/IPO/AlwaysInliner.cpp`, `llvm/lib/Transforms/Utils/InlineFunction.cpp`,
+  `llvm/lib/Analysis/InlineCost.cpp` (ported, G5.1; Apache-2.0 with the LLVM exception, LICENSE.md, doc/ARBACE.md, the
+  file's notice); `clang/lib/CodeGen/CodeGenFunction.cpp` (`ConstantFoldsToSimpleInteger`, `ContainsLabel`),
+  `CGStmt.cpp` (`EmitIfStmt`), `CGExprScalar.cpp` (`VisitBinLAnd`, `VisitBinLOr`, `VisitAbstractConditionalOperator`),
+  `clang/lib/Sema/SemaExprCXX.cpp` (`FindAllocationFunctions`, `resolveAllocationOverload`, `UsualDeallocFnInfo`,
+  `resolveDeallocationOverload`, `FindDeallocationFunction`, `FindUsualDeallocationFunction`,
+  `FindDeallocationFunctionForDestructor`, `doesUsualArrayDeleteWantSize`, `ActOnCXXDelete`), `clang/lib/AST/ItaniumMangle.cpp`
+  (`mangleRequirement`, the `RequiresExprClass` and `CXXNewExprClass` cases) read as the models of the rest, which is
+  written anew in Arbace's structures (P6 (a) outside templates and the ABI).
+- The standard (ISO/IEC 14882:2024): [expr.new], [expr.delete], [basic.stc.dynamic], [dcl.init.list], [over.match.list],
+  [over.ics.list], [over.best.ics], [temp.param], [temp.deduct.funcaddr], [temp.deduct.call], [temp.explicit],
+  [temp.expl.spec], [class.nest], [class.free], [class.dtor], [lex.ext], [dcl.init.aggr], [expr.spaceship],
+  [class.compare.default], [over.match.oper], [dcl.fct], [dcl.align], [except.spec].
+- The Itanium C++ ABI §5.1.3 (literal operators), §5.1.5 (ref-qualifiers), §5.1.6 (local names), §5.1.8 (the standard
+  abbreviations), §2.7 (array cookies), §2.9.5 (type_info classes); the System V x86-64 psABI §3.5.7 (va_list, va_arg).
+- gcc 15.2.0's testsuite (the tarball pinned for repr/c, its extraction in the main checkout's `.tmp/repr-c/`): the corpus
+  of G5.3, read as input; libstdc++ 15.2.0's headers on the host, read as input, never copied.
+
+### G5.6 What is not done
+
+- **A non-template member's trailing requires-clause in a class template** (`_Vector_impl() requires
+  is_default_constructible_v<_Tp_alloc_type>`, clang 23's `Q` after the parameters): the constraint names the class's
+  member typedef, which only the pattern's symbolic instantiation (the current instantiation, a dependent class) can
+  mangle as clang does (`N9__gnu_cxx14__alloc_traitsIT0_NS5_10value_typeEE6rebindIT_E5otherE`); `hdr-vector` stays
+  known for it (P19).
+- Function explicit instantiation declarations with explicit template arguments (`extern template bool
+  has_facet<collate<char>>(const locale&)`: the arguments are not deduced from the declared type; their specializations
+  are emitted when used).
+- The corpus's refusals of G5.4's last list; among them coroutines (frames and the coroutine intrinsics: the lowering
+  refuses `llvm.coro.*` too), GNU's `__complex__` types (`std::complex`'s), a class through `...`, C++23's
+  multi-argument `operator[]` (the parser declines it), a local typedef of a dependent iterator's `value_type` in a header
+  function template (`_Destroy`'s `_Value_type`: the partial specialization `iterator_traits<_Tp*>` not chosen there,
+  not understood yet), `istreambuf_iterator` named without arguments in its own class.
+- The cost: G5 made the analysis slower (codegen-check's 135 samples: generate and lower 321 s at G4's head with the
+  new samples, 441 s after the layouts were no longer kept for unfinished classes, 308 s once concept satisfactions
+  were memoized).
+
+### G5.7 Proposed
+
+**P17. The headers' cost, again.** The full parse's cache (P15 (b), G5.2) does not pay on the tools' host; the
+preprocessor is the larger part (20 s of `hdr-vector`'s 44). (a) As built: the cache opt-in, every run preprocesses and
+parses. (b) A cache of the preprocessor's tokens of the leading `#include` run, keyed by the include closure's files'
+digests and the configuration (the run's tokens are then the parse cache's key at no cost, and both caches pay); costs
+recording the closure (the preprocessor knows every file it opened) and a flat token table (cheaper to read than the
+parse's graph). (c) A compiled executable for the C++ crop's namespaces (out of `gate_key` today: evaluated from the
+checkout), which would speed the parser and the analysis several times; costs the crop's namespaces in the program's
+build. **Recommended: (b)**, then (c) when the crop joins the gate (P7).
+
+**P18. The headers' corpus.** (a) Measured on every fifth file of the rule's 206, the list not committed (as built).
+(b) The list and its recorded results committed (`test/cpp/codegen/gxx-headers.tsv`, `gxx-headers-results.edn`, a known
+file), `bin/cppi codegen-check --corpus gxx-headers` as P11's template corpus; costs about an hour of four jobs for a
+whole run (the `<iostream>` files take a minute each), so a night run. **Recommended: (b)** with P11's corpus, both run
+at night.
+
+**P19. The current instantiation.** (a) As built: a class template's members are analyzed only in specializations;
+what clang mangles from the pattern (a constrained non-template member's `Q`) is left out. (b) Analyze a class template's
+pattern once as the current instantiation (a dependent class whose members' types stay dependent: what
+`arbace.cpp.template`'s symbolic scope does for function templates' signatures, extended to member typedefs and bases);
+costs a dependent class type in sema's registry and its member lookups. **Recommended: (b)** in G6, with the remaining
+template corners; `hdr-vector` needs it for its last name.
+
+### G5.8 The staged plan
+
+| stage | what | target | estimate |
+|---|---|---|---|
+| **G5a** (this branch) | P15 (b), P16 (a), G5.3 | `<iostream>`, `<sstream>`, `<initializer_list>`, `<compare>` programs at three levels; the corpus sample of G5.4 | done |
+| **G5b** | P17, P18, P19; coroutines (frames, `co_await`/`co_yield`, the lowering's `llvm.coro.*` or our own frame lowering); `__complex__`; classes through `...`; the remaining refusals | the headers' corpus at 80 %; the existing 16 samples | 3-4 |
+| **G5c** | the runtime's units by our route (libsupc++ and libstdc++-v3/src compiled without clang, §6's G5) | `bin/cppi runtime-build --route ours` | 3-5 |
+
+## Decided (2026-11-06, the user: P17-P19)
+
+- **P17 (b), then (c):** a preprocessor token cache keyed by the include closure now; compiling the C++ crop's namespaces into the
+  executable later.
+- **P18 (b):** the 206-test headers corpus list committed with recorded results, as a night check beside P11's template corpus.
+- **P19 (b):** a class template's pattern analyzed as a dependent class (the current instantiation), in G6.

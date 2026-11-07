@@ -21,6 +21,15 @@
   []
   (= "native" (System/getenv "REPR_CPP_READER")))
 
+(defn- own-judge?
+  "Whether the round trip is judged by its own verdict alone (REPR_CPP_JUDGE=own, bin/repr-cpp roundtrip --judge own; cpp-90, the user's
+  decision of 2026-11-07): the file and its print read by the native parser, level 1 (the forms read again equal) and level 5 (mode :full
+  printed back byte for byte) the judge; no dump, no object: clang's levels 3 and 4 and its rejections are the oracle tier's (--judge clang,
+  by hand). A file the native parser refuses is the verdict refused (class native-refused); a read whose levels fail is known by its
+  first level's class (forms-differ, full-differs) unless the known file classes it."
+  []
+  (= "own" (System/getenv "REPR_CPP_JUDGE")))
+
 (defn- read-file
   "The file `src` (named `nm`) read from its dump, or natively with the options `args`."
   [^String dump ^String src ^String nm ^String std args full]
@@ -63,7 +72,7 @@
   (none when PRINT is \"-\"), its source SRC-ROOT/NAME; the results in OUT (name, status, text forms, detail)."
   [^String list ^String dumps ^String src-root ^String forms-dir ^String print-dir ^String out]
   (let [rows (for [l (str/split-lines (slurp list)) :when (seq l)] (str/split l #"\t" -1))
-        rows (filter (fn [[nm]] (.exists (java.io.File. (str dumps "/" nm ".edn")))) rows)
+        rows (if (own-judge?) rows (filter (fn [[nm]] (.exists (java.io.File. (str dumps "/" nm ".edn")))) rows))
         threads (Integer/parseInt (or (System/getenv "REPR_CPP_THREADS") "4"))
         pool (Executors/newFixedThreadPool threads)
         t0 (System/nanoTime)
@@ -74,8 +83,16 @@
                        (.submit pool ^Callable (fn [] (one nil nm std (str dumps "/" nm ".edn") (str src-root "/" nm) forms-dir
                                                            (when-not (= print-dir "-") print-dir) args)))))
                    rows)
-        rs (mapv #(.get ^Future %) futs)]
-    (.shutdown pool)
+        ;; a file's read and print in at most REPR_CPP_FILE_SECONDS (default 300, the dumps' timeout): past it the file is a crash
+        ;; (timeout), its thread abandoned (the run exits once written, -main's System/exit)
+        secs (Long/parseLong (or (System/getenv "REPR_CPP_FILE_SECONDS") "300"))
+        deadline (+ (System/nanoTime) (* secs 1000000000 (max 1 (quot (+ (count futs) threads -1) threads))))
+        rs (mapv (fn [[nm] ^Future f]
+                   (try (.get f (max 1 (quot (- deadline (System/nanoTime)) 1000000)) java.util.concurrent.TimeUnit/MILLISECONDS)
+                        (catch java.util.concurrent.TimeoutException _
+                          (.cancel f true) [nm "crash" 0 (str "timeout: no read and print in " secs " s")])))
+                 rows futs)]
+    (.shutdownNow pool)
     (spit out (str/join (map #(str (str/join "\t" %) "\n") rs)))
     (println (str (count rs) " files: " (pr-str (frequencies (map second rs))) ", "
                   (count (filter #(and (= (second %) "ok") (zero? (long (nth % 2)))) rs)) " without a text form, "
@@ -143,9 +160,9 @@
 (defn- full-bytes
   "Level 5's other side (mode :full): the file read in mode :full, written as .ae text and read back, printed: the text's bytes,
   or nil when the file is refused or crashes."
-  [^String dump ^String src ^String nm ^String std]
+  [^String dump ^String src ^String nm ^String std & [args]]
   (try
-    (let [rd (rc/read-cpp dump src nm std true)]
+    (let [rd (read-file dump src nm std args true)]
       (when-not (:refused rd)
         (let [[ff forms] (rc/read-unit-text (rc/unit-text rd))]
           (.getBytes ^String (rc/print-cpp ff forms) "ISO-8859-1"))))
@@ -169,7 +186,12 @@
           by (fn [x] (some #(when (or (= % x) (= (qual %) x)) %) names))
           srcroot (let [f (java.io.File. (str work "/srcroot.txt"))] (when (.exists f) (str/trim (slurp f))))
           r1 (tsv (str work "/read.tsv"))
-          ok? (fn [nm] (and (= "0" (status (str work "/orig/" nm ".status"))) (= "ok" (second (get r1 nm)))))
+          own (own-judge?)
+          ok? (fn [nm] (and (or own (= "0" (status (str work "/orig/" nm ".status")))) (= "ok" (second (get r1 nm)))))
+          ;; the native read's options, as run gives them
+          nargs (fn [nm] (let [[_ _ _ path cargs] (get rows nm)]
+                           (into (vec (remove str/blank? (str/split (or cargs "") #"\s+")))
+                                 (when path ["-iquote" (str (.getParent (java.io.File. ^String path)))]))))
           bad (atom 0)]
       (doseq [{:keys [id subject reference]} cs]
         (let [s (by subject) r (by reference)]
@@ -182,7 +204,7 @@
                   l4 (fn [who] (when (and (= "0" (st "print" who s)) (= "0" (st "orig" who r)))
                                  (not (same? (obj "print" who s) (obj "orig" who r)))))
                   l5 (when srcroot
-                       (let [a (full-bytes (str work "/orig/" s ".edn") (str srcroot "/" s) s (nth (get rows s) 1))
+                       (let [a (full-bytes (str work "/orig/" s ".edn") (str srcroot "/" s) s (nth (get rows s) 1) (nargs s))
                              b (bytes-of (str srcroot "/" r))]
                          (when (and a b) (not (java.util.Arrays/equals ^bytes a ^bytes b)))))
                   lv [[:l1 (when (and (.exists (java.io.File. (str work "/forms2/" s ".ae"))) (.exists (java.io.File. (str work "/forms/" r ".ae"))))
@@ -205,9 +227,11 @@
         ;; CP130 (c): the oracle's rejections and failures of the corpus WORK/list.key names, recorded by name (and kind) in
         ;; ORACLE-FILE: a rejection or failure not recorded fails; no key or no entry: unrecorded (any rejection stands)
         okey (let [f (java.io.File. (str work "/list.key"))] (when (.exists f) (let [k (str/trim (slurp f))] (when (seq k) k))))
-        orec (when (and okey oracle-file (.exists (java.io.File. ^String oracle-file)))
+        own (own-judge?)
+        orec (when (and (not own) okey oracle-file (.exists (java.io.File. ^String oracle-file)))
                (get-in (read-string (slurp oracle-file)) [:corpora okey]))
-        _ (cond (nil? okey) (.println System/err "rtcheck: no corpus key (a #list header or --corpus): the oracle's rejections and failures are taken on trust, no record is read")
+        _ (cond own nil
+                (nil? okey) (.println System/err "rtcheck: no corpus key (a #list header or --corpus): the oracle's rejections and failures are taken on trust, no record is read")
                 (nil? orec) (.println System/err (str "rtcheck: no record for the corpus " okey " in " oracle-file ": its rejections and failures are taken on trust")))
         rejected-rec (set (:rejected orec)) fails-rec (:fails orec {})
         ;; CP127 (b): a file's name in the known file and the results is qualified by its corpus, the list's key without its
@@ -221,7 +245,8 @@
         ;; RESULTS-MODE "record" the record is not read but written from this run, when no file fails
         record? (contains? #{"record" "record-replace"} results-mode)
         mode-replace (= results-mode "record-replace")
-        rfile (when (and okey (seq results-dir)) (str results-dir "/" okey ".edn"))
+        ;; the own judge's records apart (RESULTS-DIR/own/KEY.edn): its verdicts are not clang's levels'
+        rfile (when (and okey (seq results-dir)) (str results-dir (when own "/own") "/" okey ".edn"))
         rrec (when (and rfile (not record?) (.exists (java.io.File. ^String rfile))) (read-string (slurp rfile)))
         rec-files (:files rrec {})
         ;; CP165 (b), CP172 (b): a recorded :known may carry its class, [:known :forms-differ]; the bare keyword (the old format) holds the verdict alone
@@ -239,7 +264,8 @@
         rows (for [nm names]
                (let [o (status (str work "/orig/" nm ".status"))
                      [_ rs texts detail full] (get r1 nm)
-                     read (cond (= o "0") (if (nil? rs) "no-read" rs)
+                     read (cond own (if (nil? rs) "no-read" rs)
+                                (= o "0") (if (nil? rs) "no-read" rs)
                                 (oracle-rejects? o (some-> (bytes-of (str work "/orig/" nm ".err")) (String. "UTF-8"))) "oracle-rejects"
                                 (nil? o) "no-dump"
                                 :else (str "dump-error-" o))
@@ -256,12 +282,13 @@
                      p (status (str work "/dump2/" nm ".status"))
                      pn (status (str work "/dump2/" nm ".norm.status"))
                      read (cond (not= read "ok") read
+                                own read
                                 (not= nst "0") (str "dump-error-norm-" (or nst "none"))
                                 (and p (not= p "0") (not (oracle-rejects? p (err-of "dump2" nm)))) (str "dump-error-print-" p)
                                 (and (= p "0") (not= pn "0")) (str "dump-error-print-norm-" (or pn "none"))
                                 :else read)
                      l1 (when (= read "ok") (and (= "ok" (second (get r2 nm))) (same? (str work "/forms/" nm ".ae") (str work "/forms2/" nm ".ae"))))
-                     l3 (when (= read "ok") (and (= "0" (status (str work "/dump2/" nm ".status"))) (same? (str work "/orig/" nm ".norm") (str work "/dump2/" nm ".norm"))))
+                     l3 (when (= read "ok") (or own (and (= "0" (status (str work "/dump2/" nm ".status"))) (same? (str work "/orig/" nm ".norm") (str work "/dump2/" nm ".norm")))))
                      l4 (fn [who]
                           (when (= read "ok")
                             (let [a (obj "orig" who nm) b (obj "print" who nm)]
@@ -275,6 +302,12 @@
                      pass (and (= read "ok") l1 l3 (contains? #{"same" "-"} l5) (ok4? g) (ok4? c))
                      q (qual nm)
                      k (get kfiles q)
+                     ;; the own judge's rule classes (own-judge?): a refusal of the native parser, or the first level that fails
+                     k (if (and own (nil? k) (not pass))
+                         (cond (= read "refused") :native-refused
+                               (and (= read "ok") (not l1)) :forms-differ
+                               (= read "ok") :full-differs)
+                         k)
                      ;; the first level that fails (review 007's finding 8): a known file is known only when its class names
                      ;; that level; the objects count as differing only when both were made and compared
                      first (cond pass nil
@@ -287,7 +320,7 @@
                                                                      (and (false? g) (ok4? c)) :l4-gxx
                                                                      :else :l4)
                                  :else :l5)
-                     fits (get {:print-rejected #{:l1-rejected} :forms-differ #{:l1-differs} :ast-differs #{:l3}
+                     fits (get {:native-refused #{:read} :full-differs #{:l5} :print-rejected #{:l1-rejected} :forms-differ #{:l1-differs} :ast-differs #{:l3}
                                 :objects-differ #{:l4 :l4-gxx} :gxx-objects-location #{:l4-gxx} :read-crash #{:read} :read-refused #{:read}} k #{})
                      ;; a dump that failed for another reason than clang's rejection is the check's failure, never known
                      verdict (cond (= read "oracle-rejects") "oracle-rejects" (= read "oracle-fails") "oracle-fails" pass "pass"
@@ -361,7 +394,7 @@
           ;; CP164 (c): an improvement is a count in a sample run and a failure in a whole-corpus run (the key ends in -all), so the
           ;; record of a whole corpus stays exact
           improved-fail (and okey (re-find #"-all$" okey) (not record?) (not partial?) (pos? (or (:improvements summary) 0)))
-          unknown (and okey ocorpora (nil? orec) (not record?) (seq results-dir))
+          unknown (and (not own) okey ocorpora (nil? orec) (not record?) (seq results-dir))
           unheld (and orec okey (not record?) (seq results-dir) (nil? rrec) (not (contains? pending okey)))
           rec-names (when (and record? rfile (.exists (java.io.File. ^String rfile))) (set (keys (:files (read-string (slurp rfile))))))
           shrinks (and rec-names (not= mode-replace true) (not= rec-names (set (map first rows))))]
@@ -402,7 +435,7 @@
 
 (defn -main [cmd & args]
   (case cmd
-    "run" (apply run args)
+    "run" (do (apply run args) (shutdown-agents) (System/exit 0))
     "judge" (apply judge args)
     "record" (apply record args)
     (do (println "rtcheck: run LIST DUMPS SRC-ROOT FORMS PRINT OUT") (System/exit 2))))

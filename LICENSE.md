@@ -1213,8 +1213,13 @@ covers what.
   `hasInconsistentOrSupersetQualifiersOf` and `isAtLeastAsSpecializedAs`, and `clang/lib/AST/ItaniumMangle.cpp`'s
   `mangleTemplatePrefix`, `mangleTemplateArgs`, `mangleTemplateParameter`, `mangleIntegerLiteral`, the return-type
   rule of `mangleFunctionEncodingBareType` and the `sr` form of `mangleUnresolvedPrefix`, under the Apache License
-  2.0 with the LLVM Exceptions (section "LLVM (clang)" below), the files carrying clang's notice. The rest of
-  `arbace/cpp/` is Arbace's own, under the Eclipse Public License 1.0.
+  2.0 with the LLVM Exceptions (section "LLVM (clang)" below), the files carrying clang's notice; and
+  `arbace/cpp/inline.ae` (doc/cpp/CODEGEN.md G5, the user's decision P16 (a), 2026-11-05): a port of LLVM's
+  AlwaysInliner at the same commit, `llvm/lib/Transforms/IPO/AlwaysInliner.cpp`'s `AlwaysInlineImpl`,
+  `llvm/lib/Transforms/Utils/InlineFunction.cpp`'s `InlineFunctionImpl` (the parts -O0 IR uses),
+  `HandleInlinedLandingPad`, `HandleCallsInBlockInlinedThroughInvoke`, `LandingPadInliningInfo::forwardResume` and
+  `getInnerResumeDest`, and `llvm/lib/Analysis/InlineCost.cpp`'s `isInlineViable`, under the same license, the file
+  carrying LLVM's notice. The rest of `arbace/cpp/` is Arbace's own, under the Eclipse Public License 1.0.
 - `go/arbace/libm.ae` and `go/arbace/libm/` (the package `arbace/libm`, musl's libm in Go, shared by hsi and pyi;
   also `go/arbace/hs/prim_scalar.ae`'s `fmaf`, musl 1.2.6's `src/math/fmaf.c` ported likewise, HE4e;
   doc/haskell/HASKELL-EVAL-SURVEY.md, HES37 (a), "As built: HE4b, HE4c (write-ahead)", "As built: HES38's :full
