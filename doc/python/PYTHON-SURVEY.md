@@ -3896,6 +3896,37 @@ As the design said, plus what the runs showed:
 - Known gap: `sorted(float.__dict__)` still lists only the dict's entries: `ownSlots` answers `in` and `[]`, not iteration.
   tp_name in "not callable" and setattr's messages stays the bare name (`'TypeVar' object is not callable`).
 
+
+## Design: 227, pickling the core types, the iterators and the exceptions (2026-11-07, the Mac VM, queue 227)
+
+The classes `:pickle-core`, `:pickle-iterators` and `:array-pickle` (`:exc-pickle` went with 223), judged by test_pickle (the
+pure Pickler; the `_pickle` twin stays, PY6g's DECISION 1), test_itertools, test_array and test_exceptions, then test_iter,
+test_enumerate, test_range, test_set, test_deque and test_bytes for the iterators. Base c44a0b5d. The rules are the pinned
+3.14.10's C; a 1,088-line probe of `__reduce_ex__` at protocols 0, 1, 2 and 4, `pickle` and `copy` over about 150 objects, against
+`python3 -I -B`, finds the gaps before the tests do.
+
+**On 226.** 226 (running beside this task) ported `object_getstate_default` with its required check, `reduce_newobj`'s
+conditions and the reduces of set, method, deque subclasses, bytearray and the str iterator. This task does not port them a
+second time: 226's head is merged here first, by the printed-Go method (only `func.go` conflicts: two fields of `Builtin`).
+
+**The iterators.** One new file, `iterreduce.go`, holds what `Objects/*.c` spreads out: `enum_reduce`, `map_reduce`,
+`map_setstate`, `filter_reduce`, `zip_reduce`, `zip_setstate`, `iter_reduce`, `iter_setstate`, `calliter_reduce`, the
+`striter`, `bytearrayiter`, `unicodeiter`, `rangeiter`, `longrangeiter` and `listreviter` pairs, `setiter_reduce`,
+`dequeiter_reduce` and `dequeiter_new`. Each reads the builtin (`_PyEval_GetBuiltin`, by the dict's own lookup) before it reads the
+iterator (issue #101765: a key's `__eq__` may exhaust it). What the iterators' structs must keep for that: bytes' and bytearray's
+iterators their object, `filter` that its function was `bool`, a deque iterator its deque after the end and the C's counter,
+and an exhausted str or bytes iterator its nil sequence.
+
+**Types pyi lacks.** `list_reverseiterator` (`list.__reversed__`), `str_iterator` beside `str_ascii_iterator`,
+`longrange_iterator` and `range.__reversed__` (`range_reverse`): the reduces name them, and an unpickled iterator's type shows
+them. itertools' `__reduce__` went in 3.14: its types refuse (`cannot pickle 'itertools.count' object`), which the required
+check gives without a line of its own, and test_itertools' pickling tests are the reference's as they stand.
+
+**Out of the design.** `OrderedDict` is pyi's pure-Python twin, so `iter(od)` is a generator that does not pickle where
+`odict_iterator` does: classed with the twin, not ported.
+
+**The cost.** The compiled loop is not touched. `strIter` and `rangeIter` get a type by field or by test, and `Next` of a str
+iterator one nil test; the bench sample checks the iteration programs.
 ## Design: 226, the core data model's gaps (2026-11-07, the Mac VM, queue 226)
 
 The classes `:data-model`, `:module-subclasses`, `:function-constructor`, `:str-protocol` and `:surrogate-pairs`, judged by
@@ -3990,3 +4021,66 @@ positional refusal; `sq_repeat`'s messages. **Surrogates**: as designed; `ast.pa
 
 **Measured** (VM, the native driver on both sides, per method): see report 226. The classes: `:data-model` 90 listed tests to 13,
 `:module-subclasses` 9 to 0, `:str-protocol` 19 to 5, `:surrogate-pairs` 14 to 0.
+`:module-subclasses` 9 to 0, `:str-protocol` 19 to 6, `:surrogate-pairs` 14 to 0.
+
+## As built: 227, pickling the core types, the iterators and the exceptions (2026-11-07, the Mac VM, queue 227)
+
+As designed ("Design: 227"), on 226's head merged first (760899239). Base c44a0b5d. Counts are `bin/pyi lib-test --aot` (the compiled driver,
+samples; the record is the main host's).
+
+| class | before | after |
+|---|---|---|
+| `:pickle-core` | 41 listed | 2 listed, `:design` (`_pyio`) |
+| `:pickle-iterators` | a pattern, 26 methods of the sample (test_iter 10, test_enumerate 8, test_set 4, test_range 3, test_deque 1) | removed |
+| `:array-pickle` | 28 | removed |
+| `:exc-pickle` | gone with 223 | test_exceptions' 11 pickling, copying and state methods pass (run alone: see the Lows) |
+
+| module (sample) | not equal before | after |
+|---|---|---|
+| test_pickle | 56 of the 471 run | 26 of the 1,015 run (24 of the C classes, 2 by `_pyio`) |
+| test_array | 56 | 28 (`:buffer-exports`) |
+| test_iter | 13 | 0 |
+| test_enumerate | 11 | 0 |
+| test_range | 10 | 2 |
+| test_set | 116 | 21 |
+| test_deque | 14 | 8 |
+| test_list | 4 | 0 |
+| test_tuple | 2 | 0 |
+| test_pickletools | 23 | 1 |
+
+**The iterators** are as designed, in `iterreduce.go`, with `__length_hint__` beside them (test_enumerate's test_len and test_set
+asked for it), `reversed` on its `__reversed__ = None` block, and calliter_iternext's clearing of the sentinel (gh-101892). An
+enumerate, zip, map, filter or reversed subclass was a bare iterator of type `t` and had no `__dict__`: they now keep the built-in
+type and `wrapNew` wraps them as any built-in's subclass; `iter(e) is e` needed `unwrapSlots`' `Iter` to give back the instance
+when the value is its own iterator. `range_iter` and `range_reverse` choose `range_iterator` and `longrange_iterator` by the C's
+overflow conditions, which test_range's pickling checks by type.
+
+**The core types.** `set` follows `set_new` and `set_init`: `__new__` ignores its arguments and `__init__` fills, so a subclass's
+own `__init__` signature works and `super().__init__(x)` no longer reaches `object.__init__` (the cause of test_pickle's
+`test_complex_newobj` family and of most of test_set's). `frozenset_new` keeps its arguments, keywords refused for frozenset alone.
+A subclass's repr names it for set, frozenset and bytearray. `deque.__reduce__` is `(type, ((), maxlen), state, iter(self))`, so
+a deque holding itself pickles; `deque_copy` calls a subclass. `array.__reduce_ex__` takes the instance, so a subclass's `__dict__`
+is its state. A method descriptor's and a slot wrapper's reduce is `getattr(owner, name)`; `bytearray.maketrans`; None passes
+the required check of `object_getstate_default`, memoryview and code are var-sized for it.
+
+**Identity for pickle's memo.** The memo goes by `id`, so byte-equal pickles need CPython's sharing: a static type's `__module__` is one
+interned object, a built-in function's another (`funcModuleStr`, m_module's), and `pickle.dumps(map(int, x), 5)` is now byte
+for byte CPython's. `type(...)` pickles still differ in one memo reference: `sys.modules`' key is not that interned string (Low).
+
+**Found on the way.** `islice_next` overflowed `next` with a huge step and looped forever (test_islice had not returned after six minutes, when I stopped it): ported
+whole. `tee` got `__copy__` and "cannot re-enter the tee iterator" (test_tee_concurrent waited forever). `set_lookkey`'s restart was
+missing from `Set.lookup`, so an `__eq__` that clears the set was a Go panic (64 methods of test_set). `Contains` keeps a non-TypeError
+of `__iter__`; `range()` keeps `__index__`'s exception; `_PyObject_FunctionStr` in "argument after **".
+
+**`_pickle` (the user's decision on 227's DECISION (a), 2026-11-07).** pickle.py imports PickleBuffer from `_pickle` alone, test_inspect does
+`import _pickle`, and test_pickle takes the module's presence for the C classes, so a module with PickleBuffer alone would break
+test_pickle's import. `picklebuf.go` holds PickleBuffer (picklebufobject.c: `raw`, `release`, the object's own buffer through `memoryview`) and
+the module `_pickle`, whose other names (Pickler, Unpickler, dump, dumps, load, loads, the three exceptions) are pickle's pure twin
+through a module `__getattr__`: `from _pickle import (...)` at pickle.py's end then finds them already defined, and `pickle.Pickler` stays `_Pickler`.
+`_pickle.c` is not ported, PY6g's DECISION 1 stands for it. Protocol 5's out-of-band buffers work, test_pickletools' 10 and test_pickle's
+Py classes' buffer methods pass, and test_inspect imports. test_pickle's C classes now run on the pure Pickler: **a pass among them says
+nothing about a C pickler.** The 24 that fail, what only `_pickle.c` does (a C function not binding in a class body, the memo proxies,
+re-entrancy, its messages), stay in `:c-accelerators`, whose `:why` says this; the C classes' other entries stay listed for the same reason.
+`:pickle-core` keeps the 2 `_pyio` methods, now `:design`.
+
+**The cost.** The compiled loop is untouched. `str` iteration gains a nil test; `set(x)` runs New and Init as `deque` does. The bench sample the design named was not run.
