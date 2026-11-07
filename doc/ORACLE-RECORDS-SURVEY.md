@@ -1483,3 +1483,52 @@ A light run of `bin/cppi check --only` io.cpp (1 job, 1 thread, `GOMEMLIMIT=1500
 as the day's rule asks: **the night's**, `env CPPI_THREADS=2 CPPI_CI_MEMLIMIT=4GiB bin/cppi check --only test/cpp/essential-check.txt` and
 `--aot` (the gate's `cpp-check-essential` and `cpp-aot-essential`), to measure io.cpp's cost in the essential gate (its last recorded ci build
 204 s) and confirm its pass.
+
+## As built: batch 4, the line consolidated (2026-11-07, branch `batch4` on `mac/batch2` 3ff5ad692)
+
+The line merged in its order, one merge commit a branch: `oracle-records` 3f800b868 (`589e229e9`), `-c` 58829ed2e (`17c101e67`),
+`-scheme` b8f7825b1 (`6ac1674ed`), `-haskell` c2d46e3a6 (`15a7e32fa`), `-rust` 3c7ceddf9 (`acba96cd7`), `-ocaml` 056caff62 (`c4337a5ad`),
+`-cpp` 0c025a3f7 (`453bb382f`), `-cpp2` 557e7aeec (`df089a139`); then the oracle tier's splice (`d29725a4f`). The line is linear
+(oracle-records < -c < -scheme < -haskell < -rust < -ocaml < -cpp < -cpp2). Batch 2 held much of it already in another form: haskell-90's
+cherry-picks of the tooling and Haskell's records, cpp-indep's of C++'s IR packs, c-indep-b1's of C's sysroot, and since the line was
+written each crop moved to its own verdicts and own targets. The rule was batch 2's behaviour wherever the two differ, the line's
+additions where they add.
+
+- **Taken.** The oracle tier: the planner's `:phase :oracle` (modes `oracle`, `full-oracle`), the runner's `absent`, `bin/gate --oracle`.
+  C's gcc outcomes as oracle-tier records and packs under batch 2's own target (`ARBACE_C_TARGET=gcc ARBACE_C_JUDGE=gcc` reads them; the
+  default reads Arbace's target and judges each test by its own verdict): `test/c/ref-dg-gcc15.edn`, `test/c/c23/ref-syntax-gcc15.tsv`,
+  `c-headers-gcc15` (now gcc's target's sysroot, `c_gcc_sysroot`), `c-musl-1.2.6-x86_64` (`bin/ci musl verify-derived` compares batch 2's
+  derived headers with it, no gcc), `c-roundtrip-orig-benchmarksgame`, and the verbs that record and verify them; C's oracle steps
+  `c-c23-oracle`, `c-roundtrip-oracle`, `c-records-verify`. Scheme's `scheme-chez-dumps` (SCS2 (a): `scheme-read-essential` and
+  `scheme-read` off `:chez`; `scheme-records-verify`). C++'s selftests split by toolchain (`cpp-selftest --no-toolchain`,
+  `cpp-selftest-oracle`) and ORS28 (b) (`cpp-lower-essential`, `cpp-lower` on `[:stage0]`, `samples/io.cpp` in the essential run list,
+  `cpp-lower-oracle`). The survey's text through ORS28.
+- **Not taken, superseded.** Chibi's committed answers (SCS1 keeps Chibi's marks in the check's record) and `si-boot-oracle` (`si boot
+  --check` runs psyntax on si since SMR7b); Haskell's (haskell-90's are the newer form); Rust's corpus packs and `repr-rust test`'s
+  records (the native reader is the default, and every entry is keyed by the line's helper hash, which batch 2's helper no longer gives:
+  all STALE) and its IR packs (batch 2 pins `test/rust/ir/`); OCaml's Lambda and ocdump packs and the REPL's phrases (Arbace's typer,
+  TY24 (a), the native reader and `repl-check --native`); C++'s cxxdump packs (cpp-indep left them out: the print judged by its own
+  verdict); LLVM's originals' digests and opt's pack (llvm-90's `ref-rt23.edn`, `ref-opt23.edn` and own verdicts). Their packs stay in the
+  store, unpinned.
+- **The oracle tier now**: 52 planned steps (`bin/gate --oracle --plan`), C's 3 (`c-roundtrip-oracle` a part a corpus), Scheme's 1, C++'s 5
+  (`cpp-check-oracle`, `cpp-records-verify`, `cpp-target-oracle`, `cpp-selftest-oracle`, `cpp-lower-oracle`), OCaml's 2 (`ocaml-dumps`,
+  `ocaml-oracle`), Haskell's 4, Rust's 4 (`rust-iface`, `rust-behaviour`, `rust-native-essential`, `rust-native`, off `--full` and the
+  essential gate). `--plan` 49 -> 48 steps, `--full --plan` 317 -> 311, `--full --oracle --plan` 358.
+- **Numbers.** Scheme's judge 0.752 -> 0.874 (the read check's 1,371 cases at 0.5: recorded dumps), independence 95.0 -> 97.5; every
+  other crop unchanged (the facts of C, C++, OCaml, Haskell and Rust already counted batch 2's routes). SCS2's "about 0.82" was an estimate;
+  the case-weighted mean gives 0.874.
+
+### Proposed (batch 4): ORS29-ORS32
+
+- **ORS29 Rust's helper dumps as records again.** (a) Re-record `rust-{dumps,dumps-full,trees}-rustc-1.99.1` on batch 2's helper (rsdump.rs
+  with front.rs, mirdata.rs) and let `bin/repr-rust native-check` read the helper's side from them, so `rust-native-essential` returns to
+  the essential gate on no toolchain host (the oracle tier keeps a live native-check); a Rust agent's day and a night's rustc. (b) Leave
+  native-check in the oracle tier. *Recommended: (a).*
+- **ORS30 LLVM IR's live judges in the oracle tier.** llvm-90's record-rt and record-opt have no oracle step. (a) `llvm-roundtrip-oracle`
+  (`REPR_LLVM_JUDGE=live`) and `llvm-records-verify` (record-rt and record-opt against the tools, a sample) on `:llvm`; (b) by hand at a tag.
+  *Recommended: (a).*
+- **ORS31 C++'s other `:cxx` steps.** `cpp-dg`, `cpp-roundtrip` and `cpp-roundtrip-dg` still name `:cxx` in `--full`. (a) The round trips
+  on `--judge own` in `--full` and clang's levels in the oracle tier, `cpp-dg` on `ref-dg-gxx15.edn` with g++'s live run the oracle's;
+  (b) leave. *Recommended: (a)*, with batch 3's C++ lines.
+- **ORS32 The line's unpinned packs.** Rust's 7, OCaml's 6, LLVM's `llvm-opt-verify` and C++'s two cxxdump packs sit in the store with no
+  pin. (a) Keep them until ORS29 and the crops' own records decide; (b) remove them. *Recommended: (a).*

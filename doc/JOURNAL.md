@@ -482,3 +482,48 @@ On `batch2` 93db65e83, by an agent by day in the light tier (no gate but `--plan
   `bin/crops-score --judge --strict` 0; samples under 2 GiB (`bin/oracle-records pins`, `bin/repr-cpp pp-check --essential` 1.47 GB, `bin/rsi
   judge-test`, `bin/repr-haskell test`). Not run: C's and Rust's AOT after RES34 (the shared `.tmp/ci-aot-lib` is the night's first build).
 - Found: repr-haskell's configure skip test is inverted in native mode (proposal 9 in the AGENDA).
+
+## 2026-11-07: batch 4, the oracle-records line consolidated (branch batch4, on batch2 3ff5ad692)
+
+Branch `batch4` from `mac/batch2` 3ff5ad692, the main session's request (consolidating the held branches first). The line
+`oracle-records` (doc/ORACLE-RECORDS-SURVEY.md, ORS1-ORS28) is linear: `mac/oracle-records` 3f800b868 < `-c` 58829ed2e < `-scheme`
+b8f7825b1 < `-haskell` c2d46e3a6 < `-rust` 3c7ceddf9 < `-ocaml` 056caff62 < `-cpp` 0c025a3f7 < `-cpp2` 557e7aeec (checked with `git
+merge-base --is-ancestor`); each merged in that order, one merge commit a branch (589e229e9, 17c101e67, 6ac1674ed, 15a7e32fa, acba96cd7,
+c4337a5ad, 453bb382f, df089a139), then the oracle tier's splice (d29725a4f).
+
+- **Why most of it is batch 2's.** Since the line was written (2026-11-05/06) batch 2 took its shared tooling and Haskell's records
+  (haskell-90's cherry-picks), C++'s IR packs (cpp-indep's) and C's sysroot (c-indep-b1's), and each crop moved to its own verdicts and own
+  targets: C on Arbace's target judging each test by its own verdict, OCaml on Arbace's typer and native reader, Rust on its native reader
+  with its own IR packs, LLVM IR on own verdicts with `ref-rt23.edn` and `ref-opt23.edn`, Scheme with Chibi's marks in the check's record
+  and psyntax booted on si. The rule kept: batch 2's behaviour where the two differ, the line's additions where they add, every drop named
+  with its reason in its merge message.
+- **Taken.** The planner's `:phase :oracle` (`test/gate/plan.ae`: modes `oracle` and `full-oracle`, an oracle step whose host is none here
+  `absent`), the runner's `absent` (`bin/lib/gate-run.bash`), `bin/gate --oracle`. C's gcc outcomes as records and packs, read under gcc's
+  target and judge (`ARBACE_C_TARGET=gcc ARBACE_C_JUDGE=gcc`): `bin/lib/ci/dg` judges by the directives unless gcc's judge, which reads
+  `test/c/ref-dg-gcc15.edn` (`--live` runs gcc); `bin/lib/repr-c/c23check`'s modes self (default), records, `--oracle`, `--record-ref`,
+  `--verify-ref`; `bin/lib/repr-c/roundtrip`'s originals' packs under gcc's judge; `bin/lib/ci/musl`'s `pack`, `verify-pack`, gcc's target
+  taking the products from the pack and `verify-derived` against the pack with no gcc; `bin/lib/repr-c/sysroot.bash`'s `c_gcc_sysroot`
+  (the pack `c-headers-gcc15`) in place of `/` for gcc's target. Scheme's `scheme-chez-dumps` pack (SCS2 (a), the user 2026-11-07).
+  C++'s selftest split (`test/cpp/selftest/toolchain.txt`, 30 of 34 tests) and ORS28 (b) (the user, 2026-11-06).
+- **Spliced.** `test/gate/crops/ocaml-oracle.edn` (OC180 (a)'s), `cpp-oracle.edn` (cpp-indep's, with `cpp-selftest-oracle` and
+  `cpp-lower-oracle` added), `haskell.edn`'s four oracle steps (haskell-90's), by `gate.crops splice` (steps, crops, controls; chains
+  renamed CROP-oracle; cpp-oracle's crops entry `:cpp`'s); Rust's four `:rust-helper` steps set to `:phase :oracle` in place (and in
+  `llvm-rust.edn`, `natives.edn`). The tier: 52 steps.
+- **Alternatives considered.** Integrating Rust's corpus packs into batch 2's `bin/repr-rust` so native-check runs without rustc: not
+  now, the entries are keyed by the line's helper hash and would all read STALE (ORS29 proposes a re-record); taking the C packs' `:pins`
+  on every C step (the line's): no default C path reads them on batch 2, so they would rekey C's steps for nothing; si-boot-oracle and
+  Chibi's records: superseded.
+- **Keys.** gate `fc2cc71ebe1f` and runtime `cb6a54899d99` unchanged; javac `cc2abcd735f9` -> `73b4ec54ebcd` at the C merge (its
+  commit message names `83c9dfbb1623`, a value taken while a conflict marker was still in `bin/lib/repr-c/check`, resolved before that
+  commit: corrected in the Scheme merge's message).
+- **Checks** (light, main's stage 0, after each merge): `gate.crops check` 0; `bin/gate --plan` 49 (48 after the splice), `--full --plan`
+  317 (311), `--oracle --plan` 52, `--full --oracle --plan` 358; `bin/reap` 41 of 44, 1 problem (deferred.cpp's, CP245); `bin/crops-score
+  --judge --strict` 0 (recorded at the Scheme merge); `bin/oracle-records pins` 13 packs after copying C's two from `.tmp/keep/oracle-records-c`
+  into the main checkout's `.tmp/oracle-packs` (no clobber); C: dg essential 92/92, check --c23 59/3/0 in both modes, musl verify-derived
+  equal to the pack; Scheme: the read check on the records with chez stubbed (1,358 + 6 files and probes, 7 scans, equal, no stub
+  called); C++: selftest --no-toolchain 4 pass with the compilers stubbed.
+- **Found.** `test/gate/crops-test.bash` (in the essential gate's `gate-tests`) failed on batch 2 already: batch 1's table was hardcoded
+  (crop pins, chains, `:haskell` as the crop not gated, an injected `:llvm []` that duplicated batch 2's key); brought to batch 2's table.
+- **Scores**: Scheme's independence 95.0 -> 97.5 (judge 0.752 -> 0.874, the read check's 1,371 cases at 0.5: recorded dumps; SCS2's
+  "about 0.82" was an estimate); every other crop unchanged.
+- Proposed: ORS29-ORS32 (the survey's "Proposed (batch 4)").

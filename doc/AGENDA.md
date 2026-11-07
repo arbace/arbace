@@ -504,6 +504,69 @@ Night B (the night after, keyed: what A did not reach):
 - Still open from the lines: LLS31 (a) (the pack rt, planned), LLS32, CP242, OCaml's OC182, OC186-OC190; the branches `res34`, `hfs-i1`
   and `cpp-indep` merged in the third round (above); CP240 (b) and (c) after the night's routes compared.
 
+## Batch 4 (merged on `batch4`, 2026-11-07, on `batch2` 3ff5ad69: the oracle-records line)
+
+The oracle-records line (doc/ORACLE-RECORDS-SURVEY.md, "As built: batch 4, the line consolidated"), linear, one merge commit a branch:
+`oracle-records` 3f800b86 (`589e229e`), `-c` 58829ed2 (`17c101e6`), `-scheme` b8f7825b (`6ac1674e`), `-haskell` c2d46e3a (`15a7e32f`),
+`-rust` 3c7ceddf (`acba96cd`), `-ocaml` 056caff6 (`c4337a5a`), `-cpp` 0c025a3f (`453bb382`), `-cpp2` 557e7aee (`df089a13`); then the oracle
+tier spliced (`d29725a4`). Batch 3 (Haskell's and C++'s remaining lines) is built beside it on the same base.
+
+- **What each gave.** The tooling's survey text (all eight); `-c`: the planner's `:phase :oracle` and `bin/gate --oracle`, gcc's
+  outcomes as oracle-tier records and packs read under `ARBACE_C_TARGET=gcc ARBACE_C_JUDGE=gcc` (batch 2's own target and own verdicts
+  stay the default), C's three oracle steps; `-scheme`: SCS2 (a), the read check on the pack `scheme-chez-dumps`, `scheme-records-verify`;
+  `-cpp`: the selftests split by toolchain; `-cpp2`: ORS28 (b), the lowering steps on no toolchain host and `samples/io.cpp` in the
+  essential run list. Dropped as superseded by batch 2 (each merge message says why): Chibi's records, `si-boot-oracle`, the Haskell,
+  Rust, OCaml, LLVM and cxxdump records (newer own routes; Rust's keyed to an older helper).
+- **The oracle tier**: 52 steps (`bin/gate --oracle --plan`): C 3, Scheme 1, C++ 5, OCaml 2 (`test/gate/crops/ocaml-oracle.edn`), Haskell 4,
+  Rust 4 (rust-iface, rust-behaviour, rust-native-essential, rust-native: off the essential gate and `--full`). `--plan` 49 -> 48,
+  `--full --plan` 317 -> 311, `--full --oracle --plan` 358.
+- **Keys** (12 hex; before gate `fc2cc71ebe1f`, runtime `cb6a54899d99`, javac `cc2abcd735f9`): gate and runtime unchanged; javac
+  `73b4ec54ebcd` (the C merge's `bin/lib/ci/`, `bin/lib/repr-c/`); the step keys of every C step (`:c` gains `bin/oracle-records`,
+  `test/oracle-records/`), the Scheme steps (`:scheme` alike), cpp-selftest, cpp-lower(-essential), cpp-check-essential and cpp-aot-essential
+  (io.cpp) and the four Rust steps move.
+- **Checks (light), after each merge:** `gate.crops check` 0 problems; both plans clean (the oracle tier planned apart); `bin/reap` 41 of 44
+  cells checked, 1 problem (deferred.cpp's, CP245, as before); `bin/crops-score --judge --strict` 0 problems (after `--record` at the Scheme
+  merge; no claim refuted by the steps that moved tier); `bin/oracle-records pins` 13 packs (C's `c-headers-gcc15` and
+  `c-roundtrip-orig-benchmarksgame` copied, no clobber, from `.tmp/keep/oracle-records-c` into the main checkout's store). Samples: `bin/ci
+  dg --essential` 92/92; `bin/repr-c check --c23` 59 pass, 3 expected, 0 failing in the own-verdict and the records mode; `bin/ci musl
+  verify-derived` equal to the pack (no gcc); `bin/repr-scheme check` on the essential corpora (1,358), whimsical (6) and the scans (7) from the
+  records with chez a stub exiting 99, equal, no stub called; `bin/cppi selftest --no-toolchain` 4 pass with the compilers stubbed; the gate's
+  tests crops, costs, plan-logic, claude-md, stale-comments, gate-key-crops, lanes, rotation.
+- **Found and fixed:** `test/gate/crops-test.bash` (in `gate-tests`, the essential gate) failed on batch 2 already (5 FAILs: batch 1's table
+  hardcoded); brought to batch 2's table (`d29725a4`).
+
+| crop | batch2 (3ff5ad69) | batch4 (completeness / maturity / independence) |
+|---|---|---|
+| Clojure | 99.0 / 96.3 / 100 | 99.0 / 96.3 / 100 |
+| Java | 72.9 / 100 / 99.7 | 72.9 / 100 / 99.7 |
+| Go | 94.9 / 95.8 / 100 | 94.9 / 95.8 / 100 |
+| C | 95.1 / 100 / 99.7 | 95.1 / 100 / 99.7 |
+| C++ | 75.4 / 100 / 54.3 | 75.4 / 100 / 54.3 |
+| OCaml | 80.9 / 100 / 87.4 | 80.9 / 100 / 87.4 |
+| Scheme | 98.4 / 100 / 95.0 | 98.4 / 100 / 97.5 |
+| Haskell | 96.3 / 100 / 74.9 | 96.3 / 100 / 74.9 |
+| Rust | 75.0 / 95.8 / 80.0 | 75.0 / 95.8 / 80.0 |
+| LLVM IR | 96.0 / 100 / 96.9 | 96.0 / 100 / 96.9 |
+| Python | 0 / 83.3 / 20 | 0 / 83.3 / 20 |
+
+### Batch 4's night (after batch 2's; one heavy job at a time under `bin/heavy-lock`)
+
+1. The essential gate at batch 4's head (step rekeys only: C's, Scheme's, C++'s lowering and run essentials, `gate-tests`; no build:
+   `gate_key` unchanged), `bin/gate --pins` (13 packs), `bin/reap`, `bin/crops-score --judge --strict`. `cpp-check-essential` and
+   `cpp-aot-essential` now run `samples/io.cpp` (its ci build about 200 s, above 2 GiB by day): measure it (ORS28 (b)).
+2. javac's tool at `73b4ec54ebcd` for `--full`'s javac steps (`bin/javac-vendor tool`, heavy), with batch 2's `--full` nights.
+3. The oracle tier's first run, `bin/gate --oracle` (gcc, g++, clang++, Chez, GHC, rustc and OCaml are on this host: 47 of 52 run;
+   `c-roundtrip-oracle` heavy, a part a corpus); at least `c-records-verify`, `scheme-records-verify`, `cpp-records-verify`,
+   `cpp-selftest-oracle`, `c-c23-oracle` if the night is short. The night's C++ IR records (`bin/cppi record-ir --corpus libstdcxx --every
+   15,25`, cpp-ir-libstdcxx) let `cpp-lower`'s libstdcxx-every-15th part come back from `cpp-lower-oracle`.
+4. Last: `bin/reap --record`, `bin/crops-score --record`.
+
+### Proposed (batch 4)
+
+ORS29-ORS32 (doc/ORACLE-RECORDS-SURVEY.md, "Proposed (batch 4)"): Rust's helper dumps re-recorded on batch 2's helper so native-check
+leaves the oracle tier (a); LLVM IR's live judges as oracle steps (a); C++'s remaining `:cxx` steps (`cpp-dg`, `cpp-roundtrip`,
+`cpp-roundtrip-dg`) on own verdicts and records, with batch 3's C++ lines (a); the line's unpinned packs kept in the store (a).
+
 ## After the tag
 
 - **The held branches, in batches into `next`** (`.tmp/tag-v2/merge-plan.md`): the crops' rows (batch 1, above), the LLVM IR line (the reader's gaps, `:full`, the verifier, the lowering of
