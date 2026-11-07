@@ -3783,3 +3783,48 @@ it and find AttributeError). Inline values themselves are CPython's layout and s
 **Speed.** `lookupAttr`, the attribute sites and the compiled loop stay as they are; the class-creation path and `__class__`
 assignment change. Instance creation keeps its fields. If `objectNew` or `genericGetAttrFound` change, 210's bench sample
 is rerun.
+
+## As built: 226, the core data model's gaps (2026-11-07, the Mac VM, queue 226)
+
+As designed ("Design: 226"), with what the samples found. Base 7df8864b.
+
+**Classes.** `type_new_slots` is `newSlots` (identifiers, `may_add_dict`, `may_add_weak`, a mangled name's conflict with
+`__qualname__`, `__classcell__` and `__classdictcell__` excepted, the names sorted, a secondary base's `__dict__` and
+`__weakref__`). `__dict__` and `__weakref__` are getsets in the class that adds them, by `PyDict_SetDefault`'s rule (a class's
+own `__dict__ = property(...)` stays: test_builtin's test_vars caught the first version). `object` has no `__dict__`; `type`,
+`module`, `function`, `BaseException` show their own. `subtype_dict` goes to a built-in base's dict (`class M(Base, type)`).
+A dict subclass's instance assigned to `__dict__` keeps its identity through `Dict.self`. `__classcell__` is set before the MRO
+(`type_new_set_attrs` comes before `PyType_Ready`), so a metaclass's `mro()` can call a method using `__class__`.
+
+**`__class__` and `__bases__`** are `object_set_class`, `compatible_for_assignment` (`hasGC` for tp_free, `compatibleWithBase`,
+`sameSlotsAdded`, `managedLayout` for the preheader and inline-values flags), `type_set_bases` with `mro_hierarchy`'s undo list.
+`mroInternal` calls a metaclass's `mro()`, checks it, and lets a reentrant inner call win; `type.mro()` computes C3 afresh;
+`__mro__` is None inside the first `mro()`; a class a custom `mro()` left out of its own MRO is refused at `super(type, type)`,
+as CPython's is. Every MRO set moves `typeEpoch`, so 210's caches keep their rule.
+
+**Descriptors.** A classmethod, staticmethod or super subclass's instance stays an `Instance`; their slots unwrap.
+`functools_wraps` at `__init__`, `__annotations__` and `__annotate__` by `descriptor_get_wrapped_attribute`. `AddMember` makes
+`member_descriptor`s (`types.MemberDescriptorType` is one again): function's `__globals__`, `__closure__`, `__builtins__`,
+method's, property's, super's, complex's; read-only ones say "readonly attribute". A data descriptor without `__get__` no longer
+hides the instance's dict. `hackcheck` is applied for type alone: of the built-in bases reachable here only type overrides
+tp_setattro in CPython (module's Go `SetAttr` is pyi's own: importlib's `_LazyModule` caught a wider first version). A bound
+method is not bound again. Wrapper descriptors check their owner at binding and through `callBound` (bpo-37619).
+
+**Built-in methods** learn their type (`Builtin.Owner`): `__qualname__`, `__objclass__`, method_vectorcall's self check
+(`str.split(fake)` was a Go panic), equality and hash of bound ones. `recordOwnSlots` covers every slot, `lookupAttrMRO` shows a
+built-in type's wrapper only on the type that owns it (`bool.__add__ is int.__add__`), and `dir()` lists wrappers.
+
+**Pickling.** `object_getstate_default` with `required`, `_PyType_GetSlotNames`, `__reduce__` of set, frozenset, method, deque
+subclasses and the str iterator, bytearray's `__reduce_ex__`. **Functions**: `func_set_code`'s checks and warning,
+`__dict__`'s setter, the read-only members; the compiler's `force_global` qualname. **Modules**: `module_new` and
+`module_init`, `__class__`, `__slots__`, module's `__doc__`. **mappingproxy** over any mapping, its views, `|`.
+
+**str.** `ReprObject` and `StrObject` keep a subclass's result; `format_complex_internal`; `%`'s limits; `format_map`'s
+positional refusal; `sq_repeat`'s messages. **Surrogates**: as designed; `ast.parse`'s Constant stays a Low.
+
+**test_class** runs: `test/python/libtest.py` and `libtest_run.py` give it alone a stand-in `_testinternalcapi` with
+`has_inline_values` (raising), the new class `:inline-values`. Providing the module to all of Lib/test would have turned
+33 files' skips into failures.
+
+**Measured** (VM, the native driver on both sides, per method): see report 226. The classes: `:data-model` 90 listed tests to 13,
+`:module-subclasses` 9 to 0, `:str-protocol` 19 to 6, `:surrogate-pairs` 14 to 0.
