@@ -1314,6 +1314,18 @@ text), `hsi-check` and `hsi-check-aot` in `--full`. `test/gate/crops/haskell.edn
 (`haskell-test-oracle`, `haskell-roundtrip-oracle`, `haskell-native-oracle` new: `tables --check`, `native-check` in both modes,
 `HSI_JUDGE=ref` `own-verdicts --check`; `haskell-records-verify`, with the new kind `native-inputs`). `bin/gate --plan` reads them.
 
+**Scores** (`bin/crops-score --ref REF --crop haskell` from a scratch worktree of `mac/batch1`, with this branch's facts and
+control rules, `.tmp/independence.diff` and `.tmp/crops-rules.diff` of its report):
+
+| ref | completeness (without by design) | maturity | independence (read, eval, AOT, print, judge) |
+|---|---:|---:|---:|
+| `mac/haskell-hf7` (the brief's baseline) | 96.3 (98.7) | 73.3 | 20.0 (0, 0, 0, 1, 0) |
+| `haskell-90` | 96.3 (98.7) | 100.0 | 73.8 (0.804, 0.452, 0.493, 1, 0.942) |
+
+Independence stays under 90 while every hsi run consumes the libraries' STG GHC made (eval and AOT 0.5 at most: HFS-I1 with a
+native compile of the boot libraries is what makes them 1) and the read stage's 528 preprocessed modules read the pack (HFS-I2).
+The 87 programs with C score 0 on this line alone (ci's musl configured by gcc), 0.5 after the merge with `mac/batch1`'s ci.
+
 **Left** (the night's, one check process at a time, at most 1.5 GB a process): `bin/hsi dumps --record` (the libraries' STG at
 this helper; then `hsi-essential` and `hsi-check` pass their pins), `bin/repr-haskell roundtrip --text --layout` over the whole
 corpus (writes the native known files' first entries, if any differ), `bin/hsi check --corpus nofib,samples,synthetic,testsuite-core
