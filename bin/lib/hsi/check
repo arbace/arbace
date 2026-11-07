@@ -34,7 +34,7 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
 . "$root/bin/lib/hsi/records.bash"
-corpora=samples,synthetic only="" jobs=${HSI_JOBS:-3} record="" keep="" aot="" live=${HSI_LIVE:-} dump_only="" record_progs="" verify_progs="" sample=""
+corpora=samples,synthetic only="" jobs=${HSI_JOBS:-3} record="" keep="" aot="" live=${HSI_LIVE:-} dump_only="" record_progs="" verify_progs="" sample="" opt=${HSI_OPT:-O0}
 while [ $# -gt 0 ]; do
   case $1 in
     --live) live=1; shift ;;
@@ -48,9 +48,15 @@ while [ $# -gt 0 ]; do
     --record) record=1; shift ;;
     --keep) keep=1; shift ;;
     --aot) aot=1; shift ;;
-    *) echo "usage: bin/hsi check [--corpus C,...] [--only ID,...|@FILE] [--jobs N] [--record] [--keep] [--aot] [--live] [--dump-only] [--record-progs] [--verify-progs [--sample N]]" >&2; exit 2 ;;
+    --opt) opt=$2; shift 2 ;;
+    *) echo "usage: bin/hsi check [--corpus C,...] [--only ID,...|@FILE] [--jobs N] [--record] [--keep] [--aot] [--opt O0|O1] [--live] [--dump-only] [--record-progs] [--verify-progs [--sample N]]" >&2; exit 2 ;;
   esac
 done
+# -O1's programs are not in haskell-stg-progs (its records are -O0's): --opt O1 dumps them live, and records none
+if [ "$opt" != O0 ]; then
+  { [ -z "$record_progs" ] && [ -z "$verify_progs" ]; } || { echo "hsi check: --record-progs and --verify-progs are -O0's (haskell-stg-progs)" >&2; exit 2; }
+  live=1
+fi
 pin=$(cat "$root/tools/hsdump/GHC_VERSION")
 # GHC is needed only by --live (the helper dumps the programs; HSI_LIVE=1), --dump-only, --record-progs and --verify-progs: the libraries'
 # and the programs' STG are the records' otherwise (ORS12, bin/lib/hsi/records.bash)
@@ -58,10 +64,19 @@ export live
 if [ -n "$live" ]; then [ "$(ghc --numeric-version)" = "$pin" ] || { echo "hsi check: the host's GHC is not $pin" >&2; exit 1; }; fi
 ref=$root/test/haskell/ref-ghc914.edn
 work=$root/.tmp/hsi/check
+# --opt O1 (HES74 (c)): the programs dumped at -O1 (GHC's optimiser: strictness analysis, worker/wrapper, specialisation),
+# judged against GHC's -O1 runs (test/haskell/ref-ghc914-O1.edn, bin/hsi record-ref --opt O1); the dumps cached apart
+# (.tmp/hsi/progs-O1), the results in .tmp/hsi/check[-aot]-O1, --record into test/haskell/check-hsi[-aot]-O1.edn, a
+# non-pass's class looked up in test/haskell/divergences-O1.edn first (the classes only -O1 has: :eval-order), then in
+# test/haskell/divergences.edn. The compiled level's runs at -O1 (--aot --opt O1); hsi's own level stays at -O0.
+case $opt in O0) sfx="" ;; O1) sfx=-O1 ;; *) echo "hsi check: --opt O0 or O1" >&2; exit 2 ;; esac
+ref=$root/test/haskell/ref-ghc914$sfx.edn
+divs=$root/test/haskell/divergences.edn divs1=$root/test/haskell/divergences$sfx.edn
+work=$work$sfx
 # --aot (HE8, the first slice): each program built by bin/hsi aot build (its modules and the library closures a first
 # run on hsi entered compiled to Go) and run on its executable; results into .tmp/hsi/check-aot, --record into
 # test/haskell/check-hsi-aot.edn
-[ -z "$aot" ] || work=$root/.tmp/hsi/check-aot
+[ -z "$aot" ] || work=$root/.tmp/hsi/check-aot$sfx
 rm -rf "$work"; mkdir -p "$work/res" "$work/out" "$work/run"
 hsi=""; if [ -z "$dump_only" ] && [ -z "$verify_progs" ]; then hsi=$("$root/bin/hsi" build); fi
 if [ -n "$dump_only" ] || [ -n "$verify_progs" ]; then libs=""; else libs=$(hsi_libs) || exit 1; fi
@@ -83,7 +98,7 @@ fi
 # the pack haskell-native-inputs-ghc-9.14.1's copy of them (its sysroot, as repr/haskell's native reads take it)
 if [ -n "$live" ]; then rtsinc=$(ls -d "$libdir"/../lib/*-ghc-"$pin"-*/rts-*/include 2>&1 | head -1)
 else rtsinc=$(ls -d "$("$root/bin/repr-haskell" native-libdir)"/*-ghc-"$pin"-*/rts-*/include 2>&1 | head -1); fi
-export root work hsi libs helper helper_hash libdir ref keep images aot rtsinc
+export root work hsi libs helper helper_hash libdir ref keep images aot rtsinc opt sfx divs divs1
 export HSI_TIMEOUT=${HSI_TIMEOUT:-60}
 # programs that need more than ARBACE_MEM_GIB name their own cap (ID=GIB ...); none today: the deepest stacks, Loop
 # (7.3 GB of RSS) and T16846 (9.7 GB), pass under the default 16 GiB (measured alone, 2026-11-03)
@@ -144,7 +159,7 @@ echo "== hsi check: $(wc -l < "$plan") programs, $jobs at a time" >&2
 # file, its flags, and for a test of several modules its directory's sources, then the helper's identity
 prog_key() {  # (a program's own C is not in it: the helper's STG is the Haskell's alone)
   local src=$1 main=$2 flags=$3 kind=$4
-  { echo "$flags $kind"; cat "$src/$main"
+  { echo "$flags $kind${sfx:+ $opt}"; cat "$src/$main"
     if [ "$kind" != plain ] && [ "$kind" != compile_and_run ]; then
       (cd "$src" && find . -type f \( -name '*.hs' -o -name '*.lhs' -o -name '*.hs-boot' -o -name '*.c' -o -name '*.h' \) | LC_ALL=C sort | xargs sha256sum)
     fi; } | sha256sum | cut -c1-16 | tr -d '\n'
@@ -191,7 +206,7 @@ one() {
   # the dump's key: the main file, the flags, the helper; a test of several modules: its directory's sources too
   local key prog
   key=$(prog_key "$src" "$main" "$flags" "$kind")
-  prog=$root/.tmp/hsi/progs/$id/$key
+  prog=$root/.tmp/hsi/progs$sfx/$id/$key
   local td=0 t0 t1
   if [ ! -f "$prog/ok" ] && [ -z "$live" ]; then
     # the record's STG (ORS12): an entry whose key is not this program's is STALE, an absent one UNRECORDED (both :unrecorded, in no class)
@@ -203,12 +218,12 @@ one() {
     if [ -f "$progs_pack/$id/dump-failed.txt" ]; then
       echo "{:id \"$id\" :result :no-dump :error \"$(cat "$progs_pack/$id/dump-failed.txt")\"}" > "$res"; return 0
     fi
-    rm -rf "$root/.tmp/hsi/progs/$id"; mkdir -p "$prog"; cp -r "$progs_pack/$id/stg" "$prog/stg"; touch "$prog/ok"
+    rm -rf "$root/.tmp/hsi/progs$sfx/$id"; mkdir -p "$prog"; cp -r "$progs_pack/$id/stg" "$prog/stg"; touch "$prog/ok"
   fi
   if [ ! -f "$prog/ok" ]; then
-    rm -rf "$root/.tmp/hsi/progs/$id"; mkdir -p "$prog"
+    rm -rf "$root/.tmp/hsi/progs$sfx/$id"; mkdir -p "$prog"
     t0=$(date +%s.%N)
-    if ! (cd "$src" && timeout 300 "$helper" stg -o "$prog/stg" --libdir "$libdir" --helper-hash "sha256:$helper_hash" --ghc -O0 \
+    if ! (cd "$src" && timeout 300 "$helper" stg -o "$prog/stg" --libdir "$libdir" --helper-hash "sha256:$helper_hash" --ghc -$opt \
             ${fl[@]+"${fl[@]}"} -outputdir "$prog/obj" --files "$main") > "$prog/dump.log" 2>&1; then
       local e; e=$( (grep -m1 -E 'error' "$prog/dump.log" || tail -n 1 "$prog/dump.log") | cut -c1-160 | sed 's/\\/\\\\/g; s/"/\\"/g')
       echo "{:id \"$id\" :result :no-dump :error \"$e\"}" > "$res"; printf '%s' "$e" > "$prog/dump-failed.txt"; rm -rf "$prog/obj"; return 0
@@ -224,7 +239,7 @@ one() {
     rm -rf "$prog/stubs"
     if (cd "$src" && grep -qE 'foreign +export|"wrapper"|foreign +import +capi' "$main" $( [ "$kind" != plain ] && [ "$kind" != compile_and_run ] && find . -name '*.hs' -o -name '*.lhs' ) 2> "$prog/stubs.grep"); then
       if [ -n "$live" ]; then
-        (cd "$src" && timeout 300 "$("$root/bin/hsi" stubs-build)" --stubs "$libdir" "$prog/stubs" -O0 ${fl[@]+"${fl[@]}"} -outputdir "$prog/stubobj" -- "$main") > "$prog/stubs.log" 2>&1 || true
+        (cd "$src" && timeout 300 "$("$root/bin/hsi" stubs-build)" --stubs "$libdir" "$prog/stubs" -$opt ${fl[@]+"${fl[@]}"} -outputdir "$prog/stubobj" -- "$main") > "$prog/stubs.log" 2>&1 || true
         rm -rf "$prog/stubobj"
         # GHC wrote none (a capi import of a function, no wrapper): recorded as such, so the records' run knows it
         [ -n "$(ls "$prog/stubs" 2>"$TMPDIR/hsi-stubs.err")" ] || { mkdir -p "$prog/stubs"; touch "$prog/stubs/NONE"; }
@@ -272,7 +287,7 @@ one() {
   local ro=""; [ "$ropts" != - ] && ro=${ropts//\/dev\/null/.empty}
   [[ $ro == *"<"* ]] && stdin=.empty
   # a test all.T skips unconditionally (the class :skipped) is not run: its 180 s at the wall cap spared (review 189, L8)
-  if awk '/^ *\{:id :skipped/ {s=1; next} /^ *\{:id :/ {s=0} s' "$root/test/haskell/divergences.edn" | grep -qF "\"$id\""; then
+  if awk '/^ *\{:id :skipped/ {s=1; next} /^ *\{:id :/ {s=0} s' "$divs" | grep -qF "\"$id\""; then
     rm -rf "$w"; echo "{:id \"$id\" :result :skipped :dump $td :run 0}" > "$res"; return 0
   fi
   local exe=$hsi ab=0 pst=0 hrun=0
@@ -428,8 +443,8 @@ fi
 
 out=$work/results.edn
 {
-  echo ";; hsi's check (bin/hsi check, HE4a): each program of the run corpora on hsi against GHC 9.14.1's -O0 run"
-  echo ";; (test/haskell/ref-ghc914.edn): :pass (status, stdout and stderr byte for byte), :fail (:differs), :hsi (hsi stopped:"
+  echo ";; hsi's check (bin/hsi check, HE4a): each program of the run corpora on hsi against GHC 9.14.1's -$opt run"
+  echo ";; (test/haskell/ref-ghc914$sfx.edn): :pass (status, stdout and stderr byte for byte), :fail (:differs), :hsi (hsi stopped:"
   echo ";; its message), :no-dump (the helper's first error), :no-ref; :dump the helper's seconds (0: cached), :run hsi's wall"
   echo ";; seconds (GT8)."
   [ -z "$aot" ] || echo ";; --aot (HE8): each program run on its executable from bin/hsi aot build (its modules and the library modules its run on hsi entered compiled to Go); :aot-build the build's seconds, :hsi-run the seconds of the same run on hsi (the profile's), :vs-hsi the compiled run's status, stdout and stderr against hsi's (:same, :differs)."
@@ -452,7 +467,7 @@ while IFS= read -r line; do
     /^ *:results \[/ {res=$0; sub(/.*:results \[/, "", res); sub(/\].*/, "", res)}
     /^ *:reasons \[/ {rsn=$0; sub(/.*:reasons \[/, "", rsn); sub(/\].*/, "", rsn)}
     /^ *:message "/ {msg=$0; sub(/.*:message "/, "", msg); sub(/".*/, "", msg)}
-    index($0, id) {printf "%s\t%s\t%s\t%s\n", cls, (res == "" ? "-" : res), (msg == "" ? "-" : msg), (rsn == "" ? "-" : rsn); exit}' "$root/test/haskell/divergences.edn") || true
+    index($0, id) {printf "%s\t%s\t%s\t%s\n", cls, (res == "" ? "-" : res), (msg == "" ? "-" : msg), (rsn == "" ? "-" : rsn); exit}' $([ "$divs1" != "$divs" ] && [ -f "$divs1" ] && echo "$divs1") "$divs") || true
   # "-" for a field the class has not (a tab is IFS whitespace: empty fields would run together)
   [ "$cres" = - ] && cres=""; [ "$cmsg" = - ] && cmsg=""; [ "$crsn" = - ] && crsn=""
   if [ -z "$c" ]; then echo "hsi check: $id in no class"; unclassed=$((unclassed + 1)); continue; fi
@@ -469,9 +484,9 @@ while IFS= read -r line; do
   fi
   echo "hsi check: $id in class $c"
 done < <(grep '^{' "$out" | grep -v ':result :pass')
-echo "hsi check: $unclassed not passing in no class of test/haskell/divergences.edn"
+echo "hsi check: $unclassed not passing in no class of test/haskell/divergences$sfx.edn${sfx:+ or test/haskell/divergences.edn}"
 if [ -n "$record" ]; then
-  rec=$root/test/haskell/check-hsi.edn; [ -z "$aot" ] || rec=$root/test/haskell/check-hsi-aot.edn
+  rec=$root/test/haskell/check-hsi$sfx.edn; [ -z "$aot" ] || rec=$root/test/haskell/check-hsi-aot$sfx.edn
   # the other programs' lines kept (another corpus's, or those --only left out)
   { grep '^;;' "$out" | grep -v '^;; corpora:'
     echo ";; corpora: $(cat "$out" $([ -f "$rec" ] && echo "$rec") | grep -h "^;; corpora:" | sed 's/^;; corpora: //' | tr ',' '\n' | sort -u | grep . | paste -sd, -)"
