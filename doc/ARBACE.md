@@ -101,6 +101,15 @@ code. Three kinds of things live here:
   `xmlparse.c`, `xmltok.c`, `xmltok_impl.c`, `xmltok_ns.c`, `xmlrole.c`, `xcs.c`, `siphash.h` and their headers; Expat's
   commit `e3ca8454...`, "2.9.0+", as `xmlparse.c`'s first line names it) statement for statement, each file carrying
   Expat's notice (LICENSE.md: Expat's MIT License; the binding under the PSF License Agreement).
+- `llvm/` (`arbace.llvm.*`: llvmi, LLVM IR's evaluator, `arbace.llvm.run` and its judge `arbace.llvm.check`, and the C forms of the
+  personality-free layer `llvm/rt/none.c.ae`; doc/llvm/LLVM-CROP-SURVEY.md, "As built: llvmi") is Arbace's own.
+- `cpp/` (`arbace.cpp.*`, the C++ crop's eval: the lowering of LLVM forms to C forms, the code generator and its
+  semantic analysis; doc/llvm/LOWER.md, doc/cpp/CODEGEN.md) is Arbace's own but for `cpp/template.ae`
+  (`arbace.cpp.template`, templates, CODEGEN.md §G3), whose deduction ports parts of clang's
+  `clang/lib/Sema/SemaTemplateDeduction.cpp`, https://github.com/llvm/llvm-project at `llvmorg-23.1.4` (commit
+  `7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`), and the template parts of `cpp/abi.ae`'s mangling, which
+  reimplement parts of `clang/lib/AST/ItaniumMangle.cpp` at the same commit, by hand on 2026-11-05 (LICENSE.md
+  names the functions; the files carry clang's notice).
 - Arbace's own namespaces of the program, not derived from Clojure: `box.ae` and `box/`
   (`arbace.box`, the store, over its host layer `arbace.box.host`; the box's build driver
   `arbace.box.build`, its plan `arbace.box.plan` (since GP2 also repr/go's native loader's go

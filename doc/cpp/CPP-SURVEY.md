@@ -2973,3 +2973,14 @@ run's): about 16 va_arg programs of gxx-dg-run and the long double layouts' chec
 - **CP230 (a):** C++'s threads come with C's shared deterministic scheduler (one goroutine per C thread, one running at a time,
   drafted on `rust-re6` in `go/arbace/crt/sched.ae`, adopted by C under CS276); the `threads` class stays deferred until then.
 - **CP231 (a):** `__PRETTY_FUNCTION__`'s spelling stays the class `oracle-text`; clang's strings are not rewritten to g++'s.
+## As built: CX11, first part (2026-11-04)
+
+On the branch `cpp-native` from `cpp-cx9`, in the light tier (stage 0 by `ARBACE_HOST_EXE`, 4 jobs, no gate, nothing embedded: no
+re-seed). The native parser, its design, its check and its numbers: [NATIVE.md](NATIVE.md). New: `arbace/repr/cpp/parse.ae` (the
+parser: C++23's grammar decided as clang's Parse decides it, clang's AST as data), `scope.ae` (the names' kinds), `lit.ae` (literals
+as clang holds them), `native.ae` (the read without the oracle), `ncheck.ae` and `bin/lib/repr-cpp/native-check` (both reads' forms
+compared), `test/repr/cpp/native/` (the parser's own sample, the two g++.dg lists), `test/repr/cpp/native-known.edn` (the classes,
+each a Sema fact). Changed: `arbace/repr/cpp.ae` (`read-cpp-native`, `read --reader native`), `bin/repr-cpp` (`read --reader native`,
+`native-check`). The converter is unchanged. Numbers: samples 9 of 9 files the same, the subset sample 30 of 30 items, g++.dg 60 of
+62 and 156 of 163 files (every difference classed); over the 977 recorded passes of g++.dg's every-10th sample, 942 the same.
+

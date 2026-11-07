@@ -1,5 +1,5 @@
 (ns arbace.repr.llvm.read
-  "LLVM IR text as LLVM forms (doc/cpp/LLVM.md; doc/cpp/CPP-SURVEY.md §5.2, \"As built: CX6\"): `read-module`, the
+  "LLVM IR text as LLVM forms (doc/llvm/SPEC.md; doc/cpp/CPP-SURVEY.md §5.2, \"As built: CX6\"): `read-module`, the
   lexer and the recursive-descent parser of LLParser's grammar (LLVM 23): modules, types, globals, functions, their
   blocks, instructions and debug records, attribute groups, metadata with the specialized DI nodes as structured forms,
   use-list orders and module summaries. A construct outside the grammar read here is refused with its line:
@@ -34,6 +34,8 @@
         "|(\\.\\.\\.)"                                          ; 21
         "|([=,*()\\[\\]{}<>|!:])")))                            ; 22 punctuation
 
+(declare unescape)
+
 (deftype Toks [^objects kinds ^objects texts ^ints starts ^ints ends ^String src ^ints pos])
 
 (defn lex
@@ -44,17 +46,21 @@
         add (fn [k t s e] (.add ks k) (.add ts t) (.add ss (int s)) (.add es (int e)))
         n (count src)]
     (loop [i (long 0)]
-      (when (< i n)
+      (when (and (< i n) (not (#{:bad :nul} (when (pos? (.size ks)) (.get ks (dec (.size ks)))))))
         (.region m (int i) (int n))
         (if-not (.lookingAt m)
-          (throw (ex-info (str "llvm: unexpected character " (pr-str (str (.charAt src (int i)))) " at offset " i) {:llvm/refused :lex}))
+          ;; a character LLLexer would refuse: one :bad token to the end, the parser refuses when it reaches it (LLParser
+          ;; reports the first error in the text's order)
+          (do (add :bad (subs src (int i)) i n) (.region m (int n) (int n)))
           (let [e (long (.end m))]
             (cond
               (.group m 1) nil
               (.group m 2) (add :mspec (.group m 2) i e)
               (.group m 3) (add :dbgrec (.group m 3) i e)
               (.group m 4) (add :sumid (.group m 4) i e)
-              (.group m 5) (add ({"%" :lname "@" :gname "$" :comdat "!" :mstr} (.group m 5)) (.group m 6) i e)
+              (and (or (.group m 5) (.group m 8)) (not= "!" (.group m 5)) (str/includes? (unescape (or (.group m 6) (.group m 8))) "\u0000"))
+              (do (add :nul "" i n) (.region m (int n) (int n)))   ; LLLexer: NUL character is not allowed in names
+              (.group m 5) (add ({"%" :lname "@" :gname "$" :comdat "!" :mstr} (.group m 5)) (if (= (.group m 5) "!") (.group m 6) (unescape (.group m 6))) i e)
               (.group m 7) (add :cstr (.group m 7) i e)
               (.group m 8) (add :qlabel (.group m 8) i e)
               (.group m 9) (add :str (.group m 9) i e)
@@ -87,6 +93,12 @@
 ;; Mode :full's item spans (arbace.repr.llvm.full): when bound, each item's [start end] offsets in the text's order (a
 ;; top-level form, or a definition's header up to `{`, its labels, instructions, debug records, use-list orders and `}`).
 (def ^:dynamic ^java.util.ArrayList *items* nil)
+(def ^:dynamic *di-expression* false)   ; parsing a DIExpression's operands
+(def ^:dynamic *musttail* false)        ; parsing a musttail call's arguments
+(def ^:dynamic *varargs-fn* false)      ; parsing a varargs function's body
+(def ^:dynamic *ellipsis* nil)          ; a volatile: the call's arguments end with ...
+(declare di-names)
+(def ^:dynamic *pending* nil)   ; when bound (a volatile), an LLParser error inside a function body ends the reading there
 (def ^:dynamic ^"[J" *top* nil)
 
 (defn- tok-start ^long [] (aget ^ints (.starts *t*) (p)))
@@ -96,16 +108,40 @@
   (let [^String s (.src *t*)]
     (loop [i 0 n 1] (if (>= i (min off (count s))) n (recur (inc i) (if (= (.charAt s (int i)) \newline) (inc n) n))))))
 
+(declare bad-token!)
+
 (defn- refuse
   ([msg] (refuse :parse msg))
   ([cls msg]
+   (bad-token!)
    (throw (ex-info (str "llvm: line " (line-of (aget ^ints (.starts *t*) (p))) ": " msg " (at " (pr-str (text)) ")")
-                   {:llvm/refused cls}))))
+                   {:llvm/refused cls :llvm/offset (aget ^ints (.starts *t*) (p))}))))
+
+(defn- llerr
+  "LLParser's error at the offset `off` (the cursor's token by default): its message in LLVM's words, the reader's
+  refusal (verify prints it as opt does: arbace.repr.llvm.verify/verify-file)."
+  ([msg] (llerr msg (aget ^ints (.starts *t*) (p))))
+  ([msg off]
+   (bad-token!)
+   (throw (ex-info (str "llvm: line " (line-of off) ": " msg) {:llvm/refused :llparser :llvm/message msg :llvm/offset off}))))
+
+(defn- bad-token!
+  "At a character LLLexer refuses (the :bad token): its error. `/*` without `*/` is LLLexer's unterminated comment."
+  []
+  (when (= (kind) :nul)
+    (let [off (aget ^ints (.starts *t*) (p))]
+      (throw (ex-info (str "llvm: line " (line-of off) ": NUL character is not allowed in names")
+                      {:llvm/refused :llparser :llvm/message "NUL character is not allowed in names" :llvm/offset off}))))
+  (when (= (kind) :bad)
+    (let [off (aget ^ints (.starts *t*) (p))]
+      (throw (if (str/starts-with? (text) "/*")
+               (ex-info (str "llvm: line " (line-of off) ": unterminated comment") {:llvm/refused :llparser :llvm/message "unterminated comment" :llvm/offset off})
+               (ex-info (str "llvm: unexpected character " (pr-str (subs (text) 0 1)) " at offset " off) {:llvm/refused :lex :llvm/offset off}))))))
 
 (defn- punct? [^String s] (and (= (kind) :punct) (= (text) s)))
 (defn- punct-at? [^long d ^String s] (and (= (kind d) :punct) (= (text d) s)))
 (defn- word? [^String s] (and (= (kind) :word) (= (text) s)))
-(defn- expect! [^String s] (if (and (#{:punct :word} (kind)) (= (text) s)) (adv!) (refuse (str "expected " s))))
+(defn- expect! [^String s] (if (and (#{:punct :word} (kind)) (= (text) s)) (adv!) (if (#{"(" ")" "{" "}" "[" "]" "<" ">" "," "=" "!" "x"} s) (llerr (str "expected '" s "'")) (refuse (str "expected " s)))))
 (defn- accept! [^String s] (when (and (#{:punct :word} (kind)) (= (text) s)) (adv!) true))
 (defn- take-word! ^String [] (if (= (kind) :word) (let [w (text)] (adv!) w) (refuse "expected a word")))
 (defn- take-int! [] (if (= (kind) :int) (let [w (text)] (adv!) (bigint w)) (refuse "expected an integer")))
@@ -139,8 +175,8 @@
     (symbol "g" s)
     :else (list 'g s)))
 
-(defn- unescape
-  "An LLVM string's bytes as a string of chars 0-255: \\\\ and \\XX."
+(defn unescape
+  "An LLVM string's bytes as a string of chars 0-255: \\\\ and \\XX (also a quoted name's, unescaped by the lexer)."
   ^String [^String s]
   (if-not (str/includes? s "\\")
     s
@@ -176,20 +212,46 @@
   "addrspace(N), or a symbolic one, addrspace(\"A\") (the data layout's name): N or \"A\"."
   []
   (expect! "addrspace") (expect! "(")
+  (when (and (= (kind) :int) (>= (bigint (text)) 16777216)) (llerr "invalid address space, must be a 24-bit integer"))
   (let [n (if (= (kind) :str) (take-str!) (take-num!))] (expect! ")") n))
 
 (defn- parse-base-type []
+  (when (and (= (kind) :word) (re-matches #"[ib][0-9]+" (text)) (let [n (bigint (subs (text) 1))] (or (< n 1) (> n 8388608))))
+    (llerr "bitwidth for integer or byte type out of range"))
   (case (kind)
-    :word (let [w (take-word!)]
+    :word (let [t0 (tok-start) w (take-word!)]
             (cond
+              ;; LL6: a word that is no type keyword is LLParser's "expected type" (llvm/test's RUN-line templates, iXLen)
+              (not (or (prim-types w) (re-matches #"[ib][0-9]+" w) (= w "target") (= w "x86_mmx"))) (llerr "expected type" t0)
               (= w "ptr") (if (word? "addrspace") (list 'ptr (parse-addrspace)) 'ptr)
               (= w "target") (let [_ (expect! "(") nm (take-str!)
-                                   args (loop [out []] (if (accept! ",") (recur (conj out (if (= (kind) :int) (take-num!) (parse-type)))) out))]
-                               (expect! ")") (apply list 'target nm args))
+                                   args (loop [out [] seen-int false]
+                                          (if (accept! ",")
+                                            (cond (= (kind) :int) (recur (conj out (take-num!)) true)
+                                                  seen-int (llerr "expected uint32 param")
+                                                  :else (recur (conj out (parse-type)) false))
+                                            out))]
+                               (expect! ")")
+                               (let [nt (count (remove integer? args)) ni (count (filter integer? args))]
+                                 (cond
+                                   (and (= nm "aarch64.svcount") (or (pos? nt) (pos? ni)))
+                                   (llerr "target extension type aarch64.svcount should have no parameters")
+                                   (and (= nm "riscv.vector.tuple") (or (not= nt 1) (not= ni 1)))
+                                   (llerr "target extension type riscv.vector.tuple should have one type parameter and one integer parameter")
+                                   (and (= nm "amdgcn.named.barrier") (or (pos? nt) (not= ni 1)))
+                                   (llerr "target extension type amdgcn.named.barrier should have no type parameters and one integer parameter")
+                                   (and (= nm "amdgpu.stridemark") (or (pos? nt) (> ni 1)))
+                                   (llerr "target extension type amdgpu.stridemark should have no type parameters and at most one integer parameter")))
+                               (apply list 'target nm args))
               :else (symbol w)))
     :lname (let [n (local-name (text))] (adv!) n)
     :punct (case (text)
-             "[" (do (adv!) (let [n (take-num!)] (expect! "x") (let [t (parse-type)] (expect! "]") (list 'array n t))))
+             "[" (do (adv!) (let [n (take-num!)] (expect! "x")
+                              (let [t0 (tok-start) t (parse-type)]
+                                ;; ArrayType::isValidElementType
+                                (when (or ('#{void label metadata token x86_amx} t) (and (seq? t) (= 'fn (first t))))
+                                  (llerr "invalid array element type" t0))
+                                (expect! "]") (list 'array n t))))
              "{" (do (adv!)
                      (if (accept! "}")
                        (list 'struct)
@@ -204,7 +266,14 @@
                                (expect! "}") (expect! ">") (apply list 'packed ts))))
                        (let [sc (accept! "vscale") _ (when sc (expect! "x")) n (take-num!)]
                          (expect! "x")
-                         (let [t (parse-type)] (expect! ">") (list (if sc 'vscale 'vector) n t)))))
+                         (let [t0 (tok-start) t (parse-type)]
+                           ;; VectorType::isValidElementType: integers, bytes, floating point, pointers
+                           (when-not (or (and (symbol? t) (re-matches #"[ib][0-9]+|half|bfloat|float|double|x86_fp80|fp128|ppc_fp128|ptr" (name t)))
+                                         (and (seq? t) (= 'ptr (first t)))
+                                         (and (seq? t) (= 'target (first t)) (= "llvm.test.vectorelement" (second t)))
+                                         (and (symbol? t) (str/starts-with? (name t) "%")))
+                             (llerr "invalid vector element type" t0))
+                           (expect! ">") (list (if sc 'vscale 'vector) n t)))))
              (refuse "expected a type"))
     (refuse "expected a type")))
 
@@ -226,7 +295,7 @@
                                     (and (punct? "...") (do (adv!) true)) (do (expect! ")") (conj out '&))
                                     :else (let [pt (parse-type)] (accept! ",") (recur (conj out pt)))))]
                          (recur (list 'fn t ps))))
-      (punct? "*") (do (adv!) (recur (list '* t)))
+      (punct? "*") (do (when (= t 'ptr) (llerr "ptr* is invalid - use ptr instead")) (adv!) (recur (list '* t)))
       (typed-pointer-addrspace?) (let [a (parse-addrspace)] (adv!) (recur (list '* t a)))
       :else t)))
 
@@ -266,6 +335,48 @@
                        (do (adv!) (recur (dec depth))))
         :else (do (adv!) (recur depth))))))
 
+(defn- check-captures!
+  "LLParser::parseCapturesAttr's errors over the tokens after `captures` (LL6), the cursor left where it was: `(`, components
+  none, address, address_is_null, provenance, read_provenance, a `ret:` location at most once, none alone in its location."
+  []
+  (let [p0 (p)]
+    (when-not (punct? "(") (llerr "expected '('"))
+    (adv!)
+    (loop [ret? false seen false nothing false]
+      (let [[ret? seen nothing]
+            (cond
+              (and (= (kind) :label) (= (text) "ret")) (do (when ret? (adv!) (llerr "duplicate 'ret' location")) (adv!) [true false false])
+              (and (= (kind) :word) (= (text) "ret")) (do (adv!) (when-not (punct? ":") (llerr "expected ':'")) (adv!)
+                                                          (when ret? (llerr "duplicate 'ret' location")) [true false false])
+              :else [ret? seen nothing])
+            nothing (cond
+                      (and (= (kind) :word) (= (text) "none")) (do (adv!) (when seen (llerr "cannot use 'none' with other component")) true)
+                      (and seen nothing) (llerr "cannot use 'none' with other component")
+                      (and (= (kind) :word) (#{"address" "address_is_null" "provenance" "read_provenance"} (text))) (do (adv!) false)
+                      :else (llerr "expected one of 'none', 'address', 'address_is_null', 'provenance' or 'read_provenance'"))]
+        (cond
+          (punct? ")") nil
+          (punct? ",") (do (adv!) (recur ret? true nothing))
+          :else (llerr "expected ',' or ')'"))))
+    (aset ^ints (.pos *t*) 0 (int p0))))
+
+(defn- check-initializes!
+  "LLParser::parseInitializesAttr's errors over the tokens after `initializes` (LL6), the cursor left where it was: `(`, then
+  `(LOWER, UPPER)` pairs of integers, LOWER not UPPER, separated by commas, then `)`."
+  []
+  (let [p0 (p)
+        int! (fn [] (when-not (= (kind) :int) (llerr "expected integer")) (let [v (bigint (text))] (adv!) v))
+        tok! (fn [t msg] (when-not (punct? t) (llerr msg)) (adv!))]
+    (tok! "(" "expected '('")
+    (loop []
+      (tok! "(" "expected '('")
+      (let [lo (int!) _ (tok! "," "expected ','") hi (int!)]
+        (when (= lo hi) (llerr "the range should not represent the full or empty set!"))
+        (tok! ")" "expected ')'"))
+      (when (punct? ",") (adv!) (recur)))
+    (tok! ")" "expected ')'")
+    (aset ^ints (.pos *t*) 0 (int p0))))
+
 (defn- parse-attr
   "One attribute: :word, (:word ARG) for word(ARG) (a type for byval and the like, else the raw text), (:align N) for
   align N, (:word= N) for word=N, [\"k\" \"v\"] or [\"k\"] for a string attribute."
@@ -277,9 +388,18 @@
              [k]))
     :word (let [w (take-word!) kw (keyword w)]
             (cond
+              (and (#{"align" "alignstack"} w) (punct? "(") (= (kind 1) :int) (not (punct-at? 2 ")")))
+              (llerr "expected ')'")
+              (and (= w "uwtable") (punct? "(") (= (kind 1) :word) (not (punct-at? 2 ")")))
+              (do (adv!) (adv!) (llerr "expected ')'"))
+              (and (#{"align" "alignstack"} w) (punct? "(") (not= (kind 1) :int))
+              (do (adv!) (llerr "expected integer"))
+              (= w "captures") (do (check-captures!) (list kw (raw-parens)))
+              (= w "initializes") (do (check-initializes!) (list kw (raw-parens)))
               (punct? "(") (if (type-attrs w)
-                             (do (adv!) (let [t (parse-type)] (expect! ")") (list kw t)))
+                             (do (adv!) (when-not (type-start?) (llerr "expected type")) (let [t (parse-type)] (expect! ")") (list kw t)))
                              (list kw (raw-parens)))
+              (type-attrs w) (llerr "expected '('")
               (and (= w "align") (= (kind) :int)) (list kw (take-num!))
               (and params? (= w "dereferenceable") (= (kind) :int)) (list kw (take-num!))
               (punct? "=") (do (adv!) (list (keyword (str w "=")) (take-num!)))
@@ -363,6 +483,9 @@
 (defn- parse-const-expr
   "A constant expression whose word is current (getelementptr, a cast, a binary operator, blockaddress, ...)."
   []
+  (when (#{"extractvalue" "insertvalue" "udiv" "sdiv" "urem" "srem" "fadd" "fsub" "fmul" "fdiv" "frem" "and" "or" "lshr" "ashr"
+           "shl" "mul" "fneg" "select" "zext" "sext" "fptrunc" "fpext" "uitofp" "sitofp" "fptoui" "fptosi" "icmp" "fcmp"} (text))
+    (llerr (str (text) " constexprs are no longer supported")))
   (let [w (take-word!)]
     (cond
       (= w "getelementptr")
@@ -392,7 +515,11 @@
     :int (take-num!)
     :hexint (let [s (text)] (adv!) (list 'int s))
     :float (let [s (text)] (adv!) (list 'fp s))
-    :hexfp (let [s (text)] (adv!) (list 'fp s))
+    :hexfp (let [s (text)]
+             ;; LLLexer: a half or bfloat by its bits fits 16 bits
+             (when (and (re-matches #"0x[HR][0-9A-Fa-f]+" s) (>= (bigint (java.math.BigInteger. (subs s 3) (int 16))) 65536))
+               (llerr (str "hexadecimal constant too large for " (if (= \H (.charAt ^String s 2)) "half" "bfloat") " (16-bit)")))
+             (adv!) (list 'fp s))
     :cstr (let [s (unescape (text))] (adv!) (list 'c-string s))
     (:meta :mstr :mspec) (parse-md-value)
     :punct (case (text)
@@ -431,14 +558,18 @@
     :meta (let [s (symbol (str "!" (text)))] (adv!) s)
     :mstr (let [s (unescape (text))] (adv!) (list '! s))
     :mspec (parse-di-node)
-    :punct (if (and (= (text) "!") (punct-at? 1 "{"))
+    :punct (if (and (= (text) "!") (not (punct-at? 1 "{"))) (do (adv!) (llerr "expected '{' here"))
+           (if (and (= (text) "!") (punct-at? 1 "{"))
              (do (adv!) (adv!)
                  (if (accept! "}")
                    (list '! [])
                    (let [xs (comma-list parse-md-value)]
                      (expect! "}") (list '! xs))))
-             (parse-typed))
-    :word (if (word? "null") (do (adv!) 'null) (parse-typed))
+             (parse-typed)))
+    :word (cond (word? "null") (do (adv!) 'null)
+                (word? "metadata") (llerr "invalid metadata-value-metadata roundtrip")
+                :else (parse-typed))
+    :eof (llerr "expected metadata operand")
     (parse-typed)))
 
 (defn- md-list-start?
@@ -480,27 +611,158 @@
 (defn- parse-di-operand
   "An operand of a positional node: DIExpression's DW_OP words and integers, DIArgList's typed values."
   []
+  (when *di-expression*
+    ;; parseDIExpressionBody: a DWARF op or an attribute encoding by name, else an unsigned 64-bit integer
+    (cond
+      (and (= (kind) :word) (str/starts-with? (text) "DW_OP_"))
+      (when-not (contains? (di-names "DW_OP_") (text)) (llerr (str "invalid DWARF op '" (text) "'")))
+      (and (= (kind) :word) (str/starts-with? (text) "DW_ATE_"))
+      (when-not (contains? (di-names "DW_ATE_") (text)) (llerr (str "invalid DWARF attribute encoding '" (text) "'")))
+      (not (and (= (kind) :int) (not (str/starts-with? (text) "-")))) (llerr "expected unsigned integer")
+      (> (bigint (text)) 18446744073709551615N) (llerr "element too large, limit is 18446744073709551615")))
   (case (kind)
     :int (take-num!)
     :word (if (type-start?) (parse-typed) (symbol (take-word!)))
     (parse-md-value)))
 
+;; LLParser's fields of the specialized nodes (arbace.repr.llvm.di-table, generated from LLParser.cpp's VISIT_MD_FIELDS by
+;; bin/llvm-corpus di-table): each field's value checked at its token as parseMDField does, unknown and repeated fields,
+;; the required ones at the closing parenthesis.
+
+(def ^:private di-fields-table
+  (delay
+    (require 'arbace.repr.llvm.di-table)
+    (reduce (fn [m l] (let [[k f r t a] (str/split l #" ")] (update m k (fnil conj []) [f (= r "r") t a])))
+            {} (str/split-lines @(resolve 'arbace.repr.llvm.di-table/fields)))))
+
+(defn- di-names [pre] (get @(resolve 'arbace.repr.llvm.di-table/names) pre #{}))
+
+(def ^:private di-consts
+  {"UINT64_MAX" 18446744073709551615N "UINT32_MAX" 4294967295 "UINT16_MAX" 65535 "UINT8_MAX" 255 "INT64_MAX" 9223372036854775807
+   "INT64_MIN" -9223372036854775808 "INT32_MAX" 2147483647 "INT32_MIN" -2147483648 "false" false "true" true})
+
+(defn- di-args
+  "A field type's constructor arguments: numbers, booleans and the limits' names evaluated, the rest as text."
+  [^String a]
+  (if (or (= a "-") (str/starts-with? a "=")) []
+      (mapv (fn [x] (cond (contains? di-consts x) (di-consts x)
+                          (re-matches #"-?[0-9]+" x) (bigint x)
+                          (re-matches #"0x[0-9a-fA-F]+" x) (bigint (java.math.BigInteger. (subs x 2) (int 16)))
+                          :else x))
+            (str/split (subs a 1 (dec (count a))) #","))))
+
+(defn- di-unsigned! [^String f mx]
+  (when-not (and (= (kind) :int) (not (str/starts-with? (text) "-"))) (llerr "expected unsigned integer"))
+  (when (> (bigint (text)) mx) (llerr (str "value for '" f "' too large, limit is " mx))))
+
+(defn- di-signed! [^String f mn mx]
+  (when-not (= (kind) :int) (llerr "expected signed integer"))
+  (let [v (bigint (text))]
+    (when (< v mn) (llerr (str "value for '" f "' too small, limit is " mn)))
+    (when (> v mx) (llerr (str "value for '" f "' too large, limit is " mx)))))
+
+(defn- di-md! [^String f allow-null]
+  (when (and (word? "null") (false? allow-null)) (llerr (str "'" f "' cannot be null"))))
+
+(defn- di-keyword!
+  "A DWARF keyword field: an integer up to `mx`, else a word of the lexer's kind (its prefix) that names one."
+  [^String f mx ^String pre names ^String expected ^String invalid]
+  (if (= (kind) :int)
+    (di-unsigned! f mx)
+    (if (and (= (kind) :word) (if (set? pre) (contains? pre (text)) (str/starts-with? (text) pre)))
+      (when-not (contains? names (text)) (llerr (str invalid " '" (text) "'")))
+      (llerr expected))))
+
+(defn- check-di-value!
+  "parseMDField for one field at the cursor: its type `t` with arguments `a`."
+  [^String f ^String t ^String a]
+  (let [as (di-args a)]
+    (case t
+      "MDUnsignedField" (di-unsigned! f (nth as 1 18446744073709551615N))
+      "LineField" (di-unsigned! f 4294967295)
+      "ColumnField" (di-unsigned! f 65535)
+      "MDSignedField" (di-signed! f (nth as 1 -9223372036854775808) (nth as 2 9223372036854775807))
+      "MDBoolField" (when-not (or (word? "true") (word? "false")) (llerr "expected 'true' or 'false'"))
+      "MDField" (di-md! f (nth as 0 true))
+      "MDSignedOrMDField" (if (= (kind) :int) (di-signed! f (nth as 1 -9223372036854775808) (nth as 2 9223372036854775807)) (di-md! f (nth as 3 true)))
+      "MDUnsignedOrMDField" (if (= (kind) :int) (di-unsigned! f (nth as 1 18446744073709551615N)) (di-md! f (nth as 2 true)))
+      "MDStringField" (do (when-not (= (kind) :str) (llerr "expected string constant"))
+                          (when (and (= (nth as 0 nil) "MDStringField::EmptyIs::Error") (= "" (text))) (llerr (str "'" f "' cannot be empty"))))
+      "MDAPSIntField" (when-not (= (kind) :int) (llerr "expected integer"))
+      "DwarfTagField" (di-keyword! f 65535 "DW_TAG_" (di-names "DW_TAG_") "expected DWARF tag" "invalid DWARF tag")
+      "DwarfAttEncodingField" (di-keyword! f 255 "DW_ATE_" (di-names "DW_ATE_") "expected DWARF type attribute encoding" "invalid DWARF type attribute encoding")
+      "DwarfVirtualityField" (di-keyword! f 2 "DW_VIRTUALITY_" (di-names "DW_VIRTUALITY_") "expected DWARF virtuality code" "invalid DWARF virtuality code")
+      "DwarfLangField" (di-keyword! f 65535 "DW_LANG_" (di-names "DW_LANG_") "expected DWARF language" "invalid DWARF language")
+      "DwarfSourceLangNameField" (di-keyword! f 65535 "DW_LNAME_" (di-names "DW_LNAME_") "expected DWARF source language name" "invalid DWARF source language name")
+      "DwarfCCField" (di-keyword! f 255 "DW_CC_" (di-names "DW_CC_") "expected DWARF calling convention" "invalid DWARF calling convention")
+      "DwarfEnumKindField" (di-keyword! f 1 "DW_APPLE_ENUM_KIND_" (di-names "DW_APPLE_ENUM_KIND_") "expected DWARF enum kind code" "invalid DWARF enum kind code")
+      "DwarfMacinfoTypeField" (di-keyword! f 255 "DW_MACINFO_" #{"DW_MACINFO_define" "DW_MACINFO_undef" "DW_MACINFO_start_file" "DW_MACINFO_end_file" "DW_MACINFO_vendor_ext"}
+                                           "expected DWARF macinfo type" "invalid DWARF macinfo type")
+      "DwarfLangDialectField" (if (= (kind) :int)
+                                (when-not (#{"0" "1" "2"} (text)) (llerr "value for 'dialect' must be a known DWARF language dialect"))
+                                (di-keyword! f 2 "DW_LLVM_LANG_DIALECT_" (di-names "DW_LLVM_LANG_DIALECT_") "expected DWARF language dialect" "invalid DWARF language dialect"))
+      "EmissionKindField" (let [ks #{"NoDebug" "FullDebug" "LineTablesOnly" "DebugDirectivesOnly"}] (di-keyword! f 3 ks ks "expected emission kind" "invalid emission kind"))
+      "NameTableKindField" (let [ks #{"Default" "GNU" "None" "Apple"}] (di-keyword! f 3 ks ks "expected nameTable kind" "invalid nameTable kind"))
+      "FixedPointKindField" (let [ks #{"Binary" "Decimal" "Rational"}] (di-keyword! f 2 ks ks "expected fixed-point kind" "invalid fixed-point kind"))
+      nil)))
+
+(defn- check-di-flag!
+  "One atom of a DIFlagField or DISPFlagField: an unsigned integer or a flag the table names."
+  [^String t]
+  (let [sp? (= t "DISPFlagField") pre (if sp? "DISPFlag" "DIFlag")]
+    (cond (and (= (kind) :int) (not (str/starts-with? (text) "-"))) nil
+          (and (= (kind) :word) (str/starts-with? (text) pre) (or sp? (not (str/starts-with? (text) "DISPFlag"))))
+          (when-not (contains? (di-names pre) (text))
+            (llerr (str (if sp? "invalid subprogram debug info flag '" "invalid debug info flag '") (text) "'")))
+          :else (llerr "expected debug info flag"))))
+
 (defn parse-di-node
   "A specialized node, !NAME( at the cursor: (!NAME :key value ...) for its keyed fields in the text's order,
   (!NAME operand ...) for DIExpression's, DIArgList's and DIAssignID's positional operands."
   []
-  (let [head (symbol (str "!" (text)))]
+  (when-not (or (contains? @di-fields-table (text)) (#{"DIExpression" "DIArgList" "DIAssignID"} (text)))
+    (llerr "expected metadata type"))
+  (let [head (symbol (str "!" (text))) head-off (tok-start)
+        spec (get @di-fields-table (text))
+        by-name (into {} (map (fn [[f r t a]] [f [r t a]]) spec))]
     (adv!) (expect! "(")
-    (cond
-      (accept! ")") (list head)
-      (= (kind) :label)
-      (let [fs (loop [out []]
-                 (when-not (= (kind) :label) (refuse "expected a field"))
-                 (let [k (keyword (text)) _ (adv!) out (conj out k (parse-di-field))]
-                   (if (accept! ",") (recur out) out)))]
-        (expect! ")") (apply list head fs))
-      :else
-      (let [xs (comma-list parse-di-operand)] (expect! ")") (apply list head xs)))))
+    ;; LLParser::parseDIAssignID: no operands (LL6)
+    (when (and (= (name head) "!DIAssignID") (not (punct? ")"))) (llerr "expected ')' here"))
+    (let [node
+          (cond
+            (and (punct? ")") (or (nil? spec) (not (some second spec)))) (do (adv!) (list head))
+            (or (= (kind) :label) (and spec (punct? ")")))
+            (let [fs (if (punct? ")") []
+                         (loop [out [] seen #{}]
+                           (when-not (= (kind) :label) (if spec (llerr "expected field label here") (refuse "expected a field")))
+                           (let [fname (text) [_ t a] (get by-name fname)]
+                             (when spec
+                               (when-not t (llerr (str "invalid field '" fname "'")))
+                               (when (contains? seen fname) (llerr (str "field '" fname "' cannot be specified more than once"))))
+                             (adv!)
+                             (when t (if (#{"DIFlagField" "DISPFlagField"} t) (check-di-flag! t) (check-di-value! fname t a)))
+                             (let [v (if (#{"DIFlagField" "DISPFlagField"} t)
+                                       (let [x (parse-di-atom)]
+                                         (if (punct? "|") (loop [o [x]] (if (accept! "|") (recur (conj o (do (check-di-flag! t) (parse-di-atom)))) (apply list '| o))) x))
+                                       (parse-di-field))
+                                   out (conj out (keyword fname) v)]
+                               (if (accept! ",") (recur out (conj seen fname)) out)))))]
+              (when spec
+                (let [have (set (map name (take-nth 2 fs)))]
+                  (when-let [[f] (first (filter (fn [[f r]] (and r (not (have f)))) spec))]
+                    (llerr (str "missing required field '" f "'")))
+                  ;; parseDICompileUnit's language fields
+                  (when (= (name head) "!DICompileUnit")
+                    (when-not (or (have "language") (have "sourceLanguageName"))
+                      (llerr "missing one of 'language' or 'sourceLanguageName', required for !DICompileUnit" head-off))
+                    (when (and (have "language") (have "sourceLanguageName"))
+                      (llerr "can only specify one of 'language' and 'sourceLanguageName' on !DICompileUnit" head-off))
+                    (when (and (have "sourceLanguageVersion") (not (have "sourceLanguageName")))
+                      (llerr "'sourceLanguageVersion' requires an associated 'sourceLanguageName' on !DICompileUnit" head-off)))))
+              (expect! ")") (apply list head fs))
+            :else
+            (let [xs (binding [*di-expression* (= (name head) "!DIExpression")] (comma-list parse-di-operand))] (expect! ")") (apply list head xs)))]
+      node)))
 
 (defn- parse-md-attachments
   "`, !name !N` pairs after an instruction or a global: a flat vector [!name md ...]."
@@ -538,9 +800,16 @@
   (expect! "(")
   (if (accept! ")") []
       (let [xs (loop [out []]
-                 (let [t (parse-type) as (parse-param-attrs) v (if (= t 'metadata) (parse-md-value) (parse-value t))
-                       out (conj out (vec (concat [t] as [v])))]
-                   (if (accept! ",") (recur out) out)))]
+                 (when (punct? "...")
+                   (let [m "unexpected ellipsis in argument list for "]
+                     (cond (not *musttail*) (llerr (str m "non-musttail call"))
+                           (not *varargs-fn*) (llerr (str m "musttail call in non-varargs function"))
+                           :else nil)))
+                 (if (accept! "...")
+                   (do (when *ellipsis* (vreset! *ellipsis* true)) out)   ; a musttail call's forwarded varargs: the call's :ellipsis
+                   (let [t (parse-type) as (parse-param-attrs) v (if (= t 'metadata) (parse-md-value) (parse-value t))
+                         out (conj out (vec (concat [t] as [v])))]
+                     (if (accept! ",") (recur out) out))))]
         (expect! ")") xs)))
 
 (defn- parse-bundles []
@@ -554,7 +823,7 @@
       (expect! "]") bs)))
 
 (def ^:private cconv-re
-  #"cc|[a-z0-9_]+cc|aarch64_vector_pcs|aarch64_sve_vector_pcs|aarch64_sme_[a-z0-9_]+|ptx_kernel|ptx_device|spir_kernel|spir_func|amdgpu_[a-z_]+")
+  #"cc|cc[0-9]+|[a-z0-9_]+cc|aarch64_vector_pcs|aarch64_sve_vector_pcs|aarch64_sme_[a-z0-9_]+|ptx_kernel|ptx_device|spir_kernel|spir_func|amdgpu_[a-z_]+")
 
 (defn- parse-cconv
   "A calling convention: its word, \"cc N\", or the word with its argument (riscv_vls_cc(256))."
@@ -575,10 +844,11 @@
         as (when (word? "addrspace") (parse-addrspace))
         t (parse-type)
         callee (parse-value nil)
-        args (parse-args)
+        ell (volatile! nil)
+        args (binding [*ellipsis* ell] (parse-args))
         fa (parse-call-fn-attrs)
         bs (parse-bundles)]
-    {:fmf fmf :cconv cc :ret-attrs ra :addrspace as :type t :callee callee :args args :attrs fa :bundles bs}))
+    {:fmf fmf :cconv cc :ret-attrs ra :addrspace as :type t :callee callee :args args :attrs fa :bundles bs :ellipsis @ell}))
 
 (def ^:private orderings #{"unordered" "monotonic" "acquire" "release" "acq_rel" "seq_cst"})
 
@@ -605,12 +875,13 @@
       (let [xs (comma-list (fn [] (let [t (parse-type)] [t (if (= t 'metadata) (parse-md-value) (parse-value t))])))]
         (expect! "]") xs)))
 
-(defn- call-opts [c] [[:fmf (:fmf c)] [:cconv (:cconv c)] [:ret-attrs (:ret-attrs c)] [:addrspace (:addrspace c)] [:attrs (:attrs c)] [:bundles (:bundles c)]])
+(defn- call-opts [c] [[:fmf (:fmf c)] [:cconv (:cconv c)] [:ret-attrs (:ret-attrs c)] [:addrspace (:addrspace c)] [:attrs (:attrs c)] [:bundles (:bundles c)] [:ellipsis (:ellipsis c)]])
 
 (defn parse-inst-body
   "An instruction after its result's `%r =` (if any)."
   []
-  (let [op (take-word!)]
+  (let [op0 (tok-start)
+        op (if (= (kind) :word) (take-word!) (llerr "expected instruction opcode"))]
     (cond
       (bin-ops op) (let [fl (parse-flags) [t a] (parse-typed) _ (expect! ",") b (parse-value t)]
                      (apply list (symbol op) (concat fl [t a b])))
@@ -650,7 +921,7 @@
             _ (expect! "[")
             ids (if (accept! "]") [] (let [xs (comma-list parse-label)] (expect! "]") xs))]
         (with-opts ['callbr (:type c) (:callee c) (:args c)] (concat [[:to ft] [:indirect ids]] (call-opts c))))
-      (#{"tail" "musttail" "notail"} op) (do (expect! "call") (let [c (parse-call-like)]
+      (#{"tail" "musttail" "notail"} op) (do (expect! "call") (let [c (binding [*musttail* (= op "musttail")] (parse-call-like))]
                                                                 (with-opts ['call (:type c) (:callee c) (:args c)]
                                                                   (cons [:tail (keyword op)] (call-opts c)))))
       (= op "ret") (if (word? "void") (do (adv!) (list 'ret 'void)) (let [[t v] (parse-typed)] (list 'ret t v)))
@@ -699,13 +970,15 @@
       (= op "cmpxchg") (let [wk (accept! "weak") vol (accept! "volatile") pv (parse-typed) _ (expect! ",") c (parse-typed) _ (expect! ",") n (parse-typed)
                              ss (parse-syncscope) s (parse-ordering) f (parse-ordering) al (opt-align)]
                          (with-opts ['cmpxchg pv c n s f] [[:weak wk] [:volatile vol] [:syncscope ss] [:align al]]))
-      :else (refuse :instruction (str "the instruction " op)))))
+      (opcodes op) (refuse :instruction (str "the instruction " op))
+      :else (llerr "expected instruction opcode" op0))))
 
 (defn- parse-inst []
   (let [res (when (and (= (kind) :lname) (punct-at? 1 "="))
               (let [n (local-name (text))] (adv!) (adv!) n))
         body (parse-inst-body)
         md (parse-md-attachments)
+        _ (when (and (punct? ",") (not (#{"align" "addrspace" "!"} (text 1)))) (adv!) (llerr "expected metadata after comma"))
         body (if (seq md) (with-opts body [[:md md]]) body)]
     (if res (list '= res body) body)))
 
@@ -713,9 +986,13 @@
   "A debug record, #dbg_KIND(operand, ...) (value, declare, assign, label, declare_value): (dbg_KIND md...), its
   operands metadata (a value as [T v], !N, an inline !DIExpression(...) or !DIArgList(...))."
   []
-  (let [k (text)]
+  (when-not (#{"value" "declare" "assign" "label" "declare_value"} (text)) (llerr "expected debug record type here" (inc (tok-start))))
+  (let [k (text)
+        md-op (fn [i] (when (and (or (pos? i) (= k "label")) (not (#{:meta :mstr :mspec} (kind))) (not (punct? "!")))
+                        (llerr "expected '!' here"))
+                (parse-md-value))]
     (adv!) (expect! "(")
-    (let [ops (if (punct? ")") [] (comma-list parse-md-value))]
+    (let [ops (if (punct? ")") [] (loop [out [(md-op 0)]] (if (accept! ",") (recur (conj out (md-op (count out)))) out)))]
       (expect! ")")
       (apply list (symbol (str "dbg_" k)) ops))))
 
@@ -753,12 +1030,19 @@
                                           (let [s (tok-start)]
                                             (if (accept! "}")
                                               (do (item! s) out)
-                                              (let [o (apply list 'uselistorder (parse-uselistorder))] (item! s) (recur (conj out o))))))]
+                                              (let [o (apply list 'uselistorder (do (when-not (word? "uselistorder") (llerr "expected uselistorder directive")) (parse-uselistorder)))] (item! s) (recur (conj out o))))))]
                                  [(close) os])
-        (= (kind) :eof) (refuse "unterminated function body")
+        (= (kind) :eof) (llerr "found end of file when expecting more instructions")
         ended (recur (close) nil [] false)
         (= (kind) :dbgrec) (let [r (parse-dbg-record)] (item! s) (recur blocks cur (conj insts r) false))
-        :else (let [x (parse-inst)] (item! s) (recur blocks cur (conj insts x) (boolean (terminator? x))))))))
+        :else (let [x (if *pending*
+                        (try (parse-inst)
+                             (catch arbace.lang.ExceptionInfo e
+                               (if (:llvm/offset (ex-data e)) (do (vreset! *pending* e) ::stop) (throw e))))
+                        (parse-inst))]
+                (if (= x ::stop)
+                  [(close) []]   ; the function so far: the module's checks before the error run on it (read-module-items)
+                  (do (item! s) (recur blocks cur (conj insts x) (boolean (terminator? x))))))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Module summaries (^N = module: (...), gv: (...), typeid: (...), typeidCompatibleVTable: (...), flags: N, blockcount: N)
@@ -893,46 +1177,67 @@
                    (= w "partition") (do (adv!) (recur (conj m [:partition (take-str!)])))
                    (= w "comdat") (recur (conj m [:comdat (parse-comdat-ref)]))
                    (= w "align") (do (adv!) (recur (conj m [:align (take-num!)])))
-                   (= w "prefalign") (do (adv!) (expect! "(") (let [n (take-num!)] (expect! ")") (recur (conj m [:prefalign n]))))
+                   (= w "prefalign") (do (adv!) (expect! "(") (when-not (= (kind) :int) (llerr "expected integer"))
+                                         (let [n (take-num!)] (expect! ")") (recur (conj m [:prefalign n]))))
                    (= w "gc") (do (adv!) (recur (conj m [:gc (take-str!)])))
                    (= w "prefix") (do (adv!) (recur (conj m [:prefix (parse-typed)])))
                    (= w "prologue") (do (adv!) (recur (conj m [:prologue (parse-typed)])))
                    (= w "personality") (do (adv!) (recur (conj m [:personality (parse-typed)])))
                    :else m)))
         md (if define? (parse-fn-md) pre-md)
-        [blocks orders] (when define? (parse-body))]
+        [blocks orders] (when define? (binding [*varargs-fn* (boolean (some #{'&} ps))] (parse-body)))]
     (with-opts (concat [(if define? 'llvm/define 'llvm/declare) nm rt ps])
       (concat (opts-in-order o global-key-order) [[:cconv cc] [:ret-attrs ra]] (opts-in-order o2 global-key-order)
               [[:attrs fa]] more [[:md md] [:body (when define? (vec blocks))] [:uselistorder orders]]))))
 
+(def ^:dynamic *past-header* nil)   ; a volatile: an entity other than target and source_filename was read
+
 (defn- parse-top []
+  ;; LLParser::parseTargetDefinitions: target and source_filename only before the module's other entities
+  (if (and (= (kind) :word) (#{"target" "source_filename"} (text)))
+    (when (and *past-header* @*past-header*) (llerr "expected top-level entity"))
+    (when *past-header* (vreset! *past-header* true)))
   (case (kind)
     :word (case (text)
             "source_filename" (do (adv!) (expect! "=") (list 'llvm/source-filename (take-str!)))
             "target" (do (adv!) (let [w (take-word!)] (expect! "=") (list (symbol "llvm" w) (take-str!))))
             "declare" (do (adv!) (let [md (parse-fn-md)] (parse-function false md)))
             "define" (do (adv!) (parse-function true nil))
-            "attributes" (do (adv!) (let [n (Long/parseLong (text))] (adv!) (expect! "=") (expect! "{")
+            "attributes" (do (adv!) (let [n (if (= (kind) :attrgrp) (Long/parseLong (text)) (llerr "expected attribute group id"))] (adv!) (expect! "=") (expect! "{")
                                          (let [as (loop [out []] (if (accept! "}") out (recur (conj out (parse-attr false)))))]
                                            (list 'llvm/attributes n as))))
-            "module" (do (adv!) (expect! "asm") (list 'llvm/module-asm (take-str!)))
+            "module" (do (adv!) (expect! "asm")
+                         (let [props (when (accept! "(")
+                                       (loop [out []]
+                                         (when-not (= (kind) :label) (llerr "expected property name followed by ':'"))
+                                         (let [k0 (tok-start) k (text)]
+                                           (adv!)
+                                           (let [v (take-str!)]
+                                             (when-not (#{"target_features"} k) (llerr "unknown property name" k0))
+                                             (cond (accept! ")") (conj out [k v])
+                                                   (accept! ",") (recur (conj out [k v]))
+                                                   :else (llerr "expected ',' or ')'"))))))]
+                           (if props (list 'llvm/module-asm (take-str!) :props props) (list 'llvm/module-asm (take-str!)))))
             "uselistorder" (apply list 'llvm/uselistorder (parse-uselistorder))
-            (refuse "unexpected word at top level"))
+            (llerr "expected top-level entity"))
     :lname (let [n (local-name (text))] (adv!) (expect! "=") (expect! "type")
              (if (word? "opaque") (do (adv!) (list 'llvm/type n 'opaque)) (list 'llvm/type n (parse-type))))
     :gname (let [n (global-name (text))] (adv!) (expect! "=") (parse-global n))
     :comdat (let [n (text)] (adv!) (expect! "=") (expect! "comdat") (list 'llvm/comdat n (keyword (take-word!))))
     :meta (let [n (symbol (str "!" (text)))] (adv!) (expect! "=")
             (if (re-matches #"![0-9]+" (str n))
-              (let [d (accept! "distinct") v (parse-md-value)]
+              (let [d (accept! "distinct") _ (when (word? "metadata") (llerr "unexpected type in metadata definition")) v (parse-md-value)]
                 (with-opts ['llvm/meta n v] [[:distinct d]]))
               (do (expect! "!") (expect! "{")
                   (let [xs (if (accept! "}") [] (let [xs (comma-list parse-md-value)] (expect! "}") xs))]
                     (list 'llvm/named-meta n xs)))))
     :sumid (let [n (Long/parseLong (text))] (adv!) (expect! "=")
-             (when-not (= (kind) :label) (refuse "expected a summary entry's kind"))
+             (when-not (and (= (kind) :label) (#{"gv" "module" "typeid" "typeidCompatibleVTable" "flags" "blockcount"} (text)))
+               (llerr "Expected 'gv', 'module', 'typeid', 'typeidCompatibleVTable', 'flags' or 'blockcount' at the start of summary entry"))
+             (when (and (not (#{"flags" "blockcount"} (text))) (not (punct-at? 1 "(")))
+               (adv!) (llerr "expected '(' at start of summary entry"))
              (let [k (keyword (text))] (adv!) (list 'llvm/summary n k (parse-summary-value))))
-    (refuse "unexpected token at top level")))
+    (llerr "expected top-level entity")))
 
 (defn read-module
   "The LLVM forms of an IR text: a vector of top-level forms in the text's order."
@@ -943,13 +1248,22 @@
 
 (defn read-module-items
   "Mode :full's reading: [forms spans], spans a vector per top-level form of its items' [start end] offsets."
-  [^String src]
-  (binding [*t* (lex src) *items* (java.util.ArrayList.) *top* (long-array 1)]
+  ([^String src] (let [[f s e] (read-module-items src true)] (if e (throw e) [f s])))
+  ([^String src partial?]
+  ;; partial?: [forms spans error], an LLParser error (llerr) ending the reading with the forms read before it (a function
+  ;; cut at the failing instruction), so that the checks of what LLParser parsed before the error can run first
+  (binding [*t* (lex src) *items* (java.util.ArrayList.) *top* (long-array 1) *pending* (when partial? (volatile! nil)) *past-header* (volatile! false)]
     (loop [out [] spans []]
       (if (= (kind) :eof)
-        [out spans]
+        [out spans nil]
         (let [s (tok-start) n (.size *items*)
               _ (aset ^"[J" *top* 0 (long s))
-              f (parse-top)]
-          (when (= (.size *items*) n) (item! s))
-          (recur (conj out f) (conj spans (vec (.subList *items* n (.size *items*))))))))))
+              f (try (parse-top)
+                     (catch arbace.lang.ExceptionInfo e
+                       (if (and partial? (:llvm/offset (ex-data e))) (do (vreset! *pending* e) ::stop) (throw e))))]
+          (cond
+            (= f ::stop) [out spans @*pending*]
+            :else
+            (do (when (= (.size *items*) n) (item! s))
+                (let [out (conj out f) spans (conj spans (vec (.subList *items* n (.size *items*))))]
+                  (if @*pending* [out spans @*pending*] (recur out spans)))))))))))
