@@ -580,7 +580,7 @@ states and one of values, a sub-list copied to a vector for every reduction), th
 | `Parsec.hs` (40 KB): lexing alone; parse with lexing; Haddock; `to-dump`; text | 218; 487; 10; 55; 97 ms | 140; 265; 10; 60; 79 ms |
 | `Data/Fixed.hs` (15 KB), the same | 81; 158; 14; 20; 33 ms | 59; 97; 14; 19; 28 ms |
 | `read` of 15 modules (407 KB), process start included | 11 s | 7 s |
-| `read` of 128 modules (about 2.4 MB), process start included | 27 s | 16 s |
+| `read` of 128 modules (1.4 MB), process start included | 27 s | 16 s |
 | `native-check` (54 modules), the native reads | 7.6 s (recorded) | 6.0 s |
 
 What changed (`parse.ae`, `lex.ae`, `ast.ae`, `native.ae`; the dumps byte for byte the same on 15 and on 124 modules, the
