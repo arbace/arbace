@@ -3733,3 +3733,53 @@ outside this work, each for its owner).
   test_tasks: 9, all pass) and the named methods of other modules (test_threading's 3 pass, test_fstring's passes,
   test_setcomps' passes after the comprehension's locations; test_import's five as classed above). The display imports traceback when an exception is displayed (about 4.5 s on
 goi per uncaught exception, CPython does the same), `-c` imports linecache (about 1.3 s on goi).
+
+## Design: 226, the core data model's gaps (2026-11-07, the Mac VM, queue 226)
+
+The classes `:data-model`, `:module-subclasses`, `:function-constructor`, `:str-protocol` and `:surrogate-pairs`, judged by
+test_descr, test_class, test_module, test_funcattrs, test_str and the surrogate cases of test_codecs and test_codeccallbacks.
+Base 7df8864b. Objects/typeobject.c, descrobject.c, funcobject.c, classobject.c and moduleobject.c of the pinned 3.14.10 are
+the rules; what follows is what changes in pyi's model.
+
+**Instances of a built-in's subclass stay an `Instance` around the built-in's value.** classmethod, staticmethod and super
+subclasses panic because their slots assert the Go type. Their slots take `unwrap`, and `unwrapSlots` covers `DescrGet`,
+`DescrSet` and `Call`'s owners, rather than a `cls` field per Go type (the slots, `__dict__` and `__class__` of `Instance`
+come for free).
+
+**A class's layout is recorded where typeobject.c records it.** `classInfo` gets `hasWeakref`, and `type_new`'s slot rules are
+ported whole (`type_new_slots`, `type_new_slots_bases`, `type_new_copy_slots`): `may_add_dict`, `may_add_weak` (a base with
+tp_itemsize: int, bytes, tuple, type's own table, gives no `__weakref__`), `__slots__` names checked as identifiers, a mangled
+name's conflict, `__qualname__` and `__classcell__` excepted. `__dict__` and `__weakref__` become getsets in the dict of the
+class that adds them (`type_add_getset`), not one `object.__dict__`: `object` has none, and `hasattr(object(), '__dict__')` is
+false. The built-in types that have a dict get their own. `weakref.ref` asks the same `hasWeakref` (218's Low).
+
+**`__class__` assignment is object_set_class** with `compatible_for_assignment`, `compatible_with_tp_base` and
+`same_slots_added`, over `Instance`, a module subclass's `Module` (its `Cls`) and an exception subclass; module subclasses get
+`slots` as instances do. `module.__new__` makes an uninitialized module (no `__name__` in its dict yet), `module.__init__`
+sets it, as moduleobject.c splits them.
+
+**The MRO is mro_internal.** `type.mro()` computes C3 afresh; a metaclass's `mro` is called and checked (`mro_check`);
+`__bases__` assignment is type_set_bases with `mro_hierarchy`'s undo list, each class's old MRO kept until all succeed. Every
+MRO set moves `typeEpoch`, so report 210's caches stay correct by the rule they already keep; nothing on the hot paths changes.
+
+**Special methods on built-ins.** `recordOwnSlots` covers every slot (number protocol, comparison, descriptors), so
+`t.__dict__` lists what `add_operators` puts there, by the same lazy `ownSlot`. No wrapper is built at start.
+
+**function and module attributes.** `function`'s `__dict__`, `__closure__`, `__globals__`, `__builtins__`, `__code__`
+(free variable count), and `__qualname__` keep funcobject.c's rules: the fast path in `FunctionType.Slots.GetAttr` and
+`SetAttr` stays for the common names and the read-only ones raise as `PyMemberDef`'s READONLY does.
+
+**Surrogates.** A Java string cannot tell `"𐀀"` from `"\U00010000"`. `decode-str` splits its parts where an
+escape makes a high surrogate meet a low one, through the `{:joined ...}` constant that `\N{...}` already uses; `join-strs`
+does the same for adjacent literals; `portable-consts` carries a part with a lone surrogate as `{:codepoints ...}`, and the
+loader's joined constant writes parts by WTF-8 bytes, so the runes stay two. `ast.parse`'s constant stays a Low (its JSON).
+
+**str.** The str subclass results of `repr`, `ascii`, `str`, and `format`/`%`'s edge cases are unicodeobject.c's rules.
+
+**test_class** imports `_testinternalcapi` for `has_inline_values` at module level. Providing the module makes 33 other test
+files stop skipping, so the choice is made after measuring (a module with that one function; the tests that need more import
+it and find AttributeError). Inline values themselves are CPython's layout and stay classed.
+
+**Speed.** `lookupAttr`, the attribute sites and the compiled loop stay as they are; the class-creation path and `__class__`
+assignment change. Instance creation keeps its fields. If `objectNew` or `genericGetAttrFound` change, 210's bench sample
+is rerun.
