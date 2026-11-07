@@ -13,8 +13,8 @@ covers what.
 
 - `arbace/`: the vendored Clojure in it (everything outside the tools `arbace/classes/`,
   `arbace/repr/`, `arbace/build/`, `arbace/j2g/` and `arbace/c2j/`, which are Arbace's own but
-  for repr/java's native lexer and parser, ports of jdk26u's javac, and repr/c's lexer and
-  preprocessor, ports of cc, below) is
+  for repr/java's native lexer and parser, ports of jdk26u's javac, repr/c's lexer and
+  preprocessor, ports of cc, and repr/rust's native lexer and parser, ports of rustc, below) is
   derived from Clojure, https://github.com/clojure/clojure at `98d735fab02f337cee654cb0629bddc09883a75a`,
   with ASM, https://gitlab.ow2.org/asm/asm at `0460f74ba64230e5b846967c81a52628b5dd0596`: the frozen tree `clojure/` that this repository
   held until the freeze (it remains on the branch `arbace-for-java-26`), renamed to `arbace.*`,
@@ -724,6 +724,23 @@ covers what.
   helpers the parser calls) and `TreeMaker.java` (its factories' positions): Copyright (c) Oracle
   and/or its affiliates, under the GNU General Public License version 2 with the Classpath
   Exception (text below; each file carries the notice of the files it ports).
+- `arbace/repr/rust/lex.ae`, `parse.ae`, `parse/expr.ae`, `parse/pat.ae`, `parse/item.ae` and the meta
+  items, literals and identifiers' names of `native.ae` (repr/rust's native reader, doc/rust/NATIVE-READER.md):
+  Arbace forms porting, function by function, rustc 1.99.1, https://github.com/rust-lang/rust at
+  `58cf8f9c3` (the sources of Alpine's `rust-src-1.99.1-r0`, pinned by `tools/rsdump/apks.sha256`):
+  `compiler/rustc_lexer/src/lib.rs`, `compiler/rustc_parse/src/lexer/mod.rs` and `tokentrees.rs`,
+  `compiler/rustc_parse/src/parser/`'s `mod.rs`, `attr.rs`, `path.rs`, `generics.rs`, `ty.rs`, `expr.rs`,
+  `stmt.rs`, `pat.rs`, `item.rs`, `function.rs` and the paths of `diagnostics.rs` that accept,
+  `compiler/rustc_ast/src/`'s `token.rs`, `ast.rs` (the tree's shapes), `util/classify.rs`, `util/parser.rs`,
+  `util/literal.rs` and `attr/mod.rs`, and `compiler/rustc_span/src/symbol.rs` (the keywords, `Ident`'s
+  Debug), with the escapes' checks of the crate rustc-literal-escaper 0.0.8 that rustc calls
+  (https://github.com/rust-lang/literal-escaper; its `.crate`, pinned by rustc's `Cargo.lock` by SHA-256
+  `bfe6f213fb658c8fb95baabd5420393438cf5a98d707f5dd701d9197c705f71e`): copyright the Rust project's
+  contributors (The Rust Project Developers), dual-licensed under the MIT License or the Apache License
+  2.0 at the licensee's option (`rustc_lexer`'s and the escaper's `license = "MIT OR Apache-2.0"`), taken
+  here under the MIT License ("Rust (rustc 1.99.1): MIT License or Apache License 2.0" below). The rest
+  of `native.ae` (the facts, after `tools/rsdump`'s visitor, the dump and the check) and
+  `test/rust/native-check.txt` are Arbace's own, under the Eclipse Public License 1.0.
 - The non-javac branches of `skip-parens`, `tree-name`, `full-name`, `diamond?` and `class-kind` in
   `arbace/repr/java/tree.ae` (repr/java's interface to the tree, doc/classes/JAVA-FRONTEND-SURVEY.md,
   "As built: JFS66 (b)"): Arbace forms reimplementing, for the native parser's trees,
@@ -3807,7 +3824,6 @@ PERFORMANCE OF THIS SOFTWARE.
 
 The modules of `test/llvm/essential/` are files of `llvm/test` of llvm-project at `llvmorg-23.1.4` (commit 7a941dfb2877a0b8cf30323fefa85ad019e0b0f5, `llvm-project-23.1.4.src.tar.xz`, pinned in `test/cpp/corpora.edn`), copied unchanged as test data; the rest of `llvm/test`, read in place from the pinned tarball, is not stored. The text of `llvm/LICENSE.TXT` of that release follows.
 
-==============================================================================
 The LLVM Project is under the Apache License v2.0 with LLVM Exceptions:
 ==============================================================================
 
@@ -4773,3 +4789,38 @@ the library.  If this is what you want to do, use the GNU Lesser General
 Public License instead of this License.  But first, please read
 <http://www.gnu.org/philosophy/why-not-lgpl.html>.
 ```
+=======
+## Rust (rustc 1.99.1): MIT License or Apache License 2.0
+
+The Rust project's sources are dual-licensed under the MIT License or the Apache License 2.0, at
+the licensee's option. The MIT License's text, as the Rust project's crates carry it (the
+`LICENSE-MIT` of rustc-literal-escaper 0.0.8, the `.crate` above, whole):
+
+```
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```
+
+The Apache License 2.0's text (the escaper's `LICENSE-APACHE`, the same terms) is given in full in
+the section "Murmur3 (Guava): Apache License 2.0" above.

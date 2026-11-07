@@ -121,6 +121,15 @@ code. Three kinds of things live here:
   as Menhir 20250912 does and writes it as the generated `tables.ae`, `parser.ae` drives it as MenhirLib's engine
   (boot/menhir/menhirLib.ml of the same tarball) does (LICENSE.md: the OCaml Core System; Menhir and MenhirLib); the
   rest (the converter, the printer, the checks, `native.ae`) is Arbace's own.
+- `repr/rust.ae` and `repr/rust/` (repr/rust, Rust's bridge, `arbace.repr.rust` and `arbace.repr.rust.*`;
+  doc/rust/SPEC.md; evaluated from the checkout, not embedded): its native reader's lexer and parser,
+  `repr/rust/lex.ae`, `parse.ae` and `parse/{expr,pat,item}.ae`, with the meta items, literals and
+  identifiers' names of `repr/rust/native.ae`, port rustc 1.99.1, https://github.com/rust-lang/rust at
+  `58cf8f9c3` (the sources of Alpine's `rust-src-1.99.1-r0`, pinned by `tools/rsdump/apks.sha256`):
+  `compiler/rustc_lexer`, `rustc_parse`'s `lexer/` and `parser/`, parts of `rustc_ast` and `rustc_span`
+  and the escapes' checks of the crate rustc-literal-escaper 0.0.8 (LICENSE.md names the files; MIT OR
+  Apache-2.0), by hand on 2026-11-04, each file's header naming its sources (doc/rust/NATIVE-READER.md);
+  the rest of `repr/rust/` is Arbace's own.
 - Arbace's own namespaces of the program, not derived from Clojure: `box.ae` and `box/`
   (`arbace.box`, the store, over its host layer `arbace.box.host`; the box's build driver
   `arbace.box.build`, its plan `arbace.box.plan` (since GP2 also repr/go's native loader's go

@@ -32,21 +32,40 @@
 #                                 (test/rust/corpus_make.ae ui-editions, ui)
 #   bin/repr-rust corpus list [CORPUS]
 #                                 the corpus's files, one per line: crate, file
-#   bin/repr-rust dump [--full] --corpus [CORPUS]
+#   bin/repr-rust dump [--reader helper|native] [--full] --corpus [CORPUS]
 #                                 dump the corpus into .tmp/repr-rust/dumps/CORPUS/FILE.edn
-#                                 (CORPUS-full/ with --full: rustc_lexer's tokens and comments too)
-#   bin/repr-rust dump [--full] [-o DIR] [--edition E] FILE...
+#                                 (CORPUS-full/ with --full: rustc_lexer's tokens and comments too;
+#                                 the native reader's into .tmp/repr-rust/dumps-native/)
+#   bin/repr-rust dump [--reader helper|native] [--full] [--expr] [-o DIR] [--edition E] FILE...
 #                                 run the helper on files (relative to the current directory; their
 #                                 path is the name of every span): DIR/FILE.edn each (default
-#                                 .tmp/repr-rust/out), edition 2024 by default
-#   bin/repr-rust read [--full] [-o DIR] [--crate NAME --crate-type T --ns-root NS] DUMP.edn...
+#                                 .tmp/repr-rust/out), edition 2024 by default; --expr: expression
+#                                 files of include! (RR6). --reader native (REPR_RUST_READER;
+#                                 doc/rust/NATIVE-READER.md): the same dumps by the native reader,
+#                                 arbace.repr.rust.native, ports of rustc's lexer and parser in
+#                                 Arbace, no rustc (REPR_RUST_NATIVE_JOBS processes, default 4)
+#   bin/repr-rust read [--reader helper|native] [--full] [--expr] [--edition E] [-o DIR]
+#                      [--crate NAME --crate-type T --ns-root NS] (DUMP.edn | FILE.rs)...
 #                                 convert dumps to Rust forms: one .ae per file under DIR (default
 #                                 .tmp/repr-rust/forms/files), each read back and compared; plain
 #                                 comments as ; comments; with --full (dumps of dump --full) mode
-#                                 :full, every position of the text (SPEC §9.2)
-#   bin/repr-rust read [--full] --corpus [CORPUS]
+#                                 :full, every position of the text (SPEC §9.2). A FILE.rs (relative
+#                                 to the current directory) is dumped first by the reader (default
+#                                 the helper; edition 2024, --expr as dump's) into
+#                                 .tmp/repr-rust/read-dumps/
+#   bin/repr-rust read [--reader helper|native] [--full] --corpus [CORPUS]
 #                                 dump the corpus and convert it into .tmp/repr-rust/forms/CORPUS/
 #                                 (CORPUS-full/; SPEC §2.1); report .tmp/repr-rust/forms/CORPUS.report.edn
+#   bin/repr-rust native-check [--full] [--edition E] [FILE...]
+#                                 the native reader against the helper (doc/rust/NATIVE-READER.md):
+#                                 each file dumped by both, the dumps equal as data (the
+#                                 configuration but the reader's name), or both an error; the first
+#                                 difference of each file reported (E: 2015 ... 2024, E+expr for
+#                                 expression files). The files relative to the current directory;
+#                                 without, the list test/rust/native-check.txt (the samples and a
+#                                 few dozen files of std's crates, each line ROOT EDITION FILE).
+#                                 --full: dump --full's dumps (the tokens). Work and reports in
+#                                 .tmp/repr-rust/native-check/
 #   bin/repr-rust print [--layout lines|pretty|full] [-o DIR] FORMS.ae...
 #                                 the printer (SPEC §9.4): one .rs per forms file into DIR (default
 #                                 .tmp/repr-rust/printed), at its rs/file's :path; mode :lines' layout,
@@ -118,7 +137,9 @@
 # SHA-256, before apk fetch); REPR_RUST_SRC (a directory holding rustc-1.99.1-src.tar.xz, before
 # static.rust-lang.org); REPR_RUST_CRATES (a directory of .crate files to take the pinned ones
 # from, before the host's Cargo cache and crates.io); REPR_RUST_JOBS (parallel helper and converter runs, default the cores, at most
-# 32); REPR_RUST_CODE_JOBS (the code levels' crates built at a time, default 8); ARBACE_HOST_EXE (the Arbace executable, bin/lib/host.bash; default stage 0).
+# 32); REPR_RUST_CODE_JOBS (the code levels' crates built at a time, default 8); REPR_RUST_READER (dump's and read's reader,
+# helper or native; default helper); REPR_RUST_NATIVE_JOBS (the native reader's processes, default 4, each about 0.6 GB);
+# ARBACE_HOST_EXE (the Arbace executable, bin/lib/host.bash; default stage 0).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash" # TMPDIR: .tmp/tmp when unset
@@ -350,6 +371,49 @@ run_helper() {
   printf '%s\n' "$@" | xargs -r -P "$jobs" -n 8 "$helper" "$verb" "${flags[@]}" -o "$out" --edition "$ed" --helper-hash "sha256:$(helper_hash)"
 }
 
+# the native reader (doc/rust/NATIVE-READER.md): arbace.repr.rust.native, the ports of
+# rustc's lexer and parser, evaluated from the checkout; its dumps name it as the helper's name the
+# helper, by the digest of its sources and the pin of the rustc it ports
+native_sources() {
+  echo "$root/arbace/repr/rust/lex.ae" "$root/arbace/repr/rust/parse.ae" "$root"/arbace/repr/rust/parse/*.ae \
+    "$root/arbace/repr/rust/native.ae" "$root/tools/rsdump/RUSTC_VERSION"
+}
+native_hash() {
+  # shellcheck disable=SC2046
+  cat $(native_sources) | sha256sum | cut -c1-64
+}
+native_tool() {
+  arbace_tool -m arbace.repr.rust.native "$1" --pin "$root/tools/rsdump/RUSTC_VERSION" "${@:2}"
+}
+
+# run_native dump OUT EDITION FILE...: run_helper's dumps by the native reader, the files in
+# REPR_RUST_NATIVE_JOBS processes (default 4); EDITION E+expr: expression files of include!
+run_native() {
+  local out=$2 ed=$3 flags=() nj=${REPR_RUST_NATIVE_JOBS:-4} exe h; shift 3
+  [ "${dump_full:-0}" = 1 ] && flags=(--full)
+  case $ed in *+expr) ed=${ed%+expr}; flags+=(--expr) ;; esac
+  [ $# -gt 0 ] || return 0
+  . "$root/bin/lib/host.bash"
+  exe=$(arbace_host_exe)
+  h=$(native_hash)
+  printf '%s\n' "$@" | ARBACE_PATH=$root xargs -r -P "$nj" -n $(( ($# + nj - 1) / nj )) \
+    "$exe" -m arbace.repr.rust.native dump --pin "$root/tools/rsdump/RUSTC_VERSION" "${flags[@]}" -o "$out" \
+    --edition "$ed" --helper-hash "sha256:$h"
+}
+
+# run_reader dump OUT EDITION FILE...: run_helper's or run_native's, by $reader
+run_reader() {
+  case ${reader:-helper} in
+    helper) run_helper "$@" ;;
+    native) run_native "$@" ;;
+    *) echo "repr-rust: no reader ${reader} (helper or native)" >&2; return 2 ;;
+  esac
+}
+
+reader_check() {
+  case $1 in helper|native) ;; *) echo "repr-rust: --reader helper|native, not '$1'" >&2; exit 2 ;; esac
+}
+
 # dump_corpus CORPUS OUT [--full]: the helper's dumps of the corpus (with --full, its tokens and
 # comments too: mode :full, SPEC §9.2)
 dump_corpus() {
@@ -360,9 +424,54 @@ dump_corpus() {
   edition_plan "$c" > "$pl"
   while IFS=$'\t' read -r name ed files; do
     # shellcheck disable=SC2086
-    (cd "$srcroot" && run_helper dump "$out" "$ed" $files) 2>> "$out.err" || true
+    (cd "$srcroot" && run_reader dump "$out" "$ed" $files) 2>> "$out.err" || true
   done < "$pl"
   rm -f "$pl"
+}
+
+# native_check [--full] [--edition E] [FILE...]: the native reader against the helper: the files
+# (relative to the current directory, edition E) or test/rust/native-check.txt's, by group
+# of root and edition, each group's files dumped by the helper into ref/N/ and by the native reader
+# into native/N/, compared by arbace.repr.rust.native check (a report N.report.edn each)
+native_check() {
+  local nc=$work/native-check ed=2024 files=() rc=0 i=0 dir e fs list l dump_full=0 full=()
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --full) dump_full=1; full=(--full); shift ;;
+      --edition) ed=$2; shift 2 ;;
+      *) files+=("$1"); shift ;;
+    esac
+  done
+  build
+  rm -rf "$nc"; mkdir -p "$nc"
+  list=$nc/groups
+  if [ ${#files[@]} -gt 0 ]; then
+    printf '%s\t%s\t%s\n' "$PWD" "$ed" "${files[*]}" > "$list"
+  else
+    corpus_root rustc-1.99.1
+    # test/rust/native-check.txt: ROOT EDITION FILE, ROOT sample (test/rust/sample) or library
+    # (rust-src's library/, std's corpus); one group per root and edition, in the list's order
+    awk -v s="$root/test/rust/sample" -v l="$srcroot" '
+      /^[ \t]*(#|$)/ { next }
+      { d = ($1 == "sample") ? s : ($1 == "library") ? l : ""; if (d == "") { print "repr-rust native-check: no root " $1 " (sample or library)" | "cat >&2"; exit 2 }
+        k = d "\t" $2; if (!(k in fs)) order[n++] = k; fs[k] = fs[k] (fs[k] == "" ? "" : " ") $3 }
+      END { for (i = 0; i < n; i++) print order[i] "\t" fs[order[i]] }' "$root/test/rust/native-check.txt" > "$list"
+  fi
+  while IFS=$'\t' read -r dir e fs; do
+    i=$((i + 1))
+    l=$nc/files.$i; tr ' ' '\n' <<< "$fs" > "$l"
+    local xf=() en=$e
+    case $e in *+expr) en=${e%+expr}; xf=(--expr) ;; esac
+    echo "== repr-rust native-check: $(wc -l < "$l") files, edition $e, in ${dir#"$root"/}" >&2
+    # shellcheck disable=SC2086
+    (cd "$dir" && run_helper dump "$nc/ref/$i" "$e" $fs) 2>> "$nc/helper.err" || true
+    (cd "$dir" && native_tool check "${full[@]}" "${xf[@]}" --brief --ref "$nc/ref/$i" --out "$nc/native/$i" \
+       --edition "$en" --list "$l" --report "$nc/$i.report.edn") | tee "$nc/$i.log" || rc=1
+  done < "$list"
+  # the total of the groups' summaries
+  cat "$nc"/[0-9]*.log | awk '/^repr-rust native-check:/ { f += $3; q += $5; b += $7; d += $10; n += $12; h += $19; t += $(NF-2) }
+    END { printf "repr-rust native-check total: %d files, %d equal, %d both rejected, %d differ, %d rejected by the native reader alone, %d by the helper alone; %.1f s reading\n", f, q, b, d, n, h, t }'
+  return $rc
 }
 
 # prune_dumps DUMPS LOG: the dumps of the files the conversion's log names no error or misread for
@@ -1048,37 +1157,66 @@ case $cmd in
       *) echo "usage: bin/repr-rust corpus fetch|list [CORPUS] | corpus make-ui" >&2; exit 2 ;;
     esac ;;
   dump)
-    build
-    full=()
-    if [ "${1:-}" = --full ]; then full=(--full); shift; fi
+    reader=${REPR_RUST_READER:-helper}
+    if [ "${1:-}" = --reader ]; then reader=${2:-}; shift 2; fi
+    reader_check "$reader"
+    # the native reader needs no rustc (corpus fetch extracts the corpora without it)
+    if [ "$reader" = helper ]; then build; else mkdir -p "$work"; fi
+    full=(); dump_full=0; dd=$work/dumps; [ "$reader" = native ] && dd=$work/dumps-native
+    if [ "${1:-}" = --full ]; then full=(--full); dump_full=1; shift; fi
     if [ "${1:-}" = --corpus ]; then
       c=${2:-rustc-1.99.1}; corpus_root "$c"
-      if [ ${#full[@]} -gt 0 ]; then dump_corpus "$c" "$work/dumps/$c-full" --full; cat "$work/dumps/$c-full.err" >&2
-      else dump_corpus "$c" "$work/dumps/$c"; cat "$work/dumps/$c.err" >&2; fi
+      if [ ${#full[@]} -gt 0 ]; then dump_corpus "$c" "$dd/$c-full" --full; cat "$dd/$c-full.err" >&2
+      else dump_corpus "$c" "$dd/$c"; cat "$dd/$c.err" >&2; fi
       exit 0
     fi
-    out=$work/out; ed=2024; files=()
+    out=$work/out; ed=2024; files=(); expr=""
     while [ $# -gt 0 ]; do
       case $1 in
         -o) out=$2; shift 2 ;;
         --edition) ed=$2; shift 2 ;;
+        --expr) expr=+expr; shift ;;
         *) files+=("$1"); shift ;;
       esac
     done
-    "$helper" dump "${full[@]}" -o "$out" --edition "$ed" --helper-hash "sha256:$(helper_hash)" "${files[@]}" ;;
+    run_reader dump "$out" "$ed$expr" "${files[@]}" ;;
   read)
+    reader=${REPR_RUST_READER:-helper}
+    if [ "${1:-}" = --reader ]; then reader=${2:-}; shift 2; fi
+    reader_check "$reader"
     full=(); sfx=""
     if [ "${1:-}" = --full ] && [ "${2:-}" = --corpus ]; then full=(--full); sfx=-full; shift; fi
     if [ "${1:-}" = --corpus ]; then
       shift; c=${1:-rustc-1.99.1}
-      build; corpus_root "$c"
-      dump_corpus "$c" "$work/dumps/$c$sfx" "${full[@]}"
+      if [ "$reader" = helper ]; then build; dd=$work/dumps; else mkdir -p "$work"; dd=$work/dumps-native; fi
+      corpus_root "$c"
+      dump_corpus "$c" "$dd/$c$sfx" "${full[@]}"
       out=$work/forms/$c$sfx
       rm -rf "$out"
-      read_files "${full[@]}" --jobs "$jobs" -o "$out" --report "$out.report.edn" --root "$work/dumps/$c$sfx" --corpus "$(corpus_file "$c")"
+      read_files "${full[@]}" --jobs "$jobs" -o "$out" --report "$out.report.edn" --root "$dd/$c$sfx" --corpus "$(corpus_file "$c")"
     else
-      read_files --jobs "$jobs" "$@"
+      # the converter's arguments, but the Rust files: dumped first by the reader
+      args=(); rs=(); ed=2024; expr=""; dump_full=0
+      while [ $# -gt 0 ]; do
+        case $1 in
+          --edition) ed=$2; shift 2 ;;
+          --expr) expr=+expr; shift ;;
+          --full) dump_full=1; args+=("$1"); shift ;;
+          -o|--jobs|--report|--only|--corpus|--crate|--crate-type|--ns-root|--pin|--root) args+=("$1" "${2:-}"); shift 2 ;;
+          *.rs) rs+=("$1"); shift ;;
+          *) args+=("$1"); shift ;;
+        esac
+      done
+      if [ ${#rs[@]} -gt 0 ]; then
+        rd=$work/read-dumps; rm -rf "$rd"; mkdir -p "$rd"
+        if [ "$reader" = helper ]; then build; fi
+        # a file the reader rejects is dumped as (rsdump/error ...), which the conversion reports
+        run_reader dump "$rd" "$ed$expr" "${rs[@]}" || true
+        for f in "${rs[@]}"; do args+=("$rd/$f.edn"); done
+      fi
+      read_files --jobs "$jobs" "${args[@]}"
     fi ;;
+  native-check) native_check "$@" ;;
   print) arbace_tool -m arbace.repr.rust print --jobs "$jobs" "$@" ;;
   roundtrip) rustc_check; roundtrip "$@" ;;
   test) exec "$root/bin/lib/repr-rust/test" "$@" ;;
