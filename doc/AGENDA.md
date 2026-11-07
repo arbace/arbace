@@ -273,6 +273,101 @@ Then `java-judge` 3ab550e0 (`b4216bacc`) and `scheme-90` 43b39f4a (`eb49dcddc`),
   produced first (the reference records only digests), and `verdicts.edn`/`run.ae` taught a `:golden` kind for them: a
   reviewing task of its own (an agent, Opus), after tonight's gate.
 
+## Batch 2 (merged on `batch2`, 2026-11-07, on `batch1` 0edacad6; for the day after batch 1's night)
+
+Merge plan batches 2 and 3 together (`.tmp/tag-v2/merge-plan-rehearsal-1105.md` §4 step 3, `merge-plan.md` §3), each line at its newest
+head the slot allows, one merge commit a branch: rsi `rust-re5`, `gt9v-rust`, `rust-re6`; LLVM `llvm-read`, `cpp-lower-dbg`, `llvm-full`,
+`llvm-verify3`, `gt9v-llvm`, `llvm-ll6` (it holds `cpp-native`, `cpp-native2`, `cpp-sema`, `cpp-codegen`, `cpp-codegen2`, `cpp-g2fix`,
+`cpp-templates` and `llvm-row`: batch 5's C++ native line comes with it), `llvm-90`; OCaml `ocaml-native`, `ocaml-errors`, `ocaml-errors2`,
+`crop-controls-ocaml`, then `ocaml-t12` and `ocaml-90` (through `batch2-ocaml`, an agent's merge onto batch 2 with `ocaml-libs4`'s
+libraries); Rust native `rust-native`, `rust-unicode`, `rust-errors`, `rust-errors2`, `crop-controls-rust`, `rust-rf9b` (RF1-RF9b),
+`rust-rf3b`; `rust-row` (Rust's REAP row, not in the plan: the Rust row's cells); crop-controls' Rust round-trip control `7bf1d1e4` picked.
+None contains 53794ed6. Skipped: `llvm-ll4` (LL4's corpus loop, a line of its own that conflicts with LL9a: LLS32), `rust-res34` (RES34
+write-ahead, changes C's `arbace/c/` and `bin/ci`: its own day), `oracle-records-ocaml`/`-rust` (ORS12, later), `ocaml-libs1` (one doc
+commit, OT11-OT15's decision text, already in libs4's doc).
+
+- **Conflicts of note.** `arbace/cpp/lower.ae`: batch 1's lowering (CX8, rust-re4/re5's vectors and rustc intrinsics, cppi-deferred,
+  cpp-lower-dbg) against ll6's (LL5's vectors, LL6's `*ci*`): integrated by an agent (`batch2-lower` f703fceb, 3550feb7: LL5's vectors and
+  one bitcast path, both va_list schemes kept apart by `*ci*`, a packed-vector size bug fixed); doc/cpp/LLVM.md split by ll6 into
+  doc/llvm/SPEC.md and LOWER.md with batch 1's sections 7-11 merged in; `arbace/c/build.ae` (re6's thread-local statics with c-deferred's
+  VLAs); `test/gate/steps.edn` (llvm-90's eight steps and group beside GT9's, their `:controls` added); `test/reap/cells.edn` (ten rows);
+  repr/ocaml's native-check (crop-controls' hook on errors2's); repr/rust's lexer (unicode's emoji test, errors' error path); OCaml's
+  `bin/oi` (the native library and libs4's unix, threads, str and compiler-libs). GT9: Rust's fragment parts spliced (`llvm-rust.edn`
+  without its LLVM interim step, `natives.edn`'s Rust part); OCaml's steps off `:ocaml` (OC180), `ocaml-oracle.edn` waiting for the
+  planner's `:phase :oracle`.
+- **Keys** (12 hex; batch 1 gate `4178700aed97`, runtime `b74523271f12`, javac `0da7d3f90cee`): at the end `1bfe8ffffe7e`, `6b114cbcf8f0`,
+  `54e889c46334`. Moved by `rust-re6` (all three: `go/arbace/{ci,crt}`, `arbace/c/build.ae`, `tools/cirun`: C's embedded runtime, rsi's
+  threads) and `llvm-ll6` (gate, javac: `arbace/llvm/` joining `arbace_crop_paths` and embed.ae's exclusions); every other merge moved none.
+- **Checks (day, light).** gate.crops check 0 problems; `bin/gate --plan`, `--full --plan` clean; C `check --only essential` and `--aot`
+  (re6's ci) pass, 4 and 1 recorded failures now pass (binary-trees-5 with threads); llvmi `--essential` 10/10 and a 70-module sample on C's
+  own target; the lowering's samples (cppi lower 9/9, 17/17, essential 6/6, libstdcxx sample 39/39, llvmi 175 by feature, rsi native leg);
+  OCaml's (the agent's: typer-check 79/79, essential 58/58 both paths, native-check samples 8/8, round trips, libs4's sample 14/18 native).
+  One found: `runtime/thread-throw.cpp` on ci now terminates in `cx$thread_start` (re6's threads), its class `threads` extended.
+- **`bin/reap`**: ten rows, 40 cells, 37 checked (Python's eval and AOT, Rust's AOT "no check yet"), 1 problem (deferred.cpp's, tonight's
+  C++ record; the matrix recorded with that row held out as in batch 1). **`bin/crops-score --judge --strict`**: 0 problems.
+
+| crop | batch1 (completeness / maturity / independence) | batch2 |
+|---|---|---|
+| Clojure | 99.0 / 96.3 / 100 | 99.0 / 96.3 / 100 |
+| Java | 72.9 / 100 / 99.7 | 72.9 / 100 / 99.7 |
+| Go | 94.9 / 95.8 / 100 | 94.9 / 95.8 / 100 |
+| C | 95.1 / 100 / 99.7 | 95.1 / 100 / 99.7 |
+| C++ | 75.4 / 91.7 / 20 | 75.4 / 91.7 / 20 |
+| OCaml | 80.9 / 100 / 20 | 80.9 / 100 / 87.4 |
+| Scheme | 98.4 / 100 / 95.0 | 98.4 / 100 / 95.0 |
+| Haskell | 0 / 8.3 / 20 | 0 / 8.3 / 20 |
+| Rust | 0 / 8.3 / 20 | 75.0 / 95.8 / 20 |
+| LLVM IR | 0 / 4.2 / 40 | 95.9 / 93.3 / 88.3 |
+| Python | 0 / 83.3 / 20 | 0 / 83.3 / 20 |
+
+- **`bin/gate --full --plan`** on batch 2: 309 steps, 295 run, 8 after; `--costs`: nightly 10.3 h of measured step seconds, 86 steps
+  unmeasured (the crops' first passes: LLVM's 10, Rust's 12 never passed; about 2 h more by GT9's estimates): about 12 h, over the 8 h plan.
+
+### Batch 2's night, in order (one heavy job at a time under `bin/heavy-lock`; at most 1.5 GiB a process outside the gate)
+
+0. Before the gate: the host's clang moved to 23.1.5 (2026-11-06 20:11): `test/cpp/runtime/ir.sha256` fails for every unit (the `!ident`
+   line only), so `cpp-runtime` (needed by C++'s, Rust's and the lowering's steps) fails. Proposal 1 below.
+1. The essential gate on `next` (rekeys everything on `:gate`, `:prog`, `:javac`: re6, ll6's list), `bin/gate --pins`.
+2. `bin/gate --full`, keyed (about 12 h with the first passes; proposal 2).
+3. Records, after the gate:
+   - C++: `CPPI_THREADS=2 bin/cppi check --record`, `--aot --record` (deferred.cpp, thread-throw's new shape; up to 6.7 GB measured at one
+     thread: under the heavy lock).
+   - rsi (RE6.4): `bin/rsi check --corpus samples,synthetic --record`, `--corpus ui --only .tmp/re6/uicheck.ids`, then `--corpus ui --record`
+     (about 5.5 h at 3 threads), `bin/rsi divergences`; `rsi-lower-check-all` (3,718, about 40 min, `RSI_JOBS=8`, heavy); `bin/rsi
+     runtime-build` (4 GiB) and `runtime-ci` (6 GiB) first where stale.
+   - C: `bin/ci check --record`, `--aot --record` (the recorded failures that now pass).
+   - LLVM IR: `bin/llvmi check --aot --record` (33 min, 1.5 GB), `LLVMI_TX_ALL=1 bin/llvmi check` (16 min); the oracle tier by hand
+     (`REPR_LLVM_JUDGE=live bin/repr-llvm check FAMILY`, `LLVMI_JUDGE=lli bin/llvmi check`).
+   - OCaml (`OI_TYPER_GOMEMLIMIT=1200MiB`, `O2J_JOBS=1`, one process at a time): `bin/oi stdlib` (4 min), `check --record` (35 min),
+     `check --aot --record` (40), `suite check --record` (35), `suite check --aot --record` (35), `bin/repr-ocaml roundtrip --text
+     --record-results all` (40 min, 1.5 GB), `roundtrip --text --types samples stdlib` (5); then OC185's cells change if each native record
+     has no fewer passes than its oracle twin.
+   - Rust native: `bin/repr-rust native-check` beyond the 68 (core/std), the error mutants (1,400).
+   - Last: `bin/reap --record`, `bin/crops-score --record`.
+
+### Proposed (batch 2)
+
+1. **The C++ runtime's IR pin after clang 23.1.5.** (a) Re-record `test/cpp/runtime/ir.sha256` (`bin/cppi runtime-build --update`, only
+   `!ident` differs) and the clang pins with it, before the night; cost: C++'s and the lowering's records keep their numbers, the pin names
+   23.1.5. (b) Pin clang back to 23.1.4 (an apk downgrade on the host). (c) Leave the steps failing. *Recommended: (a).* It affects batch 1's
+   night too.
+2. **The night's fit.** (a) Revert `rust-re6`'s merge commit for the night (rsi stays at RE5; the keys still move by ll6's list, so the
+   rekey stays, but C's steps do not rerun twice); (b) run all of it into the slack, as batch 1's (about 12 h); (c) the essential gate,
+   `bin/reap`, `crops-score` and the four new crops' chains tonight, the rest of `--full` the night after (keyed). *Recommended: (c).*
+3. **LLS31, the 282 LLVM modules' pack** (their lists and corner sources are gone with removed worktrees): (a) rebuild the pack `rt` from
+   what can be rebuilt (260 torture builds, the C++ samples' Mach-O builds, a Rust module, the stress set; four `hw-*` committed), drop the 21
+   corner modules, re-make the mutants and records: a day's verb and a night's clang; (b) retire the four families from the read cells (read
+   1 now, LLVM independence 94.2%). *Recommended: (a)*, (b) meanwhile if the score is wanted now. (doc/llvm/LLVM-CROP-SURVEY.md, "Proposed
+   (batch 2)", with LLS32: rebase `llvm-ll4` onto batch 2.)
+4. **OCaml's open items** (doc/ocaml/OCAML-SURVEY.md, Proposed): OC182 (expect natively, with T12), OC186 (ocamllex ported, a day; meanwhile
+   `OI_OCAMLLEX=1`), OC187 (`ocaml-oracle.edn` spliced with `oracle-records-cpp2`'s planner), OC188 (compiler-libs' typer gaps in T12, classed
+   tonight), OC189, OC190. *Recommended as the survey says.*
+5. **Rust's independence (20%) and eval cell.** Rust's cells still read through rustc's helper (`tools/rsdump`) and rsi's eval cell has only
+   the samples' record (5 programs; RE6's UI records come tonight). (a) Make the native reader (RF line) the read cells' default once its
+   native-check covers the corpora, and record rsi's UI check into the eval cell; (b) leave. *Recommended: (a)*, a Rust agent's day after the
+   night's records.
+6. **C++'s independence (20%)** is unchanged: the codegen line (now merged with ll6) is not the cells' default. A C++ agent's task, batch 5.
+
 ## After the tag
 
 - **The held branches, in batches into `next`** (`.tmp/tag-v2/merge-plan.md`): the crops' rows (batch 1, above), the LLVM IR line (the reader's gaps, `:full`, the verifier, the lowering of

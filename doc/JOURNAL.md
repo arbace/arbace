@@ -212,3 +212,34 @@ completeness or maturity. On `mac/batch1` C scores 20.0% (every C step on `:gcc`
   `:hosts` loses `:gcc`.
 - **Rekeys** (embedded, gate_key): `arbace/repr/c/host.ae`, `pp.ae`, `ppcheck.ae`, `rtcheck.ae`, `c23check.ae`; stage 0
   evaluates them from the checkout (repr namespaces are tool sources).
+
+## 2026-11-07: batch 2, LLVM IR, rsi, OCaml's and Rust's native lines (branch batch2, on batch1 0edacad6)
+
+Merge plan batches 2 and 3 on one day (`.tmp/tag-v2/merge-plan-rehearsal-1105.md` §4 step 3), after `merge-check.sh --base mac/batch1`
+on the day's heads (25 steps, 17 conflicting), each line at its newest head: `rust-re5` 495e5265b's ancestor e573fd86b, `gt9v-rust`
+73b2848b, `rust-re6` 495e5265, `llvm-read` 5249bc5c, `cpp-lower-dbg` 1eb112ab, `llvm-full` f2a4dafe, `llvm-verify3` 93108c42,
+`gt9v-llvm` 058168d9, `llvm-ll6` 153ac9e9 (with cpp-native, cpp-native2, cpp-sema, cpp-codegen, cpp-codegen2, cpp-g2fix, cpp-templates
+and llvm-row inside), `llvm-90` b8aa3f16; `ocaml-native` 8f00636e, `ocaml-errors` 0e25bd25, `ocaml-errors2` b7fa3dd7, `crop-controls-ocaml`
+52548f59, then `ocaml-t12` 394c7a2f and `ocaml-90` c0fdfca4 merged by an agent on `batch2-ocaml` (6742fb54) with ocaml-libs4's libraries,
+OC180, OC181, OC183 and OC184 built there; `rust-native` 2038e0fd, `rust-unicode` d6efaadb, `rust-errors` 7efd8917, `rust-errors2` 668e0259,
+`crop-controls-rust` 63f53b42, `rust-rf9b` 523640cd, `rust-rf3b` 2c4e8faa, `rust-row` e33985da, and crop-controls' 7bf1d1e4 picked. One
+merge commit a branch.
+
+- **Why the lowering took an agent.** `arbace/cpp/lower.ae` had two implementations of vectors and of ci's va_list: batch 1's (CX8,
+  rust-re4/re5, cppi-deferred, cpp-lower-dbg) and ll6's (LL5, LL6). The ll6 merge took ll6's file, and `batch2-lower` (f703fceb, 3550feb7)
+  integrated the rest: LL5's vectors and one bitcast path win, rustc's intrinsics and the slot unions kept, the two va_list schemes kept
+  apart by `*ci*`; checked on the C++ lowering's samples, llvmi's features and rsi's native leg. Alternatives: ours' vectors (rsi's) over
+  LL5's (llvmi's 522-of-562 record was made with LL5's), or holding llvm-ll6 for its own day (the LLVM row waits).
+- **The keys.** rust-re6 changes C's embedded runtime (`go/arbace/{ci,crt}`, `arbace/c/build.ae`, `tools/cirun`: threads on ci) and moves
+  all three keys; llvm-ll6's `arbace/llvm/` had to join `arbace_crop_paths` and embed.ae's exclusions (the keys commit missed it), which
+  moves gate_key and the javac key. Batch 2's night is a rekey night again (AGENDA, "Proposed (batch 2)", 2).
+- **LLS27-LLS30** (the user's decisions of 2026-11-07): the rule for a pinned input corpus in the crop's own language in doc/CROPS-SCORE.md;
+  llvmi switched to C's own target (`c/target`) so its eval and AOT stages are Arbace's alone; LLVM IR's independence 68.3% at llvm-90,
+  88.3% on batch 2. LLS28 could not be prepared as decided: the 282 modules' lists and corner sources were in the removed worktrees of
+  llvm-read and llvm-full; LLS31 proposes rebuilding a pack from what can be rebuilt.
+- **Scores** (batch1 → batch2): LLVM IR 0 / 4.2 / 40 → 95.9 / 93.3 / 88.3; Rust 0 / 8.3 / 20 → 75.0 / 95.8 / 20; OCaml 80.9 / 100 / 20 →
+  80.9 / 100 / 87.4; the others unchanged. `bin/reap`: ten rows, 40 cells, 37 checked, 1 problem (deferred.cpp's, tonight's record).
+- **Found:** `runtime/thread-throw.cpp` on ci terminates in `cx$thread_start` since re6's threads (C++'s class `threads` extended, the
+  record tonight's); the host's clang moved to 23.1.5, so `test/cpp/runtime/ir.sha256` no longer matches (the `!ident` line).
+- Not merged: `llvm-ll4` (LLS32), `rust-res34` (its own day: C's `arbace/c/`), `oracle-records-ocaml`/`-rust` (ORS12), `ocaml-libs1` (a doc
+  commit already in libs4's doc).
