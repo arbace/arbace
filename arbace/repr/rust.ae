@@ -27,7 +27,11 @@
         rustdoc's JSON of the originals (ORIG/C/C.json) against the printed files' (CAND/C/C.json),
         compared as text once every span is removed (span fields, and the spans rustc's Debug writes
         in attributes' texts); the known differences FILE (a map from the crate's name to its
-        reason) excuse a crate, and a listed crate found equal is a failure."
+        reason) excuse a crate, and a listed crate found equal is a failure.
+    controls [--file FILE] [--work DIR]
+        the round trips' negative controls (test/rust/roundtrip-controls.edn, GTS81 (a)): each a
+        subject and a candidate made from it, judged by the tree level's judge (the native trees and
+        lines) or the text level's (byte for byte), must differ; the subject against itself equal."
   (:require [arbace.repr.rust.convert :as cv]
             [arbace.repr.rust.write :as wr]
             [arbace.repr.rust.print :as pr]
@@ -672,6 +676,59 @@
                         :sides reports}))))
     (if (every? #(and (empty? (:unexpected %)) (empty? (:fixed %))) reports) 0 1)))
 
+;;; The round trips' negative controls (GTS81 (a); test/rust/roundtrip-controls.edn)
+
+(defn- control-candidate
+  "The candidate text of a control: the subject's text edited"
+  ^String [^String text edit]
+  (let [[k a b] edit]
+    (case k
+      :replace (let [i (.indexOf text ^String a)]
+                 (when (neg? i) (throw (ex-info (str "control: the subject has no " (pr-str a)) {})))
+                 (str (subs text 0 i) b (subs text (+ i (count a)))))
+      :insert-line (let [ls (vec (.split text "\n" -1)) n (dec (long a))]
+                     (str/join "\n" (concat (subvec ls 0 n) [b] (subvec ls n))))
+      :file (slurp a))))
+
+(defn run-controls
+  "Each control of FILE judged by its family's judge (the native reader's trees and lines, or the
+  text byte for byte) against its subject: [{:id :status :ok|:FAILS ...}]; a control passes when
+  its judge reports a difference and the subject judged against itself is equal"
+  [^String file ^String work]
+  (let [trees (requiring-resolve 'arbace.repr.rust.native/file-trees)]
+    (vec (for [{:keys [id family subject edition edit]} (read-string (slurp file))]
+           (let [d (str work "/" (str/replace id #"[^A-Za-z0-9_.-]" "_"))
+                 o (File. (str d "/orig.rs")) c (File. (str d "/cand.rs"))
+                 text (slurp subject)]
+             (.mkdirs (File. d))
+             (spit o text)
+             (spit c (control-candidate text edit))
+             (let [judge (fn [^File x]
+                           (case family
+                             :text (compare-text-file (str o) (str x))
+                             :tree (let [w (fn [^File f tag]
+                                             (let [[t l] (trees (str f) (long (or edition 2024)) nil)]
+                                               (spit (str d "/" tag ".tree") t) (spit (str d "/" tag ".lines") l)))]
+                                     (w o "orig") (w x "cand")
+                                     (compare-file (str d "/orig.tree") (str d "/cand.tree") (str d "/orig.lines") (str d "/cand.lines")))))
+                   self (judge o)
+                   r (judge c)]
+               {:id id :family family :subject subject
+                :self (:status self) :judged (select-keys r [:level :status])
+                :status (if (and (= :ok (:status self)) (= :differs (:status r))) :ok :FAILS)}))))))
+
+(defn- cmd-controls [args]
+  (let [{:keys [opts]} (parse-args args #{"--file" "--work"})
+        rs (run-controls (get opts "--file" "test/rust/roundtrip-controls.edn") (get opts "--work" ".tmp/repr-rust/controls"))
+        bad (remove #(= :ok (:status %)) rs)]
+    (doseq [r rs]
+      (println (if (= :ok (:status r)) "ok  " "FAIL") (:id r) (pr-str (:judged r))
+               (if (= :ok (:status r)) "(differs, as it must)" (str "(the subject against itself: " (name (:self r)) ")"))))
+    (println (format "repr-rust roundtrip: negative controls: %d of %d fail their judge as they must%s"
+                     (- (count rs) (count bad)) (count rs)
+                     (if (seq bad) (str "; NOT: " (str/join ", " (map :id bad))) "")))
+    (if (empty? bad) 0 1)))
+
 (defn -main [& args]
   (let [[verb & more] args
         status (try
@@ -684,7 +741,8 @@
                    "run-plan" (cmd-run-plan more)
                    "compare-run" (cmd-compare-run more)
                    "compare-code" (cmd-compare-code more)
-                   (do (println "usage: -m arbace.repr.rust read|print|compare|compare-iface|compare-text|run-plan|compare-run|compare-code ...") 2))
+                   "controls" (cmd-controls more)
+                   (do (println "usage: -m arbace.repr.rust read|print|compare|compare-iface|compare-text|run-plan|compare-run|compare-code|controls ...") 2))
                  (catch Throwable e
                    (.printStackTrace e)
                    1))]
