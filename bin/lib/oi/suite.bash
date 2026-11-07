@@ -26,7 +26,7 @@ suite_actions() { # -> "ID<TAB>run|class<TAB>..." for every .ml of tests/ (ID wi
 }
 
 cmd_suite_corpus() {
-  mkdir -p "$S"; need_tree; cmd_corpus > "$OI_DIR/corpus.log"
+  mkdir -p "$S"; need_source; cmd_corpus > "$OI_DIR/corpus.log"
   local out=$S/corpus.tsv
   # the testsuite's run programs the run corpus of O5 does not hold
   suite_actions > "$S/actions.tsv"
@@ -119,6 +119,7 @@ suite_dump() {
   suite_stage "$id" "$base" "$units" "$d"
   local I=""; [ -n "$incs" ] && I="-I $TESTLIB"
   : > "$d/units.list"
+  if [ "${NATIVE:-0}" = 1 ]; then suite_dump_native "$d" "$flags" "$incs" "$units"; return; fi
   for u in $units; do
     n=$(basename "${u#=}"); b=${n%.*}; U=$(echo "${b:0:1}" | tr a-z A-Z)${b:1}
     if ! (cd "$d" && ocamlc -w -a $flags $I -c "$n") > "$d/$n.log" 2>&1; then
@@ -127,6 +128,28 @@ suite_dump() {
     case $n in *.mli) continue ;; esac
     (cd "$d" && "$OCD" --mode lambda --simplify $flags $I --prefix "$b" --file "$n" "$n" > "$U.ae" 2> "$n.dump.log")
     if grep -q '^(ocaml/error' "$d/$U.ae"; then echo "dump $n: $(head -c 300 "$d/$U.ae" | tr '\n\t' '  ')" > "$d/error"; return; fi
+    echo "$d/$U.ae" >> "$d/units.list"
+  done
+}
+
+# suite_dump_native DIR FLAGS INCS UNITS (TY24 (a), the native path): each unit in link order typed and translated by Arbace's typer
+# (no ocamlc, no ocdump), the earlier units' interfaces found in DIR (--include): an .mli of the program's own, else the signature the
+# typer wrote for the unit (--sig-out, as the toplevel's top_N.mli); a unit with its .mli is coerced to it (--intf)
+suite_dump_native() {
+  local d=$1 flags=$2 incs=$3 units=$4 u n b U nf="" f inc
+  for f in $flags; do
+    case $f in -nolabels) nf="$nf --nolabels" ;; -unsafe) nf="$nf --unsafe" ;; -no-strict-formats) ;;
+      *) echo "typer: flag $f not modelled" > "$d/error"; return ;; esac
+  done
+  inc=$d; [ -n "$incs" ] && inc="$d:$TESTLIB"
+  for u in $units; do
+    n=$(basename "${u#=}"); b=${n%.*}; U=$(echo "${b:0:1}" | tr a-z A-Z)${b:1}
+    case $n in *.mli) continue ;; esac
+    local extra=""
+    if [ -f "$d/$b.mli" ]; then extra=--intf; else extra="--sig-out $d/$b.mli"; fi
+    if ! (cd "$d" && typer_ns lambda --simplify --stdlib "$(native_dir)" --include "$inc" $nf $extra --file "$n" "$n" > "$U.ae" 2> "$n.typer.err"); then
+      echo "typer $n: $(grep -a -v '^\s*at \|^Full report at:\|^/.*\.edn$\|^$' "$d/$n.typer.err" | sed 's/^Execution error ([A-Za-z.]*) at [^ ]* ([^)]*)\. \{0,1\}//' | tr '\n\t' '  ' | sed 's/^ *//; s/  */ /g' | head -c 300)" > "$d/error"; return
+    fi
     echo "$d/$U.ae" >> "$d/units.list"
   done
 }
@@ -153,31 +176,53 @@ suite_header() { # LEVEL: replace the first comment block of a results file
   sed -i '1,/^\[$/{/^\[$/!d}' "$f"; printf '%s\n' "$text" | cat - "$f" > "$f.new"; mv "$f.new" "$f"
 }
 
+# suite_results ORACLE-RESULTS BASE: the results file a suite check judges against: the oracle path's (--ocdump), or on the native path
+# test/ocaml/BASE-native.edn once a --record wrote it (as TY19 (b)'s check-oi-native.edn: the two records side by side), until then the
+# oracle path's (a native row that differs a CHANGED line); --record on the native path starts the native record from the oracle's rows
+suite_results() {
+  local o=$1 n=$root/test/ocaml/$2-native.edn
+  if [ "${NATIVE:-0}" != 1 ]; then echo "$o"; return; fi
+  if [ ! -f "$n" ] && [ "$RECORD" = 1 ]; then cp "$o" "$n"; fi
+  if [ -f "$n" ]; then
+    grep -q "^judge $2-native\.edn " "$root/test/ocaml/controls.txt" || sed -n "s/^judge $2\.edn /judge $2-native.edn /p" "$root/test/ocaml/controls.txt" >> "$root/test/ocaml/controls.txt"
+    echo "$n"
+  else echo "$o"; fi
+}
+
+# the native path's environment for the suite's dumps (TY24 (a)): the typer's process limits, its functions exported; the oracle's
+# path (--ocdump) needs the tree (ocdump, lib/testing by ocamlc)
+suite_native_env() {
+  if [ "${NATIVE:-0}" != 1 ]; then need_tree; return; fi
+  export OI_TYPER_THREADS=${OI_TYPER_THREADS:-1} OI_TYPER_GOMEMLIMIT=${OI_TYPER_GOMEMLIMIT:-1200MiB}
+  export -f typer_ns arbace_exe die native_dir; export NATIVE OI_STDLIB TOP
+}
+
 cmd_suite_check() {
   opts "$@"
   if [ "$AOT" = 1 ]; then cmd_suite_check_aot; return; fi
-  cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_build; cmd_suite_corpus > "$S/corpus.log"
-  export -f limited_cpu oi_wall oi_status oi_cpu_secs suite_oi_one suite_dump suite_stage suite_names; export S OI_DIR TESTS TESTLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
+  cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_build; cmd_suite_corpus > "$S/corpus.log"; suite_native_env
+  export -f limited_cpu oi_wall oi_status oi_cpu_secs suite_oi_one suite_dump suite_dump_native suite_stage suite_names; export S OI_DIR TESTS TESTLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
   local out=$S/check.tsv
   suite_selected | awk -F'\t' '$2 == "run" { printf "%s%c%s%c%s%c%s%c%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0, $5, 0, $6, 0, $7, 0, $8, 0 }' | xargs -0 -n 7 -P "$JOBS" bash -c 'suite_oi_one "$@"' _ > "$out.new"
   LC_ALL=C sort "$out.new" > "$out"; rm -f "$out.new"; oi_key "$S/corpus.tsv" > "$out.key"
   local mode=judge; [ "$RECORD" = 1 ] && mode=record
   { [ -n "$ONLY" ] || [ -n "$ONLY_LIST" ]; } && mode=$mode-only
-  "$(arbace_exe)" "$root/test/ocaml/oi_check.ae" "$mode" "$out" "$S/corpus.tsv" "$SUITE_REFS" "$SUITE_OI" "$SUITE_OI_CLASSES" || return $?
+  local res; res=$(suite_results "$SUITE_OI" check-suite-oi)
+  OI_OWN=$(own_verdicts oi "$S/corpus.tsv" suite) "$(arbace_exe)" "$root/test/ocaml/oi_check.ae" "$mode" "$out" "$S/corpus.tsv" "$SUITE_REFS" "$res" "$SUITE_OI_CLASSES" || return $?
   if [ "$RECORD" = 1 ]; then
-    suite_header "$SUITE_OI" ';; oi'"'"'s results over the suite corpus (bin/oi suite check --record; doc/ocaml/OCAML-SURVEY.md, "As built: O7 (write-ahead)"):
+    suite_header "$res" ';; oi'"'"'s results over the suite corpus (bin/oi suite check --record; doc/ocaml/OCAML-SURVEY.md, "As built: O7 (write-ahead)"):
 ;; [PROGRAM RESULT REASON] as test/ocaml/check-oi.edn; the programs: the testsuite'"'"'s run tests O5'"'"'s corpus does not hold and the
 ;; opam set'"'"'s. Judged against ocamlc'"'"'s runs in test/ocaml/ref-suite.edn, classes test/ocaml/divergences-suite.edn.'
   fi
 }
 
 cmd_suite_check_aot() {
-  cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_build; cmd_suite_corpus > "$S/corpus.log"; cmd_aot_lib > "$O2J/aot-lib.log"
+  cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_build; cmd_suite_corpus > "$S/corpus.log"; cmd_aot_lib > "$O2J/aot-lib.log"; suite_native_env
   local jobs=${O2J_JOBS:-2}
   [ -n "${OPT_JOBS:-}" ] && jobs=$OPT_JOBS
   mkdir -p "$O2J/tmp"
   # oi's rows for the same programs, from this oi build (review 008's finding 1)
-  export -f limited_cpu oi_wall oi_status oi_cpu_secs suite_oi_one suite_dump suite_stage suite_names; export S OI_DIR TESTS TESTLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
+  export -f limited_cpu oi_wall oi_status oi_cpu_secs suite_oi_one suite_dump suite_dump_native suite_stage suite_names; export S OI_DIR TESTS TESTLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
   suite_selected > "$S/selected.tsv"
   oi_rows_for "$S/check.tsv" "$S/oi.tsv" "$S/selected.tsv" suite_oi_one 6 "$S/corpus.tsv"
   local A=$S/aot; rm -rf "$A"; mkdir -p "$A"
@@ -218,9 +263,10 @@ cmd_suite_check_aot() {
   LC_ALL=C sort "$out.new" > "$out"; rm -f "$out.new"; aot_key "$S/corpus.tsv" > "$out.key"
   local mode=judge; [ "$RECORD" = 1 ] && mode=record
   { [ -n "$ONLY" ] || [ -n "$ONLY_LIST" ]; } && mode=$mode-only
-  "$(arbace_exe)" "$root/test/ocaml/o2j_check.ae" "$mode" "$out" "$S/corpus.tsv" "$SUITE_REFS" "$S/oi.tsv" "$SUITE_AOT" "$SUITE_AOT_CLASSES" || return $?
+  local res; res=$(suite_results "$SUITE_AOT" check-suite-aot)
+  OI_OWN=$(own_verdicts aot "$S/corpus.tsv" suite) "$(arbace_exe)" "$root/test/ocaml/o2j_check.ae" "$mode" "$out" "$S/corpus.tsv" "$SUITE_REFS" "$S/oi.tsv" "$res" "$SUITE_AOT_CLASSES" || return $?
   if [ "$RECORD" = 1 ]; then
-    suite_header "$SUITE_AOT" ';; The AOT level'"'"'s results over the suite corpus (bin/oi suite check --aot --record; doc/ocaml/OCAML-SURVEY.md, "As built: O7
+    suite_header "$res" ';; The AOT level'"'"'s results over the suite corpus (bin/oi suite check --aot --record; doc/ocaml/OCAML-SURVEY.md, "As built: O7
 ;; (write-ahead)"): [PROGRAM RESULT REASON OI] as test/ocaml/check-aot.edn, at the light level (OC87); judged against ocamlopt'"'"'s runs in
 ;; test/ocaml/ref-suite.edn and oi'"'"'s in test/ocaml/check-suite-oi.edn, classes test/ocaml/divergences-suite-aot.edn.'
   fi

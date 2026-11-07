@@ -714,3 +714,11 @@ tests (T12: their errors).
 TY24 (a) prepared: `bin/oi check --ocdump` names the oracle's path, and `OI_CHECK_DEFAULT=native|ocdump` the path `bin/oi check`
 takes with neither flag; its default stays `ocdump` until the night's whole-corpus native record (`bin/oi check --native --record`),
 then becomes `native` (one line of bin/oi, with its header and the Makefile's `oi-check` line).
+
+## 23. As built: TY24 (a), the switch (2026-11-07, branch `ocaml-90`)
+
+`bin/oi check`'s default is the native path (`OI_CHECK_DEFAULT` defaults to `native`, `--ocdump` the oracle's), and so are `check
+--aot`'s (`o2j_dump` types the programs natively) and `suite check`'s (`suite_dump_native`, the typer's `lambda --sig-out` for a unit
+without an `.mli`); `bin/oi run` is `run-native`. The switch was made before the night's whole-corpus record that TY24 (a) names, on
+a branch: the record (`bin/oi check --record`) must be made before the branch reaches `next`. The judgment and its own verdicts:
+doc/ocaml/OCAML-SURVEY.md, "As built: the crop's independence".

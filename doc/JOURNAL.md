@@ -476,3 +476,29 @@ stdlib-check 71 of 71, repl-check --native 24 of 24. TY24 prepared, not switched
 class (the T11 state); a dependent arrow as a plain arrow from the package with the result's paths left free (types escape, the
 program's inclusion check fails as T11 showed); not ported: filter_arrow's Tfunctor-to-arrow conversion for a non-packed argument,
 moregeneral's and subtyping's Tfunctor cases (no corpus program needs them).
+
+## 2026-11-07: OCaml's independence: the native reader and typer as the defaults, the tests' own verdicts (branch ocaml-90)
+
+From `mac/ocaml-t12` (394c7a2f7), for the brief "raise the OCaml crop's independence above 90% without lowering its completeness or
+maturity", under the day's light rules (sample checks, stage 0 of main, no gate). The user decided (relayed by the main session): a
+test's own verdict is a judge no toolchain made (1), the toolchain's records go to the oracle tier, tests without a verdict of their
+own keep 0.5, and a mixed stage scores as the case-weighted mean of its cases (doc/ocaml/OCAML-SURVEY.md, "Decided (the user,
+2026-11-07)"). Done (the survey's "As built: the crop's independence"): `bin/repr-ocaml read` and `roundtrip` read with the native
+reader by default (the round trip's reread forms and text its own verdict; `--reader helper` ocdump; `corpus check --host` the host's
+pins); `bin/oi check`, `check --aot`, `suite check` (and `--aot`) and `run` on the native typer's Lambda by default (TY24 (a)'s switch,
+`--ocdump` the oracle's; the corpus read from the tarball alone; oi's key the native library's; the suite's units typed in link order,
+the typer's `lambda --sig-out` for a unit without an `.mli`); the judges (`test/ocaml/oi_check.ae`, `o2j_check.ae`) take each run
+program's own verdict as ocamltest gives it, ported from ocamltest's rules in the same OCaml 5.5.0 tarball (SHA-256
+fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba): the `(* TEST *)` block's `exit_status` (default 0), the `.reference`
+byte for byte or no output when there is none (ocamltest/filecompare.ml's `check_file`), no bytecode verdict for a native-only block;
+the exceptions in `test/ocaml/own-verdict.edn` (6: backtraces, ocamltest's variable expansion and `\r\n` normalisation); `bin/oi
+own-verdicts --check` measures it from the records: own verdicts for 300 and 304 of the run corpus's 309 (oi, AOT), 65 and 75 of the
+suite's 98, each equal to the recorded run on every one of them. Stub runs (ocamlc, ocamlopt, ocamlfind, ocaml, ocamlrun, ocamldep
+exiting 99 first on PATH): the round trip over samples (8 of 8) and the stdlib (148 of 150, the 2 templates classed; text 148 of 148),
+`menhir --check`, `bin/oi check` of 8 programs (8 pass, the stdlib rebuilt natively), `check --aot` of 5 (5 pass), `suite check` of 6;
+the log empty each time. crops-score (a scratch worktree of `mac/crops-score`, the facts in the report's `.tmp/independence.diff`):
+OCaml's independence 20% to 99.8% (the judge 0.988, the case-weighted mean); on a scratch merge into `mac/batch1` completeness 80.9%
+and maturity 100% unchanged, the independence 99.8% only with batch1's OCaml steps moved off `:ocaml` (OC180). Alternatives weighed:
+the own verdict chosen by the record's `:reference` flag (rejected: it reads ocamlc's record to decide; the rules are ocamltest's own,
+the record only measures them); new reason texts for the own-verdict judge (rejected: the recorded reasons would all change; the
+numbers are the test's, equal to the record's); the expect tests on oi now (left: T12, OC182). Proposals OC180-OC183 (the survey).

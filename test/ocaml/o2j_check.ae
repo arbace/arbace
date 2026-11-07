@@ -19,17 +19,35 @@
 
 (defn refs [path] (into {} (for [r (read-string (slurp path))] [(:test r) r])))
 
+;; The tests' own verdicts (the user's decision of 2026-11-07, doc/ocaml/OCAML-SURVEY.md "Decided (the user, 2026-11-07)"):
+;; OI_OWN names a TSV bin/oi writes at check time from the tarball alone, "ID STATUS SHA256 BYTES": the exit status the test's
+;; header expects (ocamltest's exit_status, default 0) and its .reference's digest and size. A program it lists is judged by
+;; them, no toolchain's run consulted; the others (no own verdict: test/ocaml/own-verdict.edn's exceptions) by the recorded run.
+;; The reasons keep the recorded wording (the numbers are the test's, equal to the record's where both exist).
+(def ^:dynamic *own*
+  (if-let [p (System/getenv "OI_OWN")]
+    (into {} (for [[id st sha bytes] (tsv p)] [id {:status st :sha256 sha :bytes (parse-long bytes)}]))
+    {}))
+
+(defn own-share
+  "The judged rows' split: by the test's own verdict, by the recorded run"
+  [tool rows]
+  (let [run-ids (for [[id res] rows :when (not (#{"class"} res))] id)
+        o (count (filter #(contains? *own* %) run-ids))]
+    (println (str "o2j: judge: " o " of " (count run-ids) " programs by their own verdict (the .reference, the header's exit status), "
+                  (- (count run-ids) o) " by " tool "'s recorded run"))))
+
 (defn result-of [id c refs runs]
   (if (= (:kind c) :class)
     ["class" (:reason c)]
     (let [r (get refs id) run (get runs id)]
       (cond
-        (nil? r) ["no-ref" "not in the references"]
+        (and (nil? r) (not (contains? *own* id))) ["no-ref" "not in the references"]
         (nil? run) ["not-run" "no run"]
-        (= (get-in r [:ocamlopt :status]) "compile-error") ["ref" "ocamlopt does not compile it"]
+        (and (not (contains? *own* id)) (= (get-in r [:ocamlopt :status]) "compile-error")) ["ref" "ocamlopt does not compile it"]
         :else
         (let [[_ st sha bytes secs note] run
-              want (:ocamlopt r)]
+              want (or (get *own* id) (:ocamlopt r))]
           (cond
             (str/starts-with? (or note "") "dump: ") ["dump" (subs note 6)]
             (str/starts-with? (or note "") "refused: ") ["refused" (subs note 9)]
@@ -128,8 +146,9 @@
         vs (for [[id subject reference] cs]
              (let [v (cond
                        (not (contains? runs subject)) :left
-                       (nil? (get rf reference)) :not-judged
-                       :else (case (first (result-of subject (corp subject) (assoc rf subject (get rf reference)) runs))
+                       (and (nil? (get rf reference)) (not (contains? *own* reference))) :not-judged
+                       :else (case (first (binding [*own* (if (contains? *own* reference) (assoc *own* subject (get *own* reference)) (dissoc *own* subject))]
+                                            (result-of subject (corp subject) (assoc rf subject (get rf reference)) runs)))
                                "pass" :passes
                                "fail" :differs
                                :left))]
@@ -167,6 +186,7 @@
         gone (if only? [] (let [have (set (map first rows))] (vec (remove have (map first old)))))
         cls (if (.exists (java.io.File. ^String classes-edn)) (classes classes-edn) [])
         ok (summary rows cls)
+        _ (own-share "ocamlopt" rows)
         _ (when-not (controls-ok results-edn corp rf runs) (System/exit 1))]
     (if (str/starts-with? mode "record")
       (do (doseq [id gone] (println (str "DROPPED " id ": no row in this run, was " (pr-str (vec (rest (first (filter #(= (first %) id) old))))))))
