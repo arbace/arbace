@@ -27,7 +27,9 @@
   that fails, a new item, an item in another class, a recorded item or result the run lacks, another count, is a line \"regress ...\",
   and the run fails (exit 1) unless it records: the record is the reviewed state.
     divergences              the recorded items by class"
-  (:require [arbace.string :as str] [arbace.scheme.regress :as rg]))
+  (:require [arbace.string :as str] [arbace.scheme.regress :as rg] [arbace.scheme.controls :as ctl]))
+
+(declare r7rs-found srfi-found chibi-found ecraven-found record-of)
 
 (defn- root [] (or (System/getenv "ARBACE_ROOT") "."))
 (defn- path [& xs] (apply str (root) "/" xs))
@@ -197,9 +199,12 @@
     (max (if (and (every? :class items) (empty? (reference-check :chibi rc out tests))) 0 1)
          (regress-code rec [result] (boolean (and (some #{"--record"} opts) (empty? (reference-check :chibi rc out tests))))))))
 
-(defn- cmd-r7rs [[dir & opts]]
-  (let [out (or (slurp-or (str dir "/out")) "") rc (str/trim (or (slurp-or (str dir "/rc")) "?"))
-        {:keys [tests sections]} (parse-r7rs out)
+(defn- r7rs-result
+  "The judgment of a run of the suite (its stdout OUT, status RC, first line of stderr ERR): the result of the record, its items
+  the own verdicts of the tests, the crash, the count and the disagreements with both references. Pure but for the references
+  and the classes it reads; cmd-r7rs prints and records, and the negative controls (test/scheme/controls.edn) feed it other runs."
+  [out rc err]
+  (let [{:keys [tests sections]} (parse-r7rs out)
         cs (classes)
         ref (chez-r7rs-ref)
         ;; re-review 025, finding A: Chez's tests are paired as Chibi's, by the alignment of the sources, not by number: the numbers
@@ -224,7 +229,7 @@
                      (for [t tests :when (= :fail (:status t))
                            :let [item (str "fails r7rs/chibi " (:what t) " => " (str/join " " (:detail t)))]]
                        {:item item :class (class-of cs item)})
-                     (when-not (= rc "0") [(let [i (str "crash r7rs/chibi status " rc ": " (first-line (slurp-or (str dir "/err"))))]
+                     (when-not (= rc "0") [(let [i (str "crash r7rs/chibi status " rc ": " (first-line err))]
                                              {:item i :class (class-of cs i)})])
                      ;; finding 5: the expected number of tests, and a test whose status differs from both references' (each
                      ;; paired) is an item that needs a class (si passing where Chez and Chibi fail is a sign of a lax judge)
@@ -253,17 +258,23 @@
                 :per-test (mapv (fn [t] (let [c (get chez (:n t)) ch (get chibi (:n t))]
                                           (cond-> [(:n t) (:status t) (clip (:what t) 70)] (or c ch) (conj c) ch (conj ch))))
                                 tests)}]
+    result))
+
+(defn- cmd-r7rs [[dir & opts]]
+  (let [out (or (slurp-or (str dir "/out")) "") rc (str/trim (or (slurp-or (str dir "/rc")) "?"))
+        result (r7rs-result out rc (or (slurp-or (str dir "/err")) ""))
+        total (:tests result) pass (:pass result)]
     (println "r7rs: status" rc "-" total "tests," pass "pass," (- total pass) "fail")
-    (when ref
-      (println "against Chez (the same tests):" vs-chez))
-    (when cref
-      (println "against Chibi 0.12.0 (paired by source):" vs-chibi))
+    (when (:vs-chez result)
+      (println "against Chez (the same tests):" (:vs-chez result)))
+    (when (:vs-chibi result)
+      (println "against Chibi 0.12.0 (paired by source):" (:vs-chibi result)))
     (let [rec (recorded-results "test/scheme/check-r7rs-linux-amd64.edn") recording? (boolean (some #{"--record"} opts))]
       (when recording?
         (write-results "test/scheme/check-r7rs-linux-amd64.edn"
                        ";; Chibi's r7rs-tests.scm on si (bin/si r7rs --record): the result of each test (number, status, the expression, Chez's status\n;; from test/scheme/ref-r7rs-chez.edn), the sections' counts and the failing tests' items with their classes\n;; (test/scheme/divergences-corpora.edn); generated."
                        [result]))
-      (max (summary [result]) (regress-code rec [result] recording?)))))
+      (max (summary [result]) (regress-code rec [result] recording?) (ctl/run :r7rs r7rs-found)))))
 
 ;; SC130 (a): the suite on Chibi's own (chibi test) (vendored in scheme/vendor/chibi), which prints a mark a test (a dot for a pass,
 ;; another character for a failure, ERROR and SKIP); the marks in order are compared with SM8's library's per-test results.
@@ -477,7 +488,7 @@
         (write-results "test/scheme/check-ecraven-linux-amd64.edn"
                        ";; ecraven's r7rs-benchmarks on si (bin/si ecraven --record, repetition count 1): each benchmark's verdict (its own\n;; check of its result) and non-pass items with their classes (test/scheme/divergences-corpora.edn); generated."
                        results))
-      (max (summary results) (regress-code rec results recording?))))))
+      (max (summary results) (regress-code rec results recording?) (ctl/run :ecraven ecraven-found)))))) 
 
 ;; ------------------------------------------------------------------------------------------ Chez's mats
 
@@ -682,32 +693,43 @@
                   marks)))
             [] (str/split-lines plain))))
 
+(defn- chibi-test-result
+  "One library N (file F)'s judgment from the outputs and statuses of its run on si and on Chibi: the own marks of si's tests are
+  the verdicts, Chibi's marks the comparison. Pure; the negative controls feed it other runs."
+  [n f si-out si-rc ch-out ch-rc cs]
+  (let [sm (test-marks si-out) cm (test-marks ch-out)
+        same (= (count sm) (count cm))
+        pass? (fn [m] (= \. (:mark m)))
+        items (vec (concat
+                     (for [[i m] (map-indexed vector sm) :when (not (pass? m))
+                           :let [item (str "fails chibi-tests/" n " test " (inc i) ": " (or (:detail m) (str "mark " (:mark m))))]]
+                       {:item item :class (class-of cs item)})
+                     (when-not (= si-rc "0") [(let [i (str "crash chibi-tests/" n " status " si-rc)] {:item i :class (class-of cs i)})])
+                     (when-not same [(let [i (str "marks chibi-tests/" n " " (count sm) " marks on si, " (count cm) " on Chibi")] {:item i :class (class-of cs i)})])))
+        vs (frequencies (for [[a b] (map vector sm cm)] [(pass? a) (pass? b)]))]
+    {:id (str "chibi-tests/" n) :corpus :chibi-tests :library f :verdict (if (empty? items) :pass :non-pass)
+     :si {:rc si-rc :tests (count sm) :pass (count (filter pass? sm)) :fail (count (remove pass? sm))}
+     :chibi {:rc ch-rc :tests (count cm) :pass (count (filter pass? cm)) :fail (count (remove pass? cm))}
+     :vs-chibi (when same {:both-pass (get vs [true true] 0) :si-only-pass (get vs [true false] 0)
+                           :chibi-only-pass (get vs [false true] 0) :both-fail (get vs [false false] 0)})
+     :items items
+     :per-test (when same (mapv (fn [a b] [(str (:mark a)) (str (:mark b))]) sm cm))}))
+
 (defn- cmd-chibi-tests
-  "chibi-tests DIR [--record]: DIR/NAME.si.out and NAME.chibi.out (and .rc) of each library; one result a library, the marks of si
-  against Chibi's, test by test; --record: test/scheme/check-chibi-tests-linux-amd64.edn."
+  "chibi-tests DIR [--record]: DIR/NAME.si.out (and .rc) of each library, and NAME.chibi.out and .rc when Chibi was run afresh (bin/si
+  chibi-tests --chibi); without them Chibi's marks are the record's (SCS1: no chibi-scheme at check time, the tests' own verdict is the
+  judge). One result a library, the marks of si against Chibi's, test by test; --record: test/scheme/check-chibi-tests-linux-amd64.edn."
   [[dir & opts]]
   (let [cs (classes)
+        recorded (record-of "test/scheme/check-chibi-tests-linux-amd64.edn")
+        chibi-side (fn [n] (if (.exists (java.io.File. (str dir "/" n ".chibi.rc")))
+                             [(or (slurp-or (str dir "/" n ".chibi.out")) "") (str/trim (or (slurp-or (str dir "/" n ".chibi.rc")) "?"))]
+                             (let [r (recorded (str "chibi-tests/" n))]
+                               [(str (str/join "\n" (map second (:per-test r))) "\n") (or (get-in r [:chibi :rc]) "?")])))
         results
-        (vec (for [[n f] chibi-test-libs
-                   :let [si-out (or (slurp-or (str dir "/" n ".si.out")) "") si-rc (str/trim (or (slurp-or (str dir "/" n ".si.rc")) "?"))
-                         ch-out (or (slurp-or (str dir "/" n ".chibi.out")) "") ch-rc (str/trim (or (slurp-or (str dir "/" n ".chibi.rc")) "?"))
-                         sm (test-marks si-out) cm (test-marks ch-out)
-                         same (= (count sm) (count cm))
-                         pass? (fn [m] (= \. (:mark m)))
-                         items (vec (concat
-                                      (for [[i m] (map-indexed vector sm) :when (not (pass? m))
-                                            :let [item (str "fails chibi-tests/" n " test " (inc i) ": " (or (:detail m) (str "mark " (:mark m))))]]
-                                        {:item item :class (class-of cs item)})
-                                      (when-not (= si-rc "0") [(let [i (str "crash chibi-tests/" n " status " si-rc)] {:item i :class (class-of cs i)})])
-                                      (when-not same [(let [i (str "marks chibi-tests/" n " " (count sm) " marks on si, " (count cm) " on Chibi")] {:item i :class (class-of cs i)})])))
-                         vs (frequencies (for [[a b] (map vector sm cm)] [(pass? a) (pass? b)]))]]
-               {:id (str "chibi-tests/" n) :corpus :chibi-tests :library f :verdict (if (empty? items) :pass :non-pass)
-                :si {:rc si-rc :tests (count sm) :pass (count (filter pass? sm)) :fail (count (remove pass? sm))}
-                :chibi {:rc ch-rc :tests (count cm) :pass (count (filter pass? cm)) :fail (count (remove pass? cm))}
-                :vs-chibi (when same {:both-pass (get vs [true true] 0) :si-only-pass (get vs [true false] 0)
-                                      :chibi-only-pass (get vs [false true] 0) :both-fail (get vs [false false] 0)})
-                :items items
-                :per-test (when same (mapv (fn [a b] [(str (:mark a)) (str (:mark b))]) sm cm))}))]
+        (vec (for [[n f] chibi-test-libs :let [[ch-out ch-rc] (chibi-side n)]]
+               (chibi-test-result n f (or (slurp-or (str dir "/" n ".si.out")) "") (str/trim (or (slurp-or (str dir "/" n ".si.rc")) "?"))
+                                  ch-out ch-rc cs)))]
     (doseq [r results]
       (println (:id r) "- si" (:si r) "- Chibi" (:chibi r) (or (:vs-chibi r) "marks differ in number")))
     (let [rec (recorded-results "test/scheme/check-chibi-tests-linux-amd64.edn") recording? (boolean (some #{"--record"} opts))]
@@ -715,17 +737,14 @@
         (write-results "test/scheme/check-chibi-tests-linux-amd64.edn"
                        ";; Chibi-Scheme 0.12.0's own tests of the libraries vendored in scheme/vendor/chibi (diff-test, optional-test, term/ansi-test) on si\n;; (test by test, test/scheme/chibi/split-run.sps) and on Chibi (bin/si chibi-tests --record, SC142 (b)): the marks of both, per library; generated."
                        results))
-      (max (summary results) (regress-code rec results recording?)))))
+      (max (summary results) (regress-code rec results recording?) (ctl/run :chibi-tests chibi-found)))))
 
 ;; ------------------------------------------------------------------------------------------ the SRFIs' programs (SC173 (b))
 
-(defn- srfi-result
-  "One SRFI program's run: DIR/NAME.{out,rc}. The program passes when its status is 0, it prints no FAIL line and its last line is
-  its report \"srfi-N: P passed, F failed\" with F zero (a program that prints nothing, or stops early, does not pass); its
-  counts are the result's."
-  [dir n]
-  (let [out (or (slurp-or (str dir "/" n ".out")) "") rc (str/trim (or (slurp-or (str dir "/" n ".rc")) "?"))
-        ls (str/split-lines out)
+(defn- srfi-judge
+  "A SRFI program N's judgment from its stdout OUT and status RC (see srfi-result)."
+  [n out rc]
+  (let [ls (str/split-lines out)
         [_ p f] (re-find #"^srfi-\S+: (\d+) passed, (\d+) failed$" (or (last ls) ""))
         fails (filter #(str/starts-with? % "FAIL") ls)
         items (vec (concat (when-not (= rc "0") [(str "crash srfi/" n " status " rc)])
@@ -735,6 +754,13 @@
     (cond-> {:id (str "srfi/" n) :corpus :srfi :verdict (if (empty? items) :pass :non-pass)
              :items (mapv (fn [i] {:item i :class nil}) items)}
       p (assoc :tests (+ (parse-long p) (parse-long f)) :pass (parse-long p) :fail (parse-long f)))))
+
+(defn- srfi-result
+  "One SRFI program's run: DIR/NAME.{out,rc}. The program passes when its status is 0, it prints no FAIL line and its last line is
+  its report \"srfi-N: P passed, F failed\" with F zero (a program that prints nothing, or stops early, does not pass); its
+  counts are the result's."
+  [dir n]
+  (srfi-judge n (or (slurp-or (str dir "/" n ".out")) "") (str/trim (or (slurp-or (str dir "/" n ".rc")) "?"))))
 
 (defn- cmd-srfi
   "srfi DIR [--record]: DIR/NAME.{out,err,rc} of each test/scheme/srfi/NAME.sps run on si (bin/si srfi); one result a program,
@@ -755,7 +781,7 @@
     (let [c (let [items (mapcat :items results)]
               (doseq [i (take 40 items)] (println "  FAILING" (:item i)))
               (if (seq items) 1 0))]
-      (max c (regress-code rec results recording?))))))
+      (max c (regress-code rec results recording?) (ctl/run :srfi srfi-found)))))) 
 
 (defn- cmd-regress-test
   "Re-review 033's checks of the regression step (N5, N8) on small data: 0, or 1 with the failing cases printed."
@@ -785,6 +811,82 @@
     (doseq [[n ok] cases] (println (if ok "ok  " "FAIL") n))
     (if (seq bad) 1 0)))
 
+;; ------------------------------------------------------------------------------------------ the negative controls (GTS81 (a))
+
+;; test/scheme/controls.edn, arbace.scheme.controls: a control's subject run is made from the record of its subject case (the
+;; run the record was made from, as far as the judge reads it: the tests' lines, the report line, the marks, the CSVLINE),
+;; edited or judged under the reference case's name, and the family's own judge, the function the check runs, is asked about it;
+;; the reasons it finds are the regress lines against the judge's result for the reference case's own, unedited, run (and
+;; the own verdict's item). Nothing is run, no host toolchain is needed.
+
+(defn- record-of [file] (into {} (map (juxt :id identity) (recorded-results file))))
+
+(defn- found-lines
+  "The reasons a judge finds in RESULT against BASELINE (the result for the reference's own run): the regress lines."
+  [baseline result] (rg/regressions [baseline] [result] (classes)))
+
+(defn- r7rs-run [per-test]
+  (str (str/join "\n" (for [e per-test :let [[n st what] e]] (str "TEST " n " " (if (= st :pass) "PASS" "FAIL") " " what))) "\n"))
+
+(defn- r7rs-found [{:keys [edit]}]
+  (let [rec (first (recorded-results "test/scheme/check-r7rs-linux-amd64.edn"))
+        per (:per-test rec)
+        pick (fn [pred] (some #(when (pred %) (first %)) per))
+        target (case (:pick edit)
+                 :first-pass (pick #(= :pass (second %)))
+                 ;; a test Chez and Chibi both pass: si failing it is an item against both references
+                 :both-pass (pick #(and (= :pass (second %)) (= :pass (nth % 3 nil)) (= :pass (nth % 4 nil))))
+                 nil)
+        per' (cond->> per
+               (:pick edit) (map (fn [e] (if (= target (first e)) (assoc (vec e) 1 (:to edit)) e)))
+               (:cut edit) (take (:cut edit)))
+        _ (when (and (:pick edit) (nil? target)) (throw (ex-info (str "no test to pick: " (:pick edit)) {})))
+        base (r7rs-result (r7rs-run per) "0" "")
+        run (r7rs-result (r7rs-run per') (or (:rc edit) "0") (or (:err edit) ""))]
+    (found-lines base run)))
+
+(defn- srfi-run [r edit]
+  (str (when (:fail-line edit) "FAIL (equal? 1 2)\n")
+       (when-not (:truncate edit) (str "srfi-x: " (- (:tests r) (:fail r) (if (:fail-line edit) 1 0)) " passed, " (+ (:fail r) (if (:fail-line edit) 1 0)) " failed\n"))))
+
+(defn- srfi-found [{:keys [subject reference edit]}]
+  (let [rec (record-of "test/scheme/check-srfi-linux-amd64.edn")
+        s (rec (str "srfi/" subject)) r (rec (str "srfi/" reference))]
+    (when-not (and s r) (throw (ex-info (str "no record of " subject " or " reference) {})))
+    (found-lines (srfi-judge reference (srfi-run r nil) "0")
+                 (srfi-judge reference (srfi-run s edit) (or (:rc edit) "0")))))
+
+(defn- chibi-run [per i] (str (str/join "\n" (map #(nth % i) per)) "\n"))
+
+(defn- chibi-found [{:keys [subject reference edit]}]
+  (let [rec (record-of "test/scheme/check-chibi-tests-linux-amd64.edn")
+        s (rec (str "chibi-tests/" subject)) r (rec (str "chibi-tests/" reference))
+        lib (fn [n] (second (first (filter #(= n (first %)) chibi-test-libs))))]
+    (when-not (and (:per-test s) (:per-test r)) (throw (ex-info (str "no marks recorded for " subject " or " reference) {})))
+    (let [si (cond-> (vec (map first (:per-test s)))
+               (:set-si edit) (assoc (first (:set-si edit)) (second (:set-si edit)))
+               (:drop-si edit) (subvec 0 (:drop-si edit)))
+          ch (vec (map second (:per-test s)))
+          cs (classes)]
+      (found-lines (chibi-test-result reference (lib reference) (chibi-run (:per-test r) 0) "0" (chibi-run (:per-test r) 1) "0" cs)
+                   (chibi-test-result reference (lib reference) (str (str/join "\n" si) "\n") (or (:rc edit) "0") (str (str/join "\n" ch) "\n") "0" cs)))))
+
+(defn- ecraven-found [{:keys [subject edit]}]
+  (let [rec (record-of "test/scheme/check-ecraven-linux-amd64.edn")]
+    (when-not (rec (str "ecraven/" subject)) (throw (ex-info (str "no record of benchmark " subject) {})))
+    (let [out (or (:out edit) (when-not (:no-csv edit) (str "CSVLINE!+si," subject ",1.5\n")) "")
+          it (bench-item subject out (or (:err edit) "") (or (:rc edit) "0"))]
+      (if it [it] []))))
+
+(defn found-fn [family]
+  (case family :r7rs r7rs-found :srfi srfi-found :chibi-tests chibi-found :ecraven ecraven-found))
+
+(defn- cmd-controls
+  "controls [FAMILY...]: the controls of the families (default every family of corpora's checks), judged; 0 or 1."
+  [fams]
+  (apply max 0 (for [f (if (seq fams) (map keyword fams) [:r7rs :srfi :chibi-tests :ecraven])] (ctl/run f (found-fn f)))))
+
+
 (defn -main [& [cmd & args]]
   (let [rc (case cmd
              "r7rs" (cmd-r7rs args)
@@ -801,6 +903,8 @@
              "files" (cmd-files)
              "divergences" (cmd-divergences)
              "regress-test" (cmd-regress-test)
+             "controls" (cmd-controls args)
+             "controls-test" (ctl/selftest)
              (do (println "usage: arbace.scheme.corpora r7rs DIR | ecraven DIR | ecraven-chez DIR | mats DIR [--record] | srfi DIR [--record] | files | divergences") 2))]
     (shutdown-agents)
     (System/exit rc)))
