@@ -2139,3 +2139,135 @@ On the branch `ocaml-typer2`: Simplif (T7) and the module system with the stdlib
 doc/ocaml/TYPER.md §9: 52 of 52 samples equal at every level (types, raw and simplified Lambda, oi's runs), the
 oracle's dumps committed (TY2), the stdlib 64 of 71 units equal natively (`bin/oi stdlib-check`; GADTs, formats and
 type extensions pulled forward from T9-T10 for it), the probe 31 of 36; proposals TY7-TY10 (TYPER.md §10).
+
+## Decided (the user, 2026-11-07)
+
+Relayed by the main session with the brief of the branch `ocaml-90` (the crop's independence, as `bin/crops-score` measures it,
+above 90%):
+
+- **The judge.** A test's own verdict counts as a judge no toolchain made (score 1): judge by the test's own verdict wherever it
+  has one (the testsuite programs' assert and exit status, the expect tests' expected output written in the test file itself, the
+  round trip's reread forms equal). The toolchain's recorded outputs go to the oracle tier, re-recorded by hand at a tag; the tests
+  without a verdict of their own keep 0.5.
+- **The expect tool.** Run testsuite/tools/expect.ml on oi natively rather than on ocamlc, or judge the `[%%expect]` blocks directly.
+  `roundtrip --cmi`: the native interfaces against recorded ones, or the oracle tier.
+- **A mixed stage** (2026-11-07, about 07:45): `bin/crops-score` scores a stage whose cases are partly judged by their own verdict
+  (1) and partly by a recorded toolchain reference (0.5) as the case-weighted mean over its cases.
+- OC170 (`read`'s default reader) by that brief: the native reader is the default, the helper the oracle's (the read check's
+  reference the round trip's own verdict; its comparison with ocdump, `native-check`, in the oracle tier).
+
+## As built: the crop's independence (2026-11-07, branch `ocaml-90`, from `ocaml-t12`)
+
+Under the day's light rules (no gate, no build, sample checks only; every process under 1.5 GB). The stub runs below had
+`ocamlc ocamlopt ocamlfind ocaml ocamlrun ocamldep` first on `PATH` as scripts logging their call and exiting 99
+(doc/CROPS-SCORE.md, "The stub runs"); after each run the log was empty.
+
+**Read: the native reader as the read stage's source of forms.** `bin/repr-ocaml read` and `roundtrip` read with
+`arbace.repr.ocaml.native` by default (`REPR_OCAML_READER=helper` or `--reader helper`: ocdump). The round trip reads the
+originals and the printed files with the same reader (one process a list: `native read --root --list`), and `--text` takes the
+layouts of mode `:full` from the native lexer (`--mode tokens`); its verdict is its own: the reread forms equal, the printed text
+byte for byte. ocdump is built only for `--reader helper`; the `.cmi` levels (`--cmi`, `--cmi-lines`, ocamlc's interfaces of the
+original and of the print) stay as they are, the oracle tier's. `corpus check` no longer runs the host's `ocamlopt`: its pins
+(ocamlopt's version, compiler-libs' digest) are `corpus check --host`'s.
+
+| stub run | result |
+|---|---|
+| `bin/repr-ocaml corpus check`, `read` of the 7 samples' `.ml` | counts and pins hold; 7 dumps, 0 failures |
+| `bin/repr-ocaml roundtrip --text samples` | 8 of 8 equal, text 8 of 8 byte for byte, 9 s |
+| `bin/repr-ocaml roundtrip --text stdlib` | 148 of 150 equal, the 2 templates rejected by the native reader as by ocdump (classed `:template`); text 148 of 148 byte for byte; 2 min 14 s |
+| `bin/repr-ocaml menhir --check` | 2,327 of 2,327 states, 0 differences |
+
+**Eval and AOT: the native typer's Lambda as the default (TY24 (a)'s switch).** `bin/oi check` takes the native path
+(`OI_CHECK_DEFAULT` defaults to `native`; `--ocdump` the oracle's); its corpus is read from the tarball alone (`cmd_corpus` no longer
+builds ocdump or compiles lib/testing with ocamlc: the oracle's paths, `--ocdump`, `record-ref`, call `need_tree` themselves); oi's
+key on the native path is the native library's (`native_key`), not ocdump's. `bin/oi check --aot` types its programs natively too
+(`o2j_dump`'s native path, the oi column from `check-native.tsv`, which now has its key), `aot-lib` translating the native library;
+its record is `test/ocaml/check-aot-native.edn` once the night's `--record` writes it (until then the native rows are judged against
+`check-aot.edn`, a differing row a `CHANGED` line); the suite's likewise, `check-suite-oi-native.edn` and `check-suite-aot-native.edn`
+beside the oracle path's (TY19 (b)'s two records side by side). `bin/oi suite check` (and `--aot`) type the suite's unit lists natively
+(`suite_dump_native`: the units in link order, `--include` of the program's directory, a unit with its `.mli` coerced to it, one
+without written its signature by the typer's new `lambda --sig-out FILE.mli`, as the toplevel keeps `top_N.mli`). `bin/oi run` is
+`run-native` by default (`run --ocdump` the oracle's).
+
+| stub run | result |
+|---|---|
+| `bin/oi check --only-list` of 8 (basic/arrays, basic/patmatch, effects/test1, lib-hashtbl/htbl, asmcomp/compare, asmcomp/evaluation_order, parsing/assert_location, tool-ocamltest/norm3) | the stdlib rebuilt natively in the run (71 units); 8 of 8 pass; 6 by their own verdict, 2 by ocamlc's record (asmcomp/compare is native-only, tool-ocamltest/norm3 an exception); the negative control differs; 2 min 17 s; again after the Env fix below, the same |
+| `OI_TYPER_NO_OCDUMP=1 bin/oi typer-check` (after the Env fix) | 79 of 79 at every level, 79 of 79 runs on oi equal to the toplevel's |
+| `bin/oi check --aot --only-list` of 5 | aot-lib over the native library; 5 of 5 pass, 5 the same as oi; 4 by their own verdict; the control differs; 1 min 26 s |
+| `bin/oi suite check --only-list` of 6 multi-unit and opam programs | 3 of 6 pass (basic-multdef/usemultdef, basic-private/tlength, raise-counts/main); 3 typer gaps: typing-multifile/pr7563 (a unit's interface aliasing a sibling module recurred: fixed, Env's components take the sibling's address; then 2 of 2 with basic-multdef), basic-modules/main (a stack overflow substituting an applicative path, `Set.Make(String).t`, of a printed interface), opam/astring/test (a signature mismatch against a printed interface); 7 min 34 s |
+
+**The judge: the tests' own verdicts.** `bin/oi`'s `own_verdicts` writes, at check time and from the tarball alone, each run
+program's verdict as ocamltest gives it: the exit status its `(* TEST ... *)` block expects (`exit_status`, default 0) and its
+`.reference` byte for byte, or no output at all when it has none (ocamltest/filecompare.ml's `check_file`: a missing reference is an
+empty one). `test/ocaml/oi_check.ae` and `o2j_check.ae` judge a program it lists by it (`OI_OWN`), the others by the recorded run; a
+negative control judges its subject by the reference program's own verdict. No own verdict: a native-only test (its block's
+`native;` and no `bytecode`) at oi's level, the opam set's programs, and the six of `test/ocaml/own-verdict.edn` (backtraces whose
+`.reference` is not either compiler's output here, ocamltest's variable expansion and its `\r\n` normalisation). The reasons keep
+the recorded wording, so the records stay valid. `bin/oi own-verdicts [--check]` measures it from the records, no run:
+
+| corpus | level | own verdict | recorded run | own verdict = the recorded run |
+|---|---|---:|---:|---:|
+| run (309) | oi | 300 | 9 (ocamlc's) | 300 of 300 |
+| run (309) | AOT | 304 | 5 (ocamlopt's) | 304 of 304 |
+| suite (98) | oi | 65 | 33 | 65 of 65 |
+| suite (98) | AOT | 75 | 23 | 75 of 75 |
+
+So the two judges decide every run alike on the recorded cases: a program passes by its own verdict exactly when it passes by the
+record. The judge stage is mixed; by the user's rule its score is the case-weighted mean of its checks' cases: the read and print
+round trips 3,162 files each by their own verdict (1); eval 407 programs, 365 own and 42 recorded (0.5); AOT 407, 379 own and 28
+recorded; typer-check's 79 samples and repl-check's 24 phrases against committed toolchain records (0.5): (7,068 + 0.5 × 173) /
+7,241 = 0.988. Out of the check-time judge, the oracle tier's: the host's expect tool (`bin/oi suite expect`, which checks the host's
+toolchain against the expect files, not Arbace), `roundtrip --cmi`, `stdlib-check` (it builds ocamlc's library), `native-check`,
+`typer-check`'s fresh dumps, `spec-check` (ocdump, and the spec's extraction by python3).
+
+**The records.** The check-time pipeline is native, but the records the REAP cells read on `mac/batch1` were made by the oracle's
+path (`check-oi.edn`, `check-aot.edn`, `check-suite-oi.edn`, `check-suite-aot.edn`: ocdump's Lambda). A stage that compares with a
+record a toolchain made scores 0.5 by crops-score's definition, so until the night's native records replace them the eval and AOT
+stages are mixed too: eval, the run corpus's 309 with its native record (`check-oi-native.edn`, 273 passes, as many as ocamlc's path)
+once the cell reads it (OC185) and the suite's 98 at 0.5: (309 + 49) / 407 = 0.880; AOT, both records the oracle path's: 0.5. Today's
+facts (`.tmp/independence.diff`) say so; after the night's records (`check-aot-native.edn`, the suite's two) and OC185 both are 1.
+
+**Scores** (`bin/crops-score --ref ... --crop ocaml`, from a scratch worktree of `mac/crops-score` with the facts of
+`.tmp/independence.diff`):
+
+| tree | completeness | maturity | independence |
+|---|---:|---:|---:|
+| `mac/batch1` (the brief's 75.6 at its writing) | 80.9% | 100% | 20% |
+| `ocaml-90` alone (no REAP row and no OCaml gate steps on this lineage), today's records | 0% | 0% | 87.4% |
+| the same, after the night's native records and OC185 | 0% | 0% | 99.8% |
+| a scratch merge of `ocaml-90` into `mac/batch1` (not pushed) | 80.9% | 100% | 20% (the facts refuted: batch1's OCaml steps on `:ocaml`) |
+| the same with the steps of `.tmp/steps-batch1.diff`, after the night's records | 80.9% | 100% | 99.8% |
+
+**Left**, the night's (the brief's: whole-corpus records, one check process at a time, at most 1.5 GB a process): `bin/oi check
+--record` (the native path's whole corpus, about 22 minutes at three jobs; TY24 (a)'s condition), `bin/oi check --aot --record`
+(writes `check-aot-native.edn`), `bin/oi suite check --record` and `--aot --record` (the suite natively: its classes for the typer's
+gaps the sample found), `bin/repr-ocaml roundtrip --text` over every corpus with `--record-results` where the merged tree has it. The
+compiled shards of the AOT level are big (O2J_GOMEMLIMIT 900 MiB a process, O2J_JOBS 2): keep `O2J_JOBS=1` at night.
+
+## Proposed (OC180-OC183; options with costs, a recommendation each, none decided)
+
+- **OC180 The gate's OCaml steps on the merge.** (a) `.tmp/steps-batch1.diff` (on `ocaml-90`'s report): `oi-essential`,
+  `ocaml-read-essential`, `ocaml-roundtrip`, `oi-check`, `oi-aot`, `oi-suite-aot` off `:ocaml` (their commands native: `repl-check
+  --native`, `roundtrip --text`, `menhir --check`, `own-verdicts --check`), the `.cmi` part and `ocaml-dumps` to the oracle tier, a new
+  `ocaml-oracle` step (`:phase :oracle`: `corpus check --host`, the helper's `--cmi` round trip, `--spec`, `spec-check`,
+  `native-check`, `stdlib-check`, `typer-check`, `suite expect`); (b) keep the steps as they are until T12. *Recommended: (a)*;
+  without it crops-score refutes every claim on the merged tree.
+- **OC181 `ocaml-judges`.** Its `judges-test` runs `dumps_determinism_test` (ocdump) and the expect action. (a) split it: the judges'
+  own tests (fixtures, no toolchain) in `--full`, the determinism and expect parts in `ocaml-oracle`; (b) as it is, on `:ocaml`.
+  *Recommended: (a)*, at the merge (the tests are on `mac/batch1`, not on this lineage).
+- **OC182 The expect tests natively.** (a) judge the `[%%expect]` blocks directly on oi's native toplevel (each phrase through
+  `bin/oi repl --native`, the toplevel's output against the block), after T12's error messages and TY20's one typer process a
+  session (a phrase costs 8 s now); (b) run testsuite/tools/expect.ml on oi (it links compiler-libs' Toploop: the whole compiler on
+  oi, weeks); (c) leave them to the oracle tier. *Recommended: (a)* with T12; until then (c).
+- **OC184 A unit's interface for the next units.** The suite's native path writes a unit's inferred signature as an `.mli`
+  (Printtyp's text) for the units after it; printing is lossy (applicative paths, weak variables, `'a` for a generalised type), and two
+  of the sample's three gaps come from it. (a) the typer keeps the unit's signature as data, a native `.cmi` (the typed `Types`
+  signature as forms, read back by `find-unit` as OCaml reads a `.cmi`), as ocamlc does; (b) keep the printed interfaces and class
+  what they lose. *Recommended: (a)*, about half a day, before the night's suite record.
+- **OC185 The eval cell's source.** (a) the REAP row's eval source `check-oi.edn` becomes `check-oi-native.edn` (273 passes, the same
+  as ocamlc's path, made without ocamlc), and the AOT and suite sources their native records once the night has written them with no
+  fewer passes; the oracle path's records stay as the oracle tier's; (b) re-record `check-oi.edn` itself from the native path.
+  *Recommended: (a)*: the comparison TY19 (b) keeps stays possible.
+- **OC183 The `.cmi` level natively.** (a) the typer's signatures of the original and of the print compared (`types` on both: an
+  own verdict, the typer covering what it types), ocamlc's `.cmi` bytes in the oracle tier; (b) the oracle tier only.
+  *Recommended: (a)* for the stdlib and the samples now (the typer types the stdlib 71 of 71), the rest as T12 widens it.

@@ -25,7 +25,8 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   repr-python-lex-check repr-python-lex-record repr-python-pegen repr-python-pegen-check repr-python-parse-check repr-python-parse-record repr-python-ast-check repr-python-records-record repr-python-records-verify pyi-lib-test-record pyi-runtime-tables pyi-aot pyi-aot-check pyi-aot-check-record pyi-bench pyi-bench-record pyi-check pyi-check-record pyi-divergences pyi-cover pyi-c2j-check pyi-table-check pyi-clib-build pyi-clib-verify python-essential \
   oi-check-compiled check-makefile \
   repr-ocaml-native-check repr-ocaml-menhir \
-  oi-typer-check oi-stdlib-check oi-check-native oi-typer-probe oi-repl-check-native
+  oi-typer-check oi-stdlib-check oi-check-native oi-typer-probe oi-repl-check-native \
+  oi-check-ocdump oi-own-verdicts
 
 help: ## list the targets
 	@awk 'BEGIN {FS = ":.*## "} /^## / {printf "\n%s\n", substr($$0, 4)} \
@@ -504,7 +505,7 @@ repr-ocaml-spec-check: ## doc/ocaml/SPEC.md: every forms block reads, every exam
 	bin/repr-ocaml spec-check
 repr-ocaml-samples: ## test/ocaml/samples/ read by ocdump and by Arbace's reader; the typed ones typed and lowered to Lambda (bin/repr-ocaml samples)
 	bin/repr-ocaml samples
-repr-ocaml-corpus: ## the corpora's counts and pins of test/ocaml/corpora.edn hold: OCaml 5.5.0's tarball (fetched once), go-whim's whiml, the host's compiler (bin/repr-ocaml corpus check)
+repr-ocaml-corpus: ## the corpora's counts and pins of test/ocaml/corpora.edn hold: OCaml 5.5.0's tarball (fetched once), go-whim's whiml (bin/repr-ocaml corpus check; --host: the host's compiler too)
 	bin/repr-ocaml corpus check
 repr-ocaml-corpus-count: ## the files and lines of every OCaml corpus (bin/repr-ocaml corpus count)
 	bin/repr-ocaml corpus count
@@ -533,8 +534,12 @@ oi-typer-check: ## oi's native front end (doc/ocaml/TYPER.md): test/ocaml/typer/
 oi-stdlib-check: ## the stdlib's units typed natively (doc/ocaml/TYPER.md, T8) against bin/oi stdlib's Lambda, the typer's samples run on oi with the equal units native (bin/oi stdlib-check)
 	bin/oi stdlib-check
 
-oi-check: ## O5: the testsuite's run programs on oi against ocamlc's recorded runs, every non-pass classed (bin/oi check)
+oi-check: ## the testsuite's run programs typed by Arbace's typer (TY24 (a): the default) and run on oi, each judged by its own verdict (the .reference, the exit status) or ocamlc's recorded run, every non-pass classed (bin/oi check)
 	bin/oi check
+oi-check-ocdump: ## O5: the oracle's path, the programs' Lambda dumped by ocdump on the host's compiler-libs (bin/oi check --ocdump)
+	bin/oi check --ocdump
+oi-own-verdicts: ## the judged corpora's split, by the tests' own verdicts and by the recorded runs, the two against each other from the records (bin/oi own-verdicts --check)
+	bin/oi own-verdicts --check
 oi-check-native: ## T11 (doc/ocaml/TYPER.md): the run programs typed and translated by Arbace's typer and run on oi, against ocamlc's runs (test/ocaml/check-oi-native.edn) and compared with ocamlc's path (bin/oi check --native)
 	bin/oi check --native
 oi-typer-probe: ## T11: the run corpus's signatures and Lambda from Arbace's typer against the oracle's (bin/oi typer-probe)

@@ -312,8 +312,8 @@ Prior art:
     the oracle `tools/ocdump` built live) and oi's light driver (`go/arbace/oi` built alone by TamaGo's go) against ocamlc's and
     ocamlopt's recorded runs, the corpora fetched by pin into the checkout's `.tmp/repr-ocaml`; `--corpus ID` (`bin/repr-ocaml
     roundtrip`; `opam`, `all`) and `--only-list FILE` (`bin/oi check [--aot]`, `suite check [--aot]`) select parts.
-    repr/ocaml reads natively too (doc/ocaml/OCAML-SURVEY.md, "As built: the native reader"; the helper `tools/ocdump` stays
-    the oracle and `read`'s default): `arbace/repr/ocaml/menhir.ae` builds parser.mly's LALR(1) automaton as Menhir does into the
+    repr/ocaml reads natively (doc/ocaml/OCAML-SURVEY.md, "As built: the native reader"; the default of `read` and `roundtrip`
+    since 2026-11-07, "As built: the crop's independence"; the helper `tools/ocdump` the oracle's, `--reader helper`): `arbace/repr/ocaml/menhir.ae` builds parser.mly's LALR(1) automaton as Menhir does into the
     generated `tables.ae` (`bin/repr-ocaml menhir`, `--check` against Menhir's own tables in the tarball, `--verify`), `lex.ae`,
     `docstrings.ae`, `actions.ae` and `parser.ae` port lexer.mll, docstrings.ml, parser.mly's actions and MenhirLib's engine;
     `bin/repr-ocaml read --reader native`, `native-check` (the dumps against the helper's, byte for byte). oi's native front end
@@ -322,7 +322,9 @@ Prior art:
     Lambda without ocamlc (`bin/oi run-native`; `bin/oi typer-check`: test/ocaml/typer/'s samples' signatures, raw and
     simplified Lambda against the oracle's dumps committed in `test/ocaml/typer/oracle/` (verified fresh when ocdump is
     present), their runs on oi against the toplevel's; `bin/oi stdlib-check`: the stdlib's units typed natively against
-    `bin/oi stdlib`'s Lambda).
+    `bin/oi stdlib`'s Lambda); since 2026-11-07 the native path is `bin/oi check`'s, `check --aot`'s and `suite check`'s default
+    (TY24 (a); `--ocdump` the oracle's), and each run program is judged by its own verdict as ocamltest gives it (the header's exit
+    status, the `.reference` or no output; `bin/oi own-verdicts`, exceptions `test/ocaml/own-verdict.edn`), the rest by the recorded run).
   - `arbace/repr/clojure{.ae,/}`: `arbace.repr.clojure`, Clojure's bridge (`doc/REPR-CLOJURE.md`;
     `bin/repr-clojure read`, `print`, `roundtrip`, `check`): Clojure source into Arbace's, the
     names of the vendored Clojure, `.clj`/`.cljc` into `.ae`, a table of rules for the dialects'
