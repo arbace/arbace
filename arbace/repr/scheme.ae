@@ -76,25 +76,36 @@
           (doseq [x (read-forms text)] (println (pr/write-form x)))))))
   0)
 
-(defn- roundtrip-file
-  "Both roundtrips of a text: nil when they hold, else a map of what failed."
+(defn- pipeline
+  "A text through the round trip's stages: its forms, the :full print's text (`back`) and the forms it reads again to (`forms2`),
+  the layout printer's text (`lay`) and the forms that reads to (`again`), and the layout of those (`lay2`, the idempotence's)."
   [^String text]
   (let [{:keys [data layer]} (fu/read-full text)
         forms (mapv :form data)
         ae (fu/ae-text forms layer)
         [forms2 layer2] (fu/parse-ae ae)
-        back (fu/print-full forms2 layer2)
-        full-ok (= back text)
-        forms-ok (and (== (count forms) (count forms2)) (every? true? (map fm/tree= forms forms2)))
         lay (lo/layout-file forms)
-        again (:data (rd/read-all lay {}))
-        lines-ok (and (== (count forms) (count again)) (every? true? (map fm/tree= forms (map :form again))))
-        idem (= lay (lo/layout-file (mapv :form again)))]
+        again (:data (rd/read-all lay {}))]
+    {:text text :forms forms :forms2 forms2 :back (fu/print-full forms2 layer2) :lay lay
+     :again (mapv :form again) :lay2 (lo/layout-file (mapv :form again))}))
+
+(defn- same-forms? [xs ys] (and (== (count xs) (count ys)) (every? true? (map fm/tree= xs ys))))
+
+(defn- roundtrip-judge
+  "The round trip's judgment of the stages of a text A against those of a text B (the same text for the round trip itself): nil when
+  they hold, else a map of what failed: `:full` (A's :full print is B's text, byte for byte), `:forms` (A's forms equal B's read
+  again), `:lines` (A's forms equal the forms B's layout reads to), `:idempotent` (A's layout is B's layout of those forms)."
+  [a b]
+  (let [text (:text b) back (:back a) forms (:forms a)
+        full-ok (= back text)
+        forms-ok (same-forms? forms (:forms2 b))
+        lines-ok (same-forms? forms (:again b))
+        idem (= (:lay a) (:lay2 b))]
     (when-not (and full-ok forms-ok lines-ok idem)
       (cond-> {}
         (not full-ok) (assoc :full (let [k (count (take-while true? (map = back text)))] {:at k :want (subs text k (min (count text) (+ k 30))) :got (subs back k (min (count back) (+ k 30)))}))
         (not forms-ok) (assoc :forms true)
-        (not lines-ok) (assoc :lines (some (fn [[i a b]] (when-not (fm/tree= a b) [i (pr-str a) (pr-str b)])) (map vector (range) forms (map :form again))))
+        (not lines-ok) (assoc :lines (some (fn [[i x y]] (when-not (fm/tree= x y) [i (pr-str x) (pr-str y)])) (map vector (range) forms (:again b))))
         (not idem) (assoc :idempotent true)))))
 
 (defn- write-results
@@ -108,6 +119,43 @@
              (str/join "" (for [[k r why] (sort-by first rows)] (str (pr-str [k r (str why)]) "\n")))
              "]\n"))
   (println (str "wrote " file " (" (count rows) " rows)")))
+
+(defn- roundtrip-file
+  "Both roundtrips of a text: nil when they hold, else a map of what failed."
+  [^String text]
+  (let [p (pipeline text)] (roundtrip-judge p p)))
+
+(defn- controls-judged
+  "The negative controls of a check (doc/GATE-SURVEY.md, GTS81 (a), \"As built: GT9's controls\"; CONTROLS, the forms of
+  test/scheme/repr-controls.edn): each pair's verdict by JUDGE-FN of [subject-key reference-key], which gives nil when the judge passes
+  the pair, else the set of levels it fails, or :left when the pair is not in the run, and the set of levels the judge has (LEVELS).
+  Prints `control ID fails as it must (levels)`, `control passed: ID ... at LEVELS` for each level the judge passed, `control left:`; returns
+  the number of failing controls."
+  [controls levels judge-fn]
+  (let [bad (atom 0)]
+    (doseq [{:keys [id subject reference]} controls]
+      (let [r (judge-fn subject reference)]
+        (cond (= r :left) (println (str "control " id " left: " subject " or " reference " is not in the run"))
+              :else (let [failed (set (keys r)) passed (remove failed levels)]
+                      (if (seq passed)
+                        (do (swap! bad inc) (println (str "control passed: " id " (" subject " against " reference ") is the same at " (str/join " " (map name passed)))))
+                        (println (str "control " id " fails as it must (" (str/join " " (map name (sort failed))) " differ)")))))))
+    @bad))
+
+(defn- controls-file [] (str (root) "/test/scheme/repr-controls.edn"))
+
+(defn- read-controls [level]
+  (let [f (java.io.File. ^String (controls-file))]
+    (if (.exists f) (filter #(contains? (set (:levels %)) level) (read-string (slurp f))) [])))
+
+(defn- roundtrip-path
+  "The path of a control key in a round trip's files: ID/PATH in DIR/files-ID.txt (a line ending in /PATH), probe/NAME in DIR/probes."
+  [^String dir ^String k]
+  (if (.startsWith k "probe/")
+    (let [f (java.io.File. (str dir "/probes/" (subs k 6) ".ss"))] (when (.exists f) (.getPath f)))
+    (let [i (.indexOf k "/") id (subs k 0 i) p (subs k (inc i))
+          lf (java.io.File. (str dir "/files-" id ".txt"))]
+      (when (.exists lf) (first (filter #(.endsWith ^String % (str "/" p)) (str/split (slurp lf) #"\n")))))))
 
 (defn- cmd-roundtrip
   "roundtrip [--record] [--only-list FILE] DIR. GT9: --only-list names the files to run, one key a line as test/scheme/roundtrip-results.edn
@@ -149,7 +197,11 @@
                      "repr/scheme's round trip (bin/repr-scheme roundtrip --record): :full byte for byte, the forms again,\n;; the layout read back and idempotent"
                      @rows))
     (println (str "roundtrip: " (count files) " files, " @bytes " bytes, failing " @bad ", " (quot (- (System/currentTimeMillis) t0) 1000) " s"))
-    (if (zero? @bad) 0 1)))
+    ;; the negative controls: the subject's stages judged by the round trip's own judgment against the reference's text and stages
+    (let [ctl (controls-judged (read-controls :roundtrip) [:full :forms :lines :idempotent]
+                               (fn [s r] (let [sp (roundtrip-path dir s) rp (roundtrip-path dir r)]
+                                           (if (and sp rp) (roundtrip-judge (pipeline (slurp sp)) (pipeline (slurp rp))) :left))))]
+      (if (and (zero? @bad) (zero? ctl)) 0 1))))
 
 (defn- cmd-prepare [[dir]]
   (let [r (ck/prepare (root) dir)]
@@ -162,7 +214,8 @@
   (let [record (some #{"--record"} args)
         partial (some #{"--partial"} args)
         dir (first (remove #{"--record" "--partial"} args))
-        {:keys [results scans]} (ck/check-dumps (root) dir)
+        controls (read-controls :check)
+        {:keys [results scans dumps]} (ck/check-dumps (root) dir (set (mapcat (juxt :subject :reference) controls)))
         known-file (str (root) "/test/scheme/check-known.edn")
         known (if (.exists (java.io.File. known-file)) (read-string (slurp known-file)) {})
         n (count results)
@@ -193,7 +246,13 @@
             (str ";; Known differences between repr/scheme and Chez (bin/repr-scheme check --record): key -> {:kind ...}\n"
                  (pr-str (into (sorted-map) (map (fn [[k d]] [k (select-keys d [:kind :chez :mine])]) diffs)))
                  "\n")))
-    (if (or (and (not record) (or (seq unlisted) (seq gone))) (seq scan-bad) @rule-bad) 1 0)))
+    ;; the negative controls (GT9): the subject's text judged by the check's own comparison (`compare-file`) against the reference's
+    ;; Chez dump, which must differ; not run by --record
+    (let [ctl (if record 0
+                  (controls-judged controls [:read]
+                                   (fn [s r] (let [ds (get dumps s) dr (get dumps r)]
+                                               (if (and ds dr) (when-let [d (ck/compare-file (slurp (:file ds)) dr)] {:read d}) :left)))))]
+      (if (or (and (not record) (or (seq unlisted) (seq gone))) (seq scan-bad) @rule-bad (pos? ctl)) 1 0))))
 
 (defn- spec-blocks
   "The fenced blocks of a markdown file: [[lang text] ...]."
