@@ -3030,6 +3030,44 @@ judge turns into judged files), then the front ends (read, eval, AOT: the most p
 - **The gate**: `cpp-print-essential` runs `--judge own` on `[:stage0]` (no `:cxx`, no `:go`), held to `own/gxx-dg-essential.edn`
   (recorded: 32 pass, 1 forms-differ, `modules/cpp-11.C`, known as such by the clang judge too). `bin/gate --plan` plans it.
 
+### The runs' route: Arbace's front end and code generator (CP240 (b), begun)
+
+`bin/cppi check` and `check --aot` take `CPPI_ROUTE` (`bin/lib/cppi/route.bash`'s `cppi_ir_route`): `clang` (the default, as
+recorded), `ours` (each program by the native parser, `arbace.cpp.sema` and `arbace.cpp.codegen`, one process for the list,
+`arbace.cpp.codegen gen-batch`; no clang; a program it refuses is `ir.status` 98, its class in `ir.log`, a build failure of its row)
+or `auto` (ours for a program whose dg-options give the compilers no option, clang's IR for the rest and for those ours refuses).
+`WORK/files/ID/route` says which made each IR; the run prints the counts. The lowering, ci's build and the run are the same for both.
+The default stays clang's until the night's runs compare the routes (below).
+
+Measured over the sampling's 67 programs (gxx-dg-run every 25th) by our route, each generated, lowered, built by gcc against the
+lowered runtime and run (a measure by hand; the check itself runs on ci): 37 generated and 32 passed by their own verdict at first;
+the four that ran wrong were fixed (each with a sample of test/cpp/codegen, written for it):
+
+| program | what was wrong | fix (the model) | sample |
+|---|---|---|---|
+| eh/ctor-fntry1.C | a function-try-block body (CXXTryStmt) was not taken as the body: the constructor was declared, not defined | the body a compound statement or a function-try-block (`sema/body-of`, also templates'); a constructor's and destructor's handler rethrows at its end ([except.handle]/15, clang's ExitCXXTryStmt); the parser read `try` only after a constructor's mem-initializers, so `C() try : m(x) {` was skimmed from the colon ([dcl.fct.def.general]/1) | `fn-try-block` |
+| (found by the sample) | a destructor that throws (noexcept(false)) unwound into its own object's cleanup: a second destructor call, std::terminate | each cleanup emitted with the cleanups below it alone in force (clang's PopCleanupBlock pops a cleanup's EH scope before its normal-path code) | `fn-try-block` |
+| init/float1.C | `static const double b = a + 1.0;` was dynamically initialized, after a constructor that reads it | constant initialization folds a const floating variable's constant value (clang's EvaluateAsInitializer, a fold: ExprConstant notes, does not refuse, the read of a non-constexpr const); its reads emitted as the constant (CGExpr's tryEmitAsConstant), as clang's IR has no such global | `const-fold-init` |
+| cpp0x/rv-life.C | `T&& r = static_cast<T&&>(T());` destroyed the temporary at once | lifetime extension through a cast without a user-defined conversion to a glvalue of the operand's object ([class.temporary]/6, CWG1376) | `cast-extends` |
+| ext/is_aggregate.C | a GNU vector typedef (`vector_size`) read as its element type | refused (class `type`): vector types are not modelled; `auto` takes clang's IR | |
+
+After them and the header fix below: 36 generated, **35 pass by their own verdict** (the 36th, template/pretty1.C, is the class
+oracle-text by either route), among them special/initp1.C, which clang rejects (oracle-rejected, by design) and our route passes; 31
+refused, by their first refusal: expr 10 (CoawaitExpr and the coroutines' others, CXXDefaultInitExpr 2, BinaryConditionalOperator 2,
+PackExpansionExpr, CXXFoldExpr, CompoundLiteralExpr), type 6 (vector 4), name 4, parse 3, crash 2, one each of conversion, decl
+(structured bindings), overload, range-for, stmt (asm), template. `bin/cppi codegen-check`: 141 of 142 (hdr-vector known, as before); native-check samples 9 of 9, native 1 of 1, gxx-a 62 of 62.
+
+The runtime by our route (CODEGEN.md G5c), measured: libsupc++'s 62 C++ units (test/cpp/runtime/units.edn) through `gen-batch` with
+the build's include directories and `-D` flags (`gen-batch` takes a fourth column, the preprocessor's options; the `-f` flags, such
+as `-fno-implicit-templates`, are not taken): **10 generated at first, 41 after one fix**: a header found beside the main file by a
+quoted `#include` (libsupc++'s own `new`, through `-I` its directory) is named relative in the native tree's locations, and its
+text was taken for the main file's (an out-of-range slice in 44 units, and wrong qualifiers where it fell in range); `sema/*main-dir*`
+resolves it, and `header-node?` counts it a header. The 21 others: crash 9 (the type_info classes' units), AtomicExpr 5
+(`__atomic_*` builtins), the native parser's declines 4, one each of `_Unwind_Reason_Code` (a header enum), an overload, and
+`__builtin_popcountg`. Generated is not proved: runtime-build's levels (each unit's round trip and its lowered run) are the proof,
+G5c's. The eval and AOT stages stay 0 while the runtime is built from clang's IR at gate time, and 0.5 with a
+recorded runtime (CP240 (a)), whichever route makes the programs' IR.
+
 ### The negative controls (maturity)
 
 `bin/crops-score` counted 4 of 8 check families covered. Added: the token check's (`_control/pp/udl-vs-prefixes` and
