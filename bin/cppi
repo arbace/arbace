@@ -336,12 +336,27 @@ runtime_ci() { # runtime_ci [OUT]: OUT/ci, the lowered runtime's units read by r
     ( runtime_build "$out" ) >&2 || exit 1
   fi
   out=$(cd "$out" && pwd)
+  # the reader's key (its sources and options) apart from the runtime's: a unit read by the same reader from the same lowered C is
+  # read again to the same forms (cppi-deferred)
+  rk=$( (cd "$root" && sed -n '/^;; runtime-ci-key begin/,/^;; runtime-ci-key end/p' arbace/cpp/run.ae | sha256sum
+         find arbace/repr/c.ae arbace/repr/c arbace/c/musl.ae test/c/host test/cpp/runtime/ci -type f | LC_ALL=C sort | xargs sha256sum) | sha256sum | cut -d' ' -f1)
   k=$( { cat "$out/key"; (cd "$root" && sed -n '/^;; runtime-ci-key begin/,/^;; runtime-ci-key end/p' arbace/cpp/run.ae | sha256sum
                                  find arbace/repr/c.ae arbace/repr/c arbace/c/musl.ae test/c/host test/cpp/runtime/ci -type f | LC_ALL=C sort | xargs sha256sum); } | sha256sum | cut -d' ' -f1)
   if [ "$(cat "$out/ci/key" 2>"$TMPDIR/cppi-cikey.err")" != "$k" ]; then
-    rm -rf "$out/ci"; mkdir -p "$out/ci"
-    { cut -f1 "$out/units.tsv" | while read -r u; do printf '%s\t%s\n' "$u" "$out/units/$u/lowered.c"; done; printf 'cx-rt\t%s\n' "$out/rt.c"; } > "$out/ci/list.tsv"
-    echo "runtime-ci: reading the lowered runtime into $out/ci (about 3 minutes)" >&2
+    { cut -f1 "$out/units.tsv" | while read -r u; do printf '%s\t%s\n' "$u" "$out/units/$u/lowered.c"; done; printf 'cx-rt\t%s\n' "$out/rt.c"; } > "$TMPDIR/cppi-ci-list.$$"
+    cut -f2 "$TMPDIR/cppi-ci-list.$$" | xargs sha256sum | awk '{ print $1 }' | paste "$TMPDIR/cppi-ci-list.$$" - | cut -f1,3 > "$TMPDIR/cppi-ci-sums.$$"
+    if [ "$(cat "$out/ci/reader-key" 2>"$TMPDIR/cppi-cikey.err")" = "$rk" ] && [ -f "$out/ci/units.sha256" ] && [ -f "$out/ci/read.tsv" ]; then
+      # the same reader: only the units whose lowered C changed are read again (read-lib keeps the rows read.tsv says are read;
+      # the index is made again from every unit), seconds after a lowering change that touches a few units, not the whole read
+      awk -F'\t' 'NR == FNR { old[$1] = $2; next } old[$1] != $2 { print $1 }' "$out/ci/units.sha256" "$TMPDIR/cppi-ci-sums.$$" > "$TMPDIR/cppi-ci-changed.$$"
+      awk -F'\t' 'NR == FNR { ch[$1] = 1; next } !($1 in ch)' "$TMPDIR/cppi-ci-changed.$$" "$out/ci/read.tsv" > "$out/ci/read.tsv.new"
+      mv "$out/ci/read.tsv.new" "$out/ci/read.tsv"; rm -f "$out/ci/key"
+      echo "runtime-ci: reading $(wc -l < "$TMPDIR/cppi-ci-changed.$$") changed units of the lowered runtime into $out/ci" >&2
+    else
+      rm -rf "$out/ci"; mkdir -p "$out/ci"
+      echo "runtime-ci: reading the lowered runtime into $out/ci (about 3 minutes)" >&2
+    fi
+    mv "$TMPDIR/cppi-ci-list.$$" "$out/ci/list.tsv"; rm -f "$TMPDIR/cppi-ci-changed.$$"
     (cd "$root" && GOMEMLIMIT=${CPPI_CI_MEMLIMIT:-6GiB} arbace_tool -m arbace.cpp.run read-lib "$out/ci" "$out/ci/list.tsv" "${CPPI_JOBS:-4}") > "$out/ci/read.log" 2>&1 \
       || { grep -v -E 'Reflection|recur arg|Auto-boxing' "$out/ci/read.log" | tail -5 >&2; exit 1; }
     # ci's overrides (test/cpp/runtime/ci/*.c, arbace.cpp.run's libs-fn links them before the runtime): C for ci of what the
@@ -351,6 +366,7 @@ runtime_ci() { # runtime_ci [OUT]: OUT/ci, the lowered runtime's units read by r
 ' "ci/$(basename "$f" .c)" "$f"; done > "$out/ci/over/list.tsv"
     (cd "$root" && GOMEMLIMIT=${CPPI_CI_MEMLIMIT:-6GiB} arbace_tool -m arbace.cpp.run read-lib "$out/ci/over" "$out/ci/over/list.tsv" 1) > "$out/ci/over/read.log" 2>&1 \
       || { grep -v -E 'Reflection|recur arg|Auto-boxing' "$out/ci/over/read.log" | tail -5 >&2; exit 1; }
+    mv "$TMPDIR/cppi-ci-sums.$$" "$out/ci/units.sha256"; echo "$rk" > "$out/ci/reader-key"
     echo "$k" > "$out/ci/key"
   fi
   echo "$out/ci"
