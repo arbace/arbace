@@ -962,3 +962,140 @@ and `steps.edn` with GT9's fragment and, apart, this branch's spliced in; `bin/g
 ## Decided (2026-11-05, the user: ORS20, ORS21)
 
 ORS20: (a) now, the round trip and test's print halves in the oracle tier and native-check on :ghc, then (c) haskell-native merged and the print's tree level native in the gate; ORS21 (a): the committed side's 3% overrun accepted.
+
+## As built: Rust (write-ahead, 2026-11-05)
+
+ORS12's fourth crop, on branch `oracle-records-rust` (from `oracle-records-haskell`, with `rust-row` merged: Rust's REAP row on rust-re5's rsi,
+tools and records). The merge's conflicts, resolved as both sides: `Makefile`'s `.PHONY` line (the haskell branch's list with rust-row's `rsi-*`
+targets added), `test/reap/cells.edn` (the comment lines, `:languages [... :scheme :haskell :rust]`, `:names`, the Rust cells after Haskell's;
+one slip fixed after: Haskell's block closed the map, so the Rust cells had landed outside it), `test/reap/main.ae` (Scheme's and Haskell's
+readers kept, Rust's `:rust-lower` added; the two `:corpus-known` readers merged into one whose `:count` is `:hs-modules`, `:files`, `:ifaces`
+or `:programs`, the case name `ghc-VERSION` or the corpus's name; `classify-entry` kept Haskell's, which does what Rust's did too) and
+`test/reap/matrix.edn` (both rows). `bin/reap` after the merge: 27 of 28 cells checked (Rust AOT "no check yet"), its only problems the Java
+eval row's one-test drift (`pass 1847, recorded 1848`), which this branch did not touch. Light: the helper was built here (10 s, with the
+apks from `crop-controls-rust`'s `.tmp` by `REPR_RUST_APKS`), std built here (45 s), the records made on the checkout's samples and on the
+whole `rustc-1.99.1` corpus; the other corpora (library, compiler, the crates, the UI suite) need sources this host has no network for.
+Read from GT9's fragment (`git show gt9-verbs:test/gate/crops/llvm-rust.edn`), `bin/repr-rust`, `bin/lib/repr-rust/{test,run-program,code-unit}`,
+`bin/rsi` and `bin/lib/rsi/{check,wrap-ir,link-ir,plan.bash}`.
+
+### What the steps asked of rustc, and what each became
+
+| Step | Live call | Class | Now |
+|---|---|---|---|
+| rust-read-essential (`bin/repr-rust test`) | the helper's `dump` (both modes, the expression file) and `tree` of the 10 cases' fixed inputs; rustdoc's JSON of shapes, attrs and the mutated shapes; whether edition 2018 parses edition2015.rs | B | 43 files committed, `test/rust/records/test/` (1.22 MB, manifest `test.tsv`); no rustc; `:rustc` off |
+| the same, the print's half | the helper's `tree` of the printed files (cases 3, 4, 7, 8, 9, 10), rustdoc of the printed shapes and attrs, `run-program` and `code-unit` of the originals and the print | D | `bin/repr-rust test --oracle` (62 s), the oracle tier's `rust-test-oracle`; 11 checks listed as `skipped` in the records mode |
+| rsi-essential, rsi-check, rsi-aot | `rustc --emit=llvm-ir,link` per program (wrap-ir, link-ir: the program's codegen unit and the allocator shim by `clang -S -emit-llvm`); std's IR (`bin/rsi std-build`, cargo) for `runtime-build` | C | packs `rust-ir-samples` (5 programs), `rust-ir-synthetic` (67) and `rust-std-ir` (110 units); `:rustc` off. rustc's runs are `ref-rustc-1.99.1.edn` (A) already |
+| rust-roundtrip, rust-iface (originals' half) | the helper's dump (both modes) and tree of every file of the corpus | B | packs `rust-{dumps,dumps-full,trees}-rustc-1.99.1` (1,074 files, 144 + 180 + 200 MB raw) |
+| rust-roundtrip, rust-iface, rust-behaviour (the print's half) | the helper's tree of the printed files, rustdoc of the mirror, `run-program` and `code-unit` builds, `cargo -Zbuild-std` of std from the print | D | the oracle tier's `rust-roundtrip-oracle`, `rust-iface-oracle`, `rust-behaviour-oracle` (class D until a native reader reads the print) |
+| rust-native(-essential) | rsdump per file of `native-check.txt` | B | not on this branch (rust-native is not merged here): the dumps carry the absolute `:abs` the pack format below normalizes; the step is the merge's (ORS22) |
+
+Not steps: the UI suite's tarball and the crate set's `.crate` files (pinned sources), `bin/rsi sets`, `lower-unit` (lli, `:llvm`), `lower-check`
+(rustc builds each program from the original and its lowered IR: both sides live, an oracle-tier candidate with `rsi-aot`'s native-std leg, left).
+
+### What the tooling is
+
+- **The identity** `:rustc` in `test/oracle-records/oracle.bash` (`oracle_rustc_id`): GT9's recipe for the `:rustc` host (`rustc --version -v`,
+  the executable's SHA-256 through its links, the sysroot's `librustc_driver-*.so`): here `:rustc b789fd432132e377`, rustc 1.99.1 (Alpine r0).
+  The packs of `rust-std-ir` and `rust-ir-*` are made by rustc and by `clang -S -emit-llvm` (the shim); the record names rustc's identity only (ORS23).
+- **`bin/lib/repr-rust/records.bash`** (out of `gate_key`): the committed record, as Haskell's (`rsr_records_unpack`: `STALE`, `UNRECORDED`, `REFUSED`;
+  `rsr_records_make`; `rsr_records_verify` with the crossed pair); the helper's identity `rsr_helper_hash` is `bin/repr-rust`'s `helper_hash`.
+- **`bin/repr-rust test [--oracle | --record | --verify-records]`**: the originals' calls are one function (`live_origs`) whose outputs are the records, the
+  key one digest of the helper, every file under `test/rust/sample/` and `live_origs`' text. The dumps' `:abs` is the one path in any output (the converter
+  reads the file it names): written `@WORK@/...` and `@ROOT@/...` in the records and put back at the unpack. Trees, lines and rustdoc's JSON hold no path.
+  `--record` 3 s, `--verify-records` 43 files equal, the crossed pair differs. With a `rustc` that exits 99 first on `PATH`: 15 checks `ok`, 11 skipped,
+  rc 0, 54 s; `--oracle`: 28 `ok`, none failed. One case moves to the records side whole: the changed doc comment (rustdoc of two originals).
+- **`bin/repr-rust record-corpus [CORPUS]`, `verify-corpus [--sample N]`**: three packs (a pack a kind: `dumps`, `dumps-full`, `trees`), members `FILE.edn` or
+  `FILE.tree`, `FILE.lines` (FILE relative to the corpus's source root), the dumps' `:abs` written `@SRC@/FILE`, keyed per crate (the corpus's source pin, the helper's
+  identity, the kind, the crate's plan line); `REPR_RUST_ONLY_CRATES="core alloc"` selects crates and keeps the others from the pack in place. `read --corpus` and the
+  round trip's originals (`dump_corpus`, the three `orig` tree loops) read the packs unless `REPR_RUST_LIVE=1`; `dump --corpus` stays live (it is what records). A host with
+  no rustc needs only rust-src's apk (`REPR_RUST_APK_ONLY=rust-src`, in `prepare`), the files the dumps name. Whole record: 8 min, one xz thread the larger part.
+- **`bin/rsi check --record-ir | --verify-ir [--sample N] | --ir-only`**: a pack per corpus `rust-ir-samples`, `rust-ir-synthetic` (`-ui` the night's), members
+  `KEY/FILE` for each program (KEY: its id as a directory name; `ir.status`, `x.ll`, `shim.ll`, and `x.refused` or `ir.log` of a failure), keyed by `ir_key`: the program's
+  source (the UI corpus's tarball pin for the UI suite), its plan line, the digest of `test/rust/runtime/ir.sha256` (std's identity), and the wrap, link and plan scripts. The shim's
+  `ModuleID` names the scratch directory: written `@WORK@`, put back by `ir1`. `check` reads the packs (`ir_records_get`: a program with no entry is `UNRECORDED`, one whose key moved
+  `STALE`: the step fails, ORS10 (a)) unless `RSI_LIVE=1`; the heavy half (runtime-ci, cirun, musl) is skipped by the three flags. `--record-ir` records whole corpora.
+- **`bin/rsi std-record | std-verify`**: `rust-std-ir`, members `CRATE/UNIT.ll`, keyed by the std pin (the apk's SHA-256, `std.edn`, `ir.sha256`); `runtime_build` takes
+  std's IR from it when the build in place is not at the pin and `RSI_LIVE` is unset (`std_ir_get`: the unpacked units' digests must be `ir.sha256`'s); `std-verify` builds std afresh into
+  `.tmp/rsi/std-verify` and compares.
+- Kinds in `test/oracle-records/kinds.edn`: `rust test-dumps` (B), `corpus-dumps` (B; one line for the three packs, its verify runs all three), `std-ir` (C), `ir` (C).
+
+### Sizes (ORS11)
+
+| Pack | Members | Raw | xz | Ratio |
+|---|---|---|---|---|
+| `test/rust/records/test/` (committed) | 43 | 1.22 MB | not packed | |
+| `rust-dumps-rustc-1.99.1` | 1,074 | 144.5 MB | 9,070,628 | 16x |
+| `rust-dumps-full-rustc-1.99.1` | 1,074 | 180.0 MB | 13,495,720 | 13x |
+| `rust-trees-rustc-1.99.1` | 2,148 | 199.5 MB | 4,151,080 | 48x |
+| `rust-std-ir` | 110 | 50.9 MB | 2,376,000 | 21x |
+| `rust-ir-samples` | 15 | 5.9 MB | 295,808 | 20x |
+| `rust-ir-synthetic` | 201 | 23.7 MB | 984,424 | 24x |
+
+The packs total 30.4 MB, inside ORS11's 100 MB a crop. The committed side: the 43 test files and the manifests (the corpus' three 0.73 MB, the IR's and std's 0.06 MB), **2.0 MB**, inside 3 MB.
+The larger corpora by the same ratios would not fit (ORS22): library, compiler and the crates have 13,665 files against 1,117, about 110 MB of dumps alone. Unpacking checks every member: `rust-trees` 200 MB.
+
+### Checked (light, in the worktree, main's stage 0)
+
+- `bin/repr-rust test --record` then `--verify-records`: 43 entries equal (`:rustc b789fd432132e377`), the crossed pair differs. With a stub `rustc` and `rustdoc` first on `PATH` (exit 99):
+  rc 0, 15 `ok` lines and 11 `skipped`. `--oracle`: 28 `ok`, none `FAIL`.
+- `REPR_RUST_ONLY_CRATES="proc_macro test" bin/repr-rust record-corpus` (3 packs, 47 files, 18 s), `verify-corpus --sample 12`, `read --corpus` from the packs with the `.tmp/repr-rust/dumps` removed (47 dumps,
+  47 converted, 1,779 forms), `roundtrip rustc-1.99.1` on the same crates (the originals' trees from the pack: 47 equal, the others `:no-original`, as a partial record must be); then the whole
+  `record-corpus` of `rustc-1.99.1` (8 min) and `bin/oracle-records verify rust test-dumps corpus-dumps ir --sample 20`: 43, 60 and 15 entries equal, crossed pairs differ.
+- `bin/rsi check --record-ir --corpus samples,synthetic` (27 s); `--verify-ir` from another work directory: 15 and 201 entries equal (the shim's `ModuleID` was the one difference, now normalized);
+  `--ir-only` with a stub `rustc` first on `PATH`: the IR from the packs in 2 s; a changed synthetic program: `STALE`, the check fails. `bin/rsi std-record` (32 s) and `std_ir_get` into a clean directory: 110 units, `ir.sha256` equal to the pin.
+- `bin/oracle-records pins`: the Rust packs found in the store with their members (the other crops' packs are not in this scratch store).
+- Not run: any gate, any build of the executable, `bin/rsi check` past the IR (runtime-ci lowers std: 4 to 6 GiB), `std-verify` (cargo), the library, compiler, crates and UI corpora.
+
+### The plan (scratch overlay)
+
+`.tmp/overlay/` here: this branch's tree with `bin/lib/gate-run.bash` given the `:rustc` host (GT9's `:host-ids :rustc` is on `gt9-verbs`, not here; the recipe is `oracle_rustc_id`'s) and `:cxx`, `:llvm`
+fixed, a stub `cpp-runtime`, and `steps.edn` with GT9's fragment (its LLVM step left out) and, apart, `test/gate/crops/rust.edn` spliced in; `bin/gate --full --plan`:
+
+| Step | hosts with GT9's fragment | with this one |
+|---|---|---|
+| rust-read-essential | `stage0 rustc` | `stage0` |
+| rsi-essential | `stage0 go rustc cxx gcc` | `stage0 go cxx gcc` |
+| rsi-check | `.samples` and `.ui`: `stage0 go rustc cxx gcc` | `.samples`, `.synthetic`: `stage0 go cxx gcc` (the ui part waits for `rust-ir-ui`) |
+| rust-roundtrip (2 parts planned), rust-iface, rust-behaviour (3 parts) | `stage0 rustc` (and `gcc`) | gone from the gate: `rust-roundtrip-oracle`, `rust-iface-oracle`, `rust-behaviour-oracle` in the oracle tier |
+
+- No Rust step outside the oracle tier names `:rustc` (the `host` lines of every `rust-*` and `rsi-*` input); `:cxx` and `:gcc` stay on the rsi steps (the lowering's C++ part, gcc).
+- With another `rustc` first on `PATH` (a stub printing 9.99.9) every key of GT9's fragment's steps changes (`rust-read-essential` `8b4bf4cabb52` to `4735e3a46d22`, `rsi-essential` `2298b3733aab` to
+  `5b919c5157e0`); with this fragment `rust-read-essential` (`b628ea54d3ec`), `rsi-essential` (`998175104b00`) and `rsi-check.samples` (`cc80c744ceec`) do not.
+- `bin/gate --oracle --plan`: `rust-test-oracle`, `rust-roundtrip-oracle` (rustc-1.99.1, -ui), `rust-iface-oracle`, `rust-behaviour-oracle` (run, std, code-std) and `rust-records-verify` `run`.
+- The controls named by GT9's fragment (`test/rust/controls.edn`, `roundtrip-controls.edn`) are the ones the merge brings; the new oracle steps reuse them, the verify waives its own crossed pairs.
+
+### The night's commands
+
+1. `bin/rsi std-build` has made the std at the pin here; `bin/rsi std-verify` (cargo, 1 min) after the commit shows the pack is what a second build gives.
+2. The UI suite: `bin/repr-rust corpus fetch rustc-1.99.1-ui` (the tarball: network), then `bin/rsi check --record-ir --corpus ui` (the whole list, the programs not built by the judge left out: ORS22's size to confirm)
+   and `bin/repr-rust record-corpus rustc-1.99.1-ui` (dumps both modes and trees of 24,831 files: the pack's size decides ORS22).
+3. `bin/oracle-records verify rust --sample 8` and, once, `bin/oracle-records verify rust test-dumps corpus-dumps std-ir ir` whole; a commit of its own naming `:rustc b789fd432132e377` for the records and pins (ORS5 (a));
+   `bin/oracle-records mirror --push` once the user agrees (six packs, 30 MB).
+4. After the merge with gt9-verbs: `bin/gate --full --plan` shows `rust-read-essential` and the rsi steps without `:rustc`, `bin/gate --oracle` the five.
+
+### Left
+
+- **rust-native's verbs** (`native-check`: rsdump per file of its list, the dumps' `:abs` the same normalization): the branch is not merged here; its step reads the corpus packs once it is (ORS22).
+- **The UI suite**: no pack (`rust-ir-ui`, its dumps and trees), so `rsi-check`'s ui part is out of the fragment and the UI round trip's parts run live (`REPR_RUST_LIVE=1`) in the oracle tier; the same for library, compiler and the crates.
+- **`rsi lower-check`** (both sides built by rustc from the original, one with the lowered IR as the linker's input) and `rsi record-ref` still need rustc and std's sysroot: not gate steps, left as they are.
+- `bin/rsi check` past the IR on the packs was not run here (heavy); the IR step alone was (`--ir-only`).
+- The class D steps no longer run per merge: rustc's reading of the print is once a night at most and at tags (ORS1 (a)); the forms level of the round trip stays in `rust-read-essential` (mode `:full`'s byte for byte).
+- `test --record`'s key covers `live_origs`' text and `sample/`'s files: a new case rekeys the records (STALE until `--record`, by hand). A `rustc` that moved with Alpine edge: the verify reports "toolchain moved", the records are kept.
+
+## Proposed (2026-11-05, Rust): ORS22-ORS23
+
+- **ORS22 The larger corpora's records, and rust-native.** The packs cover `rustc-1.99.1` (std's five crates, 1,117 files), the checkout's rsi programs and std's IR. Library, compiler, the crate set and the UI
+  suite (about 13,700 and 24,831 files) are not recorded: by the std ratios their dumps alone would be 110 MB, past ORS11's 100 MB a crop, and the rest of the packs 2 to 3 times that.
+  - Options: (a) as built: those corpora run live in the oracle tier (`REPR_RUST_LIVE=1`), the UI IR pack (`rust-ir-ui`, programs only) recorded at the night and `rsi-check`'s ui part back; (b) record the
+    dumps and trees of every corpus, raising Rust's cap to about 400 MB; (c) record a rotating subset per corpus (a list of files, GT8-style) and run the rest live.
+  - Costs: (a) the compiler's and the crates' round trips need rustc as they do today, in the oracle tier only; (b) a precedent of four times the cap, the store and mirror 400 MB; (c) a subset list per corpus to keep.
+  - *Recommended: (a)*: the larger corpora are read-and-print checks of Arbace's converter, run once a night; what the gate needed (the essential and the rsi steps) is recorded.
+- **ORS23 The identity of the packs' producers.** `rust-std-ir` and `rust-ir-*` are made by cargo and rustc, and the shim and std's IR text by `clang -S -emit-llvm`; GT9's `:rustc` host covers rustc and its driver.
+  - Options: (a) as built, the record names rustc's identity (the clang version is in `std.edn`'s pin and `std-build` refuses another); (b) the kinds name two hosts (`:rustc` and `:llvm`), the manifest's header both identities;
+    (c) a combined host `:rustc` that adds `clang --version`.
+  - Costs: (a) none, a moved clang is found by `std-build`'s check and by `std-verify`; (b) the oracle tier's verify needs both, `kinds.edn` a second `:host`; (c) a change of GT9's recipe, a rekey of every Rust step.
+  - *Recommended: (a)*.
+
+## Decided (2026-11-05, the user: ORS22, ORS23)
+
+ORS22 (a): as built, the larger corpora live in the oracle tier, the UI suite's IR pack recorded at night, rust-native's native-check with its merge; ORS23 (a): the packs name rustc's identity only.
