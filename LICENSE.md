@@ -538,6 +538,17 @@ covers what.
   `jdk/internal/jrt/ZipAccess.java`, `Utf8Coder.java`, the variants `ZipCoder.ae`, `ZipUtils.ae`,
   `JarFileFactory.ae` and `go/arbace/jrt/checksum.ae` are Arbace's own (zlib's adler32 algorithm
   in `checksum.ae` written from RFC 1950).
+- java.util.logging (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F5 (write-ahead)"; recorded by the
+  rule of B7): the variants `overlay/jdk/variants/LogManager.ae`, `Logger.ae`, `Level.ae`,
+  `LogRecord.ae`, `SimpleFormatter.ae` and `LoggingFileHandler.ae` keep the code of the jdk26u members
+  they replace (https://github.com/openjdk/jdk26u at `baf63fb`,
+  `src/java.logging/share/classes/java/util/logging/LogManager.java`, `Logger.java`, `Level.java`,
+  `LogRecord.java`, `FileHandler.java`, and `src/java.base/share/classes/jdk/internal/logger/SimpleConsoleLogger.java`,
+  whose `Formatting.getSimpleFormat` and `isFilteredFrame` `SimpleFormatter.ae` and `LogRecord.ae`
+  transcribe) where they keep it: Copyright (c) Oracle and/or its affiliates, under the GNU General
+  Public License version 2 with the Classpath Exception (text below); the rest of those files and
+  `overlay/jdk/java.base/sun/util/logging/internal/LoggingProviderImpl.java` (jrt's own, with jdk26u's
+  names and signatures of its access interface) are Arbace's own.
 - `overlay/jdk/variants/TreeMap.ae` (doc/go/JAVA-BASE.md, amendment JB2): its two
   `buildFromIterator` methods are jdk26u's `buildFromSorted` (https://github.com/openjdk/jdk26u
   at `baf63fb`, `src/java.base/share/classes/java/util/TreeMap.java`) without the deserializing

@@ -1367,6 +1367,37 @@ digests recorded as `"-"`. `bin/java-check --record-ref` writes `"-"` only where
   no rerun. Cost: an hour; the reference keeps digests the check ignores.
 - *Recommended: (a)*: the reference says what is compared, as JCS80 (a)'s `"-"` does, and the classes stay a
   classification.
+### JCS138 System.Logger after java.util.logging
+
+F5 brings java.util.logging without `System.getLogger` (its `LoggerFinder`, `jdk.internal.logger`'s bootstrap and
+lazy loggers, `sun.util.logging.PlatformLogger`'s bridge): `java.lang.System` is jrt's hand-written Go, whose
+nested `System.Logger`, `System.Logger.Level` and `System.LoggerFinder` would be new hand-written types, and the
+corpus has one test that names them (`jdk/java/lang/System/Logger/interface/LoggerInterfaceTest`, filed under
+`:logging` today, not counted in F5's 27).
+- (a) Now, with F5: the three nested types in jrt (`system.ae`, `bin/jrt manifest`), `System.getLogger` and
+  `getLogger(String, ResourceBundle)` bound directly to a jrt `LoggerFinder` over jrt's `LoggingProviderImpl`
+  (overlay, which already holds `LogManagerAccess`), jdk26u's `LoggingProviderImpl`'s wrappers translated; no
+  `BootstrapLogger` (the configuration is read before any logger exists). About 1.5 days; 1 test, and the JDK
+  classes that log through `System.Logger` (none in the world yet).
+- (b) Deferred until a widening brings a JDK class that logs through it (SunJSSE's `SSLLogger`, JCS131, does: F3)
+  or a test area needs it; `:logging` narrowed to `System\$Logger` meanwhile.
+- *Recommended: (b)*, taken up with F3, whose `SSLLogger` is the first in-world user.
+
+### JCS139 Localized level names
+
+`Level.getLocalizedName` and the system loggers' bundle read `sun.util.logging.resources.logging`, a
+`ListResourceBundle` the JDK build generates from `logging.properties` (and ten translations) with
+`build.tools.compileproperties` (make/modules/java.logging/Gensrc.gmk), a build tool javac's tool does not
+carry (`bin/javac-vendor`'s `tool_dirs`; langtools' `compileproperties`, which it does carry, writes no `import`
+line, so its output differs from the build's).
+- (a) The tool added to `tool_dirs`, the root bundle (and the selected locales' translations, `JRT_LOCALES`)
+  generated in `bin/jrt-convert`'s generate step as KIND `gensrc:java.logging`, compared with the build's
+  `support/gensrc/java.logging`. Cost: half a day, and javac's tool rebuilt (its key changes): best folded
+  into the next night that rebuilds the tool anyway.
+- (b) No bundle: the lookup fails and `getLocalizedLevelName` answers the level's name, which is what the JDK
+  prints in the root and English locales (the bundle's values are the names' capitalized forms, which the JDK
+  upper-cases back); a non-English default locale prints English names.
+- *Recommended: (b)* for F5, (a) with the next change that rebuilds javac's tool.
 
 ## Decided (2026-11-05, the user)
 
@@ -1542,3 +1573,98 @@ JCS136 and JCS137 (Proposed).
 ## Decided (2026-11-05, the user)
 
 JCS136 (a): F1's internal packages made visible at the REPL; JCS137 (a): JCS99 (c)'s 9 status-only tests listed for --record-ref and rerun on the JDK.
+## As built: F5 (write-ahead)
+
+Branch `java-jc9-logging` (from `java-deferred-triage`, JCS128-JCS135 decided), 2026-11-05, prepared by day
+under the light rules: the closure, the variants, jrt's own class, the data step, j2g's two tables, and light
+checks only. Nothing converted, translated or built; the night's commands and their expected outcomes are below.
+F1 (the JCA) is prepared beside it on `java-jc9-jca`: this branch touches no crypto class, and its hunks in
+the shared files (`test/jrt/jrt_sources.ae`, `arbace/j2g/names.ae`, `arbace/j2g/model.ae`, `LICENSE.md`) are
+apart from the lists F1 extends (`security-sources`, the end of `class-supers` and of the rename table).
+
+**What comes in, and how** (jdk26u at `baf63fb`):
+
+| class (or group) | how |
+|---|---|
+| java.logging's 17 classes: `ConsoleHandler`, `ErrorManager`, `FileHandler`, `Filter`, `Formatter`, `Handler`, `Level`, `LogManager`, `LogRecord`, `Logger`, `Logging`, `LoggingMXBean`, `MemoryHandler`, `SimpleFormatter`, `SocketHandler`, `StreamHandler`, `XMLFormatter` | jdk26u's, translated as java.base's (`test/jrt/jrt_sources.ae`'s new `logging-sources`, KIND `share:java.logging`, as java.sql's two files); 9,697 lines |
+| `LogManager` | variant: the default configuration read as the resource `conf/logging.properties` when `java.util.logging.config.file` is unset; the manager's and the configuration class's names through the system loader alone (no context loader); the shutdown hook a `Thread(String)`; no `BootstrapLogger` redirection |
+| `Logger` | variant: the caller-sensitive `getLogger(String)`, `getLogger(String, String)`, `getAnonymousLogger(String)` pass no caller (no `Reflection.getCallerClass`; the JDK's null-caller paths); `demandLogger` tests a caller's module only when there is one (`VM.isSystemDomainLoader`); `findResourceBundle` by `ResourceBundle.getBundle(name, locale)` (jrt's one registry); `RbAccess` cut |
+| `Level` | variant: `computeLocalizedLevelName` by `ResourceBundle.getBundle(name, locale)`; `KnownLevel`'s custom levels kept in a map by loader (no `ClassLoaderValue`); `RbAccess` cut |
+| `LogRecord` | variant: `inferCaller` over `new Throwable().getStackTrace()` with `CallerFinder`'s test and `SimpleConsoleLogger.Formatting.isFilteredFrame`'s names (no `StackWalker`, F20); `serialPersistentFields` cut (serialization by design) |
+| `SimpleFormatter` | variant: the format by `SimpleConsoleLogger.Formatting.getSimpleFormat`'s rules, transcribed (no `jdk.internal.logger`) |
+| `FileHandler` | variant (`LoggingFileHandler.ae`: `FileHandler.ae` is the file: URL handler's): the lock file held by an output stream, availability by the in-process lock table alone (no `FileChannel`/`FileLock`, F7); `%h` without the set-UID check |
+| `sun.util.logging.internal.LoggingProviderImpl` | jrt's own (overlay): only `LogManagerAccess` and its holder, which `LogManager`'s static initializer registers with; no `LoggerFinder` (JCS138) |
+| `conf/logging.properties` | resource data: `bin/jrt-convert`'s generate step copies `src/java.logging/share/conf/logging.properties` as the build's Copy.gmk installs it (identical to the build's `jdk/conf/logging.properties`); `jdk/data/conf/logging.properties` after `update` |
+| j2g | rename `java/util/logging/Formatter` → `Logging_Formatter` (java.util.Formatter's Go name); `class-supers` gains the 10 logging classes the area's tests extend (11 of the 27 subclass `Handler`, `Logger`, `LogManager`, `Formatter`, ...), so interpreted subclasses work (JC4b's mechanism) |
+
+Left out: `LoggingPermission` (extends `BasicPermission`: F4's), `HttpLogFormatter` (sun.net.www.protocol.http's),
+`System.Logger` (JCS138), the localized level names' bundle (JCS139). Corrections to §5's F5 design: `LoggingMXBean`
+and `Logging` are plain Java (no java.lang.management), so they come in and `LogManager.getLoggingMXBean` works
+(`LoggingMXBeanTest2`); `MemoryHandler` has no management part; no table of handlers is needed: `LogManager`
+names classes through `ClassLoader.getSystemClassLoader().loadClass`, which is jrt's registry (the world's and a
+compiled program's classes; an interpreted test's classes are not in it, a second cause for configurations that
+name a test's own handler). What stays outside the world in members no variant replaces becomes j2g's
+operation-level stubs (J2G-SPEC §4.1), unreachable in the Go build: `LogRecord$CallerFinder` (StackWalker,
+`SurrogateLogger`), `LogRecord.writeObject`/`readObject` (serialization), `LogManager$LoggingProviderAccess.demandLoggerFor`
+and `Logger.setupResourceInfo(String, Module)`'s system-logger branch (`DefaultLoggerFinder.isSystem`; no finder
+calls the first, no system logger has a module). `report.edn`'s missing parts should list these and no other.
+
+**The closure's growth** (JCS135): `jdk/sources.txt` 907 → 925 lines (17 `share:java.logging`, 1 `overlay`);
+9,697 Java lines on the closure's 483,461 (+2.0%); the converted forms about 145 KB on `jdk/forms`' 12 MB.
+JC6b's 10k lines cost +1,634,304 bytes (+1.06%); expect about +1.5 MB on the gate build's 206,876,832-byte
+executable (`d86cb874a`), to be measured.
+
+**Light checks done** (stage 0 `ARBACE_HOST_EXE` main's, javac's tool `.tmp/gate-exe/javac-8f24f568a977b802084a`,
+`REPR_JAVA_STALE_OK=1`, each under 1 GB and 10 s):
+- the closure: `jrt.jrt-sources/print-sources` on `doc/go/java-surface.edn`: 924 lines (with the generate step's
+  `jrtgen` line, 925), the committed list plus exactly the 17 logging files and the overlay class;
+- the read: `bin/repr-java read-jdk --check OUT java.base TREE` of the 17 files and the overlay class as a patch of
+  java.base, as `bin/jrt-convert`'s convert step reads them: 18 converted, 0 failed, 0 javac errors, 0 unreadable;
+  `--no-javac` (the vendoring default): 18 native, 0 fallbacks, the forms identical;
+- the variants: `arbace.j2g.world/read-variants` and `apply-variant` on those forms (`.tmp/f5/vet.ae`), each then
+  parsed by `arbace.classes.parse/parse-class`: every replaced, cut and added member found (LogManager 4/0/1,
+  Logger 5/0/0, Level 1/0/0, LogRecord 1/1/1, SimpleFormatter 1/0/1, FileHandler 3/1/1; nested
+  `Level$KnownLevel` 1/1/1, `Level$RbAccess` 0/1/0, `Logger$RbAccess` 0/1/0, `LogManager$Cleaner` 1/0/0), all parsed;
+- `arbace/j2g/names.ae` and `model.ae` load (the rename found, 10 class-supers added); `bash -n bin/jrt-convert`;
+  the build's `conf/logging.properties` equal to the source's.
+Not checked by day: the analysis and translation (j2g on the whole world), javac's classes of the patch, the
+edge, the build, the runs.
+
+**The night's commands**, in order, heavy ones under `bin/heavy-lock` (expected outcomes after each):
+
+1. `bin/jrt-convert update`: sources 925 lines ("18 more"); generate: `conf/logging.properties` `:same` against
+   the build's `jdk/conf`; convert: `0 failed, 0 javac errors, ... 0 unreadable`, `no javac: ... 0 fallbacks`;
+   check: 18 forms files added (`java/util/logging/*.ae`, `sun/util/logging/internal/LoggingProviderImpl.ae`),
+   none different; `jdk/data/conf/logging.properties` new; the edge step's tables (javac's classes of the
+   unvaried sources) gain the logging classes' outside references (`StackWalker$StackFrame`, `StackWalker$Option`, `ObjectInputStream`,
+   `ObjectOutputStream` and their `GetField`/`PutField`, `ObjectStreamField`, `jdk.internal.logger.DefaultLoggerFinder`,
+   `SurrogateLogger`, `BootstrapLogger`, `jdk.internal.loader.ClassLoaderValue`,
+   `jdk.internal.access.JavaUtilResourceBundleAccess`, `jdk.internal.reflect.Reflection`, `FileChannel`'s members,
+   `OverlappingFileLockException`, `VM.isSetUID`, `Thread`'s five-argument constructor).
+2. `bin/j2g-edge update` (the frozen JVM): what j2g asks after the variants, a subset of the above (the
+   `StackWalker` family, the object streams, `ObjectStreamField`, `DefaultLoggerFinder`, `SurrogateLogger`,
+   `ClassLoaderValue`, `JavaUtilResourceBundleAccess`, which the unreplaced members name); `bin/j2g-edge verify` passes.
+3. `bin/arbace-go --gate-build` (stage 0): j2g's report lists the replaced/cut/added counts above and only the
+   missing parts named above; the executable's size against 206,876,832 (expect about +1.5 MB); `bin/jrt test`
+   passes.
+4. `bin/java-check --levels interp,compiled --jobs 8 --only 'jdk/java/util/logging|jdk/java/lang/management/PlatformLoggingMXBean|jdk/java/rmi/transport/runtimeThreadInheritanceLeak|jdk/com/sun/net/httpserver/(TaskRejectedTest|bugs/TruncatedRequestBody)|jdk/com/sun/security/sasl/digest/NoQuoteParams|jdk/java/lang/System/Logger'`:
+   the area's 31 run tests (all `:load-failed`/`:refused` now); at most the 27 / 26 of §3 pass (26 of them in
+   `jdk/java/util/logging`), about 19 / 18 expected (0.7). Expected to stay out: the 4 serialization tests
+   (`HigherResolutionTimeStamps/LogRecordWithNanos*`, `SerializeLogRecord*`, by design, JCS129),
+   `CheckLockLocationTest` (`UserPrincipal`, F9), the 6 with other causes (MXBeans, RMI, the HTTP server, SASL);
+   at risk: `TestInferCaller` interpreted (an interpreted caller's frames are the evaluator's), `TestLogger` and
+   `RootLoggerHandlers` interpreted (the test's own bundle and handlers are not in jrt's registry),
+   `ParentLoggerWithHandlerGC` and `TestLoggerNames` (collection of weakly held loggers, F17).
+5. `bin/java-check --judge` on the results; `test/java/divergences.edn`: `:logging` narrowed to `System\$Logger`
+   (JCS138), the tail filed by cause; `--record` of the levels' files once the whole corpus is rerun (no test
+   passing before may fail: `levels-known.edn`); `bin/reap --record`.
+6. `bin/gate` (essential) and, with JC9's other parts, `bin/gate --full` (its `jrt-convert verify` byte for
+   byte).
+
+Docs left for the night, with the numbers: JRT-SOURCES.md's closure list, JRT-NOTES.md (a "java.util.logging"
+section like JC6b's "java.io, zip and jar"), J2G-SPEC §4.1's closure paragraph and §4.4's rename, LICENSE.md's
+`jdk/forms` count ("17 of `src/java.logging/share/classes`"; the variants' entry is written).
+
+## Decided (2026-11-05, the user)
+
+JCS138 (b): System.Logger deferred to F3 (SSLLogger); JCS139 (b) for F5, no localized level-name bundle, (a) at the next rebuild of javac's tool.
