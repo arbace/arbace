@@ -776,7 +776,15 @@ since `java.time.chrono.Era` is `Era` (amendment TM7, accepted 2026-10-10);
 `sun/security/provider/SecureRandom` → `Sun_SecureRandom`, since `java.security.SecureRandom` is
 `SecureRandom` (amendment SC2, accepted 2026-10-10); `sun/net/www/protocol/jar/JarURLConnection` →
 `Jar_JarURLConnection`, since `java.net.JarURLConnection` is `JarURLConnection` (JC6b,
-doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JC6b": the `jar:` URL's connection in the world).
+doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JC6b": the `jar:` URL's connection in the world). Since F12 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F12 (write-ahead)"): `java/net/Authenticator` →
+`Net_Authenticator` (SunJSSE's `Authenticator`, F3's, is `Authenticator`), `sun/net/www/protocol/ftp/Handler` →
+`Ftp_Handler`, `sun/net/www/protocol/mailto/Handler` → `Mailto_Handler` (java.util.logging's `Handler`, F5's,
+is `Handler`), `sun/net/ftp/impl/FtpClient` → `FtpImpl_FtpClient` (its abstract class `sun.net.ftp.FtpClient`
+is `FtpClient`), `sun/net/www/protocol/http/HttpURLConnection` → `Http_HttpURLConnection`
+(`java.net.HttpURLConnection` is `HttpURLConnection`). Since F19: `javax/naming/directory/Attributes` → `Naming_Attributes` (java.util.jar's), `javax/naming/Reference`
+→ `Naming_Reference` (jrt's `java.lang.ref.Reference`). Since F13: `com/sun/management/ThreadMXBean` → `Sun_ThreadMXBean`,
+`com/sun/management/OperatingSystemMXBean` → `Sun_OperatingSystemMXBean` (java.lang.management's are
+`ThreadMXBean`, `OperatingSystemMXBean`).
 The check runs after translation (`arbace.j2g.checks`) over every Go package's package-level
 names and every type's method names, across j2g's generated files **and jrt's hand-written
 ones** (the stand-in files excepted, since replaced stand-ins are removed, §4.3); a collision is

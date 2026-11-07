@@ -30,7 +30,15 @@
 #                                 JDK's, the status alone for a test whose two JDK runs differ (JCS3
 #                                 (a)), stdout with identity hash codes masked when the plain digest
 #                                 differs or only the masked runs agreed (JCS17 (b)); load-failed,
-#                                 fail, differ, timeout otherwise, stderr's first line the reason
+#                                 fail, differ, timeout otherwise, stderr's first line the reason;
+#                                 since F6 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F6", JCS95
+#                                 (c)) a test whose sources name javac's API (com.sun.tools.javac,
+#                                 com.sun.source, javax.tools, javax.lang.model,
+#                                 javax.annotation.processing, java.util.spi.ToolProvider; not in a
+#                                 comment line) on javac's tool executable (REPR_JAVA_EXE, bin/repr-java's,
+#                                 which holds javac's world), its system compiler's platform the
+#                                 property jdk.internal.jrt.javac.platform (bin/repr-java platform-dir);
+#                                 without the tool, on the executable as the others (a warning)
 #                        compiled the tests translated by j2g (JC2, survey §7.2): in shards of
 #                                 --shard-size tests (default 500, JCS48 (a); a shard whose j2g dies
 #                                 split in two and run again, JCS48 (b); --shard K,...: those shards
@@ -494,6 +502,29 @@ cover_flags() {
   while IFS= read -r f; do cflags+=("$f"); done < "$3/cover-flags.txt"
 }
 
+# F6 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F6", JCS95 (c)): the interp level's tool tests, whose
+# sources name javac's API, which javac's tool executable holds and the shipped program does not: tool_re
+# the names (a source line that is no comment line), tool_exe the tool (REPR_JAVA_EXE, else bin/repr-java's
+# default; none: the tests run on run_exe's executable as before, said once), tool_platform the platform its
+# system compiler attributes against (jdk.internal.jrt.javac.SystemCompiler's property, as bin/javac-vendor's
+# generate step sets it), bin/repr-java's
+tool_re='(com\.sun\.tools\.javac|com\.sun\.source|javax\.tools|javax\.lang\.model|javax\.annotation\.processing)\.|java\.util\.spi\.ToolProvider'
+tool_exe() {
+  local e
+  . "$root/bin/lib/host.bash"
+  e=${REPR_JAVA_EXE:-$root/target/arbace-go/$(arbace_host_arch)/arbace-javac}
+  if [ -x "$e" ]; then echo "$e"; else echo "java-check: no javac tool executable $e: the tests naming javac's API run on the executable (F6)" >&2; fi
+}
+# tool_test (run_actions' p and dir): does a source file of the test name javac's API
+tool_test() {
+  local k rel dst pre
+  while IFS=$'\t' read -r k rel dst pre; do
+    [ "$k" = file ] || continue
+    grep -vE '^[[:space:]]*(\*|//|/\*)' "$dir/$rel" 2>/dev/null | grep -qE "$tool_re" && return 0
+  done < "$p/plan.tsv"
+  return 1
+}
+
 # run_exe: the executable that interprets and hosts j2g: JAVA_CHECK_EXE (the gate's), else the gate's build
 # at the checkout's key, else ARBACE_GATE_CACHE's or a --build's, which nothing compares with the checkout
 # (report 003's finding 8): named so
@@ -576,7 +607,11 @@ test_limit() {
 # under the test's limit (test_limit: its line in test/java/timeouts.txt, GTS102)
 run_actions() {
   local level=$1 exe=$2 mode=$3 fdir=$4 res="" i st w tmp lim st0="" res0="" cres n tmo
-  local -a x c
+  local -a x c props=()
+  # F6: a tool test interpreted on javac's tool, its system compiler against the platform
+  if [ "$level" = interp ] && [ -n "${texe:-}" ] && tool_test; then
+    exe=$texe props=(-Djdk.internal.jrt.javac.platform="$tplatform")
+  fi
   # GT8.3, GTS206 (a): under ARBACE_COVER_DIR the interp level runs the cover build's executable (cover_rexe), the
   # compiled level its programs built with the cover flags, each test with its GOCOVERDIR, ARBACE_COVER_DIR/java-LEVEL/ID
   [ -z "${ARBACE_COVER_DIR:-}" ] || [ "$level" != interp ] || exe=$cover_rexe
@@ -593,7 +628,7 @@ run_actions() {
       rm -rf "$w" "$tmp"; mkdir -p "$w" "$tmp"
       st=0; (cd "$w" && export TMPDIR="$tmp" && { [ -z "$fdir" ] || export ARBACE_PATH=$fdir; } \
                && { [ -z "${ARBACE_COVER_DIR:-}" ] || export $(cover_env "java-$level" "$id"); } && limited "$lim" "$exe" "$root/test/java/run.ae" --load "$mode" "${fdir:--}" "${x[8]}" \
-               -Dtest.src="$dir" -Dtest.classes="$work/classes/$id" -Djava.io.tmpdir="$tmp" -- "${x[@]:9}" \
+               -Dtest.src="$dir" -Dtest.classes="$work/classes/$id" -Djava.io.tmpdir="$tmp" ${props[@]+"${props[@]}"} -- "${x[@]:9}" \
                < "$work/empty" > "$p/out$i" 2> "$p/err$i") || st=$?
       if [ "$st" = 126 ] && grep -q '^java-check: load-failed: ' "$p/err$i"; then
         res="load-failed	$(grep -m1 '^java-check: load-failed: ' "$p/err$i" | sed 's/^java-check: load-failed: //' | tr '\t' ' ' | cut -c1-400)"
@@ -1059,6 +1094,17 @@ check() {
   fi
   # the executable interprets and hosts j2g: the levels read, nread, classes, print and diagnostics need none
   case ",$levels," in *,interp,*|*,compiled,*) rexe=$(run_exe) || return 1 ;; *) rexe=none ;; esac
+  # F6: the tool tests' executable and platform (interp)
+  texe= tplatform=
+  case ",$levels," in
+    *,interp,*)
+      if [ -z "${ARBACE_COVER_DIR:-}" ]; then
+        texe=$(tool_exe)
+        if [ -n "$texe" ]; then
+          tplatform=$(REPR_JAVA_EXE=$texe "$root/bin/repr-java" platform-dir) || { echo "java-check: no platform for javac's tool (bin/repr-java platform-dir)" >&2; return 1; }
+        fi
+      fi ;;
+  esac
   cover_setup || return 1
   mkdir -p "$formsc"; : > "$work/empty"
   rm -rf "$work/run"; rm -f "$work/forms-misses"
@@ -1081,10 +1127,10 @@ check() {
   fi
   jc plan "$ref" "$work" ${pargs[@]+"${pargs[@]}"} >&2
   jc plan-diag "$ref" "$work" "$levels" >&2
-  echo "== java-check: $(wc -l < "$work/run.list") tests at the levels $levels, $jobs at a time (the executable $rexe)" >&2
-  export -f cover_env cover_settle limited limited_cpu attempt_limits timeout_kind note_attempt program_tmo test_limit check_one nread_one read_opts read_finished first_line root_cause classes_sha classes_verdict judge run_actions run_dirs mask_hashes mask_dirs test_dir check_diag diag_actions diag_root diag_norm diag_first_diff diag_golden diag_judge
+  echo "== java-check: $(wc -l < "$work/run.list") tests at the levels $levels, $jobs at a time (the executable $rexe${texe:+; the tests naming the javac API on $texe})" >&2
+  export -f tool_test cover_env cover_settle limited limited_cpu attempt_limits timeout_kind note_attempt program_tmo test_limit check_one nread_one read_opts read_finished first_line root_cause classes_sha classes_verdict judge run_actions run_dirs mask_hashes mask_dirs test_dir check_diag diag_actions diag_root diag_norm diag_first_diff diag_golden diag_judge
   reset_timeout_log "$work/timeout-attempts.tsv"
-  export root work formsc forms_only save jdktest levels timeout from_committed load rexe reader_key="${reader_key:-}" classes_opts_s="${classes_opts[*]}"
+  export root work formsc forms_only save jdktest levels timeout from_committed load rexe texe tplatform tool_re reader_key="${reader_key:-}" classes_opts_s="${classes_opts[*]}"
   xargs -a "$work/run.list" -P "$jobs" -I{} bash -c 'classes_opts=($classes_opts_s); check_one "$1"' _ {} | LC_ALL=C sort > "$work/results.tsv"
   case ",$levels," in *,interp,*) export -f again interp_one; export jobs; again interp "$work/results.tsv" interp_one ;; esac
   case ",$levels," in

@@ -525,6 +525,24 @@ covers what.
   branch, and its other members keep the code of the members they replace: Copyright (c) Oracle
   and/or its affiliates, under the GNU General Public License version 2 with the Classpath
   Exception (text below), by the rule of B7; the rest of the file is Arbace's own.
+- Permissions, JAAS's core and PKI (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F4 (write-ahead)",
+  "As built: F2 (write-ahead)"; recorded by the rule of B7): the variants
+  `overlay/jdk/variants/Password.ae`, `PasswordCallback.ae`, `LoginContext.ae`, `Configuration.ae`,
+  `FilePermission.ae` (F4), `SignatureAccess.ae`, `X500Principal.ae`, `X500Name.ae`,
+  `SignatureUtil.ae`, `JceKeyProtector.ae`, `PKCS12KeyStore.ae`, `Sun.ae` and `SunEntriesPki.ae` (F2)
+  keep the jdk26u members they replace or add (https://github.com/openjdk/jdk26u at `baf63fb`, the
+  classes' files of `src/java.base/share/classes`) as repr/java converts them, with the changes they
+  name: Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2
+  with the Classpath Exception (text below); the rest of those files, the variants `Subject.ae`,
+  `PortConfig.ae`, `RegisteredDomain.ae` and `OCSP.ae`, and
+  `overlay/jdk/java.base/jdk/internal/event/EventHelper.java` (with jdk26u's names and signatures),
+  `jdk/internal/jrt/PkiAccess.java` and `sun/security/provider/PkiServices.java` (its service class
+  names are jdk26u's providers') are Arbace's own. Their jdk26u sources join `jdk/forms/` (the
+  closure's files above) once `bin/jrt-convert update` has run: 86 files of permission-sources (69
+  of `src/java.base/share/classes`, 1 of `src/java.base/unix/classes`, 15 of
+  `src/jdk.security.auth/share/classes`, 1 of `src/java.logging/share/classes`) and the 2 security
+  message bundles the build's `CompileProperties` generates, and 219 of pki-sources (218 of
+  `src/java.base/share/classes`, 1 of `src/jdk.security.auth/share/classes`).
 - Other Go-build variants (J2G-SPEC §4.6; recorded by the rule of B7):
   `overlay/jdk/variants/AbstractChronology.ae`, `BitSet.ae`, `CRC32.ae`, `Collectors.ae`,
   `File.ae`, `FileHandler.ae`, `ParseUtil.ae`, `TimeZone.ae`, `TzdbZoneRulesProvider.ae`,
@@ -540,6 +558,50 @@ covers what.
   (`java/lang/System.java`): Copyright (c) Oracle and/or its affiliates, under the GNU General
   Public License version 2 with the Classpath Exception (text below); the rest of those files is
   Arbace's own.
+- TLS (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F3 (write-ahead)"; recorded by the rule of B7): the
+  variants `overlay/jdk/variants/SSLContext.ae`, `SNIHostName.ae`, `SSLSocketImpl.ae`,
+  `InetAddressAccess.ae` and `ProviderConfigJsse.ae` keep the jdk26u members they replace or add
+  (https://github.com/openjdk/jdk26u at `baf63fb`, the classes' files of `src/java.base/share/classes`)
+  as repr/java converts them, with the changes they name, and `overlay/jdk/java.base/sun/security/ssl/SSLLogger.java`
+  is jdk26u's `SSLLogger.java` transcribed with the changes its header names: Copyright (c) Oracle and/or
+  its affiliates, under the GNU General Public License version 2 with the Classpath Exception (text
+  below), as its notice says; the rest of the variants, `overlay/jdk/java.base/sun/security/ssl/JsseServices.java`
+  (its service class names are jdk26u's SunJSSE's) and `jdk/internal/jrt/NetAccess.java` are Arbace's own.
+  Their jdk26u sources join `jdk/forms/` (the converted closure, under the same license as above): 205 of
+  tls-sources (`src/java.base/share/classes`); the resource data `sun/net/idn/uidna.spp` joins `jdk/data/`
+  (the resource data's item below).
+- URL and HTTP's classes (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F12 (write-ahead)"; recorded by the
+  rule of B7): the variants `overlay/jdk/variants/DefaultProxySelector.ae`, `HttpClient.ae`,
+  `HttpConnectSocketImpl.ae`, `HttpCookieAccess.ae` and `HttpURLConnectionImpl.ae` keep the jdk26u members
+  they replace (https://github.com/openjdk/jdk26u at `baf63fb`, the classes' files of
+  `src/java.base/share/classes`) as repr/java converts them, with the changes they name, and
+  `overlay/jdk/java.base/sun/util/logging/PlatformLogger.java` is jdk26u's `PlatformLogger.java` transcribed
+  with the changes its header names, its `JulBridge` from jdk26u's
+  `src/java.logging/share/classes/sun/util/logging/internal/LoggingProviderImpl.java`: Copyright (c) Oracle
+  and/or its affiliates, under the GNU General Public License version 2 with the Classpath Exception (text
+  below), as its notice says; the rest of the variants (`ProxySelector.ae`, `NetProperties.ae` too),
+  `overlay/jdk/java.base/jdk/internal/misc/InnocuousThread.java` (written after jdk26u's documented
+  factories) and NetAccess's cookie access are Arbace's own. Their jdk26u sources join `jdk/forms/` (the
+  converted closure, under the same license as above): 82 of http-sources (`src/java.base/share/classes`);
+  `conf/net.properties` joins `jdk/data/` (the resource data's item below).
+- javax.script's API and JNDI's names (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F19 (write-ahead)"; recorded by
+  the rule of B7): the variants `overlay/jdk/variants/ScriptEngineManager.ae`, `VersionHelper.ae` and
+  `NamingManager.ae` keep the jdk26u members they replace (https://github.com/openjdk/jdk26u at `baf63fb`,
+  `src/java.scripting/share/classes`, `src/java.naming/share/classes`) as repr/java converts them, with the changes
+  they name: Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2 with the
+  Classpath Exception (text below); the rest of the variants is Arbace's own. Their jdk26u sources join `jdk/forms/`
+  (the converted closure, under the same license): 63 of naming-script-sources.
+- java.lang.management without JMX (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F13 (write-ahead)";
+  recorded by the rule of B7): `overlay/jdk/java.base/java/lang/management/{ManagementFactory,ThreadInfo,LockInfo,MonitorInfo,MemoryUsage}.java`
+  `overlay/jdk/java.base/sun/management/{ManagementFactoryHelper,VMManagementImpl}.java` and
+  `overlay/jdk/java.base/com/sun/management/internal/OperatingSystemImpl.java` are jdk26u's files
+  (https://github.com/openjdk/jdk26u at `baf63fb`, `src/java.management/share/classes`, and
+  `src/jdk.management/unix/classes` for the last) transcribed with the changes their headers name: Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2 with
+  the Classpath Exception (text below), as their notices say; the variants `overlay/jdk/variants/ThreadImpl.ae` and
+  `BaseOperatingSystemImpl.ae`, `com/sun/management/internal/JrtPlatformBeans.java`, the
+  skeletons `overlay/jdk/java.base/javax/management/ObjectName.java` and `openmbean/CompositeData.java` (written for
+  JMX's documented signatures), `jdk/internal/jrt/HostManagement.java` and `go/arbace/jrt/management{,_linux,_tamago}.ae` are Arbace's
+  own (written for jdk26u's documented natives and Linux's /proc and syscalls). Their jdk26u sources join `jdk/forms/` (the converted closure, under the same license): 29 of management-sources.
 - `go/arbace/jrt/fdlibm.ae` and the `FdLibm` part of `go/arbace/jrt/math.ae` (`Log`, `Cbrt`,
   `Pow`): jrt's hand-written Go forms porting, as written, https://github.com/openjdk/jdk26u at
   `baf63fb`, `src/java.base/share/classes/java/lang/FdLibm.java` (doc/go/JRT-NOTES.md, phase 1
@@ -718,6 +780,14 @@ covers what.
     `src/java.base/share/classes/jdk/internal/icu/impl/data/icudata/`: ICU4J's normalization data
     (ICU 78.1, as jdk26u's `src/java.base/share/legal/icu.md` records), under the ICU4J License,
     the Unicode License V3 (text below);
+  - `sun/net/idn/uidna.spp` (doc/classes/JAVA-DEFERRED-TRIAGE.md, F3: java.net.IDN), copied from
+    jdk26u's `src/java.base/share/classes/sun/net/idn/`: ICU4J's StringPrep profile for IDNA (RFC 3491),
+    under the ICU4J License, the Unicode License V3 (text below), as jdk26u's
+    `src/java.base/share/legal/icu.md` records ICU's data;
+  - `conf/net.properties` (doc/classes/JAVA-DEFERRED-TRIAGE.md, F12: sun.net.NetProperties' defaults), as
+    `make/modules/java.base/Copy.gmk` makes it: jdk26u's `src/java.base/share/conf/net.properties` followed
+    by `src/java.base/unix/conf/net.properties`, Copyright (c) Oracle and/or its affiliates, under the GNU
+    General Public License version 2 with the Classpath Exception (text below), as their notices say;
   - `java/lang/uniName.dat`, generated as the JDK build generates it
     (`make/modules/java.base/Gendata.gmk`: jdk26u's build tool
     `make/jdk/src/classes/build/tools/generatecharacter/CharacterName.java` run on

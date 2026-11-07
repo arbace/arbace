@@ -1,0 +1,48 @@
+;; Go-build variant of javax.naming.spi.NamingManager (J2G-SPEC §4.6; doc/classes/JAVA-DEFERRED-TRIAGE.md, F19,
+;; "As built: F19 (write-ahead)"): read by j2g only. getInitialContext keeps jdk26u's factory per class name,
+;; cached per class loader (jdk.internal.loader.ClassLoaderValue, outside the world): jrt has one registry of
+;; classes and no loaders to tell apart (J2G-SPEC §10.3), so the cache is a map by class name, filled as
+;; jdk26u's computeIfAbsent fills it. getFactory finds no ServiceLoader provider (outside the world: no
+;; META-INF/services, J2G-SPEC §12), so the factory is the class named, instantiated as jdk26u does when no
+;; provider has the name (its own LDAP, DNS and RMI providers are not in the Go build). Otherwise jdk26u's code
+;; (baf63fb; Copyright (c) Oracle and/or its affiliates, GPL 2 with the Classpath Exception: LICENSE.md); the
+;; rest Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+(in-ns 'javax.naming.spi)
+
+(j2g/variant NamingManager
+  (j2g/cut (field ^:private ^:static ^:final ^{:tag (ClassLoaderValue InitialContextFactory)} FACTORIES_CACHE))
+  (j2g/add (field ^:private ^:static ^:final ^{:tag (java.util.concurrent.ConcurrentHashMap String InitialContextFactory)} FACTORIES_BY_NAME
+             (java.util.concurrent.ConcurrentHashMap.)))
+
+  (method ^:public ^:static getInitialContext :throws [NamingException] ^Context [^{:tag (Hashtable ? ?)} env]
+    (let [^:mutable ^InitialContextFactory factory nil
+          builder (NamingManager/getInitialContextFactoryBuilder)]
+      (if (nil? builder)
+          (let [^String className (when (some? env)
+                                    (cast String (.get env Context/INITIAL_CONTEXT_FACTORY)))]
+            (when (nil? className)
+              (let [ne (NoInitialContextException.
+                         (java-str
+                           "Need to specify class name in environment or system property, or in an application resource file: "
+                           Context/INITIAL_CONTEXT_FACTORY))]
+                (throw ne)))
+            (try
+              (set! factory
+                    (cast InitialContextFactory
+                          (.computeIfAbsent FACTORIES_BY_NAME className
+                                            (lambda java.util.function.Function ^InitialContextFactory [^String ky]
+                                              (NamingManager/getFactory ky)))))
+              (catch FactoryInitializationError e (throw (.getCause e)))))
+          (set! factory (.createInitialContextFactory builder env)))
+      (.getInitialContext factory env)))
+
+  (method ^:private ^:static getFactory ^InitialContextFactory [^String className]
+    (let [^:mutable ^InitialContextFactory factory nil]
+      (try
+        (let [o (.newInstance (.loadClass helper className))]
+          (set! factory (cast InitialContextFactory o)))
+        (catch Exception e
+          (let [ne (NoInitialContextException. (java-str "Cannot instantiate class: " className))]
+            (.setRootCause ne e)
+            (throw (FactoryInitializationError. ne)))))
+      factory)))

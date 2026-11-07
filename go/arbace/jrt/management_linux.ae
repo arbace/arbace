@@ -1,0 +1,172 @@
+;; jrt: the operating system's facts java.lang.management's OperatingSystemMXBean asks (doc/classes/
+;; JAVA-DEFERRED-TRIAGE.md, F13 slice 5), on Linux, as jdk26u's libmanagement_ext reads them
+;; (src/jdk.management/linux/native/libmanagement_ext/OperatingSystemImpl.c, UnixOperatingSystem.c): sysinfo for
+;; the memory and swap sizes, /proc/self/stat's vsize, the process's CPU time, /proc/self/fd and RLIMIT_NOFILE for
+;; the descriptors, /proc/stat's ticks for the loads (each since the previous call, the first since boot),
+;; /proc/loadavg. The natives of jdk.internal.jrt.HostManagement (management.ae's HostManagement_*).
+(in-ns 'go.arbace.jrt)
+
+(go/file "management_linux.go"
+  :build ["//go:build linux"]
+  :imports [[os "os"] [strconv "strconv"] [strings "strings"] [sync "sync"] [syscall "syscall"]])
+
+(go/const
+  [^{:tag int32 :val 0} osCommittedVirtual 0]
+  [^{:tag int32 :val 1} osFreeMemory 1]
+  [^{:tag int32 :val 2} osTotalMemory 2]
+  [^{:tag int32 :val 3} osFreeSwap 3]
+  [^{:tag int32 :val 4} osTotalSwap 4]
+  [^{:tag int32 :val 5} osProcessCpuTime 5]
+  [^{:tag int32 :val 6} osOpenFds 6]
+  [^{:tag int32 :val 7} osMaxFds 7]
+  [^{:tag int32 :val 8} osConfiguredCpus 8]
+  [^{:tag int32 :val 9} osOnlineCpus 9]
+  [^{:tag int32 :val 10} osTotalCpuTicksNanos 10])
+
+(go/func HostManagement_Os0_I__J_native
+  "HostManagement_Os0_I__J_native is the operating system's fact of kind k (osCommittedVirtual ...), -1 when it
+cannot be read.\n"
+  ^int64 [^int32 k]
+  (switch k
+    (case [osCommittedVirtual]
+      (let [f (procStatFields "/proc/self/stat")]
+        (when (< (len f) 23) (return -1))
+        (let [(values v err) (strconv/ParseInt (aget f 22) 10 64)]
+          (when (!= err nil) (return -1))
+          (return v))))
+    (case [osFreeMemory osTotalMemory osFreeSwap osTotalSwap]
+      (let [^syscall/Sysinfo_t si (zero syscall/Sysinfo_t)]
+        (when (!= (syscall/Sysinfo (addr si)) nil) (return -1))
+        (let [unit (conv int64 (.-Unit si))]
+          (switch k
+            (case [osFreeMemory] (return (* (conv int64 (.-Freeram si)) unit)))
+            (case [osTotalMemory] (return (* (conv int64 (.-Totalram si)) unit)))
+            (case [osFreeSwap] (return (* (conv int64 (.-Freeswap si)) unit)))
+            (default (return (* (conv int64 (.-Totalswap si)) unit)))))))
+    (case [osProcessCpuTime]
+      (let [^syscall/Rusage ru (zero syscall/Rusage)]
+        (when (!= (syscall/Getrusage syscall/RUSAGE_SELF (addr ru)) nil) (return -1))
+        (return (+ (.Nano (.-Utime ru)) (.Nano (.-Stime ru))))))
+    (case [osOpenFds]
+      (let [(values es err) (os/ReadDir "/proc/self/fd")]
+        (when (!= err nil) (return -1))
+        ;; the directory's own descriptor, open while it is read, left out as the JDK's count leaves it
+        (return (- (conv int64 (len es)) 1))))
+    (case [osMaxFds]
+      (let [^syscall/Rlimit rl (zero syscall/Rlimit)]
+        (when (!= (syscall/Getrlimit syscall/RLIMIT_NOFILE (addr rl)) nil) (return -1))
+        (return (conv int64 (.-Cur rl)))))
+    (case [osConfiguredCpus]
+      (return (conv int64 (countCpus "/sys/devices/system/cpu/possible"))))
+    (case [osOnlineCpus]
+      (return (conv int64 (countCpus "/sys/devices/system/cpu/online"))))
+    (case [osTotalCpuTicksNanos]
+      (let [(values ts ok) (cpuTicks -1)]
+        (when (not ok) (return -1))
+        ;; USER_HZ is 100 on Linux: 10 ms a tick
+        (return (* (aget ts 0) 10000000)))))
+  -1)
+
+(go/func procStatFields
+  "procStatFields is the space-separated fields of a /proc/PID/stat file, the command (in parentheses) one field.\n"
+  ^{:tag (slice string)} [^string path]
+  (let [(values b err) (os/ReadFile path)]
+    (when (!= err nil) (return nil))
+    (let [s (conv string b)
+          i (strings/LastIndex s ")")]
+      (when (< i 0) (return nil))
+      (append (lit (slice string) "pid" "comm") (spread (strings/Fields (subslice s (+ i 1))))))))
+
+(go/func countCpus
+  "countCpus is the CPUs of a sysfs list (\"0-3,5\"), 0 when it cannot be read.\n"
+  ^int [^string path]
+  (let [(values b err) (os/ReadFile path)
+        ^int n 0]
+    (when (!= err nil) (return 0))
+    (range [_ r (strings/Split (strings/TrimSpace (conv string b)) ",")]
+      (let [ab (strings/SplitN r "-" 2)
+            (values a e1) (strconv/Atoi (aget ab 0))]
+        (when (!= e1 nil) (continue))
+        (if (== (len ab) 2)
+          (let [(values z e2) (strconv/Atoi (aget ab 1))]
+            (when (== e2 nil) (set! n (+ n (+ (- z a) 1)))))
+          (inc! n))))
+    n))
+
+(go/func cpuTicks
+  "cpuTicks is /proc/stat's line of cpu (-1: the total line): its total and busy ticks (all but idle and iowait).\n"
+  [^int32 cpu] :results [(array 2 int64) bool]
+  (let [(values b err) (os/ReadFile "/proc/stat")
+        ^{:tag (array 2 int64)} out (zero (array 2 int64))
+        name "cpu"]
+    (when (!= err nil) (return out false))
+    (when (>= cpu 0) (set! name (+ "cpu" (strconv/Itoa (conv int cpu)))))
+    (range [_ line (strings/Split (conv string b) "\n")]
+      (let [f (strings/Fields line)]
+        (when (and (> (len f) 4) (== (aget f 0) name))
+          (let [^int64 total 0
+                ^int64 idle 0]
+            (range [i x (subslice f 1)]
+              (let [(values v e) (strconv/ParseInt x 10 64)]
+                (when (== e nil)
+                  (set! total (+ total v))
+                  (when (or (== i 3) (== i 4)) (set! idle (+ idle v))))))
+            (aset out 0 total)
+            (aset out 1 (- total idle))
+            (return out true)))))
+    (return out false)))
+
+(go/var ^{:tag sync/Mutex} loadMu)
+(go/var ^{:doc "lastTicks is the ticks of the previous load sample, per CPU (-1 the total) (loadMu).\n"
+          :tag (map int32 (array 2 int64))} lastTicks (make (map int32 (array 2 int64))))
+(go/var ^{:doc "lastProc is the process's CPU ticks (nanoseconds) and the total ticks at the previous process
+load sample (loadMu).\n" :tag (array 2 int64)} lastProc)
+
+(go/func HostManagement_CpuLoad0_I__D_native
+  "HostManagement_CpuLoad0_I__D_native is the recent CPU load of cpu (-1: the whole system) in [0, 1]: the busy
+share of its ticks since the previous call (the first: since boot), -1 when it cannot be read.\n"
+  ^float64 [^int32 cpu]
+  (let [(values ts ok) (cpuTicks cpu)]
+    (when (not ok) (return -1))
+    (.Lock loadMu)
+    (defer (.Unlock loadMu))
+    (let [prev (aget lastTicks cpu)
+          dt (- (aget ts 0) (aget prev 0))
+          db (- (aget ts 1) (aget prev 1))]
+      (aset lastTicks cpu ts)
+      (when (<= dt 0) (return 0))
+      (let [l (/ (conv float64 db) (conv float64 dt))]
+        (when (> l 1) (set! l 1))
+        (when (< l 0) (set! l 0))
+        l))))
+
+(go/func HostManagement_ProcessCpuLoad0__D_native
+  "HostManagement_ProcessCpuLoad0__D_native is the process's share of the system's CPU time since the previous
+call (the first: since boot), in [0, 1], -1 when it cannot be read.\n"
+  ^float64 []
+  (let [(values ts ok) (cpuTicks -1)
+        p (HostManagement_Os0_I__J_native osProcessCpuTime)]
+    (when (or (not ok) (< p 0)) (return -1))
+    (.Lock loadMu)
+    (defer (.Unlock loadMu))
+    ;; total ticks in nanoseconds of all CPUs (USER_HZ 100)
+    (let [total (* (aget ts 0) 10000000)
+          dp (- p (aget lastProc 0))
+          dt (- total (aget lastProc 1))]
+      (set! lastProc (lit (array 2 int64) p total))
+      (when (<= dt 0) (return 0))
+      (let [l (/ (conv float64 dp) (conv float64 dt))]
+        (when (> l 1) (set! l 1))
+        (when (< l 0) (set! l 0))
+        l))))
+
+(go/func HostManagement_LoadAverage0__D_native
+  "HostManagement_LoadAverage0__D_native is the one-minute load average of /proc/loadavg, -1 when it cannot be read.\n"
+  ^float64 []
+  (let [(values b err) (os/ReadFile "/proc/loadavg")]
+    (when (!= err nil) (return -1))
+    (let [f (strings/Fields (conv string b))]
+      (when (== (len f) 0) (return -1))
+      (let [(values v e) (strconv/ParseFloat (aget f 0) 64)]
+        (when (!= e nil) (return -1))
+        v))))

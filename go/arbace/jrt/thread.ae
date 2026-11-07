@@ -140,6 +140,19 @@ LockSupport's permit.\n"
           ^{:tag (chan (struct))} intr
           ^{:tag (chan (struct))} park
           ^{:tag (Volatile any) :doc "LockSupport's blocker (getBlocker)\n"} parkBlocker
+          ^{:tag atomic/Int32 :doc "what the thread waits for (management.ae: wsNone, wsBlocked, wsWaiting, wsTimed), for
+getState and ThreadMXBean\n"} wstate
+          ^{:tag (Volatile any) :doc "the object it is blocked or waits on (management.ae), or nil\n"} waitOn
+          ^{:tag atomic/Int64 :doc "the times it blocked to enter a monitor or a lock (ThreadInfo.getBlockedCount)\n"} blockedCount
+          ^{:tag atomic/Int64 :doc "the times it waited (ThreadInfo.getWaitedCount)\n"} waitedCount
+          ^{:tag atomic/Int64 :doc "the nanoseconds blocked while contention monitoring was on\n"} blockedNanos
+          ^{:tag atomic/Int64 :doc "the nanoseconds waited while contention monitoring was on\n"} waitedNanos
+          ^{:tag atomic/Int64 :doc "when the current wait began (nanoseconds since vmStart), for the times\n"} waitSince
+          ^{:tag sync/Mutex :doc "guards held and syncs (management.ae)\n"} heldMu
+          ^{:tag (slice heldMonitor) :doc "the monitors it holds, in entry order, once tracked (management.ae)\n"} held
+          ^{:tag (slice any) :doc "the ownable synchronizers (jrt's ReentrantLocks) it holds, once tracked\n"} syncs
+          ^{:tag (Volatile any) :doc "its Java frames when it began to wait, once tracked (management.ae: another thread's
+ThreadInfo stack)\n"} waitStack
           ^{:tag (Volatile Thread_UncaughtExceptionHandler)} ueh
           ^{:tag (map (* ThreadLocal) any) :doc "thread locals, used by the thread itself only\n"} locals
           ^{:tag (map (* ThreadLocal) any)} inheritable
@@ -236,9 +249,12 @@ current thread is one, as Java's.\n"
 (go/func threadEntry
   "threadEntry is the goroutine of a started Thread (and the entry of every goroutine Java
 code starts): it puts the Thread in the slot, runs run, hands an uncaught exception to the
-handlers and ends the thread (joiners released, number freed).\n"
+handlers and ends the thread (joiners released, number freed). The thread is live
+(management.ae's registry, java.lang.management's ThreadMXBean) from before its run to its
+end.\n"
   [^{:tag (* Thread)} t]
   (.Store (.-num t) (allocNum))
+  (liveAdd t)
   (setLocal (conv unsafe/Pointer t))
   (let [exc (runCatching (fn [] (.Run__V (.-self t))))]
     (when (!= exc nil)
@@ -252,6 +268,7 @@ handlers and ends the thread (joiners released, number freed).\n"
   (close (.-done t))
   (setLocal nil)
   (freeNum (.Swap (.-num t) 0))
+  (liveRemove t)
   (when (not (.Load (.-daemon t)))
     (nonDaemonAdd -1)))
 
@@ -310,11 +327,16 @@ current thread is interrupted. A thread never started is not alive: join returns
         (panic (InterruptedException_New)))
       (return))
     (if (< d 0)
-      (select
-        (case (<! (.-done t)))
-        (case (<! (.-intr me)) (panic (InterruptedException_New))))
+      (do
+        (waitBegin me wsWaiting t)
+        (defer (waitEnd me))
+        (select
+          (case (<! (.-done t)))
+          (case (<! (.-intr me)) (panic (InterruptedException_New)))))
       (let [tm (time/NewTimer d)]
         (defer (.Stop tm))
+        (waitBegin me wsTimed t)
+        (defer (waitEnd me))
         (select
           (case (<! (.-done t)))
           (case (<! (.-C tm)))
@@ -358,12 +380,19 @@ current thread is interrupted. A thread never started is not alive: join returns
 (go/method Impl_ThreadId__J ^int64 [^{:tag (* Thread)} t ^Thread_I this] (.-tid t))
 (go/method Impl_IsVirtual__Z ^bool [^{:tag (* Thread)} t ^Thread_I this] (.-virtual t))
 (go/method Impl_GetState__Thread_State
-  "Impl_GetState__Thread_State is getState: NEW before start, TERMINATED after the run, else
-RUNNABLE (jrt does not tell a thread blocked or waiting from a running one: JC8).\n"
+  "Impl_GetState__Thread_State is getState: NEW before start, TERMINATED after the run, BLOCKED,
+WAITING or TIMED_WAITING while it waits (management.ae's waitBegin, since F13; before, RUNNABLE, JC8), else
+RUNNABLE.\n"
   ^{:tag (* Thread_State)} [^{:tag (* Thread)} t ^Thread_I this]
   (switch (.Load (.-state t))
     (case [threadNew] (return Thread_State_NEW))
     (case [threadTerminated] (return Thread_State_TERMINATED)))
+  ;; F13 (management.ae): what an alive thread waits for, recorded by the monitors' contended entry, wait,
+  ;; sleep, join, park and the locks' waits
+  (switch (.Load (.-wstate t))
+    (case [wsBlocked] (return Thread_State_BLOCKED))
+    (case [wsWaiting] (return Thread_State_WAITING))
+    (case [wsTimed] (return Thread_State_TIMED_WAITING)))
   Thread_State_RUNNABLE)
 
 ;; ---- java.lang.Thread.State, an enum (§7.13)
@@ -518,7 +547,9 @@ the goroutine ends).\n"
     (.Store (.-state t) threadAlive)
     (.Store (.-num t) n)
     (setLocal (conv unsafe/Pointer t))
-    (runtime/AddCleanup t freeNum n)
+    ;; management.ae: an adopted thread is no live thread of the counts, but can own a monitor
+    (adoptedAdd n t)
+    (runtime/AddCleanup t freeAdopted n)
     t))
 
 (go/func Thread_CurrentThread__Thread "Thread_CurrentThread__Thread is Thread.currentThread().\n"
@@ -547,6 +578,8 @@ interrupted before or during the sleep (the status cleared).\n"
       (return))
     (let [tm (time/NewTimer d)]
       (defer (.Stop tm))
+      (waitBegin me wsTimed nil)
+      (defer (waitEnd me))
       (select
         (case (<! (.-C tm)))
         (case (<! (.-intr me))
@@ -662,6 +695,8 @@ threads, runs the shutdown hooks (as the JVM's DestroyJavaVM does) and returns t
         (set! t (CurrentThread))
         (.Store (.-name t) (Str "main"))))
     (.Store (.-daemon t) false)
+    ;; the main thread is live from here (management.ae), as the JVM's from its start
+    (liveAdd t)
     (keepAlive)
     (let [exc (runCatching run)
           status 0]

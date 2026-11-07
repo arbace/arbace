@@ -146,6 +146,7 @@ interruptible and interrupted (the status consumed).\n"
         (set! (.-owner l) me)
         (set! (.-holds l) 1)
         (.Unlock (.-mu l))
+        (syncHeld me l true)
         (return true))
       (== (.-owner l) me)
       (do
@@ -157,9 +158,16 @@ interruptible and interrupted (the status consumed).\n"
         (return true)))
     (let [ch (.wait (addr (.-g l)))]
       (.Unlock (.-mu l))
-      (switch (block ch me interruptible deadline)
+      ;; a thread waiting for a lock parks in the JDK: WAITING (TIMED_WAITING with a deadline) on the lock
+      ;; (management.ae; the JDK's blocker is the lock's AQS sync object, which jrt's lock has not)
+      (let [^int32 ws wsTimed]
+        (when (.IsZero deadline) (set! ws wsWaiting))
+        (waitBegin me ws l))
+      (let [r (block ch me interruptible deadline)]
+        (waitEnd me)
+        (switch r
         (case [wokenInterrupted] (panic (InterruptedException_New)))
-        (case [wokenTimeout] (return false)))
+        (case [wokenTimeout] (return false))))
       (.Lock (.-mu l)))))
 
 (go/method Lock__V "Lock__V is lock().\n" [^{:tag (* ReentrantLock)} l]
@@ -174,7 +182,7 @@ interruptible and interrupted (the status consumed).\n"
     (.Lock (.-mu l))
     (defer (.Unlock (.-mu l)))
     (cond
-      (== (.-owner l) nil) (do (set! (.-owner l) me) (set! (.-holds l) 1) (return true))
+      (== (.-owner l) nil) (do (set! (.-owner l) me) (set! (.-holds l) 1) (syncHeld me l true) (return true))
       (== (.-owner l) me) (do (inc! (.-holds l)) (return true)))
     false))
 
@@ -193,7 +201,8 @@ the lock.\n"
     (dec! (.-holds l))
     (when (== (.-holds l) 0)
       (set! (.-owner l) nil)
-      (.open (addr (.-g l))))
+      (.open (addr (.-g l)))
+      (syncHeld me l false))
     (.Unlock (.-mu l))))
 
 (go/method IsLocked__Z ^bool [^{:tag (* ReentrantLock)} l]
@@ -297,7 +306,13 @@ Whether it was signalled (before the deadline).\n"
       (set! (.-holds l) 0)
       (.open (addr (.-g l)))
       (.Unlock (.-mu l))
+      (syncHeld me l false)
+      ;; WAITING (TIMED_WAITING with a deadline) on the condition, as a JDK thread parks on it (management.ae)
+      (let [^int32 ws wsTimed]
+        (when (.IsZero deadline) (set! ws wsWaiting))
+        (waitBegin me ws c))
       (let [why (block (.-ch w) me interruptible deadline)]
+        (waitEnd me)
         (.Lock (.-mu l))
         (when (!= why woken)
           (let [found false]
@@ -320,6 +335,7 @@ Whether it was signalled (before the deadline).\n"
         (set! (.-owner l) me)
         (set! (.-holds l) saved)
         (.Unlock (.-mu l))
+        (syncHeld me l true)
         (when (== why wokenInterrupted)
           (panic (InterruptedException_New)))
         (== why woken)))))
@@ -595,6 +611,11 @@ spuriously, as Java's park.\n"
       (let [tm (time/NewTimer d)]
         (defer (.Stop tm))
         (set! tc (.-C tm))))
+    ;; WAITING or TIMED_WAITING on the blocker (management.ae)
+    (if (== tc nil)
+      (waitBegin me wsWaiting (.Load (.-parkBlocker me)))
+      (waitBegin me wsTimed (.Load (.-parkBlocker me))))
+    (defer (waitEnd me))
     (select
       (case (<! (.-park me)))
       (case (<! (.-intr me)) (.Impl_Interrupt__V me me))
