@@ -11,6 +11,8 @@
 #                                         against its SHA-256 (the license text too); whimsical is read in
 #                                         place from go-whim (GOWHIM, default ../go-whim), checked at its
 #                                         tree hash
+#   bin/repr-scheme pins check            (GT9, SC234; bin/gate --pins) the pins hold, no fetch: every corpus file and license at its SHA-256, whimsical's
+#                                         tree, Chez's version and boot files, Chibi's version (test/scheme/corpora.edn's :reference)
 #   bin/repr-scheme corpus list           the corpora, their files and bytes
 #   bin/repr-scheme dump [--mode M] FILE...   Chez's reading of the files (tools/schemedump/dump.ss)
 #   bin/repr-scheme read [--full] [-o DIR] FILE...   the files as Scheme forms, one datum a line; --full: with the
@@ -22,6 +24,8 @@
 #                                         (:lines); needs no Chez (the corpora fetched); --record: the print level's record,
 #                                         test/scheme/roundtrip-results.edn (a whole run); --corpus (SM9): those corpora alone
 #                                         (an id of test/scheme/corpora.edn, a glob such as 'srfi-*', or probes)
+#   bin/repr-scheme roundtrip --only-list FILE   (GT9, the gate's rotation) only the files FILE keys, CORPUS/PATH or probe/ID a line as
+#                                         test/scheme/roundtrip-results.edn names them; a partial run, no --record; the failing keys print as `FAILED KEY`
 #   bin/repr-scheme spec-check            doc/scheme/SPEC.md's examples: each Scheme block read by the reader equal to the forms block after it
 #   bin/repr-scheme check [--quick] [--record] [--corpus ID]...   every corpus file, the probes (test/scheme/probes.edn) and
 #                                         the scans of the lexical classes over all Unicode scalar values, read and
@@ -88,6 +92,36 @@ corpus_fetch() {
   done
 }
 
+# pins_check (GT9, SC234; the gate's `bin/gate --pins`): the pins hold, no fetch, no network: every corpus file and license at its SHA-256 under
+# the corpora's directory (a missing or changed one is named), whimsical's tree at go-whim's checkout, Chez's version and boot files, Chibi's version
+pins_check() {
+  local bad=0 id list n=0 want have f out bd
+  list=$root/.tmp/repr-scheme/pins.sums; mkdir -p "$(dirname "$list")"; : > "$list"
+  for id in $(corpus_ids); do
+    [ "$id" != whimsical ] || continue
+    { read -r _ _ lic licsha
+      while IFS=$'\t' read -r p h; do printf '%s  %s\n' "$h" "$corpora/$id/$p" >> "$list"; n=$((n + 1)); done
+      if [ -n "$lic" ] && [ -n "$licsha" ]; then printf '%s  %s\n' "$licsha" "$corpora/$id.license" >> "$list"; n=$((n + 1)); fi
+    } < <(corpus_pins "$id")
+  done
+  if [ -s "$list" ]; then
+    out=$(sha256sum -c --quiet "$list" 2>&1 | head -20 || true)
+    [ -z "$out" ] || { echo "$out" | sed 's/^/  PIN /'; bad=1; }
+  fi
+  want=$(arbace_tool -e "(println (:tree (first (filter #(= (:id %) :whimsical) (:corpora (read-string (slurp \"$root/test/scheme/corpora.edn\")))))))")
+  have=$(git -C "$gowhim" rev-parse HEAD:whimsical 2>/dev/null || echo none)
+  [ "$want" = "$have" ] || { echo "  PIN go-whim's whimsical is at tree $have, the pin is $want"; bad=1; }
+  pin_ref() { arbace_tool -e "(print (get-in (read-string (slurp \"$root/test/scheme/corpora.edn\")) [:reference $1]))"; }
+  have=$("$CHEZ" --version 2>&1 | head -1); [ "$have" = "$(pin_ref :chez)" ] || { echo "  PIN chez is $have, the pin is $(pin_ref :chez)"; bad=1; }
+  have=$("${CHIBI:-chibi-scheme}" -V 2>&1 | sed -n 's/^chibi-scheme \([0-9.]*\) .*$/\1/p'); [ "$have" = "$(pin_ref :chibi)" ] || { echo "  PIN chibi-scheme is $have, the pin is $(pin_ref :chibi)"; bad=1; }
+  bd=$(pin_ref :boot-dir)
+  while read -r f want; do
+    have=$(sha256sum < "$bd/$f" 2>/dev/null | cut -c1-64)
+    [ "$have" = "$want" ] || { echo "  PIN Chez's $bd/$f is $have, the pin is $want"; bad=1; }
+  done < <(arbace_tool -e "(doseq [[k v] (:boot (:reference (read-string (slurp \"$root/test/scheme/corpora.edn\"))))] (println k v))")
+  if [ $bad = 0 ]; then echo "scheme pins: $n corpus files and licenses at their SHA-256, whimsical's tree, Chez $(pin_ref :chez) and its boot files, Chibi $(pin_ref :chibi)"; else echo "scheme pins: NOT held" >&2; return 1; fi
+}
+
 dump_cmd() { "$CHEZ" --script "$root/tools/schemedump/dump.ss" "$@"; }
 
 # selected NAME: whether --corpus selected NAME (a corpus id, probes or scans; a glob such as srfi-*), every name when none was given
@@ -116,16 +150,20 @@ check() {
 
 roundtrip() {
   local out=$root/.tmp/repr-scheme/roundtrip id rec=()
+  local only=()
   while [ $# -gt 0 ]; do
-    case $1 in --corpus) sel+=("$2"); shift 2 ;; --record) rec=(--record); shift ;; *) echo "roundtrip: $1?" >&2; exit 2 ;; esac
+    case $1 in --corpus) sel+=("$2"); shift 2 ;; --record) rec=(--record); shift ;;
+      --only-list) [ -f "${2:-}" ] || { echo "roundtrip: no list ${2:-}" >&2; exit 2; }; only=(--only-list "$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"); shift 2 ;;
+      *) echo "roundtrip: $1?" >&2; exit 2 ;; esac
   done
+  [ ${#only[@]} -eq 0 ] || [ ${#rec[@]} -eq 0 ] || { echo "bin/repr-scheme roundtrip: --only-list is a partial run (no --record)" >&2; exit 2; }
   [ ${#sel[@]} -eq 0 ] || [ ${#rec[@]} -eq 0 ] || { echo "bin/repr-scheme roundtrip: --record takes every corpus (no --corpus)" >&2; exit 2; }
   rm -rf "$out"; mkdir -p "$out"
   corpus_fetch >/dev/null
   arbace_tool -m arbace.repr.scheme prepare "$out" >/dev/null
   for id in $(check_ids); do selected "$id" || rm -f "$out/files-$id.txt"; done
   selected probes || rm -rf "$out/probes"/*
-  arbace_tool -m arbace.repr.scheme roundtrip ${rec[@]+"${rec[@]}"} "$out"
+  arbace_tool -m arbace.repr.scheme roundtrip ${rec[@]+"${rec[@]}"} ${only[@]+"${only[@]}"} "$out"
 }
 
 cmd=${1:-}; [ $# -eq 0 ] || shift
@@ -137,6 +175,7 @@ case $cmd in
       list) arbace_tool -e "(doseq [c (:corpora (read-string (slurp \"$root/test/scheme/corpora.edn\")))] (println (name (:id c)) (:count c) \"files\" (:bytes c) \"bytes\" (:license c)))" ;;
       *) echo "usage: bin/repr-scheme corpus fetch|list" >&2; exit 2 ;;
     esac ;;
+  pins) case ${1:-} in check) pins_check ;; *) echo "usage: bin/repr-scheme pins check" >&2; exit 2 ;; esac ;;
   dump) dump_cmd "$@" ;;
   spec-check) arbace_tool -m arbace.repr.scheme spec-check "$root/doc/scheme/SPEC.md" ;;
   read|print) arbace_tool -m arbace.repr.scheme "$cmd" "$@" ;;
