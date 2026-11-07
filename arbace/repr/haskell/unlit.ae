@@ -1,0 +1,107 @@
+;; Ported from GHC 9.14.1's utils/unlit/unlit.c (ghc-9.14.1-src.tar.xz, the corpus's pinned
+;; tarball; LICENSE.md, "GHC").
+
+(ns arbace.repr.haskell.unlit
+  "GHC's unlit (utils/unlit/unlit.c) as GHC's driver runs it on a literate module (runUnlitPhase:
+  `unlit -h FILE FILE OUT`): the bird tracks' lines without their > (a space in its place), the
+  \\begin{code} blocks' lines as they are, every other line blank, a #line 1 \"FILE\" first; tabs
+  outside code blocks expanded to stops of 8; `#` lines kept (cpp's), a `#!` line dropped. A
+  program line next to a comment line, a missing \\end{code} and a script without code are errors,
+  as unlit's exit status makes them GHC's."
+  (:require [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(defn- fail [file line what] (throw (ex-info (str file " line " line ": " what) {:unlit true})))
+
+(defn unlit
+  "The text unlit writes for a literate module's bytes (text, one char a byte), its #line naming
+  label (GHC's escaped input file name)"
+  ^String [^String text ^String label ^String file]
+  (let [n (.length text)
+        pos (volatile! 0)
+        spleft (volatile! 0)
+        linepos (volatile! 0)
+        out (StringBuilder.)
+        raw-getc (fn [] (let [p @pos] (if (< p n) (do (vreset! pos (inc p)) (long (int (.charAt text p)))) -1)))
+        ;; egetc: getc with tab expansion
+        egetc (fn []
+                (if (pos? (long @spleft))
+                  (do (vswap! spleft dec) (vswap! linepos inc) 32)
+                  (let [c (long (raw-getc))]
+                    (cond
+                      (= c -1) c
+                      (or (= c 10) (= c 12)) (do (vreset! linepos 0) c)
+                      (= c 9) (do (vreset! spleft (dec (- 8 (mod (long @linepos) 8)))) (vswap! linepos inc) 32)
+                      :else (do (vswap! linepos inc) c)))))
+        put (fn [c] (.append out (char c)))
+        line-term? (fn [c] (or (= c 10) (= c -1)))
+        ;; fgets of a line (unlit's 1000-byte buffer: a longer line comes in pieces)
+        fgets (fn []
+                (when (< (long @pos) n)
+                  (let [start (long @pos)
+                        e (loop [i start] (cond (>= i n) i (= \newline (.charAt text i)) (inc i) (>= (- i start) 998) i :else (recur (inc i))))]
+                    (vreset! pos e)
+                    (subs text start e))))
+        readline
+        (fn []
+          (let [c (long (egetc))]
+            (if (= c -1)
+              :endfile
+              (let [hash (= c 35)
+                    c (if hash
+                        (let [c1 (long (egetc))]
+                          (if (= c1 33)
+                            (do (loop [] (when-not (line-term? (egetc)) (recur))) :shebang)
+                            (do (put c) c1)))
+                        c)]
+                (cond
+                  (= c :shebang) :shebang
+                  hash (do (put c)
+                           (loop [] (let [c (long (egetc))] (when-not (line-term? c) (put c) (recur))))
+                           (put 10)
+                           :hash)
+                  (= c 62) (do (put 32)
+                               (loop [] (let [c (long (egetc))] (when-not (line-term? c) (put c) (recur))))
+                               (put 10)
+                               :defn)
+                  :else
+                  (do (put 10)
+                      (let [c (loop [c (long c)] (if (or (= c 32) (= c 9) (= c 13)) (recur (long (egetc))) c))]
+                        (if (line-term? c)
+                          :blank
+                          (let [sb (StringBuilder.)]
+                            (.append sb (char c))
+                            (loop [] (let [c (long (egetc))] (when-not (line-term? c) (when (< (.length sb) 99) (.append sb (char c))) (recur))))
+                            (let [s (str/trimr (.toString sb))]
+                              (cond (str/starts-with? s "\\begin{code}") :begin
+                                    (str/starts-with? s "\\end{code}") :end
+                                    :else :text)))))))))))]
+    (.append out (str "#line 1 \"" label "\"\n"))
+    (loop [this :start lines 0 defns 0]
+      (let [last this
+            this (readline)
+            lines (inc lines)
+            defns (if (= this :defn) (inc defns) defns)]
+        (when (and (= last :defn) (= this :text)) (fail file (dec lines) "unlit: Program line next to comment"))
+        (when (and (= last :text) (= this :defn)) (fail file lines "unlit: Program line next to comment"))
+        (when (= this :end) (fail file lines "unlit: spurious \\end{code}"))
+        (let [[lines defns]
+              (if (= this :begin)
+                (loop [lines lines]
+                  (let [l (fgets)]
+                    (when (nil? l) (fail file lines "unlit: missing \\end{code}"))
+                    (if (str/starts-with? l "\\end{code}")
+                      (do (put 10) [(inc lines) (inc defns)])
+                      (do (.append out ^String l) (recur (inc lines))))))
+                [lines defns])]
+          (when (= this :shebang) (put 10))
+          (if (= this :endfile)
+            (do (when (zero? (long defns)) (fail file lines "unlit: No definitions in file (perhaps you forgot the '>'s?)"))
+                (.toString out))
+            (recur this lines defns)))))))
+
+(defn escape-label
+  "runUnlitPhase's escape of the input file's name for -h: \\, \" and ' backslashed"
+  ^String [^String f]
+  (-> f (str/replace "\\" "\\\\") (str/replace "\"" "\\\"") (str/replace "'" "\\'")))

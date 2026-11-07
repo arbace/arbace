@@ -177,19 +177,24 @@
           (emit! (list 'fn id nm))
           id)))))
 
+(defn- ro-code
+  "A static's RO field: 1 read-only, 2 thread-local (go/arbace/ci's thread.go: each thread its own bytes), 0 else."
+  [ro]
+  (cond (= ro :tls) 2 ro 1 :else 0))
+
 (defn- static-idx
-  "A static object's index, allocated (SIZE ALIGN RO) when new."
+  "A static object's index, allocated (SIZE ALIGN RO) when new; ro true, false or :tls (a thread-local object)."
   [key size align ro]
   (if (:frag *p*)
     ;; a fragment's own static (a static local, a temporary, a compound literal: its key is new)
-    (let [[l new?] (frag-static! key #(vector :n size align (if ro 1 0) (str (if (vector? key) (last key) key))))]
+    (let [[l new?] (frag-static! key #(vector :n size align (ro-code ro) (str (if (vector? key) (last key) key))))]
       (item-ref! [:s l] [:s l])
       (sph l))
   (let [^HashMap ss (:statics *p*)]
     (or (.get ss key)
         (let [i (swap! (:nstatic *p*) inc)]
           (.put ss key i)
-          (emit! (list 'static i size align (if ro 1 0) (str (if (vector? key) (last key) key))))
+          (emit! (list 'static i size align (ro-code ro) (str (if (vector? key) (last key) key))))
           i)))))
 
 (defn- hex-of ^String [^bytes b]
@@ -523,7 +528,8 @@
   [e t]
   (let [loc (cond
               (:static (:m e)) {:loc :static :idx (static-idx [:local (:id e)] (size-of t) (obj-align e t)
-                                                                (contains? (chk/quals t) :const))}
+                                                                (let [c (contains? (chk/quals t) :const)]
+                                                                  (if (and (:thread_local (:m e)) (not c)) :tls c)))}
               (or (and (= :array (:k (unq t))) (:vla (unq t))) (var-size? t)) {:loc :vla :slot (new-slot! :i) :size (new-slot! :i)}
               (addressed? (:name e) t) (let [al (obj-align e t)]
                                          ;; the frame's base is 16-aligned (go/arbace/ci's Enter and Call): an object aligned
@@ -1416,7 +1422,7 @@
     "strcat" "strncat" "strchr" "strrchr" "strstr" "strspn" "strcspn" "strpbrk" "printf" "fprintf" "sprintf"
     "snprintf" "vprintf" "vfprintf" "vsprintf" "vsnprintf" "puts" "putchar" "fputs" "fputc" "fwrite" "malloc"
     "calloc" "realloc" "free" "abs" "labs" "llabs" "imaxabs" "sqrt" "sqrtf" "sqrtl" "fabs" "fabsf" "fabsl" "floor"
-    "floorf" "ceil" "ceilf" "round" "roundf" "trunc" "truncf" "copysign" "copysignf" "copysignl" "fmod" "pow"
+    "floorf" "ceil" "ceilf" "round" "roundf" "trunc" "truncf" "copysign" "copysignf" "copysignl" "fmod" "fmodf" "fmodl" "pow"
     "powf" "exp" "log" "log10" "sin" "cos" "tan" "atan" "atan2" "frexp" "ldexp" "modf" "nan" "nanf" "nanl" "isalnum"
     "isalpha" "isdigit" "isspace" "isupper" "islower" "toupper" "tolower" "isprint" "isxdigit" "bcmp" "bcopy" "bzero"
     "index" "rindex" "stpcpy" "strdup" "strndup" "mempcpy" "memchr" "strnlen" "fmin" "fmax" "fminf" "fmaxf"
@@ -1697,6 +1703,134 @@
     (when (and (:bits ra) (= rt ta)) (refuse :builder nm " of a bit-field"))
     (native-call nm (into [xa (list 'ai (list 'i n))] extra) rt)))
 
+;; LLS21 (a): gcc's __atomic_* builtins (the lowering of LLVM IR's atomics writes them, doc/llvm/LOWER.md §7) and the older __sync_*,
+;; lowered to plain loads and stores: ci runs one thread, so every memory order is sequential consistency (a no-op beyond it)
+;; and a read-modify-write is not interrupted. The object is an integer, a pointer or a _Bool (a wider one is refused).
+
+(defn- atomic-name
+  "The operation of a builtin's name, or nil: [op generic?], op one of :load :store :xchg :cas :tas :clear :fence,
+  [:fetch OP], [:op-fetch OP], :sync-bool, :sync-val, :release (the __sync_ spellings mapped onto them)."
+  [^String nm]
+  (cond
+    (str/starts-with? nm "__atomic_")
+    (let [s (subs nm 9)]
+      (cond
+        (#{"load_n" "store_n" "exchange_n" "compare_exchange_n"} s)
+        [(case s "load_n" :load "store_n" :store "exchange_n" :xchg :cas) false]
+        (#{"load" "store" "exchange" "compare_exchange"} s)
+        [(case s "load" :load "store" :store "exchange" :xchg :cas) true]
+        (= s "test_and_set") [:tas false]
+        (= s "clear") [:clear false]
+        (#{"thread_fence" "signal_fence"} s) [:fence false]
+        (re-matches #"fetch_(add|sub|and|or|xor|nand)" s) [[:fetch (subs s 6)] false]
+        (re-matches #"(add|sub|and|or|xor|nand)_fetch" s) [[:op-fetch (subs s 0 (- (count s) 6))] false]))
+    (str/starts-with? nm "__sync_")
+    (let [s (subs nm 7)]
+      (cond
+        (re-matches #"fetch_and_(add|sub|and|or|xor|nand)" s) [[:fetch (subs s 10)] false]
+        (re-matches #"(add|sub|and|or|xor|nand)_and_fetch" s) [[:op-fetch (first (str/split s #"_"))] false]
+        (= s "bool_compare_and_swap") [:sync-bool false]
+        (= s "val_compare_and_swap") [:sync-val false]
+        (= s "lock_test_and_set") [:xchg false]
+        (= s "lock_release") [:release false]
+        (= s "synchronize") [:fence false]))))
+
+(defn- atomic-call
+  "A call of an __atomic_* or __sync_* builtin: its nodes, the value it returns of the checker's result type."
+  [^String nm args r]
+  (let [[op generic?] (atomic-name nm)
+        p0 (first args)
+        pt (if (= :fence op)
+             chk/t-int
+             (let [t (chk/decay (unq (:t (res-of p0))))]
+               (if (ptr? t) (under (:to t)) (refuse :builder nm " of a non-pointer"))))
+        _ (when-not (or (= :fence op) (and (= :i (kind pt)) (not (#{:struct :union :array} (:k pt)))))
+            (refuse :builder nm " on an object of type " (chk/tstr pt)))
+        bool? (= :bool (:k pt))
+        pre (atom [])
+        add! (fn [e] (swap! pre conj e))
+        ;; an argument's address, evaluated once into a slot
+        addr (fn [a] (let [s (temp-i)]
+                       (add! (list 'ei (list 'is s (:n (conv (ex a) chk/t-ulong)))))
+                       {:mode :mem :a (list 'il s) :t pt}))
+        orders (fn [as] (doseq [a as] (add! (effect (ex a)))))
+        val (fn [a] (conv (ex a) pt))
+        out (fn [pl] (place-load pl))
+        save (fn [x] (let [s (temp-i)] (add! (list 'ei (list 'is s (:n x)))) {:k :i :t pt :n (list 'il s)}))
+        fin (fn [x] (seq-node @pre x))
+        void (fn [] {:k :v :t chk/t-void :n (list 'ei (list 'seq (vec @pre) '(i 0)))})
+        rmw (fn [o old v]
+              (case o
+                "add" (arith '+ old v pt) "sub" (arith '- old v pt) "and" (arith 'bit-and old v pt)
+                "or" (arith 'bit-or old v pt) "xor" (arith 'bit-xor old v pt)
+                "nand" (arith 'bit-xor (arith 'bit-and old v pt) {:k :i :t pt :n '(i -1)} pt)))]
+    (case op
+      :fence (do (orders args) (void))
+      :load (if generic?
+              (let [pl (addr p0) rp (addr (second args))]
+                (orders (drop 2 args))
+                (add! (effect (place-store rp (out pl))))
+                (void))
+              (let [pl (addr p0)] (orders (rest args)) (fin (save (out pl)))))
+      :store (if generic?
+               (let [pl (addr p0) vp (addr (second args))]
+                 (orders (drop 2 args))
+                 (add! (effect (place-store pl (out vp))))
+                 (void))
+               (let [pl (addr p0) v (save (val (second args)))]
+                 (orders (drop 2 args))
+                 (add! (effect (place-store pl v)))
+                 (void)))
+      :xchg
+      (if generic?
+        (let [pl (addr p0) vp (addr (second args)) rp (addr (nth args 2))
+              old (save (out pl))]
+          (orders (drop 3 args))
+          (add! (effect (place-store pl (out vp))))
+          (add! (effect (place-store rp old)))
+          (void))
+        (let [pl (addr p0) v (save (val (second args)))
+              old (save (out pl))]
+          (orders (drop 2 args))
+          (add! (effect (place-store pl v)))
+          (fin old)))
+      :cas
+      (let [pl (addr p0) ep (addr (second args))
+            d (save (if generic? (out (addr (nth args 2))) (val (nth args 2))))
+            cur (save (out pl)) exp (save (out ep))]
+        (orders (drop 3 args))
+        {:k :i :t chk/t-bool
+         :n (list 'seq (vec @pre)
+                  (list 'if (list 'cmp "eq" (ity pt) (:n cur) (:n exp))
+                        (list 'seq [(effect (place-store pl d))] '(i 1))
+                        (list 'seq [(effect (place-store ep cur))] '(i 0))))})
+      (:sync-bool :sync-val)
+      (let [pl (addr p0) e (save (val (second args))) d (save (val (nth args 2)))
+            cur (save (out pl))
+            hit (list 'cmp "eq" (ity pt) (:n cur) (:n e))]
+        (add! (list 'ei (list 'if hit (list 'seq [(effect (place-store pl d))] '(i 0)) '(i 0))))
+        (if (= op :sync-bool)
+          {:k :i :t chk/t-bool :n (list 'seq (vec @pre) hit)}
+          (fin cur)))
+      :tas (let [pl (addr p0) old (save (out pl))]
+             (orders (rest args))
+             (add! (effect (place-store pl {:k :i :t pt :n '(i 1)})))
+             {:k :i :t chk/t-bool :n (list 'seq (vec @pre) (list 'cmp "ne" (ity pt) (:n old) '(i 0)))})
+      (:clear :release)
+      (let [pl (addr p0)]
+        (orders (rest args))
+        (add! (effect (place-store pl {:k :i :t pt :n '(i 0)})))
+        (void))
+      (let [[fam o] op
+            pl (addr p0) v (save (val (second args)))
+            old (save (out pl))
+            nv (save (if bool?
+                       (conv (rmw o (conv old chk/t-int) (conv v chk/t-int)) pt)
+                       (conv (rmw o old v) pt)))]
+        (orders (drop 2 args))
+        (add! (effect (place-store pl nv)))
+        (fin (if (= fam :fetch) old nv))))))
+
 (defn call-node [f h args r]
   (let [hn (when (or (symbol? h) (and (seq? h) (= 'c/id (first h)))) (if (symbol? h) (name h) (second h)))
         hr (ex-res h)
@@ -1708,6 +1842,7 @@
       ;; the number of the calling frame's variadic arguments (CS277)
       (= nm "__builtin_va_arg_pack_len") {:k :i :t t :n '(vplen)}
       b b
+      (and nm (or (nil? e) (str/starts-with? nm "__atomic_")) (atomic-name nm)) (atomic-call nm args r)
       (and nm (overflow-builtins nm)) (overflow-call nm args)
       (and nm (bitg-builtins nm)) (bitg-call nm args r)
       :else
@@ -1734,7 +1869,12 @@
             callee (if direct callee (:n (ex-as h :i)))
             rk (kind t)]
         (case rk
-          :i {:k :i :t t :n (list 'call callee argns)}
+          ;; LLS21 (a), abi-punning: a call through a function pointer reads the result at the pointer's return type, as the
+          ;; register holds it (gcc's code reads eax whatever the callee's own type): the callee's wider or other-signed
+          ;; result is truncated to that width
+          :i {:k :i :t t :n (if (and (nil? direct) (#{"i8" "u8" "i16" "u16" "i32" "u32"} (ity t)))
+                              (list 'cv (ity t) (list 'call callee argns))
+                              (list 'call callee argns))}
           :f {:k :f :t t :n (list 'fcall callee argns)}
           :w {:k :w :t t :n (list 'wcall callee argns)}
           :v {:k :v :t t :n (list 'ecall callee argns)}
@@ -2418,7 +2558,8 @@
                                 t (:t e)
                                 sz (try {:size (max 1 (+ (size-of t) (flex-extra t (when has-init (nth f 2)))))
                                          :align (obj-align e t)
-                                         :ro (boolean (and (contains? (chk/quals t) :const) has-init))}
+                                         :ro (let [c (boolean (and (contains? (chk/quals t) :const) has-init))]
+                                               (if (and (:thread_local (meta (second f))) (not c)) :tls c))}
                                         (catch Exception x {:ex (ex-of x)}))]
                             (cond-> (assoc sz :k k :init has-init :def def)
                               has-init (assoc :item (frag-item
@@ -2473,6 +2614,13 @@
       (let [k (.poll q)]
         (doseq [[i c] (.get by k)] (include! i c))))
     kept))
+
+;; The link's provenance (doc/rust/RUST-EVAL-SURVEY.md, "As built: RES34 (write-ahead)"): with *link-trace* bound to an atom,
+;; link-text puts in it which of the node program's lines are a fragment's item replayed ({:items {LINE [FRAG :f|:o J]}}: a code
+;; command of the fragment's Jth function candidate, an init of its Jth object) and each fragment's placeholders' numbers
+;; (:fmaps, :smaps: per fragment a vector, nil for a placeholder the link did not resolve), so that cf2g's prebuilt libraries
+;; (arbace.c.aotlib) link a unit's code translated once instead of the code commands. The text is the same, bound or not.
+(def ^:dynamic *link-trace* nil)
 
 (defn link-text
   "The node program's text (program-text's) of fragments (unit-fragment's, in link order), linked as build-program links
@@ -2532,25 +2680,30 @@
                      (subst i (:text item))))
           defs (HashMap.)
           chosen (HashMap.)
+          tr-items (HashMap.)         ; *link-trace*'s: line -> [frag kind j]
+          tr-inits (ArrayList.)       ; [index-in-inits frag :o j]
           kept (when (seq prune) (reached frags prune roots rk))
           keep? (fn [i c] (or (nil? kept) (not (contains? prune i)) (.contains ^java.util.HashSet kept (rk i (:k c)))))]
       ;; the objects: each external one's defining declaration, allocated first, then their initializers
-      (doseq [i (range (count frags)) c (:objs (frags i)) :when (keep? i c)]
+      (doseq [i (range (count frags)) [j c] (map-indexed vector (:objs (frags i))) :when (keep? i c)]
         (let [k (rk i (:k c)) old (.get defs k) has-init (:init c)]
           (when (or (nil? old)
                     (and has-init (not (:init old)))
                     (and (not (:init old)) (:def c) (not (:def old))))
-            (.put defs k (assoc c :u i)))))
+            (.put defs k (assoc c :u i :j j)))))
       (doseq [[k c] defs]
         (when-let [x (:ex c)] (throw-ex x))
         (static-idx [:obj k] (:size c) (:align c) (:ro c)))
       (doseq [[k c] defs]
-        (when (:init c) (.add inits (replay (:u c) (:item c)))))
+        (when (:init c)
+          (let [text (replay (:u c) (:item c))]
+            (when *link-trace* (.add tr-inits [(.size inits) (:u c) :o (:j c)]))
+            (.add inits text))))
       ;; the functions: static ones always, an external one's strong definition over a weak one
-      (doseq [i (range (count frags)) c (:fcands (frags i)) :when (keep? i c)]
+      (doseq [i (range (count frags)) [j c] (map-indexed vector (:fcands (frags i))) :when (keep? i c)]
         (let [k (rk i (:k c)) old (.get chosen k)]
           (when (or (nil? old) (and (:weak old) (not (:weak c))))
-            (.put chosen k (assoc c :u i)))))
+            (.put chosen k (assoc c :u i :j j)))))
       (doseq [[k c] chosen]
         (let [i (:u c)]
           (if (:alias c)
@@ -2564,10 +2717,17 @@
                       a (ob (:e c))
                       b (ob (:te c))]
                   (.add aliases (list 'alias a b 0)))))
-            (.add out (replay i (:item c))))))
+            (let [text (replay i (:item c))]
+              ;; the line is the code's own, after the commands its replay emitted
+              (when *link-trace* (.put tr-items (.size out) [i :f (:j c)]))
+              (.add out text)))))
       (doseq [a undefined] (emit! a))
       (doseq [a aliases] (emit! a))
+      (let [base (.size out)]
+        (doseq [[k i kind j] tr-inits] (.put tr-items (+ base (long k)) [i kind j])))
       (doseq [x inits] (emit! x))
+      (when *link-trace*
+        (reset! *link-trace* {:items (into {} tr-items) :fmaps (mapv vec fmaps) :smaps (mapv vec smaps)}))
       (let [main (.get ^HashMap (:fns *p*) "main")]
         (when-not main (refuse :no-main "no main"))
         (emit! (if libc-start
@@ -2626,7 +2786,8 @@
       (doseq [[k {:keys [e f init def u]}] defs]
         (binding [*u* u *cfg* (assoc *cfg* :unsigned-char (:unsigned-char u))]
           (let [t (:t e)
-                ro (and (contains? (chk/quals t) :const) init)]
+                ro (let [c (and (contains? (chk/quals t) :const) init)]
+                     (if (and (:thread_local (meta (second f))) (not c)) :tls c))]
             (static-idx [:obj k] (max 1 (+ (size-of t) (flex-extra t (when init (nth f 2))))) (obj-align e t) ro))))
       (doseq [[k {:keys [e f init def u]}] defs]
         (binding [*u* u *cfg* (assoc *cfg* :unsigned-char (:unsigned-char u))]

@@ -32,14 +32,58 @@
 
 (declare expr-str*)
 
+;;; Mode :full's spellings (doc/go/SPEC.md §10.2, "As built"): a literal child's text in its parent's
+;;; :go/atext and its parentheses in :go/aparens, by the child's index (GOI-DESIGN-REVIEW.md, "As
+;;; built: :full forms")
+
+(def ^:dynamic *lit-parent*
+  "The innermost list being checked or printed whose metadata spells literal children (mode
+  :full's :go/atext or :go/aparens), or nil."
+  nil)
+
+(defn spells?
+  "Whether form f's metadata spells some literal child (:go/atext, :go/aparens)."
+  [f]
+  (and (or (seq? f) (vector? f)) (let [m (meta f)] (or (:go/atext m) (:go/aparens m)))))
+
+(defn lit-text
+  "The source's text of literal x, a child of list p (by identity: its first such child), as
+  mode :full spells it with its parentheses; nil when p does not spell it."
+  [p x]
+  (when p
+    (let [m (meta p)
+          i (loop [i 0 s (seq p)]
+              (cond (nil? s) nil
+                    (identical? (first s) x) i
+                    :else (recur (inc i) (next s))))]
+      (when i
+        (let [t (get (:go/atext m) i)
+              ps (count (get (:go/aparens m) i))]
+          (when (or t (pos? ps))
+            (let [t (or t (lit-str x))]
+              (str (apply str (repeat ps "(")) t (apply str (repeat ps ")"))))))))))
+
+(defmacro with-lit-parent
+  "Body with *lit-parent* f when f spells literal children, else nil (a child is looked up only
+  in its own parent)."
+  [f & body]
+  `(let [f# ~f]
+     (cond
+       (spells? f#) (binding [*lit-parent* f#] ~@body)
+       *lit-parent* (binding [*lit-parent* nil] ~@body)
+       :else (do ~@body))))
+
 (defn expr-str
   "Go's text of an expression form (abridged where long); a form's :go/parens (raw forms, mode
-  :full's parentheses) written."
+  :full's parentheses) written, and a literal's spelling (mode :full's :go/atext)."
   [f]
-  (let [ps (when (instance? arbace.lang.IMeta f) (count (:go/parens (meta f))))]
-    (if (and ps (pos? ps))
-      (str (apply str (repeat ps "(")) (expr-str* f) (apply str (repeat ps ")")))
-      (expr-str* f))))
+  (if-let [t (when (and *lit-parent* (not (instance? arbace.lang.IMeta f))) (lit-text *lit-parent* f))]
+    t
+    (let [ps (when (instance? arbace.lang.IMeta f) (count (:go/parens (meta f))))
+          s (with-lit-parent f (expr-str* f))]
+      (if (and ps (pos? ps))
+        (str (apply str (repeat ps "(")) s (apply str (repeat ps ")")))
+        s))))
 
 (defn- expr-str*
   [f]
@@ -64,8 +108,9 @@
         (= h "deref") (str "*" (expr-str (first args)))
         (= h "<!") (str "<-" (expr-str (first args)))
         (= h "conv") (str (let [t (first args)]
-                            ;; (*T)(x), (func())(x): the parentheses the source needs
-                            (if (and (seq? t) (#{"*" "func" "chan"} (head-name t)))
+                            ;; (*T)(x), (func())(x): the parentheses the source needs (mode :full's
+                            ;; :go/parens write them)
+                            (if (and (seq? t) (#{"*" "func" "chan"} (head-name t)) (empty? (:go/parens (meta t))))
                               (str "(" (expr-str t) ")")
                               (expr-str t)))
                           "(" (expr-str (second args)) ")")
@@ -93,10 +138,10 @@
         (= h "interface") (if (seq args) "interface{…}" "interface{}")
         (= h "spread") (str (expr-str (first args)) "...")
         (= h "method-expr") (str (let [t (first args)]
-                                   (if (and (seq? t) (= "*" (head-name t))) (str "(" (expr-str t) ")") (expr-str t)))
+                                   (if (and (seq? t) (= "*" (head-name t)) (empty? (:go/parens (meta t)))) (str "(" (expr-str t) ")") (expr-str t)))
                                  "." (expr-str (second args)))
-        (= h "rune") (str (second f))
-        (= h "imaginary") (str (expr-str (second f)) "i")
+        (= h "rune") (or (:go/text (meta f)) (str (second f)))
+        (= h "imaginary") (or (:go/text (meta f)) (str (expr-str (second f)) "i"))
         (= h "byte-string") "\"…\""
         (= h "go/call") (str (expr-str (second f)) "(" (str/join ", " (map expr-str (nnext f))) ")")
         (= h "inst") (str (expr-str (second f)) "[" (str/join ", " (map expr-str (nnext f))) "]")
@@ -215,7 +260,7 @@
 (defn operand-str
   "go/types' operandString of a node."
   [n]
-  (let [ex (let [f (:form n)] (when (some? f) (expr-str f)))
+  (let [ex (or (:text n) (let [f (:form n)] (when (some? f) (expr-str f))))
         m (:mode n)
         ty (:type n)]
     (if (and (= :untyped-nil ty) (not= :invalid m))

@@ -319,6 +319,14 @@ Two decisions of the user on 2026-11-07, relayed by the main session:
   and print at 1 (Arbace's own target, doc/C23-SURVEY.md, "As built: C's own target"), C's independence is 99.7% (20.0% on
   `mac/batch1`; 90.0% were the judge left on gcc's records).
 
+- **C++ (branch `cpp-90`, from `mac/cpp-g5` with `mac/batch1` merged).** The run checks by each test's own verdict
+  (`test/cpp/selfref.ae`: g++.dg's and libstdc++'s `dg-do run` tests by exit status, 205 of 225 reference cases), the round trip by
+  its own levels 1 and 5 on the native parser (`bin/repr-cpp roundtrip --judge own`, no clang: the essential step on `[:stage0]`, the
+  whole lists' own records the night's). The judge's cases: 1,934 at 0.5 (the token check's recorded digests), 4,597 at 1 (dg
+  directives), 81 + 81 (65 + 65 at 1, 16 + 16 at 0.5), 3,366 at 0 until the night's own records (then 1): judge 0.568 today, 0.90 after.
+  Two controls added (the token check's, the dg check's) and the round trip's rule pointed at GT9's control file: maturity 100. C++'s
+  independence 20.0 to 31.4 today, 38.0 after the night; read, eval and AOT need doc/cpp/CPP-SURVEY.md's CP240-CP242.
+
 ## Left
 
 - The facts at refs other than those in `independence.edn`'s `:at` are main's. `--newest` says so in the output, as
@@ -336,3 +344,21 @@ gives the per-check case counts, the tool computes the mean and uses it in place
 `:cases {CHECK [N SCORE] ...}` (Scheme's judge: 5,624 cases, 0.752) or `:mixed {:own N :jdk-record M}` (Java's judge:
 14,482 cases, (14,038 + 0.5 x 444) / 14,482 = 0.985). A fact without counts keeps its stated score. A claim refuted by the
 gate's steps (a step of the stage on a toolchain host) scores 0 as before.
+
+## Decided (the user, 2026-11-07): a pinned input corpus in the crop's own language (LLS27 (a))
+
+A pinned input corpus written in the crop's own language counts **1** as a stage's input, as hand-written test data does,
+when no output of a toolchain about it is a reference: the toolchain that made it does none of the crop's work (reading,
+lowering, running and the verdicts are Arbace's), as gcc's torture C sources are to C. It is pinned (committed, or fetched by a
+SHA-256 the checkout pins) and read as the language under test, not as a stand-in for a front end the crop lacks: OCaml's
+Lambda, GHC's STG, C++'s and Rust's IR made by clang or rustc for those crops stay 0.5 (a toolchain's product consumed in
+place of the crop's own front end). Where a toolchain's output about a case is its reference (lli's or opt's recorded run),
+that is the judge stage's 0.5, not the input's. Inputs a toolchain made that are in no checkout and pinned by nothing (the
+first LLVM records' 282 modules and their mutants, before LLS28 (a)'s pack) stay 0.5.
+
+- **LLVM IR (batch 2, the merge of `llvm-90`).** The pinned IR packs `test/llvm/ir/{tx,c}.tar.xz` (clang 23's, made by hand by
+  `bin/llvmi ir-make`) and llvm/test's files from the pinned tarball count 1; llvmi's ci reads Arbace's own C target
+  (`c/target`, `bin/llvmi`'s `c_sysroot`, batch 2) in place of gcc's recorded `test/c/host`. Eval and AOT 1; read 0.706 (the
+  2,276 cases of the 282-module lists and mutants, in no checkout, 0.5, until the night pack of LLS28 (a)); print 1; judge
+  0.711 (opt's and lli's records, 0.5). LLVM IR's independence (0.706 + 1 + 1 + 1 + 0.711) / 5 = 88.3% (68.3% on `llvm-90`);
+  94.2% once LLS28 (a)'s pack and regenerated mutants are the read stage's inputs.

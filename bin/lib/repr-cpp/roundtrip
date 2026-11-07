@@ -29,17 +29,38 @@
 # (REPR_CPP_ROUNDTRIP_CONTROLS) lists crossed pairs of the run's files, the subject's print judged by each level's own comparison against
 # the reference's original; arbace.repr.cpp.rtcheck/controls requires every pair to differ (`control ID fails as it must`), a control that
 # passes or is not judged fails the run, one whose files the run lacks is left. Not run by --record-results.
-# Usage: bin/repr-cpp roundtrip LIST WORK [--jobs N] [--no-objects] [--corpus KEY] [--partial] [--record-oracle [--replace-oracle]] [--record-results [--replace-results]]
+# The reader (CX11, doc/cpp/NATIVE.md): --reader clang (the default) converts the oracle's dumps; --reader native reads the file and its
+# print with the native parser (arbace.repr.cpp.native: no oracle at read time, REPR_CPP_READER=native for rtcheck), the oracle's dumps
+# still made for its rejections and for level 3 (clang's ASTs of the original and of the print compared).
+# The judge (cpp-90, the user's decision of 2026-11-07): --judge own (REPR_CPP_JUDGE=own) judges each file by the round trip's own verdict
+# alone: read by the native parser (--reader native implied), level 1 (the forms read again equal) and level 5 (mode :full printed back
+# byte for byte); no clang dump and no object is made, so no clang, clang++ or g++ runs; clang's rejections and levels 3 and 4 are the oracle
+# tier's (--judge clang, the default until the night's records: roundtrip-results/own/KEY.edn, written by --judge own --record-results).
+# The oracle's rejections (CPR1, doc/cpp/PRINT-DESIGN-REVIEW.md): a file clang rejects (recorded, roundtrip-oracle.edn) is read natively
+# whatever the reader (rtcheck run's ORIG argument), printed, its print read natively again (level 1), and judged at level R: the print fails
+# like the original, for clang (the dumps' diagnostics, WORK/orig and WORK/dump2) and for g++ (-fsyntax-only, WORK/diag/{orig,print}/NAME.gxx.log):
+# the same status and the same errors by message, positions dropped (rtcheck's diag-errors). No AST nor objects for them. A file the native
+# reader refuses or throws on stays oracle-rejects; one whose level 1 or R fails is a failure unless the known file classes it
+# :rejected-differs (CPR2); --record-known-rejected writes those classes for this run's failing ones before the judge (the re-record's).
+# Coroutines (CPR4): a file of g++.dg's coroutines/ (coroutines.exp gives it -fcoroutines) or whose g++ options have -fcoroutines is read and
+# compiled by clang at C++20 (gnu++20 for a gnu++ standard below it: libstdc++'s <coroutine> needs __cpp_impl_coroutine, which clang defines
+# from C++20 on), g++ keeping the list's standard with -fcoroutines (the list's STD is clang's and the reader's, -std=STD -fcoroutines prepended
+# to g++'s options).
+# Usage: bin/repr-cpp roundtrip LIST WORK [--jobs N] [--reader native|clang] [--judge own|clang] [--no-objects] [--corpus KEY] [--partial] [--record-oracle [--replace-oracle]] [--record-results [--replace-results]] [--record-known-rejected]
 # The light tier: REPR_CPP_THREADS (default 4), GOMAXPROCS=4 and GOMEMLIMIT=1500MiB unless set.
 set -uo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
 . "$root/bin/lib/tools.bash"
 list=$1 work=$2; shift 2
-jobs=${REPR_CPP_THREADS:-4} objects=1 corpus="" record= replace= results_mode=check replace_results= record_results= partial=
+export REPR_CPP_READER=clang REPR_CPP_JUDGE=${REPR_CPP_JUDGE:-clang}
+[ "$REPR_CPP_JUDGE" = own ] && export REPR_CPP_READER=native
+jobs=${REPR_CPP_THREADS:-4} objects=1 corpus="" record= replace= results_mode=check replace_results= record_results= partial= known_rejected=
 while [ $# -gt 0 ]; do
   case $1 in
     --jobs) jobs=$2; shift 2 ;;
+    --reader) case $2 in native|clang) export REPR_CPP_READER=$2 ;; *) echo "roundtrip: --reader native|clang" >&2; exit 2 ;; esac; shift 2 ;;
+    --judge) case $2 in own) export REPR_CPP_JUDGE=own REPR_CPP_READER=native; objects= ;; clang) export REPR_CPP_JUDGE=clang ;; *) echo "roundtrip: --judge own|clang" >&2; exit 2 ;; esac; shift 2 ;;
     --no-objects) objects=; shift ;;
     --partial) partial=1; shift ;;
     --corpus) corpus=$2; shift 2 ;;
@@ -47,6 +68,7 @@ while [ $# -gt 0 ]; do
     --replace-oracle) replace=replace; shift ;;
     --record-results) record_results=1; [ "$results_mode" = record-replace ] || results_mode=record; shift ;;
     --replace-results) results_mode=record-replace; replace_results=1; shift ;;
+    --record-known-rejected) known_rejected=1; shift ;;
     *) echo "roundtrip: unknown option $1" >&2; exit 2 ;;
   esac
 done
@@ -55,18 +77,28 @@ done
 [ -z "$replace_results" ] || [ -n "$record_results" ] || { echo "roundtrip: --replace-results needs --record-results" >&2; exit 2; }
 export GOMAXPROCS=${GOMAXPROCS:-4} GOMEMLIMIT=${GOMEMLIMIT:-1500MiB} REPR_CPP_THREADS=$jobs
 exe=${REPR_CPP_CXXDUMP_EXE:-$root/.tmp/repr-cpp/cxxdump}
-[ -x "$exe" ] || "$root/bin/repr-cpp" cxxdump-build >&2
+own=; [ "$REPR_CPP_JUDGE" = own ] && { own=1; objects=; [ -z "$record" ] || { echo "roundtrip: --judge own records no oracle (no --record-oracle)" >&2; exit 2; }; }
+[ -n "$own" ] || [ -x "$exe" ] || "$root/bin/repr-cpp" cxxdump-build >&2
 cache=${REPR_CPP_CXXDUMP_CACHE:-$root/.tmp/repr-cpp/cxxdump-cache}
 mkdir -p "$work" "$cache"; work=$(cd "$work" && pwd)
 # a reused WORK keeps nothing of an earlier run (review 018's R1, as review 007's finding 5 for bin/cppi): a stale level file
 # would be read as this run's
-for d in orig print forms forms2 dump2 obj; do rm -rf "${work:?}/$d"; done
+for d in orig print forms forms2 dump2 obj diag; do rm -rf "${work:?}/$d"; done
 rm -f "$work/read.tsv" "$work/read2.tsv" "$work/results.tsv" "$work/summary.edn" "$work/partial"
 [ -z "$partial" ] || : > "$work/partial"
-mkdir -p "$work/orig" "$work/print" "$work/forms" "$work/forms2" "$work/dump2" "$work/obj"
+mkdir -p "$work/orig" "$work/print" "$work/forms" "$work/forms2" "$work/dump2" "$work/obj" "$work/diag"
 [ -n "$corpus" ] || corpus=$(sed -n 's/^#list //p' "$list" | head -1)
 rm -f "$work/list.key"; [ -z "$corpus" ] || echo "$corpus" > "$work/list.key"
-grep -v '^#' "$list" > "$work/list.tsv" || true
+# CPR4: the coroutines' standard for clang and the reader (the header's "Coroutines")
+grep -v '^#' "$list" | awk -F'\t' 'BEGIN { OFS = "\t" }
+  { if ($1 ~ /^coroutines\// || (" " $3 " ") ~ / -fcoroutines /) {
+      y = $2; sub(/^(gnu|c)\+\+/, "", y)
+      if (y == "98" || y == "03" || y == "11" || y == "14" || y == "17") {
+        g = $3; if ((" " g " ") !~ / -fcoroutines /) g = g " -fcoroutines"
+        $3 = "-std=" $2 " " g; sub(/ +$/, "", $3); $2 = ($2 ~ /^gnu/ ? "gnu++20" : "c++20")
+      }
+    }
+    print }' > "$work/list.tsv" || true
 srcroot=$(head -1 "$work/list.tsv" | awk -F'\t' '{p=$4; n=$1; print substr(p, 1, length(p)-length(n)-1)}')
 echo "$srcroot" > "$work/srcroot.txt"
 
@@ -108,21 +140,34 @@ objs() { # objs OUTDIR ROOT NAME STD GARGS CARGS ORIGDIR: the objects of g++ and
   (cd "$r" && SOURCE_DATE_EPOCH=1793145600 timeout 300 clang++ -x c++ -std=$std $cargs -O0 -iquote "$od" -fdebug-prefix-map="$origroot"=. $pm -fdebug-prefix-map="$r"=. -c "$n" -o "$o/clang/$n.o") > "$o/clang/$n.log" 2>&1
   echo $? > "$o/clang/$n.status"
 }
-export -f dump objs; export exe cache work TMPDIR
+diags() { # diags OUTDIR ROOT NAME STD GARGS ORIGDIR: g++'s diagnostics of a file the oracle rejects (CPR1's level R; clang's are the dumps')
+  local o=$1 r=$2 n=$3 std=$4 gargs=$5 od=$6
+  mkdir -p "$(dirname "$o/$n")"
+  # shellcheck disable=SC2086
+  (cd "$r" && timeout 300 g++ -x c++ -std=$std $gargs -fsyntax-only -fdiagnostics-plain-output -iquote "$od" "$n") > "$o/$n.gxx.log" 2>&1
+  echo $? > "$o/$n.gxx.status"
+}
+rejected() { # rejected NAME: whether the original's dump is clang's rejection (rtcheck's oracle-rejects?)
+  [ "$(cat "$work/orig/$1.status" 2>"$TMPDIR/rt-status.err")" = 1 ] && grep -qE '^[^[:space:]:][^:]*:[0-9]+:[0-9]+: (fatal )?error: ' "$work/orig/$1.err"
+}
+export -f dump objs diags rejected; export exe cache work TMPDIR
 
 each() { # each FUNCTION-AND-ARGS: run over the list in parallel, the fields NAME STD GARGS PATH CARGS as $1..$5
   tr '\t\n' '\037\0' < "$work/list.tsv" | xargs -0 -P "$jobs" -I{} nice bash -c 'IFS=$'"'"'\037'"'"' read -r n s g p c <<< "$1"; d=${p%"/$n"}; od=$(dirname "$p"); '"$1" _ {}
 }
 t0=$(date +%s)
-each 'dump "$work/orig" "$d" "$n" "$s" "$c" "$od"'
+[ -n "$own" ] || each 'dump "$work/orig" "$d" "$n" "$s" "$c" "$od"'
 t1=$(date +%s)
-arbace_tool -m arbace.repr.cpp.rtcheck run "$work/list.tsv" "$work/orig" "$srcroot" "$work/forms" "$work/print" "$work/read.tsv" || exit 1
+arbace_tool -m arbace.repr.cpp.rtcheck run "$work/list.tsv" "$work/orig" "$srcroot" "$work/forms" "$work/print" "$work/read.tsv" "$work/orig" || exit 1
 t2=$(date +%s)
-each '[ -f "$work/print/$n" ] && dump "$work/dump2" "$work/print" "$n" "$s" "$c" "$od"'
-arbace_tool -m arbace.repr.cpp.rtcheck run "$work/list.tsv" "$work/dump2" "$work/print" "$work/forms2" - "$work/read2.tsv" || exit 1
+[ -n "$own" ] || each '[ -f "$work/print/$n" ] && dump "$work/dump2" "$work/print" "$n" "$s" "$c" "$od"'
+arbace_tool -m arbace.repr.cpp.rtcheck run "$work/list.tsv" "$work/dump2" "$work/print" "$work/forms2" - "$work/read2.tsv" "$work/orig" || exit 1
+# CPR1's level R: g++'s diagnostics of the rejected files read natively, the original's and the print's (the clang judge's: the own
+# judge makes no dump, so no file is a recorded rejection)
+[ -n "$own" ] || each '[ -f "$work/print/$n" ] && rejected "$n" && diags "$work/diag/orig" "$d" "$n" "$s" "$g" "$od" && diags "$work/diag/print" "$work/print" "$n" "$s" "$g" "$od"; true'
 t3=$(date +%s)
 if [ -n "$objects" ]; then
-  each '[ -f "$work/print/$n" ] && objs "$work/obj/orig" "$d" "$n" "$s" "$g" "$c" "$od" && objs "$work/obj/print" "$work/print" "$n" "$s" "$g" "$c" "$od"'
+  each '[ -f "$work/print/$n" ] && ! rejected "$n" && objs "$work/obj/orig" "$d" "$n" "$s" "$g" "$c" "$od" && objs "$work/obj/print" "$work/print" "$n" "$s" "$g" "$c" "$od"'
 fi
 t4=$(date +%s)
 echo "roundtrip: dumps $((t1-t0)) s, forms and prints $((t2-t1)) s, again $((t3-t2)) s, objects $((t4-t3)) s" | tee "$work/times.txt"
@@ -130,6 +175,13 @@ oracle=${REPR_CPP_ROUNDTRIP_ORACLE:-$root/test/repr/cpp/roundtrip-oracle.edn}
 if [ -n "$record" ]; then
   [ -n "$corpus" ] || { echo "roundtrip: --record-oracle needs the corpus (--corpus KEY or a #list header)" >&2; exit 2; }
   arbace_tool -m arbace.repr.cpp.rtcheck record "$work" "$oracle" $replace || exit 1
+fi
+known=${REPR_CPP_ROUNDTRIP_KNOWN:-$root/test/repr/cpp/roundtrip-known.edn}
+if [ -n "$known_rejected" ]; then
+  # the judge's rows first (its verdicts), then the classes written, then the judge again against them
+  arbace_tool -m arbace.repr.cpp.rtcheck judge "$work" "$known" "$([ -n "$objects" ] && echo objects || echo no-objects)" "$oracle" \
+    "${REPR_CPP_ROUNDTRIP_RESULTS:-$root/test/repr/cpp/roundtrip-results}" check > "$work/judge0.txt" 2>&1
+  arbace_tool -m arbace.repr.cpp.rtcheck known-rejected "$work" "$known" || exit 1
 fi
 arbace_tool -m arbace.repr.cpp.rtcheck judge "$work" "${REPR_CPP_ROUNDTRIP_KNOWN:-$root/test/repr/cpp/roundtrip-known.edn}" "$([ -n "$objects" ] && echo objects || echo no-objects)" "$oracle" \
   "${REPR_CPP_ROUNDTRIP_RESULTS:-$root/test/repr/cpp/roundtrip-results}" "$results_mode" \

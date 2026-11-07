@@ -1,0 +1,289 @@
+;; Ported from OCaml 5.5.0 (the release tarball, SHA-256 fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba):
+;; typing/value_rec_check.ml's classify_expression (the kind of a recursive binding, Static or Dynamic) and
+;; lambda/value_rec_compiler.ml (sizing, function lifting and the compilation of `let rec` with pre-allocation and
+;; backpatching), whose notices follow (LICENSE.md, "The OCaml Core System"):
+;;
+;;                                 OCaml
+;;
+;;                       Vincent Laviron, OCamlPro
+;;
+;;   Copyright 2023 OCamlPro SAS
+;;
+;;   All rights reserved.  This file is distributed under the terms of
+;;   the GNU Lesser General Public License version 2.1, with the
+;;   special exception on linking described in the file LICENSE.
+;;
+;; and (typing/value_rec_check.ml)
+;;
+;;                                 OCaml
+;;
+;;   Jeremy Yallop, University of Cambridge
+;;   Gabriel Scherer, Project Parsifal, INRIA Saclay
+;;   Alban Reynaud, ENS Lyon
+;;
+;;   Copyright 2017 Jeremy Yallop
+;;   Copyright 2018 Alban Reynaud
+;;   Copyright 2018 INRIA
+;;
+;;   All rights reserved.  This file is distributed under the terms of
+;;   the GNU Lesser General Public License version 2.1, with the
+;;   special exception on linking described in the file LICENSE.
+
+(ns arbace.repr.ocaml.typer.valuerec
+  "Recursive values (doc/ocaml/TYPER.md, T10): Value_rec_check.classify_expression over the Typedtree (a binding's
+  kind :static or :dynamic) and Value_rec_compiler.compile_letrec over Lambda (a `let rec` whose bindings are not
+  all syntactic functions: dynamic bindings let-bound, static blocks pre-allocated by caml_alloc_dummy* and
+  backpatched by caml_update_dummy*, non-syntactic functions lifted with their context's block)."
+  (:require [arbace.repr.ocaml.typer.types :as ty]
+            [arbace.repr.ocaml.typer.lambda :as l]
+            [arbace.repr.ocaml.typer.simplif :as simplif]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* false)
+
+;; ---------------------------------------------------------------------------------------------
+;; Value_rec_check.classify_expression
+
+(defn- ref-vdesc? [vd]
+  (let [k (:kind vd)]
+    (and (= :prim (first k)) (= "%makemutable" (:name (second k))) (= 1 (:arity (second k))))))
+
+(declare classify-module)
+
+(defn- classify-path [env p]
+  (if (= :Pident (p 0)) (get env (p 1) :dynamic) :dynamic))
+
+(defn- classify* [env e]
+  (let [d (:desc e)]
+    (case (d 0)
+      :Texp_let (classify* (reduce (fn [env' vb]
+                                     ;; non-recursive classification against the old environment
+                                     (let [pd (:desc (:pat vb))]
+                                       (if (= :Tpat_var (pd 0)) (assoc env' (pd 1) (classify* env (:expr vb))) env')))
+                                   env (d 2))
+                           (d 3))
+      :Texp_ident (classify-path env (d 1))
+      (:Texp_sequence :Texp_struct_item) (classify* env (d 2))
+      :Texp_construct (if (and (:unboxed (d 1)) (= 1 (count (d 2)))) (classify* env (first (d 2))) :static)
+      :Texp_record (let [defs (d 1)]
+                     (if (and (= :unboxed (d 2)) (= 1 (count defs)) (= :overridden ((second (first defs)) 0)))
+                       (classify* env ((second (first defs)) 1))
+                       :static))
+      (:Texp_variant :Texp_tuple :Texp_atomic_loc :Texp_extension_constructor :Texp_constant) :static
+      (:Texp_for :Texp_setfield :Texp_while :Texp_setinstvar :Texp_unreachable) :static
+      :Texp_apply (let [f (d 1)]
+                    (cond (and (= :Texp_ident ((:desc f) 0)) (ref-vdesc? ((:desc f) 2))) :static
+                          (some #(nil? (second %)) (d 2)) :static
+                          :else :dynamic))
+      :Texp_array :static
+      :Texp_pack (classify-module env (d 1))
+      :Texp_function :static
+      :Texp_lazy (let [a (d 1) ad (:desc a)]
+                   ;; Typeopt.classify_lazy_argument, as Translcore uses it
+                   (cond
+                     (or (and (= :Texp_constant (ad 0)) (not= :float ((ad 1) 0)))
+                         (= :Texp_function (ad 0))
+                         (and (= :Texp_construct (ad 0)) (zero? (:arity (ad 1)))))
+                     (classify* env a)
+                     (= :Texp_constant (ad 0)) :static
+                     (= :Texp_ident (ad 0)) (if (#{:any :lazy :float} (ty/classify (:type a))) :static (classify* env a))
+                     :else :static))
+      :dynamic)))
+
+(defn- classify-module [env m]
+  (let [d (:desc m)]
+    (case (d 0)
+      :Tmod_ident (classify-path env (d 1))
+      (:Tmod_structure :Tmod_functor) :static
+      (:Tmod_apply :Tmod_apply_unit) :dynamic
+      :Tmod_constraint (let [cc (d 3)]
+                         (cond (nil? cc) (classify-module env (d 1))
+                               (#{:structure :functor} (cc 0)) :static
+                               :else (throw (ex-info "letrec: a primitive or alias coercion on a module" {}))))
+      :Tmod_unpack (classify* env (d 1))
+      :dynamic)))
+
+(defn classify-expression
+  "Value_rec_check.classify_expression: :static (a pre-allocation scheme is possible) or :dynamic"
+  [e]
+  (classify* {} e))
+
+(defn rec-kind
+  "Value_rec_check.is_valid_recursive_expression's kind for an accepted binding (the validity check itself, which
+  rejects programs, is not ported: the oracle judges rejected programs)"
+  [e]
+  (if (= :Texp_function ((:desc e) 0)) :static (classify-expression e)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Value_rec_compiler: sizing
+
+(defn- dynamic-size [] (throw (ex-info "letrec: No size found for Static binding" {})))
+
+(defn- join-sizes [a b]
+  (cond (= a :unreachable) b (= b :unreachable) a :else (dynamic-size)))
+
+(defn- int-arg [args] (when (and (= 1 (count args)) (= :Lconst ((first args) 0)) (= :int (first ((first args) 1))))
+                        (second ((first args) 1))))
+
+(defn- find-size-of-alloc-prim [p args]
+  (case (:name p)
+    "caml_alloc_dummy" (when-let [n (int-arg args)] [:block [:regular n]])
+    "caml_alloc_dummy_float" (when-let [n (int-arg args)] [:block [:float n]])
+    "caml_alloc_dummy_lazy" [:block [:lazy]]
+    nil))
+
+(def ^:private unit-prim-re
+  #"ignore|setfield_.*|setfloatfield.*|-?[0-9]+\+|\+:=-?[0-9]+|bytes\.(unsafe_)?set|array\.(unsafe_)?set.*|Bigarray\.(unsafe_)?set.*|(bytes|bigstring)\.(unsafe_)?set(16|32|64)|poll")
+
+(declare compute-size)
+
+(defn- size-of-primitive [env p args]
+  (let [n (:name p)]
+    (cond
+      (re-matches unit-prim-re n) :constant
+      (str/starts-with? n "duprecord") (let [[_ rep size] (re-matches #"duprecord (\S+) (\d+)" n)]
+                                         [:block [(if (= rep "float") :float :regular) (Long/parseLong size)]])
+      (= :makeblock (:kind p)) [:block [:regular (count args)]]
+      (#{"makelazyblock" "makeforwardblock"} n) [:block [:lazy]]
+      (re-matches #"makearray(_imm)?\[(.*)\]" n) (let [[_ _ k] (re-matches #"makearray(_imm)?\[(.*)\]" n)]
+                                                   [:block [(if (= k "float") :float :regular) (count args)]])
+      (str/starts-with? n "duparray") (compute-size env (first args))
+      (= :raise (:kind p)) :unreachable
+      (= :ccall (:kind p)) (if-let [s (find-size-of-alloc-prim p args)] s (dynamic-size))
+      :else (dynamic-size))))
+
+(defn- compute-size
+  "Value_rec_compiler.compute_static_size's compute_expression_size: env maps an identifier to a delay of its size"
+  [env lam]
+  (let [join (fn [branches] (reduce (fn [s b] (join-sizes s (compute-size env b))) :unreachable branches))]
+    (case (lam 0)
+      :Lvar (if-let [d (get env (lam 1))] @d (dynamic-size))
+      :Lmutvar (dynamic-size)
+      :Lconst :constant
+      :Lapply (dynamic-size)
+      :Lfunction :function
+      :Llet (compute-size (assoc env (lam 3) (delay (compute-size env (lam 4)))) (lam 5))
+      :Lmutlet (compute-size env (lam 4))
+      :Lletrec (compute-size (reduce (fn [e [id _]] (assoc e id (delay :function))) env (lam 1)) (lam 2))
+      :Lprim (size-of-primitive env (lam 1) (lam 2))
+      :Lswitch (let [sw (lam 2)]
+                 (join (concat (map second (:consts sw)) (map second (:blocks sw)) (when (:fail sw) [(:fail sw)]))))
+      :Lstringswitch (join (concat (map second (lam 2)) (when (lam 3) [(lam 3)])))
+      :Lstaticraise :unreachable
+      (:Lstaticcatch :Ltrywith) (join [(lam 1) (lam 3)])
+      :Lifthenelse (join [(lam 2) (lam 3)])
+      :Lsequence (compute-size env (lam 2))
+      (:Lwhile :Lfor :Lassign) :constant
+      :Lsend (dynamic-size)
+      :Lifused :constant)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Value_rec_compiler: function lifting
+
+(defn- lfunction-with-body [f body] (assoc f 4 body))
+
+(declare split-static-function)
+
+(defn- one-reachable
+  "the arms' results: unreachable when none is reachable, the reachable one rebuilt by (rebuild i lam) else"
+  [results rebuild]
+  (let [reach (keep-indexed (fn [i r] (when (not= :unreachable r) [i r])) results)]
+    (case (count reach)
+      0 :unreachable
+      1 (let [[i [lfun lam]] (first reach)] [lfun (rebuild i lam)])
+      (throw (ex-info "letrec: multiple functions" {})))))
+
+(defn- split-static-function
+  "Value_rec_compiler.split_static_function: :unreachable or [lifted-function lam], lifted-function {:lfun
+  :free-vars-block-size}"
+  [block-var local lam]
+  (let [plus (fn [r f] (if (= r :unreachable) r [(r 0) (f (r 1))]))]
+    (case (lam 0)
+      :Lvar (let [param (ty/ident-create "let_rec_param")
+                  body [:Lapply [:Lprim (l/pfield 0 :pointer false) [[:Lvar block-var]]] [[:Lvar param]]]
+                  wrapper [:Lfunction :curried [[param ""]] "" body {:stub true :may-fuse-arity true}]]
+              [{:lfun wrapper :free-vars-block-size 1} [:Lprim (l/pmakeblock 0 false nil) [[:Lvar (lam 1)]]]])
+      :Lfunction (let [fv (simplif/free-variables (lam 4))
+                       locals (sort-by :stamp (filter #(contains? local %) fv))
+                       s (into {} (map-indexed (fn [i v] [v [:Lprim (l/pfield i :pointer false) [[:Lvar block-var]]]]) locals))]
+                   [{:lfun (lfunction-with-body lam (simplif/subst s (lam 4))) :free-vars-block-size (count locals)}
+                    [:Lprim (l/pmakeblock 0 false nil) (mapv (fn [v] [:Lvar v]) locals)]])
+      :Llet (plus (split-static-function block-var (conj local (lam 3)) (lam 5)) #(assoc lam 5 %))
+      :Lmutlet (plus (split-static-function block-var (conj local (lam 2)) (lam 4)) #(assoc lam 4 %))
+      :Lletrec (plus (split-static-function block-var (into local (map first (lam 1))) (lam 2)) #(assoc lam 2 %))
+      :Lprim (if (= :raise (:kind (lam 1))) :unreachable (throw (ex-info "letrec binding is not a static function" {})))
+      :Lstaticraise :unreachable
+      :Lswitch (let [sw (lam 2)
+                     arms (fn [k] (mapv (fn [[_ a]] (split-static-function block-var local a)) (k sw)))
+                     cs (arms :consts) bs (arms :blocks)
+                     f (when (:fail sw) (split-static-function block-var local (:fail sw)))
+                     nc (count cs) nb (count bs)]
+                 (one-reachable (concat cs bs (when f [f]))
+                                (fn [i x]
+                                  (cond (< i nc) [:Lswitch (lam 1) (assoc-in sw [:consts i 1] x)]
+                                        (< i (+ nc nb)) [:Lswitch (lam 1) (assoc-in sw [:blocks (- i nc) 1] x)]
+                                        :else [:Lswitch (lam 1) (assoc sw :fail x)]))))
+      :Lstringswitch (let [as (mapv (fn [[_ a]] (split-static-function block-var local a)) (lam 2))
+                           f (when (lam 3) (split-static-function block-var local (lam 3)))
+                           n (count as)]
+                       (one-reachable (concat as (when f [f]))
+                                      (fn [i x] (if (< i n) (assoc-in lam [2 i 1] x) (assoc lam 3 x)))))
+      :Lstaticcatch (one-reachable [(split-static-function block-var local (lam 1))
+                                    (split-static-function block-var (into local (map first (second (lam 2)))) (lam 3))]
+                                   (fn [i x] (assoc lam (if (zero? i) 1 3) x)))
+      :Ltrywith (one-reachable [(split-static-function block-var local (lam 1))
+                                (split-static-function block-var (conj local (lam 2)) (lam 3))]
+                               (fn [i x] (assoc lam (if (zero? i) 1 3) x)))
+      :Lifthenelse (one-reachable [(split-static-function block-var local (lam 2))
+                                   (split-static-function block-var local (lam 3))]
+                                  (fn [i x] (assoc lam (if (zero? i) 2 3) x)))
+      :Lsequence (plus (split-static-function block-var local (lam 2)) #(assoc lam 2 %))
+      (throw (ex-info "letrec binding is not a static function" {})))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Value_rec_compiler: compilation
+
+(def dummy-constant (l/lconst-int (quot 0xBBBB 2)))
+
+(def ^:dynamic *transl-prim*
+  "Lambda.transl_prim MODULE FIELD (the value's path translated), set by arbace.repr.ocaml.typer.translcore" nil)
+
+(defn- compile-alloc [[k n]]
+  (case k
+    :regular [:Lprim (l/pccall "caml_alloc_dummy") [(l/lconst-int n)]]
+    :float [:Lprim (l/pccall "caml_alloc_dummy_float") [(l/lconst-int n)]]
+    :lazy [:Lprim (l/pccall "caml_alloc_dummy_lazy") [l/lambda-unit]]))
+
+(defn- compile-update [[k] dummy newval]
+  (if (= k :lazy)
+    [:Lprim (l/pccall "caml_update_dummy_lazy")
+     [dummy (if (and (= :Lprim (newval 0)) (#{"makelazyblock" "makeforwardblock"} (:name (newval 1))))
+              newval
+              [:Lapply (*transl-prim* "CamlinternalLazy" "indirect") [newval]])]]
+    [:Lprim (l/pccall "caml_update_dummy") [dummy newval]]))
+
+(defn compile-letrec
+  "Value_rec_compiler.compile_letrec: bindings [[id rkind dfn]...] (rkind :static or :dynamic) and the body"
+  [bindings body]
+  (let [consts (into {} (map (fn [[id]] [id dummy-constant]) bindings))
+        {:keys [static functions dynamic]}
+        (reduce (fn [acc [id rkind dfn]]
+                  (if (= rkind :dynamic)
+                    (update acc :dynamic conj [id dfn])
+                    (let [size (compute-size {} dfn)]
+                      (cond
+                        (#{:constant :unreachable} size) (update acc :dynamic conj [id (simplif/subst consts dfn)])
+                        (and (vector? size) (= :block (first size))) (update acc :static conj [id (second size) dfn])
+                        (= :Lfunction (dfn 0)) (update acc :functions conj [id dfn])
+                        :else (let [ctx (ty/ident-create "letrec_function_context")
+                                    r (split-static-function ctx #{} dfn)]
+                                (when (= r :unreachable) (throw (ex-info "letrec: no function for binding" {})))
+                                (let [[{:keys [lfun free-vars-block-size]} lam] r]
+                                  (-> acc
+                                      (update :functions conj [id lfun])
+                                      (update :static conj [ctx [:regular free-vars-block-size] lam]))))))))
+                {:static [] :functions [] :dynamic []} bindings)
+        body (reduce (fn [b [id size lam]] [:Lsequence (compile-update size [:Lvar id] lam) b]) body (reverse static))
+        body (if (seq functions) [:Lletrec (vec functions) body] body)
+        body (reduce (fn [b [id lam]] [:Llet :strict "" id lam b]) body (reverse dynamic))]
+    (reduce (fn [b [id size _]] [:Llet :strict "" id (compile-alloc size) b]) body (reverse static))))

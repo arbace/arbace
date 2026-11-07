@@ -5,7 +5,8 @@
 # terminate at once, the original's stderr and status 134.
 . "$(dirname "$0")/lib.bash"
 printf 'runtime/ctor-throw.cpp\tc++23\t\t%s\n' "$root/test/cpp/runtime/samples/ctor-throw.cpp" > "$t/list.tsv"
-"$root/bin/cppi" lower-check "$t/list.tsv" "$t/w" > "$t/w.log" 2>&1; st=$?
+# ORS27: the lowered run is gcc's (CPPI_GCC=1; the test is in toolchain.txt, the oracle tier's); its run on ci is cpp-check-essential's
+CPPI_GCC=1 "$root/bin/cppi" lower-check "$t/list.tsv" "$t/w" > "$t/w.log" 2>&1; st=$?
 d=$t/w/files/runtime/ctor-throw.cpp
 [ "$(cat "$d/orig.status" 2>&1)" = 134 ] && ok "the original terminates (134)" || bad "the original's status: $(cat "$d/orig.status" 2>&1)"
 [ -f "$d/low.err" ] || bad "the lowered run left no stderr (low.err)"

@@ -1,0 +1,862 @@
+(ns arbace.repr.haskell.native
+  "repr/haskell's native reader (doc/haskell/NATIVE.md): Haskell text read into GHC 9.14.1's parsed
+  tree by Arbace code alone, written as the helper's dump of mode :lines (tools/hsdump, SPEC §8.2:
+  (hsdump/config {...}) (hsdump/pragmas [...]) then the tree), so that the converter
+  (arbace.repr.haskell.convert) makes the same Haskell forms from either reader. The parts: the
+  header pragmas and the parser's options (arbace.repr.haskell.header), the lexer
+  (arbace.repr.haskell.lex), the parser (arbace.repr.haskell.parse: Happy's driver over the
+  tables generated from Parser.y, the actions of rules-module, rules-decl, rules-expr and the
+  post-processing of post and post-decl), the Haddock pass (arbace.repr.haskell.haddock).
+
+  GHC's driver's preprocessing is native too (arbace.repr.haskell.driver: unlit, and GHC's
+  traditional C preprocessor with GHC's arguments, the GHC installation read as data), but hsc2hs:
+  an .hsc module is read from its hsc2hs output X.hs (the helper's), its :hsc2hs record the
+  helper's cpp verb's (X.hs.hspp.edn).
+
+  Mode :full (full-data): the dump also holds the text the positions refer to (a CPP module's
+  module view) and the lexer's tokens with the comments, as the helper's dump --full, an .hsc or
+  alex module's spans remapped to their places in the text (phys-of, the helper's physOf).
+
+  -main verbs (bin/repr-haskell runs them):
+    read [-o DIR] --libdir DIR [--hspp DIR] [--mode full] --flags \"FLAG...\" FILE...
+        each module to DIR/FILE.edn, the native dump (DIR default .tmp/repr-haskell/native),
+        preprocessed natively; an .hsc module's X.hs read, its :hsc2hs from HSPP/X.hs.hspp.edn;
+        --mode full: dumps of mode :full (the text, the lexer's tokens with the comments)
+    check --list FILE --libdir DIR [--report FILE] [--controls FILE]
+        the native check over a list of lines `DUMP DIR MODULE-FILE HSPP` (a helper dump of mode
+        :lines, the directory the helper ran in, the module's file as the helper names it, the
+        helper's cpp verb's text of a module it preprocessed or -): each module preprocessed
+        natively (its text against the helper's, byte for byte but the MIN_VERSION header's
+        temporary name), read with the dump's flags, its tree and header pragmas compared with the
+        dump's as data, then both converted and their forms compared as text (the native forms'
+        :config the native reader's own, the GHC installation's keys and :cpp included). The negative
+        controls (GT9; --controls FILE, test/haskell/native-controls.txt, `ID SUBJECT REFERENCE`): the
+        subject's module read natively against the reference's dump by the same comparison must
+        differ; one judged equal fails the check"
+  (:require [arbace.repr.haskell.ast :as a]
+            [arbace.repr.haskell.cpp :as cpp]
+            [arbace.repr.haskell.driver :as drv]
+            [arbace.repr.haskell.header :as hd]
+            [arbace.repr.haskell.unlit :as unlit]
+            [arbace.repr.haskell.lex :as lx]
+            [arbace.repr.haskell.parse :as prs]
+            [arbace.string :as str])
+  (:import [java.io File]))
+
+(defn- sha256-hex ^String [^bytes b]
+  (let [md (java.security.MessageDigest/getInstance "SHA-256")
+        d (.digest md b)
+        sb (StringBuilder.)]
+    (doseq [x d] (.append sb (format "%02x" (bit-and (long x) 0xff))))
+    (.toString sb)))
+
+(defn- language-of
+  "The language the flags name (GHC2021 when none), and the extensions' flags as the helper's
+  config lists them"
+  [flags]
+  (let [xs (keep #(when (str/starts-with? % "-X") (subs % 2)) flags)
+        langs (filter hd/languages xs)]
+    [(or (last langs) "GHC2021") (vec (remove hd/languages xs))]))
+
+(defn config
+  "The dump's configuration (hsdump/config) of a native read: the helper's keys, the reader's own:
+  the GHC version it reads for, the GHC installation's (:ghc-unit :target :os :arch, from inst,
+  arbace.repr.haskell.driver/installation), the language, the extensions, the flags, the unit, the
+  source file's SHA-256, the preprocessing's (pre: arbace.repr.haskell.driver/preprocess's :cpp,
+  :unlit); :hsc2hs and :corpus from base (the helper's config) when given"
+  [flags ^bytes source & {:keys [base corpus inst pre full]}]
+  (let [[lang exts] (language-of flags)
+        unit (second (drop-while #(not= % "-this-unit-id") flags))
+        other (vec (remove #(or (str/starts-with? % "-X") (str/starts-with? % "-D") (str/starts-with? % "-I")) flags))]
+    (cond-> {:ghc "9.14.1"}
+      inst (merge {:ghc-unit (drv/ghc-unit inst "9.14.1")} (drv/platform inst))
+      true (assoc :language (symbol lang))
+      (seq exts) (assoc :extensions (mapv symbol exts))
+      true (assoc :flags other)
+      unit (assoc :unit unit)
+      (or corpus (:corpus base)) (assoc :corpus (or corpus (:corpus base)))
+      true (assoc :reader :native :positions (if full :full :lines) :source (str "sha256:" (sha256-hex source)))
+      (:cpp pre) (assoc :cpp (:cpp pre))
+      (:hsc2hs base) (assoc :hsc2hs (:hsc2hs base))
+      (:unlit pre) (assoc :unlit true))))
+
+(defn- file-bytes ^bytes [^String f] (java.nio.file.Files/readAllBytes (.toPath (cpp/file-at f))))
+
+(defn preprocess
+  "GHC's driver's preprocessing of the module file (relative to cpp/*cwd*) under the flags, natively
+  (arbace.repr.haskell.driver/preprocess): CPP when the configuration's flags or the module's
+  header pragmas (of its text, unlit's for a literate module) turn it on, its OPTIONS_GHC flags
+  among CPP's"
+  [inst flags ^String file]
+  (let [raw (String. (file-bytes file) "ISO-8859-1")
+        pre (if (drv/literate? file) (unlit/unlit raw (unlit/escape-label file) file) raw)
+        cs (lx/code-points (String. (.getBytes ^String pre "ISO-8859-1") "UTF-8"))
+        d0 (hd/dyn-flags flags)
+        [_ opts] (hd/header-pragmas cs file (hd/parser-bits d0))
+        d (hd/dyn-flags d0 opts)
+        cpp? (contains? (hd/extensions d) "CPP")]
+    (drv/preprocess inst flags file cpp? opts)))
+
+(defn- haddock-pass
+  "The Haddock pass (arbace.repr.haskell.haddock/add-haddock), when it is there"
+  [lmod hdk & [on-warning]]
+  (if-let [f (try (requiring-resolve 'arbace.repr.haskell.haddock/add-haddock) (catch Exception _ nil))]
+    (f lmod hdk on-warning)
+    lmod))
+
+(defn- ps-message "The parser's message an exception carries (nil: not a parse failure)" [e]
+  (:ps-message (ex-data e)))
+
+(defn- run-parser
+  "A parser over a fresh lexer state: [value-or-nil fatal-message-or-nil ps]"
+  [cs file bits start]
+  (let [ps (lx/make-state cs file bits)]
+    (try [(prs/parse ps start) nil ps]
+         (catch Exception e
+           (if-let [m (ps-message e)] [nil m ps] (throw e))))))
+
+(defn render-opts
+  "The message printer's options a flags state gives (-ferror-spans, -fdiagnostics-show-caret,
+  -dppr-cols, -fdiagnostics-as-json)"
+  [d]
+  (select-keys d [:error-spans :show-caret :ppr-cols :json :max-errors]))
+
+(defn- marked
+  "The warnings of ps the flags state d turns on, each marked :fatal when d makes its flag fatal
+  (-Werror: the message is an error)"
+  [d ps]
+  (let [flag (requiring-resolve 'arbace.repr.haskell.errors/warning-flag)]
+    (vec (keep (fn [m] (let [f (flag m)]
+                         (when (hd/warning-on? d f)
+                           (if (contains? (:fatal d) f) (assoc m :fatal true) m))))
+               (lx/warnings ps)))))
+
+(def ^:private bidi-chars
+  "bidirectionalFormatChars"
+  {0x202a "U+202A LEFT-TO-RIGHT EMBEDDING (LRE)" 0x202b "U+202B RIGHT-TO-LEFT EMBEDDING (RLE)"
+   0x202c "U+202C POP DIRECTIONAL FORMATTING (PDF)" 0x202d "U+202D LEFT-TO-RIGHT OVERRIDE (LRO)"
+   0x202e "U+202E RIGHT-TO-LEFT OVERRIDE (RLO)" 0x2066 "U+2066 LEFT-TO-RIGHT ISOLATE (LRI)"
+   0x2067 "U+2067 RIGHT-TO-LEFT ISOLATE (RLI)" 0x2068 "U+2068 FIRST STRONG ISOLATE (FSI)"
+   0x2069 "U+2069 POP DIRECTIONAL ISOLATE (PDI)"})
+
+(defn- bidi-warning
+  "hscParse's checkBidirectionFormatChars over the text's code points cs: the warning
+  PsWarnBidirectionalFormatChars at the first such character with every one's offset, or nil"
+  [cs file]
+  (loop [i 0 l 1 c 1 found []]
+    (if (< i (count cs))
+      (let [ch (long (nth cs i))
+            d (get bidi-chars ch)
+            found (if d (conj found [i l c d]) found)]
+        (cond (= ch 10) (recur (inc i) (inc l) 1 found)
+              (= ch 9) (recur (inc i) l (inc (* 8 (quot (+ c 7) 8))) found)
+              :else (recur (inc i) l (inc c) found)))
+      (when (seq found)
+        (let [[_ l c _] (first found)]
+          (lx/msg :PsWarnBidirectionalFormatChars [file l c l (inc c) nil nil]
+                  (mapv (fn [[i _ _ d]] [i d]) found)))))))
+
+(defn- read-text*
+  "Reads a module's text (the text GHC parses) of file under flags (the GHC flags of the helper's
+  --ghc): {:tree :pragmas :exts :dflags}, the tree in the dump's form; signature: an .hsig. A
+  module GHC rejects gives {:messages batches :dflags :opts} instead, the messages ghc -fno-code
+  prints, in its driver's order (doc/haskell/NATIVE.md, \"Messages\"): the header's own errors
+  first (arbace.repr.haskell.fileargs: a batch is a vector of messages, or the text of a usage
+  error); else the header's warnings, and when the module's parse fails or records errors the
+  header's parse (getImports' parseHeader) first, its errors alone when it fails; else the module's
+  warnings (when its parse failed, those that are not errors under -Werror) and then its errors
+  (and the warnings that -Werror made errors); a parse that succeeds with only such warnings gives
+  them all in one batch. raw: an accepted module's tree as the parser made it (spans of the
+  parser's form; write-dump writes it as the dump's text)"
+  [^String text ^String file flags & {:keys [signature raw]}]
+  (let [cs (lx/code-points text)
+        d0 (hd/dyn-flags flags)
+        hdr ((requiring-resolve 'arbace.repr.haskell.fileargs/file-args) cs file d0)]
+    (if (:error hdr)
+      {:messages (:error hdr) :dflags d0 :opts (render-opts d0)}
+      (let [[prags _] (hd/header-pragmas cs file (hd/parser-bits d0))
+            d (:d hdr)
+            bits (hd/parser-bits d)
+            [lmod fatal ps] (run-parser cs file bits (if signature "parseSignatureNoHaddock" "parseModuleNoHaddock"))
+            ;; addHaddockToModule ends GHC's parse of a module (so its warnings are the parse's)
+            lmod (if (and lmod (not fatal) (:haddock d))
+                   (haddock-pass lmod (lx/hdk-comments ps) (fn [m] (lx/add-warning! ps m)))
+                   lmod)
+            errs (lx/errors ps)
+            ws (marked d ps)
+            ;; hscParse' logs the bidirectional characters' warning before the parse; the Hsc
+            ;; monad's warnings go with an exception, so it is in the batches of a parse that goes
+            ;; through only
+            bflag (let [m (lx/msg :PsWarnBidirectionalFormatChars nil)] ((requiring-resolve 'arbace.repr.haskell.errors/warning-flag) m))
+            bidi (when (hd/warning-on? d bflag)
+                   (when-let [b (bidi-warning cs file)]
+                     (if (contains? (:fatal d) bflag) (assoc b :fatal true) b)))
+            ws* (if bidi (vec (cons bidi ws)) ws)
+            fatal-ws (filterv :fatal ws*)
+            opts (render-opts d)
+            pre (fn [] @(:pre hdr))]
+        (cond
+          (or fatal (seq errs))
+          (let [[_ hfatal hps] (run-parser cs file bits "parseHeader")
+                herrs (lx/errors hps)]
+            (if (or hfatal (seq herrs))
+              {:messages (into (pre) [(cond-> herrs hfatal (conj hfatal))]) :dflags d :opts opts}
+              {:messages (into (pre) [(if fatal ws [])
+                                      (cond-> errs fatal (conj fatal))])
+               :dflags d :opts opts}))
+          (seq fatal-ws)
+          {:messages (into (pre) [ws*]) :dflags d :opts opts}
+          :else
+          (let []
+            {:tree (if raw lmod (a/to-dump lmod file))
+             :pragmas (mapv (fn [[k line v f]] (if (= f file) (list k line v) (list k line v f))) prags)
+             :exts (hd/extensions d)
+             :dflags d
+             :cs cs
+             :bits bits}))))))
+
+(defn read-text
+  "read-text* with the command line's flag warnings (ghc's main prints them before it compiles
+  anything: deprecated and unrecognised -W flags, `on the commandline: ...`): the first batch of a
+  module's messages, alone when one is fatal (-Werror: ghc stops there)"
+  [^String text ^String file flags & {:keys [signature] :as opts}]
+  (let [r (apply read-text* text file flags (apply concat opts))
+        {:keys [d warns]} ((requiring-resolve 'arbace.repr.haskell.fileargs/command-line) flags)]
+    (cond
+      (some :fatal warns) {:messages [(vec warns)] :dflags d :opts (render-opts d)}
+      (and (seq warns) (:messages r)) (update r :messages #(into [(vec warns)] %))
+      :else r)))
+
+(defn messages-text
+  "The text ghc -fno-code prints for a read's messages (\"\" for an accepted module); source-line
+  a fn of a file and a line to the line's text (arbace.repr.haskell.errors/text-lines)"
+  [{:keys [messages opts]} source-line]
+  (if messages
+    (let [txt (requiring-resolve 'arbace.repr.haskell.errors/messages-text)]
+      (apply str (map #(if (string? %) % (txt % source-line opts)) messages)))
+    ""))
+
+(defn- write-string [^StringBuilder b ^String x]
+  (.append b "\"")
+  (if (re-find #"[\"\\\n\t\r\x0c\x08]" x)
+    (dotimes [i (.length x)]
+      (let [c (.charAt x i)]
+        (case c
+          \" (.append b "\\\"")
+          \\ (.append b "\\\\")
+          \newline (.append b "\\n")
+          \tab (.append b "\\t")
+          \return (.append b "\\r")
+          \formfeed (.append b "\\f")
+          \backspace (.append b "\\b")
+          (.append b c))))
+    (.append b x))
+  (.append b "\""))
+
+(defn write-form
+  "x printed as pr-str prints it (the dump's data: lists, vectors, strings, symbols, keywords, integers, booleans, nil;
+  any other value by pr-str), into b"
+  [^StringBuilder b x]
+  (cond
+    (nil? x) (.append b "nil")
+    (instance? String x) (write-string b x)
+    (symbol? x) (.append b (str x))
+    (keyword? x) (.append b (str x))
+    (instance? Long x) (.append b (str x))
+    (true? x) (.append b "true")
+    (false? x) (.append b "false")
+    (vector? x) (do (.append b "[")
+                    (let [n (count x)] (dotimes [i n] (when (pos? i) (.append b " ")) (write-form b (nth x i))))
+                    (.append b "]"))
+    (seq? x) (do (.append b "(")
+                 (loop [s (seq x) first? true]
+                   (when s
+                     (when-not first? (.append b " "))
+                     (write-form b (first s))
+                     (recur (next s) false)))
+                 (.append b ")"))
+    :else (.append b (pr-str x))))
+
+(defn form-text "x as pr-str prints it" [x] (let [b (StringBuilder.)] (write-form b x) (str b)))
+
+(defn- write-span [^StringBuilder b s ^String module-file]
+  (if (nil? s)
+    (.append b "nil")
+    (let [f (nth s 0)]
+      (.append b "[")
+      (when-not (= f module-file) (write-string b f) (.append b " "))
+      (.append b (long (nth s 1))) (.append b " ") (.append b (long (nth s 2))) (.append b " ")
+      (.append b (long (nth s 3))) (.append b " ") (.append b (long (nth s 4)))
+      (.append b "]"))))
+
+(defn write-dump
+  "The text of (a/to-dump x module-file) as pr-str prints it, written without building the tree"
+  [^StringBuilder b x ^String module-file]
+  (cond
+    (seq? x)
+    (cond
+      (empty? x) (.append b "[]")
+      (= 'L (first x)) (do (.append b "(L ") (write-span b (nth x 1) module-file) (.append b " ")
+                           (write-dump b (nth x 2) module-file) (.append b ")"))
+      (a/node? x)
+      (let [h (first x)]
+        (case h
+          XModulePs (do (.append b "(XModulePs nil nil ") (write-dump b (nth x 3) module-file) (.append b " ")
+                        (write-dump b (nth x 4) module-file) (.append b ")"))
+          ClassDecl (do (.append b "(ClassDecl (tuple nil nil nil)")
+                        (doseq [y (drop 2 x)] (.append b " ") (write-dump b y module-file))
+                        (.append b ")"))
+          HsDataDefn (do (.append b "(HsDataDefn nil")
+                         (doseq [y (drop 2 x)] (.append b " ") (write-dump b y module-file))
+                         (.append b ")"))
+          (do (.append b "(")
+              (loop [s (seq x) first? true]
+                (when s
+                  (when-not first? (.append b " "))
+                  (write-dump b (first s) module-file)
+                  (recur (next s) false)))
+              (.append b ")"))))
+      :else
+      (do (.append b "[")
+          (loop [s (seq x) first? true]
+            (when s
+              (when-not first? (.append b " "))
+              (write-dump b (first s) module-file)
+              (recur (next s) false)))
+          (.append b "]")))
+    (vector? x) (do (.append b "[")
+                    (let [n (count x)] (dotimes [i n] (when (pos? i) (.append b " ")) (write-dump b (nth x i) module-file)))
+                    (.append b "]"))
+    :else (write-form b x)))
+
+(defn dump-forms
+  "The native read as a dump's three forms; in mode :full (full: {:text :tokens}, full-data's) the
+  text and the tokens after them"
+  [{:keys [tree pragmas]} cfg & [full]]
+  (if full
+    [(list 'hsdump/config cfg) (list 'hsdump/pragmas pragmas) (:tree full)
+     (list 'hsdump/text (:text full)) (list 'hsdump/tokens (:tokens full))]
+    [(list 'hsdump/config cfg) (list 'hsdump/pragmas pragmas) tree]))
+
+;;; Mode :full (SPEC §7.2, §8.2): the text the positions refer to and the lexer's tokens, as the
+;;; helper's dump --full writes them (tools/hsdump/HsDump.hs: pView, fullTokens, literateTokens,
+;;; moduleView)
+
+(defn- hs-space? [c] (let [c (char c)] (or (Character/isSpaceChar c) (contains? #{\tab \newline \return \formfeed \u000B} c))))
+
+(defn- hs-lines
+  "Haskell's lines: split at \n, no last empty line"
+  [^String s]
+  (let [ls (str/split s #"\n" -1)] (if (and (seq ls) (= "" (peek (vec ls)))) (pop (vec ls)) (vec ls))))
+
+(defn- width
+  "A line's width in GHC's columns (code points, tab stops of 8)"
+  ^long [^String l]
+  (loop [cs (seq (.toArray (.codePoints l))) c 1]
+    (if-let [x (first cs)]
+      (recur (next cs) (if (= x 9) (+ 1 (* 8 (quot (+ c 7) 8))) (inc c)))
+      (dec c))))
+
+(defn- line-pragma
+  "{-# LINE n \"file\" #-} -> [n file], or nil"
+  [^String l]
+  (when-let [[_ n f] (re-find #"^\{-#\s*(?i:LINE)\s+(\d+) \"([^\"]*)" l)] [(Long/parseLong n) f]))
+
+(defn- marker
+  "A line marker (# N \"f\", #line N \"f\"; with pragmas? also {-# LINE N \"f\" #-}) -> [n file]"
+  [^String l pragmas?]
+  (or (when-let [[_ n q] (re-find #"^#(?:line)? *(\d+) \"((?:[^\"\\]|\\.)*)\"" l)]
+        [(Long/parseLong n) (str/replace q #"\\(.)" "$1")])
+      (when pragmas? (when-let [[_ n f] (re-find #"^\{-#\s*(?i:LINE)\s+(\d+) \"([^\"]*)" l)] [(Long/parseLong n) f]))))
+
+(defn module-view
+  "moduleView (markers on, a text without {-# LINE #-} pragmas of its own): for each line of the
+  module file, the output line its line markers attribute to it, the lines of other files dropped"
+  ^String [^String file ^String out]
+  (let [m (loop [ls (seq (hs-lines out)) cur file n 1 acc {}]
+            (if-let [l (first ls)]
+              (if-let [[n2 f2] (marker l true)]
+                (recur (next ls) f2 n2 acc)
+                (if (= cur file)
+                  (recur (next ls) cur (inc n) (assoc acc n l))
+                  (recur (next ls) cur (inc n) acc)))
+              acc))
+        mx (if (seq m) (apply max (keys m)) 0)
+        sb (StringBuilder.)]
+    (doseq [n (range 1 (inc mx))] (.append sb (get m n "")) (.append sb "\n"))
+    (.toString sb)))
+
+(defn- unlit-lines
+  "unlit's output by line, its #line markers followed: {n line}"
+  [^String out]
+  (loop [ls (seq (hs-lines out)) n 1 m {}]
+    (if-let [l (first ls)]
+      (if-let [[_ d] (and (str/starts-with? l "#") (re-find #"^#(?:line)? *(\d+) \"" l))]
+        (recur (next ls) (Long/parseLong d) m)
+        (recur (next ls) (inc n) (assoc m n l)))
+      m)))
+
+(defn- literate-tokens
+  "literateTokens: a literate module's text unlit leaves out, as comments"
+  [^String src ^String out]
+  (let [outl (unlit-lines out)]
+    (keep (fn [[n ^String l]]
+            (let [u ^String (get outl n "")]
+              (cond
+                (every? hs-space? l) nil
+                (every? hs-space? u) [n 1 n (+ 1 (width l)) :c]
+                (and (str/starts-with? l ">") (str/starts-with? u " ")) [n 1 n 2 :c])))
+          (map vector (iterate inc 1) (hs-lines src)))))
+
+(defn module-view-pragmas
+  "moduleView of a text with {-# LINE #-} pragmas of its own (HR26-HR28): as module-view, but a line
+  marker naming the module's file that gives its line n a position the pragmas before it do not
+  writes {-# LINE n \"file\" #-} on the blank line before it, unless only blank lines follow up to
+  the next pragma: [view view-markers]"
+  [^String file ^String out]
+  (let [pragma-text (fn [n] (str "{-# LINE " n " \"" (str/replace (str/replace file "\\" "\\\\") "\"" "\\\"") "\" #-}"))
+        [m0 marks0]
+        (loop [ls (seq (hs-lines out)) cur file n 1 acc {} st nil ms ()]
+          (if-let [l (first ls)]
+            (if-let [[n2 f2] (marker l false)]
+              (if (= f2 file)
+                (if st
+                  (let [[vn vf vl] st]
+                    (if (and (not= [vf (+ (long vl) (- (long n2) (long vn)))] [file n2]) (> (long n2) 1)
+                             (every? hs-space? (get acc (dec (long n2)) "")))
+                      (recur (next ls) f2 n2 (assoc acc (dec (long n2)) (pragma-text n2)) [n2 file n2]
+                             (cons [(dec (long n2)) (get acc (dec (long n2)))] ms))
+                      (recur (next ls) f2 n2 acc st ms)))
+                  (recur (next ls) f2 n2 acc [n2 file n2] ms))
+                (recur (next ls) f2 n2 acc st ms))
+              (if (= cur file)
+                (let [st (if-let [[v f] (and st (line-pragma l))] [(inc (long n)) f v] st)]
+                  (recur (next ls) cur (inc (long n)) (assoc acc n l) st ms))
+                (recur (next ls) cur (inc (long n)) acc st ms)))
+            [acc ms]))
+        max0 (if (seq m0) (apply max (keys m0)) 0)
+        at (fn [j] (get m0 j ""))
+        idle (fn [k] (every? #(every? hs-space? (at %)) (take-while #(not (line-pragma (at %))) (range (inc (long k)) (inc (long max0))))))
+        marks (vec (for [[k _] (reverse marks0) :when (not (idle k))] k))
+        m (reduce (fn [acc [k was]] (if (idle k) (if (nil? was) (dissoc acc k) (assoc acc k was)) acc)) m0 marks0)
+        mx (if (seq m) (apply max (keys m)) 0)
+        sb (StringBuilder.)]
+    (doseq [n (range 1 (inc mx))] (.append sb (get m n "")) (.append sb "\n"))
+    [(.toString sb) marks]))
+
+(defn- cpp-events
+  "cppEvents: the segments' starts of a CPP module from its output: [view-line file line kind]"
+  [^String file ^String out]
+  (loop [ls (seq (hs-lines out)) seen false cur file n 1 acc []]
+    (if-let [l (first ls)]
+      (if-let [[n2 f2] (marker l false)]
+        (if (= f2 file)
+          (recur (next ls) true f2 n2 (conj acc [n2 f2 n2 1]))
+          (recur (next ls) seen f2 n2 acc))
+        (if-let [[v f] (and seen (= cur file) (line-pragma l))]
+          (recur (next ls) seen cur (inc (long n)) (conj acc [(inc (long n)) f v 2]))
+          (recur (next ls) seen cur (inc (long n)) acc)))
+      acc)))
+
+(defn- phys-of
+  "physOf (R6, HR25): a module with {-# LINE #-} pragmas of its own (an .hsc module's hsc2hs output,
+  alex's): its tokens at their places in the text (the view), the pragmas as comments, and a remap
+  of GHC's spans, which the pragmas put in other files and lines, to those places: [tokens remap]"
+  [^String file ^String view cpp-out own-all]
+  (let [vlines (hs-lines view)
+        prags (keep (fn [[n l]] (when-let [[v f] (line-pragma l)] [n f v (width l)])) (map vector (iterate inc 1) vlines))
+        events (if cpp-out (cpp-events file cpp-out) (map (fn [[n f v _]] [(inc (long n)) f v 2]) prags))
+        starts (vec (sort-by first (vals (reduce (fn [m [ps f v k]] (assoc m ps [ps f v k])) {1 [1 file 1 1]} events))))
+        segs (mapv (fn [[ps f v _] last-p] [ps f v last-p])
+                   starts (concat (map (fn [[ps _ _ k]] (- (long ps) (long k))) (rest starts)) [Long/MAX_VALUE]))
+        fwd (fn [l] (or (some (fn [[ps f v lp]] (when (<= (long ps) (long l) (long lp)) [f (+ (long v) (- (long l) (long ps)))])) segs)
+                        [file l]))
+        back (fn [f v] (for [[ps f0 v0 lp] segs
+                             :when (and (= f0 f) (>= (long v) (long v0)) (<= (+ (long ps) (- (long v) (long v0))) (long lp)))]
+                         (+ (long ps) (- (long v) (long v0)))))
+        prag-lines (set (map first prags))
+        own (vec (remove (fn [[a]] (contains? prag-lines a)) own-all))
+        toks (vec (sort-by (fn [[a b]] [a b]) (concat own (map (fn [[n _ _ w]] [n 1 n (+ 1 (long w)) :c]) prags))))
+        ;; Map.fromListWith (++): a key's places latest first
+        index (fn [kf] (reduce (fn [m t] (let [[k p] (kf t)] (update m k #(cons p %)))) {} own))
+        starts' (index (fn [[a b]] (let [[f v] (fwd a)] [[f v b] [a b]])))
+        ends' (index (fn [[_ _ c d]] (let [[f v] (fwd c)] [[f v d] [c d]])))
+        places (fn [m f l c]
+                 (if-let [xs (get m [f l c])]
+                   (distinct xs)
+                   (let [bs (distinct (back f l))]
+                     (concat (map (fn [l2] [l2 c]) bs) (when (and (= f file) (empty? bs)) [[l c]])))))
+        cmp-pos (fn [[a b] [c d]] (or (< (long a) (long c)) (and (= a c) (<= (long b) (long d)))))
+        remap (fn [f l1 c1 l2 c2]
+                (let [ss (places starts' f l1 c1)
+                      es (places ends' f l2 c2)
+                      pairs (for [s ss e es :when (cmp-pos s e)] [[(- (long (first e)) (long (first s))) (- (long (second e)) (long (second s)))] s e])]
+                  (when (seq pairs)
+                    (let [[_ [a b] [c d]] (first (sort-by first pairs))] [a b c d]))))]
+    [toks remap]))
+
+(defn- remap-tree
+  "The tree with every located node's span remapped (phys-of's remap; a span it cannot place kept)"
+  [tree ^String file remap]
+  (letfn [(sp [s]
+            (if (vector? s)
+              (let [[f l1 c1 l2 c2] (if (= 4 (count s)) (cons file s) s)]
+                (or (remap f l1 c1 l2 c2) s))
+              s))
+          (walk [x]
+            (cond
+              (and (seq? x) (= 'L (first x)) (= 3 (count x))) (list 'L (sp (nth x 1)) (walk (nth x 2)))
+              (seq? x) (apply list (map walk x))
+              (vector? x) (mapv walk x)
+              :else x))]
+    (walk tree)))
+
+(defn full-data
+  "Mode :full's text, tokens and tree of a native read r of module file (pre: its preprocessing,
+  src the file's text): {:text :tokens :tree :view-markers}"
+  [r pre ^String file ^String src]
+  (let [ts (lx/tokens (:cs r) file (:bits r))
+        comment? #{:ITlineComment :ITblockComment :ITdocComment :ITdocOptions}
+        pragmas? (boolean (some line-pragma (hs-lines src)))
+        own (for [[k _ [f l1 c1 l2 c2]] ts
+                  :when (and (= f file) (not (and (= l1 l2) (= c1 c2)))
+                             (not (and pragmas? (#{:ITline_prag :ITcolumn_prag} k))))]
+              (if (comment? k) [l1 c1 l2 c2 :c] [l1 c1 l2 c2]))
+        [view marks] (cond (:unlit pre) [src []]
+                           (and (:cpp pre) pragmas?) (module-view-pragmas file (:text pre))
+                           (:cpp pre) [(module-view file (:text pre)) []]
+                           :else [src []])]
+    (if pragmas?
+      (let [[toks remap] (phys-of file view (when (:cpp pre) (:text pre)) own)]
+        {:text view :tokens toks :tree (remap-tree (:tree r) file remap) :view-markers marks})
+      {:text view
+       :tokens (if (:unlit pre)
+                 (vec (sort-by (fn [[a b]] [a b]) (concat own (literate-tokens src (:text pre)))))
+                 (vec own))
+       :tree (:tree r)
+       :view-markers marks})))
+
+(defn- dumped [forms sym] (some #(when (and (seq? %) (= sym (first %))) (second %)) forms))
+
+(defn- first-difference
+  "The first place two trees differ: [path a b] (a path of indices; at a length difference the
+  first element one has more), or nil"
+  [x y]
+  (letfn [(go [x y path]
+            (cond
+              (= x y) nil
+              (and (sequential? x) (sequential? y) (= (vector? x) (vector? y)))
+              (or (some identity (map-indexed (fn [i [a b]] (go a b (conj path i))) (map vector x y)))
+                  (let [n (min (count x) (count y))]
+                    [(conj path n) (nth (seq x) n :none) (nth (seq y) n :none)]))
+              :else [path x y]))]
+    (go x y [])))
+
+(defn- clip [x n] (let [s (pr-str x)] (if (> (count s) n) (str (subs s 0 n) "...") s)))
+
+(defn- convert-text
+  "The converter's forms of a dump, as the forms text (arbace.repr.haskell.write)"
+  [forms file]
+  (let [convert (requiring-resolve 'arbace.repr.haskell/convert-dump)
+        forms-text (requiring-resolve 'arbace.repr.haskell.write/forms-text)
+        {:keys [forms]} (convert forms file)]
+    (forms-text forms)))
+
+(defn- helper-text
+  "The helper's cpp verb's text, its MIN_VERSION header's temporary name as <macros> and unlit's
+  temporary output as <unlit>, as the native preprocessing names them"
+  ^String [^String hspp]
+  (-> (String. (java.nio.file.Files/readAllBytes (.toPath (File. hspp))) "ISO-8859-1")
+      (str/replace #"\"[^\"]*ghc_tmp_\d+\.h\"" "\"<macros>\"")
+      (str/replace #"\"[^\"]*ghc_tmp_\d+\.lpp\"" "\"<unlit>\"")))
+
+(defn- first-line-difference [^String a ^String b]
+  (let [as (str/split-lines a) bs (str/split-lines b)
+        i (or (some #(when (not= (get as %) (get bs %)) %) (range (max (count as) (count bs)))) 0)]
+    (str "line " (inc i) ": helper " (pr-str (get as i)) ", native " (pr-str (get bs i)))))
+
+(defn check-one
+  "Reads one module natively and compares it with the helper's dump of it: {:status :equal | :pp
+  | :tree | :pragmas | :forms | :converter | :error, ...} (:converter: the trees equal, the
+  converter rejecting the helper's dump itself; :pp: the preprocessed texts differ); dir the
+  directory the helper ran in, module-file the module's file as the helper was given it (its
+  spans' file; an .hsc module's X.hs), hspp the helper's cpp verb's text or nil"
+  [inst ^String dump-path ^String dir ^String module-file hspp]
+  (let [t0 (System/currentTimeMillis)
+        ref (read-string (str "[" (slurp dump-path) "]"))
+        cfg (dumped ref 'hsdump/config)
+        flags (vec (concat (map #(str "-X" %) (cons (:language cfg) (:extensions cfg))) (:flags cfg)
+                           (get-in cfg [:cpp :defines]) (map #(str "-I" (str/replace % "$libdir" (:libdir inst))) (get-in cfg [:cpp :include-dirs]))))
+        base (when hspp (dumped (read-string (str "[" (slurp (str hspp ".edn")) "]")) 'hsdump/config))]
+    (if (nil? cfg)
+      {:status :no-dump :ms 0}
+      (try
+        (let [pre (binding [cpp/*cwd* dir] (preprocess inst flags module-file))
+              text (:text pre)
+              r (read-text text module-file flags :signature (str/ends-with? module-file ".hsig"))
+              ms (- (System/currentTimeMillis) t0)
+              ref-tree (nth ref 2)
+              ref-prags (vec (dumped ref 'hsdump/pragmas))
+              want (when hspp (helper-text hspp))
+              got (or (:raw pre) (String. (.getBytes ^String text "UTF-8") "ISO-8859-1"))]
+          (cond
+            (and want (not= want got))
+            {:status :pp :ms ms :where (first-line-difference want got)}
+            (:messages r)
+            {:status :error :ms ms :error (messages-text r (constantly nil))}
+            (not= ref-prags (:pragmas r))
+            {:status :pragmas :ms ms :ref (clip ref-prags 400) :native (clip (:pragmas r) 400)}
+            (not= ref-tree (:tree r))
+            (let [[path x y] (first-difference ref-tree (:tree r))]
+              {:status :tree :ms ms :path path :ref (clip x 700) :native (clip y 700)})
+            :else
+            (let [native (dump-forms r (config flags (binding [cpp/*cwd* dir] (file-bytes module-file)) :base (merge cfg base) :inst inst :pre pre))
+                  f1 (try (convert-text ref module-file) (catch Throwable e e))]
+              (if (instance? Throwable f1)
+                ;; the trees are equal, but the converter rejects the helper's dump itself
+                {:status :converter :ms ms :error (ex-message f1)}
+                (if (= f1 (convert-text native module-file))
+                  {:status :equal :ms ms}
+                  {:status :forms :ms ms})))))
+        (catch Throwable e
+          {:status :error :ms (- (System/currentTimeMillis) t0) :error (ex-message e)
+           :span (:span (ex-data e)) :at (some-> (.getStackTrace e) seq first str)})))))
+
+(defn check-one-full
+  "Mode :full: reads one module natively with its text and tokens and compares them with the
+  helper's dump --full of it, then the forms of mode :full of both (the native with its own
+  configuration), then the native forms printed in the full layout with the text, byte for byte:
+  {:status :equal | :pp | :text | :tokens | :tree | :forms | :print | :converter | :error ...}"
+  [inst ^String dump-path ^String dir ^String module-file hspp]
+  (let [t0 (System/currentTimeMillis)
+        ref (read-string (str "[" (slurp dump-path) "]"))
+        cfg (dumped ref 'hsdump/config)
+        flags (vec (concat (map #(str "-X" %) (cons (:language cfg) (:extensions cfg))) (:flags cfg)
+                           (get-in cfg [:cpp :defines]) (map #(str "-I" (str/replace % "$libdir" (:libdir inst))) (get-in cfg [:cpp :include-dirs]))))
+        base (when hspp (dumped (read-string (str "[" (slurp (str hspp ".edn")) "]")) 'hsdump/config))]
+    (if (nil? cfg)
+      {:status :no-dump :ms 0}
+      (try
+        (binding [cpp/*cwd* dir]
+          (let [pre (preprocess inst flags module-file)
+                r (read-text (:text pre) module-file flags :signature (str/ends-with? module-file ".hsig"))
+                src (String. (file-bytes module-file) "UTF-8")
+                fd (full-data r pre module-file src)
+                ms (- (System/currentTimeMillis) t0)
+                pre (cond-> pre (seq (:view-markers fd)) (assoc-in [:cpp :view-markers] (:view-markers fd)))
+                native (dump-forms r (config flags (file-bytes module-file) :base (merge cfg base) :inst inst :pre pre :full true) fd)
+                convert (requiring-resolve 'arbace.repr.haskell/convert-dump)
+                forms-text (requiring-resolve 'arbace.repr.haskell.write/forms-text)
+                read-all (requiring-resolve 'arbace.repr.haskell.write/read-all)
+                print-module (requiring-resolve 'arbace.repr.haskell.print/print-module)]
+            (cond
+              (not= (dumped ref 'hsdump/text) (:text fd))
+              {:status :text :ms ms :where (first-line-difference (dumped ref 'hsdump/text) (:text fd))}
+              (not= (dumped ref 'hsdump/tokens) (:tokens fd))
+              (let [[path x y] (first-difference (dumped ref 'hsdump/tokens) (:tokens fd))]
+                {:status :tokens :ms ms :path path :ref (clip x 200) :native (clip y 200)})
+              (not= (nth ref 2) (:tree fd))
+              (let [[path x y] (first-difference (nth ref 2) (:tree fd))]
+                {:status :tree :ms ms :path path :ref (clip x 700) :native (clip y 700)})
+              :else
+              (let [f1 (try (forms-text (:forms (convert ref module-file))) (catch Throwable e e))]
+                (if (instance? Throwable f1)
+                  {:status :converter :ms ms :error (ex-message f1)}
+                  (let [f2 (forms-text (:forms (convert native module-file)))
+                        ;; a macro an expansion came from is the expansion in the printed text (full/expand-macros)
+                        want ((requiring-resolve (quote arbace.repr.haskell.full/expand-macros)) (:text fd) (:tokens fd)
+                              ((requiring-resolve (quote arbace.repr.haskell.print/print-tokens)) (read-all f2)))]
+                    (cond
+                      (not= f1 f2) {:status :forms :ms ms}
+                      (not= want (:text (print-module (read-all f2))))
+                      {:status :print :ms ms :where (first-line-difference want (:text (print-module (read-all f2))))}
+                      :else {:status :equal :ms ms})))))))
+        (catch Throwable e
+          {:status :error :ms (- (System/currentTimeMillis) t0) :error (ex-message e)
+           :span (:span (ex-data e)) :at (some-> (.getStackTrace e) seq first str)})))))
+
+(defn check-controls
+  "The negative controls of the native check (GT9, doc/GATE-SURVEY.md, GTS81 (a), \"As built: GT9's controls\"; CONTROLS-FILE, test/haskell/
+  native-controls.txt: lines `ID SUBJECT REFERENCE`, modules named by the list's MODULE-FILE): the REFERENCE's helper dump judged by
+  `check-one` against the SUBJECT's text (read natively with the reference's configuration), which must give a difference of the trees,
+  the pragmas or the forms (`control ID fails as it must`); :equal (or :converter, which the check counts as a pass) is `control passed`,
+  any other status (the reader's error on the subject) `control not judged`; both fail. A control whose modules the list lacks is left.
+  LINES: the list's [dump dir module-file hspp] lines (check-list's), INST the GHC installation. Returns the number that passed or were
+  not judged."
+  [^String controls-file inst lines]
+  (if-not (and controls-file (.exists (File. controls-file)))
+    0
+    (let [by (into {} (map (fn [[d dir m]] [m [d dir]]) lines))
+          bad (atom 0)]
+      (doseq [l (str/split-lines (slurp controls-file))
+              :let [[id subject reference] (str/split (str/trim l) #"\s+")]
+              :when (and id reference (not (str/starts-with? id "#")))]
+        (if-not (and (by subject) (by reference))
+          (println (str "control " id " left: " (if (by subject) reference subject) " is not in the list"))
+          (let [r (check-one inst (first (by reference)) (second (by subject)) subject nil)]
+            (cond (#{:pragmas :tree :forms} (:status r))
+                  (println (str "control " id " fails as it must (" subject " read natively against the helper's dump of " reference ": " (name (:status r)) " differs)"))
+                  (#{:equal :converter} (:status r))
+                  (do (swap! bad inc) (println (str "control passed: " id " (" subject " against " reference ") is judged " (name (:status r)) " by the check")))
+                  :else
+                  (do (swap! bad inc) (println (str "control not judged: " id " (" subject " against " reference "): the check says " (name (:status r)) ", not a difference")))))))
+      @bad)))
+
+(defn- parse-args [args]
+  (loop [as args opts {} pos []]
+    (if (empty? as)
+      [opts pos]
+      (let [[x & more] as]
+        (if (and (or (str/starts-with? x "--") (= x "-o")) (seq more) (not (#{"--verbose"} x)))
+          (recur (rest more) (assoc opts x (first more)) pos)
+          (recur more opts (conj pos x)))))))
+
+(defn check-list
+  "The native check over a list file: lines `DUMP SOURCE MODULE-FILE` (blank and # lines skipped);
+  prints a line per module and a summary, returns the counts by status"
+  [^String list-file & {:keys [report libdir full]}]
+  (let [inst (drv/installation libdir)
+        lines (->> (str/split-lines (slurp list-file)) (map str/trim) (remove #(or (empty? %) (str/starts-with? % "#"))))
+        results (vec (for [l lines]
+                       (let [[dump dir mfile hspp] (str/split l #"\s+")
+                             r (assoc ((if full check-one-full check-one) inst dump dir mfile (when-not (= hspp "-") hspp)) :module mfile :dump dump)]
+                         (println (str (name (:status r)) " " mfile " " (:ms r) " ms"
+                                       (case (:status r)
+                                         :tree (str "\n    at " (:path r) "\n    helper " (:ref r) "\n    native " (:native r))
+                                         :pragmas (str "\n    helper " (:ref r) "\n    native " (:native r))
+                                         (:pp :text :print) (str "\n    " (:where r))
+                                         :tokens (str "\n    at " (:path r) "\n    helper " (:ref r) "\n    native " (:native r))
+                                         :error (str "\n    " (:error r) " " (pr-str (:span r)) " " (:at r))
+                                         :converter (str " (the trees equal; the converter rejects the helper's dump: "
+                                                         (clip (:error r) 200) ")")
+                                         "")))
+                         (flush)
+                         r)))
+        counts (frequencies (map :status results))]
+    (println (str "native-check: " (count results) " modules: "
+                  (str/join ", " (map (fn [[k v]] (str v " " (name k))) (sort-by (comp - val) counts)))
+                  "; " (reduce + (map :ms results)) " ms"))
+    (when report (spit report (pr-str {:results results :counts counts})))
+    counts))
+
+(defn- file-text "A file's text, nil when it is not there" [^File f]
+  (when (.isFile f) (slurp f)))
+
+(defn check-errors-one
+  "Reads one module natively and compares its messages with GHC's (the helper's errors verb:
+  errors-file the text ghc -fno-code prints, empty for a module it accepts; hspp the text GHC
+  parsed; module-file the module's file as the helper named it; srcdir the helper's directory,
+  where the caret lines' files are read): {:status :accepted | :equal | :differs |
+  :native-accepts | :native-rejects | :helper | :error ...}"
+  [^String errors-file ^String hspp ^String module-file ^String srcdir flags]
+  (let [t0 (System/currentTimeMillis)
+        ref (slurp errors-file)]
+    (if (str/starts-with? ref "hsdump/error")
+      {:status :helper :ms 0 :error (str/trim ref)}
+      (try
+        (let [text (slurp hspp)
+              r (with-bindings {(requiring-resolve 'arbace.repr.haskell.fileargs/*cwd*) srcdir}
+                  (read-text text module-file flags :signature (str/ends-with? module-file ".hsig")))
+              lines ((requiring-resolve 'arbace.repr.haskell.errors/text-lines)
+                     (fn [f] (file-text (File. srcdir ^String f))))
+              native (messages-text r lines)
+              ms (- (System/currentTimeMillis) t0)]
+          (cond
+            (and (= "" ref) (= "" native)) {:status :accepted :ms ms}
+            (= ref native) {:status :equal :ms ms}
+            (= "" ref) {:status :native-rejects :ms ms :native native}
+            (= "" native) {:status :native-accepts :ms ms :ref ref}
+            :else {:status :differs :ms ms :ref ref :native native}))
+        (catch Throwable e
+          {:status :error :ms (- (System/currentTimeMillis) t0) :error (ex-message e)
+           :at (some-> (.getStackTrace e) seq first str)})))))
+
+(defn check-errors
+  "The messages' check over a list file: lines `ERRORS HSPP MODULE-FILE SRCDIR FLAG...`; prints a
+  line per module that is not equal and a summary, returns the counts by status"
+  [^String list-file & {:keys [report quiet]}]
+  (let [lines (->> (str/split-lines (slurp list-file)) (map str/trim) (remove #(or (empty? %) (str/starts-with? % "#"))))
+        results (vec (for [l lines]
+                       (let [[ef hspp mfile srcdir & flags] (str/split l #"\s+")
+                             r (assoc (check-errors-one ef hspp mfile srcdir (vec flags)) :module mfile :errors ef)]
+                         (when-not (and quiet (#{:accepted :equal} (:status r)))
+                           (println (str (name (:status r)) " " srcdir "/" mfile " " (:ms r) " ms"
+                                         (case (:status r)
+                                           :differs (str "\n--- ghc\n" (:ref r) "--- native\n" (:native r))
+                                           :native-rejects (str "\n--- native\n" (:native r))
+                                           :native-accepts (str "\n--- ghc\n" (:ref r))
+                                           (:error :helper) (str "\n    " (:error r) " " (:at r))
+                                           ""))))
+                         (flush)
+                         r)))
+        counts (frequencies (map :status results))]
+    (println (str "native-check errors: " (count results) " modules: "
+                  (str/join ", " (map (fn [[k v]] (str v " " (name k))) (sort-by (comp - val) counts)))
+                  "; " (reduce + (map :ms results)) " ms"))
+    (when report (spit report (pr-str {:results results :counts counts})))
+    counts))
+
+(defn read-files
+  "Reads modules natively into OUT/FILE.edn (the dump's form), each preprocessed natively; an .hsc
+  module's hsc2hs output X.hs (the helper's), with its :hsc2hs record from HSPP/X.hs.hspp.edn. A
+  module that does not read is reported, its dump not written; returns the number read"
+  [out flags files & {:keys [hspp libdir full]}]
+  (let [inst (drv/installation libdir)]
+    (count
+     (filter identity
+             (for [f0 files]
+               (let [hsc (str/ends-with? f0 ".hsc")
+                     f (if hsc (subs f0 0 (dec (count f0))) f0)
+                     base (when (and hsc hspp)
+                            (dumped (read-string (str "[" (slurp (str hspp "/" f ".hspp.edn")) "]")) 'hsdump/config))
+                     o (File. (str out "/" f ".edn"))]
+                 (try
+                   (let [pre (preprocess inst flags f)
+                         r (read-text (:text pre) f flags :signature (str/ends-with? f ".hsig") :raw (not full))
+                         _ (when (:messages r)
+                             (throw (ex-info (str "rejected\n" (messages-text r ((requiring-resolve 'arbace.repr.haskell.errors/text-lines)
+                                                                                 (fn [g] (file-text (File. ^String g))))))
+                                             {})))
+                         fd (when full (full-data r pre f (String. (file-bytes f) "UTF-8")))
+                         pre (cond-> pre (seq (:view-markers fd)) (assoc-in [:cpp :view-markers] (:view-markers fd)))
+                         cfg (config flags (file-bytes f) :base base :inst inst :pre pre :full full)]
+                     (.mkdirs (.getParentFile o))
+                     (if full
+                       (spit o (str (str/join "\n" (map form-text (dump-forms r cfg fd))) "\n"))
+                       ;; mode :lines: the fused writer, the parser's tree written as the dump's text
+                       (let [b (StringBuilder.)]
+                         (write-form b (list 'hsdump/config cfg)) (.append b "\n")
+                         (write-form b (list 'hsdump/pragmas (:pragmas r))) (.append b "\n")
+                         (write-dump b (:tree r) f) (.append b "\n")
+                         (spit o (str b))))
+                     ;; mode :full: a CPP module's module view beside its dump, as the helper's dump --full writes it
+                     ;; (the text level's reference: FILE.view)
+                     (when (and full (:cpp pre)) (spit (str out "/" f ".view") (:text fd)))
+                     (println "read" f)
+                     true)
+                   (catch Exception e
+                     (println (str "repr-haskell: native read: " f ": " (ex-message e)
+                                   (when-let [sp (:span (ex-data e))] (str " at " (pr-str (a/dump-span sp f))))))
+                     false))))))))
+
+(defn -main [& args]
+  (let [[verb & more] args
+        [opts pos] (parse-args more)]
+    (binding [cpp/*sysroot* (get opts "--sysroot")]
+    (case verb
+      ;; a module the converter rejects (the helper's dump too) counts for the reader: its trees
+      ;; are equal
+      "check" (let [c (check-list (get opts "--list") :report (get opts "--report") :libdir (get opts "--libdir")
+                                  :full (= "full" (get opts "--mode")))
+                    lines (->> (str/split-lines (slurp (get opts "--list"))) (map str/trim) (remove #(or (empty? %) (str/starts-with? % "#")))
+                               (mapv #(str/split % #"\s+")))
+                    ctl (check-controls (get opts "--controls") (drv/installation (get opts "--libdir")) lines)]
+                (System/exit (if (and (every? #{:equal :converter} (keys c)) (zero? ctl)) 0 1)))
+      "errors" (let [c (check-errors (get opts "--list") :report (get opts "--report") :quiet (get opts "--quiet"))]
+                 (System/exit (if (every? #{:accepted :equal} (keys c)) 0 1)))
+      "read" (let [n (read-files (or (get opts "-o") ".tmp/repr-haskell/native")
+                                 (remove empty? (str/split (or (get opts "--flags") "") #"\s+"))
+                                 pos :hspp (get opts "--hspp") :libdir (get opts "--libdir") :full (= "full" (get opts "--mode")))]
+               (System/exit (if (= n (count pos)) 0 1)))
+      (do (println "usage: -m arbace.repr.haskell.native check --list FILE --libdir DIR [--report FILE] [--controls FILE] | read [-o DIR] --libdir DIR [--sysroot DIR] [--hspp DIR] --flags \"FLAG...\" FILE...")
+          (System/exit 2))))))

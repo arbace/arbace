@@ -4,9 +4,12 @@
   their sources are data, test/reap/cells.edn; each source's reference gives its passing cases and
   its non-passing ones (read-source), each non-pass falls into a class of its classes file, the
   first whose :match finds \"RESULT REASON\" (test/goi/divergences.edn's format), and the matrix
-  prints pass / by design / deferred per cell. A non-pass no class takes, or of a result its cell
+  prints pass / by design / deferred per cell. A class of :kind :na (not applicable: the case is no
+  program of the level, as Go's invalid programs at the AOT level, which have no forms to print) is
+  reported beside the cell and left out of its denominator; :budget (over the check's time budget,
+  test/goi/timeouts.txt) is counted in it and reported beside it. A non-pass no class takes, or of a result its cell
   refuses (:refuse; Go's: a fail or an error, whatever the classes, as goi's judge), a class's :kind neither
-  :design nor :deferred (nor mapped by the cell's :kind-map), or a reference missing fails the
+  :design, :deferred, :na nor :budget (nor mapped by the cell's :kind-map), or a reference missing fails the
   verb, and so does a file a source names gone (but the :file of a source with :until, a check
   not recorded yet: a cell none of whose checks is recorded yet prints \"no check yet\"), a stale
   :until, a source of passes with no case, an :include that selects nothing. The
@@ -289,7 +292,7 @@
             es (vec (for [[f v] (sort-by first rows) :when (not= :pass (rv v))]
                       (case (rv v)
                         :known (entry f :known (text (or (rc v) (get kfiles f) :unclassified)))
-                        :oracle-rejects (entry f :oracle-rejects "oracle-rejects: clang rejects the file with its own diagnostics (recorded by name, roundtrip-oracle.edn)")
+                        :oracle-rejects (entry f :oracle-rejects "oracle-rejects: clang rejects the file with its own diagnostics (recorded by name, roundtrip-oracle.edn) and the native reader cannot read it (CPR1)")
                         :oracle-fails (entry f :oracle-fails "oracle-fails: the oracle's dump failed (a timeout or a crash, recorded by name, roundtrip-oracle.edn)")
                         (entry f (rv v) (str (name (rv v)) ": a verdict the round trip does not record")))))
             stale (for [[f v] rows :when (and (= :known (rv v)) (not (contains? kfiles f)))] f)]
@@ -392,6 +395,42 @@
     {:pass (count (filter #(= :pass (second %)) rows)) :ids (mapv first rows)
      :entries (vec (for [[id r why] rows :when (not= :pass r)] (entry id r why)))
      :detail (str (count rows) " rows in " (:file src))}))
+;; ---- the crops' readers (the REAP rows of Rust, Haskell and LLVM): one block each, so that the branches merge by keeping all
+
+(defmethod read-source :corpus-known [src]
+  ;; A round trip's known file (bin/repr-rust roundtrip's test/rust/roundtrip-CORPUS[-LEVEL]-known.edn, bin/repr-haskell roundtrip's
+  ;; test/haskell/roundtrip-CORPUS[-LEVEL]-known.edn: a map from a file, crate, program or PKG/FILE module to
+  ;; the reason it differs; the passes are not recorded, the round trip passes every other unit of the corpus): each
+  ;; :parts entry {:corpus CORPUS-FILE :known KNOWN-FILE}, the units of the corpus (:count :files, the files of its crates;
+  ;; :ifaces, the crates rustdoc documents; :programs, the behaviour level's; :hs-modules, Haskell's modules) less the known file's. A case is
+  ;; "CORPUS KEY" of the result :known, its reason "LEVEL: REASON" (:level, the source's).
+  (let [parts (for [{:keys [corpus known]} (:parts src)]
+                (let [c (read-edn corpus)
+                      total (case (:count src)
+                              :files (reduce + (map #(count (:files %)) (:crates c)))
+                              :ifaces (count (filter :iface (:crates c)))
+                              :programs (count (:programs c))
+                              ;; Haskell's (haskell-90, merged at batch 2): the modules, .hsc modules and boot files of its packages
+                              :hs-modules (reduce + (map #(+ (count (:modules %)) (count (:hsc %)) (count (:boot %))) (:packages c))))
+                      ks (sort-by (comp str key) (read-edn known))]
+                  {:total total
+                   :entries (for [[k why] ks]
+                              (entry (str (if (= :hs-modules (:count src)) (str "ghc-" (:ghc c)) (:name c)) " " k) :known (str (:level src) ": " (str/replace (str why) #"\s+" " "))))}))]
+    {:pass (- (reduce + (map :total parts)) (count (mapcat :entries parts)))
+     :entries (vec (mapcat :entries parts))
+     :detail (str (str/join ", " (map #(format "%,d" (long (:total %))) parts)) " " (name (:count src)) " in the corpora")}))
+
+(defmethod read-source :rust-lower [src]
+  ;; rsi lower-check's results (test/rust/lower-results.edn, lower-std-results.edn: {PROGRAM :pass | :nondet | :skip | [RESULT CLASS]},
+  ;; EVAL.md section 7): a non-pass an entry of its RESULT, reason the CLASS's id, taken by that class (:class-id) of the classes file;
+  ;; :nondet (the judge's own runs differ) and :skip are no cases.
+  (let [m (read-edn (:file src))
+        vs (vals m)]
+    {:pass (count (filter #{:pass} vs))
+     :entries (vec (for [[id v] (sort-by (comp str key) m) :when (vector? v)]
+                     (assoc (entry id (first v) (name (second v))) :class-id (second v))))
+     :detail (str (count m) " programs in " (:file src) "; " (count (filter #{:nondet} vs)) " nondeterministic and "
+                  (count (filter #{:skip} vs)) " skipped, not counted")}))
 
 ;; the cases a source must have (report 021's finding 1: a shrunk record is a valid record)
 
@@ -411,6 +450,18 @@
     (loop [xs []]
       (let [x (read r false ::eof)]
         (if (= ::eof x) xs (recur (conj xs x)))))))
+
+;; ---- Haskell's readers (its round trips' known files are :corpus-known's, :count :hs-modules, above)
+
+(defmethod read-source :hsi-check [src]
+  ;; bin/hsi check's record (test/haskell/check-hsi.edn: one map a program, {:id :result :error ...}; :result :pass, :fail, :hsi, :no-dump,
+  ;; :no-ref, :skipped): a non-pass an entry of its result, reason its message (:error, else the result), taken by the class whose
+  ;; :ids name the program (test/haskell/divergences.edn).
+  (let [rows (read-forms (:file src))]
+    {:pass (count (filter #(= :pass (:result %)) rows)) :ids (mapv :id rows)
+     :entries (vec (for [r rows :when (not= :pass (:result r))]
+                     (entry (:id r) (:result r) (let [e (str (:error r))] (if (seq e) e (name (:result r)))))))
+     :detail (str (count rows) " programs in " (:file src))}))
 
 (def ^:private ref-run-ids
   (memoize
@@ -546,9 +597,18 @@
                     c))
           classes)))
 
+(defn- classify-entry
+  "An entry that names its class (:class-id, a check that records the class) is taken by it, one a class's :ids lists (hsi's classes
+  name their programs, HES43 (a)) by that class, else classify's."
+  [classes e]
+  (if-let [id (:class-id e)]
+    (first (filter #(= id (:id %)) classes))
+    (or (first (filter #(some #{(:id e)} (:ids %)) classes))
+        (classify classes e))))
+
 (defn- kind-of [cell c]
   (let [k (:kind c)]
-    (if (#{:design :deferred} k) k (get (:kind-map cell) k))))
+    (if (#{:design :deferred :na :budget} k) k (get (:kind-map cell) k))))
 
 (defn- per-file
   "Entries of one id merged into one: an entry in no class kept as it is (a problem), else the first deferred one, else the first;
@@ -572,6 +632,7 @@
   [src]
   (concat (for [k [:file :upstream :known :ref :same-cases :ref-runs] :let [f (get src k)] :when (and f (not (exists? f)))] f)
           (for [f (let [x (:py-ref src)] (if (vector? x) x (when x [x]))) :when (not (exists? f))] f)
+          (for [{:keys [corpus known]} (:parts src) f [corpus known] :when (not (exists? f))] f)
           (when-let [d (:expected src)] (when-not (dir? d) [d]))
           (when-let [d (:results-dir src)] (when-not (dir? d) [d]))))
 
@@ -594,7 +655,7 @@
                  :problems (when-not not-yet (vec (for [f miss] (str (:name src) ": no " f)))))
       (let [r (read-source src)
             classes (classes-of cf)
-            es (for [e (:entries r)] (let [c (classify classes e)] (assoc e :class c :kind (when c (kind-of cell c)))))
+            es (for [e (:entries r)] (let [c (classify-entry classes e)] (assoc e :class c :kind (when c (kind-of cell c)))))
             ;; :per-file (the token check's three sections, queue 122 finding 4): a file the known file lists at several levels
             ;; is one non-pass, of its deferred class when any is (the worst kind), else of its first; an entry in no class stays
             es (if (:per-file src) (per-file es) es)]
@@ -624,7 +685,7 @@
                                 (for [e es :when (nil? (:class e))]
                                   (str (:name src) ": " (:id e) " in no class of " cf ": " (name (:result e)) " " (:reason e)))
                                 (for [c (distinct (keep :class es)) :when (nil? (kind-of cell c))]
-                                  (str cf ": class " (:id c) "'s kind " (:kind c) " is neither :design nor :deferred"))))})))))
+                                  (str cf ": class " (:id c) "'s kind " (:kind c) " is neither :design, :deferred, :na nor :budget"))))})))))
 
 (defn- sum [k es] (reduce + (map :n (filter #(= k (:kind %)) es))))
 
@@ -652,6 +713,7 @@
                 :pass (reduce + (keep :pass units))
                 :pass-partial (boolean (some #(and (nil? (:pass %)) (not (:within %))) checks))
                 :design (sum :design es) :deferred (sum :deferred es)
+                :na (sum :na es) :budget (sum :budget es)
                 :pending (reduce + (map :n (filter #(= :pending (:decided (:class %))) es))))))
 
 (defn- n [x] (format "%,d" (long x)))
@@ -660,7 +722,9 @@
   (if-not (:checked c)
     (str "no check yet" (when (:until c) (str " (" (:until c) ")")))
     (str (n (:pass c)) (when (:pass-partial c) "+") " / " (n (:design c)) " / " (n (:deferred c))
-         (when (pos? (:pending c)) (str " (" (n (:pending c)) " pending)")))))
+         (when (pos? (:pending c)) (str " (" (n (:pending c)) " pending)"))
+         (when (pos? (:budget c)) (str " (" (n (:budget c)) " over budget, in the denominator)"))
+         (when (pos? (:na c)) (str " (" (n (:na c)) " n/a, not in the denominator)")))))
 
 (defn- print-source [s entries?]
   (if-not (:present s)
@@ -704,7 +768,7 @@
 
 (defn- cell-record [k c]
   {:cell k :checked (:checked c) :pass (:pass c) :design (:design c) :deferred (:deferred c)
-   :pending (:pending c) :sources (mapv source-record (:sources c))})
+   :na (:na c) :budget (:budget c) :pending (:pending c) :sources (mapv source-record (:sources c))})
 
 (defn- matrix-text [records]
   (str ";; The REAP matrix as bin/reap computes it from the checks' records (report 021's finding 1):\n"
@@ -716,7 +780,7 @@
                  (for [r records]
                    (str " {:cell " (pr-str (:cell r)) " :checked " (pr-str (:checked r))
                         " :pass " (:pass r) " :design " (:design r) " :deferred " (:deferred r)
-                        " :pending " (:pending r) "\n  :sources\n  ["
+                        " :na " (:na r) " :budget " (:budget r) " :pending " (:pending r) "\n  :sources\n  ["
                         (str/join "\n   "
                                   (for [s (:sources r)]
                                     (if (:absent s)
@@ -743,7 +807,7 @@
             (if-not o
               [(str cn ": not recorded")]
               (concat
-               (mapcat #(diff cn % (get r %) (get o %)) [:checked :pass :design :deferred :pending])
+               (mapcat #(diff cn % (get r %) (get o %)) [:checked :pass :design :deferred :na :budget :pending])
                (let [os (into {} (for [s (:sources o)] [(:name s) s]))]
                  (concat
                   (for [s (:sources o) :when (not (some #(= (:name s) (:name %)) (:sources r)))]

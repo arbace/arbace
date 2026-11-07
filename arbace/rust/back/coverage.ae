@@ -1,0 +1,64 @@
+(ns arbace.rust.back.coverage
+  "RF3's coverage (bin/rust-front coverage): over the mono items rustc collects for a program (`rsdump --mono-mir`: each function
+  instance's monomorphic MIR, its symbol, its callees resolved), arbace.rust.back.codegen's function against the function of
+  rustc's own -O0 -Zshare-generics=no IR of the same symbol, after arbace.rust.back.check's normalizer. Per item: pass, differs
+  (the first differing line) or the reason codegen refuses it; the summary counts them and ranks the reasons."
+  (:require [arbace.rust.front.mir :as mir]
+            [arbace.rust.back.codegen :as cg]
+            [arbace.rust.back.check :as chk]
+            [arbace.repr.llvm :as llvm]
+            [arbace.string :as str]))
+
+(defn coverage-one
+  "[[symbol result]...] for one program: dir/NAME.mono.edn and dir/NAME.ll."
+  [dir n]
+  (let [all (mir/read-all (slurp (str dir "/" n ".mono.edn")))
+        lt (:layouts all)
+        forms (llvm/read-ll (str dir "/" n ".ll"))
+        gm (chk/global-map forms)
+        theirs (into {} (keep (fn [f] (when (= 'llvm/define (first f)) [(name (second f)) f]))) forms)
+        gl (cg/new-globals (:langsyms all))
+        _ (cg/set-def-symbols! gl (:bodies all))]
+    (vec
+     (for [b (:bodies all) :when (= :body (:form b))]
+       (let [sym (:symbol b)
+             t (get theirs sym)]
+         [sym
+          (cond
+            (nil? t) "no rustc function"
+            :else
+            (try
+              (let [o (chk/normalize (cg/codegen-fn b lt gl) (chk/global-map (cg/module-extras gl)))
+                    r (chk/normalize t gm)]
+                (when (= sym (System/getenv "CG_SYM")) (println "--- ours") (doseq [l (chk/norm-lines o)] (println l)) (println "--- rustc") (doseq [l (chk/norm-lines r)] (println l)))
+                (if (= o r) :pass (or (chk/diff-text o r) "differs")))
+              (catch Throwable e
+                (if-let [u (:codegen/unsupported (ex-data e))] (str "unsupported: " u) (str "error: " (.getMessage e))))))])))))
+
+(defn- reason-key [r]
+  (cond (= r :pass) :pass
+        (.startsWith ^String r "unsupported: ") (let [u (subs r 13)] (str "unsupported: " (first (str/split u #"[ ({]" 3)) " " (second (str/split u #" " 3))))
+        (.startsWith ^String r "error: ") "error"
+        :else "differs"))
+
+(defn -main
+  "`DIR NAME...`: each program's coverage into DIR/NAME.coverage.edn; `--summary DIR`: the programs' files summed."
+  [dir & names]
+  (if (= dir "--summary")
+    (let [d (first names)
+          fs (sort (filter #(.endsWith ^String % ".coverage.edn") (map #(.getName ^java.io.File %) (.listFiles (java.io.File. ^String d)))))
+          rs (map (fn [f] [f (read-string (slurp (str d "/" f)))]) fs)
+          tally (apply merge-with + (map (comp :tally second) rs))
+          total (reduce + (vals tally))]
+      (println "coverage:" (get tally :pass 0) "of" total "mono items' functions equal to rustc's IR (" (count rs) "programs)")
+      (doseq [[k v] (sort-by (comp - val) (dissoc tally :pass))] (println " " v k))
+      (let [full (filter (fn [[_ r]] (= (:total r) (get (:tally r) :pass 0))) rs)]
+        (println (count full) "programs with every item equal:" (str/join " " (map (comp #(str/replace % ".coverage.edn" "") first) full))))
+      (System/exit 0))
+    (do
+      (doseq [n names]
+        (let [r (try (coverage-one dir n) (catch Throwable e [["(program)" (str "error: " (.getMessage e))]]))
+              tally (frequencies (map (comp reason-key second) r))]
+          (spit (str dir "/" n ".coverage.edn") (pr-str {:total (count r) :tally tally :failures (vec (take 300 (remove (comp #{:pass} second) r)))}))
+          (println n (get tally :pass 0) "of" (count r))))
+      (System/exit 0))))

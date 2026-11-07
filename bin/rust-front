@@ -1,0 +1,337 @@
+#!/bin/bash
+# The Rust front end's trial (doc/rust/FRONTEND-SURVEY.md, "As built: RF1-RF3 (trial, 2026-11-05)"; doc/rust/MIR.md): RF1's oracles
+# from the helper's new modes (tools/rsdump/mirdata.rs), RF2's MIR forms check, RF3's first slice (arbace.rust.back.*: code generation
+# to LLVM forms, the collector's traversal) and its judges. Light: one process per program, each under 2 GiB. Needs the helper
+# (bin/repr-rust helper) and rustc 1.99.1; evaluated from the checkout on the tools' host (ARBACE_HOST_EXE), RUSTC_BOOTSTRAP=1 set here.
+#
+#   bin/rust-front collect-check [--crates] [--ours] [NAME...]
+#                          RF7: arbace.rust.front.collect (generics, types, signatures, clauses, ADTs, impls) over the HIR of
+#                          arbace.rust.front.lower against the helper's --iface (front-oracles' NAME.iface.edn), item by item
+#                          (COLLECT_VERBOSE=1: each program's differing items; COLLECT_DUMP=DIR: our items); --ours: the pipeline;
+#                          --crates: over the crates' oracles of `crates`
+#   bin/rust-front typeck-check [--crates] [--ours] [NAME...]
+#                          RF9: arbace.rust.front.typeck's facts (each expression's type and adjustments, each binding's type and
+#                          mode) against the helper's --typeck (front-oracles' NAME.tc.edn), fact by fact (TYPECK_VERBOSE=1)
+#   bin/rust-front crates CRATE-DIR...
+#                          RF7 on ordinary crates (a Cargo registry's sources): src/lib.rs at its edition through the helper's
+#                          front oracles into .tmp/rust-front/crates/, then collect-check over the helper's crates
+#   bin/rust-front oracles [-o DIR] [--next-solver] FILE.rs...
+#                          rsdump rustc's --mir (rustc's -Zunpretty=mir text), --mir-data (the forms), --census,
+#                          --iface per file into DIR/NAME.{mir.txt,mir.edn,census.edn,iface.edn} (default
+#                          .tmp/rust-front/oracles); --next-solver: -Znext-solver=globally, into DIR/next/
+#   bin/rust-front corpus  the synthetic corpus and the samples (test/rust/synthetic, sample, eval) through oracles and again with
+#                          the next solver; the solvers' MIR compared
+#   bin/rust-front mir-check [NAME...]
+#                          RF2: each body of the oracles' MIR forms read and printed back (arbace.rust.front.mir) equal to the
+#                          oracle's text (all of .tmp/rust-front/oracles without names); a negative control must differ
+#   bin/rust-front codegen-check FILE.rs...
+#                          RF3: no_std programs (test/rust/front/*.rs: `// rf: overflow-checks` turns the checks on) through
+#                          arbace.rust.back.codegen, each function against rustc's IR after the normalizer; then the programs built from
+#                          our IR (rsi's lowering to C, gcc) against rustc's executables' exit statuses
+#   bin/rust-front coverage FILE.rs...
+#                          RF3: the mono items rustc collects (the helper's --mono-mir; COVERAGE_REDUMP=1 makes the dumps again),
+#                          each function codegen'd and judged against rustc's IR; per program NAME.coverage.edn in
+#                          .tmp/rust-front/mono/, the refusals ranked (CG_SYM=SYMBOL prints that function's two normal forms)
+#   bin/rust-front collect FILE.rs...
+#                          RF3: arbace.rust.back.collect's item set of each program against rustc's
+#   bin/rust-front run FILE.rs [-- ARG...]
+#                          RF3, what `bin/rsi run --front mir` runs: a no_std program's LLVM forms lowered by bin/rsi lower and
+#                          compiled by gcc -O0; the exit status is the program's (125: the front takes no part of it)
+#   bin/rust-front run-native FILE.rs
+#                          RF3: a std program whose own unit is the front's IR, linked with the host's native std as rsi's native-std
+#                          leg links (bin/lib/rsi/link, RSI_FRONT_IR); status, stdout and stderr against the program built by rustc
+#   bin/rust-front front-oracles [FILE.rs...]
+#                          RF4-RF6's oracles (tools/rsdump/front.rs): the helper's --expanded crate and --resolve paths per file
+#                          into .tmp/rust-front/front/NAME.{exp,res}.edn, rustc's -Zunpretty=hir text (the helper as rustc,
+#                          RF6) into NAME.hir.txt, the helper's --iface (RF7) and --typeck (RF9) into NAME.iface.edn and
+#                          NAME.tc.edn, and once std's names and macros (--std-names) into std-names.edn and std's interface
+#                          (--std-iface, RF9) into std-iface.edn, each pinned by its digest in test/rust/front/ (default: the
+#                          synthetic corpus, test/rust/sample, eval and front)
+#   bin/rust-front expand-check [FILE.rs...]
+#                          RF4: arbace.rust.front.expand's crate of each file against the helper's --expanded, spans and syntax
+#                          contexts set aside, per item; a negative control (EXPAND_VERBOSE=1: the first differences; EXPAND_SPANS=1:
+#                          the root file's spans at context 0 kept; EXPAND_DUMP=DIR: our crates written there; EXPAND_TRACE=1)
+#   bin/rust-front resolve-check [--ours] [NAME...]
+#                          RF5: arbace.rust.front.resolve over the helper's expanded crates (front-oracles' NAME.exp.edn)
+#                          against its HIR paths (NAME.res.edn), per span; the root file's text from test/rust/*/NAME.rs
+#                          (RESOLVE_VERBOSE=1: each program's first differences; RESOLVE_NO_SOURCE=1: without it); --ours: the
+#                          crates arbace.rust.front.expand makes from the sources in place of the helper's (the pipeline)
+#   bin/rust-front hir-check [--ours] [NAME...]
+#                          RF6: arbace.rust.front.lower (AST to HIR) over the helper's expanded crates and resolutions, printed by
+#                          arbace.rust.front.hir-pretty, against rustc's -Zunpretty=hir text (front-oracles' NAME.hir.txt) byte for
+#                          byte (HIR_VERBOSE=1: each program's first differing line; HIR_DUMP=DIR: our texts); --ours: the pipeline
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/tools.bash"
+helper=$root/.tmp/repr-rust/rsdump
+work=$root/.tmp/rust-front
+export RUSTC_BOOTSTRAP=1
+oracles() {
+  local out=$work/oracles solver="" f n
+  while [ $# -gt 0 ]; do
+    case $1 in
+      -o) out=$2; shift 2 ;;
+      --next-solver) solver="-Znext-solver=globally"; shift ;;
+      *) break ;;
+    esac
+  done
+  [ -n "$solver" ] && out=$out/next
+  mkdir -p "$out"
+  for f in "$@"; do
+    n=$(basename "$f" .rs)
+    f=$(realpath "$f")
+    local ed=2024 ct=bin
+    grep -q "fn main" "$f" || ct=lib
+    [ "$n" = edition2015 ] && ed=2015
+    (ulimit -v 4000000; cd "$out" && "$helper" rustc --mir "$n.mir.txt" --mir-data "$n.mir.edn" --census "$n.census.edn" --iface "$n.iface.edn" \
+       -- --edition $ed --crate-type $ct -A warnings $solver -o "$n.bin" "$f" > "$n.log" 2>&1) || { echo "oracles: $f failed (see $out/$n.log)" >&2; rm -f "$out/$n.mir.txt"; }
+    rm -f "$out/$n.bin"
+  done
+}
+# RF4-RF5's oracles (tools/rsdump/front.rs): the expanded crate, each path's resolution, std's names and macros
+front_oracles() {
+  local out=$work/front f n
+  mkdir -p "$out"
+  for f in "$@"; do
+    n=$(basename "$f" .rs)
+    f=$(realpath "$f")
+    local ed=2024 ct=bin
+    grep -q "fn main" "$f" || ct=lib
+    [ "$n" = edition2015 ] && ed=2015
+    local pf=""
+    grep -q '^#!\[no_std\]' "$f" && pf="-C panic=abort"
+    (ulimit -v 4000000; cd "$out" && "$helper" rustc --expanded "$n.exp.edn" --resolve "$n.res.edn" --iface "$n.iface.edn" --typeck "$n.tc.edn" \
+       -- --edition $ed --crate-type $ct -A warnings $pf -o "$n.bin" "$f" > "$n.log" 2>&1) || echo "front-oracles: $f failed (see $out/$n.log)" >&2
+    # RF6's oracle: rustc's -Zunpretty=hir text, by the helper as rustc
+    (ulimit -v 4000000; cd "$out" && "$helper" rustc -- --edition $ed --crate-type $ct -A warnings $pf -Zunpretty=hir -o "$n.hir.txt" "$f" > "$n.hir.log" 2>&1) ||
+      { echo "front-oracles: $f: no HIR text (see $out/$n.hir.log)" >&2; rm -f "$out/$n.hir.txt"; }
+    rm -f "$out/$n.bin"
+  done
+  if [ ! -s "$out/std-names.edn" ]; then
+    printf 'fn main() {}\n' > "$out/empty.rs"
+    (ulimit -v 4000000; cd "$out" && "$helper" rustc --std-names std-names.edn -- --edition 2024 --crate-type bin -A warnings -o empty.bin empty.rs > std-names.log 2>&1) ||
+      { echo "front-oracles: std's names failed (see $out/std-names.log)" >&2; rm -f "$out/std-names.edn"; }
+    rm -f "$out/empty.bin"
+  fi
+  # RF9: std's interface for type checking (--std-iface), once
+  if [ ! -s "$out/std-iface.edn" ]; then
+    printf 'fn main() {}\n' > "$out/empty.rs"
+    (ulimit -v 4000000; cd "$out" && "$helper" rustc --std-iface std-iface.edn -- --edition 2024 --crate-type bin -A warnings -o empty.bin empty.rs > std-iface.log 2>&1) ||
+      { echo "front-oracles: std's interface failed (see $out/std-iface.log)" >&2; rm -f "$out/std-iface.edn"; }
+    rm -f "$out/empty.bin"
+  fi
+  if [ -s "$out/std-iface.edn" ] && ! (cd "$out" && sha256sum -c --quiet "$root/test/rust/front/std-iface.sha256" > /dev/null 2>&1); then
+    echo "front-oracles: $out/std-iface.edn differs from test/rust/front/std-iface.sha256's digest" >&2
+  fi
+  # std's names and macros are pinned by their digest (RFS4: std's interface as pinned helper data)
+  if [ -s "$out/std-names.edn" ] && ! (cd "$out" && sha256sum -c --quiet "$root/test/rust/front/std-names.sha256" > /dev/null 2>&1); then
+    echo "front-oracles: $out/std-names.edn differs from test/rust/front/std-names.sha256's digest" >&2
+  fi
+}
+front_files() {
+  if [ $# -gt 0 ]; then echo "$@"; else ls "$root"/test/rust/synthetic/*.rs "$root"/test/rust/sample/*.rs "$root"/test/rust/eval/*.rs "$root"/test/rust/front/*.rs; fi
+}
+case ${1:-} in
+  resolve-check)
+    # RF5: arbace.rust.front.resolve over the helper's expanded crates against its HIR paths (front-oracles first)
+    shift
+    ours=()
+    [ "${1:-}" = --ours ] && { ours=(--ours); shift; }
+    names=("$@")
+    if [ ${#names[@]} -eq 0 ]; then
+      names=($(cd "$work/front" && ls *.res.edn | sed 's/\.res\.edn$//'))
+    fi
+    cd "$root" && arbace_tool -m arbace.rust.front.resolve-check "$work/front" "${ours[@]}" "${names[@]}" 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing' ;;
+  hir-check)
+    # RF6: arbace.rust.front.lower and arbace.rust.front.hir-pretty against rustc's -Zunpretty=hir (front-oracles first)
+    shift
+    ours=()
+    [ "${1:-}" = --ours ] && { ours=(--ours); shift; }
+    names=("$@")
+    if [ ${#names[@]} -eq 0 ]; then
+      names=($(cd "$work/front" && ls *.hir.txt | sed 's/\.hir\.txt$//'))
+    fi
+    cd "$root" && arbace_tool -m arbace.rust.front.hir-check "$work/front" "${ours[@]}" "${names[@]}" 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing' ;;
+  collect-check)
+    # RF7: arbace.rust.front.collect over arbace.rust.front.lower's HIR against the helper's --iface (front-oracles first)
+    shift
+    dir=$work/front
+    [ "${1:-}" = --crates ] && { dir=$work/crates; shift; }
+    ours=()
+    [ "${1:-}" = --ours ] && { ours=(--ours); shift; }
+    names=("$@")
+    if [ ${#names[@]} -eq 0 ]; then
+      names=($(cd "$dir" && ls *.iface.edn | sed 's/\.iface\.edn$//'))
+    fi
+    cd "$root" && arbace_tool -m arbace.rust.front.collect-check "$dir" "${ours[@]}" "${names[@]}" 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing' ;;
+  typeck-check)
+    # RF9: arbace.rust.front.typeck over RF7's collection against the helper's --typeck (front-oracles first)
+    shift
+    dir=$work/front
+    [ "${1:-}" = --crates ] && { dir=$work/crates; shift; }
+    [ "${1:-}" = --dir ] && { dir=$2; shift 2; }
+    ours=()
+    [ "${1:-}" = --ours ] && { ours=(--ours); shift; }
+    names=("$@")
+    if [ ${#names[@]} -eq 0 ]; then
+      names=($(cd "$dir" && ls *.tc.edn | sed 's/\.tc\.edn$//'))
+    fi
+    cd "$root" && arbace_tool -m arbace.rust.front.typeck-check "$dir" "${ours[@]}" "${names[@]}" 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing' ;;
+  crates)
+    # RF7 on ordinary crates: each crate directory's src/lib.rs (its Cargo.toml's edition, no features) through the helper's
+    # --expanded, --resolve and --iface into .tmp/rust-front/crates/NAME.*, NAME.src naming the root file; then collect-check
+    # over the helper's crates (out-of-line modules are the helper's: the pipeline is not run)
+    shift
+    out=$work/crates; mkdir -p "$out"
+    [ -s "$work/front/std-names.edn" ] || front_oracles "$root/test/rust/front/a1.rs"
+    ln -sf "$work/front/std-names.edn" "$out/std-names.edn"
+    [ -s "$work/front/std-iface.edn" ] && ln -sf "$work/front/std-iface.edn" "$out/std-iface.edn"
+    names=()
+    for d in "$@"; do
+      d=$(realpath "$d"); n=$(basename "$d"); f=$d/src/lib.rs
+      [ -f "$f" ] || { echo "crates: $d: no src/lib.rs" >&2; continue; }
+      ed=$(grep -m1 '^edition' "$d/Cargo.toml" | grep -o '20[0-9][0-9]'); ed=${ed:-2015}
+      cn=$(echo "$n" | sed -E 's/-[0-9][0-9.]*.*$//; s/-/_/g')
+      (ulimit -v 4000000; cd "$out" && "$helper" rustc --expanded "$n.exp.edn" --resolve "$n.res.edn" --iface "$n.iface.edn" --typeck "$n.tc.edn" \
+         -- --edition "$ed" --crate-type lib --crate-name "$cn" -A warnings --emit=metadata -o "$n.rmeta" "$f" > "$n.log" 2>&1) ||
+        { echo "crates: $n: the helper failed (see $out/$n.log)" >&2; rm -f "$out/$n.iface.edn"; continue; }
+      rm -f "$out/$n.rmeta"
+      echo "$f" > "$out/$n.src"; echo "$ed" > "$out/$n.edition"
+      names+=("$n")
+    done
+    cd "$root" && arbace_tool -m arbace.rust.front.collect-check "$out" "${names[@]}" 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing' ;;
+  oracles) shift; oracles "$@" ;;
+  front-oracles) shift; front_oracles $(front_files "$@") ;;
+  expand-check)
+    shift
+    [ -s "$work/front/std-names.edn" ] || front_oracles
+    cd "$root" && arbace_tool -m arbace.rust.front.expand-check "$work/front" "$work/front/std-names.edn" $(front_files "$@") 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing' ;;
+  corpus)
+    files=$(ls "$root"/test/rust/synthetic/*.rs "$root"/test/rust/sample/*.rs "$root"/test/rust/eval/*.rs)
+    oracles $files
+    oracles --next-solver $files
+    ok=0 bad=0 same=0 diff=0
+    for f in $files; do
+      n=$(basename "$f" .rs)
+      if [ -f "$work/oracles/$n.mir.txt" ]; then
+        ok=$((ok+1))
+        if [ -f "$work/oracles/next/$n.mir.txt" ] && cmp -s "$work/oracles/$n.mir.txt" "$work/oracles/next/$n.mir.txt"; then same=$((same+1)); else diff=$((diff+1)); echo "next solver differs: $n"; fi
+      else bad=$((bad+1)); echo "no oracle: $n"; fi
+    done
+    echo "oracles: $ok built, $bad failed; next solver: $same same MIR, $diff differ"
+    ;;
+  mir-check)
+    shift
+    names=("$@")
+    if [ ${#names[@]} -eq 0 ]; then
+      names=($(cd "$work/oracles" && ls *.mir.txt | sed 's/\.mir\.txt$//'))
+    fi
+    cd "$root" && arbace_tool -m arbace.rust.front.mir-check "$work/oracles" "${names[@]}" ;;
+  run)
+    # RF3, bin/rsi run --front mir: a program through the helper's mono items (rustc's collector, for now), arbace.rust.back.codegen's
+    # LLVM forms, rsi's lowering (bin/rsi lower: LLVM forms to C), gcc -O0 and the run; the exit status is the program's. Only what
+    # the codegen takes (no_std programs with an extern "C" main, today): else status 125 with the refusal's reason
+    shift
+    f=$(realpath "$1"); shift; [ "${1:-}" = -- ] && shift
+    n=$(basename "$f" .rs); out=$work/run/$n; mkdir -p "$out"
+    pf=""; grep -q '^#!\[no_std\]' "$f" && ! grep -q eh_personality "$f" && pf="-C panic=abort"
+    oc=-Coverflow-checks=off; grep -q '^// rf: overflow-checks' "$f" && oc=-Coverflow-checks=on
+    (cd "$out" && "$helper" rustc --mono-mir "$n.mono.edn" -- --edition 2024 --crate-type bin -A warnings -C opt-level=0 -C debuginfo=0 $pf $oc -Zshare-generics=no -o "$n.bin" "$f" > "$n.log" 2>&1) || { echo "rust-front run: the helper failed ($out/$n.log)" >&2; exit 1; }
+    cd "$root"
+    arbace_tool -m arbace.rust.back.check --emit-mono "$out" "$n" 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing' >&2
+    [ -f "$out/$n.ours.ll" ] || { echo "rust-front run: unsupported by the front (see above)" >&2; exit 125; }
+    "$root/bin/rsi" lower "$out/$n.ours.ll" -o "$out/$n.ours.c" 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing' >&2
+    printf '#include <stdlib.h>\n_Thread_local int cx$pending;\nvoid cx$uncaught(void) { abort(); }\nvoid cx$resume(void *o) { abort(); }\nvoid *cx$exception(void) { return 0; }\nint cx$catches(void *t) { return 0; }\n' > "$out/driver.c"
+    gcc -std=gnu23 -O0 -w -fno-builtin -fno-strict-aliasing -ffp-contract=off "$out/$n.ours.c" "$out/driver.c" -o "$out/$n.exe" 2>&1 | head -5 >&2
+    [ -x "$out/$n.exe" ] || { echo "rust-front run: gcc refused the lowered C" >&2; exit 125; }
+    "$out/$n.exe" "$@"; exit $? ;;
+  run-native)
+    # RF3: a program whose own unit is the front's IR, linked with the host's native std as rsi's native-std leg links the
+    # oracle's (bin/lib/rsi/link, RSI_FRONT_IR): the unit lowered by rsi's lowering, gcc -O0; status and stdout against the
+    # program built by rustc alone
+    shift
+    f=$(realpath "$1"); n=$(basename "$f" .rs); out=$work/native/$n; mkdir -p "$out"
+    rt=$work/rt
+    if [ ! -f "$rt/native.o" ]; then
+      mkdir -p "$rt"
+      GCC_FLAGS="-std=gnu23 -O0 -w -fno-builtin -fno-strict-aliasing -ffp-contract=off"
+      (cd "$root" && arbace_tool -m arbace.cpp.lower lower-rt "$root/arbace/rust/rt/native.c.ae" "$rt/native.c" 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing' >&2)
+      gcc $GCC_FLAGS -c "$rt/native.c" -o "$rt/native.o"
+      rustc --edition 2024 --crate-type=lib --emit=obj -Copt-level=0 -Cdebuginfo=0 "$root/test/rust/runtime/native/try.rs" -o "$rt/try.o" 2> "$rt/try.log"
+    fi
+    (cd "$out" && "$helper" rustc --mono-mir "$n.mono.edn" -- --edition 2024 --crate-type bin -A warnings -C opt-level=0 -C debuginfo=0 -Zshare-generics=no -o "$n.h.bin" "$f" > "$n.log" 2>&1) || { echo "run-native: the helper failed ($out/$n.log)" >&2; exit 1; }
+    cd "$root"
+    arbace_tool -m arbace.rust.back.check --emit-mono "$out" "$n" --native 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing' >&2
+    [ -f "$out/$n.ours.ll" ] || { echo "run-native: unsupported by the front (see above)" >&2; exit 125; }
+    rm -rf "$out/low"; mkdir -p "$out/low"
+    (cd "$(dirname "$f")" && RSI_LOW="$out/low" RSI_RT="$rt" RSI_FRONT_IR="$out/$n.ours.ll" RSI_KEEP=1 rustc --edition 2024 -A warnings -C opt-level=0 -C debuginfo=0 -Zshare-generics=no \
+       -C codegen-units=1 -C save-temps --emit=llvm-ir,link -C linker="$root/bin/lib/rsi/link" -C linker-flavor=gcc "$f" -o "$out/$n.front.bin" > "$out/link.log" 2>&1) || { echo "run-native: the link failed ($out/link.log)" >&2; tail -5 "$out/link.log" >&2; exit 125; }
+    (cd "$(dirname "$f")" && rustc --edition 2024 -A warnings -C opt-level=0 -C debuginfo=0 "$f" -o "$out/$n.rustc.bin" 2>/dev/null)
+    "$out/$n.rustc.bin" > "$out/rustc.out" 2> "$out/rustc.err"; a=$?
+    "$out/$n" > "$out/front.out" 2> "$out/front.err"; b=$?
+    # the thread ids a panic prints are run-program's normalization too (RR5)
+    norm() { sed -E "s/^(thread '[^']*') \([0-9]+\)/\1 (N)/" "$1"; }
+    if [ "$a" = "$b" ] && cmp -s "$out/rustc.out" "$out/front.out" && [ "$(norm "$out/rustc.err")" = "$(norm "$out/front.err")" ]; then echo "run-native: $n: status $b, stdout and stderr equal to rustc's"; else echo "run-native: $n: rustc $a, front $b (outputs in $out)"; exit 1; fi ;;
+  collect)
+    # RF3: the collector slice (arbace.rust.back.collect) over each program's mono dump (made by `coverage` or this verb), its
+    # set of items against rustc's
+    shift
+    out=$work/mono; mkdir -p "$out"
+    names=()
+    for f in "$@"; do
+      n=$(basename "$f" .rs); names+=("$n"); f=$(realpath "$f")
+      pf=""; grep -q '^#!\[no_std\]' "$f" && ! grep -q eh_personality "$f" && pf="-C panic=abort"
+      [ -f "$out/$n.mono.edn" ] ||
+      (ulimit -v 4000000; cd "$out" && "$helper" rustc --mono-mir "$n.mono.edn" -- --edition 2024 --crate-type bin -A warnings \
+         -C opt-level=0 -C debuginfo=0 $pf -Zshare-generics=no --emit=llvm-ir -o "$n.ll" "$f" > "$n.log" 2>&1) || echo "collect: $f: rustc failed" >&2
+    done
+    cd "$root" && arbace_tool -m arbace.rust.back.collect "$out" "${names[@]}" 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing' ;;
+  coverage)
+    # RF3's coverage: the mono items rustc collects for each program (the helper's --mono-mir: monomorphic MIR, symbols, resolved
+    # callees) through arbace.rust.back.codegen, each function judged against rustc's own IR of the same symbol
+    shift
+    out=$work/mono; mkdir -p "$out"
+    names=()
+    for f in "$@"; do
+      n=$(basename "$f" .rs); names+=("$n"); f=$(realpath "$f")
+      # the flags a program's first lines ask for: a no_std program without its own eh_personality is built with panic=abort
+      pf=""; grep -q '^#!\[no_std\]' "$f" && ! grep -q eh_personality "$f" && pf="-C panic=abort"
+      [ -f "$out/$n.mono.edn" ] && [ "${COVERAGE_REDUMP:-}" != 1 ] ||
+      (ulimit -v 4000000; cd "$out" && "$helper" rustc --mono-mir "$n.mono.edn" -- --edition 2024 --crate-type bin -A warnings \
+         -C opt-level=0 -C debuginfo=0 -C no-prepopulate-passes $pf -Zshare-generics=no --emit=llvm-ir -o "$n.ll" "$f" > "$n.log" 2>&1) || { echo "coverage: $f: rustc failed ($out/$n.log)" >&2; }
+    done
+    cd "$root"
+    for n in "${names[@]}"; do
+      GOMEMLIMIT=1500MiB arbace_tool -m arbace.rust.back.coverage "$out" "$n" 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing'
+    done
+    arbace_tool -m arbace.rust.back.coverage --summary "$out" ;;
+  codegen-check)
+    # RF3: no_std programs (test/rust/front/*.rs) through rustc's IR and MIR, then arbace.rust.back.codegen's forms judged
+    shift
+    out=$work/rf3; mkdir -p "$out"
+    names=()
+    for f in "$@"; do
+      n=$(basename "$f" .rs); names+=("$n"); f=$(realpath "$f")
+      oc=-Coverflow-checks=off; grep -q '^// rf: overflow-checks' "$f" && oc=-Coverflow-checks=on
+      (ulimit -v 4000000; cd "$out" && "$helper" rustc --mir "$n.mir.txt" --mir-data "$n.mir.edn" -- --edition 2024 --crate-type bin -A warnings \
+         -C opt-level=0 -C debuginfo=0 -C no-prepopulate-passes -C panic=abort $oc -Zshare-generics=no --emit=llvm-ir -o "$n.ll" "$f" > "$n.log" 2>&1) || { echo "codegen-check: $f: rustc failed ($out/$n.log)" >&2; }
+    done
+    cd "$root" && arbace_tool -m arbace.rust.back.check "$out" "${names[@]}" || st=1
+    rm -f "$out"/*.ours.ll
+    # the run: our IR assembled and linked by clang against musl, the exit status against rustc's own executable's
+    arbace_tool -m arbace.rust.back.check --emit "$out" "${names[@]}" 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing' >&2
+    ran=0 okrun=0
+    for n in "${names[@]}"; do
+      f=$(ls "$root"/test/rust/front/$n.rs)
+      [ -f "$out/$n.ours.ll" ] || { echo "run: $n: not run (a function is unsupported)"; continue; }
+      oc=-Coverflow-checks=off; grep -q '^// rf: overflow-checks' "$f" && oc=-Coverflow-checks=on
+      ( cd "$out" && RUSTC_BOOTSTRAP=1 rustc --edition 2024 -A warnings -C opt-level=0 -C panic=abort $oc --crate-type bin "$f" -o "$n.rustc.bin" >> "$n.log" 2>&1 \
+        && clang -w "$n.ours.ll" -o "$n.ours.bin" >> "$n.log" 2>&1 ) || { echo "run: $n: build failed ($out/$n.log)"; continue; }
+      "$out/$n.rustc.bin"; a=$?
+      "$out/$n.ours.bin"; b=$?
+      ran=$((ran+1)); if [ "$a" = "$b" ]; then okrun=$((okrun+1)); else echo "run: $n: rustc's status $a, ours $b"; fi
+    done
+    echo "codegen-run: $okrun of $ran programs give the status rustc's executable gives"
+    exit ${st:-0} ;;
+  *) sed -n '2,/^root=/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+esac

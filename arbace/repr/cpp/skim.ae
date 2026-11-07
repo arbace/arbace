@@ -1,0 +1,226 @@
+(ns arbace.repr.cpp.skim
+  "The native parser's header-skim cache (doc/cpp/NATIVE.md, \"The headers' cache\"; CX11): the parser's state after
+  the leading run of a translation unit's header tokens (the declarations its #includes bring, skimmed for their names:
+  the global namespace's scope with everything reachable from it, the member templates' names, the cursor) kept in a
+  file under a directory (REPR_CPP_SKIM_CACHE, else .tmp/repr-cpp/skim-cache of the current directory when its .tmp
+  exists; `off` none), keyed by the digest of the run's tokens as the preprocessor gave them (kinds, spellings,
+  locations, macro expansions), the standard, the main file's name and the parser's own sources. The state is a graph
+  (scopes refer to their parents, entities to their scopes, a class's scope to its bases'): it is written as a table of
+  its objects, each once, a reference by its index, and read back with the same sharing; a value of a kind the
+  table does not know makes the state uncacheable (said once, the run goes on without the cache)."
+  (:require [arbace.repr.cpp.scope :as sc])
+  (:import [java.io DataOutputStream DataInputStream ByteArrayOutputStream File FileOutputStream FileInputStream
+            BufferedOutputStream BufferedInputStream]
+           [java.util ArrayList HashMap HashSet IdentityHashMap ArrayDeque]
+           [java.util.zip GZIPOutputStream GZIPInputStream]))
+
+(set! *warn-on-reflection* true)
+
+(def ^:private magic "arbace-cpp-skim-2")
+
+;; a reference to the table's object of index i, as read before the objects are built
+(deftype Ref [^long i])
+
+(defn cache-dir
+  "The cache's directory, or nil (no cache)."
+  ^String []
+  (let [e (System/getenv "REPR_CPP_SKIM_CACHE")]
+    (cond (= e "off") nil
+          (and e (seq e)) e
+          (.isDirectory (File. ".tmp")) ".tmp/repr-cpp/skim-cache"
+          :else nil)))
+
+(defn- hex ^String [^bytes b] (apply str (map #(format "%02x" (bit-and (long %) 0xff)) b)))
+
+(def ^:private sources
+  ["arbace/repr/cpp/parse.ae" "arbace/repr/cpp/scope.ae" "arbace/repr/cpp/lit.ae" "arbace/repr/cpp/skim.ae"
+   "arbace/repr/cpp/sema.ae"])
+
+(def ^:private source-digest
+  (delay
+    (let [md (java.security.MessageDigest/getInstance "SHA-256")]
+      (doseq [s sources]
+        (let [f (File. ^String s)]
+          (if (.exists f)
+            (.update md (java.nio.file.Files/readAllBytes (.toPath f)))
+            (.update md (.getBytes (str "missing " s))))))
+      (hex (.digest md)))))
+
+(defn digest
+  "The key of a run: the parser's sources and `parts` (the standard, the main file's name, the run's tokens' text)."
+  ^String [parts]
+  (let [md (java.security.MessageDigest/getInstance "SHA-256")
+        put (fn [^String s] (.update md (.getBytes s "UTF-8")) (.update md (byte 0)))]
+    (put magic) (put @source-digest)
+    (doseq [x parts] (put (str x)))
+    (hex (.digest md))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The table
+
+(defn- ref-kind
+  "The table's kind of a value that is an object of its own (written once, referred to), or nil for a scalar."
+  [x]
+  (cond
+    (instance? arbace.repr.cpp.scope.Scope x) :scope
+    (map? x) :map
+    (vector? x) :vec
+    (set? x) :set
+    (seq? x) :list
+    (instance? ArrayList x) :alist
+    (instance? HashMap x) :hmap
+    (instance? HashSet x) :hset
+    :else nil))
+
+(defn- children
+  "The values an object holds, in the order they are written."
+  [x]
+  (case (ref-kind x)
+    :scope (let [^arbace.repr.cpp.scope.Scope s x]
+             (concat [(sc/kind-of s) (sc/parent-of s) (sc/ent-of s)]
+                     (mapcat (fn [^java.util.Map$Entry e] [(.getKey e) (.getValue e)]) (seq (sc/names-of s)))
+                     (mapcat (fn [^java.util.Map$Entry e] [(.getKey e) (.getValue e)]) (seq (sc/tags-of s)))
+                     (seq (sc/usings-of s)) (seq (sc/inline-of s)) (seq (sc/bases-of s))))
+    :map (mapcat identity (seq x))
+    (:vec :set :list :alist :hset) (seq x)
+    :hmap (mapcat (fn [^java.util.Map$Entry e] [(.getKey e) (.getValue e)]) (seq x))))
+
+(defn- write-scalar [^DataOutputStream o x]
+  (cond
+    (nil? x) (.writeByte o 0)
+    (true? x) (.writeByte o 1)
+    (false? x) (.writeByte o 2)
+    (integer? x) (do (.writeByte o 3) (.writeLong o (long x)))
+    (float? x) (do (.writeByte o 4) (.writeDouble o (double x)))
+    (string? x) (let [b (.getBytes ^String x "UTF-8")] (.writeByte o 5) (.writeInt o (alength b)) (.write o b))
+    (keyword? x) (let [b (.getBytes (subs (str x) 1) "UTF-8")] (.writeByte o 6) (.writeInt o (alength b)) (.write o b))
+    (symbol? x) (let [b (.getBytes (str x) "UTF-8")] (.writeByte o 7) (.writeInt o (alength b)) (.write o b))
+    (char? x) (do (.writeByte o 9) (.writeInt o (int (long (int (char x))))))
+    :else (throw (ex-info (str "skim cache: a value of " (class x)) {:cpp/skim true}))))
+
+(defn- write-val [^DataOutputStream o ^IdentityHashMap ids x]
+  (if (ref-kind x)
+    (do (.writeByte o 8) (.writeInt o (int (.get ids x))))
+    (write-scalar o x)))
+
+(def ^:private kind-codes {:scope 0 :map 1 :vec 2 :set 3 :list 4 :alist 5 :hmap 6 :hset 7})
+
+(defn- count-of [x]
+  (case (ref-kind x)
+    :scope (let [^arbace.repr.cpp.scope.Scope s x]
+             [(.size ^HashMap (sc/names-of s)) (.size ^HashMap (sc/tags-of s)) (.size ^ArrayList (sc/usings-of s))
+              (.size ^ArrayList (sc/inline-of s)) (.size ^ArrayList (sc/bases-of s))])
+    :map [(count x)]
+    :hmap [(.size ^HashMap x)]
+    [(count x)]))
+
+(defn write-state
+  "The values `roots` and everything reachable from them, into the file at `path` (through a temporary name)."
+  [^String path roots]
+  (let [ids (IdentityHashMap.)
+        order (ArrayList.)
+        stack (ArrayDeque.)]
+    ;; the objects in the order they are first met, each with its index
+    (doseq [r roots] (when (ref-kind r) (.push stack r)))
+    (loop []
+      (when-not (.isEmpty stack)
+        (let [x (.pop stack)]
+          (when-not (.containsKey ids x)
+            (.put ids x (.size order))
+            (.add order x)
+            (doseq [c (children x)] (when (and (ref-kind c) (not (.containsKey ids c))) (.push stack c)))))
+        (recur)))
+    (let [f (File. path)
+          tmp (File. (str path ".tmp" (.getId (Thread/currentThread))))]
+      (.mkdirs (.getParentFile f))
+      (with-open [o (DataOutputStream. (BufferedOutputStream. (GZIPOutputStream. (FileOutputStream. tmp)) 65536))]
+        (.writeUTF o magic)
+        (.writeInt o (.size order))
+        (doseq [x order]
+          (.writeByte o (int (kind-codes (ref-kind x))))
+          (doseq [n (count-of x)] (.writeInt o (int n)))
+          (doseq [c (children x)] (write-val o ids c)))
+        (.writeInt o (count roots))
+        (doseq [r roots] (write-val o ids r)))
+      (.renameTo tmp f))))
+
+(defn- read-str ^String [^DataInputStream i]
+  (let [n (.readInt i) b (byte-array n)] (.readFully i b) (String. b "UTF-8")))
+
+(defn- read-val
+  "A value: a scalar, or [::ref index]."
+  [^DataInputStream i]
+  (case (int (.readByte i))
+    0 nil 1 true 2 false
+    3 (.readLong i)
+    4 (.readDouble i)
+    5 (read-str i)
+    6 (keyword (read-str i))
+    7 (symbol (read-str i))
+    8 (Ref. (.readInt i))
+    9 (char (.readInt i))
+    (throw (ex-info "skim cache: a bad value" {:cpp/skim true}))))
+
+(defn read-state
+  "The roots written by write-state into `path`, with their objects' sharing, or nil when the file is not there."
+  [^String path]
+  (let [f (File. path)]
+    (when (.exists f)
+      (with-open [i (DataInputStream. (BufferedInputStream. (GZIPInputStream. (FileInputStream. f)) 65536))]
+        (when-not (= magic (.readUTF i)) (throw (ex-info "skim cache: not a cache file" {:cpp/skim true})))
+        (let [n (.readInt i)
+              kinds (int-array n)
+              counts (object-array n)
+              raw (object-array n)]
+          (dotimes [j n]
+            (let [k (int (.readByte i))
+                  cs (if (zero? k) (vec (repeatedly 5 #(.readInt i))) [(.readInt i)])
+                  m (case k 0 (+ 3 (* 2 (long (cs 0))) (* 2 (long (cs 1))) (long (cs 2)) (long (cs 3)) (long (cs 4)))
+                          (1 6) (* 2 (long (cs 0)))
+                          (long (cs 0)))
+                  vs (object-array m)]
+              (dotimes [q m] (aset vs q (read-val i)))
+              (aset kinds j k) (aset counts j cs) (aset raw j vs)))
+          (let [built (object-array n)
+                done (boolean-array n)
+                fill (ArrayDeque.)
+                build (fn build [x]
+                        (if-not (instance? Ref x)
+                          x
+                          (let [j (int (.-i ^Ref x))]
+                            (if (aget done j)
+                              (aget built j)
+                              (let [^objects vs (aget raw j)
+                                    k (aget kinds j)]
+                                (case k
+                                  ;; a scope: its parent and entity first (immutable), its containers filled after
+                                  0 (let [s (sc/new-scope (build (aget vs 0)) (build (aget vs 1)) (build (aget vs 2)))]
+                                      (aset built j s) (aset done j true) (.add fill (int j)) s)
+                                  5 (let [a (ArrayList.)] (aset built j a) (aset done j true)
+                                      (doseq [v vs] (.add a (build v))) a)
+                                  6 (let [h (HashMap.)] (aset built j h) (aset done j true)
+                                      (doseq [[a b] (partition 2 vs)] (.put h (build a) (build b))) h)
+                                  7 (let [h (HashSet.)] (aset built j h) (aset done j true)
+                                      (doseq [v vs] (.add h (build v))) h)
+                                  (let [xs (mapv build vs)
+                                        v (case k 1 (apply hash-map xs) 2 xs 3 (set xs) 4 (apply list xs))
+                                        v (if (and (= k 1) (empty? xs)) {} v)]
+                                    (aset built j v) (aset done j true) v)))))))
+                roots (let [r (.readInt i)] (vec (repeatedly r #(read-val i))))
+                out (mapv build roots)]
+            (loop []
+              (when-not (.isEmpty fill)
+                (let [j (int (.poll fill))
+                      ^objects vs (aget raw j)
+                      cs (aget counts j)
+                      s (aget built j)
+                      [nn nt nu ni nb] cs
+                      at (long-array [3])
+                      take! (fn [] (let [v (aget vs (int (aget at 0)))] (aset at 0 (inc (aget at 0))) (build v)))]
+                  (dotimes [_ nn] (let [a (take!) b (take!)] (.put ^HashMap (sc/names-of s) a b)))
+                  (dotimes [_ nt] (let [a (take!) b (take!)] (.put ^HashMap (sc/tags-of s) a b)))
+                  (dotimes [_ nu] (.add ^ArrayList (sc/usings-of s) (take!)))
+                  (dotimes [_ ni] (.add ^ArrayList (sc/inline-of s) (take!)))
+                  (dotimes [_ nb] (.add ^ArrayList (sc/bases-of s) (take!))))
+                (recur)))
+            out))))))

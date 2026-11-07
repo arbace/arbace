@@ -1,0 +1,737 @@
+;; Ported from OCaml 5.5.0 (the release tarball, SHA-256 fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba):
+;; typing/typemod.ml (structures, signatures, module expressions and types, functors and their applications with
+;; applicative paths, include, open, with-constraints), typing/includemod.ml (the inclusion of module types and
+;; its coercions) and typing/mtype.ml's parts env.ae does not hold, for what doc/ocaml/TYPER.md's T8 names, whose
+;; notices follow (LICENSE.md, "The OCaml Core System"):
+;;
+;;                                 OCaml
+;;
+;;             Xavier Leroy, projet Cristal, INRIA Rocquencourt
+;;
+;;   Copyright 1996 Institut National de Recherche en Informatique et
+;;     en Automatique.
+;;
+;;   All rights reserved.  This file is distributed under the terms of
+;;   the GNU Lesser General Public License version 2.1, with the
+;;   special exception on linking described in the file LICENSE.
+
+(ns arbace.repr.ocaml.typer.typemod
+  "The module system (doc/ocaml/TYPER.md, T8). A typed module is {:desc :mty}, desc [:Tmod_ident path entry]
+  [:Tmod_structure items sig] [:Tmod_functor id-or-nil mty-or-nil body] [:Tmod_apply f arg cc] [:Tmod_constraint m
+  mty cc]; structure items [:Tstr_value rec vbs] [:Tstr_eval e] [:Tstr_type] [:Tstr_exception id cstr name]
+  [:Tstr_module id tmod] [:Tstr_modtype] [:Tstr_open] [:Tstr_include tmod ids]; a coercion nil (none) |
+  [:structure [[pos cc]...]] | [:functor cc-arg cc-res] | [:primitive vdesc type]."
+  (:require [arbace.repr.ocaml.typer.types :as ty]
+            [arbace.repr.ocaml.typer.env :as env]
+            [arbace.repr.ocaml.typer.typecore :as tc]
+            [arbace.repr.ocaml.typer.parmatch :as pm]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* false)
+
+(def type-error env/type-error)
+
+;; ---------------------------------------------------------------------------------------------
+;; The environment's items
+
+(def ^:dynamic *class-declarations* "Typeclass.class_declarations: (fn [env scls] [infos env'])" nil)
+(def ^:dynamic *class-type-declarations* "Typeclass.class_type_declarations: (fn [env scls] [infos env'])" nil)
+
+(defn add-item
+  "The environment with a signature item bound"
+  [env item]
+  (case (item 0)
+    :val (let [[_ n id t k] item]
+           (assoc-in env [:values n] (if (= :prim (first k)) {:type t :kind k} {:type t :kind [:reg] :path [:Pident id] :id id})))
+    :type (reduce (fn [e [n p d]]
+                    (let [k (:kind d) e (assoc-in e [:types n] p)]
+                      (case (k 0)
+                        :variant (reduce (fn [e c] (update-in e [:constrs (:name c)] #(cons c %)))
+                                         e (ty/constructors-of p (:params d) (k 1)))
+                        :record (reduce (fn [e l] (update-in e [:labels (:name l)] #(cons l %)))
+                                        e (ty/labels-of p (:params d) (k 1) (k 2)))
+                        e)))
+                  env (item 1))
+    :exn (update-in env [:constrs (item 1)] #(cons (item 3) %))
+    :module (let [[_ n id mty pres] item]
+              (assoc-in env [:modules n] (env/add-module! id {:path [:Pident id] :mty mty
+                                                               :addr (if (= :absent pres) (env/alias-addr mty) [:var id])})))
+    :hole env
+    :class (let [[_ n id decl obj-id ty-id] item]
+             (-> env
+                 (assoc-in [:types n] (:path decl))
+                 (assoc-in [:classes n] {:path [:Pident id] :id id :decl decl})
+                 (assoc-in [:cltypes n] {:path [:Pident (or ty-id id)] :decl (update decl :type env/class-body)})))
+    :class-type (let [[_ n id decl] item]
+                  (-> env (assoc-in [:types n] (:path decl)) (assoc-in [:cltypes n] {:path [:Pident id] :decl decl})))
+    :modtype (let [[_ n id mty] item]
+               (env/add-modtype! [:Pident id] mty)
+               (assoc-in env [:modtypes n] {:path [:Pident id] :mty mty}))))
+
+(defn- drop-shadowed
+  "Signature_names.simplify: of the items of one kind and name, the last"
+  [items]
+  (let [k (fn [item] (case (item 0) :type nil [(item 0) (item 1)]))
+        seen (atom #{})]
+    (vec (reverse (keep (fn [item]
+                          (if-let [key (k item)]
+                            (when-not (@seen key) (swap! seen conj key) item)
+                            item))
+                        (reverse items))))))
+
+(defn runtime-ids [items]
+  (vec (keep (fn [item]
+               (when (env/runtime-item? item)
+                 ;; a hole (an item of a unit's interface the slice does not type) has no identifier to coerce to
+                 (when (= :hole (item 0)) (env/type-error "a part of the interface is outside the slice"))
+                 (item 2)))
+             items)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Module types and signatures (Typemod.transl_modtype, transl_signature)
+
+(declare transl-signature transl-modtype type-module include-mty)
+
+(declare transl-modtype)
+
+(defn- approx-sig-ast
+  "Typemod.approx_sig, on the Parsetree: the types abstract (Typedecl.approx_type_decl), the modules and module types
+  approximated, opens and includes kept, the rest left out"
+  [items]
+  (letfn [(approx-mty [smty]
+            (let [d (:pmty_desc smty)]
+              (case (d 0)
+                :Pmty_signature (assoc smty :pmty_desc [:Pmty_signature (approx-sig-ast (d 1))])
+                :Pmty_functor (assoc smty :pmty_desc [:Pmty_functor (if (= :Unit (d 1)) :Unit (update (d 1) 2 approx-mty))
+                                                      (approx-mty (d 2))])
+                :Pmty_with (assoc smty :pmty_desc (assoc d 1 (approx-mty (d 1))))
+                smty)))]
+    (vec (keep (fn [item]
+                 (let [d (:psig_desc item)
+                       re (fn [d'] (assoc item :psig_desc d'))]
+                   (case (d 0)
+                     :Psig_type (re (assoc d 2 (mapv #(assoc % :ptype_kind :Ptype_abstract :ptype_manifest nil :ptype_constraints []
+                                                             :ptype_private :Public)
+                                                     (d 2))))
+                     :Psig_module (when (:txt (:pmd_name (d 1))) (re [:Psig_module (update (d 1) :pmd_type approx-mty)]))
+                     :Psig_recmodule (re [:Psig_recmodule (mapv #(update % :pmd_type approx-mty) (d 1))])
+                     :Psig_modtype (re [:Psig_modtype (update (d 1) :pmtd_type #(some-> % approx-mty))])
+                     :Psig_open item
+                     :Psig_include (re [:Psig_include (update (d 1) :pincl_mod approx-mty)])
+                     nil)))
+               items))))
+
+(defn- approx-modtype-ast [smty]
+  (let [d (:pmty_desc smty)]
+    (case (d 0)
+      :Pmty_signature (assoc smty :pmty_desc [:Pmty_signature (approx-sig-ast (d 1))])
+      :Pmty_functor (assoc smty :pmty_desc [:Pmty_functor (if (= :Unit (d 1)) :Unit (update (d 1) 2 approx-modtype-ast))
+                                            (approx-modtype-ast (d 2))])
+      :Pmty_with (assoc smty :pmty_desc (assoc d 1 (approx-modtype-ast (d 1))))
+      smty)))
+
+(defn transl-recmodule-modtypes
+  "Typemod.transl_recmodule_modtypes: decls [[name smty]...]; the modules bound to their approximations
+  (approx_modtype), their types translated in that environment, then again in the environment of the first
+  translations; [env ids mtys]"
+  [env decls]
+  (let [ids (mapv (fn [[n _]] (ty/ident-create (or n "_"))) decls)
+        make-env (fn [mtys] (reduce (fn [e [[n _] id mty]] (if n (add-item e [:module n id mty]) e))
+                                    env (map vector decls ids mtys)))
+        env0 (make-env (mapv (fn [[_ smty]] (transl-modtype env (approx-modtype-ast smty))) decls))
+        env1 (make-env (mapv (fn [[_ smty]] (transl-modtype env0 smty)) decls))
+        dcl2 (mapv (fn [[_ smty]] (transl-modtype env1 smty)) decls)]
+    [(make-env dcl2) ids dcl2]))
+
+(defn- functor-param
+  "[id-or-nil mty env'] of a functor's parameter, nil for ()"
+  [env sparam]
+  (if (= :Unit sparam)
+    nil
+    (let [[_ name smty] sparam
+          mty (transl-modtype env smty)
+          n (:txt name)
+          id (ty/ident-create (or n "_"))
+          entry {:path [:Pident id] :mty mty :addr [:var id] :functor-arg true}]
+      (env/add-module! id entry)
+      [(when n id) mty (if n (assoc-in env [:modules n] entry) env)])))
+
+
+(defn rewrite-items
+  "The signature's types rewritten node by node by rw (values, declarations, exceptions, submodules), the new
+  declarations registered"
+  [rw items]
+  (mapv (fn [item]
+          (case (item 0)
+            :val (assoc item 3 (rw (item 3)))
+            :type [:type (mapv (fn [[n p d]]
+                                 (let [k (:kind d)
+                                       d' (assoc d :manifest (some-> (:manifest d) rw)
+                                                 :kind (case (k 0)
+                                                         :variant [:variant (mapv (fn [c] (cond-> (update c :args #(mapv rw %))
+                                                                                            (:res c) (update :res rw)
+                                                                                            (:inlined c) (update :inlined (fn [ls] (mapv #(update % :type rw) ls)))))
+                                                                                  (k 1))]
+                                                         :record [:record (mapv #(update % :type rw) (k 1)) (k 2)]
+                                                         k))]
+                                   (env/add-decl! p d')
+                                   [n p d']))
+                               (item 1))]
+            :exn (assoc item 3 (update (item 3) :args #(mapv rw %)))
+            :module (let [m (env/scrape (item 3))]
+                      (if (= :Mty_signature (m 0)) (assoc item 3 [:Mty_signature (rewrite-items rw (m 1))]) item))
+            item))
+        items))
+
+(defn- with-constraint [env items c]
+  (case (c 0)
+    :Pwith_type
+    (let [parts (env/lid-parts (:txt (c 1)))]
+      (when (> (count parts) 1) (type-error "with-constraints on a submodule's type are outside the slice"))
+      (mapv (fn [item]
+              (if (and (= :type (item 0)) (some #(= (first parts) (first %)) (item 1)))
+                [:type (mapv (fn [[n p d]]
+                               (if (= n (first parts))
+                                 ;; Typedecl.transl_with_constraint: the declaration translated in the outer environment, which
+                                 ;; does not bind the constrained type (`with type t = t`: the outer t, not a cycle)
+                                 (let [[_ [[_ _ d']]] (env/transl-type-decls env [(c 2)] (fn [_] p) :Nonrecursive)
+                                       d' (if (and (= :abstract ((:kind d') 0)) (not= :abstract ((:kind d) 0)))
+                                            (assoc d :manifest (:manifest d'))
+                                            d')]
+                                   (env/add-decl! p (assoc d' :path p))
+                                   [n p (assoc d' :path p)])
+                                 [n p d]))
+                             (item 1))]
+                item))
+            items))
+    :Pwith_module
+    (let [parts (env/lid-parts (:txt (c 1)))
+          e (env/lookup-module env (:txt (c 2)))]
+      (when (> (count parts) 1) (type-error "with-constraints on a submodule's module are outside the slice"))
+      (mapv (fn [item]
+              (if (and (= :module (item 0)) (= (item 1) (first parts)))
+                (assoc item 3 (env/strengthen (not (:functor-arg e)) (:mty e) (:path e)))
+                item))
+            items))
+    :Pwith_typesubst
+    ;; destructive substitution: the type taken out, its uses replaced by the definition
+    (let [parts (env/lid-parts (:txt (c 1)))
+          _ (when (> (count parts) 1) (type-error "destructive substitutions in a submodule are outside the slice"))
+          n (first parts)
+          tp (some (fn [item] (when (= :type (item 0)) (some (fn [[tn p _]] (when (= tn n) p)) (item 1)))) items)
+          _ (when-not tp (type-error (str "The signature has no type " n)))
+          ;; (non-recursive, as transl_with_constraint: `with type t := t` names the outer t)
+          [_ [[_ _ d']]] (env/transl-type-decls env [(c 2)] (fn [_] [:Pident (ty/ident-create n)]) :Nonrecursive)
+          params (:params d') body (:manifest d')
+          memo (atom {})
+          rw (fn rw [t]
+               (let [t (ty/repr t)]
+                 (or (get @memo t)
+                     (let [d (ty/desc t)]
+                       (cond
+                         (= :Tvar (d 0)) t
+                         (and (= :Tconstr (d 0)) (= (d 1) tp)) (env/make-generic! (ty/subst params (mapv rw (d 2)) body))
+                         :else (let [x (ty/newty2 (ty/level t) [:Tvar nil])]
+                                 (swap! memo assoc t x)
+                                 (swap! x assoc :desc (ty/map-desc rw d))
+                                 x))))))]
+      (rewrite-items rw (vec (keep (fn [item]
+                                     (if (= :type (item 0))
+                                       (let [ds (vec (remove (fn [[tn _ _]] (= tn n)) (item 1)))] (when (seq ds) [:type ds]))
+                                       item))
+                                   items))))
+    :Pwith_modsubst
+    ;; Typemod's destructive module substitution (with module M := P): M taken out of the signature, the paths through it
+    ;; replaced by P's (Subst.add_module), as transl_with_constraint's With_modsubst
+    (let [parts (env/lid-parts (:txt (c 1)))
+          _ (when (> (count parts) 1) (type-error "destructive module substitutions in a submodule are outside the slice"))
+          n (first parts)
+          id (some (fn [item] (when (and (= :module (item 0)) (= (item 1) n)) (item 2))) items)
+          _ (when-not id (type-error (str "The signature has no module " n)))
+          e (env/lookup-module env (:txt (c 2)))]
+      (env/subst-items {id (:path e)} (vec (remove (fn [item] (and (= :module (item 0)) (= (item 1) n))) items))))
+    (type-error (str "the with-constraint " (c 0) " is outside the slice"))))
+
+(defn transl-modtype
+  "Typemod.transl_modtype: the module type of a Parsetree module type"
+  [env smty]
+  (let [d (:pmty_desc smty)]
+    (case (d 0)
+      :Pmty_ident [:Mty_ident (:path (env/lookup-modtype env (:txt (d 1))))]
+      :Pmty_alias (let [lid (:txt (d 1))]
+                    (if (and (:alias-prefix env) (= :Lident (lid 0)))
+                      [:Mty_alias [:Pident (ty/ident-global (if (str/starts-with? (lid 1) "Stdlib__") (lid 1)
+                                                                (str (:alias-prefix env) (lid 1))))]]
+                      [:Mty_alias (:path (env/lookup-module env lid))]))
+      :Pmty_signature [:Mty_signature (first (transl-signature env (d 1)))]
+      :Pmty_functor (if-let [[id mty env'] (functor-param env (d 1))]
+                      [:Mty_functor [id mty] (transl-modtype env' (d 2))]
+                      [:Mty_functor nil (transl-modtype env (d 2))])
+      :Pmty_with (let [mty (env/scrape (transl-modtype env (d 1)))]
+                   (when-not (= :Mty_signature (mty 0)) (type-error "with-constraints on a functor type"))
+                   [:Mty_signature (reduce #(with-constraint env %1 %2) (env/rename-items (mty 1)) (d 2))])
+      :Pmty_typeof (:mty (type-module env (d 1) false nil))
+      (type-error (str "module type " (d 0) " outside the slice")))))
+
+(defn transl-signature
+  "[items env'] of a Parsetree signature"
+  [env sitems]
+  (loop [sitems sitems env env items []]
+    (if (empty? sitems)
+      [items env]
+      (let [d (:psig_desc (first sitems))
+            more (rest sitems)]
+        (case (d 0)
+          :Psig_value (let [v (d 1) n (:txt (:pval_name v))
+                            t (env/make-generic! (binding [ty/*find-type* env/find-decl]
+                                                   (env/transl-type env (atom {}) (:pval_type v))))
+                            prims (vec (:pval_prim v))
+                            k (when (seq prims) [:prim {:name (first prims) :arity (env/prim-arity (:pval_type v)) :names prims}])
+                            item [:val n (ty/ident-create n) t k]]
+                        (recur more (add-item env item) (conj items item)))
+          :Psig_type (let [[env' out]
+                           (try (env/transl-type-decls env (d 2) #(ty/pident (ty/ident-create %)) (d 1))
+                                (catch arbace.lang.ExceptionInfo e
+                                  (if (and env/*lenient* (:ocaml-type-error (ex-data e)))
+                                    ;; a declaration outside the slice in a unit's interface: its types abstract
+                                    (env/transl-type-decls env (mapv #(assoc % :ptype_kind :Ptype_abstract :ptype_manifest nil) (d 2))
+                                                           #(ty/pident (ty/ident-create %)))
+                                    (throw e))))]
+                       (recur more env' (conj items [:type out])))
+          :Psig_exception (let [ec (:ptyexn_constructor (d 1)) n (:txt (:pext_name ec)) k (:pext_kind ec)
+                                id (ty/ident-create n)
+                                item [:exn n id (env/exn-constructor env n ((k 2) 1) (ty/pident id))]]
+                            (recur more (add-item env item) (conj items item)))
+          :Psig_module (let [md (d 1) n (:txt (:pmd_name md))
+                             mty (try (transl-modtype env (:pmd_type md))
+                                      (catch arbace.lang.ExceptionInfo e
+                                        (if (and env/*lenient* (:ocaml-type-error (ex-data e))) nil (throw e))))]
+                         (if mty
+                           (let [item [:module n (ty/ident-create (or n "_")) mty (when (= :Mty_alias (mty 0)) :absent)]]
+                             (recur more (add-item env item) (conj items item)))
+                           (recur more env (conj items [:hole]))))
+          :Psig_typext (let [cs (try (env/type-extension-constructors env (d 1) ty/ident-create)
+                                     (catch arbace.lang.ExceptionInfo e
+                                       (if (and env/*lenient* (:ocaml-type-error (ex-data e))) nil (throw e))))]
+                         (if cs
+                           (let [its (vec (map-indexed (fn [i [n id c]] [:exn n id (assoc c :ext-first (zero? i))]) cs))]
+                             (recur more (reduce add-item env its) (into items its)))
+                           (recur more env (into items (repeat (count (:ptyext_constructors (d 1))) [:hole])))))
+          :Psig_class (if env/*lenient*
+                        (recur more env (into items (repeat (count (d 1)) [:hole])))
+                        (let [[infos env'] (*class-declarations* env (d 1) true)
+                              its (vec (map-indexed (fn [i c] [:class (:name c) (:id c) (:decl c) (:obj-id c) (:ty-id c) (if (pos? i) :next :first)]) infos))]
+                          (recur more env' (into items its))))
+          ;; Typemod's Psig_recmodule (transl_recmodule_modtypes), as the structure's: the module types translated
+          ;; in order, each seeing the earlier ones
+          :Psig_recmodule (let [[env' its]
+                                (try
+                                  (let [decls (mapv (fn [md] [(:txt (:pmd_name md)) (:pmd_type md)]) (d 1))
+                                        [env' ids mtys] (transl-recmodule-modtypes env decls)]
+                                    [env' (vec (keep-indexed (fn [i [[n _] id mty]]
+                                                               (when n [:module n id mty nil (if (zero? i) :rec-first :rec-next)]))
+                                                             (map vector decls ids mtys)))])
+                                  (catch arbace.lang.ExceptionInfo e
+                                    (if (and env/*lenient* (:ocaml-type-error (ex-data e))) nil (throw e))))]
+                            (if env'
+                              (recur more env' (into items its))
+                              (recur more env (into items (repeat (count (d 1)) [:hole])))))
+          :Psig_class_type (if env/*lenient*
+                             (recur more env items)
+                             (let [[infos env'] (*class-type-declarations* env (d 1))
+                                   its (vec (map-indexed (fn [i c] [:class-type (:name c) (:ty-id c) (:decl c) (:obj-id c) nil (if (pos? i) :next :first)]) infos))]
+                               (recur more env' (into items its))))
+          :Psig_modtype (let [mtd (d 1) n (:txt (:pmtd_name mtd))
+                              mty (try (some->> (:pmtd_type mtd) (transl-modtype env))
+                                       (catch arbace.lang.ExceptionInfo e
+                                         (if (and env/*lenient* (:ocaml-type-error (ex-data e))) ::failed (throw e))))]
+                          (if (= ::failed mty)
+                            (recur more env items)
+                            (let [item [:modtype n (ty/ident-create n) mty]]
+                              (recur more (add-item env item) (conj items item)))))
+          :Psig_include (let [mty (env/scrape (transl-modtype env (:pincl_mod (d 1))))
+                              _ (when-not (= :Mty_signature (mty 0)) (type-error "include of a functor type"))
+                              its (env/rename-items (mty 1))]
+                          (recur more (reduce add-item env its) (into items its)))
+          :Psig_open (let [e (env/lookup-module env (:txt (:popen_expr (d 1))))]
+                       (recur more (env/open-components env (env/entry-components e)) items))
+          :Psig_attribute (recur more env items)
+          (type-error (str "signature item " (d 0) " outside the slice")))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Inclusion (includemod.ml): the check that a module type is included in another, and its coercion
+
+(defn- moregeneral!
+  "Ctype.moregeneral: the implementation's type an instance of the specification's, the specification's variables
+  kept apart (a variable may not be bound twice nor to a non-variable)"
+  [n t-impl t-spec]
+  (let [spec (ty/instance t-spec)
+        vars (atom [])
+        _ (letfn [(go [t] (let [t (ty/repr t)] (if (ty/tvar? t) (swap! vars conj t) (run! go (ty/children (ty/desc t))))))]
+            (go spec))
+        before (distinct @vars)]
+    (try (ty/unify (ty/instance t-impl) spec)
+         (catch arbace.lang.ExceptionInfo e
+           (if (:unify (ex-data e))
+             (type-error (str "Signature mismatch: the value " n " has type " (ty/type-scheme-text t-impl)
+                              " but is expected to have type " (ty/type-scheme-text t-spec)))
+             (throw e))))
+    (let [;; a row variable of the specification linked to the rest of its row: that row's own variable
+          row-end (fn [t] (let [t (ty/repr t) d (ty/desc t)] (if (= :Tvariant (d 0)) (ty/repr (ty/row-more (d 1))) t)))
+          after (map row-end before)]
+      (when-not (and (every? ty/tvar? after) (= (count (distinct after)) (count after)))
+        (type-error (str "Signature mismatch: the value " n " is less general than its specification"))))))
+
+(defn- runtime-positions
+  "Of a signature: each runtime item's key [kind name] to its position (the last of a name wins), and the items by key"
+  [items]
+  (loop [its items pos 0 m {} byk {}]
+    (if (empty? its)
+      [m byk]
+      (let [item (first its)
+            k (case (item 0) (:val :exn :module :modtype :class) [(item 0) (item 1)] nil)
+            rt (env/runtime-item? item)]
+        (recur (rest its) (if rt (inc pos) pos)
+               (if (and k rt) (assoc m k pos) m)
+               (cond-> byk k (assoc k item)
+                       (= :type (item 0)) (into (map (fn [[n p d]] [[:type n] [n p d]]) (item 1)))))))))
+
+(defn- signatures [env sig1 sig2]
+  (let [[pos1 by1] (runtime-positions sig1)
+        ;; the specification's types and modules named by the implementation's (Includemod's equations)
+        s (into {} (keep (fn [[id n]]
+                           (let [k (if (some #(and (= :type (% 0)) (some (fn [[tn tp _]] (= (tp 1) id)) (% 1))) sig2) :type
+                                     (first (keep #(when (= id (% 2)) (% 0)) (filter #(#{:module :modtype} (% 0)) sig2))))
+                                 x (get by1 [k n])]
+                             (when x
+                               (case k
+                                 :type [id (second x)]
+                                 (:module :modtype) [id [:Pident (x 2)]]))))
+                         (env/bound-type-ids sig2)))
+        sig2 (env/subst-items s sig2)
+        pairs (vec
+               (mapcat
+                (fn [item]
+                  (case (item 0)
+                    :val (let [[_ n _ t k] item
+                               impl (or (get by1 [:val n]) (type-error (str "The value " n " is required but not provided")))]
+                           (moregeneral! n (impl 3) t)
+                           (cond
+                             (= :prim (first k)) []
+                             (= :prim (first (impl 4))) [[-1 [:primitive {:type (impl 3) :kind (impl 4)} t]]]
+                             :else [[(get pos1 [:val n]) nil]]))
+                    :exn (do (or (get by1 [:exn (item 1)]) (type-error (str "The exception " (item 1) " is required but not provided")))
+                             [[(get pos1 [:exn (item 1)]) nil]])
+                    :module (let [impl (or (get by1 [:module (item 1)])
+                                           (type-error (str "The module " (item 1) " is required but not provided")))]
+                              (cond
+                                (= :absent (get item 4)) []
+                                (= :absent (get impl 4))
+                                (let [p ((impl 3) 1)]
+                                  [[-1 [:alias p (include-mty env (:mty (env/find-module p)) (item 3))]]])
+                                :else [[(get pos1 [:module (item 1)]) (include-mty env (impl 3) (item 3))]]))
+                    :type (do (doseq [[n _ _] (item 1)]
+                                (when-not (get by1 [:type n]) (type-error (str "The type " n " is required but not provided"))))
+                              [])
+                    :modtype []
+                    :class (do (or (get by1 [:class (item 1)]) (type-error (str "The class " (item 1) " is required but not provided")))
+                               [[(get pos1 [:class (item 1)]) nil]])
+                    :hole (type-error "a part of the interface is outside the slice")))
+                sig2))
+        n1 (count (filter env/runtime-item? sig1))]
+    (if (and (= n1 (count pairs)) (every? (fn [[i [p c]]] (and (= i p) (nil? c))) (map-indexed vector pairs)))
+      nil
+      [:structure pairs])))
+
+(defn include-mty
+  "Includemod.modtypes: the coercion of a module of type mty1 to mty2"
+  [env mty1 mty2]
+  (let [m1 (env/scrape mty1) m2 (env/scrape mty2)]
+    (cond
+      (= :Mty_alias (m2 0)) nil
+      (and (= :Mty_signature (m1 0)) (= :Mty_signature (m2 0))) (signatures env (m1 1) (m2 1))
+      (and (= :Mty_functor (m1 0)) (= :Mty_functor (m2 0)))
+      (let [[p1 p2] [(m1 1) (m2 1)]]
+        (if (and p1 p2)
+          (let [cc-arg (include-mty env (second p2) (second p1))
+                res2 (if (and (first p1) (first p2)) (env/subst-mty {(first p2) [:Pident (first p1)]} (m2 2)) (m2 2))
+                cc-res (include-mty env (m1 2) res2)]
+            (if (and (nil? cc-arg) (nil? cc-res)) nil [:functor cc-arg cc-res]))
+          (let [cc-res (include-mty env (m1 2) (m2 2))] (if cc-res [:functor nil cc-res] nil))))
+      (and (= :Mty_ident (m1 0)) (= :Mty_ident (m2 0)) (= (m1 1) (m2 1))) nil
+      :else (type-error "Signature mismatch: modules do not match"))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Module expressions (Typemod.type_module)
+
+(defn- functor-root [rootpath id] (when rootpath (str rootpath "(" (:name id) ")")))
+
+(declare type-structure)
+
+(defn- nondep
+  "Mtype.nondep_supertype for an anonymous argument: the result's types that name the parameter (bound to a fresh
+  module of the argument's type) replaced by their expansions; one with no expansion cannot be erased"
+  [pid arg-mty mty]
+  (let [id (ty/ident-create (:name pid))
+        _ (env/add-module! id {:path [:Pident id] :mty arg-mty :addr nil})
+        mty (env/subst-mty {pid [:Pident id]} mty)]
+    (letfn [(mention? [p] (case (p 0) :Pident (= (p 1) id) :Pdot (mention? (p 1)) :Papply (or (mention? (p 1)) (mention? (p 2)))))
+            (nd-type [memo t]
+              (let [t (ty/repr t)]
+                (or (get @memo t)
+                    (let [d (ty/desc t)]
+                      (cond
+                        (= :Tvar (d 0)) t
+                        (and (= :Tconstr (d 0)) (mention? (d 1)))
+                        (let [e (binding [ty/*find-type* env/find-decl] (ty/expand-head t))]
+                          (when (identical? e t)
+                            (type-error (str "This functor application's result has a type of its anonymous argument: "
+                                             (env/path-name (d 1)))))
+                          (nd-type memo e))
+                        :else (let [n (ty/newty2 (ty/level t) [:Tvar nil])]
+                                (swap! memo assoc t n)
+                                (swap! n assoc :desc (ty/map-desc #(nd-type memo %) d))
+                                n))))))
+            (nd-items [items]
+              (mapv (fn [item]
+                      (case (item 0)
+                        :val (assoc item 3 (nd-type (atom {}) (item 3)))
+                        :type [:type (mapv (fn [[n p d]]
+                                             (let [m (atom {}) k (:kind d)
+                                                   d' (assoc d :manifest (some->> (:manifest d) (nd-type m))
+                                                             :kind (case (k 0)
+                                                                     :variant [:variant (mapv #(update % :args (fn [as] (mapv (fn [x] (nd-type m x)) as))) (k 1))]
+                                                                     :record [:record (mapv #(update % :type (fn [x] (nd-type m x))) (k 1)) (k 2)]
+                                                                     k))]
+                                               (env/add-decl! p d')
+                                               [n p d']))
+                                           (item 1))]
+                        :exn (let [m (atom {})] (assoc item 3 (update (item 3) :args (fn [as] (mapv #(nd-type m %) as)))))
+                        :module (assoc item 3 (nd-mty (item 3)))
+                        item))
+                    items))
+            (nd-mty [m]
+              (let [m (if (and (= :Mty_ident (m 0)) (mention? (m 1))) (env/scrape m) m)]
+                (case (m 0)
+                  :Mty_signature [:Mty_signature (nd-items (m 1))]
+                  :Mty_functor [:Mty_functor (when-let [[i a] (m 1)] [i (nd-mty a)]) (nd-mty (m 2))]
+                  :Mty_alias (if (mention? (m 1)) (nd-mty (env/scrape m)) m)
+                  m)))]
+      (let [m (env/scrape mty)]
+        (if (= :Mty_signature (m 0)) [:Mty_signature (nd-items (env/rename-items (m 1)))] (nd-mty m))))))
+
+(defn- path-of-module
+  "Typemod.path_of_module: the path of a module expression that is one"
+  [m]
+  (let [d (:desc m)]
+    (case (d 0)
+      :Tmod_ident (d 1)
+      :Tmod_constraint (path-of-module (d 1))
+      ;; applicative functors (Clflags.applicative_functors, the default)
+      :Tmod_apply (let [f (path-of-module (d 1)) a (path-of-module (d 2))] (when (and f a) [:Papply f a]))
+      nil)))
+
+(defn type-module
+  "Typemod.type_module: {:desc :mty}; alias for a module bound by `module M = P`, sttn (default true) for a path's
+  type strengthened"
+  ([env smod alias rootpath] (type-module env smod alias rootpath true))
+  ([env smod alias rootpath sttn]
+  (let [d (:pmod_desc smod)]
+    (case (d 0)
+      :Pmod_ident (let [e (env/lookup-module env (:txt (d 1)))
+                        p (:path e)
+                        aliasable (not (:functor-arg e))
+                        md {:desc [:Tmod_ident p e] :mty [:Mty_alias p]}
+                        emty (when-not (and alias aliasable) (or (:mty e) (:mty (env/find-module p))))]
+                    (cond
+                      (and alias aliasable) (do (when (and (:global (ty/path-head p)) (not env/*transparent-modules*)) (swap! env/alias-required conj (:name (ty/path-head p))))
+                                                md)
+                      (= :Mty_alias (emty 0))
+                      (let [p1 (env/normalize-module-path (emty 1))
+                            target (:mty (env/find-module p1))
+                            mty (if sttn (env/strengthen true target p1) target)]
+                        {:desc [:Tmod_constraint md mty [:alias p nil]] :mty mty})
+                      :else {:desc [:Tmod_ident p e] :mty (if sttn (env/strengthen aliasable emty p) emty)}))
+      :Pmod_structure (let [[items sig _] (type-structure env (d 1) rootpath)
+                            sig' (drop-shadowed sig)]
+                        {:desc [:Tmod_structure items sig'] :mty [:Mty_signature sig']})
+      :Pmod_functor (if-let [[id mty env'] (functor-param env (d 1))]
+                      (let [body (type-module env' (d 2) false (functor-root rootpath (or id {:name "_"})))]
+                        {:desc [:Tmod_functor (or id (ty/ident-create "_")) mty body] :mty [:Mty_functor [id mty] (:mty body)]})
+                      (let [body (type-module env (d 2) false rootpath)]
+                        {:desc [:Tmod_functor nil nil body] :mty [:Mty_functor nil (:mty body)]}))
+      :Pmod_apply (let [a (type-module env (d 2) false nil)
+                        ;; type_application: the functor strengthened only when every argument of the chain is a path
+                        f (type-module env (d 1) false nil (and sttn (= :Pmod_ident ((:pmod_desc (d 2)) 0))))
+                        fm (env/scrape (:mty f))
+                        _ (when-not (and (= :Mty_functor (fm 0)) (fm 1)) (type-error "This module is not a functor"))
+                        [pid pmty] (fm 1)
+                        cc (include-mty env (:mty a) pmty)
+                        apath (path-of-module a)
+                        fpath (when (= :Tmod_ident ((:desc f) 0)) ((:desc f) 1))
+                        res (cond (nil? pid) (fm 2)
+                                  apath (env/subst-mty {pid apath} (fm 2))
+                                  :else (nondep pid (:mty a) (fm 2)))
+                        ;; Subst.modtype (Rescope scope): the result's bound identifiers fresh, their declarations (the
+                        ;; argument substituted) registered under them, not over the functor's own
+                        res (if (and pid (= :Mty_signature (res 0))) [:Mty_signature (env/rename-items (res 1))] res)]
+                    {:desc [:Tmod_apply f a cc] :mty res})
+      :Pmod_apply_unit (let [f (type-module env (d 1) false nil)
+                             fm (env/scrape (:mty f))]
+                         (when-not (and (= :Mty_functor (fm 0)) (nil? (fm 1))) (type-error "This functor is not generative"))
+                         {:desc [:Tmod_apply_unit f] :mty (fm 2)})
+      :Pmod_unpack (let [e (tc/type-exp env (d 1))
+                         t (ty/expand-head (:type e)) td (ty/desc t)]
+                     (when-not (= :Tpackage (td 0)) (type-error "This expression is not a packed module"))
+                     (let [mty (env/modtype-of-package t)]
+                       {:desc [:Tmod_unpack e mty] :mty mty}))
+      :Pmod_constraint (let [m (type-module env (d 1) alias rootpath)
+                             mty (transl-modtype env (d 2))]
+                         {:desc [:Tmod_constraint m mty (include-mty env (:mty m) mty)] :mty mty})
+      (type-error (str "module expression " (d 0) " outside the slice"))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Structures (Typemod.type_structure)
+
+(defn- sub-root [rootpath n] (when rootpath (str rootpath "." n)))
+
+(defn type-struct-item
+  "[titem sig-items env'] of one structure item"
+  [env sitem rootpath]
+  (let [d (:pstr_desc sitem)]
+    (case (d 0)
+      :Pstr_value (let [[vbs env'] (tc/type-let env (d 1) (d 2))
+                        vars (mapcat #(pm/bound-idents-full (:pat %)) vbs)]
+                    [[:Tstr_value (d 1) vbs] (mapv (fn [[id n t]] [:val n id t nil]) vars) env'])
+      :Pstr_eval [[:Tstr_eval (tc/type-statement env (d 1))] [] env]
+      :Pstr_primitive (let [v (d 1) n (:txt (:pval_name v))
+                            t (env/make-generic! (binding [ty/*find-type* env/find-decl]
+                                                   (env/transl-type env (atom {}) (:pval_type v))))
+                            item [:val n (ty/ident-create n) t
+                                  [:prim {:name (first (:pval_prim v)) :arity (env/prim-arity (:pval_type v)) :names (vec (:pval_prim v))}]]]
+                        [[:Tstr_primitive] [item] (add-item env item)])
+      :Pstr_type (let [[env' out] (env/transl-type-decls env (d 2) #(ty/pident (ty/ident-create %)) (d 1))]
+                   [[:Tstr_type] [[:type out]] env'])
+      :Pstr_exception
+      (let [ec (:ptyexn_constructor (d 1)) n (:txt (:pext_name ec)) k (:pext_kind ec)
+            id (ty/ident-create n)
+            [c rebind] (if (= :Pext_rebind (k 0))
+                         ;; Typedecl.transl_extension_constructor's rebinding: the original's arguments, a new path
+                         (let [orig (or (first (env/lookup env :constrs (:txt (k 1))))
+                                        (type-error (str "Unbound constructor " (str/join "." (env/lid-parts (:txt (k 1)))))))]
+                           [(assoc orig :name n :tag [:Cstr_extension (ty/pident id) (empty? (:args orig))]) (second (:tag orig))])
+                         [(env/exn-constructor env n ((k 2) 1) (ty/pident id)) nil])
+            item [:exn n id c]]
+        [[:Tstr_exception id c (if rootpath (str rootpath "." n) n) rebind] [item] (add-item env item)])
+      :Pstr_typext (let [cs (env/type-extension-constructors env (d 1) ty/ident-create)
+                         its (vec (map-indexed (fn [i [n id c]] [:exn n id (assoc c :ext-first (zero? i))]) cs))]
+                     [[:Tstr_typext (mapv (fn [[n id c rebind]] [id (if rootpath (str rootpath "." n) n) rebind]) cs)]
+                      its (reduce add-item env its)])
+      :Pstr_module (let [mb (d 1) n (:txt (:pmb_name mb))
+                         tm (type-module env (:pmb_expr mb) true (when n (sub-root rootpath n)))
+                         id (ty/ident-create (or n "_"))
+                         absent (when (= :Mty_alias ((:mty tm) 0)) :absent)
+                         item [:module n id (:mty tm) absent]]
+                     [[:Tstr_module id tm absent] (if n [item] []) (if n (add-item env item) env)])
+      :Pstr_recmodule
+      ;; Typemod's recursive modules: each with its signature, the signatures translated in order (each seeing the
+      ;; earlier ones), the bodies typed with all the modules bound, each coerced to its signature
+      (let [bs (vec (d 1))
+            _ (doseq [mb bs] (when-not (= :Pmod_constraint ((:pmod_desc (:pmb_expr mb)) 0)) (type-error "a recursive module needs a signature")))
+            [env1 ids mtys] (transl-recmodule-modtypes env (mapv (fn [mb] [(:txt (:pmb_name mb)) ((:pmod_desc (:pmb_expr mb)) 2)]) bs))
+            decls (mapv (fn [mb id mty] (let [me (:pmod_desc (:pmb_expr mb))]
+                                          [(:txt (:pmb_name mb)) id mty (me 1) (:pmod_loc (me 1))]))
+                        bs ids mtys)
+            tbs (mapv (fn [[n id mty sme loc]]
+                        (let [tm (type-module env1 sme false (when n (sub-root rootpath n)))]
+                          [id {:desc [:Tmod_constraint tm mty (include-mty env1 (:mty tm) mty)] :mty mty} loc]))
+                      decls)]
+        [[:Tstr_recmodule tbs]
+         (vec (keep-indexed (fn [i [n id mty]] (when n [:module n id mty nil (if (zero? i) :rec-first :rec-next)])) decls))
+         env1])
+      :Pstr_modtype (let [mtd (d 1) n (:txt (:pmtd_name mtd))
+                          item [:modtype n (ty/ident-create n) (some->> (:pmtd_type mtd) (transl-modtype env))]]
+                      [[:Tstr_modtype] [item] (add-item env item)])
+      :Pstr_open (let [od (d 1) me (:popen_expr od)]
+                   (if (= :Pmod_ident ((:pmod_desc me) 0))
+                     (let [e (env/lookup-module env (:txt ((:pmod_desc me) 1)))]
+                       [[:Tstr_open] [] (env/open-components env (env/entry-components e))])
+                     ;; Typemod.type_open_decl_aux of a module expression: typed (strengthened), its signature entered
+                     ;; with fresh identifiers (Env.enter_signature) and hidden (Signature_names: From_open), so the items
+                     ;; are local to the structure, not in its signature
+                     (let [tm (type-module env me false nil)
+                           mty (env/scrape (:mty tm))
+                           _ (when-not (= :Mty_signature (mty 0)) (type-error "This module is not a structure; it is a functor"))
+                           its (env/rename-items (mty 1))]
+                       [[:Tstr_open tm (runtime-ids its)] [] (reduce add-item env its)])))
+      :Pstr_include (let [tm (type-module env (:pincl_mod (d 1)) false nil)
+                          mty (env/scrape (:mty tm))
+                          _ (when-not (= :Mty_signature (mty 0)) (type-error "include of a functor"))
+                          its (env/rename-items (mty 1))]
+                      [[:Tstr_include tm (runtime-ids its)] its (reduce add-item env its)])
+      :Pstr_attribute [nil [] env]
+      :Pstr_class (let [[infos env'] (*class-declarations* env (d 1))
+                        items (vec (map-indexed (fn [i c] [:class (:name c) (:id c) (:decl c) (:obj-id c) (:ty-id c) (if (pos? i) :next :first)]) infos))]
+                    [[:Tstr_class infos] items env'])
+      :Pstr_class_type (let [[infos env'] (*class-type-declarations* env (d 1))
+                             items (vec (map-indexed (fn [i c] [:class-type (:name c) (:ty-id c) (:decl c) (:obj-id c) nil (if (pos? i) :next :first)]) infos))]
+                         [[:Tstr_class_type] items env'])
+      (type-error (str "structure item " (d 0) " outside the slice")))))
+
+(defn type-structure
+  "[items sig env]: the typed items and the signature's items in order (shadowed ones kept: the caller simplifies)"
+  [env sitems rootpath]
+  (loop [sitems sitems env env items [] sig []]
+    (if (empty? sitems)
+      [items sig env]
+      (let [_ (when (System/getenv "TYPER_TRACE")
+                (binding [*out* *err*] (println "item" (some-> (:pstr_loc (first sitems)) first str))))
+            [ti its env'] (type-struct-item env (first sitems) rootpath)]
+        (recur (rest sitems) env' (if ti (conj items ti) items) (into sig its))))))
+
+(defn- unit-root
+  "The root path's name of a unit (Out_type.rewrite_double_underscore_paths: Stdlib__List is Stdlib.List)"
+  [uname]
+  (if (str/starts-with? uname "Stdlib__") (str "Stdlib." (subs uname 8)) uname))
+
+(defn- expand-escaping!
+  "Ctype's scope check for a packed module: an outer variable bound to one of the module's own types (by the
+  package's inclusion) is bound to its expansion instead, the local type not escaping"
+  [mty]
+  (when (= :Mty_signature (mty 0))
+    (let [local (set (keep (fn [[id _]] id) (env/bound-type-ids (mty 1))))
+          seen (atom #{})]
+      (letfn [(local? [t] (let [d (ty/desc t)] (and (= :Tconstr (d 0)) (= :Pident ((d 1) 0)) (local ((d 1) 1)))))
+              (walk [t]
+                (when-not (@seen t)
+                  (swap! seen conj t)
+                  (let [d (:desc @t)]
+                    (if (= :Tlink (d 0))
+                      (let [r (ty/repr t)]
+                        (when (and (not= ty/generic-level (:level @t)) (local? r))
+                          (let [e (binding [ty/*find-type* env/find-decl] (ty/expand-head r))]
+                            (when-not (identical? e r) (swap! t assoc :desc [:Tlink e]))))
+                        (walk (d 1)))
+                      (run! walk (ty/children d))))))]
+        (doseq [item (mty 1)] (when (= :val (item 0)) (walk (item 3))))))))
+
+(defn type-implementation
+  "[items sig env full-sig] of a compilation unit: its signature simplified (the toplevel's shadowed names dropped)
+  and whole"
+  [env sitems uname]
+  (binding [tc/*type-struct-item* (fn [env sitem] (let [[ti _ env'] (type-struct-item env sitem nil)] [ti env']))
+            tc/*type-package* (fn [env smod t]
+                                (let [m (type-module env smod false nil)
+                                      mty (env/modtype-of-package t)
+                                      cc (include-mty env (:mty m) mty)]
+                                  (expand-escaping! (:mty m))
+                                  {:desc [:Tmod_constraint m mty cc] :mty mty}))]
+    (let [[items sig env'] (type-structure env sitems (unit-root uname))]
+      [items (drop-shadowed sig) env' sig])))
+
+(defn compunit-coercion
+  "Includemod.compunit: the coercion of the implementation's whole signature to its interface's"
+  [env full-sig intf-sig]
+  (include-mty env [:Mty_signature full-sig] [:Mty_signature intf-sig]))
+
+(reset! env/unit-signature-fn (fn [env items _] (first (transl-signature env items))))

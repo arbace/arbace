@@ -16,11 +16,21 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-go-native-check \
   repr-java-check repr-java-roundtrip repr-java-text repr-java-jdk repr-java-parse-check repr-java-front-check repr-java-attr-check repr-java-nojavac-check repr-java-closure-check repr-java-platform-pack repr-java-platform-check repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test repr-cpp-host-record repr-cpp-host-check repr-cpp-pins-check repr-cpp-cxxdump-build repr-cpp-cxxdump-test repr-cpp-spec-check repr-cpp-c2j-check repr-scheme-c2j-check repr-ocaml-c2j-check repr-cpp-pp-check repr-cpp-pp-record repr-cpp-cxxdump-check repr-cpp-roundtrip repr-cpp-roundtrip-corpus repr-cpp-pp-essential repr-cpp-roundtrip-essential repr-cpp-pp-record-results repr-llvm-roundtrip cppi-lower-check cppi-lower-corpus cppi-lower-essential cpp-essential cppi-runtime-build cppi-testsuite cppi-selftest cppi-run cppi-runtime-ci cppi-record-ref cppi-check cppi-check-aot cppi-divergences cppi-divergences-aot repr-c-host-record repr-c-host-check repr-c-ccdump repr-c-check repr-c-record repr-c-parse-check repr-c-read repr-c-print repr-c-roundtrip repr-c-corpus-dedup repr-c-record-gcc repr-c-c23 ci-diagnose ci-run ci-check ci-check-aot ci-dg ci-dg-essential ci-judge-test ci-c2j-check ci-cinterp-check ci-aot-translate ci-repl-session ci-divergences ci-musl ci-runtime ci-cirun-build ci-annot ci-annotations ci-annotations-record ci-record-ref ci-synth ci-synth-check goi-annotations goi-test goi-check goi-check-aot goi-check-aot-essential goi-check-nethttp goi-check-nethttp-arbace goi-divergences goi-divergences-aot java-check java-check-compiled java-check-compiled-essential java-check-print java-check-nread java-check-diagnostics java-check-essential java-check-ref alpine-check alpine-test clean \
   java-check-oracle java-check-rejudge java-verdicts \
+  rsi-samples rsi-lower-check rsi-lower-check-all rsi-lower-check-native-all rsi-std-build rsi-runtime-build rsi-runtime-ci rsi-aot-lib ci-aot-lib rsi-record-ref rsi-check rsi-check-aot rsi-check-all rsi-divergences rsi-synthetic rsi-synthetic-check rsi-judge-test rsi-check-essential \
+  repr-llvm-record-opt repr-llvm-record-rt llvmi-ir-make llvmi-run llvmi-check llvmi-check-aot llvmi-record-ref llvmi-divergences cppi-codegen-check \
+  repr-llvm-check repr-llvm-check-essential llvm-controls-test llvmi-check-essential \
+  repr-rust-native-check \
+  repr-rust-native-errors \
+  rust-front-corpus rust-front-mir-check rust-front-codegen-check rust-front-coverage rust-front-collect rust-front-run-native rust-front-oracles rust-front-expand-check rust-front-resolve-check rust-front-hir-check rust-front-collect-check rust-front-typeck-check \
   suite-aot suite-aot-essential suite-divergences java-forms-verify java-forms-update reap-record-native-check \
   repr-c-gcc-tests repr-scheme-fetch repr-scheme-check repr-scheme-check-quick repr-scheme-record repr-scheme-spec repr-scheme-roundtrip si-vendor-verify si-boot si-boot-check si-test si-test-record si-check-suite si-fixpoint si-unit si-light si-test-si si-check si-check-record-ref si-srfi si-srfi-record si-srfi-aot si-aot-check si-aot-check-record si-bench si-divergences si-r7rs si-r7rs-record si-r7rs-chez si-r7rs-chez-record si-r7rs-chibi si-r7rs-chibi-record si-r7rs-chibi-test si-r7rs-chibi-test-record si-chibi-tests si-chibi-tests-record si-ecraven si-ecraven-record si-ecraven-chez si-ecraven-chez-record si-ecraven-chibi si-ecraven-chibi-record si-mats si-mats-record si-corpora-files si-corpora-divergences repr-ocaml-ocdump repr-ocaml-spec-check repr-ocaml-samples repr-ocaml-corpus repr-ocaml-corpus-count repr-ocaml-roundtrip repr-ocaml-roundtrip-all repr-ocaml-check repr-ocaml-text repr-ocaml-cmi repr-ocaml-dumps oi-stdlib oi-build oi-check oi-divergences oi-record-ref oi-repl oi-aot-lib oi-check-aot oi-divergences-aot oi-suite-check oi-suite-check-aot oi-suite-divergences oi-suite-expect oi-suite-rollup oi-suite-record-ref repr-ocaml-opam repr-python-fetch repr-python-pins repr-python-count repr-python-spec-check repr-python-samples repr-python-roundtrip repr-python-record repr-python-check repr-python-text repr-python-text-record pyi-gen pyi-gen-check pyi-record-ref pyi-record-ref-check pyi-scope-check pyi-compile-check pyi-run pyi-repl pyi-repl-check pyi-lib-test pyi-lib-test-oracle pyi-runtime-print pyi-runtime-read pyi-runtime-vet pyi-runtime-check \
   repr-scheme repr-scheme-roundtrip-record si-essential si-aot-essential scheme-read-essential scheme-essential \
   repr-python-lex-check repr-python-lex-record repr-python-pegen repr-python-pegen-check repr-python-parse-check repr-python-parse-record repr-python-ast-check repr-python-records-record repr-python-records-verify pyi-lib-test-record pyi-runtime-tables pyi-aot pyi-aot-check pyi-aot-check-record pyi-bench pyi-bench-record pyi-check pyi-check-record pyi-divergences pyi-cover pyi-c2j-check pyi-table-check pyi-clib-build pyi-clib-verify python-essential \
-  oi-check-compiled check-makefile
+  oi-check-compiled check-makefile \
+  repr-ocaml-native-check repr-ocaml-menhir \
+  oi-typer-check oi-stdlib-check oi-check-native oi-typer-probe oi-repl-check-native repr-ocaml-types oi-judges-fixtures \
+  oi-check-ocdump oi-own-verdicts \
+  repr-haskell-native-check repr-haskell-tables-check repr-haskell-rename-check repr-haskell-typecheck-check repr-haskell-stg-check repr-haskell-run-check repr-haskell-run-check-nofib hsi-pins hsi-spec-check hsi-tests hsi-dumps hsi-generate hsi-record-ref hsi-build hsi-stubs-build hsi-repl-session hsi-check hsi-check-core hsi-check-essential hsi-check-aot hsi-check-aot-o1 hsi-record-ref-o1 hsi-primops hsi-libm-check hsi-runtime-check repr-haskell-test-oracle repr-haskell-record-corpus hsi-record-libs hsi-record-progs oracle-records-list oracle-records-check oracle-records-verify oracle-records-record oracle-records-mirror
 
 help: ## list the targets
 	@awk 'BEGIN {FS = ":.*## "} /^## / {printf "\n%s\n", substr($$0, 4)} \
@@ -132,7 +142,17 @@ cover-build: ## GT8.3: the cover build, the gate's executable and test build wit
 	bin/cover build
 provenance-check: ## the provenance files' repr/java hash equals the reader's (bin/provenance-check; the gate's essential step, seconds)
 	bin/provenance-check
-reap: ## the REAP matrix: read, eval, AOT, print for Clojure, Java, Go, C, C++, Scheme, OCaml, Python from the checks' recorded results; every non-pass in a class, by design or deferred (bin/reap; no runs, seconds)
+oracle-records-list: ## the oracles' records and packs and their state here (bin/oracle-records list; doc/ORACLE-RECORDS-SURVEY.md)
+	bin/oracle-records list
+oracle-records-check: ## every pinned pack in the store, its members as its manifest says, and the tampered-pack control (bin/oracle-records check)
+	bin/oracle-records check
+oracle-records-verify: ## a crop's records against its live toolchain, CROP=c [KIND=...] [CORPUS=...] [SAMPLE=N] (bin/oracle-records verify; a moved toolchain reported, not failed)
+	bin/oracle-records verify $(CROP) $(KIND) $(if $(CORPUS),--corpus $(CORPUS)) $(if $(SAMPLE),--sample $(SAMPLE))
+oracle-records-record: ## a crop's kind recorded by hand on the host with its toolchain, CROP=c KIND=... [CORPUS=...] (bin/oracle-records record)
+	bin/oracle-records record $(CROP) $(KIND) $(if $(CORPUS),--corpus $(CORPUS))
+oracle-records-mirror: ## the packs' mirror commands, the orphan branch oracle-packs for the Mac's bare repository (bin/oracle-records mirror; PUSH=1 pushes)
+	bin/oracle-records mirror $(if $(PUSH),--push)
+reap: ## the REAP matrix: read, eval, AOT, print for Clojure, Java, Go, C, C++, Scheme, OCaml, Python, LLVM IR, Rust, Haskell from the checks' recorded results; every non-pass in a class, by design or deferred (bin/reap; no runs, seconds)
 	bin/reap
 crops-score: ## each crop's completeness, maturity and independence as percentages, from the recorded results (bin/crops-score [ARGS="--newest|--ref REF|--crop C|--tsv"]; doc/CROPS-SCORE.md; no runs, seconds)
 	bin/crops-score $(ARGS)
@@ -236,8 +256,76 @@ repr-haskell-text: ## the same in mode :full: each module printed back byte for 
 	bin/repr-haskell roundtrip --text-only
 repr-haskell-layout: ## the same forms printed by Haskell's layout rule, as a person writes them: GHC's trees and lines, then interfaces (bin/repr-haskell roundtrip --layout-only --iface)
 	bin/repr-haskell roundtrip --layout-only --iface
-repr-haskell-test: ## repr/haskell's cases: the reader's samples, the spec's worked example, mode :full, the layout layout, R5's and R6's cases (bin/repr-haskell test)
+repr-haskell-test: ## repr/haskell's cases on the records, no GHC: the reader's samples, the spec's worked example, mode :full, the layout layout, R5's and R6's cases (bin/repr-haskell test)
 	bin/repr-haskell test
+repr-haskell-native-check: ## the native reader (GHC 9.14.1's lexer, grammar and PostProcess in Arbace) against the helper over test/haskell/native-check.txt: trees, pragmas, forms (bin/repr-haskell native-check)
+	bin/repr-haskell native-check
+repr-haskell-tables-check: ## the native parser's LALR(1) tables generated from GHC's Parser.y against Happy's in the tarball's Parser.hs (bin/repr-haskell tables --check)
+	bin/repr-haskell tables --check
+repr-haskell-rename-check: ## the front end's renamer (HF2) against GHC's: the rn dump over test/haskell/rename-check.txt (samples, ghc-internal modules, nofib programs) (bin/repr-haskell rename-check)
+	bin/repr-haskell rename-check
+repr-haskell-typecheck-check: ## the front end's elaborator (HF3) against GHC's types and desugared Core's evidence over test/haskell/typecheck's samples, with its negative control (bin/repr-haskell typecheck-check)
+	bin/repr-haskell typecheck-check
+repr-haskell-stg-check: ## HF5-HF6: the match compiler, the -O0 Simplifier, CorePrep and CoreToStg; desugared and simplified Core and STG against GHC's -O0, test/haskell/stg's programs run on hsi from Arbace's STG against GHC's output (bin/repr-haskell stg-check)
+	bin/repr-haskell stg-check
+repr-haskell-run-check: ## HF7's first light: the run corpus (test/haskell/eval's samples and synthetic programs) compiled by Arbace's front end alone and run on hsi, against GHC's recorded runs and test/haskell/run-check.edn (bin/repr-haskell run-check)
+	bin/repr-haskell run-check
+repr-haskell-run-check-nofib: ## HF3's second slice measured: the single-module nofib programs of test/haskell/run-check-nofib.txt by Arbace's front end on hsi, against test/haskell/ref-nofib.edn and test/haskell/run-check-nofib.edn (bin/repr-haskell run-check --nofib)
+	bin/repr-haskell run-check --nofib
+repr-haskell-test-oracle: ## the same cases with GHC reading the printed modules (class D; the oracle tier's haskell-test-oracle; bin/repr-haskell test --oracle)
+	bin/repr-haskell test --oracle
+repr-haskell-record-corpus: ## the corpus's originals dumped and parsed by the helper into the four packs, by hand (bin/repr-haskell record-corpus; REPR_HASKELL_ONLY_PACKAGES="P Q" some packages)
+	bin/repr-haskell record-corpus
+hsi-pins: ## Haskell's eval corpora: the testsuite tarball and nofib fetched by their pins, every corpus's measures against test/haskell/eval-corpora.edn (bin/hsi pins --check)
+	bin/hsi pins --check
+hsi-spec-check: ## doc/haskell/STG-SPEC.md's checklist against GHC 9.14.1's STG constructors (bin/hsi spec-check)
+	bin/hsi spec-check
+hsi-tests: ## the testsuite's all.T files read, its run tests listed in test/haskell/eval/testsuite-run.edn (bin/hsi tests)
+	bin/hsi tests
+hsi-dumps: ## the boot libraries and the samples compiled to STG forms by the helper, ABI hashes against the installed, read back, twice (bin/hsi dumps --samples --again; heavy: run by night)
+	bin/hsi dumps --samples --again
+hsi-record-libs: ## the boot libraries' STG dumped and packed into haskell-stg-libs, by hand (bin/hsi dumps --record; heavy: run by night)
+	bin/hsi dumps --record
+hsi-record-progs: ## the run corpora's programs' STG dumped by the helper and packed into haskell-stg-progs, by hand (bin/hsi check --live --dump-only --record-progs)
+	bin/hsi check --live --dump-only --record-progs --corpus samples,synthetic,testsuite-core
+hsi-generate: ## the synthetic corpus test/haskell/eval/synthetic/ against its generator (bin/hsi generate --check)
+	bin/hsi generate --check
+hsi-record-ref: ## GHC 9.14.1's -O0 runs of the run corpora into test/haskell/ref-ghc914.edn (bin/hsi record-ref)
+	bin/hsi record-ref
+hsi-build: ## hsi's light driver: go/arbace/hs printed by repr/go and built by TamaGo's go into .tmp/hsi/bin/hsi (bin/hsi build)
+	bin/hsi build
+hsi-check: ## the samples and the synthetic corpus on hsi against test/haskell/ref-ghc914.edn, every non-pass in a class (bin/hsi check)
+	bin/hsi check
+
+hsi-check-core: ## the samples, the synthetic corpus and the testsuite's language core (701 run tests) on hsi, about 4 minutes (bin/hsi check --corpus samples,synthetic,testsuite-core)
+	bin/hsi check --corpus samples,synthetic,testsuite-core
+
+hsi-check-essential: ## GT8's list of Haskell's eval, test/haskell/hsi/essential.txt, on hsi (bin/hsi check --only @test/haskell/hsi/essential.txt)
+	bin/hsi check --corpus samples,synthetic,testsuite-core --only @test/haskell/hsi/essential.txt
+
+hsi-check-aot: ## HE8's AOT: the samples and the synthetic corpus compiled to Go over hsi's machine and run against test/haskell/ref-ghc914.edn and against hsi (bin/hsi check --aot)
+	bin/hsi check --aot
+
+hsi-check-aot-o1: ## HES74 (c): the essential list compiled from GHC's -O1 STG against GHC's -O1 runs, test/haskell/ref-ghc914-O1.edn (bin/hsi check --aot --opt O1)
+	bin/hsi check --aot --opt O1 --corpus samples,synthetic,testsuite-core --only @test/haskell/hsi/essential.txt
+
+hsi-record-ref-o1: ## GHC 9.14.1's -O1 runs of the run corpora into test/haskell/ref-ghc914-O1.edn, the compiled level's reference at -O1 (bin/hsi record-ref --opt O1)
+	bin/hsi record-ref --opt O1
+
+hsi-stubs-build: ## HES60's probe and stub writer (tools/hsdump/probe/StubProbe.hs) built by the host's ghc into .tmp/hsi/stubprobe (bin/hsi stubs-build)
+	bin/hsi stubs-build
+
+hsi-repl-session: ## HE7's REPL: test/haskell/repl/'s sessions through bin/hsi repl, stdout byte for byte against GHCi's recorded transcripts, and the negative control (bin/hsi repl-session)
+	bin/hsi repl-session
+
+hsi-primops: ## hsi's primops against GHC.Prim's 742 non-SIMD names (bin/hsi primops)
+	bin/hsi primops
+
+hsi-libm-check: ## hsi's port of musl's libm against the host's musl, bit for bit, function by function, and its negative control (bin/hsi libm-check)
+	bin/hsi libm-check
+
+hsi-runtime-check: ## hsi's runtime (go/arbace/hs, go/arbace/libm, the driver) printed from its :full Go forms and read again: the same forms (bin/hsi runtime check)
+	bin/hsi runtime check
 repr-rust-roundtrip: ## Rust -> forms -> Rust over std's five crates of rustc 1.99.1: rustc's trees and lines (bin/repr-rust roundtrip)
 	bin/repr-rust roundtrip
 repr-rust-iface: ## the same, then rustdoc's JSON of the five crates from the originals and from the printed files, compared without spans (bin/repr-rust roundtrip --iface)
@@ -254,6 +342,10 @@ repr-rust-all: ## every level over all five corpora: std, the rest of library/, 
 	bin/repr-rust roundtrip --iface --text --pretty --run --code --std all
 repr-rust-test: ## repr/rust's cases: the reader's samples, the spec's worked example and its round trip, the interface level's cases, mode :full's, the behaviour and code levels' (bin/repr-rust test)
 	bin/repr-rust test
+repr-rust-native-check: ## the native reader (rustc's lexer and parser ported to Arbace) against the helper: the samples' and a few dozen std files' dumps equal (bin/repr-rust native-check)
+	bin/repr-rust native-check
+repr-rust-native-errors: ## the native reader's first error of each file against rustc's (bin/repr-rust native-errors [--edition E] FILES=...)
+	bin/repr-rust native-errors $(FILES)
 repr-cpp-host-record: ## record g++ 15.2's and clang 23.1.4's answers under test/cpp/host/: predefined macros per standard, search lists, __has_* answers, sizes, libstdc++'s header digests (bin/repr-cpp host record)
 	bin/repr-cpp host record
 repr-cpp-host-check: ## the host's compilers still give test/cpp/host/'s answers and libstdc++'s headers their digests (bin/repr-cpp host check)
@@ -287,6 +379,64 @@ repr-cpp-pp-record-results: ## the token check's results, test/repr/cpp/pp-check
 	bin/repr-cpp pp-check --corpus cpp-lexical --record-results && bin/repr-cpp pp-check --corpus gxx-dg --sample 10 --record-results && bin/repr-cpp pp-check --corpus libstdcxx-headers --sample 8 --record-results
 repr-llvm-roundtrip: ## repr/llvm's round trip over a list of IR files: forms, .ae text, print, forms again, clang -c's objects equal (bin/repr-llvm roundtrip LIST WORK; LIST=... WORK=...)
 	bin/repr-llvm roundtrip $(LIST) $(WORK)
+rsi-samples: ## Rust's eval, RE3: rsi's samples (test/rust/eval/) lowered with std's lowered IR and run as the originals (bin/rsi lower-check on bin/rsi list --set samples)
+	bin/rsi list --set samples -o .tmp/rsi/samples.tsv && bin/rsi lower-check .tmp/rsi/samples.tsv .tmp/rsi/samples
+rsi-lower-check: ## Rust's eval, RE3: every 10th UI program built from its lowered IR with the lowered std (gcc -O0) and run as the original, against test/rust/divergences-lower.edn (bin/rsi lower-check)
+	bin/rsi list --sample 10 -o .tmp/rsi/sample10.tsv && bin/rsi lower-check .tmp/rsi/sample10.tsv .tmp/rsi/sample10
+rsi-lower-check-all: ## the same over all 3,718 UI programs, recorded into test/rust/lower-std-results.edn (a night's run; bin/rsi lower-check --record)
+	bin/rsi list -o .tmp/rsi/all.tsv && bin/rsi lower-check .tmp/rsi/all.tsv .tmp/rsi/all --record
+rsi-lower-check-native-all: ## RE2's native-std leg over all 3,718 UI programs, recorded into test/rust/lower-results.edn (bin/rsi lower-check --leg native --record)
+	bin/rsi list -o .tmp/rsi/all.tsv && bin/rsi lower-check .tmp/rsi/all.tsv .tmp/rsi/all-native --leg native --record
+rsi-std-build: ## std's sysroot built from the pinned rust-src (library/'s workspace) with its IR, against test/rust/runtime/ir.sha256 (bin/rsi std-build)
+	bin/rsi std-build
+rsi-runtime-build: ## RE3: std's IR lowered, compiled by gcc -O0 and archived by crate with the pending-flag layer (bin/rsi runtime-build)
+	bin/rsi runtime-build
+rsi-runtime-ci: ## RE4: std's lowered units and the pending-flag layer read by repr/c as ci's library, with ci's ports (bin/rsi runtime-ci)
+	bin/rsi runtime-ci
+rsi-aot-lib: ## RES34: every unit of std's, musl's and the ports' libraries translated once by cf2g into its cached Go package, .tmp/ci-aot-lib/ (bin/rsi aot-lib)
+	bin/rsi aot-lib
+rsi-record-ref: ## RE4: the judge's runs (rustc 1.99.1 -O0 against std's build) of the samples and every 10th UI program recorded into test/rust/ref-rustc-1.99.1.edn (bin/rsi record-ref)
+	bin/rsi record-ref --sample 10
+rsi-check: ## RE4: the samples and every 10th UI program run on ci against the judge's runs, every non-pass in a class of test/rust/divergences.edn (bin/rsi check)
+	bin/rsi check --sample 10
+rsi-check-aot: ## RE4: the same compiled by cf2g (bin/rsi check --aot)
+	bin/rsi check --aot --sample 10
+rsi-check-all: ## RE4: every UI program on ci, recorded into test/rust/check-linux-amd64.edn with its times (a night's run; bin/rsi record-ref then bin/rsi check --record)
+	bin/rsi record-ref && bin/rsi check --record
+rsi-synthetic: ## RE5: the synthetic corpus's programs (test/rust/synthetic/) generated from test/rust/synthetic.edn and its templates (bin/rsi synthetic generate)
+	bin/rsi synthetic generate
+rsi-synthetic-check: ## RE5: the committed synthetic programs equal what the table and templates give, and their expected statuses the judge's runs (bin/rsi synthetic check, ref)
+	bin/rsi synthetic check && bin/rsi synthetic ref
+rsi-judge-test: ## RE5: the check's judge without ci: the judge's own runs pass, a changed output fails, the controls differ (bin/rsi judge-test)
+	bin/rsi judge-test
+rust-front-corpus: ## RF1: the helper's mir, census and iface modes over the synthetic corpus and the samples, the new solver's MIR against the old's (bin/rust-front corpus)
+	bin/rust-front corpus
+rust-front-mir-check: ## RF2: each program's MIR forms read and printed back equal to rustc's -Zunpretty=mir text (bin/rust-front mir-check)
+	bin/rust-front mir-check
+rust-front-codegen-check: ## RF3: the no_std samples (test/rust/front/) through arbace.rust.back.codegen, each function against rustc's IR, then the run (bin/rust-front codegen-check)
+	bin/rust-front codegen-check test/rust/front/a[1-57].rs
+rust-front-coverage: ## RF3: the mono items rustc collects for the synthetic corpus and the samples, codegen'd and judged against rustc's IR, the refusals ranked (bin/rust-front coverage)
+	bin/rust-front coverage test/rust/synthetic/*.rs test/rust/sample/space.rs test/rust/sample/shapes.rs test/rust/eval/*.rs test/rust/front/a*.rs
+rust-front-collect: ## RF3: the collector slice's item set of each program against rustc's (bin/rust-front collect)
+	bin/rust-front collect test/rust/synthetic/*.rs test/rust/sample/space.rs test/rust/sample/shapes.rs test/rust/eval/*.rs test/rust/front/a*.rs
+rust-front-run-native: ## RF3: the synthetic programs the front codegens completely, run from its IR with the host's std, against rustc's runs (bin/rust-front run-native)
+	for n in abort exit-code panic-assert panic-todo panic-unwrap-err trap; do bin/rust-front run-native test/rust/synthetic/$$n.rs || exit 1; done
+rust-front-oracles: ## RF4-RF5: the helper's expanded crates, HIR paths' resolutions and std's names and macros for the corpus and samples (bin/rust-front front-oracles)
+	bin/rust-front front-oracles
+rust-front-expand-check: ## RF4: arbace.rust.front.expand's crates against rustc's expansion, per item (bin/rust-front expand-check)
+	bin/rust-front expand-check
+rust-front-resolve-check: ## RF5: arbace.rust.front.resolve over rustc's expanded crates and over ours, against rustc's resolutions per path (bin/rust-front resolve-check)
+	bin/rust-front resolve-check && bin/rust-front resolve-check --ours
+rust-front-hir-check: ## RF6: arbace.rust.front.lower and hir-pretty over rustc's expanded crates and over the pipeline, against rustc's -Zunpretty=hir text (bin/rust-front hir-check)
+	bin/rust-front hir-check && bin/rust-front hir-check --ours
+rust-front-collect-check: ## RF7: arbace.rust.front.collect (generics, types, signatures, clauses) over both inputs against the helper's iface (bin/rust-front collect-check)
+	bin/rust-front collect-check && bin/rust-front collect-check --ours
+rust-front-typeck-check: ## RF9: arbace.rust.front.typeck (expressions' types and adjustments, bindings) over both inputs against the helper's typeck (bin/rust-front typeck-check)
+	bin/rust-front typeck-check && bin/rust-front typeck-check --ours
+rsi-check-essential: ## RE5: the essential programs (test/rust/essential.txt) on ci against the judge's runs (bin/rsi check --essential)
+	bin/rsi check --essential
+rsi-divergences: ## RE4: the recorded check's non-passes by class (bin/rsi divergences [--aot])
+	bin/rsi divergences
 cppi-lower-check: ## C++'s lowering over a list: the IR, its LLVM forms' round trip, the lowered C compiled by gcc -O0, linked with the lowered runtime and run as the original, against test/cpp/lower-known.edn (bin/cppi lower-check LIST WORK; LIST=... WORK=...)
 	bin/cppi lower-check $(LIST) $(WORK)
 cppi-lower-corpus: ## C++'s lowering check over a recorded list of test/cpp/lower-results.edn by its key: samples, libstdcxx-every-15th (bin/cppi lower-corpus KEY; KEY=...)
@@ -309,6 +459,32 @@ cppi-divergences: ## the recorded C++ run check judged against its classes (bin/
 	bin/cppi divergences
 cppi-divergences-aot: ## the recorded C++ AOT check judged against its classes (bin/cppi divergences --aot)
 	bin/cppi divergences --aot
+repr-llvm-check: ## repr/llvm's check families against their records, the tests' own verdicts where they have one, no LLVM tool (bin/repr-llvm check FAMILY; FAMILY=roundtrip-llvmtest|text-llvmtest|verify-llvmtest|verify-probes)
+	bin/repr-llvm check $(FAMILY)
+repr-llvm-check-essential: ## repr/llvm's essential subsets of the four families (the gate's llvm-read-essential, llvm-print-essential)
+	bin/repr-llvm check roundtrip-llvmtest --essential && bin/repr-llvm check verify-llvmtest --essential && bin/repr-llvm check verify-probes --essential && bin/repr-llvm check text-llvmtest --essential
+llvm-controls-test: ## the LLVM row's negative controls wired: a control crossing a module with itself fails each check (test/repr/llvm/controls-test.bash)
+	test/repr/llvm/controls-test.bash
+repr-llvm-record-opt: ## opt -passes=verify's verdicts of IR lists recorded into test/llvm/ref-opt23.edn, verify-check's reference without opt (bin/repr-llvm record-opt LIST...; LISTS=...)
+	bin/repr-llvm record-opt $(LISTS)
+repr-llvm-record-rt: ## the round trip's judges (clang -c's objects, llvm-as's bitcode) recorded into test/llvm/ref-rt23.edn, roundtrip's reference without clang (bin/repr-llvm record-rt LIST WORK; LIST=... WORK=...)
+	bin/repr-llvm record-rt $(LIST) $(WORK)
+llvmi-ir-make: ## llvmi's pinned IR made afresh by clang 23 (test/llvm/ir/{tx,c}.tar.xz, their pins, manifests, commands; bin/llvmi ir-make)
+	bin/llvmi ir-make
+llvmi-run: ## llvmi: an IR module lowered to C and run by ci (bin/llvmi run FILE; FILE=...)
+	bin/llvmi run $(FILE)
+llvmi-check: ## llvmi's eval check: llvm/test's ExecutionEngine modules, C's synth and run programs, gcc's torture sample and C++'s samples as clang 23's pinned IR (test/llvm/ir), lowered and run by ci judged by the tests' own verdicts (lit's, gcc's torture harness's), else against lli 23's recorded runs; no clang or lli (bin/llvmi check)
+	bin/llvmi check
+llvmi-check-essential: ## llvmi's essential subset, test/llvm/essential-check.txt's ten modules with the negative controls (bin/llvmi check --essential)
+	bin/llvmi check --essential
+llvmi-check-aot: ## llvmi's AOT check: the same lowered C through cf2g and TamaGo's go (bin/llvmi check --aot)
+	bin/llvmi check --aot
+llvmi-record-ref: ## lli 23's runs of llvmi's modules recorded into test/llvm/ref-lli23.edn (bin/llvmi record-ref)
+	bin/llvmi record-ref
+llvmi-divergences: ## llvmi's recorded eval check judged against test/llvm/divergences-eval.edn (bin/llvmi divergences)
+	bin/llvmi divergences
+cppi-codegen-check: ## C++ without clang (doc/cpp/CODEGEN.md): test/cpp/codegen's samples by the native parser, arbace.cpp.sema and arbace.cpp.codegen, lowered and run against clang's IR lowered and run (bin/cppi codegen-check WORK; WORK=..., default .tmp/cppi/codegen)
+	bin/cppi codegen-check $(or $(WORK),.tmp/cppi/codegen)
 cppi-runtime-build: ## C++'s lowered runtime: libsupc++ and libstdc++-v3/src compiled to IR by the oracle (pinned by test/cpp/runtime/ir.sha256), lowered and archived into .tmp/cppi/runtime (bin/cppi runtime-build)
 	bin/cppi runtime-build
 cppi-selftest: ## the C++ checks' own tests: each check put in a situation review 007 found mishandled (bin/cppi selftest [NAME...]; test/cpp/selftest/)
@@ -371,6 +547,8 @@ ci-musl: ## musl 1.2.6 prepared and read into C forms for ci's libc, .tmp/ci-mus
 	bin/ci musl prepare && bin/ci musl read
 ci-runtime: ## ci's prebuilt runtime: every musl unit checked and built once into its cached fragment, .tmp/ci-runtime/, the other keys' removed (bin/ci runtime build)
 	bin/ci runtime build
+ci-aot-lib: ## RES34: every musl unit translated once by cf2g into its cached Go package, .tmp/ci-aot-lib/, which check --aot links (bin/ci aot-lib build)
+	bin/ci aot-lib build
 ci-cirun-build: ## ci's back end (go/arbace/crt, go/arbace/ci) printed and built with tools/cirun, the light path's runner (bin/ci cirun-build)
 	bin/ci cirun-build
 ci-annot: ## a C file's annotations by ci's checker (types, values, layouts, linkage; tools/ccdump's types format), FILE=... (bin/ci annot FILE)
@@ -441,7 +619,7 @@ repr-ocaml-spec-check: ## doc/ocaml/SPEC.md: every forms block reads, every exam
 	bin/repr-ocaml spec-check
 repr-ocaml-samples: ## test/ocaml/samples/ read by ocdump and by Arbace's reader; the typed ones typed and lowered to Lambda (bin/repr-ocaml samples)
 	bin/repr-ocaml samples
-repr-ocaml-corpus: ## the corpora's counts and pins of test/ocaml/corpora.edn hold: OCaml 5.5.0's tarball (fetched once), go-whim's whiml, the host's compiler (bin/repr-ocaml corpus check)
+repr-ocaml-corpus: ## the corpora's counts and pins of test/ocaml/corpora.edn hold: OCaml 5.5.0's tarball (fetched once), go-whim's whiml (bin/repr-ocaml corpus check; --host: the host's compiler too)
 	bin/repr-ocaml corpus check
 repr-ocaml-corpus-count: ## the files and lines of every OCaml corpus (bin/repr-ocaml corpus count)
 	bin/repr-ocaml corpus count
@@ -453,14 +631,39 @@ repr-ocaml-text: ## O3: mode :full over the default corpora: the text printed fr
 	bin/repr-ocaml roundtrip --text
 repr-ocaml-cmi: ## O3: and the .cmi level: ocamlc -c on the original and on the print, the .cmi bytes equal; the :lines print's with -no-keep-locs too (bin/repr-ocaml roundtrip --cmi-lines)
 	bin/repr-ocaml roundtrip --cmi-lines
+repr-ocaml-types: ## OC183 (a): the typed signature level, the typer's signatures of the original and of the print equal, no ocamlc (bin/repr-ocaml roundtrip --text --types samples stdlib)
+	bin/repr-ocaml roundtrip --text --types samples stdlib
+oi-judges-fixtures: ## OC181 (a): the judges' own tests on fixtures, no toolchain (bin/oi judges-test --fixtures; --oracle the toolchain's parts)
+	bin/oi judges-test --fixtures
 repr-ocaml-dumps: ## O4: the typed and Lambda dumps of every file ocamlc compiles alone, read by Arbace's reader and shaped by SPEC 11.2, stable across two runs; sizes and seconds (bin/repr-ocaml dumps)
 	bin/repr-ocaml dumps
+repr-ocaml-native-check: ## the native reader (lexer.mll and parser.mly in Arbace) against the helper over the samples and the stdlib: dumps with positions and :full layouts equal byte for byte (bin/repr-ocaml native-check --layout)
+	bin/repr-ocaml native-check --layout
+repr-ocaml-menhir: ## the native parser's LALR(1) tables built from parser.mly equal to Menhir's own (boot/menhir/parser.ml) and to the committed arbace/repr/ocaml/tables.ae (bin/repr-ocaml menhir --check, --verify)
+	bin/repr-ocaml menhir --check
+	bin/repr-ocaml menhir --verify
 oi-stdlib: ## O5: the stdlib built by ocamlc in dependency order and its Lambda dumped for oi, into .tmp/oi/lib/ (bin/oi stdlib)
 	bin/oi stdlib
 oi-build: ## O5: oi's light driver, go/arbace/oi's forms printed by repr/go and built by TamaGo's go (bin/oi build)
 	bin/oi build
-oi-check: ## O5: the testsuite's run programs on oi against ocamlc's recorded runs, every non-pass classed (bin/oi check)
+oi-typer-check: ## oi's native front end (doc/ocaml/TYPER.md): test/ocaml/typer/'s samples typed and translated to Lambda by Arbace, against the committed oracle's signatures, raw and simplified Lambda, then run on oi against the toplevel's outputs (bin/oi typer-check)
+	bin/oi typer-check
+
+oi-stdlib-check: ## the stdlib's units typed natively (doc/ocaml/TYPER.md, T8) against bin/oi stdlib's Lambda, the typer's samples run on oi with the equal units native (bin/oi stdlib-check)
+	bin/oi stdlib-check
+
+oi-check: ## the testsuite's run programs typed by Arbace's typer (TY24 (a): the default) and run on oi, each judged by its own verdict (the .reference, the exit status) or ocamlc's recorded run, every non-pass classed (bin/oi check)
 	bin/oi check
+oi-check-ocdump: ## O5: the oracle's path, the programs' Lambda dumped by ocdump on the host's compiler-libs (bin/oi check --ocdump)
+	bin/oi check --ocdump
+oi-own-verdicts: ## the judged corpora's split, by the tests' own verdicts and by the recorded runs, the two against each other from the records (bin/oi own-verdicts --check)
+	bin/oi own-verdicts --check
+oi-check-native: ## T11 (doc/ocaml/TYPER.md): the run programs typed and translated by Arbace's typer and run on oi, against ocamlc's runs (test/ocaml/check-oi-native.edn) and compared with ocamlc's path (bin/oi check --native)
+	bin/oi check --native
+oi-typer-probe: ## T11: the run corpus's signatures and Lambda from Arbace's typer against the oracle's (bin/oi typer-probe)
+	bin/oi typer-probe
+oi-repl-check-native: ## T11: the recorded toplevel session with each phrase typed by Arbace's typer, against the ocaml toplevel's (bin/oi repl-check --native)
+	bin/oi repl-check --native
 oi-divergences: ## O5: oi's recorded results against test/ocaml/divergences.edn's classes (bin/oi divergences)
 	bin/oi divergences
 oi-record-ref: ## O5: ocamlc's and ocamlopt's runs of oi's run corpus recorded into test/ocaml/ref-ocaml55.edn (bin/oi record-ref)

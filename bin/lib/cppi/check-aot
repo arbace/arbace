@@ -12,13 +12,15 @@
 # executable are deleted once run.
 #
 # Usage: bin/cppi check --aot [--corpus C,...] [--only LIST] [--sample N] [--record] [--judge] [--resume]
-#   (the options of bin/cppi check); CPPI_JOBS (default 4) the runs', CPPI_THREADS (default 3) the builder's, CPPI_GO_P
+#   (the options of bin/cppi check; CPPI_ROUTE and CPPI_JUDGE as there); CPPI_JOBS (default 4) the runs', CPPI_THREADS (default 3) the builder's, CPPI_GO_P
 #   (default 2) go build's -p; CPPI_AOT_WORK (default .tmp/cppi-aot)
 set -uo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
 . "$root/bin/lib/tools.bash"
 . "$root/bin/lib/cppi/lists.bash"
+. "$root/test/oracle-records/oracle.bash"
+. "$root/test/oracle-records/cpp.bash"
 cd "$root"
 corpora=$cppi_corpora_recorded only= sample=1 record= judge= resume=
 while [ $# -gt 0 ]; do
@@ -69,10 +71,13 @@ if [ -z "$judge" ]; then
   ir1() {
     local d=$work/files/$1 t0
     rm -rf "$d"; mkdir -p "$d"; t0=$(date +%s.%N)
+    # ORS12 (a): the oracle's IR from the records (test/oracle-records/cpp.bash), clang++ only when CPPI_LIVE is set
+    if ! cpr_live; then cpr_ir_or_fail "$1" "$2" "$3" "$4" "$d"; echo 0.0 > "$d/ir.secs"; return 0; fi
     # shellcheck disable=SC2086
     (cd "$d" && timeout 300 clang++ -x c++ -std=$2 $3 -O0 -S -emit-llvm "$4" -o x.ll; echo $? > ir.status) > "$d/ir.log" 2>&1
     echo "$(date +%s.%N) $t0" | awk '{printf "%.1f\n", $1 - $2}' > "$d/ir.secs"
   }
+  cpr_prepare || exit 1
   export -f ir1; export work
   for id in "${ids[@]}"; do
     d=$work/$id
@@ -97,7 +102,9 @@ if [ -z "$judge" ]; then
     if [ -n "$resume" ] && [ -f "$d/nodes.tsv" ]; then cut -f1 "$d/nodes.tsv" > "$d/done.txt"; fi
     awk -F'\t' 'BEGIN { while ((getline l < ARGV[2]) > 0) done[l] = 1; ARGV[2] = "" } !($1 in done)' "$d/list.tsv" "$d/done.txt" > "$d/todo.tsv"
     [ -s "$d/todo.tsv" ] || continue
-    tr '\t\n' '\037\0' < "$d/todo.tsv" | xargs -0 -P "$jobs" -I{} nice bash -c 'IFS=$'"'"'\037'"'"' read -r i s a p <<< "$1"; ir1 "$i" "$s" "$a" "$p"' _ {}
+    # by the route CPPI_ROUTE names (bin/lib/cppi/route.bash: clang, the default, ours or auto)
+    . "$root/bin/lib/cppi/route.bash"
+    cppi_ir_route "$d/todo.tsv" "$jobs" || exit 1
     xlib=
     if [ "$id" = libstdcxx ]; then
       xlib=$work/util
@@ -105,7 +112,8 @@ if [ -z "$judge" ]; then
         rm -rf "$xlib"; mkdir -p "$xlib"
         for f in testsuite_abi testsuite_allocator testsuite_character testsuite_hooks; do
           mkdir -p "$xlib/src/$f"
-          clang++ -std=gnu++17 -O0 -S -emit-llvm -I"$cppi_ts/util" "$cppi_ts/util/$f.cc" -o "$xlib/src/$f/x.ll" || exit 1
+          if cpr_live; then clang++ -std=gnu++17 -O0 -S -emit-llvm -I"$cppi_ts/util" "$cppi_ts/util/$f.cc" -o "$xlib/src/$f/x.ll" || exit 1
+          else cpr_ir_get "libstdcxx/util/$f.cc" gnu++17 "-I$cppi_ts/util" "$cppi_ts/util/$f.cc" "$xlib/src/$f" && [ "$(cat "$xlib/src/$f/ir.status")" = 0 ] || exit 1; fi
           printf '%s\t%s\n' "$f" "$xlib/src/$f/x.ll"
         done > "$xlib/ll.tsv"
         GOMEMLIMIT=${CPPI_CI_MEMLIMIT:-6GiB} arbace_tool -m arbace.cpp.run lower-lib "$xlib" "$xlib/ll.tsv" "$threads" > "$xlib/read.log" 2>&1 || { tail -5 "$xlib/read.log"; exit 1; }
@@ -183,4 +191,7 @@ if [ -z "$judge" ]; then
   done
 fi
 smp=(); [ -z "$only" ] && [ "$sample" != 1 ] && smp=(--sample "$sample")
-arbace_tool -m arbace.cpp.check run-judge "$work" aot "${record:+--record}" "${smp[@]}" "${ids[@]}"
+# the judges' reference (the user, 2026-11-07): each program's own verdict where it has one, g++'s run for the rest
+. "$root/bin/lib/cppi/selfref.bash"
+runref=$(cppi_run_ref) || exit 1
+CPPI_RUN_REF=$runref arbace_tool -m arbace.cpp.check run-judge "$work" aot "${record:+--record}" "${smp[@]}" "${ids[@]}"

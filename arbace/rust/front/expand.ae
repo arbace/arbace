@@ -1,0 +1,857 @@
+;; Ported from rustc 1.99.1 (https://github.com/rust-lang/rust at 58cf8f9c3, the sources of Alpine's rust-src-1.99.1-r0,
+;; pinned by tools/rsdump/apks.sha256): the shapes and decisions of compiler/rustc_expand/src/mbe/{macro_parser,
+;; macro_rules,quoted,transcribe}.rs (macro_rules!' matchers, arms and transcription), rustc_expand/src/expand.rs (the
+;; fragments' kinds, the trailing semicolon of a statement macro), rustc_builtin_macros/src/{standard_library_imports,
+;; format,assert,edition_panic,source_util,concat}.rs and rustc_parse_format/src/lib.rs (format strings), and the
+;; derives' expansions of rustc_builtin_macros/src/deriving/; rustc is dual-licensed MIT OR Apache-2.0 (LICENSE.md,
+;; "Rust (rustc 1.99.1)"). RFS12: rustc's text ported; rust-analyzer and mrustc read as design only.
+
+(ns arbace.rust.front.expand
+  "RF4's first slice (doc/rust/FRONTEND-SURVEY.md, \"As built: RF4-RF5 start\"): macro expansion over the native reader's
+  trees (arbace.repr.rust.parse; the helper's dump format, spans [l1 c1 l2 c2]), judged against the helper's --expanded
+  crate (tools/rsdump/front.rs) with spans and syntax contexts set aside.
+
+  A token here is an item {:t Tok :mark M}: a Tok of the root file (its position kept, so a user's tokens keep their spans
+  through macro_rules!) or a foreign Tok (position -1: a token of std's macro definitions, read from the helper's
+  --std-names, or of a builtin macro's expansion), M its expansion's mark (the syntax context the output's identifiers
+  carry: (id NAME M)); a delimited group {:g OPEN-KIND :open item :close item :kids [items]}; a parsed fragment {:frag
+  KIND :ast FORM}. An expansion's tokens are assembled into one token array over the root file's text with the foreign
+  tokens' text appended, and parsed by the native parser as the fragment kind its position asks (an expression, statements,
+  items, a pattern, a type); a fragment stands in the array as an identifier __rf_frag_N, replaced by its tree after the
+  parse (rustc's invisible delimiters). Spans of foreign text are written (span \"<expansion>\" 0 0 0 0 M)."
+  (:require [arbace.repr.rust.lex :as lx]
+            [arbace.repr.rust.parse :as ps]
+            [arbace.repr.rust.native :as nat]
+            [arbace.string :as str])
+  (:import [arbace.repr.rust.lex Tok Src]
+           [arbace.repr.rust.parse Sp Id Lt TS TT P]
+           [java.io File]))
+
+(set! *warn-on-reflection* true)
+
+;; ---------------------------------------------------------------------------------------------
+;; The root
+
+(def ^:dynamic *root* nil)     ; {:src Src :toks Tok[] :mt :by-span {[l c l c] index} :ed :n0}
+(def ^:dynamic *macros* nil)   ; atom: name -> {:arms [...] :builtin B :name}
+(def ^:dynamic *std* nil)      ; name -> macro def (std's)
+(def ^:private mark-counter (atom 0))
+(def ^:dynamic *frags* nil)    ; atom: placeholder name -> the fragment's tree (names unique in a crate's expansion)
+(def ^:dynamic *site* nil)     ; the root call site [l1 c1 l2 c2] of the expansion being made (line!, column!)
+(def ^:dynamic *sites* nil)    ; atom: mark -> its expansion's root call site
+(defn- fresh-mark [] (let [m (swap! mark-counter inc)] (when (and *sites* *site*) (swap! *sites* assoc m *site*)) m))
+(def ^:dynamic *mark-crates*
+  "When bound to an atom: mark -> the crate of the macro_rules! macro its expansion transcribed (std's macros: the crate
+  of their path, a user's: \"crate\"), what $crate stands for in its output (RF6's lowering prints it)"
+  nil)
+
+(defn- root-src ^Src [] (:src *root*))
+
+(declare strip-cfg cfg-pred cfg-item include-expr unesc remark-1 rep-vars format-args expand-derives items->stream items-text concat-text attr-name)
+
+;; ---------------------------------------------------------------------------------------------
+;; Tokens
+
+(def punct-text
+  {:Eq "=" :Lt "<" :Le "<=" :EqEq "==" :Ne "!=" :Ge ">=" :Gt ">" :AndAnd "&&" :OrOr "||" :Bang "!" :Tilde "~"
+   :Plus "+" :Minus "-" :Star "*" :Slash "/" :Percent "%" :Caret "^" :And "&" :Or "|" :Shl "<<" :Shr ">>"
+   :PlusEq "+=" :MinusEq "-=" :StarEq "*=" :SlashEq "/=" :PercentEq "%=" :CaretEq "^=" :AndEq "&=" :OrEq "|="
+   :ShlEq "<<=" :ShrEq ">>=" :At "@" :Dot "." :DotDot ".." :DotDotDot "..." :DotDotEq "..=" :Comma "," :Semi ";"
+   :Colon ":" :PathSep "::" :RArrow "->" :LArrow "<-" :FatArrow "=>" :Pound "#" :Dollar "$" :Question "?"
+   :SingleQuote "'" :OpenParen "(" :CloseParen ")" :OpenBrace "{" :CloseBrace "}" :OpenBracket "[" :CloseBracket "]"})
+
+(def ^:private delim-open {'Parenthesis :OpenParen 'Brace :OpenBrace 'Bracket :OpenBracket})
+(def ^:private open-close {:OpenParen :CloseParen :OpenBrace :CloseBrace :OpenBracket :CloseBracket})
+(def ^:private open-delim-name {:OpenParen 'Parenthesis :OpenBrace 'Brace :OpenBracket 'Bracket})
+
+(defn- ftok ^Tok [kind sym x y z sp] (lx/tok kind -1 -1 sym x y z (or sp :Alone)))
+(defn- titem [^Tok t mark] {:t t :mark mark})
+(defn- tkind [it] (when-let [^Tok t (:t it)] (.-kind t)))
+(defn- tsym [it] (when-let [^Tok t (:t it)] (.-sym t)))
+(defn- ident-item? [it] (= :Ident (tkind it)))
+(defn- punct-item? [it k] (= k (tkind it)))
+(defn- root-tok? [it] (when-let [^Tok t (:t it)] (>= (.-lo t) 0)))
+
+(defn tok-text
+  "A token's text, for placing a foreign token in an assembled array (the parser reads its fields, not its text)"
+  ^String [^Tok t]
+  (case (.-kind t)
+    :Ident (if (.-x t) (str "r#" (.-sym t)) (str (.-sym t)))
+    :Lifetime (str (.-sym t))
+    :Literal (let [s (str (.-sym t)) suf (or (.-y t) "")]
+               (str (case (.-x t)
+                      :Str (str "\"" s "\"") :ByteStr (str "b\"" s "\"") :CStr (str "c\"" s "\"")
+                      :Char (str "'" s "'") :Byte (str "b'" s "'")
+                      (:StrRaw :ByteStrRaw :CStrRaw) (let [h (apply str (repeat (.-z t) "#"))]
+                                                       (str ({:StrRaw "r" :ByteStrRaw "br" :CStrRaw "cr"} (.-x t)) h "\"" s "\"" h))
+                      s)
+                    suf))
+    :DocComment "/** */"
+    (or (punct-text (.-kind t)) "?")))
+
+;; the root's tokens by span, from the dump's [l1 c1 l2 c2]
+(defn- root-at [sv]
+  (when-let [i (get (:by-span *root*) sv)] (aget ^objects (:toks *root*) (int i))))
+
+(defn- span-mark
+  "A dump span's mark: 0 for the root file at context 0, else its context"
+  [s]
+  (cond (vector? s) (if (= 5 (count s)) (nth s 4) 0)
+        (and (seq? s) (= 'span (first s))) (last s)
+        :else 0))
+
+(defn- dump-kind->tok ^Tok [k sp]
+  (cond
+    (symbol? k) (ftok (keyword (name k)) nil nil nil 0 sp)
+    (= 'Ident (first k)) (ftok :Ident (second k) (= 'Yes (nth k 2)) nil 0 sp)
+    (= 'NtIdent (first k)) (ftok :Ident (second k) (= 'Yes (nth k 2)) nil 0 sp)
+    (= 'Lifetime (first k)) (ftok :Lifetime (second k) (= 'Yes (nth k 2)) nil 0 sp)
+    (= 'Literal (first k))
+    (let [lit (second k) m (apply hash-map (rest lit)) kind (:kind m)
+          [xk z] (if (seq? kind) [(keyword (name (first kind))) (long (second kind))] [(keyword (name kind)) 0])
+          suf (:suffix m)]
+      (ftok :Literal (:symbol m) xk (when (seq? suf) (second suf)) z sp))
+    (= 'DocComment (first k)) (ftok :DocComment (nth k 3) (keyword (name (nth k 1))) (keyword (name (nth k 2))) 0 sp)
+    :else (throw (ex-info (str "expand: a token kind not taken: " (pr-str k)) {}))))
+
+(defn dump-tts->items
+  "A dump TokenStream's trees as items: the root's tokens at their spans (context 0) kept; others foreign, marked by
+  their span's context (or MARK when given)"
+  [trees mark]
+  (vec (mapcat
+        (fn [tr]
+          (case (first tr)
+            Token (let [[_ tk sp] tr m (apply hash-map (rest tk)) s (:span m)
+                        sp (keyword (name sp))]
+                    (if-let [fr (let [k (:kind m)] (and *frags* (seq? k) (= 'Ident (first k)) (get @*frags* (second k))))]
+                      [fr]
+                    (if-let [^Tok rt (and (nil? mark) (vector? s) (= 4 (count s)) (root-at s))]
+                      [(titem rt 0)]
+                      [(cond-> (titem (dump-kind->tok (:kind m) sp) (or mark (span-mark s)))
+                         (and (seq? s) (pos? (long (nth s 2))))
+                         (assoc :orig (root-at (vec (take 4 (drop 2 s))))))])))
+            Delimited (let [[_ ds dsp delim ts] tr
+                            dm (apply hash-map (rest ds)) spm (apply hash-map (rest dsp))
+                            kids (dump-tts->items (second ts) mark)]
+                        (if-let [fr (let [o (:open dm)]
+                                      (when (and *frags* (seq? o) (str/starts-with? (str (second o)) "<fragment "))
+                                        (get @*frags* (subs (second o) 10 (dec (count (second o)))))))]
+                          [fr]
+                        (if-let [ok (delim-open delim)]
+                          (let [oi (or (and (nil? mark) (vector? (:open dm)) (= 4 (count (:open dm))) (root-at (:open dm))
+                                            (titem (root-at (:open dm)) 0))
+                                       (titem (ftok ok nil nil nil 0 (keyword (name (:open spm)))) (or mark (span-mark (:open dm)))))
+                                ci (or (and (nil? mark) (vector? (:close dm)) (= 4 (count (:close dm))) (root-at (:close dm))
+                                            (titem (root-at (:close dm)) 0))
+                                       (titem (ftok (open-close ok) nil nil nil 0 (keyword (name (:close spm)))) (or mark (span-mark (:close dm)))))]
+                            [{:g ok :open oi :close ci :kids kids}])
+                          kids)))))
+        trees)))
+
+(defn- remark
+  "Items of a macro definition given the expansion's mark (foreign copies)"
+  [items mark]
+  (mapv (fn [it]
+          (cond (:g it) (assoc it :open (remark-1 (:open it) mark) :close (remark-1 (:close it) mark) :kids (remark (:kids it) mark))
+                (:t it) (remark-1 it mark)
+                :else it))
+        items))
+
+(defn- remark-1
+  ([it mark] (remark-1 it mark nil))
+  ([it mark sp]
+   (let [^Tok t (:t it)]
+     (assoc (titem (lx/tok (.-kind t) -1 -1 (.-sym t) (.-x t) (.-y t) (.-z t) (or sp (.-sp t))) mark)
+            :orig (if (>= (.-lo t) 0) t (:orig it))))))
+
+(defn text->items
+  "Rust text as foreign items of MARK (a builtin's template); identifiers __rf_frag_N replaced by (frags N)"
+  [^String text mark frags]
+  (let [src (lx/source text)
+        {:keys [^objects toks ^ints mt]} (lx/token-trees src 2024 :nothing)]
+    (letfn [(conv [^long from ^long to]
+              (loop [i from out []]
+                (if (>= i to)
+                  out
+                  (let [^Tok t (aget toks (int i)) k (.-kind t)]
+                    (cond
+                      (contains? open-close k)
+                      (let [c (aget mt (int i)) ^Tok ct (aget toks c)]
+                        (recur (inc c) (conj out {:g k :open (titem (ftok k nil nil nil 0 (.-sp t)) mark)
+                                                  :close (titem (ftok (.-kind ct) nil nil nil 0 (.-sp ct)) mark)
+                                                  :kids (conv (inc i) c)})))
+                      (= k :Eof) out
+                      (and (= k :Dollar) (< (inc i) to) (= "crate" (.-sym ^Tok (aget toks (int (inc i))))))
+                      (recur (+ i 2) (conj out (titem (ftok :Ident "$crate" false nil 0 :Alone) mark)))
+                      (and (= k :Ident) (str/starts-with? (str (.-sym t)) "__rf_frag_"))
+                      (recur (inc i) (conj out (get frags (Long/parseLong (subs (.-sym t) 10)))))
+                      :else (recur (inc i) (conj out (titem (lx/tok k -1 -1 (.-sym t) (.-x t) (.-y t) (.-z t) :Alone) mark))))))))]
+      (conv 0 (dec (alength toks))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Assembling items into a token array and parsing it
+
+(defn- flat
+  "Items flattened: [kind payload] entries, :tok Tok+mark or :frag"
+  [items ^java.util.ArrayList out]
+  (doseq [it items]
+    (cond (:g it) (do (.add out (:open it)) (flat (:kids it) out) (.add out (:close it)))
+          :else (.add out it)))
+  out)
+
+(defn assemble
+  "The items as one token array over the root's text: {:src :toks :mt :n0 :marks long[] (by appended position) :frags
+  {name ast} :starts (flat index of each top-level item)}"
+  [items]
+  (let [^Src rsrc (root-src)
+        n0 (.-n rsrc)
+        sb (StringBuilder. ^String (.-text rsrc))
+        _ (.append sb "\n")
+        pos (long-array [(inc n0)])
+        marks (java.util.ArrayList.)
+        out (java.util.ArrayList.)
+        starts (java.util.ArrayList.)
+        origs (java.util.ArrayList.)
+        place (fn [^String text kind sym x y z sp mark ^Tok orig]
+                (let [lo (aget pos 0) n (.codePointCount text 0 (.length text))]
+                  (.append sb text) (.append sb " ")
+                  (dotimes [_ (inc n)] (.add marks (Long/valueOf (long mark))) (.add origs orig))
+                  (aset pos 0 (+ lo n 1))
+                  (lx/tok kind lo (+ lo n) sym x y z sp)))
+        add-item (fn [it]
+                   (cond
+                     (:frag it) (let [nm (str "__rf_g" (count @*frags*))]
+                                  (swap! *frags* assoc nm it)
+                                  (.add out (place nm :Ident nm false nil 0 :Alone 0 nil)))
+                     :else (let [^Tok t (:t it)]
+                             (if (and (>= (.-lo t) 0) (zero? (long (:mark it))))
+                               (.add out t)
+                               (.add out (place (tok-text t) (.-kind t) (.-sym t) (.-x t) (.-y t) (.-z t) (.-sp t) (:mark it)
+                                                 (if (>= (.-lo t) 0) t (:orig it))))))))]
+    (doseq [it items]
+      (.add starts (Long/valueOf (.size out)))
+      (let [fl (flat [it] (java.util.ArrayList.))]
+        (doseq [x fl] (add-item x))))
+    (.add starts (Long/valueOf (.size out)))
+    (let [eof (lx/tok :Eof (aget pos 0) (aget pos 0) nil nil nil 0 nil)
+          _ (.add out eof)
+          toks (.toArray out)
+          cnt (alength toks)
+          mt (int-array cnt -1)
+          stk (java.util.ArrayList.)]
+      (dotimes [i cnt]
+        (let [k (.-kind ^Tok (aget toks i))]
+          (cond (contains? open-close k) (.add stk (Long/valueOf i))
+                (contains? #{:CloseParen :CloseBrace :CloseBracket} k)
+                (let [o (long (.remove stk (dec (.size stk))))] (aset mt (int o) (int i)) (aset mt i (int o))))))
+      {:src (lx/source (str sb)) :toks toks :mt mt :n0 n0 :marks (long-array (map long marks)) :origs (.toArray origs)
+       :starts (vec starts) :eof (dec cnt)})))
+
+(defn- mark-at ^long [ctx ^long pos]
+  (let [n0 (long (:n0 ctx)) ^longs ms (:marks ctx) i (- pos n0 1)]
+    (if (and (>= i 0) (< i (alength ms))) (aget ms i) 0)))
+
+(defn- foreign-span [m] (list 'span "<expansion>" 0 0 0 0 m))
+
+(defn- orig-at ^Tok [ctx ^long pos]
+  (let [n0 (long (:n0 ctx)) ^objects os (:origs ctx) i (- pos n0 1)]
+    (when (and (>= i 0) (< i (alength os))) (aget os i))))
+
+(defn- cspan
+  "A span out of an assembled array: the root's [l1 c1 l2 c2]; a foreign one (span \"<expansion>\" l1 c1 l2 c2 M), at
+  the root's position its first and last tokens came from when they did (a user's macro_rules!), else 0s"
+  [ctx ^long lo ^long hi]
+  (let [n0 (long (:n0 ctx))]
+    (cond (and (zero? lo) (zero? hi)) nil
+          (and (< lo n0) (<= hi n0)) (lx/span-vec (:src ctx) lo hi)
+          :else (let [m (mark-at ctx (max lo (inc n0)))
+                      ^Tok a (orig-at ctx lo) ^Tok b (orig-at ctx (max lo (dec hi)))]
+                  (if (and a b)
+                    (let [[l1 c1] (lx/span-vec (root-src) (.-lo a) (.-hi a)) [_ _ l2 c2] (lx/span-vec (root-src) (.-lo b) (.-hi b))]
+                      (list 'span "<expansion>" l1 c1 l2 c2 m))
+                    (foreign-span m))))))
+
+(defn- tok-kind-out [^Tok t]
+  (case (.-kind t)
+    :Ident (list 'Ident (.-sym t) (if (.-x t) 'Yes 'No))
+    :Lifetime (list 'Lifetime (.-sym t) (if (.-x t) 'Yes 'No))
+    :Literal (list 'Literal (list 'Lit :kind (case (.-x t)
+                                               (:StrRaw :ByteStrRaw :CStrRaw) (list (symbol (name (.-x t))) (.-z t))
+                                               (symbol (name (.-x t))))
+                                  :symbol (.-sym t) :suffix (if (.-y t) (list 'Some (.-y t)) 'None)))
+    :DocComment (list 'DocComment (symbol (name (.-x t))) (symbol (name (.-y t))) (.-sym t))
+    (symbol (name (.-kind t)))))
+
+(declare items->stream)
+
+(defn- invisible-group
+  "A fragment's placeholder in a token stream as rustc writes it: an invisible group of the fragment's tokens"
+  [ctx ^Tok t]
+  (when-let [f (and (= :Ident (.-kind t)) *frags* (get @*frags* (.-sym t)))]
+    (when (:items f)
+      (let [sp (list 'span (str "<fragment " (.-sym t) ">") 0 0 0 0 (mark-at ctx (.-lo t)))
+            ^Tok t0 (:t (first (flat (:items f) (java.util.ArrayList.))))
+            mv (case (:frag f)
+                 (:expr :expr_2021) (list 'Expr :kind (if (= :expr (:frag f)) 'Expr 'Expr2021)
+                                          :can_begin_literal_maybe_minus (boolean (and t0 (or (= :Literal (.-kind t0)) (= :Minus (.-kind t0)))))
+                                          :can_begin_string_literal (boolean (and t0 (= :Literal (.-kind t0)))))
+                 :ty 'Ty :path 'Path :block 'Block :stmt 'Stmt :item 'Item
+                 :pat '(Pat PatWithOr) :pat_param '(Pat PatParam {:inferred false})
+                 (symbol (name (:frag f))))]
+        (list 'Delimited (list 'DelimSpan :open sp :close sp) (list 'DelimSpacing :open 'Alone :close 'Alone)
+              (list 'Invisible (list 'MetaVar mv))
+              (items->stream (:items f)))))))
+
+(defn- cstream [ctx ^long from ^long to]
+  (let [^objects toks (:toks ctx) ^ints mt (:mt ctx)]
+    (list 'TokenStream
+          (loop [i from out []]
+            (if (>= i to)
+              out
+              (let [^Tok t (aget toks (int i))]
+                (if (contains? open-close (.-kind t))
+                  (let [c (aget mt (int i)) ^Tok cl (aget toks c)]
+                    (recur (inc c) (conj out (list 'Delimited (list 'DelimSpan :open (cspan ctx (.-lo t) (.-hi t)) :close (cspan ctx (.-lo cl) (.-hi cl)))
+                                                   (list 'DelimSpacing :open (symbol (name (.-sp t))) :close (symbol (name (.-sp cl))))
+                                                   (open-delim-name (.-kind t))
+                                                   (cstream ctx (inc i) c)))))
+                  (recur (inc i) (conj out (or (invisible-group ctx t)
+                                               (list 'Token (list 'Token :kind (tok-kind-out t) :span (cspan ctx (.-lo t) (.-hi t)))
+                                                     (symbol (name (.-sp t))))))))))))))
+
+(defn- frag-name [x]
+  ;; the placeholder's name when x is an Expr, Ty or Pat that is just __rf_frag_N
+  (when (seq? x)
+    (case (when (= :kind (second x)) (first x))
+      (Expr Ty) (let [k (nth x 2 nil)]
+                  (when (and (seq? k) (= 'Path (first k)) (= 'None (second k)))
+                    (let [segs (:segments (apply hash-map (rest (nth k 2 nil))))]
+                      (when (= 1 (count segs))
+                        (let [idf (:ident (apply hash-map (rest (first segs))))]
+                          (when (str/starts-with? (str (second idf)) "__rf_g") (second idf)))))))
+      Pat (let [k (nth x 2 nil)]
+            (when (and (seq? k) (= 'Ident (first k)))
+              (let [idf (nth k 2 nil)]
+                (when (and (seq? idf) (str/starts-with? (str (second idf)) "__rf_g")) (second idf)))))
+      nil)))
+
+(defn cout
+  "The parser's tree out of an assembled array, as the dump writes it, the fragments put back"
+  [ctx x]
+  (let [^Src src (:src ctx) ed (long (:ed *root*)) frags @*frags*]
+    (letfn [(o [x]
+              (cond (seq? x) (let [y (apply list (map o x))]
+                               (if-let [nm (frag-name y)] (if-let [f (get frags nm)] (:ast f) y) y))
+                    (vector? x) (mapv o x)
+                    (instance? Sp x) (cspan ctx (.-lo ^Sp x) (.-hi ^Sp x))
+                    (instance? Id x) (let [^Id i x ^Sp s (.-span i) m (mark-at ctx (.-lo s)) sv (cspan ctx (.-lo s) (.-hi s))]
+                                       ;; a root identifier in a macro's output carries its span (the resolver's definitions)
+                                       (cond (vector? sv) (list 'id (nat/print-name (.-name i) ed) m sv)
+                                             (and (seq? sv) (pos? (long (nth sv 2))))
+                                             (list 'id (nat/print-name (.-name i) ed) m (vec (take 4 (drop 2 sv))))
+                                             :else (list 'id (nat/print-name (.-name i) ed) m)))
+                    (instance? Lt x) (list 'lifetime (.-name ^Id (.-ident ^Lt x)))
+                    (instance? TS x) (cstream ctx (.-from ^TS x) (.-to ^TS x))
+                    (instance? TT x) (let [i (.-open ^TT x)] (second (cstream ctx i (inc (aget ^ints (:mt ctx) (int i))))))
+                    :else x))]
+      (o x))))
+
+(defn- cur-index ^long [^P p] (dec (aget ^longs (.-n p) 0)))
+(defn- cur-kind [^P p] (.-kind ^Tok (aget ^objects (.-o p) 0)))
+(defn- parser ^P [ctx] (ps/make-parser (:src ctx) (:toks ctx) (:mt ctx) 0 (:eof ctx) (:ed *root*)))
+
+(defn- parse-with [ctx f]
+  (let [errs (java.util.ArrayList.)]
+    (binding [ps/*errs* errs]
+      (try (f (parser ctx))
+           (catch Throwable e
+             (if (identical? e ps/perr)
+               (throw (ex-info (str "expand: the parser: " (first (first errs))) {:expand true}))
+               (throw e)))))))
+
+(def ^:private parse-pat* (fn [^P p] (ps/parse-pat-allow-top-guard p nil :recover-comma nil nil)))
+
+(defn parse-fragment
+  "The items parsed as an AST fragment of KIND (:expr :stmts :items :pat :ty), out as the dump writes it"
+  [items kind]
+  (let [ctx (assemble items)]
+    (parse-with ctx
+                (fn [^P p]
+                  (let [r (case kind
+                            :expr (let [e (ps/parse-expr p)] (when-not (= :Eof (cur-kind p)) (throw (ex-info "expand: tokens after an expression" {:expand true}))) e)
+                            :ty (ps/parse-ty p)
+                            :pat (parse-pat* p)
+                            :stmts (loop [out []]
+                                     (if (= :Eof (cur-kind p)) out
+                                         (if (= :Semi (cur-kind p))
+                                           (do (#'ps/bump p) (recur out))
+                                           (recur (conj out (ps/parse-full-stmt* p))))))
+                            :items (loop [out []]
+                                     (if (= :Eof (cur-kind p)) out
+                                         (let [it (ps/parse-item p :yes)]
+                                           (when-not it (throw (ex-info "expand: not an item" {:expand true})))
+                                           (recur (conj out it))))))]
+                    (strip-cfg (cout ctx r)))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; macro_rules!: arms, matching, transcription (mbe)
+
+(defn- rep-op? [it] (#{:Star :Plus :Question} (tkind it)))
+
+(defn- parse-matcher
+  "mbe::quoted::parse of a matcher (transcriber? false) or a transcriber"
+  [items transcriber?]
+  (loop [xs items out []]
+    (if-let [it (first xs)]
+      (cond
+        (and (punct-item? it :Dollar) (second xs))
+        (let [nx (second xs)]
+          (cond
+            (and (:g nx) (= :OpenParen (:g nx)))
+            (let [sub (parse-matcher (:kids nx) transcriber?)
+                  r (drop 2 xs)
+                  [sep op r] (if (rep-op? (first r))
+                               (if (and (punct-item? (first r) :Question) false) [nil nil r] [nil (tkind (first r)) (rest r)])
+                               [(first r) (tkind (second r)) (drop 2 r)])]
+              (recur r (conj out {:rep sub :sep sep :op op})))
+            (and (ident-item? nx) (= "crate" (tsym nx)) transcriber?)
+            (recur (drop 2 xs) (conj out {:crate true}))
+            (ident-item? nx)
+            (if (and (not transcriber?) (punct-item? (nth xs 2 nil) :Colon) (ident-item? (nth xs 3 nil)))
+              (recur (drop 4 xs) (conj out {:var (tsym nx) :kind (keyword (tsym (nth xs 3)))}))
+              (recur (drop 2 xs) (conj out {:var (tsym nx)})))
+            :else (recur (rest xs) (conj out {:tok it}))))
+        (:g it) (recur (rest xs) (conj out {:group it :sub (parse-matcher (:kids it) transcriber?)}))
+        :else (recur (rest xs) (conj out {:tok it})))
+      out)))
+
+(defn macro-arms
+  "A macro_rules! (or macro) body's arms: [[matcher transcriber] ...]"
+  [items]
+  (loop [xs items arms []]
+    (cond
+      (empty? xs) arms
+      (or (punct-item? (first xs) :Semi) (punct-item? (first xs) :Comma)) (recur (rest xs) arms)
+      :else (let [[m arrow t & r] xs]
+              (when-not (and (:g m) (punct-item? arrow :FatArrow) (:g t))
+                (throw (ex-info "expand: a macro arm not taken" {:expand true})))
+              (recur r (conj arms [(parse-matcher (:kids m) false) (parse-matcher (:kids t) true)]))))))
+
+(defn- same-tok? [a b]
+  (let [^Tok x (:t a) ^Tok y (:t b)]
+    (and x y (= (.-kind x) (.-kind y)) (= (.-sym x) (.-sym y)) (= (boolean (.-x x)) (boolean (.-x y)))
+         (or (not= :Literal (.-kind x)) (= (.-y x) (.-y y))))))
+
+(defn- parse-frag-at
+  "A fragment of KIND parsed from elems at i: [ast next-i] or nil"
+  [elems i kind]
+  (let [rest-items (subvec elems i)
+        ctx (assemble rest-items)
+        starts (:starts ctx)]
+    (try
+      (parse-with ctx
+                  (fn [^P p]
+                    (let [r (case kind
+                              (:expr :expr_2021) (ps/parse-expr p)
+                              :ty (ps/parse-ty p)
+                              (:pat :pat_param) (if (= kind :pat) (ps/parse-pat-no-top-guard p nil nil nil nil) (ps/parse-pat-no-top-alt p nil nil))
+                              :path (ps/parse-path p 'Type)
+                              :block (ps/parse-block p)
+                              :stmt (#'ps/parse-stmt-without-recovery p false)
+                              :item (ps/parse-item p :yes)
+                              (throw (ex-info (str "expand: fragment kind " kind) {:expand true})))
+                          ci (cur-index p)
+                          k (.indexOf ^java.util.List starts (Long/valueOf ci))]
+                      (when (neg? k) (throw (ex-info "expand: a fragment ends inside a group" {:expand true})))
+                      [{:frag kind :text (items-text (subvec elems i (+ i k))) :items (subvec elems i (+ i k))
+                        :ast (let [a (cout ctx r)]
+                                          (if (= kind :block) (list 'Expr :kind (list 'Block a 'None) :span (second (drop-while #(not= :span %) a)) :attrs []) a))}
+                       (+ i k)])))
+      (catch arbace.lang.ExceptionInfo e (when-not (:expand (ex-data e)) (throw e)) nil))))
+
+(declare m-seq)
+
+(defn- m-one
+  "Matching one matcher element at elems[i]: a seq of [i' env]"
+  [pat elems i env]
+  (let [e (nth elems i nil)]
+    (cond
+      (:tok pat) (when (and e (same-tok? (:tok pat) e)) [[(inc i) env]])
+      (:group pat) (when (and e (:g e) (= (:g e) (:g (:group pat))))
+                     (for [[j env'] (m-seq (:sub pat) 0 (:kids e) 0 env) :when (= j (count (:kids e)))] [(inc i) env']))
+      (:var pat)
+      (case (:kind pat)
+        :tt (when e [[(inc i) (assoc env (:var pat) [e])]])
+        :ident (when (and e (ident-item? e) (not= "_" (tsym e))) [[(inc i) (assoc env (:var pat) [e])]])
+        :lifetime (when (and e (= :Lifetime (tkind e))) [[(inc i) (assoc env (:var pat) [e])]])
+        :literal (cond (and e (= :Literal (tkind e))) [[(inc i) (assoc env (:var pat) [e])]]
+                       (and e (ident-item? e) (#{"true" "false"} (tsym e))) [[(inc i) (assoc env (:var pat) [e])]]
+                       (and e (punct-item? e :Minus) (= :Literal (tkind (nth elems (inc i) nil))))
+                       [[(+ i 2) (assoc env (:var pat) [e (nth elems (inc i))])]])
+        :vis (cond (and e (ident-item? e) (= "pub" (tsym e)))
+                   (if (and (:g (nth elems (inc i) nil)) (= :OpenParen (:g (nth elems (inc i)))))
+                     [[(+ i 2) (assoc env (:var pat) [e (nth elems (inc i))])] [(inc i) (assoc env (:var pat) [e])]]
+                     [[(inc i) (assoc env (:var pat) [e])]])
+                   :else [[i (assoc env (:var pat) [])]])
+        (when (and e (< i (count elems)))
+          (when-let [[f j] (parse-frag-at elems i (:kind pat))]
+            [[j (assoc env (:var pat) f)]])))
+      (:rep pat)
+      (letfn [(reps [i acc]
+                ;; zero or more repetitions from i; acc the envs so far
+                (lazy-cat
+                 (when-not (and (= :Plus (:op pat)) (empty? acc)) [[i acc]])
+                 (when-not (and (= :Question (:op pat)) (seq acc))
+                   (let [i0 (if (and (seq acc) (:sep pat))
+                              (when (and (nth elems i nil) (same-tok? (:sep pat) (nth elems i))) (inc i))
+                              i)]
+                     (when i0
+                       (mapcat (fn [[j e2]] (when (> j i) (reps j (conj acc e2))))
+                               (m-seq (:rep pat) 0 elems i0 {})))))))]
+        (for [[j acc] (reverse (vec (reps i [])))]
+          [j (merge env (into {} (for [v (rep-vars (:rep pat))] [v {:seq (mapv #(get % v) acc)}])))]))
+      :else (throw (ex-info "expand: matcher element" {:pat pat})))))
+
+(defn- rep-vars [pats]
+  (set (mapcat (fn [p] (cond (:var p) [(:var p)] (:rep p) (rep-vars (:rep p)) (:group p) (rep-vars (:sub p)) :else nil)) pats)))
+
+(defn- m-seq [pats k elems i env]
+  (if (>= k (count pats))
+    [[i env]]
+    (mapcat (fn [[j env']] (m-seq pats (inc k) elems j env')) (m-one (nth pats k) elems i env))))
+
+(defn- transcribe [pats env mark]
+  (vec (mapcat
+        (fn [p]
+          (cond
+            ;; transcribe.rs: a token of the definition is Alone; a delimiter keeps its spacing but `]` closes Alone
+            (:tok p) [(if (:t (:tok p)) (remark-1 (:tok p) mark :Alone) (:tok p))]
+            (:crate p) [(titem (ftok :Ident "$crate" false nil 0 :Alone) mark)]
+            (:group p) (let [g (:group p)]
+                         [{:g (:g g) :open (remark-1 (:open g) mark) :close (remark-1 (:close g) mark (when (= :OpenBracket (:g g)) :Alone))
+                           :kids (transcribe (:sub p) env mark)}])
+            (:var p) (let [b (get env (:var p) ::none)]
+                       (cond (= b ::none) [(titem (ftok :Dollar nil nil nil 0 :Alone) mark) (titem (ftok :Ident (:var p) false nil 0 :Alone) mark)]
+                             (map? b) (if (:frag b) [b] (throw (ex-info (str "expand: $" (:var p) " still repeating") {:expand true})))
+                             :else b))
+            (:rep p) (let [vs (filter #(map? (get env %)) (rep-vars (:rep p)))
+                           n (reduce max 0 (map #(count (:seq (get env %))) (filter #(:seq (get env %)) vs)))]
+                       (apply concat
+                              (for [k (range n)]
+                                (let [env' (reduce (fn [e v] (let [b (get env v)] (if (:seq b) (assoc e v (nth (:seq b) k)) e))) env vs)]
+                                  (concat (when (and (pos? k) (:sep p)) [(remark-1 (:sep p) mark :Alone)])
+                                          (transcribe (:rep p) env' mark))))))
+            :else (throw (ex-info "expand: transcriber element" {:p p}))))
+        pats)))
+
+(defn expand-rules
+  "A macro_rules! call: the first arm whose matcher matches all of the input, transcribed with a fresh mark"
+  [mac input]
+  (let [mark (fresh-mark)]
+    (when *mark-crates*
+      (swap! *mark-crates* assoc mark (let [n (str (:name mac))] (if (str/includes? n "::") (first (str/split n #"::")) "crate"))))
+    (or (some (fn [[m t]]
+                (when-let [[_ env] (first (filter #(= (count input) (first %)) (m-seq m 0 input 0 {})))]
+                  (transcribe t env mark)))
+              (:arms mac))
+        (throw (ex-info (str "expand: no arm of " (:name mac) " matches") {:expand true})))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Builtin macros
+
+(defn- str-lit-of
+  "The fmt string: [cooked raw-symbol style-form root-tok?] of a string literal item"
+  [it]
+  (let [^Tok t (:t it)]
+    (when (and t (= :Literal (.-kind t)) (#{:Str :StrRaw} (.-x t)))
+      [(if (= :Str (.-x t)) (unesc (.-sym t)) (.-sym t))
+       (.-sym t)
+       (if (= :Str (.-x t)) 'Str (list 'StrRaw (.-z t)))
+       t])))
+
+(defn- split-commas [items]
+  (loop [xs items cur [] out []]
+    (if-let [x (first xs)]
+      (if (punct-item? x :Comma) (recur (rest xs) [] (conj out cur)) (recur (rest xs) (conj cur x) out))
+      (if (seq cur) (conj out cur) out))))
+
+
+(defn- id-form [nm m] (list 'id nm m))
+
+(defn esc
+  "A cooked string literal's symbol from its text (expr_str: str::escape_debug)"
+  ^String [^String t]
+  (let [sb (StringBuilder.)]
+    (doseq [c t]
+      (case c
+        \\ (.append sb "\\\\") \" (.append sb "\\\"") \' (.append sb "\\'")
+        \newline (.append sb "\\n") \return (.append sb "\\r") \tab (.append sb "\\t")
+        (.append sb c)))
+    (str sb)))
+(defn- path-form [segs m]
+  (list 'Path :span (foreign-span m) :segments (mapv (fn [s] (list 'PathSegment :ident (id-form s m) :args 'None)) segs)))
+
+(defn- builtin
+  "A builtin macro's expansion: items (to parse in the call's position) or a form {:ast X}"
+  [nm input call]
+  (let [m (fresh-mark)]
+    (case nm
+      ("format_args" "const_format_args") {:ast (format-args input false m)}
+      "format_args_nl" {:ast (format-args input true m)}
+      ("panic" "unreachable")
+      {:ast (list 'Expr :kind (list 'MacCall (list 'MacCall :path (path-form ["$crate" "panic" (str nm "_2021")] m)
+                                                   :args (list 'DelimArgs :dspan (list 'DelimSpan :open (foreign-span m) :close (foreign-span m))
+                                                               :delim 'Parenthesis :tokens (items->stream input))))
+                  :span (foreign-span m) :attrs [])}
+      "assert"
+      (let [parts (split-commas input)
+            cond-items (first parts)
+            msg (when (next parts) (vec (apply concat (interpose [(titem (ftok :Comma nil nil nil 0 :Alone) m)] (rest parts)))))
+            c (parse-fragment cond-items :expr)]
+        {:ast (if msg
+                (list 'Expr :kind (list 'If (list 'Expr :kind (list 'Unary 'Not c) :span (foreign-span m) :attrs [])
+                                        (list 'Block :stmts [(list 'Stmt :kind (list 'Expr (list 'Expr :kind (list 'MacCall (list 'MacCall :path (path-form ["$crate" "panic" "panic_2021"] m)
+                                                                                                                            :args (list 'DelimArgs :dspan (list 'DelimSpan :open (foreign-span m) :close (foreign-span m))
+                                                                                                                                        :delim 'Parenthesis :tokens (items->stream msg))))
+                                                                                                :span (foreign-span m) :attrs []))
+                                                                    :span (foreign-span m))]
+                                              :rules 'Default :span (foreign-span m))
+                                        'None)
+                      :span (foreign-span m) :attrs [])
+                (list 'Expr :kind (list 'If (list 'Expr :kind (list 'Unary 'Not c) :span (foreign-span m) :attrs [])
+                                        (list 'Block :stmts [(list 'Stmt :kind (list 'Expr (list 'Expr :kind (list 'Call (list 'Expr :kind (list 'Path 'None (path-form ["$crate" "panicking" "panic"] m)) :span (foreign-span m) :attrs [])
+                                                                                                                  [(list 'Expr :kind (list 'Lit (list 'Lit :kind 'Str :symbol (esc (str "assertion failed: " (items-text cond-items))) :suffix 'None)) :span nil :attrs [])])
+                                                                                                :span (foreign-span m) :attrs []))
+                                                                    :span (foreign-span m))]
+                                              :rules 'Default :span (foreign-span m))
+                                        'None)
+                      :span (foreign-span m) :attrs []))})
+      "stringify" {:ast (list 'Expr :kind (list 'Lit (list 'Lit :kind 'Str :symbol (esc (items-text input)) :suffix 'None)) :span (foreign-span m) :attrs [])}
+      "line" {:ast (list 'Expr :kind (list 'Lit (list 'Lit :kind 'Integer :symbol (str (first (:span call))) :suffix (list 'Some "u32"))) :span (foreign-span m) :attrs [])}
+      "column" {:ast (list 'Expr :kind (list 'Lit (list 'Lit :kind 'Integer :symbol (str (second (:span call))) :suffix (list 'Some "u32"))) :span (foreign-span m) :attrs [])}
+      "file" {:ast (list 'Expr :kind (list 'Lit (list 'Lit :kind 'Str :symbol (.getCanonicalPath (File. ^String (:file *root*))) :suffix 'None)) :span (foreign-span m) :attrs [])}
+      "include" {:ast (include-expr input)}
+      "cfg" {:ast (list 'Expr :kind (list 'Lit (list 'Lit :kind 'Bool :symbol (str (boolean (second (cfg-pred input)))) :suffix 'None))
+                        :span (foreign-span m) :attrs [])}
+      "concat" {:ast (list 'Expr :kind (list 'Lit (list 'Lit :kind 'Str :symbol (esc (concat-text input)) :suffix 'None)) :span (foreign-span m) :attrs [])}
+      (throw (ex-info (str "expand: the builtin " nm " is not taken") {:expand true})))))
+
+(defn include-expr
+  "include! in an expression's place: the file (relative to the root's directory) parsed as one expression, its spans
+  written (span \"<include>\" l1 c1 l2 c2 0)"
+  [input]
+  (let [[lit] (str-lit-of (first input))
+        f (File. (.getParentFile (.getAbsoluteFile (File. ^String (:file *root*)))) ^String lit)
+        src (lx/source (slurp f))
+        {:keys [tree toks mt]} (binding [ps/*errs* (java.util.ArrayList.)] (ps/parse-expr-file src (:ed *root*)))
+        e (nat/out tree src toks mt (:ed *root*))]
+    (letfn [(w [x] (cond (and (vector? x) (= 4 (count x)) (every? integer? x)) (apply list 'span "<include>" (conj x 0))
+                         (seq? x) (apply list (map w x))
+                         (vector? x) (mapv w x)
+                         :else x))]
+      (w e))))
+
+(defn items->stream [items]
+  (let [ctx (assemble items)] (cstream ctx 0 (:eof ctx))))
+
+(defn items-text
+  "The items' text as rustc's pretty printer joins tokens (an approximation: the root's text where the items are
+  root tokens in one run)"
+  [items]
+  (let [fl (flat items (java.util.ArrayList.))
+        toks (map :t fl)]
+    (cond
+      (and (= 1 (count fl)) (:frag (first fl))) (or (:text (first fl)) "")
+      (some :frag fl) (str/join " " (map #(if (:frag %) (or (:text %) "") (tok-text (:t %))) fl))
+      (and (seq toks) (every? #(>= (.-lo ^Tok %) 0) toks))
+      (let [^Tok a (first toks) ^Tok b (last toks)
+            s (lx/text-of (root-src) (.-lo a) (.-hi b))]
+        (str/replace s #"\s+" " "))
+      :else (str/join " " (map tok-text toks)))))
+
+(defn- concat-text [items]
+  (apply str (for [part (split-commas items) :let [it (first part) ^Tok t (:t it)]]
+               (cond (and t (= :Literal (.-kind t)) (= :Str (.-x t))) (unesc (.-sym t))
+                     t (.-sym t)
+                     :else ""))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The walk
+
+(defn- fget [x k] (when (seq? x) (let [m (apply hash-map (drop 1 x))] (get m k))))
+(defn- fset [x k v]
+  (let [h (first x) kvs (vec (rest x)) i (.indexOf ^java.util.List kvs k)]
+    (apply list h (assoc kvs (inc i) v))))
+
+(defn- mac-name [mac]
+  (let [segs (:segments (apply hash-map (rest (fget mac :path))))]
+    (second (fget (last segs) :ident))))
+
+(defn- mac-input [mac]
+  (let [args (fget mac :args)]
+    (dump-tts->items (second (fget args :tokens)) nil)))
+
+(def ^:private std-builtins #{"format_args" "format_args_nl" "const_format_args" "panic" "unreachable" "assert" "stringify"
+                              "line" "column" "file" "concat" "include" "cfg"})
+
+(declare expand-form)
+
+(defn- expand-mac
+  "A macro call: [kind-of-result value]: items to parse, or a parsed form"
+  [mac kind]
+  (let [nm (mac-name mac)
+        input (mac-input mac)
+        user (get @*macros* nm)
+        sp (fget (fget mac :path) :span)
+        ;; the call's root site: its own when written in the root file, else its expansion's (a macro inside a macro)
+        site (cond (vector? sp) (vec (take 4 sp))
+                   (seq? sp) (or (get @*sites* (last sp)) (when (pos? (long (nth sp 2))) (vec (take 4 (drop 2 sp)))))
+                   :else nil)
+        r (binding [*site* site]
+            (cond user (expand-rules user input)
+                  (contains? std-builtins nm) (builtin nm input {:span (or site [0 0 0 0])})
+                  (get *std* nm) (expand-rules (get *std* nm) input)
+                  :else (throw (ex-info (str "expand: no macro " nm) {:expand true}))))]
+    (if (map? r)
+      (:ast r)
+      (parse-fragment r kind))))
+
+(defn- semi-last
+  "expand.rs: a statement macro with a semicolon makes its last statement one with a semicolon"
+  [stmts]
+  (if (empty? stmts)
+    stmts
+    (let [st (peek stmts) k (fget st :kind)]
+      ;; the call's own semicolon: added to an expression statement, else (after a statement that has one: rustc's
+      ;; parse of the call's `;` after the expansion) an empty statement; nothing after a let or an item
+      (cond (and (seq? k) (= 'Expr (first k))) (conj (pop stmts) (fset st :kind (list 'Semi (second k))))
+            (and (seq? k) (= 'MacCall (first k)) (not= 'Semicolon (fget (second k) :style)))
+            (conj (pop stmts) (fset st :kind (list 'MacCall (fset (second k) :style 'Semicolon))))
+            (or (and (seq? k) (#{'Semi 'MacCall} (first k))) (= 'Empty k))
+            (conj stmts (list 'Stmt :kind 'Empty :span (fget st :span)))
+            :else stmts))))
+
+(defn- expand-stmt [st]
+  (let [k (fget st :kind)]
+    (if (and (seq? k) (= 'MacCall (first k)))
+      (let [mcs (second k) mac (fget mcs :mac) style (fget mcs :style)
+            r (expand-mac mac :stmts)
+            stmts (if (and (seq? r) (= 'Expr (first r)))
+                    [(list 'Stmt :kind (list 'Expr r) :span (fget r :span))]
+                    (vec r))
+            stmts (if (= style 'Semicolon) (semi-last stmts) stmts)]
+        (vec (mapcat expand-stmt stmts)))
+      [(apply list (map expand-form st))])))
+
+(defn- item-kind-mac? [it] (let [k (fget it :kind)] (and (seq? k) (= 'MacCall (first k)))))
+
+(defn- expand-item [it]
+  (cond
+    (nil? (cfg-item it)) []
+    (not (identical? it (cfg-item it))) (expand-item (cfg-item it))
+    (not= it (strip-cfg it)) (expand-item (strip-cfg it))
+    (item-kind-mac? it) (vec (mapcat expand-item (expand-mac (second (fget it :kind)) :items)))
+    :else (let [k (fget it :kind)
+                _ (when (and (seq? k) (= 'MacroDef (first k)))
+                    ;; a macro_rules! a macro's expansion defines is in scope from there on (textual scoping)
+                    (let [[_ idf md] k]
+                      (swap! *macros* assoc (second idf) {:name (second idf) :arms (macro-arms (dump-tts->items (second (fget (fget md :body) :tokens)) nil))})))
+                [it' derived] (expand-derives it)]
+            (into [(expand-form it')] (mapcat expand-item derived)))))
+
+(defn expand-form [x]
+  (cond
+    (vector? x)
+    (cond (and (seq x) (seq? (first x)) (= 'Stmt (first (first x))) (= :kind (second (first x)))) (vec (mapcat expand-stmt x))
+          (and (seq x) (seq? (first x)) (= 'Item (first (first x))) (= :attrs (second (first x)))) (vec (mapcat expand-item x))
+          :else (mapv expand-form x))
+    (and (seq? x) (not= :kind (second x)))
+    (apply list (map expand-form x))
+    (seq? x)
+    (case (first x)
+      Expr (let [k (fget x :kind)]
+             (if (and (seq? k) (= 'MacCall (first k)))
+               (let [e (expand-mac (second k) :expr)]
+                 (expand-form (if (seq (fget x :attrs)) (fset e :attrs (into (fget x :attrs) (fget e :attrs))) e)))
+               (apply list (map expand-form x))))
+      Pat (let [k (fget x :kind)]
+            (if (and (seq? k) (= 'MacCall (first k))) (expand-form (expand-mac (second k) :pat)) (apply list (map expand-form x))))
+      Ty (let [k (fget x :kind)]
+           (if (and (seq? k) (= 'MacCall (first k))) (expand-form (expand-mac (second k) :ty)) (apply list (map expand-form x))))
+      Stmt (let [r (expand-stmt x)] (if (= 1 (count r)) (first r) (throw (ex-info "expand: statements in a single place" {}))))
+      (apply list (map expand-form x)))
+    :else x))
+
+;; ---------------------------------------------------------------------------------------------
+;; std's macros, the user's macro_rules!, the prelude
+
+(defn load-std-macros
+  "std's, core's and alloc's macros from the helper's --std-names: simple name -> {:arms :builtin :name}"
+  [file]
+  (with-open [r (java.io.PushbackReader. (java.io.FileReader. ^String file))]
+    (loop [m {}]
+      (let [f (read {:eof ::eof} r)]
+        (if (= f ::eof)
+          m
+          (recur (if (and (seq? f) (= 'names/macro (first f)))
+                   (let [[_ path info body] f
+                         nm (last (str/split path #"::"))
+                         toks (second (fget (fget body :body) :tokens))]
+                     (if (or (:builtin info) (contains? m nm))
+                       m
+                       (assoc m nm {:name path :arms (try (macro-arms (dump-tts->items toks 0)) (catch Throwable _ []))})))
+                   m)))))))
+
+(defn- collect-user-macros [crate]
+  (let [acc (atom {})]
+    (letfn [(walk [x]
+              (cond (seq? x)
+                    (do (when (and (= 'Item (first x)) (= :attrs (second x)) (seq? (fget x :kind)) (= 'MacroDef (first (fget x :kind))))
+                          (let [[_ idf md] (fget x :kind)
+                                toks (second (fget (fget md :body) :tokens))]
+                            (swap! acc assoc (second idf) {:name (second idf) :arms (macro-arms (dump-tts->items toks nil))})))
+                        (doseq [y x] (walk y)))
+                    (vector? x) (doseq [y x] (walk y))))]
+      (walk crate))
+    @acc))
+
+(defn- prelude-items [ed krate]
+  (let [m 1]
+    [(list 'Item :attrs [] :span nil :vis (list 'Visibility :kind 'Inherited :span nil) :kind (list 'ExternCrate 'None (id-form krate m)))
+     (list 'Item :attrs [(list 'Attribute :kind (list 'Normal (list 'NormalAttr :item (list 'AttrItem :unsafety 'Default :path (list 'Path :span nil :segments [(list 'PathSegment :ident (id-form "prelude_import" m) :args 'None)]) :args 'Empty :span nil)))
+                               :style 'Outer :span nil)]
+           :span nil :vis (list 'Visibility :kind 'Inherited :span nil)
+           :kind (list 'Use (list 'UseTree :prefix (list 'Path :span nil :segments (mapv (fn [s] (list 'PathSegment :ident (id-form s m) :args 'None))
+                                                                                          (cond->> [krate "prelude" (str "rust_" ed)]
+                                                                                            (= ed 2015) (into ["{{root}}"]))))
+                                  :kind (list 'Glob nil))))]))
+
+(defn expand-file
+  "A Rust file read by the native reader and expanded: the expanded Crate form"
+  [^String file ^long ed std-macros]
+  (let [text (slurp file)
+        src (lx/source text)
+        {:keys [tree toks mt]} (binding [ps/*errs* (java.util.ArrayList.)] (ps/parse-file src ed))
+        ^objects toks toks
+        by-span (into {} (for [i (range (dec (alength toks))) :let [^Tok t (aget toks i)]] [(lx/span-vec src (.-lo t) (.-hi t)) i]))
+        crate (nat/out tree src toks mt ed)]
+    (binding [*root* {:src src :toks toks :mt mt :by-span by-span :ed ed :file file}
+              *std* std-macros
+              *macros* (atom {})
+              *frags* (atom {})
+              *sites* (atom {})]
+      (reset! mark-counter 1)
+      (reset! *macros* (collect-user-macros crate))
+      (let [items (fget crate :items)
+            no-std (some #(= "no_std" (attr-name %)) (fget crate :attrs))
+            items (into (prelude-items ed (if no-std "core" "std")) items)]
+        (fset crate :items (expand-form items))))))
+
+(defn- attr-name [a]
+  (let [k (fget a :kind)]
+    (when (and (seq? k) (= 'Normal (first k)))
+      (let [item (fget (second k) :item) segs (:segments (apply hash-map (rest (fget item :path))))]
+        (when (= 1 (count segs)) (second (fget (first segs) :ident)))))))
+
+(load "expand_format")
+(load "expand_derive")

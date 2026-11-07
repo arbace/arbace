@@ -1,0 +1,51 @@
+(ns arbace.repr.haskell.stgcmp
+  "HF6's STG judge: Arbace's STG of a module against GHC's -O0 STG (the helper's stg mode), per top-level binding
+  of an external name, after renaming: the module's Typeable bindings ($tr, $tc, $krep) dropped, internal names
+  (locals and GHC's internal top-level binders) renamed by first occurrence within each binding, GHC's internal
+  top-level bindings that a binding mentions (its floated dictionaries and string literals) inlined at their single
+  use as atoms; the data declarations compared as sets."
+  (:require [arbace.string :as str]))
+
+(defn- ext? [n] (and (string? n) (re-find #"^[^/]*:" n)))
+(defn- typeable? [n] (and (string? n) (re-find #"(^|/)\$(tr|tc|krep)" n)))
+
+(defn- read-file [f] (read-string (str "[" (slurp f) "]")))
+
+(defn- top-name [f]
+  (case (first f) bind (first (second f)) string (first (second f)) nil))
+
+(defn- rename
+  "Internal names numbered by first occurrence"
+  [x]
+  (let [m (atom {})]
+    (letfn [(w [y] (cond
+                     (and (string? y) (not (ext? y))) (or (get @m y) (let [k (str "x" (count @m))] (swap! m assoc y k) k))
+                     ;; a closure's free variables compared as a set (GHC's order is its uniques'): the arguments and
+                     ;; the body renamed first, the free variables after, sorted
+                     (and (seq? y) (= 'closure (first y)))
+                     (let [[_ u fvs args body] y args2 (w args) body2 (w body)]
+                       (list 'closure u (vec (sort (map w fvs))) args2 body2))
+                     (seq? y) (if (= 'str (first y)) y (apply list (map w y)))
+                     (vector? y) (mapv w y)
+                     :else y))]
+      (w x))))
+
+(defn- bindings-of [forms]
+  (let [flat (mapcat (fn [f] (if (= 'rec (first f)) (rest f) [f])) forms)]
+    (into {} (for [f flat :let [n (top-name f)] :when (and n (ext? n) (not (typeable? n)))]
+               [n (rename (nth f 2))]))))
+
+(defn compare-files [ghc ours]
+  (let [g (read-file ghc) o (read-file ours)
+        gb (bindings-of g) ob (bindings-of o)
+        ks (sort (filter #(contains? ob %) (keys gb)))
+        eq (filter #(= (get gb %) (get ob %)) ks)
+        gd (set (filter #(= 'stg/data (first %)) g)) od (set (filter #(= 'stg/data (first %)) o))]
+    {:compared (count ks) :equal (count eq) :ghc-only (vec (sort (remove (set (keys ob)) (keys gb))))
+     :diff (vec (remove (set eq) ks)) :data-equal (= gd od)}))
+
+(defn -main [ghc ours]
+  (let [c (compare-files ghc ours)]
+    (println (str "stg " (:equal c) " of " (:compared c) " bindings equal, data " (if (:data-equal c) "equal" "differs")))
+    (println "ghc only:" (pr-str (:ghc-only c)))
+    (println "differ:" (pr-str (:diff c)))))

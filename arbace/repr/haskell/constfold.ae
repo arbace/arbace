@@ -1,0 +1,247 @@
+;; Ported from GHC 9.14.1 (https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz, SHA-256
+;; 2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77): compiler/GHC/Core/Opt/ConstantFold.hs (primOpRules'
+;; floating-point rules: binaryLit with floatOp2 and doubleOp2, guardFloatDiv and guardDoubleDiv, identity, rightIdentity,
+;; strengthReduction, unaryLit with negOp, semiInversePrimOp, fmaRules: fmaLit, fmaZero_z, fmaOne; convFloating,
+;; mkFloatVal, mkDoubleVal) and compiler/GHC/Types/Literal.hs (floatToIntLit, intToFloatLit, doubleToIntLit,
+;; intToDoubleLit, floatToDoubleLit, doubleToFloatLit), on Arbace's untyped Core; GHC's notice follows (LICENSE.md, "GHC:
+;; the Glasgow Haskell Compiler License"):
+;;
+;; The Glasgow Haskell Compiler License
+;;
+;; Copyright 2002, The University Court of the University of Glasgow.
+;; All rights reserved.
+;;
+;; Redistribution and use in source and binary forms, with or without
+;; modification, are permitted provided that the following conditions are met:
+;;
+;; - Redistributions of source code must retain the above copyright notice,
+;; this list of conditions and the following disclaimer.
+;;
+;; - Redistributions in binary form must reproduce the above copyright notice,
+;; this list of conditions and the following disclaimer in the documentation
+;; and/or other materials provided with the distribution.
+;;
+;; - Neither name of the University nor the names of its contributors may be
+;; used to endorse or promote products derived from this software without
+;; specific prior written permission.
+;;
+;; THIS SOFTWARE IS PROVIDED BY THE UNIVERSITY COURT OF THE UNIVERSITY OF
+;; GLASGOW AND THE CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
+;; INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+;; FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+;; UNIVERSITY COURT OF THE UNIVERSITY OF GLASGOW OR THE CONTRIBUTORS BE LIABLE
+;; FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+;; DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+;; SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+;; CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+;; LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+;; OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+;; DAMAGE.
+
+(ns arbace.repr.haskell.constfold
+  "GHC's built-in rules for the floating-point primops (GHC.Core.Opt.ConstantFold), which -O0's one simplifier run
+  (GHC.Driver.Config.Core.Opt's \"Non-opt simplification\", rules on) applies to every program: the only ones whose
+  result differs from evaluating the primop, because GHC computes on the literals' Rationals (so 0.0 * -2.5 is 0.0, a
+  Rational has no negative zero) and drops identities (0.0 +## x is x, so 0.0 +## -0.0 is -0.0). The integral primops'
+  rules compute what the machine computes and are left to hsi. A literal is Core's (lit \"TEXT##\") (Double#) or
+  (lit \"TEXT#\") (Float#) with a decimal TEXT, read exactly as a Rational."
+  (:require [arbace.string :as str]))
+
+(defn- head? [x h] (and (seq? x) (= h (first x))))
+
+(defn- prim [o] (list 'v ["ext" "var" "GHC.Internal.Prim" o]))
+
+(defn- prim-name [f] (when (and (head? f 'v) (vector? (second f)) (= "GHC.Internal.Prim" (nth (second f) 2))) (nth (second f) 3)))
+
+;;; Literals: [:double r], [:float r], [:int n]
+
+(defn- rational-of [^String t] (rationalize (java.math.BigDecimal. t)))
+
+(defn- lit-val [e]
+  (when (head? e 'lit)
+    (let [t (second e)]
+      (cond (re-matches #"-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?##" t) [:double (rational-of (subs t 0 (- (count t) 2)))]
+            (re-matches #"-?[0-9]+\.[0-9]+([eE][+-]?[0-9]+)?#" t) [:float (rational-of (subs t 0 (dec (count t))))]
+            (re-matches #"-?[0-9]+#" t) [:int (bigint (read-string (subs t 0 (dec (count t)))))]
+            :else nil))))
+
+(defn- to-bigdec ^java.math.BigDecimal [r]
+  (if (ratio? r)
+    (.divide (java.math.BigDecimal. (biginteger (numerator r))) (java.math.BigDecimal. (biginteger (denominator r)))
+             (java.math.MathContext. 60))
+    (java.math.BigDecimal. (biginteger r))))
+
+(defn- as-double [r] (.doubleValue (to-bigdec r)))
+(defn- as-float [r] (.floatValue (to-bigdec r)))
+
+(defn- conv
+  "convFloating: the Rational cut to the precision of its type (toRational . fromRational), nil when not finite"
+  [kind r]
+  (let [x (if (= kind :double) (as-double r) (double (as-float r)))]
+    (when-not (or (Double/isInfinite x) (Double/isNaN x)) (rationalize (java.math.BigDecimal. x)))))
+
+(defn- mk-lit
+  "mkDoubleVal / mkFloatVal: the literal of a Rational (its sign of zero lost, as a Rational's)"
+  [kind r]
+  (when-let [r (conv kind r)]
+    (let [x (if (= kind :double) (as-double r) (double (as-float r)))
+          x (if (zero? x) 0.0 x)
+          t (if (= kind :double) (str x) (str (float x)))]
+      (list 'lit (str t (if (= kind :double) "##" "#"))))))
+
+(defn- lit-of-kind [kind r] (list 'lit (str (if (= kind :double) (str (as-double r)) (str (as-float r))) (if (= kind :double) "##" "#"))))
+
+(defn- wrap64 [n] (let [m (mod (bigint n) 18446744073709551616N)] (if (>= m 9223372036854775808N) (- m 18446744073709551616N) m)))
+
+;;; The rules
+
+(def ^:private ops
+  {"+##" [:double :add] "-##" [:double :sub] "*##" [:double :mul] "/##" [:double :div] "negateDouble#" [:double :neg]
+   "fmaddDouble#" [:double :fmadd] "fmsubDouble#" [:double :fmsub] "fnmaddDouble#" [:double :fnmadd] "fnmsubDouble#" [:double :fnmsub]
+   "plusFloat#" [:float :add] "minusFloat#" [:float :sub] "timesFloat#" [:float :mul] "divideFloat#" [:float :div] "negateFloat#" [:float :neg]
+   "fmaddFloat#" [:float :fmadd] "fmsubFloat#" [:float :fmsub] "fnmaddFloat#" [:float :fnmadd] "fnmsubFloat#" [:float :fnmsub]
+   "double2Int#" [:double :to-int] "float2Int#" [:float :to-int] "int2Double#" [:double :from-int] "int2Float#" [:float :from-int]
+   "double2Float#" [:double :to-float] "float2Double#" [:float :to-double]})
+
+(defn- op-name [kind op]
+  (get {[:double :add] "+##" [:double :sub] "-##" [:double :mul] "*##" [:double :neg] "negateDouble#"
+        [:float :add] "plusFloat#" [:float :sub] "minusFloat#" [:float :mul] "timesFloat#" [:float :neg] "negateFloat#"} [kind op]))
+
+(defn- lits [kind args] (let [vs (map lit-val args)] (when (every? #(= kind (first %)) vs) (mapv #(conv kind (second %)) vs))))
+(defn- is-lit? [kind e r] (let [v (lit-val e)] (and (= kind (first v)) (= r (second v)))))
+
+(declare int-rule int-ops)
+
+(defn primop-rule
+  "The rewritten application of primop o to args, or nil (mkPrimOpRule's rules in GHC's order)"
+  [o args]
+  (if (contains? int-ops o)
+    (int-rule o args)
+  (when-let [[kind op] (get ops o)]
+    (let [ap (fn [op2 as] (list 'app (prim (op-name kind op2)) (vec as)))]
+      (case op
+        :add (or (when-let [[a b] (lits kind args)] (when (and a b) (mk-lit kind (+ a b))))
+                 (when (= 2 (count args))
+                   (cond (is-lit? kind (first args) 0) (second args)   ; identity zerod
+                         (is-lit? kind (second args) 0) (first args))))
+        :sub (or (when-let [[a b] (lits kind args)] (when (and a b) (mk-lit kind (- a b))))
+                 (when (and (= 2 (count args)) (is-lit? kind (second args) 0)) (first args)))
+        :mul (or (when-let [[a b] (lits kind args)] (when (and a b) (mk-lit kind (* a b))))
+                 (when (= 2 (count args))
+                   (cond (is-lit? kind (first args) 1) (second args)
+                         (is-lit? kind (second args) 1) (first args)
+                         ;; strength reduction: x * 2.0 = x + x
+                         (is-lit? kind (second args) 2) (ap :add [(first args) (first args)])
+                         (is-lit? kind (first args) 2) (ap :add [(second args) (second args)]))))
+        :div (or (when-let [[a b] (lits kind args)]
+                   (when (and a b (or (not (zero? a)) (pos? b)) (not (zero? b))) (mk-lit kind (/ a b))))
+                 (when (and (= 2 (count args)) (is-lit? kind (second args) 1)) (first args)))
+        :neg (or (when-let [[a] (lits kind args)] (when (and a (not (zero? a))) (mk-lit kind (- a))))
+                 ;; negate (negate e) = e
+                 (let [a (first args)] (when (and (head? a 'app) (= (prim-name (second a)) o) (= 1 (count (nth a 2)))) (first (nth a 2)))))
+        (:fmadd :fmsub :fnmadd :fnmsub)
+        (when (= 3 (count args))
+          (let [[x y z] args]
+            (or (when-let [[a b c] (lits kind args)]
+                  (when (and a b c)
+                    (mk-lit kind (case op :fmadd (+ (* a b) c) :fmsub (- (* a b) c) :fnmadd (+ (- (* a b)) c) :fnmsub (- (- (* a b)) c)))))
+                ;; fmaZero_z: x * y + 0 = x * y
+                (when (is-lit? kind z 0)
+                  (case op (:fmadd :fmsub) (ap :mul [x y]) (ap :neg [(ap :mul [x y])])))
+                ;; fmaOne: (+-1) * t + z
+                (let [one (fn [e] (cond (is-lit? kind e 1) false (is-lit? kind e -1) true))
+                      [sgn t] (cond (some? (one x)) [(one x) y] (some? (one y)) [(one y) x])]
+                  (when (some? sgn)
+                    (cond (or (and (= op :fmadd) (not sgn)) (and (= op :fnmadd) sgn)) (ap :add [t z])
+                          (#{:fmadd :fnmadd} op) (ap :sub [z t])
+                          (or (and (= op :fmsub) (not sgn)) (and (= op :fnmsub) sgn)) (ap :sub [t z])
+                          :else (ap :neg [(ap :add [t z])])))))))
+        ;; the conversions (liftLit: the literal as it is, no convFloating)
+        :to-int (let [v (lit-val (first args))] (when (= kind (first v)) (list 'lit (str (wrap64 (bigint (second v))) "#"))))
+        :from-int (let [v (lit-val (first args))] (when (= :int (first v)) (lit-of-kind kind (second v))))
+        :to-float (let [v (lit-val (first args))] (when (= :double (first v)) (lit-of-kind :float (second v))))
+        :to-double (let [v (lit-val (first args))] (when (= :float (first v)) (lit-of-kind :double (second v))))
+        nil)))))
+
+;;; The integral primops' rules (primOpRules' Int#, Word#, Char# entries at -O0: binaryLit, the identities, zeroElem,
+;;; leftZero, equalArgs, the comparisons of two literals and of equal arguments, negation, the conversions; the
+;;; NumConstantFolding rules are off at -O0)
+
+(defn- ilit [e]
+  (when (head? e 'lit)
+    (let [t (second e)]
+      (cond (re-matches #"-?[0-9]+##" t) [:word (bigint (read-string (subs t 0 (- (count t) 2))))]
+            (re-matches #"-?[0-9]+#" t) [:int (bigint (read-string (subs t 0 (dec (count t)))))]
+            (re-matches #"'\(char ([0-9]+)\)'#" t) [:char (bigint (read-string (second (re-find #"char ([0-9]+)" t))))]
+            (re-matches #"(?s)'.'#" t) [:char (bigint (int (.charAt ^String t 1)))]
+            :else nil))))
+
+(defn- wrapw [n] (mod (bigint n) 18446744073709551616N))
+(defn- mk-int [n] (list 'lit (str (wrap64 n) "#")))
+(defn- mk-word [n] (list 'lit (str (wrapw n) "##")))
+(defn- mk-kind [k n] (if (= k :word) (mk-word n) (mk-int n)))
+(def ^:private true-i (list 'lit "1#"))
+(def ^:private false-i (list 'lit "0#"))
+
+(def ^:private int-ops
+  {"+#" [:int :add] "-#" [:int :sub] "*#" [:int :mul] "quotInt#" [:int :quot] "remInt#" [:int :rem]
+   "andI#" [:int :and] "orI#" [:int :or] "xorI#" [:int :xor] "negateInt#" [:int :neg]
+   "plusWord#" [:word :add] "minusWord#" [:word :sub] "timesWord#" [:word :mul] "quotWord#" [:word :quot]
+   "remWord#" [:word :rem] "and#" [:word :and] "or#" [:word :or] "xor#" [:word :xor]
+   "==#" [:int :eq] "/=#" [:int :ne] ">#" [:int :gt] ">=#" [:int :ge] "<#" [:int :lt] "<=#" [:int :le]
+   "eqWord#" [:word :eq] "neWord#" [:word :ne] "gtWord#" [:word :gt] "geWord#" [:word :ge] "ltWord#" [:word :lt]
+   "leWord#" [:word :le]
+   "eqChar#" [:char :eq] "neChar#" [:char :ne] "gtChar#" [:char :gt] "geChar#" [:char :ge] "ltChar#" [:char :lt]
+   "leChar#" [:char :le]
+   "int2Word#" [:int :to-word] "word2Int#" [:word :to-int] "ord#" [:char :to-int] "chr#" [:int :to-char]})
+
+(defn- int-rule [o args]
+  (when-let [[k op] (get int-ops o)]
+    (let [vs (mapv ilit args)
+          lits (when (every? #(= k (first %)) vs) (mapv second vs))
+          is (fn [i n] (let [v (get vs i)] (and (= k (first v)) (= n (second v)))))
+          same (and (= 2 (count args)) (= (first args) (second args)) (seq? (first args)) (contains? #{'lv 'v} (first (first args))))
+          cmp (fn [f] (cond (and lits (= 2 (count lits))) (if (f (first lits) (second lits)) true-i false-i)))]
+      (case op
+        :add (or (when lits (mk-kind k (+ (first lits) (second lits)))) (cond (is 0 0) (second args) (is 1 0) (first args)))
+        :sub (or (when lits (mk-kind k (- (first lits) (second lits)))) (cond (is 1 0) (first args) same (mk-kind k 0)))
+        :mul (or (when lits (mk-kind k (* (first lits) (second lits))))
+                 (cond (is 0 0) (first args) (is 1 0) (second args) (is 0 1) (second args) (is 1 1) (first args)))
+        :quot (or (when (and lits (not (zero? (second lits)))) (mk-kind k (quot (first lits) (second lits))))
+                  (cond (is 0 0) (first args) (is 1 1) (first args) same (mk-kind k 1)))
+        :rem (or (when (and lits (not (zero? (second lits)))) (mk-kind k (rem (first lits) (second lits))))
+                 (cond (is 0 0) (first args) (is 1 1) (mk-kind k 0) same (mk-kind k 0)))
+        :and (or (when lits (mk-kind k (.and (biginteger (first lits)) (biginteger (second lits)))))
+                 (cond (is 0 0) (first args) (is 1 0) (second args) same (first args)))
+        :or (or (when lits (mk-kind k (.or (biginteger (first lits)) (biginteger (second lits)))))
+                (cond (is 0 0) (second args) (is 1 0) (first args) same (first args)))
+        :xor (or (when lits (mk-kind k (.xor (biginteger (first lits)) (biginteger (second lits)))))
+                 (cond (is 0 0) (second args) (is 1 0) (first args) same (mk-kind k 0)))
+        :neg (or (when (and lits (= 1 (count lits))) (mk-int (- (first lits))))
+                 (let [a (first args)] (when (and (head? a 'app) (= (prim-name (second a)) o) (= 1 (count (nth a 2)))) (first (nth a 2)))))
+        :eq (or (cmp =) (when same true-i))
+        :ne (or (cmp not=) (when same false-i))
+        :gt (or (cmp >) (when same false-i))
+        :ge (or (cmp >=) (when same true-i))
+        :lt (or (cmp <) (when same false-i))
+        :le (or (cmp <=) (when same true-i))
+        :to-word (when lits (mk-word (first lits)))
+        :to-int (when lits (mk-int (first lits)))
+        :to-char (when (and lits (<= 0 (first lits) 1114111)) (list 'lit (str "'(char " (first lits) ")'#")))
+        nil))))
+
+(defn has-rules? [o] (or (contains? ops o) (contains? int-ops o)))
+
+(defn fold
+  "An expression with the floating-point primops' rules applied bottom-up, to a fixpoint at each application"
+  [e]
+  (cond
+    (head? e 'app)
+    (let [f (fold (second e)) args (mapv fold (nth e 2)) o (prim-name f)
+          e2 (list 'app f args)]
+      (if-let [r (when o (primop-rule o args))] (recur r) e2))
+    (seq? e) (apply list (map fold e))
+    (vector? e) (mapv fold e)
+    :else e))
+
+(defn fold-program [binds] (mapv (fn [[_ b e]] (list 'bind b (fold e))) binds))

@@ -2,8 +2,10 @@
   "repr/cpp, C++'s bridge (doc/cpp/SPEC.md; doc/cpp/CPP-SURVEY.md, \"As built: CX3, CX4\"): `read-cpp` reads the
   oracle's filtered AST of a C++ file (tools/cxxdump's output) with the file's text into C++ forms
   (arbace.repr.cpp.convert), `unit-text` writes them as .ae text (repr/c's layout), `print-cpp` prints forms back
-  to C++ (arbace.repr.cpp.print, mode :lines). `-main` is bin/repr-cpp read and print."
+  to C++ (arbace.repr.cpp.print, mode :lines). `read-cpp-native` reads a file without the oracle (CX11: the native
+  parser's tree, arbace.repr.cpp.native, converted alike). `-main` is bin/repr-cpp read and print."
   (:require [arbace.repr.cpp.convert :as convert]
+            [arbace.repr.cpp.native :as native]
             [arbace.repr.cpp.print :as print]
             [arbace.repr.c.layout :as layout]
             [arbace.string :as str]))
@@ -69,6 +71,24 @@
         {:refused g :message (ex-message e)}
         (throw e))))))
 
+(defn read-cpp-native
+  "The forms of the C++ file at `src-path` read by the native parser (CX11), with no oracle: `main` its name, `std`
+  its standard, `args` its compiler options (-D, -U, -I); the map of read-cpp, with :native (the parser's declines and
+  the preprocessor's errors). `full`: mode :full."
+  ([src-path main std args] (read-cpp-native src-path main std args false))
+  ([^String src-path ^String main ^String std args full]
+  (try
+    (let [u (native/parse-file src-path main std args)
+          src (latin1 src-path)
+          c (convert/convert (:nodes u) src main (:executed u))
+          ff (list 'cpp/file main :std (keyword std))
+          c (if full (with-full c src ff) (assoc c :file-form ff))]
+      (assoc c :ns (ns-name-of main) :native (select-keys u [:declines :reasons :pp-errors])))
+    (catch arbace.lang.ExceptionInfo e
+      (if-let [g (:cpp/gap (ex-data e))]
+        {:refused g :message (ex-message e)}
+        (throw e))))))
+
 (defn unit-text
   "A read's .ae text."
   ^String [rd]
@@ -95,13 +115,23 @@
 
 (defn -main
   "bin/repr-cpp read DUMP FILE [--main NAME] [--std S] [--full]: FILE's forms (from its cxxdump output DUMP) as .ae text
-  (--full: mode :full, the text kept); bin/repr-cpp print FILE.ae...: each unit's C++ text (a :full unit's bytes as read)."
+  (--full: mode :full, the text kept); bin/repr-cpp read --reader native FILE [--main NAME] [--std S] [--full] [-- ARGS...]:
+  the same read by the native parser (CX11), no oracle; bin/repr-cpp print FILE.ae...: each unit's C++ text (a :full unit's
+  bytes as read)."
   [verb & args]
   (case verb
-    "read" (let [[dump src & opts] args
+    "read" (let [native? (and (= "--reader" (first args)) (= "native" (second args)))
+                 args (if (= "--reader" (first args)) (drop 2 args) args)
+                 [dump src & opts] (if native? (cons nil args) args)
                  full (boolean (some #{"--full"} opts))
+                 [opts cargs] (split-with #(not= "--" %) opts)
                  o (apply hash-map (remove #{"--full"} opts))
-                 rd (read-cpp dump src (get o "--main" src) (get o "--std" "gnu++17") full)]
+                 rd (if native?
+                      (read-cpp-native src (get o "--main" src) (get o "--std" "gnu++17") (vec (rest cargs)) full)
+                      (read-cpp dump src (get o "--main" src) (get o "--std" "gnu++17") full))]
+             (when-let [nv (:native rd)]
+               (when (pos? (long (:declines nv)))
+                 (binding [*out* *err*] (println (str src ": native: " (:declines nv) " declined " (pr-str (:reasons nv)))))))
              (if (:refused rd)
                (do (binding [*out* *err*] (println (str src ": refused (" (name (:refused rd)) "): " (:message rd)))) (flush) (System/exit 1))
                (do (print (unit-text rd)) (flush))))

@@ -312,7 +312,7 @@ load_plan() {  # load_plan: plan.tsv into the arrays (again after a second plan:
     outputs[$n]=$ou uses[$n]=${us//,/ } kind[$n]=$ki cmd[$n]=$cm
   done < "$logs/plan.tsv"
 }
-ok_status() { [ -f "$logs/$1.status" ] && case $(cat "$logs/$1.status") in 0|skip) return 0 ;; esac; return 1; }
+ok_status() { [ -f "$logs/$1.status" ] && case $(cat "$logs/$1.status") in 0|skip|absent) return 0 ;; esac; return 1; }
 # out_sha PATH: an output's digest, as gate.plan's out-digest: a file's SHA-256; a directory's, the
 # SHA-256 of sha256sum's lines of its files in order; missing
 out_sha() {
@@ -346,6 +346,8 @@ run_one() {  # run_one NAME: a step of the plan, as decided (once: a build of th
           rotation_note "$n" skip
           echo skip > "$logs/$n.status"; touch "$logs/$n.done"; return 0 ;;
     none) echo none > "$logs/$n.status"; touch "$logs/$n.done"; return 0 ;;
+    # the oracle tier (doc/ORACLE-RECORDS-SURVEY.md, ORS1 (a)): a step whose toolchain this host lacks
+    absent) echo absent > "$logs/$n.status"; touch "$logs/$n.done"; return 0 ;;
   esac
   for x in ${needs[$n]}; do
     [ "$x" = - ] && continue
@@ -478,6 +480,7 @@ report() {  # report NAME: a step's outcome, times, memory and summary lines
   case $st in
     skip) echo "   skipped  $n (${why[$n]})"; return ;;
     none) echo "   -  $n (not needed: no step that runs needs it)"; return ;;
+    absent) echo "   absent  $n (${why[$n]})"; return ;;
     notrun*) echo "   FAILED  $n (not run: ${st#notrun } did not pass)"; status=1; return ;;
   esac
   s=$(cat "$logs/$n.secs"); w=$(mmss "$s")

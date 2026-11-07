@@ -1,0 +1,815 @@
+;; Ported from OCaml 5.5.0 (the release tarball, SHA-256 fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba):
+;; lambda/translcore.ml (expressions, applications with omitted and optional arguments, curried functions,
+;; let, match with exception cases, try, records, arrays, assertions), lambda/translprim.ml (the primitives'
+;; table, their specialization by type, comparisons) and the bytecode translation of a structure of
+;; lambda/translmod.ml, for the core language (doc/ocaml/TYPER.md), whose notices follow (LICENSE.md, "The OCaml
+;; Core System"):
+;;
+;;                                 OCaml
+;;
+;;             Xavier Leroy, projet Cristal, INRIA Rocquencourt
+;;
+;;   Copyright 1996 Institut National de Recherche en Informatique et
+;;     en Automatique.
+;;
+;;   All rights reserved.  This file is distributed under the terms of
+;;   the GNU Lesser General Public License version 2.1, with the
+;;   special exception on linking described in the file LICENSE.
+
+(ns arbace.repr.ocaml.typer.translcore
+  "The Typedtree of arbace.repr.ocaml.typer.typecore to Lambda (doc/ocaml/TYPER.md, T6): Translcore with
+  Translprim's primitives and Translmod's bytecode structure (the unit's block, its fields in the order of the
+  signature). The translation is the raw one (ocamlc -drawlambda), before Simplif."
+  (:require [arbace.repr.ocaml.typer.types :as ty]
+            [arbace.repr.ocaml.typer.env :as env]
+            [arbace.repr.ocaml.typer.parmatch :as pm]
+            [arbace.repr.ocaml.typer.lambda :as l]
+            [arbace.repr.ocaml.typer.matching :as m]
+            [arbace.repr.ocaml.typer.valuerec :as vr]
+            [arbace.repr.ocaml.lex :as lex]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* false)
+
+(def ^:private required (atom #{}))
+(def ^:private try-ids (atom #{}))
+
+;; ---------------------------------------------------------------------------------------------
+;; Paths
+
+(defn- transl-address [path pos]
+  (case (path 0)
+    :Pident (let [id (path 1)]
+              (if (or (:global id) (:predef id)) [:Lprim (l/pgetglobal id) []] [:Lvar id]))
+    :Pdot (let [unit (path 1)]
+            (when-not (= :Pident (unit 0)) (env/type-error "nested modules are outside the slice"))
+            (swap! required conj (:name (unit 1)))
+            [:Lprim (l/pfield pos :pointer false) [[:Lprim (l/pgetglobal (unit 1)) []]]])))
+
+(defn transl-addr
+  "Lambda.transl_address: an environment's address ([:global id] [:var id] [:field addr pos]) as Lambda"
+  [a]
+  (case (a 0)
+    :global (do (swap! required conj (:name (a 1))) [:Lprim (l/pgetglobal (a 1)) []])
+    :var [:Lvar (a 1)]
+    :field [:Lprim (l/pfield (a 2) :pointer false) [(transl-addr (a 1))]]))
+
+(defn transl-value-path [vd]
+  (if-let [a (:addr vd)] (transl-addr a) (transl-address (:path vd) (:pos vd))))
+
+(defn transl-module-path [p] (transl-addr (or (:addr (env/find-module p)) (env/type-error (str "no address for " p)))))
+
+(defn transl-extension-path [path]
+  (if-let [a (get @env/ext-addrs path)]
+    (transl-addr a)
+    (case (path 0)
+      :Pident (transl-address path nil)
+      :Pdot (transl-address path (or (get @env/ext-positions path) (env/type-error (str "no position for " path)))))))
+
+(def ^:dynamic *transl-struct-item*
+  "Translmod.transl_struct_item for an expression's structure item: (fn [titem next-fn] lambda)"
+  nil)
+(def ^:dynamic *transl-module* "Translmod.transl_module: (fn [cc rootpath tmod] lambda)" nil)
+(defn required-globals [] @required)
+(defn reset-required! [] (reset! required #{}) (reset! try-ids #{}))
+
+;; ---------------------------------------------------------------------------------------------
+;; Primitives (translprim.ml)
+
+(def ^:private primitives
+  (merge
+   {"%loc_LINE" {:t :loc :k :line} "%loc_FILE" {:t :loc :k :file} "%loc_LOC" {:t :loc :k :loc} "%loc_POS" {:t :loc :k :pos} "%loc_MODULE" {:t :loc :k :module}
+    "%loc_FUNCTION" {:t :loc :k :function}
+    "%identity" {:t :identity} "%ignore" {:t :p :name "ignore" :arity 1} "%revapply" {:t :revapply} "%apply" {:t :apply}
+    "%field0" {:t :field :pos 0} "%field1" {:t :field :pos 1}
+    "%send" {:t :send :k :public} "%sendself" {:t :send :k :self} "%sendcache" {:t :send :k :cache}
+    "%setfield0" {:t :setfield :pos 0} "%setfield1" {:t :setfield :pos 1}
+    "%makeblock" {:t :makeblock :mut false} "%makemutable" {:t :makeblock :mut true}
+    "%raise" {:t :raise :k :regular} "%reraise" {:t :raise :k :reraise} "%raise_notrace" {:t :raise :k :notrace}
+    "%sequand" {:t :p :name "&&" :arity 2} "%sequor" {:t :p :name "||" :arity 2} "%boolnot" {:t :p :name "not" :arity 1}
+    "%negint" {:t :p :name "~" :arity 1} "%succint" {:t :p :name "1+" :arity 1} "%predint" {:t :p :name "-1+" :arity 1}
+    "%addint" {:t :p :name "+" :arity 2} "%subint" {:t :p :name "-" :arity 2} "%mulint" {:t :p :name "*" :arity 2}
+    "%divint" {:t :p :name "/" :arity 2} "%modint" {:t :p :name "mod" :arity 2} "%andint" {:t :p :name "and" :arity 2}
+    "%orint" {:t :p :name "or" :arity 2} "%xorint" {:t :p :name "xor" :arity 2} "%lslint" {:t :p :name "lsl" :arity 2}
+    "%lsrint" {:t :p :name "lsr" :arity 2} "%asrint" {:t :p :name "asr" :arity 2}
+    "%eq" {:t :p :name "==" :arity 2} "%noteq" {:t :p :name "!=" :arity 2} "%ltint" {:t :p :name "<" :arity 2}
+    "%leint" {:t :p :name "<=" :arity 2} "%gtint" {:t :p :name ">" :arity 2} "%geint" {:t :p :name ">=" :arity 2}
+    "%incr" {:t :p :name "+:=1" :arity 1} "%decr" {:t :p :name "+:=-1" :arity 1}
+    "%intoffloat" {:t :p :name "int_of_float" :arity 1} "%floatofint" {:t :p :name "float_of_int" :arity 1}
+    "%negfloat" {:t :p :name "~." :arity 1} "%absfloat" {:t :p :name "abs." :arity 1}
+    "%addfloat" {:t :p :name "+." :arity 2} "%subfloat" {:t :p :name "-." :arity 2} "%mulfloat" {:t :p :name "*." :arity 2}
+    "%divfloat" {:t :p :name "/." :arity 2} "%eqfloat" {:t :p :name "==." :arity 2} "%noteqfloat" {:t :p :name "!=." :arity 2}
+    "%ltfloat" {:t :p :name "<." :arity 2} "%lefloat" {:t :p :name "<=." :arity 2} "%gtfloat" {:t :p :name ">." :arity 2}
+    "%gefloat" {:t :p :name ">=." :arity 2}
+    "%string_length" {:t :p :name "string.length" :arity 1} "%string_safe_get" {:t :p :name "string.get" :arity 2}
+    "%string_safe_set" {:t :p :name "bytes.set" :arity 3} "%string_unsafe_get" {:t :p :name "string.unsafe_get" :arity 2}
+    "%string_unsafe_set" {:t :p :name "bytes.unsafe_set" :arity 3} "%bytes_length" {:t :p :name "bytes.length" :arity 1}
+    "%bytes_safe_get" {:t :p :name "bytes.get" :arity 2} "%bytes_safe_set" {:t :p :name "bytes.set" :arity 3}
+    "%bytes_unsafe_get" {:t :p :name "bytes.unsafe_get" :arity 2} "%bytes_unsafe_set" {:t :p :name "bytes.unsafe_set" :arity 3}
+    "%bytes_to_string" {:t :p :name "bytes_to_string" :arity 1} "%bytes_of_string" {:t :p :name "bytes_of_string" :arity 1}
+    "%array_length" {:t :array :op "array.length" :arity 1} "%array_safe_get" {:t :array :op "array.get" :arity 2}
+    "%array_safe_set" {:t :array :op "array.set" :arity 3} "%array_unsafe_get" {:t :array :op "array.unsafe_get" :arity 2}
+    "%array_unsafe_set" {:t :array :op "array.unsafe_set" :arity 3}
+    "%obj_size" {:t :array :op "array.length" :arity 1} "%obj_field" {:t :array :op "array.unsafe_get" :arity 2}
+    "%obj_set_field" {:t :array :op "array.unsafe_set" :arity 3} "%obj_is_int" {:t :p :name "isint" :arity 1}
+    "%floatarray_length" {:t :p :name "array.length[float]" :arity 1}
+    "%floatarray_safe_get" {:t :p :name "array.get[float]" :arity 2}
+    "%floatarray_safe_set" {:t :p :name "array.set[float]" :arity 3}
+    "%floatarray_unsafe_get" {:t :p :name "array.unsafe_get[float]" :arity 2}
+    "%floatarray_unsafe_set" {:t :p :name "array.unsafe_set[float]" :arity 3}
+    "%opaque" {:t :p :name "opaque" :arity 1} "%int_as_pointer" {:t :p :name "int_as_pointer" :arity 1}
+    "%sys_argv" {:t :sys-argv}
+    "%equal" {:t :cmp :c :eq} "%notequal" {:t :cmp :c :ne} "%lessequal" {:t :cmp :c :le} "%lessthan" {:t :cmp :c :lt}
+    "%greaterequal" {:t :cmp :c :ge} "%greaterthan" {:t :cmp :c :gt} "%compare" {:t :cmp :c :compare}}
+   (into {} (for [[k n] [["big_endian" "big_endian"] ["word_size" "word_size"] ["int_size" "int_size"]
+                         ["max_wosize" "max_wosize"] ["ostype_unix" "ostype_unix"] ["ostype_win32" "ostype_win32"]
+                         ["ostype_cygwin" "ostype_cygwin"] ["backend_type" "backend_type"]]]
+              [(str "%" k) {:t :p :name (str "sys.constant_" n) :arity 1}]))
+   (into {} (for [n [1 2 3] [op base] [["ref" 1] ["set" 2]] u ["" "unsafe_"]]
+              [(str "%caml_ba_" u op "_" n) {:t :bigarray :op (if (= op "ref") "get" "set") :unsafe (= u "unsafe_") :n n
+                                            :arity (+ n base)}]))
+   (into {} (for [n [1 2 3]] [(str "%caml_ba_dim_" n) {:t :p :name (str "Bigarray.dim_" n) :arity 1}]))
+   (into {} (for [[op ar] [["load" 1] ["exchange" 2] ["cas" 3] ["fetch_add" 2]]
+                  [k extra] [["" 0] ["_field" 1] ["_loc" 0]]]
+              [(str "%atomic_" op k) {:t :atomic :op op :field (= k "_field") :loc (= k "_loc") :arity (+ ar extra)}]))
+   {"%raise_with_backtrace" {:t :raise-bt} "%frame_pointers" {:t :frame-pointers} "%lazy_force" {:t :lazy-force}
+    "%standard_library_default" {:t :p :name "sys.constant_standard_library_default" :arity 1}
+    "%nativeint_of_int32" {:t :p :name "nativeint_of_int32" :arity 1} "%nativeint_to_int32" {:t :p :name "int32_of_nativeint" :arity 1}
+    "%int64_of_int32" {:t :p :name "int64_of_int32" :arity 1} "%int64_to_int32" {:t :p :name "int32_of_int64" :arity 1}
+    "%int64_of_nativeint" {:t :p :name "int64_of_nativeint" :arity 1} "%int64_to_nativeint" {:t :p :name "nativeint_of_int64" :arity 1}
+    "%bswap16" {:t :p :name "bswap16" :arity 1} "%bswap_int32" {:t :p :name "Int32.bswap" :arity 1}
+    "%bswap_int64" {:t :p :name "Int64.bswap" :arity 1} "%bswap_native" {:t :p :name "Nativeint.bswap" :arity 1}
+    "%dls_get" {:t :p :name "dls_get" :arity 1} "%poll" {:t :p :name "poll" :arity 1}
+    "%runstack" {:t :p :name "runstack" :arity 3} "%reperform" {:t :p :name "reperform" :arity 3}
+    "%perform" {:t :p :name "perform" :arity 1} "%resume" {:t :p :name "resume" :arity 4}}
+   (into {} (for [[src nm] [["string" "string"] ["bytes" "bytes"] ["bigstring" "bigarray.array1"]]
+                  [op ar] [["get" 2] ["set" 3]]
+                  w ["16" "32" "64"]
+                  u ["" "u"]]
+              [(str "%caml_" src "_" op w u) {:t :p :name (str (if (and (= src "string") (= op "set")) "bytes" nm) "."
+                                                              (if (= u "u") "unsafe_" "") op w)
+                                              :arity ar}]))
+   (into {} (for [[bi m] [["nativeint" "Nativeint"] ["int32" "Int32"] ["int64" "Int64"]]
+                  [op n] [["of_int" "of_int"] ["to_int" "to_int"] ["neg" "neg"] ["add" "add"] ["sub" "sub"] ["mul" "mul"]
+                          ["div" "div"] ["mod" "mod"] ["and" "and"] ["or" "or"] ["xor" "xor"] ["lsl" "lsl"] ["lsr" "lsr"]
+                          ["asr" "asr"]]]
+              [(str "%" bi "_" op) {:t :p :name (str m "." n) :arity (if (#{"of_int" "to_int" "neg"} op) 1 2)}]))))
+
+(defn- lookup-primitive [p]
+  (or (get primitives (:name p))
+      (if (str/starts-with? (:name p) "%")
+        (env/type-error (str "primitive " (:name p) " outside the slice"))
+        {:t :external :name (:name p)})))
+
+(defn- fn-params
+  "is_function_type twice: the first two parameter types of ty"
+  [ty]
+  (let [t (ty/expand-head ty) d (ty/desc t)]
+    (if (= :Tarrow (d 0))
+      (let [r (ty/expand-head (d 3)) rd (ty/desc r)]
+        (if (= :Tarrow (rd 0)) [(d 2) (rd 2)] [(d 2)]))
+      [])))
+
+(defn- base-type? [t p] (let [t (ty/expand-head t) d (ty/desc t)] (and (= :Tconstr (d 0)) (= (d 1) p))))
+
+(def ^:private cmp-names
+  {:generic {:eq "caml_equal" :ne "caml_notequal" :le "caml_lessequal" :lt "caml_lessthan" :ge "caml_greaterequal"
+             :gt "caml_greaterthan" :compare "caml_compare"}
+   :ints {:eq "==" :ne "!=" :le "<=" :lt "<" :ge ">=" :gt ">" :compare "compare_ints"}
+   :floats {:eq "==." :ne "!=." :le "<=." :lt "<." :ge ">=." :gt ">." :compare "compare_floats"}
+   :strings {:eq "caml_string_equal" :ne "caml_string_notequal" :le "caml_string_lessequal" :lt "caml_string_lessthan"
+             :ge "caml_string_greaterequal" :gt "caml_string_greaterthan" :compare "caml_string_compare"}
+   :bytes {:eq "caml_bytes_equal" :ne "caml_bytes_notequal" :le "caml_bytes_lessequal" :lt "caml_bytes_lessthan"
+           :ge "caml_bytes_greaterequal" :gt "caml_bytes_greaterthan" :compare "caml_bytes_compare"}
+   :int32 {:eq "Int32.==" :ne "Int32.!=" :le "Int32.<=" :lt "Int32.<" :ge "Int32.>=" :gt "Int32.>" :compare "compare_bints int32"}
+   :int64 {:eq "Int64.==" :ne "Int64.!=" :le "Int64.<=" :lt "Int64.<" :ge "Int64.>=" :gt "Int64.>" :compare "compare_bints int64"}
+   :nativeint {:eq "Nativeint.==" :ne "Nativeint.!=" :le "Nativeint.<=" :lt "Nativeint.<" :ge "Nativeint.>="
+               :gt "Nativeint.>" :compare "compare_bints nativeint"}})
+
+(def ^:private bigarray-kinds
+  {"float16_elt" "float16" "float32_elt" "float32" "float64_elt" "float64" "int8_signed_elt" "sint8"
+   "int8_unsigned_elt" "uint8" "int16_signed_elt" "sint16" "int16_unsigned_elt" "uint16" "int32_elt" "int32"
+   "int64_elt" "int64" "int_elt" "camlint" "nativeint_elt" "nativeint" "complex32_elt" "complex32"
+   "complex64_elt" "complex64"})
+
+(defn- bigarray-kind-layout
+  "Typeopt.bigarray_type_kind_and_layout: the element kind and layout a bigarray's type names"
+  [t]
+  (let [decode (fn [t tbl dfl]
+                 (let [d (ty/desc (ty/expand-head t))]
+                   (or (when (and (= :Tconstr (d 0)) (empty? (d 2)) (= :Pdot ((d 1) 0)) (= :Pident (((d 1) 1) 0))
+                                  (= "Stdlib__Bigarray" (:name (((d 1) 1) 1))))
+                         (get tbl ((d 1) 2)))
+                       dfl)))
+        d (ty/desc (ty/expand-head t))]
+    (if (and (= :Tconstr (d 0)) (= 3 (count (d 2))))
+      [(decode ((d 2) 1) bigarray-kinds "generic") (decode ((d 2) 2) {"c_layout" "C" "fortran_layout" "Fortran"} "unknown")]
+      ["generic" "unknown"])))
+
+(defn- specialize
+  "Translprim.specialize_primitive: the primitive as the types make it"
+  [ty has-constant-constructor prim]
+  (let [ps (fn-params ty)]
+    (case (:t prim)
+      :field (let [t (ty/expand-head ty) d (ty/desc t)
+                   ptr (if (= :Tarrow (d 0)) (ty/maybe-pointer (d 3)) :pointer)]
+               (assoc prim :ptr ptr))
+      :setfield (assoc prim :ptr (if (= 2 (count ps)) (ty/maybe-pointer (second ps)) :pointer))
+      :array (assoc prim :kind (let [k (if (seq ps) (ty/array-kind (first ps)) "gen")] k))
+      :makeblock (assoc prim :shape (mapv ty/value-kind ps))
+      :bigarray (assoc prim :kl (if (seq ps) (bigarray-kind-layout (first ps)) ["generic" "unknown"]))
+      :cmp (if (empty? ps)
+             (assoc prim :kind :generic)
+             (let [p1 (first ps)]
+               (assoc prim :kind
+                      (cond (and has-constant-constructor (#{:eq :ne} (:c prim))) :ints
+                            (or (base-type? p1 ty/path-int) (base-type? p1 ty/path-char) (ty/immediate? p1)) :ints
+                            (base-type? p1 ty/path-float) :floats
+                            (base-type? p1 ty/path-string) :strings
+                            (base-type? p1 ty/path-bytes) :bytes
+                            (base-type? p1 ty/path-int32) :int32
+                            (base-type? p1 ty/path-int64) :int64
+                            (base-type? p1 ty/path-nativeint) :nativeint
+                            :else :generic))))
+      prim)))
+
+(defn- prim-of [prim]
+  (case (:t prim)
+    :field (l/pfield (:pos prim) (:ptr prim) true)
+    :setfield (l/psetfield (:pos prim) (:ptr prim))
+    :makeblock (l/pmakeblock 0 (:mut prim) (if (some #(not= "" %) (:shape prim)) (:shape prim) nil))
+    :array (l/prim (str (:op prim) "[" (if (= "gen" (:kind prim)) "gen" (:kind prim)) "]"))
+    :cmp (let [k (or (:kind prim) :generic) n (get-in cmp-names [k (:c prim)])]
+           (if (#{:generic :strings :bytes} k) (l/pccall n) (l/prim n)))
+    :p (l/prim (:name prim))
+    :bigarray (let [[k lay] (:kl prim)] (l/prim (str "Bigarray." (when (:unsafe prim) "unsafe_") (:op prim) "[" k "," lay "]")))
+    :external (l/pccall (:name prim))))
+
+(defn- prim-arity [prim desc]
+  (case (:t prim)
+    (:field :makeblock) 1
+    :setfield 2
+    (:raise :identity) 1
+    :raise-bt 2
+    :send (if (= :cache (:k prim)) 4 2)
+    :frame-pointers 0
+    :lazy-force 1
+    :atomic (:arity prim)
+    (:apply :revapply :cmp) 2
+    :sys-argv 0
+    :loc (:arity desc)
+    (:p :array :bigarray) (:arity prim)
+    :external (:arity desc)))
+
+(declare inline-lazy-force)
+
+(def ^:dynamic *prim-loc* "The location of the primitive's use (Translprim's loc)" nil)
+(def ^:dynamic *unit-name* "Env.get_current_unit_name: the unit being translated" nil)
+(declare pos-info)
+
+;; ---------------------------------------------------------------------------------------------
+;; Scoped locations (lambda/debuginfo.ml's Scoped_location): the names a %loc_FUNCTION reports
+
+(def ^:dynamic *scopes* "Debuginfo.Scoped_location.scopes: nil (Empty) or {:item :str :str-fun}" nil)
+(def ^:private new-scope "Translcore's ~in_new_scope for the next transl-exp (transl_scoped_exp sets it)" (atom false))
+
+(defn- add-parens-if-symbolic [^String s]
+  (cond (= "" s) ""
+        (let [c (.charAt s 0)] (or (Character/isLetterOrDigit c) (= c \_))) s
+        :else (str "(" s ")")))
+
+(defn- scope-dot [scopes s & [sep]]
+  (let [s (add-parens-if-symbolic s)] (if scopes (str (:str scopes) (or sep ".") s) s)))
+
+(defn- scope-cons [item s] {:item item :str s :str-fun (str s ".(fun)")})
+
+(defn enter-anonymous-function [scopes]
+  (let [s (if scopes (:str-fun scopes) "(fun)")] {:item :anonymous-function :str s :str-fun s}))
+(defn enter-value-definition [scopes id] (scope-cons :value-definition (scope-dot scopes (:name id))))
+(defn enter-module-definition [scopes id] (scope-cons :module-definition (scope-dot scopes (:name id))))
+(defn enter-class-definition [scopes id] (scope-cons :class-definition (scope-dot scopes (:name id))))
+(defn enter-method-definition [scopes name]
+  (scope-cons :method-definition (if (= :class-definition (:item scopes)) (scope-dot scopes name "#") (scope-dot scopes name))))
+
+(defn- string-of-scopes [scopes] (if scopes (:str scopes) "<unknown>"))
+
+(defn- lambda-of-loc
+  "Translprim.lambda_of_loc"
+  [k]
+  (let [loc *prim-loc*
+        [file lnum cnum] (pos-info loc)
+        enum (+ (- (lex/pos-cnum (second loc)) (lex/pos-cnum (first loc))) cnum)]
+    (case k
+      :pos [:Lconst [:block 0 [[:string file] [:int lnum] [:int cnum] [:int enum]]]]
+      :file [:Lconst [:string file]]
+      :module [:Lconst [:string (or *unit-name* (str "//" (last (str/split file #"/")) "//"))]]
+      :loc [:Lconst [:string (format "File \"%s\", line %d, characters %d-%d" file lnum cnum enum)]]
+      :function [:Lconst [:string (string-of-scopes *scopes*)]]
+      :line (l/lconst-int lnum))))
+
+(defn- lambda-of-prim [prim args]
+  (case (:t prim)
+    :loc (let [lam (lambda-of-loc (:k prim))]
+           (if (empty? args) lam [:Lprim (l/pmakeblock 0 false nil) [lam (first args)]]))
+    :sys-argv [:Lprim (l/pccall "caml_sys_argv") [(l/lconst-int 0)]]
+    :raise (let [a (first args)
+                 k (if (and (= :regular (:k prim)) (= :Lvar (a 0)) (@try-ids (a 1))) :reraise (:k prim))]
+             [:Lprim (l/praise k) [a]])
+    :identity (first args)
+    :raise-bt (let [vexn (ty/ident-create "exn")]
+                [:Llet :strict "" vexn (first args)
+                 [:Lsequence [:Lprim (l/pccall "caml_restore_raw_backtrace") [[:Lvar vexn] (second args)]]
+                  [:Lprim (l/praise :reraise) [[:Lvar vexn]]]]])
+    :frame-pointers (l/lconst-int 0)
+    :lazy-force (inline-lazy-force (first args))
+    :atomic (let [p (if (= "load" (:op prim)) (l/prim "atomic_load") (l/pccall (str "caml_atomic_" (:op prim) "_field")))
+                  a (first args)]
+              (cond
+                (:field prim) [:Lprim p args]
+                (:loc prim) (if (and (= :Lprim (a 0)) (= :makeblock (:kind (a 1))) (= 2 (count (a 2))))
+                              [:Lprim p (into (a 2) (rest args))]
+                              (let [v (ty/ident-create "atomic_arg")]
+                                [:Llet :strict "" v a
+                                 [:Lprim p (into [[:Lprim (l/pfield 0 :pointer false) [[:Lvar v]]]
+                                                  [:Lprim (l/pfield 1 :immediate false) [[:Lvar v]]]]
+                                                 (rest args))]]))
+                :else [:Lprim p (into [a (l/lconst-int 0)] (rest args))]))
+    :apply [:Lapply (first args) [(second args)]]
+    ;; bytecode: a cached send is a public one
+    :send [:Lsend (if (= :self (:k prim)) :self :public) (second args) (first args) []]
+    :revapply [:Lapply (second args) [(first args)]]
+    [:Lprim (prim-of prim) args]))
+
+(defn- mark-used [prim vd]
+  (when (and (= :external (:t prim)) (= :Pdot (get (:path vd) 0)) (:global (ty/path-head (:path vd))))
+    (swap! required conj (:name (ty/path-head (:path vd))))))
+
+(defn transl-primitive
+  "Translprim.transl_primitive: an unapplied primitive as a function of fresh parameters"
+  [vd ty]
+  (let [desc (second (:kind vd))
+        prim (specialize ty false (lookup-primitive desc))
+        params (vec (repeatedly (:arity desc) #(ty/ident-create "prim")))
+        body (lambda-of-prim prim (mapv (fn [id] [:Lvar id]) params))]
+    (if (empty? params) body [:Lfunction :curried (mapv (fn [id] [id ""]) params) "" body])))
+
+;; ---------------------------------------------------------------------------------------------
+;; Constants
+
+(defn lambda-of-const [c]
+  (case (c 0)
+    :string [:Lconst [:string (c 1)]]
+    [:Lconst c]))
+
+(defn- extract-constant [lam] (when (= :Lconst (lam 0)) (lam 1)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Locations for Match_failure and Assert_failure
+
+(defn pos-info [loc]
+  (let [p (first loc)] [(lex/pos-fname p) (lex/pos-lnum p) (- (lex/pos-cnum p) (lex/pos-bol p))]))
+
+(defn failure-block [path loc]
+  (let [[f line ch] (pos-info loc)]
+    [:Lprim (l/praise :regular)
+     [[:Lprim (l/pmakeblock 0 false nil)
+       [(transl-extension-path path) [:Lconst [:block 0 [[:string f] [:int line] [:int ch]]]]]]]]))
+
+;; ---------------------------------------------------------------------------------------------
+;; Expressions
+
+(declare transl-exp transl-function transl-let transl-apply transl-match transl-handler)
+
+(defn- split-pattern
+  "Typedtree.split_pattern: [value-part exception-part] of a computation pattern"
+  [p]
+  (let [d (:desc p)]
+    (case (d 0)
+      :Tpat_exception [nil (d 1)]
+      :Tpat_or (let [[v1 e1] (split-pattern (d 1)) [v2 e2] (split-pattern (d 2))
+                     comb (fn [a b] (cond (and a b) (assoc p :desc [:Tpat_or a b]) a a :else b))]
+                 [(comb v1 v2) (comb e1 e2)])
+      [p nil])))
+
+(defn- transl-guard [guard rhs]
+  (let [e (transl-exp rhs)]
+    (if guard [:Lifthenelse (transl-exp guard) e l/staticfail] e)))
+
+(defn- transl-case [c] [(:lhs c) (transl-guard (:guard c) (:rhs c))])
+
+(defn- reachable
+  "Translcore's filter of the refutation cases (`| p -> .`, Texp_unreachable): typed, counted in the match's
+  partiality, then left out of the translation"
+  [cases]
+  (remove #(= :Texp_unreachable ((:desc (:rhs %)) 0)) cases))
+
+(defn- exn-names [p]
+  (let [d (:desc p)] (case (d 0) :Tpat_var [(d 1)] :Tpat_alias (cons (d 2) (exn-names (d 1))) [])))
+
+(defn- transl-case-try [c]
+  (let [ids (exn-names (:lhs c)) before @try-ids]
+    (swap! try-ids into ids)
+    (try (transl-case c) (finally (reset! try-ids before)))))
+
+(defn- transl-list-with-shape [es] [(mapv transl-exp es) (mapv #(ty/value-kind (:type %)) es)])
+
+(defn- record-tag [repres] (if (vector? repres) (repres 1) 0))
+
+(defn- transl-record [loc fields repres init]
+  (let [size (count fields)
+        init-id (ty/ident-create "init")
+        lv (mapv (fn [[lbl df]]
+                   (case (df 0)
+                     :kept (let [t (df 1)]
+                             [(if (= :float repres)
+                                [:Lprim (l/prim (str "floatfield " (:pos lbl))) [[:Lvar init-id]]]
+                                [:Lprim (l/pfield (:pos lbl) (ty/maybe-pointer t) (df 2)) [[:Lvar init-id]]])
+                              (ty/value-kind t)])
+                     :overridden [(transl-exp (df 1)) (ty/value-kind (:type (df 1)))]))
+                 fields)
+        ll (mapv first lv) shape (mapv second lv)
+        mut (some (fn [[lbl _]] (:mut lbl)) fields)
+        cl (when-not mut (let [cs (map extract-constant ll)] (when (every? some? cs) (vec cs))))
+        lam (cond
+              cl (if (= :float repres) [:Lconst [:float-array (mapv second cl)]] [:Lconst [:block (record-tag repres) cl]])
+              (= :float repres) [:Lprim (l/prim (str (if mut "makearray" "makearray_imm") "[float]")) ll]
+              :else [:Lprim (l/pmakeblock (record-tag repres) (boolean mut) shape) ll])]
+    (if init [:Llet :strict "" init-id (transl-exp init) lam] lam)))
+
+(defn- transl-array [e es & [immutable]]
+  (let [kind (ty/array-kind (:type e))
+        ll (mapv transl-exp es)
+        makearray (fn [mut] [:Lprim (l/prim (str (if mut "makearray" "makearray_imm") "[" kind "]")) ll])
+        dup (fn [a] [:Lprim (l/prim (str "duparray[" kind "]")) [a]])]
+    (if immutable
+      (let [cs (map extract-constant ll)]
+        (if (every? some? cs)
+          (case kind
+            ("addr" "int") [:Lconst [:block 0 (vec cs)]]
+            "float" [:Lconst [:float-array (mapv second cs)]]
+            (makearray false))
+          (makearray false)))
+    (if (<= (count ll) 4)
+      (makearray true)
+      (let [cs (map extract-constant ll)]
+        (if (every? some? cs)
+          (case kind
+            ("addr" "int") (dup [:Lconst [:block 0 (vec cs)]])
+            "float" (dup [:Lconst [:float-array (mapv second cs)]])
+            (makearray true))
+          (if (= kind "float") (dup (makearray false)) (makearray true))))))))
+
+(def ^:dynamic *transl-object* "Translcore's transl_object: (fn [structure public-methods env] lambda)" nil)
+(def ^:dynamic *oo-wrap* "Translobj.oo_wrap: (fn [env req thunk] lambda)" (fn [_ _ f] (f)))
+(def ^:dynamic *oo-prim* "Translobj.oo_prim: (fn [name] lambda)" nil)
+(def ^:dynamic *transl-class-path* "A class's value: (fn [path] lambda)" nil)
+(def ^:dynamic *transl-label-init* "Translobj.transl_label_init: (fn [thunk] lambda)" nil)
+
+(declare transl-exp0)
+
+(defn transl-exp
+  "Translcore.transl_exp1: a function, for or while evaluated more than once, its immediate objects' classes cached;
+  a function not just given a scope of its own (transl_scoped_exp) enters an anonymous function's"
+  [e]
+  (let [in-new-scope (when @new-scope (reset! new-scope false) true)]
+    (if (#{:Texp_function :Texp_for :Texp_while} ((:desc e) 0))
+      (if (and (= :Texp_function ((:desc e) 0)) (not in-new-scope))
+        (binding [*scopes* (enter-anonymous-function *scopes*)] (*oo-wrap* (:env e) true #(transl-exp0 e)))
+        (*oo-wrap* (:env e) true #(transl-exp0 e)))
+      (transl-exp0 e))))
+
+(defn transl-scoped-exp
+  "Translcore.transl_scoped_exp: e translated in scopes, which it was just given"
+  [scopes e]
+  (binding [*scopes* scopes] (reset! new-scope true) (transl-exp e)))
+
+(defn- transl-bound-exp
+  "Translcore.transl_bound_exp: a binding of a function, or any in a structure, in the scope of its first variable"
+  [in-structure pat expr]
+  (let [ids (pm/bound-idents pat)]
+    (if (and (seq ids) (or (= :Texp_function ((:desc expr) 0)) in-structure))
+      (transl-scoped-exp (enter-value-definition *scopes* (first ids)) expr)
+      (transl-exp expr))))
+
+(defn- transl-setinstvar [self var expr]
+  [:Lprim (l/prim (str "setfield_" (if (= :immediate (ty/maybe-pointer (:type expr))) "imm" "ptr") "_computed"))
+   [self var (transl-exp expr)]])
+
+(defn transl-exp0 [e]
+  (let [d (:desc e)]
+    (case (d 0)
+      :Texp_send (let [obj (transl-exp (d 1)) meth (d 2)]
+                   (case (meth 0)
+                     :Tmeth_val [:Lsend :self [:Lvar (meth 1)] obj []]
+                     :Tmeth_name [:Lsend :public (l/lconst-int (ty/hash-variant (meth 1))) obj []]
+                     :Tmeth_ancestor [:Lapply [:Lvar (meth 1)] [(transl-address (meth 2) nil)]]))
+      :Texp_new [:Lapply [:Lprim (l/pfield 0 :pointer true) [(*transl-class-path* (d 1))]] [l/lambda-unit]]
+      :Texp_instvar [:Lprim (l/prim "field_computed") [(transl-address (d 1) nil) [:Lvar (d 2)]]]
+      :Texp_setinstvar (transl-setinstvar (transl-address (d 1) nil) [:Lvar (d 2)] (d 3))
+      :Texp_override (let [cpy (ty/ident-create "copy")]
+                       [:Llet :strict "" cpy [:Lapply (*oo-prim* "copy") [(transl-address (d 1) nil)]]
+                        (reduce (fn [rem [id _ expr]] [:Lsequence (transl-setinstvar [:Lvar cpy] [:Lvar id] expr) rem])
+                                [:Lvar cpy] (reverse (d 2)))])
+      :Texp_object (*transl-object* (d 1) (d 2) (d 3))
+      :Texp_ident (let [vd (d 2)]
+                    (if (= :prim (first (:kind vd)))
+                      (let [p (lookup-primitive (second (:kind vd)))] (mark-used p vd) (binding [*prim-loc* (:loc e)] (transl-primitive vd (:type e))))
+                      (transl-value-path vd)))
+      :Texp_constant (lambda-of-const (d 1))
+      :Texp_let (transl-let (d 1) (d 2) (transl-exp (d 3)) false)
+      :Texp_function (transl-function e (d 1) (d 2))
+      :Texp_apply
+      (let [f (d 1) args (d 2) fd (:desc f)]
+        (if (and (= :Texp_ident (fd 0)) (= :prim (first (:kind (fd 2))))
+                 (let [desc (second (:kind (fd 2)))] (and (>= (count args) (:arity desc)) (every? some? (map second args)))))
+          (let [vd (fd 2) desc (second (:kind vd))
+                n (:arity desc)
+                argl (take n args) extra (vec (drop n args))
+                arg-exps (mapv second argl)
+                largs (mapv transl-exp arg-exps)
+                p (lookup-primitive desc)
+                _ (mark-used p vd)
+                hcc (boolean (some (fn [a] (let [ad (:desc a)] (or (and (= :Texp_construct (ad 0)) (= :Cstr_constant ((:tag (ad 1)) 0)))
+                                                                  (and (= :Texp_variant (ad 0)) (nil? (ad 2))))))
+                                   (when (= 2 (count arg-exps)) arg-exps)))
+                prim (specialize (:type f) hcc p)
+                lam (binding [*prim-loc* (:loc e)] (lambda-of-prim prim largs))]
+            (if (empty? extra) lam (transl-apply lam extra)))
+          (transl-apply (transl-exp f) args)))
+      ;; Translcore.transl_letop: each and-operator applied to the bindings so far and its expression, the
+      ;; let-operator to their result and the body's function (no arity fusion)
+      :Texp_letop (let [[_ lop lexp ands param case partial] d
+                        exp ((fn lp [prev ands]
+                               (if (empty? ands)
+                                 prev
+                                 (let [[op e] (first ands)
+                                       left (ty/ident-create "left") right (ty/ident-create "right")
+                                       lam (l/bind :strict right (transl-exp e) [:Lapply (transl-exp op) [[:Lvar left] [:Lvar right]]])]
+                                   (l/bind :strict left prev (lp lam (rest ands))))))
+                             (transl-exp lexp) ands)
+                        func (transl-function {:loc (:loc (:rhs case))} []
+                                              [:cases [case] partial param (:loc (:rhs case))])]
+                    [:Lapply (transl-exp lop) [exp func]])
+      :Texp_match (if (seq (get d 4))
+                    ;; Translcore's Texp_match with effect cases: the values' and the exceptions' cases split, transl_handler
+                    (let [[vc ec] (reduce (fn [[vc ec] c]
+                                            (let [[pv pe] (split-pattern (:lhs c))]
+                                              [(cond-> vc pv (conj (assoc c :lhs pv))) (cond-> ec pe (conj (assoc c :lhs pe)))]))
+                                          [[] []] (reachable (d 2)))]
+                      (transl-handler e (d 1) [vc (d 3)] ec (d 4)))
+                    (transl-match e (d 1) (d 2) (d 3)))
+      :Texp_try (if (seq (get d 3))
+                  (transl-handler e (d 1) nil (d 2) (d 3))
+                  (let [cases (d 2)
+                      id (m/name-pattern* "exn" (map :lhs cases))]
+                  [:Ltrywith (transl-exp (d 1)) id
+                   (m/for-trywith (:loc e) [:Lvar id] (mapv transl-case-try (reachable cases)))]))
+      :Texp_tuple (let [[ll shape] (transl-list-with-shape (mapv second (d 1)))
+                        cs (map extract-constant ll)]
+                    (if (every? some? cs)
+                      [:Lconst [:block 0 (vec cs)]]
+                      [:Lprim (l/pmakeblock 0 false shape) ll]))
+      :Texp_construct
+      (let [c (d 1) [ll shape] (transl-list-with-shape (d 2)) tag (:tag c)]
+        (case (if (or (:inlined c) (:unboxed c)) :inlined (tag 0))
+          :inlined (first ll)
+          :Cstr_constant (l/lconst-int (tag 1))
+          :Cstr_block (let [cs (map extract-constant ll)]
+                        (if (every? some? cs)
+                          [:Lconst [:block (tag 1) (vec cs)]]
+                          [:Lprim (l/pmakeblock (tag 1) false shape) ll]))
+          :Cstr_extension (let [lam (transl-extension-path (tag 1))]
+                            (if (tag 2) lam [:Lprim (l/pmakeblock 0 false (vec (cons "" shape))) (vec (cons lam ll))]))))
+      :Texp_variant (let [tag (ty/hash-variant (d 1))]
+                      (if-let [arg (d 2)]
+                        (let [lam (transl-exp arg)]
+                          (if-let [c (extract-constant lam)]
+                            [:Lconst [:block 0 [[:int tag] c]]]
+                            [:Lprim (l/pmakeblock 0 false nil) [(l/lconst-int tag) lam]]))
+                        (l/lconst-int tag)))
+      :Texp_record (transl-record (:loc e) (d 1) (d 2) (d 3))
+      :Texp_extension_constructor (transl-extension-path (d 1))
+      :Texp_atomic_loc (let [r (d 1) lbl (d 2)]
+                         [:Lprim (l/pmakeblock 0 false [(ty/value-kind (:type r)) "[int]"]) [(transl-exp r) (l/lconst-int (:pos lbl))]])
+      :Texp_field (let [lbl (d 2) targ (transl-exp (d 1))]
+                    (if (:atomic lbl)
+                      [:Lprim (l/prim "atomic_load") [targ (l/lconst-int (:pos lbl))]]
+                    (if (= :float (:repres lbl))
+                      [:Lprim (l/prim (str "floatfield " (:pos lbl))) [targ]]
+                      [:Lprim (l/pfield (:pos lbl) (ty/maybe-pointer (:type e)) (:mut lbl)) [targ]])))
+      :Texp_setfield (let [lbl (d 2) v (d 3)]
+                       (if (:atomic lbl)
+                         [:Lprim (l/prim "ignore") [[:Lprim (l/pccall "caml_atomic_exchange_field")
+                                                     [(transl-exp (d 1)) (l/lconst-int (:pos lbl)) (transl-exp v)]]]]
+                       [:Lprim (if (= :float (:repres lbl))
+                                 (l/prim (str "setfloatfield " (:pos lbl)))
+                                 (l/psetfield (:pos lbl) (ty/maybe-pointer (:type v))))
+                        [(transl-exp (d 1)) (transl-exp v)]]))
+      :Texp_array (transl-array e (d 1) (false? (get d 2)))
+      :Texp_ifthenelse [:Lifthenelse (transl-exp (d 1)) (transl-exp (d 2)) (if (d 3) (transl-exp (d 3)) l/lambda-unit)]
+      :Texp_sequence [:Lsequence (transl-exp (d 1)) (transl-exp (d 2))]
+      :Texp_while [:Lwhile (transl-exp (d 1)) (transl-exp (d 2))]
+      :Texp_for [:Lfor (d 1) (transl-exp (d 2)) (transl-exp (d 3)) (if (= :Upto (d 4)) :to :downto) (transl-exp (d 5))]
+      :Texp_assert (let [c (d 1) cd (:desc c)]
+                     (if (and (= :Texp_construct (cd 0)) (= "false" (:name (cd 1))))
+                       (failure-block ty/path-assert-failure (d 2))
+                       [:Lifthenelse (transl-exp c) l/lambda-unit (failure-block ty/path-assert-failure (d 2))]))
+      :Texp_unreachable (throw (ex-info "Unreachable_reached: an unreachable expression was translated" {}))
+      :Texp_struct_item (*transl-struct-item* (d 1) (fn [] (transl-exp (d 2))))
+      :Texp_pack (*transl-module* nil nil (d 1))
+      :Texp_lazy (let [a (d 1) ad (:desc a)]
+                   ;; Typeopt.classify_lazy_argument
+                   (cond
+                     (or (and (= :Texp_constant (ad 0)) (not= :float ((ad 1) 0)))
+                         (= :Texp_function (ad 0))
+                         (and (= :Texp_construct (ad 0)) (zero? (:arity (ad 1)))))
+                     (transl-exp a)
+                     (= :Texp_constant (ad 0)) [:Lprim (l/prim "makeforwardblock") [(transl-exp a)]]
+                     (= :Texp_ident (ad 0)) (if (#{:any :lazy :float} (ty/classify (:type a)))
+                                              [:Lprim (l/prim "makeforwardblock") [(transl-exp a)]]
+                                              (transl-exp a))
+                     :else [:Lprim (l/prim "makelazyblock")
+                            [[:Lfunction :curried [[(ty/ident-create "param") ""]] "" (transl-exp a)]]])))))
+
+(alter-var-root #'vr/*transl-prim*
+                (constantly (fn [unit field] (transl-value-path (get-in (env/find-unit unit) [:values field])))))
+
+(defn inline-lazy-force
+  "Matching.inline_lazy_force for bytecode (inline_lazy_force_cond)"
+  [arg]
+  (let [idarg (ty/ident-create "lzarg") varg [:Lvar idarg] tag (ty/ident-create "tag")
+        test-tag (fn [t] [:Lprim (l/pintcomp :eq) [[:Lvar tag] (l/lconst-int t)]])
+        force [:Lapply (transl-value-path (get-in (env/find-unit "CamlinternalLazy") [:values "force_lazy_block"]))
+               [[:Lprim (l/prim "opaque") [varg]]]]]
+    [:Llet :strict "" idarg arg
+     [:Llet :alias "" tag [:Lprim (l/pccall "caml_obj_tag") [varg]]
+      [:Lifthenelse (test-tag 250)
+       [:Lprim (l/pfield 0 :pointer true) [varg]]
+       [:Lifthenelse [:Lprim (l/prim "||") [(test-tag 246) (test-tag 244)]] force varg]]]]))
+
+(defn transl-apply
+  "Translcore.transl_apply: right-to-left evaluation, out-of-order partial applications as closures"
+  [lam sargs]
+  (let [lapply (fn [f args]
+                 (case (f 0)
+                   :Lapply [:Lapply (f 1) (vec (concat (f 2) args))]
+                   :Lsend [:Lsend (f 1) (f 2) (f 3) (vec (concat (f 4) args))]
+                   [:Lapply f (vec args)]))]
+    (letfn [(build [lam args l]
+              (if (empty? l)
+                (lapply lam (reverse (map first args)))
+                (let [[a optional] (first l)]
+                  (if (some? a)
+                    (build lam (cons [a optional] args) (rest l))
+                    (let [defs (atom ())
+                          protect (fn [name lam]
+                                    (if (#{:Lvar :Lconst} (lam 0))
+                                      lam
+                                      (let [id (ty/ident-create name)] (swap! defs conj [id lam]) [:Lvar id])))
+                          [args args'] (if (every? second args) [() args] [args ()])
+                          lam (if (empty? args) lam (lapply lam (reverse (map first args))))
+                          handle (protect "func" lam)
+                          args' (mapv (fn [[a o]] [(protect "arg" a) o]) args')
+                          l (mapv (fn [[a o]] [(when a (protect "arg" a)) o]) (rest l))
+                          id-arg (ty/ident-create "param")
+                          body (let [b (build handle (cons [[:Lvar id-arg] optional] args') l)]
+                                 (if (= :Lfunction (b 0))
+                                   [:Lfunction :curried (vec (cons [id-arg ""] (b 2))) (b 3) (b 4)]
+                                   [:Lfunction :curried [[id-arg ""]] "" b]))]
+                      ;; List.fold_right over !defs (the latest first): the latest protected outermost, evaluated first
+                      (reduce (fn [body [id lam]] [:Llet :strict "" id lam body]) body (reverse @defs)))))))]
+      (build lam () (mapv (fn [[label a]] [(when a (transl-exp a)) (ty/is-optional label)]) sargs)))))
+
+(defn- vk-union [a b] (if (= a b) a ""))
+
+(defn transl-function
+  "Translcore.transl_curried_function (bytecode: no tupled functions)"
+  [e params body]
+  (let [;; Translcore.fuse_method_arity: a method's self parameter and its own parameters in one function
+        [params body] (let [b (when (= :body (body 0)) (body 1))]
+                        (if (and b (:poly b) (= :Texp_function ((:desc b) 0)))
+                          [(into (vec params) ((:desc b) 1)) ((:desc b) 2)]
+                          [params body]))
+        ret (case (body 0)
+              :body (ty/value-kind (:type (body 1)))
+              :cases (if-let [c (first (body 1))] (ty/value-kind (:type (:rhs c))) ""))
+        [cases-param lbody]
+        (case (body 0)
+          :body [nil (transl-exp (body 1))]
+          :cases (let [[_ cases partial param loc] body
+                       kind (reduce vk-union (map #(ty/value-kind (:type (:lhs %))) cases))]
+                   [[param kind] (m/for-function (or loc (:loc e)) [:Lvar param] (mapv transl-case (reachable cases)) partial)]))
+        [lbody lparams]
+        (reduce (fn [[body ps] fp]
+                  (let [param (:param fp) k (:kind fp)]
+                    (case (k 0)
+                      ;; each parameter's matching at its own location (fp_loc)
+                      :pat [(m/for-function (or (:loc fp) (:loc e)) [:Lvar param] [[(k 1) body]] (:partial fp))
+                            (cons [param (ty/value-kind (:type (k 1)))] ps)]
+                      :opt [(m/for-optional-arg-default (or (:loc fp) (:loc e)) (k 1) (transl-exp (k 2)) param body)
+                            (cons [param ""] ps)])))
+                [lbody (if cases-param [cases-param] [])]
+                (reverse params))]
+    [:Lfunction :curried (vec lparams) ret lbody]))
+
+(defn- with-vb-attrs
+  "Translattribute.add_function_attributes: [@tail_mod_cons] on a function's binding"
+  [vb lam]
+  (if (and (= :Lfunction (lam 0)) (some #{"tail_mod_cons" "ocaml.tail_mod_cons"} (:attrs vb)))
+    (assoc (if (< (count lam) 6) (conj lam {}) lam) 5 (assoc (get lam 5) :tmc true))
+    lam))
+
+(defn transl-let
+  "Translcore.transl_let; body a function for a structure's let: the bindings translated first, then the rest
+  (Translmod.transl_structure's order)"
+  [rec vbs body in-structure]
+  (if (= rec :Recursive)
+    ;; Value_rec_compiler.compile_letrec over (id, rkind, def)
+    (let [defs (mapv (fn [vb] [((:desc (:pat vb)) 1) (or (:rec-kind vb) (vr/rec-kind (:expr vb)))
+                               (with-vb-attrs vb (transl-bound-exp in-structure (:pat vb) (:expr vb)))])
+                     vbs)]
+      (vr/compile-letrec defs (if (fn? body) (body) body)))
+    (let [lams (mapv (fn [vb] (transl-bound-exp in-structure (:pat vb) (:expr vb))) vbs)
+          body (if (fn? body) (body) body)]
+      (reduce (fn [body [vb lam]] (m/for-let (:loc (:pat vb)) lam (:pat vb) body))
+              body (reverse (map vector vbs lams))))))
+
+(defn- transl-cases-cont
+  "Translcore.transl_cases ~cont: an effect case's continuation variable an alias of the handler's k"
+  [cont cases]
+  (mapv (fn [c] (let [[p body] (transl-case c)]
+                  [p (if-let [id (:cont c)] [:Llet :alias "" id [:Lvar cont] body] body)]))
+        (reachable cases)))
+
+(defn- evaluated? [lam] (contains? #{:Lconst :Lvar :Lfunction} (lam 0)))
+
+(defn transl-handler
+  "Translcore.transl_handler: the handler's three functions (values, exceptions, effects) on a stack
+  caml_alloc_stack makes, the body a function of one argument run on it by runstack"
+  [e body val-caselist exn-caselist eff-caselist]
+  (let [lfun (fn [params lbody] [:Lfunction :curried (mapv (fn [p] [p ""]) params) "" lbody])
+        val-fun (if-let [[vcs partial] val-caselist]
+                  (let [cases (mapv transl-case (reachable vcs))
+                        param (m/name-pattern* "param" (map :lhs vcs))]
+                    (lfun [param] (m/for-function (:loc e) [:Lvar param] cases partial)))
+                  (let [param (ty/ident-create "param")] (lfun [param] [:Lvar param])))
+        exn-fun (let [cases (mapv transl-case (reachable exn-caselist))
+                      param (m/name-pattern* "exn" (map :lhs exn-caselist))]
+                  (lfun [param] (m/for-trywith (:loc e) [:Lvar param] cases)))
+        eff-fun (let [param (m/name-pattern* "eff" (map :lhs eff-caselist))
+                      cont (ty/ident-create "k")
+                      cont-tail (ty/ident-create "ktail")
+                      cases (transl-cases-cont cont eff-caselist)]
+                  (lfun [param cont cont-tail]
+                        (m/for-handler (:loc e) [:Lvar param] [:Lvar cont] [:Lvar cont-tail] cases)))
+        lbody (transl-exp body)
+        [body-fun arg] (if (and (= :Lapply (lbody 0)) (= 1 (count (lbody 2)))
+                                (evaluated? (lbody 1)) (evaluated? (first (lbody 2))))
+                         [(lbody 1) (first (lbody 2))]
+                         [(lfun [(ty/ident-create "param")] lbody) [:Lconst [:int 0]]])]
+    [:Lprim (l/prim "runstack")
+     [[:Lprim (l/pccall "caml_alloc_stack") [val-fun exn-fun eff-fun]] body-fun arg]]))
+
+(defn transl-match [e arg cases partial]
+  (let [[val-cases exn-cases handlers]
+        (reduce (fn [[vc ec hs] c]
+                  (let [[pv pe] (split-pattern (:lhs c))]
+                    (cond
+                      (and pv (nil? pe)) [(conj vc (transl-case (assoc c :lhs pv))) ec hs]
+                      (and pe (nil? pv)) [vc (conj ec (transl-case-try (assoc c :lhs pe))) hs]
+                      :else (let [lbl (l/next-raise-count)
+                                  full (pm/bound-idents-full pv)
+                                  ids (mapv first full)
+                                  kinds (mapv (fn [[id _ t]] [id (ty/value-kind t)]) full)
+                                  vids (mapv ty/ident-rename ids)
+                                  pv (pm/alpha-pat (zipmap ids vids) pv)
+                                  rhs (let [before @try-ids]
+                                        (swap! try-ids into (exn-names pe))
+                                        (try (transl-exp (:rhs c)) (finally (reset! try-ids before))))]
+                              [(conj vc [pv [:Lstaticraise lbl (mapv (fn [v] [:Lvar v]) vids)]])
+                               (conj ec [pe [:Lstaticraise lbl (mapv (fn [v] [:Lvar v]) ids)]])
+                               (conj hs [lbl kinds rhs])]))))
+                [[] [] []] (reachable cases))
+        static-catch (fn [scrutinees val-ids handler]
+                       (let [id (m/name-pattern* "exn" (map first exn-cases))
+                             sid (l/next-raise-count)]
+                         [:Lstaticcatch [:Ltrywith [:Lstaticraise sid scrutinees] id
+                                         (m/for-trywith (:loc e) [:Lvar id] exn-cases)]
+                          [sid val-ids] handler]))
+        ad (:desc arg)
+        classic (cond
+                  (and (= :Texp_tuple (ad 0)) (empty? exn-cases))
+                  (m/for-multiple-match (:loc e) (mapv (comp transl-exp second) (ad 1)) val-cases partial)
+                  (= :Texp_tuple (ad 0))
+                  (let [argl (mapv second (ad 1))
+                        val-ids (mapv (fn [a] [(ty/ident-create "val") (ty/value-kind (:type a))]) argl)]
+                    (static-catch (mapv transl-exp argl) val-ids
+                                  (m/for-multiple-match (:loc e) (mapv (fn [[id _]] [:Lvar id]) val-ids) val-cases partial)))
+                  (empty? exn-cases)
+                  (m/for-function (:loc e) (transl-exp arg) val-cases partial)
+                  :else
+                  (let [val-id (m/name-pattern* "val" (map first val-cases))
+                        k (ty/value-kind (:type arg))]
+                    (static-catch [(transl-exp arg)] [[val-id k]]
+                                  (m/for-function (:loc e) [:Lvar val-id] val-cases partial))))]
+    (reduce (fn [body [sid ids handler]] [:Lstaticcatch body [sid ids] handler]) classic handlers)))

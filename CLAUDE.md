@@ -114,8 +114,8 @@ Prior art:
   `test/arbace-go-aot-results.edn` (classes `test/clojure/divergences-aot.edn`), the two levels'
   disagreements listed (`bin/gate --full`'s `suite-aot`).
 - `bin/reap` (and `make reap`; REAP1, doc/FULL-SUPPORT-SURVEY.md, RPS3, RPS13): the REAP matrix,
-  read, eval, AOT and print for Clojure, Java, Go, C, C++, Scheme, OCaml and Python (eight rows, 32 cells since merge plan batch 1,
-  2026-11-07, the rows' branches merged: four rows, 16 cells since C8, doc/C23-SURVEY.md §10; C++'s since CX10,
+  read, eval, AOT and print for Clojure, Java, Go, C, C++, Scheme, OCaml, Python, LLVM IR and Rust (ten rows, 40 cells since merge plan
+  batch 2, 2026-11-07, llvm-90's and rust-row's rows; eight rows, 32 cells since batch 1, the rows' branches merged: four rows, 16 cells since C8, doc/C23-SURVEY.md §10; C++'s since CX10,
   doc/cpp/CPP-SURVEY.md, "As built: CX10 (write-ahead)", "As built: cppi-check": C++'s read the token check's `test/repr/cpp/pp-check-known.edn` with its results
   `pp-check-results.edn` (`:c-known`'s `:id-sep "/"`) and CX9's dg record, eval and AOT CX8's `test/cpp/check{,-aot}-linux-amd64.edn` and the sampling's
   `check{,-aot}-every-25-linux-amd64.edn` (cppi-check; the lowering's `test/cpp/lower-results.edn` beside, reader `:cpp-lower`), print the round trip's `test/repr/cpp/roundtrip-results/`
@@ -241,8 +241,16 @@ Prior art:
     `tools/hsdump/GHC_VERSION`; `bin/repr-haskell read`, `print`, `roundtrip` (`--iface`: GHC's
     interfaces too; `--text`: mode `:full` printed back to the original text, byte for byte;
     `--layout`: printed by Haskell's layout rule, as a person writes it), `test`; corpus GHC
-    9.14.1's boot libraries, `test/haskell/corpus-ghc-9.14.1.edn`), evaluated from the checkout,
-    not embedded; `arbace.repr.rust` (`arbace/repr/rust{.ae,/}`), Rust as Rust forms and back
+    9.14.1's boot libraries, `test/haskell/corpus-ghc-9.14.1.edn`; the helper's verbs `cpp`, `errors`, `flags`,
+    `stg`, `core`, `rn`, `iface`, `tc`), evaluated from the checkout, not embedded; its native reader
+    (doc/haskell/NATIVE.md; the round trip's and `read --corpus`'s default since haskell-90, `REPR_HASKELL_READER=helper`
+    the oracle's): GHC's lexer and parser ported (`lex.ae`, `parse.ae` over the generated `tables.ae`, `bin/repr-haskell
+    tables --check`), unlit ported, the C preprocessor `cpp.ae` a clean-room implementation of GCC's traditional mode
+    (no GPL code: the GPL port of `haskell-pp`, 53794ed6, never entered the history), the driver's header phase
+    `fileargs.ae` and GHC's parse messages (`errors.ae`, `pprhs.ae`, `doc.ae`; `native-check --errors [--count N --seed S]`
+    with mutants), mode `:full` natively; `native-check` with its negative controls (`test/haskell/native-controls.txt`);
+    hsi, the STG evaluator (`bin/hsi`, `go/arbace/hs`, doc/haskell/HASKELL-EVAL-SURVEY.md; `check --aot [--opt O1]`, `--front
+    native`; out of every key); `arbace.repr.rust` (`arbace/repr/rust{.ae,/}`), Rust as Rust forms and back
     (spec `doc/rust/SPEC.md`, notes `doc/rust/RUST-NOTES.md`; helper `tools/rsdump`, a
     `rustc_private` driver on the host's rustc, pinned by `tools/rsdump/RUSTC_VERSION`, built
     against `rustc-dev` fetched as an apk into `.tmp/` and pinned by `tools/rsdump/apks.sha256`;
@@ -292,18 +300,34 @@ Prior art:
     :ocaml`, beside `:gcc`; `bin/gate`'s `gate_host_id`), their pins `:crop-pins` (`bin/gate --pins`), their light `:full` chains
     beside the serial run (`:night-concurrent`, GTS216; `bin/gate --plan` names them), their budgets `:new-crops` and `:shares`
     (`bin/gate --costs`); the rotations take GT9's verbs (`--only-list`, `--cmi-only`, `--no-expect`; test/{ocaml,cpp}/subsets.edn).
-    The fragments of later batches (llvm-rust, natives, haskell, cpp-native, python) wait in `test/gate/crops/`.
+    Since batch 2 (2026-11-07) LLVM IR's and Rust's too: llvm-90's eight steps (LL9a, doc/llvm/LLVM-CROP-SURVEY.md: the chains
+    `llvm-essential` and `llvm-full`, on `:stage0` and `:go` alone: no LLVM tool at check time, each module judged by its own verdict, else
+    opt's and lli's records; clang, llvm-as, opt and lli only by hand, `REPR_LLVM_JUDGE=live`, `LLVMI_JUDGE=lli`), llvmi (`bin/llvmi`,
+    `arbace/llvm/`, in `arbace_crop_paths`) on C's own target; Rust's from `crops/llvm-rust.edn` and `natives.edn` (`rust-read-essential`,
+    `rsi-essential`, `rust-native-essential`; `--full` the chains `rust-full` and `rust-aot`, on the host `:rustc`).
+    The fragments of later batches (haskell, cpp-native, python) wait in `test/gate/crops/`.
     C++'s since CX10 (doc/cpp/CPP-SURVEY.md, "As built: CX10 (write-ahead)"), on stage 0 with the host's g++
     and clang++ (the host `:cxx`; `bin/gate --pins` runs `bin/repr-cpp pins check` and `host check`, `:crop-pins :cpp`):
     essential `cpp-read-essential` (`bin/repr-cpp pp-check --essential`, `test/cpp/essential-read.txt`; `--only FILE`, CORPUS/NAME a line,
-    `--record-results`), `cpp-print-essential` (`bin/repr-cpp roundtrip-corpus gxx-dg-essential` and `samples`: a recorded list made by its
-    key, `test/cpp/essential-print.txt` held to `roundtrip-results/gxx-dg-essential.edn`), `cpp-lower-essential` (`bin/cppi lower-essential`,
+    `--record-results`), `cpp-print-essential` (`bin/repr-cpp roundtrip-corpus gxx-dg-essential --judge own` and `samples --judge own`: a recorded list made by its
+    key, `test/cpp/essential-print.txt` held to `roundtrip-results/own/gxx-dg-essential.edn`; since cpp-90 judged by the round trip's own levels 1 and 5 on the
+    native parser, no clang, `--judge clang` the oracle tier's; the run checks by each test's own verdict, `test/cpp/selfref.ae`, `CPPI_JUDGE=gxx` g++'s runs), `cpp-lower-essential` (`bin/cppi lower-essential`,
     `test/cpp/essential-lower.txt`), about 2 minutes warm; `--full` `cpp-selftest`, `cpp-tokens`, `cpp-roundtrip` and `cpp-lower` (`bin/cppi
     lower-corpus KEY`), a part a recorded list; `make cpp-essential`. Since cppi-check (2026-11-05; "As built: cppi-check") CX8's run checks too:
     essential `cpp-check-essential` (`bin/cppi check --only test/cpp/essential-check.txt`; cppi-check's `cpp-aot-essential`, 4 GiB, is not a step: GTS215's 3 GiB), `--full` `cpp-check` and
     `cpp-aot`, parts the recorded corpora samples and runtime (`test/cpp/check{,-aot}-linux-amd64.edn`) and the sampling `--sample 25` of gxx-dg-run
     (`test/cpp/check{,-aot}-every-25-linux-amd64.edn`: a `--sample N` run is held to and `--record`ed into its own record), against g++ 15.2's runs
     `test/cpp/ref-gxx15.edn` (reap's `:ref-corpora`); CX9's `cpp-dg` (`bin/repr-cpp dg`), `cpp-runtime` (the lowered runtime, a build step), `cpp-roundtrip-dg` (rotated) and `cpp-c2j` with GT9's fragment.
+    Since cpp-indep (2026-11-07; doc/cpp/CPP-SURVEY.md, "As built: cpp-indep", CP240 (a), CP241 (b)) the run checks and the runtime's build
+    read clang's IR from the packs `cpp-ir-samples` and `cpp-runtime-ir` (`test/cpp/records/`, mac/oracle-records-cpp2's tooling
+    `test/oracle-records/`, `bin/oracle-records`; `bin/cppi record-ir` by hand, `CPPI_LIVE=1` live, no gcc unless `CPPI_GCC=1`), and the readers
+    read libstdc++'s headers and gcc's include directory as `test/cpp/target.ae` makes them from the pinned gcc tarball and `cpp/target/`
+    (`bin/repr-cpp target tree|answers|oracle`, with musl's headers from its tarball: `bin/lib/repr-cpp/sysroot.bash`, `REPR_CPP_HEADERS=arbace|libstdcxx|host`);
+    the live parts wait in `test/gate/crops/cpp-oracle.edn` for the oracle tier.
+    repr/cpp's native parser (doc/cpp/NATIVE.md, CX11): `read --reader native`, `bin/repr-cpp native-check LIST WORK` against clang's
+    AST (`--tree`: the tree level, `arbace.repr.cpp.tcheck`, `test/repr/cpp/native-tree-known.edn`; its controls
+    `test/repr/cpp/native-controls.edn`), the skim cache `REPR_CPP_SKIM_CACHE`; the print cell's oracle rejections read natively
+    and judged at levels 1 and R (CPR1-CPR4, doc/cpp/PRINT-DESIGN-REVIEW.md; `roundtrip --record-known-rejected`).
     Scheme's since SM9: repr/scheme against Chez 10.3.0 run live (the host `:chez`) and si's light driver
     (`go/arbace/scm` built alone by TamaGo's go, not Arbace's executable) against Chez's and Chibi's recorded runs, the corpora fetched
     by pin into the main checkout's `.tmp/scheme/corpora` (a worktree's and the clean clone's too); `--corpus ID` (`bin/repr-scheme
@@ -311,7 +335,27 @@ Prior art:
     OCaml's since O8: repr/ocaml against the host's OCaml 5.5.0 (the host `:ocaml`: ocamlc, ocamlopt, compiler-libs,
     the oracle `tools/ocdump` built live) and oi's light driver (`go/arbace/oi` built alone by TamaGo's go) against ocamlc's and
     ocamlopt's recorded runs, the corpora fetched by pin into the checkout's `.tmp/repr-ocaml`; `--corpus ID` (`bin/repr-ocaml
-    roundtrip`; `opam`, `all`) and `--only-list FILE` (`bin/oi check [--aot]`, `suite check [--aot]`) select parts.
+    roundtrip`; `opam`, `all`) and `--only-list FILE` (`bin/oi check [--aot]`, `suite check [--aot]`) select parts. Since the
+    typer line's merge (OC180 (a), the user 2026-11-07; doc/ocaml/OCAML-SURVEY.md, "As built: the typer line's merge") the steps
+    run on no `:ocaml` host, their commands native (`repl-check --native`, `own-verdicts --check`, `roundtrip --text [--types]`,
+    `menhir --check`, `judges-test --fixtures`); ocamlc's and ocdump's levels (`roundtrip --cmi`, `dumps`, `native-check`,
+    `stdlib-check`, `typer-check`'s fresh dumps, `suite expect`) are the oracle tier's `ocaml-dumps` and `ocaml-oracle`
+    (`test/gate/crops/ocaml-oracle.edn`, spliced into the planner's `:phase :oracle` at batch 4: `bin/gate --oracle`); the native library (`bin/oi stdlib`) types unix,
+    threads, str and compiler-libs' units too (`libs_native`; compiler-libs' `lexer.ml` only with `OI_OCAMLLEX=1`), and the
+    suite's native path keeps a unit's signature as data (`NAME.cmi.ae`, OC184 (a)).
+    repr/ocaml reads natively (doc/ocaml/OCAML-SURVEY.md, "As built: the native reader"; the default of `read` and `roundtrip`
+    since 2026-11-07, "As built: the crop's independence"; the helper `tools/ocdump` the oracle's, `--reader helper`): `arbace/repr/ocaml/menhir.ae` builds parser.mly's LALR(1) automaton as Menhir does into the
+    generated `tables.ae` (`bin/repr-ocaml menhir`, `--check` against Menhir's own tables in the tarball, `--verify`), `lex.ae`,
+    `docstrings.ae`, `actions.ae` and `parser.ae` port lexer.mll, docstrings.ml, parser.mly's actions and MenhirLib's engine;
+    `bin/repr-ocaml read --reader native`, `native-check` (the dumps against the helper's, byte for byte). oi's native front end
+    (doc/ocaml/TYPER.md): `arbace/repr/ocaml/typer/` ports typing/ (with Typemod, Includemod, Mtype, Subst: the module
+    system) and lambda/'s Translcore, Matching, Translmod, Simplif and Tmc, the native Parsetree typed and translated to
+    Lambda without ocamlc (`bin/oi run-native`; `bin/oi typer-check`: test/ocaml/typer/'s samples' signatures, raw and
+    simplified Lambda against the oracle's dumps committed in `test/ocaml/typer/oracle/` (verified fresh when ocdump is
+    present), their runs on oi against the toplevel's; `bin/oi stdlib-check`: the stdlib's units typed natively against
+    `bin/oi stdlib`'s Lambda); since 2026-11-07 the native path is `bin/oi check`'s, `check --aot`'s and `suite check`'s default
+    (TY24 (a); `--ocdump` the oracle's), and each run program is judged by its own verdict as ocamltest gives it (the header's exit
+    status, the `.reference` or no output; `bin/oi own-verdicts`, exceptions `test/ocaml/own-verdict.edn`), the rest by the recorded run).
   - `arbace/repr/clojure{.ae,/}`: `arbace.repr.clojure`, Clojure's bridge (`doc/REPR-CLOJURE.md`;
     `bin/repr-clojure read`, `print`, `roundtrip`, `check`): Clojure source into Arbace's, the
     names of the vendored Clojure, `.clj`/`.cljc` into `.ae`, a table of rules for the dialects'
@@ -475,7 +519,10 @@ Prior art:
   `.tmp/gate-pass/`, shared by the worktrees: each pass with its commit, worktree, date, seconds,
   peak memory, log); the builds (`go-build`, `javac-tool`) run when a check that runs needs them;
   `bin/gate [--full] --plan` prints each step's decision and why, `bin/gate --why STEP` what changed
-  since its latest pass, `--rerun` runs every check; since GT4-GT6 (doc/GATE-SURVEY.md, "As built: GT4, GT6")
+  since its latest pass, `--rerun` runs every check; since batch 4 (doc/ORACLE-RECORDS-SURVEY.md, ORS1 (a), ORS8 (a)) `bin/gate --oracle` (alone,
+  or `--full --oracle` beside `--full`'s) runs the oracle tier, the `:phase :oracle` steps that run a host toolchain (gcc, clang++ and g++, Chez,
+  GHC, rustc, OCaml) on Arbace's output or against the records and packs (`bin/oracle-records`, `test/*/records/`), one after another, a step
+  whose host's identity is none here `absent` (no key, no run, no failure); never in the essential gate, `--full` or the clean run; since GT4-GT6 (doc/GATE-SURVEY.md, "As built: GT4, GT6")
   `bin/gate --audit [STEP...]` runs a check under strace and fails on a file of the checkout it reads
   that its declared inputs do not cover (the declarations are the audit's; `make gate-audit`), one skipped
   light check (the oldest pass) reruns each gate as the canary (`GATE_CANARY=0` not), `--prune` trims the

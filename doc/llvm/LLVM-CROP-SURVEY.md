@@ -8,7 +8,7 @@ lands**, because the lowering is shared and being changed now (CX8 on `cpp-cx8`,
 adopted: no code under `arbace/`, `go/`, `bin/`, `tools/` or `test/` changed, and only this file was written. The decisions
 are the user's, as proposals LLS1-LLS19 (§14); the milestones are LL1-LL9 (§13), with two optional ones.
 
-Base: branch `llvm-survey` from main `c545ede1`. The work is reading (doc/cpp/LLVM.md, CPP-SURVEY's "As built: CX6",
+Base: branch `llvm-survey` from main `c545ede1`. The work is reading (doc/llvm/SPEC.md and LOWER.md, CPP-SURVEY's "As built: CX6",
 "CX7", CX8's commit `4d6c0b37` on `cpp-cx8`, RUST-EVAL-SURVEY, GATE-SURVEY's "GT8, the test budget",
 PYTHON-SURVEY for the shape) and light probes of seconds each (§3): the host's clang 23.1.4 as assembler, verifier and
 printer on tiny files; LLVM 15's `llvm-as`, `opt` and `lli` (the only LLVM tools on the host) on clang 23's IR; the IR
@@ -22,7 +22,7 @@ marked **to verify**.
 
 Words used throughout:
 
-- **LLVM forms**: LLVM IR text as Arbace forms (`arbace.repr.llvm`, doc/cpp/LLVM.md §1-§6), as C++'s CX6 built them.
+- **LLVM forms**: LLVM IR text as Arbace forms (`arbace.repr.llvm`, doc/llvm/SPEC.md and LOWER.md §1-§6), as C++'s CX6 built them.
 - **repr/llvm**: the bridge between IR text and LLVM forms (`bin/repr-llvm read|print|roundtrip`), as repr/c and repr/go are.
 - **The lowering**: LLVM forms → C forms, `arbace.cpp.lower` today, `arbace.llvm.lower` once RES16 (b) renames it at RE2.
 - **llvmi**: the evaluator of LLVM IR at the REPL and for programs (the name is LLS14's): the lowering, then C23's ci; as
@@ -499,7 +499,7 @@ Each with options, the recommended one named.
   `llvm/lib/AsmParser/LLParser.cpp`, `llvm/lib/IR/Verifier.cpp`, `llvm/include/llvm/IR/Intrinsics.td` and the targets'
   `Intrinsics*.td`, `llvm/lib/ExecutionEngine/Interpreter/`, `llvm/test/{Assembler,Verifier,Bitcode,Transforms,CodeGen,DebugInfo}`,
   `llvm/tools/llvm-stress`.
-- Arbace: CLAUDE.md; doc/cpp/LLVM.md (§1-§10; §11 on `cpp-cx8`); doc/cpp/CPP-SURVEY.md (§5, §6, §8, "As built: CX6",
+- Arbace: CLAUDE.md; doc/llvm/SPEC.md (§1-§6) and LOWER.md (§7-§10; §11 on `cpp-cx8`); doc/cpp/CPP-SURVEY.md (§5, §6, §8, "As built: CX6",
   "CX7", CP82-CP88, CP100-CP105, CP120-CP127, CP180); `cpp-cx8`'s `4d6c0b37`; `rust-re1`'s `252d9af2`;
   doc/rust/RUST-EVAL-SURVEY.md (RES1, RES12, RES16; decided 2026-11-03); doc/GATE-SURVEY.md ("GT8, the test budget",
   GTS200-GTS209 decided); doc/python/PYTHON-SURVEY.md (the shape); doc/C23-SURVEY.md (C5.4, CS35, CS250);
@@ -535,3 +535,886 @@ clang 23 for want of them; LL1's pins name `llvm23`'s version beside `clang23`'s
 LLVM IR's GT8 share is half a crop's (about 17 minutes nightly, 1.2 hours clean), carved from C++'s and Rust's shares (their
 checks shrink to the language-specific parts once LLVM checks the shared lowering). The crops are "10+1": ten languages and
 LLVM IR beside them. LLS1-LLS16 wait for after the tag (the user).
+
+## As built: LL8 (`:full`, LLS18 (a)) and LL4 (the verifier, LLS6 (a)), 2026-11-04 (write-ahead)
+
+Branch `llvm-full` from `llvm-read` (`5249bc5c`); the details in doc/llvm/SPEC.md §6.1 and §6.2. Both run on the main
+checkout's stage 0 (`ARBACE_HOST_EXE`), evaluated from the checkout; no gate step, no whole corpus.
+
+- **`:full`** (`arbace/repr/llvm/full.ae`; `bin/repr-llvm read --full`, `print --full`, `roundtrip --text`): the plain
+  forms and a layer kept item by item (a top-level form; a definition's header, labels, instructions, debug records,
+  use-list orders and `}`): the gap before each item when it is not the canonical layout's, the item's text when its
+  spelling is not the printer's, with the hash of its canonical print (an edited form prints canonically). The printer
+  was rebuilt on the same items, its output unchanged byte for byte on the 278 modules. The reader now starts a new block
+  after a terminator when the text writes no label, as LLParser does. Over the round trip's lists (278 modules: C's
+  torture programs at `-O0`/`-O2`/`-g`, C++ samples at `-O0`/`-O2`/LTO and for Windows, Rust, the six hand-written corner
+  modules) and four new hand-written modules with comments (`notes`, `implicit`, `dbg`, `unnamed`): **282 of 282 printed
+  back byte for byte**, the `.ae` text read back to the same forms and layer, the plain print read in `:full` with an
+  empty layer; 4,322 forms with an entry, 7,130 gaps, 18 texts. The plain round trip over the same 282: forms 282 of 282,
+  objects 279 (3 `none`), bitcode 282.
+- **The verifier** (`arbace/repr/llvm/verify.ae`; `bin/repr-llvm verify`, `verify-check`): LLParser's checks beyond the
+  grammar in the text's order, then the Verifier's rules by function and module, 42 parser rules and 21 Verifier rules
+  named, messages in LLVM 23's words (the ported and the missing ones in LLVM.md §6.2). The mutants
+  (`arbace/repr/llvm/mutate.ae`, `bin/repr-llvm mutants`): 17 kinds, the moves also renumbered so that the Verifier's
+  rules decide. Against `opt -passes=verify` of the pin: the 282 valid modules 0 errors on both; 630 mutants (two sets
+  of 315, the second held out from the fitting): **912 of 912 verdicts, 613 of 613 rejections with opt's first message**;
+  73 hand-written probes 72 of 73 (a twice-defined label, LLParser merges the blocks).
+
+What is left: `llvm/test`'s rejection tests as the corpus (LLS6 (i), (ii): the tarball's re-fetch), LLParser's syntax
+errors with positions (the reader's refusals keep their own words), the attribute, calling-convention, `musttail`,
+funclet and metadata-structure rules, a fuller intrinsic table (`Intrinsics.td`'s), and the Makefile's targets for
+`roundtrip --text`, `verify-check` and `mutants` (this branch touches only repr/llvm, its script and the docs).
+
+## Decision sheet (2026-11-05)
+
+For the user to decide in one pass. Written from the branches `llvm-read`, `llvm-full`, `llvm-verify2`, `llvm-verify3`
+(this branch's base), `cpp-lower-dbg` and `cpp-codegen` (doc/cpp/CODEGEN.md, via `git show cpp-codegen:...`), and the GT9
+fragment `gt9-build:test/gate/crops/llvm-rust.edn`. Reading only: nothing was built or run, the figures are those the branches'
+docs record. LLS17 and LLS18 are decided (above); LLS5, LLS6 and LLS19 have been done in fact (rows marked "done in fact":
+the user may ratify them in a word).
+
+### What changed since the survey (2026-11-03)
+
+- **repr/llvm reads the whole grammar** (`llvm-read`): debug records, the `DI*` nodes as keyword forms, `callbr`,
+  `ptrtoaddr`, Windows EH pads, summaries, `uselistorder`; three judges per module (forms, object per the module's own
+  triple, `llvm-as`'s bitcode byte for byte: the bitcode is the canonical-text judge of LLS5 (a)). The lists: 282 modules
+  (C torture `-O0`/`-O2`/`-g`, C++, LTO, Windows, Rust, hand-written); forms 282 of 282, bitcode 282, objects 279 (3 `none`).
+- **`:full`** (`llvm-full`, LLS18 (a)): 282 of 282 printed back byte for byte (LL8 done on that list).
+- **The verifier** (`llvm-full`, `llvm-verify2`, `llvm-verify3`): `arbace/repr/llvm/verify.ae` after LLParser and LLVM 23's
+  Verifier, now **opt's whole stderr** (messages, positions, culprits): 282 of 282 valid modules as opt's; the held-out
+  mutants 1,040 of 1,082 whole stderr (96.1 %), verdicts about 99.8 %; probes 470 of 478 whole stderr (8 known in
+  `test/llvm/probes-known.tsv`). Not done: `llvm/test`'s rejection tests as the corpus, a few attribute/DI rules.
+- **The lowering took the reader's new forms** (`cpp-lower-dbg`): debug records and `!dbg` dropped (`-g` lowers as `-g0`),
+  structured metadata values refused as `:metadata`, `callbr` with an empty template lowered, `:callbr` and `:windows-eh`
+  refused. Vectors, `blockaddress` and `ptrtoaddr` are not reported done there; LL5 is open.
+- **`llvm23` and `llvm23-test-utils` are installed** (`opt`, `llvm-as`, `lli`, `FileCheck` at clang's 23.1.4): the verifier's
+  judge is `opt -passes=verify`; `lli` is available as an IR reference (LLS3, LLS8, LL10). The llvm-project 23.1.4 tarball
+  is pinned in `test/cpp/corpora.edn` (fetched-into `.tmp/llvm/`, SHA-512 against Alpine's APKBUILD); llvm-test-suite's pin
+  is still `:later`.
+- **cpp-codegen makes Arbace a second producer of LLVM forms** (G1: 38 of 38 samples through three levels: lowered and run by
+  gcc equal to clang's route, the IR printed and built by `clang++`, every defined name one clang defines). Decided there
+  (P1, 2026-11-05): the output is LLVM forms, through the same lowering and runtime. Consequences for this crop: the
+  lowering is now the contract between **two** producers (clang's IR and ours), so judging it once, on its own corpus (LLS1),
+  is worth more; our IR is a corpus by construction (byte-offset memory, no struct types, no attributes, so it shows what
+  the lowering does without clang's attributes: P4 will add `nounwind`), and the verifier of repr/llvm can judge it
+  (`opt -passes=verify` is already the native level's check); G2-G6 (about 22 to 33 days) will keep changing
+  `arbace.cpp.lower` (SysV classification, exceptions, vtables) for a long time, which makes the LL2 move costlier early.
+  `cpp-cx8` (the lowering on ci and compiled; samples 10 of 14, 4 in classes) is not in main as seen from this branch.
+- **GT9's llvm fragment** (`test/gate/crops/llvm-rust.edn`, group `:llvm` = `bin/repr-llvm`, `arbace/repr/llvm{.ae,/}`,
+  `test/cpp/runtime/`, `test/repr/llvm/`): one interim step, `llvm-roundtrip` (`:phase :full`, chain `llvm-full`, 3 GiB, needs
+  `cpp-runtime`; `bin/repr-llvm roundtrip .tmp/cppi/runtime/ir-units.txt .tmp/gate/llvm-roundtrip`; hosts stage0, cxx, llvm;
+  pin `test/cpp/corpora.edn`; summary `same|differ|control|FAIL`), over C++'s pinned runtime IR (198 units), half a share
+  (GTS221 (a)), control `test/repr/llvm/roundtrip-controls.txt`. It assumes: the verb `roundtrip LIST WORK` (exists on
+  `llvm-read`), the controls file (NEW; `test/repr/llvm/` does not exist on this branch), the list
+  `test/llvm/essential.txt` (NEW, LL1: until then the runtime's units), and a plan without the runtime's units is GTS221's
+  open item. It judges neither `:full`, the verifier nor eval: the step is the round trip alone, so everything built since
+  (LL4, LL8) is outside the gate. It needs the files `test/repr/llvm/*` and the essential list added before it can pass.
+
+### The REAP row as it would be now
+
+`test/reap/cells.edn`'s `:languages` is `[:clojure :java :go :c]`; the new levels are the same four. Row `:llvm`, an
+intermediate row printed after the languages (LLS1 (a)); cells and their sources:
+
+| cell | sources today | status |
+|---|---|---|
+| read | `bin/repr-llvm roundtrip` over the 282 modules (forms, object, bitcode); `bin/repr-llvm verify-check` (sets and held-out mutants, probes, vs `opt`), classes by `test/llvm/divergences-read.edn` (new; the 8 probes' known file is the seed) | can be recorded now on the 282-module list and the mutant sets; `llvm/test` not read (needs the tarball extracted and LL1's count) |
+| eval | `llvmi`'s run of recorded IR: lowering to C forms on ci, against the IR's own build by clang 23 (`test/llvm/ref-clang23.edn`); today only C++'s `cppi lower-check` (234 of 234 libstdc++ tests, gcc the judge) and cpp-codegen's `codegen-check` (38) exist | no `llvmi`, no reference file: LL2 and LL6 |
+| AOT | `llvmi check --aot`: the same C forms through cf2g | C++'s AOT record of the samples (10 of 14) is the only record; LL7 |
+| print | `bin/repr-llvm roundtrip --text` (`:full`, 282 of 282), the printed canonical text read by `llvm-as` equal to the original's bitcode | can be recorded now; classes file new |
+
+So at once only read and print could be checked (about two cells of four, on small corpora); eval and AOT wait for LL2, LL6,
+LL7. The judging code (`test/reap/main.ae`) needs a reader for repr/llvm's results files and a `:languages` entry for an
+intermediate row (a few hours, LL9's).
+
+### Milestones: effectively done
+
+| milestone | state |
+|---|---|
+| LL1 spec and pins | pins mostly done (tarball pinned, llvm23 named by the note above); the spec is still `doc/cpp/LLVM.md`, not moved; `llvm/test` not counted, no `test/llvm/corpora.edn`, no synthetic generator. Open, about 1 day |
+| LL2 the move | not started; see LLS13/LLS2 |
+| LL3 read: the whole grammar | **done in substance** (`llvm-read`) on the 282 and the probes; open: `llvm/test`'s whole as the corpus, the classes file, `bin/repr-llvm check` over it |
+| LL4 the verifier | **done beyond the survey's stage (iii)** (whole stderr); open: `llvm/test`'s rejection corpus (needs the tarball), a few rules |
+| LL5 the lowering's breadth | partial (`cpp-lower-dbg`: debug, `callbr`; vectors and integers wider than 128 bits done, "As built: LL5"); `blockaddress`, `freeze` flags, `ptrtoaddr`, `-O2` intrinsics open |
+| LL6, LL7 llvmi's check, AOT | not started |
+| LL8 `:full` | **done** on the 282 (`llvm-full`); open: `llvm/test`'s files |
+| LL9 the row | not started (the GT9 step is the interim) |
+| LL10, LL11 | not started, optional |
+
+Remaining by the survey's estimates: LL1 1-2, LL2 2-3, LL3 about 1-2 (was 5-9), LL4 about 1-2 (was 5-8), LL5 6-10, LL6 5-8, LL7
+2-4, LL8 about 0.5, LL9 2-3: **about 21 to 35 days** (was 31 to 52), the saving all in read, verifier and `:full`.
+
+### Decisions
+
+Recommendations carry costs in working days. "Done in fact" rows ask only for ratification.
+
+| id | question (two lines) | recommendation | cost | why, and what changed |
+|---|---|---|---|---|
+| LLS1 | The row: (a) an intermediate crop, its own row beside the ten languages; (b) part of C++'s row; (c) no row. | **(a)** | LL9 2-3 | Unchanged, stronger: two producers (clang's IR, cpp-codegen's) feed one lowering; one row judges it once. |
+| LLS2 | Timing: (a) after CX8 merges, LL2 only after it and RE2's rename; (b) now; (c) after C++'s and Rust's rows. | **(a), refined: LL1, LL3, LL4, LL8 (reader-side, repr/llvm only) go on now; LL2 and LL5 wait until codegen's G2 settles `arbace.cpp.lower`** | 0 extra | The reader side is done without waiting; the lowering is the moving part (CX8 not in main, codegen G2-G6 coming). |
+| LLS3 | Reference: (a) the host's clang 23.1.4; (b) the `llvm23` apk; (c) built from the tarball. | **(a)+(b) as installed**: clang for builds and objects, `opt`/`llvm-as` for the verifier and bitcode, `lli` optional; pin both versions in LL1; (c) no | 0 (installed) | The apk is installed and used: the verifier and bitcode judges depend on it. Ratify, and record `llvm23`'s apk version in the pins. |
+| LLS4 | Version churn: (a) one version, a bump an event; (b) several versions' spellings; (c) bitcode as the only stable input. | **(a)**; LL11 later | 0 | Unchanged. The bitcode judge already gives a version-pinned check. |
+| LLS5 | Read's judges: (a) forms, canonical text, objects. | **done in fact, as (a) with bitcode as the canonical-text judge**; ratify | 0 | `llvm-read` implements forms, object, bitcode: 282 of 282. |
+| LLS6 | Verifier: (a) staged, (b) acceptance only, (c) none. | **done in fact, beyond (a)**; ratify. Open: `llvm/test`'s rejections as corpus | 0 now; 1-2 later with the tarball | Whole stderr as opt's, 96 % held out. Stop extending the rules; the corpus's tail finds the rest. |
+| LLS7 | Eval's route: (a) lowering to C forms on ci; (b) an IR interpreter; (c) (a), then (b) as a second judge. | **(a), (b) as LL10 only if wanted** | LL6 5-8; LL10 15-25 | cpp-codegen's whole route is (a) (P1); `lli` is installed and gives a cheap semantics reference, so LL10 is less urgent than before. |
+| LLS8 | Eval's reference: (a) the IR's own build by the pin as data; (b) the source's compiler; (c) lli. | **(a)**; `lli` as a spot check on small modules | in LL6 | cpp-codegen's check already uses the IR's own build by clang (its "native" level) as one judge: the same machinery. |
+| LLS9 | Poison, undef, UB: (a) deterministic refinement, UB-free corpora; (b) tracked; (c) refuse. | **(a)** | in LL5 | Unchanged. Our own IR (no flags written) is UB-free by construction. |
+| LLS10 | Target intrinsics: (a) a class, a table grown by what the corpora reach; (b) x86's whole table; (c) refuse. | **(a)** | in LL5 | The verifier's intrinsic table (Intrinsics.td's immarg positions) already covers the read side. |
+| LLS11 | Corpora: (a) `llvm/test`, C's run corpora at `-O0`/`-O2`, client crops' IR deduplicated, synthetic, random, llvm-test-suite if fetched; (b) client IR alone; (c) (a)+MultiSource. | **(a)**, adding cpp-codegen's IR; **the go-ahead of the llvm-project tarball's fetch** (about 150 MB, SHA-512 pinned); llvm-test-suite's fetch still deferred | fetch minutes; LL1 counts 1-2 | `llvm/test` is the one corpus the reader, the verifier (rejections) and `:full` all still lack; it unblocks LL1, LL3's close and LL4's close. |
+| LLS12 | Optimization levels: (a) `-O0` and `-O2`; (b) `-O0` only. | **(a)** | in LL5 | Already read at both (torture at `-O2` round-trips); only the lowering is `-O0`-centred. |
+| LLS13 | Layout: (a) `arbace.repr.llvm`, `arbace.llvm.{lower,run,check,verify}`, `bin/llvmi`, `doc/llvm/`, `test/llvm/`; (b) all left under `cpp/`. | **(a) as the end state, moving LL2 after codegen G2 (or last, by renames only)**; the reader and verifier stay where they are | LL2 2-3 | `arbace.cpp.codegen`, `.sema`, `.abi` now sit on `arbace.cpp.lower`; moving it while G2 edits it costs merges in two crops. The repr half already lives in `arbace/repr/llvm/`. |
+| LLS14 | Evaluator's name: (a) `llvmi`; (b) `lli`; (c) `iri`. | **(a)**; `lli` is now installed, which confirms the clash | 0 | Decided by the facts. |
+| LLS15 | What C++ and Rust keep: (a) language-specific parts; the generic IR work judged once, deduplicated by digest; (b) both keep everything. | **(a)**; add: C++'s codegen-check stays C++'s (the producer), the lowering's breadth (LL5) is the row's | 0.5 in LL9 | Two producers make the split clearer: producers test themselves, the row tests the shared consumer. |
+| LLS16 | Embedding: (a) with C++ at the first re-seed after the tag; (b) its own later re-seed. | **(a)** | 0 (rides the re-seed) | The 2026-11-03 re-seed (d5548e72) was C only; C++'s embedding is the next, now with codegen and sema beside the lowering. |
+| LLS19 | Metadata: (a) `DI*` and debug records as structured forms; (b) text. | **done in fact, (a)**; ratify | 0 | `llvm-read` has them (`(!DILocation :line 3 ...)`); the lowering refuses them as `:metadata`, drops debug records. |
+| (new) LLS20 | GT9's interim `llvm-roundtrip` step: (a) keep as GT9 has it (the round trip alone, the runtime's units); (b) replace its list by the 282-module list and add `verify-check` and `roundtrip --text` as parts; (c) leave all out of the gate until LL9. | **(b)**, once `test/llvm/essential.txt` and `test/repr/llvm/roundtrip-controls.txt` exist | 0.5-1 | The step as written gates only the oldest part; the verifier and `:full` are most of the new code and have no gate coverage. Within half a share (the 282 list is minutes, the mutant sets must be a sampled part). |
+
+### What to decide first
+
+1. **LLS11's fetch** (the llvm-project tarball): unblocks LL1, the verifier's last corpus and `:full`'s.
+2. **LLS2/LLS13's refinement** (reader side now, the move after codegen's G2): the one change to the plan.
+3. **Ratify** LLS3, LLS5, LLS6, LLS19 (done in fact) and take LLS1, LLS4, LLS7-LLS10, LLS12, LLS14-LLS16 as recommended in one word.
+4. **LLS20**: whether the gate's interim step grows with the verifier and `:full`.
+
+## Decided (2026-11-05, the user)
+
+The decision sheet as recommended: LLS11, the llvm-project tarball fetched once (its SHA-512 pinned); LLS2 and LLS13, the reader side (LL1, LL3, LL4, LL8) now, LL2 and LL5 after C++ codegen's G2; LLS3, LLS5, LLS6 and LLS19 ratified as done; LLS1, LLS4, LLS7-LLS10, LLS12, LLS14-LLS16 as recommended; LLS20, the interim llvm-roundtrip step extended with verify-check and roundtrip --text once its control and essential files exist.
+
+## As built: LL1 (the spec, the pins, llvm/test as a corpus) and the reader side's corpora, 2026-11-05
+
+Branch `llvm-ll1` from `llvm-decisions`. Light runs only (the keyed `--full` of main was running): every process under 2 GiB, `ARBACE_HOST_EXE` the
+main checkout's stage 0, samples of a few hundred files. The whole corpus is the night's (below).
+
+- **The fetch** (LLS11, once): `llvm-project-23.1.4.src.tar.xz` from the release's URL in `test/cpp/corpora.edn`, 179,272,572 bytes, SHA-512
+  `1443531768d7...bde23` equal to the pin (`bin/llvm-corpus pin`); stored at the main checkout's `.tmp/llvm/`, `llvm/test` and `LICENSE.TXT` extracted
+  into `.tmp/llvm/src/` (`bin/llvm-corpus extract`, 1.2 GB). No other network.
+- **The spec moved**: `doc/cpp/LLVM.md` is `doc/llvm/SPEC.md` (§1-§6: forms, reader, printer, `:full`, verifier; `git mv`, history kept) and
+  `doc/llvm/LOWER.md` (§7-§10, section numbers kept). References updated in `arbace/repr/llvm*`, `bin/repr-llvm` and this survey; left as they are:
+  C++'s survey (its records), `arbace/cpp/`, `bin/cppi`, `test/cpp/` and Rust's survey (the lowering's code moves at LL2; C++'s codegen branches edit
+  those files).
+- **`llvm/test` counted** (`bin/llvm-corpus scan`, 90 s, `test/llvm/llvm-test-counts.tsv`): **44,886 `.ll` files**, 731,590,527 bytes (the survey
+  guessed about 40,000). By kind of RUN line: 42,555 inputs, **1,706 rejections** (a `not llvm-as`/`opt`/`llc`/... RUN line), 149 `split-file` tests
+  (**328 `.ll` sections** of 147 of them, expanded by the pin's `split-file`), 476 without a RUN line (libraries of other tests). By tool named:
+  `llc` 26,431 (CodeGen: 26,261 files, the targets' tests), `opt` 16,094, `llvm-as` 1,322. Typed pointers (`i8*`) in code: **32 files**, of which Bitcode 18
+  (upgrade tests). Directories: CodeGen 26,261, Transforms 11,655, Analysis 1,538, DebugInfo 1,183, Instrumentation 610, Assembler 523, Verifier 408
+  (309 of them rejections), Bitcode 308, ThinLTO 331, Linker 371, tools 863, LTO 170, Other 172, the rest under 170 each. The counts are by regular
+  expression over the RUN lines (a heuristic: `typed` in particular; `ptr0`, `-opaque-pointers` flags, are left out of the samples).
+- **The corpora as lists** (`bin/llvm-corpus full-lists`: `.tmp/llvm/lists/{input,reject,split}.list`, NAME<tab>PATH): 42,555 + 1,706 + 328 modules. The
+  committed samples (deterministic, stratified by directory, every k-th file of a stratum by sorted path, at most 60 KB each):
+  `test/llvm/llvm-test-valid.list` (300, taken by `llvm-as` 23 with no flags: the reference's verdict), `llvm-test-reject.list` (200: `not llvm-as`/`not opt`
+  tests that `opt -passes=verify` also rejects; a `not opt` with other passes is left out), `llvm-test-split.list` (60 sections, not all rejected);
+  paths relative (`llvm/test/...`, `split/...`), `bin/llvm-corpus resolve LIST OUT` makes them absolute for the `repr-llvm` verbs.
+- **A fault the corpus found, fixed**: quoted names (`@"\01L_foo"`) were kept escaped by the lexer, printed `\\01` and read back as another name (3 of 300
+  forms differed). The lexer now unescapes `%"..."`, `@"..."` and `$"..."` as LLParser does (`arbace/repr/llvm/read.ae`). And a judge's fault: a module with no
+  `source_filename` made clang's object and `llvm-as`'s bitcode depend on the input's path; `roundtrip` copies original and print to one name before
+  judging (`bin/repr-llvm`, `judge`). The 282-module lists all wrote one; llvm/test's mostly do not.
+- **Read and `:full` over the 300 valid** (`bin/repr-llvm roundtrip`, `roundtrip --text`; records `test/llvm/llvm-test-valid-{rt,judges}.tsv`): forms
+  **300 of 300**, bitcode **300 of 300** (the canonical-text judge, LLS5), objects 252 of 300 equal (48 `none`: targets clang cannot build, the
+  bitcode judge decides them, no `differs`), `:full` **300 of 300 printed back byte for byte** (2,268 forms with a layer entry, 4,118 gaps, 395 texts).
+  Of the 300, 130 CodeGen, 95 Transforms, 21 Analysis, 13 DebugInfo, 12 tools, the rest small directories. One minute at 2 threads.
+- **The verifier on the valid sample** (`bin/repr-llvm verify-check`, `test/llvm/llvm-test-valid-verify.tsv`): verdicts **277 of 300** as `opt -passes=verify`'s;
+  23 differ: 20 Arbace rejects what opt takes (false positives: `elementtype` on non-intrinsics in 3, `Access type node must be a valid scalar type` in 3, `scope
+  points into the type hierarchy` in 6 (old-style `isDefinition:`/`isLocal:` DISubprograms that LLParser upgrades; the declaration rule was fixed to see
+  `isDefinition: true`, which exposed the scope rule), `align 1 applied to incompatible type`, `Calling convention disallows stack byref`,
+  `branch-target-enforcement`, an addrspace cast, a `<1 x ptr>` cast, one more), 3 where opt only warns (the DXIL target machine, a `DIAssignID` kind).
+  These are LL4's tail, listed, not fixed here.
+- **The rejection corpus** (`test/llvm/llvm-test-reject-verify.tsv`, `-split-verify.tsv`; `bin/llvm-corpus reject-check LIST WORK`): 200 rejections by the pin:
+  Arbace's verdict equal on **77** (invalid), 95 accepted (valid) — missing rules and parse errors, 17 refused by the reader in its own words (not LLParser's),
+  11 where opt rejects with the debug-info warning only; the first message equal on 60 of 200, opt's whole stderr on 43. The tests' own declarations
+  are the references: 67 of the 200 name an `error:` in a CHECK-style comment (`bin/llvm-corpus expect`), the pin's opt prints that fragment in 65 and Arbace's
+  `verify` in 17 (`WORK/expect.tsv`). Over the 60 split sections: verdicts 57 of 60 (3 rejections, 1 with the first message equal). **The verifier is far from the
+  rejection tests**: the survey's "a few rules" was written from the mutants Arbace's own mutator makes; llvm/test's tests are the long tail of LLParser's
+  messages (DI* field checks, atomics, uselistorder, ptrauth, intrinsic signatures by target: the classes seen in the 95 are `Assembler/invalid-*`, DI field
+  ranges, target intrinsics' immargs, `Verifier/` attribute and addrspace rules). Estimate for LL4's close: 3-5 working days, not 1-2 (re-estimate at the
+  next check of the whole corpus).
+- **LLS20's prerequisites**: `test/llvm/essential.txt` (43 modules: 39 small valid llvm/test files copied to `test/llvm/essential/`, unchanged, and the four
+  hand-written `hw` ones; LICENSE.md has the LLVM section for them) and `test/repr/llvm/roundtrip-controls.txt` (the verb's negative control: `bin/repr-llvm
+  roundtrip` crosses the subject's print with the reference's original, forms by `arbace.repr.llvm control` and objects by `cmp`, both must differ; the
+  mechanism is crop-controls' commit `01c732aa6` ported to this branch's judge file names; the C++ samples' line from that branch is kept and is
+  left on lists that lack its names). `bin/repr-llvm roundtrip test/llvm/essential.txt WORK`: 43 of 43 forms, 37 of 43 objects equal (6 `none`), bitcode
+  43 of 43, the control fails as it must; 9 s.
+
+### The night's runs (commands and what to expect)
+
+All under `bin/heavy-lock` if run on the loaded host; `ARBACE_HOST_EXE` unset in the gate. `bin/llvm-corpus extract` once, then `scan` and `full-lists`.
+
+| what | command | expected |
+|---|---|---|
+| pin, counts | `bin/llvm-corpus pin; bin/llvm-corpus extract; bin/llvm-corpus scan` | `pin: ... sha512 ok (179272572 bytes)`; 44,886 `.ll`; counts file unchanged (`git diff test/llvm/llvm-test-counts.tsv` empty); 328 sections |
+| read, whole corpus | `bin/llvm-corpus full-lists; bin/repr-llvm roundtrip .tmp/llvm/lists/input.list .tmp/llvm/rt-input` (split in shards of 2,000 with `split -l`; CodeGen's IR is large) | forms: a refusal for every module the reader does not take, listed in `WORK/rt.tsv`; the sample's 300 of 300 predicts most pass; objects `none` for the targets clang cannot build, the bitcode judge `same`. Not known: the tail (the exotic targets' types, `ptr0` tests, old upgrades): classify what `rt.tsv` shows into `test/llvm/divergences-read.edn` |
+| `:full` | `bin/repr-llvm roundtrip --text LIST WORK` per shard | every `ok`; any other status a read fault (the sample: 300 of 300) |
+| verifier, valid | `bin/repr-llvm verify-check .tmp/llvm/lists/input.list WORK` per shard | most verdicts `valid`/`valid`; the sample's 277 of 300 (92 %) predicts about 8 % false positives, to class |
+| verifier, rejections | `bin/llvm-corpus reject-check .tmp/llvm/lists/reject.list WORK`; `... split.list WORK` | the sample's rates: verdicts about 40 %, first message about 30 %; opt rejects only part of the 1,706 under `-passes=verify` (the rest are `llc`'s and the passes' rejections: the verdict column `valid/valid` is then not a failure) |
+| peak memory | each verb runs `GOMEMLIMIT=1500MiB`, 4 threads by default | under 2 GiB per process on the sample; a 25 MB module (`CodeGen` has some) may need more: shard by size |
+
+### Proposed
+
+1. **LL4's close as a corpus loop** (3-5 days, Sonnet): take the 95 accepted rejections and the 20 false positives as the work list, grouped by message family; the whole
+   corpus after each family. Alternative: leave the tail in `test/llvm/divergences-read.edn` classed `:message`/`:rule` and close LL4 at "every rejection test
+   rejected" (acceptance only, 1 day). Recommend the first for `Assembler/` and `Verifier/` (931 files, the part LLVM itself tests the verifier with), the second for
+   the target directories.
+2. **Whether the interim gate step takes `llvm-test-valid.list` as a part** (LLS20): 300 modules, one minute at 2 threads, 3 GiB: in budget. The sample's records
+   (`-valid-rt/judges/verify.tsv`) are the expected outputs.
+
+## Decided (2026-11-05, the user: after LL1)
+
+Both as recommended: (1) LL4 closed as a corpus loop over the wrongly accepted rejections and the false errors, the full loop (opt's messages) for Assembler/ and Verifier/, acceptance only for the target directories; (2) GT9's interim llvm-roundtrip step takes llvm-test-valid.list (300 modules) as a part.
+
+## As built: llvmi (LL2's run, LL6, LL7), 2026-11-05
+
+Branch `llvm-llvmi` from `llvm-ll4`, with `cpp-g2fix` (C++ codegen's G2 and its fixes: the settled lowering), `llvm-row` (the REAP row) and main
+(the re-seed d5548e72, whose stage 0 embeds main's repr/c) merged in. Light runs only: `ARBACE_HOST_EXE` the main checkout's stage 0, every
+Arbace process `GOMEMLIMIT=1500MiB`; peak RSS (busybox `time -v`): the eval check 0.9 GB; AOT's translation (`compile-list`, 2 threads) 0.8 GB a
+shard of 40 (1.6 GB for all 230 at once), Go's compiler at most 0.55 GB a package but for two, `c-O{0,2}.synth.lib-musl-tables` (11 MB of Go
+each, musl's tables), 2.9 GB: those two are `test/llvm/aot-heavy.txt`, built only with `LLVMI_AOT_HEAVY=1` (the night's run; the record's rows
+come from such a run), their recorded rows kept by a light run.
+
+**The route** (LLS7 (a)): `bin/llvmi` over `arbace.llvm.run` and `arbace.llvm.check` (`arbace/llvm/`, out of the embedded sources and
+`gate_key` like `arbace/cpp/`). An IR module is read by repr/llvm, normalized for the lowering (`arbace.llvm.run/normalize`: typed
+pointers `(* T)` as `ptr`, as LLVM 23 reads them; LLParser's implicit numbers of unnamed arguments, blocks and value instructions
+written in, which old `llvm/test` files rely on and clang never writes), lowered by the shared lowering (`arbace.cpp.lower`, LOWER.md;
+the move to `arbace.llvm.lower` is left to LL2's rename, below), printed by repr/c with **the personality-free layer**
+`arbace/llvm/rt/none.c.ae` appended (§5.3's "none": `cx$pending` never raised, `cx$resume`/`cx$uncaught` abort, the renamed `atexit`,
+`at_quick_exit`, `__cxa_atexit` and `pthread_create` passed to musl), so a module is **one C translation unit that links with musl
+alone**; a module that unwinds (a personality, `invoke`, `landingpad`, `resume`) is refused `:personality`. ci runs no
+`__attribute__((constructor))`/`((destructor))` function, so llvmi strips them from the lowering's `cx$ctor$N`/`cx$dtor$N` and `main` calls
+the constructors by priority and registers the destructors with `atexit`. Eval: `arbace.c.run`'s `nodes-list` builds the node programs
+(musl's prebuilt runtime), `tools/cirun` runs them. AOT (§7): `arbace.c.cf2g`'s `compile-list` translates them into Go packages over
+`go/arbace/ci` and `go/arbace/crt`, built by TamaGo's go in shards of 40 (one executable a shard, as `bin/ci check --aot`).
+
+**The judge** (LLS8, as the brief took it): lli 23's run of the same module (the host's `/usr/lib/llvm23/bin/lli`; empty stdin, no
+arguments, 10 s), status, stdout and stderr by SHA-256, recorded as data (`test/llvm/ref-lli23.edn`, `bin/llvmi record-ref`), so the check
+needs no lli; each entry also records the module's digest (a reference from other IR is `:stale-ref`, not a divergence) and, as a second
+opinion, whether clang 23 `-O0`'s build of the module agrees with lli (`:clang`: 240 `:same`, 14 `:no-build`, 4 `:differs`: argv[0],
+environment, a 32-bit data layout, and `test-interp-variable-arguments`, whose output is not deterministic under lli either).
+Rows `[ID RESULT REASON]` (goi's format) in `test/llvm/check-eval-linux-amd64.edn` and `check-aot-linux-amd64.edn`; classes in GR10's format,
+`test/llvm/divergences-eval.edn` (AOT: `divergences-aot.edn` first, empty, then eval's); a recorded pass that does not pass fails; the
+negative controls `test/llvm/controls.edn` (three: a subject's run against another module's reference) must fail, and do.
+
+**The corpus** (`bin/llvmi modules`, 258 modules): `ee`, `llvm/test/ExecutionEngine`'s 80 modules with a `main` whose first RUN line is a
+plain lli run (read in place from the main checkout's `.tmp/llvm/src`); `c-O0` and `c-O2`, test/c's `synth` and `run` programs through clang 23
+`-S -emit-llvm` (81 of 97 each; 16 are gcc's dialect clang rejects); `cpp`, C++'s samples and runtime samples with a `main` (16). The C++ runtime's
+units have no `main`: read and lowered by `bin/cppi runtime-build`, not run here.
+
+**Numbers** (eval and AOT the same modules, the same results):
+
+| level | modules | lowered | pass | not passing, in classes | seconds (lower / build / run) |
+|---|---:|---:|---:|---|---|
+| eval (`bin/llvmi check`) | 258 | 230 | **218** | 40: personality 13, vector 10, ci-builtins 5, wide-int 2, crash-report 2, ub-refinement 2, abi-punning 2, argv0, datalayout, target-type, va-arg | 81 s wall: 15 / 33 / 6 |
+| AOT (`bin/llvmi check --aot`) | 258 | 230 | **218** | the same 40 in the same classes (none of AOT's own) | 18.7 min wall: 14 s lowering, then 6 shards of translation, `go build` and runs, 1,075 s |
+
+None failing; every non-pass in a class; the controls fail as they must. What the check found and fixed in the lowering: the vector casts
+and `shufflevector` crashed it (now refused `:vector`), `llvm.global_dtors` was refused (now `destructor` wrappers), and the intrinsics
+`scmp`/`ucmp`, `fshl`/`fshr` and `l(l)round`/`l(l)rint` (C23's `<stdbit.h>` and `-O2` code) are in its table (LOWER.md §7).
+
+**The REAP row**: `test/reap/cells.edn`'s `[:llvm :eval]` and `[:llvm :aot]` read the two records (the `:until` gone).
+
+### The night's runs (commands and what to expect)
+
+| what | command | expected |
+|---|---|---|
+| the references | `bin/llvmi record-ref` (after `bin/llvm-corpus extract`) | `258 runs recorded`; `git diff test/llvm/ref-lli23.edn` empty but `test-interp-variable-arguments`'s stdout (lli's own nondeterminism; the module is refused `:va-arg`) |
+| eval | `bin/llvmi check` (`make llvmi-check`) | about 90 s, under 1 GB: 218 pass, 40 in classes, the controls 3 judged 0 passing, exit 0 |
+| AOT | `LLVMI_AOT_HEAVY=1 bin/llvmi check --aot --record` (`make llvmi-check-aot`, without the heavy two) | about 19 minutes (6 shards), the same 218; `git diff test/llvm/check-aot-linux-amd64.edn` empty; one `go build` at 2.9 GB |
+| the classes alone | `bin/llvmi divergences [--aot]` | exit 0 |
+| the matrix | `bin/reap` | the LLVM row's four cells checked |
+
+### Proposed
+
+1. **LLS21 ci's gaps the row found.** The lowering writes what gcc takes and ci's builder lacks: `__builtin_fmodf`/`fmodl` (`frem` on float and
+   long double: `builtin-aliases` has `fmod` only) and gcc's `__atomic_*` builtins (`__atomic_fetch_add` ...); and ci converts a lowered
+   comparator's `unsigned` result to the `int` of musl's `qsort` call as a value (`abi-punning`: gcc reads the same register). (a) add the
+   aliases and the `__atomic_*` family to ci (C's crop, `arbace/c/build.ae`, about 0.5 day) and, for the punning, have ci truncate a call's
+   result through a function pointer to the pointer's return width (C's crop, 0.5 day; or (a') the lowering types i32 results of address-taken
+   functions as `int`, which changes C++'s records); (b) keep them as classes. Recommend (a): 7 of the 40 go, C's own corpora gain.
+2. **LLS22 the C++ personality on ci.** 13 modules are refused `:personality`. (a) link C++'s lowered runtime (`bin/cppi runtime-build`'s
+   libsupc++ and libstdc++ as C forms) into ci's build for such modules, the way `arbace.cpp.run` (branch `cppi-check`) does for cppi: one
+   runtime per key, cached (1-2 days, the memory of a ci build of libstdc++ to measure); (b) leave them to cppi's own check (LLS15 (a): the
+   producer tests itself). Recommend (b) now, (a) with LL2's split of the layer.
+3. **LL2's rename** (`arbace.cpp.lower` to `arbace.llvm.lower`): still not done, since C++'s codegen branches edit the file; recommend doing it
+   by `git mv` and a one-line `require` change in each client after C++'s next merge to main, when no branch holds an edit of it.
+4. **The essential tier** (§11.2): three llvmi modules on ci (a C module, an ExecutionEngine module, a constructor module, about 10 s) as an
+   essential gate step beside the interim llvm-roundtrip step, once the row enters the gate; the eval check (90 s) nightly, AOT (19 min) in
+   the clean run.
+
+## Decided (2026-11-05, the user: LLS21, LLS22 and llvmi's two)
+
+LLS21 (a): fmodf/fmodl, the __atomic_* family and the function-pointer return width in ci; LLS22 (b) now, the C++ personality left to cppi's check, (a) with LL2; arbace.cpp.lower renamed arbace.llvm.lower once no branch edits it; an essential step of 3 llvmi modules when the row enters the gate, eval nightly, AOT in the clean run.
+
+## As built: LL5 (vectors and integers wider than 128 bits in the lowering), 2026-11-05
+
+Branch `llvm-ll5` (from `llvm-llvmi`); all in `arbace/cpp/lower.ae`, the new functions in two clearly separate blocks (the vector
+section before `call-stmts`, `inst-stmts` wrapping the scalar `inst-stmts*`, `intrinsic` wrapping `intrinsic*`) so C++'s branches merge
+without touching them.
+
+- **Vectors, scalarized.** A vector value was already a C struct with the member `e`, the array of its lanes. `vector-stmts` takes every
+  instruction with a vector operand and writes one scalar operation a lane on the lanes' C expressions (`(aget (.-e v) i)`): the integer
+  and floating binary operators (through `binop`), `fneg`, `icmp` and `fcmp` (the scalar bodies are now `icmp-expr` and `fcmp-expr`; the
+  result type `<N x i1>`), the casts between vectors lane by lane (`cast-expr`), `select` with a vector condition, `shufflevector` (a mask
+  of constants, `zeroinitializer` or a splat; an undefined lane takes lane 0), and `bitcast` (`<N x i1>` and iN by bits, every other by
+  bytes through memory, little endian). `splat` constants are a compound literal of N copies. The vector intrinsics: the elementwise ones
+  (`fabs`, `sqrt`, `smax`, `abs`, `ctpop`, `fshl`, `fma`, ... `lane-intrinsics`) call the scalar intrinsic's lowering per lane (the lane
+  as a `(c-expr E)` operand, which `value` takes), and `llvm.vector.reduce.{add,mul,and,or,xor,smax,smin,umax,umin,fadd,fmul,fmax,fmin}`
+  fold the lanes in order. Not done: scalable vectors (refused `:vector`), `llvm.masked.*`, gather and scatter, the vector `*.with.overflow`
+  and `.sat` intrinsics, vector constant expressions (`add` of two vector constants), a `splat` in a static initializer.
+- **Integers wider than 128 bits as C's `_BitInt(N)`** (`(unsigned-bit-int N)`, ci has it since C23's crop; the literal `(lit (unsigned-bit-int N) n)`),
+  exactly N bits, so no masking: `container-bits` returns N above 128, `utype` and `stype` are functions, `int-lit`, `mask` and `store-bytes`
+  take the case (a load and a store of i200 move its 25 bytes, not the 32 of the C type). `llvm.fshl/fshr` at any width, and `ctpop`, `ctlz`
+  and `cttz` above 64 bits (i128's rules kept) by 64-bit limbs. Still refused: `switch` on more than 64 bits, the overflow intrinsics above
+  128, atomics.
+- **Numbers.** `bin/llvmi check` (whole, 2 min wall on the loaded host, ci with musl's forms): 258 modules, 242 lowered, **229 pass (218
+  before)**, the 29 others in the recorded classes; the `:vector` (10) and `:wide-int` (2) classes are gone from
+  `test/llvm/divergences-eval.edn`. The ten modules of `:vector` and the two of `:wide-int` now pass at eval and AOT but one:
+  `ee.MCJIT.test-interp-vec-arithm_float` lowers and runs up to `frem <N x float>`, which is ci's missing `__builtin_fmodf` (class
+  `ci-builtins`, LLS21 (a)). AOT: `--aot --only` on the thirteen modules (the twelve above and `c-O2.run.ptr-sub-narrow`, whose `splat` it also
+  took), 12 pass, the thirteenth the same `fmodf` fault; their rows in `check-aot-linux-amd64.edn` set from that run (a whole AOT run, 19
+  minutes and heavy, not made: the other rows are unchanged by construction, the change touching only vector and wide-integer code).
+  `bin/llvmi check --record` rewrote `check-eval-linux-amd64.edn`.
+- **gcc as the judge.** The C of the vector modules and of `c-O0.run.builtin-stdc` compiles with gcc (gnu23); the vector ones run the same.
+  `builtin-stdc`, which uses `_BitInt(129)` and `_BitInt(256)` counts, passes on ci against lli but segfaults under gcc at its `_BitInt(129)`
+  line (gcc's own `_BitInt` library; the lowering's C is valid): C++'s `bin/cppi lower-check` is not affected unless a program uses an
+  integer above 128 bits.
+
+### Proposed
+
+1. Add `fmodf`/`fmodl` to ci's `builtin-aliases` (arbace/c/build.ae) with LLS21 (a): the last vector module passes and `frem` in
+   general; recommended, one line and a ci rebuild.
+2. A whole `bin/llvmi check --aot --record` at night (LLVMI_AOT_HEAVY=1) to replace the hand-set AOT rows by a recorded run; recommended.
+
+## Decided (2026-11-05, the user: LL5's proposals)
+
+LL5's two as recommended: fmodf/fmodl via ci's builtin-aliases (built on ci-lls21, LLS21 (a)); a whole bin/llvmi check --aot --record with LLVMI_AOT_HEAVY=1 at night replacing the hand-set rows.
+
+## Decided (2026-11-06, the user: the torture corpora's IR pinned)
+
+The clang-made IR of llvmi's torture corpora (`tx-O0`, `tx-O2`: gcc 9.1.0's `gcc.c-torture/execute` through clang 23) is committed as
+one deterministic tar.xz pinned by its SHA-256, so the eval check needs no clang; the IR is regenerated by a recorded command when the
+pin (clang's version, the flags or the sources) moves.
+
+## As built: LL6 (llvmi's coverage, the pinned IR, the records for opt, clang and llvm-as), 2026-11-06
+
+Branch `llvm-ll6` from `llvm-ll5`. Light runs only (the main checkout's stage 0 as `ARBACE_HOST_EXE`, every process under 1.5 GiB,
+samples): no gate step, no whole corpus. The C++ crops' forms are unchanged: the new lowering behaviour is under `*ci*` (below), false
+for C++'s lowering for gcc.
+
+- **The torture corpora** (`bin/llvmi`'s `tx-O0`, `tx-O2`): gcc 9.1.0's `gcc.c-torture/execute` and `ieee/` (C's `:torture-execute`,
+  ccorpus2 at its pin; not `builtins/`, which links `builtins/lib/`) through clang 23 in gnu17 with gcc's leniencies as warnings
+  (implicit declarations and int, int conversions): 1,520 modules at each level (44 files clang refuses, or without a `main`).
+  The default check takes a deterministic sample, every 10th module (`test/llvm/tx-sample.txt`, 304), the whole with
+  `LLVMI_TX_ALL=1` (the night's). lli's runs of the sample are in `test/llvm/ref-lli23.edn`.
+- **The IR pinned** (the user's decision above): `test/llvm/ir/tx.tar.xz` (3,040 modules, 829 KB) and `c.tar.xz` (C's synth and run
+  programs at `-O0`/`-O2` and C++'s samples, 176 modules, 222 KB), each deterministic (GNU tar sorted, mtime 0, xz -9e; made twice, the
+  same SHA-256), pinned by `PACK.tar.xz.sha256`, with its manifest `PACK.tsv` (ID, source, the source's SHA-256, the IR's) and the
+  command that made it `PACK.cmd` (clang's version and flags); `bin/llvmi ir-make [PACK]` makes them again. The check reads the IR from
+  the packs: no clang (proved with clang, clang++, lli and opt shadowed by failing scripts on `PATH`: none called, the same rows); a
+  source of the manifest present here with another digest makes the pack stale, an error; `LLVMI_CLANG=1` compiles afresh as before.
+- **The lowering's faults the corpus found** (root causes):
+  1. `arbace.llvm.run`'s numbering of unnamed values counted a void call to a variadic function (`(call (fn void [...]) ...)`, its
+     type written as the callee's) as a value and gave it the next number, overwriting `%1..%N`: their declarations went missing
+     (`'l$1' undeclared`, 6 modules). The return type is the `fn` type's, and an explicit `%N` now sets the counter, as LLParser does.
+  2. va_list on ci (6 modules, segfaults): clang's inline `va_arg` code reads SysV's `{gp_offset, fp_offset, overflow, reg_save}`,
+     ci's `va_list` is a slot pointer. Under `arbace.cpp.lower/*ci*` the lowering keeps the SysV form with every register used and
+     the overflow area ci's slots, and passes the overflow pointer to libc's v* functions (LOWER.md, "LL6"); the `va_arg`
+     instruction is lowered (both models), so the `:va-arg` class is gone.
+  3. `blockaddress` and `indirectbr` (computed goto; clang hoists the label table into a global): a token per block and a switch.
+  4. `llvm.{u,s}{add,sub}.sat`, `llvm.returnaddress`, `llvm.frameaddress` in the intrinsic table.
+  5. `llvm.stackrestore` was nothing, so a loop's VLAs exhausted ci's stack (`vla-dealloc-1`): under `*ci*` a restoring function's
+     dynamic allocas come from the heap on a chain freed back to the saved head, onto a spare list reused (the million iterations in
+     seconds, not a minute).
+- **Classes** (`test/llvm/divergences-eval.edn`): `:long-double` (design: ci's long double is binary64, CS35: an aggregate with an
+  x86_fp80 has another size, 10 of the sample), `:lli-reference` (design: lli's JIT is not the module's meaning: it links every
+  external at once, crashes where clang's build runs, or the module is the interpreter's, `test-interp-variable-arguments`, whose CHECK
+  line llvmi's output meets), `:stackrestore` (deferred, emptied by 5 above; kept for the night's whole corpus).
+- **opt recorded** (`bin/repr-llvm record-opt LIST...`, `test/llvm/ref-opt23.edn`, 1,288 modules: llvm/test's three samples, its 446
+  modules `opt -passes=verify` rejects (`test/llvm/llvm-test-reject-opt.list`), the probes, essential and hand-written lists): each
+  module's SHA-256, opt's verdict, first message and its whole stderr's SHA-256 with the module's path and opt's own written `<input>`
+  and `opt`. `verify-check` without opt (or with `REPR_LLVM_REF`) judges from the record: the same verdicts, messages and stderr
+  equalities as with opt on every list (checked list by list); a module not recorded is `unrecorded`, one changed `stale`.
+- **clang and llvm-as recorded** (`bin/repr-llvm record-rt LIST WORK`, `test/llvm/ref-rt23.edn`, 304 modules: the valid sample,
+  essential, hand-written): the original's and the print's SHA-256 with the object's and the bitcode's verdicts; `roundtrip` without
+  clang (or with `REPR_LLVM_RTREF`) carries the verdicts to the same original printed to the same text, and calls any other print
+  `unjudged`, a failure (a printer change needs `record-rt` with the tools: the print is judged only by LLVM itself). The negative
+  control is judged by its forms then.
+- **The verifier**: `GEP into vector with non-byte-addressable element type`, `get_dynamic_area_offset`'s width, the `modular-format`
+  attribute's rules, MemProf's `!memprof` and `!callsite` (each message and culprit as opt's, checked on the test and on the 120
+  llvm/test files that use them), and in the reader LLParser's own errors for a word that is no type (llvm/test's RUN-line templates,
+  `iXLen`: refused as llvm-as refuses them, 8 of a fresh 999-file sample, the others of that sample read: forms 991 of 991, bitcode
+  988), for `captures(...)` (parseCapturesAttr: `ret:` once, `none` alone) and `initializes(...)` (parseInitializesAttr), and for
+  `!DIAssignID` with an operand (19 of 19 split-file sections of `Assembler/captures-errors` and `initializes-attribute-invalid`, opt's
+  whole stderr; 150 of 150 llvm/test files that use the two attributes). False errors on valid modules, from the 150 and a fresh
+  999-file valid sample, fixed at their root: a `bitcast`/`addrspacecast` in `@llvm.used` walked as a GEP (a crash), byte counts above
+  2^63 parsed as longs (a crash), a self-reference in an unreachable block (allowed: `!DT.isReachableFromEntry`), a named type that
+  aliases a non-struct type (`%T = type ptr` is `ptr` itself: `alias-type` in `norm-type`), and `common` globals' null values (+0.0, and
+  aggregates of nulls: `null-value?`). That sample's other false errors are AutoUpgrade's old intrinsic forms (x86's
+  `*-upgrade` tests, `llvm.experimental.vector.extract`, old argument counts: 7) and two debug-info warnings; they are not in a record
+  (the sample's verdicts were checked against opt, not recorded). Four probes known since LL4 now pass (`attrs-p17`, `cc-c10`,
+  `musttail-q38`, `metadata-w51`), out of `test/llvm/probes-known.tsv`; the probes' record is rewritten (475 of 478 verdicts).
+- **The REAP row**: read gains llvm/test's 806 verified modules and 304 round-tripped (judged from the records), print the same 304
+  printed back byte for byte; the non-passes of the 806 are in `:llvmtest-rules` (14: rules not ported, mostly AMDGPU's, VP and
+  gc.relocate intrinsics, inline asm constraints) and `:llvmtest-messages` (45: the verdict opt's, another first message or culprit,
+  mostly LLParser's error order: an earlier error the lexer or the parser reports first). `test/reap/matrix.edn` re-recorded.
+
+**Numbers** (before: `llvm-ll5`'s records; after: this branch's):
+
+| what | before | after |
+|---|---|---|
+| REAP LLVM read (pass / design / deferred) | 2,695 / 1 / 58 | 3,750 / 1 / 113 (llvm/test's 1,110 rows added) |
+| REAP LLVM eval | 229 / 7 / 22 (258 modules) | 519 / 22 / 21 (562 modules: the 258 and the torture sample; `bin/llvmi check` exits 0, 2.5 min, 1.5 GB) |
+| REAP LLVM AOT | 229 / 8 / 21 (LL5's hand-set rows among them) | 519 / 22 / 21 (`bin/llvmi check --aot --record`, a recorded run, 33 min, 1.5 GB; every row's result the eval's; the two heavy modules' rows kept) |
+| REAP LLVM print | 282 / 0 / 0 | 586 / 0 / 0 |
+| llvmi on the torture sample (304) | 271 | 290 (AOT before the stackrestore fix, `--aot --corpus tx-O0,tx-O2`: 288, the same rows as eval's then, 7.9 min, 1.4 GB) |
+| verify on llvm/test's 446 opt rejections: verdicts / first message / whole stderr | 428 / 399 / 381 | 433 / 406 / 388 |
+| verify on llvm/test's 806 (the samples and the rejections) | 791 verdicts, 744 whole stderr (this branch's first record) | 792, 747 |
+| verify on a fresh 999-file valid sample of llvm/test (not recorded) | 984 verdicts | 988 (AutoUpgrade's old intrinsic forms 7, debug-info warnings 2, a SPIR-V target warning, a template opt also rejects but with its own first message) |
+| verify on llvm/test's 300 valid, 200 rejection, 60 split samples | 300, 195, 59 verdicts | the same |
+| host LLVM tools a check needs | eval: clang (c, cpp); verify-check: opt; roundtrip: clang, llvm-as | none (records; the tools only to record) |
+
+### The night's runs (commands and what to expect)
+
+| what | command | expected |
+|---|---|---|
+| lli's runs of the whole torture corpora | `LLVMI_TX_ALL=1 bin/llvmi record-ref --corpus tx-O0,tx-O2` | `3040 runs recorded`; the sample's 304 entries unchanged (`git diff` adds lines only) |
+| eval, whole | `LLVMI_TX_ALL=1 bin/llvmi check` (about 16 min, 1.5 GB) | about 95 % pass by the sample; new non-passes classed in `divergences-eval.edn` (`:long-double` by its static assertions, `:lli-reference`), then `--record` without `LLVMI_TX_ALL` for the committed rows |
+| AOT, the heavy two | `LLVMI_AOT_HEAVY=1 bin/llvmi check --aot --record` (about 35 min, one `go build` at 2.9 GB: above the day's limit) | the day's recorded run (519 of 562, the eval's rows) unchanged; the two heavy modules' rows from their own run |
+| the matrix | `bin/reap --record` after the records | 20 of 20, 0 problems |
+
+### Proposed
+
+1. **LLS23 the torture corpora whole in the default check.** (a) keep the 304 sample by default and the whole at night (as built:
+   2.5 min for the 562 modules); (b) the whole by default (about 16 min, the eval check then over GT8's half share). Recommend (a).
+2. **LLS24 a canonical printer** (AsmWriter's output, `llvm-dis`'s text, byte for byte): the round trip could then be judged with
+   no LLVM tool at all, the reference the recorded digest of `llvm-as | llvm-dis` of the original, robust to Arbace's printer changes
+   (the record-rt judges hold only for the print they saw). Cost: a port of AsmWriter's slot numbering, attribute groups and comments,
+   about 3-5 days. Recommend after LL9, if the row's prints change often.
+3. **LLS25 the verifier's tail as data.** The 62 llvm/test non-passes are mostly target intrinsics (AMDGPU) and LLParser's error order.
+   (a) port AMDGPU's intrinsic rules and LLParser's order for Assembler/ (2-3 days); (b) leave them classed. Recommend (b) for the
+   target rules (the decided "acceptance for the target directories" holds: they are in Verifier/AMDGPU), (a) for Assembler/'s order
+   when LL9 puts the row in the gate.
+4. **LLS26 the torture IR's license.** `test/llvm/ir/tx.tar.xz` is a derivative of gcc's testsuite (GPL-3.0-or-later): the repo then
+   distributes GPL-licensed test data, not ported code (the rule "GPL sources are not ported" is about code). (a) keep it and add the
+   GPL version 3's full text to LICENSE.md (it is named there now; the text is not on this host: one fetch of
+   `https://www.gnu.org/licenses/gpl-3.0.txt`, or gcc 15.2.0's `COPYING3` out of the pinned tarball C's crop already uses); (b) keep
+   only `c.tar.xz` committed and make `tx` locally by `bin/llvmi ir-make tx` (clang again at the check for the torture corpora);
+   (c) a corpus of permissive programs in its place (CompCert's tests are not permissive either; tcc's tests2 are LGPL). Recommend (a)
+   with gcc 15.2.0's `COPYING3` from the pinned tarball (no network): done so in LICENSE.md, for the user to ratify or undo.
+
+## Decided (2026-11-06, the user: LLS23-LLS26)
+
+- **LLS23 (a):** the 304-module torture sample stays in the default check; all 3,040 modules run at night (`LLVMI_TX_ALL=1`).
+- **LLS24 (a):** a printer writing exactly `llvm-dis`'s text, so the round trip needs no LLVM tool, after LL9.
+- **LLS25 (a):** the AMDGPU verifier rules stay classed; the Assembler errors' order is fixed when LL9 puts the row in the gate.
+- **LLS26 (a), ratified:** `test/llvm/ir/tx.tar.xz` stays committed as GPL-3.0-or-later test data (clang's IR of gcc's torture
+  tests), with GPL version 3's text in `LICENSE.md` from the pinned gcc 15.2.0 tarball's `COPYING3`; the rule against porting GPL
+  sources is about code, not test data.
+
+## Decided (2026-11-07, the user: the judges, independence)
+
+- **A test's own verdict is a judge no toolchain made** (1 in `bin/crops-score`'s independence). Every check judges by the test's
+  own verdict wherever it has one: gcc's torture execute programs by exit 0 (`abort()` fails), the round trip by its forms read
+  again equal and the print's acceptance by Arbace's own verifier, mode `:full` by the text printed back byte for byte. The
+  toolchain's recorded outputs (`ref-lli23.edn`, the clang, llvm-as and opt runs) move to the oracle tier, run by hand at a tag. A test
+  without an own verdict keeps its recorded reference (0.5).
+- **A mixed stage is the case-weighted mean of its cases** (relayed 2026-11-07, about 07:45): a case judged by its own verdict counts
+  1, one judged against a recorded toolchain reference 0.5.
+
+## As built: LL9a (the own verdicts, the gate's steps, the controls), 2026-11-07
+
+Branch `llvm-90` from `llvm-ll6` (`153ac9e91`). Light runs only, by day: the main checkout's stage 0 as `ARBACE_HOST_EXE`, every
+process under 1.5 GiB (measured below), the committed lists and llvmi's default sample; no whole corpus, no gate run but `--plan`.
+
+**The judges.** `bin/repr-llvm` and `bin/llvmi` run no LLVM tool unless asked. The judge's mode is `REPR_LLVM_JUDGE`: `own` (the
+default), `record` (also when `REPR_LLVM_REF` or `REPR_LLVM_RTREF` names a record), `live` (also `REPR_LLVM_LIVE=1`). llvmi's is
+`LLVMI_JUDGE`: `own` (the default) or `lli`. Before LL9a, a host with `/usr/lib/llvm23/bin/opt` or `clang` on `PATH` ran them at the
+check. The record-* verbs run live (`record-rt` sets `REPR_LLVM_JUDGE=live`).
+
+- **The round trip** (`bin/repr-llvm roundtrip`): the forms read again equal (as before), and the print's verdict by Arbace's verifier
+  the original's (`WORK/verifier.tsv`: `verify-list` over both). clang's objects and llvm-as's bitcode are `record` or `live` only.
+  `bin/lib/repr-llvm/results roundtrip` takes the verifier as a judge.
+- **verify-check**: a module's own verdict comes from its RUN lines (`own_verdicts`, `WORK/own.tsv`). `invalid`: a `not llvm-as`, or
+  a `not opt` with no pass but verify, on the file with no option that changes how it is read. Only `-o`, `-S`, `-disable-output`,
+  `-passes=verify` and redirections are allowed. `-data-layout "P39"` is such an option, as in
+  `Bitcode/function-nonzero-address-spaces`, whose plain `not llvm-as` line decides it. With it goes the `error:` fragment that the
+  check lines of the prefixes those RUN lines give FileCheck declare. `valid`: RUN lines, none of them a `not` of an LLVM tool, and
+  no split-file. `-`: none of these, so opt's record judges. An own `valid` is met by verify's valid or `debug`; an own `invalid` is
+  met by invalid, with the fragment in verify's output when one is declared. `WORK/verify.tsv`'s eighth column says whose reference
+  judged the module, and `full.tsv` says `own` for those.
+- **llvmi** (`arbace.llvm.check/own-verdict`):
+  - `ee.*`: lit's verdict. The RUN lines run lli on the file with no argument; the run must exit 0, and when its output is piped to
+    FileCheck the `CHECK:` lines must be found in stdout, in order and with blanks collapsed (FileCheck's rule). Any other directive
+    gives no own verdict: CHECK-NEXT, a prefix, `{{regex}}`, an argument, a `not`, an XFAIL for x86_64. stdout is kept for this
+    (`LLVMI_RUN_OUT`, `WORK/out/ID.out`).
+  - `tx-*`: gcc's torture harness's verdict, exit 0.
+  - The C and C++ samples' modules keep lli's record (no own verdict: C's crop judges them by gcc's record).
+- **ci without gcc**: `bin/ci musl prepare` configures musl with `CC=gcc ./configure` when its tree is absent. `bin/llvmi`'s
+  `musl_prepare` derives configure's products first, as musl's Makefile makes them (`sed` over `arch/x86_64`'s `.in` files,
+  `VERSION`), with a `config.mak` that holds `ARCH`. The three headers are byte for byte gcc's configure's (checked against the
+  configured tree), so ci's forms cache stays fresh. C's own target (branch `c-indep`, `c/README.md`) does the same in `bin/lib/ci/musl`.
+
+**The check families as gate steps** (`bin/repr-llvm check FAMILY [--essential] [--record]`):
+- Families: `roundtrip-llvmtest`, `text-llvmtest`, `verify-llvmtest` and `verify-probes`. Each runs its lists (llvm/test's from the
+  pinned tarball's extraction, the rest the checkout's) and judges the rows against the family's record. A recorded pass that does
+  not pass, or an unrecorded module, fails; a fixed one is reported. A negative control that passes, or is not judged, fails.
+- `--essential` takes `test/llvm/essential.txt`'s modules in the family's record, with four llvm/test rejections copied into
+  `test/llvm/essential/` (`essential-verify.txt`) and four probes (`essential-probes.txt`).
+- `bin/llvmi check --essential`: `test/llvm/essential-check.txt`, ten modules: a C program, ExecutionEngine modules, a constructor
+  module, two torture programs and the controls' modules. This is LLS21's essential tier.
+- `test/gate/steps.edn`, group `:llvm`, crop `:llvm` (`test/gate/costs.ae` takes it):
+  - Essential, chain `llvm-essential`: `llvm-read-essential`, `llvm-print-essential`, `llvmi-essential` and `llvm-controls-test`.
+  - `--full`, chain `llvm-full`: `llvm-read` (parts by family), `llvm-print`, `llvmi-check` and `llvmi-aot`.
+  - All of them run on `:stage0` (llvmi's also on `:go`, TamaGo's); none runs on `:llvm`, `:cxx` or `:gcc`.
+  - `bin/gate --plan` and `--full --plan` plan them; `test/gate/costs-test.bash` passes.
+  - `reap`'s inputs name `test/llvm/*.edn`. `bin/llvm-corpus` reads the invoking checkout's extraction from a clean run's clone.
+
+**Negative controls** (GTS81 (a)):
+- `test/repr/llvm/verify-controls.txt` has four controls:
+  - a valid module against a rejection's own verdict;
+  - a rejection against another's declared fragment;
+  - two pairs of probes against opt's record.
+- `test/repr/llvm/text-controls.txt` has two: a subject's `:full` print against another module's text (`arbace.repr.llvm
+  text-control`).
+- `test/llvm/controls.edn` gains a fourth: `c-O0.run.ptr-sub-unsigned` exits 3, against a torture program's own verdict.
+- The round trip's controls are unchanged; in mode `own` the forms decide them.
+- `test/repr/llvm/controls-test.bash` (the gate's `llvm-controls-test`, 42 s) checks the wiring. Each verb is given a control that
+  crosses a module with itself, and must fail and say so: roundtrip, `--text`, verify-check, `bin/repr-llvm check` and
+  `bin/llvmi check`. With the committed controls each must pass. Result: 9 of 9 ok.
+
+**Numbers** (stubs first on `PATH`: `clang clang++ clang-23 gcc g++ cc llvm-as opt lli llvm-dis split-file FileCheck`, each logging
+and exiting 99; the log was empty after every run below):
+
+| check | command | result | wall, peak |
+|---|---|---|---|
+| verify, llvm/test's 806 | `bin/repr-llvm check verify-llvmtest --record` | 781 pass (747 before); 690 by own verdict, 116 by opt's record; 34 fixed (other first messages and stderr that opt's record called differences), 0 regressed | 17 s, 0.65 GB |
+| round trip, 304 | `bin/repr-llvm check roundtrip-llvmtest --record` | 304 of 304, the verifier taking every print | 21 s, 0.66 GB |
+| `:full`, 304 | `bin/repr-llvm check text-llvmtest` | 304 of 304, both controls fail | 9 s, 0.39 GB |
+| probes, 478 | `bin/repr-llvm check verify-probes` | 472, as recorded (opt's record) | 12 s, 0.52 GB |
+| the essential subsets | `bin/repr-llvm check FAMILY --essential` | 43, 43 + 4, 4 and 43 modules, as recorded | 8 s each |
+| llvmi eval, 562 | `bin/llvmi check --record` | **522 pass** (519 before): 385 by own verdict, 177 by lli's record | 145 s, 1.48 GB |
+| llvmi AOT | LL6's recorded AOT run (`.tmp/ll6/aot-all`) judged again, with the seven FileCheck and control modules rebuilt (`--aot --only`, 38 s, 0.8 GB) | 522, every row eval's | |
+| llvmi essential | `bin/llvmi check --essential` | 10 of 10, 4 controls fail; also with ci's musl tree removed (derived again, no gcc) | 12 s |
+
+What the own verdicts changed in llvmi:
+- **Now pass**:
+  - `ee.MCJIT.2002-12-16-ArgTest`: lli's argv[0] was the difference.
+  - `tx-O0.ieee.fp-cmp-7`: lli could not resolve `link_error`.
+  - `tx-O2.20010122-1`: lli crashed.
+- **New classes**:
+  - `:dg-options` (deferred): `restrict-1` (`-fgnu89-inline`) and `20040409-3w` (`-fwrapv`). The pack's single command does not pass
+    a test's dg-options, so its IR is another program.
+  - `:envp` (design): `2003-08-21-EnvironmentTest` reads `envp[0]`, and ci's runs have an empty environment.
+- **`:lli-reference` keeps only `test-interp-variable-arguments`**. Its pointer-wide `va_list` is the interpreter's; llvmi prints
+  `result is 4`, not the CHECK line's 6. LL6's note that llvmi met the CHECK line was wrong; the own verdict found it.
+- `bin/reap`: 20 of 20, 0 problems. The sources' names say "own verdicts".
+
+**The crop's scores** (`bin/crops-score --ref llvm-90 --crop llvm`, from a scratch worktree of `mac/crops-score` with
+`.tmp/crops-rules.diff` and `.tmp/independence.diff` applied):
+
+| | completeness (without by design) | maturity | independence |
+|---|---|---|---|
+| `mac/llvm-ll6`, the baseline | 91.7 (92.9) | 71.4 (`llvm-ll6` at 153ac9e91 with mac/crops-score's rules: 70.0) | 40.0 |
+| `llvm-90` | **95.9** (97.3) | **93.3** (controls 6 of 10 families, gate 1) | **68.3** |
+
+- Independence by stage: read 0.706, eval 0.5, AOT 0.5, print 1, judge 0.711.
+- Read: 1,588 cases on hand-written IR and 2,276 on clang's.
+- Eval and AOT: the packs, and ci's host record `test/c/host/predefined`.
+- Judge: 2,350 of 5,574 cases by their own verdict.
+- The four families without a control are the first records' 282-module lists and mutants, which cannot be rerun (LLS28).
+
+### The night's runs (commands and what to expect)
+
+| what | command | expected |
+|---|---|---|
+| AOT, a recorded run | `bin/llvmi check --aot --record` (about 33 min, 1.5 GB; `LLVMI_AOT_HEAVY=1` adds the two heavy modules, one `go build` at 2.9 GB) | 522 of 562, the eval's rows; `git diff test/llvm/check-aot-linux-amd64.edn` empty |
+| the torture corpora whole | `LLVMI_TX_ALL=1 bin/llvmi check` (about 16 min, 1.5 GB) | by own verdict; new non-passes classed (`:long-double`, `:dg-options`) |
+| the oracle tier, by hand | `REPR_LLVM_JUDGE=live bin/repr-llvm check FAMILY` for each family; `LLVMI_JUDGE=lli bin/llvmi check` | the toolchain's verdicts against the own verdicts: differences reported, not recorded |
+| the gate's steps | `bin/gate` (the four essential steps, about 1.5 min) and `bin/gate --full` (`llvm-read`, `llvm-print`, `llvmi-check`, `llvmi-aot`) | every step passes; then `bin/gate --audit llvm-read-essential llvmi-essential` (inputs declared) |
+
+### Proposed
+
+1. **LLS27: a pinned input corpus in the crop's own language.**
+   - The question: does IR that clang made, committed and pinned (`test/llvm/ir`), count as "a toolchain's product consumed" (0.5)?
+     Or is it the crop's test data, as hand-written IR is (1)?
+   - The rule's text (doc/CROPS-SCORE.md, "Independence") names "rustc's and clang's IR" among the inputs a stage consumes, so as
+     written it is 0.5.
+   - The case for 1: OCaml's Lambda, GHC's STG and C++'s clang IR stand in for a front end the crop lacks, so the toolchain does part
+     of the crop's work. For the LLVM IR crop the IR is the language under test, the toolchain does none of the crop's work (reading,
+     lowering, running and the own verdicts are Arbace's), and nothing the toolchain printed about the IR is the reference. It is as
+     gcc's torture C sources are to C.
+   - Options:
+     - (a) a pinned input corpus in the crop's own language is test data, 1, when no output of the toolchain about it is a
+       reference (doc/CROPS-SCORE.md's rule, one sentence);
+     - (b) as written, 0.5; 1 only for hand-written IR or IR from Arbace's own producers (C++'s codegen, `cpp-codegen`), weighted
+       by case;
+     - (c) replace clang's IR by Arbace's producers. That gives 1 under either rule, but costs C++'s codegen's coverage of the
+       torture programs (weeks).
+   - Recommended: (a), with (c) as the long-term route. Under (a), with C's own target merged (ci's predefined macros from
+     `c/target`, not gcc's record) and LLS28 (a), independence is (1 + 1 + 1 + 1 + 0.711) / 5 = **94.2**. Under (a) without C's
+     target, it is 74.2: eval and AOT stay at 0.5.
+2. **LLS28: the first records' 282-module lists.** The 282 modules (C's torture programs at -O0/-O2/-g, C++ samples, Rust crates,
+   the six corner modules) and their 630 and 1,082 mutants were made by the host's clang and are in no checkout. Their four record
+   families (2,558 cases) cannot be rerun, and they have neither a gate step nor a control.
+   - (a) Pack the 282 modules as a pinned IR pack (`bin/llvmi ir-make`'s way; one clang run by hand, at night). The mutants are
+     regenerated by `bin/repr-llvm mutants` (deterministic); the families join `bin/repr-llvm check` with controls.
+   - (b) Retire them from the REAP cells.
+   - Recommended: (a). Maturity's controls item would go to 10 of 10 (maturity 100), and the read stage to 1 under LLS27 (a).
+3. **LLS29: dg-options in the torture pack.** `bin/llvmi ir-make tx` to pass each torture test's `dg-options` and
+   `dg-additional-options` (the `.c` file's own lines). The pack changes for the files that have them, and needs clang once, at
+   night. Recommended with the next pack, when LLS28 (a) packs.
+4. **LLS30: the probes' own verdicts.** The 478 probes are Arbace's hand-written modules, judged by opt's record (0.5). Writing
+   each probe's expected verdict and message into it would copy opt's output into the test. Recommended: no, keep the record (the
+   probes are the verifier's regression set, not its specification).
+
+## Decided (2026-11-07, the user: LLS27-LLS30)
+
+- **LLS27 (a):** a pinned input corpus in the crop's own language counts 1 when no output of a toolchain about it is a
+  reference (doc/CROPS-SCORE.md, "Decided (the user, 2026-11-07): a pinned input corpus in the crop's own language"). The
+  packs `test/llvm/ir/{tx,c}.tar.xz` and llvm/test's files from the pinned tarball are test data (1); opt's and lli's records stay
+  the judge's 0.5; the first records' 282 modules and mutants, in no checkout, stay 0.5 until LLS28's pack.
+- **LLS28 (a):** pack the 282 modules once with clang, at night, and regenerate the mutants with Arbace's mutator
+  (`bin/repr-llvm mutants`, deterministic by index).
+- **LLS29:** dg-options with the next pack (`bin/llvmi ir-make tx` passing each torture test's `dg-options` and
+  `dg-additional-options`).
+- **LLS30:** the probes keep opt's record (they are the verifier's regression set, not its specification).
+
+## As merged: batch 2 (2026-11-07, branch `batch2`)
+
+`llvm-read`, `cpp-lower-dbg`, `llvm-full`, `llvm-verify3`, `gt9v-llvm`, `llvm-ll6` (with `cpp-native`, `cpp-native2`, `cpp-sema`,
+`cpp-codegen`, `cpp-codegen2`, `cpp-g2fix`, `cpp-templates` and `llvm-row` inside it) and `llvm-90`, one merge commit each, on
+batch 1 and rsi's `rust-re5`, `gt9v-rust`, `rust-re6`. Not merged: `llvm-ll4` (LL4's corpus loop, 8 commits on `llvm-verify3`, never
+merged into `llvm-ll5`/`ll6`: it conflicts with LL9a in `arbace/repr/llvm/verify.ae`, the SPEC and this survey; to be rebased onto
+batch 2 with its records re-made, proposal LLS32).
+
+- **The doc split.** `llvm-ll6` moved doc/cpp/LLVM.md's sections 1-6 to doc/llvm/SPEC.md and 7-10 to doc/llvm/LOWER.md; batch 1's
+  changes to the old file (CX8's section 11, cppi-deferred's slot unions, atomics and va_list fields, cpp-lower-dbg's debug
+  records) were merged into LOWER.md.
+- **The lowering** (`arbace/cpp/lower.ae`): batch 1's lowering (CX8's ci lowering, rust-re4/re5's rustc intrinsics and vectors,
+  cppi-deferred, cpp-lower-dbg) and ll6's (LL5's vectors, LL6's `*ci*`) are two implementations of the same features; the merge
+  commit takes ll6's and the next commit integrates batch 1's (branch `batch2-lower`).
+- **The keys' list.** `arbace/llvm/` (llvmi's namespaces) joined `bin/lib/version.bash`'s `arbace_crop_paths`, `test/gate/audit.ae`'s
+  `crop-rules` and `arbace/j2g/embed.ae`'s exclusions (the keys commit had `arbace/rust/` but not it).
+- **The gate.** llvm-90's eight steps (`llvm-essential`: `llvm-read-essential`, `llvm-print-essential`, `llvmi-essential`,
+  `llvm-controls-test`; `llvm-full`: `llvm-read`, `llvm-print`, `llvmi-check`, `llvmi-aot`), all on `:stage0` and `:go`, with their
+  `:controls` (verify-controls, text-controls, `test/llvm/controls.edn`; `llvm-controls-test` waived as the wiring test itself);
+  `test/gate/crops/llvm-rust.edn`'s LLVM interim step `llvm-roundtrip` superseded. `gate.crops check`: 0 problems.
+- **llvmi on C's own target** (LLS27 (a)'s condition for eval and AOT): `bin/llvmi` sources `bin/lib/repr-c/sysroot.bash` and runs
+  ci on `c/target` and Arbace's sysroot (`c_sysroot`; `ARBACE_C_TARGET=gcc`: gcc's `test/c/host`, the oracle tier's). Checked:
+  `bin/llvmi check --essential` 10 of 10 (4 controls fail as they must, 22 s, 0.6 GB); a sample of 70 modules of the eval record
+  (every 8th) 66 pass and 4 in their recorded classes, exit 0 (49 s, 0.75 GB); `--aot --only` 5 of them, 5 of 5 (39 s, 1.1 GB).
+- **Independence** (`test/crops/independence.edn`'s `:llvm :stages`, batch 2's): read 0.706, eval 1, AOT 1, print 1, judge 0.711:
+  **88.3%** (68.3% on `llvm-90`).
+
+### LLS28 prepared: what the pack needs
+
+The 282 modules' ids (`test/llvm/check-roundtrip-linux-amd64.edn`) are: 52 torture programs of gcc's `execute` in five builds each
+(`.g0`, `.g2`, `.o2`, `.lto`, `.win`: 260), nine C++ samples for a Mach-O target (`.mac`), one Rust module (`rs.lt`), ten
+`stress1`-`stress10`, the 21 corner modules (`dbg-O0` ... `typed`: debug info, Windows EH, callbr, LTO's summaries and CFI, the
+sanitizers, `typed` pointers) and the four hand-written `hw-*` (committed in `test/llvm/hw/`). Their lists and the corner modules'
+sources were in the worktrees of `llvm-read` and `llvm-full` and are gone with them (no copy under the main checkout's `.tmp/`): the
+commands that made them are not recorded either. So the pack cannot be made as the record's inputs byte for byte; what can be
+made at night, after `bin/llvmi ir-make` learns a pack `rt` (a day's task, below):
+
+    bin/llvmi ir-make rt                         # clang 23.1.4: the 52 torture programs x {-O0 -g, -O2 -g, -O2, -O2 -flto, --target=x86_64-pc-windows-msvc},
+                                                 # the C++ samples for x86_64-apple-macosx, one Rust crate's IR (rustc --emit=llvm-ir), the stress set; ~10 min, < 1 GB
+    bin/repr-llvm mutants .tmp/llvm/rt.list .tmp/llvm/mut-a 315 0      # the two fitted sets and the held-out sets, at their indices
+    bin/repr-llvm mutants .tmp/llvm/rt.list .tmp/llvm/mut-b 315 315
+    bin/repr-llvm mutants .tmp/llvm/rt.list .tmp/llvm/mut-h1 543 500000
+    bin/repr-llvm mutants .tmp/llvm/rt.list .tmp/llvm/mut-h2 539 600000
+    REPR_LLVM_JUDGE=live bin/repr-llvm record-rt .tmp/llvm/rt.list .tmp/llvm/rt-rec     # the oracle tier's references, once
+    bin/repr-llvm check roundtrip-rt --record; bin/repr-llvm check text-rt --record; bin/repr-llvm check verify-rt --record
+
+The families `roundtrip-rt`, `text-rt` and `verify-rt` (with controls) are new verbs of `bin/repr-llvm check`, as LL9a's four. The
+record's numbers change (new inputs). See LLS31 below.
+
+### Proposed (batch 2)
+
+- **LLS31 The 282 modules' pack, without their sources.** (a) Rebuild what can be rebuilt as the pack `rt` (the 260 torture builds,
+  the C++ samples' Mach-O builds, a Rust module, the stress set; the four `hw-*` committed), drop the 21 corner modules (their
+  constructs are among llvm/test's 304 and 806 and the probes), re-make the mutants from the pack and re-record the families: cost a
+  day's verb (`ir-make rt`, three `check` families with controls) and a night's clang run; the REAP read cell's numbers change once.
+  (b) Retire the four families of the 282 lists from the read cells (LLS28's old option (b)): the read stage is then llvm/test's and
+  the probes' alone, all pinned (read 1 now, independence 94.2%), completeness counted on fewer cases; cost: the C torture programs'
+  and the C++ samples' IR leave the read level (llvmi's eval still runs the packs'). *Recommended: (a)*, (b) meanwhile if the user
+  wants the score now.
+- **LLS32 `llvm-ll4`.** LL4's corpus loop (wider rejection samples, LLParser's messages at more parseToken sites, three valid samples'
+  false errors) is on a line of its own. (a) Rebase it onto batch 2 (its `verify.ae` changes against LL9a's, SPEC §6.2.3 against
+  ll6's SPEC, the survey's sections), its records re-made by verify-check (light: seconds); an agent's day; (b) leave it. *Recommended: (a)*.
+
+## Decided (the user, 2026-11-07): LLS31 (b) now, (a) later
+
+- **LLS31 (b), built on batch 2** (2026-11-07): the first records' four families (the 282 modules' round trip, their verify-check with
+  the 630 mutants, the 1,082 held-out mutants, and the 282 modules' mode `:full` text: 2,558 cases on inputs the host's clang made and
+  no checkout holds) leave the REAP cells: `test/reap/cells.edn` keeps them as `:role :beside` sources (listed, not counted), their
+  records unchanged. The read cell is llvm/test's pinned files, the probes and `hw` (1,557 / 1 / 30 of 1,588), print llvm/test's
+  304. `test/crops/independence.edn`: read 1 (LLS27 (a): pinned input in the crop's language), judge (2,068 + 0.5 x 948) / 3,016 =
+  0.843 (the retired families' 912 + 1,082 opt records, 282 objects and bitcode and 282 own texts no longer counted). LLVM IR
+  95.9 / 93.3 / 88.3 -> **96.0 / 100 / 96.9** (maturity's controls item 6 of 6 families: the four without a control are beside).
+  The estimate of 94.2 kept the judge at 0.711; it moves with the cases.
+- **LLS31 (a), later**: the pack `rt` rebuilt and the families back as checks, below.
+
+### LLS31 (a): the pack rt, planned
+
+What the first records were made from, by the ids of `test/llvm/check-roundtrip-linux-amd64.edn` (282): 42 torture programs of gcc
+9.1.0's `gcc.c-torture/execute` (ccorpus2 at its pin, `bin/llvmi`'s `$tx`) in up to five builds (`.g0` 51 and `.g2` 51 with the nine C++
+samples, `.o2` 41, `.lto` 50, `.win` 44: the builds clang accepted), the nine C++ samples of `test/cpp/samples/` for a Mach-O target
+(`.mac`), one Rust module (`rs.lt`), `stress1`-`stress10` (`llvm-stress -size=60`, seeds 1-10), the 21 corner modules (`dbg-O0` ...
+`typed`, sources lost) and the four `hw-*` (committed, `test/llvm/hw/`). The pack rebuilds all but the corners:
+
+1. **The day's verb (light, no clang run by day).** `bin/llvmi`: a pack `rt` beside `tx` and `c` (`pack_of`, `ir-make`'s case, the
+   manifest `test/llvm/ir/rt.tsv` with `rt.cmd` and `rt.tar.xz.sha256`), its corpus set `rt` made from a committed list
+   `test/llvm/rt-builds.tsv` (ID, SOURCE, BUILD), one line per id above but the corners, written from the record's ids by a
+   `bin/llvmi rt-list` (deterministic: the ids' suffixes give the build). The builds, as `modules`' tx lines do (gnu17, `-w
+   -fno-strict-aliasing $tx_flags -ffile-prefix-map=TX/=`): `.g0` `-O0 -g`, `.g2` `-O2 -g`, `.o2` `-O2`, `.lto` `-O2 -flto` (its
+   IR text), `.win` `-O2 --target=x86_64-pc-windows-msvc`; `.mac` `clang++ -O0 -std=c++23 --target=x86_64-apple-macosx` of the C++
+   samples; `rs.lt` `rustc --emit=llvm-ir -C lto=thin` of `test/rust/sample/shapes.rs` (the oracle tier's rustc, by hand); `stressN`
+   `${REPR_LLVM_BIN:-/usr/lib/llvm23/bin}/llvm-stress -size=60 -seed=N`. A module clang refuses is not one (as `ir-make`'s rule).
+   `bin/repr-llvm check` learns the families `roundtrip-rt`, `text-rt`, `verify-rt` (lists from the pack, as LL9a's four), each
+   with a crossed-pair control in `test/repr/llvm/{roundtrip,text,verify}-controls.txt`.
+2. **The night's clang run (one heavy-free job, under 1 GB):**
+
+       bin/llvmi ir-make rt                                                  # clang 23.1.5 (the host's since 2026-11-06), about 10 min
+       bin/repr-llvm mutants .tmp/llvm/rt.list .tmp/llvm/mut-a 315 0         # the fitted sets and the held-out sets, at their indices
+       bin/repr-llvm mutants .tmp/llvm/rt.list .tmp/llvm/mut-b 315 315
+       bin/repr-llvm mutants .tmp/llvm/rt.list .tmp/llvm/mut-h1 543 500000
+       bin/repr-llvm mutants .tmp/llvm/rt.list .tmp/llvm/mut-h2 539 600000
+       REPR_LLVM_JUDGE=live bin/repr-llvm record-rt .tmp/llvm/rt.list .tmp/llvm/rt-rec   # the oracle tier's references, once
+       bin/repr-llvm check roundtrip-rt --record; bin/repr-llvm check text-rt --record; bin/repr-llvm check verify-rt --record
+
+3. **Then (a day):** the four `:beside` sources of `test/reap/cells.edn` replaced by the three families' records as checks,
+   `bin/reap --record`, the read and judge facts recounted (read stays 1: the pack is pinned input in the crop's language, LLS27 (a);
+   the judge gains the families' own verdicts and opt's records at 0.5), the gate's `llvm-read` and `llvm-print` taking the new
+   families as parts. The numbers change once (new inputs: the corners dropped, the builds clang 23.1.5's).
+## As built: LLS21 (a), ci's gaps (2026-11-05, branch `ci-lls21`)
+
+What the user decided (LLS21 (a)) is in ci, C's crop (`arbace/c/build.ae`, `arbace/c/check.ae`), no new native and no Go
+change: nothing of go/arbace/ci or crt moves, so cf2g's AOT needs no new node kind.
+
+- `fmodf` and `fmodl` are in the builder's `builtin-aliases`: `__builtin_fmodf` and `__builtin_fmodl` call musl 1.2.6's functions
+  (long double is double in ci, CS35), as `fmod` always did.
+- The `__atomic_*` and `__sync_*` families are lowered by the builder to plain loads and stores (`atomic-call`, `atomic-name`):
+  ci runs one thread, so every memory order is sequential consistency and a read-modify-write is not interrupted, no `sync/atomic`
+  needed; the memory-order arguments are evaluated for their effects and ignored. Covered: `load_n`, `store_n`, `exchange_n`,
+  `compare_exchange_n` and the generic `load`, `store`, `exchange`, `compare_exchange` (their value arguments by pointer),
+  `fetch_{add,sub,and,or,xor,nand}`, `{add,sub,and,or,xor,nand}_fetch`, `test_and_set`, `clear`, `thread_fence`, `signal_fence`,
+  and the `__sync_` spellings (`fetch_and_OP`, `OP_and_fetch`, `bool_compare_and_swap`, `val_compare_and_swap`, `lock_test_and_set`,
+  `lock_release`, `synchronize`). `__atomic_always_lock_free` and `__atomic_is_lock_free` stay as before. The object is an integer,
+  a pointer or a `_Bool` (anything else is refused by the builder: a `_BitInt` wider than 64 bits, an `__int128`, a float). The checker
+  types the result (`atomic-res`: the pointed-to type for a value, `_Bool` for compare-exchange, test-and-set and
+  `__sync_bool_compare_and_swap`, void for the rest) and no longer lets the parser's prelude declarations `void __atomic_load ();`,
+  `__atomic_store ()`, `__atomic_exchange ()` (cc's, for `<stdatomic.h>`) make the generic forms "too many arguments".
+- A call through a function pointer reads its result at the pointer's return width (`call-node`: `(cv "i32" ...)` around an integer
+  call of 8, 16 or 32 bits when the callee is not a named function): gcc's code reads `eax`, whatever type the callee was defined
+  with, so a comparator lowered as returning `unsigned`, called by musl's `qsort` and `bsearch` as `int`, gives -1. Direct calls are
+  untouched (the callee's own type is the call's).
+- Samples in `test/c/run/` (the `ci-run` corpus, 11 files to 13, gcc 15.2's runs in `test/c/ref-gcc15.edn`, results in
+  `test/c/check-linux-amd64.edn`, in the corpora's `subset-cf2g`, `subset-read` and `subset-run`): `builtin-atomic.c` (every
+  operation above, at char, short, int, long long, pointer and `_Bool`, both compare-exchange forms succeeding and failing, the
+  `__sync_` spellings, fmodf/fmodl) and `fnptr-result-width.c` (qsort with a comparator returning unsigned, a long read as int, an
+  int read as unsigned char). Both equal gcc -O0's output byte for byte.
+
+Checked (on main's stage 0 with `arbace.c.check` and `arbace.c.build` loaded from the branch: the embedded copies are older, so the
+tools' host loads these two files over them; light, nothing built):
+
+| check | result |
+|-|-|
+| `bin/llvmi check --only` of the 7 modules (`ee.MCJIT.frem`, `c-O{0,2}.synth.{decl-atomic,decl-qualifiers,ext-callbacks}`) | 7 of 7 pass (were: ci-builtins 5, abi-punning 2) |
+| `bin/ci check --corpus ci-run --only` (the two new files and three old) | 5 of 5 pass |
+| `bin/ci judge-test` | 104 tests, 464 assertions, 0 failures |
+| `bin/ci dg --essential` | 92 of 92 listed files pass, the control differs |
+| `bin/ci check --only test/c/essential-check.txt` | every program passes (the essential run check) |
+
+`test/llvm/check-eval-linux-amd64.edn`: the 7 rows are `:pass` now (edited by hand from the 7-module run; the next full
+`bin/llvmi check --record` confirms them). The classes `ci-builtins` and `abi-punning` stay in `divergences-eval.edn` because
+`test/llvm/check-aot-linux-amd64.edn` still records the 7 as non-passes (AOT not rerun: cf2g's Go build is not a light check);
+once the AOT record is rewritten both classes have no members and go. This moves `gate_key` (ci is embedded): the main host merges
+it in a rekey night, and the 7 rows of the AOT record and the new samples' `check --aot` rows (`test/c/check-aot-linux-amd64.edn`:
+`ci-run/builtin-atomic.c`, `ci-run/fnptr-result-width.c`, not recorded here) are the night's.
+## As built: LL4, the corpus loop (2026-11-05)
+
+Branch `llvm-ll4` from `llvm-ll1`. Light runs only (main's keyed `--full`, then tonight's gate): every process under 2 GiB,
+`ARBACE_HOST_EXE` the main checkout's stage 0, the lists a few hundred files, opt the pin's `/usr/lib/llvm23/bin/opt`. The rules,
+the tables and the machinery are doc/llvm/SPEC.md §6.2.3; the sources read are llvm-project 23.1.4's (the pinned tarball, LLS11),
+`lib/IR/{Verifier,Intrinsics,AutoUpgrade,Type,Attributes,AsmWriter,DebugInfoMetadata}.cpp`, `lib/AsmParser/{LLParser,LLLexer}.cpp`,
+`include/llvm/IR/Intrinsics*.td`, `DebugInfoFlags.def`, `include/llvm/BinaryFormat/Dwarf.{def,h}` (extracted into the worktree's
+`.tmp/`; no other network). Two tables are generated from them and committed: `arbace/repr/llvm/intr_table.ae` (`bin/llvm-corpus
+intrinsics`, the pin's `llvm-tblgen --dump-json` over Intrinsics.td: 16,423 intrinsics) and `di_table.ae` (`bin/llvm-corpus
+di-table`: 246 fields of 29 node kinds, 234 print fields, the DWARF names, flags and op codes).
+
+**The samples, before and after** (`bin/llvm-corpus verify-record LIST WORK OUT`; the records `test/llvm/llvm-test-*-verify.tsv`,
+NAME, opt's verdict, Arbace's, verdicts same, first messages same, whole stderr same; "before" the verifier of `llvm-ll1`):
+
+| list | files | verdicts as opt's | first messages | whole stderr |
+|---|---|---|---|---|
+| `llvm-test-valid.list` (LL1's 300 valid) | 300 | 277 → **300** | | 277 → **300** |
+| `llvm-test-valid-wide.list` (new: every 97th module of input.list, under 60 KB) | 420 | **420** | | **420** |
+| `llvm-test-reject.list` (LL1's 200 rejections) | 200 | 77 → **195** | 60 → **189** | 43 → **183** |
+| `llvm-test-split.list` (60 sections) | 60 | 57 → **60** | | 57 → **60** |
+| `llvm-test-reject-av.list` (new: every Assembler/ and Verifier/ rejection opt rejects) | 578 | 227 → **554** (95.8 %) | 184 → **538** | 133 → **516** (89.3 %) |
+| `llvm-test-reject-other.list` (new: the other directories', acceptance only) | 179 | 43 → **176** (98.3 %) | 25 → 173 | 24 → 172 |
+
+Two more valid samples held out (not committed, each run once after the rules of the day): every 97th from the 50th (415 modules):
+414 of 415 verdicts, the one a template file (`[SIZE x ptr]`, a parse error read in other words); every 37th from the 11th (1,088
+modules): **1,087 of 1,088 verdicts**, 1,086 whole stderr; the one false error an AMDGPU `wmma` declaration AutoUpgrade rewrites.
+Their false errors found on the way (named types not resolved in operand checks, common globals' float zeros, speculatable
+intrinsic callees, self-references in unreachable blocks, AutoUpgrade's old forms) were fixed before.
+
+The tests' own declarations (`bin/llvm-corpus reject-check`, an `error:` in a CHECK-style line): of the 200, 67 declare one, opt
+prints it in 65, Arbace's verify now in **64** (17 before); of the 578, 190 declare, opt 188, Arbace **185**; of the 179, 27, opt 16,
+Arbace 14. The reader side holds: `roundtrip` over the 300 valid: forms **300 of 300**, bitcode 300 of 300, objects 252 (48 `none`);
+`roundtrip --text` **300 of 300** byte for byte; `test/llvm/essential.txt` 43 of 43 forms, the control fails as it must. The regression
+sets of LL4b/c: the probes (`test/llvm/probes.list`) verdicts 472 → **474** of 478, whole stderr 470 → **471** (the rest the classes of
+`probes-known.tsv`); 269 mutants of the 300 valid (`bin/repr-llvm mutants .tmp/valid.abs OUT 300 700000`, held out, generated once):
+verdicts 252 → **268** of 269, whole stderr 226 → **251**.
+
+The 24 Assembler/ and Verifier/ rejections Arbace still takes (or cannot read): the AMDGPU intrinsics' and allocas' rules (9, Verifier/
+AMDGPU), the vector-predication, vector insert/extract, `get_dynamic_area_offset`, statepoint relocation (2), `callbr` intrinsic,
+memprof, `modular-format`, funclet-token, logical-pointer, structured-gep and non-byte vector GEP rules (one each), `DILocation not
+allowed within this metadata node`, and two of the lexer (`*/` at the top level, `u0x` integers). Of the other directories':
+`dso_local_equivalent`, a DIAssignID operand, `amdhsa_code_object_version` in a constant. The 38 with the verdict right but not the
+rest of the output: mostly later messages of the same families (statepoints, matrix, convergence, deoptimize, guard, the use-list
+order of two users of one intrinsic, a node opt prints by its address, attribute groups of intrinsic declarations).
+
+### The night's runs (commands and what to expect)
+
+As LL1's (under `bin/heavy-lock` on the loaded host; `ARBACE_HOST_EXE` unset in the gate):
+
+| what | command | expected |
+|---|---|---|
+| the lists | `bin/llvm-corpus full-lists; bin/llvm-corpus reject-lists` | 578 and 179 files; `git diff test/llvm/llvm-test-reject-{av,other}.list` empty |
+| the tables | `bin/llvm-corpus intrinsics; bin/llvm-corpus di-table` | `git diff arbace/repr/llvm/{intr,di}_table.ae` empty (llvm-tblgen and python3 of the host) |
+| the records | `bin/llvm-corpus valid-wide`, then `bin/llvm-corpus verify-record LIST WORK test/llvm/llvm-test-NAME-verify.tsv` for valid, valid-wide, reject, split, reject-av, reject-other (resolved by `bin/llvm-corpus resolve`) | `git diff test/llvm/*-verify.tsv` empty; under a minute each at 4 threads |
+| every rejection test | `bin/repr-llvm verify-check .tmp/llvm/lists/reject.list WORK` | 1,706 files: the 757 opt rejects as the two records (verdicts about 96.5 %), the rest (`not llc`, passes' rejections opt -passes=verify takes) `valid`/`valid` |
+| the valid corpus | `bin/repr-llvm verify-check LIST WORK` over `.tmp/llvm/lists/input.list` in shards of 2,000 (`split -l`) | the held-out samples (1,087 of 1,088) predict about 0.1-0.5 % false errors, a few hundred of 42,555, mostly AutoUpgrade's rewrites and large CodeGen modules; each one a class of `test/llvm/divergences-verify.edn` or a rule to fix |
+| the mutants | `bin/repr-llvm mutants .tmp/valid.abs OUT 600 800000` then `verify-check` | about 99 % verdicts, 93 % whole stderr (the 269 held out) |
+
+### Proposed
+
+1. **LL4's close** (LLS6). (a) Close LL4 at these numbers: the A/V rejections at 95.8 % of verdicts and 89.3 % of opt's whole
+   stderr, the target directories at 98.3 % of verdicts, the valid samples 300 of 300 and 420 of 420 (1,087 of 1,088 held out); the rest classed after the night's whole-corpus
+   run in `test/llvm/divergences-verify.edn` (`:target-intrinsic`, `:intrinsic-family`, `:md-debug-locs`, `:lexer`, `:use-list-order`,
+   `:printed-address`), ported when a client crop needs them. Cost: the classing, an hour, after the night. (b) One more day for
+   the target intrinsics (AMDGPU, NVPTX, the vector-predication and matrix families) and the rest of the first-message-only list:
+   about 1 day for A/V verdicts near 99 % and whole stderr near 95 %. Recommend (a): the residue is target-specific, and LL2's
+   lowering, not the verifier, is the row's next need.
+2. **The rejection lists as the interim llvm step's parts** (GT9, LLS20). (a) Add `llvm-test-reject.list`, `-reject-av.list` and
+   `-reject-other.list` as parts of the interim `llvm-roundtrip` step's verify check, their records the expected outputs (957 files,
+   about 1.5 minutes at 4 threads, under 2 GiB a process; opt of the pin as the reference, which the step already needs; and
+   `llvm-test-valid-wide.list`, 420, for the false errors). (b) Only
+   the 300 valid modules (as decided after LL1) until LL4 closes. Recommend (a): the rejection tests are what moved; without them a
+   regression of the verifier's rules is seen only by hand.
+3. **The generated tables** (`intr_table.ae`, `di_table.ae`: 0.9 MB and 30 KB, from the pinned tarball with the host's llvm-tblgen
+   and python3). (a) Committed, with the two verbs re-run and diffed in the night's vendoring checks. (b) Generated at use from the
+   tarball (no committed copy; every verify run would need the tarball and llvm-tblgen). Recommend (a).
+
+## Decided (2026-11-05, the user: LL4's proposals)
+
+LL4's three proposals (a): LL4 closed at these numbers, the remainder classed in test/llvm/divergences-verify.edn after the night's run; the rejection lists and the 420 valid modules as parts of the interim llvm gate step; the generated intrinsic and debug-info tables committed, their regeneration diffed in the night's vendoring checks.
+
+## Decided (the user, 2026-11-07: batch 3's proposal 2) and as built
+
+**2 (a)+(b).** The own verdict (LL9a) takes lit's substitution: `bin/repr-llvm`'s `own_verdicts` gives, as a fourth column, the first RUN
+line's `sed 's/A/B/g' %s |` (a plain substitution alone), and `verify-check` reads a module judged by its own verdict as sed's output
+(`WORK/subst/NAME.ll`), as the test's tools read it; a `valid` claim from a RUN line reading the module with `--disable-verify` is no own
+verdict (the test claims no verification). On batch 3 (`55f9900c8`): valid-wide 413 -> 419 of 420 (`CodeGen-RISCV-rvv-{masked-tama,
+sf_vfexp32e,vbrev,vfmv.s.f,vmnor}`, `s/iXLen/i32/g`; `tools-llubi-divrem_ub3`, `s/DIVREM/sdiv/g`), the reader's answers unchanged; the
+one left, `LTO-Resolution-X86-protected-def-dllimport` (`llvm-as --disable-verify`), judged by opt's verdict, not yet recorded: classed
+`disable-verify` in `test/llvm/valid-wide-known.tsv` (`REPR_LLVM_KNOWN`) until the night's `bin/repr-llvm record-opt`, the class removed
+when it passes. The other lists' records unchanged (valid, reject, split, reject-av, reject-other); `check verify-llvmtest` re-recorded
+(792 of 806: 11 fixed by LL4's messages), roundtrip-llvmtest and text-llvmtest 304/304, verify-probes 472/478.

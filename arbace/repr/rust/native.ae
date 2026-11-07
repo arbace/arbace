@@ -1,0 +1,693 @@
+;; The meta items and literals port rustc 1.99.1's compiler/rustc_ast/src/attr/mod.rs (MetaItem's,
+;; MetaItemKind's and MetaItemInner's from_tokens, list_from_tokens, Attribute::meta),
+;; util/literal.rs (LitKind::from_token_lit, MetaItemLit::from_token) and rustc_span's Ident Debug
+;; (Symbol::guess_print_mode, is_raw_guess), rustc at 58cf8f9c3 (the sources of Alpine's
+;; rust-src-1.99.1-r0; MIT OR Apache-2.0, LICENSE.md, "Rust (rustc 1.99.1)"); the rest (the facts,
+;; after tools/rsdump's Facts visitor, the dump and the check) is Arbace's own.
+
+(ns arbace.repr.rust.native
+  "repr/rust's native reader (doc/rust/NATIVE-READER.md): a Rust file read into the helper's dump
+  (tools/rsdump's `dump`: the configuration, rustc's parsed tree as rustc's Debug transcodes it, the
+  facts rsdump/mac-exprs and rsdump/meta, the lexer's rsdump/comments or, with --full,
+  rsdump/tokens) by Arbace code alone: arbace.repr.rust.lex and arbace.repr.rust.parse, ports of
+  rustc 1.99.1's lexer and parser; no rustc runs. The converter (arbace.repr.rust.convert) reads
+  these dumps as it reads the helper's.
+
+    dump --pin PIN [--full] [--expr] -o DIR --edition E [--helper-hash H] [--list FILE] FILE...
+        DIR/FILE.edn per file, as the helper's dump (--expr: expression files of include!); PIN
+        tools/rsdump/RUSTC_VERSION, the rustc the reader ports; the dump's :helper native:H
+    check --pin PIN [--full] [--expr] [--brief] --ref DIR --out DIR --edition E [--report FILE] [--controls FILE]
+          [--list FILE] FILE...
+        each FILE's native dump (written to OUT) against the helper's (REF/FILE.edn): equal as
+        data (the configuration but the helper's identity), or both an error; the first
+        difference of each file reported (--brief: those files alone)
+    errors --pin PIN [--expr] --edition E [--ref TSV] [--list FILE] FILE...
+        each FILE's first error as rustc reports it (rustc --error-format=json's first error: its
+        message, code and primary span), a line FILE, ok|err, l1:c1-l2:c2, code, message; with --ref,
+        against rustc's lines (bin/repr-rust native-errors), the files whose lines differ reported
+    tree --pin PIN [--expr] -o DIR --edition E [--list FILE] FILE...
+        DIR/FILE.tree and DIR/FILE.lines per file, as rsdump tree writes them (the round trip's
+        tree level, SPEC §11.2), from the native tree"
+  (:require [arbace.repr.rust.lex :as lx]
+            [arbace.repr.rust.parse :as ps]
+            [arbace.string :as str])
+  (:import [arbace.repr.rust.lex Tok Src]
+           [arbace.repr.rust.parse Sp Id Lt TS TT]
+           [java.io File]))
+
+(set! *warn-on-reflection* true)
+
+;; ---------------------------------------------------------------------------------------------
+;; The dump's values
+
+(defn print-name
+  "An Ident's Debug name (rustc_span's guess_print_mode): a reserved name as r#name, a reserved
+  lifetime name as 'r#name"
+  ^String [^String nm ^long ed]
+  (let [stripped (loop [s nm] (if (str/starts-with? s "'") (recur (subs s 1)) s))]
+    (cond (and (not= nm "'") (not= stripped nm) (lx/can-be-raw? stripped) (lx/reserved? stripped ed)
+               (not (contains? #{"_" "static"} stripped)))
+          (str "'r#" (subs nm 1))
+          (and (lx/can-be-raw? nm) (lx/reserved? nm ed)) (str "r#" nm)
+          :else nm)))
+
+(def ^:private delim-names {:OpenParen 'Parenthesis :OpenBrace 'Brace :OpenBracket 'Bracket})
+
+(defn- lit-kind-out [^Tok t]
+  (case (.-x t)
+    (:StrRaw :ByteStrRaw :CStrRaw) (list (symbol (name (.-x t))) (.-z t))
+    (symbol (name (.-x t)))))
+
+(defn- token-kind-out [^Tok t]
+  (case (.-kind t)
+    :Ident (list 'Ident (.-sym t) (if (.-x t) 'Yes 'No))
+    :Lifetime (list 'Lifetime (.-sym t) (if (.-x t) 'Yes 'No))
+    :Literal (list 'Literal (list 'Lit :kind (lit-kind-out t) :symbol (.-sym t)
+                                  :suffix (if (.-y t) (list 'Some (.-y t)) 'None)))
+    :DocComment (list 'DocComment (symbol (name (.-x t))) (symbol (name (.-y t))) (.-sym t))
+    (symbol (name (.-kind t)))))
+
+(defn- spacing-out [k] (symbol (name k)))
+
+;; the tree verb's marked spans: a span the tree text writes as _ and the lines text by its start
+;; line (rsdump's Mode::Tree and Mode::Lines), told apart from a vector of integers (a byte string)
+(deftype Spn [v])
+(def ^:dynamic *mark-spans* false)
+(defn- span-out [^Src src ^long lo ^long hi]
+  (let [v (lx/span-vec src lo hi)] (if *mark-spans* (Spn. v) v)))
+
+(declare tree-at)
+
+(defn- stream-out
+  "TokenStream([...]) of the flat tokens [from, to)"
+  [^Src src ^objects toks ^ints mt ^long from ^long to]
+  (list 'TokenStream
+        (loop [i from out (transient [])]
+          (if (>= i to)
+            (persistent! out)
+            (let [^Tok t (aget toks (int i))]
+              (if (contains? lx/open-delims (.-kind t))
+                (recur (inc (aget mt (int i))) (conj! out (tree-at src toks mt i)))
+                (recur (inc i) (conj! out (list 'Token (list 'Token :kind (token-kind-out t) :span (span-out src (.-lo t) (.-hi t)))
+                                                (spacing-out (.-sp t)))))))))))
+
+(defn- tree-at
+  "TokenTree::Delimited of the group opening at i"
+  [^Src src ^objects toks ^ints mt ^long i]
+  (let [^Tok o (aget toks (int i)) c (aget mt (int i)) ^Tok cl (aget toks c)]
+    (list 'Delimited (list 'DelimSpan :open (span-out src (.-lo o) (.-hi o)) :close (span-out src (.-lo cl) (.-hi cl)))
+          (list 'DelimSpacing :open (spacing-out (.-sp o)) :close (spacing-out (.-sp cl)))
+          (delim-names (.-kind o))
+          (stream-out src toks mt (inc i) c))))
+
+(defn out
+  "The parser's tree as the helper's dump writes it: spans [l1 c1 l2 c2] (nil for the dummy span),
+  identifiers (id NAME 0), lifetimes (lifetime NAME), token streams TokenStream([...])"
+  [x ^Src src ^objects toks ^ints mt ^long ed]
+  (letfn [(o [x]
+            (cond (seq? x) (apply list (map o x))
+                  (vector? x) (mapv o x)
+                  (instance? Sp x) (span-out src (.-lo ^Sp x) (.-hi ^Sp x))
+                  (instance? Id x) (list 'id (print-name (.-name ^Id x) ed) 0)
+                  (instance? Lt x) (list 'lifetime (.-name ^Id (.-ident ^Lt x)))
+                  (instance? TS x) (stream-out src toks mt (.-from ^TS x) (.-to ^TS x))
+                  (instance? TT x) (tree-at src toks mt (.-open ^TT x))
+                  :else x))]
+    (o x)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Meta items (rustc_ast::attr: AttrItem::meta, MetaItem::from_tokens, MetaItemLit, LitKind)
+
+(def ^:private int-tys
+  {"isize" '(Signed Isize) "i8" '(Signed I8) "i16" '(Signed I16) "i32" '(Signed I32) "i64" '(Signed I64)
+   "i128" '(Signed I128) "usize" '(Unsigned Usize) "u8" '(Unsigned U8) "u16" '(Unsigned U16)
+   "u32" '(Unsigned U32) "u64" '(Unsigned U64) "u128" '(Unsigned U128)})
+(def ^:private float-tys {"f16" 'F16 "f32" 'F32 "f64" 'F64 "f128" 'F128})
+
+(defn- units->string ^String [units]
+  (let [sb (StringBuilder.)]
+    (doseq [u units] (if (vector? u) (.appendCodePoint sb (int (second u))) (.appendCodePoint sb (int u))))
+    (.toString sb)))
+
+(defn- utf8-bytes [^String s] (mapv #(bit-and (long %) 0xff) (.getBytes s "UTF-8")))
+
+(defn- float-lit [^String sym suffix]
+  (cond (nil? suffix) (list 'Float sym 'Unsuffixed)
+        (float-tys suffix) (list 'Float sym (list 'Suffixed (float-tys suffix)))
+        :else nil))
+
+(defn- lit-kind
+  "LitKind::from_token_lit of a token literal (lit kind keyword, symbol, suffix), or nil"
+  [k ^String sym suffix ^long z]
+  (when-not (and suffix (not (contains? #{:Integer :Float :Err} k)))
+    (case k
+      :Bool (list 'Bool (= sym "true"))
+      :Byte (list 'Byte (long (first (lx/unescape sym :byte))))
+      :Char (list 'Char (list 'char (long (first (lx/unescape sym :char)))))
+      :Integer (let [s (.replace sym "_" "")
+                     base (cond (str/starts-with? s "0x") 16 (str/starts-with? s "0o") 8 (str/starts-with? s "0b") 2 :else 10)
+                     ty (cond (nil? suffix) 'Unsuffixed
+                              (int-tys suffix) (int-tys suffix)
+                              (str/starts-with? suffix "f") :float
+                              :else nil)]
+                 (cond (nil? ty) nil
+                       (= ty :float) (when (== base 10) (float-lit s suffix))
+                       :else (let [v (java.math.BigInteger. ^String (if (== base 10) s (subs s 2)) (int base))]
+                               (when (< (.bitLength v) 129)
+                                 (list 'Int (list 'Pu128 (if (< (.bitLength v) 64) (.longValue v) (bigint v))) ty)))))
+      :Float (float-lit (.replace sym "_" "") suffix)
+      :Str (list 'Str (if (>= (.indexOf sym "\\") 0) (units->string (lx/unescape sym :str)) sym) 'Cooked)
+      :StrRaw (list 'Str sym (list 'Raw z))
+      :ByteStr (list 'ByteStr (mapv long (lx/unescape sym :byte-str)) 'Cooked)
+      :ByteStrRaw (list 'ByteStr (utf8-bytes sym) (list 'Raw z))
+      :CStr (list 'CStr (conj (vec (mapcat (fn [u] (if (vector? u) [(second u)] (utf8-bytes (String. (int-array [u]) 0 1)))) (lx/unescape sym :c-str))) 0) 'Cooked)
+      :CStrRaw (list 'CStr (conj (utf8-bytes sym) 0) (list 'Raw z))
+      nil)))
+
+(defn- meta-lit
+  "MetaItemLit of a token (a literal or true/false), or nil"
+  [^Tok t]
+  (cond (and (= :Ident (.-kind t)) (not (.-x t)) (contains? #{"true" "false"} (.-sym t)))
+        (list 'MetaItemLit :symbol (.-sym t) :suffix 'None :kind (list 'Bool (= "true" (.-sym t))) :span (Sp. (.-lo t) (.-hi t)))
+        (= :Literal (.-kind t))
+        (when-let [k (lit-kind (.-x t) (.-sym t) (.-y t) (.-z t))]
+          (list 'MetaItemLit :symbol (.-sym t) :suffix (if (.-y t) (list 'Some (.-y t)) 'None) :kind k :span (Sp. (.-lo t) (.-hi t))))
+        :else nil))
+
+(declare meta-list)
+
+(defn- tree-end ^long [^objects toks ^ints mt ^long i]
+  (if (contains? lx/open-delims (.-kind ^Tok (aget toks (int i)))) (inc (aget mt (int i))) (inc i)))
+
+(defn- tree-hi ^long [^objects toks ^ints mt ^long i]
+  (let [^Tok t (aget toks (int i))]
+    (if (contains? lx/open-delims (.-kind t)) (.-hi ^Tok (aget toks (aget mt (int i)))) (.-hi t))))
+
+(defn- meta-item-from-tokens
+  "MetaItem::from_tokens at i (to the stream's end): [MetaItem next-i] or nil"
+  [^objects toks ^ints mt ^long i ^long end]
+  (when (< i end)
+    (let [^Tok t (aget toks (int i))
+          tk (.-kind t)
+          seg (fn [^Tok t] (list 'PathSegment :ident (Id. (.-sym t) (Sp. (.-lo t) (.-hi t))) :args 'None))
+          pathsep? (fn [^long j] (and (< j end) (= :PathSep (.-kind ^Tok (aget toks (int j))))))
+          r (cond
+              (and (= tk :Ident) (not (pathsep? (inc i))))
+              [(list 'Path :span (Sp. (.-lo t) (.-hi t)) :segments [(seg t)]) (inc i)]
+              (or (= tk :Ident) (= tk :PathSep))
+              (loop [segs (if (= tk :Ident) [(seg t)] [(list 'PathSegment :ident (Id. "{{root}}" (Sp. (.-lo t) (.-hi t))) :args 'None)])
+                     j (if (= tk :Ident) (+ i 2) (inc i))]
+                (if (and (< j end) (= :Ident (.-kind ^Tok (aget toks (int j)))))
+                  (let [segs (conj segs (seg (aget toks (int j))))]
+                    (if (pathsep? (inc j))
+                      (recur segs (+ j 2))
+                      [(list 'Path :span (Sp. (.-lo t) (.-hi ^Sp (.-span ^Id (ps/fget (peek segs) :ident)))) :segments segs) (inc j)]))
+                  nil))
+              :else nil)]
+      (when-let [[path j] r]
+        (let [path-hi (.-hi ^Sp (ps/fget path :span))
+              closing (when (< j end) (tree-hi toks mt j))
+              [kind j hi]
+              (if (< j end)
+                (let [^Tok n (aget toks (int j))]
+                  (cond (= :OpenParen (.-kind n))
+                        (when-let [items (meta-list toks mt (inc j) (aget mt (int j)))]
+                          [(list 'List items) (tree-end toks mt j) closing])
+                        (contains? lx/open-delims (.-kind n)) nil
+                        (= :Eq (.-kind n))
+                        (when (and (< (inc j) end) (not (contains? lx/open-delims (.-kind ^Tok (aget toks (int (inc j)))))))
+                          (when-let [l (meta-lit (aget toks (int (inc j))))]
+                            [(list 'NameValue l) (+ j 2) (.-hi ^Sp (ps/fget l :span))]))
+                        :else ['Word j path-hi]))
+                ['Word j path-hi])]
+          (when kind
+            [(list 'MetaItem :unsafety 'Default :path path :kind kind :span (Sp. (.-lo ^Sp (ps/fget path :span)) hi)) j]))))))
+
+(defn- meta-list
+  "MetaItemKind::list_from_tokens of the flat tokens [from, to): [MetaItemInner...] or nil"
+  [^objects toks ^ints mt ^long from ^long to]
+  (loop [i from out []]
+    (if (>= i to)
+      out
+      (let [^Tok t (aget toks (int i))
+            lit (when-not (contains? lx/open-delims (.-kind t)) (meta-lit t))
+            r (if lit [(list 'Lit lit) (inc i)] (when-let [[m j] (meta-item-from-tokens toks mt i to)] [(list 'MetaItem m) j]))]
+        (when-let [[item j] r]
+          (let [j (long j)]
+            (cond (>= j to) (conj out item)
+                  (= :Comma (.-kind ^Tok (aget toks (int j)))) (recur (inc j) (conj out item))
+                  :else nil)))))))
+
+(defn- attr-meta
+  "Attribute::meta: the MetaItem of a normal attribute, or nil"
+  [attr ^objects toks ^ints mt]
+  (let [k (ps/fget attr :kind)]
+    (when (and (seq? k) (= 'Normal (first k)))
+      (let [item (ps/fget (second k) :item)
+            args (ps/fget item :args)
+            kind (cond (= args 'Empty) 'Word
+                       (and (seq? args) (= 'Delimited (first args)))
+                       (let [d (second args)]
+                         (when (= 'Parenthesis (ps/fget d :delim))
+                           (let [^TS ts (ps/fget d :tokens)]
+                             (some->> (meta-list toks mt (.-from ts) (.-to ts)) (list 'List)))))
+                       (and (seq? args) (= 'Eq (first args)))
+                       (let [e (ps/fget args :expr) ek (ps/fget e :kind)]
+                         (when (and (seq? ek) (= 'Lit (first ek)))
+                           (let [l (second ek)
+                                 kk (ps/fget l :kind)
+                                 kw (if (seq? kk) (keyword (name (first kk))) (keyword (name kk)))
+                                 z (if (seq? kk) (long (second kk)) 0)
+                                 suf (let [s (ps/fget l :suffix)] (when (seq? s) (second s)))]
+                             (when-let [lk (lit-kind kw (ps/fget l :symbol) suf z)]
+                               (list 'NameValue (list 'MetaItemLit :symbol (ps/fget l :symbol) :suffix (ps/fget l :suffix) :kind lk
+                                                      :span (ps/fget e :span)))))))
+                       :else nil)]
+        (when kind
+          (list 'MetaItem :unsafety 'Default :path (ps/fget item :path) :kind kind :span (ps/fget attr :span)))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The facts (the helper's Facts visitor): every macro call's arguments parsed as expressions, every
+;; normal attribute's meta item, in rustc_ast::visit's order
+
+(defn- facts
+  "[mac-exprs meta] of a tree, internal values"
+  [tree ^Src src ^objects toks ^ints mt ^long ed]
+  (let [macs (java.util.ArrayList.) metas (java.util.ArrayList.)]
+    (letfn [(walk [x]
+              (cond
+                (seq? x)
+                (let [h (first x) k2 (second x)]
+                  (cond
+                    (and (= h 'Expr) (identical? k2 :kind)) (do (walk (ps/fget x :attrs)) (walk (ps/fget x :kind)))
+                    (and (= h 'MethodCall) (identical? k2 :seg))
+                    (do (walk (ps/fget x :receiver)) (walk (ps/fget x :seg)) (walk (ps/fget x :args)))
+                    (and (= h 'MacCallStmt) (identical? k2 :mac)) (do (walk (ps/fget x :attrs)) (walk (ps/fget x :mac)))
+                    (and (= h 'MacCall) (identical? k2 :path))
+                    (do (walk (ps/fget x :path))
+                        (let [d (ps/fget x :args)
+                              delim (ps/fget d :delim)
+                              ^TS ts (ps/fget d :tokens)]
+                          (when (and (contains? #{'Parenthesis 'Bracket} delim) (instance? TS ts))
+                            (when-let [[kind es] (ps/mac-args src toks mt ed (.-from ts) (.-to ts) (= delim 'Bracket))]
+                              (.add macs [(ps/fget (ps/fget d :dspan) :open) kind es])
+                              (doseq [e es] (walk e))))))
+                    (and (= h 'Attribute) (identical? k2 :kind))
+                    (do (when-let [m (attr-meta x toks mt)] (.add metas [(ps/fget x :span) m]))
+                        (walk (ps/fget x :kind)))
+                    :else (doseq [c x] (walk c))))
+                (vector? x) (doseq [c x] (walk c))
+                :else nil))]
+      (walk tree))
+    [(vec macs) (vec metas)]))
+
+;; ---------------------------------------------------------------------------------------------
+;; The dump
+
+(defn- hex ^String [^bytes b] (apply str (map #(format "%02x" (bit-and (long %) 0xff)) b)))
+
+(defn- sha256 ^String [^bytes data]
+  (hex (.digest (java.security.MessageDigest/getInstance "SHA-256") data)))
+
+(defn- read-pin
+  "tools/rsdump/RUSTC_VERSION's pins, the helper's configuration (version, commit, driver): the
+  native dump names the rustc it is a port of as the helper's names the rustc it ran"
+  [^String f]
+  (when-not (.exists (File. f)) (throw (ex-info (str "repr-rust native: no pin file " f " (--pin)") {})))
+  (into {} (for [l (str/split-lines (slurp f)) :let [[k v] (str/split (str/trim l) #"\s+" 2)] :when v] [k v])))
+
+(def ^:dynamic *helper* "native")
+
+(declare read-error)
+
+(defn dump-forms
+  "A file's dump as the helper's forms: [(rsdump/config {...}) tree (rsdump/mac-exprs [...])
+  (rsdump/meta [...]) (rsdump/comments [...]) or (rsdump/tokens [...])], or with an error, rustc's
+  first error of the parse, [(rsdump/config {...}) (rsdump/error MSG) (rsdump/diagnostic {:message
+  :code :span [l1 c1 l2 c2]})]"
+  [^String file ^long ed full pin expr]
+  (let [f (File. file)
+        raw (java.nio.file.Files/readAllBytes (.toPath f))
+        text (String. ^bytes raw "UTF-8")
+        cfg (list 'rsdump/config (apply array-map :rustc (get pin "version") :rustc-commit (get pin "commit") :rustc-driver (get pin "driver")
+                                        :edition ed :file file :abs (.getCanonicalPath f) :sha256 (sha256 raw) :helper *helper*
+                                        (when expr [:expr true])))
+        errs (java.util.ArrayList.)
+        late (java.util.ArrayList.)
+        stash (java.util.ArrayList.)
+        src (lx/source text)
+        reject (fn [d]
+                 [cfg (list 'rsdump/error (str "error" (when (:code d) (str "[" (:code d) "]")) ": " (:msg d)))
+                  (list 'rsdump/diagnostic (array-map :message (:msg d) :code (:code d) :span (ps/diag-span src d)))])]
+    (try
+      (let [{:keys [tree toks mt]} (binding [ps/*errs* errs ps/*stash* stash lx/*late* late]
+                                     (if expr (ps/parse-expr-file src ed) (ps/parse-file src ed)))]
+        (if-let [d (or (first errs) (first stash) (first late))]
+          (reject d)
+          (let [[macs metas] (facts tree src toks mt ed)
+                o (fn [x] (out x src toks mt ed))]
+            [cfg
+             (o tree)
+             (list 'rsdump/mac-exprs (mapv (fn [[sp k es]] [(o sp) k (o (vec es))]) macs))
+             (list 'rsdump/meta (mapv (fn [[sp m]] [(o sp) (o m)]) metas))
+             (if full
+               (list 'rsdump/tokens (lx/raw-tokens src ed false (boolean expr)))
+               (list 'rsdump/comments (lx/raw-tokens src ed true (boolean expr))))])))
+      (catch Throwable e
+        (cond (and (identical? e ps/perr) (or (first errs) (first stash))) (reject (or (first errs) (first stash)))
+              (:diag (ex-data e)) (reject (:diag (ex-data e)))
+              :else [cfg (list 'rsdump/error (read-error e errs))])))))
+
+(defn- write-dump [^String out-dir ^String file forms]
+  (let [o (File. (str out-dir "/" file ".edn"))]
+    (.mkdirs (.getParentFile o))
+    (spit o (str (str/join "\n" (map pr-str forms)) "\n"))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The tree verb: rsdump tree's texts (tools/rsdump's transcoder in Mode::Tree and Mode::Lines, the
+;; round trip's tree level, SPEC §11.2) written from the native tree, so that the round trip
+;; compares the native reader's trees of the original and of the printed file and needs no rustc
+
+(defn- clj-str
+  "tools/rsdump's clj: a string for the Clojure reader (controls and DEL as \\uXXXX)"
+  ^String [^String s]
+  (let [sb (StringBuilder. "\"")]
+    (loop [i 0]
+      (when (< i (.length s))
+        (let [cp (.codePointAt s i)]
+          (case (int cp)
+            34 (.append sb "\\\"")
+            92 (.append sb "\\\\")
+            10 (.append sb "\\n")
+            9 (.append sb "\\t")
+            13 (.append sb "\\r")
+            (if (or (< cp 0x20) (== cp 0x7f))
+              (.append sb (format "\\u%04x" (int cp)))
+              (.appendCodePoint sb (int cp))))
+          (recur (+ i (Character/charCount (int cp)))))))
+    (.append sb "\"")
+    (.toString sb)))
+
+(defn tree-texts
+  "The tree text and the lines text of a tree whose spans are marked (*mark-spans*), as rsdump
+  tree writes them: spans, identifiers' syntax contexts and token spacing left out (N1-N4), one
+  compound a line indented by its depth; the start line of every span with the node and field it
+  belongs to (- for the dummy span)"
+  [x]
+  (let [tree (StringBuilder.) lines (StringBuilder.) names (java.util.ArrayList.) key (volatile! "") depth (volatile! 0)]
+    (letfn [(emit [^String s] (.append tree s))
+            (open [^String s]
+              (.append tree "\n")
+              (dotimes [_ @depth] (.append tree " "))
+              (emit s) (vswap! depth inc))
+            (close [^String s] (emit s) (vswap! depth dec))
+            (here [] (let [n (if (.isEmpty names) "-" (str (.get names (dec (.size names)))))]
+                       (if (= "" @key) n (str n "." @key))))
+            (span-line [v] (.append lines (str (if v (first v) "-") " " (here) "\n")))
+            (elems [xs] (doseq [e xs] (emit " ") (vreset! key "") (value e)))
+            (fields [xs]
+              (loop [xs (seq xs)]
+                (when xs
+                  (let [k (first xs)]
+                    (if (= k :..)
+                      (do (emit " :..") (recur (next xs)))
+                      (do (emit (str " " k " ")) (vreset! key (name k)) (value (second xs)) (recur (nnext xs))))))))
+            (compound [nm ^String o ^String c body xs]
+              (.add names nm) (open o) (body xs) (close c) (.remove names (int (dec (.size names)))))
+            (value [x]
+              (cond (instance? Spn x) (do (emit "_") (span-line (.-v ^Spn x)))
+                    (nil? x) (do (emit "_") (span-line nil))
+                    (string? x) (emit (clj-str x))
+                    (vector? x) (compound "[" "[" "]" elems x)
+                    (seq? x)
+                    (let [h (first x)]
+                      (case h
+                        id (emit (str "(id " (clj-str (second x)) ")"))
+                        lifetime (emit (str "(lifetime " (clj-str (second x)) ")"))
+                        char (emit (str "(char " (second x) ")"))
+                        ctxt (emit (str "(ctxt " (second x) ")"))
+                        DelimSpacing (emit "_")
+                        tuple (compound "tuple" "(tuple" ")" elems (rest x))
+                        map (compound "map" "(map" ")" fields (rest x))
+                        (if (keyword? (second x))
+                          (compound (str h) (str "(" h) ")" fields (rest x))
+                          (compound (str h) (str "(" h) ")" elems (rest x)))))
+                    (contains? '#{Joint Alone JointHidden} x) (emit "_")
+                    :else (emit (str x))))]
+      (value x)
+      [(str (str/triml (.toString tree)) "\n") (.toString lines)])))
+
+(defn- read-error
+  "The native reader's message for a file it rejects"
+  ^String [^Throwable e errs]
+  ;; batch 2's merge: the parser's diagnostics are rust-errors' maps ({:msg :code ...}), not rust-90's [msg pos]
+  (cond (and (identical? e ps/perr) (first errs)) (str "native parser: " (:msg (first errs)))
+        (:diag (ex-data e)) (str "native lexer: " (:msg (:diag (ex-data e))))
+        (:rust-lex (ex-data e)) (str "native lexer: " (.getMessage e))
+        :else (str "native reader failed: " e)))
+
+(defn file-trees
+  "A file's [tree lines] texts as rsdump tree writes them (tree-texts), or [\"rsdump/error MSG\\n\" \"\"]"
+  [^String file ^long ed expr]
+  (let [text (String. ^bytes (java.nio.file.Files/readAllBytes (.toPath (File. file))) "UTF-8")
+        errs (java.util.ArrayList.)
+        stash (java.util.ArrayList.)
+        late (java.util.ArrayList.)]
+    (try
+      (let [src (lx/source text)
+            {:keys [tree toks mt]} (binding [ps/*errs* errs ps/*stash* stash lx/*late* late]
+                                     (if expr (ps/parse-expr-file src ed) (ps/parse-file src ed)))]
+        ;; batch 2's merge: a parse that recovered with an error rejects the file, as dump-forms does
+        (if-let [d (or (first errs) (first stash) (first late))]
+          [(str "rsdump/error native parser: " (:msg d) "\n") ""]
+          (tree-texts (binding [*mark-spans* true] (out tree src toks mt ed)))))
+      (catch Throwable e
+        [(str "rsdump/error " (read-error e errs) "\n") ""]))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The comparison
+
+(defn first-diff
+  "The first difference of two forms: [path a b] or nil"
+  [a b]
+  (letfn [(d [a b path]
+            (cond (= a b) nil
+                  (and (sequential? a) (sequential? b) (= (seq? a) (seq? b)))
+                  (let [n (max (count a) (count b))]
+                    (or (first (keep (fn [i] (d (nth a i ::none) (nth b i ::none) (conj path i))) (range n)))
+                        [path a b]))
+                  :else [path a b]))]
+    (d a b [])))
+
+(defn- context-of
+  "The node names along a difference's path in a form"
+  [form path]
+  (loop [x form path path out []]
+    (if (or (empty? path) (not (sequential? x)))
+      out
+      (let [i (first path)
+            nm (when (and (seq? x) (symbol? (first x))) (first x))
+            key (when (and (seq? x) (pos? i) (keyword? (nth x (dec i) nil))) (nth x (dec i)))]
+        (recur (nth x i nil) (rest path) (cond-> out nm (conj (if key (str nm key) (str nm)))))))))
+
+(defn- truncate ^String [x ^long n] (let [s (pr-str x)] (if (> (count s) n) (str (subs s 0 n) "...") s)))
+
+(defn compare-dumps
+  "A file's native dump against the helper's: {:status :equal|:both-reject|:differs|:native-rejects|
+  :helper-rejects ...}"
+  [helper native]
+  (let [herr (some #(when (and (seq? %) (= 'rsdump/error (first %))) (second %)) helper)
+        nerr (some #(when (and (seq? %) (= 'rsdump/error (first %))) (second %)) native)
+        hcfg (second (first helper)) ncfg (second (first native))]
+    (cond
+      (and herr nerr) {:status :both-reject :helper herr :native nerr}
+      herr {:status :helper-rejects :helper herr}
+      nerr {:status :native-rejects :native nerr}
+      (not= (select-keys hcfg [:edition :file :sha256 :expr]) (select-keys ncfg [:edition :file :sha256 :expr]))
+      {:status :differs :section "rsdump/config" :helper (pr-str hcfg) :native (pr-str ncfg)}
+      :else
+      (let [names ["tree" "rsdump/mac-exprs" "rsdump/meta" "rsdump/comments"]]
+        (or (first (keep (fn [i]
+                           (let [a (nth helper i nil) b (nth native i nil)]
+                             (when-let [[path x y] (first-diff a b)]
+                               {:status :differs :section (nth names (dec i)) :path path :context (context-of a path)
+                                :helper (truncate x 400) :native (truncate y 400)})))
+                         [1 2 3 4]))
+            {:status :equal})))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The command
+
+(defn- parse-args [args with-value]
+  (loop [as args opts {} pos []]
+    (if (empty? as)
+      {:opts opts :args pos}
+      (let [[a & more] as]
+        (cond (contains? with-value a) (recur (rest more) (assoc opts a (first more)) pos)
+              (str/starts-with? a "--") (recur more (assoc opts a true) pos)
+              :else (recur more opts (conj pos a)))))))
+
+(defn- files-of [opts args]
+  (concat args (when-let [l (get opts "--list")] (remove str/blank? (str/split-lines (slurp l))))))
+
+(defn- cmd-dump [args root]
+  (let [{:keys [opts args]} (parse-args args #{"-o" "--edition" "--list" "--helper-hash" "--pin"})
+        out (get opts "-o" ".tmp/repr-rust/native")
+        ed (Long/parseLong (get opts "--edition" "2024"))
+        pin (read-pin (get opts "--pin" (str root "/tools/rsdump/RUSTC_VERSION")))
+        bad (volatile! 0)]
+    (binding [*helper* (str "native" (when-let [h (get opts "--helper-hash")] (str ":" h)))]
+      (doseq [f (files-of opts args)]
+        (let [forms (dump-forms f ed (get opts "--full") pin (get opts "--expr"))]
+          (when (some #(and (seq? %) (= 'rsdump/error (first %))) forms)
+            (vswap! bad inc)
+            (binding [*out* *err*] (println "native:" f (second (second forms)))))
+          (write-dump out f forms))))
+    (if (zero? @bad) 0 1)))
+
+(defn- judge-controls
+  "The negative controls of the check (GT9, doc/GATE-SURVEY.md, GTS81 (a), \"As built: GT9's controls\"; CONTROLS-FILE, test/rust/
+  native-controls.txt: lines `ID SUBJECT REFERENCE`, files as the list names them): the SUBJECT's native dump, given the configuration
+  of the REFERENCE's dump (so that the comparison reaches the trees, as it does for a file against its own dump), judged by
+  `compare-dumps` against the REFERENCE's helper dump must be :differs in a section other than the configuration
+  (`control ID fails as it must`); :equal or :both-reject is `control passed`, any other status `control not judged`; both fail the check.
+  A control whose subject is in this run's list and its reference not is left; one whose subject is not in the list is not this
+  run's (another group of the list). NFS and HFS: the native and the helper dumps by file. Returns the number that failed."
+  [^String controls-file nfs hfs]
+  (if-not (and controls-file (.exists (File. controls-file)))
+    0
+    (let [bad (atom 0)]
+      (doseq [l (str/split-lines (slurp controls-file))
+              :let [[id subject reference] (str/split (str/trim l) #"\s+")]
+              :when (and id reference (not (str/starts-with? id "#")) (contains? nfs subject))]
+        (if-not (contains? hfs reference)
+          (println (str "control " id " left: " reference " is not in the run"))
+          (let [hr (get hfs reference) ns (get nfs subject)
+                r (compare-dumps hr (assoc (vec ns) 0 (first hr)))]
+            (cond (and (= :differs (:status r)) (not= "rsdump/config" (:section r)))
+                  (println (str "control " id " fails as it must (" subject " read natively against the helper's dump of " reference ": " (:section r) " differs)"))
+                  (contains? #{:equal :both-reject} (:status r))
+                  (do (swap! bad inc) (println (str "control passed: " id " (" subject " against " reference ") is judged " (name (:status r)) " by the check")))
+                  :else
+                  (do (swap! bad inc) (println (str "control not judged: " id " (" subject " against " reference "): the check says " (name (:status r)) (when (:section r) (str " in " (:section r))) ", not a difference in the trees")))))))
+      @bad)))
+
+(defn- cmd-check [args root]
+  (let [{:keys [opts args]} (parse-args args #{"--ref" "--out" "--edition" "--report" "--list" "--pin" "--controls"})
+        ref (get opts "--ref") out (get opts "--out" ".tmp/repr-rust/native-check/native")
+        brief (get opts "--brief")
+        ed (Long/parseLong (get opts "--edition" "2024"))
+        pin (read-pin (get opts "--pin" (str root "/tools/rsdump/RUSTC_VERSION")))
+        results (vec (for [f (files-of opts args)]
+                       (let [t0 (System/currentTimeMillis)
+                             nf (dump-forms f ed (get opts "--full") pin (get opts "--expr"))
+                             t1 (System/currentTimeMillis)
+                             hf (let [h (File. (str ref "/" f ".edn"))]
+                                  (if (.exists h) (read-string (str "[" (slurp h) "]")) [nil (list 'rsdump/error "no helper dump")]))
+                             ;; the native dump as written and read back: the converter's view
+                             _ (write-dump out f nf)
+                             nf (read-string (str "[" (slurp (str out "/" f ".edn")) "]"))
+                             r (assoc (compare-dumps hf nf) :file f :ms (- t1 t0))]
+                         (when-not (and brief (contains? #{:equal :both-reject} (:status r)))
+                           (println (format "%-14s %6d ms  %s" (name (:status r)) (:ms r) f)))
+                         (when (= :differs (:status r))
+                           (println "   " (:section r) (pr-str (:context r)) (pr-str (:path r)))
+                           (println "    helper:" (:helper r))
+                           (println "    native:" (:native r)))
+                         (when (contains? #{:native-rejects :helper-rejects} (:status r))
+                           (println "   " (or (:native r) (:helper r))))
+                         r)))
+        by (frequencies (map :status results))
+        ctl (judge-controls (get opts "--controls")
+                            (into {} (for [f (files-of opts args)] [f (read-string (str "[" (slurp (str out "/" f ".edn")) "]"))]))
+                            (into {} (for [f (files-of opts args) :let [h (File. (str ref "/" f ".edn"))] :when (.exists h)]
+                                       [f (read-string (str "[" (slurp h) "]"))])))]
+    (println (format "repr-rust native-check: %d files, %d equal, %d both rejected, %d differ, %d rejected by the native reader alone, %d by the helper alone; %.1f s reading"
+                     (count results) (get by :equal 0) (get by :both-reject 0) (get by :differs 0)
+                     (get by :native-rejects 0) (get by :helper-rejects 0) (/ (reduce + (map :ms results)) 1000.0)))
+    (when-let [rep (get opts "--report")]
+      (spit rep (with-out-str (prn {:files (count results) :by-status by :results (mapv #(dissoc % :helper :native) results)}))))
+    (if (and (every? #(contains? #{:equal :both-reject} (:status %)) results) (zero? ctl)) 0 1)))
+
+;; ---------------------------------------------------------------------------------------------
+;; The first errors against rustc's
+
+(defn first-error
+  "A file's first error as rustc reports it, or nil when the native reader accepts it:
+  {:message :code :span [l1 c1 l2 c2]}"
+  [^String file ^long ed pin expr]
+  (let [forms (dump-forms file ed false pin expr)]
+    (or (some #(when (and (seq? %) (= 'rsdump/diagnostic (first %))) (second %)) forms)
+        ;; a crash of the reader is no acceptance: it is reported as an error of its own
+        (some #(when (and (seq? %) (= 'rsdump/error (first %)) (str/starts-with? (str (second %)) "native reader failed"))
+                 {:message (str (second %)) :span [0 0 0 0]})
+              forms))))
+
+(defn- error-line
+  "A file's first error as a line of the rustc reference's table: FILE, ok|err, l1:c1-l2:c2, code, message"
+  ^String [^String file e]
+  (if e
+    (let [[l1 c1 l2 c2] (:span e)]
+      (str file "\terr\t" l1 ":" c1 "-" l2 ":" c2 "\t" (or (:code e) "-") "\t"
+           (-> ^String (:message e) (.replace "\n" "\\n") (.replace "\t" "\\t"))))
+    (str file "\tok\t-\t-\t-")))
+
+(defn- cmd-errors [args root]
+  (let [{:keys [opts args]} (parse-args args #{"--ref" "--edition" "--list" "--pin" "--out"})
+        ed (Long/parseLong (get opts "--edition" "2024"))
+        pin (read-pin (get opts "--pin" (str root "/tools/rsdump/RUSTC_VERSION")))
+        ref (when-let [r (get opts "--ref")]
+              (into {} (for [l (str/split-lines (slurp r)) :when (not (str/blank? l))] [(first (str/split l #"\t" 2)) l])))
+        lines (vec (for [f (files-of opts args)]
+                     (let [l (error-line f (first-error f ed pin (get opts "--expr")))
+                           r (get ref f)
+                           st (cond (nil? ref) nil
+                                    (nil? r) :no-ref
+                                    (= r l) (if (str/includes? l "\tok\t") :both-accept :equal)
+                                    :else (let [rs (str/split r #"\t") ls (str/split l #"\t")]
+                                            (cond (not= (nth rs 1) (nth ls 1)) (if (= (nth ls 1) "ok") :native-accepts :native-rejects)
+                                                  (not= (nth rs 4 nil) (nth ls 4 nil)) :message-differs
+                                                  (not= (nth rs 2) (nth ls 2)) :span-differs
+                                                  :else :code-differs)))]
+                       (if ref
+                         (do (when-not (contains? #{:equal :both-accept} st)
+                               (println (name st) "\n    rustc: " r "\n    native:" l))
+                             st)
+                         (do (println l) nil)))))]
+    (when-let [o (get opts "--out")] nil)
+    (if ref
+      (let [by (frequencies lines)
+            errs (+ (get by :equal 0) (get by :message-differs 0) (get by :span-differs 0) (get by :code-differs 0))]
+        (println (format "repr-rust native errors: %d files, %d accepted by both, %d first errors equal of %d rejected by both (%d messages differ, %d spans, %d codes); %d rejected by the native reader alone, %d by rustc alone"
+                         (count lines) (get by :both-accept 0) (get by :equal 0) errs
+                         (get by :message-differs 0) (get by :span-differs 0) (get by :code-differs 0)
+                         (get by :native-rejects 0) (get by :native-accepts 0)))
+        (if (every? #{:equal :both-accept} lines) 0 1))
+      0)))
+
+(defn- cmd-tree [args root]
+  (let [{:keys [opts args]} (parse-args args #{"-o" "--edition" "--list" "--pin"})
+        out (get opts "-o" ".tmp/repr-rust/native-trees")
+        ed (Long/parseLong (get opts "--edition" "2024"))
+        bad (volatile! 0)]
+    (doseq [f (files-of opts args)]
+      (let [[t l] (file-trees f ed (get opts "--expr"))
+            o (File. (str out "/" f ".tree"))]
+        (when (str/starts-with? t "rsdump/error")
+          (vswap! bad inc)
+          (binding [*out* *err*] (println (str "native: " f ": " (subs t 13 (dec (count t)))))))
+        (.mkdirs (.getParentFile o))
+        (spit o t)
+        (spit (str out "/" f ".lines") l)))
+    (if (zero? @bad) 0 1)))
+
+(defn -main [& args]
+  (let [[verb & more] args
+        root (or (System/getenv "ARBACE_ROOT") ".")]
+    (System/exit
+      (case verb
+        "dump" (cmd-dump more root)
+        "check" (cmd-check more root)
+        "errors" (cmd-errors more root)
+        "tree" (cmd-tree more root)
+        (do (println "usage: arbace.repr.rust.native dump|check|errors|tree ...") 2)))))

@@ -1,0 +1,302 @@
+(ns arbace.rust.front.mir
+  "MIR forms (doc/rust/MIR.md, RF2): the reader of the helper's `mir` dump (tools/rsdump/mirdata.rs, `rsdump rustc
+  --mir-data`) and the printer, after rustc's compiler/rustc_middle/src/mir/pretty.rs (rustc 1.99.1, MIT or Apache-2.0;
+  the port is recorded in doc/ARBACE.md and LICENSE.md): the forms printed back are rustc's `-Zunpretty=mir` text."
+  (:require [arbace.string :as str]))
+
+(def indent "    ")
+
+;; ---------------------------------------------------------------- the reader
+
+(defn read-all
+  "A `--mir-data` file: {:bodies [map ...] :layouts {TYPE-TEXT map}}. The bodies in rustc's order (the `mir/body` and
+  `mir/trivial-const` forms' maps, with :form :body or :trivial-const); the layouts the helper's `layout_of` gave the
+  monomorphic types of the locals (RF1's layout oracle: size, align, abi, field offsets)."
+  [text]
+  (let [rdr (java.io.PushbackReader. (java.io.StringReader. text))]
+    (loop [bodies [] layouts {} langs {}]
+      (let [f (read {:eof ::eof} rdr)]
+        (cond
+          (= f ::eof) {:bodies bodies :layouts layouts :langsyms langs :entry (:entry (meta bodies))}
+          (= "entry" (name (first f))) (recur (vary-meta bodies assoc :entry (second f)) layouts langs)
+          (= "layouts" (name (first f))) (recur bodies (into layouts (map (fn [[k v]] [k v])) (second f)) langs)
+          (= "langsyms" (name (first f))) (recur bodies layouts (second f))
+          (#{"body" "trivial-const"} (name (first f)))
+          (recur (conj bodies (assoc (second f) :form (case (name (first f)) "body" :body "trivial-const" :trivial-const)))
+                 layouts langs)
+          ;; (mir/static ...), (mir/external ...): items without a body here
+          :else (recur bodies layouts langs))))))
+
+(defn read-dump
+  "The bodies of a `--mir-data` file (read-all's :bodies)."
+  [text]
+  (:bodies (read-all text)))
+
+;; ---------------------------------------------------------------- the printer
+
+(defn tx "A type form's text." [t] (second t))
+
+(defn- local [n] (str "_" n))
+
+(declare place operand)
+
+(defn- proj-pre [projs]
+  (apply str (map (fn [e] (case (name (first e))
+                            ("field" "downcast" "opaque") "("
+                            "deref" "(*"
+                            "unwrap-binder" "unwrap_binder!("
+                            ""))
+                  (reverse projs))))
+
+(defn- proj-post [projs]
+  (apply str
+         (map (fn [e]
+                (case (name (first e))
+                  "opaque" (str " as " (tx (second e)) ")")
+                  "downcast" (let [[_ n i] e] (if n (str " as " n ")") (str " as variant#" i ")")))
+                  "deref" ")"
+                  "field" (str "." (second e) ": " (tx (nth e 2)) ")")
+                  "index" (str "[" (local (second e)) "]")
+                  "cindex" (let [[_ off ml from-end] e] (if from-end (str "[-" off " of " ml "]") (str "[" off " of " ml "]")))
+                  "subslice" (let [[_ from to from-end] e]
+                               (cond (and from-end (zero? to)) (str "[" from ":]")
+                                     (and from-end (zero? from)) (str "[:-" to "]")
+                                     from-end (str "[" from ":-" to "]")
+                                     :else (str "[" from ".." to "]")))
+                  "unwrap-binder" (str "; " (tx (second e)) ")")))
+              projs)))
+
+(defn place [[_ l & projs]]
+  (str (proj-pre projs) (local l) (proj-post projs)))
+
+(defn operand [o]
+  (case (name (first o))
+    "copy" (str "copy " (place (second o)))
+    "move" (str "move " (place (second o)))
+    "const" (second o)
+    "runtime-checks" (second o)))
+
+(defn- tuple-str
+  "Debug's `debug_tuple(name)`: `name(a, b)`, a one-element tuple of an empty name `(a,)`; no fields: the name alone."
+  [name items]
+  (cond (empty? items) name
+        (and (= 1 (count items)) (= "" name)) (str "(" (first items) ",)")
+        :else (str name "(" (str/join ", " items) ")")))
+
+(defn- struct-str [name fields]
+  (if (empty? fields) name (str name " { " (str/join ", " (map (fn [[k v]] (str k ": " v)) fields)) " }")))
+
+(defn rvalue [r]
+  (let [k (name (first r))]
+    (case k
+      "use" (operand (second r))
+      "use-noretag" (str "no_retag " (operand (second r)))
+      "repeat" (str "[" (operand (second r)) "; " (nth r 2) "]")
+      "ref" (str "&" (case (second r) :shared "" :mut "mut " :fake-deep "fake " :fake-shallow "fake shallow ") (place (nth r 2)))
+      "tlsref" (str "&/*tls*/ " (second r) (nth r 2))
+      "rawptr" (str "&raw " (second r) " " (place (nth r 2)))
+      "cast" (str (operand (nth r 2)) " as " (tx (nth r 3)) " (" (second r) ")")
+      "binop" (str (second r) "(" (operand (nth r 2)) ", " (operand (nth r 3)) ")")
+      "unop" (str (second r) "(" (operand (nth r 2)) ")")
+      "discriminant" (str "discriminant(" (place (second r)) ")")
+      "copy-for-deref" (str "deref_copy " (place (second r)))
+      "wrap-binder" (str "wrap_binder!(" (operand (second r)) "; " (tx (nth r 2)) ")")
+      "reborrow" (str (tx (second r)) "(" (if (nth r 2) "reborrow" "coerce shared") " " (place (nth r 3)) ")")
+      "aggregate"
+      (let [[_ kind ops] r
+            os (mapv operand ops)
+            kk (name (first kind))]
+        (case kk
+          "array" (str "[" (str/join ", " os) "]")
+          "tuple" (if (empty? os) "()" (tuple-str "" os))
+          "adt" (let [[_ name ctor fields] kind]
+                  (case ctor
+                    "const" name
+                    "fn" (tuple-str name os)
+                    "struct" (struct-str name (map vector fields os))))
+          ("closure" "coroutine")
+          (let [[_ _ _ names span] kind
+                nm (if (= kk "closure") (str "{closure@" span "}") (str "{coroutine@" span "}"))]
+            (struct-str nm (map vector (or names (map str (range (count os)))) os)))
+          "rawptr" (str "*" (if (nth kind 2) "mut" "const") " " (tx (second kind)) " from " (tuple-str "" os))))
+      (throw (ex-info (str "MIR rvalue " k) {})))))
+
+(defn- bin-name [n] n)
+
+(defn statement [s]
+  (let [k (name (first s))]
+    (case k
+      "assign" (str (place (second s)) " = " (rvalue (nth s 2)))
+      "fake-read" (str "FakeRead(" (second s) ", " (place (nth s 2)) ")")
+      "set-discriminant" (str "discriminant(" (place (second s)) ") = " (nth s 2))
+      "storage-live" (str "StorageLive(" (local (second s)) ")")
+      "storage-dead" (str "StorageDead(" (local (second s)) ")")
+      "place-mention" (str "PlaceMention(" (place (second s)) ")")
+      "assume" (str "assume(" (operand (second s)) ")")
+      "copy-nonoverlapping" (str "copy_nonoverlapping(dst = " (operand (second s)) ", src = " (operand (nth s 2)) ", count = " (operand (nth s 3)) ")")
+      "const-eval-counter" "ConstEvalCounter"
+      "nop" "nop"
+      "bidh" (str "BackwardIncompatibleDropHint(" (place (second s)) ")")
+      "raw" (second s))))
+
+(defn- unwind-str [u]
+  (case (name (first u))
+    "continue" "continue"
+    "unreachable" "unreachable"
+    "terminate" (str "terminate(" (second u) ")")))
+
+(defn- assert-args [m]
+  (let [k (name (first m))
+        o operand]
+    (case k
+      "bounds-check" (str "\"index out of bounds: the length is {} but the index is {}\", " (o (second m)) ", " (o (nth m 2)))
+      "overflow-neg" (str "\"attempt to negate `{}`, which would overflow\", " (o (second m)))
+      "div-zero" (str "\"attempt to divide `{}` by zero\", " (o (second m)))
+      "rem-zero" (str "\"attempt to calculate the remainder of `{}` with a divisor of zero\", " (o (second m)))
+      "overflow" (let [[_ op l r] m]
+                   (case op
+                     "Add" (str "\"attempt to compute `{} + {}`, which would overflow\", " (o l) ", " (o r))
+                     "Sub" (str "\"attempt to compute `{} - {}`, which would overflow\", " (o l) ", " (o r))
+                     "Mul" (str "\"attempt to compute `{} * {}`, which would overflow\", " (o l) ", " (o r))
+                     "Div" (str "\"attempt to compute `{} / {}`, which would overflow\", " (o l) ", " (o r))
+                     "Rem" (str "\"attempt to compute the remainder of `{} % {}`, which would overflow\", " (o l) ", " (o r))
+                     "Shr" (str "\"attempt to shift right by `{}`, which would overflow\", " (o r))
+                     "Shl" (str "\"attempt to shift left by `{}`, which would overflow\", " (o r))))
+      "misaligned" (str "\"misaligned pointer dereference: address must be a multiple of {} but is {}\", " (o (second m)) ", " (o (nth m 2)))
+      "null-deref" "\"null pointer dereference occurred\""
+      "null-ref" "\"null reference produced\""
+      "invalid-enum" (str "\"trying to construct an enum from an invalid value {}\", " (o (second m)))
+      "resumed" (nth m 2))))
+
+(defn- succ
+  "[head labels-and-targets show-unwind-or-nil] of a terminator: its head text, its successors as [label block] in
+  rustc's order, and the unwind action to show (continue, unreachable, terminate) or nil."
+  [t]
+  (let [k (name (first t))
+        cleanup (fn [u] (when (= "cleanup" (name (first u))) (second u)))
+        shown (fn [u] (when-not (cleanup u) u))]
+    (case k
+      "goto" ["goto" [["" (second t)]] nil]
+      "switch" (let [[_ d vals other] t]
+                 [(str "switchInt(" (operand d) ")") (conj (mapv (fn [[v b]] [(str v) b]) vals) ["otherwise" other]) nil])
+      "resume" ["resume" [] nil]
+      "terminate" [(str "terminate(" (second t) ")") [] nil]
+      "return" ["return" [] nil]
+      "unreachable" ["unreachable" [] nil]
+      "coroutine-drop" ["coroutine_drop" [] nil]
+      "drop" (let [[_ p target u _ drop] t]
+               [(str "drop(" (place p) ")")
+                (cond-> [["return" target]] (cleanup u) (conj ["unwind" (cleanup u)]) drop (conj ["drop" drop]))
+                (shown u)])
+      "call" (let [[_ f args dest target u] t]
+               [(str (place dest) " = " (operand f) "(" (str/join ", " (map operand args)) ")")
+                (cond-> [] target (conj ["return" target]) (cleanup u) (conj ["unwind" (cleanup u)]))
+                (shown u)])
+      "tailcall" [(str "tailcall " (operand (second t)) "(" (str/join ", " (map operand (nth t 2))) ")") [] nil]
+      "assert" (let [[_ c expected msg target u] t]
+                 [(str "assert(" (if expected "" "!") (operand c) ", " (assert-args msg) ")")
+                  (cond-> [["success" target]] (cleanup u) (conj ["unwind" (cleanup u)]))
+                  (shown u)])
+      "yield" (let [[_ v resume arg drop] t]
+                [(str (place arg) " = yield(" (operand v) ")") (cond-> [["resume" resume]] drop (conj ["drop" drop])) nil])
+      "false-edge" ["falseEdge" [["real" (second t)] ["imaginary" (nth t 2)]] nil]
+      "false-unwind" (let [[_ real u] t]
+                       ["falseUnwind" (cond-> [["real" real]] (cleanup u) (conj ["unwind" (cleanup u)])) (shown u)])
+      "asm" [(second t) nil nil])))
+
+(defn terminator [t]
+  (if (= "asm" (name (first t)))
+    (second t)
+    (let [[head succs unw] (succ t)
+          n (count succs)
+          unw-s (when unw (str "unwind " (unwind-str unw)))]
+      (cond
+        (and (zero? n) (not unw)) head
+        (zero? n) (str head " -> " unw-s)
+        (and (= 1 n) (not unw)) (str head " -> bb" (second (first succs)))
+        :else (str head " -> ["
+                   (str/join ", " (concat (map (fn [[l b]] (str l ": bb" b)) succs) (when unw [unw-s])))
+                   "]")))))
+
+(defn- debug-info [d]
+  (let [v (:value d)
+        value (if (= "place" (name (first v))) (place v) (operand v))
+        c (:composite d)
+        head (if c
+               (let [ps (:proj c)]
+                 (str (proj-pre ps) "(" (:name d) ": " (tx (:ty c)) ")" (proj-post ps)))
+               (:name d))]
+    (str head " => " value)))
+
+(defn- sig [b]
+  (let [kind (:kind b)
+        promoted (:promoted b)
+        locals (:locals b)
+        pre (cond promoted "const " (= kind :const) "const " (= kind :static) "static " (= kind :static-mut) "static mut " (= kind :fn) "fn " :else "")
+        name (str (:name b) (when promoted (str "::promoted[" promoted "]")))]
+    (str pre name
+         (if (and (not promoted) (= kind :fn))
+           (str "(" (str/join ", " (map (fn [i] (str (local i) ": " (tx (:ty (nth locals i))))) (range 1 (inc (:args b))))) ") -> " (tx (:ret b)))
+           (str ": " (tx (:ret b)) " ="))
+         (when (:yields b) (str "\nyields " (tx (:yields b))))
+         " ")))
+
+(defn- scope-tree [b parent depth]
+  (let [ind (apply str (repeat (* depth 4) " "))
+        scopes (:scopes b)
+        lines (concat
+               (for [d (:debug b) :when (= parent (:scope d))] (str ind "debug " (debug-info d) ";"))
+               (for [[i d] (map-indexed vector (:locals b))
+                     :when (and (not (<= 1 i (:args b))) (= parent (:scope d)))]
+                 (str ind "let " (if (:mut d) "mut " "") (local i) ": " (tx (:ty d))
+                      (apply str (map #(str " as " %) (:user-ty d))) ";")))
+        kids (keep-indexed (fn [i [p _]] (when (= p parent) i)) scopes)]
+    (concat lines
+            (mapcat (fn [c]
+                      (concat [(str ind "scope " c (or (second (nth scopes c)) "") " {")]
+                              (scope-tree b c (inc depth))
+                              [(str ind "}")]))
+                    kids))))
+
+(defn print-body
+  "A body as write_mir_fn prints it, one string ending in a newline."
+  [b]
+  (let [sb (StringBuilder.)
+        w (fn [s] (.append sb s))]
+    (w (sig b)) (w "{\n")
+    (doseq [l (scope-tree b 0 1)] (w l) (w "\n"))
+    (w "\n")
+    (let [blocks (:blocks b) n (count blocks)]
+      (doseq [[i bb] (map-indexed vector blocks)]
+        (w (str indent "bb" i (if (:cleanup bb) " (cleanup)" "") ": {\n"))
+        (doseq [s (:stmts bb)]
+          (let [[s dbg] (if (= "dbg-stmt" (name (first s))) [(second s) (nth s 3)] [s nil])]
+            (doseq [d dbg] (w (str indent indent "// DBG: " d ";\n")))
+            (w (str indent indent (statement s) ";\n"))))
+        (doseq [d (:after-dbg bb)] (w (str indent indent "// DBG: " d ";\n")))
+        (when (:term bb) (w (str indent indent (terminator (:term bb)) ";\n")))
+        (w (str indent "}\n"))
+        (when (< (inc i) n) (w "\n"))))
+    (w "}\n")
+    (w (:allocs b))
+    (str sb)))
+
+(defn print-dump
+  "A whole dump as the helper's `--mir` text: the three header lines, every body with rustc's separators."
+  [bodies]
+  (let [sb (StringBuilder.)
+        w (fn [s] (.append sb s))]
+    (w "// WARNING: This output format is intended for human consumers only\n// and is subject to change without notice. Knock yourself out.\n// HINT: See also -Z dump-mir for MIR at specific points during compilation.\n")
+    (loop [bs bodies prev nil]
+      (when-let [b (first bs)]
+        (if (= :trivial-const (:form b))
+          (do (when prev (w "\n")) (w (str (:text b) "\n")))
+          (let [same (and prev (= (:def-id prev) (:def-id b)))]
+            (cond
+              (:promoted b) (w "\n")
+              (and (:ctfe b) same) (w "\n// MIR FOR CTFE\n")
+              (:ctfe b) (do (when prev (w "\n")) (w "// MIR FOR CTFE\n"))
+              :else (when prev (w "\n")))
+            (w (print-body b))))
+        (recur (rest bs) b)))
+    (str sb)))

@@ -1925,3 +1925,567 @@ is under `arbace/`, so the steps whose inputs name `arbace/` whole (java-compile
   testsuite part too (both need OC161 (a)), and the judges' expect check (3 min of the 9.5) in the clean run only: about 44 minutes;
   (b) the light level at 4 processes in the gate (`O2J_JOBS=4`: its records were made at 2, the timeouts under more load to be checked);
   (c) accept the overrun until the compiled level replaces the light one (OC87). *Recommended: (a)*, then (c) for what remains.
+## As built: the native reader (2026-11-04)
+
+OCaml text read into OCaml forms by Arbace alone, no ocamlc at read time (the survey's O6a half, OC3 (a)'s "native
+reader later"; the helper `tools/ocdump` stays the oracle and `read`'s default). Built on the branch `ocaml-native` from
+main `46d04247` under light rules: no gate, no Arbace build, no re-seed; every run on stage 0
+(`target/seed/amd64/arbace`) under 1.1 GB. Sources read in place from the pinned tarball (`test/ocaml/corpora.edn`'s
+`:ocaml-5.5.0`, extracted into `.tmp/repr-ocaml/`).
+
+**The design: Menhir ported, the tables generated from parser.mly** (rather than a hand-written recursive descent)
+
+- OCaml's parser *is* an LALR(1) automaton: `parsing/parser.mly` is not stratified ("concise but fragile", its own
+  comment), its 28 precedence levels and `%prec` annotations resolve the conflicts of expressions, patterns, types,
+  module expressions and functor types, and its locations are Menhir's (`$sloc` is `$symbolstartpos`, which skips
+  nullable symbols by a runtime test; an `%inline` symbol's span is its cells'). A hand-written parser would re-derive
+  each resolution and each location by hand, with no way to show it complete. Generating the automaton from the grammar
+  gets both by construction, as PY9 got CPython's parser by porting pegen.
+- It is checkable: `bin/repr-ocaml menhir --check` pairs the generated automaton with the one Menhir itself wrote into
+  the tarball (`boot/menhir/parser.ml`'s `--table` back end, MenhirLib's encoding decoded): 2,327 of 2,327 states,
+  1,024 of 1,024 productions and 238 of 238 nonterminals paired, every action, goto and default reduction equal. "The
+  whole grammar" is a checked claim, not a sample's.
+- It is small: the construction (the `.mly` reader, parameterized and anonymous rules, `%inline` expansion, LR(0),
+  DeRemer and Pennello's lookaheads, Menhir's precedence and default-reduction rules) is about 900 lines and runs in
+  2.5 s. The semantic actions need translating in either design; keyed by their text (comments out, blanks collapsed)
+  the 887 action sites are 611 distinct texts, shared by Menhir's 1,009 expanded productions.
+- The grammar stays the source: a new OCaml is `bin/repr-ocaml menhir` again plus its new actions (the loader names
+  every action with no translation). Rejected: decoding Menhir's tables and using them directly (the production-to-action
+  mapping is only in the generated OCaml's let structure; kept as the cross-check); translating the actions by machine
+  (it needs an OCaml expression reader, this one; possible later).
+
+**What is in the tree** (`arbace/repr/ocaml/`, evaluated from the checkout, not embedded, as all of repr/ocaml, OC30 (a))
+
+- `menhir.ae` (`arbace.repr.ocaml.menhir`): the construction. Each expanded production keeps a *plan*: the source
+  actions it composes (an inlined symbol's action nested where it was) and the cells each covers.
+- `tables.ae` (generated, 696 KB): terminals, nonterminals, productions with their plans, states (default reduction,
+  actions, gotos), start states, the action texts. `bin/repr-ocaml menhir --verify` generates it again and compares.
+- `lex.ae`: `lexer.mll` with ocamllex's longest match (earliest rule on a tie), Lexing's position updates (a fresh
+  position object per boundary: Menhir's `$symbolstartpos` tests identity), `Utf8_lexeme` (Latin-9, NFC), strings as
+  byte strings, and Lexer.token's docstring filing. `docstrings.ae`: `docstrings.ml`, the attachment marks that make a
+  field's info no item's doc.
+- `ast.ae`: the Parsetree as data (the OCaml field names as keywords), Ast_helper's constructors, and the helper's dump
+  (`ocdump.ml`'s printer, its exact text: a node prints flat when its last check point fits, computed once per node).
+- `actions.ae`: parser.mly's header helpers and its actions, OCaml's evaluation order kept where it is observable
+  (docstring lookups; the right-to-left tuples of `mkexpvar`/`mkpatvar` puns; lazy let-binding docs forced as
+  `val_of_let_bindings` forces them).
+- `parser.ae`: MenhirLib's engine: a token read after each shift, default reductions, an empty production's start and
+  end the previous cell's end (one object); a plan's items evaluated right to left, inlined ones first, as Menhir's
+  generated code binds them, each action with its `$startpos`, `$endpos`, `$symbolstartpos` from its cells.
+- `native.ae`: `dump`, `read`, `check`; `bin/repr-ocaml read --reader native` (and `read --full --reader native`, the
+  layout of mode `:full` from the native lexer), `dump --reader native`, `native-check [--layout] [CORPUS...] | --list
+  FILE`, `menhir [--check|--verify]`; Makefile `repr-ocaml-native-check`, `repr-ocaml-menhir`.
+
+**The checks** (each file's native dump with positions against `ocdump --loc`, byte for byte; light: one Arbace process)
+
+| corpus | files | equal | rejected by both | differ |
+|---|---:|---:|---:|---:|
+| samples (their `:full` layouts too: 8 of 8) | 8 | 8 | 0 | 0 |
+| stdlib (layouts: 150 of 150) | 150 | 148 | 2 (the `templates/`) | 0 |
+| compiler sources: parsing, typing, lambda, utils, driver (layouts: 248 of 248) | 248 | 248 | 0 | 0 |
+| testsuite: parsing, lexing, typing-objects, effects, effect-syntax, exotic-syntax, let-syntax, generalized-open, formatting, functors, extension-constructor, typing-modules, typing-poly, typing-labeled-tuples, typing-misc, parsetree | 234 | 231 | 3 | 0 |
+| `--use-file` (the toplevel's phrases): tool-toplevel and typing-modules, first 40 | 40 | 37 | 3 | 0 |
+
+Equal counts include 7 rejected files whose error form (kind, message, location) is already the helper's. The 8 rejected
+by both with another message (the 2 templates, 3 testsuite files, 3 `#use` files) are the later step's (below): 6 need
+Menhir's error token ("Syntax error: end expected", "`)` expected"), 2 the lexer's wording; every location agrees. `read --reader native` gives the
+helper path's forms exactly (`:lines` and `:full`, samples and `stdlib/list.ml`); `menhir --check`: 0 differences.
+Speed on stage 0 as first built: about 40 KB/s (the stdlib's 1.9 MB in 48 s, the compiler's 4.0 MB in 118 s, peak RSS
+1.0 GB), half lexing; the helper reads about 2 MB/s. After OC173: about 80 KB/s ("Speed (OC173)" below).
+
+**Left** (none run here: whole corpora, mutants, the gate)
+
+- Error messages as ocamlc's (the later step): Menhir's simplified error strategy (the `error` token shifted, the error
+  productions' `unclosed`/`expecting` messages: "Syntax error: ) expected" where the native reader says "Syntax error");
+  the lexer's messages as Format prints them (its `@ ` breaks, `%S` quoting); warnings (comment start, illegal backslash)
+  not reported.
+- The whole corpora: the testsuite's 1,862 files, go-whim's whiml (57k lines in one file), the opam set.
+- Speed: OC173 (b) done, 2x ("Speed (OC173)" below); (c), the reader compiled with the program at a re-seed, is what is
+  left for a further step.
+
+**Speed (OC173)** (2026-11-04, branch `parsers-speed`; the trees identical, the checks above unchanged)
+
+Where the time went, profiled on stage 0 (`target/seed/amd64/arbace`, the evaluator over the checkout's namespaces). The Go
+CPU profile (`ARBACE_CPUPROFILE=FILE`, `go tool pprof`) shows the evaluator's nodes (`Compiler_Code*`), not Arbace's
+functions, so the phases were timed by experiment: a scratch script (in `.tmp/`, not committed) times each phase in one
+process over the 210 files that are the stdlib's 150 and the first 60 of the compiler sources' list (2.81 MB), and stubs of a
+phase (the actions returning nil, no plans at all) give the rest. The costs the experiments found in the evaluator, which
+decided the changes: a function call 100 to 150 ns; a vector or a `deftype` 100 ns and 100 to 130 ns a field; `aget` on a
+`byte` array 300 ns (an `int`, `long` or object array 30 ns); `aset` of a boxed value into a typed array is 50 to 100 times
+dearer (reflective: coerce the value with `(long ...)` or `(int ...)`), an unhinted `aget` likewise; `case` and `into`
+about 1 µs, a `String` from bytes 0.5 µs; `str` of 13 arguments several µs. Before: lexing 33% of the parse and a token
+30 to 45 µs (a candidate list of closures for every operator, a map lookup and a byte `aget` for each byte, five volatiles
+and an allocated position for each match); the driver 7.6 µs a reduction (3.5 a token), among them the plans' walk
+(`eval-plan`: vectors destructured, three arrays and an environment per plan, each of 126,000 evaluations a
+`camlinternalFormat.ml`, 59,000 of them identity projections) and `$`'s linear search of the item names; the dump (the
+forms, then their text) a third of the total, with the six atoms of every location.
+
+| phase, 210 files, 2.81 MB, one process | before | after |
+|---|---:|---:|
+| lexing alone | 22.8 s | 4.8 s |
+| parse (lexing, LR driver, actions) | 43.7 s | 16.4 s |
+| the dump's forms (`--loc`) | 17.8 s | 10.8 s |
+| the dump's text | 8.6 s | 8.0 s |
+| the four phases | 70.0 s, 40 KB/s | 35.2 s, 80 KB/s |
+| `read --loc` of the 210 files, the process and the writing included | 72 s | 38 s |
+| `read --mode tokens` (the layouts) of the 210 files | 39 s | 25 s |
+| `camlinternalFormat.ml` (126 KB): lexing, parse (lexing included), forms, text | 0.94, 2.45, 1.0, 0.54 s | 0.20, 1.05, 0.50, 0.38 s |
+| `native-check stdlib` (150 files, 1.9 MB) | 48 s | 22.7 s |
+
+What changed, in the hot paths only (`lex.ae`, `parser.ae`, `actions.ae`, `ast.ae`, the `Pos` type moved to
+`docstrings.ae` so that `docstrings` hints it): the lexer's buffer is also an `int` array padded with -1 (no bounds check,
+no byte `aget`), the characters' classes one table of bits (`cls`, macros `digit?`, `identchar?`, `run-end`... inline),
+the state one `long` array (offsets, lines, `bol`) with the positions made when asked for (a fresh object each time, as
+Lexing's: the parser compares them by identity); `token-rule` decides the common tokens on the byte and its class (blanks,
+identifiers, keywords, newlines, integers, punctuation and operators whose longest match is unambiguous: ocamllex's earlier
+rule on a tie, as `token-general`, the old function, which does the rest), comments and strings skip a run of ordinary
+bytes at once and store it as a range, `token` files docstrings without a closure per token; the driver runs on flat `int`
+tables (`action-table` by state and terminal, `goto-table`), the stacks as arrays in a `loop`, no volatiles or closures,
+the plans as typed nodes (`Plan`: an environment reads the stack in place for a plan over its first cells, a plan whose
+action text mentions no position gets none, a plan that only returns one item (`$1`, or an item's name, checked against
+the action itself at load) is that cell, also when inlined), `$` a macro and the item names a map; the dump writes a
+location as one node (`IV`, its text written only when it prints) and counts lengths without allocating; the load of the
+tables is 150 ms shorter. The process start (the namespaces evaluated from source, 2 s) is unchanged. Checks after the
+changes: `menhir --check` 0 differences; `native-check samples stdlib` 8 of 8 and 148 of 150 equal, 2 rejected by both,
+as before; `--layout samples stdlib` 8 and 150 of 150; the 210 files' dumps and layouts byte for byte those of the code
+before. What is left: the dump is a third of the time (270,000 nodes, each built as a list of atoms and measured for the
+width, then written), the actions 5 µs each, the process start; the next step is (c).
+
+**Proposals** (OC170-OC174; options, recommendation first, none decided)
+
+- **OC170 `read`'s default reader.** (a) the helper until `native-check` has passed every corpus once (recorded as
+  `read`'s results are), then native; (b) native now; (c) the helper for good. *Recommended: (a)*.
+- **OC171 A gate step.** (a) with OCaml's steps (OC120 (b)), a light `--full` step `bin/repr-ocaml menhir --check`
+  `--verify` plus `native-check samples` (seconds), the stdlib's run by hand; (b) the stdlib in it too (about a minute);
+  (c) none. *Recommended: (a)*.
+- **OC172 Error messages.** (built 2026-11-04, "As built: OC172 (a)" and "As built: OC172 (b)") (a) port MenhirLib's simplified strategy and the error printers (`Syntaxerr`, `Lexer`'s
+  `prepare_error`, Format's breaks), judged by `native-check` on every rejected file (message and location); (b) the
+  strategy only; (c) kinds only, as built. *Recommended: (a)*, next.
+- **OC173 Speed.** (a) as first built; (b) the lexer buffer as a type with fields (no map lookups per byte), fewer position
+  objects; (c) embedded and compiled with the program at a re-seed (OC30). *Recommended: (b)* when a corpus run needs it.
+  *Done: (b), and more than it named (2.0x, "Speed (OC173)" above); (c) remains.*
+- **OC174 The actions' translation.** (a) by hand, keyed by text (as built; the loader refuses tables with an
+  untranslated action); (b) by machine from parser.mly through this reader. *Recommended: (a)*; (b) at a new OCaml.
+
+## As built: OC172 (a), ocamlc's syntax errors (2026-11-04)
+
+The native reader rejects a file with ocamlc's words and locations (OC172 (a)), built on the branch `ocaml-errors` from
+`ocaml-native` (`8f00636e`) under the same light rules (stage 0, no gate, no build; every run under 1.1 GB).
+
+**What is in the tree**
+
+- `parser.ae`: MenhirLib's simplified strategy (parse.ml passes `--strategy simplified`; Engine.ml's `initiate`, `error`,
+  `error_shift`, `error_reduce`, `error_fail`): on an error action the parser enters error mode with the lookahead kept,
+  default reductions still taken, then the `error` terminal's column (terminal 0 of the tables): shifted (its cell the
+  lookahead's positions, Engine.shift's `env.triple`, no token read), reduced, or `Parser.Error` (Parse.wrap's `Other` at
+  the lookahead). The `error` productions' actions (`unclosed`, `expecting`, `not_expecting`, `indexop_unclosed_error`,
+  `syntax_error ()`) were already translated; they now run. A parse error is `[:error KIND MSG LOC SUB]`.
+- `actions.ae`, `lex.ae`: the messages as parse.ml's and lexer.mll's `prepare_error` word them, with their sub-messages
+  (`Unclosed`'s "This ( might be unmatched" at the opening location, `Unterminated_string_in_comment`'s "String literal
+  begins here", the ghost-located hints of `Removed_string_set` and `Empty_character_literal`), Format's `@ ` hints kept
+  in the message (`\u0001`: `Removed_string_set`, `Non_lowercase_delimiter`), `%S` and `Char.escaped` as OCaml escapes
+  (`Invalid_directive`, `Illegal_character`).
+- `report.ae` (new, `arbace.repr.ocaml.report`): `message`, the main text as the helper writes it (Format.asprintf of
+  the doc in the formatter's own hov box, never closed, so its last break always breaks; trimmed), and `report`, what
+  ocamlc prints on stderr: location.ml's batch_mode_printer for an error (Doc.loc's `File "...", line(s) ...,
+  characters ...:`, highlight_quote with its ISet, infer_line_numbers and lines_around over the whole input as Pparse's
+  `set_input_lexbuf` keeps it; one line with its carets, tabs kept, or format_doc.ml's two columns with dots and the
+  ellipsis past 10 lines; nothing for an empty location or one of another file; `Error: ` and the message in a `@[`
+  box at column 7, which breaks only when the whole box does not fit; each sub-message's location and quote, then two
+  spaces and its box).
+- `native.ae`: `report --file NAME FILE`; `check --ocamlc ODIR` compares each file's report with ocamlc's stderr
+  (`REPORT` lines); `mutants --root --list --out --n --seed`: one token deleted, inserted (from the file or a pool of
+  openers, closers, keywords, quotes and comment marks) or swapped with the next, deterministic by seed.
+- `bin/repr-ocaml native-check` runs `ocamlc -stop-after parsing -nopervasives -w -a -c REL` on every file beside the
+  helper (warnings off: the lexer's warnings are not ported; `-nopervasives` because stdlib.ml cannot open Stdlib) and
+  fails on a report that differs. A `--use-file` file has no ocamlc report (the toplevel's); its error form is still the
+  helper's.
+
+**The checks** (byte for byte; a rejected file's dump compares kind, message and location, its report everything)
+
+| set | files | dumps equal | rejected by ocamlc | reports equal |
+|---|---:|---:|---:|---:|
+| the files rejected among the corpora (2 stdlib templates, 11 testsuite) | 13 | 13 | 13 | 13 |
+| `--use-file` phrases (tool-toplevel, typing-modules: 40; 4 rejected) | 40 | 40 | (helper only) | |
+| stdlib, compiler sources, the 16 testsuite directories (all files) | 632 | 632 | 13 | 13 |
+| mutants of the samples (seeds 1 and 7, 50 per file) | 800 | 800 | 660 | 660 |
+| mutants of the 16 testsuite directories' files (seed 2, 3 per file) | 684 | 684 | 561 | 561 |
+| mutants of the stdlib (seed 3, 2 per file) | 288 | 288 | 231 | 231 |
+| hand cases (`.tmp/ec/hand`: hints, breaks, multi-line and 15-line quotes, tabs, CRLF, line directives, package types) | 50 | 50 | 47 | 47 |
+
+The 8 files rejected by both with other messages before this step now agree. Messages equal: 1,512 of 1,512 ocamlc
+reports (the corpora's 13 counted once), every helper error form equal.
+
+**Left**
+
+- The lexer's warnings (Comment_start, Comment_not_end, Illegal_backslash, ...) are not reported (ocamlc runs with
+  `-w -a`); the toplevel's own printer (`//toplevel//`, phrase skipping) is not ported.
+- `Unknown_keyword` (keyword editions, `-keywords`) and the errors raised outside the parser (`Variable_in_scope`,
+  `Applicative_path` under `-no-app-func`) are not produced.
+- Format is ported only as far as the messages need it (text and `@ ` hints in one box); a message with nested boxes
+  would need more of it.
+- The whole corpora and the gate (OC170, OC171) as before.
+
+## As built: OC172 (b), the errors outside the parser and the lexer's warnings (2026-11-04)
+
+What OC172 (a) left, built on the branch `ocaml-errors2` from `ocaml-errors` (`0e25bd25`), the same light rules (stage 0, no
+gate, no build). `bin/repr-ocaml native-check` now runs `ocamlc -stop-after parsing -nopervasives -c REL` with its **default
+warnings** (no `-w -a`), so a file's report is the warnings the lexer raised before the error (or alone, for a file that
+parses) and then the error.
+
+- **Warnings** (`lex.ae`'s `*warn*`, `report.ae`'s `warning-report`, `native.ae`'s `report-of`): Comment_start (1, `(*)`),
+  Comment_not_end (2, a `*)` outside a comment), Illegal_backslash (14, outside comments), and the docstrings' Unexpected_docstring
+  (50, unattached or ambiguous, `docstrings.ae`'s `bad-docstrings` after a parse that succeeds, as `Parse.wrap` does). Each is
+  printed as location.ml's `warning_format` does (the quote, then `Warning N [name]: text` in a `@[<b 2>` box at column 0, its
+  hints as Format's breaks), a blank line before every report after the first (`separate_new_message`), in the order the
+  lexer raised them, so the tokens after an error are never lexed. `report-of` takes ocamlc's flags: `-w SPEC` (letters,
+  `+N -N @N`, ranges; names not), `-warn-error SPEC` (a warning made an error prints `Error (warning N [name]): ...` and the parse
+  goes on, as ocamlc does), `-no-app-funct`, `-keywords`; the default set is ocamlc's (`+a-4-7-9-27-29-30-32..42-44-45-48-50-60-66..70`,
+  so 50 only with `-w +50`).
+- **Errors outside the parser**: Applicative_path (`actions.ae`'s `lapply` under `-no-app-funct`; the message names the option
+  `-no-app-func`, as syntaxerr's text does), Variable_in_scope (`ast.ae`'s `varify-constructors` for a method's
+  `type a. ...`: the message was missing, the tree was lazy so the error escaped to the dump, and the arrows are evaluated right to
+  left as OCaml's constructor arguments are; `Pprintast.tyvar_of_name`'s spellings), Unknown_keyword (`lex.ae`'s
+  `keyword-table` and `parse-keyword-edition`: `-keywords 5.2`, `-keywords 5.4+foo`; also `is_keyword` for labels). Ill_formed_ast
+  (`Ast_invariants`) is **unreachable from the grammar**: 17 attempts (`fun (type a) -> 1`, attributes on inherited row fields,
+  `module type S :=`, empty records and tuples, local `let include`, ...) were either accepted or syntax errors in both readers, so
+  no code for it (`test/ocaml/errors/invariant_*`). Invalid_package_type and the other lexer errors were already done.
+- **The hand cases** `test/ocaml/errors/` (100 cases: `FILE.ml`/`.mli`, ocamlc's flags in `FILE.flags`, ocamlc's recorded stderr in
+  `FILE.err`): `bin/repr-ocaml errors-check` (native only, seconds), `--ocamlc` (also against live ocamlc), `--record` (rewrites the
+  `.err`). File names must be module names (warning 24 otherwise).
+
+**The checks** (byte for byte, ocamlc's stderr and the helper's dumps; mutants with the pool extended by `(*)`, `*)`, `\q`, `(** d *)`)
+
+| set | files | dumps equal | reports equal (ocamlc output non-empty) |
+|---|---:|---:|---:|
+| stdlib, compiler sources (default warnings) | 398 | 398 | 2 of 2 |
+| hand cases (`errors-check`) | 100 | | 100 of 100 (77 non-empty) |
+| mutants of the samples, seeds 11, 12 (`-w +a-4-9-40-41-42-44-45 -warn-error +14`), 13 (`-no-app-funct -keywords 5.2+foo`): 60 a file | 1,440 | 1,440 | 1,259 of 1,259 |
+| mutants of the samples, seeds 14 (`-w +a-4-9-40-41-42-44-45`) and 15, 300 a file | 4,800 | 4,800 | 4,130 of 4,130 |
+| mutants of the 234 testsuite files, seed 12, 4 a file | 912 | 912 | 748 of 748 |
+| mutants of the stdlib, seed 13, 2 a file | 288 | 288 | 227 of 227 |
+
+(Of the 7,440 mutants, 64 of seed 14's carry a warning: 8 of 1, 9 of 2, 49 of 50; a mutant rarely adds one before its error, the
+hand cases are the check of the warnings.)
+
+**Left**
+
+- Warnings by name in `-w` (`-w +comment-start`), `-alert`, the toplevel's printer (`//toplevel//`, phrase skipping),
+  `-keywords` with an ill-formed version (Arg.Bad), `-unsafe` and the other flags that change the parse.
+- Format ported as far as messages need it (one box with `@ ` hints); nested boxes would need more.
+- The whole corpora and the gate (OC170, OC171) as before.
+
+## As built: oi's native front end, the first slice (2026-11-05)
+
+OC4 (b)'s route, begun on the branch `ocaml-typer`: doc/ocaml/TYPER.md (the port of typing/ and lambda/'s Translcore
+with Matching, `arbace/repr/ocaml/typer/`; `bin/oi typer-check`, `run-native`). The core language's samples
+(test/ocaml/typer/, 36) are typed with the toplevel's printed types, translated to Lambda equal to the oracle's raw
+translation, and run on oi with the toplevel's output; modules, formats, objects and the rest are TYPER.md's T7-T12.
+Proposals TY1-TY6 there.
+
+## As built: oi's native front end, T7 and T8 (2026-11-05)
+
+On the branch `ocaml-typer2`: Simplif (T7) and the module system with the stdlib typed natively unit by unit (T8),
+doc/ocaml/TYPER.md §9: 52 of 52 samples equal at every level (types, raw and simplified Lambda, oi's runs), the
+oracle's dumps committed (TY2), the stdlib 64 of 71 units equal natively (`bin/oi stdlib-check`; GADTs, formats and
+type extensions pulled forward from T9-T10 for it), the probe 31 of 36; proposals TY7-TY10 (TYPER.md §10).
+
+## Decided (the user, 2026-11-07)
+
+Relayed by the main session with the brief of the branch `ocaml-90` (the crop's independence, as `bin/crops-score` measures it,
+above 90%):
+
+- **The judge.** A test's own verdict counts as a judge no toolchain made (score 1): judge by the test's own verdict wherever it
+  has one (the testsuite programs' assert and exit status, the expect tests' expected output written in the test file itself, the
+  round trip's reread forms equal). The toolchain's recorded outputs go to the oracle tier, re-recorded by hand at a tag; the tests
+  without a verdict of their own keep 0.5.
+- **The expect tool.** Run testsuite/tools/expect.ml on oi natively rather than on ocamlc, or judge the `[%%expect]` blocks directly.
+  `roundtrip --cmi`: the native interfaces against recorded ones, or the oracle tier.
+- **A mixed stage** (2026-11-07, about 07:45): `bin/crops-score` scores a stage whose cases are partly judged by their own verdict
+  (1) and partly by a recorded toolchain reference (0.5) as the case-weighted mean over its cases.
+- OC170 (`read`'s default reader) by that brief: the native reader is the default, the helper the oracle's (the read check's
+  reference the round trip's own verdict; its comparison with ocdump, `native-check`, in the oracle tier).
+
+## As built: the crop's independence (2026-11-07, branch `ocaml-90`, from `ocaml-t12`)
+
+Under the day's light rules (no gate, no build, sample checks only; every process under 1.5 GB). The stub runs below had
+`ocamlc ocamlopt ocamlfind ocaml ocamlrun ocamldep` first on `PATH` as scripts logging their call and exiting 99
+(doc/CROPS-SCORE.md, "The stub runs"); after each run the log was empty.
+
+**Read: the native reader as the read stage's source of forms.** `bin/repr-ocaml read` and `roundtrip` read with
+`arbace.repr.ocaml.native` by default (`REPR_OCAML_READER=helper` or `--reader helper`: ocdump). The round trip reads the
+originals and the printed files with the same reader (one process a list: `native read --root --list`), and `--text` takes the
+layouts of mode `:full` from the native lexer (`--mode tokens`); its verdict is its own: the reread forms equal, the printed text
+byte for byte. ocdump is built only for `--reader helper`; the `.cmi` levels (`--cmi`, `--cmi-lines`, ocamlc's interfaces of the
+original and of the print) stay as they are, the oracle tier's. `corpus check` no longer runs the host's `ocamlopt`: its pins
+(ocamlopt's version, compiler-libs' digest) are `corpus check --host`'s.
+
+| stub run | result |
+|---|---|
+| `bin/repr-ocaml corpus check`, `read` of the 7 samples' `.ml` | counts and pins hold; 7 dumps, 0 failures |
+| `bin/repr-ocaml roundtrip --text samples` | 8 of 8 equal, text 8 of 8 byte for byte, 9 s |
+| `bin/repr-ocaml roundtrip --text stdlib` | 148 of 150 equal, the 2 templates rejected by the native reader as by ocdump (classed `:template`); text 148 of 148 byte for byte; 2 min 14 s |
+| `bin/repr-ocaml menhir --check` | 2,327 of 2,327 states, 0 differences |
+
+**Eval and AOT: the native typer's Lambda as the default (TY24 (a)'s switch).** `bin/oi check` takes the native path
+(`OI_CHECK_DEFAULT` defaults to `native`; `--ocdump` the oracle's); its corpus is read from the tarball alone (`cmd_corpus` no longer
+builds ocdump or compiles lib/testing with ocamlc: the oracle's paths, `--ocdump`, `record-ref`, call `need_tree` themselves); oi's
+key on the native path is the native library's (`native_key`), not ocdump's. `bin/oi check --aot` types its programs natively too
+(`o2j_dump`'s native path, the oi column from `check-native.tsv`, which now has its key), `aot-lib` translating the native library;
+its record is `test/ocaml/check-aot-native.edn` once the night's `--record` writes it (until then the native rows are judged against
+`check-aot.edn`, a differing row a `CHANGED` line); the suite's likewise, `check-suite-oi-native.edn` and `check-suite-aot-native.edn`
+beside the oracle path's (TY19 (b)'s two records side by side). `bin/oi suite check` (and `--aot`) type the suite's unit lists natively
+(`suite_dump_native`: the units in link order, `--include` of the program's directory, a unit with its `.mli` coerced to it, one
+without written its signature by the typer's new `lambda --sig-out FILE.mli`, as the toplevel keeps `top_N.mli`). `bin/oi run` is
+`run-native` by default (`run --ocdump` the oracle's).
+
+| stub run | result |
+|---|---|
+| `bin/oi check --only-list` of 8 (basic/arrays, basic/patmatch, effects/test1, lib-hashtbl/htbl, asmcomp/compare, asmcomp/evaluation_order, parsing/assert_location, tool-ocamltest/norm3) | the stdlib rebuilt natively in the run (71 units); 8 of 8 pass; 6 by their own verdict, 2 by ocamlc's record (asmcomp/compare is native-only, tool-ocamltest/norm3 an exception); the negative control differs; 2 min 17 s; again after the Env fix below, the same |
+| `OI_TYPER_NO_OCDUMP=1 bin/oi typer-check` (after the Env fix) | 79 of 79 at every level, 79 of 79 runs on oi equal to the toplevel's |
+| `bin/oi check --aot --only-list` of 5 | aot-lib over the native library; 5 of 5 pass, 5 the same as oi; 4 by their own verdict; the control differs; 1 min 26 s |
+| `bin/oi suite check --only-list` of 6 multi-unit and opam programs | 3 of 6 pass (basic-multdef/usemultdef, basic-private/tlength, raise-counts/main); 3 typer gaps: typing-multifile/pr7563 (a unit's interface aliasing a sibling module recurred: fixed, Env's components take the sibling's address; then 2 of 2 with basic-multdef), basic-modules/main (a stack overflow substituting an applicative path, `Set.Make(String).t`, of a printed interface), opam/astring/test (a signature mismatch against a printed interface); 7 min 34 s |
+
+**The judge: the tests' own verdicts.** `bin/oi`'s `own_verdicts` writes, at check time and from the tarball alone, each run
+program's verdict as ocamltest gives it: the exit status its `(* TEST ... *)` block expects (`exit_status`, default 0) and its
+`.reference` byte for byte, or no output at all when it has none (ocamltest/filecompare.ml's `check_file`: a missing reference is an
+empty one). `test/ocaml/oi_check.ae` and `o2j_check.ae` judge a program it lists by it (`OI_OWN`), the others by the recorded run; a
+negative control judges its subject by the reference program's own verdict. No own verdict: a native-only test (its block's
+`native;` and no `bytecode`) at oi's level, the opam set's programs, and the six of `test/ocaml/own-verdict.edn` (backtraces whose
+`.reference` is not either compiler's output here, ocamltest's variable expansion and its `\r\n` normalisation). The reasons keep
+the recorded wording, so the records stay valid. `bin/oi own-verdicts [--check]` measures it from the records, no run:
+
+| corpus | level | own verdict | recorded run | own verdict = the recorded run |
+|---|---|---:|---:|---:|
+| run (309) | oi | 300 | 9 (ocamlc's) | 300 of 300 |
+| run (309) | AOT | 304 | 5 (ocamlopt's) | 304 of 304 |
+| suite (98) | oi | 65 | 33 | 65 of 65 |
+| suite (98) | AOT | 75 | 23 | 75 of 75 |
+
+So the two judges decide every run alike on the recorded cases: a program passes by its own verdict exactly when it passes by the
+record. The judge stage is mixed; by the user's rule its score is the case-weighted mean of its checks' cases: the read and print
+round trips 3,162 files each by their own verdict (1); eval 407 programs, 365 own and 42 recorded (0.5); AOT 407, 379 own and 28
+recorded; typer-check's 79 samples and repl-check's 24 phrases against committed toolchain records (0.5): (7,068 + 0.5 × 173) /
+7,241 = 0.988. Out of the check-time judge, the oracle tier's: the host's expect tool (`bin/oi suite expect`, which checks the host's
+toolchain against the expect files, not Arbace), `roundtrip --cmi`, `stdlib-check` (it builds ocamlc's library), `native-check`,
+`typer-check`'s fresh dumps, `spec-check` (ocdump, and the spec's extraction by python3).
+
+**The records.** The check-time pipeline is native, but the records the REAP cells read on `mac/batch1` were made by the oracle's
+path (`check-oi.edn`, `check-aot.edn`, `check-suite-oi.edn`, `check-suite-aot.edn`: ocdump's Lambda). A stage that compares with a
+record a toolchain made scores 0.5 by crops-score's definition, so until the night's native records replace them the eval and AOT
+stages are mixed too: eval, the run corpus's 309 with its native record (`check-oi-native.edn`, 273 passes, as many as ocamlc's path)
+once the cell reads it (OC185) and the suite's 98 at 0.5: (309 + 49) / 407 = 0.880; AOT, both records the oracle path's: 0.5. Today's
+facts (`.tmp/independence.diff`) say so; after the night's records (`check-aot-native.edn`, the suite's two) and OC185 both are 1.
+
+**Scores** (`bin/crops-score --ref ... --crop ocaml`, from a scratch worktree of `mac/crops-score` with the facts of
+`.tmp/independence.diff`):
+
+| tree | completeness | maturity | independence |
+|---|---:|---:|---:|
+| `mac/batch1` (the brief's 75.6 at its writing) | 80.9% | 100% | 20% |
+| `ocaml-90` alone (no REAP row and no OCaml gate steps on this lineage), today's records | 0% | 0% | 87.4% |
+| the same, after the night's native records and OC185 | 0% | 0% | 99.8% |
+| a scratch merge of `ocaml-90` into `mac/batch1` (not pushed) | 80.9% | 100% | 20% (the facts refuted: batch1's OCaml steps on `:ocaml`) |
+| the same with the steps of `.tmp/steps-batch1.diff`, after the night's records | 80.9% | 100% | 99.8% |
+
+**Left**, the night's (the brief's: whole-corpus records, one check process at a time, at most 1.5 GB a process): `bin/oi check
+--record` (the native path's whole corpus, about 22 minutes at three jobs; TY24 (a)'s condition), `bin/oi check --aot --record`
+(writes `check-aot-native.edn`), `bin/oi suite check --record` and `--aot --record` (the suite natively: its classes for the typer's
+gaps the sample found), `bin/repr-ocaml roundtrip --text` over every corpus with `--record-results` where the merged tree has it. The
+compiled shards of the AOT level are big (O2J_GOMEMLIMIT 900 MiB a process, O2J_JOBS 2): keep `O2J_JOBS=1` at night.
+
+## Proposed (OC180-OC183; options with costs, a recommendation each, none decided)
+
+- **OC180 The gate's OCaml steps on the merge.** (a) `.tmp/steps-batch1.diff` (on `ocaml-90`'s report): `oi-essential`,
+  `ocaml-read-essential`, `ocaml-roundtrip`, `oi-check`, `oi-aot`, `oi-suite-aot` off `:ocaml` (their commands native: `repl-check
+  --native`, `roundtrip --text`, `menhir --check`, `own-verdicts --check`), the `.cmi` part and `ocaml-dumps` to the oracle tier, a new
+  `ocaml-oracle` step (`:phase :oracle`: `corpus check --host`, the helper's `--cmi` round trip, `--spec`, `spec-check`,
+  `native-check`, `stdlib-check`, `typer-check`, `suite expect`); (b) keep the steps as they are until T12. *Recommended: (a)*;
+  without it crops-score refutes every claim on the merged tree.
+- **OC181 `ocaml-judges`.** Its `judges-test` runs `dumps_determinism_test` (ocdump) and the expect action. (a) split it: the judges'
+  own tests (fixtures, no toolchain) in `--full`, the determinism and expect parts in `ocaml-oracle`; (b) as it is, on `:ocaml`.
+  *Recommended: (a)*, at the merge (the tests are on `mac/batch1`, not on this lineage).
+- **OC182 The expect tests natively.** (a) judge the `[%%expect]` blocks directly on oi's native toplevel (each phrase through
+  `bin/oi repl --native`, the toplevel's output against the block), after T12's error messages and TY20's one typer process a
+  session (a phrase costs 8 s now); (b) run testsuite/tools/expect.ml on oi (it links compiler-libs' Toploop: the whole compiler on
+  oi, weeks); (c) leave them to the oracle tier. *Recommended: (a)* with T12; until then (c).
+- **OC184 A unit's interface for the next units.** The suite's native path writes a unit's inferred signature as an `.mli`
+  (Printtyp's text) for the units after it; printing is lossy (applicative paths, weak variables, `'a` for a generalised type), and two
+  of the sample's three gaps come from it. (a) the typer keeps the unit's signature as data, a native `.cmi` (the typed `Types`
+  signature as forms, read back by `find-unit` as OCaml reads a `.cmi`), as ocamlc does; (b) keep the printed interfaces and class
+  what they lose. *Recommended: (a)*, about half a day, before the night's suite record.
+- **OC185 The eval cell's source.** (a) the REAP row's eval source `check-oi.edn` becomes `check-oi-native.edn` (273 passes, the same
+  as ocamlc's path, made without ocamlc), and the AOT and suite sources their native records once the night has written them with no
+  fewer passes; the oracle path's records stay as the oracle tier's; (b) re-record `check-oi.edn` itself from the native path.
+  *Recommended: (a)*: the comparison TY19 (b) keeps stays possible.
+- **OC183 The `.cmi` level natively.** (a) the typer's signatures of the original and of the print compared (`types` on both: an
+  own verdict, the typer covering what it types), ocamlc's `.cmi` bytes in the oracle tier; (b) the oracle tier only.
+  *Recommended: (a)* for the stdlib and the samples now (the typer types the stdlib 71 of 71), the rest as T12 widens it.
+
+## Decided (the user, 2026-11-07): OC180-OC185
+
+Relayed by the main session with the brief of the branch `batch2-ocaml`: OC180 (a) (the steps off `:ocaml`, the `.cmi` part and
+`ocaml-dumps` to the oracle tier, a new `ocaml-oracle`), OC181 (a), OC183 (a), OC184 (a) (before the suite's native record) and
+OC185 (a) (the REAP cells to the native records once they have no fewer passes), each to be built if a day's work or less.
+
+## As built: the typer line's merge (2026-11-07, branch `batch2-ocaml`)
+
+The branch `batch2-ocaml` (from batch 2's head `531289398`: batch 1 with ocaml-o8, gt9v-ocaml and ocaml-libs4, batch 2's LLVM
+and rsi merges, ocaml-native, ocaml-errors, ocaml-errors2, crop-controls-ocaml) merges `ocaml-t12` (`394c7a2f7`) and then
+`ocaml-90` (`c0fdfca44`), one merge commit each, under the day's light rules (sample checks only, no gate run, each process under
+2 GiB).
+
+**The merges' conflicts and their resolutions.**
+
+- `ocaml-t12`: the Makefile (the union of `.PHONY`), `bin/oi` (six hunks), `bin/lib/oi/suite.bash`, the survey (both sections in
+  date order) and the journal (batch 2's side). In `bin/oi`: the libraries' directories follow `OI_STDLIB` as the stdlib's do
+  (native: `lib`, `testlib`, `unixlib`, `threadlib`, `strlib`, `complib`; ocamlc: the same with `-ocamlc`); libs4's build of
+  unix, threads, str and compiler-libs by ocamlc and ocdump is `libs_ocamlc` (the oracle's library), and the native library builds
+  them too (`libs_native`, below); the oracle's dumps against the native directories get their `.cmi` from ocamlc
+  (`oracle_libs`, beside `oracle_testlib`, from `need_tree`); `--only-list` is one option (its absolute path, `ONLY` kept for the
+  `-only` modes); `select_from` (libs4's, with `@OCAMLSRCDIR@`) serves both corpora; the native path's run line is libs4's
+  `run_redirected`; the magic numbers of compiler-libs' `config.ml` come from the tarball's `build-aux/ocaml_version.m4` (the
+  host's `ocamlc -config` gives the same), so the native library reads no host tool for them.
+- `ocaml-90`: CLAUDE.md (batch 1's paragraph, the native reader as `read`'s default), the Makefile, `bin/oi` (`opts` with libs4's
+  `LEVEL` and the native default, record-ref's and the oracle check's `need_tree`, check --aot's oi column from
+  `check-native.tsv` with `OI_SELECTED`), the suite's `--aot` exports, `bin/repr-ocaml` (O8's `--only-list`, `opam`, `all`,
+  `need_ocdump` for `--reader helper` alone), `test/ocaml/oi_check.ae` (the own verdicts with record-ref-only's merge). After it:
+  `bin/oi key` and `suite key` give the default path's key; `oi_key_test` and `aot_oi_column_test` follow the native default;
+  own-verdicts writes no `/dev` path.
+
+**The native library with libs4's units (TY18 over OT9-OT29).** `libs_native` types and translates each library unit natively
+against the native stdlib, coerced to its `.mli` (`typer lambda --intf`, the `-I` directories its Makefile gives: threads over
+unix), in parallel (`OI_LIB_JOBS`, default 3), each under `OI_LIB_TIMEOUT` (240 s); a unit the typer refuses is listed in
+`DIR/failed.txt` and a program that loads it gets the typer note "library unit M not built natively: REASON" (`lib_missing`, in
+`oi_one` and `suite_oi_one`), not a wrong run. The native path's programs type against their libraries' sources
+(`--include` of `inc_dirs`) and run with `inc_units`' Lambda, libs4's `complib_need` included. Results: unix, unixLabels, thread,
+event, str: 5 of 5 built natively; compiler-libs: 40 of the 49 library units built natively: unix, unixLabels, thread, event and str (5 of 5) and 35 of compiler-libs' 44; refused `Lexer` (no `lexer.ml` without ocamllex), `Identifiable` (a functor body's earlier module unbound, `T_set`), `Numbers` (an applicative path through `with module :=`), `Local_store` (GADT constructors with inline records), `Consistbl` (an index error in the coercion), `Stable_matching` (a record field), `Location` (a value less general than its specification), `Pprintast` (an optional argument's elimination), `Ast_mapper` (`Ppat_open`); about 4 minutes for the whole native library (the stdlib's 71 units in one process, the other 49 three at a time). Two typer fixes came from it: `with type t = t` and
+`with type t := t` translated in the outer environment, non-recursively, as `Typedecl.transl_with_constraint` does (before: a
+cyclic abbreviation and no end, `Identifiable.Thing`); the refusals left are TYPER.md §24's. compiler-libs' `lexer.ml` is
+ocamllex's output: the oracle's library runs the host's `ocamllex`; the native one only with `OI_OCAMLLEX=1` (Proposed OC186),
+so by default the native compiler-libs lack `Lexer` and what links it.
+
+**The checks after the merges** (`ARBACE_HOST_EXE` main's stage 0; the stub runs with `ocamlc ocamlopt ocamlfind ocaml ocamlrun
+ocamldep ocamllex` first on `PATH` as scripts exiting 99, their log empty after the run):
+
+| command | result |
+|---|---|
+| `bin/oi test` | go vet and go test of the printed package: ok, 13 s |
+| `bin/oi repl-check --native` | 24 phrases, the output equal to the ocaml toplevel's |
+| `OI_TYPER_NO_OCDUMP=1 bin/oi typer-check` (stubs) | 79 of 79 samples: types, raw and simplified Lambda equal; 79 runs on oi equal to the toplevel's; 301 s with the native library's rebuild |
+| `bin/oi check --only-list test/ocaml/essential-check.txt` (native, stubs) | 58 of 58 pass (the 59th classed by its header), 57 by their own verdict; the control differs; 191 s |
+| the same with `--ocdump` | 58 of 58; 73 s |
+| `bin/oi own-verdicts --check` (stubs) | run corpus 360 of 377 by their own verdict at oi's level, 370 at the AOT level; suite 87 and 97 of 120; own = recorded on every one, 0 stale (after libs4's three exceptions) |
+| `bin/oi divergences`, `--aot` (stubs) | every non-pass in a class |
+| `bin/repr-ocaml native-check samples` (the oracle tier's) | 8 of 8 equal to the helper's dump byte for byte; the control differs |
+| `bin/repr-ocaml roundtrip --text samples stdlib` | 8 of 8; 148 of 150 equal (the 2 templates classed), text 148 of 148 byte for byte; 2 min 21 s |
+| `bin/repr-ocaml roundtrip --text --types samples`, `--types stdlib` (OC183) | signatures 2 of 2, 148 of 148 equal; the controls differ |
+| `bin/oi suite check --only-list` of ocaml-90's six (stubs) | 5 of 6 with the native `.cmi` (OC184), 4 of 6 with Printtyp's text |
+| `bin/oi check --native --only-list` of libs4's 18 (stubs) | 14 of 18, the 4 others classed typer notes; ocamlc's library on the oracle's path 18 of 18 |
+| `bin/oi judges-test --fixtures` (stubs) | judges_test's 46 cases (7 of the expect action's counted, left to the oracle tier), repr_levels_test, floors_test, oi_key_test, aot_oi_column_test: all ok; 0 stub calls; 767 s with a rebuild |
+| `gate.crops check`, `bin/gate --plan`, `bin/gate --full --plan` | the base's 8 LLVM problems only; both plans clean |
+
+**OC180 (a)** (ocaml-90's `steps-batch1.diff`, adapted): `oi-essential` (`repl-check --native`, `own-verdicts --check`),
+`ocaml-read-essential` (`corpus check`, `roundtrip --text samples stdlib`, `menhir --check`, `embed-check`), `ocaml-roundtrip`,
+`oi-check`, `oi-aot`, `oi-suite-aot` off `:ocaml`. This tree's planner knows no `:phase :oracle` (it is `mac/oracle-records-cpp2`'s
+ORS1 (a), not merged; teaching `test/gate/plan.ae` would rekey every step), so `ocaml-dumps` and the new `ocaml-oracle` wait in the
+fragment `test/gate/crops/ocaml-oracle.edn` as `:phase :oracle`, to be spliced after that branch; `crops/ocaml.edn` is synced
+with `steps.edn`. `gate.crops check`: the 8 problems of the base `531289398` (LLVM's steps without a control), none of OCaml's;
+`bin/gate --plan` and `--full --plan` clean.
+
+**OC181 (a).** `bin/oi judges-test --fixtures`: `judges_test` without the expect action's six cases (`OI_JUDGES_NO_HOST`, counted as
+run), `repr_levels_test` with x.ml read natively and without its ocdump case, `floors_test`, `oi_key_test`, `aot_oi_column_test`:
+`ocaml-judges` on `[:stage0 :go]`; `judges-test --oracle` (the two files whole, the dumps' determinism, `suite expect`) ends
+`ocaml-oracle`. Under the stubs `--fixtures` ran 0 toolchain commands; two of its cases needed a fix for it: the rollup's
+`suite roles` called `need_tree` (it reads the tarball alone: `need_source` now), and the CPU-limit case read the oracle path's
+`check.tsv` (the native default's `check-native.tsv` now).
+
+**OC183 (a).** `bin/repr-ocaml roundtrip --types` (the typer's `sigs` verb): each file's signature, Printtyp's text, typed from the
+original and from the `:lines` print against the native library's interfaces (the stdlib corpus's files named and flagged as
+stdlib/Compflags does), the texts equal; a negative control (one file's print against another's original); the floor
+`types-typed`. stdlib 148 typed, 148 equal, 0 differ (the 2 templates not typed), 4 min 11 s; samples 2 of 2 equal (the other six
+are syntax showcases the typer refuses: unbound names, `module ... := ...`, classes outside a method). `ocaml-roundtrip`'s stdlib
+and samples parts run `--text --types`; ocamlc's `.cmi` bytes are `ocaml-oracle`'s.
+
+**OC184 (a).** A unit's signature as data, `NAME.cmi.ae` (TYPER.md §24): `lambda --cmi-out`, read back by `find-unit` from an
+`--include` directory when the unit has no `.mli`; the suite's native path writes it instead of Printtyp's `.mli`
+(`OI_SUITE_SIG_TEXT=1` the old way). The proof on the suite sample whose gaps came from the printed interfaces (ocaml-90's six programs:
+basic-modules/main, basic-multdef/usemultdef, basic-private/tlength, raise-counts/main, typing-multifile/pr7563, opam/astring/test),
+`bin/oi suite check --only-list` under the stubs: with the native `.cmi` 5 of 6 pass in 108 s (basic-modules/main, which failed with
+Printtyp's text by a stack overflow substituting `Set.Make(String).t`, passes); with `OI_SUITE_SIG_TEXT=1` 4 of 6 in 392 s (basic-modules/main
+fails as before). opam/astring/test fails in both, a mismatch of astring.ml against its own `.mli` (`Char.equal`), not an
+interface the typer printed. A two-unit sample (`.tmp/cmit`: a `Set.Make (String)` instance, a reference, a record with a mutable
+field used from the next unit) runs on oi with the next unit typed against `a.cmi.ae`.
+
+**OC185 (a).** Not yet: on the merged tree `check-oi-native.edn` has 273 passes of 309 programs, `check-oi.edn` 336 of 377 (libs4
+widened the run corpus by 68 programs the native record has not run). The cells' change is prepared as a comment beside OCaml's
+row in `test/reap/cells.edn` (the native files, the eval cell's classes `[divergences-native.edn divergences.edn]`), for the night's
+records.
+
+**libs4's corpus on the native path (a sample).** 18 programs of `test/ocaml/check-oi.edn`'s passes that libs4 made pass (unix: lib-unix/common/dup, rename,
+truncate, test_unixlabels, pipe_eof, lib-sys/signal; threads: lib-threads/bank, prodcons, sieve, tls, lib-systhreads/boundscheck; str:
+lib-str/t01, parallel; compiler-libs: misc/stable_matching_test, utils/edit_distance, parsing/change_start_loc, formatting/errors_batch;
+and basic-more/safer_matching, whose header's `@OCAMLSRCDIR@` libs4 expands). `bin/oi check --native --only-list` under the stubs:
+14 of 18 pass (unix 6 of 6, threads 5 of 5, str 2 of 2, compiler-libs 1 of 4), the other 4 classed typer notes: the flag
+`-safer-matching` not modelled, and three programs whose compiler-libs units the native library lacks (`Stable_matching`, `Numbers`,
+`Location`); 358 s with the native library's rebuild. The oracle's path on ocamlc's library
+(`OI_STDLIB=ocamlc bin/oi check --ocdump --only-list`): 18 of 18, as recorded (62 s). One fix came from it: `dump_required` read
+the required globals only from ocdump's layout (the vector on lines of its own), so the native dumps' (on the first line) linked
+no compiler-libs unit ("no unit Misc in the library"); it reads both now. The native path with ocdump's dumps against the native
+library (`--ocdump`, OI_STDLIB native) passes 14 of 18 too (the same missing units).
+
+**Scores** (`bin/crops-score --crop ocaml`, the merged tree's records): completeness 80.9% (95.2% without by design; the cells read
+the oracle path's records until OC185), maturity 100%, independence 87.4% (read 1, eval 0.880, AOT 0.5, print 1, judge 0.988; batch 2's
+base 20%), no fact refuted by the steps; `test/crops/scores.edn`'s OCaml line recorded.
+
+**The night's commands for OCaml** (in order, one check process at a time, each process at most 1.5 GB: `OI_TYPER_GOMEMLIMIT=1200MiB`,
+`O2J_JOBS=1`; times from today's samples, scaled):
+1. `bin/oi stdlib` (the native library: about 4 minutes, three typer processes of 1.2-1.5 GB at once; `OI_LIB_JOBS=1` for one: about 8).
+2. `bin/oi check --record` (the native path over the run corpus's 377 programs, `OI_JOBS=2`: about 35 minutes; writes
+   `check-oi-native.edn`, its 68 new rows libs4's; the typer notes of the refused compiler-libs units and `-safer-matching` need
+   divergences-native.edn's `:typer-*` classes, which take them as the sample showed).
+3. `bin/oi check --aot --record` (writes `check-aot-native.edn`; about 40 minutes at `O2J_JOBS=1`, 900 MiB a shard).
+4. `bin/oi suite check --record` (writes `check-suite-oi-native.edn`, the suite's 120 programs with OC184's `.cmi`: about 35 minutes).
+5. `bin/oi suite check --aot --record` (writes `check-suite-aot-native.edn`: about 35 minutes).
+6. `bin/repr-ocaml roundtrip --text --record-results` over every corpus (`all`; about 40 minutes, 1.5 GB), then
+   `bin/repr-ocaml roundtrip --text --types samples stdlib` (5 minutes; `--record` there records the floors).
+7. OC185: if each native record has no fewer passes than its oracle twin, the cells' change prepared in `test/reap/cells.edn`'s
+   comment, then `bin/reap` and `bin/crops-score --record`; the facts' eval and AOT to 1 (`test/crops/independence.edn`).
+The oracle tier's (by hand at a tag, the host `:ocaml`): `bin/oi record-ref`, `suite record-ref`, `bin/repr-ocaml roundtrip --reader
+helper --cmi`, `native-check`, `dumps`, `bin/oi stdlib-check`, `typer-check`, `judges-test --oracle`.
+
+## Proposed (OC182, OC186-OC190; options with costs, a recommendation each, none decided)
+
+- **OC182** (ocaml-90's, open): the expect tests natively. As there: *(a)* with T12's messages; until then (c), the oracle tier.
+- **OC186 compiler-libs' `lexer.ml` without the host's ocamllex.** The native library takes `parsing/lexer.ml` only from the
+  host's `ocamllex` (`OI_OCAMLLEX=1`); by default the native compiler-libs lack `Lexer` (and `Parse`, `Pprintast`... that link it).
+  (a) port ocamllex's generator (the tarball's `lex/`: lexgen.ml, compact.ml, output.ml, about 2,000 lines, its `.mll` parser
+  over the menhir port's engine) into `arbace/repr/ocaml/`, `lexer.mll` → `lexer.ml` natively, compared with ocamllex's output in
+  the oracle tier: about a day; (b) run `lex/` on oi itself (typed natively: its `lexer.ml`/`parser.ml` are generated by
+  ocamllex/ocamlyacc, a bootstrap problem, so (b) needs (a) or a committed generated file); (c) commit ocamllex's `lexer.ml` as a
+  recorded input (0.5 by the scoring rule); (d) leave it to `OI_OCAMLLEX=1` and class the programs that link Lexer natively.
+  *Recommended: (a)*; until then (d).
+- **OC187 The oracle tier's planner on this line.** `ocaml-dumps` and `ocaml-oracle` wait in `test/gate/crops/ocaml-oracle.edn`.
+  (a) splice it when `mac/oracle-records-cpp2` (`:phase :oracle`, `bin/gate --oracle`) is merged: minutes; (b) port that planner's
+  two lines here now: every step's key moves (the planner is in every key), a whole `--full` rerun. *Recommended: (a)*.
+- **OC188 compiler-libs typed natively.** The native library builds unix, unixLabels, thread, event, str; of compiler-libs' 44
+  units 35 of 44 (the nine refused are listed above). The typer's gaps there: an applicative path through a destructive module substitution
+  (`Numbers`: `Set.Make(Int_base.T).t` against `Set.Make(T).t`), a functor body's earlier module unbound (`Identifiable.Make_map`'s
+  `T_set`), GADT constructors with inline records (`Local_store`), and what links them. (a) T12's module-system slice extended for
+  them (Mtype's path normalization under `with module :=`, the functor body's environment): one to two days; (b) class the programs
+  that link them (`:typer` in divergences-native.edn) until T12. *Recommended: (a)* in T12, (b) for the night's record.
+- **OC189 The toplevel's phrases as native `.cmi`.** `bin/oi repl --native` keeps each phrase's signature as `top_N.mli`
+  (Printtyp's text), as the suite's native path did before OC184. (a) `phrase` writes `top_N.cmi.ae` (the same module, an hour);
+  (b) as it is (repl-check passes 24 of 24). *Recommended: (a)* with OC182.
+- **OC190 The native library's build time.** Every change to the typer's sources rebuilds the stdlib (71 units, one process,
+  about 1 minute) and the other libraries (49 units, a process each, three at once, about 3 minutes). (a) one process for all the
+  library units (`stdlib-build`'s loop, a per-unit timeout by a watchdog thread that ends the process on a hang): about an hour,
+  1 minute; (b) as it is. *Recommended: (a)* before the night's records if they run more than once.
+
+## Decided (the user, 2026-11-07: batch 3's proposal 4) and as built
+
+**4 (a).** A linked worktree's or the clean clone's OCaml inputs are the main checkout's: `bin/repr-ocaml corpus fetch` and the opam set
+take a missing tarball from the main checkout's `.tmp/repr-ocaml/src` by hard link (`bin/lib/crops/take.bash`, `crop_take`), refuse when it
+has none, and never download there (the main checkout fetches once). Proved under stubs of curl, wget and the C compilers (each exiting
+99): the refusal, then the eleven tarballs taken; `native-check samples stdlib` 8 + 150 files equal to the helper's dumps byte for byte
+(the speed commits re-applied on batch 3 included), `errors-check` 100 of 100; no stub called.

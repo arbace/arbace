@@ -1,7 +1,8 @@
 # C's target and sysroot (c/README.md; doc/C23-SURVEY.md, "As built: C's own target"): sourced by bin/repr-c, bin/ci and
 # bin/lib/ci/musl after $root and bin/lib/tmpdir.bash. ARBACE_C_TARGET=arbace (unset) reads Arbace's own description c/target
 # and headers c/include with musl 1.2.6's from its release tarball, no file of a toolchain; ARBACE_C_TARGET=gcc reads gcc's
-# recorded answers test/c/host and the host's installed headers in place, as before (the oracle tier's).
+# recorded answers test/c/host and gcc's installed headers as the pack c-headers-gcc15 (doc/ORACLE-RECORDS-SURVEY.md, ORS9 (a),
+# "As built: the tooling and C"; the oracle tier's), ARBACE_C_SYSROOT=/ the host's own files in place, as before the pack.
 #   c_target_host     exports ARBACE_C_HOST, the description every reader reads (arbace.repr.c.host/load-host)
 #   c_sysroot         exports it and, under Arbace's target, ARBACE_C_SYSROOT: the sysroot c_arbace_sysroot assembles, which
 #                     repr/c's preprocessor (arbace.repr.c.pp's sysroot-file) and tools/ccdump (sysroot.go) read a file under
@@ -45,8 +46,37 @@ c_arbace_sysroot() {
   export ARBACE_C_SYSROOT=$d
 }
 
+# c_gcc_sysroot (ORS9 (a), from mac/oracle-records-c): the headers C's checks read at the paths of test/c/host/search.txt under
+# gcc's target (gcc's include directory, /usr/include/fortify, /usr/include: gcc's, musl-dev's, fortify-headers' and the few
+# other packages' test/c/host/headers.sha256 names) are the pack c-headers-gcc15 (test/c/records/c-headers-gcc15.sha256, its
+# manifest .tsv beside it; bin/repr-c host pack makes it on the host with gcc), unpacked from the store; when the store lacks
+# it, the same members staged from the host's files when each has the manifest's digest (.tmp/c-sysroot/MANIFEST-SHA); else 1
+# with the reason
+c_gcc_sysroot() {
+  declare -F oracle_unpack > "$TMPDIR/c-sysroot.fn" || . "$root/test/oracle-records/oracle.bash"
+  local pin=$root/test/c/records/c-headers-gcc15.sha256 man d rc st id
+  man=$(oracle_manifest "$pin")
+  [ -f "$pin" ] && [ -f "$man" ] || { echo "c: no headers pack pinned ($pin): ARBACE_C_SYSROOT=/ reads the host's" >&2; return 1; }
+  if d=$(oracle_unpack "$pin" 2>"$TMPDIR/c-sysroot.err"); then export ARBACE_C_SYSROOT=$d/c-headers-gcc15; return 0; else rc=$?; fi
+  [ $rc = 2 ] || { cat "$TMPDIR/c-sysroot.err" >&2; return 1; }
+  # the store lacks the pack: the host's files, when each is the manifest's, staged as the pack would unpack
+  d=$root/.tmp/c-sysroot/$(sha256sum < "$man" | cut -c1-16)
+  if [ ! -f "$d.ok" ]; then
+    st=$d.$$; rm -rf "$st"; mkdir -p "$st"
+    while IFS=$'\t' read -r id _; do
+      case $id in '#'*|'') continue ;; roots.txt) awk 'NF' "$root/test/c/host/search.txt" > "$st/roots.txt"; continue ;; esac
+      [ -f "$id" ] || { echo "c: no headers pack in $(oracle_store) and the host lacks $id (bin/oracle-records fetch c-headers-gcc15; ARBACE_C_SYSROOT=/ the host's)" >&2; rm -rf "$st"; return 1; }
+      mkdir -p "$st$(dirname "$id")"; cp "$id" "$st$id"
+    done < "$man"
+    oracle_check_members "$st" "$man" 2>"$TMPDIR/c-sysroot.err" \
+      || { echo "c: no headers pack in $(oracle_store), and the host's headers are not the pack's ($(head -1 "$TMPDIR/c-sysroot.err")): bin/oracle-records fetch c-headers-gcc15" >&2; rm -rf "$st"; return 1; }
+    rm -rf "$d"; mv "$st" "$d"; : > "$d.ok"
+  fi
+  export ARBACE_C_SYSROOT=$d
+}
+
 c_sysroot() {
   c_target_host || return 1
   [ -n "${ARBACE_C_SYSROOT:-}" ] && return 0
-  if [ "${ARBACE_C_TARGET:-arbace}" = arbace ]; then c_arbace_sysroot; else export ARBACE_C_SYSROOT=/; fi
+  if [ "${ARBACE_C_TARGET:-arbace}" = arbace ]; then c_arbace_sysroot; else c_gcc_sysroot; fi
 }

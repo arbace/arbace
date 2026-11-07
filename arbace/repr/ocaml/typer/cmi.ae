@@ -1,0 +1,93 @@
+(ns arbace.repr.ocaml.typer.cmi
+  "OC184 (a) (the user's decision of 2026-11-07, doc/ocaml/OCAML-SURVEY.md \"As built: OC184 (a)\"): a unit's signature kept as
+  data, a native .cmi: the typed signature (Typemod's items, their Types graph: type nodes, row extensions and field kinds are
+  atoms, shared and cyclic) written as forms, NAME.cmi.ae, and read back by Env's find-unit as OCaml reads a .cmi
+  (cmi_format.ml's read_cmi: the signature as it was typed, no text in between). Printing an inferred signature as an .mli
+  (Printtyp's text) and reading it again loses what the text cannot say (an applicative path's expansion, weak type
+  variables, a generalised variable's identity); the graph keeps it.
+
+  The form: (ocaml/cmi {:unit NAME :ocaml \"5.5.0\" :nodes [V0 V1 ...] :sig ITEMS}): every atom of the signature numbered in
+  the order of a depth-first walk, written once in :nodes (its value, with the atoms it reaches as {:arbace.cmi/node N}),
+  ITEMS with its atoms as references. Reading makes the atoms first and then fills them, so sharing and cycles come back.
+  The identifiers the unit's program stamped (local stamps, not a global's nor a predef's) are stamped afresh in the units'
+  range (Ident's stamps are per process: a unit's are kept apart from the reading program's, as with-unit-stamps does for an
+  interface read from its .mli), and the type nodes get fresh ids."
+  (:require [arbace.repr.ocaml.typer.types :as ty]))
+
+(set! *warn-on-reflection* false)
+
+(def ^:private atom-class (class (atom nil)))
+(defn- atom? [x] (instance? atom-class x))
+
+(defn freeze
+  "{:nodes [...] :sig form} of a signature's items"
+  [items]
+  (let [index (java.util.IdentityHashMap.)
+        nodes (atom [])]
+    (letfn [(walk [x]
+              (cond
+                (atom? x) (if-let [n (.get index x)]
+                            {:arbace.cmi/node n}
+                            (let [n (count @nodes)]
+                              (.put index x n)
+                              (swap! nodes conj nil)
+                              (let [v (walk @x)] (swap! nodes assoc n v))
+                              {:arbace.cmi/node n}))
+                (map? x) (into {} (map (fn [[k v]] [(walk k) (walk v)]) x))
+                (vector? x) (mapv walk x)
+                (set? x) (into #{} (map walk x))
+                ;; an infinite repetition (a declaration's :variance (repeat :inv)): written as its element
+                (and (seq? x) (= "Repeat" (.getSimpleName (class x))) (>= (bounded-count 4096 x) 4096))
+                {:arbace.cmi/repeat (walk (first x))}
+                (seq? x) (if (>= (bounded-count 100000 x) 100000)
+                           (throw (ex-info "cmi: a signature holds an infinite sequence" {}))
+                           (doall (map walk x)))
+                (or (nil? x) (string? x) (keyword? x) (number? x) (boolean? x) (symbol? x) (char? x)) x
+                :else (throw (ex-info (str "cmi: a signature holds a value that is not data: " (class x)) {}))))]
+      (let [s (walk (vec items))]
+        {:nodes @nodes :sig s}))))
+
+(defn write-cmi
+  "The unit UNAME's signature ITEMS written to PATH"
+  [^String path uname items]
+  (let [{:keys [nodes sig]} (freeze items)]
+    (binding [*print-length* nil *print-level* nil *print-meta* false]
+      (spit path (str "(ocaml/cmi " (pr-str {:unit uname :ocaml "5.5.0" :nodes nodes :sig sig}) ")\n")))))
+
+(defn- local-ident? [m]
+  (and (string? (:name m)) (integer? (:stamp m)) (not (:global m)) (not (:predef m)) (>= (:stamp m) 1000)))
+
+(defn thaw
+  "The signature items of a frozen {:nodes :sig}: the atoms made and filled, the local identifiers stamped afresh in the
+  units' range, the type nodes given fresh ids"
+  [{:keys [nodes sig]}]
+  (let [atoms (vec (repeatedly (count nodes) #(atom nil)))
+        stamps (atom {})
+        ;; (called inside ty/with-unit-stamps: Ident's counter is the units' then)
+        restamp (fn [s] (or (get @stamps s)
+                            (let [n (swap! ty/stamp inc)] (swap! stamps assoc s n) n)))
+        node-ids @#'ty/ids]
+    (letfn [(walk [x]
+              (cond
+                (map? x) (cond
+                           (contains? x :arbace.cmi/node) (atoms (:arbace.cmi/node x))
+                           (contains? x :arbace.cmi/repeat) (repeat (walk (:arbace.cmi/repeat x)))
+                           :else
+                           (let [m (into {} (map (fn [[k v]] [(walk k) (walk v)]) x))]
+                             (if (local-ident? m) (assoc m :stamp (restamp (:stamp m))) m)))
+                (vector? x) (mapv walk x)
+                (set? x) (into #{} (map walk x))
+                (seq? x) (doall (map walk x))
+                :else x))]
+      (doseq [[n v] (map-indexed vector nodes)]
+        (let [w (walk v)
+              w (if (and (map? w) (contains? w :desc) (contains? w :id)) (assoc w :id (swap! node-ids inc)) w)]
+          (reset! (atoms n) w)))
+      (walk sig))))
+
+(defn read-cmi
+  "The signature items of the native .cmi PATH"
+  [^String path]
+  (let [form (read-string (slurp path))]
+    (when-not (and (seq? form) (= 'ocaml/cmi (first form))) (throw (ex-info (str path ": not a native .cmi") {})))
+    (ty/with-unit-stamps (thaw (second form)))))

@@ -128,6 +128,23 @@
           (re-matches #"-g(:.*)?|-Werror|-XD.*|-Xlint(:.*)?|-parameters|-nowarn|-doe" o) (recur more)
           :else false)))
 
+;; JCS136 (a), JCS142 (a): the internal packages the REPL's world makes visible (jdk/repl-exports.txt, which j2g's
+;; repl-visible? reads too): a test whose @modules entries are all `java.base/PKG` of that list stays in its category
+;; (not :run-modules), its entries kept as the javac options `--add-exports=java.base/PKG=ALL-UNNAMED`, which the
+;; JDK's javac and java (--record-ref) and javac on Arbace take as the test's own exports
+
+(def ^:private repl-exports
+  (delay (set (for [l (lines "jdk/repl-exports.txt") :let [l (str/trim (str/replace l #"#.*$" ""))] :when (seq l)] l))))
+
+(defn- module-exports
+  "The package exports of a description's @modules entries when every entry is java.base/PKG of the REPL's list
+  (JCS136 (a)), else nil (an entry of another module or package: the test stays :run-modules)."
+  [desc]
+  (let [es (vec (for [[t v] desc :when (= t "modules") m (str/split (str/trim v) #"\s+") :when (seq m)] m))
+        pk (fn [m] (second (re-matches #"java\.base/([\w.]+)" m)))]
+    (when (and (seq es) (every? #(@repl-exports (pk %)) es))
+      (mapv pk es))))
+
 (defn- run-mode-ok? [modes]
   (every? #(or (= % "othervm") (re-matches #"timeout=\d+" %)) modes))
 
@@ -150,7 +167,7 @@
               (some #(some #{"fail"} (:modes %)) compiles) :compile-fail
               (and (empty? runs) (seq compiles)) :compile-only
               (has "library") :run-lib
-              (has "modules") :run-modules
+              (and (has "modules") (not (module-exports desc))) :run-modules
               (has "requires") :run-requires
               (or (has "enablePreview") (has "clean")) :other
               (some #(not= "main" (:kind %)) runs) :other
@@ -297,14 +314,17 @@
                   compiles (filter #(= :compile (:tag %)) acts)
                   opts (distinct (mapcat :opts compiles))
                   skip (cond (not (compile-opts-ok? opts)) (str "@compile options: " (str/join " " opts))
-                             (some #(str/includes? % "${") (mapcat :args runs)) "a substitution in @run's arguments")]]
+                             (some #(str/includes? % "${") (mapcat :args runs)) "a substitution in @run's arguments"
+                             ;; a main class of a module (java.base/PKG.Main: the test patches the module)
+                             (some #(str/includes? (str (:class %)) "/") runs) "a module-qualified main class")]]
       (write-lines (str work "/record/" (:id r) "/plan.tsv")
                    (concat [(str "key\t" (:key r)) (str "path\t" (:path r)) (str "corpus\t" (name (:corpus r)))
                             (str "category\t" (name (:category r))) (str "dir\t" (.getPath dir))
                             (str "root\t" (name (:root-kind r)) "\t" (:root r))]
                            (if (= :compile-fail-ref (:category r))
                              (diag-plan (:desc r))
-                             (run-plan skip opts (.getName ^File (:file r)) compiles acts runs base)))))
+                             (run-plan skip (distinct (concat opts (for [p (module-exports (:desc r))] (str "--add-exports=java.base/" p "=ALL-UNNAMED"))))
+                                       (.getName ^File (:file r)) compiles acts runs base)))))
     (write-lines (str work "/record.list") (map :id sel))
     ;; the counts, by area and category
     (let [cats (sort (distinct (map (comp name :category) rows)))

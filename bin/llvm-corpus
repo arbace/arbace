@@ -1,0 +1,320 @@
+#!/bin/bash
+# llvm/test's .ll files as a corpus of the LLVM row (doc/llvm/LLVM-CROP-SURVEY.md, "As built: LL1"): counted by directory and
+# by what the test's RUN lines do with the file, listed, sampled; the pinned llvm-project tarball (test/cpp/corpora.edn,
+# :llvmorg-23.1.4) is the source. Reads only; the checks that run on the lists are bin/repr-llvm's.
+#
+#   bin/llvm-corpus pin             the tarball's SHA-512 against the pin of test/cpp/corpora.edn
+#   bin/llvm-corpus extract         llvm/test (and LICENSE.TXT) out of the tarball into $LLVM_SRC (default MAIN/.tmp/llvm/src)
+#   bin/llvm-corpus scan            every .ll of llvm/test with its attributes: .tmp/llvm/scan.tsv (PATH, DIR1, DIR2, BYTES,
+#                                   RUNS, KIND, FLAGS); the counts test/llvm/llvm-test-counts.tsv; the split-file sections
+#                                   expanded by the pin's split-file into .tmp/llvm/split/ (sections.tsv)
+#   bin/llvm-corpus sample          the committed sample lists test/llvm/llvm-test-{valid,reject,split}.list (NAME<tab>llvm/test/...
+#                                   or split/..., deterministic: every k-th file of each stratum, by sorted path)
+#   bin/llvm-corpus resolve LIST OUT  LIST's relative paths made absolute (OUT: NAME<tab>ABSOLUTE PATH), the lists the repr/llvm verbs take
+#   bin/llvm-corpus intrinsics      the intrinsic table of the verifier (arbace/repr/llvm/intr_table.ae): llvm/include's .td
+#                                   files out of the tarball, the pin's llvm-tblgen --dump-json over Intrinsics.td, each
+#                                   intrinsic's name, IIT type signature (TypeSig), overloaded flag, immarg and Range params,
+#                                   IntrNoMem and IntrSpeculatable
+#   bin/llvm-corpus di-table        the specialized metadata nodes' fields as LLParser parses them (arbace/repr/llvm/di_table.ae):
+#                                   lib/AsmParser/LLParser.cpp's VISIT_MD_FIELDS of each parseDI*, the DWARF names of
+#                                   BinaryFormat/Dwarf.def and Dwarf.h, the flags of IR/DebugInfoFlags.def
+#   bin/llvm-corpus reject-lists    the widened rejection samples (LL4): every rejection test of llvm/test that the pin's
+#                                   opt -passes=verify rejects, Assembler/ and Verifier/ (test/llvm/llvm-test-reject-av.list)
+#                                   and the other directories (llvm-test-reject-other.list), by name
+#   bin/llvm-corpus valid-wide      a second valid sample for the verifier's false errors (LL4): every 97th module of
+#                                   input.list from the 3rd, under 60 KB (test/llvm/llvm-test-valid-wide.list)
+#   bin/llvm-corpus verify-record LIST WORK OUT   bin/repr-llvm verify-check over LIST, OUT the record: NAME, opt's verdict,
+#                                   Arbace's, verdicts same, first messages same, whole stderr same
+#   bin/llvm-corpus full-lists      the whole corpus' lists into .tmp/llvm/lists/ (the night's runs: doc/llvm/LLVM-CROP-SURVEY.md, "As built: LL1")
+# KIND: reject (a `not llvm-as`/`not opt`/`not llc` RUN line names the file), split (split-file in a RUN line), input (the
+# rest with RUN lines), none (no RUN line: a library of another test). FLAGS: tools named in RUN lines (as opt llc dis lli
+# link lto mc other), typed (a typed pointer in code), ptr0 (-opaque-pointers flags), triple=ARCH.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+main=$(cd "$(git -C "$root" rev-parse --git-common-dir)/.." && pwd)
+# the clean run's clone (.tmp/gate-clean/SHA, git clone --shared: its own .git) reads the invoking checkout's extraction
+case $root in */.tmp/gate-clean/*) main=${root%%/.tmp/gate-clean/*} ;; esac
+src=${LLVM_SRC:-$main/.tmp/llvm/src}
+top=llvm-project-23.1.4.src
+tar_=${LLVM_TARBALL:-$main/.tmp/llvm/llvm-project-23.1.4.src.tar.xz}
+test_=$src/$top/llvm/test
+w=$main/.tmp/llvm
+split_file=${LLVM_SPLIT_FILE:-/usr/lib/llvm23/bin/split-file}
+
+scan_awk() { cat <<'AWK'
+function flush(   k, f, t) {
+  if (file == "") return
+  kind = "none"
+  if (nrun > 0) kind = "input"
+  if (nrun > 0 && runs ~ /split-file/) kind = "split"
+  if (runs ~ /(^|[^A-Za-z-])not (--crash )?(llvm-as|opt|llc|llvm-dis|llvm-link|llvm-lto|lli)( |$)/ || runs ~ /not --crash (llvm-as|opt|llc)/) kind = "reject"
+  f = ""
+  if (runs ~ /llvm-as/) f = f "as,"
+  if (runs ~ /(^|[ |;(\n])opt( |$)/) f = f "opt,"
+  if (runs ~ /(^|[ |;(\n])llc( |$)/) f = f "llc,"
+  if (runs ~ /llvm-dis/) f = f "dis,"
+  if (runs ~ /(^|[ |;(\n])lli( |$)/) f = f "lli,"
+  if (runs ~ /llvm-link/) f = f "link,"
+  if (runs ~ /llvm-lto/) f = f "lto,"
+  if (runs ~ /llvm-mc/) f = f "mc,"
+  if (f == "" && nrun > 0) f = "other,"
+  if (typed) f = f "typed,"
+  if (runs ~ /opaque-pointers/) f = f "ptr0,"
+  if (tr != "") f = f "triple=" tr ","
+  if (kind == "split" && runs ~ /not /) f = f "splitreject,"
+  sub(/,$/, "", f)
+  sub(/^llvm\/test\//, "", file); n = split(file, p, "/")
+  printf "%s\t%s\t%s\t%d\t%d\t%s\t%s\n", file, p[1], (n > 2 ? p[2] : "-"), size, nrun, kind, f
+  file = ""
+}
+FNR == 1 { flush(); file = FILENAME; sub(/^\.\//, "", file); nrun = 0; runs = ""; typed = 0; tr = ""; size = 0; cont = 0; incont = 0 }
+{
+  size += length($0) + 1
+  line = $0
+  if (incont) {
+    t = line; sub(/^[;#\/ \t]*/, "", t)
+    runs = runs " " t
+    incont = (runs ~ /\\$/)
+    if (incont) sub(/\\$/, "", runs)
+    next
+  }
+  if (line ~ /(^|[;#\/ \t])RUN:/) {
+    t = line; sub(/^.*RUN:[ \t]*/, "", t)
+    nrun++
+    runs = runs "\n" t
+    if (t ~ /\\$/) { incont = 1; sub(/\\$/, "", runs) }
+    next
+  }
+  if (line ~ /^[ \t]*;/) next
+  if (!typed && line ~ /(i[0-9]+|float|double|half|void|%[A-Za-z0-9_.$-]+|\))\*+[ ,)\]}]|(i[0-9]+|float|double|half|void|%[A-Za-z0-9_.$-]+|\))\*+$/) typed = 1
+  if (tr == "" && line ~ /^target triple *= *"/) { t = line; sub(/^target triple *= *"/, "", t); sub(/[-"].*$/, "", t); tr = t }
+}
+END { flush() }
+AWK
+}
+
+case ${1:-} in
+  pin)
+    want=$(sed -n '/:llvmorg-23.1.4/,/:license/{s/^ *:sha512 "\([0-9a-f]*\)"$/\1/p;}' "$root/test/cpp/corpora.edn")
+    got=$(sha512sum "$tar_" | cut -d' ' -f1)
+    [ -n "$want" ] && [ "$want" = "$got" ] && echo "pin: $tar_ sha512 ok ($(wc -c < "$tar_") bytes)" || { echo "pin: MISMATCH want=$want got=$got" >&2; exit 1; } ;;
+  extract)
+    "$0" pin
+    mkdir -p "$src"
+    tar -xJf "$tar_" -C "$src" --wildcards "$top/llvm/test/*" "$top/llvm/LICENSE.TXT"
+    echo "extract: $(find "$test_" -name '*.ll' | wc -l) .ll files in $test_" ;;
+  intrinsics)
+    # the .td files and the pin's llvm-tblgen: the records as JSON, then one line per intrinsic (NAME OVERLOADED SIG IMMARGS
+    # RANGES PROPS; SIG the IIT encoding Intrinsic::getIntrinsicInfoTableEntries decodes, IMMARGS and RANGES by parameter from 0)
+    "$0" pin
+    mkdir -p "$src"
+    tar -xJf "$tar_" -C "$src" --wildcards "$top/llvm/include/llvm/IR/*.td" "$top/llvm/include/llvm/CodeGen/*.td"
+    tmpj=$root/.tmp/intrinsics.json; mkdir -p "$root/.tmp"
+    "${LLVM_TBLGEN:-/usr/lib/llvm23/bin/llvm-tblgen}" --dump-json -I "$src/$top/llvm/include" "$src/$top/llvm/include/llvm/IR/Intrinsics.td" -o "$tmpj"
+    python3 -I - "$tmpj" "$root/arbace/repr/llvm/intr_table.ae" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+rows = []
+for k in d['!instanceof']['Intrinsic']:
+    r = d[k]
+    name = r['LLVMName'] or 'llvm.' + k[len('int_'):].replace('_', '.')
+    ti = d[r['TypeInfo']['def']]
+    imm, rng = [], []
+    nomem = any(a['def'] == 'IntrNoMem' for a in r['IntrProperties'])
+    spec = any(a['def'] == 'IntrSpeculatable' for a in r['IntrProperties'])
+    for a in r['IntrProperties']:
+        p = d[a['def']]
+        sc = p['!superclasses']
+        if 'ImmArg' in sc: imm.append(p['ArgNo'] - 1)
+        if 'Range' in sc: rng.append('%d:%d:%d' % (p['ArgNo'] - 1, p['Lower'], p['Upper']))
+    rows.append('%s %d %s %s %s %s' % (name, ti['isOverloaded'], ','.join(str(x) for x in ti['TypeSig']),
+                                        ','.join(str(x) for x in sorted(imm)) or '-', ';'.join(rng) or '-', ('n' if nomem else '') + ('s' if spec else '') or '-'))
+rows.sort()
+with open(sys.argv[2], 'w') as o:
+    o.write(';; Generated by bin/llvm-corpus intrinsics from llvm-project 23.1.4\'s llvm/include/llvm/IR/Intrinsics*.td (llvm-tblgen\n')
+    o.write(';; --dump-json): NAME OVERLOADED TYPESIG IMMARGS RANGES PROPS (n IntrNoMem, s IntrSpeculatable) a line. Apache-2.0 WITH LLVM-exception (LICENSE.md). Do not edit.\n')
+    o.write('(ns arbace.repr.llvm.intr-table)\n\n(def lines\n  "')
+    o.write('\n'.join(rows))
+    o.write('")\n')
+print('intrinsics: %d' % len(rows))
+PY
+    ;;
+  di-table)
+    "$0" pin
+    mkdir -p "$src"
+    tar -xJf "$tar_" -C "$src" "$top/llvm/lib/AsmParser/LLParser.cpp" "$top/llvm/lib/IR/AsmWriter.cpp" "$top/llvm/include/llvm/BinaryFormat/Dwarf.def" "$top/llvm/include/llvm/BinaryFormat/Dwarf.h" "$top/llvm/include/llvm/IR/DebugInfoFlags.def"
+    python3 -I - "$src/$top/llvm" "$root/arbace/repr/llvm/di_table.ae" <<'PY'
+import re, sys
+base, out = sys.argv[1], sys.argv[2]
+cpp = open(base + '/lib/AsmParser/LLParser.cpp').read()
+rows = []
+for m in re.finditer(r'bool LLParser::parse((?:DI|Generic)[A-Za-z]*)\(MDNode \*&Result,\s*bool IsDistinct\) \{(.*?)\n\}', cpp, re.S):
+    kind, body = m.group(1), m.group(2)
+    v = re.search(r'#define VISIT_MD_FIELDS\(OPTIONAL, REQUIRED\)(.*?)\n  PARSE_MD_FIELDS', body, re.S)
+    if not v: continue
+    for f in re.finditer(r'(OPTIONAL|REQUIRED)\((\w+), (\w+), *(.*?)\);', v.group(1).replace('\\\n', ' ')):
+        args = re.sub(r'/\*.*?\*/', '', f.group(4)).strip()
+        args = re.sub(r'\s+', '', args)
+        rows.append('%s %s %s %s %s' % (kind, f.group(2), 'r' if f.group(1) == 'REQUIRED' else 'o', f.group(3), args or '-'))
+dwarf = open(base + '/include/llvm/BinaryFormat/Dwarf.def').read()
+names = {}
+for key, pre in [('TAG', 'DW_TAG_'), ('LANG', 'DW_LANG_'), ('ATE', 'DW_ATE_'), ('VIRTUALITY', 'DW_VIRTUALITY_'), ('CC', 'DW_CC_'),
+                 ('LNAME', 'DW_LNAME_'), ('LLVM_LANG_DIALECT', 'DW_LLVM_LANG_DIALECT_'), ('APPLE_ENUM_KIND', 'DW_APPLE_ENUM_KIND_')]:
+    names[pre] = sorted(set(pre + n for n in re.findall(r'^HANDLE_DW_' + key + r'\(\s*[^,]+,\s*(\w+)', dwarf, re.M)))
+names['DW_OP_'] = sorted(set(['DW_OP_' + n for n in re.findall(r'^HANDLE_DW_OP\(\s*[^,]+,\s*(\w+)', dwarf, re.M)]
+                              + re.findall(r'^\s*(DW_OP_LLVM_\w+) = ', open(base + '/include/llvm/BinaryFormat/Dwarf.h').read(), re.M)))
+flags = open(base + '/include/llvm/IR/DebugInfoFlags.def').read()
+names['DIFlag'] = sorted(set('DIFlag' + n for n in re.findall(r'^HANDLE_DI_FLAG\(\s*[^,]+,\s*(\w+)\)', flags, re.M)))
+names['DISPFlag'] = sorted(set('DISPFlag' + n for n in re.findall(r'^HANDLE_DISP_FLAG\(\s*[^,]+,\s*(\w+)\)', flags, re.M)))
+asm = open(base + '/lib/IR/AsmWriter.cpp').read()
+prints = []
+for m in re.finditer(r'static void write((?:DI|Generic)[A-Za-z]*)\(raw_ostream &Out,\s*const \w+ \*\w+,.*?\{(.*?)\n\}', asm, re.S):
+    kind, body = m.group(1), m.group(2)
+    for c in re.finditer(r'Printer\.print(\w+)(?:<[^>]*>)?\(\s*"(\w+)"(.*?)\);', body, re.S):
+        fn, name, rest = c.group(1), c.group(2), c.group(3)
+        if fn in ('Tag', 'DISPFlags'): mode = 'a'
+        elif fn == 'Bool':
+            d = re.search(r'Default \*/\s*(true|false)', rest)
+            mode = ('t' if d.group(1) == 'true' else 'f') if d else 'a'
+        elif re.search(r'ShouldSkip\w+ \*/\s*false', rest): mode = 'k'
+        else: mode = 'z'
+        prints.append('%s %s %s' % (kind, name, mode))
+fo = [n for n in re.findall(r'^HANDLE_DI_FLAG\(\s*[^,]+,\s*(\w+)\)', flags, re.M)]
+opcodes = [('DW_OP_' + n, int(i, 16)) for i, n in re.findall(r'^HANDLE_DW_OP\(\s*(0x[0-9a-fA-F]+),\s*(\w+)', dwarf, re.M)]
+opcodes += [(n, int(i, 16)) for n, i in re.findall(r'^\s*(DW_OP_LLVM_\w+) = (0x[0-9a-fA-F]+)', open(base + '/include/llvm/BinaryFormat/Dwarf.h').read(), re.M)]
+with open(out, 'w') as o:
+    o.write(';; Generated by bin/llvm-corpus di-table from llvm-project 23.1.4 (lib/AsmParser/LLParser.cpp, lib/IR/AsmWriter.cpp, BinaryFormat/Dwarf.def,\n')
+    o.write(';; IR/DebugInfoFlags.def). Apache-2.0 WITH LLVM-exception (LICENSE.md). Do not edit.\n')
+    o.write('(ns arbace.repr.llvm.di-table)\n\n(def fields\n  "KIND FIELD REQUIRED TYPE ARGS a line"\n  "')
+    o.write('\n'.join(rows))
+    o.write('")\n\n(def names\n  "the DWARF and flag names by prefix"\n  {')
+    o.write('\n   '.join('"%s" #{%s}' % (k, ' '.join('"%s"' % n for n in v)) for k, v in sorted(names.items())))
+    o.write('})\n\n(def print-order\n  "KIND FIELD MODE a line, the AsmWriter\'s order (MODE: z skips a zero, null or empty value, k keeps it, t and f skip\n  a bool of that value, a always prints)"\n  "')
+    o.write('\n'.join(prints))
+    o.write('")\n\n(def flag-order\n  "DINode\'s flags in DebugInfoFlags.def\'s order (splitFlags prints them so)"\n  [')
+    o.write(' '.join('"DIFlag%s"' % n for n in fo))
+    o.write('])\n\n(def op-codes\n  "the DWARF expression operations\' codes (Dwarf.def, Dwarf.h\'s DW_OP_LLVM_*)"\n  {')
+    o.write(' '.join('"%s" %d' % (n, c) for n, c in sorted(set(opcodes))))
+    o.write('})\n')
+print('di-table: %d print fields, ' % len(prints), end='')
+print('di-table: %d fields, %s' % (len(rows), ', '.join('%s %d' % (k, len(v)) for k, v in sorted(names.items()))))
+PY
+    ;;
+  scan)
+    mkdir -p "$w"
+    scan_awk > "$w/scan.awk"
+    ( cd "$src/$top" && find llvm/test -name '*.ll' | LC_ALL=C sort | xargs -n 3000 awk -f "$w/scan.awk" ) | LC_ALL=C sort > "$w/scan.tsv"
+    # split-file: sections of each split test as modules of their own
+    rm -rf "$w/split"; mkdir -p "$w/split"; : > "$w/sections.tsv"
+    awk -F'\t' '$6 == "split" { print $1 }' "$w/scan.tsv" | while read -r f; do
+      d=$w/split/$f; mkdir -p "$d"
+      "$split_file" "$test_/$f" "$d" 2>/dev/null || { echo "split-file failed: $f" >&2; continue; }
+      for s in "$d"/*; do
+        [ -f "$s" ] || continue
+        case $s in *.ll) printf '%s\t%s\t%s\n' "$f" "${s#$w/split/}" "$(wc -c < "$s")" >> "$w/sections.tsv" ;; esac
+      done
+    done
+    # the counts
+    {
+      printf '# llvm/test of llvmorg-23.1.4 (llvm-project-23.1.4.src.tar.xz): .ll files by top directory and KIND (bin/llvm-corpus scan)\n'
+      printf '# DIR\tfiles\tinput\treject\tsplit\tnone\ttyped\tas\topt\tllc\tbytes\n'
+      awk -F'\t' '{ d = $2; n[d]++; k[d, $6]++; if ($7 ~ /typed/) ty[d]++; if ($7 ~ /(^|,)as(,|$)/) as[d]++; if ($7 ~ /(^|,)opt(,|$)/) op[d]++; if ($7 ~ /(^|,)llc(,|$)/) lc[d]++; b[d] += $4
+         N++; K[$6]++; if ($7 ~ /typed/) TY++; if ($7 ~ /(^|,)as(,|$)/) AS++; if ($7 ~ /(^|,)opt(,|$)/) OP++; if ($7 ~ /(^|,)llc(,|$)/) LC++; B += $4 }
+         END { for (d in n) printf "%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n", d, n[d], k[d,"input"], k[d,"reject"], k[d,"split"], k[d,"none"], ty[d], as[d], op[d], lc[d], b[d]
+               printf "TOTAL\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n", N, K["input"], K["reject"], K["split"], K["none"], TY, AS, OP, LC, B }' "$w/scan.tsv" | LC_ALL=C sort -k1,1
+      printf '# split-file sections: %s sections (.ll) of %s tests\n' "$(wc -l < "$w/sections.tsv")" "$(cut -f1 "$w/sections.tsv" | sort -u | wc -l)"
+    } > "$root/test/llvm/llvm-test-counts.tsv"
+    cat "$root/test/llvm/llvm-test-counts.tsv" ;;
+  sample)
+    [ -f "$w/scan.tsv" ] || { echo "run scan first" >&2; exit 1; }
+    nv=${SAMPLE_VALID:-300} nr=${SAMPLE_REJECT:-200} ns=${SAMPLE_SPLIT:-60} maxb=${SAMPLE_MAX_BYTES:-60000}
+    # valid: input files (the reference llvm-as takes: checked below), small, one stratum per DIR1/DIR2 (CodeGen's by target),
+    # every k-th of a stratum's sorted files, the quota spread by stratum size with a floor of one
+    pick() { # kind quota extra-awk-cond
+      awk -F'\t' -v kind="$1" -v maxb="$maxb" '$6 == kind && $4 <= maxb && $7 !~ /ptr0/ { print $2 "/" $3 "\t" $1 }' "$w/scan.tsv" | LC_ALL=C sort |
+      awk -F'\t' -v q="$2" '{ s[$1] = s[$1] "\n" $2; c[$1]++; T++ }
+        END { for (st in c) { share = int(q * c[st] / T + 0.5); if (share < 1) share = 1; if (share > c[st]) share = c[st]
+                k = c[st] / share; m = split(substr(s[st], 2), a, "\n")
+                for (i = 0; i < share; i++) print a[int(i * k) + 1] } }' | LC_ALL=C sort
+    }
+    pick input "$((nv * 2))" | while read -r f; do printf '%s\tllvm/test/%s\n' "$(echo "$f" | tr '/' '-' | sed 's/\.ll$//')" "$f"; done > "$w/valid.cand"
+    # the reference's verdict: llvm-as 23 takes it, with no flags (a test whose RUN lines need flags may be rejected: left out)
+    : > "$w/valid.ok"
+    while IFS=$'\t' read -r n p; do
+      if /usr/lib/llvm23/bin/llvm-as "$src/$top/$p" -o "$w/tmp.bc" 2> "$w/tmp.err"; then printf '%s\t%s\n' "$n" "$p"; fi
+    done < "$w/valid.cand" > "$w/valid.ok"
+    awk -v q="$nv" '{ o[NR] = $0 } END { if (NR <= q) { for (i = 1; i <= NR; i++) print o[i] } else { for (i = 0; i < q; i++) print o[int(i * NR / q) + 1] } }' "$w/valid.ok" > "$root/test/llvm/llvm-test-valid.list"
+    # rejections: tests whose RUN lines say `not llvm-as` or `not opt` (llc's rejections are the code generator's), and that the
+    # reference `opt -passes=verify` rejects too (a `not opt` with other passes may reject for the pass's reasons: left out);
+    # the candidates three times the quota, thinned evenly
+    awk -F'\t' '$6 == "reject" && $7 ~ /(^|,)(as|opt)(,|$)/ && $7 !~ /ptr0/ && $4 <= 60000 { print $2 "/" $3 "\t" $1 }' "$w/scan.tsv" | LC_ALL=C sort |
+      awk -F'\t' -v q="$((nr * 3))" '{ s[$1] = s[$1] "\n" $2; c[$1]++; T++ } END { for (st in c) { share = int(q * c[st] / T + 0.5); if (share < 1) share = 1; if (share > c[st]) share = c[st]; k = c[st] / share; m = split(substr(s[st], 2), a, "\n"); for (i = 0; i < share; i++) print a[int(i * k) + 1] } }' | LC_ALL=C sort |
+      while read -r f; do printf '%s\tllvm/test/%s\n' "$(echo "$f" | tr '/' '-' | sed 's/\.ll$//')" "$f"; done > "$w/reject.cand"
+    while IFS=$'\t' read -r n p; do
+      if ! /usr/lib/llvm23/bin/opt -passes=verify -disable-output "$src/$top/$p" > "$w/tmp.err" 2>&1; then printf '%s\t%s\n' "$n" "$p"; fi
+    done < "$w/reject.cand" > "$w/reject.ok"
+    awk -v q="$nr" '{ o[NR] = $0 } END { if (NR <= q) { for (i = 1; i <= NR; i++) print o[i] } else { for (i = 0; i < q; i++) print o[int(i * NR / q) + 1] } }' "$w/reject.ok" > "$root/test/llvm/llvm-test-reject.list"
+    # split sections: the first section of every k-th split test
+    awk -F'\t' -v q="$ns" '{ if (!($1 in seen)) { seen[$1] = 1; o[++n] = $0 } } END { k = n / q; for (i = 0; i < q && int(i * k) + 1 <= n; i++) print o[int(i * k) + 1] }' "$w/sections.tsv" |
+      while IFS=$'\t' read -r f s sz; do printf '%s\tsplit/%s\n' "$(echo "$s" | tr '/' '-' | sed 's/\.ll$//')" "$s"; done > "$root/test/llvm/llvm-test-split.list"
+    wc -l "$root"/test/llvm/llvm-test-*.list ;;
+  expect)
+    # expect LIST OUT: the diagnostics a test declares (its CHECK-style comment lines that name `error:`), NAME<tab>fragment after
+    # `error:` (first such line; empty when the test declares none: the reference tool's stderr is then the only reference)
+    while IFS=$'\t' read -r n p; do
+      [ -n "$n" ] || continue
+      frag=$(grep -E '^[;#/ ]*[A-Za-z][A-Za-z0-9_-]*(-NEXT|-SAME)?: *.*error: ' "$p" | head -1 | sed -E 's/^.*error: *//; s/\{\{[^}]*\}\}//g; s/[[:space:]]+$//' || true)
+      printf '%s\t%s\n' "$n" "$frag"
+    done < "$2" > "$3" ;;
+  reject-check)
+    # reject-check LIST WORK: bin/repr-llvm verify-check over LIST, then per rejection the test's declared fragment (expect), whether
+    # the pin's opt prints it and whether Arbace's verify does (WORK/expect.tsv: NAME, declared, opt, arbace); the summary line
+    list=$2 work=$3
+    "$root/bin/repr-llvm" verify-check "$list" "$work" 2>&1 | grep -v '^Performance warning' | tail -2 || true
+    "$0" expect "$list" "$work/declared.tsv"
+    while IFS=$'\t' read -r n d; do
+      o=- a=-
+      if [ -n "$d" ]; then
+        grep -aqF -- "$d" "$work/opt/$n.log" && o=yes || o=no
+        grep -aqF -- "$d" "$work/arb/$n.err" && a=yes || a=no
+      fi
+      printf '%s\t%s\t%s\t%s\n' "$n" "$d" "$o" "$a"
+    done < "$work/declared.tsv" > "$work/expect.tsv"
+    echo "reject-check: $(awk -F'\t' '$2 != ""' "$work/expect.tsv" | wc -l) of $(wc -l < "$work/expect.tsv") declare an error; opt prints it in $(awk -F'\t' '$3 == "yes"' "$work/expect.tsv" | wc -l), Arbace's verify in $(awk -F'\t' '$4 == "yes"' "$work/expect.tsv" | wc -l)" ;;
+  reject-lists)
+    # needs full-lists' reject.list; opt over each (about 1,700 files, a minute)
+    [ -f "$w/lists/reject.list" ] || "$0" full-lists
+    mkdir -p "$root/.tmp"; : > "$root/.tmp/reject-av.ok"; : > "$root/.tmp/reject-other.ok"
+    sort "$w/lists/reject.list" | while IFS=$'\t' read -r n p; do
+      if ! /usr/lib/llvm23/bin/opt -passes=verify -disable-output "$p" > "$root/.tmp/reject.err" 2>&1; then
+        rel=${p#"$src/$top/"}
+        case $rel in llvm/test/Assembler/*|llvm/test/Verifier/*) printf '%s\t%s\n' "$n" "$rel" >> "$root/.tmp/reject-av.ok" ;;
+                     *) printf '%s\t%s\n' "$n" "$rel" >> "$root/.tmp/reject-other.ok" ;; esac
+      fi
+    done
+    cp "$root/.tmp/reject-av.ok" "$root/test/llvm/llvm-test-reject-av.list"
+    cp "$root/.tmp/reject-other.ok" "$root/test/llvm/llvm-test-reject-other.list"
+    wc -l "$root"/test/llvm/llvm-test-reject-{av,other}.list ;;
+  valid-wide)
+    [ -f "$w/lists/input.list" ] || "$0" full-lists
+    awk 'NR % 97 == 3' "$w/lists/input.list" | while IFS=$'\t' read -r n p; do
+      if [ "$(stat -c %s "$p")" -lt 60000 ]; then printf '%s\t%s\n' "$n" "${p#"$src/$top/"}"; fi
+    done > "$root/test/llvm/llvm-test-valid-wide.list"
+    wc -l "$root/test/llvm/llvm-test-valid-wide.list" ;;
+  verify-record)
+    list=$2 work=$3 out=$4
+    rm -f "$work/arbace.tsv" "$work/verify.tsv" "$work/full.tsv"
+    "$root/bin/repr-llvm" verify-check "$list" "$work" 2>&1 | grep -av '^Performance warning' | tail -1 || true
+    [ -s "$work/verify.tsv" ] && [ -s "$work/full.tsv" ] || { echo "verify-record: verify-check wrote no results in $work" >&2; exit 1; }
+    awk -F'\t' 'NR == FNR { f[$1] = $2; next } { print $1 "\t" $2 "\t" $3 "\t" $4 "\t" $5 "\t" f[$1] }' "$work/full.tsv" "$work/verify.tsv" > "$out"
+    echo "verify-record: $(wc -l < "$out") rows in $out; verdicts $(awk -F'\t' '$4 == "same"' "$out" | wc -l), whole stderr $(awk -F'\t' '$6 == "same"' "$out" | wc -l)" ;;
+  resolve)
+    awk -F'\t' -v s="$src/$top" -v w="$w" '{ p = ($2 ~ /^split\//) ? w "/" $2 : s "/" $2; print $1 "\t" p }' "$2" > "$3" ;;
+  full-lists)
+    mkdir -p "$w/lists"
+    awk -F'\t' -v s="$src/$top/llvm/test" '$6 != "none" && $6 != "split" && $6 != "reject" { n = $1; gsub(/\//, "-", n); sub(/\.ll$/, "", n); print n "\t" s "/" $1 }' "$w/scan.tsv" > "$w/lists/input.list"
+    awk -F'\t' -v s="$src/$top/llvm/test" '$6 == "reject" { n = $1; gsub(/\//, "-", n); sub(/\.ll$/, "", n); print n "\t" s "/" $1 }' "$w/scan.tsv" > "$w/lists/reject.list"
+    awk -F'\t' -v w="$w/split" '{ n = $2; gsub(/\//, "-", n); sub(/\.ll$/, "", n); print n "\t" w "/" $2 }' "$w/sections.tsv" > "$w/lists/split.list"
+    wc -l "$w"/lists/*.list ;;
+  *) sed -n '2,19p' "$0"; exit 2 ;;
+esac

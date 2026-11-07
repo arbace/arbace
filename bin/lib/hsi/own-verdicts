@@ -1,0 +1,67 @@
+#!/bin/bash
+# bin/hsi own-verdicts [--record | --check]: which programs of hsi's run corpora carry a verdict of their own (the user's
+# decision of 2026-11-07: a test's own verdict is a judge no toolchain made), as test/haskell/own-verdicts.tsv lists them:
+#   ID<TAB>EXIT<TAB>STDOUT<TAB>STDERR      EXIT the status the test expects (all.T's exit_code, default 0; nofib 0), STDOUT
+#                                           and STDERR the expected outputs shipped with it, relative to its directory
+#                                           (GHC's testsuite: NAME.stdout and NAME.stderr, a missing .stderr an empty one, as
+#                                           the testsuite driver takes it; nofib: NAME.faststdout or NAME.stdout and
+#                                           NAME.stderr), "-" for an expected empty output
+# A program is listed when its shipped expectations are exactly what GHC 9.14.1's recorded -O0 run gave
+# (test/haskell/ref-ghc914.edn: the status, the SHA-256 of stdout and of stderr): then bin/hsi check judges it by the
+# shipped files alone (its verdict the test's own, the record not read) and the verdict is the same either way. The
+# others keep the recorded run (0.5: a toolchain's record). No run: the trees and the record are read.
+#   --record   writes the list (by hand, beside a new record-ref)
+#   --check    the list against a fresh computation (exit 1 on a difference); default: prints the counts
+set -euo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+mode=${1:-}
+ref=$root/test/haskell/ref-ghc914.edn list=$root/test/haskell/own-verdicts.tsv
+tests=$root/.tmp/hsi/ghc-9.14.1/testsuite/tests nofib=$root/.tmp/hsi/nofib
+[ -d "$tests" ] || "$root/bin/hsi" pins --fetch >&2
+work=$root/.tmp/hsi/own-verdicts; rm -rf "$work"; mkdir -p "$work"
+ae() { ARBACE_PATH=$root "$("$root/bin/hsi" exe)" "$@"; }
+# the testsuite's tests with their expected status (run_plan's EXIT)
+ae "$root/test/haskell/eval/run_plan.ae" "$root/test/haskell/eval/testsuite-run.edn" "$tests" - 2> "$work/plan.notes" |
+  awk -F'\t' '{print $1 "\t" $2 "\t" $7 "\t" $8}' > "$work/testsuite.tsv"
+empty=$(printf '' | sha256sum | cut -c1-64)
+sha() { if [ -f "$1" ]; then sha256sum < "$1" | cut -c1-64; else echo "$empty"; fi; }
+: > "$work/new.tsv"
+n=0 own=0
+while IFS= read -r line; do
+  id=$(sed -n 's/^{:id "\([^"]*\)".*/\1/p' <<< "$line"); [ -n "$id" ] || continue
+  n=$((n + 1))
+  rst=$(sed -n 's/.* :status \([^ ]*\) .*/\1/p' <<< "$line")
+  rso=$(sed -n 's/.* :stdout "\([0-9a-f]*\)".*/\1/p' <<< "$line"); rse=$(sed -n 's/.* :stderr "\([0-9a-f]*\)".*/\1/p' <<< "$line")
+  [ -n "$rso" ] || continue
+  case $id in
+    testsuite/*)
+      IFS=$'\t' read -r _ dir exit name <<< "$(awk -F'\t' -v i="$id" '$1 == i' "$work/testsuite.tsv")"
+      [ -n "${dir:-}" ] || continue
+      d=$tests/$dir; so=$name.stdout; se=$name.stderr
+      [ -f "$d/$so" ] || continue ;;
+    nofib/*)
+      d=$nofib/${id#nofib/}; name=$(basename "$d"); exit=0; so=""
+      for f in "$name.faststdout" "$name.stdout"; do [ -f "$d/$f" ] && { so=$f; break; }; done
+      [ -n "$so" ] || continue; se=$name.stderr ;;
+    *) continue ;;
+  esac
+  [ "$rst" = "$exit" ] && [ "$(sha "$d/$so")" = "$rso" ] && [ "$(sha "$d/$se")" = "$rse" ] || continue
+  [ -f "$d/$se" ] || se=-
+  printf '%s\t%s\t%s\t%s\n' "$id" "$exit" "$so" "$se" >> "$work/new.tsv"
+  own=$((own + 1))
+done < <(grep '^{' "$ref")
+LC_ALL=C sort -o "$work/new.tsv" "$work/new.tsv"
+hdr() {
+  echo "# hsi's programs judged by their own verdict (bin/hsi own-verdicts; the user's decision of 2026-11-07): ID, the expected"
+  echo "# status, the shipped expected stdout and stderr (relative to the test's directory; - an empty one); made from the trees and"
+  echo "# test/haskell/ref-ghc914.edn, each listed one's shipped expectations equal to GHC 9.14.1's recorded run"
+}
+case $mode in
+  --record) { hdr; cat "$work/new.tsv"; } > "$list"; echo "own-verdicts: $own of $n programs recorded in $list" ;;
+  --check)
+    grep -v '^#' "$list" > "$work/old.tsv" || true
+    if cmp -s "$work/old.tsv" "$work/new.tsv"; then echo "own-verdicts: $own of $n programs by their own verdict, the list current"
+    else echo "own-verdicts: the list differs from the trees and the record:"; diff "$work/old.tsv" "$work/new.tsv" | head -10; exit 1; fi ;;
+  *) echo "own-verdicts: $own of $n programs would be judged by their own verdict (--record writes $list)" ;;
+esac

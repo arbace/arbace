@@ -1,0 +1,169 @@
+(ns arbace.llvm.run
+  "llvmi's lowering step (doc/llvm/LLVM-CROP-SURVEY.md §5, \"As built: llvmi (LL2's run, LL6, LL7)\"): an IR module read as
+  LLVM forms by repr/llvm, lowered to C forms by the shared lowering (arbace.cpp.lower, doc/llvm/LOWER.md §7-§8), printed
+  as C by repr/c, with the personality-free layer (arbace/llvm/rt/none.c.ae) appended, so that the module is one C
+  translation unit that ci (bin/ci run, eval) and cf2g (bin/ci check --aot's compile-list, AOT) take with musl alone.
+  A module with a personality (invoke, landingpad, resume: C++'s or Rust's exceptions) is refused (:personality): its
+  runtime is the client crop's (C++'s lowered libsupc++, bin/cppi), not linked on ci yet (LLS15)."
+  (:require [arbace.string :as str]
+            [arbace.repr.llvm :as llvm]
+            [arbace.repr.c :as rc]
+            [arbace.cpp.lower :as lower]))
+
+(set! *warn-on-reflection* true)
+
+(def layer-path "arbace/llvm/rt/none.c.ae")
+
+(defn- unwinds?
+  "Whether the module's forms use the exception machinery: a personality option or an invoke, landingpad or resume
+  instruction anywhere in a define's body."
+  [forms]
+  (some (fn [x] (or (= x :personality) (and (seq? x) ('#{invoke landingpad resume} (first x)))))
+        (tree-seq coll? seq forms)))
+
+(def ^:private void-ops '#{store br ret switch indirectbr resume unreachable cleanupret catchret fence})
+
+(defn- named? [x] (or (and (symbol? x) (str/starts-with? (str x) "%")) (and (seq? x) (= '% (first x)))))
+
+(defn- value-inst?
+  "Whether an instruction form without (= NAME ...) still defines a value: LLParser numbers it (old IR writes `add i32 %0, 1`
+  and uses its result as %1). Calls by their return type."
+  [inst]
+  (and (seq? inst) (symbol? (first inst))
+       (let [op (first inst) n (name op)]
+         (cond (= op '=) false
+               (str/starts-with? n "dbg_") false
+               (void-ops op) false
+               ('#{call invoke callbr} op) (let [t (first (remove keyword? (rest inst)))]
+                                          ;; a variadic callee's type is written (fn RT ...): its return type decides
+                                          (not= 'void (if (and (seq? t) (= 'fn (first t))) (second t) t)))
+               :else true))))
+
+(defn- number-define
+  "A define whose unnamed arguments, blocks and value instructions LLParser numbers: the numbers written in, %N, so the
+  lowering sees each value by its name (the forms keep the text's names only; clang writes every number, old llvm/test files
+  do not). A define without an unnamed value instruction or block is returned as it is."
+  [f]
+  (let [o (apply hash-map (drop 4 f))
+        body (:body o)
+        needs? (some (fn [b] (or (and (not= b (first body)) (nil? (second b))) (some #(and (value-inst? %) true) (drop 2 b)))) body)]
+    (if-not needs?
+      f
+      ;; LLParser's numbering: an explicitly numbered value or block (%N, as a mixed text writes) takes N and the next unnamed one N+1
+      (let [n (atom -1) nx (fn [] (symbol (str "%" (swap! n inc))))
+            seen (fn [s] (when-let [[_ d] (and (symbol? s) (re-matches #"%([0-9]+)" (name s)))] (reset! n (Long/parseLong d))) s)
+            ps (mapv (fn [p] (if (and (vector? p) (not (and (> (count p) 1) (named? (peek p))))) (conj p (nx)) (do (when (vector? p) (seen (peek p))) p))) (nth f 3))
+            body' (vec (map-indexed
+                        (fn [i b]
+                          (let [lbl (if (nil? (second b)) (let [l (nx)] (when (pos? i) l)) (seen (second b)))]
+                            (apply list 'block lbl (doall (map #(cond (value-inst? %) (list '= (nx) %) (and (seq? %) (= '= (first %))) (do (seen (second %)) %) :else %) (drop 2 b))))))
+                        body))
+            idx (.indexOf ^java.util.List (vec f) :body)]
+        (apply list (assoc (vec f) 3 ps (inc idx) body'))))))
+
+(defn normalize
+  "The forms as the lowering takes them: typed pointers ((* T), which LLVM 23 reads as ptr) as ptr, and each define's implicit
+  numbers written in (number-define)."
+  [forms]
+  (let [untyped (fn walk [x]
+                  (cond (and (seq? x) (= '* (first x))) 'ptr
+                        (seq? x) (with-meta (apply list (map walk x)) (meta x))
+                        (vector? x) (with-meta (mapv walk x) (meta x))
+                        (map? x) (into {} (map (fn [[k v]] [k (walk v)]) x))
+                        :else x))]
+    (vec (for [f (map untyped forms)]
+           (if (and (seq? f) (= 'llvm/define (first f)) (some #{:body} f)) (number-define f) f)))))
+
+(defn- init-attr
+  "A c/defn name's constructor or destructor attribute: [kind priority] (65535 when it has none), or nil."
+  [m]
+  (some (fn [a] (when (seq? a)
+                  (some (fn [x] (cond ('#{constructor destructor} x) [(keyword (name x)) 65535]
+                                      (and (vector? x) ('#{constructor destructor} (first x))) [(keyword (name (first x))) (long (second x))]))
+                        (rest a))))
+        (:c/decl-attrs m)))
+
+(defn- run-inits
+  "ci's builder runs no __attribute__((constructor)) or ((destructor)) function (gcc's startup does): the lowering's
+  cx$ctor$N and cx$dtor$N wrappers lose the attribute, and main calls the constructors first, by priority, and registers the
+  destructors with atexit so that exit runs them by priority, the lowest last."
+  [forms]
+  (let [inits (for [f forms :when (and (seq? f) (= 'c/defn (first f))) :let [a (init-attr (meta (second f)))] :when a]
+                [(first a) (second a) (second f)])
+        ctors (map #(nth % 2) (sort-by second (filter #(= :constructor (first %)) inits)))
+        dtors (map #(nth % 2) (sort-by second (filter #(= :destructor (first %)) inits)))
+        strip (fn [f] (if (and (seq? f) (= 'c/defn (first f)) (init-attr (meta (second f))))
+                        (apply list 'c/defn (vary-meta (second f) dissoc :c/decl-attrs) (drop 2 f))
+                        f))]
+    (if (empty? inits)
+      forms
+      (vec (mapcat (fn [f]
+                     (if (and (seq? f) (= 'c/defn (first f)) (= 'main (second f)))
+                       [(list 'c/declare 'atexit (with-meta ['(* (fn [void] void))] {:tag 'int}))
+                        (apply list 'c/defn (second f) (nth f 2)
+                               (concat (map list ctors) (map #(list 'atexit %) dtors) (drop 3 f)))]
+                       [(strip f)]))
+                   forms)))))
+
+(defn- lower-c
+  "The module's C text by the shared lowering (arbace.cpp.lower's lower-file, with run-inits between the forms and the print)."
+  [forms ^String c-name]
+  (try
+    ;; ci holds a va_list as a pointer to its next slot: the IR's SysV va_list kept (arbace.cpp.lower/*ci*, LL6)
+    (binding [lower/*ci* true]
+      (let [[ff cs] (lower/lower-module forms c-name)
+            ns (str "c.llvmi." (str/replace (str/replace c-name #"\.c$" "") #"[^A-Za-z0-9_]" "_"))
+            [ff2 cs2] (rc/read-unit-text (lower/c-forms-text ns ff cs))]
+        {:c (rc/print-c ff2 (run-inits cs2))}))
+    (catch Throwable e
+      (if-let [c (or (:lower/refused (ex-data e)) (:llvm/refused (ex-data e)))]
+        {:refused c :message (.getMessage e)}
+        {:refused :crash :message (str e)}))))
+
+(defn lower-one
+  "The module at `ll` as one C text: {:c text} or {:refused class :message m}. `layer` is the layer's C text."
+  [^String ll ^String c-name ^String layer]
+  (let [forms (try (normalize (llvm/read-ll ll)) (catch Throwable e e))]
+    (cond
+      (instance? Throwable forms)
+      {:refused :read :message (str/replace (str (.getMessage ^Throwable forms)) #"\s+" " ")}
+      (unwinds? forms)
+      {:refused :personality :message "the module unwinds (a personality, invoke, landingpad or resume): its runtime is the client crop's"}
+      :else
+      (let [r (lower-c forms c-name)]
+        (if (:refused r)
+          (update r :message #(str/replace (str %) #"\s+" " "))
+          {:c (str (:c r) "\n/* llvmi: the personality-free layer (" layer-path ") */\n" layer)})))))
+
+(defn -main
+  "lower FILE.ll OUT.c: one module lowered (exit 3 when refused, its class and message on stderr);
+  lower-list LIST OUTDIR [THREADS]: each NAME<tab>PATH line of LIST lowered into OUTDIR/NAME.c, or OUTDIR/NAME.refused
+  (CLASS<tab>MESSAGE); OUTDIR/lower.tsv: NAME STATUS CLASS MESSAGE."
+  [verb & args]
+  (let [layer (lower/runtime-c layer-path)]
+    (case verb
+      "lower" (let [[f out] args
+                    r (lower-one f (.getName (java.io.File. ^String out)) layer)]
+                (if (:refused r)
+                  (do (binding [*out* *err*] (println (str f ": refused (" (name (:refused r)) "): " (:message r)))) (System/exit 3))
+                  (llvm/spit-latin1 out (:c r))))
+      "lower-list" (let [[lst out threads] args
+                         rows (vec (for [l (str/split-lines (slurp lst)) :when (and (seq l) (not (str/starts-with? l "#")))]
+                                     (str/split l #"\t")))
+                         _ (.mkdirs (java.io.File. ^String out))
+                         pool (java.util.concurrent.Executors/newFixedThreadPool (Integer/parseInt (or threads "2")))
+                         futs (mapv (fn [[n p]]
+                                      (.submit pool ^java.util.concurrent.Callable
+                                               (fn [] (let [r (try (lower-one p (str n ".c") layer)
+                                                                   (catch Throwable e {:refused :crash :message (str e)}))]
+                                                        (if (:refused r)
+                                                          (do (spit (str out "/" n ".refused") (str (name (:refused r)) "\t" (:message r) "\n"))
+                                                              (str n "\trefused\t" (name (:refused r)) "\t" (str/replace (str (:message r)) #"[\t\n]" " ")))
+                                                          (do (llvm/spit-latin1 (str out "/" n ".c") (:c r))
+                                                              (str n "\tok\t\t")))))))
+                                    rows)
+                         lines (mapv #(.get ^java.util.concurrent.Future %) futs)]
+                     (.shutdown pool)
+                     (spit (str out "/lower.tsv") (str (str/join "\n" lines) "\n"))
+                     (println "llvmi:" (count lines) "modules," (count (filter #(re-find #"\tok\t" %) lines)) "lowered"))
+      (do (println "arbace.llvm.run: lower FILE.ll OUT.c | lower-list LIST OUTDIR [THREADS]") (System/exit 2)))))

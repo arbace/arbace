@@ -583,12 +583,27 @@
 
 (declare ^:dynamic *directives*)
 
+(defn- holes?
+  "An InitListExpr with a value-initialized or default-initialized member before a written one, here or in a list
+  without braces of its own inside it."
+  [n]
+  (let [ks (loop [ks (vec (or (seq (kids n)) (rest (:array_filler n))))]
+             (if (and (seq ks) (#{"ImplicitValueInitExpr" "CXXDefaultInitExpr"} (kind (peek ks)))) (recur (pop ks)) ks))]
+    (boolean (some (fn [k] (or (#{"ImplicitValueInitExpr" "CXXDefaultInitExpr"} (kind k))
+                               (and (= "InitListExpr" (kind k)) (not (some-> (ntext k) ^String (str/trim) (.startsWith "{"))) (holes? k))))
+                   ks))))
+
 (defn- init-list [n]
   ;; an InitListExpr's written elements (the trailing value-initialized ones are the oracle's)
   (let [;; with an array filler, clang's JSON writes the filler and then the elements under :array_filler
         ks (vec (or (seq (kids n)) (rest (:array_filler n))))
         ks (loop [ks ks] (if (and (seq ks) (#{"ImplicitValueInitExpr" "CXXDefaultInitExpr"} (kind (peek ks)))) (recur (pop ks)) ks))]
-    (when (some #(= (kind %) "ImplicitValueInitExpr") ks) (gap :init "value-initialized elements inside a list"))
+    ;; a member a designator skips, value-initialized or by its default member initializer, in the list or in a list
+    ;; clang makes of a nested designator's (.a.y = 2: no braces of its own): the designators are not in the semantic
+    ;; form, so the list is its text
+    (when (some #(#{"ImplicitValueInitExpr" "CXXDefaultInitExpr"} (kind %)) ks) (gap :init "value-initialized elements inside a list"))
+    (when (some (fn [k] (and (= "InitListExpr" (kind k)) (not (some-> (ntext k) ^String (str/trim) (.startsWith "{"))) (holes? k))) ks)
+      (gap :init "value-initialized elements inside a list"))
     (when (:array_filler n) (when (some #(= (kind %) "DesignatedInitExpr") ks) (gap :init "designators")))
     (let [fs (exs ks)]
       (if (seq *directives*)
@@ -662,24 +677,33 @@
         [b _] (rng n)
         close (loop [i 1 d 1] (cond (>= i (count t)) (gap :lambda "captures") (= \[ (.charAt t i)) (recur (inc i) (inc d))
                                     (= \] (.charAt t i)) (if (= d 1) i (recur (inc i) (dec d))) :else (recur (inc i) d)))
-        caps (str/trim (subs t 1 close))
+        caps-raw (subs t 1 close)
+        caps (str/trim caps-raw)
         cls (first (filter #(= (kind %) "CXXRecordDecl") (kids n)))
-        mids (atom (vec (butlast (remove #(= (kind %) "CXXRecordDecl") (kids n)))))
+        ;; the capture initializers clang lists (one an explicit capture, then the implicit ones'): an init-capture's is
+        ;; the one that begins within its text, found by its offset (not by its place in the list: a simple capture
+        ;; before it has one too, the variable it names)
+        mids (vec (butlast (remove #(= (kind %) "CXXRecordDecl") (kids n))))
+        init-at (fn [^long cb ^long ce]
+                  (or (first (filter #(when-let [[mb _] (rng %)] (and (<= cb (long mb)) (< (long mb) ce))) mids))
+                      (gap :lambda "an init-capture's initializer")))
+        pieces (let [ps (split-top caps-raw)]
+                 (first (reduce (fn [[out ^long at] ^String c] [(conj out [c (+ b 1 at) (+ b 1 at (count c))]) (+ at (count c) 1)])
+                                [[] 0] ps)))
         cap-forms (if (= caps "")
                     []
-                    (mapv (fn [^String c]
+                    (mapv (fn [[^String c cb ce]]
                             (let [c (str/trim c)]
                               (cond
                                 (re-matches #"(?s)&?\s*[A-Za-z_][A-Za-z0-9_]*\s*=[^=].*" c)
                                 (let [[_ amp nm] (re-find #"^(&?)\s*([A-Za-z_][A-Za-z0-9_]*)" c)
-                                      e (or (first @mids) (gap :lambda "an init-capture's initializer"))]
-                                  (swap! mids subvec 1)
+                                      e (init-at cb ce)]
                                   (if (= amp "&") (list '& (ident nm) (ex e)) (list '= (ident nm) (ex e))))
                                 (= c "&") '& (= c "=") '= (= c "this") 'this (= c "*this") '(deref this)
                                 (re-matches #"[A-Za-z_][A-Za-z0-9_]*" c) (ident c)
                                 (re-matches #"&\s*[A-Za-z_][A-Za-z0-9_]*" c) (list '& (ident (str/trim (subs c 1))))
                                 :else (gap :lambda "a capture"))))
-                          (split-top caps)))
+                          pieces))
         op (first (filter #(and (= (kind %) "CXXMethodDecl") (= (:name %) "operator()")) (kids cls)))
         _ (when-not op (gap :lambda "a generic lambda"))
         body (last (kids n))
@@ -1618,12 +1642,14 @@
           "FriendDecl"
           (if-let [t (:type n)]
             ;; a template-id's arguments are the written ones (clang prints the template's own parameter names)
+            ;; C++26's variadic friends (friend Ts...;): a pack's expansion
             [(list 'cpp/friend
-                   (or (when (str/includes? (:qualType t) "<")
-                         (when-let [w (ntext n)]
-                           (try (type-of (str/trim (-> w (str/replace #"^friend\s+" "") (str/replace #";\s*$" ""))))
-                                (catch arbace.lang.ExceptionInfo _ nil))))
-                       (type-of (:qualType t))))]
+                   (cond->> (or (when (and (str/includes? (:qualType t) "<") (not (:isPackExpansion n)))
+                                  (when-let [w (ntext n)]
+                                    (try (type-of (str/trim (-> w (str/replace #"^friend\s+" "") (str/replace #";\s*$" ""))))
+                                         (catch arbace.lang.ExceptionInfo _ nil))))
+                                (type-of (:qualType t)))
+                     (:isPackExpansion n) (list 'pack-expand)))]
             ;; a friend naming a function template's specialization (`friend void ns::f<int>();`, CX9's modules part) is its
             ;; declaration, the pattern clang links it to aside; a friend without forms is a gap, never (cpp/friend nil)
             (let [d (first (kids n))

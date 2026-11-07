@@ -213,6 +213,273 @@ completeness or maturity. On `mac/batch1` C scores 20.0% (every C step on `:gcc`
 - **Rekeys** (embedded, gate_key): `arbace/repr/c/host.ae`, `pp.ae`, `ppcheck.ae`, `rtcheck.ae`, `c23check.ae`; stage 0
   evaluates them from the checkout (repr namespaces are tool sources).
 
+## 2026-11-07: batch 2, LLVM IR, rsi, OCaml's and Rust's native lines (branch batch2, on batch1 0edacad6)
+
+Merge plan batches 2 and 3 on one day (`.tmp/tag-v2/merge-plan-rehearsal-1105.md` §4 step 3), after `merge-check.sh --base mac/batch1`
+on the day's heads (25 steps, 17 conflicting), each line at its newest head: `rust-re5` 495e5265b's ancestor e573fd86b, `gt9v-rust`
+73b2848b, `rust-re6` 495e5265, `llvm-read` 5249bc5c, `cpp-lower-dbg` 1eb112ab, `llvm-full` f2a4dafe, `llvm-verify3` 93108c42,
+`gt9v-llvm` 058168d9, `llvm-ll6` 153ac9e9 (with cpp-native, cpp-native2, cpp-sema, cpp-codegen, cpp-codegen2, cpp-g2fix, cpp-templates
+and llvm-row inside), `llvm-90` b8aa3f16; `ocaml-native` 8f00636e, `ocaml-errors` 0e25bd25, `ocaml-errors2` b7fa3dd7, `crop-controls-ocaml`
+52548f59, then `ocaml-t12` 394c7a2f and `ocaml-90` c0fdfca4 merged by an agent on `batch2-ocaml` (6742fb54) with ocaml-libs4's libraries,
+OC180, OC181, OC183 and OC184 built there; `rust-native` 2038e0fd, `rust-unicode` d6efaadb, `rust-errors` 7efd8917, `rust-errors2` 668e0259,
+`crop-controls-rust` 63f53b42, `rust-rf9b` 523640cd, `rust-rf3b` 2c4e8faa, `rust-row` e33985da, and crop-controls' 7bf1d1e4 picked. One
+merge commit a branch.
+
+- **Why the lowering took an agent.** `arbace/cpp/lower.ae` had two implementations of vectors and of ci's va_list: batch 1's (CX8,
+  rust-re4/re5, cppi-deferred, cpp-lower-dbg) and ll6's (LL5, LL6). The ll6 merge took ll6's file, and `batch2-lower` (f703fceb, 3550feb7)
+  integrated the rest: LL5's vectors and one bitcast path win, rustc's intrinsics and the slot unions kept, the two va_list schemes kept
+  apart by `*ci*`; checked on the C++ lowering's samples, llvmi's features and rsi's native leg. Alternatives: ours' vectors (rsi's) over
+  LL5's (llvmi's 522-of-562 record was made with LL5's), or holding llvm-ll6 for its own day (the LLVM row waits).
+- **The keys.** rust-re6 changes C's embedded runtime (`go/arbace/{ci,crt}`, `arbace/c/build.ae`, `tools/cirun`: threads on ci) and moves
+  all three keys; llvm-ll6's `arbace/llvm/` had to join `arbace_crop_paths` and embed.ae's exclusions (the keys commit missed it), which
+  moves gate_key and the javac key. Batch 2's night is a rekey night again (AGENDA, "Proposed (batch 2)", 2).
+- **LLS27-LLS30** (the user's decisions of 2026-11-07): the rule for a pinned input corpus in the crop's own language in doc/CROPS-SCORE.md;
+  llvmi switched to C's own target (`c/target`) so its eval and AOT stages are Arbace's alone; LLVM IR's independence 68.3% at llvm-90,
+  88.3% on batch 2. LLS28 could not be prepared as decided: the 282 modules' lists and corner sources were in the removed worktrees of
+  llvm-read and llvm-full; LLS31 proposes rebuilding a pack from what can be rebuilt.
+- **Scores** (batch1 → batch2): LLVM IR 0 / 4.2 / 40 → 95.9 / 93.3 / 88.3; Rust 0 / 8.3 / 20 → 75.0 / 95.8 / 20; OCaml 80.9 / 100 / 20 →
+  80.9 / 100 / 87.4; the others unchanged. `bin/reap`: ten rows, 40 cells, 37 checked, 1 problem (deferred.cpp's, tonight's record).
+- **Found:** `runtime/thread-throw.cpp` on ci terminates in `cx$thread_start` since re6's threads (C++'s class `threads` extended, the
+  record tonight's); the host's clang moved to 23.1.5, so `test/cpp/runtime/ir.sha256` no longer matches (the `!ident` line).
+- Not merged: `llvm-ll4` (LLS32), `rust-res34` (its own day: C's `arbace/c/`), `oracle-records-ocaml`/`-rust` (ORS12), `ocaml-libs1` (a doc
+  commit already in libs4's doc).
+
+## 2026-11-07: Rust's independence and maturity (branch rust-90)
+
+Branch `rust-90` from `mac/rust-rf9b` (`523640cd8`), `mac/rust-row` (`e33985da`) and `mac/rust-re6` (`495e5265`) merged in (clean), by an
+agent by day in the light tier, toward the brief's goal of Rust above 90% on `bin/crops-score`'s three measures (scored from
+`mac/batch1`'s tool, `0edacad62`). Order: independence first, then maturity, then completeness, by what each day's work moves. Built
+(doc/rust/RUST-EVAL-SURVEY.md and FRONTEND-SURVEY.md, "As built: rust-90"; EVAL.md §13; SPEC §11.3; NATIVE-READER.md):
+- the native reader as the default of `bin/repr-rust dump`, `read` and `roundtrip`; the round trip's tree level from the native trees
+  (`arbace.repr.rust.native tree`: `rsdump tree`'s texts written from the native tree, ported from Arbace's own helper's transcoder,
+  `tools/rsdump/rsdump.rs`'s `Mode::Tree`/`Mode::Lines`; 68 of 68 files byte for byte the helper's, `native-check --trees`); rustc only
+  for `--reader helper` and the rustc levels, which move to the oracle tier (the read cell's rustdoc level `:role :beside`);
+- the round trips' negative controls (`test/rust/roundtrip-controls.edn`, seven, run last by every round trip);
+- rsi's programs' IR from pinned packs (`bin/rsi ir-pack`, `test/rust/ir/`: samples and synthetic committed, the UI corpus's in `.tmp`,
+  its every-40th pinned), deterministic (the shim's ModuleID without the build directory); the ci leg's library keyed without the C
+  toolchains (`lowered_key`, `runtime-build --ci`, repr/c's reader alone in the keys; rust-re6's runtime copied and re-keyed after its old
+  key was verified over rust-re6's tree but the clang --version line); `RSI_BATCH` (RES53 (a));
+- the UI programs judged by their own verdicts, compiletest's run rule ported from rustc 1.99.1's `src/tools/compiletest/src/runtest/ui.rs`
+  and `directives.rs` (the pinned `rustc-1.99.1-src.tar.xz`): 3,409 of 3,718; rustc's recorded runs meet 277 of the 281 they cover;
+- Rust's gate steps in `test/gate/steps.edn` (three essential, three full, on `:stage0` and `:go`), validated by the planner.
+Stub runs: rustc, rustdoc, cargo, cc, gcc, g++, c++, clang, clang++, clang-23, llvm-as, opt, lli, llc, ld and ar first on `PATH` exiting
+99 for the round trips (std's 8 files, 82 UI files), the controls, `bin/rsi judge-test`, `runtime-ci`, musl's reread and `bin/rsi check
+--essential`: the log empty after each. Scores at `rust-90` (completeness / maturity / independence): 75.0 / 66.7 / 20.0 before,
+75.0 / 95.8 / 80.0 after (`bin/rsi check --essential` 13 of 13 from the packs; the builder peaked at 3.8 GB, over the day's line). Not reached: completeness (the AOT cell needs RES34: cf2g's translation of a program with its linked std, up to 7 GiB) and
+independence above 80% (eval and AOT consume std's rustc-made IR until Tier S, RF12). Alternatives considered: committing the UI
+pack (18 MB; RES56), the AOT cell on the samples alone at 7 GiB (RES55 (b)), counting std's pinned IR as the crop's own input (RES54
+(b): against the user's rule). Proposed RES54-RES60.
+
+## 2026-11-07: Haskell's independence and maturity (branch `haskell-90`, from `haskell-simpl` 2646694d5)
+
+The brief: the Haskell crop above 90% on `bin/crops-score`'s three measures (doc/CROPS-SCORE.md on `mac/crops-score`), under
+the user's decisions of 2026-11-07 (a test's own verdict a judge no toolchain made; mixed stages case-weighted; toolchain runs
+in the oracle tier). What was done, in doc/haskell/FRONTEND-SURVEY.md, "As built: the crop's independence":
+
+- Taken in: `mac/oracle-records-cpp2`'s oracle-records tooling and Haskell's ORS12 commits (cherry-picked with `-x`:
+  `c3892e875`, `8e5ce6196`, `1bf41517c`, `54f5e5313`, `62e96e5d9`, `2b03a6bdd`; `test/oracle-records/oracle.bash` taken whole
+  from that branch's head); `mac/haskell-cpp`'s net change over `53794ed6^` (unlit, the driver, the clean-room C preprocessor,
+  mode `:full` natively, the helper's version 5) applied as one diff: its tree has no GPL code and no commit containing
+  `53794ed6` is in this history. `mac/haskell-eval9` not merged (eleven conflicted files in hsi's runtime: both lines built
+  HES60 and HES64; HFS-I4). Considered: merging all of `mac/oracle-records-cpp2` (rejected: it carries every crop's ORS work).
+- Read: the native reader is the round trip's and `read --corpus`'s default on both sides; what the reads still consume of
+  the host (GHC's installation data and headers, the configure products, hsc2hs's outputs) is the pinned pack
+  `haskell-native-inputs-ghc-9.14.1` (`bin/repr-haskell record-native-inputs`, by hand), read under a sysroot by `cpp.ae`.
+- Judges by their own verdict: the tree and layout levels compare the reread forms (`compare-forms`), the text level the
+  bytes (`compare-text --bytes-only`); hsi's programs with shipped expectations equal to GHC's recorded run (580 of 908,
+  `test/haskell/own-verdicts.tsv`, `bin/hsi own-verdicts`) by those files. Negative controls for the tree, text and
+  interface levels (`test/haskell/roundtrip-controls.edn`).
+- hsi without GHC: the programs' STG and foreign stubs re-recorded into `haskell-stg-progs` (908 programs); the RTS headers
+  from the native-inputs pack; `pins --fetch` and `corpus fetch` no longer probe GHC. `haskell-stg-libs` is stale at this
+  helper: the night's `bin/hsi dumps --record`.
+- The gate: five steps in `test/gate/steps.edn` (two essential, three `--full`), none on `:ghc`; the oracle tier's four in
+  `test/gate/crops/haskell.edn`. The REAP row's read and print sources name the native judges, `bin/reap --record`.
+- Stub runs (ghc, ghc-pkg, runghc, ghci, hsc2hs, gcc, cc, clang exiting 99): `bin/repr-haskell test` 18 ok; the round trip of
+  five packages, 113 of 113 at the tree, layout and text levels; `bin/hsi check` of 16 programs, all as recorded; no stub called.
+
+## 2026-11-07: batch 2, second round: rust-90, haskell-90, cpp-90, LLS31 (b) and the user's decisions (branch batch2)
+
+On `batch2` at 590a8588, one merge commit each, the earlier merges' rules (union for docs and the Makefile, the lines' `.tmp` diffs
+applied, the three keys computed after each):
+
+- **`mac/rust-90` 58ca6783** (`105c549d8`): native.ae kept rust-errors2's rejecting dump and added rust-90's `tree` verb beside `errors`;
+  its `file-trees` and `read-error` were taught errors2's diagnostics (maps, not rust-90's `[msg pos]`), and a parse that recovered from
+  an error rejects the file there too. The two lines' round-trip controls both used `test/rust/roundtrip-controls.edn` with different
+  formats (GT9's crossed pairs, judged inside each level's compare; rust-90's edited subjects, a `controls` verb run last), and both used
+  `REPR_RUST_CONTROLS` (a file path; an on/off switch): rust-90's moved to `test/rust/roundtrip-edit-controls.edn` and
+  `REPR_RUST_EDIT_CONTROLS`. Alternative considered: one file with both kinds (each reader would see the other's entries). The gate:
+  rust-90's six steps (no rustc) replace GT9's four of the same names; GT9's rustc levels are kept (`:rust-helper` for the helper's
+  sources) until the planner has `:phase :oracle`, rather than dropped as LLVM's interim step was, since they are the only runs of the
+  interface and behaviour levels; `rsi-essential`'s 4 GiB is over GTS215's essential cap, so it runs in `--full` (RES61 proposed).
+- **`mac/haskell-90` 0fb4591b** (`b71b3e9be`): no commit containing 53794ed6 (checked with `merge-base --is-ancestor`); its CPP is the
+  clean-room `cpp.ae` (haskell-90 applied `mac/haskell-cpp`'s net diff). The branch sits on old main d86cb874 (164 commits, with
+  oracle-records-cpp2's tooling cherry-picked): `bin/arbace-go` kept batch 2's gate_key (its `arbace_not_crops` already excludes hsi's
+  Go forms and scripts, so no key moved), `bin/gate --pins` runs both the new crops' pins and `bin/oracle-records pins`, the REAP reader
+  `:corpus-known` was one method for Rust and Haskell (haskell-90's second `defmethod` would have replaced Rust's). The packs
+  haskell-native-inputs (2 files) and haskell-stg-progs (2) were copied, no clobber, into the main checkout's `.tmp/oracle-packs/`.
+- **`mac/cpp-90` 4e0a8fc5** (`ef0af119c`): mostly docs and scripts; `bin/cppi`'s moved usage blocks and verbs kept once; lower.ae
+  auto-merged (its only hunk, the x86_fp80 decimal literal, already in batch2-lower's integration).
+- **LLS31 (b)** (`f95e6c26b`, the user's decision): LLVM's four first-record families kept as `:role :beside` in `test/reap/cells.edn`
+  (not deleted, so the records stay visible until the pack `rt` re-records them); the read fact 1 and the judge recounted
+  (2,068 + 0.5 x 948) / 3,016 = 0.843, so LLVM's independence is 96.9 rather than the estimate's 94.2 (which held the judge at 0.711).
+  LLS31 (a)'s plan written in the LLVM survey: the ids' builds, `bin/llvmi ir-make rt` with `rt-list`, the families roundtrip-rt,
+  text-rt, verify-rt with controls, the night's clang commands.
+- **Decisions recorded** (`ffbcc29cd`): Rust RES54 (a), RES55 (a), RES56-RES60 as recommended; Haskell HFS-I1 (a), HFS-I2 (a), HFS-I3
+  (b), HFS-I4 (b); C++ CP240 (a)(b)(c) in that order, CP241 (b), CP243 (a); Java JCS162-JCS164 (a), JCS165-JCS166 (a), JCS167 (a)
+  (recorded in batch 2's JAVA-DEFERRED-TRIAGE.md: the proposals' text is on batch 1's later head from java-complete); batch 2's proposal
+  1 (a) (the C++ runtime's IR pin on clang 23.1.5, tonight's step 0 on batch1/next, not run here) and 2 (c) (the night over two nights).
+- **Keys**: gate `1bfe8ffffe7e`, runtime `6b114cbcf8f0`, javac `54e889c46334` after every commit (unchanged).
+- **Checks**: `gate.crops check` 0; `bin/gate --plan` 49 steps, `--full --plan` 319 (305 run, 8 after); `bin/reap` 41 of 44 checked, the
+  one problem deferred.cpp's (the matrix recorded with its reference row held out, as batch 1 did); `bin/crops-score --judge --strict` 0.
+  Light samples: rsi judge-test, repr-rust controls 7/7 and a two-file native round trip, repr-haskell test, hsi own-verdicts --check,
+  oracle-records pins, repr-cpp roundtrip-corpus samples --judge own 9/9. A slip: `bin/hsi own-verdicts --check` downloaded GHC's source
+  and testsuite tarballs and nofib into the worktree's `.tmp/` (the worktree had none; pins matched); proposal 8 in the agenda.
+- **Scores** (batch 2 before → after): C++ 75.4 / 91.7 / 20 → 75.4 / 100 / 31.4; Haskell 0 / 8.3 / 20 → 96.3 / 100 / 74.9; Rust
+  75.0 / 95.8 / 20 → 75.0 / 95.8 / 80.0; LLVM IR 95.9 / 93.3 / 88.3 → 96.0 / 100 / 96.9; the others unchanged.
+- Not merged here: `res34` and `cpp-indep` (later, on these heads).
+
+## 2026-11-05: HF4b, the deriving strategy keywords and DerivingVia (branch `haskell-deriving-via`)
+
+HF4's proposal 3 (b), decided by the user. Strategies written in a deriving clause or a standalone declaration
+(`stock`, `newtype`, `anyclass`, `via T`) now set the request's strategy in `arbace/repr/haskell/typecheck.ae`
+(`strategy-of`, `rep-of`, `gnd-of`); `via T` is the newtype strategy's coercion with `T` as the representation. Source read:
+GHC 9.14.1's `compiler/GHC/Tc/Deriv.hs` (strategy choice, `mkNewTypeEqn`, via) from the pinned tarball, as the specification;
+nothing new ported (origin as HF4's, `LICENSE.md`, `doc/ARBACE.md`). Judge findings fixed: a one-method, no-superclass class's
+coerced method is the dictionary; a superclass dictionary applying a dictionary function to the instance's parameters alone is
+inlined; standalone deriving with a strategy binds implicit type variables at the strategy's span (`rename.ae`). Samples
+T23Strategies, T24Via; results in the survey ("As built: HF4b"). Alternative considered: checking the via type's
+coercibility now (needs a Coercible solver; left to HF5's Core).
+
+## 2026-11-05: Haskell's HE5 (the libraries' C) and HE6's verbs, on branch haskell-he5
+
+- Branch `haskell-he5` from `haskell-he4d`, light work by day (2 jobs, no gate, no lock): the dumps of the 41 packages
+  rebuilt (`bin/hsi dumps`, 1,320 modules), the foreign symbols counted (434; 253 C functions the table lacked, 69 left after
+  this work, all in classes or unreached), and the C of the libraries ported by need, proved on seven library samples
+  (`test/haskell/eval/samples/Lib*.hs`) against GHC's recorded runs, all equal. Ported from GHC 9.14.1's source tarball
+  (`libraries/bytestring/cbits`: `itoa.c`, `fpstring.c`, `shortbytestring.c`, `is-valid-utf8.c` by Go's `unicode/utf8`,
+  `aligned-static-hs-data.c`'s tables generated by `bin/lib/hsi/cdata-gen`; `libraries/text/cbits`: `is_ascii.c`,
+  `measure_off.c`, `reverse.c`, `utils.c`), licenses bytestring (BSD 3-Clause) and text (BSD 2-Clause) in LICENSE.md; the rest
+  (POSIX layer over os and syscall, spawned processes and pipes over os/exec, signals, printf) is Arbace's own.
+- Considered and not done: forking (no fork of a Go process: `:process`, a design class), wrappers and foreign exports (the
+  helper's dump lacks the exported Haskell helper: HES60), the tests' own C (ci beside hsi: HES64), waiting on descriptors by
+  poll (HES61). `bin/hsi divergences` and `slice` (HE6's first verbs) and nofib as a run corpus of `bin/hsi check`.
+- Results: check of samples, synthetic and testsuite-core 661 of 763 (650 of 756 before),
+  nofib 76 of 144 (57 not built by GHC either, 9 `:speed`, 2 `:callback`), every non-pass in a class
+  (doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: HE5, HE6 (write-ahead)", the night commands there).
+
+## 2026-11-05: Haskell's HE6, second half (a program's own C, callbacks, descriptors, reasons), on branch haskell-he6
+
+- Branch `haskell-he6` from `haskell-he5`, main `d86cb874` merged first (the C crop's prebuilt runtime, `arbace.c.runtime`,
+  which hsi's C builds link through); light work by day (2 jobs, no gate, no lock, the main checkout's stage 0), every check on
+  lists of a few dozen tests. HES60, HES61, HES64 (a) and HES43 (b) built (doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: HE6's
+  second half (write-ahead)").
+- **HES64 (a):** a test's C read and checked by ci and linked with musl (`bin/hsi cnodes`, `test/haskell/eval/cnodes.ae`, hsi's
+  glue `test/haskell/hsi/c/`) and loaded into `go/arbace/ci` over hsi's own `crt.Mem` and `crt.Sys` (`hsi run --c`,
+  `go/arbace/hs/cprog.ae`); `go/arbace/ci` and `crt` unchanged.
+- **HES60 (a), by the probe:** `tools/hsdump/probe/StubProbe.hs` (`bin/hsi stubs-build`) showed that GHC 9.14.1's `ModGuts`
+  hold a module's foreign stubs and that the exported helpers (`$fstable...`) are in the STG the hook sees, so in the dumps
+  already: HE5's journal entry ("the helper's dump lacks the exported Haskell helper") is corrected here, the missing part
+  was the stub C. The stubs are written by the probe's `--stubs` mode and compiled by ci; the RTS's C API is hsi's
+  (`go/arbace/hs/rtsapi.ae`), Arbace's own, written from the declarations of the installed GHC's `RtsAPI.h`, `StablePtr.h`,
+  `Adjustor.h` and `DerivedConstants.h`'s offsets (GHC 9.14.1, Alpine's ghc package; no code copied). The helper is not
+  changed (the dumps' key stays): folding the stubs into it is HES65.
+- **HES61 (a):** `waitRead#`, `waitWrite#`, `fdReady` by poll(2), the minimal scheduler change (HE4f's work does not exist on
+  the branch); `fcntl(F_GETFL)` of a pipe's write end fixed.
+- **HES43 (b):** `hsi-reason:` lines, `:reason` in the results, classes' `:reasons`.
+- Considered: a helper extension (HES60 as decided) against a separate stub writer (taken today, the dumps' key untouched);
+  hsi's own `printf` and `malloc` beside musl's (taken: musl's whenever a C program is loaded, one buffer and one heap);
+  changing `go/arbace/ci`'s loader to name statics (not needed: the node program's `static` commands carry names, and hsi
+  rewrites the `at` of an undefined object it defines before ci loads it).
+- Results (lists of the testsuite's run tests, 2 jobs): of HE5's 57 `:test-c`/`:test-c-output` tests 33 pass, of its 21
+  `:callback` 18, T21969 passes; the 104 recorded passes of the core's `concurrent`, `lib`, `ffi` and the samples and synthetic
+  corpora unchanged; `test/haskell/check-hsi.edn` rerecorded for those: 789 of 907 pass (737 before; the core 652 of 701),
+  `bin/hsi divergences` 118 in a class, none unclassed. Proposed: HES65-HES68 (the survey's "Proposed (HES65 onward)").
+
+## 2026-11-05: Haskell's HE8 (AOT) designed and its first slice, on branch haskell-he8
+
+- Branch `haskell-he8` from `haskell-he5` (`a7fafe0b`), light work by day (2 jobs, no gate, no lock, each Go build of a
+  program under `GOMEMLIMIT=1536MiB`). HE8's design written into doc/haskell/HASKELL-EVAL-SURVEY.md ("As built: HE8
+  (write-ahead)"): STG compiled to Go as a second implementation of hsi's node trees' `eval` over the same machine (one Go
+  function per closure body, per case continuation and per join point, returning the next code to hsi's trampoline; the
+  explicit stack, update frames, blackholes, exceptions, masks, STM, continuations and green threads all hsi's), installed
+  per closure by its tree's shape when first entered, every other closure interpreted.
+- Alternatives considered: Go's goroutine stacks for Haskell's stack (HES8 (b) again: loses `<<loop>>`, `-K`, asynchronous
+  exceptions' unwinding, `control0#` and the collector's walk); STG → Java forms → j2g (Eta's route, §7 (b)); whole library
+  modules in one Go package (measured: 9.2 MB of Go for 21 modules of `ghc-internal` peaks at 5.2 GB in the Go compiler, so
+  the slice compiles the closures a profile run entered, and HES70 proposes a package per module).
+- Built: `go/arbace/hs/aot.ae` (generator and runtime half), hooks in `load.ae`, `nodes.ae`, `rts.ae`, `live.ae` (the kill
+  lists sorted: images and shapes depended on a map's order), `hsi aot`, `bin/hsi aot build|run`, `bin/hsi check --aot`.
+- Results: `bin/hsi check --aot` over the samples (but Loop, a night's 7 GB) and the synthetic corpus, 61 of 62 equal to GHC's
+  runs, AsyncRerun in its class as on hsi, and GT8's essential list (73 testsuite run tests among its 123) 123 of 123, every
+  run the same as on hsi (`test/haskell/check-hsi-aot.edn`, 139 programs); a new sample `Classes` (user classes and
+  dictionaries) with GHC's reference; every module of the 41 packages generated (88,465 closures, none refused, 337 MB of Go);
+  speed 1.05 to 1.23 times hsi on nfib and four nofib programs (the machine's frames and allocation, shared by design, are the
+  rest: HES73). Proposed HES70-HES73 (HES65-HES69 left to HE6's branch).
+
+## 2026-11-05: Haskell's line integrated (HE6's second half and HE7 onto HE8's REAP row), on branch haskell-integrate
+
+- Branch `haskell-integrate` from `haskell-row2` (`5045c5c3`: `haskell-he8` merged onto the REAP row); `haskell-he6`
+  (`40b58c2f`) merged, then `haskell-he7` (`19268f47`, HE7: the REPL, built on HE6; its own commits carry no journal
+  entry: `tools/hsrepl/Repl.hs`, GHC 9.14.1's API session whose `hscCompileCoreExprHook` writes each statement's STG,
+  `go/arbace/hs/repl.ae`, `hsi repl`, `bin/hsi repl` and `repl-session` over the seven sessions of `test/haskell/repl/`, the
+  survey's "As built: HE7 (write-ahead)", HES69 decided (b)). Light work by day, the main checkout's stage 0.
+- hsi's Go forms (`go/arbace/hs.ae`, `hs/nodes.ae`, `hs/rts.ae`, `test/haskell/hsi/cmd/main.ae`) merged as Go, the Python
+  crop's method: the packages `arbace/hs` and the driver printed by repr/go from the merge base, ours and theirs, `git
+  merge-file` file by file (he6: no conflict left; he7: the driver's usage lines and cases, `aot` and `repl`, both kept), the
+  module built and `go vet` clean, read back by `bin/hsi runtime read`; the forms equal to one side wherever only one side
+  changed a file. Considered: resolving the `.ae` conflicts by hand (positions and the package's `:files` and
+  `:init-order` make the forms' hunks interleave where the Go's do not). Makefile: `hsi-check-aot`, `hsi-stubs-build` and a
+  new `hsi-repl-session`; `bin/lib/hsi/check` exports both sides' variables; the survey's sections and the journal as unions,
+  HE6's second half, HE7 and HE8 in the order of their proposals (HES65-HES68, HES69, HES70-HES73).
+- `test/haskell/check-hsi.edn` reconciled: the 78 programs whose rows differ between HE8's record and HE6's (`bin/hsi check
+  --only`, 2 jobs) rerun on the merged hsi, every row now HE6's, and HE8's sample `Classes` added (it passes): 790 of 908. The
+  first run met a race: two jobs' first `bin/ci musl ensure` in a fresh worktree at once, twelve programs failing
+  `:c-build`; rerun once the cache was made, all twelve as recorded by HE6.
+- Results: `bin/hsi runtime check` the same forms; `bin/hsi check` (samples, synthetic) 62 of 63, none unclassed, the controls
+  failing; `bin/hsi check --aot` on GT8's essential list 123 of 123, every run the same as on hsi; `bin/hsi repl-session` 7 of
+  7 byte for byte, the control failing; `bin/reap --record`, `bin/reap` 20 of 20 cells, 0 problems.
+
+## 2026-11-05: HES73 (a), the compiled code's typed locals and direct calls, on branch haskell-speed
+
+- Branch `haskell-speed` from `haskell-integrate` (`7bda6b88`), light work by day, the main checkout's stage 0, the
+  integration's `.tmp/hsi` caches copied (no dump rebuilt). The method: hsi's runtime printed once as Go (`bin/hsi runtime
+  print`), edited and built as Go against the AOT (`bin/lib/hsi/aot`'s new `HSI_RT_MOD`, `HSI_RT_KEY` with `HSI_EXE`), each
+  step measured on nfib, then read back into the forms by `bin/hsi runtime read` (`go/arbace/hs/aot.ae`, `aotapi.ae`,
+  `machine.ae`, `hs.ae`'s init order); the printed Go of the committed forms equal to the edited files.
+- Profiled first (Go's pprof on HE8's compiled nfib): the machine's frames and allocation dominate, and
+  `GHC.Internal.Classes`, over `HSI_AOT_MAX_KB`, was interpreted whole. Built: an oversized library module compiled in part
+  (the profile's closures, kept by their list's digest; `HSI_AOT_PARTS=0` the old way); typed Go locals for the inline
+  primops' unlifted results, flushed into the frame only before something else reads it; call sites resolved once (a
+  global's function, a class method of a global dictionary) and entered directly; direct Go calls between compiled code,
+  bounded (`HSI_AOT_DEPTH`, default 4: 16 measured slower, none a little slower); the machine's case and update frames
+  pushed and popped in place (hsi gains 4-11 % too). Not done: a frameless evaluation of a case's scrutinee (designed,
+  estimated 1.15-1.3 times for 3-4 days, risky for exceptions, STM and `control0#`: HES74 (a)).
+- Results: compiled now against HE8's hsi 1.45 times on nfib 32 (5.84 → 4.04 s), tak 1.34, rfib 1.45, fibheaps 1.12, sphere
+  1.17 (against HE8's compiled 1.07-1.32); 3 times not reached: the survey's "As built: HES73", HES74 (recommended (c) then
+  (a): `-O1` STG for the compiled level, then frameless evaluation) and HES75. `bin/hsi check --aot` on GT8's essential list
+  123 of 123, all the same as hsi; samples and synthetic 62 of 63 (AsyncRerun in its class), all 63 the same as hsi; `bin/hsi
+  check` on the essential list 123 of 123; `bin/hsi runtime check` the same forms.
+- `bin/hsi cnodes`: the integration's race fixed, `bin/ci musl ensure` under a lock (`.tmp/hsi/cnodes-musl.lock`), a log per
+  job; two runs at once gave byte-identical node programs. Considered: preparing musl once in `bin/lib/hsi/check` before
+  the jobs (only the check would be safe; the lock covers every caller).
+
+## 2026-11-05: HES74 (c), the compiled level on GHC's -O1 STG, on branch haskell-o1
+
+- Decided by the user (HES74: (c) first, then (a)). The helper unchanged: `tools/hsdump stg --ghc -O1` dumps the program's
+  modules with GHC's optimiser on, against the installed `-O2` interfaces; the libraries' dumps were already the installed
+  units' `-O2` builds (HES6 (a)), so every worker and specialisation an `-O1` program names is there. `bin/hsi check --opt O1`
+  (own dump cache, references, results, record, and `test/haskell/divergences-O1.edn` with `:eval-order`), `bin/hsi
+  record-ref --opt O1` (`test/haskell/ref-ghc914-O1.edn`: the essential list and five benchmarks recorded), `HSI_OPT=O1` for
+  `bin/hsi aot run`. hsi's own level stays on `-O0`. Considered: dumping `-O1` for hsi too (rejected by the decision: the
+  interpreter is the reference); a second library dump at `-O1` (not needed: the installed libraries are `-O2`).
+- Two runtime fixes the `-O1` code showed: `runSlice` ends the slice after `ret` when a compiled case continuation spent
+  the budget (an inline `yield#` was lost: MVarOrder, ThrowMasked); `integer_gmp_gcd_word` in hsi's C table (the installed
+  gmp backend's `gcdWord`, inlined at `-O1`). GHC's own `-O0`/`-O1` references differ on five synthetic programs, all
+  constant folding (negative zero, `float2Int#` out of range), which the compiled level matches at `-O1`.
+- Measured (one run each, the same host one after the other): compiled `-O1` against compiled `-O0` 6.7-10.3 times (nfib
+  0.53 s, tak 2.23, rfib 2.98, fibheaps 3.97, sphere 2.39), 6.0-8.7 times HES73's numbers: the target of 3 met. `bin/hsi check
+  --aot --opt O1` on the essential list: 123 of 123, all the same as hsi on the same dumps, the controls failing; after the
+  machine's change `bin/hsi check --aot` (`-O0`) and `bin/hsi check` (hsi) on the essential list 123 of 123 each. Details: doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: HES74 (c)".
 ## 2026-11-07: F10a, java.nio's selectors and socket channels over jrt's natives at sun.nio.ch's layer (branch java-complete)
 
 Branch `java-complete` from `mac/batch1` 0edacad62, the main session's brief: raise Java's completeness (72.9% strict, 80.4%
@@ -258,3 +525,216 @@ F10a: selectors, socket and server socket channels, pipes and the sockets' adapt
   asynchronous channels), JCS164 UNIX domain sockets with F9, JCS165 the joint javac check as a gate step, JCS166 the
   derivations committed as Arbace with a check, JCS167 serialization out of by design (the strict mean cannot pass 90% while
   10% of eval and AOT are by design; serialization is 168 / 117 of it).
+
+## 2026-11-07: C++ without clang and g++ at check time, CP240 (a) and CP241 (b) (branch cpp-indep)
+
+The user decided CP240 ((a), (b), (c) in that order) and CP241 (b) (doc/cpp/CPP-SURVEY.md, "Decided (the user, 2026-11-07): CP240,
+CP241"). On `cpp-indep` from `mac/cpp-90` (4e0a8fc5b), the day's light tier.
+
+- **CP240 (a).** From `mac/oracle-records-cpp2`: the shared tooling as `mac/haskell-90` took it (`a08c614e9`, its cherry-pick of
+  `c3892e875`), then `4ec2da932`, `e63d37180` and `15a312026` with `-x`, each cut to C++'s eval and AOT (the IR packs `cpp-ir-samples`,
+  pin `0730915b`, and `cpp-runtime-ir`, `ea55ad3c`, read unless `CPPI_LIVE=1`; `record-ir`, `--every`; the lowering's gcc half behind
+  `CPPI_GCC`); left out: tools/cxxdump's records, the round trip's records mode, the cxxdump packs (the print is judged by its own verdict
+  on this line). Conflicts: `Makefile` and `bin/gate` (both sides: the oracle-records targets beside batch 1's, the packs' pins check
+  beside GTS211's crop pins), `bin/cppi` (cpp-90's codegen verbs and record-ir both kept; runtime-ci's key on `key.records` with
+  cppi-deferred's reader key). The gate's C++ run steps and the runtime's build lose `:cxx` and `:gcc`; the live sampling and the packs'
+  verify wait in `test/gate/crops/cpp-oracle.edn` for the oracle tier. Proved with the toolchain stubbed: `bin/cppi runtime-build` from
+  the pack (198 of 198), `bin/cppi lower-essential` (6 of 6). `bin/cppi check` on ci was stopped (runtime-ci's read at 3.0 GB, over the
+  day's 2 GiB): the night's. `runtime/deferred.cpp` is not in the pack (CP245).
+- **CP241 (b).** `test/cpp/target.ae` and `cpp/target/libstdcxx.edn`: libstdc++'s installed tree (834 files) and gcc's own include
+  directory (151) made from the pinned gcc-15.2.0 tarball (test/cpp/corpora.edn's `:gcc-15.2.0`, sha256 438fd996…) with no compiler:
+  827 + 148 files laid out, the build's products by rules stated from inputs and outputs (no GPL makefile or configure ported):
+  std.cc and std.compat.cc joined, the gthr headers renamed, c++config.h's switches and configure's 299 answers (173 probes of musl
+  1.2.6's headers from its tarball, C's own target's; 126 facts with reasons), limits.h, omp.h and mm_malloc.h (Alpine's patch as four
+  substitutions). `bin/repr-cpp target oracle`: 834 of 834 and 151 of 151 byte for byte. The readers read it through `ARBACE_C_SYSROOT`
+  (`bin/lib/repr-cpp/sysroot.bash`; with musl's headers and fortify-headers' nine files at recorded digests, every search directory a
+  root): pp-check's essential and a sampling of 949 files as with the host's headers, no host header opened (strace).
+- **Alternatives**: for the headers, a pack of the installed tree (CP241 (a), 0.5) or a clean-room set (c, weeks, a clean-room runtime
+  with it); taking all of `mac/oracle-records-cpp2` (its gate tier's planner changes rekey every step); musl's headers left in place
+  (the token check would still read a library's installed tree: the first measure showed only fortify and the compiler's directory
+  mattered, so both were made or taken at digests).
+- **Scores** (`bin/crops-score --crop cpp`, facts in the worktree's `.tmp/independence.diff`): completeness 75.4, maturity 100,
+  independence 31.4 to 54.3 (read 0.148, eval 0.5, AOT 0.5). The night re-records the packs on clang 23.1.5 by hand (the survey's
+  commands) and compares the routes for CP240 (b). Proposed CP244-CP246.
+
+## 2026-11-07: RES34 on rust-90's line (branch `res34`, from `mac/rust-90` 58ca67832, `mac/rust-res34` merged)
+
+The user's decision RES55 (a): RES34 first, then Rust's AOT cell. `mac/rust-res34` (std's units translated once per key by cf2g,
+`arbace.c.aotlib`, the link's provenance `*link-trace*`) merged into rust-90's line: the Makefile's target list and the survey's
+sections conflicted, both resolved by keeping both sides; the code merged clean. RES40 (a) built in the scripts (the prebuilt cache
+the main checkout's `.tmp/ci-aot-lib`, shared by the worktrees; `CI_AOT_LIB` exported to the builder), not in `aotlib.ae`, whose source
+is in the units' key. `bin/rsi aot-lib` gained `RSI_AOT_LIB_CACHED=1` (the units whose fragments exist) and `compile-list` a line of
+the translation's parts. C's embedded set is RES34's own four files (`arbace/c/{build,cf2g,runtime,aotlib}.ae`), unchanged here; their
+merge rekeys every library's fragments (the day hard-linked rust-90's after checking fragments made at the new key byte for byte equal).
+
+Proved by day under 2 GiB a process: std's 74 linked units translated once (19,843 functions, none refused, 69 MB of Go, 28 minutes,
+1.37 GB); five synthetic programs AOT-built against them pass (2 to 5 minutes each, the builder at most 1.71 GB; Go's build 14 to 17 s
+after the first shard's 324 s), against RE4's about 1,000 s and 7 GiB a program whole. The translation is now mostly the printing of
+the glue (51 to 77 s: 11,343 `SetCompiled` and 7,786 data runs for `exit-code.rs`): RES64. `collections.rs`'s builder passed 2.3 GB:
+RES66. Night commands, the expected scores (completeness 75 → 100, maturity 95.8 → 100) and RES64-RES66 in
+doc/rust/RUST-EVAL-SURVEY.md, "As built: RES34 on rust-90's line". Alternatives considered: a per-crate Go package (RES34.1's
+rejection stands), and changing `aotlib.ae`'s default root (rejected: it would retranslate every unit).
+
+## 2026-11-07: HFS-I1 (a), hsi from the native front end's STG (branch `hfs-i1`, from `mac/haskell-90` 0fb4591bf)
+
+The user's decision HFS-I1 (a). `bin/hsi check --front native` (`bin/lib/hsi/check`): each program the front end can take (a single
+module of library imports, no C, CPP or foreign stubs, no deferred type errors or RULES: about 690 of 908) is compiled by
+`arbace.repr.haskell.front` (one process a shard, each program with its own `-X` flags through `front.ae`'s new `--plan`, a program
+that loops stopped after `HSI_FRONT_TIMEOUT`) and run from Arbace's STG; the rest from `haskell-stg-progs`; each result names its
+`:stg`. The interfaces are a new pack, `haskell-ifaces-ghc-9.14.1` (440 members: the helper's iface closure of the run corpora's
+imports and ghc-pkg's reexports, recorded by hand with GHC, `--record-ifaces`). `bin/hsi compare-front` judges a native run against
+the GHC-STG record program by program; the default stays ghc (`default_front`) until a night's run shows no pass lost; the switch is
+written (`.tmp/hfs-i1-switch.diff` in the worktree, and the survey).
+
+By day (light caps, 2 GiB): 100 programs, 84 from native STG, 79 pass, no pass lost but the two that fail at the light cap from GHC's
+STG too. The first slice found four lost passes; two were front-end bugs fixed by GHC's rules (exprIsConApp_maybe and a strict
+field's argument, `cgrun051`; dsStrictBind's banged pattern binding, `T11601`), two programs outside the subset (deferred type errors,
+RULES). Eval stays 0.5 a case: the libraries' STG and interfaces are GHC's; 1 needs HF9 and HF10. The libraries' pack is stale at
+this helper (haskell-90's night item): the day ran with `HSI_LIBS` its unpacked members. doc/haskell/FRONTEND-SURVEY.md, "As built:
+HFS-I1 (a)", HFS-I5-HFS-I7. Alternatives considered: run-check's one `-XHaskell2010` for every program (rejected: GHC compiled the
+pack's STG in GHC2021 with each test's flags), eligibility by trying the front end on every program (kept as the fallback: a stop
+runs from the pack).
+
+## 2026-11-07: batch 2, third round: batch1's last head, cpp-indep, res34, hfs-i1, and the worktrees' Haskell inputs (branch batch2)
+
+On `batch2` 93db65e83, by an agent by day in the light tier (no gate but `--plan`, no build, no heavy lock: the night shift ran on
+`next`). One merge commit each, the keys computed after each (`bin/arbace-go --gate-key`, `arbace_runtime_key`, `arbace_javac_key`):
+
+- `mac/batch1` 23d640f54 (java-complete's F10a) as `69d8704c2`: the journal and JAVA-DEFERRED-TRIAGE as unions; all three keys move
+  (F10a's jrt natives and overlays): gate `6725b5801608`, runtime `cb6a54899d99`, javac `343e3c44918d`.
+- `mac/cpp-indep` 605c62e69 (CP240 (a), CP241 (b)) as `2bc42fc1c`: `bin/gate`'s oracle-packs block (the same as haskell-90's, kept in
+  place), the Makefile (the `oracle-records-*` targets already in), `kinds.edn` (both crops' kinds), CPP-SURVEY (batch 2's Decided kept,
+  cpp-indep's As built after); its facts from its worktree's `.tmp/independence.diff` applied; C++ independence 31.4% to 54.3% (read 0.148,
+  eval and AOT 0.5), `test/crops/scores.edn` recorded (`5fc449d4e`). Two sampling parts moved to `crops/cpp-oracle.edn` (`--full` 317
+  steps). No key moved.
+- `mac/res34` 5d85bff6e (RES34 on rust-90's line) as `b3de90d41`: `arbace/c/cf2g.ae` (batch 1's CS277 `apack`/`vplen` and RES34's
+  placeholders both kept; the namespace loads), the Makefile, RUST-EVAL-SURVEY. res34's RES61-RES63 renumbered RES64-RES66, since batch 2
+  had proposed its own RES61 (rsi-essential's memory) the same day; the alternative, renumbering batch 2's, would have moved a number the
+  user had already read in batch 2's proposals. Gate `fc2cc71ebe1f`, javac `cc2abcd735f9` (C's embedded set), runtime unchanged.
+- `mac/hfs-i1` ce89c3836 (HFS-I1 (a)) as `d0964c426`: FRONTEND-SURVEY and the journal; its facts applied (no score change); the switch
+  diff left for the night's `compare-front`, as the main session said. No key moved.
+- Proposal 8 (a) built (`2f9eb4fa4`, `2a124fbe9`): `bin/lib/repr-haskell/inputs.bash`, sourced by `bin/repr-haskell` and `bin/hsi`: in a
+  linked worktree (git's common dir) or the clean clone (`.tmp/gate-clean/SHA`) the GHC source and testsuite tarballs are hard-linked from
+  the main checkout's copies and nofib fetched from its checkout; with no copy there, a refusal: a worktree never downloads (the user's
+  network rule). Scheme's SM9 shares the corpora directory itself; here only the immutable inputs are shared, each worktree extracting its
+  own (the extraction gets configure products written into it). The main checkout had none: seeded by hard links from batch 2's `.tmp`
+  (SHA-256 84aefc21 testsuite, 2a83779c source, the pins'; nofib d4750745 cloned, tree 1f5a8852). Checked by `bin/hsi pins --fetch` with
+  batch 2's copies moved aside (all three taken from the main checkout, nothing fetched) and a missing file refused.
+- Checks after each merge: `gate.crops check` 0 problems, both plans clean, `bin/reap` 41 of 44 with deferred.cpp's one problem (CP245),
+  `bin/crops-score --judge --strict` 0; samples under 2 GiB (`bin/oracle-records pins`, `bin/repr-cpp pp-check --essential` 1.47 GB, `bin/rsi
+  judge-test`, `bin/repr-haskell test`). Not run: C's and Rust's AOT after RES34 (the shared `.tmp/ci-aot-lib` is the night's first build).
+- Found: repr-haskell's configure skip test is inverted in native mode (proposal 9 in the AGENDA).
+
+## 2026-11-07: batch 4, the oracle-records line consolidated (branch batch4, on batch2 3ff5ad692)
+
+Branch `batch4` from `mac/batch2` 3ff5ad692, the main session's request (consolidating the held branches first). The line
+`oracle-records` (doc/ORACLE-RECORDS-SURVEY.md, ORS1-ORS28) is linear: `mac/oracle-records` 3f800b868 < `-c` 58829ed2e < `-scheme`
+b8f7825b1 < `-haskell` c2d46e3a6 < `-rust` 3c7ceddf9 < `-ocaml` 056caff62 < `-cpp` 0c025a3f7 < `-cpp2` 557e7aeec (checked with `git
+merge-base --is-ancestor`); each merged in that order, one merge commit a branch (589e229e9, 17c101e67, 6ac1674ed, 15a7e32fa, acba96cd7,
+c4337a5ad, 453bb382f, df089a139), then the oracle tier's splice (d29725a4f).
+
+- **Why most of it is batch 2's.** Since the line was written (2026-11-05/06) batch 2 took its shared tooling and Haskell's records
+  (haskell-90's cherry-picks), C++'s IR packs (cpp-indep's) and C's sysroot (c-indep-b1's), and each crop moved to its own verdicts and own
+  targets: C on Arbace's target judging each test by its own verdict, OCaml on Arbace's typer and native reader, Rust on its native reader
+  with its own IR packs, LLVM IR on own verdicts with `ref-rt23.edn` and `ref-opt23.edn`, Scheme with Chibi's marks in the check's record
+  and psyntax booted on si. The rule kept: batch 2's behaviour where the two differ, the line's additions where they add, every drop named
+  with its reason in its merge message.
+- **Taken.** The planner's `:phase :oracle` (`test/gate/plan.ae`: modes `oracle` and `full-oracle`, an oracle step whose host is none here
+  `absent`), the runner's `absent` (`bin/lib/gate-run.bash`), `bin/gate --oracle`. C's gcc outcomes as records and packs, read under gcc's
+  target and judge (`ARBACE_C_TARGET=gcc ARBACE_C_JUDGE=gcc`): `bin/lib/ci/dg` judges by the directives unless gcc's judge, which reads
+  `test/c/ref-dg-gcc15.edn` (`--live` runs gcc); `bin/lib/repr-c/c23check`'s modes self (default), records, `--oracle`, `--record-ref`,
+  `--verify-ref`; `bin/lib/repr-c/roundtrip`'s originals' packs under gcc's judge; `bin/lib/ci/musl`'s `pack`, `verify-pack`, gcc's target
+  taking the products from the pack and `verify-derived` against the pack with no gcc; `bin/lib/repr-c/sysroot.bash`'s `c_gcc_sysroot`
+  (the pack `c-headers-gcc15`) in place of `/` for gcc's target. Scheme's `scheme-chez-dumps` pack (SCS2 (a), the user 2026-11-07).
+  C++'s selftest split (`test/cpp/selftest/toolchain.txt`, 30 of 34 tests) and ORS28 (b) (the user, 2026-11-06).
+- **Spliced.** `test/gate/crops/ocaml-oracle.edn` (OC180 (a)'s), `cpp-oracle.edn` (cpp-indep's, with `cpp-selftest-oracle` and
+  `cpp-lower-oracle` added), `haskell.edn`'s four oracle steps (haskell-90's), by `gate.crops splice` (steps, crops, controls; chains
+  renamed CROP-oracle; cpp-oracle's crops entry `:cpp`'s); Rust's four `:rust-helper` steps set to `:phase :oracle` in place (and in
+  `llvm-rust.edn`, `natives.edn`). The tier: 52 steps.
+- **Alternatives considered.** Integrating Rust's corpus packs into batch 2's `bin/repr-rust` so native-check runs without rustc: not
+  now, the entries are keyed by the line's helper hash and would all read STALE (ORS29 proposes a re-record); taking the C packs' `:pins`
+  on every C step (the line's): no default C path reads them on batch 2, so they would rekey C's steps for nothing; si-boot-oracle and
+  Chibi's records: superseded.
+- **Keys.** gate `fc2cc71ebe1f` and runtime `cb6a54899d99` unchanged; javac `cc2abcd735f9` -> `73b4ec54ebcd` at the C merge (its
+  commit message names `83c9dfbb1623`, a value taken while a conflict marker was still in `bin/lib/repr-c/check`, resolved before that
+  commit: corrected in the Scheme merge's message).
+- **Checks** (light, main's stage 0, after each merge): `gate.crops check` 0; `bin/gate --plan` 49 (48 after the splice), `--full --plan`
+  317 (311), `--oracle --plan` 52, `--full --oracle --plan` 358; `bin/reap` 41 of 44, 1 problem (deferred.cpp's, CP245); `bin/crops-score
+  --judge --strict` 0 (recorded at the Scheme merge); `bin/oracle-records pins` 13 packs after copying C's two from `.tmp/keep/oracle-records-c`
+  into the main checkout's `.tmp/oracle-packs` (no clobber); C: dg essential 92/92, check --c23 59/3/0 in both modes, musl verify-derived
+  equal to the pack; Scheme: the read check on the records with chez stubbed (1,358 + 6 files and probes, 7 scans, equal, no stub
+  called); C++: selftest --no-toolchain 4 pass with the compilers stubbed.
+- **Found.** `test/gate/crops-test.bash` (in the essential gate's `gate-tests`) failed on batch 2 already: batch 1's table was hardcoded
+  (crop pins, chains, `:haskell` as the crop not gated, an injected `:llvm []` that duplicated batch 2's key); brought to batch 2's table.
+- **Scores**: Scheme's independence 95.0 -> 97.5 (judge 0.752 -> 0.874, the read check's 1,371 cases at 0.5: recorded dumps; SCS2's
+  "about 0.82" was an estimate); every other crop unchanged.
+- Proposed: ORS29-ORS32 (the survey's "Proposed (batch 4)").
+
+## 2026-11-07: batch 3, Haskell, C++ native and the small branches (branch `batch3`, on `batch2` 93db65e8)
+
+Merge plan batches 4 and 5 (`.tmp/tag-v2/merge-plan.md` §3, the rehearsal's §4 steps 4-5) and the independent branches, one merge commit a
+branch, the light checks after each (doc/AGENDA.md, "Batch 3", has the commits, conflicts, keys and numbers):
+
+- **Haskell.** `haskell-errors3` ed461dd2 (with `-errors`, `-errors2`), `haskell-deriving-via` aa7d0b52, `haskell-o1` b76f992e (with
+  `haskell-speed`), `gt9v-haskell` a9853476, `crop-controls-haskell` 72f76e22 merged. The GPL rule: `haskell-cpp`'s clean-room net diff over
+  `53794ed6^` was already in through haskell-90; of `haskell-full2` only its commit after `haskell-cpp`, 4ed75d38, was cherry-picked (`-x`).
+  No commit containing 53794ed6 is in the history. `parsers-speed` 855d6f49 was rebuilt rather than merged (plan item 32): its six commits
+  re-applied by cherry-pick onto the merged tree, each conflict resolved for both lines (the OCaml LR driver's flat tables with the errors
+  line's Menhir error strategy; Haskell's lexer slots renumbered `:acc 18 :tab-first 19 :tab-count 20`; the array driver with `lx/fatal!`;
+  the fused dump writer for mode `:lines` only), and one semantic fault the textual merge left (`keyword-token` called with one argument in
+  the new OCaml fast path, which made every errors-check case differ) found by the proof and fixed. The proof: the native readers' outputs
+  before and after on samples, byte for byte (OCaml 44 files' dumps with positions, 8 files' tokens, errors-check 100 of 100; Haskell 42
+  corpus modules' dumps, 166 rejected samples' messages, the `read` verb on 15 and 4 modules). `haskell-eval9` not merged: HFS-I4 (b)'s
+  rebase of its HE9 commit conflicts in ten of hsi's files (proposal 1). Considered: merging `parsers-speed` and fixing by hand (rejected by
+  the plan: a hand merge of two rewrites of the same drivers can drop either side silently).
+- **C++.** `cpp-tree` f0e631c3, `cpp-cpr1` ee6f606f (with `cpp-print-review`), `crop-controls-cpp` 25a62973 merged; of `crop-controls`, the
+  GT9.8 section 0d1ae970 picked and Haskell's round-trip pair 6dc54221 left out as superseded by haskell-90's controls in the same file
+  (the same design over the own-verdict judges); the others were picked in batches 1 and 2. The LICENSE question of plan item 35 (clang's
+  disambiguation reproduced or ported in `arbace/repr/cpp/{parse,scope,sema}.ae`) stays as doc/ARBACE.md records it; no new port came in.
+- **The small ones.** `goi-budgets` 741e989e (with `goi-not-applicable`), `goi-full-forms` 53f076ea (with `goi-liveness`),
+  `java-internal-pkgs` e3d5b57a, `c2j-pool-encode` 74e60353, `ci-lls21` cd76b572, `llvm-ll4` a9a95f40 (LLS32 (a): its records re-made by
+  `bin/llvm-corpus verify-record` on batch 3, now judged by LL9a's references) merged; `trio-off` 2e86cdba superseded (its commit is main's
+  d86cb874a). Then `mac/batch2` 3ff5ad69 (batch 2's third round) merged, and `bin/reap --record` and `bin/crops-score --record` with the
+  night's pending records held out for the run (deferred.cpp, ci-run's two new programs' AOT rows, java-internal-pkgs' three references).
+- Keys at the end: gate `bd0295a51879`, runtime `e55979557036`, javac `a7060fc7d33d` (moved by goi-full-forms, java-internal-pkgs,
+  c2j-pool-encode, ci-lls21 and batch 2's third round). Scores: Go 94.9 to 97.0 completeness, LLVM 96.0 to 96.3, C++ independence 31.4 to
+  54.3 (batch 2's cpp-indep); the rest unchanged. Proposed: HE9 by hand (1), LLVM's RUN-line substitutions in the own verdict (2), the GPL
+  line's branches deleted (3), the worktrees' corpora from the main checkout (4).
+
+## 2026-11-07: batch 3's proposals decided and built (branch `batch3`)
+
+The user's decisions (relayed by the main session, about 13:45) on doc/AGENDA.md's "Batch 3, Proposed" and batch 2's proposal 9:
+
+- **2 (a)+(b), built.** LLVM's own verdict takes lit's RUN-line substitution (`bin/repr-llvm`'s `own_verdicts`: the first RUN line's
+  `sed 's/A/B/g' %s |`; `verify-check` reads sed's output for a module judged by its own verdict), and a `valid` claim from a RUN line
+  reading the module with `--disable-verify` is no own verdict. valid-wide 413 -> 419 of 420; the one left classed in
+  `test/llvm/valid-wide-known.tsv` until opt's record. A first version made every `--disable-verify` RUN line void the own verdict and
+  lost reject-av's `Assembler-attribute-builtin` (an `invalid` claim from another RUN line): restricted to `valid` claims, the other
+  lists' records came back unchanged. `check verify-llvmtest` re-recorded (11 fixed by LL4's messages). Alternative considered: running
+  each RUN line's substitution and requiring every result to verify (lit runs each); one substitution suffices for a verdict of the
+  module's text, and the corpora's tests substitute a type or an opcode alike in every line.
+- **4 (a), built.** `bin/lib/crops/take.bash` (`crop_take`): a worktree's missing crop input taken from the main checkout by hard link,
+  refused when the main checkout has none; used by `bin/repr-ocaml corpus fetch` and its opam set. The main checkout's
+  `.tmp/repr-ocaml/src` seeded from ocaml-90's copies (hard links; pins checked). Proved under stubs: no download, no compiler call.
+  Alternative considered: generalizing `bin/lib/repr-haskell/inputs.bash` in place (rejected: batch 2's proven code, and Haskell's git
+  checkout of nofib has its own function).
+- **Batch 2's 9 (a), built.** `bin/repr-haskell corpus fetch`'s configure test un-inverted; proved under stubs, with a control that calls
+  the compiler stub when `REPR_HASKELL_CONFIGURE=1`. Found: `haskell-native-inputs` is STALE at the helper's new hash, so the native reads
+  wait for the night's `record-native-inputs`.
+- **1 (a)**: HE9 ported by hand the day after batch 3's night (doc/AGENDA.md, "The day after batch 3's night"); not started.
+- **3 (a)**: the GPL line's branches deleted locally and on `mac` by the main session once batch 3 is on `next`.
+- The REAP matrix and the scores re-recorded (LLVM's read cell after the verify re-record: completeness 96.4).
+
+## 2026-11-07: batch 3 merged into batch 4 (branch batch4)
+
+`mac/batch3` 90396a29c (batch 3 on batch2 3ff5ad692: Haskell's remaining lines, C++'s tree, CPR1 and controls, the small branches,
+llvm-ll4; its second round: LLVM's RUN-line substitutions, `crop_take`, Haskell's corpus fetch without configure) merged into `batch4`, one
+merge commit, the main session's request: `batch4` is the single head of everything after batch 1. Conflicts only in doc/AGENDA.md and
+doc/JOURNAL.md (both sides kept, batch 4's sections first); `test/gate/steps.edn` and the fragments merged cleanly, the oracle tier's 26
+`:phase :oracle` declarations intact, and batch 3 plans no toolchain step outside it but the three ORS31 names (`cpp-dg`, `cpp-roundtrip`,
+`cpp-roundtrip-dg` on `:cxx`, as before). Keys: gate `bd0295a51879`, runtime `e55979557036` (batch 3's), javac `4414d352e77c` (batch 3's
+plus batch 4's `bin/lib/ci`, `bin/lib/repr-c`). Checks: `gate.crops check` 0; `--plan` 48, `--full --plan` 311, `--oracle --plan` 52;
+`bin/reap --record` with batch 3's hold-out (its `.tmp/reap-rec.sh`, run in batch4: deferred.cpp, ci-run's two programs, three JDK
+references held) 0 problems, the matrix unchanged; `bin/crops-score --judge --strict --record` 0 with the rows held (unheld, the held rows'
+9 reap problems and 1 score problem stay until the night's records, as on batch 3). Scores: Go 94.9 -> 97.0 completeness, LLVM IR 96.0 ->
+96.4 (batch 3's), the rest as batch 4. The nights of batches 2-4 in one ordered list: the AGENDA's "Batches 2-4: the nights after batch 1".

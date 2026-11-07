@@ -19,7 +19,14 @@
 # gcc's acceptance are the oracle tier's: by default (ARBACE_C_JUDGE unset or self) no gcc runs, the levels 1-2 judged and
 # the acceptance cc's (arbace.repr.c.rtcheck/load-acceptance), the known entries only levels 3-4 give deferred; ARBACE_C_JUDGE=gcc
 # (or --record, --record-gcc) runs gcc as before, by hand.
-# Usage: bin/repr-c roundtrip [--corpus C,...] [--record] [--record-gcc] [--no-run]
+# Under gcc's judge, since the oracles' records (doc/ORACLE-RECORDS-SURVEY.md, ORS1-ORS10 (a), CS77 (a) generalized; "As built: the tooling and C"):
+# the originals' half of levels 3 and 4 (gcc's object of each original, its link and run: status and standard output) is the
+# pack c-roundtrip-orig-CORPUS (test/repr/c/records/), recorded by hand (--record-orig); a run reads it in place of compiling
+# the originals, and only the print is compiled (gcc on Arbace's output: the oracle tier's half, class D).
+# --no-gcc forces the default's levels 1-2 (the known entries of the classes only levels 3 and 4 give, :objects,
+# :objects-macro-body, :run-address, :print-grammar, deferred to the oracle tier when the file passes the rest).
+#
+# Usage: bin/repr-c roundtrip [--corpus C,...] [--record] [--record-gcc] [--no-run] [--no-gcc|--record-orig|--verify-orig [--sample N]]
 #   --corpus      test/c/corpora.edn's ids (default every corpus read in place, `all`; lua's tarball not)
 #   --record      the known file's entries of the corpora rewritten from the files that do not pass, then judged
 #                 again, and the results file test/repr/c/roundtrip-results.edn (CS240 (a): every file's row
@@ -28,6 +35,13 @@
 #   --record-gcc  gcc -fsyntax-only run on every file of the corpora, test/repr/c/parse-gcc.tsv rewritten
 #                 for them (the other corpora's lines kept)
 #   --no-run      levels 1-3 only
+#   --no-gcc      levels 1-2 and the acceptance (test/repr/c/parse-gcc.tsv) only: gcc never run; not with --record
+#   --record-orig the originals compiled, linked and run by gcc (levels 3 and 4's original half) and packed per corpus as
+#                 c-roundtrip-orig-CORPUS, its pin and manifest in test/repr/c/records/ (by hand on the host with gcc, ORS5 (a));
+#                 nothing read, printed or judged (minutes: gcc alone)
+#   --verify-orig the originals compiled and run afresh (--sample N: N files a corpus, spread evenly) against the packs and
+#                 test/repr/c/parse-gcc.tsv's acceptance afresh against the record; the crossed pair (one file's object
+#                 against another's member must differ, ORS7 (a)); nothing printed or judged; another gcc reported (ORS6 (a))
 #   --resume      a corpus whose forms.tsv a run left keeps it (its lists, prints and levels 1-2); the rest again
 #   --only LIST   GT8: a file of ids CORPUS/NAME (bin/lib/repr-c/only.bash), those files alone, judged on what the run holds
 #                 (a known entry of a file not run is not stale, a control whose files are not run is left); not with
@@ -52,9 +66,13 @@ root=$(cd "$(dirname "$0")/../../.." && pwd)
 cd "$root"
 
 all=c23conf,torture-execute,torture-execute-mirror,torture-compile,tcc-tests2,tcc-pp,compcert,mir,cxgo,benchmarksgame,sqlite,zlib,quickjs,gcc-c23,gcc-cpp-c23,gcc-c23-sub,gcc-gnu23,gcc-embed,gcc-va-opt,gcc-bitint
-corpora=$all record= record_gcc= run=1 resume= only=
+corpora=$all record= record_gcc= run=1 resume= only= nogcc= record_orig= verify_orig= sample=
 while [ $# -gt 0 ]; do
   case $1 in
+    --no-gcc) nogcc=1; shift ;;
+    --record-orig) record_orig=1; shift ;;
+    --verify-orig) verify_orig=1; shift ;;
+    --sample) sample=$2; shift 2 ;;
     --corpus) corpora=$2; shift 2 ;;
     --only) only=$2; shift 2 ;;
     --record) record=1; shift ;;
@@ -70,7 +88,12 @@ unset REPR_C_ONLY
 [ -z "$record" ] || c_only_refuse "repr-c roundtrip" --record
 [ -z "$record_gcc" ] || c_only_refuse "repr-c roundtrip" --record-gcc
 [ -z "$resume" ] || c_only_refuse "repr-c roundtrip" "--resume (a kept corpus's lists)"
+[ -z "$nogcc" ] || [ -z "$record$record_gcc$record_orig$verify_orig" ] || { echo "repr-c roundtrip: --no-gcc records nothing (no level 3 or 4)" >&2; exit 2; }
+[ -z "$record_orig$verify_orig" ] || [ -z "$only$resume" ] || { echo "repr-c roundtrip: --record-orig and --verify-orig take whole corpora" >&2; exit 2; }
 work=${REPR_C_RT_WORK:-$root/.tmp/repr-c-roundtrip}
+[ -z "$verify_orig" ] || work=${REPR_C_RT_WORK:-$root/.tmp/repr-c-roundtrip-verify}
+. "$root/test/oracle-records/oracle.bash"
+orig_pin() { echo "$root/test/repr/c/records/c-roundtrip-orig-$1.sha256"; }
 threads=${REPR_C_THREADS:-8}
 export REPR_C_THREADS=$threads
 mkdir -p "$work"
@@ -80,7 +103,7 @@ mkdir -p "$work"
 cmain=${root%%/.tmp/gate-clean/*}; cmain=${cmain%%/.tmp/worktrees/*}
 gowhim=${GOWHIM:-$(cd "$cmain/.." && pwd)/go-whim}
 modcache=$(GOFLAGS= "${ARBACE_GOROOT:-/root/tamago-go}/bin/go" env GOMODCACHE)
-nogcc=; [ "${ARBACE_C_JUDGE:-self}" = gcc ] || [ -n "$record$record_gcc" ] || nogcc=1
+[ -n "$nogcc" ] || [ "${ARBACE_C_JUDGE:-self}" = gcc ] || [ -n "$record$record_gcc$record_orig$verify_orig" ] || nogcc=1
 gi=; [ -n "$nogcc" ] || gi=$(gcc -print-file-name=include)
 epoch=$(sed -n 's/^ *:epoch \([0-9]*\).*/\1/p' test/c/host/host.edn)
 gccroot=
@@ -123,17 +146,114 @@ if [ -n "$record_gcc" ]; then
   echo "recorded test/repr/c/parse-gcc.tsv"
 fi
 
+# the originals' half of levels 3 and 4 (CS77 (a)): ORIG_KEY the entry's key (the original's bytes, its standard and options:
+# what the pack's member depends on besides gcc, whose identity the manifest's header names)
+orig_one() { # DIR NAME STD ARGS BASE RUN READ OUT: the original compiled (and linked and run) by gcc into OUT/NAME.{o,cc,stdout}
+  local d=$1 f=$2 std=$3 args=$4 base=$5 run=$6 rd=${7:-$2} out=$8 gstd o os ro r
+  gstd=$std; [ "$std" = c94 ] && gstd=iso9899:199409
+  o=$out/$f.o; mkdir -p "$(dirname "$o")"
+  # shellcheck disable=SC2086
+  (cd "$base" && SOURCE_DATE_EPOCH=$epoch LC_ALL=C timeout 120 gcc -std=$gstd $args -isystem "$gi" -O0 -fno-stack-protector -fpermissive -w -c "$rd" -o "$o") > "$o.err" 2>&1
+  os=$?; rm -f "$o.err"; [ $os = 0 ] || rm -f "$o"
+  ro=-
+  if [ "$run" = 1 ] && [ $os = 0 ]; then
+    r=$out/.run/$f; mkdir -p "$r"
+    if gcc "$o" -o "$r/a.out" -lm > "$r/link.err" 2>&1; then
+      (cd "$r" && timeout 10 ./a.out < "$TMPDIR/repr-c-empty-stdin" > stdout 2> stderr); ro=$?
+      cp "$r/stdout" "$out/$f.stdout"
+    else ro=link; fi
+    rm -rf "$r"
+  fi
+  printf '%s\n%s\n' "$os" "$ro" > "$out/$f.cc"
+}
+orig_key() { # BASE READ STD ARGS
+  local f=$1/$2; case $2 in /*) f=$2 ;; esac
+  { sha256sum < "$f" | cut -c1-64; printf '%s\n%s\n' "$3" "$4"; } | sha256sum | cut -c1-64
+}
+export -f orig_one orig_key
+if [ -n "$record_orig$verify_orig" ]; then
+  export epoch gi TMPDIR
+  vst=0; tot=0; ndiff=0
+  for id in "${ids[@]}"; do
+    d=$work/$id; o=$d/orig-pack/c-roundtrip-orig-$id; rm -rf "$d/orig-pack"; mkdir -p "$o"
+    isrun=0
+    arbace_tool -e "(println (= :run (:action (first (filter #(= (:id %) :$id) (:corpora (read-string (slurp \"test/c/corpora.edn\"))))))))" | grep -q true && isrun=1
+    # every file of the corpus (gcc.list: name, standard, options, the name read; from the corpus's base), whatever repr/c reads
+    base=$(cat "$d/base.txt")
+    awk -F'\t' -v b="$base" '{print $1 "\t" $2 "\t" $3 "\t" b "\t" $4}' "$d/gcc.list" > "$d/orig.list"
+    list=$d/orig.list
+    if [ -n "$sample" ]; then
+      n=$(wc -l < "$list"); k=$(( n > sample ? n / sample : 1 ))
+      awk -v k="$k" -v s="$sample" 'NR % k == 1 % k && c < s {print; c++}' "$list" > "$d/orig.sample"; list=$d/orig.sample
+    fi
+    awk -F'\t' -v d="$d" -v r="$isrun" -v o="$o" '{print d "\037" $1 "\037" $2 "\037" $3 "\037" $4 "\037" r "\037" $5 "\037" o}' "$list" | tr '\n' '\0' \
+      | xargs -0 -P "$threads" -I{} bash -c 'IFS=$'"'"'\037'"'"' read -r d f std args base r rd o <<< "$1"; orig_one "$d" "$f" "$std" "$args" "$base" "$r" "$rd" "$o"' _ {}
+    # the members and their keys: NAME.cc (the compile's status, the run's: a status, link or -), NAME.o, NAME.stdout
+    tr '\t' '\037' < "$list" | while IFS=$'\037' read -r f std args base rd; do
+      k=$(orig_key "$base" "${rd:-$f}" "$std" "$args")
+      for x in cc o stdout; do [ -f "$o/$f.$x" ] && printf '%s.%s\t%s\n' "$f" "$x" "$k"; done
+    done > "$d/orig.ids"
+    if [ -n "$record_orig" ]; then
+      oracle_make "$(orig_pin "$id")" "$d/orig-pack" "$d/orig.ids" "bin/repr-c roundtrip --record-orig --corpus $id" gcc || exit 1
+    else
+      p=$(orig_pin "$id")
+      [ -f "$p" ] || { echo "verify: $id: no pack pinned ($p)"; vst=1; continue; }
+      u=$(oracle_unpack "$p") || { vst=1; continue; }
+      man=$(oracle_manifest "$p")
+      while IFS=$'\t' read -r m k; do
+        tot=$((tot + 1))
+        want=$(awk -F'\t' -v m="$m" -v k="$k" '$1 == m {print ($2 == k ? $3 : "stale")}' "$man")
+        got=$(sha256sum < "$o/$m" | cut -c1-64)
+        [ "$want" = "$got" ] || { ndiff=$((ndiff + 1)); [ $ndiff -le 10 ] && echo "DIFF $id/$m: ${want:-unrecorded} recorded, $got afresh"; }
+      done < "$d/orig.ids"
+      # the crossed pair: the first two objects of the sample that differ, one's afresh against the other's member
+      a=$(awk -F'\t' '$1 ~ /\.o$/ {print $1}' "$d/orig.ids" | head -1); b=$(awk -F'\t' '$1 ~ /\.o$/ {print $1}' "$d/orig.ids" | sed -n 2p)
+      if [ -n "$a" ] && [ -n "$b" ] && ! cmp -s "$o/$a" "$o/$b"; then
+        if [ "$(sha256sum < "$o/$a" | cut -c1-64)" = "$(awk -F'\t' -v m="$b" '$1 == m {print $3}' "$man")" ]; then echo "verify: FAILED: control: $id/$a afresh taken for $b's member"; vst=1
+        else echo "verify: control: $id/$a afresh against $b's member differs, as it must"; fi
+      fi
+      # the acceptance (test/repr/c/parse-gcc.tsv's lines of the sample's files) afresh
+      tr '\t' '\037' < "$list" | while IFS=$'\037' read -r f std args base rd; do
+        gstd=$std; [ "$std" = c94 ] && gstd=iso9899:199409
+        # shellcheck disable=SC2086
+        (cd "$base" && SOURCE_DATE_EPOCH=$epoch LC_ALL=C gcc -std=$gstd $args -isystem "$gi" -fsyntax-only -w "${rd:-$f}") > "$TMPDIR/rt-syn.out" 2>&1
+        sy=$?; tot=$((tot + 1))
+        want=$(awk -F'\t' -v n="$id/$f" '$2 == n {print $1}' test/repr/c/parse-gcc.tsv)
+        [ "$want" = "$sy" ] || echo "DIFF parse-gcc.tsv $id/$f: ${want:-unrecorded} recorded, $sy afresh"
+        echo "ACCEPT"
+      done > "$d/accept.out"
+      grep '^DIFF' "$d/accept.out" | head -10
+      tot=$((tot + $(grep -c '^ACCEPT' "$d/accept.out"))); ndiff=$((ndiff + $(grep -c '^DIFF' "$d/accept.out" || true)))
+    fi
+  done
+  if [ -n "$verify_orig" ]; then
+    oracle_verdict gcc "$(oracle_manifest "$(orig_pin "${ids[0]}")")" "$ndiff" "$tot" || vst=1
+    exit $vst
+  fi
+  exit 0
+fi
+
 [ ${#todo[@]} = 0 ] || arbace_tool -m arbace.repr.c.rtcheck forms "$work" "${todo[@]}" || exit 1
 
 # level 3: both compiled, the objects compared; level 4: both linked and run
-cc_pair() { # DIR NAME STD ARGS BASE RUN READ
-  local d=$1 f=$2 std=$3 args=$4 base=$5 run=$6 rd=${7:-$2} gstd o p os ps cmp rdir ro rp same
+cc_pair() { # DIR NAME STD ARGS BASE RUN READ [ORIG]: ORIG the unpacked c-roundtrip-orig-CORPUS (the originals' half recorded)
+  local d=$1 f=$2 std=$3 args=$4 base=$5 run=$6 rd=${7:-$2} og=${8:-} gstd o p os ps cmp rdir ro rp same oro=
   gstd=$std; [ "$std" = c94 ] && gstd=iso9899:199409
   o=$d/obj/orig/$f.o; p=$d/obj/print/$f.o
   mkdir -p "$(dirname "$o")" "$(dirname "$p")"
+  if [ -n "$og" ]; then
+    # CS77 (a): the original's object, link and run from the pack, keyed by its bytes, standard and options (stale or
+    # unrecorded: the row says so, and the run fails)
+    if ! awk -F'\t' -v m="$f.cc" -v k="$(orig_key "$base" "$rd" "$std" "$args")" '$1 == m && $2 == k {ok = 1} END {exit !ok}' "$d/orig.tsv"; then
+      printf '%s\tunrecorded\n' "$f" >> "$d/orig-missing.part.$$"; return
+    fi
+    os=$(sed -n 1p "$og/$f.cc"); oro=$(sed -n 2p "$og/$f.cc")
+    [ "$os" = 0 ] && cp "$og/$f.o" "$o"
+  else
   # shellcheck disable=SC2086
   (cd "$base" && SOURCE_DATE_EPOCH=$epoch LC_ALL=C timeout 120 gcc -std=$gstd $args -isystem "$gi" -O0 -fno-stack-protector -fpermissive -w -c "$rd" -o "$o") > "$o.err" 2>&1
   os=$?
+  fi
   # shellcheck disable=SC2086
   (cd "$d/print/$f.d" && SOURCE_DATE_EPOCH=$epoch LC_ALL=C timeout 120 gcc -std=$gstd $args -iquote "$base/$(dirname "$f")" --embed-dir="$base/$(dirname "$f")" -isystem "$gi" -O0 -fno-stack-protector -fpermissive -w -c "$f" -o "$p") > "$p.err" 2>&1
   ps=$?
@@ -142,8 +262,13 @@ cc_pair() { # DIR NAME STD ARGS BASE RUN READ
   printf '%s\t%s\t%s\t%s\n' "$f" "$os" "$ps" "$cmp" >> "$d/obj.part.$$"
   if [ "$run" = 1 ] && [ $os = 0 ] && [ $ps = 0 ]; then
     rdir=$d/run/$f; mkdir -p "$rdir/o" "$rdir/p"
+    if [ -n "$og" ]; then
+      [ "$oro" != link ] && gcc "$p" -o "$rdir/p/a.out" -lm > "$rdir/p/link.err" 2>&1 || { printf '%s\tlink\tlink\t-\n' "$f" >> "$d/run.part.$$"; return; }
+      ro=$oro; [ -f "$og/$f.stdout" ] && cp "$og/$f.stdout" "$rdir/o/stdout" || : > "$rdir/o/stdout"
+    else
     gcc "$o" -o "$rdir/o/a.out" -lm > "$rdir/o/link.err" 2>&1 && gcc "$p" -o "$rdir/p/a.out" -lm > "$rdir/p/link.err" 2>&1 || { printf '%s\tlink\tlink\t-\n' "$f" >> "$d/run.part.$$"; return; }
     (cd "$rdir/o" && timeout 10 ./a.out < "$TMPDIR/repr-c-empty-stdin" > stdout 2> stderr); ro=$?
+    fi
     (cd "$rdir/p" && timeout 10 ./a.out < "$TMPDIR/repr-c-empty-stdin" > stdout 2> stderr); rp=$?
     same=differ; [ $ro = $rp ] && cmp -s "$rdir/o/stdout" "$rdir/p/stdout" && same=same
     printf '%s\t%s\t%s\t%s\n' "$f" "$ro" "$rp" "$same" >> "$d/run.part.$$"
@@ -156,13 +281,25 @@ status=0
 for id in "${ids[@]}"; do
   [ -z "$nogcc" ] || break
   d=$work/$id
+  # CS77 (a): the originals from their pack when the corpus has one pinned, else (not recorded yet) compiled as before
+  og=
+  if [ -f "$(orig_pin "$id")" ]; then
+    u=$(oracle_unpack "$(orig_pin "$id")") || exit 1
+    og=$u/c-roundtrip-orig-$id; cp "$(oracle_manifest "$(orig_pin "$id")")" "$d/orig.tsv"
+  else echo "roundtrip: $id: no pack of the originals pinned ($(orig_pin "$id")): the originals compiled by gcc"; fi
+  rm -f "$d"/orig-missing.part.*
   isrun=0
   if [ -n "$run" ] && arbace_tool -e "(println (= :run (:action (first (filter #(= (:id %) :$id) (:corpora (read-string (slurp \"test/c/corpora.edn\"))))))))" | grep -q true; then isrun=1; fi
   rm -f "$d"/obj.part.* "$d"/run.part.*
-  awk -F'\t' -v d="$d" -v r="$isrun" '{print d "\037" $1 "\037" $2 "\037" $3 "\037" $4 "\037" r "\037" $5}' "$d/gcc3.list" | tr '\n' '\0' \
-    | xargs -0 -P "$threads" -I{} bash -c 'IFS=$'"'"'\037'"'"' read -r d f std args base r rd <<< "$1"; cc_pair "$d" "$f" "$std" "$args" "$base" "$r" "$rd"' _ {}
+  awk -F'\t' -v d="$d" -v r="$isrun" -v og="$og" '{print d "\037" $1 "\037" $2 "\037" $3 "\037" $4 "\037" r "\037" $5 "\037" og}' "$d/gcc3.list" | tr '\n' '\0' \
+    | xargs -0 -P "$threads" -I{} bash -c 'IFS=$'"'"'\037'"'"' read -r d f std args base r rd og <<< "$1"; cc_pair "$d" "$f" "$std" "$args" "$base" "$r" "$rd" "$og"' _ {}
   cat "$d"/obj.part.* 2>"$TMPDIR/repr-c-rt.err" > "$d/obj.tsv"; cat "$d"/run.part.* 2>"$TMPDIR/repr-c-rt.err" > "$d/run.tsv"
   rm -f "$d"/obj.part.* "$d"/run.part.*
+  # ORS10 (a): an original the pack lacks (or whose bytes, standard or options changed) fails the run
+  if ls "$d"/orig-missing.part.* > "$TMPDIR/repr-c-rt.ls" 2>&1; then
+    cat "$d"/orig-missing.part.* | sort | while IFS=$'\t' read -r f why; do echo "FAIL $id/$f	the original's half is $why in $(orig_pin "$id") (bin/repr-c roundtrip --record-orig --corpus $id)"; done
+    status=1; rm -f "$d"/orig-missing.part.*
+  fi
 done
 if [ -n "$nogcc" ]; then
   # no gcc (carried from mac/oracle-records-cpp2's --no-gcc, ORS16): the judge's stale known entries of the classes only levels

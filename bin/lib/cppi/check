@@ -21,6 +21,9 @@
 #              run is judged against (its absent rows fail)
 #   --judge    the last run judged again (nothing run)
 #   --resume   the programs already run kept
+#   CPPI_ROUTE (cpp-90; bin/lib/cppi/route.bash): the programs' IR by clang (the default), ours (Arbace's front end and code
+#   generator, no clang; a program it refuses fails its build) or auto (ours where it covers the program, clang's for the rest);
+#   CPPI_JUDGE=gxx: every program judged by g++'s recorded run (default: each one's own verdict where it has one, test/cpp/selfref.ae)
 #   CPPI_JOBS (default 4): the IR's and the runs' jobs; CPPI_THREADS (default 3): the builder's threads (its GOMEMLIMIT
 #   CPPI_CI_MEMLIMIT, default 6GiB: the runtime's checked units are held); CPPI_CHECK_WORK
 #   (default .tmp/cppi-check) the work directory; CPPI_KEEP_NODES: keep every node program (else those of a run that failed)
@@ -30,6 +33,8 @@ root=$(cd "$(dirname "$0")/../../.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
 . "$root/bin/lib/tools.bash"
 . "$root/bin/lib/cppi/lists.bash"
+. "$root/test/oracle-records/oracle.bash"
+. "$root/test/oracle-records/cpp.bash"
 cd "$root"
 corpora=$cppi_corpora_recorded only= sample=1 record= judge= resume=
 while [ $# -gt 0 ]; do
@@ -80,6 +85,8 @@ if [ -z "$judge" ]; then
   ir1() { # ID STD ARGS PATH: the oracle's IR, its seconds
     local d=$work/files/$1 t0
     rm -rf "$d"; mkdir -p "$d"; t0=$(date +%s.%N)
+    # ORS12 (a): the oracle's IR from the records (test/oracle-records/cpp.bash), clang++ only when CPPI_LIVE is set
+    if ! cpr_live; then cpr_ir_or_fail "$1" "$2" "$3" "$4" "$d"; echo 0.0 > "$d/ir.secs"; return 0; fi
     # shellcheck disable=SC2086
     (cd "$d" && timeout 300 clang++ -x c++ -std=$2 $3 -O0 -S -emit-llvm "$4" -o x.ll; echo $? > ir.status) > "$d/ir.log" 2>&1
     echo "$(date +%s.%N) $t0" | awk '{printf "%.1f\n", $1 - $2}' > "$d/ir.secs"
@@ -96,6 +103,7 @@ if [ -z "$judge" ]; then
     rm -rf "$rd"
     [ -n "${CPPI_KEEP_NODES:-}" ] || [ "$st" != 0 ] || rm -f "$f"
   }
+  cpr_prepare || exit 1
   export -f ir1 run1 budget; export work cirun root
   for id in "${ids[@]}"; do
     d=$work/$id
@@ -121,7 +129,9 @@ if [ -z "$judge" ]; then
     awk -F'\t' 'BEGIN { while ((getline l < ARGV[2]) > 0) done[l] = 1; ARGV[2] = "" } !($1 in done)' "$d/list.tsv" "$d/done.txt" > "$d/todo.tsv"
     [ -s "$d/todo.tsv" ] || continue
     # the oracle's IR
-    tr '\t\n' '\037\0' < "$d/todo.tsv" | xargs -0 -P "$jobs" -I{} nice bash -c 'IFS=$'"'"'\037'"'"' read -r i s a p <<< "$1"; ir1 "$i" "$s" "$a" "$p"' _ {}
+    # by the route CPPI_ROUTE names (bin/lib/cppi/route.bash: clang, the default, ours or auto)
+    . "$root/bin/lib/cppi/route.bash"
+    cppi_ir_route "$d/todo.tsv" "$jobs" || exit 1
     # the corpus's own library: the testsuite's util/ lowered and read (once a run)
     xlib=
     if [ "$id" = libstdcxx ]; then
@@ -130,7 +140,8 @@ if [ -z "$judge" ]; then
         rm -rf "$xlib"; mkdir -p "$xlib"
         for f in testsuite_abi testsuite_allocator testsuite_character testsuite_hooks; do
           mkdir -p "$xlib/src/$f"
-          clang++ -std=gnu++17 -O0 -S -emit-llvm -I"$cppi_ts/util" "$cppi_ts/util/$f.cc" -o "$xlib/src/$f/x.ll" || exit 1
+          if cpr_live; then clang++ -std=gnu++17 -O0 -S -emit-llvm -I"$cppi_ts/util" "$cppi_ts/util/$f.cc" -o "$xlib/src/$f/x.ll" || exit 1
+          else cpr_ir_get "libstdcxx/util/$f.cc" gnu++17 "-I$cppi_ts/util" "$cppi_ts/util/$f.cc" "$xlib/src/$f" && [ "$(cat "$xlib/src/$f/ir.status")" = 0 ] || exit 1; fi
           printf '%s\t%s\n' "$f" "$xlib/src/$f/x.ll"
         done > "$xlib/ll.tsv"
         GOMEMLIMIT=${CPPI_CI_MEMLIMIT:-6GiB} arbace_tool -m arbace.cpp.run lower-lib "$xlib" "$xlib/ll.tsv" "$threads" > "$xlib/read.log" 2>&1 || { tail -5 "$xlib/read.log"; exit 1; }
@@ -164,4 +175,7 @@ if [ -z "$judge" ]; then
   done
 fi
 smp=(); [ -z "$only" ] && [ "$sample" != 1 ] && smp=(--sample "$sample")
-arbace_tool -m arbace.cpp.check run-judge "$work" eval "${record:+--record}" "${smp[@]}" "${ids[@]}"
+# the judges' reference (the user, 2026-11-07): each program's own verdict where it has one, g++'s run for the rest
+. "$root/bin/lib/cppi/selfref.bash"
+runref=$(cppi_run_ref) || exit 1
+CPPI_RUN_REF=$runref arbace_tool -m arbace.cpp.check run-judge "$work" eval "${record:+--record}" "${smp[@]}" "${ids[@]}"

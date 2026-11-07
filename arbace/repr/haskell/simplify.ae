@@ -1,0 +1,1352 @@
+;; Ported from GHC 9.14.1 (https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz, SHA-256
+;; 2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77): compiler/GHC/Core/Opt/Simplify.hs (simplifyPgm,
+;; shortOutIndirections), Simplify/Iteration.hs (simplTopBinds and everything below it), Simplify/Utils.hs (SimplCont,
+;; ArgInfo, preInlineUnconditionally, postInlineUnconditionally, interestingCallContext, interestingArg, mkArgInfo,
+;; rebuildLam, tryEtaExpandRhs, prepareAlts, mkCase), Simplify/Env.hs (SimplEnv, SimplFloats, the substitution),
+;; Simplify/Inline.hs (callSiteInline, tryUnfolding, computeDiscount), the built-in class-op rule of
+;; compiler/GHC/Types/Id/Make.hs (mkDictSelId's classOpRule) and GHC.Core.Opt.Pipeline's -O0 SimplMode (initSimplMode
+;; at -O0: getCoreToDo's `simplify "final"`), on Arbace's Core (doc/haskell/FRONTEND-SURVEY.md, "As built: the -O0
+;; Simplifier"); GHC's notice follows (LICENSE.md, "GHC: the Glasgow Haskell Compiler License"):
+;;
+;; The Glasgow Haskell Compiler License
+;;
+;; Copyright 2002, The University Court of the University of Glasgow.
+;; All rights reserved.
+;;
+;; Redistribution and use in source and binary forms, with or without
+;; modification, are permitted provided that the following conditions are met:
+;;
+;; - Redistributions of source code must retain the above copyright notice,
+;; this list of conditions and the following disclaimer.
+;;
+;; - Redistributions in binary form must reproduce the above copyright notice,
+;; this list of conditions and the following disclaimer in the documentation
+;; and/or other materials provided with the distribution.
+;;
+;; - Neither name of the University nor the names of its contributors may be
+;; used to endorse or promote products derived from this software without
+;; specific prior written permission.
+;;
+;; THIS SOFTWARE IS PROVIDED BY THE UNIVERSITY COURT OF THE UNIVERSITY OF
+;; GLASGOW AND THE CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
+;; INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+;; FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+;; UNIVERSITY COURT OF THE UNIVERSITY OF GLASGOW OR THE CONTRIBUTORS BE LIABLE
+;; FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+;; DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+;; SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+;; CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+;; LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+;; OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+;; DAMAGE.
+
+
+(ns arbace.repr.haskell.simplify
+  "GHC's Simplifier at -O0 (the one pass `simplify \"final\"` of GHC.Core.Opt.Pipeline.getCoreToDo, up to 4 iterations,
+  each after the occurrence analyser): the SimplMode of -O0 (inlining on, rewrite rules off but the built-in ones,
+  eta expansion and eta reduction on, case-of-case on, cast swizzling on, case merging and case folding off, let
+  floating to the top level), the continuation-passing simplifier rule for rule (simplExprF, the SimplCont
+  continuations, rebuild, rebuildCase, knownCon, mkDupableCont and its join points, completeBind with eta expansion and
+  the let unfoldings, pre- and post-inline-unconditionally, callSiteInline with GHC's sizes and discounts, the cast
+  worker/wrapper, the class-op and primop built-in rules). The input is the desugarer's Core after the simple
+  optimiser, with its newtype casts (arbace.repr.haskell.simpleopt); see arbace.repr.haskell.core for the vocabulary."
+  (:require [arbace.string :as str]
+            [arbace.repr.haskell.core :as c]
+            [arbace.repr.haskell.occanal :as oa]
+            [arbace.repr.haskell.constfold :as cf]))
+
+(def ^:dynamic *ticks* nil)
+(defn- tick! [] (swap! *ticks* inc))
+
+(def ^:dynamic *exported* #{})
+(def ^:dynamic *trace* false)
+(def ^:dynamic *family-cons* (constantly nil)) ; CON -> its type's constructors, in order
+(def ^:dynamic *con-arity* (constantly nil))
+(def ^:dynamic *con-tag* (constantly nil))     ; CON -> its tag (1-based)
+(defn- unlifted-expr-hook? [e] (c/*unlifted-expr?* e))
+
+;;; ------------------------------------------------------------------------------------------
+;;; SimplEnv (GHC.Core.Opt.Simplify.Env)
+
+(def o0-mode
+  {:inline true :rules false :eta-expand true :eta-reduce true :case-case true :cast-swizzle true :pre-inline true
+   :float :enabled :case-merge false :case-folding false})
+
+(defn mk-env [] {:subst {} :in-scope {} :rec-ids #{} :case-depth 0 :inline-depth 0 :mode o0-mode})
+
+(defn- zap-subst [env] (assoc env :subst {} :inline-depth (inc (:inline-depth env))))
+(defn- in-scope-from-e [rhs-env here] (assoc rhs-env :in-scope (:in-scope here)))
+(defn- in-scope-from-f [env fl] (assoc env :in-scope (:in-scope fl)))
+(defn- extend-subst [env b sr] (assoc-in env [:subst (c/vkey b)] sr))
+(defn- cont-ex [env e] [:cont (:subst env) e])
+(defn- modify-in-scope [env b] (assoc-in env [:in-scope (c/vkey b)] b))
+(defn- add-new-in-scope [env bs]
+  (-> env (update :in-scope into (map (fn [b] [(c/vkey b) b]) bs))
+      (update :subst #(apply dissoc % (map c/vkey bs)))))
+
+(defn- refine
+  "refineFromInScope: a local's latest binder (with its IdInfo) as an occurrence"
+  [env x]
+  (if-let [b (get (:in-scope env) (c/vkey x))] (c/occ-form b) x))
+
+(defn- subst-id
+  "substId: [:done-id x] | [:done-ex e join-arity] | [:cont subst e]"
+  [env v]
+  (let [r (get (:subst env) (c/vkey v))]
+    (cond (nil? r) [:done-id (refine env v)]
+          (= :done-id (first r)) [:done-id (refine env (second r))]
+          :else r)))
+
+(defn- lookup-rec-bndr [env b]
+  (let [r (get (:subst env) (c/vkey b))]
+    (cond (= :done-id (first r)) (let [x (second r)] (or (get (:in-scope env) (c/vkey x)) x))
+          :else (or (get (:in-scope env) (c/vkey b)) b))))
+
+(defn- zap-fragile
+  "zapFragileIdInfo: a OneOcc made many, an unfolding but an evaluated one dropped"
+  [b]
+  (let [i (meta b) o (:occ i) u (:unf i)]
+    (with-meta b (cond-> (or i {})
+                   (= :one (:k o)) (assoc :occ {:k :many :tail nil})
+                   (some? u) (assoc :unf (when (c/evald-unf? u) {:k :other :cons []}))))))
+
+(defn- subst-id-bndr
+  "substIdBndr: the binder renamed when in scope already (uniqAway), its fragile info zapped: [env out-bndr]"
+  [env b]
+  (let [k (c/vkey b)
+        b1 (if (and (c/lv? b) (contains? (:in-scope env) k)) (c/clone b) b)
+        b2 (zap-fragile b1)
+        env2 (-> env (assoc-in [:in-scope (c/vkey b2)] b2)
+                 (assoc :subst (if (= (c/vkey b2) k) (dissoc (:subst env) k) (assoc (:subst env) k [:done-id (c/occ-form b2)]))))]
+    [env2 b2]))
+
+(defn- simpl-binders [env bs] (reduce (fn [[env out] b] (let [[e2 b2] (subst-id-bndr env b)] [e2 (conj out b2)])) [env []] bs))
+(defn- simpl-rec-bndrs [env bs] (first (simpl-binders env bs)))
+(defn- simpl-lam-bndrs [env bs] (simpl-binders env (map #(c/update-info % dissoc :unf) bs)))
+
+;;; SimplFloats
+
+(defn- empty-floats [env] {:lets [] :ff :lifted :joins [] :in-scope (:in-scope env)})
+(defn- empty-floats? [fl] (and (empty? (:lets fl)) (empty? (:joins fl))))
+
+(defn- strict-id? [b] (c/*unlifted-type?* (c/id-type b)))
+
+(defn- bind-flag [bind]
+  (if (c/head? bind 'rec)
+    :lifted
+    (let [[_ b r] bind]
+      (cond (not (strict-id? b)) :lifted
+            (c/lit-string? r) :lifted
+            (c/ok-for-speculation? r) :okspec
+            :else :careful))))
+
+(defn- and-ff [a b] (cond (= :careful a) :careful (= :okspec a) (if (= :careful b) :careful :okspec) :else b))
+
+(defn- bind-in-scope [m bind] (into m (map (fn [[_ b _]] [(c/vkey b) b]) (c/bind-pairs bind))))
+
+(defn- join-bind? [bind] (c/join? (second (first (c/bind-pairs bind)))))
+
+(defn- mk-float-bind [env bind]
+  (let [is (bind-in-scope (:in-scope env) bind)
+        fl (if (join-bind? bind)
+             {:lets [] :ff :lifted :joins [bind] :in-scope is}
+             {:lets [bind] :ff (bind-flag bind) :joins [] :in-scope is})]
+    [fl (assoc env :in-scope is)]))
+
+(defn- extend-floats [fl bind]
+  (let [is (bind-in-scope (:in-scope fl) bind)]
+    (if (join-bind? bind)
+      (assoc fl :joins (conj (:joins fl) bind) :in-scope is)
+      (assoc fl :lets (conj (:lets fl) bind) :ff (and-ff (:ff fl) (bind-flag bind)) :in-scope is))))
+
+(defn- add-let-floats [fl lf]
+  (assoc fl :lets (into (:lets fl) (:lets lf)) :ff (and-ff (:ff fl) (:ff lf))
+            :in-scope (reduce bind-in-scope (:in-scope fl) (:lets lf))))
+
+(defn- add-join-floats [fl joins]
+  (assoc fl :joins (into (:joins fl) joins) :in-scope (reduce bind-in-scope (:in-scope fl) joins)))
+
+(defn- add-floats [f1 f2]
+  {:lets (into (:lets f1) (:lets f2)) :ff (and-ff (:ff f1) (:ff f2)) :joins (into (:joins f1) (:joins f2))
+   :in-scope (:in-scope f2)})
+
+(defn- let-floats [binds] {:lets (vec binds) :ff (reduce and-ff :lifted (map bind-flag binds))})
+
+(defn- mk-rec-floats [fl]
+  (cond-> fl
+    (seq (:lets fl)) (assoc :lets [(list 'rec (vec (mapcat c/bind-pairs (:lets fl))))] :ff :lifted)
+    (seq (:joins fl)) (assoc :joins [(list 'rec (vec (mapcat c/bind-pairs (:joins fl))))])))
+
+(defn- wrap-join-floats [joins body] (c/wrap-binds joins body))
+
+(defn- wrap-floats [fl body] (c/wrap-binds (:lets fl) (wrap-join-floats (:joins fl) body)))
+
+(defn- wrap-join-floats-x [fl body] [(assoc fl :joins []) (wrap-join-floats (:joins fl) body)])
+
+(defn- do-float-from-rhs? [top? rec? strict? fl rhs]
+  (and (seq (:lets fl))
+       (or top? (c/cheap? rhs) (c/expandable? rhs))
+       (case (:ff fl)
+         :lifted true
+         :okspec (and (not top?) (not rec?))
+         :careful (and (not top?) (not rec?) strict?))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; SimplCont and ArgInfo (GHC.Core.Opt.Simplify.Utils)
+
+(defn- boring-stop [] {:k :stop :ctxt :boring})
+(defn- rhs-stop [rec?] {:k :stop :ctxt [:rhs rec?]})
+
+(defn- simplified? [d] (not= :nodup d))
+
+(defn- cont-is-rhs [k]
+  (case (:k k) :stop (let [cx (:ctxt k)] (when (vector? cx) cx)) :cast (cont-is-rhs (:cont k)) nil))
+(defn- cont-is-stop? [k] (= :stop (:k k)))
+(defn- cont-is-dupable? [k]
+  (case (:k k)
+    :stop true
+    :cast (cont-is-dupable? (:cont k))
+    (:apply :select :strict-arg) (= :ok (:dup k))
+    false))
+(defn- cont-is-trivial? [k] (case (:k k) :stop true :cast (cont-is-trivial? (:cont k)) false))
+(defn- count-args [k] (case (:k k) :apply (inc (count-args (:cont k))) :cast (count-args (:cont k)) 0))
+
+(defn- cont-args
+  "contArgs: [lone-variable? [ArgSummary...] call-cont]"
+  [interesting-arg k]
+  (if (not (contains? #{:apply :cast} (:k k)))
+    [true [] k]
+    (loop [k k out []]
+      (case (:k k)
+        :apply (recur (:cont k) (conj out (interesting-arg (:env k) (:arg k))))
+        :cast (recur (:cont k) out)
+        [false out k]))))
+
+(defn- drop-cont-args [n k] (if (zero? n) k (case (:k k) :apply (recur (dec n) (:cont k)) :cast (recur n (:cont k)) k)))
+
+(defn- arg-info-expr [f args] (c/mk-apps f (map :arg args)))
+
+(defn- add-val-arg [ai arg]
+  (assoc ai :args (conj (:args ai) {:arg arg :dmd (first (:dmds ai))}) :dmds (rest (:dmds ai)) :discs (rest (:discs ai))))
+
+(defn- strict-arg-info? [ai] (= :strict (first (:dmds ai))))
+
+(defn- push-simplified-args [env args k]
+  (reduce (fn [k a] {:k :apply :arg (:arg a) :env env :dup :simpl :cont k}) k (reverse args)))
+
+(defn- lazy-arg-context [ai]
+  (cond (:encl ai) :rule-arg
+        (pos? (or (first (:discs ai)) 0)) :disc-arg
+        :else :boring))
+
+(defn- strict-arg-context [ai]
+  (cond (:encl ai) :rule-arg
+        (pos? (or (first (:discs ai)) 0)) :disc-arg
+        :else [:rhs false]))
+
+(defn- cont-has-rules? [k]
+  (case (:k k)
+    (:apply :cast) (cont-has-rules? (:cont k))
+    :strict-arg (:encl (:fun k))
+    :stop (= :rule-arg (:ctxt k))
+    false))
+
+(defn- interesting-call-context [env k]
+  (case (:k k)
+    :select (cond (not (:case-case (:mode env))) :boring
+                  (and (= 1 (count (:alts k))) (every? #(= :dead (:k (c/id-occ %))) (nth (first (:alts k)) 2))
+                       (not= :dead (:k (c/id-occ (:bndr k)))))
+                  [:rhs false]
+                  :else :case)
+    :apply :val-app
+    :strict-arg (strict-arg-context (:fun k))
+    :strict-bind :boring
+    :stop (:ctxt k)
+    :cast (interesting-call-context env (:cont k))
+    :boring))
+
+(declare rules-for subst-expr-env)
+
+(defn- arg-type-strictness
+  "add_type_strictness: an argument of an unlifted type demanded strictly"
+  [f n]
+  (let [t (c/id-type f)]
+    (loop [t (when t (c/strip-forall (if (= :forall (first t)) (nth t 3) t))) i 0 out []]
+      (if (and t (c/fun-ty? t) (< i n))
+        (recur (c/strip-forall (second (nth t 2))) (inc i) (conj out (if (c/*unlifted-type?* (first (nth t 2))) :strict :top)))
+        out))))
+
+(defn- mk-arg-info
+  "mkArgInfo"
+  [env f rules k]
+  (let [n (loop [k k n 0] (case (:k k) :apply (recur (:cont k) (inc n)) :cast (recur (:cont k) n) n))
+        unf (c/id-unf f)
+        discs (concat (when (and (= :core (:k unf)) (= :if-good (:k (c/guide unf)))) (:args (c/guide unf))) (repeat 0))]
+    (if (< n (c/id-arity f))
+      {:fun f :args [] :rules rules :encl false :dmds (repeat :top) :discs (repeat 0)}
+      (let [bot (:bot (c/info f))
+            pre (if (:primop (c/details f)) [] [])
+            ts (arg-type-strictness f n)
+            ;; a dead-end Id's demands are finite (its arity's), the rest's infinite; an unlifted argument strict
+            dmds (if bot
+                   (vec (map-indexed (fn [i d] (or (get ts i) d)) (repeat bot :top)))
+                   (concat ts (repeat :top)))]
+        {:fun f :args [] :rules rules :encl (or (boolean (seq rules)) (cont-has-rules? k)) :dmds dmds :discs discs}))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Inlining decisions (GHC.Core.Opt.Simplify.Utils and Inline)
+
+(defn- interesting-arg
+  "interestingArg: :triv | :nontriv | :value"
+  [env e]
+  (letfn [(go-var [n v]
+            (cond (c/conlike-id? v) :value
+                  (> (c/id-arity v) n) :value
+                  (pos? n) :nontriv
+                  :else (let [u (c/id-unf v)]
+                          (case (:k u)
+                            :other (if (empty? (:cons u)) :nontriv :value)
+                            :dfun :value
+                            :core (cond (:conlike u) :value (:value u) :nontriv :else :triv)
+                            :triv))))
+          (go [env n e]
+            (case (first e)
+              (lv v) (let [r (subst-id env e)]
+                       (case (first r)
+                         :done-id (go-var n (second r))
+                         :done-ex (go (zap-subst env) n (second r))
+                         :cont (go (assoc env :subst (second r)) n (nth r 2))))
+              lit :value
+              app (go env (+ n (count (nth e 2))) (second e))
+              cast (go env n (second e))
+              lam (if (pos? n) :nontriv :value)
+              case :nontriv
+              (let letrec) (if (= :value (go env n (nth e 2))) :value :nontriv)
+              :triv))]
+    (go env 0 e)))
+
+(defn- one-occ-pre? [top? occ rhs]
+  (case (:k occ)
+    :dead true
+    :one (cond (and (= 1 (:n occ)) (not (:in-lam occ))) (not top?)
+               (and (= 1 (:n occ)) (:in-lam occ) (:int occ))
+               (letfn [(can [e] (case (first e)
+                                  lit true
+                                  lam true
+                                  (lv v) (let [o (c/id-occ e)] (or (and (= :one (:k o)) (:in-lam o)) (= :many (:k o))))
+                                  false))]
+                 (can rhs))
+               :else false)
+    false))
+
+(defn- pre-inline-unconditionally
+  "preInlineUnconditionally: the extended env, or nil"
+  [env top? b rhs rhs-env]
+  (let [occ (c/id-occ b) unf (c/id-unf b)]
+    (cond (not (:pre-inline (:mode env))) nil
+          (and top? (c/dead-end-id? b)) nil
+          (and (c/join? b) (= :one (:k occ)) (:in-lam occ)) nil
+          (contains? *exported* (c/vkey b)) nil
+          (not (one-occ-pre? top? (or occ {:k :many}) rhs)) nil
+          (not (c/stable-unf? unf)) (extend-subst env b (cont-ex rhs-env rhs))
+          :else nil)))
+
+(defn- post-inline-unconditionally
+  "postInlineUnconditionally"
+  [env ctx old b rhs]
+  (let [occ (c/id-occ old) unf (c/id-unf b)]
+    (cond (= :lb (:k occ)) false
+          (c/stable-unf? unf) false
+          (= :top (:level ctx)) false
+          (contains? *exported* (c/vkey old)) false
+          (c/trivial? rhs) true
+          (= :join (:k ctx)) false
+          :else (case (:k occ)
+                  :one (cond (>= (:n occ) 100) false
+                             (and (= 1 (:n occ)) (not (:in-lam occ))) true
+                             :else (and (if (:in-lam occ) (and (:int occ) (c/cheap-unf? unf)) true)
+                                        (c/small-enough-to-inline? unf)))
+                  :dead true
+                  false))))
+
+(defn- compute-discount [arg-discs res-disc arg-infos cont-info]
+  (let [actual (map (fn [d a] (case a :triv 0 :nontriv 10 :value d)) arg-discs arg-infos)
+        res (if (< (count arg-discs) (count arg-infos))
+              res-disc
+              (case cont-info :boring 0 :case res-disc :val-app res-disc (min 40 res-disc)))]
+    (+ 10 (* 10 (count actual)) (reduce + 0 actual) res)))
+
+(defn- try-unfolding [env v lone arg-infos cont-info u]
+  (let [g (c/guide u) n (count arg-infos)
+        some-benefit (fn [uf-arity is-inline]
+                       (let [sat (>= n uf-arity) over (> n uf-arity)
+                             interesting-args (some #(not= :triv %) arg-infos)]
+                         (if (not sat)
+                           (boolean interesting-args)
+                           (or (boolean interesting-args)
+                               (if over true
+                                   (case cont-info
+                                     :case (not (and lone (:expandable u)))
+                                     :val-app true
+                                     :rule-arg (pos? uf-arity)
+                                     :disc-arg (pos? uf-arity)
+                                     (if (and (= [:rhs false] cont-info) is-inline) (pos? uf-arity) false)))))))]
+    (case (:k g)
+      :never nil
+      :when (when (and (or (>= n (:arity g)) (and (:unsat-ok g) (pos? n)))
+                       (or (:boring-ok g) (some-benefit (:arity g) true)))
+              (c/tmpl u))
+      :if-good (let [size (:size g) depth (:case-depth env)
+                     penalty (if (<= depth c/uf-case-threshold) 0 (quot (* size (- depth c/uf-case-threshold)) c/uf-case-scaling))
+                     disc (compute-discount (:args g) (:res g) arg-infos cont-info)
+                     small (<= (- (+ size penalty) disc) c/uf-use-threshold)]
+                 (cond (and (c/join? v) small)
+                       (when (or (some true? (map (fn [d a] (and (= a :value) (pos? d))) (:args g) arg-infos))
+                                 (some (fn [x] (let [b (get (:in-scope env) (c/vkey x))]
+                                                 (and b (c/evald-unf? (c/id-unf b)) (not (c/evald-unf? (c/id-unf x))))))
+                                       (c/free-locals (c/tmpl u))))
+                         (c/tmpl u))
+                       (and (:work-free u) (some-benefit (count (:args g)) false) small) (c/tmpl u)
+                       :else nil))
+      nil)))
+
+(defn- call-site-inline [env v lone arg-infos cont-info]
+  (let [u (c/id-unf v)]
+    (when (= :core (:k u))
+      (when (or (c/compulsory-unf? u) (:inline (:mode env)))
+        (try-unfolding env v lone arg-infos cont-info u)))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Built-in rules (sm_rules is off at -O0, but built-in rules cannot be switched off: GHC.Core.Rules.matchRule)
+
+(declare expr-is-con-app)
+
+(defn- rules-for
+  "The built-in rules of an Id: :classop (classOpRule), :primop (ConstantFold's primOpRules)"
+  [f]
+  (cond (and (c/classop-id? f) (not (:unary (c/details f)))) [:classop]
+        (and (c/primop-of f) (cf/has-rules? (c/primop-of f))) [:primop]
+        (contains? #{"dataToTagSmall#" "dataToTagLarge#"} (c/primop-of f)) [:data-to-tag]
+        :else []))
+
+(defn- try-rules
+  "tryRules: [rule-arity rhs] or nil"
+  [env rules f args]
+  (when (seq rules)
+    (case (first rules)
+      :classop (when (seq args)
+                 (when-let [[floats con cargs] (expr-is-con-app env (first args))]
+                   (let [i (:index (c/details f))]
+                     (when (< i (count cargs))
+                       [1 (c/wrap-binds floats (nth cargs i))]))))
+      :primop (when-let [r (cf/primop-rule (c/primop-of f) args)] [(count args) r])
+      ;; ConstantFold's dataToTagRule: the tag of a known constructor (0-based)
+      :data-to-tag (when (= 1 (count args))
+                     (when-let [[floats con _] (expr-is-con-app env (first args))]
+                       (when-let [t (*con-tag* con)]
+                         [1 (c/wrap-binds floats (list 'lit (str (dec t) "#")))])))
+      nil)))
+
+(defn- cont-out-args
+  "contOutArgs: the continuation's arguments as OutExprs"
+  [env k]
+  (loop [k k out []]
+    (case (:k k)
+      :apply (recur (:cont k) (conj out (if (simplified? (:dup k)) (:arg k) (subst-expr-env (:env k) (:arg k)))))
+      :cast (recur (:cont k) out)
+      out)))
+
+(defn subst-expr-env
+  "GHC.Core.Subst.substExpr of the env's substitution"
+  [env e]
+  (let [m (into {} (for [[k sr] (:subst env)]
+                     [k (case (first sr)
+                          :done-id (second sr)
+                          :done-ex (second sr)
+                          :cont (subst-expr-env (assoc env :subst (second sr)) (nth sr 2)))]))]
+    (if (empty? m) e (c/subst-expr m e))))
+
+;;; exprIsConApp_maybe (GHC.Core.SimpleOpt), with the in-scope unfoldings
+
+(defn- dfun-args [u args]
+  (when (= (count (:bndrs u)) (count args))
+    (mapv #(c/subst-expr (zipmap (map c/vkey (:bndrs u)) args) %) (:args u))))
+
+(defn expr-is-con-app
+  "exprIsConApp_maybe: [floats con args] or nil"
+  [env e]
+  (letfn [(unf-of [v] (c/id-unf (refine env v)))
+          (go [floats e args]
+            (case (first e)
+              cast (go floats (second e) args)
+              app (go floats (second e) (into (vec (nth e 2)) args))
+              lam (if (seq args)
+                    (let [[b & bs] (second e)
+                          body (if (seq bs) (list 'lam (vec bs) (nth e 2)) (nth e 2))]
+                      (go (conj floats (list 'bind b (first args))) body (vec (rest args))))
+                    nil)
+              let (go (conj floats (first (second e))) (nth e 2) args)
+              (lv v) (let [v2 (refine env e)]
+                       (cond
+                         (and (c/con-id? v2) (= (count args) (c/id-arity v2)))
+                         (let [strict (:strict (c/details v2))]
+                           (when (every? true? (map (fn [a s] (or (not s) (c/hnf? a))) args (concat strict (repeat false))))
+                             [floats (assoc (c/vkey v2) 1 "data") args]))
+                         (= :dfun (:k (unf-of v2)))
+                         (when-let [as (dfun-args (unf-of v2) args)] [floats (:con (unf-of v2)) as])
+                         (and (zero? (c/id-arity v2)) (= :core (:k (unf-of v2))) (:expandable (unf-of v2)))
+                         (go floats (c/tmpl (unf-of v2)) args)
+                         :else nil))
+              nil))]
+    (go [] e [])))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The Simplifier (GHC.Core.Opt.Simplify.Iteration)
+
+(declare simpl-expr-f simpl-expr-c simpl-expr rebuild rebuild-call simpl-lam complete-bind simpl-lazy-bind
+         simpl-join-bind simpl-alts mk-dupable-cont mk-dupable-case-cont simpl-alt make-trivial prepare-rhs
+         simpl-non-rec-body complete-bind-x simpl-rec-bind prepare-binding simpl-join-rhs rebuild-case)
+
+(defn- occ-fs [b] (if (vector? b) (nth b 3) (second b)))
+
+(defn- simpl-lazy-arg [env dup arg-env arg ai]
+  (if (simplified? dup)
+    [dup arg-env arg]
+    (let [arg-env2 (in-scope-from-e arg-env env)
+          stop (if ai {:k :stop :ctxt (lazy-arg-context ai)} (boring-stop))]
+      [:simpl (zap-subst arg-env2) (simpl-expr-c arg-env2 arg stop)])))
+
+(defn- bc-level [ctx] (= :top (:level ctx)))
+
+(defn- want-eta-expansion? [e]
+  (case (first e) cast (want-eta-expansion? (second e)) app (want-eta-expansion? (second e)) (lv v lit) false true))
+
+(defn- try-eta-expand-rhs
+  "tryEtaExpandRhs: [ArityType rhs]"
+  [env ctx b rhs]
+  (let [[increased at] (c/find-rhs-arity (= :rec (:rec ctx)) b rhs)]
+    (if (and (:eta-expand (:mode env)) (want-eta-expansion? rhs) increased (not= :join (:k ctx)))
+      (do (tick!)
+          (when *trace* (binding [*out* *err*] (println "eta" (pr-str (c/vkey b)) (pr-str at) (pr-str (c/id-type b)) (binding [*print-meta* true] (pr-str rhs)))))
+          [at (c/eta-expand-at at rhs (c/id-type b))])
+      [at rhs])))
+
+(defn- mk-let-unfolding [env top? b join? rhs]
+  (c/mk-unfolding :vanilla top? (c/dead-end-id? b) join? rhs oa/occur-analyse-expr))
+
+(defn- simpl-stable-unfolding [env ctx b u]
+  (case (:k u)
+    :dfun (let [[env2 bs] (simpl-binders env (:bndrs u))
+                u2 (assoc u :bndrs bs :args (mapv #(simpl-expr env2 %) (:args u)))]
+            (when *trace* (binding [*out* *err*] (println "dfun" (pr-str (c/vkey b)) (pr-str (map #(count (pr-str %)) (:args u))) "->" (pr-str (map #(count (pr-str %)) (:args u2))))))
+            u2)
+    :core (if (c/stable-unf? u)
+            (let [e2 (if (= :join (:k ctx))
+                       (simpl-join-rhs env b (c/tmpl u) (:cont ctx))
+                       (simpl-expr-c env (c/tmpl u) (rhs-stop (= :rec (:rec ctx)))))]
+              (if (= :when (:k (c/guide u)))
+                (assoc (c/mk-unfolding (:src u) (bc-level ctx) false false e2 oa/occur-analyse-expr) :guide (c/guide u) :src (:src u))
+                (assoc (mk-let-unfolding env (bc-level ctx) b false e2) :src (:src u))))
+            nil)
+    u))
+
+(defn- simpl-let-unfolding [env ctx b rhs at old-unf]
+  (cond (c/stable-unf? old-unf) (simpl-stable-unfolding env ctx b old-unf)
+        (= :dfun (:k old-unf)) (simpl-stable-unfolding env ctx b old-unf)
+        (and (c/join? b) (= :many (:k (c/id-occ b)))) nil
+        :else (mk-let-unfolding env (bc-level ctx) b (c/join? b) rhs)))
+
+(defn- add-let-bndr-info [b at unf]
+  (c/update-info b (fn [i] (cond-> (assoc i :arity (c/at-arity at) :unf unf)
+                             (c/dead-end-div? (:div at)) (assoc :bot (c/at-arity at))
+                             (not (c/dead-end-div? (:div at))) (dissoc :bot)))))
+
+(defn- try-cast-worker-wrapper
+  "tryCastWorkerWrapper: x = e |> co split into a worker x1 = e and a wrapper x = x1 |> co"
+  [env ctx old b rhs]
+  (if (and (c/head? rhs 'cast) (= :let (:k ctx)) (not (c/dfun-id? b))
+           (not (c/trivial? (second rhs))) (not (c/stable-unf? (c/id-unf b))))
+    (let [[_ body co] rhs
+          work-ty (:l co)
+          work-arity (min (c/id-arity b) (or (c/type-arity work-ty) 1000))
+          work (c/fresh-local (occ-fs b) {:arity work-arity :type work-ty})
+          _ (when (and work-ty c/*new-types*) (swap! c/*new-types* assoc work work-ty))
+          [rhs-floats work-rhs] (prepare-binding env (bc-level ctx) (= :rec (:rec ctx)) false work (empty-floats env) body)
+          work-unf (mk-let-unfolding env (bc-level ctx) work false work-rhs)
+          work2 (c/update-info work assoc :unf work-unf)
+          floats (extend-floats rhs-floats (list 'bind work2 work-rhs))
+          triv (c/mk-cast (c/occ-form work2) co)]
+      (if (post-inline-unconditionally env ctx old b triv)
+        (do (tick!) [floats (extend-subst (in-scope-from-f env floats) old [:done-ex triv nil])])
+        (let [wrap-unf (mk-let-unfolding env (bc-level ctx) b false triv)
+              b2 (c/update-info b assoc :unf wrap-unf :inl :cast-wrapper)
+              floats2 (extend-floats floats (list 'bind b2 triv))]
+          [floats2 (in-scope-from-f env floats2)])))
+    (mk-float-bind env (list 'bind b rhs))))
+
+(defn- complete-bind
+  "completeBind: [floats env]"
+  [ctx [old unf-se] [b rhs env]]
+  (let [[at eta-rhs] (try-eta-expand-rhs env ctx b rhs)
+        old-unf (c/real-unf old)
+        new-unf (simpl-let-unfolding (in-scope-from-e unf-se env) ctx old eta-rhs at old-unf)
+        b2 (add-let-bndr-info b at new-unf)]
+    (if (post-inline-unconditionally env ctx old b2 eta-rhs)
+      (do (tick!)
+          [(empty-floats env) (extend-subst env old [:done-ex (or (c/unf-template new-unf) eta-rhs) (c/join-arity b2)])])
+      (try-cast-worker-wrapper env ctx old b2 eta-rhs))))
+
+(defn- binding-ok? [top? e] (or (not top?) (not (unlifted-expr-hook? e)) (c/lit-string? e)))
+
+(defn- prepare-rhs
+  "prepareRhs: an expandable application's arguments made trivial: [let-floats rhs]"
+  [env top? occ rhs]
+  (let [expandable (loop [e rhs n 0]
+                     (case (first e)
+                       (lv v) (c/expandable-app? (refine env e) n)
+                       app (recur (second e) (+ n (count (nth e 2))))
+                       cast (recur (second e) n)
+                       false))]
+    (if-not expandable
+      [{:lets [] :ff :lifted} rhs]
+      (letfn [(anf [e]
+                (case (first e)
+                  cast (let [[f e2] (anf (second e))] [f (list 'cast e2 (nth e 2))])
+                  app (let [[f0 args] [(second e) (nth e 2)]
+                            [fl f2] (anf f0)
+                            [fl2 as2] (reduce (fn [[fl out] a]
+                                                (let [[f3 a2] (make-trivial env false :top occ a)]
+                                                  [(add-let-floats fl f3) (conj out a2)]))
+                                              [fl []] args)]
+                        [fl2 (c/mk-apps f2 as2)])
+                  [{:lets [] :ff :lifted :in-scope {}} e]))]
+        (let [[fl e] (anf rhs)] [(select-keys fl [:lets :ff]) e])))))
+
+(defn- make-trivial
+  "makeTrivial: [let-floats trivial-expr]"
+  [env top? dmd occ e]
+  (cond
+    (or (c/trivial? e) (not (binding-ok? top? e))) [{:lets [] :ff :lifted} e]
+    (c/head? e 'cast) (let [[fl e2] (make-trivial env top? dmd occ (second e))] [fl (list 'cast e2 (nth e 2))])
+    :else
+    (let [[fl e1] (prepare-rhs env top? occ e)
+          v (if (c/lit-string? e1)
+              (let [t [:tc ["ext" "tc" "GHC.Internal.Prim" "Addr#"] []] v (c/fresh-local occ {:type t})]
+                (when c/*new-types* (swap! c/*new-types* assoc v t))
+                v)
+              (c/fresh-local occ {}))
+          [at e2] (try-eta-expand-rhs env {:k :let :level (if top? :top :nested) :rec :nonrec} v e1)
+          unf (mk-let-unfolding env top? v false e2)
+          v2 (add-let-bndr-info v at unf)]
+      [(add-let-floats (assoc fl :in-scope {}) (let-floats [(list 'bind v2 e2)])) (c/occ-form v2)])))
+
+(defn- prepare-binding
+  "prepareBinding: [floats rhs]"
+  [env top? rec? strict? b rhs-floats rhs]
+  (let [[fl1 rhs1] (wrap-join-floats-x rhs-floats rhs)
+        renv (in-scope-from-f env fl1)
+        [anf rhs2] (prepare-rhs renv top? (occ-fs b) rhs1)
+        all (add-let-floats fl1 anf)]
+    (if (and (= :enabled (:float (:mode env))) (do-float-from-rhs? top? rec? strict? all rhs2))
+      (do (when (seq (:lets anf)) (tick!)) [all rhs2])
+      [(empty-floats env) (wrap-floats fl1 rhs1)])))
+
+(defn- rebuild-lam
+  "rebuildLam: eta reduction, else eta expansion out of a right-hand side, the casts swizzled out of the lambdas"
+  [env bs body k]
+  (if (empty? bs)
+    body
+    (let [mk (fn mk [bs body]
+               (cond (c/head? body 'lam) (mk (into (vec bs) (second body)) (nth body 2))
+                     (and (c/head? body 'cast) (:cast-swizzle (:mode env)))
+                     (c/mk-cast (mk bs (second body)) (c/mk-pi-cos bs (nth body 2)))
+                     :else (c/mk-lams bs body)))
+          red (when (:eta-reduce (:mode env)) (c/try-eta-reduce (:rec-ids env) bs body))]
+      (cond red (do (tick!) red)
+            (and (nil? (cont-is-rhs k)) (:eta-expand (:mode env)) (seq bs))
+            (if-let [at (c/eta-expand-arity body)]
+              (do (tick!) (mk bs (c/eta-expand-at at body)))
+              (mk bs body))
+            :else (mk bs body)))))
+
+(defn- simpl-lazy-bind
+  "simplLazyBind: [floats env]"
+  [top? rec? [b unf-se] [b1 env] [rhs rhs-se]]
+  (let [renv (in-scope-from-e rhs-se env)
+        k (rhs-stop rec?)
+        [fl0 body0] (simpl-expr-f renv rhs k)
+        [fl2 body2] (prepare-binding env top? rec? false b1 fl0 body0)
+        env1 (in-scope-from-f env fl2)
+        [bf env2] (complete-bind {:k :let :level (if top? :top :nested) :rec (if rec? :rec :nonrec)} [b unf-se] [b1 body2 env1])]
+    [(add-floats fl2 bf) env2]))
+
+(defn- simpl-join-rhs [env b e k]
+  (let [ja (c/join-arity b)
+        [bs body] (or (c/collect-n-binders ja e) [[] e])
+        [env2 bs2] (simpl-lam-bndrs env bs)]
+    (c/mk-lams bs2 (simpl-expr-c env2 body k))))
+
+(defn- simpl-join-bind [rec? k [old unf-se] [b env] [rhs rhs-se]]
+  (let [renv (in-scope-from-e rhs-se env)
+        rhs2 (simpl-join-rhs renv old rhs k)]
+    (complete-bind {:k :join :rec (if rec? :rec :nonrec) :cont k} [old unf-se] [b rhs2 env])))
+
+(defn- simpl-rec-or-top-pair [env ctx old b rhs]
+  (if-let [env2 (pre-inline-unconditionally env (= :top (:level ctx)) old rhs env)]
+    (do (tick!) [(empty-floats env) env2])
+    (if (= :join (:k ctx))
+      (simpl-join-bind (= :rec (:rec ctx)) (:cont ctx) [old env] [b env] [rhs env])
+      (simpl-lazy-bind (= :top (:level ctx)) (= :rec (:rec ctx)) [old env] [b env] [rhs env]))))
+
+(defn- simpl-rec-bind [env ctx pairs]
+  (let [triples (mapv (fn [[_ b r]] [b (lookup-rec-bndr env b) r]) pairs)
+        rec-ids (:rec-ids env)
+        env1 (update env :rec-ids into (map (fn [[_ b _]] (c/vkey b)) triples))
+        [fl env2] (reduce (fn [[fl env] [old b r]]
+                            (let [[f2 env2] (simpl-rec-or-top-pair env ctx old b r)] [(add-floats fl f2) env2]))
+                          [(empty-floats env1) env1] triples)]
+    [(mk-rec-floats fl) (assoc env2 :rec-ids rec-ids)]))
+
+(defn- simpl-non-rec-bndr [env b] (subst-id-bndr env b))
+
+(defn- needs-case-binding? [lev e] (and (= :unlifted lev) (not (c/ok-for-speculation? e))))
+
+(defn- simpl-non-rec-e
+  "simplNonRecE"
+  [env from b [rhs rhs-se] body k]
+  (if (= [:beta :unlifted] from)
+    (simpl-expr-f (in-scope-from-e rhs-se env) rhs {:k :strict-bind :bndr b :body body :from from :env env :cont k :dup :nodup})
+    (let [[env1 b1] (simpl-non-rec-bndr env b)
+          [fl1 env3] (simpl-lazy-bind false false [b env] [b1 env1] [rhs rhs-se])
+          [fl2 e2] (simpl-non-rec-body env3 from body k)]
+      [(add-floats fl1 fl2) e2])))
+
+(defn- simpl-non-rec-body [env from body k]
+  (if (= :let from) (simpl-expr-f env body k) (simpl-lam env body k)))
+
+(defn- complete-bind-x
+  "completeBindX"
+  [env from b rhs body k]
+  (if (and (vector? from) (needs-case-binding? (second from) rhs))
+    (let [[env1 b1] (simpl-non-rec-bndr env b)
+          [fl e2] (simpl-non-rec-body env1 from body k)]
+      [(empty-floats env) (list 'case rhs b1 [(list 'alt :default [] (wrap-floats fl e2))])])
+    (let [[env1 b1] (simpl-non-rec-bndr env b)
+          [rfl rhs1] (prepare-binding env false false (strict-id? b1) b1 (empty-floats env) rhs)
+          env3 (in-scope-from-f env1 rfl)
+          [bf env4] (complete-bind {:k :let :level :nested :rec :nonrec} [b env] [b1 rhs1 env3])
+          [bfl body2] (simpl-non-rec-body env4 from body k)]
+      [(add-floats (add-floats rfl bf) bfl) body2])))
+
+(defn- simpl-aux-bind
+  "simplAuxBind"
+  [env b rhs]
+  (let [occ (c/id-occ b)]
+    (cond (= :dead (:k occ)) [(empty-floats env) env]
+          (or (c/trivial? rhs) (and (= :one (:k occ)) (= 1 (:n occ)) (not (:in-lam occ))))
+          [(empty-floats env) (extend-subst env b [:done-ex rhs nil])]
+          :else (let [[anf rhs1] (prepare-rhs env false (occ-fs b) rhs)
+                      _ (when (seq (:lets anf)) (tick!))
+                      rfl (add-let-floats (empty-floats env) anf)
+                      [env1 b1] (subst-id-bndr (in-scope-from-f env rfl) b)
+                      [bf env2] (complete-bind {:k :let :level :nested :rec :nonrec} [b env] [b1 rhs1 env1])]
+                  [(add-floats rfl bf) env2]))))
+
+(defn- wrap-join-cont [env k thing]
+  (cond (cont-is-stop? k) (thing env k)
+        :else (let [[fl1 k2] (mk-dupable-cont env k)
+                    [fl2 r] (thing (in-scope-from-f env fl1) k2)]
+                [(add-floats fl1 fl2) r])))
+
+(defn- simpl-non-rec-join-point [env b rhs body k]
+  (wrap-join-cont env k
+                  (fn [env k]
+                    (let [[env1 b1] (subst-id-bndr env b)
+                          [fl1 env3] (simpl-join-bind false k [b env] [b1 env1] [rhs env])
+                          [fl2 body2] (simpl-expr-f env3 body k)]
+                      [(add-floats fl1 fl2) body2]))))
+
+(defn- simpl-rec-join-point [env pairs body k]
+  (wrap-join-cont env k
+                  (fn [env k]
+                    (let [env1 (simpl-rec-bndrs env (map second pairs))
+                          [fl1 env2] (simpl-rec-bind env1 {:k :join :rec :rec :cont k} pairs)
+                          [fl2 body2] (simpl-expr-f env2 body k)]
+                      [(add-floats fl1 fl2) body2]))))
+
+(defn- simpl-rec-e [env pairs body k]
+  (let [env1 (simpl-rec-bndrs env (map second pairs))
+        [fl1 env2] (simpl-rec-bind env1 {:k :let :level :nested :rec :rec} pairs)
+        [fl2 e2] (simpl-expr-f env2 body k)]
+    [(add-floats fl1 fl2) e2]))
+
+(defn- trim-join-cont [ja k]
+  (if (nil? ja)
+    k
+    (letfn [(trim [n k]
+              (cond (zero? n) (if (cont-is-stop? k) k (boring-stop))
+                    (= :apply (:k k)) (assoc k :cont (trim (dec n) (:cont k)))
+                    :else k))]
+      (trim ja k))))
+
+(defn- lazy-con-rep? [v] (and (c/con-id? v) (not (some true? (:strict (c/details v))))))
+
+(defn- try-inlining [env v k]
+  (let [[lone arg-infos call-k] (cont-args interesting-arg k)
+        cx (interesting-call-context env call-k)]
+    (call-site-inline env v lone arg-infos cx)))
+
+(defn- simpl-out-id [env f k]
+  (let [rules (rules-for f)
+        m (when (seq rules) (try-rules env rules f (cont-out-args env k)))]
+    (if m
+      (do (tick!) (when *trace* (binding [*out* *err*] (println "rule" (pr-str (c/vkey f)) (pr-str (second m))))) (simpl-expr-f env (second m) (drop-cont-args (first m) k)))
+      (if-let [e (try-inlining env f k)]
+        (do (tick!) (when *trace* (binding [*out* *err*] (println "inline" (pr-str (c/vkey f)) (pr-str (second (cont-args interesting-arg k))) (pr-str (:k (c/guide (c/id-unf f)))))))
+            (simpl-expr-f env e k))
+        (rebuild-call env (mk-arg-info env f rules k) k)))))
+
+(defn- simpl-in-id [env v k]
+  (if (and (c/gv? v) (lazy-con-rep? v))
+    (rebuild (zap-subst env) v k)
+    (let [r (subst-id env v)]
+      (case (first r)
+        :cont (simpl-expr-f (assoc env :subst (second r)) (nth r 2) k)
+        :done-id (simpl-out-id (zap-subst env) (second r) (trim-join-cont (c/join-arity (second r)) k))
+        :done-ex (simpl-expr-f (zap-subst env) (second r) (trim-join-cont (nth r 2) k))))))
+
+(defn- rebuild-call [env ai k]
+  ;; a loop over the arguments (the interpreter's call depth is bounded: a long do block nests deeply)
+  (loop [ai ai k k]
+    (cond
+      (and (not (seq (:dmds ai))) (not (cont-is-trivial? k)))
+      [(empty-floats env) (arg-info-expr (:fun ai) (:args ai))]
+      (= :apply (:k k))
+      (let [{:keys [arg dup cont]} k]
+        (cond (simplified? dup) (recur (add-val-arg ai arg) cont)
+              (and (strict-arg-info? ai) (:case-case (:mode env)))
+              (simpl-expr-f (in-scope-from-e (:env k) env) arg {:k :strict-arg :fun ai :dup :simpl :cont cont})
+              :else (let [[_ _ a2] (simpl-lazy-arg env dup (:env k) arg ai)] (recur (add-val-arg ai a2) cont))))
+      (empty? (:rules ai)) (rebuild env (arg-info-expr (:fun ai) (:args ai)) k)
+      :else (let [args (:args ai)
+                  m (try-rules env (:rules ai) (:fun ai) (map :arg args))]
+              (if m
+                (do (tick!) (simpl-expr-f env (second m) (push-simplified-args env (drop (first m) args) k)))
+                (rebuild env (arg-info-expr (:fun ai) (:args ai)) k))))))
+
+(defn- add-coerce [env co k]
+  (cond (c/co-refl? co) k
+        (= :cast (:k k)) (add-coerce env (c/co-trans co (:co k)) (:cont k))
+        (= :apply (:k k))
+        (if-let [[c1 c2] (c/push-co-val-arg co)]
+          (let [tail (if c2 (add-coerce env c2 (:cont k)) (:cont k))]
+            (if (nil? c1)
+              (assoc k :cont tail)
+              (let [[dup se a2] (simpl-lazy-arg env (:dup k) (:env k) (:arg k) nil)]
+                {:k :apply :arg (c/mk-cast a2 c1) :env se :dup dup :cont tail})))
+          {:k :cast :co co :cont k})
+        :else {:k :cast :co co :cont k}))
+
+(defn- simpl-cast [env body co k]
+  (simpl-expr-f env body (if (c/co-refl? co) k (add-coerce env co k))))
+
+(defn- zap-lambda-bndrs
+  "zapLambdaBndrs: a lambda applied to fewer arguments than it has binders gets its binders' occurrences inside a lambda"
+  [e n]
+  (let [bs (second e)]
+    (if (or (>= n (count bs)) (every? #(:oneshot (c/info %)) (drop n bs)))
+      e
+      (list 'lam (vec (map-indexed (fn [i b]
+                                     (if (< i n)
+                                       (let [o (c/id-occ b)]
+                                         (if (and (= :one (:k o)) (not (:in-lam o))) (c/update-info b assoc :occ (assoc o :in-lam true :tail nil)) b))
+                                       b))
+                                   bs))
+            (nth e 2)))))
+
+(defn- lam-arg-levity [b arg] (if (c/*unlifted-type?* (c/id-type b)) :unlifted (if (unlifted-expr-hook? arg) :unlifted :lifted)))
+
+(defn- simpl-lam [env e k]
+  (if-not (c/head? e 'lam)
+    (simpl-expr-f env e k)
+    (let [[b & bs] (second e)
+          body (if (seq bs) (list 'lam (vec bs) (nth e 2)) (nth e 2))]
+      (if (= :apply (:k k))
+        (let [{:keys [arg dup cont] se :env} k
+              lev (lam-arg-levity b arg)
+              from [:beta lev]]
+          (tick!)
+          (let [pre (pre-inline-unconditionally env false b arg se)]
+            (cond (and pre (not (needs-case-binding? lev arg))
+                       (not (and (simplified? dup) (not (c/trivial? arg)) (not= :dead (:k (c/id-occ b))))))
+                  (simpl-lam pre body cont)
+                  (simplified? dup) (complete-bind-x env from b arg body cont)
+                  :else (simpl-non-rec-e env from b [arg se] body cont))))
+        (let [[ibs ibody] (c/collect-binders body)
+              [env2 bs2] (simpl-lam-bndrs env (cons b ibs))
+              body2 (simpl-expr env2 ibody)
+              lam (rebuild-lam env2 bs2 body2 k)]
+          (rebuild env2 lam k))))))
+
+(defn- join-point-binding
+  "joinPointBinding_maybe: [join-binder rhs] or nil"
+  [b rhs]
+  (cond (c/join? b) [b rhs]
+        :else nil))
+
+(defn simpl-expr-f
+  "simplExprF: [floats expr]"
+  [env e k]
+  (case (first e)
+    (lv v) (simpl-in-id env e k)
+    lit (rebuild env e k)
+    cast (let [co (nth e 2)] (recur env (second e) (if (c/co-refl? co) k (add-coerce env co k))))
+    app (recur env (second e) (reduce (fn [k a] {:k :apply :arg a :env env :dup :nodup :cont k}) k (reverse (nth e 2))))
+    lam (simpl-lam env (zap-lambda-bndrs e (count-args k)) k)
+    case (let [[_ s b alts] e] (simpl-expr-f env s {:k :select :dup :nodup :bndr b :alts alts :env env :cont k}))
+    letrec (let [pairs (second e)]
+             (if (every? (fn [[_ b _]] (c/join? b)) pairs)
+               (simpl-rec-join-point env pairs (nth e 2) k)
+               (simpl-rec-e env pairs (nth e 2) k)))
+    let (let [[_ [[_ b rhs]] body] e]
+          (if-let [env2 (pre-inline-unconditionally env false b rhs env)]
+            (do (tick!) (simpl-expr-f env2 body k))
+            (if-let [[jb jr] (join-point-binding b rhs)]
+              (simpl-non-rec-join-point env jb jr body k)
+              (simpl-non-rec-e env :let b [rhs env] body k))))
+    (rebuild env e k)))
+
+(defn simpl-expr-c [env e k]
+  (let [[fl e2] (simpl-expr-f env e k)] (wrap-floats fl e2)))
+
+(defn simpl-expr [env e] (simpl-expr-c env e (boring-stop)))
+
+(defn- rebuild-go [env e k]
+  (case (:k k)
+    :stop [(empty-floats env) e]
+    :cast (rebuild-go env (c/mk-cast e (:co k)) (:cont k))
+    :select (rebuild-case (in-scope-from-e (:env k) env) e (:bndr k) (:alts k) (:cont k))
+    :strict-arg (rebuild-call env (add-val-arg (:fun k) e) (:cont k))
+    :strict-bind (complete-bind-x (in-scope-from-e (:env k) env) (:from k) (:bndr k) e (:body k) (:cont k))
+    :apply (let [[_ _ a2] (simpl-lazy-arg env (:dup k) (:env k) (:arg k) nil)]
+             (rebuild-go env (c/mk-apps e [a2]) (:cont k)))))
+
+(defn rebuild [env e k] (rebuild-go (zap-subst env) e k))
+
+;;; Cases
+
+(defn- con-name? [c] (vector? c))
+
+(defn- missing-alt [env k]
+  [(empty-floats env)
+   (list 'app (list 'v ["ext" "var" "GHC.Internal.Control.Exception.Base" "absentSumFieldError"]) [])])
+
+(defn- known-con [env scrut dc-floats dc args bndr bs rhs k]
+  (let [zap-occ (fn [b] (if (= :dead (:k (c/id-occ bndr))) b (c/update-info b assoc :occ {:k :many :tail nil})))
+        [fl1 env1] (reduce (fn [[fl env] [b a]]
+                             (let [[f2 env2] (simpl-aux-bind env (zap-occ b) a)] [(add-floats fl f2) env2]))
+                           [(empty-floats env) env] (map vector bs args))
+        [fl2 env2] (cond (= :dead (:k (c/id-occ bndr))) [(empty-floats env1) env1]
+                         (c/trivial? scrut) [(empty-floats env1) (extend-subst env1 bndr [:done-ex scrut nil])]
+                         :else (let [dargs (mapv (fn [b] (let [r (subst-id env1 b)]
+                                                           (case (first r)
+                                                             :done-id (second r) :done-ex (second r)
+                                                             :cont (simpl-expr (assoc env1 :subst (second r)) (nth r 2)))))
+                                                 bs)]
+                                 (simpl-aux-bind env1 bndr (c/mk-apps (list 'v (assoc dc 1 "var")) dargs))))
+        [fl3 e2] (simpl-expr-f env2 rhs k)
+        all (add-floats (add-floats fl1 fl2) fl3)]
+    (if (empty? dc-floats)
+      [all e2]
+      [(empty-floats env) (c/wrap-binds dc-floats (wrap-floats all e2))])))
+
+(defn- do-case-to-let? [scrut]
+  (if (unlifted-expr-hook? scrut) (c/ok-for-speculation? scrut) (c/hnf? scrut)))
+
+(defn- really-rebuild-case [env scrut b alts k]
+  (if-not (:case-case (:mode env))
+    (rebuild (zap-subst env) (simpl-alts env scrut b alts (boring-stop)) k)
+    (let [[fl env2 k2] (mk-dupable-case-cont env alts k)]
+      [fl (simpl-alts env2 scrut b alts k2)])))
+
+(defn rebuild-case
+  "rebuildCase"
+  [env scrut b alts k]
+  (let [con-app (when-not (and (c/head? scrut 'lit) (not (c/lit-string? scrut))) (expr-is-con-app env scrut))
+        simple-rhs (fn [env wfloats cb-rhs rhs]
+                     (let [[fl1 env2] (simpl-aux-bind env b cb-rhs)
+                           [fl2 e2] (simpl-expr-f env2 rhs k)]
+                       (if (empty? wfloats) [(add-floats fl1 fl2) e2]
+                           [(empty-floats env) (c/wrap-binds wfloats (wrap-floats (add-floats fl1 fl2) e2))])))]
+    (cond
+      (and (c/head? scrut 'lit) (not (c/lit-string? scrut)) (re-find #"#$" (second scrut)))
+      (do (tick!)
+          (if-let [[_ _ _ rhs] (c/find-alt scrut alts)]
+            (simple-rhs env [] scrut rhs)
+            (missing-alt env k)))
+      con-app
+      (let [[wfloats con args] con-app]
+        (tick!)
+        (if-let [[_ ac bs rhs] (c/find-alt con alts)]
+          (if (= :default ac)
+            (simple-rhs env wfloats (if (c/trivial? scrut) scrut (c/mk-apps (list 'v (assoc con 1 "var")) args)) rhs)
+            (known-con env scrut wfloats con args b bs rhs k))
+          (missing-alt env k)))
+      (= 1 (count alts))
+      (let [[_ _ bs rhs] (first alts)
+            all-dead (every? #(= :dead (:k (c/id-occ %))) bs)
+            plain-seq (and all-dead (= :dead (:k (c/id-occ b))))]
+        (cond (and plain-seq (c/ok-to-discard? scrut)) (do (tick!) (simpl-expr-f env rhs k))
+              (and all-dead (do-case-to-let? scrut))
+              (do (tick!) (let [[fl1 env2] (simpl-aux-bind env b scrut) [fl2 e2] (simpl-expr-f env2 rhs k)] [(add-floats fl1 fl2) e2]))
+              :else (really-rebuild-case env scrut b alts k)))
+      :else (really-rebuild-case env scrut b alts k))))
+
+(defn- prepare-alts
+  "prepareAlts: filterAlts (the constructors the scrutinee cannot be) and refineDefaultAlt: [impossible-defaults alts]"
+  [env scrut b alts]
+  (let [imposs (when (c/vref? scrut) (let [u (c/id-unf (refine env scrut))] (when (= :other (:k u)) (:cons u))))
+        alts1 (vec (remove (fn [[_ con _ _]] (and (con-name? con) (some #(= % con) imposs))) alts))
+        cons-seen (set (keep (fn [[_ con _ _]] (when (con-name? con) con)) alts1))
+        idcs (into (set imposs) cons-seen)
+        dflt (some (fn [a] (when (= :default (second a)) a)) alts1)]
+    (if (and dflt (seq cons-seen))
+      (let [fam (c/*con-family* (first cons-seen))
+            all-cons (*family-cons* (first cons-seen))
+            remaining (remove idcs all-cons)]
+        (if (and fam (= 1 (count remaining)))
+          (let [con (first remaining) ar (or (*con-arity* con) 0)]
+            (tick!)
+            [(vec idcs)
+             (vec (sort-by (fn [[_ c _ _]] (if (= :default c) -1 (.indexOf ^java.util.List (vec all-cons) c)))
+                           (map (fn [a] (if (= :default (second a))
+                                          (list 'alt con (vec (repeatedly ar #(c/fresh-local "x" {:occ {:k :dead}}))) (nth a 3))
+                                          a))
+                                alts1)))])
+          [(vec idcs) alts1]))
+      [(vec idcs) alts1])))
+
+(defn- add-binder-unfolding [env b u] (if (contains? (:in-scope env) (c/vkey b)) (modify-in-scope env (c/update-info (get (:in-scope env) (c/vkey b)) assoc :unf u)) env))
+
+(defn- simpl-alt [env scrut imposs cb swap k [_ con bs rhs]]
+  (cond
+    (= :default con)
+    (let [u {:k :other :cons (vec imposs)}
+          env2 (cond-> (add-binder-unfolding env cb u) swap (add-binder-unfolding swap u))]
+      (list 'alt :default [] (simpl-expr-c env2 rhs k)))
+    (not (con-name? con))
+    (let [u (c/mk-unfolding :vanilla false false false con)
+          env2 (cond-> (add-binder-unfolding env cb u) swap (add-binder-unfolding swap u))]
+      (list 'alt con [] (simpl-expr-c env2 rhs k)))
+    :else
+    (let [bs1 (if (or (not= :dead (:k (c/id-occ cb))) swap)
+                (mapv (fn [x] (if (= :dead (:k (c/id-occ x))) (c/update-info x assoc :occ {:k :many :tail nil}) x)) bs)
+                bs)
+          [env1 bs2] (simpl-binders env bs1)
+          con-app (c/mk-apps (list 'v (assoc con 1 "var")) (map c/occ-form bs2))
+          u (c/mk-unfolding :vanilla false false false con-app)
+          env2 (cond-> (add-binder-unfolding env1 cb u) swap (add-binder-unfolding swap u))]
+      (list 'alt con bs2 (simpl-expr-c env2 rhs k)))))
+
+(defn- mk-case
+  "mkCase: the identity case (case-merge and case-folding off at -O0)"
+  [scrut b alts]
+  (let [identity-alt (fn [[_ con bs rhs]]
+                       (let [r (loop [r rhs] (if (c/head? r 'cast) (recur (second r)) r))]
+                         (cond (and (c/vref? r) (= (c/vkey r) (c/vkey b))) true
+                               (and (c/head? r 'lit) (= r con)) true
+                               (and (con-name? con) (empty? bs) (c/vref? r)) (= (c/vkey r) (assoc con 1 "var"))
+                               (con-name? con) (c/cheap-eq? r (c/mk-apps (list 'v (assoc con 1 "var")) (map c/occ-form bs)))
+                               :else false)))]
+    (if (and (seq alts) (every? identity-alt alts))
+      (do (tick!)
+          (let [rhs1 (nth (first alts) 3)]
+            (loop [r rhs1 acc scrut] (if (c/head? r 'cast) (recur (second r) (list 'cast acc (nth r 2))) acc))))
+      (list 'case scrut b (vec alts)))))
+
+(defn- simpl-alts [env scrut b alts k]
+  (let [[env1 b1] (subst-id-bndr env b)
+        b2 (c/update-info b1 assoc :unf {:k :other :cons []})
+        env2 (modify-in-scope env1 b2)
+        [imposs alts2] (prepare-alts env scrut b alts)
+        swap (when-let [v (c/trivial-id scrut)] (when (and (c/vref? scrut) (contains? (:in-scope env2) (c/vkey v))) v))
+        alts3 (mapv #(simpl-alt env2 scrut imposs b2 swap k %) alts2)]
+    (mk-case scrut b2 alts3)))
+
+;;; Duplicable continuations: join points (mkDupableCont)
+
+(defn- alts-would-dup? [alts]
+  (let [bot? (fn [[_ _ _ r]] (c/dead-end? r))]
+    (loop [as alts]
+      (cond (<= (count as) 1) false
+            (bot? (first as)) (recur (rest as))
+            :else (not (every? bot? (rest as)))))))
+
+(defn- new-join-id [bs]
+  (c/fresh-local "$j" {:join (count bs)}))
+
+(defn- mk-dupable-strict-bind [env arg-b join-rhs]
+  (if (c/uncond-inline-join? [arg-b] join-rhs)
+    [(empty-floats env) {:k :strict-bind :bndr arg-b :body join-rhs :env (zap-subst env) :from :let :dup :ok :cont (boring-stop)}]
+    (let [j (new-join-id [arg-b])
+          ai {:fun (c/occ-form j) :rules [] :args [] :encl false :dmds (repeat :top) :discs (repeat 0)}]
+      [(add-join-floats (empty-floats env) [(list 'bind j (list 'lam [(c/update-info arg-b assoc :oneshot true)] join-rhs))])
+       {:k :strict-arg :dup :ok :fun ai :cont (boring-stop)}])))
+
+(defn- mk-dupable-alt [env cb jfloats [_ con bs rhs]]
+  (if (c/uncond-inline-join? bs rhs)
+    [jfloats (list 'alt con bs rhs)]
+    (let [live (vec (remove #(= :dead (:k (c/id-occ %))) bs))
+          live (if (= :dead (:k (c/id-occ cb))) live (conj live cb))
+          j (new-join-id live)
+          jrhs (c/mk-lams (mapv #(c/update-info % (fn [i] (-> i (assoc :oneshot true) (dissoc :unf)))) live) rhs)]
+      [(conj jfloats (list 'bind j jrhs)) (list 'alt con bs (c/mk-apps (c/occ-form j) (map c/occ-form live)))])))
+
+(defn- mk-dupable-cont [env k]
+  (let [env (zap-subst env)]
+    (cond
+      (cont-is-dupable? k) [(empty-floats env) k]
+      (= :cast (:k k)) (let [[fl k2] (mk-dupable-cont env (:cont k))] [fl (assoc k :cont k2)])
+      (= :strict-bind (:k k))
+      (let [sb-env (in-scope-from-e (:env k) env)
+            [sb-env1 b2] (subst-id-bndr sb-env (:bndr k))
+            [fl1 inner] (simpl-non-rec-body sb-env1 (:from k) (:body k) (:cont k))]
+        (mk-dupable-strict-bind env b2 (wrap-floats fl1 inner)))
+      (= :strict-arg (:k k))
+      (let [ai (:fun k)
+            plan-a (fn plan-a [k] (case (:k k) :strict-arg false (:strict-bind :stop :select) true (:cast :apply) (plan-a (:cont k))))]
+        (if (and (not (c/con-id? (:fun ai))) (plan-a (:cont k)))
+          (let [[fl1 k2] (mk-dupable-cont env (:cont k))
+                [fls args] (reduce (fn [[fl out] a] (let [[f2 a2] (make-trivial env false (:dmd a) "arg" (:arg a))] [(add-let-floats fl f2) (conj out (assoc a :arg a2))]))
+                                   [fl1 []] (:args ai))]
+            [fls {:k :strict-arg :fun (assoc ai :args args) :cont k2 :dup :ok}])
+          (let [arg-b (c/fresh-local "arg" {})
+                env2 (add-new-in-scope env [arg-b])
+                [fl jrhs] (rebuild-call env2 (add-val-arg ai (c/occ-form arg-b)) (:cont k))]
+            (mk-dupable-strict-bind env2 arg-b (wrap-floats fl jrhs)))))
+      (= :apply (:k k))
+      (let [[fl1 k2] (mk-dupable-cont env (:cont k))
+            env2 (in-scope-from-f env fl1)
+            [_ se a2] (simpl-lazy-arg env2 (:dup k) (:env k) (:arg k) nil)
+            [lf2 a3] (make-trivial env false :top "karg" a2)
+            all (add-let-floats fl1 lf2)]
+        [all {:k :apply :arg a3 :env (in-scope-from-f se all) :dup :ok :cont k2}])
+      (= :select (:k k))
+      (let [_ (tick!)
+            [fl alt-env alt-k] (mk-dupable-case-cont (in-scope-from-e (:env k) env) (:alts k) (:cont k))
+            [alt-env2 cb2] (subst-id-bndr alt-env (:bndr k))
+            alts2 (mapv #(simpl-alt alt-env2 nil [] cb2 nil alt-k %) (:alts k))
+            [jfl alts3] (reduce (fn [[jf out] a] (let [[jf2 a2] (mk-dupable-alt env cb2 jf a)] [jf2 (conj out a2)])) [[] []] alts2)
+            all (add-join-floats fl jfl)]
+        [all {:k :select :dup :ok :bndr cb2 :alts alts3 :env (in-scope-from-f (zap-subst (:env k)) all) :cont (boring-stop)}])
+      :else [(empty-floats env) k])))
+
+(defn- mk-dupable-case-cont [env alts k]
+  (if (alts-would-dup? alts)
+    (let [[fl k2] (mk-dupable-cont env k)]
+      [fl (update (in-scope-from-f env fl) :case-depth inc) k2])
+    [(empty-floats env) env k]))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The top level and the iterations (GHC.Core.Opt.Simplify)
+
+(defn simpl-top-binds
+  "simplTopBinds: the program's binds [(bind B E)|(rec [...])...] simplified once"
+  [env binds]
+  (let [env1 (simpl-rec-bndrs env (for [bd binds [_ b _] (c/bind-pairs bd)] b))]
+    (loop [env env1 bs binds fl (empty-floats env1)]
+      (if (empty? bs)
+        (:lets fl)
+        (let [bd (first bs)
+              t0 (System/currentTimeMillis)
+              [f2 env2] (if (c/head? bd 'rec)
+                          (simpl-rec-bind env {:k :let :level :top :rec :rec} (second bd))
+                          (let [[_ b r] bd] (simpl-rec-or-top-pair env {:k :let :level :top :rec :nonrec} b (lookup-rec-bndr env b) r)))]
+          (when *trace* (binding [*out* *err*] (println "top" (- (System/currentTimeMillis) t0) "ms" (pr-str (map second (c/bind-pairs bd))))))
+          (recur env2 (rest bs) (add-floats fl f2)))))))
+
+(defn- short-out-indirections
+  "shortOutIndirections: exported = local (the local not exported) becomes the exported binding"
+  [binds]
+  (let [ind (into {} (for [bd binds [_ b r] (c/bind-pairs bd)
+                           :when (and (contains? *exported* (c/vkey b)) (c/lv? r)
+                                      (not (contains? *exported* (c/vkey r))))]
+                       [(c/vkey r) b]))
+        ind (into {} (filter (fn [[l _]] (= 1 (count (filter #(= l %) (keys ind))))) ind))
+        exp-set (set (vals ind))]
+    (if (empty? ind)
+      binds
+      (let [zap (fn [[_ b r]]
+                  (cond (contains? exp-set b) []
+                        (contains? ind (c/vkey b)) (let [e (get ind (c/vkey b))] [(list 'bind (with-meta e (merge (meta e) (select-keys (meta b) [:unf :arity :bot]))) r)])
+                        :else [(list 'bind b r)]))
+            sub (fn [e] (c/subst-expr (into {} (for [[l b] ind] [l (c/occ-form b)])) e))]
+        (vec (for [bd binds]
+               (if (c/head? bd 'rec)
+                 (list 'rec (vec (for [p (second bd) q (zap p)] (list 'bind (second q) (sub (nth q 2))))))
+                 (let [qs (zap bd)] (if (empty? qs) nil (let [q (first qs)] (list 'bind (second q) (sub (nth q 2))))))))))
+      )))
+
+(defn- strip-occ
+  "The occurrence information of every binder dropped (the next analysis recomputes it)"
+  [e] e)
+
+(defn simplify-pgm
+  "simplifyPgm: up to max-iter iterations of the occurrence analyser and simplTopBinds, until no transformation fires"
+  [binds max-iter]
+  (loop [binds binds i 1]
+    (if (> i max-iter)
+      binds
+      (let [tagged (oa/occur-analyse-pgm binds *exported*)
+            ticks (atom 0)
+            binds1 (binding [*ticks* ticks] (simpl-top-binds (mk-env) tagged))
+            n @ticks]
+        (when *trace* (binding [*out* *err*] (println "simplifier iteration" i "ticks" n)))
+        (if (zero? n)
+          binds1
+          (recur (vec (remove nil? (short-out-indirections binds1))) (inc i)))))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The module: the Ids' details from the elaborator's tables, the DFun unfoldings, the let-can-float invariant
+
+(def ^:private error-ids
+  {["ext" "var" "GHC.Internal.Control.Exception.Base" "patError"] 1
+   ["ext" "var" "GHC.Internal.Control.Exception.Base" "recSelError"] 1
+   ["ext" "var" "GHC.Internal.Control.Exception.Base" "recConError"] 1
+   ["ext" "var" "GHC.Internal.Control.Exception.Base" "noMethodBindingError"] 1
+   ["ext" "var" "GHC.Internal.Control.Exception.Base" "nonExhaustiveGuardsError"] 1
+   ["ext" "var" "GHC.Internal.Control.Exception.Base" "typeError"] 1
+   ["ext" "var" "GHC.Internal.Control.Exception.Base" "impossibleError"] 1
+   ["ext" "var" "GHC.Internal.Prim.Exception" "raiseOverflow"] 0
+   ["ext" "var" "GHC.Internal.Prim.Exception" "raiseUnderflow"] 0
+   ["ext" "var" "GHC.Internal.Prim.Exception" "raiseDivZero"] 0
+   ["ext" "var" "GHC.Internal.Prim.Panic" "absentSumFieldError"] 0})
+
+(defn- globals-of
+  "The IdDetails of the global names: GHC's implicit Ids (constructor workers, class-op and superclass selectors,
+  primops, dictionary functions) and the wired-in error Ids; nothing else of an imported Id (-O0 ignores the
+  interfaces' pragmas)"
+  [r con-strict]
+  (let [classes (:all-classes r)
+        ops (into {} (for [[cls i] classes
+                           :let [ns (or (:nsupers i) (count (:supers i))) fields (+ ns (count (:methods i))) unary (= 1 fields)]
+                           entry (concat (map-indexed (fn [k m] [m (+ ns k)]) (:methods i))
+                                         (map (fn [k] [["ext" "var" (nth cls 2) (str "$p" (inc k) (nth cls 3))] k]) (range ns)))]
+                       [(first entry) {:details {:k :classop :index (second entry) :unary unary :cls cls} :arity 1}]))
+        dcons (into {} (for [[cls i] classes
+                             :let [ns (or (:nsupers i) (count (:supers i))) fields (+ ns (count (:methods i)))]]
+                         [["ext" "var" (nth cls 2) (str "C:" (nth cls 3))] {:details {:k :con :strict (vec (repeat fields false)) :unary (= 1 fields)} :arity fields}]))
+        cache (atom {})]
+    (fn [n]
+      (if (contains? @cache n)
+        (get @cache n)
+        (let [v (when (and (vector? n) (= 4 (count n)))
+                  (let [[_ k m o] n dn ["ext" "data" m o]]
+                    (cond
+                      (contains? (:all-cons r) dn)
+                      (let [ci (get (:all-cons r) dn)]
+                        {:details {:k :con :strict (vec (con-strict dn)) :unary false} :arity (or (:arity ci) 0)})
+                      (contains? dcons n) (get dcons n)
+                      (contains? ops n) (get ops n)
+                      (contains? error-ids n) (let [a (get error-ids n)] {:arity a :bot a})
+                      (and (= "GHC.Internal.Prim" m) (c/primop-info o))
+                      {:details {:k :primop :op o} :arity (or (c/type-arity (get (:genv r) n)) 0)
+                       :bot (when (:bot (c/primop-info o)) (or (c/type-arity (get (:genv r) n)) 0))}
+                      (str/starts-with? o "$f") {:details {:k :dfun}}
+                      (= "fld" k) {:details {:k :recsel}})))]
+          (swap! cache assoc n v)
+          v)))))
+
+(defn- dfun-unfolding
+  "A dictionary function's DFunUnfolding (the typechecker's mkDFunUnfolding): \\ds -> C:Cls args"
+  [rhs]
+  (let [[bs body] (c/collect-binders rhs)
+        [f args] (c/collect-args body)]
+    (when (and (c/gv? f) (str/starts-with? (nth (second f) 3) "C:") (not= 1 (count args)))
+      {:k :dfun :bndrs bs :con (assoc (second f) 1 "data") :args args})))
+
+(defn- let-to-case
+  "Core's let-can-float invariant: a let of an unlifted type that is not ok for speculation is a case (the desugarer's
+  bindNonRec)"
+  [e]
+  (cond
+    (and (c/head? e 'let) (let [[_ [[_ b r]] _] e] (and (c/lv? b) (c/*unlifted-type?* (c/id-type b)) (not (c/ok-for-speculation? r)))))
+    (let [[_ [[_ b r]] body] e] (list 'case (let-to-case r) b [(list 'alt :default [] (let-to-case body))]))
+    (seq? e) (if (= 'lit (first e)) e (apply list (map let-to-case e)))
+    (vector? e) (mapv let-to-case e)
+    :else e))
+
+(defn- uniquify
+  "Every local binder of an expression cloned (a binding site a unique of its own)"
+  [e]
+  (letfn [(cl [m b] (let [b2 (c/clone b)] [(assoc m b b2) b2]))
+          (cls [m bs] (reduce (fn [[m out] b] (let [[m2 b2] (cl m b)] [m2 (conj out b2)])) [m []] bs))
+          (w [m e]
+            (if-not (seq? e)
+              e
+              (case (first e)
+                lv (get m e e)
+                (v lit) e
+                app (list 'app (w m (second e)) (mapv #(w m %) (nth e 2)))
+                lam (let [[m2 bs] (cls m (second e))] (list 'lam bs (w m2 (nth e 2))))
+                let (let [[_ [[_ b r]] body] e [m2 b2] (cl m b)] (list 'let [(list 'bind b2 (w m r))] (w m2 body)))
+                letrec (let [[m2 bs] (cls m (map second (second e)))]
+                         (list 'letrec (mapv (fn [[_ _ r] b2] (list 'bind b2 (w m2 r))) (second e) bs) (w m2 (nth e 2))))
+                case (let [[_ s b alts] e [m2 b2] (cl m b)]
+                       (list 'case (w m s) b2 (mapv (fn [[_ c xs r]] (let [[m3 xs2] (cls m2 xs)] (list 'alt c xs2 (w m3 r)))) alts)))
+                cast (list 'cast (w m (second e)) (nth e 2))
+                e)))]
+    (w {} e)))
+
+(defn strip
+  "The simplified program for CorePrep and CoreToStg (arbace.repr.haskell.tostg): casts erased, a binding whose
+  arity exceeds its right-hand side's lambdas eta-expanded (CorePrep's cpeEtaExpand), rec groups flattened"
+  [binds]
+  (letfn [(st [e]
+            (cond (c/head? e 'cast) (st (second e))
+                  (c/head? e 'lit) e
+                  (c/head? e 'app) (c/mk-apps (st (second e)) (mapv st (nth e 2)))
+                  (or (c/head? e 'let) (c/head? e 'letrec))
+                  (list (first e) (mapv (fn [[_ b r]] (list 'bind b (eta b (st r)))) (second e)) (st (nth e 2)))
+                  (seq? e) (apply list (map st e))
+                  (vector? e) (mapv st e)
+                  :else e))
+          (eta [b r]
+            (let [ar (c/id-arity b)]
+              (if (and (not (c/join? b)) (> ar (c/manifest-arity r)))
+                (c/eta-expand-at {:lams (vec (repeat ar [true false])) :div :top} r)
+                r)))]
+    ;; CorePrep clones every local binder (cpCloneBndr): each binding site a name of its own
+    (vec (for [bd binds [_ b r] (c/bind-pairs bd)] (list 'bind b (uniquify (eta b (st r))))))))
+
+(defn simplify-module
+  "The desugared program of the elaborator's result r ([(bind B E)...], after the simple optimiser) through the -O0
+  Simplifier; hooks {:unlifted-type? :unlifted-expr? :con-strict}: tostg's representations. Returns
+  [binds new-types]"
+  [r prog exported hooks]
+  (binding [c/*uniq* (atom 0)
+            c/*new-types* (atom {})
+            c/*ltypes* (:ltypes r)
+            c/*genv* (merge (:genv r) (:types r))
+            c/*tycons* (:tycons r)
+            c/*unlifted-type?* (:unlifted-type? hooks)
+            c/*unlifted-expr?* (let [ue (:unlifted-expr? hooks) ut (:unlifted-type? hooks)]
+                                 (fn ue2 [e] (cond (c/lv? e) (if-let [t (c/id-type e)] (ut t) (ue e))
+                                                   (c/head? e 'cast) (ue2 (second e))
+                                                   :else (ue e))))
+            c/*globals* (globals-of r (:con-strict hooks))
+            c/*con-family* (fn [con] (some-> (get (:all-cons r) con) :tycon (->> (get (:tycons r))) :cons count))
+            *family-cons* (fn [con] (some-> (get (:all-cons r) con) :tycon (->> (get (:tycons r))) :cons))
+            *con-arity* (fn [con] (:arity (get (:all-cons r) con)))
+            *con-tag* (fn [con] (:tag (get (:all-cons r) con)))
+            *exported* (set exported)
+            *trace* (= "1" (System/getenv "REPR_HASKELL_SIMPL_TRACE"))]
+    (let [binds (mapv (fn [[_ b e]]
+                        (let [e2 (let-to-case e)
+                              b2 (if-let [u (and (vector? b) (str/starts-with? (nth b 3) "$f") (dfun-unfolding e2))] (c/update-info b assoc :unf u) b)]
+                          (list 'bind b2 e2)))
+                      prog)
+          _ (when-let [f (System/getenv "REPR_HASKELL_SIMPL_DUMP")]
+              (spit f (binding [*print-length* nil *print-level* nil] (str (str/join "\n" (map pr-str binds)) "\n"))))
+          out (simplify-pgm binds 4)]
+      [(strip out) @c/*new-types* out])))

@@ -212,6 +212,11 @@
 #                   repr-java-closure bin/repr-java closure-check (JN10: repr/java's read closure
 #                                 names no javac class, as a ratchet, test/repr/java/closure-known.edn;
 #                                 its clean namespaces loaded on stage 0; seconds)
+#   --oracle   the oracle tier alone (doc/ORACLE-RECORDS-SURVEY.md, ORS1 (a), ORS8 (a), §3.6): the steps of :phase :oracle,
+#              one after another, the host toolchains' checks no other gate runs (gcc on Arbace's output, the records
+#              verified against the live toolchain: C's c-c23-oracle, c-roundtrip-oracle, c-records-verify); a step whose
+#              toolchain this host lacks (its host identity none) is absent, not failed; with --full, beside it; never
+#              with --clean, --nightly or --concurrent. Required at a tag (ORS1 (a))
 #   --full     also, once those are done, one after another in this order (GTS13 (a); by chain,
 #              concurrently, with GATE_FULL_PARALLEL=1):
 #                   go            the chain of the gate's executables (no fresh build of the program
@@ -371,8 +376,8 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 caller_host_exe=${ARBACE_HOST_EXE-} # --costs only (it reads, keys nothing): the caller's tools' host
 unset ARBACE_HOST_EXE J2G_GO_EXE REPR_GO_EXE
-usage() { echo "usage: bin/gate [--full|--nightly] [--rerun] | bin/gate --rotation-status [--days N] | bin/gate [--full] --plan [--builds] | bin/gate [--full] --costs [--last N] [--tsv] | bin/gate --why STEP | bin/gate --audit [STEP...] | bin/gate --prune [--dry-run] | bin/gate [--full] --clean [--tag TAG] [--only STEP,...|failed|changed] [--plan] | bin/gate --pins [FILE] | bin/gate --full [--clean] --concurrent [--plan] | bin/gate [--full] --mem-check" >&2; exit 2; }
-full= plan_only= why= rerun= audit= prune= dry= clean= clean_tag= pins= pins_out= concurrent= builds= only= outside=
+usage() { echo "usage: bin/gate [--full|--nightly] [--oracle] [--rerun] | bin/gate --rotation-status [--days N] | bin/gate [--full] --plan [--builds] | bin/gate [--full] --costs [--last N] [--tsv] | bin/gate --why STEP | bin/gate --audit [STEP...] | bin/gate --prune [--dry-run] | bin/gate [--full] --clean [--tag TAG] [--only STEP,...|failed|changed] [--plan] | bin/gate --pins [FILE] | bin/gate --full [--clean] --concurrent [--plan] | bin/gate [--full] --mem-check" >&2; exit 2; }
+oracle= full= plan_only= why= rerun= audit= prune= dry= clean= clean_tag= pins= pins_out= concurrent= builds= only= outside=
 nightly= rotation_status= rot_days=
 costs= costs_last=5 costs_fmt=text mem_check=
 steps_arg=() orig_args=("$@")
@@ -383,6 +388,7 @@ while [ $# -gt 0 ]; do
     --rotation-status) rotation_status=1 ;;
     --days) [ $# -ge 2 ] || usage; rot_days=$2; shift ;;
     --plan) plan_only=1 ;;
+    --oracle) oracle=1 ;;
     --builds) builds=1 ;;
     --clean) clean=1 ;;
     --tag) [ $# -ge 2 ] || usage; clean_tag=$2; shift ;;
@@ -405,6 +411,12 @@ while [ $# -gt 0 ]; do
   shift
 done
 mode=essential; [ -n "$full" ] && mode=full
+# the oracle tier (doc/ORACLE-RECORDS-SURVEY.md, ORS1 (a), ORS8 (a), §3.6): --oracle its :oracle steps alone (gcc on Arbace's
+# output, the records verified), absent where their toolchain is not; --full --oracle beside --full's; never in the clean run
+if [ -n "$oracle" ]; then
+  [ -n "$clean$nightly$concurrent$audit" ] && usage
+  if [ -n "$full" ]; then mode=full-oracle; else mode=oracle; fi
+fi
 # GT8.4, GT8.7 (doc/GATE-SURVEY.md, "As built: GT8.4, GT8.7 (write-ahead)"): --nightly, --full's steps with each
 # rotated part's subset and the night's slice (the night: the day of the run's start less 12 hours, so that a
 # night that crosses midnight is one; GATE_NIGHT gives it); the clean run its subsets alone (GATE_CLEAN_WHOLE=1:
@@ -711,7 +723,10 @@ clean_pins() {
   ccwant=$(sed -n '/^ *:ccorpus2-v1.6.0$/,/:zip-sha256/s/^ *:h1 "\(h1:[^"]*\)".*/\1/p' "$root/test/c/corpora.edn" | head -1)
   if [ -n "$ccwant" ] && [ "$cch" = "$ccwant" ]; then echo "pins: modernc.org/ccorpus2 v1.6.0 in $mc: $cch, test/c/corpora.edn's"
   else echo "pins: FAILED: modernc.org/ccorpus2 v1.6.0 in $mc is $cch, test/c/corpora.edn pins ${ccwant:-nothing}"; st=1; fi
-  if ct=$("$root/bin/repr-c" host check 2>&1); then ch=true; echo "pins: the host's gcc ($(gcc --version 2>"$TMPDIR/pins.err" | head -1)): test/c/host/'s answers ($(ls "$root/test/c/host/predefined" | wc -l) standards, $(wc -l < "$root/test/c/host/headers.sha256") headers)"
+  # ORS1 (a), ORS9 (a): no gate step reads gcc or its headers (the packs above); a host without gcc is no failure here, the
+  # oracle tier's c-records-verify checks test/c/host/ against gcc where it is
+  if ! command -v gcc > "$TMPDIR/pins-gcc.out" 2>&1; then ch=absent; echo "pins: no gcc here: test/c/host/'s answers are checked by the oracle tier (bin/gate --oracle's c-records-verify)"
+  elif ct=$("$root/bin/repr-c" host check 2>&1); then ch=true; echo "pins: the host's gcc ($(gcc --version 2>"$TMPDIR/pins.err" | head -1)): test/c/host/'s answers ($(ls "$root/test/c/host/predefined" | wc -l) standards, $(wc -l < "$root/test/c/host/headers.sha256") headers)"
   else echo "pins: FAILED: the host's gcc against test/c/host/ (bin/repr-c host check):"; printf '%s\n' "$ct" | grep -v ': OK$' | head -5 | sed 's/^/   /'; st=1; fi
   # GTS211 (a): the gated new crops' pins verbs, each run in the checkout; recorded as :crops (absent while no new crop is gated)
   local crop what cmd cok crops_edn=
@@ -723,8 +738,14 @@ clean_pins() {
     crops_edn="$crops_edn {:crop :$crop :what \"$(esc "$what")\" :cmd \"$(esc "$cmd")\" :ok $cok}"
   done < "$TMPDIR/pins-crops.tsv"
   [ -z "$crops_edn" ] || crops_edn=$'\n'"  :crops [${crops_edn# }]"
-  [ -n "$out" ] && printf '{:go {:goroot "%s" :version "%s" :sources-sha256 "%s"} :goroot-test-sha256 "%s"\n  :jdk26u {:dir "%s" :commit "%s"} :system-jdk {:version "%s" :release-sha256 "%s"}\n  :frozen-jar "%s" :frozen-tree "%s"\n  :c {:gcc-tarball %s :musl-tarball %s :host-check %s :go-whim {:dir "%s" :commit "%s"} :ccorpus2 {:version "v1.6.0" :h1 "%s"}}%s\n  :ok %s}\n' \
-    "$g" "$pv" "$have" "$gt" "$jdk" "$(git -C "$jdk" rev-parse HEAD 2>"$TMPDIR/pins.err")" "$jv" "$jrel" "$fj" "$ft" "$cg" "$cm" "$ch" "$gw" "$gwh" "$cch" "$crops_edn" "$([ $st = 0 ] && echo true || echo false)" > "$out"
+  # the oracles' packs (doc/ORACLE-RECORDS-SURVEY.md, ORS3 (a), ORS4 (a)): every pin of test/*/records/*.sha256 in the store
+  # (ARBACE_ORACLE_PACKS, the main checkout's .tmp/oracle-packs by default) with its bytes and its members, and the
+  # tampered-pack control (ORS7 (a))
+  local op=false
+  if "$root/bin/oracle-records" pins > "$TMPDIR/pins-oracle.log" 2>&1; then op=true; sed 's/^pins: //; s/^/pins: oracle-records: /' "$TMPDIR/pins-oracle.log"
+  else echo "pins: FAILED: the oracles' packs (bin/oracle-records pins):"; grep 'FAILED' "$TMPDIR/pins-oracle.log" | head -5 | sed 's/^/   /'; st=1; fi
+  [ -n "$out" ] && printf '{:go {:goroot "%s" :version "%s" :sources-sha256 "%s"} :goroot-test-sha256 "%s"\n  :jdk26u {:dir "%s" :commit "%s"} :system-jdk {:version "%s" :release-sha256 "%s"}\n  :frozen-jar "%s" :frozen-tree "%s"\n  :c {:gcc-tarball %s :musl-tarball %s :host-check %s :go-whim {:dir "%s" :commit "%s"} :ccorpus2 {:version "v1.6.0" :h1 "%s"}}%s\n  :oracle-packs %s :ok %s}\n' \
+    "$g" "$pv" "$have" "$gt" "$jdk" "$(git -C "$jdk" rev-parse HEAD 2>"$TMPDIR/pins.err")" "$jv" "$jrel" "$fj" "$ft" "$cg" "$cm" "$ch" "$gw" "$gwh" "$cch" "$crops_edn" "$op" "$([ $st = 0 ] && echo true || echo false)" > "$out"
   [ $st = 0 ] && echo "pins: ok" || echo "pins: FAILED"
   return $st
 }
@@ -1102,7 +1123,7 @@ if [ -n "$plan_only$why" ]; then
     rm -f "$d"/*.done
     run_plan "$d"
   else
-    echo "== gate$( [ -n "$nightly" ] && echo ' --nightly' || { [ -n "$full" ] && echo ' --full'; })$( [ -n "$clean" ] && echo ' --clean')$( [ -n "$concurrent" ] && echo ' --concurrent') --plan: $(git log -1 --format='%h %s'), store $store"
+    echo "== gate$( [ -n "$nightly" ] && echo ' --nightly' || { [ -n "$full" ] && echo ' --full'; })$( [ -n "$oracle" ] && echo " --oracle")$( [ -n "$clean" ] && echo ' --clean')$( [ -n "$concurrent" ] && echo ' --concurrent') --plan: $(git log -1 --format='%h %s'), store $store"
     run_plan "$d" ${rerun:+--rerun} || exit 1
     # GTS216 (a): the chains a --full or --nightly would run beside its serial run (said only when there are some)
     if [ -n "$full" ] && [ -z "$clean" ] && [ -z "$concurrent" ]; then
@@ -1129,7 +1150,7 @@ status=0
 commit=$(git rev-parse HEAD 2>"$TMPDIR/gate-git.err" || echo unknown)
 dirty=false; [ -z "$(git status --porcelain --untracked-files=no 2>"$TMPDIR/gate-git.err")" ] || dirty=true
 
-echo "== gate$( [ -n "$nightly" ] && echo ' --nightly' || { [ -n "$full" ] && echo ' --full'; }): $(git log -1 --format='%h %s')"
+echo "== gate$( [ -n "$nightly" ] && echo ' --nightly' || { [ -n "$full" ] && echo ' --full'; })$( [ -n "$oracle" ] && echo " --oracle"): $(git log -1 --format='%h %s')"
 # Go's build cache, trimmed by every gate run (bin/lib/gocache.bash)
 . "$root/bin/lib/gocache.bash"
 gocache_trim
@@ -1269,9 +1290,14 @@ if [ -n "$full" ]; then
   gate_prune > "$logs/prune.log" 2>&1 || echo "gate: warning: the store's prune failed ($logs/prune.log)"
   tail -1 "$logs/prune.log" | sed 's/^/   /'
 fi
+# the oracle tier, one step after another (ORS1 (a)): an absent step is reported as such
+if [ -n "$oracle" ]; then
+  for n in $(names_of oracle); do run_one "$n"; done
+  for n in $(names_of oracle); do report "$n"; done
+fi
 ran=0 skipped=0
 for n in "${order[@]}"; do
-  case $(cat "$logs/$n.status" 2>"$logs/count.err") in skip) skipped=$((skipped + 1)) ;; none) ;; ?*) ran=$((ran + 1)) ;; esac
+  case $(cat "$logs/$n.status" 2>"$logs/count.err") in skip) skipped=$((skipped + 1)) ;; none|absent) ;; ?*) ran=$((ran + 1)) ;; esac
 done
 peak=$(awk -F'\t' '$2 == "gate" && $3 > m {m = $3} END {print m + 0}' "$logs/mem.tsv" 2>"$logs/count.err")
 low=$(awk -F'\t' '$2 == "MemAvailable" && (m == "" || $3 < m) {m = $3} END {print m + 0}' "$logs/mem.tsv" 2>"$logs/count.err")

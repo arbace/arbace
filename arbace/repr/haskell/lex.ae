@@ -1,0 +1,1947 @@
+;; Ported from GHC 9.14.1 (https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz, SHA-256
+;; 2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77): compiler/GHC/Parser/Lexer.x,
+;; GHC/Parser/Lexer/String.x, GHC/Parser/Lexer/Interface.hs, GHC/Parser/String.hs,
+;; GHC/Parser/CharClass.hs, GHC/Utils/Misc.hs's readSignificandExponentPair and
+;; readHexSignificandExponentPair, whose notice follows (LICENSE.md, "GHC: the Glasgow Haskell
+;; Compiler License"):
+;;
+;; The Glasgow Haskell Compiler License
+;;
+;; Copyright 2002, The University Court of the University of Glasgow.
+;; All rights reserved.
+;;
+;; Redistribution and use in source and binary forms, with or without
+;; modification, are permitted provided that the following conditions are met:
+;;
+;; - Redistributions of source code must retain the above copyright notice,
+;; this list of conditions and the following disclaimer.
+;;
+;; - Redistributions in binary form must reproduce the above copyright notice,
+;; this list of conditions and the following disclaimer in the documentation
+;; and/or other materials provided with the distribution.
+;;
+;; - Neither name of the University nor the names of its contributors may be
+;; used to endorse or promote products derived from this software without
+;; specific prior written permission.
+;;
+;; THIS SOFTWARE IS PROVIDED BY THE UNIVERSITY COURT OF THE UNIVERSITY OF
+;; GLASGOW AND THE CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
+;; INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+;; FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+;; UNIVERSITY COURT OF THE UNIVERSITY OF GLASGOW OR THE CONTRIBUTORS BE LIABLE
+;; FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+;; DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+;; SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+;; CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+;; LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+;; OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+;; DAMAGE.
+
+(ns arbace.repr.haskell.lex
+  "GHC 9.14.1's lexer, a port of compiler/GHC/Parser/Lexer.x (doc/haskell/NATIVE.md): the Alex
+  rules hand-ported with Alex's semantics (at each position the longest match among the rules of
+  the current start code whose predicates hold, the earlier rule on a tie, empty rules included,
+  also at the end of the input), their actions as GHC writes them, the layout algorithm's lexer
+  half (the context stack, do_bol, new_layout_context, the layout start codes) and the
+  extension-dependent tokens (ParserOpts' ExtBits). The parser's half of layout, the
+  parse-error(t) rule, is Happy's error token in Parser.y's `close` (arbace.repr.haskell.parse
+  calls pop-context!).
+
+  The input is the module's text as code points (GHC's StringBuffer: positions count code
+  points, columns are code points with tab stops of 8). A location is [file line col pos], a span
+  [file l1 c1 l2 c2 b1 b2] (b1, b2 the buffer positions, GHC's BufSpan; nil when GHC's span has
+  none). A token is [kind value span], kind a keyword named as GHC's Token constructor
+  (:ITvarid, :ITocurly, ...). The lexer state is an object array (make-state), mutated in place;
+  comments are skipped (the parser of mode :lines does not see them), documentation comments
+  kept in the state for the Haddock pass (hdk-comments) when -haddock is on."
+  (:require [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+;;; ------------------------------------------------------------------------------------------
+;;; The extension bits (GHC.Parser.Lexer's ExtBits, in their Enum order)
+
+(def ext-bits
+  [:FfiBit :InterruptibleFfiBit :CApiFfiBit :ArrowsBit :ThBit :ThQuotesBit :IpBit
+   :OverloadedLabelsBit :ExplicitForallBit :BangPatBit :PatternSynonymsBit :HaddockBit
+   :MagicHashBit :RecursiveDoBit :QualifiedDoBit :UnicodeSyntaxBit :UnboxedParensBit
+   :DatatypeContextsBit :MonadComprehensionsBit :TransformComprehensionsBit :QqBit
+   :RawTokenStreamBit :AlternativeLayoutRuleBit :ALRTransitionalBit :RelaxedLayoutBit
+   :NondecreasingIndentationBit :SafeHaskellBit :TraditionalRecordSyntaxBit
+   :ExplicitNamespacesBit :LambdaCaseBit :BinaryLiteralsBit :NegativeLiteralsBit
+   :HexFloatLiteralsBit :StaticPointersBit :NumericUnderscoresBit :StarIsTypeBit
+   :BlockArgumentsBit :NPlusKPatternsBit :DoAndIfThenElseBit :MultiWayIfBit :GadtSyntaxBit
+   :ImportQualifiedPostBit :LinearTypesBit :NoLexicalNegationBit :OverloadedRecordDotBit
+   :OverloadedRecordUpdateBit :OrPatternsBit :ExtendedLiteralsBit :ListTuplePunsBit
+   :ViewPatternsBit :RequiredTypeArgumentsBit :MultilineStringsBit :LevelImportsBit
+   :InRulePragBit :InNestedCommentBit :UsePosPragsBit])
+
+(def ext-index (into {} (map-indexed (fn [i k] [k i]) ext-bits)))
+
+(defn xbit ^long [k] (bit-shift-left 1 (long (ext-index k))))
+
+(defmacro ^:private xtest [exts k]
+  `(not (zero? (bit-and (long ~exts) ~(bit-shift-left 1 (long (ext-index k)))))))
+
+(def ext-of-bit
+  "mkParserOpts: the bit of each language extension (NoLexicalNegationBit is set when
+  LexicalNegation is off; UnboxedParensBit by UnboxedTuples or UnboxedSums)"
+  {"ForeignFunctionInterface" :FfiBit "InterruptibleFFI" :InterruptibleFfiBit "CApiFFI" :CApiFfiBit
+   "Arrows" :ArrowsBit "TemplateHaskell" :ThBit "TemplateHaskellQuotes" :ThQuotesBit
+   "QuasiQuotes" :QqBit "ImplicitParams" :IpBit "OverloadedLabels" :OverloadedLabelsBit
+   "ExplicitForAll" :ExplicitForallBit "BangPatterns" :BangPatBit "MagicHash" :MagicHashBit
+   "RecursiveDo" :RecursiveDoBit "QualifiedDo" :QualifiedDoBit "UnicodeSyntax" :UnicodeSyntaxBit
+   "UnboxedTuples" :UnboxedParensBit "UnboxedSums" :UnboxedParensBit
+   "DatatypeContexts" :DatatypeContextsBit "TransformListComp" :TransformComprehensionsBit
+   "MonadComprehensions" :MonadComprehensionsBit "AlternativeLayoutRule" :AlternativeLayoutRuleBit
+   "AlternativeLayoutRuleTransitional" :ALRTransitionalBit "RelaxedLayout" :RelaxedLayoutBit
+   "NondecreasingIndentation" :NondecreasingIndentationBit
+   "TraditionalRecordSyntax" :TraditionalRecordSyntaxBit "ExplicitNamespaces" :ExplicitNamespacesBit
+   "LambdaCase" :LambdaCaseBit "BinaryLiterals" :BinaryLiteralsBit
+   "NegativeLiterals" :NegativeLiteralsBit "HexFloatLiterals" :HexFloatLiteralsBit
+   "PatternSynonyms" :PatternSynonymsBit "StaticPointers" :StaticPointersBit
+   "NumericUnderscores" :NumericUnderscoresBit "StarIsType" :StarIsTypeBit
+   "BlockArguments" :BlockArgumentsBit "NPlusKPatterns" :NPlusKPatternsBit
+   "DoAndIfThenElse" :DoAndIfThenElseBit "MultiWayIf" :MultiWayIfBit "GADTSyntax" :GadtSyntaxBit
+   "ImportQualifiedPost" :ImportQualifiedPostBit "LinearTypes" :LinearTypesBit
+   "OverloadedRecordDot" :OverloadedRecordDotBit "OverloadedRecordUpdate" :OverloadedRecordUpdateBit
+   "OrPatterns" :OrPatternsBit "ExtendedLiterals" :ExtendedLiteralsBit
+   "ListTuplePuns" :ListTuplePunsBit "ViewPatterns" :ViewPatternsBit
+   "RequiredTypeArguments" :RequiredTypeArgumentsBit "MultilineStrings" :MultilineStringsBit
+   "ExplicitLevelImports" :LevelImportsBit})
+
+(defn parser-bits
+  "mkParserOpts: the bitmap of a set of extensions (their names), Safe Haskell's imports, -haddock,
+  the raw token stream (comments as tokens), UsePosPragsBit (LINE pragmas move the position)"
+  ^long [exts {:keys [safe haddock raw-tokens use-pos-prags] :or {use-pos-prags true}}]
+  (let [b (reduce (fn [^long b e] (if-let [k (ext-of-bit e)] (bit-or b (xbit k)) b)) 0 exts)
+        b (if (contains? (set exts) "LexicalNegation") b (bit-or b (xbit :NoLexicalNegationBit)))]
+    (cond-> b
+      safe (bit-or (xbit :SafeHaskellBit))
+      haddock (bit-or (xbit :HaddockBit))
+      raw-tokens (bit-or (xbit :RawTokenStreamBit))
+      use-pos-prags (bit-or (xbit :UsePosPragsBit)))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Characters (GHC.Parser.Lexer.Interface's adjustChar, CharClass, Data.Char)
+
+(defn ucat
+  "The Unicode general category of a code point, as Java numbers them (Character/getType)"
+  ^long [^long c]
+  (long (Character/getType (int c))))
+
+(defn adjust-char
+  "adjustChar: the byte Alex sees for a code point: ASCII as itself (0 for \\x00-\\x07), other
+  code points by their general category: 1 upper, 2 lower, 3 digit, 4 symbol, 5 space,
+  6 other graphic, 7 uniidchar, 0 non-graphic"
+  ^long [^long c]
+  (cond
+    (<= c 7) 0
+    (<= c 0x7f) c
+    :else
+    (let [t (ucat c)]
+      (cond
+        (or (= t 1) (= t 3)) 1                     ; Lu, Lt
+        (or (= t 2) (= t 5)) 2                     ; Ll, Lo
+        (or (= t 4) (= t 6)) 7                     ; Lm, Mn
+        (or (= t 8) (= t 7)) 6                     ; Mc, Me
+        (or (= t 9) (= t 10) (= t 11)) 3           ; Nd, Nl, No
+        (or (= t 23) (= t 20) (= t 24) (= t 25) (= t 26) (= t 27) (= t 28)) 4 ; Pc Pd Po Sm Sc Sk So
+        (or (= t 21) (= t 22) (= t 29) (= t 30)) 6 ; Ps Pe Pi Pf
+        (= t 12) 5                                 ; Zs
+        :else 0))))
+
+(defn- ascsym? [^long c]
+  (or (= c 33) (= c 35) (= c 36) (= c 37) (= c 38) (= c 42) (= c 43) (= c 46) (= c 47)
+      (= c 60) (= c 61) (= c 62) (= c 63) (= c 64) (= c 92) (= c 94) (= c 124) (= c 45)
+      (= c 126) (= c 58)))
+
+(defn small? [^long c]
+  (or (and (>= c 97) (<= c 122)) (= c 95) (and (> c 127) (= 2 (adjust-char c)))))
+(defn large? [^long c]
+  (or (and (>= c 65) (<= c 90)) (and (> c 127) (= 1 (adjust-char c)))))
+(defn digit? [^long c]
+  (or (and (>= c 48) (<= c 57)) (and (> c 127) (= 3 (adjust-char c)))))
+(defn idchar? [^long c]
+  (or (and (>= c 97) (<= c 122)) (and (>= c 65) (<= c 90)) (and (>= c 48) (<= c 57))
+      (= c 95) (= c 39)
+      (and (> c 127) (let [b (adjust-char c)] (or (= b 1) (= b 2) (= b 3) (= b 7))))))
+(defn sym-char? [^long c]
+  (or (ascsym? c) (and (> c 127) (= 4 (adjust-char c)))))
+(defn graphic?
+  "$graphic: printable ASCII but space, and the graphic Unicode classes"
+  [^long c]
+  (or (and (>= c 33) (<= c 126))
+      (and (> c 127) (let [b (adjust-char c)] (and (>= b 1) (<= b 7) (not= b 5))))))
+(defn space? [^long c] (or (= c 32) (and (> c 127) (= 5 (adjust-char c)))))
+(defn whitechar? [^long c] (or (= c 10) (= c 13) (= c 12) (= c 9) (= c 11) (space? c)))
+(defn white-no-nl? [^long c] (and (not= c 10) (whitechar? c)))
+(defn pragmachar? [^long c]
+  (or (small? c) (large? c) (digit? c) (and (> c 127) (= 7 (adjust-char c)))))
+(defn docsym? [^long c] (or (= c 124) (= c 94) (= c 42) (= c 36)))
+(defn special? [^long c]
+  (or (= c 40) (= c 41) (= c 44) (= c 59) (= c 91) (= c 93) (= c 96) (= c 123) (= c 125)))
+
+(defn alpha-num?
+  "Data.Char.isAlphaNum: the letter and number categories"
+  [^long c]
+  (if (< c 128)
+    (or (and (>= c 97) (<= c 122)) (and (>= c 65) (<= c 90)) (and (>= c 48) (<= c 57)))
+    (let [t (ucat c)] (or (<= 1 t 5) (<= 9 t 11)))))
+(defn hs-space?
+  "Data.Char.isSpace"
+  [^long c]
+  (or (= c 32) (and (>= c 9) (<= c 13)) (= c 0xa0) (and (> c 0xff) (= 12 (ucat c)))))
+(defn hs-upper?
+  "Data.Char.isUpper (Lu, Lt)"
+  [^long c]
+  (if (< c 128) (and (>= c 65) (<= c 90)) (let [t (ucat c)] (or (= t 1) (= t 3)))))
+(defn- decdigit? [^long c] (and (>= c 48) (<= c 57)))
+(defn- hexit? [^long c] (or (decdigit? c) (and (>= c 97) (<= c 102)) (and (>= c 65) (<= c 70))))
+(defn- octit? [^long c] (and (>= c 48) (<= c 55)))
+(defn- binit? [^long c] (or (= c 48) (= c 49)))
+(defn- hex-digit ^long [^long c]
+  (cond (decdigit? c) (- c 48) (>= c 97) (+ 10 (- c 97)) :else (+ 10 (- c 65))))
+
+;;; Character classes as bits (speed, OC173): the predicates above for every ASCII code point once, in a table;
+;;; the others by the predicates. The macros test a bit, inline.
+
+(def ^:private K-SMALL 1) (def ^:private K-LARGE 2) (def ^:private K-DIGIT 4) (def ^:private K-IDCHAR 8)
+(def ^:private K-SYM 16) (def ^:private K-SPECIAL 32) (def ^:private K-WNN 64) (def ^:private K-GRAPHIC 128)
+(def ^:private K-SPACE 256) (def ^:private K-PRAGMA 512) (def ^:private K-WHITE 1024) (def ^:private K-DEC 2048)
+
+(defn- cls-slow
+  "The class bits of a code point by the predicates"
+  ^long [^long c]
+  (long (bit-or (if (small? c) K-SMALL 0) (if (large? c) K-LARGE 0) (if (digit? c) K-DIGIT 0) (if (idchar? c) K-IDCHAR 0)
+                (if (sym-char? c) K-SYM 0) (if (special? c) K-SPECIAL 0) (if (white-no-nl? c) K-WNN 0)
+                (if (graphic? c) K-GRAPHIC 0) (if (space? c) K-SPACE 0) (if (pragmachar? c) K-PRAGMA 0)
+                (if (whitechar? c) K-WHITE 0) (if (decdigit? c) K-DEC 0))))
+
+(def ^:private ascii-cls
+  (let [a (int-array 128)] (dotimes [c 128] (aset a c (int (cls-slow c)))) a))
+
+(defmacro ^:private cl
+  "The class bits of the code point c"
+  [c] `(let [c# (long ~c)] (if (and (>= c# 0) (< c# 128)) (aget ~(with-meta 'ascii-cls {:tag 'ints}) c#) (cls-slow c#))))
+
+(defmacro ^:private has [cc bit] `(not (zero? (bit-and (long ~cc) ~bit))))
+(defmacro ^:private small?* [c] `(has (cl ~c) ~K-SMALL))
+(defmacro ^:private large?* [c] `(has (cl ~c) ~K-LARGE))
+(defmacro ^:private idchar?* [c] `(has (cl ~c) ~K-IDCHAR))
+(defmacro ^:private sym-char?* [c] `(has (cl ~c) ~K-SYM))
+(defmacro ^:private white-no-nl?* [c] `(has (cl ~c) ~K-WNN))
+(defmacro ^:private whitechar?* [c] `(has (cl ~c) ~K-WHITE))
+(defmacro ^:private pragmachar?* [c] `(has (cl ~c) ~K-PRAGMA))
+(defmacro ^:private decdigit?* [c] `(has (cl ~c) ~K-DEC))
+
+(defmacro ^:private run*
+  "m-run with the predicate inlined: pred a #(..) form or a predicate with a * macro"
+  [cs n i pred]
+  (let [j (gensym "j") csv (gensym "cs") nv (gensym "n")
+        m {'idchar? 'idchar?* 'sym-char? 'sym-char?* 'whitechar? 'whitechar?* 'white-no-nl? 'white-no-nl?* 'pragmachar? 'pragmachar?*
+           'decdigit? 'decdigit?*}
+        x `(aget ~csv ~j)
+        test (cond (and (seq? pred) (= 'fn* (first pred)) (vector? (second pred)) (= 1 (count (second pred))))
+                   `(let [~(first (second pred)) ~x] ~(nth pred 2))
+                   (and (symbol? pred) (m pred)) (list (m pred) x)
+                   :else (list pred x))]
+    `(let [~(with-meta csv {:tag 'ints}) ~cs ~nv (long ~n)]
+       (loop [~j (long ~i)] (if (and (< ~j ~nv) ~test) (recur (inc ~j)) ~j)))))
+
+(declare nested-pragma! qual-end scan-qualified! scan-numbers! pragma-token! header-pragma-token!
+         multiline-string! lex-token)
+
+(defn- hs-space-ascii? [^long c] (or (= c 32) (and (>= c 9) (<= c 13))))
+
+(defn- loc-at-start "The start location [file line col pos] of a span" [span] [(nth span 0) (nth span 1) (nth span 2) (nth span 5)])
+
+;;; ------------------------------------------------------------------------------------------
+;;; The state (PState): an object array
+
+(def ^:private slot-index
+  {:cs 0 :n 1 :pos 2 :line 3 :col 4 :file 5 :lex 6 :ctx 7 :exts 8 :last-tk 9 :last-loc 10
+   :last-len 11 :prev-loc 12 :hdk 13 :errors 14 :srcfiles 15 :warnings 16 :file0 17
+   :acc 18 :tab-first 19 :tab-count 20})
+
+(defmacro ^:private st [ps k] `(aget ~(with-meta ps {:tag 'objects}) ~(int (slot-index k))))
+(defmacro ^:private st! [ps k v] `(aset ~(with-meta ps {:tag 'objects}) ~(int (slot-index k)) ^Object (box ~v)))
+
+(defn box "v as an Object (a boxed number)" ^Object [v] v)
+
+(defn code-points
+  "The text's code points"
+  ^ints [^String text]
+  (.toArray (.codePoints text)))
+
+(defn make-state
+  "initParserState: the lexer's state over text (a String, or code points) for file, with the
+  extension bitmap exts; the start codes [bol 0], or with :prags (initPragState) [bol
+  option_prags 0]"
+  [text ^String file ^long exts & {:keys [prags]}]
+  (let [cs (if (string? text) (code-points text) text)
+        ps (object-array 21)]
+    (st! ps :cs cs)
+    (st! ps :n (alength ^ints cs))
+    (st! ps :pos 0) (st! ps :line 1) (st! ps :col 1) (st! ps :file file)
+    (st! ps :lex (if prags '(:bol :option-prags :s0) '(:bol :s0)))
+    (st! ps :ctx '())
+    (st! ps :exts exts)
+    (st! ps :last-tk nil)
+    (st! ps :last-loc [file 1 1 1 1 0 0])
+    (st! ps :last-len 0)
+    (st! ps :prev-loc [file 1 1 1 1 0 0])
+    (st! ps :hdk (java.util.ArrayList.))
+    (st! ps :errors (java.util.ArrayList.))
+    (st! ps :srcfiles '())
+    (st! ps :warnings (java.util.ArrayList.))
+    (st! ps :file0 file)
+    (st! ps :acc (long-array 2))
+    (st! ps :tab-first nil)
+    (st! ps :tab-count 0)
+    ps))
+
+(defn exts ^long [ps] (long (st ps :exts)))
+(defn set-exts! [ps ^long e] (st! ps :exts e))
+(defn get-bit
+  "getBit: whether an extension bit (a keyword of ext-bits) is set"
+  [ps k] (not (zero? (bit-and (long (st ps :exts)) (xbit k)))))
+(defn context [ps] (st ps :ctx))
+(defn set-context! [ps c] (st! ps :ctx c))
+(defn last-loc [ps] (st ps :last-loc))
+(defn last-tk [ps] (st ps :last-tk))
+(defn hdk-comments "The documentation comments, [span hdk-comment] in order" [ps] (vec (st ps :hdk)))
+(defn lex-state [ps] (first (st ps :lex)))
+(defn push-lex-state! [ps s] (st! ps :lex (conj (st ps :lex) s)))
+(defn pop-lex-state! [ps] (let [l (st ps :lex)] (st! ps :lex (rest l)) (first l)))
+(defn errors "The non-fatal errors recorded (messages, arbace.repr.haskell.errors)" [ps] (vec (st ps :errors)))
+
+(defn msg "A message (arbace.repr.haskell.errors): constructor con at span, its fields" [con span & args]
+  {:con con :span span :args (vec args)})
+
+(defn fatal!
+  "addFatalError: the parse fails with the message m (an exception carrying it)"
+  [m]
+  (throw (ex-info (str "parse failed: " (name (:con m)) (when (seq (:args m)) (str " " (pr-str (first (:args m))))))
+                  {:span (:span m) :error (name (:con m)) :ps-message m})))
+
+(defn lex-error!
+  "A fatal lexical or parse error, the message m"
+  [ps m]
+  (fatal! m))
+
+(defn add-error!
+  "addError: the message m recorded, parsing goes on"
+  [ps m]
+  (let [^java.util.ArrayList l (st ps :errors)] (.add l m)))
+
+(defn add-warning!
+  "addPsMessage of a warning on by default: recorded"
+  [ps m]
+  (let [^java.util.ArrayList l (st ps :warnings)] (.add l m)))
+
+(defn warnings
+  "The warnings (getPsMessages: the tab warning added, at the first tab with their count)"
+  [ps]
+  (let [ws (vec (st ps :warnings))]
+    (if-let [tf (st ps :tab-first)]
+      (conj ws (msg :PsWarnTab tf (st ps :tab-count)))
+      ws)))
+
+(defn- prev-chars
+  "decodePrevNChars n: StringBuffer's n code points before the one before position p (it starts
+  from the last byte before p, and decodes the characters before that one), fewer at the start"
+  ^String [^ints cs ^long p ^long n]
+  (let [e (max 0 (dec p)) b (max 0 (- e n))] (String. cs (int b) (int (- e b)))))
+
+(defn src-parse-err
+  "srcParseErr: the parse error at the last token (its text, or none for a virtual one: the
+  message's possibly incorrect indentation) with its details, at the last token's span"
+  [ps]
+  (let [^ints cs (st ps :cs) p (long (st ps :pos)) len (long (st ps :last-len))
+        token (String. cs (int (- p len)) (int len))
+        last100 (prev-chars cs p 100)
+        ex (long (st ps :exts))]
+    (msg :PsErrParse (st ps :last-loc) token
+         {:th (not (zero? (bit-and ex (xbit :ThQuotesBit))))
+          :do100 (str/includes? last100 "do")
+          :mdo100 (str/includes? last100 "mdo")
+          :patsyn (not (zero? (bit-and ex (xbit :PatternSynonymsBit))))
+          :pattern (= "pattern " (prev-chars cs p 8))})))
+
+(defn loc
+  "The current location [file line col pos]"
+  [ps]
+  [(st ps :file) (st ps :line) (st ps :col) (st ps :pos)])
+
+(defn set-loc! [ps [file line col pos]]
+  (st! ps :file file) (st! ps :line line) (st! ps :col col) (st! ps :pos pos))
+
+(defn mk-span
+  "mkPsSpan: the span from location a to location b"
+  [[f l1 c1 p1] [_ l2 c2 p2]]
+  [f l1 c1 l2 c2 p1 p2])
+
+(defn- advance
+  "The location after the code points cs[from, to) from location (line col): [line col]"
+  [^ints cs ^long from ^long to ^long line ^long col]
+  (loop [i from l line c col]
+    (if (< i to)
+      (let [ch (aget cs i)]
+        (cond
+          (= ch 10) (recur (inc i) (inc l) 1)
+          (= ch 9) (recur (inc i) l (inc (bit-shift-left (inc (bit-shift-right (dec c) 3)) 3)))
+          :else (recur (inc i) l (inc c))))
+      [l c])))
+
+(defn- loc-of
+  "The location [file line col pos] of position p, at or after the current position"
+  [ps ^long p]
+  (let [[l c] (advance (st ps :cs) (st ps :pos) p (st ps :line) (st ps :col))]
+    [(st ps :file) l c p]))
+
+(defn- report-lex-error!
+  "reportLexError: the lexical error err from location l1 to position p2, at the end of the
+  input, else at p2's character"
+  [ps err l1 ^long p2]
+  (let [l2 (loc-of ps p2)
+        eof (>= p2 (long (st ps :n)))
+        c (when-not eof (aget ^ints (st ps :cs) p2))]
+    (if (and c (zero? (long c)))
+      ;; a decoding error (StringBuffer's \0): at p2
+      (fatal! (msg :PsErrLexer [(nth l2 0) (nth l2 1) (nth l2 2) (nth l2 1) (nth l2 2) p2 p2] err [:utf8]))
+      (fatal! (msg :PsErrLexer [(nth l1 0) (nth l1 1) (nth l1 2) (nth l2 1) (nth l2 2) (nth l1 3) p2] err
+                   (if eof [:eof] [:char c]))))))
+
+(defn- error-at!
+  "throwStringLexError's lexError: the error err at position p after the location l0 [file line
+  col pos] (a token's start)"
+  [ps err l0 ^long p]
+  (let [[f l c b] l0
+        [l2 c2] (advance (st ps :cs) b p l c)
+        n (long (st ps :n))]
+    (fatal! (msg :PsErrLexer [f l2 c2 l2 c2 p p] err
+                 (if (>= p n) [:eof] [:char (aget ^ints (st ps :cs) p)])))))
+
+(defn- lex-error-here!
+  "lexError: the lexical error err at the current position"
+  [ps err]
+  (let [p (long (st ps :pos))] (report-lex-error! ps err (loc-of ps p) p)))
+
+(defn- smart-quote-error!
+  "throwSmartQuoteError: the smart quote c at the zero-width span of location l"
+  [ps ^long c l]
+  (let [single (or (= c 0x2018) (= c 0x2019))]
+    (fatal! (msg :PsErrUnicodeCharLooksLike [(nth l 0) (nth l 1) (nth l 2) (nth l 1) (nth l 2) (nth l 3) (nth l 3)]
+                 c (if single 39 34) (if single "Single Quote" "Quotation Mark")))))
+
+(defn- loc-at
+  "The location at position p, from the current location (p after it)"
+  [ps ^long p]
+  (let [pos (long (st ps :pos))
+        [l c] (advance (st ps :cs) pos p (st ps :line) (st ps :col))]
+    [(st ps :file) l c p]))
+
+(defn- set-input!
+  "setInput: the input moved to position p (after the current one), its location advanced"
+  [ps ^long p]
+  (let [^ints cs (st ps :cs)]
+    (loop [i (long (st ps :pos)) l (long (st ps :line)) c (long (st ps :col))]
+      (if (< i p)
+        (let [ch (aget cs i)]
+          (cond
+            (== ch 10) (recur (inc i) (inc l) 1)
+            (== ch 9) (recur (inc i) l (inc (bit-shift-left (inc (bit-shift-right (dec c) 3)) 3)))
+            :else (recur (inc i) l (inc c))))
+        (do (st! ps :line l) (st! ps :col c) (st! ps :pos p))))))
+
+(defn- substr
+  "The text of cs[from, to)"
+  ^String [^ints cs ^long from ^long to]
+  (String. cs (int from) (int (- to from))))
+
+(defn- ch ^long [^ints cs ^long n ^long i] (if (< i n) (aget cs i) -1))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Layout contexts (LayoutContext: :nolayout or [:layout col gen-semic])
+
+(defn pop-context!
+  "popContext: the innermost layout context popped (the parser's close on error, Parser.y's
+  `close : error`); a parse error when there is none"
+  [ps]
+  (let [c (st ps :ctx)]
+    (if (seq c)
+      (st! ps :ctx (rest c))
+      (lex-error! ps (src-parse-err ps)))))
+
+(defn push-current-context!
+  "pushCurrentContext: a layout context at the start column of the last token"
+  [ps gen-semic]
+  (st! ps :ctx (conj (st ps :ctx) [:layout (nth (st ps :last-loc) 2) gen-semic])))
+
+(defn push-module-context! [ps] (push-current-context! ps true))
+
+(defn- offside
+  "getOffside: the comparison of the last token's start column with the innermost layout
+  context's: [-1|0|1 gen-semic]"
+  [ps]
+  (let [offs (long (nth (st ps :last-loc) 2))
+        top (first (st ps :ctx))]
+    (if (vector? top)
+      (let [n (long (nth top 1))] [(compare offs n) (nth top 2)])
+      [1 false])))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Reserved words and symbols (reservedWordsFM, reservedSymsFM)
+
+(def ^:private reserved-words
+  {"_" [:ITunderscore nil] "as" [:ITas nil] "case" [:ITcase nil] "cases" [:ITlcases :LambdaCaseBit]
+   "class" [:ITclass nil] "data" [:ITdata nil] "default" [:ITdefault nil] "deriving" [:ITderiving nil]
+   "do" [:ITdo nil] "else" [:ITelse nil] "hiding" [:IThiding nil] "if" [:ITif nil]
+   "import" [:ITimport nil] "in" [:ITin nil] "infix" [:ITinfix nil] "infixl" [:ITinfixl nil]
+   "infixr" [:ITinfixr nil] "instance" [:ITinstance nil] "let" [:ITlet nil] "module" [:ITmodule nil]
+   "newtype" [:ITnewtype nil] "of" [:ITof nil] "qualified" [:ITqualified nil] "then" [:ITthen nil]
+   "type" [:ITtype nil] "where" [:ITwhere nil]
+   "forall" [:ITforall nil] "mdo" [:ITmdo [:RecursiveDoBit]] "family" [:ITfamily nil]
+   "role" [:ITrole nil] "pattern" [:ITpattern [:PatternSynonymsBit]]
+   "static" [:ITstatic [:StaticPointersBit]] "stock" [:ITstock nil] "anyclass" [:ITanyclass nil]
+   "via" [:ITvia nil] "group" [:ITgroup [:TransformComprehensionsBit]]
+   "by" [:ITby [:TransformComprehensionsBit]] "using" [:ITusing [:TransformComprehensionsBit]]
+   "foreign" [:ITforeign [:FfiBit]] "export" [:ITexport [:FfiBit]] "label" [:ITlabel [:FfiBit]]
+   "dynamic" [:ITdynamic [:FfiBit]] "safe" [:ITsafe [:FfiBit :SafeHaskellBit]]
+   "interruptible" [:ITinterruptible [:InterruptibleFfiBit]] "unsafe" [:ITunsafe [:FfiBit]]
+   "stdcall" [:ITstdcallconv [:FfiBit]] "ccall" [:ITccallconv [:FfiBit]]
+   "capi" [:ITcapiconv [:CApiFfiBit]] "prim" [:ITprimcallconv [:FfiBit]]
+   "javascript" [:ITjavascriptcallconv [:FfiBit]]
+   "unit" [:ITunit nil] "dependency" [:ITdependency nil] "signature" [:ITsignature nil]
+   "rec" [:ITrec [:ArrowsBit :RecursiveDoBit]] "proc" [:ITproc [:ArrowsBit]]
+   "splice" [:ITsplice [:LevelImportsBit]] "quote" [:ITquote [:LevelImportsBit]]})
+
+(def ^:private reserved-syms
+  ;; [token value unicode? bits]
+  {".." [:ITdotdot nil false nil] ":" [:ITcolon nil false nil] "::" [:ITdcolon :normal false nil]
+   "=" [:ITequal nil false nil] "\\" [:ITlam nil false nil] "|" [:ITvbar nil false nil]
+   "<-" [:ITlarrow :normal false nil] "->" [:ITrarrow :normal false nil]
+   "=>" [:ITdarrow :normal false nil] "-" [:ITminus nil false [:NoLexicalNegationBit]]
+   "*" [:ITstar :normal false [:StarIsTypeBit]]
+   "-<" [:ITlarrowtail :normal false [:ArrowsBit]] ">-" [:ITrarrowtail :normal false [:ArrowsBit]]
+   "-<<" [:ITLarrowtail :normal false [:ArrowsBit]] ">>-" [:ITRarrowtail :normal false [:ArrowsBit]]
+   "∷" [:ITdcolon :unicode true nil] "⇒" [:ITdarrow :unicode true nil]
+   "∀" [:ITforall :unicode true nil] "→" [:ITrarrow :unicode true nil]
+   "←" [:ITlarrow :unicode true nil] "⊸" [:ITlolly nil true nil]
+   "⤙" [:ITlarrowtail :unicode true [:ArrowsBit]] "⤚" [:ITrarrowtail :unicode true [:ArrowsBit]]
+   "⤛" [:ITLarrowtail :unicode true [:ArrowsBit]] "⤜" [:ITRarrowtail :unicode true [:ArrowsBit]]
+   "★" [:ITstar :unicode true [:StarIsTypeBit]]})
+
+(defn- any-bit? [^long exts bits]
+  (boolean (some #(not (zero? (bit-and exts (xbit %)))) bits)))
+
+(defn- maybe-layout!
+  "maybe_layout: the layout keywords push a layout start code"
+  [ps kind]
+  (when-not (get-bit ps :AlternativeLayoutRuleBit)
+    (case kind
+      (:ITdo :ITmdo) (push-lex-state! ps :layout-do)
+      (:ITof :ITlcase :ITlcases :ITlet :ITwhere :ITrec) (push-lex-state! ps :layout)
+      :ITif (push-lex-state! ps :layout-if)
+      nil)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Regular expressions: matchers returning the end position of a match at i, or -1
+
+(defn- m-run
+  "The end of a run of code points satisfying p from i (i itself when none)"
+  ^long [^ints cs ^long n ^long i p]
+  (loop [j i] (if (and (< j n) (p (aget cs j))) (recur (inc j)) j)))
+
+(defn- m-digits
+  "@decimal-like: d (_* d)* for a digit predicate p, or -1"
+  ^long [^ints cs ^long n ^long i p]
+  (if (and (< i n) (p (aget cs i)))
+    (loop [j (inc i)]
+      (let [k (m-run cs n j #(= (long %) 95))]
+        (if (and (< k n) (p (aget cs k))) (recur (inc k)) j)))
+    -1))
+
+(defn- m-numspc ^long [^ints cs ^long n ^long i] (m-run cs n i #(= (long %) 95)))
+
+(defn- m-varid ^long [^ints cs ^long n ^long i]
+  (if (and (< i n) (small?* (aget cs i))) (run* cs n (inc i) idchar?) -1))
+
+(defn- m-conid ^long [^ints cs ^long n ^long i]
+  (if (and (< i n) (large?* (aget cs i))) (run* cs n (inc i) idchar?) -1))
+
+(defn- m-varsym ^long [^ints cs ^long n ^long i]
+  (if (and (< i n) (sym-char?* (aget cs i)) (not= 58 (aget cs i))) (run* cs n (inc i) sym-char?) -1))
+
+(defn- m-consym ^long [^ints cs ^long n ^long i]
+  (if (and (< i n) (= 58 (aget cs i))) (run* cs n (inc i) sym-char?) -1))
+
+(defn- m-exponent ^long [^ints cs ^long n ^long i e?]
+  ;; @numspc [eE] [\-\+]? @decimal (e? the exponent letter's predicate)
+  (let [j (m-numspc cs n i)]
+    (if (and (< j n) (e? (aget cs j)))
+      (let [k (inc j)
+            k (if (and (< k n) (or (= 45 (aget cs k)) (= 43 (aget cs k)))) (inc k) k)]
+        (m-digits cs n k decdigit?))
+      -1)))
+
+(defn- m-floating
+  "@floating_point = @numspc @decimal \\. @decimal @exponent? | @numspc @decimal @exponent"
+  ^long [^ints cs ^long n ^long i]
+  (let [j (m-numspc cs n i)
+        d (m-digits cs n j decdigit?)]
+    (if (neg? d)
+      -1
+      (let [a (if (and (< d n) (= 46 (aget cs d)))
+                (let [f (m-digits cs n (inc d) decdigit?)]
+                  (if (neg? f) -1 (let [e (m-exponent cs n f #(or (= (long %) 101) (= (long %) 69)))]
+                                    (if (neg? e) f e))))
+                -1)
+            b (m-exponent cs n d #(or (= (long %) 101) (= (long %) 69)))]
+        (max a b)))))
+
+(defn- m-hex-floating
+  "0[xX] @numspc @hex_floating_point: @numspc @hexadecimal \\. @hexadecimal @bin_exponent? |
+  @numspc @hexadecimal @bin_exponent"
+  ^long [^ints cs ^long n ^long i]
+  (if (and (< (inc i) n) (= 48 (aget cs i)) (or (= 120 (aget cs (inc i))) (= 88 (aget cs (inc i)))))
+    (let [j (m-numspc cs n (m-numspc cs n (+ i 2)))
+          d (m-digits cs n j hexit?)]
+      (if (neg? d)
+        -1
+        (let [p? #(or (= (long %) 112) (= (long %) 80))
+              a (if (and (< d n) (= 46 (aget cs d)))
+                  (let [f (m-digits cs n (inc d) hexit?)]
+                    (if (neg? f) -1 (let [e (m-exponent cs n f p?)] (if (neg? e) f e))))
+                  -1)
+              b (m-exponent cs n d p?)]
+          (max a b))))
+    -1))
+
+(defn- m-radix-lit
+  "0[bB] @numspc @binary (and o, x): letters the radix letters, p the digit predicate"
+  ^long [^ints cs ^long n ^long i ^long l1 ^long l2 p]
+  (if (and (< (inc i) n) (= 48 (aget cs i)) (or (= l1 (aget cs (inc i))) (= l2 (aget cs (inc i)))))
+    (m-digits cs n (m-numspc cs n (+ i 2)) p)
+    -1))
+
+(def ^:private ascii-escapes
+  ["NUL" "SOH" "STX" "ETX" "EOT" "ENQ" "ACK" "BEL" "BS" "HT" "LF" "VT" "FF" "CR" "SO" "SI" "DLE"
+   "DC1" "DC2" "DC3" "DC4" "NAK" "SYN" "ETB" "CAN" "EM" "SUB" "ESC" "FS" "GS" "RS" "US" "SP" "DEL"])
+
+(defn- cntrl? [^long c] (or (and (>= c 65) (<= c 90)) (= c 64) (= c 91) (= c 92) (= c 93) (= c 94) (= c 95)))
+
+(defn- m-escape-ends
+  "The ends of @escape after its backslash at i (the alternatives' possible ends; amp?: whether
+  \\& counts, @escape's charesc, not @escapechar's)"
+  [^ints cs ^long n ^long i amp?]
+  (let [c (ch cs n i)]
+    (cond
+      (or (= c 97) (= c 98) (= c 102) (= c 110) (= c 114) (= c 116) (= c 118) (= c 92) (= c 34) (= c 39))
+      [(inc i)]
+      (= c 38) (if amp? [(inc i)] [])
+      (= c 94) (if (cntrl? (ch cs n (inc i))) [(+ i 2)] [])
+      (decdigit? c) [(m-digits cs n i decdigit?)]
+      (= c 111) (let [e (m-digits cs n (inc i) octit?)] (if (neg? e) [] [e]))
+      (= c 120) (let [e (m-digits cs n (inc i) hexit?)] (if (neg? e) [] [e]))
+      :else (vec (keep (fn [^String nm]
+                         (let [k (count nm)]
+                           (when (and (<= (+ i k) n)
+                                      (loop [j 0] (or (= j k) (and (= (long (.charAt nm j)) (aget cs (+ i j))) (recur (inc j))))))
+                             (+ i k))))
+                       ascii-escapes)))))
+
+(defn- m-string-body
+  "@stringchar* from i: the position of the first code point that is not a @stringchar (an
+  escape taken at its longest), so a closing quote, or anything else"
+  ^long [^ints cs ^long n ^long i]
+  (loop [j i]
+    (if (>= j n)
+      j
+      (let [c (aget cs j)]
+        (cond
+          (= c 34) j
+          (= c 92)
+          (let [d (ch cs n (inc j))]
+            (if (and (>= d 0) (whitechar? d))
+              (let [k (m-run cs n (inc j) whitechar?)]
+                (if (= 92 (ch cs n k)) (recur (inc k)) j))
+              (let [es (m-escape-ends cs n (inc j) true)]
+                (if (seq es) (recur (long (apply max es))) j))))
+          (or (and (graphic? c) (not= c 92)) (space? c)) (recur (inc j))
+          :else j)))))
+
+(def ^:private escape-prefixes
+  "The names an escape can begin with after the backslash, for the longest prefix the automaton
+  consumes before it stops: the control names, x, o and ^"
+  ["NUL" "SOH" "STX" "ETX" "EOT" "ENQ" "ACK" "BEL" "BS" "HT" "LF" "VT" "FF" "CR" "SO" "SI" "DLE" "DC1"
+   "DC2" "DC3" "DC4" "NAK" "SYN" "ETB" "CAN" "EM" "SUB" "ESC" "FS" "GS" "RS" "US" "SP" "DEL" "x" "o" "^"])
+
+(defn- escape-prefix-len
+  "The length of the longest prefix of an escape's name that the input from p begins with"
+  ^long [^ints cs ^long n ^long p]
+  (reduce (fn [^long best ^String nm]
+            (let [k (loop [k 0]
+                      (if (and (< k (count nm)) (= (long (.charAt nm k)) (long (ch cs n (+ p k))))) (recur (inc k)) k))]
+              (max best k)))
+          0 escape-prefixes))
+
+(defn- dfa-stop
+  "Where Alex's automaton stops on input that no rule matches from i (the error's end: the
+  longest prefix of some rule's expression): within a string or a character literal, else at i"
+  ^long [ps sc ^long i]
+  (let [^ints cs (st ps :cs) n (long (st ps :n))
+        c (ch cs n i)]
+    (cond
+      (= c 34)
+      (loop [j (inc i)]
+        (if (>= j n)
+          n
+          (let [c (aget cs j)]
+            (cond
+              (= c 34) j
+              (= c 92)
+              (let [d (ch cs n (inc j))]
+                (cond
+                  (< d 0) n
+                  (whitechar? d) (let [k (m-run cs n (inc j) whitechar?)]
+                                   (if (= 92 (ch cs n k)) (recur (inc k)) k))
+                  :else (let [es (m-escape-ends cs n (inc j) true)]
+                          (if (seq es) (recur (long (apply max es))) (+ (inc j) (escape-prefix-len cs n (inc j)))))))
+              (or (and (graphic? c) (not= c 92)) (space? c)) (recur (inc j))
+              :else j))))
+      (= c 39)
+      (let [j (inc i) d (ch cs n j)]
+        (cond
+          (< d 0) n
+          (= d 39) (+ i 2)
+          (= d 92) (let [es (m-escape-ends cs n (inc j) false)]
+                     (if (seq es) (long (apply max es)) (min n (+ (inc j) (escape-prefix-len cs n (inc j))))))
+          (or (graphic? d) (space? d)) (min n (inc j))
+          :else j))
+      :else i)))
+
+(defn- m-char-lit
+  "\\' @char \\' at i: the end after the closing quote, or -1"
+  ^long [^ints cs ^long n ^long i]
+  (let [j (inc i)
+        c (ch cs n j)]
+    (cond
+      (< c 0) -1
+      (= c 92) (let [es (m-escape-ends cs n (inc j) false)
+                     e (some (fn [^long e] (when (= 39 (ch cs n e)) e)) (sort > es))]
+                 (if e (inc (long e)) -1))
+      (and (or (and (graphic? c) (not= c 39)) (space? c)) (= 39 (ch cs n (inc j)))) (+ j 2)
+      :else -1)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Predicates on the input (followedByOpeningToken, precededByClosingToken...)
+
+(defn- followed-by-opening?
+  "followedByOpeningToken': the input after the token (position j) begins an opening token"
+  [^ints cs ^long n ^long j]
+  (if (>= j n)
+    false
+    (let [c (aget cs j)]
+      (cond
+        (= c 123) (not= 45 (ch cs n (inc j)))
+        (or (= c 40) (= c 91) (= c 34) (= c 39) (= c 95) (= c 0x27e6) (= c 0x2987)) true
+        :else (alpha-num? c)))))
+
+(defn- preceded-by-closing?
+  "precededByClosingToken': the code point before position i ends a closing token"
+  [^ints cs ^long i]
+  (let [c (if (pos? i) (aget cs (dec i)) 10)]
+    (cond
+      (= c 125) (not (and (> i 1) (= 45 (aget cs (- i 2)))))
+      (or (= c 41) (= c 93) (= c 34) (= c 39) (= c 95) (= c 0x27e7) (= c 0x2988)) true
+      :else (alpha-num? c))))
+
+(defn- at-eol? [^ints cs ^long n ^long j] (or (>= j n) (= 10 (aget cs j))))
+
+(defn- bol? [^ints cs ^long i] (or (zero? i) (= 10 (aget cs (dec i)))))
+
+(defn- smart-quote? [^long c] (or (= c 0x2018) (= c 0x2019) (= c 0x201c) (= c 0x201d)))
+
+(defn- clean-pragma
+  "clean_pragma: lower case, the {-# dropped, the words canonical (noinline, specialise,
+  constructorlike), single-spaced"
+  ^String [^String prag]
+  (let [s (str/lower-case (if (str/starts-with? prag "{-#") (subs prag 3) prag))
+        ws (remove empty? (str/split s #"[ \t\n\r\f\u000b]+"))]
+    (str/join " " (map #(case % "noinline" "notinline" "specialise" "specialize" "constructorlike" "conlike" %) ws))))
+
+(def ^:private line-prags #{"line"})
+(def ^:private file-header-prags #{"options" "options_ghc" "options_haddock" "language" "include"})
+(def ^:private ignored-prags
+  (into #{"cfiles" "contract"} (map #(str "options_" %) ["hugs" "nhc98" "jhc" "yhc" "catch" "derive"])))
+(def ^:private one-word-prags
+  #{"rules" "inline" "inlinable" "inlineable" "notinline" "opaque" "specialize" "source" "warning"
+    "deprecated" "scc" "unpack" "nounpack" "ann" "minimal" "overlaps" "overlappable" "overlapping"
+    "incoherent" "ctype" "complete" "column"})
+(def ^:private two-word-prags
+  #{"inline conlike" "notinline conlike" "specialize inline" "specialize notinline"})
+
+(defn- pragma-match
+  "\"{-#\" $whitechar* $pragmachar+ [$whitechar+ $pragmachar+]: the end of the longest match at i
+  whose lexeme is in prags (known_pragma: and not followed by a pragma name character), or -1;
+  two: the two-word form"
+  ^long [^ints cs ^long n ^long i prags two]
+  (if (and (< (+ i 2) n) (= 123 (aget cs i)) (= 45 (aget cs (inc i))) (= 35 (aget cs (+ i 2))))
+    (let [w0 (m-run cs n (+ i 3) whitechar?)
+          w1 (m-run cs n w0 pragmachar?)]
+      (if (= w1 w0)
+        -1
+        (let [ok? (fn [^long e]
+                    (and (contains? prags (clean-pragma (substr cs i e)))
+                         (let [c (ch cs n e)] (not (and (>= c 0) (or (alpha-num? c) (= c 95)))))))]
+          (if two
+            (let [w2 (m-run cs n w1 whitechar?)]
+              (if (= w2 w1)
+                -1
+                (let [w3 (m-run cs n w2 pragmachar?)]
+                  (loop [e w3] (cond (<= e w2) -1 (ok? e) e :else (recur (dec e)))))))
+            (loop [e w1] (cond (<= e w0) -1 (ok? e) e :else (recur (dec e))))))))
+    -1))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Numbers
+
+(defn- parse-unsigned
+  "parseUnsignedInteger: the digits of cs[from, to) in radix, underscores skipped"
+  [^ints cs ^long from ^long to ^long radix]
+  (loop [i from acc (biginteger 0)]
+    (if (< i to)
+      (let [c (aget cs i)]
+        (if (= c 95)
+          (recur (inc i) acc)
+          (recur (inc i) (.add (.multiply ^java.math.BigInteger acc (biginteger radix)) (biginteger (hex-digit c))))))
+      (let [v acc] (if (< (.bitLength ^java.math.BigInteger v) 63) (long v) (bigint v))))))
+
+(defn- digits-value [^String s ^long radix]
+  (let [s (str/replace s "_" "")]
+    (if (empty? s) 0 (let [v (java.math.BigInteger. s (int radix))] (if (< (.bitLength v) 63) (long v) (bigint v))))))
+
+(defn read-significand-exponent
+  "readSignificandExponentPair (and the hex form, readHexSignificandExponentPair): [significand
+  exponent] of a fractional literal's text, a leading minus handled"
+  [^String s hex?]
+  (let [neg (str/starts-with? s "-")
+        s (if neg (subs s 1) s)
+        [i e] (if hex?
+                (let [body (str/replace (subs s 2) "_" "")
+                      [m ex] (let [k (str/index-of (str/lower-case body) "p")] (if k [(subs body 0 k) (subs body (inc k))] [body nil]))
+                      [front back] (let [k (str/index-of m ".")] (if k [(subs m 0 k) (subs m (inc k))] [m ""]))
+                      num (digits-value (str front back) 16)
+                      e1 (* -4 (count back))
+                      ex (if ex (let [ex (if (str/starts-with? ex "+") (subs ex 1) ex)] (Long/parseLong ex)) 0)]
+                  [num (+ e1 ex)])
+                (let [body (str/replace s "_" "")
+                      [m ex] (let [k (or (str/index-of body "e") (str/index-of body "E"))] (if k [(subs body 0 k) (subs body (inc k))] [body nil]))
+                      [front back] (let [k (str/index-of m ".")] (if k [(subs m 0 k) (subs m (inc k))] [m ""]))
+                      num (digits-value (str front back) 10)
+                      ex (if ex (let [ex (if (str/starts-with? ex "+") (subs ex 1) ex)] (Long/parseLong ex)) 0)]
+                  [num (- ex (count back))]))]
+    [(if neg (- i) i) e]))
+
+(defn fractional-lit
+  "readFractionalLit: the FractionalLit of a literal's text, a dump form (FL (src text) neg
+  (:% significand 1) exponent base)"
+  [^String s hex?]
+  (let [[i e] (read-significand-exponent s hex?)]
+    (list 'FL (list 'src s) (str/starts-with? s "-") (list :% i 1) e (if hex? 'Base2 'Base10))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Strings (GHC.Parser.String)
+
+(defn- resolve-escape
+  "resolveEscapeChar after a backslash at i of the code points v: [code-point next-index]"
+  [v ^long i]
+  (let [n (count v)
+        c (long (nth v i))]
+    (case (int c)
+      97 [7 (inc i)] 98 [8 (inc i)] 102 [12 (inc i)] 110 [10 (inc i)] 114 [13 (inc i)]
+      116 [9 (inc i)] 118 [11 (inc i)] 92 [92 (inc i)] 34 [34 (inc i)] 39 [39 (inc i)]
+      120 (loop [j (inc i) x 0] (if (and (< j n) (hexit? (nth v j))) (recur (inc j) (+ (* x 16) (hex-digit (nth v j)))) [x j]))
+      111 (loop [j (inc i) x 0] (if (and (< j n) (octit? (nth v j))) (recur (inc j) (+ (* x 8) (- (long (nth v j)) 48))) [x j]))
+      94 [(- (long (nth v (inc i))) 64) (+ i 2)]
+      (if (decdigit? c)
+        (loop [j i x 0] (if (and (< j n) (decdigit? (nth v j))) (recur (inc j) (+ (* x 10) (- (long (nth v j)) 48))) [x j]))
+        (let [codes [["NUL" 0] ["SOH" 1] ["STX" 2] ["ETX" 3] ["EOT" 4] ["ENQ" 5] ["ACK" 6] ["BEL" 7]
+                     ["BS" 8] ["HT" 9] ["LF" 10] ["VT" 11] ["FF" 12] ["CR" 13] ["SO" 14] ["SI" 15]
+                     ["DLE" 16] ["DC1" 17] ["DC2" 18] ["DC3" 19] ["DC4" 20] ["NAK" 21] ["SYN" 22]
+                     ["ETB" 23] ["CAN" 24] ["EM" 25] ["SUB" 26] ["ESC" 27] ["FS" 28] ["GS" 29]
+                     ["RS" 30] ["US" 31] ["SP" 32] ["DEL" 127]]]
+          (or (some (fn [[^String nm code]]
+                      (let [k (count nm)]
+                        (when (and (<= (+ i k) n)
+                                   (every? true? (map-indexed (fn [j ch] (= (long ch) (long (nth v (+ i j))))) (map long (.toCharArray nm)))))
+                          [code (+ i k)])))
+                    codes)
+              (throw (ex-info "bad escape" {:at i}))))))))
+
+(defn- collapse-gaps
+  "collapseGaps: each gap \\ ws \\ as \\& (GHC #25784)"
+  [v]
+  (let [n (count v)]
+    (loop [i 0 out (transient [])]
+      (if (>= i n)
+        (persistent! out)
+        (let [c (long (nth v i))]
+          (if (and (= c 92) (< (inc i) n))
+            (let [d (long (nth v (inc i)))]
+              (cond
+                (hs-space-ascii? d)
+                (let [k (loop [k (+ i 2)] (if (= 92 (long (nth v k))) (inc k) (recur (inc k))))]
+                  (recur k (conj! (conj! out 92) 38)))
+                (= d 92) (recur (+ i 2) (conj! (conj! out 92) 92))
+                (and (= d 94) (< (+ i 2) n) (= 92 (long (nth v (+ i 2))))) (recur (+ i 3) (conj! (conj! (conj! out 92) 94) 92))
+                :else (recur (inc i) (conj! out c))))
+            (recur (inc i) (conj! out c))))))))
+
+(defn- resolve-escapes
+  "resolveEscapes: the escapes resolved, \\& dropped"
+  [v]
+  (let [n (count v)]
+    (loop [i 0 out (transient [])]
+      (if (>= i n)
+        (persistent! out)
+        (let [c (long (nth v i))]
+          (if (= c 92)
+            (if (= 38 (long (nth v (inc i))))
+              (recur (+ i 2) out)
+              (let [[e j] (resolve-escape v (inc i))]
+                (when (> (long e) 0x10ffff)
+                  ;; parseNum: the error at the digit that takes the value out of range
+                  (let [c (long (nth v (inc i)))
+                        [k base] (case (int c) 120 [(+ i 2) 16] 111 [(+ i 2) 8] [(inc i) 10])
+                        at (loop [k (long k) x 0]
+                             (let [x (+ (* x (long base)) (long (hex-digit (nth v k))))]
+                               (if (> x 0x10ffff) k (recur (inc k) x))))]
+                    (throw (ex-info "numeric escape sequence out of range" {:at at}))))
+                (recur (long j) (conj! out e))))
+            (recur (inc i) (conj! out c))))))))
+
+(defn- cps->str ^String [v]
+  (let [sb (StringBuilder.)] (doseq [c v] (.appendCodePoint sb (int c))) (.toString sb)))
+
+(defn lex-string-chars
+  "lexString: the value of a string's content cs[from, to) (gaps collapsed, escapes resolved), as
+  code points"
+  [^ints cs ^long from ^long to]
+  (resolve-escapes (collapse-gaps (vec (java.util.Arrays/copyOfRange cs (int from) (int to))))))
+
+(defn- lex-multiline-chars
+  "lexMultilineString's steps 1-8 over the content cs[from, to)"
+  [^ints cs ^long from ^long to]
+  (let [v (collapse-gaps (vec (java.util.Arrays/copyOfRange cs (int from) (int to))))
+        ;; normalizeEOL
+        v (loop [i 0 out (transient [])]
+            (if (>= i (count v)) (persistent! out)
+                (let [c (long (nth v i))]
+                  (cond (and (= c 13) (< (inc i) (count v)) (= 10 (long (nth v (inc i))))) (recur (+ i 2) (conj! out 10))
+                        (or (= c 13) (= c 12)) (recur (inc i) (conj! out 10))
+                        :else (recur (inc i) (conj! out c))))))
+        ;; expandLeadingTabs
+        v (loop [i 0 col 0 out (transient [])]
+            (if (>= i (count v)) (persistent! out)
+                (let [c (long (nth v i))]
+                  (if (= c 9)
+                    (let [fill (- 8 (mod col 8))] (recur (inc i) (+ col fill) (reduce conj! out (repeat fill 32))))
+                    (recur (inc i) (if (= c 10) 0 (inc col)) (conj! out c))))))
+        lines (loop [ls [] cur [] i 0] (if (>= i (count v)) (conj ls cur) (let [c (long (nth v i))] (if (= c 10) (recur (conj ls cur) [] (inc i)) (recur ls (conj cur c) (inc i))))))
+        ws? (fn [c] (hs-space-ascii? (long c)))
+        included (filter #(not (every? ws? %)) (drop 1 lines))
+        prefix (if (seq included) (apply min (map #(count (take-while ws? %)) included)) 0)
+        ;; rmCommonWhitespacePrefix: from every line after a newline
+        lines (into [(first lines)] (map (fn [l] (let [k (min prefix (count l))] (vec (drop k l)))) (rest lines)))
+        ;; collapseOnlyWsLines (lines after the first)
+        lines (into [(first lines)] (map #(if (every? ws? %) [] %) (rest lines)))
+        v (vec (apply concat (interpose [10] lines)))
+        v (if (and (seq v) (= 10 (long (first v)))) (vec (rest v)) v)
+        v (if (and (seq v) (= 10 (long (peek v)))) (pop v) v)]
+    (resolve-escapes v)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Doc comments (multiline_doc_comment, nested_doc_comment, withLexedDocType)
+
+(defn- loc-after
+  "The location after advancing location l over cs[from, to)"
+  [^ints cs [f ^long line ^long col _] ^long from ^long to]
+  (let [[l c] (advance cs from to line col)] [f l c to]))
+
+(defn- doc-chunk [span ^String s] (list 'L span (list 'chunk s)))
+
+(defn- check-comment-line
+  "checkIfCommentLine at position j (after a newline): the position after the next line's \"--\"
+  when the doc comment continues there, else nil"
+  [^ints cs ^long n ^long j]
+  (let [k (loop [k j] (if (and (< k n) (let [c (aget cs k)] (and (hs-space? c) (not= c 10)))) (recur (inc k)) k))]
+    (when (and (= 45 (ch cs n k)) (= 45 (ch cs n (inc k))) (< (+ k 2) n))
+      (let [c (aget cs (+ k 2))]
+        (cond (= c 45) nil
+              (and (= c 32) (= 36 (ch cs n (+ k 3)))) nil
+              :else (+ k 2))))))
+
+(defn- hdk! [ps span c] (let [^java.util.ArrayList l (st ps :hdk)] (.add l [span c])))
+
+(defn- doc-decorated
+  "The HdkComment and HsDocString of a doc comment: kind :next :prev [:named name] [:section n]"
+  [kind mk]
+  (case (if (vector? kind) (first kind) kind)
+    :next [(list 'HdkCommentNext (mk 'HsDocStringNext))]
+    :prev [(list 'HdkCommentPrev (mk 'HsDocStringPrevious))]
+    :named (let [nm (second kind)] [(list 'HdkCommentNamed nm (mk (list 'HsDocStringNamed nm)))])
+    :section (let [k (second kind)] [(list 'HdkCommentSection k (mk (list 'HsDocStringGroup k)))])))
+
+(defn- doc-kind
+  "withLexedDocType: the doc comment's kind from its decorator, the position its text begins at
+  and whether later lines may continue it; nil when a $name reaches the end of the input"
+  [^ints cs ^long n ^long p]
+  ;; p: the position after the decorator character
+  (let [d (aget cs (dec p))]
+    (case (int d)
+      124 [:next p true]
+      94 [:prev p true]
+      36 (let [e (loop [k p] (cond (>= k n) nil (hs-space? (aget cs k)) k :else (recur (inc k))))]
+           (if e [[:named (substr cs p e)] e true] [:eof p]))
+      42 (let [e (loop [k p] (if (= 42 (ch cs n k)) (recur (inc k)) k))]
+           (if (< e n) [[:section (inc (- e p))] e false] [:eof e])))))
+
+(defn- comment-end!
+  "commentEnd: the input moved to position e, the token's span from the start of span to it; a
+  doc comment's HdkComment recorded; the comment token returned in the raw token stream, else nil"
+  [ps span ^long e hdk tok]
+  (let [end (loc-at ps e)
+        span' [(nth span 0) (nth span 1) (nth span 2) (nth end 1) (nth end 2) (nth span 5) e]]
+    (set-input! ps e)
+    (st! ps :last-loc span')
+    (when hdk (hdk! ps span' hdk))
+    (when (get-bit ps :RawTokenStreamBit) [tok nil span'])))
+
+(defn- multiline-doc-comment!
+  [ps span ^long p]
+  (let [^ints cs (st ps :cs) n (long (st ps :n))
+        [kind start more] (doc-kind cs n p)]
+    (if-not (= kind :eof)
+      (let [start (long start)]
+        (loop [line-start start lines []]
+          ;; the chunk: from line-start to the end of the line
+          (let [e (loop [k line-start] (if (and (< k n) (not= 10 (aget cs k))) (recur (inc k)) k))
+                sl (loc-at ps line-start)
+                el (loc-after cs sl line-start e)
+                lines (conj lines (doc-chunk (mk-span sl el) (substr cs line-start e)))]
+            (if-let [nxt (and more (< e n) (check-comment-line cs n (inc e)))]
+              (recur (long nxt) lines)
+              (let [[hdk] (doc-decorated kind (fn [dec] (list 'MultiLineDocString dec lines)))]
+                (comment-end! ps span e hdk :ITdocComment))))))
+      ;; the end of the input reached in a $name or after the stars: lexed normally from there
+      (do (set-input! ps start) nil))))
+
+(defn- nested-comment-end
+  "nested_comment_logic from position j inside a comment (depth 1): the position after the
+  closing -}, the comment's text after j; CPP line markers inside the comment followed
+  (parseNestedPragma); an unterminated comment an error from l0 (the comment's start, by
+  default the {- token's)"
+  [ps ^long j & [l0]]
+  (let [^ints cs (st ps :cs) n (long (st ps :n))]
+    (loop [i j depth 1]
+      (cond
+        (zero? depth) i
+        (>= i n) (report-lex-error! ps :LexUnterminatedComment (or l0 (loc-at-start (st ps :last-loc))) n)
+        :else
+        (let [c (aget cs i)]
+          (cond
+            (= c 45) (if (= 125 (ch cs n (inc i))) (recur (+ i 2) (dec depth)) (recur (inc i) depth))
+            (= c 123) (if (= 45 (ch cs n (inc i))) (recur (+ i 2) (inc depth)) (recur (inc i) depth))
+            (and (= c 10) (= 35 (ch cs n (inc i))))
+            (let [k (nested-pragma! ps (inc i))] (recur (long k) depth))
+            :else (recur (inc i) depth)))))))
+
+(defn- nested-pragma!
+  "parseNestedPragma: at position i (a # after a newline inside a comment), the bol start code's
+  line pragma lexed with InNestedCommentBit set; the comment goes on from the position this
+  consumed, at the location it reached (a line marker moves it). As GHC's, a marker leaves a bol
+  start code pushed (popLinePrag1 does not pop in a comment, parseNestedPragma pops once)"
+  ^long [ps ^long i]
+  (let [[l c] (advance (st ps :cs) (st ps :pos) i (st ps :line) (st ps :col))]
+    (st! ps :pos i) (st! ps :line l) (st! ps :col c)
+    (set-exts! ps (bit-or (exts ps) (xbit :InNestedCommentBit)))
+    (push-lex-state! ps :bol)
+    (lex-token ps)
+    (pop-lex-state! ps)
+    (set-exts! ps (bit-and (exts ps) (bit-not (xbit :InNestedCommentBit))))
+    (long (st ps :pos))))
+
+(defn- nested-comment!
+  "nested_comment: a block comment skipped (or a token in the raw token stream); j the position
+  after the matched {- (the input is there)"
+  [ps span ^long j]
+  (let [e (nested-comment-end ps j)]
+    (comment-end! ps span e nil :ITblockComment)))
+
+(defn- nested-doc-comment!
+  [ps span ^long p]
+  (let [^ints cs (st ps :cs) n (long (st ps :n))
+        [kind start] (doc-kind cs n p)
+        start (long start)]
+    (set-input! ps start)
+    (if (= kind :eof)
+     nil
+     (let [sl (loc ps)
+          e (nested-comment-end ps start sl)
+          el (loc-at ps e)
+          text (substr cs start (- e 2))
+          [hdk] (doc-decorated kind (fn [dec] (list 'NestedDocString dec (doc-chunk (mk-span sl el) text))))]
+      (comment-end! ps span e hdk :ITdocComment)))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The scanner: Alex's longest match over the rules of the current start code
+
+(defn- cand!
+  "Records a candidate match (rule priority, end position) in acc [best-end best-rule] when it
+  is longer than the best so far, or as long and earlier"
+  [^longs acc ^long rule ^long e]
+  (when (>= e 0)
+    (let [be (aget acc 0)]
+      (when (or (> e be) (and (= e be) (< rule (aget acc 1))))
+        (aset acc 0 e) (aset acc 1 rule)))))
+
+(def ^:private s0-codes #{:s0})
+(def ^:private s0-prags #{:s0 :option-prags})
+
+(defn- scan-comments!
+  "The rules of every start code that begin with - or {: comments, doc comments, line pragmas"
+  [^longs acc ^ints cs ^long n ^long i ^long ex]
+  (let [c (aget cs i) c1 (ch cs n (inc i)) c2 (ch cs n (+ i 2)) c3 (ch cs n (+ i 3))
+        haddock (xtest ex :HaddockBit)
+        eol (fn [^long j] (m-run cs n j #(not= 10 (long %))))]
+    (when (and (= c 45) (= c1 45))
+      ;; 4: "-- " ~$docsym .*
+      (when (and (= c2 32) (>= c3 0) (not= c3 10) (not (docsym? c3))) (cand! acc 4 (eol (+ i 4))))
+      ;; 5: "--" [^$symbol \ ] .*
+      (when (and (>= c2 0) (not= c2 10) (not (sym-char? c2)) (not= c2 32)) (cand! acc 5 (eol (+ i 3))))
+      ;; 6: "-- " $docsym .* / not Haddock
+      (when (and (not haddock) (= c2 32) (>= c3 0) (docsym? c3)) (cand! acc 6 (eol (+ i 4))))
+      ;; 7: "---"\-* ~$symbol .*
+      (when (= c2 45)
+        (let [d (m-run cs n (+ i 3) #(= (long %) 45)) e (ch cs n d)]
+          (when (and (>= e 0) (not= e 10) (not (sym-char? e))) (cand! acc 7 (eol (inc d))))))
+      ;; 8: "--"\-* / atEOL
+      (let [d (m-run cs n (+ i 2) #(= (long %) 45))]
+        (when (at-eol? cs n d) (cand! acc 8 d)))
+      ;; 9: "-- " / atEOL
+      (when (and (= c2 32) (at-eol? cs n (+ i 3))) (cand! acc 9 (+ i 3)))
+      ;; 42: "-- " $docsym / Haddock
+      (when (and haddock (= c2 32) (>= c3 0) (docsym? c3)) (cand! acc 42 (+ i 4))))
+    (when (and (= c 123) (= c1 45))
+      ;; 3: "{-" / isNormalComment
+      (when (if haddock
+              (let [k (if (= c2 32) (+ i 3) (+ i 2)) d (ch cs n k)] (not (or (docsym? d) (= d 35))))
+              (not= c2 35))
+        (cand! acc 3 (+ i 2)))
+      ;; 43: "{-" \ ? $docsym / Haddock
+      (when haddock
+        (cond (and (>= c2 0) (docsym? c2)) (cand! acc 43 (+ i 3))
+              (and (= c2 32) (>= c3 0) (docsym? c3)) (cand! acc 43 (+ i 4))))
+      ;; 27: "{-#" ... / known_pragma linePrags
+      (when (= c2 35) (cand! acc 27 (pragma-match cs n i line-prags false))))))
+
+(defn- scan-fast
+  "The best match in the start code :s0 or :bol at i when the byte alone decides it (the rules that could match
+  begin with it and no other rule does): in :s0 blanks (rule 1), a lowercase letter's variable (79), a newline (26),
+  a special character (66), an operator not beginning a comment or a bracket (87); in :bol blanks (1), a newline
+  (11), the empty rule (17) before a byte that begins no other; nil for the rest"
+  [ps sc ^long i]
+  (let [^ints cs (st ps :cs) n (long (st ps :n))]
+    (when (< i n)
+      (let [c (aget cs i) cc (cl c)]
+        (if (identical? sc :s0)
+          (cond
+            (and (has cc K-WNN) (not= c 9)) [(run* cs n i #(let [c (long %)] (and (white-no-nl?* c) (not= c 9)))) 1]
+            (and (>= c 97) (<= c 122))
+            (let [e (m-varid cs n i)]
+              (when-not (and (= 35 (ch cs n e)) (xtest (long (st ps :exts)) :MagicHashBit)) [e 79]))
+            (== c 10) [(inc i) 26]
+            (or (== c 41) (== c 44) (== c 59) (== c 96) (== c 93) (== c 125)) [(inc i) 66]
+            (== c 40) (let [c1 (ch cs n (inc i))] (when-not (or (== c1 35) (== c1 124)) [(inc i) 66]))
+            (and (has cc K-SYM) (not (#{45 124 35 63 58} c))) [(m-varsym cs n i) 87]
+            :else nil)
+          (cond
+            (and (has cc K-WNN) (not= c 9)) (when-not (== 35 (ch cs n (inc i))) [(run* cs n i #(let [c (long %)] (and (white-no-nl?* c) (not= c 9)))) 1])
+            (== c 10) [(inc i) 11]
+            (and (< c 128) (not (has cc K-WNN)) (not (#{45 123 35 9} c))) [i 17]
+            :else nil))))))
+
+(defn- scan!
+  "The best match at position i in start code sc: [end rule] or nil"
+  [ps sc ^long i]
+  (let [^ints cs (st ps :cs) n (long (st ps :n)) ex (long (st ps :exts))
+        ^longs acc (st ps :acc)
+        _ (do (aset acc 0 -1) (aset acc 1 Long/MAX_VALUE))
+        s0 (identical? sc :s0)
+        s0p (or s0 (identical? sc :option-prags))
+        lay (or (identical? sc :layout) (identical? sc :layout-do) (identical? sc :layout-if))]
+    ;; empty rules
+    (when-not s0
+      (case sc
+        :bol (cand! acc 17 i)
+        :layout-if (cand! acc 22 i)
+        :layout (cand! acc 23 i)
+        :layout-do (cand! acc 24 i)
+        :layout-left (cand! acc 25 i)
+        :line-prag1 (cand! acc 29 i)
+        nil))
+    (when (< i n)
+      (let [c (aget cs i)
+            cc (cl c)]
+        ;; 1: ($white_no_nl # \t)+
+        (when (and (has cc K-WNN) (not= c 9))
+          (cand! acc 1 (run* cs n i #(let [c (long %)] (and (white-no-nl?* c) (not= c 9))))))
+        ;; 2: $tab
+        (when (= c 9) (cand! acc 2 (inc i)))
+        (when (or (= c 45) (= c 123)) (scan-comments! acc cs n i ex))
+        ;; 10: $unigraphic / isSmartQuote
+        (when (smart-quote? c) (cand! acc 10 (inc i)))
+        ;; bol
+        (when (identical? sc :bol)
+          (when (= c 10) (cand! acc 11 (inc i)))
+          (when (and (= c 35) (bol? cs i))
+            (when (and (= 108 (ch cs n (inc i))) (= 105 (ch cs n (+ i 2))) (= 110 (ch cs n (+ i 3))) (= 101 (ch cs n (+ i 4))))
+              (cand! acc 12 (+ i 5)))
+            (when (let [k (if (= 32 (ch cs n (inc i))) (+ i 2) (inc i))] (decdigit? (ch cs n k)))
+              (cand! acc 13 (inc i)))
+            (let [after-line (fn [^long j] (let [e (m-run cs n j #(not= 10 (long %)))] (if (< e n) (inc e) -1)))]
+              (when (= "pragma" (when (<= (+ i 7) n) (substr cs (inc i) (+ i 7))))
+                (cand! acc 14 (after-line (+ i 7))))
+              (when (= 33 (ch cs n (inc i))) (cand! acc 15 (after-line (+ i 2))))))
+          (when (and (= c 32) (bol? cs i) (= 35 (ch cs n (inc i))) (= 33 (ch cs n (+ i 2))))
+            (let [e (m-run cs n (+ i 3) #(not= 10 (long %)))] (when (< e n) (cand! acc 16 (inc e))))))
+        ;; layout states
+        (when lay
+          (when (and (= c 123) (not= 45 (ch cs n (inc i)))) (cand! acc 18 (inc i)))
+          (when (= c 10) (cand! acc 19 (inc i)))
+          (when (and (= c 35) (bol? cs i))
+            (cand! acc 20 (if (= "line" (when (<= (+ i 5) n) (substr cs (inc i) (+ i 5)))) (+ i 5) (inc i)))))
+        (when (and (identical? sc :layout-if) (= c 124)
+                   (let [d (ch cs n (inc i))] (not (and (>= d 0) (< d 128) (ascsym? d) (not= d 58)))))
+          ;; notFollowedBySymbol: not one of !#$%&*+./<=>?@\^|-~
+          (cand! acc 21 (inc i)))
+        ;; 26: <0,option_prags> \n
+        (when (and s0p (= c 10)) (cand! acc 26 (inc i)))
+        ;; line pragma states
+        (when (or (identical? sc :line-prag1) (identical? sc :line-prag2))
+          (let [d (m-digits cs n i decdigit?)]
+            (when (>= d 0)
+              (let [w (m-run cs n d white-no-nl?)]
+                (when (and (> w d) (= 34 (ch cs n w)))
+                  (let [q (m-run cs n (inc w) #(let [c (long %)] (or (graphic? c) (= c 32))))
+                        ;; [$graphic \ ]* \": the longest run ending at a quote
+                        q (loop [k (dec q)] (cond (< k (inc w)) -1 (= 34 (aget cs k)) (inc k) :else (recur (dec k))))]
+                    (when (>= q 0) (cand! acc (if (identical? sc :line-prag1) 28 31) q))))))))
+        (when (identical? sc :line-prag1a) (cand! acc 30 (m-run cs n i #(not= 10 (long %)))))
+        (when (and (identical? sc :line-prag2a))
+          (cond (and (= c 35) (= 45 (ch cs n (inc i))) (= 125 (ch cs n (+ i 2)))) (cand! acc 32 (+ i 3))
+                (and (= c 45) (= 125 (ch cs n (inc i)))) (cand! acc 32 (+ i 2))))
+        (when (identical? sc :column-prag)
+          (let [d (m-digits cs n i decdigit?)]
+            (when (>= d 0)
+              (let [w (m-run cs n d whitechar?)]
+                (when (and (= 35 (ch cs n w)) (= 45 (ch cs n (inc w))) (= 125 (ch cs n (+ w 2))))
+                  (cand! acc 33 (+ w 3)))))))
+        (when s0p
+          (when (and (= c 123) (= 45 (ch cs n (inc i))) (= 35 (ch cs n (+ i 2))))
+            (cand! acc 34 (pragma-match cs n i two-word-prags true))
+            (cand! acc 35 (pragma-match cs n i one-word-prags false))
+            (cand! acc 36 (pragma-match cs n i ignored-prags false))
+            (when (identical? sc :option-prags) (cand! acc 38 (pragma-match cs n i file-header-prags false)))
+            (when s0 (cand! acc 39 (pragma-match cs n i file-header-prags false)))
+            (let [w0 (m-run cs n (+ i 3) whitechar?) w1 (m-run cs n w0 pragmachar?)]
+              (when (> w1 w0) (cand! acc 40 w1)))
+            (cand! acc 41 (+ i 3)))
+          (when (and (= c 35) (= 45 (ch cs n (inc i))) (= 125 (ch cs n (+ i 2)))) (cand! acc 37 (+ i 3))))
+        (when s0
+          ;; Template Haskell brackets and quasi-quotes
+          (when (= c 91)
+            (let [c1 (ch cs n (inc i)) c2 (ch cs n (+ i 2)) c3 (ch cs n (+ i 3))
+                  thq (xtest ex :ThQuotesBit)]
+              (when (= c1 124) (cand! acc 44 (+ i 2)) (when (= c2 124) (cand! acc 45 (+ i 3))))
+              (when (and thq (= c2 124))
+                (case (int c1)
+                  101 (do (cand! acc 48 (+ i 3)) (when (= c3 124) (cand! acc 49 (+ i 4))))
+                  112 (cand! acc 50 (+ i 3))
+                  100 (cand! acc 51 (+ i 3))
+                  116 (cand! acc 52 (+ i 3))
+                  nil))
+              (when (xtest ex :QqBit)
+                (let [v (m-varid cs n (inc i))]
+                  (when (and (>= v 0) (= 124 (ch cs n v))) (cand! acc 53 (inc v))))
+                ;; "[" @qvarid "|"
+                (let [e (qual-end cs n (inc i) :varid)]
+                  (when (and (>= e 0) (= 124 (ch cs n e))) (cand! acc 54 (inc e)))))))
+          (when (= c 124)
+            (let [c1 (ch cs n (inc i))]
+              (when (= c1 93) (cand! acc 46 (+ i 2)))
+              (when (and (= c1 124) (= 93 (ch cs n (+ i 2)))) (cand! acc 47 (+ i 3)))
+              (when (and (= c1 41) (xtest ex :ArrowsBit)) (cand! acc 58 (+ i 2)))))
+          (when (and (xtest ex :UnicodeSyntaxBit) (xtest ex :ThQuotesBit))
+            (when (= c 0x27e6) (cand! acc 55 (inc i)))
+            (when (= c 0x27e7) (cand! acc 56 (inc i))))
+          (when (xtest ex :ArrowsBit)
+            (when (and (= c 40) (= 124 (ch cs n (inc i)))
+                       (let [d (ch cs n (+ i 2))] (not (and (>= d 0) (< d 128) (ascsym? d) (not= d 58)))))
+              (cand! acc 57 (+ i 2)))
+            (when (xtest ex :UnicodeSyntaxBit)
+              (when (= c 0x2987) (cand! acc 59 (inc i)))
+              (when (= c 0x2988) (cand! acc 60 (inc i)))))
+          (when (and (= c 63) (xtest ex :IpBit)) (cand! acc 61 (m-varid cs n (inc i))))
+          (when (and (= c 35) (xtest ex :OverloadedLabelsBit))
+            (let [e (m-run cs n (inc i) idchar?)] (when (> e (inc i)) (cand! acc 62 e)))
+            (when (= 34 (ch cs n (inc i)))
+              (let [e (m-string-body cs n (+ i 2))] (when (= 34 (ch cs n e)) (cand! acc 63 (inc e))))))
+          (when (xtest ex :UnboxedParensBit)
+            (when (and (= c 40) (= 35 (ch cs n (inc i)))) (cand! acc 64 (+ i 2)))
+            (when (and (= c 35) (= 41 (ch cs n (inc i)))) (cand! acc 65 (+ i 2)))))
+        (when (and s0p (has cc K-SPECIAL)) (cand! acc 66 (inc i)))
+        ;; identifiers
+        (when s0p
+          (cond
+            (has cc K-LARGE) (scan-qualified! acc cs n i ex s0)
+            (has cc K-SMALL)
+            (let [e (m-varid cs n i)]
+              (cand! acc 79 e)
+              (when (and s0 (xtest ex :MagicHashBit) (= 35 (ch cs n e)))
+                (cand! acc 83 (m-run cs n e #(= (long %) 35)))))))
+        (when s0
+          ;; operators
+          (when (has cc K-SYM)
+            (if (= c 58) (cand! acc 88 (m-consym cs n i)) (cand! acc 87 (m-varsym cs n i))))
+          ;; numbers
+          (when (or (decdigit? c) (= c 95) (= c 45))
+            (scan-numbers! ps acc cs n i ex))
+          ;; strings and characters
+          (when (= c 34)
+            (when (and (xtest ex :MultilineStringsBit) (= 34 (ch cs n (inc i))) (= 34 (ch cs n (+ i 2))))
+              (cand! acc 129 (+ i 3)))
+            (let [e (m-string-body cs n (inc i))]
+              (if (= 34 (ch cs n e))
+                (do (cand! acc 130 (inc e))
+                    (when (and (xtest ex :MagicHashBit) (= 35 (ch cs n (inc e)))) (cand! acc 131 (+ e 2))))
+                (do (when (and (= 92 (ch cs n e)) (smart-quote? (ch cs n (inc e)))) (cand! acc 135 (+ e 2)))
+                    (when (smart-quote? (ch cs n e)) (cand! acc 136 (inc e)))
+                    ;; \" @stringchar* $unigraphic / isSmartQuote: the match may end at any smart
+                    ;; quote of the body, Alex keeps the last
+                    (loop [k (dec e)]
+                      (when (> k i)
+                        (if (smart-quote? (ch cs n k)) (cand! acc 136 (inc k)) (recur (dec k)))))))))
+          (when (= c 39)
+            (let [e (m-char-lit cs n i)]
+              (when (>= e 0)
+                (cand! acc 132 e)
+                (when (and (xtest ex :MagicHashBit) (= 35 (ch cs n e))) (cand! acc 133 (inc e)))))
+            (when (and (= 92 (ch cs n (inc i))) (smart-quote? (ch cs n (+ i 2)))) (cand! acc 134 (+ i 3)))
+            (when (= 39 (ch cs n (inc i))) (cand! acc 137 (+ i 2)))
+            (let [d (ch cs n (inc i))]
+              (when (and (>= d 0) (or (and (graphic? d) (not= d 92)) (= d 32))) (cand! acc 138 (inc i))))))))
+    (when (>= (aget acc 0) 0) [(aget acc 0) (aget acc 1)])))
+
+(defn- qual-end
+  "The end of (@conid \\.)+ followed by what (:varid, :conid, :varsym, :consym, :do, :mdo), the
+  longest such match at i, or -1"
+  ^long [^ints cs ^long n ^long i what]
+  ;; the chain conid . conid . ... and the longest alternative
+  (loop [j i best -1]
+    (let [e (m-conid cs n j)]
+      (if (and (>= e 0) (= 46 (ch cs n e)))
+        (let [k (inc e)
+              m (case what
+                  :varid (m-varid cs n k)
+                  :conid (let [e2 (m-conid cs n k)] e2)
+                  :varsym (m-varsym cs n k)
+                  :consym (m-consym cs n k)
+                  :do (if (and (= 100 (ch cs n k)) (= 111 (ch cs n (inc k)))) (+ k 2) -1)
+                  :mdo (if (and (= 109 (ch cs n k)) (= 100 (ch cs n (inc k))) (= 111 (ch cs n (+ k 2)))) (+ k 3) -1))]
+          (recur k (max best m)))
+        best))))
+
+(defn- scan-qualified!
+  "The rules of a word beginning with an upper-case letter: @conid, @qconid, @qvarid, @qdo,
+  @qmdo, @qvarsym, @qconsym and their MagicHash forms"
+  [^longs acc ^ints cs ^long n ^long i ^long ex s0]
+  (cand! acc 80 (m-conid cs n i))
+  (cand! acc 75 (qual-end cs n i :do))
+  (when (xtest ex :RecursiveDoBit) (cand! acc 76 (qual-end cs n i :mdo)))
+  (let [qv (qual-end cs n i :varid)
+        qc (qual-end cs n i :conid)
+        mh (and s0 (xtest ex :MagicHashBit))]
+    (cand! acc 77 qv)
+    (cand! acc 78 qc)
+    (when mh
+      (when (and (>= qv 0) (= 35 (ch cs n qv))) (cand! acc 81 (m-run cs n qv #(= (long %) 35))))
+      (when (and (>= qc 0) (= 35 (ch cs n qc))) (cand! acc 82 (m-run cs n qc #(= (long %) 35))))
+      (let [c (m-conid cs n i)]
+        (when (= 35 (ch cs n c)) (cand! acc 84 (m-run cs n c #(= (long %) 35)))))))
+  (when s0
+    (cand! acc 85 (qual-end cs n i :varsym))
+    (cand! acc 86 (qual-end cs n i :consym))))
+
+(defn- scan-numbers!
+  "The numeric literal rules at i (a digit, an underscore or a minus)"
+  [ps ^longs acc ^ints cs ^long n ^long i ^long ex]
+  (let [neg (= 45 (aget cs i))
+        j (if neg (inc i) i)
+        neg-ok (and neg (not (preceded-by-closing? cs i)))
+        neglit (and neg-ok (or (xtest ex :NegativeLiteralsBit) (not (xtest ex :NoLexicalNegationBit))))
+        mh (xtest ex :MagicHashBit)
+        bin (xtest ex :BinaryLiteralsBit)
+        hexf (xtest ex :HexFloatLiteralsBit)
+        extl (xtest ex :ExtendedLiteralsBit)
+        dec (m-digits cs n j decdigit?)
+        binl (m-radix-lit cs n j 98 66 binit?)
+        octl (m-radix-lit cs n j 111 79 octit?)
+        hexl (m-radix-lit cs n j 120 88 hexit?)
+        fl (m-floating cs n j)
+        hf (m-hex-floating cs n j)
+        hash1 (fn [^long e] (if (and (>= e 0) (= 35 (ch cs n e))) (inc e) -1))
+        hash2 (fn [^long e] (if (and (>= e 0) (= 35 (ch cs n e)) (= 35 (ch cs n (inc e)))) (+ e 2) -1))
+        hashid (fn [^long e] (if (and (>= e 0) (= 35 (ch cs n e))) (let [k (m-run cs n (inc e) idchar?)] (if (> k (inc e)) k -1)) -1))]
+    (if-not neg
+      (do
+        (cand! acc 89 dec)
+        (when bin (cand! acc 90 binl))
+        (cand! acc 91 octl)
+        (cand! acc 92 hexl)
+        (cand! acc 97 fl)
+        (when hexf (cand! acc 99 hf))
+        (when mh
+          (cand! acc 101 (hash1 dec))
+          (when bin (cand! acc 102 (hash1 binl)))
+          (cand! acc 103 (hash1 octl))
+          (cand! acc 104 (hash1 hexl))
+          (cand! acc 109 (hash2 dec))
+          (when bin (cand! acc 110 (hash2 binl)))
+          (cand! acc 111 (hash2 octl))
+          (cand! acc 112 (hash2 hexl))
+          (cand! acc 121 (hash1 fl))
+          (cand! acc 122 (hash2 fl))
+          (when hexf (cand! acc 125 (hash1 hf)) (cand! acc 126 (hash2 hf))))
+        (when extl
+          (cand! acc 113 (hashid dec))
+          (when bin (cand! acc 114 (hashid binl)))
+          (cand! acc 115 (hashid octl))
+          (cand! acc 116 (hashid hexl))))
+      (do
+        (when neglit
+          (cand! acc 93 dec)
+          (when bin (cand! acc 94 binl))
+          (cand! acc 95 octl)
+          (cand! acc 96 hexl)
+          (cand! acc 98 fl)
+          (when hexf (cand! acc 100 hf)))
+        (when (and neg-ok mh)
+          (cand! acc 105 (hash1 dec))
+          (when bin (cand! acc 106 (hash1 binl)))
+          (cand! acc 107 (hash1 octl))
+          (cand! acc 108 (hash1 hexl))
+          (cand! acc 123 (hash1 fl))
+          (cand! acc 124 (hash2 fl))
+          (when hexf (cand! acc 127 (hash1 hf)) (cand! acc 128 (hash2 hf))))
+        (when (and neg-ok extl)
+          (cand! acc 117 (hashid dec))
+          (when bin (cand! acc 118 (hashid binl)))
+          (cand! acc 119 (hashid octl))
+          (cand! acc 120 (hashid hexl)))))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Actions
+
+(defn- tok [kind val span] [kind val span])
+
+(defn- split-qual-name
+  "splitQualName: [module name] of a qualified name's text, split at the last dot followed by an
+  upper-case letter's chain end (hierarchical module names)"
+  [^String s]
+  ;; the qualifier is the longest prefix of conid. segments
+  (let [n (count s)]
+    (loop [i 0 dot -1]
+      (let [c (if (< i n) (long (.codePointAt s i)) -1)]
+        (cond
+          (>= i n) [(subs s 0 dot) (subs s (inc dot))]
+          (= c 46) (let [d (if (< (inc i) n) (long (.codePointAt s (inc i))) -1)]
+                     (if (and (>= d 0) (hs-upper? d)) (recur (inc i) i) [(subs s 0 i) (subs s (inc i))]))
+          :else (recur (+ i (Character/charCount (int c))) dot))))))
+
+(defn- op-ws
+  "get_op_ws: :prefix :suffix :tight :loose"
+  [^ints cs ^long n ^long i ^long e]
+  (let [p (preceded-by-closing? cs i) f (followed-by-opening? cs n e)]
+    (cond (and (not p) f) :prefix (and p (not f)) :suffix (and p f) :tight :else :loose)))
+
+(defn- ext-conflict!
+  "varsym_prefix's warnExtConflict: the prefix use of an operator an extension would make special
+  (-Woperator-whitespace-ext-conflict), then the operator"
+  [ps span sym s]
+  (add-warning! ps (msg :PsWarnOperatorWhitespaceExtConflict span sym))
+  [:ITvarsym s])
+
+(defn- varsym-token
+  "varsym's meaning overrides by occurrence (Note [Whitespace-sensitive operator parsing])"
+  [ps ^String s ws span]
+  (let [ex (exts ps)]
+    (case ws
+      :prefix (cond
+                (= s "@") [:ITtypeApp nil]
+                (= s "%") (if (xtest ex :LinearTypesBit) [:ITpercent nil] (ext-conflict! ps span :PrefixPercent s))
+                (= s "$") (if (xtest ex :ThQuotesBit) [:ITdollar nil] (ext-conflict! ps span :PrefixDollar s))
+                (= s "$$") (if (xtest ex :ThQuotesBit) [:ITdollardollar nil] (ext-conflict! ps span :PrefixDollarDollar s))
+                (= s "-") [:ITprefixminus nil]
+                (and (= s ".") (xtest ex :OverloadedRecordDotBit)) [:ITproj true]
+                (= s ".") [:ITdot nil]
+                (= s "!") [:ITbang nil]
+                (= s "~") [:ITtilde nil]
+                :else [:ITvarsym s])
+      :suffix (cond
+                (= s "@") (let [^ints cs (st ps :cs) n (long (st ps :n))
+                                [f l c b] (loc-at-start span)
+                                ;; errSuffixAt: the spaces after the @ and one character more,
+                                ;; counted from the @'s start
+                                [l2 c2] (loop [k (long (st ps :pos)) l l c c]
+                                          (if (< k n)
+                                            (let [[l' c'] (advance cs k (inc k) l c)]
+                                              (if (= 32 (aget cs k)) (recur (inc k) l' c') [l' c']))
+                                            [l c]))]
+                            (fatal! (msg :PsErrSuffixAT [f l c l2 c2 b nil])))
+                (= s ".") [:ITdot nil]
+                :else [:ITvarsym s])
+      :tight (cond
+               (= s "@") [:ITat nil]
+               (and (= s ".") (xtest ex :OverloadedRecordDotBit)) [:ITproj false]
+               (= s ".") [:ITdot nil]
+               :else [:ITvarsym s])
+      :loose (if (= s ".") [:ITdot nil] [:ITvarsym s]))))
+
+(defn- sym-token
+  "sym: a reserved symbol, else con's token"
+  [ps ^String s con]
+  (let [ex (exts ps)]
+    (if-let [[k v uni bits] (reserved-syms s)]
+      (if (if uni
+            (and (xtest ex :UnicodeSyntaxBit) (or (nil? bits) (any-bit? ex bits)))
+            (or (nil? bits) (any-bit? ex bits)))
+        [k v]
+        (con))
+      (con))))
+
+(defn- varid-token!
+  "varid: a reserved word (with its extension bits) or ITvarid; \\case and \\cases"
+  [ps ^String s]
+  (if-let [[k bits] (reserved-words s)]
+    (cond
+      (= k :ITcase)
+      (let [lt (st ps :last-tk)
+            kw (if (and lt (= :ITlam (first lt))) :ITlcase :ITcase)]
+        (when (and (= kw :ITlcase) (not (get-bit ps :LambdaCaseBit)))
+          (add-error! ps (msg :PsErrLambdaCase (st ps :last-loc))))
+        (maybe-layout! ps kw)
+        [kw nil])
+      (= k :ITlcases)
+      (let [lt (st ps :last-tk)
+            t (if (and lt (= :ITlam (first lt)) (get-bit ps :LambdaCaseBit)) [:ITlcases nil] [:ITvarid s])]
+        (maybe-layout! ps (first t))
+        t)
+      (nil? bits) (do (maybe-layout! ps k) [k (case k :ITforall :normal nil)])
+      (any-bit? (exts ps) bits) (do (maybe-layout! ps k) [k nil])
+      :else [:ITvarid s])
+    [:ITvarid s]))
+
+(defn- new-layout-context!
+  "new_layout_context strict gen-semic: a layout context at the column of the input minus len,
+  or {} when it is not indented enough"
+  [ps strict gen-semic kind len span]
+  (pop-lex-state! ps)
+  (let [offset (- (long (st ps :col)) (long len))
+        ctx (st ps :ctx)
+        strict' (or strict (not (get-bit ps :NondecreasingIndentationBit)))
+        top (first ctx)]
+    (if (and (vector? top)
+             (let [prev (long (nth top 1))]
+               (or (and strict' (>= prev offset)) (and (not strict') (> prev offset)))))
+      (do (push-lex-state! ps :layout-left) (tok kind nil span))
+      (do (st! ps :ctx (conj ctx [:layout offset gen-semic])) (tok kind nil span)))))
+
+(defn- set-line-and-file!
+  "setLineAndFile: a line marker's line and file: the location's line (minus one: the marker
+  names the next line) and column (the span's end), the file recorded"
+  [ps code span ^long i ^long e]
+  (let [^ints cs (st ps :cs)
+        s (substr cs i (dec e))
+        num (Long/parseLong (re-find #"^[0-9]+" s))
+        q (inc (str/index-of s "\""))
+        file (let [raw (subs s q)]
+               (loop [k 0 sb (StringBuilder.)]
+                 (if (< k (count raw))
+                   (let [c (.charAt ^String raw k)]
+                     (if (and (= c \\) (< (inc k) (count raw)))
+                       (recur (+ k 2) (.append sb (.charAt ^String raw (inc k))))
+                       (recur (inc k) (.append sb c))))
+                   (.toString sb))))]
+    (st! ps :file file)
+    (st! ps :line (dec num))
+    (st! ps :col (nth span 4))
+    (st! ps :srcfiles (conj (st ps :srcfiles) file))
+    (pop-lex-state! ps)
+    (push-lex-state! ps code)
+    nil))
+
+(defn- lex-chars-value
+  "lex_chars: the value of a string or character literal between its delimiters"
+  [ps ^ints cs ^long from ^long to span]
+  (try (lex-string-chars cs from to)
+       (catch Exception e
+         ;; throwStringLexError: at the escape's position (a numeric escape out of range)
+         (let [at (:at (ex-data e))
+               p (if at (+ from (long at)) from)]
+           (error-at! ps :LexNumEscapeRange (loc-at-start span) p)))))
+
+(defn- qq-token!
+  "lex_quasiquote_tok, lex_qquasiquote_tok: the quote up to |] (no escapes)"
+  [ps span ^long i ^long e qual?]
+  (let [^ints cs (st ps :cs) n (long (st ps :n))
+        quoter-text (substr cs (inc i) (dec e))
+        quote-start (loc ps)
+        q-end (loop [k e] (cond (>= k (dec n)) (report-lex-error! ps :LexUnterminatedQQ quote-start n)
+                                (and (= 124 (aget cs k)) (= 93 (aget cs (inc k)))) k
+                                :else (recur (inc k))))
+        quote (substr cs e q-end)
+        _ (set-input! ps (+ q-end 2))
+        end (loc ps)
+        qs (let [[f l c p] (loc-at-start span)] [f l (inc (long c)) (inc (long p))])
+        qe (let [[f l c p] qs k (count (code-points quoter-text))] [f l (+ (long c) k) (+ (long p) k)])
+        quoter-span (mk-span qs qe)
+        full (mk-span (loc-at-start span) end)]
+    (if qual?
+      (let [[m nm] (split-qual-name quoter-text)]
+        (tok :ITqQuasiQuote [m nm quoter-span quote (mk-span quote-start end)] full))
+      (tok :ITquasiQuote [quoter-text quoter-span quote (mk-span quote-start end)] full))))
+
+(defn- tok-integral
+  "tok_integral: an integer literal token; kind :ITinteger (an IL), else a prim kind with
+  (SourceText, value); offset the digits' start, translen the non-digits"
+  [ps kind negate ^long offset ^long translen radix ^ints cs ^long i ^long e span]
+  (let [src (substr cs i e)
+        _ (when (and (not (get-bit ps :NumericUnderscoresBit)) (str/includes? src "_"))
+            (add-error! ps (msg :PsErrNumUnderscores span :Integral)))
+        v (parse-unsigned cs (+ i offset) (- e (- translen offset)) radix)
+        v (if negate (- v) v)]
+    (if (= kind :ITinteger)
+      (tok :ITinteger (list 'IL (list 'src src) (str/starts-with? src "-") v) span)
+      (tok kind [(list 'src src) v] span))))
+
+(defn- tok-frac
+  "tok_frac: a fractional literal; drop the trailing #s"
+  [ps kind hex? ^ints cs ^long i ^long e ^long drop span]
+  (let [src (substr cs i (- e drop))]
+    (when (and (not (get-bit ps :NumericUnderscoresBit)) (str/includes? src "_"))
+      (add-error! ps (msg :PsErrNumUnderscores span :Float)))
+    (tok kind (fractional-lit src hex?) span)))
+
+(defn- prim-ext-kind [^String suffix]
+  (case suffix
+    "Word" :ITprimword "Word8" :ITprimword8 "Word16" :ITprimword16 "Word32" :ITprimword32
+    "Word64" :ITprimword64 "Int" :ITprimint "Int8" :ITprimint8 "Int16" :ITprimint16
+    "Int32" :ITprimint32 "Int64" :ITprimint64 nil))
+
+(defn- do-bol!
+  "do_bol: at the first token of a line, a virtual } or ; by the layout contexts"
+  [ps span]
+  (if (get-bit ps :InNestedCommentBit)
+    (tok :ITcomment_line_prag nil span)
+    (let [[o gen] (offside ps)]
+      (cond
+        (neg? (long o)) (do (pop-context! ps) (tok :ITvccurly nil span))
+        (and (zero? (long o)) gen) (do (pop-lex-state! ps) (tok :ITsemi nil span))
+        :else (do (pop-lex-state! ps) nil)))))
+
+(defn- run-action!
+  "The action of rule at [i, e) with span; a token, or nil to lex on"
+  [ps ^long rule ^long i ^long e span]
+  (let [^ints cs (st ps :cs) n (long (st ps :n))
+        lexeme (fn [] (substr cs i e))]
+    (case (int rule)
+      2 (do (when-not (st ps :tab-first) (st! ps :tab-first span))   ; warnTab
+            (st! ps :tab-count (inc (long (st ps :tab-count))))
+            nil)
+      3 (nested-comment! ps span e)
+      (4 5 6 7 8 9) (when (get-bit ps :RawTokenStreamBit) (tok :ITlineComment (lexeme) span))
+      10 (smart-quote-error! ps (aget cs (dec e)) (loc-at-start span))
+      12 (do (push-lex-state! ps :line-prag1) nil)
+      13 (do (push-lex-state! ps :line-prag1) nil)
+      17 (do-bol! ps span)
+      18 ;; hopefully_open_brace
+      (let [ctx (st ps :ctx) top (first ctx) offset (long (st ps :col))]
+        (if (or (get-bit ps :RelaxedLayoutBit) (not (vector? top)) (< (long (nth top 1)) offset))
+          (do (pop-lex-state! ps) (st! ps :ctx (conj ctx :nolayout)) (tok :ITocurly nil span))
+          (fatal! (msg :PsErrMissingBlock span))))
+      20 (do (push-lex-state! ps :line-prag1) nil)
+      21 (new-layout-context! ps true false :ITvbar 1 span)
+      22 (do (pop-lex-state! ps) nil)
+      23 (new-layout-context! ps true true :ITvocurly 0 span)
+      24 (new-layout-context! ps false true :ITvocurly 0 span)
+      25 (do (pop-lex-state! ps) (push-lex-state! ps :bol) (tok :ITvccurly nil span))
+      26 (do (push-lex-state! ps :bol) nil)
+      27 ;; linePrag: UsePosPrags moves the position, else a token
+      (if (get-bit ps :UsePosPragsBit)
+        (do (push-lex-state! ps :line-prag2) nil)
+        (tok :ITline_prag (list 'src (lexeme)) span))
+      28 (set-line-and-file! ps :line-prag1a span i e)
+      29 (if (get-bit ps :InNestedCommentBit) (tok :ITcomment_line_prag nil span) (lex-error-here! ps :LexErrorInPragma))
+      30 (if (get-bit ps :InNestedCommentBit) (tok :ITcomment_line_prag nil span) (do (pop-lex-state! ps) nil))
+      31 (set-line-and-file! ps :line-prag2a span i e)
+      32 (do (pop-lex-state! ps) nil)
+      33 ;; setColumn
+      (let [col (Long/parseLong (re-find #"^[0-9]+" (lexeme)))]
+        (st! ps :col col)
+        (st! ps :line (nth span 3))
+        (pop-lex-state! ps) nil)
+      (34 35) (pragma-token! ps (lexeme) span)
+      36 (nested-comment! ps span e)
+      37 (do (set-exts! ps (bit-and (exts ps) (bit-not (xbit :InRulePragBit)))) (tok :ITclose_prag nil span))
+      38 (header-pragma-token! ps (lexeme) span)
+      39 (nested-comment! ps span e)
+      ;; warn_unknown_prag: the pragma's name upper-cased, the known ones (the union's keys, sorted)
+      ;; for the suggestions
+      (40 41) (do (add-warning! ps (msg :PsWarnUnrecognisedPragma span (str/upper-case (clean-pragma (lexeme)))
+                                        (if (= rule 40)
+                                          (mapv str/upper-case (sort (concat one-word-prags file-header-prags ignored-prags line-prags)))
+                                          [])))
+                  (nested-comment! ps span e))
+      42 (multiline-doc-comment! ps span e)
+      43 (nested-doc-comment! ps span e)
+      44 (tok :ITopenExpQuote [:NoE :normal] span)
+      45 (tok :ITopenTExpQuote :NoE span)
+      46 (tok :ITcloseQuote :normal span)
+      47 (tok :ITcloseTExpQuote nil span)
+      48 (tok :ITopenExpQuote [:HasE :normal] span)
+      49 (tok :ITopenTExpQuote :HasE span)
+      50 (tok :ITopenPatQuote nil span)
+      51 (do (push-lex-state! ps :layout) (tok :ITopenDecQuote nil span))
+      52 (tok :ITopenTypQuote nil span)
+      53 (qq-token! ps span i e false)
+      54 (qq-token! ps span i e true)
+      55 (tok :ITopenExpQuote [:NoE :unicode] span)
+      56 (tok :ITcloseQuote :unicode span)
+      57 (tok :IToparenbar :normal span)
+      58 (tok :ITcparenbar :normal span)
+      59 (tok :IToparenbar :unicode span)
+      60 (tok :ITcparenbar :unicode span)
+      61 (tok :ITdupipvarid (substr cs (inc i) e) span)
+      62 (let [s (substr cs (inc i) e)] (tok :ITlabelvarid [(list 'src s) s] span))
+      63 (let [v (lex-chars-value ps cs (+ i 2) (dec e) span)]
+           (tok :ITlabelvarid [(list 'src (substr cs (inc i) e)) (cps->str v)] span))
+      64 (tok :IToubxparen nil span)
+      65 (tok :ITcubxparen nil span)
+      66 (let [c (aget cs i)]
+           (case (int c)
+             40 (tok :IToparen nil span) 41 (tok :ITcparen nil span)
+             91 (tok :ITobrack nil span) 93 (tok :ITcbrack nil span)
+             44 (tok :ITcomma nil span) 59 (tok :ITsemi nil span) 96 (tok :ITbackquote nil span)
+             123 (do (st! ps :ctx (conj (st ps :ctx) :nolayout)) (tok :ITocurly nil span))
+             125 (do (pop-context! ps) (tok :ITccurly nil span))))
+      75 (let [[m _] (split-qual-name (lexeme))] (maybe-layout! ps :ITdo) (tok :ITdo m span))
+      76 (let [[m _] (split-qual-name (lexeme))] (maybe-layout! ps :ITmdo) (tok :ITmdo m span))
+      (77 81) (tok :ITqvarid (split-qual-name (lexeme)) span)
+      (78 82) (tok :ITqconid (split-qual-name (lexeme)) span)
+      (79 83) (let [[k v] (varid-token! ps (lexeme))] (tok k v span))
+      (80 84) (tok :ITconid (lexeme) span)
+      85 (tok :ITqvarsym (split-qual-name (lexeme)) span)
+      86 (tok :ITqconsym (split-qual-name (lexeme)) span)
+      87 (let [s (lexeme) ws (op-ws cs n i e)
+               [k v] (sym-token ps s #(varsym-token ps s ws span))]
+           (tok k v span))
+      88 (let [s (lexeme) [k v] (sym-token ps s (fn [] [:ITconsym s]))] (tok k v span))
+      89 (tok-integral ps :ITinteger false 0 0 10 cs i e span)
+      90 (tok-integral ps :ITinteger false 2 2 2 cs i e span)
+      91 (tok-integral ps :ITinteger false 2 2 8 cs i e span)
+      92 (tok-integral ps :ITinteger false 2 2 16 cs i e span)
+      93 (tok-integral ps :ITinteger true 1 1 10 cs i e span)
+      94 (tok-integral ps :ITinteger true 3 3 2 cs i e span)
+      95 (tok-integral ps :ITinteger true 3 3 8 cs i e span)
+      96 (tok-integral ps :ITinteger true 3 3 16 cs i e span)
+      (97 98) (tok-frac ps :ITrational false cs i e 0 span)
+      (99 100) (tok-frac ps :ITrational true cs i e 0 span)
+      101 (tok-integral ps :ITprimint false 0 1 10 cs i e span)
+      102 (tok-integral ps :ITprimint false 2 3 2 cs i e span)
+      103 (tok-integral ps :ITprimint false 2 3 8 cs i e span)
+      104 (tok-integral ps :ITprimint false 2 3 16 cs i e span)
+      105 (tok-integral ps :ITprimint true 1 2 10 cs i e span)
+      106 (tok-integral ps :ITprimint true 3 4 2 cs i e span)
+      107 (tok-integral ps :ITprimint true 3 4 8 cs i e span)
+      108 (tok-integral ps :ITprimint true 3 4 16 cs i e span)
+      109 (tok-integral ps :ITprimword false 0 2 10 cs i e span)
+      110 (tok-integral ps :ITprimword false 2 4 2 cs i e span)
+      111 (tok-integral ps :ITprimword false 2 4 8 cs i e span)
+      112 (tok-integral ps :ITprimword false 2 4 16 cs i e span)
+      (113 114 115 116 117 118 119 120)
+      (let [hash (loop [k i] (if (= 35 (aget cs k)) k (recur (inc k))))
+            suffix (substr cs (inc hash) e)
+            kind (or (prim-ext-kind suffix) (lex-error-here! ps :LexError))
+            [neg offset radix] (case (int rule) 113 [false 0 10] 114 [false 2 2] 115 [false 2 8] 116 [false 2 16]
+                                 117 [true 1 10] 118 [true 3 2] 119 [true 3 8] 120 [true 3 16])
+            translen (+ (- e hash 1) offset 1)]
+        (tok-integral ps kind neg offset translen radix cs i e span))
+      (121 123) (tok-frac ps :ITprimfloat false cs i e 1 span)
+      (122 124) (tok-frac ps :ITprimdouble false cs i e 2 span)
+      (125 127) (tok-frac ps :ITprimfloat true cs i e 1 span)
+      (126 128) (tok-frac ps :ITprimdouble true cs i e 2 span)
+      129 (multiline-string! ps span i)
+      (130 131)
+      (let [hash (= 35 (aget cs (dec e)))
+            v (lex-chars-value ps cs (inc i) (if hash (- e 2) (dec e)) span)
+            src (list 'src (lexeme))]
+        (if hash
+          (do (when (some #(> (long %) 0xff) v) (add-error! ps (msg :PsErrPrimStringInvalidChar span)))
+              (tok :ITprimstring [src (cps->str v)] span))
+          (tok :ITstring [src (cps->str v)] span)))
+      (132 133)
+      (let [hash (= 35 (aget cs (dec e)))
+            v (lex-chars-value ps cs (inc i) (if hash (- e 2) (dec e)) span)
+            src (list 'src (lexeme))]
+        (tok (if hash :ITprimchar :ITchar) [src (first v)] span))
+      (134 135 136) (smart-quote-error! ps (aget cs (dec e)) (loc-at-start span))
+      137 (tok :ITtyQuote nil span)
+      138 (tok :ITsimpleQuote nil span))))
+
+(defn- multiline-string!
+  "tok_string_multi: \"\"\" ... \"\"\" (the content: @stringchar* lines and bare quotes)"
+  [ps span ^long i]
+  (let [^ints cs (st ps :cs) n (long (st ps :n))
+        start (+ i 3)
+        ;; the end: the first """ not inside an escape or gap
+        close (loop [k start]
+                (cond
+                  (>= k n) (do ;; checkSmartQuotes: a double smart quote not escaped, else a
+                               ;; lexical error at the end
+                               (loop [j i]
+                                 (when (< j n)
+                                   (let [c (aget cs j)]
+                                     (cond (= c 92) (recur (+ j 2))
+                                           (or (= c 0x201C) (= c 0x201D)) (smart-quote-error! ps c (loc-of ps j))
+                                           :else (recur (inc j))))))
+                               (set-input! ps n)
+                               (lex-error-here! ps :LexError))
+                  (and (= 34 (aget cs k)) (= 34 (ch cs n (inc k))) (= 34 (ch cs n (+ k 2)))) k
+                  (= 92 (aget cs k))
+                  (let [d (ch cs n (inc k))]
+                    (if (and (>= d 0) (whitechar? d))
+                      (let [m (m-run cs n (inc k) whitechar?)] (recur (inc m)))
+                      (let [es (m-escape-ends cs n (inc k) true)]
+                        (if (seq es) (recur (long (apply max es))) (do (set-input! ps (inc k)) (lex-error-here! ps :LexError))))))
+                  :else (recur (inc k))))
+        e (+ close 3)
+        v (try (lex-multiline-chars cs start close)
+               (catch Exception x (error-at! ps :LexNumEscapeRange (loc-at-start span) (+ start (long (or (:at (ex-data x)) 0))))))
+        _ (set-input! ps e)
+        full (mk-span (loc-at-start span) (loc ps))]
+    (tok :ITstringMulti [(list 'src (substr cs i e)) (cps->str v)] full)))
+
+(defn- pragma-token!
+  "The one-word and two-word pragmas' tokens (oneWordPrags, twoWordPrags)"
+  [ps ^String lexeme span]
+  (let [s (list 'src lexeme)]
+    (case (clean-pragma lexeme)
+      "rules" (do (set-exts! ps (bit-or (exts ps) (xbit :InRulePragBit))) (tok :ITrules_prag s span))
+      "inline" (tok :ITinline_prag [s (list 'Inline s) 'FunLike] span)
+      ("inlinable" "inlineable") (tok :ITinline_prag [s (list 'Inlinable s) 'FunLike] span)
+      "notinline" (tok :ITinline_prag [s (list 'NoInline s) 'FunLike] span)
+      "opaque" (tok :ITopaque_prag s span)
+      "specialize" (tok :ITspec_prag s span)
+      "source" (tok :ITsource_prag s span)
+      "warning" (tok :ITwarning_prag s span)
+      "deprecated" (tok :ITdeprecated_prag s span)
+      "scc" (tok :ITscc_prag s span)
+      "unpack" (tok :ITunpack_prag s span)
+      "nounpack" (tok :ITnounpack_prag s span)
+      "ann" (tok :ITann_prag s span)
+      "minimal" (tok :ITminimal_prag s span)
+      "overlaps" (tok :IToverlaps_prag s span)
+      "overlappable" (tok :IToverlappable_prag s span)
+      "overlapping" (tok :IToverlapping_prag s span)
+      "incoherent" (tok :ITincoherent_prag s span)
+      "ctype" (tok :ITctype s span)
+      "complete" (tok :ITcomplete_prag s span)
+      "column" (if (get-bit ps :UsePosPragsBit)
+                 (do (push-lex-state! ps :column-prag) nil)
+                 (tok :ITcolumn_prag s span))
+      "inline conlike" (tok :ITinline_prag [s (list 'Inline s) 'ConLike] span)
+      "notinline conlike" (tok :ITinline_prag [s (list 'NoInline s) 'ConLike] span)
+      "specialize inline" (tok :ITspec_inline_prag [s true] span)
+      "specialize notinline" (tok :ITspec_inline_prag [s false] span))))
+
+(defn- header-pragma-token!
+  "fileHeaderPrags (option_prags): OPTIONS, OPTIONS_GHC, OPTIONS_HADDOCK, LANGUAGE, INCLUDE"
+  [ps ^String lexeme span]
+  (case (clean-pragma lexeme)
+    "language" (tok :ITlanguage_prag nil span)
+    ("options" "options_ghc" "options_haddock" "include")
+    ;; lex_string_prag: the text up to #-}
+    (let [^ints cs (st ps :cs) n (long (st ps :n))
+          start (long (st ps :pos))
+          k (loop [k start] (cond (>= (+ k 2) n) (report-lex-error! ps :LexUnterminatedOptions (loc-at-start span) n)
+                                  (and (= 35 (aget cs k)) (= 45 (aget cs (inc k))) (= 125 (aget cs (+ k 2)))) k
+                                  :else (recur (inc k))))
+          s0 (loc ps)
+          text (substr cs start k)
+          _ (set-input! ps k)
+          sp (mk-span s0 (loc ps))
+          kind (case (clean-pragma lexeme) "include" :ITinclude_prag "options_haddock" :ITdocOptions :IToptions_prag)]
+      [kind text sp])))
+
+;;; ------------------------------------------------------------------------------------------
+;;; lexToken
+
+(defn- comment-kind? [k] (or (= k :ITlineComment) (= k :ITblockComment) (= k :ITdocComment) (= k :ITdocOptions)))
+
+(defn lex-token
+  "lexToken: the next token, [kind value span]; :ITeof at the end"
+  [ps]
+  (loop []
+    (let [i (long (st ps :pos))
+          sc (first (st ps :lex))
+          m (or (when (or (identical? sc :s0) (identical? sc :bol)) (scan-fast ps sc i)) (scan! ps sc i))]
+      (if (nil? m)
+        (if (>= i (long (st ps :n)))
+          (let [l (loc ps) span (mk-span l l)]
+            (st! ps :last-loc span) (st! ps :last-len 0)
+            [:ITeof nil span])
+          ;; AlexError: from the token's start to where Alex's automaton stopped
+          (report-lex-error! ps :LexError (loc ps) (dfa-stop ps sc i)))
+        (let [[e rule] m
+              e (long e) rule (long rule)]
+          (if (case rule (1 11 14 15 16 19) true false)
+            (do (set-input! ps e) (recur))            ; AlexSkip
+            (let [f (st ps :file) la (st ps :line) ca (st ps :col) pa (st ps :pos)
+                  _ (set-input! ps e)
+                  span [f la ca (st ps :line) (st ps :col) pa (st ps :pos)]
+                  _ (st! ps :last-loc span)
+                  _ (st! ps :last-len (- e i))
+                  t (run-action! ps rule i e span)]
+              (if (nil? t)
+                (recur)
+                (do (if (comment-kind? (first t))
+                      (st! ps :prev-loc (nth t 2))
+                      ;; setLastTk: prev_loc only for a token of non-zero width
+                      (let [sp (nth t 2)]
+                        (st! ps :last-tk t)
+                        (when-not (and (= (nth sp 1) (nth sp 3)) (= (nth sp 2) (nth sp 4)))
+                          (st! ps :prev-loc sp))))
+                    t)))))))))
+
+(defn tokens
+  "Every token of a text (lexTokenStream: comments as tokens, LINE pragmas as tokens), for checks:
+  [[kind value span]...] without the end of file"
+  [text file ^long exts]
+  (let [ps (make-state text file (-> exts (bit-or (xbit :RawTokenStreamBit)) (bit-and (bit-not (xbit :UsePosPragsBit)))))]
+    (loop [out (transient [])]
+      (let [t (lex-token ps)]
+        (if (= :ITeof (first t)) (persistent! out) (recur (conj! out t)))))))

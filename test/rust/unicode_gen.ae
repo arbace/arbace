@@ -1,0 +1,149 @@
+;; repr/rust's Unicode tables (doc/rust/NATIVE-READER.md, "Unicode"): prints arbace/repr/rust/unicode.ae
+;; from the tables of the two crates rustc 1.99.1's rustc_lexer links, pinned by rustc's Cargo.lock
+;; (tools/rsdump/unicode-crates.sha256): unicode-ident 1.0.24's `src/tables.rs` (XID_Start and
+;; XID_Continue, a two-level trie of 64-byte chunks, decoded here as the crate's `is_xid_start` and
+;; `is_xid_continue` read it) and unicode-properties 0.1.4's `src/tables.rs` (`EMOJI_STATUS`, which
+;; `is_emoji_char` tests). Both crates: MIT OR Apache-2.0, unicode-ident's tables also under the
+;; Unicode License V3 (LICENSE.md).
+;; Usage: arbace test/rust/unicode_gen.ae IDENT-TABLES.rs PROPERTIES-TABLES.rs IDENT-SHA256 PROPERTIES-SHA256 > unicode.ae
+;; (bin/rust-unicode drives it: it fetches and checks the crates.)
+
+(ns rust-unicode-gen
+  (:require [arbace.string :as str]))
+
+(defn- nums
+  "the numbers (0x..) of the array literal that follows the declaration `static NAME`"
+  [^String text ^String name]
+  (let [i (.indexOf text (str "static " name ":"))
+        _ (when (neg? i) (throw (ex-info (str "no static " name) {})))
+        j (.indexOf text "]);" i)
+        body (subs text (.indexOf text "Align" i) j)
+        body (subs body (inc (.indexOf body "(")))
+        m (re-matcher #"0x([0-9A-Fa-f]+)" body)]
+    (loop [acc (transient [])]
+      (if (.find m) (recur (conj! acc (Long/parseLong (.group m 1) 16))) (persistent! acc)))))
+
+(defn- const-num [^String text ^String name]
+  (let [m (re-matcher (re-pattern (str "const " name ": u128 = 0x([0-9a-f]+);")) text)]
+    (when-not (.find m) (throw (ex-info (str "no const " name) {})))
+    (BigInteger. (.group m 1) 16)))
+
+(defn- ranges
+  "the maximal ranges [lo hi] of the code points from 128 up for which (member? c) holds"
+  [member?]
+  (loop [c 128 start -1 acc (transient [])]
+    (if (> c 0x10FFFF)
+      (persistent! (if (neg? start) acc (conj! acc [start 0x10FFFF])))
+      (let [m (member? c)]
+        (cond (and m (neg? start)) (recur (inc c) c acc)
+              (and (not m) (>= start 0)) (recur (inc c) -1 (conj! acc [start (dec c)]))
+              :else (recur (inc c) start acc))))))
+
+(defn- emit-ranges [rs]
+  (->> (partition-all 6 rs)
+       (map (fn [row] (str "    " (str/join " " (map (fn [[lo hi]] (format "0x%X 0x%X" lo hi)) row)))))
+       (str/join "\n")))
+
+(defn -main [& [ident-file props-file ident-sha props-sha]]
+  (let [it (slurp ident-file)
+        pt (slurp props-file)
+        chunk (let [m (re-matcher #"const CHUNK: usize = (\d+);" it)] (.find m) (Long/parseLong (.group m 1)))
+        _ (assert (= 64 chunk))
+        trie-start (nums it "TRIE_START")
+        trie-cont (nums it "TRIE_CONTINUE")
+        leaf (nums it "LEAF")
+        ascii-start (const-num it "ASCII_START")
+        ascii-cont (const-num it "ASCII_CONTINUE")
+        in-trie (fn [trie c]
+                  (let [k (quot (quot c 8) chunk)
+                        ch (if (< k (count trie)) (long (nth trie k)) 0)
+                        off (+ (quot (* ch chunk) 2) (mod (quot c 8) chunk))]
+                    (not (zero? (bit-and (bit-shift-right (long (nth leaf off)) (mod c 8)) 1)))))
+        start (ranges #(in-trie trie-start %))
+        cont (ranges #(in-trie trie-cont %))
+        lo (fn [^BigInteger bits] (.longValue bits))
+        hi (fn [^BigInteger bits] (.longValue (.shiftRight bits 64)))
+        ver (fn [t] (let [m (re-matcher #"UNICODE_VERSION: \(\w+, \w+, \w+\) = \((\d+), (\d+), (\d+)\)" t)]
+                      (when-not (.find m) (throw (ex-info "no UNICODE_VERSION" {})))
+                      (str (.group m 1) "." (.group m 2) "." (.group m 3))))
+        ;; unicode-properties: EMOJI_STATUS's (lo, hi, status) entries; is_emoji_char is every status
+        ;; but NonEmoji and NonEmojiButEmojiComponent
+        es (subs pt (.indexOf pt "const EMOJI_STATUS"))
+        es (subs es 0 (.indexOf es "];"))
+        em (re-matcher #"\('\\u\{([0-9a-f]+)\}',\s*'\\u\{([0-9a-f]+)\}',\s*EmojiStatus::(\w+)\)" es)
+        entries (loop [acc (transient [])]
+                  (if (.find em)
+                    (recur (conj! acc [(Long/parseLong (.group em 1) 16) (Long/parseLong (.group em 2) 16) (.group em 3)]))
+                    (persistent! acc)))
+        _ (assert (= 0 (ffirst entries)))
+        _ (assert (= 0x10FFFF (second (last entries))))
+        _ (assert (every? true? (map (fn [a b] (or (= (inc (second a)) (first b)) (and (= 0xD7FF (second a)) (= 0xE000 (first b))))) entries (rest entries))) "EMOJI_STATUS has gaps beyond the surrogates")
+        emoji-set (loop [es entries acc []]
+                    (if-let [[[lo hi s] & more] (seq es)]
+                      (recur more (if (and (not (#{"NonEmoji" "NonEmojiButEmojiComponent"} s)) (> hi 127))
+                                    (let [lo (max lo 128)
+                                          prev (when (pos? (count acc)) (peek acc))]
+                                      (if (and prev (= (inc (second prev)) lo))
+                                        (conj (pop acc) [(first prev) hi])
+                                        (conj acc [lo hi])))
+                                    acc))
+                      acc))]
+    (assert (= (ver it) (ver pt)))
+    (println ";; GENERATED by test/rust/unicode_gen.ae (bin/rust-unicode generate): do not edit; `bin/rust-unicode check` regenerates and compares.")
+    (println ";;")
+    (println ";; The character classes rustc 1.99.1's rustc_lexer uses, from the tables of the crates it links (rustc's")
+    (println ";; Cargo.lock, https://crates.io, pinned by SHA-256 in tools/rsdump/unicode-crates.sha256):")
+    (println (str ";;   unicode-ident 1.0.24 (crate SHA-256 " ident-sha ")"))
+    (println (str ";;     src/tables.rs, Unicode " (ver it) ": is_xid_start, is_xid_continue (rustc_lexer's is_id_start, is_id_continue)"))
+    (println (str ";;   unicode-properties 0.1.4 (crate SHA-256 " props-sha ")"))
+    (println (str ";;     src/tables.rs, Unicode " (ver pt) ": EMOJI_STATUS, is_emoji_char (rustc_lexer's invalid identifiers)"))
+    (println ";; unicode-ident: (MIT OR Apache-2.0) AND Unicode-3.0, copyright the Rust project's contributors, David Tolnay and")
+    (println ";; Unicode, Inc.; unicode-properties: MIT OR Apache-2.0, copyright the Rust project's contributors, the")
+    (println ";; unicode-rs developers (LICENSE.md, \"Rust (rustc 1.99.1)\" and \"Unicode License V3\"). The tables here are the")
+    (println ";; non-ASCII ranges, [lo hi] flattened, ascending; ASCII is the crate's masks.")
+    (println)
+    (println "(ns arbace.repr.rust.unicode")
+    (println "  \"rustc_lexer's character classes from unicode-ident's and unicode-properties' tables (generated).\")")
+    (println)
+    (println "(set! *warn-on-reflection* true)")
+    (println)
+    (println (str "(def unicode-version \"" (ver it) "\")"))
+    (println)
+    (println ";; the crate's ASCII_START and ASCII_CONTINUE (u128 masks, bit c for the character c) as signed halves")
+    (println (str "(def ^:private ascii-start-lo " (lo ascii-start) ")"))
+    (println (str "(def ^:private ascii-start-hi " (hi ascii-start) ")"))
+    (println (str "(def ^:private ascii-continue-lo " (lo ascii-cont) ")"))
+    (println (str "(def ^:private ascii-continue-hi " (hi ascii-cont) ")"))
+    (println)
+    (doseq [[nm rs] [["start-ranges" start] ["continue-ranges" cont] ["emoji-ranges" emoji-set]]]
+      (println (str "(def ^:private ^ints " nm " (int-array ["))
+      (println (str (emit-ranges rs) "]))"))
+      (println))
+    (println "(defn- in-ranges? [^ints rs ^long c]")
+    (println "  (loop [lo 0 hi (dec (quot (alength rs) 2))]")
+    (println "    (if (> lo hi)")
+    (println "      false")
+    (println "      (let [mid (quot (+ lo hi) 2)]")
+    (println "        (cond (< c (aget rs (* 2 mid))) (recur lo (dec mid))")
+    (println "              (> c (aget rs (inc (* 2 mid)))) (recur (inc mid) hi)")
+    (println "              :else true)))))")
+    (println)
+    (println "(defn- ascii-bit? [^long lo ^long hi ^long c]")
+    (println "  (not (zero? (bit-and 1 (bit-shift-right (if (< c 64) lo hi) (bit-and c 63))))))")
+    (println)
+    (println "(defn xid-start?")
+    (println "  \"unicode_ident::is_xid_start\"")
+    (println "  [^long c]")
+    (println "  (if (< c 128) (ascii-bit? ascii-start-lo ascii-start-hi c) (in-ranges? start-ranges c)))")
+    (println)
+    (println "(defn xid-continue?")
+    (println "  \"unicode_ident::is_xid_continue\"")
+    (println "  [^long c]")
+    (println "  (if (< c 128) (ascii-bit? ascii-continue-lo ascii-continue-hi c) (in-ranges? continue-ranges c)))")
+    (println)
+    (println "(defn emoji-char?")
+    (println "  \"unicode_properties::emoji::UnicodeEmoji::is_emoji_char, for a non-ASCII character (rustc_lexer asks only those)\"")
+    (println "  [^long c]")
+    (println "  (and (>= c 128) (in-ranges? emoji-ranges c)))")))
+
+(apply -main *command-line-args*)

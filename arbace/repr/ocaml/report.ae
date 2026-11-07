@@ -1,0 +1,208 @@
+;; Ported from OCaml 5.5.0 (the release tarball https://caml.inria.fr/pub/distrib/ocaml-5.5/ocaml-5.5.0.tar.xz, SHA-256
+;; fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba): parsing/location.ml's batch-mode report printer
+;; (batch_mode_printer for Report_error, Doc.loc, highlight_quote with its ISet, infer_line_numbers and lines_around),
+;; utils/format_doc.ml's pp_two_columns, and the part of stdlib/format.ml a message's break hints need (Pp_box and
+;; Pp_hovbox, margin 78), whose notice follows (LICENSE.md, "The OCaml Core System"):
+;;
+;;                                 OCaml
+;;
+;;             Xavier Leroy, projet Cristal, INRIA Rocquencourt
+;;
+;;   Copyright 1996 Institut National de Recherche en Informatique et
+;;     en Automatique.
+;;
+;;   All rights reserved.  This file is distributed under the terms of
+;;   the GNU Lesser General Public License version 2.1, with the
+;;   special exception on linking described in the file LICENSE.
+
+(ns arbace.repr.ocaml.report
+  "An error of the native reader (arbace.repr.ocaml.parser's [:error KIND MESSAGE LOC SUB]) as ocamlc prints it:
+  `message` the main text as the helper tools/ocdump writes it (Format.asprintf, trimmed), `report` the whole report
+  as ocamlc -stop-after parsing writes it on stderr (the location, the quoted source with its carets, Error: and the
+  text, then each sub-message), in Location's batch mode with no colours. A message is a byte string (one char a
+  byte) whose \\u0001 are Format's `@ ` break hints."
+  (:require [arbace.repr.ocaml.lex :as lex]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* false)
+
+(def ^:private margin 78)
+(def ^:private max-indent 68)
+
+(defn- chunks [^String msg] (str/split msg #"\u0001" -1))
+
+(defn- layout
+  "MSG laid out by Format in a box opened at column COL: :box (`@[`, Pp_box: no break when the whole box fits) or
+  :hov (the formatter's own box, never closed: at the flush the last break's size is still unknown, taken as
+  infinite, so it always breaks); a break that does not fit is a newline indented to the box's column"
+  ([msg col kind] (layout msg col kind (min max-indent col)))
+  ([^String msg col kind indent]
+  (let [cs (chunks msg)
+        total (+ (reduce + (map count cs)) (dec (count cs)))
+        fits (and (= kind :box) (<= total (- margin col)))
+        b (StringBuilder.)]
+    (loop [[c & more] cs column col first? true]
+      (if (nil? c)
+        (str b)
+        (let [column (if first?
+                       column
+                       (if (and (not fits) (or (and (= kind :hov) (nil? more)) (> (+ 1 (count c)) (- margin column))))
+                         (do (.append b "\n") (dotimes [_ indent] (.append b " ")) indent)
+                         (do (.append b " ") (inc column))))]
+          (.append b ^String c)
+          (recur more (+ column (count c)) false)))))))
+
+(defn message
+  "The main text as the helper writes it: Format.asprintf \"%t\" of the message, trimmed"
+  [^String msg]
+  (str/trim (layout msg 0 :hov)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Locations (Location.Doc.loc) and their quotes (highlight_quote)
+
+(defn- loc-text [loc input-name]
+  (let [[s e] loc
+        fname (if (= "" (lex/pos-fname s)) input-name (lex/pos-fname s))
+        file-valid (not (contains? #{"" "//toplevel//"} fname))
+        sl (lex/pos-lnum s) el (lex/pos-lnum e)
+        sl (if (> sl 0) sl 1) el (if (> el 0) el sl)
+        sc (- (lex/pos-cnum s) (lex/pos-bol s)) ec (- (lex/pos-cnum e) (lex/pos-bol e))
+        parts (cond-> []
+                file-valid (conj (str "file \"" fname "\""))
+                true (conj (if (= sl el) (str "line " sl) (str "lines " sl "-" el)))
+                (and (not= sc -1) (not= ec -1)) (conj (str "characters " sc "-" ec)))
+        t (str/join ", " parts)]
+    (str (str/upper-case (subs t 0 1)) (subs t 1))))
+
+(defn- lines-around
+  "Location.lines_around over the whole input: the lines [text start] from START's beginning of line until END"
+  [^bytes buf start-pos end-pos]
+  (let [n (alength buf) endc (lex/pos-cnum end-pos)
+        lines (java.util.ArrayList.)
+        b (StringBuilder.)]
+    (loop [pos (lex/pos-bol start-pos) bol (lex/pos-bol start-pos) cur (lex/pos-bol start-pos)]
+      (let [add (fn [] (if (< bol cur)
+                         (do (.add lines [(str b) bol]) (.setLength b 0) cur)
+                         bol))]
+        (if (>= bol endc)
+          nil
+          (if (or (>= pos n) (< pos 0))
+            (add)
+            (let [c (bit-and 0xff (aget buf pos)) cur (inc cur)]
+              (case c
+                13 (recur (inc pos) bol cur)
+                10 (let [bol (if (< bol cur) (do (.add lines [(str b) bol]) (.setLength b 0) cur) bol)]
+                     (recur (inc pos) bol cur))
+                (do (.append b (char c)) (recur (inc pos) bol cur))))))))
+    (vec lines)))
+
+(defn- infer-line-numbers [lines]
+  (let [[_ offset consistent]
+        (reduce (fn [[i offset consistent] [lnum _]]
+                  (cond
+                    (nil? lnum) [(inc i) offset consistent]
+                    (nil? offset) [(inc i) (- lnum i) consistent]
+                    :else [(inc i) offset (and consistent (= lnum (+ offset i)))]))
+                [0 nil true] lines)]
+    (if (and offset consistent)
+      (vec (map-indexed (fn [i [_ line]] [(+ offset i) line]) lines))
+      lines)))
+
+(defn- highlight
+  "highlight_quote of one location: the lines it prints (each ended by a newline), or empty"
+  [^bytes buf loc]
+  (let [[s e] loc]
+    (if (or (= -1 (lex/pos-cnum s)) (= -1 (lex/pos-cnum e)) (> (lex/pos-cnum s) (dec (lex/pos-cnum e))))
+      ""
+      (let [lo (lex/pos-cnum s) hi (dec (lex/pos-cnum e))
+            mem? (fn [p] (and (<= lo p) (<= p hi)))
+            lines (->> (lines-around buf s e)
+                       (map (fn [[text start]]
+                              (let [end (+ start (count text) -1)
+                                    nb (cond (and (<= start lo) (<= lo end)) (lex/pos-lnum s)
+                                             (and (<= start hi) (<= hi end)) (lex/pos-lnum e))]
+                                [nb [text start]])))
+                       infer-line-numbers
+                       (mapv (fn [[nb [text start]]] [text (if nb (str nb) "") start])))
+            b (StringBuilder.)]
+        (cond
+          (or (empty? lines) (and (= 1 (count lines)) (= "" (first (first lines))))) nil
+          (= 1 (count lines))
+          (let [[^String line nb start] (first lines)]
+            (.append b (str nb " | " line "\n"))
+            (dotimes [_ (+ 3 (count nb))] (.append b " "))
+            (dotimes [i (- (lex/pos-cnum e) start)]
+              (let [p (+ start i)]
+                (cond
+                  (mem? p) (.append b "^")
+                  (< i (count line)) (.append b (if (= \tab (.charAt line i)) "\t" " ")))))
+            (.append b "\n"))
+          :else
+          (let [lines (mapv (fn [[^String line nb start]]
+                              [nb (apply str (map-indexed (fn [i ch] (if (mem? (+ start i)) ch \.)) line))])
+                            lines)
+                w (reduce max 0 (map (comp count first) lines))
+                n (count lines)
+                max-lines 10
+                [ef el] (if (> n max-lines)
+                          (let [printed (dec max-lines)
+                                before (+ (quot printed 2) (mod printed 2))
+                                after (quot printed 2)]
+                            [before (- n after 1)])
+                          [-1 -1])]
+            (doseq [[k [l r]] (map-indexed vector lines)]
+              (when (= k ef) (.append b "...\n"))
+              (when-not (and (<= ef k) (<= k el))
+                (dotimes [_ (- w (count l))] (.append b " "))
+                (.append b (str l " | " r "\n"))))))
+        (str b)))))
+
+(defn- quotable? [loc input-name]
+  (let [[s e] loc]
+    (and (not= -1 (lex/pos-cnum s)) (not= -1 (lex/pos-cnum e))
+         (= input-name (lex/pos-fname s)) (= input-name (lex/pos-fname e)))))
+
+(defn- pp-loc [^bytes buf loc input-name]
+  (str (loc-text loc input-name) ":\n" (when (quotable? loc input-name) (highlight buf loc))))
+
+(def ^:private warning-texts
+  ;; Warnings.message with Warnings.number and Warnings.reduce's name: [number name text]
+  {:comment-start [1 "comment-start"
+                   "this (* is the start of a comment.\u0001Hint: Did you forget spaces when writing the infix operator ( * )?"]
+   :comment-not-end [2 "comment-not-end" "this is not the end of a comment."]
+   :illegal-backslash [14 "illegal-backslash"
+                       (str "illegal backslash escape in string.\u0001Hint: Single backslashes \\ are reserved for escape sequences"
+                            "\u0001(\\n, \\r, ...).\u0001Did you check the list of OCaml escape sequences?"
+                            "\u0001To get a backslash character, escape it with a second backslash: \\\\.")]
+   :docstring-unattached [50 "unexpected-docstring" "unattached documentation comment (ignored)"]
+   :docstring-ambiguous [50 "unexpected-docstring" "ambiguous documentation comment"]})
+
+(defn warning-number [kind] (first (get warning-texts kind)))
+
+(defn warning-report
+  "The report ocamlc prints for a warning (batch_mode_printer's warning_format): the location with its quote, then
+  `Warning N [name]: text` (`Error (warning N [name]): text` for a warning made an error by -warn-error) in a `@[<b 2>` box at column 0"
+  ([buf input-name kind loc] (warning-report buf input-name kind loc false))
+  ([^bytes buf input-name kind loc as-error]
+  (let [[n name text] (get warning-texts kind)]
+    (str (pp-loc buf loc input-name)
+         (layout (str (if as-error (str "Error (warning " n " [" name "])") (str "Warning " n " [" name "]")) ": " text) 0 :box 2)
+         "\n"))))
+
+(defn report
+  "The report ocamlc prints for the error (batch_mode_printer's error_format): the bytes of the input, its name as
+  ocamlc was given it, the message, its location and its sub-messages [TEXT LOC]; a byte string"
+  [^bytes buf input-name msg loc sub]
+  (let [b (StringBuilder.)]
+    (.append b (pp-loc buf loc input-name))
+    (.append b "Error: ")
+    (.append b (layout msg 7 :box))
+    (doseq [[txt l] sub]
+      (.append b "\n")
+      (if (nth l 2)
+        (.append b (layout txt 0 :box))
+        (do (.append b (pp-loc buf l input-name))
+            (.append b "  ")
+            (.append b (layout txt 2 :box)))))
+    (.append b "\n")
+    (str b)))

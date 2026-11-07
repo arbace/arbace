@@ -33,11 +33,11 @@
 # bin/lib/ci, bin/lib/repr-c (gate_key's own), repr/java (javac's tool embeds it), go/arbace/{ci,cinterp,crt}.
 arbace_crop_paths=(
   # the crops' Arbace namespaces (embed.ae's excluded): repr/haskell, rust, ocaml, scheme, python, cpp, llvm; si's, pyi's, the
-  # lowering's and rsi's tools
+  # lowering's, rsi's and llvmi's tools
   arbace/repr/haskell.ae 'arbace/repr/haskell/*' arbace/repr/rust.ae 'arbace/repr/rust/*' arbace/repr/ocaml.ae 'arbace/repr/ocaml/*'
   arbace/repr/scheme.ae 'arbace/repr/scheme/*' 'arbace/scheme/*' arbace/repr/python.ae 'arbace/repr/python/*'
   arbace/python.ae 'arbace/python/*' arbace/repr/cpp.ae 'arbace/repr/cpp/*' arbace/repr/llvm.ae 'arbace/repr/llvm/*'
-  'arbace/cpp/*' arbace/rust.ae 'arbace/rust/*'
+  'arbace/cpp/*' arbace/rust.ae 'arbace/rust/*' 'arbace/llvm/*'
   # their Go forms: oi's, si's (scm, scminterp), pyi's (py, expat, pyexpat), hsi's (hs) and the libm port hsi and pyi import
   go/arbace/oi.ae 'go/arbace/oi/*' go/arbace/scm.ae 'go/arbace/scm/*' go/arbace/scminterp.ae 'go/arbace/scminterp/*'
   go/arbace/py.ae 'go/arbace/py/*' go/arbace/expat.ae 'go/arbace/expat/*' go/arbace/pyexpat.ae 'go/arbace/pyexpat/*'
@@ -119,7 +119,7 @@ arbace_version() {
 # (doc/GATE-SURVEY.md, GTS5 (a), "As built: GT1-GT3"): arbace/ less the namespaces no executable
 # embeds and nothing of the build reads: repr/java (javac's tool embeds it itself: bin/arbace-go's reader_key names it) and the
 # crops' namespaces of arbace_crop_paths (repr/haskell, rust, ocaml, scheme and scheme, python and pyi's arbace/python (PYS18 (a)),
-# cpp, llvm and arbace/cpp, rsi's arbace/rust; arbace/j2g/embed.ae's excluded; repr/c and ci's arbace/c are embedded since C9)
+# cpp, llvm and arbace/cpp, rsi's arbace/rust, llvmi's arbace/llvm; arbace/j2g/embed.ae's excluded; repr/c and ci's arbace/c are embedded since C9)
 arbace_embedded_sources() {
   (cd "$1" && find arbace -type f ! -path arbace/repr/java.ae ! -path 'arbace/repr/java/*' "${arbace_not_crops[@]}" | LC_ALL=C sort)
 }

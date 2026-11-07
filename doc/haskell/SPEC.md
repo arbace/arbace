@@ -336,11 +336,11 @@ on, so that it can be reproduced and checked:
 | key | example | meaning |
 |---|---|---|
 | `:command` | `["cc" "-E" "-undef" "-traditional"]` | GHC's "Haskell CPP command" and flags (`ghc --info`) |
-| `:args` | `["-Dlinux_HOST_OS" "-Dx86_64_HOST_ARCH" "-D__GLASGOW_HASKELL_TH__" ...]` | the arguments GHC's driver passed, temporary paths replaced by their role (`<macros>`), paths under GHC's libdir written from `$libdir` |
+| `:args` | `["-Dlinux_HOST_OS" "-Dx86_64_HOST_ARCH" "-D__GLASGOW_HASKELL_TH__" ...]` | the arguments GHC's driver passed, temporary paths replaced by their role (`<macros>`, `<output>`, a literate module's `<unlit>`), paths under GHC's libdir written from `$libdir` |
 | `:defines` | `["-DFOO=1"]` | the `-D` flags of the build (a `.cabal` file's `cpp-options`) |
 | `:include-dirs` | `["include" "$libdir/../lib/x86_64-linux-ghc-9.14.1-07a2/rts-1.0.3/include"]` | the `-I` directories |
 | `:files` | `{"$libdir/.../MachDeps.h" "sha256:..."}` | every file the output's line markers name, with its SHA-256: the headers that took part |
-| `:macros` | `"sha256:..."` | the SHA-256 of the header of `MIN_VERSION_pkg` macros GHC's driver generates for the packages in scope |
+| `:macros` | `"sha256:..."` | the SHA-256 of the header of `MIN_VERSION_pkg` macros GHC's driver generates for the packages in scope, its blocks sorted (since the helper's version 5: GHC orders them by its unit map's uniques, which only its process knows; doc/haskell/NATIVE.md) |
 | `:output` | `"sha256:..."` | the SHA-256 of the preprocessed text |
 
 The preprocessed text keeps the module's lines: traditional CPP replaces removed lines by blank

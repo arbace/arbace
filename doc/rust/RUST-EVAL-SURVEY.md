@@ -627,3 +627,872 @@ against the conventions); the first two gcc invocations ran with `TMPDIR` unset,
 
 All as recommended. The trial RE1-RE2 starts now, by an agent on the main host, beside GT8 and C++'s CX8 (light work by
 day).
+
+## As built: RE1-RE2 (write-ahead, 2026-11-03)
+
+Branch `rust-re1` from main `c545ede1`, by an agent on the main host beside C++'s CX8 (light tier: 4 jobs, `GOMEMLIMIT`
+1500 MiB a lowering, no heavy lock; stage 0 `/root/arbace/target/seed/amd64/arbace`, the namespaces evaluated from the
+worktree). Spec: doc/rust/EVAL.md. Written ahead of the night's whole run (RE2.5): the counts below are the day's two 10%
+slices of the UI programs.
+
+### RE2.1 What was built
+
+| piece | file | what |
+|---|---|---|
+| the spec | `doc/rust/EVAL.md` | rsi's pipeline, std's build, the native-std leg, the Rust delta, the lists, the judgment and classes, panics from RE3 |
+| command | `bin/rsi` (`lower`, `list`, `sets`, `std-build`, `lower-check`); Makefile `rsi-samples`, `rsi-lower-check`, `rsi-lower-check-all`, `rsi-std-build` | RES15 (a) |
+| the driver | `arbace/rust/lower.ae` (`arbace.rust.lower`) | read, round trip, the intrinsics a unit declares, the lowering; the native-std leg's substitution (`__rust_try` → `cx_rust_try`) |
+| the judge | `arbace/rust/check.ae` (`arbace.rust.check`) | the sets, the plan's filter, `judge` (results, reasons, classes, `--record`) |
+| the lowered side | `bin/lib/rsi/wrap`, `bin/lib/rsi/link`; `bin/lib/repr-rust/run-program`'s sides take a WRAP (`NAME:SRC:SYSROOT:NORM:WRAP`, `RUN_PROGRAM_ID`) | rustc's own link with the program's and the shim's objects replaced by gcc's of their lowered IR |
+| the layer | `arbace/rust/rt/native.c.ae`, `test/rust/runtime/native/try.rs` | EVAL.md §4 |
+| the lowering's Rust delta | `arbace/cpp/lower.ae`, four commits of its own (intrinsics; vectors; bit-packed vectors and the vector intrinsics' order; bitreverse's widths and load.relative.i64) | EVAL.md §5 |
+| pins | `test/rust/runtime/std.edn` (rustc's and clang's versions, std's profile, flags, crates), `test/rust/runtime/ir.sha256` (std's 103 units) | RE1 |
+| lists | `test/rust/eval-programs.edn` (threads 175 programs, process 63, net 5; 3,506 in none), `test/rust/eval/` (three samples) | RE1 |
+| classes, results | `test/rust/divergences-lower.edn` (11 classes), `test/rust/lower-results.edn` (756 programs) | RES13 (a) |
+
+### RE2.2 Results
+
+The IR scan (every one of the 3,718 programs' `-O0` IR with its flags, 31 s at 12 jobs; 3,716 compile): the intrinsics the
+table lacked were the survey's §5.3 list and `fpto{s,u}i.sat` (Rust's `as` from floats: 29 and 26 programs), `vector.reduce.*`
+(90), `{s,u}cmp` (157), `{u,s}{add,sub}.sat` (91), `fsh{l,r}` (31), `bitreverse`, `bswap.i128`, `powi`, `minimumnum`,
+`ptrmask`, `load.relative`; 86 programs use vector instructions (hashbrown's group in most: `load`, `icmp`, `sext`/`trunc`
+`<16 x i1>`, `bitcast <16 x i1> to i16`, splat `shufflevector`; `core::simd`'s in `simd/`). The samples: 3 of 3 pass.
+
+`bin/rsi lower-check` over every 10th program (372), then every 10th from the 5th (372), then the tests the fixes touched again
+(21 revisions, 12 of them new); recorded in `test/rust/lower-results.edn`:
+
+| run | programs | pass | nondet | in a class | unclassified | wall (4 jobs) |
+|---|---:|---:|---:|---:|---:|---:|
+| every 10th | 372 | 360 | 4 | 8 | 0 (5 before the fixes, rerun) | 420 s |
+| every 10th from the 5th | 372 | 358 | 2 | 12 | 0 (1 before the fixes) | 305 s |
+| the record (both and the fixes' revisions) | 756 | 718 | 6 | 32 | 0 | |
+
+The 32 by class: `native-unwind` 10 (drops of unwound lowered frames, catches inlined into lowered code by `-O` builds),
+`lto` 6 (thin LTO: 19 units), `c-variadic` 3, `inline-asm` 2 (asm goto's `callbr`; `global_asm!`'s LLVM 23 header
+`module asm(target_cpu: ...)`, which repr/llvm does not read), `float16-128` 2 (`half`), `known-bug` 2 (`equal-pointers-unequal`'s
+miscompilations at `-O2`, which the lowered build does not reproduce), `wide-int` 2 (i256 of fat LTO's optimized std),
+`optimized-ir` 2 (a vector GEP, a static initializer gcc does not fold: fat LTO at `-O2`, `-O3`), `simd` 1
+(`llvm.masked.gather`), `alias` 1 (externally implementable items' static alias), `speed` 1 (`mir_heavy_promoted.rs`: a 32 MiB
+constant, 33 MB of IR, past the build's 300 s). Every class but `native-unwind`, `known-bug` and `speed` is a refusal by the
+lowering (or repr/llvm) with its class, never a wrong run. What the slices found and was fixed (the lowering's fourth and fifth
+commits): the vector intrinsics' order (`llvm.ctpop.v4i32` taken by the scalar row: a crash), bit-packed vectors' bitcasts in
+constant expressions (`bitcast (<1 x i4> splat (i4 5) to <4 x i1>)`: gcc refused the C), `bitreverse.i3`, `load.relative.i64`;
+and three programs built with `-g` whose IR has debug records repr/llvm does not read (the lowered side adds `-C debuginfo=0`).
+The round trip through LLVM forms: every unit read is equal as forms and as objects (the units it does not cover are the reader's
+refusals, `callbr`, `module asm(target_cpu:`, and the timeout).
+
+Costs: the lowering evaluated on stage 0 takes about 1.6 s of CPU a program (602 s for 371 units; 0.1 to 7.5 s, 2.2 MB of IR
+for 53 programs), the whole build-and-run about 1.1 s of wall a program at 4 jobs: the whole suite about 70 minutes at 4 jobs,
+35 to 40 at 8. std's build: 38 s of Cargo (8 jobs) and 2 s of `clang -S`, 103 units, 51 MB of IR (CX7's libstdc++: 38 MB).
+
+C++ unchanged: the 16 C++ samples (`test/cpp/samples`, `test/cpp/runtime/samples`) lowered by this branch's lowering and by
+main's give the same C byte for byte (the refactor of icmp/fcmp and casts is neutral); `bin/cppi lower-check` was not rerun
+(its lowered runtime is keyed by `lower.ae` and would rebuild, minutes: for the merge).
+
+### RE2.3 Against the exit criteria
+
+RE1 ("the spec accepted; lists counted"): the spec is written (EVAL.md), the lists counted (§6 there), std's flags and IR pinned
+(at the main checkout's place, RES17), rustc's and clang's versions pinned; the synthetic corpus's generator is planned (EVAL.md
+§6), not written. RE2 ("every UI program lowered and run by gcc as the original, or refused in a class"): on the two slices and the fixes'
+revisions (756 programs, 20% of the 3,718), 718 run as the original (95.0%; 96.3% of those judged), 6 are nondeterministic, 32 are
+in a class, none is outside one; the whole 3,718 is the night's run (RE2.5). Costs recorded (RE2.2).
+
+### RE2.4 Decisions taken in the build, and proposals (RES17-RES22)
+
+- **RES17 Where std is built.** Cargo's `-Zbuild-std` hashes std's packages by their absolute path (measured: two places, two
+  sets of disambiguators, whatever the remaps, `__CARGO_DEFAULT_LIB_METADATA`, `-Ztrim-paths` or a copy). Options: (a) build at
+  the main checkout's `.tmp/rsi/std` (as built; the pin holds there and nowhere else: a clean run in another clone re-records);
+  (b) **at RE3, build the library's own workspace (`library/`, the package `sysroot`) with Cargo directly, as rust's bootstrap
+  does**, which hashes its members by their path in the workspace (to verify: the dylib's link and an empty sysroot); (c) pin
+  the IR modulo the disambiguators. *Recommended: (b) at RE3, (a) until then.*
+- **RES18 The native-std leg's catch.** `__rust_try` called as a native `cx_rust_try` (as built) makes catch_unwind work before
+  RE3; drops of unwound lowered frames do not run (class `native-unwind`). Options: (a) **keep it until RE3 and drop it with the
+  layer**; (b) no substitution (every caught panic a difference). *Recommended: (a).*
+- **RES19 Debug records.** Options: (a) **the lowered side adds `-C debuginfo=0` after a test's `-g` (as built)**; (b) repr/llvm
+  reads `#dbg_` records. *Recommended: (a)*: debuginfo changes only backtraces, which RES8 turns off.
+- **RES20 The night's whole run and its record.** Options: (a) **`make rsi-lower-check-all` by night at 8 jobs (about 40
+  minutes, light: about 1.5 GiB a lowering), recorded into `test/rust/lower-results.edn`**, then the classes completed by day;
+  (b) the slices only until RE3. *Recommended: (a).*
+- **RES21 A negative control** (GTS81 (a)) for `lower-check`: a sample's lowered run judged against another's original must
+  differ. *Recommended: at RE5, with the judge's recorded runs.*
+- **RES22 The sets' search.** The thread, process and net sets are a text search (over-approximate). Options: (a) **keep it
+  as the list's first cut and judge the classes by the runs on ci (RE4)**; (b) sets by the IR's calls (`pthread_create`,
+  `posix_spawn`, `socket` reached from `main`). *Recommended: (a).*
+- **RES16's rename** (`arbace.cpp.lower` → `arbace.llvm.lower`, decided (b)) is not done: C++'s CX8 is touching the namespace
+  on `cpp-cx8`; the rename is one mechanical commit after CX8 merges, the Rust delta's four commits rebase over either side.
+
+### RE2.5 Night runs
+
+- `make rsi-lower-check-all` (`bin/rsi list -o .tmp/rsi/all.tsv && bin/rsi lower-check .tmp/rsi/all.tsv .tmp/rsi/all --record`;
+  `RSI_JOBS=8` by night): the 3,718 programs, recorded into `test/rust/lower-results.edn`; every unclassified program a class
+  or a fix the next day.
+- `bin/rsi std-build` in the main checkout once merged (the pin's place).
+
+## As built: RE3 (write-ahead, 2026-11-03)
+
+Branch `rust-re3` from `rust-re1` (`3802394e`), by an agent on the main host beside C++'s CX8 and the Rust trial's RE2 (light tier: 4 jobs
+for the checks, 8 for std's build and lowering, no heavy lock; stage 0 `/root/arbace/target/seed/amd64/arbace`, the namespaces evaluated
+from the worktree). Spec: doc/rust/EVAL.md §3, §8. Written ahead of the night's whole run (RE3.4): the counts below are the day's.
+
+### RE3.1 What was built
+
+| piece | file | what |
+|---|---|---|
+| std's build (RES17 (b)) | `bin/rsi std-build`, `test/rust/runtime/std.edn`, `ir.sha256` | `library/`'s own workspace built as bootstrap does (package `sysroot`, features `panic-unwind backtrace`, `-Zforce-unstable-if-unmarked`, the manifest's per-package profile overridden by `--config`: compiler_builtins 16 codegen units, the backtrace crates at `-O0`); 110 units, 51 MB, 45 s of Cargo |
+| std lowered | `bin/rsi runtime-build` (`make rsi-runtime-build`) | 94 units (compiler_builtins' 16 native), round trip, pre-pass, lowering, gcc, one archive a crate, `rt.o`, a key as cppi's |
+| the pre-pass | `arbace/rust/lower.ae` (`runtime-forms`, `lower-list --runtime`) | cpuid and xgetbv answered (RES8 (a)); u128's `carrying_mul_add` (i256) replaced by the layer's; other unlowerable defines (f16) stubbed |
+| the layer (RES4) | `arbace/rust/rt/eh.c.ae` | the unwinder's entry points on the pending flag, `cx$catches` for `catch ptr null`, the unwinder's queries as no frame, `cx$uncaught` as std's "failed to initiate panic", C++'s trampolines, `rsi_cpuid`, `rsi_xgetbv`, `rsi_u128_carrying_mul_add`, `rsi_not_lowered` |
+| the link | `bin/lib/rsi/link` (`RSI_RUNTIME`, `RSI_SYSROOT`) | each sysroot rlib replaced in place by its crate's lowered archive, no `-lgcc_s`: the program links musl alone |
+| the check | `bin/rsi lower-check --leg lowered\|native` (default lowered), `arbace/rust/check.ae` (`--leg`, classes' `:legs`) | both sides against std's build; RE2's leg kept as `--leg native` |
+| samples | `test/rust/eval/std.rs`, `unwind.rs` | formatting, collections, strings, `env::args`, `dyn`, i128 and floats; drops while unwinding, nested catches, `resume_unwind`, a panic leaving main (status 101) |
+| classes, records | `test/rust/divergences-lower.edn` (`not-lowered`, `backtrace`; `native-unwind` `:legs [:native]`), `test/rust/lower-std-results.edn` (196 programs) | RES13 (a) |
+
+The lowering (`arbace/cpp/lower.ae`) is unchanged by RE3: nothing of C++'s namespace moved, so no commit there to rebase over CX8.
+
+### RE3.2 Results
+
+- **Determinism (RES17 (b))**: std built in three places (two scratch directories of different depth and `.tmp/rsi/std`, in a worktree,
+  so neither the main checkout's place) gave the same 110 digests; the pin no longer depends on an absolute path.
+- **runtime-build**: 94 of 94 units read, forms equal, objects equal (`clang -c` of the print = of the IR), lowered, compiled by gcc;
+  33 functions stubbed (all `core`'s f16); about 2 minutes at 8 jobs (lowering 103 s, gcc 12 s).
+- **The exit's programs** (rsi's five samples, gcc `-O0` the judge): `hello`, `HashMap`/`BTreeMap`/`HashSet`, `fmt` (widths, `{:#?}`,
+  floats, i128 and u128), `catch_unwind` (payloads, nested, `resume_unwind`), drops while unwinding, a panic's message and status 101,
+  `process::exit`, `env::args`: **5 of 5 run as the original**, linked against the lowered std, musl alone native. The first run found u128's
+  `Display` reaching the i256 stub (`carrying_mul_add`), replaced by the layer since.
+- **The native-unwind class emptied**: RE2's 10 `native-unwind` programs, rerun on the lowered leg: **10 of 10 pass** (drops of unwound
+  frames, catches inlined by `-O` builds, `extern "Rust"` unwinding). The sample `unwind.rs` passes on the lowered leg and is
+  `native-unwind` on the native leg.
+- **A slice**: every 20th UI program from the 7th (186, none in RE2's slices): 179 pass, 3 nondeterministic, 4 in a class (`alias` 1,
+  `optimized-ir` 1, `speed` 1, `backtrace` 1: `location-detail-unwrap-multiline.rs` runs with `RUST_BACKTRACE=1` and the original prints
+  the native unwinder's backtrace), none outside one; 395 s of wall at 4 jobs (about 2.1 s a program: the lowering's 1.9 s of CPU and a
+  link against 13 MB of archives).
+
+### RE3.3 Against the exit criteria
+
+"`hello`, `HashMap`, `fmt`, `catch_unwind`, a panic's message and status 101, `process::exit`, `env::args` run as the original": met by
+the samples (5 of 5). "Every UI program as RE2 or classed": on the day's 196 programs (the slice and RE2's native-unwind programs), every
+non-pass in a class; the whole 3,718 is the night's run. "The native-unwind class emptied": 10 of 10 pass. The UI programs are judged by
+gcc `-O0` until RE4's ci leg, as the brief says.
+
+### RE3.4 Night runs (for tonight)
+
+- `make rsi-lower-check-all` (`RSI_JOBS=8`): the 3,718 programs on the lowered leg, recorded into `test/rust/lower-std-results.edn`;
+  at the slice's rate about 2.1 s a program at 4 jobs, so about 70 minutes at 8 (light: about 1.5 GiB a lowering); every unclassified
+  program a class or a fix the next day.
+- `make rsi-lower-check-native-all` if RE2's whole native record (RE2.5) has not run: it is the same 3,718 on the native leg, about 40
+  minutes at 8; with RE3 it only feeds the comparison (RES27).
+- Nothing in the main checkout is needed for the pin any more: `bin/rsi std-build` holds wherever it runs.
+
+### RE3.5 Proposals (RES23-RES27)
+
+- **RES23 One layer for C++ and Rust (RES4 (a)'s split).** Options: (a) **split `arbace/cpp/rt/eh.c.ae` into the unwinder's entry points
+  and C++'s personality part in the same mechanical commit as RES16's rename (`arbace/llvm/rt/`), after C++'s CX8 merges**, Rust's layer
+  then only its own part (`cx$catches` for null, the unwinder's queries, the CPU's answers); (b) keep two layers (about 40 duplicated
+  lines: the entry points and the trampolines); (c) split now (a conflict with CX8's changes to `eh.c.ae`). *Recommended: (a).*
+- **RES24 std's functions the lowering does not take.** As built: stubs that abort with their name (class `not-lowered`, 33 f16
+  functions) and a table of replacements in the layer (u128's `carrying_mul_add`). Options: (a) **as built now; f16 and f128 lowered
+  as gcc's `_Float16` and `_Float128` at RE5 with the programs' class `float16-128`, the stubs then gone**; (b) lower them now (C forms'
+  types, repr/c's printer and ci's later support); (c) the stubs for good. *Recommended: (a).*
+- **RES25 compiler_builtins.** Options: (a) **native until RE4 (as libgcc is for the lowered C++), ci's own builtins there**; (b) lowered
+  with its f16/f128 and `global_asm!` units stubbed. *Recommended: (a)*: the lowered C calls libgcc's builtins anyway.
+- **RES26 The CPU std sees (RES8 (a)).** As built: an x86-64 baseline (SSE2, vendor `ArbaceRsiCPU`). Options: (a) **as built; a program
+  that prints `is_x86_feature_detected!` results differs from the native judge and is classed (`cpu-features`) when the night finds one**;
+  (b) the judge's runs under the same answers (an `LD_PRELOAD`-free way does not exist for cpuid: no); (c) answer the host's real cpuid
+  (the runs then depend on the host). *Recommended: (a).*
+- **RES27 RE2's native leg.** Options: (a) **kept as `--leg native` and `lower-results.edn` until RE4's ci leg, then removed with
+  `native.c.ae` and `try.rs`** (RES18 (a) said drop it with the layer; it costs nothing kept and shows the layer's effect, `unwind.rs`);
+  (b) removed now. *Recommended: (a).*
+
+### RE3.6 Rule slips, scratch
+
+No slip found: every rustc, clang and gcc ran with `TMPDIR` the worktree's `.tmp/tmp`; no `/dev/null`, no process left running.
+`python3` was used for multi-line edits of the sources (no package installed). Scratch: the worktree's `.tmp/re3/` (`a/`,
+`elsewhere/` the determinism builds; `low1/`, `low2/` the first lowerings of std; `h/` hello's link line; `w-samples/`,
+`w-samples-native/`, `w-nu/`, `w-s20/` the checks' work directories), `.tmp/rsi/std/` and `.tmp/rsi/runtime/` (std's build and its
+lowering), `.tmp/repr-rust/` (hard links of `rust-re1`'s fetched apks and UI sources).
+
+## As built: RE4 (write-ahead, 2026-11-03)
+
+Branch `rust-re4` from `rust-re3` (`dfd4bb90`) merged with `ci-prebuilt` (`447b1102`, then its head `544ad8f3`), by an agent on the
+main host (light tier: 4 jobs, 3 builder threads; stage 0 `/root/arbace/target/seed/amd64/arbace`, ci judged from the checkout's sources,
+`ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1`; the worktree's own `.tmp/ci-musl/forms` (copied from `ci-prebuilt`'s, its key
+the same) and `.tmp/ci-runtime/`). Spec: doc/rust/EVAL.md §9. Written ahead of the night's whole run (RE4.5): the counts are the day's.
+
+### RE4.1 What was built
+
+| piece | file | what |
+|---|---|---|
+| the ci leg's build | `bin/lib/rsi/wrap-ir`, `link-ir` | the plan's rustc command line (one codegen unit, `-C save-temps`), its linker keeping the program's IR (`x.ll`) and the allocator shim's (`shim.ll`), linking nothing |
+| the program on ci | `arbace/rust/run.ae` (`arbace.rust.run`) | each unit lowered, read by repr/c, checked by ci; linked by archive rule with the libraries (EVAL.md §9: compiletest's helpers, ci's ports, std, musl, compiler_builtins), each ci's prebuilt runtime; the node program for tools/cirun or cf2g (`nodes-list`, `compile-list`, `nodes`). The machinery is a copy of C++'s `arbace.cpp.run` (cpp-cx8, as `ci-prebuilt-cpp` adapted it): CX8 is not merged here (RES28) |
+| std for ci | `bin/rsi runtime-ci` | runtime-build's 94 lowered units (their C now kept) and the layer read by repr/c into a library (95 units, 70 MB of forms); resumable (a unit read whole is kept by an interrupted read at the same key); compiler_builtins lowered for ci with the runtime's pre-pass (15 of 16 units; `cgu.09`, `global_asm!`'s probestack, is not read by repr/llvm and left out), linked after musl (RES25 (b) on ci); ci's ports keyed apart |
+| ci's ports | `test/rust/runtime/ci/builtins.c` | `__builtin_ldexpl` (fptoi.sat's bounds), `__builtin_powi`/`powif` (compiler_builtins' `__powidf2` algorithm), `__builtin_fmod`/`fmodf`, `__cxa_thread_atexit_impl` (registers nothing: on musl the native weak reference is null and the main thread's TLS destructors never run either); `prog-opts` declares powi for the programs |
+| the judge (RES5 (a)) | `bin/rsi record-ref` (`bin/lib/rsi/record-ref`), `test/rust/ref-rustc-1.99.1.edn` | rustc -O0 against std's build, run three times as run-program runs it, normalized; status, the outputs' SHA-256, `:det` |
+| the check | `bin/rsi check [--aot]` (`bin/lib/rsi/check`), `bin/rsi run`, `bin/rsi divergences [--aot]`; `arbace.rust.check` `run-judge`, `write-ref`, `divergences` | the corpora samples and ui; `--only`, `--sample`/`--offset`, `--set`; per-program times; the record `test/rust/check{,-aot}-linux-amd64.edn` and times; `test/rust/check-known.edn`; a failing program's exec-env noted |
+| classes, control | `test/rust/divergences.edn` (process, threads, speed, not-lowered, env, ci-param-width, c-variadic, lto), `divergences-aot.edn` (none yet), `controls.edn`, `check-budget.edn` | RES13 (a), GTS81 (a) |
+| the lowering (review 190) | `arbace/cpp/lower.ae`, two commits; `bin/rsi lower-unit` (each `test/rust/lower/*.ll` run by lli 23.1.4 and lowered, gcc -O0, the outputs equal) | a bit-packed vector (`<N x i1>`) in memory as LLVM lays it out (its N·k bits' bytes; loads and stores through the bits; inside an aggregate refused; L4's float bitcast refused, not thrown); a bitcast from a byte-element vector through a temporary (gcc refused the compound literal) |
+| Makefile | `rsi-runtime-ci`, `rsi-record-ref`, `rsi-check`, `rsi-check-aot`, `rsi-check-all`, `rsi-divergences` | |
+
+### RE4.2 Results
+
+- **The lowering's fixes** (review 190): `packed-vector-memory.ll` as lli (`a5`, `24`, `2`, `15`, `101`; the base lowering gave
+  `100010000010001`, `10`, `4`), `bitcast-byte-vector.ll` as lli (the base's C: 4 gcc errors). C++'s 16 samples (`test/cpp/samples`,
+  `test/cpp/runtime/samples`, `clang++ -std=c++23 -O0` on this host) lower to the same C byte for byte with `rust-re3`'s lowering and this
+  branch's (941 B to 1.69 MB).
+- **hello on ci**: `hello, 42`, 36 s end to end warm (a process's start on the evaluated sources included; ci's build 16.6 s), 550 s cold
+  (the first link makes the fragments of the 367 units it pulls: std's, core's, musl's).
+- **The samples** (rsi's five, `test/rust/eval/`): **5 of 5 pass on ci** (`intrinsics`, `panics`, `std`, `unwind`, `vectors`: i128,
+  saturating and funnel ops, HashMap's SSE2 group, `core::simd`, catch_unwind, drops while unwinding, status 101), recorded in
+  `test/rust/check-linux-amd64.edn`; the control differs as it must. Builds 36 to 290 s a program (std.rs's monomorphized collections:
+  33 s lowering, 290 s ci's build).
+- **A UI sample** (every 40th of the 3,718, 93 programs, the judge's runs recorded): first run 85 pass, 1 threads, 7 unclassified; after
+  the ports and classes those 7 rerun (`--only`): 2 pass, and **the 93: 87 pass, 6 in a class, none outside one** (process 1:
+  `posix_spawn`; threads 1: `stringify.rs`'s harness thread; env 1: ci's empty environment; ci-param-width 1: `rust_int8_to_int32(-1)`
+  gives 255; c-variadic 1; lto 1: thin LTO's 64 units). Not recorded (a subset, C's rule). Times: ci's build about 12.7 s a program warm
+  (87 of 93 under 100 s; three at 943 s were the cold fragments after merging ci-prebuilt's new key), lowering 1.4 s, IR 0.25 s, run 1.2 s.
+- **AOT**: `panics.rs` compiled by cf2g, built by TamaGo's go and run: **passes, as interpreted** (ci's build and cf2g's translation
+  1,088 s on the evaluated host, go build 116 s, run 0.1 s against ci's 1.1 s). The five samples in one process (shards of 4) were stopped
+  after an hour without a program translated (a 7 GiB process, std.rs's node program the largest): cf2g's translation of a node program
+  that holds the linked std is the AOT level's cost, as C++'s CX8 found (CS273's next step: a unit's functions translated once). Not
+  recorded (one program).
+- **The judge's runs**: 98 programs (the samples and the 93) in 18 s at 4 jobs; no nondeterministic and no unbuilt program among them.
+
+### RE4.3 Costs and what they mean for GT8
+
+- std's read for ci is the long pole: about 100 minutes of wall (340 min CPU) on stage 0 evaluated, a 7 GiB process at 4 threads; it is
+  keyed and resumable, so it reruns only when the lowering, repr/c, the host or run.ae's read options move.
+- The first link after a key change makes std's fragments (about 15 minutes); warm, a UI program's ci build is about 13 s.
+- Whole UI suite on ci: about 3,718 × 16 s ≈ 16.5 h of thread time, about 5.5 h at 3 builder threads: a night at most with more
+  threads, far over GT8's share; the nightly needs the coverage subset (GTS205), as C++'s does.
+
+### RE4.4 Against the exit criteria
+
+"The samples and a sample of the UI programs run on ci as the originals, every non-pass classed": the samples 5 of 5; the UI sample 87 of
+93, the 6 others classed. compiler_builtins: lowered for ci (15 of 16 units; RES25's native leg kept for gcc's). "bin/rsi check and check
+--aot with classes, controls, per-program times and --only lists": built; AOT run on one sample (passes), its record for the night (RE4.5).
+
+### RE4.5 Night runs (for tonight; through `/root/arbace/.tmp/heavy`, at most 4 jobs)
+
+- `/root/arbace/.tmp/heavy make rsi-check-all` (`bin/rsi record-ref && bin/rsi check --record`): the judge's runs of all 3,718 (minutes),
+  then every UI program on ci, recorded into `test/rust/check-linux-amd64.edn` and its times; about 5.5 h at 3 threads (one ci process,
+  about 7 GiB); every unclassified program a class or a fix the next day.
+- `/root/arbace/.tmp/heavy env RSI_THREADS=1 RSI_SHARD=1 bin/rsi check --aot --corpus samples --record`: the AOT level's record of the five
+  samples (about 20 minutes to 1.5 hours a program on the evaluated host). The UI programs' AOT waits for cf2g's per-unit translation (RES34):
+  at about 18 minutes a program, every 40th alone is a night.
+
+### RE4.6 Proposals (RES28-RES34)
+
+- **RES28 One ci leg for C++ and Rust.** `arbace.rust.run` copies `arbace.cpp.run`'s machinery (the options, read-lib, the closure, the
+  constructors, the prebuilt link). Options: (a) **fold both into one namespace of the LLVM path (`arbace.llvm.run`) in RES16's rename
+  commit after CX8 merges**, each language its libraries and units; (b) keep two copies. *Recommended: (a).*
+- **RES29 ci's environment.** ci's `RunMain` gives an empty envp by design; compiletest's `exec-env` programs differ (class `env`).
+  Options: (a) **the runner's environment as envp (tools/cirun and cf2g's main, behind a flag C's records keep off)**, C's crop to decide;
+  (b) the class for good. *Recommended: (a).*
+- **RES30 prog-opts.** The powi declarations are programs' options apart from std's read (std's units use none) to avoid a 100-minute
+  reread. Options: (a) **fold them into `opts` at the next read that a lowering change forces anyway**; (b) keep them apart.
+  *Recommended: (a).*
+- **RES31 ci's gaps found (to C's crop).** A callee does not narrow a parameter to its type (`ci-param-width`: bin/ci run of a cast call
+  gives 255 where gcc gives -1); a weak undefined function is called, not null (the port of `__cxa_thread_atexit_impl` works around it).
+  Options: (a) **report both to C's crop as gaps, the class and the port removed once fixed**; (b) lower Rust's narrow parameters with
+  explicit conversions. *Recommended: (a).*
+- **RES32 std's ci library's cost.** Options: (a) **share `.tmp/rsi/runtime/ci` and the fragments across worktrees by key (CS272 (b)'s
+  shape) and read std on the compiled ci after the re-seed that embeds it**; (b) per checkout, evaluated, as built. *Recommended: (a).*
+- **RES34 AOT's translation.** cf2g translates each program's whole node program, the linked std included (about 1,000 s for `panics.rs`).
+  Options: (a) **std's fragments translated once per key into a Go package the programs' packages call (CS273's next step, shared with
+  C++)**; (b) as built. *Recommended: (a)*, before the UI programs' AOT.
+- **RES33 The nightly's Rust eval.** Options: (a) **the samples and a coverage subset (GTS205) of the UI programs, the rest rotated
+  (GTS203), the whole only in a clean run**; (b) the whole nightly (about 5.5 h: no). *Recommended: (a).*
+
+### RE4.7 Rule slips, scratch
+
+Two slips: one check ran with `--only <(echo ...)` (a process substitution) and one rustc's stderr went to `/dev/fd/2`, both against the
+conventions and harmless; redone with files. The first runtime-ci read (about 97 minutes) was terminated from outside during the host's
+memory pressure; read-lib now resumes an interrupted read. The day's AOT run was stopped and restarted under `.tmp/heavy` at the
+coordinator's resource note. Scratch in the worktree's `.tmp/`: `rsi/` (std's build, the lowered runtime with `ci/`), `ci-runtime/`,
+`ci-musl/`, `rsi-check/`, `rsi-check-f/`, `rsi-aot/`, `rsi-ref/`, `t1/`, `t2/`, `cb/`, `cppsame/` (the C++ comparison), `base-unit/`.
+
+## As built: RE5 (write-ahead, 2026-11-05)
+
+Branch `rust-re5` from `rust-re4` (`5ea3caa2`), by an agent on the main host during the day's keyed `--full` (light tier: no gate, no
+build, no heavy lock; stage 0 `/root/arbace/target/seed/amd64/arbace`, checkout sources evaluated with `ARBACE_PATH_FIRST=1
+ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1`; processes under 2 GiB). **What the day could not do**: no program ran on ci. The UI suite's source
+(`bin/repr-rust corpus fetch rustc-1.99.1-ui`) and `rust-src` are not on the host and the day had no network; std's lowered ci library
+(`bin/rsi runtime-ci`: about 100 minutes, a 7 GiB process) is far over the day's limits; and `bin/rsi lower-check` stopped itself at the
+light tier's disk rule (the disk at 83%, `RSI_DISK_MAX` 80). So RE5's exit criterion (the check over the UI programs and the synthetic
+corpus, none failing, every non-pass in a class) is **not met**; its machinery and the corpus are built, proved without ci, and the
+night's commands written (RE5.4).
+
+### RE5.1 What was built
+
+| piece | file | what |
+|---|---|---|
+| the verbs | `bin/rsi run`, `check`, `divergences`, `record-ref` were RE4's (§RE4.1); RE5 adds `synthetic [generate\|check\|ref]`, `judge-test`, `check --essential`, and the corpus `synthetic` in `list`, `record-ref`, `check`, `lower-check` (programs of the checkout need no UI source tree) | the records' format is RE4's: `test/rust/ref-rustc-1.99.1.edn`, `test/rust/check{,-aot}-linux-amd64.edn`, `check{,-aot}-times-linux-amd64.edn`, classes `divergences{,-aot}.edn`, `check-known.edn`, `check-budget.edn` |
+| the synthetic corpus (GT8.6, GTS207 (a)) | `arbace/rust/synthetic.ae`, `test/rust/synthetic.edn` (67 rows), `test/rust/synthetic-templates/` (23 templates), `test/rust/synthetic/` (the generated programs, committed) | EVAL.md §6; every program compiles with rustc 1.99.1 at `-O0` under the plan's flags, runs deterministically (two runs equal but the thread id the judge's normalization removes), and gives the status of its row |
+| the judge's runs | `test/rust/ref-rustc-1.99.1.edn` | the 67 and the 5 samples recorded (165 maps with the UI sample's 93); the 5 samples' digests came out as before |
+| the controls (GTS81 (a)) | `test/rust/controls.edn` | three more: i32 against i64's run, two panics' stderr, the trap's status against the abort's |
+| the judge's test | `bin/rsi judge-test`, `arbace.rust.check/make-fake` | without ci: the samples and the synthetic corpus as built and run with the judge's own results (72 of 72 pass, the 4 controls differ), then `fmt.rs`'s output changed (it fails, `differ stdout`); 34 s on stage 0 |
+| the essential list | `test/rust/essential.txt`, `check --essential` | 13 programs, one per class of what the lowering and ci do; the coverage subset proper (GTS205) is chosen from the first whole run's records (RES38) |
+| Makefile | `rsi-synthetic`, `rsi-synthetic-check`, `rsi-judge-test`, `rsi-check-essential` | |
+| doc | EVAL.md §2 (verbs), §6 (the corpus), §9 (the signals) | |
+
+### RE5.2 Results
+
+- **SIGILL (RE4's open mapping)**: none needed. rustc's trap is a `ud2` and status 132 (`128 + signal`); the lowering's `__builtin_trap`
+  is 132 on gcc and on ci (`Fault{SIGILL}` reported as 128 + 4); `abort` is 134 on both. Checked: `bin/ci run` of a C program: 132 for
+  the trap, 134 for `abort()`; rustc: `std::process::abort` 134, `core::intrinsics::abort` 132. The Rust cases on ci (`trap.rs`, `abort.rs`)
+  are in the essential list.
+- **The corpus against rustc**: `bin/rsi synthetic ref`: 67 programs, 0 against the judge, 0 nondeterministic (statuses: 0 in 29, 101 in
+  34, 1, 37, 132, 134). `bin/rsi synthetic check`: 67 programs, 0 stale.
+- **Judge**: `bin/rsi judge-test` passes (above).
+- The synthetic programs were first drafted with 7 rustc errors (macro syntax, borrows in one `println!`), fixed in the templates; one
+  drafted program (a panic in a drop while unwinding) was left out: std prints a backtrace with addresses on that abort, which no
+  normalization of run-program's covers (RES39).
+- The judge's runs of the day were recorded against the older std build the host had (`/root/arbace/.tmp/rsi/std`, 103 units, from the
+  RE3 day's first profile), not the pin's 110 units (`test/rust/runtime/ir.sha256`; `rust-src` was not at hand to build it): the 5
+  samples' digests are the same as recorded at RE4 against the pin's, and the night's `record-ref` records everything again.
+
+### RE5.3 What is left of RE5 and after
+
+- RE5: the whole check on ci (RE5.4): the UI programs and the synthetic corpus, classes and fixes for what comes out; the costs against
+  §10.2 (RE4.3 measured the UI sample: ci's build about 13 s a program warm); the coverage subset chosen from the records (RES38).
+- RE6 (AOT): not started. RE4 measured cf2g's translation of a node program with the linked std at about 1,000 s (`panics.rs`); RES34 (a),
+  std's fragments translated once per key into a Go package the programs call, precedes any UI program's AOT, and the synthetic
+  corpus's AOT with it (the essential list is the first AOT subset). RE7 (the REPL) and RE8 (auxiliaries) wait on RE5-RE6.
+
+### RE5.4 Night commands (through `/root/arbace/.tmp/heavy`, at most 4 jobs; the checkout's `.tmp/` with the UI source and std)
+
+1. `bin/repr-rust corpus fetch rustc-1.99.1-ui` (network), `bin/rsi std-build` (the pin's std), `bin/rsi runtime-build`, then
+   `/root/arbace/.tmp/heavy bin/rsi runtime-ci` (about 100 minutes; keyed, resumable).
+2. `bin/rsi synthetic check && bin/rsi judge-test` (seconds): the corpus and the judge.
+3. `/root/arbace/.tmp/heavy bin/rsi record-ref` (every UI program, the samples and the synthetic corpus, three runs each: minutes), then
+   `bin/rsi synthetic ref`.
+4. `/root/arbace/.tmp/heavy bin/rsi check --essential` first (13 programs, about 4 to 10 minutes warm): any non-pass is a class or a
+   fix before the rest; then `/root/arbace/.tmp/heavy bin/rsi check --corpus samples,synthetic --record` (72 programs, about 20
+   minutes warm), then `/root/arbace/.tmp/heavy bin/rsi check --corpus ui --record` (about 5.5 h at 3 threads: RE4.5's), then
+   `bin/rsi divergences`.
+5. AOT, after RES34: `bin/rsi check --aot --essential`, then the samples and the synthetic corpus in shards.
+
+### RE5.5 Proposals (RES35-RES39)
+
+- **RES35 The synthetic corpus's shape.** Options: (a) **as built: a table and templates, 67 programs, committed generated files (the
+  files read as the programs; `check` keeps them honest)**; (b) the generator writes files at each run, nothing committed (the corpus
+  is then no program of the record, the ids move); (c) grow it to the few hundred of EVAL.md §6 by more tables (floats at more values,
+  `fmt` specs, integer ops by pair) once the 67 run on ci. *Recommended: (a), then (c) in the order the classes show where ci or the
+  lowering fail.*
+- **RES36 The Rust crop's namespaces and the gate's key.** `arbace/rust/*.ae` (the lowering driver, run.ae, check.ae, synthetic.ae)
+  are not in `arbace/j2g/embed.ae`'s exclusions or `bin/lib/version.bash`'s, unlike `arbace/cpp/` and `arbace/repr/{rust,cpp,llvm}`: at a
+  merge they would be embedded and compiled by c2j into every executable (and a change to them moves `gate_key`). Options: (a)
+  **exclude `arbace/rust/` beside `arbace/cpp/` in both until a re-seed embeds the crop (CX10's plan)**; (b) embed now. *Recommended: (a);
+  not done here (embed.ae and version.bash are the gate's, and main's keyed run is in flight).*
+- **RES37 The judge's std.** The reference runs are recorded against std's build at the pin; a host without the pin's build (the day's)
+  records against any build and says so. Options: (a) **as built: the night's `record-ref` records against the pin and rewrites every
+  map**; (b) `record-ref` refuses a std not at the pin (as `std_current` does when it may build one) with a flag to override, the record
+  marking the maps. *Recommended: (a); the digests agree today.*
+- **RES38 The coverage subset.** GTS205's rule (every block of the lowering, of ci and of cf2g reached, every class, the controls, every
+  deferred program) needs per-program coverage data this check does not yet write. Options: (a) **the first whole run writes each
+  program's features (the intrinsics of `x/intrinsics.txt`, the lowering's constructs, the classes) beside its times, and a greedy
+  cover over them makes `test/rust/subset.txt`, as C's rule did (229 of 3,582)**; (b) `essential.txt` plus every 40th UI program, rotated
+  (GTS203). *Recommended: (a) after the first run; (b) meanwhile.*
+- **RES39 Output with addresses.** A run that prints a backtrace (std's abort after a double panic) has addresses neither side can
+  match. Options: (a) **leave such programs out of the corpus (as built) and class a UI program that prints one**; (b) normalize
+  `0x[0-9a-f]+` frames in `plan_norm` for both sides (run-program's too: RR5's). *Recommended: (a).*
+
+## Decided (2026-11-05, the user)
+
+RES35-RES39, each as recommended: the synthetic corpus as a table and templates with the generated files committed; arbace/rust/ out of embed.ae and the keys (built on gt9-build's keys commit); a judge recorded against a non-pin std allowed, re-recorded at night; the coverage subset by greedy cover after the first whole run; programs printing backtrace addresses left out.
+
+## As built: RES34 (write-ahead, 2026-11-05)
+
+Branch `rust-res34` from `rust-re5` (`e573fd86`), by an agent on the main host on the day of a keyed `--full` (light tier: no gate, no
+build of Arbace, no heavy lock, every process under 2 GiB: `GOMEMLIMIT=1800MiB`, one or two threads; stage 0
+`/root/arbace/target/seed/amd64/arbace`, the checkout's sources evaluated with `ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1`).
+RES34 (a), the prerequisite of RE6: a library's lowered units translated by cf2g **once per key** into Go packages that every program's
+AOT build links, so that a program's translation and Go build cover its own code alone. Written ahead of the night's whole-std run
+(RES34.6): the day proved it on core (std's `core`, 16 codegen units) and on musl, with C and `no_std` Rust programs.
+
+### RES34.1 The design
+
+**What is translated: a library unit, one Go package each.** The unit is what ci's prebuilt runtime already caches (a musl source, one
+of std's codegen units, a lowered C++ runtime unit: arbace.c.runtime's fragment, PB.1): a unit's fragment is plain data whose items are
+node commands with placeholders (`?fL` a function, `?sL` a static) that the link replaces by the program's numbers. cf2g translates
+each item that is a code command (or an object's initializer) **with its placeholders left symbolic**, read at run time through two
+relocation tables of the unit's package (`R`, the functions' ids; `S`, the statics' indices), so the Go text depends on the unit alone.
+Rejected granularities: per crate (one package of std's 51 MB of IR: one Go compile of everything, no parallelism, any change
+translates the crate again) and per function (a package or a file per function: tens of thousands of Go packages for std, the
+import graph and the link's table per function; the fragment, the cache's unit, is per codegen unit anyway). rustc's codegen units are
+fixed by std's pin and profile (RES17 (b): 110 units at the pin), so a unit is also a stable cache entry.
+
+**The link interface.** The program's link is unchanged: `arbace.c.build/link-text` still makes the node program from the program's
+fragments and the libraries' (its text byte for byte as before: `CI_LINK_CHECK`'s comparison holds), and with `*link-trace*` bound it
+also says which of its lines are a library item replayed (`{LINE [FRAG :f|:o J]}`) and each fragment's placeholders' numbers
+(`:fmaps`, `:smaps`; nil where the link resolved none: a pruned function). `arbace.c.aotlib/program-pre` turns that into cf2g's
+`translate` argument `pre`: such a code command becomes `l.SetCompiled(ID, unitpkg.CJ)` instead of a translated function, such an init
+`unitpkg.IJ` among the program's inits, and once the program is loaded each unit's tables are bound (`unitpkg.Bind(p, R, S)`: two
+`[]int64` literals, -1 for an unresolved placeholder). The data (statics, the functions' table, natives, strings, aliases) stays node
+program text the Loader reads, as on the interpreted path, so memory is laid out as before. Calls: the program's code calls a unit's
+function directly; a unit's code calls through the program's function table (`P.Call(t, F[R[L]], args)`: the link chooses the
+definition, a program's strong definition over a library's weak one, as the C link does), except its own static functions (their
+key is the unit's alone, so the callee is always that item: a direct Go call). An item cf2g refuses stays out of the package (listed in
+the unit's manifest) and is translated with the program, as before.
+
+**Generic instantiations: nothing to do on the library side.** At `-O0` rustc monomorphizes into the program's own codegen unit every
+instance the program needs that the upstream crates did not export; with share-generics (`-O0`'s default) it calls the instances
+upstream already has, by their symbols (§7.1, P1). So an instance is either in std's units (prebuilt, linked by symbol like any
+function) or in the program's IR (translated with the program); the prebuilt library never needs an instance it did not emit. The day's
+`fmt.rs` shows both: 382 functions defined in its own IR (`sort_unstable` for `i64` and for an enum, `Debug` impls, iterator adapters,
+`core::fmt`'s generic glue) and 75 of core's declared, among them generic instances core exported (`NonNull<u128>::from_ref`).
+
+**The key, the cache's place, pruning.** A library's Go key is the units' Go format (`aot-version`), the fragments' key
+(arbace.c.runtime's `runtime-key`: the library's own key, ci's checker and builder as loaded, the target) and the sources the Go is
+made by as this process loaded them (cf2g, aotlib, repr/go's printer). The cache: `.tmp/ci-aot-lib/LIB_KEY16/PKG/{unit.go,manifest.edn}`
+(`CI_AOT_LIB`; `LIB` the fragments' directory's name: `musl`, `rsi_std_LIBKEY12`), each unit written through a temporary name when
+first needed (a program's build makes the units it lacks; `bin/ci aot-lib build`, `arbace.rust.run translate-libs` make all ahead).
+Each use marks its library's directory used; `bin/ci aot-lib prune` keeps per library the newest 3 keys and removes an older one
+unused for a day (CS272 (a)'s rule). A shard's module links the cache as `arbace/cilib` (`bin/lib/ci/check-aot`, `bin/lib/rsi/check`),
+so the import path of a unit is the same in every program and Go's build cache compiles a unit's package once per key too (the same
+file at the same path, `-trimpath`). Go's linker drops a unit's functions no program's table names.
+
+**Where it runs.** `bin/ci check --aot` (cf2g's `compile-list`: `arbace.c.runtime/link-traced`) and `bin/rsi check --aot`
+(`arbace.rust.run/compile-list`: `build-linked-traced`) link the prebuilt units by default; `CI_AOT_LIB_OFF=1` (both) or `RSI_AOT_LIB=0`
+translate the whole node program as before. The gate's C steps run stage 0's embedded ci when the env trio is off (main since
+`d86cb874`): the seed's cf2g predates RES34, so `bin/ci check --aot` takes the prebuilt units after the re-seed that embeds this cf2g
+(or with the trio); nothing breaks before it (the old compile-list never loads aotlib).
+
+### RES34.2 What was built
+
+| piece | file | what |
+|---|---|---|
+| the link's provenance | `arbace/c/build.ae` (`*link-trace*` in `link-text`) | the items' lines and the placeholders' numbers; the text unchanged |
+| a unit translated once | `arbace/c/cf2g.ae` (`translate-unit`, `*reloc*`, `ref-expr`; `translate`'s `pre`) | the unit's code items as `CJ`, its objects' initializers as `IJ`, `R`, `S`, `Bind`; a refused item left to the program; the program's `SetCompiled` of a unit's function, its direct calls into the units |
+| the cache | `arbace/c/aotlib.ae` (`arbace.c.aotlib`: `lib-key`, `unit`, `program-pre`, `translate-lib`, `c-compile`) | above (RES34.1); `c-compile OUT [--whole] PKG FILE...` the day's C driver |
+| the links | `arbace/c/runtime.ae` (`link-traced`), `arbace/rust/run.ae` (`build-linked-traced`, `translate-libs`) | musl's and the Rust libraries' traced links |
+| the AOT paths | `arbace/c/cf2g.ae`'s `compile-list` (`bin/ci check --aot`), `arbace.rust.run/compile-list` (`bin/rsi check --aot`), `bin/lib/ci/check-aot`, `bin/lib/rsi/check` | the prebuilt units by default; the module's `cilib` link |
+| verbs | `bin/ci aot-lib build\|prune`, `bin/rsi aot-lib`; Makefile `ci-aot-lib`, `rsi-aot-lib`; EVAL.md §2 | |
+
+### RES34.3 Results (the day's, light)
+
+The library for Rust: core alone (the RE3 day's std build at `/root/arbace/.tmp/rsi/std`, 103 units, not the pin's 110: `rust-src` is not
+on the host), its 16 codegen units lowered by `arbace.rust.lower lower-list --runtime` (132 s at 2 threads, 5.8 MB of C, none refused,
+nothing stubbed) and read with the layer by `arbace.rust.run read-lib` as runtime-ci reads std (730 s at one thread under 1.8 GiB, 9.4
+MB of forms) into `.tmp/res34/rt/ci/std`: the light stand-in for runtime-ci's 100-minute std. The programs: `#![no_std]` `#![no_main]`
+binaries with `-C panic=abort` against that sysroot, on core's path (`.tmp/res34/rs/`): `fmt.rs` (`core::fmt` with widths, `{:#x}`,
+`{:?}` of slices and a derived enum, `{:#?}`, f64's and f32's `Display` and `{:e}`, u128 and i128, `sort_unstable` of two types,
+iterator adapters, `str`'s chars) and `iter.rs` (ranges, `map`/`filter`/`max_by_key`, `split`, a bounds-check panic through a
+`#[panic_handler]` that formats its message: status 101). C: two programs over musl (`.tmp/res34/c/`: `printf`; `qsort`, `malloc`,
+`strcat`, `getenv`, a loop).
+
+| | translation, whole node program | translation, prebuilt units (warm) | prog.go, whole / prebuilt | units linked |
+|---|---:|---:|---:|---:|
+| C `hello.c` | 12.5 s | 1.9 s | 649 KB / 127 KB | 43 musl |
+| C `sort.c` | 17.4 s | 2.4 s | 834 KB / 165 KB | 64 musl |
+| Rust `fmt.rs` (790 KB of IR, 382 functions of its own) | 140.9 s | 35.8 s | 6.26 MB / 1.91 MB | 17 core + musl |
+| Rust `iter.rs` (312 KB of IR) | 54.5 s | 13.3 s | 2.64 MB / 0.79 MB | 17 core + musl |
+
+- **Once per key**: core's 17 units (with the layer) translated in 261 s of one thread: 2,943 functions, 12.9 MB of Go, none refused;
+  musl's units a C program links, 12 s for 43. Each a manifest beside its `unit.go`.
+- **Go**: the first shard that links core's packages compiles them (30 s for the two Rust programs, all core's units); afterwards a
+  shard's build compiles its programs alone: **3.5 s against 11.2 s** for the same two programs whole (Go's cache by content: the units'
+  files unchanged). Executables: 17.2 MB prebuilt against 18.9 MB whole (Go's linker drops a unit's functions no table names).
+- **Runs**: the prebuilt executables run as the originals: `fmt.rs` status 29 and its standard output byte for byte as rustc's `-O0`
+  build of it (native, against the same sysroot); `iter.rs` status 101, its standard output and the panic's message the same; the
+  C programs as gcc's `-O0` builds (status 0 and 3, outputs equal). The whole translations run the same.
+- **What a program's AOT build now costs**: its own lowering, read and check, the link (reading the library fragments: 73 s for
+  `fmt.rs`, 28 s for `iter.rs`, the first program of a process; RES43), its own translation and its own Go package. Before, RE4
+  measured `panics.rs` (std linked) at about 1,000 s of translation; with std's units prebuilt that part becomes the program's own code
+  (the ratio above, 3.9 to 4.1 for Rust, 6.6 to 7.3 for C, is a floor for std, whose linked units are larger than core's).
+- The link's text with `*link-trace*` bound is the same as without (the replay's order is untouched: the trace records a line after
+  its replay; checked on `sort.c`, 419 KB of node text equal); `CI_LINK_CHECK`'s comparison is not rerun here (no `bin/ci check`: the musl forms of this branch's key would be read
+  again, about 20 minutes; the night's).
+
+### RES34.4 Against the brief
+
+Designed (RES34.1: the key, the cache's place and pruning, the unit as the granularity, the link interface, the instantiations) and
+proved end to end on core's path and on musl with samples, time and size measured (RES34.3). Not done by day: the whole std (runtime-ci,
+100 minutes and 7 GiB), the UI programs' and the synthetic corpus's AOT, the C crop's essential AOT list under the prebuilt units: the
+night's (RES34.5).
+
+### RES34.5 Night commands (through `/root/arbace/.tmp/heavy`, at most 4 jobs; the checkout's `.tmp/` with std's pin build)
+
+1. RE5.4's step 1 (std at the pin, `bin/rsi runtime-build`, `/root/arbace/.tmp/heavy bin/rsi runtime-ci`), then
+   `/root/arbace/.tmp/heavy env ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1 RSI_JOBS=4 bin/rsi aot-lib`: std's, the ports',
+   compiler_builtins' and musl's units translated once (by core's rate about 10 times core's work for std's 51 MB of IR: about 45 minutes
+   of one thread, 12 to 15 at 4; to measure, with the Go's size).
+2. `/root/arbace/.tmp/heavy env ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1 bin/rsi check --aot --essential`, then
+   `... bin/rsi check --aot --corpus samples,synthetic --record` (RE6's first records), and once
+   `RSI_AOT_LIB=0 RSI_CHECK_WORK=.tmp/rsi-aot-whole ... bin/rsi check --aot --corpus samples`: the same results whole and prebuilt.
+3. C: `env ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1 bin/ci aot-lib build`, then `... CI_LINK_CHECK=1 bin/ci check --aot --only
+   test/c/essential-aot.txt` and `CI_AOT_LIB_OFF=1 CI_AOT_WORK=.tmp/ci-aot-whole ... bin/ci check --aot --only test/c/essential-aot.txt`:
+   the two `results.edn` equal, the times compared.
+
+### RES34.6 Proposals (RES40-RES45)
+
+- **RES40 The cache's place.** Options: (a) **shared by the worktrees as the gate's executables are (the main checkout's
+  `.tmp/ci-aot-lib`, `CI_AOT_LIB` set by `bin/lib/tools.bash` when unset), the key making it safe**, together with RES32 (a)'s fragments;
+  (b) per checkout, as built. *Recommended: (a)* once std's units are translated at night (13 MB of Go for core; std about 130 MB).
+- **RES41 Pruning.** Options: (a) **`bin/gate --prune` (`gate_prune`) calls `bin/ci aot-lib prune` as it trims `.tmp/ci-runtime`
+  (CS272 (a))**; (b) by hand only. *Recommended: (a)*; not done here (`gate-run.bash` is the gate's).
+- **RES42 The equality of the two translations as a check.** Options: (a) **the night's comparison (RES34.5) once, then a control in
+  `c-aot-essential` at the re-seed: one program translated whole and prebuilt, the runs equal**; (b) every AOT check twice (doubles its
+  translation); (c) none. *Recommended: (a).*
+- **RES43 The link's remaining cost.** A program's link reads the library units' fragments (73 s for `fmt.rs` in a fresh process;
+  RE4: about 13 s warm for a UI program on std). Options: (a) **measure it in the night's shards (one process per shard keeps the
+  fragments), then decide on a compact fragment format or a per-library link index**; (b) a binary fragment format now. *Recommended:
+  (a).*
+- **RES44 C++ on the same path.** Options: (a) **`arbace.cpp.run` takes `build-linked-traced` in RES28's fold (one LLVM-path run
+  namespace)**, so libstdc++'s lowered runtime is translated once too; (b) C++ apart. *Recommended: (a).*
+- **RES45 When C's gate sees it.** The gate's C steps run the seed's embedded ci (main, `d86cb874`), which predates RES34: the prebuilt
+  musl units serve `bin/ci check --aot` from the re-seed that embeds this cf2g. Options: (a) **with the next re-seed (the C crop's)**;
+  (b) the env trio back on `c-aot-essential` until then. *Recommended: (a).*
+
+### RES34.7 Rule slips, scratch
+
+One slip: a background chain of the day's Rust runs was started with its own output redirected to `/dev/null` (the runs wrote their logs to
+files; harmless, against the conventions). No process left running. Scratch in the worktree's `.tmp/`: `res34/` (`rt/` core lowered and
+read, `rs/` the Rust programs, their IR and native builds, `c/` the C programs, `cout/`, `rout-*/` the translations and their logs,
+`mod/` the Go module, the executables), `ci-aot-lib/` (the prebuilt units), `ci/`, `ci-musl/`, `ci-runtime/` (copied from `rust-re5`'s;
+the musl forms cache is at main's key, not this branch's older repr/c: read in place, `bin/ci musl ensure` bypassed), `gocache/`.
+
+## Decided (2026-11-05, the user: RES40-RES45)
+
+All as recommended: the cache shared across worktrees by key with RES32; bin/gate --prune calls bin/ci aot-lib prune at the runner's next change; whole and prebuilt compared once at night, a control in c-aot-essential at the re-seed; the link's cost measured in the night's shards first; C++ adopts the path in RES28's fold; RES45 (a), prebuilt musl in the gate from the next re-seed.
+
+## As built: RE6 (write-ahead, 2026-11-06)
+
+Branch `rust-re6` from `rust-re5` (`e573fd86`), by an agent on the main host during the day before the night's clean rerun (light tier:
+no gate, no build of Arbace, no heavy lock, every process under about 2 GiB, from 19:00 UTC 1.5 GiB and one check at a time; stage 0
+`/root/arbace/target/seed/amd64/arbace`, the checkout's sources evaluated with `ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1`).
+The brief: RE6, the next eval stages, the UI suite's run-pass programs as the measure, the failing ones triaged by root cause and the
+largest causes fixed. The plan's RE6 (AOT) rests on RES34 (`rust-res34`, designed); this RE6 took the eval's completeness first, as
+the brief asked. The UI suite's source was fetched at the user's go-ahead (`bin/repr-rust corpus fetch rustc-1.99.1-ui`, the
+pinned `rustc-1.99.1-src.tar.xz` by its SHA-256, 26 s); std was built at the pin (`bin/rsi std-build`, 110 units, from the pinned
+`rust-src` apk) and lowered (`runtime-build`, 94 units, 33 stubbed) and read for ci (`runtime-ci`: one thread under the memory line,
+about four hours with restarts, read-lib resuming after each; RES52).
+
+### RE6.1 The triage
+
+Before RE6 the classes of RE4's sample (every 40th of the 3,718, 93 programs: 87 pass) were one program each (process, threads,
+env, ci-param-width, c-variadic, lto). Over the whole suite the causes size so (the corpus's flags and the sets, EVAL.md §6):
+
+| cause | programs (of 3,718) | why they fail on ci | RE6 |
+|---|---:|---|---|
+| threads | 175 in the threads set (157 files), and every one of the 49 `--test` harness programs (libtest spawns a thread per test even with `--test-threads=1`) | `__clone` is assembly: no threads on ci | **built**: threads on ci (EVAL.md §10) |
+| process | 63 in the process set; 51 of their files spawn themselves (`current_exe`, `args[0]`) | ci ran one process | **built**: posix_spawn's child and its exec (EVAL.md §12) |
+| env | 42 with an exec-env | ci's empty environment | **built**: RES29 (a), `--env` (EVAL.md §10) |
+| lto | 24 revisions with `-C lto`/`-Z thinlto` (19 not `lto=no`) | the link gets several units | **built**: the unit before LTO (EVAL.md §11) |
+| c-variadic | about 15 (RE2's ratio) | rustc's x86-64 `va_arg` against ci's `va_list` | RES51 |
+| f16/f128, not-lowered | about 10 to 15 | ci refuses `_Float16`/`_Float128` by design (C's SPEC §14) | RES51 |
+| ci-param-width | the abi tests' `i8`/`i16` helpers | ci does not narrow a parameter (C's gap, RES31) | C's crop |
+
+### RE6.2 What was built
+
+| piece | file | what |
+|---|---|---|
+| threads on ci | `go/arbace/crt/sched.ae` (new), `go/arbace/crt/syscall.ae`, `go/arbace/ci/thread.ae` (new), `ci/{prog,call,aot,load}.ae`, `arbace/c/build.ae` | EVAL.md §10: the scheduler (one baton, round robin, the futex's operations, sleeps, yield, a thread's exit, the program's end from another thread), `__clone` and `__unmapself`, a stack bottom per thread, preemption every 20,000 calls, thread-local objects marked by the builder and swapped |
+| the environment | `go/arbace/ci/prog.ae` (`Prog.Env`), `tools/cirun`, `ci/aot.ae` | RES29 (a): `--env` |
+| child processes | `go/arbace/crt/spawn.ae` (new), `ci/thread.ae`'s `vforkChild`, `crt/syscall.ae` (`execve`, `wait4`, `kill` of a child, `ioctl` FIONBIO/FIOCLEX), `tools/cirun`, `ci/aot.ae` | EVAL.md §12: posix_spawn's child, the program run again by `Sys.Self`; `--signals` (`crt.DieBy`) |
+| LTO | `bin/lib/rsi/link-ir`, `wrap-ir` | EVAL.md §11: the unit before LTO, fat LTO's shim by a second build |
+| ports | `test/rust/runtime/ci/builtins.c` | `__cxa_thread_atexit_impl` on a pthread key (a thread's TLS destructors at its exit); the math builtins ci lacks (`__builtin_logf`, ...) |
+| the check | `bin/lib/rsi/check`, `bin/lib/rsi/run` | `--env --signals`; ci's fault line out of the compared standard error |
+| samples | `test/rust/eval/threads.rs`; `test/rust/ci/{threads,spawn}.c` with gcc's runs | |
+| records | `test/rust/ref-rustc-1.99.1.edn` | the judge's runs against the pin's std of the samples, the synthetic corpus and 345 UI programs (every 40th, the threads set, the `--test` harnesses, the LTO and exec-env programs); three synthetic panics' stderr changed from RE5's (the older std build, RES37) |
+| classes | `test/rust/divergences.edn` | process, threads, env, lto: their whys after RE6 |
+
+### RE6.3 Results (the day's, light; stopped at 16:42 UTC by the main session)
+
+- **C on ci with threads and processes**: `test/rust/ci/threads.c` (four workers, a mutex, a condvar, a `_Thread_local`, a detached
+  and a joined sleeper) and `spawn.c` (spawn of itself, `posix_spawnp` of `echo` through a pipe, a missing program) give gcc's runs.
+  C's essential check (`bin/ci check --only test/c/essential-check.txt`): no regression, and two recorded failures now pass
+  (`benchmarksgame/binary-trees-5.c`, C's one `threads` program; `gcc.dg/c23-complit-2.c`): to re-record by C's crop.
+- **Rust on ci**: a `thread::spawn` and `join` program runs as rustc's (55 s, 1.2 GB). **Samples and synthetic corpus**: 69 of 73
+  run, **69 pass** (two after fixes: `float-f32.rs` met `__builtin_logf` undefined, the math ports; `trap.rs`'s status was
+  rustc's, its stderr ci's fault line, now out of the compared stderr; both rerun and passing); not measured, over the day's
+  memory line in one process: `threads.rs` (2.4 GB), `collections.rs`, `drops.rs`, `errors.rs` (a batch of three past 2.3 GB).
+- **UI sample (RE4's every 40th, 93 programs)**: 92 run (one a process, under 1.5 GiB from 16:55), **90 pass**: `c-variadic/valid.rs`
+  refused (class c-variadic), `abi/abi-sysv64-arg-passing.rs` (ci-param-width, C's gap, RES31); not run by day: `threads-sendsync/
+  task-comm-16.rs` (over 1.5 GiB in one process: the night). RE4 had 87 of 93: its threads (`macros/stringify.rs`, a `--test`
+  harness: fixed after a first deadlock by thread-local objects at each thread's own addresses, EVAL.md §10), process
+  (`abi/segfault-no-out-of-stack.rs`: its child runs now, `ioctl` FIONBIO, `--signals`, `--quiet-faults`), env and lto failures
+  pass. **Before RE6 87 of 93 (93.5%), after 90 of 92 run (97.8%; 90 of 93 at worst).**
+- **The `--test` harnesses and the LTO programs** (the first 68 of `.tmp/re6/focus.ids`, one program a process, 18:00-19:45 UTC):
+  69 run, **66 of 68 judged pass**: all 48 harness programs (libtest's thread per test) and 18 of 20 LTO ones, one over 1.5 GiB
+  (`threads-sendsync/mpsc_stress.rs`: the night); not passing: `lto/thin-lto-inlines.rs` (`-Z thinlto -C codegen-units=8 -O`: a
+  SIGSEGV at a function's address in main, to look at: what its pre-LTO unit calls that thin LTO would have imported) and
+  `test-attrs/test-should-panic-failed-show-span.rs` (stdout differs; compiletest normalizes its `TypeId(0x...)`, which
+  run-program does not: the TypeId hash of rsi's build is not the judge's, a candidate for RES39's normalization). Before
+  RE6 every harness program and every LTO one failed on ci.
+- **The gcc leg** (`bin/rsi lower-check`, std lowered, over the 345 UI programs of the check list, 85 minutes at 2 jobs): 305 pass,
+  13 nondet, 25 in classes (backtrace 7, speed 8: fat LTO's merged module, lto 6, optimized-ir 2, c-variadic 1, inline-asm 1), 2
+  unclassed (`abi/stack-probes.rs#x64`: a stack overflow on purpose; `backtrace/backtrace.rs`). All the threads set's programs pass
+  there (the native threads): the lowering is not what fails them on ci.
+- **Estimate for the UI suite's run programs on ci, after RE6** (to confirm at night): RE4's 93.5% plus what the threads (up to 224
+  programs: the set and the harnesses), process (up to 63), env (42) and LTO (19) programs gain, bounded by the gcc leg's 92% to 95%
+  (305 + 13 nondet of 345 on a list weighted toward those sets): about 90% to 94% of 3,718, against an estimated 88% to 91% before
+  (the sets failing whole on ci).
+
+### RE6.4 Night commands (after the clean rerun; the checkout's `.tmp/` with the UI source, std at the pin and its ci library)
+
+1. `bin/rsi check --corpus samples,synthetic --record` (73 programs; RSI_THREADS 3, the night's memory), then
+   `bin/rsi check --corpus ui --only .tmp/re6/uicheck.ids` (345: the sample and the sets), then the whole
+   `bin/rsi check --corpus ui --record` (about 5.5 h at 3 threads, RE4.5's), `bin/rsi divergences`.
+2. `bin/ci check --record` for C's two improvements (C's crop).
+
+### RE6.5 Proposed (RES46-RES53)
+
+- **RES46 Threads on ci: the design and who owns it.** RE6's threads live in C's back end (`go/arbace/crt/sched.ae`,
+  `go/arbace/ci/thread.ae`, changes to `crt/syscall.ae`, `ci/{prog,call,aot,load}.ae`, `tools/cirun`) and in C's builder
+  (`arbace/c/build.ae`: the thread-local mark), all C's crop's, embedded since C9: a merge moves `gate_key` (two Go-hosted builds)
+  and C's records (`benchmarksgame/binary-trees-5.c`, C's one `threads` program, passes: its record re-recorded). Options:
+  (a) **as built: one runner at a time with the baton (deterministic, musl's and the lowering's plain atomics stay atomic, no
+  change to `Mem`), reviewed by C's crop and merged with the next batch that moves `gate_key` anyway**, C's SPEC §6.5 and
+  C23-SURVEY §6.5 saying it is built; (b) parallel goroutines (threads truly concurrent): every atomic as Go's `sync/atomic` on
+  `Mem`'s bytes, `Mem`'s slabs and the `Sys` tables locked, a run no longer deterministic (the judge's `:det` classes
+  more programs nondet), weeks; (c) keep threads on Rust's branch only (a fork of ci). *Recommended: (a)*; (b) only if a
+  program needs real parallelism (none of the corpora's do: they are judged on their output).
+- **RES47 Thread-local storage in the compiled programs.** Since the stringify.rs fix the interpreter gives each thread its own
+  block (EVAL.md §10); cf2g's code reads statics from its table. Options: (a) **cf2g emits a thread-local object's address as the
+  interpreter's node does (the thread's block, else the static), with RE6's AOT**; (b) threads refused in AOT. *Recommended: (a)*.
+- **RES48 LTO on the ci leg.** As built (EVAL.md §11) the program's unit before LTO is lowered, the flags kept for the judge
+  (RES2 (c)); a fat-LTO program's shim from a second build without LTO. Options: (a) **as built**; (b) the class `lto` for
+  good. *Recommended: (a)*: LTO changes no behaviour a run-pass test observes (the known-bug tests aside, their own class).
+- **RES49 Processes on ci.** `process` is the next class by size (the set: 63 programs; most spawn their own executable
+  with an argument and judge the child's status and output). Options: (a) **`posix_spawn` (and `fork` followed by
+  `execve` of the program's own path) as a native that runs the child as a new ci process (cirun of the same node program,
+  `--env`, its argv), the file actions on real descriptors (ci's pipes are the host's), `wait4` on it**, with `current_exe`
+  answering a path cirun maps back; C's crop's code as RES46; (b) the class for good. *Recommended: (a)*, after RES46.
+- **RES50 musl's index written from a partial read (a C crop bug found here).** `bin/ci musl ensure` writes
+  `.tmp/ci-musl/forms/index.edn` from the forms present; a second `bin/ci` started while the first reads musl wrote an index
+  of 740 of 1,331 units, kept for good (`index` keeps an existing file): `pthread_create` was then undefined. Options: (a)
+  **the read and the index under one lock (`flock` on the forms directory) and the index written only by the read that
+  finished, keyed with it**; (b) as is, the index deleted by hand. *Recommended: (a)*, to C's crop.
+- **RES51 The next causes.** After RES46-RES49, the UI sample's classes left are each about 1%: (a) **the f16/f128 lowering
+  next, as LLVM legalizes them on x86-64 (`half` as `i16` bits with `__extendhfsf2`/`__truncsfhf2` around float
+  arithmetic, `fp128` as 16 bytes with compiler_builtins' `__addtf3`, `__multf3`, `__eqtf2`, ... the libcalls of LLVM's
+  `RuntimeLibcalls.def`), which also ends std's 33 stubbed f16 functions and compiler_builtins' left units; then
+  c-variadic (rustc's x86-64 `va_arg` expansion reads SysV's `__va_list_tag`, ci's `va_list` is a pointer: the lowering
+  to map `VaList` onto ci's)**; (b) c-variadic first. *Recommended: (a)*: it removes a stub mechanism and a class.
+- **RES52 read-lib's memory.** `arbace.rust.run read-lib` at one thread grew past 2.4 GB over std's units (the same unit read in a
+  fresh process peaked at 1.3 GB): what a unit's read leaves is kept. Options: (a) **read-lib reads each unit in a fresh
+  process (or frees the unit's state; to profile), so `runtime-ci` fits the light tier at 2 or 3 jobs**; (b) the night only.
+  *Recommended: (a)*.
+- **RES53 The check's builder.** `bin/rsi check`'s one `nodes-list` process per corpus grows with the programs it links (six
+  synthetic programs passed 2.3 GB; RE4 saw 7 GiB at three threads), so by day the check ran in batches of three, each a fresh
+  process (`.tmp/re6/batch.sh`). Options: (a) **`bin/rsi check` itself batches (`RSI_BATCH`, a process per N programs) in the
+  light tier, the night's runs one process as now**; (b) find what the builder keeps (the library fragments as loaded: the
+  link's cache, RES43) and bound it. *Recommended: (a) now, (b) with RES43*.
+
+## Decided (the user, 2026-11-07)
+
+Relayed by the main session (doc/CROPS-SCORE.md on `mac/batch1`, "Decided (the user, 2026-11-07)"): a test's own verdict counts as
+a judge no toolchain made (exit status; rustc's UI tests' `//~ ERROR` annotations and run-pass/check-pass headers; expected output
+shipped with the test; the round trip's reread forms equal); a mixed stage is the case-weighted mean of 1 and 0.5; a pinned input
+corpus in the crop's own language counts 1 when no toolchain output about it is a reference; toolchain runs move to the oracle tier.
+
+## As built: rust-90 (2026-11-07)
+
+Branch `rust-90` from `mac/rust-rf9b` (`523640cd8`) with `mac/rust-row` and `mac/rust-re6` merged in (both clean), by an agent on the
+main host by day (the light tier: no gate but its planner, no build of Arbace, sample checks only, every process under about 2 GiB;
+stage 0 `/root/arbace/target/seed/amd64/arbace`, the checkout's sources evaluated with `ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1
+ARBACE_NO_IMAGE=1`). The brief: Rust above 90% on `bin/crops-score`'s completeness, maturity and independence. The order, by what
+moves the scores most per day: independence first (the read stage native, the judge by own verdicts, eval's inputs pinned: one day's
+code each, and three of five stages), then maturity (the gate's steps and the controls: data and small scripts), then completeness
+(the eval and AOT cells need runs the day cannot give: the night's).
+
+### What was built
+
+| piece | files | what |
+|---|---|---|
+| the native read as the default | `bin/repr-rust`, `arbace/repr/rust/native.ae` | `dump`, `read` and `roundtrip` read with the native reader (`--reader helper`: rsdump, the oracle tier); the round trip's tree level from the native trees: `arbace.repr.rust.native tree` writes `rsdump tree`'s `.tree` and `.lines` from the native tree, byte for byte the helper's (`bin/repr-rust native-check --trees`: 68 of 68 files); rustc only for `--reader helper` and the rustc levels (`--iface`, `--run`, `--std`, `--code`); a round trip's `--only` dumps and parses only its files (doc/rust/NATIVE-READER.md, SPEC §11.3) |
+| the round trips' controls | `test/rust/roundtrip-edit-controls.edn` (named so at batch 2's merge: GT9's crossed pairs hold `roundtrip-controls.edn`), `arbace/repr/rust.ae` (`controls`), `bin/repr-rust controls` | seven controls of the tree, lines and text judges (GTS81 (a)), run last by every round trip |
+| the programs' IR packs | `bin/lib/rsi/check` (`RSI_IR=pack`, `--make-pack`), `bin/rsi ir-pack`, `bin/lib/rsi/link-ir`, `test/rust/ir/` | rustc's `-O0` IR of each program made once by hand and pinned (EVAL.md §13): samples and synthetic committed (1.4 MB), the UI corpus's in `.tmp/rsi/ir-packs` (its every-40th pinned today) |
+| the ci leg's keys | `bin/rsi` (`lowered_key`, `runtime-build --ci`, `runtime-keys`, `rc_reader`) | std's lowered library current without gcc or clang in its key; repr/c's reader alone keys it (its checks changed on this line and would have read std again, about four hours) |
+| the tests' own verdicts | `arbace/rust/check.ae` (`own-verdict`, `verdict-met?`, `own-verdicts`, `own-test`), `bin/rsi own-verdicts` | compiletest 1.99.1's run rule (EVAL.md §13): 3,409 of the 3,718 UI programs judged by their own verdict |
+| the builder's batches | `bin/lib/rsi/check` (`RSI_BATCH`) | RES53 (a): a fresh builder process every N programs |
+| the gate's steps | `test/gate/steps.edn`, `test/gate/costs.ae` | `rust-read-essential`, `rsi-judge-test`, `rsi-essential`; `rust-roundtrip` (five corpora), `rsi-check` (samples, synthetic), `rsi-check-ui` (every 40th); hosts `:stage0` and `:go` alone; the group `:rust`, `:crops`' `:rust`, `reap`'s inputs; the planner validates them (`gate.plan plan`, every Rust step planned), `test/gate/costs-test.bash` passes |
+| the REAP row | `test/reap/cells.edn`, `matrix.edn` | the read cell's rustdoc level beside (`:role :beside`, the oracle tier); `bin/reap` 0 problems |
+
+### Results (the day's, light; rustc, rustdoc, cargo, cc, gcc, g++, c++, clang, clang++, clang-23, llvm-as, opt, lli, llc, ld and ar first on `PATH` exiting 99, the log empty after every run)
+
+| check | result |
+|---|---|
+| `bin/repr-rust native-check --trees` (with rustc: the oracle) | 68 of 68 files' `.tree` and `.lines` byte for byte the helper's, 18 s |
+| `bin/repr-rust roundtrip --text --only` std's 8 files (`rust-read-essential`'s) | every file equal at the tree, text and `:full` tree levels; the controls 7 of 7 |
+| the same over 82 UI files (`try-block`, `return`, `deprecation`, `offset-of`) | 82 of 82 at each level, 9,323 spans, 3 min, 1.5 GB at the peak |
+| `bin/repr-rust roundtrip --reader helper` (rustc's parser, the oracle tier) | 2 of 2: the helper path unchanged |
+| `bin/repr-rust controls` | 7 of 7 differ, each subject against itself equal |
+| `bin/rsi ir-pack --corpus samples,synthetic` twice in two places | 73 programs, the packs byte for byte equal (after the shim's ModuleID fix) |
+| `bin/rsi runtime-ci` | current at `lowered_key` (rust-re6's library re-keyed), no toolchain |
+| `bin/ci musl ensure` (repr/c's checks changed on this line: reread) | 1,331 units in about 45 minutes at 2 threads, 1.5 GB; no gcc (the copied tree configured) |
+| `bin/rsi check --essential` (13 synthetic programs from the pack, `RSI_BATCH=3 RSI_THREADS=1 RSI_CI_MEMLIMIT=1400MiB`) | **13 of 13 pass**, the two controls in the run differing; 34.5 minutes; the builder's peak 3.8 GB, over the day's 2 GiB line (its GOMEMLIMIT is soft): the steps declare 4 GiB, and RES60 |
+| `bin/rsi judge-test` | the judge's own runs pass, a changed output fails, the own verdicts 12 of 12 |
+| `bin/rsi own-verdicts` | 3,409 of 3,718 UI programs by their own verdict; rustc's runs meet 277 of 281 |
+| `bin/reap` | 19 of 20 cells checked (Rust's AOT: no check yet), 0 problems |
+| the gate's planner (`gate.plan plan` on a hand-made hosts file), `test/gate/costs-test.bash` | every Rust step planned; passed |
+
+The scores (`bin/crops-score --ref rust-90 --crop rust` from `mac/batch1`'s tool, with `.tmp/independence.diff` and
+`.tmp/crops-rules.diff` applied to its data): completeness **75.0 → 75.0** (the AOT cell), maturity **66.7 → 95.8** (controls 0.25 → 1,
+gate 0 → 1; the AOT cell's 0.75 left), independence **20.0 → 80.0** (read 0 → 1, eval and AOT 0 → 0.5, print 1, judge 0 → 1.0: 66,692
+cases by their own verdict, 5 by rustc's records).
+
+What is left: the AOT cell (RES55), independence above 80% (RES54), the whole corpora natively and the eval record over the UI corpus
+(the night's).
+
+### Night commands (through `bin/heavy-lock`, the night's 1.5 GiB a process, one check at a time; `. .tmp/env.sh` first: stage 0, the checkout's sources evaluated)
+
+1. `bin/repr-rust roundtrip --text all` (the native reader over the five corpora, 33,346 files; `REPR_RUST_JOBS=4`), then `bin/repr-rust
+   native-check --trees` and the oracle tier's `roundtrip --reader helper --iface --run --code all` only at a tag (RES59).
+2. `bin/rsi ir-pack --corpus ui` (rustc 1.99.1 on the 3,718 programs, about 20 minutes at 2 jobs: the oracle tier), then commit
+   `test/rust/ir/ui.sha256` (RES56 (a)).
+3. `RSI_BATCH=2 RSI_THREADS=1 RSI_JOBS=2 RSI_CI_MEMLIMIT=1400MiB bin/rsi check --corpus samples,synthetic --record` (73 programs, about two
+   hours in batches; `threads.rs`, `collections.rs`, `errors.rs` near the line), then `bin/rsi check --corpus ui --record` (about 5.5 hours
+   at one builder thread; the UI programs by their own verdict), `bin/rsi divergences`, `bin/rsi own-verdicts`, `bin/reap --record`,
+   `bin/crops-score --ref rust-90 --crop rust` from `mac/batch1`'s tool.
+4. AOT: none until RES34 (RES55).
+
+### Proposed (RES54-RES60)
+
+- **RES54 Independence above 80%.** With the read, print and judge stages at 1, eval and AOT are 0.5 as long as any case consumes a
+  toolchain's record, and every Rust program consumes std's (its MIR or IR) until std is built from source (FRONTEND-SURVEY, "As
+  built: rust-90": RF10, RF11 move only the program's own bodies off rustc; RF12, Tier S, 35 to 60 days, removes std's). So the
+  crop's independence is at most (1 + 0.5 + 0.5 + 1 + 1) / 5 = 80% before RF12. Options: (a) **accept 80% until Tier S, and go on
+  with the front end in the surveys' order (RFP20, RFP15, RF10, RF11, RF12)**; (b) count std's pinned data (its IR at
+  `test/rust/runtime/ir.sha256`, Tier U's MIR library) as the crop's own pinned input (it is rustc's output: against the rule of
+  2026-11-07); (c) score eval and AOT case by case once Tier U runs (the program's own functions native, std's recorded), still 0.5
+  by the rule. *Recommended: (a)*: the number is honest, and RF12 is the only route the rule rewards.
+- **RES55 AOT's cell.** `bin/rsi check --aot` translates each program's node program with its linked std (RE4: about 1,000 s and up
+  to 7 GiB for `panics.rs`): over the night's 1.5 GiB a process, so the AOT cell stays "no check yet" (completeness 75%, maturity's
+  first item 0.75). Options: (a) **RES34 (a) first: std's fragments translated once per key into a Go package the programs call
+  (CS273's next step, shared with C++), then `check --aot` over the samples, the synthetic corpus and the UI corpus's every 40th,
+  recorded**; (b) record the AOT cell over the samples alone on a heavy night slot (7 GiB a process, about 20 minutes to 1.5 hours a
+  program), the rest later; (c) leave it. *Recommended: (a)*; (b) only if the user wants the cell recorded before RES34.
+- **RES56 The UI corpus's IR pack.** About 18 MB for the 3,718 programs (the every-40th's 452 KiB). Options: (a) **in the main
+  checkout's `.tmp/rsi/ir-packs/`, made by hand (`bin/rsi ir-pack --corpus ui`), each file pinned by the committed
+  `test/rust/ir/ui.sha256`; a clone or worktree reads the main checkout's (as built)**; (b) committed as `test/rust/ir/ui.tar.xz`.
+  *Recommended: (a)*: the pin is the record; (b) if a clean run's clone must hold it.
+- **RES57 ci's libc on this line.** musl's ci forms read `test/c/host`'s predefined macros (gcc's record) and, on `rust-90`, musl's
+  configure products made by gcc (`bin/lib/ci/musl` prepares with `CC=gcc ./configure` when the tree is not configured).
+  `mac/batch1` (C's `c-indep-b1`) derives them without gcc. Options: (a) **take batch1's side at the merge; Rust's eval fact then
+  rests on C's derived musl, no gcc even on a fresh `.tmp`**; (b) carry a copy of C's change here. *Recommended: (a)*.
+- **RES58 The four programs the two judges see apart.** rustc's recorded runs fail four own verdicts (`compiletest-self-test/
+  trim-env-name.rs#set`, `#unset`, `process/process-spawn-with-unicode-params.rs`, `std/stdio-from.rs`): run-program's harness, not
+  the programs (environment trimming, a spawned child's arguments, stdio redirection). Options: (a) **a class `harness` in
+  `divergences.edn` when the night's run fails them, each with its cause**; (b) fix run-program's environment and stdio to
+  compiletest's. *Recommended: (a) now, (b) with RE7*.
+- **RES59 The round trips' known files under the native reader.** The five corpora's known files were recorded on rsdump's trees;
+  the native reader equals the helper on every file checked (native-check, 92 more by hand, 1,400 mutants, today's 90 round-tripped),
+  but the whole corpora were not round-tripped natively by day. Options: (a) **the night's `bin/repr-rust roundtrip --text all`
+  confirms them (a file that differs natively is a failure, to classify or fix)**; (b) keep `--reader helper` the gate's default until
+  then. *Recommended: (a)*.
+- **RES60 Rust's steps' memory.** `rsi-essential` and `rsi-check` declare 2 and 3 GiB, the builder held under 1.4 GiB
+  (`RSI_CI_MEMLIMIT`) in batches (`RSI_BATCH`); a first run of std's lowered library (`runtime-build --ci` and `runtime-ci`'s read,
+  about four hours, 6 GiB) is outside any budget. Options: (a) **the library kept by its key in the main checkout's `.tmp/rsi/runtime`
+  (as the gate's executables), the steps reading it (`RSI_RUNTIME_DIR`), its first build by hand**; (b) `:heavy` steps that build it
+  when missing. *Recommended: (a)*, with RES52's per-unit read.
+
+### Decided (the user, 2026-11-07: RES54-RES60)
+
+- **RES54 (a):** Rust's independence accepted at its 80% ceiling until RF12 (Tier S: std built from source); the front end goes on in
+  the surveys' order (RFP20, RFP15, RF10, RF11, RF12). Eval and AOT stay 0.5 while any case consumes std's rustc-made IR.
+- **RES55 (a):** RES34 first (std's fragments translated once per key into a Go package the programs call), then `check --aot` over
+  the samples, the synthetic corpus and the UI corpus's every 40th, recorded: the AOT cell after RES34, not before (branch `res34`).
+- **RES56-RES60 as recommended:** RES56 (a) the UI pack in the main checkout's `.tmp/rsi/ir-packs/`, pinned by `test/rust/ir/ui.sha256`;
+  RES57 (a) batch 1's derived musl taken at the merge (done on batch 2: Rust's eval fact rests on it); RES58 (a) a class `harness` for
+  the four programs when the night fails them, (b) with RE7; RES59 (a) the night's `bin/repr-rust roundtrip --text all` confirms the known
+  files under the native reader; RES60 (a) std's lowered library kept by its key in the main checkout's `.tmp/rsi/runtime`, its first
+  build by hand.
+
+### As merged: batch 2 (2026-11-07, branch `batch2`)
+
+rust-90 merged after batch 2's Rust lines (rust-native ... rust-row, rust-re6). Two moves: rust-90's round-trip controls (an edited
+subject each) are `test/rust/roundtrip-edit-controls.edn` (GT9's crossed pairs, crop-controls' 7bf1d1e4, keep
+`test/rust/roundtrip-controls.edn`; both are read by `bin/repr-rust roundtrip`), their switch `REPR_RUST_EDIT_CONTROLS=0` (GT9's
+`REPR_RUST_CONTROLS` names its file). The native reader's `tree` verb and errors2's `errors` verb are both kept; `file-trees` rejects a
+file whose parse recovered from an error (errors2's diagnostics), as `dump-forms` does. The gate: rust-90's six steps replace GT9's four of
+the same names; GT9's rustc levels (`rust-iface`, `rust-behaviour`, `rust-native-essential`, `rust-native`) stay until the planner has
+`:phase :oracle`; `rsi-aot` reads the packs (`:clean-only`). Scores 75.0 / 95.8 / 80.0 (batch 2 before: 75.0 / 95.8 / 20).
+
+### Proposed (batch 2: RES61)
+
+- **RES61 rsi-essential's memory.** rust-90 measured the builder's peak at 3.8 GB (`RSI_BATCH=3`), so the step declares 4 GiB, above
+  the essential tier's 3 GiB (GTS215, `gate.crops check`); at the merge it runs in `--full`, first in the chain `rust-full`. (a) Measure
+  `RSI_BATCH=1` (a fresh builder per program) at night; back to the essential tier at `:mem-gib 3` if its peak is under 2.8 GB; cost a
+  night's 35 minutes. (b) Leave it in `--full` (the essential gate then runs no rsi program, only `rsi-judge-test`). (c) A smaller
+  essential list (5 programs). *Recommended: (a)*, (c) if (a) does not fit.
+
+## As built: RES34 on rust-90's line (2026-11-07, branch `res34`, from `mac/rust-90` 58ca67832 with `mac/rust-res34` merged)
+
+By an agent on the main host by day (the light tier: no gate, no build of Arbace, every process under about 2 GiB, watched by a
+sampler that kills a process over 2,300 MB; stage 0 `/root/arbace/target/seed/amd64/arbace`, the checkout's sources evaluated with
+`ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1`). `mac/rust-res34` (RES34's design, RES34.1, and its proof on core) merged into
+rust-90's line: two conflicts, both additive (the Makefile's target list: `rsi-aot-lib`, `ci-aot-lib` added to rust-90's; this survey:
+RES34's sections put before RE6's in date order); the code merged clean (rust-90's `compile-list` and RES34's `build-linked-traced`
+touch different lines). std's lowered library and its ci read are rust-90's (`.tmp/rsi/runtime`, current at `lowered_key`), so the
+proof is on the whole std of the pin, not RES34.3's core alone.
+
+**The set this touches in C's embedded code** (a rekey of `gate_key` and of ci's prebuilt runtime when it lands on main): RES34's own,
+unchanged here: `arbace/c/build.ae` (`*link-trace*`), `arbace/c/cf2g.ae` (`translate-unit`, `translate`'s `pre`), `arbace/c/runtime.ae`
+(`link-traced`), `arbace/c/aotlib.ae` (new). This branch adds nothing to it: RES40 (a)'s shared cache is in the scripts
+(`bin/lib/rsi/check`, `bin/lib/ci/check-aot`, `bin/rsi`, `bin/ci`), and the rest is `arbace/rust/run.ae` (out of the keys, RES36).
+Because `build.ae` and `runtime.ae` are in `runtime-sources`, every library's fragments are rekeyed by the merge (std's 58 fragments
+about four hours of a builder to make again); the day hard-linked rust-90's fragments under the new keys after checking that
+fragments made afresh at the new key are byte for byte the old ones (ports' `ci-builtins`, std's `adler2` unit; `*link-trace*` changes
+the link, not `unit-fragment`). The night's runs on main make them afresh.
+
+### What was built
+
+| piece | files | what |
+|---|---|---|
+| RES40 (a): the cache shared by the worktrees | `bin/lib/rsi/check`, `bin/lib/ci/check-aot` (export `CI_AOT_LIB`), `bin/rsi aot-lib`, `bin/ci aot-lib build\|prune` | `CI_AOT_LIB`, else the main checkout's `.tmp/ci-aot-lib` (a linked worktree's root less `/.tmp/worktrees/NAME`), exported to the builder; `arbace.c.aotlib/cache-root` untouched (its source is in the units' key: a change would translate every unit again) |
+| the ahead translation of what programs link | `arbace/rust/run.ae` (`translate-libs ... --cached`), `bin/rsi aot-lib` (`RSI_AOT_LIB_CACHED=1`) | only the units whose fragment is made (those some program has linked), so that nothing is checked and built in the translating process |
+| the translation's parts measured | `arbace/rust/run.ae` (`compile-list`) | a line per program on standard error: the manifests (`pre`), the node program read, cf2g, the Go printed; the node text's and the Go's sizes, the units linked |
+
+### Results (the day's, light)
+
+| step | result |
+|---|---|
+| std's units translated once (`translate-libs --cached`'s rule, one thread, `GOMEMLIMIT=1400MiB`) | 74 units (ports 1, std's crates 58, compiler_builtins 15) whose fragments rust-90's runs made: **19,843 functions, none refused, 69 MB of Go, 1,663 s of translation (28 minutes of wall time), the process at most 1.37 GB**; the largest unit `std`'s cgu.08 (433 functions, 3.6 MB of Go) in 95 s |
+| `bin/rsi check --aot --corpus synthetic --only` five of `test/rust/essential.txt` (`exit-code`, `fmt`, `panic-index`, `drops`, `int-ops-i128`; `RSI_SHARD=1 RSI_THREADS=1 RSI_CI_MEMLIMIT=1400MiB RSI_GO_P=1`) | **5 of 5 pass** (status, standard output and error against rustc's recorded runs); the control `synthetic-panic` differs as it must |
+| per program | lowering 0.2 to 4.4 s; ci's build and link with std's fragments 20 to 60 s; the translation 93 to 223 s; Go's build of the shard 14 to 17 s (the first shard 324 s: std's 74 packages and musl's 350 compiled once into Go's cache by content); the run 0.1 s. The builder at most **1.71 GB**, Go's build under it |
+| the translation's parts (`exit-code.rs`, `drops.rs`) | the manifests 0.4 to 0.7 s; the node program read 15 to 23 s (19 MB of text: std's and musl's data and the program's lines); cf2g 4 to 8 s; **the Go printed 51 to 77 s**; 3.7 to 4.3 MB of Go, of which the program's own code is little (22 functions for `exit-code.rs`): 11,343 `SetCompiled` statements, 7,786 `TopText` runs of data (832 KB) and 424 `Bind` tables (269 KB) of the units linked (std's 74 and musl's 350) |
+| `collections.rs` | its builder passed 2.3 GB (the sampler stopped it): its link and translation are the night's (it was the slowest eval program too: 990 s, rust-90's essential run) |
+
+So a program's AOT build is now about 2 to 5 minutes of one process under 2 GB where RE4 measured `panics.rs` whole at about
+1,000 s of translation and up to 7 GiB; what is left of it is the glue (RES64) and the node program's read (RES43).
+
+### Night commands (through `bin/heavy-lock`, one check process at a time; `. .tmp/env.sh` first: stage 0, the checkout's sources evaluated; on main after the merge, so with main's fragments and the shared cache)
+
+1. std's fragments at the merged keys: `RSI_BATCH=2 RSI_THREADS=1 RSI_CI_MEMLIMIT=1400MiB bin/rsi check --essential` (rust-90's night
+   command 3's first half makes them as its programs link; about 35 minutes, its builder up to 3.8 GB as rust-90 measured: RES60), then
+   `RSI_AOT_LIB_CACHED=1 RSI_JOBS=1 RSI_CI_MEMLIMIT=1200MiB bin/rsi aot-lib` (the units they made, about 30 minutes, 1.4 GB).
+2. The AOT cell: `RSI_SHARD=1 RSI_THREADS=1 RSI_JOBS=2 RSI_GO_P=1 RSI_CI_MEMLIMIT=1400MiB bin/rsi check --aot --corpus samples,synthetic
+   --record` (73 programs at 2 to 5 minutes each, about 4 hours; writes `test/rust/check-aot-linux-amd64.edn`, which the REAP cell
+   reads; `collections.rs`, `threads.rs`, `errors.rs` need more than 2 GB in the builder: RES66), then the UI corpus's every 40th as
+   `rsi-check-ui` runs it, `--aot` added: `... bin/rsi check --aot --corpus ui --sample 40` (about 93 programs, 4 to 6 hours; judged,
+   not recorded: `--record` takes whole corpora, RES65).
+3. Once: `RSI_AOT_LIB=0 RSI_CHECK_WORK=.tmp/rsi-aot-whole ... bin/rsi check --aot --corpus synthetic --only test/rust/essential.txt`
+   on a heavy slot (whole: 7 GiB a program; RES42 (a)'s comparison, the two results equal), then `bin/reap --record`, `bin/crops-score
+   --ref res34 --crop rust`.
+
+### The score (expected after the night's record)
+
+The AOT cell checked: completeness 75.0 → 100 (Rust's four cells checked, none failing), maturity 95.8 → 100 (the AOT cell's 0.75 in its
+first item); independence unchanged at 80.0 (AOT 0.5: every program runs std's lowered IR, rustc's output, RES54).
+
+### Proposed (RES64-RES66)
+
+Numbered RES61-RES63 on branch `res34`; renumbered RES64-RES66 at batch 2's merge, RES61 being batch 2's (rsi-essential's memory,
+"Proposed (batch 2: RES61)" above).
+
+- **RES64 The prebuilt glue as tables.** A program's Go is now mostly glue (above): a statement per linked function and per data run,
+  printed by repr/go's printer at about 70 KB/s, 51 to 77 s of the 93 to 223. Options: (a) **cf2g emits the glue as data: the data runs
+  as one text (the Loader's `TopText` takes the runs in order; the code commands between them are the prebuilt functions, which
+  `SetCompiled` binds by id, so the order between the two is not needed), the `(id, function)` pairs as one table literal and a loop, the
+  `Bind` tables as before; about half a day, a change to `arbace/c/cf2g.ae` (embedded: the units' key and the C crop's AOT steps rerun)**;
+  (b) the glue written as a Go file by text, outside the printer; (c) leave it. *Recommended: (a)*, with C's next re-seed (RES45).
+- **RES65 The UI corpus's AOT record.** `--record` takes whole corpora and the UI corpus's every 40th is a subset. Options: (a) **a
+  subset record: `--record --sample 40` allowed for the AOT level, the record naming its sample (`:sample 40`), `bin/reap` counting
+  its programs**; (b) the cell recorded over the samples and the synthetic corpus alone, the UI subset judged without a record; (c) the
+  whole UI corpus (3,718 programs at 2 to 5 minutes: about ten nights). *Recommended: (a)*; (b) for tonight.
+- **RES66 The builders above 2 GB.** `collections.rs` (and, by rust-90's eval run, `threads.rs` and `errors.rs`) need more than the light
+  tier's 2 GiB in the builder (std's fragments of the program's closure in one process). Options: (a) **per-program caps
+  (`test/rust/check-budget.edn` gains a memory column, the shard run under it), the night's slots given to them last**; (b) RES43's
+  compact fragment format first. *Recommended: (a)*, (b) with RES43's measure.
+

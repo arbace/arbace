@@ -372,7 +372,11 @@
               :else
               (let [e (errors-of err nm false)]
                 (try
-                  (let [rd (rc/read-cpp (str c ".edn") (str root "/" nm) nm (:std r))]
+                  (let [src (str root "/" nm)
+                        ;; CX11: --reader native (REPR_CPP_READER=native) reads the accepted unit with the native parser
+                        rd (if (= "native" (System/getenv "REPR_CPP_READER"))
+                             (rc/read-cpp-native src nm (:std r) (into (vec (:clang r)) ["-iquote" (str (.getParent (java.io.File. src)))]))
+                             (rc/read-cpp (str c ".edn") src nm (:std r)))]
                     (if (:refused rd)
                       (assoc e :status :refused :message (str (name (:refused rd)) ": " (one-line (:message rd))))
                       (let [o (java.io.File. (str d "/forms/" nm ".ae"))]
@@ -516,6 +520,24 @@
         cls (when (= :fail (second row)) (classify classes row))]
     (cond-> row cls (conj cls))))
 
+(def controls-file "test/cpp/controls.edn")
+
+(defn controls
+  "The dg check's negative controls (doc/GATE-SURVEY.md, GTS81 (a); test/cpp/controls.edn's :level :dg entries, cpp-90): the :subject's
+  read (its errors' lines, or its acceptance) judged by the check's own verdict against the :reference's directives must fail. Both are
+  gxx-dg/NAME files of the part's run; a control whose files the run lacks is left (said). One that passes is returned as a failing row."
+  [part dg rd]
+  (let [cs (filter #(= :dg (:level %)) (read-edn controls-file []))
+        nm (fn [^String id] (when (str/starts-with? id (str corpus "/")) (subs id (inc (count corpus)))))]
+    (vec (for [{cid :id :keys [subject reference]} cs
+               :let [s (nm subject) r (nm reference)
+                     d (get dg r) row (get rd s)
+                     v (when (and d row (contains? dg s)) (verdict d row))]
+               :when (cond (nil? v) (do (when (or (contains? dg s) (contains? dg r)) (println (str "control " cid " left: " part " lacks " (if (contains? dg s) reference subject)))) false)
+                           (= :fail (first v)) (do (println (str "control " cid " fails as it must (" (name (second v)) ": " subject "'s read against " reference "'s directives)")) false)
+                           :else (do (println (str "control " cid " passed: the verdict takes another file's errors")) true))]
+           [cid :fail (str "control " cid " passed (test/cpp/controls.edn)")]))))
+
 (defn judge-cmd
   "judge WORK [--record] PART...: each file's row against the classes (test/cpp/divergences-dg.edn); the counts by part and
   class; a failure in no class, a recorded pass that fails now, or a recorded file of the run's set missing from it, fails
@@ -555,7 +577,7 @@
               unrec (count (remove #(or (:unsupported (val %)) (let [g (get gx (str corpus "/" (key %)))] (and (= (:std (val %)) (:std g)) (= (:gxx (val %)) (:args g))))) dg))]
           (println (format "  g++'s reference: %d files not recorded at their standard; %d passes whose directives g++ does not give" unrec (count passes-differ))))
         (spit (str d "/rows.edn") (str "[\n" (str/join "\n" (map pr-str rows)) "\n]\n"))
-        (swap! failing into (concat unclassed regress))
+        (swap! failing into (concat unclassed regress (controls part dg rd)))
         (when record
           (let [keep (remove (fn [[id]] (contains? now id)) (vals committed))
                 all (sort-by first (concat keep (map (fn [r] (vec (take 3 r))) rows)))]
