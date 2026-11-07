@@ -42,6 +42,11 @@
 
 (defn- pos-of [x] (when (and (seq? x) (map? (last x))) (:pos (last x))))
 
+(defmacro ^:private at
+  "BODY with *pos* the location of the form X when it has one (symtable.c's LOCATION(x) at each symtable_add_def)"
+  [x & body]
+  `(binding [*pos* (or (pos-of ~x) *pos*)] ~@body))
+
 ;; ---- blocks: atoms ----
 
 (def ^:private function-like #{:function :annotation :type-variable :type-alias :type-parameters})
@@ -183,15 +188,15 @@
 (defn- arg-name [a] (if (seq? a) (ident (second a)) (ident a)))
 (defn- arg-ann [a] (when (seq? a) (nth (second (pp/node a)) 1 nil)))
 
-(defn- visit-params! [st as] (doseq [a as] (add-def! st (arg-name a) DEF_PARAM)))
+(defn- visit-params! [st as] (doseq [a as] (at a (add-def! st (arg-name a) DEF_PARAM))))
 
 (defn- visit-arguments! [st a]
   (let [o (args-of a)]
     (visit-params! st (:posonly o))
     (visit-params! st (:args o))
     (visit-params! st (:kwonly o))
-    (when-let [v (:vararg o)] (add-def! st (arg-name v) DEF_PARAM))
-    (when-let [k (:kwarg o)] (add-def! st (arg-name k) DEF_PARAM))))
+    (when-let [v (:vararg o)] (at v (add-def! st (arg-name v) DEF_PARAM)))
+    (when-let [k (:kwarg o)] (at k (add-def! st (arg-name k) DEF_PARAM)))))
 
 (defn- visit-annotation! [st annotation]
   (let [cur (:cur @st)
@@ -244,7 +249,7 @@
 (defn- visit-type-param! [st tp]
   (let [[h [nm] o _] (pp/node tp)
         nm (ident nm)]
-    (add-def! st nm (bit-or DEF_TYPE_PARAM DEF_LOCAL))
+    (at tp (add-def! st nm (bit-or DEF_TYPE_PARAM DEF_LOCAL)))
     (case h
       type-var (do (visit-type-param-bound-or-default!
                     st (:bound o) nm (when-let [b (:bound o)] (if (and (seq? b) (= 'tuple (first b))) "a TypeVar constraint" "a TypeVar bound")) tp)
@@ -300,7 +305,7 @@
       (swap! (:cur @st) assoc :mangled-names #{})
       (doseq [tp tps] (visit-type-param! st tp)))
     (visit-exprs! st (:bases o))
-    (doseq [k (:keywords o)] (let [[_ [kn v] _ _] (pp/node k)] (when (some? kn) (check-name (ident kn) :store))))
+    (doseq [k (:keywords o)] (let [[_ [kn v] _ _] (pp/node k)] (when (some? kn) (at k (check-name (ident kn) :store)))))
     (doseq [k (:keywords o)] (visit-expr! st (nth (second (pp/node k)) 1) :load))
     (keyed! st x (enter! st nm :class))
     (swap! st assoc :private nm)
@@ -313,13 +318,14 @@
     (swap! st assoc :private tmp)))
 
 (defn- visit-alias! [st a]
+  (at a
   (let [[nm as] (if (seq? a) (let [[_ [n] o _] (pp/node a)] [(ident n) (some-> (:as o) ident)]) [(ident a) nil])
         name (or as nm)
         store (first (str/split name #"\."))]
     (if (not= name "*")
       (add-def! st store DEF_IMPORT)
       (when (not= :module (:type @(:cur @st)))
-        (syntax-error "import * only allowed at module level")))))
+        (syntax-error "import * only allowed at module level"))))))
 
 (defn- directive-check! [st nm global?]
   (let [cur (lookup st (:cur @st) nm)]
@@ -338,7 +344,8 @@
         (syntax-error (str "annotated name '" nm "' can't be " (if global? "global" "nonlocal")))
         (directive-check! st nm global?)))
     ;; the directive's location for the second pass's errors (symtable.c's ste_directives, error_at_directive)
-    (swap! (:cur @st) update :directives #(if (contains? % nm) % (assoc % nm *pos*)))
+    (let [mangled (maybe-mangle st (:cur @st) nm)]
+      (swap! (:cur @st) update :directives #(if (contains? % mangled) % (assoc % mangled *pos*))))
     (add-def! st nm (if global? DEF_GLOBAL DEF_NONLOCAL))))
 
 (defn- maybe-coroutine-for-module! [st] nil)
@@ -376,9 +383,10 @@
           (let [cur (lookup st (:cur @st) nm)]
             (when (and (has? cur (bit-or DEF_GLOBAL DEF_NONLOCAL)) (not= (:cur @st) (:global @st)) simple)
               (syntax-error (str "annotated name '" nm "' can't be " (if (has? cur DEF_GLOBAL) "global" "nonlocal"))))
-            (if simple
-              (add-def! st nm (bit-or DEF_ANNOT DEF_LOCAL))
-              (when (some? v) (add-def! st nm DEF_LOCAL))))
+            (at t
+              (if simple
+                (add-def! st nm (bit-or DEF_ANNOT DEF_LOCAL))
+                (when (some? v) (add-def! st nm DEF_LOCAL)))))
           (visit-expr! st t :store))
         (visit-annotation! st an)
         (e! v))
@@ -402,7 +410,7 @@
                             (doseq [hd (second p)]
                               (let [[_ [b] ho _] (pp/node hd)]
                                 (e! (:type ho))
-                                (when-let [n (:name ho)] (add-def! st (ident n) DEF_LOCAL))
+                                (when-let [n (:name ho)] (at hd (add-def! st (ident n) DEF_LOCAL)))
                                 (body! b)))
                             (body! (:else o)) (body! (:finally o))))
       assert (do (e! (first p)) (e! (second p)))
@@ -553,7 +561,7 @@
                   (swap! cur assoc :coroutine true))
         compare (do (e! (first p)) (es! (nth p 2)))
         call (do (e! (first p)) (es! (second p))
-                 (doseq [k (:keywords o)] (let [[_ [kn _] _ _] (pp/node k)] (when (some? kn) (check-name (ident kn) :store))))
+                 (doseq [k (:keywords o)] (let [[_ [kn _] _ _] (pp/node k)] (when (some? kn) (at k (check-name (ident kn) :store)))))
                  (doseq [k (:keywords o)] (e! (second (second (pp/node k))))))
         formatted-value (do (e! (first p)) (doseq [part (:format-spec o)] (when-not (string? part) (e! part))))
         interpolation (do (e! (first p)) (doseq [part (:format-spec o)] (when-not (string? part) (e! part))))
@@ -571,6 +579,7 @@
   (if-let [p (pos-of x)] (binding [*pos* p] (visit-expr*! st x ctx)) (visit-expr*! st x ctx)))
 
 (defn- visit-pattern! [st x]
+  (at x
   (let [[h p o _] (pp/node x)]
     (case h
       match-value (visit-expr! st (first p) :load)
@@ -582,11 +591,11 @@
                         (when-let [r (:rest o)] (add-def! st (ident r) DEF_LOCAL)))
       match-class (do (visit-expr! st (first p) :load)
                       (doseq [q (second p)] (visit-pattern! st q))
-                      (doseq [a (:kwd-attrs o)] (check-name (ident a) :store))
+                      (doseq [[a q] (map vector (:kwd-attrs o) (:kwd-patterns o))] (at q (check-name (ident a) :store)))
                       (doseq [q (:kwd-patterns o)] (visit-pattern! st q)))
       match-as (do (when (some? (first p)) (visit-pattern! st (first p)))
                    (when (some? (second p)) (add-def! st (ident (second p)) DEF_LOCAL)))
-      match-or (doseq [q (first p)] (visit-pattern! st q)))))
+      match-or (doseq [q (first p)] (visit-pattern! st q))))))
 
 ;; ---- the second pass (symtable.c's analyze_block) ----
 

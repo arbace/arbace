@@ -56,12 +56,12 @@
   ({\n \newline \t \tab \r \return \\ \\ \' \' \" \" \a (char 7) \b (char 8) \f (char 12) \v (char 11)} c))
 
 (defn decode-str
-  "The value of a string body as written (escapes decoded unless raw); a \\N{NAME} escape by the platform's Unicode
-  names (Character/codePointOf), one it does not know kept as the marker {:named NAME} in a vector of parts"
+  "The value of a string body as written (escapes decoded unless raw); a \\N{NAME} escape by unicodedata's tables, the
+  reader's (arbace.repr.python.ucn, which has checked the name; queue 228: the platform's names did not know them all)"
   [^String body raw? bytes?]
   (if raw?
     body
-    (let [sb (StringBuilder.) parts (atom []) n (count body)]
+    (let [sb (StringBuilder.) n (count body)]
       (loop [i 0]
         (if (>= i n)
           nil
@@ -81,16 +81,12 @@
                   (and (not bytes?) (= d \U)) (do (.appendCodePoint sb (Integer/parseInt (subs body (+ i 2) (+ i 10)) 16)) (recur (+ i 10)))
                   (and (not bytes?) (= d \N) (< (+ i 2) n) (= (.charAt body (+ i 2)) \{))
                   (let [e (.indexOf body "}" (int (+ i 3)))
-                        nm (subs body (+ i 3) e)
-                        cp (try (Character/codePointOf nm) (catch Throwable _ nil))]
-                    ;; the name by the platform's Unicode data (jrt's); one it does not know kept as a marker
-                    (if cp
-                      (.appendCodePoint sb (int cp))
-                      (do (swap! parts conj (str sb) {:named nm}) (.setLength sb 0)))
+                        nm (subs body (+ i 3) e)]
+                    (.appendCodePoint sb (int ((requiring-resolve 'arbace.repr.python.ucn/lookup) nm)))
                     (recur (inc e)))
                   :else (do (.append sb \\) (.append sb d) (recur (+ i 2)))))
               (do (.append sb c) (recur (inc i)))))))
-      (if (seq @parts) (conj @parts (str sb)) (str sb)))))
+      (str sb))))
 
 (defn- string-token-value [x]
   (let [[h [body] o _] (node x)
@@ -491,10 +487,11 @@
   (let [kwns (map #(second (node %)) kws)
         star (or (some starred? pos) (some #(nil? (first %)) kwns))]
     ;; codegen_validate_keywords
-    (loop [seen #{} [k & more] (keep #(some-> (first %) ident) kwns)]
+    (loop [seen #{} [k & more] (filter #(some? (first (second (node %)))) kws)]
       (when k
-        (when (seen k) (syntax-error (str "keyword argument repeated: " k)))
-        (recur (conj seen k) more)))
+        (let [n (ident (first (second (node k))))]
+          (when (seen n) (binding [*pos* (or (pos-of k) *pos*)] (syntax-error (str "keyword argument repeated: " n))))
+          (recur (conj seen n) more))))
     (if-not star
       (do (doseq [a pos] (expr! u a))
           (doseq [[_ v] kwns] (expr! u v))
@@ -2325,12 +2322,37 @@
 
 (declare compile-source*)
 
+(defn- finally-warnings!
+  "ast_preprocess.c's control flow in a finally block (PEP 765; astfold_stmt's BEFORE_RETURN and BEFORE_LOOP_EXIT): a
+  SyntaxWarning for each return out of a finally block, and each break and continue out of one. `ctx` the top of
+  its stack: :finally, :funcdef, :loop or nil; a class body pushes none"
+  [stmts ctx]
+  (doseq [s stmts :when (seq? s)]
+    (let [[h p o _] (node s)
+          walk (fn [ss c] (finally-warnings! ss c))
+          warn (fn [kw] (binding [*pos* (or (pos-of s) *pos*)] (warn! (str "'" kw "' in a 'finally' block"))))]
+      (case h
+        (function-def async-function-def) (walk (nth p 2) :funcdef)
+        class-def (walk (second p) ctx)
+        return (when (= ctx :finally) (warn "return"))
+        (break continue) (when (= ctx :finally) (warn (str h)))
+        (for async-for) (do (walk (nth p 2) :loop) (walk (:else o) ctx))
+        (while if) (let [loop? (= h 'while)] (walk (second p) (if loop? :loop ctx)) (walk (:else o) ctx))
+        (with async-with) (walk (second p) ctx)
+        match (doseq [c (second p)] (walk (second (second (node c))) ctx))
+        (try try-star) (do (walk (first p) ctx)
+                           (doseq [hd (second p)] (walk (first (second (node hd))) ctx))
+                           (walk (:else o) ctx)
+                           (walk (:finally o) :finally))
+        nil))))
+
 (defn compile-source
   "compile()'s modes over a module's forms: :exec the module; :eval a module of one expression statement, its value
   returned (an expression's code object); :single the statements with each expression statement's value displayed
   (print-expr, the REPL's)"
   [module mode]
   (binding [*warnings* (atom [])]
+    (finally-warnings! (second module) nil)
     (let [code (compile-source* module mode)]
       (cond-> code (seq @*warnings*) (assoc :warnings @*warnings*)))))
 
