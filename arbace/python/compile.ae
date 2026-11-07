@@ -22,10 +22,14 @@
   _PyCompile_Warn); compile-source puts them in the module's code object as :warnings, the runtime emits them"
   nil)
 
+(def ^:dynamic *disable-warning*
+  "compile.c's c_disable_warning, an atom: above 0 in a finally body's second copy (COMPILE_FBLOCK_FINALLY_END)"
+  nil)
+
 (defn- warn!
   "A SyntaxWarning at *pos* (CPython's location: 1-based offsets)"
   [msg]
-  (when *warnings*
+  (when (and *warnings* (not (and *disable-warning* (pos? @*disable-warning*))))
     (let [[l c el ec] *pos*]
       (swap! *warnings* conj [msg l (some-> c inc) el (some-> ec inc)]))))
 
@@ -328,8 +332,15 @@
 
 ;; ---- frame blocks: loops, try-finally, with, except handlers (for break, continue, return) ----
 
-(defn- push-fblock! [u fb] (swap! u update :fblocks conj (assoc fb :hs (or (:hs fb) (:hstack @u)))))
-(defn- pop-fblock! [u] (swap! u update :fblocks pop))
+(defn- push-fblock!
+  "_PyCompile_PushFBlock: at most CO_MAXBLOCKS, 21"
+  [u fb]
+  (when (>= (count (:fblocks @u)) 21) (syntax-error "too many statically nested blocks"))
+  (when (and *disable-warning* (= :finally-end (:kind fb))) (swap! *disable-warning* inc))
+  (swap! u update :fblocks conj (assoc fb :hs (or (:hs fb) (:hstack @u)))))
+(defn- pop-fblock! [u]
+  (when (and *disable-warning* (= :finally-end (:kind (peek (:fblocks @u))))) (swap! *disable-warning* dec))
+  (swap! u update :fblocks pop))
 
 (defn- unwind-fblock!
   "The cleanup of one frame block on leaving it by break, continue or return (preserve: a return value is on the top)"
@@ -844,7 +855,7 @@
               (emit! u :unpack-ex [i (- (count es) i 1)]))
             (emit! u :unpack-sequence (count es)))
           (doseq [e es] (store-target! u (if (starred? e) (first (second (node e))) e))))
-        starred (syntax-error "starred assignment target must be in a list or tuple")
+        starred (binding [*pos* (or (pos-of t) *pos*)] (syntax-error "starred assignment target must be in a list or tuple"))
         (throw (ex-info (str "compile: cannot assign to " h) {}))))))
 
 (defn- delete-target! [u t]
@@ -1125,7 +1136,8 @@
   (reduce (fn [seen tp]
             (let [[_ [nm] o _] (node tp)]
               (when (and seen (nil? (:default o)))
-                (syntax-error (str "non-default type parameter '" (ident nm) "' follows default type parameter")))
+                (binding [*pos* (or (pos-of tp) *pos*)]
+                  (syntax-error (str "non-default type parameter '" (ident nm) "' follows default type parameter"))))
               (type-param! u tp)
               (or seen (some? (:default o)))))
           false tps))
@@ -1480,7 +1492,8 @@
           (let [[_ [hb] ho _] (node hd)
                 t (:type ho)
                 nm (some-> (:name ho) ident)]
-            (when (and (nil? t) (< i (dec (count handlers)))) (syntax-error "default 'except:' must be last"))
+            (when (and (nil? t) (< i (dec (count handlers))))
+              (binding [*pos* (or (pos-of hd) *pos*)] (syntax-error "default 'except:' must be last")))
             ;; the clause's instructions at the except clause's line (LOC(handler))
             (swap! u assoc :line (line-of hd) :loc (pos-of hd))
             (let [next-j (when t
@@ -1787,10 +1800,55 @@
       match-or (pattern-names (first (first p)))
       nil)))
 
+(defn- py-repr-str
+  "repr() of a str: its quotes, backslash and the common escapes, a control character as \\xNN"
+  ^String [^String s]
+  (let [q (if (and (str/includes? s "'") (not (str/includes? s "\""))) \" \')
+        sb (StringBuilder.)]
+    (.append sb q)
+    (doseq [c s]
+      (cond (= c q) (do (.append sb \\) (.append sb c))
+            (= c \\) (.append sb "\\\\")
+            (= c \newline) (.append sb "\\n")
+            (= c \tab) (.append sb "\\t")
+            (= c \return) (.append sb "\\r")
+            (or (< (int c) 32) (= (int c) 127)) (.append sb (format "\\x%02x" (int c)))
+            :else (.append sb c)))
+    (.append sb q)
+    (str sb)))
+
+(defn- check-stores!
+  "codegen_pattern_helper_store_name's duplicates and codegen_pattern_or's alternatives, in codegen's order at each
+  pattern's location; stores: an atom of the names stored so far"
+  [x stores]
+  (binding [*pos* (or (pos-of x) *pos*)]
+    (let [[h p o _] (node x)
+          store! (fn [n] (when (contains? @stores n)
+                           (syntax-error (str "multiple assignments to name '" n "' in pattern")))
+                   (swap! stores conj n))]
+      (case h
+        match-as (do (when (some? (first p)) (check-stores! (first p) stores))
+                     (when (some? (second p)) (store! (ident (second p)))))
+        match-star (when (some? (first p)) (store! (ident (first p))))
+        match-sequence (doseq [q (first p)] (check-stores! q stores))
+        match-mapping (do (doseq [q (second p)] (check-stores! q stores))
+                          (when-let [r (:rest o)] (store! (ident r))))
+        match-class (doseq [q (concat (second p) (:kwd-patterns o))] (check-stores! q stores))
+        match-or (let [alts (first p)
+                       control (reduce (fn [control q]
+                                         (let [mine (atom #{})]
+                                           (check-stores! q mine)
+                                           (when (and control (not= control @mine))
+                                             (binding [*pos* (or (pos-of x) *pos*)]
+                                               (syntax-error "alternative patterns bind different names")))
+                                           (or control @mine)))
+                                       nil alts)]
+                   (doseq [n (sort control)] (store! n)))
+        nil))))
+
 (defn- check-pattern-names! [x]
-  (let [ns (pattern-names x)
-        dup (first (for [[k c] (frequencies ns) :when (> c 1)] k))]
-    (when dup (syntax-error (str "multiple assignments to name '" dup "' in pattern")))
+  (let []
+    (check-stores! x (atom #{}))
     (letfn [(ors [y] (let [[h p o _] (node y)]
                        (when (= h 'match-or)
                          (let [sets (map (comp set pattern-names) (first p))]
@@ -1841,7 +1899,7 @@
                          [(if (and (== v (Math/rint v)) (< (Math/abs v) 1e18)) (long v) [:float v]) (pp/expr k 0)])
           (= 'imag h) (let [v (Double/parseDouble (str/replace (let [t (second k)] (subs t 0 (dec (count t)))) "_" ""))]
                         [(if (zero? v) 0 [:complex v]) (pp/expr k 0)])
-          (string? k) [[:str k] (pp/expr k 0)]
+          (string? k) [[:str k] (py-repr-str k)]
           (= 'True k) [1 "True"] (= 'False k) [0 "False"] (= 'None k) [[:none] "None"]
           (= 'int h) (let [v (digits->int (second k))] [v (str v)])
           (and (= 'const h) (not (seq? (second k)))) (key-value (second k))
@@ -1850,7 +1908,8 @@
           (let [[v r] (key-value (nth k 2 nil))]
             (if (integer? v) [(- v) (str (- v))] [[:form k] (pp/expr k 0)]))
           (= 'attribute h) nil
-          (#{'str 'bytes} h) (let [v (string-token-value k)] [[:str v] (pp/expr k 0)])
+          (= 'str h) (let [v (string-token-value k)] [[:str v] (py-repr-str v)])
+          (= 'bytes h) (let [v (string-token-value k)] [[:str v] (pp/expr k 0)])
           :else [[:form k] (pp/expr k 0)])))
 
 (declare pattern!)
@@ -1931,10 +1990,12 @@
                         (do (emit! u :copy-dict-without-keys nil) (name-op! u rest-name :store) (emit! u :pop nil))
                         (do (emit! u :pop nil) (emit! u :pop nil))))
       match-class (let [[cls ps] p]
-                    (reduce (fn [seen a]
-                              (when (seen a) (syntax-error (str "attribute name repeated in class pattern: " a)))
+                    (reduce (fn [seen [a q]]
+                              (when (seen a)
+                                (binding [*pos* (or (pos-of q) *pos*)]
+                                  (syntax-error (str "attribute name repeated in class pattern: " a))))
                               (conj seen a))
-                            #{} (map ident (:kwd-attrs o)))
+                            #{} (map vector (map ident (:kwd-attrs o)) (:kwd-patterns o)))
                     (expr! u cls)
                     (load-const! u {:tuple (mapv ident (:kwd-attrs o))})
                     (emit! u :match-class (count ps))
@@ -2351,9 +2412,14 @@
   returned (an expression's code object); :single the statements with each expression statement's value displayed
   (print-expr, the REPL's)"
   [module mode]
-  (binding [*warnings* (atom [])]
+  (binding [*warnings* (atom []) *disable-warning* (atom 0)]
     (finally-warnings! (second module) nil)
-    (let [code (compile-source* module mode)]
+    (let [code (try (compile-source* module mode)
+                    ;; the warnings made before a SyntaxError are emitted before it
+                    (catch arbace.lang.ExceptionInfo e
+                      (if (and (seq @*warnings*) (= 'SyntaxError (:class (ex-data e))))
+                        (throw (ex-info (.getMessage e) (assoc (ex-data e) :warnings @*warnings*)))
+                        (throw e))))]
       (cond-> code (seq @*warnings*) (assoc :warnings @*warnings*)))))
 
 (defn- compile-source* [module mode]

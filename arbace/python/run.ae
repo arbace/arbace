@@ -44,6 +44,14 @@
         r (with-bindings {(requiring-resolve 'arbace.repr.python.lex/*warnings*) ws} (f ws))]
     (str ((requiring-resolve 'arbace.repr.python.astjson/warnings-prefix) @ws) r)))
 
+(defn- keep-compile-warnings!
+  "The compiler's warnings made before its SyntaxError e (ex-data :warnings, [MSG L O EL EO]) join the reader's, emitted
+  ahead of the error (queue 228)"
+  [e]
+  (when-let [ws (var-get (requiring-resolve 'arbace.repr.python.lex/*warnings*))]
+    (doseq [[msg l o el eo] (:warnings (ex-data e))]
+      (swap! ws conj {:category "SyntaxWarning" :msg msg :lineno l :error ["SyntaxError" msg l o el eo nil]}))))
+
 (defn- read-dump
   "The native reader's forms of source (PY9: arbace.repr.python.astjson/read-forms, mode :full, as the helper's
   tools/pydump/pydump.py tree --full gave them): the module's forms or its (python/error ...)"
@@ -131,6 +139,7 @@
                 msg)]
       (syntax-error (str (second form)) msg (reader-loc form) (reader-kind form) (reader-text form)))
     (let [d (ex-data ex)]
+      (keep-compile-warnings! ex)
       (syntax-error (:msg d) (when (:lineno d) [(:lineno d) (:offset d) (:end-lineno d) (:end-offset d)])))))
 
 (defn- compile-uncached [mode source]
@@ -161,7 +170,8 @@
       (try ((resolve 'arbace.python/ir-text) (pc/compile-source form (keyword mode)))
            (catch Throwable e
              (if (= 'SyntaxError (:class (ex-data e)))
-               (syntax-error (:msg (ex-data e)) (let [d (ex-data e)] (when (:lineno d) [(:lineno d) (:offset d) (:end-lineno d) (:end-offset d)])))
+               (do (keep-compile-warnings! e)
+               (syntax-error (:msg (ex-data e)) (let [d (ex-data e)] (when (:lineno d) [(:lineno d) (:offset d) (:end-lineno d) (:end-offset d)]))))
                (str "SystemError: pyi's compiler: " (str/replace (str (.getMessage e)) #"\n" " "))))))))))
 
 (defn main-answer
@@ -177,7 +187,7 @@
         cf (File. (str work "/ir-cache/" (subs key 0 2) "/" key))]
     (if (.exists cf)
       (slurp cf)
-      (let [r (if (or (str/starts-with? mode "ast:") (str/starts-with? mode "tokenize:"))
+      (let [r (if (or (str/starts-with? mode "ast:") (str/starts-with? mode "tokenize:") (= mode "source-error"))
                 (native-answer mode file source)
                 (compile-uncached mode source))]
         (when (or (str/starts-with? r "{") (str/starts-with? r "AST:") (str/starts-with? r "TOK:") (= r "incomplete")
