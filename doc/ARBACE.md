@@ -122,7 +122,9 @@ of `lang/Compiler.ae` and of the Java forms compiler (`classes/emit.ae` ...), `l
 (doc/STANDALONE-NOTES.md, S4: the JVM removed); they remain on the branch `arbace-for-java-26`,
 whose `doc/ARBACE.md` records ASM's origin (below). The namespaces `genclass.ae`,
 `core_proxy.ae`, `reflect/java.ae`, `main.ae` and `core/server.ae` took the Go build's variants
-then (they were under `lang/go/ns/`, since merged).
+then (they were under `lang/go/ns/`, since merged). Since 2026-11-06 (CDR3) `genclass.ae` holds again Clojure's
+`generate-class` (clojure/clojure `src/clj/clojure/genclass.clj` at `98d735fab02f`, the same origin
+as below), ported to write a Java form in place of ASM's bytecode (doc/VENDOR-NOTES.md, hand change 31).
 
 Origin of the vendored Clojure: the frozen baseline `clojure/` this repository held until the
 freeze (it remains on the branch `arbace-for-java-26`), that is

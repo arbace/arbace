@@ -6,13 +6,14 @@
 ;   the terms of this license.
 ;   You must not remove this notice, or any other, from this software.
 
-;; gen-interface (doc/go/EVAL-NOTES.md, "Namespace variants"; the Go build's variant until
-;; 2026-10-12, when the JVM's version, whose gen-class and gen-interface write class files with
-;; ASM, left main with the bytecode back end: it is on the branch arbace-for-java-26).
+;; gen-interface and gen-class (doc/go/EVAL-NOTES.md, "Namespace variants"; the Go build's
+;; variant until 2026-10-12, when the JVM's version, whose gen-class and gen-interface write class
+;; files with ASM, left main with the bytecode back end: it is on the branch arbace-for-java-26).
 ;; gen-interface makes the interface at run time (Compiler$Dyn, J2G-SPEC §10.4; EVAL-PLAN.md
-;; Q5), so definterface and defprotocol work; gen-class does nothing, as Clojure's when not
-;; compiling (B1-PLAN.md D6; doc/STANDALONE-SURVEY.md D13). prim->class, the-array-class and
-;; the-class are Clojure's genclass.clj's.
+;; Q5), so definterface and defprotocol work; gen-class, a no-op until 2026-11-06 (B1-PLAN.md D6;
+;; doc/STANDALONE-SURVEY.md D13), defines its class at run time as a Java form (CDR3, below).
+;; prim->class, the-array-class, the-class and generate-class's helpers are Clojure's
+;; genclass.clj's.
 
 (in-ns 'arbace.core)
 
@@ -60,13 +61,415 @@
                                  (str "java.lang." strx)))))
     :else (arbace.lang.RT/classForName x)))
 
+;; gen-class at run time (CDR3, doc/CLOJURE-DESIGN-REVIEW.md; the user, 2026-11-05): Clojure's
+;; generate-class (clojure/clojure src/clj/clojure/genclass.clj at 98d735fab02f, the suite's
+;; revision) ported rule for rule, but writing the class as a Java form (defclass, SPEC §4)
+;; where it writes bytecode with ASM, and defining it when the gen-class form is evaluated (by
+;; the Java forms' interpreter, doc/go/CLASSFORMS-REPL.md) where Clojure writes a class file when
+;; compiling: the Go build loads no class files, so gen-class has its effect at run time, at
+;; both levels (an evaluated namespace and a compiled one, whose loader evaluates the form).
+;; The class is the one Clojure generates: a private static Var field per method name, overload
+;; and init/post-init/main (foo_Object_int__var), interned in the static initializer, which
+;; loads the implementing namespace (when it is not loaded yet: the class is defined while its
+;; namespace loads, not found later as a class file); its constructors (the superclass's
+;; signatures, or :constructors) calling :init, the superclass constructor, :post-init, the
+;; :state field and the :factory methods; the superclass's non-private methods, the
+;; interfaces' instance methods (a default one running the interface's when no fn) and :methods,
+;; each forwarding to its var's fn, else the superclass's method or UnsupportedOperationException
+;; with Clojure's message; :main; :exposes and :exposes-methods. Divergences: the annotations of
+;; the name, methods and parameters are not written (the Go build has no class files to carry
+;; them, as for deftype); the Java form is evaluated in the namespace arbace.genclass; a
+;; superclass the Go build's Java forms cannot extend (arbace.j2g.dyn's
+;; supers) gives a class extending Object whose constructors throw UnsupportedOperationException,
+;; so that code naming the class loads (as proxy does).
+
+;; someday this can be made codepoint aware
+(defn- valid-java-method-name
+  [^String s]
+  (= s (arbace.lang.Compiler/munge s)))
+
+(defn- validate-generate-class-options
+  [{:keys [methods]}]
+  (let [[mname] (remove valid-java-method-name (map (comp str first) methods))]
+    (when mname (throw (IllegalArgumentException. (str "Not a valid method name: " mname))))))
+
+(defn- gc-filter-methods [^Class c invalid-method?]
+  (loop [mm {}
+         considered #{}
+         c c]
+    (if c
+      (let [[mm considered]
+            (loop [mm mm
+                   considered considered
+                   meths (seq (concat
+                                (seq (. c (getDeclaredMethods)))
+                                (seq (. c (getMethods)))))]
+              (if meths
+                (let [^java.lang.reflect.Method meth (first meths)
+                      mk (method-sig meth)]
+                  (if (or (considered mk)
+                          (invalid-method? meth))
+                    (recur mm (conj considered mk) (next meths))
+                    (recur (assoc mm mk meth) (conj considered mk) (next meths))))
+                [mm considered]))]
+        (recur mm considered (. c (getSuperclass))))
+      mm)))
+
+(defn- gc-non-private-methods [^Class c]
+  (let [not-overridable? (fn [^java.lang.reflect.Method meth]
+                           (let [mods (. meth (getModifiers))]
+                             (or (not (or (Modifier/isPublic mods) (Modifier/isProtected mods)))
+                                 (. Modifier (isStatic mods))
+                                 (. Modifier (isFinal mods))
+                                 (= "finalize" (.getName meth)))))]
+    (gc-filter-methods c not-overridable?)))
+
+(defn- gc-protected-final-methods [^Class c]
+  (let [not-exposable? (fn [^java.lang.reflect.Method meth]
+                         (let [mods (. meth (getModifiers))]
+                           (not (and (Modifier/isProtected mods)
+                                     (Modifier/isFinal mods)
+                                     (not (Modifier/isStatic mods))))))]
+    (gc-filter-methods c not-exposable?)))
+
+(defn- gc-instance-methods [^Class c]
+  (remove (fn [^java.lang.reflect.Method meth]
+            (Modifier/isStatic (.getModifiers meth)))
+          (.getMethods c)))
+
+(defn- gc-ctor-sigs [^Class super]
+  (for [^Constructor ctor (. super (getDeclaredConstructors))
+        :when (not (. Modifier (isPrivate (. ctor (getModifiers)))))]
+    (apply vector (. ctor (getParameterTypes)))))
+
+(defn- gc-escape-class-name [^Class c]
+  (.. (.getSimpleName c)
+      (replace "[]" "<>")))
+
+(defn- gc-overload-name [mname pclasses]
+  (if (seq pclasses)
+    (apply str mname (interleave (repeat \-)
+                                 (map gc-escape-class-name pclasses)))
+    (str mname "-void")))
+
+(defn- ^java.lang.reflect.Field gc-find-field [^Class c f]
+  (let [start-class c]
+    (loop [c c]
+      (if (= c Object)
+        (throw (new Exception (str "field, " f ", not defined in class, " start-class ", or its ancestors")))
+        (let [dflds (.getDeclaredFields c)
+              rfld (first (filter #(= f (.getName ^java.lang.reflect.Field %)) dflds))]
+          (or rfld (recur (.getSuperclass c))))))))
+
+(defn- gc-type
+  "The Java forms' type of class c (SPEC §4.3): a primitive's name, an array's element type
+  and dimensions (String/1), else the class's binary name."
+  [^Class c]
+  (if (.isArray c)
+    (loop [e c n 0]
+      (if (.isArray e)
+        (recur (.getComponentType e) (inc n))
+        (symbol (str (gc-type e)) (str n))))
+    (symbol (.getName c))))
+
+(defn- gc-tag [sym ^Class c] (with-meta sym {:tag (gc-type c)}))
+
+(defn- gc-unbox
+  "The value x (an Object) as rclass, as ASM's GeneratorAdapter.unbox: a cast for a reference
+  type, the primitive's value of its wrapper otherwise."
+  [x ^Class rclass]
+  (cond
+    (= rclass Object) x
+    (not (.isPrimitive rclass)) (list 'cast (gc-type rclass) x)
+    (= rclass Boolean/TYPE) (list '.booleanValue (list 'cast 'java.lang.Boolean x))
+    (= rclass Character/TYPE) (list '.charValue (list 'cast 'java.lang.Character x))
+    :else (list (symbol (str "." (.getName rclass) "Value")) (list 'cast 'java.lang.Number x))))
+
+(defn- gc-load-impl
+  "The generated class's static initializer's load of its implementing namespace (Clojure's
+  Util.loadWithClass of its __init class): required when no lib of that name is loaded."
+  [^String impl-ns]
+  (let [n (symbol impl-ns)]
+    (when-not (contains? @*loaded-libs* n)
+      (require n))
+    nil))
+
+(defn- generate-class
+  "The Java form of the class gen-class's options-map describes (Clojure's generate-class)."
+  [options-map]
+  (validate-generate-class-options options-map)
+  (let [default-options {:prefix "-" :load-impl-ns true :impl-ns (ns-name *ns*)}
+        {:keys [name extends implements constructors methods main factory state init exposes
+                exposes-methods prefix load-impl-ns impl-ns post-init]}
+          (merge default-options options-map)
+        name (str name)
+        super (if extends (the-class extends) Object)
+        interfaces (map the-class implements)
+        supers (cons super interfaces)
+        ctor-sig-map (or constructors (zipmap (gc-ctor-sigs super) (gc-ctor-sigs super)))
+        impl-pkg-name (str impl-ns)
+        init-name (str init)
+        post-init-name (str post-init)
+        factory-name (str factory)
+        state-name (str state)
+        main-name "main"
+        var-name (fn [s] (arbace.lang.Compiler/munge (str s "__var")))
+        all-sigs (distinct (concat (map #(let [[m p] (key %)] {m [p]}) (mapcat gc-non-private-methods supers))
+                                   (map (fn [[m p]] {(str m) [p]}) methods)))
+        sigs-by-name (apply merge-with concat {} all-sigs)
+        overloads (into1 {} (filter (fn [[m s]] (next s)) sigs-by-name))
+        var-fields (concat (when init [init-name])
+                           (when post-init [post-init-name])
+                           (when main [main-name])
+                           (distinct (concat (keys sigs-by-name)
+                                             (mapcat (fn [[m s]] (map #(gc-overload-name m (map the-class %)) s)) overloads)
+                                             (mapcat (comp (partial map str) vals val) exposes))))
+        ;; the var's fn, or nil when the var is unbound
+        get-var (fn [v] (let [f (symbol (var-name v))] (list 'if (list '.isBound f) (list '.get f) nil)))
+        unsupported (fn [mname] (list 'throw (list 'UnsupportedOperationException.
+                                                   (str mname " (" impl-pkg-name "/" prefix mname " not defined?)"))))
+        params (fn [pclasses] (vec (map (fn [i c] (gc-tag (symbol (str "p" i)) c)) (range) pclasses)))
+        args (fn [pclasses] (map #(symbol (str "p" %)) (range (count pclasses))))
+        ;; else-gen: a form of the method's alternative given its name and parameter symbols
+        forwarding-method
+        (fn [mname pclasses rclass as-static else-gen]
+          (let [mname (str mname)
+                pclasses (map the-class pclasses)
+                rclass (the-class rclass)
+                void? (= rclass Void/TYPE)
+                as (args pclasses)
+                is-overload (seq (overloads mname))
+                ret (fn [form] (cond (and (seq? form) (= 'throw (first form))) form
+                                 void? (list 'do form '(return))
+                                 :else (list 'return form)))
+                body (if (> (count pclasses) 18)
+                       [(ret (else-gen mname as))]
+                       [(list 'let [(with-meta 'f {:mutable true})
+                                    (if is-overload (get-var (gc-overload-name mname pclasses)) nil)]
+                              (list 'when '(nil? f) (list 'set! 'f (get-var mname)))
+                              (list 'when '(nil? f) (ret (else-gen mname as)))
+                              (let [call (apply list '.invoke '(cast arbace.lang.IFn f)
+                                                (concat (when-not as-static ['this]) as))]
+                                (if void? call (list 'return (gc-unbox call rclass)))))])]
+            (apply list 'method (with-meta (symbol mname) (if as-static {:public true :static true} {:public true}))
+                   (with-meta (vec (concat (when-not as-static ['this]) (params pclasses))) {:tag (gc-type rclass)})
+                   body)))
+        super-call (fn [^Class target] (fn [mname as] (apply list (symbol (str "." mname))
+                                                              (if (.isInterface target) (symbol (.getName target) "super") 'super)
+                                                              as)))
+        unsupported-gen (fn [mname _] (unsupported mname))
+        mm (gc-non-private-methods super)
+        cname (symbol name)
+        statics (for [v var-fields]
+                  (list 'field (with-meta (symbol (var-name v)) {:private true :static true :final true :tag 'arbace.lang.Var})))
+        state-field (when state
+                      [(list 'field (with-meta (symbol state-name) {:public true :final true :tag 'java.lang.Object}))])
+        clinit (list* 'static-initializer
+                      (concat
+                        (for [v var-fields]
+                          (list 'set! (symbol (var-name v))
+                                (list 'arbace.lang.Var/internPrivate impl-pkg-name (str prefix v))))
+                        (when load-impl-ns
+                          [(list '.invoke (list 'arbace.lang.RT/var "arbace.core" "gc-load-impl") impl-pkg-name)])))
+        ctors (mapcat
+                (fn [[pclasses super-pclasses]]
+                  (let [pclasses (map the-class pclasses)
+                        super-pclasses (map the-class super-pclasses)
+                        as (args pclasses)
+                        ps (params pclasses)
+                        init-body
+                        (if init
+                          [(list 'let ['f (get-var init-name)]
+                                 (list 'when '(nil? f)
+                                       (list 'throw (list 'UnsupportedOperationException. (str impl-pkg-name "/" prefix init-name " not defined"))))
+                                 (list 'let ['r (apply list '.invoke '(cast arbace.lang.IFn f) as)
+                                             'sa '(arbace.lang.RT/nth r 0)]
+                                       (apply list 'super.
+                                              (map (fn [i c] (gc-unbox (list 'arbace.lang.RT/nth 'sa (int i)) c)) (range) super-pclasses))
+                                       (if state
+                                         (list 'set! (list (symbol (str ".-" state-name)) 'this) '(arbace.lang.RT/nth r 1))
+                                         nil)))]
+                          (if (= pclasses super-pclasses)
+                            [(apply list 'super. as)]
+                            (throw (new Exception ":init not specified, but ctor and super ctor args differ"))))
+                        post-init-body
+                        (when post-init
+                          [(list 'let ['f (get-var post-init-name)]
+                                 (list 'when '(nil? f)
+                                       (list 'throw (list 'UnsupportedOperationException. (str impl-pkg-name "/" prefix post-init-name " not defined"))))
+                                 (apply list '.invoke '(cast arbace.lang.IFn f) 'this as))])]
+                    (concat
+                      [(apply list 'constructor (with-meta (vec (cons 'this ps)) {:public true})
+                              (concat init-body post-init-body))]
+                      (when factory
+                        [(list 'method (with-meta (symbol factory-name) {:public true :static true})
+                               (with-meta ps {:tag cname})
+                               (apply list (symbol (str name ".")) as))]))))
+                ctor-sig-map)
+        super-methods (for [^java.lang.reflect.Method meth (vals mm)]
+                        (forwarding-method (.getName meth) (.getParameterTypes meth) (.getReturnType meth) false
+                                           (super-call super)))
+        ;; an interface's default method (a class of the world's: the interpreter cannot call
+        ;; Iface.super's on one, j2g's Dyn can): not a method of the Java form but a fn set after
+        ;; it, for dispatch only (no member table entry, reflection finding the interface's),
+        ;; answering Compiler$Dyn's super marker without a fn, so that Dyn's Go method runs the
+        ;; default method (arbace.j2g.dyn's iface-fallback), as Clojure's emit-super-call
+        [iface-methods defaults]
+          (let [[_ acc ds]
+                (reduce1 (fn [[mm acc ds] ^java.lang.reflect.Method meth]
+                           (cond
+                             (contains? mm (method-sig meth)) [mm acc ds]
+                             (.isDefault meth) [(assoc mm (method-sig meth) meth) acc (conj ds meth)]
+                             :else [(assoc mm (method-sig meth) meth)
+                                    (conj acc (forwarding-method (.getName meth) (.getParameterTypes meth) (.getReturnType meth) false
+                                                                 unsupported-gen))
+                                    ds]))
+                         [mm [] []] (mapcat gc-instance-methods interfaces))]
+            [acc (vec (for [^java.lang.reflect.Method meth ds
+                            :let [mname (.getName meth) pcs (.getParameterTypes meth)]]
+                        {:name mname :params pcs :ret (.getReturnType meth)
+                         :vars (vec (concat (when (seq (overloads mname))
+                                              [(gc-overload-name mname (seq pcs))])
+                                            [mname]))}))])
+        extra-methods (for [[mname pclasses rclass :as msig] methods]
+                        (forwarding-method mname pclasses rclass (:static (meta msig)) unsupported-gen))
+        exposers (for [[local-mname ^java.lang.reflect.Method m]
+                       (reduce1 (fn [ms [[name _ _] m]]
+                                  (if (contains? exposes-methods (symbol name))
+                                    (conj ms [((symbol name) exposes-methods) m])
+                                    ms)) [] (concat (seq mm) (seq (gc-protected-final-methods super))))]
+                   (let [pcs (.getParameterTypes m)
+                         rclass (.getReturnType m)
+                         call (apply list (symbol (str "." (.getName m))) 'super (args pcs))]
+                     (list 'method (with-meta (symbol (str local-mname)) {:public true})
+                           (with-meta (vec (cons 'this (params pcs))) {:tag (gc-type rclass)})
+                           (if (= rclass Void/TYPE) call (list 'return call)))))
+        main-method (when main
+                      [(list 'method (with-meta 'main {:public true :static true})
+                             (with-meta [(gc-tag 'args (class (make-array String 0)))] {:tag 'void})
+                             (list 'let ['f (get-var main-name)]
+                                   (list 'when '(nil? f)
+                                         (list 'throw (list 'UnsupportedOperationException. (str impl-pkg-name "/" prefix main-name " not defined"))))
+                                   '(.applyTo (cast arbace.lang.IFn f) (arbace.lang.RT/seq args))))])
+        field-exposers (mapcat
+                         (fn [[f {getter :get setter :set}]]
+                           (let [fld (gc-find-field super (str f))
+                                 ftype (.getType fld)
+                                 static? (Modifier/isStatic (.getModifiers fld))
+                                 mods (if static? {:public true :static true} {:public true})
+                                 place (if static? (symbol (.getName super) (str f)) (list (symbol (str ".-" f)) 'super))]
+                             (concat
+                               (when getter
+                                 [(list 'method (with-meta (symbol (str getter)) mods)
+                                        (with-meta (if static? [] '[this]) {:tag (gc-type ftype)})
+                                        (list 'return place))])
+                               (when setter
+                                 [(list 'method (with-meta (symbol (str setter)) mods)
+                                        (with-meta (vec (concat (when-not static? '[this]) [(gc-tag 'v ftype)])) {:tag 'void})
+                                        (list 'set! place 'v))]))))
+                         exposes)]
+    (with-meta
+     (apply list 'defclass (with-meta cname {:public true})
+           (concat
+             (when-not (some #{\.} name) [:package ""])
+             (when-not (= super Object) [:extends (gc-type super)])
+             (when (seq interfaces) [:implements (vec (map gc-type interfaces))])
+             statics state-field [clinit] ctors super-methods iface-methods extra-methods exposers
+             main-method field-exposers))
+     {::defaults defaults ::impl-ns impl-pkg-name ::prefix prefix})))
+
+(defn- gen-class-ns
+  "The namespace gen-class's Java forms are evaluated in, arbace.genclass (arbace.core referred):
+  not the namespace of the gen-class form, which a class need not be imported into (Clojure's
+  gen-class imports nothing) and whose ns form calls gen-class before it refers arbace.core."
+  []
+  (or (find-ns 'arbace.genclass)
+      (let [n (create-ns 'arbace.genclass)]
+        (binding [*ns* n] (refer 'arbace.core))
+        n)))
+
+(defn gen-class*
+  "Defines the class of gen-class's options-map (its :impl-ns the namespace that evaluated
+  gen-class) at run time, as a Java form, and answers it (doc/CLOJURE-DESIGN-REVIEW.md, CDR3).
+  A superclass the Go build's Java forms cannot extend (Compiler$CFGo/canExtend: Object, the
+  world's classes of arbace.j2g.dyn/sub-supers, an interpreted class) gives a class of that name
+  extending Object whose constructor throws, as a proxy of such a class does."
+  {:added "arbace"}
+  [options-map]
+  (let [super (when-let [e (:extends options-map)] (the-class e))]
+    (try
+      (let [form (generate-class options-map)
+            {ds ::defaults impl ::impl-ns prefix ::prefix} (meta form)
+            c (binding [*ns* (gen-class-ns)] (eval form))]
+        (doseq [{:keys [name params ret vars]} ds]
+          (let [vs (vec (map #(arbace.lang.Var/internPrivate impl (str prefix %)) vars))]
+            (arbace.lang.Compiler$CFGo/setMethod
+              c name params ret (int (bit-or java.lang.reflect.Modifier/PUBLIC 0x40000000))
+              (fn [this & args]
+                (if-let [f (some (fn [^arbace.lang.Var v] (when (.isBound v) (.get v))) vs)]
+                  (apply f this args)
+                  (Compiler$Dyn/superMarker))))))
+        c)
+      (catch Throwable t
+        (if (and super (not= super Object) (not (arbace.lang.Compiler$CFGo/canExtend super)))
+          (let [why (str "gen-class " (:name options-map) ": the Go build's Java forms cannot extend "
+                         (.getName ^Class super) " yet")
+                name (str (:name options-map))]
+            (binding [*ns* (gen-class-ns)] (eval (list* 'defclass (with-meta (symbol name) {:public true})
+                         (concat
+                           (when-not (some #{\.} name) [:package ""])
+                           [(list 'constructor (with-meta '[this] {:public true})
+                                  (list 'throw (list 'UnsupportedOperationException. why)))])))))
+          (throw t))))))
+
 (defmacro gen-class
-  "Clojure's gen-class generates the bytecode of a named class, for AOT compilation only: when
-  not compiling it does nothing. Arbace has no AOT compilation (no bytecode back end, B1-PLAN.md
-  D6; doc/STANDALONE-SURVEY.md D13): it does nothing, so that (ns ... (:gen-class)) loads."
+  "When compiling, generates compiled bytecode for a class with the
+  given package-qualified :name (which, as all names in these
+  parameters, can be a string or symbol), and writes the .class file
+  to the *compile-path* directory.  When not compiling, does
+  nothing. The gen-class construct contains no implementation, as the
+  implementation will be dynamically sought by the generated class in
+  functions in an implementing Clojure namespace. Given a generated
+  class org.mydomain.MyClass with a method named mymethod, gen-class
+  will generate an implementation that looks for a function named by
+  (str prefix mymethod) (default prefix: \"-\") in a
+  Clojure namespace specified by :impl-ns
+  (defaults to the current namespace). All inherited methods,
+  generated methods, and init and main functions (see :methods, :init,
+  and :main below) will be found similarly prefixed. By default, the
+  static initializer for the generated class will attempt to load the
+  Clojure support code for the class as a resource from the classpath,
+  e.g. in the example case, ``org/mydomain/MyClass__init.class``. This
+  behavior can be controlled by :load-impl-ns
+
+  Arbace writes no class files: the class is defined when the gen-class
+  form is evaluated, as a Java form, and its static initializer requires
+  the implementing namespace when it is not loaded (doc/CLOJURE-DESIGN-REVIEW.md,
+  CDR3). Its options are Clojure's: :name, :extends, :implements, :init,
+  :constructors, :post-init, :methods (^{:static true} for a static one),
+  :main, :factory, :state, :exposes, :exposes-methods, :prefix, :impl-ns
+  and :load-impl-ns (Clojure's docstring, genclass.clj). Note that methods
+  with a maximum of 18 parameters are supported."
   {:added "1.0"}
   [& options]
-  nil)
+  (let [options-map (into1 {} (map vec (partition 2 options)))]
+    (list 'arbace.core/gen-class*
+          (list 'quote (merge {:impl-ns (ns-name *ns*)} options-map)))))
+
+(defn- gi-class
+  "A type of gen-interface's (the-class): Clojure's generate-interface names it in the
+  interface's descriptors without loading it (asm-type), so a hint naming a class of the same
+  file by its namespace's spelling (clojure.test-clojure.genclass.examples.ArrayDefInterface,
+  definterface's class being clojure.test_clojure...) still makes the interface; the Go build
+  needs the Class, so such a name is resolved as munged (- to _), as definterface defines it."
+  [x]
+  (try
+    (the-class x)
+    (catch ClassNotFoundException e
+      (let [s (str x)]
+        (if (and (symbol? x) (.contains s "-"))
+          (the-class (symbol (.replace s \- \_)))
+          (throw e))))))
 
 (defmacro gen-interface
   "Makes an interface with the given package-qualified :name, extending the :extends
@@ -79,10 +482,10 @@
       (throw
         (IllegalArgumentException. "Interface methods must not contain '-'")))
     (let [c (arbace.lang.Compiler$Image/defineInterface
-              (str name) (into-array Class (map the-class extends)))]
+              (str name) (into-array Class (map gi-class extends)))]
       (doseq [[mname pclasses rclass] methods]
         (arbace.lang.Compiler$Image/addInterfaceMethod
-          c (str mname) (into-array Class (map the-class pclasses)) (the-class rclass)))
+          c (str mname) (into-array Class (map gi-class pclasses)) (gi-class rclass)))
       ;; an interface annotated @FunctionalInterface (^{java.lang.FunctionalInterface true} on its
       ;; name, as definterface keeps it): the interface has no annotation data in the Go build
       ;; (no class file), so a fn is adapted to it by a reify of its one method, registered with

@@ -280,7 +280,10 @@
    "java/lang/ref/WeakReference" "java/lang/ref/SoftReference" "java/lang/InheritableThreadLocal"
    "java/util/concurrent/atomic/AtomicReference" "java/util/concurrent/CopyOnWriteArraySet"
    "java/util/concurrent/CopyOnWriteArrayList" "java/util/concurrent/RecursiveAction"
-   "java/util/concurrent/RecursiveTask"])
+   "java/util/concurrent/RecursiveTask"
+   ;; CDR11 (doc/CLOJURE-DESIGN-REVIEW.md, the user, 2026-11-06): jrt's hand-written ClassLoader, which
+   ;; gen-class's :extends java.lang.ClassLoader extends (Clojure's suite's genclass ProtectedFinalTester)
+   "java/lang/ClassLoader"])
 
 (def ^:private proxy-super? (set (concat proxy-supers class-supers)))
 
@@ -512,6 +515,35 @@
                     {:kind :default :owner c :method m})
             cands (remove (fn [x] (some #(and (not= (:owner %) (:owner x)) (env/subclass? (:owner %) (:owner x))) cands)) cands)]
         (first cands))))
+
+(defn serial-super
+  "CDR10 (doc/go/JRT-NOTES.md, \"Serialization\"): when class n's objects are made for deserialization
+  by jrt's allocation (jdk.internal.jrt.SerialAlloc, ReflectionFactory.newConstructorForSerialization's
+  rule), [S ctor] for its first superclass S that is not Serializable and S's no-argument constructor
+  (nil for Object's, which does nothing); else nil. Only when java.io.ObjectStreamClass is in the world,
+  for a concrete translated class of it that is Serializable and neither an enum nor a record (those
+  are made by name and by their canonical constructor), S's constructor accessible to n (public,
+  protected, or of n's package) and taking nothing in Go (no outer instance)."
+  [n]
+  (when (and (translated? "java/io/ObjectStreamClass") (translated? n)
+             (not (interface? n)) (not (abstract? n)))
+    (let [d (a/decl n)
+          ser? (fn [c] (some #{"java/io/Serializable"} (env/all-supertypes c)))]
+      (when (and d (not (#{:enum :record} (:kind d))) (not (:enum-body d)) (ser? n)
+                 (not (#{:local :anon} (:nesting d))))
+        (let [s (first (remove ser? (rest (superclass-chain n))))]
+          (cond
+            (or (nil? s) (= s "java/lang/Object")) [nil nil]
+            (not (in-world? s)) nil
+            :else
+            (let [k (first (filter #(and (= "<init>" (:name %)) (= "()V" (:desc %))) (methods-of s)))
+                  fl (or (:flags k) 0)
+                  ok (and k (not (private? k))
+                          (or (has? fl Opcodes/ACC_PUBLIC) (has? fl Opcodes/ACC_PROTECTED)
+                              (= (pkg s) (pkg n))))
+                  sd (a/decl s)]
+              (when (and ok (or (not sd) (not (:outer-instance? sd))))
+                [s k]))))))))
 
 (defn code-class?
   "Is class n a compiled fn's code (standalone S6, :c2j/code; SA156)? Not a Java object in Go:
