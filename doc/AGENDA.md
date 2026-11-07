@@ -23,10 +23,11 @@ The current state of the work. This file is rewritten as things change. For the 
 - Stage 0 hosts every Arbace tool (c2j, j2g, repr/go, repr/clojure, build/go, the suite's runner, ci and repr/c),
   compiled into it; `bin/arbace-go --build` is a Go-hosted build, `--fixpoint` the chain G1 → G2 → G3. The program's
   namespaces are compiled to Go (`ARBACE_AOT=1`, since S6).
-- The REAP matrix (`bin/reap`): four crops, Clojure, Java 26, Go 1.27.1 and C (C23 against gcc 15.2), 16 of 16 cells
-  checked, none failing, every non-pass in a recorded class ([FULL-SUPPORT-SURVEY.md](FULL-SUPPORT-SURVEY.md), "REAP
-  v3's divergences"). The other crops (OCaml, Scheme, C++23, net/http) have their checks and classes, out of the matrix
-  and of the gate; since 2026-11-04 every crop has a native reader (on held branches for OCaml, Haskell, Rust, C++).
+- The REAP matrix (`bin/reap`): four crops at the tag, Clojure, Java 26, Go 1.27.1 and C (C23 against gcc 15.2), 16 of 16
+  cells checked, none failing, every non-pass in a recorded class ([FULL-SUPPORT-SURVEY.md](FULL-SUPPORT-SURVEY.md), "REAP
+  v3's divergences"); with batch 1 (below) eight rows, C++, Scheme, OCaml and Python joining, 30 of 32 cells checked. The
+  other crops (Haskell, Rust, LLVM IR, net/http) have their checks and classes, out of the matrix and of the gate; since
+  2026-11-04 every crop has a native reader (on held branches for OCaml, Haskell, Rust, C++).
 - The gate is keyed and audited (GT1-GT7, [GATE-SURVEY.md](GATE-SURVEY.md)); since 2026-11-02 `bin/gate --full` runs C's
   seven full checks as heavy steps (about 7 to 8 hours more, serial).
 - The JVM (Java 26 from jdk26u's own build, 2026-11-02) runs only the frozen jar of `arbace-for-java-26-v4` (pinned by
@@ -100,14 +101,64 @@ The nights to the tag:
    logs; then the clean run of the four crops, `.tmp/night5/clean.sh`, estimated about 12 hours, over one night's plan
    (the options to fit it: `.tmp/night5/clean-fit.md`). Then the tag, by hand, on the record.
 
+## Batch 1 (merged on `batch1`, 2026-11-07, for tonight's night; not yet on `next`)
+
+Merge plan batch 1 (`.tmp/tag-v2/merge-plan-rehearsal-1105.md` §4 step 1, `merge-plan.md` §3), on `e16e4c1d`, one merge
+commit a branch: `cpp-cx8`, `cpp-cx9`, `cpp-cx10` + `gt9v-cpp`, `scheme-sm9` + `gt9v-scheme`, `ocaml-o8` + `gt9v-ocaml`,
+`e6f88eb3` (embed-crops 1-2: the crops' c2j checks), `gate-crops`, `zed-survey`, `java-deferred-triage`,
+`go-design-review`, `gt9-build` (with the keys commit `100f8e0b`, PYS30 (a)) and `gt9-verbs`, three of `crop-controls`'
+commits picked (C++/LLVM, OCaml, Scheme: the fragments name their controls), GT9's fragments `cpp`, `scheme`, `ocaml`
+spliced, `mac/201-python-py7-py11` (`7df8864b`; W2's embedding and the REQUESTs into goi, crt and the planner left out,
+below), `crops-score` with its after-tag patch for goi (CSP5), and `cppi-check` (C++'s eval and AOT cells; not in the
+plan, needed by the C++ row: `bin/reap` had 180 problems without it). Not done: `mac/192`'s redo (superseded: GT9's
+fragments read SC233's and OC161's records by an `:id-re` of one group, GTS213 (a)).
+
+- `bin/reap`: eight rows, 32 cells, 30 checked (Python's eval and AOT "no check yet" until its amd64 records), 0 problems.
+- `bin/crops-score` (main → batch1; completeness / maturity / independence): C++ 0 / 0 / 20 → 75.4 / 90.2 / 20; OCaml
+  0 / 0 / 20 → 75.6 / 100 / 20; Scheme 0 / 0 / 80 → 98.3 / 87.5 / 80; Python 0 / 0 / 20 → 0 / 83.3 / 20; Go 93.9 / 86.0 →
+  94.1 / 87.5; C maturity 95.8 → 100; Java maturity 98.3 → 100; Haskell, Rust, LLVM IR 0 (their rows are later batches').
+- Keys (first 12 hex): main gate `0276a6db9960`, runtime `f29a38759450`, javac `a3300f566f6c`; after the keys commit
+  `98ffc164199f`, `c40e01ac561c`, `8c9a6a206dd7`; at batch1's head `d42c7a5dd92d`, `c40e01ac561c`, `ab86bd52d01b` (moved
+  after the keys commit only by `bin/lib/version.bash`'s list gaining pyi's lazy modules and `bin/goi`'s CSP5 patch;
+  the runtime key not since).
+- Tonight (`bin/gate --full --plan`: 288 steps, 272 run, 2 skip; about 10.2 h of measured step seconds, serial, plus the
+  builds and the three new crops' first passes, about 1.3 h estimated (GT9): about 11.5 h, over the 8 h plan): every
+  step on `:gate`, `:prog`, `:javac` and `:javac-prog` (the keys commit, `bin/arbace-go`, `bin/goi`, embed.ae), C's
+  steps (crops-score's CSP5 records and scripts are among their inputs, 2.1 h), and the new crops' 59 never passed.
+
+### Proposed (batch 1)
+
+1. **Tonight's fit.** (a) The essential gate, `bin/reap`, `crops-score` and the three crops' chains tonight, the rest of
+   `--full` the night after (keyed: what passed is kept); cost: a second night. (b) Leave CSP5's C part (crops-score's
+   rewritten `test/c/ref-gcc15.edn`, `test/repr/c/{annot,roundtrip}-results.edn` and their writers) for the re-seed window
+   W, which reruns C anyway; saves C's 2.1 h tonight; cost: C's maturity 100 → 95.8 until W, a revert commit now.
+   (c) Run `--full` whole into the slack (about 11.5 h). *Recommended: (a).*
+2. **The deferred parts of Python's branch.** Left out of the merge (taken as next's side, so a later merge of the branch
+   does not bring them; they are cherry-picked): W2's embedding `101c0d03`, `a420fa0d`, `0525fa89` (with `7ab5364b`'s
+   `bin/pyi table-check`, merged but failing until then), the REQUESTs `656dfcdc` and `c9047d52` (goi's), `3db255c5` (crt for
+   tamago), `cc463c8d` (the planner's `:slice-re`). (a) The embedding and goi's and crt's REQUESTs at W (PYS18 (a)), the
+   planner's with GTS240's runner change (GTS243 (a)), and `test/gate/crops/python.edn` spliced after Python's records
+   night; (b) the REQUESTs now, on a day branch with their owners' sample checks; cost: a gate rekey of goi's and C's steps.
+   *Recommended: (a).*
+3. **cppi-check's `cpp-aot-essential`** (4 GiB measured) is not a step: GTS215 (a) holds a new crop's essential checks to
+   3 GiB. (a) Leave it out (the AOT level is checked in `--full`'s `cpp-aot`); (b) run it at `CPPI_THREADS=1` and measure;
+   (c) raise C++'s essential limit. *Recommended: (a), then (b).*
+4. **cppi-check outside the plan.** Merged because the C++ row needs it (its records, the sampling, the cells); the
+   2026-11-06 branch `cppi-deferred` (CP230-CP231, on `cppi-check`) is a clean descendant of batch 1's and the next C++ step.
+   (a) Merge `cppi-deferred` with the next batch's day; (b) with batch 1 before tonight. *Recommended: (a).*
+5. **Candidates of the 2026-11-06 day branches** (clean on batch 1's branches, no later batch's ancestry, not merged):
+   `cppi-deferred` (on cx8-10, cppi-check), `ocaml-libs4` (on o8), `scheme-smr7` (on sm9), `java-jc9c` (on
+   java-deferred-triage); independent of every batch (on main's line): `clojure-cdr`, `goi-escape`, `c-deferred`.
+   (a) A batch 1b day for them after tonight's gate; (b) each with its crop's later batch. *Recommended: (a) for the four
+   on batch 1's branches (they extend its rows), (b) for the three others.*
+
 ## After the tag
 
-- **The held branches, in batches into `next`** (`.tmp/tag-v2/merge-plan.md`): the crops' rows (C++ CX8-CX10, Scheme
-  SM9, OCaml O8, GT9's plan, goi's frames), the LLVM IR line (the reader's gaps, `:full`, the verifier, the lowering of
+- **The held branches, in batches into `next`** (`.tmp/tag-v2/merge-plan.md`): the crops' rows (batch 1, above), the LLVM IR line (the reader's gaps, `:full`, the verifier, the lowering of
   `-g` IR), the native readers with their error messages (OCaml: Menhir's tables generated from parser.mly; Haskell:
   Happy's from Parser.y, a clean-room traditional cpp; Rust: rustc's parser rule for rule; C++: CX11 with a minimal Sema
-  and the tree check), the negative controls, Python's line (`mac/201-python-py7-py11`, then its amd64 records and
-  PY11), and the re-seed window W (the evaluator's speed, the embedding of C++, Scheme and OCaml's oi).
+  and the tree check), the negative controls, Python's amd64 records night and PY11 (its
+  line merged in batch 1), and the re-seed window W (the evaluator's speed, the embedding of C++, Scheme and OCaml's oi).
 - **GT9** (the crops' gate, GTS210-GTS223 decided (a)), CS268, LLS1-LLS16.
 - Python on the Mac VM: 202 done (`mac/201-python-py7-py11` 9540946b); queued 203-206 (the user, 2026-11-05, in order):
   202's lows, `_csv` and `mmap` as Go ports (PYS22), pinned wheels and the installer (PYS23-PYS25), `bin/pyi c2j-check`.
