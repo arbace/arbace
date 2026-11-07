@@ -13,7 +13,7 @@
         the printer (SPEC §9.4): each forms file to DIR/PATH, PATH its rs/file's :path; mode
         :lines' layout, the pretty layout of the forms without their positions (RR4), or the full
         layout of mode :full's forms (RR3).
-    compare --corpus FILE --orig DIR --cand DIR --known FILE --report FILE [--forms-report FILE]
+    compare --corpus FILE --orig DIR --cand DIR --known FILE --report FILE [--forms-report FILE] [--controls FILE]
             [--only REGEX] [--times TEXT] [--trees-only]
         the round trip's tree level (SPEC §11.2): for each file of the corpus, the helper's tree and
         lines of the original (ORIG/FILE.tree, .lines) against the printed file's
@@ -265,8 +265,40 @@
                      {:level :lines :status :differs :at i :orig a :cand b :count n})
       :else {:status :ok :spans (count (or ol (read-lines-file orig-lines)))})))
 
+(defn- judge-controls
+  "The round trip's negative controls (GT9, doc/GATE-SURVEY.md, GTS81 (a), \"As built: GT9's controls\"; CONTROLS-FILE, test/rust/
+  roundtrip-controls.edn): each is a crossed pair of two keys of the run (a file of the corpus; at the interface level a crate), both
+  :ok in RESULTS, the subject's printed side judged by the level's own comparison (CROSSED, given the two keys, the function the level
+  applies to every item) against the reference's original side, which must report a difference. Prints `control ID fails as it must`;
+  `control passed: ID ...` when the level judges the pair equal; `control not judged: ID ...` for any other status than a difference (a
+  file of the pair missing); `control left: ID ...` for an item that is not :ok itself, and one line `controls left, not in the run` for the
+  keys the run does not have (--only, another corpus). LEVELS names the levels the controls of the file apply to (a control's :levels, all when it has none). Returns the number of
+  controls that passed or were not judged."
+  [^String controls-file level results crossed]
+  (if-not (and controls-file (.exists (File. controls-file)))
+    0
+    (let [rs (into {} results)
+          bad (atom 0) left (atom [])]
+      (doseq [{:keys [id subject reference levels]} (read-string (slurp controls-file))
+              :when (or (nil? levels) (contains? (set levels) level))]
+        (let [ok? (fn [k] (= :ok (:status (get rs k))))]
+          (cond (not (and (contains? rs subject) (contains? rs reference)))
+                (swap! left conj id)
+                (not (and (ok? subject) (ok? reference)))
+                (println (str "control " id " left: " (if (ok? subject) reference subject) " does not pass the level"))
+                :else
+                (let [r (crossed subject reference)]
+                  (cond (= :ok (:status r))
+                        (do (swap! bad inc) (println (str "control passed: " id " (" subject " against " reference ") is judged equal by the " (name level) " level")))
+                        (not= :differs (:status r))
+                        (do (swap! bad inc) (println (str "control not judged: " id " (" subject " against " reference "): the " (name level) " level says " (pr-str (:status r)) ", not a difference")))
+                        :else (println (str "control " id " fails as it must (" (name level) " level"
+                                            (when (:level r) (str ", " (name (:level r)))) ": differs)")))))))
+      (when (seq @left) (println (str "controls left, not in the run (" (name level) " level): " (str/join " " @left))))
+      @bad)))
+
 (defn- cmd-compare [args]
-  (let [{:keys [opts]} (parse-args args #{"--corpus" "--orig" "--cand" "--known" "--report" "--forms-report" "--only" "--times"})
+  (let [{:keys [opts]} (parse-args args #{"--corpus" "--orig" "--cand" "--known" "--report" "--forms-report" "--only" "--times" "--controls"})
         corpus (read-string (slurp (get opts "--corpus")))
         orig (get opts "--orig")
         cand (get opts "--cand")
@@ -290,7 +322,12 @@
         failing (remove #(= :ok (:status (second %))) results)
         unexpected (remove #(contains? known (first %)) failing)
         fixed (filter #(and (contains? known (first %)) (= :ok (:status (second %)))) results)
-        by-level (frequencies (map (comp :level second) failing))]
+        by-level (frequencies (map (comp :level second) failing))
+        ;; the controls before the prune removes the trees they cross
+        ctl (judge-controls (get opts "--controls") (if (get opts "--trees-only") :pretty :tree) results
+                            (fn [s r] (compare-file (str orig "/" r ".tree") (str cand ".trees/" s ".tree")
+                                                    (str orig "/" r ".lines") (str cand ".trees/" s ".lines")
+                                                    (get opts "--trees-only"))))]
     (when (get opts "--prune")
       ;; the trees of the files found equal removed (the scratch stays small)
       (doseq [[f _] ok
@@ -315,7 +352,7 @@
                         :by-level by-level :unexpected (mapv first unexpected) :fixed (mapv first fixed)
                         :times (get opts "--times")
                         :results (into (sorted-map) (for [[k r] results] [k (dissoc r :detail :cand)]))}))))
-    (if (and (empty? unexpected) (empty? fixed)) 0 1)))
+    (if (and (empty? unexpected) (empty? fixed) (zero? ctl)) 0 1)))
 
 ;;; The text level (SPEC §11.1, §11.3; RR3)
 
@@ -344,7 +381,7 @@
             {:status :differs :at i :bytes [(alength a) (alength b)] :orig (ctx a) :cand (ctx b)}))))))
 
 (defn- cmd-compare-text [args]
-  (let [{:keys [opts]} (parse-args args #{"--corpus" "--orig" "--cand" "--known" "--report" "--forms-report" "--only" "--times"})
+  (let [{:keys [opts]} (parse-args args #{"--corpus" "--orig" "--cand" "--known" "--report" "--forms-report" "--only" "--times" "--controls"})
         corpus (read-string (slurp (get opts "--corpus")))
         orig (get opts "--orig")
         cand (get opts "--cand")
@@ -363,7 +400,8 @@
         ok (filter #(= :ok (:status (second %))) results)
         failing (remove #(= :ok (:status (second %))) results)
         unexpected (remove #(contains? known (first %)) failing)
-        fixed (filter #(and (contains? known (first %)) (= :ok (:status (second %)))) results)]
+        fixed (filter #(and (contains? known (first %)) (= :ok (:status (second %)))) results)
+        ctl (judge-controls (get opts "--controls") :text results (fn [s r] (compare-text-file (str orig "/" r) (str cand "/" s))))]
     (doseq [[i [k r]] (map-indexed vector unexpected)]
       (println "DIFFERS" k (pr-str (dissoc r :orig :cand :detail)))
       (when (< i 10)
@@ -382,7 +420,7 @@
                         :unexpected (mapv first unexpected) :fixed (mapv first fixed)
                         :times (get opts "--times")
                         :results (into (sorted-map) (for [[k r] results] [k (dissoc r :orig :cand)]))}))))
-    (if (and (empty? unexpected) (empty? fixed)) 0 1)))
+    (if (and (empty? unexpected) (empty? fixed) (zero? ctl)) 0 1)))
 
 ;;; The interface level (SPEC §11.1, §11.3; RR2)
 
@@ -485,15 +523,16 @@
 
 (defn compare-crate
   "The interface level of one crate: ORIG/C/C.json against CAND/C/C.json (rustdoc's logs
-  C.log beside them), spans removed"
-  [orig cand c]
-  (let [jf (fn [d] (File. (str d "/" c "/" c ".json")))
-        log (fn [d] (let [f (File. (str d "/" c "/" c ".log"))]
-                      (when (.exists f) (let [ls (str/split-lines (slurp f))] (str/join "\n" (take 12 ls))))))
-        o (jf orig) k (jf cand)]
+  C.log beside them), spans removed; with C2 (a negative control, GT9) the candidate is crate C2's"
+  [orig cand c & [c2]]
+  (let [c2 (or c2 c)
+        jf (fn [d c] (File. (str d "/" c "/" c ".json")))
+        log (fn [d c] (let [f (File. (str d "/" c "/" c ".log"))]
+                        (when (.exists f) (let [ls (str/split-lines (slurp f))] (str/join "\n" (take 12 ls))))))
+        o (jf orig c) k (jf cand c2)]
     (cond
-      (not (.exists o)) {:status :original-fails :detail (log orig)}
-      (not (.exists k)) {:status :printed-fails :detail (log cand)}
+      (not (.exists o)) {:status :original-fails :detail (log orig c)}
+      (not (.exists k)) {:status :printed-fails :detail (log cand c2)}
       :else
       (let [a (strip-spans (slurp o))
             b (strip-spans (slurp k))]
@@ -505,7 +544,7 @@
              :orig (item-at (:text a) i) :cand (item-at (:text b) i)}))))))
 
 (defn- cmd-compare-iface [args]
-  (let [{:keys [opts]} (parse-args args #{"--corpus" "--crates" "--orig" "--cand" "--known" "--report" "--only" "--times"})
+  (let [{:keys [opts]} (parse-args args #{"--corpus" "--crates" "--orig" "--cand" "--known" "--report" "--only" "--times" "--controls"})
         corpus (if-let [f (get opts "--corpus")]
                  (read-string (slurp f))
                  {:crates (for [n (str/split (get opts "--crates" "") #",")] {:name n})})
@@ -522,7 +561,9 @@
         ok (filter #(= :ok (:status (second %))) results)
         failing (remove #(= :ok (:status (second %))) results)
         unexpected (remove #(contains? known (first %)) failing)
-        fixed (filter #(and (contains? known (first %)) (= :ok (:status (second %)))) results)]
+        fixed (filter #(and (contains? known (first %)) (= :ok (:status (second %)))) results)
+        ;; the controls before the prune removes the JSON they cross
+        ctl (judge-controls (get opts "--controls") :iface results (fn [s r] (compare-crate orig cand r s)))]
     (when (get opts "--prune")
       (doseq [[c _] ok d [orig cand]] (.delete (File. (str d "/" c "/" c ".json")))))
     (doseq [[c r] results :when (= :ok (:status r))]
@@ -546,7 +587,7 @@
                         :unexpected (mapv first unexpected) :fixed (mapv first fixed)
                         :times (get opts "--times")
                         :results (into (sorted-map) results)}))))
-    (if (and (empty? unexpected) (empty? fixed)) 0 1)))
+    (if (and (empty? unexpected) (empty? fixed) (zero? ctl)) 0 1)))
 
 ;;; The behaviour level (SPEC §11.1, 5; RR5)
 
