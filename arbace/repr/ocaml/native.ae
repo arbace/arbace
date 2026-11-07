@@ -8,7 +8,7 @@
                                                     (--mode tokens: the layout of mode :full, ocdump's tokens_form)
     read --out OUT [--loc] [--mode tokens] FILE...  each FILE dumped into OUT/BASENAME.ae, named by its basename
     read --root DIR --list LIST --out OUT [--loc] [--mode tokens]   each file of LIST (relative to DIR) into OUT/REL.ae
-    check --root DIR --list LIST --helper HDIR [--mode tokens] [--report FILE]
+    check --root DIR --list LIST --helper HDIR [--mode tokens] [--report FILE] [--controls FILE --corpus NAME]
                                                     native-check: each file of LIST dumped with positions and
                                                     compared byte for byte with the helper's HDIR/REL.ae (ocdump
                                                     --loc; --mode tokens: the layouts, ocdump --mode tokens), so a
@@ -23,7 +23,11 @@
     mutants --root DIR --list LIST --out OUT [--n N] [--seed S]
                                                     N mutants of each file of LIST (default 40, seed 1): one token
                                                     deleted, inserted or swapped with the next, OUT/mNNNNN.ml(i) and
-                                                    OUT/list.txt (each with its origin and edit)"
+                                                    OUT/list.txt (each with its origin and edit)
+                                                    The negative controls (GT9; test/ocaml/native-controls.txt, `CORPUS ID
+                                                    SUBJECT REFERENCE`, --controls FILE --corpus NAME): the subject read
+                                                    natively judged against the helper's dump of the reference, which must
+                                                    differ; one judged equal fails the check"
   (:require [arbace.repr.ocaml.parser :as p]
             [arbace.repr.ocaml.actions :as act]
             [arbace.repr.ocaml.lex :as lex]
@@ -177,6 +181,45 @@
     (layout-text b rel)
     (p/dump b rel (kind-of rel opts) (boolean (get opts "--loc")))))
 
+(defn- verdict
+  "native-check's judgment of the native reader's dump MINE of a file against the helper's THEIRS: :equal (byte for byte), :both-rejected (both
+  reject, the same kind), :failed (the reader failed itself) or :differ."
+  [mine theirs]
+  (let [hk (error-head theirs) mk (error-head mine)]
+    (cond (= mine theirs) :equal
+          (and hk mk (= hk mk)) :both-rejected
+          (str/starts-with? mine "(native-failure") :failed
+          :else :differ)))
+
+(defn- control-lines
+  "The negative controls of the check (GT9, doc/GATE-SURVEY.md, GTS81 (a), \"As built: GT9's controls\"; test/ocaml/native-controls.txt):
+  `CORPUS ID SUBJECT REFERENCE` lines of CONTROLS-FILE for CORPUS, as [id subject reference]."
+  [^String controls-file corpus]
+  (when (and controls-file (.exists (File. controls-file)))
+    (vec (for [l (str/split-lines (slurp controls-file))
+               :let [[c id s r] (str/split (str/trim l) #"\s+")]
+               :when (and c (not (str/starts-with? c "#")) r (= c corpus))]
+           [id s r]))))
+
+(defn- judge-controls
+  "Each control's subject, read natively, judged by `verdict` against the helper's dump of its reference, must :differ (`control ID fails
+  as it must`); :equal or :both-rejected is a control that passed, :failed one not judged; both fail the check. A control whose files
+  the run's list lacks is left. Returns the number that passed or were not judged."
+  [controls files root hdir opts]
+  (let [fs (set files) bad (atom 0)]
+    (doseq [[id s r] controls]
+      (if-not (and (fs s) (fs r))
+        (println (str "control " id " left: " (if (fs s) r s) " is not in the run"))
+        (let [theirs (slurp (str hdir "/" r ".ae"))
+              mine (try (dump-of (read-bytes (str root "/" s)) s (assoc opts "--loc" true))
+                        (catch Throwable t (str "(native-failure " (pr-str (str (.getMessage t))) ")")))
+              v (verdict mine theirs)]
+          (case v
+            :differ (println (str "control " id " fails as it must (" s " read natively differs from the helper's dump of " r ")"))
+            :failed (do (swap! bad inc) (println (str "control not judged: " id " (the native reader failed on " s ")")))
+            (do (swap! bad inc) (println (str "control passed: " id " (" s " against " r ") is judged " (name v) " by the check")))))))
+    @bad))
+
 (defn- do-check [{:keys [opts]}]
   (let [root (get opts "--root") files (list-files (get opts "--list")) hdir (get opts "--helper")
         odir (get opts "--ocamlc")
@@ -191,7 +234,7 @@
                         (swap! bytes-read + (alength b))
                         (dump-of b rel (assoc opts "--loc" true)))
                       (catch Throwable t (str "(native-failure " (pr-str (str (.getMessage t))) ")")))
-            hk (error-head theirs) mk (error-head mine)]
+            v (verdict mine theirs)]
         (when (and odir (not= :toplevel (kind-of rel opts)))
           (let [oc (String. (read-bytes (str odir "/" rel ".err")) "ISO-8859-1")
                 nr (try (report-of (read-bytes path) rel (kind-of rel opts) (or (get opts "--flags") ""))
@@ -202,12 +245,10 @@
                 (swap! st update :reports-equal inc)
                 (do (swap! st update :reports-differ inc)
                     (swap! bad conj [rel :report (str "ocamlc " (pr-str oc) "\n  native " (pr-str nr))]))))))
-        (cond
-          (= mine theirs) (swap! st update :equal inc)
-          (and hk mk (= hk mk)) (swap! st update :both-rejected inc)
-          (str/starts-with? mine "(native-failure")
-          (do (swap! st update :failed inc) (swap! bad conj [rel :failure (subs mine 0 (min 300 (count mine)))]))
-          :else
+        (case v
+          :equal (swap! st update :equal inc)
+          :both-rejected (swap! st update :both-rejected inc)
+          :failed (do (swap! st update :failed inc) (swap! bad conj [rel :failure (subs mine 0 (min 300 (count mine)))]))
           (let [[ln a b] (first-diff-line theirs mine)]
             (swap! st update :differ inc)
             (swap! bad conj [rel :differ (str "line " ln ": helper " (pr-str a) " native " (pr-str b))])))))
@@ -224,7 +265,8 @@
         (spit-mk r (pr-str (cond-> {:files (count files) :equal equal :both-rejected both-rejected :differ differ
                                     :failed failed :problems @bad}
                              odir (assoc :reports reports :reports-equal reports-equal)))))
-      (System/exit (if (and (zero? differ) (zero? failed) (zero? reports-differ)) 0 1)))))
+      (let [ctl (judge-controls (control-lines (get opts "--controls") (get opts "--corpus")) files root hdir opts)]
+        (System/exit (if (and (zero? differ) (zero? failed) (zero? reports-differ) (zero? ctl)) 0 1))))))
 
 (defn- do-read [{:keys [opts args]}]
   (let [root (get opts "--root") out (get opts "--out")
@@ -331,7 +373,7 @@
     (case verb
       "dump" (do-dump (pa #{"--file" "--mode"}))
       "read" (do-read (pa #{"--root" "--list" "--out" "--mode"}))
-      "check" (do-check (pa #{"--root" "--list" "--helper" "--report" "--mode" "--ocamlc" "--flags"}))
+      "check" (do-check (pa #{"--root" "--list" "--helper" "--report" "--mode" "--ocamlc" "--flags" "--controls" "--corpus"}))
       "report" (do-report (pa #{"--file" "--flags"}))
       "errors-check" (do-errors-check (pa #{"--dir"}))
       "mutants" (do-mutants (pa #{"--root" "--list" "--out" "--n" "--seed"}))
