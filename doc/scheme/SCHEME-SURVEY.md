@@ -3337,8 +3337,7 @@ run them alone (7 s, 0.5 GB).
 `scheme-smr7`'s check (49 programs, fib out): 27 judged by their own verdict (55.1%); of them 22 agree on a pass, 0 on a fail, 3 are failures the
 recorded-output judge passes because Chez fails the same tests (`racket/base` 5 of 2,049, `racket/exceptions` 1 of 12, `racket/io/ports` 2 of 399:
 `chez-fails-too`), 2 end with the same error in both (`racket/run`, `racket/test`: the library `(tests r6rs run)` is not found by either:
-`chez-errors-too`), and 0 pass their own verdict where the recorded-output judge finds an item. The other 22 (Larceny's 13, si's own 10 but
-`si/amb`...: no report) have none. The compiled check (essential subset, 11 programs): 4 by their own verdict, 2 agree on a pass, 1 on a fail
+`chez-errors-too`), and 0 pass their own verdict where the recorded-output judge finds an item. The other 22 (Larceny's 12 and si's own 10 programs: they print values, no report) have none. The compiled check (essential subset, 11 programs): 4 by their own verdict, 2 agree on a pass, 1 on a fail
 (`racket/syntax-case` refused), 1 `chez-fails-too` (`racket/base`). The records: 27 of 50 programs in `check-linux-amd64.edn` and in
 `check-aot-linux-amd64.edn`. Not an own verdict's blind spot: a run that stops early with status 0 reports fewer tests, which only the recorded count
 sees (`count` items); the recorded-output judge stays beside.
