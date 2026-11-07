@@ -190,13 +190,13 @@ public final class HostChannels {
     public static native int makePipe0(boolean blocking, int[] fds, int[] err);
 
     /** IOUtil.write1: 1, UNAVAILABLE, INTERRUPTED or THROWN. */
-    public static native int write1_0(int fd, byte b, int[] err);
+    public static native int writeOne0(int fd, byte b, int[] err);
 
     /** IOUtil.drain: 1 when something was read, 0 when not, or THROWN. */
     public static native int drain0(int fd, int[] err);
 
     /** IOUtil.drain1: 1 a byte read, 0 none (EAGAIN), or THROWN. */
-    public static native int drain1_0(int fd, int[] err);
+    public static native int drainOne0(int fd, int[] err);
 
     /** IOUtil.fdLimit: RLIMIT_NOFILE's soft limit (Integer.MAX_VALUE when unlimited). */
     public static native int fdLimit0();

@@ -319,7 +319,7 @@ public class IOUtil {
 
     static int write1(int fd, byte b) throws IOException {
         int[] err = new int[1];
-        int n = HostChannels.write1_0(fd, b, err);
+        int n = HostChannels.writeOne0(fd, b, err);
         if (n == HostChannels.THROWN)
             throw HostChannels.readWriteException(err[0], false);
         return n;
@@ -342,7 +342,7 @@ public class IOUtil {
      */
     static int drain1(int fd) throws IOException {
         int[] err = new int[1];
-        int n = HostChannels.drain1_0(fd, err);
+        int n = HostChannels.drainOne0(fd, err);
         if (n == HostChannels.THROWN)
             throw HostChannels.ioException(err[0], "Drain");
         return n;

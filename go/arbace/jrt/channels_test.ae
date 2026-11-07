@@ -1,0 +1,159 @@
+;; jrt's tests: the descriptors under java.nio's selectable channels (channels_linux.ae; F10 of
+;; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F10a"), through HostChannels' natives as jrt's overlays of
+;; sun.nio.ch's Net, IOUtil, SocketDispatcher, UnixDispatcher and PollSelectorImpl call them (net_test.ae's
+;; helpers).
+(in-ns 'go.arbace.jrt)
+
+(go/file "channels_test.go"
+  :build ["//go:build linux"]
+  :imports [[testing "testing"] [time "time"]])
+
+(go/func chErr "chErr is a fresh int[1] for a native's error number.\n" ^{:tag (* IntArray)} []
+  (NewIntArray 1))
+
+(go/func loopback4 ^{:tag (* ByteArray)} []
+  (let [b (NewByteArray 4)]
+    (aset (.-A b) 0 127)
+    (aset (.-A b) 3 1)
+    b))
+
+(go/func chListen "chListen is a listening blocking stream socket at 127.0.0.1 on a free port: fd, port.\n"
+  [^{:tag (* testing/T)} t] :results [int32 int32]
+  (let [e (chErr)
+        fd (HostChannels_Socket0_Z_Z_Z_I1__I_native false true true e)]
+    (when (< fd 0)
+      (.Fatalf t "socket: %d errno %d" fd (aget (.-A e) 0)))
+    (when (!= (HostChannels_Bind0_I_B1_I_I_I1__I_native fd (loopback4) 0 0 e) 0)
+      (.Fatalf t "bind: errno %d" (aget (.-A e) 0)))
+    (when (!= (HostChannels_Listen0_I_I_I1__I_native fd 50 e) 0)
+      (.Fatalf t "listen: errno %d" (aget (.-A e) 0)))
+    (let [addr (NewRefArray (.ArrayClass Prim_byte) 1)
+          port (NewIntArray 2)]
+      (when (!= (HostChannels_Address0_I_Z_B2_I1_I1__I_native fd true addr port e) 0)
+        (.Fatalf t "address: errno %d" (aget (.-A e) 0)))
+      (when (!= (len (.-A (assert (* ByteArray) (aget (.-A addr) 0)))) 4)
+        (.Errorf t "local address of %d bytes" (len (.-A (assert (* ByteArray) (aget (.-A addr) 0))))))
+      (return fd (aget (.-A port) 0)))))
+
+(go/func TestChannelSockets
+  "A connection through blocking stream sockets: connect, accept with the peer's address, read and write; a
+non-blocking read with nothing to read; poll's timeout and readiness; options with Linux's conversions; a
+thread blocked in a read woken by preClose; a refused non-blocking connect reported by pollConnect.\n"
+  [^{:tag (* testing/T)} t]
+  (let [e (chErr)
+        (values l port) (chListen t)
+        c (HostChannels_Socket0_Z_Z_Z_I1__I_native false true false e)]
+    (defer (HostChannels_Close0_I_I1__I_native l nil))
+    (defer (HostChannels_Close0_I_I1__I_native c nil))
+    (when (!= (HostChannels_Connect0_I_B1_I_I_I1__I_native c (loopback4) 0 port e) 1)
+      (.Fatalf t "connect: errno %d" (aget (.-A e) 0)))
+    (let [nfd (NewIntArray 1)
+          addr (NewRefArray (.ArrayClass Prim_byte) 1)
+          pp (NewIntArray 2)]
+      (when (!= (HostChannels_Accept0_I_I1_B2_I1_I1__I_native l nfd addr pp e) 1)
+        (.Fatalf t "accept: errno %d" (aget (.-A e) 0)))
+      (let [s (aget (.-A nfd) 0)
+            ca (NewRefArray (.ArrayClass Prim_byte) 1)
+            cp (NewIntArray 2)]
+        (defer (HostChannels_Close0_I_I1__I_native s nil))
+        (HostChannels_Address0_I_Z_B2_I1_I1__I_native c true ca cp e)
+        (when (!= (aget (.-A pp) 0) (aget (.-A cp) 0))
+          (.Errorf t "accepted peer port %d, the client's %d" (aget (.-A pp) 0) (aget (.-A cp) 0)))
+        ;; a write and a read
+        (when (!= (HostChannels_Write0_I_B1_I_I_I1__I_native c (javaBytes "hello") 0 5 e) 5)
+          (.Fatalf t "write: errno %d" (aget (.-A e) 0)))
+        (let [buf (NewByteArray 16)
+              n (HostChannels_Read0_I_B1_I_I_Z_I1__I_native s buf 0 16 true e)]
+          (when (or (!= n 5) (!= (stringOf buf n) "hello"))
+            (.Errorf t "read %d %q" n (stringOf buf n))))
+        ;; non-blocking: nothing to read is UNAVAILABLE
+        (HostChannels_ConfigureBlocking0_I_Z_I1__I_native s false e)
+        (let [buf (NewByteArray 16)
+              n (HostChannels_Read0_I_B1_I_I_Z_I1__I_native s buf 0 16 true e)]
+          (when (!= n iosUnavailable)
+            (.Errorf t "non-blocking read %d, want %d" n iosUnavailable)))
+        ;; poll: a timeout, then readiness
+        (let [t0 (time/Now)
+              r (HostChannels_Poll0_I_I_J_I1__I_native s (conv int32 pollIn) 50 e)]
+          (when (or (!= r 0) (< (time/Since t0) (* 40 time/Millisecond)))
+            (.Errorf t "poll %d after %v" r (time/Since t0))))
+        (HostChannels_Write0_I_B1_I_I_I1__I_native c (javaBytes "x") 0 1 e)
+        (let [r (HostChannels_Poll0_I_I_J_I1__I_native s (conv int32 pollIn) 2000 e)]
+          (when (== (bit-and r (conv int32 pollIn)) 0)
+            (.Errorf t "poll %d, want POLLIN" r)))
+        (when (!= (HostChannels_Available0_I_I1__I_native s e) 1)
+          (.Errorf t "available %d" (HostChannels_Available0_I_I1__I_native s e)))
+        ;; options: SO_LINGER off is -1, then 5; SO_RCVBUF halved with the conversion
+        (let [v (NewIntArray 1)]
+          (HostChannels_GetIntOption0_I_Z_I_I_I1_I1__I_native c false 1 13 v e)
+          (when (!= (aget (.-A v) 0) -1)
+            (.Errorf t "SO_LINGER %d" (aget (.-A v) 0)))
+          (HostChannels_SetIntOption0_I_Z_I_I_I_Z_I1__I_native c false 1 13 5 false e)
+          (HostChannels_GetIntOption0_I_Z_I_I_I1_I1__I_native c false 1 13 v e)
+          (when (!= (aget (.-A v) 0) 5)
+            (.Errorf t "SO_LINGER set 5: %d" (aget (.-A v) 0)))
+          (HostChannels_SetIntOption0_I_Z_I_I_I_Z_I1__I_native c true 1 8 65536 false e)
+          (HostChannels_GetIntOption0_I_Z_I_I_I1_I1__I_native c true 1 8 v e)
+          (when (!= (aget (.-A v) 0) 65536)
+            (.Errorf t "SO_RCVBUF 65536 with conversion: %d" (aget (.-A v) 0))))
+        ;; a blocked read woken by preClose: the end of the stream
+        (HostChannels_ConfigureBlocking0_I_Z_I1__I_native s true e)
+        (let [buf (NewByteArray 16)]
+          (HostChannels_Read0_I_B1_I_I_Z_I1__I_native s buf 0 16 true e)
+          (let [done (make (chan int32) 1)]
+            (go ((fn [] (>! done (HostChannels_Read0_I_B1_I_I_Z_I1__I_native s buf 0 16 true (chErr))))))
+            (time/Sleep (* 50 time/Millisecond))
+            (HostChannels_PreClose0_I__V_native s)
+            (select
+              (case [n (<! done)]
+                (when (!= n iosEOF)
+                  (.Errorf t "blocked read after preClose %d" n)))
+              (case (<! (time/After (* 2 time/Second)))
+                (.Errorf t "a blocked read not woken by preClose")))
+            (when (!= (HostChannels_Write0_I_B1_I_I_I1__I_native s (javaBytes "y") 0 1 e) iosThrown)
+              (.Errorf t "a write after preClose did not fail"))))
+        ;; a refused non-blocking connect
+        (let [q (HostChannels_Socket0_Z_Z_Z_I1__I_native false true false e)]
+          (defer (HostChannels_Close0_I_I1__I_native q nil))
+          (HostChannels_ConfigureBlocking0_I_Z_I1__I_native q false e)
+          (HostChannels_Close0_I_I1__I_native l nil)
+          (let [r (HostChannels_Connect0_I_B1_I_I_I1__I_native q (loopback4) 0 port e)]
+            (when (== r iosUnavailable)
+              (set! r (HostChannels_PollConnect0_I_J_I1__I_native q 2000 e)))
+            (when (or (!= r iosThrown) (!= (aget (.-A e) 0) 111))
+              (.Errorf t "refused connect %d errno %d" r (aget (.-A e) 0)))))))))
+
+(go/func TestChannelPipeAndPoll
+  "A non-blocking pipe: an empty read end polled, a byte written by write1, poll(2) of the array with the
+selector's shape (the pipe and a socket), the byte drained.\n"
+  [^{:tag (* testing/T)} t]
+  (let [e (chErr)
+        fds (NewIntArray 2)]
+    (when (!= (HostChannels_MakePipe0_Z_I1_I1__I_native false fds e) 0)
+      (.Fatalf t "pipe: errno %d" (aget (.-A e) 0)))
+    (let [r (aget (.-A fds) 0)
+          w (aget (.-A fds) 1)
+          (values l _) (chListen t)
+          pf (NewIntArray 2)
+          pe (NewIntArray 2)
+          pr (NewIntArray 2)]
+      (defer (HostChannels_Close0_I_I1__I_native r nil))
+      (defer (HostChannels_Close0_I_I1__I_native w nil))
+      (defer (HostChannels_Close0_I_I1__I_native l nil))
+      (aset (.-A pf) 0 r)
+      (aset (.-A pe) 0 (conv int32 pollIn))
+      (aset (.-A pf) 1 l)
+      (aset (.-A pe) 1 (conv int32 pollIn))
+      (when (!= (HostChannels_Poll1_I1_I1_I1_I_I_I1__I_native pf pe pr 2 0 e) 0)
+        (.Errorf t "an empty poll counted %d" (aget (.-A pr) 0)))
+      (when (!= (HostChannels_DrainOne0_I_I1__I_native r e) 0)
+        (.Errorf t "drain1 of an empty pipe"))
+      (when (!= (HostChannels_WriteOne0_I_B_I1__I_native w 0 e) 1)
+        (.Fatalf t "write1: errno %d" (aget (.-A e) 0)))
+      (let [n (HostChannels_Poll1_I1_I1_I1_I_I_I1__I_native pf pe pr 2 1000 e)]
+        (when (or (!= n 1) (== (bit-and (aget (.-A pr) 0) (conv int32 pollIn)) 0) (!= (aget (.-A pr) 1) 0))
+          (.Errorf t "poll %d revents %d %d" n (aget (.-A pr) 0) (aget (.-A pr) 1))))
+      (when (!= (HostChannels_Drain0_I_I1__I_native r e) 1)
+        (.Errorf t "drain found nothing"))
+      (when (!= (HostChannels_Drain0_I_I1__I_native r e) 0)
+        (.Errorf t "a second drain found something")))))
