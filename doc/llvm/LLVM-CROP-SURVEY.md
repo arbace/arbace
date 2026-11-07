@@ -1236,3 +1236,48 @@ record's numbers change (new inputs). See LLS31 below.
 - **LLS32 `llvm-ll4`.** LL4's corpus loop (wider rejection samples, LLParser's messages at more parseToken sites, three valid samples'
   false errors) is on a line of its own. (a) Rebase it onto batch 2 (its `verify.ae` changes against LL9a's, SPEC §6.2.3 against
   ll6's SPEC, the survey's sections), its records re-made by verify-check (light: seconds); an agent's day; (b) leave it. *Recommended: (a)*.
+
+## Decided (the user, 2026-11-07): LLS31 (b) now, (a) later
+
+- **LLS31 (b), built on batch 2** (2026-11-07): the first records' four families (the 282 modules' round trip, their verify-check with
+  the 630 mutants, the 1,082 held-out mutants, and the 282 modules' mode `:full` text: 2,558 cases on inputs the host's clang made and
+  no checkout holds) leave the REAP cells: `test/reap/cells.edn` keeps them as `:role :beside` sources (listed, not counted), their
+  records unchanged. The read cell is llvm/test's pinned files, the probes and `hw` (1,557 / 1 / 30 of 1,588), print llvm/test's
+  304. `test/crops/independence.edn`: read 1 (LLS27 (a): pinned input in the crop's language), judge (2,068 + 0.5 x 948) / 3,016 =
+  0.843 (the retired families' 912 + 1,082 opt records, 282 objects and bitcode and 282 own texts no longer counted). LLVM IR
+  95.9 / 93.3 / 88.3 -> **96.0 / 100 / 96.9** (maturity's controls item 6 of 6 families: the four without a control are beside).
+  The estimate of 94.2 kept the judge at 0.711; it moves with the cases.
+- **LLS31 (a), later**: the pack `rt` rebuilt and the families back as checks, below.
+
+### LLS31 (a): the pack rt, planned
+
+What the first records were made from, by the ids of `test/llvm/check-roundtrip-linux-amd64.edn` (282): 42 torture programs of gcc
+9.1.0's `gcc.c-torture/execute` (ccorpus2 at its pin, `bin/llvmi`'s `$tx`) in up to five builds (`.g0` 51 and `.g2` 51 with the nine C++
+samples, `.o2` 41, `.lto` 50, `.win` 44: the builds clang accepted), the nine C++ samples of `test/cpp/samples/` for a Mach-O target
+(`.mac`), one Rust module (`rs.lt`), `stress1`-`stress10` (`llvm-stress -size=60`, seeds 1-10), the 21 corner modules (`dbg-O0` ...
+`typed`, sources lost) and the four `hw-*` (committed, `test/llvm/hw/`). The pack rebuilds all but the corners:
+
+1. **The day's verb (light, no clang run by day).** `bin/llvmi`: a pack `rt` beside `tx` and `c` (`pack_of`, `ir-make`'s case, the
+   manifest `test/llvm/ir/rt.tsv` with `rt.cmd` and `rt.tar.xz.sha256`), its corpus set `rt` made from a committed list
+   `test/llvm/rt-builds.tsv` (ID, SOURCE, BUILD), one line per id above but the corners, written from the record's ids by a
+   `bin/llvmi rt-list` (deterministic: the ids' suffixes give the build). The builds, as `modules`' tx lines do (gnu17, `-w
+   -fno-strict-aliasing $tx_flags -ffile-prefix-map=TX/=`): `.g0` `-O0 -g`, `.g2` `-O2 -g`, `.o2` `-O2`, `.lto` `-O2 -flto` (its
+   IR text), `.win` `-O2 --target=x86_64-pc-windows-msvc`; `.mac` `clang++ -O0 -std=c++23 --target=x86_64-apple-macosx` of the C++
+   samples; `rs.lt` `rustc --emit=llvm-ir -C lto=thin` of `test/rust/sample/shapes.rs` (the oracle tier's rustc, by hand); `stressN`
+   `${REPR_LLVM_BIN:-/usr/lib/llvm23/bin}/llvm-stress -size=60 -seed=N`. A module clang refuses is not one (as `ir-make`'s rule).
+   `bin/repr-llvm check` learns the families `roundtrip-rt`, `text-rt`, `verify-rt` (lists from the pack, as LL9a's four), each
+   with a crossed-pair control in `test/repr/llvm/{roundtrip,text,verify}-controls.txt`.
+2. **The night's clang run (one heavy-free job, under 1 GB):**
+
+       bin/llvmi ir-make rt                                                  # clang 23.1.5 (the host's since 2026-11-06), about 10 min
+       bin/repr-llvm mutants .tmp/llvm/rt.list .tmp/llvm/mut-a 315 0         # the fitted sets and the held-out sets, at their indices
+       bin/repr-llvm mutants .tmp/llvm/rt.list .tmp/llvm/mut-b 315 315
+       bin/repr-llvm mutants .tmp/llvm/rt.list .tmp/llvm/mut-h1 543 500000
+       bin/repr-llvm mutants .tmp/llvm/rt.list .tmp/llvm/mut-h2 539 600000
+       REPR_LLVM_JUDGE=live bin/repr-llvm record-rt .tmp/llvm/rt.list .tmp/llvm/rt-rec   # the oracle tier's references, once
+       bin/repr-llvm check roundtrip-rt --record; bin/repr-llvm check text-rt --record; bin/repr-llvm check verify-rt --record
+
+3. **Then (a day):** the four `:beside` sources of `test/reap/cells.edn` replaced by the three families' records as checks,
+   `bin/reap --record`, the read and judge facts recounted (read stays 1: the pack is pinned input in the crop's language, LLS27 (a);
+   the judge gains the families' own verdicts and opt's records at 0.5), the gate's `llvm-read` and `llvm-print` taking the new
+   families as parts. The numbers change once (new inputs: the corners dropped, the builds clang 23.1.5's).
