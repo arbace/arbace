@@ -96,6 +96,14 @@
     ^{:line 96 :tag uint64} pending
     ^{:line 97 :tag uint32} umask
     ^{:line 98 :tag uint64} tidAddr
+    ^{:tag (* Sched) :doc "Sched is the program's threads (sched.go), from the first clone on.\n"} Sched
+    ^{:tag string :doc "SelfExe is the host's path of the executable that runs the program (its /proc/self/exe), Self the command\nthat runs the program again (spawn.go), Argv0 the program's argv[0], StdFiles the host files of the standard streams.\n"} SelfExe
+    ^{:tag (slice string)} Self
+    ^{:tag string} Argv0
+    ^{:tag (array 3 (* os/File))} StdFiles
+    ^{:tag bool} inChild
+    ^{:tag (map int (* childProc))} procs
+    ^{:tag int} nextFake
     ^{:line 99 :tag time/Time} start))
 
 
@@ -245,6 +253,9 @@
 ^{:go/end 259} (go/method Syscall "Syscall performs system call n with the six argument registers and returns the kernel's result:\na value >= 0, or -errno. A bad pointer argument gives -EFAULT. A call that ends the program\n(exit, exit_group, a fatal signal) panics with *Exit.\n" [^{:tag (* Sys)} s ^int64 n ^uint64 a1 ^uint64 a2 ^uint64 a3 ^uint64 a4 ^uint64 a5 ^uint64 a6] :results [^int64 ret]
   (defer (^{:go/end 257} (fn []
         (when [r (recover)] (!= r nil)
+          ;; the program's end raised by the main thread when another thread ended it (sched.go)
+          (when (and (!= (.-Sched s) nil) (!= (.-Over (.-Sched s)) nil))
+            (panic r))
           (type-switch [v r]
             (case [(* Fault)]
               (set! ret (- eFAULT)))
@@ -320,7 +331,22 @@
         (return (.sigaction s (conv int a1) a2 a3)))
       (case [14]
         (return (.sigprocmask s (conv int (conv int32 a1)) a2 a3)))
-      (case [16] ; ioctl: nothing is a terminal
+      (case [16] ; ioctl: nothing is a terminal; FIONBIO, FIOCLEX and FIONCLEX as fcntl's (RE6: std's read2 sets its pipes
+        ;; non-blocking so; a read still waits for data, poll answering ready)
+        (let [e (aget (.-fds s) (fdArg a1))]
+          (switch a2
+            (case [0x5421] ; FIONBIO
+              (when (== e nil)
+                (return (- eBADF)))
+              (if (!= (.Load32 m a3) 0)
+                (set! (.-flags (.-of e)) (bit-or (.-flags (.-of e)) oNonblock))
+                (set! (.-flags (.-of e)) (bit-and-not (.-flags (.-of e)) oNonblock)))
+              (return 0))
+            (case [0x5451 0x5450] ; FIOCLEX, FIONCLEX
+              (when (== e nil)
+                (return (- eBADF)))
+              (set! (.-cloexec e) (== a2 0x5451))
+              (return 0))))
         (return (- eNOTTY)))
       (case [17] ; pread64
         (let [of (.get s (fdArg a1))]
@@ -370,6 +396,7 @@
       (case [293]
         (return (.pipe s a1 (conv int a2))))
       (case [24] ; sched_yield
+        (.Yield s)
         (return 0))
       (case [25]
         (return (.mremap s a1 a2 a3 (conv int a4))))
@@ -407,16 +434,31 @@
           (when (!= e 0)
             (return e))
 
-          (time/Sleep d)
+          (.sleep s d)
           (when (!= a2 0)
             (.Fill m a2 0 16))
 
           (return 0)))
-      (case [39 186] ; getpid, gettid
+      (case [39] ; getpid
         (return sysPid))
-      (case [60 231] ; exit, exit_group
+      (case [186] ; gettid
+        (return (.Tid s)))
+      (case [60] ; exit: the calling thread's
+        (when (.-inChild s)
+          (panic (addr (lit SpawnExit :Code (conv int (bit-and a1 0xff))))))
+        (.exitThread s (conv int (bit-and a1 0xff)))
+        (return 0))
+      (case [231] ; exit_group
+        (when (.-inChild s)
+          (panic (addr (lit SpawnExit :Code (conv int (bit-and a1 0xff))))))
         (panic (addr (lit Exit :Code (conv int (bit-and a1 0xff))))))
+      (case [59] ; execve: a vfork child's (spawn.go)
+        (return (.execve s a1 a2 a3)))
+      (case [61] ; wait4
+        (return (.wait4 s (conv int64 (conv int32 a1)) a2 (conv int (conv int32 a3)))))
       (case [62] ; kill
+        (when [(values r ok) (.killChild s (conv int (conv int32 a1)) (conv int (conv int32 a2)))] ok
+          (return r))
         (when [p (conv int32 a1)] (and (!= p sysPid) (!= p 0))
           (return (- eSRCH)))
 
@@ -562,20 +604,13 @@
             (.Store64 m a1 (conv uint64 t)))
 
           (return t)))
-      (case [202] ; futex (single-threaded)
-        (switch (bit-and a2 127)
-          (case [0 9] ; WAIT, WAIT_BITSET
-            (when (!= (.Load32 m a1) (conv uint32 a3))
-              (return (- eAGAIN)))
-
-            (return 0))
-          (case [1 10 3 4 5] ; WAKE, WAKE_BITSET, REQUEUE, CMP_REQUEUE, WAKE_OP
-            (return 0)))
-
-        (return (- eNOSYS)))
+      (case [202] ; futex (sched.go)
+        (return (.futex s a1 a2 a3 a4 a5 a6)))
       (case [218] ; set_tid_address
         (set! (.-tidAddr s) a1)
-        (return sysPid))
+        (when (!= (.-Sched s) nil)
+          (set! (.-ClearTid (.-Cur (.-Sched s))) a1))
+        (return (.Tid s)))
       (case [217] ; getdents64
         (return (.getdents s (fdArg a1) a2 a3)))
       (case [228] ; clock_gettime
@@ -608,7 +643,7 @@
               (set! d - (+ (* (conv time/Duration sec) time/Second) (conv time/Duration nsec))))
 
             (when (> d 0)
-              (time/Sleep d))
+              (.sleep s d))
 
             (return 0))))
       (case [318] ; getrandom

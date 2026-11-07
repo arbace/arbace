@@ -113,10 +113,14 @@
 
 
 
-(go/type Thread "Thread is one C thread: its stack pointer, its innermost frame, its depth.\n" (struct
+(go/type Thread "Thread is one C thread: its stack pointer and the stack's lowest address, its innermost frame, its depth,\nits task for the scheduler (thread.go) and the calls left before it lets the others run.\n" (struct
     ^{:line 116 :tag (* Prog)} P
     ^{:line 117 :tag (* crt/Mem)} M
     ^{:line 118 :tag uint64} SP
+    ^{:tag uint64} Lo
+    ^{:tag (* crt/Task)} Task
+    ^{:tag uint64 :doc "TLS is the thread's block of thread-local objects (0: the main thread's, at their static addresses).\n"} TLS
+    ^{:tag int} budget
     ^{:line 119 :tag (* Frame)} Top
     ^{:line 120 :tag int} Depth
     ^{:tag (slice (* Frame)) :doc "free holds the compiled functions' frames for reuse (Enter, Leave).\n"} free))
@@ -139,13 +143,19 @@
     ^{:line 137 :tag (* Thread)} Main
     ^{:line 138 :tag int} MaxDepth
     ^{:line 139 :tag (map uint64 (* jmpTarget))} jmps
-    ^{:line 140 :tag uint64} nextJmp))
+    ^{:line 140 :tag uint64} nextJmp
+    ^{:tag (slice uint64) :doc "tls holds the thread-local objects as address, size and offset triples (thread.go): the main thread's\nat their static addresses, another thread's in its own block at the offset.\n"} tls
+    ^{:tag (map int uint64) :doc "tlsOff is a thread-local object's offset in a thread's block, by its static's index.\n"} tlsOff
+    ^{:tag uint64} tlsSize
+    ^{:tag (slice byte) :doc "tlsInit is the block's bytes after the static initializers: a new thread's.\n"} tlsInit
+    ^{:tag int :doc "Signal is the signal that ended the run (a fault's, an abort's), 0 when it exited (tools/cirun dies by it).\n"} Signal
+    ^{:tag (slice string) :doc "Env is the environment RunMain gives the program (NAME=VALUE strings; none by default: tools/cirun --env\nand a compiled program's --env give the runner's, RES29 (a)).\n"} Env))
 
 
 
 ^{:go/end 152} (go/func NewProg "NewProg is an empty program over a fresh address space and system call layer.\n" ^{:tag (* Prog)} [^{:tag (* crt/Sys)} sys]
   (let [p (addr (lit Prog :M (.-M sys) :Sys sys :ByName (lit (map string (* Func))) :MaxDepth (<< 1 20) :jmps (lit (map uint64 (* jmpTarget)))))]
-    (set! (.-Main p) (addr (lit Thread :P p :M (.-M p) :SP crt/StackTop)))
+    (set! (.-Main p) (addr (lit Thread :P p :M (.-M p) :SP crt/StackTop :Lo (- crt/StackTop crt/StackSize))))
     (set! (.-Handler sys) ^{:go/breaks [3] :go/end 150} (fn ^bool [^int sig ^uint64 h]
         (.CallAddr p (.-Main p) h (lit (slice Arg) (lit _ :K \i :I (conv int64 sig))))
         true))
@@ -202,6 +212,8 @@
 
       (panic (addr (lit crt/Fault :Sig crt/SIGSEGV :Msg (+ "undefined function " (.-Name f))))))
 
+    (when (!= (.-Sched (.-Sys p)) nil)
+      (preempt t))
     (inc! (.-Depth t))
     (when CallTrace
       (fmt/Fprintf os/Stderr "ci: %*s%s\n" (.-Depth t) "" (.-Name f)))
@@ -225,7 +237,7 @@
 
 
         (let [nsp (bit-and-not (- sp (.-FrameSize c) va 16) 15)]
-          (when (or (< nsp (- crt/StackTop crt/StackSize)) (> nsp sp))
+          (when (or (< nsp (.-Lo t)) (> nsp sp))
             (panic (addr (lit crt/Fault :Sig crt/SIGSEGV :Addr nsp :Msg "stack overflow"))))
 
           (set! (.-Base fr) nsp)
@@ -321,11 +333,12 @@
           (type-switch [x r]
             (case [(* crt/Exit)]
               (if (!= (.-Signal x) 0)
-                (set! status (+ 128 (.-Signal x)))
+                (do (set! status (+ 128 (.-Signal x))) (set! (.-Signal p) (.-Signal x)))
 
                 (set! status (.-Code x))))
 
             (case [(* crt/Fault)]
+              (set! (.-Signal p) (.-Sig x))
               (set! (values status fault) (values (+ 128 (.-Sig x)) (fmt/Errorf "%s at %#x in %s" (.-Msg x) (.-Addr x) (.Trace p)))))
             (case [(* longjmpPanic)]
               (set! (values status fault) (values (+ 128 crt/SIGSEGV) (fmt/Errorf "longjmp to a frame that returned"))))
@@ -339,6 +352,7 @@
       (let [fr (addr (lit Frame :T t :Base (- (.-SP t) 4096) :I (make (slice int64) (.-NI in)) :F (make (slice float64) (.-NF in))))]
         (.Run (.-S in) fr)))
 
+    (.tlsSnapshot p)
     (.Seal (.-M p))
     (let [r (.Call p t entry args)]
       (return (conv int (bit-and (.-I r) 0xff)) nil))))
@@ -348,17 +362,23 @@
 
 
 
-^{:go/end 371} (go/method RunMain "RunMain runs the program with the command line argv: through musl's __libc_start_main (start)\nwhen given, which initializes the libc and calls exit(main(argc, argv, envp)), else main\ndirectly. The initial stack holds argv's strings and pointers, an empty environment and the\nauxiliary vector (AT_PAGESZ, AT_RANDOM), as Linux's.\n" [^{:tag (* Prog)} p ^{:tag (* Func)} start ^{:tag (* Func)} main ^{:tag (slice string)} argv] :results [int error]
+^{:go/end 371} (go/method RunMain "RunMain runs the program with the command line argv: through musl's __libc_start_main (start)\nwhen given, which initializes the libc and calls exit(main(argc, argv, envp)), else main\ndirectly. The initial stack holds argv's strings and pointers, the environment Env (empty unless set) and the\nauxiliary vector (AT_PAGESZ, AT_RANDOM), as Linux's.\n" [^{:tag (* Prog)} p ^{:tag (* Func)} start ^{:tag (* Func)} main ^{:tag (slice string)} argv] :results [int error]
   (let [m (.-M p)
-      ^{:line 351 :tag (slice uint64)} ptrs (zero (slice uint64))]
+      ^{:line 351 :tag (slice uint64)} ptrs (zero (slice uint64))
+      ^{:tag (slice uint64)} envs (zero (slice uint64))]
     (range [_ a argv]
       (let [b (append (conv (slice byte) a) 0)
           ^{:line 354} at (.Static m (conv uint64 (len b)) 1)]
         (copy (.W m at (conv uint64 (len b))) b)
         (set! ptrs (append ptrs at))))
+    (range [_ a (.-Env p)]
+      (let [b (append (conv (slice byte) a) 0)
+            at (.Static m (conv uint64 (len b)) 1)]
+        (copy (.W m at (conv uint64 (len b))) b)
+        (set! envs (append envs at))))
 
     (let [rnd (.Static m 16 16)
-        ^{:line 359} vec (append (append (lit (slice uint64)) (spread ptrs)) 0 0 6 crt/PageSize 25 rnd 0 0)
+        ^{:line 359} vec (append (append (append (append (lit (slice uint64)) (spread ptrs)) 0) (spread envs)) 0 6 crt/PageSize 25 rnd 0 0)
         ^{:line 360} av (.Static m (conv uint64 (* 8 (len vec))) 16)]
       (range [i v vec]
         (.Store64 m (+ av (conv uint64 (* 8 i))) v))
