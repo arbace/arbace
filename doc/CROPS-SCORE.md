@@ -319,6 +319,14 @@ Two decisions of the user on 2026-11-07, relayed by the main session:
   and print at 1 (Arbace's own target, doc/C23-SURVEY.md, "As built: C's own target"), C's independence is 99.7% (20.0% on
   `mac/batch1`; 90.0% were the judge left on gcc's records).
 
+- **C++ (branch `cpp-90`, from `mac/cpp-g5` with `mac/batch1` merged).** The run checks by each test's own verdict
+  (`test/cpp/selfref.ae`: g++.dg's and libstdc++'s `dg-do run` tests by exit status, 205 of 225 reference cases), the round trip by
+  its own levels 1 and 5 on the native parser (`bin/repr-cpp roundtrip --judge own`, no clang: the essential step on `[:stage0]`, the
+  whole lists' own records the night's). The judge's cases: 1,934 at 0.5 (the token check's recorded digests), 4,597 at 1 (dg
+  directives), 81 + 81 (65 + 65 at 1, 16 + 16 at 0.5), 3,366 at 0 until the night's own records (then 1): judge 0.568 today, 0.90 after.
+  Two controls added (the token check's, the dg check's) and the round trip's rule pointed at GT9's control file: maturity 100. C++'s
+  independence 20.0 to 31.4 today, 38.0 after the night; read, eval and AOT need doc/cpp/CPP-SURVEY.md's CP240-CP242.
+
 ## Left
 
 - The facts at refs other than those in `independence.edn`'s `:at` are main's. `--newest` says so in the output, as

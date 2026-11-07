@@ -2984,3 +2984,143 @@ each a Sema fact). Changed: `arbace/repr/cpp.ae` (`read-cpp-native`, `read --rea
 `native-check`). The converter is unchanged. Numbers: samples 9 of 9 files the same, the subset sample 30 of 30 items, g++.dg 60 of
 62 and 156 of 163 files (every difference classed); over the 977 recorded passes of g++.dg's every-10th sample, 942 the same.
 
+
+## Decided (the user, 2026-11-07): a test's own verdict is the judge
+
+Relayed by the main session (doc/CROPS-SCORE.md, "Decided (the user, 2026-11-07)"): a test's own verdict counts as a judge no toolchain
+made (1): dg directives, an execute test's exit status, expected output shipped with the test, the round trip's reread forms equal (and
+its `:full` print byte for byte). A test with no verdict of its own keeps the toolchain's recorded output (0.5); a mixed stage scores the
+case-weighted mean; the toolchain's runs move to the oracle tier, by hand. A pinned input corpus in the crop's own language counts 1 when
+no toolchain output about it is a reference.
+
+## As built: cpp-90 (2026-11-07)
+
+On the branch `cpp-90` from `mac/cpp-g5` (2e3c671b), `mac/batch1` (0edacad6) merged into it first (conflicts both sides, all additive:
+the Makefile's targets, bin/cppi's and bin/repr-cpp's verbs, roundtrip's `--reader` beside `--partial`, doc/ARBACE.md's `cpp/` and
+`python/` paragraphs, this survey's CX10 before CX11). The day's light tier: stage 0 by `ARBACE_HOST_EXE` (main's), samples only, no gate
+run but `--plan`, nothing built. Goal: C++'s three `bin/crops-score` measures toward 90%; the order chosen by what moves them most per
+day: maturity first (two controls, an hour, 91.7 to 100), then the judge (one stage of five, every cell's cases, no new front end needed:
+the decided rule applies to checks that already carry their verdict), then completeness (the print cell's by-design cases, which the own
+judge turns into judged files), then the front ends (read, eval, AOT: the most points but days of work, measured and proposed below).
+
+### The judge by each test's own verdict
+
+- **The run checks** (`bin/cppi check`, `check --aot`): `test/cpp/selfref.ae` (`cpp.selfref`) merges each program's own verdict into the
+  reference the judge reads, `bin/lib/cppi/selfref.bash`'s `cppi_run_ref` (`.tmp/cppi-selfref/KEY.edn`, keyed by the reference, the
+  rules and the corpora's pin), `CPPI_RUN_REF` for `arbace.cpp.check/run-judge`. g++.dg's `dg-do run` tests (g++-dg.exp's dg-test) and
+  libstdc++'s run tests (VERIFY aborts) pass on exit 0, their output not compared (the status alone, as `:o2 :differ` is judged); a file
+  with `dg-output`, `dg-shouldfail` or an xfail on its run, the samples and the runtime samples (Arbace's own, no verdict) keep g++'s run;
+  `test/cpp/selfref-exceptions.edn` (none yet) would hold the cases the harness does not meet. `CPPI_JUDGE=gxx`: g++'s recorded runs
+  alone, the oracle tier's. A failure says `differ status N (its own verdict 0)`. Of the reference's 225 cases 205 are judged by their
+  own verdict (gxx-dg-run 65 of 67, libstdcxx 140 of 141); `cpp.selfref agree`: g++'s recorded run meets the verdict in 205 of 205, so the
+  records' judgments stand (the sampling's 7 non-passes are the oracle's rejections and its text, no run difference). The sampling's
+  control now crosses no-elide2.C with `samples/io.cpp`'s g++ run: its former reference dr2137-1.C is judged by its exit status, which
+  no-elide2 meets (a status-only judge has no passing program to cross; the C++ corpora have no `dg-shouldfail` program in the sampling).
+- **The round trip** (`bin/repr-cpp roundtrip --judge own`, `REPR_CPP_JUDGE=own`; `roundtrip-corpus KEY --judge own`): the file and its
+  print read by the native parser (CX11), judged by level 1 (the forms read again equal) and level 5 (mode `:full` printed back byte for
+  byte); no clang dump and no object are made (clang's rejections and levels 3 and 4 are the oracle tier's: `--judge clang`, the
+  default until the night's records, by hand afterwards). A file the native parser refuses is the class `native-refused`, a read whose
+  level 1 or 5 fails `forms-differ` or `full-differs` (deferred, test/cpp/divergences-print.edn) unless the known file classes it; the own
+  judge's records are apart, `test/repr/cpp/roundtrip-results/own/KEY.edn` (bin/reap's reader lists `roundtrip-results/` alone, so they
+  are not counted until `cells.edn` names them). The negative control (`bitfields-vs-io`) is judged at levels 1 and 5 from the native
+  reads. A file's read and print are bounded (`REPR_CPP_FILE_SECONDS`, default 300, the dumps' timeout): past it a crash (timeout).
+- **The native parser's loop**: an attribute keyword without its parenthesis (`auto alignas a [[]] [[const]] ();`, g++.dg's
+  `cpp0x/pr96440.C`) made the declaration-specifier loop ask `attr-nodes` again forever; it is now an error as clang's ("expected '('",
+  ParseAlignmentSpecifier), the converter's text item: the file passes.
+- **The gate**: `cpp-print-essential` runs `--judge own` on `[:stage0]` (no `:cxx`, no `:go`), held to `own/gxx-dg-essential.edn`
+  (recorded: 32 pass, 1 forms-differ, `modules/cpp-11.C`, known as such by the clang judge too). `bin/gate --plan` plans it.
+
+### The negative controls (maturity)
+
+`bin/crops-score` counted 4 of 8 check families covered. Added: the token check's (`_control/pp/udl-vs-prefixes` and
+`_control/lex/udl-vs-prefixes` in test/cpp/controls.edn, `arbace.repr.cpp.ppcheck/controls`: udl.cpp's port judged by the level's own
+judgment against prefixes.cpp's recorded g++ -E and clang raw-token digests must differ; both files in the essential subset) and the dg
+check's (`_control/dg/dr2082-vs-dr1423`, `arbace.repr.cpp.dg/controls`: dr2082.C's errors, line 9, against dr1423.C's dg-error lines 4
+and 7: missed and extra). The round trip's two sources were covered by GT9's control already, in `test/repr/cpp/roundtrip-controls.edn`:
+`test/crops/crops.edn`'s rule named the wrong file. A control made to pass by hand fails its check (exit 1).
+
+### Checked (light; clang, clang++, clang-23, g++, gcc, cc, cpp, c++, cc1, cc1plus, ld and as stubs exiting 99 first on PATH, none called)
+
+| check | result |
+|---|---|
+| `bin/repr-cpp pp-check --essential` | cpp-lexical 19, gxx-dg 31, libstdcxx-headers 3 as before; both new controls fail as they must (not under stubs: its step reads the installed headers) |
+| `bin/repr-cpp dg --corpus dg-error --only` (dr2082, dr1423, dr2475) | 3 of 3 pass, the control fails as it must (clang's dumps: the dg check's oracle) |
+| `bin/repr-cpp roundtrip-corpus samples --judge own` | 9 of 9 pass, the control fails as it must (levels 1 and 5), 72 s; stubs not called |
+| `roundtrip-corpus gxx-dg-essential --judge own` | 32 pass, 1 forms-differ (the clang judge's record: 27 pass, 4 oracle-rejects, 1 oracle-fails, 4 known); recorded |
+| 30 of gxx-dg-every-10's 745 oracle-rejected files (every 25th), `--judge own --only-list` | 29 pass, 1 forms-differ (modules/cpp-11.C); pr96440.C passes after the parser's fix; 6 of them in 11 s at 2 jobs, 0.5 GB peak |
+| `cpp.selfref ref`, `agree` | 205 of 225 by their own verdict; g++'s runs meet it in 205 of 205 |
+| `run-judge` over a made-up work directory (3 programs) | self: a status-0 run whose output differs passes, status 134 fails "(its own verdict 0)"; gxx: all three fail; the control differs under both |
+| the code generator (cpp-g5's route, `arbace.cpp.codegen/gen-one`) over the sampling's 67 programs, no clang | 37 generate and lower to C (35 of them among the record's 60 passes, 1 oracle-rejected, 1 failing); refused: expr 8, crash 8 (coroutines, a NullPointerException), name 3, parse 3, type 2, one each of conversion, decl, init, overload, range-for, stmt; 36 s of generation in all. Not run: the lowered runtime is stale (below) |
+| `bin/gate --plan` | plans cpp-print-essential ("never passed", 520 files) and the other C++ steps |
+
+Found on the way: the host's clang is now **23.1.5** (`clang --version`), the pins' 23.1.4 (test/cpp/host/host.edn); every worktree's
+lowered runtime is stale by `bin/cppi runtime-key` (`clang --version`, `/usr/include/*.h` differ). The night's clang-route C++ steps
+(the dg check, the token check's `--record`, the runs' IR, the runtime's IR pin test/cpp/runtime/ir.sha256, the clang judge's dumps) run
+a clang the records were not made with; the own judges do not.
+
+### The numbers (bin/crops-score --crop cpp)
+
+| measure | batch1 | cpp-90 today | after the night's own records |
+|---|---|---|---|
+| completeness | 75.4 (96.5 without by design) | 75.4 (96.5) | about 87 (print 48.3 to about 96: its 1,584 oracle-rejects judged, about 29 in 30 pass, and the 81 gxx-objects-location files no longer judged by objects; read 80.6, eval and AOT 86.4 unchanged) |
+| maturity | 91.7 | 100.0 | 100.0 |
+| independence | 20.0 (read 0, eval 0, AOT 0, print 1, judge 0) | 31.4 (judge 0.568) | 38.0 (judge 0.90) |
+
+The judge's cases (test/crops/independence.edn, `:cases`): the token check's 1,934 against g++'s and clang's recorded digests (0.5),
+the dg check's 4,597 by their directives (1: the errors are clang's, the read stage's, but the verdict is the test's own), eval's and
+AOT's 81 each (14 samples and runtime by g++'s recorded runs, 0.5; the sampling's 65 by exit status, 1, and 2 with dg-output by g++'s
+run, 0.5), print's 3,366 by clang's levels live (0) until the own records, then 1. Read, eval and AOT stay 0: the dg check is clang's
+Sema, the token check reads the installed headers in place, the runs lower clang's IR and a runtime built from clang's IR at gate time.
+
+The read cell's 1,192 by design are the dg check's clang-* classes (clang's diagnostics against g++'s expectations, CP2 (a)): by design
+under the decided rule as long as the errors are clang's; no record is missing. The print cell's 1,665 by design are 1,584
+oracle-rejects (clang rejects the file, so the clang judge has nothing to compare) and 81 of the classes gxx-objects-location and
+the like: not missing records but a judge that cannot judge them; the own judge judges them, and the night's records reclassify them
+by its verdicts (the decided rule: the round trip's reread forms equal).
+
+### The night's commands (one check process at a time, at most 1.5 GiB: REPR_CPP_THREADS=2, GOMEMLIMIT=1400MiB)
+
+```
+export ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace REPR_CPP_THREADS=2 GOMEMLIMIT=1400MiB REPR_CPP_FILE_SECONDS=300
+for k in gxx-dg-every-10 gxx-old-deja-every-10 c-c++-common-every-10 libstdcxx-testsuite-every-40 gxx-modules-every-10 gxx-modules-all; do
+  bin/repr-cpp roundtrip-corpus $k --judge own --record-results     # roundtrip-results/own/KEY.edn; refused while a file fails
+done                                                                  # estimate 1-2 h in all (headers' files about 30 s each)
+# then: test/gate/steps.edn's cpp-roundtrip and cpp-roundtrip-dg (and test/gate/crops/cpp.edn) add --judge own to their :cmd and
+# take :hosts [:stage0]; test/reap/cells.edn's [:cpp :print] sources :results-dir "test/repr/cpp/roundtrip-results/own", their names
+# "bin/repr-cpp roundtrip --judge own (...)"; bin/reap --record; independence.edn's judge :roundtrip [N 1] with N the new print cases;
+# bin/crops-score --record
+```
+
+A file that fails (a crash, a timeout, an unclassed refusal) stops its key's recording: fix or class it (the known file), run the key
+again. The clang judge stays the oracle tier's: `bin/repr-cpp roundtrip-corpus KEY --judge clang` by hand at a tag.
+
+### Proposed (CP240-CP243; none decided)
+
+- **CP240: eval and AOT without clang's IR.** The runs lower clang's IR of each program and a runtime built from clang's IR of
+  libstdc++'s sources at gate time (the step `cpp-runtime` on `:cxx :gcc`): 0 however the programs' IR is made. (a) The pack route:
+  mac/oracle-records-cpp2's records of the programs' and the runtime's IR (`test/cpp/records/cpp-ir-samples`, `cpp-runtime-ir`) merged,
+  eval and AOT 0.5 each (independence +20); costs that branch's merge (its C++ part: 25 files, bin/cppi's IR steps). (b) Our route as
+  the runs' default (`CPPI_ROUTE=ours`, clang's IR for the programs the code generator refuses until it does not), with (a)'s runtime
+  record: the same 0.5 today (the runtime is clang's), 37 of the sampling's 67 programs without clang now; costs a day (the harness's
+  route, the night's run of both routes against each other). (c) As (b) with the runtime by our route too (CODEGEN.md's G5c: libsupc++
+  and libstdc++-v3/src through Sema and the code generator), eval and AOT toward 1; costs G5b and G5c, 6-9 days by CODEGEN.md's plan.
+  **Recommended: (a) now, (b) next, (c) as G5c.**
+- **CP241: the headers.** libstdc++'s installed headers count as the toolchain (0). Measured today: of the 834 files under
+  `/usr/include/c++/15.2.0`, **827 are byte for byte files of the pinned gcc-15.2.0 tarball** (libstdc++-v3/include, config/, libsupc++);
+  the other 7 are made by libstdc++'s build: `bits/c++config.h` (c++config with the release, the date and configure's answers about the
+  target, config.h's 300-odd `_GLIBCXX_HAVE_*`), the five `gthr*.h` (libgcc's gthr files through the Makefile's sed), `bits/std.cc` and
+  `std.compat.cc` (sed over the .cc.in). (a) A pack of the installed tree, pinned (0.5); costs an hour, and its contents are a toolchain
+  package's. (b) The headers from the pinned tarball, an input corpus in C++ (1), the 7 derived by the Makefile's rules (sed) and
+  configure's answers derived from the target description and musl's headers as C's own target does (c/target, `test/c/target.ae`), the
+  installed tree the oracle (equal file for file); with C's sysroot for the C library and gcc's `ginclude/` from the same tarball; costs
+  about two days (configure's answers the most). (c) A clean-room subset written from the standard: the corpora include most of the
+  library (`<iostream>`, `<string>`, `<vector>`, `<map>`, `<format>` ...), and the lowered runtime is libstdc++'s, whose ABI the headers
+  must match, so a clean-room header set means a clean-room runtime too; weeks. **Recommended: (b)**; the read cell gains only the token
+  check's 1,934 files from it (the dg check's 4,597 are clang's Sema: CP242), so after CP240.
+- **CP242: the dg check without clang.** Its 4,597 files are clang's acceptance and errors (CP2 (a)), the read stage's 0 and the source
+  of the read cell's 1,192 by-design cases. (a) As now. (b) The native parser's syntax errors for the files whose expected errors are
+  syntax errors (the parser declines them now), clang for the rest; a mixed stage. (c) Sema's diagnostics (CX12): the checker. **Recommended:
+  (a) until CX12**; (b) moves few files (most dg-error tests are semantic).
+- **CP243: the round trip's default.** (a) `--judge own` the default once the night's records exist (the steps then on `[:stage0]`,
+  `--judge clang` by hand at a tag, the oracle tier). (b) Both judges in the gate, clang's on `:cxx` beside. **Recommended: (a)**, the
+  decided rule's.
