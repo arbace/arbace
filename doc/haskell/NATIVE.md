@@ -565,6 +565,42 @@ list `test/haskell/errors-check.txt`, seed 16 and 150 mutants: 468 modules (352 
 `native-check` (the trees): 54 of 54 equal. The mutator's pool did not change (the seeds stay
 reproducible): its headers do not reach the deprecated flags or the response files, the samples do.
 
+## Speed (2026-11-04, branch `parsers-speed`)
+
+Profiled on stage 0 (the evaluator over the checkout's namespaces; the method and the evaluator's costs, one call 100 to 150
+ns, an allocation 100 ns and more, `aset` of a boxed value into a typed array 50 to 100 times dearer, in doc/ocaml/OCAML-SURVEY.md,
+"Speed (OC173)"). Where the time went, a 40 KB module of 4,520 tokens (Cabal's `PackageDescription/Parsec.hs`) before: lexing
+218 ms (a token and its blank 30 to 60 µs: `scan!` allocated its accumulator, tried every rule's predicates by calls of the
+character functions and walked `m-run` with a function per code point), the driver and the actions 270 ms (an `ArrayList` of
+states and one of values, a sub-list copied to a vector for every reduction), the Haddock pass 10 ms, `to-dump` 55 ms and
+`pr-str` 97 ms.
+
+| | before | after |
+|---|---:|---:|
+| `Parsec.hs` (40 KB): lexing alone; parse with lexing; Haddock; `to-dump`; text | 218; 487; 10; 55; 97 ms | 140; 265; 10; 60; 79 ms |
+| `Data/Fixed.hs` (15 KB), the same | 81; 158; 14; 20; 33 ms | 59; 97; 14; 19; 28 ms |
+| `read` of 15 modules (407 KB), process start included | 11 s | 7 s |
+| `read` of 128 modules (about 2.4 MB), process start included | 27 s | 16 s |
+| `native-check` (54 modules), the native reads | 7.6 s (recorded) | 6.0 s |
+
+What changed (`parse.ae`, `lex.ae`, `ast.ae`, `native.ae`; the dumps byte for byte the same on 15 and on 124 modules, the
+failures the same): the LR driver keeps the states and the values in two arrays of a `loop`, and calls an action with its
+arguments read from the array (no vector, no sub-list), the token's terminal found in a `HashMap` (the `Long/valueOf`
+that was reflective is typed); the lexer has a table of the character classes (the predicates' answers for ASCII, computed
+from the predicates themselves; macros `small?*`, `idchar?*`, `run*`... inline them) and `scan-fast`, which answers in the
+start codes `:s0` and `:bol` when the byte alone decides (blanks, a lowercase letter's variable, a newline, a special
+character, an operator that begins no comment or bracket, the empty `do_bol` rule), leaving `scan!` the rest; `scan!`
+reuses its accumulator, `set-input!` and the span are made without intermediate vectors, `combine` without three; `read`
+writes the dump with `write-form`/`write-dump`, a printer for the dump's data (lists, vectors, strings, symbols, keywords,
+integers; any other value by `pr-str`) that also applies `to-dump`'s changes while it writes, the text the same as
+`pr-str` of the converted tree (tried on all code points below 400 in a string). The start of the process (the namespaces
+from source, `tables.ae` decoded) is about 2 s, unchanged. What is left: the lexer is a third of a module's time, the actions
+25 µs a token (the ECP closures and `comb`s), the process start; compiled with the program (c2j) at a re-seed the next step.
+
+On batch 3 (2026-11-07) the speed commits were re-applied onto the errors and preprocessing lines (merge plan §3 item 32):
+the fused writer writes mode `:lines`' dumps (`read` without `--mode full`); mode `:full`'s dumps, whose tree `full-data`
+remaps, are printed by `form-text` of the converted tree.
+
 ## What is left
 
 - Messages: `PsWarnTransitionalLayout` (the alternative layout rule is a lexer bit, not run);
@@ -576,4 +612,5 @@ reproducible): its headers do not reach the deprecated flags or the response fil
   panics); Alex's stopping point beyond strings and characters. `PsErrExpectedHyphen` is not raised by GHC
   9.14.1 itself.
 - hsc2hs natively: it runs a C program (above); an `.hsc` module still needs the helper.
-- Speed: on stage 0's evaluator about 0.1 to 0.3 s a module; not yet compiled (c2j) or tuned.
+- Speed: on stage 0's evaluator about 0.06 to 0.2 s a module after the tuning above (0.1 to 0.3 s before); not yet
+  compiled (c2j).

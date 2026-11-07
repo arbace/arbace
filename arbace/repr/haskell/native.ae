@@ -166,8 +166,9 @@
   header's parse (getImports' parseHeader) first, its errors alone when it fails; else the module's
   warnings (when its parse failed, those that are not errors under -Werror) and then its errors
   (and the warnings that -Werror made errors); a parse that succeeds with only such warnings gives
-  them all in one batch"
-  [^String text ^String file flags & {:keys [signature]}]
+  them all in one batch. raw: an accepted module's tree as the parser made it (spans of the
+  parser's form; write-dump writes it as the dump's text)"
+  [^String text ^String file flags & {:keys [signature raw]}]
   (let [cs (lx/code-points text)
         d0 (hd/dyn-flags flags)
         hdr ((requiring-resolve 'arbace.repr.haskell.fileargs/file-args) cs file d0)]
@@ -207,7 +208,7 @@
           {:messages (into (pre) [ws*]) :dflags d :opts opts}
           :else
           (let []
-            {:tree (a/to-dump lmod file)
+            {:tree (if raw lmod (a/to-dump lmod file))
              :pragmas (mapv (fn [[k line v f]] (if (= f file) (list k line v) (list k line v f))) prags)
              :exts (hd/extensions d)
              :dflags d
@@ -277,6 +278,56 @@
     :else (.append b (pr-str x))))
 
 (defn form-text "x as pr-str prints it" [x] (let [b (StringBuilder.)] (write-form b x) (str b)))
+
+(defn- write-span [^StringBuilder b s ^String module-file]
+  (if (nil? s)
+    (.append b "nil")
+    (let [f (nth s 0)]
+      (.append b "[")
+      (when-not (= f module-file) (write-string b f) (.append b " "))
+      (.append b (long (nth s 1))) (.append b " ") (.append b (long (nth s 2))) (.append b " ")
+      (.append b (long (nth s 3))) (.append b " ") (.append b (long (nth s 4)))
+      (.append b "]"))))
+
+(defn write-dump
+  "The text of (a/to-dump x module-file) as pr-str prints it, written without building the tree"
+  [^StringBuilder b x ^String module-file]
+  (cond
+    (seq? x)
+    (cond
+      (empty? x) (.append b "[]")
+      (= 'L (first x)) (do (.append b "(L ") (write-span b (nth x 1) module-file) (.append b " ")
+                           (write-dump b (nth x 2) module-file) (.append b ")"))
+      (a/node? x)
+      (let [h (first x)]
+        (case h
+          XModulePs (do (.append b "(XModulePs nil nil ") (write-dump b (nth x 3) module-file) (.append b " ")
+                        (write-dump b (nth x 4) module-file) (.append b ")"))
+          ClassDecl (do (.append b "(ClassDecl (tuple nil nil nil)")
+                        (doseq [y (drop 2 x)] (.append b " ") (write-dump b y module-file))
+                        (.append b ")"))
+          HsDataDefn (do (.append b "(HsDataDefn nil")
+                         (doseq [y (drop 2 x)] (.append b " ") (write-dump b y module-file))
+                         (.append b ")"))
+          (do (.append b "(")
+              (loop [s (seq x) first? true]
+                (when s
+                  (when-not first? (.append b " "))
+                  (write-dump b (first s) module-file)
+                  (recur (next s) false)))
+              (.append b ")"))))
+      :else
+      (do (.append b "[")
+          (loop [s (seq x) first? true]
+            (when s
+              (when-not first? (.append b " "))
+              (write-dump b (first s) module-file)
+              (recur (next s) false)))
+          (.append b "]")))
+    (vector? x) (do (.append b "[")
+                    (let [n (count x)] (dotimes [i n] (when (pos? i) (.append b " ")) (write-dump b (nth x i) module-file)))
+                    (.append b "]"))
+    :else (write-form b x)))
 
 (defn dump-forms
   "The native read as a dump's three forms; in mode :full (full: {:text :tokens}, full-data's) the
@@ -761,7 +812,7 @@
                      o (File. (str out "/" f ".edn"))]
                  (try
                    (let [pre (preprocess inst flags f)
-                         r (read-text (:text pre) f flags :signature (str/ends-with? f ".hsig"))
+                         r (read-text (:text pre) f flags :signature (str/ends-with? f ".hsig") :raw (not full))
                          _ (when (:messages r)
                              (throw (ex-info (str "rejected\n" (messages-text r ((requiring-resolve 'arbace.repr.haskell.errors/text-lines)
                                                                                  (fn [g] (file-text (File. ^String g))))))
@@ -770,7 +821,14 @@
                          pre (cond-> pre (seq (:view-markers fd)) (assoc-in [:cpp :view-markers] (:view-markers fd)))
                          cfg (config flags (file-bytes f) :base base :inst inst :pre pre :full full)]
                      (.mkdirs (.getParentFile o))
-                     (spit o (str (str/join "\n" (map form-text (dump-forms r cfg fd))) "\n"))
+                     (if full
+                       (spit o (str (str/join "\n" (map form-text (dump-forms r cfg fd))) "\n"))
+                       ;; mode :lines: the fused writer, the parser's tree written as the dump's text
+                       (let [b (StringBuilder.)]
+                         (write-form b (list 'hsdump/config cfg)) (.append b "\n")
+                         (write-form b (list 'hsdump/pragmas (:pragmas r))) (.append b "\n")
+                         (write-dump b (:tree r) f) (.append b "\n")
+                         (spit o (str b))))
                      ;; mode :full: a CPP module's module view beside its dump, as the helper's dump --full writes it
                      ;; (the text level's reference: FILE.view)
                      (when (and full (:cpp pre)) (spit (str out "/" f ".view") (:text fd)))
