@@ -605,16 +605,16 @@ covers what.
   `share/classes/sun/nio/ch/Net.java`), `PollSelectorImpl.java` (from `unix/classes/sun/nio/ch/PollSelectorImpl.java`),
   `SocketOptionRegistry.java` (from `share/classes/sun/nio/ch/SocketOptionRegistry.java.template`), `NativeDispatcher.java`,
   `UnixDispatcher.java`, `EventFD.java`, `NativeThread.java`, `Util.java`'s `ungrowableSet`, and the variant
-  `overlay/jdk/variants/SelectorProvider.ae`, which keeps the jdk26u member it replaces: Copyright (c) Oracle and/or
-  its affiliates, under the GNU General Public License version 2 with the Classpath Exception (text below); the
-  rest of those files, `IOUtil.java`, `SocketDispatcher.java`, `Poller.java`, `UnixDomainSockets.java`, `EPoll.java`,
-  `FileDispatcherImpl.java` (jdk26u's names and signatures, jrt's code), `jdk/internal/jrt/HostChannels.java`, the
-  variants `SocketChannelImpl.ae`, `PollSelectorProvider.ae` and `EPollSelectorProvider.ae`, and the Go natives
-  `go/arbace/jrt/channels_linux.ae`, `channels_other.ae` and `channels_test.ae` (written after jdk26u's
-  `src/java.base/unix/native/libnio/ch/{Net,IOUtil,SocketDispatcher,UnixDispatcher,PollSelectorImpl}.c`,
-  `src/java.base/linux/native/libnio/ch/{EPoll,EventFD}.c` and `src/java.base/unix/native/libnet/net_util_md.c`'s
-  `NET_SetSockOpt`, `NET_GetSockOpt` and `NET_Bind`: their system calls, flags and results, under the same license as
-  those files, GNU General Public License version 2 with the Classpath Exception) are Arbace's own but for that.
+  `overlay/jdk/variants/SelectorProvider.ae`, which keeps the jdk26u member it replaces, and `go/arbace/jrt/channels_linux.ae`,
+  a port to Go forms of jdk26u's `src/java.base/unix/native/libnio/ch/{Net,IOUtil,SocketDispatcher,UnixDispatcher,
+  PollSelectorImpl}.c`, `src/java.base/linux/native/libnio/ch/{EPoll,EventFD}.c` and
+  `src/java.base/unix/native/libnet/net_util_md.c`'s `NET_SetSockOpt`, `NET_GetSockOpt` and `NET_Bind` (their system
+  calls, flags, conversions and results): Copyright (c) Oracle and/or its affiliates, under the GNU General Public
+  License version 2 with the Classpath Exception (text below); the rest of those files, `IOUtil.java`,
+  `SocketDispatcher.java`, `Poller.java`, `UnixDomainSockets.java`, `EPoll.java`, `FileDispatcherImpl.java` (jdk26u's
+  names and signatures, jrt's code), `jdk/internal/jrt/HostChannels.java`, the variants `SocketChannelImpl.ae`,
+  `PollSelectorProvider.ae` and `EPollSelectorProvider.ae`, `go/arbace/jrt/channels_other.ae` and `channels_test.ae`
+  are Arbace's own.
   Their jdk26u sources join `jdk/forms/` once `bin/jrt-convert update` has run: 47 files of selector-sources (40 of
   `src/java.base/share/classes`, 4 of `src/java.base/unix/classes`, 3 of `src/java.base/linux/classes`).
 - Other Go-build variants (J2G-SPEC §4.6; recorded by the rule of B7):
