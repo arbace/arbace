@@ -50,6 +50,19 @@ def test_id(test):
         return repr(test)
 
 
+def inline_values_stand_in(name):
+    """test_class imports _testinternalcapi's has_inline_values at module level (CPython's inline values, which pyi's
+    objects do not have, class :inline-values; queue 226): a stand-in for that one name, for that one module, so that
+    its other tests run. The module stays absent for the rest of Lib/test, whose tests skip without it."""
+    if name.endswith("test_class") and sys.implementation.name != "cpython":
+        import types
+        m = types.ModuleType("_testinternalcapi")
+        def has_inline_values(obj):
+            raise NotImplementedError("pyi's objects have no inline values")
+        m.has_inline_values = has_inline_values
+        sys.modules.setdefault("_testinternalcapi", m)
+
+
 def main():
     name = sys.argv[1]
     skipfile = sys.argv[2] if len(sys.argv) > 2 else None
@@ -71,6 +84,7 @@ def main():
         from test import support
         regrtest_setup(support)
         modname = name if name.startswith("test.") else "test." + name
+        inline_values_stand_in(modname)
         mod = __import__(modname, fromlist=["*"])
         import unittest
     except BaseException as e:
