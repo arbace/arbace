@@ -3824,3 +3824,19 @@ coroutine; its one regex stays until a whole run shows it serves nothing). The r
 `:finalization` 46 to 59 (10 `refcycles` methods read `gc.get_referrers`, which answers nothing here), `:finalization-goi` 59
 to 68 (pass compiled), `:finalization-collect` 29 to 30, `:finalization-cycle` 17 to 18 (a cycle through a frame's globals),
 `:docstrings` 1 to 2.
+
+**Speed.**
+Least compiled wall time in ms of 3 rounds, base and head back to back (210's method; q225's run shared the VM, so both sides carry its load):
+
+| benchmark | CPython | base | head | change |
+|---|---:|---:|---:|---:|
+| bm_async_tree | 231 | 1303 | 746 | -42.7% |
+| bm_async_tree_io | 546 | 2331 | 1380 | -40.8% |
+| bm_async_tree_memoization | 256 | 1485 | 813 | -45.3% |
+| bm_async_tree_eager | 111 | 782 | 405 | -48.2% |
+| bm_async_tree_tg | 230 | 1191 | 549 | -53.9% |
+| bm_async_generators | 316 | 923 | 1374 | +48.9% |
+| bm_coroutines | 368 | 769 | 729 | -5.2% |
+| bm_generators | 159 | 682 | 676 | -0.9% |
+
+bm_async_generators pays for the firstiter hook, which the base skipped in `async for` (a bug): a WeakSet add per generator, as CPython does.
