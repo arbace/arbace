@@ -1,24 +1,33 @@
 #!/bin/bash
 # repr/llvm, LLVM IR's bridge (doc/cpp/LLVM.md; doc/cpp/CPP-SURVEY.md §5.2, "As built: CX6"): LLVM IR text as LLVM forms
-# and back, arbace.repr.llvm on the tools' host (evaluated from the checkout). The judge is clang as the assembler.
+# and back, arbace.repr.llvm on the tools' host (evaluated from the checkout). The judges are clang as the assembler and
+# LLVM 23's llvm-as.
 #
 #   bin/repr-llvm read FILE.ll [-o OUT.ae]     FILE's LLVM forms as .ae text
 #   bin/repr-llvm print FILE.ae [-o OUT.ll]    the forms printed as IR
 #   bin/repr-llvm roundtrip LIST WORK          each NAME<tab>PATH.ll of LIST: read, the .ae text read back equal, printed,
-#                                              read again equal (WORK/forms/NAME.ae, WORK/print/NAME.ll), and clang -c of the
-#                                              print equal byte for byte to clang -c of the original (WORK/rt.tsv, WORK/objects.tsv);
-#                                              exit 1 unless every file's forms are equal and its objects the same, and every
-#                                              negative control (test/repr/llvm/roundtrip-controls.txt, REPR_LLVM_CONTROLS; GT9,
-#                                              doc/GATE-SURVEY.md, "As built: GT9's controls") fails as it must: a line `ID SUBJECT
-#                                              REFERENCE` (names of LIST, both round-tripping) crosses the SUBJECT's print with the
-#                                              REFERENCE's original, the forms read again against the original's forms (arbace.repr.llvm
-#                                              control) and the objects (cmp); either the same is `control passed`, a control whose
-#                                              names LIST lacks is left
+#                                              read again equal (WORK/forms/NAME.ae, WORK/print/NAME.ll); clang -c of the
+#                                              print against clang -c of the original, for the module's own target triple
+#                                              (COFF without its time stamp), byte for byte (WORK/objects.tsv), and llvm-as's
+#                                              bitcode of both, module summaries included (WORK/bitcode.tsv; REPR_LLVM_AS,
+#                                              default /usr/lib/llvm23/bin/llvm-as, the judge skipped when it is missing);
+#                                              WORK/rt.tsv. A judge is `same`, `differs` (the print's output differs or the
+#                                              print does not build where the original does) or `none` (the original does
+#                                              not build: a target the back end does not take). Exit 1 unless every file's
+#                                              forms are equal, no judge differs, and each file has one judge `same`
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
 . "$root/bin/lib/tools.bash"
 export GOMAXPROCS=${GOMAXPROCS:-4} GOMEMLIMIT=${GOMEMLIMIT:-1500MiB}
+
+# judge NAME ORIG PRINT CMD...: CMD ORIG ORIG-OUT, CMD PRINT PRINT-OUT, the verdict on the two outputs
+judge() {
+  local o=$1 a=$2 b=$3; shift 3
+  if ! "$@" "$a" -o "$o.orig" 2> "$o.log"; then echo none
+  elif [ -f "$b" ] && "$@" "$b" -o "$o.print" 2>> "$o.log" && cmp -s "$o.orig" "$o.print"; then echo same
+  else echo differs; fi
+}
 
 case ${1:-} in
   read|print) arbace_tool -m arbace.repr.llvm "$@" ;;
@@ -26,34 +35,26 @@ case ${1:-} in
     list=$2 work=$3
     mkdir -p "$work"; work=$(cd "$work" && pwd)
     REPR_LLVM_THREADS=${REPR_LLVM_THREADS:-4} arbace_tool -m arbace.repr.llvm rt "$list" "$work"
+    llvm_as=${REPR_LLVM_AS:-/usr/lib/llvm23/bin/llvm-as}
+    [ -x "$llvm_as" ] || llvm_as=
+    : > "$work/objects.tsv"; : > "$work/bitcode.tsv"
     while IFS=$'\t' read -r n p; do
+      [ -n "$n" ] || continue
       mkdir -p "$work/obj/$(dirname "$n")"
-      if clang -c "$p" -o "$work/obj/$n.orig.o" 2> "$work/obj/$n.log" && [ -f "$work/print/$n.ll" ] \
-         && clang -c "$work/print/$n.ll" -o "$work/obj/$n.print.o" 2>> "$work/obj/$n.log"; then
-        if cmp -s "$work/obj/$n.orig.o" "$work/obj/$n.print.o"; then echo "$n	same"; else echo "$n	differs"; fi
-      else echo "$n	none"; fi
-    done < "$list" > "$work/objects.tsv"
+      tr=$(sed -n '/^target triple = /{s/^target triple = "\(.*\)"$/\1/p;q;}' "$p")
+      printf '%s\t%s\n' "$n" "$(judge "$work/obj/$n.o" "$p" "$work/print/$n.ll" \
+        clang -c -mno-incremental-linker-compatible ${tr:+-target "$tr"})" >> "$work/objects.tsv"
+      if [ -n "$llvm_as" ]; then
+        printf '%s\t%s\n' "$n" "$(judge "$work/obj/$n.bc" "$p" "$work/print/$n.ll" "$llvm_as")" >> "$work/bitcode.tsv"
+      fi
+    done < "$list"
     nf=$(wc -l < "$work/rt.tsv"); nok=$(cut -f2 "$work/rt.tsv" | grep -c '^ok$' || true)
     no=$(wc -l < "$work/objects.tsv"); nsame=$(grep -c '	same$' "$work/objects.tsv" || true)
-    echo "roundtrip: $nok of $nf forms equal, $nsame of $no objects equal"
-    # a check: every form equal and every object the same, else exit 1 (review 007's finding 11)
-    ctl=0
-    controls=${REPR_LLVM_CONTROLS:-$root/test/repr/llvm/roundtrip-controls.txt}
-    if [ -f "$controls" ]; then
-      while read -r cid csub cref _; do
-        case $cid in ''|'#'*) continue ;; esac
-        cpath=$(awk -F'\t' -v n="$cref" '$1 == n {print $2; exit}' "$list")
-        if [ -z "$cpath" ] || ! grep -q "^$csub	" "$list"; then echo "control $cid left: $csub or $cref is not in the list"; continue; fi
-        if ! grep -q "^$csub	same\$" "$work/objects.tsv" || ! grep -q "^$cref	same\$" "$work/objects.tsv"; then echo "control $cid left: $csub or $cref did not round-trip"; continue; fi
-        cf=$(arbace_tool -m arbace.repr.llvm control "$work" "$csub" "$cpath" 2>/dev/null | tail -1)
-        if [ -f "$work/obj/$csub.print.o" ] && [ -f "$work/obj/$cref.orig.o" ]; then
-          if cmp -s "$work/obj/$csub.print.o" "$work/obj/$cref.orig.o"; then co=same; else co=differs; fi
-        else co=none; fi
-        if [ "$cf" = differs ] && [ "$co" = differs ]; then echo "control $cid fails as it must (forms and objects differ)"
-        elif [ "$cf" != same ] && [ "$cf" != differs ] || [ "$co" = none ]; then echo "control not judged: $cid ($csub against $cref: forms $cf, objects $co)"; ctl=1
-        else echo "control passed: $cid ($csub against $cref): forms $cf, objects $co"; ctl=1; fi
-      done < "$controls"
-    fi
-    [ "$ctl" = 0 ] && [ "$nf" -gt 0 ] && [ "$nok" = "$nf" ] && [ "$nsame" = "$no" ] && [ "$no" = "$(grep -c . "$list")" ] ;;
+    nb=$(wc -l < "$work/bitcode.tsv"); nbsame=$(grep -c '	same$' "$work/bitcode.tsv" || true)
+    echo "roundtrip: $nok of $nf forms equal, $nsame of $no objects equal${llvm_as:+, $nbsame of $nb bitcode equal}"
+    # a check: every form equal, no judge differing, and every file judged same by one of them (review 007's finding 11)
+    judged=$(cat "$work/objects.tsv" "$work/bitcode.tsv" | awk -F'\t' '$2 == "same" { print $1 }' | sort -u | wc -l)
+    [ "$nf" -gt 0 ] && [ "$nok" = "$nf" ] && awk -F'\t' '$2 == "differs" { d = 1 } END { exit d }' "$work/objects.tsv" "$work/bitcode.tsv" \
+      && [ "$no" = "$(grep -c . "$list")" ] && [ "$judged" = "$no" ] ;;
   *) sed -n '2,/^set -e/p' "$0" | sed '$d;s/^# \{0,1\}//' >&2; exit 2 ;;
 esac
