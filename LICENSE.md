@@ -969,8 +969,20 @@ covers what.
   Haskell Compiler License" below). `arbace/repr/haskell/tables.ae` is generated from that tarball's
   `compiler/GHC/Parser.y.source` (its grammar, the same Glasgow license) by `happy.ae`, Arbace's own port of
   Happy's LALR(1) construction (no Happy code: Happy is a tool, its tables in GHC's generated
-  `Parser.hs` the check); `happy.ae`, `ast.ae`, `parse.ae` and `native.ae` are Arbace's own, under the
-  Eclipse Public License 1.0.
+  `Parser.hs` the check); `happy.ae`, `ast.ae`, `parse.ae`, `native.ae` and `mutate.ae` are Arbace's own,
+  under the Eclipse Public License 1.0. `arbace/repr/haskell/doc.ae`, `errors.ae` and `pprhs.ae` (the
+  native reader's messages, doc/haskell/NATIVE.md, "Messages") port from the same tarball
+  `compiler/GHC/Utils/Ppr.hs` (GHC's copy of the pretty library's HughesPJ printer) and the combinators of
+  `GHC/Utils/Outputable.hs`, `GHC/Parser/Errors/Ppr.hs`, `GHC/Types/Hint/Ppr.hs`, the parser's codes of
+  `GHC/Types/Error/Codes.hs`, the printing of `GHC/Types/Error.hs`, `GHC/Utils/Error.hs`,
+  `GHC/Driver/Errors.hs`, `GHC/Utils/Logger.hs` and the Outputable instances of
+  `GHC/Hs/{Expr,Pat,Type,Lit,Binds,Decls}.hs` and `GHC/Parser/Types.hs`, by hand on 2026-11-04, each file
+  carrying GHC's notice (the Glasgow license, below). `arbace/repr/haskell/fileargs.ae` (the driver's header
+  phase, 2026-11-05) ports `GHC/Parser/Header.hs` (getOptions', toArgs, checkExtension,
+  checkProcessArgsResult), `GHC/Driver/CmdLine.hs` (processArgs), `GHC/Driver/Session.hs` and
+  `GHC/Driver/Pipeline/Execute.hs` (getFileArgs) with GHC's notice; `arbace/repr/haskell/flags.ae` is generated
+  by the helper's `flags` verb from the names of `flagsDynamic` and `supportedLanguagePragmas` of the same
+  tarball's GHC (the Glasgow license).
 - `arbace/repr/haskell/rename.ae` (repr/haskell's renamer, HF2, doc/haskell/FRONTEND-SURVEY.md, "As built: HF1-HF2"):
   ports of GHC 9.14.1, https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz (SHA-256
   `2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77`, the corpus's pin): `mkOpAppRn`,

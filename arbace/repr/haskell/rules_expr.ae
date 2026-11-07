@@ -119,7 +119,7 @@
     (when (a/just? $2)
       (let [[_ l [_ i]] (second $2)]
         (when-not (or (<= 0 (long i) 9) (every? #(= (unLoc %) (a/exact 'tc "->")) (unLoc $4)))
-          (pp/fatal! (str "Precedence out of range: " i) l))))
+          (pp/fatal! (lx/msg :PsErrPrecedenceOutOfRange l i)))))
     (sLL $1 $4 (con SigD nx (con FixSig (tuple (tuple nil ann) fix-text)
                                  (con FixitySig (unLoc $3) (unLoc $4) (con Fixity fix-prec (unLoc $1))))))))
 
@@ -158,7 +158,7 @@
   "getSCC: an SCC pragma's string, refused when it has a space"
   [t]
   (let [[_ s] (tv t)]
-    (when (str/includes? s " ") (pp/fatal! "Spaces are not allowed in SCCs" (gl t)))
+    (when (str/includes? s " ") (pp/fatal! (lx/msg :PsErrSpaceInSCC (gl t))))
     s))
 
 (defrule "sigdecl" "'{-# SCC' qvar STRING '#-}'" [ps $1 $2 $3 $4]
@@ -184,8 +184,9 @@
              (L (combine (getLoc expr) lt) (con ExprWithTySig nil expr (pp/mk-hs-wild-card-bndrs (first sigtypes))))
              inl-prag)
         (and (not (a/just? rule-binds)) (= 'HsVar (first (unLoc expr))))
-        (con SpecSig nil (nth (unLoc expr) 2) (vec sigtypes) inl-prag)
-        :else (pp/fatal! "SPECIALISE expression with several type ascriptions" lt)))))
+        (do (lx/add-warning! pp/*ps* (lx/msg :PsWarnSpecMultipleTypeAscription lt))
+            (con SpecSig nil (nth (unLoc expr) 2) (vec sigtypes) inl-prag))
+        :else (pp/fatal! (lx/msg :PsErrSpecExprMultipleTypeAscription lt))))))
 
 (defrule "sigdecl" "'{-# SPECIALISE' activation rule_foralls infixexp sigtypes_maybe '#-}'" [ps $1 $2 $3 $4 $5 $6]
   (let [e (pp/run-expr $4)
@@ -274,11 +275,13 @@
     (let [e1 ($1 mode)
           m ($2 mode)
           e4 ($4 mode)
+          _ (pp/hint-linear (getLoc m))
           arr ((unLoc m) $3)]
       (pp/mk-hs-arrow-pv ps mode (comb2 e1 e4) :fun-type e1 arr e4))))
 
 (defrule "infixexp2" "infixexp '->.' infixexp2" [ps $1 $2 $3]
   (ecp [mode]
+    (pp/hint-linear (gl $2))
     (let [e1 ($1 mode) e3 ($3 mode)]
       (pp/mk-hs-arrow-pv ps mode (comb2 e1 e3) :fun-type e1 (con HsLinearAnn nil) e3))))
 
@@ -366,9 +369,11 @@
   (let [c (pp/run-expr $2)]
     (ecp [mode]
       (let [a ($5 mode) b ($8 mode)]
+        (pp/check-do-and-if-then-else mode c (second $3) a (second $6) b)
         (pp/mk-hs-if-pv mode (comb2 $1 b) c a b)))))
 
 (defrule "aexp" "'if' ifgdpats" [ps $1 $2]
+  (pp/hint-multi-way-if $1)
   (let [[_ gdpats] (unLoc $2)]
     (pp/ecp-from-exp (sLL $1 $2 (con HsMultiIf (tuple nil nil nil) (vec (reverse gdpats)))))))
 
@@ -378,12 +383,14 @@
       (let [alts ($4 mode)] (pp/mk-hs-case-pv mode (comb3 $1 $3 alts) e alts)))))
 
 (defrule "aexp" "DO stmtlist" [ps $1 $2]
+  (pp/hint-qualified-do $1 "do")
   (ecp [mode]
     (let [stmts ($2 mode)
           m (tv $1)]
       (pp/mk-hs-do-pv mode (comb2 $1 stmts) (if m (just (a/mod-name m)) 'Nothing) stmts))))
 
 (defrule "aexp" "MDO stmtlist" [ps $1 $2]
+  (pp/hint-qualified-do $1 "mdo")
   (let [stmts ($2 :expr)
         m (tv $1)]
     (pp/ecp-from-exp (L (comb2 $1 stmts) (con HsDo nil (con MDoExpr (if m (just (a/mod-name m)) 'Nothing)) stmts)))))
@@ -427,7 +434,7 @@
   (ecp [mode] (pp/mk-sum-or-tuple-pv ps mode (comb2 $1 $3) 'Boxed ($2 mode))))
 
 (defrule "aexp2" "'(' orpats(exp2) ')'" [ps $1 $2 $3]
-  (let [pat (sL1 $2 (con OrPat nx (unLoc $2)))]
+  (let [pat (pp/hint-or-pats (sL1 $2 (con OrPat nx (unLoc $2))))]
     (pp/ecp-from-pat (sLL $1 $3 (con ParPat (tuple nil nil) pat)))))
 
 (defrule "aexp2" "'(' projection ')'" [ps $1 $2 $3]
@@ -448,7 +455,7 @@
 (defrule "aexp2" "SIMPLEQUOTE qcon" [ps $1 $2] (pp/ecp-from-exp (sLL $1 $2 (con HsUntypedBracket nx (con VarBr nil true $2)))))
 (defrule "aexp2" "TH_TY_QUOTE tyvar" [ps $1 $2] (pp/ecp-from-exp (sLL $1 $2 (con HsUntypedBracket nx (con VarBr nil false $2)))))
 (defrule "aexp2" "TH_TY_QUOTE gtycon" [ps $1 $2] (pp/ecp-from-exp (sLL $1 $2 (con HsUntypedBracket nx (con VarBr nil false $2)))))
-(defrule "aexp2" "TH_TY_QUOTE" [ps $1] (pp/fatal! "Parser error on `''`" (gl $1)))
+(defrule "aexp2" "TH_TY_QUOTE" [ps $1] (pp/fatal! (lx/msg :PsErrEmptyDoubleQuotes (gl $1) (lx/get-bit ps :ThQuotesBit))))
 
 (defn- bracket-ann [t] (if (= :HasE (if (vector? (tv t)) (first (tv t)) (tv t))) (con BracketHasE nil) (con BracketNoE nil)))
 
@@ -505,6 +512,7 @@
 (defrule "texp" "infixexp qop" [ps $1 $2]
   (let [e (pp/run-expr $1)
         op ($2 :expr)]
+    (pp/reject-pragma-pv e)
     (pp/ecp-from-exp (sLL e op (con SectionL nx e op)))))
 
 (defrule "texp" "qopm infixexp" [ps $1 $2]
@@ -686,11 +694,13 @@
   (let [pats (unLoc $1)]
     (if (= 1 (count pats))
       (first pats)
-      (sL1 $1 (con OrPat nx pats)))))
+      (pp/hint-or-pats (sL1 $1 (con OrPat nx pats))))))
 
 (defrule "pats1" "pat" [ps $1] [$1])
 
-(defrule "bindpat" "exp" [ps $1] (pp/check-pattern ps (pp/run-pat $1)))
+(defrule "bindpat" "exp" [ps $1]
+  ;; checkPattern_details incompleteDoBlock
+  (binding [pp/*parse-context* [nil true]] (pp/check-pattern ps (pp/run-pat $1))))
 
 (defrule "argpat" "apat" [ps $1] $1)
 (defrule "argpat" "PREFIX_AT atype" [ps $1 $2]

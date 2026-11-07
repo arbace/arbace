@@ -56,9 +56,17 @@
             [arbace.string :as str]))
 
 (defn fatal!
-  "addFatalError: the parse fails with msg at span"
-  [msg span]
-  (throw (ex-info (str "parse error: " msg) {:error msg :span span :state :parser})))
+  "addFatalError: the parse fails with the message m (arbace.repr.haskell.errors), or with a
+  message not yet ported, msg at span"
+  ([m] (lx/fatal! m))
+  ([msg span] (lx/fatal! (lx/msg :Unported span msg))))
+
+(declare ^:dynamic *ps*)
+
+(defn add-error!
+  "addError: the message m recorded, the parse going on"
+  [m]
+  (lx/add-error! *ps* m))
 
 (defn run-expr "runPV (unECP ecp) at type HsExpr" [ecp] (ecp :expr))
 (defn run-pat "runPV (unECP ecp) at type PatBuilder" [ecp] (ecp :pat))
@@ -77,8 +85,91 @@
   [mode]
   (if (identical? mode :cmd) :expr mode))
 
-(defn- cmd-fail [what span] (fatal! (str "Parse error in command: " what) span))
-(defn- pat-fail [what span] (fatal! (str "Parse error in pattern: " what) span))
+(defn- ph [f & args] (apply (requiring-resolve (symbol "arbace.repr.haskell.pprhs" (name f))) args))
+(defn- dc [f & args] (apply (requiring-resolve (symbol "arbace.repr.haskell.doc" (name f))) args))
+
+(defn- cmd-fail
+  "cmdFail: PsErrParseErrorInCmd at span, doc a fn giving the command's document"
+  [doc span]
+  (fatal! (lx/msg :PsErrParseErrorInCmd span (doc))))
+
+(defn- pat-fail "patFail: the message m" [m] (fatal! m))
+
+(def ^:dynamic *parse-context*
+  "The PV's ParseContext (runPV_details): [operator incomplete-do], the operator of an infix
+  function binding (or nil), whether a do block may be missing (bindpat's incompleteDoBlock)"
+  [nil false])
+
+(defn- pat-details "fromParseContext: PEIP_OtherPatDetails of the parse context" []
+  [:Other (first *parse-context*) (second *parse-context*)])
+
+
+
+(defn- block-arguments-bit? [] (lx/get-bit *ps* :BlockArgumentsBit))
+
+(defn check-exp-block-arguments
+  "checkExpBlockArguments: an error (not fatal) for a do, case, lambda, let, if or proc applied
+  to without BlockArguments"
+  [e]
+  (let [n (unLoc e)
+        err (case (first n)
+              HsDo (case (let [f (nth n 2)] (when (seq? f) (first f)))
+                     DoExpr (lx/msg :PsErrDoInFunAppExpr (getLoc e) (a/from-just (second (nth n 2))) e)
+                     MDoExpr (lx/msg :PsErrMDoInFunAppExpr (getLoc e) (a/from-just (second (nth n 2))) e)
+                     nil)
+              HsCase (lx/msg :PsErrCaseInFunAppExpr (getLoc e) e)
+              HsLam (lx/msg :PsErrLambdaInFunAppExpr (getLoc e) (nth n 2) e)
+              HsLet (lx/msg :PsErrLetInFunAppExpr (getLoc e) e)
+              HsIf (lx/msg :PsErrIfInFunAppExpr (getLoc e) e)
+              HsProc (lx/msg :PsErrProcInFunAppExpr (getLoc e) e)
+              nil)]
+    (when (and err (not (block-arguments-bit?))) (add-error! err))))
+
+(defn check-cmd-block-arguments "checkCmdBlockArguments" [c]
+  (let [n (unLoc c)
+        err (case (first n)
+              HsCmdLam (lx/msg :PsErrLambdaCmdInFunAppCmd (getLoc c) (nth n 2) c)
+              HsCmdCase (lx/msg :PsErrCaseCmdInFunAppCmd (getLoc c) c)
+              HsCmdIf (lx/msg :PsErrIfCmdInFunAppCmd (getLoc c) c)
+              HsCmdLet (lx/msg :PsErrLetCmdInFunAppCmd (getLoc c) c)
+              HsCmdDo (lx/msg :PsErrDoCmdInFunAppCmd (getLoc c) c)
+              nil)]
+    (when (and err (not (block-arguments-bit?))) (add-error! err))))
+
+(defn- unless-bit
+  "The error m (not fatal) unless the extension bit is on"
+  [bit m]
+  (when-not (lx/get-bit *ps* bit) (add-error! m)))
+
+(defn check-do-and-if-then-else
+  "checkDoAndIfThenElse: semicolons before then or else without DoAndIfThenElse (an error, not
+  fatal, over the condition to the else branch)"
+  [mode c semi-then t semi-else e]
+  (when (or semi-then semi-else)
+    (unless-bit :DoAndIfThenElseBit
+                (lx/msg (if (= mode :cmd) :PsErrSemiColonsInCondCmd :PsErrSemiColonsInCondExpr)
+                        (combine (getLoc c) (getLoc e)) (unLoc c) semi-then (unLoc t) semi-else (unLoc e)))))
+
+(defn hint-explicit-forall "hintExplicitForall" [tok]
+  (when-not (or (lx/get-bit *ps* :ExplicitForallBit) (lx/get-bit *ps* :InRulePragBit))
+    (add-error! (lx/msg :PsErrExplicitForall (gl tok) (= :unicode (nth tok 1))))))
+(defn hint-multi-way-if "hintMultiWayIf" [tok] (unless-bit :MultiWayIfBit (lx/msg :PsErrMultiWayIf (gl tok))))
+(defn hint-linear "hintLinear" [span] (unless-bit :LinearTypesBit (lx/msg :PsErrLinearFunction span)))
+(defn hint-or-pats "hintOrPats" [pat] (unless-bit :OrPatternsBit (lx/msg :PsErrIllegalOrPat (getLoc pat) pat)) pat)
+(defn hint-qualified-do "hintQualifiedDo: a qualified do's token" [tok kw]
+  (when-let [m (nth tok 1)]
+    (unless-bit :QualifiedDoBit
+                (lx/msg :PsErrIllegalQualifiedDo (gl tok)
+                        ((requiring-resolve 'arbace.repr.haskell.doc/text) (str (if (string? m) m (a/mod-name m)) "." kw))))))
+(defn require-lt-puns
+  "requireLTPuns: without ListTuplePuns, the construct from the token or node s to e is an error"
+  [kind s e]
+  (when-not (lx/get-bit *ps* :ListTuplePunsBit)
+    (add-error! (lx/msg :PsErrInvalidPun (a/comb2 s e) kind))))
+
+(defn warn-star-is-type "warnStarIsType" [tok] (lx/add-warning! *ps* (lx/msg :PsWarnStarIsType (gl tok))))
+
+(def parse-error "parseError: the placeholder of an expression in error" (con HsHole 'HoleError))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; DisambInfixOp: the operators of qop and qopm, fns of the operator's mode (:expr or :name)
@@ -90,7 +181,7 @@
 (defn mk-hs-infix-hole-pv [v]
   (fn [omode]
     (if (identical? omode :name)
-      (fatal! "Invalid infix hole, expected an infix operator" (getLoc v))
+      (fatal! (lx/msg :PsErrInvalidInfixHole (getLoc v)))
       (L (getLoc v) (con HsHole (con HoleVar v))))))
 
 ;;; ------------------------------------------------------------------------------------------
@@ -100,21 +191,22 @@
   (fn [mode]
     (case mode
       :expr e
-      :pat (fatal! "Expression syntax in pattern" (getLoc e))
-      :cmd (cmd-fail "an expression" (getLoc e)))))
+      :pat (fatal! (lx/msg :PsErrArrowExprInPat (getLoc e) (unLoc e)))
+      :cmd (cmd-fail #(ph :ppr-expr (unLoc e)) (getLoc e)))))
 
 (defn ecp-from-cmd "ecpFromCmd" [c]
   (fn [mode]
     (case mode
       :cmd c
-      (fatal! "Arrow command found where an expression was expected" (getLoc c)))))
+      :expr (do (add-error! (lx/msg :PsErrArrowCmdInExpr (getLoc c) (unLoc c))) (L (getLoc c) parse-error))
+      :pat (fatal! (lx/msg :PsErrArrowCmdInPat (getLoc c) (unLoc c))))))
 
 (defn ecp-from-pat "ecpFromPat" [p]
   (fn [mode]
     (case mode
       :pat (L (getLoc p) (con PatBuilderPat (unLoc p)))
-      :expr (fatal! "Or-pattern in an expression" (getLoc p))
-      :cmd (fatal! "Or-pattern in a command" (getLoc p)))))
+      :expr (do (add-error! (lx/msg :PsErrOrPatInExpr (getLoc p) p)) (L (getLoc p) parse-error))
+      :cmd (cmd-fail #(ph :ppr-pat (unLoc p)) (getLoc p)))))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Patterns: PatBuilder to Pat (checkLPat, checkPat, checkAPat)
@@ -161,12 +253,12 @@
         (let [lit (second ur)]
           (con NPlusKPat nil (second ul) (L (getLoc r) lit) lit nx nx))
         (= opn (a/unqual 'var "@"))
-        (fatal! "Found a binding for the '@' operator in a pattern position" (getLoc op))
+        (do (add-error! (lx/msg :PsErrAtInPatPos (getLoc op))) (con WildPat nx))
         (or (rdr-data-con? opn) (rdr-tc? opn))
         (con ConPat (a/tuple 'Nothing 'Nothing) op (con InfixCon (check-lpat ps l) (check-lpat ps r)))
-        :else (pat-fail "operator application" loc)))
+        :else (pat-fail (lx/msg :PsErrInPat loc e0 (pat-details)))))
     PatBuilderPar (con ParPat (a/tuple nil nil) (check-lpat ps (nth e0 2)))
-    (pat-fail (str (first e0)) loc)))
+    (pat-fail (lx/msg :PsErrInPat loc e0 (pat-details)))))
 
 (defn- check-pat
   "checkPat: the pattern of (L l e) applied to args, at the outer location loc"
@@ -179,16 +271,16 @@
           (or (rdr-data-con? c) (rdr-tc? c))
           (L loc (con ConPat (a/tuple 'Nothing 'Nothing) ln (con PrefixCon (vec args))))
           (and (seq args) (= c (a/unqual 'var "rec")))
-          (pat-fail "rec" (getLoc lpb))
+          (pat-fail (lx/msg :PsErrInPat (getLoc lpb) e [:RecPattern (count args) (second *parse-context*)]))
           (empty? args) (L (getLoc lpb) (check-apat ps (getLoc lpb) e))
-          :else (pat-fail (pr-str c) loc)))
+          :else (pat-fail (lx/msg :PsErrInPat loc e (pat-details)))))
       PatBuilderAppType
       (let [[_ f at t] e] (check-pat ps loc f (cons (mk-invis-lpat at t) args)))
       PatBuilderApp
       (let [[_ f x] e] (check-pat ps loc f (cons (check-lpat ps x) args)))
       (if (empty? args)
         (L (getLoc lpb) (check-apat ps (getLoc lpb) e))
-        (pat-fail (str (first e)) loc)))))
+        (pat-fail (lx/msg :PsErrInPat loc e (pat-details)))))))
 
 (defn check-lpat
   "checkLPat: a PatBuilder (L l pb) to an LPat"
@@ -237,15 +329,24 @@
         e (unLoc exp)]
     (if (and (= 'HsVar (first e)) (rdr-data-con? (unLoc (nth e 2))))
       (if (seq projs)
-        (fatal! "Use of OverloadedRecordDot '.' not valid" (getLoc (first projs)))
+        (fatal! (lx/msg :PsErrOverloadedRecordDotInvalid (getLoc (first projs))))
         (con RecordCon (a/tuple (just nil) (just nil)) (nth e 2) (mk-rec-fields fs dd)))
       (cond
-        dd (fatal! "You cannot use `..' in a record update" dd)
-        (and (not overloaded) (seq projs)) (fatal! "OverloadedRecordUpdate needs to be enabled" (getLoc exp))
+        dd (fatal! (lx/msg :PsErrDotsInRecordUpdate dd))
+        (and (not overloaded) (seq projs)) (fatal! (lx/msg :PsErrOverloadedRecordUpdateNotEnabled (getLoc exp)))
         (not overloaded)
         (con RecordUpd (a/tuple (just nil) (just nil)) exp (con RegularRecUpdFields nx (mapv mk-rec-upd-field fs)))
         :else
-        (con RecordUpd (a/tuple (just nil) (just nil)) exp
+        (do
+          ;; the fields are not qualified (a fatal error at the first that is)
+          (doseq [[k v] fbinds]
+            (when (= k :left)
+              (let [lhs (nth (nth v 2) 2)
+                    [_ _ focc] lhs
+                    [_ _ rdr] (nth focc 2)]
+                (when (a/rdr-qual? rdr)
+                  (fatal! (lx/msg :PsErrOverloadedRecordUpdateNoQualifiedFields (getLoc lhs)))))))
+          (con RecordUpd (a/tuple (just nil) (just nil)) exp
              (con OverloadedRecUpdFields nx
                   (mapv (fn [[k v]]
                           (if (= k :right)
@@ -259,7 +360,7 @@
                                   fl (con DotFieldOcc nil (L loc (con FieldLabelString f)))
                                   arg' (if pun (L nil (con HsVar nx (L nil (a/unqual 'var f)))) arg)]
                               (mk-rdr-proj-update l (L loc [(L loc fl)]) arg' pun anns))))
-                        fbinds)))))))
+                        fbinds))))))))
 
 (defn- mk-pat-rec "mkPatRec" [ps p fields]
   (let [pb (unLoc p)]
@@ -267,7 +368,7 @@
       (let [[_ x fs dd] fields]
         (con PatBuilderPat (con ConPat (a/tuple (just nil) (just nil)) (second pb)
                                 (con RecCon (con HsRecFields x (mapv #(check-pat-field ps %) fs) dd)))))
-      (fatal! "Not a record constructor" (getLoc p)))))
+      (fatal! (lx/msg :PsErrInvalidRecordCon (getLoc p) pb)))))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Match groups and right-hand sides
@@ -309,18 +410,18 @@
                      boxity))
     :sum (if (= boxity 'Unboxed)
            (let [[_ alt arity e] sot] (L l (con ExplicitSum nil alt arity e)))
-           (fatal! "Boxed sums not supported" l))))
+           (fatal! (lx/msg :PsErrUnsupportedBoxedSumExpr l [boxity sot])))))
 
 (defn- mk-sum-or-tuple-pat [ps l boxity sot]
   (case (first sot)
     :tuple (L l (con PatBuilderPat
                      (con TuplePat (a/tuple nil nil)
-                          (mapv (fn [[k p]] (if (= k :missing) (fatal! "Tuple section in pattern context" l) (check-lpat ps p)))
+                          (mapv (fn [[k p]] (if (= k :missing) (fatal! (lx/msg :PsErrTupleSectionInPat l)) (check-lpat ps p)))
                                 (second sot))
                           boxity)))
     :sum (if (= boxity 'Unboxed)
            (let [[_ alt arity p] sot] (L l (con PatBuilderPat (con SumPat nil (check-lpat ps p) alt arity))))
-           (fatal! "Boxed sums not supported" l))))
+           (fatal! (lx/msg :PsErrUnsupportedBoxedSumPat l [boxity sot])))))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; DisambECP's methods, by mode
@@ -329,28 +430,39 @@
   (case mode
     :expr (L (getLoc v) (con HsVar nx v))
     :pat (L (getLoc v) (con PatBuilderVar v))
-    :cmd (cmd-fail "a variable" (getLoc v))))
+    :cmd (cmd-fail #(ph :ppr-name (unLoc v)) (getLoc v))))
+
+(defn- check-unboxed-lit-pat
+  "checkUnboxedLitPat: a pattern is not a primitive string, Float# or Double# literal"
+  [llit]
+  (let [lit (unLoc llit)]
+    (case (first lit)
+      HsStringPrim (add-error! (lx/msg :PsErrIllegalUnboxedStringInPat (getLoc llit) lit))
+      (HsFloatPrim HsDoublePrim) (add-error! (lx/msg :PsErrIllegalUnboxedFloatingLitInPat (getLoc llit) lit))
+      nil)))
 
 (defn mk-hs-lit-pv "mkHsLitPV" [mode llit]
   (case mode
     :expr (L (getLoc llit) (con HsLit nx (unLoc llit)))
-    :pat (L (getLoc llit) (con PatBuilderPat (con LitPat nx (unLoc llit))))
-    :cmd (cmd-fail "a literal" (getLoc llit))))
+    :pat (do (check-unboxed-lit-pat llit)
+             (L (getLoc llit) (con PatBuilderPat (con LitPat nx (unLoc llit)))))
+    :cmd (cmd-fail #(ph :ppr-lit (unLoc llit)) (getLoc llit))))
 
 (defn mk-hs-over-lit-pv "mkHsOverLitPV" [mode llit]
   (case mode
     :expr (L (getLoc llit) (con HsOverLit nx (unLoc llit)))
     :pat (L (getLoc llit) (con PatBuilderOverLit (unLoc llit)))
-    :cmd (cmd-fail "a literal" (getLoc llit))))
+    :cmd (cmd-fail #(ph :ppr-lit (unLoc llit)) (getLoc llit))))
 
 (defn mk-hs-wild-card-pv "mkHsWildCardPV" [mode l]
   (case mode
     :expr (L l (con HsHole (con HoleVar (L l (a/unqual 'var "_")))))
     :pat (L l (con PatBuilderPat (con WildPat nx)))
-    :cmd (cmd-fail "_" l)))
+    :cmd (cmd-fail #(dc :text "_") l)))
 
 (defn- add-sig-pat-p
-  "addSigPatP: a pattern signature, pushed under a view pattern (the legacy parse)"
+  "addSigPatP: a pattern signature, pushed under a view pattern (the legacy parse), with the warning
+  -Wview-pattern-signatures (the legacy and the future parse)"
   [l p sig]
   (if (= 'ViewPat (first (unLoc p)))
     (let [sig-loc (getLoc (nth sig 2))
@@ -359,39 +471,53 @@
                  (let [[_ vl vp] p
                        [_ ann e p'] vp]
                    (L (combine vl sig-loc) (con ViewPat ann e (go p'))))
-                 (L (combine (getLoc p) sig-loc) (con SigPat nil p sig))))]
-      (go p))
+                 (L (combine (getLoc p) sig-loc) (con SigPat nil p sig))))
+          legacy (go p)]
+      (lx/add-warning! *ps* (lx/msg :PsWarnViewPatternSignatures l legacy (L l (con SigPat nil p sig))))
+      legacy)
     (L l (con SigPat nil p sig))))
+
+(defn reject-pragma-pv
+  "rejectPragmaPV (expressions): a pragma at the left of an infix expression or before a type
+  signature, or of an operator section, is not allowed"
+  [e]
+  (let [n (unLoc e)]
+    (case (first n)
+      OpApp (reject-pragma-pv (nth n 4))
+      HsPragE (add-error! (lx/msg :PsErrUnallowedPragma (getLoc e) (nth n 2)))
+      nil)))
 
 (defn mk-hs-ty-sig-pv "mkHsTySigPV" [ps mode l a sig]
   (case mode
-    :expr (L l (con ExprWithTySig nil a (hs-type-to-hs-sig-wc-type sig)))
+    :expr (do (reject-pragma-pv a) (L l (con ExprWithTySig nil a (hs-type-to-hs-sig-wc-type sig))))
     :pat (let [p (check-lpat ps a)
                sig (con HsPS nil sig)
                sp (add-sig-pat-p l p sig)]
            (L (getLoc sp) (con PatBuilderPat (unLoc sp))))
-    :cmd (cmd-fail "a type signature" l)))
+    :cmd (cmd-fail #(dc :<+> (ph :ppr-cmd a) (dc :text "::") (ph :ppr-ltype sig)) l)))
 
 (defn mk-hs-explicit-list-pv "mkHsExplicitListPV" [ps mode l xs]
   (case mode
     :expr (L l (con ExplicitList nil (vec xs)))
     :pat (L l (con PatBuilderPat (con ListPat nil (mapv #(check-lpat ps %) xs))))
-    :cmd (cmd-fail "a list" l)))
+    :cmd (cmd-fail #(dc :brackets (dc :ppr-with-commas (fn [x] (ph :ppr-cmd x)) xs)) l)))
 
 (defn mk-hs-splice-pv "mkHsSplicePV" [mode lsp]
   (let [[_ l sp] lsp]
     (case mode
       :expr (L l (con HsUntypedSplice nx sp))
       :pat (L l (con PatBuilderPat (con SplicePat nx sp)))
-      :cmd (cmd-fail "a splice" l))))
+      :cmd (cmd-fail #(dc :text "<splice>") l))))
 
 (defn mk-hs-record-pv "mkHsRecordPV" [ps mode overloaded l lrec a [fbinds dd]]
   (case mode
     :expr (L l (mk-rec-constr-or-update overloaded a lrec [fbinds dd]))
     :pat (if (some #(= :right (first %)) fbinds)
-           (fatal! "Use of OverloadedRecordDot '.' not valid" l)
+           (fatal! (lx/msg :PsErrOverloadedRecordDotInvalid l))
            (L l (mk-pat-rec ps a (mk-rec-fields (map second fbinds) dd))))
-    :cmd (cmd-fail "a record" l)))
+    :cmd (if (some #(= :right (first %)) fbinds)
+           (fatal! (lx/msg :PsErrOverloadedRecordDotInvalid l))
+           (cmd-fail #(dc :text "<record>") l))))
 
 (defn mk-hs-neg-app-pv "mkHsNegAppPV" [mode l a]
   (case mode
@@ -399,54 +525,57 @@
     :pat (let [[_ lp p] a]
            (if (= 'PatBuilderOverLit (first p))
              (L l (con PatBuilderPat (mk-npat (L lp (second p)) (just nx))))
-             (pat-fail "negation" l)))
-    :cmd (cmd-fail "a negation" l)))
+             (pat-fail (lx/msg :PsErrInPat l p [:NegApp]))))
+    :cmd (cmd-fail #(dc :<> (dc :text "-") (ph :ppr-cmd a)) l)))
 
 (defn mk-hs-section-r-pv "mkHsSectionR_PV" [mode l op e]
   (case mode
     :expr (L l (con SectionR nx op e))
-    :pat (pat-fail "a right section" l)
-    :cmd (cmd-fail "a right section" l)))
+    :pat (pat-fail (lx/msg :PsErrParseRightOpSectionInPat l (unLoc op) (unLoc e)))
+    :cmd (cmd-fail #(dc :<> (ph :ppr-infix-occ (unLoc (nth (unLoc op) 2))) (ph :ppr-cmd e)) l)))
 
 (defn mk-hs-as-pat-pv "mkHsAsPatPV" [ps mode l v e]
   (case mode
     :pat (L l (con PatBuilderPat (con AsPat nil v (check-lpat ps e))))
-    :expr (fatal! "Did you mean a type application or an as-pattern? (missing space?)" l)
-    :cmd (cmd-fail "an as-pattern" l)))
+    :expr (do (add-error! (lx/msg :PsErrTypeAppWithoutSpace l (unLoc v) e)) (L l parse-error))
+    :cmd (cmd-fail #(dc :<> (ph :ppr-prefix-occ (unLoc v)) (dc :text "@") (ph :ppr-cmd e)) l)))
 
 (defn mk-hs-lazy-pat-pv "mkHsLazyPatPV" [ps mode l e]
   (case mode
     :pat (L l (con PatBuilderPat (con LazyPat nil (check-lpat ps e))))
-    :expr (fatal! "Lazy pattern in an expression (a ~ without a space after it?)" l)
-    :cmd (cmd-fail "a lazy pattern" l)))
+    :expr (do (add-error! (lx/msg :PsErrLazyPatWithoutSpace l e)) (L l parse-error))
+    :cmd (cmd-fail #(dc :<> (dc :text "~") (ph :ppr-cmd e)) l)))
 
 (defn mk-hs-bang-pat-pv "mkHsBangPatPV" [ps mode l e]
   (case mode
-    :pat (L l (con PatBuilderPat (con BangPat nil (check-lpat ps e))))
-    :expr (fatal! "Bang pattern in an expression (a ! without a space after it?)" l)
-    :cmd (cmd-fail "a bang pattern" l)))
+    :pat (let [pb (con BangPat nil (check-lpat ps e))]
+           ;; hintBangPat
+           (unless-bit :BangPatBit (lx/msg :PsErrIllegalBangPattern l pb))
+           (L l (con PatBuilderPat pb)))
+    :expr (do (add-error! (lx/msg :PsErrBangPatWithoutSpace l e)) (L l parse-error))
+    :cmd (cmd-fail #(dc :<> (dc :text "!") (ph :ppr-cmd e)) l)))
 
 (defn mk-sum-or-tuple-pv "mkSumOrTuplePV" [ps mode l boxity sot]
   (case mode
     :expr (mk-sum-or-tuple-expr l boxity sot)
     :pat (mk-sum-or-tuple-pat ps l boxity sot)
-    :cmd (cmd-fail "a tuple" l)))
+    :cmd (cmd-fail #(ph :ppr-sum-or-tuple [boxity sot]) l)))
 
 (defn mk-hs-emb-ty-pv "mkHsEmbTyPV" [mode l ty]
   (case mode
     :expr (L l (con HsEmbTy nil (mk-hs-wild-card-bndrs ty)))
     :pat (L l (con PatBuilderPat (con EmbTyPat nil (mk-hs-ty-pat ty))))
-    :cmd (cmd-fail "an embedded type" l)))
+    :cmd (cmd-fail #(dc :<+> (dc :text "type") (ph :ppr-ltype ty)) l)))
 
 (defn mk-hs-let-pv "mkHsLetPV" [mode l bs e]
   (case mode
     :expr (L l (con HsLet (a/tuple nil nil) bs e))
     :cmd (L l (con HsCmdLet (a/tuple nil nil) bs e))
-    :pat (fatal! "(let ... in ...)-syntax in pattern" l)))
+    :pat (fatal! (lx/msg :PsErrLetInPat l))))
 
 (defn mk-hs-op-app-pv "mkHsOpAppPV" [mode l e1 op e2]
   (case mode
-    :expr (L l (con OpApp nx e1 op e2))
+    :expr (do (reject-pragma-pv e1) (L l (con OpApp nx e1 op e2)))
     :cmd (let [cmd-arg (fn [c] (L (getLoc c) (con HsCmdTop nx c)))]
            (L l (con HsCmdArrForm nil op 'Infix [(cmd-arg e1) (cmd-arg e2)])))
     :pat (L l (con PatBuilderOpApp e1 op e2 nil))))
@@ -455,39 +584,43 @@
   (case mode
     :expr (L l (con HsCase nil e (mk-match-group lms)))
     :cmd (L l (con HsCmdCase nil e (mk-match-group lms)))
-    :pat (fatal! "(case ... of ...)-syntax in pattern" l)))
+    :pat (fatal! (lx/msg :PsErrCaseInPat l))))
 
 (defn mk-hs-lam-pv "mkHsLamPV" [mode l variant lms]
   (case mode
-    :expr (L l (con HsLam nil variant (mk-lam-case-match-group variant lms)))
+    :expr (let [mg (mk-lam-case-match-group variant lms)]
+            ;; checkLamMatchGroup: a lambda without parameters
+            (when (and (= variant 'LamSingle) (empty? (unLoc (nth (unLoc (first (unLoc (nth mg 2)))) 3))))
+              (add-error! (lx/msg :PsErrEmptyLambda l)))
+            (L l (con HsLam nil variant mg)))
     :cmd (L l (con HsCmdLam nil variant (mk-lam-case-match-group variant lms)))
-    :pat (fatal! "Lambda-syntax in pattern" l)))
+    :pat (fatal! (lx/msg :PsErrLambdaInPat l variant))))
 
 (defn mk-hs-app-pv "mkHsAppPV" [mode l e1 e2]
   (case mode
-    :expr (L l (con HsApp nx e1 e2))
-    :cmd (L l (con HsCmdApp nx e1 e2))
+    :expr (do (check-exp-block-arguments e1) (check-exp-block-arguments e2) (L l (con HsApp nx e1 e2)))
+    :cmd (do (check-cmd-block-arguments e1) (check-exp-block-arguments e2) (L l (con HsCmdApp nx e1 e2)))
     :pat (L l (con PatBuilderApp e1 e2))))
 
 (defn mk-hs-app-type-pv "mkHsAppTypePV" [mode l e at t]
   (case mode
-    :expr (L l (con HsAppType nil e (mk-hs-wild-card-bndrs t)))
+    :expr (do (check-exp-block-arguments e) (L l (con HsAppType nil e (mk-hs-wild-card-bndrs t))))
     :pat (L l (con PatBuilderAppType e at (mk-hs-ty-pat t)))
-    :cmd (cmd-fail "a type application" l)))
+    :cmd (cmd-fail #(dc :<+> (ph :ppr-cmd e) (dc :<> (dc :text "@") (ph :ppr-ltype t))) l)))
 
 (defn mk-hs-if-pv "mkHsIfPV" [mode l c a b]
   (case mode
     :expr (L l (con HsIf nil c a b))
     :cmd (L l (con HsCmdIf nil nx c a b))
-    :pat (fatal! "(if ... then ... else ...)-syntax in pattern" l)))
+    :pat (fatal! (lx/msg :PsErrIfThenElseInPat l))))
 
 (defn mk-hs-do-pv "mkHsDoPV" [mode l mod stmts]
   (case mode
     :expr (L l (con HsDo nil (con DoExpr mod) stmts))
     :cmd (if (a/just? mod)
-           (fatal! "Illegal qualified do in a command" l)
+           (fatal! (lx/msg :PsErrQualifiedDoInCmd l (second (a/from-just mod))))
            (L l (con HsCmdDo nil stmts)))
-    :pat (fatal! "do-notation in pattern" l)))
+    :pat (fatal! (lx/msg :PsErrDoNotationInPat l))))
 
 (defn mk-hs-par-pv "mkHsParPV" [mode l lpar e rpar]
   (case mode
@@ -498,7 +631,7 @@
 (defn mk-hs-proj-update-pv "mkHsProjUpdatePV" [mode l fields arg pun anns]
   (case mode
     :expr (mk-rdr-proj-update l fields arg pun anns)
-    (fatal! "Use of OverloadedRecordDot '.' not valid" l)))
+    (fatal! (lx/msg :PsErrOverloadedRecordDotInvalid l))))
 
 (defn arrow-parsing-mode
   "withArrowParsingMode: :view-pat (ViewPatterns, or neither extension) or :fun-type
@@ -519,8 +652,10 @@
     :expr (L l (con HsFunArr nx arr arg res))
     :pat (if (identical? amode :view-pat)
            (L l (con PatBuilderPat (con ViewPat nil arg (check-lpat ps res))))
-           (pat-fail "a function type" l))
-    :cmd (cmd-fail "an arrow" l)))
+           (pat-fail (lx/msg :PsErrTypeSyntaxInPat l "function arrow"
+                             ((requiring-resolve 'arbace.repr.haskell.doc/<+>)
+                              (ph :ppr-patbuilder arg) (ph :ppr-arrow arr) (ph :ppr-patbuilder res)))))
+    :cmd (cmd-fail #(dc :<+> (ph :ppr-cmd arg) (ph :ppr-arrow arr) (ph :ppr-cmd res)) l)))
 
 (defn mk-hs-mult-pv
   "mkHsMultPV: a fn of the arrow token giving the multiplicity annotation (mkMultExpr)"
@@ -535,7 +670,9 @@
                                 (and (= (list 'src "1") (nth il 1)) (= 1 (nth il 3)))))))
                 (con HsLinearAnn nil)
                 (con HsExplicitMult (a/tuple nil nil) t))))
-    (fatal! "Multiplicity annotation in a pattern or command" (combine (gl pct) (getLoc t)))))
+    :pat (pat-fail (lx/msg :PsErrTypeSyntaxInPat (combine (gl pct) (getLoc t)) "multiplicity annotation"
+                           (dc :<> (dc :text "%") (ph :ppr-ltype t))))
+    :cmd (cmd-fail #(dc :<> (dc :text "%") (ph :ppr-ltype t)) (combine (gl pct) (getLoc t)))))
 
 (defn set-telescope-bndrs-name-space
   "setTelescopeBndrsNameSpace: the binders' names in namespace ns"
@@ -555,7 +692,7 @@
 (defn mk-hs-forall-pv "mkHsForallPV" [mode l tele ty]
   (case mode
     :expr (L l (con HsForAll nx (set-telescope-bndrs-name-space 'var tele) ty))
-    (pat-fail "a forall telescope" l)))
+    (pat-fail (lx/msg :PsErrTypeSyntaxInPat l "forall telescope" (dc :text "<forall>")))))
 
 (defn- check-context-expr
   "checkContextExpr: the constraint expressions of a context (a tuple, parenthesized, or ())"
@@ -577,12 +714,12 @@
 (defn check-context-pv "checkContextPV" [ps mode e]
   (case mode
     :expr (check-context-expr e)
-    (pat-fail "a constraint context" (getLoc e))))
+    (pat-fail (lx/msg :PsErrTypeSyntaxInPat (getLoc e) "constraint context" (dc :text "<context>")))))
 
 (defn mk-qual-pv "mkQualPV" [mode l ctx ty]
   (case mode
     :expr (L l (con HsQual nx ctx ty))
-    (pat-fail "a context" l)))
+    (pat-fail (lx/msg :PsErrTypeSyntaxInPat l "constraint context" (dc :text "<context>")))))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Value bindings (checkValDef, checkFunBind, checkPatBind, isFunLhs, checkValSigLhs)
@@ -615,9 +752,10 @@
 (defn- make-fun-bind "makeFunBind" [fn-name lms] (con FunBind nx fn-name (mk-match-group lms)))
 
 (defn- check-fun-bind
-  "checkFunBind: a FunBind of one equation spanning locF"
+  "checkFunBind: a FunBind of one equation spanning locF (an infix one's patterns checked with
+  the operator as the parse context)"
   [ps locF fun fixity pats grhss]
-  (let [ps' (mapv #(check-lpat ps %) pats)
+  (let [ps' (binding [*parse-context* [(when (= fixity 'Infix) (unLoc fun)) false]] (mapv #(check-lpat ps %) pats))
         lp (list-location pats)]
     (make-fun-bind fun (L locF [(L locF (con Match nx (con FunRhs fun fixity 'NoSrcStrict nil) (L lp ps') (unLoc grhss)))]))))
 
@@ -650,9 +788,11 @@
   "checkValSigLhs: the name of a signature's left-hand side (an unqualified variable)"
   [lhs]
   (let [e (unLoc lhs)]
-    (if (and (= 'HsVar (first e)) (a/rdr-unqual? (unLoc (nth e 2))) (not (rdr-data-con? (unLoc (nth e 2)))))
-      (nth e 2)
-      (fatal! "Invalid type signature" (getLoc lhs)))))
+    (cond
+      (not= 'HsVar (first e)) (fatal! (lx/msg :PsErrInvalidTypeSignature (getLoc lhs) :Other lhs))
+      (not (a/rdr-unqual? (unLoc (nth e 2)))) (fatal! (lx/msg :PsErrInvalidTypeSignature (getLoc lhs) :Qualified lhs))
+      (rdr-data-con? (unLoc (nth e 2))) (fatal! (lx/msg :PsErrInvalidTypeSignature (getLoc lhs) :DataCon lhs))
+      :else (nth e 2))))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Statements and comprehensions

@@ -96,29 +96,141 @@
 
 (defn- haddock-pass
   "The Haddock pass (arbace.repr.haskell.haddock/add-haddock), when it is there"
-  [lmod hdk]
+  [lmod hdk & [on-warning]]
   (if-let [f (try (requiring-resolve 'arbace.repr.haskell.haddock/add-haddock) (catch Exception _ nil))]
-    (f lmod hdk)
+    (f lmod hdk on-warning)
     lmod))
 
-(defn read-text
+(defn- ps-message "The parser's message an exception carries (nil: not a parse failure)" [e]
+  (:ps-message (ex-data e)))
+
+(defn- run-parser
+  "A parser over a fresh lexer state: [value-or-nil fatal-message-or-nil ps]"
+  [cs file bits start]
+  (let [ps (lx/make-state cs file bits)]
+    (try [(prs/parse ps start) nil ps]
+         (catch Exception e
+           (if-let [m (ps-message e)] [nil m ps] (throw e))))))
+
+(defn render-opts
+  "The message printer's options a flags state gives (-ferror-spans, -fdiagnostics-show-caret,
+  -dppr-cols, -fdiagnostics-as-json)"
+  [d]
+  (select-keys d [:error-spans :show-caret :ppr-cols :json :max-errors]))
+
+(defn- marked
+  "The warnings of ps the flags state d turns on, each marked :fatal when d makes its flag fatal
+  (-Werror: the message is an error)"
+  [d ps]
+  (let [flag (requiring-resolve 'arbace.repr.haskell.errors/warning-flag)]
+    (vec (keep (fn [m] (let [f (flag m)]
+                         (when (hd/warning-on? d f)
+                           (if (contains? (:fatal d) f) (assoc m :fatal true) m))))
+               (lx/warnings ps)))))
+
+(def ^:private bidi-chars
+  "bidirectionalFormatChars"
+  {0x202a "U+202A LEFT-TO-RIGHT EMBEDDING (LRE)" 0x202b "U+202B RIGHT-TO-LEFT EMBEDDING (RLE)"
+   0x202c "U+202C POP DIRECTIONAL FORMATTING (PDF)" 0x202d "U+202D LEFT-TO-RIGHT OVERRIDE (LRO)"
+   0x202e "U+202E RIGHT-TO-LEFT OVERRIDE (RLO)" 0x2066 "U+2066 LEFT-TO-RIGHT ISOLATE (LRI)"
+   0x2067 "U+2067 RIGHT-TO-LEFT ISOLATE (RLI)" 0x2068 "U+2068 FIRST STRONG ISOLATE (FSI)"
+   0x2069 "U+2069 POP DIRECTIONAL ISOLATE (PDI)"})
+
+(defn- bidi-warning
+  "hscParse's checkBidirectionFormatChars over the text's code points cs: the warning
+  PsWarnBidirectionalFormatChars at the first such character with every one's offset, or nil"
+  [cs file]
+  (loop [i 0 l 1 c 1 found []]
+    (if (< i (count cs))
+      (let [ch (long (nth cs i))
+            d (get bidi-chars ch)
+            found (if d (conj found [i l c d]) found)]
+        (cond (= ch 10) (recur (inc i) (inc l) 1 found)
+              (= ch 9) (recur (inc i) l (inc (* 8 (quot (+ c 7) 8))) found)
+              :else (recur (inc i) l (inc c) found)))
+      (when (seq found)
+        (let [[_ l c _] (first found)]
+          (lx/msg :PsWarnBidirectionalFormatChars [file l c l (inc c) nil nil]
+                  (mapv (fn [[i _ _ d]] [i d]) found)))))))
+
+(defn- read-text*
   "Reads a module's text (the text GHC parses) of file under flags (the GHC flags of the helper's
-  --ghc): {:tree :pragmas :exts :dflags}, the tree in the dump's form; signature: an .hsig"
+  --ghc): {:tree :pragmas :exts :dflags}, the tree in the dump's form; signature: an .hsig. A
+  module GHC rejects gives {:messages batches :dflags :opts} instead, the messages ghc -fno-code
+  prints, in its driver's order (doc/haskell/NATIVE.md, \"Messages\"): the header's own errors
+  first (arbace.repr.haskell.fileargs: a batch is a vector of messages, or the text of a usage
+  error); else the header's warnings, and when the module's parse fails or records errors the
+  header's parse (getImports' parseHeader) first, its errors alone when it fails; else the module's
+  warnings (when its parse failed, those that are not errors under -Werror) and then its errors
+  (and the warnings that -Werror made errors); a parse that succeeds with only such warnings gives
+  them all in one batch"
   [^String text ^String file flags & {:keys [signature]}]
   (let [cs (lx/code-points text)
         d0 (hd/dyn-flags flags)
-        [prags opts] (hd/header-pragmas cs file (hd/parser-bits d0))
-        d (hd/dyn-flags d0 opts)
-        bits (hd/parser-bits d)
-        ps (lx/make-state cs file bits)
-        lmod (prs/parse ps (if signature "parseSignatureNoHaddock" "parseModuleNoHaddock"))
-        lmod (if (:haddock d) (haddock-pass lmod (lx/hdk-comments ps)) lmod)]
-    {:tree (a/to-dump lmod file)
-     :pragmas (mapv (fn [[k line v f]] (if (= f file) (list k line v) (list k line v f))) prags)
-     :exts (hd/extensions d)
-     :dflags d
-     :cs cs
-     :bits bits}))
+        hdr ((requiring-resolve 'arbace.repr.haskell.fileargs/file-args) cs file d0)]
+    (if (:error hdr)
+      {:messages (:error hdr) :dflags d0 :opts (render-opts d0)}
+      (let [[prags _] (hd/header-pragmas cs file (hd/parser-bits d0))
+            d (:d hdr)
+            bits (hd/parser-bits d)
+            [lmod fatal ps] (run-parser cs file bits (if signature "parseSignatureNoHaddock" "parseModuleNoHaddock"))
+            ;; addHaddockToModule ends GHC's parse of a module (so its warnings are the parse's)
+            lmod (if (and lmod (not fatal) (:haddock d))
+                   (haddock-pass lmod (lx/hdk-comments ps) (fn [m] (lx/add-warning! ps m)))
+                   lmod)
+            errs (lx/errors ps)
+            ws (marked d ps)
+            ;; hscParse' logs the bidirectional characters' warning before the parse; the Hsc
+            ;; monad's warnings go with an exception, so it is in the batches of a parse that goes
+            ;; through only
+            bflag (let [m (lx/msg :PsWarnBidirectionalFormatChars nil)] ((requiring-resolve 'arbace.repr.haskell.errors/warning-flag) m))
+            bidi (when (hd/warning-on? d bflag)
+                   (when-let [b (bidi-warning cs file)]
+                     (if (contains? (:fatal d) bflag) (assoc b :fatal true) b)))
+            ws* (if bidi (vec (cons bidi ws)) ws)
+            fatal-ws (filterv :fatal ws*)
+            opts (render-opts d)
+            pre (fn [] @(:pre hdr))]
+        (cond
+          (or fatal (seq errs))
+          (let [[_ hfatal hps] (run-parser cs file bits "parseHeader")
+                herrs (lx/errors hps)]
+            (if (or hfatal (seq herrs))
+              {:messages (into (pre) [(cond-> herrs hfatal (conj hfatal))]) :dflags d :opts opts}
+              {:messages (into (pre) [(if fatal ws [])
+                                      (cond-> errs fatal (conj fatal))])
+               :dflags d :opts opts}))
+          (seq fatal-ws)
+          {:messages (into (pre) [ws*]) :dflags d :opts opts}
+          :else
+          (let []
+            {:tree (a/to-dump lmod file)
+             :pragmas (mapv (fn [[k line v f]] (if (= f file) (list k line v) (list k line v f))) prags)
+             :exts (hd/extensions d)
+             :dflags d
+             :cs cs
+             :bits bits}))))))
+
+(defn read-text
+  "read-text* with the command line's flag warnings (ghc's main prints them before it compiles
+  anything: deprecated and unrecognised -W flags, `on the commandline: ...`): the first batch of a
+  module's messages, alone when one is fatal (-Werror: ghc stops there)"
+  [^String text ^String file flags & {:keys [signature] :as opts}]
+  (let [r (apply read-text* text file flags (apply concat opts))
+        {:keys [d warns]} ((requiring-resolve 'arbace.repr.haskell.fileargs/command-line) flags)]
+    (cond
+      (some :fatal warns) {:messages [(vec warns)] :dflags d :opts (render-opts d)}
+      (and (seq warns) (:messages r)) (update r :messages #(into [(vec warns)] %))
+      :else r)))
+
+(defn messages-text
+  "The text ghc -fno-code prints for a read's messages (\"\" for an accepted module); source-line
+  a fn of a file and a line to the line's text (arbace.repr.haskell.errors/text-lines)"
+  [{:keys [messages opts]} source-line]
+  (if messages
+    (let [txt (requiring-resolve 'arbace.repr.haskell.errors/messages-text)]
+      (apply str (map #(if (string? %) % (txt % source-line opts)) messages)))
+    ""))
 
 (defn dump-forms
   "The native read as a dump's three forms; in mode :full (full: {:text :tokens}, full-data's) the
@@ -393,6 +505,8 @@
           (cond
             (and want (not= want got))
             {:status :pp :ms ms :where (first-line-difference want got)}
+            (:messages r)
+            {:status :error :ms ms :error (messages-text r (constantly nil))}
             (not= ref-prags (:pragmas r))
             {:status :pragmas :ms ms :ref (clip ref-prags 400) :native (clip (:pragmas r) 400)}
             (not= ref-tree (:tree r))
@@ -498,6 +612,63 @@
     (when report (spit report (pr-str {:results results :counts counts})))
     counts))
 
+(defn- file-text "A file's text, nil when it is not there" [^File f]
+  (when (.isFile f) (slurp f)))
+
+(defn check-errors-one
+  "Reads one module natively and compares its messages with GHC's (the helper's errors verb:
+  errors-file the text ghc -fno-code prints, empty for a module it accepts; hspp the text GHC
+  parsed; module-file the module's file as the helper named it; srcdir the helper's directory,
+  where the caret lines' files are read): {:status :accepted | :equal | :differs |
+  :native-accepts | :native-rejects | :helper | :error ...}"
+  [^String errors-file ^String hspp ^String module-file ^String srcdir flags]
+  (let [t0 (System/currentTimeMillis)
+        ref (slurp errors-file)]
+    (if (str/starts-with? ref "hsdump/error")
+      {:status :helper :ms 0 :error (str/trim ref)}
+      (try
+        (let [text (slurp hspp)
+              r (with-bindings {(requiring-resolve 'arbace.repr.haskell.fileargs/*cwd*) srcdir}
+                  (read-text text module-file flags :signature (str/ends-with? module-file ".hsig")))
+              lines ((requiring-resolve 'arbace.repr.haskell.errors/text-lines)
+                     (fn [f] (file-text (File. srcdir ^String f))))
+              native (messages-text r lines)
+              ms (- (System/currentTimeMillis) t0)]
+          (cond
+            (and (= "" ref) (= "" native)) {:status :accepted :ms ms}
+            (= ref native) {:status :equal :ms ms}
+            (= "" ref) {:status :native-rejects :ms ms :native native}
+            (= "" native) {:status :native-accepts :ms ms :ref ref}
+            :else {:status :differs :ms ms :ref ref :native native}))
+        (catch Throwable e
+          {:status :error :ms (- (System/currentTimeMillis) t0) :error (ex-message e)
+           :at (some-> (.getStackTrace e) seq first str)})))))
+
+(defn check-errors
+  "The messages' check over a list file: lines `ERRORS HSPP MODULE-FILE SRCDIR FLAG...`; prints a
+  line per module that is not equal and a summary, returns the counts by status"
+  [^String list-file & {:keys [report quiet]}]
+  (let [lines (->> (str/split-lines (slurp list-file)) (map str/trim) (remove #(or (empty? %) (str/starts-with? % "#"))))
+        results (vec (for [l lines]
+                       (let [[ef hspp mfile srcdir & flags] (str/split l #"\s+")
+                             r (assoc (check-errors-one ef hspp mfile srcdir (vec flags)) :module mfile :errors ef)]
+                         (when-not (and quiet (#{:accepted :equal} (:status r)))
+                           (println (str (name (:status r)) " " srcdir "/" mfile " " (:ms r) " ms"
+                                         (case (:status r)
+                                           :differs (str "\n--- ghc\n" (:ref r) "--- native\n" (:native r))
+                                           :native-rejects (str "\n--- native\n" (:native r))
+                                           :native-accepts (str "\n--- ghc\n" (:ref r))
+                                           (:error :helper) (str "\n    " (:error r) " " (:at r))
+                                           ""))))
+                         (flush)
+                         r)))
+        counts (frequencies (map :status results))]
+    (println (str "native-check errors: " (count results) " modules: "
+                  (str/join ", " (map (fn [[k v]] (str v " " (name k))) (sort-by (comp - val) counts)))
+                  "; " (reduce + (map :ms results)) " ms"))
+    (when report (spit report (pr-str {:results results :counts counts})))
+    counts))
+
 (defn read-files
   "Reads modules natively into OUT/FILE.edn (the dump's form), each preprocessed natively; an .hsc
   module's hsc2hs output X.hs (the helper's), with its :hsc2hs record from HSPP/X.hs.hspp.edn. A
@@ -515,6 +686,10 @@
                  (try
                    (let [pre (preprocess inst flags f)
                          r (read-text (:text pre) f flags :signature (str/ends-with? f ".hsig"))
+                         _ (when (:messages r)
+                             (throw (ex-info (str "rejected\n" (messages-text r ((requiring-resolve 'arbace.repr.haskell.errors/text-lines)
+                                                                                 (fn [g] (file-text (File. ^String g))))))
+                                             {})))
                          fd (when full (full-data r pre f (String. (file-bytes f) "UTF-8")))
                          pre (cond-> pre (seq (:view-markers fd)) (assoc-in [:cpp :view-markers] (:view-markers fd)))
                          cfg (config flags (file-bytes f) :base base :inst inst :pre pre :full full)]
@@ -540,6 +715,8 @@
       "check" (let [c (check-list (get opts "--list") :report (get opts "--report") :libdir (get opts "--libdir")
                                   :full (= "full" (get opts "--mode")))]
                 (System/exit (if (every? #{:equal :converter} (keys c)) 0 1)))
+      "errors" (let [c (check-errors (get opts "--list") :report (get opts "--report") :quiet (get opts "--quiet"))]
+                 (System/exit (if (every? #{:accepted :equal} (keys c)) 0 1)))
       "read" (let [n (read-files (or (get opts "-o") ".tmp/repr-haskell/native")
                                  (remove empty? (str/split (or (get opts "--flags") "") #"\s+"))
                                  pos :hspp (get opts "--hspp") :libdir (get opts "--libdir") :full (= "full" (get opts "--mode")))]

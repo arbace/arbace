@@ -1,0 +1,111 @@
+(ns arbace.repr.haskell.mutate
+  "Mutants of Haskell modules for the messages' check (doc/haskell/NATIVE.md, \"Messages\"): one
+  edit each at a token or a line of the module's text (a token deleted, doubled, swapped with the
+  next, replaced or preceded by one of a pool of tokens and fragments, a line's indentation
+  changed, a line broken or joined), from a seeded java.util.Random, so a seed and a count give
+  the same mutants.
+
+  -main: mutants --seed S --count N -o DIR FILE... writes DIR/FILE/mNNNN.hs for each FILE (the
+  path below DIR as given) and prints each mutant's path relative to DIR"
+  (:require [arbace.string :as str])
+  (:import [java.io File]))
+
+(def ^:private pool
+  [")" "(" "]" "[" "," "=" "->" "<-" "::" "|" "\\" "@" "~" "!" "in" "let" "where" "of" "do" "case"
+   "if" "then" "else" "module" "import" "data" "class" "instance" "type" "newtype" "forall" "proc"
+   "mdo" "rec" "\"" "'" "{-" "-}" "#" "$" "$x" "$$" "%" "`" "{" "}" ";" "1_000" "1_0.5" "'a" "''"
+   "\\case" "." "?x" "\u2192" "\u2019" "\u201c" "\t" "0x" "\\x ->" "{-# INLINE f #-}" "{-# LANGUAGE Foo #-}"
+   "{-# OPTIONS_GHC -O #-}" "pattern" "foreign" "default" "deriving" "*" "-" "@Int" "!x" "~x" "(# #)"
+   "(,)" "[|" "|]" "$(" "x@" "@ x" "\"\\q\"" "'\\x110000'" "\"\\9999999\"" "!!" ".." "`f`" "(+)"
+   "\"abc" "'ab" "\\" "_" "-- |" "{-|" "0b1" "1e" "Foo.bar" "Foo." "M.+" "if | x -> y" "\\cases"
+   "let {" "x :: Int" "[x | x <- xs]" "(x, )" "(# x | #)" "type family" "data family" "%1 ->"
+   "infixl 9" "infix 10" "@-" "\"\u0000\"" "'\\SOH'" "#-}" "{-#" "f x = y" "x = 1" "where x = 1" "{-# LANGUAGE LambdaCas #-}" "{-# LANGUAGE lambdaCase, #-}" "{-# OPTIONS_GHC -Werror #-}"
+   "{-# OPTIONS_GHC -fbogus -Wfoo #-}" "{-# OPTIONS_GHC \"x #-}" "{-# OPTIONS_GHC -fmax-errors=x #-}"
+   "{-# OPTIONS_GHC -Wwarn=tabs -Werror=star-is-type #-}" "{-# INCLUDE \"f.h\" #-}" "-Wall" "-XNoLambdaCase"
+   "[\"-Wall\", ]" "{-# OPTIONS_GHC -ferror-spans #-}" "{-# OPTIONS_GHC -fno-diagnostics-show-caret #-}"])
+
+(defn- token-spans
+  "The tokens' [start end] of a text: identifiers (qualified), numbers, operators, brackets and
+  punctuation, string and character literals; comments skipped"
+  [^String s]
+  (let [n (count s)
+        out (java.util.ArrayList.)
+        sym? #(str/includes? "!#$%&*+./<=>?@\\^|~:-" (str %))
+        id? #(or (Character/isLetterOrDigit (char %)) (= % \_) (= % \'))]
+    (loop [i 0]
+      (when (< i n)
+        (let [c (.charAt s i)]
+          (cond
+            (and (= c \-) (< (inc i) n) (= \- (.charAt s (inc i))))
+            (recur (let [k (.indexOf s "\n" i)] (if (neg? k) n k)))
+            (and (= c \{) (< (inc i) n) (= \- (.charAt s (inc i))))
+            (recur (let [k (.indexOf s "-}" (+ i 2))] (if (neg? k) n (+ k 2))))
+            (Character/isWhitespace c) (recur (inc i))
+            (or (Character/isLetterOrDigit c) (= c \_))
+            (let [e (loop [k i] (if (and (< k n) (or (id? (.charAt s k))
+                                                     (and (= \. (.charAt s k)) (< (inc k) n) (Character/isLetter (.charAt s (inc k))))))
+                                  (recur (inc k)) k))]
+              (.add out [i e]) (recur e))
+            (= c \")
+            (let [e (loop [k (inc i)] (cond (>= k n) n
+                                            (= \\ (.charAt s k)) (recur (+ k 2))
+                                            (= \" (.charAt s k)) (inc k)
+                                            (= \newline (.charAt s k)) k
+                                            :else (recur (inc k))))]
+              (.add out [i (min e n)]) (recur (min e n)))
+            (sym? c)
+            (let [e (loop [k i] (if (and (< k n) (sym? (.charAt s k))) (recur (inc k)) k))]
+              (.add out [i e]) (recur e))
+            :else (do (.add out [i (inc i)]) (recur (inc i)))))))
+    (vec out)))
+
+(defn mutate
+  "One mutant of text s by the random r"
+  [^String s ^java.util.Random r]
+  (let [toks (token-spans s)
+        pick (fn [] (nth toks (.nextInt r (count toks))))
+        ptok (fn [] (nth pool (.nextInt r (count pool))))
+        lines (str/split s #"\n" -1)
+        kind (.nextInt r 10)]
+    (case kind
+      0 (let [[a b] (pick)] (str (subs s 0 a) (subs s b)))
+      1 (let [[a b] (pick)] (str (subs s 0 b) " " (subs s a b) (subs s b)))
+      2 (let [[a _] (pick)] (str (subs s 0 a) (ptok) " " (subs s a)))
+      3 (let [[a b] (pick)] (str (subs s 0 a) (ptok) (subs s b)))
+      4 (let [i (.nextInt r (max 1 (dec (count toks))))
+              [a b] (nth toks i) [c d] (nth toks (min (inc i) (dec (count toks))))]
+          (if (<= b c) (str (subs s 0 a) (subs s c d) (subs s b c) (subs s a b) (subs s d)) s))
+      5 (let [i (.nextInt r (count lines))
+              l ^String (nth lines i)
+              ind (count (take-while #(= % \space) l))
+              l' (case (.nextInt r 3)
+                   0 (subs l (max 0 (- ind (inc (.nextInt r (max 1 ind))))))
+                   1 (str (apply str (repeat (inc (.nextInt r 2)) \space)) l)
+                   2 (subs l ind))]
+          (str/join "\n" (assoc lines i l')))
+      6 (let [[a _] (pick)] (str (subs s 0 a) "\n" (subs s a)))
+      7 (let [i (.nextInt r (max 1 (dec (count lines))))]
+          (str/join "\n" (concat (take i lines) [(str (nth lines i) " " (str/trim (nth lines (inc i) "")))] (drop (+ i 2) lines))))
+      8 (let [[a b] (pick) [c d] (pick)] (if (< b c) (str (subs s 0 a) (subs s c d) (subs s b)) (str (subs s 0 a) (subs s b))))
+      9 (let [[a _] (pick)] (str (subs s 0 a) (ptok) " " (ptok) " " (subs s a))))))
+
+(defn write-mutants
+  "count mutants of each file into dir/FILE/mNNNN.EXT, seed the Random's; the paths below dir"
+  [dir files ^long seed ^long count]
+  (let [r (java.util.Random. seed)]
+    (vec (for [^String f files
+               :let [s (slurp f)
+                     ext (subs f (.lastIndexOf f "."))]
+               i (range count)
+               :let [m (str f "/m" (format "%04d" i) ext)
+                     o (File. (str dir "/" m))]]
+           (do (.mkdirs (.getParentFile o))
+               (spit o (mutate s r))
+               m)))))
+
+(defn -main [& args]
+  (let [opts (apply hash-map (take-while #(not (str/ends-with? % ".hs")) args))
+        files (drop-while #(not (str/ends-with? % ".hs")) args)]
+    (doseq [m (write-mutants (get opts "-o") files (Long/parseLong (get opts "--seed" "1"))
+                             (Long/parseLong (get opts "--count" "10")))]
+      (println m))))

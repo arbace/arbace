@@ -55,11 +55,18 @@ code. Three kinds of things live here:
   2026-11-04 (the tarball names the Alex and Happy sources `*.x.source`, `Parser.y.source`), the files
   carrying GHC's notice; `tables.ae` is generated from the tarball's `Parser.y.source` by
   `happy.ae`, Arbace's own port of Happy's LALR(1) construction, checked equal to the tables of the
-  tarball's `Parser.hs` (Happy 1.20.1.1's output); `unlit.ae` ports the tarball's `utils/unlit/unlit.c`
+  tarball's `Parser.hs` (Happy 1.20.1.1's output); `doc.ae` ports `GHC/Utils/Ppr.hs` and Outputable's
+  combinators, `errors.ae` the parser's messages (`GHC/Parser/Errors/Ppr.hs`, `GHC/Types/Hint/Ppr.hs`, the
+  codes of `GHC/Types/Error/Codes.hs`, the printing of `GHC/Types/Error.hs`, `GHC/Utils/Error.hs`,
+  `GHC/Driver/Errors.hs`, `GHC/Utils/Logger.hs`), `pprhs.ae` the Outputable instances of the parsed tree
+  (`GHC/Hs/{Expr,Pat,Type,Lit,Binds,Decls}.hs`, `GHC/Parser/Types.hs`), the same day; `fileargs.ae` the driver's
+  header phase (`GHC/Parser/Header.hs`, `GHC/Driver/{CmdLine,Session}.hs`, `GHC/Driver/Pipeline/Execute.hs`'s
+  getFileArgs), with `flags.ae`, the names and kinds of `flagsDynamic` as the helper's `flags` verb prints them
+  (2026-11-05); `unlit.ae` ports the tarball's `utils/unlit/unlit.c`
   (2026-11-04); `cpp.ae`, GCC's traditional preprocessor as GHC runs it, is a clean-room implementation of
   Arbace's own (2026-11-04): written from the documented behaviour of `-traditional` and judged against Alpine's
   gcc 15.2.0 `cpp -traditional` as a black box (its output and line markers on probe inputs), no GCC code read
-  or kept; `ast.ae`, `parse.ae`, `native.ae`, `driver.ae` are Arbace's own;
+  or kept; `ast.ae`, `parse.ae`, `native.ae`, `mutate.ae`, `driver.ae` are Arbace's own;
   `rename.ae`, the renamer of the front end (doc/haskell/FRONTEND-SURVEY.md, HF2), ports `mkOpAppRn`, `mkNegAppRn`,
   `mkConOpPatRn`, `mkHsOpTyRn` of `compiler/GHC/Rename/HsType.hs` and `compareFixity` of `compiler/GHC/Types/Fixity.hs`
   from the same tarball on 2026-11-05, reading the rest of `compiler/GHC/Rename/` as the specification, the file
