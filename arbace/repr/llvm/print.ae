@@ -374,7 +374,9 @@
 
 (defn- index-list-str ^String [idx] (str "{ " (str/join ", " idx) " }"))
 
-(defn- fn-str ^String [x]
+(defn- fn-head-str
+  "A function's header: a declaration whole, a definition's up to and including its body's `{`."
+  ^String [x]
   (let [[h nm rt ps & opts] x
         o (apply hash-map opts)
         define? (= h 'llvm/define)
@@ -396,15 +398,35 @@
          (when-let [p (:prefix o)] (str " prefix " (typed-str p)))
          (when-let [p (:prologue o)] (str " prologue " (typed-str p)))
          (when-let [p (:personality o)] (str " personality " (typed-str p)))
-         (when define?
-           (str md " {\n"
-                (str/join "\n" (map-indexed (fn [i b]
-                                              (let [[_ l & is] b]
-                                                (str (when l (str (let [s (local-str l)] (subs s 1)) ":\n"))
-                                                     (apply str (map #(str "  " (inst-str %) "\n") is)))))
-                                            (:body o)))
-                (apply str (map (fn [[_ tv idx]] (str "  uselistorder " (typed-str tv) ", " (index-list-str idx) "\n")) (:uselistorder o)))
-                "}")))))
+         (when define? (str md " {")))))
+
+(defn item-inst-str
+  "An instruction's or a debug record's text as an item: without the indentation of a debug record."
+  ^String [x]
+  (let [s (inst-str x)] (if (dbg-record? (first x)) (subs s 2) s)))
+
+(defn define-items
+  "A definition's items, [gap text] each in the text's order: its header up to `{`, each block's label (when written)
+  and items, the use-list orders, the closing `}`; the gaps those of the canonical layout."
+  [x]
+  (let [o (apply hash-map (drop 4 x))
+        out (java.util.ArrayList.)]
+    (.add out [nil (fn-head-str x)])
+    (doseq [[i b] (map-indexed vector (:body o))]
+      (let [[_ l & is] b]
+        (when l (.add out [(if (zero? i) "\n" "\n\n") (str (subs (local-str l) 1) ":")]))
+        (doseq [[j y] (map-indexed vector is)]
+          (.add out [(str (if (and (zero? j) (nil? l) (pos? i)) "\n\n" "\n") (if (dbg-record? (first y)) "    " "  "))
+                     (item-inst-str y)]))))
+    (doseq [[_ tv idx] (:uselistorder o)]
+      (.add out ["\n  " (str "uselistorder " (typed-str tv) ", " (index-list-str idx))]))
+    (.add out ["\n" "}"])
+    (vec out)))
+
+(defn- fn-str ^String [x]
+  (if (= (first x) 'llvm/define)
+    (apply str (mapcat (fn [[g t]] [g t]) (define-items x)))
+    (fn-head-str x)))
 
 (defn top-str
   "A top-level form's text."
@@ -429,12 +451,30 @@
     llvm/summary (let [[_ n k v] x] (str "^" n " = " (name k) ": " (sum-str v)))
     (fail "top-level form" x)))
 
+(defn form-items
+  "A top-level form's items, [gap text] each (the first gap nil: the module's)."
+  [x]
+  (if (= (first x) 'llvm/define) (define-items x) [[nil (top-str x)]]))
+
+(defn module-gap
+  "The canonical gap before the top-level form after `prev` (nil before the first)."
+  ^String [prev]
+  (cond (nil? prev) "" (= (first prev) 'llvm/define) "\n\n" :else "\n"))
+
+(defn module-end
+  "The canonical text after a module's last form."
+  ^String [forms]
+  (if (seq forms) (module-gap (last forms)) ""))
+
 (defn print-module
   "A module's forms as IR text."
   ^String [forms]
   (let [b (StringBuilder.)]
-    (doseq [f forms]
-      (.append b (top-str f))
-      (.append b "\n")
-      (when (= (first f) 'llvm/define) (.append b "\n")))
+    (loop [fs (seq forms) prev nil]
+      (when fs
+        (let [f (first fs)]
+          (.append b (module-gap prev))
+          (doseq [[g t] (form-items f)] (when g (.append b ^String g)) (.append b ^String t))
+          (recur (next fs) f))))
+    (.append b (module-end forms))
     (str b)))
