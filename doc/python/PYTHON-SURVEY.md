@@ -3840,3 +3840,58 @@ Least compiled wall time in ms of 3 rounds, base and head back to back (210's me
 | bm_generators | 159 | 682 | 676 | -0.9% |
 
 bm_async_generators pays for the firstiter hook, which the base skipped in `async for` (a bug): a WeakSet add per generator, as CPython does.
+## Design: 225 (typing's runtime, PEP 695's and PEP 649's scopes)
+
+The classes `:type-params`, `:module-annotations` and `:typing-runtime`, judged by test_type_params, test_annotationlib,
+test_typing and test_type_aliases, CPython 3.14.10's own algorithms ported rather than stand-ins:
+
+- The objects: `Objects/typevarobject.c`, `genericaliasobject.c` and `unionobject.c` ported whole into typing.go: TypeVar,
+  ParamSpec, TypeVarTuple with their constructors' checks, the managed dict that holds `__module__` (a type parameter of
+  PEP 695 has none: its `__module__` is the type's), `evaluate_*` (the function, else a `_ConstEvaluator`), `__reduce__` and
+  `__mro_entries__`; ParamSpecArgs and ParamSpecKwargs as native types; TypeAliasType's constructor; `_Py_make_parameters`
+  and `_Py_subs_parameters` for GenericAlias and Union, `ga_reduce`, `ga_getattro`'s lists, the union builder.
+- The compiler: `codegen_type_param_bound_or_default` and `codegen_typealias_body` (the evaluators' `.format`, position-only,
+  default VALUE, the prologue), `codegen_finish_annotations_scope` (an `__annotate__`'s parameter named `format`),
+  `dictbytype(FREE, DEF_FREE_CLASS)` for every block, a class's type-parameter scope taking the class's private name,
+  `compiler_set_qualname` whole (the name declared global, annotation scopes looked through), and the inlined comprehension
+  in a class body under its own scopes (`_PyCompile_TweakInlinedComprehensionScopes`' `in_class_block`); a name free outside
+  and a cell inside an inlined comprehension stays free.
+- The surroundings the tests show: `__class_getitem__` of the built-in classes as real class methods, a built-in type's
+  class method a `builtin_function_or_method`, `isinstance`'s and `issubclass`'s union, `__set_name__`'s note, the number
+  slots in a built-in type's `__dict__` (typing's Protocols read them).
+
+No trade-off needs the user so far: each item has CPython's answer.
+
+## As built: 225, typing's runtime, PEP 695's and PEP 649's scopes (2026-11-07, the Mac VM, queue 225)
+
+`lib-test-all --fresh` before (7df8864b) and after, per module; test_type_params (the language core's family) by `lib-test --aot`:
+
+| module | before | after |
+|---|---|---|
+| test_type_params | 94 ok of 109 by the driver, 15 not | 109 equal |
+| test_type_aliases | does not import, 31 failing | 31 equal |
+| test_typing | does not import, 718 failing | 714 equal, 4 classed (cpython-only 3, finalization-goi 1) |
+| test_annotationlib | 112 equal, 3 classed, 3 failing | 116 equal, 2 classed (cpython-only 1, c-accelerators 1) |
+
+The classes: `:type-params` to none (10 tests named in it), `:typing-runtime` to none, `:module-annotations` to
+none (test_pkg's 8 equal): all three retired. Two methods moved to standing classes: test_type_repr to `:c-accelerators`
+(pyi's datetime is `_pydatetime`, its `isoformat` a bound method), test_args_kwargs_weakrefs to `:finalization-goi` (equal
+compiled, `del`'s moment under goi).
+
+As the design said, plus what the runs showed:
+
+- Compiler: `compiler_set_qualname` whole gave `global`-declared classes their plain name (pickle of the tests' local classes);
+  the comprehensions' code had the names `<generator-exp>`, `<list-comp>`: now `<genexpr>`, `<listcomp>`. Under the future
+  import a string in an annotation is its repr (`pp/*string-repr*`, ast_unparse), the rest of arbace.repr.python.print's text
+  unchanged. Function annotations evaluate in codegen_annotations_in_scope's order, args before posonly.
+- A function's `__annotate__.__qualname__` is `f.__annotate__` while its code's co_qualname is `__annotate__`: as observed on
+  CPython 3.14.10; the source of the rename was not found in funcobject.c or codegen.c, so `annotateOf` applies it on read.
+- Runtime beyond typing: the number protocol and comparisons listed in `ownSlots` (`'__abs__' in float.__dict__`), `__abs__`'s
+  slot wrapper, `__round__`, `__complex__`, `__bytes__`; a bound built-in's repr, equality and hash (meth_repr, meth_richcompare,
+  meth_hash); mappingproxy's keys, values and items the mapping's views, no longer lists; `iter()` of a class or a union refused
+  (a type's GetItem slot is the subscription, no sq_item); `type.__subclasscheck__`'s check_class; pickling a code object a
+  TypeError.
+- `__class_getitem__` of the rest of test_genericalias's generic types (mappingproxy, generator, coroutine, async_generator,
+  ReferenceType, Template, Interpolation, Token, itertools.chain, DirEntry, whose old method returned the class).
+- Known gap: `sorted(float.__dict__)` still lists only the dict's entries: `ownSlots` answers `in` and `[]`, not iteration.
+  tp_name in "not callable" and setattr's messages stays the bare name (`'TypeVar' object is not callable`).
