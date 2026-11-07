@@ -3816,3 +3816,38 @@ rules are already CPython's (PY9c's generated errors, 872 of 874 equal), so what
 
 Judged, beside the modules, by a corpus harvested from Lib/test: every string constant of 17 test modules that CPython's
 `compile` refuses or warns about, 2,576 sources, compared with CPython on message, the four location fields, text and warnings.
+
+## As built: 228, the compiler's errors and warnings, the C tokenizer, eval of byte sources (2026-11-07, the Mac VM, queue 228)
+
+As designed ("Design: 228"), plus what the runs found:
+
+- **Reader's warnings** (`lex/*warnings*`, `astjson/warnings-prefix`, go/arbace/py's `emitReaderWarnings`): tokenizer's
+  `verify_end_of_number` and backslash-brace, string_parser.c's `warn_invalid_escape_sequence` (first pass, the C's line and
+  column over the transformed buffer, an f-string's parts from its end token), each with the SyntaxError an error filter makes
+  of it; the prefix's separators escaped (an invalid escape's character can be one). The compiler's warnings made before a
+  SyntaxError are emitted ahead of it. The main module warns as `python3 FILE` does.
+- **PEP 765** (`finally-warnings!`) and `c_disable_warning` (a finally body's second copy does not warn again).
+- **Locations**: symtable's per node (`at`), codegen's per pattern store and alternative (`check-stores!`, codegen's order),
+  type parameter, handler, starred target, repeated keyword; a dict comprehension's value before its key (symtable's order);
+  mapping keys by repr.
+- **compile()**: mode eval by its start rule (no fake newline, as the string tokenizer); codeop's flags to the parser (`+incomplete`,
+  `+dedent`: `_is_end_of_source`'s IncompleteInputError in place of the approximate rule, the REPL's own rule unchanged);
+  PyCF_ALLOW_TOP_LEVEL_AWAIT (`+await`: symtable's `allows_top_level_await`, the module's code CO_COROUTINE, eval gives the
+  coroutine); CO_MAXBLOCKS; filename by PyUnicode_FSDecoder, mode's and dont_inherit's errors; `_Py_SourceAsString` (bytes,
+  buffers, null bytes, eval's leading blanks, a str's U+FEFF); a byte source's decoding errors from the reader's
+  `source-text` (hook mode `source-error`, bytes as Latin-1); a lone CR translated before positions.
+- **Int literals over the digits limit**: the reader records a decimal literal of over 640 digits; the runtime raises
+  `_PyPegen_number_token`'s SyntaxError when the run's `sys.set_int_max_str_digits` limit is lower.
+- **Smaller**: `__debug__` a constant; debug f-strings' comments removed (set_ftstring_expr); a raw f-string's format spec;
+  `\N{}` by the reader's tables (the `:ir-constants` marker gone); `__static_attributes__` by the name self in nested
+  functions; dir() of a mapping by keys(); a main file's null bytes (file tokenizer's message) and its EOF after a
+  continuation line (file tokenizer's column); a main module in a codec the host has no charset for, decoded and compiled
+  by the runtime.
+- **`_tokenize`**: readline's errors and wrongly typed lines after the tokens of the lines before them; lines decoded with
+  errors replace. The lines are still all read first.
+
+Results (run, the VM): 2,576 sources harvested from 17 Lib/test modules (`compile` against CPython: message, location, text,
+warnings): 0 differ (72 at the first measure); 573 of them in modes eval and single: 0 (146); the same through `tokenize`: 0;
+parse-check lex-errors 62 equal, syntax-errors 872 equal and 2 refused (as before). Classes: `:compiler-errors` narrowed to
+test_codeop's test_future_imports (compile()'s future flags); `:compiler-warnings`, `:eval-source`, `:ir-constants` and
+`:tokenizer` keep their patterns for unsampled methods, no method named. Per-module figures in the report (queue 228).
