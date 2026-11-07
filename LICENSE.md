@@ -4069,9 +4069,9 @@ OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
 PERFORMANCE OF THIS SOFTWARE.
 ```
 
-## LLVM (llvm/test files in test/llvm/essential/): Apache License 2.0 with LLVM Exceptions
+## LLVM (llvm/test files in test/llvm/essential/, repr/llvm's verifier and tables): Apache License 2.0 with LLVM Exceptions
 
-The modules of `test/llvm/essential/` are files of `llvm/test` of llvm-project at `llvmorg-23.1.4` (commit 7a941dfb2877a0b8cf30323fefa85ad019e0b0f5, `llvm-project-23.1.4.src.tar.xz`, pinned in `test/cpp/corpora.edn`), copied unchanged as test data; the rest of `llvm/test`, read in place from the pinned tarball, is not stored. The text of `llvm/LICENSE.TXT` of that release follows.
+The modules of `test/llvm/essential/` are files of `llvm/test` of llvm-project at `llvmorg-23.1.4` (commit 7a941dfb2877a0b8cf30323fefa85ad019e0b0f5, `llvm-project-23.1.4.src.tar.xz`, pinned in `test/cpp/corpora.edn`), copied unchanged as test data; the rest of `llvm/test`, read in place from the pinned tarball, is not stored. The same release's `llvm/lib/IR/Verifier.cpp`, `Intrinsics.cpp`, `AutoUpgrade.cpp`, `Type.cpp`, `Attributes.cpp`, `AsmWriter.cpp`, `DebugInfoMetadata.cpp` and `llvm/lib/AsmParser/LLParser.cpp`, `LLLexer.cpp` are reimplemented in part by `arbace/repr/llvm/verify.ae`, `read.ae`, `intr.ae` and `diag.ae` (doc/ARBACE.md), and `arbace/repr/llvm/intr_table.ae` and `di_table.ae` are generated from its `llvm/include/llvm/IR/Intrinsics*.td`, `DebugInfoFlags.def`, `llvm/include/llvm/BinaryFormat/Dwarf.def`, `Dwarf.h`, `LLParser.cpp` and `AsmWriter.cpp` (`bin/llvm-corpus intrinsics`, `di-table`). The text of `llvm/LICENSE.TXT` of that release follows.
 
 The LLVM Project is under the Apache License v2.0 with LLVM Exceptions:
 ==============================================================================
