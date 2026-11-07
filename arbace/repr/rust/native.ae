@@ -16,7 +16,7 @@
     dump --pin PIN [--full] [--expr] -o DIR --edition E [--helper-hash H] [--list FILE] FILE...
         DIR/FILE.edn per file, as the helper's dump (--expr: expression files of include!); PIN
         tools/rsdump/RUSTC_VERSION, the rustc the reader ports; the dump's :helper native:H
-    check --pin PIN [--full] [--expr] [--brief] --ref DIR --out DIR --edition E [--report FILE]
+    check --pin PIN [--full] [--expr] [--brief] --ref DIR --out DIR --edition E [--report FILE] [--controls FILE]
           [--list FILE] FILE...
         each FILE's native dump (written to OUT) against the helper's (REF/FILE.edn): equal as
         data (the configuration but the helper's identity), or both an error; the first
@@ -432,8 +432,35 @@
           (write-dump out f forms))))
     (if (zero? @bad) 0 1)))
 
+(defn- judge-controls
+  "The negative controls of the check (GT9, doc/GATE-SURVEY.md, GTS81 (a), \"As built: GT9's controls\"; CONTROLS-FILE, test/rust/
+  native-controls.txt: lines `ID SUBJECT REFERENCE`, files as the list names them): the SUBJECT's native dump, given the configuration
+  of the REFERENCE's dump (so that the comparison reaches the trees, as it does for a file against its own dump), judged by
+  `compare-dumps` against the REFERENCE's helper dump must be :differs in a section other than the configuration
+  (`control ID fails as it must`); :equal or :both-reject is `control passed`, any other status `control not judged`; both fail the check.
+  A control whose subject is in this run's list and its reference not is left; one whose subject is not in the list is not this
+  run's (another group of the list). NFS and HFS: the native and the helper dumps by file. Returns the number that failed."
+  [^String controls-file nfs hfs]
+  (if-not (and controls-file (.exists (File. controls-file)))
+    0
+    (let [bad (atom 0)]
+      (doseq [l (str/split-lines (slurp controls-file))
+              :let [[id subject reference] (str/split (str/trim l) #"\s+")]
+              :when (and id reference (not (str/starts-with? id "#")) (contains? nfs subject))]
+        (if-not (contains? hfs reference)
+          (println (str "control " id " left: " reference " is not in the run"))
+          (let [hr (get hfs reference) ns (get nfs subject)
+                r (compare-dumps hr (assoc (vec ns) 0 (first hr)))]
+            (cond (and (= :differs (:status r)) (not= "rsdump/config" (:section r)))
+                  (println (str "control " id " fails as it must (" subject " read natively against the helper's dump of " reference ": " (:section r) " differs)"))
+                  (contains? #{:equal :both-reject} (:status r))
+                  (do (swap! bad inc) (println (str "control passed: " id " (" subject " against " reference ") is judged " (name (:status r)) " by the check")))
+                  :else
+                  (do (swap! bad inc) (println (str "control not judged: " id " (" subject " against " reference "): the check says " (name (:status r)) (when (:section r) (str " in " (:section r))) ", not a difference in the trees")))))))
+      @bad)))
+
 (defn- cmd-check [args root]
-  (let [{:keys [opts args]} (parse-args args #{"--ref" "--out" "--edition" "--report" "--list" "--pin"})
+  (let [{:keys [opts args]} (parse-args args #{"--ref" "--out" "--edition" "--report" "--list" "--pin" "--controls"})
         ref (get opts "--ref") out (get opts "--out" ".tmp/repr-rust/native-check/native")
         brief (get opts "--brief")
         ed (Long/parseLong (get opts "--edition" "2024"))
@@ -457,13 +484,17 @@
                          (when (contains? #{:native-rejects :helper-rejects} (:status r))
                            (println "   " (or (:native r) (:helper r))))
                          r)))
-        by (frequencies (map :status results))]
+        by (frequencies (map :status results))
+        ctl (judge-controls (get opts "--controls")
+                            (into {} (for [f (files-of opts args)] [f (read-string (str "[" (slurp (str out "/" f ".edn")) "]"))]))
+                            (into {} (for [f (files-of opts args) :let [h (File. (str ref "/" f ".edn"))] :when (.exists h)]
+                                       [f (read-string (str "[" (slurp h) "]"))])))]
     (println (format "repr-rust native-check: %d files, %d equal, %d both rejected, %d differ, %d rejected by the native reader alone, %d by the helper alone; %.1f s reading"
                      (count results) (get by :equal 0) (get by :both-reject 0) (get by :differs 0)
                      (get by :native-rejects 0) (get by :helper-rejects 0) (/ (reduce + (map :ms results)) 1000.0)))
     (when-let [rep (get opts "--report")]
       (spit rep (with-out-str (prn {:files (count results) :by-status by :results (mapv #(dissoc % :helper :native) results)}))))
-    (if (every? #(contains? #{:equal :both-reject} (:status %)) results) 0 1)))
+    (if (and (every? #(contains? #{:equal :both-reject} (:status %)) results) (zero? ctl)) 0 1)))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; The first errors against rustc's
