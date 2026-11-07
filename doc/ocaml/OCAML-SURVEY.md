@@ -2009,10 +2009,69 @@ lexing; the helper reads about 2 MB/s.
 - **OC171 A gate step.** (a) with OCaml's steps (OC120 (b)), a light `--full` step `bin/repr-ocaml menhir --check`
   `--verify` plus `native-check samples` (seconds), the stdlib's run by hand; (b) the stdlib in it too (about a minute);
   (c) none. *Recommended: (a)*.
-- **OC172 Error messages.** (a) port MenhirLib's simplified strategy and the error printers (`Syntaxerr`, `Lexer`'s
+- **OC172 Error messages.** (built 2026-11-04, "As built: OC172 (a)") (a) port MenhirLib's simplified strategy and the error printers (`Syntaxerr`, `Lexer`'s
   `prepare_error`, Format's breaks), judged by `native-check` on every rejected file (message and location); (b) the
   strategy only; (c) kinds only, as built. *Recommended: (a)*, next.
 - **OC173 Speed.** (a) as built; (b) the lexer buffer as a type with fields (no map lookups per byte), fewer position
   objects; (c) embedded and compiled with the program at a re-seed (OC30). *Recommended: (b)* when a corpus run needs it.
 - **OC174 The actions' translation.** (a) by hand, keyed by text (as built; the loader refuses tables with an
   untranslated action); (b) by machine from parser.mly through this reader. *Recommended: (a)*; (b) at a new OCaml.
+
+## As built: OC172 (a), ocamlc's syntax errors (2026-11-04)
+
+The native reader rejects a file with ocamlc's words and locations (OC172 (a)), built on the branch `ocaml-errors` from
+`ocaml-native` (`8f00636e`) under the same light rules (stage 0, no gate, no build; every run under 1.1 GB).
+
+**What is in the tree**
+
+- `parser.ae`: MenhirLib's simplified strategy (parse.ml passes `--strategy simplified`; Engine.ml's `initiate`, `error`,
+  `error_shift`, `error_reduce`, `error_fail`): on an error action the parser enters error mode with the lookahead kept,
+  default reductions still taken, then the `error` terminal's column (terminal 0 of the tables): shifted (its cell the
+  lookahead's positions, Engine.shift's `env.triple`, no token read), reduced, or `Parser.Error` (Parse.wrap's `Other` at
+  the lookahead). The `error` productions' actions (`unclosed`, `expecting`, `not_expecting`, `indexop_unclosed_error`,
+  `syntax_error ()`) were already translated; they now run. A parse error is `[:error KIND MSG LOC SUB]`.
+- `actions.ae`, `lex.ae`: the messages as parse.ml's and lexer.mll's `prepare_error` word them, with their sub-messages
+  (`Unclosed`'s "This ( might be unmatched" at the opening location, `Unterminated_string_in_comment`'s "String literal
+  begins here", the ghost-located hints of `Removed_string_set` and `Empty_character_literal`), Format's `@ ` hints kept
+  in the message (`\u0001`: `Removed_string_set`, `Non_lowercase_delimiter`), `%S` and `Char.escaped` as OCaml escapes
+  (`Invalid_directive`, `Illegal_character`).
+- `report.ae` (new, `arbace.repr.ocaml.report`): `message`, the main text as the helper writes it (Format.asprintf of
+  the doc in the formatter's own hov box, never closed, so its last break always breaks; trimmed), and `report`, what
+  ocamlc prints on stderr: location.ml's batch_mode_printer for an error (Doc.loc's `File "...", line(s) ...,
+  characters ...:`, highlight_quote with its ISet, infer_line_numbers and lines_around over the whole input as Pparse's
+  `set_input_lexbuf` keeps it; one line with its carets, tabs kept, or format_doc.ml's two columns with dots and the
+  ellipsis past 10 lines; nothing for an empty location or one of another file; `Error: ` and the message in a `@[`
+  box at column 7, which breaks only when the whole box does not fit; each sub-message's location and quote, then two
+  spaces and its box).
+- `native.ae`: `report --file NAME FILE`; `check --ocamlc ODIR` compares each file's report with ocamlc's stderr
+  (`REPORT` lines); `mutants --root --list --out --n --seed`: one token deleted, inserted (from the file or a pool of
+  openers, closers, keywords, quotes and comment marks) or swapped with the next, deterministic by seed.
+- `bin/repr-ocaml native-check` runs `ocamlc -stop-after parsing -nopervasives -w -a -c REL` on every file beside the
+  helper (warnings off: the lexer's warnings are not ported; `-nopervasives` because stdlib.ml cannot open Stdlib) and
+  fails on a report that differs. A `--use-file` file has no ocamlc report (the toplevel's); its error form is still the
+  helper's.
+
+**The checks** (byte for byte; a rejected file's dump compares kind, message and location, its report everything)
+
+| set | files | dumps equal | rejected by ocamlc | reports equal |
+|---|---:|---:|---:|---:|
+| the files rejected among the corpora (2 stdlib templates, 11 testsuite) | 13 | 13 | 13 | 13 |
+| `--use-file` phrases (tool-toplevel, typing-modules: 40; 4 rejected) | 40 | 40 | (helper only) | |
+| stdlib, compiler sources, the 16 testsuite directories (all files) | 632 | 632 | 13 | 13 |
+| mutants of the samples (seeds 1 and 7, 50 per file) | 800 | 800 | 660 | 660 |
+| mutants of the 16 testsuite directories' files (seed 2, 3 per file) | 684 | 684 | 561 | 561 |
+| mutants of the stdlib (seed 3, 2 per file) | 288 | 288 | 231 | 231 |
+| hand cases (`.tmp/ec/hand`: hints, breaks, multi-line and 15-line quotes, tabs, CRLF, line directives, package types) | 50 | 50 | 47 | 47 |
+
+The 8 files rejected by both with other messages before this step now agree. Messages equal: 1,512 of 1,512 ocamlc
+reports (the corpora's 13 counted once), every helper error form equal.
+
+**Left**
+
+- The lexer's warnings (Comment_start, Comment_not_end, Illegal_backslash, ...) are not reported (ocamlc runs with
+  `-w -a`); the toplevel's own printer (`//toplevel//`, phrase skipping) is not ported.
+- `Unknown_keyword` (keyword editions, `-keywords`) and the errors raised outside the parser (`Variable_in_scope`,
+  `Applicative_path` under `-no-app-func`) are not produced.
+- Format is ported only as far as the messages need it (text and `@ ` hints in one box); a message with nested boxes
+  would need more of it.
+- The whole corpora and the gate (OC170, OC171) as before.

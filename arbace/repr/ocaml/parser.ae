@@ -16,7 +16,8 @@
             [arbace.repr.ocaml.actions :as act]
             [arbace.repr.ocaml.lex :as lex]
             [arbace.repr.ocaml.docstrings :as ds]
-            [arbace.repr.ocaml.ast :as ast])
+            [arbace.repr.ocaml.ast :as ast]
+            [arbace.repr.ocaml.report :as report])
   (:import [arbace.repr.ocaml.actions Env]))
 
 (set! *warn-on-reflection* false)
@@ -130,7 +131,9 @@
                        [tk (lex/start-p lb) (lex/curr-p lb)]))]
     ;; the bottom cell: the start state, its end the initial position
     (push! start-state nil p0 p0)
-    (loop [[tk tsp tep :as la] (read-token)]
+    ;; err: Menhir's error-handling mode (the simplified strategy, parse.ml's --strategy simplified): the lookahead
+    ;; replaced by the error terminal, no token read until the parse ends
+    (loop [[tk tsp tep :as la] (read-token) err false]
       (let [s (aget ^ints @st (dec @top))
             d (aget ^ints defred s)
             reduce! (fn [p]
@@ -152,17 +155,27 @@
                                 (push! g v sp ep))
                               nil))))]
         (if (>= d 0)
-          (let [r (reduce! d)] (if r (second r) (recur la)))
-          (let [ti (get term-index (first tk))
-                a (if ti (aget ^ints (aget ^objects actions s) (int ti)) 0)]
-            (cond
-              (pos? a) (do (push! (dec a) (if (> (count tk) 1) (second tk) :unit) tsp tep)
-                           (recur (if (= :EOF (first tk)) la (read-token))))
-              (neg? a) (let [r (reduce! (- (- a) 1))] (if r (second r) (recur la)))
-              :else (throw (ex-info "Syntax error" (syntax-error-data "Syntax error" [tsp tep false]))))))))))
+          (let [r (reduce! d)] (if r (second r) (recur la err)))
+          (if err
+            ;; the error terminal's column: shift it (its cell the lookahead's positions, Engine.shift's env.triple)
+            ;; and stay in error mode, reduce, or die (Parser.Error: Parse.wrap's Other at the lookahead)
+            (let [a (aget ^ints (aget ^objects actions s) 0)]
+              (cond
+                (pos? a) (do (push! (dec a) :unit tsp tep) (recur la true))
+                (neg? a) (let [r (reduce! (- (- a) 1))] (if r (second r) (recur la true)))
+                :else (throw (ex-info "Syntax error" (syntax-error-data "Syntax error" [tsp tep false])))))
+            (let [ti (get term-index (first tk))
+                  a (if ti (aget ^ints (aget ^objects actions s) (int ti)) 0)]
+              (cond
+                (pos? a) (do (push! (dec a) (if (> (count tk) 1) (second tk) :unit) tsp tep)
+                             (recur (if (= :EOF (first tk)) la (read-token)) false))
+                (neg? a) (let [r (reduce! (- (- a) 1))] (if r (second r) (recur la false)))
+                ;; Engine.initiate: error-handling mode
+                :else (recur la true)))))))))
 
 (defn parse
-  "The bytes of a file parsed as kind (:impl, :intf, :toplevel): [:ok tree] or [:error kind message loc]"
+  "The bytes of a file parsed as kind (:impl, :intf, :toplevel): [:ok tree] or [:error kind message loc sub], the
+  message with its break hints (arbace.repr.ocaml.report), sub the report's sub-messages [text loc]"
   [^bytes bytes fname kind]
   (binding [ds/*state* (ds/new-state)]
     (let [lb (lex/new-lexbuf bytes fname)
@@ -172,10 +185,10 @@
         (catch arbace.lang.ExceptionInfo ex
           (let [d (ex-data ex)]
             (case (:ocaml-error d)
-              :lexer [:error :lexer (:message d) (:loc d)]
-              :syntax [:error :syntax (:message d) (:loc d)]
+              :lexer [:error :lexer (:message d) (:loc d) (vec (:sub d))]
+              :syntax [:error :syntax (:message d) (:loc d) (vec (:sub d))]
               ;; Parse.wrap: an Escape_error is a syntax error at the current token
-              :escape [:error :syntax "Syntax error" [(lex/start-p lb) (lex/curr-p lb) false]]
+              :escape [:error :syntax "Syntax error" [(lex/start-p lb) (lex/curr-p lb) false] []]
               (throw ex))))))))
 
 (defn dump-form
@@ -185,7 +198,7 @@
     (let [r (parse bytes fname kind)]
       (if (= :ok (first r))
         (ast/top-form kind (second r) fname)
-        (let [[_ k msg lc] r] (ast/error-form k msg lc))))))
+        (let [[_ k msg lc] r] (ast/error-form k (report/message msg) lc))))))
 
 (defn dump
   "The helper's dump text of a file"
@@ -199,6 +212,6 @@
   (ast/dump-text (ast/layout-form items fname)))
 
 (defn error-text
-  "The text of the helper's error form"
+  "The text of the helper's error form (msg with its break hints)"
   [kind msg lc]
-  (ast/dump-text (ast/error-form kind msg lc)))
+  (ast/dump-text (ast/error-form kind (report/message msg) lc)))

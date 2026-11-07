@@ -11,12 +11,20 @@
     check --root DIR --list LIST --helper HDIR [--mode tokens] [--report FILE]
                                                     native-check: each file of LIST dumped with positions and
                                                     compared byte for byte with the helper's HDIR/REL.ae (ocdump
-                                                    --loc; --mode tokens: the layouts, ocdump --mode tokens); a file
-                                                    both reject passes when the kinds agree (the messages are a later
-                                                    step: counted, not compared)"
+                                                    --loc; --mode tokens: the layouts, ocdump --mode tokens), so a
+                                                    file both reject compares its error's kind, message and location;
+                                                    --ocamlc ODIR: and each file's report (below) equal to ocamlc's
+                                                    stderr ODIR/REL.err (ocamlc -stop-after parsing -nopervasives -w -a -c REL)
+    report --file NAME FILE                         the report ocamlc prints for FILE named NAME (nothing when it
+                                                    parses; arbace.repr.ocaml.report)
+    mutants --root DIR --list LIST --out OUT [--n N] [--seed S]
+                                                    N mutants of each file of LIST (default 40, seed 1): one token
+                                                    deleted, inserted or swapped with the next, OUT/mNNNNN.ml(i) and
+                                                    OUT/list.txt (each with its origin and edit)"
   (:require [arbace.repr.ocaml.parser :as p]
             [arbace.repr.ocaml.lex :as lex]
             [arbace.repr.ocaml.docstrings :as ds]
+            [arbace.repr.ocaml.report :as report]
             [arbace.string :as str])
   (:import [java.io File]))
 
@@ -91,6 +99,14 @@
               (p/error-text :lexer (:message d) nil)
               (throw ex))))))))
 
+(defn report-of
+  "The report ocamlc prints for the bytes of a file named rel (a byte string), or \"\" when the file parses"
+  [^bytes b rel kind]
+  (let [r (p/parse b rel kind)]
+    (if (= :ok (first r))
+      ""
+      (let [[_ _ msg lc sub] r] (report/report b rel msg lc sub)))))
+
 (defn- dump-of [^bytes b rel opts]
   (if (= "tokens" (get opts "--mode"))
     (layout-text b rel)
@@ -98,7 +114,8 @@
 
 (defn- do-check [{:keys [opts]}]
   (let [root (get opts "--root") files (list-files (get opts "--list")) hdir (get opts "--helper")
-        st (atom {:equal 0 :both-rejected 0 :differ 0 :failed 0})
+        odir (get opts "--ocamlc")
+        st (atom {:equal 0 :both-rejected 0 :differ 0 :failed 0 :reports 0 :reports-equal 0 :reports-differ 0})
         bad (atom [])
         t0 (System/nanoTime)
         bytes-read (atom 0)]
@@ -110,6 +127,16 @@
                         (dump-of b rel (assoc opts "--loc" true)))
                       (catch Throwable t (str "(native-failure " (pr-str (str (.getMessage t))) ")")))
             hk (error-head theirs) mk (error-head mine)]
+        (when (and odir (not= :toplevel (kind-of rel opts)))
+          (let [oc (String. (read-bytes (str odir "/" rel ".err")) "ISO-8859-1")
+                nr (try (report-of (read-bytes path) rel (kind-of rel opts))
+                        (catch Throwable t (str "(native-failure " (.getMessage t) ")")))]
+            (when (or (seq oc) (seq nr))
+              (swap! st update :reports inc)
+              (if (= oc nr)
+                (swap! st update :reports-equal inc)
+                (do (swap! st update :reports-differ inc)
+                    (swap! bad conj [rel :report (str "ocamlc " (pr-str oc) "\n  native " (pr-str nr))]))))))
         (cond
           (= mine theirs) (swap! st update :equal inc)
           (and hk mk (= hk mk)) (swap! st update :both-rejected inc)
@@ -119,16 +146,20 @@
           (let [[ln a b] (first-diff-line theirs mine)]
             (swap! st update :differ inc)
             (swap! bad conj [rel :differ (str "line " ln ": helper " (pr-str a) " native " (pr-str b))])))))
-    (let [{:keys [equal both-rejected differ failed]} @st
+    (let [{:keys [equal both-rejected differ failed reports reports-equal reports-differ]} @st
           secs (/ (- (System/nanoTime) t0) 1e9)]
-      (doseq [[rel k m] @bad] (println (if (= k :differ) "DIFF" "FAIL") rel m))
+      (doseq [[rel k m] @bad] (println (case k :differ "DIFF" :report "REPORT" "FAIL") rel m))
+      (when odir
+        (println (str "native-check: ocamlc's reports: " reports-equal " of " reports " equal byte for byte, "
+                      reports-differ " differ")))
       (println (str "native-check: " (count files) " files: " equal " equal to the helper's dump byte for byte, "
                     both-rejected " rejected by both (same kind), " differ " differ, " failed " native failures ("
                     (format "%.1f s, %d bytes" secs @bytes-read) ")"))
       (when-let [r (get opts "--report")]
-        (spit-mk r (pr-str {:files (count files) :equal equal :both-rejected both-rejected :differ differ :failed failed
-                            :problems @bad})))
-      (System/exit (if (and (zero? differ) (zero? failed)) 0 1)))))
+        (spit-mk r (pr-str (cond-> {:files (count files) :equal equal :both-rejected both-rejected :differ differ
+                                    :failed failed :problems @bad}
+                             odir (assoc :reports reports :reports-equal reports-equal)))))
+      (System/exit (if (and (zero? differ) (zero? failed) (zero? reports-differ)) 0 1)))))
 
 (defn- do-read [{:keys [opts args]}]
   (let [root (get opts "--root") out (get opts "--out")
@@ -142,6 +173,69 @@
     (println (str "native read: " (count files) " files, " @bad " failures"))
     (System/exit (if (zero? @bad) 0 1))))
 
+(defn- do-report [{:keys [opts args]}]
+  (let [f (first args)
+        name (or (get opts "--file") f)
+        b (read-bytes f)
+        out (lex/bstr->bytes (report-of b name (kind-of name opts)))]
+    (.write System/out out 0 (alength out))
+    (flush)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Mutants: one token deleted, inserted or swapped with the next (the error paths' check against ocamlc)
+
+(def ^:private insert-pool
+  ["(" ")" "[" "]" "{" "}" "[|" "|]" "begin" "end" "struct" "sig" "object" "do" "done" "\"" "(*" "*)" "'" "{<" ">}"
+   ".(" "let" "in" "|" "->" ";;" "=" ":" "," "with" "''" "\\" "{|" "#" "?" "~" "fun" "match" "type" "module" "if"
+   "then" "else" "@@" "[@" "[%" "." "..." "<-" ":=" "!" "_" "0x" "1e" "'\\" "`" ";" "of" "val" "->" "*"])
+
+(defn- token-spans
+  "The [start end] byte offsets of the file's tokens (the layout's raw token rule), comments and docstrings apart"
+  [^bytes b fname]
+  (let [lb (lex/new-lexbuf b fname) spans (java.util.ArrayList.)]
+    (try
+      (binding [ds/*state* (ds/new-state)]
+        (loop []
+          (let [t (lex/token-rule lb)]
+            (case (first t)
+              :EOF nil
+              (:EOL :COMMENT :DOCSTRING) (recur)
+              (do (.add spans [(lex/pos-cnum (lex/start-p lb)) (lex/pos-cnum (lex/curr-p lb))]) (recur))))))
+      (catch arbace.lang.ExceptionInfo _ nil))
+    (vec spans)))
+
+(defn- do-mutants [{:keys [opts]}]
+  (let [root (get opts "--root") files (list-files (get opts "--list")) out (get opts "--out")
+        n (Long/parseLong (or (get opts "--n") "40"))
+        rnd (java.util.Random. (Long/parseLong (or (get opts "--seed") "1")))
+        listing (StringBuilder.)
+        k (atom 0)]
+    (doseq [rel files]
+      (let [b (read-bytes (str root "/" rel))
+            src (lex/bytes->bstr b)
+            spans (token-spans b rel)]
+        (when (> (count spans) 2)
+          (dotimes [_ n]
+            (let [i (.nextInt rnd (dec (count spans)))
+                  [s e] (nth spans i) [s2 e2] (nth spans (inc i))
+                  op (.nextInt rnd 3)
+                  [text what] (case op
+                                0 [(str (subs src 0 s) (subs src e)) (str "delete " i)]
+                                1 (let [t (if (.nextBoolean rnd)
+                                            (nth insert-pool (.nextInt rnd (count insert-pool)))
+                                            (let [[a z] (nth spans (.nextInt rnd (count spans)))] (subs src a z)))]
+                                    [(str (subs src 0 s) t " " (subs src s)) (str "insert " (pr-str t) " before " i)])
+                                2 [(str (subs src 0 s) (subs src s2 e2) (subs src e s2) (subs src s e) (subs src e2))
+                                   (str "swap " i)])
+                  name (format "m%05d%s" (swap! k inc) (if (str/ends-with? rel ".mli") ".mli" ".ml"))
+                  bytes (lex/bstr->bytes text)
+                  f (File. (str out "/" name))]
+              (.mkdirs (.getParentFile (.getAbsoluteFile f)))
+              (java.nio.file.Files/write (.toPath f) bytes (make-array java.nio.file.OpenOption 0))
+              (.append listing (str name "\t" rel "\t" what "\n")))))))
+    (spit-mk (str out "/list.txt") (str listing))
+    (println (str "mutants: " @k " files in " out))))
+
 (defn- do-dump [{:keys [opts args]}]
   (let [f (first args)
         name (or (get opts "--file") f)]
@@ -154,5 +248,7 @@
     (case verb
       "dump" (do-dump (pa #{"--file" "--mode"}))
       "read" (do-read (pa #{"--root" "--list" "--out" "--mode"}))
-      "check" (do-check (pa #{"--root" "--list" "--helper" "--report" "--mode"}))
-      (do (println "usage: -m arbace.repr.ocaml.native dump|read|check ...") (System/exit 2)))))
+      "check" (do-check (pa #{"--root" "--list" "--helper" "--report" "--mode" "--ocamlc"}))
+      "report" (do-report (pa #{"--file"}))
+      "mutants" (do-mutants (pa #{"--root" "--list" "--out" "--n" "--seed"}))
+      (do (println "usage: -m arbace.repr.ocaml.native dump|read|check|report|mutants ...") (System/exit 2)))))

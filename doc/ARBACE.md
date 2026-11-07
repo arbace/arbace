@@ -114,8 +114,9 @@ code. Three kinds of things live here:
   doc/ocaml/SPEC.md, doc/ocaml/OCAML-SURVEY.md; evaluated from the checkout, not embedded, OC30 (a)): its native
   reader (2026-11-04, "As built: the native reader") ports OCaml 5.5.0's parsing/lexer.mll (`repr/ocaml/lex.ae`, with
   stdlib/lexing.ml's position updates and utils/misc.ml's Utf8_lexeme), parsing/docstrings.ml (`docstrings.ae`),
-  parsing/ast_helper.ml (`ast.ae`'s constructors) and parsing/parser.mly's header and semantic actions
-  (`actions.ae`), from the release tarball https://caml.inria.fr/pub/distrib/ocaml-5.5/ocaml-5.5.0.tar.xz (SHA-256
+  parsing/ast_helper.ml (`ast.ae`'s constructors), parsing/parser.mly's header and semantic actions
+  (`actions.ae`) and parsing/location.ml's report printer with utils/format_doc.ml's two columns and Format's break
+  rule (`report.ae`, OC172 (a)), from the release tarball https://caml.inria.fr/pub/distrib/ocaml-5.5/ocaml-5.5.0.tar.xz (SHA-256
   `fcc6ae66...f015ba`), by hand, the files carrying OCaml's notice; `menhir.ae` builds parser.mly's LALR(1) automaton
   as Menhir 20250912 does and writes it as the generated `tables.ae`, `parser.ae` drives it as MenhirLib's engine
   (boot/menhir/menhirLib.ml of the same tarball) does (LICENSE.md: the OCaml Core System; Menhir and MenhirLib); the
