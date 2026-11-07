@@ -289,6 +289,10 @@ warning (debug info) has the verdict `debug`.
 The reader takes function attributes in a parameter's or a return value's place (the grammar of LLParser's
 `parseOptionalParamAttrs` accepts any attribute word and rejects it by Attributes.td), so the placement rules see them.
 
+*Since LL9a (doc/llvm/LLVM-CROP-SURVEY.md, "As built: LL9a") a module with an own verdict (its RUN lines' verdict and declared
+`error:`) is judged by it, opt only for the others and only from its record unless `REPR_LLVM_JUDGE=live`; the text below is
+the opt comparison, the oracle tier's.*
+
 **The check**, `bin/repr-llvm verify-check LIST WORK`: opt (`REPR_LLVM_OPT`, default `/usr/lib/llvm23/bin/opt -passes=verify
 -disable-output`) and the verifier on each file of LIST, `WORK/verify.tsv` (NAME, opt's verdict, Arbace's, the verdicts
 same, the first messages same, the two messages); opt's message is its first line that is not a warning, without its
