@@ -3973,14 +3973,14 @@ samples; the record is the main host's).
 
 | class | before | after |
 |---|---|---|
-| `:pickle-core` | 41 listed | 2 listed and the PickleBuffer patterns: 8 methods of test_pickle (the other 19 that wait on PickleBuffer stay in `:c-accelerators`' list) |
+| `:pickle-core` | 41 listed | 2 listed, `:design` (`_pyio`) |
 | `:pickle-iterators` | a pattern, 26 methods of the sample (test_iter 10, test_enumerate 8, test_set 4, test_range 3, test_deque 1) | removed |
 | `:array-pickle` | 28 | removed |
 | `:exc-pickle` | gone with 223 | test_exceptions' 11 pickling, copying and state methods pass (run alone: see the Lows) |
 
 | module (sample) | not equal before | after |
 |---|---|---|
-| test_pickle | 56 of the 471 run | 27 (`_pickle`'s PickleBuffer 25, 2 by `_pyio`) |
+| test_pickle | 56 of the 471 run | 26 of the 1,015 run (24 of the C classes, 2 by `_pyio`) |
 | test_array | 56 | 28 (`:buffer-exports`) |
 | test_iter | 13 | 0 |
 | test_enumerate | 11 | 0 |
@@ -3989,7 +3989,7 @@ samples; the record is the main host's).
 | test_deque | 14 | 8 |
 | test_list | 4 | 0 |
 | test_tuple | 2 | 0 |
-| test_pickletools | 23 | 11 |
+| test_pickletools | 23 | 1 |
 
 **The iterators** are as designed, in `iterreduce.go`, with `__length_hint__` beside them (test_enumerate's test_len and test_set
 asked for it), `reversed` on its `__reversed__ = None` block, and calliter_iternext's clearing of the sentinel (gh-101892). An
@@ -4015,8 +4015,15 @@ whole. `tee` got `__copy__` and "cannot re-enter the tee iterator" (test_tee_con
 missing from `Set.lookup`, so an `__eq__` that clears the set was a Go panic (64 methods of test_set). `Contains` keeps a non-TypeError
 of `__iter__`; `range()` keeps `__index__`'s exception; `_PyObject_FunctionStr` in "argument after **".
 
-**`_pickle`.** Not cleared. pickle.py imports PickleBuffer from `_pickle` alone, test_inspect does `import _pickle` at its top,
-and test_pickle takes the module's presence for the C classes (`has_c_implementation`), so no change short of a `_pickle` module helps;
-see 227's DECISION in the report. 25 methods of test_pickle, 10 of test_pickletools and test_inspect's 363 wait on it.
+**`_pickle` (the user's decision on 227's DECISION (a), 2026-11-07).** pickle.py imports PickleBuffer from `_pickle` alone, test_inspect does
+`import _pickle`, and test_pickle takes the module's presence for the C classes, so a module with PickleBuffer alone would break
+test_pickle's import. `picklebuf.go` holds PickleBuffer (picklebufobject.c: `raw`, `release`, the object's own buffer through `memoryview`) and
+the module `_pickle`, whose other names (Pickler, Unpickler, dump, dumps, load, loads, the three exceptions) are pickle's pure twin
+through a module `__getattr__`: `from _pickle import (...)` at pickle.py's end then finds them already defined, and `pickle.Pickler` stays `_Pickler`.
+`_pickle.c` is not ported, PY6g's DECISION 1 stands for it. Protocol 5's out-of-band buffers work, test_pickletools' 10 and test_pickle's
+Py classes' buffer methods pass, and test_inspect imports. test_pickle's C classes now run on the pure Pickler: **a pass among them says
+nothing about a C pickler.** The 24 that fail, what only `_pickle.c` does (a C function not binding in a class body, the memo proxies,
+re-entrancy, its messages), stay in `:c-accelerators`, whose `:why` says this; the C classes' other entries stay listed for the same reason.
+`:pickle-core` keeps the 2 `_pyio` methods, now `:design`.
 
 **The cost.** The compiled loop is untouched. `str` iteration gains a nil test; `set(x)` runs New and Init as `deque` does. The bench sample the design named was not run.
