@@ -3789,3 +3789,30 @@ As the design said, plus what the runs showed:
   ReferenceType, Template, Interpolation, Token, itertools.chain, DirEntry, whose old method returned the class).
 - Known gap: `sorted(float.__dict__)` still lists only the dict's entries: `ownSlots` answers `in` and `[]`, not iteration.
   tp_name in "not callable" and setattr's messages stays the bare name (`'TypeVar' object is not callable`).
+
+## Design: 228, the compiler's errors and warnings, the C tokenizer, eval of byte sources (2026-11-07, the Mac VM, queue 228)
+
+The classes `:compiler-errors`, `:compiler-warnings`, `:tokenizer`, `:eval-source`, `:ir-constants`. The parser's invalid_*
+rules are already CPython's (PY9c's generated errors, 872 of 874 equal), so what is left is around them:
+
+- **Locations.** symtable.c gives each `symtable_add_def` the LOCATION of its own node (arg, alias, keyword, pattern, handler,
+  annotated target, type parameter), where `arbace.python.scope` kept the enclosing statement's; directives are recorded under
+  the mangled name. `at` binds `*pos*` to the node's location; codegen's repeated keyword likewise.
+- **The reader's warnings.** `lex/*warnings*` (an atom, nil: a second reading of the same text) collects, in the order made,
+  `verify_end_of_number`'s and the tokenizer's backslash-brace warning and string_parser.c's `warn_invalid_escape_sequence`, the
+  last in the first pass only (`p->call_invalid_rules`) and at the C's line and column, counted in the same transformed buffer.
+  Each record holds the SyntaxError it becomes under an "error" filter, made by the same raising code. The host cannot run
+  `warnings`, so a compiler's answer (IR, AST, tokens, or an error) carries them as a prefix (`warnings-prefix`), and the runtime
+  emits them in order before reading the answer (`emitReaderWarnings`); the first that a filter raises is the compile's error.
+  The alternative, a call back from the reader into the runtime, would make the ir-cache unusable for a source that warns.
+- **PEP 765** (`ast_preprocess.c`, absent so far): `finally-warnings!` over the forms before the symbol table, its context the top
+  of the C's stack only (a loop inside the finally ends the warning for `return` too, as the C does; a class pushes nothing).
+- **The main module** goes through `compile-source` too, so it warns as `python3 FILE` does.
+- **Mode eval** is read as a module; anything else than one expression statement is answered by the eval start rule.
+- **eval and exec of bytes**: `_Py_SourceAsString` (`sourceAsString`), eval's leading blanks skipped.
+- **`\N{}` in the compiler** by the reader's tables (`arbace.repr.python.ucn`), which ends the marker `{:named}`, the loader's
+  unknown constant.
+- **`_tokenize`** stays the native lexer's stream; the judge is `tokenize` over the corpus below against CPython.
+
+Judged, beside the modules, by a corpus harvested from Lib/test: every string constant of 17 test modules that CPython's
+`compile` refuses or warns about, 2,576 sources, compared with CPython on message, the four location fields, text and warnings.
