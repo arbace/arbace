@@ -42,6 +42,7 @@
               (.put by-kind [(keyword k) (= v "True")] (int (inc i)))
               (.put by-kind (keyword k) (int (inc i))))))
         (assoc t :acts acts :missing (vec (distinct missing)) :by-kind by-kind
+               :rule-lhs (int-array (map first (:rules t))) :rule-len (int-array (map second (:rules t)))
                :eof (dec (long (:n-terms t))))))))
 
 (defn missing-actions
@@ -51,24 +52,26 @@
 
 (defn- terminal
   "The terminal number of a token"
-  ^long [g tok]
-  (let [k (nth tok 0)
-        ^java.util.HashMap m (:by-kind g)]
-    (if (= k :ITeof)
-      (long (:eof g))
-      (let [n (or (.get m k) (when (= k :ITproj) (.get m [k (boolean (nth tok 1))])))]
+  ^long [^java.util.HashMap m ^long eof tok]
+  (let [k (nth tok 0)]
+    (if (identical? k :ITeof)
+      eof
+      (let [n (or (.get m k) (when (identical? k :ITproj) (.get m [k (boolean (nth tok 1))])))]
         (if n (long n) (throw (ex-info (str "parse error: unexpected token " k) {:span (nth tok 2) :error "token"})))))))
 
 (defn- call-action
-  "Applies the action fn f to ps and the values"
-  [f ps vals]
-  (case (count vals)
+  "Applies the action fn f to ps and the len values of vals ending at n"
+  [f ps ^objects vals ^long n ^long len]
+  (case len
     0 (f ps)
-    1 (f ps (nth vals 0))
-    2 (f ps (nth vals 0) (nth vals 1))
-    3 (f ps (nth vals 0) (nth vals 1) (nth vals 2))
-    4 (f ps (nth vals 0) (nth vals 1) (nth vals 2) (nth vals 3))
-    (apply f ps vals)))
+    1 (f ps (aget vals (- n 1)))
+    2 (f ps (aget vals (- n 2)) (aget vals (- n 1)))
+    3 (f ps (aget vals (- n 3)) (aget vals (- n 2)) (aget vals (- n 1)))
+    4 (f ps (aget vals (- n 4)) (aget vals (- n 3)) (aget vals (- n 2)) (aget vals (- n 1)))
+    (apply f ps (vec (java.util.Arrays/copyOfRange vals (int (- n len)) (int n))))))
+
+(defn- grow-ints ^ints [^ints a] (java.util.Arrays/copyOf a (int (* 2 (alength a)))))
+(defn- grow-objects ^objects [^objects a] (java.util.Arrays/copyOf a (int (* 2 (alength a)))))
 
 (defn parse
   "Runs the parser start (a %name of Parser.y) over the lexer state ps; its value"
@@ -76,51 +79,56 @@
   (let [g @grammar
         ^ints action (:action g) ^ints gotos (:goto g)
         nt (long (:n-terms g)) nn (long (:n-nonterms g))
-        rules (:rules g) ^objects acts (:acts g)
-        states (java.util.ArrayList.)
-        vals (java.util.ArrayList.)
-        start-state (or (get (:starts g) start) (throw (ex-info (str "no parser " start) {})))]
-    (.add states (int start-state))
+        ^ints rule-lhs (:rule-lhs g) ^ints rule-len (:rule-len g) ^objects acts (:acts g)
+        ^java.util.HashMap by-kind (:by-kind g) eof (long (:eof g))
+        start-state (or (get (:starts g) start) (throw (ex-info (str "no parser " start) {})))
+        sts0 (int-array 256) vals0 (object-array 256)]
+    (aset sts0 0 (int start-state))
+    ;; sts: the states, stop of them; vals: the values, vtop of them (a failing token's number is on vals
+    ;; without a state, while the error token is tried)
     (binding [pp/*ps* ps]
-      (loop [tok (lx/lex-token ps)
-             i (terminal g tok)]
-        (let [st (long (.get states (dec (.size states))))
-              act (long (aget action (int (+ (* st nt) i))))]
-          (cond
-            ;; fail: enter error recovery (the token number saved on the value stack, the error
-            ;; token tried in the same state), or fail when already recovering
-            (zero? act)
-            (if (zero? i)
-              (lx/fatal! (lx/src-parse-err ps))
-              (do (.add vals (Long/valueOf i)) (recur tok 0)))
-            ;; accept (a %partial parser's on the error token: the saved token number dropped)
-            (= act -1)
-            (.get vals (- (.size vals) (if (zero? i) 2 1)))
-            ;; reduce
-            (neg? act)
-            (if (zero? i)
-              (lx/fatal! (lx/src-parse-err ps))
-              (let [r (- (inc act))
-                    [lhs len] (rules r)
-                    len (long len)
-                    n (.size vals)
-                    args (if (zero? len) [] (vec (.subList vals (int (- n len)) (int n))))
-                    _ (dotimes [_ len] (.remove vals (dec (.size vals))) (.remove states (dec (.size states))))
-                    f (aget acts (int r))
-                    _ (when (nil? f) (throw (ex-info (str "no action for production " r) {:production r})))
-                    v (call-action f ps args)
-                    st' (long (.get states (dec (.size states))))
-                    s2 (aget gotos (int (+ (* st' nn) (long lhs))))]
-                (.add states (int s2))
-                (.add vals v)
-                (recur tok i)))
-            ;; shift
-            :else
-            (let [s2 (dec act)]
-              (.add states (int s2))
-              (if (zero? i)
-                ;; the error token shifted: its value is the saved token number, and the parse
-                ;; goes on with that token
-                (recur tok (long (.get vals (dec (.size vals)))))
-                (do (.add vals tok)
-                    (let [t2 (lx/lex-token ps)] (recur t2 (terminal g t2))))))))))))
+      (let [tok0 (lx/lex-token ps)]
+        (loop [tok tok0
+               i (terminal by-kind eof tok0)
+               stop 1 vtop 0 ^ints sts sts0 ^objects vals vals0]
+          (if (>= (+ (max stop vtop) 8) (alength sts))
+            (recur tok i stop vtop (grow-ints sts) (grow-objects vals))
+            (let [st (aget sts (dec stop))
+                  act (aget action (int (+ (* st nt) i)))]
+              (cond
+                ;; fail: enter error recovery (the token number saved on the value stack, the error
+                ;; token tried in the same state), or fail when already recovering
+                (zero? act)
+                (if (zero? i)
+                  (lx/fatal! (lx/src-parse-err ps))
+                  (do (aset vals vtop (Long/valueOf (long i)))
+                      (recur tok 0 stop (inc vtop) sts vals)))
+                ;; accept (a %partial parser\'s on the error token: the saved token number dropped)
+                (= act -1)
+                (aget vals (- vtop (if (zero? i) 2 1)))
+                ;; reduce
+                (neg? act)
+                (if (zero? i)
+                  (lx/fatal! (lx/src-parse-err ps))
+                  (let [r (- (inc act))
+                        len (aget rule-len r)
+                        f (aget acts r)
+                        _ (when (nil? f) (throw (ex-info (str "no action for production " r) {:production r})))
+                        v (call-action f ps vals vtop len)
+                        stop2 (- stop len)
+                        vtop2 (- vtop len)
+                        s2 (aget gotos (int (+ (* (aget sts (dec stop2)) nn) (aget rule-lhs r))))]
+                    (aset sts stop2 (int s2))
+                    (aset vals vtop2 v)
+                    (recur tok i (inc stop2) (inc vtop2) sts vals)))
+                ;; shift
+                :else
+                (let [s2 (dec act)]
+                  (aset sts stop (int s2))
+                  (if (zero? i)
+                    ;; the error token shifted: its value is the saved token number, and the parse
+                    ;; goes on with that token
+                    (recur tok (long (aget vals (dec vtop))) (inc stop) vtop sts vals)
+                    (do (aset vals vtop tok)
+                        (let [t2 (lx/lex-token ps)]
+                          (recur t2 (terminal by-kind eof t2) (inc stop) (inc vtop) sts vals)))))))))))))

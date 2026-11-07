@@ -203,6 +203,52 @@
 (defn- hex-digit ^long [^long c]
   (cond (decdigit? c) (- c 48) (>= c 97) (+ 10 (- c 97)) :else (+ 10 (- c 65))))
 
+;;; Character classes as bits (speed, OC173): the predicates above for every ASCII code point once, in a table;
+;;; the others by the predicates. The macros test a bit, inline.
+
+(def ^:private K-SMALL 1) (def ^:private K-LARGE 2) (def ^:private K-DIGIT 4) (def ^:private K-IDCHAR 8)
+(def ^:private K-SYM 16) (def ^:private K-SPECIAL 32) (def ^:private K-WNN 64) (def ^:private K-GRAPHIC 128)
+(def ^:private K-SPACE 256) (def ^:private K-PRAGMA 512) (def ^:private K-WHITE 1024) (def ^:private K-DEC 2048)
+
+(defn- cls-slow
+  "The class bits of a code point by the predicates"
+  ^long [^long c]
+  (long (bit-or (if (small? c) K-SMALL 0) (if (large? c) K-LARGE 0) (if (digit? c) K-DIGIT 0) (if (idchar? c) K-IDCHAR 0)
+                (if (sym-char? c) K-SYM 0) (if (special? c) K-SPECIAL 0) (if (white-no-nl? c) K-WNN 0)
+                (if (graphic? c) K-GRAPHIC 0) (if (space? c) K-SPACE 0) (if (pragmachar? c) K-PRAGMA 0)
+                (if (whitechar? c) K-WHITE 0) (if (decdigit? c) K-DEC 0))))
+
+(def ^:private ascii-cls
+  (let [a (int-array 128)] (dotimes [c 128] (aset a c (int (cls-slow c)))) a))
+
+(defmacro ^:private cl
+  "The class bits of the code point c"
+  [c] `(let [c# (long ~c)] (if (and (>= c# 0) (< c# 128)) (aget ~(with-meta 'ascii-cls {:tag 'ints}) c#) (cls-slow c#))))
+
+(defmacro ^:private has [cc bit] `(not (zero? (bit-and (long ~cc) ~bit))))
+(defmacro ^:private small?* [c] `(has (cl ~c) ~K-SMALL))
+(defmacro ^:private large?* [c] `(has (cl ~c) ~K-LARGE))
+(defmacro ^:private idchar?* [c] `(has (cl ~c) ~K-IDCHAR))
+(defmacro ^:private sym-char?* [c] `(has (cl ~c) ~K-SYM))
+(defmacro ^:private white-no-nl?* [c] `(has (cl ~c) ~K-WNN))
+(defmacro ^:private whitechar?* [c] `(has (cl ~c) ~K-WHITE))
+(defmacro ^:private pragmachar?* [c] `(has (cl ~c) ~K-PRAGMA))
+(defmacro ^:private decdigit?* [c] `(has (cl ~c) ~K-DEC))
+
+(defmacro ^:private run*
+  "m-run with the predicate inlined: pred a #(..) form or a predicate with a * macro"
+  [cs n i pred]
+  (let [j (gensym "j") csv (gensym "cs") nv (gensym "n")
+        m {'idchar? 'idchar?* 'sym-char? 'sym-char?* 'whitechar? 'whitechar?* 'white-no-nl? 'white-no-nl?* 'pragmachar? 'pragmachar?*
+           'decdigit? 'decdigit?*}
+        x `(aget ~csv ~j)
+        test (cond (and (seq? pred) (= 'fn* (first pred)) (vector? (second pred)) (= 1 (count (second pred))))
+                   `(let [~(first (second pred)) ~x] ~(nth pred 2))
+                   (and (symbol? pred) (m pred)) (list (m pred) x)
+                   :else (list pred x))]
+    `(let [~(with-meta csv {:tag 'ints}) ~cs ~nv (long ~n)]
+       (loop [~j (long ~i)] (if (and (< ~j ~nv) ~test) (recur (inc ~j)) ~j)))))
+
 (declare nested-pragma! qual-end scan-qualified! scan-numbers! pragma-token! header-pragma-token!
          multiline-string! lex-token)
 
@@ -216,7 +262,7 @@
 (def ^:private slot-index
   {:cs 0 :n 1 :pos 2 :line 3 :col 4 :file 5 :lex 6 :ctx 7 :exts 8 :last-tk 9 :last-loc 10
    :last-len 11 :prev-loc 12 :hdk 13 :errors 14 :srcfiles 15 :warnings 16 :file0 17
-   :tab-first 18 :tab-count 19})
+   :acc 18 :tab-first 19 :tab-count 20})
 
 (defmacro ^:private st [ps k] `(aget ~(with-meta ps {:tag 'objects}) ~(int (slot-index k))))
 (defmacro ^:private st! [ps k v] `(aset ~(with-meta ps {:tag 'objects}) ~(int (slot-index k)) ^Object (box ~v)))
@@ -234,7 +280,7 @@
   option_prags 0]"
   [text ^String file ^long exts & {:keys [prags]}]
   (let [cs (if (string? text) (code-points text) text)
-        ps (object-array 20)]
+        ps (object-array 21)]
     (st! ps :cs cs)
     (st! ps :n (alength ^ints cs))
     (st! ps :pos 0) (st! ps :line 1) (st! ps :col 1) (st! ps :file file)
@@ -250,6 +296,7 @@
     (st! ps :srcfiles '())
     (st! ps :warnings (java.util.ArrayList.))
     (st! ps :file0 file)
+    (st! ps :acc (long-array 2))
     (st! ps :tab-first nil)
     (st! ps :tab-count 0)
     ps))
@@ -512,16 +559,16 @@
 (defn- m-numspc ^long [^ints cs ^long n ^long i] (m-run cs n i #(= (long %) 95)))
 
 (defn- m-varid ^long [^ints cs ^long n ^long i]
-  (if (and (< i n) (small? (aget cs i))) (m-run cs n (inc i) idchar?) -1))
+  (if (and (< i n) (small?* (aget cs i))) (run* cs n (inc i) idchar?) -1))
 
 (defn- m-conid ^long [^ints cs ^long n ^long i]
-  (if (and (< i n) (large? (aget cs i))) (m-run cs n (inc i) idchar?) -1))
+  (if (and (< i n) (large?* (aget cs i))) (run* cs n (inc i) idchar?) -1))
 
 (defn- m-varsym ^long [^ints cs ^long n ^long i]
-  (if (and (< i n) (sym-char? (aget cs i)) (not= 58 (aget cs i))) (m-run cs n (inc i) sym-char?) -1))
+  (if (and (< i n) (sym-char?* (aget cs i)) (not= 58 (aget cs i))) (run* cs n (inc i) sym-char?) -1))
 
 (defn- m-consym ^long [^ints cs ^long n ^long i]
-  (if (and (< i n) (= 58 (aget cs i))) (m-run cs n (inc i) sym-char?) -1))
+  (if (and (< i n) (= 58 (aget cs i))) (run* cs n (inc i) sym-char?) -1))
 
 (defn- m-exponent ^long [^ints cs ^long n ^long i e?]
   ;; @numspc [eE] [\-\+]? @decimal (e? the exponent letter's predicate)
@@ -1098,24 +1145,27 @@
   "The best match at position i in start code sc: [end rule] or nil"
   [ps sc ^long i]
   (let [^ints cs (st ps :cs) n (long (st ps :n)) ex (long (st ps :exts))
-        acc (long-array [-1 Long/MAX_VALUE])
+        ^longs acc (st ps :acc)
+        _ (do (aset acc 0 -1) (aset acc 1 Long/MAX_VALUE))
         s0 (identical? sc :s0)
         s0p (or s0 (identical? sc :option-prags))
         lay (or (identical? sc :layout) (identical? sc :layout-do) (identical? sc :layout-if))]
     ;; empty rules
-    (case sc
-      :bol (cand! acc 17 i)
-      :layout-if (cand! acc 22 i)
-      :layout (cand! acc 23 i)
-      :layout-do (cand! acc 24 i)
-      :layout-left (cand! acc 25 i)
-      :line-prag1 (cand! acc 29 i)
-      nil)
+    (when-not s0
+      (case sc
+        :bol (cand! acc 17 i)
+        :layout-if (cand! acc 22 i)
+        :layout (cand! acc 23 i)
+        :layout-do (cand! acc 24 i)
+        :layout-left (cand! acc 25 i)
+        :line-prag1 (cand! acc 29 i)
+        nil))
     (when (< i n)
-      (let [c (aget cs i)]
+      (let [c (aget cs i)
+            cc (cl c)]
         ;; 1: ($white_no_nl # \t)+
-        (when (and (white-no-nl? c) (not= c 9))
-          (cand! acc 1 (m-run cs n i #(let [c (long %)] (and (white-no-nl? c) (not= c 9))))))
+        (when (and (has cc K-WNN) (not= c 9))
+          (cand! acc 1 (run* cs n i #(let [c (long %)] (and (white-no-nl?* c) (not= c 9))))))
         ;; 2: $tab
         (when (= c 9) (cand! acc 2 (inc i)))
         (when (or (= c 45) (= c 123)) (scan-comments! acc cs n i ex))
@@ -1220,19 +1270,19 @@
           (when (xtest ex :UnboxedParensBit)
             (when (and (= c 40) (= 35 (ch cs n (inc i)))) (cand! acc 64 (+ i 2)))
             (when (and (= c 35) (= 41 (ch cs n (inc i)))) (cand! acc 65 (+ i 2)))))
-        (when (and s0p (special? c)) (cand! acc 66 (inc i)))
+        (when (and s0p (has cc K-SPECIAL)) (cand! acc 66 (inc i)))
         ;; identifiers
         (when s0p
           (cond
-            (large? c) (scan-qualified! acc cs n i ex s0)
-            (small? c)
+            (has cc K-LARGE) (scan-qualified! acc cs n i ex s0)
+            (has cc K-SMALL)
             (let [e (m-varid cs n i)]
               (cand! acc 79 e)
               (when (and s0 (xtest ex :MagicHashBit) (= 35 (ch cs n e)))
                 (cand! acc 83 (m-run cs n e #(= (long %) 35)))))))
         (when s0
           ;; operators
-          (when (sym-char? c)
+          (when (has cc K-SYM)
             (if (= c 58) (cand! acc 88 (m-consym cs n i)) (cand! acc 87 (m-varsym cs n i))))
           ;; numbers
           (when (or (decdigit? c) (= c 95) (= c 45))
