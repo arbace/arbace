@@ -472,6 +472,12 @@
   (let [f (io/file (.getParent (io/file ref)) "controls.edn")]
     (if (.isFile f) (read-edn (.getPath f)) [])))
 
+(defn verdict-map
+  "test/java/verdicts.edn beside REF as {id kind}; empty when there is none (every test the JDK's)."
+  [ref]
+  (let [f (io/file (.getParent (io/file ref)) "verdicts.edn")]
+    (if (.isFile f) (into {} (for [[id k] (read-edn (.getPath f))] [id k])) {})))
+
 (defn- controls-judged!
   "GTS81 (a): the controls' results of RESULTS at the level LV (rows [id lv result reason]) against
   their subjects' (the run without them): a control that passes is a problem (the judge passes a run
@@ -481,7 +487,9 @@
   (doseq [c controls :when (some #{lv} (:levels c))
           :let [sub (first (filter #(and (= (:subject c) (first %)) (= lv (second %))) results))
                 row (first (filter #(and (= (:id c) (first %)) (= lv (second %))) results))
-                what (str "control " (:id c) " (" (:subject c) "'s run judged against " (:reference c) "'s reference)")]
+                what (if (:inverted c)
+                       (str "control " (:id c) " (" (:subject c) "'s run judged by its own verdict inverted, JCV1)")
+                       (str "control " (:id c) " (" (:subject c) "'s run judged against " (:reference c) "'s reference)"))]
           :when (or sub row)]
     (cond
       ;; GTS84 (a): a control whose crossed material was not made in this run (the print level's reference not
@@ -509,14 +517,17 @@
                  :when (or (nil? corp) (corp (:corpus t)))
                  :when (or (nil? only) (re-find only (str (:id t) " " (:test t))))]
              t)]
-    (doseq [[controls by-id] [(let [cs (controls-of ref)] [cs (if (seq cs) (into {} (for [t (ref-tests ref)] [(:id t) t])) {})])]
+    (doseq [[controls by-id vm] [(let [cs (controls-of ref)] [cs (if (seq cs) (into {} (for [t (ref-tests ref)] [(:id t) t])) {}) (verdict-map ref)])]
             t ts
             :let [cs (for [c controls :when (= (:subject c) (:id t))
+                           :when (not (:inverted c))
                            :let [r (by-id (:reference c)) r0 (first (:runs r))]
                            :when r0]
                        [c r r0])]]
       (write-lines (str work "/run/" (:id t) "/plan.tsv")
-                   (concat [(str "test\t" (:test t)) (str "dir\t" (:dir t)) (str "root\t" (name (:root t :jdk26u))) (str "classes\t" (:classes t))]
+                   (concat [(str "test\t" (:test t)) (str "dir\t" (:dir t)) (str "root\t" (name (:root t :jdk26u))) (str "classes\t" (:classes t))
+                            ;; JCV1: whose verdict judges it (test/java/verdicts.edn; none: the JDK's record)
+                            (str "verdict\t" (name (vm (:id t) :stdout)))]
                            (for [x (:javac t)] (str "javac\t" x))
                            (for [[src dst] (:files t)]
                              (str "file\t" src "\t" dst "\t" (if (some #{dst} (:unnamed t)) (str "package " (first (str/split dst #"/")) "; ") "")))
@@ -530,6 +541,9 @@
                              (str/join "\t" ["control" (:id c) (:exit r0) (:out r0) (:out-len r0) (if (:det r0) "1" "0")
                                              (or (:out-masked r0) "-") (if (:det-masked r0) "1" "0")]))
                            (for [[c r] cs] (str "control-classes\t" (:id c) "\t" (:classes r)))
+                           ;; JCV1: the own verdict's controls (:inverted): the subject's run judged by its own
+                           ;; verdict inverted (it must fail, as jtreg's main/fail and @compile/fail)
+                           (for [c controls :when (and (:inverted c) (= (:subject c) (:id t)))] (str "control-own\t" (:id c)))
                            ;; GTS84 (a): the print level's controls: the subject's print judged against its
                            ;; reference's printed run (control-print CID REF); the reference keeps its printed
                            ;; class files for them (control-reference CID)
@@ -628,9 +642,94 @@
                                  ["]"]))
           (println (str "   recorded " f)))))))
 
+(defn own-row
+  "JCV1: a result row [id level result reason] judged by the test's own verdict (VM, verdict-map): at
+  interp and compiled a :status test's stdout is not looked at (a differ, its status the expected 0,
+  passes; the JDK's status in a reason is jtreg's expected 0); at classes javac's acceptance judges (a
+  differ, the class files not the JDK javac's, passes). Rows of JCV1's runs, and every other row, as
+  they are."
+  [vm [id lv r reason :as row]]
+  (cond
+    (and (#{:interp :compiled} lv) (= :status (vm id)) (= :differ r) (not (str/starts-with? reason "action ")))
+    [id lv :pass ""]
+    (and (#{:interp :compiled} lv) (= :status (vm id)) (= :fail r) (re-find #"^(?:action \d+: )?status -?\d+ \(the JDK's 0\)" reason))
+    [id lv r (str/replace-first reason #"\(the JDK's 0\)" "(expected 0)")]
+    (and (= :classes lv) (= :differ r) (= reason "the class files differ from the JDK javac's"))
+    [id lv :pass ""]
+    :else row))
+
+(defn rejudge-records
+  "JCV1: the own verdict's records (CHECKDIR/check-LEVEL.edn at interp, compiled and classes, and
+  levels-known.edn) made from the oracle tier's (ORACLEDIR's: the JDK's record's judgment, the records of
+  before JCV1) by own-row, as a judgment of the runs they record would make them; the other levels'
+  records are the test's own already."
+  [ref checkdir oracledir]
+  (let [vm (verdict-map ref)
+        recs (into {} (for [lv [:interp :compiled :classes]
+                            :let [f (str oracledir "/check-" (name lv) ".edn")]]
+                        [lv (vec (for [[id t r reason] (read-edn f) :let [[_ _ r2 reason2] (own-row vm [id lv r reason])]]
+                                   [id t r2 reason2]))]))]
+    (doseq [[lv rows] recs]
+      (write-lines (str checkdir "/check-" (name lv) ".edn")
+                   (concat [(str ";; bin/java-check's results at the level " (name lv) " (doc/classes/JAVA-CONFORMANCE-SURVEY.md, \"As built: JC1\"):")
+                            ";; per test of test/java/ref-jdk26.edn the JDK passes, its jtreg name, its result and reason."
+                            ";; A test passing here and not in a run is a regression. bin/java-check --record writes it."
+                            "["]
+                           (for [[id t r reason] rows] (str " [" (q id) " " (q t) " " r " " (q reason) "]"))
+                           ["]"]))
+      (println (str "java-check rejudge-records: " (name lv) ": " (count rows) " tests, "
+                    (count (filter #(= :pass (nth % 2)) rows)) " pass (the oracle's "
+                    (count (filter #(= :pass (nth % 2)) (read-edn (str oracledir "/check-" (name lv) ".edn")))) ")")))
+    (let [ri (into {} (for [[id t r reason] (recs :interp)] [id [t r reason]]))
+          rc (into {} (for [[id t r reason] (recs :compiled)] [id [t r reason]]))
+          ok? #{:pass :flaky}
+          ;; the oracle's known disagreements (a run's, which the records need not repeat: a test's sides as one
+          ;; run saw them) judged again, kept while they still disagree; then the records' own
+          old (for [[id t ir ire cr cre] (read-edn (str oracledir "/levels-known.edn"))
+                    :let [[_ _ ir ire] (own-row vm [id :interp ir ire]) [_ _ cr cre] (own-row vm [id :compiled cr cre])]
+                    :when (not= (boolean (ok? ir)) (boolean (ok? cr)))]
+                [id t ir ire cr cre])
+          from-recs (for [id (sort (filter rc (keys ri)))
+                          :let [[t ir ire] (ri id) [_ cr cre] (rc id)]
+                          :when (not= (boolean (ok? ir)) (boolean (ok? cr)))]
+                      [id t ir ire cr cre])
+          dis (vals (into (sorted-map) (for [e (concat from-recs old)] [(first e) e])))]
+      (write-lines (str checkdir "/levels-known.edn")
+                   (concat [";; The tests passing at one of bin/java-check's levels interp and compiled and not at the other"
+                            ";; (doc/classes/JAVA-CONFORMANCE-SURVEY.md, JCS45 (a), \"As built: JC2b\"): [id jtreg-name"
+                            ";; interp-result interp-reason compiled-result compiled-reason]. A run of both levels fails on a"
+                            ";; disagreement not here (or whose passing side changed); bin/java-check --record writes it."
+                            "["]
+                           (for [[id t ir ire cr cre] dis]
+                             (str " [" (q id) " " (q t) " " ir " " (q ire) " " cr " " (q cre) "]"))
+                           ["]"]))
+      (println (str "java-check rejudge-records: levels-known.edn: " (count dis) " disagreements")))))
+
+(defn- agreement!
+  "JCV1: per level, the own verdict's judgment (OWN rows) against the JDK's record's (JDK rows, the oracle
+  tier's), the tests on which they disagree printed by kind (the oracle's result and its reason's head)."
+  [vm own jdk control-ids levels]
+  (doseq [lv levels
+          :let [o (into {} (for [[id l r reason] own :when (and (= l lv) (not (control-ids id)))] [id [r reason]]))
+                j (into {} (for [[id l r reason] jdk :when (and (= l lv) (not (control-ids id)))] [id [r reason]]))
+                ids (sort (filter j (keys o)))
+                own-judged (count (filter #(if (#{:interp :compiled} lv) (= :status (vm %)) true) ids))
+                dis (filter #(not= (first (o %)) (first (j %))) ids)]
+          :when (seq ids)]
+    (println (str "java-check " (name lv) ": the own verdict judges " own-judged " of " (count ids)
+                  " tests; against the JDK's record (the oracle tier): " (- (count ids) (count dis)) " agree, "
+                  (count dis) " disagree"))
+    (doseq [[k xs] (sort-by (comp - count val)
+                            (group-by #(str (name (first (o %))) " / the JDK's " (name (first (j %))) ": "
+                                            (first (str/split (second (j %)) #"[:(]")))
+                                      dis))]
+      (println (format "   %5d %s %s" (count xs) k (str/join " " (take 12 xs)))))))
+
 (defn report [ref work divergences checkdir levels & opts]
   (let [flags (set opts)
-        o (apply hash-map (remove #{"--record" "--partial"} opts))
+        o (apply hash-map (remove #{"--record" "--partial" "--oracle"} opts))
+        ;; JCV1: --oracle, the oracle tier's judgment (the JDK's record: the rows LEVEL.jdk where a run wrote one)
+        oracle? (flags "--oracle")
         record? (flags "--record")
         partial? (or (flags "--partial") (some? (o "--essential")))
         essential (some->> (o "--essential") lines (remove #(str/starts-with? % "#")) (map #(first (str/split % #"\s+"))) set)
@@ -645,10 +744,36 @@
                                      :when (in-corpora? (:id t))]
                                  (:id t))))
         classes (read-edn divergences)
-        all-results (for [[id lv r reason] (tsv (str work "/results.tsv"))] [id (keyword lv) (keyword r) (or reason "")])
+        raw (for [[id lv r reason] (tsv (str work "/results.tsv"))] [id lv (keyword r) (or reason "")])
+        ;; JCV1: the two judgments of the rows: the own verdict's (rows LEVEL, own-row: a row the JDK's record
+        ;; judged, as before JCV1's runs and in the saved results of then, judged again by the test's own
+        ;; verdict) and the oracle tier's (a row LEVEL.jdk where the run wrote one, else the row LEVEL)
+        vm (verdict-map ref)
+        ;; (a control's row is its judge's, as it is: c00001's classes row the digest's)
+        cids (set (map :id (controls-of ref)))
+        own-rows (for [[id lv r reason] raw :when (not (str/ends-with? lv ".jdk"))]
+                   (if (cids id) [id (keyword lv) r reason] (own-row vm [id (keyword lv) r reason])))
+        ;; an :inverted control's row missing (a run before JCV1's, its saved results judged again): its subject's
+        ;; own row inverted, as judge_own with WANT fail would judge its run
+        own-rows (concat own-rows
+                         (for [c (controls-of ref) :when (:inverted c)
+                               lv (:levels c)
+                               :when (not-any? #(and (= (:id c) (first %)) (= lv (second %))) own-rows)
+                               :let [sub (first (filter #(and (= (:subject c) (first %)) (= lv (second %))) own-rows))]
+                               :when (and sub (#{:pass :fail :differ} (nth sub 2)))]
+                           (if (= :pass (nth sub 2))
+                             [(:id c) lv :fail "status 0 (expected a failure: the verdict inverted, a control; from its subject's row)"]
+                             [(:id c) lv :pass "(from its subject's row)"])))
+        jdk-rows (let [jdk (into {} (for [[id lv :as x] raw :when (str/ends-with? lv ".jdk")]
+                                      [[id (subs lv 0 (- (count lv) 4))] x]))]
+                   (for [[id lv :as x] raw :when (not (str/ends-with? lv ".jdk"))
+                         :let [[_ _ r reason] (get jdk [id lv] x)]]
+                     [id (keyword lv) r reason]))
+        all-results (if oracle? jdk-rows own-rows)
         ;; GTS81 (a): the controls' rows judged apart, no test of the records, classes or lists
-        controls (controls-of ref)
-        control-ids (set (map :id controls))
+        ;; (JCV1: the oracle tier's judgment has no :inverted control, the own verdict's)
+        controls (cond->> (controls-of ref) oracle? (remove :inverted))
+        control-ids (set (map :id (controls-of ref)))
         results (remove #(control-ids (first %)) all-results)
         ;; the levels whose runs were under the clean run's audit (--save's audited marker, GT7 rerun 8):
         ;; a class with :audited at a level switches the hold on there (any such class: it classifies
@@ -759,6 +884,7 @@
                                    (str " [" (q id) " " (q (:test (tests id))) " " r " " (q reason) "]")))
                                ["]"]))
         (println (str "   recorded " f))))
+    (when-not oracle? (agreement! vm own-rows jdk-rows control-ids (map keyword (str/split levels #","))))
     (doseq [lv (map keyword (str/split levels #","))] (controls-judged! controls lv all-results problems))
     (levels-against! checkdir tests results (set (map keyword (str/split levels #","))) record? (or partial? (some? corpora)) problems
                      ;; a levels disagreement is held only for a test recorded passing at interp: a timeout recorded
@@ -861,6 +987,11 @@
     (doseq [x bad] (println (str "   " x)))
     (when (seq bad) (shutdown-agents) (System/exit 1))))
 
+(defn- diag-want
+  "A golden-diagnostics action's own expected status: 1 under jtreg's @compile/fail, else 0."
+  [a]
+  (if (some #{"fail"} (str/split (str (:modes a)) #"/")) 1 0))
+
 (defn plan-diag
   "After plan: the golden-diagnostics tests' plans (WORK/run/ID/plan.tsv: kind, library, modules,
   preview, act I KIND MODES TOKEN..., exp I EXIT GOLDEN), and WORK/run.list kept to the tests of
@@ -878,17 +1009,20 @@
                            (when (:preview t) ["preview\t1"])
                            (for [[i a] (map-indexed vector (:actions t))]
                              (str/join "\t" (concat ["act" i (:kind a) (if (str/blank? (:modes a)) "-" (:modes a))] (:toks a))))
+                           ;; JCV1: each action's expectation the test's own: its @compile mode's status (/fail: 1,
+                           ;; else 0) and its ref= golden file shipped with the test; for every test the JDK
+                           ;; passes the JDK's record says the same (diag-line), which bin/java-check verdicts checks
                            (for [[i a] (map-indexed vector (:actions t))]
-                             (str "exp\t" i "\t" (:exit a) "\t" (if (:golden a) "1" "-")))
+                             (str "exp\t" i "\t" (diag-want a) "\t" (if (re-find #"(?:^|/)ref=" (str (:modes a))) "1" "-")))
                            ;; GTS84 (a): the diagnostics controls whose subject the test is: their reference's first
                            ;; golden action's expected status and golden file (control-diag CID EXIT DIR/FILE)
                            (for [c (controls-of ref)
                                  :when (and (= (:subject c) id) (some #{:diagnostics} (:levels c)))
                                  :let [r (tests (:reference c))
-                                       a (first (filter :golden (:actions r)))
+                                       a (first (filter #(re-find #"(?:^|/)ref=" (str (:modes %))) (:actions r)))
                                        g (some->> (:modes a) (re-find #"(?:^|/)ref=([^/]+)") second)]
                                  :when g]
-                             (str "control-diag\t" (:id c) "\t" (:exit a) "\t" (:dir r) "/" g)))))
+                             (str "control-diag\t" (:id c) "\t" (diag-want a) "\t" (:dir r) "/" g)))))
     (write-lines (str work "/run.list") kept)
     (println (str "java-check plan-diag: " (count kept) " tests at the levels " levels
                   " (" (count (filter tests kept)) " golden-diagnostics tests)"))))
@@ -1060,8 +1194,97 @@
                [stem (str stem ": " msg (when (seq ext) (str " (extended by " (str/join " " (distinct ext)) ")")))])]
     (refuse! shard (owner-index work shard) errs "Go does not compile: ")))
 
+;; ---------------------------------------------------------------------------------------------
+;; verdicts: whose verdict judges each test (doc/classes/JAVA-CONFORMANCE-SURVEY.md, "Decided (the
+;; user, 2026-11-07)", "As built: JCV1"). A test's own verdict counts as a judge no toolchain made:
+;; jtreg's main action passes when main returns normally (status 0) and fails when it throws or
+;; exits otherwise, so a test that can fail by itself judges itself; a golden-diagnostics test
+;; ships its golden files and its @compile modes (/fail) say the status. The JDK's recorded runs
+;; (test/java/ref-jdk26.edn) move to the oracle tier, but for the tests whose only reference is
+;; the JDK's recorded stdout.
+
+(def ^:private literal-or-comment
+  "Java's comments, text blocks, string and character literals, in the order the lexer meets them."
+  #"(?s)/\*.*?\*/|//[^\n]*|\"\"\".*?\"\"\"|\"(?:\\.|[^\"\\\n])*\"|'(?:\\.|[^'\\\n])*'")
+
+(defn code-only
+  "A Java file's text without its comments and literals (each replaced by a space)."
+  [^String text]
+  (str/replace text literal-or-comment " "))
+
+(def ^:private self-check
+  "What lets a main action fail by itself: a throw statement, System.exit, Runtime's exit or halt."
+  #"\bthrow\b|\bSystem\s*\.\s*exit\s*\(|\bRuntime\s*\.\s*getRuntime\s*\(\s*\)\s*\.\s*(?:exit|halt)\s*\(")
+
+(defn- verdict-of
+  "A test of REF's verdict: [kind why]. :golden (a golden-diagnostics test: its @compile modes and
+  golden files), :status (a run test whose source set can fail by itself: judged by its status,
+  jtreg's), :stdout (a run test with no way to fail but a crash, or Arbace's own corpus jls, whose
+  programs print what they check: judged by the JDK's recorded stdout, as before)."
+  [t ^String jdktest]
+  (cond
+    (= :compile-fail-ref (:category t))
+    [:golden (str (count (filter #(re-find #"(?:^|/)ref=" (str (:modes %))) (:actions t))) " golden of "
+                  (count (:actions t)) " actions")]
+    (= :jls (:corpus t)) [:stdout "jls: Arbace's own programs, their output the check"]
+    :else
+    (let [base (if (= :checkout (:root t)) "." jdktest)
+          hits (for [[src] (:files t)
+                     :let [f (io/file base (:dir t) src)]
+                     :when (.isFile f)
+                     :let [m (re-find self-check (code-only (slurp f)))]
+                     :when m]
+                 [src (str/replace m #"\s+" "")])]
+      (cond
+        (seq hits) (let [[src m] (first hits)] [:status (str (str/replace m #"\($" "") " in " src)])
+        ;; nothing of its own can fail it, and it prints nothing: what it checks is that the runtime
+        ;; throws nothing and does not crash (hotspot's compiler tests, most), jtreg's status again;
+        ;; the JDK's stdout would only say "nothing"
+        (every? #(= 0 (:out-len %)) (:runs t)) [:status "no output: the runtime's own exceptions and crashes"]
+        :else [:stdout "no throw, System.exit or Runtime.exit/halt in the source set, and it prints"]))))
+
+(defn verdicts
+  "bin/java-check verdicts: every test REF passes on the JDK classified by verdict-of, written to OUT
+  (test/java/verdicts.edn), or with --verify compared with it; the shares printed per level."
+  [jdktest ref out & opts]
+  (let [ts (filter #(= :pass (:jdk %)) (ref-tests ref))
+        vs (for [t ts :let [[k why] (verdict-of t jdktest)]] [(:id t) k why])
+        text (str/join "\n"
+                       (concat [";; Whose verdict judges each test of test/java/ref-jdk26.edn the JDK passes (doc/classes/JAVA-CONFORMANCE-SURVEY.md,"
+                                ";; \"Decided (the user, 2026-11-07)\", \"As built: JCV1\"): [id kind why], kind :status (jtreg's main action,"
+                                ";; its source set can fail by itself: the status judges it, the JDK's stdout is the oracle tier's), :stdout"
+                                ";; (nothing in it but a crash can fail it, or Arbace's own jls corpus: the JDK's recorded stdout judges it, as"
+                                ";; before), :golden (a golden-diagnostics test: its @compile modes and shipped golden files). Written by"
+                                ";; bin/java-check verdicts (java.check/verdicts, from the sources at the platform's pin; --verify compares)."
+                                ";; Read with the Clojure reader."
+                                "["]
+                               (for [[id k why] vs] (str " [" (q id) " " k " " (q why) "]"))
+                               ["]" ""]))
+        ;; the golden tests' own expectations against the JDK's record (diag-line's): equal for every test it passes
+        diag-off (for [t ts :when (= :compile-fail-ref (:category t))
+                       [i a] (map-indexed vector (:actions t))
+                       :when (or (not= (diag-want a) (:exit a))
+                                 (not= (boolean (re-find #"(?:^|/)ref=" (str (:modes a)))) (boolean (:golden a))))]
+                   (str (:id t) " action " i))
+        by (frequencies (map second vs))
+        run (count (remove #(= :golden (second %)) vs))]
+    (println (str "java-check verdicts: " (count vs) " tests: " (by :status 0) " :status, " (by :stdout 0) " :stdout, "
+                  (by :golden 0) " :golden"))
+    (println (str "   own verdict per level: interp, compiled " (by :status 0) " of " run
+                  "; classes, print " run " of " run " (javac's acceptance; the original's class files); diagnostics "
+                  (by :golden 0) " of " (by :golden 0) "; read " run " of " run))
+    (println (str "   the golden tests' own expectations (their @compile modes, their ref= files) against the JDK's record: "
+                  (if (seq diag-off) (str (count diag-off) " actions differ: " (str/join ", " (take 10 diag-off))) "the same for every action")))
+    (if (some #{"--verify"} opts)
+      (if (= text (slurp out))
+        (println (str "   " out ": as recorded"))
+        (do (println (str "   " out ": DIFFERS (bin/java-check verdicts writes it)")) (shutdown-agents) (System/exit 1)))
+      (do (spit out text) (println (str "   written " out))))))
+
 (defn -main [cmd & args]
   (case cmd
+    "verdicts" (apply verdicts args)
+    "rejudge-records" (apply rejudge-records args)
     "scan" (apply scan args)
     "rename" (apply rename args)
     "gather" (apply gather args)

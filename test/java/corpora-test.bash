@@ -15,7 +15,7 @@ root=$t/root; mkdir -p "$root/test"
 # what --judge reads (the gate-tests step declares them): the script and its libraries, java.check, the ref, the records,
 # the classes and the controls
 mkdir -p "$root/bin" "$root/test/java"; cp "$src/bin/java-check" "$root/bin/"; cp -r "$src/bin/lib" "$root/bin/lib"
-for f in check.ae ref-jdk26.edn corpora.edn controls.edn divergences.edn levels-known.edn check-interp.edn; do cp "$src/test/java/$f" "$root/test/java/"; done
+for f in check.ae ref-jdk26.edn corpora.edn controls.edn verdicts.edn divergences.edn levels-known.edn check-interp.edn; do cp "$src/test/java/$f" "$root/test/java/"; done
 export JAVA_CHECK_WORK=$t/work
 n=0 bad=0
 ok() { n=$((n + 1)); echo "ok   $*"; }
