@@ -1,0 +1,430 @@
+;; Ported from OCaml 5.5.0 (the release tarball, SHA-256 fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba):
+;; stdlib/camlinternalFormat.ml's format parser (fmt_ebb_of_string in its legacy behaviour, fmtty_of_fmt,
+;; concat_fmtty, the char sets) and typing/typecore.ml's type_format (the format as a Parsetree of
+;; CamlinternalFormatBasics' constructors), whose notices follow (LICENSE.md, "The OCaml Core System"):
+;;
+;;                                 OCaml
+;;
+;;                          Benoit Vaugon, ENSTA
+;;
+;;   Copyright 2014 Institut National de Recherche en Informatique et
+;;     en Automatique.
+;;
+;;   All rights reserved.  This file is distributed under the terms of
+;;   the GNU Lesser General Public License version 2.1, with the
+;;   special exception on linking described in the file LICENSE.
+
+(ns arbace.repr.ocaml.typer.fmt
+  "Printf's formats (doc/ocaml/TYPER.md): a string literal expected to be a format6 parsed as CamlinternalFormat
+  parses it, then given back as the Parsetree of CamlinternalFormatBasics' constructors that Typecore types in its
+  place (type_format). A format is a vector [ctor arg...]: constructors by name, a side :Left :Right :Zeros, an
+  option [:None] [:Some n], a float conversion [:fconv flag kind]."
+  (:require [arbace.string :as str]))
+
+(set! *warn-on-reflection* false)
+
+(defn- fail [msg] (throw (ex-info msg {:ocaml-type-error msg})))
+
+;; ---------------------------------------------------------------------------------------------
+;; fmtty_of_fmt and concat_fmtty
+
+(defn concat-fmtty [a b]
+  (if (= :End_of_fmtty (a 0)) b
+      (case (a 0)
+        :Format_arg_ty [:Format_arg_ty (a 1) (concat-fmtty (a 2) b)]
+        :Format_subst_ty [:Format_subst_ty (a 1) (a 2) (concat-fmtty (a 3) b)]
+        [(a 0) (concat-fmtty (a 1) b)])))
+
+(declare fmtty-of-fmt)
+
+(defn- pad-ty [pad t] (if (= :Arg_padding (pad 0)) [:Int_ty t] t))
+(defn- prec-ty [prec t] (if (= :Arg_precision (prec 0)) [:Int_ty t] t))
+
+(defn fmtty-of-fmt [f]
+  (case (f 0)
+    (:String :Caml_string) (pad-ty (f 1) [:String_ty (fmtty-of-fmt (f 2))])
+    :Int (pad-ty (f 2) (prec-ty (f 3) [:Int_ty (fmtty-of-fmt (f 4))]))
+    :Int32 (pad-ty (f 2) (prec-ty (f 3) [:Int32_ty (fmtty-of-fmt (f 4))]))
+    :Nativeint (pad-ty (f 2) (prec-ty (f 3) [:Nativeint_ty (fmtty-of-fmt (f 4))]))
+    :Int64 (pad-ty (f 2) (prec-ty (f 3) [:Int64_ty (fmtty-of-fmt (f 4))]))
+    :Float (pad-ty (f 2) (prec-ty (f 3) [:Float_ty (fmtty-of-fmt (f 4))]))
+    (:Char :Caml_char :Scan_next_char) [:Char_ty (fmtty-of-fmt (f 1))]
+    :Bool (pad-ty (f 1) [:Bool_ty (fmtty-of-fmt (f 2))])
+    :Alpha [:Alpha_ty (fmtty-of-fmt (f 1))]
+    :Theta [:Theta_ty (fmtty-of-fmt (f 1))]
+    :Reader [:Reader_ty (fmtty-of-fmt (f 1))]
+    :Format_arg [:Format_arg_ty (f 2) (fmtty-of-fmt (f 3))]
+    :Format_subst [:Format_subst_ty (f 2) (f 2) (fmtty-of-fmt (f 3))]
+    :Flush (fmtty-of-fmt (f 1))
+    (:String_literal :Char_literal :Formatting_lit) (fmtty-of-fmt (f 2))
+    :Scan_char_set [:String_ty (fmtty-of-fmt (f 3))]
+    :Scan_get_counter [:Int_ty (fmtty-of-fmt (f 2))]
+    :Ignored_param (let [ign (f 1) rest (f 2)]
+                     (case (ign 0)
+                       :Ignored_format_subst (concat-fmtty (ign 2) (fmtty-of-fmt rest))
+                       :Ignored_reader [:Ignored_reader_ty (fmtty-of-fmt rest)]
+                       (fmtty-of-fmt rest)))
+    :Formatting_gen (concat-fmtty (fmtty-of-fmt ((second (f 1)) 1)) (fmtty-of-fmt (f 2)))
+    :End_of_format [:End_of_fmtty]))
+
+;; ---------------------------------------------------------------------------------------------
+;; fmt_ebb_of_string (legacy behaviour: Clflags.strict_formats false)
+
+(defn- char-set-string [^bytes cs] (String. cs "ISO-8859-1"))
+
+(defn parse-format
+  "CamlinternalFormat.fmt_ebb_of_string: the format of str"
+  [^String fs]
+  (let [legacy true
+        n (count fs)
+        ch (fn [i] (.charAt fs (int i)))
+        invalid (fn [i msg] (fail (str "invalid format " (pr-str fs) ": at character number " i ", " msg)))
+        unexpected-end (fn [i] (invalid i "unexpected end of format"))
+        incompatible (fn [pct i symb opt]
+                       (fail (str "invalid format " (pr-str fs) ": at character number " pct ", " opt
+                                  " is incompatible with '" symb "' in sub-format " (pr-str (subs fs pct i)))))]
+    (letfn [(parse [beg end] (parse-literal beg beg end))
+            (add-literal [lit-start i f]
+              (case (- i lit-start)
+                0 f
+                1 [:Char_literal (ch lit-start) f]
+                [:String_literal (subs fs lit-start i) f]))
+            (parse-literal [lit-start i end]
+              (if (= i end)
+                (add-literal lit-start i [:End_of_format])
+                (case (ch i)
+                  \% (add-literal lit-start i (parse-format* i end))
+                  \@ (add-literal lit-start i (parse-after-at (inc i) end))
+                  (recur lit-start (inc i) end))))
+            (parse-format* [pct end] (parse-ign pct (inc pct) end))
+            (parse-ign [pct i end]
+              (when (= i end) (unexpected-end end))
+              (if (= \_ (ch i)) (parse-flags pct (inc i) end true) (parse-flags pct i end false)))
+            (parse-flags [pct i end ign]
+              (loop [i i zero false minus false plus false hash false space false]
+                (when (= i end) (unexpected-end end))
+                (case (ch i)
+                  \0 (recur (inc i) true minus plus hash space)
+                  \- (recur (inc i) zero true plus hash space)
+                  \+ (recur (inc i) zero minus true hash space)
+                  \# (recur (inc i) zero minus plus true space)
+                  \space (recur (inc i) zero minus plus hash true)
+                  (parse-padding pct i end zero minus plus hash space ign))))
+            (parse-positive [i end acc]
+              (when (= i end) (unexpected-end end))
+              (let [c (ch i)]
+                (if (Character/isDigit c) (recur (inc i) end (+ (* acc 10) (- (int c) 48))) [i acc])))
+            (parse-padding [pct i end zero minus plus hash space ign]
+              (when (= i end) (unexpected-end end))
+              (let [padty (cond (and (not zero) (not minus)) :Right (and (not zero) minus) :Left
+                                (and zero (not minus)) :Zeros :else :Left)
+                    c (ch i)]
+                (cond
+                  (Character/isDigit c) (let [[ni w] (parse-positive i end 0)]
+                                          (parse-after-padding pct ni end minus plus hash space ign [:Lit_padding padty w]))
+                  (= c \*) (parse-after-padding pct (inc i) end minus plus hash space ign [:Arg_padding padty])
+                  :else (case padty
+                          :Left (parse-after-padding pct i end minus plus hash space ign [:No_padding])
+                          :Zeros (parse-after-padding pct i end minus plus hash space ign [:Lit_padding :Right 0])
+                          :Right (parse-after-padding pct i end minus plus hash space ign [:No_padding])))))
+            (parse-after-padding [pct i end minus plus hash space ign pad]
+              (when (= i end) (unexpected-end end))
+              (if (= \. (ch i))
+                (parse-precision pct (inc i) end minus plus hash space ign pad)
+                (parse-conversion pct (inc i) end plus hash space ign pad [:No_precision] pad (ch i))))
+            (parse-precision [pct i end minus plus hash space ign pad]
+              (when (= i end) (unexpected-end end))
+              (let [lit (fn [minus i] (let [[ni p] (parse-positive i end 0)]
+                                        (parse-after-precision pct ni end minus plus hash space ign pad [:Lit_precision p])))
+                    c (ch i)]
+                (cond
+                  (Character/isDigit c) (lit minus i)
+                  (#{\+ \-} c) (lit (or minus (= c \-)) (inc i))
+                  (= c \*) (parse-after-precision pct (inc i) end minus plus hash space ign pad [:Arg_precision])
+                  :else (parse-after-precision pct i end minus plus hash space ign pad [:Lit_precision 0]))))
+            (parse-after-precision [pct i end minus plus hash space ign pad prec]
+              (when (= i end) (unexpected-end end))
+              (let [conv (fn [padprec] (parse-conversion pct (inc i) end plus hash space ign pad prec padprec (ch i)))]
+                (if (= :No_padding (pad 0))
+                  (case (prec 0)
+                    :No_precision (conv [:No_padding])
+                    :Lit_precision (conv [:Lit_padding (if minus :Left :Right) (prec 1)])
+                    :Arg_precision (conv [:Arg_padding (if minus :Left :Right)]))
+                  (conv pad))))
+            (int-conv [pct i plus hash space symb]
+              (cond
+                (and (not plus) (not hash) (not space) (= symb \d)) :Int_d
+                (and (not plus) (not hash) (not space) (= symb \i)) :Int_i
+                (and (not plus) (not hash) space (= symb \d)) :Int_sd
+                (and (not plus) (not hash) space (= symb \i)) :Int_si
+                (and plus (not hash) (not space) (= symb \d)) :Int_pd
+                (and plus (not hash) (not space) (= symb \i)) :Int_pi
+                (and (not plus) (not hash) (not space) (= symb \x)) :Int_x
+                (and (not plus) (not hash) (not space) (= symb \X)) :Int_X
+                (and (not plus) hash (not space) (= symb \x)) :Int_Cx
+                (and (not plus) hash (not space) (= symb \X)) :Int_CX
+                (and (not plus) (not hash) (not space) (= symb \o)) :Int_o
+                (and (not plus) hash (not space) (= symb \o)) :Int_Co
+                (and (not plus) (not hash) (not space) (= symb \u)) :Int_u
+                (and (not plus) hash (not space) (= symb \d)) :Int_Cd
+                (and (not plus) hash (not space) (= symb \i)) :Int_Ci
+                (and (not plus) hash (not space) (= symb \u)) :Int_Cu
+                (and hash (= symb \x)) :Int_Cx
+                (and hash (= symb \X)) :Int_CX
+                (and hash (= symb \o)) :Int_Co
+                (and hash (#{\d \i \u} symb)) (int-conv pct i plus false space symb)
+                (and plus space) (int-conv pct i plus hash false symb)
+                (and (not plus) space) (int-conv pct i plus hash false symb)
+                (and plus (not space)) (int-conv pct i false hash space symb)
+                :else (invalid i (str "invalid conversion \"%" symb "\""))))
+            (float-conv [plus hash space symb]
+              [:fconv (cond (and (not plus) (not space)) :Float_flag_ (and (not plus) space) :Float_flag_s :else :Float_flag_p)
+               (case symb \f :Float_f \e :Float_e \E :Float_E \g :Float_g \G :Float_G \h :Float_h \H :Float_H
+                     \F (if hash :Float_CF :Float_F))])
+            (parse-conversion [pct i end plus hash space ign pad prec padprec symb]
+              (let [int-pad (fn [] (if (= :No_precision (prec 0))
+                                     pad
+                                     (case (pad 0)
+                                       :No_padding pad
+                                       :Lit_padding (if (= :Zeros (pad 1)) [:Lit_padding :Right (pad 2)] pad)
+                                       :Arg_padding (if (= :Zeros (pad 1)) [:Arg_padding :Right] pad))))
+                    no-0 (fn [p] (case (p 0)
+                                   :Lit_padding (if (= :Zeros (p 1)) [:Lit_padding :Right (p 2)] p)
+                                   :Arg_padding (if (= :Zeros (p 1)) [:Arg_padding :Right] p)
+                                   p))
+                    opt-of-pad (fn [c p] (case (p 0)
+                                           :No_padding [:None]
+                                           :Lit_padding [:Some (p 2)]
+                                           :Arg_padding (incompatible pct i c "'*'")))
+                    prec-opt (fn [] (case (prec 0) :No_precision [:None] :Lit_precision [:Some (prec 1)]
+                                          :Arg_precision (incompatible pct i \_ "'*'")))
+                    rest (fn [] (parse i end))]
+                (case symb
+                  \, (rest)
+                  \c (let [r (rest) po (opt-of-pad \c pad)]
+                       (if (= [:Some 0] po)
+                         (if ign [:Ignored_param [:Ignored_scan_next_char] r] [:Scan_next_char r])
+                         (if ign [:Ignored_param [:Ignored_char] r] [:Char r])))
+                  \C (let [r (rest)] (if ign [:Ignored_param [:Ignored_caml_char] r] [:Caml_char r]))
+                  (\s \S) (let [p (no-0 padprec) r (rest)]
+                            (if ign
+                              [:Ignored_param [(if (= symb \s) :Ignored_string :Ignored_caml_string) (opt-of-pad \_ padprec)] r]
+                              [(if (= symb \s) :String :Caml_string) p r]))
+                  (\d \i \x \X \o \u) (let [ic (int-conv pct i plus hash space symb) r (rest)]
+                                        (if ign [:Ignored_param [:Ignored_int ic (opt-of-pad \_ pad)] r]
+                                            [:Int ic (int-pad) prec r]))
+                  \N (let [r (rest)] (if ign [:Ignored_param [:Ignored_scan_get_counter :Token_counter] r] [:Scan_get_counter :Token_counter r]))
+                  (\l \n \L)
+                  (if (or (= i end) (not (#{\d \i \x \X \o \u} (ch i))))
+                    (let [r (rest) cnt (case symb \l :Line_counter \n :Char_counter \L :Token_counter)]
+                      (if ign [:Ignored_param [:Ignored_scan_get_counter cnt] r] [:Scan_get_counter cnt r]))
+                    (let [ic (int-conv pct (inc i) plus hash space (ch i)) r (parse (inc i) end)
+                          [c ic-ign] (case symb \l [:Int32 :Ignored_int32] \n [:Nativeint :Ignored_nativeint] \L [:Int64 :Ignored_int64])]
+                      (if ign [:Ignored_param [ic-ign ic (opt-of-pad \_ pad)] r] [c ic (int-pad) prec r])))
+                  (\f \e \E \g \G \F \h \H) (let [fc (float-conv plus hash space symb) r (rest)]
+                                              (if ign [:Ignored_param [:Ignored_float (opt-of-pad \_ pad) (prec-opt)] r]
+                                                  [:Float fc pad prec r]))
+                  (\b \B) (let [p (no-0 padprec) r (rest)]
+                            (if ign [:Ignored_param [:Ignored_bool (opt-of-pad \_ padprec)] r] [:Bool p r]))
+                  \a [:Alpha (rest)]
+                  \t [:Theta (rest)]
+                  \r (let [r (rest)] (if ign [:Ignored_param [:Ignored_reader] r] [:Reader r]))
+                  \! [:Flush (rest)]
+                  (\% \@) [:Char_literal symb (rest)]
+                  \{ (let [se (search-end i end \}) sub (parse i se) r (parse (+ se 2) end) ty (fmtty-of-fmt sub)]
+                       (if ign [:Ignored_param [:Ignored_format_arg (opt-of-pad \_ pad) ty] r] [:Format_arg (opt-of-pad \{ pad) ty r]))
+                  \( (let [se (search-end i end \)) r (parse (+ se 2) end) sub (parse i se) ty (fmtty-of-fmt sub)]
+                       (if ign [:Ignored_param [:Ignored_format_subst (opt-of-pad \_ pad) ty] r] [:Format_subst (opt-of-pad \( pad) ty r]))
+                  \[ (let [[ni cs] (parse-char-set i end) r (parse ni end)]
+                       (if ign [:Ignored_param [:Ignored_scan_char_set (opt-of-pad \_ pad) cs] r] [:Scan_char_set (opt-of-pad \[ pad) cs r]))
+                  (invalid (dec i) (str "invalid conversion \"%" symb "\"")))))
+            (parse-after-at [i end]
+              (if (= i end)
+                [:Char_literal \@ [:End_of_format]]
+                (let [c (ch i) r (fn [] (parse (inc i) end))]
+                  (case c
+                    \[ (parse-tag false (inc i) end)
+                    \] [:Formatting_lit [:Close_box] (r)]
+                    \{ (parse-tag true (inc i) end)
+                    \} [:Formatting_lit [:Close_tag] (r)]
+                    \, [:Formatting_lit [:Break "@," 0 0] (r)]
+                    \space [:Formatting_lit [:Break "@ " 1 0] (r)]
+                    \; (parse-good-break (inc i) end)
+                    \? [:Formatting_lit [:FFlush] (r)]
+                    \newline [:Formatting_lit [:Force_newline] (r)]
+                    \. [:Formatting_lit [:Flush_newline] (r)]
+                    \< (parse-magic-size (inc i) end)
+                    \@ [:Formatting_lit [:Escaped_at] (r)]
+                    \% (if (and (< (inc i) end) (= \% (ch (inc i))))
+                         [:Formatting_lit [:Escaped_percent] (parse (+ i 2) end)]
+                         [:Char_literal \@ (parse i end)])
+                    [:Formatting_lit [:Scan_indic c] (r)]))))
+            (parse-tag [open-tag i end]
+              (let [gen (fn [sub r] [:Formatting_gen [(if open-tag :Open_tag :Open_box) sub] r])
+                    j (when (and (< i end) (= \< (ch i))) (let [x (.indexOf fs ">" (int (inc i)))] (when (and (>= x 0) (< x end)) x)))]
+                (if j
+                  (let [r (parse (inc j) end) sub (parse i (inc j))]
+                    (gen [:Format sub (subs fs i (inc j))] r))
+                  (gen [:Format [:End_of_format] ""] (parse i end)))))
+            (parse-spaces [i end]
+              (when (= i end) (unexpected-end end))
+              (if (= \space (ch i)) (recur (inc i) end) i))
+            (parse-integer [i end]
+              (when (= i end) (unexpected-end end))
+              (let [c (ch i)]
+                (cond (Character/isDigit c) (parse-positive i end 0)
+                      (= c \-) (do (when (= (inc i) end) (unexpected-end end))
+                                   (if (Character/isDigit (ch (inc i)))
+                                     (let [[ni v] (parse-positive (inc i) end 0)] [ni (- v)])
+                                     (fail "digit expected")))
+                      :else (fail "integer expected"))))
+            (parse-good-break [i end]
+              (let [[ni lit]
+                    (or (try
+                          (when (and (< i end) (= \< (ch i)))
+                            (let [i1 (parse-spaces (inc i) end)]
+                              (when (or (Character/isDigit (ch i1)) (= \- (ch i1)))
+                                (let [[i2 w] (parse-integer i1 end) i3 (parse-spaces i2 end)]
+                                  (cond
+                                    (= \> (ch i3)) [(inc i3) [:Break (subs fs (- i 2) (inc i3)) w 0]]
+                                    (or (Character/isDigit (ch i3)) (= \- (ch i3)))
+                                    (let [[i4 o] (parse-integer i3 end) i5 (parse-spaces i4 end)]
+                                      (when (= \> (ch i5)) [(inc i5) [:Break (subs fs (- i 2) (inc i5)) w o]])))))))
+                          (catch Exception _ nil))
+                        [i [:Break "@;" 1 0]])]
+                [:Formatting_lit lit (parse ni end)]))
+            (parse-magic-size [i end]
+              (if-let [[ni lit] (try
+                                  (let [i1 (parse-spaces i end)]
+                                    (when (or (Character/isDigit (ch i1)) (= \- (ch i1)))
+                                      (let [[i2 sz] (parse-integer i1 end) i3 (parse-spaces i2 end)]
+                                        (when (= \> (ch i3)) [(inc i3) [:Magic_size (subs fs (- i 2) (inc i3)) sz]]))))
+                                  (catch Exception _ nil))]
+                [:Formatting_lit lit (parse ni end)]
+                [:Formatting_lit [:Scan_indic \<] (parse i end)]))
+            (parse-char-set [i end]
+              (when (= i end) (unexpected-end end))
+              (let [cs (byte-array 32)
+                    add (fn [c] (let [x (int c) b (bit-shift-right x 3)]
+                                  (aset-byte cs b (unchecked-byte (bit-or (aget cs b) (bit-shift-left 1 (bit-and x 7)))))))
+                    add-range (fn [c c'] (doseq [x (range (int c) (inc (int c')))] (add (char x))))
+                    [i rev] (if (= \^ (ch i)) [(inc i) true] [i false])]
+                (letfn [(after-char [i c]
+                          (when (= i end) (unexpected-end end))
+                          (let [d (ch i)]
+                            (cond
+                              (= d \]) (do (add c) (inc i))
+                              (= d \-) (after-minus (inc i) c)
+                              (and (#{\% \@} d) (= c \%)) (do (add d) (content (inc i)))
+                              :else (do (when (= c \%) (fail "'%' alone is not accepted in character sets"))
+                                        (add c) (after-char (inc i) d)))))
+                        (content [i]
+                          (when (= i end) (unexpected-end end))
+                          (let [d (ch i)]
+                            (cond (= d \]) (inc i)
+                                  (= d \-) (do (add \-) (content (inc i)))
+                                  :else (after-char (inc i) d))))
+                        (after-minus [i c]
+                          (when (= i end) (unexpected-end end))
+                          (let [d (ch i)]
+                            (cond (= d \]) (do (add c) (add \-) (inc i))
+                                  (= d \%) (do (when (= (inc i) end) (unexpected-end end))
+                                               (let [d' (ch (inc i))]
+                                                 (if (#{\% \@} d') (do (add-range c d') (content (+ i 2)))
+                                                     (fail "'%' alone is not accepted in character sets"))))
+                                  :else (do (add-range c d) (content (inc i))))))]
+                  (when (= i end) (unexpected-end end))
+                  (let [ni (after-char (inc i) (ch i))]
+                    (when rev (dotimes [k 32] (aset-byte cs k (unchecked-byte (bit-xor (aget cs k) 0xFF)))))
+                    [ni (char-set-string cs)]))))
+            (search-end [i end c]
+              (when (= i end) (fail (str "invalid format " (pr-str fs) ": unclosed sub-format")))
+              (if (= \% (ch i))
+                (do (when (= (inc i) end) (unexpected-end end))
+                    (let [d (ch (inc i))]
+                      (cond
+                        (= d c) i
+                        (= d \_) (do (when (= (+ i 2) end) (unexpected-end end))
+                                     (case (ch (+ i 2))
+                                       \{ (recur (+ (search-end (+ i 3) end \}) 2) end c)
+                                       \( (recur (+ (search-end (+ i 3) end \)) 2) end c)
+                                       (recur (+ i 3) end c)))
+                        (= d \{) (recur (+ (search-end (+ i 2) end \}) 2) end c)
+                        (= d \() (recur (+ (search-end (+ i 2) end \)) 2) end c)
+                        (#{\} \)} d) (fail "unmatched sub-format end")
+                        :else (recur (+ i 2) end c))))
+                (recur (inc i) end c)))]
+      (parse 0 n))))
+
+;; ---------------------------------------------------------------------------------------------
+;; type_format: the format as the Parsetree of CamlinternalFormatBasics' constructors
+
+(defn- mk [d] {:pexp_desc d})
+(defn- mk-constr [n args]
+  (mk [:Pexp_construct {:txt [:Ldot {:txt [:Lident "CamlinternalFormatBasics"]} {:txt (name n)}]}
+       (case (count args) 0 nil 1 (first args) (mk [:Pexp_tuple (mapv (fn [e] [nil e]) args)]))]))
+(defn- mk-int [n] (mk [:Pexp_constant {:pconst_desc [:Pconst_integer (str n) nil]}]))
+(defn- mk-string [s] (mk [:Pexp_constant {:pconst_desc [:Pconst_string s nil nil]}]))
+(defn- mk-char [c] (mk [:Pexp_constant {:pconst_desc [:Pconst_char c]}]))
+(defn- mk-opt [o] (if (= :None (o 0))
+                    (mk [:Pexp_construct {:txt [:Lident "None"]} nil])
+                    (mk [:Pexp_construct {:txt [:Lident "Some"]} (mk-int (o 1))])))
+
+(declare mk-fmt mk-fmtty)
+
+(defn- mk-pad [p] (case (p 0)
+                    :No_padding (mk-constr :No_padding [])
+                    :Lit_padding (mk-constr :Lit_padding [(mk-constr (p 1) []) (mk-int (p 2))])
+                    :Arg_padding (mk-constr :Arg_padding [(mk-constr (p 1) [])])))
+(defn- mk-prec [p] (case (p 0)
+                     :No_precision (mk-constr :No_precision [])
+                     :Lit_precision (mk-constr :Lit_precision [(mk-int (p 1))])
+                     :Arg_precision (mk-constr :Arg_precision [])))
+
+(defn mk-fmtty [t]
+  (case (t 0)
+    :End_of_fmtty (mk-constr :End_of_fmtty [])
+    :Format_arg_ty (mk-constr :Format_arg_ty [(mk-fmtty (t 1)) (mk-fmtty (t 2))])
+    :Format_subst_ty (mk-constr :Format_subst_ty [(mk-fmtty (t 1)) (mk-fmtty (t 2)) (mk-fmtty (t 3))])
+    (mk-constr (t 0) [(mk-fmtty (t 1))])))
+
+(defn- mk-ignored [g]
+  (case (g 0)
+    (:Ignored_char :Ignored_caml_char :Ignored_reader :Ignored_scan_next_char) (mk-constr (g 0) [])
+    (:Ignored_string :Ignored_caml_string :Ignored_bool) (mk-constr (g 0) [(mk-opt (g 1))])
+    (:Ignored_int :Ignored_int32 :Ignored_nativeint :Ignored_int64) (mk-constr (g 0) [(mk-constr (g 1) []) (mk-opt (g 2))])
+    :Ignored_float (mk-constr (g 0) [(mk-opt (g 1)) (mk-opt (g 2))])
+    (:Ignored_format_arg :Ignored_format_subst) (mk-constr (g 0) [(mk-opt (g 1)) (mk-fmtty (g 2))])
+    :Ignored_scan_char_set (mk-constr (g 0) [(mk-opt (g 1)) (mk-string (g 2))])
+    :Ignored_scan_get_counter (mk-constr (g 0) [(mk-constr (g 1) [])])))
+
+(defn- mk-fmting-lit [l]
+  (case (l 0)
+    :Break (mk-constr :Break [(mk-string (l 1)) (mk-int (l 2)) (mk-int (l 3))])
+    :Magic_size (mk-constr :Magic_size [(mk-string (l 1)) (mk-int (l 2))])
+    :Scan_indic (mk-constr :Scan_indic [(mk-char (l 1))])
+    (mk-constr (l 0) [])))
+
+(defn mk-fmt [f]
+  (case (f 0)
+    (:Char :Caml_char :Flush :Alpha :Theta :Reader :Scan_next_char) (mk-constr (f 0) [(mk-fmt (f 1))])
+    (:String :Caml_string :Bool) (mk-constr (f 0) [(mk-pad (f 1)) (mk-fmt (f 2))])
+    (:Int :Int32 :Nativeint :Int64) (mk-constr (f 0) [(mk-constr (f 1) []) (mk-pad (f 2)) (mk-prec (f 3)) (mk-fmt (f 4))])
+    :Float (let [[_ flag kind] (f 1)]
+             (mk-constr :Float [(mk [:Pexp_tuple [[nil (mk-constr flag [])] [nil (mk-constr kind [])]]])
+                                (mk-pad (f 2)) (mk-prec (f 3)) (mk-fmt (f 4))]))
+    :String_literal (mk-constr :String_literal [(mk-string (f 1)) (mk-fmt (f 2))])
+    :Char_literal (mk-constr :Char_literal [(mk-char (f 1)) (mk-fmt (f 2))])
+    (:Format_arg :Format_subst) (mk-constr (f 0) [(mk-opt (f 1)) (mk-fmtty (f 2)) (mk-fmt (f 3))])
+    :Formatting_lit (mk-constr :Formatting_lit [(mk-fmting-lit (f 1)) (mk-fmt (f 2))])
+    :Formatting_gen (let [[k [_ sub s]] (f 1)]
+                      (mk-constr :Formatting_gen [(mk-constr k [(mk-constr :Format [(mk-fmt sub) (mk-string s)])]) (mk-fmt (f 2))]))
+    :Scan_char_set (mk-constr :Scan_char_set [(mk-opt (f 1)) (mk-string (f 2)) (mk-fmt (f 3))])
+    :Scan_get_counter (mk-constr :Scan_get_counter [(mk-constr (f 1) []) (mk-fmt (f 2))])
+    :Ignored_param (mk-constr :Ignored_param [(mk-ignored (f 1)) (mk-fmt (f 2))])
+    :End_of_format (mk-constr :End_of_format [])))
+
+(defn type-format
+  "Typecore.type_format: the Parsetree that a format string literal is typed as"
+  [s]
+  (mk-constr :Format [(mk-fmt (parse-format s)) (mk-string s)]))

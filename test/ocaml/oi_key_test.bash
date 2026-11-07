@@ -25,8 +25,10 @@ sed 's/0\.17\.0/0.17.1/' "$root/.tmp/repr-ocaml/opam-pins.txt" > "$root/.tmp/w/o
 cmp -s "$root/.tmp/repr-ocaml/opam-pins.txt" "$root/.tmp/w/opam-pins.changed" && { echo "FAIL the changed pins equal the pins (the edit did not apply)"; exit 1; }
 chk "the program corpus's key does not hold the opam pins (a pin bump must not rerun its rows)" same "$(OI_OPAM_PINS=$root/.tmp/w/opam-pins.changed bin/oi key)"
 chk "the opam pins are in the suite's key" differ "$(OI_OPAM_PINS=$root/.tmp/w/opam-pins.changed bin/oi suite key)" "$(bin/oi suite key)"
+# (ocdump's key is the oracle path's part: OI_CHECK_DEFAULT=ocdump; the native path's key has none, TY24 (a))
 for v in OI_OPAM_PINS OI_OCDUMP_KEY; do
-  OI_TIMEOUT=30 env "$v=$root/.tmp/w/missing" bin/oi suite key > "$root/.tmp/w/key.out" 2> "$root/.tmp/w/key.err"; st=$?
+  dflt=native; [ "$v" = OI_OCDUMP_KEY ] && dflt=ocdump
+  OI_CHECK_DEFAULT=$dflt OI_TIMEOUT=30 env "$v=$root/.tmp/w/missing" bin/oi suite key > "$root/.tmp/w/key.out" 2> "$root/.tmp/w/key.err"; st=$?
   if [ "$st" != 0 ] && [ ! -s "$root/.tmp/w/key.out" ] && grep -q '^oi: key: ' "$root/.tmp/w/key.err"; then echo "ok   a missing part ($v) fails the key"; else echo "FAIL a missing part ($v): exit $st, key $(cat "$root/.tmp/w/key.out")"; bad=1; fi
 done
 

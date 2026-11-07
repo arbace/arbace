@@ -1,0 +1,1318 @@
+;; Ported from OCaml 5.5.0 (the release tarball https://caml.inria.fr/pub/distrib/ocaml-5.5/ocaml-5.5.0.tar.xz, SHA-256
+;; fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba): the parts of typing/types.ml, typing/btype.ml,
+;; typing/ctype.ml (levels, unification, generalization, instances, expansion of abbreviations), typing/predef.ml and
+;; typing/printtyp.ml (with out_type.ml and oprint.ml) that the core language needs (doc/ocaml/TYPER.md), whose notices
+;; follow (LICENSE.md, "The OCaml Core System"):
+;;
+;;                                 OCaml
+;;
+;;  Xavier Leroy and Jerome Vouillon, projet Cristal, INRIA Rocquencourt
+;;
+;;   Copyright 1996 Institut National de Recherche en Informatique et
+;;     en Automatique.
+;;
+;;   All rights reserved.  This file is distributed under the terms of
+;;   the GNU Lesser General Public License version 2.1, with the
+;;   special exception on linking described in the file LICENSE.
+
+(ns arbace.repr.ocaml.typer.types
+  "OCaml's types as Arbace data (doc/ocaml/TYPER.md, T1): a type node is an atom holding {:desc :level :id}, its
+  desc a vector ([:Tvar name] [:Tarrow label t1 t2] [:Ttuple [[label t]...]] [:Tconstr path [t...]] [:Tlink t]),
+  a label the Parsetree's ([:Nolabel] [:Labelled s] [:Optional s]); identifiers {:name :stamp} (:global for a
+  compilation unit, :predef for Predef's), paths [:Pident id] or [:Pdot path name]. Levels, unification with
+  the occur check and level updates, generalization, instances and the expansion of abbreviations follow
+  Ctype; the printer follows Printtyp (variables named in order of appearance, the opened Stdlib's prefix
+  left out)."
+  (:require [arbace.string :as str]))
+
+(set! *warn-on-reflection* false)
+
+;; ---------------------------------------------------------------------------------------------
+;; Identifiers and paths (typing/ident.ml, typing/path.ml)
+
+(def stamp (atom 1000))
+(declare abbrev-memo)
+(def scope-windows
+  "Identifiers' scopes (Ident.create_scoped): [first-stamp last-stamp-or-nil scope] of each local structure item of an
+  expression (`let module`, a local open), the identifiers stamped in it scoped there" (atom []))
+(defn reset-stamps! [] (reset! stamp 1000) (reset! abbrev-memo {}) (reset! scope-windows []))
+(def unit-stamp-base "The stamps of the identifiers of the stdlib's interfaces, apart from a program's" 100000000)
+(def unit-stamp (atom unit-stamp-base))
+(defmacro with-unit-stamps
+  "body with identifiers stamped in the units' range (the units' interfaces outlive a program's stamps)"
+  [& body]
+  `(let [saved# @stamp]
+     (reset! stamp @unit-stamp)
+     (try (do ~@body) (finally (reset! unit-stamp @stamp) (reset! stamp saved#)))))
+(defn ident-create [name] {:name name :stamp (swap! stamp inc)})
+(defn ident-rename [id] (ident-create (:name id)))
+(defn ident-global [name] {:name name :stamp 0 :global true})
+(defn ident-predef [name n] {:name name :stamp n :predef true})
+(defn unique-name
+  "Ident.unique_name"
+  [id] (str (:name id) "_" (:stamp id)))
+(defn ident-print
+  "Ident.print as -dlambda shows a global (M!) or a predef identifier (Name/stamp!)"
+  [id]
+  (cond (:global id) (str (:name id) "!")
+        (:predef id) (str (:name id) "/" (:stamp id) "!")
+        :else (unique-name id)))
+
+(defn pident [id] [:Pident id])
+(defn pdot [p s] [:Pdot p s])
+(defn path-last [p] (case (p 0) :Pident (:name (p 1)) :Pdot (p 2)))
+(defn path-head [p] (case (p 0) :Pident (p 1) (:Pdot :Papply) (recur (p 1))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Type nodes and levels (types.ml, btype.ml)
+
+(def generic-level 100000000)
+(def current-level (atom 0))
+(def ^:private ids (atom 0))
+
+(defn newty2 [lv d] (atom {:desc d :level lv :id (swap! ids inc)}))
+(defn newty [d] (newty2 @current-level d))
+(defn newgenty [d] (newty2 generic-level d))
+(defn newvar ([] (newty [:Tvar nil])) ([name] (newty [:Tvar name])))
+(defn newgenvar [] (newgenty [:Tvar nil]))
+
+(defn repr [t] (let [d (:desc @t)] (if (= :Tlink (d 0)) (recur (d 1)) t)))
+(defn desc [t] (:desc @(repr t)))
+(defn level [t] (:level @(repr t)))
+(def ^:dynamic *trail* "Btype's snapshots: an atom of [cell old-value] while a unification may be backtracked" nil)
+(defn log-change! [a] (when *trail* (swap! *trail* conj [a @a])))
+(defmacro try-unify
+  "Btype.snapshot and backtrack around body: true when body ran, else (an exception of unification) every change it
+  made undone and false"
+  [& body]
+  `(let [trail# (atom ()) outer# *trail*]
+     (try (binding [*trail* trail#] ~@body)
+          (when outer# (swap! outer# #(concat @trail# %)))
+          true
+          (catch arbace.lang.ExceptionInfo e#
+            (if (:unify (ex-data e#))
+              (do (doseq [[a# v#] @trail#] (reset! a# v#)) false)
+              (throw e#))))))
+(defn set-level! [t l] (log-change! t) (swap! t assoc :level l))
+(defn link!
+  "Btype.link_type: a variable's name passed to the unnamed variable it is linked to"
+  [t to]
+  (let [d (:desc @t) to' (let [x (:desc @to)] (if (= :Tlink (x 0)) nil x))]
+    (when (and (= :Tvar (d 0)) (d 1) to' (= :Tvar (to' 0)) (nil? (to' 1)))
+      (log-change! to) (swap! to assoc :desc [:Tvar (d 1)])))
+  (log-change! t) (swap! t assoc :desc [:Tlink to]))
+(defn tvar? [t] (= :Tvar ((desc t) 0)))
+;; ---------------------------------------------------------------------------------------------
+;; Rows of polymorphic variants (types.ml's row_desc and row_field, btype.ml): [:Tvariant row], row {:fields [[label
+;;   field]...] :more t :closed bool :fixed nil-or-explanation :name nil-or-[path args]}; a field [:RFpresent t-or-nil]
+;;   [:RFabsent] or [:RFeither {:no-arg :arg-type [t...] :matched :ext atom}], the ext a cell (nil: RFnone) that
+;;   unification links to another field; a static row's more is [:Tnil]
+
+(defn create-row [fields more closed fixed name]
+  {:fields (vec fields) :more more :closed (boolean closed) :fixed fixed :name name})
+
+(defn rf-present [t] [:RFpresent t])
+(def rf-absent [:RFabsent])
+(defn row-field-ext
+  "Types.row_field_ext: the unlinked cell at the end of an RFeither's chain"
+  [f]
+  (when-not (= :RFeither (f 0)) (throw (ex-info "Types.row_field_ext" {})))
+  (let [e (:ext (f 1))] (if-let [v @e] (recur v) e)))
+(defn rf-either
+  "Types.rf_either: tl the argument types; use-ext-of a field whose cell it shares"
+  [tl no-arg matched & [use-ext-of]]
+  [:RFeither {:no-arg (boolean no-arg) :arg-type (vec tl) :matched (boolean matched)
+              :ext (if use-ext-of (row-field-ext use-ext-of) (atom nil))}])
+(defn rf-either-of [t] (if t (rf-either [t] false false) (rf-either [] true false)))
+
+(defn- row-field-repr-aux [tl f]
+  (case (f 0)
+    :RFeither (let [m (f 1) v @(:ext m)]
+                (if (nil? v) [:RFeither (assoc m :arg-type (into (vec tl) (:arg-type m)))] (recur (into (vec tl) (:arg-type m)) v)))
+    :RFpresent (if (and (f 1) (seq tl)) [:RFpresent (first tl)] f)
+    f))
+
+(defn field-view
+  "Types.row_field_repr: [:Rpresent t-or-nil] [:Reither no-arg tl matched] [:Rabsent]"
+  [f]
+  (let [f (row-field-repr-aux [] f)]
+    (case (f 0)
+      :RFeither (let [m (f 1)] [:Reither (:no-arg m) (:arg-type m) (:matched m)])
+      :RFpresent [:Rpresent (f 1)]
+      :RFabsent [:Rabsent])))
+
+(defn absent? [f] (= :Rabsent ((field-view f) 0)))
+(defn eq-row-field-ext [f1 f2] (identical? (row-field-ext f1) (row-field-ext f2)))
+(declare log-change!)
+(defn link-row-field-ext!
+  "Types.link_row_field_ext: the field inside linked to v"
+  [inside v]
+  (let [e (row-field-ext inside)] (log-change! e) (reset! e v)))
+
+(defn row-fields
+  "Types.row_fields: the fields along the row's chain of more"
+  [row]
+  (let [m (desc (:more row))]
+    (if (= :Tvariant (m 0)) (into (:fields row) (row-fields (m 1))) (:fields row))))
+(defn row-repr-no-fields [row] (let [m (desc (:more row))] (if (= :Tvariant (m 0)) (recur (m 1)) row)))
+(defn row-more [row] (:more (row-repr-no-fields row)))
+(defn row-closed [row] (:closed (row-repr-no-fields row)))
+(defn row-fixed [row] (:fixed (row-repr-no-fields row)))
+(defn row-name [row] (:name (row-repr-no-fields row)))
+(defn row-repr
+  "Types.row_repr: the row with all its fields"
+  [row]
+  (assoc (row-repr-no-fields row) :fields (row-fields row)))
+(defn set-row-name [row name] (assoc (row-repr row) :name name))
+(defn get-row-field
+  "Types.get_row_field: the tag's field, rf-absent when the row has none"
+  [tag row]
+  (or (some (fn [[l f]] (when (= l tag) f)) (row-fields row)) rf-absent))
+
+(defn fixed-explanation
+  "Btype.fixed_explanation: the row's fixed explanation, or a reified row (its more a constructor)"
+  [row]
+  (or (row-fixed row)
+      (let [m (desc (row-more row))] (when (= :Tconstr (m 0)) [:Reified (m 1)]))))
+(defn static-row
+  "Btype.static_row: closed, and no field undecided"
+  [row]
+  (and (row-closed row) (every? (fn [[_ f]] (not= :Reither ((field-view f) 0))) (row-fields row))))
+
+(defn hash-variant
+  "Btype.hash_variant: the tag's hash, 31 bits made signed"
+  [^String s]
+  (let [a (reduce (fn [acc ch] (bit-and (+ (* 223 acc) (long (int ch))) 0x7FFFFFFF)) 0 s)]
+    (if (> a 0x3FFFFFFF) (- a (bit-shift-left 1 31)) a)))
+
+(defn sort-row-fields [fs] (vec (sort-by first fs)))
+
+(defn merge-row-fields
+  "Ctype.merge_row_fields: [only-in-1 only-in-2 [[label f1 f2]...]]"
+  [fi1 fi2]
+  (cond
+    (or (empty? fi1) (empty? fi2)) [fi1 fi2 []]
+    (and (= 1 (count fi1)) (not (some #(= (ffirst fi1) (first %)) fi2))) [fi1 fi2 []]
+    (and (= 1 (count fi2)) (not (some #(= (ffirst fi2) (first %)) fi1))) [fi1 fi2 []]
+    :else
+    (loop [r1 [] r2 [] pairs () a (seq (sort-row-fields fi1)) b (seq (sort-row-fields fi2))]
+      (cond
+        (nil? a) [r1 (into (vec (reverse r2)) b) pairs]
+        (nil? b) [(into (vec (reverse r1)) a) (vec r2) pairs]
+        :else (let [[l1 f1 :as p1] (first a) [l2 f2 :as p2] (first b) c (compare l1 l2)]
+                (cond (zero? c) (recur r1 r2 (cons [l1 f1 f2] pairs) (next a) (next b))
+                      (neg? c) (recur (cons p1 r1) r2 pairs (next a) b)
+                      :else (recur r1 (cons p2 r2) pairs a (next b))))))))
+
+(defn filter-row-fields
+  "Ctype.filter_row_fields: the absent fields dropped, the undecided unmatched ones made absent when erase"
+  [erase fields]
+  (vec (keep (fn [[_ f :as p]]
+               (let [v (field-view f)]
+                 (case (v 0)
+                   :Rabsent nil
+                   :Reither (if (and erase (not (v 3))) (do (link-row-field-ext! f rf-absent) nil) p)
+                   p)))
+             fields)))
+
+(defn row-children
+  "Btype.iter_row and the row's more: the types inside a row"
+  [row]
+  (let [row (row-repr row)
+        ts (mapcat (fn [[_ f]] (let [v (field-view f)]
+                                 (case (v 0) :Rpresent (if (v 1) [(v 1)] []) :Reither (v 2) [])))
+                   (:fields row))]
+    (vec (concat ts (when-let [[_ args] (:name row)] args) [(:more row)]))))
+
+(defn map-row
+  "Ctype.copy_row: the row's types mapped by f, keep sharing the undecided fields' cells, more the new row variable"
+  [f row keep more]
+  (let [row (row-repr row)]
+    (create-row (mapv (fn [[l fi]]
+                        [l (let [v (field-view fi)]
+                             (case (v 0)
+                               :Rpresent (rf-present (some-> (v 1) f))
+                               :Reither (rf-either (mapv f (v 2)) (v 1) (v 3) (when keep fi))
+                               rf-absent))])
+                      (:fields row))
+                more (:closed row) (:fixed row)
+                (when-let [[p args] (:name row)] [p (mapv f args)]))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Objects (types.ml's Tobject, Tfield and field_kind; ctype.ml's flatten_fields, associate_fields, build_fields,
+;;   object_row, opened_object): [:Tobject fields name] (name nil or [path args], the class's #-type), [:Tfield name kind
+;;   t rest], [:Tnil]; a field kind an atom shared by the copies of its field, holding :public, :absent, nil
+;;   (Fprivate, undecided) or the kind it is linked to
+
+(defn field-public [] (atom :public))
+(defn field-private [] (atom nil))
+(defn field-kind-repr
+  "Types.field_kind_repr: :public :absent or :private"
+  [k]
+  (let [v @k] (cond (nil? v) :private (keyword? v) v :else (recur v))))
+(defn- field-kind-cell [k] (let [v @k] (if (or (nil? v) (keyword? v)) k (recur v))))
+(defn link-kind!
+  "Types.link_kind: the undecided kind inside linked to k"
+  [inside k]
+  (let [c (field-kind-cell inside)]
+    (when-not (identical? c (field-kind-cell k))
+      (log-change! c) (reset! c (if (keyword? @(field-kind-cell k)) @(field-kind-cell k) (field-kind-cell k))))))
+
+(defn flatten-fields
+  "Ctype.flatten_fields: [[[name kind t]...] sorted by name, the rest]"
+  [t]
+  (loop [l () t t]
+    (let [d (desc t)]
+      (if (= :Tfield (d 0)) (recur (cons [(d 1) (d 2) (d 3)] l) (d 4)) [(vec (sort-by first l)) (repr t)]))))
+(defn fields-in-order
+  "The fields of an object's chain in its order, and the rest"
+  [t]
+  (loop [l [] t t]
+    (let [d (desc t)]
+      (if (= :Tfield (d 0)) (recur (conj l [(d 1) (d 2) (d 3)]) (d 4)) [l (repr t)]))))
+(defn object-row
+  "Ctype.object_row: the rest of an object's fields"
+  [t]
+  (let [d (desc t)] (case (d 0) :Tobject (recur (d 1)) :Tfield (recur (d 4)) (repr t))))
+(defn opened-object [t] (#{:Tvar :Tunivar} ((desc (object-row t)) 0)))
+
+(defn begin-def [] (swap! current-level inc))
+(defn end-def [] (swap! current-level dec))
+(defmacro with-local-level
+  "Ctype.with_local_level: body at a fresh level"
+  [& body]
+  `(do (begin-def) (try (do ~@body) (finally (end-def)))))
+
+(defn children [d]
+  (case (d 0)
+    :Tvar []
+    :Tarrow [(d 2) (d 3)]
+    :Ttuple (mapv second (d 1))
+    :Tconstr (d 2)
+    :Tpoly (into [(d 1)] (d 2))
+    :Tpackage (mapv second (d 2))
+    ;; OCaml 5.5's dependent arrow (modular explicits): [:Tfunctor label id package-path constraints result]
+    :Tfunctor (conj (mapv second (d 4)) (d 5))
+    :Tvariant (row-children (d 1))
+    :Tobject (into [(d 1)] (second (d 2)))
+    :Tfield [(d 3) (d 4)]
+    []))
+
+(defn map-desc [f d]
+  (case (d 0)
+    :Tvar d
+    :Tarrow [:Tarrow (d 1) (f (d 2)) (f (d 3))]
+    :Ttuple [:Ttuple (mapv (fn [[l t]] [l (f t)]) (d 1))]
+    :Tconstr [:Tconstr (d 1) (mapv f (d 2))]
+    :Tpoly [:Tpoly (f (d 1)) (mapv f (d 2))]
+    :Tpackage [:Tpackage (d 1) (mapv (fn [[n t]] [n (f t)]) (d 2))]
+    :Tfunctor [:Tfunctor (d 1) (d 2) (d 3) (mapv (fn [[n t]] [n (f t)]) (d 4)) (f (d 5))]
+    :Tvariant (let [row (d 1)] [:Tvariant (map-row f row false (f (row-more row)))])
+    :Tobject [:Tobject (f (d 1)) (when-let [[p args] (d 2)] [p (mapv f args)])]
+    :Tfield [:Tfield (d 1) (field-kind-cell (d 2)) (f (d 3)) (f (d 4))]
+    d))
+
+(defn is-optional [l] (= :Optional (l 0)))
+(defn label-name [l] (if (= :Nolabel (l 0)) "" (l 1)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Predef (predef.ml): the stamps are Predef's, in its order of creation
+
+(def predef-type-names ["int" "char" "bytes" "float" "bool" "unit" "exn" "eff" "continuation" "array" "list" "option"
+                        "nativeint" "int32" "int64" "lazy_t" "string" "extension_constructor" "floatarray" "iarray"
+                        "atomic_loc"])
+(def predef-exn-names ["Match_failure" "Out_of_memory" "Invalid_argument" "Failure" "Not_found" "Sys_error"
+                       "End_of_file" "Division_by_zero" "Stack_overflow" "Sys_blocked_io" "Assert_failure"
+                       "Undefined_recursive_module" "Continuation_already_taken"])
+
+(def predef-idents
+  (into {} (map-indexed (fn [i n] [n (ident-predef n (inc i))])
+                        (concat predef-type-names predef-exn-names))))
+
+(defn predef-path [n] (pident (predef-idents n)))
+(def path-int (predef-path "int"))
+(def path-char (predef-path "char"))
+(def path-bytes (predef-path "bytes"))
+(def path-float (predef-path "float"))
+(def path-bool (predef-path "bool"))
+(def path-unit (predef-path "unit"))
+(def path-exn (predef-path "exn"))
+(def path-array (predef-path "array"))
+(def path-list (predef-path "list"))
+(def path-option (predef-path "option"))
+(def path-nativeint (predef-path "nativeint"))
+(def path-int32 (predef-path "int32"))
+(def path-int64 (predef-path "int64"))
+(def path-lazy-t (predef-path "lazy_t"))
+(def path-string (predef-path "string"))
+(def path-floatarray (predef-path "floatarray"))
+(def path-iarray (predef-path "iarray"))
+(def path-match-failure (predef-path "Match_failure"))
+(def path-assert-failure (predef-path "Assert_failure"))
+
+(defn tconstr [p args] (newty [:Tconstr p (vec args)]))
+(defn type-int [] (tconstr path-int []))
+(defn type-char [] (tconstr path-char []))
+(defn type-string [] (tconstr path-string []))
+(defn type-bytes [] (tconstr path-bytes []))
+(defn type-float [] (tconstr path-float []))
+(defn type-bool [] (tconstr path-bool []))
+(defn type-unit [] (tconstr path-unit []))
+(defn type-exn [] (tconstr path-exn []))
+(defn type-list [t] (tconstr path-list [t]))
+(defn type-option [t] (tconstr path-option [t]))
+(defn type-array [t] (tconstr path-array [t]))
+(defn type-int32 [] (tconstr path-int32 []))
+(defn type-int64 [] (tconstr path-int64 []))
+(defn type-nativeint [] (tconstr path-nativeint []))
+
+;; ---------------------------------------------------------------------------------------------
+;; Type declarations: {:path :params [t] :kind [:abstract] | [:variant [cdecl]] | [:record [ldecl] repr] | [:open]
+;;   :manifest t-or-nil :immediate bool :variance [:co|:inv ...]} with descriptions built by `constructors-of` and
+;;   `labels-of` (datarepr.ml)
+
+(defn constructors-of
+  "Datarepr.constructor_descrs: each constructor's description, tags numbered among the constant and the block
+  constructors apart"
+  [path params cdecls]
+  (let [nconst (count (filter #(empty? (:args %)) cdecls))
+        nnon (- (count cdecls) nconst)
+        res (fn [] [:Tconstr path params])]
+    (loop [cs cdecls ic 0 ib 0 acc []]
+      (if (empty? cs)
+        acc
+        (let [c (first cs) const (empty? (:args c))
+              d {:name (:name c) :args (:args c) :arity (count (:args c)) :res-path path :params params
+                 :tag (if const [:Cstr_constant ic] [:Cstr_block ib]) :consts nconst :nonconsts nnon}
+              d (if (:inlined c) (assoc d :inlined true) d)
+              d (if (:res c) (assoc d :res (:res c)) d)
+              d (if (:unboxed c) (assoc d :unboxed true) d)]
+          (recur (rest cs) (if const (inc ic) ic) (if const ib (inc ib)) (conj acc d)))))))
+
+(def record-labels "A record type's path to its labels" (atom {}))
+
+(defn labels-of
+  "Datarepr.label_descrs: positions, the record's representation (all fields float: Record_float)"
+  [path params ldecls repres]
+  (let [all (vec (map-indexed (fn [i l] {:name (:name l) :arg (:type l) :mut (:mut l) :pos i :res-path path
+                                         :params params :repres repres :atomic (:atomic l)})
+                              ldecls))]
+    (let [all1 (mapv #(assoc % :all all) all)]
+      (swap! record-labels assoc path all1)
+      all1)))
+
+(defn label-all
+  "Every label of the label's record type, in order (each with its :all)"
+  [l]
+  (or (get @record-labels (:res-path l)) (:all l)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Copying and substitution (instances)
+
+(defn- copy-with
+  "Copies the generic part of t (Ctype.instance): each generic node once, the variables fresh at the current level;
+  `subst` maps generic parameter nodes (by identity) to the types replacing them"
+  [t memo]
+  (let [t (repr t)]
+    (if-let [c (get @memo t)]
+      c
+      (if (not= generic-level (level t))
+        t
+        (let [d (desc t)
+              rowkey (when (= :Tvariant (d 0)) (let [m (repr (row-more (d 1)))] (when (= :Tvar ((desc m) 0)) [::row m])))]
+          (if-let [c (and rowkey (get @memo rowkey))]
+            c
+            (let [n (newty [:Tvar nil])]
+              (swap! memo assoc t n)
+              (when rowkey (swap! memo assoc rowkey n))
+              (when-not (= :Tvar (d 0))
+                (swap! n assoc :desc
+                       (if (= :Tvariant (d 0))
+                         ;; Ctype.copy: a row variable not generic kept, with the undecided fields' cells
+                         (let [row (d 1) more (repr (row-more row)) keep (not= generic-level (level more))]
+                           [:Tvariant (map-row #(copy-with % memo) row keep (if keep more (copy-with more memo)))])
+                         (map-desc #(copy-with % memo) d))))
+              n)))))))
+
+(defn instance [t] (copy-with t (atom {})))
+(declare subst)
+(defn instance-poly
+  "Ctype.instance_poly: a polytype's body with its universal variables fresh variables"
+  [t]
+  (let [t (repr t) d (desc t)]
+    (if (= :Tpoly (d 0)) (subst (d 2) (vec (repeatedly (count (d 2)) #(newvar))) (d 1)) t)))
+(defn instance-list [ts] (let [m (atom {})] (mapv #(copy-with % m) ts)))
+
+(defn subst
+  "The type t with the parameter nodes params (by identity of their representatives) replaced by args, everything
+  else copied (used to expand abbreviations and to instantiate declarations)"
+  [params args t]
+  (let [m (atom (zipmap (map repr params) args))]
+    (letfn [(go [t]
+              (let [t (repr t)]
+                (if-let [c (get @m t)]
+                  c
+                  (let [d (desc t)]
+                    (if (= :Tvar (d 0))
+                      t
+                      (let [n (newty [:Tvar nil])]
+                        (swap! m assoc t n)
+                        (swap! n assoc :desc (map-desc go d))
+                        n))))))]
+      (go t))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Expansion (the environment's declarations are looked up by a function the env namespace sets)
+
+(def ^:dynamic *find-type* (fn [p] nil))
+
+(def abbrev-memo
+  "Ctype's memorized abbreviations: the expansion of a path applied to the same argument nodes, shared (so that the
+  unification of recursive types through abbreviations ends)" (atom {}))
+
+(defn expand-head-opt
+  "Ctype.expand_head: the type with its head abbreviations expanded; Ctype's memorized abbreviations (a path applied to
+  the same argument nodes expands to one node, a local equation's afresh), a memorized expansion that unification has
+  linked back into the chain expanded afresh"
+  [t]
+  (loop [t (repr t) seen #{}]
+    (let [d (desc t)]
+      (if (= :Tconstr (d 0))
+        (let [decl (*find-type* (d 1))]
+          (if (and decl (:manifest decl))
+            (let [fresh #(subst (:params decl) (d 2) (:manifest decl))
+                  e (if (:local-abstract decl)
+                      (fresh)
+                      (let [k [(d 1) (mapv repr (d 2))]
+                            [e0 d0] (get @abbrev-memo k)
+                            e (when (and e0 (identical? d0 decl)) e0)]
+                        (if (and e (not (seen (repr e))) (not (identical? (repr e) t)))
+                          e
+                          (let [e (fresh)] (swap! abbrev-memo assoc k [e decl]) e))))]
+              (recur (repr e) (conj seen t)))
+            t))
+        t))))
+
+(def expand-head expand-head-opt)
+
+;; ---------------------------------------------------------------------------------------------
+;; Unification (ctype.ml): occur check, level updates, abbreviations expanded on a mismatch
+
+(defn deep-occur
+  "Btype.deep_occur: whether v is a node of t"
+  [v t]
+  (let [v (repr v) seen (atom #{})]
+    (letfn [(go [t] (let [t (repr t)]
+                      (cond (identical? t v) true
+                            (@seen t) false
+                            :else (do (swap! seen conj t) (boolean (some go (children (desc t))))))))]
+      (go t))))
+
+(defn path-mentions?
+  "Whether the path p names the module identifier id"
+  [id p]
+  (case (p 0) :Pident (= (p 1) id) :Pdot (recur id (p 1)) :Papply (or (path-mentions? id (p 1)) (path-mentions? id (p 2)))))
+
+(defn type-mentions?
+  "Whether a path of t names the module identifier id (a dependent arrow's parameter)"
+  [id t]
+  (let [seen (atom #{})]
+    (letfn [(go [t] (let [t (repr t)]
+                      (when-not (@seen t)
+                        (swap! seen conj t)
+                        (let [d (desc t)]
+                          (or (and (#{:Tconstr :Tpackage} (d 0)) (path-mentions? id (d 1)))
+                              (and (= :Tfunctor (d 0)) (path-mentions? id (d 3)))
+                              (some go (children d)))))))]
+      (boolean (go t)))))
+
+(defn subst-module-ident
+  "Ctype.instance_funct ~id_in ~p_out: t copied where a path names the module identifier id, that identifier replaced
+  by the path p (the nodes that mention none shared)"
+  [id p t]
+  (let [sp (fn sp [q] (case (q 0) :Pident (if (= (q 1) id) p q) :Pdot [:Pdot (sp (q 1)) (q 2)] :Papply [:Papply (sp (q 1)) (sp (q 2))]))
+        memo (atom {})]
+    (letfn [(go [t]
+              (let [t (repr t)]
+                (cond
+                  (contains? @memo t) (@memo t)
+                  (not (type-mentions? id t)) t
+                  :else (let [n (newty2 (level t) [:Tvar nil])]
+                          (swap! memo assoc t n)
+                          (swap! n assoc :desc (let [d (map-desc go (desc t))]
+                                                 (case (d 0)
+                                                   :Tconstr (assoc d 1 (sp (d 1)))
+                                                   :Tpackage (assoc d 1 (sp (d 1)))
+                                                   :Tfunctor (assoc d 3 (sp (d 3)))
+                                                   d)))
+                          n))))]
+      (go t))))
+
+(defn- occur [v t]
+  (let [seen (atom #{})]
+    (letfn [(go [t]
+              (let [t (repr t)]
+                (when-not (@seen t)
+                  (swap! seen conj t)
+                  (when (identical? t v) (throw (ex-info "occur check" {:unify :occur})))
+                  ;; Ctype.occur_rec: a cycle through a variant is a recursive type, allowed; one through an
+                  ;; abbreviation retried on its expansion
+                  (let [d (desc t)]
+                    (case (d 0)
+                      (:Tvariant :Tobject) nil
+                      :Tconstr (try (run! go (d 2))
+                                    (catch arbace.lang.ExceptionInfo e
+                                      (let [x (expand-head t)]
+                                        (if (and (:unify (ex-data e)) (not (identical? x t))) (go x) (throw e)))))
+                      (run! go (children d)))))))]
+      (go t))))
+
+(defn ident-scope
+  "Ident.scope of a local identifier stamped in a scope window, the innermost; nil for the others (the outermost)"
+  [id]
+  (when-let [st (:stamp id)]
+    (when (and (not (:global id)) (not (:predef id)) (< st unit-stamp-base))
+      (some (fn [[s0 s1 sc]] (when (and (< s0 st) (or (nil? s1) (<= st s1))) sc)) (rseq @scope-windows)))))
+
+(defmacro with-scope
+  "body with the identifiers it creates scoped at the current level (Ctype.create_scope)"
+  [& body]
+  `(let [i# (count @scope-windows)]
+     (swap! scope-windows conj [@stamp nil @current-level])
+     (try (do ~@body) (finally (swap! scope-windows assoc-in [i# 1] @stamp)))))
+
+(declare expand-head)
+
+(defn update-level
+  "Ctype.update_level: the levels of t's nodes lowered to lv; an abbreviation whose path is scoped deeper than lv
+  replaced by its expansion (linked to it), as a local module's type leaving its scope is"
+  [lv t]
+  (let [t (repr t)]
+    (when (> (level t) lv)
+      (let [d (desc t)
+            sc (when (= :Tconstr (d 0)) (ident-scope (path-head (d 1))))
+            e (when (and sc (< lv sc)) (let [e (repr (expand-head t))] (when-not (identical? e t) e)))]
+        (if e
+          (do (link! t e) (update-level lv e))
+          (do (set-level! t lv)
+              (run! #(update-level lv %) (children d))))))))
+
+(def ^:dynamic *normalize-modtype-path*
+  "Env.normalize_modtype_path: a module type path through module type abbreviations is its definition's (set by the
+  environment)" identity)
+
+(def ^:dynamic *normalize-type-path*
+  "Env.normalize_type_path: a type path through an alias is its target's (set by the environment)" identity)
+
+(def ^:dynamic *classic*
+  "-nolabels (Clflags.classic): labelled and unlabelled arrows unify (but optional ones)" false)
+
+(def ^:dynamic *gadt-equation*
+  "In a GADT pattern: (fn [t1 t2] added?) adds a local equation for a locally abstract type (Ctype's pattern mode)"
+  nil)
+
+(defn unify-error [t1 t2]
+  (when-not (and *gadt-equation* t1 t2 (*gadt-equation* t1 t2))
+    (throw (ex-info "Unify" {:unify :mismatch :t1 t1 :t2 t2}))))
+
+(declare unify unify-row unify-fields associate-fields build-fields)
+
+(defn- unify-list [l1 l2]
+  (when-not (= (count l1) (count l2)) (unify-error nil nil))
+  (dorun (map unify l1 l2)))
+
+(defn- phantom-abbrev?
+  "An abbreviation some of whose parameters its manifest does not mention"
+  [p]
+  (let [decl (*find-type* p)]
+    (when (and decl (:manifest decl) (seq (:params decl)))
+      (let [seen (atom #{}) found (atom #{})]
+        (letfn [(go [t] (let [t (repr t)]
+                          (when-not (@seen t)
+                            (swap! seen conj t)
+                            (swap! found conj t)
+                            (run! go (children (desc t))))))]
+          (go (:manifest decl)))
+        (some #(not (@found (repr %))) (:params decl))))))
+
+(defn unify [t1 t2]
+  (let [t1 (repr t1) t2 (repr t2)]
+    (when-not (identical? t1 t2)
+      (let [d1 (desc t1) d2 (desc t2)]
+        (cond
+          (= :Tvar (d1 0)) (do (occur t1 t2) (update-level (level t1) t2) (link! t1 t2))
+          (= :Tvar (d2 0)) (do (occur t2 t1) (update-level (level t2) t1) (link! t2 t1))
+          (and (= :Tconstr (d1 0) (d2 0)) (or (= (d1 1) (d2 1)) (= (*normalize-type-path* (d1 1)) (*normalize-type-path* (d2 1))))
+               (phantom-abbrev? (d1 1)))
+          ;; Ctype.unify2: the heads expanded, so an abbreviation's parameters its expansion drops stay apart
+          (unify (expand-head t1) (expand-head t2))
+          (and (= :Tconstr (d1 0) (d2 0)) (or (= (d1 1) (d2 1)) (= (*normalize-type-path* (d1 1)) (*normalize-type-path* (d2 1)))))
+          (unify-list (d1 2) (d2 2))
+          ;; Ctype.unify3: an object linked to the abbreviation it is unified with (not to its expansion)
+          (and (= :Tconstr (d1 0)) (identical? (repr (expand-head t1)) t2)) nil
+          (and (= :Tconstr (d2 0)) (identical? (repr (expand-head t2)) t1)) nil
+          (and (= :Tobject (d1 0)) (= :Tconstr (d2 0)) (= :Tobject ((desc (expand-head t2)) 0)))
+          (let [saved @t1 e (expand-head t2)]
+            (link! t1 t2)
+            (try (unify-fields (d1 1) ((desc e) 1)) (catch arbace.lang.ExceptionInfo x (reset! t1 saved) (throw x))))
+          (and (= :Tconstr (d1 0)) (= :Tobject (d2 0)) (= :Tobject ((desc (expand-head t1)) 0)))
+          (let [saved @t2 e (expand-head t1)]
+            (link! t2 t1)
+            (try (unify-fields ((desc e) 1) (d2 1)) (catch arbace.lang.ExceptionInfo x (reset! t2 saved) (throw x))))
+          (= :Tconstr (d1 0)) (let [e (expand-head t1)]
+                                (if (identical? e t1)
+                                  (if (= :Tconstr (d2 0))
+                                    (let [e2 (expand-head t2)] (if (identical? e2 t2) (unify-error t1 t2) (unify t1 e2)))
+                                    (unify-error t1 t2))
+                                  (unify e t2)))
+          (= :Tconstr (d2 0)) (let [e (expand-head t2)] (if (identical? e t2) (unify-error t1 t2) (unify t1 e)))
+          (and (= :Tarrow (d1 0) (d2 0))
+               (or (= (d1 1) (d2 1))
+                   (and *classic* (not (is-optional (d1 1))) (not (is-optional (d2 1))))))
+          (do (unify (d1 2) (d2 2)) (unify (d1 3) (d2 3)))
+          ;; Ctype.compare_package's eq_package_path: the paths equal, or equal once normalized
+          (and (= :Tpackage (d1 0) (d2 0)) (= (map first (d1 2)) (map first (d2 2)))
+               (or (= (d1 1) (d2 1)) (= (*normalize-modtype-path* (d1 1)) (*normalize-modtype-path* (d2 1)))))
+          (unify-list (mapv second (d1 2)) (mapv second (d2 2)))
+          ;; Ctype.unify3's Tfunctor pair: the labels and packages equal, the results with the second's parameter
+          ;; renamed to the first's
+          (and (= :Tfunctor (d1 0) (d2 0)) (= (d1 1) (d2 1)) (= (map first (d1 4)) (map first (d2 4)))
+               (or (= (d1 3) (d2 3)) (= (*normalize-modtype-path* (d1 3)) (*normalize-modtype-path* (d2 3)))))
+          (do (unify-list (mapv second (d1 4)) (mapv second (d2 4)))
+              (unify (d1 5) (subst-module-ident (d2 2) [:Pident (d1 2)] (d2 5))))
+          ;; a Tfunctor against an arrow: equal when its result does not depend on its parameter (the package the
+          ;; arrow's argument)
+          (and (= :Tfunctor (d1 0)) (= :Tarrow (d2 0)) (= (d1 1) (d2 1)) (not (type-mentions? (d1 2) (d1 5))))
+          (do (unify (newty [:Tpackage (d1 3) (d1 4)]) (d2 2)) (unify (d1 5) (d2 3)))
+          (and (= :Tarrow (d1 0)) (= :Tfunctor (d2 0)) (= (d1 1) (d2 1)) (not (type-mentions? (d2 2) (d2 5))))
+          (do (unify (d1 2) (newty [:Tpackage (d2 3) (d2 4)])) (unify (d1 3) (d2 5)))
+          (and (= :Ttuple (d1 0) (d2 0)) (= (map first (d1 1)) (map first (d2 1))))
+          (unify-list (mapv second (d1 1)) (mapv second (d2 1)))
+          ;; Ctype.unify3: the first type linked to the second before their rows are unified (so that a recursive
+          ;; type's unification ends), its description restored on failure
+          (= :Tvariant (d1 0) (d2 0)) (let [saved @t1]
+                                        (link! t1 t2)
+                                        (try (unify-row (d1 1) (d2 1))
+                                             (catch arbace.lang.ExceptionInfo e (reset! t1 saved) (throw e))))
+          (= :Tfield (d1 0) (d2 0)) (unify-fields t1 t2)
+          ;; Ctype.unify's polytypes: their universal variables paired (as fresh variables shared by both bodies)
+          (and (= :Tpoly (d1 0) (d2 0)) (= (count (d1 2)) (count (d2 2))))
+          (let [vs (vec (repeatedly (count (d1 2)) newvar))]
+            (unify (subst (d1 2) vs (d1 1)) (subst (d2 2) vs (d2 1))))
+          (= :Tobject (d1 0) (d2 0)) (let [saved @t1]
+                                       (link! t1 t2)
+                                       (try (unify-fields (d1 1) (d2 1))
+                                            ;; Ctype.unify3: the second's name set to the first's
+                                            (let [d2' (desc t2)]
+                                              (when (= :Tobject (d2' 0))
+                                                (when-not (when-let [[_ [va]] (d2' 2)] (#{:Tvar :Tunivar :Tnil} ((desc va) 0)))
+                                                  (log-change! (repr t2)) (swap! (repr t2) assoc :desc [:Tobject (d2' 1) (d1 2)]))))
+                                            (catch arbace.lang.ExceptionInfo e (reset! t1 saved) (throw e))))
+          (or (and (= :Tfield (d1 0)) (= :Tnil (d2 0))) (and (= :Tnil (d1 0)) (= :Tfield (d2 0))))
+          (let [[f k rem] (if (= :Tfield (d1 0)) [(d1 1) (d1 2) (d1 4)] [(d2 1) (d2 2) (d2 4)])]
+            (cond
+              (and (= :private (field-kind-repr k)) (not= f "*dummy method*"))
+              (do (link-kind! k (atom :absent))
+                  (if (= :Tnil (d2 0)) (unify rem t2) (unify (newgenty [:Tnil]) rem)))
+              ;; an absent field (a hidden dummy method) is no field
+              (= :absent (field-kind-repr k)) (if (= :Tnil (d2 0)) (unify rem t2) (unify (newgenty [:Tnil]) rem))
+              :else (unify-error t1 t2)))
+          (= :Tnil (d1 0) (d2 0)) nil
+          :else (unify-error t1 t2))))))
+
+(defn- make-rowvar
+  "Ctype.make_rowvar"
+  [lv use1 rest1 use2 rest2]
+  (let [set-name (fn [t n] (when (= [:Tvar nil] (desc t)) (log-change! (repr t)) (swap! (repr t) assoc :desc [:Tvar n])))
+        n1 (let [d (desc rest1)] (when (= :Tvar (d 0)) (d 1)))
+        n2 (let [d (desc rest2)] (when (= :Tvar (d 0)) (d 1)))
+        name (cond (and n1 n2) (if (<= (level rest1) (level rest2)) n1 n2)
+                   n1 (do (when use2 (set-name rest2 n1)) n1)
+                   n2 (do (when use1 (set-name rest2 n2)) n2)
+                   :else nil)]
+    (cond use1 rest1 use2 rest2 :else (newty2 lv [:Tvar name]))))
+
+(defn associate-fields
+  "Ctype.associate_fields over sorted field lists: [pairs miss1 miss2]"
+  [f1 f2]
+  (loop [p [] s [] s' [] a (seq f1) b (seq f2)]
+    (cond
+      (nil? b) [p (into s a) s']
+      (nil? a) [p s (into s' b)]
+      :else (let [[n k t] (first a) [n' k' t'] (first b) c (compare n n')]
+              (cond (zero? c) (recur (conj p [n k t k' t']) s s' (next a) (next b))
+                    (neg? c) (recur p (conj s (first a)) s' (next a) b)
+                    :else (recur p s (conj s' (first b)) a (next b)))))))
+
+(defn build-fields
+  "Ctype.build_fields"
+  [lv fields rest]
+  (reduce (fn [r [n k t]] (newty2 lv [:Tfield n k t r])) rest (reverse fields)))
+
+(defn- unify-kind [k1 k2]
+  (let [a (field-kind-repr k1) b (field-kind-repr k2)]
+    (cond (= :private a) (link-kind! k1 k2)
+          (= :private b) (link-kind! k2 k1)
+          (= a b) nil
+          :else (unify-error nil nil))))
+
+(defn unify-fields
+  "Ctype.unify_fields: the fields missing on each side added to the other's rest, the common ones unified"
+  [ty1 ty2]
+  (let [[fields1 rest1] (flatten-fields ty1)
+        [fields2 rest2] (flatten-fields ty2)
+        [pairs miss1 miss2] (associate-fields fields1 fields2)
+        l1 (level ty1) l2 (level ty2)
+        va (make-rowvar (min l1 l2) (empty? miss2) rest1 (empty? miss1) rest2)
+        s1 @rest1 s2 @rest2]
+    (try
+      (unify (build-fields l1 miss1 va) rest2)
+      (unify rest1 (build-fields l2 miss2 va))
+      (doseq [[_ k1 t1 k2 t2] pairs] (unify-kind k1 k2) (unify t1 t2))
+      (catch arbace.lang.ExceptionInfo e (reset! rest1 s1) (reset! rest2 s2) (throw e)))))
+
+(defn- unify-row-field
+  "Ctype.unify_row_field"
+  [fixed1 fixed2 rm1 rm2 l f1 f2]
+  (let [either-fixed (or fixed1 fixed2)
+        if-not-fixed (fn [fx thunk] (if fx (unify-error nil nil) (thunk)))]
+    (when-not (identical? f1 f2)
+      (let [v1 (field-view f1) v2 (field-view f2) k1 (v1 0) k2 (v2 0)]
+        (cond
+          (and (= :Rpresent k1 k2) (v1 1) (v2 1)) (unify (v1 1) (v2 1))
+          (and (= :Rpresent k1 k2) (nil? (v1 1)) (nil? (v2 1))) nil
+          (= :Reither k1 k2)
+          (when-not (eq-row-field-ext f1 f2)
+            (let [[_ c1 tl1 m1] v1 [_ c2 tl2 m2] v2
+                  no-arg (or c1 c2) matched (or m1 m2)]
+              (if (and either-fixed (not no-arg) (= (count tl1) (count tl2)))
+                (let [f (rf-either [] no-arg matched)]
+                  (link-row-field-ext! f1 f) (link-row-field-ext! f2 f)
+                  (dorun (map unify tl1 tl2)))
+                (let [redo (and (or m1 m2 either-fixed)
+                                (let [tl (concat tl1 tl2)]
+                                  (when (seq tl)
+                                    (when no-arg (unify-error nil nil))
+                                    (let [exts [(row-field-ext f1) (row-field-ext f2)]]
+                                      (run! #(unify (first tl) %) (rest tl))
+                                      (boolean (some #(some? @%) exts))))))]
+                  (if redo
+                    (unify-row-field fixed1 fixed2 rm1 rm2 l f1 f2)
+                    (let [remq (fn [tl other] (vec (remove (fn [t] (some #(identical? (repr t) (repr %)) other)) tl)))
+                          tl1' (remq tl1 tl2) tl2' (remq tl2 tl1)]
+                      (run! #(update-level (level rm2) %) tl1')
+                      (run! #(update-level (level rm1) %) tl2')
+                      (let [f1' (rf-either tl2' no-arg matched)
+                            f2' (rf-either tl1' no-arg matched f1')]
+                        (link-row-field-ext! f1 f1') (link-row-field-ext! f2 f2'))))))))
+          (and (= :Reither k1) (not (v1 3)) (= :Rabsent k2)) (if-not-fixed fixed1 #(link-row-field-ext! f1 f2))
+          (and (= :Rabsent k1) (= :Reither k2) (not (v2 3))) (if-not-fixed fixed2 #(link-row-field-ext! f2 f1))
+          (= :Rabsent k1 k2) nil
+          (and (= :Reither k1) (not (v1 1)) (= :Rpresent k2) (v2 1))
+          (if-not-fixed fixed1 #(do (link-row-field-ext! f1 f2) (update-level (level rm1) (v2 1)) (run! (fn [t] (unify t (v2 1))) (v1 2))))
+          (and (= :Rpresent k1) (v1 1) (= :Reither k2) (not (v2 1)))
+          (if-not-fixed fixed2 #(do (link-row-field-ext! f2 f1) (update-level (level rm2) (v1 1)) (run! (fn [t] (unify (v1 1) t)) (v2 2))))
+          (and (= :Reither k1) (v1 1) (empty? (v1 2)) (= :Rpresent k2) (nil? (v2 1))) (if-not-fixed fixed1 #(link-row-field-ext! f1 f2))
+          (and (= :Rpresent k1) (nil? (v1 1)) (= :Reither k2) (v2 1) (empty? (v2 2))) (if-not-fixed fixed2 #(link-row-field-ext! f2 f1))
+          :else (unify-error nil nil))))))
+
+(defn unify-row
+  "Ctype.unify_row: the fields of each row missing in the other added to it (its more linked to a row of them), the
+  common ones unified"
+  [row1 row2]
+  (let [r1row (row-repr row1) r2row (row-repr row2)
+        rm1 (repr (:more r1row)) rm2 (repr (:more r2row))]
+    (when-not (identical? rm1 rm2)
+      (let [[r1 r2 pairs] (merge-row-fields (:fields r1row) (:fields r2row))
+            _ (when (and (seq r1) (seq r2))
+                (let [h (into {} (map (fn [[l _]] [(hash-variant l) l]) r1))]
+                  (doseq [[l _] r2] (when-let [l' (h (hash-variant l))] (when (not= l l') (unify-error nil nil))))))
+            fixed1 (fixed-explanation row1) fixed2 (fixed-explanation row2)
+            more (cond (and fixed1 fixed2) (if (< (level rm2) (level rm1)) rm2 rm1)
+                       fixed1 rm1 fixed2 rm2
+                       :else (newty2 (min (level rm1) (level rm2)) [:Tvar nil]))
+            fixed (or fixed1 fixed2)
+            c1 (:closed r1row) c2 (:closed r2row)
+            closed (or c1 c2)
+            keep (fn [sw] (every? (fn [[_ a b]] (let [[a b] (sw a b)] (or (absent? a) (not (absent? b))))) pairs))
+            empty (fn [fs] (every? (fn [[_ f]] (absent? f)) fs))
+            _ (when (and closed (or (empty r1) c2) (or (empty r2) c1)
+                         (every? (fn [[_ a b]] (or (absent? a) (absent? b))) pairs))
+                (unify-error nil nil))
+            n1 (:name r1row) n2 (:name r2row)
+            name (cond (and n1 (or c1 (empty r2)) (or (not c2) (and (keep (fn [a b] [a b])) (empty r1)))) n1
+                       (and n2 (or c2 (empty r1)) (or (not c1) (and (keep (fn [a b] [b a])) (empty r2)))) n2
+                       :else nil)
+            set-more (fn [row rest]
+                       (let [rest (if closed (filter-row-fields (row-closed row) rest) rest)
+                             fx (fixed-explanation row)]
+                         (if fx
+                           (when (or (and closed (not (row-closed row))) (seq rest)) (unify-error nil nil))
+                           (when (and (seq rest) (row-closed row)) (unify-error nil nil)))
+                         (let [rm (repr (row-more row))]
+                           (if fx
+                             (when-not (identical? (repr more) rm) (if (tvar? rm) (link! rm more) (unify rm more)))
+                             (let [t (newty2 generic-level [:Tvariant (create-row rest more closed fixed name)])]
+                               (update-level (level rm) t)
+                               (link! rm t))))))]
+        (set-more row2 r1)
+        (set-more row1 r2)
+        (doseq [[l a b] pairs] (unify-row-field fixed1 fixed2 rm1 rm2 l a b))
+        (when (static-row row1)
+          (let [rm (repr (row-more row1))] (when (tvar? rm) (link! rm (newty2 (level rm) [:Tnil])))))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Coercions (Ctype.build_subtype, enlarge_type)
+
+(defn- expand-abbrev-once [t]
+  (let [d (desc t) decl (*find-type* (d 1))] (subst (:params decl) (d 2) (:manifest decl))))
+
+(defn- build-subtype
+  "Ctype.build_subtype without objects: [supertype change], change 0 Unchanged, 1 Equiv, 2 Changed"
+  [visited posi level t]
+  (let [t (repr t) d (desc t)
+        pred-expand (fn [n] (if (and (even? n) (pos? n)) (dec n) n))
+        pred-enlarge (fn [n] (if (odd? n) (dec n) n))]
+    (case (d 0)
+      :Tarrow (if (visited t)
+                [t 0]
+                (let [v (conj visited t)
+                      [t1 c1] (build-subtype v (not posi) level (d 2))
+                      [t2 c2] (build-subtype v posi level (d 3))
+                      c (max c1 c2)]
+                  (if (pos? c) [(newty [:Tarrow (d 1) t1 t2]) c] [t 0])))
+      :Ttuple (if (visited t)
+                [t 0]
+                (let [v (conj visited t)
+                      rs (mapv (fn [[_ x]] (build-subtype v posi level x)) (d 1))
+                      c (reduce max 0 (map second rs))]
+                  (if (pos? c) [(newty [:Ttuple (mapv (fn [[l _] [x _]] [l x]) (d 1) rs)]) c] [t 0])))
+      :Tconstr (let [decl (*find-type* (d 1))]
+                 (cond
+                   ;; a class's abbreviation: its #-type, named when its methods are unchanged
+                   (and (pos? level) posi decl (:hash decl)
+                        (let [e (desc (expand-head t))] (and (= :Tobject (e 0)) (not (opened-object (e 1))))))
+                   (let [{hp :params hm :manifest} (:hash decl)
+                         ty (repr (subst hp (d 2) hm))
+                         [_ ty1 [p tl1]] (desc ty)]
+                     (swap! ty assoc :desc [:Tvar nil])
+                     (let [[ty1' c] (build-subtype #{t} posi (pred-enlarge (pred-expand level)) ty1)
+                           nm (when-not (> c 1) [p tl1])
+                           t'' (newty [:Tobject ty1' nm])]
+                       (swap! ty assoc :desc [:Tlink t])
+                       [t'' 2]))
+                   (and (pos? level) decl (:manifest decl))
+                   (let [[t' c] (build-subtype visited posi (pred-expand level) (expand-abbrev-once t))]
+                     (if (pos? c) [t' c] [t 0]))
+                   (or (visited t) (nil? decl)) [t 0]
+                   :else
+                   (let [v (conj visited t)
+                         rs (mapv (fn [var a] (if (= var :co) (build-subtype v posi level a) [a 0]))
+                                  (or (:variance decl) (repeat :inv)) (d 2))
+                         c (reduce max 0 (map second rs))]
+                     (if (pos? c) [(newty [:Tconstr (d 1) (mapv first rs)]) c] [t 0]))))
+      :Tvariant (let [row (d 1)]
+                  (if (or (visited t) (not (static-row row)))
+                    [t 0]
+                    (let [level' (pred-enlarge level)
+                          v (if (< level' level) #{t} (conj visited t))
+                          fs (mapv (fn [[l f :as orig]]
+                                     (let [fv (field-view f)]
+                                       (if-let [x (fv 1)]
+                                         (let [[x' c] (build-subtype v posi level' x)]
+                                           [[l (if (and posi (pos? level)) (rf-either-of x') (rf-present x'))] c])
+                                         (if posi [[l (rf-either-of nil)] 0] [orig 0]))))
+                                   (filter-row-fields false (row-fields row)))
+                          c (reduce max 0 (map second fs))]
+                      ;; the row's name: OCaml's is lost (on its levels' update below the type's scope)
+                      [(newty [:Tvariant (create-row (mapv first fs) (newvar) posi nil nil)]) 2])))
+      :Tobject (if (or (visited t) (opened-object (d 1)))
+                 [t 0]
+                 (let [level' (pred-enlarge level)
+                       v (if (< level' level) #{t} (conj visited t))
+                       [f' c] (build-subtype v posi level' (d 1))]
+                   (if (pos? c) [(newty [:Tobject f' nil]) c] [t 0])))
+      :Tfield (let [[t1 c1] (build-subtype visited posi level (d 3))
+                    [t2 c2] (build-subtype visited posi level (d 4))
+                    c (max c1 c2)]
+                (if (pos? c) [(newty [:Tfield (d 1) (field-public) t1 t2]) c] [t 0]))
+      :Tnil (if posi [(newvar) 2] [t 0])
+      [t 0])))
+
+(defn enlarge-type
+  "Ctype.enlarge_type: the supertypes of t made flexible (two expansions)"
+  [t]
+  (first (build-subtype #{} true 4 t)))
+
+(defn- subtype-error [] (throw (ex-info "Subtype" {:subtype true})))
+
+(declare unify)
+
+(defn subtype
+  "Ctype.subtype without objects, functors and universal variables: the constraints making t1 a subtype of t2, as a
+  function that enforces them (unifications); throws {:subtype true} when t1 cannot be a subtype of t2"
+  [t1 t2]
+  (let [seen (atom #{})]
+    (letfn [(sub [t1 t2 cs]
+              (let [t1 (repr t1) t2 (repr t2)]
+                (if (or (identical? t1 t2) (@seen [t1 t2]))
+                  cs
+                  (do
+                    (swap! seen conj [t1 t2])
+                    (let [d1 (desc t1) d2 (desc t2)
+                          abbrev? (fn [d] (and (= :Tconstr (d 0)) (:manifest (*find-type* (d 1)))))
+                          same-path? (fn [] (or (= (d1 1) (d2 1)) (= (*normalize-type-path* (d1 1)) (*normalize-type-path* (d2 1)))))]
+                      (cond
+                        (or (= :Tvar (d1 0)) (= :Tvar (d2 0))) (conj cs [t1 t2])
+                        (and (= :Tarrow (d1 0) (d2 0))
+                             (or (= (d1 1) (d2 1)) (and *classic* (not (is-optional (d1 1))) (not (is-optional (d2 1))))))
+                        (sub (d1 3) (d2 3) (sub (d2 2) (d1 2) cs))
+                        (= :Ttuple (d1 0) (d2 0))
+                        (do (when-not (and (= (count (d1 1)) (count (d2 1))) (= (map first (d1 1)) (map first (d2 1))))
+                              (subtype-error))
+                            (reduce (fn [cs [[_ a] [_ b]]] (sub a b cs)) cs (map vector (d1 1) (d2 1))))
+                        (and (= :Tconstr (d1 0) (d2 0)) (empty? (d1 2)) (empty? (d2 2)) (same-path?)) cs
+                        ;; Ctype's memorized abbreviations: a recursive abbreviation expands to the same node
+                        (abbrev? d1) (sub (expand-head t1) t2 cs)
+                        (abbrev? d2) (sub t1 (expand-head t2) cs)
+                        (and (= :Tconstr (d1 0) (d2 0)) (same-path?))
+                        (if-let [decl (*find-type* (d1 1))]
+                          (reduce (fn [cs [v a b]]
+                                    (case v
+                                      :co (sub a b cs)
+                                      (conj cs [(newty2 (level a) [:Ttuple [[nil a]]]) (newty2 (level b) [:Ttuple [[nil b]]])])))
+                                  cs (map vector (or (:variance decl) (repeat :inv)) (d1 2) (d2 2)))
+                          (conj cs [t1 t2]))
+                        (= :Tvariant (d1 0) (d2 0))
+                        (or (sub-row (d1 1) (d2 1) cs) (conj cs [t1 t2]))
+                        (= :Tobject (d1 0) (d2 0))
+                        (if (and (tvar? (object-row (d1 1))) (tvar? (object-row (d2 1))))
+                          (conj cs [t1 t2])
+                          (sub-fields (d1 1) (d2 1) cs))
+                        :else (conj cs [t1 t2])))))))
+            (sub-fields [ty1 ty2 cs]
+              ;; Ctype.subtype_fields
+              (let [[f1 rest1] (flatten-fields ty1) [f2 rest2] (flatten-fields ty2)
+                    [pairs miss1 miss2] (associate-fields f1 f2)
+                    cs (cond (= :Tnil ((desc rest2) 0)) cs
+                             (empty? miss1) (sub rest1 rest2 cs)
+                             :else (conj cs [(build-fields (level ty1) miss1 rest1) rest2]))
+                    cs (if (empty? miss2) cs (conj cs [rest1 (build-fields (level ty2) miss2 (newvar))]))]
+                (reduce (fn [cs [_ _ a _ b]] (sub a b cs)) cs pairs)))
+            (sub-row [row1 row2 cs]
+              ;; Ctype.subtype_row: nil for its Exit
+              (let [r1row (row-repr row1) r2row (row-repr row2)
+                    [r1 r2 pairs] (merge-row-fields (:fields r1row) (:fields r2row))
+                    r1 (if (:closed r2row) (filter-row-fields false r1) r1)
+                    m1 (desc (:more r1row)) m2 (desc (:more r2row))
+                    plain #{:Tvar :Tconstr :Tnil}]
+                (cond
+                  (and (= :Tconstr (m1 0) (m2 0)) (= (m1 1) (m2 1))) (sub (:more r1row) (:more r2row) cs)
+                  (and (plain (m1 0)) (plain (m2 0)) (:closed r1row) (empty? r1))
+                  (reduce (fn [cs [_ f1 f2]]
+                            (if (nil? cs)
+                              cs
+                              (let [v1 (field-view f1) v2 (field-view f2)]
+                                (cond
+                                  (and (or (and (= :Rpresent (v1 0)) (nil? (v1 1))) (and (= :Reither (v1 0)) (v1 1)))
+                                       (= :Rpresent (v2 0)) (nil? (v2 1))) cs
+                                  (and (= :Rpresent (v1 0) (v2 0)) (v1 1) (v2 1)) (sub (v1 1) (v2 1) cs)
+                                  (and (= :Reither (v1 0)) (not (v1 1)) (seq (v1 2)) (= :Rpresent (v2 0)) (v2 1))
+                                  (sub (first (v1 2)) (v2 1) cs)
+                                  (= :Rabsent (v1 0)) cs
+                                  (and (= :Rpresent (v1 0) (v2 0)) (not= (nil? (v1 1)) (nil? (v2 1)))) (subtype-error)
+                                  :else nil))))
+                          cs pairs)
+                  :else nil)))]
+      (let [cs (sub t1 t2 [])]
+        (fn [] (doseq [[a b] cs]
+                 (try (unify a b)
+                      (catch arbace.lang.ExceptionInfo e (if (:unify (ex-data e)) (subtype-error) (throw e))))))))))
+
+(defn free-vars?
+  "Ctype.closed_type_expr's negation: some variable (a row's too) in t"
+  [t]
+  (let [seen (atom #{})]
+    (letfn [(go [t] (let [t (repr t)]
+                      (when-not (@seen t)
+                        (swap! seen conj t)
+                        (or (tvar? t) (some go (children (desc t)))))))]
+      (boolean (go t)))))
+
+(defn generalizable?
+  "Ctype.generalizable: some node of t above level lv"
+  [lv t]
+  (let [seen (atom #{})]
+    (letfn [(go [t] (let [t (repr t)]
+                      (when-not (@seen t)
+                        (swap! seen conj t)
+                        (or (> (level t) lv) (some go (children (desc t)))))))]
+      (boolean (go t)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Generalization (Ctype.generalize, and the relaxed value restriction's lower_contravariant)
+
+(defn generalize [t]
+  (let [t (repr t)]
+    (when (and (> (level t) @current-level) (not= (level t) generic-level))
+      (set-level! t generic-level)
+      (run! generalize (children (desc t))))))
+
+(defn lower-contravariant
+  "Ctype.lower_contravariant: the variables at contravariant or invariant positions lowered to the current level, so
+  that the relaxed value restriction generalizes only the covariant ones; a declaration's :variance gives its
+  parameters' (:co or :inv; an abstract type's are invariant)"
+  [t]
+  (let [lv @current-level
+        visited (atom #{})]
+    (letfn [(go [co t]
+              (let [t (repr t) d (desc t)]
+                ;; each node once with each variance (Ctype's visited table)
+                (when (and (> (level t) lv) (not (@visited [t co])))
+                  (swap! visited conj [t co])
+                  (if-not co
+                    (update-level lv t)
+                    (case (d 0)
+                      :Tarrow (do (go false (d 2)) (go co (d 3)))
+                      :Ttuple (run! #(go co (second %)) (d 1))
+                      :Tconstr (let [decl (*find-type* (d 1))]
+                                 (if (:manifest decl)
+                                   (go co (expand-head t))
+                                   (let [vs (or (:variance decl) (repeat :inv))]
+                                     (dorun (map (fn [v a] (go (and co (= v :co)) a)) vs (d 2))))))
+                      (:Tvariant :Tobject :Tfield) (run! #(go co %) (children d))
+                      nil)))))]
+      (go true t))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Immediacy and the classification of types (typeopt.ml)
+
+(defn immediate?
+  "Ctype.immediacy: an int, a char, or a variant whose constructors are all constant"
+  [t]
+  (let [t (expand-head t) d (desc t)]
+    (case (d 0)
+      :Tconstr (let [decl (*find-type* (d 1))]
+                 (boolean (:immediate decl)))
+      ;; a closed row whose tags have no argument
+      :Tvariant (let [row (d 1)]
+                  (and (row-closed row)
+                       (not (some (fn [[_ f]] (let [v (field-view f)]
+                                                (or (and (= :Rpresent (v 0)) (v 1)) (and (= :Reither (v 0)) (not (v 1))))))
+                                  (row-fields row)))))
+      false)))
+
+(declare value-kind*)
+
+(defn value-kind
+  "Typeopt.value_kind as -dlambda prints it: \"[int]\", \"[float]\", \"[int32]\"... or \"\" (Ctype.none's, nil, too)"
+  [t]
+  (if (nil? t) "" (value-kind* t)))
+
+(defn value-kind*
+  [t]
+  (let [t (expand-head t) d (desc t)]
+    (cond
+      (immediate? t) "[int]"
+      (not= :Tconstr (d 0)) ""
+      (= (d 1) path-float) "[float]"
+      (= (d 1) path-int32) "[int32]"
+      (= (d 1) path-int64) "[int64]"
+      (= (d 1) path-nativeint) "[nativeint]"
+      ;; Typeopt.value_kind of a variant with no constructors (`type empty = |`): every constructor constant
+      (let [decl (*find-type* (d 1))] (and decl (= [:variant []] (some-> (:kind decl) (update 1 vec))))) "[int]"
+      :else "")))
+
+(defn maybe-pointer [t] (if (immediate? t) :immediate :pointer))
+
+(defn classify
+  "Typeopt.classify: :int :float :lazy :addr :any"
+  [t]
+  (let [t (expand-head t) d (desc t)]
+    (cond
+      (immediate? t) :int
+      (= :Tvar (d 0)) :any
+      (= :Tconstr (d 0))
+      (let [p (d 1)]
+        (cond (= p path-float) :float
+              (= p path-lazy-t) :lazy
+              (#{path-string path-bytes path-int32 path-int64 path-nativeint path-array path-floatarray} p) :addr
+              :else (let [decl (*find-type* p)]
+                      (if (and decl (#{:variant :record :open} ((:kind decl) 0))) :addr :any))))
+      :else :addr)))
+
+(defn array-kind
+  "Typeopt.array_type_kind: \"gen\" \"addr\" \"int\" \"float\""
+  [t]
+  (let [t (expand-head t) d (desc t)]
+    (if (and (= :Tconstr (d 0)) (#{path-array path-iarray} (d 1)))
+      (case (classify (first (d 2))) :any "gen" :float "float" (:addr :lazy) "addr" :int "int")
+      (if (and (= :Tconstr (d 0)) (= (d 1) path-floatarray)) "float" "gen"))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The printer (printtyp.ml, out_type.ml, oprint.ml)
+
+(def ^:dynamic *path-name*
+  "The printed name of a type path (Printtyp's shortest path through the opened Stdlib), set by the environment"
+  (fn [p] (path-last p)))
+
+(def ^:private weak-counter (atom 0))
+(def ^:private weak-names (atom {}))
+
+(defn- letter-of-int [i] (str (char (+ 97 (mod i 26))) (let [n (quot i 26)] (if (zero? n) "" n))))
+
+(defn nameable-row
+  "Out_type.nameable_row: a row printed by its name"
+  [row]
+  (and (row-name row)
+       (every? (fn [[_ f]] (let [v (field-view f)]
+                             (or (not= :Reither (v 0))
+                                 (and (row-closed row) (if (v 1) (empty? (v 2)) (= 1 (count (v 2))))))))
+               (row-fields row))))
+
+(defn object-print-name
+  "Ctype.normalize_type's object names: an object's name kept for printing, nil when its arguments contain the object
+  or its row is neither a variable nor closed"
+  [t]
+  (let [t (repr t) d (desc t)]
+    (when-let [[_ [v & args] :as nm] (d 2)]
+      (let [seen (atom #{})
+            occ (fn occ [x] (let [x (repr x)]
+                              (cond (identical? x t) true (@seen x) false
+                                    :else (do (swap! seen conj x) (some occ (children (desc x)))))))]
+        (when (and (not (some occ args)) (#{:Tvar :Tunivar :Tnil} ((desc v) 0))) nm)))))
+
+(defn printer-children
+  "Out_type.printer_iter_type_expr: the parts of a type its printer prints (a row's name's arguments, or its fields'
+  types, never its more)"
+  [t]
+  (let [d (desc t)]
+    (if (= :Tvariant (d 0))
+      (let [row (d 1)]
+        (if (nameable-row row)
+          (second (row-name row))
+          ;; in the printed order (Ctype.normalize_type sorts the fields)
+          (vec (mapcat (fn [[_ f]] (let [v (field-view f)]
+                                     (case (v 0) :Rpresent (if (v 1) [(v 1)] []) :Reither (v 2) [])))
+                       (sort-row-fields (row-fields row))))))
+      (if (= :Tobject (d 0))
+        (if-let [[_ args] (object-print-name t)]
+          (vec (rest args))
+          (vec (keep (fn [[_ k t]] (when (= :public (field-kind-repr k)) t)) (first (flatten-fields (d 1))))))
+        (if (= :Tpoly (d 0)) (into (vec (d 2)) [(d 1)]) (children d))))))
+
+(defn type-proxy
+  "Btype.proxy: an open row's more stands for the row"
+  [t]
+  (let [t (repr t) d (desc t)]
+    (cond (and (= :Tvariant (d 0)) (not (static-row (d 1)))) (repr (row-more (d 1)))
+          (= :Tobject (d 0)) (let [r (object-row t)] (if (= :Tnil ((desc r) 0)) t r))
+          :else t)))
+
+(defn- mark-loops
+  "Out_type.mark_loops (with alias_nongen_row for a type scheme): the proxies printed with an alias, an open row met
+  twice or a weak one"
+  [ts]
+  (let [aliased (atom #{}) objects (atom #{})]
+    (letfn [(go [visited t]
+              (let [t (repr t) px (type-proxy t) d (desc t)]
+                (when (and (#{:Tvariant :Tobject} (d 0)) (not= px t) (tvar? px) (not= generic-level (level px)))
+                  (swap! aliased conj px))
+                (if (and (visited px) (not (#{:Tvar :Tpoly} (d 0))))
+                  (swap! aliased conj px)
+                  (let [visited (conj visited px)]
+                    (case (d 0)
+                      :Tvariant (if (@objects px)
+                                  (swap! aliased conj px)
+                                  (do (when-not (static-row (d 1)) (swap! objects conj px))
+                                      (run! #(go visited %) (printer-children t))))
+                      :Tobject (if (@objects px)
+                                 (swap! aliased conj px)
+                                 (do (when (opened-object t) (swap! objects conj px))
+                                     (run! #(go visited %) (printer-children t))))
+                      (run! #(go visited %) (printer-children t)))))))]
+      (run! #(go #{} %) ts))
+    @aliased))
+
+(defn name-vars
+  "Out_type's Variable_names: the variables of ts in order of appearance, a named one by its name (suffixed when
+  taken), the other generic ones 'a, 'b... skipping the names in use, the others '_weakN; an aliased row's proxy
+  named where the row is first printed (the map's ::aliased, ::printed the proxies already printed)"
+  [ts & [extra-aliased]]
+  (let [order (atom []) seen (atom #{})
+        aliased (into (mark-loops ts) extra-aliased)]
+    (letfn [(go [t] (let [t (repr t) px (type-proxy t)]
+                      (if (and (aliased px) (not (tvar? t)))
+                        (when-not (@seen px)
+                          (swap! seen conj px)
+                          (swap! order conj px)
+                          (run! go (printer-children t)))
+                        (when-not (@seen t)
+                          (swap! seen conj t)
+                          (if (or (tvar? t) (= :Tunivar ((desc t) 0))) (swap! order conj t) (run! go (printer-children t)))))))]
+      (run! go ts))
+    (let [uvar? (fn [v] (#{:Tvar :Tunivar} ((desc v) 0)))
+          named (set (keep #(when (uvar? %) ((desc %) 1)) @order))
+          counter (atom 0)]
+      (loop [vs @order m {} used #{}]
+        (if (empty? vs)
+          (assoc m ::aliased aliased ::printed (atom #{}))
+          (let [v (first vs) nm (when (uvar? v) ((desc v) 1))]
+            (cond
+              (and (tvar? v) (not= generic-level (level v)))
+              (let [n (or (get @weak-names v) (let [n (str "'_weak" (swap! weak-counter inc))] (swap! weak-names assoc v n) n))]
+                (recur (rest vs) (assoc m v n) used))
+              nm (let [n (if (used nm) (first (remove used (map #(str nm %) (iterate inc 1)))) nm)]
+                   (recur (rest vs) (assoc m v (str "'" n)) (conj used n)))
+              :else (let [n (loop [] (let [n (letter-of-int @counter)] (swap! counter inc) (if (or (named n) (used n)) (recur) n)))]
+                      (recur (rest vs) (assoc m v (str "'" n)) (conj used n))))))))))
+
+(defn type-text [names t prec]
+  ;; prec: 0 top, 1 arrow argument / tuple component, 2 constructor argument
+  (let [t (repr t) d (desc t)
+        paren (fn [p s] (if (> prec p) (str "(" s ")") s))]
+    (case (d 0)
+      :Tvar (get names t "'_")
+      :Tarrow (let [l (d 1)
+                    lab (case (l 0) :Nolabel "" :Labelled (str (l 1) ":") :Optional (str "?" (l 1) ":"))
+                    arg (if (is-optional l)
+                          (let [a (expand-head (d 2)) ad (desc a)]
+                            (if (and (= :Tconstr (ad 0)) (= (ad 1) path-option)) (first (ad 2)) (d 2)))
+                          (d 2))]
+                (paren 0 (str lab (type-text names arg 1) " -> " (type-text names (d 3) 0))))
+      :Ttuple (paren 1 (str/join " * " (map (fn [[l x]] (str (when l (str l ":")) (type-text names x 2))) (d 1))))
+      :Tconstr (let [args (d 2) n (*path-name* (d 1))]
+                 (case (count args)
+                   0 n
+                   1 (str (type-text names (first args) 2) " " n)
+                   (str "(" (str/join ", " (map #(type-text names % 0) args)) ") " n)))
+      :Tvariant (let [row (row-repr (d 1))
+                      fs (sort-row-fields (remove (fn [[_ f]] (absent? f)) (:fields row)))
+                      present (filter (fn [[_ f]] (= :Rpresent ((field-view f) 0))) fs)]
+                  (str "[" (if (:closed row) (if (= (count present) (count fs)) " " "< ") (if (= (count present) (count fs)) "> " "? "))
+                       (str/join " | " (map (fn [[l f]] (let [v (field-view f)
+                                                              ts (case (v 0) :Rpresent (if (v 1) [(v 1)] []) :Reither (v 2) [])]
+                                                          (str "`" l (when (seq ts) (str " of " (str/join " & " (map #(type-text names % 1) ts)))))))
+                                            fs))
+                       (when (not= (count present) (count fs)) (str " > " (str/join " " (map #(str "`" (first %)) present))))
+                       " ]"))
+      :Tobject (let [[fs r] (flatten-fields (d 1))
+                     fs (filter (fn [[_ k _]] (= :public (field-kind-repr k))) fs)
+                     open (not= :Tnil ((desc r) 0))]
+                 (str "< " (str/join "; " (concat (map (fn [[n _ x]] (str n " : " (type-text names x 0))) fs) (when open [".."]))) " >"))
+      "?")))
+
+(defn type-scheme-text
+  "Printtyp.type_scheme's text of t, its variables named afresh"
+  [t]
+  (type-text (name-vars [t]) t 0))
+
+(defn types-text
+  "The texts of several types sharing one naming of their variables"
+  [ts]
+  (let [names (name-vars ts)] (mapv #(type-text names % 0) ts)))
+
+(defn types-text-prec
+  "The texts of ts at precedence prec, one naming of their variables"
+  [ts prec]
+  (let [names (name-vars ts)] (mapv #(type-text names % prec) ts)))

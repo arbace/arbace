@@ -316,12 +316,27 @@ Prior art:
     OCaml's since O8: repr/ocaml against the host's OCaml 5.5.0 (the host `:ocaml`: ocamlc, ocamlopt, compiler-libs,
     the oracle `tools/ocdump` built live) and oi's light driver (`go/arbace/oi` built alone by TamaGo's go) against ocamlc's and
     ocamlopt's recorded runs, the corpora fetched by pin into the checkout's `.tmp/repr-ocaml`; `--corpus ID` (`bin/repr-ocaml
-    roundtrip`; `opam`, `all`) and `--only-list FILE` (`bin/oi check [--aot]`, `suite check [--aot]`) select parts.
-    repr/ocaml reads natively too (doc/ocaml/OCAML-SURVEY.md, "As built: the native reader"; the helper `tools/ocdump` stays
-    the oracle and `read`'s default): `arbace/repr/ocaml/menhir.ae` builds parser.mly's LALR(1) automaton as Menhir does into the
+    roundtrip`; `opam`, `all`) and `--only-list FILE` (`bin/oi check [--aot]`, `suite check [--aot]`) select parts. Since the
+    typer line's merge (OC180 (a), the user 2026-11-07; doc/ocaml/OCAML-SURVEY.md, "As built: the typer line's merge") the steps
+    run on no `:ocaml` host, their commands native (`repl-check --native`, `own-verdicts --check`, `roundtrip --text [--types]`,
+    `menhir --check`, `judges-test --fixtures`); ocamlc's and ocdump's levels (`roundtrip --cmi`, `dumps`, `native-check`,
+    `stdlib-check`, `typer-check`'s fresh dumps, `suite expect`) are the oracle tier's `ocaml-dumps` and `ocaml-oracle`, waiting in
+    `test/gate/crops/ocaml-oracle.edn` for the planner's `:phase :oracle`; the native library (`bin/oi stdlib`) types unix,
+    threads, str and compiler-libs' units too (`libs_native`; compiler-libs' `lexer.ml` only with `OI_OCAMLLEX=1`), and the
+    suite's native path keeps a unit's signature as data (`NAME.cmi.ae`, OC184 (a)).
+    repr/ocaml reads natively (doc/ocaml/OCAML-SURVEY.md, "As built: the native reader"; the default of `read` and `roundtrip`
+    since 2026-11-07, "As built: the crop's independence"; the helper `tools/ocdump` the oracle's, `--reader helper`): `arbace/repr/ocaml/menhir.ae` builds parser.mly's LALR(1) automaton as Menhir does into the
     generated `tables.ae` (`bin/repr-ocaml menhir`, `--check` against Menhir's own tables in the tarball, `--verify`), `lex.ae`,
     `docstrings.ae`, `actions.ae` and `parser.ae` port lexer.mll, docstrings.ml, parser.mly's actions and MenhirLib's engine;
-    `bin/repr-ocaml read --reader native`, `native-check` (the dumps against the helper's, byte for byte).
+    `bin/repr-ocaml read --reader native`, `native-check` (the dumps against the helper's, byte for byte). oi's native front end
+    (doc/ocaml/TYPER.md): `arbace/repr/ocaml/typer/` ports typing/ (with Typemod, Includemod, Mtype, Subst: the module
+    system) and lambda/'s Translcore, Matching, Translmod, Simplif and Tmc, the native Parsetree typed and translated to
+    Lambda without ocamlc (`bin/oi run-native`; `bin/oi typer-check`: test/ocaml/typer/'s samples' signatures, raw and
+    simplified Lambda against the oracle's dumps committed in `test/ocaml/typer/oracle/` (verified fresh when ocdump is
+    present), their runs on oi against the toplevel's; `bin/oi stdlib-check`: the stdlib's units typed natively against
+    `bin/oi stdlib`'s Lambda); since 2026-11-07 the native path is `bin/oi check`'s, `check --aot`'s and `suite check`'s default
+    (TY24 (a); `--ocdump` the oracle's), and each run program is judged by its own verdict as ocamltest gives it (the header's exit
+    status, the `.reference` or no output; `bin/oi own-verdicts`, exceptions `test/ocaml/own-verdict.edn`), the rest by the recorded run).
   - `arbace/repr/clojure{.ae,/}`: `arbace.repr.clojure`, Clojure's bridge (`doc/REPR-CLOJURE.md`;
     `bin/repr-clojure read`, `print`, `roundtrip`, `check`): Clojure source into Arbace's, the
     names of the vendored Clojure, `.clj`/`.cljc` into `.ae`, a table of rules for the dialects'

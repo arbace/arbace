@@ -27,7 +27,9 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   repr-scheme repr-scheme-roundtrip-record si-essential si-aot-essential scheme-read-essential scheme-essential \
   repr-python-lex-check repr-python-lex-record repr-python-pegen repr-python-pegen-check repr-python-parse-check repr-python-parse-record repr-python-ast-check repr-python-records-record repr-python-records-verify pyi-lib-test-record pyi-runtime-tables pyi-aot pyi-aot-check pyi-aot-check-record pyi-bench pyi-bench-record pyi-check pyi-check-record pyi-divergences pyi-cover pyi-c2j-check pyi-table-check pyi-clib-build pyi-clib-verify python-essential \
   oi-check-compiled check-makefile \
-  repr-ocaml-native-check repr-ocaml-menhir
+  repr-ocaml-native-check repr-ocaml-menhir \
+  oi-typer-check oi-stdlib-check oi-check-native oi-typer-probe oi-repl-check-native repr-ocaml-types oi-judges-fixtures \
+  oi-check-ocdump oi-own-verdicts
 
 help: ## list the targets
 	@awk 'BEGIN {FS = ":.*## "} /^## / {printf "\n%s\n", substr($$0, 4)} \
@@ -534,7 +536,7 @@ repr-ocaml-spec-check: ## doc/ocaml/SPEC.md: every forms block reads, every exam
 	bin/repr-ocaml spec-check
 repr-ocaml-samples: ## test/ocaml/samples/ read by ocdump and by Arbace's reader; the typed ones typed and lowered to Lambda (bin/repr-ocaml samples)
 	bin/repr-ocaml samples
-repr-ocaml-corpus: ## the corpora's counts and pins of test/ocaml/corpora.edn hold: OCaml 5.5.0's tarball (fetched once), go-whim's whiml, the host's compiler (bin/repr-ocaml corpus check)
+repr-ocaml-corpus: ## the corpora's counts and pins of test/ocaml/corpora.edn hold: OCaml 5.5.0's tarball (fetched once), go-whim's whiml (bin/repr-ocaml corpus check; --host: the host's compiler too)
 	bin/repr-ocaml corpus check
 repr-ocaml-corpus-count: ## the files and lines of every OCaml corpus (bin/repr-ocaml corpus count)
 	bin/repr-ocaml corpus count
@@ -546,6 +548,10 @@ repr-ocaml-text: ## O3: mode :full over the default corpora: the text printed fr
 	bin/repr-ocaml roundtrip --text
 repr-ocaml-cmi: ## O3: and the .cmi level: ocamlc -c on the original and on the print, the .cmi bytes equal; the :lines print's with -no-keep-locs too (bin/repr-ocaml roundtrip --cmi-lines)
 	bin/repr-ocaml roundtrip --cmi-lines
+repr-ocaml-types: ## OC183 (a): the typed signature level, the typer's signatures of the original and of the print equal, no ocamlc (bin/repr-ocaml roundtrip --text --types samples stdlib)
+	bin/repr-ocaml roundtrip --text --types samples stdlib
+oi-judges-fixtures: ## OC181 (a): the judges' own tests on fixtures, no toolchain (bin/oi judges-test --fixtures; --oracle the toolchain's parts)
+	bin/oi judges-test --fixtures
 repr-ocaml-dumps: ## O4: the typed and Lambda dumps of every file ocamlc compiles alone, read by Arbace's reader and shaped by SPEC 11.2, stable across two runs; sizes and seconds (bin/repr-ocaml dumps)
 	bin/repr-ocaml dumps
 repr-ocaml-native-check: ## the native reader (lexer.mll and parser.mly in Arbace) against the helper over the samples and the stdlib: dumps with positions and :full layouts equal byte for byte (bin/repr-ocaml native-check --layout)
@@ -557,8 +563,24 @@ oi-stdlib: ## O5: the stdlib built by ocamlc in dependency order and its Lambda 
 	bin/oi stdlib
 oi-build: ## O5: oi's light driver, go/arbace/oi's forms printed by repr/go and built by TamaGo's go (bin/oi build)
 	bin/oi build
-oi-check: ## O5: the testsuite's run programs on oi against ocamlc's recorded runs, every non-pass classed (bin/oi check)
+oi-typer-check: ## oi's native front end (doc/ocaml/TYPER.md): test/ocaml/typer/'s samples typed and translated to Lambda by Arbace, against the committed oracle's signatures, raw and simplified Lambda, then run on oi against the toplevel's outputs (bin/oi typer-check)
+	bin/oi typer-check
+
+oi-stdlib-check: ## the stdlib's units typed natively (doc/ocaml/TYPER.md, T8) against bin/oi stdlib's Lambda, the typer's samples run on oi with the equal units native (bin/oi stdlib-check)
+	bin/oi stdlib-check
+
+oi-check: ## the testsuite's run programs typed by Arbace's typer (TY24 (a): the default) and run on oi, each judged by its own verdict (the .reference, the exit status) or ocamlc's recorded run, every non-pass classed (bin/oi check)
 	bin/oi check
+oi-check-ocdump: ## O5: the oracle's path, the programs' Lambda dumped by ocdump on the host's compiler-libs (bin/oi check --ocdump)
+	bin/oi check --ocdump
+oi-own-verdicts: ## the judged corpora's split, by the tests' own verdicts and by the recorded runs, the two against each other from the records (bin/oi own-verdicts --check)
+	bin/oi own-verdicts --check
+oi-check-native: ## T11 (doc/ocaml/TYPER.md): the run programs typed and translated by Arbace's typer and run on oi, against ocamlc's runs (test/ocaml/check-oi-native.edn) and compared with ocamlc's path (bin/oi check --native)
+	bin/oi check --native
+oi-typer-probe: ## T11: the run corpus's signatures and Lambda from Arbace's typer against the oracle's (bin/oi typer-probe)
+	bin/oi typer-probe
+oi-repl-check-native: ## T11: the recorded toplevel session with each phrase typed by Arbace's typer, against the ocaml toplevel's (bin/oi repl-check --native)
+	bin/oi repl-check --native
 oi-divergences: ## O5: oi's recorded results against test/ocaml/divergences.edn's classes (bin/oi divergences)
 	bin/oi divergences
 oi-record-ref: ## O5: ocamlc's and ocamlopt's runs of oi's run corpus recorded into test/ocaml/ref-ocaml55.edn (bin/oi record-ref)

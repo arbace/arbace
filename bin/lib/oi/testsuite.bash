@@ -8,7 +8,8 @@
 T_ROOT=$TOP/testsuite
 
 cmd_suite_roles() {
-  need_tree; mkdir -p "$S"
+  # the tarball's files alone (their headers and the actions' classes): no ocamlc, no ocdump (OC181 (a): the rollup on no :ocaml host)
+  need_source; mkdir -p "$S"
   local out=$S/roles.tsv f
   # every header's text, by file (under tests/)
   (cd "$T_ROOT/tests" && find . -name '*.ml' | sed 's|^\./||' | LC_ALL=C sort) | while read -r f; do
