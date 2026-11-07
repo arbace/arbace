@@ -4017,6 +4017,6 @@ of `__iter__`; `range()` keeps `__index__`'s exception; `_PyObject_FunctionStr` 
 
 **`_pickle`.** Not cleared. pickle.py imports PickleBuffer from `_pickle` alone, test_inspect does `import _pickle` at its top,
 and test_pickle takes the module's presence for the C classes (`has_c_implementation`), so no change short of a `_pickle` module helps;
-see 227's DECISION in the report. The 27 methods of test_pickle and test_inspect's 363 wait on it.
+see 227's DECISION in the report. 25 methods of test_pickle, 10 of test_pickletools and test_inspect's 363 wait on it.
 
-**The cost.** The compiled loop is untouched. `str` iteration gains a nil test; `set(x)` runs New and Init as `deque` does.
+**The cost.** The compiled loop is untouched. `str` iteration gains a nil test; `set(x)` runs New and Init as `deque` does. The bench sample the design named was not run.
