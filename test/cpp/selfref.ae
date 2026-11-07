@@ -1,0 +1,72 @@
+(ns cpp.selfref
+  "C++'s run corpora's own verdicts (doc/cpp/CPP-SURVEY.md, \"As built: cpp-90\"; the user's decision of 2026-11-07, doc/CROPS-SCORE.md):
+  where a test carries its expected outcome, bin/cppi check and check --aot judge its run by it, not by g++ 15.2's recorded run
+  (test/cpp/ref-gxx15.edn, the oracle tier's from then on, read for the tests with no verdict of their own; CPPI_JUDGE=gxx judges
+  every program by it). The rules, a corpus at a time, each the suite's own runner's convention:
+    gxx-dg-run  g++.dg's dg-do run tests (g++-dg.exp's dg-test, DejaGnu's ${tool}_load): a program passes when it exits 0 (a
+                failure calls abort() or returns non-zero); its output is not compared. A file with a dg-output (an expected
+                output DejaGnu matches by regexp), a dg-shouldfail or an xfail on its run keeps g++'s reference
+    libstdcxx   libstdc++-v3's testsuite run tests (libstdc++.exp's v3-dg-runtest, the same dg-test): VERIFY() aborts on a
+                failure, so a program passes when it exits 0; dg-output, dg-shouldfail and xfail files keep g++'s
+  samples and runtime (Arbace's own samples, test/cpp/samples, test/cpp/runtime/samples) carry no verdict of their own: g++'s
+  recorded run stays their reference (0.5 in bin/crops-score's judge stage). An entry g++ could not build (:status :no-build)
+  stays g++'s.
+
+  ref ROOTS GXX-REF OUT   OUT: GXX-REF's entries, each with a verdict of its own replaced by it ({:id :status 0 :stdout \"-\"
+                          :stderr \"-\" :o2 :differ (the status alone, arbace.cpp.check/run-result) :judge :self :verdict
+                          KIND}); the counts printed. ROOTS: {:gxx-dg DIR :libstdcxx DIR}, the extracted trees (bin/lib/cppi/lists.bash)
+  agree ROOTS GXX-REF     for each case with a verdict of its own, whether g++'s recorded run meets it (status 0); the
+                          disagreements listed"
+  (:require [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(defn- read-all [^String f]
+  (let [r (arbace.lang.LineNumberingPushbackReader. (java.io.StringReader. (slurp f))) eof (Object.)]
+    (loop [out []] (let [x (read r false eof)] (if (identical? x eof) out (recur (conj out x)))))))
+
+(def exceptions
+  "test/cpp/selfref-exceptions.edn: {ID REASON}, the cases whose own verdict the check's harness does not meet."
+  (delay (let [f (java.io.File. "test/cpp/selfref-exceptions.edn")] (if (.exists f) (read-string (slurp f)) {}))))
+
+(defn- file-of ^java.io.File [roots ^String id]
+  (let [i (.indexOf id "/") c (subs id 0 i) rel (subs id (inc i))]
+    (case c
+      "gxx-dg-run" (java.io.File. (str (:gxx-dg roots) "/" rel))
+      "libstdcxx" (java.io.File. (str (:libstdcxx roots) "/" rel))
+      nil)))
+
+(defn verdict
+  "Case ID's own verdict: {:status 0 :verdict KIND}, or nil (no verdict of its own, an exception, or no file)."
+  [roots ^String id]
+  (let [^java.io.File f (file-of roots id)]
+    (when (and f (.exists f) (not (contains? @exceptions id)))
+      (let [t (slurp f)]
+        ;; the run's own directives: dg-output's expected text, dg-shouldfail's expected failure, an xfail on the run
+        (when-not (re-find #"dg-output|dg-shouldfail|dg-do run[^}]*xfail" t)
+          {:status 0 :verdict (if (str/starts-with? id "libstdcxx/") :verify :dg-run)})))))
+
+(defn- merged [roots gref]
+  (for [e (read-all gref)]
+    (if-let [v (and (not= :no-build (:status e)) (verdict roots (:id e)))]
+      {:id (:id e) :status (:status v) :stdout "-" :stderr "-" :o2 :differ :judge :self :verdict (:verdict v)}
+      (assoc e :judge :gxx))))
+
+(defn- corpus [^String id] (subs id 0 (.indexOf id "/")))
+
+(defn -main [cmd roots-s gref & [out]]
+  (let [roots (read-string roots-s)]
+    (case cmd
+      "ref" (let [es (merged roots gref)]
+              (spit out (str ";; C++'s run corpora's references (test/cpp/selfref.ae): each case's own verdict, else g++ 15.2's run\n"
+                             (str/join "\n" (map pr-str es)) "\n"))
+              (doseq [[c xs] (sort (group-by (comp corpus :id) es))]
+                (println (format "selfref %-12s %5d cases: %d by their own verdict, %d by g++'s run" c (count xs)
+                                 (count (filter #(= :self (:judge %)) xs)) (count (filter #(= :gxx (:judge %)) xs)))))
+              (println (format "selfref: %d of %d cases judged by their own verdict" (count (filter #(= :self (:judge %)) es)) (count es))))
+      "agree" (let [gs (read-all gref)
+                    rows (for [g gs :when (not= :no-build (:status g)) :let [v (verdict roots (:id g))] :when v]
+                           {:id (:id g) :kind (:verdict v) :ok (= (:status g) (:status v)) :status (:status g)})]
+                (println (format "selfref agree: %d cases with a verdict of their own; g++'s recorded run meets it in %d"
+                                 (count rows) (count (filter :ok rows))))
+                (doseq [x (remove :ok rows)] (println "  g++'s run against the verdict:" (:id x) (name (:kind x)) "status" (:status x)))))))
