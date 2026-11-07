@@ -2478,3 +2478,26 @@ line tables' directory and file tables are now equal (the map's part), but its l
 inside functions, the class's own cause. `roundtrip-results/gxx-dg-every-10.edn` still records arm-fp16-ops-1.C as `[:known :objects-differ]`: a run of
 the list counts it as an improvement until the record is made again (`--record-results`, a whole-list run). F3 (`$pm` unquoted) is left: no corpus path
 has a space or `=`.
+
+## As built: CX8 (write-ahead) (2026-11-03)
+
+On the branch `cpp-cx8` from main's a25d12d1, light tier (stage 0 by `ARBACE_HOST_EXE`, the main checkout's; its `arbace/c` is compiled in
+`target/seed/aot` from sources unchanged since, so ci here is the checkout's ci; `arbace/cpp`, repr/llvm and repr/cpp are evaluated from the checkout).
+Spec: doc/cpp/LLVM.md §11.
+
+- **Built.** `bin/cppi run|check|check --aot|divergences [--aot]|record-ref|runtime-ci` (`bin/lib/cppi/`), `arbace.cpp.run` (the lowered runtime read as
+  ci's library, a static link by archive rule, the runtime's units cut to what a program reaches, constructors through musl's `_init`, ci-only
+  macros for gcc's `__atomic_*` and the math builtins ci lacks, ci's overrides `test/cpp/runtime/ci/*.c`: `__snprintf_lite`), the judges
+  `arbace.cpp.check/run-judge` and `divergences`. The lowering: literal struct types named by content, an aggregate `select` as an `if`, a
+  `va_list` passed by value (gcc judges the same C: `lower-check` samples 16 of 16). Corpora (`bin/lib/cppi/lists.bash`): samples, runtime,
+  libstdcxx (3,504 run tests), gxx-dg-run (g++.dg's `dg-do run`, ~1,680 after the selectors; not modules/ or contracts/). `--only`, `--sample`,
+  `--corpus` from the start; per-program seconds (IR, lowering, ci's build, run) in `test/cpp/check{,-aot}-times-linux-amd64.edn`.
+- **Records.** `test/cpp/ref-gxx15.edn` (g++ 15.2 -O0: samples, runtime, every 25th of libstdcxx and gxx-dg-run, 224 programs);
+  `test/cpp/check-linux-amd64.edn` and `check-aot-linux-amd64.edn` for samples and runtime (14 programs: 9 pass, 5 in classes, the same compiled);
+  the sampled corpora are subsets and not recorded (C's rule).
+- **Numbers (eval, before the last fixes).** libstdcxx every 25th: 140, 127 pass, 13 non-pass; gxx-dg-run every 25th: 67, 60 pass, 6 oracle-rejected,
+  1 oracle-text. Classes: threads, long-double, ci-compound-literal, speed, oracle-text, musl-unread, atomic-generic, oracle-rejected
+  (`test/cpp/divergences.edn`, `check-known.edn`). A rerun with the math macros and the `__snprintf_lite` override was in progress at hand-back.
+- **Cost.** ci's build dominates: libstdcxx averages 12 s lowering + 59 s build a program (thread-seconds, 3 threads, ~10 GB a process); gxx-dg-run
+  4 s. Whole corpora: libstdcxx ~23 h at 3 threads, gxx-dg-run ~40 min, refs ~1 h; AOT ~30-60 s a program more. Far beyond GT8's 35 min: see the
+  report's proposals (a ci library of prebuilt nodes; parallel processes).

@@ -1,0 +1,30 @@
+#!/bin/bash
+# bin/cppi run [--std S] [OPTION...] FILE.cpp [-- ARG...]: one translation unit compiled to IR by the oracle (clang++ -O0,
+# -std=S, default c++23, and OPTION...), lowered (arbace.cpp.lower), its C read and checked by ci, linked with the lowered
+# runtime (bin/cppi runtime-ci) and musl's forms, built (arbace.cpp.run) and run by ci's back end (tools/cirun) with ARG...;
+# the program's status is the command's.
+set -uo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/tools.bash"
+std=c++23 opts=() file= pargs=()
+while [ $# -gt 0 ]; do
+  case $1 in
+    --) shift; pargs=("$@"); break ;;
+    --std) std=$2; shift 2 ;;
+    -*) opts+=("$1"); shift ;;
+    *) file=$(cd "$(dirname "$1")" && pwd)/$(basename "$1"); shift ;;
+  esac
+done
+[ -n "$file" ] || { sed -n '2,5p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+rtlib=$("$root/bin/cppi" runtime-ci) || exit 1
+cirun=${CIRUN:-$root/.tmp/ci/cirun}
+{ [ -n "${CIRUN:-}" ] && [ -x "$cirun" ]; } || "$root/bin/ci" cirun-build --ensure > "$TMPDIR/cppi-cirun-build.log" 2>&1 || { cat "$TMPDIR/cppi-cirun-build.log" >&2; exit 1; }
+"$root/bin/ci" musl ensure >&2 || exit 1
+d=$(mktemp -d "$TMPDIR/cppi-run.XXXXXX")
+clang++ -x c++ -std="$std" "${opts[@]}" -O0 -S -emit-llvm "$file" -o "$d/x.ll" || { rm -rf "$d"; exit 1; }
+(cd "$root" && GOMEMLIMIT=${CPPI_CI_MEMLIMIT:-6GiB} arbace_tool -m arbace.cpp.run nodes "$rtlib" "" "$d/x.nodes" "$d/x.ll") 2>&1 | { grep -v -E '^Reflection warning|recur arg|^Auto-boxing' || true; } >&2
+[ -f "$d/x.nodes" ] || { rm -rf "$d"; exit 1; }
+"$cirun" "$d/x.nodes" "${pargs[@]}"; st=$?
+rm -rf "$d"
+exit $st

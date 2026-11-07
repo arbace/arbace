@@ -171,7 +171,7 @@
       (println (str "lower-check: the run of the recorded list " (name listed) " has " (count run-names) " files, the record " (:files (get summaries listed))
                     "; " (count rec-missing) " recorded names missing" (when (seq rec-missing) (str ": " (str/join " " (take 8 rec-missing)))))))
     (let [cf (java.io.File. (str (.getParent (.getAbsoluteFile (java.io.File. known-path))) "/controls.edn"))
-          cbad (some true? (doall (for [{:keys [id subject reference] :as c} (if (.exists cf) (read-string (slurp cf)) [])
+          cbad (some true? (doall (for [{:keys [id subject reference] :as c} (if (.exists cf) (remove :level (read-string (slurp cf))) [])
                                         :let [v (control-result work names c)]]
                                     (do (println (case v
                                                    :differs (str "lower-check: control " id " (" subject "'s lowered run against " reference "'s original): differs, as a control must (GTS81 (a))")
@@ -207,10 +207,175 @@
     (doseq [r rs :when (not= :pass (:outcome r))] (println "  failing:" (:unit r) (name (:outcome r)) (:lower r)))
     (when (not= (:pass summary) (count rs)) (System/exit 1))))
 
+;; ---------------------------------------------------------------------------------------------
+;; The run checks (bin/cppi check, check --aot; doc/cpp/CPP-SURVEY.md, "As built: CX8 (write-ahead)"): C's judge
+;; (arbace.c.run/result) for C++: g++'s run recorded (test/cpp/ref-gxx15.edn), stderr compared too
+
+(defn- tsv [^String f]
+  (let [x (java.io.File. f)]
+    (if (.exists x) (mapv #(str/split % #"\t" -1) (remove str/blank? (str/split-lines (slurp x)))) [])))
+
+(defn- read-all-forms [^String f]
+  (let [r (arbace.lang.LineNumberingPushbackReader. (java.io.StringReader. (slurp f))) eof (Object.)]
+    (loop [out []] (let [x (read r false eof)] (if (identical? x eof) out (recur (conj out x)))))))
+
+(defn run-result
+  "A program's result: [id result reason], result :pass, :fail or the build's status (:oracle-rejected, :ir-error,
+  :lower-refused, :read-error, :check-error, :refused, :build-error). node: [id status class message flags secs]; run:
+  [id status stdout-sum bytes fault stderr-sum secs]; ref: g++'s run. The status and stdout and stderr g++'s, or, when g++'s -O0
+  and -O2 runs differ, the status alone."
+  [id ref node run]
+  (let [[_ nst ncls nmsg flags] node
+        fl (set (str/split (str flags) #" "))
+        ld (if (fl "long-double") " uses-long-double" "")
+        ;; review 191, F2: the program's functions that read their va_list inline (va-arg=NAME,...): a fault in one is the class va-arg
+        va (set (mapcat #(str/split (subs % 7) #",") (filter #(str/starts-with? % "va-arg=") fl)))
+        va-fault? (fn [fault] (when-let [[_ f] (re-find #"fault: .* in (\S+)" (str fault))] (contains? va f)))
+        ;; the flag once (review 191's low: a runtime unit's refusal carries it in its message already)
+        with-ld (fn [^String r] (if (str/ends-with? r " uses-long-double") r (str r ld)))]
+    (cond
+      (nil? ref) [id :fail "no g++ run recorded (bin/cppi record-ref)"]
+      (nil? node) [id :fail "not built"]
+      (not= nst "ok") [id (keyword nst) (with-ld (str (when (seq ncls) (str ncls ": ")) nmsg))]
+      (nil? run) [id :fail "not run"]
+      :else
+      (let [[_ st sum _ fault esum] run
+            want (:status ref)
+            st (if (= st "timeout") :timeout (Long/parseLong st))
+            same-status (= st want)
+            loose (= :differ (:o2 ref))]
+        (cond
+          ;; never flagged long-double (review 191, F1): the runner's failure is no program's layout
+          (re-find #"^(ci(run|aot): internal|fatal error: |runtime: )" (str fault)) [id :fail (str "internal: " fault)]
+          (and same-status (or loose (and (= sum (:stdout ref)) (= esum (:stderr ref))))) [id :pass ""]
+          :else [id :fail (str (cond (not same-status) (str "differ status " (if (keyword? st) (name st) st) " (g++ " (if (keyword? want) (name want) want) ")")
+                                     (not= sum (:stdout ref)) "differ stdout"
+                                     :else "differ stderr")
+                               (when (seq fault) (str " " fault)) (when (va-fault? fault) " uses-va-arg") ld)])))))
+
+(defn- ir-row
+  "The build row of a program whose IR the oracle did not make: clang's rejection (its own diagnostics) or another failure."
+  [^String work id]
+  (let [d (str work "/files/" id "/")
+        st (slurp? (str d "ir.status")) log (slurp? (str d "ir.log"))]
+    (if (oracle-rejection? st log)
+      [id "oracle-rejected" "" (str/replace (str (first (filter #(re-find #"error" %) (str/split-lines log)))) #"^\S*/gcc-15\.2\.0/" "") ""]
+      [id "ir-error" "" (str "status " st) ""])))
+
+(defn run-judge
+  "run-judge WORK LEVEL [--record] CORPUS...: LEVEL eval (bin/cppi check: WORK/CORPUS/nodes.tsv, run.tsv) or aot (check --aot:
+  the same, and the interpreted record beside); each program's result against g++'s run and the classes (test/cpp/divergences.edn;
+  aot: divergences-aot.edn first), the committed record (arbace.c.run/compare-record), the negative controls (test/cpp/controls.edn,
+  :level :run). --record rewrites the level's record and its times."
+  [[work level & more]]
+  (require 'arbace.c.run)
+  (let [record (some #{"--record"} more)
+        corpora (remove #{"--record" ""} more)
+        aot (= level "aot")
+        recf (if aot "test/cpp/check-aot-linux-amd64.edn" "test/cpp/check-linux-amd64.edn")
+        timesf (if aot "test/cpp/check-aot-times-linux-amd64.edn" "test/cpp/check-times-linux-amd64.edn")
+        _ (when-let [m (and record ((resolve 'arbace.c.run/subset-record-refusal) work corpora))]
+            (println "cppi judge:" m) (System/exit 2))
+        refs (into {} (map (juxt :id identity) (read-all-forms "test/cpp/ref-gxx15.edn")))
+        classes (into (if aot (vec (read-string (slurp "test/cpp/divergences-aot.edn"))) [])
+                      (read-string (slurp "test/cpp/divergences.edn")))
+        klass (fn [[_ r reason]]
+                (let [s (str (name r) " " reason)]
+                  (some (fn [c] (when (some #(re-find % s) (:match c)) (:id c))) classes)))
+        ;; test/cpp/check-known.edn: {ID REASON}, a program whose non-pass needs a reason its row cannot show (C's check-known.edn)
+        known (let [f (java.io.File. "test/cpp/check-known.edn")] (if (.exists f) (read-string (slurp f)) {}))
+        interp (when aot (let [f (java.io.File. "test/cpp/check-linux-amd64.edn")] (if (.exists f) (into {} (map (juxt first identity) (read-string (slurp f)))) {})))
+        rows (vec (for [c corpora
+                        :let [nodes (into {} (map (juxt first identity) (tsv (str work "/" c "/nodes.tsv"))))
+                              runs (into {} (map (juxt first identity) (tsv (str work "/" c "/run.tsv"))))]
+                        [id] (tsv (str work "/" c "/list.tsv"))]
+                    (let [node (let [n (get nodes id)] (if (and n (= "ir-missing" (second n))) (ir-row work id) n))
+                          row (run-result id (get refs id) node (get runs id))
+                          kr (get known id)
+                          row (if (and (not= :pass (second row)) kr (not (str/starts-with? (str (nth row 2)) "internal: ")))
+                                [id :fail (str "known " kr " (" (nth row 2) ")")]
+                                row)
+                          row (if (= :pass (second row)) row (conj row (klass row)))]
+                      (if aot (conj (if (= 3 (count row)) (conj row nil) row) (second (get interp id))) row))))
+        cmp ((resolve 'arbace.c.run/compare-record) rows recf corpora)
+        ;; review 191, F1: a recorded non-pass whose class changes (a long-double check error that now segfaults) is a regression
+        ;; too; compare-record sees only a recorded pass that fails and a changed known reason
+        cmp (let [old (let [f (java.io.File. recf)] (if (.exists f) (read-string (slurp f)) []))
+                  now (into {} (map (juxt first identity) rows))
+                  moved (vec (for [[id r reason :as o] old
+                                   :when (some #(str/starts-with? id (str % "/")) corpora)
+                                   :let [n (get now id)]
+                                   :when (and n (not= :pass r) (not= :pass (second n)) (not= (klass o) (nth n 3 nil)))]
+                               [id (str "recorded " (name r) " in class " (some-> (klass o) name) ", now " (name (second n)) " " (nth n 2)
+                                        " in class " (some-> (nth n 3 nil) name))]))]
+              (update cmp :regressions into moved))
+        failing (filter #(and (not= :pass (second %)) (nil? (nth % 3 nil))) rows)
+        controls (filterv #(= :run (:level %)) (read-string (slurp "test/cpp/controls.edn")))
+        cfail (vec (for [{:keys [id subject reference]} controls
+                         :let [c (first (str/split subject #"/"))
+                               in (and (some #{c} corpora) (some #(= subject (first %)) (tsv (str work "/" c "/list.tsv"))))
+                               node (get (into {} (map (juxt first identity) (tsv (str work "/" c "/nodes.tsv")))) subject)
+                               run (get (into {} (map (juxt first identity) (tsv (str work "/" c "/run.tsv")))) subject)
+                               ref (get refs reference)
+                               v (cond (not in) :left (nil? ref) :not-judged (or (nil? run) (not= "ok" (second node))) :left
+                                       (= :pass (second (run-result subject ref node run))) :passes :else :differs)
+                               _ (println (str "cppi judge: control " id " (" subject " against " reference "'s g++ run): "
+                                               (case v :differs "differs, as a control must (GTS81 (a))" :passes "PASSES: the judge passes what differs"
+                                                     :not-judged "not judged: no g++ run of the reference" :left "left (not in the run, not built or not run)")))]
+                         :when (#{:passes :not-judged} v)]
+                     [id :fail (str "control " (name v) " (test/cpp/controls.edn)")]))]
+    (spit (str work "/results-" level ".edn") (str "[\n" (str/join "\n" (map pr-str rows)) "\n]\n"))
+    (doseq [c corpora]
+      (let [rs (filter #(str/starts-with? (first %) (str c "/")) rows)
+            by (frequencies (map #(if (= :pass (second %)) :pass (or (nth % 3 nil) :fail)) rs))]
+        (println (format "%-12s %5d programs: %s" c (count rs) (str/join ", " (map (fn [[k v]] (str (name k) " " v)) (sort-by (comp - val) by)))))))
+    (when aot
+      (let [both (frequencies (map (fn [r] [(= :pass (second r)) (= :pass (nth r 4 nil))]) rows))]
+        (println "compiled against interpreted (the record):" (get both [true true] 0) "both pass," (get both [false false] 0) "neither,"
+                 (get both [true false] 0) "compiled only," (get both [false true] 0) "interpreted only")))
+    (when record
+      (let [old (if (.exists (java.io.File. recf)) (read-string (slurp recf)) [])
+            in? (fn [id] (some #(str/starts-with? id (str % "/")) corpora))
+            all (sort-by first (concat (remove (comp in? first) old) (map (fn [[id r reason]] [id r reason]) rows)))
+            told (if (.exists (java.io.File. timesf)) (read-string (slurp timesf)) {})
+            tnew (into {} (for [c corpora [id ir lw b r] (tsv (str work "/" c "/times.tsv"))]
+                            [id (mapv #(if (re-matches #"[0-9.]+" (str %)) (Double/parseDouble %) nil) [ir lw b r])]))
+            tall (into (sorted-map) (concat (remove (comp in? key) told) tnew))]
+        (spit recf (str ";; cppi's " (if aot "AOT check (bin/cppi check --aot --record): each program of the run corpora compiled by cf2g"
+                                         "check (bin/cppi check --record): each program of the run corpora run on ci")
+                        ",\n;; [ID RESULT REASON], against g++ 15.2's -O0 run (test/cpp/ref-gxx15.edn); its classes "
+                        (if aot "test/cpp/divergences-aot.edn, then " "") "test/cpp/divergences.edn.\n[\n"
+                        (str/join "\n" (map pr-str all)) "\n]\n"))
+        (spit timesf (str ";; each program's seconds in bin/cppi check" (if aot " --aot" "") "'s last recorded run (GT8, GTS205's subsets): ID [IR "
+                          (if aot "BUILD TRANSLATE RUN" "LOWER BUILD RUN") "], the light tier's (4 jobs, 3 threads); nil: the step did not run.\n{\n"
+                          (str/join "\n" (for [[k v] tall] (str " " (pr-str k) " " (pr-str v)))) "\n}\n"))
+        (println "recorded" recf "and" timesf)))
+    (let [fids (set (map first failing))
+          failing (concat failing (remove #(fids (first %)) ((resolve 'arbace.c.run/report-record) cmp)) cfail)]
+      (doseq [r (take 40 failing)] (println "FAIL" (first r) (nth r 2)))
+      (System/exit (if (seq failing) 1 0)))))
+
+(defn divergences
+  "divergences LEVEL: the recorded check's non-passes (test/cpp/check-linux-amd64.edn, aot: check-aot-linux-amd64.edn), each in a
+  class or listed UNCLASSED."
+  [level]
+  (let [aot (= level "aot")
+        rows (read-string (slurp (if aot "test/cpp/check-aot-linux-amd64.edn" "test/cpp/check-linux-amd64.edn")))
+        classes (into (if aot (vec (read-string (slurp "test/cpp/divergences-aot.edn"))) []) (read-string (slurp "test/cpp/divergences.edn")))
+        klass (fn [[_ r reason]] (let [s (str (name r) " " reason)] (some (fn [c] (when (some #(re-find % s) (:match c)) (:id c))) classes)))
+        non (remove #(= :pass (second %)) rows)
+        by (group-by klass non)]
+    (println (count rows) "programs," (- (count rows) (count non)) "pass")
+    (doseq [c classes] (println (format "  %-24s %5d  %s" (name (:id c)) (count (get by (:id c))) (:title c))))
+    (doseq [r (get by nil)] (println "UNCLASSED" (pr-str r)))
+    (System/exit (if (seq (get by nil)) 1 0))))
+
 (defn -main
-  "bin/cppi's judges: judge WORK KNOWN [RESULTS], runtime-judge OUT."
+  "bin/cppi's judges: judge WORK KNOWN [RESULTS], runtime-judge OUT, run-judge WORK LEVEL [--record] CORPUS..., divergences LEVEL."
   [verb & args]
   (case verb
     "judge" (let [[work known results recorded] args] (judge work known results recorded))
     "runtime-judge" (runtime-judge (first args))
+    "run-judge" (run-judge args)
+    "divergences" (divergences (or (first args) "eval"))
     (do (println "cppi check: judge or runtime-judge") (System/exit 2))))

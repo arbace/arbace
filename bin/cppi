@@ -48,6 +48,20 @@
 #                               fails on a recorded name missing from it or a count other than the record's (review 018, R4)
 #                               and on its negative control (GTS81 (a), test/cpp/controls.edn): a sample's lowered run judged
 #                               against another's original run must differ (selftest controls)
+#   bin/cppi run [--std S] [OPTION...] FILE.cpp [-- ARG...]
+#                               FILE (one translation unit) compiled to IR by the oracle, lowered, read and built by ci with the
+#                               lowered runtime and musl (arbace.cpp.run), run by ci's back end with ARG...; its status the command's
+#   bin/cppi runtime-ci [OUT]   the lowered runtime's units read by repr/c as ci's library, OUT/ci (CX8; keyed)
+#   bin/cppi record-ref [--corpus C,...] [--only] [--sample N] [--ids LIST]
+#                               g++ 15.2's -O0 runs of the run corpora recorded, test/cpp/ref-gxx15.edn (bin/lib/cppi/record-ref)
+#   bin/cppi check [--corpus C,...] [--only LIST] [--sample N] [--record] [--judge] [--resume]
+#                               the run corpora on ci against g++'s runs, every non-pass in a class of test/cpp/divergences.edn,
+#                               against test/cpp/check-linux-amd64.edn (bin/lib/cppi/check, its header; CX8)
+#   bin/cppi check --aot [the same options]
+#                               the same programs' node programs translated by cf2g and built by TamaGo's go, against g++'s runs
+#                               and test/cpp/check-aot-linux-amd64.edn, classes divergences-aot.edn then divergences.edn
+#                               (bin/lib/cppi/check-aot)
+#   bin/cppi divergences [--aot]  the recorded check judged against the classes
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
@@ -163,7 +177,9 @@ rt_ir() { # rt_ir UNIT SOURCE STD FLAGS: one runtime unit's IR (cwd the tarball'
   local u=$1 src=$2 std=$3 fl=$4 d=$rt/units/$1 shim
   rm -rf "$d"; mkdir -p "$d" # no level file of an earlier build stands for this one's
   shim=$(grep -F -x -A1 "$src" "$rt/shims.txt" | sed -n 2p || true)
-  [ -n "$shim" ] && src=$root/test/cpp/runtime/shims/$shim
+  # the shim named relative to the tarball's root, where clang runs: the IR's ModuleID and source_filename are the path as
+  # given, which no -ffile-prefix-map rewrites, so an absolute one made the IR's digest the checkout's place (CX8)
+  [ -n "$shim" ] && src=$(realpath --relative-to="$gcc_root" "$root/test/cpp/runtime/shims/$shim")
   local maps="-ffile-prefix-map=$gcc_root/= -ffile-prefix-map=$rt/gen/=gen/ -ffile-prefix-map=$root/test/cpp/runtime/=test/cpp/runtime/"
   # shellcheck disable=SC2086
   if [ "$std" = c ]; then
@@ -188,7 +204,7 @@ rt_two() { # rt_two UNIT: the print's object against the IR's, gcc -O0 on the lo
   if [ -f "$d/lowered.c" ]; then
     # shellcheck disable=SC2086
     ( cd "$d" && timeout 900 gcc $GCC_FLAGS -c lowered.c -o lowered.o; echo $? > gcc.status ) 2>&1 | cap "$d/gcc.log"
-    [ -n "${CPPI_KEEP:-}" ] || rm -f "$d/lowered.c"
+    # the lowered C kept: bin/cppi runtime-ci reads it as ci's library (CX8)
   fi
   return 0
 }
@@ -292,6 +308,36 @@ disk_ok() { # the light tier's disk rule: stop past 80% (CPPI_DISK_MAX)
   [ "$u" -le "${CPPI_DISK_MAX:-80}" ] || { echo "lower-check: the disk is at $u%, stopping" >&2; exit 3; }
 }
 
+runtime_ci() { # runtime_ci [OUT]: OUT/ci, the lowered runtime's units read by repr/c as ci's library (CX8; arbace.cpp.run's
+  # read-lib), made again when its key (OUT's key, the reader's sources and opts: arbace/cpp/run.ae, repr/c, test/c/host)
+  # changed; runtime-build first when OUT is not at the checkout's key. Prints OUT/ci.
+  local out=${1:-${CPPI_RUNTIME:-$root/.tmp/cppi/runtime}} k u
+  if ! runtime_key_check "$out" 2>"$TMPDIR/cppi-rtkey.log" || [ ! -f "$out/rt.c" ] \
+     || cut -f1 "$out/units.tsv" | while read -r u; do [ -f "$out/units/$u/lowered.c" ] || echo missing; done | grep -q missing; then
+    echo "runtime-ci: the runtime in $out is not at the checkout's key (or has no lowered C): runtime-build" >&2
+    ( runtime_build "$out" ) >&2 || exit 1
+  fi
+  out=$(cd "$out" && pwd)
+  k=$( { cat "$out/key"; (cd "$root" && sed -n '/^;; runtime-ci-key begin/,/^;; runtime-ci-key end/p' arbace/cpp/run.ae | sha256sum
+                                 find arbace/repr/c.ae arbace/repr/c arbace/c/musl.ae test/c/host test/cpp/runtime/ci -type f | LC_ALL=C sort | xargs sha256sum); } | sha256sum | cut -d' ' -f1)
+  if [ "$(cat "$out/ci/key" 2>"$TMPDIR/cppi-cikey.err")" != "$k" ]; then
+    rm -rf "$out/ci"; mkdir -p "$out/ci"
+    { cut -f1 "$out/units.tsv" | while read -r u; do printf '%s\t%s\n' "$u" "$out/units/$u/lowered.c"; done; printf 'cx-rt\t%s\n' "$out/rt.c"; } > "$out/ci/list.tsv"
+    echo "runtime-ci: reading the lowered runtime into $out/ci (about 3 minutes)" >&2
+    (cd "$root" && GOMEMLIMIT=${CPPI_CI_MEMLIMIT:-6GiB} arbace_tool -m arbace.cpp.run read-lib "$out/ci" "$out/ci/list.tsv" "${CPPI_JOBS:-4}") > "$out/ci/read.log" 2>&1 \
+      || { grep -v -E 'Reflection|recur arg|Auto-boxing' "$out/ci/read.log" | tail -5 >&2; exit 1; }
+    # ci's overrides (test/cpp/runtime/ci/*.c, arbace.cpp.run's libs-fn links them before the runtime): C for ci of what the
+    # lowered runtime does in a way ci cannot (clang's inline va_arg)
+    mkdir -p "$out/ci/over"
+    for f in "$root"/test/cpp/runtime/ci/*.c; do printf '%s	%s
+' "ci/$(basename "$f" .c)" "$f"; done > "$out/ci/over/list.tsv"
+    (cd "$root" && GOMEMLIMIT=${CPPI_CI_MEMLIMIT:-6GiB} arbace_tool -m arbace.cpp.run read-lib "$out/ci/over" "$out/ci/over/list.tsv" 1) > "$out/ci/over/read.log" 2>&1 \
+      || { grep -v -E 'Reflection|recur arg|Auto-boxing' "$out/ci/over/read.log" | tail -5 >&2; exit 1; }
+    echo "$k" > "$out/ci/key"
+  fi
+  echo "$out/ci"
+}
+
 lower_check() {
   local list=$1; work=$2; shift 2
   local jobs=${CPPI_JOBS:-4} rtdir=$root/.tmp/cppi/runtime recorded=auto
@@ -375,5 +421,12 @@ case ${1:-} in
           *) echo "list: samples, runtime or libstdcxx" >&2; exit 2 ;;
         esac ;;
   lower-check) shift; lower_check "$@" ;;
+  runtime-ci) shift; runtime_ci "$@" ;;
+  record-ref) shift; exec "$root/bin/lib/cppi/record-ref" "$@" ;;
+  check) shift
+    for a in "$@"; do [ "$a" = --aot ] && { args=(); for b in "$@"; do [ "$b" = --aot ] || args+=("$b"); done; exec "$root/bin/lib/cppi/check-aot" "${args[@]}"; }; done
+    exec "$root/bin/lib/cppi/check" "$@" ;;
+  divergences) shift; lvl=eval; [ "${1:-}" = --aot ] && lvl=aot; arbace_tool -m arbace.cpp.check divergences "$lvl" ;;
+  run) shift; exec "$root/bin/lib/cppi/run" "$@" ;;
   *) sed -n '2,/^set -e/p' "$0" | sed '$d;s/^# \{0,1\}//' >&2; exit 2 ;;
 esac
