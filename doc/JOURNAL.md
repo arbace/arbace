@@ -452,3 +452,33 @@ this helper (haskell-90's night item): the day ran with `HSI_LIBS` its unpacked 
 HFS-I1 (a)", HFS-I5-HFS-I7. Alternatives considered: run-check's one `-XHaskell2010` for every program (rejected: GHC compiled the
 pack's STG in GHC2021 with each test's flags), eligibility by trying the front end on every program (kept as the fallback: a stop
 runs from the pack).
+
+## 2026-11-07: batch 2, third round: batch1's last head, cpp-indep, res34, hfs-i1, and the worktrees' Haskell inputs (branch batch2)
+
+On `batch2` 93db65e83, by an agent by day in the light tier (no gate but `--plan`, no build, no heavy lock: the night shift ran on
+`next`). One merge commit each, the keys computed after each (`bin/arbace-go --gate-key`, `arbace_runtime_key`, `arbace_javac_key`):
+
+- `mac/batch1` 23d640f54 (java-complete's F10a) as `69d8704c2`: the journal and JAVA-DEFERRED-TRIAGE as unions; all three keys move
+  (F10a's jrt natives and overlays): gate `6725b5801608`, runtime `cb6a54899d99`, javac `343e3c44918d`.
+- `mac/cpp-indep` 605c62e69 (CP240 (a), CP241 (b)) as `2bc42fc1c`: `bin/gate`'s oracle-packs block (the same as haskell-90's, kept in
+  place), the Makefile (the `oracle-records-*` targets already in), `kinds.edn` (both crops' kinds), CPP-SURVEY (batch 2's Decided kept,
+  cpp-indep's As built after); its facts from its worktree's `.tmp/independence.diff` applied; C++ independence 31.4% to 54.3% (read 0.148,
+  eval and AOT 0.5), `test/crops/scores.edn` recorded (`5fc449d4e`). Two sampling parts moved to `crops/cpp-oracle.edn` (`--full` 317
+  steps). No key moved.
+- `mac/res34` 5d85bff6e (RES34 on rust-90's line) as `b3de90d41`: `arbace/c/cf2g.ae` (batch 1's CS277 `apack`/`vplen` and RES34's
+  placeholders both kept; the namespace loads), the Makefile, RUST-EVAL-SURVEY. res34's RES61-RES63 renumbered RES64-RES66, since batch 2
+  had proposed its own RES61 (rsi-essential's memory) the same day; the alternative, renumbering batch 2's, would have moved a number the
+  user had already read in batch 2's proposals. Gate `fc2cc71ebe1f`, javac `cc2abcd735f9` (C's embedded set), runtime unchanged.
+- `mac/hfs-i1` ce89c3836 (HFS-I1 (a)) as `d0964c426`: FRONTEND-SURVEY and the journal; its facts applied (no score change); the switch
+  diff left for the night's `compare-front`, as the main session said. No key moved.
+- Proposal 8 (a) built (`2f9eb4fa4`, `2a124fbe9`): `bin/lib/repr-haskell/inputs.bash`, sourced by `bin/repr-haskell` and `bin/hsi`: in a
+  linked worktree (git's common dir) or the clean clone (`.tmp/gate-clean/SHA`) the GHC source and testsuite tarballs are hard-linked from
+  the main checkout's copies and nofib fetched from its checkout; with no copy there, a refusal: a worktree never downloads (the user's
+  network rule). Scheme's SM9 shares the corpora directory itself; here only the immutable inputs are shared, each worktree extracting its
+  own (the extraction gets configure products written into it). The main checkout had none: seeded by hard links from batch 2's `.tmp`
+  (SHA-256 84aefc21 testsuite, 2a83779c source, the pins'; nofib d4750745 cloned, tree 1f5a8852). Checked by `bin/hsi pins --fetch` with
+  batch 2's copies moved aside (all three taken from the main checkout, nothing fetched) and a missing file refused.
+- Checks after each merge: `gate.crops check` 0 problems, both plans clean, `bin/reap` 41 of 44 with deferred.cpp's one problem (CP245),
+  `bin/crops-score --judge --strict` 0; samples under 2 GiB (`bin/oracle-records pins`, `bin/repr-cpp pp-check --essential` 1.47 GB, `bin/rsi
+  judge-test`, `bin/repr-haskell test`). Not run: C's and Rust's AOT after RES34 (the shared `.tmp/ci-aot-lib` is the night's first build).
+- Found: repr-haskell's configure skip test is inverted in native mode (proposal 9 in the AGENDA).
