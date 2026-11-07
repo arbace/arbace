@@ -3734,6 +3734,168 @@ outside this work, each for its owner).
   test_setcomps' passes after the comprehension's locations; test_import's five as classed above). The display imports traceback when an exception is displayed (about 4.5 s on
 goi per uncaught exception, CPython does the same), `-c` imports linecache (about 1.3 s on goi).
 
+## Design: 224, generators' and coroutines' edge cases, and `_asyncio` (2026-11-07, the Mac VM, queue 224)
+
+The classes `:generators`, `:coroutines` and `:asyncio-c`, base 7df8864b. Judged by test_generators, test_coroutines,
+test_asyncgen and test_asyncio's packages, sampled; before any change (run, `bin/pyi lib-test --aot`): 244 methods, 208
+equal, 28 classed, 8 failing (test_asyncgen's, in no class).
+
+**`_asyncio` as a port, not a stand-in.** One file, `builtins_asyncio.go`, follows Modules/_asynciomodule.c function by
+function: the same names (`future_schedule_callbacks` as `futureScheduleCallbacks`), the same order of checks, the same
+messages. What C does by its object model is replaced as follows.
+
+- **The object.** Every Future and Task, exact or a subclass's, is an `*Instance` with `value` a `*futObj` (FutureObj_HEAD
+  and TaskObj's fields in one struct, no pointer back: Go never frees a cycle through a finalized object). `*Instance` gives
+  `__dict__`, weak references, `__del__` and `__slots__` as a class's instances have them. `classInfos` declares the two
+  types with a dict. The built-in slots must see the instance (a future yields itself, a task hands itself to callbacks),
+  so `fixupSlots` leaves them unwrapped for these layouts (`selfSlots`, as `reprOfInstance` does for repr alone).
+- **tp_finalize.** `__del__` is a built-in method (CPython's slot wrapper over tp_finalize), and tracking uses queue 218's
+  `workDel`, so a subclass's `__del__` replaces it as slot_tp_finalize does. A Future is tracked when `fut_log_tb` is set,
+  that is when an exception nobody asked for is stored; a Task when it is still pending at a flush of the pending list.
+  That list is `pendingGens`' rule: a task finished before the flush pays no Go finalizer.
+- **The task registry.** C's linked list holds borrowed references. Here a recent task is in a short strong list (removed by
+  index when it finishes), and at a flush a still pending one is marked in its `finTrack` record, which holds no reference.
+  `all_tasks` reads both under `finMu`. The per-thread lists exist in C for free threading; pyi has a GIL, so one registry.
+- **The thread state.** `asyncio_running_loop` and `asyncio_running_task` are two fields of `Thread`. `current_task(loop)` for
+  another thread's loop walks the thread list, as C's stop-the-world path does.
+- **Contexts.** `PyContext_CopyCurrent` runs per task and per callback; C's HAMT makes it O(1). `pyContext` gets
+  copy-on-write of its dictionary, and the current context moves from the interpreter to the `Thread` (context.c keeps it in
+  the thread state; asyncio's executors make the difference visible).
+- **PyIter_Send.** `genSendTo` learns FutureIter's am_send, so an `await` of a pending or finished future allocates no
+  StopIteration; `GetAwaitable` takes exact futures without a method lookup.
+- **Module state.** The module's exec imports what `module_init` imports, through `builtinModulesErr`, into one state.
+  The types are made once, C's per module; a second import of `_asyncio` renews the state (a Low if a test notices).
+
+**asyncio.graph** needs no port: Lib/asyncio/graph.py reads `_asyncio_awaited_by`, `cr_await`, `cr_frame`, `ag_await`,
+`ag_frame`, `gi_yieldfrom`, `f_generator`. Those are the C getters and generators' attributes. The remote-debugging offsets
+(`_AsyncioDebug`) have no meaning without a C layout and are left out, as `_remote_debugging` is absent.
+
+**Generators and coroutines**, by the failing methods, porting Objects/genobject.c rather than patching messages:
+`__name__` and `__qualname__` settable with their checks (`gen_set_name`), `throw`'s three-argument DeprecationWarning and
+`_gen_throw`'s normalization (an exception instance's traceback, "throw() third argument must be a traceback", the check
+before the frame state), `gi_suspended` and `cr_suspended` as FRAME_SUSPENDED states, `close()` clearing the frame and
+`gen_close`'s cases, `async_gen_asend`/`athrow`'s close, throw and unawaited warnings (`async_gen_asend_close`,
+`async_gen_athrow_close`, the "coroutine method ... was never awaited" RuntimeWarning), and the never-awaited coroutine's
+warning through `warnings._warn_unawaited_coroutine`, as `_PyErr_WarnUnawaitedCoroutine` does.
+
+What stays out, as the user decided: generators resumed by nested runs (216d) are unchanged.
+
+## As built: 224, generators' and coroutines' edge cases, and `_asyncio` (2026-11-07, the Mac VM, queue 224)
+
+As designed ("Design: 224"), with these changes the samples forced.
+
+**`_asyncio`** (`go/arbace/py/builtins_asyncio.ae`) follows Modules/_asynciomodule.c function by function. The state is not
+`Instance.value` as designed: `unwrap` hands that value for the object at every built-in method call, so a future's own
+methods received the state. It is the instance's last slot, `value` stays nil, and no `selfSlots` was needed. C's oddity
+that `_asyncio.Future` takes attributes but has no `__dict__` attribute is not copied (a Low). `asyncio.run`, TaskGroup,
+timeouts, eager tasks and `asyncio.graph` run on it; the remote-debugging offsets stay out (`:remote-debugging`).
+
+**Contexts.** Copy-on-write and the current context per `Thread`, as designed.
+
+**Generators** (`gen.go`, `coro.go`). `throwArgs` is `_gen_throw`. The delegate is now served outside the frame's run, the
+frame linked into the stack, so an error in throw's arguments leaves the generator suspended and a delegate's StopIteration
+comes back through CLEANUP_THROW's rule in `opYieldFrom`. `resume`'s third argument is gen_send_ex2's `closing`. `gi_*`, `cr_*`,
+`ag_*`, `__name__` and `__qualname__` are getsets (in `dir()`, read-only errors as C's). A throw into a generator not started
+puts its frame in the traceback. The asend and athrow awaitables are ported whole, with `close` and "coroutine method ...
+was never awaited" (`workAgen`, under `pendingGens`' rule). `async for` now calls the async generator's hooks
+(`async_gen_anext`): before it did not, so `shutdown_asyncgens` never saw those generators. `anext(it, default)` keeps a
+generator's return value, and PyIter_Send uses `send` on an object with no `__next__`.
+
+**Found on the way: no suspended generator could be finalized.** `Frame.gen` pointed back at the generator, and Go never
+finalizes an object that reaches itself, so queue 218's `workGen` ran only for generators whose frame had gone. Tracking
+(`Generator.track`) now turns that pointer into an address in the frame's views, read through `tracked`. This is what made
+the never-awaited warnings and the async generators' finalizer hooks fire after `gc.collect()`.
+
+**The cycle graph** (`finalize.go`) gained suspended generators, FutureIter and `task_wakeup` as nodes, so gc.collect finds a
+pending task's cycle (task, coroutine, frame, FutureIter, future, wakeup, task), and "Task was destroyed but it is pending!"
+is logged. A generator with an escaped frame stays out: what else holds that frame is not in the graph. Debug mode
+escapes it (`extract_stack` in the coroutine), so test_log_destroyed_pending_task stays classed; a frame's cells stay out for
+the same reason. `cyNode.slots` holds addresses: a pointer into FutureIter kept FutureIter alive, so its probe never ran.
+
+**The moment at `del`** (the user's (a) on 222) now covers DELETE_NAME and DELETE_GLOBAL too (`finPeek`, `finDeleted`), and a
+generator still in the pending list is flushed first.
+
+**Smaller.** `<genexpr>`, `<listcomp>`, `<setcomp>` and `<dictcomp>` as code names (`<generator-exp>` before); an exhausted
+generator's frame has no `f_back`; an unraisable exception with no traceback gets the current frame's (format_unraisable_v).
+A generator's rare fields moved to `genExt`: 32 more bytes had crossed a size class and cost bm_coroutines 7%.
+
+**Classes** (`:tests` names): `:generators` 15 to gone, `:asyncio-c` 7 to gone, `:coroutines` 17 to 2 (the frame keeps the
+coroutine; its one regex stays until a whole run shows it serves nothing). The rest went to the classes that say why:
+`:finalization` 46 to 59 (10 `refcycles` methods read `gc.get_referrers`, which answers nothing here), `:finalization-goi` 59
+to 68 (pass compiled), `:finalization-collect` 29 to 30, `:finalization-cycle` 17 to 18 (a cycle through a frame's globals),
+`:docstrings` 1 to 2.
+
+**Speed.**
+Least compiled wall time in ms of 3 rounds, base and head back to back (210's method; q225's run shared the VM, so both sides carry its load):
+
+| benchmark | CPython | base | head | change |
+|---|---:|---:|---:|---:|
+| bm_async_tree | 231 | 1303 | 746 | -42.7% |
+| bm_async_tree_io | 546 | 2331 | 1380 | -40.8% |
+| bm_async_tree_memoization | 256 | 1485 | 813 | -45.3% |
+| bm_async_tree_eager | 111 | 782 | 405 | -48.2% |
+| bm_async_tree_tg | 230 | 1191 | 549 | -53.9% |
+| bm_async_generators | 316 | 923 | 1374 | +48.9% |
+| bm_coroutines | 368 | 769 | 729 | -5.2% |
+| bm_generators | 159 | 682 | 676 | -0.9% |
+
+bm_async_generators pays for the firstiter hook, which the base skipped in `async for` (a bug): a WeakSet add per generator, as CPython does.
+## Design: 225 (typing's runtime, PEP 695's and PEP 649's scopes)
+
+The classes `:type-params`, `:module-annotations` and `:typing-runtime`, judged by test_type_params, test_annotationlib,
+test_typing and test_type_aliases, CPython 3.14.10's own algorithms ported rather than stand-ins:
+
+- The objects: `Objects/typevarobject.c`, `genericaliasobject.c` and `unionobject.c` ported whole into typing.go: TypeVar,
+  ParamSpec, TypeVarTuple with their constructors' checks, the managed dict that holds `__module__` (a type parameter of
+  PEP 695 has none: its `__module__` is the type's), `evaluate_*` (the function, else a `_ConstEvaluator`), `__reduce__` and
+  `__mro_entries__`; ParamSpecArgs and ParamSpecKwargs as native types; TypeAliasType's constructor; `_Py_make_parameters`
+  and `_Py_subs_parameters` for GenericAlias and Union, `ga_reduce`, `ga_getattro`'s lists, the union builder.
+- The compiler: `codegen_type_param_bound_or_default` and `codegen_typealias_body` (the evaluators' `.format`, position-only,
+  default VALUE, the prologue), `codegen_finish_annotations_scope` (an `__annotate__`'s parameter named `format`),
+  `dictbytype(FREE, DEF_FREE_CLASS)` for every block, a class's type-parameter scope taking the class's private name,
+  `compiler_set_qualname` whole (the name declared global, annotation scopes looked through), and the inlined comprehension
+  in a class body under its own scopes (`_PyCompile_TweakInlinedComprehensionScopes`' `in_class_block`); a name free outside
+  and a cell inside an inlined comprehension stays free.
+- The surroundings the tests show: `__class_getitem__` of the built-in classes as real class methods, a built-in type's
+  class method a `builtin_function_or_method`, `isinstance`'s and `issubclass`'s union, `__set_name__`'s note, the number
+  slots in a built-in type's `__dict__` (typing's Protocols read them).
+
+No trade-off needs the user so far: each item has CPython's answer.
+
+## As built: 225, typing's runtime, PEP 695's and PEP 649's scopes (2026-11-07, the Mac VM, queue 225)
+
+`lib-test-all --fresh` before (7df8864b) and after, per module; test_type_params (the language core's family) by `lib-test --aot`:
+
+| module | before | after |
+|---|---|---|
+| test_type_params | 94 ok of 109 by the driver, 15 not | 109 equal |
+| test_type_aliases | does not import, 31 failing | 31 equal |
+| test_typing | does not import, 718 failing | 714 equal, 4 classed (cpython-only 3, finalization-goi 1) |
+| test_annotationlib | 112 equal, 3 classed, 3 failing | 116 equal, 2 classed (cpython-only 1, c-accelerators 1) |
+
+The classes: `:type-params` to none (10 tests named in it), `:typing-runtime` to none, `:module-annotations` to
+none (test_pkg's 8 equal): all three retired. Two methods moved to standing classes: test_type_repr to `:c-accelerators`
+(pyi's datetime is `_pydatetime`, its `isoformat` a bound method), test_args_kwargs_weakrefs to `:finalization-goi` (equal
+compiled, `del`'s moment under goi).
+
+As the design said, plus what the runs showed:
+
+- Compiler: `compiler_set_qualname` whole gave `global`-declared classes their plain name (pickle of the tests' local classes);
+  the comprehensions' code had the names `<generator-exp>`, `<list-comp>`: now `<genexpr>`, `<listcomp>`. Under the future
+  import a string in an annotation is its repr (`pp/*string-repr*`, ast_unparse), the rest of arbace.repr.python.print's text
+  unchanged. Function annotations evaluate in codegen_annotations_in_scope's order, args before posonly.
+- A function's `__annotate__.__qualname__` is `f.__annotate__` while its code's co_qualname is `__annotate__`: as observed on
+  CPython 3.14.10; the source of the rename was not found in funcobject.c or codegen.c, so `annotateOf` applies it on read.
+- Runtime beyond typing: the number protocol and comparisons listed in `ownSlots` (`'__abs__' in float.__dict__`), `__abs__`'s
+  slot wrapper, `__round__`, `__complex__`, `__bytes__`; a bound built-in's repr, equality and hash (meth_repr, meth_richcompare,
+  meth_hash); mappingproxy's keys, values and items the mapping's views, no longer lists; `iter()` of a class or a union refused
+  (a type's GetItem slot is the subscription, no sq_item); `type.__subclasscheck__`'s check_class; pickling a code object a
+  TypeError.
+- `__class_getitem__` of the rest of test_genericalias's generic types (mappingproxy, generator, coroutine, async_generator,
+  ReferenceType, Template, Interpolation, Token, itertools.chain, DirEntry, whose old method returned the class).
+- Known gap: `sorted(float.__dict__)` still lists only the dict's entries: `ownSlots` answers `in` and `[]`, not iteration.
+  tp_name in "not callable" and setattr's messages stays the bare name (`'TypeVar' object is not callable`).
+
 ## Design: 226, the core data model's gaps (2026-11-07, the Mac VM, queue 226)
 
 The classes `:data-model`, `:module-subclasses`, `:function-constructor`, `:str-protocol` and `:surrogate-pairs`, judged by
