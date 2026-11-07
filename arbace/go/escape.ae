@@ -1,0 +1,3353 @@
+;; A port of gc's escape analysis and inliner (Go 1.27.1, src/cmd/compile/internal/escape, inline,
+;; devirtualize and the parts of ir, typecheck, loopvar, walk, noder and ssagen named below).
+;; Copyright The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file (LICENSE.md: Go's BSD 3-Clause License).
+
+(ns arbace.go.escape
+  "gc's escape analysis over goi's checked trees (doc/go/GOI-SPEC.md, \"Since v1: gc's escape
+  analysis\"): a port, rule for rule, of Go 1.27.1's cmd/compile/internal/escape (escape.go,
+  graph.go, solve.go, expr.go, stmt.go, assign.go, call.go, utils.go, leaks.go; TamaGo's go1.27.1,
+  src/cmd/compile/internal/escape, its forms in tamago/cmd/go/cmd/compile/internal/escape), with
+  the parts of gc's front end it sees the tree through: ir.VisitFuncsBottomUp (ir/scc.go), the
+  ReassignOracle's StaticValue (ir/reassignment.go), loopvar.ForCapture's per-iteration loop
+  variables (loopvar/loopvar.go), typecheck's normalizeGoDeferCall (go/defer wrappers),
+  rewriteMultiValueCall and FixVariadicCall, and ir's expression format (ir/fmt.go) and types'
+  (types/fmt.go) for the messages.
+
+  It reports what gc's -m reports of it: \"moved to heap: x\", \"E escapes to heap\", \"E does not
+  escape\", \"leaking param: p\", \"leaking param content: p\", \"leaking param: p to result r
+  level=n\", \"p does not escape\", the self-assignments ignored; as lines FILE:LINE: MESSAGE, at
+  the forms' lines (the forms keep no columns). The checked tree stands for gc's IR after
+  typecheck: its implicit conversions are its OCONVIFACE nodes, its places and selections gc's
+  ODOT/ODOTPTR/OINDEX, a call's kind gc's OCALLFUNC/OCALLINTER (a method call as gc's fixed
+  OCALLFUNC of the method expression, the receiver its first argument).
+
+  Calls of functions of other packages use their parameter tags as gc does; goi has no export
+  data, so a package's functions are analyzed from their forms when the package's forms are at
+  hand (arbace.go.escape/*import-tags*), else such a call's arguments leak to the heap (gc's
+  unknown callee).
+
+  Without -l gc's inliner runs first (inline/inl.go's CanInline and hairyVisitor, the interleaved
+  inliner, devirtualize.StaticCall interleaved): can inline f, inlining call to f; the analysis then
+  sees the inlined bodies."
+  (:require [arbace.string :as str]
+            [arbace.go.check.env :as e]
+            [arbace.go.check.types :as t]))
+
+;;; Flags and output
+
+(def ^:dynamic *m*
+  "gc's -m level (base.Flag.LowerM)."
+  1)
+
+(def ^:dynamic *debug*
+  "gc's -d flags the analysis reads: {:escapemutationscalls n :zerocopy n} (base.Debug; zerocopy
+  is on by default)."
+  {:zerocopy 1})
+
+(def ^:dynamic *msgs*
+  "A volatile vector of the messages: [line text]."
+  nil)
+
+(def ^:dynamic *wfile*
+  "The file of the function a message is of."
+  nil)
+
+(defn- warn! [line msg]
+  (vswap! *msgs* conj [*wfile* (or line 0) msg]))
+
+(defn- file-of [d]
+  (let [f (:file d)]
+    (cond (string? f) f (map? f) (:name f) :else nil)))
+
+(defn- unsupported! [what]
+  (throw (ex-info (str "not supported by goi yet: escape analysis of " what) {:goi/unsupported (str "escape analysis of " what)})))
+
+(def ^:dynamic *ctx*
+  "The run: {:local-pkg path, :fn-of-obj HashMap obj -> fn, :fn-of-node IdentityHashMap node -> fn,
+  :loc-of HashMap obj -> location (gc's Name.Opt), :owner HashMap obj -> fn}."
+  nil)
+
+;;; Types (types.Type's predicates gc's escape analysis asks)
+
+(defn- under [ty] (t/under ty))
+
+(defn- kind [ty]
+  (let [u (under ty)]
+    (cond (keyword? u) u
+          (vector? u) (nth u 0)
+          :else :invalid)))
+
+(defn- iface? [ty] (= :interface (kind ty)))
+(defn- elem [ty]
+  (let [u (under ty)]
+    (case (nth u 0)
+      (:pointer :slice) (nth u 1)
+      :array (nth u 2)
+      :map (nth u 2)
+      :chan (nth u 2)
+      nil)))
+
+(defn has-pointers?
+  "types.Type.HasPointers."
+  [ty]
+  (let [u (under ty)]
+    (cond
+      (keyword? u) (boolean (#{:string :unsafe-pointer :untyped-nil} u))
+      (vector? u) (case (nth u 0)
+                    (:pointer :slice :map :chan :func :interface) true
+                    :array (and (pos? (long (nth u 1))) (has-pointers? (nth u 2)))
+                    :struct (boolean (some #(has-pointers? (:type %)) (nth u 1)))
+                    :tuple (boolean (some has-pointers? (rest u)))
+                    true)
+      :else false)))
+
+(defn- direct-iface?
+  "types.IsDirectIface: a pointer-shaped type, stored in an interface's data word directly."
+  [ty]
+  (let [u (under ty)]
+    (cond
+      (keyword? u) (= :unsafe-pointer u)
+      (vector? u) (case (nth u 0)
+                    (:pointer :chan :map :func) true
+                    :array (and (= 1 (long (nth u 1))) (direct-iface? (nth u 2)))
+                    :struct (let [fs (nth u 1)] (and (= 1 (count fs)) (direct-iface? (:type (first fs)))))
+                    false)
+      :else false)))
+
+(defn- size ^long [ty] (long (t/sizeof ty)))
+(defn- align ^long [ty] (long (t/alignof ty)))
+
+(defn- untyped? [ty] (t/untyped? ty))
+
+(def ^:private go-ops
+  {"bit-and" "&" "bit-or" "|" "bit-xor" "^" "bit-and-not" "&^" "and" "&&" "or" "||" "not" "!" "bit-not" "^"
+   "=" "==" "not=" "!=" "==" "==" "!=" "!="})
+
+(defn- gop
+  "A unary or binary node's Go operator (the forms spell some: bit-and, not=, ...)."
+  [n]
+  (let [o (str (:go/op n))] (get go-ops o o)))
+
+(defn- spread-call? [n] (boolean (or (:spread n) (:spread (peek (vec (:args n)))))))
+
+;;; types/fmt.go's tconv in fmtGo mode, for the messages
+
+(declare type-str)
+
+(defn- params-str [ps variadic]
+  (str "(" (str/join ", " (map-indexed (fn [i p]
+                                         (if (and variadic (= i (dec (count ps))))
+                                           (str "..." (type-str (elem p)))
+                                           (type-str p)))
+                                       ps)) ")"))
+
+(defn type-str
+  "A type as gc's %v of a types.Type prints it (types/fmt.go, fmtGo): the local package's names
+  unqualified, others' qualified by their package's name."
+  [ty]
+  (cond
+    (keyword? ty) (case ty
+                    :unsafe-pointer "unsafe.Pointer"
+                    :untyped-nil "nil"
+                    :untyped-bool "untyped bool" :untyped-int "untyped int" :untyped-rune "untyped rune"
+                    :untyped-float "untyped float" :untyped-complex "untyped complex" :untyped-string "untyped string"
+                    (name ty))
+    (t/named? ty) (let [i (t/info ty)
+                        n (str (:name i)
+                               (when-let [as (seq (:targs i))] (str "[" (str/join "," (map type-str as)) "]")))]
+                    (cond
+                      (and (= "error" (:name i)) (nil? (:pkg i))) "error"
+                      (or (nil? (:pkg i)) (= (:pkg i) (:local-pkg *ctx*))) n
+                      :else (str (last (str/split (str (:pkg i)) #"/")) "." n)))
+    (vector? ty) (case (nth ty 0)
+                   :pointer (str "*" (type-str (nth ty 1)))
+                   :slice (str "[]" (type-str (nth ty 1)))
+                   :array (str "[" (nth ty 1) "]" (type-str (nth ty 2)))
+                   :map (str "map[" (type-str (nth ty 1)) "]" (type-str (nth ty 2)))
+                   :chan (let [[_ dir et] ty]
+                           (case dir
+                             :recv (str "<-chan " (type-str et))
+                             :send (str "chan<- " (type-str et))
+                             (if (and (vector? et) (= :chan (nth et 0)) (= :recv (nth et 1)))
+                               (str "chan (" (type-str et) ")")
+                               (str "chan " (type-str et)))))
+                   :func (let [[_ ps rs variadic] ty]
+                           (str "func" (params-str ps variadic)
+                                (case (count rs)
+                                  0 ""
+                                  1 (str " " (type-str (first rs)))
+                                  (str " " (params-str rs false)))))
+                   :interface (let [ms (nth ty 1)]
+                                (if (and (empty? ms) (empty? (nth ty 2 nil)))
+                                  "interface {}"
+                                  (str "interface {"
+                                       (str/join ";" (for [m ms]
+                                                       (let [[_ ps rs variadic] (:type m)]
+                                                         (str " " (:name m) (params-str ps variadic)
+                                                              (case (count rs) 0 "" 1 (str " " (type-str (first rs))) (str " " (params-str rs false)))))))
+                                       " }")))
+                   :struct (let [fs (nth ty 1)]
+                             (str "struct {"
+                                  (str/join ";" (for [f fs]
+                                                  (str " " (if (:embedded f) (type-str (:type f)) (str (:name f) " " (type-str (:type f))))
+                                                       (when (:tag f) (str " " (pr-str (:tag f)))))))
+                                  (when (seq fs) " ")
+                                  "}"))
+                   (str ty))
+    :else (str ty)))
+
+;;; The run's state
+
+;; locations (graph.go's location): volatiles of maps
+(def ^:private attr-escapes 1)
+(def ^:private attr-persists 2)
+(def ^:private attr-mutates 4)
+(def ^:private attr-calls 8)
+
+(defn- lget [l k] (get @l k))
+(defn- lset! [l k v] (vswap! l assoc k v))
+(defn- has-attr? [l a] (not (zero? (bit-and (long (lget l :attrs)) (long a)))))
+
+;; leaks.go: [8]uint8, each derefs+1 (0: none); heap, mutator, callee, results 0..4
+(def ^:private no-leaks [0 0 0 0 0 0 0 0])
+(def ^:private num-esc-results 5)
+(defn- leak-get ^long [lk i] (dec (long (nth lk i))))
+(defn- leak-add [lk i derefs]
+  (let [old (leak-get lk i)]
+    (if (or (neg? old) (< (long derefs) old))
+      (assoc lk i (min 255 (inc (long derefs))))
+      lk)))
+(defn- leak-optimize [lk]
+  (let [x (leak-get lk 0)]
+    (if (>= x 0)
+      (reduce (fn [lk i] (if (>= (leak-get lk i) x) (assoc lk i 0) lk)) lk (range 1 8))
+      lk)))
+(defn- leak-encode
+  "Encode then parseLeaks: a tag whose heap leak is 0 keeps that alone (Encode's \"\")."
+  [lk]
+  (if (= 0 (leak-get lk 0)) (assoc no-leaks 0 1) lk))
+
+(defn- fn-get [f k] (get @f k))
+(defn- fn-set! [f k v] (vswap! f assoc k v))
+
+(defn- new-batch []
+  (let [mk (fn [attrs] (volatile! {:attrs attrs :edges [] :derefs 0 :walkgen 0 :queued-one 0 :param-esc no-leaks :special true}))]
+    {:all-locs (volatile! [])
+     :closures (volatile! [])
+     :heap (mk (bit-or attr-escapes attr-persists attr-mutates attr-calls))
+     :mutator (mk attr-mutates)
+     :callee (mk attr-calls)
+     :blank (mk 0)}))
+
+;; an escape (escape.go's escape): the batch, the function, the loop depth, the labels, the
+;; current line (base.Pos)
+(defn- with-fn [b f] (volatile! {:b b :curfn f :loop-depth 1 :labels {} :line (fn-get f :line)}))
+(defn- eb [e] (:b @e))
+(defn- curfn [e] (:curfn @e))
+(defn- depth ^long [e] (long (:loop-depth @e)))
+
+(defn- hole [l] {:dst l :derefs 0 :addrtaken false})
+(defn- heap-hole [e] (hole (:heap (eb e))))
+(defn- mutator-hole [e] (hole (:mutator (eb e))))
+(defn- callee-hole [e] (hole (:callee (eb e))))
+(defn- discard-hole [e] (hole (:blank (eb e))))
+(defn- shift [k delta]
+  (let [d (+ (long (:derefs k)) (long delta))]
+    (assoc k :derefs d :addrtaken (neg? (long delta)))))
+(defn- k-deref [k] (shift k 1))
+(defn- k-addr [k] (shift k -1))
+(defn- dot-type [k ty]
+  (if (and (not (iface? ty)) (not (direct-iface? ty))) (shift k 1) k))
+
+(defn- name-loc? [l] (= :name (lget l :what)))
+
+(defn- new-loc
+  "escape.newLoc: n an object (a variable: :what :name) or a node (an expression), or nil."
+  [e n persists]
+  (let [obj? (e/obj? n)
+        l (volatile! {:n n :what (cond obj? :name n :expr :else nil) :curfn (curfn e) :edges []
+                      :loop-depth (depth e) :result-index 0 :derefs 0 :walkgen 0 :dst nil :dst-edge-idx 0
+                      :queued-all false :queued-one 0 :attrs (if persists attr-persists 0) :param-esc no-leaks
+                      :captured false :reassigned false :addrtaken false
+                      :param (boolean (and obj? (= :param (e/o n :esc-class))))
+                      :param-out (boolean (and obj? (= :result (e/o n :esc-class))))
+                      :line (if obj? (e/o n :line) (or (:line n) (:line @e)))})]
+    (vswap! (:all-locs (eb e)) conj l)
+    (when obj?
+      (.put ^java.util.HashMap (:loc-of *ctx*) n l))
+    l))
+
+(defn- old-loc [e o]
+  (or (.get ^java.util.HashMap (:loc-of *ctx*) o)
+      (unsupported! (str "a variable without a location (" (e/o o :name) " of line " (e/o o :line) " in " (fn-get (curfn e) :name) ")"))))
+
+(defn- flow
+  "batch.flow."
+  [e k src]
+  (when (:addrtaken k) (lset! src :addrtaken true))
+  (let [b (eb e)
+        dst (:dst k)
+        derefs (long (:derefs k))]
+    (cond
+      (identical? dst (:blank b)) nil
+      (and (identical? dst src) (>= derefs 0)) nil
+      (and (has-attr? dst attr-escapes) (< derefs 0))
+      (vswap! src update :attrs bit-or (bit-or attr-escapes attr-persists attr-mutates attr-calls))
+      :else (vswap! dst update :edges conj [src derefs]))))
+
+(defn- tee-hole [e ks]
+  (case (count ks)
+    0 (discard-hole e)
+    1 (first ks)
+    (let [l (new-loc e nil false)]
+      (doseq [k ks] (flow e k l))
+      (hole l))))
+
+(defn- later [e k]
+  (let [l (new-loc e nil true)]
+    (flow e k l)
+    (hole l)))
+
+(defn- spill [e k n]
+  (let [l (new-loc e n false)]
+    (flow e (k-addr k) l)
+    (hole l)))
+
+;;; Functions
+
+(declare foreign-fn)
+
+(defn- fn-of-obj [o]
+  (when o
+    (or (.get ^java.util.HashMap (:fn-of-obj *ctx*) o)
+        (when (and (e/obj? o) (= :func (e/o o :kind)) (e/o o :pkg) (not= (e/o o :pkg) (:local-pkg *ctx*)))
+          (let [f (foreign-fn o)]
+            (.put ^java.util.HashMap (:fn-of-obj *ctx*) o f)
+            f)))))
+(defn- fn-of-node [n] (.get ^java.util.IdentityHashMap (:fn-of-node *ctx*) n))
+
+(defn- contains-closure?
+  "ir.ContainsClosure: closure c nested (at any depth) in f."
+  [f c]
+  (and (not (identical? f c))
+       (loop [c (fn-get c :parent)]
+         (cond (nil? c) false
+               (identical? c f) true
+               :else (recur (fn-get c :parent))))))
+
+(defn- in-mutual-batch? [f]
+  (and f (#{:planned :started} (fn-get f :esc))))
+
+;;; The tree: helpers over the checked tree's nodes
+
+(defn- node-type [n] (:type n))
+(defn- const? [n] (or (#{:const :nil} (:op n)) (= :constant (:mode n))))
+
+(defn- field-steps
+  "A selection's steps from x: [[deref? field-type] ...] for path's field indexes (the embedded
+  fields' and the selected field's) from x's type."
+  [xty path derefs]
+  (loop [ty xty i 0 acc []]
+    (if (= i (count path))
+      acc
+      (let [d (if derefs (boolean (nth derefs i false)) (t/pointer? ty))
+            sty (if d (elem ty) ty)
+            u (under sty)
+            fs (when (and (vector? u) (= :struct (nth u 0))) (nth u 1))
+            f (nth fs (nth path i) nil)]
+        (when-not f (unsupported! "a selection through a type it cannot follow"))
+        (recur (:type f) (inc i) (conj acc [d (:type f) (:name f)]))))))
+
+(defn- select-node
+  "The nodes of x.f1.f2...: a selection node of one step each ({:op :sel :deref d :x ..}), from
+  steps of field-steps."
+  [x steps line]
+  (reduce (fn [x [d ty nm]] {:op :sel :deref d :x x :type ty :field-name nm :line line :mode :variable})
+          x steps))
+
+(defn- expand-field
+  "A :field or :place-field node as nested one-step selections (gc's ODOT/ODOTPTR chain)."
+  [n]
+  (let [x (:x n)
+        steps (field-steps (node-type x) (:path n) (:derefs n))]
+    (select-node x steps (:line n))))
+
+(defn- method-recv
+  "A method call's or method value's receiver as gc's IR has it: the embedded fields selected
+  (:path less its last, the method's index), then the implicit & or *."
+  [mn]
+  (let [x (:recv mn)
+        path (pop (vec (:path mn)))
+        steps (field-steps (node-type x) path nil)
+        x (select-node x steps (:line mn))
+        line (:line mn)
+        m (:method mn)
+        ptr (when (e/obj? m) (e/o m :ptr-recv))
+        xt (node-type x)
+        ;; the implicit & or * gc's typecheck puts on the receiver its embedded fields selected
+        adj (cond
+              (nil? ptr) (:recv-adjust mn)
+              (and ptr (not (t/pointer? xt))) :addr
+              (and (not ptr) (t/pointer? xt)) :deref
+              :else nil)]
+    (case adj
+      :addr {:op :addr :implicit true :x x :type [:pointer (node-type x)] :line line :mode :value}
+      :deref {:op :deref :implicit true :x x :type (elem (node-type x)) :line line :mode :variable}
+      x)))
+
+;;; ir/fmt.go's exprFmt, for the messages
+
+(declare fmt-node variadic-args)
+
+(def ^:private prec
+  {:call 8 :lit 8 :local 8 :global 8 :func 8 :const 8 :nil 8 :conv 8 :convert-iface 8 :index 8 :map-index 8
+   :slice 8 :sel 8 :field 8 :method 8 :method-expr 8 :assert 8 :fn 8 :type 8 :result 8 :place-local 8
+   :unary 7 :addr 7 :deref 7 :recv 7 :addstr 5})
+
+(def ^:private bin-prec
+  {"*" 6 "/" 6 "%" 6 "<<" 6 ">>" 6 "&" 6 "&^" 6 "+" 5 "-" 5 "|" 5 "^" 5
+   "==" 4 "!=" 4 "<" 4 "<=" 4 ">" 4 ">=" 4 "&&" 2 "||" 1})
+
+(defn- node-prec [n]
+  (case (:op n)
+    :binary (get bin-prec (gop n) 5)
+    :addr (if (= :lit (:op (:x n))) 0 7)
+    (get prec (:op n) 8)))
+
+(defn- const-str [n]
+  (let [f (:form n)
+        v (:val n)
+        ty (node-type n)]
+    (cond
+      (= :untyped-nil ty) "nil"
+      (or (= ty :rune) (= ty :untyped-rune))
+      (if (and (integer? v) (<= 0 (long v) 0x10FFFF)) (pr-str (char (long v))) (str v))
+      :else
+      (let [vs (cond (string? v) (pr-str v)
+                     (instance? Boolean v) (str v)
+                     :else (str v))]
+        (if (or (untyped? ty) (#{:int :float64 :complex128 :string :bool} ty))
+          vs
+          (str (type-str ty) "(" vs ")"))))))
+
+(defn- args-str [args] (str/join ", " (map #(fmt-node % 0) args)))
+
+(defn- builtin-str [n]
+  (let [b (:builtin n)
+        args (:args n)]
+    (case b
+      "new" (str "new(" (type-str (elem (node-type n))) ")")
+      "make" (let [ty (node-type n)
+                   [l c] (rest args)]
+               (cond
+                 c (str "make(" (type-str ty) ", " (fmt-node l 0) ", " (fmt-node c 0) ")")
+                 (and l (or (= :slice (kind ty)) (not (untyped? (node-type l)))))
+                 (str "make(" (type-str ty) ", " (fmt-node l 0) ")")
+                 :else (str "make(" (type-str ty) ")")))
+      (str b "(" (args-str args) (when (spread-call? n) "...") ")"))))
+
+(defn fmt-node
+  "exprFmt: node n as gc's %v of its IR prints it, at precedence p."
+  [n p]
+  (let [n (loop [n n]
+            (if (and (#{:addr :deref :convert-iface} (:op n)) (or (:implicit n) (= :convert-iface (:op n))))
+              (recur (:x n))
+              n))
+        np (node-prec n)]
+    (if (and (> (long p) (long np)) (not (const? n)))
+      (str "(" (fmt-node n 0) ")")
+      (case (if (const? n) :const (:op n))
+        (:local :global :place-local :place-global) (let [o (:obj n) nm (e/o o :name)]
+                                                      (cond (str/starts-with? nm "~b") "_"
+                                                            (e/o o :inl-pkg) (str (e/o o :inl-pkg) "." nm)
+                                                            :else nm))
+        :func (let [o (:obj n) pk (e/o o :pkg)]
+                (if (and pk (not= pk (:local-pkg *ctx*)))
+                  (str (last (str/split (str pk) #"/")) "." (e/o o :name))
+                  (e/o o :name)))
+        (:const :nil) (const-str n)
+        :fn "func literal"
+        :addr (if (= :lit (:op (:x n)))
+                (str "&" (fmt-node (:x n) 0))
+                (str "&" (fmt-node (:x n) (inc (long np)))))
+        :deref (str "*" (fmt-node (:x n) (inc (long np))))
+        :lit (if (:implicit n)
+               "... argument"
+               (str (type-str (node-type n)) "{"
+                    (when (seq (or (:elems n) (:fields n) (:entries n))) "...")
+                    "}"))
+        :sel (str (fmt-node (:x n) np) "." (:field-name n))
+        (:field :place-field) (fmt-node (expand-field n) p)
+        :method (str (fmt-node (:recv n) np) "." (or (e/o (:method n) :name) (:name (:method n))))
+        :iface-method (str (fmt-node (:recv n) np) "." (:name (:method n)))
+        :method-expr (str (type-str (:recv-type n)) "." (e/o (:method n) :name))
+        :assert (str (fmt-node (:x n) np) ".("
+                     (let [f (:form n)]
+                       (if (and (seq? f) (= 'any (last f)) (iface? (:to n))) "any" (type-str (:to n))))
+                     ")")
+        (:index :place-index) (str (fmt-node (:x n) np) "[" (fmt-node (:index n) 0) "]")
+        (:map-index :place-map) (str (fmt-node (:x n) np) "[" (fmt-node (or (:key n) (:index n)) 0) "]")
+        :slice (let [[lo hi mx] (:indexes n)]
+                 (str (fmt-node (:x n) np) "[" (when lo (fmt-node lo 0)) ":" (when hi (fmt-node hi 0))
+                      (when (= 3 (count (:indexes n))) (str ":" (when mx (fmt-node mx 0)))) "]"))
+        :conv (let [ty (node-type n)
+                    tf (let [f (:form n)] (when (and (seq? f) (= 'conv (first f))) (second f)))]
+                (str (cond
+                       (and (= 'any tf) (iface? ty)) "any"
+                       (or (keyword? ty) (t/named? ty)) (type-str ty)
+                       :else (str "(" (type-str ty) ")"))
+                     "(" (fmt-node (:x n) 0) ")"))
+        :call (case (:kind n)
+                :builtin (builtin-str n)
+                (let [c (:callee n)
+                      sig (node-type c)
+                      variadic (and (vector? (under sig)) (= :func (nth (under sig) 0)) (nth (under sig) 3 false))
+                      args (if variadic (variadic-args n sig) (:args n))
+                      ddd (or (spread-call? n) variadic)]
+                  (str (fmt-node c np) "(" (args-str args) (when ddd "...") ")")))
+        :result (fmt-node (:call n) p)
+        :unary (str (gop n) (when (= (:op (:x n)) :unary) " ") (fmt-node (:x n) (inc (long np))))
+        :recv (str "<-" (fmt-node (:x n) (inc (long np))))
+        :binary (str (fmt-node (:x n) np) " " (gop n) " " (fmt-node (:y n) (inc (long np))))
+        :addstr (str/join " + " (map #(fmt-node % np) (:list n)))
+        :type (type-str (node-type n))
+        (str (:form n))))))
+
+;;; Expressions (expr.go)
+
+(declare expr discard stmts stmt call walk-func! assign-list addr-of reassigned! dcl! call-tag-hole heap-alloc-reason call-temps elt-value builtin-call)
+
+(defn- with-line* [e n f]
+  (let [old (:line @e)
+        l (or (:line n) old)]
+    (vswap! e assoc :line l)
+    (let [r (f)]
+      (vswap! e assoc :line old)
+      r)))
+
+(defn- assign-heap [e src] (expr e (heap-hole e) src))
+(defn- mutate [e n] (expr e (mutator-hole e) n))
+(defn- discards [e ns] (doseq [n ns] (discard e n)))
+
+(defn- conv-kind
+  "The op gc's typecheck gives an explicit conversion (typecheck.tcConv): :str2bytes, :bytes2str
+  ... :iface (OCONVIFACE), :unsafe-from-uintptr, or :nop (OCONV, OCONVNOP)."
+  [n]
+  (let [to (node-type n)
+        from (node-type (:x n))
+        tk (kind to)
+        fk (kind from)
+        eb (fn [ty] (kind (elem ty)))]
+    (cond
+      (and (iface? to) (not (iface? from))) :iface
+      (and (= :string tk) (= :slice fk) (#{:uint8 :byte} (eb from))) :bytes2str
+      (and (= :string tk) (= :slice fk) (#{:int32 :rune} (eb from))) :runes2str
+      (and (= :string tk) (t/integer-type? from)) :runestr
+      (and (= :slice tk) (= :string fk) (#{:uint8 :byte} (eb to))) :str2bytes
+      (and (= :slice tk) (= :string fk) (#{:int32 :rune} (eb to))) :str2runes
+      (and (= :array tk) (= :slice fk)) :slice2arr
+      (and (= :pointer tk) (= :array (kind (elem to))) (= :slice fk)) :slice2arrptr
+      (and (= :unsafe-pointer tk) (= :uintptr fk)) :unsafe-from-uintptr
+      :else :nop)))
+
+(defn- reflect-header-data?
+  "ir.IsReflectHeaderDataField: n (a one-step selection) is the Data field of a
+  *reflect.SliceHeader or *reflect.StringHeader."
+  [n]
+  (and (= :sel (:op n)) (:deref n) (= "Data" (:field-name n))
+       (let [et (elem (node-type (:x n)))]
+         (and (t/named? et) (= "reflect" (:pkg (t/info et)))
+              (#{"SliceHeader" "StringHeader"} (:name (t/info et)))))))
+
+(defn- unsafe-value
+  "escape.unsafeValue: k flows from a uintptr expression n converted to unsafe.Pointer."
+  [e k n]
+  (cond
+    (= :field (:op n)) (unsafe-value e k (expand-field n))
+    (= :sel (:op n)) (if (reflect-header-data? n) (expr e (k-deref k) (:x n)) (discard e (:x n)))
+    (= :conv (:op n)) (if (t/unsafe-pointer? (node-type (:x n))) (expr e k (:x n)) (discard e (:x n)))
+    (and (= :unary (:op n)) (#{"+" "-" "^"} (gop n))) (unsafe-value e k (:x n))
+    (and (= :binary (:op n)) (#{"+" "-" "|" "^" "*" "/" "%" "&" "&^"} (gop n)))
+    (do (unsafe-value e k (:x n)) (unsafe-value e k (:y n)))
+    (and (= :binary (:op n)) (#{"<<" ">>"} (gop n)))
+    (do (unsafe-value e k (:x n)) (discard e (:y n)))
+    :else (expr e (discard-hole e) n)))
+
+(defn- add-string-list
+  "OADDSTR's operands: a string + chain flattened (typecheck's tcArith of strings)."
+  [n]
+  (if (and (= :binary (:op n)) (= "+" (gop n)) (not (const? n)) (t/string-type? (node-type n)))
+    (concat (add-string-list (:x n)) [(:y n)])
+    [n]))
+
+(defn- closure-expr
+  "OCLOSURE: the literal's record spilled; a closure (a literal that captures a variable,
+  Func.IsClosure) walked here, in its enclosing function's batch, its captured variables marked;
+  a literal that captures none is a function of its own, analyzed in an earlier batch."
+  [e k n]
+  (let [f (fn-of-node n)
+        k (spill e k n)]
+    (vswap! (:closures (eb e)) conj [k n])
+    (when (fn-get f :closure?)
+      (doseq [cv (fn-get f :closure-vars)]
+        (let [l (old-loc e cv)]
+          (when-not (lget l :captured)
+            (lset! l :captured true)
+            (when (= (long (lget l :loop-depth)) (depth e))
+              (lset! l :reassigned false)))))
+      (walk-func! (eb e) f))))
+
+(defn- method-value [e k n]
+  (let [closure-k (spill e k n)
+        m (fn-of-obj (:method n))
+        ty (e/o (:method n) :type)
+        nres (count (nth (under ty) 2 []))
+        ks (vec (repeat nres (heap-hole e)))
+        param-k (if m
+                  (call-tag-hole e ks m :recv)
+                  (heap-hole e))]
+    (expr e (tee-hole e [param-k closure-k]) (method-recv n))))
+
+(defn- expr-skip-init [e k n]
+  (let [ty (node-type n)
+        k (if (and (>= (long (:derefs k)) 0) ty (not (untyped? ty)) (not= :invalid ty) (not (has-pointers? ty)))
+            (assoc k :dst (:blank (eb e)))
+            k)]
+    (if (const? n)
+      nil
+      (case (:op n)
+        (:global :place-global :func :type :method-expr :ok) nil
+        (:local :place-local) (flow e k (old-loc e (:obj n)))
+        :unary (discard e (:x n))
+        :binary (if (and (= "+" (gop n)) (t/string-type? ty))
+                  (let [k2 (spill e k (assoc n :op :addstr :list (vec (add-string-list n))))]
+                    (discards e (add-string-list n)))
+                  (do (discard e (:x n)) (discard e (:y n))))
+        :addr (if (= :lit (:op (:x n)))
+                (do (when-let [why (heap-alloc-reason n)] nil)
+                    (expr e (spill e k n) (:x n)))
+                (expr e (k-addr k) (:x n)))
+        :deref (expr e (k-deref k) (:x n))
+        (:field :place-field) (expr e k (expand-field n))
+        :sel (expr e (if (:deref n) (k-deref k) k) (:x n))
+        :assert (expr e (dot-type k ty) (:x n))
+        (:index :place-index) (let [xt (node-type (:x n))]
+                                (if (= :array (kind xt))
+                                  (expr e k (:x n))
+                                  (expr e (k-deref k) (:x n)))
+                                (discard e (:index n)))
+        (:map-index :place-map) (do (discard e (:x n)) (discard e (or (:key n) (:index n))))
+        :slice (let [xt (node-type (:x n))]
+                 (if (= :array (kind xt))
+                   (expr e (k-addr k) (:x n))
+                   (expr e k (:x n)))
+                 (discards e (remove nil? (:indexes n))))
+        :conv (case (conv-kind n)
+                :iface (let [k (if (and (not (iface? (node-type (:x n)))) (not (direct-iface? (node-type (:x n)))))
+                                 (spill e k n) k)]
+                         (expr e k (:x n)))
+                (:bytes2str :runes2str :runestr :str2bytes :str2runes) (do (spill e k n) (discard e (:x n)))
+                :slice2arr (expr e (k-deref k) (:x n))
+                :unsafe-from-uintptr (unsafe-value e k (:x n))
+                (expr e k (:x n)))
+        :convert-iface (let [xt (node-type (:x n))
+                             k (if (and (not (iface? xt)) (not (direct-iface? xt))) (spill e k n) k)]
+                         (expr e k (:x n)))
+        :recv (discard e (:x n))
+        :call (case (:kind n)
+                :builtin (case (:builtin n)
+                           "new" (if (= :type (:op (first (:args n))))
+                                   (spill e k n)
+                                   (unsupported! "new of a value"))
+                           "make" (let [ty (node-type n)]
+                                    (case (kind ty)
+                                      (:slice :map) (do (spill e k n) (discards e (rest (:args n))))
+                                      (discards e (rest (:args n)))))
+                           (call e [k] n))
+                (call e [k] n))
+        :inlcall (call e [k] n)
+        :result (let [tmps (call-temps e (:call n))]
+                  (flow e k (nth tmps (:index n))))
+        :lit (case (:kind n)
+               :array (doseq [x (:elems n)] (expr e k (elt-value x)))
+               :slice (let [k (spill e k n)] (doseq [x (:elems n)] (expr e k (elt-value x))))
+               :struct (doseq [x (:fields n)] (expr e k (elt-value x)))
+               :map (do (spill e k n)
+                        (doseq [x (:entries n)]
+                          (assign-heap e (:key x))
+                          (assign-heap e (:value x))))
+               (unsupported! (str "a composite literal of kind " (:kind n))))
+        :fn (closure-expr e k n)
+        :method (method-value e k n)
+        :iface-method (expr e k (:recv n))
+        (unsupported! (str "the expression " (:op n)))))))
+
+(defn- elt-value
+  "A composite literal's element: its value (a keyed element's)."
+  [x]
+  (cond
+    (and (map? x) (contains? x :value) (not (:op x))) (:value x)
+    (and (map? x) (= :key (:op x))) (:value x)
+    :else x))
+
+(defn expr [e k n]
+  (when n
+    (with-line* e n #(expr-skip-init e k n))))
+
+(defn discard [e n] (expr e (discard-hole e) n))
+
+(defn- max-stack ^long [] (if (:smallframes *debug*) (* 64 1024) (* 128 1024)))
+(defn- max-implicit ^long [] (if (:smallframes *debug*) (* 16 1024) (* 64 1024)))
+
+(defn- heap-alloc-reason
+  "escape.HeapAllocReason: why node n must be on the heap, or nil."
+  [n]
+  (let [ty (node-type n)]
+    (when (and ty (not= :invalid ty))
+      (cond
+        (> (size ty) (max-stack)) "too large for stack"
+        (> (align ty) 8) "too aligned for stack"
+        (and (or (and (= :call (:op n)) (= "new" (:builtin n))) (and (= :addr (:op n)) (= :lit (:op (:x n)))))
+             (> (size (elem ty)) (max-implicit))) "too large for stack"
+        (and (= :method (:op n)) (> (+ 8 (size (node-type (method-recv n)))) (max-implicit))) "too large for stack"
+        (and (= :call (:op n)) (= "make" (:builtin n)) (= :slice (kind ty)))
+        (let [[l c] (rest (:args n))
+              r (or c l)
+              es (size (elem ty))]
+          (cond
+            (zero? es) "zero-sized element"
+            (not (and r (= :constant (:mode r)) (integer? (:val r)) (<= 0 (long (:val r))))) nil
+            (> (long (:val r)) (quot (max-implicit) es)) "too large for stack"
+            :else nil))
+        :else nil))))
+
+;;; Multi-value calls (typecheck's rewriteMultiValueCall: t1, t2 := f())
+
+(defn- call-temps
+  "The temporaries of a multi-value call (OAS2FUNC into autotmps), made and the call walked
+  the first time one of its results is used."
+  [e c]
+  (let [^java.util.IdentityHashMap tm (:temps *ctx*)]
+    (or (.get tm c)
+        (let [rtys (if (= :inlcall (:op c))
+                     (mapv #(e/o % :type) (:retvars c))
+                     (let [ty (node-type (:callee c))] (nth (under (or ty [:func [] [] false])) 2 nil)))
+              rtys (or rtys (rest (node-type c)))
+              tmps (vec (for [i (range (count rtys))]
+                          (let [o (e/obj {:kind :var :name (str ".autotmp_" i) :line (or (:line c) (:line @e))
+                                          :type (nth rtys i)})]
+                            (new-loc e o true))))]
+          (.put tm c tmps)
+          (call e (mapv hole tmps) c)
+          tmps))))
+
+;;; Calls (call.go)
+
+(defn- tag-hole
+  "escape.tagHole: the hole for argument param (:recv or an index) of fn f."
+  [e ks f param]
+  (cond
+    (nil? f) (heap-hole e)
+    (in-mutual-batch? f)
+    (let [o (if (= :recv param) (fn-get f :recv) (nth (fn-get f :params) param nil))]
+      (if (or (nil? o) (= "_" (e/o o :name)))
+        (discard-hole e)
+        (hole (old-loc e o))))
+    :else
+    (let [esc (or (get (fn-get f :tags) param) (assoc no-leaks 0 1))
+          tks (cond-> []
+                (>= (leak-get esc 0) 0) (conj (shift (heap-hole e) (leak-get esc 0)))
+                (>= (leak-get esc 1) 0) (conj (shift (mutator-hole e) (leak-get esc 1)))
+                (>= (leak-get esc 2) 0) (conj (shift (callee-hole e) (leak-get esc 2))))
+          tks (if ks
+                (into tks (for [i (range num-esc-results)
+                                :let [x (leak-get esc (+ 3 i))]
+                                :when (and (>= x 0) (< i (count ks)))]
+                            (shift (nth ks i) x)))
+                tks)]
+      (tee-hole e tks))))
+
+(defn- call-tag-hole [e ks f param] (tag-hole e ks f param))
+
+(defn- merged-tag-hole [e ks fns param-idx nparams]
+  (if (empty? fns)
+    (heap-hole e)
+    (tee-hole e (vec (for [f fns]
+                       (let [np (count (fn-get f :param-types))
+                             j (- (long param-idx) (- (long nparams) np))]
+                         (tag-hole e ks f (if (and (>= j 0) (not= -1 param-idx)) j :recv))))))))
+
+(defn- static-value
+  "ReassignOracle.StaticValue: n's value when n is a local variable defined once and never
+  reassigned (nor address taken), followed; OCONVNOP looked through."
+  [n]
+  (loop [n n]
+    (cond
+      (and (= :conv (:op n)) (= :nop (conv-kind n)) (= (under (node-type n)) (under (node-type (:x n))))) (recur (:x n))
+      (= :local (:op n))
+      (let [o (:obj n)
+            ^java.util.HashMap sd (:single-def *ctx*)
+            v (.get sd o)]
+        (if (and v (not= ::none v)) (recur v) n))
+      :else n)))
+
+(defn- static-callee
+  "ir.StaticCalleeName: the function a callee expression names: a package function, a method
+  expression's method, a function literal; or nil."
+  [v]
+  (case (:op v)
+    :func (fn-of-obj (:obj v))
+    :method-expr (fn-of-obj (:method v))
+    :fn (fn-of-node v)
+    nil))
+
+(defn- func-assignments
+  "ReassignOracle.FuncAssignments: the values of a func-typed local's assignments, or nil when one
+  is not a plain assignment."
+  [o]
+  (let [^java.util.HashMap fa (:func-assigns *ctx*)
+        v (.get fa o)]
+    (when (and v (not= ::none v)) v)))
+
+(defn- resolve-assigned-callees [vals]
+  (loop [vs vals acc []]
+    (if (empty? vs)
+      acc
+      (let [v (first vs)]
+        (if (let [v (loop [v v] (if (= :conv (:op v)) (recur (:x v)) v))]
+              (or (= :nil (:op v)) (= :untyped-nil (node-type v))))
+          (recur (rest vs) acc)
+          (if-let [c (static-callee v)]
+            (if (seq (fn-get c :uintptr-pragmas))
+              nil
+              (recur (rest vs) (conj acc c)))
+            nil))))))
+
+(defn- call-line
+  "A call's line as gc's (its Lparen's): after a function literal callee, the literal's closing
+  brace's line."
+  [c dflt]
+  (let [cl (:callee c)
+        end (when (= :fn (:op cl)) (some-> (:form cl) meta :go/end))]
+    (or end (:line c) dflt)))
+
+(defn- variadic-args
+  "typecheck.FixVariadicCall: a call's arguments with its variadic ones in an implicit slice
+  literal (\"... argument\"), nil when there are none."
+  [n sig]
+  (let [[_ ps _ variadic] (under sig)
+        args (vec (:args n))]
+    (if (and variadic (not (spread-call? n)))
+      (let [vi (dec (count ps))
+            extra (subvec args (min vi (count args)))
+            st (nth ps vi)]
+        (conj (subvec args 0 (min vi (count args)))
+              (if (empty? extra)
+                {:op :nil :type st :mode :value :line (:line n)}
+                {:op :lit :kind :slice :implicit true :elems extra :type st :mode :value :line (call-line n nil)})))
+      args)))
+
+(defn- argument [e k arg] (expr e k arg))
+
+(defn- inl-call
+  "OINLCALL: the inlined body's statements, then its result variables into the holes ks."
+  [e ks n]
+  (stmts e (:body n))
+  (doseq [[i o] (map-indexed vector (:retvars n))]
+    (expr e (if ks (nth ks i (discard-hole e)) (discard-hole e))
+          {:op :local :obj o :type (e/o o :type) :mode :variable :line (:line n)})))
+
+(defn- call
+  "escape.call: ks the holes of the call's results (nil: a statement)."
+  [e ks n]
+  (with-line* e n
+    (fn []
+      (case (if (= :inlcall (:op n)) :inlcall (:kind n))
+        :inlcall (inl-call e ks n)
+        :builtin (builtin-call e ks n)
+        (:static :method :closure :iface :compiled)
+        (let [c (:callee n)
+              iface (= :iface (:kind n))
+              [fns fun recv]
+              (case (:kind n)
+                :static [(if-let [f (fn-of-obj (:obj c))] [f] []) c nil]
+                :compiled [(if-let [f (fn-of-obj (:obj c))] [f] []) c nil]
+                :method [(if-let [f (fn-of-obj (:method c))] [f] []) nil (method-recv c)]
+                :iface [[] nil (:recv c)]
+                :closure (let [v (static-value c)]
+                           (if-let [f (static-callee v)]
+                             [[f] c nil]
+                             (if (= :local (:op v))
+                               [(or (resolve-assigned-callees (func-assignments (:obj v))) []) c nil]
+                               [[] c nil]))))
+              sig (or (when (= 1 (count fns)) (fn-get (first fns) :sig))
+                      (node-type c))
+              _ (when-not (and (vector? (under sig)) (= :func (nth (under sig) 0)))
+                  (unsupported! "a call of a callee of no function type"))
+              args (variadic-args n sig)
+              ;; a method expression's call: its receiver is its first argument
+              method-expr? (and (= :closure (:kind n)) (= 1 (count fns)) (fn-get (first fns) :recv-type)
+                                (= :method-expr (:op (static-value c))))
+              [recv args] (if method-expr? [(first args) (vec (rest args))] [recv args])
+              nparams (count (nth (under sig) 1))]
+          (when (System/getenv "GOI_ESCAPE_TRACE")
+            (binding [*out* *err*] (println "escape: call" (:line n) (:kind n) (mapv #(fn-get % :name) fns) (count ks) (map #(fn-get % :tags) fns) (boolean recv))))
+          (when ks
+            (doseq [f fns :when (in-mutual-batch? f)]
+              (doseq [[i r] (map-indexed vector (fn-get f :results))]
+                (when (< i (count ks))
+                  (flow e (nth ks i) (old-loc e r))))))
+          (when fun
+            (let [callee-k (if (and (empty? fns) (some #(not (identical? (:dst %) (:blank (eb e)))) ks))
+                             (callee-hole e)
+                             (discard-hole e))]
+              (expr e callee-k fun)))
+          (when recv
+            (argument e (merged-tag-hole e ks fns -1 nparams) recv))
+          (doseq [i (range nparams)]
+            (argument e (merged-tag-hole e ks fns i nparams) (nth args i nil))))
+        (unsupported! (str "a call of kind " (:kind n)))))))
+
+(defn- builtin-call [e ks n]
+  (let [args (vec (:args n))
+        k0 (first ks)]
+    (case (:builtin n)
+      "append"
+      (let [s (first args)
+            appendee-k (tee-hole e [k0 (mutator-hole e)])
+            appendee-k (if (has-pointers? (elem (node-type s)))
+                         (tee-hole e [appendee-k (k-deref (heap-hole e))])
+                         appendee-k)]
+        (argument e appendee-k s)
+        (if (spread-call? n)
+          (let [a (nth args 1)
+                ak (if (and (= :slice (kind (node-type a))) (has-pointers? (elem (node-type a))))
+                     (k-deref (heap-hole e))
+                     (discard-hole e))]
+            (argument e ak a))
+          (doseq [a (rest args)] (argument e (heap-hole e) a)))
+        (let [bs (spill e k0 (assoc n :append true))]
+          (lset! (:dst bs) :loop-depth 0)))
+      "copy" (do (argument e (mutator-hole e) (nth args 0))
+                 (let [y (nth args 1)
+                       ck (if (and (= :slice (kind (node-type y))) (has-pointers? (elem (node-type y))))
+                            (k-deref (heap-hole e))
+                            (discard-hole e))]
+                   (argument e ck y)))
+      "panic" (argument e (heap-hole e) (first args))
+      "complex" (discards e args)
+      ("delete" "print" "println" "recover") (discards e args)
+      ("min" "max") (doseq [a args] (argument e k0 a))
+      ("len" "cap" "real" "imag" "close") (discard e (first args))
+      "clear" (argument e (mutator-hole e) (first args))
+      ("StringData" "SliceData") (argument e k0 (first args))
+      ("Add" "Slice" "String") (do (argument e k0 (first args)) (discard e (second args)))
+      ("Sizeof" "Alignof" "Offsetof") nil
+      ;; bloop's runtime.KeepAlive (IsCompilerVarLive: its argument flows nowhere)
+      "keepalive" (doseq [a args] (argument e (discard-hole e) a))
+      ("new" "make") (expr e (or k0 (discard-hole e)) n)
+      (unsupported! (str "the built-in " (:builtin n))))))
+
+;;; go and defer (call.go's goDeferStmt, typecheck's normalizeGoDeferCall)
+
+(defn- wrapper-visit
+  "normalizeGoDeferCall's visit: the arguments that need a temporary, as [path node] (paths into
+  the call node), the rest left in place."
+  [n path]
+  (cond
+    (nil? n) []
+    (or (const? n) (#{:method-expr :func :nil} (:op n))
+        (and (= :call (:op n)) (= :builtin (:kind n)) (= "new" (:builtin n)) (= :type (:op (first (:args n)))))) []
+    (and (= :conv (:op n)) (t/uintptr? (node-type n)) (t/unsafe-pointer? (node-type (:x n))))
+    (wrapper-visit (:x n) (conj path :x))
+    (and (= :lit (:op n)) (#{:array :slice :struct} (:kind n)))
+    (let [k (case (:kind n) :struct :fields :elems)]
+      (vec (mapcat (fn [i x]
+                     (if (and (map? x) (not (:op x)) (contains? x :value))
+                       (wrapper-visit (:value x) (conj path k i :value))
+                       (wrapper-visit x (conj path k i))))
+                   (range) (get n k))))
+    :else [[path n]]))
+
+(defn- go-defer [e n]
+  (let [defer? (= :defer (:op n))
+        k (if (and defer? (= 1 (depth e)))
+            (later e (discard-hole e))
+            (heap-hole e))
+        c (:call n)
+        f (curfn e)
+        sig (when (#{:static :closure :compiled} (:kind c)) (node-type (:callee c)))
+        normal (and sig (let [[_ ps rs] (under sig)] (and (empty? ps) (empty? rs))))]
+    (if normal
+      (expr e k (:callee c))
+      ;; the wrapper: func() { call(tmps...) }, the arguments in temporaries
+      (let [c (if (= :builtin (:kind c)) c (assoc c :args (variadic-args c (or (when (= :method (:kind c)) (e/o (:method (:callee c)) :type))
+                                                                                 (node-type (:callee c))))
+                                                   :spread true))
+            visits (case (:kind c)
+                     :builtin (vec (mapcat (fn [i a] (wrapper-visit a [:args i])) (range) (:args c)))
+                     :iface (vec (concat [[[:callee :recv] (:recv (:callee c))]]
+                                         (mapcat (fn [i a] (wrapper-visit a [:args i])) (range) (:args c))))
+                     :method (vec (concat (wrapper-visit (method-recv (:callee c)) [:callee ::recv])
+                                          (mapcat (fn [i a] (wrapper-visit a [:args i])) (range) (:args c))))
+                     (vec (concat (wrapper-visit (:callee c) [:callee])
+                                  (mapcat (fn [i a] (wrapper-visit a [:args i])) (range) (:args c)))))
+            tmps (vec (for [[_ a] visits]
+                        (e/obj {:kind :var :name ".autotmp" :line (or (:line a) (:line n)) :type (node-type a)
+                                :esc-class :auto})))
+            _ (doseq [o tmps] (dcl! e (new-loc e o true)))
+            _ (doseq [[o [_ a]] (map vector tmps visits)] (.put ^java.util.HashMap (:single-def *ctx*) o a))
+            ;; the assignment tmps = args (OAS2, each tmp's Defn)
+            _ (doseq [[o [_ a]] (map vector tmps visits)]
+                (expr e (hole (old-loc e o)) a))
+            ;; the call with the temporaries in place of the arguments
+            c2 (reduce (fn [c [o [path a]]]
+                         (let [ln {:op :local :obj o :type (node-type a) :mode :variable :line (:line a)}]
+                           (if (= ::recv (peek path))
+                             (assoc-in c [:callee ::recv-node] ln)
+                             (assoc-in c path ln))))
+                       c (map vector tmps visits))
+            wf (volatile! {:node ::wrapper :parent f :file (fn-get f :file) :closure? (boolean (seq tmps)) :wrapper true :params [] :results [] :recv nil
+                           :param-types [] :sig [:func [] [] false] :esc :planned :closure-vars tmps
+                           :line (:line n) :body [{:op :expr :x c2 :line (:line n)}]})
+            clo {:op :fn :wrapper true :line (:line n) :type [:func [] [] false]}]
+        (.put ^java.util.IdentityHashMap (:fn-of-node *ctx*) clo wf)
+        (doseq [o tmps] (.put ^java.util.HashMap (:owner *ctx*) o f))
+        (closure-expr e k clo)
+        (when-not (seq tmps) (walk-func! (eb e) wf))))))
+
+;;; typecheck's normalizeGoDeferCall over the tree: a go or defer of a call with arguments or
+;;; results becomes the call of a wrapper literal (gc's f.gowrapN, f.deferwrapN) without either,
+;;; its arguments evaluated first into temporaries the wrapper captures
+
+(defn- normal-go-defer?
+  [c]
+  (let [sig (when (#{:static :closure :compiled} (:kind c)) (node-type (:callee c)))]
+    (and sig (let [[_ ps rs] (under sig)] (and (empty? ps) (empty? rs))))))
+
+(defn- wrap-go-defer
+  "Statement n (a go or defer) normalized: [temporaries' declaration or nil, the statement]."
+  [n]
+  (let [c (:call n)]
+    (if (or (not= :call (:op c)) (normal-go-defer? c))
+      [nil n]
+      (let [line (:line n)
+            c (if (= :builtin (:kind c)) c (assoc c :args (variadic-args c (or (when (= :method (:kind c)) (e/o (:method (:callee c)) :type))
+                                                                                (node-type (:callee c))))
+                                                  :spread true))
+            mrecv (when (= :method (:kind c)) (method-recv (:callee c)))
+            visits (case (:kind c)
+                     :builtin (vec (mapcat (fn [i a] (wrapper-visit a [:args i])) (range) (:args c)))
+                     :iface (vec (concat [[[:callee :recv] (:recv (:callee c))]]
+                                         (mapcat (fn [i a] (wrapper-visit a [:args i])) (range) (:args c))))
+                     :method (vec (concat (wrapper-visit mrecv [:callee ::recv])
+                                          (mapcat (fn [i a] (wrapper-visit a [:args i])) (range) (:args c))))
+                     (vec (concat (wrapper-visit (:callee c) [:callee])
+                                  (mapcat (fn [i a] (wrapper-visit a [:args i])) (range) (:args c)))))
+            tmps (vec (for [[_ a] visits]
+                        (e/obj {:kind :var :name ".autotmp" :line (or (:line a) line) :type (node-type a)
+                                :local? true :esc-class :auto})))
+            ln (fn [o a] {:op :local :obj o :type (node-type a) :mode :variable :line (:line a)})
+            c (if mrecv (assoc-in c [:callee :recv] mrecv) c)
+            c (if mrecv (update c :callee assoc :recv-adjust nil :path [(peek (vec (:path (:callee c))))]) c)
+            c2 (reduce (fn [c [o [path a]]]
+                         (if (= ::recv (peek path))
+                           (assoc-in c [:callee :recv] (ln o a))
+                           (assoc-in c path (ln o a))))
+                       c (map vector tmps visits))
+            wsig [:func [] [] false]
+            w {:op :fn :wrapper true :wrapkind (if (= :go (:op n)) "gowrap" "deferwrap") :params [] :results [] :recv nil
+               :sig wsig :type wsig :mode :value :line line
+               :body {:op :block :stmts [{:op :expr :x c2 :line line}]}}]
+        [(when (seq tmps) {:op :decl :short true :objs tmps :init (mapv second visits) :line line})
+         (assoc n :call {:op :call :kind :closure :callee w :args [] :mode :novalue :type :invalid :line line})]))))
+
+(defn- normalize-go-defer
+  "The go and defer statements of a tree normalized (wrap-go-defer)."
+  [tree]
+  (let [memo (java.util.IdentityHashMap.)]
+    (letfn [(nm [x]
+              (cond
+                (and (map? x) (.containsKey memo x)) (.get memo x)
+                (map? x) (let [x0 x
+                               x (into {} (map (fn [[k v]] [k (if (#{:type :to :sig :field :method :recv-type :iface} k) v (nm v))])) x)
+                               r (if (#{:go :defer} (:op x))
+                                   (let [[d st] (wrap-go-defer x)]
+                                     (if d {:op :block :line (:line x) :stmts [d st]} st))
+                                   x)]
+                           (.put memo x0 r)
+                           r)
+                (vector? x) (mapv nm x)
+                :else x))]
+      (nm tree))))
+
+;;; Assignments (assign.go)
+
+(defn- addr-of
+  "escape.addr: the hole for an assignment's destination (a place node, or :blank)."
+  [e n]
+  (if (or (nil? n) (= :blank n) (= :blank (:op n)))
+    (discard-hole e)
+    (with-line* e n
+      (fn []
+        (case (:op n)
+          (:place-local :local) (hole (old-loc e (:obj n)))
+          (:place-global :global) (heap-hole e)
+          (:place-field :field) (addr-of e (expand-field n))
+          :sel (if (:deref n)
+                 (do (mutate e (:x n)) (heap-hole e))
+                 (addr-of e (:x n)))
+          (:place-index :index) (let [xt (node-type (:x n))]
+                                  (discard e (:index n))
+                                  (cond
+                                    (= :array (kind xt)) (addr-of e (:x n))
+                                    :else (do (mutate e (:x n)) (heap-hole e))))
+          (:place-map :map-index) (do (discard e (:x n))
+                                      (assign-heap e (or (:key n) (:index n)))
+                                      (heap-hole e))
+          (:place-deref :deref) (do (mutate e (:x n)) (heap-hole e))
+          (unsupported! (str "an assignment to " (:op n))))))))
+
+(defn- outer-name
+  "ir.OuterValue then the name: the variable an expression's storage is of (x of x.f, x[i] of an
+  array), or nil."
+  [n]
+  (case (:op n)
+    (:place-local :local) (:obj n)
+    (:place-field :field) (outer-name (expand-field n))
+    :sel (when-not (:deref n) (outer-name (:x n)))
+    (:place-index :index) (when (= :array (kind (node-type (:x n)))) (outer-name (:x n)))
+    nil))
+
+(defn- norm-place [n]
+  (case (:op n)
+    :place-local (assoc n :op :local)
+    :place-global (assoc n :op :global)
+    (:place-field :field) (expand-field n)
+    :place-index (assoc n :op :index)
+    :place-deref (assoc n :op :deref)
+    :place-map (assoc n :op :map-index)
+    n))
+
+(defn- same-safe-expr?
+  "ir.SameSafeExpr."
+  [l r]
+  (let [l (norm-place l) r (norm-place r)]
+  (and (= (:op l) (:op r))
+       (case (:op l)
+         (:local :place-local :global :place-global) (identical? (:obj l) (:obj r))
+         (:sel) (and (= (:field-name l) (:field-name r)) (= (:deref l) (:deref r)) (same-safe-expr? (:x l) (:x r)))
+         (:deref :place-deref) (same-safe-expr? (:x l) (:x r))
+         (:index :place-index) (and (same-safe-expr? (:x l) (:x r)) (same-safe-expr? (:index l) (:index r)))
+         (:const) (= (:val l) (:val r))
+         false))))
+
+(defn- may-affect-memory? [n]
+  (cond
+    (const? n) false
+    :else (case (:op n)
+            (:local :global :nil) false
+            :binary (or (may-affect-memory? (:x n)) (may-affect-memory? (:y n)))
+            :index (or (may-affect-memory? (:x n)) (may-affect-memory? (:index n)))
+            :conv (may-affect-memory? (:x n))
+            :unary (may-affect-memory? (:x n))
+            :sel (may-affect-memory? (:x n))
+            :deref (may-affect-memory? (:x n))
+            :call (if (and (= :builtin (:kind n)) (#{"len" "cap"} (:builtin n)))
+                    (may-affect-memory? (first (:args n)))
+                    true)
+            true)))
+
+(defn- slice-self-assign? [dst src]
+  (let [dst (norm-place dst)
+        dstx (case (:op dst)
+               :deref (:x dst)
+               :sel (when (:deref dst) (:x dst))
+               nil)]
+    (and dstx (= :local (:op dstx))
+         (= :slice (:op src))
+         (not (= :array (kind (node-type (:x src)))))
+         (let [sx (:x src)
+               basex (case (:op sx)
+                       (:deref) (:x sx)
+                       (:field) (let [s (expand-field sx)] (when (:deref s) (:x s)))
+                       :sel (when (:deref sx) (:x sx))
+                       nil)]
+           (and basex (= :local (:op basex)) (identical? (:obj basex) (:obj dstx)))))))
+
+(defn- self-assign? [dst src]
+  (or (slice-self-assign? dst src)
+      (let [d (norm-place dst)
+            s (if (#{:field} (:op src)) (expand-field src) src)]
+        (and src (= (:op d) (:op s))
+             (case (:op d)
+               :sel (and (= (:deref d) (:deref s)) (same-safe-expr? (:x d) (:x s)))
+               :index (and (not (may-affect-memory? (:index d))) (not (may-affect-memory? (:index s)))
+                           (same-safe-expr? (:x d) (:x s)))
+               false)))))
+
+(defn- fmt-stmt-assign [dsts srcs]
+  (str (str/join ", " (map #(fmt-node (norm-place %) 0) dsts)) " = " (str/join ", " (map #(fmt-node % 0) srcs))))
+
+(defn- comma-ok-temps
+  "typecheck's assignments of a comma-ok pair (v, ok = x.(T), m[k], <-c) to destinations of other
+  types: through an autotmp each (tmp, tmp2 = x.(T); v = tmp; ok = tmp2), the conversion of the
+  temporary in the value's place. The pair's values with the temporaries' assignments made."
+  [e rhs]
+  (if (and (= 2 (count rhs))
+           (let [[a b] rhs
+                 inner (fn [r] (if (#{:convert-iface :conv} (:op r)) (:x r) r))]
+             (and (:comma-ok (inner a)) (= :ok (:op (inner b))))))
+    (vec (for [r rhs]
+           (if (#{:convert-iface :conv} (:op r))
+             (let [x (:x r)
+                   o (e/obj {:kind :var :name (str ".autotmp_" (count @(:all-locs (eb e)))) :line (or (:line x) (:line @e))
+                             :type (node-type x) :esc-class :auto})
+                   l (new-loc e o true)]
+               (dcl! e l)
+               (expr e (hole l) x)
+               (assoc r :x {:op :local :obj o :type (node-type x) :mode :variable :line (:line x)}))
+             r)))
+    rhs))
+
+(defn assign-list
+  "escape.assignList: dsts (places, objects' holes given by addr-of) from srcs; where: the
+  statement, {:defn #{objs defined by it} :range bool}."
+  [e dsts srcs where]
+  (let [srcs (comma-ok-temps e srcs)
+        ks (mapv #(if (instance? arbace.lang.IPersistentMap %) (if (:dst %) % (addr-of e %)) (addr-of e %)) dsts)]
+    (doseq [[i k] (map-indexed vector ks)]
+      (let [src (nth srcs i nil)
+            dst (nth dsts i)
+            hdr (and (map? dst) (#{:place-field :field} (:op dst)) (reflect-header-data? (expand-field dst)))
+            k (if (and src (map? dst) (:op dst) (not hdr) (self-assign? dst src))
+                (do (when (pos? (long *m*))
+                      (warn! (:line where) (str (fn-get (curfn e) :name) " ignoring self-assignment in "
+                                                (fmt-stmt-assign dsts srcs))))
+                    (discard-hole e))
+                k)]
+        (if hdr
+          (unsafe-value e (heap-hole e) src)
+          (expr e k src))))
+    (reassigned! e ks where)))
+
+(defn reassigned!
+  "escape.reassigned."
+  [e ks where]
+  (when-not (:zero-decl where)
+    (doseq [k ks]
+      (let [l (:dst k)]
+        (when-not (and (name-loc? l) (contains? (:defn where) (lget l :n)) (not (:range where)))
+          (lset! l :reassigned true))))))
+
+;;; Statements (stmt.go)
+
+(defn dcl! [e l]
+  (lset! l :loop-depth (depth e))
+  (hole l))
+
+(defn- dcl-obj! [e o]
+  (when (and o (not= "_" (e/o o :name)))
+    (dcl! e (old-loc e o))))
+
+(defn- block [e ss]
+  (let [old (depth e)]
+    (stmts e ss)
+    (vswap! e assoc :loop-depth old)))
+
+(defn- static-bool
+  "noder's staticBool: +1, -1 for a constant condition, else 0."
+  [c]
+  (if (and c (const? c) (instance? Boolean (:val c)))
+    (if (:val c) 1 -1)
+    0))
+
+(defn- terminates?
+  "noder's terminates: a statement that ends normal control flow (return, goto, panic, an if
+  both of whose live branches do, a block whose last statement does)."
+  [n]
+  (case (:op n)
+    :goto true
+    :return true
+    :expr (let [x (:x n)] (boolean (and (= :call (:op x)) (= :builtin (:kind x)) (= "panic" (:builtin x)))))
+    :if (let [c (static-bool (:cond n))]
+          (and (or (neg? c) (terminates? (:then n))) (or (pos? c) (terminates? (:else n)))))
+    :block (let [ss (:stmts n)] (boolean (and (seq ss) (terminates? (peek (vec ss))))))
+    nil (if (sequential? n) (boolean (and (seq n) (terminates? (peek (vec n))))) false)
+    false))
+
+(defn- live-stmts
+  "noder's stmts: the statements after a terminating one (and after the list's last label) are
+  not written."
+  [ss]
+  (let [ss (vec ss)
+        last-label (reduce (fn [acc [i s]] (if (= :label (:op s)) i acc)) -1 (map-indexed vector ss))]
+    (loop [i 0 dead false acc []]
+      (if (= i (count ss))
+        acc
+        (let [s (nth ss i)]
+          (if (and dead (> i last-label) (not= :label (:op s)))
+            (recur (inc i) dead acc)
+            (recur (inc i) (terminates? s) (conj acc s))))))))
+
+(defn stmts [e ss]
+  (cond
+    (nil? ss) nil
+    (map? ss) (stmt e ss)
+    :else (doseq [s (live-stmts ss)] (stmt e s))))
+
+(defn- decl-stmt
+  "A :decl (x := v, var x T = v, var x T): gc's ODCLs, then its OAS or OAS2 (each object's Defn)."
+  [e n]
+  (let [objs (:objs n)
+        init (:init n)]
+    (when-not (:const n)
+      (doseq [o objs] (dcl-obj! e o))
+      (let [dsts (mapv #(if (or (nil? %) (= "_" (e/o % :name))) :blank {:op :place-local :obj %}) objs)
+            where {:line (or (:line n) (:line @e)) :defn (set (remove nil? objs))}]
+        (cond
+          (empty? init) nil
+          (and (= 1 (count init)) (> (count objs) 1) (= :call (:op (first init))))
+          (let [ks (mapv #(addr-of e %) dsts)]
+            (call e ks (first init))
+            (reassigned! e ks where))
+          :else (assign-list e dsts init where))))))
+
+(defn- loop-leaked
+  "loopvar.ForCapture's possiblyLeaked: the loop variables objs captured by a function literal or
+  whose address is taken in body (outside a return statement of the loop's own depth)."
+  [objs body]
+  (let [want (set (remove nil? objs))
+        found (volatile! #{})]
+    (when (seq want)
+      (letfn [(walk [x in-ret]
+                (cond
+                  (map? x)
+                  (let [op (:op x)]
+                    (cond
+                      (= :fn op) (when-not in-ret
+                                   (let [f (fn-of-node x)]
+                                     (doseq [cv (when f (fn-get f :closure-vars)) :when (want cv)] (vswap! found conj cv))))
+                      (= :return op) (doseq [[_ v] x] (walk v true))
+                      (= :addr op) (do (when-not in-ret
+                                         (when-let [o (outer-name (:x x))] (when (want o) (vswap! found conj o))))
+                                       (walk (:x x) in-ret))
+                      (= :method op) (do (when (and (not in-ret) (= :addr (:recv-adjust x)))
+                                           (when-let [o (outer-name (:recv x))] (when (want o) (vswap! found conj o))))
+                                         (doseq [[_ v] x] (walk v in-ret)))
+                      (#{:range :for} op) (doseq [[_ v] x] (walk v false))
+                      :else (doseq [[_ v] x] (walk v in-ret))))
+                  (sequential? x) (doseq [v x] (walk v in-ret))
+                  :else nil))]
+        (walk body false)))
+    @found))
+
+(defn- range-stmt [e n]
+  (let [tmp (new-loc e nil true)
+        objs (:objs n)
+        leaked (if objs (loop-leaked objs (:body n)) #{})
+        ;; the variables' ODCLs: before the loop, unless per-iteration (in the body)
+        _ (doseq [o objs :when (not (leaked o))] (dcl-obj! e o))
+        _ (expr e (hole tmp) (:x n))
+        _ (vswap! e update :loop-depth inc)
+        dsts (if objs
+               (mapv #(if (or (nil? %) (= "_" (e/o % :name))) :blank
+                          (if (leaked %) :blank {:op :place-local :obj %})) objs)
+               (mapv #(or % :blank) (:places n)))
+        dsts (vec (take 2 (concat dsts [:blank :blank])))
+        ks (mapv #(addr-of e %) dsts)
+        xt (node-type (:x n))
+        k1 (nth ks 1)]
+    (when-not (#{:int :func} (:over n))
+      (if (= :array (kind xt))
+        (flow e k1 tmp)
+        (flow e (k-deref k1) tmp)))
+    (reassigned! e ks {:range true :defn #{}})
+    ;; per-iteration variables: v := tmp' at the body's start (their Defn)
+    (when (seq leaked)
+      (let [ltmps (vec (for [[i o] (map-indexed vector objs) :when (leaked o)] [i o]))]
+        (doseq [[i o] ltmps]
+          (let [l (old-loc e o)]
+            (dcl! e l)
+            (when (= i 1)
+              (if (= :array (kind xt))
+                (flow e (hole l) tmp)
+                (flow e (k-deref (hole l)) tmp)))))))
+    (block e (:body n))
+    (vswap! e update :loop-depth dec)))
+
+(defn- for-stmt [e n]
+  (let [init (:init n)
+        objs (when (and (map? init) (= :decl (:op init)) (:short init)) (:objs init))
+        leaked (if objs (loop-leaked objs [(:cond n) (:post n) (:body n)]) #{})]
+    (stmts e init)
+    (if (empty? leaked)
+      (do (vswap! e update :loop-depth inc)
+          (discard e (:cond n))
+          (stmts e (:post n))
+          (block e (:body n))
+          (vswap! e update :loop-depth dec))
+      ;; loopvar's rewrite: for z', first := init, true; ; { z := z'; if first {first = false} else {post};
+      ;; if !cond {break}; body; z' = z }
+      (let [zs (vec (for [o objs :when (leaked o)]
+                      [o (let [p (e/obj {:kind :var :name ".autotmp" :line (e/o o :line) :type (e/o o :type) :esc-class :auto})
+                               pl (new-loc e p true)]
+                           (dcl! e pl)
+                           pl)]))]
+        ;; the init's z = v became z' = v: the init flowed into z; z' takes z's place there
+        (doseq [[o pl] zs] (flow e (hole pl) (old-loc e o)))
+        (vswap! e update :loop-depth inc)
+        (doseq [[o pl] zs]
+          (let [l (old-loc e o)]
+            (dcl! e l)
+            (lset! l :reassigned false)
+            (flow e (hole l) pl)))
+        (stmts e (:post n))
+        (discard e (:cond n))
+        (block e (:body n))
+        (doseq [[o pl] zs]
+          (flow e (hole pl) (old-loc e o)))
+        (vswap! e update :loop-depth dec)))))
+
+(defn- type-switch-stmt [e n]
+  (stmts e (:init n))
+  (let [ks (vec (for [cl (:clauses n)
+                      :let [cv (:var cl)]
+                      :when cv
+                      :let [k (dcl! e (old-loc e cv))]
+                      :when (has-pointers? (e/o cv :type))]
+                  (dot-type k (e/o cv :type))))]
+    (expr e (tee-hole e ks) (:x n)))
+  (doseq [cl (:clauses n)]
+    (block e (:body cl))))
+
+(defn- assign-stmt [e n]
+  (let [lhs (:lhs n)
+        rhs (:rhs n)
+        where {:line (or (:line n) (:line @e)) :defn #{}}]
+    (cond
+      (and (= 1 (count rhs)) (> (count lhs) 1) (= :call (:op (first rhs))))
+      (let [ks (mapv #(addr-of e %) lhs)]
+        (call e ks (first rhs))
+        (reassigned! e ks where))
+      :else (assign-list e lhs rhs where))))
+
+(defn- return-stmt [e n]
+  (let [f (curfn e)
+        rs (fn-get f :results)
+        vals (:values n)
+        dsts (mapv (fn [o] {:op :place-local :obj o}) rs)
+        where {:line (or (:line n) (:line @e)) :defn #{}}]
+    (if (and (= 1 (count vals)) (> (count rs) 1) (= :call (:op (first vals))))
+      (let [ks (mapv #(addr-of e %) dsts)]
+        (call e ks (first vals))
+        (reassigned! e ks where))
+      (assign-list e dsts vals where))))
+
+(defn stmt [e n]
+  (if (sequential? n)
+    (stmts e n)
+  (when (map? n)
+    (with-line* e n
+      (fn []
+        (case (:op n)
+          (:fallthrough :break :continue :goto :directive :local-type :var-decl) nil
+          :block (do (when (:let n)
+                       (doseq [d (:decls n)] (stmt e d)))
+                     (stmts e (:stmts n)))
+          :decl (decl-stmt e n)
+          :label (do (when-let [st (get (:labels @e) (:label n))]
+                       (when (= st :looping) (vswap! e update :loop-depth inc)))
+                     (stmt e (:stmt n)))
+          :if (let [c (static-bool (:cond n))]
+                (stmts e (:init n))
+                (discard e (:cond n))
+                (when (>= c 0) (block e (:then n)))
+                (when (<= c 0) (block e (:else n))))
+          :for (for-stmt e n)
+          :range (range-stmt e n)
+          :switch (do (stmts e (:init n))
+                      (discard e (:tag n))
+                      (doseq [cl (:clauses n)]
+                        (discards e (:values cl))
+                        (block e (:body cl))))
+          :type-switch (type-switch-stmt e n)
+          :select (doseq [cl (:clauses n)]
+                    (let [c (:comm cl)]
+                      (when c
+                        (case (:op c)
+                          :send (stmt e c)
+                          :expr (discard e (:x c))
+                          (stmt e c)))
+                      (block e (:body cl))))
+          :send (do (discard e (:ch n)) (assign-heap e (:value n)))
+          :assign (assign-stmt e n)
+          :op-assign (assign-list e [(:place n)] [(:value n)] {:line (:line n) :defn #{}})
+          :incdec (assign-list e [(:place n)] [nil] {:line (:line n) :defn #{}})
+          :return (return-stmt e n)
+          :expr (let [x (:x n)]
+                  (case (:op x)
+                    (:call :inlcall) (call e nil x)
+                    :recv (discard e (:x x))
+                    (discard e x)))
+          (:go :defer) (go-defer e n)
+          (unsupported! (str "the statement " (:op n) " at " (:line @e)))))))))
+
+;;; Functions: their records, closures, labels
+
+(defn- label-states
+  "walkFunc's labels: a label is :looping when a goto to it follows it, else :nonlooping."
+  [body]
+  (let [st (volatile! {})]
+    (letfn [(walk [x]
+              (cond
+                (map? x) (case (:op x)
+                           :fn nil
+                           :label (do (vswap! st assoc (:label x) :nonlooping) (walk (:stmt x)))
+                           :goto (when (= :nonlooping (get @st (:label x))) (vswap! st assoc (:label x) :looping))
+                           (doseq [[_ v] x] (walk v)))
+                (sequential? x) (doseq [v x] (walk v))
+                :else nil))]
+      (walk body))
+    @st))
+
+(defn walk-func! [b f]
+  (binding [*wfile* (fn-get f :file)]
+  (let [e (with-fn b f)]
+    (fn-set! f :esc :started)
+    (vswap! e assoc :labels (label-states (fn-get f :body)))
+    (stmts e (fn-get f :body)))))
+
+(defn- flow-closure
+  "batch.flowClosure: closure clo's captured variables flow into its record, by value (<= 128
+  bytes, never reassigned nor address taken) or by reference."
+  [b k clo]
+  (let [f (fn-of-node clo)
+        e (with-fn b f)]
+    (doseq [cv (fn-get f :closure-vars)]
+      (let [l (old-loc e cv)
+            byval (and (not (lget l :addrtaken)) (not (lget l :reassigned)) (<= (size (e/o cv :type)) 128))
+            k (if byval k (k-addr k))]
+        (when (> (long *m*) 1)
+          (binding [*wfile* (fn-get (lget l :curfn) :file)]
+            (warn! (e/o cv :line) (str (fn-get (lget l :curfn) :name) " capturing by " (if byval "value" "ref") ": " (e/o cv :name)
+                                       " (addr=" (lget l :addrtaken) " assign=" (lget l :reassigned) " width=" (size (e/o cv :type)) ")"))))
+        (flow e k l)))))
+
+(defn- init-func! [b f]
+  (let [e (with-fn b f)]
+    (fn-set! f :esc :planned)
+    (doseq [o (fn-get f :dcl)] (new-loc e o true))
+    (doseq [[i o] (map-indexed vector (fn-get f :results))]
+      (lset! (old-loc e o) :result-index (inc i)))))
+
+;;; Solving (solve.go)
+
+(defn- outlives?
+  "batch.outlives: whether location l outlives other."
+  [b l other]
+  (cond
+    (has-attr? l attr-escapes) true
+    (or (identical? l (:mutator b)) (identical? l (:callee b))) false
+    (lget l :param-out) (if (and (contains-closure? (lget other :curfn) (lget l :curfn))
+                                 (not (fn-get (lget l :curfn) :results-lost)))
+                          false
+                          true)
+    (and (identical? (lget l :curfn) (lget other :curfn)) (< (long (lget l :loop-depth)) (long (lget other :loop-depth)))) true
+    (and (lget l :curfn) (lget other :curfn) (contains-closure? (lget l :curfn) (lget other :curfn))) true
+    :else false))
+
+(defn- leak-to!
+  "location.leakTo."
+  [l sink derefs]
+  (let [ri (dec (long (or (lget sink :result-index) 0)))]
+    (if (and (not (has-attr? sink attr-escapes)) (lget sink :param-out) (identical? (lget sink :curfn) (lget l :curfn))
+             (>= ri 0) (< ri num-esc-results))
+      (vswap! l update :param-esc leak-add (+ 3 ri) derefs)
+      (vswap! l update :param-esc leak-add 0 derefs))))
+
+(defn- walk-one! [b root walkgen enqueue]
+  (lset! root :walkgen walkgen)
+  (lset! root :derefs 0)
+  (lset! root :dst nil)
+  (when (has-attr? root attr-calls)
+    (let [n (lget root :n)]
+      (when (and (map? n) (= :fn (:op n)))
+        (let [f (fn-of-node n)]
+          (when (and (in-mutual-batch? f) (not (fn-get f :results-lost)))
+            (fn-set! f :results-lost true)
+            (doseq [r (fn-get f :results)]
+              (enqueue (.get ^java.util.HashMap (:loc-of *ctx*) r))))))))
+  (let [todo (java.util.ArrayDeque.)]
+    (.addLast todo root)
+    (loop []
+      (when-not (.isEmpty todo)
+        (let [l (.pollFirst todo)
+              _ (lset! l :queued-one 0)
+              derefs (long (lget l :derefs))
+              address-of (neg? derefs)
+              derefs (if address-of 0 derefs)
+              new-attrs (if address-of
+                          (if (outlives? b root l)
+                            (bit-or attr-escapes attr-persists attr-mutates attr-calls)
+                            (if (has-attr? root attr-persists) attr-persists 0))
+                          0)
+              new-attrs (if (zero? derefs)
+                          (bit-or new-attrs (bit-and (long (lget root :attrs)) (bit-or attr-mutates attr-calls)))
+                          new-attrs)]
+          (when (lget l :param)
+            (when (outlives? b root l)
+              (leak-to! l root derefs))
+            (when (has-attr? root attr-mutates)
+              (vswap! l update :param-esc leak-add 1 derefs))
+            (when (has-attr? root attr-calls)
+              (vswap! l update :param-esc leak-add 2 derefs)))
+          (let [skip (if (not (zero? (bit-and (long new-attrs) (bit-not (long (lget l :attrs))))))
+                       (do (vswap! l update :attrs bit-or new-attrs)
+                           (enqueue l)
+                           (has-attr? l attr-escapes))
+                       false)]
+            (when-not skip
+              (doseq [[i [src ed]] (map-indexed vector (lget l :edges))]
+                (when-not (has-attr? src attr-escapes)
+                  (let [d (+ derefs (long ed))]
+                    (when (or (not= (long (lget src :walkgen)) (long walkgen)) (> (long (lget src :derefs)) d))
+                      (vswap! src assoc :walkgen walkgen :derefs d :dst l :dst-edge-idx i)
+                      (when (not= (long (lget src :queued-one)) (long walkgen))
+                        (lset! src :queued-one walkgen)
+                        (.addLast todo src))))))))
+          (recur))))))
+
+(defn- walk-all! [b]
+  (let [todo (java.util.ArrayDeque.)
+        enqueue (fn [l]
+                  (when-not (lget l :queued-all)
+                    (lset! l :queued-all true)
+                    (if (has-attr? l attr-escapes)
+                      (.addFirst todo l)
+                      (.addLast todo l))))]
+    (doseq [l @(:all-locs b)]
+      (.addFirst todo l)
+      (lset! l :queued-all true))
+    (doseq [k [:mutator :callee :heap]]
+      (.addFirst todo (get b k))
+      (lset! (get b k) :queued-all true))
+    (loop [walkgen 1]
+      (when-not (.isEmpty todo)
+        (let [root (.pollFirst todo)]
+          (lset! root :queued-all false)
+          (walk-one! b root walkgen enqueue)
+          (recur (inc walkgen)))))))
+
+;;; Finishing: the tags and the diagnostics (escape.go's finish, paramTag, reportLeaks)
+
+(defn- report-leaks! [line nm esc res-names]
+  (let [warned (volatile! false)]
+    (let [x (leak-get esc 0)]
+      (when (>= x 0)
+        (if (zero? x)
+          (warn! line (str "leaking param: " nm))
+          (warn! line (str "leaking param content: " nm)))
+        (vreset! warned true)))
+    (doseq [i (range num-esc-results)]
+      (let [x (leak-get esc (+ 3 i))]
+        (when (>= x 0)
+          (warn! line (str "leaking param: " nm " to result " (nth res-names i) " level=" x))
+          (vreset! warned true))))
+    (if (<= (long (get *debug* :escapemutationscalls 0)) 0)
+      (when-not @warned
+        (warn! line (str nm " does not escape")))
+      (do
+        (let [x (leak-get esc 1)]
+          (when (>= x 0) (warn! line (str "mutates param: " nm " derefs=" x)) (vreset! warned true)))
+        (let [x (leak-get esc 2)]
+          (when (>= x 0) (warn! line (str "calls param: " nm " derefs=" x)) (vreset! warned true)))
+        (when-not @warned
+          (warn! line (str nm " does not escape, mutate, or call")))))))
+
+(defn- param-tag
+  "batch.paramTag: the tag of f's parameter o (its type ty), reporting its leaks."
+  [b f o ty]
+  (let [diagnose (and (pos? (long *m*)) (not (fn-get f :wrapper)))
+        nm (when o (e/o o :name))]
+    (cond
+      (fn-get f :extern)
+      (cond
+        (t/uintptr? ty) (do (when diagnose (warn! (some-> o (e/o :line)) (str "assuming " nm " is unsafe uintptr"))) nil)
+        (not (has-pointers? ty)) nil
+        (fn-get f :noescape) (do (when (and diagnose nm) (warn! (some-> o (e/o :line)) (str nm " does not escape")))
+                                 (-> no-leaks (leak-add 1 0) (leak-add 2 0)))
+        :else (do (when (and diagnose nm) (warn! (some-> o (e/o :line)) (str "leaking param: " nm)))
+                  (assoc no-leaks 0 1)))
+      (and (fn-get f :uintptrescapes) (t/uintptr? ty))
+      (do (when diagnose (warn! (some-> o (e/o :line)) (str "marking " nm " as escaping uintptr"))) nil)
+      (and (fn-get f :uintptrescapes) (= o (last (fn-get f :params))) (nth (under (fn-get f :sig)) 3 false)
+           (t/uintptr? (elem ty)))
+      (do (when diagnose (warn! (some-> o (e/o :line)) (str "marking " nm " as escaping ...uintptr"))) nil)
+      (not (has-pointers? ty)) nil
+      (or (nil? o) (= "_" nm)) no-leaks
+      :else
+      (let [l (.get ^java.util.HashMap (:loc-of *ctx*) o)
+            esc (leak-optimize (lget l :param-esc))]
+        (when (and diagnose (not (has-attr? l attr-escapes)))
+          (report-leaks! (e/o o :line) nm esc (mapv #(e/o % :name) (fn-get f :results))))
+        (leak-encode esc)))))
+
+(defn- finish! [b fns]
+  (doseq [f fns]
+   (binding [*wfile* (fn-get f :file)]
+    (fn-set! f :esc :tagged)
+    (let [sig (under (fn-get f :sig))
+          tags (cond-> {}
+                 (fn-get f :recv-type) (assoc :recv (param-tag b f (fn-get f :recv) (fn-get f :recv-type))))
+          tags (reduce (fn [m [i o ty]] (assoc m i (param-tag b f o ty)))
+                       tags (map vector (range) (concat (fn-get f :params) (repeat nil)) (nth sig 1)))]
+      (fn-set! f :tags tags)
+      (when (System/getenv "GOI_ESCAPE_TRACE")
+        (binding [*out* *err*] (println "escape: tags" (fn-get f :name) tags))))))
+  (doseq [l @(:all-locs b)]
+    (let [n (lget l :n)]
+      (when n
+       (binding [*wfile* (fn-get (lget l :curfn) :file)]
+        (let [wrapper (and (map? n) (= :fn (:op n)) (:wrapper n))]
+          (when (and (pos? (long *m*)) (pos? (long (get *debug* :zerocopy 0))) (map? n) (= :conv (:op n)) (= :str2bytes (conv-kind n)) (not (has-attr? l attr-mutates)))
+            (warn! (lget l :line) "zero-copy string->[]byte conversion"))
+          (if (has-attr? l attr-escapes)
+            (if (name-loc? l)
+              (when (and (pos? (long *m*)) (not (str/starts-with? (e/o n :name) ".")))
+                (warn! (lget l :line) (str "moved to heap: " (if (e/o n :inl-pkg) (str (e/o n :inl-pkg) "." (e/o n :name)) (e/o n :name)))))
+              (when (and (pos? (long *m*)) (not wrapper))
+                (warn! (lget l :line) (if (:append n) "append escapes to heap" (str (fmt-node n 0) " escapes to heap")))))
+            (when (and (pos? (long *m*)) (not (name-loc? l)) (not wrapper))
+              (warn! (lget l :line) (if (:append n) "append does not escape" (str (fmt-node n 0) " does not escape"))))))))))
+  nil)
+
+(defn- literal-of
+  "A node's static value when it is a constant: the constant node, else nil."
+  [n]
+  (let [v (static-value n)]
+    (when (and (const? v) (not= :nil (:op v)) (not= :untyped-nil (node-type v))) v)))
+
+(defn- rewrite-with-literals!
+  "batch.rewriteWithLiterals: a make's non-constant size whose static value is a constant (or
+  the len of a slice literal), an interface conversion's operand whose static value is one,
+  replaced by the literal (in the location's node, which the messages print)."
+  [l]
+  (let [n (lget l :n)]
+    (when (and (map? n) (not (name-loc? l)))
+      (cond
+        (and (= :call (:op n)) (= "make" (:builtin n)) (= :slice (kind (node-type n))))
+        (let [args (vec (:args n))
+              ri (if (> (count args) 2) 2 1)
+              r (nth args ri nil)]
+          (when (and r (not (const? r)))
+            (let [s (static-value r)]
+              (cond
+                (and (const? s) (integer? (:val s)) (>= (long (:val s)) 0))
+                (lset! l :n (assoc-in n [:args ri] {:op :const :mode :constant :type (node-type r) :val (:val s) :line (:line r)}))
+                (and (= :call (:op s)) (= "len" (:builtin s)))
+                (let [x (static-value (first (:args s)))]
+                  (when (and (= :lit (:op x)) (= :slice (:kind x)))
+                    (lset! l :n (assoc-in n [:args ri] {:op :const :mode :constant :type :int :val (count (:elems x)) :line (:line r)}))))
+                :else nil))))
+        (or (= :convert-iface (:op n)) (and (= :conv (:op n)) (= :iface (conv-kind n))))
+        (let [x (:x n)]
+          (when (and (not (const? x)) (not (iface? (node-type x))))
+            (when-let [v (literal-of x)]
+              (lset! l :n (assoc n :x (assoc v :type (node-type x) :form nil))))))
+        :else nil))))
+
+(defn- batch! [fns]
+  (let [b (new-batch)]
+    (doseq [f fns] (init-func! b f))
+    (doseq [f fns :when (not (fn-get f :closure?))]
+      (walk-func! b f))
+    (doseq [[k clo] @(:closures b)]
+      (flow-closure b k clo))
+    (vreset! (:closures b) [])
+    (doseq [l @(:all-locs b)]
+      (rewrite-with-literals! l))
+    (doseq [l @(:all-locs b)]
+      (let [n (lget l :n)]
+        (when (and n (not (name-loc? l)))
+          (when-let [why (heap-alloc-reason n)]
+            (when (and (> (long *m*) 1) (not (has-attr? l attr-escapes)))
+              ;; flow's explanation of a flow into the heap (explainFlow, its one note)
+              (binding [*wfile* (fn-get (lget l :curfn) :file)]
+                (let [line (lget l :line) s (fmt-node n 0)]
+                  (warn! line (str s " escapes to heap in " (fn-get (lget l :curfn) :name) ":"))
+                  (warn! line (str "  flow: {heap} ← &{storage for " s "}:"))
+                  (warn! line (str "    from " s " (" why ") at " *wfile* ":" line)))))
+            (flow (with-fn b (lget l :curfn)) (k-addr (heap-hole (with-fn b (lget l :curfn)))) l)))
+        (when (and n (name-loc? l) (not (#{:param :result} (e/o n :esc-class))))
+          (when (or (> (size (e/o n :type)) (max-stack)) (> (align (e/o n :type)) 8))
+            (flow (with-fn b (lget l :curfn)) (k-addr (heap-hole (with-fn b (lget l :curfn)))) l)))))
+    (walk-all! b)
+    (finish! b fns)))
+
+;;; Devirtualization (devirtualize/devirtualize.go's StaticCall, with go1.26's improved
+;;; concrete type analysis): an interface method call whose receiver's concrete type is known
+;;; statically becomes a call of the concrete type's method, before escape analysis
+
+(defn- method-obj-data [m]
+  (if (map? m) m
+      {:name (e/o m :name) :pkg (when-not (t/exported? (e/o m :name)) (e/o m :pkg))
+       :type (or (e/o m :type) [:func [] [] false]) :ptr-recv (e/o m :ptr-recv) :obj m}))
+
+(defn- iface-assignments
+  "devirtualize.State.analyze over a function's tree: for each local variable of interface type,
+  its assignments: a node (its value), a type (a concrete value of that type), or nil (unknown)."
+  [tree]
+  (let [acc (java.util.HashMap.)
+        add! (fn [o v]
+               (when (and o (e/o o :local?) (not= "_" (e/o o :name)) (iface? (e/o o :type)))
+                 (let [v (cond
+                           (and (vector? v) (= ::type (first v))) (if (iface? (second v)) nil v)
+                           :else v)]
+                   (when-not (and (map? v) (or (= :nil (:op v)) (= :untyped-nil (node-type v))))
+                     (.put acc o (conj (or (.get acc o) []) v))))))
+        place-obj (fn [p] (when (and (map? p) (#{:place-local :local} (:op p))) (:obj p)))
+        result-type (fn [c i] (let [ty (node-type (:callee c))]
+                                (when (and (vector? (under ty)) (= :func (nth (under ty) 0)))
+                                  (nth (nth (under ty) 2) i nil))))
+        inl-val (fn [r i] (let [rv (nth (:retvars r) i nil)]
+                            (when rv {:op :local :obj rv :type (e/o rv :type) :mode :variable})))
+        assign-pairs (fn [objs rhs]
+                       (cond
+                         (and (= 1 (count rhs)) (= :inlcall (:op (first rhs))))
+                         (doseq [[i o] (map-indexed vector objs)] (add! o (inl-val (first rhs) i)))
+                         (and (= 1 (count rhs)) (> (count objs) 1))
+                         (let [r (first rhs)]
+                           (cond
+                             (= :call (:op r)) (doseq [[i o] (map-indexed vector objs)] (add! o [::type (result-type r i)]))
+                             (= :assert (:op r)) (do (add! (first objs) r) (add! (second objs) nil))
+                             :else (do (add! (first objs) [::type (node-type r)]) (add! (second objs) nil))))
+                         (and (= 2 (count rhs)) (:comma-ok (first rhs)))
+                         (let [r (first rhs)]
+                           (if (= :assert (:op r))
+                             (add! (first objs) r)
+                             (add! (first objs) [::type (node-type r)]))
+                           (add! (second objs) nil))
+                         :else
+                         (doseq [[o r] (map vector objs rhs)]
+                           (cond
+                             (= :inlcall (:op r)) (add! o (inl-val r 0))
+                             (and (= :result (:op r)) (= :inlcall (:op (:call r)))) (add! o (inl-val (:call r) (:index r)))
+                             (and (= :convert-iface (:op r)) (= :inlcall (:op (:x r)))) (add! o (assoc r :x (inl-val (:x r) 0)))
+                             :else
+                           (if (and (= :call (:op r)) (not= :builtin (:kind r)) (not (:comma-ok r)))
+                             (add! o [::type (result-type r 0)])
+                             (if (and (= :result (:op r)))
+                               (add! o [::type (node-type r)])
+                               (add! o r)))))))]
+    (letfn [(walk [x]
+              (cond
+                (map? x)
+                (do (case (:op x)
+                      :decl (when (seq (:init x)) (assign-pairs (:objs x) (:init x)))
+                      :assign (assign-pairs (mapv place-obj (:lhs x)) (:rhs x))
+                      :range (let [xt (node-type (:x x))
+                                   xt (if (and (t/pointer? xt) (= :array (kind (elem xt)))) (elem xt) xt)
+                                   [ko vo] (or (:objs x) (mapv place-obj (:places x)))]
+                               (case (kind xt)
+                                 (:array :slice) (do (add! ko nil) (add! vo [::type (elem xt)]))
+                                 :chan (add! ko [::type (elem xt)])
+                                 :map (do (add! ko [::type (nth (under xt) 1)]) (add! vo [::type (elem xt)]))
+                                 (do (add! ko nil) (add! vo nil))))
+                      :type-switch (doseq [cl (:clauses x)] (when (:var cl) (add! (:var cl) (:x x))))
+                      nil)
+                    (doseq [[_ v] x] (walk v)))
+                (sequential? x) (doseq [v x] (walk v))
+                :else nil))]
+      (walk tree))
+    acc))
+
+(defn- concrete-type
+  "devirtualize.concreteType: the one concrete type n's value can have, or nil."
+  [^java.util.HashMap asg n]
+  (letfn [(ct [n seen]
+            (let [n (loop [n n]
+                      (cond
+                        (not (iface? (node-type n))) n
+                        (= :convert-iface (:op n)) (recur (:x n))
+                        (and (= :conv (:op n)) (#{:iface :nop} (conv-kind n))) (recur (:x n))
+                        (= :assert (:op n)) (recur (:x n))
+                        :else n))]
+              (cond
+                (not (iface? (node-type n))) (node-type n)
+                (not= :local (:op n)) nil
+                :else
+                (let [o (:obj n)]
+                  (cond
+                    (or (not (e/o o :local?)) (#{:param :result} (e/o o :esc-class)) (e/o o :param?) (e/o o :result?)
+                        (e/o o :addressed?)) nil
+                    (contains? @seen o) ::none
+                    :else
+                    (do (vswap! seen conj o)
+                        (loop [vs (seq (.get asg o)) typ nil]
+                          (if (empty? vs)
+                            (or typ ::none)
+                            (let [v (first vs)
+                                  t (cond (nil? v) nil
+                                          (vector? v) (second v)
+                                          :else (ct v seen))]
+                              (cond
+                                (= ::none t) (recur (rest vs) typ)
+                                (nil? t) nil
+                                (and typ (not (t/same? typ t))) nil
+                                ;; gc's types of two struct literals are two types (*types.Type identity)
+                                (and typ (= :struct (kind t)) (not (t/named? t))) nil
+                                :else (recur (rest vs) t)))))))))))]
+    (let [r (ct n (volatile! #{}))]
+      (when-not (= ::none r) r))))
+
+(defn- devirt-call
+  "StaticCall of interface call c (its operands already devirtualized), asg the function's
+  interface assignments: c as a method call of its receiver's concrete type, reported, or c."
+  [asg c]
+  (binding [t/*method-obj* method-obj-data]
+    (let [sel (:callee c)
+          x (:recv sel)
+          typ (concrete-type asg x)
+          mname (:name (:method sel))
+          mpkg (:pkg (:method sel))]
+      (if (and typ (nil? (t/missing-method typ (node-type x) false)))
+        (let [r (t/lookup typ false mname mpkg)
+              line (call-line c nil)
+              dt {:op :assert :x x :to typ :type typ :mode :value :line line :devirt true}
+              selstr (str (fmt-node x 8) "." mname)]
+          (case (:kind r)
+            :method
+            (let [m (:obj r)
+                  ptr (boolean (e/o m :ptr-recv))
+                  [_ isptr] (t/deref-type typ)
+                  adj (cond (and ptr (not (:indirect r))) :addr
+                            (and (not ptr) (:indirect r) (= 1 (count (:index r))) isptr) :deref
+                            :else nil)]
+              (warn! line (str "devirtualizing " selstr " to " (type-str typ)))
+              (assoc c :kind :method
+                     :callee {:op :method :method m :recv dt :recv-adjust adj :path (:index r) :via (:via r)
+                              :recv-type typ :type (e/o m :type) :mode :value :line (:line sel)}))
+            :iface-method
+            (do (warn! line (str "partially devirtualizing " selstr " to " (type-str typ)))
+                (assoc c :callee (assoc sel :recv (select-node dt (field-steps typ (pop (vec (:index r))) nil) line))))
+            c))
+        c))))
+
+(defn- devirtualize
+  "A function's tree with its devirtualizable interface calls made method calls (StaticCall),
+  each reported: devirtualizing x.M to T (partially, when T's method is an embedded interface's)."
+  [tree]
+  (let [asg (iface-assignments tree)
+        memo (java.util.IdentityHashMap.)]
+    (letfn [(dv [x godefer]
+              (cond
+                (and (map? x) (.containsKey memo x)) (.get memo x)
+                (map? x)
+                (let [x0 x
+                      x (if (contains? #{:go :defer} (:op x))
+                          (assoc x :call (dv-call (:call x) true))
+                          (into (empty x) (map (fn [[k v]] [k (dv v false)])) x))]
+                  (let [r (if (and (= :call (:op x)) (= :iface (:kind x)) (not godefer))
+                            (dv-call x false)
+                            x)]
+                    (.put memo x0 r)
+                    r))
+                (vector? x) (if (and (seq x) (map? (first x))) (mapv #(dv % false) x) x)
+                :else x))
+            (dv-call [c godefer]
+              (let [c (if (map? c) (into (empty c) (map (fn [[k v]] [k (dv v false)])) c) c)]
+                (if (or godefer (not= :iface (:kind c)))
+                  c
+                  (devirt-call asg c))))]
+      (dv tree false))))
+
+;;; Bounds check elision (walk/expr.go's walkIndex and bounded): with -m, an index into an
+;;; array whose range the index's type and operation cannot exceed, reported
+
+(defn- small-int-const [n]
+  (when (and n (const? n) (integer? (:val n)) (t/integer-type? (node-type n)))
+    (long (:val n))))
+
+(defn- bounded?
+  "walk.bounded: whether integer expression n is in [0, max)."
+  [n ^long mx]
+  (let [ty (node-type n)]
+    (if-not (and ty (t/integer-type? ty))
+      false
+      (let [sign (not (t/unsigned? ty))
+            bits (* 8 (size ty))]
+        (if-let [v (small-int-const n)]
+          (and (<= 0 v) (< v mx))
+          (let [op (when (= :binary (:op n)) (gop n))
+                [res bits]
+                (case op
+                  ("&" "&^") (let [v (cond (small-int-const (:x n)) (small-int-const (:x n))
+                                           (small-int-const (:y n)) (let [v (small-int-const (:y n))]
+                                                                      (if (= op "&^")
+                                                                        (let [v (bit-not v)]
+                                                                          (if (not sign) (bit-and v (dec (bit-shift-left 1 bits))) v))
+                                                                        v))
+                                           :else -1)]
+                               [(and (<= 0 v) (< v mx)) bits])
+                  "%" [(boolean (and (not sign) (small-int-const (:y n))
+                                     (let [v (small-int-const (:y n))] (and (<= 0 v) (<= v mx)))))
+                       bits]
+                  "/" [false (if (and (not sign) (small-int-const (:y n)))
+                               (loop [bits bits v (small-int-const (:y n))]
+                                 (if (and (> bits 0) (>= v 2)) (recur (dec bits) (bit-shift-right v 1)) bits))
+                               bits)]
+                  ">>" (if (and (not sign) (small-int-const (:y n)))
+                         (let [v (small-int-const (:y n))]
+                           (if (> v bits) [::max bits] [false (- bits v)]))
+                         [false bits])
+                  [false bits])]
+            (cond
+              (= ::max res) (> mx 0)
+              res true
+              (and (not sign) (<= bits 62) (<= (bit-shift-left 1 bits) mx)) true
+              :else false)))))))
+
+(defn- bce-walk!
+  "The index expressions of a function's live code, each elided bounds check reported."
+  [body]
+  (letfn [(walk [x]
+            (cond
+              (map? x)
+              (do (when (and (#{:index :place-index} (:op x)) (:index x))
+                    (let [xt (node-type (:x x))
+                          at (if (t/pointer? xt) (elem xt) xt)
+                          idx (:index x)]
+                      (cond
+                        (= :array (kind at))
+                        (when (and (bounded? idx (long (nth (under at) 1))) (not (small-int-const idx)))
+                          (warn! (:line x) "index bounds check elided"))
+                        (and (const? (:x x)) (string? (:val (:x x))))
+                        (when (and (bounded? idx (count (.getBytes ^String (:val (:x x)) "UTF-8"))) (not (small-int-const idx)))
+                          (warn! (:line x) "index bounds check elided"))
+                        :else nil)))
+                  (case (:op x)
+                    :fn nil
+                    :if (let [c (static-bool (:cond x))]
+                          (walk (:init x)) (walk (:cond x))
+                          (when (>= c 0) (walk (:then x)))
+                          (when (<= c 0) (walk (:else x))))
+                    (doseq [[_ v] x] (walk v))))
+              (sequential? x) (doseq [v (if (every? map? x) (live-stmts x) x)] (walk v))
+              :else nil))]
+    (walk body)))
+
+;;; Inlining (inline/inl.go: CanInline's hairyVisitor and its budget, the interleaved inliner's
+;;; mkinlcall), as gc does it before escape analysis when inlining is on (no -l)
+
+(def ^:dynamic *inline*
+  "Whether gc's inliner runs (gc without -l)."
+  false)
+
+(def ^:private inline-max-budget 80)
+(def ^:private inline-extra-call-cost 57)
+(def ^:private inline-param-call-cost 17)
+(def ^:private inline-closure-called-once-cost 800)
+
+(declare static-inlined-call? inl-callee can-inline! try-inline field-offset max-cost all-fns scan-fn! closure-vars! foreign-body)
+
+(defn- conv-nop?
+  "typecheck's convertOp: whether a conversion is OCONVNOP (costs nothing in the budget)."
+  [n]
+  (let [src (node-type (:x n))
+        dst (node-type n)]
+    (cond
+      (t/same? src dst) true
+      (or (iface? src) (iface? dst)) false
+      (t/identical-ignore-tags? (under src) (under dst)) true
+      (and (t/pointer? src) (t/pointer? dst) (not (t/named? src)) (not (t/named? dst))
+           (t/identical-ignore-tags? (under (elem src)) (under (elem dst)))) true
+      (and (or (t/integer-type? src) (t/float-type? src)) (or (t/integer-type? dst) (t/float-type? dst)))
+      (= (kind src) (kind dst))
+      (and (or (t/pointer? src) (t/uintptr? src)) (t/unsafe-pointer? dst)) true
+      (and (t/unsafe-pointer? src) (or (t/pointer? dst) (t/uintptr? dst))) true
+      :else false)))
+
+(defn- param-local?
+  "An ONAME of class PPARAM (or a closure variable of the enclosing function's: PAUTOHEAP)."
+  [n]
+  (and (= :local (:op n)) (#{:param} (e/o (:obj n) :esc-class))))
+
+(def ^:private intrinsics
+  "ssagen's intrinsics for amd64 (ssagen/intrinsics.go's initIntrinsics, go1.27.1: its add, addF and
+  alias entries that apply to amd64): calls the back end replaces by instructions, which the
+  inliner's budget counts as one node (ir.IsIntrinsicCall)."
+  {"crypto/internal/constanttime" #{"Select" "boolToUint8"}
+   "internal/runtime/atomic" #{"And" "And32" "And64" "And8" "Cas" "Cas64" "CasRel" "Casint32" "Casint64" "Casp1" "Casuintptr" "Load" "Load64" "Load8" "LoadAcq" "LoadAcq64" "LoadAcquintptr" "Loadint32" "Loadint64" "Loadp" "Loaduint" "Loaduintptr" "Or" "Or32" "Or64" "Or8" "Store" "Store64" "Store8" "StoreRel" "StoreRel64" "StoreReluintptr" "Storeint32" "Storeint64" "StorepNoWB" "Storeuintptr" "Xadd" "Xadd64" "Xaddint32" "Xaddint64" "Xadduintptr" "Xchg" "Xchg64" "Xchg8" "Xchgint32" "Xchgint64" "Xchguintptr"}
+   "internal/runtime/maps" #{"bitsetFirst" "bitsetLowestSet" "bitsetRemoveBelow" "bitsetShiftOutLowest" "ctrlGroupMatchEmpty" "ctrlGroupMatchEmptyOrDeleted" "ctrlGroupMatchFull" "ctrlGroupMatchH2"}
+   "internal/runtime/math" #{"Add64" "MulUintptr"}
+   "internal/runtime/sys" #{"Bswap32" "Bswap64" "GetCallerPC" "GetCallerSP" "GetClosurePtr" "Len64" "Len8" "OnesCount64" "Prefetch" "PrefetchStreamed" "TrailingZeros32" "TrailingZeros64" "TrailingZeros8"}
+   "math" #{"Ceil" "FMA" "Floor" "RoundToEven" "Trunc" "sqrt"}
+   "math/big" #{"mulWW"}
+   "math/bits" #{"Add" "Add64" "Div" "Div64" "Len" "Len16" "Len32" "Len64" "Len8" "Mul" "Mul64" "OnesCount" "OnesCount16" "OnesCount32" "OnesCount64" "ReverseBytes32" "ReverseBytes64" "RotateLeft" "RotateLeft16" "RotateLeft32" "RotateLeft64" "RotateLeft8" "Sub" "Sub64" "TrailingZeros16" "TrailingZeros32" "TrailingZeros64" "TrailingZeros8"}
+   "runtime" #{"KeepAlive" "slicebytetostringtmp"}
+   "sync/atomic" #{"AddInt32" "AddInt64" "AddUint32" "AddUint64" "AddUintptr" "AndInt32" "AndInt64" "AndUint32" "AndUint64" "AndUintptr" "CompareAndSwapInt32" "CompareAndSwapInt64" "CompareAndSwapUint32" "CompareAndSwapUint64" "CompareAndSwapUintptr" "LoadInt32" "LoadInt64" "LoadPointer" "LoadUint32" "LoadUint64" "LoadUintptr" "OrInt32" "OrInt64" "OrUint32" "OrUint64" "OrUintptr" "StoreInt32" "StoreInt64" "StoreUint32" "StoreUint64" "StoreUintptr" "SwapInt32" "SwapInt64" "SwapUint32" "SwapUint64" "SwapUintptr"}})
+
+(def ^:private cheap-calls
+  "hairyVisitor's cheap calls (amd64: CanMergeLoads): counted as one node."
+  {"encoding/binary" (set (for [e ["littleEndian" "bigEndian"] f ["Uint64" "Uint32" "Uint16" "PutUint64" "PutUint32" "PutUint16"
+                                                                  "AppendUint64" "AppendUint32" "AppendUint16"]]
+                            (str e "." f)))
+   "internal/byteorder" (set (for [e ["LE" "BE"] f ["Uint64" "Uint32" "Uint16" "PutUint64" "PutUint32" "PutUint16"
+                                                    "AppendUint64" "AppendUint32" "AppendUint16"]]
+                              (str e f)))
+   "internal/abi" #{"NoEscape"}})
+
+(defn- fn-pkg-name
+  "A function record's package path and its name in it."
+  [f]
+  (if (or (fn-get f :foreign) (fn-get f :foreign-body))
+    [(fn-get f :pkg-path) (fn-get f :local-name)]
+    [(:local-pkg *ctx*) (fn-get f :name)]))
+
+(defn- cheap-call? [f]
+  (let [[p n] (fn-pkg-name f)]
+    (boolean (or (contains? (get cheap-calls p) n)
+                 (and (= p "internal/abi") (str/starts-with? (str n) "EscapeNonString["))))))
+
+(defn- intrinsic? [f]
+  (boolean (if (or (fn-get f :foreign) (fn-get f :foreign-body))
+             (contains? (get intrinsics (fn-get f :pkg-path)) (fn-get f :local-name))
+             (and (fn-get f :obj) (not (fn-get f :parent))
+                  (contains? (get intrinsics (:local-pkg *ctx*)) (fn-get f :name))))))
+
+(defn- hairy-cost
+  "hairyVisitor over function f's body: [cost reason], gc's IR nodes counted as the unified IR
+  reader and typecheck build them from the checked tree's forms."
+  [f]
+  (let [budget (volatile! 0)
+        reason (volatile! nil)
+        cost! (fn [n] (vswap! budget + (long n)))]
+    (letfn [(visit [x]
+              (cond
+                (nil? x) nil
+                @reason nil
+                (sequential? x) (doseq [v (live-stmts x)] (visit v))
+                (not (map? x)) nil
+                (const? x) (cost! 1)
+                :else
+                (case (:op x)
+                  :block (do (doseq [d (:decls x)] (visit d)) (visit (:stmts x)))
+                  :decl (let [objs (:objs x) init (:init x)]
+                          (when-not (:const x)
+                            (if (empty? init)
+                              (cost! (* 4 (count objs)))
+                              (do (cost! (* 2 (count objs)))
+                                  (cost! 1) (cost! (count objs))
+                                  (doseq [v init] (visit v))))))
+                  :assign (do (cost! 1) (doseq [p (:lhs x)] (if (map? p) (visit-place p) (cost! 1))) (doseq [v (:rhs x)] (visit v)))
+                  :op-assign (do (cost! 1) (visit-place (:place x)) (visit (:value x)))
+                  :incdec (do (cost! 2) (visit-place (:place x)))
+                  :return (do (cost! 1) (doseq [v (:values x)] (visit v)))
+                  :expr (visit (:x x))
+                  :if (let [c (static-bool (:cond x))]
+                        (if (zero? c)
+                          (do (cost! 1) (visit (:init x)) (visit (:cond x)) (visit (:then x)) (visit (:else x)))
+                          (do (visit (:init x)) (if (pos? c) (visit (:then x)) (visit (:else x))))))
+                  :for (do (cost! 1) (visit (:init x)) (visit (:cond x)) (visit (:post x)) (visit (:body x)))
+                  :range (do (cost! 1) (cost! (* 2 (count (remove nil? (:objs x)))))
+                             (visit (:x x))
+                             (cost! (count (remove nil? (:objs x))))
+                             (doseq [p (:places x)] (when (map? p) (visit-place p)))
+                             (visit (:body x)))
+                  :switch (do (cost! 1) (visit (:init x)) (visit (:tag x))
+                              (doseq [cl (:clauses x)] (cost! 1) (doseq [v (:values cl)] (visit v)) (visit (:body cl))))
+                  :type-switch (do (cost! 2) (visit (:init x)) (visit (:x x))
+                                   (doseq [cl (:clauses x)] (cost! 1) (when (:var cl) (cost! 1)) (visit (:body cl))))
+                  :select (do (cost! 1) (doseq [cl (:clauses x)] (cost! 1) (visit (:comm cl)) (visit (:body cl))))
+                  :send (do (cost! 1) (visit (:ch x)) (visit (:value x)))
+                  :label (do (cost! 1) (visit (:stmt x)))
+                  (:goto :break :continue) (cost! 1)
+                  (:fallthrough :local-type :directive :var-decl) nil
+                  :go (vreset! reason "unhandled op GO")
+                  :defer (vreset! reason "unhandled op DEFER")
+                  ;; expressions
+                  (:local :global :func :nil :place-local :place-global) (cost! 1)
+                  (:type :method-expr) nil
+                  (:field :place-field) (visit (expand-field x))
+                  :sel (do (cost! 1) (visit (:x x)))
+                  (:index :place-index :map-index :place-map) (do (cost! 1) (visit (:x x)) (visit (or (:index x) (:key x))))
+                  :slice (let [[lo hi mx] (:indexes x)]
+                           (cost! 1)
+                           (when (= :array (kind (node-type (:x x)))) (cost! 1))
+                           (when (and lo (const? lo) (= 0 (:val lo))) (cost! -1))
+                           (when (and hi (= :call (:op hi)) (= "len" (:builtin hi)) (= (:form (first (:args hi))) (:form (:x x)))) (cost! -2))
+                           (visit (:x x)) (doseq [i (remove nil? (:indexes x))] (visit i)))
+                  :addr (if (= :lit (:op (:x x)))
+                          (do (cost! 1) (visit (:x x)))
+                          (let [sx (let [y (:x x)] (if (#{:field :place-field} (:op y)) (expand-field y) y))]
+                            (cost! 1)
+                            (when (and (= :sel (:op sx)) (#{:local :global :place-local} (:op (:x sx)))
+                                       (zero? (field-offset (node-type (:x sx)) (:deref sx) (:field-name sx))))
+                              (cost! -2))
+                            (visit sx)))
+                  (:deref :place-deref) (do (cost! 1)
+                                            (when (= :addr (:op (loop [p (:x x)] (if (and (= :conv (:op p)) (conv-nop? p)) (recur (:x p)) p))))
+                                              (cost! -1))
+                                            (visit (:x x)))
+                  :conv (do (when-not (conv-nop? x) (cost! 1)) (visit (:x x)))
+                  :convert-iface (do (cost! 1) (visit (:x x)))
+                  (:assert :recv :unary) (do (cost! 1) (visit (:x x)))
+                  :binary (if (and (= "+" (gop x)) (t/string-type? (node-type x)))
+                            (do (cost! 1) (doseq [v (add-string-list x)] (visit v)))
+                            (do (cost! 1) (visit (:x x)) (visit (:y x))))
+                  :lit (case (:kind x)
+                         :struct (do (cost! 1) (doseq [fx (:fields x)] (cost! 1) (visit (elt-value fx))))
+                         (:array :slice) (do (cost! (if (and (= :slice (:kind x)) (not (:implicit-ptr x))) 2 1))
+                                             (doseq [ex (:elems x)]
+                                               (when (and (map? ex) (not (:op ex)) (:key ex)) (cost! 2))
+                                               (visit (elt-value ex))))
+                         :map (do (cost! 1) (doseq [en (:entries x)] (cost! 1) (visit (:key en)) (visit (:value en))))
+                         (cost! 1))
+                  :fn (if (zero? (long (get *debug* :inlfuncswithclosures 1)))
+                        (vreset! reason "not inlining functions with closures")
+                        (cost! 16))
+                  :method (do (cost! 2) (visit (method-recv x)))
+                  :iface-method (do (cost! 1) (visit (:recv x)))
+                  :result (cost! 1)
+                  :ok nil
+                  :call (visit-call x)
+                  (cost! 1))))
+            (visit-place [p]
+              (visit (norm-place p)))
+            (visit-call [c]
+              (case (:kind c)
+                :builtin (case (:builtin c)
+                           "recover" (vreset! reason "call to recover")
+                           "panic" (let [a (first (:args c))]
+                                     (cost! 2)
+                                     (when (= :convert-iface (:op a)) (cost! -1))
+                                     (visit a))
+                           ("new") (cost! 1)
+                           "keepalive" (do (cost! 2) (doseq [a (:args c)] (visit a)))
+                           (do (cost! 1) (doseq [a (:args c)] (when-not (= :type (:op a)) (visit a)))))
+                :iface (do (cost! (+ 1 inline-extra-call-cost)) (visit (:callee c)) (doseq [a (:args c)] (visit a)))
+                (let [callee (inl-callee f c)
+                      inl (when callee (can-inline! callee))
+                      sig (node-type (:callee c))
+                      sig (if (= :method (:kind c)) (e/o (:method (:callee c)) :type) sig)
+                      args (if (and (vector? (under sig)) (nth (under sig) 3 false)) (variadic-args c sig) (:args c))
+                      extra (cond
+                              (and callee (or (intrinsic? callee) (cheap-call? callee))) 0
+                              (and inl (<= (long (:cost inl)) (long (max-cost callee false)))) (:cost inl)
+                              (and (= :closure (:kind c)) (param-local? (:callee c))) inline-param-call-cost
+                              :else inline-extra-call-cost)]
+                  (cost! (+ 1 (long extra)))
+                  (case (:kind c)
+                    :method (visit (method-recv (:callee c)))
+                    (visit (:callee c)))
+                  (doseq [a args] (visit a)))))]
+      (visit (fn-get f :body)))
+    [(long @budget) @reason]))
+
+(defn- field-offset
+  "The offset of field nm of struct type ty (through a pointer when deref)."
+  [ty deref nm]
+  (let [st (if deref (elem ty) ty)
+        u (under st)]
+    (if (and (vector? u) (= :struct (nth u 0)))
+      (let [fs (nth u 1)
+            i (first (keep-indexed (fn [i f] (when (= nm (:name f)) i)) fs))]
+        (if i (long (nth (t/offsetsof st) i 0)) -1))
+      -1)))
+
+(def ^:dynamic *big-caller*
+  "Whether the function whose calls are being inlined is big (IsBigFunc): its inlinees' maximum
+  cost is 20."
+  false)
+
+(defn- max-cost
+  "inlineCostOK's maximum cost of a callee (a closure's doubled)."
+  [callee called-once]
+  (let [m (if *big-caller* 20 inline-max-budget)
+        m (if (fn-get callee :parent) (* 2 m) m)]
+    (if (and (fn-get callee :parent) called-once) (max m inline-closure-called-once-cost) m)))
+
+(defn- call-str2
+  "A call as gc prints it after typecheck (-m=2's bodies): a method call as its method expression's
+  call, the receiver first."
+  [c]
+  (case (:kind c)
+    :method (let [m (:callee c)
+                  rt (or (:recv-type m) (node-type (method-recv m)))
+                  ptr (e/o (:method m) :ptr-recv)
+                  tt (if (and ptr (not (t/pointer? rt))) [:pointer rt] rt)
+                  ts (type-str tt)
+                  ts (if (t/pointer? tt) (str "(" ts ")") ts)]
+              (str ts "." (e/o (:method m) :name) "(" (args-str (cons (method-recv m) (:args c))) ")"))
+    (fmt-node c 0)))
+
+(declare stmt-str)
+
+(defn- stmts-str [ss]
+  (str/join "; " (remove str/blank? (map stmt-str (live-stmts (cond (nil? ss) [] (map? ss) [ss] :else ss))))))
+
+(defn- stmt-str
+  "ir/fmt.go's stmtFmt (its short forms: for loop, switch statement)."
+  [n]
+  (letfn [(ex [x] (if (and (= :call (:op x)) (not= :builtin (:kind x))) (call-str2 x) (fmt-node x 0)))
+          (pl [x] (if (= :blank x) "_" (fmt-node (norm-place x) 0)))]
+    (case (:op n)
+      :block (stmts-str (concat (:decls n) (:stmts n)))
+      :decl (if (empty? (:init n))
+              (str/join "; " (for [o (:objs n)] (str "var " (e/o o :name) " " (type-str (e/o o :type)))))
+              (str (str/join ", " (map #(if % (e/o % :name) "_") (:objs n))) " := " (str/join ", " (map ex (:init n)))))
+      :assign (str (str/join ", " (map pl (:lhs n))) " = " (str/join ", " (map ex (:rhs n))))
+      :op-assign (str (pl (:place n)) " " (get go-ops (str (:go/op n)) (str (:go/op n))) "= " (ex (:value n)))
+      :incdec (str (pl (:place n)) (if (:inc n) "++" "--"))
+      :return (str "return " (str/join ", " (map ex (:values n))))
+      :expr (ex (:x n))
+      :if (str "if " (ex (:cond n)) " { " (stmts-str (:then n)) " }"
+               (when (seq (let [e (:else n)] (if (map? e) [e] e))) (str " else { " (stmts-str (:else n)) " }")))
+      (:for :range) "for loop"
+      (:switch :type-switch) "switch statement"
+      :select "select statement"
+      (:go :defer) (str (name (:op n)) " " (ex (:call n)))
+      (:break :continue :goto) (str (name (:op n)) (when (:label n) (str " " (:label n))))
+      :label (str (:label n) ": ")
+      :send (str (fmt-node (:ch n) 0) " <- " (ex (:value n)))
+      "")))
+
+(defn- big-func?
+  "IsBigFunc: whether function f has more than 5,000 IR nodes (counted as the budget counts them,
+  every node one)."
+  [f]
+  (let [n (volatile! 0)]
+    (letfn [(walk [x]
+              (cond
+                (map? x) (do (when (:op x) (vswap! n inc)) (when-not (= :fn (:op x)) (doseq [[k v] x] (when-not (#{:type :to :sig :field :method :recv-type :iface :form} k) (walk v)))))
+                (sequential? x) (doseq [v x] (walk v))
+                :else nil))]
+      (walk (fn-get f :body)))
+    (> (long @n) 5000)))
+
+(defn- can-inline!
+  "CanInline: function f's inlining record {:cost n}, or nil (with its reason); its message."
+  [f]
+  (let [st (fn-get f :inl-state)]
+    (case st
+      :done (fn-get f :inl)
+      :visiting nil
+      (do
+        (fn-set! f :inl-state :visiting)
+        (let [reason (cond
+                       (fn-get f :foreign) "no function body"
+                       (fn-get f :extern) "no function body"
+                       (fn-get f :noinline) "marked go:noinline"
+                       (seq (fn-get f :uintptr-pragmas)) "marked as having an escaping uintptr argument"
+                       :else nil)
+              [cost r] (if reason [0 reason] (hairy-cost f))
+              budget (if (fn-get f :parent) (max inline-max-budget inline-closure-called-once-cost) inline-max-budget)
+              r (or r (when (> (long cost) (long budget)) (str "function too complex: cost " cost " exceeds budget " budget)))
+              inl (when-not r {:cost cost})]
+          (fn-set! f :inl inl)
+          (fn-set! f :inl-reason r)
+          (when (System/getenv "GOI_INLINE_COSTS")
+            (binding [*out* *err*] (println "inl-cost" (fn-get f :line) (fn-get f :name) cost (or r ""))))
+          (fn-set! f :inl-state :done)
+          (binding [*wfile* (fn-get f :file)]
+            (cond
+              (and inl (> (long *m*) 1))
+              (warn! (fn-get f :line) (str "can inline " (fn-get f :name) " with cost " cost " as: "
+                                           (type-str (fn-get f :sig)) " { " (stmts-str (fn-get f :body)) " }"))
+              (and inl (pos? (long *m*)))
+              (warn! (fn-get f :line) (str "can inline " (fn-get f :name)))
+              (and r (> (long *m*) 1) (not (fn-get f :foreign)))
+              (warn! (fn-get f :line) (str "cannot inline " (fn-get f :name) ": " r))
+              :else nil))
+          inl)))))
+
+(defn- inl-callee
+  "inlCallee: the function call c of caller calls, when gc can inline it (a package function, a
+  method expression of the receiver's own type, a literal of the caller's)."
+  [caller c]
+  (case (:kind c)
+    (:static :compiled) (fn-of-obj (:obj (:callee c)))
+    :method (let [m (:callee c)]
+              (when (= 1 (count (:path m)))
+                (fn-of-obj (:method m))))
+    :closure (let [v (static-value (:callee c))]
+               (case (:op v)
+                 :func (fn-of-obj (:obj v))
+                 :method-expr (fn-of-obj (:method v))
+                 :fn (let [g (fn-of-node v)]
+                       (when (and g (let [cvs (fn-get g :closure-vars)]
+                                      (or (empty? cvs)
+                                          (identical? (.get ^java.util.HashMap (:owner *ctx*) (first cvs)) caller))))
+                         g))
+                 nil))
+    nil))
+
+(defn- copy-body
+  "The callee's body copied for an inlined call at line: its variables (in om, extended with a
+  fresh copy of each the body declares) renamed, every node at the call's line (gc reports the
+  inlined code at its outermost position), its literals fresh nodes (named as the callee's)."
+  [body ^java.util.HashMap om line lit-names decls qual]
+  (doseq [o decls]
+    (when-not (.containsKey om o)
+      (.put om o (e/obj (cond-> (dissoc (assoc @o :line line :esc-class :auto :local? true) :param? :result?) qual (assoc :inl-pkg qual))))))
+  (letfn [(fresh [o]
+            (or (.get om o)
+                (let [c (e/obj (assoc @o :line line :esc-class :auto :local? true))]
+                  (.put om o c)
+                  c)))
+          (cp [x]
+            (cond
+              (e/obj? x) (if (.containsKey om x) (.get om x) x)
+              (map? x)
+              (let [x2 (into {} (map (fn [[k v]]
+                                       [k (cond
+                                            (#{:type :to :sig :field :method :recv-type :iface} k) v
+                                            (= k :objs) (mapv #(when % (fresh %)) v)
+                                            (= k :var) (when v (fresh v))
+                                            (= k :params) (if (= :fn (:op x)) (mapv #(when % (fresh %)) v) v)
+                                            (and (= k :results) (= :fn (:op x))) (mapv (fn [r] (if (:obj r) (assoc r :obj (fresh (:obj r))) r)) v)
+                                            :else (cp v))]))
+                             x)
+                    x2 (if (contains? x :line) (assoc x2 :line line) x2)]
+                (if (= :fn (:op x))
+                  (assoc x2 :lit-name (get lit-names x) ::copy true ::orig-line (:line x))
+                  x2))
+              (vector? x) (mapv cp x)
+              (seq? x) (doall (map cp x))
+              :else x))]
+    (cp body)))
+
+(defn- register-copies!
+  "Records for the literals of an inlined body (copies of the callee's), scanned, so that their
+  calls in the copy can be inlined in turn."
+  [caller body]
+  (letfn [(walk [x]
+            (cond
+              (map? x) (if (and (= :fn (:op x)) (::copy x))
+                         (let [c (volatile! {:node x :parent caller :closure? true :file (fn-get caller :file) :name (:lit-name x)
+                                             :params (vec (:params x)) :param-types (vec (nth (under (:sig x)) 1))
+                                             :results (vec (map-indexed (fn [i r] (or (:obj r) (when (e/obj? r) r)
+                                                                                      (e/obj {:kind :var :name (str "~r" i) :line (:line x) :type (:type r)})))
+                                                                        (:results x)))
+                                             :sig (:sig x) :recv nil :esc :unknown :line (or (::orig-line x) (:line x)) :body (:body x)})]
+                           (.put ^java.util.IdentityHashMap (:fn-of-node *ctx*) x c)
+                           (scan-fn! c)
+                           (closure-vars! c))
+                         (doseq [[_ v] x] (walk v)))
+              (sequential? x) (doseq [v x] (walk v))
+              :else nil))]
+    (walk body)))
+
+(defn- returns->assigns
+  "The inlined body's return statements as assignments to the result variables rv (their goto to
+  the end left out: the analysis is not flow sensitive)."
+  [x rv]
+  (letfn [(rw [x]
+            (cond
+              (map? x) (case (:op x)
+                         :fn x
+                         :return (let [vs (:values x)]
+                                   ;; ~R0 = v; goto .i0 (the goto keeps what follows dead, as gc's)
+                                   {:op :block :line (:line x)
+                                    :stmts (conj (if (empty? vs)
+                                                   []
+                                                   [{:op :assign :line (:line x) :inl-return true
+                                                     :lhs (mapv (fn [o] {:op :place-local :obj o :type (e/o o :type) :mode :variable}) rv)
+                                                     :rhs vs}])
+                                                 {:op :goto :label ".inlret" :line (:line x)})})
+                         (into {} (map (fn [[k v]] [k (rw v)])) x))
+              (vector? x) (mapv rw x)
+              :else x))]
+    (rw x)))
+
+(defn- inline-calls
+  "The interleaved inliner over a tree of function caller: each call gc inlines replaced by its
+  inlined body ({:op :inlcall}), reported (inlining call to f), the inlined bodies' own calls
+  inlined in turn (chain: the functions being inlined, gc's inlining tree: no function inlined
+  into its own copy)."
+  [caller x chain]
+  (let [memo (java.util.IdentityHashMap.)
+        ;; devirtualize.State.assignments: a variable's assignments over its own function's body,
+        ;; its literals' included (a literal's call reads its enclosing function's variables)
+        root (loop [g caller] (if-let [p (fn-get g :parent)] (recur p) g))
+        asg (let [^java.util.HashMap a (iface-assignments x)]
+              (when-not (identical? root caller)
+                (doseq [[o vs] (iface-assignments (fn-get root :body))]
+                  (.put a o (vec (concat (.get a o) vs)))))
+              a)]
+  (letfn [(il [x godefer]
+            (cond
+              (and (map? x) (.containsKey memo x)) (.get memo x)
+              (map? x)
+              (let [r (il1 x)] (.put memo x r) r)
+              (vector? x) (mapv #(il % false) (if (and (seq x) (every? map? x) (some :op x)) (live-stmts x) x))
+              (seq? x) (doall (map #(il % false) x))
+              :else x))
+          (il1 [x]
+              (case (:op x)
+                ;; noder's dead code: the live branch of a constant condition
+                :if (let [c (static-bool (:cond x))]
+                      (cond
+                        (pos? c) {:op :block :line (:line x) :stmts (il (vec (concat (when (:init x) [(:init x)]) (let [t (:then x)] (if (map? t) [t] t)))) false)}
+                        (neg? c) {:op :block :line (:line x) :stmts (il (vec (concat (when (:init x) [(:init x)]) (let [t (:else x)] (cond (nil? t) [] (map? t) [t] :else t)))) false)}
+                        :else (into {} (map (fn [[k v]] [k (il v false)])) x)))
+                :fn (let [g (fn-of-node x)]
+                      (when g (vswap! (:kept-lits *ctx*) conj g))
+                      (if-let [nb (when g (fn-get g :inlined-body))]
+                        (let [x2 (assoc x :body nb :lit-name (fn-get g :name))]
+                          (.put ^java.util.IdentityHashMap (:fn-of-node *ctx*) x2 g)
+                          x2)
+                        x))
+                (:go :defer) (let [c (:call x)]
+                               (assoc x :call (if (= :call (:op c))
+                                                (assoc (into {} (map (fn [[k v]] [k (if (#{:callee :args} k) (il v false) v)])) c) :godefer true)
+                                                c)))
+                (let [x (into {} (map (fn [[k v]] [k (il v false)])) x)
+                      x (if (and (= :call (:op x)) (= :iface (:kind x))) (devirt-call asg x) x)]
+                  (if (and (= :call (:op x)) (not= :builtin (:kind x)) (not= :iface (:kind x)) (not (::tried x)))
+                    (or (try-inline caller x chain) (assoc x ::tried true))
+                    x))))]
+    (il x false))))
+
+(defn- try-inline [caller c chain]
+  (let [callee (inl-callee caller c)
+        inl (when callee (can-inline! callee))
+        inl (when-not (and callee (intrinsic? callee)) inl)
+        callee (if (and inl (fn-get callee :foreign)) (foreign-body callee) callee)
+        inl (when callee inl)]
+    (when (and inl (not (some #(identical? % callee) chain))
+               (<= (long (:cost inl)) (long (max-cost callee false))))
+      (let [line (call-line c (fn-get caller :line))
+            _ (warn! line (str "inlining call to " (fn-get callee :name)))
+            _ (when (= :fn (:op (:callee c))) (vswap! (:kept-lits *ctx*) disj callee))
+            om (java.util.HashMap.)
+            ;; another package's variables inlined print qualified by its name (bytes.b)
+            qual (when (fn-get callee :foreign-body) (last (str/split (str (fn-get callee :pkg-path)) #"/")))
+            fresh (fn [o nm] (let [c (e/obj (cond-> (dissoc (assoc (if o @o {:kind :var :name nm}) :line line :esc-class :auto :local? true) :param? :result?)
+                                              qual (assoc :inl-pkg qual)))]
+                               (when o (.put om o c))
+                               c))
+            sig (under (fn-get callee :sig))
+            recv (when (fn-get callee :recv-type) (fresh (fn-get callee :recv) "~p"))
+            params (vec (map-indexed (fn [i o] (fresh o (str "~p" i))) (map (fn [i] (nth (fn-get callee :params) i nil)) (range (count (nth sig 1))))))
+            rv (vec (map-indexed (fn [i o] (fresh o (str "~R" i))) (fn-get callee :results)))
+            _ (doseq [[o ty] (map vector params (nth sig 1))] (e/oset! o :type ty))
+            sigc (node-type (:callee c))
+            sigc (if (= :method (:kind c)) (e/o (:method (:callee c)) :type) sigc)
+            args (if (and (vector? (under sigc)) (nth (under sigc) 3 false)) (variadic-args c sigc) (vec (:args c)))
+            method-expr? (and (= :closure (:kind c)) (fn-get callee :recv-type) (= :method-expr (:op (static-value (:callee c)))))
+            [rarg args] (cond
+                          (= :method (:kind c)) [(method-recv (:callee c)) args]
+                          method-expr? [(first args) (vec (rest args))]
+                          :else [nil args])
+            ;; the copies of the callee's literals named after it (r.func2's r.func2.1 inlined: r.func2.func1)
+            cname (fn-get callee :name)
+            lit-names (into {} (for [k (rest (all-fns callee))
+                                     :let [n (fn-get k :name)]]
+                                 [(fn-get k :node)
+                                  (if (and (str/starts-with? n (str cname ".")) (not (str/starts-with? n (str cname ".func"))))
+                                    (str cname ".func" (subs n (inc (count cname))))
+                                    n)]))
+            body (copy-body (fn-get callee :body) om line lit-names (mapcat #(fn-get % :dcl) (all-fns callee)) qual)
+            body (returns->assigns body rv)
+            _ (register-copies! caller body)
+            pdecl {:op :decl :short true :objs (vec (concat (when recv [recv]) params))
+                   :init (vec (concat (when recv [rarg]) args)) :line line :inl-params true}
+            rdecl {:op :decl :objs rv :init [] :line line}
+            body [pdecl rdecl {:op :block :stmts (if (vector? body) body [body]) :line line}]
+            body (inline-calls caller body (conj chain callee))]
+        {:op :inlcall :callee-name (fn-get callee :name) :body body :retvars rv :line line
+         ;; staticinit's staticAssignInlinedCall: a callee whose body is one return
+         :inl-static (static-inlined-call? (let [ss (live-stmts (let [b (fn-get callee :body)] (if (map? b) (:stmts b) b)))
+                           ss (if (and (= 1 (count ss)) (= :block (:op (first ss))) (empty? (:decls (first ss))))
+                                (live-stmts (:stmts (first ss))) ss)]
+                       (when (and (= 1 (count ss)) (= :return (:op (first ss))) (= 1 (count (:values (first ss)))))
+                         {:value (first (:values (first ss)))
+                          :params (set (remove nil? (concat [(fn-get callee :recv)] (fn-get callee :params))))
+                          :args (vec (concat (when rarg [rarg]) args))})))
+         :type (node-type c) :mode :value
+         :callee-is-lit (= :fn (:op (static-value (:callee c))))}))))
+
+;;; testing.B.Loop's loops (bloop/bloop.go, Go 1.24): in a package that imports testing, the
+;;; statements of a b.Loop() loop keep their results and operands alive (runtime.KeepAlive of
+;;; each), reported at -m=2; before the inliner
+
+(def ^:private bloop-tmps (atom 0))
+
+(defn- bloop-tmp [ty line]
+  (e/obj {:kind :var :name (str ".autotmp_" (swap! bloop-tmps inc)) :line line :type ty :local? true :esc-class :auto}))
+
+(defn- bloop-name
+  "getNameFromNode: the variable at the root of n's selections, slices, conversions, indexes."
+  [n]
+  (loop [n n]
+    (when (map? n)
+      (case (:op n)
+        (:local :place-local :global :place-global) (:obj n)
+        (:slice :conv :convert-iface :addr :index :place-index :map-index :place-map :sel) (recur (:x n))
+        (:field :place-field) (recur (:x n))
+        nil))))
+
+(defn- addressable-name
+  "getAddressableNameFromNode: that variable when it is addressable (a local or global variable)."
+  [n]
+  (let [o (bloop-name n)]
+    (when (and o (= :var (e/o o :kind)) (not= "_" (e/o o :name))) o)))
+
+(defn- bloop-kept [line o]
+  (when (> (long *m*) 1)
+    (warn! line (str (if (e/o o :local?) "p." (str (e/o o :pkg) ".")) (e/o o :name) " will be kept alive"))))
+
+(defn- keep-alive-calls
+  "keepAliveAt: runtime.KeepAlive(unsafe.Pointer(&v)) for each variable (the call IsCompilerVarLive)."
+  [objs line]
+  (vec (for [o objs :when (and o (not= "_" (e/o o :name)))]
+         {:op :expr :line line
+          :x {:op :call :kind :builtin :builtin "keepalive" :line line :mode :novalue :type :invalid
+              :args [{:op :addr :x {:op (if (e/o o :local?) :local :global) :obj o :type (e/o o :type) :mode :variable :line line}
+                      :type [:pointer (e/o o :type)] :mode :value :line line}]}})))
+
+(defn- keep-alive-nodes
+  "getKeepAliveNodes of an assignment's destination."
+  [line n]
+  (let [o (when (map? n) (addressable-name n))]
+    (cond
+      o (do (bloop-kept line o) [o])
+      (and (map? n) (#{:deref :place-deref} (:op n))) (do (when (> (long *m*) 1) (warn! line "dereference will be kept alive")) [])
+      :else (do (when (> (long *m*) 1) (warn! line "expr is unknown to bloop pass")) []))))
+
+(defn- preserve-stmt [st]
+  (let [line (:line st)
+        blk (fn [s objs] (let [ka (keep-alive-calls objs line)] (if (seq ka) {:op :block :line line :stmts (into [s] ka)} s)))]
+    (case (:op st)
+      :assign
+      (let [lhs (:lhs st) rhs (:rhs st)
+            rtys (if (and (= 1 (count rhs)) (> (count lhs) 1))
+                   (let [t (node-type (first rhs))] (if (and (vector? t) (= :tuple (first t))) (vec (rest t)) []))
+                   (mapv node-type rhs))
+            tmps (volatile! [])
+            lhs2 (vec (map-indexed (fn [i p] (if (= :blank p)
+                                                (let [o (bloop-tmp (nth rtys i nil) line)] (vswap! tmps conj o) {:op :place-local :obj o})
+                                                p))
+                                   lhs))
+            objs (vec (mapcat #(keep-alive-nodes line %) lhs2))
+            st2 (assoc st :lhs lhs2)]
+        (blk (if (seq @tmps) {:op :block :line line :stmts [{:op :decl :objs @tmps :init [] :line line} st2]} st2) objs))
+      :decl (if (:const st) st (blk st (vec (mapcat #(keep-alive-nodes line {:op :local :obj %}) (remove nil? (:objs st))))))
+      (:op-assign :incdec) (blk st (keep-alive-nodes line (:place st)))
+      :expr
+      (let [c (:x st)]
+        (if (and (= :call (:op c)) (not= :builtin (:kind c)))
+          (let [sig (if (= :method (:kind c)) (e/o (:method (:callee c)) :type) (node-type (:callee c)))
+                rs (when (vector? (under sig)) (nth (under sig) 2 nil))]
+            (if (seq rs)
+              (let [tmps (mapv #(bloop-tmp % line) rs)]
+                (when (> (long *m*) 1) (warn! line (str "function result" (when (> (count rs) 1) "s") " will be kept alive")))
+                (blk {:op :decl :short true :line line :objs tmps :init [c]} tmps))
+              ;; preserveCallArgs
+              (let [args (if (nth (under sig) 3 false) (variadic-args c sig) (vec (:args c)))
+                    pre (volatile! []) names (volatile! [])
+                    tmp-of (fn [a] (let [o (bloop-tmp (node-type a) line)]
+                                     (vswap! pre conj {:op :decl :short true :line line :objs [o] :init [a]})
+                                     (vswap! names conj o)
+                                     (when (> (long *m*) 1) (warn! line "function arg will be kept alive"))
+                                     {:op :local :obj o :type (node-type a) :mode :variable :line line}))
+                    args2 (mapv (fn [a]
+                                  (if-let [o (addressable-name a)]
+                                    (do (bloop-kept line o) (vswap! names conj o) a)
+                                    (if (and (= :lit (:op a)) (:implicit a))
+                                      (assoc a :elems (mapv (fn [x] (if-let [o (addressable-name x)]
+                                                                      (do (bloop-kept line o) (vswap! names conj o) x)
+                                                                      (tmp-of x)))
+                                                            (:elems a)))
+                                      (tmp-of a))))
+                                args)
+                    c2 (assoc c :args args2 :spread true :packed true)]
+                (blk {:op :block :line line :stmts (conj @pre {:op :expr :x c2 :line line})} @names))))
+          st))
+      st)))
+
+(defn- preserve-stmts [ss] (if (map? ss) (preserve-stmt ss) (mapv preserve-stmt ss)))
+
+(defn- b-loop? [n]
+  (and (= :for (:op n))
+       (let [c (:cond n)]
+         (and (= :call (:op c)) (= :method (:kind c))
+              (let [m (:method (:callee c))]
+                (and (= "Loop" (e/o m :name)) (= "testing" (e/o m :pkg))))))))
+
+(defn bloop-walk
+  "bloop.Walk over a function's tree."
+  [tree]
+  (let [memo (java.util.IdentityHashMap.)]
+  (letfn [(ed [x in]
+            (cond
+              (and (map? x) (not in) (.containsKey memo x)) (.get memo x)
+              (map? x)
+              (let [x0 x
+                    r (ed1 x in)]
+                (when-not in (.put memo x0 r))
+                r)
+              (vector? x) (mapv #(ed % in) x)
+              :else x))
+          (ed1 [x in]
+              (let [in (or in (b-loop? x))
+                    x (into {} (map (fn [[k v]] [k (if (#{:type :to :sig :field :method :recv-type :iface :form} k) v (ed v in))])) x)]
+                (if in
+                  (case (:op x)
+                    :for (update x :body preserve-stmts)
+                    :if (-> x (update :then #(if (vector? %) (preserve-stmts %) %))
+                            (update :else #(if (vector? %) (preserve-stmts %) %)))
+                    :block (-> x (update :stmts preserve-stmts) (update :decls #(when % (preserve-stmts %))))
+                    :case (update x :body preserve-stmts)
+                    :comm (update x :body preserve-stmts)
+                    :range (update x :body preserve-stmts)
+                    x)
+                  x)))]
+    (ed tree false))))
+
+;;; The package: its functions, their declarations, closures and captured variables
+
+(defn scan-fn!
+  "Walks function f's body (not the bodies of its literals, which are scanned as functions of
+  their own): its declared variables (its Dcl), its function literals, the variables it refers
+  to (for the closure variables), the single definitions (the ReassignOracle's)."
+  [f]
+  (let [dcl (volatile! (vec (remove nil? (concat (when-let [r (fn-get f :recv)] [r]) (fn-get f :params) (fn-get f :results)))))
+        refs (volatile! [])
+        kids (volatile! [])
+        ^java.util.HashMap owner (:owner *ctx*)
+        declare! (fn [o] (when (and o (not (.containsKey owner o)))
+                           (.put owner o f)
+                           (when-not (e/o o :esc-class) (e/oset! o :esc-class :auto))
+                           (vswap! dcl conj o)))
+        ^java.util.HashMap sd (:single-def *ctx*)
+        ^java.util.HashMap fa (:func-assigns *ctx*)
+        func-typed? (fn [o] (= :func (kind (e/o o :type))))
+        prune! (fn [place defn?]
+                 (when-let [o (outer-name place)]
+                   (when (.containsKey sd o)
+                     (when-not defn? (.put sd o ::none)))
+                   (when (and (not defn?) (func-typed? o) (.containsKey fa o) (not= :place-local (:op place)))
+                     (.put fa o ::none))))]
+    (doseq [o (fn-get f :params)] (when o (.put sd o ::none)))
+    (doseq [o @dcl] (.put owner o f))
+    (letfn [(walk [x]
+              (cond
+                (map? x)
+                (case (:op x)
+                  :fn (when-not (.containsKey ^java.util.IdentityHashMap (:fn-of-node *ctx*) x)
+                       (let [c (volatile! {:node x :parent f :closure? true :file (fn-get f :file) :name (or (:lit-name x)
+                                                                                                                (when (:wrapkind x) (str (fn-get f :name) "." (:wrapkind x) (inc (count @kids))))
+                                                                                                                (if (fn-get f :parent)
+                                                                                                                  (str (fn-get f :name) "." (inc (count @kids)))
+                                                                                                                  (str (fn-get f :name) ".func" (inc (count @kids)))))
+                                          :params (vec (:params x)) :param-types (vec (nth (under (:sig x)) 1))
+                                          :results (vec (map-indexed (fn [i r] (or (:obj r) (when (e/obj? r) r)
+                                                                                   (e/obj {:kind :var :name (str "~r" i) :line (:line x) :type (:type r)})))
+                                                                     (:results x)))
+                                          :sig (:sig x) :recv nil :esc :unknown :line (:line x)
+                                          :wrapper (boolean (:wrapper x))
+                                          :body (:body x)})]
+                        (doseq [o (:params x)] (when o (e/oset! o :esc-class :param)))
+                        (doseq [o (fn-get c :results)] (e/oset! o :esc-class :result))
+                        (.put ^java.util.IdentityHashMap (:fn-of-node *ctx*) x c)
+                        (vswap! kids conj c)))
+                  :decl (do (doseq [o (:objs x)] (declare! o))
+                            (doseq [o (:objs x)]
+                              (when (and o (e/o o :local?) (not (e/o o :addressed?)))
+                                (let [init (:init x)]
+                                  (cond
+                                    (and (= (count init) (count (:objs x))) (seq init))
+                                    (do (.put sd o (nth init (.indexOf ^java.util.List (:objs x) o)))
+                                        (when (func-typed? o) (.put fa o [(nth init (.indexOf ^java.util.List (:objs x) o))])))
+                                    (empty? init) (when (func-typed? o) (.put fa o []))
+                                    :else nil))))
+                            (walk (:init x)))
+                  :range (do (doseq [o (:objs x)] (declare! o))
+                             (doseq [p (:places x)] (prune! p false)
+                               (when-let [o (outer-name p)] (when (.containsKey fa o) (.put fa o ::none))))
+                             (doseq [[_ v] x] (walk v)))
+                  :type-switch (do (doseq [cl (:clauses x)] (declare! (:var cl)))
+                                   (doseq [[_ v] x] (walk v)))
+                  (:local :place-local) (vswap! refs conj (:obj x))
+                  :assign (let [lhs (:lhs x) rhs (:rhs x)]
+                            (doseq [[i p] (map-indexed vector lhs)]
+                              (when (map? p)
+                                (prune! p false)
+                                (when-let [o (when (= :place-local (:op p)) (:obj p))]
+                                  (when (and (func-typed? o) (.containsKey fa o) (not= ::none (.get fa o)))
+                                    (.put fa o (if (and (= 1 (count lhs)) (= 1 (count rhs)))
+                                                 (conj (.get fa o) (first rhs))
+                                                 ::none))))))
+                            (doseq [[_ v] x] (walk v)))
+                  (:op-assign :incdec) (do (prune! (:place x) false)
+                                           (when-let [o (outer-name (:place x))] (when (.containsKey fa o) (.put fa o ::none)))
+                                           (doseq [[_ v] x] (walk v)))
+                  (doseq [[_ v] x] (walk v)))
+                (sequential? x) (doseq [v x] (walk v))
+                :else nil))]
+      (walk (fn-get f :body)))
+    ;; a func-typed local assigned: its values for resolveAssignedCallees
+    (fn-set! f :dcl @dcl)
+    (fn-set! f :refs @refs)
+    (fn-set! f :kids @kids)
+    (doseq [c @kids] (scan-fn! c))))
+
+(defn closure-vars!
+  "A function literal's closure variables: the variables it (or a literal nested in it) refers to
+  that an enclosing function declares, in order of first reference."
+  [f]
+  (doseq [c (fn-get f :kids)] (closure-vars! c))
+  (when (fn-get f :closure?)
+    (let [^java.util.HashMap owner (:owner *ctx*)
+          inside? (fn [g] (or (identical? g f) (contains-closure? f g)))
+          all (concat (fn-get f :refs) (mapcat #(fn-get % :closure-vars) (fn-get f :kids)))
+          cvs (reduce (fn [acc o]
+                        (let [g (.get owner o)]
+                          (if (and g (not (inside? g)) (not (some #(identical? % o) acc)))
+                            (conj acc o)
+                            acc)))
+                      [] all)]
+      (fn-set! f :closure-vars cvs)
+      (fn-set! f :closure? (boolean (seq cvs))))))
+
+(defn all-fns [f] (cons f (mapcat all-fns (fn-get f :kids))))
+
+(defn- bottom-up
+  "ir.VisitFuncsBottomUp: the package functions in batches, each a strongly connected component
+  of the call graph (a function with its literals), callees first."
+  [fns]
+  (let [ids (java.util.IdentityHashMap.)
+        gen (volatile! 0)
+        stack (volatile! [])
+        out (volatile! [])
+        callees (fn [f]
+                  (let [acc (volatile! [])]
+                    (letfn [(walk [x]
+                              (cond
+                                (map? x) (case (:op x)
+                                           :func (when-let [g (fn-of-obj (:obj x))] (vswap! acc conj g))
+                                           :method (do (when-let [g (fn-of-obj (:method x))] (vswap! acc conj g))
+                                                       (doseq [[_ v] x] (walk v)))
+                                           :method-expr (when-let [g (fn-of-obj (:method x))] (vswap! acc conj g))
+                                           :fn (when-let [g (fn-of-node x)] (vswap! acc conj g))
+                                           (doseq [[_ v] x] (walk v)))
+                                (sequential? x) (doseq [v x] (walk v))
+                                :else nil))]
+                      (walk (fn-get f :body)))
+                    (remove #(fn-get % :foreign) @acc)))]
+    (letfn [(visit [f]
+              (if-let [id (.get ids f)]
+                (long id)
+                (let [id (long (vswap! gen inc))
+                      _ (.put ids f id)
+                      _ (vswap! gen inc)
+                      min-gen (volatile! (long @gen))]
+                  (vswap! stack conj f)
+                  (doseq [g (callees f)]
+                    (let [m (long (visit g))]
+                      (when (< m (long @min-gen)) (vreset! min-gen m))))
+                  (when (and (or (= @min-gen id) (= @min-gen (inc id))) (not (fn-get f :closure?)))
+                    (let [st @stack
+                          i (loop [i (dec (count st))] (if (identical? (nth st i) f) i (recur (dec i))))
+                          blk (subvec st i)]
+                      (doseq [x blk] (.put ids x Long/MAX_VALUE))
+                      (vreset! stack (subvec st 0 i))
+                      (vswap! out conj blk)))
+                  @min-gen)))]
+      (doseq [f fns :when (not (fn-get f :closure?))] (visit f)))
+    @out))
+
+(defn- method-base
+  "A method object's receiver base type name."
+  [o]
+  (let [d (e/o o :decl)
+        b (when (instance? arbace.lang.Volatile d) (:base @d))]
+    (cond (string? b) b
+          (symbol? b) (name b)
+          (e/obj? b) (e/o b :name)
+          :else (str b))))
+
+(defn- static-init?
+  "staticinit's StaticAssign, approximately: an initializer gc makes static data (no code in the
+  package's init function)."
+  [n]
+  (cond
+    (nil? n) true
+    (const? n) true
+    :else (case (:op n)
+            (:global :func :nil :method-expr) true
+            :fn true
+            :addr (let [x (:x n)] (or (= :global (:op x)) (and (= :lit (:op x)) (static-init? x))))
+            :lit (case (:kind n)
+                   (:struct) (every? #(static-init? (elt-value %)) (:fields n))
+                   (:array :slice) (every? #(static-init? (elt-value %)) (:elems n))
+                   false)
+            :convert-iface (static-init? (:x n))
+            :conv (and (= :nop (conv-kind n)) (static-init? (:x n)))
+            false)))
+
+(defn- dynamic-parts
+  "staticinit.StaticAssign of an initializer: nil when the whole of it is code; else the parts
+  that are (a static composite literal's entries that are not static data), each assigned into
+  the static data by the init function."
+  [n]
+  (cond
+    (static-init? n) []
+    :else (case (:op n)
+            :addr (when (= :lit (:op (:x n))) (dynamic-parts (:x n)))
+            :lit (when (#{:struct :array :slice} (:kind n))
+                   (vec (mapcat (fn [x] (let [v (elt-value x)]
+                                          (or (dynamic-parts v) [v])))
+                                (if (= :struct (:kind n)) (:fields n) (:elems n)))))
+            nil)))
+
+(defn- const-eq? [a b]
+  (let [x (:val a) y (:val b)]
+    (cond
+      (and (number? x) (number? y)) (== x y)
+      :else (= x y))))
+
+(defn- prune-switches
+  "noder's writer: a switch whose tag (or true, without one) and cases are constants keeps only
+  the clause that matches (none when none does; not one that falls through)."
+  [tree]
+  (let [memo (java.util.IdentityHashMap.)]
+    (letfn [(pr [x]
+              (cond
+                (and (map? x) (.containsKey memo x)) (.get memo x)
+                (map? x)
+                (let [x0 x
+                      x (into {} (map (fn [[k v]] [k (if (#{:type :to :sig :field :method :recv-type :iface} k) v (pr v))])) x)
+                      r (if (and (= :switch (:op x)) (or (nil? (:tag x)) (const? (:tag x))))
+                          (let [tag (or (:tag x) {:op :const :val true :mode :constant :type :bool})
+                                cls (:clauses x)]
+                            (if (every? const? (mapcat :values cls))
+                              (let [target (or (first (filter (fn [cl] (some #(const-eq? tag %) (:values cl))) cls))
+                                               (first (filter :default cls)))]
+                                (if (and target (some #(and (map? %) (= :fallthrough (:op %))) (tree-seq coll? seq (:body target))))
+                                  x
+                                  (assoc x :tag nil :clauses (if target [(assoc target :values [] :default true)] []))))
+                              x))
+                          x)]
+                  (.put memo x0 r)
+                  r)
+                (vector? x) (mapv pr x)
+                :else x))]
+      (pr tree))))
+
+(defn- fn-name
+  "ir.FuncName: a function's name, a method's (T).m or (*T).m."
+  [d o]
+  (if (:method d)
+    (let [tn (method-base o)]
+      (if (e/o o :ptr-recv) (str "(*" tn ")." (e/o o :name)) (str tn "." (e/o o :name))))
+    (e/o o :name)))
+
+(defn- base-type
+  "The type named n in checked package r's scope."
+  [r n]
+  (let [sc (:scope r)
+        x (when sc (e/scope-get sc (str n)))]
+    (when x (e/o x :type))))
+
+(def ^:dynamic *import-root*
+  "The forms root other packages' forms are read from for their parameter tags (gc reads them
+  from their export data, written when it compiled them): repr/go's forms of the standard
+  library for the configuration (bin/goi: the corpus linux-amd64), or nil: a call of another
+  package's function is a call of an unknown function."
+  nil)
+
+(def ^:dynamic *tag-cache*
+  "A directory the packages' tags are kept in between runs ({name tags} per package, keyed by
+  the package's forms and this namespace's source), or nil."
+  nil)
+
+(def ^:private tag-version
+  "The version of the tags' analysis, in the cache's keys: changed with the analysis."
+  "escape-8")
+
+(def ^:private pkg-tags
+  "The other packages' tags analyzed in this process: path -> {function name -> its record}."
+  (atom {}))
+
+(declare analyze-package)
+
+(def ^:private std-sess (atom nil))
+
+(defn std-result
+  "The checked result of standard package path, with its trees, from *import-root*'s forms (a
+  session of the process: each package checked once)."
+  [path]
+  (let [session (requiring-resolve 'arbace.go.check/session)
+        ensure (requiring-resolve 'arbace.go.check/ensure-package)
+        package-source (requiring-resolve 'arbace.go.check.load/package-source)
+        config (let [c @(requiring-resolve 'arbace.go.repl/config)] (if (delay? c) @c c))
+        root *import-root*
+        listed? (requiring-resolve 'arbace.go.repl/listed?)
+        digest (let [d @(resolve 'arbace.go.repl/digest-session)] (if (delay? d) @d d))
+        ;; the package from its forms, with its trees; its imports the table lists from the
+        ;; digest (their declarations), the others from their forms
+        mk (fn [local] (assoc (session (fn [p _] (package-source {:dir root} p config)))
+                              :delegate digest
+                              :local local
+                              :keep-trees (fn [p] (= p path))))
+        res (fn [s] (let [pkg (ensure s path nil [])] (if pkg (e/o pkg :result) {:errors [{:msg "no package"}]})))
+        r (res (mk (fn [p] (or (= p path) (not (listed? p))))))]
+    ;; the digest's declarations and the forms' types of one package can disagree (an alias's
+    ;; instance named from two sources): then every import from its forms
+    (if (seq (:errors r))
+      (res (mk (constantly true)))
+      r)))
+
+(def ^:dynamic *phase-a*
+  "When true, analyze-package returns the functions' records once scanned (their bodies for
+  inlining), before inlining and the analysis."
+  false)
+
+(def ^:dynamic *pkg-bodies*
+  "Other packages' functions' records with their bodies (for inlining their calls): an atom, path
+  -> {name f}; one for the analysis of each package (dropped when its tags are made, for memory)."
+  (atom {}))
+
+(defn foreign-body
+  "Another package's function f (a foreign record) with its body, or nil."
+  [f]
+  (let [path (fn-get f :pkg-path)
+        m (or (get @*pkg-bodies* path)
+              (let [m (try
+                        (let [r (binding [*ctx* nil] (std-result path))]
+                          (if (seq (:errors r))
+                            {}
+                            (binding [*msgs* (volatile! []) *m* 0 *phase-a* true]
+                              (into {} (for [g (analyze-package r) :when (fn-get g :obj)] [(fn-get g :name) g])))))
+                        (catch Throwable ex {}))]
+                (swap! *pkg-bodies* assoc path m)
+                m))]
+    (when-let [g (get m (fn-get f :local-name))]
+      (vswap! g assoc :name (fn-get f :name) :inl (fn-get f :inl) :inl-state :done :foreign-body true
+               :pkg-path (fn-get f :pkg-path) :local-name (fn-get f :local-name))
+      g)))
+
+(def ^:dynamic *std-inline*
+  "Whether another package's tags are made with gc's inliner on (as gc compiles the standard
+  library): the per-package warm-up's (one package a process: its imports' tags already kept),
+  else without it (a run that finds no tags made by the warm-up)."
+  false)
+
+(defn- forms-digest [^java.io.File dir ^java.io.File pf version]
+  (let [md (java.security.MessageDigest/getInstance "SHA-256")
+        files (sort-by #(.getPath ^java.io.File %)
+                       (cons pf (when (.isDirectory dir)
+                                  (filter #(.isFile ^java.io.File %) (.listFiles dir)))))]
+    (doseq [^java.io.File f files] (.update md (java.nio.file.Files/readAllBytes (.toPath f))))
+    (.update md (.getBytes ^String version "UTF-8"))
+    (apply str (map #(format "%02x" (bit-and (long %) 0xff)) (take 16 (.digest md))))))
+
+(defn- load-package-tags
+  "Package path's functions' tags, from its forms under *import-root*: {name {:tags :sig ...}},
+  or {} when its forms are missing or goi's checker does not check them."
+  [path]
+  (let [root *import-root*
+        rel (str "go/" path)
+        pf (java.io.File. (str root "/" rel ".ae"))
+        dir (java.io.File. (str root "/" rel))]
+    (if-not (.isFile pf)
+      {}
+      (let [cfile (fn [v] (when *tag-cache*
+                            (java.io.File. (str *tag-cache* "/" (str/replace path "/" "%") "-" (forms-digest dir pf v) ".edn"))))
+            inl-cf (cfile (str tag-version "-inline"))
+            plain-cf (cfile tag-version)
+            ;; the inliner's tags when the warm-up made them, else the ones without it
+            found (first (filter #(and % (.isFile ^java.io.File %)) (if *std-inline* [inl-cf] [inl-cf plain-cf])))
+            cf (if *std-inline* inl-cf plain-cf)]
+        (if found
+          (read-string (slurp found))
+          (let [r (try
+                    (let [r (std-result path)]
+                      (if (seq (:errors r))
+                        (do (when (System/getenv "GOI_ESCAPE_TRACE")
+                              (binding [*out* *err*] (println "escape: package" path "not analyzed:" (first (:errors r)))))
+                            {})
+                        ;; the functions' inlining costs (CanInline over their bodies), then their tags by
+                        ;; the analysis without the inliner (gc compiles the standard library with it:
+                        ;; the inlined bodies' effects on the tags are left out, for memory: the
+                        ;; packages' analyses would nest the inlined packages' checks)
+                        (binding [*msgs* (volatile! []) *m* 0 *inline* (or *std-inline* (= "1" (System/getenv "GOI_ESCAPE_STD_INLINE"))) *phase-a* false
+                                  *pkg-bodies* (atom {})]
+                          (let [costs (binding [*phase-a* :costs]
+                                        (into {} (for [f (analyze-package r) :when (fn-get f :obj)]
+                                                   [(fn-get f :name) (fn-get f :inl)])))]
+                          (into {} (for [f (analyze-package r)
+                                         :when (not (fn-get f :closure?))
+                                         :when (fn-get f :obj)]
+                                     [(fn-get f :name) {:tags (fn-get f :tags) :nparams (count (fn-get f :param-types))
+                                                        :inl (get costs (fn-get f :name))
+                                                        :recv-type (boolean (fn-get f :recv-type)) :name (fn-get f :name)
+                                                        :pragmas (vec (fn-get f :uintptr-pragmas))}]))))))
+                    (catch Throwable ex
+                      (when (System/getenv "GOI_ESCAPE_TRACE")
+                        (binding [*out* *err*] (println "escape: package" path "not analyzed:" (.getMessage ex))
+                          (when (= path (System/getenv "GOI_ESCAPE_TRACE")) (.printStackTrace ex))))
+                      {}))]
+            (when cf
+              ;; through a temporary name: parallel checks share the cache
+              (.mkdirs (.getParentFile cf))
+              (let [tmp (java.io.File. (str cf ".tmp" (System/nanoTime)))]
+                (spit tmp (pr-str r))
+                (.renameTo tmp cf)))
+            r))))))
+
+(defn std-imports
+  "The import paths of standard package path's forms (its files for the configuration)."
+  [path]
+  (let [package-source (requiring-resolve 'arbace.go.check.load/package-source)
+        config (let [c @(requiring-resolve 'arbace.go.repl/config)] (if (delay? c) @c c))
+        src (try (package-source {:dir *import-root*} path config) (catch Throwable _ nil))]
+    (vec (distinct (for [fi (:files src)
+                         spec (get-in fi [:opts :imports])
+                         :let [p (if (vector? spec) (second spec) spec)]
+                         :when (and (string? p) (not (#{"unsafe" "C"} p)))]
+                     p)))))
+
+(defn warm-order
+  "The packages paths import, transitively, theirs first (each after its imports), whose tags
+  made with the inliner are not kept yet."
+  [paths]
+  (let [seen (volatile! #{})
+        out (volatile! [])]
+    (letfn [(visit [p]
+              (when-not (contains? @seen p)
+                (vswap! seen conj p)
+                (doseq [q (std-imports p)] (visit q))
+                (vswap! out conj p)))]
+      (doseq [p paths] (visit p)))
+    (vec (remove (fn [p]
+                   (let [rel (str "go/" p)
+                         pf (java.io.File. (str *import-root* "/" rel ".ae"))
+                         dir (java.io.File. (str *import-root* "/" rel))]
+                     (or (not (.isFile pf))
+                         (.isFile (java.io.File. (str *tag-cache* "/" (str/replace p "/" "%") "-"
+                                                      (forms-digest dir pf (str tag-version "-inline")) ".edn"))))))
+                 @out))))
+
+(defn warm-package!
+  "The tags of package path made with the inliner and kept (the warm-up's one package)."
+  [path]
+  (binding [*std-inline* true *ctx* nil]
+    (load-package-tags path)))
+
+(defn- foreign-fn
+  "The record of another package's function or method o (its tags), or nil."
+  [o]
+  (when *import-root*
+    (let [path (e/o o :pkg)
+          tags (or (get @pkg-tags path)
+                   (let [t (binding [*ctx* nil] (load-package-tags path))]
+                     (swap! pkg-tags assoc path t)
+                     t))
+          nm (if (e/o o :method)
+               (let [tn (method-base o)]
+                 (if (e/o o :ptr-recv) (str "(*" tn ")." (e/o o :name)) (str tn "." (e/o o :name))))
+               (e/o o :name))]
+      (when-let [m (get tags nm)]
+        (volatile! (assoc m :esc :tagged :foreign true :params [] :sig nil
+                          :pkg-path path :local-name nm
+                          :name (str (last (str/split (str path) #"/")) "." nm)
+                          :inl-state :done
+                          :param-types (vec (repeat (:nparams m) nil)) :uintptr-pragmas (set (:pragmas m))))))))
+
+(defn analyze
+  "gc's escape analysis of a checked package (check-package's result r, with its trees): the
+  -m lines, [file line message] sorted. m: gc's -m level."
+  [r m]
+  (binding [*m* m
+            *msgs* (volatile! [])]
+    (analyze-package r)
+    (vec (sort-by (juxt first second) (distinct @*msgs*)))))
+
+(defn- static-inlined? [x] (boolean (:inl-static x)))
+
+(defn- static-inlined-call?
+  "staticinit over an inlined call in an initializer: its callee returns one expression static but
+  for its parameters, its arguments static (decided when it is inlined: the callee's nodes are not
+  kept in the tree)."
+  [st]
+  (let []
+    (boolean
+      (and st (every? static-init? (:args st))
+           (letfn [(ok [n] (cond
+                             (and (= :local (:op n)) (contains? (:params st) (:obj n))) true
+                             (static-init? n) true
+                             :else (case (:op n)
+                                     :addr (and (= :lit (:op (:x n))) (ok (:x n)))
+                                     :lit (case (:kind n)
+                                            :struct (every? #(ok (elt-value %)) (:fields n))
+                                            (:array :slice) (every? #(ok (elt-value %)) (:elems n))
+                                            false)
+                                     :convert-iface (ok (:x n))
+                                     false)))]
+             (ok (:value st)))))))
+
+(defn- inline-package!
+  "CanInline over the package's functions and literals, then their bodies with the calls gc
+  inlines inlined; the package scanned again over the new bodies (the literals inlined away
+  that capture nothing stay functions of their own): the top-level functions."
+  [fns]
+  (let [live (vec (remove #(fn-get % :extern) fns))
+        all (vec (mapcat all-fns live))]
+    (doseq [f all] (can-inline! f))
+    ;; reflectdata's pointer wrappers of value methods ((*T).M calling T.M), generated code that
+    ;; inlines an inlinable value method: reported at <autogenerated>:1
+    (binding [*wfile* "<autogenerated>"]
+      (doseq [f live
+              :when (and (fn-get f :obj) (fn-get f :recv-type) (not (t/pointer? (fn-get f :recv-type)))
+                         (fn-get f :inl) (<= (long (:cost (fn-get f :inl))) inline-max-budget))]
+        (warn! 1 (str "inlining call to " (fn-get f :name)))))
+    (when (> (long *m*) 1)
+      (doseq [f fns :when (fn-get f :extern)] (can-inline! f)))
+    ;; literals first (all-fns lists a function before its literals)
+    (doseq [f (reverse all)]
+      (binding [*wfile* (fn-get f :file)]
+        (let [big (big-func? f)]
+          (when (and big (> (long *m*) 1))
+            (warn! (fn-get f :line) (str "function " (fn-get f :name) " considered 'big'; reducing max cost of inlinees")))
+          (binding [*big-caller* big]
+            ;; the interleaved loop: the calls inlined, then the interface calls whose receivers'
+            ;; concrete types the inlined bodies show devirtualized and inlined in turn
+            (loop [b (fn-get f :body) i 0]
+              (let [n0 (count @*msgs*)
+                    b2 (inline-calls f b [])]
+                (if (and (< i 8) (> (count @*msgs*) n0))
+                  (recur b2 (inc i))
+                  (fn-set! f :inlined-body b2))))))))
+    (let [lits (filter #(fn-get % :parent) all)
+          kept @(:kept-lits *ctx*)
+          lone (vec (for [g lits
+                          :when (and (not (contains? kept g)) (not (fn-get g :closure?)))]
+                      g))]
+      (doseq [k [:owner :single-def :func-assigns]] (.clear ^java.util.HashMap (get *ctx* k)))
+      (.clear ^java.util.IdentityHashMap (:fn-of-node *ctx*))
+      (doseq [f live]
+        (fn-set! f :body (if (= "init" (fn-get f :name))
+                           (vec (remove #(and (= :assign (:op %)) (= 1 (count (:rhs %))) (= :inlcall (:op (first (:rhs %))))
+                                              (static-inlined? (first (:rhs %))))
+                                        (fn-get f :inlined-body)))
+                           (fn-get f :inlined-body))))
+      (let [lone-fns (vec (for [g lone]
+                            (volatile! (assoc (select-keys @g [:node :name :file :params :param-types :results :sig :line :inl :inl-state])
+                                              :parent nil :closure? false :recv nil :esc :unknown
+                                              :body (fn-get g :inlined-body)))))
+            fns (into (vec fns) lone-fns)]
+        (doseq [f fns :when (not (fn-get f :extern))] (fn-set! f :kids []) (scan-fn! f))
+        (doseq [f fns :when (not (fn-get f :extern))] (closure-vars! f))
+        fns))))
+
+(defn analyze-package
+  "The escape analysis of checked package r: its functions' records, their tags; the messages
+  in *msgs*."
+  [r]
+  (binding [*ctx* {:local-pkg (:path r)
+                   :fn-of-obj (java.util.HashMap.)
+                   :fn-of-node (java.util.IdentityHashMap.)
+                   :loc-of (java.util.HashMap.)
+                   :owner (java.util.HashMap.)
+                   :single-def (java.util.HashMap.)
+                   :func-assigns (java.util.HashMap.)
+                   :temps (java.util.IdentityHashMap.)
+                   :extra-fns (volatile! [])
+                   :kept-lits (volatile! #{})}]
+
+    (let [decls (filter #(and (= :func (:kind %)) (:obj %)) (:decl-infos r))
+          decls (mapv (fn [d] (if (:tree d) (binding [*wfile* (file-of d)] (update d :tree (comp bloop-walk normalize-go-defer prune-switches))) d)) decls)
+          fns (vec (for [d decls
+                         :let [tree (:tree d)
+                               o (:obj d)
+                               form (:form d)
+                               nm (when (seq? form) (second form))
+                               mt (merge (meta form) (when (instance? arbace.lang.IMeta nm) (meta nm)))
+                               sig (e/o o :type)
+                               sig (if (and (vector? sig) (= :func (nth sig 0))) sig (:sig tree))]
+                         :when (and sig (not (:generic d)))]
+                     (let [recv (:recv tree)
+                           rtys (nth (under sig) 2)
+                           f (volatile! {:node tree :obj o :name (fn-name d o) :parent nil :closure? false :file (file-of d)
+                                         :recv recv :recv-type (or (when recv (e/o recv :type))
+                                                         (when (:method d)
+                                                           (let [rn (base-type r (:base d))]
+                                                             (if (e/o o :ptr-recv) [:pointer rn] rn))))
+                                         :params (vec (:params tree)) :param-types (vec (nth (under sig) 1))
+                                         :results (vec (map-indexed (fn [i r] (or (:obj r) (when (e/obj? r) r)
+                                                                                  (e/obj {:kind :var :name (str "~r" i) :line (:line tree) :type (nth rtys i nil)})))
+                                                                    (:results tree)))
+                                         :sig sig :esc :unknown :line (or (:line tree) (e/o o :line))
+                                         :extern (or (nil? tree) (boolean (:extern mt)))
+                                         :noescape (boolean (:go/noescape mt))
+                                         :noinline (boolean (:go/noinline mt))
+                                         :uintptrescapes (boolean (:go/uintptrescapes mt))
+                                         :uintptr-pragmas (cond-> #{} (:go/uintptrescapes mt) (conj :escapes) (:go/uintptrkeepalive mt) (conj :keepalive))
+                                         :body (:body tree)})]
+                       (when recv (e/oset! recv :esc-class :param))
+                       (doseq [p (:params tree)] (when p (e/oset! p :esc-class :param)))
+                       (doseq [p (fn-get f :results)] (e/oset! p :esc-class :result))
+                       (.put ^java.util.HashMap (:fn-of-obj *ctx*) o f)
+                       f)))]
+      (let [inits (vec (for [d (:decl-infos r)
+                             :let [tr (:tree d)]
+                             :when (and (= :var (:kind d)) (= :var-init (:op tr)))
+                             :let [rhs (vec (:rhs tr))]
+                             :when (not (every? static-init? rhs))]
+                         (let [parts (when (= 1 (count rhs) (count (:lhs tr))) (dynamic-parts (first rhs)))]
+                           (if parts
+                             ;; the static data's dynamic entries, each stored into it
+                             [d (assoc tr :parts parts)]
+                             [d tr]))))]
+        (when (seq inits)
+          ;; the package's init function (gc's staticinit leaves it the initializers it cannot
+          ;; make static data)
+          (let [body (vec (for [[_ tr] inits
+                                st (if (:parts tr)
+                                     (for [x (:parts tr)]
+                                       {:op :assign :line (:line tr) :lhs [{:op :place-global :obj (first (:lhs tr))}] :rhs [x]})
+                                     [{:op :assign :line (:line tr)
+                                       :lhs (mapv #(if (or (nil? %) (= "_" (e/o % :name))) :blank {:op :place-global :obj %}) (:lhs tr))
+                                       :rhs (vec (:rhs tr))}])]
+                            st))
+                f (volatile! {:node {:op :func} :obj nil :name "init" :parent nil :closure? false :noinline true :file (file-of (first (first inits)))
+                              :recv nil :recv-type nil :params [] :param-types [] :results [] :sig [:func [] [] false]
+                              :esc :unknown :line nil :extern false :uintptr-pragmas #{} :body body})]
+            (vswap! (:extra-fns *ctx*) conj f))))
+      (let [fns (into fns @(:extra-fns *ctx*))]
+      (when-not (or *inline* *phase-a*)
+        (doseq [f fns :when (not (fn-get f :extern))]
+          (binding [*wfile* (fn-get f :file)] (fn-set! f :body (devirtualize (fn-get f :body))))))
+      (doseq [f fns :when (not (fn-get f :extern))] (scan-fn! f))
+      (doseq [f fns :when (not (fn-get f :extern))] (closure-vars! f))
+      (if *phase-a*
+        (do (when (= :costs *phase-a*)
+              (doseq [f fns :when (not (fn-get f :extern))] (can-inline! f)))
+            fns)
+      (let [fns (if *inline* (inline-package! fns) fns)]
+      (doseq [f fns :when (fn-get f :extern)]
+        ;; an external function's tags (paramTag's len(fn.Body) == 0): no batch
+        (fn-set! f :esc :tagged)
+        (binding [*wfile* (fn-get f :file)]
+        (let [sig (under (fn-get f :sig))
+              params (let [form (:spec (some #(when (identical? (:obj %) (fn-get f :obj)) %) decls))]
+                       (vec (for [[i p] (map-indexed vector (when (seq? form) (some #(when (vector? %) %) form)))]
+                              (let [s (if (vector? p) (first p) p)
+                                    nm (when (and (symbol? s) (not (seq? s))) (name s))]
+                                (when (and nm (instance? arbace.lang.IMeta s) (:tag (meta s)))
+                                  (e/obj {:kind :var :name nm :line (or (:line (meta s)) (fn-get f :line) (e/o (fn-get f :obj) :line))}))))))]
+          (fn-set! f :tags (into {} (map-indexed (fn [i ty] [i (param-tag nil f (nth params i nil) ty)]) (nth sig 1)))))))
+      (doseq [blk (bottom-up (vec (remove #(fn-get % :extern) fns)))]
+        (batch! blk))
+      (when (pos? (long *m*))
+        (doseq [f (mapcat all-fns fns) :when (not (fn-get f :extern))]
+          (binding [*wfile* (fn-get f :file)]
+            (bce-walk! (fn-get f :body)))))
+      (vec (mapcat all-fns fns))))))))

@@ -932,6 +932,7 @@ dir_verdict() {
 # PROGRAM<TAB>RESULT<TAB>REASON.
 check_err() {
   local p=$1 g=$goroot/test/$1 f act fl tmo=10 want=1 auto="" lang="" maxerr="" goflags=() why="" ns key ref st r types dump reason syn rejected froot=$eforms raw=""
+  local mlev=0 nolinl="" escdebug="" d
   act=$(action_of "$g")
   set -- $act
   [ "$1" = errorcheckwithauto ] && auto=-auto
@@ -945,8 +946,23 @@ check_err() {
       -e|-d=panic) goflags+=("$fl") ;;
       -e=0|-e=false) goflags+=("$fl"); maxerr=10 ;; # gc's limit of 10 errors (GR10)
       -lang=*) lang=${fl#-lang=}; goflags+=("$fl") ;;
-      -m|-m=*|-l|-l=*|-live|-wb=*|-N|-smallframes) why=${why:-"$fl: gc's escape analysis, inlining and liveness, which goi does not have"} ;;
-      -d=*) why=${why:-"$fl: gc's debug flags (its SSA back end's passes), which goi does not have"} ;;
+      # gc's -m: its inliner's (without -l), escape analysis' and walk's diagnostics, arbace.go.escape
+      # (GOI-SPEC.md, "Since v1: gc's escape analysis"); liveness, the write barriers and the SSA
+      # back end's passes stay gc's
+      -m) mlev=$((mlev + 1)); goflags+=("$fl") ;;
+      -m=*) mlev=${fl#-m=}; goflags+=("$fl") ;;
+      -l) nolinl=1; goflags+=("$fl") ;;
+      -N) goflags+=("$fl") ;;
+      -smallframes) escdebug="$escdebug :smallframes true"; goflags+=("$fl") ;;
+      -l=*|-live|-wb=*) why=${why:-"$fl: gc's liveness and write barriers (-l=N: its inliner's debugging), which goi does not have"} ;;
+      -d=*) for d in $(echo "${fl#-d=}" | tr ',' ' '); do
+              case $d in
+                escapemutationscalls|escapemutationscalls=*|zerocopy|zerocopy=*|inlfuncswithclosures|inlfuncswithclosures=*)
+                  case $d in *=*) escdebug="$escdebug :${d%%=*} ${d#*=}" ;; *) escdebug="$escdebug :$d 1" ;; esac ;;
+                *) why=${why:-"-d=$d: gc's debug flags (its SSA back end's passes), which goi does not have"} ;;
+              esac
+            done
+            goflags+=("$fl") ;;
       -race) goflags+=("$fl") ;; # gc's race instrumentation adds code, no error: the errorcheck tests under -race expect none (but a -m's, below)
       -std|-+|-complete|-asmhdr*|-spectre*) why=${why:-"$fl: gc compiling the standard library or the runtime, out of goi's scope"} ;;
       -goexperiment) why=${why:-"-goexperiment: another GOEXPERIMENT"}; shift ;;
@@ -954,6 +970,9 @@ check_err() {
     esac
   done
   tmo=$(program_tmo "$p" "$tmo")
+  # the escape analysis of the imports' forms (their tags, cached in $gcwork/escape-tags): a first run
+  # checks and analyzes the standard packages the program's calls reach
+  [ "$mlev" = 0 ] || [ "$tmo" -ge 180 ] || tmo=180
   [ -n "$why" ] && { printf '%s\tunsupported\t%s\n' "$p" "$why"; return; }
   # gc's reference: the errors of the original, judged
   key=$( { cat "$goroot/VERSION"; cat "$g"; printf '%s\n' "${goflags[@]}"; echo "judge: ${gocmp_key:-}"; } | sha256sum | cut -c1-24)
@@ -1011,7 +1030,9 @@ check_err() {
   if [ -f "$dump" ] && "$gocmp" errorcheck -dump-errors "$dump" > "$r.types" 2> "$r.types.err"; then
     types=$(grep -c . "$r.types" || true)
   fi
-  st=0; (cd "$goroot/test" && { [ -z "${ARBACE_COVER_DIR:-}" ] || export $(cover_env goi "$p"); } && limited "$tmo" "$rexe" -m arbace.go.run --errorcheck ${lang:+--lang "$lang"} ${maxerr:+--max-errors "$maxerr"} $raw --gc-front "$g" "$froot" "$ns" > "$r.out" 2> "$r.err" < "$empty") || st=$?
+  st=0; (cd "$goroot/test" && { [ -z "${ARBACE_COVER_DIR:-}" ] || export $(cover_env goi "$p"); } && limited "$tmo" "$rexe" -m arbace.go.run --errorcheck ${lang:+--lang "$lang"} ${maxerr:+--max-errors "$maxerr"} $raw \
+    $( [ "$mlev" = 0 ] || echo "--escape $mlev --escape-std $root/.tmp/repr-go/forms/linux-amd64 --escape-cache $gcwork/escape-tags"; [ -n "$nolinl" ] || echo --inline ) \
+    ${escdebug:+--escape-debug "{$escdebug}"} --gc-front "$g" "$froot" "$ns" > "$r.out" 2> "$r.err" < "$empty") || st=$?
   cover_settle goi "$p"
   if { [ "$st" = 124 ] || [ "$st" = 137 ] || [ "$st" = 152 ]; } && [ "$types" = 0 ] && [ -n "$want" ]; then
     printf '%s\tunsupported\terrors of gc'"'"'s phases after type checking (go/types reports none; goi'"'"'s check over %s s)\n' "$p" "$tmo"; return
@@ -1030,7 +1051,9 @@ check_err() {
     else printf '%s\tfail\t%s\n' "$c" "$(sed -n 2,3p "$r.${c//\//_}.judge" | tr '\t\n' '  ' | cut -c1-240)"; fi
   done
   err_verdict "$g" "$r.out" "$st" "$r.judge" && { printf '%s\tpass\t\n' "$p"; return; }
-  if [ "$types" = 0 ] && [ "$st" = 0 ]; then
+  # gc's -m: goi's port's diagnostics are the program's errors (a difference is a fail, a known one
+  # test/goi/check-known.edn's)
+  if [ "$types" = 0 ] && [ "$st" = 0 ] && [ "$mlev" = 0 ]; then
     printf '%s\tunsupported\terrors of gc'"'"'s phases after type checking (go/types reports none)\n' "$p"; return
   fi
   printf '%s\tfail\t%s\n' "$p" "$(sed -n 2,3p "$r.judge" | tr '\t\n' '  ' | cut -c1-240)"
@@ -1492,6 +1515,33 @@ check() {
   # host's go 1.27.2 compile std within issue21576.go's minute, under gc and goi alike; the host's go is
   # pinned by nothing)
   export PATH=$goroot/bin:$PATH
+  # gc's -m (GOI-SPEC.md, "Since v1: gc's escape analysis and inliner"): the escape tags of the standard
+  # packages the -m programs import, made first by one process into $gcwork/escape-tags (each program a
+  # package's imports not yet covered), so that the parallel runs read them instead of each making them
+  if [ -z "$aot" ] && [ -z "$box" ]; then
+    local wl="" seen=" " q imps im nsq
+    while read -r q; do
+      grep -qE '^// *errorcheck[a-z]* .*-m( |=|$)' "$goroot/test/$q" 2>/dev/null || continue
+      [ -f "$eforms/go/test/$(forms_rel "$q").ae" ] || continue
+      imps=$(awk '/^import \(/{f=1;next} f&&/^\)/{f=0} f{print $NF} /^import "/{print $2}' "$goroot/test/$q" | tr -d '"')
+      nsq=""
+      for im in $imps; do case $seen in *" $im "*) ;; *) seen="$seen$im "; nsq=1 ;; esac; done
+      [ -n "$nsq" ] && wl="$wl $(sed -n '1s/^(ns \([^ )]*\).*/\1/p' "$eforms/go/test/$(forms_rel "$q").ae")"
+    done < "$list"
+    if [ -n "$wl" ]; then
+      # the standard library's tags with gc's inliner (GOI-SPEC.md, "Decided (2026-11-06)": Proposed 1 (b)): a
+      # process a package, its imports first, under GOMEMLIMIT; then each program's imports' rest
+      local wp
+      echo "== goi check: the escape tags of the -m programs' imports (.tmp/goi-check/escape-warm.log)" >&2
+      : > "$cwork/escape-warm.log"
+      for wp in $(cd "$goroot/test" && "$rexe" -m arbace.go.run --escape-order "$root/.tmp/repr-go/forms/linux-amd64" "$gcwork/escape-tags" $seen 2>> "$cwork/escape-warm.log"); do
+        (cd "$goroot/test" && GOMEMLIMIT=${GOI_ESCAPE_WARM_MEM:-1200MiB} "$rexe" -m arbace.go.run --escape-warm-pkg \
+           "$root/.tmp/repr-go/forms/linux-amd64" "$gcwork/escape-tags" "$wp") >> "$cwork/escape-warm.log" 2>&1 || echo "escape-warm-pkg: $wp failed" >> "$cwork/escape-warm.log"
+      done
+      (cd "$goroot/test" && GOMEMLIMIT=${GOI_ESCAPE_WARM_MEM:-1200MiB} "$rexe" -m arbace.go.run --escape-warm "$root/.tmp/repr-go/forms/linux-amd64" "$gcwork/escape-tags" "$eforms" $wl) \
+        >> "$cwork/escape-warm.log" 2>&1 || true
+    fi
+  fi
   echo "== goi check: $(wc -l < "$list") programs, $jobs at a time" >&2
   export -f cover_env cover_settle forms_rel no_forms_row limited limited_cpu program_tmo ref_commit action_parse check_one check_dir check_err check_err_aot run_verdict dir_verdict syn_verdict err_verdict err_aot_verdict controls_of action_of action_words gc_ref gc_ref_fails aot_build aot_dir_root stderr_head gc_env run_env box_run box_input
   export root goroot rexe hexe cforms dforms cwork gcwork empty box bundle aot eforms efull edumps etsv gocmp gocmp_key esyntax eraw

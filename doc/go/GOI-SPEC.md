@@ -4909,6 +4909,168 @@ The review's own probes (`go.p.*`) give the same on the executable built from th
 `fixedbugs/issue75764`) 22 pass and 3 known as before, and the check's programs matching
 `select|line|init|chan|recover|defer|stack|caller` (77) no regression.
 
+## Since v1: gc's escape analysis and inliner (2026-11-06, branch `goi-escape`)
+
+The class "gc's optimizer diagnostics and flags" (`gc-flags`, 98 programs at the start of the day: 96
+errorcheck programs and the two run programs with gc flags) held every errorcheck program whose action
+passes gc `-m`, `-l`, `-live`, `-N`, `-wb`, `-smallframes` or a `-d=` flag: the expected text is what gc's
+phases after type checking print. Grouped by what they print (gc's own `-m` output of each, the lines
+classified): `-m -l` (escape analysis, inlining off) 42, `-m` without `-l` (the inliner's decisions with
+escape analysis after it) 24, `-live` 8, `-d=ssa/...` 14, `-d=wb` 4, `-d=nil` 3, and single others
+(`-d=typeassert`, `-d=tailcall`, `-d=append,slice`, `-d=defer`, `-d=checkptr`, `-d=escapedebug`). The
+largest group is escape analysis; it and the inliner, which `-m` without `-l` puts before it, are built.
+
+**The port.** `arbace.go.escape` (`arbace/go/escape.ae`) is gc's escape analysis, ported rule for rule from
+TamaGo's go1.27.1 (`src/cmd/compile/internal/escape`: `escape.go`, `graph.go`, `solve.go`, `expr.go`,
+`stmt.go`, `assign.go`, `call.go`, `utils.go`, `leaks.go`; the forms of the same files in
+`tamago/cmd/go/cmd/compile/internal/escape`) over the checker's checked trees (§3.7), which stand for gc's
+IR after typecheck: their implicit conversions are gc's OCONVIFACE, their places and selections ODOT,
+ODOTPTR and OINDEX (a selection through embedded fields as one node a step), a method call gc's fixed
+OCALLFUNC of the method expression with the receiver first. The locations, holes, the flows with their
+dereference counts, the closures captured by value or by reference, the parameter tags (`leaks`, eight
+counts), `walkAll`'s and `walkOne`'s solving with `outlives`, `HeapAllocReason`, `rewriteWithLiterals`
+and `finish`'s and `paramTag`'s reports are gc's, with the parts of gc's front end the analysis sees the
+tree through:
+
+- `ir.VisitFuncsBottomUp` (`ir/scc.go`): batches by strongly connected component; a function literal that
+  captures nothing (`Func.IsClosure` false) is a function of its own, analyzed before its enclosing one;
+- the ReassignOracle's `StaticValue` and `FuncAssignments` (`ir/reassignment.go`): a call through a local
+  defined once (or a func-typed local's every assignment, Go 1.27's `resolveAssignedCallees`);
+- `loopvar.ForCapture` (`loopvar/loopvar.go`): Go 1.22's per-iteration variables, a loop variable
+  captured or whose address is taken declared in the body (a `for` loop's rewritten with its copy back);
+- typecheck's `normalizeGoDeferCall` (go/defer wrappers, the arguments in temporaries the wrapper
+  captures), `RewriteMultiValueCall` (f(g()) through temporaries), `FixVariadicCall` (`... argument`),
+  the comma-ok assignments through an autotmp, staticinit's split of package initializers (static data,
+  the dynamic entries assigned by the package's init function), noder's dead code (constant conditions,
+  statements after a terminating one, constant switches: the writer's `switchStmt`);
+- `devirtualize.StaticCall` with go1.26's concrete type analysis (`concreteType`, the function's interface
+  assignments), reported as gc does (`devirtualizing x.M to T`, `partially devirtualizing`);
+- walk's bounds check elision (`walk/expr.go`, `walkIndex` and `bounded`: `index bounds check elided`);
+- `ir/fmt.go`'s `exprFmt` and `types/fmt.go`'s `tconv` (fmtGo) for the messages: the nodes printed as gc
+  prints its IR (constants as their values, implicit conversions and `&`/`*` hidden, `&T{...}`,
+  `make([]int, 10)`, `fmt.Sprintf("...", ... argument...)`, another package's names qualified).
+
+`-m` without `-l` runs gc's inliner first (`inline/inl.go`, `inline/interleaved/interleaved.go`): `CanInline`
+with `hairyVisitor`'s budget (80; a literal's 800 and twice the maximum callee cost; a call's 57, a
+parameter's 17, an inlinable callee's its cost; `OCONVNOP`, `OBLOCK`, `OMETHEXPR` free, the address of a
+field at offset 0 and of a dereference refunded, a panic 1, a closure 15, `go`, `defer` and `recover`
+refused; ssagen's amd64 intrinsics (`ssagen/intrinsics.go`'s table, 144 functions) and the cheap
+encoding/binary and byteorder calls one node), counted over the nodes the unified IR reader and typecheck
+make of the checked tree (a declaration's ODCL and name, an assignment's OAS, an implicit OCONVIFACE, ...),
+calibrated against gc's `-m=2` costs of the tests' functions (`can inline f with cost N`); then each call
+of an inlinable callee (a package function, a method of its receiver's own type, a literal of the caller,
+another package's function from the forms of its package) inlined: its body copied with fresh variables,
+its returns assignments to its result variables, every node at the call's line (gc reports the inlined
+code at its outermost position), its own calls inlined in turn but for a function already being inlined
+(gc's inlining tree), devirtualization interleaved; reported as `can inline f` and `inlining call to f`.
+
+**Other packages.** gc reads a package's tags and inline bodies from its export data. goi has none: the
+tags are made from the package's forms (`bin/goi`: the corpus `linux-amd64`, repr/go's forms of the
+standard library for the configuration), checked in a session whose listed imports come from the table's
+digest (§6.5) and the others from their forms (or all from their forms when the digest's declarations
+and the forms' disagree), analyzed (its inlining costs from `CanInline` over its bodies, its tags by the
+analysis without the inliner: gc compiles the standard library with it, which changes a few tags, `fmt`'s
+`Errorf`'s `a` for one; the nested checks of every inlined package's would not fit the check's memory), and
+kept in a cache keyed by the package's forms (`.tmp/goi-check/escape-tags`); a package goi's checker does not
+check gives no tags (gc's unknown callee: its arguments leak). The bodies of another package's functions
+the test's calls inline are loaded from its forms in the run.
+
+**In the check.** `arbace.go.run --errorcheck` takes `--escape N` (gc's `-m` level), `--inline` (no `-l`),
+`--escape-debug EDN` (`-d=escapemutationscalls`, `-d=zerocopy`, `-smallframes`), `--escape-std DIR` and
+`--escape-cache DIR`: when the package has no errors, its escape and inlining diagnostics are its output
+(status 0). `bin/goi check_err` passes them for `-m`, `-m=N`, `-l`, `-N`, `-smallframes` and the `-d` flags
+`escapemutationscalls`, `zerocopy` and `inlfuncswithclosures` (gc's reference compiles with the action's flags
+as before) and gives such a program 180 s; `-l=N`, `-live`, `-wb` and the other `-d` flags stay unsupported.
+Before its parallel runs, `bin/goi check` makes the tags of the standard packages the listed `-m` programs
+import in one process (`arbace.go.run --escape-warm`, a program for each import not yet covered, under
+`GOMEMLIMIT` 1,400 MiB, `GOI_ESCAPE_WARM_MEM`: 1.5 GB at most, under two minutes from an empty cache), so that
+each program's run reads them (0.6 GB, seconds) instead of making them.
+
+**Since then (the same day).** gc's `-m=2` text: `can inline f with cost N as: SIG { BODY }` (the body
+in `ir/fmt.go`'s statement format, a loop as `for loop`), `cannot inline f: REASON` for every function,
+`function f considered 'big'; reducing max cost of inlinees` (`IsBigFunc`'s 5,000 nodes; such a function's
+inlinees at most 20), `capturing by value|ref`, and the explanation of a heap allocation's flow
+(`explainFlow` with its one note, `too large for stack`); the interleaved loop to its fixed point
+(`State.InlinedCall`: an interface value assigned from an inlined call followed through the inlined body's
+result variables, a variable's assignments over its enclosing function with its literals).
+
+**Results.** `bin/goi check --list` of the class's 96 errorcheck programs (2026-11-06; its rows of
+`test/goi/check-linux-amd64.edn` taken from that run, `--record` refusing a list): before, 0 passed (all
+unsupported); now 56 pass: with `-l` 38 of the 42 (`escape2` and `escape2n` with their 401 lines,
+`escape_closure` 151, `escape_reflect` 134, `bounds` 40, ...; the other 4 `-live` or an import goi refuses),
+without `-l` 18 of the 24 (`inline` 147 lines, `devirtualization_with_type_assertions_interleaved` 89,
+`inline_sync`, `inline_endian`, `inline_big`, `escape4`, `escape_make_non_const`, `fixedbugs/issue7921`, the
+`-m=2` programs `issue24651b`, `issue41635`, `issue54159`, `issue75278`, ...). 5 are known in the new class
+`gc-m` (deferred: generic instances in 3, `testing.B.Loop`'s keep-alives with `-m=2` in 1, a standard
+tag made without the inliner in 1), 2 stay in `std-out-of-scope` (`unique`, `internal/runtime/atomic`),
+and 33 stay in `gc-flags` (design: `-live` 8, `-d=ssa/...` 14, `-d=wb` 4, `-d=nil` 3, `-d=typeassert`,
+`-d=tailcall`, `-d=append,slice`, `-d=checkptr`, `-d=escapedebug`: gc's back end), with the two run programs
+(`known gc flags`). The record: 1,720 of 1,837 pass (1,664 before); `bin/goi divergences` places every
+program; `bin/reap` re-recorded. Memory: a run of a program with the tags made 0.6 GB; the check's warm-up 1.5 GB; a
+program run by hand on an empty cache, which makes its imports' tags itself, up to 2 GB (`fmt`'s closure). `arbace/go/escape.ae`
+and `run.ae` compile by c2j alone (as `bin/ci c2j-check` does for ci: 549 classes, none failing).
+
+### Proposed
+
+1. **The class `gc-m`'s 5.** (a) Generic functions' instances (gc's shape types, `f[go.shape.uint]`, and
+   dictionaries in the inliner's and the analysis' view): 2-3 days, 3 programs, with goi's generics in the
+   checked tree. (b) The standard library's tags made with its inliner: today a package's tags are made
+   without it, for memory (the analyses of inlined packages nest, 3.5 GB for `fmt`'s closure); a warm-up
+   building the cache package by package in its own process, dependencies first, would make them as gc
+   does: 0.5-1 day, 1 program (and the tags then exact). (`GOI_ESCAPE_STD_INLINE=1` makes them with the
+   inliner in the one process today: over 2.5 GB, beyond the day's limits.) (c) `testing.B.Loop`'s keep-alives (gc's escape of
+   a `b.Loop()` loop's results and arguments, Go 1.24) with `-m=2`'s remaining explanations (the notes of
+   every flow): 1 day, 1 program. Recommended: (b), then (c); (a) with the generics' next round.
+2. **The record.** The class's rows were written from a `--list` run. Recommended: the night's full
+   `bin/goi check --record` confirms them (the 96 among the 1,837; their first run fills
+   `.tmp/goi-check/escape-tags`, a few minutes, up to 2 GB a program).
+3. **`gc-flags`' remaining 33** stay by design: liveness, write barriers and the SSA passes are gc's back
+   end, which an interpreter does not have (or "gc in the executable", GOI-DESIGN-REVIEW Proposed 1, if
+   ever decided).
+4. **The build.** `arbace/go/escape.ae` is a new embedded namespace of goi (in `gate_key`): the next gate
+   build compiles it into the executable (c2j checked here; j2g and Go's build not run, the day's rules).
+
+## Decided (2026-11-06, the user: gc's escape analysis and inliner's proposals)
+
+On "Since v1: gc's escape analysis and inliner"'s Proposed: 1 (b), the standard library's tags made with
+its inliner by a per-package warm-up, and 1 (c), `testing.B.Loop`'s keep-alives with `-m=2`'s explanations,
+now, on the branch `goi-escape`; 1 (a), generic functions' instances, with the next round of goi's generics.
+2: tonight's full `bin/goi check --record` confirms the 96 rows. 3: the 33 programs of gc's back-end flags
+stay in `gc-flags`, by design.
+
+## As built: Proposed 1 (b) and (c) (2026-11-06, branch `goi-escape`)
+
+**(b) The standard library's tags with its inliner.** A package's tags are now made as gc makes them, with
+the inliner on, by a warm-up of one process a package: `arbace.go.run --escape-order STD CACHE PKG...` lists
+the packages the given ones import, transitively, each after its imports, whose inliner-made tags are not
+kept yet (their imports read from the forms' headers); `--escape-warm-pkg STD CACHE PKG` makes one
+package's (`warm-package!`: its imports' tags read from the cache, the bodies of the functions it inlines
+loaded from their forms). The cache keeps them apart from the tags made without the inliner (another key):
+a run reads the inliner's when the warm-up made them, else makes and keeps the others, as before. `bin/goi
+check` runs the warm-up before its runs (the -m programs' imports; `GOMEMLIMIT` 1,200 MiB, `GOI_ESCAPE_WARM_MEM`);
+from an empty cache the 73 packages of `fmt`'s and `testing`'s closures take about 11 minutes, the largest,
+`runtime`, 6.5 minutes and 1.49 GB, the others at most 1.4 GB. Two faults the warm-up found were fixed: an
+inlined call kept its callee's return expression in the tree (for staticinit's verdict, now decided at
+once), which the closures' scan read as a variable of the caller; a statement list nested in a list. And a
+method call's receiver is adjusted (`&` or `*`) after its embedded fields by its method's receiver, as
+typecheck does (it was the checker's adjustment of the whole selection): `b.Fatal` of a `*testing.B`
+leaks `b`, not its content.
+
+**(c) `testing.B.Loop`'s keep-alives.** gc's `bloop` pass (`cmd/compile/internal/bloop/bloop.go`,
+`bloop.Walk`, before the inliner): in a `for b.Loop()` loop (and the statement lists nested in it) each
+assignment's destinations, each call's results (into temporaries) or arguments (an addressable variable's
+own, the others' temporaries, a variadic literal's elements) are kept alive by
+`runtime.KeepAlive(unsafe.Pointer(&v))` (a call whose argument flows nowhere, `IsCompilerVarLive`, its
+address taken), and `-m=2` reports them (`function result will be kept alive`, `function arg will be kept
+alive`, `p.v will be kept alive`, `dereference will be kept alive`). `-m=2`'s explanations of flows are
+the heap allocations' (`explainFlow` with its note); the other flows' notes are not recorded (no program of
+the check needs them: `bloop.go`'s are on a line whose `// ERROR ".*"` takes any).
+
+**Results.** `bin/goi check --list` of the class's 96 from an empty cache (the warm-up 22 minutes, then 4):
+58 pass (`bloop` and `escape_bloop` beside the 56), 0 fail, 3 known in `gc-m` (generic instances:
+`devirtualization`, `typeparam/issue54497`, `typeparam/pragma`), 35 unsupported as before. The record:
+1,722 of 1,837 pass; `bin/goi divergences` and `bin/reap` (re-recorded) as before.
+
 ## Decided (2026-10-24): GC157 (b), GS14 (a) and GC161 (b)
 
 The user chose, 2026-10-24, goi's two items deferred from v1 (doc/AGENDA.md): GC157 (b), `byte`,

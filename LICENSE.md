@@ -165,6 +165,14 @@ covers what.
   same tree's `src/cmd/compile/internal/syntax/`), its namespace and import path renamed
   `arbace/repr/go/internal/syntax` by `arbace.repr.go.syntax/copy-texts`, nothing else changed:
   Copyright The Go Authors, under Go's BSD 3-Clause License (text below); each file's notice kept.
+- `arbace/go/escape.ae` (doc/go/GOI-SPEC.md, "Since v1: gc's escape analysis and inliner"): a port to Arbace of
+  gc's escape analysis and inliner from TamaGo's go1.27.1 tree (above: `VERSION` "go1.27.1"):
+  `src/cmd/compile/internal/escape/` (`escape.go`, `graph.go`, `solve.go`, `expr.go`, `stmt.go`, `assign.go`,
+  `call.go`, `utils.go`, `leaks.go`), `inline/inl.go`, `inline/interleaved/interleaved.go`,
+  `devirtualize/devirtualize.go`, `ir/scc.go`, `ir/reassignment.go`, `ir/fmt.go`, `types/fmt.go`,
+  `loopvar/loopvar.go`, `typecheck/stmt.go`, `typecheck/subr.go` (`convertOp`), `walk/expr.go`,
+  `noder/writer.go` and `ssagen/intrinsics.go` (the amd64 entries of its table, as data), written anew in
+  Arbace after them: Copyright The Go Authors, under Go's BSD 3-Clause License (text below).
 - `go/arbace/repr/go/gcsyntax/errors.ae` (doc/go/GO-PARSER-SURVEY.md, "As built: GPS41 (c)"):
   besides Arbace's own driver, a port of gc's noder's pragma handling from TamaGo's go1.27.1 tree
   (above: `VERSION` "go1.27.1"): `src/cmd/compile/internal/noder/noder.go` (`pragma`,
