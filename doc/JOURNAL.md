@@ -502,3 +502,11 @@ and maturity 100% unchanged, the independence 99.8% only with batch1's OCaml ste
 the own verdict chosen by the record's `:reference` flag (rejected: it reads ocamlc's record to decide; the rules are ocamltest's own,
 the record only measures them); new reason texts for the own-verdict judge (rejected: the recorded reasons would all change; the
 numbers are the test's, equal to the record's); the expect tests on oi now (left: T12, OC182). Proposals OC180-OC183 (the survey).
+
+## 2026-11-07: correction to the entry above (OCaml's independence)
+
+The entry's "OCaml's independence 20% to 99.8%" is the score after the night's native records. With the records as they are, the
+eval and AOT stages judge partly against records made on ocdump's Lambda (`check-suite-oi.edn`, `check-aot.edn`,
+`check-suite-aot.edn`) and score as mixed stages: eval 0.880, AOT 0.5, so `ocaml-90`'s independence is 87.4% today and 99.8% once
+`bin/oi check --aot --record` and `bin/oi suite check [--aot] --record` have written the native records (and the REAP sources read
+them, OC185). The suite's native sample passed 3 of 6 (4 of 6 after the Env fix), against 6 on ocdump's path: OC184.
