@@ -42,6 +42,10 @@
 
 (defn- pos-of [x] (when (and (seq? x) (map? (last x))) (:pos (last x))))
 
+(def ^:dynamic *top-level-await*
+  "compile()'s PyCF_ALLOW_TOP_LEVEL_AWAIT (queue 228)"
+  false)
+
 (defmacro ^:private at
   "BODY with *pos* the location of the form X when it has one (symtable.c's LOCATION(x) at each symtable_add_def)"
   [x & body]
@@ -270,6 +274,11 @@
     (when has-defaults (add-def! st ".defaults" DEF_PARAM))
     (when has-kwdefaults (add-def! st ".kwdefaults" DEF_PARAM))))
 
+(defn- allows-top-level-await? [st] (and *top-level-await* (= :module (:type @(:cur @st)))))
+
+(defn- maybe-coroutine-for-module! [st]
+  (when (allows-top-level-await? st) (swap! (:cur @st) assoc :coroutine true)))
+
 (defn- async-def? [st] (let [c @(:cur @st)] (and (= :function (:type c)) (:coroutine c))))
 
 (defn- visit-function! [st async? x]
@@ -349,8 +358,6 @@
       (swap! (:cur @st) update :directives #(if (contains? % mangled) % (assoc % mangled *pos*))))
     (add-def! st nm (if global? DEF_GLOBAL DEF_NONLOCAL))))
 
-(defn- maybe-coroutine-for-module! [st] nil)
-
 (defn- visit-stmt*! [st x]
   (let [[h p o _] (pp/node x)
         e! (fn [v] (when (some? v) (visit-expr! st v :load)))
@@ -394,6 +401,7 @@
       aug-assign (do (visit-expr! st (first p) :store) (e! (nth p 2)))
       (for async-for)
       (do (when (= h 'async-for)
+            (maybe-coroutine-for-module! st)
             (when-not (:coroutine @(:cur @st)) (syntax-error "'async for' outside async function")))
           (visit-expr! st (first p) :store) (e! (second p))
           (conditional! st #(do (body! (nth p 2)) (body! (:else o)))))
@@ -426,6 +434,7 @@
       (pass break continue) nil
       (with async-with)
       (do (when (= h 'async-with)
+            (maybe-coroutine-for-module! st)
             (when-not (:coroutine @(:cur @st)) (syntax-error "'async with' outside async function")))
           (conditional! st #(do (doseq [i (first p)]
                                   (let [[_ [c v] _ _] (pp/node i)]
@@ -506,7 +515,7 @@
       (swap! b assoc :generator generator?)
       (let [async? (and (:coroutine @b) (not generator?))]
         (exit! st)
-        (when (and async? (not (async-def? st)) (nil? (:comprehension @(:cur @st))))
+        (when (and async? (not (async-def? st)) (nil? (:comprehension @(:cur @st))) (not (allows-top-level-await? st)))
           (syntax-error "asynchronous comprehension outside of an asynchronous function"))
         (when async? (swap! (:cur @st) assoc :coroutine true))))))
 
@@ -555,9 +564,10 @@
               (syntax-error (case k :list "'yield' inside list comprehension" :set "'yield' inside set comprehension"
                                   :dict "'yield' inside dict comprehension" "'yield' inside generator expression"))))
         await (do (raise-if-annotation-block! st "await expression")
-                  (when-not (function-like? cur) (syntax-error "'await' outside function"))
-                  (when (and (not (async-def? st)) (nil? (:comprehension @cur)))
-                    (syntax-error "'await' outside async function"))
+                  (when-not (allows-top-level-await? st)
+                    (when-not (function-like? cur) (syntax-error "'await' outside function"))
+                    (when (and (not (async-def? st)) (nil? (:comprehension @cur)))
+                      (syntax-error "'await' outside async function")))
                   (e! (first p))
                   (swap! cur assoc :coroutine true))
         compare (do (e! (first p)) (es! (nth p 2)))

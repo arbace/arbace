@@ -166,6 +166,11 @@
 (def ^:const PyCF_ALLOW_INCOMPLETE_INPUT 0x4000)
 (def ^:const PyCF_DONT_IMPLY_DEDENT 0x200)
 
+(defn- prefix-field
+  "A field of the prefix: its own separators (an invalid escape's character can be one) as \\x04 and a letter"
+  ^String [^String s]
+  (-> s (str/replace "\u0004" "\u0004d") (str/replace "\u0001" "\u0004a") (str/replace "\u0002" "\u0004b") (str/replace "\u0003" "\u0004c")))
+
 (defn warnings-prefix
   "The reader's warnings ahead of a compiler's answer (queue 228; go/arbace/py's takeWarnings), for each of `ws`
   (arbace.repr.python.lex/*warnings*) \\x01 and, joined by \\x02, its category, message, line and the error it becomes
@@ -175,7 +180,7 @@
     ""
     (str (apply str (for [{:keys [category msg lineno error]} ws
                           :let [[cls emsg l o el eo text] error]]
-                      (str "\u0001" (str/join "\u0002" (map #(if (nil? %) "" (str %)) [category msg lineno cls emsg l o el eo text])))))
+                      (str "\u0001" (str/join "\u0002" (map #(if (nil? %) "" (prefix-field (str %))) [category msg lineno cls emsg l o el eo text])))))
          "\u0003")))
 
 (defn- error-answer
@@ -251,13 +256,13 @@
 
 (defn- start-rule-error
   "SOURCE parsed by the start rule of MODE: nil when it parses so, else the error as the compiler's answer"
-  ^String [^String source mode]
-  (try (nv/parse-source source mode {}) nil
+  ^String [^String source mode & [opts]]
+  (try (nv/parse-source source mode (or opts {})) nil
        (catch arbace.lang.ExceptionInfo e
          (let [pe (:python-error (ex-data e))]
            (cond
              (nil? pe) (throw e)
-             (#{"SyntaxError" "IndentationError" "TabError"} (first pe)) (error-answer pe (:metadata (ex-data e)))
+             (#{"SyntaxError" "IndentationError" "TabError" "IncompleteInputError"} (first pe)) (error-answer pe (:metadata (ex-data e)))
              :else nil)))))
 
 (defn single-error
@@ -267,6 +272,12 @@
   error where the statement ends, e.g. a compound statement followed by another)"
   ^String [^String source]
   (start-rule-error source :single))
+
+(defn flags-error
+  "compile()'s parse under PyCF_ALLOW_INCOMPLETE_INPUT and PyCF_DONT_IMPLY_DEDENT (queue 228: codeop's; pegen.c's
+  _is_end_of_source, IncompleteInputError): nil, or the error as the compiler's answer"
+  ^String [^String source mode incomplete dedent]
+  (start-rule-error source mode {:incomplete incomplete :dont-imply-dedent dedent}))
 
 (defn eval-error
   "compile()'s mode eval as CPython parses it (Py_eval_input, the start rule eval; queue 228): nil, or the error as the
@@ -278,7 +289,8 @@
   "The compiler's reading of a source (str): the module's forms in mode :full, or its (python/error ...), as
   tools/pydump/pydump.py tree --full and arbace.repr.python.convert give them (the error with its :metadata)"
   [^String source]
-  (cv/convert (nv/read-dump (.getBytes source "UTF-8") "src.py" true true)))
+  ;; translate_newlines before all: a lone carriage return is a line's end for the positions too
+  (cv/convert (nv/read-dump (.getBytes (-> source (str/replace "\r\n" "\n") (str/replace "\r" "\n")) "UTF-8") "src.py" true true)))
 
 ;; ---- the check's driver: bin/repr-python ast-check
 

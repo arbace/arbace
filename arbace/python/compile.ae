@@ -526,6 +526,10 @@
                 (emit! u :call-ex true))
             (emit! u :call-ex false)))))))
 
+(def ^:dynamic *fstring-raw*
+  "The enclosing f-string's or t-string's rawness: a format spec's text decoded by it (the tokenizer mode's raw)"
+  false)
+
 (defn- fstring-items
   "An f-string's or t-string's parts as items: {:lit VALUE} for a literal (decoded by the token's prefix, its doubled
   braces undone) or a replacement field's form"
@@ -539,7 +543,7 @@
   (let [[_ [v] fo _] (node p)
         conv (or (:conversion fo) (when (and (:debug fo) (not (:format-spec fo))) 'r))]
     (expr! u v)
-    (when-let [spec (:format-spec fo)] ((resolve 'arbace.python.compile/fstring-of-items!) u (fstring-items spec false)))
+    (when-let [spec (:format-spec fo)] ((resolve 'arbace.python.compile/fstring-of-items!) u (fstring-items spec *fstring-raw*)))
     (emit! u :format [(some-> conv str) (boolean (:format-spec fo))])))
 
 (defn fstring-of-items! [u items]
@@ -555,7 +559,8 @@
 
 (defn- fstring! [u x]
   (let [[_ [parts] o _] (node x)]
-    (fstring-of-items! u (fstring-items parts (str/includes? (str/lower-case (get o :prefix "f")) "r")))))
+    (let [raw (str/includes? (str/lower-case (get o :prefix "f")) "r")]
+      (binding [*fstring-raw* raw] (fstring-of-items! u (fstring-items parts raw))))))
 
 (defn- tstring-of-items! [u items]
   (let [n (atom 0)]
@@ -566,7 +571,7 @@
           (when-let [d (:debug io)] (load-const! u d) (swap! n inc))
           (expr! u v)
           (load-const! u text)
-          (when-let [spec (:format-spec io)] (fstring-of-items! u (fstring-items spec false)))
+          (when-let [spec (:format-spec io)] (fstring-of-items! u (fstring-items spec *fstring-raw*)))
           (emit! u :build-interpolation [(some-> (or (:conversion io) (when (and (:debug io) (not (:format-spec io))) 'r)) str)
                                          (boolean (:format-spec io))])
           (swap! n inc))))
@@ -574,7 +579,8 @@
 
 (defn- tstring! [u x]
   (let [[_ [parts] o _] (node x)]
-    (tstring-of-items! u (fstring-items parts (str/includes? (str/lower-case (get o :prefix "t")) "r")))))
+    (let [raw (str/includes? (str/lower-case (get o :prefix "t")) "r")]
+      (binding [*fstring-raw* raw] (tstring-of-items! u (fstring-items parts raw))))))
 
 (defn- str-concat! [u x]
   (let [parts (second (node x))
@@ -765,13 +771,16 @@
 (defn- expr*! [u x]
   (cond
     (symbol? x) (case x None (load-const! u nil) True (load-const! u true) False (load-const! u false)
-                  ... (load-const! u :ellipsis) (name-op! u (str x) :load))
+                  ... (load-const! u :ellipsis)
+                  ;; a constant, whatever builtins hold (optimize_format's neighbour in codegen: Name __debug__ in Load)
+                  __debug__ (load-const! u true)
+                  (name-op! u (str x) :load))
     (integer? x) (load-const! u x)
     (string? x) (load-const! u x)
     (seq? x)
     (let [[h p o _] (node x)]
       (case h
-        name (name-op! u (ident (first p)) :load)
+        name (if (= "__debug__" (ident (first p))) (load-const! u true) (name-op! u (ident (first p)) :load))
         const (expr! u (first p))
         int (load-const! u (digits->int (first p)))
         float (load-const! u (Double/parseDouble (str/replace (first p) "_" "")))
@@ -806,7 +815,9 @@
         list (seq-elements! u (first p) :list)
         tuple (seq-elements! u (first p) :tuple)
         (list-comp set-comp dict-comp generator-exp) (comprehension! u x)
-        await (do (when-not (#{:function :lambda :comprehension} (:kind @u)) (syntax-error "'await' outside function"))
+        await (do (when-not (or (#{:function :lambda :comprehension} (:kind @u))
+                                  (and sc/*top-level-await* (= :module (:kind @u))))
+                        (syntax-error "'await' outside function"))
                   (expr! u (first p)) (emit! u :get-awaitable nil) (load-const! u nil) (emit! u :yield-from nil))
         yield (do (when-not (#{:function :lambda} (:kind @u)) (syntax-error "'yield' outside function"))
                   (if (some? (first p)) (expr! u (first p)) (load-const! u nil)) (emit! u :yield-value nil))
@@ -1052,15 +1063,11 @@
                       (when (and (seq? t) (= 'attribute (first t)) (= self-name (name-of (second t))))
                         (swap! names conj (ident (nth t 2)))))
                     (doseq [c (rest x)] (walk self-name c)))
-                (and (seq? x) (#{'class-def 'function-def 'async-function-def 'lambda} (first x))) nil
+                ;; a nested class keeps its own (compiler_maybe_add_static_attribute_to_class: the nearest class on the stack)
+                (and (seq? x) (= 'class-def (first x))) nil
                 (coll? x) (doseq [c x] (walk self-name c))
                 :else nil))]
-      (doseq [s body]
-        (when (and (seq? s) (#{'function-def 'async-function-def} (first s)))
-          (let [[_ [_ args fbody] _ _] (node s)
-                ao (nth (node args) 2)
-                first-arg (first (concat (:posonly ao) (:args ao)))]
-            (when first-arg (walk-fn (arg-name first-arg) fbody))))))
+      (walk-fn "self" body))
     (vec (sort @names))))
 
 (defn- class-def! [u x]
@@ -2455,4 +2462,6 @@
         (stmts! u (if (docstring body) (rest body) body))
         (class-annotations! u ph)
         (no-loc! u #(do (load-const! u nil) (emit! u :return nil)))
+        ;; top-level await: the module's code a coroutine's (CO_COROUTINE)
+        (when (and sc/*top-level-await* (:coroutine @(:top t))) (swap! u update :flags conj :coroutine))
         (code-of u)))))

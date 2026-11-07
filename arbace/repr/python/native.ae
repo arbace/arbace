@@ -293,7 +293,21 @@
           (and (== c 92) (in? (ch s (inc k)) "\r\n")) (recur (+ k 2))
           :else k)))))
 
-(defn- nocomment [^String s] (str/replace s #"#[^\r\n]*" ""))
+(defn- nocomment
+  "set_ftstring_expr's comments removed from a debug expression's text (lexer.c): a quote opens a string to its own
+  character, a backslash takes the next character with it"
+  ^String [^String s]
+  (let [n (.length s) sb (StringBuilder.)]
+    (loop [i 0 q -1]
+      (when (< i n)
+        (let [c (long (int (.charAt s i)))]
+          (cond
+            (== c 92) (do (.append sb (char c)) (when (< (inc i) n) (.append sb (.charAt s (inc i)))) (recur (+ i 2) q))
+            (or (== c 34) (== c 39)) (do (.append sb (char c)) (recur (inc i) (long (cond (== q -1) c (== c q) -1 :else q))))
+            (and (== c 35) (== q -1)) (let [e (loop [k i] (if (and (< k n) (not= (int (.charAt s k)) 10)) (recur (inc k)) k))]
+                                       (recur (long e) q))
+            :else (do (.append sb (char c)) (recur (inc i) q))))))
+    (str sb)))
 
 (declare fbody)
 
@@ -304,7 +318,7 @@
         k (skip w ve ")")
         [k debug] (if (and (== (ch s k) 61) (not= (ch s (inc k)) 61))
                     (let [k2 (skip w (inc k) nil)]
-                      [k2 (str (nocomment (sub s (inc fs) vs)) (sub s vs ve) (nocomment (sub s ve k2)))])
+                      [k2 (nocomment (sub s (inc fs) k2))])
                     [k nil])
         [k conv] (if (== (ch s k) 33)
                    (let [c (sub s (inc k) (+ k 2))
@@ -653,7 +667,15 @@
   TEXT]}"
   [^bytes bs]
   (if (some #(zero? (long %)) bs)
-    {:error ["SyntaxError" "source code string cannot contain null bytes" nil nil nil nil nil]}
+    (if lex/*file-input*
+      ;; tok_nextc on the first line holding one (file_tokenizer.c): the line up to it, the column 0
+      (let [s (String. bs "ISO-8859-1")
+            z (.indexOf s (int 0))
+            before (subs s 0 z)
+            line (inc (count (filter #(= % \newline) before)))
+            text (subs before (inc (.lastIndexOf before "\n")))]
+        {:error ["SyntaxError" "source code cannot contain null bytes" line 0 line 0 text]})
+      {:error ["SyntaxError" "source code string cannot contain null bytes" nil nil nil nil nil]})
     (let [tr (translate-newlines bs 0)
           n (alength tr)
           bom (and (>= n 3) (== (aget tr 0) (unchecked-byte 0xEF)) (== (aget tr 1) (unchecked-byte 0xBB)) (== (aget tr 2) (unchecked-byte 0xBF)))
