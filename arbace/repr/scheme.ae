@@ -9,15 +9,18 @@
         each forms file (data the Clojure reader reads) to Scheme text, Chez's `write` of each datum, one
         a line (:lines, SPEC 7); --layout: laid out as a person writes it (80 columns, SPEC 11); --full: the
         original text, from the forms and the layer `read --full` wrote.
-    roundtrip DIR
+    roundtrip [--record] DIR
         the corpora's files (DIR/files-ID.txt, made by prepare) and the probes (DIR/probes/*.ss): text to forms
         and layer to text byte for byte (:full), forms to the layout printer's text to forms equal and the
-        layout idempotent (:lines).
+        layout idempotent (:lines). --record (SM9, a whole run): test/scheme/roundtrip-results.edn, a row
+        [KEY RESULT REASON] a file (KEY as check-dumps': CORPUS/PATH, probe/ID), the print level's record (bin/reap).
     prepare DIR
         the check's inputs: the corpora's file lists and the probes' files under DIR.
-    check-dumps [--record] DIR
+    check-dumps [--record] [--partial] DIR
         Arbace's reading and writing of every file against Chez's dumps in DIR; judged by
-        test/scheme/check-known.edn."
+        test/scheme/check-known.edn. --record also writes test/scheme/check-read-results.edn, a row [KEY RESULT
+        REASON] a file, probe and scan, the read level's record (SM9, bin/reap); --partial (bin/repr-scheme check
+        --corpus): the dumps of some corpora, a known entry judged only when its key was read, --record refused."
   (:require [arbace.string :as str]
             [arbace.repr.scheme.forms :as fm]
             [arbace.repr.scheme.read :as rd]
@@ -94,13 +97,31 @@
         (not lines-ok) (assoc :lines (some (fn [[i a b]] (when-not (fm/tree= a b) [i (pr-str a) (pr-str b)])) (map vector (range) forms (map :form again))))
         (not idem) (assoc :idempotent true)))))
 
-(defn- cmd-roundtrip [[dir]]
-  (let [files (concat (mapcat (fn [f] (str/split (slurp (str dir "/" f)) #"\n"))
+(defn- write-results
+  "SM9: a check's record for bin/reap (test/reap/cells.edn's :results reader): one row [KEY RESULT REASON] a line,
+  sorted by KEY, under a header naming the command that wrote it."
+  [^String file ^String what rows]
+  (spit file
+        (str ";; " what "; generated.\n"
+             ";; A row [KEY RESULT REASON] a file (CORPUS/PATH; probe/ID; scan/KIND), RESULT :pass or another keyword, read by\n"
+             ";; bin/reap (test/reap/cells.edn's Scheme row). Read with the Clojure reader.\n[\n"
+             (str/join "" (for [[k r why] (sort-by first rows)] (str (pr-str [k r (str why)]) "\n")))
+             "]\n"))
+  (println (str "wrote " file " (" (count rows) " rows)")))
+
+(defn- cmd-roundtrip [args]
+  (let [record (some #{"--record"} args)
+        dir (first (remove #{"--record"} args))
+        files (concat (mapcat (fn [f] (str/split (slurp (str dir "/" f)) #"\n"))
                               (sort (filter #(.startsWith ^String % "files-") (.list (java.io.File. ^String dir)))))
                       (sort (map #(str dir "/probes/" %) (.list (java.io.File. (str dir "/probes"))))))
         files (remove empty? files)
         t0 (System/currentTimeMillis)
-        bad (atom 0) bytes (atom 0)]
+        bad (atom 0) bytes (atom 0) rows (atom [])
+        key-of (when record (let [m (into {} (for [c (remove #(false? (:check %)) (:corpora (read-string (slurp (str (root) "/test/scheme/corpora.edn")))))
+                                                   [k p] (ck/corpus-files (root) c)] [p k]))
+                                  pd (str dir "/probes/")]
+                              (fn [^String p] (or (m p) (when (.startsWith p pd) (str "probe/" (subs p (count pd) (- (count p) 3)))) p))))]
     (doseq [f files]
       (let [text (slurp f)
             t (System/currentTimeMillis)
@@ -108,7 +129,12 @@
             ms (- (System/currentTimeMillis) t)]
         (swap! bytes + (count (.getBytes ^String text "UTF-8")))
         (when (> ms 5000) (println (str "slow " f " " ms " ms")))
-        (when r (swap! bad inc) (println "FAIL" f (pr-str r)))))
+        (when r (swap! bad inc) (println "FAIL" f (pr-str r)))
+        (when record (swap! rows conj [(key-of f) (if r :fail :pass) (if r (pr-str r) "")]))))
+    (when record
+      (write-results (str (root) "/test/scheme/roundtrip-results.edn")
+                     "repr/scheme's round trip (bin/repr-scheme roundtrip --record): :full byte for byte, the forms again,\n;; the layout read back and idempotent"
+                     @rows))
     (println (str "roundtrip: " (count files) " files, " @bytes " bytes, failing " @bad ", " (quot (- (System/currentTimeMillis) t0) 1000) " s"))
     (if (zero? @bad) 0 1)))
 
@@ -121,13 +147,15 @@
 
 (defn- cmd-check-dumps [args]
   (let [record (some #{"--record"} args)
-        dir (first (remove #{"--record"} args))
+        partial (some #{"--partial"} args)
+        dir (first (remove #{"--record" "--partial"} args))
         {:keys [results scans]} (ck/check-dumps (root) dir)
         known-file (str (root) "/test/scheme/check-known.edn")
         known (if (.exists (java.io.File. known-file)) (read-string (slurp known-file)) {})
         n (count results)
         diffs (filter (comp some? val) results)
-        {:keys [unlisted gone]} (ck/judge results known)
+        ;; a partial run (--partial): a known entry is judged only when its key was read
+        {:keys [unlisted gone]} (ck/judge results (if partial (select-keys known (keys results)) known))
         scan-bad (filter #(or (pos? (:n-only-mine %)) (pos? (:n-only-chez %))) scans)]
     (println (str "files and probes: " n ", equal to Chez: " (- n (count diffs))
                   ", differing: " (count diffs) " (listed " (- (count diffs) (count unlisted)) ")"))
@@ -138,7 +166,16 @@
     (doseq [[k d] unlisted] (println (str "UNLISTED " (ck/diff-line k d))))
     (doseq [[k kn] gone] (println (str "GONE " k " " (pr-str kn))))
     (doseq [s scan-bad] (println (str "SCAN " (pr-str s))))
-    (when record
+    (when (and record partial)
+      (println "check-dumps: --record refused on a partial run (bin/repr-scheme check --corpus): the records are of every corpus")
+      (reset! rule-bad true))
+    (when (and record (not partial))
+      (write-results (str (root) "/test/scheme/check-read-results.edn")
+                     "repr/scheme's check against Chez 10.3.0 (bin/repr-scheme check --record): each corpus file and probe\n;; read and written as Chez reads and writes it, each scan's ranges"
+                     (concat (for [[k d] results] (if d [k :known (ck/diff-line k d)] [k :pass ""]))
+                             (for [s scans] [(str "scan/" (name (:scan s)))
+                                             (if (or (pos? (:n-only-mine s)) (pos? (:n-only-chez s))) :fail :pass)
+                                             (if (or (pos? (:n-only-mine s)) (pos? (:n-only-chez s))) (pr-str (dissoc s :scan)) "")])))
       (spit (str (root) "/test/scheme/check-known.edn")
             (str ";; Known differences between repr/scheme and Chez (bin/repr-scheme check --record): key -> {:kind ...}\n"
                  (pr-str (into (sorted-map) (map (fn [[k d]] [k (select-keys d [:kind :chez :mine])]) diffs)))
