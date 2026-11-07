@@ -177,19 +177,24 @@
           (emit! (list 'fn id nm))
           id)))))
 
+(defn- ro-code
+  "A static's RO field: 1 read-only, 2 thread-local (go/arbace/ci's thread.go: each thread its own bytes), 0 else."
+  [ro]
+  (cond (= ro :tls) 2 ro 1 :else 0))
+
 (defn- static-idx
-  "A static object's index, allocated (SIZE ALIGN RO) when new."
+  "A static object's index, allocated (SIZE ALIGN RO) when new; ro true, false or :tls (a thread-local object)."
   [key size align ro]
   (if (:frag *p*)
     ;; a fragment's own static (a static local, a temporary, a compound literal: its key is new)
-    (let [[l new?] (frag-static! key #(vector :n size align (if ro 1 0) (str (if (vector? key) (last key) key))))]
+    (let [[l new?] (frag-static! key #(vector :n size align (ro-code ro) (str (if (vector? key) (last key) key))))]
       (item-ref! [:s l] [:s l])
       (sph l))
   (let [^HashMap ss (:statics *p*)]
     (or (.get ss key)
         (let [i (swap! (:nstatic *p*) inc)]
           (.put ss key i)
-          (emit! (list 'static i size align (if ro 1 0) (str (if (vector? key) (last key) key))))
+          (emit! (list 'static i size align (ro-code ro) (str (if (vector? key) (last key) key))))
           i)))))
 
 (defn- hex-of ^String [^bytes b]
@@ -523,7 +528,8 @@
   [e t]
   (let [loc (cond
               (:static (:m e)) {:loc :static :idx (static-idx [:local (:id e)] (size-of t) (obj-align e t)
-                                                                (contains? (chk/quals t) :const))}
+                                                                (let [c (contains? (chk/quals t) :const)]
+                                                                  (if (and (:thread_local (:m e)) (not c)) :tls c)))}
               (or (and (= :array (:k (unq t))) (:vla (unq t))) (var-size? t)) {:loc :vla :slot (new-slot! :i) :size (new-slot! :i)}
               (addressed? (:name e) t) (let [al (obj-align e t)]
                                          ;; the frame's base is 16-aligned (go/arbace/ci's Enter and Call): an object aligned
@@ -2418,7 +2424,8 @@
                                 t (:t e)
                                 sz (try {:size (max 1 (+ (size-of t) (flex-extra t (when has-init (nth f 2)))))
                                          :align (obj-align e t)
-                                         :ro (boolean (and (contains? (chk/quals t) :const) has-init))}
+                                         :ro (let [c (boolean (and (contains? (chk/quals t) :const) has-init))]
+                                               (if (and (:thread_local (meta (second f))) (not c)) :tls c))}
                                         (catch Exception x {:ex (ex-of x)}))]
                             (cond-> (assoc sz :k k :init has-init :def def)
                               has-init (assoc :item (frag-item
@@ -2626,7 +2633,8 @@
       (doseq [[k {:keys [e f init def u]}] defs]
         (binding [*u* u *cfg* (assoc *cfg* :unsigned-char (:unsigned-char u))]
           (let [t (:t e)
-                ro (and (contains? (chk/quals t) :const) init)]
+                ro (let [c (and (contains? (chk/quals t) :const) init)]
+                     (if (and (:thread_local (meta (second f))) (not c)) :tls c))]
             (static-idx [:obj k] (max 1 (+ (size-of t) (flex-extra t (when init (nth f 2))))) (obj-align e t) ro))))
       (doseq [[k {:keys [e f init def u]}] defs]
         (binding [*u* u *cfg* (assoc *cfg* :unsigned-char (:unsigned-char u))]

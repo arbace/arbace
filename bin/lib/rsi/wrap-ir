@@ -1,9 +1,23 @@
 #!/bin/bash
 # The ci leg's build of a program (bin/rsi check, run; doc/rust/EVAL.md §9): bin/lib/rsi/wrap's command line (one codegen unit,
 # the IR without debug records, the temporaries kept) with the linker bin/lib/rsi/link-ir, which keeps the program's IR and the
-# allocator shim's in RSI_LOW and links nothing: ci runs the lowered C, not an executable.
+# allocator shim's in RSI_LOW and links nothing: ci runs the lowered C, not an executable. Under fat LTO (link-ir left
+# RSI_LOW/fat-lto: no shim of its own, it is merged) the same command again without LTO (-C lto=off after the program's flags),
+# its linker keeping the shim alone (RE6, EVAL.md §11).
 #   wrap-ir rustc ARGS...      (RSI_LOW: the program's directory)
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 mkdir -p "${RSI_LOW:?}"
-exec "$@" -C debuginfo=0 -C codegen-units=1 -C save-temps --emit=llvm-ir,link -C linker="$here/link-ir" -C linker-flavor=gcc
+rm -f "$RSI_LOW/fat-lto"
+"$@" -C debuginfo=0 -C codegen-units=1 -C save-temps --emit=llvm-ir,link -C linker="$here/link-ir" -C linker-flavor=gcc || exit $?
+if [ -f "$RSI_LOW/fat-lto" ]; then
+  d=$(mktemp -d "$RSI_LOW/nolto.XXXXXX")
+  args=() prev=""
+  for a in "$@"; do
+    [ "$prev" = -o ] && a=$d/t
+    args+=("$a"); prev=$a
+  done
+  (RSI_SHIM_ONLY=1 "${args[@]}" -C lto=off -C debuginfo=0 -C codegen-units=1 -C save-temps --emit=link -C linker="$here/link-ir" -C linker-flavor=gcc) > "$RSI_LOW/nolto.log" 2>&1 \
+    || { echo "shim-ir	the build without LTO failed" > "$RSI_LOW/x.refused"; rm -rf "$d"; exit 1; }
+  rm -rf "$d"
+fi
