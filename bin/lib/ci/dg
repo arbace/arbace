@@ -7,7 +7,13 @@
 # the dg-error lines (a line expected and not given, a line given and not expected), every non-pass in a
 # class of test/c/divergences-dg.edn.
 #
-# Usage: bin/ci dg [--corpus C,...] [--only LIST] [--record] [--judge] [--essential]
+# By default (the user, 2026-11-07) each file is judged by its own directives and gcc's outputs are not asked. Under
+# ARBACE_C_JUDGE=gcc (the oracle tier's) gcc is not run either since the oracles' records (doc/ORACLE-RECORDS-SURVEY.md,
+# ORS1-ORS10 (a), "As built: the tooling and C"): its filtered diagnostics and status of each file are read from
+# test/c/ref-dg-gcc15.edn (test/c/dgref.ae), recorded by hand on the host with gcc (--record-ref); a file with no entry, or
+# whose bytes or dg-options differ from its entry's, fails the run.
+#
+# Usage: bin/ci dg [--corpus C,...] [--only LIST] [--record] [--judge] [--essential] [--live|--record-ref|--verify-ref [--sample N]]
 #   --corpus   test/c/corpora.edn's ids (default the six groups below)
 #   --only     GT8: a file of ids GROUP/NAME (bin/lib/repr-c/only.bash), those files alone (CI_DG_ONLY), read, run by gcc
 #              and judged on what the run holds (a recorded file not listed is not absent; a listed one not found fails); not
@@ -17,6 +23,12 @@
 #   --essential  CS146: only the files of test/c/essential-dg.txt (one of each diagnostic family and a few that expect no
 #              error), read and judged, no gcc run (its directives are the file's), every one must pass; seconds to a
 #              minute, in .tmp/ci-dg-essential (not --record)
+#   --live     gcc run on each file as before the records (nothing read from or written to the record)
+#   --record-ref  gcc run on each file, then test/c/ref-dg-gcc15.edn's entries of the groups rewritten (the others kept), then
+#              judged; by hand only, on the host whose gcc the record's header names (ORS5 (a))
+#   --verify-ref  gcc run on the groups' files (--sample N: N of each group, spread evenly) in .tmp/ci-dg-verify, its outputs
+#              against the record, and the crossed pair (one file's output against another's entry must differ, ORS7 (a));
+#              nothing judged; exit 1 when an entry differs under the gcc the record names (another gcc: reported, ORS6 (a))
 #   REPR_C_THREADS (default 3): the read's threads; CI_JOBS (default 4): gcc's jobs; REPR_C_READ_BUDGET (default 300,
 #              CS153: 120 timed out a file under the host's load): a file's read budget in seconds
 # Writes under .tmp/ci-dg/ (CI_DG_WORK): CORPUS/{files.edn,dg.edn,gcc.list,gcc/,gcc.edn,read.edn}; the gcc
@@ -32,18 +44,25 @@ cd "$root"
 export GOMEMLIMIT=${GOMEMLIMIT:-1800MiB}
 export REPR_C_READ_BUDGET=${REPR_C_READ_BUDGET:-300}
 all=gcc-c23,gcc-cpp-c23,gcc-c23-sub,gcc-gnu23,gcc-embed,gcc-va-opt,gcc-bitint
-corpora=$all record= judge= essential= only=
+corpora=$all record= judge= essential= only= live= record_ref= verify_ref= sample=
+ref=$root/test/c/ref-dg-gcc15.edn
 while [ $# -gt 0 ]; do
   case $1 in
+    --live) live=1; shift ;;
+    --record-ref) record_ref=1; live=1; shift ;;
+    --verify-ref) verify_ref=1; live=1; shift ;;
+    --sample) sample=$2; shift 2 ;;
     --corpus) corpora=$2; shift 2 ;;
     --only) only=$2; shift 2 ;;
     --record) record=1; shift ;;
     --judge) judge=1; shift ;;
     --essential) essential=1; shift ;;
-    *) sed -n '15,22p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+    *) sed -n '/^# Usage:/,/^# Writes/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2; exit 2 ;;
   esac
 done
 work=${CI_DG_WORK:-$root/.tmp/ci-dg}
+[ -z "$verify_ref" ] || work=${CI_DG_WORK:-$root/.tmp/ci-dg-verify}
+[ -z "$record_ref$verify_ref" ] || [ -z "$only$essential$judge" ] || { echo "bin/ci dg: --record-ref and --verify-ref take whole groups, not --only, --essential or --judge" >&2; exit 2; }
 unset REPR_C_ONLY CI_DG_ONLY
 if [ -n "$only" ]; then
   [ -z "$essential" ] || { echo "bin/ci dg: --only with --essential (its own list)" >&2; exit 2; }
@@ -73,11 +92,18 @@ if [ -z "$judge" ]; then
     arbace_tool -m arbace.c.dg judge "$work" test/c/divergences-dg.edn "${ids[@]}" 2>&1 | grep -v 'Reflection\|recur arg\|Auto-boxing' | head -c 200000
     exit "${PIPESTATUS[0]}"
   fi
-  if [ "${ARBACE_C_JUDGE:-self}" != gcc ]; then
+  mst=0
+  if [ "${ARBACE_C_JUDGE:-self}" != gcc ] && [ -z "$live" ]; then
     # the test's own verdict (the user, 2026-11-07; doc/C23-SURVEY.md, "Decided (the user, 2026-11-07): the judge"): the
-    # checker's errors against the file's directives alone; gcc's run on each file (which only named its agreement with the
-    # directives on a failing row) is the oracle tier's, ARBACE_C_JUDGE=gcc by hand
-    echo "bin/ci dg: judged by the directives alone (gcc's run the oracle tier's: ARBACE_C_JUDGE=gcc)"
+    # checker's errors against the file's directives alone; gcc's outputs (which only named its agreement with the
+    # directives on a failing row) are the oracle tier's: ARBACE_C_JUDGE=gcc reads them from the record, --live runs gcc
+    echo "bin/ci dg: judged by the directives alone (gcc's the oracle tier's: ARBACE_C_JUDGE=gcc, --live)"
+  else
+  if [ -z "$live" ]; then
+    # the records: gcc's outputs of each file from test/c/ref-dg-gcc15.edn (no gcc)
+    arbace_tool -p "$root/test" -m c.dgref materialize "$work" "$ref" "${ids[@]}" 2>&1 | grep -v 'Reflection\|recur arg\|Auto-boxing' | head -c 100000
+    mst=${PIPESTATUS[0]}
+    [ "$mst" = 0 ] || [ "$mst" = 3 ] || { echo "bin/ci dg: the record could not be read ($ref)" >&2; exit 1; }
   else
   . "$root/bin/lib/ci/gcc-diag.bash"
   gi=$(gcc -print-file-name=include)
@@ -93,9 +119,33 @@ if [ -z "$judge" ]; then
   export -f gcc1 gcc_diag; export gi
   for id in "${ids[@]}"; do
     base=$(cat "$work/$id/base.txt")
+    if [ -n "$sample" ]; then  # --verify-ref --sample N: N files of the group, spread evenly
+      n=$(wc -l < "$work/$id/gcc.list"); k=$(( n > sample ? n / sample : 1 ))
+      awk -v k="$k" -v s="$sample" 'NR % k == 1 % k && c < s {print; c++}' "$work/$id/gcc.list" > "$work/$id/gcc.list.s" && mv "$work/$id/gcc.list.s" "$work/$id/gcc.list"
+    fi
     awk -F'\t' -v w="$work" -v id="$id" -v b="$base" '{print w "\037" id "\037" b "\037" $1 "\037" $2 "\037" $3}' "$work/$id/gcc.list" | tr '\n' '\0' \
       | xargs -0 -P "$jobs" -I{} bash -c 'IFS=$'"'"'\037'"'"' read -r w id b n a o <<< "$1"; gcc1 "$w" "$id" "$b" "$n" "$a" "$o"' _ {}
   done
+  if [ -n "$verify_ref" ]; then
+    . "$root/test/oracle-records/oracle.bash"
+    arbace_tool -p "$root/test" -m c.dgref verify "$work" "$ref" "${ids[@]}" 2>&1 | grep -v 'Reflection\|recur arg\|Auto-boxing' > "$work/verify.out"
+    cat "$work/verify.out"
+    grep -q '^verify-count ' "$work/verify.out" || { echo "bin/ci dg --verify-ref: the comparison failed" >&2; exit 1; }
+    read -r _ nd nt <<< "$(grep '^verify-count ' "$work/verify.out")"
+    vst=0; oracle_verdict gcc "$ref" "$nd" "$nt" || vst=1
+    grep -q '^CONTROL-TAKEN' "$work/verify.out" && { echo "bin/ci dg --verify-ref: FAILED: the crossed pair was taken"; vst=1; }
+    exit $vst
+  fi
+  if [ -n "$record_ref" ]; then
+    . "$root/test/oracle-records/oracle.bash"
+    { echo ";; gcc 15.2's diagnostics of the dg check's files (doc/ORACLE-RECORDS-SURVEY.md, \"As built: the tooling and C\";"
+      echo ";; test/c/dgref.ae's header): one map a line, sorted by :id; :diag gcc's lines as bin/lib/ci/gcc-diag.bash filters them,"
+      echo ";; each byte a character (\\uXXXX outside 0x20-0x7e). Recorded by hand only (ORS5 (a)); read by bin/ci dg in place of gcc."
+      oracle_record_header ";;" gcc "bin/ci dg --record-ref --corpus $corpora"; } > "$work/ref-header.txt"
+    arbace_tool -p "$root/test" -m c.dgref write "$work" "$ref" "$work/ref-header.txt" "${ids[@]}" 2>&1 | grep -v 'Reflection\|recur arg\|Auto-boxing'
+    [ "${PIPESTATUS[0]}" = 0 ] || { echo "bin/ci dg --record-ref: the record was not written" >&2; exit 1; }
+  fi
+  fi
   arbace_tool -m arbace.c.dg gcc "$work" "${ids[@]}" 2>&1 | grep -v 'Reflection\|recur arg\|Auto-boxing' | head -c 100000
   fi
   arbace_tool -m arbace.c.dg read "$work" "${ids[@]}" 2>&1 | grep -v 'Reflection\|recur arg\|Auto-boxing' | head -c 100000
@@ -106,3 +156,7 @@ if [ -n "$judge" ] && [ -z "$essential" ] && [ -d "$work/${ids[0]}/gcc" ]; then
   [ "${PIPESTATUS[0]}" -eq 0 ] || { echo "bin/ci dg: reading gcc's kept outputs failed" >&2; exit 1; }
 fi
 arbace_tool -m arbace.c.dg judge "$work" test/c/divergences-dg.edn ${record:+--record test/c/check-dg-linux-amd64.edn} "${ids[@]}" 2>&1 | grep -v 'Reflection\|recur arg\|Auto-boxing' | head -c 200000
+jst=${PIPESTATUS[0]}
+# ORS10 (a): a file with no entry in gcc's record, or a stale one, fails the run
+[ "${mst:-0}" = 3 ] && { echo "bin/ci dg: FAILED: files unrecorded or stale in $ref (bin/oracle-records record c dg --corpus GROUP, by hand on the host with gcc)"; exit 1; }
+exit "$jst"

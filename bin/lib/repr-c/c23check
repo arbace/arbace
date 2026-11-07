@@ -5,45 +5,117 @@
 # the :lines print (gcc -std=c23 -fsyntax-only, gcc's include directory first), then judged in c23conf's order;
 # then the control, four wrong prints the judges must refuse. Run through bin/repr-c check --c23 (from the
 # repository root); writes only under .tmp/repr-c-c23/ (REPR_C_C23_WORK).
+# Since the user's decision of 2026-11-07 (doc/C23-SURVEY.md, "Decided (the user, 2026-11-07): the judge") the files are judged
+# by their own verdict by default: c23conf's and Arbace's files are valid C23, accepted, and so is their print (the same
+# program), but those test/c/c23/expected.edn records the reference rejecting (judge 1, a reviewed reason); an object not
+# compiled is not judged (arbace.repr.c.c23check), and the control's objects are not compared.
+# Under gcc's judge (ARBACE_C_JUDGE=gcc), since the oracles' records (doc/ORACLE-RECORDS-SURVEY.md, ORS1-ORS10 (a), CS79 (a);
+# "As built: the tooling and C") gcc is not run either: judge 1 (the reference accepts the original) reads test/c/c23/ref-syntax-gcc15.tsv (each file's status
+# and digest, recorded by hand: --record-ref), the round trip runs levels 1-2 (--no-gcc), and judges 3 and 5's objects (gcc
+# on Arbace's print) and the control's objects are the oracle tier's (--oracle), the judges test/c/c23records.ae's.
+#   (default)     each file's own verdict: no gcc, no record
+#   ARBACE_C_JUDGE=gcc  the records: no gcc; a file with no line in the record, or whose bytes are not its line's, fails
+#   --oracle      every judge as before, gcc on the originals and the prints and the control's objects (the class-D half)
+#   --record-ref  gcc -fsyntax-only on each original, test/c/c23/ref-syntax-gcc15.tsv rewritten (by hand only, ORS5 (a))
+#   --verify-ref  gcc afresh against the record, and the crossed pair (one file's status against another's line that
+#                 differs, ORS7 (a)); another gcc reported, not failed (ORS6 (a))
 # Exit status: 0 when every file passes or fails as test/c/c23/expected.edn expects, and the control holds.
 set -uo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
 . "$root/bin/lib/tools.bash"
+. "$root/test/oracle-records/oracle.bash"
 cd "$root"
+mode=self; [ "${ARBACE_C_JUDGE:-self}" = gcc ] && mode=records
+case ${1:-} in --oracle) mode=oracle ;; --record-ref) mode=record ;; --verify-ref) mode=verify ;; '') ;; *) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;; esac
 work=${REPR_C_C23_WORK:-$root/.tmp/repr-c-c23}
-# Since the user's decision of 2026-11-07 (doc/C23-SURVEY.md, "Decided (the user, 2026-11-07): the judge") the files are judged
-# by their own verdict: c23conf's and Arbace's files are valid C23, accepted, and so is their print (the same program), but
-# those test/c/c23/expected.edn records the reference rejecting (judge 1, a reviewed reason); the objects and gcc's acceptance
-# are the oracle tier's (ARBACE_C_JUDGE=gcc, by hand: gcc as before).
-gcc_judge=; [ "${ARBACE_C_JUDGE:-self}" = gcc ] && gcc_judge=1
-gi=; [ -z "$gcc_judge" ] || gi=$(gcc -print-file-name=include)
-REPR_C_RT_WORK=$work bin/lib/repr-c/roundtrip --corpus c23 --no-run > "$work.rt.log" 2>&1
+ref=test/c/c23/ref-syntax-gcc15.tsv
+mkdir -p "$work"
+
+syntax() { # FILE...: NAME<TAB>STATUS<TAB>SHA256 of gcc -std=c23 -fsyntax-only on each original
+  local gi f; gi=$(gcc -print-file-name=include)
+  for f in "$@"; do
+    (cd test/c/c23 && gcc -std=c23 -isystem "$gi" -fsyntax-only -w "$f" > "$work/syn-$f.out" 2>&1)
+    printf '%s\t%s\t%s\n' "$f" "$?" "$(sha256sum < "test/c/c23/$f" | cut -c1-64)"
+  done
+}
+originals() { (cd test/c/c23 && ls -- *.c) | LC_ALL=C sort; }
+
+case $mode in
+  record)
+    # shellcheck disable=SC2046
+    { echo "# gcc 15.2's acceptance of test/c/c23/'s files (CS79 (a); doc/ORACLE-RECORDS-SURVEY.md): NAME<TAB>STATUS<TAB>SHA256 of the"
+      echo "# file, gcc -std=c23 -isystem GCC-INCLUDE -fsyntax-only -w in test/c/c23/; read by bin/repr-c check --c23 in place of gcc."
+      oracle_record_header "#" gcc "bin/repr-c check --c23 --record-ref"
+      syntax $(originals); } > "$ref.new" && mv "$ref.new" "$ref"
+    echo "recorded $ref: $(grep -vc '^#' "$ref") files"; exit 0 ;;
+  verify)
+    # shellcheck disable=SC2046
+    syntax $(originals) > "$work/syn-verify.tsv"
+    nd=0 nt=0
+    while IFS=$'\t' read -r f st sh; do
+      nt=$((nt + 1))
+      [ "$(awk -F'\t' -v f="$f" '$1 == f {print $2 "\t" $3}' "$ref")" = "$st	$sh" ] || { nd=$((nd + 1)); echo "DIFF $f: $(awk -F'\t' -v f="$f" '$1 == f {print $2}' "$ref") recorded, $st afresh"; }
+    done < "$work/syn-verify.tsv"
+    vst=0
+    # the crossed pair: the first file gcc rejects afresh against the first line the record says it accepts
+    a=$(awk -F'\t' '$2 != 0 {print $1; exit}' "$work/syn-verify.tsv"); b=$(awk -F'\t' '!/^#/ && $2 == 0 {print $1; exit}' "$ref")
+    if [ -n "$a" ] && [ -n "$b" ]; then
+      if [ "$(awk -F'\t' -v f="$a" '$1 == f {print $2}' "$work/syn-verify.tsv")" = "$(awk -F'\t' -v f="$b" '$1 == f {print $2}' "$ref")" ]; then
+        echo "verify: FAILED: control: $a's status afresh taken for $b's line"; vst=1
+      else echo "verify: control: $a's status afresh against $b's line differs, as it must"; fi
+    fi
+    oracle_verdict gcc "$ref" "$nd" "$nt" || vst=1
+    exit $vst ;;
+esac
+
+if [ "$mode" = oracle ]; then
+  ARBACE_C_JUDGE=gcc REPR_C_RT_WORK=$work bin/lib/repr-c/roundtrip --corpus c23 --no-run > "$work.rt.log" 2>&1
+else
+  REPR_C_RT_WORK=$work bin/lib/repr-c/roundtrip --corpus c23 --no-run --no-gcc > "$work.rt.log" 2>&1
+fi
 grep -v 'Reflection warning\|recur arg\|Auto-boxing' "$work.rt.log" | tail -2
 d=$work/c23
 : > "$d/syn.tsv"; : > "$d/syn-print.tsv"
-if [ -z "$gcc_judge" ]; then
+status=0
+if [ "$mode" = oracle ]; then
+  gi=$(gcc -print-file-name=include)
+  while IFS=$'\t' read -r f _; do
+    (cd test/c/c23 && gcc -std=c23 -isystem "$gi" -fsyntax-only -w "$f" > "$d/syn-$f.out" 2>&1); printf '%s\t%s\n' "$f" "$?" >> "$d/syn.tsv"
+    if [ -f "$d/print/$f.d/$f" ]; then
+      (cd "$d/print/$f.d" && gcc -std=c23 -iquote "$root/test/c/c23" --embed-dir="$root/test/c/c23" -isystem "$gi" -fsyntax-only -w "$f" > "$d/synp-$f.out" 2>&1); printf '%s\t%s\n' "$f" "$?" >> "$d/syn-print.tsv"
+    fi
+  done < "$d/forms.tsv"
+  arbace_tool -m arbace.repr.c.c23check judge "$work" || status=1
+elif [ "$mode" = self ]; then
   arbace_tool -e "(doseq [[f why] (read-string (slurp \"test/c/c23/expected.edn\"))] (when (re-find #\"^1:\" why) (println f)))" > "$d/rejected.txt"
   while IFS=$'\t' read -r f _; do
     if grep -qxF "$f" "$d/rejected.txt"; then printf '%s\t1\n' "$f"; else printf '%s\t0\n' "$f"; fi >> "$d/syn.tsv"
     printf '%s\t0\n' "$f" >> "$d/syn-print.tsv"
   done < "$d/forms.tsv"
+  arbace_tool -m arbace.repr.c.c23check judge "$work" || status=1
+else
+  # judge 1 from the record (ORS10 (a): a file the record lacks, or whose bytes differ, fails)
+  while IFS=$'\t' read -r f _; do
+    l=$(awk -F'\t' -v f="$f" '!/^#/ && $1 == f {print $2 "\t" $3}' "$ref" 2>"$TMPDIR/c23-ref.err")
+    if [ -z "$l" ]; then echo "FAIL c23/$f	unrecorded: no line in $ref (bin/repr-c check --c23 --record-ref)"; status=1
+    elif [ "${l#*	}" != "$(sha256sum < "test/c/c23/$f" | cut -c1-64)" ]; then echo "FAIL c23/$f	stale: its bytes are not $ref's"; status=1
+    else printf '%s\t%s\n' "$f" "${l%%	*}" >> "$d/syn.tsv"; fi
+  done < "$d/forms.tsv"
+  arbace_tool -p "$root/test" -m c.c23records judge "$work" || status=1
 fi
-while IFS=$'\t' read -r f _; do
-  [ -n "$gcc_judge" ] || break
-  (cd test/c/c23 && gcc -std=c23 -isystem "$gi" -fsyntax-only -w "$f" > "$d/syn-$f.out" 2>&1); printf '%s\t%s\n' "$f" "$?" >> "$d/syn.tsv"
-  if [ -f "$d/print/$f.d/$f" ]; then
-    (cd "$d/print/$f.d" && gcc -std=c23 -iquote "$root/test/c/c23" --embed-dir="$root/test/c/c23" -isystem "$gi" -fsyntax-only -w "$f" > "$d/synp-$f.out" 2>&1); printf '%s\t%s\n' "$f" "$?" >> "$d/syn-print.tsv"
-  fi
-done < "$d/forms.tsv"
-status=0
-arbace_tool -m arbace.repr.c.c23check judge "$work" || status=1
 rm -rf "$work/control"
 arbace_tool -m arbace.repr.c.c23check control-write "$work" || exit 1
-for c in "$work"/control/*/; do
-  [ -n "$gcc_judge" ] || { echo - > "$c/obj"; continue; }
-  (cd "$c/a" && gcc -std=c23 -O0 -fno-stack-protector -c x.c -o x.o) && (cd "$c/b" && gcc -std=c23 -O0 -fno-stack-protector -c x.c -o x.o) \
-    && { if cmp -s "$c/a/x.o" "$c/b/x.o"; then echo equal; else echo differ; fi; } > "$c/obj" || echo gcc-failed > "$c/obj"
-done
-arbace_tool -m arbace.repr.c.c23check control-judge "$work" || status=1
+if [ "$mode" = oracle ]; then
+  for c in "$work"/control/*/; do
+    (cd "$c/a" && gcc -std=c23 -O0 -fno-stack-protector -c x.c -o x.o) && (cd "$c/b" && gcc -std=c23 -O0 -fno-stack-protector -c x.c -o x.o) \
+      && { if cmp -s "$c/a/x.o" "$c/b/x.o"; then echo equal; else echo differ; fi; } > "$c/obj" || echo gcc-failed > "$c/obj"
+  done
+  arbace_tool -m arbace.repr.c.c23check control-judge "$work" || status=1
+elif [ "$mode" = self ]; then
+  for c in "$work"/control/*/; do echo - > "$c/obj"; done
+  arbace_tool -m arbace.repr.c.c23check control-judge "$work" || status=1
+else
+  arbace_tool -p "$root/test" -m c.c23records control-judge "$work" || status=1
+fi
 exit $status
