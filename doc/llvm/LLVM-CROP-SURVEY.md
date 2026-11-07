@@ -1161,3 +1161,78 @@ What the own verdicts changed in llvmi:
 4. **LLS30: the probes' own verdicts.** The 478 probes are Arbace's hand-written modules, judged by opt's record (0.5). Writing
    each probe's expected verdict and message into it would copy opt's output into the test. Recommended: no, keep the record (the
    probes are the verifier's regression set, not its specification).
+
+## Decided (2026-11-07, the user: LLS27-LLS30)
+
+- **LLS27 (a):** a pinned input corpus in the crop's own language counts 1 when no output of a toolchain about it is a
+  reference (doc/CROPS-SCORE.md, "Decided (the user, 2026-11-07): a pinned input corpus in the crop's own language"). The
+  packs `test/llvm/ir/{tx,c}.tar.xz` and llvm/test's files from the pinned tarball are test data (1); opt's and lli's records stay
+  the judge's 0.5; the first records' 282 modules and mutants, in no checkout, stay 0.5 until LLS28's pack.
+- **LLS28 (a):** pack the 282 modules once with clang, at night, and regenerate the mutants with Arbace's mutator
+  (`bin/repr-llvm mutants`, deterministic by index).
+- **LLS29:** dg-options with the next pack (`bin/llvmi ir-make tx` passing each torture test's `dg-options` and
+  `dg-additional-options`).
+- **LLS30:** the probes keep opt's record (they are the verifier's regression set, not its specification).
+
+## As merged: batch 2 (2026-11-07, branch `batch2`)
+
+`llvm-read`, `cpp-lower-dbg`, `llvm-full`, `llvm-verify3`, `gt9v-llvm`, `llvm-ll6` (with `cpp-native`, `cpp-native2`, `cpp-sema`,
+`cpp-codegen`, `cpp-codegen2`, `cpp-g2fix`, `cpp-templates` and `llvm-row` inside it) and `llvm-90`, one merge commit each, on
+batch 1 and rsi's `rust-re5`, `gt9v-rust`, `rust-re6`. Not merged: `llvm-ll4` (LL4's corpus loop, 8 commits on `llvm-verify3`, never
+merged into `llvm-ll5`/`ll6`: it conflicts with LL9a in `arbace/repr/llvm/verify.ae`, the SPEC and this survey; to be rebased onto
+batch 2 with its records re-made, proposal LLS32).
+
+- **The doc split.** `llvm-ll6` moved doc/cpp/LLVM.md's sections 1-6 to doc/llvm/SPEC.md and 7-10 to doc/llvm/LOWER.md; batch 1's
+  changes to the old file (CX8's section 11, cppi-deferred's slot unions, atomics and va_list fields, cpp-lower-dbg's debug
+  records) were merged into LOWER.md.
+- **The lowering** (`arbace/cpp/lower.ae`): batch 1's lowering (CX8's ci lowering, rust-re4/re5's rustc intrinsics and vectors,
+  cppi-deferred, cpp-lower-dbg) and ll6's (LL5's vectors, LL6's `*ci*`) are two implementations of the same features; the merge
+  commit takes ll6's and the next commit integrates batch 1's (branch `batch2-lower`).
+- **The keys' list.** `arbace/llvm/` (llvmi's namespaces) joined `bin/lib/version.bash`'s `arbace_crop_paths`, `test/gate/audit.ae`'s
+  `crop-rules` and `arbace/j2g/embed.ae`'s exclusions (the keys commit had `arbace/rust/` but not it).
+- **The gate.** llvm-90's eight steps (`llvm-essential`: `llvm-read-essential`, `llvm-print-essential`, `llvmi-essential`,
+  `llvm-controls-test`; `llvm-full`: `llvm-read`, `llvm-print`, `llvmi-check`, `llvmi-aot`), all on `:stage0` and `:go`, with their
+  `:controls` (verify-controls, text-controls, `test/llvm/controls.edn`; `llvm-controls-test` waived as the wiring test itself);
+  `test/gate/crops/llvm-rust.edn`'s LLVM interim step `llvm-roundtrip` superseded. `gate.crops check`: 0 problems.
+- **llvmi on C's own target** (LLS27 (a)'s condition for eval and AOT): `bin/llvmi` sources `bin/lib/repr-c/sysroot.bash` and runs
+  ci on `c/target` and Arbace's sysroot (`c_sysroot`; `ARBACE_C_TARGET=gcc`: gcc's `test/c/host`, the oracle tier's). Checked:
+  `bin/llvmi check --essential` 10 of 10 (4 controls fail as they must, 22 s, 0.6 GB); a sample of 70 modules of the eval record
+  (every 8th) 66 pass and 4 in their recorded classes, exit 0 (49 s, 0.75 GB); `--aot --only` 5 of them, 5 of 5 (39 s, 1.1 GB).
+- **Independence** (`test/crops/independence.edn`'s `:llvm :stages`, batch 2's): read 0.706, eval 1, AOT 1, print 1, judge 0.711:
+  **88.3%** (68.3% on `llvm-90`).
+
+### LLS28 prepared: what the pack needs
+
+The 282 modules' ids (`test/llvm/check-roundtrip-linux-amd64.edn`) are: 52 torture programs of gcc's `execute` in five builds each
+(`.g0`, `.g2`, `.o2`, `.lto`, `.win`: 260), nine C++ samples for a Mach-O target (`.mac`), one Rust module (`rs.lt`), ten
+`stress1`-`stress10`, the 21 corner modules (`dbg-O0` ... `typed`: debug info, Windows EH, callbr, LTO's summaries and CFI, the
+sanitizers, `typed` pointers) and the four hand-written `hw-*` (committed in `test/llvm/hw/`). Their lists and the corner modules'
+sources were in the worktrees of `llvm-read` and `llvm-full` and are gone with them (no copy under the main checkout's `.tmp/`): the
+commands that made them are not recorded either. So the pack cannot be made as the record's inputs byte for byte; what can be
+made at night, after `bin/llvmi ir-make` learns a pack `rt` (a day's task, below):
+
+    bin/llvmi ir-make rt                         # clang 23.1.4: the 52 torture programs x {-O0 -g, -O2 -g, -O2, -O2 -flto, --target=x86_64-pc-windows-msvc},
+                                                 # the C++ samples for x86_64-apple-macosx, one Rust crate's IR (rustc --emit=llvm-ir), the stress set; ~10 min, < 1 GB
+    bin/repr-llvm mutants .tmp/llvm/rt.list .tmp/llvm/mut-a 315 0      # the two fitted sets and the held-out sets, at their indices
+    bin/repr-llvm mutants .tmp/llvm/rt.list .tmp/llvm/mut-b 315 315
+    bin/repr-llvm mutants .tmp/llvm/rt.list .tmp/llvm/mut-h1 543 500000
+    bin/repr-llvm mutants .tmp/llvm/rt.list .tmp/llvm/mut-h2 539 600000
+    REPR_LLVM_JUDGE=live bin/repr-llvm record-rt .tmp/llvm/rt.list .tmp/llvm/rt-rec     # the oracle tier's references, once
+    bin/repr-llvm check roundtrip-rt --record; bin/repr-llvm check text-rt --record; bin/repr-llvm check verify-rt --record
+
+The families `roundtrip-rt`, `text-rt` and `verify-rt` (with controls) are new verbs of `bin/repr-llvm check`, as LL9a's four. The
+record's numbers change (new inputs). See LLS31 below.
+
+### Proposed (batch 2)
+
+- **LLS31 The 282 modules' pack, without their sources.** (a) Rebuild what can be rebuilt as the pack `rt` (the 260 torture builds,
+  the C++ samples' Mach-O builds, a Rust module, the stress set; the four `hw-*` committed), drop the 21 corner modules (their
+  constructs are among llvm/test's 304 and 806 and the probes), re-make the mutants from the pack and re-record the families: cost a
+  day's verb (`ir-make rt`, three `check` families with controls) and a night's clang run; the REAP read cell's numbers change once.
+  (b) Retire the four families of the 282 lists from the read cells (LLS28's old option (b)): the read stage is then llvm/test's and
+  the probes' alone, all pinned (read 1 now, independence 94.2%), completeness counted on fewer cases; cost: the C torture programs'
+  and the C++ samples' IR leave the read level (llvmi's eval still runs the packs'). *Recommended: (a)*, (b) meanwhile if the user
+  wants the score now.
+- **LLS32 `llvm-ll4`.** LL4's corpus loop (wider rejection samples, LLParser's messages at more parseToken sites, three valid samples'
+  false errors) is on a line of its own. (a) Rebase it onto batch 2 (its `verify.ae` changes against LL9a's, SPEC §6.2.3 against
+  ll6's SPEC, the survey's sections), its records re-made by verify-check (light: seconds); an agent's day; (b) leave it. *Recommended: (a)*.
