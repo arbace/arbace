@@ -191,8 +191,9 @@ go-design-review's judged `-race`; `test/goi/check-linux-amd64.edn` merged row b
 ### Tonight, in order (heavy ones under `bin/heavy-lock`; one heavy job at a time)
 
 0. Before the gate, else its builds and `j2g-edge` fail: `java-jc9c`'s variants (F2, F3, F4, F12, F13) and `clojure-cdr`'s
-   world (CDR4) name classes `jdk/forms` does not hold yet ("not mergeable before its night", JAVA-DEFERRED-TRIAGE). One
-   conversion takes every area: `REPR_JAVA_EXE=<the newest .tmp/gate-exe/javac-*/arbace-javac> REPR_JAVA_STALE_OK=1
+   world (CDR4) name classes `jdk/forms` does not hold yet ("not mergeable before its night", JAVA-DEFERRED-TRIAGE), with
+   JC9's F1, F5 and JC9b since the third part. First the joint javac check of JC9's lists against jrt's overlays (JC9b's
+   `.tmp/jc9b/all9/run.sh` in its worktree, a minute, 1 GB). One conversion takes every area: `REPR_JAVA_EXE=<the newest .tmp/gate-exe/javac-*/arbace-javac> REPR_JAVA_STALE_OK=1
    bin/jrt-convert update` (heavy, the javac tool), `bin/jrt modules`, `bin/j2g-edge update` (frozen JVM), `bin/javac-vendor
    edge`, `bin/generated-check` (the module table), commit. Then `CPPI_THREADS=2 bin/cppi check --record` and `--aot --record`
    (samples and runtime, about 4 GB), `bin/reap --record`, `bin/crops-score --record`, commit: `bin/reap`'s one problem clears.
@@ -225,6 +226,52 @@ go-design-review's judged `-race`; `test/goi/check-linux-amd64.edn` merged row b
    (b) Merge the four prerequisites into batch 1 today (6, 4, 8 and 11 commits; conflicts in the triage doc, `arbace/j2g/model.ae`,
    Java's and Clojure's classes, `cells.edn`, `DriverManager.java`, `go/arbace/jrt.ae`); cost: about an hour by day, a larger
    conversion tonight. (c) Keep it and try step 0; on a failure revert it at night. *Recommended: (a).*
+
+### Decided (the user, 2026-11-07, second round)
+
+- Proposal 6: (b), JC9's four prerequisites merged today; if tonight's conversion fails, the main session reverts `java-jc9c`
+  and the four and runs the gate without them (the commits below).
+- `java-judge` (JCV1) and `scheme-90` (SCS1) merged; crops-score's mixed stage is the case-weighted mean (doc/CROPS-SCORE.md,
+  "Decided (the user, 2026-11-07): a mixed stage"); JCV2 to be built (JCV5, JCV6 not now); SCS2 (a): the scheme-chez-dumps pack
+  when `oracle-records-cpp2` merges (not today).
+
+### Batch 1, third part (JC9's four, java-judge, scheme-90, 2026-11-07)
+
+Merge commits (for a revert at night, newest first: `git revert -m 1 ID` each, in this order; `java-judge`'s merge interleaves
+`bin/java-check`'s F6 lines with JCV1's, so `java-jc9c`'s revert there may need a hand fix):
+
+| branch | head | merge commit on batch1 |
+|---|---|---|
+| `java-jc9b-natives` | f89e8e9c | `fb4689814` |
+| `java-jc9b` | 51b320c1 | `418af3c7b` |
+| `java-jc9-logging` | b8a1951c | `ef37fdb03` |
+| `java-jc9-jca` | a4a8e546 | `7d49a3249` |
+| `java-jc9c` (part two) | e92a1c8e | `5c67e7145` |
+
+Then `java-judge` 3ab550e0 (`b4216bacc`) and `scheme-90` 43b39f4a (`eb49dcddc`), crops-score's mixed stage (`a6a10d703`).
+
+- Resolutions of note: `DriverManager.java` (both added) clojure-cdr's, F16's java.sql files out of `small-members-sources`
+  (CDR4 holds them); `jrt_sources.ae` jca-sources and logging-sources both; `go/arbace/jrt.ae`'s lists both; Java's records
+  rederived by `bin/java-check rejudge-records` (equal to java-judge's but t05507, its hand edit kept); JCV1's patch applied to
+  `test/crops/independence.edn`; scheme-90's controls replace crop-controls' picked Scheme controls (`test/scheme/repr-controls.edn`
+  removed, the steps name `test/scheme/controls.edn`), gt9v-scheme's `--only-list` applied again on scheme-90's
+  `arbace/repr/scheme.ae`; scheme-90's two diffs applied (crops.edn's rules, independence.edn); `si-corpora` without `:chibi`, as
+  scheme-90 declares it (else Scheme's judge was refuted).
+- Keys (12 hex): at `1dd5bcc71` gate `1f886836e11e`, runtime `4cd0885457fb`, javac `c97e87dc55a5`; at the end `2f25331ada6f`,
+  `b74523271f12`, `f221ad0dfe97`, moved by JC9's four (jrt, jrt's closure, overlay/jdk: all three); java-judge, scheme-90 and
+  crops-score's change moved none.
+- `bin/reap`: 30 of 32 checked, the one problem as before (deferred.cpp until tonight's C++ record); Java eval 1,864 / 335 /
+  1,123, AOT 1,937 / 308 / 1,077 (JCV1). `bin/crops-score --judge --strict`: 0 problems.
+- Scores: Clojure 99.0 / 96.3 / 100, Java 72.9 / 100 / 99.7, Go 94.9 / 95.8 / 100, C 95.1 / 100 / 20, C++ 75.4 / 91.7 / 20,
+  OCaml 80.9 / 100 / 20, Scheme 98.4 / 100 / 95.0, Python 0 / 83.3 / 20, Haskell 0 / 8.3 / 20, Rust 0 / 8.3 / 20, LLVM IR
+  0 / 4.2 / 40.
+- Plans: essential 40 steps, 34 run; `--full` 288, 274 run, 8 after; about 10.3 h measured plus about 1.3 h (unchanged).
+- Tonight's step 0 conversion (above) now also carries F1, F5 and JC9b (F16, F8, F7, F11): one `bin/jrt-convert update` for every
+  area; JC9b's doc notes that F5's `Logger`/`LogRecord` called `ResourceBundle.getBundle(String, Locale, ClassLoader)`, which jrt's
+  overlay lacked (its "Findings": the joint javac check `.tmp/jc9b/all9/run.sh` before the conversion, a minute, 1 GB).
+- **JCV2 not built here**: 15 golden files reviewed line by line against the JLS sections the programs cite, their output to be
+  produced first (the reference records only digests), and `verdicts.edn`/`run.ae` taught a `:golden` kind for them: a
+  reviewing task of its own (an agent, Opus), after tonight's gate.
 
 ## After the tag
 
