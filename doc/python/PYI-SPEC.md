@@ -460,3 +460,48 @@ The operations' owners are `opOwners` (`ops.go`): PY5b 66 (the stack, names, ope
 iteration, returns, exceptions), PY5c 11 (attributes, `load-build-class`, formatting and templates, the intrinsics,
 `setup-annotations`, `exit-init-check`), PY5d 18 (yield, await, async iteration and `with`, `except*`'s, `match`'s), PY5e 3
 (imports).
+
+## 10. The AOT (PY8)
+
+`arbace.python.aot` (PYS13 (a): straight to Go forms, as Scheme's `arbace.scheme.aot`) translates the IR of §3 into Go
+forms over `go/arbace/py`, a compiled interpreter (the survey's §7):
+
+- **A code object is a Go function** `NativeFunc` (`func(t *Thread, f *Frame) (Object, error)`, `code.go`) over the
+  machine's own heap frame: the frame's stack, locals, cells, `PC` and `Lasti` are the loop's, so the loop (`Thread.run`)
+  runs it in place of `step` (`Code.Native`, set by the loader's `irLoadedHook`). Its body: an entry `switch f.PC` with
+  a case for every instruction (`goto Ln`), then each instruction under its label: `f.Lasti = n` and Go statements
+  calling `aot.go`'s helpers with the argument as a constant (`AotLoadFast(f, 3)`, `AotBinary(f, BinAdd)`, ...), a jump
+  a `goto`, a conditional jump or `for-iter` a test and a `goto`. An error returns at once and the loop unwinds it by
+  the code's exception table, setting `PC` to the handler and running the function again, whose switch enters at the
+  handler; a call of a Python function (`AotCall`, with `PC` set to the next instruction) returns the loop's
+  `*pushFrame`, so Python calls never deepen Go's stack (RecursionError where CPython raises it) and the caller resumes
+  by its switch. A generator's or coroutine's frame resumes the same way: a state machine on the resume point over the
+  heap frame, `yield-value`, `yield-from`, `throw` and `close` the loop's own (PY5d's operations).
+- **The operations the helpers do not spell out** (the rarer ones of `step`'s switch, and every operation another file
+  registers with `RegisterOp`: attributes, `with`, `match`, imports, formatting, `except*`, yields ...) run by
+  `AotExec(t, f, n)`: the loop's implementation of instruction `n`, already decoded by the loader, with `PC` set before
+  and a `goto dispatch` after when the operation moved it.
+- **A program** is its main module and the modules its module-level code imports (the code of the module and its class
+  bodies, not its functions: `import-name` after its level and from-list constants, each dotted prefix and from-list
+  submodule), found on the run's `sys.path` (the program's directory, the pinned tarball's `Lib`) as `import.go` finds
+  them, compiled by `arbace.python.run/compile-source` (the compiler pyi's imports use) and each translated into a package
+  `arbace/pyaot/mHASH` (HASH of its IR text; a module compiled once is the same package for every program, printed once
+  and kept by `bin/pyi`): the IR text, its functions in the loader's pre-order (the code object, then its nested code
+  objects in constant order), `Register` (`AotRegister` by the source's `AotKey`, the SHA-256 of the mode and the
+  source). The main package calls each `Register` and `AotMain`: `sys.argv` (the process's arguments, else the file),
+  `sys.path`, the compiler (`SetCompiler`: a source compiled ahead by its key, else the host's) and `RunModule`.
+- **Source compiled at run time** (`exec`, `eval`, `compile`, an import not found statically) goes to the host's
+  compiler: the command `PYI_AOT_COMPILER` names, started once (`arbace.python.aot compile-server` on stage 0, requests
+  and answers by length on its stdin and stdout), and runs on the loop. `PYI_AOT_STATS` names a file for the counts (code
+  objects compiled and on the loop, the host's compiles), `PYI_AOT_LOOP` runs every code object on the loop (the check's
+  interpreted reference on the same runtime, the speed's baseline), `PYI_CPUPROFILE` writes Go's CPU profile.
+- **The checks**: `bin/pyi aot FILE [ARGS]` (one program compiled and run), `bin/pyi check --aot [--record] [--no-pyi]
+  [--only ID]` (§11 of the survey's PY8: the synthetic corpus and the samples against 177's references, the loop and pyi;
+  classes `test/python/divergences-aot.edn`, the rule `:as-pyi`), `bin/pyi bench [--pyi] [--record] [BM...]`
+  (pyperformance 1.14.0's pure benchmarks, `test/python/bench/`). The Go builds use TamaGo's go alone, in
+  `.tmp/repr-python/pyi/aot/mod` (the runtime printed by `runtime print`, the packages of `arbace/pyaot`), never
+  `bin/arbace-go`; out of `gate_key` as the rest of the crop (PYS18 (a)).
+
+Owners: `arbace/python/aot.ae`, `go/arbace/py/aot.go`, `test/python/bench/`, `test/python/divergences-aot.edn` and
+`bin/pyi`'s `aot`, `check --aot` and `bench` are PY8's; its hooks in PY5b's files are `Code.Native` and `NativeFunc`
+(`code.go`), `step`'s first statement (`eval.go`) and `irLoadedHook` (`load.go`).

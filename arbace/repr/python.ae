@@ -14,7 +14,7 @@
         a charset the runtime lacks is the printer's refusal, [class charset] in the TSV
     print FORMS.ae OUT        one forms file printed to OUT
     compare --corpus NAME --orig DIR --cand DIR --orig-tsv FILE --cand-tsv FILE --convert-tsv FILE
-            --known FILE [--record] [--results FILE] [--text]
+            --known FILE [--record] [--results FILE] [--text] [--controls FILE]
         the round trip's levels (survey §5.2) per file: 1 forms (the original's dump converted against the print's,
         the module's map but :type-ignores' tags left out: their lines are positions), 2 ast (ast.dump's digest), 3
         code (the normalized code's digest); a file ast.parse rejects is judged on CPython's class and message against
@@ -23,9 +23,14 @@
         :rejected, a rejection, and :code-lines, a code difference with the ast equal, are classed by rule) is printed
         and not written: the run exits 3 (CS265 (a), CS266 (a)'s rule). With --text (PY3) the levels are 4, the :full
         print's bytes (their SHA-256 against the original's) and 5, marshal of the compiled code, positions included,
-        against test/python/full-known.edn; the writer's rules add :charset, the printer's refusal."
+        against test/python/full-known.edn; the writer's rules add :charset, the printer's refusal. --controls FILE
+        (test/python/controls-read.edn; GTS81 (a), queue 212): the corpus's crossed pairs, the subject's print judged
+        by judge-file (judge-text) against the reference's original, which must fail
+        (arbace.repr.python.results/judge-controls); a control that passes or is not judged fails the run, with
+        --record too (before anything is written)."
   (:require [arbace.repr.python.convert :as cv]
             [arbace.repr.python.print :as pr]
+            [arbace.repr.python.results :as results]
             [arbace.string :as str])
   (:import [java.io File]))
 
@@ -151,9 +156,15 @@
     :convert (when (= :charset (:refused v)) :charset)
     nil))
 
+(def ^:private ^:dynamic *deferred*
+  "queue 213 (doc/ORACLE-RECORDS-SURVEY.md, \"As built: Python\"): the print's levels that need CPython (2 ast, 3 code,
+  5 marshal) left to the oracle tier: the originals' facts come from the records, the print is read natively (compare
+  --deferred)"
+  false)
+
 (defn- judge-text
   "Levels 4 (the :full print's bytes, the original's: their SHA-256) and 5 (marshal of the code compiled from
-  each, positions included)"
+  each, positions included; not with *deferred*)"
   [r a-text oa ob cv]
   (let [status (nth oa 1 nil)]
     (cond
@@ -164,7 +175,7 @@
                                    (cond-> {:level :convert :message m} c (assoc :refused (keyword c))))
       (nil? ob) {:level :print :message "no printed file"}
       (not= (nth oa 5) (nth ob 5)) {:level :text}
-      (not= (nth oa 4) (nth ob 4)) {:level :marshal}
+      (and (not *deferred*) (not= (nth oa 4) (nth ob 4))) {:level :marshal}
       :else nil)))
 
 (defn- judge-file [r a-text b-text oa ob cv]
@@ -184,6 +195,7 @@
             code= (= (nth oa 3) (nth ob 3))]
         (cond
           d {:level :forms :at (first d) :orig (second d) :printed (nth d 2)}
+          *deferred* nil
           (not ast=) {:level :ast}
           (not code=) {:level :code :ast-equal true :orig (nth oa 3) :printed (nth ob 3)}
           :else nil)))))
@@ -213,7 +225,13 @@
                                           "}")))
                   "}}\n"))))
 
+(declare do-compare*)
+
 (defn- do-compare [{:keys [opts]}]
+  (binding [*deferred* (boolean (get opts "--deferred"))]
+    (do-compare* opts)))
+
+(defn- do-compare* [opts]
   (let [corpus (keyword (get opts "--corpus"))
         orig (get opts "--orig") cand (get opts "--cand")
         oa (tsv (get opts "--orig-tsv")) ob (tsv (get opts "--cand-tsv")) ct (tsv (get opts "--convert-tsv"))
@@ -236,40 +254,78 @@
         pass1 (- n (count (filter #(#{:rejected :helper :convert :print :printed-rejected :forms} (:level %)) (vals failing))))
         pass2 (- pass1 (get counts (if text? :text :ast) 0))
         pass3 (- pass2 (get counts (if text? :marshal :code) 0))
-        line (if text?
+        line (cond
+               (and text? *deferred*)
+               (str "roundtrip --text " (name corpus) ": " n " files: read in mode :full, woven and printed " pass1
+                    ", level 4 (text, byte for byte) " pass2 ", level 5 (marshal) the oracle tier's; not passing " (pr-str (into (sorted-map) counts)))
+               text?
                (str "roundtrip --text " (name corpus) ": " n " files: read in mode :full, woven and printed " pass1
                     ", level 4 (text, byte for byte) " pass2 ", level 5 (marshal) " pass3 "; not passing " (pr-str (into (sorted-map) counts)))
+               *deferred*
+               (str "roundtrip " (name corpus) ": " n " files: level 1 (forms, the print read natively) " pass1
+                    ", levels 2 (ast) and 3 (code) the oracle tier's; not passing " (pr-str (into (sorted-map) counts)))
+               :else
                (str "roundtrip " (name corpus) ": " n " files: level 1 (forms) " pass1 ", level 2 (ast) " pass2
-                    ", level 3 (code) " pass3 "; not passing " (pr-str (into (sorted-map) counts))))]
-    (println line)
+                    ", level 3 (code) " pass3 "; not passing " (pr-str (into (sorted-map) counts))))
+        _ (println line)
+        ;; the negative controls (GTS81 (a), queue 212: test/python/controls-read.edn): the subject's print (its dump; with
+        ;; --text its bytes and code) judged by judge-file (judge-text) against the reference's original, which must fail
+        ctl-bad
+        (long (results/judge-controls
+               (str "roundtrip" (when text? " --text")) corpus (results/read-controls (get opts "--controls") corpus)
+               (set files) (set (remove #(get failing %) files))
+               (fn [subject reference]
+                 (let [bf (File. (str cand "/" subject ".ae"))
+                       a-text (slurp (File. (str orig "/" reference ".ae")))
+                       v (if text?
+                           (judge-text reference a-text (get oa reference) (get ob subject) (get ct reference))
+                           (judge-file reference a-text (when (.exists bf) (slurp bf)) (get oa reference) (get ob subject) (get ct reference)))]
+                   (cond
+                     (nil? v) :pass
+                     (#{:forms :ast :code :text :marshal} (:level v))
+                     [:fail (str "level " (name (:level v)) (when (:at v) (str " at " (pr-str (:at v)))))]
+                     :else [:not-judged (str (name (:level v)) (when (:message v) (str ": " (:message v))))])))))]
+    (when (pos? ctl-bad) (println (str "roundtrip " (name corpus) ": " ctl-bad " negative control(s) failed")))
     (when-let [rf (get opts "--results")]
       (spit-mk rf (pr-str {:corpus corpus :files n :mode (if text? :full :lines) :passed [pass1 pass2 pass3]
                            :failing (into (sorted-map) (map (fn [[r v]] [r (:level v)]) failing))})))
+    (when (and record? *deferred*)
+      (println "roundtrip: --record needs every level (the live oracle: REPR_PYTHON_ORACLE=live)") (System/exit 2))
+    (when (and record? (pos? ctl-bad)) (System/exit 1))
     (if record?
       (let [classed (into {} (for [[r v] failing] [r (classify v)]))
             unclassed (filter (comp nil? val) classed)
             ;; a file of no class: printed and left out; its entry kept only if it had one and its class still holds
             new (into {} (for [[r v] failing :let [c (or (classed r) (:class (get mine r)))] :when c] [r (entry v c)]))]
+        (when-let [rf (get opts "--results-file")]
+          ((requiring-resolve 'arbace.repr.python.results/write) (if text? :full :roundtrip) rf corpus
+           (for [r files :let [v (get failing r)]]
+             [r (cond (nil? v) :pass (get new r) :known :else :fail) (if v (str (name (:level v)) (when (:message v) (str ": " (:message v)))) "all levels")])
+           nil))
         (doseq [[r v] failing :when (nil? (classed r))]
           (println (str "NO CLASS " r " " (pr-str v)
                         (when-let [old (get mine r)] (str " (kept as " (:class old) ": its class is the record's, not the rule's)")))))
         (write-known known-file (-> known
                                     (assoc :classes (merge (select-keys rule-classes (set (keep :class (vals new))))
                                                            (:classes known)))
-                                    (assoc-in [:roundtrip corpus] new)))
+                                    (assoc-in [:roundtrip corpus] (if (get opts "--partial") (merge (apply dissoc mine files) new) new))))
         (System/exit (if (some (fn [[r _]] (nil? (get new r))) unclassed) 3 0)))
       (let [problems (concat
                       (for [[r v] failing
                             :let [k (get mine r)]
                             :when (or (nil? k) (not (contains? classes (:class k)))
                                       (not= (dissoc (entry v (:class k)) :class) (dissoc k :class)))]
-                        (str "UNEXPECTED " r " " (pr-str v) (when k (str " (known: " (pr-str k) ")"))))
-                      (for [[r k] mine :when (and (contains? res r) (nil? (get failing r)))]
-                        (str "GONE (known as " (:class k) ", passes now) " r))
-                      (for [[r k] mine :when (not (contains? classes (:class k)))]
-                        (str "NO SUCH CLASS " (:class k) " for " r)))]
-        (doseq [p problems] (println p))
-        (System/exit (if (empty? problems) 0 1))))))
+                        [r (str "UNEXPECTED " r " " (pr-str v) (when k (str " (known: " (pr-str k) ")")))])
+                      ;; deferred: a known file of a level the oracle tier judges (its class not the read's or the
+                      ;; printer's own) passes what is judged here; not gone
+                      (for [[r k] mine :when (and (contains? res r) (nil? (get failing r))
+                                                  (not (and *deferred* (not (#{:rejected :charset} (:class k))))))]
+                        [r (str "GONE (known as " (:class k) ", passes now) " r)])
+                      (for [[r k] mine :when (and (contains? res r) (not (contains? classes (:class k))))]
+                        [r (str "NO SUCH CLASS " (:class k) " for " r)]))]
+        (doseq [[_ p] problems] (println p))
+        (doseq [[r p] problems] (println (str "FAIL " (name corpus) "/" r "\t" (str/replace p #"\s+" " "))))
+        (System/exit (if (and (empty? problems) (zero? ctl-bad)) 0 1))))))
 
 ;; ---- mode :full (PY3) ----
 
@@ -324,6 +380,6 @@
     (case verb
       "convert" (do-convert (pa #{"--dumps" "--forms" "--printed" "--tsv"}))
       "print" (do-print (pa #{}))
-      "compare" (do-compare (pa #{"--corpus" "--orig" "--cand" "--orig-tsv" "--cand-tsv" "--convert-tsv" "--known" "--results"}))
+      "compare" (do-compare (pa #{"--corpus" "--orig" "--cand" "--orig-tsv" "--cand-tsv" "--convert-tsv" "--known" "--results" "--results-file" "--controls"}))
       "convert-full" (do-convert-full (pa #{"--dumps" "--lines" "--forms" "--printed" "--tsv"}))
       (do (println "usage: -m arbace.repr.python convert|print|compare ...") (System/exit 2)))))

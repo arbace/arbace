@@ -1,0 +1,994 @@
+(in-ns 'go.arbace.py) ^{:go/comments [[14 1 "// Finalization (PYS9 (a); doc/python/PYTHON-SURVEY.md, \"Design: 218\"): pyi has no reference counts, so an object's"] [15 1 "// death is Go's collector's finding. A tracked object (one with weak references, or with a finalizer's work due: a"] [16 1 "// class's __del__, a generator's close, a socket's warning) has a Go finalizer and a record in tracked, keyed by its"] [17 1 "// address and never holding it. Go's finalizer goroutine only moves the dead object into finQueue and sets the eval"] [18 1 "// breaker's bit; the thread holding the GIL drains the queue (handleEvalBreaker, gc.collect). The order is reference"] [19 1 "// counting's (subtype_dealloc): the work first, the Go finalizer set again without it (PEP 442: once only); found"] [20 1 "// unreachable again, the weak references are cleared (in the Go finalizer, under finMu, so no weak reference yields"] [21 1 "// the object after it) and their callbacks called in CPython's list order. Go's heap does not move and an object with"] [22 1 "// a finalizer is kept until the finalizer ran, so a weak reference's hidden address is valid while it is not cleared."] [24 1 "// the work a tracked object's death runs"] [26 23 "// its class's __del__ (slot_tp_finalize)"] [27 23 "// a generator's, coroutine's or async generator's finalization (_PyGen_Finalize)"] [28 23 "// an open socket's ResourceWarning and close (sock_finalize)"] [31 1 "// finTrack is a tracked object's record."] [33 21 "// the object's pointer's element type, to rebuild it from its address"] [34 21 "// its weak references in CPython's order: the basic ref, the basic proxy, then the newest first"] [35 21 "// the work due at its death"] [36 21 "// its identity once hashed (identityHash; an instance keeps it in its own field)"] [39 1 "// finItem is a dead object's turn in the queue: obj and its work, or (obj nil) its weak references' callbacks."] [46 24 "// tracked, finQueue, the weak references' addresses (Go's finalizer goroutine takes it too)"] [49 26 "// the Go finalizers run so far (gc.collect waits until it stays still)"] [50 26 "// a drain is running (under the GIL): a nested one leaves the queue to it"] [52 18 "// PYI_NO_FINALIZERS: nothing tracked (the weak references hold their referents, as before 218)"] [57 1 "// The moment at del (queue 222; doc/python/PYTHON-SURVEY.md, \"Design: 222\"): DELETE_FAST of a tracked object with work"] [58 1 "// or weak references due asks Go's collector at once whether that was the last reference, and drains the queue before"] [59 1 "// the next instruction: reference counting's moment when it was, a wasted collection when it was not. The collections'"] [60 1 "// time is held to a tenth of the elapsed wall time (and 50 ms); past it the death waits for the next collection."] [66 1 "// finDeletedAt is DELETE_FAST of f's fast local i (not unbound) with the check of the value it deletes. The value is"] [67 1 "// read and cleared here and dropped before anything else runs: no other variable, and no frame of a call goi"] [68 1 "// interprets, keeps it (goi's registers keep a returned call's values: queue 218's REQUEST), so that the collection"] [69 1 "// can find it dead."] [90 1 "// finVerify is the collection at a deletion: rounds while the object's record moves (its work run, then its weak"] [91 1 "// references cleared: subtype_dealloc's two steps), each a Go collection and a wait until the record moved or Go's"] [92 1 "// finalizers are still, then the drain."] [127 1 "// finQueued is whether tr's object is in the queue (finMu held)."] [137 1 "// addrOf is o's address (o a pointer: finTrackable)."] [140 1 "// hiddenPtr reads the address *u as a pointer (a weak reference's referent, alive while not cleared)."] [143 1 "// toObject is the object of type *elem at the address *u (a weak reference's referent; finMu held, *u not 0)."] [148 1 "// finTrackable is o's possible tracking: a pointer to a non-empty type of this package (another package's objects"] [149 1 "// may have their own Go finalizer, which a second SetFinalizer would abort on: _bz2's, _sqlite3's, _zstd's)."] [158 1 "// trackLocked is o's record, made (with its Go finalizer) when o has none; finMu held."] [173 1 "// trackWork tracks o (finTrackable) with the work w due at its death."] [184 1 "// goFinalized is the Go finalizer of every tracked object, run on Go's finalizer goroutine: o into the queue."] [210 1 "// drainFinalizers runs the queue under the GIL until it is empty: the number of dead objects handled."] [245 2 "// the record stays (its Go finalizer set again) while weak references, new work or an identity need it"] [258 1 "// runWork runs the work w due at o's death (its record's work already cleared: PEP 442's once)."] [273 1 "// weakCallbacks calls the callbacks of a dead object's weak references, in its list's order (PyObject_ClearWeakRefs)."] [287 1 "// runDel is slot_tp_finalize: the class's __del__ called, its exception to sys.unraisablehook."] [298 1 "// finalizeGen is _PyGen_Finalize: an async generator with sys's finalizer hook handed to it; a coroutine never"] [299 1 "// started warns; a suspended generator or coroutine closed."] [319 1 "// warnUnawaitedCoroutine is _PyErr_WarnUnawaitedCoroutine: warnings._warn_unawaited_coroutine(coro), or a plain"] [320 1 "// RuntimeWarning when that failed other than by the warning itself."] [341 1 "// finUnraisable is PyErr_FormatUnraisable from a finalizer (the object None)."] [348 1 "// finRound is one round of gc.collect: Go's collection, a wait until Go's finalizer goroutine has been still for a"] [349 1 "// moment (there is no public barrier), then the drain; the number of dead objects handled."] [366 1 "// finCollect is gc.collect's finalization: rounds until one handles nothing (at most 8), none when nothing is"] [367 1 "// tracked or queued; then the cycles through finalizers (cyCollect, queue 222) and the rounds again for what their"] [368 1 "// trash held; the number of cyclic trash nodes (CPython's count: acyclic garbage is reference counting's)."] [378 1 "// finRounds is 218's rounds: the dead objects handled."] [381 2 "// the classes' attribute caches out of date are dropped now, not at their next lookup: a stale answer (a method"] [382 2 "// deleted from its class) would keep its value alive"] [405 1 "// finalizeSocket is sock_finalize: an open socket warns ResourceWarning \"unclosed %R\" (its source the socket), then"] [406 1 "// its descriptor is closed."] [423 1 "// resourceWarn is PyErr_ResourceWarning(source, 1, msg): warnings.warn(msg, ResourceWarning, 1, source=source)."] [437 1 "// growStack gives f's value stack room for n more values in a new array, the old one's values cleared: newFrame's one"] [438 1 "// allocation holds the fast locals and the stack's first array together, so the stack's stale values there would keep"] [439 1 "// their objects reachable through the fast locals for the frame's life (queue 218: found by a weak reference that a"] [440 1 "// function's first call did not clear)."] [449 1 "// pendingGens are the coroutines made, and the generators suspended in a try region, since the last flush (under the"] [450 1 "// GIL): one still not finished when the list is flushed (every 256, and in gc.collect) is tracked for its finalization,"] [451 1 "// so the common cases, a coroutine awaited at once and a generator run to its end, pay no Go finalizer (queue 218:"] [452 1 "// measured with bin/pyi aot, a coroutine 0.13 us untracked against 0.6 us tracked at creation; a generator with a"] [453 1 "// try 0.66 us against 1.0-1.2 us tracked at its first suspension)."] [476 1 "// Cycles through finalizers (queue 222; doc/python/PYTHON-SURVEY.md, \"Design: 222\"): Go never frees a cycle that"] [477 1 "// reaches a finalized object from itself, so gc.collect() finds them as CPython's gc_collect_main does, with Go's"] [478 1 "// collector answering what deduce_unreachable's counts answer: which objects are held from outside. The graph's nodes"] [479 1 "// are instances (their dictionary, while not handed out as an object, and __slots__ folded in), lists, tuples and"] [480 1 "// dictionaries; its edges their slots of interface type that hold a node. Every edge between two probed nodes is"] [481 1 "// hidden (the slot set to nil, its target kept by address), each probed node given a probe's Go finalizer, and Go"] [482 1 "// collects with the GIL held: a node whose probe does not run is held from outside, and so is what it reaches."] [485 27 "// gc.DEBUG_SAVEALL"] [486 27 "// a larger graph is left alone (Go's collection, 218's moment)"] [490 35 "// a probe's answer is being read (finMu): a probe that runs later only holds"] [491 35 "// the probed nodes whose probe ran (finMu), held until the collection ends"] [492 35 "// those that ran after the answer was read"] [493 35 "// tracemalloc traced once: a list, a dict or a cell may carry its Go finalizer"] [494 35 "// gc.set_debug's flags"] [495 35 "// gc.garbage"] [498 1 "// cyNode is a node of the graph, never holding its object (its address is hidden from the collector)."] [502 18 "// its record when tracked"] [503 18 "// its slots that hold a node"] [504 18 "// the nodes they hold, in step"] [511 1 "// cyIsNode is whether o is a node: an instance, a list, a tuple or a dictionary (a list's or a dictionary's Go"] [512 1 "// finalizer may be tracemalloc's once it traced: then neither)."] [523 1 "// cySlots calls f with each slot of o (a node) that holds a node."] [561 1 "// cyGraph is the graph from the seeds (an object a probe would find held stays out of it), nil past cyMaxNodes."] [606 1 "// cyRelevant is the nodes a probe must see: those of a strongly connected component with a cycle and a tracked node"] [607 1 "// (Tarjan's, iterative), and what they reach. An acyclic dead object is Go's to find."] [700 1 "// cyProbe asks Go's collector which of the nodes in are held from outside the set: the edges between them hidden, a"] [701 1 "// probe's finalizer on each (a tracked node's own taken off), runtime.GC() with the GIL held, a wait until every"] [702 1 "// probe ran or Go's finalizers are still; then the slots put back and the probes taken off. The answer: the nodes"] [703 1 "// reachable (held from outside, or reached from such a node through the edges)."] [723 2 "// with its probe set each node outlives its last reference: what an earlier probe held is let go now"] [800 1 "// cySetFinalizer gives n's object the probe's Go finalizer (a tracked node's own taken off first: Go allows one)."] [809 1 "// cyRestore gives a surviving tracked node its own Go finalizer again (its record dropped when it needs none)."] [826 1 "// cyClearWeakRefs clears the weak references to the trash's tracked nodes (handle_weakrefs): their callbacks, in each"] [827 1 "// list's order, returned to be called once all are cleared (a weak reference is never a node: always \"outside\")."] [847 1 "// cyCollect is gc.collect()'s cycle detection: the trash found, PEP 442's order run over it; the number of trash nodes."] [907 1 "// cyCount is the probed nodes whose probe ran (finMu held)."] [927 1 "// cyFind is the cyclic trash: from the tracked nodes (or, only given, from those nodes alone: the resurrection's"] [928 1 "// check), the graph, its relevant part probed; every probed node restored but the trash's (they keep no Go finalizer)."] [951 1 "// cySeedGraph builds the graph and its relevant part in a frame of its own, so no object of the walk stays in a live"] [952 1 "// variable of the probe's caller."]] :go/pos {:name [1 9] :package [1 1]} :go/semis [[97 16] [97 27] [102 29] [102 56] [110 29] [160 21] [164 27] [188 21] [264 29] [281 51] [293 42] [305 51] [314 24] [323 39] [324 64] [335 92] [343 25] [354 28] [354 55] [356 28] [389 16] [389 27] [412 51] [417 16] [527 20] [568 21] [572 23] [585 12] [585 28] [591 19] [619 22] [619 39] [647 32] [741 22] [749 27] [749 54] [757 27] [863 34] [884 41] [911 30] [965 33]]} (go/file "finalize.go" :imports [
+
+
+    ^{:go/apos {1 [4 2]} :go/pos {:lparen [3 8] :rparen [12 1] :tok-pos [3 1]}} [os "os"]
+    ^{:go/apos {1 [5 2]}} [reflect "reflect"]
+    ^{:go/apos {1 [6 2]}} [runtime "runtime"]
+    ^{:go/apos {1 [7 2]}} [sync "sync"]
+    ^{:go/apos {1 [8 2]}} [atomic "sync/atomic"]
+    ^{:go/apos {1 [9 2]}} [syscall "syscall"]
+    ^{:go/apos {1 [10 2]}} [time "time"]
+    ^{:go/apos {1 [11 2]}} [unsafe "unsafe"]])
+
+
+;; Finalization (PYS9 (a); doc/python/PYTHON-SURVEY.md, "Design: 218"): pyi has no reference counts, so an object's
+;; death is Go's collector's finding. A tracked object (one with weak references, or with a finalizer's work due: a
+;; class's __del__, a generator's close, a socket's warning) has a Go finalizer and a record in tracked, keyed by its
+;; address and never holding it. Go's finalizer goroutine only moves the dead object into finQueue and sets the eval
+;; breaker's bit; the thread holding the GIL drains the queue (handleEvalBreaker, gc.collect). The order is reference
+;; counting's (subtype_dealloc): the work first, the Go finalizer set again without it (PEP 442: once only); found
+;; unreachable again, the weak references are cleared (in the Go finalizer, under finMu, so no weak reference yields
+;; the object after it) and their callbacks called in CPython's list order. Go's heap does not move and an object with
+;; a finalizer is kept until the finalizer ran, so a weak reference's hidden address is valid while it is not cleared.
+
+
+^{:go/pos {:doc [24 1] :lparen [25 7] :rparen [29 1] :tok-pos [25 1]}} (go/const "the work a tracked object's death runs\n"
+  [^{:val 1 :go/pos {:name-pos [26 2]}} workDel ^{:go/apos {1 [26 13]} :go/pos {:op-pos [26 15]}} (<< 1 ^{:go/pos {:name-pos [26 18]}} iota)] ; its class's __del__ (slot_tp_finalize)
+  [^{:val 2 :go/pos {:name-pos [27 2]}} workGen] ; a generator's, coroutine's or async generator's finalization (_PyGen_Finalize)
+  [^{:val 4 :go/pos {:name-pos [28 2]}} workSock]) ; an open socket's ResourceWarning and close (sock_finalize)
+
+
+
+^{:go/pos {:doc [31 1] :tok-pos [32 1]}} (go/type ^{:go/pos {:name-pos [32 6]}} finTrack "finTrack is a tracked object's record.\n" ^{:go/pos {:lbrace [32 22] :rbrace [37 1] :struct [32 15]}} (struct
+    ^{:tag ^{:go/pos {:dot [33 15] :name-pos [33 16] :x-pos [33 8]}} reflect/Type :go/pos {:name-pos [33 2]}} elem ; the object's pointer's element type, to rebuild it from its address
+    ^{:tag ^{:go/pos {:lbrack [34 8]}} (slice ^{:go/pos {:star [34 10]}} (* ^{:go/pos {:name-pos [34 11]}} WeakRef)) :go/pos {:name-pos [34 2]}} refs ; its weak references in CPython's order: the basic ref, the basic proxy, then the newest first
+    ^{:tag ^{:go/pos {:name-pos [35 8]}} int :go/pos {:name-pos [35 2]}} work ; the work due at its death
+    ^{:tag ^{:go/pos {:name-pos [36 8]}} int64 :go/pos {:name-pos [36 2]}} ident)) ; its identity once hashed (identityHash; an instance keeps it in its own field)
+
+
+
+^{:go/pos {:doc [39 1] :tok-pos [40 1]}} (go/type ^{:go/pos {:name-pos [40 6]}} finItem "finItem is a dead object's turn in the queue: obj and its work, or (obj nil) its weak references' callbacks.\n" ^{:go/pos {:lbrace [40 21] :rbrace [43 1] :struct [40 14]}} (struct
+    ^{:tag ^{:go/pos {:name-pos [41 6]}} Object :go/pos {:name-pos [41 2]}} obj
+    ^{:tag ^{:go/pos {:star [42 6]}} (* ^{:go/pos {:name-pos [42 7]}} finTrack) :go/pos {:name-pos [42 2]}} tr))
+
+
+^{:go/pos {:lparen [45 5] :rparen [53 1] :tok-pos [45 1]}} (go/var
+  [^{:tag ^{:go/pos {:dot [46 17] :name-pos [46 18] :x-pos [46 13]}} sync/Mutex :go/pos {:name-pos [46 2]}} finMu] ; tracked, finQueue, the weak references' addresses (Go's finalizer goroutine takes it too)
+  [^{:go/pos {:name-pos [47 2]}} tracked ^{:go/pos {:lbrace [47 36] :rbrace [47 37]}} (lit ^{:go/pos {:map [47 15]}} (map ^{:go/pos {:name-pos [47 19]}} uintptr ^{:go/pos {:star [47 27]}} (* ^{:go/pos {:name-pos [47 28]}} finTrack)))]
+  [^{:tag ^{:go/pos {:lbrack [48 13]}} (slice ^{:go/pos {:name-pos [48 15]}} finItem) :go/pos {:name-pos [48 2]}} finQueue]
+  [^{:tag ^{:go/pos {:dot [49 19] :name-pos [49 20] :x-pos [49 13]}} atomic/Int64 :go/pos {:name-pos [49 2]}} finRuns] ; the Go finalizers run so far (gc.collect waits until it stays still)
+  [^{:tag ^{:go/pos {:name-pos [50 13]}} bool :go/pos {:name-pos [50 2]}} finDrains] ; a drain is running (under the GIL): a nested one leaves the queue to it
+  [^{:go/pos {:name-pos [51 2]}} pyPkgPath ^{:go/pos {:dot [51 41] :lparen [51 49] :name-pos [51 42] :rparen [51 50]}} (.PkgPath ^{:go/pos {:lparen [51 29] :rparen [51 40]}} (^{:go/pos {:dot [51 22] :name-pos [51 23] :x-pos [51 15]}} reflect/TypeOf ^{:go/pos {:lbrace [51 38] :rbrace [51 39]}} (lit ^{:go/pos {:name-pos [51 30]}} Instance)))]
+  [^{:tag ^{:go/pos {:name-pos [52 13]}} bool :go/pos {:name-pos [52 2]}} finDisable]) ; PYI_NO_FINALIZERS: nothing tracked (the weak references hold their referents, as before 218)
+
+
+^{:go/pos {:func [55 1] :lbrace [55 13] :rbrace [55 65]}} (go/func ^{:go/pos {:name-pos [55 6]}} init ^{:go/pos {:closing [55 11] :opening [55 10]}} [] ^{:go/pos {:tok-pos [55 26]}} (set! ^{:go/pos {:name-pos [55 15]}} finDisable ^{:go/apos {2 [55 62]} :go/pos {:op-pos [55 59]}} (!= ^{:go/apos {1 [55 38]} :go/pos {:lparen [55 37] :rparen [55 57]}} (^{:go/pos {:dot [55 30] :name-pos [55 31] :x-pos [55 28]}} os/Getenv "PYI_NO_FINALIZERS") "")))
+
+
+
+
+
+^{:go/pos {:doc [57 1] :lparen [61 5] :rparen [64 1] :tok-pos [61 1]}} (go/var "The moment at del (queue 222; doc/python/PYTHON-SURVEY.md, \"Design: 222\"): DELETE_FAST of a tracked object with work\nor weak references due asks Go's collector at once whether that was the last reference, and drains the queue before\nthe next instruction: reference counting's moment when it was, a wasted collection when it was not. The collections'\ntime is held to a tenth of the elapsed wall time (and 50 ms); past it the death waits for the next collection.\n"
+  [^{:go/pos {:name-pos [62 2]}} finStart ^{:go/pos {:lparen [62 21] :rparen [62 22]}} (^{:go/pos {:dot [62 17] :name-pos [62 18] :x-pos [62 13]}} time/Now)]
+  [^{:tag ^{:go/pos {:dot [63 15] :name-pos [63 16] :x-pos [63 11]}} time/Duration :go/pos {:name-pos [63 2]}} finSpent])
+
+
+
+
+
+
+^{:go/pos {:doc [66 1] :func [70 1] :lbrace [70 36] :rbrace [88 1]}} (go/func ^{:go/pos {:name-pos [70 6]}} finDeletedAt "finDeletedAt is DELETE_FAST of f's fast local i (not unbound) with the check of the value it deletes. The value is\nread and cleared here and dropped before anything else runs: no other variable, and no frame of a call goi\ninterprets, keeps it (goi's registers keep a returned call's values: queue 218's REQUEST), so that the collection\ncan find it dead.\n" ^{:go/pos {:closing [70 34] :opening [70 18]}} [^{:tag ^{:go/pos {:star [70 21]}} (* ^{:go/pos {:name-pos [70 22]}} Frame) :go/pos {:name-pos [70 19]}} f ^{:tag ^{:go/pos {:name-pos [70 31]}} int :go/pos {:name-pos [70 29]}} i]
+  (let [^{:go/pos {:name-pos [71 2] :tok-pos [71 4]}} o ^{:go/pos {:lbrack [71 13] :rbrack [71 15]}} (aget ^{:go/pos {:dot [71 8] :name-pos [71 9]}} (.-Fast ^{:go/pos {:name-pos [71 7]}} f) ^{:go/pos {:name-pos [71 14]}} i)]
+    ^{:go/apos {3 [72 14]} :go/pos {:lbrack [72 8] :rbrack [72 10] :tok-pos [72 12]}} (aset ^{:go/pos {:dot [72 3] :name-pos [72 4]}} (.-Fast ^{:go/pos {:name-pos [72 2]}} f) ^{:go/pos {:name-pos [72 9]}} i nil)
+    (let [^{:go/pos {:name-pos [73 2] :tok-pos [73 4]}} t ^{:go/pos {:lparen [73 21] :rparen [73 23]}} (^{:go/pos {:dot [73 14] :name-pos [73 15] :x-pos [73 7]}} reflect/TypeOf ^{:go/pos {:name-pos [73 22]}} o)]
+      ^{:go/pos {:if [74 2] :lbrace [74 92] :rbrace [77 2]}} (when ^{:go/ops [[74 33] [74 57]] :go/pos {:op-pos [74 57]}} (or ^{:go/pos {:op-pos [74 14]}} (!= ^{:go/pos {:dot [74 6] :lparen [74 11] :name-pos [74 7] :rparen [74 12]}} (.Kind ^{:go/pos {:name-pos [74 5]}} t) ^{:go/pos {:dot [74 24] :name-pos [74 25] :x-pos [74 17]}} reflect/Pointer) ^{:go/apos {2 [74 55]} :go/pos {:op-pos [74 52]}} (== ^{:go/pos {:dot [74 44] :lparen [74 49] :name-pos [74 45] :rparen [74 50]}} (.Size ^{:go/pos {:dot [74 37] :lparen [74 42] :name-pos [74 38] :rparen [74 43]}} (.Elem ^{:go/pos {:name-pos [74 36]}} t)) 0) ^{:go/pos {:op-pos [74 79]}} (!= ^{:go/pos {:dot [74 68] :lparen [74 76] :name-pos [74 69] :rparen [74 77]}} (.PkgPath ^{:go/pos {:dot [74 61] :lparen [74 66] :name-pos [74 62] :rparen [74 67]}} (.Elem ^{:go/pos {:name-pos [74 60]}} t)) ^{:go/pos {:name-pos [74 82]}} pyPkgPath))
+        ^{:go/apos {2 [75 7]} :go/pos {:tok-pos [75 5]}} (set! ^{:go/pos {:name-pos [75 3]}} o nil)
+        ^{:go/pos {:return [76 3]}} (return))
+
+      (let [^{:go/pos {:name-pos [78 2] :tok-pos [78 4]}} a ^{:go/pos {:dot [78 25] :lparen [78 33] :name-pos [78 26] :rparen [78 34]}} (.Pointer ^{:go/pos {:lparen [78 22] :rparen [78 24]}} (^{:go/pos {:dot [78 14] :name-pos [78 15] :x-pos [78 7]}} reflect/ValueOf ^{:go/pos {:name-pos [78 23]}} o))]
+        ^{:go/apos {2 [79 6]} :go/pos {:tok-pos [79 4]}} (set! ^{:go/pos {:name-pos [79 2]}} o nil)
+        ^{:go/pos {:dot [80 7] :lparen [80 12] :name-pos [80 8] :rparen [80 13]}} (.Lock ^{:go/pos {:name-pos [80 2]}} finMu)
+        (let [^{:go/pos {:name-pos [81 2] :tok-pos [81 5]}} tr ^{:go/pos {:lbrack [81 15] :rbrack [81 17]}} (aget ^{:go/pos {:name-pos [81 8]}} tracked ^{:go/pos {:name-pos [81 16]}} a)
+            ^{:go/pos {:name-pos [82 2] :tok-pos [82 6]}} due ^{:go/pos {:op-pos [82 19]}} (and ^{:go/apos {2 [82 15]} :go/pos {:op-pos [82 12]}} (!= ^{:go/pos {:name-pos [82 9]}} tr nil) ^:go/paren ^{:go/parens [[[82 22] [82 55]]] :go/pos {:op-pos [82 36]}} (or ^{:go/apos {2 [82 34]} :go/pos {:op-pos [82 31]}} (!= ^{:go/pos {:dot [82 25] :name-pos [82 26]}} (.-work ^{:go/pos {:name-pos [82 23]}} tr) 0) ^{:go/apos {2 [82 54]} :go/pos {:op-pos [82 52]}} (> ^{:go/pos {:lparen [82 42] :rparen [82 50]}} (^{:go/pos {:name-pos [82 39]}} len ^{:go/pos {:dot [82 45] :name-pos [82 46]}} (.-refs ^{:go/pos {:name-pos [82 43]}} tr)) 0)))]
+          ^{:go/pos {:dot [83 7] :lparen [83 14] :name-pos [83 8] :rparen [83 15]}} (.Unlock ^{:go/pos {:name-pos [83 2]}} finMu)
+          ^{:go/pos {:if [84 2] :lbrace [84 81] :rbrace [86 2]}} (when ^{:go/ops [[84 10] [84 23]] :go/pos {:op-pos [84 23]}} (or ^{:go/pos {:op-pos [84 5]}} (not ^{:go/pos {:name-pos [84 6]}} due) ^{:go/pos {:name-pos [84 13]}} finDrains ^{:go/pos {:op-pos [84 35]}} (> ^{:go/pos {:name-pos [84 26]}} finSpent ^{:go/pos {:op-pos [84 56]}} (+ ^{:go/apos {1 [84 37]} :go/pos {:op-pos [84 39]}} (* 50 ^{:go/pos {:dot [84 44] :name-pos [84 45] :x-pos [84 40]}} time/Millisecond) ^{:go/apos {2 [84 78]} :go/pos {:op-pos [84 77]}} (/ ^{:go/pos {:lparen [84 67] :rparen [84 76]}} (^{:go/pos {:dot [84 61] :name-pos [84 62] :x-pos [84 57]}} time/Since ^{:go/pos {:name-pos [84 68]}} finStart) 10))))
+            ^{:go/pos {:return [85 3]}} (return))
+
+          ^{:go/pos {:lparen [87 11] :rparen [87 17]}} (^{:go/pos {:name-pos [87 2]}} finVerify ^{:go/pos {:name-pos [87 12]}} a ^{:go/pos {:name-pos [87 15]}} tr))))))
+
+
+
+
+
+^{:go/pos {:doc [90 1] :func [93 1] :lbrace [93 41] :rbrace [125 1]}} (go/func ^{:go/pos {:name-pos [93 6]}} finVerify "finVerify is the collection at a deletion: rounds while the object's record moves (its work run, then its weak\nreferences cleared: subtype_dealloc's two steps), each a Go collection and a wait until the record moved or Go's\nfinalizers are still, then the drain.\n" ^{:go/pos {:closing [93 39] :opening [93 15]}} [^{:tag ^{:go/pos {:name-pos [93 18]}} uintptr :go/pos {:name-pos [93 16]}} a ^{:tag ^{:go/pos {:star [93 30]}} (* ^{:go/pos {:name-pos [93 31]}} finTrack) :go/pos {:name-pos [93 27]}} tr]
+  (let [^{:go/pos {:name-pos [94 2] :tok-pos [94 5]}} t0 ^{:go/pos {:lparen [94 16] :rparen [94 17]}} (^{:go/pos {:dot [94 12] :name-pos [94 13] :x-pos [94 8]}} time/Now)]
+    ^{:go/pos {:defer [95 2]}} (defer ^{:go/pos {:lparen [95 45] :rparen [95 46]}} (^{:go/pos {:func [95 8] :lbrace [95 15] :rbrace [95 44]}} (fn ^{:go/pos {:closing [95 13] :opening [95 12]}} [] ^{:go/pos {:tok-pos [95 26]}} (set! ^{:go/pos {:name-pos [95 17]}} finSpent + ^{:go/pos {:lparen [95 39] :rparen [95 42]}} (^{:go/pos {:dot [95 33] :name-pos [95 34] :x-pos [95 29]}} time/Since ^{:go/pos {:name-pos [95 40]}} t0)))))
+    ^{:go/pos {:lparen [96 18] :rparen [96 19]}} (^{:go/pos {:name-pos [96 2]}} flushPendingGens)
+    ^{:go/pos {:for [97 2] :lbrace [97 37] :rbrace [124 2]}} (for ^{:go/apos {1 [97 15]}} [^{:go/pos {:name-pos [97 6] :tok-pos [97 12]}} round 0] ^{:go/apos {2 [97 26]} :go/pos {:op-pos [97 24]}} (< ^{:go/pos {:name-pos [97 18]}} round 3) ^{:go/pos {:tok-pos [97 34]}} (inc! ^{:go/pos {:name-pos [97 29]}} round)
+      (let ^{:go/apos {1 [98 12]}} [^{:go/pos {:name-pos [98 3] :tok-pos [98 9]}} moved false]
+        ^{:go/pos {:lparen [99 15] :rparen [116 4]}} (^{:go/pos {:name-pos [99 3]}} allowThreads ^{:go/pos {:func [99 16] :lbrace [99 23] :rbrace [116 3]}} (fn ^{:go/pos {:closing [99 21] :opening [99 20]}} []
+            ^{:go/pos {:lparen [100 14] :rparen [100 15]}} (^{:go/pos {:dot [100 11] :name-pos [100 12] :x-pos [100 4]}} runtime/GC)
+            (let [^{:go/pos {:name-pos [101 4] :tok-pos [101 9]}} last ^{:go/pos {:dot [101 19] :lparen [101 24] :name-pos [101 20] :rparen [101 25]}} (.Load ^{:go/pos {:name-pos [101 12]}} finRuns)]
+              ^{:go/pos {:for [102 4] :lbrace [102 67] :rbrace [115 4]}} (for [^{:go/pos {:tok-pos [102 22]}} (values ^{:go/pos {:name-pos [102 8]}} quiet ^{:go/pos {:name-pos [102 15]}} waited) ^{:go/apos {1 [102 25] 2 [102 28]}} (values 0 0)] ^{:go/pos {:op-pos [102 41]}} (and ^{:go/apos {2 [102 39]} :go/pos {:op-pos [102 37]}} (< ^{:go/pos {:name-pos [102 31]}} quiet 3) ^{:go/apos {2 [102 53]} :go/pos {:op-pos [102 51]}} (< ^{:go/pos {:name-pos [102 44]}} waited 200)) ^{:go/pos {:tok-pos [102 64]}} (inc! ^{:go/pos {:name-pos [102 58]}} waited)
+                ^{:go/pos {:dot [103 10] :lparen [103 15] :name-pos [103 11] :rparen [103 16]}} (.Lock ^{:go/pos {:name-pos [103 5]}} finMu)
+                ^{:go/pos {:tok-pos [104 11]}} (set! ^{:go/pos {:name-pos [104 5]}} moved ^{:go/pos {:op-pos [104 30]}} (or ^{:go/pos {:op-pos [104 24]}} (!= ^{:go/pos {:lbrack [104 20] :rbrack [104 22]}} (aget ^{:go/pos {:name-pos [104 13]}} tracked ^{:go/pos {:name-pos [104 21]}} a) ^{:go/pos {:name-pos [104 27]}} tr) ^{:go/pos {:lparen [104 42] :rparen [104 45]}} (^{:go/pos {:name-pos [104 33]}} finQueued ^{:go/pos {:name-pos [104 43]}} tr)))
+                ^{:go/pos {:dot [105 10] :lparen [105 17] :name-pos [105 11] :rparen [105 18]}} (.Unlock ^{:go/pos {:name-pos [105 5]}} finMu)
+                ^{:go/pos {:if [106 5] :lbrace [106 14] :rbrace [108 5]}} (when ^{:go/pos {:name-pos [106 8]}} moved
+                  ^{:go/pos {:return [107 6]}} (return))
+
+                ^{:go/pos {:lparen [109 15] :rparen [109 32]}} (^{:go/pos {:dot [109 9] :name-pos [109 10] :x-pos [109 5]}} time/Sleep ^{:go/pos {:dot [109 20] :name-pos [109 21] :x-pos [109 16]}} time/Millisecond)
+                ^{:go/pos {:else-lbrace [112 12] :else-rbrace [114 5] :if [110 5] :lbrace [110 43] :rbrace [112 5]}} (if [^{:go/pos {:name-pos [110 8] :tok-pos [110 12]}} now ^{:go/pos {:dot [110 22] :lparen [110 27] :name-pos [110 23] :rparen [110 28]}} (.Load ^{:go/pos {:name-pos [110 15]}} finRuns)] ^{:go/pos {:op-pos [110 35]}} (!= ^{:go/pos {:name-pos [110 31]}} now ^{:go/pos {:name-pos [110 38]}} last)
+                  ^{:go/pos {:tok-pos [111 18]}} (set! (values ^{:go/pos {:name-pos [111 6]}} last ^{:go/pos {:name-pos [111 12]}} quiet) ^{:go/apos {2 [111 25]}} (values ^{:go/pos {:name-pos [111 20]}} now 0))
+
+                  ^{:go/pos {:tok-pos [113 11]}} (inc! ^{:go/pos {:name-pos [113 6]}} quiet))))))
+
+
+
+        ^{:go/pos {:lparen [117 18] :rparen [117 19]}} (^{:go/pos {:name-pos [117 3]}} drainFinalizers)
+        ^{:go/pos {:dot [118 8] :lparen [118 13] :name-pos [118 9] :rparen [118 14]}} (.Lock ^{:go/pos {:name-pos [118 3]}} finMu)
+        (let [^{:go/pos {:name-pos [119 3] :tok-pos [119 9]}} again ^{:go/ops [[119 18] [119 38]] :go/pos {:op-pos [119 38]}} (and ^{:go/pos {:name-pos [119 12]}} moved ^{:go/pos {:op-pos [119 32]}} (== ^{:go/pos {:lbrack [119 28] :rbrack [119 30]}} (aget ^{:go/pos {:name-pos [119 21]}} tracked ^{:go/pos {:name-pos [119 29]}} a) ^{:go/pos {:name-pos [119 35]}} tr) ^{:go/apos {2 [119 56]} :go/pos {:op-pos [119 54]}} (> ^{:go/pos {:lparen [119 44] :rparen [119 52]}} (^{:go/pos {:name-pos [119 41]}} len ^{:go/pos {:dot [119 47] :name-pos [119 48]}} (.-refs ^{:go/pos {:name-pos [119 45]}} tr)) 0))]
+          ^{:go/pos {:dot [120 8] :lparen [120 15] :name-pos [120 9] :rparen [120 16]}} (.Unlock ^{:go/pos {:name-pos [120 3]}} finMu)
+          ^{:go/pos {:if [121 3] :lbrace [121 13] :rbrace [123 3]}} (when ^{:go/pos {:op-pos [121 6]}} (not ^{:go/pos {:name-pos [121 7]}} again)
+            ^{:go/pos {:return [122 4]}} (return)))))))
+
+
+
+
+
+^{:go/apos {5 [134 9]} :go/pos {:doc [127 1] :func [128 1] :lbrace [128 35] :rbrace [135 1] :return [134 2]}} (go/func ^{:go/pos {:name-pos [128 6]}} finQueued "finQueued is whether tr's object is in the queue (finMu held).\n" ^{:tag ^{:go/pos {:name-pos [128 30]}} bool :go/pos {:closing [128 28] :opening [128 15]}} [^{:tag ^{:go/pos {:star [128 19]}} (* ^{:go/pos {:name-pos [128 20]}} finTrack) :go/pos {:name-pos [128 16]}} tr]
+  ^{:go/pos {:for [129 2] :lbrace [129 30] :range [129 15] :rbrace [133 2] :tok-pos [129 12]}} (range [^{:go/pos {:name-pos [129 6]}} _ ^{:go/pos {:name-pos [129 9]}} it ^{:go/pos {:name-pos [129 21]}} finQueue]
+    ^{:go/pos {:if [130 3] :lbrace [130 18] :rbrace [132 3]}} (when ^{:go/pos {:op-pos [130 12]}} (== ^{:go/pos {:dot [130 8] :name-pos [130 9]}} (.-tr ^{:go/pos {:name-pos [130 6]}} it) ^{:go/pos {:name-pos [130 15]}} tr)
+      ^{:go/apos {1 [131 11]} :go/pos {:return [131 4]}} (return true)))
+
+
+  false)
+
+
+
+^{:go/pos {:doc [137 1] :func [138 1] :lbrace [138 31] :rbrace [138 69] :return [138 33]}} (go/func ^{:go/pos {:name-pos [138 6]}} addrOf "addrOf is o's address (o a pointer: finTrackable).\n" ^{:tag ^{:go/pos {:name-pos [138 23]}} uintptr :go/pos {:closing [138 21] :opening [138 12]}} [^{:tag ^{:go/pos {:name-pos [138 15]}} Object :go/pos {:name-pos [138 13]}} o] ^{:go/pos {:dot [138 58] :lparen [138 66] :name-pos [138 59] :rparen [138 67]}} (.Pointer ^{:go/pos {:lparen [138 55] :rparen [138 57]}} (^{:go/pos {:dot [138 47] :name-pos [138 48] :x-pos [138 40]}} reflect/ValueOf ^{:go/pos {:name-pos [138 56]}} o)))
+
+
+^{:go/pos {:doc [140 1] :func [141 1] :lbrace [141 43] :rbrace [141 90] :return [141 45]}} (go/func ^{:go/pos {:name-pos [141 6]}} hiddenPtr "hiddenPtr reads the address *u as a pointer (a weak reference's referent, alive while not cleared).\n" ^{:tag ^{:go/pos {:dot [141 34] :name-pos [141 35] :x-pos [141 28]}} unsafe/Pointer :go/pos {:closing [141 26] :opening [141 15]}} [^{:tag ^{:go/pos {:star [141 18]}} (* ^{:go/pos {:name-pos [141 19]}} uintptr) :go/pos {:name-pos [141 16]}} u] ^{:go/pos {:star [141 52]}} @^{:go/pos {:lparen [141 70] :rparen [141 88]}} (conv ^{:go/parens [[[141 53] [141 69]]] :go/pos {:star [141 54]}} (* ^{:go/pos {:dot [141 61] :name-pos [141 62] :x-pos [141 55]}} unsafe/Pointer) ^{:go/pos {:lparen [141 85] :rparen [141 87]}} (conv ^{:go/pos {:dot [141 77] :name-pos [141 78] :x-pos [141 71]}} unsafe/Pointer ^{:go/pos {:name-pos [141 86]}} u)))
+
+
+^{:go/pos {:doc [143 1] :func [144 1] :lbrace [144 53] :rbrace [146 1] :return [145 2]}} (go/func ^{:go/pos {:name-pos [144 6]}} toObject "toObject is the object of type *elem at the address *u (a weak reference's referent; finMu held, *u not 0).\n" ^{:tag ^{:go/pos {:name-pos [144 46]}} Object :go/pos {:closing [144 44] :opening [144 14]}} [^{:tag ^{:go/pos {:dot [144 27] :name-pos [144 28] :x-pos [144 20]}} reflect/Type :go/pos {:name-pos [144 15]}} elem ^{:tag ^{:go/pos {:star [144 36]}} (* ^{:go/pos {:name-pos [144 37]}} uintptr) :go/pos {:name-pos [144 34]}} u]
+  ^{:go/pos {:dot [145 54] :lparen [145 55] :rparen [145 62]}} (assert ^{:go/pos {:name-pos [145 56]}} Object ^{:go/pos {:dot [145 42] :lparen [145 52] :name-pos [145 43] :rparen [145 53]}} (.Interface ^{:go/pos {:lparen [145 22] :rparen [145 41]}} (^{:go/pos {:dot [145 16] :name-pos [145 17] :x-pos [145 9]}} reflect/NewAt ^{:go/pos {:name-pos [145 23]}} elem ^{:go/pos {:lparen [145 38] :rparen [145 40]}} (^{:go/pos {:name-pos [145 29]}} hiddenPtr ^{:go/pos {:name-pos [145 39]}} u)))))
+
+
+
+
+^{:go/pos {:doc [148 1] :func [150 1] :lbrace [150 34] :rbrace [156 1] :return [155 2]}} (go/func ^{:go/pos {:name-pos [150 6]}} finTrackable "finTrackable is o's possible tracking: a pointer to a non-empty type of this package (another package's objects\nmay have their own Go finalizer, which a second SetFinalizer would abort on: _bz2's, _sqlite3's, _zstd's).\n" ^{:tag ^{:go/pos {:name-pos [150 29]}} bool :go/pos {:closing [150 27] :opening [150 18]}} [^{:tag ^{:go/pos {:name-pos [150 21]}} Object :go/pos {:name-pos [150 19]}} o]
+  ^{:go/pos {:if [151 2] :lbrace [151 16] :rbrace [153 2]}} (when ^{:go/pos {:name-pos [151 5]}} finDisable
+    ^{:go/apos {1 [152 10]} :go/pos {:return [152 3]}} (return false))
+
+  (let [^{:go/pos {:name-pos [154 2] :tok-pos [154 4]}} t ^{:go/pos {:lparen [154 21] :rparen [154 23]}} (^{:go/pos {:dot [154 14] :name-pos [154 15] :x-pos [154 7]}} reflect/TypeOf ^{:go/pos {:name-pos [154 22]}} o)]
+    ^{:go/ops [[155 37] [155 60]] :go/pos {:op-pos [155 60]}} (and ^{:go/pos {:op-pos [155 18]}} (== ^{:go/pos {:dot [155 10] :lparen [155 15] :name-pos [155 11] :rparen [155 16]}} (.Kind ^{:go/pos {:name-pos [155 9]}} t) ^{:go/pos {:dot [155 28] :name-pos [155 29] :x-pos [155 21]}} reflect/Pointer) ^{:go/apos {2 [155 58]} :go/pos {:op-pos [155 56]}} (> ^{:go/pos {:dot [155 48] :lparen [155 53] :name-pos [155 49] :rparen [155 54]}} (.Size ^{:go/pos {:dot [155 41] :lparen [155 46] :name-pos [155 42] :rparen [155 47]}} (.Elem ^{:go/pos {:name-pos [155 40]}} t)) 0) ^{:go/pos {:op-pos [155 82]}} (== ^{:go/pos {:dot [155 71] :lparen [155 79] :name-pos [155 72] :rparen [155 80]}} (.PkgPath ^{:go/pos {:dot [155 64] :lparen [155 69] :name-pos [155 65] :rparen [155 70]}} (.Elem ^{:go/pos {:name-pos [155 63]}} t)) ^{:go/pos {:name-pos [155 85]}} pyPkgPath))))
+
+
+
+^{:go/pos {:doc [158 1] :func [159 1] :lbrace [159 49] :rbrace [171 1] :return [170 2]}} (go/func ^{:go/pos {:name-pos [159 6]}} trackLocked "trackLocked is o's record, made (with its Go finalizer) when o has none; finMu held.\n" ^{:tag ^{:go/pos {:star [159 39]}} (* ^{:go/pos {:name-pos [159 40]}} finTrack) :go/pos {:closing [159 37] :opening [159 17]}} [^{:tag ^{:go/pos {:name-pos [159 20]}} Object :go/pos {:name-pos [159 18]}} o ^{:tag ^{:go/pos {:name-pos [159 30]}} uintptr :go/pos {:name-pos [159 28]}} a]
+  ^{:go/pos {:if [160 2] :lbrace [160 33] :rbrace [162 2]}} (when [^{:go/pos {:name-pos [160 5] :tok-pos [160 8]}} tr ^{:go/pos {:lbrack [160 18] :rbrack [160 20]}} (aget ^{:go/pos {:name-pos [160 11]}} tracked ^{:go/pos {:name-pos [160 19]}} a)] ^{:go/apos {2 [160 29]} :go/pos {:op-pos [160 26]}} (!= ^{:go/pos {:name-pos [160 23]}} tr nil)
+    ^{:go/pos {:return [161 3]}} (return ^{:go/pos {:name-pos [161 10]}} tr))
+
+  (let [^{:go/pos {:name-pos [163 2] :tok-pos [163 5]}} tr ^{:go/pos {:op-pos [163 8]}} (addr ^{:go/acolon {2 [163 22]} :go/apos {2 [163 18]} :go/pos {:lbrace [163 17] :rbrace [163 48]}} (lit ^{:go/pos {:name-pos [163 9]}} finTrack :elem ^{:go/pos {:dot [163 41] :lparen [163 46] :name-pos [163 42] :rparen [163 47]}} (.Elem ^{:go/pos {:lparen [163 38] :rparen [163 40]}} (^{:go/pos {:dot [163 31] :name-pos [163 32] :x-pos [163 24]}} reflect/TypeOf ^{:go/pos {:name-pos [163 39]}} o))))]
+    ^{:go/pos {:if [164 2] :lbrace [164 32] :rbrace [167 2]}} (when [^{:go/pos {:tok-pos [164 11]}} (values ^{:go/pos {:name-pos [164 5]}} h ^{:go/pos {:name-pos [164 8]}} ok) ^{:go/pos {:lbrack [164 24] :rbrack [164 26]}} (aget ^{:go/pos {:name-pos [164 14]}} identities ^{:go/pos {:name-pos [164 25]}} o)] ^{:go/pos {:name-pos [164 29]}} ok
+      ^{:go/pos {:tok-pos [165 12]}} (set! ^{:go/pos {:dot [165 5] :name-pos [165 6]}} (.-ident ^{:go/pos {:name-pos [165 3]}} tr) ^{:go/pos {:name-pos [165 14]}} h)
+      ^{:go/pos {:lparen [166 9] :rparen [166 23]}} (^{:go/pos {:name-pos [166 3]}} delete ^{:go/pos {:name-pos [166 10]}} identities ^{:go/pos {:name-pos [166 22]}} o))
+
+    ^{:go/pos {:lbrack [168 9] :rbrack [168 11] :tok-pos [168 13]}} (aset ^{:go/pos {:name-pos [168 2]}} tracked ^{:go/pos {:name-pos [168 10]}} a ^{:go/pos {:name-pos [168 15]}} tr)
+    ^{:go/pos {:lparen [169 22] :rparen [169 37]}} (^{:go/pos {:dot [169 9] :name-pos [169 10] :x-pos [169 2]}} runtime/SetFinalizer ^{:go/pos {:name-pos [169 23]}} o ^{:go/pos {:name-pos [169 26]}} goFinalized)
+    ^{:go/pos {:name-pos [170 9]}} tr))
+
+
+
+^{:go/pos {:doc [173 1] :func [174 1] :lbrace [174 33] :rbrace [182 1]}} (go/func ^{:go/pos {:name-pos [174 6]}} trackWork "trackWork tracks o (finTrackable) with the work w due at its death.\n" ^{:go/pos {:closing [174 31] :opening [174 15]}} [^{:tag ^{:go/pos {:name-pos [174 18]}} Object :go/pos {:name-pos [174 16]}} o ^{:tag ^{:go/pos {:name-pos [174 28]}} int :go/pos {:name-pos [174 26]}} w]
+  ^{:go/pos {:if [175 2] :lbrace [175 22] :rbrace [177 2]}} (when ^{:go/pos {:op-pos [175 5]}} (not ^{:go/pos {:lparen [175 18] :rparen [175 20]}} (^{:go/pos {:name-pos [175 6]}} finTrackable ^{:go/pos {:name-pos [175 19]}} o))
+    ^{:go/pos {:return [176 3]}} (return))
+
+  (let [^{:go/pos {:name-pos [178 2] :tok-pos [178 4]}} a ^{:go/pos {:lparen [178 13] :rparen [178 15]}} (^{:go/pos {:name-pos [178 7]}} addrOf ^{:go/pos {:name-pos [178 14]}} o)]
+    ^{:go/pos {:dot [179 7] :lparen [179 12] :name-pos [179 8] :rparen [179 13]}} (.Lock ^{:go/pos {:name-pos [179 2]}} finMu)
+    ^{:go/pos {:tok-pos [180 25]}} (set! ^{:go/pos {:dot [180 19] :name-pos [180 20]}} (.-work ^{:go/pos {:lparen [180 13] :rparen [180 18]}} (^{:go/pos {:name-pos [180 2]}} trackLocked ^{:go/pos {:name-pos [180 14]}} o ^{:go/pos {:name-pos [180 17]}} a)) bit-or ^{:go/pos {:name-pos [180 28]}} w)
+    ^{:go/pos {:dot [181 7] :lparen [181 14] :name-pos [181 8] :rparen [181 15]}} (.Unlock ^{:go/pos {:name-pos [181 2]}} finMu)))
+
+
+
+^{:go/pos {:doc [184 1] :func [185 1] :lbrace [185 28] :rbrace [208 1]}} (go/func ^{:go/pos {:name-pos [185 6]}} goFinalized "goFinalized is the Go finalizer of every tracked object, run on Go's finalizer goroutine: o into the queue.\n" ^{:go/pos {:closing [185 26] :opening [185 17]}} [^{:tag ^{:go/pos {:name-pos [185 20]}} Object :go/pos {:name-pos [185 18]}} o]
+  (let [^{:go/pos {:name-pos [186 2] :tok-pos [186 4]}} a ^{:go/pos {:lparen [186 13] :rparen [186 15]}} (^{:go/pos {:name-pos [186 7]}} addrOf ^{:go/pos {:name-pos [186 14]}} o)]
+    ^{:go/pos {:dot [187 7] :lparen [187 12] :name-pos [187 8] :rparen [187 13]}} (.Lock ^{:go/pos {:name-pos [187 2]}} finMu)
+    ^{:go/pos {:if [188 2] :lbrace [188 33] :rbrace [205 2]}} (when [^{:go/pos {:name-pos [188 5] :tok-pos [188 8]}} tr ^{:go/pos {:lbrack [188 18] :rbrack [188 20]}} (aget ^{:go/pos {:name-pos [188 11]}} tracked ^{:go/pos {:name-pos [188 19]}} a)] ^{:go/apos {2 [188 29]} :go/pos {:op-pos [188 26]}} (!= ^{:go/pos {:name-pos [188 23]}} tr nil)
+      ^{:go/pos {:else-lbrace [191 10] :else-rbrace [201 3] :if [189 3] :lbrace [189 19] :rbrace [191 3]}} (if ^{:go/apos {2 [189 17]} :go/pos {:op-pos [189 14]}} (!= ^{:go/pos {:dot [189 8] :name-pos [189 9]}} (.-work ^{:go/pos {:name-pos [189 6]}} tr) 0)
+        ^{:go/pos {:tok-pos [190 13]}} (set! ^{:go/pos {:name-pos [190 4]}} finQueue ^{:go/pos {:lparen [190 21] :rparen [190 55]}} (^{:go/pos {:name-pos [190 15]}} append ^{:go/pos {:name-pos [190 22]}} finQueue ^{:go/acolon {2 [190 43] 4 [190 50]} :go/apos {2 [190 40] 4 [190 48]} :go/pos {:lbrace [190 39] :rbrace [190 54]}} (lit ^{:go/pos {:name-pos [190 32]}} finItem :obj ^{:go/pos {:name-pos [190 45]}} o :tr ^{:go/pos {:name-pos [190 52]}} tr)))
+        ^{:go/pos {:lbrace [191 10] :rbrace [201 3]}} (do
+          ^{:go/pos {:lparen [192 10] :rparen [192 21]}} (^{:go/pos {:name-pos [192 4]}} delete ^{:go/pos {:name-pos [192 11]}} tracked ^{:go/pos {:name-pos [192 20]}} a)
+          (let ^{:go/apos {1 [193 10]}} [^{:go/pos {:name-pos [193 4] :tok-pos [193 7]}} cb false]
+            ^{:go/pos {:for [194 4] :lbrace [194 30] :range [194 16] :rbrace [197 4] :tok-pos [194 13]}} (range [^{:go/pos {:name-pos [194 8]}} _ ^{:go/pos {:name-pos [194 11]}} r ^{:go/pos {:dot [194 24] :name-pos [194 25]}} (.-refs ^{:go/pos {:name-pos [194 22]}} tr)]
+              ^{:go/apos {2 [195 14]} :go/pos {:tok-pos [195 12]}} (set! ^{:go/pos {:dot [195 6] :name-pos [195 7]}} (.-addr ^{:go/pos {:name-pos [195 5]}} r) 0)
+              ^{:go/pos {:tok-pos [196 8]}} (set! ^{:go/pos {:name-pos [196 5]}} cb ^{:go/pos {:op-pos [196 13]}} (or ^{:go/pos {:name-pos [196 10]}} cb ^{:go/pos {:op-pos [196 27]}} (!= ^{:go/pos {:dot [196 17] :name-pos [196 18]}} (.-callback ^{:go/pos {:name-pos [196 16]}} r) ^{:go/pos {:name-pos [196 30]}} None))))
+
+            ^{:go/pos {:if [198 4] :lbrace [198 10] :rbrace [200 4]}} (when ^{:go/pos {:name-pos [198 7]}} cb
+              ^{:go/pos {:tok-pos [199 14]}} (set! ^{:go/pos {:name-pos [199 5]}} finQueue ^{:go/pos {:lparen [199 22] :rparen [199 48]}} (^{:go/pos {:name-pos [199 16]}} append ^{:go/pos {:name-pos [199 23]}} finQueue ^{:go/acolon {2 [199 43]} :go/apos {2 [199 41]} :go/pos {:lbrace [199 40] :rbrace [199 47]}} (lit ^{:go/pos {:name-pos [199 33]}} finItem :tr ^{:go/pos {:name-pos [199 45]}} tr)))))))
+
+
+      ^{:go/pos {:if [202 3] :lbrace [202 24] :rbrace [204 3]}} (when ^{:go/apos {2 [202 22]} :go/pos {:op-pos [202 20]}} (> ^{:go/pos {:lparen [202 9] :rparen [202 18]}} (^{:go/pos {:name-pos [202 6]}} len ^{:go/pos {:name-pos [202 10]}} finQueue) 0)
+        ^{:go/pos {:dot [203 15] :lparen [203 18] :name-pos [203 16] :rparen [203 34]}} (.Or ^{:go/pos {:name-pos [203 4]}} evalBreaker ^{:go/pos {:name-pos [203 19]}} breakFinalizers)))
+
+
+    ^{:go/pos {:dot [206 7] :lparen [206 14] :name-pos [206 8] :rparen [206 15]}} (.Unlock ^{:go/pos {:name-pos [206 2]}} finMu)
+    ^{:go/apos {2 [207 14]} :go/pos {:dot [207 9] :lparen [207 13] :name-pos [207 10] :rparen [207 15]}} (.Add ^{:go/pos {:name-pos [207 2]}} finRuns 1)))
+
+
+
+^{:go/pos {:doc [210 1] :func [211 1] :lbrace [211 28] :rbrace [232 1]}} (go/func ^{:go/pos {:name-pos [211 6]}} drainFinalizers "drainFinalizers runs the queue under the GIL until it is empty: the number of dead objects handled.\n" ^{:tag ^{:go/pos {:name-pos [211 24]}} int :go/pos {:closing [211 22] :opening [211 21]}} []
+  ^{:go/pos {:if [212 2] :lbrace [212 15] :rbrace [214 2]}} (when ^{:go/pos {:name-pos [212 5]}} finDrains
+    ^{:go/apos {1 [213 10]} :go/pos {:return [213 3]}} (return 0))
+
+  ^{:go/apos {2 [215 14]} :go/pos {:tok-pos [215 12]}} (set! ^{:go/pos {:name-pos [215 2]}} finDrains true)
+  ^{:go/pos {:defer [216 2]}} (defer ^{:go/pos {:lparen [216 36] :rparen [216 37]}} (^{:go/pos {:func [216 8] :lbrace [216 15] :rbrace [216 35]}} (fn ^{:go/pos {:closing [216 13] :opening [216 12]}} [] ^{:go/apos {2 [216 29]} :go/pos {:tok-pos [216 27]}} (set! ^{:go/pos {:name-pos [216 17]}} finDrains false))))
+  (let ^{:go/apos {1 [217 7]}} [^{:go/pos {:name-pos [217 2] :tok-pos [217 4]}} n 0]
+    ^{:go/pos {:for [218 2] :lbrace [218 6] :rbrace [231 2]}} (while true
+      ^{:go/pos {:dot [219 8] :lparen [219 13] :name-pos [219 9] :rparen [219 14]}} (.Lock ^{:go/pos {:name-pos [219 3]}} finMu)
+      (let [^{:go/pos {:name-pos [220 3] :tok-pos [220 5]}} q ^{:go/pos {:name-pos [220 8]}} finQueue]
+        ^{:go/apos {2 [221 14]} :go/pos {:tok-pos [221 12]}} (set! ^{:go/pos {:name-pos [221 3]}} finQueue nil)
+        ^{:go/pos {:dot [222 14] :lparen [222 18] :name-pos [222 15] :rparen [222 35]}} (.And ^{:go/pos {:name-pos [222 3]}} evalBreaker ^{:go/pos {:op-pos [222 19]}} (bit-not ^{:go/pos {:name-pos [222 20]}} breakFinalizers))
+        ^{:go/pos {:dot [223 8] :lparen [223 15] :name-pos [223 9] :rparen [223 16]}} (.Unlock ^{:go/pos {:name-pos [223 3]}} finMu)
+        ^{:go/pos {:if [224 3] :lbrace [224 18] :rbrace [226 3]}} (when ^{:go/apos {2 [224 16]} :go/pos {:op-pos [224 13]}} (== ^{:go/pos {:lparen [224 9] :rparen [224 11]}} (^{:go/pos {:name-pos [224 6]}} len ^{:go/pos {:name-pos [224 10]}} q) 0)
+          ^{:go/pos {:return [225 4]}} (return ^{:go/pos {:name-pos [225 11]}} n))
+
+        ^{:go/pos {:for [227 3] :lbrace [227 24] :range [227 16] :rbrace [230 3] :tok-pos [227 13]}} (range [^{:go/pos {:name-pos [227 7]}} _ ^{:go/pos {:name-pos [227 10]}} it ^{:go/pos {:name-pos [227 22]}} q]
+          ^{:go/pos {:tok-pos [228 5]}} (inc! ^{:go/pos {:name-pos [228 4]}} n)
+          ^{:go/pos {:lparen [229 14] :rparen [229 17]}} (^{:go/pos {:name-pos [229 4]}} runFinItem ^{:go/pos {:name-pos [229 15]}} it))))))
+
+
+
+
+^{:go/pos {:func [234 1] :lbrace [234 29] :rbrace [256 1]}} (go/func ^{:go/pos {:name-pos [234 6]}} runFinItem ^{:go/pos {:closing [234 27] :opening [234 16]}} [^{:tag ^{:go/pos {:name-pos [234 20]}} finItem :go/pos {:name-pos [234 17]}} it]
+  ^{:go/pos {:if [235 2] :lbrace [235 19] :rbrace [238 2]}} (when ^{:go/apos {2 [235 15]} :go/pos {:op-pos [235 12]}} (== ^{:go/pos {:dot [235 7] :name-pos [235 8]}} (.-obj ^{:go/pos {:name-pos [235 5]}} it) nil)
+    ^{:go/pos {:lparen [236 16] :rparen [236 22]}} (^{:go/pos {:name-pos [236 3]}} weakCallbacks ^{:go/pos {:dot [236 19] :name-pos [236 20]}} (.-tr ^{:go/pos {:name-pos [236 17]}} it))
+    ^{:go/pos {:return [237 3]}} (return))
+
+  (let [^{:go/pos {:tok-pos [239 8]}} (values ^{:go/pos {:name-pos [239 2]}} o ^{:go/pos {:name-pos [239 5]}} tr) (values ^{:go/pos {:dot [239 13] :name-pos [239 14]}} (.-obj ^{:go/pos {:name-pos [239 11]}} it) ^{:go/pos {:dot [239 21] :name-pos [239 22]}} (.-tr ^{:go/pos {:name-pos [239 19]}} it))]
+    ^{:go/pos {:dot [240 7] :lparen [240 12] :name-pos [240 8] :rparen [240 13]}} (.Lock ^{:go/pos {:name-pos [240 2]}} finMu)
+    (let [^{:go/pos {:name-pos [241 2] :tok-pos [241 4]}} w ^{:go/pos {:dot [241 9] :name-pos [241 10]}} (.-work ^{:go/pos {:name-pos [241 7]}} tr)]
+      ^{:go/apos {2 [242 12]} :go/pos {:tok-pos [242 10]}} (set! ^{:go/pos {:dot [242 4] :name-pos [242 5]}} (.-work ^{:go/pos {:name-pos [242 2]}} tr) 0)
+      ^{:go/pos {:dot [243 7] :lparen [243 14] :name-pos [243 8] :rparen [243 15]}} (.Unlock ^{:go/pos {:name-pos [243 2]}} finMu)
+      ^{:go/pos {:lparen [244 9] :rparen [244 14]}} (^{:go/pos {:name-pos [244 2]}} runWork ^{:go/pos {:name-pos [244 10]}} o ^{:go/pos {:name-pos [244 13]}} w)
+      ;; the record stays (its Go finalizer set again) while weak references, new work or an identity need it
+      (let [^{:go/pos {:name-pos [246 2] :tok-pos [246 4]}} a ^{:go/pos {:lparen [246 13] :rparen [246 15]}} (^{:go/pos {:name-pos [246 7]}} addrOf ^{:go/pos {:name-pos [246 14]}} o)]
+        ^{:go/pos {:dot [247 7] :lparen [247 12] :name-pos [247 8] :rparen [247 13]}} (.Lock ^{:go/pos {:name-pos [247 2]}} finMu)
+        ^{:go/pos {:if [248 2] :lbrace [248 22] :rbrace [254 2]}} (when ^{:go/pos {:op-pos [248 16]}} (== ^{:go/pos {:lbrack [248 12] :rbrack [248 14]}} (aget ^{:go/pos {:name-pos [248 5]}} tracked ^{:go/pos {:name-pos [248 13]}} a) ^{:go/pos {:name-pos [248 19]}} tr)
+          ^{:go/pos {:else-lbrace [251 10] :else-rbrace [253 3] :if [249 3] :lbrace [249 57] :rbrace [251 3]}} (if ^{:go/ops [[249 24] [249 40]] :go/pos {:op-pos [249 40]}} (and ^{:go/apos {2 [249 22]} :go/pos {:op-pos [249 19]}} (== ^{:go/pos {:lparen [249 9] :rparen [249 17]}} (^{:go/pos {:name-pos [249 6]}} len ^{:go/pos {:dot [249 12] :name-pos [249 13]}} (.-refs ^{:go/pos {:name-pos [249 10]}} tr)) 0) ^{:go/apos {2 [249 38]} :go/pos {:op-pos [249 35]}} (== ^{:go/pos {:dot [249 29] :name-pos [249 30]}} (.-work ^{:go/pos {:name-pos [249 27]}} tr) 0) ^{:go/apos {2 [249 55]} :go/pos {:op-pos [249 52]}} (== ^{:go/pos {:dot [249 45] :name-pos [249 46]}} (.-ident ^{:go/pos {:name-pos [249 43]}} tr) 0))
+            ^{:go/pos {:lparen [250 10] :rparen [250 21]}} (^{:go/pos {:name-pos [250 4]}} delete ^{:go/pos {:name-pos [250 11]}} tracked ^{:go/pos {:name-pos [250 20]}} a)
+
+            ^{:go/pos {:lparen [252 24] :rparen [252 39]}} (^{:go/pos {:dot [252 11] :name-pos [252 12] :x-pos [252 4]}} runtime/SetFinalizer ^{:go/pos {:name-pos [252 25]}} o ^{:go/pos {:name-pos [252 28]}} goFinalized)))
+
+
+        ^{:go/pos {:dot [255 7] :lparen [255 14] :name-pos [255 8] :rparen [255 15]}} (.Unlock ^{:go/pos {:name-pos [255 2]}} finMu)))))
+
+
+
+^{:go/pos {:doc [258 1] :func [259 1] :lbrace [259 31] :rbrace [271 1]}} (go/func ^{:go/pos {:name-pos [259 6]}} runWork "runWork runs the work w due at o's death (its record's work already cleared: PEP 442's once).\n" ^{:go/pos {:closing [259 29] :opening [259 13]}} [^{:tag ^{:go/pos {:name-pos [259 16]}} Object :go/pos {:name-pos [259 14]}} o ^{:tag ^{:go/pos {:name-pos [259 26]}} int :go/pos {:name-pos [259 24]}} w]
+  ^{:go/pos {:if [260 2] :lbrace [260 20] :rbrace [262 2]}} (when ^{:go/apos {2 [260 18]} :go/pos {:op-pos [260 15]}} (!= ^{:go/pos {:op-pos [260 6]}} (bit-and ^{:go/pos {:name-pos [260 5]}} w ^{:go/pos {:name-pos [260 7]}} workDel) 0)
+    ^{:go/pos {:lparen [261 9] :rparen [261 11]}} (^{:go/pos {:name-pos [261 3]}} runDel ^{:go/pos {:name-pos [261 10]}} o))
+
+  ^{:go/pos {:if [263 2] :lbrace [263 20] :rbrace [267 2]}} (when ^{:go/apos {2 [263 18]} :go/pos {:op-pos [263 15]}} (!= ^{:go/pos {:op-pos [263 6]}} (bit-and ^{:go/pos {:name-pos [263 5]}} w ^{:go/pos {:name-pos [263 7]}} workGen) 0)
+    ^{:go/pos {:if [264 3] :lbrace [264 34] :rbrace [266 3]}} (when [^{:go/pos {:tok-pos [264 12]}} (values ^{:go/pos {:name-pos [264 6]}} g ^{:go/pos {:name-pos [264 9]}} ok) ^{:go/pos {:dot [264 16] :lparen [264 17] :rparen [264 28]}} (assert ^{:go/pos {:star [264 18]}} (* ^{:go/pos {:name-pos [264 19]}} Generator) ^{:go/pos {:name-pos [264 15]}} o)] ^{:go/pos {:name-pos [264 31]}} ok
+      ^{:go/pos {:lparen [265 15] :rparen [265 17]}} (^{:go/pos {:name-pos [265 4]}} finalizeGen ^{:go/pos {:name-pos [265 16]}} g)))
+
+
+  ^{:go/pos {:if [268 2] :lbrace [268 21] :rbrace [270 2]}} (when ^{:go/apos {2 [268 19]} :go/pos {:op-pos [268 16]}} (!= ^{:go/pos {:op-pos [268 6]}} (bit-and ^{:go/pos {:name-pos [268 5]}} w ^{:go/pos {:name-pos [268 7]}} workSock) 0)
+    ^{:go/pos {:lparen [269 17] :rparen [269 19]}} (^{:go/pos {:name-pos [269 3]}} finalizeSocket ^{:go/pos {:name-pos [269 18]}} o)))
+
+
+
+
+^{:go/pos {:doc [273 1] :func [274 1] :lbrace [274 34] :rbrace [285 1]}} (go/func ^{:go/pos {:name-pos [274 6]}} weakCallbacks "weakCallbacks calls the callbacks of a dead object's weak references, in its list's order (PyObject_ClearWeakRefs).\n" ^{:go/pos {:closing [274 32] :opening [274 19]}} [^{:tag ^{:go/pos {:star [274 23]}} (* ^{:go/pos {:name-pos [274 24]}} finTrack) :go/pos {:name-pos [274 20]}} tr]
+  ^{:go/pos {:for [275 2] :lbrace [275 28] :range [275 14] :rbrace [284 2] :tok-pos [275 11]}} (range [^{:go/pos {:name-pos [275 6]}} _ ^{:go/pos {:name-pos [275 9]}} r ^{:go/pos {:dot [275 22] :name-pos [275 23]}} (.-refs ^{:go/pos {:name-pos [275 20]}} tr)]
+    (let [^{:go/pos {:name-pos [276 3] :tok-pos [276 6]}} cb ^{:go/pos {:dot [276 10] :name-pos [276 11]}} (.-callback ^{:go/pos {:name-pos [276 9]}} r)]
+      ^{:go/pos {:if [277 3] :lbrace [277 30] :rbrace [279 3]}} (when ^{:go/pos {:op-pos [277 16]}} (or ^{:go/apos {2 [277 12]} :go/pos {:op-pos [277 9]}} (== ^{:go/pos {:name-pos [277 6]}} cb nil) ^{:go/pos {:op-pos [277 22]}} (== ^{:go/pos {:name-pos [277 19]}} cb ^{:go/pos {:name-pos [277 25]}} None))
+        ^{:go/pos {:tok-pos [278 4]}} (continue))
+
+      ^{:go/pos {:tok-pos [280 14]}} (set! ^{:go/pos {:dot [280 4] :name-pos [280 5]}} (.-callback ^{:go/pos {:name-pos [280 3]}} r) ^{:go/pos {:name-pos [280 16]}} None)
+      ^{:go/pos {:if [281 3] :lbrace [281 64] :rbrace [283 3]}} (when [^{:go/pos {:tok-pos [281 13]}} (values ^{:go/pos {:name-pos [281 6]}} _ ^{:go/pos {:name-pos [281 9]}} err) ^{:go/apos {3 [281 47]} :go/pos {:lparen [281 20] :rparen [281 50]}} (^{:go/pos {:name-pos [281 16]}} Call ^{:go/pos {:name-pos [281 21]}} cb ^{:go/pos {:lbrace [281 33] :rbrace [281 44]}} (lit ^{:go/pos {:lbrack [281 25]}} (slice ^{:go/pos {:name-pos [281 27]}} Object) ^{:go/pos {:dot [281 35] :lparen [281 42] :name-pos [281 36] :rparen [281 43]}} (.object ^{:go/pos {:name-pos [281 34]}} r)) nil)] ^{:go/apos {2 [281 60]} :go/pos {:op-pos [281 57]}} (!= ^{:go/pos {:name-pos [281 53]}} err nil)
+        ^{:go/pos {:lparen [282 17] :rparen [282 86]}} (^{:go/pos {:name-pos [282 4]}} finUnraisable ^{:go/pos {:name-pos [282 18]}} err ^{:go/apos {1 [282 23]} :go/pos {:op-pos [282 74]}} (+ "Exception ignored while calling weakref callback " ^{:go/pos {:lparen [282 82] :rparen [282 85]}} (^{:go/pos {:name-pos [282 75]}} reprOrQ ^{:go/pos {:name-pos [282 83]}} cb)))))))
+
+
+
+
+
+^{:go/pos {:doc [287 1] :func [288 1] :lbrace [288 23] :rbrace [296 1]}} (go/func ^{:go/pos {:name-pos [288 6]}} runDel "runDel is slot_tp_finalize: the class's __del__ called, its exception to sys.unraisablehook.\n" ^{:go/pos {:closing [288 21] :opening [288 12]}} [^{:tag ^{:go/pos {:name-pos [288 15]}} Object :go/pos {:name-pos [288 13]}} o]
+  (let [^{:go/pos {:tok-pos [289 9]}} (values ^{:go/pos {:name-pos [289 2]}} del ^{:go/pos {:name-pos [289 7]}} _) ^{:go/apos {2 [289 33]} :go/pos {:lparen [289 22] :rparen [289 42]}} (^{:go/pos {:name-pos [289 12]}} lookupAttr ^{:go/pos {:dot [289 24] :lparen [289 29] :name-pos [289 25] :rparen [289 30]}} (.Type ^{:go/pos {:name-pos [289 23]}} o) "__del__")]
+    ^{:go/pos {:if [290 2] :lbrace [290 16] :rbrace [292 2]}} (when ^{:go/apos {2 [290 12]} :go/pos {:op-pos [290 9]}} (== ^{:go/pos {:name-pos [290 5]}} del nil)
+      ^{:go/pos {:return [291 3]}} (return))
+
+    ^{:go/pos {:if [293 2] :lbrace [293 55] :rbrace [295 2]}} (when [^{:go/pos {:tok-pos [293 12]}} (values ^{:go/pos {:name-pos [293 5]}} _ ^{:go/pos {:name-pos [293 8]}} err) ^{:go/apos {3 [293 38]} :go/pos {:lparen [293 19] :rparen [293 41]}} (^{:go/pos {:name-pos [293 15]}} Call ^{:go/pos {:name-pos [293 20]}} del ^{:go/pos {:lbrace [293 33] :rbrace [293 35]}} (lit ^{:go/pos {:lbrack [293 25]}} (slice ^{:go/pos {:name-pos [293 27]}} Object) ^{:go/pos {:name-pos [293 34]}} o) nil)] ^{:go/apos {2 [293 51]} :go/pos {:op-pos [293 48]}} (!= ^{:go/pos {:name-pos [293 44]}} err nil)
+      ^{:go/pos {:lparen [294 16] :rparen [294 81]}} (^{:go/pos {:name-pos [294 3]}} finUnraisable ^{:go/pos {:name-pos [294 17]}} err ^{:go/apos {1 [294 22]} :go/pos {:op-pos [294 68]}} (+ "Exception ignored while calling deallocator " ^{:go/pos {:lparen [294 76] :rparen [294 80]}} (^{:go/pos {:name-pos [294 69]}} reprOrQ ^{:go/pos {:name-pos [294 77]}} del))))))
+
+
+
+
+
+^{:go/pos {:doc [298 1] :func [300 1] :lbrace [300 32] :rbrace [317 1]}} (go/func ^{:go/pos {:name-pos [300 6]}} finalizeGen "finalizeGen is _PyGen_Finalize: an async generator with sys's finalizer hook handed to it; a coroutine never\nstarted warns; a suspended generator or coroutine closed.\n" ^{:go/pos {:closing [300 30] :opening [300 17]}} [^{:tag ^{:go/pos {:star [300 20]}} (* ^{:go/pos {:name-pos [300 21]}} Generator) :go/pos {:name-pos [300 18]}} g]
+  ^{:go/pos {:if [301 2] :lbrace [301 20] :rbrace [303 2]}} (when ^{:go/apos {2 [301 16]} :go/pos {:op-pos [301 13]}} (== ^{:go/pos {:dot [301 6] :name-pos [301 7]}} (.-frame ^{:go/pos {:name-pos [301 5]}} g) nil)
+    ^{:go/pos {:return [302 3]}} (return))
+
+  ^{:go/pos {:if [304 2] :lbrace [304 68] :rbrace [309 2]}} (when ^{:go/ops [[304 33] [304 55]] :go/pos {:op-pos [304 55]}} (and ^{:go/pos {:op-pos [304 12]}} (== ^{:go/pos {:dot [304 6] :name-pos [304 7]}} (.-kind ^{:go/pos {:name-pos [304 5]}} g) ^{:go/pos {:name-pos [304 15]}} genAsyncGenerator) ^{:go/apos {2 [304 51]} :go/pos {:op-pos [304 48]}} (!= ^{:go/pos {:dot [304 37] :name-pos [304 38]}} (.-finalizer ^{:go/pos {:name-pos [304 36]}} g) nil) ^{:go/pos {:op-pos [304 58]}} (not ^{:go/pos {:dot [304 60] :name-pos [304 61]}} (.-closed ^{:go/pos {:name-pos [304 59]}} g)))
+    ^{:go/pos {:if [305 3] :lbrace [305 64] :rbrace [307 3]}} (when [^{:go/pos {:tok-pos [305 13]}} (values ^{:go/pos {:name-pos [305 6]}} _ ^{:go/pos {:name-pos [305 9]}} err) ^{:go/apos {3 [305 47]} :go/pos {:lparen [305 20] :rparen [305 50]}} (^{:go/pos {:name-pos [305 16]}} Call ^{:go/pos {:dot [305 22] :name-pos [305 23]}} (.-finalizer ^{:go/pos {:name-pos [305 21]}} g) ^{:go/pos {:lbrace [305 42] :rbrace [305 44]}} (lit ^{:go/pos {:lbrack [305 34]}} (slice ^{:go/pos {:name-pos [305 36]}} Object) ^{:go/pos {:name-pos [305 43]}} g) nil)] ^{:go/apos {2 [305 60]} :go/pos {:op-pos [305 57]}} (!= ^{:go/pos {:name-pos [305 53]}} err nil)
+      ^{:go/pos {:lparen [306 17] :rparen [306 81]}} (^{:go/pos {:name-pos [306 4]}} finUnraisable ^{:go/pos {:name-pos [306 18]}} err ^{:go/apos {1 [306 23]} :go/pos {:op-pos [306 70]}} (+ "Exception ignored while finalizing generator " ^{:go/pos {:lparen [306 78] :rparen [306 80]}} (^{:go/pos {:name-pos [306 71]}} reprOrQ ^{:go/pos {:name-pos [306 79]}} g))))
+
+    ^{:go/pos {:return [308 3]}} (return))
+
+  ^{:go/pos {:if [310 2] :lbrace [310 42] :rbrace [313 2]}} (when ^{:go/pos {:op-pos [310 28]}} (and ^{:go/pos {:op-pos [310 12]}} (== ^{:go/pos {:dot [310 6] :name-pos [310 7]}} (.-kind ^{:go/pos {:name-pos [310 5]}} g) ^{:go/pos {:name-pos [310 15]}} genCoroutine) ^{:go/pos {:op-pos [310 31]}} (not ^{:go/pos {:dot [310 33] :name-pos [310 34]}} (.-started ^{:go/pos {:name-pos [310 32]}} g)))
+    ^{:go/pos {:lparen [311 25] :rparen [311 27]}} (^{:go/pos {:name-pos [311 3]}} warnUnawaitedCoroutine ^{:go/pos {:name-pos [311 26]}} g)
+    ^{:go/pos {:return [312 3]}} (return))
+
+  ^{:go/pos {:if [314 2] :lbrace [314 37] :rbrace [316 2]}} (when [^{:go/pos {:tok-pos [314 12]}} (values ^{:go/pos {:name-pos [314 5]}} _ ^{:go/pos {:name-pos [314 8]}} err) ^{:go/pos {:dot [314 16] :lparen [314 22] :name-pos [314 17] :rparen [314 23]}} (.close ^{:go/pos {:name-pos [314 15]}} g)] ^{:go/apos {2 [314 33]} :go/pos {:op-pos [314 30]}} (!= ^{:go/pos {:name-pos [314 26]}} err nil)
+    ^{:go/pos {:lparen [315 16] :rparen [315 77]}} (^{:go/pos {:name-pos [315 3]}} finUnraisable ^{:go/pos {:name-pos [315 17]}} err ^{:go/apos {1 [315 22]} :go/pos {:op-pos [315 66]}} (+ "Exception ignored while closing generator " ^{:go/pos {:lparen [315 74] :rparen [315 76]}} (^{:go/pos {:name-pos [315 67]}} reprOrQ ^{:go/pos {:name-pos [315 75]}} g)))))
+
+
+
+
+
+^{:go/pos {:doc [319 1] :func [321 1] :lbrace [321 43] :rbrace [339 1]}} (go/func ^{:go/pos {:name-pos [321 6]}} warnUnawaitedCoroutine "warnUnawaitedCoroutine is _PyErr_WarnUnawaitedCoroutine: warnings._warn_unawaited_coroutine(coro), or a plain\nRuntimeWarning when that failed other than by the warning itself.\n" ^{:go/pos {:closing [321 41] :opening [321 28]}} [^{:tag ^{:go/pos {:star [321 31]}} (* ^{:go/pos {:name-pos [321 32]}} Generator) :go/pos {:name-pos [321 29]}} g]
+  (let ^{:go/apos {1 [322 12]}} [^{:go/pos {:name-pos [322 2] :tok-pos [322 9]}} warned false]
+    ^{:go/pos {:if [323 2] :lbrace [323 52] :rbrace [333 2]}} (when [^{:go/pos {:tok-pos [323 12]}} (values ^{:go/pos {:name-pos [323 5]}} w ^{:go/pos {:name-pos [323 8]}} err) ^{:go/apos {1 [323 28]} :go/pos {:lparen [323 27] :rparen [323 38]}} (^{:go/pos {:name-pos [323 15]}} importModule "warnings")] ^{:go/apos {2 [323 48]} :go/pos {:op-pos [323 45]}} (== ^{:go/pos {:name-pos [323 41]}} err nil)
+      ^{:go/pos {:if [324 3] :lbrace [324 77] :rbrace [332 3]}} (when [^{:go/pos {:tok-pos [324 14]}} (values ^{:go/pos {:name-pos [324 6]}} fn ^{:go/pos {:name-pos [324 10]}} err) ^{:go/pos {:lparen [324 24] :rparen [324 63]}} (^{:go/pos {:name-pos [324 17]}} GetAttr ^{:go/pos {:name-pos [324 25]}} w ^{:go/apos {1 [324 35]} :go/pos {:lparen [324 34] :rparen [324 62]}} (^{:go/pos {:name-pos [324 28]}} NewStr "_warn_unawaited_coroutine"))] ^{:go/apos {2 [324 73]} :go/pos {:op-pos [324 70]}} (== ^{:go/pos {:name-pos [324 66]}} err nil)
+        (let [^{:go/pos {:tok-pos [325 11]}} (values ^{:go/pos {:name-pos [325 4]}} _ ^{:go/pos {:name-pos [325 7]}} err) ^{:go/apos {3 [325 36]} :go/pos {:lparen [325 18] :rparen [325 39]}} (^{:go/pos {:name-pos [325 14]}} Call ^{:go/pos {:name-pos [325 19]}} fn ^{:go/pos {:lbrace [325 31] :rbrace [325 33]}} (lit ^{:go/pos {:lbrack [325 23]}} (slice ^{:go/pos {:name-pos [325 25]}} Object) ^{:go/pos {:name-pos [325 32]}} g) nil)]
+          ^{:go/pos {:if [326 4] :lbrace [326 55] :rbrace [328 4]}} (when ^{:go/pos {:op-pos [326 18]}} (or ^{:go/apos {2 [326 14]} :go/pos {:op-pos [326 11]}} (== ^{:go/pos {:name-pos [326 7]}} err nil) ^{:go/pos {:lparen [326 29] :rparen [326 53]}} (^{:go/pos {:name-pos [326 21]}} isRaised ^{:go/pos {:name-pos [326 30]}} err ^{:go/pos {:name-pos [326 35]}} RuntimeWarningType))
+            ^{:go/apos {2 [327 14]} :go/pos {:tok-pos [327 12]}} (set! ^{:go/pos {:name-pos [327 5]}} warned true))
+
+          ^{:go/pos {:if [329 4] :lbrace [329 18] :rbrace [331 4]}} (when ^{:go/apos {2 [329 14]} :go/pos {:op-pos [329 11]}} (!= ^{:go/pos {:name-pos [329 7]}} err nil)
+            ^{:go/pos {:lparen [330 18] :rparen [330 82]}} (^{:go/pos {:name-pos [330 5]}} finUnraisable ^{:go/pos {:name-pos [330 19]}} err ^{:go/apos {1 [330 24]} :go/pos {:op-pos [330 71]}} (+ "Exception ignored while finalizing coroutine " ^{:go/pos {:lparen [330 79] :rparen [330 81]}} (^{:go/pos {:name-pos [330 72]}} reprOrQ ^{:go/pos {:name-pos [330 80]}} g)))))))
+
+
+
+    ^{:go/pos {:if [334 2] :lbrace [334 13] :rbrace [338 2]}} (when ^{:go/pos {:op-pos [334 5]}} (not ^{:go/pos {:name-pos [334 6]}} warned)
+      ^{:go/pos {:if [335 3] :lbrace [335 105] :rbrace [337 3]}} (when [^{:go/pos {:name-pos [335 6] :tok-pos [335 10]}} err ^{:go/apos {3 [335 90]} :go/pos {:lparen [335 21] :rparen [335 91]}} (^{:go/pos {:name-pos [335 13]}} dataWarn ^{:go/pos {:name-pos [335 22]}} RuntimeWarningType ^{:go/apos {1 [335 42] 3 [335 67]} :go/ops [[335 55] [335 66]] :go/pos {:op-pos [335 66]}} (+ "coroutine '" ^{:go/pos {:dot [335 57] :name-pos [335 58]}} (.-Qualname ^{:go/pos {:name-pos [335 56]}} g) "' was never awaited") 1)] ^{:go/apos {2 [335 101]} :go/pos {:op-pos [335 98]}} (!= ^{:go/pos {:name-pos [335 94]}} err nil)
+        ^{:go/pos {:lparen [336 17] :rparen [336 81]}} (^{:go/pos {:name-pos [336 4]}} finUnraisable ^{:go/pos {:name-pos [336 18]}} err ^{:go/apos {1 [336 23]} :go/pos {:op-pos [336 70]}} (+ "Exception ignored while finalizing coroutine " ^{:go/pos {:lparen [336 78] :rparen [336 80]}} (^{:go/pos {:name-pos [336 71]}} reprOrQ ^{:go/pos {:name-pos [336 79]}} g)))))))
+
+
+
+
+
+^{:go/pos {:doc [341 1] :func [342 1] :lbrace [342 43] :rbrace [346 1]}} (go/func ^{:go/pos {:name-pos [342 6]}} finUnraisable "finUnraisable is PyErr_FormatUnraisable from a finalizer (the object None).\n" ^{:go/pos {:closing [342 41] :opening [342 19]}} [^{:tag ^{:go/pos {:name-pos [342 24]}} error :go/pos {:name-pos [342 20]}} err ^{:tag ^{:go/pos {:name-pos [342 35]}} string :go/pos {:name-pos [342 31]}} msg]
+  ^{:go/pos {:if [343 2] :lbrace [343 36] :rbrace [345 2]}} (when [^{:go/pos {:name-pos [343 5] :tok-pos [343 7]}} t ^{:go/pos {:lparen [343 23] :rparen [343 24]}} (^{:go/pos {:name-pos [343 10]}} currentThread)] ^{:go/apos {2 [343 32]} :go/pos {:op-pos [343 29]}} (!= ^{:go/pos {:name-pos [343 27]}} t nil)
+    ^{:go/apos {4 [344 39]} :go/pos {:lparen [344 18] :rparen [344 42]}} (^{:go/pos {:name-pos [344 3]}} writeUnraisable ^{:go/pos {:dot [344 20] :name-pos [344 21]}} (.-Interp ^{:go/pos {:name-pos [344 19]}} t) ^{:go/pos {:name-pos [344 29]}} err ^{:go/pos {:name-pos [344 34]}} msg nil)))
+
+
+
+
+
+^{:go/pos {:doc [348 1] :func [350 1] :lbrace [350 21] :rbrace [364 1] :return [363 2]}} (go/func ^{:go/pos {:name-pos [350 6]}} finRound "finRound is one round of gc.collect: Go's collection, a wait until Go's finalizer goroutine has been still for a\nmoment (there is no public barrier), then the drain; the number of dead objects handled.\n" ^{:tag ^{:go/pos {:name-pos [350 17]}} int :go/pos {:closing [350 15] :opening [350 14]}} []
+  ^{:go/pos {:lparen [351 14] :rparen [362 3]}} (^{:go/pos {:name-pos [351 2]}} allowThreads ^{:go/pos {:func [351 15] :lbrace [351 22] :rbrace [362 2]}} (fn ^{:go/pos {:closing [351 20] :opening [351 19]}} []
+      ^{:go/pos {:lparen [352 13] :rparen [352 14]}} (^{:go/pos {:dot [352 10] :name-pos [352 11] :x-pos [352 3]}} runtime/GC)
+      (let [^{:go/pos {:name-pos [353 3] :tok-pos [353 8]}} last ^{:go/pos {:dot [353 18] :lparen [353 23] :name-pos [353 19] :rparen [353 24]}} (.Load ^{:go/pos {:name-pos [353 11]}} finRuns)]
+        ^{:go/pos {:for [354 3] :lbrace [354 66] :rbrace [361 3]}} (for [^{:go/pos {:tok-pos [354 21]}} (values ^{:go/pos {:name-pos [354 7]}} quiet ^{:go/pos {:name-pos [354 14]}} waited) ^{:go/apos {1 [354 24] 2 [354 27]}} (values 0 0)] ^{:go/pos {:op-pos [354 40]}} (and ^{:go/apos {2 [354 38]} :go/pos {:op-pos [354 36]}} (< ^{:go/pos {:name-pos [354 30]}} quiet 3) ^{:go/apos {2 [354 52]} :go/pos {:op-pos [354 50]}} (< ^{:go/pos {:name-pos [354 43]}} waited 500)) ^{:go/pos {:tok-pos [354 63]}} (inc! ^{:go/pos {:name-pos [354 57]}} waited)
+          ^{:go/pos {:lparen [355 14] :rparen [355 31]}} (^{:go/pos {:dot [355 8] :name-pos [355 9] :x-pos [355 4]}} time/Sleep ^{:go/pos {:dot [355 19] :name-pos [355 20] :x-pos [355 15]}} time/Millisecond)
+          ^{:go/pos {:else-lbrace [358 11] :else-rbrace [360 4] :if [356 4] :lbrace [356 42] :rbrace [358 4]}} (if [^{:go/pos {:name-pos [356 7] :tok-pos [356 11]}} now ^{:go/pos {:dot [356 21] :lparen [356 26] :name-pos [356 22] :rparen [356 27]}} (.Load ^{:go/pos {:name-pos [356 14]}} finRuns)] ^{:go/pos {:op-pos [356 34]}} (!= ^{:go/pos {:name-pos [356 30]}} now ^{:go/pos {:name-pos [356 37]}} last)
+            ^{:go/pos {:tok-pos [357 17]}} (set! (values ^{:go/pos {:name-pos [357 5]}} last ^{:go/pos {:name-pos [357 11]}} quiet) ^{:go/apos {2 [357 24]}} (values ^{:go/pos {:name-pos [357 19]}} now 0))
+
+            ^{:go/pos {:tok-pos [359 10]}} (inc! ^{:go/pos {:name-pos [359 5]}} quiet))))))
+
+
+
+  ^{:go/pos {:lparen [363 24] :rparen [363 25]}} (^{:go/pos {:name-pos [363 9]}} drainFinalizers))
+
+
+
+
+
+^{:go/pos {:doc [366 1] :func [369 1] :lbrace [369 23] :rbrace [376 1] :return [375 2]}} (go/func ^{:go/pos {:name-pos [369 6]}} finCollect "finCollect is gc.collect's finalization: rounds until one handles nothing (at most 8), none when nothing is\ntracked or queued; then the cycles through finalizers (cyCollect, queue 222) and the rounds again for what their\ntrash held; the number of cyclic trash nodes (CPython's count: acyclic garbage is reference counting's).\n" ^{:tag ^{:go/pos {:name-pos [369 19]}} int :go/pos {:closing [369 17] :opening [369 16]}} []
+  ^{:go/pos {:lparen [370 11] :rparen [370 12]}} (^{:go/pos {:name-pos [370 2]}} finRounds)
+  (let [^{:go/pos {:name-pos [371 2] :tok-pos [371 4]}} c ^{:go/pos {:lparen [371 16] :rparen [371 17]}} (^{:go/pos {:name-pos [371 7]}} cyCollect)]
+    ^{:go/pos {:if [372 2] :lbrace [372 11] :rbrace [374 2]}} (when ^{:go/apos {2 [372 9]} :go/pos {:op-pos [372 7]}} (> ^{:go/pos {:name-pos [372 5]}} c 0)
+      ^{:go/pos {:lparen [373 12] :rparen [373 13]}} (^{:go/pos {:name-pos [373 3]}} finRounds))
+
+    ^{:go/pos {:name-pos [375 9]}} c))
+
+
+
+^{:go/pos {:doc [378 1] :func [379 1] :lbrace [379 22] :rbrace [403 1] :return [402 2]}} (go/func ^{:go/pos {:name-pos [379 6]}} finRounds "finRounds is 218's rounds: the dead objects handled.\n" ^{:tag ^{:go/pos {:name-pos [379 18]}} int :go/pos {:closing [379 16] :opening [379 15]}} []
+  ^{:go/pos {:lparen [380 18] :rparen [380 19]}} (^{:go/pos {:name-pos [380 2]}} flushPendingGens)
+  ;; the classes' attribute caches out of date are dropped now, not at their next lookup: a stale answer (a method
+  ;; deleted from its class) would keep its value alive
+  ^{:go/pos {:for [383 2] :lbrace [383 28] :range [383 11] :rbrace [387 2] :tok-pos [383 8]}} (range [^{:go/pos {:name-pos [383 6]}} t ^{:go/pos {:name-pos [383 17]}} classInfos]
+    ^{:go/pos {:if [384 3] :lbrace [384 55] :rbrace [386 3]}} (when ^{:go/pos {:op-pos [384 31]}} (and ^{:go/pos {:op-pos [384 18]}} (!= ^{:go/pos {:dot [384 7] :name-pos [384 8]}} (.-attrEpoch ^{:go/pos {:name-pos [384 6]}} t) ^{:go/pos {:name-pos [384 21]}} typeEpoch) ^{:go/apos {2 [384 53]} :go/pos {:op-pos [384 51]}} (> ^{:go/pos {:lparen [384 37] :rparen [384 49]}} (^{:go/pos {:name-pos [384 34]}} len ^{:go/pos {:dot [384 39] :name-pos [384 40]}} (.-attrCache ^{:go/pos {:name-pos [384 38]}} t)) 0))
+      ^{:go/pos {:lparen [385 9] :rparen [385 21]}} (^{:go/pos {:name-pos [385 4]}} clear ^{:go/pos {:dot [385 11] :name-pos [385 12]}} (.-attrCache ^{:go/pos {:name-pos [385 10]}} t))))
+
+
+  (let [^{:go/pos {:name-pos [388 2] :tok-pos [388 4]}} n ^{:go/pos {:lparen [388 22] :rparen [388 23]}} (^{:go/pos {:name-pos [388 7]}} drainFinalizers)]
+    ^{:go/pos {:for [389 2] :lbrace [389 37] :rbrace [401 2]}} (for ^{:go/apos {1 [389 15]}} [^{:go/pos {:name-pos [389 6] :tok-pos [389 12]}} round 0] ^{:go/apos {2 [389 26]} :go/pos {:op-pos [389 24]}} (< ^{:go/pos {:name-pos [389 18]}} round 8) ^{:go/pos {:tok-pos [389 34]}} (inc! ^{:go/pos {:name-pos [389 29]}} round)
+      ^{:go/pos {:dot [390 8] :lparen [390 13] :name-pos [390 9] :rparen [390 14]}} (.Lock ^{:go/pos {:name-pos [390 3]}} finMu)
+      (let [^{:go/pos {:name-pos [391 3] :tok-pos [391 8]}} idle ^{:go/pos {:op-pos [391 29]}} (and ^{:go/apos {2 [391 27]} :go/pos {:op-pos [391 24]}} (== ^{:go/pos {:lparen [391 14] :rparen [391 22]}} (^{:go/pos {:name-pos [391 11]}} len ^{:go/pos {:name-pos [391 15]}} tracked) 0) ^{:go/apos {2 [391 49]} :go/pos {:op-pos [391 46]}} (== ^{:go/pos {:lparen [391 35] :rparen [391 44]}} (^{:go/pos {:name-pos [391 32]}} len ^{:go/pos {:name-pos [391 36]}} finQueue) 0))]
+        ^{:go/pos {:dot [392 8] :lparen [392 15] :name-pos [392 9] :rparen [392 16]}} (.Unlock ^{:go/pos {:name-pos [392 3]}} finMu)
+        ^{:go/pos {:if [393 3] :lbrace [393 11] :rbrace [395 3]}} (when ^{:go/pos {:name-pos [393 6]}} idle
+          ^{:go/pos {:tok-pos [394 4]}} (break))
+
+        (let [^{:go/pos {:name-pos [396 3] :tok-pos [396 5]}} k ^{:go/pos {:lparen [396 16] :rparen [396 17]}} (^{:go/pos {:name-pos [396 8]}} finRound)]
+          ^{:go/pos {:tok-pos [397 5]}} (set! ^{:go/pos {:name-pos [397 3]}} n + ^{:go/pos {:name-pos [397 8]}} k)
+          ^{:go/pos {:if [398 3] :lbrace [398 13] :rbrace [400 3]}} (when ^{:go/apos {2 [398 11]} :go/pos {:op-pos [398 8]}} (== ^{:go/pos {:name-pos [398 6]}} k 0)
+            ^{:go/pos {:tok-pos [399 4]}} (break)))))
+
+
+    ^{:go/pos {:name-pos [402 9]}} n))
+
+
+
+
+^{:go/pos {:doc [405 1] :func [407 1] :lbrace [407 31] :rbrace [421 1]}} (go/func ^{:go/pos {:name-pos [407 6]}} finalizeSocket "finalizeSocket is sock_finalize: an open socket warns ResourceWarning \"unclosed %R\" (its source the socket), then\nits descriptor is closed.\n" ^{:go/pos {:closing [407 29] :opening [407 20]}} [^{:tag ^{:go/pos {:name-pos [407 23]}} Object :go/pos {:name-pos [407 21]}} o]
+  (let [^{:go/pos {:tok-pos [408 9]}} (values ^{:go/pos {:name-pos [408 2]}} so ^{:go/pos {:name-pos [408 6]}} ok) ^{:go/pos {:dot [408 27] :lparen [408 28] :rparen [408 38]}} (assert ^{:go/pos {:star [408 29]}} (* ^{:go/pos {:name-pos [408 30]}} pySocket) ^{:go/pos {:lparen [408 24] :rparen [408 26]}} (^{:go/pos {:name-pos [408 12]}} BuiltinValue ^{:go/pos {:name-pos [408 25]}} o))]
+    ^{:go/pos {:if [409 2] :lbrace [409 22] :rbrace [411 2]}} (when ^{:go/pos {:op-pos [409 9]}} (or ^{:go/pos {:op-pos [409 5]}} (not ^{:go/pos {:name-pos [409 6]}} ok) ^{:go/apos {2 [409 20]} :go/pos {:op-pos [409 18]}} (< ^{:go/pos {:dot [409 14] :name-pos [409 15]}} (.-fd ^{:go/pos {:name-pos [409 12]}} so) 0))
+      ^{:go/pos {:return [410 3]}} (return))
+
+    ^{:go/pos {:if [412 2] :lbrace [412 64] :rbrace [416 2]}} (when [^{:go/pos {:name-pos [412 5] :tok-pos [412 9]}} err ^{:go/pos {:lparen [412 24] :rparen [412 50]}} (^{:go/pos {:name-pos [412 12]}} resourceWarn ^{:go/pos {:name-pos [412 25]}} o ^{:go/apos {1 [412 28]} :go/pos {:op-pos [412 39]}} (+ "unclosed " ^{:go/pos {:lparen [412 47] :rparen [412 49]}} (^{:go/pos {:name-pos [412 40]}} reprOrQ ^{:go/pos {:name-pos [412 48]}} o)))] ^{:go/apos {2 [412 60]} :go/pos {:op-pos [412 57]}} (!= ^{:go/pos {:name-pos [412 53]}} err nil)
+      ^{:go/pos {:if [413 3] :lbrace [413 33] :rbrace [415 3]}} (when ^{:go/pos {:lparen [413 14] :rparen [413 31]}} (^{:go/pos {:name-pos [413 6]}} isRaised ^{:go/pos {:name-pos [413 15]}} err ^{:go/pos {:name-pos [413 20]}} WarningType)
+        ^{:go/pos {:lparen [414 17] :rparen [414 78]}} (^{:go/pos {:name-pos [414 4]}} finUnraisable ^{:go/pos {:name-pos [414 18]}} err ^{:go/apos {1 [414 23]} :go/pos {:op-pos [414 67]}} (+ "Exception ignored while finalizing socket " ^{:go/pos {:lparen [414 75] :rparen [414 77]}} (^{:go/pos {:name-pos [414 68]}} reprOrQ ^{:go/pos {:name-pos [414 76]}} o)))))
+
+
+    ^{:go/pos {:if [417 2] :lbrace [417 26] :rbrace [420 2]}} (when [^{:go/pos {:name-pos [417 5] :tok-pos [417 8]}} fd ^{:go/pos {:dot [417 13] :name-pos [417 14]}} (.-fd ^{:go/pos {:name-pos [417 11]}} so)] ^{:go/apos {2 [417 24]} :go/pos {:op-pos [417 21]}} (>= ^{:go/pos {:name-pos [417 18]}} fd 0)
+      ^{:go/apos {2 [418 11]} :go/pos {:tok-pos [418 9]}} (set! ^{:go/pos {:dot [418 5] :name-pos [418 6]}} (.-fd ^{:go/pos {:name-pos [418 3]}} so) -1)
+      ^{:go/pos {:lparen [419 16] :rparen [419 19]}} (^{:go/pos {:dot [419 10] :name-pos [419 11] :x-pos [419 3]}} syscall/Close ^{:go/pos {:name-pos [419 17]}} fd))))
+
+
+
+
+^{:go/pos {:doc [423 1] :func [424 1] :lbrace [424 52] :rbrace [435 1] :return [434 2]}} (go/func ^{:go/pos {:name-pos [424 6]}} resourceWarn "resourceWarn is PyErr_ResourceWarning(source, 1, msg): warnings.warn(msg, ResourceWarning, 1, source=source).\n" ^{:tag ^{:go/pos {:name-pos [424 46]}} error :go/pos {:closing [424 44] :opening [424 18]}} [^{:tag ^{:go/pos {:name-pos [424 26]}} Object :go/pos {:name-pos [424 19]}} source ^{:tag ^{:go/pos {:name-pos [424 38]}} string :go/pos {:name-pos [424 34]}} msg]
+  (let [^{:go/pos {:tok-pos [425 9]}} (values ^{:go/pos {:name-pos [425 2]}} w ^{:go/pos {:name-pos [425 5]}} err) ^{:go/apos {1 [425 25]} :go/pos {:lparen [425 24] :rparen [425 35]}} (^{:go/pos {:name-pos [425 12]}} importModule "warnings")]
+    ^{:go/pos {:if [426 2] :lbrace [426 16] :rbrace [428 2]}} (when ^{:go/apos {2 [426 12]} :go/pos {:op-pos [426 9]}} (!= ^{:go/pos {:name-pos [426 5]}} err nil)
+      ^{:go/pos {:return [427 3]}} (return ^{:go/pos {:name-pos [427 10]}} err))
+
+    (let [^{:go/pos {:tok-pos [429 9]}} (values ^{:go/pos {:name-pos [429 2]}} f ^:assign ^{:go/pos {:name-pos [429 5]}} err) ^{:go/pos {:lparen [429 19] :rparen [429 37]}} (^{:go/pos {:name-pos [429 12]}} GetAttr ^{:go/pos {:name-pos [429 20]}} w ^{:go/apos {1 [429 30]} :go/pos {:lparen [429 29] :rparen [429 36]}} (^{:go/pos {:name-pos [429 23]}} NewStr "warn"))]
+      ^{:go/pos {:if [430 2] :lbrace [430 16] :rbrace [432 2]}} (when ^{:go/apos {2 [430 12]} :go/pos {:op-pos [430 9]}} (!= ^{:go/pos {:name-pos [430 5]}} err nil)
+        ^{:go/pos {:return [431 3]}} (return ^{:go/pos {:name-pos [431 10]}} err))
+
+      ^{:go/pos {:tok-pos [433 9]}} (set! (values ^{:go/pos {:name-pos [433 2]}} _ ^{:go/pos {:name-pos [433 5]}} err) ^{:go/pos {:lparen [433 15] :rparen [433 106]}} (^{:go/pos {:name-pos [433 11]}} Call ^{:go/pos {:name-pos [433 16]}} f ^{:go/pos {:lbrace [433 27] :rbrace [433 79]}} (lit ^{:go/pos {:lbrack [433 19]}} (slice ^{:go/pos {:name-pos [433 21]}} Object) ^{:go/pos {:lparen [433 34] :rparen [433 38]}} (^{:go/pos {:name-pos [433 28]}} NewStr ^{:go/pos {:name-pos [433 35]}} msg) ^{:go/pos {:name-pos [433 41]}} ResourceWarningType ^{:go/apos {1 [433 69]} :go/pos {:lparen [433 68] :rparen [433 70]}} (^{:go/pos {:name-pos [433 62]}} NewInt 1) ^{:go/pos {:name-pos [433 73]}} source) ^{:go/pos {:lbrace [433 88] :rbrace [433 105]}} (lit ^{:go/pos {:lbrack [433 82]}} (slice ^{:go/pos {:star [433 84]}} (* ^{:go/pos {:name-pos [433 85]}} Str)) ^{:go/apos {1 [433 96]} :go/pos {:lparen [433 95] :rparen [433 104]}} (^{:go/pos {:name-pos [433 89]}} NewStr "source"))))
+      ^{:go/pos {:name-pos [434 9]}} err)))
+
+
+
+
+
+
+^{:go/pos {:doc [437 1] :func [441 1] :lbrace [441 34] :rbrace [447 1]}} (go/method ^{:go/pos {:name-pos [441 17]}} growStack "growStack gives f's value stack room for n more values in a new array, the old one's values cleared: newFrame's one\nallocation holds the fast locals and the stack's first array together, so the stack's stale values there would keep\ntheir objects reachable through the fast locals for the frame's life (queue 218: found by a weak reference that a\nfunction's first call did not clear).\n" ^{:go/pos {:closing [441 32] :opening [441 26] :recv-closing [441 15] :recv-opening [441 6]}} [^{:tag ^{:go/pos {:star [441 9]}} (* ^{:go/pos {:name-pos [441 10]}} Frame) :go/pos {:name-pos [441 7]}} f ^{:tag ^{:go/pos {:name-pos [441 29]}} int :go/pos {:name-pos [441 27]}} n]
+  (let [^{:go/pos {:name-pos [442 2] :tok-pos [442 6]}} old ^{:go/pos {:dot [442 10] :name-pos [442 11]}} (.-Stack ^{:go/pos {:name-pos [442 9]}} f)
+      ^{:go/pos {:name-pos [443 2] :tok-pos [443 5]}} ns ^{:go/pos {:lparen [443 12] :rparen [443 45]}} (^{:go/pos {:name-pos [443 8]}} make ^{:go/pos {:lbrack [443 13]}} (slice ^{:go/pos {:name-pos [443 15]}} Object) ^{:go/pos {:lparen [443 26] :rparen [443 30]}} (^{:go/pos {:name-pos [443 23]}} len ^{:go/pos {:name-pos [443 27]}} old) ^{:go/pos {:op-pos [443 43]}} (+ ^{:go/apos {1 [443 33]} :go/pos {:op-pos [443 34]}} (* 2 ^{:go/pos {:lparen [443 38] :rparen [443 42]}} (^{:go/pos {:name-pos [443 35]}} cap ^{:go/pos {:name-pos [443 39]}} old)) ^{:go/pos {:name-pos [443 44]}} n))]
+    ^{:go/pos {:lparen [444 6] :rparen [444 14]}} (^{:go/pos {:name-pos [444 2]}} copy ^{:go/pos {:name-pos [444 7]}} ns ^{:go/pos {:name-pos [444 11]}} old)
+    ^{:go/pos {:lparen [445 7] :rparen [445 11]}} (^{:go/pos {:name-pos [445 2]}} clear ^{:go/pos {:name-pos [445 8]}} old)
+    ^{:go/pos {:tok-pos [446 10]}} (set! ^{:go/pos {:dot [446 3] :name-pos [446 4]}} (.-Stack ^{:go/pos {:name-pos [446 2]}} f) ^{:go/pos {:name-pos [446 12]}} ns)))
+
+
+
+
+
+
+
+^{:go/pos {:doc [449 1] :tok-pos [454 1]}} (go/var ^{:tag ^{:go/pos {:lbrack [454 17]}} (slice ^{:go/pos {:star [454 19]}} (* ^{:go/pos {:name-pos [454 20]}} Generator)) :doc "pendingGens are the coroutines made, and the generators suspended in a try region, since the last flush (under the\nGIL): one still not finished when the list is flushed (every 256, and in gc.collect) is tracked for its finalization,\nso the common cases, a coroutine awaited at once and a generator run to its end, pay no Go finalizer (queue 218:\nmeasured with bin/pyi aot, a coroutine 0.13 us untracked against 0.6 us tracked at creation; a generator with a\ntry 0.66 us against 1.0-1.2 us tracked at its first suspension).\n" :go/pos {:name-pos [454 5]}} pendingGens)
+
+^{:go/pos {:func [456 1] :lbrace [456 28] :rbrace [462 1]}} (go/func ^{:go/pos {:name-pos [456 6]}} pendGen ^{:go/pos {:closing [456 26] :opening [456 13]}} [^{:tag ^{:go/pos {:star [456 16]}} (* ^{:go/pos {:name-pos [456 17]}} Generator) :go/pos {:name-pos [456 14]}} g]
+  ^{:go/apos {2 [457 17]} :go/pos {:tok-pos [457 15]}} (set! ^{:go/pos {:dot [457 3] :name-pos [457 4]}} (.-finPending ^{:go/pos {:name-pos [457 2]}} g) true)
+  ^{:go/pos {:tok-pos [458 14]}} (set! ^{:go/pos {:name-pos [458 2]}} pendingGens ^{:go/pos {:lparen [458 22] :rparen [458 37]}} (^{:go/pos {:name-pos [458 16]}} append ^{:go/pos {:name-pos [458 23]}} pendingGens ^{:go/pos {:name-pos [458 36]}} g))
+  ^{:go/pos {:if [459 2] :lbrace [459 29] :rbrace [461 2]}} (when ^{:go/apos {2 [459 25]} :go/pos {:op-pos [459 22]}} (>= ^{:go/pos {:lparen [459 8] :rparen [459 20]}} (^{:go/pos {:name-pos [459 5]}} len ^{:go/pos {:name-pos [459 9]}} pendingGens) 256)
+    ^{:go/pos {:lparen [460 19] :rparen [460 20]}} (^{:go/pos {:name-pos [460 3]}} flushPendingGens)))
+
+
+
+^{:go/pos {:func [464 1] :lbrace [464 25] :rbrace [474 1]}} (go/func ^{:go/pos {:name-pos [464 6]}} flushPendingGens ^{:go/pos {:closing [464 23] :opening [464 22]}} []
+  ^{:go/pos {:for [465 2] :lbrace [465 32] :range [465 14] :rbrace [472 2] :tok-pos [465 11]}} (range [^{:go/pos {:name-pos [465 6]}} i ^{:go/pos {:name-pos [465 9]}} g ^{:go/pos {:name-pos [465 20]}} pendingGens]
+    ^{:go/apos {2 [466 18]} :go/pos {:tok-pos [466 16]}} (set! ^{:go/pos {:dot [466 4] :name-pos [466 5]}} (.-finPending ^{:go/pos {:name-pos [466 3]}} g) false)
+    ^{:go/pos {:if [467 3] :lbrace [467 38] :rbrace [470 3]}} (when ^{:go/pos {:op-pos [467 21]}} (and ^{:go/apos {2 [467 17]} :go/pos {:op-pos [467 14]}} (!= ^{:go/pos {:dot [467 7] :name-pos [467 8]}} (.-frame ^{:go/pos {:name-pos [467 6]}} g) nil) ^{:go/pos {:op-pos [467 24]}} (not ^{:go/pos {:dot [467 26] :name-pos [467 27]}} (.-finTracked ^{:go/pos {:name-pos [467 25]}} g)))
+      ^{:go/apos {2 [468 19]} :go/pos {:tok-pos [468 17]}} (set! ^{:go/pos {:dot [468 5] :name-pos [468 6]}} (.-finTracked ^{:go/pos {:name-pos [468 4]}} g) true)
+      ^{:go/pos {:lparen [469 13] :rparen [469 24]}} (^{:go/pos {:name-pos [469 4]}} trackWork ^{:go/pos {:name-pos [469 14]}} g ^{:go/pos {:name-pos [469 17]}} workGen))
+
+    ^{:go/apos {3 [471 20]} :go/pos {:lbrack [471 14] :rbrack [471 16] :tok-pos [471 18]}} (aset ^{:go/pos {:name-pos [471 3]}} pendingGens ^{:go/pos {:name-pos [471 15]}} i nil))
+
+  ^{:go/pos {:tok-pos [473 14]}} (set! ^{:go/pos {:name-pos [473 2]}} pendingGens ^{:go/apos {3 [473 29]} :go/pos {:lbrack [473 27] :rbrack [473 30]}} (subslice ^{:go/pos {:name-pos [473 16]}} pendingGens _ 0)))
+
+
+;; Cycles through finalizers (queue 222; doc/python/PYTHON-SURVEY.md, "Design: 222"): Go never frees a cycle that
+;; reaches a finalized object from itself, so gc.collect() finds them as CPython's gc_collect_main does, with Go's
+;; collector answering what deduce_unreachable's counts answer: which objects are held from outside. The graph's nodes
+;; are instances (their dictionary, while not handed out as an object, and __slots__ folded in), lists, tuples and
+;; dictionaries; its edges their slots of interface type that hold a node. Every edge between two probed nodes is
+;; hidden (the slot set to nil, its target kept by address), each probed node given a probe's Go finalizer, and Go
+;; collects with the GIL held: a node whose probe does not run is held from outside, and so is what it reaches.
+
+^{:go/pos {:lparen [484 7] :rparen [487 1] :tok-pos [484 1]}} (go/const
+  ^{:go/apos {1 [485 19]}} [^{:val 32 :go/pos {:name-pos [485 2]}} gcDebugSaveAll 32] ; gc.DEBUG_SAVEALL
+  [^{:val 262144 :go/pos {:name-pos [486 2]}} cyMaxNodes ^{:go/apos {1 [486 19] 2 [486 24]} :go/pos {:op-pos [486 21]}} (<< 1 18)]) ; a larger graph is left alone (Go's collection, 218's moment)
+
+
+^{:go/pos {:lparen [489 5] :rparen [496 1] :tok-pos [489 1]}} (go/var
+  [^{:tag ^{:go/pos {:name-pos [490 12]}} bool :go/pos {:name-pos [490 2]}} cyOpen] ; a probe's answer is being read (finMu): a probe that runs later only holds
+  [^{:go/pos {:name-pos [491 2]}} cyFired ^{:go/pos {:lbrace [491 32] :rbrace [491 33]}} (lit ^{:go/pos {:map [491 14]}} (map ^{:go/pos {:name-pos [491 18]}} uintptr ^{:go/pos {:name-pos [491 26]}} Object))] ; the probed nodes whose probe ran (finMu), held until the collection ends
+  [^{:go/pos {:name-pos [492 2]}} cyLate ^{:go/pos {:lbrace [492 30] :rbrace [492 31]}} (lit ^{:go/pos {:map [492 14]}} (map ^{:go/pos {:name-pos [492 18]}} uintptr ^{:go/pos {:name-pos [492 26]}} bool))] ; those that ran after the answer was read
+  [^{:tag ^{:go/pos {:name-pos [493 12]}} bool :go/pos {:name-pos [493 2]}} tmEver] ; tracemalloc traced once: a list, a dict or a cell may carry its Go finalizer
+  [^{:tag ^{:go/pos {:name-pos [494 12]}} int64 :go/pos {:name-pos [494 2]}} gcDebug] ; gc.set_debug's flags
+  [^{:tag ^{:go/pos {:star [495 12]}} (* ^{:go/pos {:name-pos [495 13]}} List) :go/pos {:name-pos [495 2]}} gcGarbage]) ; gc.garbage
+
+
+
+^{:go/pos {:doc [498 1] :tok-pos [499 1]}} (go/type ^{:go/pos {:name-pos [499 6]}} cyNode "cyNode is a node of the graph, never holding its object (its address is hidden from the collector).\n" ^{:go/pos {:lbrace [499 20] :rbrace [505 1] :struct [499 13]}} (struct
+    ^{:tag ^{:go/pos {:name-pos [500 8]}} uintptr :go/pos {:name-pos [500 2]}} addr
+    ^{:tag ^{:go/pos {:dot [501 15] :name-pos [501 16] :x-pos [501 8]}} reflect/Type :go/pos {:name-pos [501 2]}} elem
+    ^{:tag ^{:go/pos {:star [502 8]}} (* ^{:go/pos {:name-pos [502 9]}} finTrack) :go/pos {:name-pos [502 2]}} tr ; its record when tracked
+    ^{:tag ^{:go/pos {:lbrack [503 8]}} (slice ^{:go/pos {:star [503 10]}} (* ^{:go/pos {:name-pos [503 11]}} Object)) :go/pos {:name-pos [503 2]}} slots ; its slots that hold a node
+    ^{:tag ^{:go/pos {:lbrack [504 8]}} (slice ^{:go/pos {:name-pos [504 10]}} int32) :go/pos {:name-pos [504 2]}} edges)) ; the nodes they hold, in step
+
+
+^{:go/pos {:func [507 1] :lbrace [507 34] :rbrace [509 1] :return [508 2]}} (go/method ^{:go/pos {:name-pos [507 18]}} object ^{:tag ^{:go/pos {:name-pos [507 27]}} Object :go/pos {:closing [507 25] :opening [507 24] :recv-closing [507 16] :recv-opening [507 6]}} [^{:tag ^{:go/pos {:star [507 9]}} (* ^{:go/pos {:name-pos [507 10]}} cyNode) :go/pos {:name-pos [507 7]}} n]
+  ^{:go/pos {:dot [508 62] :lparen [508 63] :rparen [508 70]}} (assert ^{:go/pos {:name-pos [508 64]}} Object ^{:go/pos {:dot [508 50] :lparen [508 60] :name-pos [508 51] :rparen [508 61]}} (.Interface ^{:go/pos {:lparen [508 22] :rparen [508 49]}} (^{:go/pos {:dot [508 16] :name-pos [508 17] :x-pos [508 9]}} reflect/NewAt ^{:go/pos {:dot [508 24] :name-pos [508 25]}} (.-elem ^{:go/pos {:name-pos [508 23]}} n) ^{:go/pos {:lparen [508 40] :rparen [508 48]}} (^{:go/pos {:name-pos [508 31]}} hiddenPtr ^{:go/pos {:op-pos [508 41]}} (addr ^{:go/pos {:dot [508 43] :name-pos [508 44]}} (.-addr ^{:go/pos {:name-pos [508 42]}} n)))))))
+
+
+
+
+^{:go/apos {5 [520 9]} :go/pos {:doc [511 1] :func [513 1] :lbrace [513 30] :rbrace [521 1] :return [520 2]}} (go/func ^{:go/pos {:name-pos [513 6]}} cyIsNode "cyIsNode is whether o is a node: an instance, a list, a tuple or a dictionary (a list's or a dictionary's Go\nfinalizer may be tracemalloc's once it traced: then neither).\n" ^{:tag ^{:go/pos {:name-pos [513 25]}} bool :go/pos {:closing [513 23] :opening [513 14]}} [^{:tag ^{:go/pos {:name-pos [513 17]}} Object :go/pos {:name-pos [513 15]}} o]
+  ^{:go/pos {:guard-dot [514 10] :guard-lparen [514 11] :guard-rparen [514 16] :lbrace [514 18] :rbrace [519 2] :switch [514 2]}} (type-switch ^{:go/pos {:name-pos [514 9]}} o
+    ^{:go/pos {:case [515 2] :colon [515 24]}} (case [^{:go/pos {:star [515 7]}} (* ^{:go/pos {:name-pos [515 8]}} Instance) ^{:go/pos {:star [515 18]}} (* ^{:go/pos {:name-pos [515 19]}} Tuple)]
+      ^{:go/apos {1 [516 10]} :go/pos {:return [516 3]}} (return true))
+    ^{:go/pos {:case [517 2] :colon [517 19]}} (case [^{:go/pos {:star [517 7]}} (* ^{:go/pos {:name-pos [517 8]}} List) ^{:go/pos {:star [517 14]}} (* ^{:go/pos {:name-pos [517 15]}} Dict)]
+      ^{:go/pos {:return [518 3]}} (return ^{:go/pos {:op-pos [518 10]}} (not ^{:go/pos {:name-pos [518 11]}} tmEver))))
+
+  false)
+
+
+
+^{:go/pos {:doc [523 1] :func [524 1] :lbrace [524 43] :rbrace [559 1]}} (go/func ^{:go/pos {:name-pos [524 6]}} cySlots "cySlots calls f with each slot of o (a node) that holds a node.\n" ^{:go/pos {:closing [524 41] :opening [524 13]}} [^{:tag ^{:go/pos {:name-pos [524 16]}} Object :go/pos {:name-pos [524 14]}} o ^{:tag ^{:go/pos {:func [524 26]}} (func ^{:go/pos {:closing [524 40] :opening [524 30]}} [^{:tag ^{:go/pos {:star [524 33]}} (* ^{:go/pos {:name-pos [524 34]}} Object) :go/pos {:name-pos [524 31]}} p]) :go/pos {:name-pos [524 24]}} f]
+  (let [^{:go/pos {:name-pos [525 2] :tok-pos [525 7]}} each ^{:go/pos {:func [525 10] :lbrace [525 31] :rbrace [531 2]}} (fn ^{:go/pos {:closing [525 29] :opening [525 14]}} [^{:tag ^{:go/pos {:lbrack [525 21]}} (slice ^{:go/pos {:name-pos [525 23]}} Object) :go/pos {:name-pos [525 15]}} items]
+        ^{:go/pos {:for [526 3] :lbrace [526 24] :range [526 12] :rbrace [530 3] :tok-pos [526 9]}} (range [^{:go/pos {:name-pos [526 7]}} i ^{:go/pos {:name-pos [526 18]}} items]
+          ^{:go/pos {:if [527 4] :lbrace [527 46] :rbrace [529 4]}} (when [^{:go/pos {:name-pos [527 7] :tok-pos [527 9]}} v ^{:go/pos {:lbrack [527 17] :rbrack [527 19]}} (aget ^{:go/pos {:name-pos [527 12]}} items ^{:go/pos {:name-pos [527 18]}} i)] ^{:go/pos {:op-pos [527 31]}} (and ^{:go/apos {2 [527 27]} :go/pos {:op-pos [527 24]}} (!= ^{:go/pos {:name-pos [527 22]}} v nil) ^{:go/pos {:lparen [527 42] :rparen [527 44]}} (^{:go/pos {:name-pos [527 34]}} cyIsNode ^{:go/pos {:name-pos [527 43]}} v))
+            ^{:go/pos {:lparen [528 6] :rparen [528 16]}} (^{:go/pos {:name-pos [528 5]}} f ^{:go/pos {:op-pos [528 7]}} (addr ^{:go/pos {:lbrack [528 13] :rbrack [528 15]}} (aget ^{:go/pos {:name-pos [528 8]}} items ^{:go/pos {:name-pos [528 14]}} i))))))
+
+
+
+      ^{:go/pos {:name-pos [532 2] :tok-pos [532 10]}} entries ^{:go/pos {:func [532 13] :lbrace [532 27] :rbrace [545 2]}} (fn ^{:go/pos {:closing [532 25] :opening [532 17]}} [^{:tag ^{:go/pos {:star [532 20]}} (* ^{:go/pos {:name-pos [532 21]}} Dict) :go/pos {:name-pos [532 18]}} d]
+        ^{:go/pos {:for [533 3] :lbrace [533 28] :range [533 12] :rbrace [544 3] :tok-pos [533 9]}} (range [^{:go/pos {:name-pos [533 7]}} i ^{:go/pos {:dot [533 19] :name-pos [533 20]}} (.-entries ^{:go/pos {:name-pos [533 18]}} d)]
+          (let [^{:go/pos {:name-pos [534 4] :tok-pos [534 6]}} e ^{:go/pos {:op-pos [534 9]}} (addr ^{:go/pos {:lbrack [534 19] :rbrack [534 21]}} (aget ^{:go/pos {:dot [534 11] :name-pos [534 12]}} (.-entries ^{:go/pos {:name-pos [534 10]}} d) ^{:go/pos {:name-pos [534 20]}} i))]
+            ^{:go/pos {:if [535 4] :lbrace [535 20] :rbrace [537 4]}} (when ^{:go/apos {2 [535 16]} :go/pos {:op-pos [535 13]}} (== ^{:go/pos {:dot [535 8] :name-pos [535 9]}} (.-key ^{:go/pos {:name-pos [535 7]}} e) nil)
+              ^{:go/pos {:tok-pos [536 5]}} (continue))
+
+            ^{:go/pos {:if [538 4] :lbrace [538 23] :rbrace [540 4]}} (when ^{:go/pos {:lparen [538 15] :rparen [538 21]}} (^{:go/pos {:name-pos [538 7]}} cyIsNode ^{:go/pos {:dot [538 17] :name-pos [538 18]}} (.-key ^{:go/pos {:name-pos [538 16]}} e))
+              ^{:go/pos {:lparen [539 6] :rparen [539 13]}} (^{:go/pos {:name-pos [539 5]}} f ^{:go/pos {:op-pos [539 7]}} (addr ^{:go/pos {:dot [539 9] :name-pos [539 10]}} (.-key ^{:go/pos {:name-pos [539 8]}} e))))
+
+            ^{:go/pos {:if [541 4] :lbrace [541 43] :rbrace [543 4]}} (when ^{:go/pos {:op-pos [541 22]}} (and ^{:go/apos {2 [541 18]} :go/pos {:op-pos [541 15]}} (!= ^{:go/pos {:dot [541 8] :name-pos [541 9]}} (.-value ^{:go/pos {:name-pos [541 7]}} e) nil) ^{:go/pos {:lparen [541 33] :rparen [541 41]}} (^{:go/pos {:name-pos [541 25]}} cyIsNode ^{:go/pos {:dot [541 35] :name-pos [541 36]}} (.-value ^{:go/pos {:name-pos [541 34]}} e)))
+              ^{:go/pos {:lparen [542 6] :rparen [542 15]}} (^{:go/pos {:name-pos [542 5]}} f ^{:go/pos {:op-pos [542 7]}} (addr ^{:go/pos {:dot [542 9] :name-pos [542 10]}} (.-value ^{:go/pos {:name-pos [542 8]}} e)))))))]
+
+
+
+    ^{:go/pos {:guard-dot [546 15] :guard-lparen [546 16] :guard-rparen [546 21] :guard-tok [546 11] :lbrace [546 23] :rbrace [558 2] :switch [546 2]}} (type-switch [^{:go/pos {:name-pos [546 9]}} x ^{:go/pos {:name-pos [546 14]}} o]
+      ^{:go/pos {:case [547 2] :colon [547 16]}} (case [^{:go/pos {:star [547 7]}} (* ^{:go/pos {:name-pos [547 8]}} Instance)]
+        ^{:go/pos {:if [548 3] :lbrace [548 39] :rbrace [550 3]}} (when ^{:go/pos {:op-pos [548 20]}} (and ^{:go/apos {2 [548 16]} :go/pos {:op-pos [548 13]}} (!= ^{:go/pos {:dot [548 7] :name-pos [548 8]}} (.-dict ^{:go/pos {:name-pos [548 6]}} x) nil) ^{:go/pos {:op-pos [548 23]}} (not ^{:go/pos {:dot [548 30] :name-pos [548 31]}} (.-escaped ^{:go/pos {:dot [548 25] :name-pos [548 26]}} (.-dict ^{:go/pos {:name-pos [548 24]}} x))))
+          ^{:go/pos {:lparen [549 11] :rparen [549 18]}} (^{:go/pos {:name-pos [549 4]}} entries ^{:go/pos {:dot [549 13] :name-pos [549 14]}} (.-dict ^{:go/pos {:name-pos [549 12]}} x)))
+
+        ^{:go/pos {:lparen [551 7] :rparen [551 15]}} (^{:go/pos {:name-pos [551 3]}} each ^{:go/pos {:dot [551 9] :name-pos [551 10]}} (.-slots ^{:go/pos {:name-pos [551 8]}} x)))
+      ^{:go/pos {:case [552 2] :colon [552 12]}} (case [^{:go/pos {:star [552 7]}} (* ^{:go/pos {:name-pos [552 8]}} List)]
+        ^{:go/pos {:lparen [553 7] :rparen [553 15]}} (^{:go/pos {:name-pos [553 3]}} each ^{:go/pos {:dot [553 9] :name-pos [553 10]}} (.-Items ^{:go/pos {:name-pos [553 8]}} x)))
+      ^{:go/pos {:case [554 2] :colon [554 13]}} (case [^{:go/pos {:star [554 7]}} (* ^{:go/pos {:name-pos [554 8]}} Tuple)]
+        ^{:go/pos {:lparen [555 7] :rparen [555 15]}} (^{:go/pos {:name-pos [555 3]}} each ^{:go/pos {:dot [555 9] :name-pos [555 10]}} (.-Items ^{:go/pos {:name-pos [555 8]}} x)))
+      ^{:go/pos {:case [556 2] :colon [556 12]}} (case [^{:go/pos {:star [556 7]}} (* ^{:go/pos {:name-pos [556 8]}} Dict)]
+        ^{:go/pos {:lparen [557 10] :rparen [557 12]}} (^{:go/pos {:name-pos [557 3]}} entries ^{:go/pos {:name-pos [557 11]}} x)))))
+
+
+
+
+^{:go/pos {:doc [561 1] :func [562 1] :lbrace [562 64] :rbrace [604 1] :return [603 2]}} (go/func ^{:go/pos {:name-pos [562 6]}} cyGraph "cyGraph is the graph from the seeds (an object a probe would find held stays out of it), nil past cyMaxNodes.\n" ^{:tag ^{:go/pos {:lbrack [562 54]}} (slice ^{:go/pos {:star [562 56]}} (* ^{:go/pos {:name-pos [562 57]}} cyNode)) :go/pos {:closing [562 52] :opening [562 13]}} [^{:tag ^{:go/pos {:lbrack [562 20]}} (slice ^{:go/pos {:name-pos [562 22]}} Object) :go/pos {:name-pos [562 14]}} seeds ^{:tag ^{:go/pos {:map [562 35]}} (map ^{:go/pos {:name-pos [562 39]}} uintptr ^{:go/pos {:name-pos [562 47]}} int32) :go/pos {:name-pos [562 30]}} only]
+  (let [^{:go/pos {:name-pos [563 2] :tok-pos [563 6]}} idx ^{:go/pos {:lbrace [563 26] :rbrace [563 27]}} (lit ^{:go/pos {:map [563 9]}} (map ^{:go/pos {:name-pos [563 13]}} uintptr ^{:go/pos {:name-pos [563 21]}} int32))
+      ^{:tag ^{:go/pos {:lbrack [564 12]}} (slice ^{:go/pos {:star [564 14]}} (* ^{:go/pos {:name-pos [564 15]}} cyNode)) :go/pos {:name-pos [564 6] :tok-pos [564 2]}} nodes (zero ^{:go/pos {:lbrack [564 12]}} (slice ^{:go/pos {:star [564 14]}} (* ^{:go/pos {:name-pos [564 15]}} cyNode)))
+      ^{:tag ^{:go/pos {:lbrack [565 11]}} (slice ^{:go/pos {:name-pos [565 13]}} Object) :go/pos {:name-pos [565 6] :tok-pos [565 2]}} objs (zero ^{:go/pos {:lbrack [565 11]}} (slice ^{:go/pos {:name-pos [565 13]}} Object))
+      ^{:go/pos {:name-pos [566 2] :tok-pos [566 6]}} add ^{:go/pos {:func [566 9] :lbrace [566 30] :rbrace [581 2] :return [580 3]}} (fn ^{:tag ^{:go/pos {:name-pos [566 24]}} int32 :go/pos {:closing [566 22] :opening [566 13]}} [^{:tag ^{:go/pos {:name-pos [566 16]}} Object :go/pos {:name-pos [566 14]}} o]
+        (let [^{:go/pos {:name-pos [567 3] :tok-pos [567 5]}} a ^{:go/pos {:lparen [567 14] :rparen [567 16]}} (^{:go/pos {:name-pos [567 8]}} addrOf ^{:go/pos {:name-pos [567 15]}} o)]
+          ^{:go/pos {:if [568 3] :lbrace [568 26] :rbrace [570 3]}} (when [^{:go/pos {:tok-pos [568 12]}} (values ^{:go/pos {:name-pos [568 6]}} i ^{:go/pos {:name-pos [568 9]}} ok) ^{:go/pos {:lbrack [568 18] :rbrack [568 20]}} (aget ^{:go/pos {:name-pos [568 15]}} idx ^{:go/pos {:name-pos [568 19]}} a)] ^{:go/pos {:name-pos [568 23]}} ok
+            ^{:go/pos {:return [569 4]}} (return ^{:go/pos {:name-pos [569 11]}} i))
+
+          ^{:go/pos {:if [571 3] :lbrace [571 18] :rbrace [575 3]}} (when ^{:go/apos {2 [571 14]} :go/pos {:op-pos [571 11]}} (!= ^{:go/pos {:name-pos [571 6]}} only nil)
+            ^{:go/pos {:if [572 4] :lbrace [572 29] :rbrace [574 4]}} (when [^{:go/pos {:tok-pos [572 13]}} (values ^{:go/pos {:name-pos [572 7]}} _ ^{:go/pos {:name-pos [572 10]}} ok) ^{:go/pos {:lbrack [572 20] :rbrack [572 22]}} (aget ^{:go/pos {:name-pos [572 16]}} only ^{:go/pos {:name-pos [572 21]}} a)] ^{:go/pos {:op-pos [572 25]}} (not ^{:go/pos {:name-pos [572 26]}} ok)
+              ^{:go/apos {1 [573 12]} :go/pos {:return [573 5]}} (return -1)))
+
+
+          (let [^{:go/pos {:name-pos [576 3] :tok-pos [576 5]}} i ^{:go/pos {:lparen [576 13] :rparen [576 24]}} (conv ^{:go/pos {:name-pos [576 8]}} int32 ^{:go/pos {:lparen [576 17] :rparen [576 23]}} (^{:go/pos {:name-pos [576 14]}} len ^{:go/pos {:name-pos [576 18]}} nodes))]
+            ^{:go/pos {:lbrack [577 6] :rbrack [577 8] :tok-pos [577 10]}} (aset ^{:go/pos {:name-pos [577 3]}} idx ^{:go/pos {:name-pos [577 7]}} a ^{:go/pos {:name-pos [577 12]}} i)
+            ^{:go/pos {:tok-pos [578 9]}} (set! ^{:go/pos {:name-pos [578 3]}} nodes ^{:go/pos {:lparen [578 17] :rparen [578 73]}} (^{:go/pos {:name-pos [578 11]}} append ^{:go/pos {:name-pos [578 18]}} nodes ^{:go/pos {:op-pos [578 25]}} (addr ^{:go/acolon {2 [578 37] 4 [578 46]} :go/apos {2 [578 33] 4 [578 42]} :go/pos {:lbrace [578 32] :rbrace [578 72]}} (lit ^{:go/pos {:name-pos [578 26]}} cyNode :addr ^{:go/pos {:name-pos [578 39]}} a :elem ^{:go/pos {:dot [578 65] :lparen [578 70] :name-pos [578 66] :rparen [578 71]}} (.Elem ^{:go/pos {:lparen [578 62] :rparen [578 64]}} (^{:go/pos {:dot [578 55] :name-pos [578 56] :x-pos [578 48]}} reflect/TypeOf ^{:go/pos {:name-pos [578 63]}} o))))))
+            ^{:go/pos {:tok-pos [579 8]}} (set! ^{:go/pos {:name-pos [579 3]}} objs ^{:go/pos {:lparen [579 16] :rparen [579 24]}} (^{:go/pos {:name-pos [579 10]}} append ^{:go/pos {:name-pos [579 17]}} objs ^{:go/pos {:name-pos [579 23]}} o))
+            ^{:go/pos {:name-pos [580 10]}} i)))]
+
+    ^{:go/pos {:for [582 2] :lbrace [582 26] :range [582 14] :rbrace [584 2] :tok-pos [582 11]}} (range [^{:go/pos {:name-pos [582 6]}} _ ^{:go/pos {:name-pos [582 9]}} o ^{:go/pos {:name-pos [582 20]}} seeds]
+      ^{:go/pos {:lparen [583 6] :rparen [583 8]}} (^{:go/pos {:name-pos [583 3]}} add ^{:go/pos {:name-pos [583 7]}} o))
+
+    ^{:go/pos {:for [585 2] :lbrace [585 34] :rbrace [596 2]}} (for ^{:go/apos {1 [585 11]}} [^{:go/pos {:name-pos [585 6] :tok-pos [585 8]}} i 0] ^{:go/pos {:op-pos [585 16]}} (< ^{:go/pos {:name-pos [585 14]}} i ^{:go/pos {:lparen [585 21] :rparen [585 27]}} (^{:go/pos {:name-pos [585 18]}} len ^{:go/pos {:name-pos [585 22]}} nodes)) ^{:go/pos {:tok-pos [585 31]}} (inc! ^{:go/pos {:name-pos [585 30]}} i)
+      ^{:go/pos {:if [586 3] :lbrace [586 30] :rbrace [588 3]}} (when ^{:go/pos {:op-pos [586 17]}} (> ^{:go/pos {:lparen [586 9] :rparen [586 15]}} (^{:go/pos {:name-pos [586 6]}} len ^{:go/pos {:name-pos [586 10]}} nodes) ^{:go/pos {:name-pos [586 19]}} cyMaxNodes)
+        ^{:go/apos {1 [587 11]} :go/pos {:return [587 4]}} (return nil))
+
+      (let [^{:go/pos {:name-pos [589 3] :tok-pos [589 5]}} n ^{:go/pos {:lbrack [589 13] :rbrack [589 15]}} (aget ^{:go/pos {:name-pos [589 8]}} nodes ^{:go/pos {:name-pos [589 14]}} i)]
+        ^{:go/pos {:lparen [590 10] :rparen [595 4]}} (^{:go/pos {:name-pos [590 3]}} cySlots ^{:go/pos {:lbrack [590 15] :rbrack [590 17]}} (aget ^{:go/pos {:name-pos [590 11]}} objs ^{:go/pos {:name-pos [590 16]}} i) ^{:go/pos {:func [590 20] :lbrace [590 36] :rbrace [595 3]}} (fn ^{:go/pos {:closing [590 34] :opening [590 24]}} [^{:tag ^{:go/pos {:star [590 27]}} (* ^{:go/pos {:name-pos [590 28]}} Object) :go/pos {:name-pos [590 25]}} p]
+            ^{:go/pos {:if [591 4] :lbrace [591 28] :rbrace [594 4]}} (when [^{:go/pos {:name-pos [591 7] :tok-pos [591 9]}} j ^{:go/pos {:lparen [591 15] :rparen [591 18]}} (^{:go/pos {:name-pos [591 12]}} add ^{:go/pos {:star [591 16]}} @^{:go/pos {:name-pos [591 17]}} p)] ^{:go/apos {2 [591 26]} :go/pos {:op-pos [591 23]}} (>= ^{:go/pos {:name-pos [591 21]}} j 0)
+              ^{:go/pos {:tok-pos [592 13]}} (set! ^{:go/pos {:dot [592 6] :name-pos [592 7]}} (.-slots ^{:go/pos {:name-pos [592 5]}} n) ^{:go/pos {:lparen [592 21] :rparen [592 32]}} (^{:go/pos {:name-pos [592 15]}} append ^{:go/pos {:dot [592 23] :name-pos [592 24]}} (.-slots ^{:go/pos {:name-pos [592 22]}} n) ^{:go/pos {:name-pos [592 31]}} p))
+              ^{:go/pos {:tok-pos [593 13]}} (set! ^{:go/pos {:dot [593 6] :name-pos [593 7]}} (.-edges ^{:go/pos {:name-pos [593 5]}} n) ^{:go/pos {:lparen [593 21] :rparen [593 32]}} (^{:go/pos {:name-pos [593 15]}} append ^{:go/pos {:dot [593 23] :name-pos [593 24]}} (.-edges ^{:go/pos {:name-pos [593 22]}} n) ^{:go/pos {:name-pos [593 31]}} j)))))))
+
+
+
+    ^{:go/pos {:dot [597 7] :lparen [597 12] :name-pos [597 8] :rparen [597 13]}} (.Lock ^{:go/pos {:name-pos [597 2]}} finMu)
+    ^{:go/pos {:for [598 2] :lbrace [598 26] :range [598 14] :rbrace [600 2] :tok-pos [598 11]}} (range [^{:go/pos {:name-pos [598 6]}} _ ^{:go/pos {:name-pos [598 9]}} n ^{:go/pos {:name-pos [598 20]}} nodes]
+      ^{:go/pos {:tok-pos [599 8]}} (set! ^{:go/pos {:dot [599 4] :name-pos [599 5]}} (.-tr ^{:go/pos {:name-pos [599 3]}} n) ^{:go/pos {:lbrack [599 17] :rbrack [599 24]}} (aget ^{:go/pos {:name-pos [599 10]}} tracked ^{:go/pos {:dot [599 19] :name-pos [599 20]}} (.-addr ^{:go/pos {:name-pos [599 18]}} n))))
+
+    ^{:go/pos {:dot [601 7] :lparen [601 14] :name-pos [601 8] :rparen [601 15]}} (.Unlock ^{:go/pos {:name-pos [601 2]}} finMu)
+    ^{:go/pos {:lparen [602 7] :rparen [602 12]}} (^{:go/pos {:name-pos [602 2]}} clear ^{:go/pos {:name-pos [602 8]}} objs)
+    ^{:go/pos {:name-pos [603 9]}} nodes))
+
+
+
+
+^{:go/pos {:doc [606 1] :func [608 1] :lbrace [608 41] :rbrace [698 1] :return [697 2]}} (go/func ^{:go/pos {:name-pos [608 6]}} cyRelevant "cyRelevant is the nodes a probe must see: those of a strongly connected component with a cycle and a tracked node\n(Tarjan's, iterative), and what they reach. An acyclic dead object is Go's to find.\n" ^{:tag ^{:go/pos {:lbrack [608 34]}} (slice ^{:go/pos {:name-pos [608 36]}} bool) :go/pos {:closing [608 32] :opening [608 16]}} [^{:tag ^{:go/pos {:lbrack [608 23]}} (slice ^{:go/pos {:star [608 25]}} (* ^{:go/pos {:name-pos [608 26]}} cyNode)) :go/pos {:name-pos [608 17]}} nodes]
+  (let [^{:go/pos {:name-pos [609 2] :tok-pos [609 4]}} n ^{:go/pos {:lparen [609 10] :rparen [609 16]}} (^{:go/pos {:name-pos [609 7]}} len ^{:go/pos {:name-pos [609 11]}} nodes)
+      ^{:go/pos {:tok-pos [610 19]}} (values ^{:go/pos {:name-pos [610 2]}} index ^{:go/pos {:name-pos [610 9]}} low ^{:go/pos {:name-pos [610 14]}} comp) (values ^{:go/pos {:lparen [610 26] :rparen [610 37]}} (^{:go/pos {:name-pos [610 22]}} make ^{:go/pos {:lbrack [610 27]}} (slice ^{:go/pos {:name-pos [610 29]}} int32) ^{:go/pos {:name-pos [610 36]}} n) ^{:go/pos {:lparen [610 44] :rparen [610 55]}} (^{:go/pos {:name-pos [610 40]}} make ^{:go/pos {:lbrack [610 45]}} (slice ^{:go/pos {:name-pos [610 47]}} int32) ^{:go/pos {:name-pos [610 54]}} n) ^{:go/pos {:lparen [610 62] :rparen [610 73]}} (^{:go/pos {:name-pos [610 58]}} make ^{:go/pos {:lbrack [610 63]}} (slice ^{:go/pos {:name-pos [610 65]}} int32) ^{:go/pos {:name-pos [610 72]}} n))]
+    ^{:go/pos {:for [611 2] :lbrace [611 23] :range [611 11] :rbrace [613 2] :tok-pos [611 8]}} (range [^{:go/pos {:name-pos [611 6]}} i ^{:go/pos {:name-pos [611 17]}} index]
+      ^{:go/pos {:tok-pos [612 21]}} (set! (values ^{:go/pos {:lbrack [612 8] :rbrack [612 10]}} (aget ^{:go/pos {:name-pos [612 3]}} index ^{:go/pos {:name-pos [612 9]}} i) ^{:go/pos {:lbrack [612 17] :rbrack [612 19]}} (aget ^{:go/pos {:name-pos [612 13]}} comp ^{:go/pos {:name-pos [612 18]}} i)) ^{:go/apos {1 [612 23] 2 [612 27]}} (values -1 -1)))
+
+    (let [^{:go/pos {:name-pos [614 2] :tok-pos [614 10]}} onStack ^{:go/pos {:lparen [614 17] :rparen [614 27]}} (^{:go/pos {:name-pos [614 13]}} make ^{:go/pos {:lbrack [614 18]}} (slice ^{:go/pos {:name-pos [614 20]}} bool) ^{:go/pos {:name-pos [614 26]}} n)
+        ^{:tag ^{:go/pos {:lbrack [615 12]}} (slice ^{:go/pos {:name-pos [615 14]}} int32) :go/pos {:name-pos [615 6] :tok-pos [615 2]}} stack (zero ^{:go/pos {:lbrack [615 12]}} (slice ^{:go/pos {:name-pos [615 14]}} int32))]
+      (let-type [^{:go/pos {:name-pos [616 7] :tok-pos [616 2]}} step ^{:go/pos {:lbrace [616 18] :rbrace [616 31] :struct [616 12]}} (struct ^{:tag ^{:go/pos {:name-pos [616 25]}} int32 :go/pos {:name-pos [616 20]}} v ^{:tag ^{:go/pos {:name-pos [616 25]}} int32 :go/pos {:name-pos [616 23]}} e)]
+        (let [^{:tag ^{:go/pos {:name-pos [617 11]}} int32 :go/pos {:name-pos [617 6] :tok-pos [617 2]}} next (zero ^{:go/pos {:name-pos [617 11]}} int32)
+            ^{:tag ^{:go/pos {:lbrack [618 12]}} (slice ^{:go/pos {:lbrack [618 14]}} (slice ^{:go/pos {:name-pos [618 16]}} int32)) :go/pos {:name-pos [618 6] :tok-pos [618 2]}} comps (zero ^{:go/pos {:lbrack [618 12]}} (slice ^{:go/pos {:lbrack [618 14]}} (slice ^{:go/pos {:name-pos [618 16]}} int32)))]
+          ^{:go/pos {:for [619 2] :lbrace [619 48] :rbrace [666 2]}} (for [^{:go/pos {:name-pos [619 6] :tok-pos [619 11]}} root ^{:go/apos {2 [619 20]} :go/pos {:lparen [619 19] :rparen [619 21]}} (conv ^{:go/pos {:name-pos [619 14]}} int32 0)] ^{:go/pos {:op-pos [619 29]}} (< ^{:go/pos {:name-pos [619 24]}} root ^{:go/pos {:lparen [619 36] :rparen [619 38]}} (conv ^{:go/pos {:name-pos [619 31]}} int32 ^{:go/pos {:name-pos [619 37]}} n)) ^{:go/pos {:tok-pos [619 45]}} (inc! ^{:go/pos {:name-pos [619 41]}} root)
+            ^{:go/pos {:if [620 3] :lbrace [620 23] :rbrace [622 3]}} (when ^{:go/apos {2 [620 21]} :go/pos {:op-pos [620 18]}} (>= ^{:go/pos {:lbrack [620 11] :rbrack [620 16]}} (aget ^{:go/pos {:name-pos [620 6]}} index ^{:go/pos {:name-pos [620 12]}} root) 0)
+              ^{:go/pos {:tok-pos [621 4]}} (continue))
+
+            (let [^{:go/pos {:name-pos [623 3] :tok-pos [623 8]}} call ^{:go/pos {:lbrace [623 17] :rbrace [623 27]}} (lit ^{:go/pos {:lbrack [623 11]}} (slice ^{:go/pos {:name-pos [623 13]}} step) ^{:go/apos {3 [623 25]} :go/pos {:lbrace [623 18] :rbrace [623 26]}} (lit _ ^{:go/pos {:name-pos [623 19]}} root 0))]
+              ^{:go/pos {:tok-pos [624 26]}} (set! (values ^{:go/pos {:lbrack [624 8] :rbrack [624 13]}} (aget ^{:go/pos {:name-pos [624 3]}} index ^{:go/pos {:name-pos [624 9]}} root) ^{:go/pos {:lbrack [624 19] :rbrack [624 24]}} (aget ^{:go/pos {:name-pos [624 16]}} low ^{:go/pos {:name-pos [624 20]}} root)) (values ^{:go/pos {:name-pos [624 28]}} next ^{:go/pos {:name-pos [624 34]}} next))
+              ^{:go/pos {:tok-pos [625 7]}} (inc! ^{:go/pos {:name-pos [625 3]}} next)
+              ^{:go/pos {:tok-pos [626 9]}} (set! ^{:go/pos {:name-pos [626 3]}} stack ^{:go/pos {:lparen [626 17] :rparen [626 29]}} (^{:go/pos {:name-pos [626 11]}} append ^{:go/pos {:name-pos [626 18]}} stack ^{:go/pos {:name-pos [626 25]}} root))
+              ^{:go/apos {3 [627 19]} :go/pos {:lbrack [627 10] :rbrack [627 15] :tok-pos [627 17]}} (aset ^{:go/pos {:name-pos [627 3]}} onStack ^{:go/pos {:name-pos [627 11]}} root true)
+              ^{:go/pos {:for [628 3] :lbrace [628 21] :rbrace [665 3]}} (while ^{:go/apos {2 [628 19]} :go/pos {:op-pos [628 17]}} (> ^{:go/pos {:lparen [628 10] :rparen [628 15]}} (^{:go/pos {:name-pos [628 7]}} len ^{:go/pos {:name-pos [628 11]}} call) 0)
+                (let [^{:go/pos {:name-pos [629 4] :tok-pos [629 8]}} top ^{:go/pos {:op-pos [629 11]}} (addr ^{:go/pos {:lbrack [629 16] :rbrack [629 28]}} (aget ^{:go/pos {:name-pos [629 12]}} call ^{:go/apos {2 [629 27]} :go/pos {:op-pos [629 26]}} (- ^{:go/pos {:lparen [629 20] :rparen [629 25]}} (^{:go/pos {:name-pos [629 17]}} len ^{:go/pos {:name-pos [629 21]}} call) 1)))
+                    ^{:go/pos {:name-pos [630 4] :tok-pos [630 6]}} v ^{:go/pos {:dot [630 12] :name-pos [630 13]}} (.-v ^{:go/pos {:name-pos [630 9]}} top)]
+                  ^{:go/pos {:if [631 4] :lbrace [631 40] :rbrace [644 4]}} (when ^{:go/pos {:op-pos [631 18]}} (< ^{:go/pos {:lparen [631 10] :rparen [631 16]}} (conv ^{:go/pos {:name-pos [631 7]}} int ^{:go/pos {:dot [631 14] :name-pos [631 15]}} (.-e ^{:go/pos {:name-pos [631 11]}} top)) ^{:go/pos {:lparen [631 23] :rparen [631 38]}} (^{:go/pos {:name-pos [631 20]}} len ^{:go/pos {:dot [631 32] :name-pos [631 33]}} (.-edges ^{:go/pos {:lbrack [631 29] :rbrack [631 31]}} (aget ^{:go/pos {:name-pos [631 24]}} nodes ^{:go/pos {:name-pos [631 30]}} v))))
+                    (let [^{:go/pos {:name-pos [632 5] :tok-pos [632 7]}} w ^{:go/pos {:lbrack [632 24] :rbrack [632 30]}} (aget ^{:go/pos {:dot [632 18] :name-pos [632 19]}} (.-edges ^{:go/pos {:lbrack [632 15] :rbrack [632 17]}} (aget ^{:go/pos {:name-pos [632 10]}} nodes ^{:go/pos {:name-pos [632 16]}} v)) ^{:go/pos {:dot [632 28] :name-pos [632 29]}} (.-e ^{:go/pos {:name-pos [632 25]}} top))]
+                      ^{:go/pos {:tok-pos [633 10]}} (inc! ^{:go/pos {:dot [633 8] :name-pos [633 9]}} (.-e ^{:go/pos {:name-pos [633 5]}} top))
+                      ^{:go/cond [[[634 5] [634 21] [640 5]] [[640 12] [640 47] [642 5]]] :go/pos {:if [634 5]}} (cond ^{:go/apos {2 [634 19]} :go/pos {:op-pos [634 17]}} (< ^{:go/pos {:lbrack [634 13] :rbrack [634 15]}} (aget ^{:go/pos {:name-pos [634 8]}} index ^{:go/pos {:name-pos [634 14]}} w) 0) ^{:go/pos {:lbrace [634 21] :rbrace [640 5]}} (do
+                          ^{:go/pos {:tok-pos [635 23]}} (set! (values ^{:go/pos {:lbrack [635 11] :rbrack [635 13]}} (aget ^{:go/pos {:name-pos [635 6]}} index ^{:go/pos {:name-pos [635 12]}} w) ^{:go/pos {:lbrack [635 19] :rbrack [635 21]}} (aget ^{:go/pos {:name-pos [635 16]}} low ^{:go/pos {:name-pos [635 20]}} w)) (values ^{:go/pos {:name-pos [635 25]}} next ^{:go/pos {:name-pos [635 31]}} next))
+                          ^{:go/pos {:tok-pos [636 10]}} (inc! ^{:go/pos {:name-pos [636 6]}} next)
+                          ^{:go/pos {:tok-pos [637 12]}} (set! ^{:go/pos {:name-pos [637 6]}} stack ^{:go/pos {:lparen [637 20] :rparen [637 29]}} (^{:go/pos {:name-pos [637 14]}} append ^{:go/pos {:name-pos [637 21]}} stack ^{:go/pos {:name-pos [637 28]}} w))
+                          ^{:go/apos {3 [638 19]} :go/pos {:lbrack [638 13] :rbrack [638 15] :tok-pos [638 17]}} (aset ^{:go/pos {:name-pos [638 6]}} onStack ^{:go/pos {:name-pos [638 14]}} w true)
+                          ^{:go/pos {:tok-pos [639 11]}} (set! ^{:go/pos {:name-pos [639 6]}} call ^{:go/pos {:lparen [639 19] :rparen [639 36]}} (^{:go/pos {:name-pos [639 13]}} append ^{:go/pos {:name-pos [639 20]}} call ^{:go/apos {3 [639 34]} :go/pos {:lbrace [639 30] :rbrace [639 35]}} (lit ^{:go/pos {:name-pos [639 26]}} step ^{:go/pos {:name-pos [639 31]}} w 0))))
+                        ^{:go/pos {:op-pos [640 26]}} (and ^{:go/pos {:lbrack [640 22] :rbrack [640 24]}} (aget ^{:go/pos {:name-pos [640 15]}} onStack ^{:go/pos {:name-pos [640 23]}} w) ^{:go/pos {:op-pos [640 38]}} (< ^{:go/pos {:lbrack [640 34] :rbrack [640 36]}} (aget ^{:go/pos {:name-pos [640 29]}} index ^{:go/pos {:name-pos [640 35]}} w) ^{:go/pos {:lbrack [640 43] :rbrack [640 45]}} (aget ^{:go/pos {:name-pos [640 40]}} low ^{:go/pos {:name-pos [640 44]}} v)))
+                        ^{:go/pos {:lbrack [641 9] :rbrack [641 11] :tok-pos [641 13]}} (aset ^{:go/pos {:name-pos [641 6]}} low ^{:go/pos {:name-pos [641 10]}} v ^{:go/pos {:lbrack [641 20] :rbrack [641 22]}} (aget ^{:go/pos {:name-pos [641 15]}} index ^{:go/pos {:name-pos [641 21]}} w)))
+
+                      ^{:go/pos {:tok-pos [643 5]}} (continue)))
+
+                  ^{:go/pos {:tok-pos [645 9]}} (set! ^{:go/pos {:name-pos [645 4]}} call ^{:go/pos {:lbrack [645 15] :rbrack [645 28]}} (subslice ^{:go/pos {:name-pos [645 11]}} call _ ^{:go/apos {2 [645 27]} :go/pos {:op-pos [645 26]}} (- ^{:go/pos {:lparen [645 20] :rparen [645 25]}} (^{:go/pos {:name-pos [645 17]}} len ^{:go/pos {:name-pos [645 21]}} call) 1)))
+                  ^{:go/pos {:if [646 4] :lbrace [646 21] :rbrace [650 4]}} (when ^{:go/apos {2 [646 19]} :go/pos {:op-pos [646 17]}} (> ^{:go/pos {:lparen [646 10] :rparen [646 15]}} (^{:go/pos {:name-pos [646 7]}} len ^{:go/pos {:name-pos [646 11]}} call) 0)
+                    ^{:go/pos {:if [647 5] :lbrace [647 50] :rbrace [649 5]}} (when [^{:go/pos {:name-pos [647 8] :tok-pos [647 10]}} u ^{:go/pos {:dot [647 30] :name-pos [647 31]}} (.-v ^{:go/pos {:lbrack [647 17] :rbrack [647 29]}} (aget ^{:go/pos {:name-pos [647 13]}} call ^{:go/apos {2 [647 28]} :go/pos {:op-pos [647 27]}} (- ^{:go/pos {:lparen [647 21] :rparen [647 26]}} (^{:go/pos {:name-pos [647 18]}} len ^{:go/pos {:name-pos [647 22]}} call) 1)))] ^{:go/pos {:op-pos [647 41]}} (< ^{:go/pos {:lbrack [647 37] :rbrack [647 39]}} (aget ^{:go/pos {:name-pos [647 34]}} low ^{:go/pos {:name-pos [647 38]}} v) ^{:go/pos {:lbrack [647 46] :rbrack [647 48]}} (aget ^{:go/pos {:name-pos [647 43]}} low ^{:go/pos {:name-pos [647 47]}} u))
+                      ^{:go/pos {:lbrack [648 9] :rbrack [648 11] :tok-pos [648 13]}} (aset ^{:go/pos {:name-pos [648 6]}} low ^{:go/pos {:name-pos [648 10]}} u ^{:go/pos {:lbrack [648 18] :rbrack [648 20]}} (aget ^{:go/pos {:name-pos [648 15]}} low ^{:go/pos {:name-pos [648 19]}} v))))
+
+
+                  ^{:go/pos {:if [651 4] :lbrace [651 26] :rbrace [664 4]}} (when ^{:go/pos {:op-pos [651 14]}} (== ^{:go/pos {:lbrack [651 10] :rbrack [651 12]}} (aget ^{:go/pos {:name-pos [651 7]}} low ^{:go/pos {:name-pos [651 11]}} v) ^{:go/pos {:lbrack [651 22] :rbrack [651 24]}} (aget ^{:go/pos {:name-pos [651 17]}} index ^{:go/pos {:name-pos [651 23]}} v))
+                    (let [^{:tag ^{:go/pos {:lbrack [652 11]}} (slice ^{:go/pos {:name-pos [652 13]}} int32) :go/pos {:name-pos [652 9] :tok-pos [652 5]}} c (zero ^{:go/pos {:lbrack [652 11]}} (slice ^{:go/pos {:name-pos [652 13]}} int32))]
+                      ^{:go/pos {:for [653 5] :lbrace [653 9] :rbrace [662 5]}} (while true
+                        (let [^{:go/pos {:name-pos [654 6] :tok-pos [654 8]}} w ^{:go/pos {:lbrack [654 16] :rbrack [654 29]}} (aget ^{:go/pos {:name-pos [654 11]}} stack ^{:go/apos {2 [654 28]} :go/pos {:op-pos [654 27]}} (- ^{:go/pos {:lparen [654 20] :rparen [654 26]}} (^{:go/pos {:name-pos [654 17]}} len ^{:go/pos {:name-pos [654 21]}} stack) 1))]
+                          ^{:go/pos {:tok-pos [655 12]}} (set! ^{:go/pos {:name-pos [655 6]}} stack ^{:go/pos {:lbrack [655 19] :rbrack [655 33]}} (subslice ^{:go/pos {:name-pos [655 14]}} stack _ ^{:go/apos {2 [655 32]} :go/pos {:op-pos [655 31]}} (- ^{:go/pos {:lparen [655 24] :rparen [655 30]}} (^{:go/pos {:name-pos [655 21]}} len ^{:go/pos {:name-pos [655 25]}} stack) 1)))
+                          ^{:go/apos {3 [656 19]} :go/pos {:lbrack [656 13] :rbrack [656 15] :tok-pos [656 17]}} (aset ^{:go/pos {:name-pos [656 6]}} onStack ^{:go/pos {:name-pos [656 14]}} w false)
+                          ^{:go/pos {:lbrack [657 10] :rbrack [657 12] :tok-pos [657 14]}} (aset ^{:go/pos {:name-pos [657 6]}} comp ^{:go/pos {:name-pos [657 11]}} w ^{:go/pos {:lparen [657 21] :rparen [657 32]}} (conv ^{:go/pos {:name-pos [657 16]}} int32 ^{:go/pos {:lparen [657 25] :rparen [657 31]}} (^{:go/pos {:name-pos [657 22]}} len ^{:go/pos {:name-pos [657 26]}} comps)))
+                          ^{:go/pos {:tok-pos [658 8]}} (set! ^{:go/pos {:name-pos [658 6]}} c ^{:go/pos {:lparen [658 16] :rparen [658 21]}} (^{:go/pos {:name-pos [658 10]}} append ^{:go/pos {:name-pos [658 17]}} c ^{:go/pos {:name-pos [658 20]}} w))
+                          ^{:go/pos {:if [659 6] :lbrace [659 16] :rbrace [661 6]}} (when ^{:go/pos {:op-pos [659 11]}} (== ^{:go/pos {:name-pos [659 9]}} w ^{:go/pos {:name-pos [659 14]}} v)
+                            ^{:go/pos {:tok-pos [660 7]}} (break))))
+
+
+                      ^{:go/pos {:tok-pos [663 11]}} (set! ^{:go/pos {:name-pos [663 5]}} comps ^{:go/pos {:lparen [663 19] :rparen [663 28]}} (^{:go/pos {:name-pos [663 13]}} append ^{:go/pos {:name-pos [663 20]}} comps ^{:go/pos {:name-pos [663 27]}} c))))))))
+
+
+
+          (let [^{:go/pos {:name-pos [667 2] :tok-pos [667 5]}} in ^{:go/pos {:lparen [667 12] :rparen [667 22]}} (^{:go/pos {:name-pos [667 8]}} make ^{:go/pos {:lbrack [667 13]}} (slice ^{:go/pos {:name-pos [667 15]}} bool) ^{:go/pos {:name-pos [667 21]}} n)
+              ^{:tag ^{:go/pos {:lbrack [668 11]}} (slice ^{:go/pos {:name-pos [668 13]}} int32) :go/pos {:name-pos [668 6] :tok-pos [668 2]}} work (zero ^{:go/pos {:lbrack [668 11]}} (slice ^{:go/pos {:name-pos [668 13]}} int32))]
+            ^{:go/pos {:for [669 2] :lbrace [669 26] :range [669 14] :rbrace [686 2] :tok-pos [669 11]}} (range [^{:go/pos {:name-pos [669 6]}} _ ^{:go/pos {:name-pos [669 9]}} c ^{:go/pos {:name-pos [669 20]}} comps]
+              (let ^{:go/apos {3 [671 12]}} [^{:go/pos {:name-pos [670 3] :tok-pos [670 10]}} cyclic ^{:go/apos {2 [670 22]} :go/pos {:op-pos [670 20]}} (> ^{:go/pos {:lparen [670 16] :rparen [670 18]}} (^{:go/pos {:name-pos [670 13]}} len ^{:go/pos {:name-pos [670 17]}} c) 1)
+                  ^{:go/pos {:name-pos [671 3] :tok-pos [671 9]}} hasTr false]
+                ^{:go/pos {:for [672 3] :lbrace [672 23] :range [672 15] :rbrace [677 3] :tok-pos [672 12]}} (range [^{:go/pos {:name-pos [672 7]}} _ ^{:go/pos {:name-pos [672 10]}} v ^{:go/pos {:name-pos [672 21]}} c]
+                  ^{:go/pos {:tok-pos [673 10]}} (set! ^{:go/pos {:name-pos [673 4]}} hasTr ^{:go/pos {:op-pos [673 18]}} (or ^{:go/pos {:name-pos [673 12]}} hasTr ^{:go/apos {2 [673 36]} :go/pos {:op-pos [673 33]}} (!= ^{:go/pos {:dot [673 29] :name-pos [673 30]}} (.-tr ^{:go/pos {:lbrack [673 26] :rbrack [673 28]}} (aget ^{:go/pos {:name-pos [673 21]}} nodes ^{:go/pos {:name-pos [673 27]}} v)) nil)))
+                  ^{:go/pos {:for [674 4] :lbrace [674 37] :range [674 16] :rbrace [676 4] :tok-pos [674 13]}} (range [^{:go/pos {:name-pos [674 8]}} _ ^{:go/pos {:name-pos [674 11]}} w ^{:go/pos {:dot [674 30] :name-pos [674 31]}} (.-edges ^{:go/pos {:lbrack [674 27] :rbrack [674 29]}} (aget ^{:go/pos {:name-pos [674 22]}} nodes ^{:go/pos {:name-pos [674 28]}} v))]
+                    ^{:go/pos {:tok-pos [675 12]}} (set! ^{:go/pos {:name-pos [675 5]}} cyclic ^{:go/pos {:op-pos [675 21]}} (or ^{:go/pos {:name-pos [675 14]}} cyclic ^{:go/pos {:op-pos [675 26]}} (== ^{:go/pos {:name-pos [675 24]}} w ^{:go/pos {:name-pos [675 29]}} v)))))
+
+
+                ^{:go/pos {:if [678 3] :lbrace [678 22] :rbrace [685 3]}} (when ^{:go/pos {:op-pos [678 13]}} (and ^{:go/pos {:name-pos [678 6]}} cyclic ^{:go/pos {:name-pos [678 16]}} hasTr)
+                  ^{:go/pos {:for [679 4] :lbrace [679 24] :range [679 16] :rbrace [684 4] :tok-pos [679 13]}} (range [^{:go/pos {:name-pos [679 8]}} _ ^{:go/pos {:name-pos [679 11]}} v ^{:go/pos {:name-pos [679 22]}} c]
+                    ^{:go/pos {:if [680 5] :lbrace [680 15] :rbrace [683 5]}} (when ^{:go/pos {:op-pos [680 8]}} (not ^{:go/pos {:lbrack [680 11] :rbrack [680 13]}} (aget ^{:go/pos {:name-pos [680 9]}} in ^{:go/pos {:name-pos [680 12]}} v))
+                      ^{:go/apos {3 [681 14]} :go/pos {:lbrack [681 8] :rbrack [681 10] :tok-pos [681 12]}} (aset ^{:go/pos {:name-pos [681 6]}} in ^{:go/pos {:name-pos [681 9]}} v true)
+                      ^{:go/pos {:tok-pos [682 11]}} (set! ^{:go/pos {:name-pos [682 6]}} work ^{:go/pos {:lparen [682 19] :rparen [682 27]}} (^{:go/pos {:name-pos [682 13]}} append ^{:go/pos {:name-pos [682 20]}} work ^{:go/pos {:name-pos [682 26]}} v)))))))
+
+
+
+
+            ^{:go/pos {:for [687 2] :lbrace [687 20] :rbrace [696 2]}} (while ^{:go/apos {2 [687 18]} :go/pos {:op-pos [687 16]}} (> ^{:go/pos {:lparen [687 9] :rparen [687 14]}} (^{:go/pos {:name-pos [687 6]}} len ^{:go/pos {:name-pos [687 10]}} work) 0)
+              (let [^{:go/pos {:name-pos [688 3] :tok-pos [688 5]}} v ^{:go/pos {:lbrack [688 12] :rbrack [688 24]}} (aget ^{:go/pos {:name-pos [688 8]}} work ^{:go/apos {2 [688 23]} :go/pos {:op-pos [688 22]}} (- ^{:go/pos {:lparen [688 16] :rparen [688 21]}} (^{:go/pos {:name-pos [688 13]}} len ^{:go/pos {:name-pos [688 17]}} work) 1))]
+                ^{:go/pos {:tok-pos [689 8]}} (set! ^{:go/pos {:name-pos [689 3]}} work ^{:go/pos {:lbrack [689 14] :rbrack [689 27]}} (subslice ^{:go/pos {:name-pos [689 10]}} work _ ^{:go/apos {2 [689 26]} :go/pos {:op-pos [689 25]}} (- ^{:go/pos {:lparen [689 19] :rparen [689 24]}} (^{:go/pos {:name-pos [689 16]}} len ^{:go/pos {:name-pos [689 20]}} work) 1)))
+                ^{:go/pos {:for [690 3] :lbrace [690 36] :range [690 15] :rbrace [695 3] :tok-pos [690 12]}} (range [^{:go/pos {:name-pos [690 7]}} _ ^{:go/pos {:name-pos [690 10]}} w ^{:go/pos {:dot [690 29] :name-pos [690 30]}} (.-edges ^{:go/pos {:lbrack [690 26] :rbrack [690 28]}} (aget ^{:go/pos {:name-pos [690 21]}} nodes ^{:go/pos {:name-pos [690 27]}} v))]
+                  ^{:go/pos {:if [691 4] :lbrace [691 14] :rbrace [694 4]}} (when ^{:go/pos {:op-pos [691 7]}} (not ^{:go/pos {:lbrack [691 10] :rbrack [691 12]}} (aget ^{:go/pos {:name-pos [691 8]}} in ^{:go/pos {:name-pos [691 11]}} w))
+                    ^{:go/apos {3 [692 13]} :go/pos {:lbrack [692 7] :rbrack [692 9] :tok-pos [692 11]}} (aset ^{:go/pos {:name-pos [692 5]}} in ^{:go/pos {:name-pos [692 8]}} w true)
+                    ^{:go/pos {:tok-pos [693 10]}} (set! ^{:go/pos {:name-pos [693 5]}} work ^{:go/pos {:lparen [693 18] :rparen [693 26]}} (^{:go/pos {:name-pos [693 12]}} append ^{:go/pos {:name-pos [693 19]}} work ^{:go/pos {:name-pos [693 25]}} w))))))
+
+
+
+            ^{:go/pos {:name-pos [697 9]}} in))))))
+
+
+
+
+
+
+^{:go/pos {:doc [700 1] :func [704 1] :lbrace [704 49] :rbrace [798 1] :return [797 2]}} (go/func ^{:go/pos {:name-pos [704 6]}} cyProbe "cyProbe asks Go's collector which of the nodes in are held from outside the set: the edges between them hidden, a\nprobe's finalizer on each (a tracked node's own taken off), runtime.GC() with the GIL held, a wait until every\nprobe ran or Go's finalizers are still; then the slots put back and the probes taken off. The answer: the nodes\nreachable (held from outside, or reached from such a node through the edges).\n" ^{:tag ^{:go/pos {:lbrack [704 42]}} (slice ^{:go/pos {:name-pos [704 44]}} bool) :go/pos {:closing [704 40] :opening [704 13]}} [^{:tag ^{:go/pos {:lbrack [704 20]}} (slice ^{:go/pos {:star [704 22]}} (* ^{:go/pos {:name-pos [704 23]}} cyNode)) :go/pos {:name-pos [704 14]}} nodes ^{:tag ^{:go/pos {:lbrack [704 34]}} (slice ^{:go/pos {:name-pos [704 36]}} bool) :go/pos {:name-pos [704 31]}} in]
+  (let ^{:go/apos {3 [715 10]}} [^{:go/pos {:name-pos [705 2] :tok-pos [705 8]}} probe ^{:go/pos {:func [705 11] :lbrace [705 26] :rbrace [714 2]}} (fn ^{:go/pos {:closing [705 24] :opening [705 15]}} [^{:tag ^{:go/pos {:name-pos [705 18]}} Object :go/pos {:name-pos [705 16]}} o]
+        (let [^{:go/pos {:name-pos [706 3] :tok-pos [706 5]}} a ^{:go/pos {:lparen [706 14] :rparen [706 16]}} (^{:go/pos {:name-pos [706 8]}} addrOf ^{:go/pos {:name-pos [706 15]}} o)]
+          ^{:go/pos {:dot [707 8] :lparen [707 13] :name-pos [707 9] :rparen [707 14]}} (.Lock ^{:go/pos {:name-pos [707 3]}} finMu)
+          ^{:go/pos {:lbrack [708 10] :rbrack [708 12] :tok-pos [708 14]}} (aset ^{:go/pos {:name-pos [708 3]}} cyFired ^{:go/pos {:name-pos [708 11]}} a ^{:go/pos {:name-pos [708 16]}} o)
+          ^{:go/pos {:if [709 3] :lbrace [709 14] :rbrace [711 3]}} (when ^{:go/pos {:op-pos [709 6]}} (not ^{:go/pos {:name-pos [709 7]}} cyOpen)
+            ^{:go/apos {3 [710 16]} :go/pos {:lbrack [710 10] :rbrack [710 12] :tok-pos [710 14]}} (aset ^{:go/pos {:name-pos [710 4]}} cyLate ^{:go/pos {:name-pos [710 11]}} a true))
+
+          ^{:go/pos {:dot [712 8] :lparen [712 15] :name-pos [712 9] :rparen [712 16]}} (.Unlock ^{:go/pos {:name-pos [712 3]}} finMu)
+          ^{:go/apos {2 [713 15]} :go/pos {:dot [713 10] :lparen [713 14] :name-pos [713 11] :rparen [713 16]}} (.Add ^{:go/pos {:name-pos [713 3]}} finRuns 1)))
+
+      ^{:go/pos {:name-pos [715 2] :tok-pos [715 7]}} want 0]
+    ^{:go/pos {:for [716 2] :lbrace [716 26] :range [716 14] :rbrace [722 2] :tok-pos [716 11]}} (range [^{:go/pos {:name-pos [716 6]}} i ^{:go/pos {:name-pos [716 9]}} n ^{:go/pos {:name-pos [716 20]}} nodes]
+      ^{:go/pos {:if [717 3] :lbrace [717 13] :rbrace [719 3]}} (when ^{:go/pos {:op-pos [717 6]}} (not ^{:go/pos {:lbrack [717 9] :rbrack [717 11]}} (aget ^{:go/pos {:name-pos [717 7]}} in ^{:go/pos {:name-pos [717 10]}} i))
+        ^{:go/pos {:tok-pos [718 4]}} (continue))
+
+      ^{:go/pos {:tok-pos [720 7]}} (inc! ^{:go/pos {:name-pos [720 3]}} want)
+      ^{:go/pos {:lparen [721 17] :rparen [721 26]}} (^{:go/pos {:name-pos [721 3]}} cySetFinalizer ^{:go/pos {:name-pos [721 18]}} n ^{:go/pos {:name-pos [721 21]}} probe))
+
+    ;; with its probe set each node outlives its last reference: what an earlier probe held is let go now
+    ^{:go/pos {:dot [724 7] :lparen [724 12] :name-pos [724 8] :rparen [724 13]}} (.Lock ^{:go/pos {:name-pos [724 2]}} finMu)
+    ^{:go/pos {:for [725 2] :lbrace [725 26] :range [725 14] :rbrace [728 2] :tok-pos [725 11]}} (range [^{:go/pos {:name-pos [725 6]}} _ ^{:go/pos {:name-pos [725 9]}} n ^{:go/pos {:name-pos [725 20]}} nodes]
+      ^{:go/pos {:lparen [726 9] :rparen [726 25]}} (^{:go/pos {:name-pos [726 3]}} delete ^{:go/pos {:name-pos [726 10]}} cyFired ^{:go/pos {:dot [726 20] :name-pos [726 21]}} (.-addr ^{:go/pos {:name-pos [726 19]}} n))
+      ^{:go/pos {:lparen [727 9] :rparen [727 24]}} (^{:go/pos {:name-pos [727 3]}} delete ^{:go/pos {:name-pos [727 10]}} cyLate ^{:go/pos {:dot [727 19] :name-pos [727 20]}} (.-addr ^{:go/pos {:name-pos [727 18]}} n)))
+
+    ^{:go/apos {2 [729 11]} :go/pos {:tok-pos [729 9]}} (set! ^{:go/pos {:name-pos [729 2]}} cyOpen true)
+    ^{:go/pos {:dot [730 7] :lparen [730 14] :name-pos [730 8] :rparen [730 15]}} (.Unlock ^{:go/pos {:name-pos [730 2]}} finMu)
+    (let-type [^{:go/pos {:name-pos [731 7] :tok-pos [731 2]}} hidden ^{:go/pos {:lbrace [731 21] :rbrace [734 2] :struct [731 14]}} (struct
+          ^{:tag ^{:go/pos {:star [732 5]}} (* ^{:go/pos {:name-pos [732 6]}} Object) :go/pos {:name-pos [732 3]}} p
+          ^{:tag ^{:go/pos {:name-pos [733 5]}} int32 :go/pos {:name-pos [733 3]}} j)]
+
+      (let [^{:tag ^{:go/pos {:lbrack [735 10]}} (slice ^{:go/pos {:name-pos [735 12]}} hidden) :go/pos {:name-pos [735 6] :tok-pos [735 2]}} hid (zero ^{:go/pos {:lbrack [735 10]}} (slice ^{:go/pos {:name-pos [735 12]}} hidden))]
+        ^{:go/pos {:for [736 2] :lbrace [736 26] :range [736 14] :rbrace [746 2] :tok-pos [736 11]}} (range [^{:go/pos {:name-pos [736 6]}} i ^{:go/pos {:name-pos [736 9]}} n ^{:go/pos {:name-pos [736 20]}} nodes]
+          ^{:go/pos {:if [737 3] :lbrace [737 13] :rbrace [739 3]}} (when ^{:go/pos {:op-pos [737 6]}} (not ^{:go/pos {:lbrack [737 9] :rbrack [737 11]}} (aget ^{:go/pos {:name-pos [737 7]}} in ^{:go/pos {:name-pos [737 10]}} i))
+            ^{:go/pos {:tok-pos [738 4]}} (continue))
+
+          ^{:go/pos {:for [740 3] :lbrace [740 29] :range [740 15] :rbrace [745 3] :tok-pos [740 12]}} (range [^{:go/pos {:name-pos [740 7]}} k ^{:go/pos {:name-pos [740 10]}} p ^{:go/pos {:dot [740 22] :name-pos [740 23]}} (.-slots ^{:go/pos {:name-pos [740 21]}} n)]
+            ^{:go/pos {:if [741 4] :lbrace [741 43] :rbrace [744 4]}} (when [^{:go/pos {:name-pos [741 7] :tok-pos [741 9]}} j ^{:go/pos {:lbrack [741 19] :rbrack [741 21]}} (aget ^{:go/pos {:dot [741 13] :name-pos [741 14]}} (.-edges ^{:go/pos {:name-pos [741 12]}} n) ^{:go/pos {:name-pos [741 20]}} k)] ^{:go/pos {:op-pos [741 30]}} (and ^{:go/pos {:lbrack [741 26] :rbrack [741 28]}} (aget ^{:go/pos {:name-pos [741 24]}} in ^{:go/pos {:name-pos [741 27]}} j) ^{:go/apos {2 [741 39]} :go/pos {:op-pos [741 36]}} (!= ^{:go/pos {:star [741 33]}} @^{:go/pos {:name-pos [741 34]}} p nil))
+              ^{:go/pos {:tok-pos [742 9]}} (set! ^{:go/pos {:name-pos [742 5]}} hid ^{:go/pos {:lparen [742 17] :rparen [742 35]}} (^{:go/pos {:name-pos [742 11]}} append ^{:go/pos {:name-pos [742 18]}} hid ^{:go/pos {:lbrace [742 29] :rbrace [742 34]}} (lit ^{:go/pos {:name-pos [742 23]}} hidden ^{:go/pos {:name-pos [742 30]}} p ^{:go/pos {:name-pos [742 33]}} j)))
+              ^{:go/apos {2 [743 10]} :go/pos {:tok-pos [743 8]}} (set! ^{:go/pos {:star [743 5]}} @^{:go/pos {:name-pos [743 6]}} p nil))))
+
+
+
+        ^{:go/pos {:lparen [747 12] :rparen [747 13]}} (^{:go/pos {:dot [747 9] :name-pos [747 10] :x-pos [747 2]}} runtime/GC)
+        (let [^{:go/pos {:name-pos [748 2] :tok-pos [748 7]}} last ^{:go/pos {:dot [748 17] :lparen [748 22] :name-pos [748 18] :rparen [748 23]}} (.Load ^{:go/pos {:name-pos [748 10]}} finRuns)]
+          ^{:go/pos {:for [749 2] :lbrace [749 65] :rbrace [762 2]}} (for [^{:go/pos {:tok-pos [749 20]}} (values ^{:go/pos {:name-pos [749 6]}} quiet ^{:go/pos {:name-pos [749 13]}} waited) ^{:go/apos {1 [749 23] 2 [749 26]}} (values 0 0)] ^{:go/pos {:op-pos [749 39]}} (and ^{:go/apos {2 [749 37]} :go/pos {:op-pos [749 35]}} (< ^{:go/pos {:name-pos [749 29]}} quiet 3) ^{:go/apos {2 [749 51]} :go/pos {:op-pos [749 49]}} (< ^{:go/pos {:name-pos [749 42]}} waited 500)) ^{:go/pos {:tok-pos [749 62]}} (inc! ^{:go/pos {:name-pos [749 56]}} waited)
+            ^{:go/pos {:dot [750 8] :lparen [750 13] :name-pos [750 9] :rparen [750 14]}} (.Lock ^{:go/pos {:name-pos [750 3]}} finMu)
+            (let [^{:go/pos {:name-pos [751 3] :tok-pos [751 7]}} all ^{:go/pos {:op-pos [751 29]}} (== ^{:go/pos {:lparen [751 17] :rparen [751 27]}} (^{:go/pos {:name-pos [751 10]}} cyCount ^{:go/pos {:name-pos [751 18]}} nodes ^{:go/pos {:name-pos [751 25]}} in) ^{:go/pos {:name-pos [751 32]}} want)]
+              ^{:go/pos {:dot [752 8] :lparen [752 15] :name-pos [752 9] :rparen [752 16]}} (.Unlock ^{:go/pos {:name-pos [752 3]}} finMu)
+              ^{:go/pos {:if [753 3] :lbrace [753 10] :rbrace [755 3]}} (when ^{:go/pos {:name-pos [753 6]}} all
+                ^{:go/pos {:tok-pos [754 4]}} (break))
+
+              ^{:go/pos {:lparen [756 13] :rparen [756 30]}} (^{:go/pos {:dot [756 7] :name-pos [756 8] :x-pos [756 3]}} time/Sleep ^{:go/pos {:dot [756 18] :name-pos [756 19] :x-pos [756 14]}} time/Millisecond)
+              ^{:go/pos {:else-lbrace [759 10] :else-rbrace [761 3] :if [757 3] :lbrace [757 41] :rbrace [759 3]}} (if [^{:go/pos {:name-pos [757 6] :tok-pos [757 10]}} now ^{:go/pos {:dot [757 20] :lparen [757 25] :name-pos [757 21] :rparen [757 26]}} (.Load ^{:go/pos {:name-pos [757 13]}} finRuns)] ^{:go/pos {:op-pos [757 33]}} (!= ^{:go/pos {:name-pos [757 29]}} now ^{:go/pos {:name-pos [757 36]}} last)
+                ^{:go/pos {:tok-pos [758 16]}} (set! (values ^{:go/pos {:name-pos [758 4]}} last ^{:go/pos {:name-pos [758 10]}} quiet) ^{:go/apos {2 [758 23]}} (values ^{:go/pos {:name-pos [758 18]}} now 0))
+
+                ^{:go/pos {:tok-pos [760 9]}} (inc! ^{:go/pos {:name-pos [760 4]}} quiet))))
+
+
+          ^{:go/pos {:dot [763 7] :lparen [763 12] :name-pos [763 8] :rparen [763 13]}} (.Lock ^{:go/pos {:name-pos [763 2]}} finMu)
+          (let [^{:go/pos {:name-pos [764 2] :tok-pos [764 8]}} fired ^{:go/pos {:lparen [764 15] :rparen [764 34]}} (^{:go/pos {:name-pos [764 11]}} make ^{:go/pos {:lbrack [764 16]}} (slice ^{:go/pos {:name-pos [764 18]}} bool) ^{:go/pos {:lparen [764 27] :rparen [764 33]}} (^{:go/pos {:name-pos [764 24]}} len ^{:go/pos {:name-pos [764 28]}} nodes))]
+            ^{:go/pos {:for [765 2] :lbrace [765 26] :range [765 14] :rbrace [768 2] :tok-pos [765 11]}} (range [^{:go/pos {:name-pos [765 6]}} i ^{:go/pos {:name-pos [765 9]}} n ^{:go/pos {:name-pos [765 20]}} nodes]
+              ^{:go/pos {:tok-pos [766 15]}} (set! (values ^{:go/pos {:name-pos [766 3]}} _ ^{:go/pos {:lbrack [766 11] :rbrack [766 13]}} (aget ^{:go/pos {:name-pos [766 6]}} fired ^{:go/pos {:name-pos [766 12]}} i)) ^{:go/pos {:lbrack [766 24] :rbrack [766 31]}} (aget ^{:go/pos {:name-pos [766 17]}} cyFired ^{:go/pos {:dot [766 26] :name-pos [766 27]}} (.-addr ^{:go/pos {:name-pos [766 25]}} n)))
+              ^{:go/pos {:lbrack [767 8] :rbrack [767 10] :tok-pos [767 12]}} (aset ^{:go/pos {:name-pos [767 3]}} fired ^{:go/pos {:name-pos [767 9]}} i ^{:go/pos {:op-pos [767 23]}} (and ^{:go/pos {:lbrack [767 19] :rbrack [767 21]}} (aget ^{:go/pos {:name-pos [767 14]}} fired ^{:go/pos {:name-pos [767 20]}} i) ^{:go/pos {:lbrack [767 28] :rbrack [767 30]}} (aget ^{:go/pos {:name-pos [767 26]}} in ^{:go/pos {:name-pos [767 29]}} i))))
+
+            ^{:go/apos {2 [769 11]} :go/pos {:tok-pos [769 9]}} (set! ^{:go/pos {:name-pos [769 2]}} cyOpen false)
+            ^{:go/pos {:dot [770 7] :lparen [770 14] :name-pos [770 8] :rparen [770 15]}} (.Unlock ^{:go/pos {:name-pos [770 2]}} finMu)
+            ^{:go/pos {:for [771 2] :lbrace [771 24] :range [771 14] :rbrace [773 2] :tok-pos [771 11]}} (range [^{:go/pos {:name-pos [771 6]}} _ ^{:go/pos {:name-pos [771 9]}} h ^{:go/pos {:name-pos [771 20]}} hid]
+              ^{:go/pos {:tok-pos [772 8]}} (set! ^{:go/pos {:star [772 3]}} @^{:go/pos {:dot [772 5] :name-pos [772 6]}} (.-p ^{:go/pos {:name-pos [772 4]}} h) ^{:go/pos {:dot [772 20] :lparen [772 27] :name-pos [772 21] :rparen [772 28]}} (.object ^{:go/pos {:lbrack [772 15] :rbrack [772 19]}} (aget ^{:go/pos {:name-pos [772 10]}} nodes ^{:go/pos {:dot [772 17] :name-pos [772 18]}} (.-j ^{:go/pos {:name-pos [772 16]}} h)))))
+
+            ^{:go/pos {:for [774 2] :lbrace [774 26] :range [774 14] :rbrace [778 2] :tok-pos [774 11]}} (range [^{:go/pos {:name-pos [774 6]}} i ^{:go/pos {:name-pos [774 9]}} n ^{:go/pos {:name-pos [774 20]}} nodes]
+              ^{:go/pos {:if [775 3] :lbrace [775 25] :rbrace [777 3]}} (when ^{:go/pos {:op-pos [775 12]}} (and ^{:go/pos {:lbrack [775 8] :rbrack [775 10]}} (aget ^{:go/pos {:name-pos [775 6]}} in ^{:go/pos {:name-pos [775 9]}} i) ^{:go/pos {:op-pos [775 15]}} (not ^{:go/pos {:lbrack [775 21] :rbrack [775 23]}} (aget ^{:go/pos {:name-pos [775 16]}} fired ^{:go/pos {:name-pos [775 22]}} i)))
+                ^{:go/apos {2 [776 37]} :go/pos {:lparen [776 24] :rparen [776 40]}} (^{:go/pos {:dot [776 11] :name-pos [776 12] :x-pos [776 4]}} runtime/SetFinalizer ^{:go/pos {:dot [776 26] :lparen [776 33] :name-pos [776 27] :rparen [776 34]}} (.object ^{:go/pos {:name-pos [776 25]}} n) nil)))
+
+
+            (let [^{:go/pos {:name-pos [779 2] :tok-pos [779 8]}} reach ^{:go/pos {:lparen [779 15] :rparen [779 34]}} (^{:go/pos {:name-pos [779 11]}} make ^{:go/pos {:lbrack [779 16]}} (slice ^{:go/pos {:name-pos [779 18]}} bool) ^{:go/pos {:lparen [779 27] :rparen [779 33]}} (^{:go/pos {:name-pos [779 24]}} len ^{:go/pos {:name-pos [779 28]}} nodes))
+                ^{:tag ^{:go/pos {:lbrack [780 11]}} (slice ^{:go/pos {:name-pos [780 13]}} int32) :go/pos {:name-pos [780 6] :tok-pos [780 2]}} work (zero ^{:go/pos {:lbrack [780 11]}} (slice ^{:go/pos {:name-pos [780 13]}} int32))]
+              ^{:go/pos {:for [781 2] :lbrace [781 23] :range [781 11] :rbrace [786 2] :tok-pos [781 8]}} (range [^{:go/pos {:name-pos [781 6]}} i ^{:go/pos {:name-pos [781 17]}} nodes]
+                ^{:go/pos {:if [782 3] :lbrace [782 25] :rbrace [785 3]}} (when ^{:go/pos {:op-pos [782 12]}} (and ^{:go/pos {:lbrack [782 8] :rbrack [782 10]}} (aget ^{:go/pos {:name-pos [782 6]}} in ^{:go/pos {:name-pos [782 9]}} i) ^{:go/pos {:op-pos [782 15]}} (not ^{:go/pos {:lbrack [782 21] :rbrack [782 23]}} (aget ^{:go/pos {:name-pos [782 16]}} fired ^{:go/pos {:name-pos [782 22]}} i)))
+                  ^{:go/apos {3 [783 15]} :go/pos {:lbrack [783 9] :rbrack [783 11] :tok-pos [783 13]}} (aset ^{:go/pos {:name-pos [783 4]}} reach ^{:go/pos {:name-pos [783 10]}} i true)
+                  ^{:go/pos {:tok-pos [784 9]}} (set! ^{:go/pos {:name-pos [784 4]}} work ^{:go/pos {:lparen [784 17] :rparen [784 32]}} (^{:go/pos {:name-pos [784 11]}} append ^{:go/pos {:name-pos [784 18]}} work ^{:go/pos {:lparen [784 29] :rparen [784 31]}} (conv ^{:go/pos {:name-pos [784 24]}} int32 ^{:go/pos {:name-pos [784 30]}} i)))))
+
+
+              ^{:go/pos {:for [787 2] :lbrace [787 20] :rbrace [796 2]}} (while ^{:go/apos {2 [787 18]} :go/pos {:op-pos [787 16]}} (> ^{:go/pos {:lparen [787 9] :rparen [787 14]}} (^{:go/pos {:name-pos [787 6]}} len ^{:go/pos {:name-pos [787 10]}} work) 0)
+                (let [^{:go/pos {:name-pos [788 3] :tok-pos [788 5]}} v ^{:go/pos {:lbrack [788 12] :rbrack [788 24]}} (aget ^{:go/pos {:name-pos [788 8]}} work ^{:go/apos {2 [788 23]} :go/pos {:op-pos [788 22]}} (- ^{:go/pos {:lparen [788 16] :rparen [788 21]}} (^{:go/pos {:name-pos [788 13]}} len ^{:go/pos {:name-pos [788 17]}} work) 1))]
+                  ^{:go/pos {:tok-pos [789 8]}} (set! ^{:go/pos {:name-pos [789 3]}} work ^{:go/pos {:lbrack [789 14] :rbrack [789 27]}} (subslice ^{:go/pos {:name-pos [789 10]}} work _ ^{:go/apos {2 [789 26]} :go/pos {:op-pos [789 25]}} (- ^{:go/pos {:lparen [789 19] :rparen [789 24]}} (^{:go/pos {:name-pos [789 16]}} len ^{:go/pos {:name-pos [789 20]}} work) 1)))
+                  ^{:go/pos {:for [790 3] :lbrace [790 36] :range [790 15] :rbrace [795 3] :tok-pos [790 12]}} (range [^{:go/pos {:name-pos [790 7]}} _ ^{:go/pos {:name-pos [790 10]}} w ^{:go/pos {:dot [790 29] :name-pos [790 30]}} (.-edges ^{:go/pos {:lbrack [790 26] :rbrack [790 28]}} (aget ^{:go/pos {:name-pos [790 21]}} nodes ^{:go/pos {:name-pos [790 27]}} v))]
+                    ^{:go/pos {:if [791 4] :lbrace [791 26] :rbrace [794 4]}} (when ^{:go/pos {:op-pos [791 13]}} (and ^{:go/pos {:lbrack [791 9] :rbrack [791 11]}} (aget ^{:go/pos {:name-pos [791 7]}} in ^{:go/pos {:name-pos [791 10]}} w) ^{:go/pos {:op-pos [791 16]}} (not ^{:go/pos {:lbrack [791 22] :rbrack [791 24]}} (aget ^{:go/pos {:name-pos [791 17]}} reach ^{:go/pos {:name-pos [791 23]}} w)))
+                      ^{:go/apos {3 [792 16]} :go/pos {:lbrack [792 10] :rbrack [792 12] :tok-pos [792 14]}} (aset ^{:go/pos {:name-pos [792 5]}} reach ^{:go/pos {:name-pos [792 11]}} w true)
+                      ^{:go/pos {:tok-pos [793 10]}} (set! ^{:go/pos {:name-pos [793 5]}} work ^{:go/pos {:lparen [793 18] :rparen [793 26]}} (^{:go/pos {:name-pos [793 12]}} append ^{:go/pos {:name-pos [793 19]}} work ^{:go/pos {:name-pos [793 25]}} w))))))
+
+
+
+              ^{:go/pos {:name-pos [797 9]}} reach)))))))
+
+
+
+^{:go/pos {:doc [800 1] :func [801 1] :lbrace [801 52] :rbrace [807 1]}} (go/func ^{:go/pos {:name-pos [801 6]}} cySetFinalizer "cySetFinalizer gives n's object the probe's Go finalizer (a tracked node's own taken off first: Go allows one).\n" ^{:go/pos {:closing [801 50] :opening [801 20]}} [^{:tag ^{:go/pos {:star [801 23]}} (* ^{:go/pos {:name-pos [801 24]}} cyNode) :go/pos {:name-pos [801 21]}} n ^{:tag ^{:go/pos {:func [801 38]}} (func ^{:go/pos {:closing [801 49] :opening [801 42]}} [^{:go/pos {:name-pos [801 43]}} Object]) :go/pos {:name-pos [801 32]}} probe]
+  (let [^{:go/pos {:name-pos [802 2] :tok-pos [802 4]}} o ^{:go/pos {:dot [802 8] :lparen [802 15] :name-pos [802 9] :rparen [802 16]}} (.object ^{:go/pos {:name-pos [802 7]}} n)]
+    ^{:go/pos {:if [803 2] :lbrace [803 17] :rbrace [805 2]}} (when ^{:go/apos {2 [803 13]} :go/pos {:op-pos [803 10]}} (!= ^{:go/pos {:dot [803 6] :name-pos [803 7]}} (.-tr ^{:go/pos {:name-pos [803 5]}} n) nil)
+      ^{:go/apos {2 [804 27]} :go/pos {:lparen [804 23] :rparen [804 30]}} (^{:go/pos {:dot [804 10] :name-pos [804 11] :x-pos [804 3]}} runtime/SetFinalizer ^{:go/pos {:name-pos [804 24]}} o nil))
+
+    ^{:go/pos {:lparen [806 22] :rparen [806 31]}} (^{:go/pos {:dot [806 9] :name-pos [806 10] :x-pos [806 2]}} runtime/SetFinalizer ^{:go/pos {:name-pos [806 23]}} o ^{:go/pos {:name-pos [806 26]}} probe)))
+
+
+
+^{:go/pos {:doc [809 1] :func [810 1] :lbrace [810 27] :rbrace [824 1]}} (go/func ^{:go/pos {:name-pos [810 6]}} cyRestore "cyRestore gives a surviving tracked node its own Go finalizer again (its record dropped when it needs none).\n" ^{:go/pos {:closing [810 25] :opening [810 15]}} [^{:tag ^{:go/pos {:star [810 18]}} (* ^{:go/pos {:name-pos [810 19]}} cyNode) :go/pos {:name-pos [810 16]}} n]
+  ^{:go/pos {:if [811 2] :lbrace [811 17] :rbrace [813 2]}} (when ^{:go/apos {2 [811 13]} :go/pos {:op-pos [811 10]}} (== ^{:go/pos {:dot [811 6] :name-pos [811 7]}} (.-tr ^{:go/pos {:name-pos [811 5]}} n) nil)
+    ^{:go/pos {:return [812 3]}} (return))
+
+  (let [^{:go/pos {:name-pos [814 2] :tok-pos [814 4]}} o ^{:go/pos {:dot [814 8] :lparen [814 15] :name-pos [814 9] :rparen [814 16]}} (.object ^{:go/pos {:name-pos [814 7]}} n)]
+    ^{:go/pos {:dot [815 7] :lparen [815 12] :name-pos [815 8] :rparen [815 13]}} (.Lock ^{:go/pos {:name-pos [815 2]}} finMu)
+    ^{:go/pos {:if [816 2] :lbrace [816 29] :rbrace [822 2]}} (when ^{:go/pos {:op-pos [816 21]}} (== ^{:go/pos {:lbrack [816 12] :rbrack [816 19]}} (aget ^{:go/pos {:name-pos [816 5]}} tracked ^{:go/pos {:dot [816 14] :name-pos [816 15]}} (.-addr ^{:go/pos {:name-pos [816 13]}} n)) ^{:go/pos {:dot [816 25] :name-pos [816 26]}} (.-tr ^{:go/pos {:name-pos [816 24]}} n))
+      ^{:go/pos {:else-lbrace [819 10] :else-rbrace [821 3] :if [817 3] :lbrace [817 63] :rbrace [819 3]}} (if ^{:go/ops [[817 26] [817 44]] :go/pos {:op-pos [817 44]}} (and ^{:go/apos {2 [817 24]} :go/pos {:op-pos [817 21]}} (== ^{:go/pos {:lparen [817 9] :rparen [817 19]}} (^{:go/pos {:name-pos [817 6]}} len ^{:go/pos {:dot [817 14] :name-pos [817 15]}} (.-refs ^{:go/pos {:dot [817 11] :name-pos [817 12]}} (.-tr ^{:go/pos {:name-pos [817 10]}} n))) 0) ^{:go/apos {2 [817 42]} :go/pos {:op-pos [817 39]}} (== ^{:go/pos {:dot [817 33] :name-pos [817 34]}} (.-work ^{:go/pos {:dot [817 30] :name-pos [817 31]}} (.-tr ^{:go/pos {:name-pos [817 29]}} n)) 0) ^{:go/apos {2 [817 61]} :go/pos {:op-pos [817 58]}} (== ^{:go/pos {:dot [817 51] :name-pos [817 52]}} (.-ident ^{:go/pos {:dot [817 48] :name-pos [817 49]}} (.-tr ^{:go/pos {:name-pos [817 47]}} n)) 0))
+        ^{:go/pos {:lparen [818 10] :rparen [818 26]}} (^{:go/pos {:name-pos [818 4]}} delete ^{:go/pos {:name-pos [818 11]}} tracked ^{:go/pos {:dot [818 21] :name-pos [818 22]}} (.-addr ^{:go/pos {:name-pos [818 20]}} n))
+
+        ^{:go/pos {:lparen [820 24] :rparen [820 39]}} (^{:go/pos {:dot [820 11] :name-pos [820 12] :x-pos [820 4]}} runtime/SetFinalizer ^{:go/pos {:name-pos [820 25]}} o ^{:go/pos {:name-pos [820 28]}} goFinalized)))
+
+
+    ^{:go/pos {:dot [823 7] :lparen [823 14] :name-pos [823 8] :rparen [823 15]}} (.Unlock ^{:go/pos {:name-pos [823 2]}} finMu)))
+
+
+
+
+^{:go/pos {:doc [826 1] :func [828 1] :lbrace [828 50] :rbrace [845 1] :return [844 2]}} (go/func ^{:go/pos {:name-pos [828 6]}} cyClearWeakRefs "cyClearWeakRefs clears the weak references to the trash's tracked nodes (handle_weakrefs): their callbacks, in each\nlist's order, returned to be called once all are cleared (a weak reference is never a node: always \"outside\").\n" ^{:tag ^{:go/pos {:lbrack [828 39]}} (slice ^{:go/pos {:star [828 41]}} (* ^{:go/pos {:name-pos [828 42]}} WeakRef)) :go/pos {:closing [828 37] :opening [828 21]}} [^{:tag ^{:go/pos {:lbrack [828 28]}} (slice ^{:go/pos {:star [828 30]}} (* ^{:go/pos {:name-pos [828 31]}} cyNode)) :go/pos {:name-pos [828 22]}} trash]
+  (let [^{:tag ^{:go/pos {:lbrack [829 10]}} (slice ^{:go/pos {:star [829 12]}} (* ^{:go/pos {:name-pos [829 13]}} WeakRef)) :go/pos {:name-pos [829 6] :tok-pos [829 2]}} cbs (zero ^{:go/pos {:lbrack [829 10]}} (slice ^{:go/pos {:star [829 12]}} (* ^{:go/pos {:name-pos [829 13]}} WeakRef)))]
+    ^{:go/pos {:dot [830 7] :lparen [830 12] :name-pos [830 8] :rparen [830 13]}} (.Lock ^{:go/pos {:name-pos [830 2]}} finMu)
+    ^{:go/pos {:for [831 2] :lbrace [831 26] :range [831 14] :rbrace [842 2] :tok-pos [831 11]}} (range [^{:go/pos {:name-pos [831 6]}} _ ^{:go/pos {:name-pos [831 9]}} n ^{:go/pos {:name-pos [831 20]}} trash]
+      ^{:go/pos {:if [832 3] :lbrace [832 18] :rbrace [834 3]}} (when ^{:go/apos {2 [832 14]} :go/pos {:op-pos [832 11]}} (== ^{:go/pos {:dot [832 7] :name-pos [832 8]}} (.-tr ^{:go/pos {:name-pos [832 6]}} n) nil)
+        ^{:go/pos {:tok-pos [833 4]}} (continue))
+
+      ^{:go/pos {:for [835 3] :lbrace [835 31] :range [835 15] :rbrace [840 3] :tok-pos [835 12]}} (range [^{:go/pos {:name-pos [835 7]}} _ ^{:go/pos {:name-pos [835 10]}} r ^{:go/pos {:dot [835 25] :name-pos [835 26]}} (.-refs ^{:go/pos {:dot [835 22] :name-pos [835 23]}} (.-tr ^{:go/pos {:name-pos [835 21]}} n))]
+        ^{:go/apos {2 [836 13]} :go/pos {:tok-pos [836 11]}} (set! ^{:go/pos {:dot [836 5] :name-pos [836 6]}} (.-addr ^{:go/pos {:name-pos [836 4]}} r) 0)
+        ^{:go/pos {:if [837 4] :lbrace [837 47] :rbrace [839 4]}} (when ^{:go/pos {:op-pos [837 25]}} (and ^{:go/apos {2 [837 21]} :go/pos {:op-pos [837 18]}} (!= ^{:go/pos {:dot [837 8] :name-pos [837 9]}} (.-callback ^{:go/pos {:name-pos [837 7]}} r) nil) ^{:go/pos {:op-pos [837 39]}} (!= ^{:go/pos {:dot [837 29] :name-pos [837 30]}} (.-callback ^{:go/pos {:name-pos [837 28]}} r) ^{:go/pos {:name-pos [837 42]}} None))
+          ^{:go/pos {:tok-pos [838 9]}} (set! ^{:go/pos {:name-pos [838 5]}} cbs ^{:go/pos {:lparen [838 17] :rparen [838 24]}} (^{:go/pos {:name-pos [838 11]}} append ^{:go/pos {:name-pos [838 18]}} cbs ^{:go/pos {:name-pos [838 23]}} r))))
+
+
+      ^{:go/apos {2 [841 15]} :go/pos {:tok-pos [841 13]}} (set! ^{:go/pos {:dot [841 7] :name-pos [841 8]}} (.-refs ^{:go/pos {:dot [841 4] :name-pos [841 5]}} (.-tr ^{:go/pos {:name-pos [841 3]}} n)) nil))
+
+    ^{:go/pos {:dot [843 7] :lparen [843 14] :name-pos [843 8] :rparen [843 15]}} (.Unlock ^{:go/pos {:name-pos [843 2]}} finMu)
+    ^{:go/pos {:name-pos [844 9]}} cbs))
+
+
+
+^{:go/pos {:doc [847 1] :func [848 1] :lbrace [848 22] :rbrace [905 1] :return [904 2]}} (go/func ^{:go/pos {:name-pos [848 6]}} cyCollect "cyCollect is gc.collect()'s cycle detection: the trash found, PEP 442's order run over it; the number of trash nodes.\n" ^{:tag ^{:go/pos {:name-pos [848 18]}} int :go/pos {:closing [848 16] :opening [848 15]}} []
+  ^{:go/pos {:if [849 2] :lbrace [849 16] :rbrace [851 2]}} (when ^{:go/pos {:name-pos [849 5]}} finDisable
+    ^{:go/apos {1 [850 10]} :go/pos {:return [850 3]}} (return 0))
+
+  ^{:go/pos {:defer [852 2]}} (defer ^{:go/pos {:lparen [857 3] :rparen [857 4]}} (^{:go/pos {:func [852 8] :lbrace [852 15] :rbrace [857 2]}} (fn ^{:go/pos {:closing [852 13] :opening [852 12]}} []
+        ^{:go/pos {:dot [853 8] :lparen [853 13] :name-pos [853 9] :rparen [853 14]}} (.Lock ^{:go/pos {:name-pos [853 3]}} finMu)
+        ^{:go/pos {:lparen [854 8] :rparen [854 16]}} (^{:go/pos {:name-pos [854 3]}} clear ^{:go/pos {:name-pos [854 9]}} cyFired)
+        ^{:go/pos {:lparen [855 8] :rparen [855 15]}} (^{:go/pos {:name-pos [855 3]}} clear ^{:go/pos {:name-pos [855 9]}} cyLate)
+        ^{:go/pos {:dot [856 8] :lparen [856 15] :name-pos [856 9] :rparen [856 16]}} (.Unlock ^{:go/pos {:name-pos [856 3]}} finMu))))
+
+  (let [^{:go/pos {:name-pos [858 2] :tok-pos [858 8]}} trash ^{:go/apos {1 [858 18]} :go/pos {:lparen [858 17] :rparen [858 21]}} (^{:go/pos {:name-pos [858 11]}} cyFind nil)]
+    ^{:go/pos {:if [859 2] :lbrace [859 21] :rbrace [861 2]}} (when ^{:go/apos {2 [859 19]} :go/pos {:op-pos [859 16]}} (== ^{:go/pos {:lparen [859 8] :rparen [859 14]}} (^{:go/pos {:name-pos [859 5]}} len ^{:go/pos {:name-pos [859 9]}} trash) 0)
+      ^{:go/apos {1 [860 10]} :go/pos {:return [860 3]}} (return 0))
+
+    (let ^{:go/apos {1 [862 9]}} [^{:go/pos {:name-pos [862 2] :tok-pos [862 6]}} ran false]
+      ^{:go/pos {:if [863 2] :lbrace [863 49] :rbrace [866 2]}} (when [^{:go/pos {:name-pos [863 5] :tok-pos [863 9]}} cbs ^{:go/pos {:lparen [863 27] :rparen [863 33]}} (^{:go/pos {:name-pos [863 12]}} cyClearWeakRefs ^{:go/pos {:name-pos [863 28]}} trash)] ^{:go/apos {2 [863 47]} :go/pos {:op-pos [863 45]}} (> ^{:go/pos {:lparen [863 39] :rparen [863 43]}} (^{:go/pos {:name-pos [863 36]}} len ^{:go/pos {:name-pos [863 40]}} cbs) 0)
+        ^{:go/apos {2 [864 9]} :go/pos {:tok-pos [864 7]}} (set! ^{:go/pos {:name-pos [864 3]}} ran true)
+        ^{:go/pos {:lparen [865 16] :rparen [865 37]}} (^{:go/pos {:name-pos [865 3]}} weakCallbacks ^{:go/pos {:op-pos [865 17]}} (addr ^{:go/acolon {2 [865 31]} :go/apos {2 [865 27]} :go/pos {:lbrace [865 26] :rbrace [865 36]}} (lit ^{:go/pos {:name-pos [865 18]}} finTrack :refs ^{:go/pos {:name-pos [865 33]}} cbs))))
+
+      ^{:go/pos {:for [867 2] :lbrace [867 26] :range [867 14] :rbrace [879 2] :tok-pos [867 11]}} (range [^{:go/pos {:name-pos [867 6]}} _ ^{:go/pos {:name-pos [867 9]}} n ^{:go/pos {:name-pos [867 20]}} trash]
+        ^{:go/pos {:if [868 3] :lbrace [868 18] :rbrace [870 3]}} (when ^{:go/apos {2 [868 14]} :go/pos {:op-pos [868 11]}} (== ^{:go/pos {:dot [868 7] :name-pos [868 8]}} (.-tr ^{:go/pos {:name-pos [868 6]}} n) nil)
+          ^{:go/pos {:tok-pos [869 4]}} (continue))
+
+        ^{:go/pos {:dot [871 8] :lparen [871 13] :name-pos [871 9] :rparen [871 14]}} (.Lock ^{:go/pos {:name-pos [871 3]}} finMu)
+        (let [^{:go/pos {:name-pos [872 3] :tok-pos [872 5]}} w ^{:go/pos {:dot [872 12] :name-pos [872 13]}} (.-work ^{:go/pos {:dot [872 9] :name-pos [872 10]}} (.-tr ^{:go/pos {:name-pos [872 8]}} n))]
+          ^{:go/apos {2 [873 15]} :go/pos {:tok-pos [873 13]}} (set! ^{:go/pos {:dot [873 7] :name-pos [873 8]}} (.-work ^{:go/pos {:dot [873 4] :name-pos [873 5]}} (.-tr ^{:go/pos {:name-pos [873 3]}} n)) 0)
+          ^{:go/pos {:dot [874 8] :lparen [874 15] :name-pos [874 9] :rparen [874 16]}} (.Unlock ^{:go/pos {:name-pos [874 3]}} finMu)
+          ^{:go/pos {:if [875 3] :lbrace [875 13] :rbrace [878 3]}} (when ^{:go/apos {2 [875 11]} :go/pos {:op-pos [875 8]}} (!= ^{:go/pos {:name-pos [875 6]}} w 0)
+            ^{:go/apos {2 [876 10]} :go/pos {:tok-pos [876 8]}} (set! ^{:go/pos {:name-pos [876 4]}} ran true)
+            ^{:go/pos {:lparen [877 11] :rparen [877 25]}} (^{:go/pos {:name-pos [877 4]}} runWork ^{:go/pos {:dot [877 13] :lparen [877 20] :name-pos [877 14] :rparen [877 21]}} (.object ^{:go/pos {:name-pos [877 12]}} n) ^{:go/pos {:name-pos [877 24]}} w))))
+
+
+      (let [^{:go/pos {:name-pos [880 2] :tok-pos [880 8]}} final ^{:go/pos {:name-pos [880 11]}} trash]
+        ^{:go/pos {:if [881 2] :lbrace [881 9] :rbrace [888 2]}} (when ^{:go/pos {:name-pos [881 5]}} ran
+          ^{:go/pos {:tok-pos [882 9]}} (set! ^{:go/pos {:name-pos [882 3]}} final ^{:go/pos {:lparen [882 17] :rparen [882 23]}} (^{:go/pos {:name-pos [882 11]}} cyFind ^{:go/pos {:name-pos [882 18]}} trash))
+          ^{:go/pos {:for [883 3] :lbrace [883 27] :range [883 15] :rbrace [887 3] :tok-pos [883 12]}} (range [^{:go/pos {:name-pos [883 7]}} _ ^{:go/pos {:name-pos [883 10]}} n ^{:go/pos {:name-pos [883 21]}} trash]
+            ^{:go/pos {:if [884 4] :lbrace [884 50] :rbrace [886 4]}} (when [^{:go/pos {:tok-pos [884 16]}} (values ^{:go/pos {:name-pos [884 7]}} _ ^{:go/pos {:name-pos [884 10]}} still) ^{:go/pos {:lparen [884 26] :rparen [884 40]}} (^{:go/pos {:name-pos [884 19]}} cyIndex ^{:go/pos {:name-pos [884 27]}} final ^{:go/pos {:dot [884 35] :name-pos [884 36]}} (.-addr ^{:go/pos {:name-pos [884 34]}} n))] ^{:go/pos {:op-pos [884 43]}} (not ^{:go/pos {:name-pos [884 44]}} still)
+              ^{:go/pos {:lparen [885 14] :rparen [885 16]}} (^{:go/pos {:name-pos [885 5]}} cyRestore ^{:go/pos {:name-pos [885 15]}} n))))
+
+
+
+        ^{:go/pos {:lparen [889 17] :rparen [889 23]}} (^{:go/pos {:name-pos [889 2]}} cyClearWeakRefs ^{:go/pos {:name-pos [889 18]}} final)
+        ^{:go/pos {:if [890 2] :lbrace [890 53] :rbrace [896 2]}} (when ^{:go/pos {:op-pos [890 33]}} (and ^{:go/apos {2 [890 31]} :go/pos {:op-pos [890 28]}} (!= ^{:go/pos {:op-pos [890 12]}} (bit-and ^{:go/pos {:name-pos [890 5]}} gcDebug ^{:go/pos {:name-pos [890 13]}} gcDebugSaveAll) 0) ^{:go/apos {2 [890 49]} :go/pos {:op-pos [890 46]}} (!= ^{:go/pos {:name-pos [890 36]}} gcGarbage nil))
+          ^{:go/pos {:for [891 3] :lbrace [891 27] :range [891 15] :rbrace [894 3] :tok-pos [891 12]}} (range [^{:go/pos {:name-pos [891 7]}} _ ^{:go/pos {:name-pos [891 10]}} n ^{:go/pos {:name-pos [891 21]}} final]
+            ^{:go/pos {:tok-pos [892 20]}} (set! ^{:go/pos {:dot [892 13] :name-pos [892 14]}} (.-Items ^{:go/pos {:name-pos [892 4]}} gcGarbage) ^{:go/pos {:lparen [892 28] :rparen [892 56]}} (^{:go/pos {:name-pos [892 22]}} append ^{:go/pos {:dot [892 38] :name-pos [892 39]}} (.-Items ^{:go/pos {:name-pos [892 29]}} gcGarbage) ^{:go/pos {:dot [892 47] :lparen [892 54] :name-pos [892 48] :rparen [892 55]}} (.object ^{:go/pos {:name-pos [892 46]}} n)))
+            ^{:go/pos {:lparen [893 13] :rparen [893 15]}} (^{:go/pos {:name-pos [893 4]}} cyRestore ^{:go/pos {:name-pos [893 14]}} n))
+
+          ^{:go/pos {:return [895 3]}} (return ^{:go/pos {:lparen [895 13] :rparen [895 19]}} (^{:go/pos {:name-pos [895 10]}} len ^{:go/pos {:name-pos [895 14]}} final)))
+
+        ^{:go/pos {:dot [897 7] :lparen [897 12] :name-pos [897 8] :rparen [897 13]}} (.Lock ^{:go/pos {:name-pos [897 2]}} finMu)
+        ^{:go/pos {:for [898 2] :lbrace [898 26] :range [898 14] :rbrace [902 2] :tok-pos [898 11]}} (range [^{:go/pos {:name-pos [898 6]}} _ ^{:go/pos {:name-pos [898 9]}} n ^{:go/pos {:name-pos [898 20]}} final]
+          ^{:go/pos {:if [899 3] :lbrace [899 45] :rbrace [901 3]}} (when ^{:go/pos {:op-pos [899 18]}} (and ^{:go/apos {2 [899 14]} :go/pos {:op-pos [899 11]}} (!= ^{:go/pos {:dot [899 7] :name-pos [899 8]}} (.-tr ^{:go/pos {:name-pos [899 6]}} n) nil) ^{:go/pos {:op-pos [899 37]}} (== ^{:go/pos {:lbrack [899 28] :rbrack [899 35]}} (aget ^{:go/pos {:name-pos [899 21]}} tracked ^{:go/pos {:dot [899 30] :name-pos [899 31]}} (.-addr ^{:go/pos {:name-pos [899 29]}} n)) ^{:go/pos {:dot [899 41] :name-pos [899 42]}} (.-tr ^{:go/pos {:name-pos [899 40]}} n)))
+            ^{:go/pos {:lparen [900 10] :rparen [900 26]}} (^{:go/pos {:name-pos [900 4]}} delete ^{:go/pos {:name-pos [900 11]}} tracked ^{:go/pos {:dot [900 21] :name-pos [900 22]}} (.-addr ^{:go/pos {:name-pos [900 20]}} n))))
+
+
+        ^{:go/pos {:dot [903 7] :lparen [903 14] :name-pos [903 8] :rparen [903 15]}} (.Unlock ^{:go/pos {:name-pos [903 2]}} finMu)
+        ^{:go/pos {:lparen [904 12] :rparen [904 18]}} (^{:go/pos {:name-pos [904 9]}} len ^{:go/pos {:name-pos [904 13]}} final)))))
+
+
+
+^{:go/pos {:doc [907 1] :func [908 1] :lbrace [908 46] :rbrace [916 1] :return [915 2]}} (go/func ^{:go/pos {:name-pos [908 6]}} cyCount "cyCount is the probed nodes whose probe ran (finMu held).\n" ^{:tag ^{:go/pos {:name-pos [908 42]}} int :go/pos {:closing [908 40] :opening [908 13]}} [^{:tag ^{:go/pos {:lbrack [908 20]}} (slice ^{:go/pos {:star [908 22]}} (* ^{:go/pos {:name-pos [908 23]}} cyNode)) :go/pos {:name-pos [908 14]}} nodes ^{:tag ^{:go/pos {:lbrack [908 34]}} (slice ^{:go/pos {:name-pos [908 36]}} bool) :go/pos {:name-pos [908 31]}} in]
+  (let ^{:go/apos {1 [909 7]}} [^{:go/pos {:name-pos [909 2] :tok-pos [909 4]}} k 0]
+    ^{:go/pos {:for [910 2] :lbrace [910 26] :range [910 14] :rbrace [914 2] :tok-pos [910 11]}} (range [^{:go/pos {:name-pos [910 6]}} i ^{:go/pos {:name-pos [910 9]}} n ^{:go/pos {:name-pos [910 20]}} nodes]
+      ^{:go/pos {:if [911 3] :lbrace [911 44] :rbrace [913 3]}} (when [^{:go/pos {:tok-pos [911 12]}} (values ^{:go/pos {:name-pos [911 6]}} _ ^{:go/pos {:name-pos [911 9]}} ok) ^{:go/pos {:lbrack [911 22] :rbrack [911 29]}} (aget ^{:go/pos {:name-pos [911 15]}} cyFired ^{:go/pos {:dot [911 24] :name-pos [911 25]}} (.-addr ^{:go/pos {:name-pos [911 23]}} n))] ^{:go/pos {:op-pos [911 35]}} (and ^{:go/pos {:name-pos [911 32]}} ok ^{:go/pos {:lbrack [911 40] :rbrack [911 42]}} (aget ^{:go/pos {:name-pos [911 38]}} in ^{:go/pos {:name-pos [911 41]}} i))
+        ^{:go/pos {:tok-pos [912 5]}} (inc! ^{:go/pos {:name-pos [912 4]}} k)))
+
+
+    ^{:go/pos {:name-pos [915 9]}} k))
+
+
+^{:go/pos {:func [918 1] :lbrace [918 54] :rbrace [925 1]}} (go/func ^{:go/pos {:name-pos [918 6]}} cyIndex ^{:go/pos {:closing [918 40] :opening [918 13]}} [^{:tag ^{:go/pos {:lbrack [918 20]}} (slice ^{:go/pos {:star [918 22]}} (* ^{:go/pos {:name-pos [918 23]}} cyNode)) :go/pos {:name-pos [918 14]}} nodes ^{:tag ^{:go/pos {:name-pos [918 33]}} uintptr :go/pos {:name-pos [918 31]}} a] :results ^{:go/pos {:closing [918 52] :opening [918 42]}} [^{:go/pos {:name-pos [918 43]}} int ^{:go/pos {:name-pos [918 48]}} bool]
+  ^{:go/pos {:for [919 2] :lbrace [919 26] :range [919 14] :rbrace [923 2] :tok-pos [919 11]}} (range [^{:go/pos {:name-pos [919 6]}} i ^{:go/pos {:name-pos [919 9]}} n ^{:go/pos {:name-pos [919 20]}} nodes]
+    ^{:go/pos {:if [920 3] :lbrace [920 18] :rbrace [922 3]}} (when ^{:go/pos {:op-pos [920 13]}} (== ^{:go/pos {:dot [920 7] :name-pos [920 8]}} (.-addr ^{:go/pos {:name-pos [920 6]}} n) ^{:go/pos {:name-pos [920 16]}} a)
+      ^{:go/apos {2 [921 14]} :go/pos {:return [921 4]}} (return ^{:go/pos {:name-pos [921 11]}} i true)))
+
+
+  ^{:go/apos {1 [924 9] 2 [924 13]} :go/pos {:return [924 2]}} (return -1 false))
+
+
+
+
+^{:go/pos {:doc [927 1] :func [929 1] :lbrace [929 39] :rbrace [949 1] :return [948 2]}} (go/func ^{:go/pos {:name-pos [929 6]}} cyFind "cyFind is the cyclic trash: from the tracked nodes (or, only given, from those nodes alone: the resurrection's\ncheck), the graph, its relevant part probed; every probed node restored but the trash's (they keep no Go finalizer).\n" ^{:tag ^{:go/pos {:lbrack [929 29]}} (slice ^{:go/pos {:star [929 31]}} (* ^{:go/pos {:name-pos [929 32]}} cyNode)) :go/pos {:closing [929 27] :opening [929 12]}} [^{:tag ^{:go/pos {:lbrack [929 18]}} (slice ^{:go/pos {:star [929 20]}} (* ^{:go/pos {:name-pos [929 21]}} cyNode)) :go/pos {:name-pos [929 13]}} only]
+  (let [^{:go/pos {:tok-pos [930 12]}} (values ^{:go/pos {:name-pos [930 2]}} nodes ^{:go/pos {:name-pos [930 9]}} in) ^{:go/pos {:lparen [930 26] :rparen [930 31]}} (^{:go/pos {:name-pos [930 15]}} cySeedGraph ^{:go/pos {:name-pos [930 27]}} only)]
+    ^{:go/pos {:if [931 2] :lbrace [931 18] :rbrace [933 2]}} (when ^{:go/apos {2 [931 14]} :go/pos {:op-pos [931 11]}} (== ^{:go/pos {:name-pos [931 5]}} nodes nil)
+      ^{:go/apos {1 [932 10]} :go/pos {:return [932 3]}} (return nil))
+
+    (let [^{:go/pos {:name-pos [934 2] :tok-pos [934 8]}} reach ^{:go/pos {:lparen [934 18] :rparen [934 28]}} (^{:go/pos {:name-pos [934 11]}} cyProbe ^{:go/pos {:name-pos [934 19]}} nodes ^{:go/pos {:name-pos [934 26]}} in)
+        ^{:tag ^{:go/pos {:lbrack [935 12]}} (slice ^{:go/pos {:star [935 14]}} (* ^{:go/pos {:name-pos [935 15]}} cyNode)) :go/pos {:name-pos [935 6] :tok-pos [935 2]}} trash (zero ^{:go/pos {:lbrack [935 12]}} (slice ^{:go/pos {:star [935 14]}} (* ^{:go/pos {:name-pos [935 15]}} cyNode)))]
+      ^{:go/pos {:for [936 2] :lbrace [936 26] :range [936 14] :rbrace [947 2] :tok-pos [936 11]}} (range [^{:go/pos {:name-pos [936 6]}} i ^{:go/pos {:name-pos [936 9]}} n ^{:go/pos {:name-pos [936 20]}} nodes]
+        ^{:go/pos {:if [937 3] :lbrace [937 13] :rbrace [939 3]}} (when ^{:go/pos {:op-pos [937 6]}} (not ^{:go/pos {:lbrack [937 9] :rbrack [937 11]}} (aget ^{:go/pos {:name-pos [937 7]}} in ^{:go/pos {:name-pos [937 10]}} i))
+          ^{:go/pos {:tok-pos [938 4]}} (continue))
+
+        ^{:go/pos {:else-lbrace [944 10] :else-rbrace [946 3] :if [940 3] :lbrace [940 15] :rbrace [944 3]}} (if ^{:go/pos {:lbrack [940 11] :rbrack [940 13]}} (aget ^{:go/pos {:name-pos [940 6]}} reach ^{:go/pos {:name-pos [940 12]}} i)
+          ^{:go/pos {:if [941 4] :lbrace [941 19] :rbrace [943 4]}} (when ^{:go/apos {2 [941 15]} :go/pos {:op-pos [941 12]}} (== ^{:go/pos {:name-pos [941 7]}} only nil)
+            ^{:go/pos {:lparen [942 14] :rparen [942 16]}} (^{:go/pos {:name-pos [942 5]}} cyRestore ^{:go/pos {:name-pos [942 15]}} n))
+
+
+          ^{:go/pos {:tok-pos [945 10]}} (set! ^{:go/pos {:name-pos [945 4]}} trash ^{:go/pos {:lparen [945 18] :rparen [945 27]}} (^{:go/pos {:name-pos [945 12]}} append ^{:go/pos {:name-pos [945 19]}} trash ^{:go/pos {:name-pos [945 26]}} n))))
+
+
+      ^{:go/pos {:name-pos [948 9]}} trash)))
+
+
+
+
+^{:go/pos {:doc [951 1] :func [953 1] :lbrace [953 54] :rbrace [995 1]}} (go/func ^{:go/pos {:name-pos [953 6]}} cySeedGraph "cySeedGraph builds the graph and its relevant part in a frame of its own, so no object of the walk stays in a live\nvariable of the probe's caller.\n" ^{:go/pos {:closing [953 32] :opening [953 17]}} [^{:tag ^{:go/pos {:lbrack [953 23]}} (slice ^{:go/pos {:star [953 25]}} (* ^{:go/pos {:name-pos [953 26]}} cyNode)) :go/pos {:name-pos [953 18]}} only] :results ^{:go/pos {:closing [953 52] :opening [953 34]}} [^{:go/pos {:lbrack [953 35]}} (slice ^{:go/pos {:star [953 37]}} (* ^{:go/pos {:name-pos [953 38]}} cyNode)) ^{:go/pos {:lbrack [953 46]}} (slice ^{:go/pos {:name-pos [953 48]}} bool)]
+  (let [^{:tag ^{:go/pos {:lbrack [954 12]}} (slice ^{:go/pos {:name-pos [954 14]}} Object) :go/pos {:name-pos [954 6] :tok-pos [954 2]}} seeds (zero ^{:go/pos {:lbrack [954 12]}} (slice ^{:go/pos {:name-pos [954 14]}} Object))
+      ^{:tag ^{:go/pos {:map [955 13]}} (map ^{:go/pos {:name-pos [955 17]}} uintptr ^{:go/pos {:name-pos [955 25]}} int32) :go/pos {:name-pos [955 6] :tok-pos [955 2]}} within (zero ^{:go/pos {:map [955 13]}} (map ^{:go/pos {:name-pos [955 17]}} uintptr ^{:go/pos {:name-pos [955 25]}} int32))]
+    ^{:go/pos {:else-lbrace [962 9] :else-rbrace [970 2] :if [956 2] :lbrace [956 17] :rbrace [962 2]}} (if ^{:go/apos {2 [956 13]} :go/pos {:op-pos [956 10]}} (!= ^{:go/pos {:name-pos [956 5]}} only nil) ^{:go/pos {:lbrace [956 17] :rbrace [962 2]}} (do
+        ^{:go/pos {:tok-pos [957 10]}} (set! ^{:go/pos {:name-pos [957 3]}} within ^{:go/pos {:lbrace [957 29] :rbrace [957 30]}} (lit ^{:go/pos {:map [957 12]}} (map ^{:go/pos {:name-pos [957 16]}} uintptr ^{:go/pos {:name-pos [957 24]}} int32)))
+        ^{:go/pos {:for [958 3] :lbrace [958 26] :range [958 15] :rbrace [961 3] :tok-pos [958 12]}} (range [^{:go/pos {:name-pos [958 7]}} i ^{:go/pos {:name-pos [958 10]}} n ^{:go/pos {:name-pos [958 21]}} only]
+          ^{:go/pos {:lbrack [959 10] :rbrack [959 17] :tok-pos [959 19]}} (aset ^{:go/pos {:name-pos [959 4]}} within ^{:go/pos {:dot [959 12] :name-pos [959 13]}} (.-addr ^{:go/pos {:name-pos [959 11]}} n) ^{:go/pos {:lparen [959 26] :rparen [959 28]}} (conv ^{:go/pos {:name-pos [959 21]}} int32 ^{:go/pos {:name-pos [959 27]}} i))
+          ^{:go/pos {:tok-pos [960 10]}} (set! ^{:go/pos {:name-pos [960 4]}} seeds ^{:go/pos {:lparen [960 18] :rparen [960 36]}} (^{:go/pos {:name-pos [960 12]}} append ^{:go/pos {:name-pos [960 19]}} seeds ^{:go/pos {:dot [960 27] :lparen [960 34] :name-pos [960 28] :rparen [960 35]}} (.object ^{:go/pos {:name-pos [960 26]}} n)))))
+
+      ^{:go/pos {:lbrace [962 9] :rbrace [970 2]}} (do
+        ^{:go/pos {:dot [963 8] :lparen [963 13] :name-pos [963 9] :rparen [963 14]}} (.Lock ^{:go/pos {:name-pos [963 3]}} finMu)
+        ^{:go/pos {:for [964 3] :lbrace [964 30] :range [964 16] :rbrace [968 3] :tok-pos [964 13]}} (range [^{:go/pos {:name-pos [964 7]}} a ^{:go/pos {:name-pos [964 10]}} tr ^{:go/pos {:name-pos [964 22]}} tracked]
+          ^{:go/pos {:if [965 4] :lbrace [965 47] :rbrace [967 4]}} (when [^{:go/pos {:name-pos [965 7] :tok-pos [965 9]}} o ^{:go/pos {:lparen [965 20] :rparen [965 32]}} (^{:go/pos {:name-pos [965 12]}} toObject ^{:go/pos {:dot [965 23] :name-pos [965 24]}} (.-elem ^{:go/pos {:name-pos [965 21]}} tr) ^{:go/pos {:op-pos [965 30]}} (addr ^{:go/pos {:name-pos [965 31]}} a))] ^{:go/pos {:lparen [965 43] :rparen [965 45]}} (^{:go/pos {:name-pos [965 35]}} cyIsNode ^{:go/pos {:name-pos [965 44]}} o)
+            ^{:go/pos {:tok-pos [966 11]}} (set! ^{:go/pos {:name-pos [966 5]}} seeds ^{:go/pos {:lparen [966 19] :rparen [966 28]}} (^{:go/pos {:name-pos [966 13]}} append ^{:go/pos {:name-pos [966 20]}} seeds ^{:go/pos {:name-pos [966 27]}} o))))
+
+
+        ^{:go/pos {:dot [969 8] :lparen [969 15] :name-pos [969 9] :rparen [969 16]}} (.Unlock ^{:go/pos {:name-pos [969 3]}} finMu)))
+
+    ^{:go/pos {:if [971 2] :lbrace [971 21] :rbrace [973 2]}} (when ^{:go/apos {2 [971 19]} :go/pos {:op-pos [971 16]}} (== ^{:go/pos {:lparen [971 8] :rparen [971 14]}} (^{:go/pos {:name-pos [971 5]}} len ^{:go/pos {:name-pos [971 9]}} seeds) 0)
+      ^{:go/apos {1 [972 10] 2 [972 15]} :go/pos {:return [972 3]}} (return nil nil))
+
+    (let [^{:go/pos {:name-pos [974 2] :tok-pos [974 8]}} nodes ^{:go/pos {:lparen [974 18] :rparen [974 32]}} (^{:go/pos {:name-pos [974 11]}} cyGraph ^{:go/pos {:name-pos [974 19]}} seeds ^{:go/pos {:name-pos [974 26]}} within)]
+      ^{:go/pos {:lparen [975 7] :rparen [975 13]}} (^{:go/pos {:name-pos [975 2]}} clear ^{:go/pos {:name-pos [975 8]}} seeds)
+      ^{:go/pos {:if [976 2] :lbrace [976 21] :rbrace [978 2]}} (when ^{:go/apos {2 [976 19]} :go/pos {:op-pos [976 16]}} (== ^{:go/pos {:lparen [976 8] :rparen [976 14]}} (^{:go/pos {:name-pos [976 5]}} len ^{:go/pos {:name-pos [976 9]}} nodes) 0)
+        ^{:go/apos {1 [977 10] 2 [977 15]} :go/pos {:return [977 3]}} (return nil nil))
+
+      ^{:go/pos {:if [979 2] :lbrace [979 17] :rbrace [985 2]}} (when ^{:go/apos {2 [979 13]} :go/pos {:op-pos [979 10]}} (!= ^{:go/pos {:name-pos [979 5]}} only nil)
+        (let [^{:go/pos {:name-pos [980 3] :tok-pos [980 6]}} in ^{:go/pos {:lparen [980 13] :rparen [980 32]}} (^{:go/pos {:name-pos [980 9]}} make ^{:go/pos {:lbrack [980 14]}} (slice ^{:go/pos {:name-pos [980 16]}} bool) ^{:go/pos {:lparen [980 25] :rparen [980 31]}} (^{:go/pos {:name-pos [980 22]}} len ^{:go/pos {:name-pos [980 26]}} nodes))]
+          ^{:go/pos {:for [981 3] :lbrace [981 21] :range [981 12] :rbrace [983 3] :tok-pos [981 9]}} (range [^{:go/pos {:name-pos [981 7]}} i ^{:go/pos {:name-pos [981 18]}} in]
+            ^{:go/apos {3 [982 12]} :go/pos {:lbrack [982 6] :rbrack [982 8] :tok-pos [982 10]}} (aset ^{:go/pos {:name-pos [982 4]}} in ^{:go/pos {:name-pos [982 7]}} i true))
+
+          ^{:go/pos {:return [984 3]}} (return ^{:go/pos {:name-pos [984 10]}} nodes ^{:go/pos {:name-pos [984 17]}} in)))
+
+      (let ^{:go/apos {3 [987 9]}} [^{:go/pos {:name-pos [986 2] :tok-pos [986 5]}} in ^{:go/pos {:lparen [986 18] :rparen [986 24]}} (^{:go/pos {:name-pos [986 8]}} cyRelevant ^{:go/pos {:name-pos [986 19]}} nodes)
+          ^{:go/pos {:name-pos [987 2] :tok-pos [987 6]}} any false]
+        ^{:go/pos {:for [988 2] :lbrace [988 23] :range [988 14] :rbrace [990 2] :tok-pos [988 11]}} (range [^{:go/pos {:name-pos [988 6]}} _ ^{:go/pos {:name-pos [988 9]}} b ^{:go/pos {:name-pos [988 20]}} in]
+          ^{:go/pos {:tok-pos [989 7]}} (set! ^{:go/pos {:name-pos [989 3]}} any ^{:go/pos {:op-pos [989 13]}} (or ^{:go/pos {:name-pos [989 9]}} any ^{:go/pos {:name-pos [989 16]}} b)))
+
+        ^{:go/pos {:if [991 2] :lbrace [991 10] :rbrace [993 2]}} (when ^{:go/pos {:op-pos [991 5]}} (not ^{:go/pos {:name-pos [991 6]}} any)
+          ^{:go/apos {1 [992 10] 2 [992 15]} :go/pos {:return [992 3]}} (return nil nil))
+
+        ^{:go/pos {:return [994 2]}} (return ^{:go/pos {:name-pos [994 9]}} nodes ^{:go/pos {:name-pos [994 16]}} in)))))

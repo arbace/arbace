@@ -1,0 +1,371 @@
+(in-ns 'go.arbace.pysqlite3) ^{:go/comments [[3 1 "// Modules/_sqlite/: Copyright (C) 2004-2010 Gerhard Häring and the Python Software Foundation, under the PSF License"] [4 1 "// Agreement for Python 3.14 (LICENSE.md; the files' own zlib-style notices). The port to Go: Copyright (c) the Arbace"] [5 1 "// authors, under the same license."] [7 1 "// The module _sqlite3 (queue 215; doc/python/PYTHON-SURVEY.md, \"As built: 215\"): CPython 3.14.10's Modules/_sqlite/"] [8 1 "// (module.c, connection.c, cursor.c, statement.c, row.c, blob.c, microprotocols.c, prepare_protocol.c, util.c, with"] [9 1 "// clinic's argument parsing) ported statement for statement over SQLite 3.50.4 itself, the amalgamation built by ci's"] [10 1 "// builder (arbace/clib/sqlite's node program) and called through arbace/clib, as _bz2, _lzma and _zstd are."] [11 1 "// Lib/sqlite3 is the tarball's Python over it."] [12 1 "//"] [13 1 "// Notes on the port:"] [14 1 "//   - SQLite calls C function pointers for the user-defined functions, aggregates, window functions, collations and"] [15 1 "//     the authorizer, progress and trace handlers: they are ci's natives here (callbacks.go), Go functions registered"] [16 1 "//     by name in ci.Natives before the library opens and handed to SQLite by tools/pyi/clib/sqlite/pysqlite.c's"] [17 1 "//     wrappers. A context pointer SQLite keeps (a callback_context, an aggregate's instance) is a handle of this"] [18 1 "//     package's table, an integer standing for the Go value."] [19 1 "//   - The library is built SQLITE_THREADSAFE=0 (sqlite3.threadsafety 0) and the GIL is held around every library call"] [20 1 "//     and callback (CPython releases it around the long ones): one C thread."] [21 1 "//   - \"PyErr_Occurred\" across a C call (a collation's exception surviving sqlite3_step, as CPython's thread state keeps"] [22 1 "//     it) is pending, set by the callbacks and taken where CPython tests it."] [23 1 "//   - The weak references the connection keeps to its cursors and blobs: the cursors' list is not kept (CPython only"] [24 1 "//     prunes it); the blobs are kept by the connection until it closes them."] [37 1 "// sqliteLib is the library's program, opened on the module's first use (its import), the natives registered first."] [50 1 "// cstring is a NUL-terminated copy of b in C memory (freed by the caller)."] [63 1 "// gostr is the C string at p (\"\" for NULL)."] [71 1 "// cbuf is a copy of b in C memory, at least one byte (freed by the caller)."] [86 1 "// pending is the error a callback left set (\"PyErr_Occurred\" after the C call returns)."] [95 1 "// chain is _PyErr_ChainExceptions1(exc) with err the error raised now: exc becomes its __context__."] [113 1 "// utf8 is PyUnicode_AsUTF8AndSize."] [119 1 "// fromUTF8 is PyUnicode_FromStringAndSize (strict)."] [136 1 "// checkBuffer is PyObject_CheckBuffer with PyObject_GetBuffer(PyBUF_SIMPLE): whether o exports a buffer, its bytes,"] [137 1 "// and the error of getting them (a memoryview not C-contiguous: BufferError)."] [152 1 "// PyLong_AsInt: an int or __index__, in a C int."] [158 1 "// asSsize is PyNumber_AsSsize_t(o, exc): exc on overflow (nil: OverflowError)."] [174 1 "// _pysqlite_long_as_int64"] [195 1 "// typeName is a type's tp_name as the C messages print it."] [198 1 "// badArgument is _PyArg_BadArgument."] [207 1 "// parseArgs is clinic's _PyArg_UnpackKeywords: names in order, the first posonly positional-only, those after maxpos"] [208 1 "// keyword-only, the first minargs required; the values by position (nil: absent)."] [281 1 "/* util.c */"] [283 1 "// Returns non-NULL if a new exception should be raised"] [330 1 "// set_error_from_code: nil when no exception need be raised."] [339 1 "// set_error_from_db checks the SQLite error code and gives the appropriate DB-API exception (nil: none)."] [346 2 "/* Create and set the exception. */"] [348 2 "// sqlite3_errmsg() always returns an UTF-8 encoded message"] [353 1 "// errOr is err, else a generic error (the C code's \"return NULL\" with an exception known set)."] [361 1 "// handles: the Go values SQLite holds as context pointers"] [369 23 "// aligned, never 0"]] :go/pos {:name [1 9] :package [1 1]} :go/semis [[132 52] [259 12] [259 25] [317 79] [324 69]]} (go/file "util.go" :imports [
+
+    ;; Modules/_sqlite/: Copyright (C) 2004-2010 Gerhard Häring and the Python Software Foundation, under the PSF License
+    ;; Agreement for Python 3.14 (LICENSE.md; the files' own zlib-style notices). The port to Go: Copyright (c) the Arbace
+    ;; authors, under the same license.
+
+    ;; The module _sqlite3 (queue 215; doc/python/PYTHON-SURVEY.md, "As built: 215"): CPython 3.14.10's Modules/_sqlite/
+    ;; (module.c, connection.c, cursor.c, statement.c, row.c, blob.c, microprotocols.c, prepare_protocol.c, util.c, with
+    ;; clinic's argument parsing) ported statement for statement over SQLite 3.50.4 itself, the amalgamation built by ci's
+    ;; builder (arbace/clib/sqlite's node program) and called through arbace/clib, as _bz2, _lzma and _zstd are.
+    ;; Lib/sqlite3 is the tarball's Python over it.
+    ;;
+    ;; Notes on the port:
+    ;;   - SQLite calls C function pointers for the user-defined functions, aggregates, window functions, collations and
+    ;;     the authorizer, progress and trace handlers: they are ci's natives here (callbacks.go), Go functions registered
+    ;;     by name in ci.Natives before the library opens and handed to SQLite by tools/pyi/clib/sqlite/pysqlite.c's
+    ;;     wrappers. A context pointer SQLite keeps (a callback_context, an aggregate's instance) is a handle of this
+    ;;     package's table, an integer standing for the Go value.
+    ;;   - The library is built SQLITE_THREADSAFE=0 (sqlite3.threadsafety 0) and the GIL is held around every library call
+    ;;     and callback (CPython releases it around the long ones): one C thread.
+    ;;   - "PyErr_Occurred" across a C call (a collation's exception surviving sqlite3_step, as CPython's thread state keeps
+    ;;     it) is pending, set by the callbacks and taken where CPython tests it.
+    ;;   - The weak references the connection keeps to its cursors and blobs: the cursors' list is not kept (CPython only
+    ;;     prunes it); the blobs are kept by the connection until it closes them.
+
+
+    ^{:go/apos {1 [27 2]} :go/pos {:lparen [26 8] :rparen [33 1] :tok-pos [26 1]}} [math "math"]
+    ^{:go/apos {1 [28 2]}} [big "math/big"]
+
+    ^{:go/apos {1 [30 2]}} [clib "arbace/clib"]
+    ^{:go/apos {1 [31 2]}} [sqlite "arbace/clib/sqlite"]
+    ^{:go/apos {1 [32 4]}} [^{:go/pos {:name-pos [32 2]}} . "arbace/py"]])
+
+
+^{:go/pos {:tok-pos [35 1]}} (go/var ^{:tag ^{:go/pos {:star [35 9]}} (* ^{:go/pos {:dot [35 14] :name-pos [35 15] :x-pos [35 10]}} clib/Lib) :go/pos {:name-pos [35 5]}} lib)
+
+
+^{:go/pos {:doc [37 1] :func [38 1] :lbrace [38 28] :rbrace [44 1] :return [43 2]}} (go/func ^{:go/pos {:name-pos [38 6]}} sqliteLib "sqliteLib is the library's program, opened on the module's first use (its import), the natives registered first.\n" ^{:tag ^{:go/pos {:star [38 18]}} (* ^{:go/pos {:dot [38 23] :name-pos [38 24] :x-pos [38 19]}} clib/Lib) :go/pos {:closing [38 16] :opening [38 15]}} []
+  ^{:go/pos {:if [39 2] :lbrace [39 16] :rbrace [42 2]}} (when ^{:go/apos {2 [39 12]} :go/pos {:op-pos [39 9]}} (== ^{:go/pos {:name-pos [39 5]}} lib nil)
+    ^{:go/pos {:lparen [40 18] :rparen [40 19]}} (^{:go/pos {:name-pos [40 3]}} registerNatives)
+    ^{:go/pos {:tok-pos [41 7]}} (set! ^{:go/pos {:name-pos [41 3]}} lib ^{:go/apos {1 [41 19]} :go/pos {:lparen [41 18] :rparen [41 41]}} (^{:go/pos {:dot [41 13] :name-pos [41 14] :x-pos [41 9]}} clib/Open "sqlite" ^{:go/pos {:dot [41 35] :name-pos [41 36] :x-pos [41 29]}} sqlite/Nodes)))
+
+  ^{:go/pos {:name-pos [43 9]}} lib)
+
+
+^{:go/pos {:func [46 1] :lbrace [46 42] :rbrace [46 72] :return [46 44]}} (go/func ^{:go/pos {:name-pos [46 6]}} call ^{:tag ^{:go/pos {:name-pos [46 36]}} int64 :go/pos {:closing [46 34] :opening [46 10]}} [^{:tag ^{:go/pos {:name-pos [46 16]}} string :go/pos {:name-pos [46 11]}} name & ^{:tag ^{:go/pos {:ellipsis [46 26]}} (slice ^{:go/pos {:name-pos [46 29]}} int64) :go/pos {:name-pos [46 24]}} a] ^{:go/pos {:dot [46 54] :ellipsis [46 67] :lparen [46 59] :name-pos [46 55] :rparen [46 70]}} (.Call ^{:go/pos {:name-pos [46 51]}} lib ^{:go/pos {:name-pos [46 60]}} name (spread ^{:go/pos {:name-pos [46 66]}} a)))
+
+^{:go/pos {:func [48 1] :lbrace [48 43] :rbrace [48 80] :return [48 45]}} (go/func ^{:go/pos {:name-pos [48 6]}} calli ^{:tag ^{:go/pos {:name-pos [48 37]}} int32 :go/pos {:closing [48 35] :opening [48 11]}} [^{:tag ^{:go/pos {:name-pos [48 17]}} string :go/pos {:name-pos [48 12]}} name & ^{:tag ^{:go/pos {:ellipsis [48 27]}} (slice ^{:go/pos {:name-pos [48 30]}} int64) :go/pos {:name-pos [48 25]}} a] ^{:go/pos {:lparen [48 57] :rparen [48 78]}} (conv ^{:go/pos {:name-pos [48 52]}} int32 ^{:go/pos {:dot [48 61] :ellipsis [48 74] :lparen [48 66] :name-pos [48 62] :rparen [48 77]}} (.Call ^{:go/pos {:name-pos [48 58]}} lib ^{:go/pos {:name-pos [48 67]}} name (spread ^{:go/pos {:name-pos [48 73]}} a))))
+
+
+^{:go/pos {:doc [50 1] :func [51 1] :lbrace [51 31] :rbrace [59 1] :return [58 2]}} (go/func ^{:go/pos {:name-pos [51 6]}} cstring "cstring is a NUL-terminated copy of b in C memory (freed by the caller).\n" ^{:tag ^{:go/pos {:name-pos [51 24]}} uint64 :go/pos {:closing [51 22] :opening [51 13]}} [^{:tag ^{:go/pos {:lbrack [51 16]}} (slice ^{:go/pos {:name-pos [51 18]}} byte) :go/pos {:name-pos [51 14]}} b]
+  (let [^{:go/pos {:name-pos [52 2] :tok-pos [52 4]}} p ^{:go/pos {:dot [52 10] :lparen [52 17] :name-pos [52 11] :rparen [52 36]}} (.Malloc ^{:go/pos {:name-pos [52 7]}} lib ^{:go/pos {:lparen [52 24] :rparen [52 35]}} (conv ^{:go/pos {:name-pos [52 18]}} uint64 ^{:go/apos {2 [52 34]} :go/pos {:op-pos [52 32]}} (+ ^{:go/pos {:lparen [52 28] :rparen [52 30]}} (^{:go/pos {:name-pos [52 25]}} len ^{:go/pos {:name-pos [52 29]}} b) 1)))]
+    ^{:go/pos {:if [53 2] :lbrace [53 12] :rbrace [55 2]}} (when ^{:go/apos {2 [53 10]} :go/pos {:op-pos [53 7]}} (== ^{:go/pos {:name-pos [53 5]}} p 0)
+      ^{:go/apos {1 [54 10]} :go/pos {:return [54 3]}} (return 0))
+
+    ^{:go/pos {:dot [56 5] :lparen [56 11] :name-pos [56 6] :rparen [56 16]}} (.Write ^{:go/pos {:name-pos [56 2]}} lib ^{:go/pos {:name-pos [56 12]}} p ^{:go/pos {:name-pos [56 15]}} b)
+    ^{:go/apos {3 [57 33]} :go/pos {:dot [57 7] :lparen [57 14] :name-pos [57 8] :rparen [57 34]}} (.Store8 ^{:go/pos {:dot [57 5] :name-pos [57 6]}} (.-M ^{:go/pos {:name-pos [57 2]}} lib) ^{:go/pos {:op-pos [57 16]}} (+ ^{:go/pos {:name-pos [57 15]}} p ^{:go/pos {:lparen [57 23] :rparen [57 30]}} (conv ^{:go/pos {:name-pos [57 17]}} uint64 ^{:go/pos {:lparen [57 27] :rparen [57 29]}} (^{:go/pos {:name-pos [57 24]}} len ^{:go/pos {:name-pos [57 28]}} b))) 0)
+    ^{:go/pos {:name-pos [58 9]}} p))
+
+
+^{:go/pos {:func [61 1] :lbrace [61 28] :rbrace [61 56] :return [61 30]}} (go/func ^{:go/pos {:name-pos [61 6]}} cstr ^{:tag ^{:go/pos {:name-pos [61 21]}} uint64 :go/pos {:closing [61 19] :opening [61 10]}} [^{:tag ^{:go/pos {:name-pos [61 13]}} string :go/pos {:name-pos [61 11]}} s] ^{:go/pos {:lparen [61 44] :rparen [61 54]}} (^{:go/pos {:name-pos [61 37]}} cstring ^{:go/pos {:lparen [61 51] :rparen [61 53]}} (conv ^{:go/pos {:lbrack [61 45]}} (slice ^{:go/pos {:name-pos [61 47]}} byte) ^{:go/pos {:name-pos [61 52]}} s)))
+
+
+^{:go/pos {:doc [63 1] :func [64 1] :lbrace [64 29] :rbrace [69 1] :return [68 2]}} (go/func ^{:go/pos {:name-pos [64 6]}} gostr "gostr is the C string at p (\"\" for NULL).\n" ^{:tag ^{:go/pos {:name-pos [64 22]}} string :go/pos {:closing [64 20] :opening [64 11]}} [^{:tag ^{:go/pos {:name-pos [64 14]}} uint64 :go/pos {:name-pos [64 12]}} p]
+  ^{:go/pos {:if [65 2] :lbrace [65 12] :rbrace [67 2]}} (when ^{:go/apos {2 [65 10]} :go/pos {:op-pos [65 7]}} (== ^{:go/pos {:name-pos [65 5]}} p 0)
+    ^{:go/apos {1 [66 10]} :go/pos {:return [66 3]}} (return ""))
+
+  ^{:go/pos {:dot [68 14] :lparen [68 22] :name-pos [68 15] :rparen [68 24]}} (.CString ^{:go/pos {:dot [68 12] :name-pos [68 13]}} (.-M ^{:go/pos {:name-pos [68 9]}} lib) ^{:go/pos {:name-pos [68 23]}} p))
+
+
+
+^{:go/pos {:doc [71 1] :func [72 1] :lbrace [72 28] :rbrace [82 1] :return [81 2]}} (go/func ^{:go/pos {:name-pos [72 6]}} cbuf "cbuf is a copy of b in C memory, at least one byte (freed by the caller).\n" ^{:tag ^{:go/pos {:name-pos [72 21]}} uint64 :go/pos {:closing [72 19] :opening [72 10]}} [^{:tag ^{:go/pos {:lbrack [72 13]}} (slice ^{:go/pos {:name-pos [72 15]}} byte) :go/pos {:name-pos [72 11]}} b]
+  (let [^{:go/pos {:name-pos [73 2] :tok-pos [73 4]}} n ^{:go/pos {:lparen [73 10] :rparen [73 12]}} (^{:go/pos {:name-pos [73 7]}} len ^{:go/pos {:name-pos [73 11]}} b)]
+    ^{:go/pos {:if [74 2] :lbrace [74 12] :rbrace [76 2]}} (when ^{:go/apos {2 [74 10]} :go/pos {:op-pos [74 7]}} (== ^{:go/pos {:name-pos [74 5]}} n 0)
+      ^{:go/apos {2 [75 7]} :go/pos {:tok-pos [75 5]}} (set! ^{:go/pos {:name-pos [75 3]}} n 1))
+
+    (let [^{:go/pos {:name-pos [77 2] :tok-pos [77 4]}} p ^{:go/pos {:dot [77 10] :lparen [77 17] :name-pos [77 11] :rparen [77 27]}} (.Malloc ^{:go/pos {:name-pos [77 7]}} lib ^{:go/pos {:lparen [77 24] :rparen [77 26]}} (conv ^{:go/pos {:name-pos [77 18]}} uint64 ^{:go/pos {:name-pos [77 25]}} n))]
+      ^{:go/pos {:if [78 2] :lbrace [78 12] :rbrace [80 2]}} (when ^{:go/apos {2 [78 10]} :go/pos {:op-pos [78 7]}} (!= ^{:go/pos {:name-pos [78 5]}} p 0)
+        ^{:go/pos {:dot [79 6] :lparen [79 12] :name-pos [79 7] :rparen [79 17]}} (.Write ^{:go/pos {:name-pos [79 3]}} lib ^{:go/pos {:name-pos [79 13]}} p ^{:go/pos {:name-pos [79 16]}} b))
+
+      ^{:go/pos {:name-pos [81 9]}} p)))
+
+
+^{:go/pos {:func [84 1] :lbrace [84 23] :rbrace [84 72] :return [84 25]}} (go/func ^{:go/pos {:name-pos [84 6]}} noMemory ^{:tag ^{:go/pos {:name-pos [84 17]}} error :go/pos {:closing [84 15] :opening [84 14]}} [] ^{:go/pos {:lparen [84 40] :rparen [84 70]}} (^{:go/pos {:name-pos [84 32]}} ExtRaise ^{:go/pos {:lparen [84 53] :rparen [84 69]}} (^{:go/pos {:name-pos [84 41]}} NewException ^{:go/pos {:name-pos [84 54]}} MemoryErrorType)))
+
+
+^{:go/pos {:doc [86 1] :tok-pos [87 1]}} (go/var ^{:tag ^{:go/pos {:name-pos [87 13]}} error :doc "pending is the error a callback left set (\"PyErr_Occurred\" after the C call returns).\n" :go/pos {:name-pos [87 5]}} pending)
+
+^{:go/pos {:func [89 1] :lbrace [89 26] :rbrace [93 1] :return [92 2]}} (go/func ^{:go/pos {:name-pos [89 6]}} takePending ^{:tag ^{:go/pos {:name-pos [89 20]}} error :go/pos {:closing [89 18] :opening [89 17]}} []
+  (let [^{:go/pos {:name-pos [90 2] :tok-pos [90 4]}} e ^{:go/pos {:name-pos [90 7]}} pending]
+    ^{:go/apos {2 [91 12]} :go/pos {:tok-pos [91 10]}} (set! ^{:go/pos {:name-pos [91 2]}} pending nil)
+    ^{:go/pos {:name-pos [92 9]}} e))
+
+
+
+^{:go/pos {:doc [95 1] :func [96 1] :lbrace [96 40] :rbrace [106 1] :return [105 2]}} (go/func ^{:go/pos {:name-pos [96 6]}} chain "chain is _PyErr_ChainExceptions1(exc) with err the error raised now: exc becomes its __context__.\n" ^{:tag ^{:go/pos {:name-pos [96 34]}} error :go/pos {:closing [96 32] :opening [96 11]}} [^{:tag ^{:go/pos {:name-pos [96 16]}} error :go/pos {:name-pos [96 12]}} err ^{:tag ^{:go/pos {:name-pos [96 27]}} error :go/pos {:name-pos [96 23]}} exc]
+  ^{:go/pos {:if [97 2] :lbrace [97 16] :rbrace [99 2]}} (when ^{:go/apos {2 [97 12]} :go/pos {:op-pos [97 9]}} (== ^{:go/pos {:name-pos [97 5]}} exc nil)
+    ^{:go/pos {:return [98 3]}} (return ^{:go/pos {:name-pos [98 10]}} err))
+
+  (let [^{:go/pos {:tok-pos [100 9]}} (values ^{:go/pos {:name-pos [100 2]}} r ^{:go/pos {:name-pos [100 5]}} ok1) ^{:go/pos {:dot [100 15] :lparen [100 16] :rparen [100 24]}} (assert ^{:go/pos {:star [100 17]}} (* ^{:go/pos {:name-pos [100 18]}} Raised) ^{:go/pos {:name-pos [100 12]}} err)
+      ^{:go/pos {:tok-pos [101 9]}} (values ^{:go/pos {:name-pos [101 2]}} x ^{:go/pos {:name-pos [101 5]}} ok2) ^{:go/pos {:dot [101 15] :lparen [101 16] :rparen [101 24]}} (assert ^{:go/pos {:star [101 17]}} (* ^{:go/pos {:name-pos [101 18]}} Raised) ^{:go/pos {:name-pos [101 12]}} exc)]
+    ^{:go/pos {:if [102 2] :lbrace [102 58] :rbrace [104 2]}} (when ^{:go/ops [[102 9] [102 16] [102 34]] :go/pos {:op-pos [102 34]}} (and ^{:go/pos {:name-pos [102 5]}} ok1 ^{:go/pos {:name-pos [102 12]}} ok2 ^{:go/pos {:op-pos [102 25]}} (!= ^{:go/pos {:dot [102 20] :name-pos [102 21]}} (.-Exc ^{:go/pos {:name-pos [102 19]}} r) ^{:go/pos {:dot [102 29] :name-pos [102 30]}} (.-Exc ^{:go/pos {:name-pos [102 28]}} x)) ^{:go/apos {2 [102 54]} :go/pos {:op-pos [102 51]}} (== ^{:go/pos {:dot [102 42] :name-pos [102 43]}} (.-Context ^{:go/pos {:dot [102 38] :name-pos [102 39]}} (.-Exc ^{:go/pos {:name-pos [102 37]}} r)) nil))
+      ^{:go/pos {:tok-pos [103 17]}} (set! ^{:go/pos {:dot [103 8] :name-pos [103 9]}} (.-Context ^{:go/pos {:dot [103 4] :name-pos [103 5]}} (.-Exc ^{:go/pos {:name-pos [103 3]}} r)) ^{:go/pos {:dot [103 20] :name-pos [103 21]}} (.-Exc ^{:go/pos {:name-pos [103 19]}} x)))
+
+    ^{:go/pos {:name-pos [105 9]}} err))
+
+
+^{:go/pos {:func [108 1] :lbrace [108 37] :rbrace [111 1] :return [110 2]}} (go/func ^{:go/pos {:name-pos [108 6]}} isErr ^{:tag ^{:go/pos {:name-pos [108 32]}} bool :go/pos {:closing [108 30] :opening [108 11]}} [^{:tag ^{:go/pos {:name-pos [108 16]}} error :go/pos {:name-pos [108 12]}} err ^{:tag ^{:go/pos {:star [108 25]}} (* ^{:go/pos {:name-pos [108 26]}} Type) :go/pos {:name-pos [108 23]}} t]
+  (let [^{:go/pos {:tok-pos [109 8]}} (values ^{:go/pos {:name-pos [109 2]}} r ^{:go/pos {:name-pos [109 5]}} ok) ^{:go/pos {:dot [109 14] :lparen [109 15] :rparen [109 23]}} (assert ^{:go/pos {:star [109 16]}} (* ^{:go/pos {:name-pos [109 17]}} Raised) ^{:go/pos {:name-pos [109 11]}} err)]
+    ^{:go/pos {:op-pos [110 12]}} (and ^{:go/pos {:name-pos [110 9]}} ok ^{:go/pos {:lparen [110 25] :rparen [110 34]}} (^{:go/pos {:name-pos [110 15]}} IsInstance ^{:go/pos {:dot [110 27] :name-pos [110 28]}} (.-Exc ^{:go/pos {:name-pos [110 26]}} r) ^{:go/pos {:name-pos [110 33]}} t))))
+
+
+
+^{:go/pos {:doc [113 1] :func [114 1] :lbrace [114 37] :rbrace [117 1] :return [116 2]}} (go/func ^{:go/pos {:name-pos [114 6]}} utf8 "utf8 is PyUnicode_AsUTF8AndSize.\n" ^{:go/pos {:closing [114 19] :opening [114 10]}} [^{:tag ^{:go/pos {:name-pos [114 13]}} Object :go/pos {:name-pos [114 11]}} o] :results ^{:go/pos {:closing [114 35] :opening [114 21]}} [^{:go/pos {:lbrack [114 22]}} (slice ^{:go/pos {:name-pos [114 24]}} byte) ^{:go/pos {:name-pos [114 30]}} error]
+  (let [^{:go/pos {:tok-pos [115 7]}} (values ^{:go/pos {:name-pos [115 2]}} s ^{:go/pos {:name-pos [115 5]}} _) ^{:go/pos {:lparen [115 18] :rparen [115 20]}} (^{:go/pos {:name-pos [115 10]}} ExtAsStr ^{:go/pos {:name-pos [115 19]}} o)]
+    ^{:go/apos {2 [116 26]} :go/pos {:lparen [116 22] :rparen [116 34]}} (^{:go/pos {:name-pos [116 9]}} ExtEncodeUTF8 ^{:go/pos {:name-pos [116 23]}} s "strict")))
+
+
+
+^{:go/pos {:doc [119 1] :func [120 1] :lbrace [120 41] :rbrace [126 1]}} (go/func ^{:go/pos {:name-pos [120 6]}} fromUTF8 "fromUTF8 is PyUnicode_FromStringAndSize (strict).\n" ^{:go/pos {:closing [120 23] :opening [120 14]}} [^{:tag ^{:go/pos {:lbrack [120 17]}} (slice ^{:go/pos {:name-pos [120 19]}} byte) :go/pos {:name-pos [120 15]}} b] :results ^{:go/pos {:closing [120 39] :opening [120 25]}} [^{:go/pos {:name-pos [120 26]}} Object ^{:go/pos {:name-pos [120 34]}} error]
+  (let [^{:go/pos {:tok-pos [121 12]}} (values ^{:go/pos {:name-pos [121 2]}} s ^{:go/pos {:name-pos [121 5]}} _ ^{:go/pos {:name-pos [121 8]}} err) ^{:go/apos {2 [121 32] 3 [121 42]} :go/pos {:lparen [121 28] :rparen [121 46]}} (^{:go/pos {:name-pos [121 15]}} ExtDecodeUTF8 ^{:go/pos {:name-pos [121 29]}} b "strict" true)]
+    ^{:go/pos {:if [122 2] :lbrace [122 16] :rbrace [124 2]}} (when ^{:go/apos {2 [122 12]} :go/pos {:op-pos [122 9]}} (!= ^{:go/pos {:name-pos [122 5]}} err nil)
+      ^{:go/apos {1 [123 10]} :go/pos {:return [123 3]}} (return nil ^{:go/pos {:name-pos [123 15]}} err))
+
+    ^{:go/apos {2 [125 12]} :go/pos {:return [125 2]}} (return ^{:go/pos {:name-pos [125 9]}} s nil)))
+
+
+^{:go/pos {:func [128 1] :lbrace [128 29] :rbrace [128 61] :return [128 31]}} (go/func ^{:go/pos {:name-pos [128 6]}} isStr ^{:tag ^{:go/pos {:name-pos [128 22]}} bool :go/pos {:closing [128 20] :opening [128 11]}} [^{:tag ^{:go/pos {:name-pos [128 14]}} Object :go/pos {:name-pos [128 12]}} o] ^{:go/pos {:lparen [128 48] :rparen [128 59]}} (^{:go/pos {:name-pos [128 38]}} IsInstance ^{:go/pos {:name-pos [128 49]}} o ^{:go/pos {:name-pos [128 52]}} StrType))
+^{:go/pos {:func [129 1] :lbrace [129 29] :rbrace [129 61] :return [129 31]}} (go/func ^{:go/pos {:name-pos [129 6]}} isInt ^{:tag ^{:go/pos {:name-pos [129 22]}} bool :go/pos {:closing [129 20] :opening [129 11]}} [^{:tag ^{:go/pos {:name-pos [129 14]}} Object :go/pos {:name-pos [129 12]}} o] ^{:go/pos {:lparen [129 48] :rparen [129 59]}} (^{:go/pos {:name-pos [129 38]}} IsInstance ^{:go/pos {:name-pos [129 49]}} o ^{:go/pos {:name-pos [129 52]}} IntType))
+^{:go/pos {:func [130 1] :lbrace [130 29] :rbrace [130 63] :return [130 31]}} (go/func ^{:go/pos {:name-pos [130 6]}} isFloat ^{:tag ^{:go/pos {:name-pos [130 24]}} bool :go/pos {:closing [130 22] :opening [130 13]}} [^{:tag ^{:go/pos {:name-pos [130 16]}} Object :go/pos {:name-pos [130 14]}} o] ^{:go/pos {:lparen [130 48] :rparen [130 61]}} (^{:go/pos {:name-pos [130 38]}} IsInstance ^{:go/pos {:name-pos [130 49]}} o ^{:go/pos {:name-pos [130 52]}} FloatType))
+^{:go/pos {:func [131 1] :lbrace [131 29] :rbrace [131 63] :return [131 31]}} (go/func ^{:go/pos {:name-pos [131 6]}} isTuple ^{:tag ^{:go/pos {:name-pos [131 24]}} bool :go/pos {:closing [131 22] :opening [131 13]}} [^{:tag ^{:go/pos {:name-pos [131 16]}} Object :go/pos {:name-pos [131 14]}} o] ^{:go/pos {:lparen [131 48] :rparen [131 61]}} (^{:go/pos {:name-pos [131 38]}} IsInstance ^{:go/pos {:name-pos [131 49]}} o ^{:go/pos {:name-pos [131 52]}} TupleType))
+^{:go/pos {:func [132 1] :lbrace [132 29] :rbrace [132 64] :return [132 54]}} (go/func ^{:go/pos {:name-pos [132 6]}} isDict ^{:tag ^{:go/pos {:name-pos [132 23]}} bool :go/pos {:closing [132 21] :opening [132 12]}} [^{:tag ^{:go/pos {:name-pos [132 15]}} Object :go/pos {:name-pos [132 13]}} o] (let [^{:go/pos {:tok-pos [132 37]}} (values ^{:go/pos {:name-pos [132 31]}} _ ^{:go/pos {:name-pos [132 34]}} ok) ^{:go/pos {:lparen [132 49] :rparen [132 51]}} (^{:go/pos {:name-pos [132 40]}} ExtAsDict ^{:go/pos {:name-pos [132 50]}} o)] ^{:go/pos {:name-pos [132 61]}} ok))
+
+^{:go/pos {:func [134 1] :lbrace [134 32] :rbrace [134 68] :return [134 34]}} (go/func ^{:go/pos {:name-pos [134 6]}} isCallable ^{:tag ^{:go/pos {:name-pos [134 27]}} bool :go/pos {:closing [134 25] :opening [134 16]}} [^{:tag ^{:go/pos {:name-pos [134 19]}} Object :go/pos {:name-pos [134 17]}} o] ^{:go/apos {2 [134 64]} :go/pos {:op-pos [134 61]}} (!= ^{:go/pos {:dot [134 55] :name-pos [134 56]}} (.-Call ^{:go/pos {:dot [134 49] :name-pos [134 50]}} (.-Slots ^{:go/pos {:dot [134 42] :lparen [134 47] :name-pos [134 43] :rparen [134 48]}} (.Type ^{:go/pos {:name-pos [134 41]}} o))) nil))
+
+
+
+^{:go/pos {:doc [136 1] :func [138 1] :lbrace [138 50] :rbrace [150 1]}} (go/func ^{:go/pos {:name-pos [138 6]}} checkBuffer "checkBuffer is PyObject_CheckBuffer with PyObject_GetBuffer(PyBUF_SIMPLE): whether o exports a buffer, its bytes,\nand the error of getting them (a memoryview not C-contiguous: BufferError).\n" ^{:go/pos {:closing [138 26] :opening [138 17]}} [^{:tag ^{:go/pos {:name-pos [138 20]}} Object :go/pos {:name-pos [138 18]}} o] :results ^{:go/pos {:closing [138 48] :opening [138 28]}} [^{:go/pos {:lbrack [138 29]}} (slice ^{:go/pos {:name-pos [138 31]}} byte) ^{:go/pos {:name-pos [138 37]}} bool ^{:go/pos {:name-pos [138 43]}} error]
+  ^{:go/pos {:if [139 2] :lbrace [139 14] :rbrace [141 2]}} (when ^{:go/pos {:lparen [139 10] :rparen [139 12]}} (^{:go/pos {:name-pos [139 5]}} isStr ^{:go/pos {:name-pos [139 11]}} o)
+    ^{:go/apos {1 [140 10] 2 [140 15] 3 [140 22]} :go/pos {:return [140 3]}} (return nil false nil))
+
+  (let [^{:go/pos {:tok-pos [142 9]}} (values ^{:go/pos {:name-pos [142 2]}} b ^{:go/pos {:name-pos [142 5]}} err) ^{:go/pos {:lparen [142 25] :rparen [142 27]}} (^{:go/pos {:name-pos [142 12]}} ExtDataBuffer ^{:go/pos {:name-pos [142 26]}} o)]
+    ^{:go/pos {:if [143 2] :lbrace [143 16] :rbrace [148 2]}} (when ^{:go/apos {2 [143 12]} :go/pos {:op-pos [143 9]}} (!= ^{:go/pos {:name-pos [143 5]}} err nil)
+      ^{:go/pos {:if [144 3] :lbrace [144 32] :rbrace [146 3]}} (when ^{:go/pos {:lparen [144 11] :rparen [144 30]}} (^{:go/pos {:name-pos [144 6]}} isErr ^{:go/pos {:name-pos [144 12]}} err ^{:go/pos {:name-pos [144 17]}} TypeErrorType)
+        ^{:go/apos {1 [145 11] 2 [145 16] 3 [145 23]} :go/pos {:return [145 4]}} (return nil false nil))
+
+      ^{:go/apos {1 [147 10] 2 [147 15]} :go/pos {:return [147 3]}} (return nil true ^{:go/pos {:name-pos [147 21]}} err))
+
+    ^{:go/apos {2 [149 12] 3 [149 18]} :go/pos {:return [149 2]}} (return ^{:go/pos {:name-pos [149 9]}} b true nil)))
+
+
+
+^{:go/pos {:doc [152 1] :func [153 1] :lbrace [153 37] :rbrace [156 1]}} (go/func ^{:go/pos {:name-pos [153 6]}} asInt "PyLong_AsInt: an int or __index__, in a C int.\n" ^{:go/pos {:closing [153 20] :opening [153 11]}} [^{:tag ^{:go/pos {:name-pos [153 14]}} Object :go/pos {:name-pos [153 12]}} o] :results ^{:go/pos {:closing [153 35] :opening [153 22]}} [^{:go/pos {:name-pos [153 23]}} int32 ^{:go/pos {:name-pos [153 30]}} error]
+  (let [^{:go/pos {:tok-pos [154 9]}} (values ^{:go/pos {:name-pos [154 2]}} v ^{:go/pos {:name-pos [154 5]}} err) ^{:go/pos {:lparen [154 21] :rparen [154 23]}} (^{:go/pos {:name-pos [154 12]}} ExtIntArg ^{:go/pos {:name-pos [154 22]}} o)]
+    ^{:go/pos {:return [155 2]}} (return ^{:go/pos {:lparen [155 14] :rparen [155 16]}} (conv ^{:go/pos {:name-pos [155 9]}} int32 ^{:go/pos {:name-pos [155 15]}} v) ^{:go/pos {:name-pos [155 19]}} err)))
+
+
+
+^{:go/pos {:doc [158 1] :func [159 1] :lbrace [159 50] :rbrace [172 1]}} (go/func ^{:go/pos {:name-pos [159 6]}} asSsize "asSsize is PyNumber_AsSsize_t(o, exc): exc on overflow (nil: OverflowError).\n" ^{:go/pos {:closing [159 33] :opening [159 13]}} [^{:tag ^{:go/pos {:name-pos [159 16]}} Object :go/pos {:name-pos [159 14]}} o ^{:tag ^{:go/pos {:star [159 28]}} (* ^{:go/pos {:name-pos [159 29]}} Type) :go/pos {:name-pos [159 24]}} exc] :results ^{:go/pos {:closing [159 48] :opening [159 35]}} [^{:go/pos {:name-pos [159 36]}} int64 ^{:go/pos {:name-pos [159 43]}} error]
+  (let [^{:go/pos {:tok-pos [160 9]}} (values ^{:go/pos {:name-pos [160 2]}} i ^{:go/pos {:name-pos [160 5]}} err) ^{:go/pos {:lparen [160 17] :rparen [160 19]}} (^{:go/pos {:name-pos [160 12]}} Index ^{:go/pos {:name-pos [160 18]}} o)]
+    ^{:go/pos {:if [161 2] :lbrace [161 16] :rbrace [163 2]}} (when ^{:go/apos {2 [161 12]} :go/pos {:op-pos [161 9]}} (!= ^{:go/pos {:name-pos [161 5]}} err nil)
+      ^{:go/apos {1 [162 10]} :go/pos {:return [162 3]}} (return 0 ^{:go/pos {:name-pos [162 13]}} err))
+
+    (let [^{:go/pos {:tok-pos [164 8]}} (values ^{:go/pos {:name-pos [164 2]}} v ^{:go/pos {:name-pos [164 5]}} ok) ^{:go/pos {:dot [164 12] :lparen [164 18] :name-pos [164 13] :rparen [164 19]}} (.Int64 ^{:go/pos {:name-pos [164 11]}} i)]
+      ^{:go/pos {:if [165 2] :lbrace [165 9] :rbrace [170 2]}} (when ^{:go/pos {:op-pos [165 5]}} (not ^{:go/pos {:name-pos [165 6]}} ok)
+        ^{:go/pos {:if [166 3] :lbrace [166 17] :rbrace [168 3]}} (when ^{:go/apos {2 [166 13]} :go/pos {:op-pos [166 10]}} (== ^{:go/pos {:name-pos [166 6]}} exc nil)
+          ^{:go/pos {:tok-pos [167 8]}} (set! ^{:go/pos {:name-pos [167 4]}} exc ^{:go/pos {:name-pos [167 10]}} OverflowErrorType))
+
+        ^{:go/apos {1 [169 10]} :go/pos {:return [169 3]}} (return 0 ^{:go/apos {2 [169 25]} :go/pos {:lparen [169 19] :rparen [169 85]}} (^{:go/pos {:name-pos [169 13]}} Raisef ^{:go/pos {:name-pos [169 20]}} exc "cannot fit '%s' into an index-sized integer" ^{:go/pos {:dot [169 80] :name-pos [169 81]}} (.-Name ^{:go/pos {:dot [169 73] :lparen [169 78] :name-pos [169 74] :rparen [169 79]}} (.Type ^{:go/pos {:name-pos [169 72]}} o)))))
+
+      ^{:go/apos {2 [171 12]} :go/pos {:return [171 2]}} (return ^{:go/pos {:name-pos [171 9]}} v nil))))
+
+
+
+^{:go/pos {:doc [174 1] :func [175 1] :lbrace [175 55] :rbrace [185 1]}} (go/func ^{:go/pos {:name-pos [175 6]}} _pysqlite_long_as_int64 "_pysqlite_long_as_int64\n" ^{:go/pos {:closing [175 38] :opening [175 29]}} [^{:tag ^{:go/pos {:name-pos [175 32]}} Object :go/pos {:name-pos [175 30]}} o] :results ^{:go/pos {:closing [175 53] :opening [175 40]}} [^{:go/pos {:name-pos [175 41]}} int64 ^{:go/pos {:name-pos [175 48]}} error]
+  (let [^{:go/pos {:tok-pos [176 9]}} (values ^{:go/pos {:name-pos [176 2]}} i ^{:go/pos {:name-pos [176 5]}} err) ^{:go/pos {:lparen [176 17] :rparen [176 19]}} (^{:go/pos {:name-pos [176 12]}} Index ^{:go/pos {:name-pos [176 18]}} o)]
+    ^{:go/pos {:if [177 2] :lbrace [177 16] :rbrace [179 2]}} (when ^{:go/apos {2 [177 12]} :go/pos {:op-pos [177 9]}} (!= ^{:go/pos {:name-pos [177 5]}} err nil)
+      ^{:go/apos {1 [178 10]} :go/pos {:return [178 3]}} (return 0 ^{:go/pos {:name-pos [178 13]}} err))
+
+    (let [^{:go/pos {:tok-pos [180 8]}} (values ^{:go/pos {:name-pos [180 2]}} v ^{:go/pos {:name-pos [180 5]}} ok) ^{:go/pos {:dot [180 12] :lparen [180 18] :name-pos [180 13] :rparen [180 19]}} (.Int64 ^{:go/pos {:name-pos [180 11]}} i)]
+      ^{:go/pos {:if [181 2] :lbrace [181 9] :rbrace [183 2]}} (when ^{:go/pos {:op-pos [181 5]}} (not ^{:go/pos {:name-pos [181 6]}} ok)
+        ^{:go/apos {1 [182 10]} :go/pos {:return [182 3]}} (return 0 ^{:go/apos {2 [182 38]} :go/pos {:lparen [182 18] :rparen [182 89]}} (^{:go/pos {:name-pos [182 13]}} Raise ^{:go/pos {:name-pos [182 19]}} OverflowErrorType "Python int too large to convert to SQLite INTEGER")))
+
+      ^{:go/apos {2 [184 12]} :go/pos {:return [184 2]}} (return ^{:go/pos {:name-pos [184 9]}} v nil))))
+
+
+^{:go/pos {:func [187 1] :lbrace [187 31] :rbrace [187 50] :return [187 33]}} (go/func ^{:go/pos {:name-pos [187 6]}} newInt64 ^{:tag ^{:go/pos {:name-pos [187 24]}} Object :go/pos {:closing [187 22] :opening [187 14]}} [^{:tag ^{:go/pos {:name-pos [187 17]}} int64 :go/pos {:name-pos [187 15]}} v] ^{:go/pos {:lparen [187 46] :rparen [187 48]}} (^{:go/pos {:name-pos [187 40]}} NewInt ^{:go/pos {:name-pos [187 47]}} v))
+
+^{:go/pos {:func [189 1] :lbrace [189 31] :rbrace [189 77] :return [189 33]}} (go/func ^{:go/pos {:name-pos [189 6]}} newUint ^{:tag ^{:go/pos {:name-pos [189 24]}} Object :go/pos {:closing [189 22] :opening [189 13]}} [^{:tag ^{:go/pos {:name-pos [189 16]}} uint64 :go/pos {:name-pos [189 14]}} v] ^{:go/pos {:lparen [189 49] :rparen [189 75]}} (^{:go/pos {:name-pos [189 40]}} NewIntBig ^{:go/pos {:dot [189 62] :lparen [189 72] :name-pos [189 63] :rparen [189 74]}} (.SetUint64 ^{:go/pos {:lparen [189 53] :rparen [189 61]}} (^{:go/pos {:name-pos [189 50]}} new ^{:go/pos {:dot [189 57] :name-pos [189 58] :x-pos [189 54]}} big/Int) ^{:go/pos {:name-pos [189 73]}} v)))
+
+^{:go/pos {:func [191 1] :lbrace [191 31] :rbrace [191 67] :return [191 33]}} (go/func ^{:go/pos {:name-pos [191 6]}} f64bits ^{:tag ^{:go/pos {:name-pos [191 25]}} int64 :go/pos {:closing [191 23] :opening [191 13]}} [^{:tag ^{:go/pos {:name-pos [191 16]}} float64 :go/pos {:name-pos [191 14]}} f] ^{:go/pos {:lparen [191 45] :rparen [191 65]}} (conv ^{:go/pos {:name-pos [191 40]}} int64 ^{:go/pos {:lparen [191 62] :rparen [191 64]}} (^{:go/pos {:dot [191 50] :name-pos [191 51] :x-pos [191 46]}} math/Float64bits ^{:go/pos {:name-pos [191 63]}} f)))
+
+^{:go/pos {:func [193 1] :lbrace [193 31] :rbrace [193 72] :return [193 33]}} (go/func ^{:go/pos {:name-pos [193 6]}} bitsf64 ^{:tag ^{:go/pos {:name-pos [193 23]}} float64 :go/pos {:closing [193 21] :opening [193 13]}} [^{:tag ^{:go/pos {:name-pos [193 16]}} int64 :go/pos {:name-pos [193 14]}} b] ^{:go/pos {:lparen [193 60] :rparen [193 70]}} (^{:go/pos {:dot [193 44] :name-pos [193 45] :x-pos [193 40]}} math/Float64frombits ^{:go/pos {:lparen [193 67] :rparen [193 69]}} (conv ^{:go/pos {:name-pos [193 61]}} uint64 ^{:go/pos {:name-pos [193 68]}} b)))
+
+
+^{:go/pos {:doc [195 1] :func [196 1] :lbrace [196 32] :rbrace [196 55] :return [196 34]}} (go/func ^{:go/pos {:name-pos [196 6]}} typeName "typeName is a type's tp_name as the C messages print it.\n" ^{:tag ^{:go/pos {:name-pos [196 25]}} string :go/pos {:closing [196 23] :opening [196 14]}} [^{:tag ^{:go/pos {:name-pos [196 17]}} Object :go/pos {:name-pos [196 15]}} o] ^{:go/pos {:dot [196 49] :name-pos [196 50]}} (.-Name ^{:go/pos {:dot [196 42] :lparen [196 47] :name-pos [196 43] :rparen [196 48]}} (.Type ^{:go/pos {:name-pos [196 41]}} o)))
+
+
+^{:go/pos {:doc [198 1] :func [199 1] :lbrace [199 73] :rbrace [205 1] :return [204 2]}} (go/func ^{:go/pos {:name-pos [199 6]}} badArgument "badArgument is _PyArg_BadArgument.\n" ^{:tag ^{:go/pos {:name-pos [199 67]}} error :go/pos {:closing [199 65] :opening [199 17]}} [^{:tag ^{:go/pos {:name-pos [199 47]}} string :go/pos {:name-pos [199 18]}} fname ^{:tag ^{:go/pos {:name-pos [199 47]}} string :go/pos {:name-pos [199 25]}} displayname ^{:tag ^{:go/pos {:name-pos [199 47]}} string :go/pos {:name-pos [199 38]}} expected ^{:tag ^{:go/pos {:name-pos [199 59]}} Object :go/pos {:name-pos [199 55]}} arg]
+  (let [^{:go/pos {:name-pos [200 2] :tok-pos [200 6]}} got ^{:go/pos {:lparen [200 17] :rparen [200 21]}} (^{:go/pos {:name-pos [200 9]}} typeName ^{:go/pos {:name-pos [200 18]}} arg)]
+    ^{:go/pos {:if [201 2] :lbrace [201 17] :rbrace [203 2]}} (when ^{:go/pos {:op-pos [201 9]}} (== ^{:go/pos {:name-pos [201 5]}} arg ^{:go/pos {:name-pos [201 12]}} None)
+      ^{:go/apos {2 [202 9]} :go/pos {:tok-pos [202 7]}} (set! ^{:go/pos {:name-pos [202 3]}} got "None"))
+
+    ^{:go/apos {2 [204 31]} :go/pos {:lparen [204 15] :rparen [204 94]}} (^{:go/pos {:name-pos [204 9]}} Raisef ^{:go/pos {:name-pos [204 16]}} TypeErrorType "%s() %s must be %s, not %s" ^{:go/pos {:name-pos [204 61]}} fname ^{:go/pos {:name-pos [204 68]}} displayname ^{:go/pos {:name-pos [204 81]}} expected ^{:go/pos {:name-pos [204 91]}} got)))
+
+
+
+
+^{:go/pos {:doc [207 1] :func [209 1] :lbrace [209 120] :rbrace [279 1]}} (go/func ^{:go/pos {:name-pos [209 6]}} parseArgs "parseArgs is clinic's _PyArg_UnpackKeywords: names in order, the first posonly positional-only, those after maxpos\nkeyword-only, the first minargs required; the values by position (nil: absent).\n" ^{:go/pos {:closing [209 100] :opening [209 15]}} [^{:tag ^{:go/pos {:name-pos [209 22]}} string :go/pos {:name-pos [209 16]}} fname ^{:tag ^{:go/pos {:lbrack [209 35]}} (slice ^{:go/pos {:name-pos [209 37]}} Object) :go/pos {:name-pos [209 30]}} args ^{:tag ^{:go/pos {:lbrack [209 48]}} (slice ^{:go/pos {:star [209 50]}} (* ^{:go/pos {:name-pos [209 51]}} Str)) :go/pos {:name-pos [209 45]}} kw ^{:tag ^{:go/pos {:lbrack [209 62]}} (slice ^{:go/pos {:name-pos [209 64]}} string) :go/pos {:name-pos [209 56]}} names ^{:tag ^{:go/pos {:name-pos [209 97]}} int :go/pos {:name-pos [209 72]}} posonly ^{:tag ^{:go/pos {:name-pos [209 97]}} int :go/pos {:name-pos [209 81]}} maxpos ^{:tag ^{:go/pos {:name-pos [209 97]}} int :go/pos {:name-pos [209 89]}} minargs] :results ^{:go/pos {:closing [209 118] :opening [209 102]}} [^{:go/pos {:lbrack [209 103]}} (slice ^{:go/pos {:name-pos [209 105]}} Object) ^{:go/pos {:name-pos [209 113]}} error]
+  (let [^{:go/pos {:name-pos [210 2] :tok-pos [210 7]}} npos ^{:go/pos {:op-pos [210 20]}} (- ^{:go/pos {:lparen [210 13] :rparen [210 18]}} (^{:go/pos {:name-pos [210 10]}} len ^{:go/pos {:name-pos [210 14]}} args) ^{:go/pos {:lparen [210 25] :rparen [210 28]}} (^{:go/pos {:name-pos [210 22]}} len ^{:go/pos {:name-pos [210 26]}} kw))
+      ^{:go/pos {:name-pos [211 2] :tok-pos [211 6]}} out ^{:go/pos {:lparen [211 13] :rparen [211 34]}} (^{:go/pos {:name-pos [211 9]}} make ^{:go/pos {:lbrack [211 14]}} (slice ^{:go/pos {:name-pos [211 16]}} Object) ^{:go/pos {:lparen [211 27] :rparen [211 33]}} (^{:go/pos {:name-pos [211 24]}} len ^{:go/pos {:name-pos [211 28]}} names))]
+    ^{:go/pos {:if [212 2] :lbrace [212 19] :rbrace [225 2]}} (when ^{:go/pos {:op-pos [212 10]}} (> ^{:go/pos {:name-pos [212 5]}} npos ^{:go/pos {:name-pos [212 12]}} maxpos)
+      ^{:go/pos {:if [213 3] :lbrace [213 18] :rbrace [215 3]}} (when ^{:go/apos {2 [213 16]} :go/pos {:op-pos [213 13]}} (== ^{:go/pos {:name-pos [213 6]}} maxpos 0)
+        ^{:go/apos {1 [214 11]} :go/pos {:return [214 4]}} (return nil ^{:go/apos {2 [214 38]} :go/pos {:lparen [214 22] :rparen [214 81]}} (^{:go/pos {:name-pos [214 16]}} Raisef ^{:go/pos {:name-pos [214 23]}} TypeErrorType "%s() takes no positional arguments" ^{:go/pos {:name-pos [214 76]}} fname)))
+
+      (let ^{:go/apos {1 [216 10]}} [^{:go/pos {:name-pos [216 3] :tok-pos [216 7]}} how "at most"]
+        ^{:go/pos {:if [217 3] :lbrace [217 24] :rbrace [219 3]}} (when ^{:go/pos {:op-pos [217 14]}} (>= ^{:go/pos {:name-pos [217 6]}} minargs ^{:go/pos {:name-pos [217 17]}} maxpos)
+          ^{:go/apos {2 [218 10]} :go/pos {:tok-pos [218 8]}} (set! ^{:go/pos {:name-pos [218 4]}} how "exactly"))
+
+        (let ^{:go/apos {1 [220 8]}} [^{:go/pos {:name-pos [220 3] :tok-pos [220 5]}} s "s"]
+          ^{:go/pos {:if [221 3] :lbrace [221 18] :rbrace [223 3]}} (when ^{:go/apos {2 [221 16]} :go/pos {:op-pos [221 13]}} (== ^{:go/pos {:name-pos [221 6]}} maxpos 1)
+            ^{:go/apos {2 [222 8]} :go/pos {:tok-pos [222 6]}} (set! ^{:go/pos {:name-pos [222 4]}} s ""))
+
+          ^{:go/apos {1 [224 10]} :go/pos {:return [224 3]}} (return nil ^{:go/apos {2 [224 37]} :go/pos {:lparen [224 21] :rparen [224 117]}} (^{:go/pos {:name-pos [224 15]}} Raisef ^{:go/pos {:name-pos [224 22]}} TypeErrorType "%s() takes %s %d positional argument%s (%d given)" ^{:go/pos {:name-pos [224 90]}} fname ^{:go/pos {:name-pos [224 97]}} how ^{:go/pos {:name-pos [224 102]}} maxpos ^{:go/pos {:name-pos [224 110]}} s ^{:go/pos {:name-pos [224 113]}} npos)))))
+
+    ^{:go/pos {:lparen [226 6] :rparen [226 23]}} (^{:go/pos {:name-pos [226 2]}} copy ^{:go/pos {:name-pos [226 7]}} out ^{:go/pos {:lbrack [226 16] :rbrack [226 22]}} (subslice ^{:go/pos {:name-pos [226 12]}} args _ ^{:go/pos {:name-pos [226 18]}} npos))
+    (let [^{:tag ^{:go/pos {:lbrack [227 14]}} (slice ^{:go/pos {:name-pos [227 16]}} string) :go/pos {:name-pos [227 6] :tok-pos [227 2]}} posAsKw (zero ^{:go/pos {:lbrack [227 14]}} (slice ^{:go/pos {:name-pos [227 16]}} string))]
+      ^{:go/pos {:for [228 2] :lbrace [228 23] :range [228 14] :rbrace [248 2] :tok-pos [228 11]}} (range [^{:go/pos {:name-pos [228 6]}} i ^{:go/pos {:name-pos [228 9]}} k ^{:go/pos {:name-pos [228 20]}} kw]
+        (let ^{:go/apos {3 [230 8]}} [^{:go/pos {:name-pos [229 3] :tok-pos [229 6]}} ks ^{:go/pos {:dot [229 10] :lparen [229 17] :name-pos [229 11] :rparen [229 18]}} (.String ^{:go/pos {:name-pos [229 9]}} k)
+            ^{:go/pos {:name-pos [230 3] :tok-pos [230 5]}} j -1]
+          ^{:go/pos {:for [231 3] :lbrace [231 27] :range [231 15] :rbrace [236 3] :tok-pos [231 12]}} (range [^{:go/pos {:name-pos [231 7]}} p ^{:go/pos {:name-pos [231 10]}} n ^{:go/pos {:name-pos [231 21]}} names]
+            ^{:go/pos {:if [232 4] :lbrace [232 26] :rbrace [235 4]}} (when ^{:go/pos {:op-pos [232 15]}} (and ^{:go/pos {:op-pos [232 9]}} (== ^{:go/pos {:name-pos [232 7]}} n ^{:go/pos {:name-pos [232 12]}} ks) ^{:go/apos {2 [232 23]} :go/pos {:op-pos [232 20]}} (!= ^{:go/pos {:name-pos [232 18]}} n ""))
+              ^{:go/pos {:tok-pos [233 7]}} (set! ^{:go/pos {:name-pos [233 5]}} j ^{:go/pos {:name-pos [233 9]}} p)
+              ^{:go/pos {:tok-pos [234 5]}} (break)))
+
+
+          ^{:go/pos {:if [237 3] :lbrace [237 28] :rbrace [240 3]}} (when ^{:go/pos {:op-pos [237 13]}} (and ^{:go/apos {2 [237 11]} :go/pos {:op-pos [237 8]}} (>= ^{:go/pos {:name-pos [237 6]}} j 0) ^{:go/pos {:op-pos [237 18]}} (< ^{:go/pos {:name-pos [237 16]}} j ^{:go/pos {:name-pos [237 20]}} posonly))
+            ^{:go/pos {:tok-pos [238 12]}} (set! ^{:go/pos {:name-pos [238 4]}} posAsKw ^{:go/pos {:lparen [238 20] :rparen [238 32]}} (^{:go/pos {:name-pos [238 14]}} append ^{:go/pos {:name-pos [238 21]}} posAsKw ^{:go/pos {:name-pos [238 30]}} ks))
+            ^{:go/pos {:tok-pos [239 4]}} (continue))
+
+          ^{:go/pos {:if [241 3] :lbrace [241 12] :rbrace [243 3]}} (when ^{:go/apos {2 [241 10]} :go/pos {:op-pos [241 8]}} (< ^{:go/pos {:name-pos [241 6]}} j 0)
+            ^{:go/apos {1 [242 11]} :go/pos {:return [242 4]}} (return nil ^{:go/apos {2 [242 38]} :go/pos {:lparen [242 22] :rparen [242 95]}} (^{:go/pos {:name-pos [242 16]}} Raisef ^{:go/pos {:name-pos [242 23]}} TypeErrorType "%s() got an unexpected keyword argument '%s'" ^{:go/pos {:name-pos [242 86]}} fname ^{:go/pos {:name-pos [242 93]}} ks)))
+
+          ^{:go/pos {:if [244 3] :lbrace [244 20] :rbrace [246 3]}} (when ^{:go/apos {2 [244 16]} :go/pos {:op-pos [244 13]}} (!= ^{:go/pos {:lbrack [244 9] :rbrack [244 11]}} (aget ^{:go/pos {:name-pos [244 6]}} out ^{:go/pos {:name-pos [244 10]}} j) nil)
+            ^{:go/apos {1 [245 11]} :go/pos {:return [245 4]}} (return nil ^{:go/apos {2 [245 38]} :go/pos {:lparen [245 22] :rparen [245 112]}} (^{:go/pos {:name-pos [245 16]}} Raisef ^{:go/pos {:name-pos [245 23]}} TypeErrorType "argument for %s() given by name ('%s') and position (%d)" ^{:go/pos {:name-pos [245 98]}} fname ^{:go/pos {:name-pos [245 105]}} ks ^{:go/apos {2 [245 111]} :go/pos {:op-pos [245 110]}} (+ ^{:go/pos {:name-pos [245 109]}} j 1))))
+
+          ^{:go/pos {:lbrack [247 6] :rbrack [247 8] :tok-pos [247 10]}} (aset ^{:go/pos {:name-pos [247 3]}} out ^{:go/pos {:name-pos [247 7]}} j ^{:go/pos {:lbrack [247 16] :rbrack [247 23]}} (aget ^{:go/pos {:name-pos [247 12]}} args ^{:go/pos {:op-pos [247 21]}} (+ ^{:go/pos {:name-pos [247 17]}} npos ^{:go/pos {:name-pos [247 22]}} i)))))
+
+      ^{:go/pos {:if [249 2] :lbrace [249 40] :rbrace [258 2]}} (when ^{:go/pos {:op-pos [249 22]}} (and ^{:go/apos {2 [249 20]} :go/pos {:op-pos [249 18]}} (> ^{:go/pos {:lparen [249 8] :rparen [249 16]}} (^{:go/pos {:name-pos [249 5]}} len ^{:go/pos {:name-pos [249 9]}} posAsKw) 0) ^{:go/pos {:op-pos [249 30]}} (< ^{:go/pos {:name-pos [249 25]}} npos ^{:go/pos {:name-pos [249 32]}} posonly))
+        (let ^{:go/apos {1 [250 8]}} [^{:go/pos {:name-pos [250 3] :tok-pos [250 5]}} q ""]
+          ^{:go/pos {:for [251 3] :lbrace [251 29] :range [251 15] :rbrace [256 3] :tok-pos [251 12]}} (range [^{:go/pos {:name-pos [251 7]}} i ^{:go/pos {:name-pos [251 10]}} n ^{:go/pos {:name-pos [251 21]}} posAsKw]
+            ^{:go/pos {:if [252 4] :lbrace [252 13] :rbrace [254 4]}} (when ^{:go/apos {2 [252 11]} :go/pos {:op-pos [252 9]}} (> ^{:go/pos {:name-pos [252 7]}} i 0)
+              ^{:go/apos {3 [253 10]} :go/pos {:tok-pos [253 7]}} (set! ^{:go/pos {:name-pos [253 5]}} q + ", "))
+
+            ^{:go/pos {:tok-pos [255 6]}} (set! ^{:go/pos {:name-pos [255 4]}} q + ^{:go/apos {1 [255 9] 3 [255 19]} :go/ops [[255 13] [255 17]] :go/pos {:op-pos [255 17]}} (+ "'" ^{:go/pos {:name-pos [255 15]}} n "'")))
+
+          ^{:go/apos {1 [257 10]} :go/pos {:return [257 3]}} (return nil ^{:go/apos {2 [257 37]} :go/pos {:lparen [257 21] :rparen [257 120]}} (^{:go/pos {:name-pos [257 15]}} Raisef ^{:go/pos {:name-pos [257 22]}} TypeErrorType "%s() got some positional-only arguments passed as keyword arguments: %s" ^{:go/pos {:name-pos [257 112]}} fname ^{:go/pos {:name-pos [257 119]}} q))))
+
+      ^{:go/pos {:for [259 2] :lbrace [259 31] :rbrace [277 2]}} (for ^{:go/apos {1 [259 11]}} [^{:go/pos {:name-pos [259 6] :tok-pos [259 8]}} i 0] ^{:go/pos {:op-pos [259 16]}} (< ^{:go/pos {:name-pos [259 14]}} i ^{:go/pos {:name-pos [259 18]}} minargs) ^{:go/pos {:tok-pos [259 28]}} (inc! ^{:go/pos {:name-pos [259 27]}} i)
+        ^{:go/pos {:if [260 3] :lbrace [260 20] :rbrace [276 3]}} (when ^{:go/apos {2 [260 16]} :go/pos {:op-pos [260 13]}} (== ^{:go/pos {:lbrack [260 9] :rbrack [260 11]}} (aget ^{:go/pos {:name-pos [260 6]}} out ^{:go/pos {:name-pos [260 10]}} i) nil)
+          ^{:go/pos {:if [261 4] :lbrace [261 19] :rbrace [271 4]}} (when ^{:go/pos {:op-pos [261 9]}} (< ^{:go/pos {:name-pos [261 7]}} i ^{:go/pos {:name-pos [261 11]}} posonly)
+            (let ^{:go/apos {1 [262 10]}} [^{:go/pos {:name-pos [262 5] :tok-pos [262 7]}} s "s"]
+              ^{:go/pos {:if [263 5] :lbrace [263 21] :rbrace [265 5]}} (when ^{:go/apos {2 [263 19]} :go/pos {:op-pos [263 16]}} (== ^{:go/pos {:name-pos [263 8]}} minargs 1)
+                ^{:go/apos {2 [264 10]} :go/pos {:tok-pos [264 8]}} (set! ^{:go/pos {:name-pos [264 6]}} s ""))
+
+              (let ^{:go/apos {1 [266 12]}} [^{:go/pos {:name-pos [266 5] :tok-pos [266 9]}} how "at least"]
+                ^{:go/pos {:if [267 5] :lbrace [267 26] :rbrace [269 5]}} (when ^{:go/pos {:op-pos [267 16]}} (== ^{:go/pos {:name-pos [267 8]}} minargs ^{:go/pos {:name-pos [267 19]}} maxpos)
+                  ^{:go/apos {2 [268 12]} :go/pos {:tok-pos [268 10]}} (set! ^{:go/pos {:name-pos [268 6]}} how "exactly"))
+
+                ^{:go/apos {1 [270 12]} :go/pos {:return [270 5]}} (return nil ^{:go/apos {2 [270 39]} :go/pos {:lparen [270 23] :rparen [270 120]}} (^{:go/pos {:name-pos [270 17]}} Raisef ^{:go/pos {:name-pos [270 24]}} TypeErrorType "%s() takes %s %d positional argument%s (%d given)" ^{:go/pos {:name-pos [270 92]}} fname ^{:go/pos {:name-pos [270 99]}} how ^{:go/pos {:name-pos [270 104]}} minargs ^{:go/pos {:name-pos [270 113]}} s ^{:go/pos {:name-pos [270 116]}} npos)))))
+
+          ^{:go/pos {:if [272 4] :lbrace [272 19] :rbrace [274 4]}} (when ^{:go/pos {:op-pos [272 9]}} (>= ^{:go/pos {:name-pos [272 7]}} i ^{:go/pos {:name-pos [272 12]}} maxpos)
+            ^{:go/apos {1 [273 12]} :go/pos {:return [273 5]}} (return nil ^{:go/apos {2 [273 39]} :go/pos {:lparen [273 23] :rparen [273 106]}} (^{:go/pos {:name-pos [273 17]}} Raisef ^{:go/pos {:name-pos [273 24]}} TypeErrorType "%s() missing required keyword-only argument '%s'" ^{:go/pos {:name-pos [273 91]}} fname ^{:go/pos {:lbrack [273 103] :rbrack [273 105]}} (aget ^{:go/pos {:name-pos [273 98]}} names ^{:go/pos {:name-pos [273 104]}} i))))
+
+          ^{:go/apos {1 [275 11]} :go/pos {:return [275 4]}} (return nil ^{:go/apos {2 [275 38]} :go/pos {:lparen [275 22] :rparen [275 106]}} (^{:go/pos {:name-pos [275 16]}} Raisef ^{:go/pos {:name-pos [275 23]}} TypeErrorType "%s() missing required argument '%s' (pos %d)" ^{:go/pos {:name-pos [275 86]}} fname ^{:go/pos {:lbrack [275 98] :rbrack [275 100]}} (aget ^{:go/pos {:name-pos [275 93]}} names ^{:go/pos {:name-pos [275 99]}} i) ^{:go/apos {2 [275 105]} :go/pos {:op-pos [275 104]}} (+ ^{:go/pos {:name-pos [275 103]}} i 1)))))
+
+
+      ^{:go/apos {2 [278 14]} :go/pos {:return [278 2]}} (return ^{:go/pos {:name-pos [278 9]}} out nil))))
+
+
+;; /* util.c */
+
+
+^{:go/pos {:doc [283 1] :func [284 1] :lbrace [284 78] :rbrace [306 1]}} (go/func ^{:go/pos {:name-pos [284 6]}} get_exception_class "Returns non-NULL if a new exception should be raised\n" ^{:go/pos {:closing [284 61] :opening [284 25]}} [^{:tag ^{:go/pos {:star [284 29]}} (* ^{:go/pos {:name-pos [284 30]}} pysqlite_state) :go/pos {:name-pos [284 26]}} st ^{:tag ^{:go/pos {:name-pos [284 56]}} int32 :go/pos {:name-pos [284 46]}} errorcode] :results ^{:go/pos {:closing [284 76] :opening [284 63]}} [^{:go/pos {:star [284 64]}} (* ^{:go/pos {:name-pos [284 65]}} Type) ^{:go/pos {:name-pos [284 71]}} error]
+  ^{:go/pos {:lbrace [285 19] :rbrace [305 2] :switch [285 2]}} (switch ^{:go/pos {:name-pos [285 9]}} errorcode
+    ^{:go/pos {:case [286 2] :colon [286 16]}} (case [^{:go/pos {:name-pos [286 7]}} SQLITE_OK]
+      ^{:go/apos {1 [287 10] 2 [287 15]} :go/pos {:return [287 3]}} (return nil nil))
+    ^{:go/pos {:case [288 2] :colon [288 39]}} (case [^{:go/pos {:name-pos [288 7]}} SQLITE_INTERNAL ^{:go/pos {:name-pos [288 24]}} SQLITE_NOTFOUND]
+      ^{:go/apos {2 [289 28]} :go/pos {:return [289 3]}} (return ^{:go/pos {:dot [289 12] :name-pos [289 13]}} (.-InternalError ^{:go/pos {:name-pos [289 10]}} st) nil))
+    ^{:go/pos {:case [290 2] :colon [290 19]}} (case [^{:go/pos {:name-pos [290 7]}} SQLITE_NOMEM]
+      ^{:go/apos {1 [291 10]} :go/pos {:return [291 3]}} (return nil ^{:go/pos {:lparen [291 23] :rparen [291 24]}} (^{:go/pos {:name-pos [291 15]}} noMemory)))
+    ^{:go/pos {:case [292 2] :colon [293 91]}} (case [^{:go/pos {:name-pos [292 7]}} SQLITE_ERROR ^{:go/pos {:name-pos [292 21]}} SQLITE_PERM ^{:go/pos {:name-pos [292 34]}} SQLITE_ABORT ^{:go/pos {:name-pos [292 48]}} SQLITE_BUSY ^{:go/pos {:name-pos [292 61]}} SQLITE_LOCKED ^{:go/pos {:name-pos [292 76]}} SQLITE_READONLY ^{:go/pos {:name-pos [292 93]}} SQLITE_INTERRUPT
+        ^{:go/pos {:name-pos [293 3]}} SQLITE_IOERR ^{:go/pos {:name-pos [293 17]}} SQLITE_FULL ^{:go/pos {:name-pos [293 30]}} SQLITE_CANTOPEN ^{:go/pos {:name-pos [293 47]}} SQLITE_PROTOCOL ^{:go/pos {:name-pos [293 64]}} SQLITE_EMPTY ^{:go/pos {:name-pos [293 78]}} SQLITE_SCHEMA]
+      ^{:go/apos {2 [294 31]} :go/pos {:return [294 3]}} (return ^{:go/pos {:dot [294 12] :name-pos [294 13]}} (.-OperationalError ^{:go/pos {:name-pos [294 10]}} st) nil))
+    ^{:go/pos {:case [295 2] :colon [295 21]}} (case [^{:go/pos {:name-pos [295 7]}} SQLITE_CORRUPT]
+      ^{:go/apos {2 [296 28]} :go/pos {:return [296 3]}} (return ^{:go/pos {:dot [296 12] :name-pos [296 13]}} (.-DatabaseError ^{:go/pos {:name-pos [296 10]}} st) nil))
+    ^{:go/pos {:case [297 2] :colon [297 20]}} (case [^{:go/pos {:name-pos [297 7]}} SQLITE_TOOBIG]
+      ^{:go/apos {2 [298 24]} :go/pos {:return [298 3]}} (return ^{:go/pos {:dot [298 12] :name-pos [298 13]}} (.-DataError ^{:go/pos {:name-pos [298 10]}} st) nil))
+    ^{:go/pos {:case [299 2] :colon [299 41]}} (case [^{:go/pos {:name-pos [299 7]}} SQLITE_CONSTRAINT ^{:go/pos {:name-pos [299 26]}} SQLITE_MISMATCH]
+      ^{:go/apos {2 [300 29]} :go/pos {:return [300 3]}} (return ^{:go/pos {:dot [300 12] :name-pos [300 13]}} (.-IntegrityError ^{:go/pos {:name-pos [300 10]}} st) nil))
+    ^{:go/pos {:case [301 2] :colon [301 34]}} (case [^{:go/pos {:name-pos [301 7]}} SQLITE_MISUSE ^{:go/pos {:name-pos [301 22]}} SQLITE_RANGE]
+      ^{:go/apos {2 [302 29]} :go/pos {:return [302 3]}} (return ^{:go/pos {:dot [302 12] :name-pos [302 13]}} (.-InterfaceError ^{:go/pos {:name-pos [302 10]}} st) nil))
+    ^{:go/pos {:case [303 2] :colon [303 9]}} (default
+      ^{:go/apos {2 [304 28]} :go/pos {:return [304 3]}} (return ^{:go/pos {:dot [304 12] :name-pos [304 13]}} (.-DatabaseError ^{:go/pos {:name-pos [304 10]}} st) nil))))
+
+
+
+^{:go/pos {:func [308 1] :lbrace [308 69] :rbrace [328 1] :return [327 2]}} (go/func ^{:go/pos {:name-pos [308 6]}} raise_exception ^{:tag ^{:go/pos {:name-pos [308 63]}} error :go/pos {:closing [308 61] :opening [308 21]}} [^{:tag ^{:go/pos {:star [308 26]}} (* ^{:go/pos {:name-pos [308 27]}} Type) :go/pos {:name-pos [308 22]}} typ ^{:tag ^{:go/pos {:name-pos [308 41]}} int32 :go/pos {:name-pos [308 33]}} errcode ^{:tag ^{:go/pos {:name-pos [308 55]}} string :go/pos {:name-pos [308 48]}} errmsg]
+  (let [^{:go/pos {:tok-pos [309 9]}} (values ^{:go/pos {:name-pos [309 2]}} m ^{:go/pos {:name-pos [309 5]}} err) ^{:go/pos {:lparen [309 20] :rparen [309 35]}} (^{:go/pos {:name-pos [309 12]}} fromUTF8 ^{:go/pos {:lparen [309 27] :rparen [309 34]}} (conv ^{:go/pos {:lbrack [309 21]}} (slice ^{:go/pos {:name-pos [309 23]}} byte) ^{:go/pos {:name-pos [309 28]}} errmsg))]
+    ^{:go/pos {:if [310 2] :lbrace [310 16] :rbrace [312 2]}} (when ^{:go/apos {2 [310 12]} :go/pos {:op-pos [310 9]}} (!= ^{:go/pos {:name-pos [310 5]}} err nil)
+      ^{:go/pos {:return [311 3]}} (return ^{:go/pos {:name-pos [311 10]}} err))
+
+    (let [^{:go/pos {:tok-pos [313 14]}} (values ^{:go/pos {:name-pos [313 2]}} excObj ^:assign ^{:go/pos {:name-pos [313 10]}} err) ^{:go/apos {3 [313 40]} :go/pos {:lparen [313 21] :rparen [313 43]}} (^{:go/pos {:name-pos [313 17]}} Call ^{:go/pos {:name-pos [313 22]}} typ ^{:go/pos {:lbrace [313 35] :rbrace [313 37]}} (lit ^{:go/pos {:lbrack [313 27]}} (slice ^{:go/pos {:name-pos [313 29]}} Object) ^{:go/pos {:name-pos [313 36]}} m) nil)]
+      ^{:go/pos {:if [314 2] :lbrace [314 16] :rbrace [316 2]}} (when ^{:go/apos {2 [314 12]} :go/pos {:op-pos [314 9]}} (!= ^{:go/pos {:name-pos [314 5]}} err nil)
+        ^{:go/pos {:return [315 3]}} (return ^{:go/pos {:name-pos [315 10]}} err))
+
+      ^{:go/pos {:if [317 2] :lbrace [317 92] :rbrace [319 2]}} (when [^{:go/pos {:name-pos [317 5] :tok-pos [317 9]}} err ^{:go/pos {:lparen [317 19] :rparen [317 78]}} (^{:go/pos {:name-pos [317 12]}} SetAttr ^{:go/pos {:name-pos [317 20]}} excObj ^{:go/apos {1 [317 35]} :go/pos {:lparen [317 34] :rparen [317 53]}} (^{:go/pos {:name-pos [317 28]}} NewStr "sqlite_errorcode") ^{:go/pos {:lparen [317 62] :rparen [317 77]}} (^{:go/pos {:name-pos [317 56]}} NewInt ^{:go/pos {:lparen [317 68] :rparen [317 76]}} (conv ^{:go/pos {:name-pos [317 63]}} int64 ^{:go/pos {:name-pos [317 69]}} errcode)))] ^{:go/apos {2 [317 88]} :go/pos {:op-pos [317 85]}} (!= ^{:go/pos {:name-pos [317 81]}} err nil)
+        ^{:go/pos {:return [318 3]}} (return ^{:go/pos {:name-pos [318 10]}} err))
+
+      (let [^{:go/pos {:name-pos [320 2] :tok-pos [320 7]}} name ^{:go/pos {:lparen [320 29] :rparen [320 37]}} (^{:go/pos {:name-pos [320 10]}} pysqlite_error_name ^{:go/pos {:name-pos [320 30]}} errcode)]
+        ^{:go/pos {:if [321 2] :lbrace [321 16] :rbrace [323 2]}} (when ^{:go/apos {2 [321 13]} :go/pos {:op-pos [321 10]}} (== ^{:go/pos {:name-pos [321 5]}} name "")
+          ^{:go/apos {2 [322 10]} :go/pos {:tok-pos [322 8]}} (set! ^{:go/pos {:name-pos [322 3]}} name "unknown"))
+
+        ^{:go/pos {:if [324 2] :lbrace [324 82] :rbrace [326 2]}} (when [^{:go/pos {:name-pos [324 5] :tok-pos [324 9]}} err ^{:go/pos {:lparen [324 19] :rparen [324 68]}} (^{:go/pos {:name-pos [324 12]}} SetAttr ^{:go/pos {:name-pos [324 20]}} excObj ^{:go/apos {1 [324 35]} :go/pos {:lparen [324 34] :rparen [324 53]}} (^{:go/pos {:name-pos [324 28]}} NewStr "sqlite_errorname") ^{:go/pos {:lparen [324 62] :rparen [324 67]}} (^{:go/pos {:name-pos [324 56]}} NewStr ^{:go/pos {:name-pos [324 63]}} name))] ^{:go/apos {2 [324 78]} :go/pos {:op-pos [324 75]}} (!= ^{:go/pos {:name-pos [324 71]}} err nil)
+          ^{:go/pos {:return [325 3]}} (return ^{:go/pos {:name-pos [325 10]}} err))
+
+        ^{:go/pos {:lparen [327 17] :rparen [327 40]}} (^{:go/pos {:name-pos [327 9]}} ExtRaise ^{:go/pos {:lparen [327 32] :rparen [327 39]}} (^{:go/pos {:name-pos [327 18]}} ExtAsException ^{:go/pos {:name-pos [327 33]}} excObj))))))
+
+
+
+^{:go/pos {:doc [330 1] :func [331 1] :lbrace [331 64] :rbrace [337 1] :return [336 2]}} (go/func ^{:go/pos {:name-pos [331 6]}} set_error_from_code "set_error_from_code: nil when no exception need be raised.\n" ^{:tag ^{:go/pos {:name-pos [331 58]}} error :go/pos {:closing [331 56] :opening [331 25]}} [^{:tag ^{:go/pos {:star [331 29]}} (* ^{:go/pos {:name-pos [331 30]}} pysqlite_state) :go/pos {:name-pos [331 26]}} st ^{:tag ^{:go/pos {:name-pos [331 51]}} int32 :go/pos {:name-pos [331 46]}} code]
+  (let [^{:go/pos {:tok-pos [332 16]}} (values ^{:go/pos {:name-pos [332 2]}} excClass ^{:go/pos {:name-pos [332 12]}} err) ^{:go/pos {:lparen [332 38] :rparen [332 47]}} (^{:go/pos {:name-pos [332 19]}} get_exception_class ^{:go/pos {:name-pos [332 39]}} st ^{:go/pos {:name-pos [332 43]}} code)]
+    ^{:go/pos {:if [333 2] :lbrace [333 21] :rbrace [335 2]}} (when ^{:go/apos {2 [333 17]} :go/pos {:op-pos [333 14]}} (== ^{:go/pos {:name-pos [333 5]}} excClass nil)
+      ^{:go/pos {:return [334 3]}} (return ^{:go/pos {:name-pos [334 10]}} err))
+
+    ^{:go/pos {:lparen [336 24] :rparen [336 91]}} (^{:go/pos {:name-pos [336 9]}} raise_exception ^{:go/pos {:name-pos [336 25]}} excClass ^{:go/pos {:name-pos [336 35]}} code ^{:go/pos {:lparen [336 46] :rparen [336 90]}} (^{:go/pos {:name-pos [336 41]}} gostr ^{:go/pos {:lparen [336 53] :rparen [336 89]}} (conv ^{:go/pos {:name-pos [336 47]}} uint64 ^{:go/apos {1 [336 59]} :go/pos {:lparen [336 58] :rparen [336 88]}} (^{:go/pos {:name-pos [336 54]}} call "sqlite3_errstr" ^{:go/pos {:lparen [336 82] :rparen [336 87]}} (conv ^{:go/pos {:name-pos [336 77]}} int64 ^{:go/pos {:name-pos [336 83]}} code)))))))
+
+
+
+^{:go/pos {:doc [339 1] :func [340 1] :lbrace [340 61] :rbrace [351 1] :return [350 2]}} (go/func ^{:go/pos {:name-pos [340 6]}} set_error_from_db "set_error_from_db checks the SQLite error code and gives the appropriate DB-API exception (nil: none).\n" ^{:tag ^{:go/pos {:name-pos [340 55]}} error :go/pos {:closing [340 53] :opening [340 23]}} [^{:tag ^{:go/pos {:star [340 27]}} (* ^{:go/pos {:name-pos [340 28]}} pysqlite_state) :go/pos {:name-pos [340 24]}} st ^{:tag ^{:go/pos {:name-pos [340 47]}} uint64 :go/pos {:name-pos [340 44]}} db]
+  (let [^{:go/pos {:name-pos [341 2] :tok-pos [341 12]}} errorcode ^{:go/apos {1 [341 21]} :go/pos {:lparen [341 20] :rparen [341 49]}} (^{:go/pos {:name-pos [341 15]}} calli "sqlite3_errcode" ^{:go/pos {:lparen [341 45] :rparen [341 48]}} (conv ^{:go/pos {:name-pos [341 40]}} int64 ^{:go/pos {:name-pos [341 46]}} db))
+      ^{:go/pos {:tok-pos [342 16]}} (values ^{:go/pos {:name-pos [342 2]}} excClass ^{:go/pos {:name-pos [342 12]}} err) ^{:go/pos {:lparen [342 38] :rparen [342 52]}} (^{:go/pos {:name-pos [342 19]}} get_exception_class ^{:go/pos {:name-pos [342 39]}} st ^{:go/pos {:name-pos [342 43]}} errorcode)]
+    ^{:go/pos {:if [343 2] :lbrace [343 21] :rbrace [345 2]}} (when ^{:go/apos {2 [343 17]} :go/pos {:op-pos [343 14]}} (== ^{:go/pos {:name-pos [343 5]}} excClass nil)
+      ^{:go/pos {:return [344 3]}} (return ^{:go/pos {:name-pos [344 10]}} err))
+
+    ;; /* Create and set the exception. */
+    (let [^{:go/pos {:name-pos [347 2] :tok-pos [347 11]}} extended ^{:go/apos {1 [347 20]} :go/pos {:lparen [347 19] :rparen [347 57]}} (^{:go/pos {:name-pos [347 14]}} calli "sqlite3_extended_errcode" ^{:go/pos {:lparen [347 53] :rparen [347 56]}} (conv ^{:go/pos {:name-pos [347 48]}} int64 ^{:go/pos {:name-pos [347 54]}} db))
+        ;; sqlite3_errmsg() always returns an UTF-8 encoded message
+        ^{:go/pos {:name-pos [349 2] :tok-pos [349 9]}} errmsg ^{:go/pos {:lparen [349 17] :rparen [349 59]}} (^{:go/pos {:name-pos [349 12]}} gostr ^{:go/pos {:lparen [349 24] :rparen [349 58]}} (conv ^{:go/pos {:name-pos [349 18]}} uint64 ^{:go/apos {1 [349 30]} :go/pos {:lparen [349 29] :rparen [349 57]}} (^{:go/pos {:name-pos [349 25]}} call "sqlite3_errmsg" ^{:go/pos {:lparen [349 53] :rparen [349 56]}} (conv ^{:go/pos {:name-pos [349 48]}} int64 ^{:go/pos {:name-pos [349 54]}} db))))]
+      ^{:go/pos {:lparen [350 24] :rparen [350 51]}} (^{:go/pos {:name-pos [350 9]}} raise_exception ^{:go/pos {:name-pos [350 25]}} excClass ^{:go/pos {:name-pos [350 35]}} extended ^{:go/pos {:name-pos [350 45]}} errmsg))))
+
+
+
+^{:go/pos {:doc [353 1] :func [354 1] :lbrace [354 49] :rbrace [359 1] :return [358 2]}} (go/func ^{:go/pos {:name-pos [354 6]}} errOr "errOr is err, else a generic error (the C code's \"return NULL\" with an exception known set).\n" ^{:tag ^{:go/pos {:name-pos [354 43]}} error :go/pos {:closing [354 41] :opening [354 11]}} [^{:tag ^{:go/pos {:name-pos [354 16]}} error :go/pos {:name-pos [354 12]}} err ^{:tag ^{:go/pos {:star [354 26]}} (* ^{:go/pos {:name-pos [354 27]}} pysqlite_state) :go/pos {:name-pos [354 23]}} st]
+  ^{:go/pos {:if [355 2] :lbrace [355 16] :rbrace [357 2]}} (when ^{:go/apos {2 [355 12]} :go/pos {:op-pos [355 9]}} (!= ^{:go/pos {:name-pos [355 5]}} err nil)
+    ^{:go/pos {:return [356 3]}} (return ^{:go/pos {:name-pos [356 10]}} err))
+
+  ^{:go/apos {2 [358 36]} :go/pos {:lparen [358 14] :rparen [358 51]}} (^{:go/pos {:name-pos [358 9]}} Raise ^{:go/pos {:dot [358 17] :name-pos [358 18]}} (.-OperationalError ^{:go/pos {:name-pos [358 15]}} st) "unknown error"))
+
+
+
+^{:go/pos {:doc [361 1] :lparen [362 5] :rparen [365 1] :tok-pos [362 1]}} (go/var "handles: the Go values SQLite holds as context pointers\n"
+  [^{:go/pos {:name-pos [363 2]}} handles ^{:go/pos {:lbrace [363 29] :rbrace [363 30]}} (lit ^{:go/pos {:map [363 15]}} (map ^{:go/pos {:name-pos [363 19]}} uint64 ^{:go/pos {:name-pos [363 26]}} any))]
+  [^{:tag ^{:go/pos {:name-pos [364 13]}} uint64 :go/pos {:name-pos [364 2]}} nextHandle])
+
+
+^{:go/pos {:func [367 1] :lbrace [367 30] :rbrace [372 1] :return [371 2]}} (go/func ^{:go/pos {:name-pos [367 6]}} newHandle ^{:tag ^{:go/pos {:name-pos [367 23]}} uint64 :go/pos {:closing [367 21] :opening [367 15]}} [^{:tag ^{:go/pos {:name-pos [367 18]}} any :go/pos {:name-pos [367 16]}} v]
+  ^{:go/pos {:tok-pos [368 12]}} (inc! ^{:go/pos {:name-pos [368 2]}} nextHandle)
+  (let [^{:go/pos {:name-pos [369 2] :tok-pos [369 4]}} h ^{:go/apos {2 [369 20]} :go/pos {:op-pos [369 18]}} (* ^{:go/pos {:name-pos [369 7]}} nextHandle 16)] ; aligned, never 0
+    ^{:go/pos {:lbrack [370 9] :rbrack [370 11] :tok-pos [370 13]}} (aset ^{:go/pos {:name-pos [370 2]}} handles ^{:go/pos {:name-pos [370 10]}} h ^{:go/pos {:name-pos [370 15]}} v)
+    ^{:go/pos {:name-pos [371 9]}} h))

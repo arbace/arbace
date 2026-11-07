@@ -15,10 +15,11 @@
         and never below zero, every local, cell, free and global name declared); the compile errors judged on
         CPython's (the TSV's code column: \"compile-error: MSG\"); --ops writes the count of each operation; the known
         file test/python/compile-known.edn
-    run --dump FILE --file PATH [--lib DIR] [--argv0 ARG] [-- ARGS...]
+    run --dump FILE --file PATH [--lib DIR] [--site DIRS] [--argv0 ARG] [-- ARGS...]
         PY5b0: the dump (pydump.py tree --full: lines for tracebacks, PY5a's DECISION (a)) compiled and its IR run by
         pyi's runtime go/arbace/py, interpreted by goi (PYI-SPEC.md §7): the program's stdout and stderr, its exit status
-    repl [--lib DIR]
+    repl [--lib DIR] [--site DIRS]
+        (--site: colon-separated directories on sys.path after the stdlib, a site of pinned wheels; queue 205)
         PY5e: the REPL (go.arbace.py/Repl, arbace.python.run): python3's basic REPL on stdin, prompts on stderr
     runtime-ops
         PY5b0: the runtime's operations (go/arbace/py's OpNames) against arbace.python.ir/ops; each unimplemented one's
@@ -188,21 +189,37 @@
   (require 'go.arbace.py)
   (or (resolve (symbol "go.arbace.py" (name sym))) (throw (ex-info (str "no go.arbace.py/" sym) {}))))
 
+;; --site DIRS (bin/pyi's PYI_SITE, colon-separated): sys.path after the stdlib, as CPython's site-packages (queue 205)
+(defn- site-dirs [opts]
+  (remove empty? (str/split (str (get opts "--site" "")) #":")))
+
+;; the program's dump: --dump's (the helper's, bin/pyi's PYI_READER=helper), else the native reader's of --file in mode :full
+;; (queue 213: no CPython in a run; the helper's text, as arbace.python.run reads the modules a program imports)
+(defn- run-dump [opts]
+  (if-let [dump (get opts "--dump")]
+    (slurp dump)
+    (let [f (File. ^String (get opts "--file"))]
+      ((requiring-resolve 'arbace.repr.python.native/read-dump)
+       (java.nio.file.Files/readAllBytes (.toPath f)) (.getName f) true true))))
+
 (defn- do-run [opts]
-  (let [d (cv/convert (slurp (get opts "--dump")))]
-    (when (cv/error-form? d)
-      (binding [*out* *err*] (println (pr-str d)))
-      (System/exit 1))
-    (let [code (try (pc/compile-module d)
+  (let [d (cv/convert (run-dump opts))
+        ;; the main module's SyntaxError as the compiler's answer (queue 223): the runtime raises it and gives it to
+        ;; sys.excepthook (traceback's display: the location, the caret, a keyword's typo), as CPython reports it
+        _ (require 'arbace.python.run)
+        answer (resolve 'arbace.python.run/error-answer)
+        file (let [f (get opts "--file")] (if (= "__pyi_c.py" (.getName (File. ^String f))) "<string>" f))
+        text (if (cv/error-form? d)
+               (answer d nil file)
+               (try (ir-text (pc/compile-module d))
                     (catch Throwable e
-                      (if (= 'SyntaxError (:class (ex-data e)))
-                        (do (binding [*out* *err*] (println (str "SyntaxError: " (:msg (ex-data e))))) (System/exit 1))
-                        (throw e))))]
-      ;; PY5e: the runtime's compiler (imports, exec, eval) and sys.argv, sys.path (arbace.python.run)
-      (require 'arbace.python.run)
-      ((resolve 'arbace.python.run/install!) (cons (get opts "--argv0" (get opts "--file")) (get opts :argv))
-       (remove nil? [(.getParent (File. ^String (get opts "--file"))) (get opts "--lib")]))
-      (System/exit ((runtime-fn 'RunModule) (ir-text code) (get opts "--file"))))))
+                      (if (= 'SyntaxError (:class (ex-data e))) (answer nil e file) (throw e)))))]
+    ;; PY5e: the runtime's compiler (imports, exec, eval) and sys.argv, sys.path (arbace.python.run)
+    ((resolve 'arbace.python.run/install!) (cons (get opts "--argv0" (get opts "--file")) (get opts :argv))
+     (concat (remove nil? [(.getParent (File. ^String (get opts "--file"))) (get opts "--lib")]) (site-dirs opts)))
+    ;; os._exit in the program is goi's os.Exit, a GoExit: the process exits with its status (PY6f's Low)
+    (System/exit (try ((runtime-fn 'RunModule) text (get opts "--file"))
+                      (catch arbace.lang.GoExit e (.status e))))))
 
 (defn- do-runtime-ops [opts]
   (let [theirs (vec ((runtime-fn 'OpNames)))
@@ -257,12 +274,12 @@
   (let [[verb & more] args
         [more argv] (split-with #(not= "--" %) more)
         opts (assoc (parse-args more #{"--corpus" "--dumps" "--scopes" "--known" "--results" "--out" "--tsv" "--ops" "--file" "--dump" "--check"
-                                       "--lib" "--argv0"})
+                                       "--lib" "--argv0" "--site"})
                     :argv (rest argv))]
     (case verb
       "scope-check" (do-scope-check opts)
       "compile-check" (do-compile-check opts)
       "run" (do-run opts)
-      "repl" (do (require 'arbace.python.run) (System/exit ((resolve 'arbace.python.run/repl) (get opts "--lib"))))
+      "repl" (do (require 'arbace.python.run) (System/exit ((resolve 'arbace.python.run/repl) (get opts "--lib") (site-dirs opts))))
       "runtime-ops" (do-runtime-ops opts)
       (do (println "usage: -m arbace.python scope-check|compile-check|run|runtime-ops ...") (System/exit 2)))))

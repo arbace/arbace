@@ -1,0 +1,884 @@
+(ns arbace.python.aot
+  "pyi's AOT (PY8; doc/python/PYTHON-SURVEY.md §7, PYS13 (a); doc/python/PYI-SPEC.md §10): pyi's IR translated
+  straight to Go forms over the runtime go/arbace/py, as Scheme's AOT goes from its core forms to Go forms
+  (arbace.scheme.aot), not through Java forms. A compiled interpreter: each code object becomes a Go function over
+  the machine's heap frame (go/arbace/py's aot.go: NativeFunc, run by the loop in place of step), its instructions Go
+  statements calling the runtime's helpers with their arguments as constants, its jumps gotos, its entry a switch on
+  the frame's PC, so a generator's or coroutine's frame resumes where it stopped (a state machine over the frame) and
+  a call of a Python function still pushes the callee's frame (no Go recursion). The operations the helpers do not
+  spell out run through AotExec, the loop's own implementation of the instruction, without its decoding.
+
+  A program is its main module and the modules its module-level code imports (found statically on sys.path: the
+  program's directory, then the pinned tarball's Lib), each compiled (arbace.python.run/compile-source, the compiler
+  pyi's imports use) and translated into a package arbace/pyaot/mHASH of its own (HASH of its IR text: a module
+  compiled once is reused by every program), registered by its source's key (AotKey), and a main package prog that
+  runs the main module (AotMain). Source compiled at run time otherwise goes to the host's compiler
+  (compile-server) and runs on the loop.
+
+    program FILE SRC PKG LIB [CACHE]   FILE's program as Go forms under SRC/go/arbace/pyaot/ (the modules' packages
+                                     not in CACHE, a directory of printed packages named mHASH; the main package
+                                     PKG/prog); prints one line per module (module NAME FILE PACKAGE new|cached),
+                                     then 'main PACKAGE'; a module that does not compile: 'error TEXT' and exit 4
+    compile-server                   the host's compiler for a compiled program's run: requests MODE TAB FILE TAB
+                                     BYTES NEWLINE SOURCE on stdin, answers BYTES NEWLINE TEXT on stdout"
+  (:require [arbace.python]
+            [arbace.python.ir :as ir]
+            [arbace.string :as str])
+  (:import [java.io File]
+           [java.security MessageDigest]))
+
+;;; ---------------------------------------------------------------------------------------
+;;; The code objects of a module, in the loader's pre-order (go/arbace/py's aotAttach)
+
+(defn code-seq [code]
+  (cons code (mapcat #(code-seq (:code %)) (filter #(and (map? %) (:code %)) (:consts code)))))
+
+(def ^:private binops
+  '{+ py/BinAdd - py/BinSub * py/BinMul / py/BinTrueDiv floor-div py/BinFloorDiv % py/BinMod ** py/BinPow
+    << py/BinLShift >> py/BinRShift bit-and py/BinAnd bit-or py/BinOr bit-xor py/BinXor mat-mult py/BinMatMul})
+
+(def ^:private unops '{+ py/UnPos - py/UnNeg bit-not py/UnInvert})
+
+(def ^:private compares '{< py/LT <= py/LE == py/EQ != py/NE > py/GT >= py/GE})
+
+(def ^:private part-bits {:defaults 1 :kwdefaults 2 :annotate 4 :closure 8})
+
+(defn- lbl [n] (keyword (str "L" n)))
+
+(defn- chk
+  "call (an error) checked: the error returned (raised, or a frame to push)"
+  [call]
+  (list 'when ['err call] '(!= err nil) '(return nil err)))
+
+(defn- set-pc [n] (list 'set! '(.-PC f) (inc n)))
+
+(defn- to-loop
+  "While tracing (queue 219t): the frame handed to the loop at instruction n, its whole stack in the frame (a block start)"
+  [n]
+  (list 'when '(py/AotTracing) (list 'set! '(.-PC f) n) '(return nil py/AotToLoop)))
+
+(defn- lookup [table k what]
+  (or (get table k) (throw (ex-info (str "aot: no " what " " (pr-str k)) {}))))
+
+(defn- instr
+  "Instruction n, [op arg], as Go statements (after its label's statement, which sets f.Lasti); :exec? when it
+  needs the dispatch label (an operation run by AotExec, which may set f.PC)"
+  [n [op arg]]
+  (case op
+    :nop []
+    :const [(list 'py/AotConst 'f arg)]
+    :pop ['(py/AotPop f)]
+    :copy [(list 'py/AotCopy 'f arg)]
+    :swap [(list 'py/AotSwap 'f arg)]
+    :load-fast [(chk (list 'py/AotLoadFast 'f arg))]
+    :store-fast [(list 'py/AotStoreFast 'f arg)]
+    :delete-fast [(chk (list 'py/AotDeleteFast 'f arg))]
+    :load-fast-and-clear [(list 'py/AotLoadFastAndClear 'f arg)]
+    :load-deref [(chk (list 'py/AotLoadDeref 't 'f arg))]
+    :store-deref [(list 'py/AotStoreDeref 'f arg)]
+    :delete-deref [(chk (list 'py/AotDeleteDeref 't 'f arg))]
+    :load-closure [(list 'py/AotLoadClosure 'f arg)]
+    :load-cell-and-clear [(list 'py/AotLoadCellAndClear 'f arg)]
+    :store-cell [(list 'py/AotStoreCell 'f arg)]
+    :load-name [(chk (list 'py/AotLoadName 't 'f arg))]
+    :store-name [(chk (list 'py/AotStoreName 'f arg))]
+    :delete-name [(chk (list 'py/AotDeleteName 'f arg))]
+    :load-global [(chk (list 'py/AotLoadGlobal 't 'f arg))]
+    :store-global [(chk (list 'py/AotStoreGlobal 'f arg))]
+    :delete-global [(chk (list 'py/AotDeleteGlobal 'f arg))]
+    :load-locals ['(py/AotLoadLocals f)]
+    :binary [(chk (list 'py/AotBinary 'f (lookup binops arg "operator")))]
+    :inplace [(chk (list 'py/AotInplace 'f (lookup binops arg "operator")))]
+    :unary [(chk (list 'py/AotUnary 'f (lookup unops arg "unary operator")))]
+    :not [(chk '(py/AotToBool f true))]
+    :to-bool [(chk '(py/AotToBool f false))]
+    :compare [(chk (list 'py/AotCompare 'f (lookup compares arg "comparison")))]
+    :is [(list 'py/AotIs 'f (boolean arg))]
+    :contains [(chk (list 'py/AotContains 'f (boolean arg)))]
+    :build-tuple [(list 'py/AotBuildTuple 'f arg)]
+    :build-list [(list 'py/AotBuildList 'f arg)]
+    :build-map [(chk (list 'py/AotBuildMap 'f arg))]
+    :build-set [(chk (list 'py/AotBuildSet 'f arg))]
+    :build-slice [(list 'py/AotBuildSlice 'f arg)]
+    :list-to-tuple ['(py/AotListToTuple f)]
+    :list-append [(list 'py/AotListAppend 'f arg)]
+    :set-add [(chk (list 'py/AotSetAdd 'f arg))]
+    :map-add [(chk (list 'py/AotMapAdd 'f arg))]
+    :load-attr [(chk (list 'py/AotLoadAttr 'f n arg))]
+    :store-attr [(chk (list 'py/AotStoreAttr 'f n arg))]
+    :subscr [(chk '(py/AotSubscr f))]
+    :store-subscr [(chk '(py/AotStoreSubscr f))]
+    :delete-subscr [(chk '(py/AotDeleteSubscr f))]
+    :unpack-sequence [(chk (list 'py/AotUnpackSequence 'f arg))]
+    :get-iter [(chk '(py/AotGetIter f))]
+    :call (let [[k kw] arg] [(set-pc n) (chk (list 'py/AotCall 't 'f k (if (integer? kw) kw -1)))])
+    :make-function (let [[k parts] arg]
+                     [(list 'py/AotMakeFunction 'f k (reduce + 0 (map #(lookup part-bits % "part") parts)))])
+    :jump [(list 'goto (lbl arg))]
+    (:jump-if-false :jump-if-true)
+    [(list 'if '[(values b err) (py/AotTruthy f)] '(!= err nil)
+           '(return nil err)
+           (list 'when (if (= op :jump-if-true) 'b '(not b)) (list 'goto (lbl arg))))]
+    :jump-if-none [(list 'when '(py/AotPopIsNone f) (list 'goto (lbl arg)))]
+    :jump-if-not-none [(list 'when '(not (py/AotPopIsNone f)) (list 'goto (lbl arg)))]
+    :for-iter [(list 'if '[(values done err) (py/AotForIter f)] '(!= err nil)
+                     '(return nil err)
+                     (list 'when 'done (list 'goto (lbl arg))))]
+    :return ['(return (py/AotPop f) nil)]
+    :raise [(list 'return (list 'py/AotRaise 't 'f arg))]
+    :reraise ['(return (py/AotReraise f))]
+    :push-exc-info ['(py/AotPushExcInfo t f)]
+    :pop-except ['(py/AotPopExcept t f)]
+    :check-exc-match [(chk '(py/AotCheckExcMatch f))]
+    (do (when-not (contains? ir/ops op) (throw (ex-info (str "aot: unknown operation " op) {})))
+        (with-meta [(set-pc n)
+                    (list 'when [(list 'values 'r 'err) (list 'py/AotExec 't 'f n)] '(or (!= err nil) (!= r nil))
+                          '(return r err))
+                    (list 'when (list '!= '(.-PC f) (inc n)) '(goto :dispatch))]
+          {:exec true}))))
+
+(defn- fused
+  "Instruction n, [op arg], fused with the next when it is to-bool or not and the next a conditional jump (queue
+  210: to-bool pushed a bool the jump popped): the operand's truth popped once, the jump taken or the next's
+  successor gone to; the next keeps its own statements for the jumps to it"
+  [ins n [op _]]
+  (let [[nop narg] (get ins (inc n))]
+    (when (and (#{:to-bool :not} op) (#{:jump-if-false :jump-if-true} nop) (< (+ n 2) (count ins)))
+      (let [on-true (not= (= nop :jump-if-true) (= op :not))]
+        [(list 'if '[(values b err) (py/AotTruthy f)] '(!= err nil)
+               '(return nil err)
+               (list 'when (if on-true 'b '(not b)) (list 'goto (lbl narg))))
+         (list 'goto (lbl (+ n 2)))]))))
+
+(def ^:private method-arg-ops
+  "the operations a method call's arguments may run between its load-attr and its call (no jump, no yield), each
+  with the number of items it pops"
+  (let [k (fn [p] (fn [_] p))]
+    {:const (k 0) :load-fast (k 0) :load-deref (k 0) :load-global (k 0) :load-closure (k 0) :load-name (k 0)
+     :binary (k 2) :compare (k 2) :is (k 2) :contains (k 2) :subscr (k 2)
+     :unary (k 1) :not (k 1) :list-to-tuple (k 1) :load-attr (k 1)
+     :build-tuple identity :build-list identity :build-set identity :build-slice identity :build-string identity
+     :build-map (fn [n] (* 2 n)) :call (fn [[n _]] (inc n)) :format (fn [[_ spec?]] (if spec? 2 1))}))
+
+(defn- method-calls
+  "The method calls of code c's instructions INS (queue 210, CPython's LOAD_ATTR method variant): {n m} for each
+  load-attr at n whose value is the callable of the call at m, [:call [k nil]], its k arguments pushed by
+  method-arg-ops alone, no instruction after n up to m a jump's or a handler's target"
+  [c ins]
+  (let [targets (into (set (map #(nth % 2) (:handlers c)))
+                      (keep (fn [[op arg]] (when (:jump (get ir/ops op)) arg)) ins))]
+    (into {}
+          (keep (fn [n]
+                  (when (= :load-attr (first (get ins n)))
+                    (loop [m (inc n) depth 0]
+                      (when (and (< m (count ins)) (< (- m n) 64) (not (contains? targets m)))
+                        (let [[op arg] (get ins m)]
+                          (cond
+                            (and (= op :call) (not (integer? (second arg))) (= depth (first arg))) [n m]
+                            (and (contains? method-arg-ops op) (<= ((method-arg-ops op) arg) depth))
+                            (recur (inc m) (+ depth ((:effect (get ir/ops op)) arg)))
+                            :else nil)))))))
+          (range (count ins)))))
+
+(def ^:private go-thread (with-meta 't {:tag '(* py/Thread)}))
+(def ^:private go-frame (with-meta 'f {:tag '(* py/Frame)}))
+
+(defn- code-func
+  "Code object c as the Go function NAME: the entry switch on f.PC, then each instruction under its label"
+  [nm c]
+  (let [ins (vec (:code c))
+        mcalls (method-calls c ins)
+        mcall-at (into {} (map (fn [[n m]] [m n]) mcalls))
+        bodies (vec (map-indexed (fn [n [op arg :as i]]
+                                   (cond
+                                     (contains? mcalls n) [(chk (list 'py/AotLoadMethod 'f n arg))]
+                                     (contains? mcall-at n) [(set-pc n) (chk (list 'py/AotCallMethod 't 'f (first arg)))]
+                                     :else (or (fused ins n i) (instr n i))))
+                                 ins))
+        exec? (some #(:exec (meta %)) bodies)
+        sw (list* 'switch '(.-PC f) (for [n (range (count ins))] (list 'case [n] (list 'goto (lbl n)))))]
+    (list* 'go/func nm [go-thread go-frame] :results '[py/Object error]
+           (concat
+             [(if exec? (list 'label :dispatch sw) sw)
+              '(return (py/AotBadPC f))]
+             (mapcat (fn [n body] (list* (list 'label (lbl n) (list 'set! '(.-Lasti f) n)) (to-loop n) body))
+                     (range) bodies)
+             ['(return (py/AotBadPC f))]))))
+
+;;; ---------------------------------------------------------------------------------------
+;;; The register generator (queue 216; doc/python/PYTHON-SURVEY.md, "Design: 216"): the value stack in Go locals within
+;;; a basic block, written back to the frame where the runtime may read it
+
+(defn- flow-depths
+  "Each instruction's stack depth as ir/verify computes it (nil for an unreachable one); nil when they do not hold"
+  [c ins]
+  (let [nc (count ins)
+        depth (object-array nc)
+        work (java.util.ArrayDeque.)
+        bad (volatile! false)
+        enter (fn [i d] (cond (or (not (< -1 i nc)) (neg? d)) (vreset! bad true)
+                              (nil? (aget depth i)) (do (aset depth i d) (.add work i))
+                              (not= (aget depth i) d) (vreset! bad true)))]
+    (when (pos? nc) (enter 0 0))
+    (while (and (not @bad) (not (.isEmpty work)))
+      (let [i (.poll work) d (aget depth i) [op arg] (nth ins i) o (get ir/ops op)]
+        (if (nil? o)
+          (vreset! bad true)
+          (do (doseq [[s e t hd lasti] (:handlers c) :when (and (<= s i) (< i e))]
+                (enter t (+ hd 1 (if lasti 1 0))))
+              (when-let [j (:jump o)] (enter arg (+ d (j arg))))
+              (when (and (not (:ends o)) (< (inc i) nc)) (enter (inc i) (+ d ((:effect o) arg))))))))
+    (when-not @bad (vec depth))))
+
+(def ^:private reg-ops
+  "the operations the register generator spells out; every other runs by AotExec with the whole stack in the frame"
+  #{:nop :const :pop :copy :swap :load-fast :store-fast :delete-fast :load-fast-and-clear :load-deref :store-deref
+    :delete-deref :load-closure :load-cell-and-clear :store-cell :load-name :store-name :delete-name :load-global
+    :store-global :delete-global :load-locals :binary :inplace :unary :not :to-bool :compare :is :contains :build-tuple
+    :build-list :build-map :build-set :build-slice :list-to-tuple :list-append :set-add :map-add :load-attr :store-attr
+    :subscr :store-subscr :delete-subscr :unpack-sequence :get-iter :call :make-function :jump :jump-if-false
+    :jump-if-true :jump-if-none :jump-if-not-none :for-iter :return :raise :reraise :push-exc-info :pop-except
+    :check-exc-match})
+
+(def ^:private check-depths
+  "true: each block start checks that the frame's stack holds the depth the generator placed there (a panic otherwise);
+  a debugging aid, off (queue 216's samples ran with it on)"
+  false)
+
+(defn- sv [k] (symbol (str "s" k)))
+
+(defn- tagged [s t] (with-meta s {:tag t}))
+
+(defn- reg-func
+  "Code object c as the Go function NAME over Go locals (the register generator), or nil when its stack's shape is not
+  static (the stack generator, code-func, then)"
+  [nm c]
+  (let [ins (vec (:code c))
+        nc (count ins)
+        depth0 (flow-depths c ins)]
+    (when (and depth0 (pos? nc))
+      (let [handlers (:handlers c)
+            mcalls (method-calls c ins)
+            mcall-at (into {} (map (fn [[n m]] [m n]) mcalls))
+            ;; a method call's load-attr pushes the callable and self: one item more up to its call
+            depth (vec (for [j (range nc)]
+                         (when-let [d (nth depth0 j)]
+                           (+ d (count (filter (fn [[n m]] (and (< n j) (<= j m))) mcalls))))))
+            exec? (fn [n] (not (contains? reg-ops (first (nth ins n)))))
+            starts (into (sorted-set 0)
+                         (concat (map #(nth % 2) handlers)
+                                 (keep (fn [[op arg]] (when (:jump (get ir/ops op)) arg)) ins)
+                                 (mapcat (fn [n] (when (exec? n) [n (inc n)])) (range nc))))
+            start? (fn [n] (contains? starts n))
+            ;; a call's next instruction: where the stack's way (AotStackCall) re-enters, its label :C<n> taking the
+            ;; frame's slots back into the locals the direct way left there, unless it is a block start (queue 216d)
+            reentries (into (sorted-set) (keep (fn [n] (when (and (= (first (nth ins n)) :call) (< (inc n) nc)
+                                                                   (not (start? (inc n)))
+                                                                   (some? (get depth0 (inc n))))
+                                                          (inc n)))
+                                               (range nc)))
+            fuse? (fn [n] (let [[op] (nth ins n) [nop] (get ins (inc n))]
+                            (and (#{:to-bool :not} op) (#{:jump-if-false :jump-if-true} nop) (< (+ n 2) nc)
+                                 (not (start? (inc n))) (not (contains? mcall-at (inc n))))))
+            out (java.util.ArrayList.)
+            emit! (fn [x] (.add out x))
+            m (volatile! 0) d (volatile! 0) live (volatile! false)
+            fail! (fn [msg] (throw (ex-info (str "aot regs: " msg) {:regs true})))
+            push! (fn [] (let [k @d] (vswap! d inc) (sv k)))
+            slot (fn [k] (if (>= k @m) (sv k) (list 'aget '(.-Stack f) k)))
+            take! (fn [lo] (when (< lo @m)
+                             (doseq [k (range lo @m)] (emit! (list 'set! (sv k) (list 'aget '(.-Stack f) k))))
+                             (emit! (list 'py/AotDrop 'f lo))
+                             (vreset! m lo)))
+            spill-stmts (fn [from to] (when (< from to) [(list* 'py/AotSpill 'f (map sv (range from to)))]))
+            spill-all! (fn [] (doseq [s (spill-stmts @m @d)] (emit! s)) (vreset! m @d))
+            lasti (fn [n] (list 'set! '(.-Lasti f) n))
+            ;; on an error at n after P pops: the handler's slots written back, the error returned
+            ;; (the slots [m, d) intact: the operation's operands popped)
+            err-path (fn [n lazy? ret]
+                       (let [h (first (filter (fn [[s e]] (and (<= s n) (< n e))) handlers))
+                             keep (when h (nth h 3))]
+                         (when (and keep (> keep @d)) (fail! (str "handler deeper than " n)))
+                         (concat (when lazy? [(lasti n)]) (when keep (spill-stmts @m keep)) [ret])))
+            chk! (fn [n lazy? stmt]
+                   (emit! stmt)
+                   (emit! (list* 'when '(!= err nil) (err-path n lazy? '(return nil err)))))
+            ;; an operation of P operands (taken into locals) returning (value, error): value pushed
+            op1! (fn [n p call-head & args]
+                   (let [lo (- @d p)]
+                     (take! lo)
+                     (emit! (lasti n))
+                     (let [call (concat call-head (map sv (range lo @d)) args)]
+                       (vreset! d lo)
+                       (chk! n false (list 'set! (list 'values (sv lo) 'err) call))
+                       (vreset! d (inc lo)))))
+            goto-stmts (fn [target] (concat (spill-stmts @m @d) [(list 'goto (lbl target))]))
+            ;; call [k] at n (method? after a method call's load-attr: its two slots then the k arguments) directly
+            ;; from the locals (AotCallV, AotCallMethodV: a compiled callee's frame run by the runtime from here, its
+            ;; value in a local, the locals below kept); the stack's way (AotStackCall: everything written back,
+            ;; AotCall or AotCallMethod, the callee's frame pushed for runFrames, re-entered at n+1)
+            call! (fn [n k kw method?]
+                    (let [lo (- @d (if method? (+ k 2) (inc k)))
+                          nxt (inc n)]
+                      (when-not (or (contains? reentries nxt) (start? nxt)) (fail! (str "no re-entry after " n)))
+                      (take! lo)
+                      (emit! (lasti n))
+                      (let [m0 @m d0 @d
+                            xs (map sv (range lo d0))]
+                        ;; the value into tmp: the stack's way writes back the callable's local as it was
+                        (emit! (list 'set! '(values tmp err)
+                                     (if method?
+                                       (list* 'py/AotCallMethodV 't 'f xs)
+                                       (list* 'py/AotCallV 't 'f (if (integer? kw) kw -1) xs))))
+                        (emit! (list* 'when '(== err py/AotStackCall)
+                                      (concat (spill-stmts m0 d0)
+                                              [(set-pc n)
+                                               (list 'set! 'err (if method?
+                                                                  (list 'py/AotCallMethod 't 'f k)
+                                                                  (list 'py/AotCall 't 'f k (if (integer? kw) kw -1))))
+                                               '(when (!= err nil) (return nil err))
+                                               (list 'goto (if (contains? reentries nxt) (keyword (str "C" nxt)) (lbl nxt)))])))
+                        (vreset! d lo)
+                        (emit! (list* 'when '(!= err nil) (err-path n false '(return nil err))))
+                        (emit! (list 'set! (sv lo) 'tmp))
+                        (vreset! d (inc lo))
+                        ;; while tracing (queue 219t): written back, the frame to the loop at the call's next instruction
+                        (emit! (list* 'when '(py/AotTracing)
+                                      (concat (spill-stmts @m @d) [(list 'set! '(.-PC f) nxt) '(return nil py/AotToLoop)])))
+                        (when (contains? reentries nxt)
+                          (let [after (keyword (str "A" nxt))]
+                            (emit! (list 'goto after))
+                            (emit! (list 'label (keyword (str "C" nxt))))
+                            (when check-depths
+                              (emit! (list 'when (list '!= '(len (.-Stack f)) (inc lo))
+                                           (list 'panic (str "aot regs: " (:qualname c) " re-entered at " nxt " depth " (inc lo))))))
+                            (doseq [j (range m0 (inc lo))] (emit! (list 'set! (sv j) (list 'aget '(.-Stack f) j))))
+                            (emit! (list 'py/AotDrop 'f m0))
+                            (emit! (list 'label after)))))))
+            truth! (fn [n neg target]
+                     ;; the top's truth: to target when it is (not neg)
+                     (take! (dec @d))
+                     (let [x (sv (dec @d))]
+                       (emit! (lasti n))
+                       (vswap! d dec)
+                       (chk! n false (list 'set! '(values tb err) (list 'py/AotTruthy2 x)))
+                       (emit! (list* 'when (if neg '(not tb) 'tb) (goto-stmts target)))))]
+        (loop [n 0]
+          (when (< n nc)
+            (let [[op arg] (nth ins n)
+                  dn (nth depth n)]
+              (when (start? n)
+                (when @live
+                  (when (not= @d dn) (fail! (str "depth into " n)))
+                  (spill-all!))
+                (emit! (list 'label (lbl n)))
+                (if (nil? dn)
+                  (do (emit! '(return (py/AotBadPC f))) (vreset! live false))
+                  (do (when check-depths
+                        (emit! (list 'when (list '!= '(len (.-Stack f)) dn)
+                                     (list 'panic (str "aot regs: " (:qualname c) " at " n " depth " dn)))))
+                      (emit! (to-loop n))
+                      (vreset! m dn) (vreset! d dn) (vreset! live true))))
+              (if (or (not @live) (nil? dn))
+                (recur (inc n))
+                (do
+                  (when (not= @d dn) (fail! (str "depth at " n)))
+                  (cond
+                    (exec? n)
+                    (do (emit! (lasti n))
+                        (emit! (set-pc n))
+                        (emit! (list 'when [(list 'values 'r 'err) (list 'py/AotExec 't 'f n)] '(or (!= err nil) (!= r nil))
+                                     '(return r err)))
+                        (emit! (list 'when (list '!= '(.-PC f) (inc n)) '(goto :dispatch)))
+                        (if-let [dn1 (get depth (inc n))]
+                          (do (vreset! m dn1) (vreset! d dn1))
+                          (vreset! live false))
+                        (recur (inc n)))
+
+                    (contains? mcall-at n)
+                    (do (call! n (first arg) nil true)
+                        (recur (inc n)))
+
+                    (contains? mcalls n)
+                    (do (take! (dec @d))
+                        (emit! (lasti n))
+                        (let [o (sv (dec @d))]
+                          (vswap! d dec)
+                          (chk! n false (list 'set! (list 'values o (sv (inc @d)) 'err) (list 'py/AotLoadMethodV 'f n arg o)))
+                          (vswap! d + 2))
+                        (recur (inc n)))
+
+                    (fuse? n)
+                    (let [[_ narg] (nth ins (inc n))
+                          on-true (not= (= (first (nth ins (inc n))) :jump-if-true) (= op :not))]
+                      (truth! n (not on-true) narg)
+                      (recur (+ n 2)))
+
+                    :else
+                    (do
+                      (case op
+                        :nop nil
+                        :const (emit! (list 'set! (push!) (list 'aget 'consts arg)))
+                        :pop (do (when (< (dec @d) @m) (emit! (list 'py/AotDrop 'f (dec @d))) (vreset! m (dec @d)))
+                                 (vswap! d dec))
+                        :copy (let [x (slot (- @d arg))] (emit! (list 'set! (push!) x)))
+                        :swap (do (take! (- @d arg))
+                                  (let [a (sv (dec @d)) b (sv (- @d arg))]
+                                    (when (not= a b)
+                                      (emit! (list 'set! 'tmp a)) (emit! (list 'set! a b)) (emit! (list 'set! b 'tmp)))))
+                        :load-fast (let [r (push!)]
+                                     (emit! (list 'set! r (list 'aget '(.-Fast f) arg)))
+                                     (vswap! d dec)
+                                     (emit! (list* 'when (list '== r nil)
+                                                   (err-path n true (list 'return nil (list 'py/AotUnboundLocal 'f arg)))))
+                                     (vswap! d inc))
+                        :store-fast (do (take! (dec @d)) (vswap! d dec) (emit! (list 'py/AotStoreFastV 'f arg (sv @d))))
+                        :delete-fast (chk! n true (list 'set! 'err (list 'py/AotDeleteFast 'f arg)))
+                        :load-fast-and-clear (emit! (list 'set! (push!) (list 'py/AotLoadFastAndClearV 'f arg)))
+                        :load-deref (let [r (push!)]
+                                      (emit! (list 'set! r (list '.-Value (list 'aget '(.-Cells f) arg))))
+                                      (vswap! d dec)
+                                      (emit! (list* 'when (list '== r nil)
+                                                    (err-path n true (list 'return nil (list 'py/AotUnboundDeref 't 'f arg)))))
+                                      (vswap! d inc))
+                        :store-deref (do (take! (dec @d)) (vswap! d dec)
+                                         (emit! (list 'set! (list '.-Value (list 'aget '(.-Cells f) arg)) (sv @d))))
+                        :delete-deref (chk! n true (list 'set! 'err (list 'py/AotDeleteDeref 't 'f arg)))
+                        :load-closure (emit! (list 'set! (push!) (list 'aget '(.-Cells f) arg)))
+                        :load-cell-and-clear (emit! (list 'set! (push!) (list 'py/AotLoadCellAndClearV 'f arg)))
+                        :store-cell (do (take! (dec @d)) (vswap! d dec) (emit! (list 'py/AotStoreCellV 'f arg (sv @d))))
+                        :load-name (op1! n 0 ['py/AotLoadNameV 't 'f arg])
+                        :store-name (do (take! (dec @d)) (emit! (lasti n)) (vswap! d dec)
+                                        (chk! n false (list 'set! 'err (list 'py/AotStoreNameV 'f arg (sv @d)))))
+                        :delete-name (do (emit! (lasti n)) (chk! n false (list 'set! 'err (list 'py/AotDeleteName 'f arg))))
+                        :load-global (op1! n 0 ['py/AotLoadGlobalV 't 'f n arg])
+                        :store-global (do (take! (dec @d)) (emit! (lasti n)) (vswap! d dec)
+                                          (chk! n false (list 'set! 'err (list 'py/AotStoreGlobalV 'f arg (sv @d)))))
+                        :delete-global (do (emit! (lasti n)) (chk! n false (list 'set! 'err (list 'py/AotDeleteGlobal 'f arg))))
+                        :load-locals (emit! (list 'set! (push!) '(py/AotLoadLocalsV f)))
+                        :binary (op1! n 2 ['py/BinaryOp (lookup binops arg "operator")])
+                        :inplace (op1! n 2 ['py/InPlaceOp (lookup binops arg "operator")])
+                        :unary (op1! n 1 ['py/UnaryOp (lookup unops arg "unary operator")])
+                        (:not :to-bool)
+                        (do (take! (dec @d)) (emit! (lasti n))
+                            (let [x (sv (dec @d))]
+                              (vswap! d dec)
+                              (chk! n false (list 'set! '(values tb err) (list 'py/AotTruthy2 x)))
+                              (emit! (list 'set! (push!) (list 'py/NewBool (if (= op :not) '(not tb) 'tb)))))) 
+                        :compare (op1! n 2 ['py/RichCompare] (lookup compares arg "comparison"))
+                        :is (do (take! (- @d 2))
+                                (let [a (sv (- @d 2)) b (sv (dec @d))]
+                                  (vswap! d - 2)
+                                  (emit! (list 'set! (push!) (list 'py/NewBool (list (if arg '!= '==) a b))))))
+                        :contains (op1! n 2 ['py/AotContainsV] (boolean arg))
+                        :build-tuple (let [lo (- @d arg)] (take! lo) (vreset! d lo)
+                                       (emit! (list 'set! (sv lo) (list* 'py/NewTuple (map sv (range lo (+ lo arg))))))
+                                       (push!))
+                        :build-list (let [lo (- @d arg)] (take! lo) (vreset! d lo)
+                                      (emit! (list 'set! (sv lo) (list* 'py/NewList (map sv (range lo (+ lo arg))))))
+                                      (push!))
+                        :build-map (op1! n (* 2 arg) ['py/AotBuildMapV])
+                        :build-set (op1! n arg ['py/AotBuildSetV])
+                        :build-slice (let [lo (- @d arg)] (take! lo) (vreset! d lo)
+                                       (emit! (list 'set! (sv lo) (list 'py/NewSlice (sv lo) (sv (inc lo))
+                                                                        (if (= arg 3) (sv (+ lo 2)) 'py/None))))
+                                       (push!))
+                        :list-to-tuple (do (take! (dec @d)) (emit! (list 'set! (sv (dec @d)) (list 'py/AotListToTupleV (sv (dec @d))))))
+                        :list-append (do (take! (dec @d)) (vswap! d dec)
+                                         (emit! (list 'py/AotListAppendV (slot (- @d arg)) (sv @d))))
+                        :set-add (do (take! (dec @d)) (emit! (lasti n)) (vswap! d dec)
+                                     (chk! n false (list 'set! 'err (list 'py/AotSetAddV (slot (- @d arg)) (sv @d)))))
+                        :map-add (do (take! (- @d 2)) (emit! (lasti n)) (vswap! d - 2)
+                                     (chk! n false (list 'set! 'err (list 'py/AotMapAddV (slot (- @d arg)) (sv @d) (sv (inc @d))))))
+                        :load-attr (op1! n 1 ['py/AotLoadAttrV 'f n arg])
+                        :store-attr (do (take! (- @d 2)) (emit! (lasti n)) (vswap! d - 2)
+                                        (chk! n false (list 'set! 'err (list 'py/AotStoreAttrV 'f n arg (sv (inc @d)) (sv @d)))))
+                        :subscr (op1! n 2 ['py/GetItem])
+                        :store-subscr (do (take! (- @d 3)) (emit! (lasti n)) (vswap! d - 3)
+                                          (chk! n false (list 'set! 'err (list 'py/SetItem (sv (inc @d)) (sv (+ @d 2)) (sv @d)))))
+                        :delete-subscr (do (take! (- @d 2)) (emit! (lasti n)) (vswap! d - 2)
+                                           (chk! n false (list 'set! 'err (list 'py/SetItem (sv @d) (sv (inc @d)) nil))))
+                        :unpack-sequence (do (take! (dec @d)) (emit! (lasti n)) (vswap! d dec)
+                                             (chk! n false (list 'set! '(values items err) (list 'py/AotUnpackV (sv @d) arg)))
+                                             (doseq [j (range arg)]
+                                               (emit! (list 'set! (push!) (list 'aget 'items (- arg 1 j))))))
+                        :get-iter (op1! n 1 ['py/GetIter])
+                        :call (let [[k kw] arg] (call! n k kw false))
+                        :make-function (let [[k parts] arg
+                                             order (filter (set parts) [:defaults :kwdefaults :annotate :closure])
+                                             lo (- @d (count order))]
+                                         (take! lo)
+                                         (let [at (zipmap order (map sv (range lo @d)))]
+                                           (vreset! d lo)
+                                           (emit! (list 'set! (push!) (list 'py/AotMakeFunctionV 'f k
+                                                                            (get at :defaults) (get at :kwdefaults)
+                                                                            (get at :annotate) (get at :closure))))))
+                        :jump (do (doseq [s (goto-stmts arg)] (emit! s)) (vreset! live false))
+                        (:jump-if-false :jump-if-true) (truth! n (= op :jump-if-false) arg)
+                        (:jump-if-none :jump-if-not-none)
+                        (do (take! (dec @d)) (vswap! d dec)
+                            (emit! (list* 'when (list (if (= op :jump-if-none) '== '!=) (sv @d) 'py/None) (goto-stmts arg))))
+                        :for-iter (let [it (slot (dec @d))
+                                        r (do (emit! (lasti n)) (push!))]
+                                    (vswap! d dec)
+                                    (chk! n false (list 'set! (list 'values r 'err) (list 'py/AotNext it)))
+                                    ;; at the end: the iterator popped, then to the target
+                                    (emit! (list* 'when (list '== r nil)
+                                                  (if (= @m @d)
+                                                    [(list 'py/AotDrop 'f (dec @d)) (list 'goto (lbl arg))]
+                                                    (concat (spill-stmts @m (dec @d)) [(list 'goto (lbl arg))]))))
+                                    (vswap! d inc))
+                        :return (do (emit! (lasti n))
+                                    (emit! (list 'return (if (>= (dec @d) @m) (sv (dec @d)) '(py/AotPop f)) nil))
+                                    (vreset! live false))
+                        :raise (do (spill-all!) (emit! (lasti n)) (emit! (list 'return (list 'py/AotRaise 't 'f arg)))
+                                   (vreset! live false))
+                        :reraise (do (spill-all!) (emit! (lasti n)) (emit! '(return (py/AotReraise f))) (vreset! live false))
+                        :push-exc-info (do (take! (dec @d))
+                                           (let [e (sv (dec @d)) r (sv @d)]
+                                             (emit! (list 'set! r e)) (emit! (list 'set! e '(.-Handled t)))
+                                             (emit! (list 'set! '(.-Handled t) r))
+                                             (push!)))
+                        :pop-except (do (take! (dec @d)) (vswap! d dec) (emit! (list 'set! '(.-Handled t) (sv @d))))
+                        :check-exc-match (do (take! (- @d 2)) (emit! (lasti n))
+                                             (let [e (sv (- @d 2)) ty (sv (dec @d))]
+                                               (vswap! d dec)
+                                               (chk! n false (list 'set! (list 'values ty 'err) (list 'py/AotCheckExcMatchV e ty)))
+                                               (vswap! d inc))))
+                      (recur (inc n)))))))))
+        (when @live (emit! '(return (py/AotBadPC f))))
+        (let [vars (concat (for [k (range (+ 2 (reduce max 0 (keep identity depth))))] (tagged (sv k) 'py/Object))
+                           [(tagged 'tmp 'py/Object) (tagged 'err 'error) (tagged 'tb 'bool)
+                            (tagged 'items '(slice py/Object))])
+              exec-any? (some exec? (range nc))
+              sw (list* 'switch '(.-PC f) (concat (for [n starts :when (< n nc)] (list 'case [n] (list 'goto (lbl n))))
+                                                  (for [n reentries] (list 'case [n] (list 'goto (keyword (str "C" n)))))))]
+          (list 'go/func nm [go-thread go-frame] :results '[py/Object error]
+                (list* 'let (vec (concat ['consts '(.-Consts (.-Code f))]
+                                         (mapcat (fn [v] [v (list 'zero (:tag (meta v)))]) vars)))
+                       (concat
+                         (map (fn [v] (list 'set! '_ v)) (cons 'consts vars))
+                         [(if exec-any? (list 'label :dispatch sw) sw)
+                          '(return (py/AotBadPC f))]
+                         (seq out)))))))))
+
+(defn- reg-func*
+  "reg-func, nil (the stack generator) when it cannot place the code object"
+  [nm c]
+  (try (reg-func nm c)
+       (catch arbace.lang.ExceptionInfo e
+         (when-not (:regs (ex-data e)) (throw e))
+         (binding [*out* *err*] (println "aot: the stack generator for" (:qualname c) "-" (.getMessage e)))
+         nil)))
+
+;;; ---------------------------------------------------------------------------------------
+;;; Writing packages (as arbace.scheme.aot writes its units)
+
+(defn- pf
+  "Form x as text, its metadata as ^{...} maps"
+  [x]
+  (let [md (when (instance? arbace.lang.IObj x) (dissoc (meta x) :line :column :file :end-line :end-column :exec))
+        body (cond
+               (seq? x) (str "(" (str/join " " (map pf x)) ")")
+               (vector? x) (str "[" (str/join " " (map pf x)) "]")
+               (map? x) (str "{" (str/join " " (map (fn [[k v]] (str (pf k) " " (pf v))) x)) "}")
+               :else (binding [*print-length* nil *print-level* nil] (pr-str x)))]
+    (if (seq md) (str "^" (pf md) " " body) body)))
+
+(defn- write-package!
+  "Go package PATH (arbace/X/Y) named NM, one file of DECLS, under SRC/go/"
+  [src path nm imports decls]
+  (let [rel (subs path (count "arbace/"))
+        dir (File. (str src "/go/arbace/" rel))
+        ns-name (str "go.arbace." (str/replace rel "/" "."))
+        base (last (str/split rel #"/"))]
+    (.mkdirs dir)
+    (spit (File. (str src "/go/arbace/" rel ".ae"))
+          (str ";; generated by arbace.python.aot (pyi's AOT); do not edit\n"
+               (pf (list 'ns (symbol ns-name) '(:require [arbace.go :as go]))) "\n\n"
+               (pr-str (list 'go/package (symbol nm) :path path :files ["unit.go"])) "\n\n"
+               (pr-str (list 'load (str base "/unit"))) "\n"))
+    (spit (File. dir "unit.ae")
+          (str ";; generated by arbace.python.aot (pyi's AOT); do not edit\n"
+               (pr-str (list 'in-ns (list 'quote (symbol ns-name)))) "\n\n"
+               (str/join "\n\n" (map pf (cons (list 'go/file "unit.go" :imports imports) decls))) "\n"))))
+
+(defn- hex [^bytes bs] (apply str (map #(format "%02x" (bit-and (int %) 0xff)) bs)))
+
+(defn sha256 [^String s]
+  (hex (.digest (MessageDigest/getInstance "SHA-256") (.getBytes s "UTF-8"))))
+
+(defn aot-key "go/arbace/py's AotKey" [mode source] (sha256 (str mode "\u0000" source)))
+
+(defn module-package!
+  "A module's IR text as the package arbace/pyaot/mHASH: IR, its natives, Register (by KEY, nil for the main
+  module); its name"
+  [src text key]
+  (let [code (read-string text)
+        cs (vec (code-seq code))
+        nm (str "m" (subs (sha256 text) 0 16))
+        fns (vec (map-indexed (fn [i c] (let [nm (symbol (str "c" i))] (or (reg-func* nm c) (code-func nm c)))) cs))]
+    (write-package! src (str "arbace/pyaot/" nm) nm '[[py "arbace/py"]]
+                    (concat
+                      [(list 'go/var 'IR text)]
+                      fns
+                      [(list 'go/func 'Register "Register registers the module's IR and its compiled code objects.\n" []
+                             (list 'py/AotRegister (or key "") 'IR
+                                   (list* 'lit '(slice py/NativeFunc) (for [i (range (count cs))] (symbol (str "c" i))))))]))
+    nm))
+
+;;; ---------------------------------------------------------------------------------------
+;;; The program: its modules found statically
+
+(def ^:private builtin-modules
+  #{"_collections" "_string" "_thread" "_weakref" "builtins" "errno" "itertools" "math" "posix" "sys"})
+
+(defn- module-level-codes
+  "The code objects that run when the module runs: the module's and its class bodies' (not functions')"
+  [code]
+  (cons code (mapcat #(when (= :class (:kind (:code %))) (module-level-codes (:code %)))
+                     (filter #(and (map? %) (:code %)) (:consts code)))))
+
+(defn- imports-of
+  "The imports [NAME LEVEL FROMLIST] of a module's module-level code: import-name after its two constants"
+  [code]
+  (for [c (module-level-codes code)
+        :let [ins (:code c)]
+        i (range 2 (count ins))
+        :let [[op arg] (nth ins i) [o1 a1] (nth ins (- i 2)) [o2 a2] (nth ins (dec i))]
+        :when (and (= op :import-name) (= o1 :const) (= o2 :const))
+        :let [level (nth (:consts c) a1) from (nth (:consts c) a2)]
+        :when (integer? level)]
+    [(nth (:names c) arg) level (when (map? from) (filter string? (:tuple from)))]))
+
+(defn- find-module
+  "The file of module NAME (dotted) under the search path DIRS: [FILE package-dir-or-nil], or nil"
+  [dirs name]
+  (let [parts (str/split name #"\.")]
+    (loop [dirs dirs [p & more] parts]
+      (let [hit (some (fn [d]
+                        (let [base (File. (str d) (str p))
+                              init (File. base "__init__.py")
+                              py (File. (str base ".py"))]
+                          (cond (.isFile init) [(.getPath init) (.getPath base)]
+                                (.isFile py) [(.getPath py) nil]
+                                (.isDirectory base) [nil (.getPath base)])))
+                      dirs)]
+        (cond (nil? hit) nil
+              (empty? more) (when (first hit) hit)
+              (second hit) (recur [(second hit)] more)
+              :else nil)))))
+
+(defn- resolve-name [name level pkg]
+  (if (zero? level)
+    name
+    (let [parts (if (str/blank? pkg) [] (str/split pkg #"\."))
+          keep (- (count parts) (dec level))]
+      (when (pos? keep)
+        (let [base (str/join "." (take keep parts))]
+          (if (str/blank? name) base (str base "." name)))))))
+
+(defn- wanted
+  "The modules a module's imports name: each dotted prefix, and a from-list's submodules"
+  [code modname package?]
+  (let [pkg (if package? modname (str/join "." (butlast (str/split modname #"\."))))]
+    (distinct
+      (for [[name level from] (imports-of code)
+            :let [abs (resolve-name name level pkg)]
+            :when abs
+            m (concat (let [ps (str/split abs #"\.")] (for [k (range 1 (inc (count ps)))] (str/join "." (take k ps))))
+                      (for [x from :when (not= x "*")] (str abs "." x)))
+            :when (not (contains? builtin-modules (first (str/split m #"\."))))]
+        m))))
+
+(defn- compile-text [mode file source]
+  (require 'arbace.python.run)
+  ((resolve 'arbace.python.run/compile-source) mode file source))
+
+(defn- cmd-program [[file src pkg lib cache]]
+  (let [f (.getCanonicalFile (File. ^String file))
+        dirs [(.getParent f) lib]
+        cached? (fn [nm] (and cache (.isDirectory (File. (str cache "/" nm)))))
+        emit-module (fn [text key]
+                      (let [nm (str "m" (subs (sha256 text) 0 16))]
+                        (if (cached? nm) [nm "cached"] [(module-package! src text key) "new"])))
+        main-text (compile-text "exec" (.getPath f) (slurp f))]
+    (when-not (str/starts-with? main-text "{")
+      (println "error" (str/replace main-text #"[\n\u0000]" " "))
+      (System/exit 4))
+    (let [[main-nm st] (emit-module main-text nil)
+          mods (loop [queue (wanted (read-string main-text) "__main__" false) seen #{} out []]
+                 (if (empty? queue)
+                   out
+                   (let [[m & more] queue]
+                     (if (contains? seen m)
+                       (recur more seen out)
+                       (let [[mf pdir] (find-module dirs m)
+                             seen (conj seen m)]
+                         (if (nil? mf)
+                           (recur more seen out)
+                           (let [source (slurp mf)
+                                 text (compile-text "exec" mf source)]
+                             (if (str/starts-with? text "{")
+                               (let [[nm st] (emit-module text (aot-key "exec" source))]
+                                 (println "module" m mf nm st)
+                                 (recur (concat more (wanted (read-string text) m (some? pdir))) seen
+                                        (conj out nm)))
+                               (do (println "module" m mf "-" "refused:" (first (str/split-lines text)))
+                                   (recur more seen out))))))))))
+          nms (distinct (cons main-nm mods))
+          ;; arbace/pyexpat: the module the interpreted runtime loads on its first import (queue 202e) is linked in;
+          ;; arbace/pyssl: _ssl's fallback store over x509roots/'s bundle (queue 209), likewise
+          ;; queue 208: _bz2's and _lzma's glue (arbace/pybz2, arbace/pylzma) too, with bzip2 and liblzma compiled by cf2g
+          ;; (arbace/clib/bzip2/aot, arbace/clib/xz/aot, bin/pyi-clib aot); queue 215: _zstd's and _sqlite3's (arbace/pyzstd, arbace/pysqlite3, arbace/clib/{zstd,sqlite}/aot)
+          imports (into '[[os "os"] [py "arbace/py"] [_ "arbace/pyexpat"] [_ "arbace/pybz2"] [_ "arbace/clib/bzip2/aot"]
+                        [_ "arbace/pylzma"] [_ "arbace/clib/xz/aot"] [_ "arbace/pyzstd"] [_ "arbace/clib/zstd/aot"]
+                        [_ "arbace/pysqlite3"] [_ "arbace/clib/sqlite/aot"] [_ "arbace/pyssl"]]
+                        (for [nm nms] [(symbol nm) (str "arbace/pyaot/" nm)]))
+          main (list 'go/func 'main []
+                     (list* 'do (for [nm nms] (list (symbol nm "Register"))))
+                     (list 'let ['argv (list 'lit '(slice string) (.getPath f))]
+                           (list 'when '(> (len os/Args) 1) '(set! argv (subslice os/Args 1)))
+                           (list 'os/Exit (list 'py/AotMain (symbol main-nm "IR") (.getPath f) 'argv
+                                                (list* 'lit '(slice string) dirs)))))]
+      (println "main" main-nm st)
+      (write-package! src (str "arbace/pyaot/" pkg "/prog") "main" imports [main])
+      0)))
+
+;;; ---------------------------------------------------------------------------------------
+;;; The host's compiler for a compiled program's run
+
+(defn- read-line-bytes [^java.io.InputStream in]
+  (let [bs (java.io.ByteArrayOutputStream.)]
+    (loop []
+      (let [b (.read in)]
+        (cond (neg? b) (when (pos? (.size bs)) (String. (.toByteArray bs) "UTF-8"))
+              (= b 10) (String. (.toByteArray bs) "UTF-8")
+              :else (do (.write bs b) (recur)))))))
+
+(defn- read-n [^java.io.InputStream in n]
+  (let [buf (byte-array n)]
+    (loop [off 0]
+      (if (< off n)
+        (let [k (.read in buf off (- n off))]
+          (if (neg? k) (throw (ex-info "aot: the request ended early" {})) (recur (+ off k))))
+        (String. buf "UTF-8")))))
+
+(defn- cmd-compile-server [_]
+  (let [in System/in
+        out System/out]
+    (loop []
+      (when-let [h (read-line-bytes in)]
+        (let [[mode file n] (str/split h #"\t")
+              source (read-n in (Long/parseLong n))
+              r (try (compile-text mode file source)
+                     (catch Throwable e (str "SystemError: pyi aot: the host's compiler: " (.getMessage e))))
+              bs (.getBytes ^String r "UTF-8")]
+          (.write out (.getBytes (str (count bs) "\n") "UTF-8"))
+          (.write out bs 0 (count bs))
+          (.flush out)
+          (recur))))
+    0))
+
+;;; ---------------------------------------------------------------------------------------
+;;; The check's judge (bin/pyi check --aot)
+
+(defn- read-lines-edn [f]
+  (for [l (str/split-lines (slurp f)) :when (str/starts-with? l "{")] (read-string l)))
+
+(defn- tsv-rows [f] (for [l (str/split-lines (slurp f)) :when (seq l)] (str/split l #"\t" -1)))
+
+(defn- outcome [[rc sha err]] {:status (if (re-matches #"[0-9]+" rc) (Long/parseLong rc) (keyword rc)) :stdout sha :stderr-last err})
+
+(defn- equal-ref? [o ref]
+  (and (= (:status o) (:status ref)) (= (:stdout o) (:stdout ref)) (= (:stderr-last o) (or (:stderr-last ref) ""))))
+
+(defn- name-or [x] (if (keyword? x) (name x) (str x)))
+
+(defn control
+  "The judge's negative control (GTS81 (a)): the first two passing programs' compiled runs judged against each other's
+  references, which must not pass; nil when they do not (or when fewer than two pass), else the pair"
+  [runs refs]
+  (let [ok (for [[id kind _ & more] runs
+                 :when (= kind "ran")
+                 :let [aot (outcome (subvec (vec more) 0 3)) ref (get refs id)]
+                 :when (and ref (not (:excluded ref)) (equal-ref? aot ref))]
+             [id aot ref])
+        [[a ao ar] [b bo br]] ok]
+    (when (and b (or (equal-ref? ao br) (equal-ref? bo ar))) [a b])))
+
+(defn- class-of
+  "The class of a non-pass that the rule (:as-pyi) does not take: the first class of CLASSES whose :ids hold ID or
+  whose :match finds itself in TEXT"
+  [classes id text]
+  (first (filter (fn [c] (or (some #{id} (:ids c)) (and (:match c) text (re-find (re-pattern (:match c)) text)))) classes)))
+
+(defn judge
+  "Each run of RUNS (bin/pyi check --aot's runs.tsv) judged: :pass the compiled run CPython's (status, stdout's
+  SHA-256, stderr's last line) and the loop's; :as-pyi (the rule's class) not CPython's but the same as the loop's and
+  pyi's, the interpreter's own divergence, its first stop named; :refused or :differs (compiled not as interpreted)
+  classed by CLASSES (test/python/divergences-aot.edn) or failing"
+  [runs refs classes]
+  (for [[id kind ct & more] runs
+        :let [ref (get refs id)]]
+    (if (= kind "refused")
+      (let [c (class-of classes id (first more))]
+        {:id id :result (if c :classed :failed) :class (or (:class c) :refused) :reason (first more) :compile-ms (Long/parseLong ct)})
+      (let [aot (outcome (subvec (vec more) 0 3))
+            loop (outcome (subvec (vec more) 3 6))
+            pyi (when (not= "-" (nth more 6)) (outcome (subvec (vec more) 6 9)))
+            [ams lms pms] (drop 9 more)
+            ms (fn [x] (when (re-matches #"[0-9]+" (str x)) (Long/parseLong x)))
+            base {:id id :compile-ms (Long/parseLong ct) :aot-ms (ms ams) :loop-ms (ms lms) :pyi-ms (ms pms)
+                  :status (:status aot)}
+            as-loop (= aot loop)
+            as-pyi (or (nil? pyi) (= aot pyi))]
+        (cond
+          (nil? ref) (assoc base :result :failed :class :no-reference)
+          (:excluded ref) (assoc base :result :classed :class :reference-excluded :reason (:excluded ref))
+          (and (equal-ref? aot ref) as-loop) (cond-> (assoc base :result :pass) (not as-pyi) (assoc :pyi-differs true :pyi-outcome pyi))
+          (and as-loop as-pyi) (assoc base :result :classed :class :as-pyi
+                                      :reason (if (seq (:stderr-last aot)) (:stderr-last aot)
+                                                  (str "stdout not CPython's (status " (name-or (:status aot)) ")")))
+          :else (let [why (str (when-not as-loop (str "the loop: " (pr-str loop) " ")) (when-not as-pyi (str "pyi: " (pr-str pyi))))
+                      c (class-of classes id why)]
+                  (assoc base :result (if c :classed :failed) :class (or (:class c) :differs) :reason why
+                         :compiled aot)))))))
+
+(defn- cmd-judge [args]
+  (let [opts (apply hash-map args)
+        refs (into {} (for [m (read-lines-edn (get opts "--ref"))] [(:id m) m]))
+        classes (:classes (read-string (slurp (get opts "--classes"))))
+        res (sort-by :id (judge (tsv-rows (get opts "--runs")) refs classes))
+        by (frequencies (map :result res))
+        sum (fn [k] (reduce + 0 (keep k (filter #(= :pass (:result %)) res))))
+        lines (fn [] (str/join "\n" (map #(binding [*print-length* nil] (pr-str %)) res)))
+        ctl (control (tsv-rows (get opts "--runs")) refs)]
+    (doseq [r res :when (not= :pass (:result r))]
+      (println (str "  " (name (:result r)) " " (:id r) " " (name (:class r)) (when (:reason r) (str ": " (subs (str (:reason r)) 0 (min 120 (count (str (:reason r))))))))))
+    (doseq [[c n] (sort (frequencies (map :class (filter #(= :classed (:result %)) res))))]
+      (println (str "  class " (name c) ": " n)))
+    (println (str "check --aot: " (count res) " programs: " (get by :pass 0) " pass, " (get by :classed 0) " classed, "
+                  (get by :failed 0) " failing"))
+    (println (str "  the passing programs' run: compiled " (sum :aot-ms) " ms, the loop " (sum :loop-ms) " ms, pyi on goi "
+                  (sum :pyi-ms) " ms; compiling " (sum :compile-ms) " ms"))
+    (when-let [f (get opts "--results")] (spit f (str (lines) "\n")))
+    (when-let [f (get opts "--record")]
+      (spit f (str ";; pyi's AOT (bin/pyi check --aot --record; doc/python/PYTHON-SURVEY.md, \"As built: PY8\"): each program of the\n"
+                   ";; synthetic corpus and the samples compiled and run, judged against CPython's reference (ref-cpython314.edn),\n"
+                   ";; the loop and pyi; :result :pass, :classed (:class, test/python/divergences-aot.edn or the rule :as-pyi) or\n"
+                   ";; :failed; the milliseconds are the recording machine's.\n"
+                   (lines) "\n")))
+    (if ctl
+      (println (str "  the negative control FAILS: " (first ctl) " and " (second ctl) " pass against each other's references"))
+      (println "  the negative control: two passing programs' runs judged against each other's references do not pass"))
+    (if (or ctl (pos? (get by :failed 0))) 1 0)))
+
+(defn -main [& [cmd & args]]
+  (let [rc (case cmd
+             "program" (cmd-program args)
+             "compile-server" (cmd-compile-server args)
+             "judge" (cmd-judge args)
+             (do (println "usage: -m arbace.python.aot program FILE SRC PKG LIB [CACHE] | compile-server") 2))]
+    (shutdown-agents)
+    (System/exit rc)))

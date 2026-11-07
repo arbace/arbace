@@ -42,6 +42,9 @@ arbace_crop_paths=(
   go/arbace/oi.ae 'go/arbace/oi/*' go/arbace/scm.ae 'go/arbace/scm/*' go/arbace/scminterp.ae 'go/arbace/scminterp/*'
   go/arbace/py.ae 'go/arbace/py/*' go/arbace/expat.ae 'go/arbace/expat/*' go/arbace/pyexpat.ae 'go/arbace/pyexpat/*'
   go/arbace/hs.ae 'go/arbace/hs/*' go/arbace/libm.ae 'go/arbace/libm/*'
+  # pyi's lazy modules (queue 208, 209, 215: the C library host, _bz2's, _lzma's, _zstd's, _ssl's and _sqlite3's glue; W-P6 (a))
+  go/arbace/clib.ae 'go/arbace/clib/*' go/arbace/pybz2.ae 'go/arbace/pybz2/*' go/arbace/pylzma.ae 'go/arbace/pylzma/*'
+  go/arbace/pyzstd.ae 'go/arbace/pyzstd/*' go/arbace/pyssl.ae 'go/arbace/pyssl/*' go/arbace/pysqlite3.ae 'go/arbace/pysqlite3/*'
   # OCaml's AOT runtime forms (o2j's Java, no executable's)
   'jdk/ocaml/*'
   # the crops' scripts' libraries

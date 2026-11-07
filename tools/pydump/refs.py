@@ -159,6 +159,10 @@ def record(args):
         if x is None or y is None or x[0] != y[0]:
             lines.append("{:id %s :excluded \"unstable: the two recording runs differ\"}" % q(rid))
             excluded += 1
+        elif kind == "libtest" and rid.endswith("/None"):
+            # regrtest's JUnit result names a test None (no test.id() of unittest's loader: libtest.py never runs it)
+            lines.append("{:id %s :excluded %s}" % (q(rid), q("runner: regrtest's JUnit names the test None")))
+            excluded += 1
         elif x[1] == "runner":
             lines.append("{:id %s :excluded %s}" % (q(rid), q("runner: a subprocess run -I cannot import the tarball's test package")))
             excluded += 1

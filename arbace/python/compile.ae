@@ -17,6 +17,18 @@
 
 (def ^:dynamic *mode* "The compile mode: :exec, :eval or :single (compile-source)" :exec)
 
+(def ^:dynamic *warnings*
+  "The compiler's SyntaxWarnings, an atom of [MSG LINENO OFFSET END-LINENO END-OFFSET] in the order made (codegen's
+  _PyCompile_Warn); compile-source puts them in the module's code object as :warnings, the runtime emits them"
+  nil)
+
+(defn- warn!
+  "A SyntaxWarning at *pos* (CPython's location: 1-based offsets)"
+  [msg]
+  (when *warnings*
+    (let [[l c el ec] *pos*]
+      (swap! *warnings* conj [msg l (some-> c inc) el (some-> ec inc)]))))
+
 (defn- syntax-error
   "A SyntaxError with CPython's message, located at *pos* when known: :lineno, :offset (1-based), :end-lineno,
   :end-offset, as CPython's SyntaxError fields"
@@ -109,18 +121,32 @@
                 cells)
         optimized (contains? #{:function :annotation :type-variable :type-alias :type-parameters} (:type b))
         params (:varnames b)
-        locals (if optimized
-                 (vec (distinct (concat params (sort (for [[nm f] symbols :when (= 1 (sc/scope-of* f))] nm)))))
-                 [])]
+        ;; the parameters, then each local as the code first names it (add-local!): co_varnames' order, CPython's
+        ;; compiler adding a name to u_varnames at its first name operation (queue 219: f_locals' and locals()' order)
+        locals (if optimized (vec (distinct params)) [])]
     (atom {:block block :kind kind :name name :qualname qualname :parent parent
            :private (if (= :class (:type b)) name (some-> parent deref :private))
            :code [] :lines [] :hs-of [] :hstack [] :consts [] :const-index {} :names [] :name-index {}
-           :locals locals :cells cells :frees frees :handlers [] :depth 0 :fblocks [] :line nil
+           :locals locals :cells cells :frees frees :handlers [] :depth 0 :fblocks [] :line nil :loc nil :locs []
            :optimized optimized :hidden {} :flags #{}})))
+
+(defn- loc-now
+  "The location an instruction emitted now takes (CPython's location: line, end line, column and end column, 0-based UTF-8
+  byte offsets; queue 223, PEP 657): the node's :pos the unit's :loc holds when its line is the unit's line, else the line
+  alone; nil with the line (NO_LOCATION)"
+  [m]
+  (when-let [l (:line m)]
+    (let [p (:loc m)]
+      (if (and p (= (first p) l)) p [l l nil nil]))))
+
+(defn- set-line!
+  "The unit's line l, its columns unknown (an instruction emitted at a line rather than at a node's location)"
+  [u l]
+  (swap! u assoc :line l :loc nil))
 
 (defn- emit! [u op arg]
   (let [i (count (:code @u))]
-    (swap! u (fn [m] (-> m (update :code conj [op arg]) (update :lines conj (:line m))
+    (swap! u (fn [m] (-> m (update :code conj [op arg]) (update :lines conj (:line m)) (update :locs conj (loc-now m))
                          (update :hs-of conj (peek (:hstack m)))
                          (update :depth + (ir/stack-effect op arg)))))
     i))
@@ -230,13 +256,74 @@
 (defn- block-of [k] (or (.get ^java.util.IdentityHashMap (:keys *table*) k)
                         (throw (ex-info "compile: no scope block for a form" {:form (take 2 k)}))))
 
-(declare type-params! annotations-used? stmt! expr! code-of type-param! class-annotations! try-star-except! match-stmt! fstring-of-items! function-annotations! defaults! make-closure!)
+(declare line-of type-params! annotations-used? stmt! expr! code-of type-param! class-annotations! try-star-except! match-stmt! fstring-of-items! function-annotations! defaults! make-closure!)
 
 (defn- stmts! [u ss] (doseq [s ss] (stmt! u s)))
 
 (defn- jump! [u op] (emit! u op nil))
 
 (defn- label! [u i] (patch! u i (here u)))
+
+;; ---- locations (queue 219t): CPython's codegen emits some instructions with NO_LOCATION (line nil here) and NOPs that
+;; hold a line (line-nop!, [:nop :line]); flow! (below) resolves them as CPython's flowgraph does ----
+
+(defn- no-loc!
+  "Runs f with the unit's line nil: what it emits has NO_LOCATION; the line restored after"
+  [u f]
+  (let [l (:line @u) lc (:loc @u)]
+    (set-line! u nil)
+    (f)
+    (swap! u assoc :line l :loc lc)))
+
+(defn- emit-nl! [u op arg] (let [i (volatile! nil)] (no-loc! u #(vreset! i (emit! u op arg))) @i))
+
+(defn- line-nop!
+  "A NOP holding line l (or the unit's), removed by flow! when redundant (CPython's ADDOP(loc, NOP))"
+  ([u] (emit! u :nop :line))
+  ([u l] (if l (let [o (:line @u) lc (:loc @u)] (set-line! u l) (emit! u :nop :line) (swap! u assoc :line o :loc lc)) (emit! u :nop :line))))
+
+(defn- at-line!
+  "f with the unit's line l when l is known, restored after; f's value"
+  [u l f]
+  (let [o (:line @u) lc (:loc @u)]
+    (when l (set-line! u l))
+    (let [r (f)] (swap! u assoc :line o :loc lc) r)))
+
+(declare pos-of)
+
+(defn- at-loc!
+  "f at location p ([LINE COL END-LINE END-COL]) when p is known, the unit's restored after; f's value"
+  [u p f]
+  (if p
+    (let [o (:line @u) lc (:loc @u)]
+      (swap! u assoc :line (first p) :loc p)
+      (let [r (f)] (swap! u assoc :line o :loc lc) r))
+    (f)))
+
+(defn- attr-loc
+  "update_start_location_to_match_attr (Python/codegen.c): location loc moved to the line where attribute node x's name
+  ends, its column the name's start (the name's length in code points, as CPython counts it), when loc starts on
+  another line"
+  [loc x]
+  (let [[_ [_ attr] _ _] (pp/node x)
+        [_ _ el ec] (pos-of x)]
+    (if (and loc el (not= (first loc) el))
+      (let [n (.codePointCount ^String (str attr) 0 (count (str attr)))
+            [c ec'] (if (and ec (<= n ec)) [(- ec n) (nth loc 3)] [nil nil])
+            l' el
+            el' (max l' (nth loc 2))
+            ec' (if (and (= l' el') c ec') (max c ec') ec')]
+        [l' c el' ec'])
+      loc)))
+
+(defn- at-node!
+  "f at node x's location (CPython's LOC(x)) when it has one, the unit's restored after; f's value"
+  [u x f]
+  (if-let [p (pos-of x)]
+    (let [o (:line @u) lc (:loc @u)]
+      (swap! u assoc :line (first p) :loc p)
+      (let [r (f)] (swap! u assoc :line o :loc lc) r))
+    (f)))
 
 ;; ---- frame blocks: loops, try-finally, with, except handlers (for break, continue, return) ----
 
@@ -259,18 +346,20 @@
                    (do (emit! u :swap 2) (emit! u :pop nil) (emit! u :swap 2) (emit! u :pop-except nil)
                        (emit! u :swap 2) (emit! u :pop nil))
                    (do (emit! u :pop nil) (emit! u :pop-except nil) (emit! u :pop nil)))
-    :with (do (when preserve (emit! u :swap 2))
+    :with (do (when (:line fb) (set-line! u (:line fb)))
+              (when preserve (emit! u :swap 2))
               (load-const! u nil) (load-const! u nil) (load-const! u nil)
-              (emit! u :call [3 nil]) (emit! u :pop nil))
-    :async-with (do (when preserve (emit! u :swap 2))
+              (emit! u :call [3 nil]) (emit! u :pop nil)
+              (set-line! u nil))
+    :async-with (do (when (:line fb) (set-line! u (:line fb)))
+                    (when preserve (emit! u :swap 2))
                     (load-const! u nil) (load-const! u nil) (load-const! u nil)
-                    (emit! u :call [3 nil]) (emit! u :get-awaitable nil) (load-const! u nil) (emit! u :yield-from nil)
-                    (emit! u :pop nil))
+                    (emit! u :call [3 nil]) (emit! u :get-awaitable 2) (load-const! u nil) (emit! u :yield-from nil)
+                    (emit! u :pop nil)
+                    (set-line! u nil))
     :handler (do (when preserve (emit! u :swap 2)) (emit! u :pop-except nil))
-    :handler-named (do (if preserve
-                         ;; [prev exc v] -> [v]
-                         (do (emit! u :swap 2) (emit! u :pop nil) (emit! u :swap 2) (emit! u :pop-except nil))
-                         (do (emit! u :pop nil) (emit! u :pop-except nil)))
+    :handler-named (do (when preserve (emit! u :swap 2))  ; [prev v] -> [v]
+                       (emit! u :pop-except nil)
                        (load-const! u nil) (name-op! u (:name fb) :store) (name-op! u (:name fb) :del))
     :handler-star (if preserve
                     (do (emit! u :swap 2) (emit! u :pop nil) (emit! u :swap 2) (emit! u :pop-except nil))
@@ -294,52 +383,62 @@
                         (let [saved (:fblocks @u)]
                           (swap! u assoc :fblocks (subvec saved 0 i))
                           (stmts! u (:body fb))
-                          (swap! u assoc :fblocks saved))
+                          (swap! u assoc :fblocks saved)
+                          (set-line! u nil))
                         (unwind-fblock! u fb false))
                       (recur (dec i)))))))))
 
 (defn- break! [u]
   (let [saved-depth (depth u)
         saved-hs (:hstack @u)
+        saved-line (do (line-nop! u) (:line @u))
         fb (unwind-to-loop! u :break)]
     (when-not fb (syntax-error "'break' outside loop"))
     (when (#{:for :async-for} (:kind fb)) (emit! u :pop nil))
     (let [j (jump! u :jump)] (swap! u update :breaks conj [j fb]))
-    (swap! u assoc :hstack saved-hs)
+    (swap! u assoc :hstack saved-hs :line saved-line)
     (set-depth! u saved-depth)))
 
 (defn- continue! [u]
   (let [saved-depth (depth u)
         saved-hs (:hstack @u)
+        saved-line (do (line-nop! u) (:line @u))
         fb (unwind-to-loop! u :continue)]
     (when-not fb (syntax-error "'continue' not properly in loop"))
     (emit! u :jump (:start fb))
-    (swap! u assoc :hstack saved-hs)
+    (swap! u assoc :hstack saved-hs :line saved-line)
     (set-depth! u saved-depth)))
 
 (defn- return! [u value]
   (let [saved-depth (depth u)
-        saved-hs (:hstack @u)]
+        saved-hs (:hstack @u)
+        saved-line (:line @u)]
     (when-not (#{:function :lambda} (:kind @u)) (syntax-error "'return' outside function"))
     (when (and (some? value) (:coroutine @(:block @u)) (:generator @(:block @u)))
       (syntax-error "'return' with value in async generator"))
     (when (some #(= :handler-star (:kind %)) (:fblocks @u))
       (syntax-error "'break', 'continue' and 'return' cannot appear in an except* block"))
-    (if (some? value) (expr! u value) (load-const! u nil))
+    (let [sl (:line @u)]
+      (if (some? value) (expr! u value) (load-const! u nil))
+      (when (or (nil? value) (not= (line-of value) sl)) (line-nop! u)))
     (let [fbs (:fblocks @u)]
       (loop [i (dec (count fbs))]
         (when (>= i 0)
           (let [fb (nth fbs i)]
             (swap! u assoc :hstack (:hs fb))
             (if (= :finally-try (:kind fb))
+              ;; the finally body runs with the frame blocks outside it, the return value under a POP_VALUE block
+              ;; (CPython's compiler_unwind_fblock): a break or continue in it drops the value
               (let [saved (:fblocks @u)]
                 (swap! u assoc :fblocks (subvec saved 0 i))
+                (push-fblock! u {:kind :pop-value})
                 (stmts! u (:body fb))
-                (swap! u assoc :fblocks saved))
+                (swap! u assoc :fblocks saved)
+                (set-line! u nil))
               (unwind-fblock! u fb true))
             (recur (dec i))))))
     (emit! u :return nil)
-    (swap! u assoc :hstack saved-hs)
+    (swap! u assoc :hstack saved-hs :line saved-line)
     (set-depth! u saved-depth)))
 
 ;; ---- expressions ----
@@ -363,10 +462,26 @@
               (do (expr! u x) (emit! u (if (= kind :set) :set-add :list-append) 1))))
           (when (= kind :tuple) (emit! u :list-to-tuple nil))))))
 
+(defn- top-block [u] (loop [u u] (if-let [p (:parent @u)] (recur p) (:block @u))))
+
+(defn- method-call?
+  "maybe_optimize_method_call's conditions (Python/codegen.c): the function an attribute load whose object is not a name
+  the module imports (is_import_originated), fewer than 30 arguments, no *args or **kwargs"
+  [u f pos kws]
+  (and (seq? f) (= 'attribute (first f))
+       (let [[_ [obj] _ _] (node f)
+             nm (name-of obj)
+             nk (count kws)]
+         (and (not (and nm (sc/has-bit? (get (:symbols @(top-block u)) nm 0) sc/DEF_IMPORT)))
+              (< (+ (count pos) nk (if (pos? nk) 1 0)) 30)
+              (not-any? starred? pos)
+              (every? #(some? (first (second (node %)))) kws)))))
+
 (defn- call-args!
   "The arguments of a call: [n keyword-names] for :call, or :ex with the tuple and dict built"
-  ([u pos kws] (call-args! u pos kws 0))
-  ([u pos kws pre]
+  ([u pos kws] (call-args! u pos kws 0 nil))
+  ([u pos kws pre] (call-args! u pos kws pre nil))
+  ([u pos kws pre meth]
   ;; pre: the arguments already on the stack before pos (a class's function and name, CPython's compiler_call_helper n)
   (let [kwns (map #(second (node %)) kws)
         star (or (some starred? pos) (some #(nil? (first %)) kwns))]
@@ -378,7 +493,9 @@
     (if-not star
       (do (doseq [a pos] (expr! u a))
           (doseq [[_ v] kwns] (expr! u v))
-          (emit! u :call [(+ pre (count pos) (count kws)) (when (seq kws) (const! u {:tuple (mapv #(ident (first %)) kwns)}))]))
+          ;; a method call's CALL at the location moved to the method's name (codegen_call's maybe_optimize_method_call)
+          (at-loc! u (when meth (attr-loc (:loc @u) meth))
+                   (fn [] (emit! u :call [(+ pre (count pos) (count kws)) (when (seq kws) (const! u {:tuple (mapv #(ident (first %)) kwns)}))]))))
       (do (if (zero? pre)
             (seq-elements! u pos :tuple)
             (do (emit! u :build-list pre)
@@ -462,8 +579,78 @@
       (contains? kinds :t) (tstring-of-items! u (items))
       :else (fstring-of-items! u (items)))))
 
+(declare string-token-value pos-of)
+
+(defn- literal-type
+  "codegen's infer_type for the warnings: [TYPE CONST?] of a constant (a tuple of constants folded into one), a
+  display, a comprehension, a lambda, an f-string or a t-string; nil for any other expression"
+  [x]
+  (cond
+    (= 'None x) ["NoneType" :singleton] (#{'True 'False} x) ["bool" :singleton] (= '... x) ["ellipsis" :singleton]
+    (symbol? x) nil
+    (integer? x) ["int" :const] (string? x) ["str" :const] (float? x) ["float" :const]
+    (seq? x)
+    (let [[h p _ _] (node x)]
+      (case h
+        const (literal-type (first p))
+        name (when (#{"True" "False" "None"} (ident (first p))) (literal-type (symbol (ident (first p)))))
+        int ["int" :const] float ["float" :const] imag ["complex" :const]
+        str ["str" :const] bytes ["bytes" :const]
+        str-concat (let [v (string-token-value x)] [(if (string? v) "str" "bytes") :const])
+        tuple (if (every? #(= :const (second (literal-type %))) (first p))
+                (if (every? #(= :singleton (second (literal-type %))) (first p))
+                  ["tuple" :const] ["tuple" :const])
+                ["tuple" :display])
+        (list list-comp) ["list" :display]
+        (dict dict-comp) ["dict" :display]
+        (set set-comp) ["set" :display]
+        generator-exp ["generator" :display]
+        lambda ["function" :display]
+        (joined-str formatted-value) ["str" :display]
+        (template-str interpolation) ["string.templatelib.Template" :display]
+        nil))
+    :else nil))
+
+(defn- constant? [x] (#{:const :singleton} (second (literal-type x))))
+
+(defn- check-compare!
+  "codegen_check_compare: is and is not with a literal (a constant but None, True, False and ...)"
+  [l ops cs]
+  (loop [left l ops ops cs cs]
+    (when (seq ops)
+      (let [right (first cs)
+            arg-ok #(let [[_ k] (literal-type %)] (not (= k :const)))]
+        (if (and (#{'is 'is-not} (first ops)) (not (and (arg-ok left) (arg-ok right))))
+          (let [lit (if (arg-ok left) right left)]
+            (warn! (if (= 'is (first ops))
+                     (str "\"is\" with '" (first (literal-type lit)) "' literal. Did you mean \"==\"?")
+                     (str "\"is not\" with '" (first (literal-type lit)) "' literal. Did you mean \"!=\"?"))))
+          (recur right (rest ops) (rest cs)))))))
+
+(defn- check-caller!
+  "check_caller: a call of a constant, a display, a comprehension or an f-string or t-string"
+  [f]
+  (let [[t k] (literal-type f)]
+    (when (and t (not= t "function"))
+      (binding [*pos* (or (pos-of f) *pos*)]
+        (warn! (str "'" t "' object is not callable; perhaps you missed a comma?"))))))
+
+(defn- check-subscript!
+  "check_subscripter and check_index of value[index] (a load)"
+  [v i]
+  (let [[t k] (literal-type v)]
+    (binding [*pos* (or (pos-of v) *pos*)]
+      (if (and t (or (#{"NoneType" "ellipsis" "int" "float" "complex" "bool"} t)
+                     (#{"set" "generator" "string.templatelib.Template" "function"} t)))
+        (warn! (str "'" t "' object is not subscriptable; perhaps you missed a comma?"))
+        (let [[it _] (literal-type i)]
+          (when (and t it (not (#{"int" "bool"} it))
+                     (#{"str" "bytes" "tuple" "list"} t))
+            (warn! (str t " indices must be integers or slices, not " it "; perhaps you missed a comma?"))))))))
+
 (defn- comparison! [u x]
   (let [[_ [l ops cs] _ _] (node x)
+        _ (check-compare! l ops cs)
         cmp (fn [op] (case op
                        (== != < <= > >=) (emit! u :compare op)
                        is (emit! u :is false) is-not (emit! u :is true)
@@ -506,10 +693,17 @@
                        :else (str pq "." name))))
         cu (new-unit block kind name qual u)
         ao (when args (nth (node args) 2))]
+    ;; co_firstlineno: the definition's first line (its first decorator's), else the expression's or statement's
+    (swap! cu assoc :firstlineno (or (:firstlineno opts) (first *pos*) (:line @u)))
     (swap! cu assoc :argcount (+ (count (:posonly ao)) (count (:args ao))) :posonly (count (:posonly ao))
            :kwonly (count (:kwonly ao)))
     (swap! cu update :flags into (remove nil? [(when (:vararg ao) :varargs) (when (:kwarg ao) :varkw)
                                                (when (:generator @block) :generator) (when (:coroutine @block) :coroutine)]))
+    ;; RESUME (queue 219t): a nop at co_firstlineno, the call event's line (CPython's code objects start with RESUME
+    ;; there); the body's lines as before
+    ;; at LOCATION(lineno, lineno, 0, 0) (codegen_enter_scope; queue 223: a traceback at tb_lasti 0 shows its empty caret line)
+    (let [fl (:firstlineno @cu)]
+      (if fl (at-loc! cu [fl 0 fl 0] #(emit! cu :nop :resume)) (no-loc! cu #(emit! cu :nop :resume))))
     (body-thunk cu)
     (code-of cu)))
 
@@ -538,7 +732,10 @@
 
 (defn- expr! [u x]
   (if-let [p (pos-of x)]
-    (binding [*pos* p] (expr*! u x))
+    (let [old (:line @u) lc (:loc @u)]
+      (when-let [l (first p)] (swap! u assoc :line l :loc p))
+      (binding [*pos* p] (expr*! u x))
+      (swap! u assoc :line old :loc lc))
     (expr*! u x)))
 
 (defn- expr*! [u x]
@@ -593,11 +790,12 @@
                        (when (:coroutine @(:block @u)) (syntax-error "'yield from' inside async function"))
                        (expr! u (first p)) (emit! u :get-yield-from-iter nil) (load-const! u nil) (emit! u :yield-from nil))
         compare (comparison! u x)
-        call (do (expr! u (first p)) (call-args! u (second p) (:keywords o)))
+        call (do (check-caller! (first p)) (expr! u (first p))
+                 (call-args! u (second p) (:keywords o) 0 (when (method-call? u (first p) (second p) (:keywords o)) (first p))))
         formatted-value (fstring! u (list 'joined-str [x]))
         interpolation (tstring! u (list 'template-str [x]))
-        attribute (do (expr! u (first p)) (emit! u :load-attr (name-index! u (mangle u (ident (second p))))))
-        subscript (do (expr! u (first p)) (expr! u (second p)) (emit! u :subscr nil))
+        attribute (do (expr! u (first p)) (at-loc! u (attr-loc (:loc @u) x) #(emit! u :load-attr (name-index! u (mangle u (ident (second p)))))))
+        subscript (do (check-subscript! (first p) (second p)) (expr! u (first p)) (expr! u (second p)) (emit! u :subscr nil))
         starred (syntax-error "can't use starred expression here")
         slice (let [[lo hi st] p]
                 (if (some? lo) (expr! u lo) (load-const! u nil))
@@ -608,13 +806,20 @@
 
 ;; ---- assignment targets ----
 
-(defn- store-target! [u t]
+(declare store-target*!)
+
+(defn- store-target!
+  "A store to target t at t's line when it has one (CPython locates a target's store at the target)"
+  [u t]
+  (at-node! u t #(store-target*! u t)))
+
+(defn- store-target*! [u t]
   (cond
     (name-of t) (name-op! u (name-of t) :store)
     :else
     (let [[h p _ _] (node t)]
       (case h
-        attribute (do (expr! u (first p)) (emit! u :store-attr (name-index! u (mangle u (ident (second p))))))
+        attribute (do (expr! u (first p)) (at-loc! u (attr-loc (:loc @u) t) #(emit! u :store-attr (name-index! u (mangle u (ident (second p)))))))
         subscript (do (expr! u (first p)) (expr! u (second p)) (emit! u :store-subscr nil))
         (tuple list)
         (let [es (first p)
@@ -635,7 +840,7 @@
     :else
     (let [[h p _ _] (node t)]
       (case h
-        attribute (do (expr! u (first p)) (emit! u :delete-attr (name-index! u (mangle u (ident (second p))))))
+        attribute (do (expr! u (first p)) (at-loc! u (attr-loc (:loc @u) t) #(emit! u :delete-attr (name-index! u (mangle u (ident (second p)))))))
         subscript (do (expr! u (first p)) (expr! u (second p)) (emit! u :delete-subscr nil))
         (tuple list) (doseq [e (first p)] (delete-target! u e))
         (throw (ex-info (str "compile: cannot delete " h) {}))))))
@@ -647,9 +852,15 @@
     (when (and (seq? s) (= 'expr (first s)))
       (let [v (second s)]
         (cond (string? v) v
-              (= 'str (head v)) (let [r (string-token-value v)] (when (string? r) r))
-              (= 'str-concat (head v)) (when (every? #(or (string? %) (= 'str (head %))) (rest v))
-                                         (join-strs (map #(if (string? %) % (string-token-value %)) (rest v)))))))))
+              ;; a str with \N{NAME} escapes the host does not know is a {:joined ...} constant (PY7: it was no docstring)
+              (= 'str (head v)) (let [r (string-token-value v)] (cond (string? r) r (vector? r) (join-strs r)))
+              ;; implicitly concatenated strs (PY7: their parts were taken as (rest v), the node's argument list, so
+              ;; such a docstring was none)
+              (= 'str-concat (head v)) (let [parts (second (node v))]
+                                         (when (every? #(or (string? %) (= 'str (head %))) parts)
+                                           (join-strs (map #(let [r (if (string? %) % (string-token-value %))]
+                                                              (if (vector? r) (join-strs r) r))
+                                                           parts)))))))))
 
 (defn- defaults! [u ao]
   (let [parts (atom [])]
@@ -699,6 +910,14 @@
         (make-function! u code [])
         true))))
 
+(declare line-of)
+
+(defn- decorated-first-line
+  "A def's or class's co_firstlineno: its first decorator's line, else its own"
+  [x o]
+  (let [ls (keep line-of (cons x (:decorators o)))]
+    (if (seq ls) (apply min ls) (first *pos*))))
+
 (defn- function-def! [u x async?]
   (let [[_ [nm args body] o _] (node x)
         nm (ident nm)
@@ -710,9 +929,10 @@
                       code (function-code! u2 block :function nm args
                                            (fn [cu]
                                              (when-let [d (docstring body)] (swap! cu assoc :docstring d))
-                                             (stmts! cu body)
-                                             (load-const! cu nil) (emit! cu :return nil))
-                                           {})]
+                                             ;; the docstring is no statement of the body (codegen_function_body)
+                                             (stmts! cu (if (docstring body) (rest body) body))
+                                             (no-loc! cu #(do (load-const! cu nil) (emit! cu :return nil))))
+                                           {:firstlineno (decorated-first-line x o)})]
                   (make-function! u2 code (cond-> parts ann (conj :annotate)))))]
     (doseq [d (:decorators o)] (expr! u d))
     (if (seq tps)
@@ -737,7 +957,10 @@
         (let [parts (defaults! u ao)]
           (emit! u :call [(count parts) nil])))
       (inner u (defaults! u ao)))
-    (doseq [_ (:decorators o)] (emit! u :call [1 nil]))
+    (let [sl (:line @u)]
+      (doseq [d (reverse (:decorators o))] (when-let [l (line-of d)] (set-line! u l)) (emit! u :call [1 nil]))
+      ;; the name stored at the statement's line (LOC(s)), after the decorators' calls at theirs
+      (set-line! u sl))
     (name-op! u nm :store)))
 
 (defn- lambda! [u x]
@@ -745,7 +968,9 @@
         ao (nth (node args) 2)
         parts (defaults! u ao)
         code (function-code! u (block-of x) :lambda "<lambda>" args
-                             (fn [cu] (expr! cu body) (emit! cu :return nil)) {})]
+                             ;; the body's line (PY7: a lambda's instructions had none, f_lineno 0: a warning's line)
+                             (fn [cu] (when-let [l (or (line-of body) (line-of x))] (set-line! cu l))
+                               (expr! cu body) (emit! cu :return nil)) {})]
     (make-function! u code parts)))
 
 (defn- static-attributes
@@ -788,20 +1013,25 @@
                   (emit! u2 :load-build-class nil)
                   (let [code (function-code! u2 block :class nm nil
                                              (fn [cu]
+                                               (swap! cu assoc :firstlineno (decorated-first-line x o))
                                                (when (:needs-classdict @block)
                                                  (emit! cu :load-locals nil) (emit! cu :store-deref (deref-index cu "__classdict__")))
                                                (name-op! cu "__name__" :load) (name-op! cu "__module__" :store)
                                                (load-const! cu (:qualname @cu)) (name-op! cu "__qualname__" :store)
-                                               (when-let [l (:line @cu)] (load-const! cu l) (name-op! cu "__firstlineno__" :store))
+                                               (when-let [l (:firstlineno @cu)] (load-const! cu l) (name-op! cu "__firstlineno__" :store))
                                                (when (seq tps)
                                                  (name-op! cu ".type_params" :load) (name-op! cu "__type_params__" :store))
                                                (when (:has-conditional-annotations @block)
                                                  (emit! cu :build-set 0) (emit! cu :store-deref (deref-index cu "__conditional_annotations__")))
                                                (when (and (:future-annotations *table*) (annotations-used? body))
                                                  (emit! cu :setup-annotations nil))
-                                               (when-let [d (docstring body)] (load-const! cu d) (name-op! cu "__doc__" :store))
+                                               (when-let [d (docstring body)]
+                                                 (at-line! cu (line-of (first body)) #(load-const! cu d))
+                                                 (no-loc! cu #(name-op! cu "__doc__" :store)))
                                                (stmts! cu (if (docstring body) (rest body) body))
                                                ((resolve 'arbace.python.compile/class-annotations!) cu)
+                                               ;; the class body's tail: artificial (codegen_class_body's NO_LOCATION)
+                                               (set-line! cu nil)
                                                (load-const! cu {:tuple (static-attributes body)})
                                                (name-op! cu "__static_attributes__" :store)
                                                (when (:needs-classdict @block)
@@ -812,7 +1042,7 @@
                                                      (emit! cu :copy 1) (name-op! cu "__classcell__" :store)
                                                      (emit! cu :return nil))
                                                  (do (load-const! cu nil) (emit! cu :return nil))))
-                                             {})]
+                                             {:firstlineno (decorated-first-line x o)})]
                     (make-function! u2 code [])
                     (load-const! u2 nm)
                     (let [bases (:bases o) kws (:keywords o)]
@@ -834,7 +1064,10 @@
           (make-function! u tcode [])
           (emit! u :call [0 nil]))
         (build u)))
-    (doseq [_ (:decorators o)] (emit! u :call [1 nil]))
+    (let [sl (:line @u)]
+      (doseq [d (reverse (:decorators o))] (when-let [l (line-of d)] (set-line! u l)) (emit! u :call [1 nil]))
+      ;; the name stored at the statement's line (LOC(s)), after the decorators' calls at theirs
+      (set-line! u sl))
     (name-op! u nm :store)))
 
 (defn type-params!
@@ -966,6 +1199,7 @@
                 (swap! u (fn [m] (-> m
                                      (update :code #(reduce (fn [c [k ins]] (assoc c (+ ph k) ins)) (subvec % 0 start) (map-indexed vector moved)))
                                      (update :lines subvec 0 start)
+                                     (update :locs subvec 0 start)
                                      (update :hs-of subvec 0 start))))))))))))
 
 ;; ---- comprehensions ----
@@ -978,7 +1212,8 @@
     (elt! n)
     (let [[_ [t it] o _] (node (nth gens i))
           async? (:async o)]
-      (when (pos? i) (expr! u it) (emit! u (if async? :get-aiter :get-iter) nil))
+      ;; codegen_sync_comprehension_generator: GET_ITER and FOR_ITER at the iterable's location (queue 223)
+      (when (pos? i) (expr! u it) (at-node! u it #(emit! u (if async? :get-aiter :get-iter) nil)))
       (let [start (here u)
             d (depth u)]
         (if async?
@@ -994,7 +1229,7 @@
             (target! u h)
             (set-depth! u (inc d))
             (emit! u :end-async-for nil))
-          (let [exit (jump! u :for-iter)]
+          (let [exit (at-node! u it #(jump! u :for-iter))]
             (store-target! u t)
             (doseq [c (:ifs o)]
               (expr! u c) (emit! u :to-bool nil)
@@ -1026,7 +1261,7 @@
             saved (:hidden @u)
             k (count own)]
         (expr! u it0)
-        (emit! u (if (:async o0) :get-aiter :get-iter) nil)
+        (at-node! u it0 #(emit! u (if (:async o0) :get-aiter :get-iter) nil))
         ;; an own name that is a cell in the comprehension (a nested scope's free name) a fresh cell of this unit
         (let [cell? (fn [nm] (= 5 (sc/scope-of* (get (:symbols @block) nm 0))))]
           (doseq [nm own]
@@ -1047,6 +1282,8 @@
               (emit! u :store-fast (local-index u nm))))))
       (let [code (function-code! u block (if (= kind :generator) :function :comprehension) (str "<" (name h) ">") nil
                                  (fn [cu]
+                                   ;; the expression's line (PY7: a generator expression's instructions had none)
+                                   (when-let [l (or (line-of x) (:line @u))] (set-line! cu l))
                                    (swap! cu assoc :argcount 1)
                                    (build! cu)
                                    (emit! cu :load-fast 0)
@@ -1056,7 +1293,7 @@
                                  {})]
         (make-function! u code [])
         (expr! u it0)
-        (emit! u (if (:async o0) :get-aiter :get-iter) nil)
+        (at-node! u it0 #(emit! u (if (:async o0) :get-aiter :get-iter) nil))
         (emit! u :call [1 nil])
         (when (and (:coroutine @block) (not= kind :generator))
           (emit! u :get-awaitable nil) (load-const! u nil) (emit! u :yield-from nil))))))
@@ -1074,7 +1311,7 @@
 (defn- for! [u x async?]
   (let [[_ [t it body] o _] (node x)]
     (expr! u it)
-    (emit! u (if async? :get-aiter :get-iter) nil)
+    (at-node! u it #(emit! u (if async? :get-aiter :get-iter) nil))
     (let [start (here u)
           d (depth u)]
       (if async?
@@ -1083,18 +1320,21 @@
               fb (loop-fblock! u :async-for start)]
           (store-target! u t)
           (stmts! u body)
-          (emit! u :jump start)
+          (emit-nl! u :jump start)
           (let [breaks (end-loop! u fb)]
             (target! u h)
             (set-depth! u (inc d))
-            (emit! u :end-async-for nil)
+            ;; at the iterator's line: the loop's end succeeds the for, not the body (codegen_async_for)
+            (at-line! u (or (line-of it) (line-of x)) #(emit! u :end-async-for nil))
             (stmts! u (:else o))
             (let [end (here u)] (doseq [b breaks] (patch! u b end)))))
-        (let [exit (jump! u :for-iter)
+        (let [exit (at-node! u it #(jump! u :for-iter))
               fb (loop-fblock! u :for start)]
+          ;; a NOP at the target's line (codegen_for: multi-line for statements' tracing)
+          (line-nop! u (line-of t))
           (store-target! u t)
           (stmts! u body)
-          (emit! u :jump start)
+          (emit-nl! u :jump start)
           (let [breaks (end-loop! u fb)]
             (label! u exit)
             (set-depth! u (dec d))
@@ -1108,7 +1348,7 @@
     (let [exit (jump! u :jump-if-false)
           fb (loop-fblock! u :while start)]
       (stmts! u body)
-      (emit! u :jump start)
+      (emit-nl! u :jump start)
       (let [breaks (end-loop! u fb)]
         (label! u exit)
         (stmts! u (:else o))
@@ -1120,7 +1360,7 @@
     (let [j (jump! u :jump-if-false) d (depth u)]
       (stmts! u body)
       (if (seq (:else o))
-        (let [end (jump! u :jump)]
+        (let [end (emit-nl! u :jump nil)]
           (label! u j) (set-depth! u d)
           (stmts! u (:else o))
           (label! u end))
@@ -1132,27 +1372,28 @@
   [u body! fin]
   (let [d (depth u)
         outer (:hstack @u)
+        _ (line-nop! u)  ; SETUP_FINALLY's NOP at the try statement's line
         h (push-handler! u d true)]
     (push-fblock! u {:kind :finally-try :body fin :hs outer})
     (body!)
     (pop-fblock! u)
     (pop-handler! u)
     (stmts! u fin)
-    (let [end (jump! u :jump)]
+    (let [end (emit-nl! u :jump nil)]
       (target! u h)
       ;; [lasti exc] -> [lasti prev exc]
       (set-depth! u (+ d 2))
       (let [cleanup (push-handler! u (+ d 2) true)]
-        (emit! u :push-exc-info nil)
+        (emit-nl! u :push-exc-info nil)
         (push-fblock! u {:kind :finally-end :hs outer})
         (stmts! u fin)
         (pop-fblock! u)
-        (emit! u :reraise nil)
+        (emit-nl! u :reraise nil)
         (pop-handler! u)
         ;; cleanup: [lasti prev lasti2 exc] -> restore the previous exception, re-raise
         (target! u cleanup)
         (set-depth! u (+ d 4))
-        (emit! u :swap 2) (emit! u :pop nil) (emit! u :swap 2) (emit! u :pop-except nil) (emit! u :reraise nil))
+        (no-loc! u #(do (emit! u :copy 3) (emit! u :pop-except nil) (emit! u :reraise 1))))
       (label! u end)
       (set-depth! u d))))
 
@@ -1161,31 +1402,34 @@
   [u body! handlers orelse _]
   (let [d (depth u)
         outer (:hstack @u)
+        _ (line-nop! u)  ; SETUP_FINALLY's NOP at the try statement's line
         h (push-handler! u d false)]
     (push-fblock! u {:kind :try-except :hs outer})
     (body!)
     (pop-fblock! u)
     (pop-handler! u)
     (stmts! u orelse)
-    (let [end (jump! u :jump)
+    (let [end (emit-nl! u :jump nil)
           exits (atom [])]
       (target! u h)
       ;; [exc] -> [prev exc]
       (set-depth! u (+ d 1))
       (let [cleanup (push-handler! u (+ d 1) true)]
-        (emit! u :push-exc-info nil)
+        (emit-nl! u :push-exc-info nil)
         (doseq [[i hd] (map-indexed vector handlers)]
           (let [[_ [hb] ho _] (node hd)
                 t (:type ho)
                 nm (some-> (:name ho) ident)]
             (when (and (nil? t) (< i (dec (count handlers)))) (syntax-error "default 'except:' must be last"))
+            ;; the clause's instructions at the except clause's line (LOC(handler))
+            (swap! u assoc :line (line-of hd) :loc (pos-of hd))
             (let [next-j (when t
                            (expr! u t)
                            (emit! u :check-exc-match nil)
                            (jump! u :jump-if-false))]
               (if nm
-                (do (emit! u :copy 1) (name-op! u nm :store)
-                    ;; [prev exc]; the body under a handler that unbinds the name and re-raises
+                (do (name-op! u nm :store)
+                    ;; [prev]; the body under a handler that unbinds the name and re-raises
                     (let [hd-depth (depth u)
                           inner (push-handler! u hd-depth true)]
                       (push-fblock! u {:kind :handler-named :name nm :hs outer})
@@ -1193,33 +1437,35 @@
                       (pop-fblock! u)
                       (pop-handler! u)
                       (pop-handler! u)
-                      (emit! u :pop nil) (emit! u :pop-except nil)
+                      (set-line! u nil)  ; name = None; del name: artificial
+                      (emit! u :pop-except nil)
                       (load-const! u nil) (name-op! u nm :store) (name-op! u nm :del)
                       (swap! exits conj (jump! u :jump))
                       (push-existing! u cleanup)
                       (target! u inner)
                       (set-depth! u (+ hd-depth 2))
                       (load-const! u nil) (name-op! u nm :store) (name-op! u nm :del)
-                      (emit! u :swap 2) (emit! u :pop nil)
-                      (emit! u :reraise nil)
+                      (emit! u :reraise 1)
                       (set-depth! u hd-depth)))
                 (do (emit! u :pop nil)
                     (push-fblock! u {:kind :handler :hs outer})
                     (stmts! u hb)
                     (pop-fblock! u)
                     (pop-handler! u)
+                    (set-line! u nil)
                     (emit! u :pop-except nil)
                     (swap! exits conj (jump! u :jump))
                     (push-existing! u cleanup)
                     (set-depth! u (+ d 2))))
               (when next-j (label! u next-j) (set-depth! u (+ d 2))))))
-        ;; no clause matched: re-raise
+        ;; no clause matched: re-raise (artificial: the last clause's jump's line propagated, flow!)
+        (set-line! u nil)
         (emit! u :reraise nil)
         (pop-handler! u)
         ;; cleanup: [prev lasti exc] -> restore the previous exception, re-raise
         (target! u cleanup)
         (set-depth! u (+ d 3))
-        (emit! u :swap 2) (emit! u :pop nil) (emit! u :swap 2) (emit! u :pop-except nil) (emit! u :reraise nil))
+        (emit! u :copy 3) (emit! u :pop-except nil) (emit! u :reraise 1))
       (label! u end)
       (doseq [e @exits] (patch! u e (here u)))
       (set-depth! u d))))
@@ -1232,23 +1478,26 @@
   [u body! handlers orelse]
   (let [d (depth u)
         outer (:hstack @u)
+        _ (line-nop! u)  ; SETUP_FINALLY's NOP at the try statement's line
         h (push-handler! u d false)]
     (push-fblock! u {:kind :try-except :hs outer})
     (body!)
     (pop-fblock! u)
     (pop-handler! u)
     (stmts! u orelse)
-    (let [end (jump! u :jump)]
+    (let [end (emit-nl! u :jump nil)]
       (target! u h)
       (set-depth! u (+ d 1))
       (let [cleanup (push-handler! u (+ d 1) true)
             n (count handlers)]
-        (emit! u :push-exc-info nil)
-        ;; [prev orig] -> [prev orig res exc]
-        (emit! u :build-list 0) (emit! u :copy 2)
+        (emit-nl! u :push-exc-info nil)
+        ;; [prev orig] -> [prev orig res exc], at the first clause's line
+        (at-node! u (first handlers) #(do (emit! u :build-list 0) (emit! u :copy 2)))
         (doseq [[i hd] (map-indexed vector handlers)]
+          (swap! u assoc :line (line-of hd) :loc (pos-of hd))
           (let [[_ [hb] ho _] (node hd)
                 nm (some-> (:name ho) ident)
+                hl (line-of hd)
                 clear! #(when nm (load-const! u nil) (name-op! u nm :store) (name-op! u nm :del))]
             ;; [.. res exc] -> [.. res rest match]
             (expr! u (:type ho)) (emit! u :check-eg-match nil)
@@ -1261,6 +1510,7 @@
                 (stmts! u hb)
                 (pop-fblock! u)
                 (pop-handler! u)
+                (set-line! u nil)  ; artificial (codegen_try_star_except)
                 (clear!)
                 (let [ok (jump! u :jump)]
                   ;; the body raised: [.. rest lasti exc], the exception into res
@@ -1269,9 +1519,10 @@
                   (emit! u :list-append 3) (emit! u :pop nil)
                   (let [err (jump! u :jump)]
                     (label! u no-match) (set-depth! u (+ d 5))
-                    (emit! u :pop nil)
+                    (at-node! u hd #(emit! u :pop nil))
                     (label! u ok) (label! u err) (set-depth! u (+ d 4))))))
-            (when (= i (dec n)) (emit! u :list-append 1))))
+            (when (= i (dec n)) (emit-nl! u :list-append 1))))
+        (set-line! u nil)
         ;; [prev orig res] -> [prev result]
         (emit! u :prep-reraise-star nil)
         (emit! u :copy 1)
@@ -1284,7 +1535,7 @@
             (emit! u :swap 2) (emit! u :pop-except nil) (emit! u :reraise nil)
             (target! u cleanup)
             (set-depth! u (+ d 3))
-            (emit! u :swap 2) (emit! u :pop nil) (emit! u :swap 2) (emit! u :pop-except nil) (emit! u :reraise nil)
+            (emit! u :copy 3) (emit! u :pop-except nil) (emit! u :reraise 1)
             (label! u out))))
       (label! u end)
       (set-depth! u d))))
@@ -1294,21 +1545,24 @@
     (stmts! u body)
     (let [[_ [c v] _ _] (node (first items))
           d (depth u)
-          outer (:hstack @u)]
+          outer (:hstack @u)
+          wl (or (line-of c) (:line @u))]
       (expr! u c)
+      (set-line! u wl)
       (if async?
         (do (emit! u :async-with-enter nil) (load-const! u nil) (emit! u :yield-from nil))
         (emit! u :with-enter nil))
       ;; [exit result]: the body under a handler entered at [exit] with lasti
       (let [h (push-handler! u (inc d) true)]
-        (push-fblock! u {:kind (if async? :async-with :with) :hs outer})
+        (push-fblock! u {:kind (if async? :async-with :with) :hs outer :line wl})
         (if (some? v) (store-target! u v) (emit! u :pop nil))
         (with! u (rest items) body async?)
         (pop-fblock! u)
         (pop-handler! u)
-        ;; normal exit: exit(None, None, None)
+        ;; normal exit: exit(None, None, None), at the with statement's line as the exceptional exit below
+        (set-line! u wl)
         (load-const! u nil) (load-const! u nil) (load-const! u nil) (emit! u :call [3 nil])
-        (when async? (emit! u :get-awaitable nil) (load-const! u nil) (emit! u :yield-from nil))
+        (when async? (emit! u :get-awaitable 2) (load-const! u nil) (emit! u :yield-from nil))
         (emit! u :pop nil)
         (let [end (jump! u :jump)]
           (target! u h)
@@ -1317,10 +1571,11 @@
           (let [cleanup (push-handler! u (+ d 3) true)]
             (emit! u :push-exc-info nil)
             (emit! u :with-except nil)
-            (when async? (emit! u :get-awaitable nil) (load-const! u nil) (emit! u :yield-from nil))
+            (when async? (emit! u :get-awaitable 2) (load-const! u nil) (emit! u :yield-from nil))
+            (set-line! u nil)  ; codegen_with_except_finish: artificial
             (emit! u :to-bool nil)
             (let [j (jump! u :jump-if-true)]
-              (emit! u :reraise nil)
+              (emit! u :reraise 2)
               (label! u j)
               (set-depth! u (+ d 4))
               ;; suppressed: [exit lasti prev exc] -> []
@@ -1331,9 +1586,10 @@
                 ;; cleanup: [exit lasti prev lasti2 exc] -> restore the previous exception, re-raise
                 (target! u cleanup)
                 (set-depth! u (+ d 5))
-                (emit! u :swap 2) (emit! u :pop nil) (emit! u :swap 2) (emit! u :pop-except nil) (emit! u :reraise nil)
+                (emit! u :copy 3) (emit! u :pop-except nil) (emit! u :reraise 1)
                 (label! u j2)
                 (label! u end)
+                (set-line! u wl)
                 (set-depth! u d)))))))))
 
 (defn- import! [u names]
@@ -1372,27 +1628,33 @@
 
 (defn- stmt*! [u x]
   (let [[h p o _] (node x)]
-    (when-let [l (line-of x)] (swap! u assoc :line l))
+    (when-let [l (line-of x)] (swap! u assoc :line l :loc (pos-of x)))
     (case h
       ;; mode :single: an expression statement's value displayed (CPython's CALL_INTRINSIC_1 INTRINSIC_PRINT:
       ;; sys.displayhook), the IR's print-expr
-      expr (do (expr! u (first p)) (emit! u (if (and (= *mode* :single) (= :module (:kind @u))) :print-expr :pop) nil))
+      expr (do (expr! u (first p))
+               (if (and (= *mode* :single) (= :module (:kind @u))) (emit! u :print-expr nil) (emit-nl! u :pop nil)))
       assign (let [[ts v] p]
                (expr! u v)
                (doseq [t (butlast ts)] (emit! u :copy 1) (store-target! u t))
                (store-target! u (last ts)))
+      ;; codegen_augassign: the instructions at the target's location, an attribute's moved to its name (queue 223)
       aug-assign (let [[t op v] p]
-                   (cond
-                     (name-of t) (do (name-op! u (name-of t) :load) (expr! u v) (emit! u :inplace op) (name-op! u (name-of t) :store))
-                     (= 'attribute (head t))
-                     (let [[_ [obj attr] _ _] (node t) ni (name-index! u (mangle u (ident attr)))]
-                       (expr! u obj) (emit! u :copy 1) (emit! u :load-attr ni) (expr! u v) (emit! u :inplace op)
-                       (emit! u :swap 2) (emit! u :store-attr ni))
-                     (= 'subscript (head t))
-                     (let [[_ [obj k] _ _] (node t)]
-                       (expr! u obj) (expr! u k) (emit! u :copy 2) (emit! u :copy 2) (emit! u :subscr nil)
-                       (expr! u v) (emit! u :inplace op) (emit! u :swap 3) (emit! u :swap 2) (emit! u :store-subscr nil))
-                     :else (syntax-error "'tuple' is an illegal expression for augmented assignment")))
+                   (at-node! u t
+                     #(cond
+                        (name-of t) (do (name-op! u (name-of t) :load) (expr! u v) (emit! u :inplace op) (name-op! u (name-of t) :store))
+                        (= 'attribute (head t))
+                        (let [[_ [obj attr] _ _] (node t) ni (name-index! u (mangle u (ident attr)))]
+                          (expr! u obj) (emit! u :copy 1)
+                          (let [al (attr-loc (:loc @u) t)]
+                            (at-loc! u al (fn [] (emit! u :load-attr ni)))
+                            (expr! u v)
+                            (at-loc! u al (fn [] (emit! u :inplace op) (emit! u :swap 2) (emit! u :store-attr ni)))))
+                        (= 'subscript (head t))
+                        (let [[_ [obj k] _ _] (node t)]
+                          (expr! u obj) (expr! u k) (emit! u :copy 2) (emit! u :copy 2) (emit! u :subscr nil)
+                          (expr! u v) (emit! u :inplace op) (emit! u :swap 3) (emit! u :swap 2) (emit! u :store-subscr nil))
+                        :else (syntax-error "'tuple' is an illegal expression for augmented assignment"))))
       ann-assign (let [[t an v] p
                        simple (and (name-of t) (not (false? (:simple o))))]
                    (when (some? v) (expr! u v) (store-target! u t))
@@ -1407,7 +1669,7 @@
                      :else nil))
       delete (doseq [t (first p)] (delete-target! u t))
       return (return! u (first p))
-      (pass) nil
+      (pass) (line-nop! u)
       break (break! u)
       continue (continue! u)
       if (if! u x)
@@ -1421,11 +1683,14 @@
               ;; nothing falls through a raise: what follows is dead code at the same depth
               nil)
       assert (let [[t m] p]
+               (when (let [[th tp _ _] (when (seq? t) (node t))] (and (= th 'tuple) (seq (first tp))))
+                 (warn! "assertion is always true, perhaps remove parentheses?"))
                (expr! u t) (emit! u :to-bool nil)
                (let [j (jump! u :jump-if-true) d (depth u)]
                  (emit! u :call-intrinsic [:assertion-error 0])
                  (when (some? m) (expr! u m) (emit! u :call [1 nil]))
-                 (emit! u :raise 1)
+                 ;; codegen_assert: the raise at the test's location (the traceback's caret line under the test)
+                 (at-node! u t #(emit! u :raise 1))
                  (set-depth! u d)
                  (label! u j)))
       import (import! u (first p))
@@ -1510,6 +1775,12 @@
   (let [k (strip-meta k0)
         h (when (seq? k) (first k))]
     (cond (integer? k) [k (str k)]
+          (float? k) [(if (and (== k (Math/rint k)) (< (Math/abs k) 1e18)) (long k) [:float k]) (str k)]
+          ;; a float or complex key equal to an int is that int's duplicate (0, 0.0, 0j: Python's equality)
+          (= 'float h) (let [v (Double/parseDouble (str/replace (second k) "_" ""))]
+                         [(if (and (== v (Math/rint v)) (< (Math/abs v) 1e18)) (long v) [:float v]) (pp/expr k 0)])
+          (= 'imag h) (let [v (Double/parseDouble (str/replace (let [t (second k)] (subs t 0 (dec (count t)))) "_" ""))]
+                        [(if (zero? v) 0 [:complex v]) (pp/expr k 0)])
           (string? k) [[:str k] (pp/expr k 0)]
           (= 'True k) [1 "True"] (= 'False k) [0 "False"] (= 'None k) [[:none] "None"]
           (= 'int h) (let [v (digits->int (second k))] [v (str v)])
@@ -1522,7 +1793,9 @@
           (#{'str 'bytes} h) (let [v (string-token-value k)] [[:str v] (pp/expr k 0)])
           :else [[:form k] (pp/expr k 0)])))
 
-(defn- pattern!
+(declare pattern!)
+
+(defn- pattern*!
   "Matches the subject on the top: on success the subject is popped and the names bound; on failure the jumps in
   fails (each with the depth it leaves) lead to the case's end (subject popped)"
   [u x fails]
@@ -1540,7 +1813,9 @@
                        :else (do (when (some? nm) (emit! u :copy 1))
                                  (pattern! u q fails)
                                  (when (some? nm) (name-op! u (ident nm) :store)))))
-      match-value (do (emit! u :copy 1) (expr! u (first p)) (emit! u :compare '==) (emit! u :to-bool nil)
+      match-value (do (when (= 'joined-str (head (strip-meta (first p))))
+                        (syntax-error "patterns may only match literals and attribute lookups"))
+                      (emit! u :copy 1) (expr! u (first p)) (emit! u :compare '==) (emit! u :to-bool nil)
                       (fail!) (emit! u :pop nil))
       match-singleton (do (emit! u :copy 1) (expr! u (first p)) (emit! u :is false)
                           (fail!) (emit! u :pop nil))
@@ -1550,16 +1825,36 @@
                            n (count ps)]
                        (when (next stars) (syntax-error "multiple starred names in sequence pattern"))
                        (when (and star (>= star 256)) (syntax-error "too many expressions in star-unpacking sequence pattern"))
-                       (emit! u :match-sequence nil) (fail!)
-                       (emit! u :get-len nil) (load-const! u (if star (dec n) n))
-                       (emit! u :compare (if star '>= '==)) (fail!)
-                       (if star (emit! u :unpack-ex [star (- n star 1)]) (emit! u :unpack-sequence n))
-                       (doseq [q ps]
-                         (if (= 'match-star (head q))
-                           (let [[_ [nm] _ _] (node q)] (if (some? nm) (name-op! u (ident nm) :store) (emit! u :pop nil)))
-                           (sub! q))))
+                       ;; codegen_pattern_sequence: the length checked unless a star stands alone; only wildcards
+                       ;; pop the subject, a star wildcard (*_) indexes it (pattern_helper_sequence_subscr, the
+                       ;; subject never unpacked: range(1 << 30)), else it is unpacked
+                       (let [wild? (fn [q] (let [[qh [qp qn] _ _] (node q)] (and (= 'match-as qh) (nil? qp) (nil? qn))))
+                             star-wild? (and star (nil? (first (second (node (nth ps star))))))
+                             only-wild? (every? #(if (= 'match-star (head %)) (nil? (first (second (node %)))) (wild? %)) ps)]
+                         (emit! u :match-sequence nil) (fail!)
+                         (when (or (nil? star) (> n 1))
+                           (emit! u :get-len nil) (load-const! u (if star (dec n) n))
+                           (emit! u :compare (if star '>= '==)) (fail!))
+                         (cond
+                           only-wild? (emit! u :pop nil)
+                           star-wild? (do (doseq [[i q] (map-indexed vector ps)
+                                                  :when (not (or (= i star) (wild? q)))]
+                                            (emit! u :copy 1)
+                                            (if (< i star)
+                                              (load-const! u i)
+                                              (do (emit! u :get-len nil) (load-const! u (- n i)) (emit! u :binary '-)))
+                                            (emit! u :subscr nil)
+                                            (sub! q))
+                                          (emit! u :pop nil))
+                           :else (do (if star (emit! u :unpack-ex [star (- n star 1)]) (emit! u :unpack-sequence n))
+                                     (doseq [q ps]
+                                       (if (= 'match-star (head q))
+                                         (let [[_ [nm] _ _] (node q)] (if (some? nm) (name-op! u (ident nm) :store) (emit! u :pop nil)))
+                                         (sub! q)))))))
       match-mapping (let [[ks ps] p rest-name (some-> (:rest o) ident)]
                       (reduce (fn [seen k]
+                                (when (= 'joined-str (head (strip-meta k)))
+                                  (syntax-error "mapping pattern keys may only match literals and attribute lookups"))
                                 (if-let [[v r] (key-value k)]
                                   (do (when (seen v) (syntax-error (str "mapping pattern checks duplicate key (" r ")")))
                                       (conj seen v))
@@ -1606,13 +1901,21 @@
                  (set-depth! u (dec d)))
       (throw (ex-info (str "compile: unknown pattern " h) {})))))
 
+
+(defn- pattern!
+  "pattern*! at the pattern's location (a SyntaxError's)"
+  [u x fails]
+  (binding [*pos* (or (pos-of x) *pos*)] (pattern*! u x fails)))
 (defn match-stmt! [u x]
   (let [[_ [subject cases] _ _] (node x)
         ends (atom [])]
     (expr! u subject)
     (doseq [[i c] (map-indexed vector cases)]
       (let [[_ [pt body] co _] (node c)
-            d (depth u)]
+            d (depth u)
+            pl (or (line-of pt) (line-of c))]
+        ;; a case's instructions at its pattern's line (codegen_match_inner's LOC(m->pattern))
+        (when pl (set-line! u pl))
         (emit! u :copy 1)
         (let [fails (atom [])]
           (binding [*allow-irrefutable* (or (some? (:guard co)) (= i (dec (count cases))))]
@@ -1621,23 +1924,334 @@
           (when-let [g (:guard co)]
             (expr! u g) (emit! u :to-bool nil)
             (let [j (jump! u :jump-if-false)] (swap! fails conj [j (depth u)])))
-          (emit! u :pop nil)
+          ;; the subject popped on success: NEXT_LOCATION in CPython (here artificial: the pattern's line propagated)
+          (emit-nl! u :pop nil)
           (stmts! u body)
-          (swap! ends conj (jump! u :jump))
+          (swap! ends conj (emit-nl! u :jump nil))
+          (when pl (set-line! u pl))
           (if (seq @fails) (fail-ladder! u @fails d) (set-depth! u d)))))
     (emit! u :pop nil)
     (let [end (here u)] (doseq [e @ends] (patch! u e end)))))
 
+;; ---- flow! (queue 219t): CPython 3.14's flowgraph line passes (Python/flowgraph.c) over a unit's instructions: the
+;; instructions in basic blocks; inline_small_or_no_lineno_blocks, remove_unreachable, resolve_line_numbers
+;; (duplicate_exits_without_lineno, propagate_line_numbers), jump threading, the const-pop pairs and redundant NOPs and
+;; jumps removed, resolve_line_numbers again; then back to instructions, the jumps' and handlers' targets renumbered.
+;; NO_LOCATION is a nil line; a NOP that holds a line is [:nop :line], RESUME [:nop :resume] (kept); push_cold_blocks_to_end
+;; is not done (pyi's handlers stay where the compiler put them) ----
+
+(def ^:private fl-jumps #{:jump :jump-if-false :jump-if-true :jump-if-none :jump-if-not-none :for-iter})
+(def ^:private fl-threaded #{:jump :jump-if-false :jump-if-true :jump-if-none :jump-if-not-none})
+(def ^:private fl-exits #{:return :raise :reraise})
+
+(defn- fl-last [b] (peek (:ins b)))
+(defn- fl-falls? [b] (let [l (fl-last b)] (or (nil? l) (not (or (= :jump (:op l)) (fl-exits (:op l)))))))
+(defn- fl-nop? [i] (and (= :nop (:op i)) (= :line (:arg i))))
+(defn- fl-nop [line h] {:op :nop :arg :line :line line :h h})
+(defn- fl-nop-of "A NOP in ins's place, its line and location kept" [ins] {:op :nop :arg :line :line (:line ins) :p (:p ins) :h (:h ins)})
+(defn- fl-pos [bs] (into {} (map-indexed (fn [p b] [(:id b) p]) bs)))
+(defn- fl-next [bs p] (first (filter #(seq (:ins (nth bs %))) (range p (count bs)))))
+
+(defn- fl-preds
+  "Each reachable block's predecessors by fallthrough and jumps (a handler's entry counts none), and the reachable set"
+  [bs htarget]
+  (let [pos (fl-pos bs) n (count bs)]
+    (loop [work [0] seen #{0} cnt {0 1}]
+      (if (empty? work)
+        [cnt seen]
+        (let [p (peek work) work (pop work) b (nth bs p) l (fl-last b)
+              edges (concat (when (and (fl-falls? b) (< (inc p) n)) [[(inc p) true]])
+                            (when (and l (fl-jumps (:op l))) [[(pos (:arg l)) true]])
+                            (for [i (:ins b) :let [t (some-> (:h i) htarget pos)] :when t] [t false]))]
+          (let [[work seen cnt] (reduce (fn [[w s c] [q counts?]]
+                                          [(if (s q) w (conj w q)) (conj s q) (if counts? (update c q (fnil inc 0)) c)])
+                                        [work seen cnt] edges)]
+            (recur work seen cnt)))))))
+
+(defn- fl-unreachable [bs htarget]
+  (let [[_ seen] (fl-preds bs htarget)]
+    (vec (map-indexed (fn [p b] (if (seen p) b (assoc b :ins []))) bs))))
+
+(defn- fl-no-line? [b] (every? (comp nil? :line) (:ins b)))
+
+(defn- fl-inline
+  "inline_small_or_no_lineno_blocks: a block ending in a jump to a small exit block, or to a block with no lines that
+  does not fall through, takes a copy of it"
+  [bs]
+  (loop [bs bs rounds 0]
+    (let [pos (fl-pos bs)
+          [bs' ch] (reduce (fn [[bs ch] p]
+                             (let [b (nth bs p) l (fl-last b)]
+                               (if (and l (= :jump (:op l)))
+                                 (let [tp (pos (:arg l)) t (nth bs tp)]
+                                   (if (and (not= tp p) (seq (:ins t))
+                                            (or (and (fl-exits (:op (fl-last t))) (<= (count (:ins t)) 4))
+                                                (and (fl-no-line? t) (not (fl-falls? t)))))
+                                     [(assoc bs p (assoc b :ins (into (conj (pop (:ins b)) (fl-nop-of l)) (:ins t)))) true]
+                                     [bs ch]))
+                                 [bs ch])))
+                           [bs false] (range (count bs)))]
+      (if (and ch (< rounds 8)) (recur bs' (inc rounds)) bs'))))
+
+(defn- fl-set-first-line
+  "The block's first instruction at src's line and location (CPython copies the whole location)"
+  [b src]
+  (update-in b [:ins 0] assoc :line (:line src) :p (:p src)))
+
+(defn- fl-backward? [bs pos p b] (some #(and (= :jump (:op %)) (<= (pos (:arg %)) p)) (:ins b)))
+
+(defn- fl-resolve
+  "resolve_line_numbers: exits (and loop back edges) without a line copied for each jump to them, then the lines
+  propagated within a block and into a block with one predecessor"
+  [bs htarget fresh]
+  (let [exitish? (fn [bs pos p] (let [b (nth bs p) l (fl-last b)]
+                                  (and (seq (:ins b)) (fl-no-line? b)
+                                       (or (fl-exits (:op l)) (fl-backward? bs pos p b)))))
+        bs (loop [bs bs p 0 pos (fl-pos bs) cnt (first (fl-preds bs htarget))]
+             (if (>= p (count bs))
+               bs
+               (let [b (nth bs p) l (fl-last b)
+                     tp (when (and l (fl-jumps (:op l))) (fl-next bs (pos (:arg l))))]
+                 (if (and tp (exitish? bs pos tp) (> (get cnt tp 0) 1))
+                   (let [id (swap! fresh inc)
+                         t (nth bs tp)
+                         nb {:id id :ins (:ins (fl-set-first-line t l))}
+                         bs (-> bs (assoc p (assoc-in b [:ins (dec (count (:ins b))) :arg] id)))
+                         bs (vec (concat (subvec bs 0 (inc tp)) [nb] (subvec bs (inc tp))))]
+                     (recur bs (inc p) (fl-pos bs) (first (fl-preds bs htarget))))
+                   (recur bs (inc p) pos cnt)))))
+        pos (fl-pos bs)
+        bs (reduce (fn [bs p]
+                     (let [b (nth bs p) nx (get bs (inc p))]
+                       (if (and (fl-falls? b) nx (seq (:ins b)) (exitish? bs pos (inc p)))
+                         (assoc bs (inc p) (fl-set-first-line nx (fl-last b)))
+                         bs)))
+                   bs (range (count bs)))
+        [cnt] (fl-preds bs htarget)]
+    (reduce (fn [bs p]
+              (let [b (nth bs p)]
+                (if (empty? (:ins b))
+                  bs
+                  (let [[ins prev] (reduce (fn [[v prev] i] (if (nil? (:line i)) [(conj v (assoc i :line (:line prev) :p (:p prev))) prev] [(conj v i) i]))
+                                           [[] nil] (:ins b))
+                        bs (assoc bs p (assoc b :ins ins))
+                        l (peek ins)
+                        bs (if-let [q (and (fl-falls? b) (< (inc p) (count bs)) (= 1 (get cnt (inc p))) (inc p))]
+                             (let [nx (nth bs q)]
+                               (if (and (seq (:ins nx)) (nil? (:line (first (:ins nx))))) (assoc bs q (fl-set-first-line nx prev)) bs))
+                             bs)]
+                    (if (and l (fl-jumps (:op l)))
+                      (let [q (pos (:arg l)) t (nth bs q)]
+                        (if (and (= 1 (get cnt q)) (seq (:ins t)) (nil? (:line (first (:ins t)))))
+                          (assoc bs q (fl-set-first-line t prev))
+                          bs))
+                      bs)))))
+            bs (range (count bs)))))
+
+(defn- fl-thread
+  "Jumps to jumps threaded (optimize_basic_block's jump_thread): the jump a NOP at its line, a jump to the target's target
+  at the target's line appended"
+  [bs]
+  (let [pos (fl-pos bs)]
+    (vec (for [p (range (count bs))]
+           (loop [b (nth bs p) k 0]
+             (let [l (fl-last b)
+                   tp (when (and l (fl-threaded (:op l))) (fl-next bs (pos (:arg l))))
+                   ti (when tp (first (:ins (nth bs tp))))]
+               (if (and ti (= :jump (:op ti)) (not= (:arg ti) (:arg l)) (< k 8))
+                 (recur (assoc b :ins (conj (pop (:ins b)) (fl-nop-of l)
+                                            {:op (:op l) :arg (:arg ti) :line (:line ti) :p (:p ti) :h (:h l)}))
+                        (inc k))
+                 b)))))))
+
+(defn- fl-truth [k]
+  (cond (nil? k) false (boolean? k) k (number? k) (not (zero? k)) (string? k) (not (empty? k)) :else :unknown))
+
+(defn- fl-fold
+  "A constant's truth tested (const, to-bool, jump-if-false or -true; optimize_basic_block's folding): NOPs, and a jump
+  when it is taken"
+  [bs consts]
+  (mapv (fn [b]
+          (let [v (:ins b) n (count v)]
+            (if (< n 3)
+              b
+              (let [[a t j] (subvec v (- n 3))
+                    k (when (= :const (:op a)) (fl-truth (get consts (:arg a) :unknown)))]
+                (if (and (boolean? k) (= :to-bool (:op t)) (#{:jump-if-false :jump-if-true} (:op j)))
+                  (assoc b :ins (into (vec (subvec v 0 (- n 3)))
+                                      (concat [(fl-nop-of a) (fl-nop-of t)]
+                                              (if (= k (= :jump-if-true (:op j)))
+                                                [{:op :jump :arg (:arg j) :line (:line j) :p (:p j) :h (:h j)}]
+                                                [(fl-nop-of j)]))))
+                  b)))))
+        bs))
+
+(defn- fl-const? [k] (or (nil? k) (boolean? k) (number? k) (string? k) (and (map? k) (contains? k :tuple) (= 1 (count k)))))
+
+(defn- fl-tuples
+  "A tuple of constants built (const ... build-tuple N, NOPs between): one constant, the loads NOPs without a line
+  (fold_tuple_of_constants); the unit's constants extended"
+  [bs consts-atom]
+  (let [const-ix (fn [v] (let [cs @consts-atom i (.indexOf ^java.util.List cs v)]
+                           (if (>= i 0) i (do (swap! consts-atom conj v) (count cs)))))]
+    (mapv (fn [b]
+            (assoc b :ins
+                   (loop [v (:ins b) i 0]
+                     (if (>= i (count v))
+                       v
+                       (let [ins (nth v i) n (:arg ins)]
+                         (if (and (= :build-tuple (:op ins)) (integer? n) (< 0 n 31))
+                           (let [ks (loop [j (dec i) acc ()]
+                                      (cond (= n (count acc)) acc
+                                            (neg? j) nil
+                                            (= :nop (:op (nth v j))) (if (keyword? (:arg (nth v j))) (recur (dec j) acc) nil)
+                                            (= :const (:op (nth v j))) (recur (dec j) (cons j acc))
+                                            :else nil))
+                                 vals (when ks (map #(get @consts-atom (:arg (nth v %)) ::none) ks))]
+                             (if (and ks (every? fl-const? vals) (not-any? #(= :resume (:arg (nth v %))) (range (first ks) i)))
+                               (recur (assoc (reduce (fn [v j] (assoc v j (fl-nop nil (:h (nth v j))))) v ks)
+                                             i (assoc ins :op :const :arg (const-ix {:tuple (vec vals)})))
+                                      (inc i))
+                               (recur v (inc i))))
+                           (recur v (inc i))))))))
+          bs)))
+
+(defn- fl-pairs
+  "const or copy 1, then pop: both NOPs (remove_redundant_nops_and_pairs), within a block"
+  [bs]
+  (mapv (fn [b]
+          (assoc b :ins (loop [v (:ins b) i 1]
+                          (if (>= i (count v))
+                            v
+                            (let [a (nth v (dec i)) c (nth v i)]
+                              (if (and (= :pop (:op c)) (or (= :const (:op a)) (and (= :copy (:op a)) (= 1 (:arg a)))))
+                                (recur (-> v (assoc (dec i) (fl-nop-of a)) (assoc i (fl-nop-of c))) (inc i))
+                                (recur v (inc i))))))))
+        bs))
+
+(defn- fl-nops
+  "basicblock_remove_redundant_nops over every block; the number removed"
+  [bs]
+  (let [n (count bs)
+        out (reduce
+              (fn [bs p]
+                (let [v (transient (into [] (:ins (nth bs p)))) m (count v)
+                      next-line (fn [] (when-let [q (fl-next bs (inc p))]
+                                         (some #(when-not (and (= :nop (:op %)) (nil? (:line %))) [(:line %)]) (:ins (nth bs q)))))]
+                  (loop [i 0 dest [] prev -1]
+                    (if (>= i m)
+                      (assoc bs p (assoc (nth bs p) :ins dest))
+                      (let [ins (nth v i) line (or (:line ins) -1)]
+                        (if (fl-nop? ins)
+                          (cond
+                            (neg? line) (recur (inc i) dest prev)
+                            (= prev line) (recur (inc i) dest prev)
+                            (< i (dec m)) (let [nl (or (:line (nth v (inc i))) -1)]
+                                            (cond (= nl line) (recur (inc i) dest prev)
+                                                  (neg? nl) (do (assoc! v (inc i) (assoc (nth v (inc i)) :line (:line ins) :p (:p ins)))
+                                                                (recur (inc i) dest prev))
+                                                  :else (recur (inc i) (conj dest ins) line)))
+                            :else (let [nx (next-line)]
+                                    (if (and nx (= (first nx) (:line ins)))
+                                      (recur (inc i) dest prev)
+                                      (recur (inc i) (conj dest ins) line))))
+                          (recur (inc i) (conj dest ins) line)))))))
+              bs (range n))]
+    [out (- (reduce + (map (comp count :ins) bs)) (reduce + (map (comp count :ins) out)))]))
+
+(defn- fl-jumps-redundant
+  "remove_redundant_jumps: an unconditional jump to the next non-empty block a NOP; the number changed"
+  [bs]
+  (let [pos (fl-pos bs)]
+    (reduce (fn [[bs k] p]
+              (let [b (nth bs p) l (fl-last b)]
+                (if (and l (= :jump (:op l)) (= (fl-next bs (pos (:arg l))) (fl-next bs (inc p))))
+                  [(assoc bs p (assoc b :ins (conj (pop (:ins b)) (fl-nop-of l)))) (inc k)]
+                  [bs k])))
+            [bs 0] (range (count bs)))))
+
+(def ^:private fl-reversed {:jump-if-false :jump-if-true :jump-if-true :jump-if-false
+                             :jump-if-none :jump-if-not-none :jump-if-not-none :jump-if-none})
+
+(defn- fl-normalize
+  "A backward conditional jump reversed over a backward jump of its own (normalize_jumps_in_block): CPython's conditional
+  jumps go forward, its backward edges are JUMP_BACKWARD (a line event for the backward jump to the same line)"
+  [bs fresh]
+  (loop [bs bs p 0]
+    (if (>= p (count bs))
+      bs
+      (let [pos (fl-pos bs) b (nth bs p) l (fl-last b)]
+        (if (and l (fl-reversed (:op l)) (<= (pos (:arg l)) p) (< (inc p) (count bs)))
+          (let [id (swap! fresh inc)
+                nb {:id id :ins [{:op :jump :arg (:arg l) :line (:line l) :p (:p l) :h (:h l)}]}
+                b (assoc b :ins (conj (pop (:ins b)) (assoc l :op (fl-reversed (:op l)) :arg (:id (nth bs (inc p))))))]
+            (recur (vec (concat (subvec bs 0 p) [b nb] (subvec bs (inc p)))) (+ p 2)))
+          (recur bs (inc p)))))))
+
+(defn- flow!
+  "The unit's :code, :lines and :hs-of through CPython's line passes; its handlers' :target renumbered"
+  [m]
+  (let [code (:code m) n (count code)
+        hs (distinct (remove nil? (:hs-of m)))
+        htarget-ix (into {} (for [h hs :let [t (:target @h)] :when t] [h t]))
+        leaders (into (sorted-set 0)
+                      (concat (keep (fn [[op arg]] (when (fl-jumps op) arg)) code)
+                              (vals htarget-ix)
+                              (keep (fn [i] (let [[op] (nth code i)] (when (or (fl-jumps op) (fl-exits op)) (inc i)))) (range n))))
+        leaders (vec (filter #(<= % n) leaders))
+        ins (mapv (fn [[op arg] l p h] {:op op :arg arg :line l :p p :h h}) code (:lines m) (:locs m) (:hs-of m))
+        bs (vec (for [[a b] (map vector leaders (concat (rest leaders) [n])) :when (or (< a b) (= a n))]
+                  {:id a :ins (vec (subvec ins a (max a b)))}))
+        bs (if (some #(= n (:id %)) bs) bs (conj bs {:id n :ins []}))
+        htarget (fn [h] (htarget-ix h))
+        fresh (atom (+ n 1))
+        consts (atom (vec (:consts m)))
+        bs (-> bs fl-inline (fl-unreachable htarget) (fl-resolve htarget fresh) (fl-tuples consts) (fl-fold @consts) fl-thread
+               fl-pairs (fl-unreachable htarget))
+        bs (loop [bs bs k 0]
+             (let [[bs a] (fl-nops bs) [bs b] (fl-jumps-redundant bs)]
+               (if (and (pos? (+ a b)) (< k 16)) (recur bs (inc k)) bs)))
+        bs (-> bs (fl-resolve htarget fresh) (fl-normalize fresh))
+        starts (loop [p 0 at 0 acc {}] (if (>= p (count bs)) acc (recur (inc p) (+ at (count (:ins (nth bs p)))) (assoc acc p at))))
+        total (reduce + (map (comp count :ins) bs))
+        pos (fl-pos bs)
+        index (fn [id] (let [q (fl-next bs (pos id))] (if q (starts q) total)))
+        out (vec (mapcat :ins bs))]
+    (doseq [h hs :let [t (htarget-ix h)] :when t] (swap! h assoc :target (index t)))
+    (assoc m
+           :consts @consts
+           :code (mapv (fn [{:keys [op arg]}] [op (cond (fl-jumps op) (index arg) (and (= :nop op) (keyword? arg)) nil :else arg)]) out)
+           :lines (mapv :line out)
+           :locs (mapv :p out)
+           :hs-of (mapv :h out))))
+
 ;; ---- the code object ----
 
+(defn- positions-of
+  "co_positions' columns by instruction (the IR's :positions, queue 223) as one string the runtime decodes when a
+  traceback or co_positions asks (a vector of numbers per instruction made the IR's parse, every program's start, slower):
+  an instruction's entry COL,END-COL when it ends on its line, COL,END-COL,END-LINE-LESS-LINE else, empty where the
+  location has no columns (the line alone or NO_LOCATION); entries separated by ;. nil when no instruction has columns
+  (mode :lines)"
+  [locs]
+  (let [es (mapv (fn [p]
+                   (let [[l c el ec] p]
+                     (cond (not (and l c el ec)) ""
+                           (= l el) (str c "," ec)
+                           :else (str c "," ec "," (- el l)))))
+                 locs)]
+    (when (some seq es) (str/join ";" es))))
+
 (defn code-of [u]
-  (let [m @u
+  (let [m (flow! @u)
         b @(:block m)]
     {:name (:name m) :qualname (:qualname m) :kind (:kind m)
      :flags (cond-> (:flags m) (:optimized m) (conj :optimized) (:nested b) (conj :nested))
      :argcount (:argcount m 0) :posonly (:posonly m 0) :kwonly (:kwonly m 0)
      :locals (:locals m) :cells (:cells m) :frees (:frees m) :names (:names m) :consts (:consts m)
-     :docstring (:docstring m) :code (:code m) :handlers (handler-table (:hs-of m)) :lines (:lines m)}))
+     :docstring (:docstring m) :code (:code m) :handlers (handler-table (:hs-of m)) :lines (:lines m)
+     :positions (positions-of (:locs m))
+     :firstlineno (:firstlineno m 1)}))
 
 (declare compile-module*)
 
@@ -1646,11 +2260,18 @@
   [module]
   (binding [*mode* :exec] (compile-module* module)))
 
+(declare compile-source*)
+
 (defn compile-source
   "compile()'s modes over a module's forms: :exec the module; :eval a module of one expression statement, its value
   returned (an expression's code object); :single the statements with each expression statement's value displayed
   (print-expr, the REPL's)"
   [module mode]
+  (binding [*warnings* (atom [])]
+    (let [code (compile-source* module mode)]
+      (cond-> code (seq @*warnings*) (assoc :warnings @*warnings*)))))
+
+(defn- compile-source* [module mode]
   (case mode
     :exec (compile-module module)
     :single (binding [*mode* :single] (compile-module* module))
@@ -1661,7 +2282,7 @@
               (binding [*mode* :eval
                         *table* (assoc t :future-annotations (contains? (:features t) "annotations"))]
                 (let [u (new-unit (:top t) :module "<module>" "<module>" nil)]
-                  (when-let [l (line-of (first body))] (swap! u assoc :line l))
+                  (when-let [l (line-of (first body))] (set-line! u l))
                   (expr! u (first p))
                   (emit! u :return nil)
                   (code-of u)))))))
@@ -1675,10 +2296,12 @@
             ph (when (and (:annotation-block b) (not (:future-annotations *table*)))
                  (let [i (here u)] (emit! u :nop nil) (emit! u :nop nil) i))]
         (when (and (:future-annotations *table*) (annotations-used? body)) (emit! u :setup-annotations nil))
-        (when-let [d (docstring body)] (load-const! u d) (name-op! u "__doc__" :store))
+        (when-let [d (docstring body)]
+          (at-line! u (line-of (first body)) #(load-const! u d))
+          (no-loc! u #(name-op! u "__doc__" :store)))
         (when (:has-conditional-annotations b)
           (emit! u :build-set 0) (name-op! u "__conditional_annotations__" :store))
         (stmts! u (if (docstring body) (rest body) body))
         (class-annotations! u ph)
-        (load-const! u nil) (emit! u :return nil)
+        (no-loc! u #(do (load-const! u nil) (emit! u :return nil)))
         (code-of u)))))

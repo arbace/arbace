@@ -1,0 +1,321 @@
+(ns arbace.python.wheels
+  "pyi's wheel installer (doc/python/PYTHON-SURVEY.md, \"As built: 205\"; PYS23-PYS25 (a)): the binary distribution
+  format alone (PEP 427, PEP 491's .data schemes), no pip and no Python, run by bin/pyi wheels as
+  -m arbace.python.wheels VERB ..., evaluated from the checkout on the tools' host:
+
+    list --pins FILE
+        each pin a line: FILE URL SHA256 BYTES SAMPLE SCRIPT (tab-separated; - for none), for bin/pyi wheels
+    install --pins FILE --cache DIR --site DIR
+        every pinned wheel of the cache (DIR/FILE, its SHA-256 and size the pin's) installed into a new site, built in a
+        temporary directory beside SITE and renamed to it; SITE already there: nothing done
+    install-one --wheel FILE --site DIR
+        one wheel into DIR (no pin): the negative controls' and the comparison with pip's layout
+    verify --pins FILE --cache DIR --site DIR
+        every cached wheel against its pin, the site's distributions the pins', every installed file against its
+        distribution's RECORD
+
+  A site: lib/ (purelib and platlib, on sys.path through PYI_SITE), bin/ (scripts, console scripts' launchers),
+  include/NAME/ (headers), data at its root. A wheel whose tags are not py3-none-any, whose WHEEL is not 1.x or not
+  purelib, whose RECORD misses a file or names one absent, whose digest or size differs, whose path leaves its
+  directory, or that ships a .pth file, is refused: nothing of it installed, exit 1."
+  (:require [arbace.string :as str])
+  (:import [java.io File FileOutputStream]
+           [java.security MessageDigest]
+           [java.util Base64]
+           [java.util.zip ZipFile ZipEntry]))
+
+(defn- fail [& msg] (throw (ex-info (apply str msg) {:wheels true})))
+
+;; ---- digests ----
+
+(defn- hex [^bytes b] (apply str (map #(format "%02x" (bit-and % 0xff)) b)))
+
+(defn- digest ^bytes [^String alg ^bytes b] (.digest (MessageDigest/getInstance alg) b))
+
+(defn- b64 [^bytes b] (.encodeToString (.withoutPadding (Base64/getUrlEncoder)) b))
+
+(def ^:private algs {"sha256" "SHA-256" "sha384" "SHA-384" "sha512" "SHA-512"})
+
+(defn- read-bytes ^bytes [^File f] (java.nio.file.Files/readAllBytes (.toPath f)))
+
+(defn- record-hash [^bytes b] (str "sha256=" (b64 (digest "SHA-256" b))))
+
+;; ---- RECORD's CSV (Python's csv module, its excel dialect) ----
+
+(defn- csv-row [^String line]
+  (loop [i 0 field (StringBuilder.) fields [] quoted false]
+    (if (>= i (count line))
+      (conj fields (str field))
+      (let [c (.charAt line i)]
+        (cond
+          (and quoted (= c \") (< (inc i) (count line)) (= (.charAt line (inc i)) \"))
+          (recur (+ i 2) (.append field \") fields true)
+          (= c \") (recur (inc i) field fields (not quoted))
+          (and (= c \,) (not quoted)) (recur (inc i) (StringBuilder.) (conj fields (str field)) false)
+          :else (recur (inc i) (.append field c) fields quoted))))))
+
+(defn- csv-rows [^String text]
+  (for [l (str/split-lines text) :let [l (str/replace l #"\r$" "")] :when (seq l)] (csv-row l)))
+
+(defn- csv-field [^String s]
+  (if (re-find #"[,\"\r\n]" s) (str "\"" (str/replace s "\"" "\"\"") "\"") s))
+
+(defn- csv-text [rows] (apply str (for [r rows] (str (str/join "," (map csv-field r)) "\n"))))
+
+;; ---- the wheel's name and tags ----
+
+(defn- normalize [s] (str/lower-case (str/replace s #"[-_.]+" "-")))
+
+(defn parse-file-name
+  "A wheel's file name (PEP 427): {:name :version :build :py :abi :plat}, the tags as sets (PEP 425's compressed sets)"
+  [^String file]
+  (let [base (if (str/ends-with? file ".whl") (subs file 0 (- (count file) 4)) (fail file ": not a wheel's file name (*.whl)"))
+        parts (str/split base #"-")
+        [n v b py abi plat] (case (count parts)
+                              5 (let [[n v py abi plat] parts] [n v nil py abi plat])
+                              6 parts
+                              (fail file ": not a wheel's file name (NAME-VERSION[-BUILD]-PY-ABI-PLATFORM.whl, PEP 427)"))
+        tags #(set (str/split % #"\."))]
+    {:name n :version v :build b :py (tags py) :abi (tags abi) :plat (tags plat) :tag (str py "-" abi "-" plat)}))
+
+(defn- check-tags [file {:keys [py abi plat tag]}]
+  (when-not (and (py "py3") (abi "none") (plat "any"))
+    (fail file ": its tags " tag " are not py3-none-any; pyi installs pure-Python wheels only"
+          " (it loads no compiled extension: no cgo, no dlopen; PYS21 (a), PYS23 (a))")))
+
+;; ---- files ----
+
+(defn- delete-tree [^File f]
+  (when (.isDirectory f) (doseq [c (.listFiles f)] (delete-tree c)))
+  (.delete f))
+
+(defn- write-file [^File f ^bytes b]
+  (.mkdirs (.getParentFile f))
+  (with-open [o (FileOutputStream. f)] (.write o b)))
+
+(defn- entry-bytes ^bytes [^ZipFile z ^ZipEntry e]
+  (with-open [in (.getInputStream z e)] (.readAllBytes in)))
+
+(defn- safe-path [file ^String p]
+  (when (or (str/starts-with? p "/") (str/includes? p "\\") (some #{".." ""} (str/split p #"/")))
+    (fail file ": the path " (pr-str p) " leaves its directory"))
+  p)
+
+(defn- key-values [^String text]
+  (for [l (str/split-lines text) :let [[k v] (str/split l #":\s*" 2)] :when v] [k (str/trim v)]))
+
+;; ---- the console scripts (entry_points.txt) ----
+
+(defn- console-scripts [^String text]
+  (loop [ls (str/split-lines text) section nil out []]
+    (if (empty? ls)
+      out
+      (let [l (str/trim (first ls))]
+        (cond
+          (or (= l "") (str/starts-with? l "#") (str/starts-with? l ";")) (recur (rest ls) section out)
+          (re-matches #"\[.*\]" l) (recur (rest ls) (subs l 1 (dec (count l))) out)
+          (= section "console_scripts")
+          (let [[k v] (map str/trim (str/split l #"=" 2))
+                spec (str/trim (str/replace (or v "") #"\[.*\]\s*$" ""))
+                [mod attr] (str/split spec #":" 2)]
+            (when-not (and (seq k) (seq mod) (seq attr) (re-matches #"[\w.]+" mod) (re-matches #"[\w.]+" attr))
+              (fail "entry_points.txt: the console script " (pr-str l) " is not NAME = MODULE:ATTR"))
+            (recur (rest ls) section (conj out [k mod attr])))
+          :else (recur (rest ls) section out))))))
+
+;; the launcher: pip's script (distlib's template) behind the shell header pip uses for a long interpreter path; the
+;; shell part runs pyi's python3 (PYI_EXECUTABLE, which bin/pyi exports) with the site's lib/ in PYI_SITE, so the site
+;; holds no absolute path and the worktrees share it
+(def ^:private sh-header
+  (str "#!/bin/sh\n"
+       "'''exec' env PYI_SITE=\"$(cd \"$(dirname \"$0\")/../lib\" && pwd)${PYI_SITE:+:$PYI_SITE}\" "
+       "\"${PYI_EXECUTABLE:?pyi runs this script: PYI_EXECUTABLE names tools/pyi/python3 (bin/pyi wheels run NAME)}\" \"$0\" \"$@\"\n"
+       "' '''\n"))
+
+(defn- launcher [mod attr]
+  (str sh-header
+       "# -*- coding: utf-8 -*-\n"
+       "import re\n"
+       "import sys\n"
+       "from " mod " import " (first (str/split attr #"\.")) "\n"
+       "if __name__ == \"__main__\":\n"
+       "    sys.argv[0] = re.sub(r\"(-script\\.pyw|\\.exe)?$\", \"\", sys.argv[0])\n"
+       "    sys.exit(" attr "())\n"))
+
+;; ---- install ----
+
+(defn install-wheel
+  "Installs the wheel FILE (a File) into the site SITE (a File: lib/, bin/, include/, data at its root); returns
+  {:name :version :files N}"
+  [^File whl ^File site]
+  (let [file (.getName whl)
+        fname (parse-file-name file)
+        _ (check-tags file fname)]
+    (with-open [z (ZipFile. whl)]
+      (let [entries (into {} (for [^ZipEntry e (enumeration-seq (.entries z)) :when (not (.isDirectory e))]
+                               [(.getName e) e]))
+            _ (doseq [p (keys entries)] (safe-path file p))
+            infos (distinct (for [p (keys entries) :let [[d f] (str/split p #"/" 2)]
+                                  :when (and (str/ends-with? d ".dist-info") (= f "WHEEL"))] d))
+            _ (when (not= 1 (count infos)) (fail file ": " (count infos) " .dist-info directories with a WHEEL, not one"))
+            info (first infos)
+            [dname dver] (str/split (subs info 0 (- (count info) 10)) #"-" 2)
+            _ (when-not (and (= (normalize dname) (normalize (:name fname))) (= dver (:version fname)))
+                (fail file ": its .dist-info is " info ", not the file name's " (:name fname) "-" (:version fname)))
+            data-dir (str dname "-" dver ".data/")
+            text #(String. (entry-bytes z (get entries %)) "UTF-8")
+            wheel (into {} (key-values (text (str info "/WHEEL"))))
+            _ (when-not (re-matches #"1(\.\d+)?" (str (get wheel "Wheel-Version")))
+                (fail file ": Wheel-Version " (pr-str (get wheel "Wheel-Version")) ", pyi installs 1.x"))
+            _ (when-not (= "true" (str/lower-case (str (get wheel "Root-Is-Purelib"))))
+                (fail file ": Root-Is-Purelib is not true (a platlib wheel)"))
+            record-name (str info "/RECORD")
+            _ (when-not (entries record-name) (fail file ": no " record-name))
+            rows (csv-rows (text record-name))
+            unsigned #{record-name (str info "/RECORD.jws") (str info "/RECORD.p7s")}
+            listed (into {} (for [r rows] [(first r) r]))
+            _ (doseq [p (sort (keys entries))]
+                (when-not (or (listed p) (unsigned p)) (fail file ": " p " is not in RECORD")))
+            contents (into {}
+                           (for [[p h size] rows :when (not (unsigned p))]
+                             (let [e (or (entries p) (fail file ": RECORD names " p ", which the wheel does not hold"))
+                                   b (entry-bytes z e)
+                                   [alg want] (str/split (or h "") #"=" 2)]
+                               (when-not (seq h) (fail file ": RECORD gives " p " no digest"))
+                               (when-not (algs alg) (fail file ": RECORD's digest of " p " is " alg ", not sha256, sha384 or sha512"))
+                               (when-not (= want (b64 (digest (algs alg) b)))
+                                 (fail file ": " p "'s " alg " differs from RECORD's (" want ")"))
+                               (when (and (seq size) (not= (str (alength b)) size))
+                                 (fail file ": " p " has " (alength b) " bytes, RECORD says " size))
+                               [p b])))
+            target (fn [p]
+                     (if (str/starts-with? p data-dir)
+                       (let [[scheme rest] (str/split (subs p (count data-dir)) #"/" 2)]
+                         (when-not rest (fail file ": " p " is in no scheme directory"))
+                         (case scheme
+                           ("purelib" "platlib") (str "lib/" rest)
+                           "scripts" (str "bin/" rest)
+                           "headers" (str "include/" dname "/" rest)
+                           "data" rest
+                           (fail file ": " p ": the scheme " scheme " is not purelib, platlib, scripts, headers or data")))
+                       (str "lib/" p)))
+            placed (vec (for [[p _] rows :when (contains? contents p)] [p (target p)]))
+            _ (doseq [[p t] placed]
+                (when (and (str/starts-with? t "lib/") (str/ends-with? t ".pth") (not (str/includes? (subs t 4) "/")))
+                  (fail file ": " p " is a .pth file, which pyi does not process (it starts without site, as -S)")))
+            ;; a script of .data/scripts with pip's #!python first line runs pyi as the launchers do
+            script-bytes (fn [t ^bytes b]
+                           (let [s (String. b "ISO-8859-1")]
+                             (if (and (str/starts-with? t "bin/") (re-find #"\A#!python[w]?[^\n]*\n" s))
+                               (.getBytes (str sh-header (str/replace-first s #"\A#!python[w]?[^\n]*\n" "")) "ISO-8859-1")
+                               b)))
+            scripts (when-let [e (entries (str info "/entry_points.txt"))] (console-scripts (String. (entry-bytes z e) "UTF-8")))
+            rel (fn [t] (if (str/starts-with? t "lib/") (subs t 4) (str "../" t)))
+            written (atom [])]
+        (doseq [[p t] placed]
+          (let [b (script-bytes t (contents p)) f (File. site ^String t)]
+            (when (.exists f) (fail file ": " t " is already installed by another wheel"))
+            (write-file f b)
+            (when (str/starts-with? t "bin/") (.setExecutable f true false))
+            (swap! written conj [(rel t) (record-hash b) (str (alength b))])))
+        (doseq [[n mod attr] scripts]
+          (let [t (str "bin/" n) f (File. site t) b (.getBytes ^String (launcher mod attr) "UTF-8")]
+            (when (.exists f) (fail file ": the console script " n " is already installed"))
+            (write-file f b)
+            (.setExecutable f true false)
+            (swap! written conj [(rel t) (record-hash b) (str (alength b))])))
+        (let [b (.getBytes "arbace-pyi\n" "UTF-8") t (str "lib/" info "/INSTALLER")]
+          (write-file (File. site t) b)
+          (swap! written conj [(rel t) (record-hash b) (str (alength b))]))
+        (write-file (File. site (str "lib/" record-name))
+                    (.getBytes ^String (csv-text (conj @written [(rel (str "lib/" record-name)) "" ""])) "UTF-8"))
+        {:name dname :version dver :info info :files (count @written)}))))
+
+;; ---- pins ----
+
+(defn- read-pins [f]
+  (let [ws (:wheels (read-string (slurp f)))]
+    (when-not (seq ws) (fail f ": no :wheels"))
+    ws))
+
+(defn- cached [cache {:keys [file sha256 bytes]}]
+  (let [f (File. ^String cache ^String file)]
+    (when-not (.isFile f) (fail f ": not fetched (bin/pyi wheels fetch, the one network step)"))
+    (let [b (read-bytes f) h (hex (digest "SHA-256" b))]
+      (when-not (and (= h sha256) (= (alength b) bytes))
+        (fail f ": SHA-256 " h ", " (alength b) " bytes; pinned " sha256 ", " bytes " bytes (bin/pyi wheels fetch fetches it again)")))
+    f))
+
+(defn- do-install [pins cache site]
+  (let [site (File. ^String site)
+        ws (read-pins pins)]
+    (if (.isDirectory site)
+      (println (str "  " (.getPath site) ": installed already"))
+      (let [tmp (File. (.getParentFile (.getAbsoluteFile site)) (str (.getName site) ".tmp-" (System/nanoTime)))]
+        (try
+          (doseq [w ws]
+            (let [r (install-wheel (cached cache w) tmp)]
+              (println (str "  " (:file w) ": " (:files r) " files"))))
+          (when-not (.renameTo tmp site)
+            (if (.isDirectory site) (delete-tree tmp) (fail "cannot rename " tmp " to " site)))
+          (finally (when (.exists tmp) (delete-tree tmp))))
+        (println (str "  " (count ws) " wheels installed into " (.getPath site)))))))
+
+(defn- verify-site [^File site]
+  (let [lib (File. site "lib")
+        infos (sort (for [^File d (.listFiles lib) :when (str/ends-with? (.getName d) ".dist-info")] (.getName d)))]
+    (vec
+      (for [info infos]
+        (let [rows (csv-rows (slurp (File. lib (str info "/RECORD"))))
+              bad (vec (for [[p h size] rows :when (seq h)
+                             :let [f (File. lib ^String p)
+                                   [alg want] (str/split h #"=" 2)]
+                             :when (or (not (.isFile f))
+                                       (not= want (b64 (digest (algs alg "SHA-256") (read-bytes f))))
+                                       (not= size (str (.length f))))]
+                         p))
+              installer (let [f (File. lib (str info "/INSTALLER"))] (when (.isFile f) (slurp f)))]
+          {:info info :files (count rows) :bad (cond-> bad (not= installer "arbace-pyi\n") (conj "INSTALLER"))})))))
+
+(defn- do-verify [pins cache site]
+  (let [ws (read-pins pins)
+        _ (doseq [w ws] (cached cache w))
+        _ (println (str "  " (count ws) " wheels in the cache as pinned"))
+        site (File. ^String site)
+        _ (when-not (.isDirectory site) (fail site ": not installed (bin/pyi wheels install)"))
+        rs (verify-site site)
+        want (sort (for [w ws :let [{:keys [name version]} (parse-file-name (:file w))]] (str name "-" version ".dist-info")))
+        have (map :info rs)]
+    (doseq [{:keys [info files bad]} rs]
+      (println (str "  " info ": " files " RECORD rows" (when (seq bad) (str ", DIFFER: " (str/join " " bad))))))
+    (when (not= (map normalize want) (map normalize have))
+      (fail "the site's distributions " (pr-str (vec have)) " are not the pins' " (pr-str (vec want))))
+    (when (some (comp seq :bad) rs) (fail "the site differs from its RECORDs"))
+    ;; no file but the RECORDs' (a __pycache__ a run wrote, a file left by hand)
+    (let [lib (File. site "lib")
+          listed (set (for [{:keys [info]} rs [p] (csv-rows (slurp (File. lib (str info "/RECORD"))))]
+                        (.getCanonicalPath (File. lib ^String p))))
+          extra (sort (for [^File f (file-seq site) :when (and (.isFile f) (not (listed (.getCanonicalPath f))))]
+                        (subs (.getPath f) (inc (count (.getPath site))))))]
+      (when (seq extra)
+        (fail "the site holds " (count extra) " files no RECORD lists: " (str/join " " (take 5 extra))
+              (when (> (count extra) 5) " ..."))))
+    (println (str "  " (.getPath site) ": every installed file as its RECORD says, no other"))))
+
+(defn -main [& args]
+  (let [[verb & more] args
+        opts (into {} (map vec (partition 2 more)))]
+    (try
+      (case verb
+        "list" (doseq [w (read-pins (opts "--pins"))]
+                 (println (str/join "\t" [(:file w) (:url w) (:sha256 w) (:bytes w) (or (:sample w) "-")
+                                          (if (:script w) (str/join " " (:script w)) "-")])))
+        "install" (do-install (opts "--pins") (opts "--cache") (opts "--site"))
+        "install-one" (let [r (install-wheel (File. ^String (opts "--wheel")) (File. ^String (opts "--site")))]
+                        (println (str "  " (:info r) ": " (:files r) " files")))
+        "verify" (do-verify (opts "--pins") (opts "--cache") (opts "--site"))
+        (do (println "usage: -m arbace.python.wheels list|install|install-one|verify ...") (System/exit 2)))
+      (catch Throwable e
+        (if (:wheels (ex-data e))
+          (do (binding [*out* *err*] (println (str "pyi wheels: " (.getMessage e)))) (System/exit 1))
+          (throw e))))))

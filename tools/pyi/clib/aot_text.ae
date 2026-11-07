@@ -1,0 +1,36 @@
+;; bin/pyi-clib aot's two text steps on stage 0 (queue 213: they were python3 one-offs, the only use of CPython in pyi's AOT):
+;;   nodes NODES.go OUT     the node program's text: the string literals of Nodes' concatenation, in order (the printed Go has
+;;                          only the escapes \" \\ and \n, \t besides)
+;;   setup PROG.go LIB      cf2g's Main (ci.AotMain running the program) rewritten as setup, registered by init with arbace/clib
+(require '[arbace.string :as str])
+
+(let [[verb a b] *command-line-args*]
+  (case verb
+    "nodes"
+    (let [src (slurp a)
+          src (subs src (str/index-of src "var Nodes"))]
+      ;; a scan, not a regex: Java's regex recurses per character of a literal (xz's are megabytes)
+      (spit b (let [sb (StringBuilder.) n (count src)]
+                (loop [i 0 in? false]
+                  (if (>= i n)
+                    (str sb)
+                    (let [c (.charAt ^String src i)]
+                      (cond
+                        (not in?) (recur (inc i) (= c \"))
+                        (= c \") (recur (inc i) false)
+                        (= c \\) (let [e (.charAt ^String src (inc i))]
+                                    (.append sb (case e \n \newline \t \tab e))
+                                    (recur (+ i 2) true))
+                        :else (do (.append sb c) (recur (inc i) true)))))))))
+    "setup"
+    (let [s (slurp a)
+          m (re-matcher #"(?s)\nfunc Main\(args \[\]string\) \{\n\tci\.AotMain\(args, func\(p \*ci\.Prog, l \*ci\.Loader\) \{\n(.*?)\n\t\}\)\n\}\n" s)]
+      (when-not (.find m)
+        (binding [*out* *err*] (println (str "pyi-clib: cf2g's Main not found in " a)))
+        (System/exit 1))
+      (let [body (str/replace (.group m 1) "\n\t\t" "\n\t")
+            body (str/replace-first body "\t\t" "\t")
+            s (str (subs s 0 (.start m))
+                   "\n// setup loads the library's data and sets its compiled functions (cf2g's Main's, without running it).\nfunc setup(p *ci.Prog, l *ci.Loader) {\n"
+                   body "\n}\n\nfunc init() { clib.RegisterCompiled(\"" b "\", setup) }\n" (subs s (.end m)))]
+        (spit a (str/replace-first s "import (\n" "import (\n\t\"arbace/clib\"\n"))))))

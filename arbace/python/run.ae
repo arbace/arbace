@@ -4,15 +4,14 @@
   configuration (go.arbace.py/Configure: sys.argv, sys.path). Evaluated from the checkout on stage 0, as
   arbace.python is (PYS18 (a)).
 
-  The compiler: source text read by the helper (tools/pydump/pydump.py tree --full: the reader until PY9's native
-  one), converted (arbace.repr.python.convert) and compiled (arbace.python.compile); the IR's text, or
+  The compiler: source text read by the native reader (PY9; before it the helper, tools/pydump/pydump.py tree --full),
+  converted (arbace.repr.python.convert) and compiled (arbace.python.compile); the IR's text, or
   \"SyntaxError: MESSAGE\", or for mode single \"incomplete\" (codeop's rule). The modes are the compiler's
   (arbace.python.compile/compile-source: exec; eval, the expression's value returned; single, each expression statement
   displayed by print-expr, sys.displayhook). Compiled code is kept by the SHA-256 of the mode, the source and the
   compiler's sources, in WORK/ir-cache."
   (:require [arbace.python.compile :as pc]
             [arbace.repr.python.convert :as cv]
-            [arbace.java.shell :as sh]
             [arbace.string :as str])
   (:import [java.io File]
            [java.security MessageDigest]))
@@ -27,30 +26,22 @@
     (hex (.digest md (.getBytes s "UTF-8")))))
 
 (def ^:private compiler-digest
-  (delay (sha256 (apply str (for [f ["arbace/python/compile.ae" "arbace/python/ir.ae" "arbace/python/scope.ae"
-                                     "arbace/python/run.ae" "arbace/repr/python/convert.ae" "tools/pydump/pydump.py"]
+  (delay (sha256 (apply str (for [f (concat ["arbace/python/compile.ae" "arbace/python/ir.ae" "arbace/python/scope.ae"
+                                             "arbace/python/run.ae"]
+                                            ;; the native reader (PY9): arbace/repr/python's namespaces
+                                            (sort (for [^File x (.listFiles (File. (str root "/arbace/repr/python")))
+                                                        :when (.endsWith (.getName x) ".ae")]
+                                                    (str "arbace/repr/python/" (.getName x)))))
                                   :let [ff (File. (str root "/" f))] :when (.exists ff)]
                               (str f "\u0000" (slurp ff) "\u0000"))))))
 
 (def ^:private counter (atom 0))
 
 (defn- read-dump
-  "The helper's dump of source: the module's forms or its (python/error ...)"
+  "The native reader's forms of source (PY9: arbace.repr.python.astjson/read-forms, mode :full, as the helper's
+  tools/pydump/pydump.py tree --full gave them): the module's forms or its (python/error ...)"
   [source]
-  (let [d (str work "/compile/" (System/getenv "PYI_RUN_ID") "-" (swap! counter inc))
-        dd (File. d)]
-    (.mkdirs dd)
-    (spit (str d "/src.py") source)
-    (spit (str d "/list") "src.py\n")
-    (let [r (sh/sh "python3" "-I" "-S" "-B" (str root "/tools/pydump/pydump.py") "tree" "--full" "--base" d
-                   "--list" (str d "/list") "--out" (str d "/dumps") "--tsv" (str d "/tsv"))
-          f (File. (str d "/dumps/src.py.ae"))]
-      (try
-        (if (.exists f)
-          (cv/convert (slurp f))
-          (list 'python/error 'SystemError (str "the reader failed: " (:err r))))
-        (finally
-          (doseq [^File x (reverse (file-seq dd))] (.delete x)))))))
+  ((requiring-resolve 'arbace.repr.python.astjson/read-forms) source))
 
 (defn- node-head [x] (when (seq? x) (first x)))
 
@@ -74,10 +65,28 @@
                (re-find #"\\$" (last lines)))))))
 
 (defn- syntax-error
-  "The compiler's answer for a SyntaxError: \"SyntaxError: MSG\", then after NULs its line, offset, end line and end
-  offset when known (CPython's 1-based offsets; the runtime makes the exception's fields of them)"
+  "The compiler's answer for a SyntaxError: \"TYPE: MSG\" (SyntaxError, IndentationError or TabError), then after NULs
+  its line, offset, end line and end offset when known (CPython's 1-based offsets; the runtime makes the exception's
+  fields of them), then its kind, p (the parser's: TEXT, the helper's text of the line, follows, empty for None), m
+  (p with the SyntaxError's _metadata line and column before the text, reader-kind) or c (the compiler's: CPython's
+  text is the line of the file when it reads, PyErr_ProgramTextObject)"
   ([msg] (str "SyntaxError: " msg))
-  ([msg loc] (str "SyntaxError: " msg (when (seq loc) (apply str (map #(str "\u0000" (if (nil? %) "" %)) loc))))))
+  ([msg loc] (syntax-error "SyntaxError" msg loc "c" nil))
+  ([typ msg loc kind text]
+   (str (if (#{"SyntaxError" "IndentationError" "TabError"} typ) typ "SyntaxError") ": " msg
+        (apply str (map #(str "\u0000" (if (nil? %) "" %)) (take 4 (concat loc (repeat nil)))))
+        "\u0000" kind (when (and (not= kind "c") (some? text)) (str "\u0000" text)))))
+
+(defn- reader-text
+  "A reader error's :text, the helper's SyntaxError text, or nil"
+  [form]
+  (second (drop-while #(not= :text %) form)))
+
+(defn- reader-kind
+  "A reader error's kind for syntax-error: p, or with the parser's :metadata (the last statement's line and column, the
+  SyntaxError's _metadata; queue 202c) m and them"
+  [form]
+  (if-let [[l c] (second (drop-while #(not= :metadata %) form))] (str "m\u0000" l "\u0000" c) "p"))
 
 (defn- reader-loc
   "A reader error's location: its :pos, the helper's SyntaxError fields as CPython gives them (lineno, offset,
@@ -85,11 +94,47 @@
   [form]
   (second (drop-while #(not= :pos %) form)))
 
+(defn- native-answer
+  "compile()'s PyCF_ONLY_AST (mode \"ast:MODE:FLAGS:FEATURE:OPTIMIZE\") and _tokenize's tokens (mode \"tokenize:EXTRA\"):
+  the native reader's answers (PY9, arbace.repr.python.astjson/compile-answer; tools/pyi/ast_json.py's form)"
+  [mode file source]
+  ((requiring-resolve 'arbace.repr.python.astjson/compile-answer) mode file source))
+
+(defn- single-error
+  "compile()'s mode single as CPython parses it, the native reader's answer (arbace.repr.python.astjson/single-error):
+  nil, or the SyntaxError as the compiler's answer"
+  [source]
+  ((requiring-resolve 'arbace.repr.python.astjson/single-error) source))
+
+(defn error-answer
+  "The compiler's answer for the main module that does not compile (queue 223; bin/pyi run): the reader's error form,
+  else the compiler's SyntaxError (an ex-info), as compile-uncached answers compile(); a file's decoding error names the
+  file as the tokenizer's does when it reads one (helpers.c's \" in file \")"
+  [form ex file]
+  (if form
+    (let [msg (str (nth form 2))
+          msg (if-let [[_ a b] (and file (re-matches #"(?s)(Non-UTF-8 code starting with '\\x[0-9a-f]{2}')( on line .*)" msg))]
+                (str a " in file " file b)
+                msg)]
+      (syntax-error (str (second form)) msg (reader-loc form) (reader-kind form) (reader-text form)))
+    (let [d (ex-data ex)]
+      (syntax-error (:msg d) (when (:lineno d) [(:lineno d) (:offset d) (:end-lineno d) (:end-offset d)])))))
+
 (defn- compile-uncached [mode source]
-  (let [form (read-dump source)]
+  ;; mode single-complete: compile()'s single without PyCF_ALLOW_INCOMPLETE_INPUT, codeop's rule not applied (PY7)
+  ;; mode single parsed as CPython parses it (queue 203: Py_single_input's start rule, one statement, then pegen's
+  ;; bad_single_statement): "multiple statements found ..." ahead of codeop's rule (CPython's parser stops after the
+  ;; first statement, so the rest may be incomplete or broken), the parser's other errors after it
+  (let [form (read-dump source)
+        incomplete-rule? (= mode "single")
+        single? (#{"single" "single-complete"} mode)
+        single-err (when single? (single-error source))
+        mode (if (= mode "single-complete") "single" mode)]
     (cond
-      (and (= mode "single") (incomplete? source form)) "incomplete"
-      (cv/error-form? form) (syntax-error (nth form 2) (reader-loc form))
+      (and single-err (str/starts-with? single-err "SyntaxError: multiple statements found")) single-err
+      (and incomplete-rule? (incomplete? source form)) "incomplete"
+      single-err single-err
+      (cv/error-form? form)(syntax-error (str (second form)) (nth form 2) (reader-loc form) (reader-kind form) (reader-text form))
       :else
       (try ((resolve 'arbace.python/ir-text) (pc/compile-source form (keyword mode)))
            (catch Throwable e
@@ -104,8 +149,11 @@
         cf (File. (str work "/ir-cache/" (subs key 0 2) "/" key))]
     (if (.exists cf)
       (slurp cf)
-      (let [r (compile-uncached mode source)]
-        (when (or (str/starts-with? r "{") (= r "incomplete") (str/starts-with? r "SyntaxError: "))
+      (let [r (if (or (str/starts-with? mode "ast:") (str/starts-with? mode "tokenize:"))
+                (native-answer mode file source)
+                (compile-uncached mode source))]
+        (when (or (str/starts-with? r "{") (str/starts-with? r "AST:") (str/starts-with? r "TOK:") (= r "incomplete")
+                  (str/starts-with? r "SyntaxError: "))
           (.mkdirs (.getParentFile cf))
           (let [tmp (File. (str (.getPath cf) ".tmp" (swap! counter inc)))]
             (spit tmp r)
@@ -120,10 +168,13 @@
   "Before RunModule or Repl: the compiler, sys.argv (ARGV) and sys.path (PATH)"
   [argv path]
   ((runtime-fn 'SetCompiler) (fn [mode file source] (compile-source mode file source)))
+  ;; a built-in module whose Go package is loaded on its first import (pyexpat: go.arbace.pyexpat over go.arbace.expat,
+  ;; queue 202e), so a run that never imports it does not load expat's forms
+  ((runtime-fn 'SetPackageLoader) (fn [ns] (require (symbol ns))))
   ((runtime-fn 'Configure) (str/join "\u0000" argv) (str/join "\u0000" path)))
 
 (defn repl
-  "The REPL on the standard streams (go.arbace.py/Repl); sys.path is ['' LIB]"
-  [lib]
-  (install! [""] (cond-> [""] lib (conj lib)))
+  "The REPL on the standard streams (go.arbace.py/Repl); sys.path is ['' LIB SITE...]"
+  [lib & [site]]
+  (install! [""] (concat (cond-> [""] lib (conj lib)) site))
   ((runtime-fn 'Repl)))

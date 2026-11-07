@@ -1,0 +1,283 @@
+(ns arbace.repr.python.parsecheck
+  "repr/python's tree check (bin/repr-python parse-check; doc/python/PYTHON-SURVEY.md, \"As built: PY9b\"): every file of a
+  corpus read by the native reader (arbace.repr.python.native/read-dump: the generated parser's tree written as the
+  helper's dump) and compared with the helper's dump (tools/pydump/pydump.py tree, mode :lines: ast.parse's tree as
+  Python forms), line for line; a file the helper's ast.parse rejects is judged by its (python/error ...) line, the
+  class, message, position and text CPython gives (PY9's errors: the second pass, pegen_errors.c). The rest as the token check, after which this namespace is modelled:
+
+  repr/python's token check (bin/repr-python lex-check; doc/python/PYTHON-SURVEY.md, \"As built: PY9a\"): every file of
+  a corpus lexed by the native lexer (arbace.repr.python.lex/dump: the encoding, then tokenize's stream and the parser's,
+  each token's type, positions and string, the error that ends a stream with CPython's class, message, position and
+  text) and compared line for line with the helper's dump of the same file (tools/pydump/tokdump.py, CPython's C
+  tokenizer through _tokenize.TokenizerIter). A file whose dumps differ passes when test/python/lex-check-known.edn
+  lists it with its class; mutants (files of the corpora with tokens deleted, duplicated, swapped, inserted, and
+  characters inserted: the error paths) are a corpus of their own, drawn by a seeded shuffle.
+
+    check --corpus ID --base DIR --list FILE --ref DIR --out DIR --known FILE [--record] [--jobs N] [--controls FILE]
+    mutants --out DIR --seed N --files N --per N --edits N --pool FILE...   (each pool file: BASE then RELs)
+
+  --controls FILE (test/python/controls-read.edn; GTS81 (a), queue 212): the corpus's crossed pairs, the subject's
+  source read natively and judged by judge-dump, this check's own comparison, against the reference's dump (named as
+  the reference, so that only the content differs), which it must fail (arbace.repr.python.results/judge-controls); a
+  control that passes or is not judged fails the check, with --record too (before anything is written)"
+  (:require [arbace.repr.python.lex :as lex]
+            [arbace.repr.python.native :as nv]
+            [arbace.repr.python.results :as results]
+            [arbace.string :as str])
+  (:import [java.io File]))
+
+(set! *warn-on-reflection* true)
+
+(defn- parse-args [args with-value]
+  (loop [as args opts {} pos []]
+    (if (empty? as)
+      {:opts opts :args pos}
+      (let [[a & more] as]
+        (cond
+          (contains? with-value a) (recur (rest more) (assoc opts a (first more)) pos)
+          (str/starts-with? a "--") (recur more (assoc opts a true) pos)
+          :else (recur more opts (conj pos a)))))))
+
+(defn- read-bytes ^bytes [^String path] (java.nio.file.Files/readAllBytes (.toPath (File. path))))
+
+(defn- spit-mk [^String path text]
+  (let [f (File. path)] (.mkdirs (.getParentFile f)) (spit f text)))
+
+(defn- lines-of [^String s] (vec (.split s "\n" -1)))
+
+(defn- first-diff
+  "The first line where the two dumps differ: [line-number ref mine], or nil"
+  [^String ref ^String mine]
+  (when (not= ref mine)
+    (let [a (lines-of ref) b (lines-of mine) n (max (count a) (count b))]
+      (loop [i 0]
+        (when (< i n)
+          (let [x (get a i) y (get b i)]
+            (if (= x y) (recur (inc i)) [(inc i) (or x "<none>") (or y "<none>")])))))))
+
+(def ^:dynamic *full* false)
+
+(defn- judge-dump
+  "[rel status detail]: :equal, :differ [line ref mine], :crash message, :no-ref: the source SRC's native dump (named
+  REL) against the reference dump REF; the differing dumps kept under OUT/diff/REL"
+  [^String src ^String ref-path ^String out rel]
+  (let [rf (File. ref-path)]
+    (if (not (.exists rf))
+      [rel :no-ref nil]
+      (let [ref (slurp rf)
+            mine (try (nv/read-dump (read-bytes src) rel *full*)
+                      (catch Throwable e
+                        (if-let [c (:class (ex-data e))] {:refused c :message (.getMessage e)} (str "!Crash\t" (.getMessage e)))))]
+        (cond
+          (map? mine) [rel :refused (:refused mine)]
+          (= ref mine)
+          [rel :equal nil]
+          (str/starts-with? ref "(python/error HelperError")
+          [rel :refused :helper-error]
+          :else
+          (let [d (first-diff ref mine)]
+            (spit-mk (str out "/diff/" rel ".ref") ref)
+            (spit-mk (str out "/diff/" rel ".mine") mine)
+            (if (str/starts-with? mine "!Crash")
+              [rel :crash (subs mine 7 (min (count mine) 300))]
+              [rel :differ d])))))))
+
+(defn- one-file [^String base ^String ref-dir ^String out rel]
+  (judge-dump (str base "/" rel) (str ref-dir "/" rel ".ae") out rel))
+
+(defn- run-files [base ref-dir out rels jobs]
+  (let [parts (partition-all (max 1 (long (Math/ceil (/ (count rels) (double jobs))))) rels)
+        full *full*
+        fs (mapv (fn [part] (future (binding [*full* full] (mapv #(one-file base ref-dir out %) part)))) parts)]
+    (vec (mapcat deref fs))))
+
+(defn- read-known [^String f]
+  (if (.exists (File. f)) (read-string (slurp f)) {:classes {} :lines {} :full {}}))
+
+(defn- write-known [^String f known]
+  (let [k (fn [m] (into (sorted-map) m))]
+    (spit-mk f
+             (str ";; The files of repr/python's tree check (bin/repr-python parse-check; doc/python/PYTHON-SURVEY.md, \"As built: PY9b\")\n"
+                  ";; whose native dump differs from the helper's (tools/pydump/pydump.py tree), by corpus, each with its class (:classes:\n"
+                  ";; what it is and the decision it rests on) and the first differing line. Written by --record, the classes kept: a\n"
+                  ";; file of no class is printed and not written (the run exits 3). Read with the Clojure reader.\n"
+                  "{:classes\n {"
+                  (str/join "\n  " (for [[c v] (k (:classes known))] (str (pr-str c) "\n  " (pr-str (into (sorted-map) v)))))
+                  "}"
+                  (str/join (for [sec [:lines :full] :when (contains? known sec)]
+                              (str "\n " sec "\n {"
+                                   (str/join "\n  " (for [[c files] (k (get known sec))]
+                                                      (str (pr-str c) "\n  {"
+                                                           (str/join "\n   " (for [[f v] (k files)] (str (pr-str f) " " (pr-str (into (sorted-map) v)))))
+                                                           "}")))
+                                   "}")))
+                  "}\n"))))
+
+(def ^:private rule-classes
+  {:helper-error
+   {:what "the helper itself fails on the file (its tree --full: the token weave's Source splits lines at a lone CR, tokenize does not, so the text between two tokens is not white space): no reference to judge by"
+    :decided "the helper's, classed by rule (a mutant with a lone CR inserted); the native reader is not judged on such a file"}
+   :charset {:what "the file is in an encoding Arbace's runtime has no charset for (KOI8-R: Lib/test's module_koi8_r.py; the coding specs cp1251 and iso8859-7 of test_exceptions' cases), so the lexer has no text to read: the decoder's refusal"
+             :decided "by design (queue 176's DECISION (a), the user, 2026-11-03): jrt's charsets are the root/English set the locales decision of 2026-10-11 chose; classed by rule, as roundtrip --text's :charset"}})
+
+(declare do-check*)
+(defn- do-check [{:keys [opts]}]
+  (binding [*full* (boolean (get opts "--full"))]
+    (do-check* opts)))
+
+(defn- do-check* [opts]
+  (let [corpus (keyword (get opts "--corpus"))
+        base (get opts "--base") ref-dir (get opts "--ref") out (get opts "--out")
+        known-file (get opts "--known")
+        jobs (Long/parseLong (get opts "--jobs" "3"))
+        rels (vec (remove str/blank? (str/split-lines (slurp (get opts "--list")))))
+        t0 (System/nanoTime)
+        res (run-files base ref-dir out rels jobs)
+        secs (/ (- (System/nanoTime) t0) 1e9)
+        known (read-known known-file)
+        section (if *full* :full :lines)
+        mine (get-in known [section corpus] {})
+        bad (filter #(not= :equal (second %)) res)
+        freq (frequencies (map second res))
+        _ (spit-mk (str out "/files.tsv")
+               (str/join (for [[r s d] res] (str r "\t" (name s) "\t" (str/replace (pr-str d) #"[\t\n]" " ") "\n"))))
+        _ (println (format "parse-check %s: %d files in %.1f s: equal %d, differ %d, refused %d, crash %d, no reference %d"
+                       (name corpus) (count res) secs (get freq :equal 0) (get freq :differ 0) (get freq :refused 0)
+                       (get freq :crash 0) (get freq :no-ref 0)))
+        ctl-bad (long (results/judge-controls
+                   (str "parse-check" (when *full* " --full")) corpus (results/read-controls (get opts "--controls") corpus) (set rels)
+                   (set (keep (fn [[r st _]] (when (= st :equal) r)) res))
+                   (fn [subject reference]
+                     (let [[_ st d] (judge-dump (str base "/" subject) (str ref-dir "/" reference ".ae") (str out "/control") reference)]
+                       (case st
+                         :equal :pass
+                         :differ [:fail (str "the dumps differ at line " (first d))]
+                         [:not-judged (str (name st) (when d (str " " (pr-str d))))])))))]
+    (when (pos? ctl-bad) (println (str "parse-check " (name corpus) ": " ctl-bad " negative control(s) failed")))
+    (when (and (get opts "--record") (pos? ctl-bad)) (System/exit 1))
+    (if (get opts "--record")
+      (let [new (into {} (for [[r s d] bad
+                               :let [c (if (= s :refused) d (:class (get mine r)))] :when c]
+                           [r (cond-> {:class c} (= s :differ) (assoc :line (first d)))]))
+            unclassed (remove #(contains? new (first %)) bad)]
+        (doseq [[r s d] unclassed] (println "NO CLASS" r (name s) (pr-str d)))
+        (when-let [rf (get opts "--results-file")]
+          (results/write :parse rf corpus (for [[r s d] res]
+                                         [r (cond (= s :equal) :pass (contains? new r) :known :else :fail)
+                                          (str (name s) (when d (str " " (pr-str d))))])
+                         (if *full* :full :lines)))
+        (write-known known-file (-> known
+                                    ;; a partial run (--partial: an --only list's) keeps the entries of the files not run
+                                    (assoc-in [section corpus] (if (get opts "--partial") (merge (apply dissoc mine rels) new) new))
+                                    (update :classes #(merge (select-keys rule-classes (set (map :class (vals new)))) %))))
+        (System/exit (if (seq unclassed) 3 0)))
+      (let [problems (concat
+                       (for [[r s d] bad
+                             :let [k (get mine r)]
+                             :when (or (nil? k) (not (contains? (:classes known) (:class k)))
+                                       (and (= s :refused) (not= d (:class k)))
+                                       (and (= s :differ) (not= (:line k) (first d))))]
+                         [r (str "UNEXPECTED " r " " (name s) " " (pr-str d) (when k (str " (known: " (pr-str k) ")")))])
+                       (let [badset (set (map first bad)) ran (set rels)]
+                         (for [[r k] mine :when (and (ran r) (not (badset r)))]
+                           [r (str "GONE (known as " (:class k) ", equal now) " r)])))]
+        (doseq [[_ p] (take 50 problems)] (println p))
+        (doseq [[r p] problems] (results/print-fail corpus r p))
+        (when (> (count problems) 50) (println "..." (- (count problems) 50) "more"))
+        (System/exit (if (and (empty? problems) (zero? ctl-bad)) 0 1))))))
+
+;; ---- mutants ----
+
+(defn- cps ^ints [^String s]
+  (let [n (.codePointCount s 0 (.length s)) a (int-array n)]
+    (loop [i 0 j 0] (when (< i (.length s)) (let [c (.codePointAt s i)] (aset a j c) (recur (+ i (Character/charCount c)) (inc j)))))
+    a))
+
+(def ^:private inserts ["'" "\"" "\t" "(" ")" "[" "}" "{" "\\" "f\"" "t'" "\"\"\"" "\n" " " "é" "$" "0" "0x" "1e" "#" "\r" "!" ":" "　"])
+
+(defn mutate
+  "`text` with `edits` random edits (tokens deleted, duplicated, swapped with the next, a random token's text inserted,
+  or one of a few characters inserted at a token's start), nil when it has too few tokens"
+  [^String text ^java.util.Random rnd ^long edits]
+  (let [a (cps text)
+        line-starts (let [v (java.util.ArrayList.)]
+                      (.add v (long 0))
+                      (dotimes [i (alength a)] (when (== (aget a i) 10) (.add v (long (inc i)))))
+                      v)
+        toks (:tokens (lex/stream text true))
+        abs (fn [l c] (when (<= 1 (long l) (.size line-starts)) (+ (long (.get line-starts (dec (long l)))) (long c))))
+        cand (vec (for [[t s sl sc el ec] toks
+                        :when (and (pos? (count s)) (not (#{lex/NEWLINE lex/NL lex/INDENT lex/DEDENT lex/ENDMARKER} t)) (= sl el))
+                        :let [o (abs sl sc)] :when o]
+                    [o (abs el ec) s]))
+        n (count cand)]
+    (when (> n 8)
+      (let [picks (sort (distinct (repeatedly edits #(.nextInt rnd (dec n)))))
+            eds (for [i picks]
+                  (let [[o e s] (nth cand i) [o2 e2 s2] (nth cand (inc i))]
+                    (case (.nextInt rnd 5)
+                      0 [o e ""]
+                      1 [o e (str s " " s)]
+                      2 (if (<= e o2) [o e2 (str s2 (String. a (int e) (int (- o2 e))) s)] [o e s])
+                      3 [o o (str (nth (nth cand (.nextInt rnd n)) 2) " ")]
+                      [o o (nth inserts (.nextInt rnd (count inserts)))])))
+            eds (loop [eds (sort-by first eds) out [] end -1]
+                  (if-let [[o e :as x] (first eds)]
+                    (if (>= (long o) end) (recur (rest eds) (conj out x) (long e)) (recur (rest eds) out end))
+                    out))]
+        (let [sb (StringBuilder.)]
+          (loop [i 0 eds eds]
+            (if-let [[o e r] (first eds)]
+              (do (.append sb (String. a (int i) (int (- (long o) i)))) (.append sb ^String r) (recur (long e) (rest eds)))
+              (.append sb (String. a (int i) (int (- (alength a) i))))))
+          (str sb))))))
+
+(defn- do-mutants [{:keys [opts args]}]
+  (let [out (get opts "--out")
+        seed (Long/parseLong (get opts "--seed" "26"))
+        nfiles (Long/parseLong (get opts "--files" "2000"))
+        per (Long/parseLong (get opts "--per" "2"))
+        edits (Long/parseLong (get opts "--edits" "3"))
+        pool (vec (for [pf args
+                        :let [[base & rels] (remove str/blank? (str/split-lines (slurp pf)))]
+                        r rels
+                        :let [p (str base "/" r)]
+                        :when (< (.length (File. ^String p)) 65536)]
+                    p))
+        rnd (java.util.Random. seed)
+        shuffled (let [l (java.util.ArrayList. ^java.util.Collection pool)] (java.util.Collections/shuffle l rnd) (vec l))
+        picked (take nfiles shuffled)
+        made (atom [])]
+    (doseq [[i p] (map-indexed vector picked)
+            j (range per)]
+      (let [{:keys [text error encoding]} (try (lex/decode-source (read-bytes p)) (catch Throwable _ nil))]
+        (when (and text (= "utf-8" encoding))
+          (when-let [m (mutate text rnd edits)]
+            (let [nm (format "m%05d-%d.py" i j)]
+              (spit-mk (str out "/src/" nm) m)
+              (swap! made conj [nm p]))))))
+    (spit-mk (str out "/list") (str/join (for [[nm _] @made] (str nm "\n"))))
+    (spit-mk (str out "/from.tsv") (str/join (for [[nm p] @made] (str nm "\t" p "\n"))))
+    (println (str "mutants: " (count @made) " mutants of " (count picked) " files (seed " seed ", " per " mutants of " edits " edits each)"))))
+
+(defn- do-dump
+  "dump --base DIR --list FILE --out DIR [--full]: each file's native dump as OUT/REL.ae (bin/repr-python read --reader
+  native), and a TSV REL STATUS on stdout"
+  [{:keys [opts]}]
+  (let [base (get opts "--base") out (get opts "--out") full (boolean (get opts "--full"))]
+    (doseq [rel (remove str/blank? (str/split-lines (slurp (get opts "--list"))))]
+      (let [text (try (nv/read-dump (read-bytes (str base "/" rel)) rel full)
+                      (catch arbace.lang.ExceptionInfo e (if (:class (ex-data e)) e (throw e))))]
+        (if (string? text)
+          (do (spit-mk (str out "/" rel ".ae") text)
+              (println (str rel "\t" (if (str/starts-with? text "(python/error") "error" "ok"))))
+          ;; a refusal (the runtime's charsets): no dump
+          (println (str rel "\trefused " (name (:class (ex-data text))) ": " (.getMessage ^Throwable text))))))))
+
+(defn -main [& args]
+  (let [[verb & more] args pa (fn [wv] (parse-args more wv))]
+    (case verb
+      "check" (do-check (pa #{"--corpus" "--base" "--list" "--ref" "--out" "--known" "--jobs" "--results-file" "--controls"}))
+      "mutants" (do-mutants (pa #{"--out" "--seed" "--files" "--per" "--edits"}))
+      "dump" (do-dump (pa #{"--base" "--list" "--out"}))
+      (do (println "usage: -m arbace.repr.python.parsecheck check|mutants ...") (System/exit 2)))))
