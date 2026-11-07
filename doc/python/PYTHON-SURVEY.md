@@ -3895,3 +3895,89 @@ As the design said, plus what the runs showed:
   ReferenceType, Template, Interpolation, Token, itertools.chain, DirEntry, whose old method returned the class).
 - Known gap: `sorted(float.__dict__)` still lists only the dict's entries: `ownSlots` answers `in` and `[]`, not iteration.
   tp_name in "not callable" and setattr's messages stays the bare name (`'TypeVar' object is not callable`).
+
+## As built: 229, dis of CPython's bytecode (2026-11-07, the Mac VM, queue 229)
+
+### The design, first
+
+**What tests and the library need of a code object** (read: `Lib/` and `Lib/test/` at the pinned tarball, 3.14.10):
+
+| Attribute | Readers in `Lib/` | Tests that read it |
+|---|---|---|
+| `co_code`, `_co_code_adaptive` | dis, modulefinder (`_unpack_opargs`: the imports), inspect (a mention) | test_dis, test_peepholer, test_code, test_compile, test_marshal |
+| `co_consts`, `co_names`, `_varname_from_oparg` | dis, pdb, trace, linecache, modulefinder | test_compile (30 uses), test_code, test_dis, test_peepholer, test_listcomps |
+| `co_positions()` | dis, traceback and inspect (with `tb_lasti // 2`) | test_code, test_compile, test_dis, test_marshal |
+| `co_lines()`, `co_linetable` | bdb, dis (`findlinestarts`), inspect, trace | test_compile, test_code, test_dis, test_sys_settrace, test_monitoring |
+| `co_exceptiontable` | dis | test_code |
+| `co_stacksize` | dis's `code_info`, inspect | test_code, test_compile |
+| `f_lasti`, `tb_lasti` | dis (`distb`, the `-->` mark), traceback, inspect | test_dis, test_frame, test_traceback |
+| the instructions' names | pdb (`find_first_executable_line`: what follows RESUME), dis | test_dis, test_peepholer (114 helpers), test_compile, test_patma, test_fstring |
+| the specializing names (`adaptive=True`) | dis | test_opcache (38 `requires_specialization`), test_dis (6), test_type_cache (7), test_monitoring (2) |
+
+Two facts decide the design. `traceback.py` and `inspect` index `co_positions()` by `tb_lasti // 2`, so `f_lasti`, `tb_lasti`,
+`co_positions` and `co_code` must count the same units: a view cannot be a co_code alone, the machine's instruction and the
+view's offset must answer for each other. And an exact dis is a matter of bytes: `flowgraph.c`'s passes (`LOAD_FAST_BORROW`, the
+superinstructions, the cold blocks, `NOT_TAKEN`, the jump normalization, constant folding) decide nearly every line.
+
+**The routes.**
+
+- (a) A generator from pyi's IR. The IR is codegen.c's order of emission already (the compiler is written after it, its line
+  passes after flowgraph.c, 219t), so the stream codegen.c would have emitted can be recovered: an abstract walk of the IR's stack finds
+  where a call's callable was finished (`PUSH_NULL`, `LOAD_ATTR`'s method bit, `CALL 0` of decorators and comprehensions), what
+  `with` keeps below (two slots for pyi's one) and the rest. From there flowgraph.c and assemble.c are ported as they are. It runs
+  lazily, in the runtime, the first time an attribute is asked: nothing on any program's start, no IR text grows. Every instruction
+  keeps the IR instruction it came from, so `f_lasti` and `tb_lasti` are exact. Its risk is the tail: wherever compile.ae is not
+  codegen.c's shape. That tail is measurable, code object by code object, against CPython.
+- (b) CPython's compiler ported beside pyi's own: codegen.c, compile.c, flowgraph.c, assemble.c, instruction_sequence.c (about
+  13,700 lines of C; the symbol table is there). It is exact by construction, but it needs the tree: either every import compiles twice on
+  the host (the compiler is evaluated there) and every IR text carries the bytecode, or the source is kept and compiled again when
+  asked, which a `compile()`d string and a changed file do not allow. And its instructions have no link to the machine's: `tb_lasti` could only
+  be paired by location, which is not one to one.
+- (c) By design: `:dis` stays a class (with `_varname_from_oparg`, so that dis fails later). Nothing to build; test_dis, test_peepholer and the
+  dis-based parts of test_compile, test_code and test_pdb stay out.
+
+The route taken: (a) for codegen.c's half, (b)'s port for flowgraph.c's and assemble.c's. The specializing names are outside every route:
+they report the adaptive interpreter's state, which pyi does not have (its inline caches are its own); `adaptive=True` shows the
+unspecialized code, and those tests want a class of their own, `:specializing`.
+
+### As built: the slice
+
+`go/arbace/py/bytecode.go` (the IR as the stream codegen.c emits), `bytecode_flow.go` (flowgraph.c: `optimize_cfg`'s load-const,
+jump-threading, tuple, list, unary and binary folds, `swaptimize`, `remove_unused_consts`, the uninitialized-locals check,
+the superinstructions, `push_cold_blocks_to_end`, `calculate_stackdepth`, the prefix, `normalize_jumps`, `optimize_load_fast`),
+`bytecode_asm.go` (assemble.c: jump offsets, the location and exception tables, and the view), `bytecode_table.go` (generated by
+`tools/pyi/bytecode_table.py` from the tarball's `pycore_opcode_metadata.h`). About 2,900 lines of Go. `bcBuild` runs the first time an
+attribute asks; a panic in it leaves the old answers from the IR. Asked of the view: `co_code`, `_co_code_adaptive`, `co_consts`, `co_stacksize`,
+`co_linetable`, `co_exceptiontable`, `co_positions`, `co_lines`, `_varname_from_oparg`, `f_lasti`, `tb_lasti`, `sys.monitoring`'s offsets;
+`code.replace` of them makes a new view (the machine keeps the IR; `co_consts` replaced is mapped back by identity). `marshal` keeps pyi's blob.
+`_opcode.stack_effect` now answers.
+
+What the IR's stack walk (`irPlan`) recovers: `PUSH_NULL` after the callable's last instruction (a merge of paths: at the label),
+`LOAD_ATTR`'s method bit (not on a name bound by an import in the module's scope, `is_import_originated`), `LOAD_SUPER_ATTR`, `CALL 0` of decorators
+and comprehensions, `f(*a)` without its list, `with`'s second slot, `STORE_FAST_MAYBE_NULL`, `CONVERT_VALUE` before a format spec, the lasti of pyi's
+finally handlers (CPython's has none).
+
+The compiler moved towards codegen.c where the shape was its own, each of these a change of behaviour or of the IR, not of the view:
+`jump-if!` is `codegen_jump_if` (`if`, `while`, `assert`, conditional expressions, comprehension filters: no `COPY` of a boolean operator's value in a
+test); inlined comprehensions save and restore as `codegen_push_inlined_comprehension_locals` (no tuple; a cleanup handler restores the names on
+an exception, which pyi did not do); `return` of a constant loads it after the unwinding (`codegen_return`); `__classdict__`'s store after
+`__firstlineno__`; locations of decorators' calls, stores of definitions, `with`, augmented assignment, lambdas and generator expressions.
+And two real gaps it found: docstrings are cleaned now (`_PyCompile_CleanDoc`: `__doc__` kept its indentation since PY5), and CO_HAS_DOCSTRING is set.
+The IR gained one key, `:threaded`.
+
+**Measured** (`bin/pyi bytecode-check`, TestBytecodeDiff; VM, arm64, CPython 3.14.10 `python3 -I`):
+
+| Sample | Code objects | `co_code` | `co_consts` | `co_stacksize` | `co_exceptiontable` | `co_linetable` | all five |
+|---|---|---|---|---|---|---|---|
+| 67 stdlib modules (before the last fixes) | 4,795 | 3,968 (82.8%) | 4,328 (90.3%) | 4,579 (95.5%) | 4,340 (90.5%) | 3,162 (65.9%) | 2,873 (59.9%) |
+| the 9 files of the slice | 491 | 412 (83.9%) | 452 (92.1%) | 475 (96.7%) | 443 (90.2%) | 315 (64.2%) | 296 (60.3%) |
+
+test_dis: before 0 of 145 equal (the module did not import: `code.replace(co_linetable=)`); after 107 equal, 26 classed (`@cpython_only`,
+the specializing ones among them), 12 in the narrowed `:dis`. test__opcode: 6 of 7 before `stack_effect`'s last fix, not rerun (suspended: see the report).
+
+**The tail** (first differences over the 67 modules, largest first): a jump's offset after an earlier difference; `LOAD_FAST` left strong after some `try` statements (not established; read: `optimize_load_fast`'s walk
+stops at an empty block, and the IR, after flow!, has not CPython's empty blocks); constant order; `all`, `any` and `tuple` of a generator expression (codegen.c inlines the
+loop); keyword dicts in calls with `**`; `f"{x!r}"`'s pieces' locations. Handlers whose region lost every instruction in flow! (an `except E as e: return`,
+`try: pass`) leave their blocks unreachable in the view: their depth is not in the IR. `async for`'s `END_ASYNC_FOR` jump. Each is a small
+change in compile.ae or `irPlan`; none is structural.
+
