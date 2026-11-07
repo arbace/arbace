@@ -771,6 +771,63 @@ reached from a non-cleanup block, and a cleanup block that only resumes (through
 empty drops) is no pad at all; aggregates over a pointer's size travel by pointer, returns by `sret`; constants LLVM's builder
 can fold (shifts, comparisons, int-to-pointer) never reach the IR as instructions.
 
+### RF3b: the codegen on rustc's data, second round (2026-11-05, branch `rust-rf3b`)
+
+RFP1 (a) decided: finish the codegen on rustc's data before replacing the oracle's answers. One day's second pass over the refusals
+and the differing items of the first coverage file: **10,433 of 11,453 mono items' functions equal rustc's IR (91.1 %)**, from 8,342
+(72.8 %), over the same 81 programs (`test/rust/front/coverage-2026-11-05b.edn`, the record; the first file stays), no program lost an
+item (checked per program on each of the 20 runs of the day: the coverage over the 81 programs is 6 minutes at about 1.5 GiB), **40
+programs with every item equal** (13 before) and the six `no_std` samples still 46 of 46 equal with their runs' exit statuses
+(`bin/rust-front codegen-check`). **Runs**: 34 synthetic programs (the 28 new ones are the `overflow-*` programs, the `panic-*`
+programs, `space`, `panic-explicit`, `panic-unwrap-none`) built with their own unit made of our IR and linked with the host's native std
+(`bin/rust-front run-native`) give rustc's status, stdout and stderr (thread ids normalized): 34 of 34. Three changes of the run
+path were needed for them: the unit declares the functions a constant or a reified pointer names that the unit does not define,
+and carries the named struct types the GEPs use.
+
+What was built (in `arbace/rust/back/codegen.ae`, `check.ae`, `coverage.ae`):
+
+- **LLVM's types of layouts** (`backend-type`, after `rustc_codegen_llvm/src/type_of.rs`): `Offset`, indexing and aggregates of
+  arrays now carry rustc's element type: scalars as their memory type, scalar pairs as `{ a, b }`, arrays as `[N x T]`, tuples as
+  anonymous structs with `[N x iK]` fillers for padding (K the filler's alignment), ADTs and closures (also scalar pairs of ADTs) as
+  named structs whose name is the type's text with every ADT's path its definition's (from the DefId in the forms, the local crate's
+  name and the hashes dropped, lifetimes kept as `'_`). The bodies of the named structs are not rustc's (the dump has no field types of
+  ADTs): the module defines each as a `[size x i8]` filler, enough to lower and run, and the judge's normalizer compares the *names*
+  in `getelementptr` types, not the bodies. Closes `Offset` of aggregates (465 items), arrays of non-scalars (91), constant indexes.
+- **Analysis**: the SSA analysis of locals runs over every block, not only the mono-reachable ones (rustc keeps a local assigned in
+  both arms of a constant `if` in memory); a pair local with a single variant stays a value through `downcast` projections while any
+  other downcast makes the local live in memory, a zero-sized one included.
+- **Intrinsics and rvalues**: `arith_offset`, `size_of_val` and `align_of_val` (slices, `str`, `dyn` through the vtable's slots 1 and 2,
+  sized pointees), `compare_bytes`, `copy`, `select_unpredictable`, `is_val_statically_known` (`llvm.is.constant`), `[x; N]` by
+  `memset` for zero or byte elements (the loop for the rest is not taken), `Cmp` as `llvm.ucmp`/`llvm.scmp`, the misaligned,
+  null-dereference and null-reference asserts; **`rotate_left`/`rotate_right` are calls of the fallback instance**, not expanded
+  (rustc's LLVM backend leaves them to the Rust body); unsizing of Box and other wrapped pointers of arrays; `BoxDerefTransmute`;
+  transmutes of a scalar or pair into a memory place; unions as aggregates (all fields at offset 0); scalar pairs larger than two
+  registers (an `i128` with a bool) returned through a pointer, with the temporary rustc makes for an SSA destination.
+- **Folding and flags LLVM's builder and rustc's choices need**: `trunc` and `udiv`/`sdiv`/`urem`/`srem` of constants fold; a shift
+  amount is masked in its own type and then cast (not the other way); `mul` by a size carries `nuw nsw` for `copy`, `size_of_val`
+  and `copy_nonoverlapping` and none for `write_bytes`; a constant that is all uninitialized copies nothing; a read of a zero-sized
+  field emits nothing; an enum constant held as a pair is *loaded* from its allocation while a pointer with its metadata is a value;
+  the scratch of a cast integer (`i24`) is aligned as LLVM aligns the integer (4), not by its size; the align attribute of a reference
+  is found through tuples, closure captures, spread tuples' elements and a Box inside a wrapper; `undef`, not `poison`, for the
+  missing component of a pair.
+
+What blocks the rest (the refusals of `coverage-2026-11-05b.edn`, by items): 565 differ, **234 `abi other`: the vector ABI** (hashbrown's
+SSE2 group and `simd_*`: the helper dumps `(other)` with no element type or lane count, so the layout of `__m128i` and `Simd<T, N>`
+is unknown), **31 virtual calls** (the callee carries the trait method's path but not the vtable slot), 34 transmutes between
+other layouts, 26 other unsizings, 25 `subslice` places, 23 `typed_swap_nonoverlapping` (a call of the fallback instance whose symbol
+needs v0 mangling of the type's arguments), 3 errors, 13 `catch_unwind`, a tail of constants, `tlsref`
+and float intrinsics. The 565 differing items fall in classes seen by their first differing line: block order (54: rustc creates the
+`unreachable` block of an `invoke` before the cleanup's resume block; ours creates it last), the order and sizes of allocas where
+rustc's analysis keeps a different set of locals in memory (about 70), drop glue and `Drop` of `dyn` through the vtable (48, one
+program), vtable shims' parameter attributes (17: rustc gives `align 8` to some `*mut Closure` self parameters and not to others, a
+rule not found), loads of a field versus a GEP computed first (the order operands' places are made), and a long tail of one or two.
+
+Findings worth keeping (the second day's surprises): the intrinsics `rotate_*` reach the IR as calls, `typed_swap_nonoverlapping` too
+for aggregates; at `-O0` `Ord::cmp` is `llvm.ucmp.i8.<T>`, not the select chain; the allocas of a function appear in the reverse order
+of the locals even when the sizes interleave; a local assigned once in each arm of a branch is memory, and rustc's analysis does not
+look at which arm is reachable; `ZeroSized` fields are never read; the fully-initialized enum constants are loaded; a debugging
+aid worth having: `CG_SYM=SYMBOL bin/rust-front coverage FILE` prints the two normal forms of one function.
+
 ### Estimates, revisited
 
 RF1 (6-9 days planned): the modes the table names for RF3's judging are in (`mir`, `iface`, `layout` as the layouts table, the
@@ -780,7 +837,9 @@ of the mono items of 81 programs, the collector's traversal to all 81 item sets,
 (LLVM's types of aggregates for `Offset` and arrays, vectors, virtual calls, `size_of_val`, the intrinsics' tail, the classes of the
 1,560 items that differ: about 3 to 5 days by the refusal counts), then the pieces the helper still answers: layout (`rustc_abi`, about 2,500 lines), the collector and instance
 resolution with specialization, v0 symbols (the crates' disambiguator hashes), vtable and drop glue and shim MIR from data
-(about 8 to 12 days). The estimate stands; the exactness of the judge is what the day showed.
+(about 8 to 12 days). The estimate stands; the exactness of the judge is what the day showed. After the second day (RF3b) the codegen's
+refusals that need only rustc's data are done but for the transmutes, unsizings and subslices; the two big ones need the helper to
+dump more (the vector layouts, the vtable slots), RFP13 below; the 565 differing items need about 2 more days by the classes above.
 
 ### Proposed (RF-trial)
 
@@ -799,10 +858,25 @@ resolution with specialization, v0 symbols (the crates' disambiguator hashes), v
   `rust-front-codegen-check` are seconds and light, the corpus coverage about ten minutes**; (b) the two light checks as essential
   steps now. *Recommended: (a)*.
 
+### Proposed (RF3b)
+
+- **RFP13 The helper's missing data.** Two refusal classes, 265 items (2.3 % of the corpus), wait on facts the helper does not dump:
+  the vector layouts (`(other)` with no element type or lane count: 234 items, hashbrown's SSE2 group and `simd_*`) and the vtable slot
+  of a virtual callee (31 items, more in programs that call trait objects: the drop and `Drop` of `dyn` are another 48); the fields'
+  types of ADTs would also give the named struct types rustc's bodies instead of fillers. Options: (a) **add them to `--mono-mir`
+  (`InstanceKind::Virtual(_, idx)`, `layout.backend_repr` of vectors with the element and count, field types of every ADT layout), rebuild
+  the helper once (rustc-dev from the pinned apk, a heavy build: one night's lane), regenerate the 81 dumps (`COVERAGE_REDUMP=1`, about
+  15 minutes), then port the vector ABI and the virtual calls: about 1 day**; (b) port layout (`rustc_abi`, 8 to 12 days of RF3) first,
+  which answers all three natively; (c) leave them as recorded classes and go on to the 565 differing items (about 2 days) and RF3's
+  replacement of the oracle's answers. *Recommended: (a) in the night's heavy lane, (c) meanwhile.*
+
 ## Decided (2026-11-05, the user: RFP1-RFP4)
 
 All as recommended: the codegen finished on rustc's data first, then layout, the collector with resolution and v0 symbols ported, each judged against the helper; the native-std leg now, the ci leg once the lowered std exists; `bin/rsi run --front mir` as built; no gate step until the row fits GT8's budget. The branch's early commits without trailers are squashed into commits that carry them at its merge (no rewrite of the branch).
 
+## Decided (2026-11-05, the user: RFP13)
+
+(a) with (c) meanwhile: the helper's --mono-mir extended (vector layouts, vtable slots, ADT field types), rebuilt once in a night's heavy lane, the 81 dumps regenerated, then the vector ABI and virtual calls ported; the items stay classed until then.
 ## As built: RF4-RF5 start (2026-11-05)
 
 The front half's first stages beside Tier B (RFS3 (a)), one afternoon on the branch `rust-rf4` (from `rust-rf13`; `rust-native`, the
