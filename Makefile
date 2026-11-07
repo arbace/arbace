@@ -16,6 +16,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-go-native-check \
   repr-java-check repr-java-roundtrip repr-java-text repr-java-jdk repr-java-parse-check repr-java-front-check repr-java-attr-check repr-java-nojavac-check repr-java-closure-check repr-java-platform-pack repr-java-platform-check repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test repr-cpp-host-record repr-cpp-host-check repr-cpp-pins-check repr-cpp-cxxdump-build repr-cpp-cxxdump-test repr-cpp-spec-check repr-cpp-c2j-check repr-scheme-c2j-check repr-ocaml-c2j-check repr-cpp-pp-check repr-cpp-pp-record repr-cpp-cxxdump-check repr-cpp-roundtrip repr-cpp-roundtrip-corpus repr-cpp-pp-essential repr-cpp-roundtrip-essential repr-cpp-pp-record-results repr-llvm-roundtrip cppi-lower-check cppi-lower-corpus cppi-lower-essential cpp-essential cppi-runtime-build cppi-testsuite cppi-selftest cppi-run cppi-runtime-ci cppi-record-ref cppi-check cppi-check-aot cppi-divergences cppi-divergences-aot repr-c-host-record repr-c-host-check repr-c-ccdump repr-c-check repr-c-record repr-c-parse-check repr-c-read repr-c-print repr-c-roundtrip repr-c-corpus-dedup repr-c-record-gcc repr-c-c23 ci-diagnose ci-run ci-check ci-check-aot ci-dg ci-dg-essential ci-judge-test ci-c2j-check ci-cinterp-check ci-aot-translate ci-repl-session ci-divergences ci-musl ci-runtime ci-cirun-build ci-annot ci-annotations ci-annotations-record ci-record-ref ci-synth ci-synth-check goi-annotations goi-test goi-check goi-check-aot goi-check-aot-essential goi-check-nethttp goi-check-nethttp-arbace goi-divergences goi-divergences-aot java-check java-check-compiled java-check-compiled-essential java-check-print java-check-nread java-check-diagnostics java-check-essential java-check-ref alpine-check alpine-test clean \
   java-check-oracle java-check-rejudge java-verdicts \
+  rsi-samples rsi-lower-check rsi-lower-check-all rsi-lower-check-native-all rsi-std-build rsi-runtime-build rsi-runtime-ci rsi-record-ref rsi-check rsi-check-aot rsi-check-all rsi-divergences rsi-synthetic rsi-synthetic-check rsi-judge-test rsi-check-essential \
   suite-aot suite-aot-essential suite-divergences java-forms-verify java-forms-update reap-record-native-check \
   repr-c-gcc-tests repr-scheme-fetch repr-scheme-check repr-scheme-check-quick repr-scheme-record repr-scheme-spec repr-scheme-roundtrip si-vendor-verify si-boot si-boot-check si-test si-test-record si-check-suite si-fixpoint si-unit si-light si-test-si si-check si-check-record-ref si-srfi si-srfi-record si-srfi-aot si-aot-check si-aot-check-record si-bench si-divergences si-r7rs si-r7rs-record si-r7rs-chez si-r7rs-chez-record si-r7rs-chibi si-r7rs-chibi-record si-r7rs-chibi-test si-r7rs-chibi-test-record si-chibi-tests si-chibi-tests-record si-ecraven si-ecraven-record si-ecraven-chez si-ecraven-chez-record si-ecraven-chibi si-ecraven-chibi-record si-mats si-mats-record si-corpora-files si-corpora-divergences repr-ocaml-ocdump repr-ocaml-spec-check repr-ocaml-samples repr-ocaml-corpus repr-ocaml-corpus-count repr-ocaml-roundtrip repr-ocaml-roundtrip-all repr-ocaml-check repr-ocaml-text repr-ocaml-cmi repr-ocaml-dumps oi-stdlib oi-build oi-check oi-divergences oi-record-ref oi-repl oi-aot-lib oi-check-aot oi-divergences-aot oi-suite-check oi-suite-check-aot oi-suite-divergences oi-suite-expect oi-suite-rollup oi-suite-record-ref repr-ocaml-opam repr-python-fetch repr-python-pins repr-python-count repr-python-spec-check repr-python-samples repr-python-roundtrip repr-python-record repr-python-check repr-python-text repr-python-text-record pyi-gen pyi-gen-check pyi-record-ref pyi-record-ref-check pyi-scope-check pyi-compile-check pyi-run pyi-repl pyi-repl-check pyi-lib-test pyi-lib-test-oracle pyi-runtime-print pyi-runtime-read pyi-runtime-vet pyi-runtime-check \
   repr-scheme repr-scheme-roundtrip-record si-essential si-aot-essential scheme-read-essential scheme-essential \
@@ -287,6 +288,38 @@ repr-cpp-pp-record-results: ## the token check's results, test/repr/cpp/pp-check
 	bin/repr-cpp pp-check --corpus cpp-lexical --record-results && bin/repr-cpp pp-check --corpus gxx-dg --sample 10 --record-results && bin/repr-cpp pp-check --corpus libstdcxx-headers --sample 8 --record-results
 repr-llvm-roundtrip: ## repr/llvm's round trip over a list of IR files: forms, .ae text, print, forms again, clang -c's objects equal (bin/repr-llvm roundtrip LIST WORK; LIST=... WORK=...)
 	bin/repr-llvm roundtrip $(LIST) $(WORK)
+rsi-samples: ## Rust's eval, RE3: rsi's samples (test/rust/eval/) lowered with std's lowered IR and run as the originals (bin/rsi lower-check on bin/rsi list --set samples)
+	bin/rsi list --set samples -o .tmp/rsi/samples.tsv && bin/rsi lower-check .tmp/rsi/samples.tsv .tmp/rsi/samples
+rsi-lower-check: ## Rust's eval, RE3: every 10th UI program built from its lowered IR with the lowered std (gcc -O0) and run as the original, against test/rust/divergences-lower.edn (bin/rsi lower-check)
+	bin/rsi list --sample 10 -o .tmp/rsi/sample10.tsv && bin/rsi lower-check .tmp/rsi/sample10.tsv .tmp/rsi/sample10
+rsi-lower-check-all: ## the same over all 3,718 UI programs, recorded into test/rust/lower-std-results.edn (a night's run; bin/rsi lower-check --record)
+	bin/rsi list -o .tmp/rsi/all.tsv && bin/rsi lower-check .tmp/rsi/all.tsv .tmp/rsi/all --record
+rsi-lower-check-native-all: ## RE2's native-std leg over all 3,718 UI programs, recorded into test/rust/lower-results.edn (bin/rsi lower-check --leg native --record)
+	bin/rsi list -o .tmp/rsi/all.tsv && bin/rsi lower-check .tmp/rsi/all.tsv .tmp/rsi/all-native --leg native --record
+rsi-std-build: ## std's sysroot built from the pinned rust-src (library/'s workspace) with its IR, against test/rust/runtime/ir.sha256 (bin/rsi std-build)
+	bin/rsi std-build
+rsi-runtime-build: ## RE3: std's IR lowered, compiled by gcc -O0 and archived by crate with the pending-flag layer (bin/rsi runtime-build)
+	bin/rsi runtime-build
+rsi-runtime-ci: ## RE4: std's lowered units and the pending-flag layer read by repr/c as ci's library, with ci's ports (bin/rsi runtime-ci)
+	bin/rsi runtime-ci
+rsi-record-ref: ## RE4: the judge's runs (rustc 1.99.1 -O0 against std's build) of the samples and every 10th UI program recorded into test/rust/ref-rustc-1.99.1.edn (bin/rsi record-ref)
+	bin/rsi record-ref --sample 10
+rsi-check: ## RE4: the samples and every 10th UI program run on ci against the judge's runs, every non-pass in a class of test/rust/divergences.edn (bin/rsi check)
+	bin/rsi check --sample 10
+rsi-check-aot: ## RE4: the same compiled by cf2g (bin/rsi check --aot)
+	bin/rsi check --aot --sample 10
+rsi-check-all: ## RE4: every UI program on ci, recorded into test/rust/check-linux-amd64.edn with its times (a night's run; bin/rsi record-ref then bin/rsi check --record)
+	bin/rsi record-ref && bin/rsi check --record
+rsi-synthetic: ## RE5: the synthetic corpus's programs (test/rust/synthetic/) generated from test/rust/synthetic.edn and its templates (bin/rsi synthetic generate)
+	bin/rsi synthetic generate
+rsi-synthetic-check: ## RE5: the committed synthetic programs equal what the table and templates give, and their expected statuses the judge's runs (bin/rsi synthetic check, ref)
+	bin/rsi synthetic check && bin/rsi synthetic ref
+rsi-judge-test: ## RE5: the check's judge without ci: the judge's own runs pass, a changed output fails, the controls differ (bin/rsi judge-test)
+	bin/rsi judge-test
+rsi-check-essential: ## RE5: the essential programs (test/rust/essential.txt) on ci against the judge's runs (bin/rsi check --essential)
+	bin/rsi check --essential
+rsi-divergences: ## RE4: the recorded check's non-passes by class (bin/rsi divergences [--aot])
+	bin/rsi divergences
 cppi-lower-check: ## C++'s lowering over a list: the IR, its LLVM forms' round trip, the lowered C compiled by gcc -O0, linked with the lowered runtime and run as the original, against test/cpp/lower-known.edn (bin/cppi lower-check LIST WORK; LIST=... WORK=...)
 	bin/cppi lower-check $(LIST) $(WORK)
 cppi-lower-corpus: ## C++'s lowering check over a recorded list of test/cpp/lower-results.edn by its key: samples, libstdcxx-every-15th (bin/cppi lower-corpus KEY; KEY=...)
