@@ -1158,6 +1158,18 @@ real one on the other is N1's (the survey's E6 met three).
 | text | the printed file against the original, byte for byte | none |
 | lowered, code (RR6) | each crate built from the originals and from the printed files by the helper as rustc (`rsdump rustc`, §12.9): its HIR and MIR written after analysis, then its rlib or object | the positions rustc writes in the texts (`FILE:L1:C1: L2:C2`) kept to their start lines in `:lines`, removed in the pretty layout; the objects built with `-Zlocation-detail` as the layout keeps positions; in `:full` nothing |
 
+Since rust-90 (2026-11-07) the tree level's texts are the native reader's: `arbace.repr.rust.native tree`
+writes `rsdump tree`'s `.tree` and `.lines` from the native tree (N1-N4 as the helper's transcoder applies them,
+byte for byte the helper's on `native-check`'s 68 files: `bin/repr-rust native-check --trees`), and the round trip
+reads the originals and the printed files with the native reader by default (`--reader helper`: rustc's parser,
+the oracle tier's, as are the interface, behaviour and code levels, which run rustdoc and rustc). The judge is then
+the test's own verdict (the user, 2026-11-07): the printed file's trees and lines equal the original's, mode
+`:full`'s text byte for byte. Its negative controls (`test/rust/roundtrip-controls.edn`, GTS81 (a); `bin/repr-rust
+controls`, and every round trip's last step): a subject file and a candidate made from it (an operator, a literal, a
+blank line, a trailing space, a doc comment's words changed, or another file in its place), judged by the tree
+level's judge (`compare-file` over the native trees and lines) or the text level's (`compare-text-file`), must
+differ, the subject against itself equal.
+
 rustc's own pretty printer (`-Zunpretty=normal`) is a ready candidate maker for proving the
 checker, as `gocmp reprint` proved repr/go's oracle: it gives the same tree for 1,069 of std's 1,074
 files under N1-N4 (survey §4.3, E6), the 5 others being `final fn` (which it drops) and dummy spans.

@@ -17,8 +17,16 @@ pin `tools/rsdump/RUSTC_VERSION`, `58cf8f9c3`) and the sources of Alpine's `rust
     bin/repr-rust read --reader native [--full] --corpus [CORPUS]
     bin/repr-rust native-check [--full] [--edition E] [FILE...]     (make repr-rust-native-check)
 
-`REPR_RUST_READER=native` makes it the default reader of `dump` and `read`; neither needs rustc
-then (a corpus's files come from `bin/repr-rust corpus fetch`). A native dump's `:helper` is
+Since rust-90 (2026-11-07) the native reader is the default of `dump`, `read` and `roundtrip`
+(`--reader helper` or `REPR_RUST_READER=helper`: the helper, the oracle); none of them needs rustc
+then (a corpus's files come from `bin/repr-rust corpus fetch`), and the round trip's tree level
+compares the native reader's trees: `arbace.repr.rust.native tree --pin PIN [--expr] -o DIR --edition
+E FILE...` writes `rsdump tree`'s `.tree` and `.lines` (tools/rsdump's transcoder's `Mode::Tree` and
+`Mode::Lines`: spans as `_`, identifiers without their syntax contexts, token spacing as `_`, one
+compound a line indented by its depth; each span's start line with its node and field) from the
+native tree, its spans marked while it is written (`*mark-spans*`) so that a byte string's vector of
+integers is not taken for one. `bin/repr-rust native-check --trees` compares them with the helper's
+byte for byte: 68 of 68 files equal (2026-11-07). A native dump's `:helper` is
 `native:sha256:H`, H the digest of the reader's sources and the pin. `native-check` without files
 runs `test/rust/native-check.txt`: the samples of `test/rust/sample/` at their editions (the
 expression file of `include!` with `--expr`) and 60 files of core and std.

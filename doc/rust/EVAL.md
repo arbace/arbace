@@ -367,3 +367,39 @@ signal (`crt.DieBy`: its action back to `SIG_DFL`, no core file, `kill` of itsel
 nothing (`synthetic/trap.rs`'s status was rustc's, its standard error not). A child (the program run again by `Sys.Self`)
 gets `--quiet-faults` as well: no fault line, so its parent reads its standard error as the original's parent does
 (`abi/segfault-no-out-of-stack.rs` prints its child's).
+
+## 13. No toolchain at the check (rust-90)
+
+Built 2026-11-07 (branch `rust-90`; doc/rust/RUST-EVAL-SURVEY.md, "As built: rust-90"). `bin/rsi check` runs no rustc, clang,
+gcc or cc: what the toolchains make is made once by hand (the oracle tier) and pinned.
+
+- **The programs' IR from packs** (`RSI_IR=pack`, the default; `RSI_IR=rustc`: the IR made afresh by the oracle as before).
+  `bin/rsi ir-pack [--corpus C] [--sample N] [--only LIST]` builds each program's IR as the check's `ir1` does (`wrap-ir`,
+  `link-ir`) and packs `KEY/x.ll`, `shim.ll`, `ir.status` (and `x.refused`, `fat-lto`, rustc's `ir.log` of a program it does
+  not build, its paths written `${root}`, `${src}`) into a deterministic tar.xz (sorted, owner 0, one mtime, `xz -9e -T1`):
+  `test/rust/ir/samples.tar.xz` (6 programs, 441 KiB) and `synthetic.tar.xz` (67, 961 KiB), committed; the UI corpus's in
+  `.tmp/rsi/ir-packs/ui.tar.xz` (the checkout's, else the main checkout's: about 18 MB for the 3,718 programs, the every-40th's
+  452 KiB). Every file is pinned by `test/rust/ir/CORPUS.sha256`, checked when the check opens the pack (`sha256sum -c`). The
+  shim's `; ModuleID` comment names the bitcode file alone (`link-ir`), so two packs made in two places are byte for byte equal
+  (checked: the samples' and the synthetic corpus's packs made twice, the same SHA-256).
+- **The ci leg's library keyed without the C toolchains.** `lowered_key` (the lowering's namespaces, repr/c's reader alone:
+  `arbace/repr/c.ae` and its `convert`, `host`, `layout`, `lex`, `parse`, `pedantic`, `pp`, `print`, `tree`, not its checks;
+  the layer, std's pins, the tools' host) keys std's lowered C, `runtime-ci` reads it when `lowered.key` is current and
+  otherwise makes it with `runtime-build --ci` (the lowering alone, from std's pinned IR without its sysroot: no clang
+  object comparison, no gcc); the full key (`runtime_key`, with gcc's and clang's versions) stays the gcc leg's. `bin/rsi
+  runtime-keys` prints the three digests; a runtime made elsewhere at the same sources is current when its `lowered.key`,
+  `ci/key` and `ci/ports/key` are those (rust-90's copy of rust-re6's runtime was re-keyed so, its old key verified first).
+- **std's IR** stays the oracle's: `bin/rsi std-build` (Cargo and rustc on the pinned `rust-src`, clang for the bitcode's
+  text), pinned by `test/rust/runtime/ir.sha256` since RE3; the check reads `$RSI_STD_DIR/ir` at that pin.
+- **The tests' own verdicts** (the user, 2026-11-07). A UI program is judged as compiletest judges it (rustc 1.99.1's
+  `src/tools/compiletest/src/runtest/ui.rs`): its run's result is Pass when it exits 0, Fail when its code is 1 to 127, else
+  Crash (rsi's status 128+N for a signal, or a timeout); `run-pass` must Pass, `run-fail` Fail (x86_64-linux unwinds),
+  `run-crash` Crash. compiletest compares a run's output only under `check-run-results` and searches it under
+  `error-pattern`, `regex-error-pattern` and `forbid-output` (directives `//@ NAME` and `//@[REV] NAME` as its parser reads
+  them): those programs, rsi's samples and the synthetic corpus keep rustc's recorded run (`test/rust/ref-rustc-1.99.1.edn`)
+  as their reference. `RSI_JUDGE=rustc`: every program against rustc's run, as before. Of the 3,718 UI programs, **3,409**
+  have a verdict of their own (3,380 run-pass, 9 run-fail, 20 run-crash) and 309 compare their output; rustc's recorded runs
+  meet 277 of the 281 own verdicts they cover (`bin/rsi own-verdicts`, from the records alone: the four others are run-program's
+  harness, where rustc's own run fails too: `compiletest-self-test/trim-env-name.rs#set`, `#unset`, `process/process-spawn-with-
+  unicode-params.rs`, `std/stdio-from.rs`). `bin/rsi judge-test` adds the own-verdict judge's twelve cases (each mode against each
+  status class, the wrong ones failing).
