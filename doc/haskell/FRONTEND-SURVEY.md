@@ -1354,3 +1354,18 @@ corpus (writes the native known files' first entries, if any differ), `bin/hsi c
   of its own: hsi's forms merged as Go (`git merge-file` per printed file, as `haskell-integrate` did), eval9's HE9 kept, this
   line's stubs and packs kept; about half a day; check-hsi 806 of 910 on that line. (b) Rebase HE9's commits alone (allocation
   counters, RTS flags) onto this line. *Recommended: (b)*: HE9 is self-contained, the C support of both lines is the same design.
+
+## Decided (the user, 2026-11-07: HFS-I1 to HFS-I4)
+
+- **HFS-I1 (a):** `bin/hsi check --front native`, the front end's STG for the programs it compiles, the pack's for the others, each
+  result naming its source; the default once a night's run shows no pass lost (branch `hfs-i1`, after `res34`'s RES34).
+- **HFS-I2 (a):** the configure products and the package database derived (data first), hsc2hs's C program on ci after.
+- **HFS-I3 (b):** the interface level stays in the read cell, recorded at each tag's oracle run; (c) as the front end grows.
+- **HFS-I4 (b):** HE9's commits (allocation counters, RTS flags) rebased alone onto this line; `haskell-eval9` not merged.
+
+### As merged: batch 2 (2026-11-07, branch `batch2`)
+
+haskell-90 merged on batch 2 (no commit containing 53794ed6; its CPP the clean-room one). The packs `haskell-native-inputs-ghc-9.14.1`
+and the re-recorded `haskell-stg-progs` copied into the main checkout's `.tmp/oracle-packs/` (`bin/oracle-records pins`: the seven
+Haskell packs in the store). `test/reap/main.ae`'s one `:corpus-known` reader counts `:hs-modules` beside Rust's units; the facts moved
+into `:stages`, ci's C cases 0.5 now that batch 1 derives musl without gcc. Scores 96.3 / 100 / 74.9 (batch 2 before: 0 / 8.3 / 20).

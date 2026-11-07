@@ -2647,3 +2647,12 @@ Linux-specific half is a file of its own, which the box's build does not compile
 merge `bin/jrt build && bin/jrt test` must still pass (about 15 s with the test data made; the first run in a
 fresh worktree builds the frozen jar). Nothing else of the nights' lists changes; F11's smoke (step 4) and F8's
 (step 7) are the first run of these natives in a program.
+
+## Decided (the user, 2026-11-07: JCS162-JCS167)
+
+The proposals are F10a's (`java-complete`, merged into `batch1` at 23d640f54, after batch 2's base 0edacad6: their text reaches this
+file when batch 1's later head and batch 2 meet on `next`). Decided: **JCS162-JCS164 (a)** (jrt's Thread gains a blocker, interrupts
+wake channels and selectors; F10b's DatagramChannel then the asynchronous channels; UNIX domain sockets with F9); **JCS165-JCS166 (a)**
+(`bin/jrt-convert check-javac` as a light essential gate step; the overlays' derivations as Arbace, `bin/jrt-convert derive --check`);
+**JCS167 (a)**: serialization ported (ObjectOutputStream, ObjectInputStream, ObjectStreamClass over jrt's reflection, j2g's SerialNew;
+clojure-cdr's staged port), its tests deferred again then regained, toward 90% strict.

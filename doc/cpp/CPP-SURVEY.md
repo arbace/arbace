@@ -3173,3 +3173,20 @@ again. The clang judge stays the oracle tier's: `bin/repr-cpp roundtrip-corpus K
 - **CP243: the round trip's default.** (a) `--judge own` the default once the night's records exist (the steps then on `[:stage0]`,
   `--judge clang` by hand at a tag, the oracle tier). (b) Both judges in the gate, clang's on `:cxx` beside. **Recommended: (a)**, the
   decided rule's.
+
+## Decided (the user, 2026-11-07: CP240, CP241, CP243)
+
+- **CP240 (a), (b), (c) in that order:** (a) oracle-records-cpp2's IR records of the programs and the runtime merged (eval and AOT 0.5);
+  then (b) our route as the runs' default (`CPPI_ROUTE=ours`, clang's IR where the code generator refuses); then (c) the runtime by our
+  route too (G5c). (a) and (b) on branch `cpp-indep` (from cpp-90).
+- **CP241 (b):** the headers from the pinned gcc-15.2.0 tarball, the seven derived files by the Makefile's rules and configure's answers
+  from the target description; the installed tree the oracle (branch `cpp-indep`).
+- **CP243 (a):** `--judge own` the round trip's default once the night's own records exist (`roundtrip-results/own/KEY.edn`); the steps
+  then on `[:stage0]`, `--judge clang` by hand at a tag.
+- CP242 not decided (recommended (a) until CX12).
+
+### As merged: batch 2 (2026-11-07, branch `batch2`)
+
+cpp-90 merged on batch 2 (its batch-1 merge 0edacad6 already in); `arbace/cpp/lower.ae` is batch2-lower's integration with cpp-90's
+x86_fp80 decimal literal in it. Scores 75.4 / 100 / 31.4 (batch 2 before: 75.4 / 91.7 / 20). The C++ runtime's IR pin is re-recorded on
+clang 23.1.5 by the night's step 0 on batch1/next (batch 2's proposal 1 (a), decided), not here.

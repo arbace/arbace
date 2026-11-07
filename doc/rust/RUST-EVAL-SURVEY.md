@@ -1231,3 +1231,33 @@ What is left: the AOT cell (RES55), independence above 80% (RES54), the whole co
   about four hours, 6 GiB) is outside any budget. Options: (a) **the library kept by its key in the main checkout's `.tmp/rsi/runtime`
   (as the gate's executables), the steps reading it (`RSI_RUNTIME_DIR`), its first build by hand**; (b) `:heavy` steps that build it
   when missing. *Recommended: (a)*, with RES52's per-unit read.
+
+### Decided (the user, 2026-11-07: RES54-RES60)
+
+- **RES54 (a):** Rust's independence accepted at its 80% ceiling until RF12 (Tier S: std built from source); the front end goes on in
+  the surveys' order (RFP20, RFP15, RF10, RF11, RF12). Eval and AOT stay 0.5 while any case consumes std's rustc-made IR.
+- **RES55 (a):** RES34 first (std's fragments translated once per key into a Go package the programs call), then `check --aot` over
+  the samples, the synthetic corpus and the UI corpus's every 40th, recorded: the AOT cell after RES34, not before (branch `res34`).
+- **RES56-RES60 as recommended:** RES56 (a) the UI pack in the main checkout's `.tmp/rsi/ir-packs/`, pinned by `test/rust/ir/ui.sha256`;
+  RES57 (a) batch 1's derived musl taken at the merge (done on batch 2: Rust's eval fact rests on it); RES58 (a) a class `harness` for
+  the four programs when the night fails them, (b) with RE7; RES59 (a) the night's `bin/repr-rust roundtrip --text all` confirms the known
+  files under the native reader; RES60 (a) std's lowered library kept by its key in the main checkout's `.tmp/rsi/runtime`, its first
+  build by hand.
+
+### As merged: batch 2 (2026-11-07, branch `batch2`)
+
+rust-90 merged after batch 2's Rust lines (rust-native ... rust-row, rust-re6). Two moves: rust-90's round-trip controls (an edited
+subject each) are `test/rust/roundtrip-edit-controls.edn` (GT9's crossed pairs, crop-controls' 7bf1d1e4, keep
+`test/rust/roundtrip-controls.edn`; both are read by `bin/repr-rust roundtrip`), their switch `REPR_RUST_EDIT_CONTROLS=0` (GT9's
+`REPR_RUST_CONTROLS` names its file). The native reader's `tree` verb and errors2's `errors` verb are both kept; `file-trees` rejects a
+file whose parse recovered from an error (errors2's diagnostics), as `dump-forms` does. The gate: rust-90's six steps replace GT9's four of
+the same names; GT9's rustc levels (`rust-iface`, `rust-behaviour`, `rust-native-essential`, `rust-native`) stay until the planner has
+`:phase :oracle`; `rsi-aot` reads the packs (`:clean-only`). Scores 75.0 / 95.8 / 80.0 (batch 2 before: 75.0 / 95.8 / 20).
+
+### Proposed (batch 2: RES61)
+
+- **RES61 rsi-essential's memory.** rust-90 measured the builder's peak at 3.8 GB (`RSI_BATCH=3`), so the step declares 4 GiB, above
+  the essential tier's 3 GiB (GTS215, `gate.crops check`); at the merge it runs in `--full`, first in the chain `rust-full`. (a) Measure
+  `RSI_BATCH=1` (a fresh builder per program) at night; back to the essential tier at `:mem-gib 3` if its peak is under 2.8 GB; cost a
+  night's 35 minutes. (b) Leave it in `--full` (the essential gate then runs no rsi program, only `rsi-judge-test`). (c) A smaller
+  essential list (5 programs). *Recommended: (a)*, (c) if (a) does not fit.
