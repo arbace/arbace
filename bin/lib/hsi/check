@@ -30,11 +30,26 @@
 #                       the plan kept; by hand, a commit of its own naming :ghc's identity
 #   --verify-progs [--sample N]   N programs of the plan (default all, evenly spread) dumped again by the helper and compared with the
 #                       pack file for file (ORS6 (a)'s verdict) and the crossed pair
+# HFS-I1 (a) (doc/haskell/FRONTEND-SURVEY.md, "As built: HFS-I1 (a)"): the program's STG from Arbace's native front end.
+#   --front native|ghc  (HSI_FRONT; default ghc, default_front below) native: each program the front end can take (a single module:
+#                       every module its main file imports is a library's, in the interfaces pack; no C of its own, no foreign export,
+#                       wrapper or capi import) compiled by arbace.repr.haskell.front (native read, rename, elaborate, desugar, the
+#                       simple optimiser, CorePrep, CoreToStg, Unarise) over the pack haskell-ifaces-ghc-9.14.1 and the libraries' STG,
+#                       with its all.T -X flags (none: GHC2021, as GHC compiled the pack's STG), in HSI_FRONT_SHARDS processes (default 4,
+#                       Go's heap near HSI_FRONT_MEM, default 1536MiB), and run from that STG; the others, and a program the front end
+#                       stops, from haskell-stg-progs as before. Each result names its source: :stg :native, or :stg :ghc with :front
+#                       the stage that stopped the front end (:ineligible: not tried). Work .tmp/hsi/check-native (check-aot-native);
+#                       --record writes test/haskell/check-hsi-native.edn (-aot-native) while ghc is the default (the switch:
+#                       default_front=native, then check-hsi.edn is native's and --front ghc writes check-hsi-ghc.edn).
+#                       bin/hsi compare-front compares the two records program by program.
+#   --record-ifaces     with --front native, live (GHC): the helper's iface closure of every module the plan's eligible programs import
+#                       (and Prelude), with ghc-pkg's reexports, packed into haskell-ifaces-ghc-9.14.1; by hand, the oracle tier
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
 . "$root/bin/lib/hsi/records.bash"
-corpora=samples,synthetic only="" jobs=${HSI_JOBS:-3} record="" keep="" aot="" live=${HSI_LIVE:-} dump_only="" record_progs="" verify_progs="" sample=""
+default_front=ghc
+corpora=samples,synthetic only="" jobs=${HSI_JOBS:-3} front=${HSI_FRONT:-$default_front} record_ifaces="" record="" keep="" aot="" live=${HSI_LIVE:-} dump_only="" record_progs="" verify_progs="" sample=""
 while [ $# -gt 0 ]; do
   case $1 in
     --live) live=1; shift ;;
@@ -48,9 +63,14 @@ while [ $# -gt 0 ]; do
     --record) record=1; shift ;;
     --keep) keep=1; shift ;;
     --aot) aot=1; shift ;;
-    *) echo "usage: bin/hsi check [--corpus C,...] [--only ID,...|@FILE] [--jobs N] [--record] [--keep] [--aot] [--live] [--dump-only] [--record-progs] [--verify-progs [--sample N]]" >&2; exit 2 ;;
+    --front) front=$2; shift 2 ;;
+    --record-ifaces) record_ifaces=1; shift ;;
+    *) echo "usage: bin/hsi check [--corpus C,...] [--only ID,...|@FILE] [--jobs N] [--record] [--keep] [--aot] [--front native|ghc] [--record-ifaces] [--live] [--dump-only] [--record-progs] [--verify-progs [--sample N]]" >&2; exit 2 ;;
   esac
 done
+case $front in native|ghc) ;; *) echo "hsi check: --front native or ghc, not $front" >&2; exit 2 ;; esac
+[ -z "$record_ifaces" ] || [ "$front" = native ] || { echo "hsi check: --record-ifaces goes with --front native" >&2; exit 2; }
+[ -z "$record_ifaces" ] || live=1
 pin=$(cat "$root/tools/hsdump/GHC_VERSION")
 # GHC is needed only by --live (the helper dumps the programs; HSI_LIVE=1), --dump-only, --record-progs and --verify-progs: the libraries'
 # and the programs' STG are the records' otherwise (ORS12, bin/lib/hsi/records.bash)
@@ -62,9 +82,11 @@ work=$root/.tmp/hsi/check
 # run on hsi entered compiled to Go) and run on its executable; results into .tmp/hsi/check-aot, --record into
 # test/haskell/check-hsi-aot.edn
 [ -z "$aot" ] || work=$root/.tmp/hsi/check-aot
+# a front that is not the default works apart (HFS-I1 (a)): its results beside the default's
+[ "$front" = "$default_front" ] || work=$work-$front
 rm -rf "$work"; mkdir -p "$work/res" "$work/out" "$work/run"
-hsi=""; if [ -z "$dump_only" ] && [ -z "$verify_progs" ]; then hsi=$("$root/bin/hsi" build); fi
-if [ -n "$dump_only" ] || [ -n "$verify_progs" ]; then libs=""; else libs=$(hsi_libs) || exit 1; fi
+hsi=""; if [ -z "$dump_only" ] && [ -z "$verify_progs" ] && [ -z "$record_ifaces" ]; then hsi=$("$root/bin/hsi" build); fi
+if [ -n "$dump_only" ] || [ -n "$verify_progs" ] || [ -n "$record_ifaces" ]; then libs=""; else libs=$(hsi_libs) || exit 1; fi
 helper=$root/.tmp/hsdump/hsdump
 helper_hash=$(hsr_helper_hash)
 libdir=""
@@ -74,7 +96,7 @@ if [ -z "$live" ]; then progs_pack=$(hsi_progs_dir) || exit 1; fi  # (--verify-p
 export progs_pack
 # the libraries' images (HES32 (a), HE4d): made once for the dumps as they are, every run loads them
 images=${HSI_IMAGE:-$root/.tmp/hsi/image}
-if [ "$images" != none ] && [ -z "$dump_only" ] && [ -z "$verify_progs" ]; then
+if [ "$images" != none ] && [ -z "$dump_only" ] && [ -z "$verify_progs" ] && [ -z "$record_ifaces" ]; then
   ia=(); IFS=: read -r -a dirs <<< "$libs"
   for l in "${dirs[@]}"; do [ -d "$l" ] && ia+=(--lib "$l"); done
   "$hsi" image --out "$images" "${ia[@]}" >&2 || { echo "hsi check: hsi image failed" >&2; exit 1; }
@@ -83,7 +105,7 @@ fi
 # the pack haskell-native-inputs-ghc-9.14.1's copy of them (its sysroot, as repr/haskell's native reads take it)
 if [ -n "$live" ]; then rtsinc=$(ls -d "$libdir"/../lib/*-ghc-"$pin"-*/rts-*/include 2>&1 | head -1)
 else rtsinc=$(ls -d "$("$root/bin/repr-haskell" native-libdir)"/*-ghc-"$pin"-*/rts-*/include 2>&1 | head -1); fi
-export root work hsi libs helper helper_hash libdir ref keep images aot rtsinc
+export root work hsi libs helper helper_hash libdir ref keep images aot rtsinc front
 export HSI_TIMEOUT=${HSI_TIMEOUT:-60}
 # programs that need more than ARBACE_MEM_GIB name their own cap (ID=GIB ...); none today: the deepest stacks, Loop
 # (7.3 GB of RSS) and T16846 (9.7 GB), pass under the default 16 GiB (measured alone, 2026-11-03)
@@ -140,6 +162,102 @@ if [ -n "$only" ]; then
 fi
 echo "== hsi check: $(wc -l < "$plan") programs, $jobs at a time" >&2
 
+# HFS-I1 (a): the native front end's STG of the programs it can take (--front native), before the runs
+front_eligible() { # SRC MAIN FLAGS KIND IFACES: a single module of the library's imports alone, no C, no foreign stubs
+  local src=$1 main=$2 flags=$3 kind=$4 ifs=$5 m f
+  case $kind in plain|compile_and_run|nofib) ;; *) return 1 ;; esac
+  [ "$main" != - ] && [ -f "$src/$main" ] || return 1
+  # (-fdefer-type-errors: a program GHC compiles with a type error raised at run time, in GHC's words; RULES: rewrite rules,
+  # which the front end does not apply, as GHC's -O0 does for a rule of the module's own, tcrun022)
+  if [ "$flags" != - ]; then for f in $flags; do case $f in *.c|*.o|*.cmm|*.s|*.S|-optc*|-cpp|-XCPP|-fdefer-type-errors|-fdefer-typed-holes) return 1 ;; esac; done; fi
+  ! grep -qE 'foreign +export|"wrapper"|foreign +import +capi|^ *\{-# *LANGUAGE[^#]*CPP|\{-# *OPTIONS_GHC[^#]*-fdefer-type|\{-# *RULES' "$src/$main" || return 1
+  for m in $(sed -n 's/^import *\(safe \)\?\(qualified \)\?\([A-Z][A-Za-z0-9_.]*\).*/\3/p' "$src/$main" | sort -u); do
+    # a library's module: its interface, or a package's reexport of one (GHC.Prim is ghc-internal's GHC.Internal.Prim)
+    [ -f "$ifs/$m.iface.edn" ] || grep -qF "\"$m\" " "$ifs/reexports.edn" || return 1
+  done
+}
+if [ "$front" = native ]; then
+  fw=$work/front; mkdir -p "$fw"
+  if [ -n "$record_ifaces" ]; then
+    # the oracle tier, by hand (GHC): every module the eligible programs import, the helper's closure below them, and the reexports
+    "$root/bin/repr-haskell" helper >&2
+    : > "$fw/mods"
+    while IFS=$'\037' read -r id src main flags ropts name sin kind; do
+      case $kind in plain|compile_and_run|nofib) ;; *) continue ;; esac
+      [ "$main" != - ] && [ -f "$src/$main" ] || continue
+      sed -n 's/^import *\(safe \)\?\(qualified \)\?\([A-Z][A-Za-z0-9_.]*\).*/\3/p' "$src/$main" >> "$fw/mods"
+    done < "$plan"
+    # a program's own modules are no library's: the helper finds no interface for them and goes on (its log names them)
+    rm -rf "$fw/if"; mkdir -p "$fw/if"
+    # shellcheck disable=SC2046
+    "$helper" iface --libdir "$libdir" -o "$fw/if" --ghc -XHaskell2010 --files Prelude $(sort -u "$fw/mods") > "$fw/if.log" 2>&1 || true
+    ghc-pkg field '*' exposed-modules 2> "$fw/pkg.err" | tr ',' '\n' \
+      | sed -n 's/^ *\(exposed-modules: *\)\?\([A-Z][A-Za-z0-9.]*\) from [^:]*:\([A-Z][A-Za-z0-9.]*\).*/"\2" "\3"/p' | sort -u \
+      | awk 'BEGIN{print "{"} {print " " $0} END{print "}"}' > "$fw/if/reexports.edn"
+    echo "hsi check: $(ls "$fw/if" | grep -c '\.iface\.edn$') interfaces of $(sort -u "$fw/mods" | wc -l) imported modules" >&2
+    hsi_record_ifaces "$fw/if" "bin/hsi check --front native --record-ifaces --corpus $corpora" || exit 1
+    exit 0
+  fi
+  ifaces=$(hsi_ifaces_dir) || exit 1
+  : > "$fw/plan.tsv"
+  while IFS=$'\037' read -r id src main flags ropts name sin kind; do
+    if front_eligible "$src" "$main" "$flags" "$kind" "$ifaces"; then
+      xf=""; if [ "$flags" != - ]; then for f in $flags; do case $f in -X*) xf="$xf $f" ;; esac; done; fi
+      printf '%s@%s\t%s\n' "$src/$main" "${id//\//_}" "${xf# }" >> "$fw/plan.tsv"
+    fi
+  done < "$plan"
+  # HSI_FRONT_REUSE=DIR: an earlier run's front directory (its out/ and front.*.log), the front end run only on the programs it
+  # holds no line for (a rerun of the judging after an interrupted run)
+  if [ -n "${HSI_FRONT_REUSE:-}" ]; then
+    mkdir -p "$fw/out"; cp -r "$HSI_FRONT_REUSE/out/." "$fw/out/"
+    cat "$HSI_FRONT_REUSE"/front.*.log | grep -E '^[^ ]+ (ok|read|rename|typecheck|typecheck-errors|stg|crash) ' > "$fw/front.reused.log" || true
+    awk -F'\t' 'BEGIN { while ((getline l < ARGV[2]) > 0) { split(l, w, " "); done[w[1]] = 1 }; ARGV[2] = "" }
+                 { b = $1; sub(/^.*@/, "", b) } !(b in done)' "$fw/plan.tsv" "$fw/front.reused.log" > "$fw/plan.rest"
+    echo "== hsi check: the front end's results of $(grep -c . "$fw/front.reused.log" || true) programs reused from $HSI_FRONT_REUSE" >&2
+    mv "$fw/plan.rest" "$fw/plan.tsv"
+  fi
+  n=$(grep -c . "$fw/plan.tsv" || true); k=${HSI_FRONT_SHARDS:-4}
+  [ -z "${HSI_FRONT_DRY:-}" ] || { echo "== hsi check: $n of $(wc -l < "$plan") programs eligible for the native front end ($fw/plan.tsv)" >&2; exit 0; }
+  echo "== hsi check: the native front end on $n of $(wc -l < "$plan") programs, $k processes" >&2
+  # a shard: one process for its programs; a program that gives no line for HSI_FRONT_TIMEOUT seconds (default 300: a front end
+  # that loops) is stopped, recorded "NAME timeout", and a fresh process takes the rest
+  front_shard() { # PLAN LOG
+    local pl=$1 log=$2 rest=$1.rest pid n n0 last now nm
+    : > "$log"
+    while [ -s "$pl" ]; do
+      (export GOMEMLIMIT=${HSI_FRONT_MEM:-1536MiB}; cd "$root" && exec env ARBACE_PATH=$root "$("$root/bin/hsi" exe)" -m arbace.repr.haskell.front build \
+         --ifaces "$ifaces" --libs "${libs//:/,}" -o "$fw/out" --plan "$pl") >> "$log" 2>&1 &
+      pid=$!; last=$(date +%s); n0=$(grep -cE '^[^ ]+ (ok|read|rename|typecheck|typecheck-errors|stg|crash|timeout) ' "$log" || true)
+      while kill -0 "$pid" 2>"$TMPDIR/hsi-front-kill.err"; do
+        sleep 5; now=$(date +%s)
+        n=$(grep -cE '^[^ ]+ (ok|read|rename|typecheck|typecheck-errors|stg|crash|timeout) ' "$log" || true)
+        if [ "$n" != "$n0" ]; then n0=$n; last=$now
+        elif [ $((now - last)) -gt "${HSI_FRONT_TIMEOUT:-300}" ]; then kill "$pid" 2>"$TMPDIR/hsi-front-kill.err"; break; fi
+      done
+      wait "$pid" 2>"$TMPDIR/hsi-front-kill.err" || true
+      awk -F'\t' 'BEGIN { while ((getline l < ARGV[2]) > 0) { split(l, w, " "); done[w[1]] = 1 }; ARGV[2] = "" }
+                   { b = $1; sub(/^.*@/, "", b) } !(b in done)' "$pl" "$log" > "$rest"
+      [ -s "$rest" ] || break
+      # the first program without a line stopped the process (a loop, or a crash of the process itself)
+      nm=$(head -1 "$rest" | cut -f1 | sed 's/^.*@//'); echo "$nm timeout no line in ${HSI_FRONT_TIMEOUT:-300} s, or the process ended" >> "$log"
+      tail -n +2 "$rest" > "$pl.next"; mv "$pl.next" "$pl"
+    done
+    rm -f "$rest"
+  }
+  pids=()
+  for i in $(seq 0 $((k - 1))); do
+    awk -v i="$i" -v k="$k" '(NR - 1) % k == i' "$fw/plan.tsv" > "$fw/plan.$i"
+    [ -s "$fw/plan.$i" ] || continue
+    front_shard "$fw/plan.$i" "$fw/front.$i.log" &
+    pids+=($!)
+  done
+  for p in ${pids[@]+"${pids[@]}"}; do wait "$p" || true; done
+  cat "$fw"/front.*.log 2>"$TMPDIR/hsi-front.err" | grep -E '^[^ ]+ (ok|read|rename|typecheck|typecheck-errors|stg|crash|timeout) ' | sort > "$fw/front.txt" || true
+  echo "== hsi check: the front end compiled $(grep -c '^[^ ]* ok ' "$fw/front.txt" || true) of $(grep -c . "$fw/front.txt" || true) eligible programs" >&2
+  # HSI_FRONT_DRY=1: the eligible programs listed (front/plan.tsv), the front end not run, nothing run
+  [ -z "${HSI_FRONT_DRY:-}" ] || exit 0
+fi
+
 # prog_key SRC MAIN FLAGS KIND: the program's key (what .tmp/hsi/progs/ID/KEY names and haskell-stg-progs's entries carry): its main
 # file, its flags, and for a test of several modules its directory's sources, then the helper's identity
 prog_key() {  # (a program's own C is not in it: the helper's STG is the Haskell's alone)
@@ -193,6 +311,14 @@ one() {
   key=$(prog_key "$src" "$main" "$flags" "$kind")
   prog=$root/.tmp/hsi/progs/$id/$key
   local td=0 t0 t1
+  # HFS-I1 (a): the native front end's STG when it compiled the program (its own work directory: no pack, no helper)
+  local stg=$prog/stg srcs=":stg :ghc" ob=${id//\//_} fst
+  if [ "$front" = native ]; then
+    fst=$(awk -v b="$ob" '$1 == b {print $2; exit}' "$work/front/front.txt")
+    if [ "$fst" = ok ] && [ -d "$work/front/out/stg/$ob" ]; then
+      prog=$work/front/prog/$ob; rm -rf "$prog"; mkdir -p "$prog"; stg=$work/front/out/stg/$ob; srcs=":stg :native"; touch "$prog/ok"
+    else srcs=":stg :ghc :front :${fst:-ineligible}"; fi
+  fi
   if [ ! -f "$prog/ok" ] && [ -z "$live" ]; then
     # the record's STG (ORS12): an entry whose key is not this program's is STALE, an absent one UNRECORDED (both :unrecorded, in no class)
     local man=$root/test/haskell/records/haskell-stg-progs.tsv pk
@@ -250,7 +376,7 @@ one() {
   if [ ${#cfiles[@]} -gt 0 ]; then
     if [ ! -f "$prog/c.ok" ]; then
       # the C functions the Haskell calls: those musl defines linked too (cnodes --refs)
-      grep -oh '(ffi (static "[^"]*"' "$prog"/stg/*.ae 2> "$prog/refs.err" | sed 's/.*"\([^"]*\)"$/\1/' | sort -u > "$prog/c.refs" || true
+      grep -oh '(ffi (static "[^"]*"' "$stg"/*.ae 2> "$prog/refs.err" | sed 's/.*"\([^"]*\)"$/\1/' | sort -u > "$prog/c.refs" || true
       if ! (cd "$src" && "$root/bin/hsi" cnodes "$prog/c.nodes" --refs "$prog/c.refs" ${cflags[@]+"${cflags[@]}"} -I"$rtsinc" "${cfiles[@]}") > "$prog/c.log" 2>&1; then
         local e; e=$(grep -v '^==\|^Reflection\|^$' "$prog/c.log" | tail -n 1 | cut -c1-160 | sed 's/\\/\\\\/g; s/"/\\"/g')
         echo "{:id \"$id\" :result :hsi :status 3 :message \"hsi: ci: $e\" :reason :c-build :dump $td :run 0}" > "$res"; return 0
@@ -281,7 +407,7 @@ one() {
     # arguments), then the program's executable built with them compiled (bin/hsi aot build, kept by key)
     local pw=$w.profile pcmd
     rm -rf "${pw:?}"; mkdir -p "$pw"; cp -r "$src"/. "$pw"/ 2> "$pw.cp.log" || true; rm -f "$pw.cp.log"; : > "$pw/.empty"
-    pcmd="exec $(printf '%q ' "$hsi" run "${la[@]}" --prog "$prog/stg" --name "$name" --) $ro"
+    pcmd="exec $(printf '%q ' "$hsi" run "${la[@]}" --prog "$stg" --name "$name" --) $ro"
     # (its run is hsi's: kept to compare the compiled run with, :vs-hsi, and its seconds, :hsi-run)
     local pt0 pt1; pt0=$(date +%s.%N); pst=0
     (cd "$pw" && env -i PATH=/usr/bin:/bin LANG=C.UTF-8 TZ=UTC HOME="$pw" HSI_AOT_MODULES="$prog/aot-closures.txt" \
@@ -291,12 +417,12 @@ one() {
     rm -rf "${pw:?}"
     [ -f "$prog/aot-closures.txt" ] || : > "$prog/aot-closures.txt"
     local t2 t3; t2=$(date +%s.%N)
-    exe=$(HSI_LIBS=$libs HSI_IMAGE=$images "$root/bin/lib/hsi/aot" build --prog "$prog/stg" --closures "$prog/aot-closures.txt" --out "$prog/aot" 2> "$prog/aot-build.err") || {
+    exe=$(HSI_LIBS=$libs HSI_IMAGE=$images "$root/bin/lib/hsi/aot" build --prog "$stg" --closures "$prog/aot-closures.txt" --out "$prog/aot" 2> "$prog/aot-build.err") || {
       local e; e=$(head -c 160 "$prog/aot-build.err" | tr '\n' ' ' | sed 's/\\/\\\\/g; s/"/\\"/g')
       rm -rf "$w"; echo "{:id \"$id\" :result :hsi :status 3 :message \"hsi aot: $e\" :dump $td :run 0}" > "$res"; return 0; }
     t3=$(date +%s.%N); ab=$(printf '%.2f' "$(echo "$t3 - $t2" | bc)")
   fi
-  local cmd; cmd="exec $(printf '%q ' "$exe" run "${la[@]}" --prog "$prog/stg" --name "$name" --) $ro"
+  local cmd; cmd="exec $(printf '%q ' "$exe" run "${la[@]}" --prog "$stg" --name "$name" --) $ro"
   local o=$work/out/${id//\//_} st=0
   # the memory cap (bin/lib/limit.bash's ARBACE_MEM_GIB, default 16 GiB: ulimit -v at it, GOMEMLIMIT at three
   # quarters), so a leaking program fails alone; the deep-stack programs name their own (HSI_MEM_CAPS, ID=GIB)
@@ -313,7 +439,7 @@ one() {
   so=$(sha256sum < "$o.stdout" | cut -c1-64); se=$(sha256sum < "$o.stderr" | cut -c1-64)
   rl=$(grep -F "{:id \"$id\" " "$ref" || true)
   local secs; secs=$(printf '%.2f' "$(echo "$t1 - $t0" | bc)")
-  local tm=":dump $td :run $secs"
+  local tm=":dump $td :run $secs $srcs"
   if [ -n "$aot" ]; then
     # the compiled run against hsi's (diffcheck's kind): status, stdout and stderr
     local vs=same
@@ -432,6 +558,7 @@ out=$work/results.edn
   echo ";; (test/haskell/ref-ghc914.edn): :pass (status, stdout and stderr byte for byte), :fail (:differs), :hsi (hsi stopped:"
   echo ";; its message), :no-dump (the helper's first error), :no-ref; :dump the helper's seconds (0: cached), :run hsi's wall"
   echo ";; seconds (GT8)."
+  [ "$front" != native ] || echo ";; --front native (HFS-I1 (a)): :stg :native, the program's STG from Arbace's front end (arbace.repr.haskell.front over the pack haskell-ifaces-ghc-9.14.1); :stg :ghc, from haskell-stg-progs (:front the stage that stopped the front end, :ineligible not tried). The libraries' STG is haskell-stg-libs' in both."
   [ -z "$aot" ] || echo ";; --aot (HE8): each program run on its executable from bin/hsi aot build (its modules and the library modules its run on hsi entered compiled to Go); :aot-build the build's seconds, :hsi-run the seconds of the same run on hsi (the profile's), :vs-hsi the compiled run's status, stdout and stderr against hsi's (:same, :differs)."
   echo ";; corpora: $corpora"
   cat "$work"/res/* | sort
@@ -441,6 +568,7 @@ for r in pass fail hsi skipped no-dump no-ref unrecorded dumped; do
   echo "hsi check: $r $(grep -c ":result :$r" "$out" || true)"
 done
 echo "hsi check: $total programs ($out)"
+[ "$front" != native ] || echo "hsi check: STG native $(grep '^{' "$out" | grep -c ':stg :native' || true), ghc $(grep '^{' "$out" | grep -c ':stg :ghc' || true); passes from native STG $(grep '^{' "$out" | grep ':result :pass' | grep -c ':stg :native' || true)"
 # every program that does not pass in a class of test/haskell/divergences.edn (by its :ids), with the result the class
 # records (its :results, and for :hsi its :message's text in hsi's message; review 189, F6): a classed program whose
 # result changed kind is in no class
@@ -472,6 +600,8 @@ done < <(grep '^{' "$out" | grep -v ':result :pass')
 echo "hsi check: $unclassed not passing in no class of test/haskell/divergences.edn"
 if [ -n "$record" ]; then
   rec=$root/test/haskell/check-hsi.edn; [ -z "$aot" ] || rec=$root/test/haskell/check-hsi-aot.edn
+  # a front that is not the default records apart (HFS-I1 (a): check-hsi-native.edn beside check-hsi.edn until the switch)
+  [ "$front" = "$default_front" ] || rec=${rec%.edn}-$front.edn
   # the other programs' lines kept (another corpus's, or those --only left out)
   { grep '^;;' "$out" | grep -v '^;; corpora:'
     echo ";; corpora: $(cat "$out" $([ -f "$rec" ] && echo "$rec") | grep -h "^;; corpora:" | sed 's/^;; corpora: //' | tr ',' '\n' | sort -u | grep . | paste -sd, -)"

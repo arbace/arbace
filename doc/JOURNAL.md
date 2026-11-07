@@ -432,3 +432,23 @@ the glue (51 to 77 s: 11,343 `SetCompiled` and 7,786 data runs for `exit-code.rs
 RES66. Night commands, the expected scores (completeness 75 → 100, maturity 95.8 → 100) and RES64-RES66 in
 doc/rust/RUST-EVAL-SURVEY.md, "As built: RES34 on rust-90's line". Alternatives considered: a per-crate Go package (RES34.1's
 rejection stands), and changing `aotlib.ae`'s default root (rejected: it would retranslate every unit).
+
+## 2026-11-07: HFS-I1 (a), hsi from the native front end's STG (branch `hfs-i1`, from `mac/haskell-90` 0fb4591bf)
+
+The user's decision HFS-I1 (a). `bin/hsi check --front native` (`bin/lib/hsi/check`): each program the front end can take (a single
+module of library imports, no C, CPP or foreign stubs, no deferred type errors or RULES: about 690 of 908) is compiled by
+`arbace.repr.haskell.front` (one process a shard, each program with its own `-X` flags through `front.ae`'s new `--plan`, a program
+that loops stopped after `HSI_FRONT_TIMEOUT`) and run from Arbace's STG; the rest from `haskell-stg-progs`; each result names its
+`:stg`. The interfaces are a new pack, `haskell-ifaces-ghc-9.14.1` (440 members: the helper's iface closure of the run corpora's
+imports and ghc-pkg's reexports, recorded by hand with GHC, `--record-ifaces`). `bin/hsi compare-front` judges a native run against
+the GHC-STG record program by program; the default stays ghc (`default_front`) until a night's run shows no pass lost; the switch is
+written (`.tmp/hfs-i1-switch.diff` in the worktree, and the survey).
+
+By day (light caps, 2 GiB): 100 programs, 84 from native STG, 79 pass, no pass lost but the two that fail at the light cap from GHC's
+STG too. The first slice found four lost passes; two were front-end bugs fixed by GHC's rules (exprIsConApp_maybe and a strict
+field's argument, `cgrun051`; dsStrictBind's banged pattern binding, `T11601`), two programs outside the subset (deferred type errors,
+RULES). Eval stays 0.5 a case: the libraries' STG and interfaces are GHC's; 1 needs HF9 and HF10. The libraries' pack is stale at
+this helper (haskell-90's night item): the day ran with `HSI_LIBS` its unpacked members. doc/haskell/FRONTEND-SURVEY.md, "As built:
+HFS-I1 (a)", HFS-I5-HFS-I7. Alternatives considered: run-check's one `-XHaskell2010` for every program (rejected: GHC compiled the
+pack's STG in GHC2021 with each test's flags), eligibility by trying the front end on every program (kept as the fallback: a stop
+runs from the pack).
