@@ -3895,3 +3895,52 @@ As the design said, plus what the runs showed:
   ReferenceType, Template, Interpolation, Token, itertools.chain, DirEntry, whose old method returned the class).
 - Known gap: `sorted(float.__dict__)` still lists only the dict's entries: `ownSlots` answers `in` and `[]`, not iteration.
   tp_name in "not callable" and setattr's messages stays the bare name (`'TypeVar' object is not callable`).
+
+## Design: 230, PEP 734's interpreters on pyi (2026-11-07, the Mac VM, queue 230)
+
+The classes `:subinterpreters` and `:interpreters`, judged by test__interpreters, test_interpreters and
+test_concurrent_futures' interpreter pool, against `Modules/_interpretersmodule.c`, `Modules/_interpqueuesmodule.c`,
+`Modules/_interpchannelsmodule.c`, `Python/crossinterp.c` and `Lib/concurrent/interpreters` of 3.14.10. Surveyed state: the
+runtime already reaches most of an interpreter's state through `current.Interp` (the module table, builtins, importlib's
+bootstrap, codecs, atexit, locale are `*Interp` or keyed by it, and `builtinModules[name](in)` makes a module per
+interpreter). What is process-wide falls in three groups:
+
+| state | an interpreter's? | how |
+|---|---|---|
+| `Interp`: Modules, Builtins, sys, importlib's bootstrap, codecs, atexit, locale | per interpreter | already; a new `Interp` fills them lazily at its first import, so `create()` costs a few dicts |
+| id, whence, config, id refcount, the thread running `__main__`, the XI registry of heap types | per interpreter | new fields of `Interp` |
+| the threads' count, `_shutdown`'s handles | per interpreter | filtered by `t.Interp` (cold paths) |
+| monitoring's tools and `monEvents`, gc.garbage and the debug flags | per interpreter, as CPython's | the "active interpreter's registers": package variables swapped when the running thread's interpreter changes (`gil.take` and a session's enter and exit), so the hot path keeps its one load |
+| finalizers | an object's `__del__` and weakref callback run in the interpreter that tracked it | `finTrack` records `current.Interp`; a drain that meets another interpreter's item enters it for the call; a destroyed interpreter's items are dropped |
+| the GIL, `evalBreaker`, `current` | shared | see below |
+| the intern table, `identities`, small ints, the singletons, code objects | shared | immutable or identity bookkeeping, under the GIL |
+| built-in types, and the exception types a module makes once | shared | static types as in CPython (whose per-interpreter part, `tp_subclasses` and the like, is a leak recorded below) |
+
+**One GIL.** PEP 684's per-interpreter GIL is not built: `typeEpoch`, the inline caches in shared `Code`s, the identity map, the
+finalizer queue and `current` itself are unlocked package state, and locking them or passing a per-interpreter
+context through every operation is exactly what the single-interpreter path must not pay for. An `isolated` interpreter
+reports `gil='own'` as data (its config) and is isolated in everything but parallelism; a thread blocked in
+`allowThreads` lets the others run, as threads do. This is a DECISION for the user.
+
+**Switching.** CPython's session is `_PyXI_Enter`/`_PyXI_Exit`: on the calling thread a new `*Thread` bound to the target
+interpreter takes over `current` (and the GIL's holder), with the caller's ident (one OS thread, two thread states), and
+becomes `in.Main` for the session (`_PyInterpreterState_SetRunningMain`: a second session is "interpreter already
+running"). `isMainThread` asks for the main interpreter too: signals stay there. Single-interpreter programs never run
+this code: nothing is added to the eval loop, the compiled loop or the call path. The cost measured (210's method) is the
+`gil.take` comparison and `finTrack`'s pointer.
+
+**Cross-interpreter data.** `_PyXIData_t` as a Go value: the owner's id and a `new_object` closure, the builtin getters
+(None, bool, int within ssize_t, float, str, bytes, tuple with its fallback) by exact type, `memoryview` over the shared
+buffer, per-interpreter registered heap types (`Queue`, channel ends), the fallbacks `_PyFunction_GetXIData` (the stateless check
+ported on the IR's names; the code shared, as marshal's copy would be equal) and `_PyPickle_GetXIData` with
+`_PyPickle_Loads`' fake `__main__`. Exceptions cross as `_PyXI_excinfo` (type's names, message, errdisplay by
+`traceback.TracebackException`), `types.SimpleNamespace` on the caller's side. Queues and channels are process-wide tables
+under the GIL holding xidata, their items bound to the interpreter that put them, unbound at its end by the op the
+queue was given.
+
+**End.** `Py_EndInterpreter`: `threading._shutdown`, atexit's functions, the streams flushed, the interpreter marked dead and
+out of the table, its items unbound. Objects still alive are left to Go's collector (a module's globals are not torn down,
+as pyi's main interpreter does not either).
+
+Not built, by design: extension-module isolation checks beyond `_testsinglephase`-less pyi (every built-in module of pyi
+is per-interpreter safe or shares a read-only table), `_testinternalcapi`'s entry points (tests needing them skip).
