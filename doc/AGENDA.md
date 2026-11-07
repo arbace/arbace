@@ -152,6 +152,80 @@ fragments read SC233's and OC161's records by an `:id-re` of one group, GTS213 (
    (a) A batch 1b day for them after tonight's gate; (b) each with its crop's later batch. *Recommended: (a) for the four
    on batch 1's branches (they extend its rows), (b) for the three others.*
 
+### Decided (the user, 2026-11-07)
+
+- Proposal 1 (tonight's fit): moot. The night shift is nominally 12 hours (19:00-07:00), overflow into the morning allowed
+  to 12:00; tonight runs the whole keyed `bin/gate --full` after the essential gate.
+- Proposal 2: Python's deferred parts at the re-seed window W (PYS18 (a)), the planner's `:slice-re` with GTS240, the python
+  fragment after Python's records night: (a).
+- Proposal 3: `cpp-aot-essential` stays out of the essential tier; measured tonight at `CPPI_THREADS=1`, added if it fits
+  3 GiB.
+- Proposals 4 and 5: all seven 2026-11-06 day branches into batch 1 today, so that one rekey night carries them:
+  `cppi-deferred`, `ocaml-libs4`, `scheme-smr7`, `java-jc9c`, `clojure-cdr`, `goi-escape`, `c-deferred`.
+
+### Batch 1, second part (the main session's `go-controls`, then the seven, 2026-11-07)
+
+On `f7696201` (the main session's merge of `go-controls`: Go's controls, Clojure and Go above 90% on all three), one merge
+commit each, at their heads: `cppi-deferred` 948a17e7 (clean), `ocaml-libs4` 628555d4 (Makefile), `scheme-smr7` 9b672f2f
+(`steps.edn`: GT9's Scheme steps kept, smr7's one change applied: `si-check` without `:chez`), `java-jc9c` e92a1c8e (clean),
+`clojure-cdr` 67adb0ff (clean), `goi-escape` 91d3eb40 (`bin/goi`'s flags: goi-escape's `-m`/`-d=` handling with
+go-design-review's judged `-race`; `test/goi/check-linux-amd64.edn` merged row by row, no row changed on both sides),
+`c-deferred` 61406468 (journal). None contains 53794ed6.
+
+- Keys (12 hex): at `f7696201` gate `30011618c1ec`, runtime `c40e01ac561c`, javac `ba31e02c1c3c`; at the end `1f886836e11e`,
+  `4cd0885457fb`, `c97e87dc55a5`. Moved by: `ocaml-libs4` (`arbace/o2j.ae`: gate, javac), `java-jc9c` (jrt, j2g, javac's world:
+  all three), `clojure-cdr` (`Compiler.ae`, jrt, j2g, `overlay/jdk`: all three), `goi-escape` (goi: gate, javac), `c-deferred`
+  (ci, crt, repr/c: all three); `cppi-deferred` and `scheme-smr7` moved none.
+- `bin/reap`: 30 of 32 cells checked, **1 problem until tonight's C++ record**: `runtime/deferred.cpp` is in g++'s reference
+  (cppi-deferred) and not yet in `test/cpp/check-linux-amd64.edn` ("the records are not written by hand", its doc). The matrix
+  was recorded with that one reference row held out for the run only, so every cell holds its records' numbers; the cells that
+  wait for the night's records stay as their branches recorded them (goi-escape's hand-written rows, ocaml-libs4's, smr7's
+  mats, clojure-cdr's suite counts), Python's eval and AOT "no check yet". `bin/crops-score --judge --strict`: 0 problems.
+- Scores (completeness / maturity / independence): Clojure 99.0 / 96.3 / 100, Java 72.6 / 100 / 90, Go 94.9 / 95.8 / 100,
+  C 95.1 / 100 / 20, C++ 75.4 / 91.7 / 20, OCaml 80.9 / 100 / 20, Scheme 98.4 / 87.5 / 80, Python 0 / 83.3 / 20, Haskell
+  0 / 8.3 / 20, Rust 0 / 8.3 / 20, LLVM IR 0 / 4.2 / 40.
+- `bin/gate --plan`: 40 steps, 34 run; `--full --plan`: 288 steps, 274 run, 8 after; about 10.3 h of measured step seconds
+  (Java 4.8, C 2.1, Go 1.7, shared 1.0, Clojure 0.7) plus the builds and the three crops' first passes (about 1.3 h): about
+  11.6 h, before the conversion below and the records after.
+
+### Tonight, in order (heavy ones under `bin/heavy-lock`; one heavy job at a time)
+
+0. Before the gate, else its builds and `j2g-edge` fail: `java-jc9c`'s variants (F2, F3, F4, F12, F13) and `clojure-cdr`'s
+   world (CDR4) name classes `jdk/forms` does not hold yet ("not mergeable before its night", JAVA-DEFERRED-TRIAGE). One
+   conversion takes every area: `REPR_JAVA_EXE=<the newest .tmp/gate-exe/javac-*/arbace-javac> REPR_JAVA_STALE_OK=1
+   bin/jrt-convert update` (heavy, the javac tool), `bin/jrt modules`, `bin/j2g-edge update` (frozen JVM), `bin/javac-vendor
+   edge`, `bin/generated-check` (the module table), commit. Then `CPPI_THREADS=2 bin/cppi check --record` and `--aot --record`
+   (samples and runtime, about 4 GB), `bin/reap --record`, `bin/crops-score --record`, commit: `bin/reap`'s one problem clears.
+1. The essential gate on `next`; `bin/gate --pins`.
+2. `bin/gate --full`, keyed (above).
+3. The records the merged branches ask for, after the gate:
+   - goi: `bin/goi check --record` whole (goi-escape's 96 rows confirmed), `bin/goi divergences`.
+   - C (c-deferred): `bin/ci check --record`, `check --aot --record`, `bin/ci annotations --only` the touched files,
+     `bin/repr-c roundtrip --record`.
+   - C++: `bin/cppi check --only test/cpp/essential-check.txt` and `--aot`; `cpp-aot-essential` measured at `CPPI_THREADS=1`
+     (added if within 3 GiB); `bin/cppi check --corpus libstdcxx --sample 25 --record` and `--aot` (about 10 GB, 50 min and
+     1.5 h); `bin/cppi record-ref --corpus gxx-dg-run` (1 h) and `check --corpus gxx-dg-run --record` (40 min); its `--aot`
+     (about 8 h) is a night of its own.
+   - OCaml (ocaml-libs4's list): `bin/oi record-ref`, `suite record-ref`, `check --record`, `suite check --record`,
+     `check --aot --record`, `suite check --aot --record`, `O2J_SHARD=8 ... --level compiled --record` both (4 to 5 h, up to
+     10.8 GB a shard), `bin/oi pins --attest`, the divergences.
+   - Scheme (smr7): `bin/si ecraven` whole (`SI_TIMEOUT=300`), `bin/si mats --record` whole.
+   - Clojure (clojure-cdr): unskip java-interop's test-dot and test-bean, the suite re-recorded on the test build, `bin/clojure-tests
+     --aot` (unskip genclass and the two), `bin/oracle check`, `bin/diffcheck`; CDR1's locale trial optional.
+   - Java (java-jc9c): the smoke programs and `bin/java-check --levels interp,compiled` on F12's and F13's areas, `--save`.
+   - Last: `bin/reap --record`, `bin/crops-score --record`.
+4. Python's amd64 records: a night of their own (as in part one).
+
+### Proposed (batch 1, second part)
+
+6. **java-jc9c without its prerequisites.** Its doc merges it "after `next` holds JC9 and JC9b" (F1 `java-jc9-jca`, F5
+   `java-jc9-logging`, `java-jc9b`, `java-jc9b-natives`: none is on main or in batch 1; PKI and TLS need F1's JCA). Merged as
+   decided, it may leave tonight's conversion or build failing, which would stop the whole night. (a) Revert its merge today
+   (`git revert -m 1 5c67e7145`) and give the JC9 line its own day and conversion night; cost: Java's F2-F4, F12, F13 wait.
+   (b) Merge the four prerequisites into batch 1 today (6, 4, 8 and 11 commits; conflicts in the triage doc, `arbace/j2g/model.ae`,
+   Java's and Clojure's classes, `cells.edn`, `DriverManager.java`, `go/arbace/jrt.ae`); cost: about an hour by day, a larger
+   conversion tonight. (c) Keep it and try step 0; on a failure revert it at night. *Recommended: (a).*
+
 ## After the tag
 
 - **The held branches, in batches into `next`** (`.tmp/tag-v2/merge-plan.md`): the crops' rows (batch 1, above), the LLVM IR line (the reader's gaps, `:full`, the verifier, the lowering of
