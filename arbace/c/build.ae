@@ -2481,6 +2481,13 @@
         (doseq [[i c] (.get by k)] (include! i c))))
     kept))
 
+;; The link's provenance (doc/rust/RUST-EVAL-SURVEY.md, "As built: RES34 (write-ahead)"): with *link-trace* bound to an atom,
+;; link-text puts in it which of the node program's lines are a fragment's item replayed ({:items {LINE [FRAG :f|:o J]}}: a code
+;; command of the fragment's Jth function candidate, an init of its Jth object) and each fragment's placeholders' numbers
+;; (:fmaps, :smaps: per fragment a vector, nil for a placeholder the link did not resolve), so that cf2g's prebuilt libraries
+;; (arbace.c.aotlib) link a unit's code translated once instead of the code commands. The text is the same, bound or not.
+(def ^:dynamic *link-trace* nil)
+
 (defn link-text
   "The node program's text (program-text's) of fragments (unit-fragment's, in link order), linked as build-program links
   units: with (entry main) or, when `libc-start`, (start ...). Throws build-program's refusals. `prune` (a set of the
@@ -2539,25 +2546,30 @@
                      (subst i (:text item))))
           defs (HashMap.)
           chosen (HashMap.)
+          tr-items (HashMap.)         ; *link-trace*'s: line -> [frag kind j]
+          tr-inits (ArrayList.)       ; [index-in-inits frag :o j]
           kept (when (seq prune) (reached frags prune roots rk))
           keep? (fn [i c] (or (nil? kept) (not (contains? prune i)) (.contains ^java.util.HashSet kept (rk i (:k c)))))]
       ;; the objects: each external one's defining declaration, allocated first, then their initializers
-      (doseq [i (range (count frags)) c (:objs (frags i)) :when (keep? i c)]
+      (doseq [i (range (count frags)) [j c] (map-indexed vector (:objs (frags i))) :when (keep? i c)]
         (let [k (rk i (:k c)) old (.get defs k) has-init (:init c)]
           (when (or (nil? old)
                     (and has-init (not (:init old)))
                     (and (not (:init old)) (:def c) (not (:def old))))
-            (.put defs k (assoc c :u i)))))
+            (.put defs k (assoc c :u i :j j)))))
       (doseq [[k c] defs]
         (when-let [x (:ex c)] (throw-ex x))
         (static-idx [:obj k] (:size c) (:align c) (:ro c)))
       (doseq [[k c] defs]
-        (when (:init c) (.add inits (replay (:u c) (:item c)))))
+        (when (:init c)
+          (let [text (replay (:u c) (:item c))]
+            (when *link-trace* (.add tr-inits [(.size inits) (:u c) :o (:j c)]))
+            (.add inits text))))
       ;; the functions: static ones always, an external one's strong definition over a weak one
-      (doseq [i (range (count frags)) c (:fcands (frags i)) :when (keep? i c)]
+      (doseq [i (range (count frags)) [j c] (map-indexed vector (:fcands (frags i))) :when (keep? i c)]
         (let [k (rk i (:k c)) old (.get chosen k)]
           (when (or (nil? old) (and (:weak old) (not (:weak c))))
-            (.put chosen k (assoc c :u i)))))
+            (.put chosen k (assoc c :u i :j j)))))
       (doseq [[k c] chosen]
         (let [i (:u c)]
           (if (:alias c)
@@ -2571,10 +2583,17 @@
                       a (ob (:e c))
                       b (ob (:te c))]
                   (.add aliases (list 'alias a b 0)))))
-            (.add out (replay i (:item c))))))
+            (let [text (replay i (:item c))]
+              ;; the line is the code's own, after the commands its replay emitted
+              (when *link-trace* (.put tr-items (.size out) [i :f (:j c)]))
+              (.add out text)))))
       (doseq [a undefined] (emit! a))
       (doseq [a aliases] (emit! a))
+      (let [base (.size out)]
+        (doseq [[k i kind j] tr-inits] (.put tr-items (+ base (long k)) [i kind j])))
       (doseq [x inits] (emit! x))
+      (when *link-trace*
+        (reset! *link-trace* {:items (into {} tr-items) :fmaps (mapv vec fmaps) :smaps (mapv vec smaps)}))
       (let [main (.get ^HashMap (:fns *p*) "main")]
         (when-not main (refuse :no-main "no main"))
         (emit! (if libc-start

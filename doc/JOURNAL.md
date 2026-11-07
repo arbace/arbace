@@ -414,3 +414,21 @@ CP241"). On `cpp-indep` from `mac/cpp-90` (4e0a8fc5b), the day's light tier.
 - **Scores** (`bin/crops-score --crop cpp`, facts in the worktree's `.tmp/independence.diff`): completeness 75.4, maturity 100,
   independence 31.4 to 54.3 (read 0.148, eval 0.5, AOT 0.5). The night re-records the packs on clang 23.1.5 by hand (the survey's
   commands) and compares the routes for CP240 (b). Proposed CP244-CP246.
+
+## 2026-11-07: RES34 on rust-90's line (branch `res34`, from `mac/rust-90` 58ca67832, `mac/rust-res34` merged)
+
+The user's decision RES55 (a): RES34 first, then Rust's AOT cell. `mac/rust-res34` (std's units translated once per key by cf2g,
+`arbace.c.aotlib`, the link's provenance `*link-trace*`) merged into rust-90's line: the Makefile's target list and the survey's
+sections conflicted, both resolved by keeping both sides; the code merged clean. RES40 (a) built in the scripts (the prebuilt cache
+the main checkout's `.tmp/ci-aot-lib`, shared by the worktrees; `CI_AOT_LIB` exported to the builder), not in `aotlib.ae`, whose source
+is in the units' key. `bin/rsi aot-lib` gained `RSI_AOT_LIB_CACHED=1` (the units whose fragments exist) and `compile-list` a line of
+the translation's parts. C's embedded set is RES34's own four files (`arbace/c/{build,cf2g,runtime,aotlib}.ae`), unchanged here; their
+merge rekeys every library's fragments (the day hard-linked rust-90's after checking fragments made at the new key byte for byte equal).
+
+Proved by day under 2 GiB a process: std's 74 linked units translated once (19,843 functions, none refused, 69 MB of Go, 28 minutes,
+1.37 GB); five synthetic programs AOT-built against them pass (2 to 5 minutes each, the builder at most 1.71 GB; Go's build 14 to 17 s
+after the first shard's 324 s), against RE4's about 1,000 s and 7 GiB a program whole. The translation is now mostly the printing of
+the glue (51 to 77 s: 11,343 `SetCompiled` and 7,786 data runs for `exit-code.rs`): RES64. `collections.rs`'s builder passed 2.3 GB:
+RES66. Night commands, the expected scores (completeness 75 → 100, maturity 95.8 → 100) and RES64-RES66 in
+doc/rust/RUST-EVAL-SURVEY.md, "As built: RES34 on rust-90's line". Alternatives considered: a per-crate Go package (RES34.1's
+rejection stands), and changing `aotlib.ae`'s default root (rejected: it would retranslate every unit).

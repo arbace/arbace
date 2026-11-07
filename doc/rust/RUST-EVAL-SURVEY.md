@@ -1000,6 +1000,161 @@ night's commands written (RE5.4).
 
 RES35-RES39, each as recommended: the synthetic corpus as a table and templates with the generated files committed; arbace/rust/ out of embed.ae and the keys (built on gt9-build's keys commit); a judge recorded against a non-pin std allowed, re-recorded at night; the coverage subset by greedy cover after the first whole run; programs printing backtrace addresses left out.
 
+## As built: RES34 (write-ahead, 2026-11-05)
+
+Branch `rust-res34` from `rust-re5` (`e573fd86`), by an agent on the main host on the day of a keyed `--full` (light tier: no gate, no
+build of Arbace, no heavy lock, every process under 2 GiB: `GOMEMLIMIT=1800MiB`, one or two threads; stage 0
+`/root/arbace/target/seed/amd64/arbace`, the checkout's sources evaluated with `ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1`).
+RES34 (a), the prerequisite of RE6: a library's lowered units translated by cf2g **once per key** into Go packages that every program's
+AOT build links, so that a program's translation and Go build cover its own code alone. Written ahead of the night's whole-std run
+(RES34.6): the day proved it on core (std's `core`, 16 codegen units) and on musl, with C and `no_std` Rust programs.
+
+### RES34.1 The design
+
+**What is translated: a library unit, one Go package each.** The unit is what ci's prebuilt runtime already caches (a musl source, one
+of std's codegen units, a lowered C++ runtime unit: arbace.c.runtime's fragment, PB.1): a unit's fragment is plain data whose items are
+node commands with placeholders (`?fL` a function, `?sL` a static) that the link replaces by the program's numbers. cf2g translates
+each item that is a code command (or an object's initializer) **with its placeholders left symbolic**, read at run time through two
+relocation tables of the unit's package (`R`, the functions' ids; `S`, the statics' indices), so the Go text depends on the unit alone.
+Rejected granularities: per crate (one package of std's 51 MB of IR: one Go compile of everything, no parallelism, any change
+translates the crate again) and per function (a package or a file per function: tens of thousands of Go packages for std, the
+import graph and the link's table per function; the fragment, the cache's unit, is per codegen unit anyway). rustc's codegen units are
+fixed by std's pin and profile (RES17 (b): 110 units at the pin), so a unit is also a stable cache entry.
+
+**The link interface.** The program's link is unchanged: `arbace.c.build/link-text` still makes the node program from the program's
+fragments and the libraries' (its text byte for byte as before: `CI_LINK_CHECK`'s comparison holds), and with `*link-trace*` bound it
+also says which of its lines are a library item replayed (`{LINE [FRAG :f|:o J]}`) and each fragment's placeholders' numbers
+(`:fmaps`, `:smaps`; nil where the link resolved none: a pruned function). `arbace.c.aotlib/program-pre` turns that into cf2g's
+`translate` argument `pre`: such a code command becomes `l.SetCompiled(ID, unitpkg.CJ)` instead of a translated function, such an init
+`unitpkg.IJ` among the program's inits, and once the program is loaded each unit's tables are bound (`unitpkg.Bind(p, R, S)`: two
+`[]int64` literals, -1 for an unresolved placeholder). The data (statics, the functions' table, natives, strings, aliases) stays node
+program text the Loader reads, as on the interpreted path, so memory is laid out as before. Calls: the program's code calls a unit's
+function directly; a unit's code calls through the program's function table (`P.Call(t, F[R[L]], args)`: the link chooses the
+definition, a program's strong definition over a library's weak one, as the C link does), except its own static functions (their
+key is the unit's alone, so the callee is always that item: a direct Go call). An item cf2g refuses stays out of the package (listed in
+the unit's manifest) and is translated with the program, as before.
+
+**Generic instantiations: nothing to do on the library side.** At `-O0` rustc monomorphizes into the program's own codegen unit every
+instance the program needs that the upstream crates did not export; with share-generics (`-O0`'s default) it calls the instances
+upstream already has, by their symbols (§7.1, P1). So an instance is either in std's units (prebuilt, linked by symbol like any
+function) or in the program's IR (translated with the program); the prebuilt library never needs an instance it did not emit. The day's
+`fmt.rs` shows both: 382 functions defined in its own IR (`sort_unstable` for `i64` and for an enum, `Debug` impls, iterator adapters,
+`core::fmt`'s generic glue) and 75 of core's declared, among them generic instances core exported (`NonNull<u128>::from_ref`).
+
+**The key, the cache's place, pruning.** A library's Go key is the units' Go format (`aot-version`), the fragments' key
+(arbace.c.runtime's `runtime-key`: the library's own key, ci's checker and builder as loaded, the target) and the sources the Go is
+made by as this process loaded them (cf2g, aotlib, repr/go's printer). The cache: `.tmp/ci-aot-lib/LIB_KEY16/PKG/{unit.go,manifest.edn}`
+(`CI_AOT_LIB`; `LIB` the fragments' directory's name: `musl`, `rsi_std_LIBKEY12`), each unit written through a temporary name when
+first needed (a program's build makes the units it lacks; `bin/ci aot-lib build`, `arbace.rust.run translate-libs` make all ahead).
+Each use marks its library's directory used; `bin/ci aot-lib prune` keeps per library the newest 3 keys and removes an older one
+unused for a day (CS272 (a)'s rule). A shard's module links the cache as `arbace/cilib` (`bin/lib/ci/check-aot`, `bin/lib/rsi/check`),
+so the import path of a unit is the same in every program and Go's build cache compiles a unit's package once per key too (the same
+file at the same path, `-trimpath`). Go's linker drops a unit's functions no program's table names.
+
+**Where it runs.** `bin/ci check --aot` (cf2g's `compile-list`: `arbace.c.runtime/link-traced`) and `bin/rsi check --aot`
+(`arbace.rust.run/compile-list`: `build-linked-traced`) link the prebuilt units by default; `CI_AOT_LIB_OFF=1` (both) or `RSI_AOT_LIB=0`
+translate the whole node program as before. The gate's C steps run stage 0's embedded ci when the env trio is off (main since
+`d86cb874`): the seed's cf2g predates RES34, so `bin/ci check --aot` takes the prebuilt units after the re-seed that embeds this cf2g
+(or with the trio); nothing breaks before it (the old compile-list never loads aotlib).
+
+### RES34.2 What was built
+
+| piece | file | what |
+|---|---|---|
+| the link's provenance | `arbace/c/build.ae` (`*link-trace*` in `link-text`) | the items' lines and the placeholders' numbers; the text unchanged |
+| a unit translated once | `arbace/c/cf2g.ae` (`translate-unit`, `*reloc*`, `ref-expr`; `translate`'s `pre`) | the unit's code items as `CJ`, its objects' initializers as `IJ`, `R`, `S`, `Bind`; a refused item left to the program; the program's `SetCompiled` of a unit's function, its direct calls into the units |
+| the cache | `arbace/c/aotlib.ae` (`arbace.c.aotlib`: `lib-key`, `unit`, `program-pre`, `translate-lib`, `c-compile`) | above (RES34.1); `c-compile OUT [--whole] PKG FILE...` the day's C driver |
+| the links | `arbace/c/runtime.ae` (`link-traced`), `arbace/rust/run.ae` (`build-linked-traced`, `translate-libs`) | musl's and the Rust libraries' traced links |
+| the AOT paths | `arbace/c/cf2g.ae`'s `compile-list` (`bin/ci check --aot`), `arbace.rust.run/compile-list` (`bin/rsi check --aot`), `bin/lib/ci/check-aot`, `bin/lib/rsi/check` | the prebuilt units by default; the module's `cilib` link |
+| verbs | `bin/ci aot-lib build\|prune`, `bin/rsi aot-lib`; Makefile `ci-aot-lib`, `rsi-aot-lib`; EVAL.md §2 | |
+
+### RES34.3 Results (the day's, light)
+
+The library for Rust: core alone (the RE3 day's std build at `/root/arbace/.tmp/rsi/std`, 103 units, not the pin's 110: `rust-src` is not
+on the host), its 16 codegen units lowered by `arbace.rust.lower lower-list --runtime` (132 s at 2 threads, 5.8 MB of C, none refused,
+nothing stubbed) and read with the layer by `arbace.rust.run read-lib` as runtime-ci reads std (730 s at one thread under 1.8 GiB, 9.4
+MB of forms) into `.tmp/res34/rt/ci/std`: the light stand-in for runtime-ci's 100-minute std. The programs: `#![no_std]` `#![no_main]`
+binaries with `-C panic=abort` against that sysroot, on core's path (`.tmp/res34/rs/`): `fmt.rs` (`core::fmt` with widths, `{:#x}`,
+`{:?}` of slices and a derived enum, `{:#?}`, f64's and f32's `Display` and `{:e}`, u128 and i128, `sort_unstable` of two types,
+iterator adapters, `str`'s chars) and `iter.rs` (ranges, `map`/`filter`/`max_by_key`, `split`, a bounds-check panic through a
+`#[panic_handler]` that formats its message: status 101). C: two programs over musl (`.tmp/res34/c/`: `printf`; `qsort`, `malloc`,
+`strcat`, `getenv`, a loop).
+
+| | translation, whole node program | translation, prebuilt units (warm) | prog.go, whole / prebuilt | units linked |
+|---|---:|---:|---:|---:|
+| C `hello.c` | 12.5 s | 1.9 s | 649 KB / 127 KB | 43 musl |
+| C `sort.c` | 17.4 s | 2.4 s | 834 KB / 165 KB | 64 musl |
+| Rust `fmt.rs` (790 KB of IR, 382 functions of its own) | 140.9 s | 35.8 s | 6.26 MB / 1.91 MB | 17 core + musl |
+| Rust `iter.rs` (312 KB of IR) | 54.5 s | 13.3 s | 2.64 MB / 0.79 MB | 17 core + musl |
+
+- **Once per key**: core's 17 units (with the layer) translated in 261 s of one thread: 2,943 functions, 12.9 MB of Go, none refused;
+  musl's units a C program links, 12 s for 43. Each a manifest beside its `unit.go`.
+- **Go**: the first shard that links core's packages compiles them (30 s for the two Rust programs, all core's units); afterwards a
+  shard's build compiles its programs alone: **3.5 s against 11.2 s** for the same two programs whole (Go's cache by content: the units'
+  files unchanged). Executables: 17.2 MB prebuilt against 18.9 MB whole (Go's linker drops a unit's functions no table names).
+- **Runs**: the prebuilt executables run as the originals: `fmt.rs` status 29 and its standard output byte for byte as rustc's `-O0`
+  build of it (native, against the same sysroot); `iter.rs` status 101, its standard output and the panic's message the same; the
+  C programs as gcc's `-O0` builds (status 0 and 3, outputs equal). The whole translations run the same.
+- **What a program's AOT build now costs**: its own lowering, read and check, the link (reading the library fragments: 73 s for
+  `fmt.rs`, 28 s for `iter.rs`, the first program of a process; RES43), its own translation and its own Go package. Before, RE4
+  measured `panics.rs` (std linked) at about 1,000 s of translation; with std's units prebuilt that part becomes the program's own code
+  (the ratio above, 3.9 to 4.1 for Rust, 6.6 to 7.3 for C, is a floor for std, whose linked units are larger than core's).
+- The link's text with `*link-trace*` bound is the same as without (the replay's order is untouched: the trace records a line after
+  its replay; checked on `sort.c`, 419 KB of node text equal); `CI_LINK_CHECK`'s comparison is not rerun here (no `bin/ci check`: the musl forms of this branch's key would be read
+  again, about 20 minutes; the night's).
+
+### RES34.4 Against the brief
+
+Designed (RES34.1: the key, the cache's place and pruning, the unit as the granularity, the link interface, the instantiations) and
+proved end to end on core's path and on musl with samples, time and size measured (RES34.3). Not done by day: the whole std (runtime-ci,
+100 minutes and 7 GiB), the UI programs' and the synthetic corpus's AOT, the C crop's essential AOT list under the prebuilt units: the
+night's (RES34.5).
+
+### RES34.5 Night commands (through `/root/arbace/.tmp/heavy`, at most 4 jobs; the checkout's `.tmp/` with std's pin build)
+
+1. RE5.4's step 1 (std at the pin, `bin/rsi runtime-build`, `/root/arbace/.tmp/heavy bin/rsi runtime-ci`), then
+   `/root/arbace/.tmp/heavy env ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1 RSI_JOBS=4 bin/rsi aot-lib`: std's, the ports',
+   compiler_builtins' and musl's units translated once (by core's rate about 10 times core's work for std's 51 MB of IR: about 45 minutes
+   of one thread, 12 to 15 at 4; to measure, with the Go's size).
+2. `/root/arbace/.tmp/heavy env ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1 bin/rsi check --aot --essential`, then
+   `... bin/rsi check --aot --corpus samples,synthetic --record` (RE6's first records), and once
+   `RSI_AOT_LIB=0 RSI_CHECK_WORK=.tmp/rsi-aot-whole ... bin/rsi check --aot --corpus samples`: the same results whole and prebuilt.
+3. C: `env ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1 bin/ci aot-lib build`, then `... CI_LINK_CHECK=1 bin/ci check --aot --only
+   test/c/essential-aot.txt` and `CI_AOT_LIB_OFF=1 CI_AOT_WORK=.tmp/ci-aot-whole ... bin/ci check --aot --only test/c/essential-aot.txt`:
+   the two `results.edn` equal, the times compared.
+
+### RES34.6 Proposals (RES40-RES45)
+
+- **RES40 The cache's place.** Options: (a) **shared by the worktrees as the gate's executables are (the main checkout's
+  `.tmp/ci-aot-lib`, `CI_AOT_LIB` set by `bin/lib/tools.bash` when unset), the key making it safe**, together with RES32 (a)'s fragments;
+  (b) per checkout, as built. *Recommended: (a)* once std's units are translated at night (13 MB of Go for core; std about 130 MB).
+- **RES41 Pruning.** Options: (a) **`bin/gate --prune` (`gate_prune`) calls `bin/ci aot-lib prune` as it trims `.tmp/ci-runtime`
+  (CS272 (a))**; (b) by hand only. *Recommended: (a)*; not done here (`gate-run.bash` is the gate's).
+- **RES42 The equality of the two translations as a check.** Options: (a) **the night's comparison (RES34.5) once, then a control in
+  `c-aot-essential` at the re-seed: one program translated whole and prebuilt, the runs equal**; (b) every AOT check twice (doubles its
+  translation); (c) none. *Recommended: (a).*
+- **RES43 The link's remaining cost.** A program's link reads the library units' fragments (73 s for `fmt.rs` in a fresh process;
+  RE4: about 13 s warm for a UI program on std). Options: (a) **measure it in the night's shards (one process per shard keeps the
+  fragments), then decide on a compact fragment format or a per-library link index**; (b) a binary fragment format now. *Recommended:
+  (a).*
+- **RES44 C++ on the same path.** Options: (a) **`arbace.cpp.run` takes `build-linked-traced` in RES28's fold (one LLVM-path run
+  namespace)**, so libstdc++'s lowered runtime is translated once too; (b) C++ apart. *Recommended: (a).*
+- **RES45 When C's gate sees it.** The gate's C steps run the seed's embedded ci (main, `d86cb874`), which predates RES34: the prebuilt
+  musl units serve `bin/ci check --aot` from the re-seed that embeds this cf2g. Options: (a) **with the next re-seed (the C crop's)**;
+  (b) the env trio back on `c-aot-essential` until then. *Recommended: (a).*
+
+### RES34.7 Rule slips, scratch
+
+One slip: a background chain of the day's Rust runs was started with its own output redirected to `/dev/null` (the runs wrote their logs to
+files; harmless, against the conventions). No process left running. Scratch in the worktree's `.tmp/`: `res34/` (`rt/` core lowered and
+read, `rs/` the Rust programs, their IR and native builds, `c/` the C programs, `cout/`, `rout-*/` the translations and their logs,
+`mod/` the Go module, the executables), `ci-aot-lib/` (the prebuilt units), `ci/`, `ci-musl/`, `ci-runtime/` (copied from `rust-re5`'s;
+the musl forms cache is at main's key, not this branch's older repr/c: read in place, `bin/ci musl ensure` bypassed), `gocache/`.
+
+## Decided (2026-11-05, the user: RES40-RES45)
+
+All as recommended: the cache shared across worktrees by key with RES32; bin/gate --prune calls bin/ci aot-lib prune at the runner's next change; whole and prebuilt compared once at night, a control in c-aot-essential at the re-seed; the link's cost measured in the night's shards first; C++ adopts the path in RES28's fold; RES45 (a), prebuilt musl in the gate from the next re-seed.
+
 ## As built: RE6 (write-ahead, 2026-11-06)
 
 Branch `rust-re6` from `rust-re5` (`e573fd86`), by an agent on the main host during the day before the night's clean rerun (light tier:
@@ -1261,3 +1416,83 @@ the same names; GT9's rustc levels (`rust-iface`, `rust-behaviour`, `rust-native
   `RSI_BATCH=1` (a fresh builder per program) at night; back to the essential tier at `:mem-gib 3` if its peak is under 2.8 GB; cost a
   night's 35 minutes. (b) Leave it in `--full` (the essential gate then runs no rsi program, only `rsi-judge-test`). (c) A smaller
   essential list (5 programs). *Recommended: (a)*, (c) if (a) does not fit.
+
+## As built: RES34 on rust-90's line (2026-11-07, branch `res34`, from `mac/rust-90` 58ca67832 with `mac/rust-res34` merged)
+
+By an agent on the main host by day (the light tier: no gate, no build of Arbace, every process under about 2 GiB, watched by a
+sampler that kills a process over 2,300 MB; stage 0 `/root/arbace/target/seed/amd64/arbace`, the checkout's sources evaluated with
+`ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1`). `mac/rust-res34` (RES34's design, RES34.1, and its proof on core) merged into
+rust-90's line: two conflicts, both additive (the Makefile's target list: `rsi-aot-lib`, `ci-aot-lib` added to rust-90's; this survey:
+RES34's sections put before RE6's in date order); the code merged clean (rust-90's `compile-list` and RES34's `build-linked-traced`
+touch different lines). std's lowered library and its ci read are rust-90's (`.tmp/rsi/runtime`, current at `lowered_key`), so the
+proof is on the whole std of the pin, not RES34.3's core alone.
+
+**The set this touches in C's embedded code** (a rekey of `gate_key` and of ci's prebuilt runtime when it lands on main): RES34's own,
+unchanged here: `arbace/c/build.ae` (`*link-trace*`), `arbace/c/cf2g.ae` (`translate-unit`, `translate`'s `pre`), `arbace/c/runtime.ae`
+(`link-traced`), `arbace/c/aotlib.ae` (new). This branch adds nothing to it: RES40 (a)'s shared cache is in the scripts
+(`bin/lib/rsi/check`, `bin/lib/ci/check-aot`, `bin/rsi`, `bin/ci`), and the rest is `arbace/rust/run.ae` (out of the keys, RES36).
+Because `build.ae` and `runtime.ae` are in `runtime-sources`, every library's fragments are rekeyed by the merge (std's 58 fragments
+about four hours of a builder to make again); the day hard-linked rust-90's fragments under the new keys after checking that
+fragments made afresh at the new key are byte for byte the old ones (ports' `ci-builtins`, std's `adler2` unit; `*link-trace*` changes
+the link, not `unit-fragment`). The night's runs on main make them afresh.
+
+### What was built
+
+| piece | files | what |
+|---|---|---|
+| RES40 (a): the cache shared by the worktrees | `bin/lib/rsi/check`, `bin/lib/ci/check-aot` (export `CI_AOT_LIB`), `bin/rsi aot-lib`, `bin/ci aot-lib build\|prune` | `CI_AOT_LIB`, else the main checkout's `.tmp/ci-aot-lib` (a linked worktree's root less `/.tmp/worktrees/NAME`), exported to the builder; `arbace.c.aotlib/cache-root` untouched (its source is in the units' key: a change would translate every unit again) |
+| the ahead translation of what programs link | `arbace/rust/run.ae` (`translate-libs ... --cached`), `bin/rsi aot-lib` (`RSI_AOT_LIB_CACHED=1`) | only the units whose fragment is made (those some program has linked), so that nothing is checked and built in the translating process |
+| the translation's parts measured | `arbace/rust/run.ae` (`compile-list`) | a line per program on standard error: the manifests (`pre`), the node program read, cf2g, the Go printed; the node text's and the Go's sizes, the units linked |
+
+### Results (the day's, light)
+
+| step | result |
+|---|---|
+| std's units translated once (`translate-libs --cached`'s rule, one thread, `GOMEMLIMIT=1400MiB`) | 74 units (ports 1, std's crates 58, compiler_builtins 15) whose fragments rust-90's runs made: **19,843 functions, none refused, 69 MB of Go, 1,663 s of translation (28 minutes of wall time), the process at most 1.37 GB**; the largest unit `std`'s cgu.08 (433 functions, 3.6 MB of Go) in 95 s |
+| `bin/rsi check --aot --corpus synthetic --only` five of `test/rust/essential.txt` (`exit-code`, `fmt`, `panic-index`, `drops`, `int-ops-i128`; `RSI_SHARD=1 RSI_THREADS=1 RSI_CI_MEMLIMIT=1400MiB RSI_GO_P=1`) | **5 of 5 pass** (status, standard output and error against rustc's recorded runs); the control `synthetic-panic` differs as it must |
+| per program | lowering 0.2 to 4.4 s; ci's build and link with std's fragments 20 to 60 s; the translation 93 to 223 s; Go's build of the shard 14 to 17 s (the first shard 324 s: std's 74 packages and musl's 350 compiled once into Go's cache by content); the run 0.1 s. The builder at most **1.71 GB**, Go's build under it |
+| the translation's parts (`exit-code.rs`, `drops.rs`) | the manifests 0.4 to 0.7 s; the node program read 15 to 23 s (19 MB of text: std's and musl's data and the program's lines); cf2g 4 to 8 s; **the Go printed 51 to 77 s**; 3.7 to 4.3 MB of Go, of which the program's own code is little (22 functions for `exit-code.rs`): 11,343 `SetCompiled` statements, 7,786 `TopText` runs of data (832 KB) and 424 `Bind` tables (269 KB) of the units linked (std's 74 and musl's 350) |
+| `collections.rs` | its builder passed 2.3 GB (the sampler stopped it): its link and translation are the night's (it was the slowest eval program too: 990 s, rust-90's essential run) |
+
+So a program's AOT build is now about 2 to 5 minutes of one process under 2 GB where RE4 measured `panics.rs` whole at about
+1,000 s of translation and up to 7 GiB; what is left of it is the glue (RES64) and the node program's read (RES43).
+
+### Night commands (through `bin/heavy-lock`, one check process at a time; `. .tmp/env.sh` first: stage 0, the checkout's sources evaluated; on main after the merge, so with main's fragments and the shared cache)
+
+1. std's fragments at the merged keys: `RSI_BATCH=2 RSI_THREADS=1 RSI_CI_MEMLIMIT=1400MiB bin/rsi check --essential` (rust-90's night
+   command 3's first half makes them as its programs link; about 35 minutes, its builder up to 3.8 GB as rust-90 measured: RES60), then
+   `RSI_AOT_LIB_CACHED=1 RSI_JOBS=1 RSI_CI_MEMLIMIT=1200MiB bin/rsi aot-lib` (the units they made, about 30 minutes, 1.4 GB).
+2. The AOT cell: `RSI_SHARD=1 RSI_THREADS=1 RSI_JOBS=2 RSI_GO_P=1 RSI_CI_MEMLIMIT=1400MiB bin/rsi check --aot --corpus samples,synthetic
+   --record` (73 programs at 2 to 5 minutes each, about 4 hours; writes `test/rust/check-aot-linux-amd64.edn`, which the REAP cell
+   reads; `collections.rs`, `threads.rs`, `errors.rs` need more than 2 GB in the builder: RES66), then the UI corpus's every 40th as
+   `rsi-check-ui` runs it, `--aot` added: `... bin/rsi check --aot --corpus ui --sample 40` (about 93 programs, 4 to 6 hours; judged,
+   not recorded: `--record` takes whole corpora, RES65).
+3. Once: `RSI_AOT_LIB=0 RSI_CHECK_WORK=.tmp/rsi-aot-whole ... bin/rsi check --aot --corpus synthetic --only test/rust/essential.txt`
+   on a heavy slot (whole: 7 GiB a program; RES42 (a)'s comparison, the two results equal), then `bin/reap --record`, `bin/crops-score
+   --ref res34 --crop rust`.
+
+### The score (expected after the night's record)
+
+The AOT cell checked: completeness 75.0 → 100 (Rust's four cells checked, none failing), maturity 95.8 → 100 (the AOT cell's 0.75 in its
+first item); independence unchanged at 80.0 (AOT 0.5: every program runs std's lowered IR, rustc's output, RES54).
+
+### Proposed (RES64-RES66)
+
+Numbered RES61-RES63 on branch `res34`; renumbered RES64-RES66 at batch 2's merge, RES61 being batch 2's (rsi-essential's memory,
+"Proposed (batch 2: RES61)" above).
+
+- **RES64 The prebuilt glue as tables.** A program's Go is now mostly glue (above): a statement per linked function and per data run,
+  printed by repr/go's printer at about 70 KB/s, 51 to 77 s of the 93 to 223. Options: (a) **cf2g emits the glue as data: the data runs
+  as one text (the Loader's `TopText` takes the runs in order; the code commands between them are the prebuilt functions, which
+  `SetCompiled` binds by id, so the order between the two is not needed), the `(id, function)` pairs as one table literal and a loop, the
+  `Bind` tables as before; about half a day, a change to `arbace/c/cf2g.ae` (embedded: the units' key and the C crop's AOT steps rerun)**;
+  (b) the glue written as a Go file by text, outside the printer; (c) leave it. *Recommended: (a)*, with C's next re-seed (RES45).
+- **RES65 The UI corpus's AOT record.** `--record` takes whole corpora and the UI corpus's every 40th is a subset. Options: (a) **a
+  subset record: `--record --sample 40` allowed for the AOT level, the record naming its sample (`:sample 40`), `bin/reap` counting
+  its programs**; (b) the cell recorded over the samples and the synthetic corpus alone, the UI subset judged without a record; (c) the
+  whole UI corpus (3,718 programs at 2 to 5 minutes: about ten nights). *Recommended: (a)*; (b) for tonight.
+- **RES66 The builders above 2 GB.** `collections.rs` (and, by rust-90's eval run, `threads.rs` and `errors.rs`) need more than the light
+  tier's 2 GiB in the builder (std's fragments of the program's closure in one process). Options: (a) **per-program caps
+  (`test/rust/check-budget.edn` gains a memory column, the shard run under it), the night's slots given to them last**; (b) RES43's
+  compact fragment format first. *Recommended: (a)*, (b) with RES43's measure.
+
