@@ -265,3 +265,33 @@ By programs per day, then by what they build for:
 ## Decided (2026-11-05, the user)
 
 All six proposals as recommended: (1) gc's flag-diagnostic programs by design for goi, a gc-on-forms cell later; (2) the AOT level's invalid programs reported as not applicable; (3) speed as a check budget; (4) liveness funded; (5) :full forms after it; (6) the by-design list shrunk class by class.
+
+## As built: Proposed 2 and 3 (2026-11-05)
+
+- **Two new kinds of class** in `test/reap/main.ae` (`kind-of`, `judge-cell`, `cell-text`, the matrix record and its diff):
+  `:na` (not applicable: the case is no program of the level) and `:budget` (over the check's time budget). A cell's
+  numbers stay "pass / by design / deferred"; `:na` is printed beside the cell and is outside its denominator, `:budget`
+  is printed beside it and inside it. `test/reap/matrix.edn` records both counts per cell (`:na`, `:budget`).
+- **Proposal 2 (b)**: the class `no-forms` of `test/goi/divergences-aot.edn` is `:kind :na` (its text says it is not a
+  divergence). Go's AOT cell before: 1,690 / 147 / 0. After: 1,690 / 10 / 0 (137 n/a, not in the denominator), 1,700
+  programs counted of 1,837. `bin/goi divergences --aot` prints the class as `(na)`; 1,837 programs, 1,690 pass, 147 in 6
+  classes, the essential subset 0 not passing.
+- **Proposal 3 (b)**: the class `speed` of `test/goi/divergences.edn` is `:kind :budget`, retitled "programs over the
+  check's time budget"; a program leaves it when its limit in `test/goi/timeouts.txt` lets it pass (the four fixed by the
+  branch's earlier work are gone; `fibish` and `fibish_closure` remain, untried at a longer budget). Go's eval cell:
+  1,673 / 162 / 0 (2 over budget, in the denominator) (it was 1,664 / 173 / 0 at the previous matrix record: the
+  earlier work's `race`, `toolchain` and four speed programs, now recorded).
+- Checked by records alone: `bin/reap` 0 problems after `bin/reap --record` (the matrix record had been stale since the
+  earlier commits of this branch); `bin/goi divergences --aot` and `bin/goi divergences` pass.
+
+## As built: the budgets of fibish and fibish_closure, winbatch at AOT (2026-11-05)
+
+- `abi/fibish` and `abi/fibish_closure` measured with `bin/goi check --only` (one at a time, one job, main's gate
+  executable as `GOI_RUN_EXE`, at a trial limit of 300 s): each passes, 24 and 25 s of wall time for the check (read
+  of the corpora included), far under what was feared. Their limits in `test/goi/timeouts.txt` are 60 s (a 2.5 times
+  margin); their known lines are gone from `test/goi/check-known.edn`, their rows `:pass` in `check-linux-amd64.edn`.
+  The class `speed` is empty.
+- `winbatch` at the AOT level (`bin/goi check --aot --only '^winbatch\.go$'`): 1 pass (the `run_env` fix reached it);
+  its line of `test/goi/check-aot-known.edn` is gone, its row `:pass`, the class `toolchain` empty at that level.
+- `bin/reap --record`: Go eval 1,675 pass, 162 not, none over budget; Go AOT 1,691 pass, 146 not. `bin/goi divergences`,
+  `--aot` and `bin/reap`: 0 problems.
