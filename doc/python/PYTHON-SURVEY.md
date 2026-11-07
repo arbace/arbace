@@ -3779,3 +3779,48 @@ before the frame state), `gi_suspended` and `cr_suspended` as FRAME_SUSPENDED st
 warning through `warnings._warn_unawaited_coroutine`, as `_PyErr_WarnUnawaitedCoroutine` does.
 
 What stays out, as the user decided: generators resumed by nested runs (216d) are unchanged.
+
+## As built: 224, generators' and coroutines' edge cases, and `_asyncio` (2026-11-07, the Mac VM, queue 224)
+
+As designed ("Design: 224"), with these changes the samples forced.
+
+**`_asyncio`** (`go/arbace/py/builtins_asyncio.ae`) follows Modules/_asynciomodule.c function by function. The state is not
+`Instance.value` as designed: `unwrap` hands that value for the object at every built-in method call, so a future's own
+methods received the state. It is the instance's last slot, `value` stays nil, and no `selfSlots` was needed. C's oddity
+that `_asyncio.Future` takes attributes but has no `__dict__` attribute is not copied (a Low). `asyncio.run`, TaskGroup,
+timeouts, eager tasks and `asyncio.graph` run on it; the remote-debugging offsets stay out (`:remote-debugging`).
+
+**Contexts.** Copy-on-write and the current context per `Thread`, as designed.
+
+**Generators** (`gen.go`, `coro.go`). `throwArgs` is `_gen_throw`. The delegate is now served outside the frame's run, the
+frame linked into the stack, so an error in throw's arguments leaves the generator suspended and a delegate's StopIteration
+comes back through CLEANUP_THROW's rule in `opYieldFrom`. `resume`'s third argument is gen_send_ex2's `closing`. `gi_*`, `cr_*`,
+`ag_*`, `__name__` and `__qualname__` are getsets (in `dir()`, read-only errors as C's). A throw into a generator not started
+puts its frame in the traceback. The asend and athrow awaitables are ported whole, with `close` and "coroutine method ...
+was never awaited" (`workAgen`, under `pendingGens`' rule). `async for` now calls the async generator's hooks
+(`async_gen_anext`): before it did not, so `shutdown_asyncgens` never saw those generators. `anext(it, default)` keeps a
+generator's return value, and PyIter_Send uses `send` on an object with no `__next__`.
+
+**Found on the way: no suspended generator could be finalized.** `Frame.gen` pointed back at the generator, and Go never
+finalizes an object that reaches itself, so queue 218's `workGen` ran only for generators whose frame had gone. Tracking
+(`Generator.track`) now turns that pointer into an address in the frame's views, read through `tracked`. This is what made
+the never-awaited warnings and the async generators' finalizer hooks fire after `gc.collect()`.
+
+**The cycle graph** (`finalize.go`) gained suspended generators, FutureIter and `task_wakeup` as nodes, so gc.collect finds a
+pending task's cycle (task, coroutine, frame, FutureIter, future, wakeup, task), and "Task was destroyed but it is pending!"
+is logged. A generator with an escaped frame stays out: what else holds that frame is not in the graph. Debug mode
+escapes it (`extract_stack` in the coroutine), so test_log_destroyed_pending_task stays classed; a frame's cells stay out for
+the same reason. `cyNode.slots` holds addresses: a pointer into FutureIter kept FutureIter alive, so its probe never ran.
+
+**The moment at `del`** (the user's (a) on 222) now covers DELETE_NAME and DELETE_GLOBAL too (`finPeek`, `finDeleted`), and a
+generator still in the pending list is flushed first.
+
+**Smaller.** `<genexpr>`, `<listcomp>`, `<setcomp>` and `<dictcomp>` as code names (`<generator-exp>` before); an exhausted
+generator's frame has no `f_back`; an unraisable exception with no traceback gets the current frame's (format_unraisable_v).
+A generator's rare fields moved to `genExt`: 32 more bytes had crossed a size class and cost bm_coroutines 7%.
+
+**Classes** (`:tests` names): `:generators` 15 to gone, `:asyncio-c` 7 to gone, `:coroutines` 17 to 2 (the frame keeps the
+coroutine; its one regex stays until a whole run shows it serves nothing). The rest went to the classes that say why:
+`:finalization` 46 to 59 (10 `refcycles` methods read `gc.get_referrers`, which answers nothing here), `:finalization-goi` 59
+to 68 (pass compiled), `:finalization-collect` 29 to 30, `:finalization-cycle` 17 to 18 (a cycle through a frame's globals),
+`:docstrings` 1 to 2.
