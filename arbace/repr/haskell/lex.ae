@@ -445,8 +445,15 @@
 (defn- set-input!
   "setInput: the input moved to position p (after the current one), its location advanced"
   [ps ^long p]
-  (let [[l c] (advance (st ps :cs) (st ps :pos) p (st ps :line) (st ps :col))]
-    (st! ps :line l) (st! ps :col c) (st! ps :pos p)))
+  (let [^ints cs (st ps :cs)]
+    (loop [i (long (st ps :pos)) l (long (st ps :line)) c (long (st ps :col))]
+      (if (< i p)
+        (let [ch (aget cs i)]
+          (cond
+            (== ch 10) (recur (inc i) (inc l) 1)
+            (== ch 9) (recur (inc i) l (inc (bit-shift-left (inc (bit-shift-right (dec c) 3)) 3)))
+            :else (recur (inc i) l (inc c))))
+        (do (st! ps :line l) (st! ps :col c) (st! ps :pos p))))))
 
 (defn- substr
   "The text of cs[from, to)"
@@ -1140,6 +1147,32 @@
               (and (= c2 32) (>= c3 0) (docsym? c3)) (cand! acc 43 (+ i 4))))
       ;; 27: "{-#" ... / known_pragma linePrags
       (when (= c2 35) (cand! acc 27 (pragma-match cs n i line-prags false))))))
+
+(defn- scan-fast
+  "The best match in the start code :s0 or :bol at i when the byte alone decides it (the rules that could match
+  begin with it and no other rule does): in :s0 blanks (rule 1), a lowercase letter's variable (79), a newline (26),
+  a special character (66), an operator not beginning a comment or a bracket (87); in :bol blanks (1), a newline
+  (11), the empty rule (17) before a byte that begins no other; nil for the rest"
+  [ps sc ^long i]
+  (let [^ints cs (st ps :cs) n (long (st ps :n))]
+    (when (< i n)
+      (let [c (aget cs i) cc (cl c)]
+        (if (identical? sc :s0)
+          (cond
+            (and (has cc K-WNN) (not= c 9)) [(run* cs n i #(let [c (long %)] (and (white-no-nl?* c) (not= c 9)))) 1]
+            (and (>= c 97) (<= c 122))
+            (let [e (m-varid cs n i)]
+              (when-not (and (= 35 (ch cs n e)) (xtest (long (st ps :exts)) :MagicHashBit)) [e 79]))
+            (== c 10) [(inc i) 26]
+            (or (== c 41) (== c 44) (== c 59) (== c 96) (== c 93) (== c 125)) [(inc i) 66]
+            (== c 40) (let [c1 (ch cs n (inc i))] (when-not (or (== c1 35) (== c1 124)) [(inc i) 66]))
+            (and (has cc K-SYM) (not (#{45 124 35 63 58} c))) [(m-varsym cs n i) 87]
+            :else nil)
+          (cond
+            (and (has cc K-WNN) (not= c 9)) (when-not (== 35 (ch cs n (inc i))) [(run* cs n i #(let [c (long %)] (and (white-no-nl?* c) (not= c 9)))) 1])
+            (== c 10) [(inc i) 11]
+            (and (< c 128) (not (has cc K-WNN)) (not (#{45 123 35 9} c))) [i 17]
+            :else nil))))))
 
 (defn- scan!
   "The best match at position i in start code sc: [end rule] or nil"
@@ -1875,7 +1908,7 @@
   (loop []
     (let [i (long (st ps :pos))
           sc (first (st ps :lex))
-          m (scan! ps sc i)]
+          m (or (when (or (identical? sc :s0) (identical? sc :bol)) (scan-fast ps sc i)) (scan! ps sc i))]
       (if (nil? m)
         (if (>= i (long (st ps :n)))
           (let [l (loc ps) span (mk-span l l)]
@@ -1885,11 +1918,11 @@
           (report-lex-error! ps :LexError (loc ps) (dfa-stop ps sc i)))
         (let [[e rule] m
               e (long e) rule (long rule)]
-          (if (or (= rule 1) (= rule 11) (= rule 14) (= rule 15) (= rule 16) (= rule 19))
+          (if (case rule (1 11 14 15 16 19) true false)
             (do (set-input! ps e) (recur))            ; AlexSkip
-            (let [l1 (loc ps)
+            (let [f (st ps :file) la (st ps :line) ca (st ps :col) pa (st ps :pos)
                   _ (set-input! ps e)
-                  span (mk-span l1 (loc ps))
+                  span [f la ca (st ps :line) (st ps :col) pa (st ps :pos)]
                   _ (st! ps :last-loc span)
                   _ (st! ps :last-len (- e i))
                   t (run-action! ps rule i e span)]
