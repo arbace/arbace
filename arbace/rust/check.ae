@@ -174,15 +174,29 @@
       (= st "124") [id "ir-error" "" "rustc timed out (300 s)" ""]
       :else [id "ir-error" "" (str "status " st ": " (first (filter #(re-find #"^error" %) (str/split-lines log)))) ""])))
 
+(declare verdict-met?)
+
 (defn run-result
   "A program's result [id result reason]: :pass, :fail, :nondet (the judge's runs differ), or the build's status (:ir-error,
   :ir-refused, :lower-refused, :read-error, :check-error, :refused, :build-error). node: [id status class message flags secs];
-  run: [id status stdout-sum bytes fault stderr-sum secs]; ref: the judge's run."
-  [id ref node run]
+  run: [id status stdout-sum bytes fault stderr-sum secs]; ref: the judge's run; own: the test's own verdict (own-verdict),
+  which judges the run in the judge's place"
+  [id ref node run & [own]]
   (let [[_ nst ncls nmsg flags] node
         ld (if (= flags "long-double") " uses-long-double" "")]
     (cond
-      (nil? ref) [id :fail "no rustc run recorded (bin/rsi record-ref)"]
+      (and own (= nst "ok") run)
+      (let [[_ st _ _ fault] run
+            st (if (= st "timeout") :timeout (Long/parseLong st))]
+        (cond
+          (re-find #"^(ci(run|aot): internal|fatal error: |runtime: )" (str fault)) [id :fail (str "internal: " fault ld)]
+          (verdict-met? own st) [id :pass ""]
+          :else [id :fail (str "differ status " (if (keyword? st) (name st) st) " (the test's own verdict: " (name (:mode own)) ")"
+                               (when (seq fault) (str " " fault)) ld)]))
+      (and (nil? ref) (not own)) [id :fail "no rustc run recorded (bin/rsi record-ref)"]
+      (and own (nil? node)) [id :fail "not built"]
+      (and own (not= nst "ok")) [id (keyword nst) (str (when (seq ncls) (str ncls ": ")) nmsg ld)]
+      (and own (nil? run)) [id :fail "not run"]
       (nil? node) [id :fail "not built"]
       (not= nst "ok") [id (keyword nst) (str (when (seq ncls) (str ncls ": ")) nmsg ld)]
       (nil? run) [id :fail "not run"]
@@ -201,6 +215,62 @@
                                (when (seq fault) (str " " fault)) ld)])))))
 
 (def corpus-prefix {"samples" "test/rust/eval" "synthetic" "test/rust/synthetic" "ui" "tests/ui"})
+
+;; ---------------------------------------------------------------------------------------------
+;; The tests' own verdicts (rust-90; the user's decision of 2026-11-07: a test's own verdict is a judge no toolchain made).
+;; Ported from compiletest, rustc 1.99.1's src/tools/compiletest/src/runtest/ui.rs (run_ui_test's run of the compiled test):
+;; the run's result is Pass when it exits 0, Fail when its exit code is 1 to 127, else Crash (a signal: rsi's status 128+N);
+;; a run-pass test must Pass, run-fail Fail (x86_64-linux unwinds: no crash allowed), run-crash Crash, run-fail-or-crash
+;; either. compiletest compares a run's output only under check-run-results (the .run.stdout and .run.stderr files, after
+;; its normalizations) and searches it under error-pattern, regex-error-pattern and forbid-output: such a test keeps rustc's
+;; recorded run (test/rust/ref-rustc-1.99.1.edn) as its reference, as do rsi's samples and the synthetic corpus (their
+;; outputs have no file of their own). Directives as compiletest reads them: `//@ NAME` or `//@[REV,...] NAME`.
+
+(def ui-corpus "test/rust/corpus-rustc-1.99.1-ui.edn")
+(def ^:private output-directives #{"check-run-results" "error-pattern" "regex-error-pattern" "forbid-output"})
+
+(def ui-modes
+  "The UI programs' modes by id (FILE or FILE#REV), from the corpus's :programs"
+  (delay (let [f (File. ui-corpus)]
+           (if (.exists f)
+             (into {} (for [{:keys [file rev mode]} (:programs (read-string (slurp f)))] [(if rev (str file "#" rev) file) mode]))
+             {}))))
+
+(defn- directives
+  "A test file's compiletest directives that apply to revision REV: the names"
+  [^String text rev]
+  (set (for [l (str/split-lines text)
+             :let [[_ revs nm] (re-find #"^\s*//@\s*(?:\[([^\]]*)\])?\s*([A-Za-z0-9_-]+)" l)]
+             :when (and nm (or (nil? revs) (and rev (some #{rev} (map str/trim (str/split revs #","))))))]
+         nm)))
+
+(defn own-verdict
+  "Program ID's own verdict, {:mode M} (compiletest's rule on its status alone), or nil: not a UI program, or its output is
+  compared (check-run-results, error-pattern, regex-error-pattern, forbid-output), or its file is missing. SRC: the UI suite's
+  tree (rustc-1.99.1-src)."
+  [^String src ^String id]
+  (when-let [mode (get @ui-modes id)]
+    (let [[file rev] (str/split id #"#" 2)
+          f (File. (str src "/" file))]
+      (when (.exists f)
+        (when-not (some output-directives (directives (slurp f) rev))
+          {:mode mode})))))
+
+(defn run-class
+  "compiletest's RunResult of a status: :pass (0), :fail (1-127), :crash (else, a signal or :timeout)"
+  [st]
+  (cond (= st 0) :pass (and (integer? st) (<= 1 st 127)) :fail :else :crash))
+
+(defn verdict-met?
+  "Whether a run's status meets a test's own verdict"
+  [{:keys [mode]} st]
+  (let [c (run-class st)]
+    (case mode
+      :run-pass (= c :pass)
+      :run-fail (= c :fail)
+      :run-crash (= c :crash)
+      :run-fail-or-crash (#{:fail :crash} c)
+      false)))
 
 (defn run-judge
   "run-judge WORK LEVEL [--record] CORPUS...: LEVEL eval (bin/rsi check: WORK/CORPUS/ids.txt, nodes.tsv, run.tsv) or aot (check
@@ -228,10 +298,12 @@
                              [c {:nodes (into {} (map (juxt first identity) (tsv (str work "/" c "/nodes.tsv"))))
                                  :runs (into {} (map (juxt first identity) (tsv (str work "/" c "/run.tsv"))))
                                  :ids (vec (lines? (str work "/" c "/ids.txt")))}]))
+        src (or (System/getenv "RSI_SRC") ".tmp/repr-rust/src/rustc-1.99.1-src")
+        own? (not= "rustc" (System/getenv "RSI_JUDGE"))
         row-of (fn [c id]
                  (let [{:keys [nodes runs]} (by-corpus c)
                        node (let [n (get nodes id)] (if (and n (= "ir-missing" (second n))) (ir-row work id) n))]
-                   (run-result id (get refs id) node (get runs id))))
+                   (run-result id (get refs id) node (get runs id) (when own? (own-verdict src id)))))
         ;; test/rust/check-known.edn: {ID REASON}, a non-pass whose reason its row cannot show
         known (let [f (File. "test/rust/check-known.edn")] (if (.exists f) (read-string (slurp f)) {}))
         ;; the programs with a run environment (the plan's sixth field: compiletest's exec-env), which ci does not pass (:env)
@@ -297,6 +369,47 @@
       (doseq [r (take 40 failing)] (println "FAIL" (first r) (nth r 2)))
       (System/exit (if (seq failing) 1 0)))))
 
+(defn own-verdicts
+  "own-verdicts [RECORD]: the UI programs' own verdicts (own-verdict) counted over the corpus and over RECORD's rows (default
+  test/rust/check-linux-amd64.edn): by their own verdict (the self judge, 1) or by rustc's recorded run (0.5); and the agreement
+  of the two judges from the records alone: for each program with a verdict of its own and a rustc run recorded, whether rustc's
+  run meets it (a program the two judge apart is listed)"
+  [[record]]
+  (let [src (or (System/getenv "RSI_SRC") ".tmp/repr-rust/src/rustc-1.99.1-src")
+        refs (into {} (map (juxt :id identity) (read-all-forms ref-path)))
+        ids (keys @ui-modes)
+        own (into {} (for [id ids :let [v (own-verdict src id)] :when v] [id v]))
+        disagree (for [[id v] (sort own) :let [r (get refs id)] :when (and r (integer? (:status r)) (not (verdict-met? v (:status r))))] [id (:status r) (:mode v)])
+        judged (count (for [[id _] own :when (integer? (:status (get refs id)))] id))
+        rows (let [f (File. (or record "test/rust/check-linux-amd64.edn"))] (if (.exists f) (read-string (slurp f)) []))
+        rself (count (filter #(contains? own (first %)) rows))]
+    (println (format "rsi own-verdicts: the UI corpus %d programs, %d by their own verdict (%s), %d by rustc's recorded run (output compared)"
+                     (count ids) (count own) (pr-str (into (sorted-map) (frequencies (map :mode (vals own))))) (- (count ids) (count own))))
+    (println (format "rsi own-verdicts: rustc's recorded runs meet %d of the %d own verdicts they cover" (- judged (count disagree)) judged))
+    (doseq [d disagree] (println "  DISAGREE" (pr-str d)))
+    (println (format "rsi own-verdicts: the record %s: %d rows, %d by their own verdict, %d by rustc's recorded run"
+                     (or record "test/rust/check-linux-amd64.edn") (count rows) rself (- (count rows) rself)))
+    (System/exit (if (seq disagree) 1 0))))
+
+(defn own-test
+  "bin/rsi judge-test's own-verdict half: the judge by a test's own verdict on runs of each status class, the right ones passing
+  and the wrong ones (another mode's status: the negative controls) failing; true when all are as they must be"
+  []
+  (let [node ["t" "ok" "" "" "" "0+0"]
+        run (fn [st] ["t" (str st) (apply str (repeat 64 "0")) "0" "" (apply str (repeat 64 "0")) "0.0"])
+        cases [[:run-pass 0 :pass] [:run-pass 101 :fail] [:run-pass 134 :fail]
+               [:run-fail 101 :pass] [:run-fail 1 :pass] [:run-fail 0 :fail] [:run-fail 134 :fail]
+               [:run-crash 134 :pass] [:run-crash 139 :pass] [:run-crash 101 :fail] [:run-crash 0 :fail]
+               [:run-pass "timeout" :fail]]
+        bad (for [[m st want] cases
+                  :let [[_ got] (run-result "t" nil node (run st) {:mode m})]
+                  :when (not= got want)]
+              [m st want got])]
+    (doseq [b bad] (println "judge-test: own verdict" (pr-str b) "NOT as it must be"))
+    (println (str "judge-test: the tests' own verdicts: " (- (count cases) (count bad)) " of " (count cases)
+                  " runs judged as compiletest judges them (the wrong modes' statuses failing)"))
+    (empty? bad)))
+
 (defn divergences
   "divergences LEVEL: the recorded check's non-passes (test/rust/check-linux-amd64.edn; aot: check-aot-linux-amd64.edn), each in a
   class or listed UNCLASSED."
@@ -337,4 +450,6 @@
     "run-judge" (run-judge args)
     "make-fake" (make-fake args)
     "divergences" (divergences (or (first args) "eval"))
+    "own-verdicts" (own-verdicts args)
+    "own-test" (System/exit (if (own-test) 0 1))
     (do (println "arbace.rust.check: plan-set, write-sets, judge, write-ref, run-judge or divergences") (System/exit 2))))
