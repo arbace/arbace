@@ -129,7 +129,7 @@ cover-build: ## GT8.3: the cover build, the gate's executable and test build wit
 	bin/cover build
 provenance-check: ## the provenance files' repr/java hash equals the reader's (bin/provenance-check; the gate's essential step, seconds)
 	bin/provenance-check
-reap: ## the REAP matrix: read
+reap: ## the REAP matrix: read, eval, AOT, print for Clojure, Java, Go, C, C++, Scheme, OCaml from the checks' recorded results; every non-pass in a class, by design or deferred (bin/reap; no runs, seconds)
 	bin/reap
 reap-record-native-check: ## Go's read level's numbers, test/repr/go/native-check-results.edn, from bin/repr-go native-check's report (bin/reap record-native-check [REPORT=...])
 	bin/reap record-native-check $(REPORT)
@@ -536,6 +536,20 @@ pyi-runtime-check: ## PY5b0: the runtime's forms stable, its operations the IR's
 	bin/pyi runtime check
 repr-ocaml-check: ## O2's check: the round trip over the default corpora and over the spec's worked examples (bin/repr-ocaml check)
 	bin/repr-ocaml check
+
+## OCaml's row of the REAP matrix and its gate steps (O8, doc/ocaml/OCAML-SURVEY.md, "As built: O8 (write-ahead)")
+.PHONY: repr-ocaml-record-results ocaml-read-essential oi-essential oi-divergences-all ocaml-essential ocaml-judges
+repr-ocaml-record-results: ## the round trip over every corpus at every level, recording the read and print levels' test/ocaml/{read,print}-results.edn (bin/repr-ocaml roundtrip --cmi --record-results all)
+	bin/repr-ocaml roundtrip --cmi --record-results all
+ocaml-read-essential: ## repr/ocaml's essential step: the pins, the samples' and the stdlib's round trip at every level, the spec's examples, the embedding check (bin/repr-ocaml)
+	bin/repr-ocaml corpus check && bin/repr-ocaml roundtrip --cmi samples stdlib && bin/repr-ocaml roundtrip --spec && bin/repr-ocaml spec-check && bin/repr-ocaml embed-check
+oi-essential: ## oi's essential step (OC67 (a)): the package's tests, the REPL's session, the check's basic and effects directories with the control (test/ocaml/essential-check.txt) (bin/oi)
+	bin/oi test && bin/oi repl-check && bin/oi check --only-list test/ocaml/essential-check.txt
+oi-divergences-all: ## OC160 (a): the four judgments of oi's committed records, no runs (bin/oi divergences [--aot], bin/oi suite divergences [--aot])
+	bin/oi divergences && bin/oi divergences --aot && bin/oi suite divergences && bin/oi suite divergences --aot
+ocaml-essential: oi-essential oi-divergences-all ocaml-read-essential ## OCaml's three essential steps, one after another (about 2.5 minutes)
+ocaml-judges: ## OC120 (b), OC130 (b), OC112 (b): the judges' and levels' tests, the dumps' determinism, the expect check against test/ocaml/ref-expect.edn (bin/oi judges-test)
+	bin/oi judges-test
 
 ## The host and housekeeping
 alpine-check: ## one minimal apk add line reinstalls exactly the host's packages (bin/alpine-env check)

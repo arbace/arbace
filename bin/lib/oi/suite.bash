@@ -53,7 +53,7 @@ cmd_suite_corpus() {
 }
 
 suite_selected() {
-  if [ -n "$ONLY" ]; then grep -E "^[^	]*($ONLY)" "$S/corpus.tsv" || true; else cat "$S/corpus.tsv"; fi
+  select_from "$S/corpus.tsv"
 }
 
 # suite_stage ID BASE UNITS DIR: the units' files (and a testsuite program's directory) copied into DIR, flat
