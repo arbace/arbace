@@ -284,7 +284,8 @@ cat > "$r3/test/steps.edn" <<'STEPS'
             :subset "test/corp.edn" :subset-key :subset-rd :always ["cc/d/f3.c" "oo/g.c"] :failed-re "CFAILRE"}}]}
 STEPS
 # every C step's :failed-re (the user, 2026-11-03: the id up to the tab of FAIL ID<tab>WHY), the same one
-cre=$(grep -o ':failed-re "^FAIL [^"]*"' "$here/test/gate/steps.edn" | sort -u)
+# (C's steps only: the crops' fragments, batch 1 on, read their own FAIL lines with their own patterns)
+cre=$(awk 'match($0, /\{:name [^ ]+/) {n = substr($0, RSTART + 7, RLENGTH - 7)} n ~ /^c-/ && match($0, /:failed-re "\^FAIL [^"]*"/) {print substr($0, RSTART, RLENGTH)}' "$here/test/gate/steps.edn" | sort -u)
 [ "$(echo "$cre" | wc -l)" = 1 ] && ok "every C step's :failed-re is one pattern" || no "C's :failed-re differ: $cre"
 cre=${cre#:failed-re \"}; cre=${cre%\"}
 sed -i "s|CFAILRE|$cre|" "$r3/test/steps.edn"

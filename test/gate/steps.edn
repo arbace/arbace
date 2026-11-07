@@ -169,6 +169,23 @@
   :suite ["bin/clojure-tests" "bin/lib/cover.bash" "test/run_clojure_tests.clj" "test/suite-go/" "test/clojure/" "test/suite_aot_hook.ae"
           "test/baseline-results.edn" "test/arbace-go-results.edn" "test/arbace-go-aot-results.edn"
           "test/java-fixtures/" "!test/java-fixtures/provenance.edn" "bin/lib/repr-clojure/" "bin/repr-clojure" "test/repr/clojure/" "test/frozen-clojure.sha256"]
+  ;; C++'s tools (CX10): repr/cpp, repr/llvm and the lowering evaluated from the checkout on stage 0, cxxdump (clang's AST, the
+  ;; oracle), the records (test/cpp/, test/repr/cpp/); g++ and clang++ are the host :cxx, gcc :gcc
+  :cpp ["bin/repr-cpp" "bin/lib/repr-cpp/" "bin/cppi" "bin/lib/cppi/" "arbace/repr/cpp.ae" "arbace/repr/cpp/" "arbace/repr/llvm.ae"
+        "arbace/repr/llvm/" "arbace/cpp/" "tools/cxxdump/" "test/cpp/" "test/repr/cpp/"]
+  ;; Scheme's tools (SM9): repr/scheme and si's Arbace side evaluated from the checkout on stage 0, psyntax's forms and the libraries
+  ;; (scheme/), the records and references (test/scheme/), Chez's dumper; the corpora the main checkout's .tmp/scheme/corpora (GTS212)
+  :scheme ["bin/si" "bin/repr-scheme" "arbace/repr/scheme.ae" "arbace/repr/scheme/" "arbace/scheme/" "scheme/" "test/scheme/"
+           "tools/schemedump/" "tools/psyntax/"]
+  ;; si's runtime: go/arbace/scm and the light driver, printed by repr/go and built by TamaGo's go
+  :scheme-run ["go/arbace/scm.ae" "go/arbace/scm/" "bin/build-go" "bin/lib/build-go/"]
+  ;; OCaml's tools (O8): repr/ocaml and o2j evaluated from the checkout on stage 0, the helper tools/ocdump on the host's compiler-libs
+  ;; (:ocaml), the records and references (test/ocaml/); the corpora read in the main checkout's .tmp/repr-ocaml at their pins (GTS212)
+  :ocaml ["bin/oi" "bin/lib/oi/" "bin/repr-ocaml" "bin/lib/limit.bash" "arbace/repr/ocaml.ae" "arbace/repr/ocaml/" "tools/ocdump/"
+          "test/ocaml/"]
+  ;; oi's driver: go/arbace/oi printed by repr/go and built by TamaGo's go; the AOT level's runtime jdk/ocaml/
+  :ocaml-run ["go/arbace/oi.ae" "go/arbace/oi/" "bin/repr-go" "bin/lib/repr-go-host.bash" "bin/lib/repr-go/"]
+  :ocaml-aot ["jdk/ocaml/"]
   ;;@ groups (GT9: a crop's groups spliced above this line, gate.crops splice: test/gate/crops/*.edn)
   }
 
@@ -753,6 +770,205 @@
    :rotate {:only "--only {list}" :universe "test/repr/c/roundtrip-results.edn" :id-re "^\\[\"([^ \"]+) ([^\"]+)\"" :id-as "$1/$2"
             :subset "test/c/corpora.edn" :subset-key :subset-roundtrip :always ["benchmarksgame/fannkuchredux.c" "benchmarksgame/fasta-8.c"]
             :failed-re "^FAIL ([^[:cntrl:]]+)[[:cntrl:]].*$"}}
+  ;; ---- C++ (CX10 with CX8, CX9; GT9): the runtime's build, the essential chain (about 1.5 min warm), the chain cpp-full at night
+  {:name cpp-runtime :mem-gib 3 :phase :build :kind :build
+   :cmd "bin/cppi runtime-build && bin/cppi runtime-ci"
+   :hosts [:stage0 :cxx :gcc] :never-loads [arbace.j2g] :inputs [:lib-tools :tools :cpp]}
+  {:name cpp-read-essential :mem-gib 2 :phase :essential :chain cpp-essential
+   :cmd "bin/repr-cpp pp-check --essential"
+   :hosts [:stage0 :cxx] :never-loads [arbace.j2g] :pins ["test/cpp/corpora.edn"]
+   :inputs [:lib-tools :tools :cpp]
+   :summary ["^(cpp-lexical|gxx-dg|libstdcxx-headers): [0-9]+ files,|failing|stale" 4]}
+  {:name cpp-print-essential :mem-gib 2 :phase :essential :chain cpp-essential :needs [cpp-read-essential]
+   :cmd "bin/repr-cpp roundtrip-corpus gxx-dg-essential && bin/repr-cpp roundtrip-corpus samples"
+   :hosts [:stage0 :go :cxx] :never-loads [arbace.j2g] :pins ["test/cpp/corpora.edn"]
+   :inputs [:lib-tools :tools :cpp]
+   :summary ["^\\{:files|failing|control|^rtcheck: the run" 4]}
+  {:name cpp-lower-essential :mem-gib 3 :phase :essential :chain cpp-essential :needs [cpp-print-essential cpp-runtime]
+   :cmd "bin/cppi lower-essential"
+   :hosts [:stage0 :cxx :gcc] :never-loads [arbace.j2g] :pins ["test/cpp/corpora.edn"]
+   :inputs [:lib-tools :tools :cpp]
+   :summary ["^lower-check|pass|failing|FAIL" 4]}
+  {:name cpp-check-essential :mem-gib 3 :phase :essential :chain cpp-essential :needs [cpp-lower-essential]
+   :cmd "bin/cppi check --corpus samples"
+   :hosts [:stage0 :go :cxx :gcc] :never-loads [arbace.j2g] :pins ["test/cpp/corpora.edn"]
+   :inputs [:lib-tools :tools :cpp :c-run]
+   :summary ["programs|pass|FAIL|control" 4]}
+  {:name cpp-selftest :mem-gib 3 :phase :full :chain cpp-full
+   :cmd "bin/cppi selftest"
+   :hosts [:stage0 :go :cxx :gcc] :never-loads [arbace.j2g] :pins ["test/cpp/corpora.edn"]
+   :inputs [:lib-tools :tools :cpp]
+   :summary ["tests?,|pass|fail|FAIL" 4]}
+  {:name cpp-tokens :mem-gib 2 :phase :full :chain cpp-full
+   :cmd "bin/repr-cpp pp-check --corpus {part}"
+   :hosts [:stage0 :cxx] :never-loads [arbace.j2g] :pins ["test/cpp/corpora.edn"]
+   :inputs [:lib-tools :tools :cpp]
+   :parts [{:part cpp-lexical}
+           {:part gxx-dg :cmd "bin/repr-cpp pp-check --corpus gxx-dg --sample 10"}
+           {:part libstdcxx-headers :cmd "bin/repr-cpp pp-check --corpus libstdcxx-headers --sample 8"}]
+   :summary ["^(cpp-lexical|gxx-dg|libstdcxx-headers): [0-9]+ files,|failing|stale" 4]}
+  {:name cpp-dg :mem-gib 3 :phase :full :chain cpp-full
+   :cmd "bin/repr-cpp dg --corpus {part}"
+   :hosts [:stage0 :cxx] :never-loads [arbace.j2g] :pins ["test/cpp/corpora.edn"]
+   :inputs [:lib-tools :tools :cpp]
+   :parts [{:part dg-error} {:part preprocess} {:part modules :clean-only true}]
+   :summary ["pass|class|FAIL|stale" 4]}
+  {:name cpp-roundtrip :mem-gib 3 :phase :full :chain cpp-full
+   :cmd "bin/repr-cpp roundtrip-corpus {part}"
+   :hosts [:stage0 :go :cxx] :never-loads [arbace.j2g] :pins ["test/cpp/corpora.edn"]
+   :inputs [:lib-tools :tools :cpp]
+   :parts [{:part gxx-old-deja-every-10} {:part c-c++-common-every-10} {:part libstdcxx-testsuite-every-40} {:part samples}]
+   :summary ["^\\{:files|failing|control|^rtcheck: the run|^roundtrip:" 4]}
+  {:name cpp-roundtrip-dg :mem-gib 3 :phase :full :chain cpp-full
+   :cmd "bin/repr-cpp roundtrip-corpus {part}"
+   :hosts [:stage0 :go :cxx] :never-loads [arbace.j2g] :pins ["test/cpp/corpora.edn"]
+   :inputs [:lib-tools :tools :cpp]
+   :parts [{:part gxx-dg-every-10}]
+   :summary ["^\\{:files|failing|^rtcheck: the run|^roundtrip:" 4]
+   :rotate {:only "--only-list {list}" :universe "test/repr/cpp/roundtrip-results/gxx-dg-every-10.edn" :id-re "^\\s+\"([^\"]+)\" "
+            :subset "test/cpp/subsets.edn" :subset-key :subset-roundtrip :failed-re "^FAIL (.+)$"}}
+  {:name cpp-lower :mem-gib 3 :phase :full :chain cpp-full :needs [cpp-runtime]
+   :cmd "bin/cppi lower-corpus {part}"
+   :hosts [:stage0 :cxx :gcc] :never-loads [arbace.j2g] :pins ["test/cpp/corpora.edn"]
+   :inputs [:lib-tools :tools :cpp]
+   :parts [{:part samples} {:part libstdcxx-every-15th :clean-only true}]
+   :summary ["^lower-check|pass|failing|FAIL" 4]
+   :rotate {:only "--only-list {list}" :universe "test/cpp/lower-results.edn" :id-re "^\\s+\"([0-9][0-9]_[^\"]+)\" \\["
+            :subset "test/cpp/subsets.edn" :subset-key :subset-lower :failed-re "^  failing: ([^ ]+) .*$"}}
+  {:name cpp-check :mem-gib 3 :phase :full :chain cpp-full :needs [cpp-runtime]
+   :cmd "bin/cppi check --corpus {part}"
+   :hosts [:stage0 :go :cxx :gcc] :never-loads [arbace.j2g] :pins ["test/cpp/corpora.edn"]
+   :inputs [:lib-tools :tools :cpp :c-run]
+   :parts [{:part samples} {:part runtime}]
+   :summary ["programs|pass|FAIL|control" 4]}
+  {:name cpp-aot :mem-gib 4 :phase :full :chain cpp-full :needs [cpp-check]
+   :cmd "bin/cppi check --aot --corpus {part}"
+   :hosts [:stage0 :go :cxx :gcc] :never-loads [arbace.j2g] :pins ["test/cpp/corpora.edn"]
+   :inputs [:lib-tools :tools :cpp :c-run]
+   :parts [{:part samples} {:part runtime :clean-only true}]
+   :summary ["programs|pass|FAIL|control" 4]}
+  ;; ---- Scheme (SM9; GT9): essential, two chains, about 1.7 min of wall (GTS215); full, the chain scheme-full beside the serial run
+  {:name si-essential :mem-gib 2 :phase :essential :chain scheme-essential
+   :cmd "bin/si unit && bin/si test --si && bin/si check --only test/scheme/essential-check.txt && bin/si r7rs && bin/si srfi"
+   :hosts [:stage0 :go] :never-loads [arbace.j2g] :pins ["test/scheme/corpora.edn"]
+   :inputs [:lib-tools :tools :scheme :scheme-run]
+   :summary ["^ok|programs pass|^r7rs:|^srfi:|regressions:|FAILING|control passed|control not" 8]}
+  {:name si-aot-essential :mem-gib 2 :phase :essential :chain scheme-essential :needs [si-essential]
+   :cmd "bin/si check --aot --only test/scheme/essential-aot.txt"
+   :hosts [:stage0 :go] :never-loads [arbace.j2g] :pins ["test/scheme/corpora.edn"]
+   :inputs [:lib-tools :tools :scheme :scheme-run]
+   :summary ["programs pass|programs: the compiled|regressions:|FAILING|control passed|control not" 6]}
+  {:name scheme-read-essential :mem-gib 2 :phase :essential :chain scheme-read-essential
+   :cmd "set -f; c='--corpus probes --corpus racket-r6rs --corpus larceny-r6rs --corpus chibi-r7rs --corpus srfi-*'; bin/repr-scheme check $c && bin/repr-scheme roundtrip $c && bin/repr-scheme spec-check && bin/si corpora files"
+   :hosts [:stage0 :chez] :never-loads [arbace.j2g] :pins ["test/scheme/corpora.edn"]
+   :inputs [:lib-tools :tools :scheme]
+   :summary ["^files and probes|^roundtrip:|^spec examples|files; |control|UNLISTED|GONE|SCAN|FAIL" 6]}
+  {:name scheme-read :mem-gib 2 :phase :full :chain scheme-full
+   :cmd "bin/repr-scheme check --corpus {part}"
+   :hosts [:stage0 :chez] :never-loads [arbace.j2g] :pins ["test/scheme/corpora.edn"]
+   :inputs [:lib-tools :tools :scheme]
+   :parts [{:part probes} {:part scans} {:part racket-r6rs} {:part larceny-r6rs} {:part chibi-r7rs} {:part whimsical}
+           {:part srfi :cmd "bin/repr-scheme check --corpus 'srfi-*'"}]
+   :summary ["^files and probes|^scan |control|UNLISTED|GONE|SCAN" 4]}
+  {:name scheme-roundtrip :mem-gib 2 :phase :full :chain scheme-full
+   :cmd "bin/repr-scheme roundtrip --corpus {part}"
+   :hosts [:stage0] :never-loads [arbace.j2g] :pins ["test/scheme/corpora.edn"]
+   :inputs [:lib-tools :tools :scheme]
+   :parts [{:part probes} {:part racket-r6rs} {:part larceny-r6rs} {:part chibi-r7rs} {:part whimsical}
+           {:part srfi :cmd "bin/repr-scheme roundtrip --corpus 'srfi-*'"}]
+   :summary ["^roundtrip:|control|FAIL" 3]}
+  {:name si-check :mem-gib 2 :phase :full :chain scheme-full
+   :cmd "bin/si check && bin/si test && bin/si fixpoint && bin/si check-suite && bin/si vendor verify && bin/si boot --check"
+   :hosts [:stage0 :go :chez] :never-loads [arbace.j2g] :pins ["test/scheme/corpora.edn"]
+   :inputs [:lib-tools :tools :scheme :scheme-run]
+   :summary ["programs pass|regressions:|FAILING|control passed|control not|of 6 of psyntax|expanded:|bootstrap gives" 8]}
+  {:name si-aot :mem-gib 2 :phase :full :chain scheme-full :needs [si-check]
+   :cmd "bin/si check --aot && bin/si srfi --aot"
+   :hosts [:stage0 :go] :never-loads [arbace.j2g] :pins ["test/scheme/corpora.edn"]
+   :inputs [:lib-tools :tools :scheme :scheme-run]
+   :summary ["programs pass|programs: the compiled|regressions:|FAILING|^srfi --aot|^FAIL" 6]}
+  {:name si-corpora :mem-gib 2 :phase :full :chain scheme-full
+   :cmd "bin/si r7rs && bin/si r7rs --chibi-test && bin/si chibi-tests && bin/si srfi && bin/si corpora files && bin/si corpora divergences"
+   :hosts [:stage0 :go :chibi] :never-loads [arbace.j2g] :pins ["test/scheme/corpora.edn"]
+   :inputs [:lib-tools :tools :scheme :scheme-run]
+   :summary ["^r7rs|^srfi:|regressions:|FAILING|files; |results pass" 8]}
+  {:name si-ecraven :mem-gib 2 :phase :full :chain scheme-full
+   :cmd "env SI_TIMEOUT=300 bin/si ecraven"
+   :hosts [:stage0 :go] :never-loads [arbace.j2g] :pins ["test/scheme/corpora.edn"]
+   :inputs [:lib-tools :tools :scheme :scheme-run]
+   :parts [{:part ecraven}]
+   :summary ["results pass|regressions:|FAILING|BAD RUN" 4]
+   :rotate {:only "--only {list}" :universe "test/scheme/check-ecraven-linux-amd64.edn" :id-re "^\\{:id \"ecraven/([^\"]+)\""
+            :subset "test/scheme/subsets.edn" :failed-re "^ +[A-Za-z]+ [a-z-]+ ecraven/([^ :]+).*$"}}
+  {:name si-mats :mem-gib 2 :phase :full :chain scheme-full
+   :cmd "bin/si mats"
+   :hosts [:stage0 :go] :never-loads [arbace.j2g] :pins ["test/scheme/corpora.edn"]
+   :inputs [:lib-tools :tools :scheme :scheme-run]
+   :parts [{:part mats}]
+   :summary ["^mats:|regressions:|FAILING" 4]
+   :rotate {:only "--only {list}" :universe "test/scheme/check-mats-linux-amd64.edn" :id-re "^\\{:id \"mats/([^\"]+)\""
+            :subset "test/scheme/subsets.edn" :failed-re "^ +[A-Za-z]+ [a-z-]+ mats/([^ :]+).*$"}}
+  ;; ---- OCaml (O8; GT9): essential, two chains of about 1.4 min warm (GTS215); full, the chain ocaml-full beside the serial run (GTS216)
+  {:name oi-essential :mem-gib 2 :phase :essential :chain oi-essential
+   :cmd "bin/oi test && bin/oi repl-check && bin/oi check --only-list test/ocaml/essential-check.txt"
+   :hosts [:stage0 :go :ocaml] :never-loads [arbace.j2g] :pins ["test/ocaml/corpora.edn"]
+   :inputs [:lib-base :lib-tools :tools :ocaml :ocaml-run]
+   :summary ["^ok|repl-check|programs:|failing|FAILING|control" 6]}
+  {:name oi-divergences :mem-gib 1 :phase :essential :chain oi-essential :needs [oi-essential]
+   :cmd "bin/oi divergences && bin/oi divergences --aot && bin/oi suite divergences && bin/oi suite divergences --aot"
+   :hosts [:stage0] :never-loads [arbace.j2g] :inputs [:lib-base :ocaml]
+   :summary ["pass, [0-9]+ failing|^oi: pins: [0-9]|FAILING" 6]}
+  {:name ocaml-read-essential :mem-gib 2 :phase :essential :chain ocaml-read-essential
+   :cmd "bin/repr-ocaml roundtrip --cmi samples stdlib && bin/repr-ocaml roundtrip --spec && bin/repr-ocaml spec-check && bin/repr-ocaml embed-check"
+   :hosts [:stage0 :ocaml] :never-loads [arbace.j2g] :pins ["test/ocaml/corpora.edn"]
+   :inputs [:lib-base :lib-tools :tools :ocaml "arbace/j2g/embed.ae" "bin/lib/version.bash"]
+   :summary ["^compare: |^full: |cmi: |spec|embed|control|FAIL|DIFF|GONE" 10]}
+  {:name ocaml-roundtrip :mem-gib 2 :phase :full :chain ocaml-full
+   :cmd "bin/repr-ocaml roundtrip --text {only} --corpus {part}"
+   :hosts [:stage0 :ocaml] :never-loads [arbace.j2g] :pins ["test/ocaml/corpora.edn"]
+   :inputs [:lib-base :lib-tools :tools :ocaml]
+   :parts [{:part stdlib :cmd "bin/repr-ocaml roundtrip --cmi --corpus stdlib"} {:part samples :cmd "bin/repr-ocaml roundtrip --cmi --corpus samples"}
+           {:part compiler-sources} {:part compiler-backend} {:part testsuite} {:part whiml} {:part opam}
+           {:part cmi-rest :clean-only true
+            :cmd "bin/repr-ocaml roundtrip --cmi-only compiler-sources compiler-backend testsuite whiml opam"}]
+   :summary ["^compare: |^full: |cmi: |control|FAIL|DIFF|GONE|UNSTABLE|FLOOR|^FAILED" 6]
+   :rotate {:only "--only-list {list}" :universe "test/ocaml/read-results.edn" :subset "test/ocaml/subsets.edn" :subset-key :subset-roundtrip
+            :id-re "^\\s*\\[\"(([^\"/]+)/[^\"]+)\"" :failed-re "^FAILED (.+)$"}}
+  {:name ocaml-dumps :mem-gib 2 :phase :full :chain ocaml-full
+   :cmd "bin/repr-ocaml dumps && bin/repr-ocaml samples"
+   :hosts [:stage0 :ocaml] :never-loads [arbace.j2g] :pins ["test/ocaml/corpora.edn"]
+   :inputs [:lib-base :lib-tools :tools :ocaml]
+   :summary ["^dumps|FLOOR|unstable|FAIL|ok" 6]}
+  {:name oi-check :mem-gib 2 :phase :full :chain ocaml-full
+   :cmd "bin/oi check {only} && bin/oi suite check && bin/oi suite rollup"
+   :hosts [:stage0 :go :ocaml] :never-loads [arbace.j2g] :pins ["test/ocaml/corpora.edn"]
+   :inputs [:lib-base :lib-tools :tools :ocaml :ocaml-run]
+   :parts [{:part run}]
+   :summary ["programs:|pass, [0-9]+ failing|FAILING|CHANGED|GONE|control|rollup" 8]
+   :rotate {:only "--only-list {list}" :universe "test/ocaml/check-oi.edn" :subset "test/ocaml/subsets.edn" :subset-key :subset-oi
+            :always ["effects/cmphash" "effects/evenodd"]
+            :id-re "^\\s*\\[\"([^\"]+)\"" :failed-re "^FAILING ([^ :]+):.*$"}}
+  {:name oi-aot :mem-gib 4 :phase :full :chain ocaml-full :needs [oi-check]
+   :cmd "env O2J_JOBS=4 bin/oi check --aot"
+   :hosts [:stage0 :go :ocaml] :never-loads [arbace.j2g] :pins ["test/ocaml/corpora.edn"]
+   :inputs [:lib-base :lib-tools :tools :ocaml :ocaml-run :ocaml-aot]
+   :parts [{:part run}]
+   :summary ["^o2j: [0-9]+ programs|pass, [0-9]+ failing|FAILING|CHANGED|GONE|control" 6]
+   :rotate {:only "--only-list {list}" :universe "test/ocaml/check-aot.edn" :subset "test/ocaml/subsets.edn"
+            :id-re "^\\s*\\[\"([^\"]+)\"" :failed-re "^FAILING ([^ :]+):.*$"}}
+  {:name oi-suite-aot :mem-gib 4 :phase :full :chain ocaml-full :needs [oi-check]
+   :cmd "env O2J_JOBS=4 bin/oi suite check --aot"
+   :hosts [:stage0 :go :ocaml] :never-loads [arbace.j2g] :pins ["test/ocaml/corpora.edn"]
+   :inputs [:lib-base :lib-tools :tools :ocaml :ocaml-run :ocaml-aot]
+   :parts [{:part suite}]
+   :summary ["^o2j: [0-9]+ programs|pass, [0-9]+ failing|FAILING|CHANGED|GONE|control" 6]
+   :rotate {:only "--only-list {list}" :universe "test/ocaml/check-suite-aot.edn" :subset "test/ocaml/subsets.edn"
+            :id-re "^\\s*\\[\"([^\"]+)\"" :failed-re "^FAILING ([^ :]+):.*$"}}
+  {:name ocaml-judges :mem-gib 2 :phase :full :chain ocaml-full :needs [oi-aot]
+   :hosts [:stage0 :go :ocaml] :never-loads [arbace.j2g] :pins ["test/ocaml/corpora.edn"]
+   :inputs [:lib-base :lib-tools :tools :ocaml :ocaml-run :ocaml-aot]
+   :parts [{:part tests :cmd "bin/oi judges-test --no-expect"} {:part expect :clean-only true :cmd "bin/oi judges-test"}]
+   :summary ["ok|FAIL|cases|expect" 8]}
   ;;@ steps (GT9: a crop's steps spliced above this line, gate.crops splice: test/gate/crops/*.edn)
   ]
 
@@ -761,9 +977,9 @@
  ;; crop's): :clojure, :java, :go, :c, or :shared (the builds, the gate's own steps and those of the whole pipeline: the
  ;; executable's smoke test, the fixpoint, j2g's edge, the generated variants, the mixed programs, the REAP matrix); every
  ;; step in exactly one (bin/gate --costs fails on a step in none, test/gate/costs-test.bash checks this table).
- ;; cpp-c2j and scheme-c2j are :shared until the C++ and Scheme rows' merges add their crops (bin/gate --costs knows five today)
+ ;; cpp-c2j and scheme-c2j are C++'s and Scheme's since the rows' merge (CP190 (a), merge plan batch 1)
  :crops {:shared [makefile seed stage0 go-build javac-tool go-smoke programs generated gate-tests j2g-edge reap provenance
-                  fixpoint programs-full cpp-c2j scheme-c2j]
+                  fixpoint programs-full]
          :clojure [suite-go oracle-go diffcheck suite-aot-essential suite-aot repr-clojure]
          :java [java-check java-check-judge java-compiled repr-java-closure javac-check javac-verify javac-classes repr-java
                 repr-java-roundtrip jrt-convert java-fixtures repr-java-parse repr-java-front repr-java-platform repr-java-attr
@@ -772,6 +988,10 @@
          :go [goi-check goi-aot-essential repr-go repr-go-native goi goi-check-full goi-aot]
          :c [c-dg-essential c-check-essential c-aot-essential c-c23 c-c2j c-judge-test c-check c-aot c-dg c-annotations c-tokens
              c-parse c-roundtrip]
+         :cpp [cpp-runtime cpp-read-essential cpp-print-essential cpp-lower-essential cpp-check-essential cpp-selftest cpp-tokens cpp-dg
+               cpp-roundtrip cpp-roundtrip-dg cpp-lower cpp-check cpp-aot cpp-c2j]
+         :scheme [si-essential si-aot-essential scheme-read-essential scheme-read scheme-roundtrip si-check si-aot si-corpora si-ecraven si-mats scheme-c2j]
+         :ocaml [oi-essential oi-divergences ocaml-read-essential ocaml-roundtrip ocaml-dumps oi-check oi-aot oi-suite-aot ocaml-judges]
          ;;@ crops (GT9: a crop's entry spliced above this line)
          }
  ;; GT8's budgets (the user, 2026-11-03), seconds, for :crops crops: the essential gate's wall (a merge), the nightly run
@@ -848,4 +1068,39 @@
  ;; by the family's own judge, which the step's run reads: FILE among the step's inputs), or STEP {:waived "WHY"} (a check that
  ;; is itself a judgment of records or a unit test with its own negative cases). bin/gate --costs and crops-test fail on a new
  ;; crop's check with neither
- :controls {}}
+ :controls {
+  cpp-read-essential {:waived "the token oracle's comparison against g++ -E and clang (GT9.8 \"Not covered\": pp-check; GTS242)"}
+  cpp-print-essential "test/repr/cpp/roundtrip-controls.edn"
+  cpp-lower-essential "test/cpp/controls.edn"
+  cpp-check-essential "test/cpp/controls.edn"
+  cpp-selftest {:waived "the checks' own tests: each a negative case (review 007's)"}
+  cpp-tokens {:waived "as cpp-read-essential (GTS242)"}
+  cpp-dg {:waived "no crossed pair yet (CP214, GTS242)"}
+  cpp-c2j {:waived "a compile check, not a judgment of runs: c2j's load, compile and reflection warnings of the crop's sources (bin/lib/crops/c2j-check), as c-c2j"}
+  cpp-roundtrip "test/repr/cpp/roundtrip-controls.edn"
+  cpp-roundtrip-dg {:waived "the round trip's control is a crossed pair of two samples (cpp-roundtrip's samples part); this step runs the recorded dg list, a partial run on its rotation's subset"}
+  cpp-lower "test/cpp/controls.edn"
+  cpp-check "test/cpp/controls.edn"
+  cpp-aot "test/cpp/controls.edn"
+  si-essential {:waived "the check's own negative controls, in test/scheme/essential-check.txt (SM9: control passed or control not judged fails the run)"}
+  si-aot-essential {:waived "the compiled level's controls, in test/scheme/essential-aot.txt (SM9)"}
+  scheme-c2j {:waived "a compile check, as cpp-c2j"}
+  scheme-read-essential "test/scheme/repr-controls.edn"
+  scheme-read "test/scheme/repr-controls.edn"
+  scheme-roundtrip "test/scheme/repr-controls.edn"
+  si-check {:waived "the check's own negative controls (SM9) and the expander's fixpoint"}
+  si-aot {:waived "the compiled level's controls (SM9)"}
+  si-corpora {:waived "R7RS, SRFI and Chibi's suites judged against their recorded references; no crossed pair yet (GT9.8: Proposed in \"As built: GTS81 (a), the crops' controls\")"}
+  si-ecraven {:waived "no crossed pair yet (GT9.8 \"Not covered\"; GTS242 proposes one before the rotation's first week)"}
+  si-mats {:waived "no crossed pair yet (GT9.8 \"Not covered\"; GTS242)"}
+  oi-essential "test/ocaml/controls.txt"
+  oi-divergences {:waived "a judgment of the committed records (no run): its negative cases are the judges' tests (ocaml-judges)"}
+  ocaml-read-essential "test/ocaml/roundtrip-controls.txt"
+  ocaml-roundtrip "test/ocaml/roundtrip-controls.txt"
+  ocaml-dumps {:waived "the typed and Lambda dumps against their known file and floors, with the determinism test; no crossed pair (GT9.8: not a read or print family)"}
+  oi-check "test/ocaml/controls.txt"
+  oi-aot "test/ocaml/controls.txt"
+  oi-suite-aot "test/ocaml/controls.txt"
+  ocaml-judges {:waived "the judges' own tests: each a negative case"}
+  ;;@ controls (GT9: a crop's controls spliced above this line)
+  }}

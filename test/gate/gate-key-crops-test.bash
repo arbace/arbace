@@ -72,12 +72,13 @@ done
 host_block() { awk -v h="$1" '$0 ~ "^ *(\\{)?:" h " " {f=1} f && $0 ~ /^ *:[a-z-]+ / && $0 !~ "^ *(\\{)?:" h " " {exit} f' "$aud"; }
 gb=$(host_block gate); pb=$(host_block prog)
 [ -n "$gb" ] && [ -n "$pb" ] || { echo "FAIL: no :gate or :prog in $aud"; exit 1; }
-for p in '!bin/lib/ci/' '!bin/lib/oi/' '!bin/lib/repr-cpp/' '!bin/lib/crops/' '!jdk/ocaml/' '!go/arbace/oi.ae' \
+# (bin/lib/crops/, e6f88eb3's c2j-check: in arbace_crop_paths since batch 1, so in crop-rules, checked below)
+for p in '!bin/lib/ci/' '!bin/lib/oi/' '!bin/lib/repr-cpp/' '!jdk/ocaml/' '!go/arbace/oi.ae' \
          '!go/arbace/oi/' '!go/arbace/scm.ae' '!go/arbace/scm/' '!go/arbace/py.ae' '!go/arbace/py/' \
          '!go/arbace/libm.ae' '!go/arbace/libm/'; do
   if echo "$gb" | grep -qF "\"$p\""; then ok "audit :gate names $p"; else bad "audit :gate does not name $p"; fi
 done
-for p in '!bin/lib/ci/' '!bin/lib/oi/' '!bin/lib/repr-cpp/' '!bin/lib/crops/'; do
+for p in '!bin/lib/ci/' '!bin/lib/oi/' '!bin/lib/repr-cpp/'; do
   if echo "$pb" | grep -qF "\"$p\""; then ok "audit :prog names $p"; else bad "audit :prog does not name $p"; fi
 done
 # the runtime's and javac's tool's keys (the re-seed after the backlog, the user 2026-11-03): computed for real on the
