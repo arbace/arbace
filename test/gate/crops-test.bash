@@ -120,7 +120,7 @@ crops concurrent "$w/cc.edn" > "$w/cc.out" 2>&1
 [ "$(tr '\n' ' ' < "$w/cc.out")" = "a b " ] && ok "concurrent chains: a (its needs in the chain or outside :full) and b; not the four's, :heavy, a part above 4 GiB, a need on another chain, one another chain needs, no :mem-gib, nor c past :max-gib" \
   || bad "concurrent chains: $(cat "$w/cc.out")"
 crops concurrent "$src/test/gate/steps.edn" > "$w/cc0.out" 2>&1
-[ "$(tr '\n' ' ' < "$w/cc0.out")" = "cpp-full scheme-full ocaml-full " ] && ok "steps.edn: the gated crops' chains beside the serial run (cpp-full, scheme-full, ocaml-full: merge plan batch 1)" || bad "steps.edn's chains: $(cat "$w/cc0.out")"
+[ "$(tr '\n' ' ' < "$w/cc0.out")" = "scheme-full ocaml-full " ] && ok "steps.edn: the gated crops' chains beside the serial run (scheme-full, ocaml-full: merge plan batch 1; cpp-full's cpp-check is 8 GiB, past :max-step-gib)" || bad "steps.edn's chains: $(cat "$w/cc0.out")"
 
 # ---- the rules
 mkdir -p "$w/r/test/ocaml"; echo '{}' > "$w/r/test/ocaml/controls.edn"; echo x > "$w/r/test/ocaml/other.edn"
