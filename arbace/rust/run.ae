@@ -258,10 +258,9 @@
   (let [dir (:dir lib) k (lib-key dir)]
     (rtm/prebuilt lib (System/getProperty "user.dir") (str "rsi-" tag "-" (subs k 0 12)) k #(check-lib-unit h lib %))))
 
-(defn build-linked
-  "The node program's text of the program's checked units linked with the libraries (musl's last): the program's units and the
-  constructors' unit built into fragments, the libraries' fragments made once (cached), the Rust libraries' candidates cut at the
-  link to what the program reaches (arbace.c.build/link-text's :prune)."
+(defn build-linked-traced
+  "build-linked with the link's provenance (arbace.c.build/*link-trace*): {:text :trace :frag-libs}, :frag-libs parallel to the
+  link's fragments ([lib unit] a library unit's, nil the program's), for cf2g's prebuilt libraries (arbace.c.aotlib)."
   [h libs units]
   (let [pdefs (set (mapcat #(keys (musl/unit-defs (:forms (:rd %)))) units))
         prefs (set (mapcat #(musl/refs (concat (:forms (:rd %)) (mapcat :forms (vals (:units (:rd %)))))) units))
@@ -273,10 +272,20 @@
         init (when (seq cs) (init-unit h (map second (sort-by first cs))))
         pre (cond-> (mapv build/unit-fragment units) init (conj (build/unit-fragment init)))
         n (count pre)
-        prune (set (keep-indexed (fn [i [lib]] (when-not (:root lib) (+ n i))) linked))]
-    (build/link-text (into pre lfs) :libc-start true
-                     :prune (when-not (System/getenv "RSI_NO_PRUNE") prune)
-                     :roots (concat (map second cs) ["main" "_init"]))))
+        prune (set (keep-indexed (fn [i [lib]] (when-not (:root lib) (+ n i))) linked))
+        tr (atom nil)
+        text (binding [build/*link-trace* tr]
+               (build/link-text (into pre lfs) :libc-start true
+                                :prune (when-not (System/getenv "RSI_NO_PRUNE") prune)
+                                :roots (concat (map second cs) ["main" "_init"])))]
+    {:text text :trace @tr :frag-libs (into (vec (repeat n nil)) linked)}))
+
+(defn build-linked
+  "The node program's text of the program's checked units linked with the libraries (musl's last): the program's units and the
+  constructors' unit built into fragments, the libraries' fragments made once (cached), the Rust libraries' candidates cut at the
+  link to what the program reaches (arbace.c.build/link-text's :prune)."
+  [h libs units]
+  (:text (build-linked-traced h libs units)))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Programs
@@ -328,13 +337,13 @@
       bad [(name (:status bad)) "" (:message bad) "" (bs) nil]
       :else
       (let [ld (if (some #(crun/uses-long-double? (:forms (:rd %))) us) "long-double" "")
-            r (try {:text (build-linked h libs us)}
+            r (try (build-linked-traced h libs us)
                    (catch arbace.lang.ExceptionInfo e
                      (if-let [c (:ci/refused (ex-data e))]
                        {:refused c :message (.getMessage e)}
                        (throw e))))]
         (if (:text r)
-          ["ok" "" "" ld (bs) (:text r)]
+          ["ok" "" "" ld (bs) (:text r) r]
           ["refused" (name (:refused r)) (:message r) ld (bs) nil])))))
 
 (defn- work-list
@@ -382,17 +391,21 @@
   "compile-list OUT LIST RTLIB THREADS: each line of LIST (ID DIR PKG) built and translated by cf2g into OUT/progs/PKG/prog.go
   (package PKG, path arbace/progs/PKG); OUT/nodes.tsv as nodes-list's (cf2g's refusal: refused, its class)."
   [h ^String out ^String list ^String rtlib threads]
-  (require 'arbace.c.cf2g)
+  (require 'arbace.c.cf2g 'arbace.c.aotlib)
   (let [ls (libs h rtlib)
         translate (resolve 'arbace.c.cf2g/translate)
-        go-text (resolve 'arbace.c.cf2g/go-text)]
+        go-text (resolve 'arbace.c.cf2g/go-text)
+        ;; std's, musl's and the ports' units translated once per key (RES34; arbace.c.aotlib), the program's own code alone
+        ;; here; RSI_AOT_LIB=0 (or CI_AOT_LIB_OFF): the whole node program, as before
+        program-pre (if (= "0" (System/getenv "RSI_AOT_LIB")) (constantly nil) (resolve 'arbace.c.aotlib/program-pre))]
     (work-list list threads (str out "/nodes.tsv")
                (fn [[id dir pkg]]
-                 (let [[st cls msg ld s text] (build-one h ls dir)]
+                 (let [[st cls msg ld s text linked] (build-one h ls dir)]
                    (if-not text
                      [st cls msg ld s]
-                     (let [t0 (System/nanoTime)]
-                       (try (let [[forms] (translate (build/read-program text) pkg (str "arbace/progs/" pkg))]
+                     (let [t0 (System/nanoTime)
+                           pre (program-pre (System/getProperty "user.dir") linked)]
+                       (try (let [[forms] (translate (build/read-program text) pkg (str "arbace/progs/" pkg) pre)]
                               (spit-mk (str out "/progs/" pkg "/prog.go") (go-text forms))
                               ["ok" "" "" ld (str s "+" (secs t0))])
                             (catch arbace.lang.ExceptionInfo e
@@ -402,7 +415,7 @@
 
 (defn -main
   "bin/rsi's ci steps: read-lib DIR LIST THREADS, nodes-list WORK LIST RTLIB THREADS, compile-list OUT LIST RTLIB THREADS,
-  nodes RTLIB DIR OUT (one program's directory)."
+  nodes RTLIB DIR OUT (one program's directory), translate-libs RTLIB THREADS (RES34: every library unit's Go made ahead)."
   [verb & args]
   (let [h (host/load-host "test/c/host")
         th #(Long/parseLong (or % "3"))]
@@ -410,6 +423,13 @@
       "read-lib" (let [[dir list t] args] (System/exit (if (read-lib h dir list (th t)) 0 1)))
       "nodes-list" (let [[work list rt t] args] (nodes-list h work list rt (th t)))
       "compile-list" (let [[out list rt t] args] (compile-list h out list rt (th t)))
+      ;; RES34: the libraries' units translated by cf2g ahead into the prebuilt cache (arbace.c.aotlib), a line a library
+      "translate-libs" (let [[rt t] args]
+                         (require 'arbace.c.aotlib)
+                         (doseq [lib (libs h rt)]
+                           (let [t0 (System/nanoTime)
+                                 r ((resolve 'arbace.c.aotlib/translate-lib) (System/getProperty "user.dir") lib (keys (:index lib)) (th t))]
+                             (println "rsi: translated" (.getName (File. ^String (:frag-dir lib))) r (secs t0) "s"))))
       "nodes" (let [[rt dir out] args
                     [st cls msg _ s text] (build-one h (libs h rt) dir)]
                 (if text
