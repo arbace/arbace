@@ -23,7 +23,8 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   repr-c-gcc-tests repr-scheme-fetch repr-scheme-check repr-scheme-check-quick repr-scheme-record repr-scheme-spec repr-scheme-roundtrip si-vendor-verify si-boot si-boot-check si-test si-test-record si-check-suite si-fixpoint si-unit si-light si-test-si si-check si-check-record-ref si-srfi si-srfi-record si-srfi-aot si-aot-check si-aot-check-record si-bench si-divergences si-r7rs si-r7rs-record si-r7rs-chez si-r7rs-chez-record si-r7rs-chibi si-r7rs-chibi-record si-r7rs-chibi-test si-r7rs-chibi-test-record si-chibi-tests si-chibi-tests-record si-ecraven si-ecraven-record si-ecraven-chez si-ecraven-chez-record si-ecraven-chibi si-ecraven-chibi-record si-mats si-mats-record si-corpora-files si-corpora-divergences repr-ocaml-ocdump repr-ocaml-spec-check repr-ocaml-samples repr-ocaml-corpus repr-ocaml-corpus-count repr-ocaml-roundtrip repr-ocaml-roundtrip-all repr-ocaml-check repr-ocaml-text repr-ocaml-cmi repr-ocaml-dumps oi-stdlib oi-build oi-check oi-divergences oi-record-ref oi-repl oi-aot-lib oi-check-aot oi-divergences-aot oi-suite-check oi-suite-check-aot oi-suite-divergences oi-suite-expect oi-suite-rollup oi-suite-record-ref repr-ocaml-opam repr-python-fetch repr-python-pins repr-python-count repr-python-spec-check repr-python-samples repr-python-roundtrip repr-python-record repr-python-check repr-python-text repr-python-text-record pyi-gen pyi-gen-check pyi-record-ref pyi-record-ref-check pyi-scope-check pyi-compile-check pyi-run pyi-repl pyi-repl-check pyi-lib-test pyi-lib-test-oracle pyi-runtime-print pyi-runtime-read pyi-runtime-vet pyi-runtime-check \
   repr-scheme repr-scheme-roundtrip-record si-essential si-aot-essential scheme-read-essential scheme-essential \
   repr-python-lex-check repr-python-lex-record repr-python-pegen repr-python-pegen-check repr-python-parse-check repr-python-parse-record repr-python-ast-check repr-python-records-record repr-python-records-verify pyi-lib-test-record pyi-runtime-tables pyi-aot pyi-aot-check pyi-aot-check-record pyi-bench pyi-bench-record pyi-check pyi-check-record pyi-divergences pyi-cover pyi-c2j-check pyi-table-check pyi-clib-build pyi-clib-verify python-essential \
-  oi-check-compiled check-makefile
+  oi-check-compiled check-makefile \
+  repr-ocaml-native-check repr-ocaml-menhir
 
 help: ## list the targets
 	@awk 'BEGIN {FS = ":.*## "} /^## / {printf "\n%s\n", substr($$0, 4)} \
@@ -516,6 +517,11 @@ repr-ocaml-cmi: ## O3: and the .cmi level: ocamlc -c on the original and on the 
 	bin/repr-ocaml roundtrip --cmi-lines
 repr-ocaml-dumps: ## O4: the typed and Lambda dumps of every file ocamlc compiles alone, read by Arbace's reader and shaped by SPEC 11.2, stable across two runs; sizes and seconds (bin/repr-ocaml dumps)
 	bin/repr-ocaml dumps
+repr-ocaml-native-check: ## the native reader (lexer.mll and parser.mly in Arbace) against the helper over the samples and the stdlib: dumps with positions and :full layouts equal byte for byte (bin/repr-ocaml native-check --layout)
+	bin/repr-ocaml native-check --layout
+repr-ocaml-menhir: ## the native parser's LALR(1) tables built from parser.mly equal to Menhir's own (boot/menhir/parser.ml) and to the committed arbace/repr/ocaml/tables.ae (bin/repr-ocaml menhir --check, --verify)
+	bin/repr-ocaml menhir --check
+	bin/repr-ocaml menhir --verify
 oi-stdlib: ## O5: the stdlib built by ocamlc in dependency order and its Lambda dumped for oi, into .tmp/oi/lib/ (bin/oi stdlib)
 	bin/oi stdlib
 oi-build: ## O5: oi's light driver, go/arbace/oi's forms printed by repr/go and built by TamaGo's go (bin/oi build)

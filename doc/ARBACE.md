@@ -110,6 +110,16 @@ code. Three kinds of things live here:
   `7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`), and the template parts of `cpp/abi.ae`'s mangling, which
   reimplement parts of `clang/lib/AST/ItaniumMangle.cpp` at the same commit, by hand on 2026-11-05 (LICENSE.md
   names the functions; the files carry clang's notice).
+- `repr/ocaml.ae` and `repr/ocaml/` (repr/ocaml, OCaml's bridge, `arbace.repr.ocaml` and `arbace.repr.ocaml.*`;
+  doc/ocaml/SPEC.md, doc/ocaml/OCAML-SURVEY.md; evaluated from the checkout, not embedded, OC30 (a)): its native
+  reader (2026-11-04, "As built: the native reader") ports OCaml 5.5.0's parsing/lexer.mll (`repr/ocaml/lex.ae`, with
+  stdlib/lexing.ml's position updates and utils/misc.ml's Utf8_lexeme), parsing/docstrings.ml (`docstrings.ae`),
+  parsing/ast_helper.ml (`ast.ae`'s constructors) and parsing/parser.mly's header and semantic actions
+  (`actions.ae`), from the release tarball https://caml.inria.fr/pub/distrib/ocaml-5.5/ocaml-5.5.0.tar.xz (SHA-256
+  `fcc6ae66...f015ba`), by hand, the files carrying OCaml's notice; `menhir.ae` builds parser.mly's LALR(1) automaton
+  as Menhir 20250912 does and writes it as the generated `tables.ae`, `parser.ae` drives it as MenhirLib's engine
+  (boot/menhir/menhirLib.ml of the same tarball) does (LICENSE.md: the OCaml Core System; Menhir and MenhirLib); the
+  rest (the converter, the printer, the checks, `native.ae`) is Arbace's own.
 - Arbace's own namespaces of the program, not derived from Clojure: `box.ae` and `box/`
   (`arbace.box`, the store, over its host layer `arbace.box.host`; the box's build driver
   `arbace.box.build`, its plan `arbace.box.plan` (since GP2 also repr/go's native loader's go

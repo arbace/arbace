@@ -312,6 +312,11 @@ Prior art:
     the oracle `tools/ocdump` built live) and oi's light driver (`go/arbace/oi` built alone by TamaGo's go) against ocamlc's and
     ocamlopt's recorded runs, the corpora fetched by pin into the checkout's `.tmp/repr-ocaml`; `--corpus ID` (`bin/repr-ocaml
     roundtrip`; `opam`, `all`) and `--only-list FILE` (`bin/oi check [--aot]`, `suite check [--aot]`) select parts.
+    repr/ocaml reads natively too (doc/ocaml/OCAML-SURVEY.md, "As built: the native reader"; the helper `tools/ocdump` stays
+    the oracle and `read`'s default): `arbace/repr/ocaml/menhir.ae` builds parser.mly's LALR(1) automaton as Menhir does into the
+    generated `tables.ae` (`bin/repr-ocaml menhir`, `--check` against Menhir's own tables in the tarball, `--verify`), `lex.ae`,
+    `docstrings.ae`, `actions.ae` and `parser.ae` port lexer.mll, docstrings.ml, parser.mly's actions and MenhirLib's engine;
+    `bin/repr-ocaml read --reader native`, `native-check` (the dumps against the helper's, byte for byte).
   - `arbace/repr/clojure{.ae,/}`: `arbace.repr.clojure`, Clojure's bridge (`doc/REPR-CLOJURE.md`;
     `bin/repr-clojure read`, `print`, `roundtrip`, `check`): Clojure source into Arbace's, the
     names of the vendored Clojure, `.clj`/`.cljc` into `.ae`, a table of rules for the dialects'

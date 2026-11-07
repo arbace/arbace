@@ -72,6 +72,20 @@
 #                                 shapes, the two runs byte for byte equal; sizes, node counts and seconds printed
 #                                 (default corpora: samples stdlib compiler-sources compiler-backend whiml testsuite;
 #                                 outputs under .tmp/repr-ocaml/ty/CORPUS/{types,lambda}.1)
+#   bin/repr-ocaml read --reader native ...   (or REPR_OCAML_READER=native) the native reader: arbace.repr.ocaml.native
+#                                 (lexer.mll and parser.mly ported, doc/ocaml/OCAML-SURVEY.md "As built: the native
+#                                 reader") writes the dumps the helper writes, no ocamlc; with --full its layout too;
+#                                 `dump --reader native ...` the same for one file
+#   bin/repr-ocaml native-check [--jobs N] [--layout] [CORPUS...] | --list FILE [--base DIR]
+#                                 the native reader against the helper: each file's dump with positions (ocdump --loc)
+#                                 equal byte for byte, a file both reject counted when the kinds agree (the messages:
+#                                 a later step); --layout: the layouts of mode :full (ocdump --mode tokens) too; default
+#                                 corpora samples stdlib; --list: paths relative to --base (default the tarball's top)
+#   bin/repr-ocaml menhir [--check|--verify]   the tables of the native parser: arbace.repr.ocaml.menhir builds
+#                                 parser.mly's LALR(1) automaton and writes arbace/repr/ocaml/tables.ae; --check: the
+#                                 automaton against Menhir's own tables in the tarball's boot/menhir/parser.ml (states,
+#                                 productions, nonterminals paired, every action, goto and default reduction equal);
+#                                 --verify: generated again, equal to the committed file
 # The checks of O1 run on small inputs, in seconds (corpus fetch: one 4.7 MB download).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -328,15 +342,28 @@ rt_arbace() {
     "$exe" -m arbace.repr.ocaml "$@"
 }
 
+# the reader: the helper (ocdump, the oracle) unless --reader native or REPR_OCAML_READER=native
+READER="${REPR_OCAML_READER:-helper}"
+
+# native_dumps OUT [--mode tokens] FILE...: the native reader's dumps of FILE... into OUT/BASENAME.ae
+native_dumps() {
+  local out=$1; shift
+  rt_arbace_ns arbace.repr.ocaml.native read --out "$out" "$@" > "$out.log" || { cat "$out.log"; return 1; }
+}
+
 cmd_read() {
-  need_ocdump
   local out="$root/.tmp/repr-ocaml/forms" tmp="$root/.tmp/repr-ocaml/read-dumps" f b flag
   if [ "${1:-}" = "-o" ]; then out=$2; shift 2; fi
   rm -rf "$tmp"; mkdir -p "$tmp"
-  for f in "$@"; do
-    b=$(basename "$f"); flag=""; case $b in *.mli) flag=--intf ;; esac
-    "$OCD" $flag --file "$b" "$f" > "$tmp/$b.ae"
-  done
+  if [ "$READER" = native ]; then
+    native_dumps "$tmp" "$@"
+  else
+    need_ocdump
+    for f in "$@"; do
+      b=$(basename "$f"); flag=""; case $b in *.mli) flag=--intf ;; esac
+      "$OCD" $flag --file "$b" "$f" > "$tmp/$b.ae"
+    done
+  fi
   rt_arbace read --root "$tmp" -o "$out"
 }
 
@@ -344,16 +371,22 @@ cmd_print() { rt_arbace print "$@"; }
 
 # read --full: forms in mode :full (O3): the parse dump and the layout dump (ocdump --mode tokens) converted together
 cmd_read_full() {
-  need_ocdump
   local out="$root/.tmp/repr-ocaml/forms-full" tmp="$root/.tmp/repr-ocaml/read-full" f b flag
   if [ "${1:-}" = "-o" ]; then out=$2; shift 2; fi
   rm -rf "$tmp"; mkdir -p "$tmp/src" "$tmp/parse" "$tmp/layout"
+  if [ "$READER" = native ]; then
+    for f in "$@"; do cp "$f" "$tmp/src/$(basename "$f")"; done
+    native_dumps "$tmp/parse" "$@"
+    native_dumps "$tmp/layout" --mode tokens "$@"
+  else
+  need_ocdump
   for f in "$@"; do
     b=$(basename "$f"); flag=""; case $b in *.mli) flag=--intf ;; esac
     cp "$f" "$tmp/src/$b"
     "$OCD" $flag --file "$b" "$f" > "$tmp/parse/$b.ae"
     "$OCD" --mode tokens --file "$b" "$f" > "$tmp/layout/$b.ae"
   done
+  fi
   rt_arbace full --src "$tmp/src" --parse "$tmp/parse" --layout "$tmp/layout" --out "$tmp/printed" --forms "$out" \
     --rt-known "$root/test/ocaml/roundtrip-known.edn"
 }
@@ -746,6 +779,83 @@ cmd_roundtrip() {
   return $bad
 }
 
+# rt_arbace_ns NS ARGS...: a namespace's -main on stage 0, evaluated from the checkout, light limits
+rt_arbace_ns() {
+  local exe ns=$1; shift; exe=$(arbace_exe)
+  ARBACE_PATH="$root" GOMEMLIMIT=${REPR_OCAML_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${REPR_OCAML_THREADS:-4} \
+    "$exe" -m "$ns" "$@"
+}
+
+# helper_loc_one REL: the helper's dump with positions of one file of $BASE into $OUT/REL.ae ($MODE tokens: its layout)
+helper_loc_one() {
+  local rel=$1 flag=""
+  case $rel in *.mli) flag=--intf ;; esac
+  mkdir -p "$OUT/$(dirname "$rel")"
+  if [ "${MODE:-}" = tokens ]; then
+    (cd "$BASE" && "$OCD" --mode tokens --file "$rel" "$rel") > "$OUT/$rel.ae"
+  else
+    (cd "$BASE" && "$OCD" --loc $flag --file "$rel" "$rel") > "$OUT/$rel.ae"
+  fi
+}
+export -f helper_loc_one
+
+# native_check_one NAME BASE LIST: the helper's dumps (parallel), then one Arbace run of the native reader comparing them
+native_check_one() {
+  local name=$1 base=$2 list=$3 w="$root/.tmp/repr-ocaml/native-check/$1" rc=0 m
+  rm -rf "$w"; mkdir -p "$w"
+  export OCD BASE="$base"
+  for m in parse ${LAYOUT:-}; do
+    local mm=""; [ "$m" = tokens ] && mm=tokens
+    OUT="$w/helper-$m" MODE=$mm xargs -a "$list" -P "${REPR_OCAML_JOBS:-4}" -n 1 bash -c 'helper_loc_one "$0"'
+    local extra=(); [ "$m" = tokens ] && extra=(--mode tokens)
+    echo "== $name ($(wc -l < "$list") files, $m)"
+    rt_arbace_ns arbace.repr.ocaml.native check --root "$base" --list "$list" --helper "$w/helper-$m" \
+      --report "$w/report-$m.edn" "${extra[@]}" || rc=1
+  done
+  return $rc
+}
+
+cmd_native_check() {
+  need_ocdump; cmd_corpus_fetch >/dev/null
+  local ids=() list="" base="$TOP" bad=0 id l
+  LAYOUT=""
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --jobs) shift; REPR_OCAML_JOBS=$1 ;;
+      --layout) LAYOUT=tokens ;;
+      --list) shift; list=$1 ;;
+      --base) shift; base=$1 ;;
+      *) ids+=("$1") ;;
+    esac
+    shift
+  done
+  if [ -n "$list" ]; then
+    l="$root/.tmp/repr-ocaml/native-check-list.txt"; mkdir -p "$(dirname "$l")"; grep -v '^\s*$' "$list" > "$l"
+    native_check_one list "$(cd "$base" && pwd)" "$l" || bad=1
+  else
+    [ ${#ids[@]} = 0 ] && ids=(samples stdlib)
+    for id in "${ids[@]}"; do
+      l="$root/.tmp/repr-ocaml/native-check-$id.list"; mkdir -p "$(dirname "$l")"
+      corpus_list "$id" > "$l"
+      native_check_one "$id" "$CORPUS_BASE" "$l" || bad=1
+    done
+  fi
+  return $bad
+}
+
+# menhir [--check|--verify]: the native parser's tables from the tarball's parser.mly
+cmd_menhir() {
+  cmd_corpus_fetch >/dev/null
+  local mly="$TOP/parsing/parser.mly" sha
+  sha=$(sha256sum "$mly" | cut -d' ' -f1)
+  case "${1:-}" in
+    --check) MLY_SHA256=$sha rt_arbace_ns arbace.repr.ocaml.menhir check "$mly" "$TOP/boot/menhir/parser.ml" ;;
+    --verify) MLY_SHA256=$sha rt_arbace_ns arbace.repr.ocaml.menhir verify "$mly" "$root/arbace/repr/ocaml/tables.ae" ;;
+    "") MLY_SHA256=$sha rt_arbace_ns arbace.repr.ocaml.menhir generate "$mly" "$root/arbace/repr/ocaml/tables.ae" ;;
+    *) echo "usage: bin/repr-ocaml menhir [--check|--verify]" >&2; return 2 ;;
+  esac
+}
+
 # the shipped build embeds nothing of repr/ocaml and nothing its keys (bin/lib/version.bash) do not name (review 008, finding 3)
 cmd_embed_check() {
   . "$root/bin/lib/version.bash"
@@ -755,8 +865,26 @@ cmd_embed_check() {
     "$(arbace_exe)" "$root/test/ocaml/embed_check.ae" "$root" "$list"
 }
 
+# --reader native|helper before the other arguments of read and dump
+reader_opt() {
+  if [ "${1:-}" = "--reader" ]; then
+    case "${2:-}" in native|helper) READER=$2 ;; *) echo "repr-ocaml: --reader native|helper" >&2; exit 2 ;; esac
+    return 0
+  fi
+  return 1
+}
+
 case "${1:-}" in
-  read) shift; if [ "${1:-}" = "--full" ]; then shift; cmd_read_full "$@"; else cmd_read "$@"; fi ;;
+  read) shift
+    full=""
+    while [ $# -gt 0 ]; do
+      if [ "$1" = --full ]; then full=1; shift
+      elif reader_opt "$@"; then shift 2
+      else break; fi
+    done
+    if [ -n "$full" ]; then cmd_read_full "$@"; else cmd_read "$@"; fi ;;
+  native-check) shift; cmd_native_check "$@" ;;
+  menhir) shift; cmd_menhir "$@" ;;
   print) shift; cmd_print "$@" ;;
   roundtrip) shift; cmd_roundtrip "$@" ;;
   types) shift; cmd_dumps "types" "$@" ;;
@@ -764,17 +892,19 @@ case "${1:-}" in
   dumps) shift; cmd_dumps "types lambda" "$@" ;;
   check) cmd_roundtrip && cmd_roundtrip --spec ;;
   ocdump-build) cmd_ocdump_build ;;
-  dump) shift; cmd_dump "$@" ;;
+  dump) shift
+    if reader_opt "$@"; then shift 2; fi
+    if [ "$READER" = native ]; then rt_arbace_ns arbace.repr.ocaml.native dump "$@"; else cmd_dump "$@"; fi ;;
   corpus)
     case "${2:-}" in
       fetch) cmd_corpus_fetch ;;
       count) cmd_corpus_count_or_check count ;;
       check) cmd_corpus_count_or_check check ;;
-      *) sed -n '2,40p' "$0"; exit 2 ;;
+      *) sed -n '2,71p' "$0"; exit 2 ;;
     esac ;;
   samples) cmd_samples ;;
   spec-check) shift; cmd_spec_check "$@" ;;
   embed-check) cmd_embed_check ;;
   c2j-check) exec "$root/bin/lib/crops/c2j-check" ocaml ;;
-  *) sed -n '2,40p' "$0"; exit 2 ;;
+  *) sed -n '2,71p' "$0"; exit 2 ;;
 esac
