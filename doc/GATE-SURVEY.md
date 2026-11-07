@@ -2813,7 +2813,7 @@ check; a missing reference is not judged and fails; a selection leaves the contr
 | C `bin/repr-c check --tokens`, `parse-check`, `bin/ci annotations`, `bin/repr-c roundtrip` | P (queue 144; its judges' deftests pass on stage 0, 31 assertions; the runs over the corpora at the window; judged in the `--full` steps `c-tokens`, `c-parse`, `c-annotations`, `c-roundtrip`, their benchmarksgame parts): `test/c/controls.edn` `:lex`, `:pp`, `:gcc-digest`, `:tree`, `:annot`, `:roundtrip`, fannkuchredux.c against fasta-8.c | after the corpora, from the dumps the run keeps: `arbace.repr.c.ppcheck/token-controls` (`same-dump?`, `gcc-digest-agrees?`), `parsecheck/tree-controls` (`same-tree?`; `check-file` keeps the controls' dumps), `annot/annot-controls` (`annot-status`), `rtcheck/roundtrip-controls` (levels 3 and 4 crossed, `judge-row`); each in its judge's exit | not in `files.tsv`, the known files, the results files or the counts | none (the corpus's own dumps) |
 | C++ `bin/cppi runtime-build`, `bin/repr-cpp roundtrip`, `pp-check`; `bin/repr-llvm roundtrip` | M | | | |
 | repr/java `parse-check`, `front-check`, `attr-check`, `nojavac-check`, `roundtrip`, `check --jdk`, `check --suite` | M | | | |
-| repr/go `native-check`, `roundtrip`; repr/clojure `check` | M | | | |
+| repr/go `native-check`, `roundtrip`; repr/clojure `check` | repr/go P (GTS88 (b), below: `test/repr/go/native-controls.edn`, `test/repr/go/roundtrip-controls.txt`); repr/clojure M | | | |
 | `bin/generated-check`, `bin/j2g-edge verify`, `bin/provenance-check`, `bin/reap` | M (VM report 041's GTS110-GTS115 cover them) | | | |
 
 **The pairs**, each checked against the records here: C run, fannkuchredux.c and fasta.c (status 0 both, other stdout
@@ -4762,3 +4762,40 @@ commits for C++/LLVM, OCaml and Scheme, picked. `arbace_crop_paths` gained `bin/
 `mac/192-rotation-records` (SC233 (a), OC161 (a)) is not redone: the fragments read Scheme's and OCaml's records by an `:id-re`
 of one group (GTS213 (a)), which covers it. `python.edn` waits for Python's records night and the planner's `:slice-re`
 (GTS243 (a), with GTS240).
+
+## As built: GTS88 (b), repr/go's controls (write-ahead, branch `go-controls`, 2026-11-07)
+
+GTS81 (a)'s controls for repr/go's two check families, the Go crop's last missing ones (the Go crop's controls 0.25,
+`bin/crops-score`); and the one path in the Go crop's records.
+
+- **`bin/repr-go native-check`** (`test/repr/go/native-controls.edn`, one map a control: `:id`, `:subject`, `:reference`,
+  `:levels`): the native read of the subject's dump judged by each level's own comparison against the helper's dump of the
+  reference, which must differ: E-tree (`ps/diff` of the trees), E-ann (`same-package` of the annotated conversions),
+  E-forms (`forms-diff`: the `.ae` text in modes `:lines` and `:full`). `check-job` keeps what the controls' jobs
+  need (`kept`, registered from `--controls` before the run: the native tree, the helper's dump, both conversions, whether the
+  job's own comparison passed); `arbace.repr.go.annotate/control-verdicts` judges after the corpora. A level whose comparison
+  passes what differs prints `CONTROL FAILED` and counts as an unknown difference (exit 1); a level whose parts are missing (a
+  corpus or id not in the run, `--only`, the rotation) or whose subject's own comparison did not pass is left (`CONTROL left`).
+  Not in the headers' check, the records (`native-check-results.edn`), the known differences or the counts; the report gets
+  `:controls`. Four pairs, `amd64` errors/io and container/list/ring, `test` helloworld/printbig, `dirtest` closure5.dir/a
+  and ddd2.dir/ddd2, all pass their own comparison; their ids are `repr-go-native`'s `:rotate :always`, so each part that
+  holds them judges them in every tier (`REPR_GO_NATIVE_CONTROLS` names another file).
+- **`bin/repr-go roundtrip`** (`test/repr/go/roundtrip-controls.txt`, lines `KIND SUBJECT REFERENCE`): `package` and `test`
+  controls in `bin/lib/repr-go/check --controls FILE`: tools/gocmp compares the subject's candidate with the original of the
+  reference (a package's files staged under the reference's names in order, gocmp pairing files by name), which must fail at
+  the tree level (the row prints all three levels); the subject must be in the run and pass the tree level, else left.
+  `text` controls in `roundtrip --text` (`roundtrip_text_controls`): the printed file of the candidate against another file's
+  original under GOROOT, `cmp` (the text level's comparison is byte for byte). A control that passes fails the run (the
+  check's EXIT trap, whatever else the run decides; the text controls' status). The `--dirs` and `--tests` runs leave the
+  `package` and `test` controls (their subjects are not in those corpora): no directory-test control yet.
+- **Proved on samples** (`test/repr/go/controls-test.bash`, light, 16 s): native-check over `test/helloworld.go` and
+  `test/printbig.go` with the real control (exit 0, `CONTROL ok`, held at tree, ann and forms) and with a fabricated one that
+  crosses a program with itself (exit 1, `CONTROL FAILED`); the round trip's check over container/list and container/ring
+  likewise (a real control exit 0, a package against itself exit 1); `bin/repr-go read --full --print --text` of the two
+  packages with the real tree and text controls (`ok`), a fabricated text control (`FAILED`, status 1). The whole corpora's
+  runs are the night's.
+- **The record with a path**: `test/goi/check-aot-linux-amd64.edn`'s one row naming `/root/tamago-go/test/...` (gc's
+  "label already defined at PATH", `fixedbugs/issue14006.go`) now holds `${GOROOT}/test/...`: `bin/goi`'s `no_forms_row`
+  writes the Go tree's path as `${GOROOT}` in the message (`test/goi/judge-test.bash` checks it); no reader takes the message
+  but the divergences classes' pattern, which stops before it.
+- The change is to `arbace/repr/go/annotate.ae`, which the executables embed: the gate's key changes (all builds rerun).

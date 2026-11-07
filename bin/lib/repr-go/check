@@ -45,6 +45,12 @@
 #   --with-tests         packages with their _test.go files (gocmp -tests: the trees of all
 #                        files, the export data and code of the package and its test
 #                        variants), test-only packages included; work directory GOOS-GOARCH-tests
+#   --controls FILE      the negative controls (GTS81 (a), doc/GATE-SURVEY.md "As built: GTS88 (b)"): lines "KIND SUBJECT REFERENCE"
+#                        (KIND package or test; both the corpus entries' paths; # comments; other kinds,
+#                        text, are bin/repr-go roundtrip --text's): the candidate's SUBJECT compared by gocmp with the
+#                        ORIGINAL of REFERENCE, which must fail at the tree level. A control that passes fails the run
+#                        (exit 1, whatever else); one whose subject is not in the run, or does not pass tree there, is
+#                        left (reported). Rows CONTROL ok|FAILED|left KIND SUBJECT vs REFERENCE
 #   --reference FILE     results to compare with: an entry passing a level there and not here
 #                        is a regression, and so is an entry missing here (default: none; any
 #                        failure fails the run)
@@ -81,6 +87,7 @@ only=
 packages=1
 tests=1
 reference=
+controls=
 record=
 known=
 with_tests=
@@ -138,6 +145,7 @@ while [ $# -gt 0 ]; do
     --with-tests) with_tests=1; shift ;;
     --dirtests) dirtests=1; shift ;;
     --reference) reference=$2; shift 2 ;;
+    --controls) controls=$2; shift 2 ;;
     --record) record=$2; shift 2 ;;
     --known) known=$2; shift 2 ;;
     --make) mode=make; make_kind=$2; shift 2 ;;
@@ -358,6 +366,54 @@ results=$work/results.edn
 
 summary "$raw"
 echo "time: $elapsed s with $jobs jobs; results in ${results#$root/}, logs in ${work#$root/}/logs"
+
+# The negative controls: the subject's candidate against another entry's original, by gocmp, must fail
+ctl_status=0
+run_controls() {
+  [ -n "$controls" ] || return 0
+  [ -f "$controls" ] || { echo "no controls file $controls" >&2; exit 2; }
+  local kind subj ref a b sdir rdir log res st n=0 held=0 left=0 bad=0
+  while read -r kind subj ref _; do
+    case $kind in ''|'#'*|text) continue ;; esac
+    n=$((n + 1))
+    # the subject must be in the run, passing the tree level
+    if ! awk -F'\t' -v k="$kind" -v s="$subj" '$1 == k && $2 == s && $3 ~ /(^| )tree=pass( |$)/ { f = 1 } END { exit !f }' "$raw"; then
+      echo "CONTROL left $kind $subj vs $ref (the subject is not in this run, or does not pass the tree level)"; left=$((left + 1)); continue
+    fi
+    sdir=$(awk -F'\t' -v k="$kind" -v s="$subj" '$1 == k && $2 == s { print $3; exit }' "$corpus")
+    rdir=$(awk -F'\t' -v k="$kind" -v s="$ref" '$1 == k && $2 == s { print $3; exit }' "$corpus")
+    [ -n "$sdir" ] || sdir=$subj
+    [ -n "$rdir" ] || rdir=$ref
+    case $kind in
+      package)
+        # gocmp pairs a package's files by name: the subject's files are staged under the reference's names, in order
+        a=$goroot/src/$rdir; b=$work/controls/$(echo "$subj-vs-$ref" | tr '/ ' '__')
+        rm -rf "$b"; mkdir -p "$b"
+        mapfile -t sf < <(ls "$cand/src/$sdir" 2> /dev/null | grep '\.go$' | grep -v '_test\.go$' | LC_ALL=C sort)
+        mapfile -t rf < <(ls "$a" 2> /dev/null | grep '\.go$' | grep -v '_test\.go$' | LC_ALL=C sort)
+        if [ ${#sf[@]} -ne ${#rf[@]} ] || [ ${#sf[@]} -eq 0 ]; then
+          echo "CONTROL left $kind $subj vs $ref (the packages' files differ in number: ${#sf[@]} and ${#rf[@]})"; left=$((left + 1)); continue
+        fi
+        for i in "${!sf[@]}"; do cp "$cand/src/$sdir/${sf[$i]}" "$b/${rf[$i]}"; done ;;
+      test) a=$goroot/test/$rdir; b=$cand/test/$sdir ;;
+      *) echo "controls: kind $kind (package or test)" >&2; exit 2 ;;
+    esac
+    if [ ! -e "$a" ] || [ ! -e "$b" ]; then
+      echo "CONTROL left $kind $subj vs $ref (no $([ -e "$a" ] || echo "$a")$([ -e "$b" ] || echo " $b"))"; left=$((left + 1)); continue
+    fi
+    log=$work/logs/control-${kind}-$(echo "$subj-vs-$ref" | tr '/ ' '__').log
+    res=$("$0" --worker "$(printf '%s\t%s\t%s\t%s\t%s\t' "$kind" "$subj" "$a" "$b" "$log")")
+    st=$(echo "$res" | cut -f3)
+    case " $st " in
+      *" tree=fail "*) echo "CONTROL ok $kind $subj vs $ref ($st)"; held=$((held + 1)) ;;
+      *) echo "CONTROL FAILED $kind $subj vs $ref ($st): the comparison passes what differs"; bad=$((bad + 1)) ;;
+    esac
+  done < "$controls"
+  echo "controls ($controls): $n, $held hold, $left left, $bad fail"
+  [ "$bad" -eq 0 ] || ctl_status=1
+}
+run_controls
+trap 'rc=$?; [ "$rc" -eq 0 ] && [ "$ctl_status" -ne 0 ] && exit 1' EXIT
 
 # Known differences: lines "kind path level" of FILE's entries [KIND "PATH" [LEVEL ...] "reason"]
 known_levels() {
