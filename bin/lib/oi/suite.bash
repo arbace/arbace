@@ -166,7 +166,7 @@ cmd_suite_check() {
   awk -F'\t' '$2 == "run" { printf "%s%c%s%c%s%c%s%c%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0, $5, 0, $6, 0, $7, 0, $8, 0 }' "$OI_SELECTED" | xargs -0 -r -n 7 -P "$JOBS" bash -c 'suite_oi_one "$@"' _ > "$out.new"
   LC_ALL=C sort "$out.new" > "$out"; rm -f "$out.new"; oi_key "$S/corpus.tsv" > "$out.key"
   local mode=judge; [ "$RECORD" = 1 ] && mode=record
-  [ -n "$ONLY" ] && mode=$mode-only
+  { [ -n "$ONLY" ] || [ -n "$ONLY_LIST" ]; } && mode=$mode-only
   "$(arbace_exe)" "$root/test/ocaml/oi_check.ae" "$mode" "$out" "$S/corpus.tsv" "$SUITE_REFS" "$SUITE_OI" "$SUITE_OI_CLASSES" || return $?
   if [ "$RECORD" = 1 ]; then
     suite_header "$SUITE_OI" ';; oi'"'"'s results over the suite corpus (bin/oi suite check --record; doc/ocaml/OCAML-SURVEY.md, "As built: O7 (write-ahead)"):
@@ -253,7 +253,7 @@ cmd_suite_check_aot() {
   done
   LC_ALL=C sort "$out.new" > "$out"; rm -f "$out.new"; aot_key "$S/corpus.tsv" > "$out.key"
   local mode=judge; [ "$RECORD" = 1 ] && mode=record
-  [ -n "$ONLY" ] && mode=$mode-only
+  { [ -n "$ONLY" ] || [ -n "$ONLY_LIST" ]; } && mode=$mode-only
   "$(arbace_exe)" "$root/test/ocaml/o2j_check.ae" "$mode" "$out" "$S/corpus.tsv" "$SUITE_REFS" "$S/oi.tsv" "$SUITE_AOT" "$SUITE_AOT_CLASSES" || return $?
   if [ "$RECORD" = 1 ]; then
     suite_header "$SUITE_AOT" ';; The AOT level'"'"'s results over the suite corpus (bin/oi suite check --aot --record; doc/ocaml/OCAML-SURVEY.md, "As built: O7

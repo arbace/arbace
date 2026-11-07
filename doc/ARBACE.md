@@ -121,6 +121,36 @@ code. Three kinds of things live here:
   as Menhir 20250912 does and writes it as the generated `tables.ae`, `parser.ae` drives it as MenhirLib's engine
   (boot/menhir/menhirLib.ml of the same tarball) does (LICENSE.md: the OCaml Core System; Menhir and MenhirLib); the
   rest (the converter, the printer, the checks, `native.ae`) is Arbace's own.
+  Its native front end for oi (2026-11-05, doc/ocaml/TYPER.md), `repr/ocaml/typer.ae` and `repr/ocaml/typer/`
+  (`arbace.repr.ocaml.typer.*`), ports from the same tarball typing/'s types.ml, btype.ml, ctype.ml, predef.ml,
+  printtyp.ml, env.ml, typetexp.ml, typedecl.ml, datarepr.ml, patterns.ml, parmatch.ml, typecore.ml and typemod.ml's
+  structure items, and lambda/'s lambda.ml helpers, switch.ml, printlambda.ml's names, matching.ml, translcore.ml,
+  translprim.ml and translmod.ml's bytecode structure, then (T7) simplif.ml with lambda.ml's traversals and (T8)
+  typemod.ml, includemod.ml, mtype.ml, subst.ml, env.ml's module components, translmod.ml, tmc.ml, stdlib/format.ml's
+  engine and oprint.ml's printers, for the core language and the module system (the slice TYPER.md names), then (T9's
+  polymorphic variants, TYPER.md §11) types.ml's rows, btype.ml's row helpers and hash_variant, ctype.ml's
+  unify_row, unify_row_field, copy_row, build_subtype and enlarge_type, typetexp.ml's Ptyp_variant, typecore.ml's
+  variant expressions and patterns, build_or_pat, finalize_variant and type_coerce, parmatch.ml's full_match,
+  close_variant and pressure_variants, out_type.ml's rows and aliases, matching.ml's divide_variant and
+  combine_variant, switch.ml's test_sequence, translcore.ml's Texp_variant and translprim.ml's %loc_ primitives, then (T9's
+  objects and classes, TYPER.md §13) typeclass.ml (`typer/typeclass.ae`: class_structure, type_object, class_expr,
+  class_type, class_declarations, class_type_declarations) with ctype.ml's class signatures, object fields,
+  unify_fields, filter_method, limited_generalize, subtype_fields and build_subtype on objects, typetexp.ml's
+  Ptyp_object, Ptyp_class and transl_poly_type, typecore.ml's object expressions (type_send, instance variables,
+  overrides, Pexp_poly), out_type.ml's and oprint.ml's object types and class declarations, translobj.ml and
+  translclass.ml (`typer/translclass.ae`: shared constants, oo_wrap, the object and class initialisers, builtin
+  methods, cached classes), translcore.ml's object expressions and fuse_method_arity, translprim.ml's %send primitives
+  and simplif.ml's Lifused, then (T10's stdlib blockers, TYPER.md §15) typing/value_rec_check.ml's classify_expression
+  and lambda/value_rec_compiler.ml (`typer/valuerec.ae`: recursive values' kinds, sizes, function lifting and
+  compile_letrec), parmatch.ml's exhaust and build_other (`typer/parmatch.ae`) and typecore.ml's
+  check_counter_example_pat and partial_pred (`typer/typecore.ae`: GADT-aware exhaustiveness), then (T10's rest,
+  TYPER.md §20, 2026-11-06) typecore.ml's effect cases, let operators, check_apply_prim_type and constructor
+  disambiguation, translcore.ml's transl_handler and transl_letop, matching.ml's for_handler, lambda/debuginfo.ml's
+  Scoped_location (`typer/translcore.ae`: %loc_FUNCTION's scopes), typemod.ml's open of a module expression,
+  approx_modtype and transl_recmodule_modtypes, translmod.ml's Tstr_open and init_shape's classes, env.ml's
+  lookup_apply and normalize_modtype_path, ctype.ml's update_level scope expansion and eq_package_path, and (TY23,
+  TYPER.md §22) the modular explicits' Tfunctor of types.mli, ctype.ml, typetexp.ml, typecore.ml, typedtree.ml and oprint.ml, by hand, the
+  files carrying OCaml's notice (LICENSE.md: the OCaml Core System); the driver and its judge are Arbace's own.
 - Arbace's own namespaces of the program, not derived from Clojure: `box.ae` and `box/`
   (`arbace.box`, the store, over its host layer `arbace.box.host`; the box's build driver
   `arbace.box.build`, its plan `arbace.box.plan` (since GP2 also repr/go's native loader's go

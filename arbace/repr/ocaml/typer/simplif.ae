@@ -1,0 +1,454 @@
+;; Ported from OCaml 5.5.0 (the release tarball, SHA-256 fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba):
+;; lambda/simplif.ml (eliminate_ref, simplify_exits, simplify_lets, simplify_local_functions, simplify_lambda) and of
+;; lambda/lambda.ml the traversals it calls (free_variables, subst and rename, shallow_iter, shallow_map,
+;; find_exact_application), whose notice follows (LICENSE.md, "The OCaml Core System"):
+;;
+;;                                 OCaml
+;;
+;;             Xavier Leroy, projet Cristal, INRIA Rocquencourt
+;;
+;;   Copyright 1996 Institut National de Recherche en Informatique et
+;;     en Automatique.
+;;
+;;   All rights reserved.  This file is distributed under the terms of
+;;   the GNU Lesser General Public License version 2.1, with the
+;;   special exception on linking described in the file LICENSE.
+
+(ns arbace.repr.ocaml.typer.simplif
+  "Simplif (doc/ocaml/TYPER.md, T7): the raw Lambda of Translcore made what `ocamlc -dlambda` prints, for bytecode
+  without -g (Simplif's `optimize` true): simplify_local_functions, simplify_exits, simplify_lets (local references
+  as `mutlet`, aliases substituted, unused lets dropped, beta-reduction of applied functions, curried functions
+  fused when both may fuse their arity), then Tmc.rewrite (arbace.repr.ocaml.typer.tmc), which changes only functions marked
+  [@tail_mod_cons]. split_default_wrapper is not called by bytecode's
+  pipeline in 5.5.0. A function's attributes are the node's optional sixth element, a map
+  {:may-fuse-arity :local :inline :stub}; absent, Translcore's for a plain function (may_fuse_arity false)."
+  (:require [arbace.repr.ocaml.typer.types :as ty]
+            [arbace.repr.ocaml.typer.lambda :as l]
+            [arbace.string :as str])
+  (:import [java.util IdentityHashMap]))
+
+(set! *warn-on-reflection* false)
+
+(defn- fattr [f] (merge {:may-fuse-arity false :local :default :inline :default} (get f 5)))
+
+;; ---------------------------------------------------------------------------------------------
+;; lambda.ml's traversals
+
+(defn shallow-map [f l]
+  (case (l 0)
+    (:Lvar :Lmutvar :Lconst) l
+    :Lapply [:Lapply (f (l 1)) (mapv f (l 2))]
+    :Lfunction (assoc l 4 (f (l 4)))
+    :Llet [:Llet (l 1) (l 2) (l 3) (f (l 4)) (f (l 5))]
+    :Lmutlet [:Lmutlet (l 1) (l 2) (f (l 3)) (f (l 4))]
+    :Lletrec [:Lletrec (mapv (fn [[id d]] [id (assoc d 4 (f (d 4)))]) (l 1)) (f (l 2))]
+    :Lprim [:Lprim (l 1) (mapv f (l 2))]
+    :Lswitch (let [sw (l 2)]
+               [:Lswitch (f (l 1)) (assoc sw :consts (mapv (fn [[n e]] [n (f e)]) (:consts sw))
+                                          :blocks (mapv (fn [[n e]] [n (f e)]) (:blocks sw))
+                                          :fail (when (:fail sw) (f (:fail sw))))])
+    :Lstringswitch [:Lstringswitch (f (l 1)) (mapv (fn [[s e]] [s (f e)]) (l 2)) (when (l 3) (f (l 3)))]
+    :Lstaticraise [:Lstaticraise (l 1) (mapv f (l 2))]
+    :Lstaticcatch [:Lstaticcatch (f (l 1)) (l 2) (f (l 3))]
+    :Ltrywith [:Ltrywith (f (l 1)) (l 2) (f (l 3))]
+    :Lifthenelse [:Lifthenelse (f (l 1)) (f (l 2)) (f (l 3))]
+    :Lsequence [:Lsequence (f (l 1)) (f (l 2))]
+    :Lwhile [:Lwhile (f (l 1)) (f (l 2))]
+    :Lfor [:Lfor (l 1) (f (l 2)) (f (l 3)) (l 4) (f (l 5))]
+    :Lassign [:Lassign (l 1) (f (l 2))]
+    :Lsend [:Lsend (l 1) (f (l 2)) (f (l 3)) (mapv f (l 4))]
+    :Lifused [:Lifused (l 1) (f (l 2))]))
+
+(defn- seq-and-or? [l] (and (= :Lprim (l 0)) (#{"&&" "||"} (:name (l 1))) (= 2 (count (l 2)))))
+
+(defn shallow-iter [tail f l]
+  (case (l 0)
+    (:Lvar :Lmutvar :Lconst) nil
+    :Lapply (do (f (l 1)) (run! f (l 2)))
+    :Lfunction (f (l 4))
+    :Llet (do (f (l 4)) (tail (l 5)))
+    :Lmutlet (do (f (l 3)) (tail (l 4)))
+    :Lletrec (do (tail (l 2)) (run! (fn [[_ d]] (f d)) (l 1)))
+    :Lprim (if (seq-and-or? l) (do (f ((l 2) 0)) (tail ((l 2) 1))) (run! f (l 2)))
+    :Lswitch (let [sw (l 2)]
+               (f (l 1)) (run! (fn [[_ e]] (tail e)) (:consts sw)) (run! (fn [[_ e]] (tail e)) (:blocks sw))
+               (when (:fail sw) (tail (:fail sw))))
+    :Lstringswitch (do (f (l 1)) (run! (fn [[_ e]] (tail e)) (l 2)) (when (l 3) (tail (l 3))))
+    :Lstaticraise (run! f (l 2))
+    :Lstaticcatch (do (tail (l 1)) (tail (l 3)))
+    :Ltrywith (do (f (l 1)) (tail (l 3)))
+    :Lifthenelse (do (f (l 1)) (tail (l 2)) (tail (l 3)))
+    :Lsequence (do (f (l 1)) (tail (l 2)))
+    :Lwhile (do (f (l 1)) (f (l 2)))
+    :Lfor (do (f (l 2)) (f (l 3)) (f (l 5)))
+    :Lassign (f (l 2))
+    :Lsend (do (f (l 2)) (f (l 3)) (run! f (l 4)))
+    :Lifused (f (l 2))))
+
+(defn free-variables [l]
+  (let [fv free-variables
+        fvs (fn [ls] (reduce into #{} (map fv ls)))]
+    (case (l 0)
+      (:Lvar :Lmutvar) #{(l 1)}
+      :Lconst #{}
+      :Lapply (into (fv (l 1)) (fvs (l 2)))
+      :Lfunction (apply disj (fv (l 4)) (map first (l 2)))
+      :Llet (into (fv (l 4)) (disj (fv (l 5)) (l 3)))
+      :Lmutlet (into (fv (l 3)) (disj (fv (l 4)) (l 2)))
+      :Lletrec (apply disj (into (fv (l 2)) (fvs (map second (l 1)))) (map first (l 1)))
+      :Lprim (fvs (l 2))
+      :Lswitch (let [sw (l 2)]
+                 (cond-> (into (fv (l 1)) (fvs (concat (map second (:consts sw)) (map second (:blocks sw)))))
+                   (:fail sw) (into (fv (:fail sw)))))
+      :Lstringswitch (cond-> (into (fv (l 1)) (fvs (map second (l 2)))) (l 3) (into (fv (l 3))))
+      :Lstaticraise (fvs (l 2))
+      :Lstaticcatch (into (apply disj (fv (l 3)) (map first (second (l 2)))) (fv (l 1)))
+      :Ltrywith (into (disj (fv (l 3)) (l 2)) (fv (l 1)))
+      :Lifthenelse (fvs [(l 1) (l 2) (l 3)])
+      (:Lsequence :Lwhile) (fvs [(l 1) (l 2)])
+      :Lfor (into (fvs [(l 2) (l 3)]) (disj (fv (l 5)) (l 1)))
+      :Lassign (conj (fv (l 2)) (l 1))
+      :Lsend (fvs (into [(l 2) (l 3)] (l 4)))
+      :Lifused (fv (l 2)))))
+
+(defn subst
+  "Lambda.subst without environments: s maps free identifiers to Lambda, bound ones kept (freshen false)"
+  [s lam]
+  (letfn [(go [bound l]
+            (case (l 0)
+              (:Lvar :Lmutvar) (if (contains? bound (l 1)) l (get s (l 1) l))
+              :Lconst l
+              :Lapply [:Lapply (go bound (l 1)) (mapv #(go bound %) (l 2))]
+              :Lfunction (assoc l 4 (go (into bound (map first (l 2))) (l 4)))
+              :Llet [:Llet (l 1) (l 2) (l 3) (go bound (l 4)) (go (conj bound (l 3)) (l 5))]
+              :Lmutlet [:Lmutlet (l 1) (l 2) (go bound (l 3)) (go (conj bound (l 2)) (l 4))]
+              :Lletrec (let [b (into bound (map first (l 1)))]
+                         [:Lletrec (mapv (fn [[id d]] [id (go b d)]) (l 1)) (go b (l 2))])
+              :Lstaticcatch [:Lstaticcatch (go bound (l 1)) (l 2) (go (into bound (map first (second (l 2)))) (l 3))]
+              :Ltrywith [:Ltrywith (go bound (l 1)) (l 2) (go (conj bound (l 2)) (l 3))]
+              :Lfor [:Lfor (l 1) (go bound (l 2)) (go bound (l 3)) (l 4) (go (conj bound (l 1)) (l 5))]
+              (shallow-map #(go bound %) l)))]
+    (go #{} lam)))
+
+(defn rename
+  "Lambda.rename: identifiers to identifiers (Lvar and Lmutvar keep their kind; an assigned one renamed too)"
+  [idmap lam]
+  (letfn [(go [bound l]
+            (let [r (fn [id] (if (contains? bound id) id (get idmap id id)))]
+              (case (l 0)
+                :Lvar [:Lvar (r (l 1))]
+                :Lmutvar [:Lmutvar (r (l 1))]
+                :Lassign [:Lassign (r (l 1)) (go bound (l 2))]
+                :Lifused [:Lifused (r (l 1)) (go bound (l 2))]
+                :Lconst l
+                :Lfunction (assoc l 4 (go (into bound (map first (l 2))) (l 4)))
+                :Llet [:Llet (l 1) (l 2) (l 3) (go bound (l 4)) (go (conj bound (l 3)) (l 5))]
+                :Lmutlet [:Lmutlet (l 1) (l 2) (go bound (l 3)) (go (conj bound (l 2)) (l 4))]
+                :Lletrec (let [b (into bound (map first (l 1)))]
+                           [:Lletrec (mapv (fn [[id d]] [id (go b d)]) (l 1)) (go b (l 2))])
+                :Lstaticcatch [:Lstaticcatch (go bound (l 1)) (l 2) (go (into bound (map first (second (l 2)))) (l 3))]
+                :Ltrywith [:Ltrywith (go bound (l 1)) (l 2) (go (conj bound (l 2)) (l 3))]
+                :Lfor [:Lfor (l 1) (go bound (l 2)) (go bound (l 3)) (l 4) (go (conj bound (l 1)) (l 5))]
+                (shallow-map #(go bound %) l))))]
+    (go #{} lam)))
+
+(defn find-exact-application [kind arity args]
+  (case kind
+    :curried (when (= arity (count args)) args)
+    :tupled (when (= 1 (count args))
+              (let [a (first args)]
+                (cond
+                  (and (= :Lprim (a 0)) (= :makeblock (:kind (a 1))))
+                  (when (= arity (count (a 2))) (a 2))
+                  (and (= :Lconst (a 0)) (= :block ((a 1) 0)))
+                  (when (= arity (count ((a 1) 2))) (mapv (fn [c] [:Lconst c]) ((a 1) 2))))))))
+
+(defn- exact-application [f args] (find-exact-application (f 1) (count (f 2)) args))
+
+(defn- beta-reduce [params body args]
+  (reduce (fn [l [[p k] a]] [:Llet :strict k p a l]) body (map vector params args)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Local references (eliminate_ref)
+
+(defn- real-reference [] (throw (ex-info "real reference" {::real-reference true})))
+
+(defn- check-function-escape [id f]
+  (when (contains? (free-variables (f 4)) id) (real-reference)))
+
+(defn- field0? [p] (and (= :field (:kind p)) (= 0 (:pos p))))
+(defn- setfield0? [p] (boolean (re-matches #"setfield_\S+ 0" (:name p))))
+(defn- offsetref [p] (when-let [[_ n] (re-matches #"\+:=(-?[0-9]+)" (:name p))] (Long/parseLong n)))
+
+(defn eliminate-ref [id lam]
+  (letfn [(go [l]
+            (case (l 0)
+              :Lvar (if (= (l 1) id) (real-reference) l)
+              (:Lmutvar :Lconst) l
+              :Lfunction (do (check-function-escape id l) l)
+              :Lletrec (do (run! (fn [[_ d]] (check-function-escape id d)) (l 1)) [:Lletrec (l 1) (go (l 2))])
+              :Lprim (let [p (l 1) args (l 2) v0? (fn [] (and (seq args) (= [:Lvar id] (first args))))]
+                       (cond
+                         (and (field0? p) (= 1 (count args)) (v0?)) [:Lmutvar id]
+                         (and (setfield0? p) (= 2 (count args)) (v0?)) [:Lassign id (go (second args))]
+                         (and (offsetref p) (= 1 (count args)) (v0?))
+                         [:Lassign id [:Lprim (l/poffsetint (offsetref p)) [[:Lmutvar id]]]]
+                         :else [:Lprim p (mapv go args)]))
+              (shallow-map go l)))]
+    (go lam)))
+
+;; ---------------------------------------------------------------------------------------------
+;; simplify_exits
+
+(defn simplify-exits [lam]
+  (let [exits (atom {})
+        get-exit (fn [i] (get @exits i {:count 0 :max-depth 0}))
+        incr-exit (fn [i nb d] (swap! exits update i (fn [r] (if r {:count (+ (:count r) nb) :max-depth (max (:max-depth r) d)}
+                                                                {:count nb :max-depth d}))))]
+    (letfn [(cnt [td l]
+              (case (l 0)
+                (:Lvar :Lmutvar :Lconst) nil
+                :Lapply (do (cnt td (l 1)) (run! #(cnt td %) (l 2)))
+                :Lfunction (cnt td (l 4))
+                :Llet (do (cnt td (l 5)) (cnt td (l 4)))
+                :Lmutlet (do (cnt td (l 4)) (cnt td (l 3)))
+                :Lletrec (do (run! (fn [[_ d]] (cnt td (d 4))) (l 1)) (cnt td (l 2)))
+                :Lprim (run! #(cnt td %) (l 2))
+                :Lswitch (let [sw (l 2)]
+                           (count-default td sw) (cnt td (l 1))
+                           (run! (fn [[_ e]] (cnt td e)) (:consts sw)) (run! (fn [[_ e]] (cnt td e)) (:blocks sw)))
+                :Lstringswitch (do (cnt td (l 1)) (run! (fn [[_ e]] (cnt td e)) (l 2))
+                                   (when-let [d (l 3)]
+                                     (if (<= (count (l 2)) 1) (cnt td d) (do (cnt td d) (cnt td d)))))
+                :Lstaticraise (do (incr-exit (l 1) 1 td) (run! #(cnt td %) (l 2)))
+                :Lstaticcatch (let [[i xs] (l 2) h (l 3)]
+                                (if (and (empty? xs) (= :Lstaticraise (h 0)) (empty? (h 2)))
+                                  (do (cnt td (l 1))
+                                      (let [ic (get-exit i)] (incr-exit (h 1) (:count ic) (max td (:max-depth ic)))))
+                                  (do (cnt td (l 1))
+                                      (when (pos? (:count (get-exit i))) (cnt td h)))))
+                :Ltrywith (do (cnt (inc td) (l 1)) (cnt td (l 3)))
+                :Lifthenelse (do (cnt td (l 1)) (cnt td (l 2)) (cnt td (l 3)))
+                (:Lsequence :Lwhile) (do (cnt td (l 1)) (cnt td (l 2)))
+                :Lfor (do (cnt td (l 2)) (cnt td (l 3)) (cnt td (l 5)))
+                :Lassign (cnt td (l 2))
+                :Lsend (run! #(cnt td %) (into [(l 2) (l 3)] (l 4)))
+                :Lifused (cnt td (l 2))))
+            (count-default [td sw]
+              (when-let [al (:fail sw)]
+                (if (and (< (count (:consts sw)) (:numconsts sw)) (< (count (:blocks sw)) (:numblocks sw)))
+                  (do (cnt td al) (cnt td al))
+                  (cnt td al))))]
+      (cnt 0 lam))
+    (let [subst-tbl (atom {})]
+      (letfn [(simp [td l]
+                (case (l 0)
+                  (:Lvar :Lmutvar :Lconst) l
+                  :Lprim (let [ll (mapv #(simp td %) (l 2)) p (l 1)]
+                           (if (and (= "caml_obj_with_tag" (:name p)) (= 2 (count ll)) (= :Lconst ((ll 0) 0))
+                                    (= :int (((ll 0) 1) 0)))
+                             (let [tag (((ll 0) 1) 1) b (ll 1)]
+                               (cond
+                                 (and (= :Lprim (b 0)) (= :makeblock (:kind (b 1))))
+                                 [:Lprim (assoc (b 1) :name (str/replace-first (:name (b 1)) #"^(makeblock|makemutable) [0-9]+"
+                                                                                          (str "$1 " tag))) (b 2)]
+                                 (and (= :Lconst (b 0)) (= :block ((b 1) 0))) [:Lconst [:block tag ((b 1) 2)]]
+                                 :else [:Lprim p ll]))
+                             [:Lprim p ll]))
+                  :Lstaticraise (let [i (l 1)]
+                                  (if (empty? (l 2))
+                                    (if-let [[_ h] (get @subst-tbl i)] h l)
+                                    (let [ls (mapv #(simp td %) (l 2))]
+                                      (if-let [[xs h] (get @subst-tbl i)]
+                                        (let [ys (mapv (fn [[x k]] [(ty/ident-rename x) k]) xs)
+                                              env (zipmap (map first xs) (map first ys))]
+                                          (reduce (fn [r [[y k] a]] [:Llet :strict k y a r]) (rename env h) (map vector ys ls)))
+                                        [:Lstaticraise i ls]))))
+                  :Lstaticcatch (let [[i xs] (l 2) h (l 3)]
+                                  (if (and (empty? xs) (= :Lstaticraise (h 0)) (empty? (h 2)))
+                                    (do (swap! subst-tbl assoc i [[] (simp td h)]) (simp td (l 1)))
+                                    (let [{c :count md :max-depth} (get-exit i)]
+                                      (cond
+                                        (zero? c) (simp td (l 1))
+                                        (and (= 1 c) (<= md td))
+                                        (do (swap! subst-tbl assoc i [xs (simp td h)]) (simp td (l 1)))
+                                        :else [:Lstaticcatch (simp td (l 1)) (l 2) (simp td h)]))))
+                  :Ltrywith (let [b (simp (inc td) (l 1))] [:Ltrywith b (l 2) (simp td (l 3))])
+                  (shallow-map #(simp td %) l)))]
+        (simp 0 lam)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; simplify_lets
+
+(defn- shape-kind
+  "The value kind of a one-field mutable block's shape as its printed name gives it"
+  [p]
+  (when-let [[_ _ s] (re-matches #"makemutable 0( \((.*)\))?" (:name p))]
+    (case s nil "" "*" "" "int" "[int]" "float" "[float]" "int32" "[int32]" "int64" "[int64]" "nativeint" "[nativeint]" nil)))
+
+(defn simplify-lets [lam]
+  (let [occ (atom {})
+        count-var (fn [v] (if-let [r (get @occ v)] @r 0))
+        bind-var (fn [bv v] (let [r (atom 0)] (swap! occ assoc v r) (assoc bv v r)))
+        use-var (fn [bv v n] (if-let [r (get bv v)] (swap! r + n) (when-let [r (get @occ v)] (swap! r + 2))))]
+    (letfn [(cnt [bv l]
+              (case (l 0)
+                (:Lconst :Lmutvar) nil
+                :Lvar (use-var bv (l 1) 1)
+                :Lapply (let [f (l 1) args (l 2)
+                              no-opt (fn [] (cnt bv f) (run! #(cnt bv %) args))]
+                          (if (= :Lfunction (f 0))
+                            (if-let [ea (exact-application f args)]
+                              (cnt bv (beta-reduce (f 2) (f 4) ea))
+                              (no-opt))
+                            (no-opt)))
+                :Lfunction (cnt {} (l 4))
+                :Llet (let [v (l 3) e1 (l 4)]
+                        (if (= :Lvar (e1 0))
+                          (do (cnt (bind-var bv v) (l 5)) (use-var bv (e1 1) (count-var v)))
+                          (do (cnt (bind-var bv v) (l 5))
+                              (when (or (= :strict (l 1)) (pos? (count-var v))) (cnt bv e1)))))
+                :Lmutlet (do (cnt bv (l 3)) (cnt bv (l 4)))
+                :Lletrec (do (run! (fn [[_ d]] (cnt {} (d 4))) (l 1)) (cnt bv (l 2)))
+                :Lprim (run! #(cnt bv %) (l 2))
+                :Lswitch (let [sw (l 2)]
+                           (when-let [al (:fail sw)]
+                             (if (and (< (count (:consts sw)) (:numconsts sw)) (< (count (:blocks sw)) (:numblocks sw)))
+                               (do (cnt bv al) (cnt bv al))
+                               (cnt bv al)))
+                           (cnt bv (l 1))
+                           (run! (fn [[_ e]] (cnt bv e)) (:consts sw)) (run! (fn [[_ e]] (cnt bv e)) (:blocks sw)))
+                :Lstringswitch (do (cnt bv (l 1)) (run! (fn [[_ e]] (cnt bv e)) (l 2))
+                                   (when-let [d (l 3)] (if (<= (count (l 2)) 1) (cnt bv d) (do (cnt bv d) (cnt bv d)))))
+                :Lstaticraise (run! #(cnt bv %) (l 2))
+                (:Lstaticcatch :Ltrywith) (do (cnt bv (l 1)) (cnt bv (l 3)))
+                :Lifthenelse (do (cnt bv (l 1)) (cnt bv (l 2)) (cnt bv (l 3)))
+                :Lsequence (do (cnt bv (l 1)) (cnt bv (l 2)))
+                :Lwhile (do (cnt {} (l 1)) (cnt {} (l 2)))
+                :Lfor (do (cnt bv (l 2)) (cnt bv (l 3)) (cnt {} (l 5)))
+                :Lassign (cnt bv (l 2))
+                :Lsend (run! #(cnt bv %) (into [(l 2) (l 3)] (l 4)))
+                :Lifused (when (pos? (count-var (l 1))) (cnt bv (l 2)))))]
+      (cnt {} lam))
+    (let [subst-tbl (atom {})
+          mklet (fn [str k v e1 e2] (if (= e2 [:Lvar v]) e1 [:Llet str k v e1 e2]))
+          mkmutlet (fn [k v e1 e2] (if (= e2 [:Lmutvar v]) e1 [:Lmutlet k v e1 e2]))]
+      (letfn [(simp [l]
+                (case (l 0)
+                  :Lvar (get @subst-tbl (l 1) l)
+                  (:Lmutvar :Lconst) l
+                  :Lapply (let [f (l 1) args (l 2)
+                                no-opt (fn [] [:Lapply (simp f) (mapv simp args)])]
+                            (if (= :Lfunction (f 0))
+                              (if-let [ea (exact-application f args)] (simp (beta-reduce (f 2) (f 4) ea)) (no-opt))
+                              (no-opt)))
+                  :Lfunction (let [b (simp (l 4))]
+                               (if (and (= :Lfunction (b 0)) (= :curried (b 1)) (= :curried (l 1))
+                                        (:may-fuse-arity (fattr l)) (:may-fuse-arity (fattr b)))
+                                 (let [f [:Lfunction (l 1) (into (l 2) (b 2)) (b 3) (b 4)]]
+                                   (if (get b 5) (conj f (get b 5)) f))
+                                 (assoc l 4 b)))
+                  :Llet (let [[_ str k v e1 e2] l]
+                          (cond
+                            (= :Lvar (e1 0)) (do (swap! subst-tbl assoc v (simp e1)) (simp e2))
+                            (and (= :strict str) (= :Lprim (e1 0)) (shape-kind (e1 1)) (= 1 (count (e1 2))))
+                            (let [sinit (simp ((e1 2) 0)) sbody (simp e2)]
+                              (try (mkmutlet (shape-kind (e1 1)) v sinit (eliminate-ref v sbody))
+                                   (catch arbace.lang.ExceptionInfo x
+                                     (if (::real-reference (ex-data x))
+                                       (mklet :strict k v [:Lprim (e1 1) [sinit]] sbody)
+                                       (throw x)))))
+                            (= :alias str) (case (count-var v)
+                                             0 (simp e2)
+                                             1 (do (swap! subst-tbl assoc v (simp e1)) (simp e2))
+                                             [:Llet :alias k v (simp e1) (simp e2)])
+                            (= :strictopt str) (if (zero? (count-var v)) (simp e2) (mklet :strictopt k v (simp e1) (simp e2)))
+                            :else (mklet str k v (simp e1) (simp e2))))
+                  :Lmutlet (mkmutlet (l 1) (l 2) (simp (l 3)) (simp (l 4)))
+                  :Lifused (if (pos? (count-var (l 1))) (simp (l 2)) (l/lconst-int 0))
+                  :Lsequence (let [a (l 1)]
+                               (if (= :Lifused (a 0))
+                                 (if (pos? (count-var (a 1))) [:Lsequence (simp (a 2)) (simp (l 2))] (simp (l 2)))
+                                 [:Lsequence (simp a) (simp (l 2))]))
+                  (shallow-map simp l)))]
+        (simp lam)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; simplify_local_functions
+
+(defn- enabled? [f]
+  (let [{:keys [local inline]} (fattr f)]
+    (or (= local :always) (and (= local :default) (#{:never :default} inline)))))
+
+(defn simplify-local-functions [lam]
+  (let [slots (atom {})                  ; id -> {:func :function-scope :scope (atom nil)}
+        static-id (atom {})
+        static (IdentityHashMap.)        ; scope -> [[st lf]...], the newest first
+        current-scope (atom lam)
+        current-function-scope (atom lam)]
+    (letfn [(tail [l]
+              (cond
+                (and (= :Llet (l 0)) (= :Lfunction ((l 4) 0)) (enabled? (l 4)))
+                (let [id (l 3) lf (l 4) cont (l 5)
+                      r {:func lf :function-scope @current-function-scope :scope (atom nil)}]
+                  (swap! slots assoc id r)
+                  (tail cont)
+                  (let [s (get @slots id)]
+                    (if (and s @(:scope s))
+                      (let [scope @(:scope s)
+                            st (l/next-raise-count)
+                            sc (if (identical? scope @current-scope) cont scope)]
+                        (swap! static-id assoc id st)
+                        (.put static sc (cons [st lf] (.get static sc)))
+                        (with-scope scope (lf 4)))
+                      (function-definition lf))))
+                (and (= :Lapply (l 0)) (= :Lvar ((l 1) 0)))
+                (let [id ((l 1) 1) args (l 2) s (get @slots id)]
+                  (when s
+                    (cond
+                      (nil? (exact-application (:func s) args)) (swap! slots dissoc id)
+                      (and @(:scope s) (not (identical? @(:scope s) @current-scope))) (swap! slots dissoc id)
+                      (not (identical? (:function-scope s) @current-function-scope)) (swap! slots dissoc id)
+                      (nil? @(:scope s)) (reset! (:scope s) @current-scope)
+                      :else nil))
+                  (run! non-tail args))
+                (= :Lvar (l 0)) (swap! slots dissoc (l 1))
+                (= :Lfunction (l 0)) (function-definition l)
+                :else (shallow-iter tail non-tail l)))
+            (non-tail [l] (with-scope l l))
+            (function-definition [lf]
+              (let [old @current-function-scope]
+                (reset! current-function-scope (lf 4))
+                (non-tail (lf 4))
+                (reset! current-function-scope old)))
+            (with-scope [scope l]
+              (let [old @current-scope]
+                (reset! current-scope scope)
+                (tail l)
+                (reset! current-scope old)))]
+      (tail lam))
+    (if (.isEmpty static)
+      lam
+      (letfn [(rewrite [lam0]
+                (let [lm (cond
+                           (and (= :Llet (lam0 0)) (contains? @static-id (lam0 3))) (rewrite (lam0 5))
+                           (and (= :Lapply (lam0 0)) (= :Lvar ((lam0 1) 0)) (contains? @static-id ((lam0 1) 1)))
+                           (let [id ((lam0 1) 1) st (get @static-id id) s (get @slots id)]
+                             [:Lstaticraise st (mapv rewrite (exact-application (:func s) (lam0 2)))])
+                           :else (shallow-map rewrite lam0))]
+                  (reduce (fn [acc [st lf]] [:Lstaticcatch acc [st (lf 2)] (rewrite (lf 4))])
+                          lm (reverse (.get static lam0)))))]
+        (rewrite lam)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The entry point
+
+(def ^:dynamic *tmc-rewrite* "Tmc.rewrite, set by arbace.repr.ocaml.typer.tmc" identity)
+
+(defn simplify-lambda [lam]
+  (-> lam simplify-local-functions simplify-exits simplify-lets *tmc-rewrite*))
+
+(defn simplify-program
+  "The program [:program unit size required code] with its code simplified"
+  [p]
+  (assoc p 4 (simplify-lambda (p 4))))

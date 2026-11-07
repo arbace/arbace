@@ -24,7 +24,8 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   repr-scheme repr-scheme-roundtrip-record si-essential si-aot-essential scheme-read-essential scheme-essential \
   repr-python-lex-check repr-python-lex-record repr-python-pegen repr-python-pegen-check repr-python-parse-check repr-python-parse-record repr-python-ast-check repr-python-records-record repr-python-records-verify pyi-lib-test-record pyi-runtime-tables pyi-aot pyi-aot-check pyi-aot-check-record pyi-bench pyi-bench-record pyi-check pyi-check-record pyi-divergences pyi-cover pyi-c2j-check pyi-table-check pyi-clib-build pyi-clib-verify python-essential \
   oi-check-compiled check-makefile \
-  repr-ocaml-native-check repr-ocaml-menhir
+  repr-ocaml-native-check repr-ocaml-menhir \
+  oi-typer-check oi-stdlib-check oi-check-native oi-typer-probe oi-repl-check-native
 
 help: ## list the targets
 	@awk 'BEGIN {FS = ":.*## "} /^## / {printf "\n%s\n", substr($$0, 4)} \
@@ -526,8 +527,20 @@ oi-stdlib: ## O5: the stdlib built by ocamlc in dependency order and its Lambda 
 	bin/oi stdlib
 oi-build: ## O5: oi's light driver, go/arbace/oi's forms printed by repr/go and built by TamaGo's go (bin/oi build)
 	bin/oi build
+oi-typer-check: ## oi's native front end (doc/ocaml/TYPER.md): test/ocaml/typer/'s samples typed and translated to Lambda by Arbace, against the committed oracle's signatures, raw and simplified Lambda, then run on oi against the toplevel's outputs (bin/oi typer-check)
+	bin/oi typer-check
+
+oi-stdlib-check: ## the stdlib's units typed natively (doc/ocaml/TYPER.md, T8) against bin/oi stdlib's Lambda, the typer's samples run on oi with the equal units native (bin/oi stdlib-check)
+	bin/oi stdlib-check
+
 oi-check: ## O5: the testsuite's run programs on oi against ocamlc's recorded runs, every non-pass classed (bin/oi check)
 	bin/oi check
+oi-check-native: ## T11 (doc/ocaml/TYPER.md): the run programs typed and translated by Arbace's typer and run on oi, against ocamlc's runs (test/ocaml/check-oi-native.edn) and compared with ocamlc's path (bin/oi check --native)
+	bin/oi check --native
+oi-typer-probe: ## T11: the run corpus's signatures and Lambda from Arbace's typer against the oracle's (bin/oi typer-probe)
+	bin/oi typer-probe
+oi-repl-check-native: ## T11: the recorded toplevel session with each phrase typed by Arbace's typer, against the ocaml toplevel's (bin/oi repl-check --native)
+	bin/oi repl-check --native
 oi-divergences: ## O5: oi's recorded results against test/ocaml/divergences.edn's classes (bin/oi divergences)
 	bin/oi divergences
 oi-record-ref: ## O5: ocamlc's and ocamlopt's runs of oi's run corpus recorded into test/ocaml/ref-ocaml55.edn (bin/oi record-ref)

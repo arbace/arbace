@@ -2124,3 +2124,18 @@ hand cases are the check of the warnings.)
   `-keywords` with an ill-formed version (Arg.Bad), `-unsafe` and the other flags that change the parse.
 - Format ported as far as messages need it (one box with `@ ` hints); nested boxes would need more.
 - The whole corpora and the gate (OC170, OC171) as before.
+
+## As built: oi's native front end, the first slice (2026-11-05)
+
+OC4 (b)'s route, begun on the branch `ocaml-typer`: doc/ocaml/TYPER.md (the port of typing/ and lambda/'s Translcore
+with Matching, `arbace/repr/ocaml/typer/`; `bin/oi typer-check`, `run-native`). The core language's samples
+(test/ocaml/typer/, 36) are typed with the toplevel's printed types, translated to Lambda equal to the oracle's raw
+translation, and run on oi with the toplevel's output; modules, formats, objects and the rest are TYPER.md's T7-T12.
+Proposals TY1-TY6 there.
+
+## As built: oi's native front end, T7 and T8 (2026-11-05)
+
+On the branch `ocaml-typer2`: Simplif (T7) and the module system with the stdlib typed natively unit by unit (T8),
+doc/ocaml/TYPER.md §9: 52 of 52 samples equal at every level (types, raw and simplified Lambda, oi's runs), the
+oracle's dumps committed (TY2), the stdlib 64 of 71 units equal natively (`bin/oi stdlib-check`; GADTs, formats and
+type extensions pulled forward from T9-T10 for it), the probe 31 of 36; proposals TY7-TY10 (TYPER.md §10).

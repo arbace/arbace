@@ -1,0 +1,258 @@
+;; Ported from OCaml 5.5.0 (the release tarball, SHA-256 fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba):
+;; lambda/translmod.ml for bytecode (apply_coercion, compose_coercions, compile_functor, transl_module,
+;; transl_structure and transl_struct_item, transl_implementation), whose notice follows (LICENSE.md, "The OCaml Core
+;; System"):
+;;
+;;                                 OCaml
+;;
+;;             Xavier Leroy, projet Cristal, INRIA Rocquencourt
+;;
+;;   Copyright 1996 Institut National de Recherche en Informatique et
+;;     en Automatique.
+;;
+;;   All rights reserved.  This file is distributed under the terms of
+;;   the GNU Lesser General Public License version 2.1, with the
+;;   special exception on linking described in the file LICENSE.
+
+(ns arbace.repr.ocaml.typer.translmod
+  "Translmod (doc/ocaml/TYPER.md, T8): modules, functors and their applications, coercions, the structure's block,
+  the compilation unit's program. A functor's Lfunction carries Translmod's attributes {:may-fuse-arity true}
+  (Simplif fuses curried functors)."
+  (:require [arbace.repr.ocaml.typer.types :as ty]
+            [arbace.repr.ocaml.typer.env :as env]
+            [arbace.repr.ocaml.typer.lambda :as l]
+            [arbace.repr.ocaml.typer.matching :as m]
+            [arbace.repr.ocaml.typer.translcore :as tr]
+            [arbace.repr.ocaml.typer.simplif :as s]))
+
+(set! *warn-on-reflection* false)
+
+(def ^:private functor-attr {:may-fuse-arity true :functor true})
+
+(defn- name-lambda [strict arg f]
+  (if (= :Lvar (arg 0))
+    (f (arg 1))
+    (let [id (ty/ident-create "let")] [:Llet strict "" id arg (f id)])))
+
+(defn- field-mut [pos lam] (if (neg? pos) l/lambda-unit [:Lprim (l/pfield pos :pointer true) [lam]]))
+
+(defn apply-coercion
+  "Translmod.apply_coercion"
+  [strict cc arg]
+  (if (nil? cc)
+    arg
+    (case (cc 0)
+      :structure (name-lambda strict arg
+                              (fn [id]
+                                [:Lprim (l/pmakeblock 0 false nil)
+                                 (mapv (fn [[pos c]] (apply-coercion :alias c (field-mut pos [:Lvar id]))) (cc 1))]))
+      :functor (let [param (ty/ident-create "funarg")
+                     carg (apply-coercion :alias (cc 1) [:Lvar param])]
+                 (name-lambda strict arg
+                              (fn [id]
+                                [:Lfunction :curried [[param ""]] ""
+                                 (apply-coercion :strict (cc 2) [:Lapply [:Lvar id] [carg]])
+                                 {:may-fuse-arity true :functor true :stub true}])))
+      :primitive (tr/transl-primitive (cc 1) (cc 2))
+      :alias (let [lam (tr/transl-module-path (cc 1))]
+               (name-lambda strict arg (fn [_] (apply-coercion :alias (cc 2) lam)))))))
+
+(defn compose-coercions [c1 c2]
+  (cond
+    (nil? c1) c2
+    (nil? c2) c1
+    (and (= :structure (c1 0)) (= :structure (c2 0)))
+    (let [v2 (vec (c2 1))]
+      [:structure (mapv (fn [[p1 cc1 :as pc]]
+                          (if (and cc1 (= :primitive (cc1 0)))
+                            pc
+                            (let [[p2 cc2] (v2 p1)] [p2 (compose-coercions cc1 cc2)])))
+                        (c1 1))])
+    (= :alias (c2 0)) [:alias (c2 1) (compose-coercions c1 (c2 2))]
+    (and (= :functor (c1 0)) (= :functor (c2 0)))
+    [:functor (compose-coercions (c2 1) (c1 1)) (compose-coercions (c1 2) (c2 2))]
+    :else (env/type-error "Translmod.compose_coercions")))
+
+(declare transl-module transl-structure)
+
+(defn- pure-module [tm]
+  (case ((:desc tm) 0)
+    :Tmod_ident :alias
+    :Tmod_constraint (pure-module ((:desc tm) 1))
+    :strict))
+
+(defn- compile-functor [tm cc rootpath]
+  (let [[params body res-cc]
+        (loop [tm tm cc cc acc []]
+          (let [d (:desc tm)]
+            (if (= :Tmod_functor (d 0))
+              (let [[arg-cc res-cc] (if cc [(cc 1) (cc 2)] [nil nil])
+                    param (or (d 1) (ty/ident-create "*"))]
+                (recur (d 3) res-cc (conj acc [param arg-cc])))
+              [acc tm cc])))
+        [lparams lbody]
+        (reduce (fn [[ps body] [param arg-cc]]
+                  (let [param' (ty/ident-rename param)
+                        arg (apply-coercion :alias arg-cc [:Lvar param'])]
+                    [(cons [param' ""] ps) [:Llet :alias "" param arg body]]))
+                [() (transl-module res-cc nil body)]
+                (reverse params))]
+    [:Lfunction :curried (vec lparams) "" lbody functor-attr]))
+
+(defn transl-module
+  "Translmod.transl_module"
+  [cc rootpath tm]
+  (let [d (:desc tm)]
+    (case (d 0)
+      :Tmod_ident (apply-coercion :strict cc (tr/transl-module-path (d 1)))
+      :Tmod_structure (transl-structure [] cc (d 1) (d 2))
+      :Tmod_functor (compile-functor tm cc rootpath)
+      :Tmod_apply (apply-coercion :strict cc [:Lapply (transl-module nil nil (d 1)) [(transl-module (d 3) nil (d 2))]])
+      :Tmod_apply_unit (apply-coercion :strict cc [:Lapply (transl-module nil nil (d 1)) [l/lambda-unit]])
+      :Tmod_constraint (transl-module (compose-coercions cc (d 3)) rootpath (d 1))
+      :Tmod_unpack (apply-coercion :strict cc (tr/transl-exp (d 1))))))
+
+(defn- mod-prim [n]
+  (tr/transl-value-path (get-in (env/find-unit "CamlinternalMod") [:values n])))
+
+(defn- init-shape
+  "Translmod.init_shape: the shape of a recursive module's signature (functions 0, lazy values 1), or nil when a
+  component cannot be initialized so (the binding is evaluated before the others)"
+  [mty]
+  (letfn [(shape-mod [mty]
+            (let [m (env/scrape mty)]
+              (if (= :Mty_signature (m 0))
+                [:block 0 [[:block 0 (shape-struct (m 1))]]]
+                (throw (ex-info "unsafe" {::unsafe true})))))
+          (shape-struct [items]
+            (vec (mapcat (fn [item]
+                           (case (item 0)
+                             :val (if (= :prim (first (get item 4)))
+                                    []
+                                    (let [t (binding [ty/*find-type* env/find-decl] (ty/expand-head (item 3))) d (ty/desc t)]
+                                      (cond (= :Tarrow (d 0)) [[:int 0]]
+                                            (and (= :Tconstr (d 0)) (= (d 1) ty/path-lazy-t)) [[:int 1]]
+                                            :else (throw (ex-info "unsafe" {::unsafe true})))))
+                             :module (if (= :absent (get item 4)) [] [(shape-mod (item 3))])
+                             ;; camlinternalMod.Class
+                             :class [[:int 2]]
+                             (:exn :hole) (throw (ex-info "unsafe" {::unsafe true}))
+                             []))
+                         items)))]
+    (try (shape-mod mty)
+         (catch arbace.lang.ExceptionInfo e (if (::unsafe (ex-data e)) nil (throw e))))))
+
+(defn- compile-recmodule
+  "Translmod.compile_recmodule: reorder_rec_bindings, then eval_rec_bindings (init_mod, the unsafe ones, update_mod)"
+  [bindings next]
+  (let [bs (mapv (fn [[id tm loc]]
+                   (let [sh (init-shape (:mty tm))
+                         [f line ch] (tr/pos-info loc)]
+                     {:id id :init (when sh [[:Lconst [:block 0 [[:string f] [:int line] [:int ch]]]] [:Lconst sh]])
+                      :rhs (binding [tr/*scopes* (if id (tr/enter-module-definition tr/*scopes* id) tr/*scopes*)]
+                             (transl-module nil nil tm))}))
+                 bindings)
+        ;; reorder: an unsafe binding after the bindings its right-hand side needs
+        n (count bs) status (atom (vec (repeat n :undefined))) res (atom [])
+        fv (mapv #(s/free-variables (:rhs %)) bs)]
+    (letfn [(emit [i]
+              (when (= :undefined (@status i))
+                (when-not (:init (bs i))
+                  (swap! status assoc i :inprogress)
+                  (dotimes [j n] (when (contains? (fv i) (:id (bs j))) (emit j))))
+                (swap! res conj (bs i))
+                (swap! status assoc i :defined)))]
+      (dotimes [i n] (emit i)))
+    (let [ordered @res
+          patch (fn patch [bs] (if (empty? bs) (next)
+                                   (let [b (first bs)]
+                                     (if (:init b)
+                                       [:Lsequence [:Lapply (mod-prim "update_mod") [(second (:init b)) [:Lvar (:id b)] (:rhs b)]] (patch (rest bs))]
+                                       (patch (rest bs))))))
+          strict (fn strict [bs] (if (empty? bs) (patch ordered)
+                                     (let [b (first bs)]
+                                       (if (:init b) (strict (rest bs)) [:Llet :strict "" (:id b) (:rhs b) (strict (rest bs))]))))
+          inits (fn inits [bs] (if (empty? bs) (strict ordered)
+                                   (let [b (first bs)]
+                                     (if (:init b)
+                                       [:Llet :strict "" (:id b) [:Lapply (mod-prim "init_mod") (:init b)] (inits (rest bs))]
+                                       (inits (rest bs))))))]
+      (inits ordered))))
+
+(defn- rebind-fields [mid ids pos next]
+  (if (empty? ids)
+    (next)
+    [:Llet :alias "" (first ids) (field-mut pos [:Lvar mid]) (rebind-fields mid (rest ids) (inc pos) next)]))
+
+(def ^:dynamic *transl-class-bindings* "Translclass's bindings of a structure's classes: (fn [infos body] lambda)" nil)
+
+(defn transl-struct-item
+  "Translmod.transl_struct_item: the item's Lambda around next's (fn [] lambda)"
+  [item next]
+  (case (item 0)
+    :Tstr_value (tr/transl-let (item 1) (item 2) next true)
+    :Tstr_eval [:Lsequence (tr/transl-exp (item 1)) (next)]
+    (:Tstr_type :Tstr_modtype :Tstr_primitive :Tstr_class_type) (next)
+    ;; Translmod's Tstr_open: an open of a path binds nothing; of a module expression, its block let-bound and each
+    ;; value it binds rebound from a field
+    :Tstr_open (if-let [tm (get item 1)]
+                 (let [mid (ty/ident-create "open")]
+                   [:Llet (pure-module tm) "" mid (transl-module nil nil tm) (rebind-fields mid (item 2) 0 next)])
+                 (next))
+    :Tstr_exception [:Llet :strict "" (item 1)
+                     (if-let [orig (get item 4)]
+                       (tr/transl-extension-path orig)
+                       [:Lprim (l/pmakeblock 248 false nil)
+                        [[:Lconst [:string (item 3)]] [:Lprim (l/pccall "caml_fresh_oo_id") [(l/lconst-int 0)]]]])
+                     (next)]
+    :Tstr_module (if (= :absent (get item 3))
+                   (next)
+                   (let [tm (item 2)
+                         body (binding [tr/*scopes* (if (item 1) (tr/enter-module-definition tr/*scopes* (item 1)) tr/*scopes*)]
+                                (transl-module nil nil tm))]
+                     [:Llet (pure-module tm) "" (item 1) body (next)]))
+    :Tstr_recmodule (compile-recmodule (item 1) next)
+    :Tstr_class (*transl-class-bindings* (item 1) next)
+    :Tstr_typext (reduce (fn [body [id name rebind]]
+                           [:Llet :strict "" id
+                            (if rebind
+                              (tr/transl-extension-path rebind)
+                              [:Lprim (l/pmakeblock 248 false nil)
+                               [[:Lconst [:string name]] [:Lprim (l/pccall "caml_fresh_oo_id") [(l/lconst-int 0)]]]])
+                            body])
+                         (next) (reverse (item 1)))
+    :Tstr_include (let [tm (item 1) mid (ty/ident-create "include")]
+                    [:Llet (pure-module tm) "" mid (transl-module nil nil tm) (rebind-fields mid (item 2) 0 next)])))
+
+(defn transl-structure
+  "Translmod.transl_structure: the items' Lambda ending in the block of the signature's runtime items (the
+  structure's own fields, or coerced)"
+  [_ cc items sig]
+  (let [ids (vec (keep (fn [item] (when (env/runtime-item? item) (item 2))) sig))
+        final (if (and cc (= :structure (cc 0)))
+                [:Lprim (l/pmakeblock 0 false nil)
+                 (mapv (fn [[pos c]]
+                         (if (and c (= :primitive (c 0)))
+                           (apply-coercion :strict c nil)
+                           (apply-coercion :strict c (if (neg? pos) l/lambda-unit [:Lvar (ids pos)]))))
+                       (cc 1))]
+                [:Lprim (l/pmakeblock 0 false nil) (mapv (fn [id] [:Lvar id]) ids)])]
+    (letfn [(go [items] (if (empty? items) final (transl-struct-item (first items) #(go (rest items)))))]
+      (go items))))
+
+(defn transl-implementation
+  "[:program unit-name size required code]; with a coercion (an interface) sig is the whole signature"
+  [uname items sig & [cc]]
+  (tr/reset-required!)
+  (l/reset-exits!)
+  (binding [m/*transl-ext-path* tr/transl-extension-path
+            m/*match-failure* (fn [loc] (tr/failure-block ty/path-match-failure loc))
+            tr/*transl-struct-item* transl-struct-item
+            tr/*unit-name* uname
+            tr/*transl-module* transl-module
+            m/*inline-lazy-force* tr/inline-lazy-force]
+    (let [body (binding [tr/*scopes* (tr/enter-module-definition nil {:name uname})]
+                 ((or tr/*transl-label-init* (fn [f] (f))) #(transl-structure [] cc items sig)))
+          size (if cc (count (cc 1)) (count (filter env/runtime-item? sig)))
+          id (ty/ident-global uname)]
+      [:program uname size (vec (sort (into (tr/required-globals) @env/alias-required))) [:Lprim (l/psetglobal id) [body]]])))

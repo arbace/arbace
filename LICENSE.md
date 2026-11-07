@@ -269,6 +269,30 @@ covers what.
   MenhirLib's terms ("Menhir and MenhirLib", below). The rest of them (`ast.ae`'s dump, which ports Arbace's own
   tools/ocdump/ocdump.ml, `native.ae`, the LALR(1) construction of `menhir.ae`) is Arbace's own, under the Eclipse
   Public License 1.0.
+- oi's native front end (doc/ocaml/TYPER.md): `arbace/repr/ocaml/typer/types.ae` (typing/types.ml, btype.ml, ctype.ml's
+  levels, unification, generalization and instances, predef.ml, printtyp.ml with out_type.ml and oprint.ml),
+  `env.ae` (typing/env.ml, typetexp.ml, typedecl.ml, datarepr.ml), `parmatch.ae` (typing/patterns.ml, parmatch.ml),
+  `typecore.ae` (typing/typecore.ml, typemod.ml's structure items), `lambda.ae` (lambda/lambda.ml's helpers,
+  switch.ml, printlambda.ml's names), `matching.ae` (lambda/matching.ml), `translcore.ae` (lambda/translcore.ml,
+  translprim.ml, translmod.ml's bytecode structure), `simplif.ae` (lambda/simplif.ml with lambda.ml's traversals,
+  T7), `tmc.ae` (lambda/tmc.ml), `typemod.ae` (typing/typemod.ml, includemod.ml, mtype.ml's nondep_supertype),
+  `translmod.ae` (lambda/translmod.ml), `format.ae` (stdlib/format.ml's engine) and `printtyp.ae` (typing/oprint.ml's
+  printers), with `env.ae` extended by env.ml's module components, subst.ml and mtype.ml (T8), and their polymorphic
+  variants' parts of the same files (types.ml, btype.ml, ctype.ml, typetexp.ml, typecore.ml, parmatch.ml, out_type.ml,
+  matching.ml, switch.ml, translcore.ml, translprim.ml; T9), `typeclass.ae` (typing/typeclass.ml with ctype.ml's class
+  signatures and objects, T9) and `translclass.ae` (lambda/translobj.ml, translclass.ml, T9) with the object parts of
+  the files above (types.ml, ctype.ml, typetexp.ml, typecore.ml, out_type.ml, oprint.ml, translcore.ml, translprim.ml,
+  simplif.ml), and `valuerec.ae` (typing/value_rec_check.ml's classify_expression, lambda/value_rec_compiler.ml, T10)
+  with parmatch.ml's exhaust and typecore.ml's counter-example check in `parmatch.ae` and `typecore.ae`, and (T10's
+  rest, 2026-11-06) lambda/debuginfo.ml's Scoped_location in `translcore.ae` with the effect, let-operator, open,
+  recursive-module, scope and modular-explicit (Tfunctor) parts of the files above, are ports of
+  the same OCaml 5.5.0 tarball (SHA-256
+  `fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba`, Copyright INRIA), by hand on 2026-11-05 and 2026-11-06, the
+  files carrying the notices: under the GNU Lesser General Public License version 2.1 with the OCaml LGPL linking
+  exception (below). `arbace/repr/ocaml/typer.ae` (the driver and the judge) and `bin/lib/oi/typer.bash` are Arbace's own,
+  under the Eclipse Public License 1.0; test/ocaml/typer/'s samples are Arbace's own, their `.out` files outputs of the
+  host's OCaml 5.5.0 toplevel, the dumps of `test/ocaml/typer/oracle/` outputs of tools/ocdump on the host's
+  compiler-libs.
 - `jdk/ocaml/` (OCaml's runtime as Java forms, the package `ocaml.rt`; doc/ocaml/OCAML-SURVEY.md, "As built: O6
   (write-ahead)") and `arbace/o2j.ae` (o2j, Lambda to Java forms): the values, the application, the program's
   start (`Block`, `Closure`, `Pap`, `Native`, `Code`, `Exn`, `Exit`, `Fatal`, `I64`, `NInt`, `Custom`, `Rt`, `Main`, `Gil`,
