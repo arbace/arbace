@@ -308,7 +308,9 @@
   (loop [e e]
     (case (:op e)
       :field (recur (:obj e))
-      (:base-lv :derived-lv) (recur (:e e))
+      ;; a cast without a user-defined conversion to a glvalue of the operand's object ([class.temporary]/6.6, CWG1376: g++.dg's
+      ;; cpp0x/rv-life.C, static_cast<T&&>(T()) extends the temporary; cpp-90)
+      (:base-lv :derived-lv :reinterpret-lv) (recur (:e e))
       :deref (let [p (:e e)] (if (= :ptradd (:op p)) (recur (:p p)) e))
       :decay (recur (:e e))
       e)))
@@ -858,10 +860,20 @@
                     (val! (list 'select ['i1 isnull] ['i64 -1] ['i64 a])))))
     :mcall (if (= :pr (:cat e)) (mcall! e nil) (load! (:ty e) (emit-lv e)))
     :zero-val (zero-of (:ty e))
-    :load (let [x (:e e)]
-            (if (:raw x)
+    :load (let [x (:e e)
+                ;; a const scalar variable of static storage whose initializer folded (sema's global-init): its value, as clang's
+                ;; tryEmitAsConstant emits a DeclRefExpr to a constant-emittable variable (cpp-90; the variable then needs no
+                ;; definition unless its address is taken)
+                cv (when (= :var (:op x))
+                     (let [v (sema/var* (:id x)) gi (:ginit v)]
+                       (when (and (#{:global :member-static} (:storage v)) (:c (:ty v)) (not (abi/ref? (:ty v)))
+                                  (abi/scalar? (abi/unq (:ty v))) (= :expr (:i gi)) (#{:int :float} (:op (:e gi))))
+                         (:e gi))))]
+            (cond
+              cv (emit-rv (assoc cv :ty (:ty e)))
+              (:raw x)
               (val! (list 'load 'ptr ['ptr (if (= :var (:op x)) (var-addr (:id x)) (emit-lv x))] :align 8))
-              (load! (:ty e) (emit-lv x))))
+              :else (load! (:ty e) (emit-lv x))))
     :cast (cast! e)
     :decay (emit-lv (:e e))
     :fnaddr (want-fn! (:fn e))
@@ -1246,7 +1258,15 @@
 (defn- push-cleanup! [c] (swap! *f* update :cleanups conj c))
 (defn- cleanup-depth [] (count (:cleanups @*f*)))
 (defn- unwind-to! [^long depth]
-  (doseq [c (reverse (subvec (:cleanups @*f*) depth))] (run-cleanup! c)))
+  ;; each cleanup run with the cleanups below it alone in force (clang's PopCleanupBlock: a cleanup's EH scope is popped before its
+  ;; normal-path code is emitted), so a destructor that throws (noexcept(false)) unwinds through the outer cleanups and handlers,
+  ;; not into its own object's cleanup again (cpp-90: a second destructor call during the unwinding, std::terminate); the stack
+  ;; is put back after, for the jumps that unwind without popping (break, continue, return)
+  (let [all (:cleanups @*f*)]
+    (doseq [i (range (dec (count all)) (dec depth) -1)]
+      (swap! *f* assoc :cleanups (subvec all 0 i))
+      (run-cleanup! (nth all i)))
+    (swap! *f* assoc :cleanups all)))
 (defn- pop-to! [^long depth] (unwind-to! depth) (swap! *f* update :cleanups #(subvec % 0 depth)))
 
 (declare emit-stmt emit-d0! emit-try! emit-if-branches!)
@@ -2403,5 +2423,14 @@
                            (spit (str out "/ref.refused") (str (name (:refused r)) "\n"))
                            (llvm/spit-latin1 (str out "/ref.c") (:c r)))))))
                  (println "generated"))
+    ;; bin/cppi check's route (CPPI_ROUTE=ours|auto, bin/lib/cppi/route.bash): PATH<tab>STD<tab>OUT lines, each program's forms, IR and
+    ;; lowering into OUT (gen.ll, or gen.refused), one process for the list; STD as g++ names it (gnu++17 read as c++17)
+    "gen-batch" (let [[lst] args]
+                  (doseq [l (str/split-lines (slurp lst)) :when (seq l)]
+                    (let [[p std out] (str/split l #"\t")
+                          c (gen-one p (str/replace (or std "c++23") #"^gnu" "c") out)]
+                      (println (str out "\t" (if c (name c) "ok")))
+                      (flush)))
+                  (shutdown-agents) (System/exit 0))
     "judge" (let [[work known] args] (judge work known))
     (do (println "codegen: gen FILE OUT [--std S], gen-list LIST") (System/exit 2))))

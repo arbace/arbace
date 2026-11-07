@@ -391,6 +391,9 @@
 (defn resolve-type
   "The semantic type of clang's spelling `s` in `scope`."
   [scope ^String s0]
+  ;; GNU's vector types (vector_size, clang's VectorType): not modelled; the attribute is no type attribute strip-type-attrs may drop
+  ;; (g++.dg's ext/is_aggregate.C read a vector typedef as its element type: a wrong answer, cpp-90), so the type is refused
+  (when (re-find #"vector_size__\s*\(" s0) (fail :type "a GNU vector type (" s0 ")"))
   (let [s (strip-type-attrs s0)]
   (if (re-find #"\((unnamed|anonymous) (union|struct|class|enum) at " s)
     (let [t @*last-anon*] (cond-> t (re-find #"^const " s) (assoc :c true)))
@@ -547,6 +550,12 @@
 
 (defn- kids [n] (filter #(and (map? %) (:kind %)) (:inner n)))
 
+(defn body-of
+  "A function declaration's body: its compound statement, or its function-try-block ([dcl.fct.def.general]/1, [except.pre]/3: the
+  native parser's CXXTryStmt, as clang's FunctionDecl holds it)."
+  [n]
+  (first (filter #(contains? #{"CompoundStmt" "CXXTryStmt"} (:kind %)) (kids n))))
+
 (defn- gnu-attr-arg
   "The argument of a GNU attribute `nm` among a declaration's attribute nodes (init_priority(200)): a number, or true
   when written without one; nil when absent."
@@ -679,7 +688,7 @@
         ty (assoc (resolve-type tscope qt) :cq (method-const? qt))
         ty (dissoc ty :cq)
         nm (:name n)
-        body (first (filter #(= "CompoundStmt" (:kind %)) (kids n)))
+        body (body-of n)
         pn (param-nodes n)
         f {:name nm :kind k :cls cid :ty ty :cq (method-const? qt) :refq (when cid (method-refq qt)) :op (when (and nm (not= k :conv)) (fn-op nm))
            ;; (a class's allocation and deallocation functions are static members, [class.free]/1)
@@ -1103,6 +1112,11 @@
 
 (def ^:dynamic *ce-steps* nil)
 
+;; clang's EvaluateAsInitializer (VarDecl::evaluateValue, the constant initialization CodeGen tries for every variable's initializer):
+;; a constant fold, not a core constant expression, so a const variable of floating type with a constant initializer reads as its value
+;; (ExprConstant's CCEDiag note_constexpr_ltor_non_constexpr: noted, not refused); g++.dg's init/float1.C (cpp-90)
+(def ^:dynamic *ce-fold* false)
+
 (defn ce-eval
   "The constant value of the typed expression `e` (`env` {var-id atom} the locals of the evaluated calls)."
   ([e] (binding [*ce-steps* (atom 0)] (ce-eval e {})))
@@ -1145,7 +1159,7 @@
                  @(get env (:id x))
                  (let [v (when (= :var (:op x)) (var* (:id x)))
                        init (or (:init v) (:init-node v))]
-                   (if (and v (:c (:ty v)) init (or (abi/integral? (:ty v)) (:constexpr v)))
+                   (if (and v (:c (:ty v)) init (or (abi/integral? (:ty v)) (:constexpr v) (and *ce-fold* (abi/floating? (:ty v)))))
                      (ce-wrap (:ty v) (ce-eval (rv (binding [*cutoff* Long/MAX_VALUE] (analyze {:scope (or (:def-scope v) *root*)} init))) {}))
                      (not-constant "a load")))))
        :assign (let [x (:l e)] (when-not (and (= :var (:op x)) (contains? env (:id x))) (not-constant "an assignment"))
@@ -3128,7 +3142,14 @@
                                        (throw e)))
                             (g)))
             inits (when (= :ctor (:kind f)) (when-not (:implicit f) (trace #(ctor-inits ctx f))))
-            body (when (:body f) (trace #(stmt ctx (:body f))))]
+            body (when (:body f) (trace #(stmt ctx (:body f))))
+            ;; a constructor's or destructor's function-try-block: control reaching a handler's end rethrows the exception
+            ;; ([except.handle]/15; clang's ExitCXXTryStmt, doImplicitRethrow); another function's handler falls through to its end
+            ;; ([except.handle]/16). The mem-initializers stay before the try (cpp-90: an exception of theirs is not caught by the
+            ;; handlers yet, clang's EmitConstructorBody enters the try before the prologue)
+            body (if (and body (= "CXXTryStmt" (:kind (:body f))) (contains? #{:ctor :dtor} (:kind f)) (= :try (:s body)))
+                   (update body :handlers (fn [hs] (mapv (fn [h] (update h :body (fn [b] {:s :block :items [b {:s :expr :e {:op :throw :ty abi/void :cat :pr}}]}))) hs)))
+                   body)]
         (upd-fn! fid assoc :params pids :tbody body :tinits inits :nrvo (when body (nrvo-var body)) :statics @(:statics ctx))))))
 
 (defn- defaulted-comparison!
@@ -3226,7 +3247,7 @@
                 :else (decl-init ctx vid (assoc (or (:node v) {}) :init (:init-style v) :inner [init] :kind "VarDecl")))]
         ;; a scalar initialized by a constant expression: constant initialization ([basic.start.static])
         (if (and (= :expr (:i i)) (abi/scalar? (abi/unq (:ty v))) (not (#{:int :float :null} (:op (:e i)))))
-          (if-let [c (ce-try (:e i))] (assoc i :e c) i)
+          (if-let [c (binding [*ce-fold* true] (ce-try (:e i)))] (assoc i :e c) i)
           i)))))
 
 (def prelude-typeinfo
