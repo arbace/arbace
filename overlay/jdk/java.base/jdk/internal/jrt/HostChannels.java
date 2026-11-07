@@ -206,4 +206,22 @@ public final class HostChannels {
      * revents into revents[i]: the count, INTERRUPTED or THROWN.
      */
     public static native int poll1(int[] fds, int[] events, int[] revents, int n, int timeout, int[] err);
+
+    /** EPoll.create: epoll_create1(EPOLL_CLOEXEC), or THROWN. */
+    public static native int epollCreate0(int[] err);
+
+    /** EPoll.ctl: epoll_ctl of fd with events (the event's data its descriptor): 0 or the error number. */
+    public static native int epollCtl0(int epfd, int opcode, int fd, int events);
+
+    /**
+     * EPoll.wait: epoll_wait for at most n events within timeout ms (negative: no limit), each event's
+     * descriptor and events into fds[i], events[i]: the count, INTERRUPTED or THROWN.
+     */
+    public static native int epollWait0(int epfd, int[] fds, int[] events, int n, int timeout, int[] err);
+
+    /** EventFD.eventfd0: eventfd(0, 0), non-blocking to the channels as jdk26u's makes it: the descriptor or THROWN. */
+    public static native int eventfd0(int[] err);
+
+    /** EventFD.set0: the counter's one added (an 8-byte write), as convertReturnVal. */
+    public static native int eventfdSet0(int efd, int[] err);
 }

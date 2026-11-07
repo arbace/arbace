@@ -11,7 +11,7 @@
 #                              status) and JRT_LOCALES
 #   arbace_jdk_originals_check ORIG
 #                              each file jdk/sources.txt lists as copied (share, share:MODULE, unix,
-#                              overlay; not the generated ones) the same in ORIG/src/java.base as its
+#                              linux, overlay; not the generated ones) the same in ORIG/src/java.base as its
 #                              source, byte for byte; status 1 naming each stale file
 #   arbace_jdk_originals ORIG LOG [OWNED]
 #                              ORIG made (bin/jrt-convert into ORIG, its log LOG) when it has no
@@ -36,6 +36,7 @@ arbace_jdk_originals_check() {
       share) s=$jdk/src/java.base/share/classes/$rel ;;
       share:*) s=$jdk/src/${kind#share:}/share/classes/$rel ;;
       unix) s=$jdk/src/java.base/unix/classes/$rel ;;
+      linux) s=$jdk/src/java.base/linux/classes/$rel ;;
       overlay) s=$root/overlay/jdk/java.base/$rel ;;
       *) continue ;;
     esac

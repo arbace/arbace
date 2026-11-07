@@ -157,3 +157,46 @@ selector's shape (the pipe and a socket), the byte drained.\n"
         (.Errorf t "drain found nothing"))
       (when (!= (HostChannels_Drain0_I_I1__I_native r e) 0)
         (.Errorf t "a second drain found something")))))
+
+(go/func TestChannelEpoll
+  "Linux's selector as EPollSelectorImpl drives it: an epoll instance with an eventfd for wakeups and a pipe's
+read end; nothing ready within a timeout; the eventfd set (a wakeup) and a byte in the pipe reported with their
+descriptors; the eventfd reset by drain; a descriptor removed.\n"
+  [^{:tag (* testing/T)} t]
+  (let [e (chErr)
+        ep (HostChannels_EpollCreate0_I1__I_native e)
+        efd (HostChannels_Eventfd0_I1__I_native e)
+        fds (NewIntArray 2)]
+    (when (or (< ep 0) (< efd 0))
+      (.Fatalf t "epoll %d eventfd %d errno %d" ep efd (aget (.-A e) 0)))
+    (defer (HostChannels_Close0_I_I1__I_native ep nil))
+    (defer (HostChannels_Close0_I_I1__I_native efd nil))
+    (HostChannels_ConfigureBlocking0_I_Z_I1__I_native efd false e)
+    (HostChannels_MakePipe0_Z_I1_I1__I_native false fds e)
+    (let [r (aget (.-A fds) 0)
+          w (aget (.-A fds) 1)
+          of (NewIntArray 8)
+          oe (NewIntArray 8)]
+      (defer (HostChannels_Close0_I_I1__I_native r nil))
+      (defer (HostChannels_Close0_I_I1__I_native w nil))
+      (when (or (!= (HostChannels_EpollCtl0_I_I_I_I__I_native ep 1 efd 1) 0)
+                (!= (HostChannels_EpollCtl0_I_I_I_I__I_native ep 1 r 1) 0))
+        (.Fatalf t "epoll_ctl"))
+      (let [t0 (time/Now)
+            n (HostChannels_EpollWait0_I_I1_I1_I_I_I1__I_native ep of oe 8 50 e)]
+        (when (or (!= n 0) (< (time/Since t0) (* 40 time/Millisecond)))
+          (.Errorf t "epoll_wait %d after %v" n (time/Since t0))))
+      (HostChannels_EventfdSet0_I_I1__I_native efd e)
+      (HostChannels_WriteOne0_I_B_I1__I_native w 7 e)
+      (let [n (HostChannels_EpollWait0_I_I1_I1_I_I_I1__I_native ep of oe 8 1000 e)
+            seen (make (map int32 int32))]
+        (range [i n]
+          (aset seen (aget (.-A of) i) (aget (.-A oe) i)))
+        (when (or (!= n 2) (== (aget seen efd) 0) (== (aget seen r) 0))
+          (.Errorf t "epoll_wait %d %v" n seen)))
+      (when (!= (HostChannels_Drain0_I_I1__I_native efd e) 1)
+        (.Errorf t "the eventfd not drained"))
+      (HostChannels_EpollCtl0_I_I_I_I__I_native ep 2 r 0)
+      (let [n (HostChannels_EpollWait0_I_I1_I1_I_I_I1__I_native ep of oe 8 0 e)]
+        (when (!= n 0)
+          (.Errorf t "epoll_wait after reset and removal %d" n))))))
