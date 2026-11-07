@@ -4799,3 +4799,59 @@ GTS81 (a)'s controls for repr/go's two check families, the Go crop's last missin
   writes the Go tree's path as `${GOROOT}` in the message (`test/goi/judge-test.bash` checks it); no reader takes the message
   but the divergences classes' pattern, which stops before it.
 - The change is to `arbace/repr/go/annotate.ae`, which the executables embed: the gate's key changes (all builds rerun).
+
+### GT9.8 As built: the crops' read and print controls (GTS218 (a); branches `crop-controls`, `crop-controls-{ocaml,haskell,rust,cpp}`, 2026-11-04)
+
+GTS218 (a)'s precondition for the read and print families of C++, LLVM IR, OCaml, Scheme, Haskell and Rust, built in the
+light tier (no gate run, no heavy lock; stage 0 of the main checkout; the corpora from other worktrees' `.tmp/`). The design is
+GTS81 (a)'s and "As built: GTS81 (a), the crops' controls": a control is a *crossed pair*, the subject's artifact of a level judged
+by that level's own comparison against another file's original (or its helper's dump), which must differ; the tool reads its
+controls file, prints `control ID fails as it must`, and a control that passes (`control passed:`: the comparison passes what
+differs) or cannot be compared (`control not judged:`) fails the run; one whose files the run lacks is left. No control is a row of
+a results file, a report, a known file or a count. Each is cheap: it reuses the run's own artifacts (no case, build or run of its
+own), and where a level prunes its artifacts (`--prune`) the control is judged before the prune.
+
+| family | controls file | pair | judge it goes through | levels crossed |
+|---|---|---|---|---|
+| C++ `bin/repr-cpp roundtrip` | `test/repr/cpp/roundtrip-controls.edn` | samples/bitfields.cpp, samples/io.cpp | `arbace.repr.cpp.rtcheck/controls`, in `judge`'s exit (`same?` of the level files) | forms again (1), normalized AST (3), g++'s and clang's objects (4), the :full print against the source (5) |
+| LLVM `bin/repr-llvm roundtrip` | `test/repr/llvm/roundtrip-controls.txt` | samples/bitfields, samples/io (IR of the C++ samples) | `arbace.repr.llvm control` (`=` of forms) and the verb's `cmp` of the objects | forms, objects |
+| OCaml `bin/repr-ocaml roundtrip` | `test/ocaml/roundtrip-controls.txt` | samples core.ml/ops.ml; stdlib stack.ml/queue.ml | `rt_controls`: the real `compare` (a crossed dump pair in a scratch directory, no known file), `cmp` of the :full print (`--text`) and of the `.cmi` (`--cmi`) | trees, text, cmi |
+| Scheme `bin/repr-scheme roundtrip`, `check` | `test/scheme/repr-controls.edn` | racket-r6rs enums.sls, lists.sls | `roundtrip-judge` (the round trip's judgment factored out of `roundtrip-file`: A's stages against B's), `check/compare-file` against the reference's Chez dump | :full, forms, layout forms, idempotence (all four must fail); read |
+| Haskell `bin/repr-haskell roundtrip` | `test/haskell/roundtrip-controls.edn` | deepseq/Control/DeepSeq.hs, pretty/src/Text/PrettyPrint/HughesPJ.hs | `judge-controls` over `compare-module`, `compare-text`, `compare-iface-module` | tree and lines (also `--layout`), interface, text |
+| Rust `bin/repr-rust roundtrip` | `test/rust/roundtrip-controls.edn` | core/src/bool.rs, borrow.rs; crates core, alloc (interface); one pair a corpus for library, compiler, crates, UI | `judge-controls` over `compare-file`, `compare-text-file`, `compare-crate` | tree and lines, the pretty layout's trees, text, interface |
+| OCaml `native-check` (`ocaml-native`) | `test/ocaml/native-controls.txt` | samples core.ml/ops.ml; stdlib stack.ml/queue.ml | `native.ae` `judge-controls` over `verdict` (the loop's own cond) | the dump with positions, and the layouts with `--layout` |
+| Haskell `native-check` (`haskell-native`) | `test/haskell/native-controls.txt` | Shape.hs, Space.hs | `native.ae` `check-controls` over `check-one` | pragmas first (every pair differs there), then trees and forms |
+| Rust `native-check` (`rust-native`) | `test/rust/native-controls.txt` | shapes.rs/constructs.rs (samples); core/src/ascii.rs, alloc/layout.rs | `native.ae` `judge-controls` over `compare-dumps`, the subject given the reference dump's configuration so that the comparison reaches the trees | tree sections |
+| C++ `native-check` (`cpp-native2`) | `test/repr/cpp/native-controls.edn` | bitfields.cpp/io.cpp; decls.cpp/auto.cpp | `ncheck.ae` `judge-controls` over `differing-items` (factored out of `compare-file`) | forms item by item |
+
+**Checked on one sample each**, the normal run passing beside it (`.tmp/` scratch of the branches; a pair of the controls file
+made equal, as `subject = reference`, fails the run with `control passed`, exit 1; a name the run lacks is left):
+C++ roundtrip on the 2 samples (all five levels differ; 12 s), LLVM on the same 2 IR files (3 s), OCaml `--cmi` on samples (trees and
+text differ; only `effects.ml` compiles alone there, so the `.cmi` level has no pair on samples: the stdlib pair serves it, run on a
+host with the tarball), Scheme `roundtrip` over all 1,364 files (95 s, 0 failing) and `check --quick` (40 s, 0 differing), Haskell
+`--iface --text` on a two-package corpus of the real boot libraries (all three levels differ), Rust `--text --pretty --iface` over
+std's five crates (1,074 files; every level differs; 2.5 min), and the five native-checks on their samples and lists (OCaml 8
+files, Haskell the 54-module list, Rust 68 files, C++ the 9 samples). The one-pair-per-corpus rows for Rust's library, compiler,
+crates and UI, and OCaml's stdlib, were chosen from the corpora's file lists and are in no known file, but no run reached them
+(those corpora are not on this host): the first run on the main host confirms them.
+
+**Not covered** (not read or print families, or no cheap crossed pair): Rust's `--run`, `--std` and `--code` (the behaviour
+levels' `bin/lib/repr-rust/run-program` and `code-unit` build each program on both sides; a crossed pair needs a second build);
+Scheme's `ecraven`, `mats`, `r7rs`, `srfi` (the proposals of "As built: GTS81 (a), the crops' controls"); C++'s `pp-check`,
+`dg` and `runtime-build`; Python's families; OCaml's `repl-check`; the proofs `spec-check`, `test`, `tables --check`, `menhir`.
+
+**What the merge must do.** The gate step table (`test/gate/steps.edn`, not applied) must declare each controls file an input of its
+step (`:files`), as `test/goi/controls.txt` is of goi's: a control edited must rekey the check. The four `native` branches are
+held: `crop-controls-{ocaml,haskell,rust,cpp}` are commits off `ocaml-native`, `haskell-native`, `rust-native` and `cpp-native2`,
+touching only each branch's native-check (its `native.ae`/`ncheck.ae`, its script's call, a controls file), and apply after those
+merge (`git cherry-pick`, or as a patch with `git format-patch`); `crop-controls` itself touches the round trips and merges onto
+`gate-crops` or main, with a conflict only on a line of a script a held branch also edits (`bin/repr-ocaml`'s header,
+`bin/repr-haskell`, `bin/repr-rust`, `bin/lib/repr-cpp/`'s drivers).
+
+**As merged (batches 1-3, 2026-11-07).** C++/LLVM, OCaml and Scheme's round-trip controls were picked in batch 1 (Scheme's since
+replaced by scheme-90's), Rust's in batch 2 (`7bf1d1e4`; rust-90's edit controls moved to `test/rust/roundtrip-edit-controls.edn`);
+the four native-check controls merged as their branches (OCaml and Rust in batch 2, Haskell and C++ in batch 3, adapted to the
+errors lines' and cpp-tree's scripts). Haskell's round-trip pair (`6dc54221`) was not taken: haskell-90 (batch 2) had already
+built crossed-pair controls of the tree, text and interface levels in the same file, `test/haskell/roundtrip-controls.edn`, judged
+by its own-verdict comparisons (`compare-forms`, `compare-text --bytes-only`, `compare-iface`): the same design, so the branch's
+older pair is superseded. This section came in by `0d1ae970` picked on batch 3.
