@@ -103,6 +103,9 @@ out=$(cd "$root" && OI_TIMEOUT=1 ARBACE_CPU_LOG=$W/cpu.log bin/oi check --only '
 expect "oi: a program over the CPU limit is a timeout row" 0 '124.timeout 1s' "$out" $?
 echo "$out" | grep -Eq '^(137|152)$' || { echo "FAIL oi: the program did not run under limited_cpu (no line in ARBACE_CPU_LOG)"; bad=1; }
 
+# OC181 (a): the expect action runs the host's toolchain (testsuite/tools/expect.ml on the ocaml toplevel): its cases are the oracle
+# tier's (bin/oi judges-test --oracle); OI_JUDGES_NO_HOST (judges-test --fixtures) leaves them out, counted as run
+if [ -z "${OI_JUDGES_NO_HOST:-}" ]; then
 # finding 9: bin/oi suite expect is a check: the run against the record, the committed record untouched without --record
 only='basic/patmatch_for_multiple'
 before=$(sha256sum "$root/test/ocaml/ref-expect.edn")
@@ -129,6 +132,7 @@ out=$(cd "$root" && OI_EXPECT_RECORD=$W/no-such-record bin/oi suite expect --onl
 expect "expect: a missing record is an error" 2 'cannot be read' "$out" $st
 out=$(cd "$root" && bin/oi suite expect --only 'no-such-directory/zzz' 2>&1); st=$?
 expect "expect: an --only that matches nothing says so" 2 'no test selected' "$out" $st
+else echo "skip the expect action's cases (OI_JUDGES_NO_HOST: the oracle tier's)"; cases=$((cases + 6)); fi
 
 # finding 2: a listed slow program recorded as slow that passes this time (the CPU limit's boundary) is not a change
 printf 'a\t0\th\t1\t1.0\t\nb\t0\th\t1\t1.0\t\nc\t0\th\t1\t1.0\t\n' > "$k/check.tsv"
