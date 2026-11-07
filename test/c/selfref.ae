@@ -1,0 +1,143 @@
+(ns c.selfref
+  "The run corpora's own verdicts (doc/C23-SURVEY.md, \"Decided (the user, 2026-11-07): the judge\"): where a test carries
+  its expected outcome, the run is judged by it, not by gcc 15.2's recorded run (test/c/ref-gcc15.edn, the oracle tier's
+  from then on, read for the tests with no verdict of their own). The rules, a corpus at a time (each the suite's own
+  runner's convention):
+    torture-execute, torture-execute-mirror  gcc.c-torture/execute/execute.exp: a program passes when it exits 0 (a
+                                             failure calls abort()); its output is not compared
+    gcc-*-run                                dg-do run (gcc-dg.exp's dg-test): exit 0, the output not compared; a file with
+                                             a dg-output, dg-shouldfail or an xfail on its run keeps gcc's reference
+    tcc-tests2                               tests2/Makefile: the output against NAME.expect (its programs return 0)
+    mir                                      c-tests' runner: the status NAME.c.expectrc's (0 without one), the output
+                                             against NAME.expect when it has one
+    compcert                                 test/c/Makefile: the output against Results/NAME, exit 0
+  The others (benchmarksgame, ci-run, cxgo) have no verdict of their own: gcc's recorded run stays their reference (0.5 in
+  bin/crops-score's judge stage). An entry gcc could not build (:status :no-build) stays gcc's.
+
+  ref ROOTS GCC-REF OUT     OUT: GCC-REF's entries, each with a verdict of its own replaced by it ({:id :status (0 or
+                            a status) :stdout (a SHA-256, or :o2 :differ for an output left open) :judge :self :verdict
+                            KIND}); the counts printed
+  agree ROOTS GCC-REF RECORD  the self judge against the recorded gcc judge, from the records alone: for each case with a
+                            verdict of its own, whether gcc's recorded run satisfies it, and the result RECORD's row
+                            (test/c/check-linux-amd64.edn) would have under it (derived from the row's reason); the
+                            disagreements by kind"
+  (:require [arbace.string :as str])
+  (:import (java.security MessageDigest)))
+
+(set! *warn-on-reflection* true)
+
+(defn- read-all [^String f]
+  (let [r (arbace.lang.LineNumberingPushbackReader. (java.io.StringReader. (slurp f))) eof (Object.)]
+    (loop [out []] (let [x (read r false eof)] (if (identical? x eof) out (recur (conj out x)))))))
+
+(defn- sha256 ^String [^java.io.File f]
+  (let [md (MessageDigest/getInstance "SHA-256")
+        b (java.nio.file.Files/readAllBytes (.toPath f))]
+    (apply str (map #(format "%02x" (bit-and (long %) 0xff)) (.digest md b)))))
+
+(defn- corpora [] (into {} (for [c (:corpora (read-string (slurp "test/c/corpora.edn")))] [(name (:id c)) c])))
+
+(defn- file-of
+  "The file of case ID (CORPUS/REL) under ROOTS, by test/c/corpora.edn's :where."
+  ^java.io.File [roots cs ^String id]
+  (let [i (.indexOf id "/") c (subs id 0 i) rel (subs id (inc i))
+        e (get cs c)
+        w (or (:where e) (:where (get cs (some-> (:like e) name))))]
+    (when w (java.io.File. (str (get roots (:root w)) "/" (:path w) rel)))))
+
+(defn- sibling ^java.io.File [^java.io.File f ^String name] (java.io.File. (.getParentFile f) name))
+(defn- base-name [^java.io.File f] (str/replace (.getName f) #"\.c$" ""))
+
+(def exceptions
+  "test/c/selfref-exceptions.edn: the cases whose own verdict the check's harness does not meet, with the reason."
+  (delay (let [f (java.io.File. "test/c/selfref-exceptions.edn")] (if (.exists f) (read-string (slurp f)) {}))))
+
+(defn verdict
+  "Case ID's own verdict: {:status S :stdout D :verdict KIND}, or nil (no verdict of its own, or no file)."
+  [roots cs ^String id]
+  (let [c (subs id 0 (.indexOf id "/"))
+        ^java.io.File f (file-of roots cs id)]
+    (when (and f (.exists f) (not (contains? @exceptions id)))
+      (cond
+        (re-find #"^torture-execute" c) {:status 0 :stdout :any :verdict :exit-zero}
+        (re-find #"^gcc-.*-run$" c)
+        (let [t (slurp f)]
+          (when-not (re-find #"dg-output|dg-shouldfail|dg-do run[^}]*xfail" t)
+            {:status 0 :stdout :any :verdict :dg-run}))
+        (= c "tcc-tests2")
+        (let [e (sibling f (str (base-name f) ".expect"))]
+          ;; tests2's programs end with return 0 (the Makefile compares their output alone): the status 0 with it
+          (when (.exists e) {:status 0 :stdout (sha256 e) :verdict :expect}))
+        (= c "mir")
+        (let [rc (sibling f (str (.getName f) ".expectrc"))
+              e (sibling f (str (base-name f) ".expect"))]
+          ;; a case with neither file states no outcome of its own (mir's runner compares it with a compiler's run)
+          (when (or (.exists rc) (.exists e))
+            {:status (if (.exists rc) (Long/parseLong (str/trim (slurp rc))) 0)
+             :stdout (if (.exists e) (sha256 e) :any)
+             :verdict (if (.exists rc) :expectrc :expect)}))
+        (= c "compcert")
+        (let [r (java.io.File. (.getParentFile f) (str "Results/" (base-name f)))]
+          (when (.exists r) {:status 0 :stdout (sha256 r) :verdict :results}))
+        :else nil))))
+
+(defn- merged [roots gref]
+  (let [cs (corpora)]
+    (for [e (read-all gref)]
+      (if-let [v (and (not= :no-build (:status e)) (verdict roots cs (:id e)))]
+        ;; in arbace.c.run/result's terms (embedded, so unchanged): an output left open is :o2 :differ (the status alone)
+        (merge {:id (:id e) :status (:status v)}
+               (if (= :any (:stdout v)) {:stdout "-" :o2 :differ} {:stdout (:stdout v) :o2 :same})
+               {:judge :self :verdict (:verdict v)})
+        (assoc e :judge :gcc)))))
+
+(defn- corpus [^String id] (subs id 0 (.indexOf id "/")))
+
+(defn- meets? [v st out]
+  (and (or (= :any (:status v)) (= st (:status v))) (or (= :any (:stdout v)) (= out (:stdout v)))))
+
+(defn -main [cmd roots-s gref & [out]]
+  (let [roots (read-string roots-s)]
+    (case cmd
+      "ref" (let [es (merged roots gref)]
+              (spit out (str ";; the run corpora's references (test/c/selfref.ae): each case's own verdict, else gcc 15.2's run\n"
+                             (str/join "\n" (map pr-str es)) "\n"))
+              (doseq [[c xs] (sort (group-by (comp corpus :id) es))]
+                (println (format "selfref %-24s %5d cases: %d by their own verdict, %d by gcc's run" c (count xs)
+                                 (count (filter #(= :self (:judge %)) xs)) (count (filter #(= :gcc (:judge %)) xs)))))
+              (println (format "selfref: %d of %d cases judged by their own verdict" (count (filter #(= :self (:judge %)) es)) (count es))))
+      "agree"
+      (let [cs (corpora)
+            gs (into {} (map (juxt :id identity) (read-all gref)))
+            rec (into {} (map (juxt first identity) (read-string (slurp out))))
+            rows (for [[id g] gs :when (not= :no-build (:status g))
+                       :let [v (verdict roots cs id)] :when v]
+                   (let [ok (meets? v (:status g) (:stdout g))
+                         [_ r why] (get rec id)
+                         why (str why)
+                         ;; the row's outcome under the self judge, from the recorded row's reason
+                         s (cond
+                             (nil? r) :not-run
+                             (= r :pass) (if ok :pass (if (and (= :differ (:o2 g)) (meets? v (:status g) :x)) :pass :fail))
+                             (re-find #"^differ status (\S+) \(gcc" why)
+                             (let [st (second (re-find #"^differ status (\S+)" why))
+                                   st (if (re-matches #"-?\d+" st) (Long/parseLong st) (keyword st))]
+                               (if (and (or (= :any (:status v)) (= st (:status v))) (= :any (:stdout v))) :pass :fail))
+                             (str/starts-with? why "differ stdout")
+                             (cond (and (= :any (:stdout v)) (or (= :any (:status v)) (= (:status g) (:status v)))) :pass
+                                   (= (:stdout v) (:stdout g)) :fail
+                                   :else :unknown)
+                             :else r)]
+                     {:id id :kind (:verdict v) :gcc-agrees ok :was r :self s}))]
+        (println (format "selfref agree: %d cases with a verdict of their own; gcc's recorded run satisfies it in %d"
+                         (count rows) (count (filter :gcc-agrees rows))))
+        (doseq [[k xs] (sort-by key (group-by :kind rows))]
+          (println (format "  %-10s %5d cases, gcc agrees %5d" (name k) (count xs) (count (filter :gcc-agrees xs)))))
+        (let [ch (remove #(= (:was %) (:self %)) (filter #(and (:was %) (not= :not-run (:self %))) rows))]
+          (println (format "selfref agree: of the %d recorded rows, %d judged the same by both judges, %d otherwise"
+                           (count (filter :was rows)) (- (count (filter :was rows)) (count ch)) (count ch)))
+          (doseq [[k xs] (sort-by key (group-by (juxt :kind :was :self) ch))]
+            (println (format "  %-34s %4d  %s" (pr-str k) (count xs) (str/join " " (take 6 (map :id xs))))))
+          (doseq [x (filter #(not (:gcc-agrees %)) rows)]
+            (println "  gcc's run against the verdict:" (:id x) (name (:kind x)) "recorded" (pr-str (get gs (:id x)))
+                     "verdict" (pr-str (dissoc (verdict roots cs (:id x)) :verdict)))))))))

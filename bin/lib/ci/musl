@@ -10,6 +10,8 @@
 #   read     its sources read by repr/c into the forms cache .tmp/ci-musl/forms and indexed (CI_THREADS, default 4); the
 #            cache is keyed (CS211): forms/key holds the digest of repr/c's files, the libc's reader (arbace/repr/c{.ae,/},
 #            arbace/c/musl.ae), the host (test/c/host) and configure's generated headers, and a read whose key differs rereads the whole cache
+#   verify-derived  the oracle tier: the headers prepare derives without a compiler (Arbace's target, the default;
+#            ARBACE_C_TARGET=gcc: gcc's configure) against gcc's configure's, byte for byte
 #   fresh    exit 0 when the cache's key is the checkout's; `ensure`: prepare, then read when the key differs
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
@@ -19,10 +21,45 @@ d=$root/.tmp/ci-musl
 m=$d/musl-1.2.6
 forms=${CI_MUSL_FORMS:-$d/forms}
 # the key also covers configure's generated headers (queue 152: forms read with another architecture's are stale)
-key() { (cd "$root" && { find arbace/repr/c.ae arbace/repr/c arbace/c/musl.ae test/c/host -type f | LC_ALL=C sort | xargs sha256sum
+key() { (cd "$root" && { find arbace/repr/c.ae arbace/repr/c arbace/c/musl.ae test/c/host c/target -type f | LC_ALL=C sort | xargs sha256sum
                          for h in "$m/obj/include/bits/alltypes.h" "$m/obj/include/bits/syscall.h"; do
                            [ -f "$h" ] && sha256sum < "$h"; done; true; } | sha256sum | cut -d' ' -f1); }
 fresh() { [ -f "$forms/key" ] && [ "$(cat "$forms/key")" = "$(key)" ]; }
+# the target description the reader reads musl with (arbace.repr.c.host/load-host): Arbace's c/target, or gcc's recorded
+# answers under ARBACE_C_TARGET=gcc (bin/lib/repr-c/sysroot.bash's c_target_host)
+. "$root/bin/lib/repr-c/sysroot.bash"
+c_target_host
+# derive_tree DIR: configure's four products without a compiler (Arbace's target, c/README.md; ARBACE_C_TARGET=gcc: gcc's
+# configure as before). The three headers are musl's Makefile's rules (obj/include/bits/alltypes.h:
+# tools/mkalltypes.sed over arch/x86_64/bits/alltypes.h.in and include/alltypes.h.in; obj/include/bits/syscall.h:
+# arch/x86_64/bits/syscall.h.in and its __NR_ lines as SYS_; obj/src/internal/version.h: tools/version.sh's VERSION),
+# byte for byte gcc's configure's (bin/ci musl verify-derived, the oracle tier, with gcc); config.mak is configure's file for
+# --target=x86_64 --disable-shared with every compiler probe left out (ci reads musl's sources itself: only ARCH is read)
+derive_tree() {
+  local t=$1
+  mkdir -p "$t/obj/include/bits" "$t/obj/src/internal"
+  (cd "$t" && sed -f tools/mkalltypes.sed arch/x86_64/bits/alltypes.h.in include/alltypes.h.in > obj/include/bits/alltypes.h \
+     && cp arch/x86_64/bits/syscall.h.in obj/include/bits/syscall.h \
+     && sed -n -e s/__NR_/SYS_/p < arch/x86_64/bits/syscall.h.in >> obj/include/bits/syscall.h \
+     && printf '#define VERSION "%s"\n' "$(cat VERSION)" > obj/src/internal/version.h) || return 1
+  cat > "$t/config.mak" <<'MAK'
+# This version of config.mak was written by bin/ci musl prepare (Arbace's target, c/README.md) from musl's
+# configure rules for --disable-shared --target=x86_64, with no compiler probed (ci reads musl's sources itself)
+ARCH = x86_64
+SUBARCH = 
+ASMSUBARCH = 
+srcdir = .
+prefix = /usr/local/musl
+exec_prefix = $(prefix)
+bindir = $(exec_prefix)/bin
+libdir = $(prefix)/lib
+includedir = $(prefix)/include
+syslibdir = /lib
+MALLOC_DIR = mallocng
+SHARED_LIBS =
+MAK
+}
+
 case ${1:-} in
   prepare)
     [ -f "$m/obj/include/bits/alltypes.h" ] && [ -f "$d/ldbl53/bits/float.h" ] && grep -qx 'ARCH = x86_64' "$m/config.mak" && exit 0
@@ -42,10 +79,25 @@ case ${1:-} in
     fi
     echo "$sum  $tb" | sha256sum -c --quiet || { echo "musl: $tb does not match the pin" >&2; exit 1; }
     rm -rf "$m"; tar -xzf "$tb" -C "$d"
-    (cd "$m" && CC=gcc ./configure --disable-shared --target=x86_64 > "$d/configure.log" 2>&1 \
-       && make obj/include/bits/alltypes.h obj/include/bits/syscall.h obj/src/internal/version.h > "$d/make.log" 2>&1)
+    if [ "${ARBACE_C_TARGET:-arbace}" = arbace ]; then
+      derive_tree "$m" || { echo "musl: deriving configure's products failed" >&2; exit 1; }
+      echo "musl: configure's products derived without a compiler (Arbace's target)"
+    else
+      (cd "$m" && CC=gcc ./configure --disable-shared --target=x86_64 > "$d/configure.log" 2>&1 \
+         && make obj/include/bits/alltypes.h obj/include/bits/syscall.h obj/src/internal/version.h > "$d/make.log" 2>&1)
+    fi
     mkdir -p "$d/ldbl53/bits"; cp "$m/arch/arm/bits/float.h" "$d/ldbl53/bits/float.h"
     echo "musl prepared in $m" ;;
+  verify-derived)
+    # the oracle tier (by hand, with gcc): the three headers derive_tree makes against gcc's configure's, byte for byte
+    w=$TMPDIR/ci-musl-derived.$$; rm -rf "$w"; mkdir -p "$w/a" "$w/b"
+    tar -xzf "$(ls "$d"/musl-1.2.6.tar.gz 2>/dev/null || echo "${root%%/.tmp/*}/.tmp/c1/musl/musl-1.2.6.tar.gz")" -C "$w/a" && cp -R "$w/a/musl-1.2.6" "$w/b/" || exit 1
+    derive_tree "$w/a/musl-1.2.6" || exit 1
+    (cd "$w/b/musl-1.2.6" && CC=gcc ./configure --disable-shared --target=x86_64 > "$w/configure.log" 2>&1 \
+       && make obj/include/bits/alltypes.h obj/include/bits/syscall.h obj/src/internal/version.h > "$w/make.log" 2>&1) || { echo "musl: gcc's configure failed" >&2; exit 1; }
+    st=0; for f in obj/include/bits/alltypes.h obj/include/bits/syscall.h obj/src/internal/version.h; do
+      if cmp -s "$w/a/musl-1.2.6/$f" "$w/b/musl-1.2.6/$f"; then echo "musl: $f equal to gcc's configure's"; else echo "musl: $f DIFFERS"; st=1; fi; done
+    rm -rf "$w"; exit $st ;;
   key) key ;;
   fresh) fresh ;;
   ensure) "$0" prepare && { fresh || "$0" read; } ;;

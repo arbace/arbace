@@ -15,6 +15,10 @@
 # or it fails (arbace.repr.c.rtcheck). Run through bin/repr-c roundtrip (from the repository root); writes only
 # under .tmp/repr-c-roundtrip/ (REPR_C_RT_WORK).
 #
+# Since the user's decision of 2026-11-07 (doc/C23-SURVEY.md, "Decided (the user, 2026-11-07): the judge") levels 3 and 4 and
+# gcc's acceptance are the oracle tier's: by default (ARBACE_C_JUDGE unset or self) no gcc runs, the levels 1-2 judged and
+# the acceptance cc's (arbace.repr.c.rtcheck/load-acceptance), the known entries only levels 3-4 give deferred; ARBACE_C_JUDGE=gcc
+# (or --record, --record-gcc) runs gcc as before, by hand.
 # Usage: bin/repr-c roundtrip [--corpus C,...] [--record] [--record-gcc] [--no-run]
 #   --corpus      test/c/corpora.edn's ids (default every corpus read in place, `all`; lua's tarball not)
 #   --record      the known file's entries of the corpora rewritten from the files that do not pass, then judged
@@ -76,7 +80,8 @@ mkdir -p "$work"
 cmain=${root%%/.tmp/gate-clean/*}; cmain=${cmain%%/.tmp/worktrees/*}
 gowhim=${GOWHIM:-$(cd "$cmain/.." && pwd)/go-whim}
 modcache=$(GOFLAGS= "${ARBACE_GOROOT:-/root/tamago-go}/bin/go" env GOMODCACHE)
-gi=$(gcc -print-file-name=include)
+nogcc=; [ "${ARBACE_C_JUDGE:-self}" = gcc ] || [ -n "$record$record_gcc" ] || nogcc=1
+gi=; [ -n "$nogcc" ] || gi=$(gcc -print-file-name=include)
 epoch=$(sed -n 's/^ *:epoch \([0-9]*\).*/\1/p' test/c/host/host.edn)
 gccroot=
 case ,$corpora, in *,gcc-*) gccroot=$(bin/repr-c gcc-tests) || exit 1 ;; esac
@@ -149,6 +154,7 @@ export -f cc_pair; export epoch gi TMPDIR
 
 status=0
 for id in "${ids[@]}"; do
+  [ -z "$nogcc" ] || break
   d=$work/$id
   isrun=0
   if [ -n "$run" ] && arbace_tool -e "(println (= :run (:action (first (filter #(= (:id %) :$id) (:corpora (read-string (slurp \"test/c/corpora.edn\"))))))))" | grep -q true; then isrun=1; fi
@@ -158,7 +164,22 @@ for id in "${ids[@]}"; do
   cat "$d"/obj.part.* 2>"$TMPDIR/repr-c-rt.err" > "$d/obj.tsv"; cat "$d"/run.part.* 2>"$TMPDIR/repr-c-rt.err" > "$d/run.tsv"
   rm -f "$d"/obj.part.* "$d"/run.part.*
 done
+if [ -n "$nogcc" ]; then
+  # no gcc (carried from mac/oracle-records-cpp2's --no-gcc, ORS16): the judge's stale known entries of the classes only levels
+  # 3 and 4 give, for files that pass the rest, deferred to the oracle tier
+  for id in "${ids[@]}"; do rm -f "$work/$id/obj.tsv" "$work/$id/run.tsv"; done
+  arbace_tool -m arbace.repr.c.rtcheck judge "$work" "${ids[@]}" > "$work/judge.out" 2>&1; jst=$?
+  arbace_tool -e "(doseq [[c es] (:roundtrip (read-string (slurp \"test/repr/c/roundtrip-known.edn\"))) [f e] es] (println (str (name c) \"/\" f \"\t\" (name (:class e)))))" > "$work/known-classes.tsv"
+  awk -F'\t' 'NR == FNR {k[$1] = $2; next}
+       /^FAIL / && $2 == "known entry stale" {id = substr($1, 6); c = k[id]
+         if (c == "objects" || c == "objects-macro-body" || c == "run-address" || c == "print-grammar") {print "deferred " id "\t" c " (levels 3-4: the oracle tier)"; next}}
+       {print}' "$work/known-classes.tsv" "$work/judge.out" > "$work/judge-nogcc.out"
+  cat "$work/judge-nogcc.out"
+  if [ "$jst" != 0 ] && { grep -q '^FAIL \| of no class\|control passed\|control not judged' "$work/judge-nogcc.out" || ! grep -q ' files ' "$work/judge-nogcc.out"; }; then status=1; fi
+  echo "roundtrip (no gcc): levels 1-2 and cc's acceptance; $(grep -c '^deferred ' "$work/judge-nogcc.out") known entries deferred to the oracle tier"
+else
 arbace_tool -m arbace.repr.c.rtcheck judge "$work" "${ids[@]}" || status=1
+fi
 if [ -n "$record" ]; then
   # 3: the known file written with files of no class left out (printed; no placeholder class, queue 122 F1): the
   # judgment and the results go on, and the run fails

@@ -156,6 +156,13 @@ Prior art:
   `test/crops/crops.edn`; the scores of the checkout recorded in `test/crops/scores.edn` (`--record`; any difference fails),
   completeness also without by design (CSP4); the essential step `crops-score` (`--judge --strict`, beside `reap`; CSP1 (b),
   the user, 2026-11-06).
+- `c/`: Arbace's own C target, x86_64-linux-musl (c/README.md; doc/C23-SURVEY.md, "As built: C's own target"): `c/include/`
+  (Arbace's headers, clean-room from C23 and the AMD64 ABI) and `c/target/` (the description repr/c reads: predefined macros
+  and `__has_` answers made by `test/c/target.ae` from `abi.edn` and `dialect.edn`, `bin/repr-c target gen|verify|oracle`),
+  with musl 1.2.6's headers from its tarball, assembled into a sysroot by `bin/lib/repr-c/sysroot.bash` (`ARBACE_C_SYSROOT`,
+  read by repr/c's preprocessor and tools/ccdump); the default (`ARBACE_C_TARGET=gcc`: gcc's recorded `test/c/host/` and the
+  host's headers, the oracle tier's). C's checks judge each test by its own verdict (the user, 2026-11-07; `test/c/selfref.ae`,
+  `bin/ci selfref`; `ARBACE_C_JUDGE=gcc`: gcc's runs and records, by hand); no C step runs gcc.
 - `LICENSE.md` holds all licenses: their full texts and which files each covers. Licenses are
   stated nowhere else, apart from the notices source files came with, which stay. Extend it when
   vendoring from a new source.
