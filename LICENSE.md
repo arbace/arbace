@@ -599,6 +599,24 @@ covers what.
   35 generated buffers (added-gensrc), and 12 of datagram-sources (11 of `src/java.base/share/classes`, 1 of
   `src/java.base/unix/classes`); the data `uprops.icu` (ICU's, under the Unicode License V3 as jdk26u's
   `legal/icu.md` says, beside `ubidi.icu`) and `sun/net/www/content-types.properties`.
+- F10a's selectors and socket channels (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F10a (write-ahead)";
+  recorded by the rule of B7): jdk26u's files (https://github.com/openjdk/jdk26u at `baf63fb`) transcribed or
+  derived with the changes their headers name, in `overlay/jdk/java.base/sun/nio/ch/`: `Net.java` (derived from
+  `share/classes/sun/nio/ch/Net.java`), `PollSelectorImpl.java` (from `unix/classes/sun/nio/ch/PollSelectorImpl.java`),
+  `SocketOptionRegistry.java` (from `share/classes/sun/nio/ch/SocketOptionRegistry.java.template`), `NativeDispatcher.java`,
+  `UnixDispatcher.java`, `EventFD.java`, `NativeThread.java`, `Util.java`'s `ungrowableSet`, and the variant
+  `overlay/jdk/variants/SelectorProvider.ae`, which keeps the jdk26u member it replaces: Copyright (c) Oracle and/or
+  its affiliates, under the GNU General Public License version 2 with the Classpath Exception (text below); the
+  rest of those files, `IOUtil.java`, `SocketDispatcher.java`, `Poller.java`, `UnixDomainSockets.java`, `EPoll.java`,
+  `FileDispatcherImpl.java` (jdk26u's names and signatures, jrt's code), `jdk/internal/jrt/HostChannels.java`, the
+  variants `SocketChannelImpl.ae`, `PollSelectorProvider.ae` and `EPollSelectorProvider.ae`, and the Go natives
+  `go/arbace/jrt/channels_linux.ae`, `channels_other.ae` and `channels_test.ae` (written after jdk26u's
+  `src/java.base/unix/native/libnio/ch/{Net,IOUtil,SocketDispatcher,UnixDispatcher,PollSelectorImpl}.c`,
+  `src/java.base/linux/native/libnio/ch/{EPoll,EventFD}.c` and `src/java.base/unix/native/libnet/net_util_md.c`'s
+  `NET_SetSockOpt`, `NET_GetSockOpt` and `NET_Bind`: their system calls, flags and results, under the same license as
+  those files, GNU General Public License version 2 with the Classpath Exception) are Arbace's own but for that.
+  Their jdk26u sources join `jdk/forms/` once `bin/jrt-convert update` has run: 47 files of selector-sources (40 of
+  `src/java.base/share/classes`, 4 of `src/java.base/unix/classes`, 3 of `src/java.base/linux/classes`).
 - Other Go-build variants (J2G-SPEC §4.6; recorded by the rule of B7):
   `overlay/jdk/variants/AbstractChronology.ae`, `BitSet.ae`, `CRC32.ae`, `Collectors.ae`,
   `File.ae`, `FileHandler.ae`, `ParseUtil.ae`, `TimeZone.ae`, `TzdbZoneRulesProvider.ae`,
