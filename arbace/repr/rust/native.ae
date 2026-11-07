@@ -20,7 +20,11 @@
           [--list FILE] FILE...
         each FILE's native dump (written to OUT) against the helper's (REF/FILE.edn): equal as
         data (the configuration but the helper's identity), or both an error; the first
-        difference of each file reported (--brief: those files alone)"
+        difference of each file reported (--brief: those files alone)
+    errors --pin PIN [--expr] --edition E [--ref TSV] [--list FILE] FILE...
+        each FILE's first error as rustc reports it (rustc --error-format=json's first error: its
+        message, code and primary span), a line FILE, ok|err, l1:c1-l2:c2, code, message; with --ref,
+        against rustc's lines (bin/repr-rust native-errors), the files whose lines differ reported"
   (:require [arbace.repr.rust.lex :as lx]
             [arbace.repr.rust.parse :as ps]
             [arbace.string :as str])
@@ -306,8 +310,9 @@
 
 (defn dump-forms
   "A file's dump as the helper's forms: [(rsdump/config {...}) tree (rsdump/mac-exprs [...])
-  (rsdump/meta [...]) (rsdump/comments [...]) or (rsdump/tokens [...])], or with an error
-  [(rsdump/config {...}) (rsdump/error MSG)]"
+  (rsdump/meta [...]) (rsdump/comments [...]) or (rsdump/tokens [...])], or with an error, rustc's
+  first error of the parse, [(rsdump/config {...}) (rsdump/error MSG) (rsdump/diagnostic {:message
+  :code :span [l1 c1 l2 c2]})]"
   [^String file ^long ed full pin expr]
   (let [f (File. file)
         raw (java.nio.file.Files/readAllBytes (.toPath f))
@@ -315,24 +320,31 @@
         cfg (list 'rsdump/config (apply array-map :rustc (get pin "version") :rustc-commit (get pin "commit") :rustc-driver (get pin "driver")
                                         :edition ed :file file :abs (.getCanonicalPath f) :sha256 (sha256 raw) :helper *helper*
                                         (when expr [:expr true])))
-        errs (java.util.ArrayList.)]
+        errs (java.util.ArrayList.)
+        late (java.util.ArrayList.)
+        stash (java.util.ArrayList.)
+        src (lx/source text)
+        reject (fn [d]
+                 [cfg (list 'rsdump/error (str "error" (when (:code d) (str "[" (:code d) "]")) ": " (:msg d)))
+                  (list 'rsdump/diagnostic (array-map :message (:msg d) :code (:code d) :span (ps/diag-span src d)))])]
     (try
-      (let [src (lx/source text)
-            {:keys [tree toks mt]} (binding [ps/*errs* errs] (if expr (ps/parse-expr-file src ed) (ps/parse-file src ed)))
-            [macs metas] (facts tree src toks mt ed)
-            o (fn [x] (out x src toks mt ed))]
-        [cfg
-         (o tree)
-         (list 'rsdump/mac-exprs (mapv (fn [[sp k es]] [(o sp) k (o (vec es))]) macs))
-         (list 'rsdump/meta (mapv (fn [[sp m]] [(o sp) (o m)]) metas))
-         (if full
-           (list 'rsdump/tokens (lx/raw-tokens src ed false (boolean expr)))
-           (list 'rsdump/comments (lx/raw-tokens src ed true (boolean expr))))])
+      (let [{:keys [tree toks mt]} (binding [ps/*errs* errs ps/*stash* stash lx/*late* late]
+                                     (if expr (ps/parse-expr-file src ed) (ps/parse-file src ed)))]
+        (if-let [d (or (first errs) (first stash) (first late))]
+          (reject d)
+          (let [[macs metas] (facts tree src toks mt ed)
+                o (fn [x] (out x src toks mt ed))]
+            [cfg
+             (o tree)
+             (list 'rsdump/mac-exprs (mapv (fn [[sp k es]] [(o sp) k (o (vec es))]) macs))
+             (list 'rsdump/meta (mapv (fn [[sp m]] [(o sp) (o m)]) metas))
+             (if full
+               (list 'rsdump/tokens (lx/raw-tokens src ed false (boolean expr)))
+               (list 'rsdump/comments (lx/raw-tokens src ed true (boolean expr))))])))
       (catch Throwable e
-        (let [msg (cond (identical? e ps/perr) (str "native parser: " (first (first errs)) " at " (second (first errs)))
-                        (:rust-lex (ex-data e)) (str "native lexer: " (.getMessage e))
-                        :else (str "native reader failed: " e))]
-          [cfg (list 'rsdump/error msg)])))))
+        (cond (and (identical? e ps/perr) (or (first errs) (first stash))) (reject (or (first errs) (first stash)))
+              (:diag (ex-data e)) (reject (:diag (ex-data e)))
+              :else [cfg (list 'rsdump/error (str "native reader failed: " e))])))))
 
 (defn- write-dump [^String out-dir ^String file forms]
   (let [o (File. (str out-dir "/" file ".edn"))]
@@ -453,6 +465,58 @@
       (spit rep (with-out-str (prn {:files (count results) :by-status by :results (mapv #(dissoc % :helper :native) results)}))))
     (if (every? #(contains? #{:equal :both-reject} (:status %)) results) 0 1)))
 
+;; ---------------------------------------------------------------------------------------------
+;; The first errors against rustc's
+
+(defn first-error
+  "A file's first error as rustc reports it, or nil when the native reader accepts it:
+  {:message :code :span [l1 c1 l2 c2]}"
+  [^String file ^long ed pin expr]
+  (let [forms (dump-forms file ed false pin expr)]
+    (some #(when (and (seq? %) (= 'rsdump/diagnostic (first %))) (second %)) forms)))
+
+(defn- error-line
+  "A file's first error as a line of the rustc reference's table: FILE, ok|err, l1:c1-l2:c2, code, message"
+  ^String [^String file e]
+  (if e
+    (let [[l1 c1 l2 c2] (:span e)]
+      (str file "\terr\t" l1 ":" c1 "-" l2 ":" c2 "\t" (or (:code e) "-") "\t"
+           (-> ^String (:message e) (.replace "\n" "\\n") (.replace "\t" "\\t"))))
+    (str file "\tok\t-\t-\t-")))
+
+(defn- cmd-errors [args root]
+  (let [{:keys [opts args]} (parse-args args #{"--ref" "--edition" "--list" "--pin" "--out"})
+        ed (Long/parseLong (get opts "--edition" "2024"))
+        pin (read-pin (get opts "--pin" (str root "/tools/rsdump/RUSTC_VERSION")))
+        ref (when-let [r (get opts "--ref")]
+              (into {} (for [l (str/split-lines (slurp r)) :when (not (str/blank? l))] [(first (str/split l #"\t" 2)) l])))
+        lines (vec (for [f (files-of opts args)]
+                     (let [l (error-line f (first-error f ed pin (get opts "--expr")))
+                           r (get ref f)
+                           st (cond (nil? ref) nil
+                                    (nil? r) :no-ref
+                                    (= r l) (if (str/includes? l "\tok\t") :both-accept :equal)
+                                    :else (let [rs (str/split r #"\t") ls (str/split l #"\t")]
+                                            (cond (not= (nth rs 1) (nth ls 1)) (if (= (nth ls 1) "ok") :native-accepts :native-rejects)
+                                                  (not= (nth rs 4 nil) (nth ls 4 nil)) :message-differs
+                                                  (not= (nth rs 2) (nth ls 2)) :span-differs
+                                                  :else :code-differs)))]
+                       (if ref
+                         (do (when-not (contains? #{:equal :both-accept} st)
+                               (println (name st) "\n    rustc: " r "\n    native:" l))
+                             st)
+                         (do (println l) nil)))))]
+    (when-let [o (get opts "--out")] nil)
+    (if ref
+      (let [by (frequencies lines)
+            errs (+ (get by :equal 0) (get by :message-differs 0) (get by :span-differs 0) (get by :code-differs 0))]
+        (println (format "repr-rust native errors: %d files, %d accepted by both, %d first errors equal of %d rejected by both (%d messages differ, %d spans, %d codes); %d rejected by the native reader alone, %d by rustc alone"
+                         (count lines) (get by :both-accept 0) (get by :equal 0) errs
+                         (get by :message-differs 0) (get by :span-differs 0) (get by :code-differs 0)
+                         (get by :native-rejects 0) (get by :native-accepts 0)))
+        (if (every? #{:equal :both-accept} lines) 0 1))
+      0)))
+
 (defn -main [& args]
   (let [[verb & more] args
         root (or (System/getenv "ARBACE_ROOT") ".")]
@@ -460,4 +524,5 @@
       (case verb
         "dump" (cmd-dump more root)
         "check" (cmd-check more root)
+        "errors" (cmd-errors more root)
         (do (println "usage: arbace.repr.rust.native dump|check ...") 2)))))

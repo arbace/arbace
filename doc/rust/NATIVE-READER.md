@@ -16,6 +16,7 @@ pin `tools/rsdump/RUSTC_VERSION`, `58cf8f9c3`) and the sources of Alpine's `rust
     bin/repr-rust read --reader native [--full] [--edition E] [-o DIR] ... FILE.rs...
     bin/repr-rust read --reader native [--full] --corpus [CORPUS]
     bin/repr-rust native-check [--full] [--edition E] [FILE...]     (make repr-rust-native-check)
+    bin/repr-rust native-errors [--edition E] [--list FILE] [FILE...]   (make repr-rust-native-errors)
 
 `REPR_RUST_READER=native` makes it the default reader of `dump` and `read`; neither needs rustc
 then (a corpus's files come from `bin/repr-rust corpus fetch`). A native dump's `:helper` is
@@ -73,15 +74,24 @@ in rustc's parsed tree).
 
 - Macro expansion. `macro_rules!` definitions and invocations are read as rustc's parser reads
   them, token trees; expanding them is not reading (the helper's tree is before expansion too).
-- Recovery and rustc's messages. Where rustc's parser reports an error, even one it recovers
-  from, the native reader stops: the file is rejected with a message of its own (the first
-  error, at its position), and the helper rejects the same files, since it refuses a file on
-  which rustc reported errors. rustc's wording, suggestions, recovered trees and further errors
-  are later work. An error rustc emits inside a speculative parse it then abandons is not
-  reported here: an over-acceptance of invalid text only (none was found).
+- Recovery past the first error. Where rustc's parser reports an error, even one it recovers
+  from, the native reader rejects the file with rustc's first error (see "Errors" below); the
+  helper rejects the same files, since it refuses a file on which rustc reported errors. rustc's
+  suggestions, labels, notes, recovered trees and further errors are not ported.
 - `include!` expression files (`--expr`) are read with nothing stripped, as rustc does; an empty
   span at the file's very start would be written as the dummy span (`nil`) where the helper,
   whose expression file follows an empty crate root in the source map, writes `[1 1 1 1]`.
+- Unicode: `XID_Start`/`XID_Continue` come from the host's Unicode identifier tables (the Go
+  runtime's: `Character/isUnicodeIdentifierStart`, `Part`, less the ignorables; ZWJ and ZWNJ
+  continue), not from the tables rustc_lexer calls, those of the crate `unicode-ident` 1.0.22
+  (`compiler/rustc_lexer/Cargo.toml`; rustc_lexer requires `unicode-properties`, its emoji
+  tables, to be of the same Unicode version). The two may differ in Unicode version and in the
+  derivation (unicode-ident's XID properties, NFKC-closed, against Java's
+  identifier-start/part classes): files whose identifiers lie where they differ may disagree.
+  Emoji (`is_emoji_char`, from `unicode-properties`) are approximated by the symbol category
+  and the block U+1F000-1FAFF. An identifier with an emoji is accepted, as rustc's parser
+  accepts it (rustc records it and reports "identifiers cannot contain emoji" after expansion,
+  so `-Z parse-crate-root-only` and the helper accept the file).
 - Speed: stage 0 evaluates the reader from the checkout: about 3,300 lines a second (core's
   and std's 60 files, 53,158 lines, in 16 s, one process, 0.55 GB at its peak); a corpus is read
   by `REPR_RUST_NATIVE_JOBS` processes (default 4).
@@ -132,6 +142,77 @@ non-ASCII code point of planes 0-3 and 14 and the edges of the others: `start.rs
 rustc; its lexer runs before its parser, so every lexer error is listed) against the lines on which the
 native lexer throws; and `ident.rs`, each identifier character bound by a `let` (its NFD form too), read by
 both readers through `bin/repr-rust native-check` (modes `:lines` and `:full`).
+## Errors
+
+Built on 2026-11-04 (branch `rust-errors`, from `rust-native`). A rejected file's dump is
+`(rsdump/error "error[CODE]: MESSAGE")` and `(rsdump/diagnostic {:message M :code C :span [l1
+c1 l2 c2]})`: rustc 1.99.1's first error of the parse, its message, code and primary span (the
+first primary span of `rustc --error-format=json`, lines from 1, columns characters from 1),
+as `rustc -Z parse-crate-root-only` reports it. `arbace.repr.rust.native errors` prints a file's
+first error as a line (FILE, ok|err, l1:c1-l2:c2, code, message) and compares the lines with
+rustc's (`--ref`); `bin/repr-rust native-errors` makes rustc's lines
+(`bin/lib/repr-rust/rustc-errors`, the host's rustc at the pin, `RUSTC_BOOTSTRAP=1` for `-Z`)
+and compares. What decides the first error, ported from rustc_parse 1.99.1
+(`compiler/rustc_parse/src/`: the diagnostics' messages are inline in this version,
+`diagnostics.rs`'s `#[diag("...")]` structs, not `errors.rs` and `messages.ftl`):
+
+- The expected token types (`parser/token_type.rs`): `check`, `eat`, `check_keyword`,
+  `eat_keyword`, `check_ident`, `check_path`, `check_type`, `check_lifetime`, `check_const_arg`,
+  `check_plus`, `break_and_eat` add the TokenType they looked for to a 128-bit set in the
+  parser's state (two longs, so a snapshot keeps it), `bump` clears it; `check-ne`, `eat-ne`,
+  `eat-kw-ne` and `is?` are rustc's `_noexpect` checks and `self.token == ...` comparisons, which
+  add nothing. Each check of the port follows rustc's choice; the explicit inserts rustc makes
+  (`TokenType::Operator` before the operators' loop, `Lt` and `OpenParen` in a type path's
+  segment, `OpenBrace` after a closure's `async`, `Colon` after a shorthand field) are made too.
+- `expected_one_of_not_found` (`parser/diagnostics.rs`): the set's strings sorted and deduplicated,
+  "expected X, found Y", "expected one of X, Y, or Z, found W", "unexpected token: W"; the
+  missing-`;` cases rustc recovers from (ExpectedSemi at the previous token's end or at a `,` or
+  `:`), `==` for `=`, `async move` in 2015, too many `#` after a raw string; `unexpected_err`
+  ("expected `X`, found Y" when nothing else was expected); `token_descr` and
+  `pprust::token_to_string` (keyword, reserved keyword, reserved identifier, doc comment);
+  `expected_ident_found` (with its recovered cases emitted).
+- Returned and emitted errors. An error rustc returns (`Err(diag)`) is `fail`: thrown with the
+  diagnostic in the parser's state, which a snapshot's restore cancels (`attempt`, rustc's
+  `create_snapshot_for_diagnostic` then `cancel` and `restore_snapshot`); one rustc emits
+  (`dcx().emit_err`, and an `Err` a caller emits) is `emit`: recorded at once in the parse's
+  list, then thrown (this parser stops where rustc recovers). So an error emitted inside a
+  speculative parse rustc then abandons still rejects the file, as in rustc (the
+  over-acceptance the first version allowed). The first error is the first emitted; the
+  top-level returned error comes after those emitted before it. Stashed errors keep rustc's
+  order: an expression in a pattern (`StashKey::ExprInPat`, the expression parsed in its place
+  as rustc's snapshot does) is emitted at the end of its statement, a missing type of a `const`
+  or `static` (`ItemNoType`) and a lifetime starting with a digit (`LifetimeIsChar`) after every
+  other error of the parse.
+- Recovery before the first error, where it changes that error's message or span: the
+  separator recovery of `parse_seq_to_before_tokens` (the element after a missing `,` parsed
+  first, its own errors coming first), ternary operators, `:` for `;`, malformed loop labels,
+  `match` arms (the missing comma, a body without braces, `=>` typos), struct expression and
+  pattern fields, `..` in struct patterns, the generic arguments' unbraced const expressions
+  (`recover_const_arg`), `<T>::` without angle brackets (with `to_ty`), path single and triple
+  colons, `fn` parameters (the pattern route's expected set, `self` not first, anonymous
+  parameters in 2015, patterns in bodiless methods), `fn`'s front matter, missing keywords before
+  an item, trait bounds' modifiers, types (`+`, `?`, `typeof`, C-style pointers, `dyn mut`),
+  `impl` headers, struct fields, item lists, `use` trees, `let` chains and forbidden `let`s at
+  the `let`'s span.
+- The lexer: each error of `lexer/mod.rs` with rustc's span and code (unterminated literals and
+  comments, raw strings' starters, terminators and hashes, number literals, unknown prefixes,
+  guarded strings in 2024, raw identifiers and lifetimes, doc comments' bare CR, unknown tokens
+  with their repeats and the confusables of `unicode_chars.rs`), the escape errors of
+  `rustc-literal-escaper` with `unescape_error_reporting.rs`'s messages and spans (the escaper's
+  scan order: a `\u{...}`'s characters, digits and braces checked as it reads them); and the
+  token trees' errors (`lexer/tokentrees.rs`, `lexer/diagnostics.rs`): on the first unmatched
+  delimiter the file is lexed again with rustc's recovery (a mismatched closer closes the
+  innermost open delimiter and is kept for an outer one it matches; `report_missing_open_delim`
+  drops the mismatches at `)` and `]` an unexpected closer reports), a lexer error on the way
+  first (rustc emits those as it lexes), then the mismatched closing delimiters, then the
+  stream's error (an unexpected closer at the top, the file's end in an open delimiter).
+
+Not ported: suggestions, labels and notes (only the message, code and primary span are compared);
+the recoveries after the first error; `parameter_without_type`'s and `recover_fn_ptr_with_generics`'s
+finer cases, `check_mistyped_turbofish_with_multiple_type_params` ("`<` is interpreted as a start
+of generic arguments ..."), `maybe_recover_struct_lit_bad_delims`, the closure-body recovery
+(`recover_missing_braces_around_closure_body`), the block-label and `if`-without-block
+recoveries, frontmatter's errors, the text-direction lints (warnings).
 
 ## Checks (2026-11-04)
 
@@ -157,3 +238,15 @@ both readers through `bin/repr-rust native-check` (modes `:lines` and `:full`).
   both, none differing.
 - The forms the converter makes of the native dumps are byte for byte those of the helper's
   (the samples in modes `:lines` and `:full`, the 60 library files).
+- The first errors (branch `rust-errors`, light runs, no corpus; scratch in the worktree's
+  `.tmp/re/`): the first agent's edge cases and mutants (39 files at 2015, 2018, 2021, 2024;
+  1,100 mutants, 1,400 runs at their editions), 400 new mutants of 40 other core and std files at 2021
+  (seed 77) and 300 held out of 40 more at 2024 (seed 1234, run once the work was done): of
+  2,256 files, 571 accepted by both, none by one reader alone, and of the 1,685 rejected by
+  both 1,650 first errors equal (message, code and primary span; 97.9 %), 1,432 of 1,464 on the
+  sets worked on and 218 of 221 on the held-out set. The 35 left: rustc's
+  `check_mistyped_turbofish_with_multiple_type_params` (6), the recoveries listed above as not
+  ported, inner attributes after doc comments, block labels, a few expected sets. The
+  accepted files' dumps are still the helper's: the 60 and 50 library files and the 42
+  compiler files of the first checks (and the 60 with `--full`), the mutants' and edge cases'
+  equal dumps.

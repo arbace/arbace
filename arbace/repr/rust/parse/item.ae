@@ -38,14 +38,14 @@
   "parse_fn_front_matter: FnHeader; mode :function or :fn-ptr"
   [^P p orig-vis case mode]
   (let [constness (parse-constness p case)]
-    (when (and (= mode :fn-ptr) (not= constness 'No)) (fail p "an `fn` pointer type cannot be `const`"))
+    (when (and (= mode :fn-ptr) (not= constness 'No)) (emit p "an `fn` pointer type cannot be `const`" (second constness)))
     (let [ck (parse-coroutine-kind p case)]
-      (when (and (= mode :fn-ptr) ck (= 'Async (first ck))) (fail p "an `fn` pointer type cannot be `async`"))
+      (when (and (= mode :fn-ptr) ck (= 'Async (first ck))) (emit p "an `fn` pointer type cannot be `async`" (nth ck 2)))
       (let [safety (parse-safety p case)
             ext (parse-extern p case)]
-        (when (and ck (= 'Async (first ck)) (< (ed) 2018)) (fail p "`async fn` is not permitted in Rust 2015"))
+        (when (and ck (= 'Async (first ck)) (< (ed) 2018)) (emit p "`async fn` is not permitted in Rust 2015" (nth ck 2) "E0670"))
         (when-not (eat-kw-case p "fn" case)
-          (fail p (str "expected `fn`, found " (describe (tok)))))
+          (expect-one-of p [] []))
         (list 'FnHeader :constness constness :coroutine_kind (opt ck) :safety safety :ext ext)))))
 
 (defn parse-fn-decl
@@ -108,8 +108,15 @@
       (let [[e i hi] r]
         (param-from-self [] (sp-to lo hi) e i)))))
 
+(defn- eat-incorrect-doc-comment-for-param-type
+  "eat_incorrect_doc_comment_for_param_type: a doc comment before a parameter's type (emitted)"
+  [^P p]
+  (when (is? :DocComment)
+    (bump p)
+    (emit p "documentation comments cannot be applied to a function parameter's type" (psp))))
+
 (defn- named-param? [^P p]
-  (let [off (if (or (check p :And) (check p :AndAnd) (kw? (tok) "mut")) 1 0)]
+  (let [off (if (or (is? :And) (is? :AndAnd) (kw? (tok) "mut")) 1 0)]
     (and (ident-tok? (la p off)) (identical? (.-kind (la p (inc off))) :Colon))))
 
 (defn parse-param-general
@@ -118,45 +125,58 @@
   (let [lo (tsp)
         attrs (parse-outer-attrs p)]
     (if-let [prm (parse-self-param p)]
-      (do (when-not first-param (fail p "unexpected `self` parameter in function"))
+      (do (when-not first-param (emit p "unexpected `self` parameter in function" (pat-span (fget prm :pat))))
           (fset prm :attrs attrs))
-      (let [dots (check p :DotDotDot)
+      (let [dots (is? :DotDotDot)
             req ((:req-name mode) (ed) dots)
             req (if (and req dots) false req)
             [pat ty]
             (if (or req (named-param? p))
               (let [[pat colon] (parse-fn-param-pat-colon p)]
-                (when-not colon (fail p (str "expected one of `:`, `@`, or `|`, found " (describe (tok)))))
-                (when (check p :DocComment) (fail p "documentation comments cannot be applied to a function parameter's type"))
+                (when-not colon (unexpected p))
+                (eat-incorrect-doc-comment-for-param-type p)
                 [pat (parse-ty-for-param p)])
-              (do (when (check p :DocComment) (fail p "documentation comments cannot be applied to a function parameter's type"))
-                  (let [ty (parse-ty-for-param p)]
-                    (when (variant? (ty-kind ty) 'Path)
-                      (check-trailing-angle-brackets p (peek (path-segs (nth (ty-kind ty) 2))) #{:CloseParen}))
-                    (when-not (or (check p :Comma) (check p :CloseParen))
-                      (fail p "expected one of `,` or `)`"))
-                    [(mk-pat (ty-span ty) 'Missing) ty])))]
+              (let [s (snap p)]
+                (eat-incorrect-doc-comment-for-param-type p)
+                (on-err p (let [ty (parse-ty-for-param p)]
+                            (when (variant? (ty-kind ty) 'Path)
+                              (check-trailing-angle-brackets p (peek (path-segs (nth (ty-kind ty) 2))) #{:CloseParen}))
+                            (when-not (or (is? :Comma) (is? :CloseParen))
+                              (expect-one-of p [] []))
+                            [(mk-pat (ty-span ty) 'Missing) ty])
+                        (fn [e]
+                          (when (or (is? :DotDotDot) (pos? (nget UNMATCHED)) (not recover-arg-parse)) (throw e))
+                          (clear-pending! p)
+                          (restore! p s)
+                          (let [pat (parse-pat-no-top-alt p :argument-name nil)]
+                            (expect p :Colon)
+                            (parse-ty p)
+                            (emit p (str "patterns aren't allowed in "
+                                         (if (= (:context mode) :fn-ptr) "function pointer types" "methods without bodies"))
+                                  (pat-span pat) "E0642"))))))]
         (list 'Param :attrs attrs :ty ty :pat pat :span (sp-to lo (psp)) :is_placeholder false)))))
 
 (defn parse-fn-params
   "parse_fn_params"
   [^P p mode]
-  (when-not (or (check p :OpenParen) (kw? (tok) "for")) (fail p "missing parameters for function definition"))
+  (when-not (or (is? :OpenParen) (kw? (tok) "for")) (emit p "missing parameters for function definition" (sp-hi (psp))))
   (let [fst (volatile! true)]
     (vec (first (paren-comma-seq p #(let [r (parse-param-general p mode @fst true)] (vreset! fst false) r))))))
 
 (defn- parse-fn-body
   "parse_fn_body: [body inner-attrs sig-hi]"
   [^P p ^Sp sig-hi req-body]
-  (cond (check p :Semi) (do (expect-semi p) [nil [] (psp)])
+  (cond (if req-body (is? :Semi) (check p :Semi)) (do (expect-semi p) [nil [] (psp)])
         (check p :OpenBrace)
         (let [prev-in (nget INFN)]
           (nset INFN 1)
           (let [[attrs body] (parse-block-common p (tsp) 'Default)]
             (nset INFN prev-in)
             [body attrs sig-hi]))
-        (check p :Eq) (fail p "function body cannot be `= expression;`")
-        :else (fail p (str "expected one of `->`, `where`, or `{`, found " (describe (tok))))))
+        (is? :Eq) (let [eq (tsp)]
+                    (bump p) (parse-expr p) (expect-semi p)
+                    (emit p "function body cannot be `= expression;`" (sp-to eq (psp))))
+        :else (do (expected-one-of-not-found p [] (if req-body [:OpenBrace] [:Semi :OpenBrace])) nil)))
 
 (defn- parse-fn
   "parse_fn: [ident sig generics contract body inner-attrs]"
@@ -265,11 +285,40 @@
 (defn- recover-missing-kw-before-item
   "recover_missing_kw_before_item: a struct, enum or fn without its keyword is an error"
   [^P p]
-  (let [is-const (kw? (prev) "const")]
+  (let [is-pub (kw? (prev) "pub")
+        is-const (kw? (prev) "const")
+        ident-span (tsp)
+        span (if is-pub (sp-to (psp) ident-span) ident-span)]
     (when (and (ident-tok? (tok))
                (or (not is-const) (identical? (.-kind (la p 1)) :OpenParen))
                (contains? #{:Lt :OpenBrace :OpenParen} (.-kind (la p 1))))
-      (fail p "missing keyword before an item"))))
+      (parse-ident-common p)
+      (let [generics (when (check p :Lt)
+                       (loop [] (when-not (or (check p :Gt) (close-delim-or-eof? (tok)))
+                                  (if (contains? lx/open-delims (tk)) (parse-token-tree p) (bump p))
+                                  (recur)))
+                       (bump p)
+                       true)
+            msg (cond (check p :OpenBrace)
+                      (cond (identical? (.-kind (la p 1)) :CloseBrace) "missing `enum` or `struct` for enum or struct definition"
+                            (or (identical? (.-kind (la p 2)) :Colon) (identical? (.-kind (la p 3)) :Colon))
+                            "missing `struct` for struct definition"
+                            :else "missing `enum` for enum definition")
+                      (check p :OpenParen)
+                      (let [^Tok a (la p 1) ^Tok b (la p 2) ^Tok c (la p 3)
+                            method (or (kw? a "self")
+                                       (and (kw? a "mut") (kw? b "self"))
+                                       (and (identical? (.-kind a) :And)
+                                            (or (kw? b "self") (and (kw? b "mut") (kw? c "self"))
+                                                (and (lifetime? b) (or (kw? c "self") (kw? c "mut"))))))]
+                        (parse-token-tree p)
+                        (cond (or (check p :RArrow) (check p :OpenBrace))
+                              (if method "missing `fn` for method definition" "missing `fn` for function definition")
+                              (and is-pub (check p :Semi)) "missing `struct` for struct definition"
+                              :else "missing `fn` or `struct` for function or struct definition"))
+                      generics "missing `fn` or `struct` for function or struct definition"
+                      :else nil)]
+        (when msg (fail p msg span))))))
 
 (defn- parse-rename [^P p]
   (when (eat-kw p "as")
@@ -294,8 +343,11 @@
       (let [prefix (parse-path p :mod)]
         (if (eat-path-sep p)
           (list 'UseTree :prefix prefix :kind (parse-use-tree-glob-or-nested p))
-          (do (when (check p :Colon) (fail p "expected `::`, found `:`"))
-              (list 'UseTree :prefix prefix :kind (list 'Simple (opt (parse-rename p))))))))))
+          (let [prefix (loop [prefix prefix]
+                         (if (eat-ne p :Colon)
+                           (do (emit p "expected `::`, found `:`" (psp)) prefix)
+                           prefix))]
+            (list 'UseTree :prefix prefix :kind (list 'Simple (opt (parse-rename p))))))))))
 
 (defn- parse-use-item [^P p]
   (let [tree (parse-use-tree p)]
@@ -305,17 +357,17 @@
 (defn- parse-item-list
   "parse_item_list: [items inner-attrs]"
   [^P p f]
-  (when (check p :Semi) (fail p "expected `{}`, found `;`"))
+  (when (is? :Semi) (emit p "expected `{}`, found `;`"))
   (expect p :OpenBrace)
   (let [inner (parse-inner-attrs p)
         items (loop [items (transient [])]
                 (if (eat p :CloseBrace)
                   (persistent! items)
-                  (do (when (and (check p :DocComment) (identical? (.-kind (la p 1)) :CloseBrace))
-                        (fail p "found a documentation comment that doesn't document anything"))
-                      (if-let [item (f)]
+                  (do (when (and (is? :DocComment) (identical? (.-kind (la p 1)) :CloseBrace))
+                        (emit p "found a documentation comment that doesn't document anything" (tsp) "E0584"))
+                      (if-let [item (on-err p (f) (fn [_] (emit-diag p (pending p))))]
                         (recur (conj! items item))
-                        (fail p "non-item in item list")))))]
+                        (emit p "non-item in item list")))))]
     [items inner]))
 
 (defn- parse-item-extern-crate [^P p]
@@ -349,11 +401,19 @@
 (defn- recover-const-mut [^P p]
   (when (or (kw? (tok) "mut") (kw? (tok) "let")) (fail p "const globals cannot be mutable")))
 
+(defn- missing-global-item-type
+  "recover_missing_global_item_type: MissingConstType, stashed (rustc's typeck would take it): reported
+  after the parse's other errors"
+  [^P p ^String kind]
+  (late! (diag (str "missing type for `" kind "` item") (sp-hi (psp))))
+  (mk-ty (sp-hi (psp)) 'Infer))
+
 (defn- parse-static-item [^P p safety m]
   (let [ident (parse-ident p)]
-    (when (check p :Lt) (fail p "static items may not have generic parameters"))
+    (when (is? :Lt) (let [g (parse-generics p)] (emit p "static items may not have generic parameters" (fget g :span))))
     (let [colon (eat p :Colon)
-          ty (if (and colon (not (or (check p :Eq) (check p :Semi)))) (parse-ty p) (fail p "missing type for `static` item"))
+          ty (if (and colon (not (or (check p :Eq) (check p :Semi)))) (parse-ty p)
+                 (missing-global-item-type p (if (= m 'Mut) "static mut" "static")))
           e (when (eat p :Eq) (parse-expr p))]
       (expect-semi p)
       (list 'Static (list 'StaticItem :ident ident :ty ty :safety safety :mutability m :expr (opt e)
@@ -367,7 +427,7 @@
         colon (eat p :Colon)
         ty (if (and colon (not (or (check p :Eq) (check p :Semi) (check-kw p "where"))))
              (parse-ty p)
-             (fail p "missing type for `const` item"))
+             (missing-global-item-type p "const"))
         before (parse-where-clause p)
         rhs (when (eat p :Eq) (parse-expr p))
         after (parse-where-clause p)]
@@ -434,8 +494,14 @@
     (case (tk)
       :Comma (bump p)
       :CloseBrace nil
-      :Semi (fail p (str adt " fields are separated by `,`"))
-      (fail p (str "expected `,`, or `}`, found " (describe (tok)))))
+      :Semi (do (bump p) (emit p (str adt " fields are separated by `,`") (psp)))
+      :DocComment (let [d (diag "found a documentation comment that doesn't document anything" (tsp) "E0585")]
+                    (bump p)
+                    (if (or (eat p :Comma) (is? :CloseBrace)) (emit-diag p d) (fail-diag p d)))
+      (let [d (diag (str "expected `,`, or `}`, found " (describe (tok))) (sp-hi (psp)))]
+        (if (or (ident-tok? (tok)) (and (is? :Pound) (identical? (.-kind (la p 1)) :OpenBracket)))
+          (emit-diag p d)
+          (fail-diag p d))))
     f))
 
 (defn- parse-record-struct-body [^P p adt]
@@ -588,28 +654,33 @@
               (parse-generics p)
               (generics [] (where-clause false [] DUMMY) (sp-hi (psp))))]
       (when (or (and (>= (ed) 2018) (kw? (tok) "async")) (kw-followed-by-ident? p "async"))
-        (fail p "`async` trait implementations are unsupported"))
+        (bump p) (emit p "`async` trait implementations are unsupported" (psp)))
       (let [polarity (parse-polarity p)
+            neg-span (psp)
             ty-first (if (and (kw? (tok) "for") (not (identical? (.-kind (la p 1)) :Lt)))
-                       (fail p "missing trait in a trait impl")
+                       (fail p "missing trait in a trait impl" (sp-between (psp) (tsp)))
                        (parse-ty-common p {:ty-generics g}))
             has-for (eat-kw p "for")
-            ty-second (cond (check p :DotDot) (do (bump p) (mk-ty (psp) 'Dummy))
+            missing-for (sp-between (psp) (tsp))
+            ty-second (cond (is? :DotDot) (do (bump p) (mk-ty (psp) 'Dummy))
                             (or has-for (can-begin-type? (tok) (ed))) (parse-ty p)
                             :else nil)
             g (fset g :where_clause (parse-where-clause p))
             [items inner] (if is-reuse [[] []] (parse-item-list p #(parse-assoc-item p {:req-name (fn [_ _] true) :context :impl :req-body true})))
             [of-trait self-ty]
             (if ty-second
-              (do (when-not has-for (fail p "missing `for` in a trait impl"))
+              (do (when-not has-for (emit p "missing `for` in a trait impl" missing-for))
                   (let [k (ty-kind ty-first)]
-                    (when-not (and (variant? k 'Path) (= 'None (nth k 1))) (fail p "expected a trait, found type"))
+                    (when-not (and (variant? k 'Path) (= 'None (nth k 1)))
+                      (if (and (variant? k 'ImplTrait) (= 1 (count (nth k 1))) (= 'Trait (first (first (nth k 1)))))
+                        (emit p "unexpected `impl` keyword" (sp-until (ty-span ty-first) (bound-span (first (nth k 1)))))
+                        (fail p "expected a trait, found type" (ty-span ty-first))))
                     [(list 'Some (list 'TraitImplHeader :defaultness defaultness :safety safety :polarity polarity
                                        :trait_ref (list 'TraitRef :path (nth k 2))))
                      ty-second]))
-              (do (when (variant? safety 'Unsafe) (fail p "inherent impls cannot be unsafe"))
-                  (when (= polarity "negative") (fail p "inherent impls cannot be negative"))
-                  (when (variant? defaultness 'Default) (fail p "inherent impls cannot be default"))
+              (do (when (variant? safety 'Unsafe) (emit p "inherent impls cannot be unsafe" (ty-span ty-first) "E0197"))
+                  (when (= polarity "negative") (emit p "inherent impls cannot be negative" (ty-span ty-first)))
+                  (when (variant? defaultness 'Default) (emit p "inherent impls cannot be default" (ty-span ty-first)))
                   ['None ty-first]))]
         [(list 'Impl (list 'Impl :generics g :constness constness :of_trait of-trait :self_ty self-ty :items items)) inner]))))
 
@@ -735,9 +806,15 @@
     (if kind
       (do (when-not (= def-left 'Implicit) (fail p "this item cannot be `default`/`final`"))
           (list 'Item :attrs (into attrs inner) :span (sp-to lo (psp)) :vis v :kind kind))
-      (do (when-not (= 'Inherited (fget v :kind)) (fail p "visibility `pub` is not followed by an item"))
+      (do (when-not (= 'Inherited (fget v :kind))
+            (emit p (str "visibility `" (lx/text-of (.-src p) (.-lo ^Sp (fget v :span)) (.-hi ^Sp (fget v :span)))
+                         "` is not followed by an item")
+                  (fget v :span)))
           (when-not (= def-left 'Implicit) (fail p "`default` is not followed by an item"))
-          (when (and (not attrs-allowed) (seq attrs)) (fail p "expected item after attributes"))
+          (when (and (not attrs-allowed) (seq attrs))
+            (let [e (peek attrs)]
+              (fail p (if (variant? (fget e :kind) 'DocComment) "expected item after doc comment" "expected item after attributes")
+                    (fget e :span))))
           nil))))
 
 (defn parse-item
