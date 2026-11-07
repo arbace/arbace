@@ -167,8 +167,10 @@ front_eligible() { # SRC MAIN FLAGS KIND IFACES: a single module of the library'
   local src=$1 main=$2 flags=$3 kind=$4 ifs=$5 m f
   case $kind in plain|compile_and_run|nofib) ;; *) return 1 ;; esac
   [ "$main" != - ] && [ -f "$src/$main" ] || return 1
-  if [ "$flags" != - ]; then for f in $flags; do case $f in *.c|*.o|*.cmm|*.s|*.S|-optc*|-cpp|-XCPP) return 1 ;; esac; done; fi
-  ! grep -qE 'foreign +export|"wrapper"|foreign +import +capi|^ *\{-# *LANGUAGE[^#]*CPP' "$src/$main" || return 1
+  # (-fdefer-type-errors: a program GHC compiles with a type error raised at run time, in GHC's words; RULES: rewrite rules,
+  # which the front end does not apply, as GHC's -O0 does for a rule of the module's own, tcrun022)
+  if [ "$flags" != - ]; then for f in $flags; do case $f in *.c|*.o|*.cmm|*.s|*.S|-optc*|-cpp|-XCPP|-fdefer-type-errors|-fdefer-typed-holes) return 1 ;; esac; done; fi
+  ! grep -qE 'foreign +export|"wrapper"|foreign +import +capi|^ *\{-# *LANGUAGE[^#]*CPP|\{-# *OPTIONS_GHC[^#]*-fdefer-type|\{-# *RULES' "$src/$main" || return 1
   for m in $(sed -n 's/^import *\(safe \)\?\(qualified \)\?\([A-Z][A-Za-z0-9_.]*\).*/\3/p' "$src/$main" | sort -u); do
     # a library's module: its interface, or a package's reexport of one (GHC.Prim is ghc-internal's GHC.Internal.Prim)
     [ -f "$ifs/$m.iface.edn" ] || grep -qF "\"$m\" " "$ifs/reexports.edn" || return 1
@@ -217,16 +219,40 @@ if [ "$front" = native ]; then
   n=$(grep -c . "$fw/plan.tsv" || true); k=${HSI_FRONT_SHARDS:-4}
   [ -z "${HSI_FRONT_DRY:-}" ] || { echo "== hsi check: $n of $(wc -l < "$plan") programs eligible for the native front end ($fw/plan.tsv)" >&2; exit 0; }
   echo "== hsi check: the native front end on $n of $(wc -l < "$plan") programs, $k processes" >&2
+  # a shard: one process for its programs; a program that gives no line for HSI_FRONT_TIMEOUT seconds (default 300: a front end
+  # that loops) is stopped, recorded "NAME timeout", and a fresh process takes the rest
+  front_shard() { # PLAN LOG
+    local pl=$1 log=$2 rest=$1.rest pid n n0 last now nm
+    : > "$log"
+    while [ -s "$pl" ]; do
+      (export GOMEMLIMIT=${HSI_FRONT_MEM:-1536MiB}; cd "$root" && exec env ARBACE_PATH=$root "$("$root/bin/hsi" exe)" -m arbace.repr.haskell.front build \
+         --ifaces "$ifaces" --libs "${libs//:/,}" -o "$fw/out" --plan "$pl") >> "$log" 2>&1 &
+      pid=$!; last=$(date +%s); n0=$(grep -cE '^[^ ]+ (ok|read|rename|typecheck|typecheck-errors|stg|crash|timeout) ' "$log" || true)
+      while kill -0 "$pid" 2>"$TMPDIR/hsi-front-kill.err"; do
+        sleep 5; now=$(date +%s)
+        n=$(grep -cE '^[^ ]+ (ok|read|rename|typecheck|typecheck-errors|stg|crash|timeout) ' "$log" || true)
+        if [ "$n" != "$n0" ]; then n0=$n; last=$now
+        elif [ $((now - last)) -gt "${HSI_FRONT_TIMEOUT:-300}" ]; then kill "$pid" 2>"$TMPDIR/hsi-front-kill.err"; break; fi
+      done
+      wait "$pid" 2>"$TMPDIR/hsi-front-kill.err" || true
+      awk -F'\t' 'BEGIN { while ((getline l < ARGV[2]) > 0) { split(l, w, " "); done[w[1]] = 1 }; ARGV[2] = "" }
+                   { b = $1; sub(/^.*@/, "", b) } !(b in done)' "$pl" "$log" > "$rest"
+      [ -s "$rest" ] || break
+      # the first program without a line stopped the process (a loop, or a crash of the process itself)
+      nm=$(head -1 "$rest" | cut -f1 | sed 's/^.*@//'); echo "$nm timeout no line in ${HSI_FRONT_TIMEOUT:-300} s, or the process ended" >> "$log"
+      tail -n +2 "$rest" > "$pl.next"; mv "$pl.next" "$pl"
+    done
+    rm -f "$rest"
+  }
   pids=()
   for i in $(seq 0 $((k - 1))); do
     awk -v i="$i" -v k="$k" '(NR - 1) % k == i' "$fw/plan.tsv" > "$fw/plan.$i"
     [ -s "$fw/plan.$i" ] || continue
-    (export GOMEMLIMIT=${HSI_FRONT_MEM:-1536MiB}; cd "$root" && ARBACE_PATH=$root "$("$root/bin/hsi" exe)" -m arbace.repr.haskell.front build \
-       --ifaces "$ifaces" --libs "${libs//:/,}" -o "$fw/out" --plan "$fw/plan.$i") > "$fw/front.$i.log" 2>&1 &
+    front_shard "$fw/plan.$i" "$fw/front.$i.log" &
     pids+=($!)
   done
   for p in ${pids[@]+"${pids[@]}"}; do wait "$p" || true; done
-  cat "$fw"/front.*.log 2>"$TMPDIR/hsi-front.err" | grep -E '^[^ ]+ (ok|read|rename|typecheck|typecheck-errors|stg|crash) ' | sort > "$fw/front.txt" || true
+  cat "$fw"/front.*.log 2>"$TMPDIR/hsi-front.err" | grep -E '^[^ ]+ (ok|read|rename|typecheck|typecheck-errors|stg|crash|timeout) ' | sort > "$fw/front.txt" || true
   echo "== hsi check: the front end compiled $(grep -c '^[^ ]* ok ' "$fw/front.txt" || true) of $(grep -c . "$fw/front.txt" || true) eligible programs" >&2
   # HSI_FRONT_DRY=1: the eligible programs listed (front/plan.tsv), the front end not run, nothing run
   [ -z "${HSI_FRONT_DRY:-}" ] || exit 0

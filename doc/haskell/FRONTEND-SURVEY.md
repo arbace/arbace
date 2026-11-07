@@ -1354,3 +1354,89 @@ corpus (writes the native known files' first entries, if any differ), `bin/hsi c
   of its own: hsi's forms merged as Go (`git merge-file` per printed file, as `haskell-integrate` did), eval9's HE9 kept, this
   line's stubs and packs kept; about half a day; check-hsi 806 of 910 on that line. (b) Rebase HE9's commits alone (allocation
   counters, RTS flags) onto this line. *Recommended: (b)*: HE9 is self-contained, the C support of both lines is the same design.
+
+## Decided (the user, 2026-11-07: HFS-I1 (a))
+
+HFS-I1 (a), relayed by the main session: `bin/hsi check --front native`, the programs the front end compiles run from Arbace's STG
+with an interfaces pack for the boot libraries, beside GHC's STG; the default once a night's run shows no pass lost.
+
+## As built: HFS-I1 (a) (2026-11-07, branch `hfs-i1`, from `haskell-90` 0fb4591bf)
+
+By an agent on the main host by day (the light tier: no gate, no build of Arbace, every process under about 2 GiB; stage 0
+`/root/arbace/target/seed/amd64/arbace`, the checkout's sources evaluated with `ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1`;
+`HSI_LIBS` the unpacked `haskell-stg-libs`, whose keys are stale at this helper, "As built: the crop's independence": the night's
+`bin/hsi dumps --record`).
+
+### What was built
+
+| piece | files | what |
+|---|---|---|
+| the front end as hsi's source of STG | `bin/lib/hsi/check` (`--front native\|ghc`, `HSI_FRONT`; `default_front`) | before the runs, each program the front end can take compiled by `arbace.repr.haskell.front` in `HSI_FRONT_SHARDS` processes (default 4, Go's heap near `HSI_FRONT_MEM`, 1536MiB); `one` runs it from `front/out/stg/ID`, else from `haskell-stg-progs` as before; each result carries `:stg :native`, or `:stg :ghc` with `:front` the stage that stopped the front end (`:ineligible`: not tried); the summary counts both and the passes from native STG |
+| eligibility | `front_eligible` | kinds `plain`, `compile_and_run`, `nofib` (one main file); every module the main file imports a library's (its interface in the pack, or a package's reexport: `GHC.Prim`); no C of its own (`.c`, `.o`, `-optc`), no CPP, no `foreign export`, `"wrapper"` or `capi` import (their stubs are GHC's): 694 of the 908 programs before the two rules below (26 samples, 37 synthetic, 567 testsuite-core, 64 nofib; `HSI_FRONT_DRY=1` lists them) |
+| the flags | `arbace/repr/haskell/front.ae` (`build --plan FILE`) | each program with its own flags (its all.T `-X` options; none: GHC2021, the language GHC compiled the pack's STG in), not run-check's one `-XHaskell2010` for all |
+| the interfaces pack | `bin/lib/hsi/records.bash` (`hsi_ifaces_dir`, `hsi_record_ifaces`), `test/haskell/records/haskell-ifaces-ghc-9.14.1.{sha256,tsv}` | the helper's `iface` closure of every module the run corpora's main files import (and Prelude), 439 interfaces, with ghc-pkg's reexports (`reexports.edn`): 440 members, 13 MB, 332 KB of xz, keyed by the helper's identity (a new helper: STALE); recorded by hand with GHC (`bin/hsi check --front native --record-ifaces --corpus samples,synthetic,testsuite-core,nofib`, 46 s), the oracle tier |
+| the records apart | `--record` | while ghc is the default, `test/haskell/check-hsi-native.edn` (`-aot-native`) beside `check-hsi.edn`; work `.tmp/hsi/check-native` |
+| the comparison | `bin/hsi compare-front [--aot] [NATIVE [GHC]]` (`bin/lib/hsi/compare-front`) | the native run against GHC's STG's record program by program: both pass, lost, gained, both fail, the native run's sources; fails on a pass lost from native STG (the switch's condition) |
+| knobs | `HSI_FRONT_REUSE=DIR` | an earlier run's front outputs reused, the front end run on the rest |
+| the front end's limit | `front_shard` (`HSI_FRONT_TIMEOUT`, default 300 s) | a program that gives no line for that long (a loop) or ends its process is recorded `timeout`, a fresh process takes the shard's rest |
+| two front-end fixes (GHC's rules) | `arbace/repr/haskell/simpleopt.ae` (`con-app`), `desugar.ae` (the constructors' `:strict`), `typecheck.ae` (`*strict-binds*`, `HsLet`) | exprIsConApp_maybe does not take a constructor application whose strict field's argument is not a value (the wrapper `$WCon` evaluates it; GHC floats that evaluation, keeping the case does the same); a banged pattern binding (dsStrictBind) forces its whole match before the let's body. `cgrun051` and `T11601` pass from native STG |
+| eligibility, two more rules | `front_eligible` | `-fdefer-type-errors` (flags or `OPTIONS_GHC`) and `RULES` pragmas: outside the front end's subset |
+
+### Results (the day's, light: `ARBACE_MEM_GIB=2 HSI_TIMEOUT=120 HSI_JOBS=2 HSI_FRONT_SHARDS=2`)
+
+| run | result |
+|---|---|
+| `bin/hsi check --front native --corpus samples,synthetic,testsuite-core,nofib --only` 100 programs (the 63 of samples and synthetic, every 20th eligible testsuite-core program, every 8th eligible nofib program), after the three fixes below | 97 eligible, **84 run from Arbace's STG (samples 26 of 26, synthetic 36 of 37, testsuite-core 17 of 29, nofib 5 of 8), 79 of them pass**; 90 of 100 pass in all. Against GHC's STG's record program by program (`bin/hsi compare-front`): **no pass lost but two**, `samples/Loop` and `synthetic/runtime-deep`, which fail at the light 2 GiB cap from GHC's STG too (`bin/hsi check --only` of the two from the pack: status 2, both) and pass in the record's 16 GiB run; no pass gained; the others fail or stop as recorded (AsyncRerun's class, two runs at the 120 s cap, CallConv's primcall in hsi). The front end stops on 13: the reader on 3 nofib programs (`parse error on input of`, `,`, a varsym: digits-of-e1, ray, lift, programs GHC rejects at `-O0` too: no-dump in the pack), the elaborator on 8 (n+k patterns, monad comprehensions, `HsAppType`, three unifications, an undeclared constructor's type), the STG stage on 1 (`primops-word`: a `StackOverflowError`), 1 timeout (`AtomicPrimops`, below); each runs from GHC's STG. 15 minutes, the largest process 1.57 GB, at most two front processes and two runs at a time |
+| the earlier slice (before the fixes) | 4 passes lost from native STG, each a front-end bug or a program outside its subset: `cgrun051` (a strict field's argument `error "OK"` dropped by the simple optimiser's case of known constructor), `T11601` (a banged pattern binding `let !(Just (Just y)) = ...` not forced), `T13838` (`-fdefer-type-errors`: GHC's run-time type error, in GHC's words), `tcrun022` (a `RULES` pragma GHC's `-O0` applies); and a front process that never returned on `AtomicPrimops` |
+
+### The night command and the switch
+
+The night (one check process at a time, at most 1.5 GiB a process; `. .tmp/env.sh`: stage 0, the checkout's sources evaluated):
+
+1. `bin/hsi dumps --record` first (the libraries' pack at this helper; "As built: the crop's independence"'s first night item).
+2. `HSI_FRONT_SHARDS=1 HSI_FRONT_MEM=1200MiB bin/hsi check --front native --corpus nofib,samples,synthetic,testsuite-core --jobs 1
+   --record` (about 690 programs through the front end, 2 to 8 s each, the primops programs up to 50 s: about an hour of one process,
+   plus the runs as `hsi-check`'s; the front process at 1.57 GB by day under 1536MiB: 1200MiB holds the night's 1.5 GiB; writes
+   `test/haskell/check-hsi-native.edn`), then `bin/hsi compare-front` against `check-hsi.edn` (recorded the same night by
+   `hsi-check`'s command at the same caps), and `bin/hsi compare-front --aot` after `bin/hsi check --aot --front native ... --record`.
+3. When `compare-front` reports no pass lost, the switch (one commit): in `bin/lib/hsi/check` `default_front=native`; the three
+   steps `hsi-essential`, `hsi-check`, `hsi-check-aot` of `test/gate/steps.edn` gain `test/haskell/records/haskell-ifaces-ghc-9.14.1.sha256`
+   in `:pins`; `check-hsi-native.edn` becomes `check-hsi.edn` (and the AOT's), the old GHC-STG record kept as `check-hsi-ghc.edn` (what
+   `--front ghc --record` writes after the switch); `test/crops/independence.edn`'s eval and AOT cases split by source (below). The patch
+   is `.tmp/hfs-i1-switch.diff` in the worktree, ready for `git apply`.
+   A pass lost instead is a front-end bug (the stage and message in `front/front.txt`), fixed or classed before the switch.
+
+### The score
+
+Eval and AOT stay 0.5 per case either way: the program's own STG is Arbace's, but every run still executes the boot libraries' STG
+GHC made (`haskell-stg-libs`) against interfaces GHC wrote (the new pack): a case that consumes a toolchain's record is 0.5 by the rule
+of 2026-11-07. The independence facts (`.tmp/independence.diff` in the worktree, for batch2's `test/crops/independence.edn`) name the
+two sources apart (`:native` and `:pack`, both 0.5), so the score does not move: Haskell stays at 73.8 (read 0.804, eval 0.452, AOT 0.493,
+print 1, judge 0.942) until the libraries compile natively.
+
+**What eval at 1 needs**: the boot libraries' STG and interfaces from Arbace's front end, i.e. HF9 (the type-level tier: type families,
+GADTs, DataKinds and PolyKinds, QuantifiedConstraints, pattern synonyms, unboxed tuples and levity, `Generic`/`Data`/`Lift`: 20 to 35
+days) and HF10 (libraries from source: the module graph and hs-boot cycles, a multi-module driver writing its own interfaces in
+dependency order, CPP and hsc2hs on Arbace (HFS-I2), `foreign import` to ghc-internal's C on ci, then `ghc-internal`, `base` ... the 41
+packages: 15 to 30 days), with HF11's speed (the 1,345 modules in the night's share: 5 to 10 days). Then neither pack is read: the
+front end's interfaces are its own (`--local`), the libraries' STG its own, and eval's and AOT's cases score 1.
+
+
+**The pack's place.** `haskell-ifaces-ghc-9.14.1`'s tar (`ea93d0a1...`, 332 KB) was made in this worktree's store
+(`ARBACE_ORACLE_PACKS=.tmp/oracle-packs`, the day's rule: nothing outside the worktree); before a run on main it goes into the main
+checkout's store, `.tmp/oracle-packs/haskell-ifaces-ghc-9.14.1/`, and the mirror (`bin/oracle-records`), as the other packs.
+
+### Proposed (HFS-I5 to HFS-I7)
+
+- **HFS-I5 The front end's stops as data.** 13 of 97 eligible programs stop in the front end (above), each run from GHC's STG, so no
+  check fails on them, but they are invisible to the record but for `:front`. Options: (a) **a file `test/haskell/front-known.edn`
+  (each program's stage and message, as run-check's classes), `compare-front` failing on a stop that is not in it and on a known one
+  that now compiles**; (b) leave them in the results only. *Recommended: (a)*, with the night's first whole run.
+- **HFS-I6 The fixes' effect on stg-check.** The two front-end fixes change the desugared Core of a strict field's case and of a
+  banged pattern binding; `bin/repr-haskell stg-check` and `run-check` (GHC at build time for the interfaces, so not run by day)
+  measure Core and STG against GHC's dumps. Options: (a) **rerun both at night (`make repr-haskell-run-check`), a change in the counts
+  classed or fixed**; (b) none. *Recommended: (a)*.
+- **HFS-I7 The front end's interfaces from its own pack, then its own.** The pack holds the helper's interfaces of 439 modules (the run
+  corpora's import closure). A program importing a library module outside it is ineligible (none of the 908 today). Options: (a)
+  **re-record the pack whenever a corpus grows (`--record-ifaces`)**, until HF10 makes the front end write the libraries' interfaces
+  itself; (b) the closure of every exposed module of the 41 packages (about 2,000 interfaces, about 60 MB). *Recommended: (a)*.
