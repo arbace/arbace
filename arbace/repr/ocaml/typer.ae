@@ -9,6 +9,9 @@
                                         (--intf: coerced to the unit's .mli, found as the stdlib's or an include's)
                                         the Lambda program, as (ocaml/lambda (lambda-program ...) {...}); with
                                         --simplify after Simplif's port (what ocamlc -dlambda prints)
+    sigs --root DIR --list LIST --out OUT [--stdlib DIR] [--stdlib-units]
+                                        OC183 (a): each file's signature (Printtyp's text) into OUT/REL.sig, or its error into
+                                        OUT/REL.err (bin/repr-ocaml roundtrip --types)
     check --dir DIR --oracle ODIR [--report FILE] NAME...
                                         typer-check: each sample DIR/NAME.ml typed and translated, its signature
                                         against ODIR/NAME.types' and its Lambda against ODIR/NAME.lambda's (equal
@@ -291,6 +294,55 @@
   (let [[a b] (map #(lam/canonical (read-string (slurp %))) args)]
     (System/exit (if (= a b) 0 1))))
 
+;; ---------------------------------------------------------------------------------------------
+;; OC183 (a): the typed signature level of the round trip (bin/repr-ocaml roundtrip --types): a file's signature as the typer
+;; gives it (an implementation's inferred signature, an interface's declared one), Printtyp's text, so that the original's and
+;; the print's compare as the test's own verdict (the .cmi bytes of ocamlc, roundtrip --cmi, the oracle tier's)
+
+(defn- intf-signature-text
+  "The signature of the interface PATH as the unit UNAME (Typemod's transl_signature of its items), Printtyp's text"
+  [^String path uname nopervasives]
+  (ty/reset-stamps!)
+  (env/reset-modules!)
+  (binding [ty/*find-type* env/find-decl ty/*path-name* env/path-name ty/*normalize-type-path* env/normalize-type-path
+            ty/*normalize-modtype-path* env/normalize-modtype-path]
+    (let [items (#'env/read-intf path)
+          base (if nopervasives (env/initial-predef) (env/initial-env))
+          sig (ty/with-unit-stamps (@env/unit-signature-fn base items uname))]
+      (pt/signature-text sig))))
+
+(defn- file-signature
+  "{:sig TEXT} or {:error MESSAGE} of the file PATH (named FNAME); STDLIB-UNITS: named and flagged as stdlib/Compflags does
+  (Stdlib__ prefix, -nopervasives, -nolabels), else by its basename"
+  [^String path ^String fname stdlib-units]
+  (let [mli (str/ends-with? fname ".mli")
+        b (.getName (File. fname)) b (subs b 0 (- (count b) (if mli 4 3)))
+        u (if stdlib-units (unit-of-base b) (unit-name (str b ".ml")))
+        nopervasives (and stdlib-units (contains? #{"Stdlib" "CamlinternalFormatBasics"} u))
+        classic (and stdlib-units (or (str/ends-with? u "Labels") (= u "Stdlib__Float")))]
+    (try (binding [ty/*classic* classic env/*transparent-modules* (and stdlib-units (or classic (= u "Stdlib")))]
+           (if mli
+             {:sig (intf-signature-text path u nopervasives)}
+             {:sig (:sig (compile-file path (str b ".ml") :uname u :nopervasives nopervasives))}))
+         (catch Throwable t {:error (str/replace (or (not-empty (.getMessage t)) (str t)) #"\s+" " ")}))))
+
+(defn- do-sigs
+  "sigs --root DIR --list LIST --out OUT [--stdlib DIR] [--include DIRS] [--stdlib-units]: each file of LIST (relative to DIR)
+  typed, its signature's text written to OUT/REL.sig, or its error to OUT/REL.err; a summary line"
+  [{:keys [opts]}]
+  (with-stdlib opts
+    #(let [root (get opts "--root") out (get opts "--out")
+           files (remove str/blank? (str/split-lines (slurp (get opts "--list"))))
+           n (atom 0) bad (atom 0)]
+       (doseq [rel files]
+         (let [r (file-signature (str root "/" rel) rel (boolean (get opts "--stdlib-units")))
+               o (File. (str out "/" rel (if (:sig r) ".sig" ".err")))]
+           (.mkdirs (.getParentFile o))
+           (spit o (str (or (:sig r) (:error r)) "\n"))
+           (if (:sig r) (swap! n inc) (swap! bad inc))))
+       (println (str "sigs: " @n " typed, " @bad " not typed (" root ")"))
+       (flush))))
+
 (defn -main [& args]
   (let [[verb & more] args
         pa (fn [wv] (parse-args more wv))]
@@ -301,5 +353,6 @@
       "phrase" (do-phrase (pa #{"--dir" "--n" "--stdlib"}))
       "stdlib-check" (do-stdlib-check (pa #{"--dir" "--lib" "--out"}))
       "canon-equal" (do-canon-equal (pa #{}))
+      "sigs" (do-sigs (pa #{"--root" "--list" "--out" "--stdlib" "--include"}))
       "stdlib-build" (do-stdlib-build (pa #{"--dir" "--out" "--bases" "--testing" "--testing-out"}))
       (do (println "usage: -m arbace.repr.ocaml.typer types|lambda|check ...") (System/exit 2)))))
