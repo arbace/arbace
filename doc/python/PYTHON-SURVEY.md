@@ -3944,3 +3944,48 @@ as pyi's main interpreter does not either).
 
 Not built, by design: extension-module isolation checks beyond `_testsinglephase`-less pyi (every built-in module of pyi
 is per-interpreter safe or shares a read-only table), `_testinternalcapi`'s entry points (tests needing them skip).
+
+## As built: 230, PEP 734's interpreters on pyi (2026-11-07, the Mac VM, queue 230)
+
+As the design said: `_interpreters` (go/arbace/py/interpreters.ae), `_interpqueues` (interpqueues.ae) and `_interpchannels`
+(interpchannels.ae), CPython 3.14.10's modules and Python/crossinterp.c ported over one GIL. Counts, on the VM's compiled
+driver (the runtime compiled by pyi's AOT, the test modules on its loop; its subprocesses `tools/pyi/python3` on goi), judged
+by `bin/pyi lib-test-all` against the recorded CPython references:
+
+| module | before | after |
+|---|---|---|
+| test__interpreters | skips (no _interpreters, 34) | 34 equal |
+| test__interpchannels | skips (no _interpreters, 73) | 73 equal |
+| test_interpreters (api, channels, queues, lifecycle, stress) | skips (no _interpreters, 174) | 148 equal, 23 classed (testcapi 17, finalization 3, cpython-only 1, fork 1, subinterpreters 1), 3 failing |
+| test_concurrent_futures.test_interpreter_pool | skips (no _interpreters, 45) | 45 equal |
+| all four | 326 methods skipped | 300 equal, 23 classed, 3 failing (then test_globals_from_builtins fixed: 2) |
+
+What the runs added to the design:
+
+- A call with no Python frame (`interp.call(eval, ...)`, `globals`, `locals`, `vars`, `dir`, `exec`) uses the running `__main__`'s
+  globals (`_PyEval_GetGlobalsFromRunningMain`); before, a nil frame panicked, and the panic left the session's thread current
+  for the rest of the process. A session's run is now protected (a Go panic becomes a SystemError), so `exit` always runs.
+- A new `__main__` has `__package__` None and, after the first session, `__loader__` BuiltinImporter (the sub's own
+  `_frozen_importlib`).
+- `_thread.set_name` and `_get_name` key on the OS thread's ident, not on the `*Thread`: one OS thread has one name in every
+  interpreter (the pool's thread names seen from inside the interpreter).
+- `method.__reduce__` (`getattr, (self, name)`): bound methods pickle, so `interp.call(Spam.from_values)` takes pickle's fallback.
+- `Token.MISSING` is its own type, repr `<Token.MISSING>`.
+- The module-builder audit: `struct.error`, `zlib.error` and `termios.error` are made once for the process (shared like static
+  types); `_csv`'s state (its `_dialects`), `_asyncio`'s (`aio`) and `os.register_at_fork`'s hooks are interpreter registers now,
+  swapped by `interpSwitch`, so a subinterpreter's import no longer replaces the main interpreter's.
+- `bin/pyi python -c` dedents its code as CPython 3.14's `-c` does (the tests' `-c` scripts are indented).
+
+The classes: `:interpreters` retired; `:subinterpreters` is now a design class for what stays different (`_testmultiphase` has
+no `__file__`; no `-i` for the REPL test); `:testcapi` takes the `_testinternalcapi` subtests and `get_code_var_counts`;
+`:finalization` takes the interpreter freed by the collector inside `list_all` and the channels whose ids CPython frees at
+refcount's moment (pyi's ChannelID never reports its death, so a channel's row stays until destroyed).
+
+Cost on the single-interpreter path (210's method, the least of 3 alternated rounds, the base 6e85c5c7b's runtime and this
+branch's compiled into the same driver; a sample: fib(24), 20,000 objects with `__del__` and weak references, 4 threads
+switching the GIL): CPU seconds fib 0.015 / 0.015, churn 0.391 / 0.223, threads 0.065 / 0.055, total 0.471 / 0.305 (base /
+branch). The churn and threads figures vary twofold between rounds (Go's collector), so the sample shows no cost; it does not
+show a gain.
+
+Left: `test_lifecycle.StartupTests.test_sys_path_0` under `-c` (the sub's `sys.path[0]` is the `-c` file's directory, not ''),
+`TestInterpreterClose.test_remaining_daemon_threads` (its subprocess exits 1), the shared GIL (the DECISION).
