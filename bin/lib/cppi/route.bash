@@ -14,6 +14,8 @@ cppi_ir_route() {
     awk -F'\t' -v w="$work" -v r="$route" '{ if (r == "auto" && $3 != "") next; print $4 "\t" $2 "\t" w "/files/" $1 }' "$todo" > "$todo.ours"
     awk -F'\t' '{ print $3 }' "$todo.ours" | while IFS= read -r d; do rm -rf "$d"; mkdir -p "$d"; done
     if [ -s "$todo.ours" ]; then
+      # libstdc++'s headers from the tree made without g++ (CP241 (b); REPR_CPP_HEADERS=host: the host's installed tree)
+      . "$root/bin/lib/repr-cpp/sysroot.bash"; cpp_sysroot || return 1
       GOMEMLIMIT=${GOMEMLIMIT:-1500MiB} arbace_tool -m arbace.cpp.codegen gen-batch "$todo.ours" > "$todo.ours.log" 2>&1 || { tail -5 "$todo.ours.log" >&2; return 1; }
     fi
     while IFS=$'\t' read -r i s a p; do
