@@ -212,3 +212,34 @@ completeness or maturity. On `mac/batch1` C scores 20.0% (every C step on `:gcc`
   `:hosts` loses `:gcc`.
 - **Rekeys** (embedded, gate_key): `arbace/repr/c/host.ae`, `pp.ae`, `ppcheck.ae`, `rtcheck.ae`, `c23check.ae`; stage 0
   evaluates them from the checkout (repr namespaces are tool sources).
+
+## 2026-11-07: C++ without clang and g++ at check time, CP240 (a) and CP241 (b) (branch cpp-indep)
+
+The user decided CP240 ((a), (b), (c) in that order) and CP241 (b) (doc/cpp/CPP-SURVEY.md, "Decided (the user, 2026-11-07): CP240,
+CP241"). On `cpp-indep` from `mac/cpp-90` (4e0a8fc5b), the day's light tier.
+
+- **CP240 (a).** From `mac/oracle-records-cpp2`: the shared tooling as `mac/haskell-90` took it (`a08c614e9`, its cherry-pick of
+  `c3892e875`), then `4ec2da932`, `e63d37180` and `15a312026` with `-x`, each cut to C++'s eval and AOT (the IR packs `cpp-ir-samples`,
+  pin `0730915b`, and `cpp-runtime-ir`, `ea55ad3c`, read unless `CPPI_LIVE=1`; `record-ir`, `--every`; the lowering's gcc half behind
+  `CPPI_GCC`); left out: tools/cxxdump's records, the round trip's records mode, the cxxdump packs (the print is judged by its own verdict
+  on this line). Conflicts: `Makefile` and `bin/gate` (both sides: the oracle-records targets beside batch 1's, the packs' pins check
+  beside GTS211's crop pins), `bin/cppi` (cpp-90's codegen verbs and record-ir both kept; runtime-ci's key on `key.records` with
+  cppi-deferred's reader key). The gate's C++ run steps and the runtime's build lose `:cxx` and `:gcc`; the live sampling and the packs'
+  verify wait in `test/gate/crops/cpp-oracle.edn` for the oracle tier. Proved with the toolchain stubbed: `bin/cppi runtime-build` from
+  the pack (198 of 198), `bin/cppi lower-essential` (6 of 6). `bin/cppi check` on ci was stopped (runtime-ci's read at 3.0 GB, over the
+  day's 2 GiB): the night's. `runtime/deferred.cpp` is not in the pack (CP245).
+- **CP241 (b).** `test/cpp/target.ae` and `cpp/target/libstdcxx.edn`: libstdc++'s installed tree (834 files) and gcc's own include
+  directory (151) made from the pinned gcc-15.2.0 tarball (test/cpp/corpora.edn's `:gcc-15.2.0`, sha256 438fd996…) with no compiler:
+  827 + 148 files laid out, the build's products by rules stated from inputs and outputs (no GPL makefile or configure ported):
+  std.cc and std.compat.cc joined, the gthr headers renamed, c++config.h's switches and configure's 299 answers (173 probes of musl
+  1.2.6's headers from its tarball, C's own target's; 126 facts with reasons), limits.h, omp.h and mm_malloc.h (Alpine's patch as four
+  substitutions). `bin/repr-cpp target oracle`: 834 of 834 and 151 of 151 byte for byte. The readers read it through `ARBACE_C_SYSROOT`
+  (`bin/lib/repr-cpp/sysroot.bash`; with musl's headers and fortify-headers' nine files at recorded digests, every search directory a
+  root): pp-check's essential and a sampling of 949 files as with the host's headers, no host header opened (strace).
+- **Alternatives**: for the headers, a pack of the installed tree (CP241 (a), 0.5) or a clean-room set (c, weeks, a clean-room runtime
+  with it); taking all of `mac/oracle-records-cpp2` (its gate tier's planner changes rekey every step); musl's headers left in place
+  (the token check would still read a library's installed tree: the first measure showed only fortify and the compiler's directory
+  mattered, so both were made or taken at digests).
+- **Scores** (`bin/crops-score --crop cpp`, facts in the worktree's `.tmp/independence.diff`): completeness 75.4, maturity 100,
+  independence 31.4 to 54.3 (read 0.148, eval 0.5, AOT 0.5). The night re-records the packs on clang 23.1.5 by hand (the survey's
+  commands) and compares the routes for CP240 (b). Proposed CP244-CP246.

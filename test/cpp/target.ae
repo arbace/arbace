@@ -7,9 +7,13 @@
   bits/std.cc and bits/std.compat.cc (two inputs joined), the five gthr headers (libgcc's with the library's names), and
   bits/c++config.h (the prewritten configuration, its switches set, then configure's config.h: each #undef of config.h.in
   answered from the target's C library headers, musl 1.2.6's as C's own target lays them out (c/README.md), or by a fact of
-  the description). The oracle (`oracle`) compares the tree with the installed one file for file, byte for byte, by hand.
+  the description). The compiler's own include directory (gcc's, :compiler-include) likewise: 148 of its 151 files the tarball's,
+  limits.h, omp.h and mm_malloc.h made by stated rules. The oracle (`oracle`) compares a tree with the installed one file for file,
+  byte for byte, by hand.
 
   plan SRC OUT          OUT/copy.tsv: INSTALLED<TAB>SOURCE for the tarball's own files (SRC: the extracted gcc-15.2.0)
+  plan-compiler SRC OUT OUT/copy-compiler.tsv: the same for the compiler's own include directory (gcc's, :compiler-include)
+  derive-compiler SRC OUT  its 3 made files (limits.h, omp.h, mm_malloc.h) under OUT
   derive SRC SYSROOT OUT  the 7 products under OUT (SYSROOT: C's sysroot, ARBACE_C_SYSROOT; its usr/include is musl's), and
                         OUT/answers.tsv: each configure answer, its value and how it was found (probe or fact)
   oracle OUT REF        OUT's files against REF's (the installed tree): missing, extra, differing (exit 1 on one)"
@@ -36,13 +40,12 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; the layout: where each of the tarball's own files is installed
 
-(defn plan
-  "[installed source] for every file the layout installs from the tarball (sources relative to SRC)."
-  [^String src]
-  (let [{:keys [layout target]} (desc)
-        sub (fn [to] (str/replace (str to) "{target}" target))]
+(defn layout-plan
+  "[installed source] for every file a layout installs from the tarball (sources relative to SRC)."
+  [^String src layout target]
+  (let [sub (fn [to] (str/replace (str to) "{target}" target))]
     (sort
-      (for [{:keys [to from only except all recursive files]} layout
+      (for [{:keys [to from only except recursive files]} layout
             :let [to (sub to) pre (if (= to "") "" (str to "/"))]
             [inst source] (cond
                             files (for [[i s] files] [(sub i) s])
@@ -50,6 +53,29 @@
                             only (for [f only] [(str pre f) (str from "/" f)])
                             :else (for [f (top-files (str src "/" from)) :when (not (some #{f} except))] [(str pre f) (str from "/" f)]))]
         [inst source]))))
+
+(defn plan
+  "libstdc++'s: [installed source] for every file the layout installs from the tarball."
+  [^String src]
+  (let [{:keys [layout target]} (desc)] (layout-plan src layout target)))
+
+(defn compiler-plan
+  "The compiler's own include directory's: [installed source] for the tarball's files it holds as they are."
+  [^String src]
+  (let [{:keys [compiler-include target]} (desc)] (layout-plan src (:layout compiler-include) target)))
+
+(defn compiler-products
+  "{installed text} of the compiler's include directory's three made files: limits.h (three files joined), omp.h (libgomp's
+  @NAME@ placeholders set), mm_malloc.h (the package's substitutions over pmm_malloc.h)."
+  [^String src]
+  (let [{:keys [limits omp mm-malloc]} (:compiler-include (desc))
+        rd (fn [f] (slurp (str src "/" f)))]
+    {"limits.h" (apply str (map rd limits))
+     "omp.h" (reduce (fn [^String t [k v]] (str/replace t (str "@" k "@") v)) (rd (:from omp)) (:values omp))
+     "mm_malloc.h" (reduce (fn [^String t [a b]]
+                             (when-not (str/includes? t a) (throw (ex-info (str "cpp.target: mm_malloc.h's substitution has nothing to replace: " a) {})))
+                             (str/replace t a b))
+                           (rd (:from mm-malloc)) (:replace mm-malloc))}))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; the probes of the target's C library (configure's checks, answered from the headers' text)
@@ -218,6 +244,14 @@
                  rows (plan src)]
              (spit (str out "/copy.tsv") (apply str (for [[i s] rows] (str i "\t" s "\n"))))
              (println (str "cpp.target: " (count rows) " files of the tarball laid out")))
+    "plan-compiler" (let [[src out] args
+                          rows (compiler-plan src)]
+                      (spit (str out "/copy-compiler.tsv") (apply str (for [[i s] rows] (str i "\t" s "\n"))))
+                      (println (str "cpp.target: " (count rows) " files of the compiler's include directory laid out")))
+    "derive-compiler" (let [[src out] args]
+                        (doseq [[f t] (compiler-products src) :let [g (File. (str out "/" f))]]
+                          (.mkdirs (.getParentFile g)) (spit g t))
+                        (println "cpp.target: the compiler's include directory's 3 products derived"))
     "derive" (let [[src sysroot out] args
                    {:keys [files answers]} (derive-products src sysroot)]
                (doseq [[f t] files :let [g (File. (str out "/" f))]]

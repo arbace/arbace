@@ -24,7 +24,11 @@ cpp_target_tree() {
     st=$d.$$; rm -rf "$st"; mkdir -p "$st/src" "$st/usr/include/c++/15.2.0"
     tar -xJf "$t" -C "$st/src" gcc-15.2.0/libstdc++-v3/include gcc-15.2.0/libstdc++-v3/config gcc-15.2.0/libstdc++-v3/libsupc++ \
       gcc-15.2.0/libstdc++-v3/config.h.in gcc-15.2.0/libstdc++-v3/src/c++23 gcc-15.2.0/libgcc/gthr.h gcc-15.2.0/libgcc/gthr-single.h \
-      gcc-15.2.0/libgcc/gthr-posix.h || { rm -rf "$st"; return 1; }
+      gcc-15.2.0/libgcc/gthr-posix.h gcc-15.2.0/gcc/ginclude gcc-15.2.0/gcc/config/i386 gcc-15.2.0/gcc/gsyslimits.h gcc-15.2.0/gcc/limitx.h \
+      gcc-15.2.0/gcc/glimits.h gcc-15.2.0/gcc/limity.h gcc-15.2.0/libgcc/unwind-generic.h gcc-15.2.0/libgcc/gcov.h \
+      gcc-15.2.0/libgfortran/ISO_Fortran_binding.h gcc-15.2.0/libquadmath/quadmath.h gcc-15.2.0/libquadmath/quadmath_weak.h \
+      gcc-15.2.0/libgomp/acc_prof.h gcc-15.2.0/libgomp/openacc.h gcc-15.2.0/libgomp/omp.h.in gcc-15.2.0/libsanitizer/include/sanitizer \
+      || { rm -rf "$st"; return 1; }
     GOMEMLIMIT=1GiB arbace_tool -p "$root/test" -m cpp.target plan "$st/src/gcc-15.2.0" "$st" > "$st/plan.log" 2>&1 || { cat "$st/plan.log" >&2; rm -rf "$st"; return 1; }
     GOMEMLIMIT=1GiB arbace_tool -p "$root/test" -m cpp.target derive "$st/src/gcc-15.2.0" "$cs" "$st/usr/include/c++/15.2.0" > "$st/derive.log" 2>&1 \
       || { cat "$st/derive.log" >&2; rm -rf "$st"; return 1; }
@@ -32,6 +36,14 @@ cpp_target_tree() {
     while IFS=$'\t' read -r i s; do
       mkdir -p "$st/usr/include/c++/15.2.0/$(dirname "$i")"; cp "$st/src/gcc-15.2.0/$s" "$st/usr/include/c++/15.2.0/$i"
     done < "$st/copy.tsv"
+    # the compiler's own include directory (gcc's; :compiler-include)
+    local gi=$st/usr/lib/gcc/x86_64-alpine-linux-musl/15.2.0/include
+    mkdir -p "$gi"
+    GOMEMLIMIT=1GiB arbace_tool -p "$root/test" -m cpp.target plan-compiler "$st/src/gcc-15.2.0" "$st" >> "$st/plan.log" 2>&1 \
+      && GOMEMLIMIT=1GiB arbace_tool -p "$root/test" -m cpp.target derive-compiler "$st/src/gcc-15.2.0" "$gi" >> "$st/derive.log" 2>&1 \
+      || { cat "$st/plan.log" "$st/derive.log" >&2; rm -rf "$st"; return 1; }
+    while IFS=$'\t' read -r i s; do mkdir -p "$gi/$(dirname "$i")"; cp "$st/src/gcc-15.2.0/$s" "$gi/$i"; done < "$st/copy-compiler.tsv"
+    (cd "$gi" && find . -type f | LC_ALL=C sort | xargs sha256sum) > "$st/compiler-tree.sha256"
     rm -rf "$st/src"
     # the roots: the libstdc++ directories of g++'s and clang's search lists (test/cpp/host/search-*.txt), their dot-dots resolved
     # lexically as the preprocessor names an opened file (/usr/include/c++/15.2.0, its target and backward directories)
@@ -45,17 +57,23 @@ cpp_target_tree() {
 }
 
 # cpp_full_sysroot: the libstdc++ tree with the C library's headers of C's own target beside it (musl 1.2.6's from its tarball, its
-# usr/include): every directory of g++'s and clang's search lists is a root, so no header is read from the host; the fortify layer
-# and the compiler's own include directory are empty roots (fortify-headers pass through without _FORTIFY_SOURCE, which neither
-# compiler predefines; musl ships the freestanding headers itself)
+# usr/include), the compiler's own include directory made from the tarball too, and the libraries' headers of
+# cpp/target/libraries.sha256 (fortify-headers', a library's package at its recorded digests, as C's c/target/libraries.txt takes
+# gmp's and pcre2's): every directory of g++'s and clang's search lists is a root, so no other header is read from the host
 cpp_full_sysroot() {
   local d f cs
   d=$(cpp_target_tree) || return 1
   cs=$(cat "$d/c-sysroot")
-  f=$d-full
+  f=$d-full-$(sha256sum < "$root/cpp/target/libraries.sha256" | cut -c1-8)
   if [ ! -f "$f.ok" ]; then
     rm -rf "$f.$$"; mkdir -p "$f.$$"; cp -al "$d/usr" "$f.$$/usr"
     (cd "$cs/usr/include" && find . -type f) | while read -r h; do mkdir -p "$f.$$/usr/include/$(dirname "$h")"; cp "$cs/usr/include/$h" "$f.$$/usr/include/$h"; done
+    # the libraries' headers (cpp/target/libraries.sha256: fortify-headers'), the host's package files at their recorded digests
+    local want id
+    grep -v '^#' "$root/cpp/target/libraries.sha256" | while read -r want id; do
+      if [ -f "$id" ] && [ "$(sha256sum < "$id" | cut -c1-64)" = "$want" ]; then mkdir -p "$f.$$$(dirname "$id")"; cp "$id" "$f.$$$id"
+      else echo "C++: $id is not the host's at cpp/target/libraries.sha256's digest: left out of the sysroot" >&2; fi
+    done
     cat "$root"/test/cpp/host/search-gxx.txt "$root"/test/cpp/host/search-clang.txt | while read -r r; do realpath -m -s "$r"; done | awk 'NF && !s[$0]++' > "$f.$$/roots.txt"
     cp "$d/tree.sha256" "$f.$$/tree.sha256"
     rm -rf "$f"; mv "$f.$$" "$f"; : > "$f.ok"
