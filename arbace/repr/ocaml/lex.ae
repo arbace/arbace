@@ -22,16 +22,14 @@
   around them). Strings are byte strings (one char a byte, ISO-8859-1), so a literal's bytes are kept exactly. A
   lexical error is an ex-info {:ocaml-error :lexer :message M :loc L}."
   (:require [arbace.repr.ocaml.docstrings :as ds]
-            [arbace.string :as str]))
+            [arbace.string :as str])
+  (:import [arbace.repr.ocaml.docstrings Pos]))
 
 (set! *warn-on-reflection* false)
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Positions and locations (Lexing.position, Location.t)
 
-(deftype Pos [fname lnum bol cnum]
-  Object
-  (toString [_] (str fname ":" lnum ":" (- cnum bol) "@" cnum)))
 
 (defn pos [fname lnum bol cnum] (Pos. fname lnum bol cnum))
 (defn pos-fname [^Pos p] (.-fname p))
@@ -234,40 +232,98 @@
 (def ^:dynamic *keywords* keywords)
 
 ;; ---------------------------------------------------------------------------------------------
-;; The lexer buffer: the bytes, the offsets of the current match, Lexing's positions, the string buffer
+;; The lexer buffer: the bytes, the offsets of the current match, Lexing's positions, the string buffer.
+;; The state is one long array (speed, OC173): slot 0 the offset (lex_curr_pos, also the current position's cnum),
+;; 1 the match's start, 2 and 3 the current position's lnum and bol, 4, 5 and 6 the start position's lnum, bol and cnum. The positions are made when asked for (curr-p, start-p): a fresh object each time, as Lexing's
+;; are (the parser compares them by identity). The bytes are also an int array, padded with -1 past the end: the
+;; evaluator's access to a byte array is slow, to an int array not.
+
+;; character classes, by byte + 1 (index 0 is the end of the input, -1): bits
+(def ^:private C-IDENT 1)       ; identchar: letters, _, digits, '
+(def ^:private C-SYM 2)         ; symbolchar
+(def ^:private C-DIGIT 4)
+(def ^:private C-BLANK 8)       ; space, tab, form feed
+(def ^:private C-IDSTART 16)    ; identstart: lower, upper, _
+(def ^:private C-LEAD 32)       ; utf8 lead byte 192-255
+(def ^:private C-CPLAIN 64)     ; in a comment: a byte that starts no rule of comment but the catch-all and the identifier
+(def ^:private C-HEX 128)
+(def ^:private C-SPLAIN 256)    ; in a string: not " \ LF CR
+(def ^:private C-KWDOP 512)     ; kwdopchar
+(def ^:private C-DOTSYM 1024)   ; dotsymbolchar
+(def ^:private C-LOWER 2048)    ; lowercase | _
+(def ^:private C-UPPER 4096)
+(def ^:private C-CONT 8192)     ; utf8 continuation 128-191
+
+(def ^:private cls
+  (let [a (int-array 257)]
+    (dotimes [c 256]
+      (let [lower (or (and (>= c 97) (<= c 122)) (= c 95)) upper (and (>= c 65) (<= c 90))
+            digit (and (>= c 48) (<= c 57)) lead (>= c 192) cont (and (>= c 128) (<= c 191))
+            has (fn [^String chars] (>= (.indexOf chars (int c)) 0))]
+        (aset a (inc c)
+              (int (bit-or (if (or lower upper digit (= c 39)) 1 0)
+                           (if (has "!$%&*+-./:<=>?@^|~") 2 0)
+                           (if digit 4 0)
+                           (if (or (= c 32) (= c 9) (= c 12)) 8 0)
+                           (if (or lower upper) 16 0)
+                           (if lead 32 0)
+                           (if (and (not lower) (not upper) (not lead) (not (has "(*\"{'\n\r"))) 64 0)
+                           (if (or digit (and (>= c 65) (<= c 70)) (and (>= c 97) (<= c 102))) 128 0)
+                           (if (not (has "\"\\\n\r")) 256 0)
+                           (if (has "$&*+-/<=>@^|") 512 0)
+                           (if (has "!$%&*+-/:=>?@^|") 1024 0)
+                           (if lower 2048 0)
+                           (if upper 4096 0)
+                           (if cont 8192 0))))))
+    a))
+
+(defn- tagged [form tag] (with-meta form {:tag tag}))
+
+(defmacro ^:private cls? [c bit] `(not (zero? (bit-and (aget ~(tagged 'cls 'ints) (inc ~c)) ~bit))))
 
 (defn new-lexbuf [^bytes buf fname]
-  (let [p0 (Pos. fname 1 0 0)]
-    {:buf buf :n (alength buf)
-     :pos (volatile! 0) :start (volatile! 0)
-     :curr-p (volatile! p0) :start-p (volatile! p0)
+  (let [n (alength buf)
+        ib (int-array (+ n 16) -1)]
+    (dotimes [i n] (aset ib i (int (bit-and 0xff (aget buf i)))))
+    {:buf buf :n n :ibuf ib
+     :st (long-array [0 0 1 0 1 0 0]) :fname (volatile! fname)
      :sbuf (java.io.ByteArrayOutputStream.)
      :comment-start (volatile! ()) :in-string (volatile! false) :string-start-loc (volatile! none)}))
 
-(defn curr-p [lb] @(:curr-p lb))
-(defn start-p [lb] @(:start-p lb))
-(defn- curr-loc [lb] [@(:start-p lb) @(:curr-p lb) false])
+(defmacro ^:private lpos [lb] `(aget ~(tagged (list :st lb) 'longs) 0))
+(defmacro ^:private lstart [lb] `(aget ~(tagged (list :st lb) 'longs) 1))
 
-(defn- byte-at
-  "The byte at i, 0-255, or -1 past the end"
-  [lb i]
-  (if (< i (:n lb)) (bit-and 0xff (aget ^bytes (:buf lb) i)) -1))
+(defn curr-p [lb]
+  (let [^longs st (:st lb)] (Pos. @(:fname lb) (aget st 2) (aget st 3) (aget st 0))))
+(defn start-p [lb]
+  (let [^longs st (:st lb)] (Pos. @(:fname lb) (aget st 4) (aget st 5) (aget st 6))))
+(defn- curr-loc [lb] [(start-p lb) (curr-p lb) false])
+
+(defmacro ^:private byte-at
+  "The byte at i, 0-255, or -1 past the end (the buffer is padded)"
+  [lb i] `(aget ~(tagged (list :ibuf lb) 'ints) ~i))
 
 (defn- matched!
   "Lexing.engine after a match of len bytes from the current offset"
   [lb len]
-  (let [^Pos p @(:curr-p lb) s @(:pos lb)]
-    (vreset! (:start lb) s)
-    (vreset! (:pos lb) (+ s len))
-    (vreset! (:start-p lb) p)
-    (vreset! (:curr-p lb) (Pos. (.-fname p) (.-lnum p) (.-bol p) (+ s len)))))
+  (let [^longs st (:st lb) s (long (aget st 0))]
+    (aset st 1 s)
+    (aset st 0 (long (+ s (long len))))
+    (aset st 4 (long (aget st 2)))
+    (aset st 5 (long (aget st 3)))
+    (aset st 6 s)))
 
-(defn- lexeme [lb] (String. ^bytes (:buf lb) (int @(:start lb)) (int (- @(:pos lb) @(:start lb))) "ISO-8859-1"))
-(defn- lexeme-char [lb i] (char (byte-at lb (+ @(:start lb) i))))
+(defn- set-start-p! [lb ^Pos p]
+  (let [^longs st (:st lb)] (aset st 4 (long (.-lnum p))) (aset st 5 (long (.-bol p))) (aset st 6 (long (.-cnum p)))))
+
+(defn- lexeme [lb] (let [^longs st (:st lb) s (aget st 1)] (String. ^bytes (:buf lb) (int s) (int (- (aget st 0) s)) "ISO-8859-1")))
+(defn- lexeme-char [lb i] (char (byte-at lb (+ (lstart lb) i))))
 
 (defn- update-loc [lb file line absolute chars]
-  (let [^Pos p @(:curr-p lb)]
-    (vreset! (:curr-p lb) (Pos. (or file (.-fname p)) (if absolute line (+ (.-lnum p) line)) (- (.-cnum p) chars) (.-cnum p)))))
+  (let [^longs st (:st lb)]
+    (when file (vreset! (:fname lb) file))
+    (aset st 2 (long (if absolute line (+ (aget st 2) line))))
+    (aset st 3 (long (- (aget st 0) chars)))))
 
 (defn- lex-error
   "Lexer.Error: its message as prepare_error words it (\\u0001 a Format break hint, `@ `), :sub the report's
@@ -306,7 +362,8 @@
 (defn- sbuf-str [lb] (bytes->bstr (.toByteArray ^java.io.ByteArrayOutputStream (:sbuf lb))))
 (defn- store-char [lb c] (.write ^java.io.ByteArrayOutputStream (:sbuf lb) (int c)))
 (defn- store-string [lb ^String s] (let [b (bstr->bytes s)] (.write ^java.io.ByteArrayOutputStream (:sbuf lb) b 0 (alength b))))
-(defn- store-lexeme [lb] (store-string lb (lexeme lb)))
+(defn- store-range [lb from len] (.write ^java.io.ByteArrayOutputStream (:sbuf lb) ^bytes (:buf lb) (int from) (int len)))
+(defn- store-lexeme [lb] (let [^longs st (:st lb) s (aget st 1)] (store-range lb s (- (aget st 0) s))))
 (defn- store-normalized-newline [lb ^String nl]
   ;; \r*\n: every carriage return but the last kept
   (if (= 1 (count nl)) (store-char lb 10) (store-string lb (subs nl 1))))
@@ -314,34 +371,39 @@
 (defn- store-escaped-char [lb c] (if (in-comment? lb) (store-lexeme lb) (store-char lb c)))
 
 ;; ---------------------------------------------------------------------------------------------
-;; Character classes (lexer.mll's definitions), on bytes
+;; Character classes (lexer.mll's definitions), on bytes: macros over cls' table
 
-(defn- digit? [c] (and (>= c 48) (<= c 57)))
-(defn- lower? [c] (or (and (>= c 97) (<= c 122)) (= c 95)))
-(defn- upper? [c] (and (>= c 65) (<= c 90)))
-(defn- identstart? [c] (or (lower? c) (upper? c)))
-(defn- identchar? [c] (or (identstart? c) (digit? c) (= c 39)))
-(defn- utf8-lead? [c] (and (>= c 192) (<= c 255)))
-(defn- utf8-cont? [c] (and (>= c 128) (<= c 191)))
-(defn- blank? [c] (or (= c 32) (= c 9) (= c 12)))
-(def ^:private symbolchars (set (map int "!$%&*+-./:<=>?@^|~")))
-(def ^:private dotsymbolchars (set (map int "!$%&*+-/:=>?@^|")))
-(def ^:private kwdopchars (set (map int "$&*+-/<=>@^|")))
-(defn- symbolchar? [c] (contains? symbolchars c))
-(defn- symbolchar-or-hash? [c] (or (symbolchar? c) (= c 35)))
-(defn- hex? [c] (or (digit? c) (and (>= c 65) (<= c 70)) (and (>= c 97) (<= c 102))))
+(defmacro ^:private digit? [c] `(cls? ~c ~C-DIGIT))
+(defmacro ^:private lower? [c] `(cls? ~c ~C-LOWER))
+(defmacro ^:private upper? [c] `(cls? ~c ~C-UPPER))
+(defmacro ^:private identstart? [c] `(cls? ~c ~C-IDSTART))
+(defmacro ^:private identchar? [c] `(cls? ~c ~C-IDENT))
+(defmacro ^:private utf8-lead? [c] `(cls? ~c ~C-LEAD))
+(defmacro ^:private utf8-cont? [c] `(cls? ~c ~C-CONT))
+(defmacro ^:private blank? [c] `(cls? ~c ~C-BLANK))
+(defmacro ^:private symbolchar? [c] `(cls? ~c ~C-SYM))
+(defmacro ^:private symbolchar-or-hash? [c] `(let [c# ~c] (or (cls? c# ~C-SYM) (= c# 35))))
+(defmacro ^:private hex? [c] `(cls? ~c ~C-HEX))
 (defn- modifier? [c] (or (and (>= c 71) (<= c 90)) (and (>= c 103) (<= c 122))))
+(defmacro ^:private kwdopchar? [c] `(cls? ~c ~C-KWDOP))
+(defmacro ^:private dotsymbolchar? [c] `(cls? ~c ~C-DOTSYM))
 
-(defn- run-end
-  "The first offset from i whose byte fails pred"
+(defmacro ^:private run-end
+  "The first offset from i whose byte fails pred (a function symbol, or a #(..) literal inlined)"
   [lb i pred]
-  (loop [j i] (if (pred (byte-at lb j)) (recur (inc j)) j)))
+  (let [j (gensym "j") ib (gensym "ib")]
+    (if (and (seq? pred) (= 'fn* (first pred)) (vector? (second pred)) (= 1 (count (second pred))))
+      (let [x (first (second pred)) body (nth pred 2)]
+        `(let [~(tagged ib 'ints) (:ibuf ~lb)] (loop [~j ~i] (let [~x (aget ~ib ~j)] (if ~body (recur (inc ~j)) ~j)))))
+      `(let [~(tagged ib 'ints) (:ibuf ~lb)] (loop [~j ~i] (if (~pred (aget ~ib ~j)) (recur (inc ~j)) ~j))))))
 
 (defn- newline-len
   "The length of a newline (\\r*\\n) at i, or nil"
   [lb i]
-  (let [j (run-end lb i #(= % 13))]
-    (when (= 10 (byte-at lb j)) (inc (- j i)))))
+  (let [c (byte-at lb i)]
+    (cond (= c 10) 1
+          (= c 13) (let [j (run-end lb i #(= % 13))] (when (= 10 (byte-at lb j)) (inc (- j i))))
+          :else nil)))
 
 (defn- utf8-run
   "After a lead byte at i: the end of ['\\192'-'\\255'] ['\\128'-'\\191']*"
@@ -351,11 +413,12 @@
 (defn- identchar-ext-end
   "The end of identchar_ext* from i"
   [lb i]
-  (loop [j i]
-    (let [c (byte-at lb j)]
-      (cond (identchar? c) (recur (inc j))
-            (utf8-lead? c) (recur (utf8-run lb j))
-            :else j))))
+  (let [ib (:ibuf lb)]
+    (loop [j i]
+      (let [c (aget ^ints ib j)]
+        (cond (identchar? c) (recur (inc j))
+              (utf8-lead? c) (recur (utf8-run lb j))
+              :else j)))))
 
 (defn- ident-ext-end
   "The end of ident_ext (identstart_ext identchar_ext*) at i, or nil"
@@ -368,11 +431,12 @@
 (defn- delim-ext-end
   "The end of (lowercase | uppercase | utf8)* from i"
   [lb i]
-  (loop [j i]
-    (let [c (byte-at lb j)]
-      (cond (or (lower? c) (upper? c)) (recur (inc j))
-            (utf8-lead? c) (recur (utf8-run lb j))
-            :else j))))
+  (let [ib (:ibuf lb)]
+    (loop [j i]
+      (let [c (aget ^ints ib j)]
+        (cond (identstart? c) (recur (inc j))
+              (utf8-lead? c) (recur (utf8-run lb j))
+              :else j)))))
 
 (defn- extattrident-end
   "The end of ident_ext ('.' ident_ext)* at i, or nil"
@@ -459,7 +523,7 @@
 (defn- char-for-hexadecimal-code [lb i] (num-value lb 16 i (inc i)))
 
 (defn- uchar-for-uchar-escape [lb]
-  (let [len (- @(:pos lb) @(:start lb))
+  (let [len (- (lpos lb) (lstart lb))
         first 3 last (- len 2)]
     (if (> (inc (- last first)) 6)
       (illegal-escape lb "too many digits, expected 1 to 6 hexadecimal digits")
@@ -511,9 +575,13 @@
   "lexer.mll's string: the position of the closing quote"
   [lb]
   (loop []
-    (let [i @(:pos lb) c (byte-at lb i)]
+    (let [i (lpos lb) c (byte-at lb i)]
       (cond
-        (= c 34) (do (matched! lb 1) @(:start-p lb))
+        ;; a run of ordinary bytes at once
+        (cls? c C-SPLAIN)
+        (let [e (run-end lb (inc i) #(cls? % C-SPLAIN))]
+          (matched! lb (- e i)) (store-range lb i (- e i)) (recur))
+        (= c 34) (do (matched! lb 1) (start-p lb))
         (= c 92)
         (let [c1 (byte-at lb (inc i))
               nl (newline-len lb (inc i))]
@@ -557,7 +625,7 @@
   "lexer.mll's quoted_string delim: the position of the closing |delim}"
   [lb delim]
   (loop []
-    (let [i @(:pos lb) c (byte-at lb i)]
+    (let [i (lpos lb) c (byte-at lb i)]
       (cond
         (newline-len lb i)
         (let [nl (newline-len lb i)]
@@ -572,29 +640,37 @@
           (let [raw (String. ^bytes (:buf lb) (int (inc i)) (int (- e (inc i))) "ISO-8859-1")
                 edelim (validate-encoding lb raw)]
             (if (= delim edelim)
-              @(:start-p lb)
+              (start-p lb)
               (do (store-lexeme lb) (recur)))))
         :else (do (matched! lb 1) (store-char lb c) (recur))))))
 
 (defn- wrap-string-lexer
   "wrap_string_lexer: [string-value content-loc], the token's start restored"
   [lb f]
-  (let [loc-start @(:curr-p lb)]
+  (let [loc-start (curr-p lb)]
     (reset-sbuf lb)
     (vreset! (:in-string lb) true)
-    (let [string-start @(:start-p lb)]
+    (let [string-start (start-p lb)]
       (vreset! (:string-start-loc lb) (curr-loc lb))
       (let [loc-end (f lb)]
         (vreset! (:in-string lb) false)
-        (vreset! (:start-p lb) string-start)
+        (set-start-p! lb string-start)
         [(sbuf-str lb) [loc-start loc-end false]]))))
 
 (defn- comment-rule
   "lexer.mll's comment: the location of the closing *)"
   [lb]
   (loop []
-    (let [i @(:pos lb) c (byte-at lb i) c1 (byte-at lb (inc i))]
+    (let [i (lpos lb) c (byte-at lb i) c1 (byte-at lb (inc i))]
       (cond
+        ;; a run of bytes that start no other rule, identifiers (ident_ext) whole, at once
+        (or (cls? c C-CPLAIN) (cls? c C-IDSTART) (cls? c C-LEAD))
+        (let [e (loop [j i]
+                  (let [cj (byte-at lb j)]
+                    (cond (cls? cj C-CPLAIN) (recur (inc j))
+                          (or (cls? cj C-IDSTART) (cls? cj C-LEAD)) (recur (ident-ext-end lb j))
+                          :else j)))]
+          (matched! lb (- e i)) (store-range lb i (- e i)) (recur))
         (and (= c 40) (= c1 42))
         (do (matched! lb 2) (vswap! (:comment-start lb) conj (curr-loc lb)) (store-lexeme lb) (recur))
         (and (= c 42) (= c1 41))
@@ -704,7 +780,7 @@
 (defn- directive-rule
   "lexer.mll's directive after a # at the beginning of a line: a line directive, or nil (the rule's Failure)"
   [lb]
-  (let [i @(:pos lb)
+  (let [i (lpos lb)
         a (run-end lb i #(or (= % 32) (= % 9)))
         b (run-end lb a digit?)]
     (when (> b a)
@@ -725,10 +801,10 @@
 
 (defn- sub [lb from to] (String. ^bytes (:buf lb) (int from) (int (- to from)) "ISO-8859-1"))
 
-(defn token-rule
-  "lexer.mll's token: the next token [KIND VALUE], EOL and COMMENT and DOCSTRING included"
+(defn- token-general
+  "lexer.mll's token, all of its rules: the next token [KIND VALUE], EOL and COMMENT and DOCSTRING included"
   [lb]
-  (let [i @(:pos lb) c (byte-at lb i) c1 (byte-at lb (inc i)) c2 (byte-at lb (+ i 2))
+  (let [i (lpos lb) c (byte-at lb i) c1 (byte-at lb (inc i)) c2 (byte-at lb (+ i 2))
         lit (fn [len rule kind] [len rule (fn [] (matched! lb len) [kind])])]
     (cond
       (= c -1) (do (matched! lb 0) [:EOF])
@@ -736,13 +812,13 @@
       (and (= c 92) (newline-len lb (inc i)))
       (do (matched! lb (inc (newline-len lb (inc i)))) (error lb "Illegal character (\\\\)"))
       (newline-len lb i) (do (matched! lb (newline-len lb i)) (update-loc lb nil 1 false 0) [:EOL])
-      (blank? c) (do (matched! lb (- (run-end lb i blank?) i)) (recur lb))
+      (blank? c) (do (matched! lb (- (run-end lb i blank?) i)) (token-rule lb))
       ;; a plain identifier or keyword: no longer match is possible when no UTF-8 byte follows the ASCII run and it is
       ;; not let or and before an operator character (LETOP, ANDOP); a lone _ is UNDERSCORE (rule 4 before rule 12)
       (and (or (lower? c) (upper? c))
            (let [e (run-end lb (inc i) identchar?)]
              (not (or (utf8-lead? (byte-at lb e))
-                      (and (= e (+ i 3)) (contains? kwdopchars (byte-at lb e))
+                      (and (= e (+ i 3)) (kwdopchar? (byte-at lb e))
                            (or (and (= c 108) (= c1 101) (= c2 116)) (and (= c 97) (= c1 110) (= c2 100))))))))
       (let [e (run-end lb (inc i) identchar?)]
         (matched! lb (- e i))
@@ -800,11 +876,11 @@
                                         (error lb (str name " cannot be used as a raw identifier, it must start with a lowercase letter"))
                                         [:UIDENT name])
                                       [:LIDENT name])))]]))
-               (when (and (= c 108) (= c1 101) (= c2 116) (contains? kwdopchars (byte-at lb (+ i 3))))
-                 (let [e (run-end lb (+ i 4) #(contains? dotsymbolchars %))]
+               (when (and (= c 108) (= c1 101) (= c2 116) (kwdopchar? (byte-at lb (+ i 3))))
+                 (let [e (run-end lb (+ i 4) dotsymbolchar?)]
                    [[(- e i) 97 (fn [] (matched! lb (- e i)) [:LETOP (lexeme lb)])]]))
-               (when (and (= c 97) (= c1 110) (= c2 100) (contains? kwdopchars (byte-at lb (+ i 3))))
-                 (let [e (run-end lb (+ i 4) #(contains? dotsymbolchars %))]
+               (when (and (= c 97) (= c1 110) (= c2 100) (kwdopchar? (byte-at lb (+ i 3))))
+                 (let [e (run-end lb (+ i 4) dotsymbolchar?)]
                    [[(- e i) 98 (fn [] (matched! lb (- e i)) [:ANDOP (lexeme lb)])]])))
               ;; numbers
               (digit? c)
@@ -918,15 +994,14 @@
                 (case (int c)
                   42 [(when (= c1 41) [2 39 (fn [] (matched! lb 2) (warn! :comment-not-end (curr-loc lb))
                                               ;; the star alone: the parenthesis is lexed again
-                                              (vswap! (:pos lb) dec)
-                                              (let [^Pos p @(:curr-p lb)] (vreset! (:curr-p lb) (Pos. (.-fname p) (.-lnum p) (.-bol p) (dec (.-cnum p)))))
+                                              (let [^longs st (:st lb)] (aset st 0 (long (dec (aget st 0)))))
                                               [:STAR])])
                       (lit 1 47 :STAR)
                       (when (= c1 42) (op (- (run-end lb (+ i 2) symbolchar?) i) 93 :INFIXOP4))
                       (op (- run i) 95 :INFIXOP3)]
                   35 [[1 40 (fn [] (matched! lb 1)
-                              (let [^Pos sp @(:start-p lb)]
-                                (if (not= (.-cnum sp) (.-bol sp))
+                              (let [^longs st (:st lb)]
+                                (if (not= (aget st 6) (aget st 5))
                                   [:HASH]
                                   (or (directive-rule lb) [:HASH]))))]
                       (when (> run-h (inc i)) (op (- run-h i) 96 :HASHOP))]
@@ -940,7 +1015,7 @@
                   46 [[1 50 (fn [] (matched! lb 1) [:DOT])]
                       (when (= c1 126) [2 6 (fn [] (matched! lb 2) (error lb "Reserved character sequence: .~ is reserved for use in MetaOCaml"))])
                       (when (= c1 46) [2 51 (fn [] (matched! lb 2) [:DOTDOT])])
-                      (when (contains? dotsymbolchars c1)
+                      (when (dotsymbolchar? c1)
                         (let [e (run-end lb (+ i 2) symbolchar?)]
                           [(- e i) 52 (fn [] (matched! lb (- e i)) [:DOTOP (sub lb (inc i) e)])]))]
                   58 [[1 53 (fn [] (matched! lb 1) [:COLON])]
@@ -984,42 +1059,111 @@
           (do (matched! lb 1)
               (error lb (str "Illegal character (" (escaped (str (char c)) true) ")"))))))))
 
+;; the tokens without a value, shared
+(def ^:private T-EOL [:EOL]) (def ^:private T-LPAREN [:LPAREN]) (def ^:private T-RPAREN [:RPAREN])
+(def ^:private T-COMMA [:COMMA]) (def ^:private T-RBRACKET [:RBRACKET]) (def ^:private T-RBRACE [:RBRACE])
+(def ^:private T-BACKQUOTE [:BACKQUOTE]) (def ^:private T-SEMI [:SEMI]) (def ^:private T-SEMISEMI [:SEMISEMI])
+(def ^:private T-EQUAL [:EQUAL]) (def ^:private T-DOT [:DOT]) (def ^:private T-COLON [:COLON])
+(def ^:private T-BAR [:BAR]) (def ^:private T-MINUS [:MINUS]) (def ^:private T-PLUS [:PLUS])
+(def ^:private T-STAR [:STAR]) (def ^:private T-LESS [:LESS]) (def ^:private T-GREATER [:GREATER])
+(def ^:private T-LBRACKET [:LBRACKET]) (def ^:private T-LBRACE [:LBRACE]) (def ^:private T-UNDERSCORE [:UNDERSCORE])
+
+(defn token-rule
+  "lexer.mll's token: the next token [KIND VALUE], EOL and COMMENT and DOCSTRING included. The common cases are
+  decided here on the byte and its class (the longest match is unambiguous, ocamllex's earlier rule on a tie, as
+  in token-general); the rest is token-general's"
+  [lb]
+  (let [^longs st (:st lb) ^ints ib (:ibuf lb)
+        i (long (aget st 0)) c (long (aget ib i)) f (long (aget ^ints cls (inc c)))]
+    (cond
+      ;; blanks
+      (not (zero? (bit-and f 8)))
+      (do (matched! lb (- (long (run-end lb i blank?)) i)) (recur lb))
+      ;; identifiers and keywords: lowercase, uppercase, _
+      (not (zero? (bit-and f 16)))
+      (let [e (long (run-end lb (inc i) identchar?))
+            ne (long (aget ib e))]
+        (if (or (utf8-lead? ne) (and (== e (+ i 3)) (kwdopchar? ne)))
+          (token-general lb)
+          (do (matched! lb (- e i))
+              (cond (and (== c 95) (== e (inc i))) T-UNDERSCORE
+                    (not (zero? (bit-and f 2048))) (keyword-token lb (lexeme lb))
+                    :else [:UIDENT (lexeme lb)]))))
+      ;; newline
+      (== c 10) (do (matched! lb 1) (update-loc lb nil 1 false 0) T-EOL)
+      ;; a decimal integer with nothing that could lengthen or change it after it
+      (and (not (zero? (bit-and f 4)))
+           (or (not (== c 48)) (not (#{120 88 111 79 98 66} (long (aget ib (inc i)))))))
+      (let [e (long (run-end lb (inc i) #(or (digit? %) (= % 95))))
+            ne (long (aget ib e))]
+        (if (or (== ne 46) (identchar? ne) (utf8-lead? ne))
+          (token-general lb)
+          (do (matched! lb (- e i)) [:INT [(lexeme lb) nil]])))
+      :else
+      (let [c1 (long (aget ib (inc i)))]
+        (case c
+          40 (if (== c1 42) (token-general lb) (do (matched! lb 1) T-LPAREN))
+          41 (do (matched! lb 1) T-RPAREN)
+          44 (do (matched! lb 1) T-COMMA)
+          93 (do (matched! lb 1) T-RBRACKET)
+          125 (do (matched! lb 1) T-RBRACE)
+          96 (do (matched! lb 1) T-BACKQUOTE)
+          59 (if (== c1 59) (do (matched! lb 2) T-SEMISEMI) (do (matched! lb 1) T-SEMI))
+          61 (if (symbolchar? c1) (token-general lb) (do (matched! lb 1) T-EQUAL))
+          46 (if (or (== c1 126) (== c1 46) (dotsymbolchar? c1)) (token-general lb) (do (matched! lb 1) T-DOT))
+          58 (if (or (== c1 58) (== c1 61) (== c1 62)) (token-general lb) (do (matched! lb 1) T-COLON))
+          124 (if (or (symbolchar? c1) (== c1 93)) (token-general lb) (do (matched! lb 1) T-BAR))
+          45 (if (symbolchar? c1) (token-general lb) (do (matched! lb 1) T-MINUS))
+          43 (if (symbolchar? c1) (token-general lb) (do (matched! lb 1) T-PLUS))
+          42 (if (or (symbolchar? c1) (== c1 41)) (token-general lb) (do (matched! lb 1) T-STAR))
+          60 (if (symbolchar? c1) (token-general lb) (do (matched! lb 1) T-LESS))
+          62 (if (or (symbolchar? c1) (== c1 93) (== c1 125)) (token-general lb) (do (matched! lb 1) T-GREATER))
+          91 (if (#{124 60 62 64 37} c1) (token-general lb) (do (matched! lb 1) T-LBRACKET))
+          123 (if (or (#{60 37 124} c1) (identstart? c1) (utf8-lead? c1)) (token-general lb) (do (matched! lb 1) T-LBRACE))
+          (token-general lb))))))
+
 ;; ---------------------------------------------------------------------------------------------
 ;; Lexer.token: comments skipped, docstrings filed around the next token
+
+(def ^:private DOCS-INITIAL [:initial])
+
+(defn- attach-docs
+  "Lexer.token's attach: the docstrings found before the token filed around the positions"
+  [lines docs post-pos pre-pos]
+  (let [[k a f b] docs]
+    (case k
+      :initial nil
+      :after (case lines
+               (:no-line :new-line) (do (ds/set-post-docstrings post-pos (reverse a))
+                                        (ds/set-pre-docstrings pre-pos a))
+               :blank-line (do (ds/set-post-docstrings post-pos (reverse a))
+                               (ds/set-pre-extra-docstrings pre-pos (reverse a))))
+      :before (case lines
+                (:no-line :new-line)
+                (do (ds/set-post-docstrings post-pos (reverse a))
+                    (ds/set-post-extra-docstrings post-pos (concat (reverse f) (reverse b)))
+                    (ds/set-floating-docstrings pre-pos (reverse f))
+                    (ds/set-pre-extra-docstrings pre-pos (reverse a))
+                    (ds/set-pre-docstrings pre-pos b))
+                :blank-line
+                (do (ds/set-post-docstrings post-pos (reverse a))
+                    (ds/set-post-extra-docstrings post-pos (concat (reverse f) (reverse b)))
+                    (ds/set-floating-docstrings pre-pos (concat (reverse f) (reverse b)))
+                    (ds/set-pre-extra-docstrings pre-pos (reverse a)))))))
 
 (defn token
   "The next token for the parser: [KIND VALUE] (EOF at the end), with (start-p lb) and (curr-p lb) its positions"
   [lb]
-  (let [post-pos @(:curr-p lb)
-        attach (fn [lines docs pre-pos]
-                 (let [[k a f b] docs]
-                   (case k
-                     :initial nil
-                     :after (case lines
-                              (:no-line :new-line) (do (ds/set-post-docstrings post-pos (reverse a))
-                                                       (ds/set-pre-docstrings pre-pos a))
-                              :blank-line (do (ds/set-post-docstrings post-pos (reverse a))
-                                              (ds/set-pre-extra-docstrings pre-pos (reverse a))))
-                     :before (case lines
-                               (:no-line :new-line)
-                               (do (ds/set-post-docstrings post-pos (reverse a))
-                                   (ds/set-post-extra-docstrings post-pos (concat (reverse f) (reverse b)))
-                                   (ds/set-floating-docstrings pre-pos (reverse f))
-                                   (ds/set-pre-extra-docstrings pre-pos (reverse a))
-                                   (ds/set-pre-docstrings pre-pos b))
-                               :blank-line
-                               (do (ds/set-post-docstrings post-pos (reverse a))
-                                   (ds/set-post-extra-docstrings post-pos (concat (reverse f) (reverse b)))
-                                   (ds/set-floating-docstrings pre-pos (concat (reverse f) (reverse b)))
-                                   (ds/set-pre-extra-docstrings pre-pos (reverse a)))))))]
+  (let [^longs st (:st lb)
+        pc (aget st 0) pl (aget st 2) pb (aget st 3)]
     ;; docs: [:initial] | [:after a] | [:before a f b], each list latest first as the OCaml lists
-    (loop [lines :no-line docs [:initial]]
-      (let [t (token-rule lb)]
-        (case (first t)
-          :COMMENT (recur (case lines :no-line :no-line :new-line :no-line :blank-line :blank-line) docs)
-          :EOL (recur (case lines :no-line :new-line :new-line :blank-line :blank-line :blank-line) docs)
-          :DOCSTRING
-          (let [doc (second t)
+    (loop [lines :no-line docs DOCS-INITIAL]
+      (let [t (token-rule lb) k (nth t 0)]
+        (cond
+          (identical? k :EOL) (recur (if (identical? lines :no-line) :new-line :blank-line) docs)
+          (identical? k :COMMENT) (recur (if (identical? lines :blank-line) :blank-line :no-line) docs)
+          (identical? k :DOCSTRING)
+          (let [doc (nth t 1)
                 [k a f b] docs]
             (ds/register doc)
             (recur :no-line
@@ -1035,5 +1179,7 @@
                        [:after :blank] [:before a () (list doc)]
                        [:before :no] [:before a f (cons doc b)]
                        [:before :blank] [:before a (concat b f) (list doc)]))))
-          (do (attach lines docs @(:start-p lb))
+          :else
+          (do (when-not (identical? (nth docs 0) :initial)
+                (attach-docs lines docs (Pos. @(:fname lb) pl pb pc) (start-p lb)))
               t))))))

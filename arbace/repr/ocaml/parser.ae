@@ -23,7 +23,8 @@
 (set! *warn-on-reflection* false)
 
 ;; ---------------------------------------------------------------------------------------------
-;; The tables, loaded once into arrays
+;; The tables, loaded once into arrays (flat int arrays and plans as typed nodes: the evaluator's cost is the
+;; number of calls and boxed operations, OC173)
 
 (def ^:private nterms (count t/terminals))
 (def ^:private term-index (into {} (map-indexed (fn [i n] [(keyword n) i]) t/terminals)))
@@ -33,6 +34,7 @@
 (def ^:private plen (int-array (map second t/productions)))
 (def ^:private pstart (object-array (map #(nth % 3) t/productions)))
 (def ^:private pnull (object-array (map #(boolean-array (nth % 4)) t/productions)))
+(def ^:private nnt (inc (long (reduce max (map first t/productions)))))
 
 (def ^:private action-fns
   (let [missing (remove #(contains? act/actions %) t/actions)]
@@ -40,33 +42,81 @@
       (throw (ex-info (str (count missing) " actions of the tables have no translation: " (pr-str (take 5 missing))) {:missing (vec missing)})))
     (object-array (map #(get act/actions %) t/actions))))
 
+;; a plan: its action, the length of the production it covers (len), its items' names (a map to the item's index,
+;; nil when none), and its n items: item k either the cell lo[k] (subs[k] nil) or the cells lo[k] to hi[k] reduced by
+;; the plan subs[k]; simple: the items are the cells 0 to n-1 in order (the environment then reads the stack in place);
+;; needs-pos: the action's text mentions a position ($startpos, $endpos, $symbolstartpos, $sloc, $loc), else the
+;; environment has none; pass: the index of the one item the action returns as it is ("$1", or an item's name), when
+;; no other item is reduced by a plan of its own (checked at load against the action itself), else -1
+(deftype Plan [f ^long len names ^long n ^ints lo ^ints hi ^objects subs simple needs-pos ^long pass])
+
+(def ^:private pos-actions
+  (boolean-array (map #(boolean (re-find #"\$(startpos|endpos|symbolstartpos|sloc|loc)" %)) t/actions)))
+(defn- needs-pos? [aid] (aget ^booleans pos-actions aid))
+
 (defn- compile-plan
-  "A plan with its action resolved: [fn len names-array items], an item an int or [lo hi plan]"
+  "A plan with its action resolved"
   [plan]
   (when plan
-    (let [[aid len names items] plan]
-      [(aget ^objects action-fns aid) len (object-array names)
-       (mapv (fn [it] (if (vector? it) [(nth it 0) (nth it 1) (compile-plan (nth it 2))] it)) items)])))
+    (let [[aid len names items] plan
+          n (count items)
+          lo (int-array n) hi (int-array n) subs (object-array n)]
+      (dotimes [k n]
+        (let [it (nth items k)]
+          (if (vector? it)
+            (do (aset lo k (int (nth it 0))) (aset hi k (int (nth it 1))) (aset subs k (compile-plan (nth it 2))))
+            (do (aset lo k (int it)) (aset hi k (int it))))))
+      (let [needs-pos (needs-pos? aid)
+            ;; a sub-plan that only passes a cell on (and no position is asked of the item) is that cell
+            _ (when-not needs-pos
+                (dotimes [k n]
+                  (let [^Plan sp (aget subs k)]
+                    (when (and sp (>= (.-pass sp) 0) (nil? (aget ^objects (.-subs sp) (.-pass sp))))
+                      (aset lo k (int (+ (aget lo k) (aget ^ints (.-lo sp) (.-pass sp)))))
+                      (aset hi k (aget lo k))
+                      (aset subs k nil)))))
+            f (aget ^objects action-fns aid)
+            text (nth t/actions aid)
+            nm (when (some some? names)
+                 (let [m (java.util.HashMap.)] (doseq [[i nm] (map-indexed vector names)] (when nm (.put m nm (int i)))) m))
+            cand (cond (re-matches #"\$([0-9]+)" text) (dec (Long/parseLong (.substring ^String text 1)))
+                       (and nm (.containsKey nm text)) (long (.get nm text))
+                       :else -1)
+            pass (if (and (>= cand 0) (< cand n)
+                          (every? #(or (= % cand) (nil? (aget subs %))) (range n))
+                          (let [vs (object-array n)]
+                            (dotimes [k n] (aset vs k (Object.)))
+                            (identical? (aget vs cand) (try (f (Env. vs nil nil nm nil nil nil 0)) (catch Throwable _ nil)))))
+                   cand -1)]
+        (Plan. f len nm n lo hi subs
+               (every? true? (for [k (range n)] (and (nil? (aget subs k)) (= k (aget lo k)))))
+               needs-pos
+               pass)))))
 
 (def ^:private pplan (object-array (map #(compile-plan (nth % 2)) t/productions)))
+;; a production whose plan only passes a cell on: its index from the production's base, else -1
+(def ^:private ppass
+  (int-array (map (fn [^Plan pl] (if (and pl (>= (.-pass pl) 0) (nil? (aget ^objects (.-subs pl) (.-pass pl))))
+                                   (aget ^ints (.-lo pl) (.-pass pl)) -1))
+                  (seq pplan))))
 
 (def ^:private defred (int-array (map first t/states)))
 
-;; per state: terminal -> 0 (error), s+1 (shift to s), -(p+1) (reduce p)
-(def ^:private actions
-  (object-array
-   (for [[_ acts _] t/states]
-     (let [a (int-array nterms)]
-       (doseq [[tm code] (partition 2 acts)]
-         (aset a (int tm) (int (if (neg? code) code (inc code)))))
-       a))))
+;; per state and terminal: 0 (error), s+1 (shift to s), -(p+1) (reduce p)
+(def ^:private action-table
+  (let [a (int-array (* n-states nterms))]
+    (doseq [[s [_ acts _]] (map-indexed vector t/states)]
+      (doseq [[tm code] (partition 2 acts)]
+        (aset a (int (+ (* s nterms) (long tm))) (int (if (neg? code) code (inc code))))))
+    a))
 
-(def ^:private gotos
-  (object-array
-   (for [[_ _ gs] t/states]
-     (let [m (java.util.HashMap.)]
-       (doseq [[x s] (partition 2 gs)] (.put m (int x) (int s)))
-       m))))
+;; per state and nonterminal: the state after a reduction to it
+(def ^:private goto-table
+  (let [a (int-array (* n-states nnt))]
+    (doseq [[s [_ _ gs]] (map-indexed vector t/states)]
+      (doseq [[x g] (partition 2 gs)]
+        (aset a (int (+ (* s nnt) (long x))) (int g))))
+    a))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Plans: the composed actions of a production, with Menhir's positions
@@ -74,104 +124,111 @@
 (defn- eval-plan
   "The value of a plan over the reduced cells from base: its items right to left (an inlined item's own plan
   evaluated in place), then its action on the environment of their values and positions"
-  [plan ^objects vals ^objects sps ^objects eps ^booleans nullable pbase base endpos0]
-  (let [[f len ^objects names items] plan
-        n (count items)
-        iv (object-array n) is (object-array n) ie (object-array n)
-        before (fn [i] (if (> i 0) (aget eps (dec i)) endpos0))]
-    (loop [k (dec n)]
-      (when (>= k 0)
-        (let [it (nth items k)]
-          (if (vector? it)
-            (let [lo (+ base (nth it 0)) hi (+ base (nth it 1))]
-              (aset iv k (eval-plan (nth it 2) vals sps eps nullable pbase lo endpos0))
-              (if (> hi lo)
-                (do (aset is k (aget sps lo)) (aset ie k (aget eps (dec hi))))
-                (let [b (before lo)] (aset is k b) (aset ie k b))))
-            (let [c (+ base it)]
-              (aset iv k (aget vals c)) (aset is k (aget sps c)) (aset ie k (aget eps c)))))
-        (recur (dec k))))
-    (let [start (if (> len 0) (aget sps base) (before base))
-          end (if (> len 0) (aget eps (+ base len -1)) start)
-          symstart (loop [c base]
-                     (cond
-                       (>= c (+ base len)) end
-                       (or (not (aget nullable (- c pbase))) (not (identical? (aget sps c) (aget eps c)))) (aget sps c)
-                       :else (recur (inc c))))]
-      (f (Env. iv is ie names start end symstart)))))
+  [^Plan plan ^objects vals ^objects sps ^objects eps ^booleans nullable pbase base endpos0]
+  (let [pass (.-pass plan)]
+    (if (>= pass 0)
+      ;; the action returns one item as it is
+      (let [sub (aget ^objects (.-subs plan) pass) c (+ base (aget ^ints (.-lo plan) pass))]
+        (if sub
+          (eval-plan sub vals sps eps nullable pbase c endpos0)
+          (aget vals c)))
+      (let [len (.-len plan)
+            n (.-n plan)
+            pos (.-needs-pos plan)
+            start (when pos (if (> len 0) (aget sps base) (if (> base 0) (aget eps (dec base)) endpos0)))
+            end (when pos (if (> len 0) (aget eps (+ base len -1)) start))
+            symstart (when pos
+                       (loop [c base]
+                         (cond
+                           (>= c (+ base len)) end
+                           (or (not (aget nullable (- c pbase))) (not (identical? (aget sps c) (aget eps c)))) (aget sps c)
+                           :else (recur (inc c)))))]
+        (if (.-simple plan)
+          ((.-f plan) (Env. vals sps eps (.-names plan) start end symstart base))
+          (let [^ints lo (.-lo plan) ^ints hi (.-hi plan) ^objects subs (.-subs plan)
+                iv (object-array n) is (when pos (object-array n)) ie (when pos (object-array n))]
+            (loop [k (dec n)]
+              (when (>= k 0)
+                (let [sub (aget subs k)]
+                  (if sub
+                    (let [l (+ base (aget lo k)) h (+ base (aget hi k))]
+                      (aset iv k (eval-plan sub vals sps eps nullable pbase l endpos0))
+                      (when pos
+                        (if (> h l)
+                          (do (aset ^objects is k (aget sps l)) (aset ^objects ie k (aget eps (dec h))))
+                          (let [b (if (> l 0) (aget eps (dec l)) endpos0)] (aset ^objects is k b) (aset ^objects ie k b)))))
+                    (let [c (+ base (aget lo k))]
+                      (aset iv k (aget vals c))
+                      (when pos (aset ^objects is k (aget sps c)) (aset ^objects ie k (aget eps c))))))
+                (recur (dec k))))
+            ((.-f plan) (Env. iv is ie (.-names plan) start end symstart 0))))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; The engine
 
 (defn- syntax-error-data [msg loc] {:ocaml-error :syntax :message msg :loc loc})
 
+(defn- grow
+  "The four stack arrays doubled: [st vals sps eps]"
+  [^ints st ^objects vals ^objects sps ^objects eps]
+  (let [n (* 2 (alength st))]
+    [(java.util.Arrays/copyOf st (int n)) (java.util.Arrays/copyOf vals (int n))
+     (java.util.Arrays/copyOf sps (int n)) (java.util.Arrays/copyOf eps (int n))]))
+
 (defn- run
   "The parse from a start state: the start production's value, or an ex-info {:ocaml-error ...}"
   [lb start-state]
-  (let [cap 256
-        st (volatile! (int-array cap))
-        vals (volatile! (object-array cap))
-        sps (volatile! (object-array cap))
-        eps (volatile! (object-array cap))
-        top (volatile! 0)
-        grow! (fn []
-                (let [n (* 2 (alength ^ints @st))]
-                  (vreset! st (java.util.Arrays/copyOf ^ints @st (int n)))
-                  (vreset! vals (java.util.Arrays/copyOf ^objects @vals (int n)))
-                  (vreset! sps (java.util.Arrays/copyOf ^objects @sps (int n)))
-                  (vreset! eps (java.util.Arrays/copyOf ^objects @eps (int n)))))
-        push! (fn [s v sp ep]
-                (when (>= @top (alength ^ints @st)) (grow!))
-                (let [i @top]
-                  (aset ^ints @st i (int s)) (aset ^objects @vals i v) (aset ^objects @sps i sp) (aset ^objects @eps i ep)
-                  (vreset! top (inc i))))
+  (let [cap 512
         p0 (lex/curr-p lb)
-        read-token (fn []
-                     (let [tk (lex/token lb)]
-                       [tk (lex/start-p lb) (lex/curr-p lb)]))]
+        st0 (int-array cap) vals0 (object-array cap) sps0 (object-array cap) eps0 (object-array cap)
+        nt (long nterms) nn (long nnt)]
     ;; the bottom cell: the start state, its end the initial position
-    (push! start-state nil p0 p0)
+    (aset st0 0 (int start-state)) (aset vals0 0 nil) (aset sps0 0 p0) (aset eps0 0 p0)
     ;; err: Menhir's error-handling mode (the simplified strategy, parse.ml's --strategy simplified): the lookahead
-    ;; replaced by the error terminal, no token read until the parse ends
-    (loop [[tk tsp tep :as la] (read-token) err false]
-      (let [s (aget ^ints @st (dec @top))
-            d (aget ^ints defred s)
-            reduce! (fn [p]
-                      (let [n (aget ^ints plen p)
-                            tp @top
-                            base (- tp n)
-                            ^objects vs @vals ^objects ss @sps ^objects es @eps
-                            endpos0 (aget es (dec base))
-                            v (if-let [plan (aget ^objects pplan p)]
-                                (eval-plan plan vs ss es (aget ^objects pnull p) base base endpos0)
-                                (aget vs (dec tp)))
-                            sp (if (> n 0) (aget ss base) endpos0)
-                            ep (if (> n 0) (aget es (dec tp)) sp)]
-                        (if (aget ^objects pstart p)
-                          [:accept v]
-                          (do (vreset! top base)
-                              (let [below (aget ^ints @st (dec base))
-                                    g (.get ^java.util.HashMap (aget ^objects gotos below) (int (aget ^ints plhs p)))]
-                                (push! g v sp ep))
-                              nil))))]
-        (if (>= d 0)
-          (let [r (reduce! d)] (if r (second r) (recur la err)))
-          (if err
-            ;; the error terminal's column: shift it (its cell the lookahead's positions, Engine.shift's env.triple)
-            ;; and stay in error mode, reduce, or die (Parser.Error: Parse.wrap's Other at the lookahead)
-            (let [a (aget ^ints (aget ^objects actions s) 0)]
-              (cond
-                (pos? a) (do (push! (dec a) :unit tsp tep) (recur la true))
-                (neg? a) (let [r (reduce! (- (- a) 1))] (if r (second r) (recur la true)))
-                :else (throw (ex-info "Syntax error" (syntax-error-data "Syntax error" [tsp tep false])))))
-            (let [ti (get term-index (first tk))
-                  a (if ti (aget ^ints (aget ^objects actions s) (int ti)) 0)]
-              (cond
-                (pos? a) (do (push! (dec a) (if (> (count tk) 1) (second tk) :unit) tsp tep)
-                             (recur (if (= :EOF (first tk)) la (read-token)) false))
-                (neg? a) (let [r (reduce! (- (- a) 1))] (if r (second r) (recur la false)))
-                ;; Engine.initiate: error-handling mode
-                :else (recur la true)))))))))
+    ;; replaced by the error terminal (column 0), no token read until the parse ends
+    (let [tk0 (lex/token lb)]
+      (loop [^ints st st0 ^objects vals vals0 ^objects sps sps0 ^objects eps eps0 top 1
+             tk tk0 tsp (lex/start-p lb) tep (lex/curr-p lb) err false]
+        (if (>= (+ top 2) (alength st))
+          (let [[st2 vals2 sps2 eps2] (grow st vals sps eps)] (recur st2 vals2 sps2 eps2 top tk tsp tep err))
+          (let [s (aget st (dec top))
+                d (aget ^ints defred s)
+                ti (cond (>= d 0) -1 err 0 :else (let [x (get term-index (nth tk 0))] (if x (long x) -1)))
+                a (if (>= d 0) 0 (if (>= ti 0) (aget ^ints action-table (+ (* s nt) ti)) 0))
+                p (cond (>= d 0) d (neg? a) (- (- a) 1) :else -1)]
+            (cond
+              (>= p 0)
+              (let [n (aget ^ints plen p)
+                    base (- top n)
+                    endpos0 (aget eps (dec base))
+                    plan (aget ^objects pplan p)
+                    pp (aget ^ints ppass p)
+                    v (cond (>= pp 0) (aget vals (+ base pp))
+                            plan (eval-plan plan vals sps eps (aget ^objects pnull p) base base endpos0)
+                            :else (aget vals (dec top)))
+                    sp (if (> n 0) (aget sps base) endpos0)
+                    ep (if (> n 0) (aget eps (dec top)) sp)]
+                (if (aget ^objects pstart p)
+                  v
+                  (let [g (aget ^ints goto-table (+ (* (aget st (dec base)) nn) (aget ^ints plhs p)))]
+                    (aset st base (int g)) (aset vals base v) (aset sps base sp) (aset eps base ep)
+                    (recur st vals sps eps (inc base) tk tsp tep err))))
+              (pos? a)
+              (do (aset st top (int (dec a)))
+                  (if err
+                    ;; the error terminal shifted (its cell the lookahead's positions, Engine.shift's env.triple), error mode kept
+                    (do (aset vals top :unit) (aset sps top tsp) (aset eps top tep)
+                        (recur st vals sps eps (inc top) tk tsp tep true))
+                    (do (aset vals top (if (> (count tk) 1) (nth tk 1) :unit))
+                        (aset sps top tsp) (aset eps top tep)
+                        (if (identical? (nth tk 0) :EOF)
+                          (recur st vals sps eps (inc top) tk tsp tep false)
+                          (let [tk2 (lex/token lb)]
+                            (recur st vals sps eps (inc top) tk2 (lex/start-p lb) (lex/curr-p lb) false))))))
+              ;; in error mode no action on the error terminal: Parser.Error (Parse.wrap's Other at the lookahead)
+              err (throw (ex-info "Syntax error" (syntax-error-data "Syntax error" [tsp tep false])))
+              ;; Engine.initiate: error-handling mode
+              :else (recur st vals sps eps top tk tsp tep true))))))))
 
 (defn parse
   "The bytes of a file parsed as kind (:impl, :intf, :toplevel): [:ok tree] or [:error kind message loc sub], the
