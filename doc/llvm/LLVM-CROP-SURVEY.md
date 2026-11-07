@@ -1281,3 +1281,48 @@ samples, `.o2` 41, `.lto` 50, `.win` 44: the builds clang accepted), the nine C+
    `bin/reap --record`, the read and judge facts recounted (read stays 1: the pack is pinned input in the crop's language, LLS27 (a);
    the judge gains the families' own verdicts and opt's records at 0.5), the gate's `llvm-read` and `llvm-print` taking the new
    families as parts. The numbers change once (new inputs: the corners dropped, the builds clang 23.1.5's).
+## As built: LLS21 (a), ci's gaps (2026-11-05, branch `ci-lls21`)
+
+What the user decided (LLS21 (a)) is in ci, C's crop (`arbace/c/build.ae`, `arbace/c/check.ae`), no new native and no Go
+change: nothing of go/arbace/ci or crt moves, so cf2g's AOT needs no new node kind.
+
+- `fmodf` and `fmodl` are in the builder's `builtin-aliases`: `__builtin_fmodf` and `__builtin_fmodl` call musl 1.2.6's functions
+  (long double is double in ci, CS35), as `fmod` always did.
+- The `__atomic_*` and `__sync_*` families are lowered by the builder to plain loads and stores (`atomic-call`, `atomic-name`):
+  ci runs one thread, so every memory order is sequential consistency and a read-modify-write is not interrupted, no `sync/atomic`
+  needed; the memory-order arguments are evaluated for their effects and ignored. Covered: `load_n`, `store_n`, `exchange_n`,
+  `compare_exchange_n` and the generic `load`, `store`, `exchange`, `compare_exchange` (their value arguments by pointer),
+  `fetch_{add,sub,and,or,xor,nand}`, `{add,sub,and,or,xor,nand}_fetch`, `test_and_set`, `clear`, `thread_fence`, `signal_fence`,
+  and the `__sync_` spellings (`fetch_and_OP`, `OP_and_fetch`, `bool_compare_and_swap`, `val_compare_and_swap`, `lock_test_and_set`,
+  `lock_release`, `synchronize`). `__atomic_always_lock_free` and `__atomic_is_lock_free` stay as before. The object is an integer,
+  a pointer or a `_Bool` (anything else is refused by the builder: a `_BitInt` wider than 64 bits, an `__int128`, a float). The checker
+  types the result (`atomic-res`: the pointed-to type for a value, `_Bool` for compare-exchange, test-and-set and
+  `__sync_bool_compare_and_swap`, void for the rest) and no longer lets the parser's prelude declarations `void __atomic_load ();`,
+  `__atomic_store ()`, `__atomic_exchange ()` (cc's, for `<stdatomic.h>`) make the generic forms "too many arguments".
+- A call through a function pointer reads its result at the pointer's return width (`call-node`: `(cv "i32" ...)` around an integer
+  call of 8, 16 or 32 bits when the callee is not a named function): gcc's code reads `eax`, whatever type the callee was defined
+  with, so a comparator lowered as returning `unsigned`, called by musl's `qsort` and `bsearch` as `int`, gives -1. Direct calls are
+  untouched (the callee's own type is the call's).
+- Samples in `test/c/run/` (the `ci-run` corpus, 11 files to 13, gcc 15.2's runs in `test/c/ref-gcc15.edn`, results in
+  `test/c/check-linux-amd64.edn`, in the corpora's `subset-cf2g`, `subset-read` and `subset-run`): `builtin-atomic.c` (every
+  operation above, at char, short, int, long long, pointer and `_Bool`, both compare-exchange forms succeeding and failing, the
+  `__sync_` spellings, fmodf/fmodl) and `fnptr-result-width.c` (qsort with a comparator returning unsigned, a long read as int, an
+  int read as unsigned char). Both equal gcc -O0's output byte for byte.
+
+Checked (on main's stage 0 with `arbace.c.check` and `arbace.c.build` loaded from the branch: the embedded copies are older, so the
+tools' host loads these two files over them; light, nothing built):
+
+| check | result |
+|-|-|
+| `bin/llvmi check --only` of the 7 modules (`ee.MCJIT.frem`, `c-O{0,2}.synth.{decl-atomic,decl-qualifiers,ext-callbacks}`) | 7 of 7 pass (were: ci-builtins 5, abi-punning 2) |
+| `bin/ci check --corpus ci-run --only` (the two new files and three old) | 5 of 5 pass |
+| `bin/ci judge-test` | 104 tests, 464 assertions, 0 failures |
+| `bin/ci dg --essential` | 92 of 92 listed files pass, the control differs |
+| `bin/ci check --only test/c/essential-check.txt` | every program passes (the essential run check) |
+
+`test/llvm/check-eval-linux-amd64.edn`: the 7 rows are `:pass` now (edited by hand from the 7-module run; the next full
+`bin/llvmi check --record` confirms them). The classes `ci-builtins` and `abi-punning` stay in `divergences-eval.edn` because
+`test/llvm/check-aot-linux-amd64.edn` still records the 7 as non-passes (AOT not rerun: cf2g's Go build is not a light check);
+once the AOT record is rewritten both classes have no members and go. This moves `gate_key` (ci is embedded): the main host merges
+it in a rekey night, and the 7 rows of the AOT record and the new samples' `check --aot` rows (`test/c/check-aot-linux-amd64.edn`:
+`ci-run/builtin-atomic.c`, `ci-run/fnptr-result-width.c`, not recorded here) are the night's.

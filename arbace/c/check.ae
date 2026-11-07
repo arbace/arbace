@@ -1698,7 +1698,8 @@
   "A call's result: the callee's result, its arguments checked."
   [f args form]
   (let [fname (ident f)
-        known (when fname (lookup fname))
+        ;; LLS21 (a): the parser's prelude declares the generic __atomic_load, store and exchange as `void f ()`: builtins here
+        known (when (and fname (not (#{"__atomic_load" "__atomic_store" "__atomic_exchange"} fname))) (lookup fname))
         bk (when (and fname (nil? known)) (lookup (str "__builtin_" fname)))
         _ (when (and bk (c99?)) (err! (str "implicit declaration of function '" fname "'")))
         rf (if (and fname (nil? known) (not= fname "__func__") (nil? bk))
@@ -1726,6 +1727,20 @@
     (or (when-let [b (or (:builtin rf) (when (and known fname (str/starts-with? fname "__builtin_")) fname))]
           (call-builtin b ras ft))
         (res (if ft (:ret ft) t-int)))))
+
+(defn- atomic-res
+  "LLS21 (a): the result of an __atomic_* or __sync_* builtin: the pointed-to type for a value, _Bool for a
+  compare-exchange and test-and-set, void for the rest."
+  [^String b ras]
+  (let [short (cond (str/starts-with? b "__atomic_") (subs b 9) (str/starts-with? b "__sync_") (subs b 7))]
+    (when (and short (not (#{"always_lock_free" "is_lock_free"} short)))
+      (let [t0 (when-let [r0 (first ras)] (let [t (decay (unq (:t r0)))] (when (ptr-type? t) (unq (:to t)))))
+            v (or t0 t-int)]
+        (cond
+          (re-matches #"(compare_exchange(_n)?|test_and_set|bool_compare_and_swap)" short) (res t-bool)
+          (re-matches #"(load_n|exchange_n|(fetch|add|sub|and|or|xor|nand)_.*|val_compare_and_swap|lock_test_and_set)" short)
+          (res v)
+          (#{"load" "store" "store_n" "exchange" "clear" "thread_fence" "signal_fence" "lock_release" "synchronize"} short) (res t-void))))))
 
 (defn- call-builtin [^String b ras ft]
   (when (#{"__builtin_constant_p" "__builtin_choose_expr" "__builtin_expect" "__builtin_inf" "__builtin_huge_val" "__builtin_inff"
@@ -1796,9 +1811,10 @@
           lf (and (integer? n) (#{1 2 4 8} (long n)) al (>= (long al) (long n)))]
       (res t-bool :v (cond lf 1 (= b "__atomic_always_lock_free") (when (integer? n) 0) :else nil)))
     ;; CS174 (b): decimal infinities and NaNs of the call's type (`__builtin_infd32 ()`, `__builtin_nansd64 ("")`)
+    (or (atomic-res b ras)
     (when-let [[_ w bits] (re-matches #"__builtin_(inf|nan|nans)d(32|64|128)" b)]
       (let [k (case bits "32" :dec32 "64" :dec64 :dec128)]
-        (res {:k k} :snan (when (= w "nans") k))))))
+        (res {:k k} :snan (when (= w "nans") k)))))))
 
 (def ^:private dec-kinds #{:dec32 :dec64 :dec128 :dec64x})
 
