@@ -17,9 +17,15 @@
 #                              keys checked
 #   hsi_record_libs DUMPDIR [PKG,...]    DUMPDIR/stg's packages (those named) packed into haskell-stg-libs (the others kept)
 #   hsi_progs_dir              the unpacked haskell-stg-progs (checked), or fails
+#   hsi_ifaces_dir             the unpacked haskell-ifaces-ghc-9.14.1 (checked, every member keyed by the helper's identity), or fails
+#   hsi_record_ifaces DIR CMD  DIR's interfaces (M.iface.edn, reexports.edn) packed into haskell-ifaces-ghc-9.14.1
+# A third pack (HFS-I1 (a), doc/haskell/FRONTEND-SURVEY.md, "As built: HFS-I1 (a)"): haskell-ifaces-ghc-9.14.1, the boot libraries'
+# interfaces as the helper's iface mode dumps them (M.iface.edn: the closure of the run corpora's imports) and ghc-pkg's reexports
+# (reexports.edn), the native front end's input (bin/hsi check --front native); keyed by the helper's identity.
 . "$root/bin/lib/repr-haskell/records.bash"
 hsi_libs_pin=$root/test/haskell/records/haskell-stg-libs.sha256
 hsi_progs_pin=$root/test/haskell/records/haskell-stg-progs.sha256
+hsi_ifaces_pin=$root/test/haskell/records/haskell-ifaces-ghc-9.14.1.sha256
 hsi_work=$root/.tmp/hsi
 hsi_corpora_edn=$root/test/haskell/corpus-ghc-9.14.1.edn
 
@@ -83,4 +89,24 @@ hsi_progs_dir() { # the unpacked pack's directory of programs, checked
   [ -f "$hsi_progs_pin" ] && [ -f "$(oracle_manifest "$hsi_progs_pin")" ] || { echo "hsi: UNRECORDED: no $hsi_progs_pin (bin/hsi check --live --dump-only --record-progs, by hand on a host with GHC)" >&2; return 1; }
   u=$(oracle_unpack "$hsi_progs_pin") || return 1
   echo "$u/$(oracle_pin_name "$hsi_progs_pin")"
+}
+
+hsi_ifaces_dir() { # the unpacked interfaces pack's directory, every member's key the helper's identity now
+  local u man h
+  man=$(oracle_manifest "$hsi_ifaces_pin")
+  [ -f "$hsi_ifaces_pin" ] && [ -f "$man" ] || { echo "hsi: UNRECORDED: no $hsi_ifaces_pin (bin/hsi check --front native --record-ifaces, by hand on a host with GHC)" >&2; return 1; }
+  h=$(hsr_helper_hash)
+  awk -F'\t' -v h="$h" '!/^#/ && NF && $2 != h {bad = 1} END {exit bad}' "$man" || { echo "hsi: STALE haskell-ifaces-ghc-9.14.1: the helper changed since the record (bin/hsi check --front native --record-ifaces)" >&2; return 1; }
+  u=$(oracle_unpack "$hsi_ifaces_pin") || return 1
+  echo "$u/$(oracle_pin_name "$hsi_ifaces_pin")"
+}
+
+hsi_record_ifaces() { # DIR CMD: DIR/*.iface.edn and DIR/reexports.edn packed, each keyed by the helper's identity
+  local dd=$1 how=$2 stage=$hsi_work/records/ifaces name h
+  name=$(oracle_pin_name "$hsi_ifaces_pin"); h=$(hsr_helper_hash)
+  rm -rf "$stage"; mkdir -p "$stage/$name"
+  cp "$dd"/*.iface.edn "$dd/reexports.edn" "$stage/$name/" || return 1
+  (cd "$stage/$name" && ls) | LC_ALL=C sort | while IFS= read -r m; do printf '%s\t%s\n' "$m" "$h"; done > "$stage/ids"
+  oracle_make "$hsi_ifaces_pin" "$stage" "$stage/ids" "$how" ghc || return 1
+  rm -rf "$stage"
 }
