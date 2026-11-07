@@ -624,3 +624,34 @@ On `batch2` 93db65e83, by an agent by day in the light tier (no gate but `--plan
   `bin/crops-score --judge --strict` 0; samples under 2 GiB (`bin/oracle-records pins`, `bin/repr-cpp pp-check --essential` 1.47 GB, `bin/rsi
   judge-test`, `bin/repr-haskell test`). Not run: C's and Rust's AOT after RES34 (the shared `.tmp/ci-aot-lib` is the night's first build).
 - Found: repr-haskell's configure skip test is inverted in native mode (proposal 9 in the AGENDA).
+
+## 2026-11-07: batch 3, Haskell, C++ native and the small branches (branch `batch3`, on `batch2` 93db65e8)
+
+Merge plan batches 4 and 5 (`.tmp/tag-v2/merge-plan.md` §3, the rehearsal's §4 steps 4-5) and the independent branches, one merge commit a
+branch, the light checks after each (doc/AGENDA.md, "Batch 3", has the commits, conflicts, keys and numbers):
+
+- **Haskell.** `haskell-errors3` ed461dd2 (with `-errors`, `-errors2`), `haskell-deriving-via` aa7d0b52, `haskell-o1` b76f992e (with
+  `haskell-speed`), `gt9v-haskell` a9853476, `crop-controls-haskell` 72f76e22 merged. The GPL rule: `haskell-cpp`'s clean-room net diff over
+  `53794ed6^` was already in through haskell-90; of `haskell-full2` only its commit after `haskell-cpp`, 4ed75d38, was cherry-picked (`-x`).
+  No commit containing 53794ed6 is in the history. `parsers-speed` 855d6f49 was rebuilt rather than merged (plan item 32): its six commits
+  re-applied by cherry-pick onto the merged tree, each conflict resolved for both lines (the OCaml LR driver's flat tables with the errors
+  line's Menhir error strategy; Haskell's lexer slots renumbered `:acc 18 :tab-first 19 :tab-count 20`; the array driver with `lx/fatal!`;
+  the fused dump writer for mode `:lines` only), and one semantic fault the textual merge left (`keyword-token` called with one argument in
+  the new OCaml fast path, which made every errors-check case differ) found by the proof and fixed. The proof: the native readers' outputs
+  before and after on samples, byte for byte (OCaml 44 files' dumps with positions, 8 files' tokens, errors-check 100 of 100; Haskell 42
+  corpus modules' dumps, 166 rejected samples' messages, the `read` verb on 15 and 4 modules). `haskell-eval9` not merged: HFS-I4 (b)'s
+  rebase of its HE9 commit conflicts in ten of hsi's files (proposal 1). Considered: merging `parsers-speed` and fixing by hand (rejected by
+  the plan: a hand merge of two rewrites of the same drivers can drop either side silently).
+- **C++.** `cpp-tree` f0e631c3, `cpp-cpr1` ee6f606f (with `cpp-print-review`), `crop-controls-cpp` 25a62973 merged; of `crop-controls`, the
+  GT9.8 section 0d1ae970 picked and Haskell's round-trip pair 6dc54221 left out as superseded by haskell-90's controls in the same file
+  (the same design over the own-verdict judges); the others were picked in batches 1 and 2. The LICENSE question of plan item 35 (clang's
+  disambiguation reproduced or ported in `arbace/repr/cpp/{parse,scope,sema}.ae`) stays as doc/ARBACE.md records it; no new port came in.
+- **The small ones.** `goi-budgets` 741e989e (with `goi-not-applicable`), `goi-full-forms` 53f076ea (with `goi-liveness`),
+  `java-internal-pkgs` e3d5b57a, `c2j-pool-encode` 74e60353, `ci-lls21` cd76b572, `llvm-ll4` a9a95f40 (LLS32 (a): its records re-made by
+  `bin/llvm-corpus verify-record` on batch 3, now judged by LL9a's references) merged; `trio-off` 2e86cdba superseded (its commit is main's
+  d86cb874a). Then `mac/batch2` 3ff5ad69 (batch 2's third round) merged, and `bin/reap --record` and `bin/crops-score --record` with the
+  night's pending records held out for the run (deferred.cpp, ci-run's two new programs' AOT rows, java-internal-pkgs' three references).
+- Keys at the end: gate `bd0295a51879`, runtime `e55979557036`, javac `a7060fc7d33d` (moved by goi-full-forms, java-internal-pkgs,
+  c2j-pool-encode, ci-lls21 and batch 2's third round). Scores: Go 94.9 to 97.0 completeness, LLVM 96.0 to 96.3, C++ independence 31.4 to
+  54.3 (batch 2's cpp-indep); the rest unchanged. Proposed: HE9 by hand (1), LLVM's RUN-line substitutions in the own verdict (2), the GPL
+  line's branches deleted (3), the worktrees' corpora from the main checkout (4).
