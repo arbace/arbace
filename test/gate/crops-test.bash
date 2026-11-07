@@ -91,13 +91,15 @@ printf '{:gate "a"}\n' > "$w/plan/hosts.edn"; cp "$w/plan/hosts.edn" "$w/hosts0.
 cmp -s "$w/plan/hosts.edn" "$w/hosts0.edn" && ok "no table host named: hosts.edn untouched (byte for byte)" || bad "hosts.edn changed with no host to add"
 
 # ---- the pins: awk (bin/gate --pins, before stage 0) and gate.crops agree
-sed 's/^ :crops {:shared/ :crops {:python [y]\n         :llvm []\n         :shared/' "$src/test/gate/steps.edn" > "$w/pins.edn"
-gate_crop_pins_list "$w/pins.edn" > "$w/pins-awk.tsv"; crops pins "$w/pins.edn" > "$w/pins-ae.tsv" 2>&1
-cmp -s "$w/pins-awk.tsv" "$w/pins-ae.tsv" && [ "$(cut -f1 "$w/pins-awk.tsv" | tr '\n' ' ')" = "cpp ocaml scheme python " ] \
-  && ok "the gated crops' pins (cpp, ocaml, scheme of steps.edn, python added; not :llvm's empty entry), awk and gate.crops alike" \
-  || { bad "the pins differ or are wrong"; diff "$w/pins-awk.tsv" "$w/pins-ae.tsv"; cat "$w/pins-awk.tsv"; }
+# batch 4: the table's own gated crops (merge plan batches 1-2: C++, LLVM IR, OCaml, Scheme, Haskell, Rust), python added (not in :crops),
+# :zz-test's empty entry not (a crop with no :crop-pins line)
 gate_crop_pins_list "$src/test/gate/steps.edn" > "$w/pins0.tsv"; crops pins "$src/test/gate/steps.edn" > "$w/pins0-ae.tsv"
-cmp -s "$w/pins0.tsv" "$w/pins0-ae.tsv" && [ "$(cut -f1 "$w/pins0.tsv" | tr '\n' ' ')" = "cpp ocaml scheme " ] && ok "steps.edn gates C++, OCaml and Scheme (merge plan batch 1): --pins checks their pins" || bad "steps.edn's crop pins: $(cat "$w/pins0.tsv")"
+sed 's/^ :crops {:shared/ :crops {:python [y]\n         :zz-test []\n         :shared/' "$src/test/gate/steps.edn" > "$w/pins.edn"
+gate_crop_pins_list "$w/pins.edn" > "$w/pins-awk.tsv"; crops pins "$w/pins.edn" > "$w/pins-ae.tsv" 2>&1
+cmp -s "$w/pins-awk.tsv" "$w/pins-ae.tsv" && [ "$(cut -f1 "$w/pins-awk.tsv" | LC_ALL=C sort | tr '\n' ' ')" = "$( { cut -f1 "$w/pins0.tsv"; echo python; } | LC_ALL=C sort | tr '\n' ' ')" ] \
+  && ok "the gated crops' pins (steps.edn's, python added; not :zz-test's empty entry), awk and gate.crops alike" \
+  || { bad "the pins differ or are wrong"; diff "$w/pins-awk.tsv" "$w/pins-ae.tsv"; cat "$w/pins-awk.tsv"; }
+cmp -s "$w/pins0.tsv" "$w/pins0-ae.tsv" && [ "$(cut -f1 "$w/pins0.tsv" | LC_ALL=C sort | tr '\n' ' ')" = "cpp haskell llvm ocaml rust scheme " ] && ok "steps.edn gates C++, Haskell, LLVM IR, OCaml, Rust and Scheme (merge plan batches 1-2): --pins checks their pins" || bad "steps.edn's crop pins: $(cat "$w/pins0.tsv")"
 
 # ---- GTS216 (a)'s chains
 cat > "$w/cc.edn" <<'F'
@@ -120,7 +122,7 @@ crops concurrent "$w/cc.edn" > "$w/cc.out" 2>&1
 [ "$(tr '\n' ' ' < "$w/cc.out")" = "a b " ] && ok "concurrent chains: a (its needs in the chain or outside :full) and b; not the four's, :heavy, a part above 4 GiB, a need on another chain, one another chain needs, no :mem-gib, nor c past :max-gib" \
   || bad "concurrent chains: $(cat "$w/cc.out")"
 crops concurrent "$src/test/gate/steps.edn" > "$w/cc0.out" 2>&1
-[ "$(tr '\n' ' ' < "$w/cc0.out")" = "scheme-full ocaml-full " ] && ok "steps.edn: the gated crops' chains beside the serial run (scheme-full, ocaml-full: merge plan batch 1; cpp-full's cpp-check is 8 GiB, past :max-step-gib)" || bad "steps.edn's chains: $(cat "$w/cc0.out")"
+[ "$(tr '\n' ' ' < "$w/cc0.out")" = "haskell-roundtrip scheme-full ocaml-full llvm-full rust-full " ] && ok "steps.edn: the gated crops' chains beside the serial run (haskell-roundtrip, scheme-full, ocaml-full, llvm-full, rust-full: merge plan batches 1-2; cpp-full's cpp-check is 8 GiB, past :max-step-gib)" || bad "steps.edn's chains: $(cat "$w/cc0.out")"
 
 # ---- the rules
 mkdir -p "$w/r/test/ocaml"; echo '{}' > "$w/r/test/ocaml/controls.edn"; echo x > "$w/r/test/ocaml/other.edn"
@@ -162,19 +164,19 @@ cat > "$w/frag.edn" <<'F'
 ;;@ steps
   {:name gt9-test-step :mem-gib 1 :phase :full :chain gt9-test :cmd "true" :hosts [:stage0] :inputs [:gt9-test]}
 ;;@ crops
-         :haskell [gt9-test-step]
+         :zz-test [gt9-test-step]
 ;;@ controls
   gt9-test-step {:waived "a test"}
 F
 crops splice "$src/test/gate/steps.edn" "$w/frag.edn" > "$w/spliced.edn" 2> "$w/splice.err" && ok "a fragment spliced (the result reads)" || bad "splice: $(cat "$w/splice.err")"
-"$exe" -e "(let [t (read-string (slurp \"$w/spliced.edn\"))] (println (:gt9-test (:groups t)) (:name (last (:steps t))) (:haskell (:crops t)) (get (:controls t) 'gt9-test-step)))" > "$w/sp.out" 2>&1
+"$exe" -e "(let [t (read-string (slurp \"$w/spliced.edn\"))] (println (:gt9-test (:groups t)) (:name (last (:steps t))) (:zz-test (:crops t)) (get (:controls t) 'gt9-test-step)))" > "$w/sp.out" 2>&1
 [ "$(cat "$w/sp.out")" = '[test/gate/] gt9-test-step [gt9-test-step] {:waived a test}' ] && ok "its groups, step, crop and control in place" || bad "spliced: $(cat "$w/sp.out")"
 grep -q 'notes, left out' "$w/spliced.edn" && bad "the fragment's notes spliced" || ok "the fragment's notes left out"
 [ "$(grep -c ';;@ ' "$w/spliced.edn")" = 4 ] && ok "the markers kept (a second crop splices after)" || bad "markers: $(grep -c ';;@ ' "$w/spliced.edn")"
-# a later fragment's steps of a crop already in :crops join its vector (no second key; :haskell, a crop not gated in steps.edn)
-printf ';;@ steps\n  {:name gt9-test-two :mem-gib 1 :phase :full :chain gt9-test :cmd "true" :hosts [:stage0] :inputs [:gt9-test]}\n;;@ crops\n         :haskell [gt9-test-two]\n;;@ controls\n  gt9-test-two {:waived "a test"}\n' > "$w/frag3.edn"
+# a later fragment's steps of a crop already in :crops join its vector (no second key; :zz-test, a crop not gated in steps.edn)
+printf ';;@ steps\n  {:name gt9-test-two :mem-gib 1 :phase :full :chain gt9-test :cmd "true" :hosts [:stage0] :inputs [:gt9-test]}\n;;@ crops\n         :zz-test [gt9-test-two]\n;;@ controls\n  gt9-test-two {:waived "a test"}\n' > "$w/frag3.edn"
 crops splice "$w/spliced.edn" "$w/frag3.edn" > "$w/spliced3.edn" 2> "$w/splice3.err" || bad "the second splice: $(cat "$w/splice3.err")"
-"$exe" -e "(let [t (read-string (slurp \"$w/spliced3.edn\"))] (println (:haskell (:crops t)) (count (:host-ids t))))" > "$w/sp3.out" 2>&1
+"$exe" -e "(let [t (read-string (slurp \"$w/spliced3.edn\"))] (println (:zz-test (:crops t)) (count (:host-ids t))))" > "$w/sp3.out" 2>&1
 [ "$(cat "$w/sp3.out")" = "[gt9-test-step gt9-test-two] $(crops host-names "$src/test/gate/steps.edn" | wc -l)" ] && ok "a second fragment's crop entry joins the crop's vector (no second key; :host-ids untouched)" || bad "second splice: $(cat "$w/sp3.out")"
 printf ';;@ nowhere\n x\n' > "$w/frag2.edn"
 crops splice "$src/test/gate/steps.edn" "$w/frag2.edn" > "$w/sp2.out" 2>&1 && bad "a section with no marker spliced" || ok "a section with no marker refused"

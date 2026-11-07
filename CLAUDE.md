@@ -327,8 +327,8 @@ Prior art:
     typer line's merge (OC180 (a), the user 2026-11-07; doc/ocaml/OCAML-SURVEY.md, "As built: the typer line's merge") the steps
     run on no `:ocaml` host, their commands native (`repl-check --native`, `own-verdicts --check`, `roundtrip --text [--types]`,
     `menhir --check`, `judges-test --fixtures`); ocamlc's and ocdump's levels (`roundtrip --cmi`, `dumps`, `native-check`,
-    `stdlib-check`, `typer-check`'s fresh dumps, `suite expect`) are the oracle tier's `ocaml-dumps` and `ocaml-oracle`, waiting in
-    `test/gate/crops/ocaml-oracle.edn` for the planner's `:phase :oracle`; the native library (`bin/oi stdlib`) types unix,
+    `stdlib-check`, `typer-check`'s fresh dumps, `suite expect`) are the oracle tier's `ocaml-dumps` and `ocaml-oracle`
+    (`test/gate/crops/ocaml-oracle.edn`, spliced into the planner's `:phase :oracle` at batch 4: `bin/gate --oracle`); the native library (`bin/oi stdlib`) types unix,
     threads, str and compiler-libs' units too (`libs_native`; compiler-libs' `lexer.ml` only with `OI_OCAMLLEX=1`), and the
     suite's native path keeps a unit's signature as data (`NAME.cmi.ae`, OC184 (a)).
     repr/ocaml reads natively (doc/ocaml/OCAML-SURVEY.md, "As built: the native reader"; the default of `read` and `roundtrip`
@@ -507,7 +507,10 @@ Prior art:
   `.tmp/gate-pass/`, shared by the worktrees: each pass with its commit, worktree, date, seconds,
   peak memory, log); the builds (`go-build`, `javac-tool`) run when a check that runs needs them;
   `bin/gate [--full] --plan` prints each step's decision and why, `bin/gate --why STEP` what changed
-  since its latest pass, `--rerun` runs every check; since GT4-GT6 (doc/GATE-SURVEY.md, "As built: GT4, GT6")
+  since its latest pass, `--rerun` runs every check; since batch 4 (doc/ORACLE-RECORDS-SURVEY.md, ORS1 (a), ORS8 (a)) `bin/gate --oracle` (alone,
+  or `--full --oracle` beside `--full`'s) runs the oracle tier, the `:phase :oracle` steps that run a host toolchain (gcc, clang++ and g++, Chez,
+  GHC, rustc, OCaml) on Arbace's output or against the records and packs (`bin/oracle-records`, `test/*/records/`), one after another, a step
+  whose host's identity is none here `absent` (no key, no run, no failure); never in the essential gate, `--full` or the clean run; since GT4-GT6 (doc/GATE-SURVEY.md, "As built: GT4, GT6")
   `bin/gate --audit [STEP...]` runs a check under strace and fails on a file of the checkout it reads
   that its declared inputs do not cover (the declarations are the audit's; `make gate-audit`), one skipped
   light check (the oldest pass) reruns each gate as the canary (`GATE_CANARY=0` not), `--prune` trims the
