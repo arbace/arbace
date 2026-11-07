@@ -25,7 +25,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   repr-python-lex-check repr-python-lex-record repr-python-pegen repr-python-pegen-check repr-python-parse-check repr-python-parse-record repr-python-ast-check repr-python-records-record repr-python-records-verify pyi-lib-test-record pyi-runtime-tables pyi-aot pyi-aot-check pyi-aot-check-record pyi-bench pyi-bench-record pyi-check pyi-check-record pyi-divergences pyi-cover pyi-c2j-check pyi-table-check pyi-clib-build pyi-clib-verify python-essential \
   oi-check-compiled check-makefile \
   repr-ocaml-native-check repr-ocaml-menhir \
-  oi-typer-check oi-stdlib-check oi-check-native oi-typer-probe oi-repl-check-native \
+  oi-typer-check oi-stdlib-check oi-check-native oi-typer-probe oi-repl-check-native repr-ocaml-types oi-judges-fixtures \
   oi-check-ocdump oi-own-verdicts
 
 help: ## list the targets
@@ -517,6 +517,10 @@ repr-ocaml-text: ## O3: mode :full over the default corpora: the text printed fr
 	bin/repr-ocaml roundtrip --text
 repr-ocaml-cmi: ## O3: and the .cmi level: ocamlc -c on the original and on the print, the .cmi bytes equal; the :lines print's with -no-keep-locs too (bin/repr-ocaml roundtrip --cmi-lines)
 	bin/repr-ocaml roundtrip --cmi-lines
+repr-ocaml-types: ## OC183 (a): the typed signature level, the typer's signatures of the original and of the print equal, no ocamlc (bin/repr-ocaml roundtrip --text --types samples stdlib)
+	bin/repr-ocaml roundtrip --text --types samples stdlib
+oi-judges-fixtures: ## OC181 (a): the judges' own tests on fixtures, no toolchain (bin/oi judges-test --fixtures; --oracle the toolchain's parts)
+	bin/oi judges-test --fixtures
 repr-ocaml-dumps: ## O4: the typed and Lambda dumps of every file ocamlc compiles alone, read by Arbace's reader and shaped by SPEC 11.2, stable across two runs; sizes and seconds (bin/repr-ocaml dumps)
 	bin/repr-ocaml dumps
 repr-ocaml-native-check: ## the native reader (lexer.mll and parser.mly in Arbace) against the helper over the samples and the stdlib: dumps with positions and :full layouts equal byte for byte (bin/repr-ocaml native-check --layout)

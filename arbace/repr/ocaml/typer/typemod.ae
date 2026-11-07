@@ -79,7 +79,13 @@
                             item))
                         (reverse items))))))
 
-(defn runtime-ids [items] (vec (keep (fn [item] (when (env/runtime-item? item) (item 2))) items)))
+(defn runtime-ids [items]
+  (vec (keep (fn [item]
+               (when (env/runtime-item? item)
+                 ;; a hole (an item of a unit's interface the slice does not type) has no identifier to coerce to
+                 (when (= :hole (item 0)) (env/type-error "a part of the interface is outside the slice"))
+                 (item 2)))
+             items)))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Module types and signatures (Typemod.transl_modtype, transl_signature)
@@ -186,7 +192,9 @@
               (if (and (= :type (item 0)) (some #(= (first parts) (first %)) (item 1)))
                 [:type (mapv (fn [[n p d]]
                                (if (= n (first parts))
-                                 (let [[_ [[_ _ d']]] (env/transl-type-decls env [(c 2)] (fn [_] p))
+                                 ;; Typedecl.transl_with_constraint: the declaration translated in the outer environment, which
+                                 ;; does not bind the constrained type (`with type t = t`: the outer t, not a cycle)
+                                 (let [[_ [[_ _ d']]] (env/transl-type-decls env [(c 2)] (fn [_] p) :Nonrecursive)
                                        d' (if (and (= :abstract ((:kind d') 0)) (not= :abstract ((:kind d) 0)))
                                             (assoc d :manifest (:manifest d'))
                                             d')]
@@ -212,7 +220,8 @@
           n (first parts)
           tp (some (fn [item] (when (= :type (item 0)) (some (fn [[tn p _]] (when (= tn n) p)) (item 1)))) items)
           _ (when-not tp (type-error (str "The signature has no type " n)))
-          [_ [[_ _ d']]] (env/transl-type-decls env [(c 2)] (fn [_] [:Pident (ty/ident-create n)]))
+          ;; (non-recursive, as transl_with_constraint: `with type t := t` names the outer t)
+          [_ [[_ _ d']]] (env/transl-type-decls env [(c 2)] (fn [_] [:Pident (ty/ident-create n)]) :Nonrecursive)
           params (:params d') body (:manifest d')
           memo (atom {})
           rw (fn rw [t]
@@ -231,6 +240,16 @@
                                        (let [ds (vec (remove (fn [[tn _ _]] (= tn n)) (item 1)))] (when (seq ds) [:type ds]))
                                        item))
                                    items))))
+    :Pwith_modsubst
+    ;; Typemod's destructive module substitution (with module M := P): M taken out of the signature, the paths through it
+    ;; replaced by P's (Subst.add_module), as transl_with_constraint's With_modsubst
+    (let [parts (env/lid-parts (:txt (c 1)))
+          _ (when (> (count parts) 1) (type-error "destructive module substitutions in a submodule are outside the slice"))
+          n (first parts)
+          id (some (fn [item] (when (and (= :module (item 0)) (= (item 1) n)) (item 2))) items)
+          _ (when-not id (type-error (str "The signature has no module " n)))
+          e (env/lookup-module env (:txt (c 2)))]
+      (env/subst-items {id (:path e)} (vec (remove (fn [item] (and (= :module (item 0)) (= (item 1) n))) items))))
     (type-error (str "the with-constraint " (c 0) " is outside the slice"))))
 
 (defn transl-modtype

@@ -217,7 +217,11 @@ run_redirected() {
 # env_vars ENV: ENV less its @ redirections
 env_vars() { local kv; for kv in $1; do case $kv in @*) ;; *) printf '%s ' "$kv" ;; esac; done; }
 # dump_required DUMP: the units a Lambda dump requires (its lambda-program's list, ocamlc's required globals), one a line
-dump_required() { awk '/^ *\[/ { on = 1 } on { s = $0; while (match(s, /"[^"]*"/)) { print substr(s, RSTART + 1, RLENGTH - 2); s = substr(s, RSTART + RLENGTH) }; if ($0 ~ /\]$/) exit }' "$1"; }
+# (the vector after lambda-program's name and size: on lines of its own in ocdump's dumps, on the first line in the native typer's)
+dump_required() { awk '!on { i = index($0, "["); if (!i) next; on = 1; $0 = substr($0, i) }
+  on { j = index($0, "]"); s = j ? substr($0, 1, j) : $0
+       while (match(s, /"[^"]*"/)) { print substr(s, RSTART + 1, RLENGTH - 2); s = substr(s, RSTART + RLENGTH) }
+       if (j) exit }' "$1"; }
 # complib_need DUMP...: compiler-libs' units the dumps require and those they require, in COMPLIB_UNITS' order (OT21 (b): ocamlc links a
 # unit of ocamlcommon.cma when a linked unit requires it)
 complib_need() {
@@ -334,8 +338,8 @@ stdlib_prepare() {
 native_key() {
   local s t e
   s=$(sha256sum "$TOP/stdlib/"*.ml "$TOP/stdlib/"*.mli "$TOP/stdlib/StdlibModules" "$TOP/testsuite/lib/testing.ml" "$TOP/testsuite/lib/testing.mli" "$TOP/otherlibs/unix/unix.mli" "$TOP/otherlibs/unix/unix_unix.ml" "$TOP/otherlibs/unix/unixLabels.mli" "$TOP/otherlibs/unix/unixLabels.ml" "$TOP/otherlibs/systhreads/thread.ml" "$TOP/otherlibs/systhreads/thread.mli" "$TOP/otherlibs/systhreads/event.ml" "$TOP/otherlibs/systhreads/event.mli" "$TOP/otherlibs/str/str.ml" "$TOP/otherlibs/str/str.mli" "$TOP"/utils/*.ml* "$TOP"/parsing/*.ml* "$TOP/build-aux/ocaml_version.m4") || { echo "oi: key: the stdlib's sources cannot be read" >&2; return 1; }
-  # the libraries' one host tool, ocamllex (compiler-libs' lexer.ml), present or not
-  s="$s $(command -v ocamllex || echo no-ocamllex)"
+  # the libraries' one host tool, ocamllex (compiler-libs' lexer.ml), taken or not (OI_OCAMLLEX)
+  s="$s ocamllex=${OI_OCAMLLEX:-0}"
   t=$(cat "$root"/arbace/repr/ocaml/*.ae "$root"/arbace/repr/ocaml/typer/*.ae | sha256sum) || return 1
   e=$(sha256sum "$(arbace_exe)" | cut -d' ' -f1) || return 1
   { echo native; echo "$s"; echo "$t"; echo "$e"; cat "$0"; } | sha256sum | cut -d' ' -f1
@@ -426,8 +430,8 @@ STRLIB str - -"
 # libs_sources: the libraries' sources of the pinned tarball in their directories (UNIXLIB, THREADLIB, STRLIB, COMPLIB), as otherlibs'
 # Makefiles and ocamlcommon's take them: unix.ml is unix_unix.ml (the Unix implementation), config.ml config.fixed.ml (the bootstrap
 # configuration) and config.common.ml.in with the magic numbers of build-aux/ocaml_version.m4 (equal to the host's ocamlc -config, OT21 (b)),
-# parser.ml boot/menhir's with its MenhirLib renamed as the Makefile does, lexer.ml ocamllex's (the one host tool the native library takes:
-# OCAML-SURVEY, "As built: the typer line's merge")
+# parser.ml boot/menhir's with its MenhirLib renamed as the Makefile does, lexer.ml ocamllex's (the oracle's library; the native one only with
+# OI_OCAMLLEX=1: OCAML-SURVEY, "As built: the typer line's merge", Proposed OC186)
 libs_sources() {
   rm -rf "$UNIXLIB" "$THREADLIB" "$STRLIB"; mkdir -p "$UNIXLIB" "$THREADLIB" "$STRLIB"
   cp "$TOP/otherlibs/unix/unix.mli" "$TOP/otherlibs/unix/unixLabels.mli" "$TOP/otherlibs/unix/unixLabels.ml" "$UNIXLIB/"
@@ -466,8 +470,11 @@ complib_sources() {
       config) cp "$U/config.mli" "$COMPLIB/" ;;
       camlinternalMenhirLib) cp "$B/menhirLib.ml" "$COMPLIB/$m.ml"; { echo '[@@@ocaml.warning "-67"]'; cat "$B/menhirLib.mli"; } > "$COMPLIB/$m.mli" ;;
       parser) sed 's/MenhirLib/CamlinternalMenhirLib/g' "$B/parser.ml" > "$COMPLIB/parser.ml"; sed 's/MenhirLib/CamlinternalMenhirLib/g' "$B/parser.mli" > "$COMPLIB/parser.mli" ;;
+      # lexer.ml is ocamllex's output: the oracle's library always runs it; the native library only with OI_OCAMLLEX=1 (the host's
+      # ocamllex, a toolchain tool at check time: without it the native compiler-libs lack Lexer and what needs it, a typer note
+      # of the programs that link them; Proposed OC186)
       lexer) cp "$P/lexer.mli" "$COMPLIB/"
-        if command -v ocamllex > "$COMPLIB/ocamllex.path" 2>&1; then ocamllex -q -o "$COMPLIB/lexer.ml" "$P/lexer.mll" || die "stdlib: ocamllex parsing/lexer.mll"; fi ;;
+        if [ "$OI_STDLIB" = ocamlc ] || [ "${OI_OCAMLLEX:-0}" = 1 ]; then ocamllex -q -o "$COMPLIB/lexer.ml" "$P/lexer.mll" || die "stdlib: ocamllex parsing/lexer.mll"; fi ;;
       *) if [ -f "$U/$m.mli" ]; then cp "$U/$m.mli" "$COMPLIB/"; [ -f "$U/$m.ml" ] && cp "$U/$m.ml" "$COMPLIB/"
          else cp "$P/$m.mli" "$COMPLIB/"; [ -f "$P/$m.ml" ] && cp "$P/$m.ml" "$COMPLIB/"; fi ;;
     esac
@@ -504,24 +511,29 @@ libs_ocamlc() {
 # error and its Lambda left out (a program that loads it is a typer note: oi_one's lib_missing), the rest built
 libs_native() {
   libs_sources
-  local v m fl inc d nf incs log=$OI_DIR/libs-native.log ok=0 bad=0
-  : > "$log"
+  local v m fl inc d nf incs log=$OI_DIR/libs-native.log tasks=$OI_DIR/libs-native.tasks
+  : > "$log"; : > "$tasks"
   rm -f "$UNIXLIB/failed.txt" "$THREADLIB/failed.txt" "$STRLIB/failed.txt" "$COMPLIB/failed.txt"
   while read -r v m fl inc; do
-    d=$(lib_dir "$v"); nf=""; [ "$fl" = -nolabels ] && nf=--nolabels
+    d=$(lib_dir "$v"); nf=-; [ "$fl" = -nolabels ] && nf=--nolabels
     incs=$d; [ "$inc" != - ] && incs="$d:$(lib_dir "$inc")"
-    if lib_unit_native "$d" "$m" "$incs" $nf; then ok=$((ok + 1)); else bad=$((bad + 1)); fi
+    printf '%s %s %s %s\n' "$d" "$m" "$incs" "$nf" >> "$tasks"
   done <<< "$LIB_UNITS"
   for m in $COMPLIB_UNITS; do
-    if [ ! -f "$COMPLIB/$m.ml" ]; then echo "$m	no $m.ml (no ocamllex for parsing/lexer.mll)" >> "$COMPLIB/failed.txt"; bad=$((bad + 1)); continue; fi
-    if lib_unit_native "$COMPLIB" "$m" "$COMPLIB"; then ok=$((ok + 1)); else bad=$((bad + 1)); fi
+    if [ ! -f "$COMPLIB/$m.ml" ]; then echo "$m	no $m.ml (parsing/lexer.mll needs ocamllex: OI_OCAMLLEX=1, Proposed OC186)" >> "$COMPLIB/failed.txt"; continue; fi
+    printf '%s %s %s -\n' "$COMPLIB" "$m" "$COMPLIB" >> "$tasks"
   done
+  # the units are typed independently (each reads the others' interfaces, not their Lambda): OI_LIB_JOBS processes at once (default 3)
+  export -f lib_unit_native typer_ns typer_err_text arbace_exe native_dir die; export OI_DIR OI_STDLIB root
+  xargs -a "$tasks" -r -L 1 -P "${OI_LIB_JOBS:-3}" bash -c 'lib_unit_native "$1" "$2" "$3" "$4" || true' _
+  local ok bad; ok=$(grep -c ' built ' "$log" || true); bad=$(cat "$UNIXLIB/failed.txt" "$THREADLIB/failed.txt" "$STRLIB/failed.txt" "$COMPLIB/failed.txt" 2>&1 | grep -c '	' || true)
   echo "oi: stdlib: the other libraries natively: $ok units built, $bad refused ($log; DIR/failed.txt)"
 }
 
 # lib_unit_native DIR BASE INCLUDES [--nolabels]: DIR/BASE.ml typed and translated natively into DIR/Base.ae, or listed in DIR/failed.txt
 lib_unit_native() {
   local d=$1 m=$2 incs=$3 nf=${4:-} M t0
+  [ "$nf" = - ] && nf=""
   M="$(echo "${m:0:1}" | tr a-z A-Z)${m:1}"; t0=$(date +%s)
   # a unit the typer does not finish in OI_LIB_TIMEOUT seconds (default 240) is refused as one it rejects
   if (cd "$d" && OI_TYPER_TIMEOUT=${OI_LIB_TIMEOUT:-240} typer_ns lambda --simplify --intf --stdlib "$(native_dir)" --include "$incs" $nf --file "$m.ml" "$m.ml" > "$M.ae.new" 2> "$m.typer.err"); then

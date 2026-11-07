@@ -99,7 +99,9 @@ out=$(cd "$root" && OI_TIMEOUT=60 O2J_LOAD_ALLOWANCE=5 bin/oi aot-cpu); expect "
 # re-review 030's finding 7 (a): oi's own level runs a program under the CPU limit (limited_cpu), as the AOT level's rerun: a program that needs
 # more than OI_TIMEOUT seconds of CPU is a "timeout 1s" row, and the limit is the project's (ARBACE_CPU_LOG records the run)
 rm -f "$W/cpu.log"
-out=$(cd "$root" && OI_TIMEOUT=1 ARBACE_CPU_LOG=$W/cpu.log bin/oi check --only 'misc/taku' 2>&1; cut -f2,6 .tmp/oi/check.tsv; cut -f1 "$W/cpu.log")
+# (the default path's rows file: the native path's check-native.tsv, TY24 (a); OI_CHECK_DEFAULT=ocdump the oracle's check.tsv)
+T=check-native.tsv; [ "${OI_CHECK_DEFAULT:-native}" = ocdump ] && T=check.tsv
+out=$(cd "$root" && OI_TIMEOUT=1 ARBACE_CPU_LOG=$W/cpu.log bin/oi check --only 'misc/taku' 2>&1; cut -f2,6 .tmp/oi/$T; cut -f1 "$W/cpu.log")
 expect "oi: a program over the CPU limit is a timeout row" 0 '124.timeout 1s' "$out" $?
 echo "$out" | grep -Eq '^(137|152)$' || { echo "FAIL oi: the program did not run under limited_cpu (no line in ARBACE_CPU_LOG)"; bad=1; }
 
@@ -154,9 +156,12 @@ out=$(cd "$root" && bin/oi oi-cpu "$W/c2" "$W/c3" 2>&1); expect "oi: a comma loc
 out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-status 152 3 2>&1); expect "oi: 152 (SIGXCPU) is a timeout" 0 '^124$' "$out" $?
 out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-status 2 3 2>&1); expect "oi: another status is kept" 0 '^2$' "$out" $?
 
-# re-review 042's finding 6: a whole run against an unreadable record says so, as --only does (and before the run)
+# re-review 042's finding 6: a whole run against an unreadable record says so, as --only does (and before the run); the expect
+# action's, so the oracle tier's (OI_JUDGES_NO_HOST leaves it out, counted as run)
+if [ -z "${OI_JUDGES_NO_HOST:-}" ]; then
 out=$(cd "$root" && OI_EXPECT_RECORD=$W/no-such-record bin/oi suite expect 2>&1); st=$?
 expect "expect: a whole run against an unreadable record says it cannot be read" 2 'cannot be read' "$out" $st
+else cases=$((cases + 1)); fi
 
 # re-review 049's finding 5: the "status " pins are attested by the digests of the runs they were made for, test/ocaml/pins-attested.tsv (bin/oi pins:
 # no run); a pin with no attested digest, or an attested row with no pin, fails
