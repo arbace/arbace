@@ -204,7 +204,7 @@
 
 (defn- ldouble-size [] (long (or (cx :ldouble-size) 16)))
 
-(declare size-of align-of complete-record! vla?)
+(declare size-of align-of complete-record! vla? var-size?)
 
 (defn- bitint-size [n] (cond (<= n 8) 1 (<= n 16) 2 (<= n 32) 4 (<= n 64) 8 :else (* 8 (quot (+ n 63) 64))))
 
@@ -691,7 +691,7 @@
             (.add out (assoc m :off 0 :bitoff (when (:bits m) 0)))))
         (.put r :size (align-up @sz (long @al)))
         (.put r :align @al))
-      (let [off (atom 0) al (atom 1)] ; off in bits
+      (let [off (atom 0) al (atom 1) vseen (atom false)] ; off in bits
         (doseq [m members]
           (let [t (:t m)
                 ta (long (align-of t))
@@ -721,13 +721,20 @@
               (let [o (align-up (quot (+' @off 7) 8) a)
                     s (size-of t)]
                 (swap! al max a)
-                (.add out (assoc m :off o))
+                ;; a member after one of variable size (a VLA, GNU's): its offset is the run time's, :voff (CS106)
+                (.add out (cond-> (assoc m :off o) @vseen (assoc :voff true)))
+                (when (var-size? t) (reset! vseen true))
                 (reset! off (*' 8 (+' o (or s 0))))))))
         (let [al (long @al)
               al (if-let [ra (.get r :min-align)] (max al (long ra)) al)]
           (.put r :size (align-up (quot (+' @off 7) 8) al))
           (.put r :align al))))
     (.put r :members (vec out))
+    ;; GNU's structures of variable size (CS106): a member of variable size makes the record's size the run time's;
+    ;; the builder lays it out again at run time with the members' alignments (member-align: packed, #pragma pack)
+    (.put r :var-size (boolean (some #(var-size? (:t %)) members)))
+    (.put r :packed packed)
+    (.put r :max-align max-align)
     (.put r :complete true)))
 
 (defn- member
@@ -1065,6 +1072,9 @@
         (when al (.put r :min-align al))
         (when (cx :pack) (feat! :cc-attr-layout))
         (layout! r ms kind packed (cx :pack))
+        ;; a variably modified definition's members (GNU's, CS106): the builder lays it out at run time where it stands,
+        ;; finding its record by its body
+        (when (and (seq body) (vm-type? {:k kind :rec r})) (record! body {:rec r :kind kind}))
         ;; GNU's transparent_union on the definition: the type itself is transparent (c-attribs.cc)
         (when (and (= kind :union) (some #(= "transparent_union" (first %)) as) (transparent-ok? r))
           (.put r :transparent true))
@@ -1528,7 +1538,14 @@
           (void-type? ub) (ptr (cond-> t-void (seq q) (assoc :q q)))
           ;; 6.5.15 p6: pointers to qualified or unqualified versions of compatible types give a pointer to the composite
           ;; type with the qualifiers of both (CS141); else gcc's "pointer type mismatch"
-          (or (compatible? ua ub) (compatible-ptr-targets? ua ub)) (ptr (reduce qual ua q))
+          ;; C23 6.2.7's composite of two compatible structures or unions, as far as ci models it: the variably modified
+          ;; one when only one is (gcc's composite_type_internal takes each member's composite: char (*)[] and char
+          ;; (*)[n] give char (*)[n]; gnu23-tag-composite-3, CS106)
+          (or (compatible? ua ub) (compatible-ptr-targets? ua ub))
+          (ptr (reduce qual (if (and (record-type? ua) (record-type? ub) (not (identical? (:rec ua) (:rec ub)))
+                                     (vm-type? ub) (not (vm-type? ua)))
+                              ub ua)
+                       q))
           :else (do (when-not (cx :permissive) (err! "pointer type mismatch in conditional expression")) (ptr (reduce qual ua q)))))
       (ptr-type? ta) ta
       (ptr-type? tb) tb
@@ -1827,6 +1844,16 @@
 
 (defn- vla? [t] (case (:k t) :array (or (:vla t) (vla? (:of t))) false))
 
+(defn var-size?
+  "Whether a type's size is the run time's: a VLA, an array of elements of variable size, a structure or union with a
+  member of variable size (GNU's, CS106)."
+  [t]
+  (let [t (unq t)]
+    (case (:k t)
+      :array (boolean (or (:vla t) (var-size? (:of t))))
+      (:struct :union) (boolean (.get ^HashMap (:rec t) :var-size))
+      false)))
+
 (defn- generic-select [f]
   (let [[_ ctl & assocs] f
         type-op (:c/type (meta f))
@@ -2073,8 +2100,8 @@
                                :nfp (or (:nfp r) (float-type? (unq (:t r)))))))
             sizeof (let [r (ex (first args))]
                      (when (bit-field? r) (err! "'sizeof' applied to a bit-field"))
-                     (emit! (if (vla? (:t r)) (res t-ulong) (sizeof-res (:t r)))))
-            sizeof-type (let [t (parse-type (first args))] (emit! (if (vla? t) (res t-ulong :tt t) (sizeof-res t)))) ; :tt, the builder's (queue 165)
+                     (emit! (if (var-size? (:t r)) (res t-ulong) (sizeof-res (:t r)))))
+            sizeof-type (let [t (parse-type (first args))] (emit! (if (var-size? t) (res t-ulong :tt t) (sizeof-res t)))) ; :tt, the builder's (queue 165)
             alignof (let [r (ex (first args))] (when (bit-field? r) (err! "'_Alignof' applied to a bit-field")) (emit! (res t-ulong :v (or (:malign r) (align-of (unq (:t r)))))))
             alignof-type (let [t (parse-type (first args))]
                            (when (incomplete-type? t) (err! "invalid application of 'alignof' to incomplete type"))
@@ -2100,7 +2127,12 @@
             lit (emit! (lit-form f))
             byte-string (emit! (res (arr t-char (inc (byte-string-len args))) :str true))
             imaginary (do (when (< (std-num) 124) (pedwarn-c2y! "imaginary constants are a C2Y feature or GCC extension"))
-                          (emit! (res {:k :complex :of t-double})))
+                          ;; the complex type of the constant's part (GNU's 2i is _Complex int, 2.0fi _Complex float, CS105)
+                          (emit! (res {:k :complex :of (let [a (first args)]
+                                                         (cond
+                                                           (integer? a) (if (<= -2147483648 a 2147483647) t-int t-long)
+                                                           (and (seq? a) (= 'lit (first a))) (unq (parse-type (second a)))
+                                                           :else t-double))})))
             va-arg (let [[ap tf] args
                          t (unq (parse-type tf))]
                      ;; cc's Builtin: (*(T*)__builtin_va_arg_impl(ap))
@@ -2110,15 +2142,16 @@
                            t (parse-type tf)]
                        (feat! :cc-builtin-macro)
                        (doseq [p path] (when-not (keyword? p) (ex p)))
-                       (res t-ulong :v (loop [t (unq t) off 0 ps (seq path)]
+                       ;; :tt, the builder's: an offset through members or elements of variable size is the run time's (CS106)
+                       (res t-ulong :tt t :v (loop [t (unq t) off 0 ps (seq path)]
                                          (if-not ps
                                            off
                                            (let [p (first ps)]
                                              (cond
                                                (and (keyword? p) (record-type? t))
-                                               (if-let [m (member t (name p))] (recur (unq (:t m)) (+ off (long (:off m))) (next ps)) nil)
+                                               (if-let [m (member t (name p))] (when-not (:voff m) (recur (unq (:t m)) (+ off (long (:off m))) (next ps))) nil)
                                                (and (= :array (:k t)) (not (keyword? p)))
-                                               (when-let [i (const-int p)] (recur (unq (:of t)) (+ off (* (long i) (long (or (size-of (unq (:of t))) 0)))) (next ps)))
+                                               (when-let [i (when-not (var-size? (:of t)) (const-int p))] (recur (unq (:of t)) (+ off (* (long i) (long (or (size-of (unq (:of t))) 0)))) (next ps)))
                                                :else nil))))))
             types-compatible? (let [[a b] args ta (unq (parse-type a)) tb (unq (parse-type b))]
                                 ;; cc's Builtin: __ccgo__types_compatible_p((t1){}, (t2){})
