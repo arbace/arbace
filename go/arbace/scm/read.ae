@@ -3,7 +3,7 @@
 (in-ns 'go.arbace.scm)
 
 (go/file "read.go"
-  :imports [[strconv "strconv"] [strings "strings"] [unicode "unicode"]])
+  :imports [[os "os"] [strconv "strconv"] [strings "strings"] [unicode "unicode"]])
 
 (go/type CharSource "CharSource is what the reader reads: characters, false at the end.\n"
   (interface (ReadChar [] :results [rune bool]) (PeekChar [] :results [rune bool])))
@@ -35,6 +35,31 @@
 (go/method SetR7RSMode [^{:tag (* StringSource)} p ^bool b] (set! (.-r7rs p) b))
 
 (go/var ^{:tag bool :doc "R7RS is the lexical mode of a source that has none of its own (a string, a port before #!r7rs or #!r6rs): R7RS's lexical syntax beyond R6RS's, #u8( bytevectors, |...| identifiers, the other identifier characters R6RS leaves out and datum labels (SM8; since SM8b set from the program's mode, ReadProgram, SC106 (b)).\n"} R7RS)
+
+(go/var ^{:tag bool :doc "ChezLex is whether the reader takes Chez's own lexical syntaxes the R6RS and R7RS ones leave out (SMR3): #!eof and #!bwp (the end-of-file object and the broken weak pointer, as data), #vfx( and #vfl( (fixnum and flonum vectors, read as vectors). Off; the environment variable SI_CHEZ_LEXICAL turns it on, bin/si mats sets it for the harness, no other run does.\n"} ChezLex)
+
+(go/method ahead "ahead is the next k characters without consuming them (fewer at the end of the text).\n"
+  ^{:tag (slice rune)} [^{:tag (* reader)} r ^int k]
+  (while (< (len (.-buf r)) k)
+    (let [(values c ok) (.ReadChar (.-src r))]
+      (when (not ok)
+        (break))
+      (set! (.-buf r) (append (.-buf r) c))))
+  (if (< (len (.-buf r)) k)
+    (return (.-buf r))
+    (return (subslice (.-buf r) 0 k))))
+
+(go/method chezDatum "chezDatum is whether the text is a #! at off (the ! at ahead's index off) naming eof or bwp, with ChezLex on (the name must end at a delimiter).\n"
+  ^bool [^{:tag (* reader)} r ^int off]
+  (when (not ChezLex)
+    (return false))
+  (let [a (.ahead r (+ off 5))]
+    (when (< (len a) (+ off 4))
+      (return false))
+    (when (and (> (len a) (+ off 4)) (not (isDelim (aget a (+ off 4)))))
+      (return false))
+    (let [name (conv string (subslice a (+ off 1) (+ off 4)))]
+      (return (or (== name "eof") (== name "bwp"))))))
 
 (go/type ModeState "ModeState is what a CharSource may also implement to keep its lexical mode (#!r7rs, #!r6rs) between reads (SC106 (b)).\n"
   (interface (R7RSMode [] :results [bool]) (SetR7RSMode [^bool b])))
@@ -197,6 +222,7 @@
           (cond
             (== d \|) (do (.next r) (.next r) (.skipBlock r))
             (== d 59) (do (.next r) (.next r) (.datum r "datum"))
+            (and (== d \!) (.chezDatum r 1)) (return)
             (== d \!)
             (do (.next r) (.next r)
                 (let [tok (.token r false)
@@ -322,6 +348,19 @@
         (let [(values v found) (charNameValue key (.-r7rs r))]
           (when found
             (return (conv Char v))))
+        ;; SMR7: Chez's own character names (rubout, bel, nel, ls) and #\NNN, three octal digits, with ChezLex
+        (when ChezLex
+          (switch key
+            (case ["rubout"] (return (conv Char (conv rune 127))))
+            (case ["bel"] (return (conv Char (conv rune 7))))
+            (case ["nel"] (return (conv Char (conv rune 0x85))))
+            (case ["ls"] (return (conv Char (conv rune 0x2028)))))
+          (when (and (== (len name) 3) (isOctal (aget (conv (slice rune) name) 0)) (isOctal (aget (conv (slice rune) name) 1))
+                     (isOctal (aget (conv (slice rune) name) 2)))
+            (let [rs (conv (slice rune) name)
+                  v (+ (* 64 (- (aget rs 0) \0)) (* 8 (- (aget rs 1) \0)) (- (aget rs 2) \0))]
+              (when (< v 256)
+                (return (conv Char v))))))
         (when (== cp \x)
           (let [all true]
             (for [i 0] (< i (len tail)) (inc! i)
@@ -332,6 +371,8 @@
                 (when good
                   (return (conv Char (conv rune v))))))))
         (.readFail r "invalid character name #\\~a" (Str name))))))
+
+(go/func isOctal ^bool [^rune c] (and (>= c \0) (<= c \7)))
 
 (go/func isPeculiar "isPeculiar is whether the identifier token starting with + - . or a digit is one R6RS admits.\n" ^bool [^string t]
   (or (== t "+") (== t "-") (== t "...") (strings/HasPrefix t "->")))
@@ -480,6 +521,13 @@
   (let [(values d ok) (.peek r)]
     (when (not ok)
       (return (.readEof r "# prefix")))
+    ;; SMR3: #!eof and #!bwp as data, with ChezLex
+    (when (and (== d \!) (.chezDatum r 0))
+      (.next r)
+      (let [name (conv string (.token r false))]
+        (if (== name "eof")
+          (return Eof)
+          (return Bwp))))
     ;; Chez's #%name and #N%name (a primitive at optimize level N): in R7RS mode the plain symbol (SM8)
     (when (and (.-r7rs r) (== d \%))
       (.next r)
@@ -514,10 +562,51 @@
                   (set! (.-v l) v)
                   (set! (.-set l) true)
                   (return (patchLabels v (make (map any bool)))))))
+            ;; SMR7: Chez's #N( and #Nvu8( #Nvfx( #Nvfl( (a vector of length N, its last element repeated, none: 0) and #Nr (radix N), with ChezLex
+            (case [\( \v]
+              (when (not ChezLex)
+                (return (.readFail r "invalid syntax #~a~c" n (conv Char e))))
+              (let [kind "vector"]
+                (when (== e \v)
+                  (let [t (conv string (.token r false))]
+                    (set! kind t)
+                    (when (not (or (== t "u8") (== t "fx") (== t "fl")))
+                      (return (.readFail r "invalid syntax #~av~a" n (Str t))))
+                    (let [(values p ok3) (.next r)]
+                      (when (not (and ok3 (== p \()))
+                        (return (.readFail r "invalid syntax #~av~a" n (Str t)))))))
+                (let [(values items _) (.seq r true "vector")]
+                  (when (> (conv int64 (len items)) n)
+                    (return (.readFail r "too many vector elements supplied" )))
+                  (let [^any fill (conv any (conv int64 0))]
+                    (when (== kind "fl")
+                      (set! fill (conv any (conv float64 0))))
+                    (when (> (len items) 0)
+                      (set! fill (aget items (- (len items) 1))))
+                    (while (< (conv int64 (len items)) n)
+                      (set! items (append items fill))))
+                  (if (== kind "u8")
+                    (let [bs (make (slice byte) 0 (len items))]
+                      (range [_ x items]
+                        (let [(values b isInt) (assert int64 x)]
+                          (when (or (not isInt) (< b 0) (> b 255))
+                            (return (.readFail r "invalid value ~:[~s~;~a~] found in bytevector" false x)))
+                          (set! bs (append bs (conv byte b)))))
+                      (return (addr (lit Bytevector :B bs))))
+                    (return (NewVector items))))))
+            (case [\r \R]
+              (when (not ChezLex)
+                (return (.readFail r "invalid syntax #~a~c" n (conv Char e))))
+              (let [tok (+ "#" (strconv/FormatInt n 10) "r" (conv string (.token r true)))
+                    v (StringToNumberX tok 10 true)]
+                (when (== v false)
+                  (return (.readFail r "invalid number syntax ~a" (Str tok))))
+                (return v)))
             (default (return (.readFail r "invalid syntax #~a~c" n (conv Char e))))))))
     (switch d
       (case [\{]
-        (when (.-gensyms r)
+        ;; SMR7: Chez's #{NAME UID} gensyms with ChezLex too
+        (when (or (.-gensyms r) ChezLex)
           (return (.readGensym r))))
       (case [\(]
         (.next r)
@@ -559,7 +648,7 @@
           (for [i 0] (< i (len rest)) (inc! i)
             (set! prefix (append prefix (aget rest i))))
           (let [tok (conv string prefix)
-                v (StringToNumber tok 10)]
+                v (StringToNumberX tok 10 ChezLex)]
             (when (== v false)
               (return (.readFail r "invalid number syntax ~a" (Str tok))))
             (return v)))))
@@ -577,6 +666,20 @@
                     (return (.readFail r "invalid value ~:[~s~;~a~] found in bytevector" false (aget items i))))
                   (set! bs (append bs (conv byte n)))))
               (return (addr (lit Bytevector :B bs)))))))
+      (when (and ChezLex (or (== l "vfx") (== l "vfl")))
+        (let [(values p ok2) (.peek r)]
+          (when (and ok2 (== p \())
+            (.next r)
+            (let [(values items _) (.seq r true "vector")]
+              (range [_ x items]
+                (if (== l "vfx")
+                  (let [(values _ isInt) (assert int64 x)]
+                    (when (not isInt)
+                      (return (.readFail r "invalid value ~s found in fxvector" x))))
+                  (let [(values _ isFl) (assert float64 x)]
+                    (when (not isFl)
+                      (return (.readFail r "invalid value ~s found in flvector" x))))))
+              (return (NewVector items))))))
       (switch l
         (case ["t" "true"] (return true))
         (case ["f" "false"] (return false)))
@@ -754,3 +857,9 @@
     (when ok
       (return (.-Name sym)))
     (return "")))
+
+(go/func init []
+  ;; SMR3: the environment variable SI_CHEZ_LEXICAL (set, not "" or "0") turns Chez's own lexical syntaxes on for every reader of the
+  ;; process: bin/si mats sets it for the harness. No primitive: a new one would be a change of psyntax's boot list (bin/si boot).
+  (let [v (os/Getenv "SI_CHEZ_LEXICAL")]
+    (set! ChezLex (and (!= v "") (!= v "0")))))

@@ -878,8 +878,8 @@ covers what.
   psyntax, the R6RS library and syntax-case system of Abdulaziz Ghuloum and R. Kent Dybvig, as Ikarus
   Scheme carried it (https://github.com/lambdaconservatory/ikarus at
   `1f2b250ed9e8cb1c2466c939a9a305461db71739`, `scheme/psyntax.*.ss`, each file's notice kept), as Scheme
-  forms; `psyntax.pp.ae` is generated from them (psyntax expanded by itself), and `tools/psyntax/boot.ss`
-  follows the structure of `psyntax-buildscript.ss` of the portable psyntax-r6rs (revision 4, 2007, by the
+  forms; `psyntax.pp.ae` is generated from them (psyntax expanded by itself), and `tools/psyntax/boot.ss` and
+  `tools/psyntax/boot-si.sps` (its program on si itself, SMR7b) follow the structure of `psyntax-buildscript.ss` of the portable psyntax-r6rs (revision 4, 2007, by the
   same authors): all under the MIT License below ("psyntax"). `compat.ae`, `internal.ae`, `patches.edn`,
   `tools/psyntax/chez/`, `tools/psyntax/run.ss` and `tools/psyntax/expand.ss` are Arbace's own, under the
   Eclipse Public License 1.0 (Ikarus's own `psyntax.compat.ss`, under the GPL version 3, is not vendored).
