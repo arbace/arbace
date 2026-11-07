@@ -73,6 +73,9 @@
         obj (or (st "object") "none")
         refused (st "lower.refused")
         gcc (st "gcc.status")
+        ;; ORS27: from the records gcc is `skipped` and the lowered C's level is repr/c's read and ci's check (ci-check.status, its
+        ;; message ci-check.log); the run is then the oracle tier's (`skipped`)
+        ci (st "ci-check.status")
         orig (st "orig.status") low (st "low.status")
         ;; the run: the status, stdout and stderr the original's (review 007's finding 6: uncaught.cpp's terminate message, the
         ;; testsuite's assertion messages are on stderr)
@@ -85,7 +88,7 @@
         gxx (cond (nil? (st "gxx.status")) "none"
                   (and (= orig (st "gxx.status")) (same-bytes? (str d "orig.out") (str d "gxx.out"))) "agrees" :else "differs")
         no-main (= "1" (st "no-main"))
-        run (if (and no-main (= gcc "0")) "no-main" run)
+        run (cond (= gcc "skipped") "skipped" (and no-main (= gcc "0")) "no-main" :else run)
         outcome (cond
                   (and (not= ir "0") (oracle-rejection? ir (st "ir.log"))) :oracle-rejected
                   (not= ir "0") :ir
@@ -93,10 +96,12 @@
                   (not= rt "ok") :forms
                   (not (contains? #{"same" "skipped"} obj)) :object
                   refused :lowering
-                  (not= gcc "0") :gcc
-                  (not (#{"same" "no-main"} run)) :run
+                  (and (= gcc "skipped") (not= ci "ok")) :c-check
+                  (not (#{"0" "skipped"} gcc)) :gcc
+                  (not (#{"same" "no-main" "skipped"} run)) :run
                   :else :pass)]
     {:name n :outcome outcome :ir ir :rt rt :obj obj :lower (if refused (first (str/split refused #"\t")) "ok") :gcc (or gcc "-")
+     :ci (or ci "-") :ci-message (some-> (st "ci-check.log") str/trim)
      :run run :gxx gxx :orig-status orig :low-status low}))
 
 (defn judge
@@ -142,6 +147,13 @@
         regression? (fn [r] (and (= :pass (first (get recorded (:name r)))) (not= :pass (:outcome r))))
         ;; a known file is known only at the level its class names (review 007's finding 8): a refusal's class at the lowering
         ;; with that refusal, the run classes at the run
+        ;; ORS27: a lowered C that ci's checker refuses for a reason test/cpp/divergences.edn classes (the run check's classes, the
+        ;; row's text `STATUS MESSAGE` as arbace.cpp.check's run-judge matches it: CS35's long double) is known at that level
+        divs (let [f (java.io.File. (str (.getParent (.getAbsoluteFile (java.io.File. known-path))) "/divergences.edn"))]
+               (if (.exists f) (read-string (slurp f)) []))
+        c-class (fn [r] (when (= :c-check (:outcome r))
+                          (let [t (str (:ci r) " " (:ci-message r))]
+                            (some (fn [c] (when (some #(re-find % t) (:match c)) (:id c))) divs))))
         fits? (fn [r] (let [c (get known (:name r))]
                         (case c
                           nil false
@@ -149,23 +161,26 @@
                           ;; run that cannot be compared)
                           (:uncaught-cleanups :native-callback-throw) (and (= :run (:outcome r)) (contains? #{"differs" "stderr-differs"} (:run r)))
                           (and (= :lowering (:outcome r)) (= (name c) (:lower r))))))
-        status (fn [r] (cond (= :pass (:outcome r)) :pass (regression? r) :failing (= :oracle-rejected (:outcome r)) :oracle-rejected
+        status (fn [r] (cond (= :pass (:outcome r)) :pass (= :oracle-rejected (:outcome r)) :oracle-rejected
+                             (c-class r) :known (regression? r) :failing
                              (fits? r) :known :else :failing))
         lines (for [r rs] (str/join "\t" [(:name r) (name (status r)) (name (:outcome r)) (:rt r) (:obj r) (:lower r) (:gcc r) (:run r) (:gxx r)
-                                         (or (:orig-status r) "-") (or (:low-status r) "-") (if-let [c (get known (:name r))] (name c) "-")]))
+                                         (or (:orig-status r) "-") (or (:low-status r) "-")
+                                         (if-let [c (or (get known (:name r)) (c-class r))] (name c) "-") (:ci r)]))
         cnt (fn [k] (count (filter #(= k (status %)) rs)))
         by (fn [f] (into (sorted-map) (frequencies (map f rs))))
         summary {:files (count rs) :pass (cnt :pass) :known (cnt :known) :failing (cnt :failing) :oracle-rejected (cnt :oracle-rejected)
                  :outcomes (by (comp name :outcome)) :forms (by #(or (:rt %) "-")) :objects (by :obj) :lowering (by :lower)
-                 :gxx (by :gxx) :regressions (count (filter regression? rs))
+                 :gxx (by :gxx) :c-level (by :ci) :regressions (count (filter #(and (regression? %) (not (c-class %))) rs))
                  :recorded-list (when listed (name listed)) :recorded-missing (count rec-missing)
-                 :known-classes (into (sorted-map) (frequencies (keep #(when (= :known (status %)) (name (get known (:name %)))) rs)))}]
-    (spit (str work "/results.tsv") (str "name\tstatus\toutcome\tforms\tobject\tlowering\tgcc\trun\tgxx\torig\tlow\tclass\n" (str/join "\n" lines) "\n"))
+                 :known-classes (into (sorted-map) (frequencies (keep #(when (= :known (status %)) (name (or (get known (:name %)) (c-class %)))) rs)))}]
+    (spit (str work "/results.tsv") (str "name\tstatus\toutcome\tforms\tobject\tlowering\tgcc\trun\tgxx\torig\tlow\tclass\tc\n" (str/join "\n" lines) "\n"))
     (spit (str work "/summary.edn") (str (pr-str summary) "\n"))
     (println (str "lower-check: " (count rs) " files, " (:pass summary) " pass, " (:known summary) " known, " (:failing summary) " failing, "
                   (:oracle-rejected summary) " rejected by the oracle"))
     (doseq [r rs :when (= :failing (status r))]
-      (println "  failing:" (:name r) (name (:outcome r)) (:lower r) (if (regression? r) "(recorded :pass)" "")
+      (println "  failing:" (:name r) (name (:outcome r)) (:lower r) (if (= :c-check (:outcome r)) (str (:ci r) ": " (:ci-message r)) "")
+               (if (regression? r) "(recorded :pass)" "")
                (if-let [c (get known (:name r))] (str "(known as " (name c) ")") "")))
     (when recorded-bad
       (println (str "lower-check: the run of the recorded list " (name listed) " has " (count run-names) " files, the record " (:files (get summaries listed))
@@ -177,7 +192,9 @@
                                                    :differs (str "lower-check: control " id " (" subject "'s lowered run against " reference "'s original): differs, as a control must (GTS81 (a))")
                                                    :passes (str "lower-check: control passed: " id " (" subject "'s lowered run against " reference "'s original): the comparison passes what differs")
                                                    :not-judged (str "lower-check: control not judged: " id ": " reference " has no original run")
-                                                   :left (str "lower-check: control " id ": left (" subject " or " reference " not in the run, or not comparable)")))
+                                                   :left (if (= "skipped" (slurp? (str work "/files/" subject "/gcc.status")))
+                                                           (str "lower-check: control " id ": the lowered run is the oracle tier's (ORS27, cpp-lower-oracle); bin/cppi check's run control judges ci's run")
+                                                           (str "lower-check: control " id ": left (" subject " or " reference " not in the run, or not comparable)"))))
                                         (contains? #{:passes :not-judged} v)))))]
       (when (or recorded-bad (pos? (:failing summary)) cbad) (System/exit 1))))))
 
@@ -191,7 +208,7 @@
                         ir (st "ir.status") rt (some-> (st "rt.status") (str/split #"\t") first)
                         obj (or (st "object") "none") refused (st "lower.refused") gcc (st "gcc.status")
                         outcome (cond (not= ir "0") :ir (not= rt "ok") :forms (not (contains? #{"same" "skipped"} obj)) :object refused :lowering
-                                      (not= gcc "0") :gcc :else :pass)]
+                                      (not (#{"0" "skipped"} gcc)) :gcc :else :pass)]
                     {:unit u :outcome outcome :ir (or ir "-") :forms (or rt "-") :object obj
                      :lower (if refused (first (str/split refused #"\t")) "ok") :gcc (or gcc "-")})))
         by (fn [f] (into (sorted-map) (frequencies (map f rs))))
