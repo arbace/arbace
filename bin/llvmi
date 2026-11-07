@@ -19,8 +19,11 @@
 #   bin/llvmi record-ref [--corpus C,...] [--only LIST]
 #                                        lli's runs (empty stdin, no arguments, 10 s) recorded into test/llvm/ref-lli23.edn (--only:
 #                                        those ids rewritten, the others kept)
-#   bin/llvmi check [--aot] [--corpus C,...] [--only LIST] [--record] [--judge]
-#                                        every module lowered, run by ci (--aot: built by cf2g and go) and judged against the reference:
+#   bin/llvmi check [--aot] [--corpus C,...] [--only LIST | --essential] [--record] [--judge]
+#                                        every module lowered, run by ci (--aot: built by cf2g and go) and judged by its own verdict
+#                                        (llvm/test's lit RUN and CHECK lines, gcc's torture harness: exit 0), else against lli's
+#                                        recorded run (LLVMI_JUDGE=lli: every module against lli's, the oracle tier; doc/llvm/
+#                                        LLVM-CROP-SURVEY.md, "As built: LL9a"); --essential: test/llvm/essential-check.txt:
 #                                        rows [ID RESULT REASON] in WORK/results.edn (WORK .tmp/llvmi/eval or .tmp/llvmi/aot), every
 #                                        non-pass in a class of test/llvm/divergences-eval.edn (--aot: divergences-aot.edn, then eval's),
 #                                        a recorded pass that does not pass a failure, the negative controls of test/llvm/controls.edn
@@ -36,7 +39,9 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
 . "$root/bin/lib/tools.bash"
 main=$root
-case $root in */.tmp/worktrees/*) main=${root%%/.tmp/worktrees/*} ;; esac
+# the main checkout (its .tmp/llvm/src, the pinned tarball's extraction): a worktree's (.tmp/worktrees/NAME) or the clean run's
+# clone's (.tmp/gate-clean/SHA, also of a worktree), else this one
+main=${root%%/.tmp/gate-clean/*}; main=${main%%/.tmp/worktrees/*}
 export GOMAXPROCS=${GOMAXPROCS:-4} GOMEMLIMIT=${GOMEMLIMIT:-1500MiB}
 llvm_bin=${LLVM_BIN:-/usr/lib/llvm23/bin}
 lli=$llvm_bin/lli
@@ -158,11 +163,38 @@ run1() {
   : > "$rd/in"
   { (cd "$rd" && timeout 10 "$@" < in > out 2> err); } 2> "$rd/sh"; st=$?
   [ $st = 124 ] && st=timeout
+  [ -n "${LLVMI_RUN_OUT:-}" ] && head -c 65536 "$rd/out" > "$LLVMI_RUN_OUT/$id.out"  # the own verdicts' CHECK lines read it
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$st" "$(sha256sum < "$rd/out" | cut -d' ' -f1)" "$(wc -c < "$rd/out")" \
     "$(sha256sum < "$rd/err" | cut -d' ' -f1)" "$(wc -c < "$rd/err")" "$(head -1 "$rd/err" | cut -c1-200 | tr '\t' ' ')"
   rm -rf "$rd"
 }
 export -f run1
+
+# musl_prepare: ci's libc (bin/ci musl prepare) without a compiler. ci's prepare configures musl with the host's gcc
+# (CC=gcc ./configure) when its tree is absent; llvmi makes configure's products first as musl's Makefile makes them
+# (sed over arch/x86_64's .in files: obj/include/bits/alltypes.h, syscall.h; tools/version.sh's VERSION: version.h) with
+# config.mak's ARCH, the only line ci reads, so no toolchain runs in llvmi's check (doc/llvm/LLVM-CROP-SURVEY.md, "As built:
+# LL9a"); C's own prepare does the same since the C crop's target (c/README.md) and then takes over
+musl_prepare() {
+  local d=$root/.tmp/ci-musl m=$root/.tmp/ci-musl/musl-1.2.6 tb sum c1
+  if ! { [ -f "$m/obj/include/bits/alltypes.h" ] && [ -f "$d/ldbl53/bits/float.h" ] && [ -f "$m/config.mak" ] && grep -qx 'ARCH = x86_64' "$m/config.mak"; }; then
+    sum=$(sed -n '/:musl-1.2.6/,/:top/s/^ *:sha256 "\(.*\)"/\1/p' "$root/test/c/corpora.edn")
+    tb=${CI_MUSL_TARBALL:-$d/musl-1.2.6.tar.gz}; c1=$main/.tmp/c1/musl/musl-1.2.6.tar.gz
+    [ -f "$tb" ] || tb=$c1
+    [ -f "$tb" ] || { echo "llvmi: no musl tarball ($d/musl-1.2.6.tar.gz or $c1): bin/ci musl prepare fetches it" >&2; return 1; }
+    echo "$sum  $tb" | sha256sum -c --quiet || { echo "llvmi: $tb does not match the pin" >&2; return 1; }
+    mkdir -p "$d"; rm -rf "$m"; tar -xzf "$tb" -C "$d" || return 1
+    mkdir -p "$m/obj/include/bits" "$m/obj/src/internal"
+    (cd "$m" && sed -f tools/mkalltypes.sed arch/x86_64/bits/alltypes.h.in include/alltypes.h.in > obj/include/bits/alltypes.h \
+       && cp arch/x86_64/bits/syscall.h.in obj/include/bits/syscall.h \
+       && sed -n -e s/__NR_/SYS_/p < arch/x86_64/bits/syscall.h.in >> obj/include/bits/syscall.h \
+       && printf '#define VERSION "%s"\n' "$(cat VERSION)" > obj/src/internal/version.h \
+       && printf '# written by bin/llvmi (musl_prepare): configure'"'"'s products for --target=x86_64 with no compiler probed\nARCH = x86_64\nsrcdir = .\n' > config.mak) || return 1
+    mkdir -p "$d/ldbl53/bits"; cp "$m/arch/arm/bits/float.h" "$d/ldbl53/bits/float.h"
+    echo "llvmi: musl's configure products derived without a compiler in $m"
+  fi
+  "$root/bin/ci" musl prepare
+}
 
 cmd=${1:-}; [ $# -gt 0 ] && shift
 case $cmd in
@@ -228,9 +260,10 @@ case $cmd in
         --aot) aot=1; shift ;;
         --corpus) corpora=$2; shift 2 ;;
         --only) only=$(cd "$(dirname "$2")" && pwd)/$(basename "$2"); shift 2 ;;
+        --essential) only=$root/test/llvm/essential-check.txt; shift ;;
         --record) record=1; shift ;;
         --judge) judge=1; shift ;;
-        *) sed -n '20,27p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+        *) sed -n '20,30p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
       esac
     done
     level=eval; [ -n "$aot" ] && level=aot
@@ -239,7 +272,8 @@ case $cmd in
       rm -rf "$work"; mkdir -p "$work"
       only_ids=$only modules "$work" "$corpora"; only_filter "$work" "$only"
       if [ -n "$only" ] || [ "$corpora" != "$all_corpora" ]; then echo "${only:-all} $corpora" > "$work/subset"; fi
-      "$root/bin/ci" musl prepare > "$work/musl.log" 2>&1 || { cat "$work/musl.log" >&2; exit 1; }
+      musl_prepare > "$work/musl.log" 2>&1 || { cat "$work/musl.log" >&2; exit 1; }
+      mkdir -p "$work/out"; export LLVMI_RUN_OUT=$work/out
       t0=$(date +%s)
       tool -m arbace.llvm.run lower-list "$work/modules.tsv" "$work/c" "$threads"
       t1=$(date +%s)
@@ -307,7 +341,7 @@ case $cmd in
       printf 'lower %s\nbuild %s\nrun %s\n' "$((t1 - t0))" "$((t2 - t1))" "$((t3 - t2))" > "$work/seconds"
     fi
     rec=$root/test/llvm/check-$level-linux-amd64.edn
-    tool -m arbace.llvm.check judge "$work" "$level" "$ref" "$rec" "$root/test/llvm/controls.edn" ${record:+--record} ;;
+    tool -m arbace.llvm.check judge "$work" "$level" "$ref" "$rec" "${LLVMI_CONTROLS:-$root/test/llvm/controls.edn}" ${record:+--record} ;;
   divergences)
     level=eval; [ "${1:-}" = --aot ] && level=aot
     tool -m arbace.llvm.check divergences "$level" "$root/test/llvm/check-$level-linux-amd64.edn" ;;

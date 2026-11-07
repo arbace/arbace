@@ -18,6 +18,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   java-check-oracle java-check-rejudge java-verdicts \
   rsi-samples rsi-lower-check rsi-lower-check-all rsi-lower-check-native-all rsi-std-build rsi-runtime-build rsi-runtime-ci rsi-record-ref rsi-check rsi-check-aot rsi-check-all rsi-divergences rsi-synthetic rsi-synthetic-check rsi-judge-test rsi-check-essential \
   repr-llvm-record-opt repr-llvm-record-rt llvmi-ir-make llvmi-run llvmi-check llvmi-check-aot llvmi-record-ref llvmi-divergences cppi-codegen-check \
+  repr-llvm-check repr-llvm-check-essential llvm-controls-test llvmi-check-essential \
   suite-aot suite-aot-essential suite-divergences java-forms-verify java-forms-update reap-record-native-check \
   repr-c-gcc-tests repr-scheme-fetch repr-scheme-check repr-scheme-check-quick repr-scheme-record repr-scheme-spec repr-scheme-roundtrip si-vendor-verify si-boot si-boot-check si-test si-test-record si-check-suite si-fixpoint si-unit si-light si-test-si si-check si-check-record-ref si-srfi si-srfi-record si-srfi-aot si-aot-check si-aot-check-record si-bench si-divergences si-r7rs si-r7rs-record si-r7rs-chez si-r7rs-chez-record si-r7rs-chibi si-r7rs-chibi-record si-r7rs-chibi-test si-r7rs-chibi-test-record si-chibi-tests si-chibi-tests-record si-ecraven si-ecraven-record si-ecraven-chez si-ecraven-chez-record si-ecraven-chibi si-ecraven-chibi-record si-mats si-mats-record si-corpora-files si-corpora-divergences repr-ocaml-ocdump repr-ocaml-spec-check repr-ocaml-samples repr-ocaml-corpus repr-ocaml-corpus-count repr-ocaml-roundtrip repr-ocaml-roundtrip-all repr-ocaml-check repr-ocaml-text repr-ocaml-cmi repr-ocaml-dumps oi-stdlib oi-build oi-check oi-divergences oi-record-ref oi-repl oi-aot-lib oi-check-aot oi-divergences-aot oi-suite-check oi-suite-check-aot oi-suite-divergences oi-suite-expect oi-suite-rollup oi-suite-record-ref repr-ocaml-opam repr-python-fetch repr-python-pins repr-python-count repr-python-spec-check repr-python-samples repr-python-roundtrip repr-python-record repr-python-check repr-python-text repr-python-text-record pyi-gen pyi-gen-check pyi-record-ref pyi-record-ref-check pyi-scope-check pyi-compile-check pyi-run pyi-repl pyi-repl-check pyi-lib-test pyi-lib-test-oracle pyi-runtime-print pyi-runtime-read pyi-runtime-vet pyi-runtime-check \
   repr-scheme repr-scheme-roundtrip-record si-essential si-aot-essential scheme-read-essential scheme-essential \
@@ -343,6 +344,12 @@ cppi-divergences: ## the recorded C++ run check judged against its classes (bin/
 	bin/cppi divergences
 cppi-divergences-aot: ## the recorded C++ AOT check judged against its classes (bin/cppi divergences --aot)
 	bin/cppi divergences --aot
+repr-llvm-check: ## repr/llvm's check families against their records, the tests' own verdicts where they have one, no LLVM tool (bin/repr-llvm check FAMILY; FAMILY=roundtrip-llvmtest|text-llvmtest|verify-llvmtest|verify-probes)
+	bin/repr-llvm check $(FAMILY)
+repr-llvm-check-essential: ## repr/llvm's essential subsets of the four families (the gate's llvm-read-essential, llvm-print-essential)
+	bin/repr-llvm check roundtrip-llvmtest --essential && bin/repr-llvm check verify-llvmtest --essential && bin/repr-llvm check verify-probes --essential && bin/repr-llvm check text-llvmtest --essential
+llvm-controls-test: ## the LLVM row's negative controls wired: a control crossing a module with itself fails each check (test/repr/llvm/controls-test.bash)
+	test/repr/llvm/controls-test.bash
 repr-llvm-record-opt: ## opt -passes=verify's verdicts of IR lists recorded into test/llvm/ref-opt23.edn, verify-check's reference without opt (bin/repr-llvm record-opt LIST...; LISTS=...)
 	bin/repr-llvm record-opt $(LISTS)
 repr-llvm-record-rt: ## the round trip's judges (clang -c's objects, llvm-as's bitcode) recorded into test/llvm/ref-rt23.edn, roundtrip's reference without clang (bin/repr-llvm record-rt LIST WORK; LIST=... WORK=...)
@@ -351,8 +358,10 @@ llvmi-ir-make: ## llvmi's pinned IR made afresh by clang 23 (test/llvm/ir/{tx,c}
 	bin/llvmi ir-make
 llvmi-run: ## llvmi: an IR module lowered to C and run by ci (bin/llvmi run FILE; FILE=...)
 	bin/llvmi run $(FILE)
-llvmi-check: ## llvmi's eval check: llvm/test's ExecutionEngine modules, C's synth and run programs, gcc's torture sample and C++'s samples as clang 23's pinned IR (test/llvm/ir), lowered and run by ci against lli 23's recorded runs; no clang or lli (bin/llvmi check)
+llvmi-check: ## llvmi's eval check: llvm/test's ExecutionEngine modules, C's synth and run programs, gcc's torture sample and C++'s samples as clang 23's pinned IR (test/llvm/ir), lowered and run by ci judged by the tests' own verdicts (lit's, gcc's torture harness's), else against lli 23's recorded runs; no clang or lli (bin/llvmi check)
 	bin/llvmi check
+llvmi-check-essential: ## llvmi's essential subset, test/llvm/essential-check.txt's ten modules with the negative controls (bin/llvmi check --essential)
+	bin/llvmi check --essential
 llvmi-check-aot: ## llvmi's AOT check: the same lowered C through cf2g and TamaGo's go (bin/llvmi check --aot)
 	bin/llvmi check --aot
 llvmi-record-ref: ## lli 23's runs of llvmi's modules recorded into test/llvm/ref-lli23.edn (bin/llvmi record-ref)

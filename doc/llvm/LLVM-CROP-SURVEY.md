@@ -1005,3 +1005,159 @@ for C++'s lowering for gcc.
 - **LLS26 (a), ratified:** `test/llvm/ir/tx.tar.xz` stays committed as GPL-3.0-or-later test data (clang's IR of gcc's torture
   tests), with GPL version 3's text in `LICENSE.md` from the pinned gcc 15.2.0 tarball's `COPYING3`; the rule against porting GPL
   sources is about code, not test data.
+
+## Decided (2026-11-07, the user: the judges, independence)
+
+- **A test's own verdict is a judge no toolchain made** (1 in `bin/crops-score`'s independence). Every check judges by the test's
+  own verdict wherever it has one: gcc's torture execute programs by exit 0 (`abort()` fails), the round trip by its forms read
+  again equal and the print's acceptance by Arbace's own verifier, mode `:full` by the text printed back byte for byte. The
+  toolchain's recorded outputs (`ref-lli23.edn`, the clang, llvm-as and opt runs) move to the oracle tier, run by hand at a tag. A test
+  without an own verdict keeps its recorded reference (0.5).
+- **A mixed stage is the case-weighted mean of its cases** (relayed 2026-11-07, about 07:45): a case judged by its own verdict counts
+  1, one judged against a recorded toolchain reference 0.5.
+
+## As built: LL9a (the own verdicts, the gate's steps, the controls), 2026-11-07
+
+Branch `llvm-90` from `llvm-ll6` (`153ac9e91`). Light runs only, by day: the main checkout's stage 0 as `ARBACE_HOST_EXE`, every
+process under 1.5 GiB (measured below), the committed lists and llvmi's default sample; no whole corpus, no gate run but `--plan`.
+
+**The judges.** `bin/repr-llvm` and `bin/llvmi` run no LLVM tool unless asked. The judge's mode is `REPR_LLVM_JUDGE`: `own` (the
+default), `record` (also when `REPR_LLVM_REF` or `REPR_LLVM_RTREF` names a record), `live` (also `REPR_LLVM_LIVE=1`). llvmi's is
+`LLVMI_JUDGE`: `own` (the default) or `lli`. Before LL9a, a host with `/usr/lib/llvm23/bin/opt` or `clang` on `PATH` ran them at the
+check. The record-* verbs run live (`record-rt` sets `REPR_LLVM_JUDGE=live`).
+
+- **The round trip** (`bin/repr-llvm roundtrip`): the forms read again equal (as before), and the print's verdict by Arbace's verifier
+  the original's (`WORK/verifier.tsv`: `verify-list` over both). clang's objects and llvm-as's bitcode are `record` or `live` only.
+  `bin/lib/repr-llvm/results roundtrip` takes the verifier as a judge.
+- **verify-check**: a module's own verdict comes from its RUN lines (`own_verdicts`, `WORK/own.tsv`). `invalid`: a `not llvm-as`, or
+  a `not opt` with no pass but verify, on the file with no option that changes how it is read. Only `-o`, `-S`, `-disable-output`,
+  `-passes=verify` and redirections are allowed. `-data-layout "P39"` is such an option, as in
+  `Bitcode/function-nonzero-address-spaces`, whose plain `not llvm-as` line decides it. With it goes the `error:` fragment that the
+  check lines of the prefixes those RUN lines give FileCheck declare. `valid`: RUN lines, none of them a `not` of an LLVM tool, and
+  no split-file. `-`: none of these, so opt's record judges. An own `valid` is met by verify's valid or `debug`; an own `invalid` is
+  met by invalid, with the fragment in verify's output when one is declared. `WORK/verify.tsv`'s eighth column says whose reference
+  judged the module, and `full.tsv` says `own` for those.
+- **llvmi** (`arbace.llvm.check/own-verdict`):
+  - `ee.*`: lit's verdict. The RUN lines run lli on the file with no argument; the run must exit 0, and when its output is piped to
+    FileCheck the `CHECK:` lines must be found in stdout, in order and with blanks collapsed (FileCheck's rule). Any other directive
+    gives no own verdict: CHECK-NEXT, a prefix, `{{regex}}`, an argument, a `not`, an XFAIL for x86_64. stdout is kept for this
+    (`LLVMI_RUN_OUT`, `WORK/out/ID.out`).
+  - `tx-*`: gcc's torture harness's verdict, exit 0.
+  - The C and C++ samples' modules keep lli's record (no own verdict: C's crop judges them by gcc's record).
+- **ci without gcc**: `bin/ci musl prepare` configures musl with `CC=gcc ./configure` when its tree is absent. `bin/llvmi`'s
+  `musl_prepare` derives configure's products first, as musl's Makefile makes them (`sed` over `arch/x86_64`'s `.in` files,
+  `VERSION`), with a `config.mak` that holds `ARCH`. The three headers are byte for byte gcc's configure's (checked against the
+  configured tree), so ci's forms cache stays fresh. C's own target (branch `c-indep`, `c/README.md`) does the same in `bin/lib/ci/musl`.
+
+**The check families as gate steps** (`bin/repr-llvm check FAMILY [--essential] [--record]`):
+- Families: `roundtrip-llvmtest`, `text-llvmtest`, `verify-llvmtest` and `verify-probes`. Each runs its lists (llvm/test's from the
+  pinned tarball's extraction, the rest the checkout's) and judges the rows against the family's record. A recorded pass that does
+  not pass, or an unrecorded module, fails; a fixed one is reported. A negative control that passes, or is not judged, fails.
+- `--essential` takes `test/llvm/essential.txt`'s modules in the family's record, with four llvm/test rejections copied into
+  `test/llvm/essential/` (`essential-verify.txt`) and four probes (`essential-probes.txt`).
+- `bin/llvmi check --essential`: `test/llvm/essential-check.txt`, ten modules: a C program, ExecutionEngine modules, a constructor
+  module, two torture programs and the controls' modules. This is LLS21's essential tier.
+- `test/gate/steps.edn`, group `:llvm`, crop `:llvm` (`test/gate/costs.ae` takes it):
+  - Essential, chain `llvm-essential`: `llvm-read-essential`, `llvm-print-essential`, `llvmi-essential` and `llvm-controls-test`.
+  - `--full`, chain `llvm-full`: `llvm-read` (parts by family), `llvm-print`, `llvmi-check` and `llvmi-aot`.
+  - All of them run on `:stage0` (llvmi's also on `:go`, TamaGo's); none runs on `:llvm`, `:cxx` or `:gcc`.
+  - `bin/gate --plan` and `--full --plan` plan them; `test/gate/costs-test.bash` passes.
+  - `reap`'s inputs name `test/llvm/*.edn`. `bin/llvm-corpus` reads the invoking checkout's extraction from a clean run's clone.
+
+**Negative controls** (GTS81 (a)):
+- `test/repr/llvm/verify-controls.txt` has four controls:
+  - a valid module against a rejection's own verdict;
+  - a rejection against another's declared fragment;
+  - two pairs of probes against opt's record.
+- `test/repr/llvm/text-controls.txt` has two: a subject's `:full` print against another module's text (`arbace.repr.llvm
+  text-control`).
+- `test/llvm/controls.edn` gains a fourth: `c-O0.run.ptr-sub-unsigned` exits 3, against a torture program's own verdict.
+- The round trip's controls are unchanged; in mode `own` the forms decide them.
+- `test/repr/llvm/controls-test.bash` (the gate's `llvm-controls-test`, 42 s) checks the wiring. Each verb is given a control that
+  crosses a module with itself, and must fail and say so: roundtrip, `--text`, verify-check, `bin/repr-llvm check` and
+  `bin/llvmi check`. With the committed controls each must pass. Result: 9 of 9 ok.
+
+**Numbers** (stubs first on `PATH`: `clang clang++ clang-23 gcc g++ cc llvm-as opt lli llvm-dis split-file FileCheck`, each logging
+and exiting 99; the log was empty after every run below):
+
+| check | command | result | wall, peak |
+|---|---|---|---|
+| verify, llvm/test's 806 | `bin/repr-llvm check verify-llvmtest --record` | 781 pass (747 before); 690 by own verdict, 116 by opt's record; 34 fixed (other first messages and stderr that opt's record called differences), 0 regressed | 17 s, 0.65 GB |
+| round trip, 304 | `bin/repr-llvm check roundtrip-llvmtest --record` | 304 of 304, the verifier taking every print | 21 s, 0.66 GB |
+| `:full`, 304 | `bin/repr-llvm check text-llvmtest` | 304 of 304, both controls fail | 9 s, 0.39 GB |
+| probes, 478 | `bin/repr-llvm check verify-probes` | 472, as recorded (opt's record) | 12 s, 0.52 GB |
+| the essential subsets | `bin/repr-llvm check FAMILY --essential` | 43, 43 + 4, 4 and 43 modules, as recorded | 8 s each |
+| llvmi eval, 562 | `bin/llvmi check --record` | **522 pass** (519 before): 385 by own verdict, 177 by lli's record | 145 s, 1.48 GB |
+| llvmi AOT | LL6's recorded AOT run (`.tmp/ll6/aot-all`) judged again, with the seven FileCheck and control modules rebuilt (`--aot --only`, 38 s, 0.8 GB) | 522, every row eval's | |
+| llvmi essential | `bin/llvmi check --essential` | 10 of 10, 4 controls fail; also with ci's musl tree removed (derived again, no gcc) | 12 s |
+
+What the own verdicts changed in llvmi:
+- **Now pass**:
+  - `ee.MCJIT.2002-12-16-ArgTest`: lli's argv[0] was the difference.
+  - `tx-O0.ieee.fp-cmp-7`: lli could not resolve `link_error`.
+  - `tx-O2.20010122-1`: lli crashed.
+- **New classes**:
+  - `:dg-options` (deferred): `restrict-1` (`-fgnu89-inline`) and `20040409-3w` (`-fwrapv`). The pack's single command does not pass
+    a test's dg-options, so its IR is another program.
+  - `:envp` (design): `2003-08-21-EnvironmentTest` reads `envp[0]`, and ci's runs have an empty environment.
+- **`:lli-reference` keeps only `test-interp-variable-arguments`**. Its pointer-wide `va_list` is the interpreter's; llvmi prints
+  `result is 4`, not the CHECK line's 6. LL6's note that llvmi met the CHECK line was wrong; the own verdict found it.
+- `bin/reap`: 20 of 20, 0 problems. The sources' names say "own verdicts".
+
+**The crop's scores** (`bin/crops-score --ref llvm-90 --crop llvm`, from a scratch worktree of `mac/crops-score` with
+`.tmp/crops-rules.diff` and `.tmp/independence.diff` applied):
+
+| | completeness (without by design) | maturity | independence |
+|---|---|---|---|
+| `mac/llvm-ll6`, the baseline | 91.7 (92.9) | 71.4 (`llvm-ll6` at 153ac9e91 with mac/crops-score's rules: 70.0) | 40.0 |
+| `llvm-90` | **95.9** (97.3) | **93.3** (controls 6 of 10 families, gate 1) | **68.3** |
+
+- Independence by stage: read 0.706, eval 0.5, AOT 0.5, print 1, judge 0.711.
+- Read: 1,588 cases on hand-written IR and 2,276 on clang's.
+- Eval and AOT: the packs, and ci's host record `test/c/host/predefined`.
+- Judge: 2,350 of 5,574 cases by their own verdict.
+- The four families without a control are the first records' 282-module lists and mutants, which cannot be rerun (LLS28).
+
+### The night's runs (commands and what to expect)
+
+| what | command | expected |
+|---|---|---|
+| AOT, a recorded run | `bin/llvmi check --aot --record` (about 33 min, 1.5 GB; `LLVMI_AOT_HEAVY=1` adds the two heavy modules, one `go build` at 2.9 GB) | 522 of 562, the eval's rows; `git diff test/llvm/check-aot-linux-amd64.edn` empty |
+| the torture corpora whole | `LLVMI_TX_ALL=1 bin/llvmi check` (about 16 min, 1.5 GB) | by own verdict; new non-passes classed (`:long-double`, `:dg-options`) |
+| the oracle tier, by hand | `REPR_LLVM_JUDGE=live bin/repr-llvm check FAMILY` for each family; `LLVMI_JUDGE=lli bin/llvmi check` | the toolchain's verdicts against the own verdicts: differences reported, not recorded |
+| the gate's steps | `bin/gate` (the four essential steps, about 1.5 min) and `bin/gate --full` (`llvm-read`, `llvm-print`, `llvmi-check`, `llvmi-aot`) | every step passes; then `bin/gate --audit llvm-read-essential llvmi-essential` (inputs declared) |
+
+### Proposed
+
+1. **LLS27: a pinned input corpus in the crop's own language.**
+   - The question: does IR that clang made, committed and pinned (`test/llvm/ir`), count as "a toolchain's product consumed" (0.5)?
+     Or is it the crop's test data, as hand-written IR is (1)?
+   - The rule's text (doc/CROPS-SCORE.md, "Independence") names "rustc's and clang's IR" among the inputs a stage consumes, so as
+     written it is 0.5.
+   - The case for 1: OCaml's Lambda, GHC's STG and C++'s clang IR stand in for a front end the crop lacks, so the toolchain does part
+     of the crop's work. For the LLVM IR crop the IR is the language under test, the toolchain does none of the crop's work (reading,
+     lowering, running and the own verdicts are Arbace's), and nothing the toolchain printed about the IR is the reference. It is as
+     gcc's torture C sources are to C.
+   - Options:
+     - (a) a pinned input corpus in the crop's own language is test data, 1, when no output of the toolchain about it is a
+       reference (doc/CROPS-SCORE.md's rule, one sentence);
+     - (b) as written, 0.5; 1 only for hand-written IR or IR from Arbace's own producers (C++'s codegen, `cpp-codegen`), weighted
+       by case;
+     - (c) replace clang's IR by Arbace's producers. That gives 1 under either rule, but costs C++'s codegen's coverage of the
+       torture programs (weeks).
+   - Recommended: (a), with (c) as the long-term route. Under (a), with C's own target merged (ci's predefined macros from
+     `c/target`, not gcc's record) and LLS28 (a), independence is (1 + 1 + 1 + 1 + 0.711) / 5 = **94.2**. Under (a) without C's
+     target, it is 74.2: eval and AOT stay at 0.5.
+2. **LLS28: the first records' 282-module lists.** The 282 modules (C's torture programs at -O0/-O2/-g, C++ samples, Rust crates,
+   the six corner modules) and their 630 and 1,082 mutants were made by the host's clang and are in no checkout. Their four record
+   families (2,558 cases) cannot be rerun, and they have neither a gate step nor a control.
+   - (a) Pack the 282 modules as a pinned IR pack (`bin/llvmi ir-make`'s way; one clang run by hand, at night). The mutants are
+     regenerated by `bin/repr-llvm mutants` (deterministic); the families join `bin/repr-llvm check` with controls.
+   - (b) Retire them from the REAP cells.
+   - Recommended: (a). Maturity's controls item would go to 10 of 10 (maturity 100), and the read stage to 1 under LLS27 (a).
+3. **LLS29: dg-options in the torture pack.** `bin/llvmi ir-make tx` to pass each torture test's `dg-options` and
+   `dg-additional-options` (the `.c` file's own lines). The pack changes for the files that have them, and needs clang once, at
+   night. Recommended with the next pack, when LLS28 (a) packs.
+4. **LLS30: the probes' own verdicts.** The 478 probes are Arbace's hand-written modules, judged by opt's record (0.5). Writing
+   each probe's expected verdict and message into it would copy opt's output into the test. Recommended: no, keep the record (the
+   probes are the verifier's regression set, not its specification).

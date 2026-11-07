@@ -50,6 +50,74 @@
     (println "llvmi record-ref:" (count new) "runs recorded," (count all) "in" ref)))
 
 ;; ---------------------------------------------------------------------------------------------
+;; the own verdicts (doc/llvm/LLVM-CROP-SURVEY.md, "As built: LL9a"; the user's decision of 2026-11-07): a module whose test says
+;; what passes is judged by that, no toolchain's record; the others against lli's recorded run. LLVMI_JUDGE=lli judges every module
+;; against lli's record (the oracle tier, by hand at a tag).
+
+(defn- run-lines
+  "The RUN lines of an IR file, each continuation joined."
+  [^String text]
+  (loop [ls (str/split-lines text) cur nil out []]
+    (if-let [l (first ls)]
+      (if-let [[_ r] (re-find #"^;\s*RUN:\s?(.*)$" l)]
+        (let [c (re-find #"\\\s*$" r) r (str/replace r #"\\\s*$" "") cur (str cur " " r)]
+          (if c (recur (rest ls) cur out) (recur (rest ls) nil (conj out (str/trim cur)))))
+        (recur (rest ls) nil (if cur (conj out (str/trim cur)) out)))
+      (if cur (conj out (str/trim cur)) out))))
+
+(defn own-verdict
+  "The module's own verdict, or nil (no verdict of its own: judged against lli's record):
+  - llvm/test's ExecutionEngine modules (ee.*): lit's, the RUN lines run lli on the file with no argument and exit 0 (lit fails a
+    test whose command fails), and when the output is piped to FileCheck the file's `CHECK:` lines are found in stdout in order
+    (FileCheck's rule: each after the last match, runs of blanks as one); any other directive (CHECK-NEXT, -NOT, -DAG, a prefix,
+    a {{regex}} or [[variable]]), an argument after the file, or a `not`: no own verdict;
+  - gcc's torture execute programs (tx-O0.*, tx-O2.*): gcc's harness's, the program exits 0 (abort() or exit(1) is a failure;
+    gcc.c-torture/execute's dg-do run, the programs' convention).
+  {:status 0 :checks [PATTERN ...]}."
+  [^String id ^String path]
+  (cond
+    (str/starts-with? id "tx-") {:status 0 :checks [] :by "gcc's torture harness: the program exits 0"}
+    (str/starts-with? id "ee.")
+    (let [text (slurp path)
+          runs (run-lines text)
+          lli-runs (filter #(re-find #"%lli|(^|\s)lli\s" %) runs)
+          plain? (fn [r] (let [r (str/replace r #"\s*\|\s*FileCheck\s+%s\s*$" "")
+                               r (str/replace r #"\s*>\s*/dev/null\s*$" "")]
+                           (and (not (re-find #"(^|\s)not\s" r)) (re-find #"%s$" (str/trim r)))))
+          fc? (some #(re-find #"FileCheck" %) runs)
+          directives (re-seq #"(?m)^;\s*([A-Z][A-Z0-9_-]*):" text)
+          checks (vec (for [[_ p] (re-seq #"(?m)^;\s*CHECK:\s?(.*)$" text)] (str/trim p)))]
+      (when (and (seq lli-runs) (= (count lli-runs) (count runs)) (every? plain? runs)
+                 (every? #(#{"RUN" "CHECK" "REQUIRES" "XFAIL" "UNSUPPORTED"} (second %)) directives)
+                 (not-any? #(re-find #"\{\{|\[\[" %) checks)
+                 (or fc? (empty? checks))
+                 ;; an XFAIL for another target only (lit on x86_64 Linux expects a pass); REQUIRES and UNSUPPORTED are lit's to skip
+                 (every? #(and (re-find #"target=" %) (not (re-find #"x86_64|x86-64|linux|\{\{\.\*\}\}$" %)))
+                         (map second (re-seq #"(?m)^;\s*XFAIL:(.*)$" text))))
+        {:status 0 :checks (if fc? checks []) :by (if fc? "lit's: exit 0 and FileCheck's CHECK lines" "lit's: exit 0")}))
+    :else nil))
+
+(defn- blanks [s] (str/replace (str s) #"[ \t]+" " "))
+
+(defn- own-result
+  "A run line's result against the module's own verdict: [RESULT REASON]. OUT is the run's stdout (WORK/out/ID.out)."
+  [[_ st _ ob _ _ ef] v ^String out]
+  (cond
+    (= st "timeout") [:timeout "ci's run timed out (the test's own verdict: exit 0)"]
+    (not= st "0") [:status (str "status " st ", the test's own verdict: exit 0 (" (:by v) "): " (clean ef))]
+    (seq (:checks v))
+    (if (nil? out) [:stdout "the run's stdout was not kept (LLVMI_RUN_OUT)"]
+        (let [o (blanks out)
+              miss (loop [ps (:checks v) pos 0]
+                     (when-let [p (first ps)]
+                       (let [i (.indexOf ^String o ^String (blanks p) (int pos))]
+                         (if (neg? i) p (recur (rest ps) (+ i (count (blanks p))))))))]
+          (if miss [:stdout (str "stdout " ob " bytes lacks the test's CHECK: " miss)] [:pass ""])))
+    :else [:pass ""]))
+
+(defn- judge-mode [] (or (System/getenv "LLVMI_JUDGE") "own"))
+
+;; ---------------------------------------------------------------------------------------------
 ;; one module's row
 
 (defn- run-result
@@ -63,25 +131,34 @@
       (not= esha (:stderr r)) [:stderr (str "stderr " eb " bytes, lli's " (:stderr-bytes r) ": " (clean ef) (when (seq (:stderr-first r)) (str " | lli: " (:stderr-first r))))]
       :else [:pass ""])))
 
+(defn- out-of [work id] (let [f (java.io.File. (str work "/out/" id ".out"))] (when (.exists f) (slurp f))))
+
+(defn- verdicts
+  "Each module's own verdict (nil: lli's record), by id; none under LLVMI_JUDGE=lli."
+  [work]
+  (into {} (for [[id p] (tsv (str work "/modules.tsv"))]
+             [id (when (= "own" (judge-mode)) (try (own-verdict id p) (catch Throwable _ nil)))])))
+
 (defn- rows
   "Every module's row: [ID RESULT REASON]."
-  [work refs]
+  [work refs owns]
   (let [lower (into {} (map (juxt first identity) (tsv (str work "/c/lower.tsv"))))
         build (into {} (map (juxt first identity) (tsv (str work "/build.tsv"))))
         goerr (into {} (map (juxt first identity) (tsv (str work "/go-errors.tsv"))))
         runs (into {} (map (juxt first identity) (tsv (str work "/run.tsv"))))]
     (vec (for [[id _ sha] (tsv (str work "/modules.tsv"))
-               :let [r (refs id) [_ ls lc lm] (lower id) [_ bs bc bm] (build id)]]
+               :let [r (refs id) v (owns id) [_ ls lc lm] (lower id) [_ bs bc bm] (build id)]]
            (into [id]
                  (cond
-                   (nil? r) [:no-ref "no lli run recorded (bin/llvmi record-ref)"]
-                   (not= sha (:ir r)) [:stale-ref "the module's IR is not the one lli's run was recorded from"]
+                   (and (nil? v) (nil? r)) [:no-ref "no lli run recorded (bin/llvmi record-ref)"]
+                   (and (nil? v) (not= sha (:ir r))) [:stale-ref "the module's IR is not the one lli's run was recorded from"]
                    (nil? ls) [:no-lowering "the lowering wrote no line"]
                    (= ls "refused") [:refused (str lc ": " (clean lm))]
                    (nil? bs) [:build "no build line"]
                    (not= bs "ok") [:build (str bs (when (seq bc) (str " " bc)) ": " (clean bm))]
                    (goerr id) [:go-error (clean (second (goerr id)))]
                    (nil? (runs id)) [:no-run "built, not run"]
+                   v (own-result (runs id) v (out-of work id))
                    :else (run-result (runs id) r)))))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -106,7 +183,7 @@
 (defn- write-rec [^String f level rs]
   (spit f (str ";; llvmi's " (if (= level "aot") "AOT level (bin/llvmi check --aot: the lowered C translated by cf2g, built by TamaGo's go)"
                                  "eval level (bin/llvmi check: the lowered C run by ci)")
-               " against lli's recorded runs (test/llvm/ref-lli23.edn),\n"
+               " by the modules' own verdicts (llvm/test's lit\n;; RUN and CHECK lines, gcc's torture harness: exit 0), else against lli's recorded runs (test/llvm/ref-lli23.edn),\n"
                ";; one row [ID RESULT REASON] a module (goi's format); written by bin/llvmi check" (when (= level "aot") " --aot") " --record, read by\n"
                ";; bin/reap (test/reap/cells.edn, the :llvm row) and judged against test/llvm/divergences-" level ".edn. Read with the Clojure reader.\n[\n"
                (str/join (for [[id r why] rs] (str "[" (q id) " " r " " (q why) "]\n")))
@@ -116,7 +193,8 @@
   "judge WORK LEVEL REF REC CONTROLS [--record]"
   [[work level ref rec controls flag]]
   (let [refs (into {} (map (juxt :id identity) (or (read-file ref) [])))
-        rs (rows work refs)
+        owns (verdicts work)
+        rs (rows work refs owns)
         classes (classes-of level)
         subset? (.exists (java.io.File. (str work "/subset")))
         recorded (into {} (map (juxt first second) (or (read-file rec) [])))
@@ -129,16 +207,20 @@
         regress (for [[id r] rs :when (and (= :pass (recorded id)) (not= :pass r))] id)
         lacking (when-not subset? (remove (set (map first rs)) (keys recorded)))
         runs (into {} (map (juxt first identity) (tsv (str work "/run.tsv"))))
+        ;; a control: the subject's run judged as the reference module is, by its own verdict when it has one, else against
+        ;; lli's recorded run of it
         ctl (for [{:keys [subject reference]} (or (read-file controls) [])
-                  :let [run (runs subject) r (refs reference)]
-                  :when (and run r)]
-              [subject reference (first (run-result run r))])
+                  :let [run (runs subject) r (refs reference) v (owns reference)]
+                  :when (and run (or v r))]
+              [subject reference (first (if v (own-result run v (out-of work subject)) (run-result run r)))])
         ctl-pass (filter #(= :pass (nth % 2)) ctl)
         problems (concat (for [[id r why] unclassed] (str "in no class: " id " " (name r) " " why))
                          (for [id regress] (str "recorded as a pass, does not pass: " id))
                          (for [id lacking] (str "recorded, not in the run: " id))
                          (for [[s r] ctl-pass] (str "the negative control passes: " s "'s run against " r "'s reference")))]
     (spit (str work "/results.edn") (str "[\n" (str/join (for [[id r why] rs] (str "[" (q id) " " r " " (q why) "]\n"))) "]\n"))
+    (println "llvmi:" (count (filter val owns)) "modules judged by their own verdicts," (count (remove val owns)) "against lli's recorded runs"
+             (str "(LLVMI_JUDGE " (judge-mode) ")"))
     (println "llvmi: negative controls:" (count ctl) "judged," (count ctl-pass) "pass (each must not)")
     (doseq [p problems] (println "FAIL" p))
     (when (= flag "--record")
