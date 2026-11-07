@@ -3733,3 +3733,49 @@ outside this work, each for its owner).
   test_tasks: 9, all pass) and the named methods of other modules (test_threading's 3 pass, test_fstring's passes,
   test_setcomps' passes after the comprehension's locations; test_import's five as classed above). The display imports traceback when an exception is displayed (about 4.5 s on
 goi per uncaught exception, CPython does the same), `-c` imports linecache (about 1.3 s on goi).
+
+## Design: 224, generators' and coroutines' edge cases, and `_asyncio` (2026-11-07, the Mac VM, queue 224)
+
+The classes `:generators`, `:coroutines` and `:asyncio-c`, base 7df8864b. Judged by test_generators, test_coroutines,
+test_asyncgen and test_asyncio's packages, sampled; before any change (run, `bin/pyi lib-test --aot`): 244 methods, 208
+equal, 28 classed, 8 failing (test_asyncgen's, in no class).
+
+**`_asyncio` as a port, not a stand-in.** One file, `builtins_asyncio.go`, follows Modules/_asynciomodule.c function by
+function: the same names (`future_schedule_callbacks` as `futureScheduleCallbacks`), the same order of checks, the same
+messages. What C does by its object model is replaced as follows.
+
+- **The object.** Every Future and Task, exact or a subclass's, is an `*Instance` with `value` a `*futObj` (FutureObj_HEAD
+  and TaskObj's fields in one struct, no pointer back: Go never frees a cycle through a finalized object). `*Instance` gives
+  `__dict__`, weak references, `__del__` and `__slots__` as a class's instances have them. `classInfos` declares the two
+  types with a dict. The built-in slots must see the instance (a future yields itself, a task hands itself to callbacks),
+  so `fixupSlots` leaves them unwrapped for these layouts (`selfSlots`, as `reprOfInstance` does for repr alone).
+- **tp_finalize.** `__del__` is a built-in method (CPython's slot wrapper over tp_finalize), and tracking uses queue 218's
+  `workDel`, so a subclass's `__del__` replaces it as slot_tp_finalize does. A Future is tracked when `fut_log_tb` is set,
+  that is when an exception nobody asked for is stored; a Task when it is still pending at a flush of the pending list.
+  That list is `pendingGens`' rule: a task finished before the flush pays no Go finalizer.
+- **The task registry.** C's linked list holds borrowed references. Here a recent task is in a short strong list (removed by
+  index when it finishes), and at a flush a still pending one is marked in its `finTrack` record, which holds no reference.
+  `all_tasks` reads both under `finMu`. The per-thread lists exist in C for free threading; pyi has a GIL, so one registry.
+- **The thread state.** `asyncio_running_loop` and `asyncio_running_task` are two fields of `Thread`. `current_task(loop)` for
+  another thread's loop walks the thread list, as C's stop-the-world path does.
+- **Contexts.** `PyContext_CopyCurrent` runs per task and per callback; C's HAMT makes it O(1). `pyContext` gets
+  copy-on-write of its dictionary, and the current context moves from the interpreter to the `Thread` (context.c keeps it in
+  the thread state; asyncio's executors make the difference visible).
+- **PyIter_Send.** `genSendTo` learns FutureIter's am_send, so an `await` of a pending or finished future allocates no
+  StopIteration; `GetAwaitable` takes exact futures without a method lookup.
+- **Module state.** The module's exec imports what `module_init` imports, through `builtinModulesErr`, into one state.
+  The types are made once, C's per module; a second import of `_asyncio` renews the state (a Low if a test notices).
+
+**asyncio.graph** needs no port: Lib/asyncio/graph.py reads `_asyncio_awaited_by`, `cr_await`, `cr_frame`, `ag_await`,
+`ag_frame`, `gi_yieldfrom`, `f_generator`. Those are the C getters and generators' attributes. The remote-debugging offsets
+(`_AsyncioDebug`) have no meaning without a C layout and are left out, as `_remote_debugging` is absent.
+
+**Generators and coroutines**, by the failing methods, porting Objects/genobject.c rather than patching messages:
+`__name__` and `__qualname__` settable with their checks (`gen_set_name`), `throw`'s three-argument DeprecationWarning and
+`_gen_throw`'s normalization (an exception instance's traceback, "throw() third argument must be a traceback", the check
+before the frame state), `gi_suspended` and `cr_suspended` as FRAME_SUSPENDED states, `close()` clearing the frame and
+`gen_close`'s cases, `async_gen_asend`/`athrow`'s close, throw and unawaited warnings (`async_gen_asend_close`,
+`async_gen_athrow_close`, the "coroutine method ... was never awaited" RuntimeWarning), and the never-awaited coroutine's
+warning through `warnings._warn_unawaited_coroutine`, as `_PyErr_WarnUnawaitedCoroutine` does.
+
+What stays out, as the user decided: generators resumed by nested runs (216d) are unchanged.
