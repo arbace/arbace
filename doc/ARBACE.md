@@ -72,7 +72,13 @@ code. Three kinds of things live here:
   from the same tarball on 2026-11-05, reading the rest of `compiler/GHC/Rename/` as the specification, the file
   carrying GHC's notice; the helper's `rn`, `iface` and `tc` verbs, `tools/hsdump/HsRn.hs`, are Arbace's own;
   `typecheck.ae`, the front end's elaborator (HF3's first slice, 2026-11-05), is Arbace's own, written anew with GHC's
-  `compiler/GHC/Tc/` and Jones's "Typing Haskell in Haskell" (1999) read as the specification, no code ported;
+  `compiler/GHC/Tc/` and Jones's "Typing Haskell in Haskell" (1999) read as the specification, no code ported (its HF9 additions,
+  2026-11-08, likewise: kinds erased from the interfaces' types, GADT constructors and their given equalities after
+  `GHC.Tc.TyCl`'s rejigConRes and `GHC.Tc.Solver.Equality`'s canonicalisation, ScopedTypeVariables, the implicit parameters, the
+  type applications, the data family instances; doc/haskell/FRONTEND-SURVEY.md, "As built: HF9 (first slice)"); `famenv.ae`
+  (2026-11-08) ports `compiler/GHC/Core/FamInstEnv.hs`'s reduction of a type family application (reduceTyFamApp_maybe,
+  chooseBranch, findBranch, apartnessCheck, compatibleBranches, computeAxiomIncomps) with `compiler/GHC/Core/Unify.hs`'s
+  tcMatchTys and tcUnifyTysFG from the same tarball, carrying GHC's notice; `libcheck.ae` (HF9's measure) is Arbace's own;
   `desugar.ae` (HF5, the match compiler) and `tostg.ae` (HF6, CorePrep, CoreToStg, Unarise) follow GHC 9.14.1's
   `compiler/GHC/HsToCore/Match*.hs`, `GuardedRHSs.hs`, `ListComp.hs`, `compiler/GHC/CoreToStg/Prep.hs`,
   `CoreToStg.hs`, `compiler/GHC/Stg/Unarise.hs`, `Stg/FVs.hs` from the same tarball (2026-11-05, written after their

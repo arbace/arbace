@@ -813,3 +813,48 @@ Makefile line, the surveys' notes (CPP-SURVEY, LLVM-CROP-SURVEY), AGENDA's propo
 lists under `.tmp/llvm/lists`/`test/llvm/essential*` against it, `test/llvm/ir/{c,tx}.cmd` and the IR packs (`bin/llvmi ir-make`), `test/cpp/check-dg-linux-amd64.edn`
 and `divergences-dg.edn` (`bin/ci`-style dg run, `bin/repr-cpp dg --record`), `test/cpp/runtime/ir.sha256` and `units.edn` (`bin/cppi runtime-build --update`),
 `test/rust/runtime/std.edn` (`:clang` line), and the oracle packs of cpp-ir-* (`bin/oracle-records`). The old 23.1.4 tarball in `.tmp/llvm/` stays until those are done.
+
+## 2026-11-08: HF9's first slice, chosen by measure (branch `hs-hf9`, from next 835891150)
+
+The brief: Haskell's independence stays under 75% while hsi runs the boot libraries' STG GHC made; HF9 (the type-level tier) is
+the first of the two milestones that remove it. Measured first, then built in the order of the measure. Detail in
+doc/haskell/FRONTEND-SURVEY.md, "As built: HF9 (first slice)".
+
+- **The measure** (`bin/repr-haskell lib-check`, `arbace.repr.haskell.libcheck`): ghc-internal's 266 modules natively read, renamed
+  and elaborated, each against the interfaces of its imports (the helper's `iface` verb, GHC 9.14.1's installed interfaces: the
+  oracle tier's), and its binders' types judged against GHC's own interface of the module. ghc-prim 9.14.1 has no Haskell but
+  `Dummy.hs` (its modules moved into ghc-internal at GHC 9.10); base's modules re-export ghc-internal's.
+- **Before → after** (the same closures and dumps; the branch's start with the judge's additions alone): ghc-internal's 248 judged
+  modules (18 hidden: GHC-87110, the helper cannot load them) elaborate without an error 122 → 200, with every binder's type equal
+  to GHC's interface 113 → 198; binders equal 4,164 of 4,473 → 4,937 of 4,992; stopped 5 → 0. base's sample (every 9th, 26
+  judged): 23 → 26. The ranking (modules blocked, before): unboxed tuples in types 30, kind arguments of poly-kinded tycons 29,
+  `HsDocTy` 28, untyped variables 19, Coercible 14, GADTs 13, derived superclasses 13, unknown constructors 12, type applications
+  10, unboxed sums 8, ScopedTypeVariables 4 (with the metas they leave unsolved), type families 4, `(->)` as a tycon 4, implicit
+  parameters 4, MultiWayIf 4, rank-n 2, type literals 4. After: GADT local equalities 12, pattern synonyms 7, unknown constructors
+  7 (pattern synonyms' uses), names of hidden modules 8, derived Show/Eq contexts 6-7.
+- **Built**: `arbace/repr/haskell/famenv.ae`, a port of GHC 9.14.1's `compiler/GHC/Core/FamInstEnv.hs` (reduceTyFamApp_maybe,
+  lookupFamInstEnv's matching, chooseBranch, findBranch, apartnessCheck, compatibleBranches, computeAxiomIncomps) with
+  `compiler/GHC/Core/Unify.hs`'s tcMatchTys and tcUnifyTysFG (the pinned tarball, SHA-256 `2a83779c...101e77`, BSD-3 Glasgow
+  license, the notice in the file, LICENSE.md and doc/ARBACE.md updated); in `typecheck.ae`, after GHC's functions as the
+  specification: kinds erased from interface types (each tycon's, promoted constructor's and class's invisible arity), the
+  families read and reduced in `expand`, stuck equalities deferred, GADT constructors with rejigConRes's split and given
+  equalities per alternative (imported constructors' split from their types), signatures checked (tcPolyCheck's order), data family
+  instances as representation tycons, unboxed tuples and sums, ScopedTypeVariables and pattern-bound type variables, rank-n
+  foralls, type applications, implicit parameters, view patterns, MultiWayIf, Coercible erased, Typeable of applications,
+  KnownNat/KnownSymbol/KnownChar on literals, `(->)`/FUN as tycons; three bugs of the existing code the measure found (a documented
+  deriving clause's classes dropped, standalone deriving's variables lost, simplify-pred's `first` of a keyword).
+  `arbace/repr/haskell/libcheck.ae` and `bin/lib/repr-haskell/lib-check` (`bin/repr-haskell lib-check`, `make
+  repr-haskell-lib-check`): the measure. `bin/repr-haskell`'s native reads in typecheck-check, rename-check, run-check's
+  typecheck lists take `--libdir` (typecheck-check failed at `/settings` on next before this branch).
+- **Checks**: typecheck-check 24 of 24, its control differing; run-check 59 of 63 pass, 62 of 63 as recorded, the one differing
+  (`synthetic/primops-word`'s STG-stage StackOverflowError) the same at the branch's start.
+- **Proposed**: HF9-P1 (the measure as a pack-backed `--full` step), HF9-P2 (a second helper verb for hidden modules and
+  pattern synonyms' types), HF9-P3 (speed, then GADT implications, pattern synonyms, deriving), HF9-P4 (kinds erased for now).
+- **Findings beside the slice**: the native dumps of the read stage hold control bytes (a `"..."#` literal's bytes), so the host's
+  grep (ugrep) takes them for binary and prints nothing with `-o`: every tool that greps a dump needs `-a` (lib-check's closures
+  were empty for 20 modules until then); the helper's `iface` verb cannot load ghc-internal's 18 hidden modules (GHC-87110) and
+  writes a pattern synonym without its type; two modules (TH.Syntax, System.Posix.Types) take 5 to 10 minutes in the elaborator.
+- Alternatives considered: judging against `tc` dumps (GHC compiling each module: GHC at check time for every module, and
+  ghc-internal's modules compile only as the package itself); a clean reimplementation of type family reduction (rejected: the
+  brief's rule for rule port, and the apartness check is subtle); kind inference instead of kind erasure (the elaborator needs no
+  kinds to place evidence; Typeable's kind representations are the one consumer, left for a later slice).
