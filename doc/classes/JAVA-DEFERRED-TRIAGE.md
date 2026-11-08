@@ -3767,3 +3767,150 @@ java.util.zip) and jdk.internal.jrtfs (over the image, which the Go build has no
 installed provider (FileSystemProvider's overlay lists it in place of ServiceLoader), about 1.5 days with its tests (the
 `jdk/nio/zipfs` corpus, not yet in `test/java/corpora.edn`); (b) neither. **Recommended: (a)** after the night's records,
 jrtfs never (no image).
+
+## As built: JCS164 (write-ahead)
+
+Branch `java-unix` (from `java-f9`, `1ff91c764`), 2026-11-08, by day under the light rules: the user's JCS164 (a), **UNIX
+domain sockets with F9**. jdk26u's UNIX family of the socket channels, rule for rule, replacing F10a's "not supported"
+`UnixDomainSockets` overlay. The closure's list, the overlay, the Go natives with their tests, light checks only; nothing
+converted, translated or built into an executable.
+
+**The shape.** The channels' UNIX paths were already jdk26u's since F10a (`SocketChannelImpl`, `ServerSocketChannelImpl` and
+`SelectorProviderImpl` take `StandardProtocolFamily.UNIX` and call `UnixDomainSockets`): only the class they call answered
+`isSupported()` false, and `UnixDomainSocketAddress` stayed out because `of(Path)` needs java.nio.file's default file system,
+which F9 brings. So JCS164 is three files and five natives:
+
+| part | how |
+|---|---|
+| `java.net.UnixDomainSocketAddress` (share), `sun.nio.ch.UnixDomainSocketsUtil` (unix) | jdk26u's, unchanged (`test/jrt/jrt_sources.ae`'s `unix-socket-sources`, one line in `sources`); the address's `of` checks the path's file system against `FileSystems.getDefault()` and its class's module against java.base's (jrt's `Class.getModule`: sun.nio.fs is java.base's); its `readObject` (ObjectInputStream) an operation-level stub, by design as serialization is |
+| `sun.nio.ch.UnixDomainSockets` (overlay, derived) | jdk26u's file with its six natives given bodies over `jdk.internal.jrt.HostChannels`, as F10a's Net (`.tmp/unix/derive.py`: four replacements, each asserted once, and no `native` declaration left): `init` true; `socket0`, `bind0`, `connect0` throw `HostChannels.socketException` (Net.c's handleSocketError); `accept0` `HostChannels.ioException(err, "Accept failed")` (JNU_ThrowIOExceptionWithLastError) and sets the new FileDescriptor (`IOUtil.setfdVal`, the C's setfdval); unixSocketAddressToSockaddr's length check (`MAX_UNIX_DOMAIN_PATH_LEN`, 106: "Unix domain path too long") before the call, where the C makes it. The rest stays jdk26u's: the temporary names of `bind(null)` (`jdk.net.unixdomain.tmpdir`, else `java.io.tmpdir`, `socket_` and NativePRNGNonBlocking's random number), `getPathBytes` by the default provider's `getSunPathForSocketFile` (F9's UnixPath bytes), the unnamed address |
+| `jdk.internal.jrt.HostChannels` (overlay, jrt's) | five natives `unixSocket0`, `unixBind0`, `unixConnect0`, `unixAccept0`, `unixLocalAddress0` and the constant `MAX_UNIX_DOMAIN_PATH_LEN` |
+| Go | `go/arbace/jrt/channels_linux.ae`'s UNIX section, a port of `src/java.base/unix/native/libnio/ch/UnixDomainSockets.c`; `channels_other.ae` (each "Channels not available"); `channels_test.ae`'s `TestChannelUnix` |
+
+Why F10a's way and not F9's (the JDK class's own natives by their mangled names): the C throws java.net's exceptions chosen by
+the error number (handleSocketError), which HostChannels' Java already makes for Net; a Go native would need a factory per
+exception class, as F9 registers UnixException's. The descriptors are F10a's: entered into the channels' table
+(non-blocking in the kernel, on Go's poller), so `IOUtil.configureBlocking`, `Net.poll`, `Net.shutdown`, the dispatchers'
+reads and writes, preClose and the selectors work on a UNIX socket unchanged.
+
+**The natives, rule for rule.** The sockaddr_un is built and read as the C does it, with raw system calls on
+`syscall.RawSockaddrUnix` (Go's `SockaddrUnix` computes another length for an empty name and spells abstract names with
+'@'): bind and connect pass a zeroed sockaddr_un with the name's bytes and length `offsetof(sun_path) + n + 1`; accept
+(accept4, non-blocking and close-on-exec as F10a's accept) and getsockname read the name back by
+sockaddrToUnixAddressBytes: empty when the length is `offsetof(sun_path)` (Linux's ZERO_PATHLEN, an unnamed socket),
+else up to the first NUL. connect answers 1, UNAVAILABLE on EINPROGRESS, INTERRUPTED on EINTR, else THROWN; accept
+UNAVAILABLE on EAGAIN, INTERRUPTED on EINTR, else THROWN. **Abstract names** (Linux's: the first byte NUL) bind and
+connect through the natives (the test does), and read back empty by the C's strlen, as the JDK's; Java cannot name one
+(UnixPath refuses a NUL: InvalidPathException), so the JDK's API has none and neither has jrt's.
+
+**One departure, below the natives' interface** (F10a's): a blocking channel's descriptor is non-blocking in the kernel.
+accept waits in Go's poller as F10a's does (preClose wakes it: EBADF). A UNIX stream connect never answers EINPROGRESS on
+Linux; with the listener's backlog full a non-blocking one gets EAGAIN (thrown, as the C's) and a blocking one waits in the
+kernel, where poll would report the unconnected socket writable at once: so a socket configured blocking tries again after
+a pause (1 ms doubling to 32 ms) until it connects, fails otherwise or is pre-closed (EBADF).
+
+**Light checks done** (main's stage 0 as `ARBACE_HOST_EXE`, javac's tool `.tmp/gate-exe/javac-5ad357331dbcd7cfb0fd`,
+`REPR_JAVA_STALE_OK=1`, `GOMEMLIMIT=1400MiB`, each process under 1.1 GB; scratch `.tmp/unix/`):
+- the closure (F1's `closure2.py`, the world this branch's `print-sources` less jrt's old overlay; seeds the three files,
+  scope java.net and sun.nio.ch): the 3 files (434 lines with jdk26u's UnixDomainSockets), and outside the world only `java.io.ObjectInputStream` (the
+  address's readObject) and jrt's hand-written `Object`;
+- **the joint javac check** (`.tmp/night7/all9-run.sh` on the branch): 2,381 files (F9's 2,379 + 2), **0 errors**, 5,101
+  classes (27 s, 1.0 GB);
+- the read: `bin/repr-java read-jdk --check` of the 4 files (the two of the list, the overlay, HostChannels) as a patch of
+  java.base: 4 converted, 0 failed, 0 javac errors, 0 unreadable; `--no-javac`: the forms identical;
+- the natives' names: the five of the read HostChannels mangled as j2g names them (`HostChannels_UnixSocket0_I1__I_native`,
+  `..._UnixBind0_I_B1_I1__I_native`, `..._UnixConnect0_I_B1_I1__I_native`, `..._UnixAccept0_I_I1_B2_I1__I_native`,
+  `..._UnixLocalAddress0_I_B2_I1__I_native`), each defined in `channels_linux.ae` and `channels_other.ae`; the two new
+  classes' simple names collide with none of the world's or jrt's;
+- jrt: `bin/jrt test --arch amd64 -run TestChannel` (the printed module), `go vet ./jrt` for linux/amd64 and arm64, `go test
+  ./jrt` on amd64 (every test passes) and `-run TestChannel` on arm64 under qemu-aarch64: `TestChannelUnix` passes on both
+  (the sockaddr_un of "abc": family 1, the bytes, a NUL, length 6, sun_path 108 and the struct 110 bytes; a 106-byte name
+  length 109, a 107-byte one ENAMETOOLONG; a listener bound in a scratch directory, its name read back; an unbound
+  client's name empty; connect, accept with the unbound peer's empty name, "hello" one way and "back" the other, the
+  peer's shutdown read as the end of the stream; a non-blocking accept with none pending UNAVAILABLE; a connect to a missing
+  path ENOENT, a bind to the path in use EADDRINUSE; a blocked accept woken by preClose; an abstract name bound, connected
+  and accepted, read back empty).
+
+**JCS135, the closure's growth**: +271 Java lines of the list's two jdk26u files, the derived overlay's 220 in place of the
+old one's 73, HostChannels +26: about +440 lines, **+0.1%**.
+
+**Expected tests.** The corpora's tests that name the UNIX family (every test of `test/java/ref-jdk26.edn` searched for
+`UnixDomainSocket`, `ProtocolFamily.UNIX` and `StandardProtocolFamily`): `jdk/java/nio/channels/unixdomain/Shutdown.java`
+(**t05204**: bind(null)'s temporary name, connect, accept, write and read, shutdownOutput then ClosedChannelException, the end
+of the stream, a non-blocking read's 0, shutdownInput's -1, Files.delete of the socket file) at interp and compiled: **1 / 1
+expected**. Not expected: `unixdomain/SocketOptions.java` (t05205: jdk.net's `SO_PEERCRED` and `UnixDomainPrincipal`, the
+module absent: JCS200). jdk26u's other UNIX tests (`unixdomain/Bind`, `IOExchanges`, `NonBlockingAccept`, `NullTest`,
+`FileAttributes`, `java/net/UnixDomainSocketAddress/*`, the inheritedChannel ones) are TestNG or `/test/lib` tests, outside
+the corpora. Today t05204 and t05205 fail at loading (`ClassNotFoundException: java.net.StandardProtocolFamily`, the records
+before F11's datagrams) and are refused compiled.
+
+**The night's commands** (after F9's, in the night's worktree with this branch merged; heavy ones under `bin/heavy-lock`;
+the conversion, the edges and the build shared with F9's steps 1-3):
+
+```sh
+# 0. the joint javac check of the merged tree (0 errors expected)
+.tmp/night7/all9-run.sh /root/arbace/.tmp/worktrees/next
+# 1. jdk/ converted afresh (F9's step 1): beyond F9's, the sources line +1 share (java/net/UnixDomainSocketAddress), +1 unix
+#    (sun/nio/ch/UnixDomainSocketsUtil); the overlay sun/nio/ch/UnixDomainSockets.java changed; 0 failed, 0 javac errors,
+#    no javac: 0 fallbacks
+REPR_JAVA_EXE=$(ls -td /root/arbace/.tmp/gate-exe/javac-*/ | head -1)arbace-javac REPR_JAVA_STALE_OK=1 \
+  ARBACE_HEAVY_CMD=$PWD/bin/heavy-lock bin/jrt-convert update
+# 2. j2g's edge (UnixDomainSocketAddress no longer an outside reference), javac's edge (F9's step 2)
+bin/heavy-lock bin/j2g-edge update && bin/heavy-lock bin/javac-vendor edge
+# 3. the executable (F9's step 3); j2g's report: no native without its Go function (HostChannels' 36: F10a's 31 and the 5
+#    unix ones)
+bin/heavy-lock bin/arbace-go --build && bin/arbace-go --smoke && bin/jrt test
+# 4. a smoke of JCS164: expect "java.net.UnixDomainSocketAddress true", "hi ", "ok"
+target/arbace-go/amd64/arbace -e '(import (quote (java.net StandardProtocolFamily)) (quote (java.nio ByteBuffer)) (quote (java.nio.channels ServerSocketChannel SocketChannel)) (quote (java.nio.file Files)))
+  (let [ss (ServerSocketChannel/open StandardProtocolFamily/UNIX)]
+    (.bind ss nil)
+    (let [a (.getLocalAddress ss) c (SocketChannel/open a) s (.accept ss) b (ByteBuffer/allocate 8)]
+      (println (.getName (class a)) (.startsWith (str a) (System/getProperty "java.io.tmpdir")))
+      (.write c (ByteBuffer/wrap (.getBytes "hi"))) (.read s b)
+      (println (String. (.array b) 0 (.position b)) (str (.getRemoteAddress s)))
+      (.close c) (.close s) (.close ss) (Files/delete (.getPath a)) (println "ok")))'
+# 5. Java's levels interp and compiled on the UNIX family's tests (with F9's step 5 and F10a's area): saved, not recorded;
+#    expect t05204 to pass at both, t05205 to fail on jdk.net (JCS200), no passing test lost
+JAVA_CHECK_EXE=$PWD/target/arbace-go/amd64/arbace J2G_GO_EXE=$PWD/target/arbace-go/amd64/arbace \
+  JAVA_CHECK_HEAVY=$PWD/bin/heavy-lock bin/java-check --levels interp,compiled --jobs 8 \
+  --only 'jdk/java/nio/channels/(unixdomain|SocketChannel|ServerSocketChannel|Selector|spi)' --save .tmp/jcs164-night/check
+```
+
+**Risks and fallbacks**: (1) a temporary name longer than 106 bytes: `bind(null)` names `java.io.tmpdir/socket_N`, so a
+`TMPDIR` deeper than about 85 bytes makes "Unix domain path too long", as the JDK's (the checks' scratch paths are short;
+`jdk.net.unixdomain.tmpdir` overrides); (2) the blocking connect's pauses when a listener's backlog is full (the kernel's
+wait emulated, at most 32 ms late); (3) should j2g refuse a member of the new forms, the fallback is F10a's overlay again
+(`git show 1ff91c764:overlay/jdk/java.base/sun/nio/ch/UnixDomainSockets.java`) with the line `unix-socket-sources` out: F9 does
+not depend on it.
+
+**What is left**: the night's run and the day's records; jdk.net's extended options for the UNIX family (JCS200); the
+inherited channel (JCS201); the derivation as Arbace with F9's and F10a's (JCS166, decided (a): `.tmp/unix/derive.py` joins
+them).
+
+## Proposed (JCS164)
+
+Numbered from JCS200 (as the brief asks).
+
+### JCS200 jdk.net's extended socket options
+
+jdk.net is absent from the Go build (F10a: `sun.net.ext.ExtendedSocketOptions` answers `NoExtendedSocketOptions`, as a JDK
+without the module), so `jdk.net.ExtendedSocketOptions` (SO_PEERCRED, TCP_KEEPIDLE/INTERVAL/COUNT, TCP_QUICKACK, IP_DONTFRAGMENT,
+SO_INCOMING_NAPI_ID) and `UnixDomainPrincipal` are not there: `unixdomain/SocketOptions` (t05205) and jdk26u's `jdk/net`
+tests (about 10 in the corpora: `ExtendedSocketOption/*`, `Sockets/*`) fail on them. (a) jdk.net's classes into the world
+(`src/jdk.net/share/classes/jdk/net/*` and its Linux platform `LinuxSocketOptions` over `jdk.internal.jrt.HostChannels`' get
+and set options, a port of `src/jdk.net/linux/native/libextnet/LinuxSocketOptions.c`: getsockopt SO_PEERCRED's uid and gid
+through os/user's names as F9's principals), registered as `sun.net.ext.ExtendedSocketOptions`' platform options in place of
+the ServiceLoader-free stub, about 1 day; (b) as now. **Recommended: (a)**: it completes the UNIX family and the TCP options
+F10a's channels already pass through.
+
+### JCS201 The inherited channel
+
+`System.inheritedChannel()` (jdk26u: `SelectorProvider.inheritedChannel()`, `sun.nio.ch.InheritedChannel` over
+`InheritedChannel.c`: standard input as a socket channel, a server socket channel or a datagram channel, of the INET or UNIX
+family, when the process was started by inetd or systemd's socket activation) answers null in jrt (F10a's provider variants).
+`spi/SelectorProvider/inheritedChannel/ClosedStreams` (t05202: `System.inheritedChannel` not in jrt's System) and `NullTest`
+(t05203) fail on it; the inheritedChannel tests that launch a child with a socket as its standard input are TestNG. (a)
+jdk26u's InheritedChannel with its natives (`peerAddressInet`, `unixPeerAddress`, `soType0`, `dup`, `dup2`, `open0`, `close0`)
+over HostChannels, `System.inheritedChannel` in jrt's System, the variants removed, 1 day; (b) `System.inheritedChannel`
+alone, answering null (t05202, t05203 pass: their standard input is not a socket), 1 hour; (c) as now. **Recommended: (b)
+now, (a) with F10b's DatagramChannel** (the inherited datagram channel needs it).

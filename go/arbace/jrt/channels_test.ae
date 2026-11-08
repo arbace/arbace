@@ -6,7 +6,7 @@
 
 (go/file "channels_test.go"
   :build ["//go:build linux"]
-  :imports [[testing "testing"] [time "time"]])
+  :imports [[syscall "syscall"] [testing "testing"] [time "time"]])
 
 (go/func chErr "chErr is a fresh int[1] for a native's error number.\n" ^{:tag (* IntArray)} []
   (NewIntArray 1))
@@ -200,3 +200,130 @@ descriptors; the eventfd reset by drain; a descriptor removed.\n"
       (let [n (HostChannels_EpollWait0_I_I1_I1_I_I_I1__I_native ep of oe 8 0 e)]
         (when (!= n 0)
           (.Errorf t "epoll_wait after reset and removal %d" n))))))
+
+(go/func unixName "unixName is the name in a RefArray slot of the UNIX natives, as a string (\"<nil>\" for none).\n"
+  ^string [^{:tag (* RefArray)} a]
+  (when (== (aget (.-A a) 0) nil)
+    (return "<nil>"))
+  (let [b (assert (* ByteArray) (aget (.-A a) 0))]
+    (stringOf b (conv int32 (len (.-A b))))))
+
+(go/func unixListen "unixListen is a listening blocking AF_UNIX stream socket bound to the bytes of name.\n"
+  ^int32 [^{:tag (* testing/T)} t ^string name]
+  (let [e (chErr)
+        fd (HostChannels_UnixSocket0_I1__I_native e)]
+    (when (< fd 0)
+      (.Fatalf t "unix socket: %d errno %d" fd (aget (.-A e) 0)))
+    (when (!= (HostChannels_UnixBind0_I_B1_I1__I_native fd (javaBytes name) e) 0)
+      (.Fatalf t "unix bind %q: errno %d" name (aget (.-A e) 0)))
+    (when (!= (HostChannels_Listen0_I_I_I1__I_native fd 50 e) 0)
+      (.Fatalf t "unix listen: errno %d" (aget (.-A e) 0)))
+    fd))
+
+(go/func TestChannelUnix
+  "UNIX domain sockets (JCS164) through UnixDomainSockets.c's natives: the sockaddr_un's layout and length; a pair at a
+path in a scratch directory, connect and accept with the names getsockname gives (the path; an unbound client's
+empty), a send and a receive each way; a non-blocking accept with none pending; ENOENT and EADDRINUSE; an abstract
+name (Linux's: the first byte NUL), which the C's rule reads as empty; a blocked accept woken by preClose.\n"
+  [^{:tag (* testing/T)} t]
+  (let [e (chErr)
+        dir (.TempDir t)
+        p (+ dir "/s.sock")]
+    ;; the layout: family AF_UNIX, the bytes, a NUL, length offsetof(sun_path) + 3 + 1
+    (let [(values sa n err) (unixSockaddr (javaBytes "abc"))]
+      (when (or (!= err nil) (!= n 6) (!= (.-Family sa) 1) (!= (aget (.-Path sa) 0) 97) (!= (aget (.-Path sa) 2) 99)
+                (!= (aget (.-Path sa) 3) 0) (!= (len (.-Path sa)) 108) (!= syscall/SizeofSockaddrUnix 110))
+        (.Errorf t "sockaddr_un of abc: family %d length %d err %v" (.-Family sa) n err)))
+    (let [long106 (make (slice byte) 106)
+          long107 (make (slice byte) 107)]
+      (range [i _ long107]
+        (aset long107 i 120))
+      (range [i _ long106]
+        (aset long106 i 120))
+      (let [(values _ n err) (unixSockaddr (javaBytes (conv string long106)))]
+        (when (or (!= err nil) (!= n 109))
+          (.Errorf t "a 106-byte name: length %d err %v" n err)))
+      (let [(values _ _ err) (unixSockaddr (javaBytes (conv string long107)))]
+        (when (!= err syscall/ENAMETOOLONG)
+          (.Errorf t "a 107-byte name: %v" err))))
+    ;; a pair at a path
+    (let [l (unixListen t p)
+          la (NewRefArray (.ArrayClass Prim_byte) 1)]
+      (defer (HostChannels_Close0_I_I1__I_native l nil))
+      (when (or (!= (HostChannels_UnixLocalAddress0_I_B2_I1__I_native l la e) 0) (!= (unixName la) p))
+        (.Errorf t "the listener's name %q, want %q" (unixName la) p))
+      (let [c (HostChannels_UnixSocket0_I1__I_native e)
+            ca (NewRefArray (.ArrayClass Prim_byte) 1)]
+        (defer (HostChannels_Close0_I_I1__I_native c nil))
+        (HostChannels_UnixLocalAddress0_I_B2_I1__I_native c ca e)
+        (when (!= (unixName ca) "")
+          (.Errorf t "an unbound socket's name %q, want empty" (unixName ca)))
+        (when (!= (HostChannels_UnixConnect0_I_B1_I1__I_native c (javaBytes p) e) 1)
+          (.Fatalf t "unix connect: errno %d" (aget (.-A e) 0)))
+        (let [nfd (NewIntArray 1)
+              pa (NewRefArray (.ArrayClass Prim_byte) 1)]
+          (when (!= (HostChannels_UnixAccept0_I_I1_B2_I1__I_native l nfd pa e) 1)
+            (.Fatalf t "unix accept: errno %d" (aget (.-A e) 0)))
+          (when (!= (unixName pa) "")
+            (.Errorf t "the unbound peer's name %q, want empty" (unixName pa)))
+          (let [s (aget (.-A nfd) 0)
+                buf (NewByteArray 16)]
+            (defer (HostChannels_Close0_I_I1__I_native s nil))
+            (when (!= (HostChannels_Write0_I_B1_I_I_I1__I_native c (javaBytes "hello") 0 5 e) 5)
+              (.Fatalf t "unix write: errno %d" (aget (.-A e) 0)))
+            (let [n (HostChannels_Read0_I_B1_I_I_Z_I1__I_native s buf 0 16 true e)]
+              (when (or (!= n 5) (!= (stringOf buf n) "hello"))
+                (.Errorf t "unix read %d %q" n (stringOf buf n))))
+            (HostChannels_Write0_I_B1_I_I_I1__I_native s (javaBytes "back") 0 4 e)
+            (let [n (HostChannels_Read0_I_B1_I_I_Z_I1__I_native c buf 0 16 true e)]
+              (when (or (!= n 4) (!= (stringOf buf n) "back"))
+                (.Errorf t "unix read back %d %q" n (stringOf buf n))))
+            ;; the peer's close: the end of the stream
+            (HostChannels_Shutdown0_I_I_I1__I_native c 1 e)
+            (when [n (HostChannels_Read0_I_B1_I_I_Z_I1__I_native s buf 0 16 true e)] (!= n iosEOF)
+              (.Errorf t "a read after the peer's shutdown %d" n))))
+        ;; non-blocking: nothing pending is UNAVAILABLE
+        (HostChannels_ConfigureBlocking0_I_Z_I1__I_native l false e)
+        (let [nfd (NewIntArray 1)
+              pa (NewRefArray (.ArrayClass Prim_byte) 1)]
+          (when [r (HostChannels_UnixAccept0_I_I1_B2_I1__I_native l nfd pa e)] (!= r iosUnavailable)
+            (.Errorf t "a non-blocking accept with none pending %d" r)))
+        (HostChannels_ConfigureBlocking0_I_Z_I1__I_native l true e)
+        ;; errors: a missing path, a path in use
+        (let [q (HostChannels_UnixSocket0_I1__I_native e)]
+          (defer (HostChannels_Close0_I_I1__I_native q nil))
+          (when [r (HostChannels_UnixConnect0_I_B1_I1__I_native q (javaBytes (+ dir "/none")) e)]
+                (or (!= r iosThrown) (!= (aget (.-A e) 0) (conv int32 syscall/ENOENT)))
+            (.Errorf t "a connect to a missing path %d errno %d" r (aget (.-A e) 0)))
+          (when [r (HostChannels_UnixBind0_I_B1_I1__I_native q (javaBytes p) e)]
+                (or (!= r iosThrown) (!= (aget (.-A e) 0) (conv int32 syscall/EADDRINUSE)))
+            (.Errorf t "a bind to a path in use %d errno %d" r (aget (.-A e) 0))))
+        ;; a blocked accept woken by preClose
+        (let [done (make (chan int32) 1)]
+          (go ((fn [] (>! done (HostChannels_UnixAccept0_I_I1_B2_I1__I_native l (NewIntArray 1)
+                                 (NewRefArray (.ArrayClass Prim_byte) 1) (chErr))))))
+          (time/Sleep (* 50 time/Millisecond))
+          (HostChannels_PreClose0_I__V_native l)
+          (select
+            (case [r (<! done)]
+              (when (!= r iosThrown)
+                (.Errorf t "a blocked accept after preClose %d" r)))
+            (case (<! (time/After (* 2 time/Second)))
+              (.Errorf t "a blocked accept not woken by preClose"))))))
+    ;; an abstract name: bound and connected by its bytes, read back empty by sockaddrToUnixAddressBytes's strlen
+    (let [name (+ "\u0000arbace-jcs164" dir)
+          l (unixListen t name)
+          la (NewRefArray (.ArrayClass Prim_byte) 1)
+          c (HostChannels_UnixSocket0_I1__I_native e)]
+      (defer (HostChannels_Close0_I_I1__I_native l nil))
+      (defer (HostChannels_Close0_I_I1__I_native c nil))
+      (HostChannels_UnixLocalAddress0_I_B2_I1__I_native l la e)
+      (when (!= (unixName la) "")
+        (.Errorf t "an abstract name read back %q, want empty (the C's strlen)" (unixName la)))
+      (when (!= (HostChannels_UnixConnect0_I_B1_I1__I_native c (javaBytes name) e) 1)
+        (.Errorf t "a connect to the abstract name: errno %d" (aget (.-A e) 0)))
+      (let [nfd (NewIntArray 1)
+            pa (NewRefArray (.ArrayClass Prim_byte) 1)]
+        (when (!= (HostChannels_UnixAccept0_I_I1_B2_I1__I_native l nfd pa e) 1)
+          (.Errorf t "an accept at the abstract name: errno %d" (aget (.-A e) 0)))
+        (HostChannels_Close0_I_I1__I_native (aget (.-A nfd) 0) nil)))))

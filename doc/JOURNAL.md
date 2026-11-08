@@ -973,3 +973,23 @@ setUninterruptible); the read of the 110 files 0 failed, `--no-javac` identical;
 `go vet` amd64 and arm64, `go test ./jrt` with TestNativeMemory, TestNioFsNatives, TestNioFsXattr, TestNioFsInotify. Expected
 after the night's conversion, build and runs: about 12 of F9's tests and JCS162's 6 at each level; the night's commands and
 risks in the triage's section; JCS180 (the box's file system) and JCS181 (jdk.zipfs) proposed.
+
+## 2026-11-08: JCS164 (write-ahead): UNIX domain sockets with F9 (branch `java-unix`, from java-f9 1ff91c764)
+
+By the user's decision of 2026-11-07 (JCS164 (a)), by day under the light rules (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As
+built: JCS164 (write-ahead)"). F10a's channels already carried jdk26u's UNIX paths (SocketChannelImpl, ServerSocketChannelImpl,
+SelectorProviderImpl); only jrt's `UnixDomainSockets` overlay refused them, because `UnixDomainSocketAddress.of(Path)` needs
+java.nio.file's default file system, which F9 brings. Now: jdk26u's `java/net/UnixDomainSocketAddress.java` and
+`sun/nio/ch/UnixDomainSocketsUtil.java` (openjdk/jdk26u `baf63fb`; `test/jrt/jrt_sources.ae`'s `unix-socket-sources`, the closure
+of the three seeds by F1's scan: nothing else but ObjectInputStream, by design); `sun/nio/ch/UnixDomainSockets.java` derived from
+jdk26u's file (`.tmp/unix/derive.py`: its six natives given bodies over `jdk.internal.jrt.HostChannels`, as F10a's Net, each
+replacement asserted once); HostChannels' five `unix` natives ported into Go from `src/java.base/unix/native/libnio/ch/
+UnixDomainSockets.c` (`go/arbace/jrt/channels_linux.ae`: the C's sockaddr_un and lengths on raw system calls, its results and
+errors; abstract names read back empty by the C's strlen; a blocking connect's EAGAIN retried, the kernel's wait emulated on
+F10a's non-blocking descriptors). Alternatives considered: F9's way (the JDK class's own natives by their mangled names),
+rejected because the C throws java.net's exceptions chosen by errno, which HostChannels' Java already makes; Go's
+`syscall.SockaddrUnix` (rejected: another length for an empty name, '@' for abstract names). Checked (light): the joint javac
+check 2,381 files, 0 errors; the read of the 4 files 0 failed, `--no-javac` identical; the five natives defined on Linux and off
+it; `go vet ./jrt` amd64 and arm64, `go test ./jrt` amd64 and `-run TestChannel` arm64 under qemu with the new TestChannelUnix.
+Expected after the night (with F9's): `jdk/java/nio/channels/unixdomain/Shutdown` (t05204) at interp and compiled; JCS200
+(jdk.net's extended options, t05205) and JCS201 (the inherited channel, t05202, t05203) proposed.
