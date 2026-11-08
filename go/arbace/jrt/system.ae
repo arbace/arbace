@@ -74,7 +74,10 @@ shutdown hooks registered with jrt run first.\n"
                 (when (and ok (!= v ""))
                   (return v))
                 dflt))]
-    (set "java.version" "26")
+    ;; JCS192 (a): the JDK build's version (the platform's: jdk26u's build at the pin, its release file's
+    ;; JAVA_VERSION and JAVA_RUNTIME_VERSION), as VersionProps sets them from it
+    (set "java.version" jdkVersionShort)
+    (set "java.version.date" jdkVersionDate)
     (set "java.specification.version" "26")
     (set "java.vm.specification.version" "26")
     (set "java.class.version" "70.0")
@@ -86,8 +89,8 @@ shutdown hooks registered with jrt run first.\n"
     ;; specification properties every JDK sets (System.getProperties' list): the runtime's and the
     ;; VM's versions are the feature release, as java.version is; the specifications' names and
     ;; vendor are the Java SE specifications', the JDK's values
-    (set "java.runtime.version" "26")
-    (set "java.vm.version" "26")
+    (set "java.runtime.version" jdkVersionString)
+    (set "java.vm.version" jdkVersionString)
     (set "java.specification.name" "Java Platform API Specification")
     (set "java.specification.vendor" "Oracle Corporation")
     (set "java.vm.specification.name" "Java Virtual Machine Specification")
@@ -247,11 +250,27 @@ RunMain's main and the non-daemon threads have ended.\n"
 ;; ---------------------------------------------------------------------------------------
 ;; Runtime.Version (leaf): Runtime.version(), the running Java's version, which javax.lang.model's
 ;; SourceVersion reads (javac's latest supported release; doc/classes/JAVA-FRONTEND-SURVEY.md,
-;; "As built: JN2"): jrt is JDK 26's runtime, as the java.version property says, so feature 26
-;; and no interim, update or patch release. Not here: parse, version(), pre, build, optional
-;; (their types are translated classes).
+;; "As built: JN2"). Since JCS192 (a) (the user, 2026-11-08; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As
+;; built: JCS192") the JDK build's (the platform's jdk26u build: Version.parse of its
+;; JAVA_RUNTIME_VERSION, 26.0.2.1-internal-adhoc.root.jdk26u: the numbers 26.0.2.1, pre-release
+;; "internal", no build, optional "adhoc.root.jdk26u"), the java.version properties made from it as
+;; VersionProps makes them, and a java.base frame's module version its short form (java.base's
+;; descriptor's, 26.0.2.1-internal: throwable.ae's frameElement). jdk26u's toString, equals, compareTo
+;; and hashCode over the parts; a version made by jrt without them (n 0) is its numbers with the trailing
+;; zeros left out, as before. Not here: parse, version(), pre, build, optional (their types are
+;; translated classes).
 
-(go/type Runtime_Version (struct Object ^int32 feature ^int32 interim ^int32 update ^int32 patch))
+(go/const
+  [^{:tag string :doc "the JDK build's version string (VERSION_STRING; java.runtime.version)\n"} jdkVersionString
+   "26.0.2.1-internal-adhoc.root.jdk26u"]
+  [^{:tag string :doc "its short form (VERSION_SHORT; java.version, java.base's module version)\n"} jdkVersionShort
+   "26.0.2.1-internal"]
+  [^{:tag string :doc "its date (java.version.date)\n"} jdkVersionDate "2026-08-18"])
+
+(go/type Runtime_Version
+  (struct Object ^int32 feature ^int32 interim ^int32 update ^int32 patch
+          ^{:tag int :doc "the numbers' count as parsed (0: the numbers without trailing zeros)\n"} n
+          ^string pre ^bool hasPre ^string opt ^bool hasOpt))
 
 (go/var Runtime_Version_class
   (Define (addr (lit ClassInfo :Name "java.lang.Runtime$Version" :Kind KindClass
@@ -259,10 +278,11 @@ RunMain's main and the non-daemon threads have ended.\n"
                      :Interfaces (lit (slice (* Class)) Comparable_class)
                      :Go "arbace/jrt.Runtime_Version"))))
 
-(go/var theVersion (addr (lit Runtime_Version :feature 26)))
+(go/var theVersion (addr (lit Runtime_Version :feature 26 :update 2 :patch 1 :n 4
+                              :pre "internal" :hasPre true :opt "adhoc.root.jdk26u" :hasOpt true)))
 
 (go/func Runtime_Version__Runtime_Version
-  "Runtime_Version__Runtime_Version is Runtime.version(): JDK 26 (java.version).\n"
+  "Runtime_Version__Runtime_Version is Runtime.version(): the JDK build's version (JCS192).\n"
   ^{:tag (* Runtime_Version)} []
   theVersion)
 
@@ -271,47 +291,116 @@ RunMain's main and the non-daemon threads have ended.\n"
 (go/method Update__I ^int32 [^{:tag (* Runtime_Version)} v] (.-update v))
 (go/method Patch__I ^int32 [^{:tag (* Runtime_Version)} v] (.-patch v))
 
+(go/func versionDigits "versionDigits tells whether s matches \\d+ (Version.comparePre).\n" ^bool [^string s]
+  (when (== s "")
+    (return false))
+  (range [_ c s]
+    (when (or (< c \0) (> c \9))
+      (return false)))
+  true)
+
+(go/func versionNumCompare
+  "versionNumCompare compares two digit strings as BigIntegers.\n"
+  ^int32 [^string a ^string b]
+  (set! a (strings/TrimLeft a "0"))
+  (set! b (strings/TrimLeft b "0"))
+  (cond
+    (< (len a) (len b)) (return -1)
+    (> (len a) (len b)) (return 1)
+    (< a b) (return -1)
+    (> a b) (return 1))
+  0)
+
 (go/method CompareTo_Runtime_Version__I
-  "CompareTo_Runtime_Version__I is Version.compareTo: by feature, interim, update and patch.\n"
+  "CompareTo_Runtime_Version__I is Version.compareTo: the numbers (each, then their count), the pre-release
+(none above one; digits as numbers, below letters; else String.compareTo), the build, the optional part.\n"
   ^int32 [^{:tag (* Runtime_Version)} v ^{:tag (* Runtime_Version)} o]
   (when (== o nil) (panic (NPE)))
-  (let [a (lit (slice int32) (.-feature v) (.-interim v) (.-update v) (.-patch v))
-        b (lit (slice int32) (.-feature o) (.-interim o) (.-update o) (.-patch o))]
-    (range [i _ a]
+  (let [a (.numbers v)
+        b (.numbers o)
+        m (min (len a) (len b))]
+    (for [i 0] (< i m) (inc! i)
       (when (!= (aget a i) (aget b i))
-        (if (< (aget a i) (aget b i)) (return -1) (return 1))))
-    0))
+        (return (- (aget a i) (aget b i)))))
+    (when (!= (len a) (len b))
+      (return (conv int32 (- (len a) (len b))))))
+  (cond
+    (and (not (.-hasPre v)) (.-hasPre o)) (return 1)
+    (and (.-hasPre v) (not (.-hasPre o))) (return -1)
+    (.-hasPre v)
+    (let [x (.-pre v) y (.-pre o)]
+      (cond
+        (versionDigits x) (if (versionDigits y) (when (!= (versionNumCompare x y) 0) (return (versionNumCompare x y))) (return -1))
+        (versionDigits y) (return 1)
+        :else (let [c (.CompareTo_String__I (Str x) (Str y))] (when (!= c 0) (return c))))))
+  (cond
+    (and (not (.-hasOpt v)) (.-hasOpt o)) (return -1)
+    (and (.-hasOpt v) (not (.-hasOpt o))) (return 1)
+    (.-hasOpt v) (return (.CompareTo_String__I (Str (.-opt v)) (Str (.-opt o)))))
+  0)
 
 (go/method CompareTo_O__I ^int32 [^{:tag (* Runtime_Version)} v ^any o]
   (.CompareTo_Runtime_Version__I v (Runtime_Version_Cast o)))
 
-(go/method Equals_O__Z ^bool [^{:tag (* Runtime_Version)} v ^any o]
+(go/method Equals_O__Z "Equals_O__Z is Version.equals: the numbers as a list, the pre-release, the build and the
+optional part equal.\n"
+  ^bool [^{:tag (* Runtime_Version)} v ^any o]
   (let [(values w ok) (assert (* Runtime_Version) o)]
-    (and ok (== (.CompareTo_Runtime_Version__I v w) 0))))
+    (when (or (not ok) (== w nil))
+      (return false))
+    (let [a (.numbers v) b (.numbers w)]
+      (when (!= (len a) (len b))
+        (return false))
+      (range [i _ a]
+        (when (!= (aget a i) (aget b i))
+          (return false))))
+    (and (== (.-hasPre v) (.-hasPre w)) (== (.-pre v) (.-pre w))
+         (== (.-hasOpt v) (.-hasOpt w)) (== (.-opt v) (.-opt w)))))
 
 (go/method HashCode__I
-  "HashCode__I is Version.hashCode: 17 * h + the hash of each part, h from 1: the numbers' list
-(trailing zeros left out, as toString), then the empty pre, build and optional.\n"
+  "HashCode__I is Version.hashCode: h = 1, then h = 17 * h + each part's hash: the numbers' list, the pre-release,
+the build and the optional part (an Optional's: its value's hash, 0 when empty).\n"
   ^int32 [^{:tag (* Runtime_Version)} v]
-  (let [lh (conv int32 1)]
+  (let [lh (conv int32 1)
+        h (conv int32 1)
+        ph (conv int32 0)
+        oh (conv int32 0)]
     (range [_ x (.numbers v)]
       (set! lh (+ (* 31 lh) x)))
-    (* (* (* (+ 17 lh) 17) 17) 17)))
+    (when (.-hasPre v)
+      (set! ph (.HashCode__I (Str (.-pre v)))))
+    (when (.-hasOpt v)
+      (set! oh (.HashCode__I (Str (.-opt v)))))
+    (set! h (+ (* 17 h) lh))
+    (set! h (+ (* 17 h) ph))
+    (set! h (* 17 h))
+    (set! h (+ (* 17 h) oh))
+    h))
 
-(go/method numbers "numbers: the version's numbers, trailing zeros left out (the feature kept).\n"
+(go/method numbers "numbers: the version's numbers as parsed (n of them), or without trailing zeros (the feature kept).\n"
   ^{:tag (slice int32)} [^{:tag (* Runtime_Version)} v]
   (let [ns (lit (slice int32) (.-feature v) (.-interim v) (.-update v) (.-patch v))
         n (len ns)]
+    (when (> (.-n v) 0)
+      (return (subslice ns _ (.-n v))))
     (while (and (> n 1) (== (aget ns (- n 1)) 0))
       (dec! n))
     (subslice ns _ n)))
 
-(go/method ToString__String "ToString__String is Version.toString: the numbers joined by dots, trailing zeros left out.\n"
+(go/method ToString__String "ToString__String is Version.toString: the numbers joined by dots, -PRE, then the optional
+part after - (after +- without a pre-release; no build here).\n"
   ^{:tag (* String)} [^{:tag (* Runtime_Version)} v]
   (let [^{:tag (slice string)} ps nil]
     (range [_ x (.numbers v)]
       (set! ps (append ps (strconv/Itoa (conv int x)))))
-    (Str (strings/Join ps "."))))
+    (let [s (strings/Join ps ".")]
+      (when (.-hasPre v)
+        (set! s (+ s "-" (.-pre v))))
+      (when (.-hasOpt v)
+        (if (.-hasPre v)
+          (set! s (+ s "-" (.-opt v)))
+          (set! s (+ s "+-" (.-opt v)))))
+      (Str s))))
 
 (go/method Ref ^any [^{:tag (* Runtime_Version)} t] (when (== t nil) (return nil)) t)
 (go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* Runtime_Version)} t] Runtime_Version_class)
