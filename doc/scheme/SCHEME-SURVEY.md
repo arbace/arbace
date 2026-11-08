@@ -3766,3 +3766,138 @@ their dump), print 1,364, `bin/si check` and `--aot` 50 each, r7rs 1,232, srfi 1
   only, with the corpus's inputs (nboyer 5: 51,507,739 rewrites, about 40 s compiled by the size-0 run's rate; earley 1,000 iterations,
   about 3 min), judged by the same result checks, in the night's `si-aot`; (c) (b) interpreted too (hours). *Recommended: (b)*: the
   benchmarks' own checks at the sizes their authors chose, within the night budget.
+
+## Decided (the user, 2026-11-08, about 21:00): SCS9 (c), SCS10 (b), SCS11 (b)
+
+SCS9 (c): the three reading scans (whitespace, ident-initial, ident-subsequent) judged by R6RS's report over a pinned Unicode
+Character Database 16.0, and the reader's tables (`arbace.repr.scheme.unicode`) generated from that database instead of Chez's answers;
+the four printing scans stay Chez's. The network allowed for the one fetch, the files pinned by SHA-256, Unicode's license in LICENSE.md.
+SCS10 (b): si's choices where R6RS leaves the reading open written into doc/scheme/SPEC.md and applied by the report, the polar numbers
+staying on their dumps; each choice checked against what si and Chez do, a difference classed. SCS11 (b): earley and nboyer also at the
+corpus's own sizes, the compiled level only, in the night's si-aot.
+
+## As built: SCS9 (c), SCS10 (b), SCS11 (b), the scans by Unicode's data, si's choices stated, the benchmarks at their sizes (2026-11-08, branch scheme-props)
+
+From `mac/scheme-props` b05140c26.
+
+### SCS9 (c): the Unicode Character Database 16.0.0, pinned
+
+Fetched once (2026-11-08, the user's allowance) from https://www.unicode.org/Public/16.0.0/ucd/ into a new directory, the main checkout's
+`.tmp/scheme/ucd-16.0.0` (data only: nothing in it is run): `UnicodeData.txt` (2,175,362 bytes, SHA-256 `ff58e582...edb48f`),
+`extracted/DerivedGeneralCategory.txt` (274,423, `7676ab75...53f293`) and Unicode's license (https://www.unicode.org/license.txt, Unicode
+License V3, 1,995 bytes, `e7a93b00...d96`; the 16.0.0 directory carries none of its own). The pins are `test/scheme/ucd.edn` (as
+`test/scheme/corpora.edn` pins the corpora); `bin/repr-scheme ucd fetch` fetches by them (by hand, the network; a present file at its pin
+is kept), `pins check` (the gate's `--pins`) checks them, and a worktree or the clean clone reads the main checkout's copy as the corpora.
+R6RS 4.2.1 names its classes by general category alone (`<whitespace>`: Zs, Zl, Zp and six controls; `<constituent>` above U+007F: Lu, Ll,
+Lt, Lm, Lo, Mn, Nl, No, Pd, Pc, Po, Sc, Sm, Sk, So, Co; `<subsequent>` adds Nd, Mc, Me), so PropList.txt's White_Space is not needed and
+not fetched.
+
+`arbace.repr.scheme.ucd` (`bin/repr-scheme ucd gen`, `check`; `make repr-scheme-ucd-fetch`, `repr-scheme-ucd-check`): UnicodeData.txt's
+field 2 for every code point (a `<..., First>` and `<..., Last>` pair a range, an unlisted code point Cn), checked against
+DerivedGeneralCategory.txt code point for code point (they agree), and three generated files, each saying so:
+
+- `arbace/repr/scheme/category.ae` (`arbace.repr.scheme.category`): the 3,368 runs of one assigned category, `(category cp)` by binary
+  search. The report (`arbace.repr.scheme.report`) takes its categories from it instead of `Character/getType` (jrt's tables, jdk26u's
+  Unicode 17.0): its classes now name their version.
+- `arbace/repr/scheme/unicode.ae` (the reader's identifier tables) and `go/arbace/scm/unicode.ae` (si's runtime's): the ranges from
+  U+0080 on by R6RS 4.2.1's rule over those categories, stated in the generator apart from the report's. They are the ranges SC21 took
+  from Chez's answers, number for number (3,320 numbers; Chez 10.3.0's data are 16.0's): only the files' headers changed.
+
+`bin/repr-scheme ucd check` regenerates the three into `.tmp/repr-scheme/ucd` and compares them byte for byte (4 s); it is the gate's
+`scheme-read.scans` part now (`bin/repr-scheme ucd check && bin/repr-scheme check --corpus scans`, its `:pins` with `test/scheme/ucd.edn`,
+its inputs with `:scheme-run` for si's file; steps.edn and the fragment `test/gate/crops/scheme.edn`).
+
+The check: for `scan-whitespace`, `scan-ident-initial` and `scan-ident-subsequent` `bin/repr-scheme check` writes `{:scan KIND :judge
+:report}` in place of the recorded dump (the pack keeps the dumps for the oracle tier), and `arbace.repr.scheme.check/scan-diffs` compares
+Arbace's predicates (the reader's `ws?`, `initial-cp?`, `subsequent-cp?`) with the report's classes over every scalar value; the four printing
+scans (`string-escaped`, `char-hex`, `symbol-escaped-first`, `symbol-escaped-rest`) stay judged by Chez's dumps. It prints `scans (SCS9 (c)): 3
+judged by the report's classes over the Unicode Character Database 16.0.0 (no dump read), 4 by Chez's dump`; all 7 equal (1 min 45 s, the
+scans part). `bin/repr-scheme report-scans [--record]` (by hand, the oracle tier's) is now a check: the report's classes and its reading of
+the scan texts against Chez's recorded scans, failing on any difference (`test/scheme/report-scans.edn` re-recorded): whitespace 25,
+ident-initial 290,846, ident-subsequent 292,091 code points, equal to Chez's, 11,465 texts confirmed by reading each (45 s). Left: the readers'
+whitespace (`arbace.repr.scheme.read/ws?` on `Character/getType`, si's runtime on Go's `unicode` tables): equal to UCD 16.0.0's by the
+whitespace scan's judge at every check, not generated (SCS13).
+
+### SCS10 (b): si's choices where the report defers, stated
+
+doc/scheme/SPEC.md 12 states six choices with ids, which `arbace.repr.scheme.report` applies through `choose` (bound `*choices*`, true
+by default; `read-all` reports the ids applied as `:choices`; with `*choices*` false the report alone, SCS5's `:undecided`):
+`:mixed-exactness` (both parts inexact, an exact part its nearest binary64), `:ratio-over-zero` (exact: no number, a syntax violation;
+inexact: +inf.0, -inf.0 or +nan.0), `:exact-naninf` (a syntax violation), `:mantissa-width` (read and ignored, 4.2.8's greater precision),
+`:fold-case` (`#!fold-case`, `#!no-fold-case` as R7RS 2.1's directives, identifiers alone lower-cased) and `:hash-bang` (any other
+`#!<identifier>` a violation). Left undecided: a polar number but for an exact zero angle, and an exact exponent beyond the limits (no case).
+`judge-probe` and `judge-file` give the judge `:choice` where a choice decided the text (no dump read, as `:report`).
+
+Checked against what Chez and si do: on the probes and files (Chez's dumps, `bin/repr-scheme report-check`): of SCS5's 72 undecided probes,
+48 now agree three ways by the choices (`:exact-naninf` 21, `:ratio-over-zero` 13, `:mixed-exactness` 5, `:hash-bang` 5, `:mantissa-width` 4,
+`:fold-case` 2), the 24 polar ones stay; of the 3 undecided files, 2 agree by `:mixed-exactness` (Racket's `r6rs/io/ports.sls`, Chibi's
+`r7rs-tests.scm`) and Racket's `r6rs/base.sls` stays (past its mixed complex, a polar number). So 50 cases move off Chez's dumps, not
+SCS10's estimated 75 (that count held the 24 polar numbers it said stay, and 3 files of which 1 reaches a polar number). `report-check` fails
+on a choice that differs from Chez's dump (`:choice-differs-from-chez`): none. Beyond the probes, `test/scheme/choices.edn`: 18 cases of the
+six choices with Chez 10.3.0's reading (`tools/schemedump/dump.ss`, by hand) and si's runtime reader's (go/arbace/scm's `read` on a string
+port, `bin/si run`, by hand), and `choices-test` at every `bin/repr-scheme check`: the report with the choices reads each as repr/scheme's
+reader does, and a case where Chez or si's runtime reads otherwise names its class. Three do, classed there: `:fold-char-names`
+(`#!fold-case #\SPACE`: Chez and si's runtime fold character names too, R7RS 2.1's rule; repr/scheme's reader refuses the name),
+`:fold-full` (Chez folds by string-foldcase, `ẞ` to `ss`; repr/scheme's reader and si's runtime lower-case, `ß`), `:chezscheme-directive`
+(`#!chezscheme`: Chez and si's runtime take it; repr/scheme's reader refuses it). The rest agree (`#i-1/0`, `#i0/0`, `#i1/0+1i`, `1.5|10`,
+`#e1|2`, `1/2+0.5i`, `+inf.0i`, `#!FOLD-CASE` refused, `Ǆ` to `ǆ`, ...). SCS12 proposes closing the three.
+
+### SCS11 (b): earley and nboyer at the corpus's sizes
+
+`test/scheme/si/programs.edn`: `larceny/earley-1000` (earley.sch with the corpus's `earley.input`, 1000) and `larceny/nboyer-5` (nboyer.sch
+with `nboyer.input`, 5: the result check wants 51,507,739 rewrites), `:libraries-first`, `:bench` (`earley`, `nboyer5`), `:aot-only true`: bin/si's
+`program_list` gives the flag, `check_runs` skips it for si (Chez still runs it, for `--record-ref`), `arbace.scheme.check/programs` leaves
+them out at the interpreted level (`*aot*` false; `own`, `record-ref` take them), so `bin/si check` and its record are unchanged and `bin/si
+check --aot` (the night's `si-aot`) runs 52 programs. reap's Scheme AOT source takes `:same-cases-extra` (test/reap/main.ae, cells.edn: ids
+beyond the interpreted record's). `bin/si check --aot --record --only larceny/earley-1000 --only larceny/nboyer-5`: both pass by their own
+result check (earley: compile 4.9 s, run 61 s; nboyer 5: compile 2.5 s, run 98.5 s; 2 min 59 s, peak 1.45 GB), recorded; Chez's runs recorded
+beside (`--record-ref --only`, 17 s), `bin/si own --aot`: 2 of 2 agree.
+
+### The numbers
+
+`bin/repr-scheme check` on the essential corpora (scheme-read-essential's command, 1 min, with the round trip, spec-check 9 of 9 and `bin/si
+corpora files` 220): 1,358 equal to their judge; probes 1,188 by the report (48 by the choices), 61 by their dumps (24 polar, the 37 of
+report-chez.edn); files 108 by the report (2 by the choices), 1 by its dump; report-test ok, choices-test ok (18, 3 classed), the controls
+differ. `--corpus whimsical`: 6 of 6 by the report. `--corpus scans`: 3 by the report's classes, 4 by their dumps, all equal. `report-check`
+(3 min): 1,140 probes and 112 files agree, 48 and 2 by the choices, 37 past the report as named, 24 and 1 undecided. `bin/si unit`, `test
+--si`, `check --only test/scheme/essential-check.txt` (44 of 49, no regression, 0 by Chez's run), `r7rs` (1,230 of 1,232), `srfi` (1,231):
+as before, controls differ; `bin/si check --aot --only test/scheme/essential-aot.txt`: 11 of 13, 12 of 13 the same as interpreted.
+`bin/repr-scheme c2j-check`: 21 of 21 sources (the new `ucd.ae` and `category.ae` with them). `bin/gate --full --plan`: the steps parse.
+`bin/reap --record` (0 problems), `bin/crops-score --record`, `--judge --strict` (0 problems).
+
+| `bin/crops-score --crop scheme` | before (b05140c26) | after |
+|---|---|---|
+| completeness | 97.31 (98.84 without by design) | 97.41 (98.88): AOT 45 of 50 (the two new programs pass) |
+| maturity | 100.0 | 100.0 |
+| independence | 99.78 (judge 0.989) | 99.88 (judge 0.994) |
+
+The judge's cases: read 1,305 at 1 (1,188 probes, 114 files, 3 scans) and 66 at 0.5 (61 probes, 1 file, 4 scans), print 1,364, `bin/si check`
+50, `--aot` 52, r7rs 1,232, srfi 1,231, chibi-tests 268, ecraven 58, all at 1: 5,593 of 5,626.
+
+### Night commands
+
+- `bin/repr-scheme check --record` (every corpus, the probes, the scans; about 3 min, 1.4 GB): the read level's record afresh (no row change
+  expected: the judges moved, not the results).
+- `bin/si check --aot --record` (52 programs, about 8 min with the two at their sizes) and `bin/si check --record` (50, unchanged).
+- By hand: `bin/repr-scheme ucd check`, `report-check` (3 min), `report-scans` (45 s), `bin/si own --list`, `bin/si own --aot --list`.
+- The gate's `scheme-read-essential`, `scheme-read` (its scans part runs `ucd check`), `si-essential`, `si-aot-essential`, `si-check`, `si-aot`,
+  `scheme-c2j`, `reap`, `crops-score`.
+
+### Proposed
+
+- **SCS12 The readers' folding and `#!chezscheme`.** test/scheme/choices.edn's three classes, where repr/scheme's reader differs from
+  Chez (and, for two, from si's runtime reader). (a) leave them classed; (b) repr/scheme's reader folds character names after
+  `#!fold-case` and takes `#!chezscheme` as a no-op, as si's runtime does (the two readers then agree; SPEC 12 restated); (c) (b) and both
+  readers fold by full case folding (`CaseFolding.txt`'s C and F mappings from the same pinned UCD 16.0.0, one more pinned file and a
+  generated table, `ẞ` to `ss` as Chez's string-foldcase). *Recommended: (c)*: the three classes go, the readers agree with Chez and with each
+  other, and the folding follows the pin, not the host's `toLowerCase` (Java's, Go's).
+- **SCS13 The readers' whitespace from the pin too.** `arbace.repr.scheme.read/ws?` uses `Character/getType`, si's runtime Go's `unicode`
+  tables; both equal UCD 16.0.0's Zs, Zl and Zp today (the whitespace scan's judge at every check). (a) leave (a later JDK or Go that changes
+  a separator fails the scan, then fixed); (b) generate a whitespace table into `unicode.ae` and si's file beside the identifier tables (a
+  few lines; `bin/si unit` for si's). *Recommended: (b)*: the readers then take no Unicode data from the host.
+- **SCS14 The polar numbers.** The read judge's last undecided: 24 probes and Racket's base.sls (judged 0.5). (a) leave on the dumps; (b) state
+  si's choice (m@a is m·cos a + i·m·sin a in binary64, the angle's cosine and sine correctly rounded) and have the report compute them by exact
+  arithmetic (a series with an error bound, rounded once), si's reader held to it and a value off by its last bit classed (Go's `math.Cos`
+  and `math.Sin` are not correctly rounded everywhere); (c) judge the polar numbers by a property (within one ulp of the correctly rounded
+  value). *Recommended: (b)*: the read judge then reads no Chez dump but the 37 where Chez reads past the grammar, and a last-bit difference
+  is a recorded class, not a hidden one.

@@ -8,7 +8,8 @@
     (read-all \"(a . 1.5) #\\\\x41\")
       => {:data [{:off [0 9] :form (scm/dot (a) 1.5)} {:off [10 15] :form \\A}] :error nil}
     (read-all \"(a\")     => {:data [] :error {:class :unexpected-eof :token false :at 2}}
-    (read-all \"#!fold-case A\") => {:undecided \"#!fold-case: ...\"}
+    (read-all \"1@2\")    => {:undecided \"a polar number ...\"}
+    (read-all \"#!fold-case A\") => {:data [{:off [12 13] :form a}] :error nil :choices #{:fold-case}}   ; si's choice, SPEC 12
 
   :error is a syntax violation: a text no production of the grammar derives. Its :class is :unexpected-eof (the text ends
   inside a datum, a lexeme or a comment), :unexpected-close, :bad-dot, :bad-string-escape, :bad-bytevector, or :token (a run
@@ -17,6 +18,10 @@
   it is Chez's). R6RS 4.1: \"An implementation must not extend the lexical or datum syntax in any way, with one exception: it
   need not treat the syntax #!<identifier>, for any <identifier> that is not r6rs, as a syntax violation\": so every
   extension of Chez's is a violation here, and #!<identifier> is :undecided.
+
+  Since SCS10 (b) si's stated choices (doc/scheme/SPEC.md 12, *choices* below) decide most of what the report leaves open
+  (the polar numbers and the exponents beyond the limits stay :undecided); with *choices* bound false, the report alone.
+  Since SCS9 (c) the character classes are over the Unicode Character Database 16.0.0 (arbace.repr.scheme.category).
 
   :undecided names what the report leaves to the implementation, where the check falls back to Chez's recorded dump:
   #!<identifier> other than #!r6rs; an exact ratio with a zero denominator (1/0, #i1/0); #e on an infinity or a NaN (R6RS
@@ -39,6 +44,30 @@
 ;; ---- outcomes
 
 (defn- undecided [^String why] (throw (ex-info (str "undecided: " why) {::undecided why})))
+
+;; ---- si's stated choices (SCS10 (b), the user 2026-11-08; doc/scheme/SPEC.md 12): where R6RS leaves the reading to the
+;; implementation, the choices si's reader makes, stated as rules and applied here instead of leaving the text :undecided. Each
+;; choice has an id (SPEC 12's); read-all reports the ids it applied (:choices). Bound to false, the report alone (SCS5's
+;; :undecided cases), as report-check measures it.
+
+(def ^:dynamic *choices*
+  "Apply si's stated choices (SPEC 12) where the report defers: true by default (the read check's judge)."
+  true)
+
+(def ^:dynamic ^:private *applied* nil)
+(def ^:dynamic ^:private *fold* nil)
+
+(defn- choose
+  "Where the report leaves `why` to the implementation: si's choice `id` (f's value) when *choices*, else :undecided."
+  [id ^String why f]
+  (if *choices*
+    (do (when *applied* (vswap! *applied* conj id)) (f))
+    (undecided why)))
+
+(defn- no-number
+  "si's choice (SPEC 12): the token is no number, so no lexeme: the run is a syntax violation (:token)."
+  []
+  (throw (ex-info "no number by si's choice" {::no-number true})))
 
 (defn- violation
   "A syntax violation of class cls at offset at; end: the violating run reaches the end of the text."
@@ -284,7 +313,9 @@
   [{:keys [kind n d mant scale neg]}]
   (let [v (case kind
             :int (bigint n)
-            :rat (if (zero? (.signum ^BigInteger d)) (undecided "an exact ratio with a zero denominator") (/ (bigint n) (bigint d)))
+            :rat (if (zero? (.signum ^BigInteger d))
+                   (choose :ratio-over-zero "an exact ratio with a zero denominator" no-number)
+                   (/ (bigint n) (bigint d)))
             :dec (let [s (long scale)]
                    (when (> (Math/abs s) 100000) (undecided "an exponent beyond the implementation's limits"))
                    (if (>= s 0) (bigint (.multiply ^BigInteger mant (.pow BigInteger/TEN (int s))))
@@ -297,29 +328,43 @@
   (case kind
     :nan Double/NaN
     :inf (if neg Double/NEGATIVE_INFINITY Double/POSITIVE_INFINITY)
+    (if (and (= kind :rat) (zero? (.signum ^BigInteger (:d p))))
+      ;; SPEC 12 :ratio-over-zero: an inexact n/0 is the binary64 quotient, +inf.0 or -inf.0 by the sign, 0/0 +nan.0
+      (choose :ratio-over-zero "an exact ratio with a zero denominator"
+              #(cond (zero? (.signum ^BigInteger (:n p))) Double/NaN neg Double/NEGATIVE_INFINITY :else Double/POSITIVE_INFINITY))
     (let [big? (and (= kind :dec) (pos? (.signum ^BigInteger mant))
                     (let [k (+ (long scale) (count (str mant)))]   ; 10^(k-1) <= |value| < 10^k
                       (cond (> k 310) :inf (< k -330) :zero :else nil)))]
       (case big?
         :inf (if neg Double/NEGATIVE_INFINITY Double/POSITIVE_INFINITY)
         :zero (if neg -0.0 0.0)
-        (let [x (nearest-double (exact-value (dissoc p :neg)))] (if neg (- x) x))))))
+        (let [x (nearest-double (exact-value (dissoc p :neg)))] (if neg (- x) x)))))))
 
 (defn- part-value
   "A part's value under the prefix's exactness ex (:e, :i or nil): [exact? value]."
   [{:keys [kind width inexact-syntax] :as p} ex]
   (let [inexact (case ex :e false :i true (boolean (or inexact-syntax (#{:nan :inf} kind))))]
-    (when (and width (= ex :e)) (undecided "a mantissa width with #e"))
-    (when (and width (< (long width) 53)) (undecided "a mantissa width below 53"))
+    ;; SPEC 12 :mantissa-width: a mantissa width is read and ignored (si's flonums have 53 bits: R6RS 4.2.8 allows the greater
+    ;; precision; with #e the exact value of the digits)
+    (when (and width (= ex :e)) (choose :mantissa-width "a mantissa width with #e" (constantly nil)))
+    (when (and width (< (long width) 53)) (choose :mantissa-width "a mantissa width below 53" (constantly nil)))
     (if inexact
       [false (inexact-value p)]
-      (do (when (#{:nan :inf} kind) (undecided "#e on an infinity or a NaN: no exact equivalent (R6RS 11.7.4.1)"))
+      (do (when (#{:nan :inf} kind) (choose :exact-naninf "#e on an infinity or a NaN: no exact equivalent (R6RS 11.7.4.1)" no-number))
           (let [v (exact-value p)] [true (if (and (integer? v) (< (.bitLength (biginteger v)) 64)) (long v) v)])))))
+
+(declare number-value*)
 
 (defn number-value
   "The value of the number token t (code points, prefixes included) as the forms' numbers (a long, a BigInt, a Ratio, a
-  double, or [:complex re im]); nil when no production derives it. Throws :undecided where the report leaves it open."
+  double, or [:complex re im]); nil when no production derives it, or (SPEC 12) when si's choice makes it no number. Throws
+  :undecided where the report leaves it open and *choices* is false (or no choice is stated: a polar number, an exponent beyond
+  the limits)."
   [t]
+  (try (number-value* t)
+       (catch arbace.lang.ExceptionInfo ex (if (::no-number (ex-data ex)) nil (throw ex)))))
+
+(defn- number-value* [t]
   (let [n (count t)]
     (loop [i 0 radix nil ex nil]
       (if (and (< (inc i) n) (== (t i) 35))
@@ -341,7 +386,10 @@
                         (cond (and ie (zero? iv)) rv
                               (and re' ie) [:complex rv iv]
                               (and (not re') (not ie)) [:complex rv iv]
-                              :else (undecided "a complex number whose parts differ in exactness")))))))))))
+                              ;; SPEC 12 :mixed-exactness: both parts inexact, an exact part its nearest binary64 (si's tower, SM5)
+                              :else (choose :mixed-exactness "a complex number whose parts differ in exactness"
+                                            #(let [d (fn [x] (if (instance? Double x) x (nearest-double x)))]
+                                               [:complex (d rv) (d iv)]))))))))))))
 
 ;; ---- the datum reader (R6RS 4.2, 4.3)
 
@@ -378,7 +426,14 @@
             (let [e (run-end t (+ i 2)) tok (subvec t (+ i 2) e)]
               (cond (= tok [114 54 114 115]) (recur (long e))   ; #!r6rs
                     (and (empty? tok) (>= e n)) (eof i "#!")
-                    (identifier-name tok) (undecided (str "#!" (text-of tok) ": the implementation's (R6RS 4.1)"))
+                    (identifier-name tok)
+                    (let [nm (text-of tok) why (str "#!" nm ": the implementation's (R6RS 4.1)")]
+                      (case nm
+                        ;; SPEC 12 :fold-case: #!fold-case folds the identifiers after it to lower case, #!no-fold-case stops it
+                        ("fold-case" "no-fold-case")
+                        (do (choose :fold-case why #(when *fold* (vreset! *fold* (= nm "fold-case")))) (recur (long e)))
+                        ;; SPEC 12 :hash-bang: any other #!<identifier> is a syntax violation
+                        (choose :hash-bang why #(token-violation t i e))))
                     :else (token-violation t i e)))
             :else i))))))
 
@@ -473,7 +528,7 @@
         (if (some? v)
           [(fm/number-form v) e]
           (if-let [nm (identifier-name tok)]
-            [(fm/sym nm) e]
+            [(fm/sym (if (and *fold* @*fold*) (.toLowerCase ^String nm java.util.Locale/ROOT) nm)) e]
             (if (and (>= e (count t)) (re-find #"\\x[0-9a-fA-F]*$" (text-of tok)))
               (eof i "an inline hex escape")
               (token-violation t i e))))))))
@@ -517,11 +572,17 @@
           :else (token-violation t i (max (+ i 2) (run-end t (inc i))))))
       :else (token-datum t i))))
 
+(declare read-all*)
+
 (defn read-all
   "What the report says the text s reads as: {:data [{:off [start end] :form F}] :error nil}, {:data [...] :error {:class K
   :at OFFSET :end BOOL}} (the data before a syntax violation; :end, the violating run reaches the end of the text), or
   {:undecided REASON}. Offsets in characters (Unicode scalar values)."
   [^String s]
+  (binding [*applied* (volatile! #{}) *fold* (volatile! false)]
+    (let [r (read-all* s)] (if (and (seq @*applied*) (not (:undecided r))) (assoc r :choices @*applied*) r))))
+
+(defn- read-all* [^String s]
   (let [t (vec (.toArray (.codePoints s)))
         n (count t)]
     (loop [i 0 acc []]

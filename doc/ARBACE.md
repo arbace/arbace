@@ -332,6 +332,12 @@ from https://github.com/clojure/core.specs.alpha at `v0.6.133-alpha10`,
 `75875946b7e827a1cec91ce645d5e1dcfc475e49`), derived on 2026-10-07 by `bin/vendor-spec` (on that branch) and
 maintained by hand since; each file names its origin in a comment.
 
+Generated from data (SCS9 (c), 2026-11-08): `repr/scheme/category.ae` (the general categories) and
+`repr/scheme/unicode.ae` (the identifier ranges), and beside them si's `go/arbace/scm/unicode.ae`, are made by
+`arbace.repr.scheme.ucd` (`bin/repr-scheme ucd gen`, `check`) from the Unicode Character Database 16.0.0
+(https://www.unicode.org/Public/16.0.0/ucd/ `UnicodeData.txt`, `extracted/DerivedGeneralCategory.txt`, pinned by SHA-256 in
+`test/scheme/ucd.edn`); each file says so in its docstring or header.
+
 The converted files keep their Java file's notice as a comment; which license covers which file
 is stated only in [LICENSE.md](../LICENSE.md). Details, the renaming rules and how to build and
 run it: [VENDOR-NOTES.md](VENDOR-NOTES.md).

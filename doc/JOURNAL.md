@@ -1119,3 +1119,39 @@ c2j-check` (19 of 19), `bin/si corpora controls-test`, `bin/reap --record`, `bin
 Scheme's scores: completeness 97.3 (unchanged), maturity 100, independence 99.6 to 99.8 (judge 0.979 to 0.989). Night: `bin/repr-scheme
 check --record`, `bin/si check --record`, `bin/si check --aot --record`. Proposed: SCS9 (the scans by a pinned UCD 16.0, the reader's tables
 from it), SCS10 (si's choices where R6RS defers stated and applied by the report), SCS11 (earley and nboyer at the corpus's sizes, compiled).
+
+## 2026-11-08: SCS9 (c), SCS10 (b), SCS11 (b), Scheme's scans by Unicode's data, si's reading choices stated, Larceny's benchmarks at their sizes (branch `scheme-props`, from b05140c26)
+
+The user's decisions of 2026-11-08 (about 21:00) on SCS9-SCS11 (doc/scheme/SCHEME-SURVEY.md, "As built: SCS9 (c), SCS10 (b), SCS11 (b)").
+SCS9 (c), with the network allowed for this one fetch: the Unicode Character Database 16.0.0's `UnicodeData.txt` and
+`extracted/DerivedGeneralCategory.txt` from https://www.unicode.org/Public/16.0.0/ucd/ and Unicode's license (https://www.unicode.org/license.txt,
+Unicode License V3; the version directory has none) fetched into a new directory, the main checkout's `.tmp/scheme/ucd-16.0.0`, data only,
+pinned by SHA-256 in `test/scheme/ucd.edn` (UnicodeData.txt `ff58e5823bd095166564a006e47d111130813dcf8bf234ef79fa51a870edb48f`,
+DerivedGeneralCategory.txt `7676ab755a41ef82108460238569e60ad65c191ddafe61b36c6765ec1353f293`, license
+`e7a93b009565cfce55919a381437ac4db883e9da2126fa28b91d12732bc53d96`), the license and the files it covers in LICENSE.md, the generated files'
+origin in doc/ARBACE.md. PropList.txt was not fetched: R6RS 4.2.1's classes are by general category alone. `arbace.repr.scheme.ucd` reads
+UnicodeData.txt (its First/Last ranges expanded, unlisted Cn), checks it against DerivedGeneralCategory.txt code point for code point (equal),
+and generates `arbace/repr/scheme/category.ae` (3,368 runs: the report's categories, in place of `Character/getType`'s Unicode 17.0),
+`arbace/repr/scheme/unicode.ae` and `go/arbace/scm/unicode.ae` (the readers' identifier ranges by R6RS's rule, stated in the generator apart from
+the report: number for number the ranges SC21 took from Chez); `bin/repr-scheme ucd fetch|gen|check`, `pins check` covers the pins, the gate's
+`scheme-read.scans` runs `ucd check`. The check judges the three reading scans by the report's classes (no dump read), the four printing scans
+by Chez's dumps; `report-scans` is now a check (3 of 3 equal to Chez's; SCS7's 4,790 and 4,803 differences were Unicode 17.0's, gone over 16.0).
+SCS10 (b): doc/scheme/SPEC.md 12 states si's six choices where R6RS defers (`:mixed-exactness`, `:ratio-over-zero`, `:exact-naninf`,
+`:mantissa-width`, `:fold-case`, `:hash-bang`), applied by `arbace.repr.scheme.report` (`choose`, `*choices*`, `:choices`); the polar numbers and
+an exponent beyond the limits stay undecided. 48 probes and 2 files move off Chez's dumps (the brief's "about 75" counted the 24 polar probes
+that stay; Racket's base.sls reaches a polar number past its mixed complex), each agreeing with Chez's dump (`report-check`). Checked against
+Chez 10.3.0 (dump.ss) and si's runtime reader (`bin/si run`) by hand on 18 cases of their own, `test/scheme/choices.edn`, held at every check by
+`choices-test`: three differences classed (`:fold-char-names`, `:fold-full`, `:chezscheme-directive`; SCS12 proposes closing them).
+Alternatives considered for SCS10: changing repr/scheme's reader to Chez's folding now (not decided: SCS12), stating the polar numbers' choice
+(not decided: the last bit of cos and sin, SCS14). SCS11 (b): `larceny/earley-1000` and `larceny/nboyer-5` (the corpus's inputs) with
+`:aot-only` (bin/si's program list, `arbace.scheme.check/programs` at the interpreted level, reap's `:same-cases-extra`): compiled, both pass by
+their own result checks (earley 61 s, nboyer 5 98.5 s to run, peak 1.45 GB), recorded at the AOT level and Chez's runs beside (`--record-ref`).
+
+Checked: scheme-read-essential's command (1,358 equal; 1,188 probes and 108 files by the report, 48 and 2 by the choices; report-test,
+choices-test, controls, round trip, spec-check, corpora files), `--corpus whimsical`, `--corpus scans`, `report-check`, `report-scans --record`,
+`ucd check`, `bin/si unit`, `test --si`, `check` and `check --aot` on their essential subsets (controls differ, no regression), `r7rs`, `srfi`,
+`bin/si own --aot`, `bin/repr-scheme c2j-check` (21 of 21), `bin/gate --full --plan`, `bin/reap --record`, `bin/crops-score --record`, `--judge
+--strict` (0 problems). Scheme's scores: completeness 97.31 to 97.41 (98.84 to 98.88 without by design), maturity 100, independence 99.78 to 99.88
+(judge 0.989 to 0.994). Night: `bin/repr-scheme check --record`, `bin/si check --aot --record`, `bin/si check --record`. Proposed: SCS12 (the
+readers' folding and `#!chezscheme` as Chez's, full case folding from the pin), SCS13 (the readers' whitespace from the pin), SCS14 (the polar
+numbers by a correctly rounded reference).

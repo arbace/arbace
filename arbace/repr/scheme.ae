@@ -148,6 +148,31 @@
     (doseq [b bad] (println "FAILING report-test" (pr-str b)))
     (if (seq bad) 1 (do (println (str "report-test: ok (" (count report-tests) " numbers of known binary64 or exact value, by the report's conversion)")) 0))))
 
+;; SCS10 (b): si's stated choices (doc/scheme/SPEC.md 12) on cases of their own (test/scheme/choices.edn): the report with the choices
+;; reads each as repr/scheme's reader does, and a case where Chez's or si's runtime's recorded reading differs names its class
+(defn- choices-test-code []
+  (let [{:keys [classes cases]} (read-string (slurp (str (root) "/test/scheme/choices.edn")))
+        reading (fn [r] (if (:error r) :error (mapv :form (:data r))))
+        same (fn [a b] (if (or (= a :error) (= b :error)) (= a b) (and (= (count a) (count b)) (every? true? (map fm/tree= a b)))))
+        bad (for [{:keys [text rule chez si class] :as c} cases
+                  :let [r (rep/read-all text) mine (rd/read-all text {})
+                        d (when-not (:undecided r) (ck/report-diff mine r))
+                        ours (reading mine)
+                        differs (or (and (some? chez) (not (same ours chez))) (and (some? si) (not (same ours si))))
+                        why (cond (:undecided r) (str "undecided: " (:undecided r))
+                                  (not (contains? (:choices r) rule)) (str "the choice " rule " not applied: " (pr-str (:choices r)))
+                                  d (str "the report with the choices differs from the reader: " (pr-str d))
+                                  (and differs (not (contains? classes class))) (str "differs from Chez or si's runtime (" (pr-str chez) ", " (pr-str si) ") in no class")
+                                  (and class (not differs)) (str "a stale class " class ": the readings agree")
+                                  :else nil)]
+                  :when why]
+              [text why])]
+    (doseq [[t why] bad] (println "FAILING choices-test" (pr-str t) why))
+    (if (seq bad) 1
+        (do (println (str "choices-test: ok (" (count cases) " cases of si's stated choices, doc/scheme/SPEC.md 12: the report with the choices reads each as the reader does; "
+                          (count (filter :class cases)) " differ from Chez or si's runtime, classed: " (str/join ", " (map name (sort (distinct (keep :class cases))))) ")"))
+            0))))
+
 (defn- cmd-report-check
   "report-check DIR (the oracle tier's, by hand): every probe of DIR/probes and (SCS7 (c)) every corpus file of DIR/dump-ID.edn read
   by the report's grammar, by Arbace's reader and against Chez's dump (DIR/dump-probes.edn, DIR/dump-ID.edn): where the report decides, the three must agree (data, offsets, an error's
@@ -159,9 +184,13 @@
         same (fn [a b] (and (= (count (:data a)) (count (:data b)))
                             (every? true? (map (fn [x y] (and (fm/tree= (:form x) (:form y)) (= (:off x) (:off y)))) (:data a) (:data b)))
                             (= (boolean (:error a)) (boolean (:error b)))))
+        bare (fn [text] (:undecided (binding [rep/*choices* false] (rep/read-all text))))
         rows (for [f (sort (.list (java.io.File. (str dir "/probes"))))
                    :let [p (str dir "/probes/" f) text (slurp p) r (rep/read-all text) rule (ck/report-exception rules (subs f 0 (- (count f) 3)))]]
                (cond (:undecided r) [:undecided f (:undecided r)]
+                     (and (:choices r) (not (same r (dumps f)))) [:choice-differs-from-chez f (:choices r)]
+                     (and (:choices r) (not (same r (rd/read-all text {})))) [:report-differs-from-arbace f (:choices r)]
+                     (:choices r) [:agree-by-choice f (:choices r)]
                      rule (if (same r (dumps f)) [:stale-rule f (:id rule)] [:chez-past-report f (:id rule)])
                      (not (same r (dumps f))) [:report-differs-from-chez f]
                      (not (same r (rd/read-all text {}))) [:report-differs-from-arbace f]
@@ -175,13 +204,22 @@
                     d (ck/read-dumps f)
                     :let [k (keyed (:file d) (:file d)) text (slurp (:file d)) r (rep/read-all text) rule (ck/report-exception rules k)]]
                 (cond (:undecided r) [:undecided k (:undecided r)]
+                      (and (:choices r) (not (same r d))) [:choice-differs-from-chez k (:choices r)]
+                      (and (:choices r) (not (same r (rd/read-all text {})))) [:report-differs-from-arbace k (:choices r)]
+                      (:choices r) [:agree-by-choice k (:choices r)]
                       rule (if (same r d) [:stale-rule k (:id rule)] [:chez-past-report k (:id rule)])
                       (not (same r d)) [:report-differs-from-chez k]
                       (not (same r (rd/read-all text {}))) [:report-differs-from-arbace k]
                       :else [:agree k]))
-        bad #{:stale-rule :report-differs-from-chez :report-differs-from-arbace}]
+        ;; SCS10 (b): a choice where si (Arbace's reader) and Chez differ is a difference to class (test/scheme/report-chez.edn's way):
+        ;; none at SCS10, so it fails
+        bad #{:stale-rule :report-differs-from-chez :report-differs-from-arbace :choice-differs-from-chez}
+        undecided-bare (count (filter #(bare (slurp (str dir "/probes/" %))) (.list (java.io.File. (str dir "/probes")))))]
     (doseq [r (concat rows frows) :when (bad (first r))] (println (pr-str r)))
-    (doseq [r frows :when (= :undecided (first r))] (println (pr-str r)))
+    (doseq [r (concat rows frows) :when (= :undecided (first r))] (println (pr-str r)))
+    (println (str "report-check: by the choice (SCS10 (b), doc/scheme/SPEC.md 12): "
+                  (pr-str (into (sorted-map) (frequencies (mapcat #(nth % 2) (filter #(= :agree-by-choice (first %)) (concat rows frows))))))
+                  "; the report alone leaves " undecided-bare " probes undecided"))
     (println (str "report-check: " (count rows) " probes: " (pr-str (into (sorted-map) (frequencies (map first rows))))))
     (println (str "report-check: " (count frows) " corpus files: " (pr-str (into (sorted-map) (frequencies (map first frows))))))
     (if (some bad (map first (concat rows frows))) 1 0)))
@@ -298,11 +336,13 @@
     (println (str "files and probes: " n ", equal to their judge (Chez's dump; a probe the report decides, the report's grammar): " (- n (count diffs))
                   ", differing: " (count diffs) " (listed " (- (count diffs) (count unlisted)) ")"))
     (let [fr (frequencies (for [[k j] judges :when (.startsWith ^String k "probe/")] j))]
-      (println (str "probes (SCS5 (b)): " (get fr :report 0) " judged by the report's grammar (arbace.repr.scheme.report, no dump read), "
-                    (get fr :dump 0) " by Chez's dump (the report leaves them to the implementation, or test/scheme/report-chez.edn names them)")))
+      (println (str "probes (SCS5 (b), SCS10 (b)): " (+ (get fr :report 0) (get fr :choice 0)) " judged by the report's grammar (arbace.repr.scheme.report, no dump read; "
+                    (get fr :choice 0) " of them by si's stated choices, doc/scheme/SPEC.md 12), "
+                    (get fr :dump 0) " by Chez's dump (the polar numbers, or test/scheme/report-chez.edn names them)")))
     (let [fr (frequencies (for [[k j] judges :when (not (.startsWith ^String k "probe/"))] j))]
-      (println (str "files (SCS7 (c)): " (get fr :report 0) " judged by the report's grammar (no dump read), "
-                    (get fr :dump 0) " by Chez's dump (a datum the report leaves to the implementation, or test/scheme/report-chez.edn names them)")))
+      (println (str "files (SCS7 (c), SCS10 (b)): " (+ (get fr :report 0) (get fr :choice 0)) " judged by the report's grammar (no dump read; "
+                    (get fr :choice 0) " of them by si's stated choices), "
+                    (get fr :dump 0) " by Chez's dump (a datum the report and the choices leave open, or test/scheme/report-chez.edn names them)")))
     (let [r (ck/symbol-rule)]
       (println (str "symbol rule: " (:names r) " names, " (:bare r) " bare, bad " (pr-str (:bad r))))
       (when (seq (:bad r)) (reset! rule-bad true)))
@@ -330,7 +370,7 @@
                  (pr-str (into (sorted-map) (map (fn [[k d]] [k (select-keys d [:kind :chez :mine])]) diffs)))
                  "\n")))
     (max (if (or (and (not record) (or (seq unlisted) (seq gone))) (seq scan-bad) @rule-bad) 1 0) (ctl/run :read read-found)
-         (ctl/run :read-report report-found) (report-test-code))))
+         (ctl/run :read-report report-found) (report-test-code) (choices-test-code))))
 
 (defn- spec-blocks
   "The fenced blocks of a markdown file: [[lang text] ...]."
