@@ -3484,7 +3484,7 @@ bin/cppi route-compare --aot --corpus gxx-dg-run --sample 25
 # all four exit 0: route.bash's cppi_route_default=auto, then bin/cppi check --record, check --aot --record and the samplings' --record
 ```
 
-### Proposed (CP247-CP249; none decided)
+### Proposed (CP247-CP249; decided (a), (a), (a) by the user, 2026-11-08: "As built: cpp-cp247")
 
 - **CP247: the dg-error part back in `--full`.** Since ORS31 (a) its 4,597 files run only in the oracle tier (0.5), and the gate no longer
   re-reads them. (a) The cxxdump packs of mac/oracle-records-cpp2 (`4ec2da932`'s `tools/cxxdump -records`, `e63d37180`'s deterministic
@@ -3515,3 +3515,126 @@ One throwaway `du` wrote its errors to `/dev/null`, against the day's rules. The
 second extraction was made with the disk above 80%. Scratch in the worktree's `.tmp/`: `repr-cpp-check/` and `lists-s/` (the lists),
 `keys*.txt`, `o1.txt`, `ess-*.log`, `pp20.*`, `only10*`, `dgpp-*`, `dg-own*.log`, `dg-mod.log`, `ir-clang/`, `ir-auto/` (with the bug),
 `ir-auto2/`, `irstage.sh` (the IR stage's driver), `rc/` (the made-up judgments), `rt-samples.log`, `stubs/`.
+
+## Decided (the user, 2026-11-08: CP247, CP248, CP249)
+
+CP247 (a): the cxxdump packs, the dg-error part back in `--full` on clang's recorded dumps. CP248 (a): a clang half of the target description,
+the native parser on it. CP249 (a): the ten option lists g++ refuses stay as they are (the model's deltas of the options it knows).
+
+## As built: cpp-cp247 (2026-11-08, write-ahead; branch `cpp-cp247` from next 5af7d0058)
+
+### CP248 (a): the clang half of Arbace's C++ target
+
+The native parser (CX11) read clang's recorded predefined macros, search list and `__has_` answers (`test/cpp/host`, `REPR_CPP_HOST`): the
+read stage's other consumer of a record. Now it reads Arbace's own:
+
+- **`test/cpp/clang.ae`** (`cpp.clang`): a port of clang 23.1.5's `clang/lib/Frontend/InitPreprocessor.cpp` (InitializeStandardPredefinedMacros,
+  InitializeCPlusPlusFeatureTestMacros, InitializePredefinedMacros with DefineFloatMacros, DefineTypeSize, DefineTypeMin, DefineFmt,
+  DefineExactWidthIntType(Size), DefineLeastWidthIntType, DefineFastIntType), `Targets/X86.cpp`'s getTargetDefines (the default CPU x86-64:
+  `k8` with its tuning macro, MMX, SSE2, FXSR, CX8), `Targets/OSTargets.h`'s LinuxTargetInfo::getOSDefines and `Targets.cpp`'s DefineStd and
+  defineCPUMacros, rule for rule, from the pinned `llvm-project-23.1.5.src.tar.xz` (test/cpp/corpora.edn; read from the main checkout's
+  `.tmp/llvm`). Apache 2.0 with the LLVM Exceptions: the file carries clang's notice, LICENSE.md names it.
+- **`cpp/target/clang.edn`**: the facts it reads beside C's `c/target/abi.edn` (whose integer types' sizes and signedness it shares): clang's
+  version and vendor ("Alpine"), GNUC 4.2.1 and ABI 1002, TargetInfo's types (WIntType unsigned int, the least types, getTypeName's spellings
+  `short`, `unsigned short`, the format modifiers), the new and suitable alignments, MAX_INT_BITS, the interference sizes, PickFP's float
+  strings (half, single, double, x87), the driver's Alpine defaults (PIE level 2, `-fstack-protector-strong` as `__SSP_STRONG__ 2`, no
+  math-errno on musl, DWARF CFI), the language options' years (sized deallocation 2014, aligned allocation 2017, char8_t 2020), the `__has_`
+  tables (the standard attributes' values, the GNU and clang attribute lists, the builtins) and the search list.
+- **`bin/repr-cpp target gen`** writes `cpp/target/host/predefined/clang/STD.h` (16), `search-clang.txt` and a fourth column of `has.tsv`
+  (clang's answer; load-host's column 3) beside g++'s; `verify` holds the 37 files to what gen makes (cpp-read-essential runs it);
+  `host-oracle` compares clang's files with `test/cpp/host` too (the has column numerically, as clang -E writes the standard values with L).
+- **The readers**: `arbace.repr.cpp.native`'s host-dir is `REPR_CPP_HOST`, else `host/gxx-dir` (REPR_CPP_TARGET=arbace, the default:
+  cpp/target/host; gxx: test/cpp/host, the oracle tier's); `ppcheck --clang` likewise; `bin/repr-cpp read|print` and `native-check` no longer
+  force test/cpp/host; the sysroot's roots from `cpp/target/host/search-clang.txt` (the same lines).
+
+### CP247 (a): the dg-error part on clang's recorded dumps
+
+- **tools/cxxdump**: the records mode of mac/oracle-records-cpp2 (4ec2da932, e63d37180), merged into next's history but lost from its files
+  by a later merge, restored: `-records DIR[:DIR...]` (a cache's layout read with no clang: a miss is UNRECORDED, a present dependency with
+  another digest STALE, an absent one not), `-clang-id`/`CXXDUMP_CLANG_ID` (the recorded clang line in the key), the node ids renumbered by
+  first appearance (cxxdump-9: ASLR made the dumps differ run to run), the checkout keyed as `@ROOT@` (`CXXDUMP_ROOT`); new: the g++.dg tree
+  keyed as `@TREE@` (`CXXDUMP_TREE`, replaced before the root, which may hold it), since the tree lives in whichever `.tmp/` extracted the
+  pinned tarball (`TestTreeKey`).
+- **`bin/repr-cpp record-dumps dg-error [--jobs N] [--sample N]`** (by hand on a host with clang; `make repr-cpp-record-dumps`): the part
+  run live into a fresh cache (`dg --corpus dg-error --dumps-only`, `REPR_CPP_LIVE=1`) and packed by `oracle_make` as
+  `test/repr/cpp/records/cxxdump-dg-error.{sha256,tsv}` (the store `ARBACE_ORACLE_PACKS`); `verify-dumps dg-error [--sample N]` the pack
+  against clang afresh (ORS6 (a)); `cxxdump-ensure`: the filter rebuilt when tools/cxxdump's sources' digest is not its build's (an older
+  build lacks `-records`).
+- **`bin/lib/repr-cpp/dg`**: the dg-error part reads the pack (`cxxdump -records $(cpr_dump_dirs)`, the recorded clang line) unless
+  `REPR_CPP_LIVE=1`; `--own` takes the part (refused only with REPR_CPP_LIVE); with no pack pinned the part prints "no record yet" and is
+  skipped (exit 0: the write-ahead until the night's recording).
+- **The gate**: `cpp-dg` gains the part `dg-error` (`--own`, on `[:stage0 :go]`: Go builds the filter); `cpp-dg-oracle` runs
+  `env REPR_CPP_LIVE=1 bin/repr-cpp dg --corpus dg-error` on `[:stage0 :go :cxx]`. The read cell's 4,597 dg cases stay 0.5 (a record), the
+  read of the accepted units checked nightly again.
+
+### CP249 (a)
+
+Nothing built: the ten lists keep the model's deltas (host-oracle: 324 compared, 10 without g++'s answer).
+
+### Checked (light; clang, clang++, clang-23, g++, gcc, cc, cpp, c++, cc1, cc1plus, ld and as stubs exiting 99 first on PATH where marked)
+
+| check | result |
+|---|---|
+| `bin/repr-cpp target gen`, `verify`, `host-oracle` | 37 files; verify equal; **37 of 37 equal to test/cpp/host's**, the 16 clang files byte for byte (`cmp`), search-clang.txt equal, clang's has column 116 of 116 |
+| host-oracle on a mutated clang.edn (version 23.1.4, `__builtin_launder` dropped) | 20 of 37, exit 1 |
+| `bin/repr-cpp native-check samples` (the native parser on the target's clang half) | 9 same, 68 of 68 items, 0 declines; both controls fail as they must |
+| `REPR_CPP_TARGET=bogus bin/repr-cpp read --reader native` | refused (the native parser reads through gxx-dir) |
+| `bin/repr-cpp roundtrip-corpus samples --judge own`; `gxx-dg-essential --judge own` (stubs) | 9 pass, the control fails; 32 pass, 1 known, 0 regressions |
+| `bin/repr-cpp target verify && pp-check --essential` (cpp-read-essential's command) | 19, 31, 3 as before; both controls fail |
+| `bin/repr-cpp cxxdump-test` | pass (TestRenumber, TestRootKey, TestTreeKey) |
+| `record-dumps dg-error --sample 200` into the worktree's store | 23 files, 71 members, 11 KB xz, 15 s (not committed) |
+| `dg --corpus dg-error --own --sample 200` from that pack (stubs) | pass 18 of 23 supported as the committed record, exit 0; the dumps, statuses and rows.edn equal to a live run's (`REPR_CPP_LIVE=1`) |
+| the same on another extraction of g++.dg (`REPR_CPP_GXX_DG`) | the same 18 of 23 (the @TREE@ key) |
+| `--sample 300` (files the pack lacks) | 8 UNRECORDED crashes, 16 failing, exit 1 |
+| `verify-dumps dg-error --sample 200` | 23 entries, all equal |
+| no pack pinned, `dg --corpus dg-error --own` | "no record yet", skipped, exit 0 |
+| `make check-makefile`, `gate.crops check`, `bin/gate --full --plan`, `--oracle --plan` | pass; 0 problems; plans `cpp-dg.dg-error` beside `cpp-dg.preprocess`; `cpp-dg-oracle`, `cpp-target-oracle` |
+| `bin/crops-score --crop cpp`; `--judge --strict` | 76.1 / 100 / 67.7, as before; 0 facts refuted, 0 problems |
+
+### The numbers
+
+| measure | before (next 5af7d0058) | after (cpp-cp247) | after the night |
+|---|---|---|---|
+| completeness | 76.1 (96.5 without by design) | 76.1 (96.5) | about 87 (cpp-target's own round-trip records and cells.edn, the night's) |
+| maturity | 100.0 | 100.0 | 100.0 |
+| independence | 67.7 | 67.7 (read 0.648: the dg cases a record either way) | 71.0 (judge 0.902, cpp-target's night) |
+
+CP247 and CP248 move no number: the dg part was a record (0.5) in the oracle tier and stays one in `--full`, and the native parser's clang
+record was in no counted case. What they buy: the dg-error reading of the accepted units regression-checked nightly with no clang, and the
+read stage's last clang record (the native parser's) gone, so only the dg record holds the read stage below 1 (CX12, Sema's diagnostics).
+
+### The night's commands (one process at a time; `export ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace GOMEMLIMIT=1400MiB REPR_CPP_THREADS=2`)
+
+```
+bin/repr-cpp target verify && bin/repr-cpp target host-oracle         # 37 of 37 (seconds)
+bin/repr-cpp record-dumps dg-error --jobs 2                            # CP247 (a): clang on the 4,597 files, the pack cxxdump-dg-error (about 1 h)
+bin/repr-cpp verify-dumps dg-error --sample 20                         # the pack against clang afresh: all equal
+PATH=<stubs>:$PATH bin/repr-cpp dg --corpus dg-error --own             # cpp-dg.dg-error from the pack, no clang: as test/cpp/check-dg-linux-amd64.edn
+git add test/repr/cpp/records/cxxdump-dg-error.{sha256,tsv}            # the pin and manifest; the pack in the store (bin/oracle-records mirror)
+bin/repr-cpp native-check samples .tmp/nc && bin/repr-cpp native-check native .tmp/nc2   # CP248 (a): the native parser on the target's clang half
+```
+
+Then cpp-target's night commands as that section lists them (the own round-trip records, CP243 (a)'s flip, `bin/crops-score --record`).
+
+### Proposed (CP250-CP251; none decided)
+
+- **CP250: clang's option deltas.** The native parser has no `opt-deltas-clang.edn` (neither had the record): a file's options reach its
+  macros only through the modelled `-D`, `-U` and `-O`. (a) A clang half of `option-lists.txt`'s deltas (cpp.clang's macros under options:
+  `-O`, `-fno-exceptions`, `-fno-rtti`, `-march`, `-m`, `-fPIC`..., as InitPreprocessor and X86's feature handling give them), checked against
+  clang's deltas recorded by hand (`bin/repr-cpp host record` extended); costs about half a day. (b) As now. **Recommended: (a)** once a
+  native-check file is found to differ by an option.
+- **CP251: the dg pack's dependencies on the host's headers.** The recorded dumps' dependency lists name libstdc++'s installed headers
+  (`/usr/include/c++/15.2.0/...`, clang reads the host's), so an Alpine upgrade of g++'s headers makes entries STALE (a re-record day,
+  ORS6 (a)), and on a host without them the entries stand unchecked. (a) Record the dumps with `-isystem` the target's tree (`bin/repr-cpp
+  target tree`) in place of the host's, so the dependencies are the pinned tarball's; changes the dumps' paths, a recording and the record's
+  judgment once (clang on the same headers: expected equal). (b) As now. **Recommended: (a)** with the next re-record.
+
+### Left
+
+The pack itself (the night's recording); CX12 (Sema's diagnostics natively, then the dg cases at 1); CP250, CP251.
+
+### Slips, scratch
+
+None against the day's rules. The 23-file sample pack sits in the worktree's own store (`.tmp/packs/`) and its pin and manifest were moved
+to `.tmp/sample-records/` (not committed). Scratch in the worktree's `.tmp/`: `llvm-src/` (the seven clang sources read), `stubs/`, `packs/`,
+`repr-cpp/record-dumps/`, `dg-rec/`, `dg-live/`, `dg-unrec/`, `dg-other/`, `dg-none/`, `cx-live/`, `nc-arbace/`, `*.log`.

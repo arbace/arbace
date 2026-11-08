@@ -919,3 +919,27 @@ OCAML-SURVEY.md, "As built: ocamllex ported (OC186 (a)), compiler-libs typed nat
 - **The by-design review**: eval's 205 (180 by a decided rule, 25 `c-api` deferred); 14 reachable cases their rules do not cover:
   Proposed OC192-OC197 (finalisers, max_domains, ocamlyacc, a test's second program, speed, the `.mll` tests), with OC191.
 - Scores (crops-score, the records unchanged): OCaml 80.9 / 95.2 / 100 / 87.4, before and after; the night's commands in the survey's section.
+
+## 2026-11-08: C++'s CP247 (a), CP248 (a), CP249 (a) built (branch `cpp-cp247`, from next 5af7d0058; write-ahead)
+
+By the user's decisions of 2026-11-08 (~17:00), under the day's light rules (doc/cpp/CPP-SURVEY.md, "As built: cpp-cp247").
+
+- **CP248 (a)**, the clang half of Arbace's C++ target: `test/cpp/clang.ae` ports clang 23.1.5's InitPreprocessor.cpp (the standard,
+  feature-test and predefined macros with their helpers), X86.cpp's getTargetDefines (the baseline CPU) and OSTargets.h's Linux defines from
+  the pinned llvm-project-23.1.5.src.tar.xz (SHA-256 fb50b1ea...6a6e, test/cpp/corpora.edn; Apache 2.0 with LLVM Exceptions, LICENSE.md),
+  over C's c/target/abi.edn and the new cpp/target/clang.edn (TargetInfo's facts, Alpine's driver defaults, PickFP's tables, the __has_
+  tables, the search list). `bin/repr-cpp target gen` writes predefined/clang/, search-clang.txt and has.tsv's clang column; host-oracle 37
+  of 37 files equal to test/cpp/host (clang's 16 byte for byte; a mutated clang.edn fails). The native parser, ppcheck --clang and the
+  sysroot read the target in place of clang's record (REPR_CPP_TARGET=gxx: the record). native-check samples 68 of 68 items as before.
+  Alternative considered: CP248 (b), the native parser on g++'s answers (rejected by the decision: clang's AST was made with clang's macros).
+  The proposal's estimate of "about 60 lines of differences per standard" was low: about 250; the port computes all of them.
+- **CP247 (a)**, the dg-error part back in `--full`: tools/cxxdump's records mode (mac/oracle-records-cpp2's 4ec2da932 and e63d37180: in
+  next's history, but their tools/cxxdump, bin/repr-cpp record-dumps and the roundtrip's records mode were lost from the files by a later
+  merge; only test/oracle-records/cpp.bash's cpr_dump_dirs remained) restored, with the g++.dg tree keyed as @TREE@; `bin/repr-cpp
+  record-dumps dg-error`, `verify-dumps`, `cxxdump-ensure`; the dg script reads the pack unless REPR_CPP_LIVE=1; cpp-dg gains the part
+  dg-error (no pack yet: "no record yet", skipped), cpp-dg-oracle runs live. Proved on a 23-file sample pack (not committed): equal to a live
+  run, tree-independent, a missing entry fails. The round trips' records mode was not restored: their clang levels are the oracle tier's since
+  ORS31 (a), read live there.
+- **CP249 (a)**: as now, nothing built.
+- Scores unchanged (76.1 / 100 / 67.7; the dg cases a record either way, the native parser's record in no counted case); independence.edn's
+  C++ read fact rewritten to say so. Proposed CP250 (clang's option deltas), CP251 (the dg pack's dependencies on the host's headers).
