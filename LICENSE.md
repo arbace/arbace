@@ -664,6 +664,19 @@ covers what.
   are Arbace's own.
   Their jdk26u sources join `jdk/forms/` once `bin/jrt-convert update` has run: 47 files of selector-sources (40 of
   `src/java.base/share/classes`, 4 of `src/java.base/unix/classes`, 3 of `src/java.base/linux/classes`).
+- F10b's datagram channels and multicast (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F10b (write-ahead)";
+  recorded by the rule of B7): jdk26u's files (https://github.com/openjdk/jdk26u at `baf63fb`) transcribed with the
+  changes their headers name, `overlay/jdk/java.base/sun/nio/ch/NativeSocketAddress.java` (from
+  `share/classes/sun/nio/ch/NativeSocketAddress.java`) and `DatagramDispatcher.java` (from
+  `unix/classes/sun/nio/ch/DatagramDispatcher.java`), `Net.java`'s multicast natives, the variant
+  `overlay/jdk/variants/DatagramChannelImpl.ae`, which keeps the jdk26u members it replaces, and the part of
+  `go/arbace/jrt/channels_linux.ae` that ports `src/java.base/unix/native/libnio/ch/DatagramChannelImpl.c`,
+  `DatagramDispatcher.c` and `Net.c`'s `joinOrDrop4/6`, `blockOrUnblock4/6`, `setInterface4/6`, `getInterface4/6` and
+  `initGroupSourceReq`: Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2 with
+  the Classpath Exception (text below); the rest of those files, the variants `DatagramSocketAdaptor.ae` and
+  `DatagramSocket.ae` (since F10b only an added accessor), `NetworkInterface.ae`'s accessors and
+  `go/arbace/jrt/datagrams_test.ae` are Arbace's own. Their jdk26u sources join `jdk/forms/` once `bin/jrt-convert
+  update` has run: 7 files of datagram-channel-sources (`src/java.base/share/classes`).
 - Other Go-build variants (J2G-SPEC §4.6; recorded by the rule of B7):
   `overlay/jdk/variants/AbstractChronology.ae`, `BitSet.ae`, `CRC32.ae`, `Collectors.ae`,
   `File.ae`, `FileHandler.ae`, `ParseUtil.ae`, `TimeZone.ae`, `TzdbZoneRulesProvider.ae`,

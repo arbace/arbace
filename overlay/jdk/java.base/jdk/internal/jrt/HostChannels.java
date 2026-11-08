@@ -224,4 +224,63 @@ public final class HostChannels {
 
     /** EventFD.set0: the counter's one added (an 8-byte write), as convertReturnVal. */
     public static native int eventfdSet0(int efd, int[] err);
+
+    // -- datagrams and multicast (F10b: DatagramChannelImpl.c's and Net.c's natives) --
+
+    /**
+     * DatagramChannelImpl.receive0: one datagram of fd, at most len bytes of it into b at off
+     * (recvfrom; MAX_PACKET_LEN at most), the sender's struct sockaddr into sender (28 bytes,
+     * NativeSocketAddress's), ECONNREFUSED retried when not connected (a blocking descriptor waits
+     * for one): the count, UNAVAILABLE, INTERRUPTED or THROWN (ECONNREFUSED when connected: a
+     * PortUnreachableException).
+     */
+    public static native int receive0(int fd, byte[] b, int off, int len, byte[] sender,
+                                      boolean connected, int[] err);
+
+    /**
+     * DatagramChannelImpl.send0: len bytes of b from off as one datagram to the struct sockaddr
+     * of target's first targetLen bytes (sendto; MAX_PACKET_LEN at most; a blocking descriptor
+     * waits for room): the count, UNAVAILABLE, INTERRUPTED or THROWN (ECONNREFUSED: a
+     * PortUnreachableException).
+     */
+    public static native int send0(int fd, byte[] b, int off, int len, byte[] target, int targetLen,
+                                   int[] err);
+
+    /** DatagramChannelImpl.disconnect0: connect(2) to AF_UNSPEC: 0 or THROWN. */
+    public static native int disconnect0(int fd, boolean isIPv6, int[] err);
+
+    /**
+     * Net.joinOrDrop4: IP_ADD_MEMBERSHIP or IP_DROP_MEMBERSHIP (source 0), else
+     * IP_ADD_SOURCE_MEMBERSHIP or IP_DROP_SOURCE_MEMBERSHIP, of group, interf, source (host order):
+     * 0, UNAVAILABLE (a join the host does not support) or THROWN.
+     */
+    public static native int joinOrDrop40(int fd, boolean join, int group, int interf, int source, int[] err);
+
+    /** Net.blockOrUnblock4: IP_BLOCK_SOURCE or IP_UNBLOCK_SOURCE: 0, UNAVAILABLE or THROWN. */
+    public static native int blockOrUnblock40(int fd, boolean block, int group, int interf, int source,
+                                              int[] err);
+
+    /**
+     * Net.joinOrDrop6: IPV6_ADD_MEMBERSHIP or IPV6_DROP_MEMBERSHIP (no source), else
+     * MCAST_JOIN_SOURCE_GROUP or MCAST_LEAVE_SOURCE_GROUP, of group (16 bytes), interface index,
+     * source (16 bytes or null): 0, UNAVAILABLE or THROWN.
+     */
+    public static native int joinOrDrop60(int fd, boolean join, byte[] group, int index, byte[] source,
+                                          int[] err);
+
+    /** Net.blockOrUnblock6: MCAST_BLOCK_SOURCE or MCAST_UNBLOCK_SOURCE: 0, UNAVAILABLE or THROWN. */
+    public static native int blockOrUnblock60(int fd, boolean block, byte[] group, int index, byte[] source,
+                                              int[] err);
+
+    /**
+     * Net.setInterface4 (IP_MULTICAST_IF of interf, host order; v6: IPV6_MULTICAST_IF of an
+     * interface index): 0 or THROWN.
+     */
+    public static native int setInterface0(int fd, boolean v6, int value, int[] err);
+
+    /**
+     * Net.getInterface4 (IP_MULTICAST_IF, host order) and getInterface6 (IPV6_MULTICAST_IF): 0
+     * with the value in value[0], or THROWN.
+     */
+    public static native int getInterface0(int fd, boolean v6, int[] value, int[] err);
 }

@@ -3361,3 +3361,174 @@ when jrt's `Runtime.version` is made the JDK build's (an hour).
 translated streams. (a) keep it to jrt's classes; (b) also run it over j2g's tables of translated classes in `bin/jrt
 test --prog` (the program root j2g writes), a check of slice 1's tables by day: half a day. **Recommended: (b)** when
 slice 4 restores the variants' members.
+
+## As built: F10b (write-ahead)
+
+(Its proposals were JCS168-JCS170 on `java-f10b`; renumbered JCS220-JCS222 when merged into `java-night`, 2026-11-08,
+since `java-serial2` had taken JCS168-JCS171.)
+
+Branch `java-f10b` (from `next` `bd33e27cc`), 2026-11-08, by day under the light rules: JCS163 (a)'s first part (the user,
+2026-11-07), **DatagramChannel and multicast through jdk26u's own `DatagramChannelImpl`, then the NIO adaptor as
+`DatagramSocket`'s delegate**. The closure's list, jrt's own Java, the variants, the Go natives with their tests, light checks
+only; nothing converted, translated or built into an executable. The asynchronous channels did not fit the slice: JCS220 below.
+
+**The shape** is F10a's: jdk26u's `DatagramChannel`, `MulticastChannel`, `MembershipKey`, `DatagramChannelImpl`,
+`DatagramSocketAdaptor`, `MembershipKeyImpl` and `MembershipRegistry` are plain Java over sun.nio.ch's native layer, which F10a gave
+jrt; F10b adds what that layer lacked, rule for rule from libnio's C (jdk26u at `baf63fb`):
+`src/java.base/unix/native/libnio/ch/DatagramChannelImpl.c` (`receive0`: recvfrom of at most MAX_PACKET_LEN bytes, the sender's
+struct sockaddr into NativeSocketAddress's, EAGAIN UNAVAILABLE, EINTR INTERRUPTED, ECONNREFUSED retried when not connected and a
+PortUnreachableException when connected, else handleSocketError; `send0`: sendto, the same results, ECONNREFUSED a
+PortUnreachableException; `disconnect0`: Linux's connect to AF_UNSPEC with sockaddr_in6's or sockaddr_in's size),
+`Net.c`'s multicast (`joinOrDrop4`: IP_ADD/DROP_MEMBERSHIP of a struct ip_mreq, IP_ADD/DROP_SOURCE_MEMBERSHIP of an ip_mreq_source,
+a join the host does not support, ENOPROTOOPT or EOPNOTSUPP, UNAVAILABLE, else handleSocketErrorWithMessage's "setsockopt failed";
+`blockOrUnblock4`: IP_BLOCK/UNBLOCK_SOURCE; `joinOrDrop6`: IPV6_ADD/DROP_MEMBERSHIP of an ipv6_mreq, MCAST_JOIN/LEAVE_SOURCE_GROUP
+of a group_source_req as `initGroupSourceReq` fills it; `blockOrUnblock6`: MCAST_BLOCK/UNBLOCK_SOURCE; `setInterface4/6`,
+`getInterface4/6`: IP_MULTICAST_IF's in_addr in network order, IPV6_MULTICAST_IF's index) and `DatagramDispatcher.c` (a connected
+channel's recv and send with no flags, which are read(2) and write(2), ECONNREFUSED a PortUnreachableException). The natives are
+HostChannels' nine new ones in `go/arbace/jrt/channels_linux.ae` (and "not available" in `channels_other.ae`), on F10a's
+descriptor table: a descriptor the channel configured blocking waits in Go's poller for a datagram or for room, a pre-closed one
+receives 0 (the dup2'd socket's end) and fails a send with EPIPE.
+
+**No native memory, the one departure.** jdk26u's channel passes its natives a direct buffer's address and a
+`NativeSocketAddress`'s (a struct sockaddr in memory from Unsafe), and registers the descriptor's close and the addresses' release
+with a Cleaner. jrt's `NativeSocketAddress` overlay keeps jdk26u's class, its methods and its layout (Linux's sockaddr_in and
+sockaddr_in6, the natives' sizeof and offsetof constants as their values on linux-amd64 and linux-arm64) over a byte array of the
+union's 28 bytes, which the Go natives hand the kernel as recvfrom's and sendto's sockaddr: the kernel writes and reads the same
+bytes it would in jdk26u. `DatagramChannelImpl`'s variant: the constructors without the Cleaner, `tryClose` closing the
+descriptor as the Cleaner's releaser does, `receiveIntoNativeBuffer` and `sendFromNativeBuffer` over the buffer's array and the
+address's bytes; jrt's temporary buffers being heap buffers (`Util`'s overlay), `receive` and `send` take jdk26u's
+substitute-buffer path unchanged.
+
+**What comes in, and how** (`test/jrt/jrt_sources.ae`'s `datagram-channel-sources`, one line in `sources`):
+
+| part | how |
+|---|---|
+| java.nio.channels (3) | jdk26u's `DatagramChannel`, `MulticastChannel`, `MembershipKey` |
+| sun.nio.ch (4) | jdk26u's `DatagramChannelImpl` (variant), `DatagramSocketAdaptor` (variant), `MembershipKeyImpl`, `MembershipRegistry` |
+| overlays (2 new, 2 grown) | `sun.nio.ch.NativeSocketAddress` (above), `sun.nio.ch.DatagramDispatcher` (jdk26u's unix class over HostChannels' read0 and write0, ECONNREFUSED a PortUnreachableException; `dup`, the macOS branch of `repairSocket`, NativeDispatcher's refusal: Linux's disconnect leaves an explicitly bound port bound and resets an ephemeral one to 0, the branch Linux takes); `Net` (the eight multicast natives' bodies, F10a's refusal gone); `HostChannels` (nine natives) |
+| variants (3 new, 1 gone, 1 grown) | `DatagramChannelImpl` (6 replaced, 4 cut: NIO_ACCESS, cleaner, receive0, send0; 1 added, `datagramException`); `DatagramSocketAdaptor$NetworkInterfaces` and `$DatagramSockets` (jdk26u reaches `NetworkInterface.getDefault`, its constructor and `DatagramSocket.NO_DELEGATE` through a private lookup's method handles and VarHandle, which the Go build has not: jrt's public accessors instead, 2 replaced 3 cut, 1 replaced); `DatagramSocket` (F11's `createDelegate` and constructor replaced by nothing: jdk26u's, the NIO adaptor the default delegate as in the JDK, JCS153 (c)'s second step; the variant now only adds `jrtNoDelegate`); `NetworkInterface` (+`jrtGetDefault`, `jrtNew`) |
+| Go | `channels_linux.ae` +289 lines of forms, `channels_other.ae` +44, `datagrams_test.ae` (TestChannelDatagram, TestChannelMulticast) |
+
+F11's `HostDatagramSocketImpl` stays in the closure, unreached (a program's DatagramSocketImplFactory returns its own impl):
+JCS221. `DatagramChannelImpl$AbstractSelectableChannels` (reflection on `AbstractSelectableChannel.forEach`) is reached only by
+`repairSocket`'s macOS branch.
+
+**Light checks done** (main's stage 0 as `ARBACE_HOST_EXE`, javac's tool `.tmp/gate-exe/javac-5ad357331dbcd7cfb0fd`,
+`REPR_JAVA_STALE_OK=1`, `GOMEMLIMIT=1400MiB`, each process under 1.5 GiB; scratch `.tmp/f10b/`):
+- `print-sources` of the branch: 2,286 lines, the base's 2,277 plus 7 jdk26u files and 2 overlays, no line twice;
+- **the joint javac check** (`/root/arbace/.tmp/night7/all9-run.sh CHECKOUT`): all 2,286 files compiled by the JDK's javac as
+  java.base's patch against jrt's overlays: **0 errors**, 4,959 classes (20.7 s, 0.9 GB; the base 2,277, 0 errors, 4,942);
+- the read: `bin/repr-java read-jdk --check` of the 9 new files with the sun.nio.ch overlays, HostChannels, HostFiles and
+  FileDescriptor as a patch of java.base: 20 converted, 0 failed, 0 javac errors, 0 unreadable (12.6 s, 0.65 GB);
+- the variants applied and parsed (`vet.ae`, JC9b's): DatagramChannelImpl 6/4/1, NetworkInterface 12/1/4, DatagramSocket 0/0/1,
+  the nested DatagramSocketAdaptor$NetworkInterfaces 2/3/0 and $DatagramSockets 1/0/0, all parsed;
+- jrt's own build (`bin/jrt build --arch amd64`, with `FROZEN_JAR` the main checkout's frozen jar for the test data; its `go
+  build ./...` stops at `arbace/expat`, Python's crop, as on F10a's day), then `go build` and `go vet` of `./jrt` for linux/amd64
+  and linux/arm64, and `go test ./jrt` on amd64: every test passes, the two new ones among them (`TestChannelDatagram`: a send to
+  a NativeSocketAddress's bytes and a receive with the sender's struct sockaddr, family and port; a non-blocking receive's
+  UNAVAILABLE; a datagram truncated to the buffer; a connected socket's receive after a refused send THROWN with ECONNREFUSED, a
+  disconnect, then an unconnected socket's refusal retried to UNAVAILABLE; a receive blocked in Go's poller woken by preClose to 0,
+  a send after it failing; `TestChannelMulticast`: IP_MULTICAST_IF set to 127.0.0.1 and read back in host order, a join of
+  239.255.0.1 on the loopback, a second join failing, a datagram to the group received by the member, a source blocked and
+  unblocked, the drop, IPV6_MULTICAST_IF by index). One collision found and fixed: `udp_linux.ae` already names
+  IP_ADD_SOURCE_MEMBERSHIP and IP_DROP_SOURCE_MEMBERSHIP.
+
+**JCS135, the closure's growth**: +3,969 jdk26u lines and 386 of jrt's overlays (+0.7% on the closure's about 668,000).
+
+**Expected yield.** The records (`test/java/check-interp.edn`, before F11 and F10a) hold 47 tests whose sources name a datagram
+class, all passing on the JDK (`test/java/ref-jdk26.edn`): 31 under java/net (F11's: DatagramPacket 4, DatagramSocket 13,
+DatagramSocketImpl 1, MulticastSocket 7, PortUnreachableException 3, B6499348, PlainSocketImpl/SetBufferSize, ipv6tests/
+BadIPv6Addresses), which since F10b run on jdk26u's own adaptor rather than F11's legacy delegate, and **16 F10b's own**:
+t05108 `channels/ConfigureBlocking`, t05109-t05118 `DatagramChannel/{AdaptorConcurrentIO, ChangingAddress, EmptyBuffer, NoSender,
+NotBound, Receive, Refused, StressNativeSignal, ThereCanBeOnlyOne, Truncate}`, t05162 `Selector/CloseInvalidatesKeys`, t05165
+`Selector/KeySets`, t05198 `SocketChannel/UnboundSocketTests`, t05199 `etc/AdaptorCloseAndInterrupt`, t05200
+`etc/NetworkChannelTests`. At risk: `EmptyBuffer` and `AdaptorCloseAndInterrupt` (interrupts: JCS162), `StressNativeSignal`
+(signals), `AdaptorConcurrentIO` (speed at the interpreted level). About **12 / 12 expected** of the 16, with F10a's 34 the
+selectors' area about 46; the java/net ones hold or gain (the adaptor's behaviour is the JDK's own).
+
+**The night's commands** (in the night's worktree with this branch merged, after F10a's and the night's other conversions;
+heavy ones under `bin/heavy-lock`; about 1.5 hours with the areas' checks, the conversion shared with the night's):
+
+```sh
+# 0. the joint javac check of the merged tree (0 errors expected; a light minute)
+/root/arbace/.tmp/night7/all9-run.sh /root/arbace/.tmp/worktrees/next
+# 1. jdk/ converted afresh: expect the sources line +7 share and +2 of jrt's own beyond F10a's; 0 failed, 0 javac errors,
+#    no javac: 0 fallbacks; jdk/forms + the 9 files (java/nio/channels' three, sun/nio/ch's six)
+REPR_JAVA_EXE=$(ls -td /root/arbace/.tmp/gate-exe/javac-*/ | head -1)arbace-javac REPR_JAVA_STALE_OK=1 \
+  ARBACE_HEAVY_CMD=$PWD/bin/heavy-lock bin/jrt-convert update
+# 2. j2g's edge afresh (DatagramChannelImpl's JavaNioAccess, Cleaner, MethodHandles, VarHandle, Method as outside
+#    references), javac's world's edge
+bin/heavy-lock bin/j2g-edge update && bin/heavy-lock bin/javac-vendor edge
+# 3. the executable; j2g's report: DatagramChannelImpl 6/4/1, DatagramSocketAdaptor$NetworkInterfaces 2/3/0,
+#    $DatagramSockets 1/0/0, DatagramSocket 0/0/1, NetworkInterface 12/1/4; no "VarHandle not constant" (SOCKET by
+#    MhUtil.findVarHandle, DatagramPackets' LENGTH and BUF_LENGTH by findVarHandle); no native without its Go function
+#    (HostChannels' 40); no access refusal of jrtGetDefault, jrtNew, jrtNoDelegate
+bin/heavy-lock bin/arbace-go --build && bin/arbace-go --smoke && bin/jrt test
+# 4. a smoke of F10b: expect "1 2 hi true", "2 yo", "3 true"
+target/arbace-go/amd64/arbace -e '(import (quote (java.nio ByteBuffer)) (quote (java.nio.channels DatagramChannel)) (quote (java.net InetSocketAddress InetAddress DatagramSocket DatagramPacket MulticastSocket)))
+  (let [lo (InetAddress/getLoopbackAddress) a (DatagramChannel/open) b (DatagramChannel/open)]
+    (.bind a (InetSocketAddress. lo 0)) (.bind b (InetSocketAddress. lo 0))
+    (.send a (ByteBuffer/wrap (.getBytes "hi")) (.getLocalAddress b))
+    (let [buf (ByteBuffer/allocate 8) from (.receive b buf)]
+      (println "1" (.position buf) (String. (.array buf) 0 (.position buf)) (= from (.getLocalAddress a))))
+    (let [s (DatagramSocket. 0 lo) p (DatagramPacket. (.getBytes "yo") 2 (.getLocalAddress b)) buf (ByteBuffer/allocate 8)]
+      (.send s p) (.receive b buf) (println "2" (String. (.array buf) 0 (.position buf))) (.close s))
+    (let [m (MulticastSocket. 0)] (println "3" (.getReuseAddress m)) (.close m))
+    (.close a) (.close b))'
+# 5. Java's levels interp and compiled on the datagram tests, then the whole corpus with the night's others: saved, not
+#    recorded; expect about 12 of F10b's 16 to pass, the 31 java/net ones to hold F11's, no passing test lost
+JAVA_CHECK_EXE=$PWD/target/arbace-go/amd64/arbace J2G_GO_EXE=$PWD/target/arbace-go/amd64/arbace \
+  JAVA_CHECK_HEAVY=$PWD/bin/heavy-lock bin/java-check --levels interp,compiled --jobs 8 \
+  --only 'jdk/java/(nio/channels/(DatagramChannel|ConfigureBlocking|Selector/(CloseInvalidatesKeys|KeySets)|SocketChannel/UnboundSocketTests|etc/(AdaptorCloseAndInterrupt|NetworkChannelTests))|net/(Datagram|Multicast|PortUnreachable|B6499348|PlainSocketImpl/SetBufferSize|ipv6tests/BadIPv6Addresses))' \
+  --save .tmp/f10b-night/check
+```
+
+**Risks and fallbacks**: (1) j2g's analysis checks access, which the light checks do not reach: the variants call only public
+members (the added accessors) or the class's own; (2) the macOS branch of `repairSocket` (`DatagramDispatcher.dup`'s
+refusal, `AbstractSelectableChannels`' reflection) is unreached on Linux, but should a test reach it, it fails with
+UnsupportedOperationException instead of jdk26u's dup2; (3) should j2g refuse a member of the new forms, the night's fallback
+leaves `datagram-channel-sources` out with the two overlays and the three variants, and restores F11's DatagramSocket variant
+(`git show 0bc16ca6e^:overlay/jdk/variants/DatagramSocket.ae`): F10a and F11 do not depend on F10b; (4) the multicast tests need
+the host's multicast routes (the loopback's join passes here).
+
+**What is left of F10**: the asynchronous channels (JCS220), the UNIX family with F9 (JCS164), the interrupts (JCS162); the
+night's run and the day's classification and records.
+
+## Proposed (F10b)
+
+### JCS220 The asynchronous channels: jdk26u's EPollPort group, or a thread per operation
+
+The asynchronous channels hold 8 tests of the corpus (`AsynchronousChannelGroup/{Basic, GroupOfOne, Identity, Restart,
+Unbounded}`, `AsynchronousSocketChannel/DieBeforeComplete`, `Channels/Basic2`; `AsynchronousFileChannel/{Basic, LotsOfWrites}`
+are F7's world, its file channel jrt's own). (a) jdk26u's own: `AsynchronousChannelGroupImpl`, `Port`, Linux's `EPollPort` and
+`LinuxAsynchronousChannelProvider`, `UnixAsynchronousSocketChannelImpl` and `UnixAsynchronousServerSocketChannelImpl`, `Invoker`,
+`PendingFuture`, `CompletedFuture`, `Cancellable`, `Groupable`, the spi's `AsynchronousChannelProvider` (no ServiceLoader, as
+SelectorProvider's variant), about 4,500 lines, over F10a's EPoll natives plus `UnixAsynchronousSocketChannelImpl.c`'s
+`checkConnect` (getsockopt SO_ERROR) and `EPollPort`'s socketpair and interrupt natives: 2 to 3 days with jrt's tests; its
+risk is the group's thread pools (ThreadPool, `sun.nio.ch.ThreadPool` over Executors: in the world since F2) and
+`AsynchronousFileChannel`'s `SimpleAsynchronousFileChannelImpl` over F7's FileChannelImpl (a variant); (b) a jrt-own provider,
+each operation on a goroutine over the blocking channels (less code, not jdk26u's: the groups' semantics, shutdown and
+`Restart`'s handler threads differ); (c) not now. **Recommended: (a)**, after the night's records of F10a and F10b show the
+selectors and datagram channels pass: it reuses their whole native layer.
+
+### JCS221 F11's HostDatagramSocketImpl, unreached since F10b
+
+Since the NIO adaptor is `DatagramSocket`'s delegate, jrt's `java.net.HostDatagramSocketImpl` (F11) and the natives of
+`jdk.internal.jrt.HostDatagram` that only it calls (open, send, receive, peek, connect, join, the multicast options;
+`go/arbace/jrt/udp.ae`'s UDPHost) are reached by nothing: a program's `DatagramSocketImplFactory` returns its own impl.
+HostDatagram's interfaces (NetworkInterface's natives) stay in use. (a) remove HostDatagramSocketImpl and the socket half of
+HostDatagram and udp.ae after the night proves F10b (about 700 lines of Java and Go fewer, jrt's tests of udp_test.ae's sockets
+with them); (b) keep them as F10b's fallback for a release, then (a); (c) keep. **Recommended: (b)**: the fallback costs
+nothing while it waits, and (a) is a small commit once the records agree.
+
+### JCS222 j2g's constant method handles of private lookups
+
+jdk26u reaches non-public members across packages through a private lookup's method handles and VarHandles made once in a
+static initializer (DatagramSocketAdaptor's `NetworkInterfaces` and `DatagramSockets`; the same idiom in about a dozen
+classes of java.base that the Go build may want: `Thread`'s, `ClassValue`'s, the HTTP client's). F10b's variants replace them
+by jrt's public accessors, one variant per use. (a) j2g's VarHandle table (`arbace.j2g.vh`) extended to method handles:
+`findStatic`, `findVirtual`, `findConstructor` and `findStaticVarHandle` of constant arguments in a static initializer,
+`invokeExact`/`invoke`/`get` on those fields translated into direct calls and field reads (access lifted as the JVM's lookup
+does), half a day with j2g's tests; (b) a variant per use as F10b did. **Recommended: (a)** when a second area needs it; (b)
+until then.
+
