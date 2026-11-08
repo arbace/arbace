@@ -10,7 +10,7 @@
   as tools/pyi/ast_json.py writes CPython's (a node {\"_\": CLASS, FIELD: VALUE ..., ATTRIBUTE: INT ...} in
   Parser/Python.asdl's order, constants other than None, bools and str tagged: {\"$\": \"int\", \"v\": DECIMAL},
   {\"$\": \"float\", \"v\": HEX}, {\"$\": \"complex\", \"r\": HEX, \"i\": HEX}, {\"$\": \"bytes\", \"v\": HEX},
-  {\"$\": \"...\"}; JSON as json.dumps(ensure_ascii=True) spells it), for go/arbace/py's _ast module to rebuild.
+  {\"$\": \"...\"}, a str holding a lone surrogate {\"$\": \"str\", \"u\": [UTF-16 UNIT ...]} (queue 232); JSON as json.dumps(ensure_ascii=True) spells it), for go/arbace/py's _ast module to rebuild.
 
     answer MODE FILE SOURCE: \"AST:\" and the JSON, or the error as the compiler's answer (arbace.python.run's form:
     \"TYPE: MSG\" and after NULs the line, offset, end line, end offset, p and the text)."
@@ -72,6 +72,18 @@
 
 (declare value)
 
+(defn- lone-surrogate?
+  "s holds a UTF-16 surrogate not part of a pair"
+  [^String s]
+  (let [n (.length s)]
+    (loop [i 0]
+      (if (>= i n)
+        false
+        (let [c (.charAt s i)]
+          (cond (and (Character/isHighSurrogate c) (< (inc i) n) (Character/isLowSurrogate (.charAt s (inc i)))) (recur (+ i 2))
+                (Character/isSurrogate c) true
+                :else (recur (inc i))))))))
+
 (defn- constant-value [^StringBuilder sb n]
   (let [v (:value n)]
     (cond
@@ -87,7 +99,16 @@
                    (.append sb "{\"$\":\"complex\",\"r\":\"0x0.0p+0\",\"i\":")
                    (jstr sb (float-hex (parse-float (subs t 0 (dec (count t))))))
                    (.append sb "}"))
-        :str (jstr sb (or (:sv n) (throw (ex-info "astjson: a string constant without its value" {:node n}))))
+        :str (let [sv (or (:sv n) (throw (ex-info "astjson: a string constant without its value" {:node n})))]
+               (if (lone-surrogate? sv)
+                 ;; JSON's \uDCxx alone is no character: Go's decoder makes it U+FFFD (queue 232: pytest's rewritten
+                 ;; modules lost "\udce2"), so the UTF-16 units, as the IR's :codepoints
+                 (do (.append sb "{\"$\":\"str\",\"u\":[")
+                     (dotimes [i (count sv)]
+                       (when (pos? i) (.append sb ","))
+                       (.append sb (str (int (.charAt ^String sv i)))))
+                     (.append sb "]}"))
+                 (jstr sb sv)))
         :bytes (do (.append sb "{\"$\":\"bytes\",\"v\":\"")
                    (doseq [b (or (:bv n) (throw (ex-info "astjson: a bytes constant without its value" {:node n})))]
                      (.append sb (format "%02x" (int b))))
