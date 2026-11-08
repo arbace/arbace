@@ -180,9 +180,15 @@
 #   bin/java-check verdicts [--verify]
 #                      JCV1: whose verdict judges each test the JDK passes (java.check/verdicts: :status, the
 #                      source set can fail by itself, a throw, System.exit or Runtime's exit or halt, or prints
-#                      nothing; :stdout, the JDK's stdout its only reference, and the jls corpus; :golden),
+#                      nothing; :stdout, the JDK's stdout its only reference; :golden, the golden-diagnostics
+#                      tests and, JCV2, the jls programs with their reviewed golden files),
 #                      from the sources at the platform's pin, written as test/java/verdicts.edn (--verify
 #                      compares), the shares per level printed
+#   bin/java-check golden [--oracle]
+#                      JCV2: the jls programs' golden files (test/java/jls/NAME.out, their expected stdout, the
+#                      :golden verdict's) against their review (test/java/jls/golden.edn: each line's text,
+#                      the JLS sections, the basis :jls, :api or :jdk, why); --oracle: each against the JDK's
+#                      recorded stdout's digest too (the oracle tier's, by hand)
 #   bin/java-check rejudge-records
 #                      JCV1: test/java/check-{interp,compiled,classes}.edn and levels-known.edn made from
 #                      the oracle tier's (test/java/oracle/) by the own verdict
@@ -632,6 +638,25 @@ judge_own() {
   if [ "$st" != 0 ]; then printf 'fail\tstatus %s (expected 0): %s%s\n' "$st" "$(first_line "$err")" "$(root_cause "$err")"; return 0; fi
 }
 
+# judge_golden STATUS OUT ERR GOLDEN: the test's own verdict for a program that ships its expected stdout (JCV2,
+# doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JCV2": Arbace's own JLS programs, test/java/jls/NAME.out,
+# reviewed line by line against the JLS in test/java/jls/golden.edn): judge_own's status (0, jtreg's rule for the
+# other threads' 97 a failure), then stdout (its run's directories masked, as judge masks them) equal to the golden
+# file byte for byte; a differ names the first line that differs (diag_first_diff). The JDK's recorded stdout is
+# not looked at (the oracle tier's: judge). RESULT<TAB>REASON, nothing when it passes
+judge_golden() {
+  local st=$1 out=$2 err=$3 gold=$4 r
+  r=$(judge_own "$st" "$err")
+  if [ -n "$r" ]; then printf '%s\n' "$r"; return 0; fi
+  if [ ! -f "$gold" ]; then printf 'fail\tno golden file %s\n' "${gold#"$root"/}"; return 0; fi
+  mask_dirs "$w" "$tmp" < "$out" > "$out.g"
+  if ! cmp -s "$out.g" "$gold"; then
+    printf 'differ\tstdout differs from the golden file %s (%s bytes, the golden file'"'"'s %s): %s\n' "$(basename "$gold")" \
+      "$(stat -c %s "$out.g")" "$(stat -c %s "$gold")" "$(diag_first_diff "$out.g" "$gold" | cut -c1-300)"
+  fi
+  rm -f "$out.g"
+}
+
 # test_limit NAME: the seconds a test's actions run under (limited's TMO; GTS102, redone after the
 # audits): its line in test/java/timeouts.txt (JTREG-NAME SECONDS, read by limit.bash's program_tmo as
 # goi's test/goi/timeouts.txt) when it is above the check's (--timeout, default 20), else the check's;
@@ -651,7 +676,7 @@ test_limit() {
 # prints ID<TAB>LEVEL<TAB>RESULT<TAB>REASON, the first action not passing its result; each action
 # under the test's limit (test_limit: its line in test/java/timeouts.txt, GTS102)
 run_actions() {
-  local level=$1 exe=$2 mode=$3 fdir=$4 res="" i st w tmp lim st0="" res0="" cres n tmo vk ores="" ojr jst
+  local level=$1 exe=$2 mode=$3 fdir=$4 res="" i st w tmp lim st0="" res0="" cres n tmo vk gold ores="" ojr jst
   local -a x c props=()
   # F6: a tool test interpreted on javac's tool, its system compiler against the platform
   if [ "$level" = interp ] && [ -n "${texe:-}" ] && tool_test; then
@@ -659,8 +684,10 @@ run_actions() {
   fi
   # JCV1: whose verdict judges the test (java.check/plan's verdict line, test/java/verdicts.edn): status, the
   # test's own (judge_own; the JDK's record judged too, the oracle tier's row LEVEL.jdk when it says otherwise),
-  # or stdout, the JDK's record (judge), as before
+  # or stdout, the JDK's record (judge), as before; JCV2: golden, the test's own golden file (the plan's golden
+  # line; judge_golden), the JDK's record the oracle tier's as for status
   vk=$(awk -F'\t' '$1 == "verdict" { print $2; exit }' "$p/plan.tsv")
+  gold=$(awk -F'\t' '$1 == "golden" { print $2; exit }' "$p/plan.tsv")
   # GT8.3, GTS206 (a): under ARBACE_COVER_DIR the interp level runs the cover build's executable (cover_rexe), the
   # compiled level its programs built with the cover flags, each test with its GOCOVERDIR, ARBACE_COVER_DIR/java-LEVEL/ID
   [ -z "${ARBACE_COVER_DIR:-}" ] || [ "$level" != interp ] || exe=$cover_rexe
@@ -687,7 +714,11 @@ run_actions() {
         # the JDK's record (the launcher's status: run.ae's 97 is a 0 there)
         jst=$st; [ "$st" != 97 ] || jst=0
         ojr=$(judge "$jst" "$p/out$i" "$p/err$i")
-        if [ "$vk" = status ]; then res=$(judge_own "$st" "$p/err$i"); else res=$ojr; fi
+        case $vk in
+          status) res=$(judge_own "$st" "$p/err$i") ;;
+          golden) res=$(judge_golden "$st" "$p/out$i" "$p/err$i" "$root/$gold") ;;
+          *) res=$ojr ;;
+        esac
       fi
       note_attempt java-check "$id" "$n" "$lim" "$st" "$res"
       cover_settle "java-$level" "$id"
@@ -707,14 +738,19 @@ run_actions() {
   done < "$p/plan.tsv"
   # GTS81 (a), test/java/controls.edn: the controls whose subject this test is (plan lines control CID
   # EXIT OUT LEN DET MASKED DET-MASKED, their reference's first action): its first action's run judged
-  # again by judge, against the reference's status and stdout; printed under the control's id
+  # again by judge, against the reference's status and stdout; printed under the control's id. JCV2:
+  # control-golden CID GOLDEN, its first action's run judged again by judge_golden against another
+  # program's golden file
   if [ -n "$st0" ]; then
     while IFS=$'\t' read -r -a c; do
-      [ "${c[0]}" = control ] || [ "${c[0]}" = control-own ] || continue
+      [ "${c[0]}" = control ] || [ "${c[0]}" = control-own ] || [ "${c[0]}" = control-golden ] || continue
       case $res0 in
         load-failed*|timeout*) cres=$res0 ;;
-        *) if [ "${c[0]}" = control-own ]; then cres=$(judge_own "$st0" "$p/err0" fail)
-           else cres=$(x=(run 0 "${c[@]:2:6}"); judge "$st0" "$p/out0" "$p/err0"); fi ;;
+        *) case ${c[0]} in
+             control-own) cres=$(judge_own "$st0" "$p/err0" fail) ;;
+             control-golden) cres=$(judge_golden "$st0" "$p/out0" "$p/err0" "$root/${c[2]}") ;;
+             *) cres=$(x=(run 0 "${c[@]:2:6}"); judge "$st0" "$p/out0" "$p/err0") ;;
+           esac ;;
       esac
       printf '%s\t%s\t%s\n' "${c[1]}" "$level" "${cres:-pass	}" | sed -e "s|$w|W|g" -e "s|$tmp|TMP|g" ${fdir:+-e "s|$fdir|FORMS|g"} \
         -e "s|$p|RUN|g" -e "s|$root|.|g" -e "s|$jdktest/||g"
@@ -1204,7 +1240,7 @@ check() {
   jc plan "$ref" "$work" ${pargs[@]+"${pargs[@]}"} >&2
   jc plan-diag "$ref" "$work" "$levels" >&2
   echo "== java-check: $(wc -l < "$work/run.list") tests at the levels $levels, $jobs at a time (the executable $rexe${texe:+; the tests naming the javac API on $texe})" >&2
-  export -f tool_test cover_env cover_settle limited limited_cpu attempt_limits timeout_kind note_attempt program_tmo test_limit check_one nread_one read_opts read_finished first_line root_cause classes_sha classes_verdict judge run_actions run_dirs mask_hashes mask_dirs test_dir check_diag diag_actions diag_root diag_norm diag_first_diff diag_golden diag_judge judge_own
+  export -f tool_test cover_env cover_settle limited limited_cpu attempt_limits timeout_kind note_attempt program_tmo test_limit check_one nread_one read_opts read_finished first_line root_cause classes_sha classes_verdict judge run_actions run_dirs mask_hashes mask_dirs test_dir check_diag diag_actions diag_root diag_norm diag_first_diff diag_golden diag_judge judge_own judge_golden
   reset_timeout_log "$work/timeout-attempts.tsv"
   export root work formsc forms_only save jdktest levels timeout from_committed load rexe texe tplatform tool_re reader_key="${reader_key:-}" classes_opts_s="${classes_opts[*]}"
   xargs -a "$work/run.list" -P "$jobs" -I{} bash -c 'classes_opts=($classes_opts_s); check_one "$1"' _ {} | LC_ALL=C sort > "$work/results.tsv"
@@ -1532,7 +1568,7 @@ essential_compiled() {
     echo "$key" > "$s/key"
   fi
   echo "== java-check --essential-compiled: the runs of $(wc -l < "$work/run.list") tests, $jobs at a time ($(since_t0))" >&2
-  export -f cover_env cover_settle limited limited_cpu attempt_limits timeout_kind note_attempt program_tmo test_limit compiled_one run_actions judge judge_own first_line root_cause mask_hashes mask_dirs run_dirs test_dir
+  export -f cover_env cover_settle limited limited_cpu attempt_limits timeout_kind note_attempt program_tmo test_limit compiled_one run_actions judge judge_own judge_golden diag_first_diff first_line root_cause mask_hashes mask_dirs run_dirs test_dir
   reset_timeout_log "$work/timeout-attempts.tsv"
   export root work jdktest timeout
   xargs -a "$work/run.list" -P "$jobs" -I{} bash -c 'compiled_one "$1" "$2"' _ {} "$s/arbace-ec" | LC_ALL=C sort > "$work/results.tsv"
@@ -1682,6 +1718,7 @@ case ${1:-} in
   --essential-compiled) shift; essential_compiled "$@" ;;
   scan) check_pin; mkdir -p "$work/scan"; jc scan "$jdktest" "$corpora" "$ref" "$work/scan" ;;
   rejudge-records) jc rejudge-records "$ref" "$root/test/java" "$root/test/java/oracle" ;;
+  golden) shift; jc golden "$ref" "$root/test/java/jls/golden.edn" "$@" ;;
   verdicts) shift; check_pin; jc verdicts "$jdktest" "$ref" "$root/test/java/verdicts.edn" "$@" ;;
   *) check "$@" ;;
 esac
