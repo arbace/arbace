@@ -526,7 +526,7 @@ covers what.
   `javax/crypto/JceSecurityManager.java`: Copyright (c) Oracle and/or its affiliates, under the GNU
   General Public License version 2 with the Classpath Exception (text below); the rest of those
   files, the digests' variants (`MD5.ae`, `SHA.ae`, `SHA2.ae`, `SHA5.ae`, `SHA3.ae`), the JCA's
-  variants that only cut or set (`SecretKeySpec.ae`, `EncodedKeySpec.ae`, `SealedObject.ae`,
+  variants that only cut or set (`SecretKeySpec.ae`, `EncodedKeySpec.ae` (`SealedObject.ae` until serialization's slice 4),
   `Signature.ae`, `GaloisCounterMode.ae`), `jdk/internal/jrt/HostRandom.java`,
   `jdk/internal/jrt/CryptoAccess.java`, `sun/security/provider/JrtServices.java`,
   `com/sun/crypto/provider/JceServices.java` and `sun/security/rsa/RsaServices.java` (their service
