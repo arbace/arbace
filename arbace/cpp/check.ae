@@ -198,29 +198,50 @@
                                         (contains? #{:passes :not-judged} v)))))]
       (when (or recorded-bad (pos? (:failing summary)) cbad) (System/exit 1))))))
 
+(defn defined-names
+  "The external names an LLVM IR text defines (functions, variables, aliases; not internal or private ones, string
+  literals, llvm.* or the global constructors)."
+  [^String ll]
+  (into (sorted-set)
+        (for [l (str/split-lines ll)
+              :let [m (or (re-find #"^define (?!internal |private )[^@]*@(\"[^\"]+\"|[^ (]+)\(" l)
+                          (re-find #"^@(\"[^\"]+\"|[^ ]+) = (?!external |private |internal )" l))]
+              :when m
+              :let [n (str/replace (second m) #"^\"|\"$" "")]
+              :when (not (or (str/starts-with? n ".str") (str/starts-with? n "llvm.") (str/starts-with? n "_GLOBAL__sub_I") (str/starts-with? n "__cxx_global_var_init")))]
+          n)))
+
 (defn runtime-judge
   "OUT/results.tsv and OUT/summary.edn of bin/cppi runtime-build: each unit's levels (the oracle's IR, the forms' round trip, the
-  objects, the lowering, gcc); every unit of test/cpp/runtime/units.edn is to pass them all."
+  objects, the lowering, gcc); every unit of test/cpp/runtime/units.edn is to pass them all. A unit by our route (CP240 (c),
+  OUT/units/U/route `ours`) has the names level too: the external names its IR defines are those the oracle's IR (clang.ll)
+  defines, none missing and none more (the other units and the programs link against them)."
   [^String out]
   (let [units (for [l (str/split-lines (slurp (str out "/units.tsv"))) :when (seq l)] (first (str/split l #"\t")))
         rs (vec (for [u units]
                   (let [d (str out "/units/" u "/") st #(slurp? (str d %))
                         ir (st "ir.status") rt (some-> (st "rt.status") (str/split #"\t") first)
                         obj (or (st "object") "none") refused (st "lower.refused") gcc (st "gcc.status")
+                        route (or (st "route") "clang")
+                        names (when (and (= route "ours") (.exists (java.io.File. (str d "clang.ll"))) (.exists (java.io.File. (str d "x.ll"))))
+                                (let [a (defined-names (slurp (str d "clang.ll"))) b (defined-names (slurp (str d "x.ll")))
+                                      missing (remove b a) more (remove a b)]
+                                  (spit (str d "names.txt") (str "missing\t" (str/join " " missing) "\nmore\t" (str/join " " more) "\n"))
+                                  (if (and (empty? missing) (empty? more)) "same" (str (count missing) " missing, " (count more) " more"))))
                         outcome (cond (not= ir "0") :ir (not= rt "ok") :forms (not (contains? #{"same" "skipped"} obj)) :object refused :lowering
-                                      (not (#{"0" "skipped"} gcc)) :gcc :else :pass)]
-                    {:unit u :outcome outcome :ir (or ir "-") :forms (or rt "-") :object obj
+                                      (not (#{"0" "skipped"} gcc)) :gcc (and names (not= names "same")) :names :else :pass)]
+                    {:unit u :outcome outcome :ir (or ir "-") :forms (or rt "-") :object obj :route route :names (or names "-")
                      :lower (if refused (first (str/split refused #"\t")) "ok") :gcc (or gcc "-")})))
         by (fn [f] (into (sorted-map) (frequencies (map f rs))))
-        summary {:units (count rs) :pass (count (filter #(= :pass (:outcome %)) rs)) :outcomes (by (comp name :outcome))
+        summary {:units (count rs) :pass (count (filter #(= :pass (:outcome %)) rs)) :outcomes (by (comp name :outcome)) :routes (by :route)
                  :objects (by :object) :lowering (by :lower)
                  :libsupc++ (count (filter #(str/starts-with? (:unit %) "libsupc++/") rs))
                  :libstdc++exp (count (filter #(str/starts-with? (:unit %) "exp/") rs))}]
-    (spit (str out "/results.tsv") (str "unit\toutcome\tir\tforms\tobject\tlowering\tgcc\n"
-                                        (str/join "\n" (for [r rs] (str/join "\t" [(:unit r) (name (:outcome r)) (:ir r) (:forms r) (:object r) (:lower r) (:gcc r)])))
+    (spit (str out "/results.tsv") (str "unit\toutcome\tir\tforms\tobject\tlowering\tgcc\troute\tnames\n"
+                                        (str/join "\n" (for [r rs] (str/join "\t" [(:unit r) (name (:outcome r)) (:ir r) (:forms r) (:object r) (:lower r) (:gcc r) (:route r) (:names r)])))
                                         "\n"))
     (spit (str out "/summary.edn") (str (pr-str summary) "\n"))
-    (println (str "runtime-build: " (count rs) " units, " (:pass summary) " pass"))
+    (println (str "runtime-build: " (count rs) " units, " (:pass summary) " pass" (when (get (:routes summary) "ours") (str ", " (get (:routes summary) "ours") " by our route"))))
     (doseq [r rs :when (not= :pass (:outcome r))] (println "  failing:" (:unit r) (name (:outcome r)) (:lower r)))
     (when (not= (:pass summary) (count rs)) (System/exit 1))))
 

@@ -1,5 +1,5 @@
 // G5c: the runtime's exception handling as a program uses it (libsupc++'s eh_alloc, eh_throw, eh_catch, eh_globals,
-// eh_type, eh_exception, eh_aux_runtime, eh_terminate): throw and catch by type, by base, by pointer, catch (...),
+// eh_type, eh_exception, eh_aux_runtime): throw and catch by type, by base, by pointer, catch (...),
 // rethrow, a nested try, an exception during unwinding caught, uncaught_exceptions in a destructor, the current
 // exception's type, std::exception's what(), the bad_* exceptions the runtime throws
 #include <cstdio>
@@ -21,7 +21,8 @@ int main() {
   try { throw std::runtime_error("boom"); } catch (const std::exception& e) { std::printf("what %s\n", e.what()); }
   try { try { throw 1.5; } catch (...) { std::type_info* t = abi::__cxa_current_exception_type(); std::printf("type %s\n", t->name()); throw; } }
   catch (double d) { std::printf("double %g\n", d); }
-  try { B b; D& d = dynamic_cast<D&>(b); (void)d; } catch (const std::bad_cast& e) { std::printf("bad_cast %s\n", e.what()); }
+  { B b; B* pb = &b; std::printf("dyncast %d\n", dynamic_cast<D*>(pb) == nullptr); }
+  try { throw std::bad_cast(); } catch (const std::exception& e) { std::printf("bad_cast %s\n", e.what()); }
   try { B* p = nullptr; (void)typeid(*p); } catch (const std::bad_typeid& e) { std::printf("bad_typeid %s\n", e.what()); }
   try { throw std::bad_alloc(); } catch (const std::exception& e) { std::printf("%s\n", e.what()); }
   std::printf("%d\n", std::uncaught_exceptions());

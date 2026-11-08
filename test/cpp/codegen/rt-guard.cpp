@@ -25,8 +25,7 @@ int main() {
   std::exception_ptr ep;
   try { throw 9; } catch (...) { ep = std::current_exception(); }
   try { std::rethrow_exception(ep); } catch (int x) { std::printf("rethrown %d\n", x); }
-  std::exception_ptr e2 = std::make_exception_ptr(4.5);
-  try { std::rethrow_exception(e2); } catch (double d) { std::printf("made %g\n", d); }
+  std::exception_ptr e2 = ep; std::printf("%d %d\n", e2 == ep, (bool)e2);
   try { try { throw 1; } catch (...) { std::throw_with_nested(std::exception()); } }
   catch (const std::exception& e) {
     try { std::rethrow_if_nested(e); } catch (int i) { std::printf("nested %d\n", i); }

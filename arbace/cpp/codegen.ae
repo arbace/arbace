@@ -323,7 +323,7 @@
 
 (defn- run-cleanup! [c]
   (cond
-    (or (:try c) (:terminate c) (:eh-only c) (:delete c)) nil
+    (or (:try c) (:terminate c) (:eh-only c) (:delete c) (:guard-abort c)) nil
     (:end-catch c) (do (declare! "__cxa_end_catch" 'void []) (call-insn! 'void 'void (gsym "__cxa_end_catch") [] (not (:might-throw c))))
     :else
   (if-let [fl (:flag c)]
@@ -392,6 +392,8 @@
 
 (defn- run-cleanup-eh! [c]
   (cond
+    (:guard-abort c) (do (declare! "__cxa_guard_abort" 'void '[ptr] :nounwind true)
+                         (emit! (list 'call 'void (gsym "__cxa_guard_abort") [['ptr (:guard-abort c)]] :attrs [:nounwind])))
     (:eh-only c) (call-dtor! (:cls c) (:addr c) (:vtt c))
     (:delete c) (if (:dealloc c)
                   (dealloc-call! (:dealloc c) (:delete c) (:size c) (:align c) (:places c))
@@ -1273,6 +1275,17 @@
     :mcall (if (= :pr (:cat e)) (materialize! e) (mcall! e nil))
     :typeid (if-let [x (:e e)]
               (let [a (emit-lv x)
+                    ;; G5c: typeid of *p, p null, throws std::bad_typeid ([expr.typeid]/3; Itanium §2.9.5's __cxa_bad_typeid,
+                    ;; as clang checks a glvalue that dereferences a pointer)
+                    _ (when (= :deref (:op x))
+                        (let [bad (new-label "typeid.bad_typeid") ok (new-label "typeid.end")
+                              z (val! (list 'icmp :eq 'ptr a 'null))]
+                          (condbr! z bad ok)
+                          (begin! bad)
+                          (declare! "__cxa_bad_typeid" 'void [])
+                          (call-insn! 'void 'void (gsym "__cxa_bad_typeid") [] false)
+                          (emit! '(unreachable))
+                          (begin! ok)))
                     vp (val! (list 'load 'ptr ['ptr a] :align 8))
                     tp (val! (list 'getelementptr :inbounds 'ptr ['ptr vp] ['i64 -1]))]
                 (val! (list 'load 'ptr ['ptr tp] :align 8)))
@@ -1467,7 +1480,12 @@
                 c (val! (list 'icmp :ne 'i32 r 0))]
             (condbr! c l2 l3)
             (begin! l2)
-            (with-full (emit-init (gsym nm) t init))
+            ;; G5c: an initialization that throws aborts the guard (Itanium §3.3.3's __cxa_guard_abort), so a later pass
+            ;; tries again ([stmt.dcl]/3), as clang's CallGuardAbort cleanup does
+            (let [d (cleanup-depth)]
+              (swap! *f* update :cleanups conj {:guard-abort (gsym g)})
+              (with-full (emit-init (gsym nm) t init))
+              (swap! *f* update :cleanups #(subvec % 0 d)))
             (let [bt (abi/unq t)]
               (when (and (abi/class? bt) (nontrivial-dtor? (:id bt)))
                 (declare! "__cxa_atexit" 'i32 '[ptr ptr ptr])
@@ -2483,6 +2501,11 @@
 ;; long, __int128, unsigned __int128, _Float16, float, double, long double, __float128, char8_t, char16_t, char32_t
 (def ^:private fundamental-codes ["v" "Dn" "b" "w" "c" "h" "a" "s" "t" "i" "j" "l" "m" "x" "y" "n" "o" "Dh" "f" "d" "e" "g" "Du" "Ds" "Di"])
 
+(defn- abstract-class?
+  "A class with a pure virtual function its final overriders leave pure ([class.abstract]/2): a [:pure] slot in its vtable group."
+  [cid]
+  (boolean (and (abi/dynamic? cid) (some #(= :pure (first %)) (:items (group-of cid cid 0))))))
+
 (defn- fundamental-typeinfos! []
   (let [vt (fn [k] ['ptr (list 'getelementptr :inbounds 'ptr ['ptr (gsym k)] ['i64 2])])
         fvt "_ZTVN10__cxxabiv123__fundamental_type_infoE" pvt "_ZTVN10__cxxabiv119__pointer_type_infoE"
@@ -2522,7 +2545,9 @@
           ;; G5c: a defined constructor's or destructor's complete-object variant too (clang's EmitCXXConstructors,
           ;; EmitCXXDestructors: C1/D1, an alias of C2/D2 without virtual bases), a virtual destructor's deleting one (D0)
           (when (#{:ctor :dtor} (:kind f))
-            (want-fn! id 1)
+            ;; (an abstract class has no complete object: no C1, Itanium §5.1.4.3's complete-object constructor is
+            ;; never called; its destructors all are, through derived classes and D0's slot)
+            (when-not (and (= :ctor (:kind f)) (abstract-class? (:cls f))) (want-fn! id 1))
             (when (and (= :dtor (:kind f)) (:virtual f)) (want-d0! id))))
         (when (and (:tbody f) (= "main" (:name f))) (want-fn! id))
         (when (and (:tbody f) (:used f) (not (:implicit f))) (want-fn! id))))
@@ -2530,6 +2555,9 @@
     ;; (clang's Sema::MarkVTableUsed at the key function's definition, CodeGenModule::EmitVTable)
     (doseq [cid (sort (keys @abi/*classes*)) :when (= :here (vtable-home cid))]
       (swap! *top* update :groups (fnil conj #{}) [cid cid 0])
+      ;; (defined here: no external declaration of it, the type_info of a class derived from __si_class_type_info, in
+      ;; si_class_type_info.cc, names __si_class_type_info's vtable)
+      (swap! *top* update :declared conj (vtable-name cid))
       (when (abi/has-vbases? cid) (swap! *top* update :vtts (fnil conj #{}) cid))
       (let [c (abi/cls cid)]
         (when (and (= "__fundamental_type_info" (:name c)) (= [[:ns "__cxxabiv1"]] (vec (:path c))))
