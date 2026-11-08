@@ -35,6 +35,9 @@
 (set! *warn-on-reflection* true)
 
 (def ^:dynamic *root-file* nil)
+(def ^:dynamic *fixed-temps-scope* nil)   ; a guard's scope, whose temporaries the sub-branches of an or-pattern share
+(def ^:dynamic *let-vis* nil)   ; the source scope an `if`'s let bindings are visible in (its variable source info's)
+(def ^:dynamic *guard-vars* #{})   ; the bindings of the enclosing guards (guard_context): their places through their references
 
 (declare span-text ctor-info field-span-of-ty)
 
@@ -678,6 +681,61 @@
    :expr (some-> (:expr b) mirror-expr)})
 
 ;; patterns (thir/pattern): {:k :wild|:binding|:constant|:leaf|:variant|:deref|:or :ty T ...}
+(declare char-text lit-const int-const)
+(defn- char-const [c t] [:const (str "const " (char-text c)) t (list 'scalar c 4)])
+
+(defn- pat-expr-const
+  "lower_pat_expr's constant: a literal (negated), or a type's MIN or MAX"
+  [x t]
+  (case (:kind x)
+    :lit (lit-const (:lit x) false t)
+    :unary (if (and (= "-" (:op x)) (= :lit (:kind (:expr x)))) (lit-const (:lit (:expr x)) true t) (unsupported "a pattern expression" (:op x)))
+    (:path :type-relative)
+    (let [nm (str (or (:ident (:seg x)) (:ident (peek (:segs (:path x))))))
+          [mn mx] (case (first t)
+                    :int (let [n (int-bits (second t))] [(- (pow2 (dec n))) (dec (pow2 (dec n)))])
+                    :uint [0 (dec (pow2 (int-bits (second t))))]
+                    nil)]
+      (cond (and mn (= "MIN" nm)) (int-const mn t)
+            (and mx (= "MAX" nm)) (int-const mx t)
+            (and (= :char (first t)) (= "MAX" nm)) (char-const 0x10FFFF t)
+            :else (unsupported "a pattern path constant" nm)))
+    (unsupported "a pattern expression" (:kind x))))
+
+(declare const-num)
+
+(defn- rest-pat? [p] (= :rest (:kind p)))
+
+(defn- tuple-subpats
+  "lower_tuple_subpats with enumerate_and_adjust: the field index of each subpattern around a `..`"
+  [pats n]
+  (let [k (first (keep-indexed (fn [i sp] (when (rest-pat? sp) i)) pats))
+        ps (vec (remove rest-pat? pats))
+        gap (- n (count ps))]
+    (vec (map-indexed (fn [i sp] [(if (and k (>= i k)) (+ i gap) i) (lower-pattern sp)]) ps))))
+
+(defn- or-canonical
+  "An or-pattern's later alternatives' bindings named by the first alternative's (their HIR id the first's)"
+  [alts]
+  (let [vars (atom {})]
+    (letfn [(walk [p f] (when (map? p)
+                          (f p)
+                          (doseq [k [:sub]] (walk (get p k) f))
+                          (doseq [[_ sp] (:subpatterns p)] (walk sp f))
+                          (doseq [k [:pats :prefix :suffix]] (doseq [sp (get p k)] (walk sp f)))
+                          (walk (:slice p) f)))
+            (rename [p] (cond (not (map? p)) p
+                              :else (cond-> p
+                                      (= :binding (:k p)) (assoc :var (get @vars (:name p) (:var p)) :primary false)
+                                      (:sub p) (update :sub rename)
+                                      (:slice p) (update :slice rename)
+                                      (:subpatterns p) (update :subpatterns (fn [ss] (mapv (fn [[i sp]] [i (rename sp)]) ss)))
+                                      (:pats p) (update :pats #(mapv rename %))
+                                      (:prefix p) (update :prefix #(mapv rename %))
+                                      (:suffix p) (update :suffix #(mapv rename %)))))]
+      (walk (first alts) #(when (= :binding (:k %)) (swap! vars assoc (:name %) (:var %))))
+      (into [(first alts)] (map rename (rest alts))))))
+
 (defn lower-pattern [p]
   (let [r (r-of p)
         ty (:ty r)
@@ -687,21 +745,39 @@
           :binding (let [[by-ref m] (or (:mode r) [:no false])]
                      {:k :binding :ty (if (#{:not :mut} by-ref) (nth ty 3) ty) :var-ty ty :name (:name p) :var (binding-key p) :by-ref by-ref :mutbl m :span (:span p)
                       :sub (some-> (:sub p) lower-pattern) :primary true})
-          :lit (let [x (:expr p)
-                     [lit neg] (if (and (= :unary (:kind x)) (= "-" (:op x))) [(:lit (:expr x)) true] [(:lit x) false])]
-                 {:k :constant :ty ty :lit lit :neg neg})
-          :tuple {:k :leaf :ty ty :subpatterns (vec (map-indexed (fn [i sp] [i (lower-pattern sp)]) (:pats p)))}
+          :lit (let [c (pat-expr-const (:expr p) (if (= :ref (first ty)) (nth ty 3) ty))]
+                 ;; const_to_pat: a `&str` constant a dereference of a `str` one (the comparison's operand the reference)
+                 (if (= :ref (first ty))
+                   {:k :deref :ty ty :sub {:k :constant :ty (nth ty 3) :value (assoc c 2 ty)}}
+                   {:k :constant :ty ty :value c}))
+          :range (let [lo (if (:lo p) (pat-expr-const (:lo p) ty) :neg-inf)
+                       hi (if (:hi p) (pat-expr-const (:hi p) ty) :pos-inf)
+                       end (if (:incl p) :incl :excl)]
+                   ;; lower_pattern_range: `a..=a` the constant a
+                   (if (and (= :incl end) (vector? lo) (vector? hi) (= (const-num lo) (const-num hi)))
+                     {:k :constant :ty ty :value lo}
+                     {:k :range :ty ty :range {:lo lo :hi hi :end end :ty ty}}))
+          :tuple {:k :leaf :ty ty :subpatterns (tuple-subpats (:pats p) (count (second ty)))}
           (:tuple-struct :struct :path)
           (let [[adt vi vid] (or (ctor-info (:path p)) (unsupported "a pattern path" (:path p)))
                 subs (case (:kind p)
-                       :tuple-struct (vec (map-indexed (fn [i sp] [i (lower-pattern sp)]) (:pats p)))
+                       :tuple-struct (tuple-subpats (:pats p) (count (tc/all-fields-of-variant vid)))
                        :struct (mapv (fn [f] [(field-index vid (:ident f)) (lower-pattern (:pat f))]) (:fields p))
                        [])]
             (if (tc/enum? adt)
               {:k :variant :ty ty :adt adt :variant vi :vid vid :subpatterns subs}
               {:k :leaf :ty ty :subpatterns subs}))
-          :ref {:k :deref :ty ty :sub (lower-pattern (:pat p))}
-          :or {:k :or :ty ty :pats (mapv lower-pattern (:pats p))}
+          (:ref :box) {:k :deref :ty ty :sub (lower-pattern (:pat p))}
+          :or {:k :or :ty ty :pats (or-canonical (mapv lower-pattern (:pats p)))}
+          :slice (let [ps (:pats p)
+                       k (first (keep-indexed (fn [i sp] (when (or (rest-pat? sp) (and (= :binding (:kind sp)) (some-> (:sub sp) rest-pat?))) i)) ps))
+                       lw (fn [sp] (if (= :binding (:kind sp)) (if (some-> (:sub sp) rest-pat?) (assoc (lower-pattern (dissoc sp :sub)) :var (binding-key sp)) (lower-pattern sp)) (lower-pattern sp)))
+                       prefix (mapv lower-pattern (if k (subvec (vec ps) 0 k) ps))
+                       slice (when k (let [sp (nth ps k)] (if (rest-pat? sp) {:k :wild :ty nil} (lw sp))))
+                       suffix (if k (mapv lower-pattern (subvec (vec ps) (inc k))) [])]
+                   (if (= :array (first ty))
+                     {:k :array :ty ty :len (parse-long (c/print-const (nth ty 2))) :prefix prefix :slice slice :suffix suffix}
+                     {:k :slice :ty ty :prefix prefix :slice slice :suffix suffix}))
           (unsupported "a pattern" (:kind p)))]
     ;; the implicit dereferences of match ergonomics, outermost first
     (reduce (fn [x rt] {:k :deref :ty rt :sub x}) inner (reverse (:pat-adj r)))))
@@ -761,6 +837,8 @@
               :deref (case (first t) :ref (nth t 3) :ptr (nth t 2) :adt (first (nth t 2)) (unsupported "a deref of" t))
               :field (nth e 2)
               :index (second t)
+              :cindex (second t)
+              :subslice (or (nth e 4) t)
               :downcast t))
           (if (:upvar p) (:base-ty (first (filter #(= (:upvar p) (:var %)) *captures*))) (local-ty (:local p))) (:proj p)))
 
@@ -772,6 +850,8 @@
              :deref '(deref)
              :field (list 'field (second e) (ty-form (nth e 2)))
              :index (list 'index (second e))
+             :cindex (list 'cindex (nth e 1) (nth e 2) (nth e 3))
+             :subslice (list 'subslice (nth e 1) (nth e 2) (nth e 3))
              :downcast (list 'downcast (second e) (nth e 2))))))
 
 (defn- new-local! [ty & {:keys [mut scope] :or {mut true scope 0}}]
@@ -1209,7 +1289,7 @@
     (:array :tuple :closure :unary :binary :cast :pointer-coercion :repeat :assign :assign-op) :rvalue
     (:literal :zst-literal :named-const) :constant))
 
-(declare ast-block-stmts primary-bindings then-else-break-default as-operand as-temp as-place as-rvalue stmt-expr then-else-break match-expr expr-into-pattern declare-bindings
+(declare lower-let-expr in-if-then-scope ast-block-stmts primary-bindings then-else-break-default as-operand as-temp as-place as-rvalue stmt-expr then-else-break match-expr expr-into-pattern declare-bindings
          storage-live-binding! schedule-drop-for-binding!)
 
 (def ^:dynamic *fake-borrow-temps* nil)   ; the outermost index expression's fake borrows (lower_index_expression)
@@ -1230,6 +1310,7 @@
             (recur (dec i))))))))
 
 (defn- var-local [id] (or (get (:var-indices (st)) id) (unsupported "a variable" id)))
+(defn- guard-local [id] (or (get (:guard-indices (st)) id) (unsupported "a guard's variable" id)))
 
 (defn- expr-as-place [bb x mutability]
   (case (:k x)
@@ -1265,7 +1346,7 @@
                      (doseq [t @*fake-borrow-temps*] (push! bb (list 'fake-read "ForIndex" (place-form (place t)))))
                      (add-fake-borrows-of-base! bb base))
                    [bb (project base [:index idx])]))))
-    :var-ref [bb (place (var-local (:id x)))]
+    :var-ref [bb (if (contains? *guard-vars* (:id x)) (place (guard-local (:id x)) [:deref]) (place (var-local (:id x))))]
     (let [[bb t] (as-temp bb (temporary-scope (:tsi x)) x mutability)] [bb (place t)])))
 
 (defn as-place [bb x] (binding [*fake-borrow-temps* nil] (expr-as-place bb x :mut)))
@@ -1276,7 +1357,9 @@
 (defn as-temp [bb temp-lifetime x mutability]
   (if (= :scope (:k x))
     (let [[bb v] (in-scope-x x (as-temp bb temp-lifetime (:value x) mutability))] [bb v])
-    (let [t (new-local! (:ty x) :mut (not= mutability :not))]
+    (let [dedup (and *fixed-temps-scope* (= *fixed-temps-scope* temp-lifetime))
+          t (or (when dedup (get (:fixed-temps (st)) x)) (new-local! (:ty x) :mut (not= mutability :not)))]
+      (when dedup (upd! assoc-in [:fixed-temps x] t))
       (when-not (or (#{:break :continue :return} (:k x))
                     (and (= :block (:k x)) (nil? (:expr (:block x))) (not (:targeted-by-break (:block x))) (= [:never] (:ty x))))
         (push! bb (list 'storage-live t))
@@ -1439,7 +1522,7 @@
                             _ (push-scope! (:if-then-scope x))
                             [tb eb] (do (when (= :let (:k (:value (:cond x)))) (upd! assoc :source-scope (new-source-scope!)))
                                         (in-if-then-scope cond-scope
-                                          (fn [] (let [tb (blk (then-else-break bb (:cond x) cond-scope))]
+                                          (fn [] (let [tb (blk (binding [*let-vis* (:source-scope (st))] (then-else-break bb (:cond x) cond-scope)))]
                                                    (blk (expr-into-dest dest tb then-x))))))
                             tb (pop-scope! (:if-then-scope x) tb)]
                         (upd! assoc :source-scope ss)
@@ -1471,13 +1554,26 @@
                                 end (blk (expr-into-dest tmp body (:body x)))]
                             (goto! end lb)
                             nil)))))
-            :call (let [[bb f] (as-local-operand bb (:fun x))
+            :call (if (let [ft (:ty (:fun x))] (and (= :fndef (first ft)) (str/ends-with? (str (second ft)) "intrinsics::write_box_via_move")))
+                    ;; write_box_via_move(b, val): `(*b).1.0.0 = val; b` (into.rs's intrinsic lowering, no copy of val)
+                    (let [[bb _] (as-local-operand bb (:fun x))
+                          [b v] (:args x)
+                          [bb bo] (as-local-operand bb b)
+                          bp (second bo)
+                          t (first (nth (:ty (:fun x)) 2))
+                          md [:adt "core::mem::manually_drop::ManuallyDrop" [t]]
+                          mg [:adt "core::mem::maybe_dangling::MaybeDangling" [t]]
+                          pl (-> bp (project [:deref]) (project [:field 1 md]) (project [:field 0 mg]) (project [:field 0 t]))
+                          bb (blk (expr-into-dest pl bb v))]
+                      (assign! bb dest (use-rv [:move bp]))
+                      bb)
+                  (let [[bb f] (as-local-operand bb (:fun x))
                         [bb args] (reduce (fn [[bb as] a] (let [[bb o] (as-local-call-operand bb a)] [bb (conj as o)])) [bb []] (:args x))
                         ok (start-new-block!)]
                     (record-operands-moved! args)
                     (terminate! bb (list 'call (op-form f) (mapv op-form args) (place-form dest) ok '(continue)))
                     (diverge-from! bb)
-                    ok)
+                    ok))
             :use (expr-into-dest dest bb (:source x))
             :borrow (let [[bb p] (if (= :shared (:bk x)) (as-read-only-place bb (:arg x)) (as-place bb (:arg x)))]
                       (assign! bb dest (list 'ref (:bk x) (place-form p))) bb)
@@ -1536,14 +1632,37 @@
 (defn- ast-block-stmts [dest bb b]
   (let [outer (:source-scope (st))
         lets (atom [])
+        last-rem (atom (:region b))
         bb (reduce
             (fn [bb s]
               (case (:k s)
                 :expr (do (upd! update :block-context conj :stmt)
                           (let [bb (blk (in-scope (:scope s) (stmt-expr bb (:expr s) (:scope s))))]
                             (upd! update :block-context pop) bb))
-                :let (do
-                       (when (:else s) (unsupported "let-else"))
+                :let (if (:else s)
+                       ;; let-else: the else block first (its end unreachable), then the pattern as a let condition in an
+                       ;; if-then scope of the last remainder scope, its failure to the else block
+                       (do
+                         (upd! update :block-context conj :stmt)
+                         (let [dummy (temp! [:never])
+                               fentry (start-new-block!)
+                               eb (:else s)
+                               fb (blk (in-scope (:region eb) (blk (ast-block-stmts dummy fentry eb))))]
+                           (terminate! fb '(unreachable))
+                           (push-scope! (:remainder s))
+                           (swap! lets conj (:remainder s))
+                           (let [vis (new-source-scope!)
+                                 ut (when-let [u (:user-ty s)] (let [i (count (:user-types (st)))] (upd! update :user-types (fnil conj []) u) i))
+                                 [ok fail] (in-scope (:init-scope s)
+                                             (declare-bindings vis (:pattern s) ut)
+                                             (let [[m f] (in-if-then-scope @last-rem (fn [] (lower-let-expr bb (:init s) (:pattern s) false ut)))]
+                                               [m f]))]
+                             (goto! fail fentry)
+                             (upd! assoc :source-scope vis)
+                             (reset! last-rem (:remainder s))
+                             (upd! update :block-context pop)
+                             ok)))
+                       (do
                        (upd! update :block-context conj :stmt)
                        (push-scope! (:remainder s))
                        (swap! lets conj (:remainder s))
@@ -1560,8 +1679,9 @@
                                         (schedule-drop-for-binding! (:var p)))
                                       bb))]
                          (upd! assoc :source-scope vis)
+                         (reset! last-rem (:remainder s))
                          (upd! update :block-context pop)
-                         bb))))
+                         bb)))))
             bb (:stmts b))
         dty (place-ty dest)
         bb (if-let [x (:expr b)]
@@ -1583,6 +1703,7 @@
       (:leaf :variant) (doseq [[_ sp] (:subpatterns p)] (walk-pat sp f))
       :deref (walk-pat (:sub p) f)
       :or (walk-pat (first (:pats p)) f)
+      (:array :slice) (do (doseq [sp (:prefix p)] (walk-pat sp f)) (walk-pat (:slice p) f) (doseq [sp (:suffix p)] (walk-pat sp f)))
       nil)))
 
 (defn- primary-bindings [p] (let [acc (atom [])] (walk-pat p #(when (= :binding (:k %)) (swap! acc conj %))) @acc))
@@ -1601,8 +1722,8 @@
 
 (defn declare-bindings
   "declare_bindings: each primary binding a local in the current source scope, its debug info in VIS (made on the first
-  binding when nil); the visibility scope"
-  [vis pattern & [user-ty]]
+  binding when nil), with a guard a reference for the guard beside it (declare_binding's RefForGuard); the visibility scope"
+  [vis pattern & [user-ty has-guard]]
   (reduce (fn [vis p]
             (let [vis (or vis (new-source-scope!))
                   l (new-local! (:var-ty p) :mut (:mutbl p) :scope (:source-scope (st)))]
@@ -1611,19 +1732,26 @@
                 (upd! assoc-in [:locals l :user-ty] [(str "UserTypeProjection { base: UserType(" user-ty "), projs: [" (str/join ", " projs) "] }")]))
               (upd! update :debug conj {:name (:name p) :scope vis :value (place-form (place l))})
               (upd! assoc-in [:var-indices (:var p)] l)
+              (when has-guard
+                (let [g (new-local! [:ref [:re-erased] false (:var-ty p)] :mut false :scope (:source-scope (st)))]
+                  (upd! update :debug conj {:name (:name p) :scope vis :value (place-form (place g))})
+                  (upd! assoc-in [:guard-indices (:var p)] g)))
               vis))
           vis (primary-bindings pattern)))
 
-(defn storage-live-binding! [bb var]
-  (let [l (var-local var)]
+(defn storage-live-binding!
+  "storage_live_binding: the binding's local (FOR-GUARD :guard: its reference for the guard) live, its storage's drop
+  scheduled unless SCHED is false"
+  [bb var & [sched for-guard]]
+  (let [l (if (= :guard for-guard) (guard-local var) (var-local var))]
     (push! bb (list 'storage-live l))
-    (when-let [r (var-scope var)] (schedule-drop-storage! r l))
+    (when-let [r (and (not (false? sched)) (var-scope var))] (schedule-drop-storage! r l))
     (place l)))
 
 (defn schedule-drop-for-binding! [var]
   (when-let [r (var-scope var)] (schedule-drop-value! r (var-local var))))
 
-(declare lower-match-tree bind-pattern lower-scrutinee place-into-pattern)
+(declare lower-match-tree bind-pattern lower-scrutinee place-into-pattern lower-let-expr)
 
 (defn expr-into-pattern [bb pat init]
   (if (and (= :binding (:k pat)) (= :no (:by-ref pat)) (nil? (:sub pat)))
@@ -1659,7 +1787,7 @@
              (then-else-break-default bb x temp-scope))
     :scope (blk (in-scope-x x (then-else-break bb (:value x) temp-scope)))
     :use (then-else-break bb (:source x) temp-scope)
-    :let (unsupported "if let")
+    :let (lower-let-expr bb (:expr x) (:pat x) true)
     (then-else-break-default bb x temp-scope)))
 
 (defn- then-else-break-default [bb x temp-scope]
@@ -1671,86 +1799,260 @@
     (break-for-else! else-b)
     then-b))
 
-;; the match lowering (matches/mod.rs, match_pair.rs, buckets.rs, test.rs): candidates as atoms
-;; {:pairs [pair] :subs [] :guard bool :bindings [binding] :pre :otherwise :fe-start}, a pair {:place P :case CASE
-;; :subpairs [pair]}, CASE [:variant ADT VI] [:const VALUE :int|:bool]
+;; the match lowering (matches/mod.rs, match_pair.rs, buckets.rs, test.rs, util.rs), rustc 1.99.1's rule for rule: candidates
+;; as atoms {:pairs [pair] :subs [candidate] :guard bool :extra {:bindings [binding | :from-or]} :pre :otherwise :fe-start},
+;; a pair (MatchPairTree) {:place P :case CASE :subpairs [pair]}, CASE (TestableCase) [:variant ADT VI], [:const C KIND] (KIND
+;; :bool :int :float :string :other), [:range R], [:slice LEN :eq|:ge], [:or [flat-pat ...]] (no place); a flat pattern
+;; {:pairs :extra}; tests [:switch ADT] [:switch-int] [:if] [:string-eq C] [:scalar-eq C] [:range R] [:slice-len LEN OP];
+;; branches [:success] [:failure] [:variant VI] [:const C]
 
-(defn- inter-pat
-  "InterPat::lower_thir_pat squashed (squash_inter_pat): [pairs bindings] of a pattern at a place"
-  [pb pat]
-  (let [pairs (atom []) bindings (atom [])]
-    (letfn [(walk [pb pat out]
-              (let [subs (atom [])
-                    case
-                    (case (:k pat)
-                      :wild nil
-                      :binding (do (when (:sub pat) (walk pb (:sub pat) subs))
-                                   (swap! bindings conj {:span (:span pat) :source pb :var (:var pat) :by-ref (:by-ref pat)})
-                                   nil)
-                      :constant (let [c (lit-const (:lit pat) (:neg pat) (:ty pat))]
-                                  [:const c (if (= :bool (first (:ty pat))) :bool :int)])
-                      :leaf (do (doseq [[f sp] (:subpatterns pat)] (walk (project pb [:field f (:ty sp)]) sp subs)) nil)
-                      :variant (let [dp (project pb [:downcast (tc/variant-name (:vid pat)) (:variant pat) (:ty pat)])]
-                                 (doseq [[f sp] (:subpatterns pat)] (walk (project dp [:field f (:ty sp)]) sp subs))
-                                 (when (> (count (tc/variants-any (:adt pat))) 1) [:variant (:adt pat) (:variant pat)]))
-                      :deref (do (walk (project pb [:deref]) (:sub pat) subs) nil)
-                      (unsupported "a pattern" (:k pat)))]
-                (if case
-                  (swap! out conj {:place pb :case case :subpairs @subs})
-                  (swap! out into @subs))))]
-      ;; (the binding's push follows its subpatterns': bindings are pushed post-order by walk itself)
-      (walk pb pat pairs))
-    [@pairs @bindings]))
+(defn- pat-const-kind [t] (case (first t) :bool :bool (:int :uint :char) :int :float :float :str :string :other))
 
-(defn- new-candidate [pb pat guard]
-  (let [[pairs bindings] (inter-pat pb pat)]
-    (atom {:pairs pairs :bindings bindings :guard guard :span (:span pat)})))
+(defn- type-min-max
+  "numeric_min_and_max_as_bits as numbers: [min max] of an integer or char type, nil otherwise"
+  [t]
+  (case (first t)
+    :int (let [n (int-bits (second t))] [(- (pow2 (dec n))) (dec (pow2 (dec n)))])
+    :uint [0 (dec (pow2 (int-bits (second t))))]
+    :char [0 0x10FFFF]
+    nil))
 
-(defn- pick-test [cands]
+(defn- const-num
+  "A scalar constant's value as a number (signed integers sign-extended, floats as doubles)"
+  [[_ _ t v]]
+  (let [b (bigint (second v))]
+    (case (first t)
+      :int (let [n (int-bits (second t))] (if (>= b (pow2 (dec n))) (- b (pow2 n)) b))
+      :float (if (= "f32" (second t))
+               (double (Float/intBitsToFloat (unchecked-int (long b))))
+               (Double/longBitsToDouble (.longValue (biginteger b))))
+      b)))
+
+(defn- bound-cmp
+  "PatRangeBoundary::compare_with: A and B constants or :neg-inf / :pos-inf, compared in type T"
+  [a b t]
+  (let [[mn mx] (type-min-max t)
+        v (fn [x] (case x :neg-inf (or mn Double/NEGATIVE_INFINITY) :pos-inf (or mx Double/POSITIVE_INFINITY) (const-num x)))]
+    (if (= a b) 0 (compare (v a) (v b)))))
+
+(defn- range-contains
+  "PatRange::contains"
+  [r c]
+  (let [t (:ty r)]
+    (and (<= (bound-cmp (:lo r) c t) 0)
+         (let [x (bound-cmp c (:hi r) t)] (or (neg? x) (and (zero? x) (= :incl (:end r))))))))
+
+(defn- range-overlaps
+  "PatRange::overlaps"
+  [a b]
+  (let [t (:ty a)]
+    (and (let [x (bound-cmp (:lo b) (:hi a) t)] (or (neg? x) (and (zero? x) (= :incl (:end a)))))
+         (let [x (bound-cmp (:lo a) (:hi b) t)] (or (neg? x) (and (zero? x) (= :incl (:end b))))))))
+
+(defn- full-range?
+  "PatRange::is_full_range"
+  [r]
+  (when-let [[mn mx] (type-min-max (:ty r))]
+    (and (or (= :neg-inf (:lo r)) (<= (const-num (:lo r)) mn))
+         (or (= :pos-inf (:hi r))
+             (let [h (const-num (:hi r))] (or (> h mx) (and (= h mx) (= :incl (:end r)))))))))
+
+(defn- prefix-slice-suffix
+  "prefix_slice_suffix: [place subpattern] of an array (ARRAY-LEN) or slice pattern's parts"
+  [pb array-len prefix slice suffix]
+  (let [pl (count prefix) sl (count suffix)
+        [minl arr?] (if array-len [array-len true] [(+ pl sl) false])]
+    (concat
+     (map-indexed (fn [i sp] [(project pb [:cindex i minl false]) sp]) prefix)
+     (when slice [[(project pb [:subslice pl (if arr? (- minl sl) sl) (not arr?) (:ty slice)]) slice]])
+     (map-indexed (fn [j sp] (let [o (inc j)] [(project pb [:cindex (if arr? (- minl o) o) minl (not arr?)]) sp])) (reverse suffix)))))
+
+(declare flat-pat)
+
+(defn- squash-pat!
+  "InterPat::lower_thir_pat with squash_inter_pat: PAT's match pairs at PB onto the atom OUT, its bindings onto EXTRA's (a
+  binding after its subpattern's)"
+  [pb pat out extra]
+  (let [subs (atom [])
+        sub! (fn [p sp] (squash-pat! p sp subs extra))
+        case
+        (case (:k pat)
+          :wild nil
+          :binding (do (when (:sub pat) (sub! pb (:sub pat))) nil)
+          :constant [:const (:value pat) (pat-const-kind (:ty pat))]
+          :range (when-not (full-range? (:range pat)) [:range (:range pat)])
+          :leaf (do (doseq [[f sp] (:subpatterns pat)] (sub! (project pb [:field f (:ty sp)]) sp)) nil)
+          :variant (let [dp (project pb [:downcast (tc/variant-name (:vid pat)) (:variant pat) (:ty pat)])]
+                     (doseq [[f sp] (:subpatterns pat)] (sub! (project dp [:field f (:ty sp)]) sp))
+                     (when (> (count (tc/variants-any (:adt pat))) 1) [:variant (:adt pat) (:variant pat)]))
+          :deref (do (sub! (project pb [:deref]) (:sub pat)) nil)
+          :array (do (doseq [[p sp] (prefix-slice-suffix pb (:len pat) (:prefix pat) (:slice pat) (:suffix pat))] (sub! p sp)) nil)
+          :slice (do (doseq [[p sp] (prefix-slice-suffix pb nil (:prefix pat) (:slice pat) (:suffix pat))] (sub! p sp))
+                     (when-not (and (empty? (:prefix pat)) (:slice pat) (empty? (:suffix pat)))
+                       [:slice (+ (count (:prefix pat)) (count (:suffix pat))) (if (:slice pat) :ge :eq)]))
+          :or :or
+          (unsupported "a pattern" (:k pat)))]
+    (if (= :or case)
+      (let [alts (mapv #(flat-pat pb %) (:pats pat))]
+        (when (seq (:bindings (:extra (first alts)))) (swap! extra update :bindings conj :from-or))
+        (swap! out conj {:place nil :case [:or alts] :subpairs [] :span (:span pat)}))
+      (do (if case
+            (swap! out conj {:place pb :case case :subpairs @subs :span (:span pat)})
+            (swap! out into @subs))
+          (when (= :binding (:k pat))
+            (swap! extra update :bindings conj {:span (:span pat) :source pb :var (:var pat) :by-ref (:by-ref pat)}))))))
+
+(defn- flat-pat [pb pat]
+  (let [out (atom []) extra (atom {:span (:span pat) :bindings []})]
+    (squash-pat! pb pat out extra)
+    {:pairs @out :extra @extra}))
+
+(defn- or-pair? [mp] (= :or (first (:case mp))))
+(defn- sort-pairs
+  "sort_match_pairs: the or-patterns last, the rest in their order"
+  [ps] (vec (concat (remove or-pair? ps) (filter or-pair? ps))))
+
+(defn- candidate [fp guard] (atom {:pairs (sort-pairs (:pairs fp)) :extra (:extra fp) :guard guard :subs []}))
+(defn- starts-with-or? [c] (boolean (some-> (first (:pairs @c)) or-pair?)))
+(defn- leaves [c] (if (empty? (:subs @c)) [c] (vec (mapcat leaves (:subs @c)))))
+
+(defn- false-edges! [from real imaginary]
+  (if (not= imaginary real) (terminate! from (list 'false-edge real imaginary)) (goto! from real)))
+
+(defn- pick-test
+  "pick_test with pick_test_for_match_pair: the first candidate's first pair's place and test"
+  [cands]
   (let [mp (first (:pairs @(first cands)))
-        kind (case (first (:case mp)) :variant [:switch (second (:case mp))] :const (if (= :bool (nth (:case mp) 2)) [:if] [:switch-int]))]
-    [(:place mp) kind]))
+        [k a b] (:case mp)
+        test (case k
+               :variant [:switch a]
+               :const (case b :bool [:if] :int [:switch-int] :string [:string-eq a] [:scalar-eq a])
+               :range [:range a]
+               :slice [:slice-len a b])]
+    [(:place mp) test]))
 
-(defn- choose-bucket! [place test cand]
+(defn- choose-bucket!
+  "choose_bucket_for_candidate: the branch of TEST at PLACE the candidate goes to (its pair removed when fully matched,
+  its subpairs taken in), nil when the test tells nothing of it; PRIOR the buckets so far [[branch [cand ...]] ...]"
+  [place test cand prior]
   (let [ps (:pairs @cand)
         i (first (keep-indexed (fn [i mp] (when (= place (:place mp)) i)) ps))]
     (when i
       (let [mp (nth ps i)
+            [ck ca cb] (:case mp)
+            [tk ta tb] test
+            prior-of (fn [br] (some (fn [[b cs]] (when (= b br) cs)) prior))
             [branch full]
-            (case (first test)
-              :switch (if (= :variant (first (:case mp))) [[:variant (nth (:case mp) 2)] true] [nil false])
-              :switch-int (if (and (= :const (first (:case mp))) (= :int (nth (:case mp) 2))) [[:const (second (:case mp))] true] [nil false])
-              :if (if (and (= :const (first (:case mp))) (= :bool (nth (:case mp) 2)))
-                    [(if (= "const true" (second (second (:case mp)))) [:success] [:failure]) true]
-                    [nil false]))]
+            (cond
+              (and (= :switch tk) (= :variant ck)) [[:variant cb] true]
+              (and (= :switch-int tk) (= :const ck) (= :int cb))
+              (if (some (fn [c] (some (fn [m] (and (= place (:place m)) (= :range (first (:case m)))
+                                                  (not (false? (range-contains (second (:case m)) ca)))))
+                                      (:pairs @c)))
+                        (prior-of [:failure]))
+                [nil false]
+                [[:const ca] true])
+              (and (= :switch-int tk) (= :range ck))
+              [(when (every? (fn [[b _]] (or (not= :const (first b)) (false? (range-contains ca (second b))))) prior) [:failure]) false]
+              (and (= :if tk) (= :const ck) (= :bool cb))
+              [(if (= 1 (second (nth ca 3))) [:success] [:failure]) true]
+              (and (= :slice-len tk) (= :slice ck) (= :eq tb))
+              (let [c (compare ta ca)]
+                (cond (and (zero? c) (= :eq cb)) [[:success] true]
+                      (neg? c) [[:failure] false]
+                      (= :ge cb) [nil false]
+                      :else [[:failure] false]))
+              (and (= :slice-len tk) (= :slice ck) (= :ge tb))
+              (let [c (compare ta ca)]
+                (cond (and (zero? c) (= :ge cb)) [[:success] true]
+                      (or (neg? c) (and (zero? c) (= :eq cb))) [[:success] false]
+                      (= :eq cb) [[:failure] false]
+                      :else [nil false]))
+              (and (= :range tk) (= :range ck))
+              (if (= ta ca) [[:success] true] [(when-not (range-overlaps ta ca) [:failure]) false])
+              (and (= :range tk) (= :const ck) (#{:bool :int :float} cb))
+              [(when-not (range-contains ta ca) [:failure]) false]
+              (or (and (= :string-eq tk) (= :const ck) (= :string cb))
+                  (and (= :scalar-eq tk) (= :const ck) (#{:float :other} cb)))
+              (if (= ta ca) [[:success] true] [[:failure] false])
+              :else [nil false])]
         (when full
-          (swap! cand (fn [c] (assoc c :pairs (into (vec (concat (subvec ps 0 i) (subvec ps (inc i)))) (:subpairs mp))))))
+          (swap! cand (fn [c] (assoc c :pairs (sort-pairs (into (vec (concat (subvec ps 0 i) (subvec ps (inc i)))) (:subpairs mp)))))))
         branch))))
-
-(defn- discriminants [adt]
-  (tc/discriminant-values adt))
 
 (declare match-candidates)
 
-(defn- perform-test! [bb otherwise place test targets]
+(defn- compare! [bb success fail op left right]
+  (let [r (temp! bool-ty)]
+    (assign! bb r (list 'binop op (op-form left) (op-form right)))
+    (terminate! bb (list 'switch (op-form [:move r]) [[0 fail]] success))))
+
+(defn- len-of-slice-or-array!
+  "len_of_slice_or_array: an array's length as a constant (its place fake read for indexing), a slice's as PtrMetadata of
+  its reference (a local of a copy type dereferenced) or of a fake raw pointer to it"
+  [bb base & [index?]]
+  (let [bt (place-ty base)]
+    (case (first bt)
+      :array (do (push! bb (list 'fake-read "ForIndex" (place-form base)))
+                 (let [n (c/print-const (nth bt 2))] [:const (str "const " n "_usize") usize-ty (list 'scalar (parse-long n) 8)]))
+      :slice (let [ptr (if (and (= [[:deref]] (:proj base)) (copy? (local-ty (:local base))))
+                         [:copy (place (:local base))]
+                         (let [t (temp! [:ptr false bt])]
+                           (assign! bb t (list 'rawptr "const (fake)" (place-form base)))
+                           [:move t]))
+                   l (temp! usize-ty)]
+               (assign! bb l (list 'unop "PtrMetadata" (op-form ptr)))
+               [:move l])
+      (unsupported "an index of" bt))))
+
+(defn- str-eq-fn [] [:fndef "core::cmp::PartialEq::eq" [[:str] [:str]]])
+
+(defn- perform-test!
+  "perform_test: TEST of PLACE at BB, each branch to its target block (else OTHERWISE)"
+  [bb otherwise place test targets]
   (let [target (fn [br] (or (some (fn [[b blk]] (when (= b br) blk)) targets) otherwise))]
     (case (first test)
       :switch (let [adt (second test)
-                    vals (keep (fn [[vi d]] (when-let [b (some (fn [[br blk]] (when (= br [:variant vi]) blk)) targets)] [d b])) (map-indexed vector (discriminants adt)))
-                    dt (tc/discr-ty adt)
-                    d (temp! dt)]
+                    vals (keep (fn [[vi d]] (when-let [b (some (fn [[br blk]] (when (= br [:variant vi]) blk)) targets)] [d b]))
+                               (map-indexed vector (tc/discriminant-values adt)))
+                    d (temp! (tc/discr-ty adt))]
                 (assign! bb d (list 'discriminant (place-form place)))
                 (terminate! bb (list 'switch (op-form [:move d]) (vec vals) (target [:failure]))))
       :switch-int (let [vals (keep (fn [[br blk]] (when (= :const (first br)) [(second (nth (second br) 3)) blk])) targets)]
                     (terminate! bb (list 'switch (op-form [:copy place]) (vec vals) (target [:failure]))))
-      :if (terminate! bb (list 'switch (op-form [:copy place]) [[0 (target [:failure])]] (target [:success]))))))
+      :if (terminate! bb (list 'switch (op-form [:copy place]) [[0 (target [:failure])]] (target [:success])))
+      :string-eq (let [succ (target [:success]) fail (target [:failure])
+                       rt [:ref [:re-erased] false [:str]]
+                       expected (assoc (second test) 2 rt)
+                       actual (temp! rt)
+                       _ (assign! bb actual (list 'ref :shared (place-form place)))
+                       r (temp! bool-ty)
+                       eqb (start-new-block!)]
+                   (terminate! bb (list 'call (op-form (fn-const (str-eq-fn))) [(op-form [:copy actual]) (op-form expected)] (place-form r) eqb '(continue)))
+                   (diverge-from! bb)
+                   (terminate! eqb (list 'switch (op-form [:move r]) [[0 fail]] succ)))
+      :scalar-eq (compare! bb (target [:success]) (target [:failure]) "Eq" (second test) [:copy place])
+      :range (let [r (second test) succ (target [:success]) fail (target [:failure]) v [:copy place]
+                   inter (cond (= :neg-inf (:lo r)) bb (= :pos-inf (:hi r)) succ :else (start-new-block!))]
+               (when-not (= :neg-inf (:lo r)) (compare! bb inter fail "Le" (:lo r) v))
+               (when-not (= :pos-inf (:hi r)) (compare! inter succ fail (if (= :incl (:end r)) "Le" "Lt") v (:hi r))))
+      :slice-len (let [[_ n op] test
+                       actual (temp! usize-ty)
+                       len (len-of-slice-or-array! bb place)
+                       _ (assign! bb actual (use-rv len))
+                       expected (temp! usize-ty)]
+                   (assign! bb expected (use-rv (int-const n usize-ty)))
+                   (compare! bb (target [:success]) (target [:failure]) (if (= :eq op) "Eq" "Ge") [:move actual] [:move expected])))))
 
-(defn- test-candidates! [cands start]
+(defn- test-candidates!
+  "test_candidates with partition_candidates_into_buckets: the first candidates the test sorts into branches matched each
+  from its own block, the test performed; [remainder-start remaining-candidates]"
+  [cands start]
   (let [[place test] (pick-test cands)
-        buckets (atom []) ; [[branch [cand...]]] in insertion order
+        buckets (atom [])
         rest-cands (loop [cs cands]
                      (if-let [c (first cs)]
-                       (if-let [br (choose-bucket! place test c)]
+                       (if-let [br (choose-bucket! place test c @buckets)]
                          (do (swap! buckets (fn [bs] (if-let [i (first (keep-indexed (fn [i [b _]] (when (= b br) i)) bs))]
                                                        (update-in bs [i 1] conj c)
                                                        (conj bs [br [c]]))))
@@ -1766,67 +2068,234 @@
     (perform-test! start remainder place test targets)
     [remainder rest-cands]))
 
+(defn- create-or-subcandidates! [c mp]
+  (let [subs (mapv #(candidate % (:guard @c)) (second (:case mp)))]
+    (swap! (first subs) assoc :fe-start (:fe-start @c))
+    (swap! c assoc :subs subs)))
+
+(defn- merge-trivial-subcandidates!
+  "merge_trivial_subcandidates: an or-pattern's alternatives without bindings or their own alternatives share one block"
+  [c]
+  (when (and (not (:guard @c)) (every? (fn [s] (and (empty? (:subs @s)) (empty? (:bindings (:extra @s))))) (:subs @c)))
+    (let [shared (start-new-block!)]
+      (when-not (:fe-start @c) (swap! c assoc :fe-start (:fe-start @(first (:subs @c)))))
+      (doseq [s (:subs @c)] (goto! (:pre @s) shared))
+      (swap! c assoc :pre shared :otherwise (:otherwise @(peek (:subs @c))) :subs []))))
+
+(defn- test-remaining-match-pairs-after-or!
+  "test_remaining_match_pairs_after_or: the last expanded candidate's remaining or-patterns tested from each of its leaves"
+  [c]
+  (when (seq (:pairs @c))
+    (let [last-otherwise (:otherwise @(peek (leaves c)))
+          remaining (:pairs @c)]
+      (swap! c assoc :pairs [])
+      (doseq [l (leaves c)]
+        (swap! l assoc :pairs remaining)
+        (let [o (match-candidates (:pre @l) [l])]
+          (goto! o (if (:guard @l) (:otherwise @l) last-otherwise)))))))
+
+(defn- expand-and-match-or-candidates!
+  "expand_and_match_or_candidates: the leading or-patterns expanded into subcandidates and matched with the others, up to
+  and including the first candidate with more than its or-pattern; [remainder-start remaining-candidates]"
+  [start cands]
+  (let [until (or (some-> (first (keep-indexed (fn [i c] (when (and (> (count (:pairs @c)) 1) (starts-with-or? c)) i)) cands)) inc)
+                  (count cands))
+        to-expand (subvec cands 0 until)
+        remaining (subvec cands until)
+        expanded (vec (mapcat (fn [c] (if (starts-with-or? c)
+                                        (let [mp (first (:pairs @c))]
+                                          (swap! c update :pairs #(subvec (vec %) 1))
+                                          (create-or-subcandidates! c mp)
+                                          (:subs @c))
+                                        [c]))
+                              to-expand))
+        rs (match-candidates start expanded)]
+    (doseq [c to-expand :when (seq (:subs @c))] (merge-trivial-subcandidates! c))
+    (when-let [l (peek to-expand)] (test-remaining-match-pairs-after-or! l))
+    [rs remaining]))
+
 (defn match-candidates [start cands]
-  (when-let [c (first cands)] (when-not (:fe-start @c) (swap! c assoc :fe-start start)))
-  (cond
-    (empty? cands) start
-    (empty? (:pairs @(first cands)))
-    (let [c (first cands) o (start-new-block!)]
-      (swap! c assoc :pre start :otherwise o)
-      (match-candidates o (vec (rest cands))))
-    :else (let [[s r] (test-candidates! cands start)] (match-candidates s r))))
+  (let [cands (vec cands)]
+    (when-let [c (first cands)] (when-not (:fe-start @c) (swap! c assoc :fe-start start)))
+    (cond
+      (empty? cands) start
+      (empty? (:pairs @(first cands)))
+      (let [c (first cands) o (start-new-block!)]
+        (swap! c assoc :pre start :otherwise o)
+        (match-candidates o (subvec cands 1)))
+      (some starts-with-or? cands) (let [[s r] (expand-and-match-or-candidates! start cands)] (match-candidates s r))
+      :else (let [[s r] (test-candidates! cands start)] (match-candidates s r)))))
 
-(defn- lower-match-tree [bb pb pats+guards]
-  (let [cands (mapv (fn [[p g]] (new-candidate pb p g)) pats+guards)
-        _ (when (some second pats+guards) (unsupported "a match guard"))
+(defn- collect-fake-borrows
+  "collect_fake_borrows: with a guard, the places the match tests or binds behind a dereference borrowed shallowly (their
+  dereferenced prefixes too) for the guards; [[place temp :shallow] ...] in their first order"
+  [cands scrutinee-local]
+  (when (some #(:guard @%) cands)
+    (let [fbs (atom [])
+          has? (fn [p] (some #(= p (first %)) @fbs))
+          deref-prefixes! (fn [p] (loop [i (dec (count (:proj p)))]
+                                    (when (>= i 0)
+                                      (if (= :deref (first (nth (:proj p) i)))
+                                        (let [pre {:local (:local p) :proj (subvec (:proj p) 0 i)}]
+                                          (when-not (has? pre) (swap! fbs conj [pre :shallow]) (recur (dec i))))
+                                        (recur (dec i))))))
+          borrow! (fn [p] (when-not (has? p) (swap! fbs conj [p :shallow]) (deref-prefixes! p)))
+          binding! (fn [b] (when (= scrutinee-local (:local (:source b))) (deref-prefixes! (:source b))))]
+      (letfn [(visit-pair [mp]
+                (if (or-pair? mp)
+                  (doseq [fp (second (:case mp))] (visit-flat fp))
+                  (do (borrow! (:place mp)) (doseq [s (:subpairs mp)] (visit-pair s)))))
+              (visit-flat [fp]
+                (doseq [b (:bindings (:extra fp)) :when (map? b)] (binding! b))
+                (doseq [mp (:pairs fp)] (visit-pair mp)))]
+        (doseq [c cands] (visit-flat @c)))
+      (mapv (fn [[p k]] [p (new-local! [:ref [:re-erased] false (place-ty p)]) k]) @fbs))))
+
+(defn- sub-branch-bindings
+  "sub_branch_bindings with push_sub_branch_bindings: a leaf's bindings with its or-patterns' parents' in their order"
+  [parents leaf]
+  (let [rem (atom (filter seq (concat (map :bindings parents) [leaf]))) out (atom [])]
+    (letfn [(push [bs] (doseq [b bs] (if (= :from-or b) (when-let [n (first @rem)] (swap! rem rest) (push n)) (swap! out conj b))))]
+      (while (seq @rem) (let [n (first @rem)] (swap! rem rest) (push n))))
+    @out))
+
+(defn- sub-branches
+  "MatchTreeBranch::from_candidate: each leaf of a candidate as a sub-branch {:success :otherwise :bindings}"
+  [c]
+  (letfn [(walk [c parents]
+            (if (empty? (:subs @c))
+              [{:success (:pre @c) :otherwise (:otherwise @c) :bindings (sub-branch-bindings parents (:bindings (:extra @c)))}]
+              (mapcat #(walk % (conj parents (:extra @c))) (:subs @c))))]
+    (vec (walk c []))))
+
+(defn- lower-match-tree
+  "lower_match_tree: the candidates of PATS+GUARDS at PB matched from BB, the false edges between them; {:branches
+  [{:sub-branches}] :otherwise :fake-borrows}"
+  [bb pb pats+guards exhaustive?]
+  (let [cands (mapv (fn [[p g]] (candidate (flat-pat pb p) g)) pats+guards)
+        fbs (collect-fake-borrows cands (:local pb))
         otherwise (match-candidates bb cands)
-        next (atom nil)]
+        next (atom (when-not exhaustive? otherwise))]
     (doseq [c (rseq cands)]
-      (when-let [n @next]
-        (let [old (:pre @c) new (start-new-block!)]
-          (terminate! old (list 'false-edge new n))
-          (swap! c assoc :pre new)))
-      (reset! next (:fe-start @c)))
-    (push! otherwise (list 'fake-read "ForMatchedPlace(None)" (place-form pb)))
-    (terminate! otherwise '(unreachable))
-    (mapv deref cands)))
+      (let [g (:guard @c)]
+        (doseq [l (rseq (leaves c))]
+          (when-let [n @next]
+            (let [old (:pre @l) new (start-new-block!)]
+              (false-edges! old new n)
+              (swap! l assoc :pre new)
+              (when g
+                (let [no (start-new-block!) oo (:otherwise @l)]
+                  (false-edges! no oo n)
+                  (swap! l assoc :otherwise no)))))
+          (reset! next (:fe-start @l)))))
+    (when exhaustive?
+      (push! otherwise (list 'fake-read "ForMatchedPlace(None)" (place-form pb)))
+      (terminate! otherwise '(unreachable)))
+    {:branches (mapv (fn [c] {:sub-branches (sub-branches c)}) cands) :otherwise otherwise :fake-borrows fbs}))
 
-(defn- bind-for-arm-body! [bb bindings]
+
+(defn- bind-for-guard!
+  "bind_matched_candidate_for_guard: each binding's reference for the guard (a by-reference binding's own local first)"
+  [bb bindings]
   (doseq [b bindings]
-    (let [p (storage-live-binding! bb (:var b))]
-      (schedule-drop-for-binding! (:var b))
+    (let [g (storage-live-binding! bb (:var b) true :guard)]
+      (case (:by-ref b)
+        :no (assign! bb g (list 'ref :shared (place-form (:source b))))
+        (let [v (storage-live-binding! bb (:var b) true)]
+          (assign! bb v (list 'ref (if (= :mut (:by-ref b)) :mut :shared) (place-form (:source b))))
+          (assign! bb g (list 'ref :shared (place-form v))))))))
+
+(defn- bind-for-arm-body! [bb bindings sched]
+  (doseq [b bindings]
+    (let [p (storage-live-binding! bb (:var b) sched)]
+      (when sched (schedule-drop-for-binding! (:var b)))
       (assign! bb p (case (:by-ref b)
                       :no (use-rv (consume (:source b)))
                       :not (list 'ref :shared (place-form (:source b)))
                       :mut (list 'ref :mut (place-form (:source b))))))))
 
-(defn- bind-pattern! [branch]
-  (bind-for-arm-body! (:pre branch) (:bindings branch))
-  (:pre branch))
+(defn- clear-match-arm-and-guard-scopes! []
+  (let [n (count (:scopes (st)))]
+    (doseq [i [(- n 2) (- n 1)]] (upd! assoc-in [:scopes i :drops] []) (upd! assoc-in [:scopes i :cached] nil))
+    (doseq [i (range (count (:scopes (st))))] (upd! assoc-in [:scopes i :cached] nil))))
+
+(defn- bind-and-guard!
+  "bind_and_guard_matched_candidate: a sub-branch's bindings, its arm's guard (ARM {:guard :match-scope}) with the fake
+  borrows, the by-value bindings after it; the block the arm's body starts from"
+  [sb fake-borrows arm sched]
+  (let [bb (:success sb)]
+    (if-let [guard (:guard arm)]
+      (do
+        (bind-for-guard! bb (:bindings sb))
+        (doseq [[p t _] fake-borrows] (assign! bb (place t) (list 'ref :fake-shallow (place-form p))))
+        (let [[post otherwise] (binding [*guard-vars* (into *guard-vars* (map :var (:bindings sb)))]
+                                 (in-if-then-scope (:match-scope arm) (fn [] (then-else-break bb guard nil))))]
+          (when-not sched (clear-match-arm-and-guard-scopes!))
+          (doseq [[_ t _] fake-borrows] (push! post (list 'fake-read "ForMatchGuard" (place-form (place t)))))
+          (goto! otherwise (:otherwise sb))
+          (let [by-value (filter #(= :no (:by-ref %)) (:bindings sb))]
+            (doseq [b by-value] (push! post (list 'fake-read "ForGuardBinding" (place-form (place (guard-local (:var b)))))))
+            (bind-for-arm-body! post by-value sched))
+          post))
+      (do (bind-for-arm-body! bb (:bindings sb) sched) bb))))
+
+(defn- bind-pattern!
+  "bind_pattern: a branch's sub-branches bound (the first's drops scheduled), joined"
+  [branch fake-borrows arm]
+  (let [subs (:sub-branches branch)]
+    (if (= 1 (count subs))
+      (bind-and-guard! (first subs) fake-borrows arm true)
+      (let [t (start-new-block!)]
+        (doseq [[i sb] (map-indexed vector (rseq subs))]
+          (goto! (bind-and-guard! sb fake-borrows arm (= i (dec (count subs)))) t))
+        t))))
+
+(defn- push-ascription! [bb pb ascription]
+  ;; ascribe_types: a let's annotation pushed again, ascribed to the matched place before the bindings
+  (when ascription
+    (let [i (count (:user-types (st)))]
+      (upd! update :user-types conj (nth (:user-types (st)) ascription))
+      (push! bb (list 'raw (str "AscribeUserType(" (mir/place (place-form pb)) ", +, UserTypeProjection { base: UserType(" i "), projs: [] })"))))))
 
 (defn place-into-pattern [bb pat pb & [ascription]]
-  (let [[branch] (lower-match-tree bb pb [[pat false]])]
-    ;; ascribe_types: a let's annotation pushed again, ascribed to the matched place before the bindings
-    (when ascription
-      (let [i (count (:user-types (st)))]
-        (upd! update :user-types conj (nth (:user-types (st)) ascription))
-        (push! (:pre branch) (list 'raw (str "AscribeUserType(" (mir/place (place-form pb)) ", +, UserTypeProjection { base: UserType(" i "), projs: [] })")))))
-    (bind-pattern! branch)))
+  (let [{[branch] :branches} (lower-match-tree bb pb [[pat false]] true)]
+    (push-ascription! (:success (first (:sub-branches branch))) pb ascription)
+    (bind-pattern! branch [] nil)))
 
 (defn- lower-scrutinee [bb x]
   (let [[bb p] (as-place bb x)]
     (push! bb (list 'place-mention (place-form p)))
     [bb p]))
 
+
+(defn lower-let-expr
+  "lower_let_expr: `let PAT = X` as a condition: the match tree's failure to the if-then scope's else, the bindings (declared
+  here when DECLARE) on success"
+  [bb x pat declare & [ascription]]
+  (let [[bb pb] (lower-scrutinee bb x)
+        {[branch] :branches otherwise :otherwise} (lower-match-tree bb pb [[pat false]] false)]
+    (break-for-else! otherwise)
+    (when declare (declare-bindings (or *let-vis* (:source-scope (st))) pat))
+    (push-ascription! (:success (first (:sub-branches branch))) pb ascription)
+    (bind-pattern! branch [] nil)))
+
+(defmacro ^:private opt-in-scope [region & body]
+  `(let [r# ~region] (if r# (in-scope r# ~@body) (do ~@body))))
+
+
 (defn match-expr [dest bb x]
   (let [[bb pb] (lower-scrutinee bb (:scrutinee x))
-        branches (lower-match-tree bb pb (mapv (fn [a] [(:pat a) (boolean (:guard a))]) (:arms x)))
+        {:keys [branches fake-borrows]} (lower-match-tree bb pb (mapv (fn [a] [(:pat a) (boolean (:guard a))]) (:arms x)) true)
+        match-scope (local-scope)
         ends (vec (for [[a br] (map vector (:arms x) branches)]
-                    (blk (in-scope (:scope a)
-                           (let [vis (declare-bindings nil (:pat a))
-                                 ab (bind-pattern! br)]
-                             (when vis (upd! assoc :source-scope vis))
-                             (blk (expr-into-dest dest ab (:body a))))))))
+                    (let [gs (when (:guard a) [(first (:scope a)) :match-guard])]
+                      (blk (in-scope (:scope a)
+                             (opt-in-scope gs
+                               (let [vis (declare-bindings nil (:pat a) nil (boolean (:guard a)))
+                                     ab (binding [*fixed-temps-scope* gs]
+                                          (bind-pattern! br fake-borrows (when (:guard a) {:guard (:guard a) :match-scope match-scope})))]
+                                 (when vis (upd! assoc :source-scope vis))
+                                 (blk (expr-into-dest dest ab (:body a))))))))))
         end (start-new-block!)]
     (doseq [e ends] (goto! e end))
     end))
