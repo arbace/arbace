@@ -40,6 +40,20 @@
 #   bin/rust-front run-native FILE.rs
 #                          RF3: a std program whose own unit is the front's IR, linked with the host's native std as rsi's native-std
 #                          leg links (bin/lib/rsi/link, RSI_FRONT_IR); status, stdout and stderr against the program built by rustc
+#   bin/rust-front build-oracles [FILE.rs...]
+#                          RF10's oracle: rustc's built MIR (-Zdump-mir=built, the helper as rustc) of each program, the flags
+#                          `run` builds it with (panic=abort for a no_std program without its own personality, overflow checks
+#                          off unless `// rf: overflow-checks`), into .tmp/rust-front/built/NAME/ (default: test/rust/front/a*.rs)
+#   bin/rust-front build-check [--run] [NAME...]
+#                          RF10: arbace.rust.front.build's MIR (THIR and MIR building over the pipeline's HIR and typeck results)
+#                          printed against rustc's built MIR text, body by body (BUILD_VERBOSE=1: the first differing lines;
+#                          BUILD_DUMP=DIR: our texts); a negative control must differ
+#   bin/rust-front run-built FILE.rs...
+#                          RF10: each no_std program (test/rust/front/a*.rs) run from Arbace's MIR: the record (the oracle tier:
+#                          the helper's --mono-mir dump and rustc's executable's exit status, made once into .tmp/rust-front/
+#                          run-built/NAME/), then with rustc, rustdoc and cargo on PATH stubs exiting 99 (RF10_STUBS=0: not):
+#                          the pipeline's built MIR of the program's own bodies through arbace.rust.front.build-run (the record's
+#                          bodies replaced), arbace.rust.back.codegen, rsi's lowering and gcc -O0, the run's status against rustc's
 #   bin/rust-front front-oracles [FILE.rs...]
 #                          RF4-RF6's oracles (tools/rsdump/front.rs): the helper's --expanded crate and --resolve paths per file
 #                          into .tmp/rust-front/front/NAME.{exp,res}.edn, rustc's -Zunpretty=hir text (the helper as rustc,
@@ -128,6 +142,22 @@ front_oracles() {
     echo "front-oracles: $out/std-names.edn differs from test/rust/front/std-names.sha256's digest" >&2
   fi
 }
+# RF10's oracle: rustc's built MIR, per body, with the flags `run` uses
+build_oracles() {
+  local out=$work/built f n
+  mkdir -p "$out"
+  for f in "$@"; do
+    n=$(basename "$f" .rs); f=$(realpath "$f")
+    local pf="" oc=-Coverflow-checks=off ct=bin
+    grep -q '^#!\[no_std\]' "$f" && ! grep -q eh_personality "$f" && pf="-C panic=abort"
+    grep -q '^// rf: overflow-checks' "$f" && oc=-Coverflow-checks=on
+    grep -q "fn main" "$f" || ct=lib
+    rm -rf "${out:?}/$n"; mkdir -p "$out/$n"
+    (ulimit -v 4000000; cd "$out" && "$helper" rustc -- --edition 2024 --crate-type $ct -A warnings -C opt-level=0 -C debuginfo=0 $pf $oc \
+       -Zdump-mir=built -Zdump-mir-dir="$n" -o "$n.bin" "$f" > "$n.log" 2>&1) || echo "build-oracles: $f failed (see $out/$n.log)" >&2
+    rm -f "$out/$n.bin"
+  done
+}
 front_files() {
   if [ $# -gt 0 ]; then echo "$@"; else ls "$root"/test/rust/synthetic/*.rs "$root"/test/rust/sample/*.rs "$root"/test/rust/eval/*.rs "$root"/test/rust/front/*.rs; fi
 }
@@ -201,6 +231,44 @@ case ${1:-} in
     done
     cd "$root" && arbace_tool -m arbace.rust.front.collect-check "$out" "${names[@]}" 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing' ;;
   oracles) shift; oracles "$@" ;;
+  run-built)
+    shift
+    stubs=$work/stubs; mkdir -p "$stubs"
+    for t in rustc rustdoc cargo; do printf '#!/bin/sh\necho "stub $0 called" >> "%s/stubs.log"\nexit 99\n' "$stubs" > "$stubs/$t"; chmod +x "$stubs/$t"; done
+    : > "$stubs/stubs.log"
+    ran=0 ok=0
+    for f in "$@"; do
+      f=$(realpath "$f"); n=$(basename "$f" .rs); out=$work/run-built/$n; mkdir -p "$out"
+      pf=""; ab=""; grep -q '^#!\[no_std\]' "$f" && ! grep -q eh_personality "$f" && { pf="-C panic=abort"; ab=--panic-abort; }
+      oc=-Coverflow-checks=off; grep -q '^// rf: overflow-checks' "$f" && oc=-Coverflow-checks=on
+      if [ ! -s "$out/$n.record.edn" ] || [ ! -s "$out/$n.status" ]; then
+        (cd "$out" && "$helper" rustc --mono-mir "$n.record.edn" -- --edition 2024 --crate-type bin -A warnings -C opt-level=0 -C debuginfo=0 $pf $oc -Zshare-generics=no -o "$n.rustc.bin" "$f" > "$n.log" 2>&1) || { echo "run-built: $n: the record failed ($out/$n.log)"; continue; }
+        "$out/$n.rustc.bin" > "$out/rustc.out" 2>&1; echo $? > "$out/$n.status"
+      fi
+      want=$(cat "$out/$n.status")
+      # the program's own bodies from our MIR, with no Rust toolchain on PATH
+      sp=$PATH; [ "${RF10_STUBS:-1}" = 1 ] && sp=$stubs:$PATH
+      rm -f "$out/$n.mono.edn" "$out/$n.ours.ll" "$out/$n.ours.c" "$out/$n.exe"
+      (cd "$root" && PATH=$sp arbace_tool -m arbace.rust.front.build-run "$work/front" "$out/$n.record.edn" "$out/$n.mono.edn" "$n" $ab 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing' > "$out/build-run.log")
+      tail -1 "$out/build-run.log"
+      (cd "$root" && PATH=$sp arbace_tool -m arbace.rust.back.check --emit-mono "$out" "$n" 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing' > "$out/emit.log")
+      [ -f "$out/$n.ours.ll" ] || { echo "run-built: $n: codegen refused ($(tail -1 "$out/emit.log"))"; continue; }
+      (cd "$root" && PATH=$sp "$root/bin/rsi" lower "$out/$n.ours.ll" -o "$out/$n.ours.c" > "$out/lower.log" 2>&1)
+      printf '#include <stdlib.h>\n_Thread_local int cx$pending;\nvoid cx$uncaught(void) { abort(); }\nvoid cx$resume(void *o) { abort(); }\nvoid *cx$exception(void) { return 0; }\nint cx$catches(void *t) { return 0; }\n' > "$out/driver.c"
+      PATH=$sp gcc -std=gnu23 -O0 -w -fno-builtin -fno-strict-aliasing -ffp-contract=off "$out/$n.ours.c" "$out/driver.c" -o "$out/$n.exe" > "$out/gcc.log" 2>&1
+      [ -x "$out/$n.exe" ] || { echo "run-built: $n: gcc refused the lowered C ($out/gcc.log)"; continue; }
+      "$out/$n.exe" > "$out/ours.out" 2>&1; got=$?
+      ran=$((ran+1))
+      if [ "$got" = "$want" ] && cmp -s "$out/ours.out" "$out/rustc.out"; then ok=$((ok+1)); echo "run-built: $n: status $got, as rustc's executable"; else echo "run-built: $n: rustc's status $want, ours $got"; fi
+    done
+    echo "run-built: $ok of $ran programs from Arbace's MIR give rustc's status and output; stub calls: $(wc -l < "$stubs/stubs.log")" ;;
+  build-oracles) shift; if [ $# -eq 0 ]; then set -- "$root"/test/rust/front/a*.rs; fi; build_oracles "$@" ;;
+  build-check)
+    # RF10: our built MIR against rustc's (build-oracles first)
+    shift
+    names=("$@")
+    if [ ${#names[@]} -eq 0 ]; then names=($(cd "$work/built" && ls -d */ | tr -d /)); fi
+    cd "$root" && arbace_tool -m arbace.rust.front.build-check "$work/front" "$work/built" "${names[@]}" 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing' ;;
   front-oracles) shift; front_oracles $(front_files "$@") ;;
   expand-check)
     shift

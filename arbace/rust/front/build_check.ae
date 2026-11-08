@@ -1,0 +1,110 @@
+(ns arbace.rust.front.build-check
+  "RF10's judge (doc/rust/FRONTEND-SURVEY.md, \"As built: RF10 (first slice)\"): each body built by arbace.rust.front.build
+  from the pipeline (the native reader, arbace.rust.front.expand, resolve, lower, collect and typeck; std's names and
+  interface the only rustc data) printed by arbace.rust.front.mir against rustc's -Zdump-mir=built text of the same body
+  (bin/rust-front build-oracles), byte for byte after the dump's header line; a negative control (one body's text against
+  another's) must differ.
+
+    bin/rust-front build-check [NAME...]   (BUILD_VERBOSE=1: the first differing lines; BUILD_DUMP=DIR: our texts;
+                                            BUILD_FORMS=DIR: our bodies as MIR forms, NAME.built.edn)"
+  (:require [arbace.rust.front.lower :as lower] [arbace.rust.front.collect :as collect] [arbace.rust.front.typeck :as tc]
+            [arbace.rust.front.build :as build] [arbace.rust.front.mir :as mir] [arbace.string :as str])
+  (:import [java.io File]))
+
+(defn- source-file [n]
+  (some #(let [f (File. (str "test/rust/" % "/" n ".rs"))] (when (.exists f) (.getCanonicalPath f))) ["front" "synthetic" "sample" "eval"]))
+
+(defn- oracle-bodies
+  "rustc's built MIR files of one program: {name text}"
+  [^File dir]
+  (into {} (for [^File f (.listFiles dir) :when (str/ends-with? (.getName f) ".built.after.mir")]
+             (let [t (slurp f)
+                   nm (second (re-find #"^// MIR for `(.*)` after built\n" t))
+                   body (subs t (inc (str/index-of t "\n")))
+                   body (if (str/starts-with? body "\n") (subs body 1) body)]
+               [nm body]))))
+
+(defn- strip-allocs [t]
+  (let [i (str/index-of t "\n}\n\nalloc")] (if i (subs t 0 (+ i 3)) t)))
+
+(defn- first-diff [a b]
+  (let [as (str/split-lines a) bs (str/split-lines b)]
+    (first (keep-indexed (fn [i [x y]] (when (not= x y) [(inc i) x y])) (map vector (concat as (repeat nil)) (take (max (count as) (count bs)) (concat bs (repeat nil))))))))
+
+(def ^:private std-cache (atom {}))
+(defn- std-data [front-dir]
+  (or (get @std-cache front-dir)
+      (let [v [(collect/load-std (str front-dir "/std-names.edn")) (collect/load-std-iface (str front-dir "/std-iface.edn"))]]
+        (swap! std-cache assoc front-dir v) v)))
+
+(defn build-program
+  "The pipeline over one program, then each function body built: [[name body-or-nil error-or-nil] ...]"
+  [front-dir n]
+  (let [std-file (str front-dir "/std-names.edn")
+        [std si] (std-data front-dir)
+        _ (require 'arbace.rust.front.expand 'arbace.rust.front.resolve)
+        src-file (source-file n)
+        src (slurp src-file)
+        mc (atom {})
+        crate (with-bindings {(resolve 'arbace.rust.front.expand/*mark-crates*) mc}
+                ((resolve 'arbace.rust.front.expand/expand-file) src-file 2024 ((resolve 'arbace.rust.front.expand/load-std-macros) std-file)))
+        res ((resolve 'arbace.rust.front.resolve/resolve-crate) crate ((resolve 'arbace.rust.front.resolve/load-std-names) std-file) {:source src})
+        res-map (into {} (for [[_ s rs] res] [s rs]))
+        hir (lower/lower-crate crate res-map {:file src-file :mark-crates @mc :std-generics (lower/load-std-generics std-file)})
+        oc (boolean (re-find #"(?m)^// rf: overflow-checks" src))]
+    (binding [tc/*root-file* src-file build/*root-file* src-file]
+      (collect/with-crate hir res-map std {:source src :edition 2024 :si si}
+        (fn []
+          (vec (for [d (collect/defs) :when (or (and (#{"Fn" "AssocFn"} (:kind d)) (:body (:node d)))
+                                                (and (= "Variant" (:kind d)) (:disr (:node d))))]
+                 (let [disr? (= "Variant" (:kind d))
+                       nm (if disr? (str (binding [collect/*in-value* true] (collect/print-def-path (:id d) [])) "::{constant#0}") (build/mir-name d))]
+                   (try [nm (if disr? (build/build-discriminant d {:edition 2024}) (build/build-body d {:overflow-checks oc :edition 2024})) nil]
+                        (catch Throwable e
+                          (when (System/getenv "BUILD_TRACE") (.printStackTrace e))
+                          [nm nil (str (or (:what (ex-data e)) e)) (pr-str (:x (ex-data e)))]))))))))))
+
+(defn -main [front-dir built-dir & names]
+  (let [verbose (System/getenv "BUILD_VERBOSE")
+        dump (System/getenv "BUILD_DUMP")
+        forms (System/getenv "BUILD_FORMS")
+        results
+        (vec (for [n names]
+               (let [want (oracle-bodies (File. (str built-dir "/" n)))
+                     got (try (build-program front-dir n) (catch Throwable e (println n "ERROR" e) []))
+                     texts (into {} (for [[nm b _] got :when b] [nm (try (build/print-built b) (catch Throwable e (str "print failed: " e)))]))
+                     rows (for [[nm b err detail] got :when (contains? want nm)]
+                            (let [w (get want nm) g (get texts nm)]
+                              (cond err [:refused nm err detail]
+                                    (= w g) [:equal nm]
+                                    ;; rustc's allocations printed after the body (a string constant's bytes): their ids
+                                    ;; are the session's interning order, which the slice does not print
+                                    (= (strip-allocs w) g) [:equal-allocs nm]
+                                    :else [:differ nm (first-diff w g)])))]
+                 (when dump
+                   (.mkdirs (File. ^String dump))
+                   (doseq [[nm t] texts] (spit (str dump "/" n "." (str/replace nm #"[^A-Za-z0-9_]+" "-") ".mir") t)))
+                 (when forms
+                   (.mkdirs (File. ^String forms))
+                   (spit (str forms "/" n ".built.edn") (with-out-str (doseq [[nm b _] got :when b] (prn (list 'mir/body (assoc b :def nm)))))))
+                 (doseq [[k nm x y] rows :when (not= k :equal)]
+                   (when verbose (println "  " n nm (name k) (pr-str x) (or y ""))))
+                 (when verbose
+                   (doseq [nm (keys want) :when (not (some #(= nm (first %)) got))]
+                     (println "  " n nm "not built (ours:" (pr-str (mapv first got)) ")")))
+                 {:name n :total (count want) :rows rows :texts texts :want want})))
+        cnt (fn [r k] (count (filter #(= k (first %)) (:rows r))))]
+    (doseq [r results]
+      (println (format "%-12s %3d of %3d bodies equal to rustc's built MIR, %3d more but for the allocations' text, %3d differ, %3d refused, %3d not built"
+                       (:name r) (cnt r :equal) (:total r) (cnt r :equal-allocs) (cnt r :differ) (cnt r :refused) (- (:total r) (count (:rows r))))))
+    (let [sum (fn [k] (reduce + (map #(cnt % k) results)))]
+      (println (format "build-check: %d of %d bodies equal to rustc's built MIR, %d more but for the allocations' text (%d differ, %d refused), %d programs whole of %d"
+                       (sum :equal) (reduce + (map :total results)) (sum :equal-allocs) (sum :differ) (sum :refused)
+                       (count (filter #(= (cnt % :equal) (:total %)) results)) (count results)))
+      (println "refusals:" (pr-str (frequencies (for [r results [k _ e] (:rows r) :when (= k :refused)] e)))))
+    ;; the negative control: the first program's first equal body against another body's text
+    (let [r (first (filter #(seq (:texts %)) results))
+          [a b] (take 2 (keys (:want r)))]
+      (when (and a b (get (:texts r) a))
+        (println "control (" a "against" b "):" (if (= (get (:texts r) a) (get (:want r) b)) "PASSED (a bug)" "differs, as it must"))))
+    (System/exit 0)))
