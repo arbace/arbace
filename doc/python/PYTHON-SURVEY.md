@@ -4547,3 +4547,46 @@ dumps of the originals); judge 0.962, `:cases {:self 51346 :recorded 4189}` (Lib
 files by their own verdict; the 151 programs' 453 cases and read's 3,736 files against records): 69.2% (20.0% before;
 89.2% if the tables count as platform data; 99.2% with the tables made from pinned sources and the originals read
 natively). Scored by main's `bin/crops-score --crop python` in a scratch overlay: 69.2%, 0 refuted, 0 problems.
+
+## As built: 235, Python's maturity: the controls, the gate's fragment, records without paths (2026-11-08, the Mac VM, queue 235)
+
+Light: samples on the VM, nothing recorded committed as the record; the main host's night and patches in queue 235's report.
+
+- **Every check family and its negative control** (GTS81 (a): a case's run judged against another case's reference by the
+  family's own judge must fail; "control passed" or "control not judged" fails the check):
+
+  | family | REAP source / gate step | control | |
+  |---|---|---|---|
+  | `bin/repr-python roundtrip`, `--text`, `lex-check`, `parse-check [--full]` | read, print; python-read-essential, python-roundtrip, python-native | `test/python/controls-read.edn`, a pair per corpus (212) | had |
+  | `bin/pyi scope-check`, `compile-check` | eval (beside); python-front(-essential) | `cscontrol` (PY7) | had |
+  | `bin/pyi gen --check` | python-front-essential | the generated `ops/` against the committed `datamodel/` by its `diff -r` | new |
+  | `bin/pyi check`, `lib-test-all` | eval; pyi-check | `test/python/controls.edn` (crossed pairs, 234's flip) | had |
+  | `bin/pyi check --aot` (compiled, the loop, pyi on goi) | AOT, eval; pyi-aot-essential, pyi-check-aot(-goi) | `arbace.python.aot/control` | fixed |
+  | `bin/pyi runtime check`'s smoke programs, `repl --check` | pyi-runtime | `test/python/controls-runtime.edn` | new |
+  | `bin/repr-python ast-check` | none | its first two equal files crossed | new |
+  | `bin/pyi wheels check`, `pip-probe`, `suite`; `c2j-check`; `records verify` | pyi-wheels, pyi-c2j, the oracle tier | their own (205, 206, 213, 232) | had |
+  | `record-ref --check`, `runtime tables`, `bench` | the oracle tier | waived (213: two runs, regenerations, speed) | |
+  | `spec-check`, `samples`, `pins --check` | python-read-essential, `--pins` | none: a checklist and the pins, no case to cross | |
+  | `pegen --check`, `bytecode-check`, `table-check`, `lib-test`, runtime check's forms round trip | none | missing (proposals in the report) | |
+
+  check --aot's control was vacuous on a selection with fewer than two passing programs (it printed "do not pass" with
+  nothing judged: now "left") and failed with nothing wrong when the first two passing programs share an output
+  (synth/ops/cmp-eq.py and cmp-is.py: now the next program of another reference); pyi's runs on goi are crossed too.
+- **bin/pyi runtime check** (230's low): a failure prints the diff's first lines and then, never cut off, each side's status
+  (124 named a timeout) and stderr's last line.
+- **The AOT's Go cache** trimmed by age past 2,000 MB (it was `go clean -cache`, which dropped the runtime's compiled
+  packages: the next AOT step compiled `go/arbace/py` again at a 13.5 GB peak, the essential chain's `pyi-aot-essential` too).
+- **Records without the machine's paths**: bin/pyi check's record, check --aot's record, repr/python's results files and
+  CPython's references write the checkout's directory as `<checkout>/` and any other `/root/`, `/home/`, `/tmp/`, `/Users/`
+  path's head as `<root>/` and the like (`host-free`); `ref-cpython314-lib-test-all.edn`'s two reasons naming Alpine's build
+  directory rewritten in place by `fixrefs`. Found by the VM's saved runs: doctest failures' reasons name the tarball's
+  files by absolute path (`File "/root/.../Lib/test/test_cmd.py"`).
+- **The gate's fragment** (main's `test/gate/crops/python.edn`, a patch in the report; GT9's with 212's, 213's and
+  python-records.edn in one, for the day after batch P's night of records): 4 essential steps, 8 full (pyi-runtime,
+  pyi-check-aot-goi and pyi-check new), 3 oracle; pyi-check rotated a seventh of each corpus's modules a night (its
+  `:id-re` reads the record's methods' MODULE, so no planner change), subsets `test/python/gate-subsets.edn`; every check
+  names its control; `:mem-gib` from the VM's busybox `time -v` on samples (the essential chain 0.4 to 0.9 GB warm, pyi-runtime
+  4.5 GB, pyi-check 5.6 GB at 2 jobs), pyi-aot-runtime 14 and `:heavy` (the cold compile of `go/arbace/py`).
+  `gate.crops check`: 0 problems on main with this branch merged and the fragment spliced. crops-score's Python maturity:
+  83.3% on main, 91.7% with this branch and the fragment spliced (the gate item 0.5 to 1), 100% once the night's records
+  check the eval and AOT cells; the controls item counts 7 of 7 families with the rules matched in their files.
