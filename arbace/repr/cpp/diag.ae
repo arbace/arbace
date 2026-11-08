@@ -58,7 +58,7 @@
   unqualified id-expression no unqualified lookup finds, outside a template (the parser's :_undecl, at the name), not
   the callee of a call ADL could still resolve ([basic.lookup.argdep]: a call whose arguments are not all of
   fundamental types; Sema::ActOnCallExpr's ADL happens before the diagnostic). Each name once a line."
-  [u starts]
+  [u starts _ _]
   (let [out (java.util.ArrayList.)]
     (walk-nodes (fn [n parent]
                   (when-let [[off nm] (:_undecl n)]
@@ -73,7 +73,190 @@
                 (:nodes u) nil)
     (distinct (vec out))))
 
-(def checks (atom [undeclared]))
+;; Redeclarations (clang/lib/Sema/SemaDecl.cpp: Sema::MergeVarDecl's and CheckVariableDeclaration's err_redefinition,
+;; MergeFunctionDecl's err_redefinition (CheckForFunctionRedefinition) and err_member_redeclared, ActOnTag's err_redefinition,
+;; CheckRedeclaration's err_redefinition_different_kind, ActOnParamDeclarator's err_param_redefinition, ActOnField's
+;; err_duplicate_member; [basic.scope.block]/2's names of a condition, an init-statement or a parameter redeclared in the
+;; outermost block): each declarative region's declarations in order, by name, the later one diagnosed at its name.
+
+(defn- qualified-name?
+  "Whether the declaration's name at `off` is written qualified (`A::x`): the text before it ends in ::."
+  [^String src ^long off]
+  (loop [i (dec off)]
+    (cond (neg? i) false
+          (Character/isWhitespace (.charAt src (int i))) (recur (dec i))
+          :else (and (pos? i) (= \: (.charAt src (int i))) (= \: (.charAt src (int (dec i))))))))
+
+(defn qualifier
+  "The nested-name-specifier written before the declaration's name at `off` (`A::B` of `A::B::x`), nil when there is
+  none or it is not plain identifiers (a template-id, a decltype, a global ::)."
+  [^String src ^long off]
+  (let [ws (fn [^long i] (loop [i i] (if (and (>= i 0) (Character/isWhitespace (.charAt src (int i)))) (recur (dec i)) i)))]
+    (loop [i (ws (dec off)) parts ()]
+      (if (and (pos? i) (= \: (.charAt src (int i))) (= \: (.charAt src (int (dec i)))))
+        (let [j (ws (- i 2))
+              k (loop [k j] (if (and (>= k 0) (let [c (.charAt src (int k))] (or (Character/isLetterOrDigit c) (= c \_)))) (recur (dec k)) k))]
+          (if (= k j) nil (recur (ws k) (conj parts (subs src (inc k) (inc j))))))
+        (when (seq parts)
+          ;; a global qualifier or a template-id before the first part: not followed
+          (when-not (and (>= i 0) (#{\: \>} (.charAt src (int i)))) (str/join "::" parts)))))))
+
+(defn- has-body? [n] (some #(= "CompoundStmt" (:kind %)) (:inner n)))
+
+(defn- decl-class
+  "A declaration's class for the redeclaration rules: [cls def? sig] or nil (not a name this check follows)."
+  [n]
+  (case (:kind n)
+    "VarDecl" [:var (or (not= "extern" (:storageClass n)) (contains? n :init)) nil]
+    ("FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "CXXConversionDecl")
+    [:fn (boolean (has-body? n)) (get-in n [:type :qualType])]
+    "FieldDecl" [:field true nil]
+    ("CXXRecordDecl" "EnumDecl") [:tag (boolean (:completeDefinition n)) (:tagUsed n)]
+    ("TypedefDecl" "TypeAliasDecl") [:typedef true nil]
+    "NamespaceDecl" [:ns true nil]
+    "FunctionTemplateDecl" [:fn-tmpl true nil]
+    "VarTemplateDecl" [:var-tmpl true nil]
+    ("ClassTemplateDecl" "TypeAliasTemplateDecl" "ConceptDecl") [:tmpl true nil]
+    nil))
+
+(def ^:private value-classes #{:var :fn :fn-tmpl :var-tmpl})
+
+(defn- conflict
+  "The diagnostic of the declaration `n` (class [c def sig]) after the entry `o` of its name in a region of kind `rk`
+  (:ns :block :class), or nil."
+  [rk o [c def sig] n]
+  (let [oc (:cls o) nm (:name n)]
+    (cond
+      (:poison o) nil
+      ;; a variable defined twice; at block scope every declaration but an extern one defines
+      (and (= :var oc c)) (when (and (:def o) def (not (and (= rk :class)))) (str "redefinition of '" nm "'"))
+      (= :fn oc c) (cond (and (= rk :class) (= sig (:sig o)) sig) "class member cannot be redeclared"
+                         (and (:def o) def (= sig (:sig o)) sig) (str "redefinition of '" nm "'"))
+      (= :field oc c) (str "duplicate member '" nm "'")
+      (and (= rk :class) (#{[:field :var] [:var :field] [:field :fn] [:fn :field]} [oc c])) (str "duplicate member '" nm "'")
+      (= :tag oc c) (when (and (:def o) def (not= "EnumDecl" (:kind n)) (= (:kind n) (:kind (:node o)))) (str "redefinition of '" nm "'"))
+      (= :ns oc c) nil
+      ;; a value and a typedef, a namespace and anything but a namespace, a variable and a function
+      (or (and (= :ns oc) (not= :ns c)) (and (= :ns c) (not= :ns oc))
+          (and (= :typedef oc) (or (value-classes c) (= :tmpl c))) (and (or (value-classes oc) (= :tmpl oc)) (= :typedef c))
+          (and (#{:var :var-tmpl} oc) (#{:fn :fn-tmpl} c)) (and (#{:fn :fn-tmpl} oc) (#{:var :var-tmpl} c))
+          (and (= :tmpl oc) (value-classes c)) (and (value-classes oc) (= :tmpl c)))
+      (when (not= rk :class) (str "redefinition of '" nm "' as different kind of symbol"))
+      :else nil)))
+
+(defn redefinitions
+  "The redeclaration diagnostics of the unit `u` (see above). The definitions of members, in their class or out of it by
+  a qualified name (`int S::foo() {}`, `struct A::B {}`), are kept by their written path from the namespace (a
+  qualifier that is not plain identifiers is not followed): a second definition of a path is a redefinition."
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        qdefs (java.util.HashMap.)
+        mine? (fn [n] (= main (get-in n [:loc :file])))
+        report! (fn [n msg] (let [[l c] (line-col starts (long (get-in n [:loc :offset])))]
+                              (.add out {:line l :col c :kind :error :rule :redefinition :msg msg})))
+        ;; a trailing requires-clause makes a function's signature another (C++20 [over.dcl]): none compared
+        reqs? (fn [n] (let [b (long (get-in n [:loc :offset] 0))
+                            e (loop [i b d 0]
+                                (if (>= i (.length src)) i
+                                    (let [c (.charAt src (int i))]
+                                      (cond (= c \() (recur (inc i) (inc d)) (= c \)) (recur (inc i) (dec d))
+                                            (and (<= d 0) (or (= c \;) (= c \{))) i
+                                            :else (recur (inc i) d)))))]
+                        (str/includes? (subs src b e) "requires")))
+        dclass (fn [n] (let [dc (decl-class n)] (if (and (= :fn (first dc)) (reqs? n)) (assoc dc 2 nil) dc)))
+        ;; a definition by its path: [path sig-or-kind]
+        qdef! (fn [n path]
+                (let [[c def sig] (dclass n)]
+                  (when (and def (#{:fn :tag :var} c) (or (not= :fn c) sig) (mine? n))
+                    (let [k [path (if (= :fn c) sig c)]]
+                      (if (.containsKey qdefs k)
+                        (report! n (str "redefinition of '" (:name n) "'"))
+                        (.put qdefs k true))))))]
+    (letfn [(enter! [^java.util.HashMap r rk n path]
+              (let [nm (:name n) dc (dclass n) off (get-in n [:loc :offset])]
+                (when (and nm (not= "" nm) dc off (mine? n))
+                  (if (qualified-name? src (long off))
+                    (when-let [q (qualifier src (long off))] (qdef! n (str path q "::" nm)))
+                    (do
+                      ;; (a static data member in its class is declared, not defined: [class.static.data]/3)
+                      (when (and (= rk :class) (not= "VarDecl" (:kind n))) (qdef! n (str path nm)))
+                      (if-let [o (.get r nm)]
+                        (if-let [m (conflict rk o dc n)]
+                          (report! n m)
+                          (when (and (second dc) (not (:def o)) (= (first dc) (:cls o))) (.put r nm (assoc o :def true :sig (nth dc 2)))))
+                        (.put r nm {:cls (first dc) :def (second dc) :sig (nth dc 2) :node n})))))))
+            (poison! [^java.util.HashMap r n] (when-let [nm (:name n)] (.put r nm {:poison true})))
+            (params! [^java.util.HashMap r f]
+              (doseq [pm (:inner f) :when (and (= "ParmVarDecl" (:kind pm)) (:name pm) (mine? pm))]
+                (if (.get r (:name pm))
+                  (report! pm (str "redefinition of parameter '" (:name pm) "'"))
+                  (.put r (:name pm) {:cls :var :def true :node pm}))))
+            (decls! [^java.util.HashMap r rk ^java.util.HashMap nss nodes path]
+              (doseq [n nodes]
+                (case (:kind n)
+                  "LinkageSpecDecl" (decls! r rk nss (:inner n) path)
+                  "NamespaceDecl" (do (enter! r rk n path)
+                                      (let [k (or (:name n) "")
+                                            [r2 nss2] (or (.get nss k) (let [v [(java.util.HashMap.) (java.util.HashMap.)]] (.put nss k v) v))]
+                                        (decls! r2 :ns nss2 (:inner n) (str path (if (= k "") "(anonymous)" k) "::"))))
+                  ("UsingDecl" "UsingShadowDecl" "UsingEnumDecl" "NativeDecline") (poison! r n)
+                  (do (enter! r rk n path) (body! n path)))))
+            (class! [n path]
+              (let [r (java.util.HashMap.)
+                    ;; the members' path: the class's, written in its namespace or qualified (`struct A::B {...}`)
+                    q (when-let [off (get-in n [:loc :offset])] (when (qualified-name? src (long off)) (qualifier src (long off))))
+                    ;; a specialization's members are its own (A<bool>::B is not A<T>::B)
+                    path (cond (#{"ClassTemplateSpecializationDecl" "ClassTemplatePartialSpecializationDecl"} (:kind n))
+                               (str "(specialization@" (get-in n [:loc :offset]) ")::")
+                               (:name n) (str path (when q (str q "::")) (:name n) "::")
+                               :else "(unnamed)::")]
+                (doseq [m (:inner n)]
+                  (case (:kind m)
+                    ("UsingDecl" "NativeDecline") (poison! r m)
+                    ("FieldDecl" "VarDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "CXXConversionDecl" "CXXRecordDecl")
+                    (do (enter! r :class m path) (body! m path))
+                    (body! m path)))))
+            (body! [n path]
+              ;; a declaration's nested regions: a class's members, a function's parameters and body, a template's pattern
+              (case (:kind n)
+                ("CXXRecordDecl" "ClassTemplateSpecializationDecl" "ClassTemplatePartialSpecializationDecl") (class! n path)
+                ("FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "CXXConversionDecl")
+                (let [r (java.util.HashMap.)]
+                  (params! r n)
+                  (doseq [b (:inner n) :when (= "CompoundStmt" (:kind b))] (block! (java.util.HashMap. r) (:inner b))))
+                ;; a template's pattern: its members' paths not followed (a specialization's would share them)
+                ("ClassTemplateDecl" "FunctionTemplateDecl" "VarTemplateDecl" "TypeAliasTemplateDecl")
+                (doseq [m (:inner n)] (body! m "(template)::"))
+                (stmt! n)))
+            (block! [^java.util.HashMap r stmts]
+              (doseq [st stmts] (in-block! r st)))
+            (in-block! [^java.util.HashMap r st]
+              (case (:kind st)
+                "DeclStmt" (doseq [d (:inner st)] (if (= "NativeDecline" (:kind d)) (poison! r d) (do (enter! r :block d "(local)::") (body! d "(local)::"))))
+                "CompoundStmt" (block! (java.util.HashMap.) (:inner st))
+                ("ForStmt" "IfStmt" "WhileStmt" "SwitchStmt" "CXXForRangeStmt" "CXXCatchStmt")
+                (let [c (java.util.HashMap.)]
+                  (doseq [x (:inner st)]
+                    (cond (= "DeclStmt" (:kind x)) (in-block! c x)
+                          (= "VarDecl" (:kind x)) (do (enter! c :block x "(local)::") (body! x "(local)::"))
+                          (= "CompoundStmt" (:kind x)) (block! (java.util.HashMap. c) (:inner x))
+                          :else (stmt! x))))
+                "NativeDecline" nil
+                (stmt! st)))
+            (stmt! [x]
+              ;; any other node: its nested blocks (a lambda's body, a statement expression) and local classes, each a region
+              (cond
+                (map? x) (case (:kind x)
+                           "CompoundStmt" (block! (java.util.HashMap.) (:inner x))
+                           "LambdaExpr" (doseq [y (:inner x)] (when-not (= "CXXRecordDecl" (:kind y)) (stmt! y)))
+                           ("CXXRecordDecl" "FunctionDecl" "CXXMethodDecl") (body! x "(local)::")
+                           (doseq [[k v] x :when (and (not= k :_ent) (coll? v))] (stmt! v)))
+                (sequential? x) (doseq [y x] (stmt! y))
+                :else nil))]
+      (decls! (java.util.HashMap.) :ns (java.util.HashMap.) (:nodes u) ""))
+    (vec out)))
+
+(def checks (atom [undeclared redefinitions]))
 
 (defn- pp-diag
   "A preprocessor error `FILE:LINE:COL: msg` (the port's) as a diagnostic, the main file's alone (nil else)."
@@ -96,7 +279,7 @@
                     :let [[l c] (line-col starts (long off))]]
                 {:line l :col c :kind :error :rule :syntax
                  :msg (str (str/replace (str why) #"^(statement|declaration): " "") " (at '" tok "')")})
-          sema (mapcat (fn [f] (f u starts)) @checks)
+          sema (mapcat (fn [f] (f u starts src main)) @checks)
           ds (->> (concat pps syn sema) (sort-by (juxt :line :col)) vec)]
       {:diags ds :other other :declines (:declines u)})
     (catch arbace.lang.ExceptionInfo e
