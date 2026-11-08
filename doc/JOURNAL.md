@@ -791,3 +791,38 @@ third of the concurrent tests, every twentieth other pass) 66 of 67, main's hsi 
 night's `bin/hsi check ... --record`: the testsuite's core 658 of 701 (652), the record 796 of 908; the divergences' edits and the night's
 commands in doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: HE9 on main (write-ahead)". HE9's 666 counted 11 programs whose references
 main's record-ref cannot build (the C includes GHC's `_stub.h`): HES83 proposed.
+
+## 2026-11-08: C++'s own target, the route's switch prepared, C++'s last `:cxx` steps off --full (branch `cpp-target`, from next bd33e27cc)
+
+Three steps toward C++'s independence (doc/cpp/CPP-SURVEY.md, "As built: cpp-target"):
+
+- **CP244 (b)** (recommended in "As built: cpp-indep", taken): the token check read g++'s recorded answers (test/cpp/host: predefined macros
+  per standard, the option lists' deltas, `__has_` answers, the search list). `test/cpp/predef.ae` now computes them from C's ABI
+  description (`c/target/abi.edn` through `c.target/macros`, the C standard of the same inline semantics, C's own macros dropped, the
+  double constants in C++'s functional cast) and `cpp/target/dialect.edn` (`__cplusplus`, the 78 feature-test macros by year from SD-6,
+  g++'s own macros, char8_t, the options' rules, the x86 ISA's implications, Table 21's attribute values, the GNU attribute and builtin
+  lists), with `cpp/target/probes.tsv` (the 118 names the corpora ask) and `cpp/target/option-lists.txt` (334 lists harvested from the
+  token check's samplings), into `cpp/target/host/` in test/cpp/host's layout. No GPL source was ported: the rules are stated from
+  ISO/IEC 14882:2024 [cpp.predefined] and [cpp.cond], WG21's SD-6, the GCC 15.2 manual and musl 1.2.6's include/stdc-predef.h, and checked
+  against the recorded outputs: `bin/repr-cpp target host-oracle`, 19 of 19 files equal (16 standards line for line, 118 answers, 324 option
+  lists, the search list; the 10 lists g++ refused have no answer to compare). `REPR_CPP_TARGET=arbace` the default
+  (`arbace.repr.cpp.host/gxx-dir`; `gxx` the record); the sysroot's roots from the target's search list; `cpp-read-essential` verifies the
+  target first. Alternatives: computing the deltas at check time from the options (rejected for now: the generated file keeps load-host
+  and the check unchanged, and verify proves it current); taking the 324 recorded keys as the list (rejected: harvested from the lists
+  instead, `target option-lists`).
+- **CP240 (b)** (decided 2026-11-07), prepared: `bin/cppi route-compare` (clang's route against auto on the same programs, judgments side
+  by side, exit 1 when auto loses a pass) and the one-word switch `cppi_route_default` in bin/lib/cppi/route.bash. Found and fixed: the
+  route's list was read with `IFS=$'\t'`, which collapses an empty options field, so every auto fallback to clang of a program with no
+  options was STALE. Proved by day on the IR stage alone (the samples and the runtime programs, the packs for clang's half) and on made-up
+  judgments; the full comparison needs runtime-ci (about 3 GB) and a disk under 80%: the night's.
+- **ORS31 (a)** (batch 4's proposal): `cpp-roundtrip` and `cpp-roundtrip-dg` `--judge own` on stage 0; `cpp-dg` `--own` (a new option:
+  preprocess's dg directives on the shared preprocessor, modules' round trip by its own levels) on stage 0; clang's dg-error part and the
+  round trips' clang levels moved to the oracle tier (`cpp-dg-oracle`, `cpp-roundtrip-oracle`), as the user's decision of 2026-11-07
+  moves the toolchain's runs. Alternative: keeping dg-error in `--full` on `:cxx` (rejected by that decision; CP247 proposes its packs to
+  bring it back on records).
+
+Checked with clang, clang++, clang-23, g++, gcc, cc, cpp, c++, cc1, cc1plus, ld and as stubs exiting 99 first on PATH (none called): the
+target's verify and oracle; `pp-check --essential` (53 files as before, the controls failing as they must) and `--corpus gxx-dg --sample
+20` (904 files, as test/cpp/host gives) under strace, no file of test/cpp/host or the installed headers opened; the dg check's preprocess
+part and modules `--own --sample 20` (60 of 60); the samples' own round trip (9 of 9). `bin/crops-score --crop cpp`: 76.1 / 100 / 54.3 to
+76.1 / 100 / 67.7 (read 0.148 to 0.648, judge 0.568 to 0.735), recorded in test/crops/scores.edn. Proposed CP247-CP249.
