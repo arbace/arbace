@@ -3891,3 +3891,122 @@ their new rows (`LEVEL.jdk` beside) judge as above. `--record` after that run re
    not assert it (the kinds above). (a) The oracle by hand at a tag only (the decision); (b) `make java-check-oracle` in
    the night's report too, printed, never failing a gate (seconds, the same saved rows). Recommended: (b), so a jrt
    regression in what the tests print is seen before the tag.
+
+## Decided (the user, 2026-11-07): JCV2 (b), the jls programs' own golden files
+
+JCV2's (b): the 15 programs of the jls corpus (`test/java/jls/`, Arbace's own JLS programs) get golden files of their own,
+reviewed line by line against the JLS sections each program cites, so their stdout tests move from the JDK's recorded
+output (0.5) to their own verdict (1). The other 207 `:stdout` tests keep the JDK's record (JCV2's (c) not chosen).
+
+## As built: JCV2 (2026-11-08)
+
+**The golden files.** `test/java/jls/NAME.out` beside each `NAME.java`: its expected stdout, byte for byte. Made once from
+the JDK by hand, the oracle tier (jdk26u's image, `${JDK:-/root/jdk26u}/build/linux-x86_64-server-release/images/jdk`):
+each program put in its test's package as `bin/java-check` puts it (`package tNNNNN; ` before the first line), compiled by
+`javac -d`, run by `java -cp`; all 15 outputs' digests and lengths equal the recorded ones (`test/java/ref-jdk26.edn`'s
+`:out`, `:out-len`). No output names its package or a directory.
+
+**The review.** `test/java/jls/golden.edn`: per program, each line of its golden file as `[line text sections basis why]`,
+reviewed against Java SE 26's JLS at the sections the program's `@summary` cites (and the ones the line rests on beyond
+them). `basis` says what fixes the line: `:jls` (the JLS alone), `:api` (the Java SE API specification, java.base's
+javadoc: `Arrays.toString`, `Formatter`, `Double.toString`'s digits, the collections' orders), `:jdk` (neither: the JDK's
+implementation, which jrt follows, named in `why`). 196 lines: 119 `:jls`, 33 `:jls :api`, 23 `:api`, 18 `:jls :jdk`,
+3 `:api :jdk`. Every line was worked out from the program text before it was compared with the output (EvalOrder's
+`i += i++ * 2` is 15 by 15.26.2's saved left operand; InitOrder's `B.show b=0 s=null` by 12.5's order; Numbers' 199,999 is
+14 per seven residues of `i * i % 7` plus 9; BackEnds' `records 1 2 2 3` by 14.30.2's null and unconditional patterns;
+...). No line contradicts the JLS. The 21 lines resting on the JDK:
+
+| program | line | the JDK's, not the JLS's or the API's |
+|---|---|---|
+| EvalOrder | 11 | ArithmeticException's message `/ by zero` |
+| EnumsRecords | 3 | `compareTo`'s 1 (the ordinals' difference; the spec: a positive integer) |
+| EnumsRecords | 7, 9, 10 | a record's `toString` format `Point[x=1, y=2]` (`Record.toString`: "the precise format is unspecified") |
+| Exceptions | 8 | a ClassCastException's message is not null |
+| Generics | 2 | `Integer.compare`'s -1 (the spec: less than 0) |
+| Numbers | 21, 23 | `Integer.compare`'s -1, `Double.compare`'s 1 |
+| Switches | 18 | a record's `toString` format |
+| RuntimeConstants | 1-5, 8 | the messages `Index -1 out of bounds for length 3` and `/ by zero`; `Empty[]` |
+| BackEnds | 3 | `HashMap.getOrDefault` not calling an overridden `get` |
+| BackEnds2 | 7 | `getSurplusQueuedTaskCount`'s 0 (an estimate) |
+| BackEnds2 | 9 | the lambda class's declared methods (15.27.4: the class is unspecified; LambdaMetafactory's bridges) |
+| BackEnds2 | 10 | `getDeclaredMethods` without a synthetic member (javac's output) |
+| BackEnds2 | 11 | the outer instance's null check thrown by `Objects.requireNonNull` (javac's code; 15.9.4 asks a NullPointerException) |
+
+Numbers' line 17 holds U+FFFF (`(char) -1` concatenated), written as UTF-8 as the JDK's stdout writes it; jrt writes it
+the same (t03215 passes). InitOrder's last line holds by 12.4.1 but tests nothing about array creation: `Lazy` was
+initialized two lines before (proposal JCV7 below).
+
+**The verdict.** `java.check/verdict-of` gives a jls test whose golden file exists `:golden` ("jls: its golden file
+test/java/jls/NAME.out, reviewed against the JLS (JCV2)"), the kind the golden-diagnostics tests have: a golden file the
+test ships. `bin/java-check verdicts` writes `test/java/verdicts.edn` again: 4,519 tests, 3,103 `:status`, 207 `:stdout`,
+1,209 `:golden` (1,194 golden-diagnostics, 15 run tests with a golden file); the interp and compiled levels judge 3,118 of
+3,325 by their own verdict (3,103 by status, 15 by a golden file). (The file at next 7696e50da lacked three tests the
+reference has since, t08351, t08362, t08376, all `:status`: written again, `--verify` passes.)
+`java.check/plan` writes a `:golden` test's `golden PATH` line (`golden-path`: `DIR/NAME.out`); `bin/java-check`'s
+`run_actions` judges it by `judge_golden STATUS OUT ERR GOLDEN`: `judge_own`'s status first (0; jtreg's rule for the
+other threads' 97 a failure), then stdout, its run's directories masked as `judge` masks them, equal to the golden file
+byte for byte, a `differ` naming the first line that differs (`diag_first_diff`, the diagnostics level's). The JDK's
+record is judged in the same run as before, its row `LEVEL.jdk` written where it says otherwise (the oracle tier's).
+`own-row` reads a `:golden` test's "(the JDK's 0)" as "(expected 0)", as a `:status` test's (t03210's records,
+`check-interp.edn` and `levels-known.edn`, rewritten so); a `differ` stays a `differ` (the golden file is the record's
+output, so a row judged by the record before JCV2 is the golden judge's). `agreement!` counts the `:golden` tests among
+the own verdict's at interp and compiled.
+
+**The review checked.** `bin/java-check golden` (`java.check/golden`, `make java-golden`, seconds): every jls program has
+its golden file and every line of it is in the review, in order, as its text, with sections, a why and a basis of `:jls`
+`:api` `:jdk`; a review of a program that is not a jls test fails. `--oracle` (by hand) also compares each golden file's
+digest and length with the JDK's recorded stdout's (all 15 equal) and says which leave it, should one do so on purpose.
+The essential gate step `java-check-judge` runs it before the judgment (`test/gate/steps.edn`; the review and the golden
+files among `:java-judge`'s inputs). A golden file edited by one character fails it ("EvalOrder line 5: the review's text
+"i = 15", the file's "i = 16"").
+
+**The control.** `c00004` (`test/java/controls.edn`, `:golden-of`): t03208 EnumsRecords' run judged by `judge_golden`
+against t03209 EvalOrder's golden file (`java.check/plan`'s `control-golden CID PATH`, `run_actions`), at interp and
+compiled: it must differ. A golden judge that passes every stdout, or reads the subject's own file, passes it.
+`java.check/report` names it ("judged against t03209's golden file, JCV2"); in saved results of a run before JCV2 (no row
+of a `:golden-of` control at all, the subject's stdout not saved) it is left, said; missing beside another's row it is a
+problem, as every control. c00001 (t03208 against t03209's recorded stdout) still judges the oracle tier's `judge`, and
+c00003 the inverted status.
+
+**Proved on the 15** (light, 2026-11-08; the gate's executable of main `ad3066cf`, javac's tool `javac-5ad35733` with
+`REPR_JAVA_STALE_OK=1`, the checkout's own tool not built): `bin/java-check --only 'test/java/jls/' --levels read,interp
+--jobs 2 --save` (20 s, peak 0.43 GiB): read 15 pass; interp 14 pass, t03210 Exceptions fail ("status 1 (expected 0):
+... RuntimeException: lost", `:interp-jls`, as recorded); c00001 differ, c00004 differ ("stdout differs from the golden
+file EvalOrder.out (336 bytes, the golden file's 228): line 1: MERCURY 0 3.70 (the golden file: 7: a b c )"), as they
+must. `bin/java-check --judge --partial` of it: 15 as recorded at both levels, no regression, the own verdict judging 15
+of 15 at interp, 15 agreeing with the JDK's record. The compiled level was
+not proved by day: `bin/java-check --only 'test/java/jls/' --levels compiled --jobs 1` ran j2g's `--program` over the
+build's compiled namespaces, a whole-program run that peaked near 20 GiB, far above the day's 2 GiB per process, and was
+stopped by PID in its `bin/build-go` (3 GiB and rising); it is the night's. The compiled level's judge is the same
+`run_actions` (`compiled_one`, `--load none`), so only the shard's build is untested here. The whole corpus judged again
+from the gate's saved results (`bin/java-check --judge --latest-saved`, 17,809 rows, 20 s, 0.46 GiB): no regression at any
+level, every control as it must (c00001 differ, c00003 fail, c00002 differ), c00004 left at interp and compiled ("a run
+before JCV2"); the run exits 1 only on the three tests next added after those runs (t08351, t08362, t08376: no result at
+any level, recorded), as it does without JCV2. The essential run as the gate runs it (`bin/java-check --essential --jobs 2 --save`, 428 tests,
+149 s, 0.42 GiB; then `bin/java-check golden` and `--judge --essential`, java-check-judge's command): 428 as recorded, no
+regression, c00001 differ, c00003 fail, c00004 differ, as they must.
+
+**Independence** (`test/crops/independence.edn`, `bin/crops-score --crop java`): the judge stage's mixed fact moves from
+14,038 own and 444 the JDK's record (0.985) to 14,080 own and 414 the JDK's (0.986): the 15 jls programs at interp and
+compiled (30 test-levels), on the reference's 3,325 run tests (three more than JCV1 counted). Java's independence 99.70%
+to 99.72%, shown 99.7% both: the four other stages are 1, and the judge's 207 `:stdout` tests at two levels keep 0.5.
+100% needs those 207 (JCV2's (c), or tests that check their own output) or a formula that drops a record-judged share;
+the 15 alone move the judge by 0.001. `test/crops/scores.edn` recorded so.
+
+**The night** (light): `bin/java-check golden` and `bin/java-check verdicts --verify` (seconds); `bin/java-check --judge
+--latest-saved` (`make java-check-rejudge`: saved results of before JCV2, c00004 left); the gate's Java level steps rerun
+at their new keys (`test/java/` in `:java-run`), the next `--full`'s java-interp and java-compiled-full judging the 15 by
+their golden files and writing c00004's rows; `--record` after it as for JCV1.
+
+### Proposed (JCV7-JCV9)
+
+1. **JCV7, InitOrder's last line.** It holds by 12.4.1 but `Lazy` was initialized above, so array creation's rule is not
+   tested. (a) Leave it; (b) a class of its own (`static class Unused { static { p("Unused.static"); } }`, `new Unused[2]`),
+   the JDK's record re-recorded for t03212 (`bin/java-check --record-ref --only t03212`, the oracle tier) and its golden
+   file and review written again. Cost: (b) an hour. Recommended: (b).
+2. **JCV8, the 21 lines resting on the JDK.** (a) Keep them: jrt follows the JDK, the review names them (`:jdk`); (b) make
+   the programs print only what the JLS or the API fixes (`Integer.signum(compare(...))`, no exception messages, no record
+   `toString`), re-recorded. Cost: (b) half a day, and the programs check less of jrt's JDK fidelity. Recommended: (a).
+3. **JCV9, the 207 other `:stdout` tests** (JCV2's (c) again, now with a tool): `bin/java-check golden` takes any test's
+   review, so a jtreg test's JDK output could be committed and reviewed as these were; or a crops-score formula of the
+   stage's own share (JCV4). Recommended: neither now; the user's decision of 2026-11-07 keeps them at 0.5.

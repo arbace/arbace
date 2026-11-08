@@ -500,6 +500,13 @@
   (let [f (io/file (.getParent (io/file ref)) "verdicts.edn")]
     (if (.isFile f) (into {} (for [[id k] (read-edn (.getPath f))] [id k])) {})))
 
+(defn golden-path
+  "JCV2: a jls test's golden file, its expected stdout beside its program (test/java/jls/NAME.out), relative to
+  the checkout."
+  [t]
+  (let [n (last (str/split (str (:test t)) #"/"))]
+    (str (:dir t) "/" (str/replace n #"\.java$" "") ".out")))
+
 (defn- controls-judged!
   "GTS81 (a): the controls' results of RESULTS at the level LV (rows [id lv result reason]) against
   their subjects' (the run without them): a control that passes is a problem (the judge passes a run
@@ -509,9 +516,10 @@
   (doseq [c controls :when (some #{lv} (:levels c))
           :let [sub (first (filter #(and (= (:subject c) (first %)) (= lv (second %))) results))
                 row (first (filter #(and (= (:id c) (first %)) (= lv (second %))) results))
-                what (if (:inverted c)
-                       (str "control " (:id c) " (" (:subject c) "'s run judged by its own verdict inverted, JCV1)")
-                       (str "control " (:id c) " (" (:subject c) "'s run judged against " (:reference c) "'s reference)"))]
+                what (cond
+                       (:inverted c) (str "control " (:id c) " (" (:subject c) "'s run judged by its own verdict inverted, JCV1)")
+                       (:golden-of c) (str "control " (:id c) " (" (:subject c) "'s run judged against " (:golden-of c) "'s golden file, JCV2)")
+                       :else (str "control " (:id c) " (" (:subject c) "'s run judged against " (:reference c) "'s reference)"))]
           :when (or sub row)]
     (cond
       ;; GTS84 (a): a control whose crossed material was not made in this run (the print level's reference not
@@ -542,7 +550,7 @@
     (doseq [[controls by-id vm] [(let [cs (controls-of ref)] [cs (if (seq cs) (into {} (for [t (ref-tests ref)] [(:id t) t])) {}) (verdict-map ref)])]
             t ts
             :let [cs (for [c controls :when (= (:subject c) (:id t))
-                           :when (not (:inverted c))
+                           :when (not (or (:inverted c) (:golden-of c)))
                            :let [r (by-id (:reference c)) r0 (first (:runs r))]
                            :when r0]
                        [c r r0])]]
@@ -550,6 +558,8 @@
                    (concat [(str "test\t" (:test t)) (str "dir\t" (:dir t)) (str "root\t" (name (:root t :jdk26u))) (str "classes\t" (:classes t))
                             ;; JCV1: whose verdict judges it (test/java/verdicts.edn; none: the JDK's record)
                             (str "verdict\t" (name (vm (:id t) :stdout)))]
+                           ;; JCV2: a run test judged by its golden file (the jls programs'), the file
+                           (when (= :golden (vm (:id t))) [(str "golden\t" (golden-path t))])
                            (for [x (:javac t)] (str "javac\t" x))
                            (for [[src dst] (:files t)]
                              (str "file\t" src "\t" dst "\t" (if (some #{dst} (:unnamed t)) (str "package " (first (str/split dst #"/")) "; ") "")))
@@ -566,6 +576,11 @@
                            ;; JCV1: the own verdict's controls (:inverted): the subject's run judged by its own
                            ;; verdict inverted (it must fail, as jtreg's main/fail and @compile/fail)
                            (for [c controls :when (and (:inverted c) (= (:subject c) (:id t)))] (str "control-own\t" (:id c)))
+                           ;; JCV2: the golden files' controls (:golden-of): the subject's run judged against another
+                           ;; program's golden file (it must differ)
+                           (for [c controls :when (and (:golden-of c) (= (:subject c) (:id t)))
+                                 :let [r (by-id (:golden-of c))] :when r]
+                             (str "control-golden\t" (:id c) "\t" (golden-path r)))
                            ;; GTS84 (a): the print level's controls: the subject's print judged against its
                            ;; reference's printed run (control-print CID REF); the reference keeps its printed
                            ;; class files for them (control-reference CID)
@@ -667,14 +682,15 @@
 (defn own-row
   "JCV1: a result row [id level result reason] judged by the test's own verdict (VM, verdict-map): at
   interp and compiled a :status test's stdout is not looked at (a differ, its status the expected 0,
-  passes; the JDK's status in a reason is jtreg's expected 0); at classes javac's acceptance judges (a
+  passes; the JDK's status in a reason is jtreg's expected 0; JCV2: a :golden test's too, its stdout
+  judged by its golden file, which a row of before JCV2 judged by the JDK's record, equal to it); at classes javac's acceptance judges (a
   differ, the class files not the JDK javac's, passes). Rows of JCV1's runs, and every other row, as
   they are."
   [vm [id lv r reason :as row]]
   (cond
     (and (#{:interp :compiled} lv) (= :status (vm id)) (= :differ r) (not (str/starts-with? reason "action ")))
     [id lv :pass ""]
-    (and (#{:interp :compiled} lv) (= :status (vm id)) (= :fail r) (re-find #"^(?:action \d+: )?status -?\d+ \(the JDK's 0\)" reason))
+    (and (#{:interp :compiled} lv) (#{:status :golden} (vm id)) (= :fail r) (re-find #"^(?:action \d+: )?status -?\d+ \(the JDK's 0\)" reason))
     [id lv r (str/replace-first reason #"\(the JDK's 0\)" "(expected 0)")]
     (and (= :classes lv) (= :differ r) (= reason "the class files differ from the JDK javac's"))
     [id lv :pass ""]
@@ -735,7 +751,7 @@
           :let [o (into {} (for [[id l r reason] own :when (and (= l lv) (not (control-ids id)))] [id [r reason]]))
                 j (into {} (for [[id l r reason] jdk :when (and (= l lv) (not (control-ids id)))] [id [r reason]]))
                 ids (sort (filter j (keys o)))
-                own-judged (count (filter #(if (#{:interp :compiled} lv) (= :status (vm %)) true) ids))
+                own-judged (count (filter #(if (#{:interp :compiled} lv) (#{:status :golden} (vm %)) true) ids))
                 dis (filter #(not= (first (o %)) (first (j %))) ids)]
           :when (seq ids)]
     (println (str "java-check " (name lv) ": the own verdict judges " own-judged " of " (count ids)
@@ -786,6 +802,16 @@
                            (if (= :pass (nth sub 2))
                              [(:id c) lv :fail "status 0 (expected a failure: the verdict inverted, a control; from its subject's row)"]
                              [(:id c) lv :pass "(from its subject's row)"])))
+        ;; JCV2: a :golden-of control in saved results with no row of any :golden-of control (a run before JCV2: its
+        ;; subject's stdout is not saved, nothing to judge again) is left, said; one missing beside another's row is not
+        own-rows (let [gcs (filter :golden-of (controls-of ref))
+                       gids (set (map :id gcs))]
+                   (if (some #(gids (first %)) own-rows)
+                     own-rows
+                     (concat own-rows
+                             (for [c gcs lv (:levels c)
+                                   :when (some #(and (= (:subject c) (first %)) (= lv (second %))) own-rows)]
+                               [(:id c) lv :left "a run before JCV2: its subject's stdout is not in the saved results"]))))
         jdk-rows (let [jdk (into {} (for [[id lv :as x] raw :when (str/ends-with? lv ".jdk")]
                                       [[id (subs lv 0 (- (count lv) 4))] x]))]
                    (for [[id lv :as x] raw :when (not (str/ends-with? lv ".jdk"))
@@ -1240,7 +1266,7 @@
 
 (defn- verdict-of
   "A test of REF's verdict: [kind why]. :golden (a golden-diagnostics test: its @compile modes and
-  golden files), :status (a run test whose source set can fail by itself: judged by its status,
+  golden files; JCV2: a jls program with its reviewed golden file, its expected stdout), :status (a run test whose source set can fail by itself: judged by its status,
   jtreg's), :stdout (a run test with no way to fail but a crash, or Arbace's own corpus jls, whose
   programs print what they check: judged by the JDK's recorded stdout, as before)."
   [t ^String jdktest]
@@ -1248,6 +1274,9 @@
     (= :compile-fail-ref (:category t))
     [:golden (str (count (filter #(re-find #"(?:^|/)ref=" (str (:modes %))) (:actions t))) " golden of "
                   (count (:actions t)) " actions")]
+    ;; JCV2: a jls program with its golden file, reviewed line by line against the JLS (test/java/jls/golden.edn)
+    (and (= :jls (:corpus t)) (.isFile (io/file (golden-path t))))
+    [:golden (str "jls: its golden file " (golden-path t) ", reviewed against the JLS (JCV2)")]
     (= :jls (:corpus t)) [:stdout "jls: Arbace's own programs, their output the check"]
     :else
     (let [base (if (= :checkout (:root t)) "." jdktest)
@@ -1276,7 +1305,8 @@
                                 ";; \"Decided (the user, 2026-11-07)\", \"As built: JCV1\"): [id kind why], kind :status (jtreg's main action,"
                                 ";; its source set can fail by itself: the status judges it, the JDK's stdout is the oracle tier's), :stdout"
                                 ";; (nothing in it but a crash can fail it, or Arbace's own jls corpus: the JDK's recorded stdout judges it, as"
-                                ";; before), :golden (a golden-diagnostics test: its @compile modes and shipped golden files). Written by"
+                                ";; before), :golden (a golden-diagnostics test: its @compile modes and shipped golden files; since JCV2 a jls"
+                                ";; program with its golden file test/java/jls/NAME.out, reviewed in test/java/jls/golden.edn). Written by"
                                 ";; bin/java-check verdicts (java.check/verdicts, from the sources at the platform's pin; --verify compares)."
                                 ";; Read with the Clojure reader."
                                 "["]
@@ -1289,12 +1319,17 @@
                                  (not= (boolean (re-find #"(?:^|/)ref=" (str (:modes a)))) (boolean (:golden a))))]
                    (str (:id t) " action " i))
         by (frequencies (map second vs))
-        run (count (remove #(= :golden (second %)) vs))]
+        ;; the golden-diagnostics tests (the diagnostics level's) apart from the run tests with a golden file (JCV2)
+        diag (set (for [t ts :when (= :compile-fail-ref (:category t))] (:id t)))
+        ndiag (count diag)
+        gold-run (count (filter #(and (= :golden (second %)) (not (diag (first %)))) vs))
+        run (- (count vs) ndiag)]
     (println (str "java-check verdicts: " (count vs) " tests: " (by :status 0) " :status, " (by :stdout 0) " :stdout, "
-                  (by :golden 0) " :golden"))
-    (println (str "   own verdict per level: interp, compiled " (by :status 0) " of " run
+                  (by :golden 0) " :golden (" ndiag " golden-diagnostics, " gold-run " run tests with a golden file)"))
+    (println (str "   own verdict per level: interp, compiled " (+ (by :status 0) gold-run) " of " run
+                  " (" (by :status 0) " by status, " gold-run " by a golden file)"
                   "; classes, print " run " of " run " (javac's acceptance; the original's class files); diagnostics "
-                  (by :golden 0) " of " (by :golden 0) "; read " run " of " run))
+                  ndiag " of " ndiag "; read " run " of " run))
     (println (str "   the golden tests' own expectations (their @compile modes, their ref= files) against the JDK's record: "
                   (if (seq diag-off) (str (count diag-off) " actions differ: " (str/join ", " (take 10 diag-off))) "the same for every action")))
     (if (some #{"--verify"} opts)
@@ -1303,9 +1338,67 @@
         (do (println (str "   " out ": DIFFERS (bin/java-check verdicts writes it)")) (shutdown-agents) (System/exit 1)))
       (do (spit out text) (println (str "   written " out))))))
 
+(defn- sha16
+  "The first 16 hex digits of a file's SHA-256 (sha256sum's, as the reference's digests)."
+  [^String f]
+  (let [md (java.security.MessageDigest/getInstance "SHA-256")
+        bs (.digest md (java.nio.file.Files/readAllBytes (.toPath (io/file f))))]
+    (subs (apply str (map #(format "%02x" (bit-and (int %) 0xff)) bs)) 0 16)))
+
+(defn golden
+  "JCV2 (doc/classes/JAVA-CONFORMANCE-SURVEY.md, \"As built: JCV2\"): bin/java-check golden [--oracle]: every
+  golden file of the jls programs reviewed in REVIEW (test/java/jls/golden.edn): each line of the file a
+  [line text sections basis why] of its program, in order, the text the line's, the sections and the why
+  given, the basis of :jls :api :jdk; every reviewed program with its golden file and a test of REF. The
+  counts by basis printed. --oracle (the oracle tier's, by hand): each golden file's digest and length the
+  JDK's recorded stdout's (test/java/ref-jdk26.edn); a golden file may leave the JDK's on purpose, then said."
+  [ref review & opts]
+  (let [oracle? (some #{"--oracle"} opts)
+        rv (read-edn review)
+        jls (for [t (ref-tests ref) :when (= :jls (:corpus t)) :when (= :pass (:jdk t))] t)
+        problems (atom [])
+        bad! #(swap! problems conj %)
+        bases (atom [])]
+    (doseq [t jls
+            :let [g (golden-path t)
+                  n (str/replace (last (str/split g #"/")) #"\.out$" "")
+                  rows (get rv n)]]
+      (cond
+        (not (.isFile (io/file g))) (bad! (str (:id t) " " n ": no golden file " g))
+        (nil? rows) (bad! (str (:id t) " " n ": " g " not reviewed in " review))
+        :else
+        (let [text (slurp g)
+              ls (str/split-lines text)]
+          (when-not (str/ends-with? text "\n") (bad! (str n ": " g " does not end with a newline")))
+          (when (not= (count ls) (count rows))
+            (bad! (str n ": " (count ls) " lines, " (count rows) " reviewed")))
+          (doseq [[i l [k lt sec basis why]] (map vector (range) ls rows)]
+            (swap! bases conj basis)
+            (cond
+              (not= k (inc i)) (bad! (str n " line " (inc i) ": the review's line " k))
+              (not= l lt) (bad! (str n " line " (inc i) ": the review's text " (pr-str lt) ", the file's " (pr-str l)))
+              (or (not (set? basis)) (empty? basis) (seq (remove #{:jls :api :jdk} basis)))
+              (bad! (str n " line " (inc i) ": basis " (pr-str basis) " (a set of :jls :api :jdk)"))
+              (or (str/blank? sec) (str/blank? why)) (bad! (str n " line " (inc i) ": no sections or why"))))
+          (when oracle?
+            (let [r (first (:runs t)) d (sha16 g) len (.length (io/file g))]
+              (if (and (= d (:out r)) (= len (:out-len r)))
+                (println (str "   " (:id t) " " n ": the JDK's recorded stdout (" d ", " len " bytes)"))
+                (println (str "   " (:id t) " " n ": leaves the JDK's recorded stdout (" d " " len " bytes, the JDK's "
+                              (:out r) " " (:out-len r) ")"))))))))
+    (doseq [n (keys rv) :when (not-any? #(= n (str/replace (last (str/split (golden-path %) #"/")) #"\.out$" "")) jls)]
+      (bad! (str n ": reviewed in " review ", no jls test of " ref)))
+    (let [fr (frequencies (map #(str/join "+" (map name (sort-by {:jls 0 :api 1 :jdk 2} %))) @bases))]
+      (println (str "java-check golden: " (count jls) " jls programs, " (count @bases) " lines reviewed: "
+                    (str/join ", " (for [[k v] (sort-by key fr)] (str v " " k))))))
+    (if (seq @problems)
+      (do (doseq [x @problems] (println (str "   " x))) (shutdown-agents) (System/exit 1))
+      (println (str "   every line of every golden file reviewed, as its text")))))
+
 (defn -main [cmd & args]
   (case cmd
     "verdicts" (apply verdicts args)
+    "golden" (apply golden args)
     "rejudge-records" (apply rejudge-records args)
     "scan" (apply scan args)
     "rename" (apply rename args)

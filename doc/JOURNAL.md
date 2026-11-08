@@ -993,3 +993,28 @@ check 2,381 files, 0 errors; the read of the 4 files 0 failed, `--no-javac` iden
 it; `go vet ./jrt` amd64 and arm64, `go test ./jrt` amd64 and `-run TestChannel` arm64 under qemu with the new TestChannelUnix.
 Expected after the night (with F9's): `jdk/java/nio/channels/unixdomain/Shutdown` (t05204) at interp and compiled; JCS200
 (jdk.net's extended options, t05205) and JCS201 (the inherited channel, t05202, t05203) proposed.
+
+## 2026-11-08: JCV2, the jls programs' own golden files (branch `java-jcv2`, from next 7696e50da)
+
+By the user's decision of 2026-11-07 (JCV2 (b), doc/classes/JAVA-CONFORMANCE-SURVEY.md, "Decided (the user, 2026-11-07): JCV2
+(b)"): the 15 programs of `test/java/jls/` are judged by golden files of their own. Each program's output was made once by
+hand from jdk26u's image (`/root/jdk26u/build/linux-x86_64-server-release/images/jdk`: the program put in its test's package as
+bin/java-check puts it, `javac -d`, `java -cp`), its digest and length checked equal to `test/java/ref-jdk26.edn`'s, and
+written as `test/java/jls/NAME.out`. Every line was then worked out from the program against the JLS (Java SE 26) sections
+its `@summary` cites and recorded in `test/java/jls/golden.edn` as `[line text sections basis why]`: 196 lines, 119 fixed by
+the JLS alone, 33 by the JLS and the API's specification, 23 by the API's, 21 resting on the JDK's implementation (exception
+messages, `Record.toString`'s format, `compare`'s -1 and 1, `HashMap.getOrDefault`, LambdaMetafactory's classes, javac's
+`requireNonNull`), named in the survey's table; none contradicts the JLS. Built: `java.check/verdict-of`'s `:golden` for a
+jls test with its file, `plan`'s `golden` and `control-golden` lines, `bin/java-check`'s `judge_golden` (status 0, then
+stdout equal to the file byte for byte) in `run_actions`, `own-row` and `agreement!` counting `:golden` as `:status`,
+`bin/java-check golden` (`java.check/golden`: the review against the files, `--oracle` against the JDK's digests; `make
+java-golden`; run by the essential step `java-check-judge`), the control c00004 (EnumsRecords' run against EvalOrder's golden
+file, at interp and compiled; left in saved results of before JCV2), `test/java/verdicts.edn` written again (also adding
+three tests next had added to the reference, all `:status`), t03210's records' reason read as "(expected 0)". Proved: read and
+interp over the 15 (14 pass, t03210 failing as recorded, c00001 and c00004 differ); the whole corpus judged again from saved
+results (no regression, c00004 left). The compiled level's sample was stopped: its whole-program j2g peaked near 20 GiB, over
+the day's rule; the night's. Independence (`test/crops/independence.edn`, `scores.edn`): the judge 0.985 to 0.986, Java's
+99.70% to 99.72% (99.7% shown either way: the 207 other `:stdout` tests keep 0.5; 100% was not reachable by these 15).
+Alternatives considered: a new verdict kind beside the diagnostics' `:golden` (rejected: the same meaning, a golden file the
+test ships); judging the golden file after `mask_hashes` (rejected: no line prints a hash, and a byte comparison is jtreg's);
+rewriting the programs so no line rests on the JDK (proposal JCV8, not done). Proposals JCV7-JCV9 in the survey.
