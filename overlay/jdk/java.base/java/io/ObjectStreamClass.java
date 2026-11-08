@@ -1619,6 +1619,12 @@ public final class ObjectStreamClass implements Serializable {
         {
             return 0L;
         }
+        // Arbace (JCS168): the value computed ahead of time from the class's declaration as javac
+        // compiles it (j2g's, the Java forms' host's): reflection over a class of the Go build sees the
+        // members its table lists, not every member javac wrote
+        if (SerialAlloc.hasDefaultSUID(cl)) {
+            return SerialAlloc.defaultSUID(cl);
+        }
 
         try {
             ByteArrayOutputStream bout = new ByteArrayOutputStream();

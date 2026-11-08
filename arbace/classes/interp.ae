@@ -13,7 +13,8 @@
             [arbace.classes.types :as t]
             [arbace.classes.env :as env]
             [arbace.classes.parse :as p]
-            [arbace.classes.analyze :as a])
+            [arbace.classes.analyze :as a]
+            [arbace.classes.suid :as suid])
   (:import (arbace.lang Compiler$CF$Rt Compiler$CF$Klass Compiler$CF$Meth Compiler$CF$Node
                         Compiler$CF$Const Compiler$CF$Local Compiler$CF$SetLocal
                         Compiler$CF$SelfField Compiler$CF$OuterPath Compiler$CF$ArithJ
@@ -1492,11 +1493,14 @@
             :when (.add seen key)
             :when (not= key "doInvoke")]
       (meth-classes m)
-      (if (and (:lambda (.-info k)) (not (identical? (.-k m) k)))
+      (if (not (identical? (.-k m) k))
         ;; a lambda's class inherits its interfaces' default methods (javac's bridges in an
         ;; interface among them) for dispatch only: getDeclaredMethods lists its method and its
         ;; bridges, as LambdaMetafactory's class (bit 30, not the JVM's: the host's slot without
-        ;; a member table entry, arbace.j2g.dyncf; JCS116 (a), "As built: JC4c")
+        ;; a member table entry, arbace.j2g.dyncf; JCS116 (a), "As built: JC4c"); so does any
+        ;; class the virtual methods it inherits from interpreted classes and their interfaces'
+        ;; defaults (JCS167's third slice: getDeclaredMethods lists the class's own, as the JVM's,
+        ;; which computeDefaultSUID and the tests that print a class's methods read)
         (.method h k (dispatch-only m))
         (.method h k m)))
     (doseq [[_ ^arbace.lang.Compiler$CF$Meth m] (.-ctors k)]
@@ -1505,6 +1509,10 @@
     (let [info (.-info k)]
       (doseq [f (:own-fields info)]
         (.addField h k (:name f) (sig-class (:desc f)) (int (:flags f)) (int (field-index k (:name f))) false))
+      ;; javac's synthetic instance fields: the enclosing instance's this$0 and the captured locals'
+      ;; (final, synthetic: getDeclaredFields lists them, as the JVM's; JCS167's third slice)
+      (doseq [f (drop (count (:own-fields info)) (:fields info))]
+        (.addField h k (:name f) (sig-class (:desc f)) (int 0x1010) (int (field-index k (:name f))) false))
       (doseq [[i f] (map-indexed vector (:statics info))]
         (.addField h k (:name f) (sig-class (:desc f)) (int (:flags f)) (int i) true)))))
 
@@ -1554,6 +1562,21 @@
       (when-let [plan (arbace.lang.Compiler$CF$Rt/serialPlan k)]
         (.setSerialNew (host) k (fn [] (arbace.lang.Compiler$CF$Rt/serialNew k plan)))))))
 
+(defn- serial-uid!
+  "JCS168 (doc/classes/JAVA-DEFERRED-TRIAGE.md, \"As built: JCS167 slices 2-3 (write-ahead)\"): the
+  default serialVersionUID of k (class n) when it is Serializable without a declared one (a static
+  serialVersionUID field), neither an enum nor a record (ObjectStreamClass gives those 0), computed from
+  its declaration as javac compiles it (arbace.classes.suid) and handed to the host as the class's
+  ClassInfo.SerialUID: computeDefaultSUID's reflection over an interpreted class sees the members the
+  interpreter publishes, not javac's synthetic ones."
+  [^arbace.lang.Compiler$CF$Klass k n]
+  (let [d (a/decl n)]
+    (when (and (.-cls k) (not (.-fnClass k)) (not (.-record k))
+               (not (#{:enum :record} (:kind d))) (not (:enum-body d))
+               (.implementsClass k java.io.Serializable)
+               (not (some #(and (= "serialVersionUID" (:name %)) (has? (:flags %) ACC_STATIC)) (:fields d))))
+      (.setSerialUID (host) k (long (suid/default-suid n))))))
+
 (defn define!
   "Compiles Java forms (each the rest of a defclass form) in namespace ns as one compilation,
   the sibling Java forms entered as declarations, into interpreted classes. Returns [[dotted-name
@@ -1576,6 +1599,7 @@
               (set! (.-cls k) (.define (host) k))
               (set! (.-info k) (assoc (.-info k) :compile-set @env/*compile-set* :klasses ks))))
           (doseq [n sorted] (serial-new! (ks n) n))
+          (doseq [n sorted] (serial-uid! (ks n) n))
           (doseq [n sorted] (vtable! (ks n)))
           ;; fn classes: their variadic arity by name (CF$FnObj)
           (doseq [n order

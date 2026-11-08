@@ -5,7 +5,11 @@ Java forms, which Clojure cannot evaluate; VENDOR-NOTES.md, hand change 19): Arb
 code. Three kinds of things live here:
 
 - Arbace's own tools: `classes/` (the Java forms' analysis and the Go build's interpreter of
-  them, `arbace.classes.*`; the bytecode back end is on the branch `arbace-for-java-26`), `repr/clojure.ae`
+  them, `arbace.classes.*`; the bytecode back end is on the branch `arbace-for-java-26`; `classes/suid.ae`, the default
+  serialVersionUID, ports https://github.com/openjdk/jdk26u at `baf63fbe42b8758448fee570a9d9bb914272d259`,
+  `src/java.base/share/classes/java/io/ObjectStreamClass.java`'s `computeDefaultSUID` and the synthetic members of
+  `src/jdk.compiler/share/classes/com/sun/tools/javac/comp/Lower.java` a serializable class has, by hand on 2026-11-08,
+  the file carrying their notice; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS167 slices 2-3 (write-ahead)"), `repr/clojure.ae`
   and `repr/clojure/` (repr/clojure, Clojure source to Arbace's, `arbace.repr.clojure` and
   `arbace.repr.clojure.*`; doc/REPR-CLOJURE.md; c2a, `arbace.c2a.*`, until 2026-10-17), `repr/java.ae`
   and `repr/java/` (repr/java, the Java to Java forms converter, `arbace.repr.java` and

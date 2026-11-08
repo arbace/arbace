@@ -1188,6 +1188,8 @@ adds it.
 
 ## Proposed
 
+JCS190-JCS193 are JCS167's slices 2 and 3 (at the end, "Proposed (JCS167 slices 2-3)", branch `java-serial2`; JCS190
+the DECISION on JCS168's switch);
 JCS168-JCS171 are JCS167's first slice's (at the end, "Proposed (JCS167)", branch `java-serial`);
 JCS162-JCS167 are F10a's and the crop's 90% (at the end, "Proposed (F10a)", branch `java-complete`);
 JCS161 is F13's ("F13 (java.lang.management's MXBeans): not built, JCS161"); JCS158-JCS159 are F6's ("As built:
@@ -3162,3 +3164,200 @@ of +1.5 to 3 MB, measured at the night's step 3. (a) accept it, as JCS135 accept
 hooks only of classes the REPL's world names publicly and the program's own (the shipped program's interpreted level
 needs them all); (c) a build option without serialization. **Recommended: (a)**, then (c) only if the box's guest
 needs it.
+
+## As built: JCS167 slices 2-3 (write-ahead)
+
+Branch `java-serial2` (from `java-serial` 05504ace6), 2026-11-08, by day under the light rules: the second and third
+slices of JCS167 (a) ("The remaining slices" above). Nothing converted, translated or built into an executable: the
+night's commands below join slice 1's.
+
+### Slice 2: jrt's hand-written serializable classes
+
+jdk26u's streams find a class's serial form by reflection (slice 1's variant of ObjectStreamClass), and jrt's
+hand-written classes listed only their public members: no `serialVersionUID`, no private serial field, no hook, no
+`SerialNew`. A JDK class j2g translates gets them from j2g (slice 1); a class jrt writes by hand now gets them from
+`go/arbace/jrt/serial_classes.ae`, each with jdk26u's serial form byte for byte. The members are a `MemberTable` of
+the class's private serial members, decoded on reflection's first use beside the public members `reflect_tables.ae`
+lists (the hooks' descriptors name `java.io.ObjectOutputStream` and `ObjectInputStream`, which j2g translates and
+registers after jrt's own classes; `MemberTable.DataFn`, new, makes the lines at the first decoding and drops the
+hooks when the world has no streams). The hooks are jdk26u's bodies over jrt's state; they call the streams by
+reflection over the translated classes' tables (`serialCall`: jrt cannot name a translated class's Go type), and
+their exceptions propagate unwrapped as the JDK's do.
+
+| class (jdk26u's serialVersionUID) | serial form |
+|---|---|
+| `Throwable` (-3042686055658047285) | fields `detailMessage`, `cause` (the exception itself when no cause was set, jdk26u's `cause = this`), `stackTrace` (`getOurStackTrace`; when not writable the sentinel `[StackTraceElement("", "", null, MIN_VALUE)]` while `writeObject` writes, its two names the one interned `""` as on the JDK), `suppressedExceptions` (`Collections.emptyList()` when none, null when suppression is disabled, else an `ArrayList`); `writeObject` (synchronized), `readObject` with jdk26u's validation (the list's class in java.base, its size, no null and not the exception itself; the sentinel making the trace not writable, a null or empty trace an empty one; a null list disabling suppression, as on the JDK) |
+| `StackTraceElement` (6992337162326171013) | jdk26u's eight fields: jrt's element gains `classLoaderName`, `moduleName`, `moduleVersion` and `format`, with jdk26u's `toString`, `equals` and `hashCode`; a frame's element holds what the JVM gives one (`frameElement`: a JDK class's module java.base, version 26, format 3; another's loader `app`, format 1), so a frame prints as before |
+| `Date` (7523967970034938905) | no fields; `writeObject` writes the time as a long, `readObject` reads it |
+| `StringBuilder` (4383685877147921099) | no fields; `writeObject` the count and a `char[]` of the capacity (jrt grows the capacity as Java does), `readObject` `initBytes` and the count (StreamCorruptedException "count value invalid") |
+| `StringBuffer` (3388685877147921107) | `serialPersistentFields` value, count, shared (`ObjectStreamField`s made once by reflection); `putFields`/`writeFields`, `readFields` |
+| `AtomicInteger` (6214790243416807050), `AtomicLong` (1927816293512124184), `AtomicBoolean` (4654671469794556979, an int), `AtomicReference` (-1848883965231344442) | `value` (private volatile), no hooks |
+
+The classes' `SerialNew` is the zero object (their first non-serializable superclass is Object). The stand-ins
+(`standin_*.ae`: the wrappers, `Number`, `Locale`, the exceptions) are not in the build: j2g translates them with
+slice 1's tables. Left for later (JCS191): the locks, `Semaphore`, `ForkJoinTask` and its adapters,
+`AbstractQueuedSynchronizer$ConditionObject` (their serial forms name JDK classes jrt has not: `ReentrantLock$Sync`,
+`NonfairSync`, AQS's state).
+
+**The oracle**: `test/jrt/serialization/SerialRecord.java` recorded once by hand on jdk26u's JDK the bytes its
+ObjectOutputStream writes for 16 cases (`jdk-streams.txt`, also `serial_test.ae`'s `jdkStreams`). jrt's package has
+not the object streams, so `serial_test.ae` has a small stream of its own written after jdk26u's protocol
+(ObjectOutputStream's grammar, handles, block data; class descriptors made as ObjectStreamClass makes them, by
+reflection over jrt's tables: `serialVersionUID`, `serialPersistentFields`, the non-static non-transient fields
+sorted primitives first and by name, the private hooks, an array class's default serialVersionUID) and stand-ins
+named as the classes the hooks call (the streams, `PutField`, `GetField`, `ObjectStreamField`, `List`, `ArrayList`,
+`Collections$EmptyList`, with their serial forms). `TestSerialForms`: each case's object made by jrt is written to
+the JDK's bytes, the JDK's bytes are read into a jrt object that shows the same (message, trace, cause, suppressed,
+capacity, value) and written again to the same bytes; `TestSerialThrowableRead` (readObject's rules),
+`TestSerialFrames`, `TestSerialControl` (the negative controls: another object's bytes differ, a wrong
+serialVersionUID is refused). The night's check with the real streams is `test/jrt/serialization/streams_check.ae`.
+
+### Slice 3: the default serialVersionUID exact (JCS168 (a), behind a switch) and the interpreted classes' reflection
+
+`arbace/classes/suid.ae` (`arbace.classes.suid`) ports jdk26u's `ObjectStreamClass.computeDefaultSUID` rule for
+rule over the class as javac compiles it rather than over reflection: the declaration arbace.classes.analyze makes
+(javac's derived members: default and anonymous constructors with their implicit parameters, `a/ctor-real-desc`;
+bridges; records' and enums' members) and javac's synthetic members of a serializable class (Lower: `this$N`, kept in
+a serializable class by `shouldEmitOuterThis`, N by `outerThisName`; the captured locals' `val$x`; `$assertionsDisabled`
+by `assertFlagTest`, in an interface only `<clinit>`; `<clinit>` from a static initializer, a static field's
+non-constant initializer, an assert or an enum's constants). It is used twice:
+
+- **j2g** (`m/serial-uid`, `out.ae`): with `J2G_DEFAULT_SUID=1` each translated Serializable class without a static
+  `serialVersionUID`, but enums and records, gets `ClassInfo.SerialUID` (new, with `HasSerialUID`); with
+  `J2G_DEFAULT_SUID_OUT=FILE` the values are also appended to FILE for the night's comparison. **Off by default: the
+  decision is the user's (JCS190).**
+- **the interpreter** (`arbace.classes.interp/serial-uid!`, beside slice 1's `serial-new!`): every interpreted
+  Serializable class without one, through the host (`Compiler$CF$Rt` `Host.setSerialUID`, `CFGo.setSerialUID`, j2g's
+  native in `dyncf.ae`). Not behind the switch: an interpreted class's reflection is not javac's (below), so the stock
+  computation over it is wrong without it.
+
+The variant's `computeDefaultSUID` returns `SerialAlloc.defaultSUID(cl)` first when `SerialAlloc.hasDefaultSUID(cl)`
+(`variants.py`, replayed: the regenerated `ObjectStreamClass.java` differs from slice 1's by that insertion alone;
+jrt's natives `SerialAlloc_HasDefaultSUID0_Class__Z_native`, `SerialAlloc_DefaultSUID0_Class__J_native`).
+
+**The interpreted classes' reflection** (`publish-members!`): a class publishes the virtual methods it inherits from
+interpreted classes and their interfaces' defaults for dispatch only (bit 30, as a lambda's class since JCS116 (a)),
+so `getDeclaredMethods` lists its own methods as the JVM's does; and it publishes javac's synthetic instance fields,
+`this$0` and the captured locals' (final, synthetic), so `getDeclaredFields` and the default serial fields list them
+as the JVM's (jdk26u serializes `this$0` too).
+
+**The oracle**: `test/jrt/serialization/suid/` holds two samples (`src/suid/Sample.java`, `Sample2.java`: inner,
+deeper inner and their subclasses, local and anonymous classes capturing locals in instance and static contexts, a
+record, interfaces with methods, defaults, statics, a constant and a non-constant field, an assert, an empty one, an
+abstract class with a bridge and a native method, generic classes and bridges, covariant returns, varargs,
+synchronized, static and instance initializers, lambdas, method references, enum and pattern switches, every field
+modifier mix), their forms (`forms/`, `bin/repr-java read --no-javac`) and jdk26u's `computeDefaultSUID` of their 26
+Serializable classes (`jdk-suids.txt`, `runner/suid/SuidRecord.java`, recorded by hand). `check.ae` loads the forms at
+the REPL and compares each class's value as the interpreter computes it (and, on an executable with the streams,
+`ObjectStreamClass.lookupAny`'s). For the JDK's own classes `DefaultSUIDs.java` recorded `default-suids-jdk26.txt`:
+the 118 Serializable classes of `jdk/forms` (members and anonymous ones) that declare none, which the night compares
+with j2g's values.
+
+### Light checks done
+
+(main's stage 0 as `ARBACE_HOST_EXE`, `GOMEMLIMIT=1400MiB`; scratch `.tmp/s2/`, `.tmp/s3/`)
+- **the joint javac check** (`.tmp/night7/all9-run.sh`): 2,293 files, 0 errors, 5,002 classes (20 s, 1.0 GB);
+- **go test ./jrt** (printed by `bin/jrt print`, run as `bin/jrt test` runs it, amd64): every test passes, the four new
+  ones among them (TestSerialForms: 16 of 16 cases written, read and written again byte for byte); its control by
+  hand: Date's serialVersionUID changed by one fails TestSerialForms ("written ... got/want") and the read
+  ("local class incompatible"); `go vet ./jrt` on amd64 and arm64: clean; `bin/jrt manifest`: unchanged, "edge
+  members of these classes jrt does not define: 0";
+- **the default serialVersionUID**: `check.ae` on stage 0 (the samples' interpreted classes, their declarations
+  taken as the interpreter publishes them): **26 of 26** equal to jdk26u's `computeDefaultSUID` (the record's too,
+  -7535811012808276925, which ObjectStreamClass gives 0); its control (one expected value changed): 25 of 26, exit 1.
+  Of jdk/forms' own classes stage 0's world analyzes two alone (`javax.naming.ldap.Control`, `java.io.Serializable`:
+  equal); the 118 are the night's (j2g's world);
+- j2g's namespaces (model, out, dyncf, decls, main) load on stage 0 from the checkout with `arbace.classes.suid`.
+
+Not checked by day (no build): `Compiler.ae`'s new host method and the interpreter's `serial-uid!` and
+`publish-members!` changes (stage 0 runs its embedded interpreter), j2g's output for `SerialUID`, the real streams
+over the new tables.
+
+### The night's commands
+
+With slice 1's (its steps 0-6, "As built: JCS167 (write-ahead)"), in the night's worktree with this branch merged; the
+conversion and the build under the heavy lock:
+
+```sh
+# 0. the joint javac check (0 errors)
+.tmp/night7/all9-run.sh /root/arbace/.tmp/worktrees/next
+# 1. jdk/ converted afresh (slice 1's step 1): the two overlays ObjectStreamClass.java and SerialAlloc.java change
+REPR_JAVA_EXE=$(ls -td /root/arbace/.tmp/gate-exe/javac-*/ | head -1)arbace-javac REPR_JAVA_STALE_OK=1 \
+  ARBACE_HEAVY_CMD=$PWD/bin/heavy-lock bin/jrt-convert update
+# 2. the edges (slice 1's step 2), then the executable with JCS168's switch on for the comparison (write-ahead: the
+#    shipped default stays off until JCS190; a build without it differs only in the ClassInfo.SerialUID lines)
+bin/heavy-lock bin/j2g-edge update && bin/heavy-lock bin/javac-vendor edge
+mkdir -p .tmp/jcs168 && rm -f .tmp/jcs168/suids.txt
+J2G_DEFAULT_SUID=1 J2G_DEFAULT_SUID_OUT=$PWD/.tmp/jcs168/suids.txt bin/heavy-lock bin/arbace-go --build && bin/arbace-go --smoke && bin/jrt test
+# 3. j2g's default serialVersionUIDs against the JDK's: expect every class of the record that j2g translated equal
+awk 'NR==FNR{j[$1]=$2;next} ($1 in j){n++; if(j[$1]!=$2){b++; print "BAD",$0,j[$1]}} END{print n+0" compared, "b+0" differ"}' \
+  .tmp/jcs168/suids.txt test/jrt/serialization/default-suids-jdk26.txt
+# 4. the real streams over jrt's classes: expect "streams-check: 16 of 16"; the samples' interpreted classes: "suid-check: 26 of 26"
+target/arbace-go/amd64/arbace -e '(load-file "test/jrt/serialization/streams_check.ae")'
+ARBACE_PATH=$PWD:$PWD/test/jrt/serialization/suid/forms target/arbace-go/amd64/arbace -e '(load-file "test/jrt/serialization/suid/check.ae")'
+# 5. Java's levels on the class's tests (slice 1's step 5, its --only with these added):
+#    'jdk/java/lang/Throwable/|jdk/java/io/Serializable/|jdk/java/security/(KeyRep|Permissions|cert/CertPath)|jdk/java/net/Inet6Address/serialize|jdk/java/math/BigInteger/SerializationTests|jdk/java/util/(TimeZone/bug4096952|Calendar/Bug7017458|concurrent/atomic/Serial)|jdk/java/text/Format'
+```
+
+**Risks and fallbacks**: (1) a hook's call names a stream method by a signature the translated table lacks
+(InternalError "serialization needs ..."): the table's line fixed, or the class's `serialClass` call removed (it is
+then as before); (2) the interpreter's dispatch-only inherited methods break a call the interpreted level made through
+the subclass's own table: revert `publish-members!`'s first hunk (the SUID stays right through `serial-uid!`); (3) a
+j2g value differs from the JDK's at step 3: the night ships with the switch off (as committed) and the class's case
+goes to JCS190's record; (4) `Compiler.ae`'s `setSerialUID` fails the build's analysis: revert it with
+`interp.ae`'s `serial-uid!` and dyncf's native (interpreted classes then compute it by reflection, as slice 1).
+
+### Expected yield
+
+Slice 2: the streams holding an exception or a date, a string builder or an atomic: the Throwable tests
+(`LegacyChainedExceptionSerialization`, `StackTraceSerialization`, `SuppressedExceptions`), the six "throwable?" ones
+of slice 1's scan, `RemoteException/chaining`, `DateFormat/bug6271375` and the old tests that write exceptions; about
+**8-12** at each of eval and AOT. Slice 3: of the 57 tests reading JDK-written streams, those whose classes declare no
+serialVersionUID or are the test's own (`classDescFlagConflict`, `illegalHandle`, `oldTests`' readers, `KeyRep`,
+`Permissions`, `Inet6Address`, `CertPath`, `BigInteger`, `TimeZone`, `Calendar`), slice 1's estimate **about 25**,
+less those that need proxies, class loaders or the security manager. Together about +1 point of Java's eval and AOT
+cells after slice 1's +1.4, the crop's strict completeness about +0.5.
+
+### Remaining slices
+
+Slices 4-8 of the table above (the JDK variants' cut members, `RecordComponent`, proxies JCS170, serializable lambdas
+JCS169, Clojure's types), and JCS191 (the locks' serial forms).
+
+## Proposed (JCS167 slices 2-3)
+
+Numbered from JCS190, to keep clear of the numbers other branches may take after JCS171.
+
+### JCS190 DECISION: JCS168's switch (j2g's default serialVersionUID ahead of time)
+
+Built write-ahead (above): `J2G_DEFAULT_SUID=1` has j2g write every translated Serializable class's default
+serialVersionUID; off, the variant computes it by reflection over the class's table, which lists only the public and
+serial members (another value than the JDK's for each of the 118 classes of `default-suids-jdk26.txt` and for a
+program's own classes at the compiled level). (a) on by default (`m/default-suid?` true unless `J2G_DEFAULT_SUID=0`),
+after the night's step 3 finds the values equal: the tables unchanged, one `SerialUID` line per such class (about 120
+of the world's, a few bytes each), no run-time cost; (b) on only for the compiled level's programs (`bin/j2g
+--program`), the shipped world by reflection; (c) off, as now. **Recommended: (a)**: the JDK's value is what a stream
+written by a JVM holds, and the computation is the one the interpreted classes use already.
+
+### JCS191 The serial forms of jrt's locks, Semaphore and ForkJoinTask
+
+Their jdk26u serial forms name classes jrt has not (`ReentrantLock$Sync`, `$NonfairSync`, `$FairSync`,
+`AbstractQueuedSynchronizer`'s `state`, `AbstractOwnableSynchronizer`, `ReentrantReadWriteLock`'s three, `Semaphore$Sync`,
+`ForkJoinTask`'s `status` and its adapters' fields). (a) descriptor classes in jrt for the hidden ones (their
+serialVersionUIDs and fields, `SerialNew` making jrt's lock with the state read), ForkJoinTask's hooks: 1 day; (b)
+as now (Serializable without serial members: written with an empty descriptor, read as a new unlocked lock, which
+`readObject` gives on the JDK too, but the bytes differ). **Recommended: (a)** with slice 4 (few tests: the
+`MyOwnSynchronizer` and ConcurrentHashMap ones).
+
+### JCS192 A frame's module version
+
+jrt's frames of JDK classes say `java.base` version "26" (`java.version`), the JVM's the build's full version
+(`26.0.2.1` and its build suffix): only a stream holding a JVM-made frame shows the difference, never `toString`
+(the format drops the version). (a) the version of `Runtime.version()` jrt reports; (b) as now. **Recommended: (a)**
+when jrt's `Runtime.version` is made the JDK build's (an hour).
+
+### JCS193 jrt's serial test stream as a shared harness
+
+`serial_test.ae`'s stream (writer and reader after jdk26u's protocol) proves jrt's serial forms without the
+translated streams. (a) keep it to jrt's classes; (b) also run it over j2g's tables of translated classes in `bin/jrt
+test --prog` (the program root j2g writes), a check of slice 1's tables by day: half a day. **Recommended: (b)** when
+slice 4 restores the variants' members.

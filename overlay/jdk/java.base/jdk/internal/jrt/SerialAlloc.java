@@ -9,7 +9,12 @@
  * Its natives are jrt's Go (go/arbace/jrt/serial.ae): the class's ClassInfo.SerialNew, which j2g writes for
  * each instantiated Serializable class of the world the rule allows (arbace.j2g.model/serial-super), and
  * the Java forms' host sets for an interpreted class (Compiler$CF$Rt.serialPlan, the rule over the
- * interpreter's classes, then the nearest class of the world's part: j2g's cfSerialFor).
+ * interpreter's classes, then the nearest class of the world's part: j2g's cfSerialFor). And the default
+ * serialVersionUID computed ahead of time (JCS168, doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS167
+ * slices 2-3 (write-ahead)"): ClassInfo.SerialUID, computed from the class's declaration as javac compiles it
+ * (arbace.classes.suid) by j2g (J2G_DEFAULT_SUID=1) and by the Java forms' host, which
+ * ObjectStreamClass.computeDefaultSUID returns first: reflection over a class of the Go build sees the
+ * members its table lists, not every member javac wrote.
  * Copyright (c) the Arbace authors; Eclipse Public License 1.0.
  */
 package jdk.internal.jrt;
@@ -35,7 +40,21 @@ public final class SerialAlloc {
         return allocate0(cl);
     }
 
+    /** Whether cl's default serialVersionUID was computed ahead of time. */
+    public static boolean hasDefaultSUID(Class<?> cl) {
+        return hasDefaultSUID0(cl);
+    }
+
+    /** cl's default serialVersionUID computed ahead of time (hasDefaultSUID). */
+    public static long defaultSUID(Class<?> cl) {
+        return defaultSUID0(cl);
+    }
+
     private static native boolean canAllocate0(Class<?> cl);
+
+    private static native boolean hasDefaultSUID0(Class<?> cl);
+
+    private static native long defaultSUID0(Class<?> cl);
 
     private static native Object allocate0(Class<?> cl);
 }
