@@ -178,7 +178,8 @@
   "A type family application that does not reduce (yet): GHC keeps it as a wanted equality, the elaborator defers
   the unification"
   [t]
-  (let [t (prune t)] (and (= :tc (first t)) (some-> *families* deref (contains? (second t))))))
+  ;; a data family is generative and injective (its instances are their own tycons): never stuck, unified as a tycon
+  (let [t (prune t)] (and (= :tc (first t)) (when-let [f (some-> *families* deref (get (second t)))] (not= :data (:flavour f))))))
 
 (defn deep-expand
   "A type with every synonym expanded"
@@ -238,6 +239,18 @@
       (= :forall (first b)) (unify b a)
       (and (= :tc (first a)) (or (get @*syns* (second a)) (stuck-family? a)) (not= a (expand a))) (unify (expand a) b)
       (and (= :tc (first b)) (or (get @*syns* (second b)) (stuck-family? b)) (not= b (expand b))) (unify a (expand b))
+      ;; a family applied beyond its arity (Rep a x, Rep :: Type -> Type -> Type of arity 1): the saturated
+      ;; applications equal, the further arguments decomposed (an AppTy's, GHC's canEqAppTy)
+      (and (stuck-family? a) (stuck-family? b) (= (second a) (second b)) (= (count (nth a 2)) (count (nth b 2)))
+           (< (or (:arity (get @*families* (second a))) 99) (count (nth a 2))))
+      (let [k (:arity (get @*families* (second a)))]
+        (and (unify [:tc (second a) (subvec (nth a 2) 0 k)] [:tc (second b) (subvec (nth b 2) 0 k)])
+             (every? true? (doall (map unify (subvec (nth a 2) k) (subvec (nth b 2) k))))))
+      ;; an over-applied family against an application (fmap's g a against Rep1 f a): its last argument split off
+      (and (= :app (first b)) (stuck-family? a) (< (or (:arity (get @*families* (second a))) 99) (count (nth a 2))))
+      (and (unify [:tc (second a) (vec (butlast (nth a 2)))] (nth b 1)) (unify (last (nth a 2)) (nth b 2)))
+      (and (= :app (first a)) (stuck-family? b) (< (or (:arity (get @*families* (second b))) 99) (count (nth b 2))))
+      (unify b a)
       ;; a stuck family application: the equality deferred (GHC's wanted F ts ~ t, solved once the arguments are known)
       (or (stuck-family? a) (stuck-family? b)) (do (when *deferred-eqs* (swap! *deferred-eqs* conj [a b])) true)
       (and (= :tc (first a)) (= :tc (first b)) (= (second a) (second b)) (= (count (nth a 2)) (count (nth b 2))))
@@ -282,6 +295,16 @@
   [f]
   (loop [f f out []] (if (and (seq? f) (= 'forall (first f))) (recur (nth f 4) (conj out [(nth f 1) (nth f 3)])) out)))
 
+(defn- invisible-positions
+  "The argument positions of a kind form's invisible binders (specified or inferred foralls), counting its visible
+  arguments (a function's argument, a required forall) and its invisible ones in order"
+  [f]
+  (loop [f f p 0 out #{}]
+    (cond (and (seq? f) (= 'forall (first f)))
+          (if (= 'required (nth f 2)) (recur (nth f 4) (inc p) out) (recur (nth f 4) (inc p) (conj out p)))
+          (and (seq? f) (= 'fun (first f))) (recur (nth f 4) (inc p) out)
+          :else out)))
+
 (defn- tvs-in-form [f]
   (set (keep (fn [x] (when (and (seq? x) (= 'tv (first x))) (second x))) (tree-seq coll? seq f))))
 
@@ -324,6 +347,13 @@
                                                    [(strs* (nth t 1)) n]))
                                nil))))
                    things)
+        ;; a type constructor with an invisible binder after a visible one (TH's Code :: (Type -> Type) -> forall r.
+        ;; TYPE r -> Type, applied as Code m r a): its invisible positions, [NAME :pos]
+        base (into base (keep (fn [t]
+                                (when (and (seq? t) (= 'tycon (first t)))
+                                  (let [ps (invisible-positions (nth t 5)) n (count (forall-binders (nth t 5)))]
+                                    (when (some #(>= % n) ps) [[(strs* (nth t 1)) :pos] ps]))))
+                              things))
         classes (filter #(and (seq? %) (= 'class (first %))) things)]
     (loop [table base i 0]
       (let [table' (into table
@@ -348,6 +378,8 @@
                         (quot (count as) 2)
                         (min (count as) (or (some-> *kind-arity* deref (get n)) 0)))]
                 (cond
+                  (some-> *kind-arity* deref (get [n :pos]))
+                  (let [ps (get @*kind-arity* [n :pos])] [:tc n (vec (keep-indexed (fn [i a] (when-not (contains? ps i) a)) as))])
                   (= ["ext" "tc" "GHC.Internal.Prim" "FUN"] n)
                   ;; FUN as a type constructor: its multiplicity and two representations dropped, the elaborator's
                   ;; function type constructor
@@ -711,6 +743,10 @@
       HsKindSig (hs-type tvs (arg v 2))
       HsAppKindTy (hs-type tvs (arg v 2))
       ;; type-level literals, as the interfaces write them (tools/hsdump: (lit N), (lit "s"), (lit-char C))
+      ;; DataKinds' promoted list '[t1, t2]: (':) t1 ((':) t2 '[]), the kind arguments erased as an interface's are
+      HsExplicitListTy (reduce (fn [acc x] [:tc (ext-name "data" "GHC.Internal.Types" ":") [(hs-type tvs x) acc]])
+                               [:tc (ext-name "data" "GHC.Internal.Types" "[]") []]
+                               (reverse (arg v 3)))
       HsTyLit (let [l (arg v 2)]
                 (case (con l) HsNumTy [:lit (nth l 2)] HsStrTy [:lit (nth l 2)] HsCharTy [:lit-char (int (nth l 2))]
                       (do (error! "type literal not handled: " (con l)) (fresh-meta))))
@@ -1095,7 +1131,18 @@
                                                          i (.indexOf ^java.util.List flds f)]
                                                      (when (>= i 0) (unify t (nth argts i)))
                                                      [f c]))
-                                      (arg (arg v 3) 2)))]
+                                      (arg (arg v 3) 2)))
+                      ;; RecordWildCards (C {..}): each field the renamer filled from the variable of its name in scope
+                      dd (arg (arg v 3) 3)
+                      given (if (and (seq? dd) (= 'Just (first dd)) (seq? (lval (second dd))) (= 'rn/dotdot (first (lval (second dd)))))
+                              (reduce (fn [g [f x]]
+                                        (if (contains? g f)
+                                          g
+                                          (let [[t c] (var-occ env x) i (.indexOf ^java.util.List flds f)]
+                                            (when (>= i 0) (unify t (nth argts i)))
+                                            (assoc g f c))))
+                                      given (partition 2 (nth (lval (second dd)) 2)))
+                              given)]
                   [res (app* (list 'v (ext-name "var" (nmod cn) (occ cn)))
                              (mapv (fn [f] (or (get given f) (list 'app (list 'v (ext-name "var" "GHC.Internal.Control.Exception.Base" "recConError")) [(list 'lit (occ f))]))) flds))])
       RecordUpd (let [[te ce] (infer env (arg v 2))
@@ -1130,15 +1177,21 @@
                                        (list 'case i w (vec (concat [(list 'alt :default [] (list 'v (ext-name "var" (nmod (last cs)) (occ (last cs)))))]
                                                                     (map-indexed (fn [k cn] (list 'alt (list 'lit (str k "#")) [] (list 'v (ext-name "var" (nmod cn) (occ cn)))))
                                                                                  (butlast cs))))))])])
+      ;; a primop comparison of unlifted fields (deriving's genPrimOpApp): tagToEnum# (x op y) at Bool
+      DerivPrimCmp (let [[tx cx] (infer env (arg v 2)) [ty cy] (infer env (arg v 3))]
+                     (unify tx ty)
+                     [(con-ty tc-bool) (list 'app (list 'v (ext-name "var" "GHC.Internal.Prim" "tagToEnum#"))
+                                             [(list 'app (list 'v (ext-name "var" "GHC.Internal.Prim" (arg v 1))) [cx cy])])])
       DerivPrim (let [rs (mapv #(infer env %) (arg v 2))]
                   (doseq [[t _] rs] (unify t (con-ty tc-int)))
                   [(con-ty tc-int) (list 'app (list 'v (ext-name "var" "GHC.Internal.Prim" (arg v 1))) (mapv second rs))])
-      ExprWithTySig (let [[t c] (infer env (arg v 2))
-                          sig (arg (arg v 3) 2)
-                          [st preds] (instantiate (sig-type sig))]
-                      (unify t st)
-                      (doseq [p preds] (want! p))
-                      [st c])
+      ;; e :: sig (GHC.Tc.Gen.Expr's tcExprSig): e checked against the signature (its quantifiers skolems, its
+      ;; context given), then the signature instantiated at the use
+      ExprWithTySig (let [sig (arg (arg v 3) 2)
+                          sigt (sig-type sig)
+                          c (check-expr env (arg v 2) (if (or (seq (nth sigt 1)) (seq (nth sigt 2))) sigt (nth sigt 3)))
+                          [st preds] (instantiate sigt)]
+                      [st (app* c (mapv want! preds))])
       (do (error! "expression not handled: " (con v)) [(fresh-meta) (list 'lit "?")]))))
 
 ;; HF9 (second slice): checking mode, GHC.Tc.Gen.Expr's tcExpr against a Check ExpType. The expected type is pushed
@@ -1218,27 +1271,31 @@
           (recur (second (nth t 2)) (conj as (first (nth t 2))))
           [as t])))))
 
+(declare tc-con-pat)
+
 (defn- tc-rec-pat
-  "A record pattern C {f = p, f, ..}: the fields matched by name, a pun's variable and a wildcard's at the field's type"
+  "A record pattern C {f = p, f, ..}: the fields matched by name, a pun's variable and a wildcard's at the field's type;
+  as the positional pattern of its fields in order (GHC.Tc.Gen.Pat's tcConArgs on RecCon), so an existential's or a
+  GADT's record (IO's Handle__ with its IODevice dev context) binds its skolems and dictionaries as a prefix one does"
   [env v t]
   (let [cn (nm (arg v 2)) rf (arg (arg v 3) 1)
         flds (:fields (get @*cons* cn))
-        [as res] (con-arg-types cn)
-        ty-of (fn [f] (let [i (.indexOf ^java.util.List flds f)] (if (>= i 0) (nth as i) (fresh-meta))))
-        _ (unify res t)
-        [env pats] (reduce (fn [[env pats] fb]
-                             (let [fbv (lval fb) lbl (lval (arg (lval (arg fbv 2)) 2))
-                                   [f x] (if (= 'rn/names (first lbl)) (second lbl) [(second lbl) nil])
-                                   ft (ty-of f)]
-                               (if (true? (arg fbv 4))
-                                 [(assoc env x {:mono ft}) (assoc pats f (lv x))]
-                                 (let [[env1 pc] (tc-pat env (arg fbv 3) ft)] [env1 (assoc pats f pc)]))))
-                           [env {}] (arg rf 2))
+        vp (fn [x] (list 'L nil (list 'VarPat nil (list 'L nil (list 'rn/name x)))))
+        given (reduce (fn [m fb]
+                        (let [fbv (lval fb) lbl (lval (arg (lval (arg fbv 2)) 2))
+                              [f x] (if (= 'rn/names (first lbl)) (second lbl) [(second lbl) nil])]
+                          (assoc m f (if (true? (arg fbv 4)) (vp x) (arg fbv 3)))))
+                      {} (arg rf 2))
         dd (arg rf 3)
-        env (if (and (seq? dd) (= 'Just (first dd)) (seq? (lval (second dd))) (= 'rn/dotdot (first (lval (second dd)))))
-              (reduce (fn [e [f x]] (assoc e x {:mono (ty-of f)})) env (partition 2 (nth (lval (second dd)) 2)))
-              env)]
-    [env (list 'pcon cn (mapv (fn [f] (get pats f (list 'pwild))) flds))]))
+        given (if (and (seq? dd) (= 'Just (first dd)) (seq? (lval (second dd))) (= 'rn/dotdot (first (lval (second dd)))))
+                (reduce (fn [m [f x]] (if (contains? m f) m (assoc m f (vp x)))) given (partition 2 (nth (lval (second dd)) 2)))
+                given)
+        wild (list 'L nil (list 'WildPat nil))
+        ;; C {} on a constructor without fields (DuplexHandle{}): every argument a wildcard
+        pats (if (seq flds)
+               (mapv (fn [f] (get given f wild)) flds)
+               (vec (repeat (count (first (con-arg-types cn))) wild)))]
+    (tc-con-pat env (list 'ConPat (arg v 1) (arg v 2) (list 'PrefixCon [] pats)) t)))
 
 (declare tc-con-pat* rewrite-by-givens assume-eqs! scope-givens dict-param solve-with-givens! retry-implications!)
 
@@ -1276,7 +1333,7 @@
   [env v t cn info]
   (let [{:keys [univ eqs tvs ctx args nres]} (:gadt info)
         us (vec (repeatedly nres fresh-meta))
-        _ (unify t [:tc (:tycon info) us])
+        _ (unify t [:tc (or (:tycon (:gadt info)) (:tycon info)) us])
         m (into {} (for [x tvs] [x (if-let [i (some (fn [[i u]] (when (= u x) i)) univ)]
                                      (nth us i)
                                      [:tv (str x "_sk" (fresh-id))])]))
@@ -1961,8 +2018,19 @@
     (let [e (arg tfi 2)]
       (swap! *families* update (nm (arg e 2)) (fn [old] (update (merge {:flavour :open} old) :eqns (fnil conj []) (fam-eqn e)))))))
 
+(defn- free-tvs
+  "The type variables of t not bound by a forall inside it"
+  [t]
+  (case (first t)
+    :tv #{(second t)}
+    :tc (reduce into #{} (map free-tvs (nth t 2)))
+    :app (into (free-tvs (nth t 1)) (free-tvs (nth t 2)))
+    :forall (apply disj (reduce into (free-tvs (nth t 3)) (map (fn [[_ ts]] (reduce into #{} (map free-tvs ts))) (nth t 2)))
+                   (nth t 1))
+    #{}))
+
 (defn- selector-type [names res t]
-  (if (every? (tvs-of res) (tvs-of t)) [:forall names [] (fn-ty res t)] [:forall [] [] [:tc (tuple-tc 0) []]]))
+  (if (every? (free-tvs res) (free-tvs t)) [:forall names [] (fn-ty res t)] [:forall [] [] [:tc (tuple-tc 0) []]]))
 
 (defn- con-names
   "The constructors a ConDecl declares: a GADT declaration may name several (A, B :: T)"
@@ -1980,7 +2048,7 @@
         names (mapv #(str (occ %) "_" (str/join "_" (drop 3 %))) tvn)
         tvs (zipmap tvn (map (fn [x] [:tv x]) names))
         ctx (when (and (seq? (arg cv 5)) (= 'Just (first (arg cv 5))))
-              (vec (keep (fn [ct] (let [p (hs-type tvs ct)] (when (= :tc (first p)) [(second p) (nth p 2)]))) (lval (second (arg cv 5))))))
+              (vec (keep (fn [ct] (let [p (hs-type tvs ct)] (case (first p) :tc [(second p) (nth p 2)] (:tv :app) [:cvar [p]] nil))) (lval (second (arg cv 5))))))
         cdf-type (fn [f] (hs-type tvs (last (butlast f))))
         det (arg cv 6)
         fields (when (= 'RecConGADT (con det))
@@ -2001,7 +2069,10 @@
     (doseq [[f t] fields] (swap! *genv* assoc f (selector-type names res t)))
     (swap! *cons* assoc cn {:arity (+ (count ctx) (count argtys)) :tycon tn :fields (mapv first fields)
                             :dicts (count ctx) :tag tag
-                            :gadt {:univ univ :eqs eqs :tvs names :ctx (vec ctx) :args argtys :nres (count rargs)}
+                            :gadt {:univ univ :eqs eqs :tvs names :ctx (vec ctx) :args argtys :nres (count rargs)
+                                   ;; the result's tycon: a data instance's family (its constructors build the family's
+                                   ;; application, as dataConOrigResTy), else the type's own
+                                   :tycon (when (= :tc (first res)) (second res))}
                             :strict (into (vec (repeat (count ctx) false))
                                           (for [x cdfs] (let [x (if (and (seq? x) (= 'L (first x))) (nth x 2) x)]
                                                           (boolean (and (seq? x) (some #{'SrcStrict} x))))))})
@@ -2035,7 +2106,7 @@
             exnames (mapv #(str (occ %) "_" (str/join "_" (drop 3 %))) exn)
             tvs (merge tvs (zipmap exn (map (fn [x] [:tv x]) exnames)))
             ctx (when (and (= 'ConDeclH98 (con cv)) (seq? (arg cv 5)) (= 'Just (first (arg cv 5))))
-                  (vec (keep (fn [ct] (let [p (hs-type tvs ct)] (when (= :tc (first p)) [(second p) (nth p 2)]))) (lval (second (arg cv 5))))))
+                  (vec (keep (fn [ct] (let [p (hs-type tvs ct)] (case (first p) :tc [(second p) (nth p 2)] (:tv :app) [:cvar [p]] nil))) (lval (second (arg cv 5))))))
             cdf-type (fn [f] (hs-type tvs (last (butlast f))))
             fields (when (= 'RecCon (con det))
                      (vec (mapcat (fn [f] (let [fv (lval f) t (cdf-type (arg fv 3))]
@@ -2084,7 +2155,7 @@
                   (swap! *derivs* conj {:cls cls :tn tn :tvs names :ts [res] :ctor? false :anyclass? true :strat :anyclass
                                         :desc (assoc desc :var (last names))})
                   (swap! *derivs* conj {:cls cls :tn tn :tvs (if ctor? (vec (butlast names)) names)
-                                        :ts [(if ctor? [:tc tn (mapv (fn [x] [:tv x]) (butlast names))] res)]
+                                        :ts [(if ctor? [:tc (second res) (vec (butlast (nth res 2)))] res)]
                                         :ctor? ctor? :desc (assoc desc :var (last names)) :stock? (= kw :stock)
                                         :strat kw :via (when via (nth (sig-type via) 3))})))
               (or (contains? deriv/generators (occ cls))
@@ -2092,7 +2163,7 @@
                        (not (contains? #{"Show" "Read"} (occ cls)))))
               (let [ctor? (and (contains? constructor-classes (occ cls)) (seq names))]
                 (swap! *derivs* conj {:cls cls :tn tn :tvs (if ctor? (vec (butlast names)) names)
-                                      :ts [(if ctor? [:tc tn (mapv (fn [x] [:tv x]) (butlast names))] res)]
+                                      :ts [(if ctor? [:tc (second res) (vec (butlast (nth res 2)))] res)]
                                       :ctor? ctor? :desc (assoc desc :var (last names)) :stock? (contains? deriv/generators (occ cls))}))
               ;; DeriveAnyClass: an empty instance, every method its default, the context empty
               (contains? *exts* "DeriveAnyClass")
@@ -2102,7 +2173,7 @@
               ;; a class of type constructors (Functor, Monad...): the head drops the last parameter
               (swap! *insts* conj {:dfun (ext-name "var" m (str "$f" (occ cls) (occ tn)))
                                    :tvs (vec (butlast names)) :ctx []
-                                   :head [cls [[:tc tn (mapv (fn [x] [:tv x]) (butlast names))]]]})
+                                   :head [cls [[:tc (second res) (vec (butlast (nth res 2)))]]]})
               :else
               (swap! *insts* conj {:dfun (ext-name "var" m (str "$f" (occ cls) (occ tn)))
                                    :tvs names
@@ -2153,6 +2224,33 @@
                    (first (:tys (first (:cons (:desc r))))))
             :binds (deriv/derive-binds (occ (:cls r)) (:desc r))}))))
 
+(defn- iface-desc
+  "An imported data type as deriving sees it ({:desc :names}, as data-decl! makes a local one), from its interface's
+  constructors (GHC derives a standalone instance for any type whose constructors are in scope: deriving instance
+  Bounded Bool in GHC.Internal.Enum); nil for one whose constructors are not all vanilla. A constructor with an
+  operator's name and two arguments is taken as declared infix (the interface does not say: dataConIsInfix)"
+  [tn]
+  (when-let [ti (some-> *tycons* deref (get tn))]
+    (let [split (fn [ct] (let [[vs body] (if (= :forall (first ct)) [(nth ct 1) (if (empty? (nth ct 2)) (nth ct 3) ::ctx)] [[] ct])]
+                           (when (not= ::ctx body)
+                             (loop [t body as []]
+                               (let [t (prune t)]
+                                 (if (and (= :tc (first t)) (= fun-tc (second t)))
+                                   (recur (second (nth t 2)) (conj as (first (nth t 2))))
+                                   [vs as t]))))))
+          parts (mapv (fn [cn] [cn (some-> (get @*genv* cn) split)]) (:cons ti))
+          vanilla? (fn [[_ [vs _ res]]] (and res (= :tc (first res)) (= tn (second res))
+                                            (every? #(= :tv (first %)) (nth res 2))
+                                            (= (set vs) (set (map second (nth res 2))))))]
+      (when (and (seq parts) (every? vanilla? parts))
+        (let [names (mapv second (nth (nth (second (first parts)) 2) 2))
+              descs (vec (for [[cn [_ as res]] parts
+                               :let [m (zipmap (map second (nth res 2)) (map (fn [x] [:tv x]) names))]]
+                           {:name cn :arity (count as) :labels (vec (:fields (get @*cons* cn)))
+                            :infix? (and (= 2 (count as)) (str/starts-with? (occ cn) ":"))
+                            :tys (mapv #(subst m %) as)}))]
+          {:desc {:tn tn :cons descs :fix (or (some-> *fixities* deref) {}) :newtype? (= 'newtype (:flavour ti))} :names names})))))
+
 (defn- standalone-requests
   "The standalone deriving declarations (deriving instance ctx => C (T a)) of the module as requests"
   [decls]
@@ -2161,7 +2259,7 @@
                    [kw via] (strategy-of (arg dd 3))
                    cls (second head) ts (nth head 2) t0 (first ts)
                    tn (when (= :tc (first t0)) (second t0))
-                   info (get @*ddescs* tn)]
+                   info (or (get @*ddescs* tn) (iface-desc tn))]
              :when (and info (= :tc (first head)))]
          {:cls cls :tn tn :tvs (nth st 1) :ts ts :ctx (nth st 2) :ctor? (contains? constructor-classes (occ cls))
           :desc (assoc (:desc info) :var (last (:names info))) :stock? (if kw (= kw :stock) (contains? deriv/generators (occ cls))) :standalone? true
@@ -2190,7 +2288,17 @@
                    (when (and (:newtype? (:desc r)) (not (:standalone? r))
                               (or (contains? #{"Eq" "Ord" "Ix" "Bounded"} (occ (:cls r)))
                                   (and (contains? *exts* "GeneralizedNewtypeDeriving") (not (contains? *exts* "DeriveAnyClass"))
-                                       (not (contains? #{"Show" "Read"} (occ (:cls r)))))))
+                                       (not (contains? #{"Show" "Read"} (occ (:cls r))))
+                                       ;; a class of type constructors by the newtype only when the representation
+                                       ;; eta-reduces (GHC.Tc.Deriv's eta_ok: newtype T a = MkT (f a)); Par1 p = Par1 p
+                                       ;; does not, and is derived stock
+                                       (or (not (:ctor? r))
+                                           (let [t (first (:tys (first (:cons (:desc r))))) x [:tv (:var (:desc r))]
+                                                 [f a] (case (first t)
+                                                         :tc (when (seq (nth t 2)) [[:tc (second t) (vec (butlast (nth t 2)))] (last (nth t 2))])
+                                                         :app [(nth t 1) (nth t 2)]
+                                                         nil)]
+                                             (and (= a x) (not (contains? (tvs-of f) (second x)))))))))
                      (rep-of r))))
         ctx-of (fn [r]
                  (cond
@@ -2229,7 +2337,9 @@
         supers (vec (keep (fn [c] (let [p (hs-type tvs c)] (when (= :tc (first p)) [(second p) (nth p 2)])))
                           (let [c (arg d 2)] (when (and (seq? c) (= 'Just (first c))) (lval (second c))))))
         methods (atom [])]
-    (doseq [s (arg d 7) :let [sv (lval s)] :when (= 'ClassOpSig (con sv))
+    ;; a method's own signature, not its default's (DefaultSignatures' `default lift :: (r ~ ..., Quote m) => ...` types
+    ;; the default method alone: GHC.Tc.TyCl.Class's tcClassSigs keeps the two apart)
+    (doseq [s (arg d 7) :let [sv (lval s)] :when (and (= 'ClassOpSig (con sv)) (not (true? (arg sv 2))))
             nl (arg sv 3)]
       (let [sig (lval (arg sv 4)) body (arg sig 3)
             own (remove (set tvn) (tv-names-of body))
@@ -2369,7 +2479,9 @@
                             (list 'app (list 'v (ext-name "var" "GHC.Internal.Control.Exception.Base" "noMethodBindingError")) [(list 'lit (occ mn))]))))]))
         supers (for [[sc sts] (:supers info)]
                  (or (solve-pred [sc (mapv #(subst (zipmap (:tvs info) ts) %) sts)] (super-closure (mapv vector ctx params)) 0)
-                     (do (error! "no superclass dictionary " (occ sc) " " (pr-str [sc (mapv #(subst (zipmap (:tvs info) ts) %) sts)])) (list 'lit "?"))))
+                     (do (error! "no superclass dictionary " (occ sc) " " (pr-str [sc (mapv #(subst (zipmap (:tvs info) ts) %) sts)]))
+                         (when trace? (binding [*out* *err*] (println "tc-trace: instances of" (pr-str sc) (pr-str (filter #(= sc (first (:head %))) @*insts*)))))
+                         (list 'lit "?"))))
         dcon (list 'v (ext-name "var" (nmod cls) (str "C:" (occ cls))))
         ;; an instance with a context: each superclass dictionary a binding of its own over the context's
         ;; dictionaries ($cp1Cls), as GHC's tcSuperClasses makes it; without one the dictionary inline
