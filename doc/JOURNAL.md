@@ -829,3 +829,30 @@ tests: 6 tests, 60 assertions, 0 failures); the record over tcc-pp, zlib, gcc-va
 the known file unchanged; its rows not committed). fprintf-1's and fprintf-chk-1's rows tidied from an `--only` run judged by
 `judge-recorded` (both pass), `bin/reap --record` (C print 4,770 passing) and `bin/crops-score --record`. Details and the night's
 command: doc/C23-SURVEY.md, "As built: CS282".
+
+## 2026-11-08: SCS3, Scheme's suites judged by their own verdict alone (branch `scheme-scs3`, from next 7696e50da)
+
+SCS3 (b), recommended in scheme-90's report under the user's own-verdict decision of 2026-11-07: `bin/si check` and `check --aot`
+(`arbace.scheme.check`) judge each program by one judge (`judge-of`): Racket's 27 R6RS suite programs by their own report alone
+(`suite-items`: each failing test an item, the report's count of tests against the program's new `:tests` in
+`test/scheme/si/programs.edn`, taken from the first record, where si's and Chez's reports agree on all 25 that report: the blind spot
+scheme-90 noted, a run that stops early with status 0, now fails); si's 10 programs by golden outputs of Arbace's own
+(`test/scheme/si/golden/`, from si's runs, equal to Chez's recorded runs, reviewed line by line against R6RS and si's documented design:
+doc/scheme/SCHEME-SURVEY.md, "As built: SCS3"); Larceny's 13 by Chez's recorded run, as before. The five programs Chez fails the same
+way, which the recorded-output judge passed, are classed in `test/scheme/divergences.edn`: `chez-exact-zero` (racket/base's five
+division and angle tests: Chez's exact-zero rules, si's tower by SM5), `chez-console-port` (racket/io/ports: the console's input/output
+port), `chez-condition-message` (racket/exceptions: a lexical violation's message a format string), all `:design`, and `suite-ill-formed`
+(`:na`: racket/run imports a library the suite lacks, racket/test calls an identifier its library does not export). Controls one a
+judge (`test/scheme/si/controls.edn`, a third: larceny/run-benchmark against larceny/exceptions's Chez run), and `judge-test`, the judges
+on made-up runs at every judgment. `judge --record --only` keeps the record's other entries (as SC182 (b)'s mats). Alternatives
+considered: counting tests from the source (rejected: the suites' macros make tests in loops, test/output runs two), keeping the
+recorded-output judge beside (SCS3 (a), rejected by the recommendation: it reads Chez's runs at check time), classing the ill-formed
+programs `:design` (rejected: they are not programs of the language).
+
+Checked: the essential interpreted subset (49 programs: 43 pass, 11 items all classed, no regression, the controls differ, judge-test ok),
+larceny/fib alone, the essential AOT subset (11) and the nine other programs whose compiled verdict changes, `bin/si own` (37 of 49 judged
+without Chez; the 5 classed are Chez's failures too), `bin/repr-scheme c2j-check` (18 of 18), `bin/reap --record`, `bin/crops-score --record`.
+Scheme's scores: completeness 98.4 to 96.8 (by design out 98.9 to 98.8: three programs now fail their own tests by design, two leave the
+denominator), maturity 100, independence 97.5 (judge 0.874 to 0.876; bin/si check's terms 0.77 to 0.87). Night: `bin/si check --record`,
+`bin/si check --aot --record`. Proposed: SCS4 (the five tests: keep Chez's semantics), SCS5 (the read check's 1,249 probes judged by the
+report's properties: the judge's largest term), SCS6 (Larceny's golden outputs).
