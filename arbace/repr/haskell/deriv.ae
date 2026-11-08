@@ -27,7 +27,10 @@
 (defn- L* [x] (list 'L sp x))
 (defn- gv [m o] ["ext" "var" m o])
 (defn- dc [m o] ["ext" "data" m o])
-(defn- lname [o] ["loc" "v" o 0 0 0 0])
+(def ^:dynamic *inst* 0) ; the derived instance: its local binders' keys apart from another instance's (GHC's uniques; the
+                         ; elaborator keys a local by its span, all zero here, so two instances' a and b would share one type)
+(def ^:private inst-counter (atom 0))
+(defn- lname [o] ["loc" "v" o 0 0 0 *inst*])
 
 (defn- nmx [n] (L* (list 'rn/name n)))
 (defn- v* [n] (L* (list 'HsVar nil (nmx n))))
@@ -62,6 +65,11 @@
 (defn- tag* [e] (L* (list 'DerivTag e)))
 (defn- tag2con* [cons e] (L* (list 'DerivTag2Con cons e)))
 (defn- prim* [op & xs] (L* (list 'DerivPrim op (vec xs))))
+;; MagicHash's primitive Int literal (HsIntPrim): the tags' literals of untag_Expr's comparisons
+(defn- intprim* [n] (L* (list 'HsLit nil (list 'HsIntPrim nil n))))
+(defn- lp-prim [n] (L* (list 'LitPat nil (list 'HsIntPrim nil n))))
+;; I# a#: intDataCon_RDR applied to an untagged tag
+(defn- boxi* [e] (ap* (L* (list 'HsVar nil (nmx ["ext" "data" "GHC.Internal.Types" "I#"]))) e))
 ;; a primop comparison of two unlifted values as a Bool (GHC's genPrimOpApp: tagToEnum# (x `op` y))
 (defn- primcmp* [op x y] (L* (list 'DerivPrimCmp op x y)))
 
@@ -154,11 +162,13 @@
           (empty? cons) []
           (= 1 (count cons)) (let [c (first cons) as (as-names "a" (:arity c)) bs (as-names "b" (:arity c))]
                                [[[(con-pat c as) (con-pat c bs)] (nested c as bs)]])
+          ;; an enumeration: genPrimOpApp a# ==# b#
           (every? nullary? cons) [[[(vp "a") (vp "b")]
-                                   (untag2 (ap* (v* (gv classes "eqInt")) (v* ah) (v* bh)))]]
+                                   (untag2 (primcmp* "==#" (v* ah) (v* bh)))]]
+          ;; eq_expr_with_tag_check: case (a# /=# b#) of 1# -> False; _ -> ...
           :else [[[(vp "a") (vp "b")]
-                  (hcase (untag2 (ap* (v* (gv classes "neInt")) (v* ah) (v* bh)))
-                         [[(cp true-c []) false-e]
+                  (hcase (untag2 (prim* "/=#" (v* ah) (v* bh)))
+                         [[(lp-prim 1) false-e]
                           [wp (hcase (v* a)
                                      (concat (map pats-etc non-nullary)
                                              (when (seq non-nullary) [[wp true-e]])))]])]])]
@@ -204,7 +214,7 @@
           wild-con-pat (fn [c] (cp (:name c) (repeat (:arity c) wp)))
           inner-rhs
           (fn [op c]
-            (let [tag (tag-of c) tag-lit (int* tag)]
+            (let [tag (tag-of c) tag-lit (intprim* tag)]
               (cond
                 single? (hcase (v* b) [(inner-eq-alt op c)])
                 (= tag first-tag) (hcase (v* b) [(inner-eq-alt op c) [wp (lt-result op)]])
@@ -212,20 +222,20 @@
                 (= tag (inc first-tag)) (hcase (v* b) [[(wild-con-pat first-con) (gt-result op)] (inner-eq-alt op c) [wp (lt-result op)]])
                 (= tag (dec last-tag)) (hcase (v* b) [[(wild-con-pat last-con) (lt-result op)] (inner-eq-alt op c) [wp (gt-result op)]])
                 (> tag (quot last-tag 2))
-                (hcase (tag* (v* b)) [[(vp "b#") (if* (ap* (v* (gv classes "ltInt")) (v* (lname "b#")) tag-lit)
+                (hcase (tag* (v* b)) [[(vp "b#") (if* (primcmp* "<#" (v* (lname "b#")) tag-lit)
                                                       (gt-result op)
                                                       (hcase (v* b) [(inner-eq-alt op c) [wp (lt-result op)]]))]])
                 :else
-                (hcase (tag* (v* b)) [[(vp "b#") (if* (ap* (v* (gv classes "gtInt")) (v* (lname "b#")) tag-lit)
+                (hcase (tag* (v* b)) [[(vp "b#") (if* (primcmp* ">#" (v* (lname "b#")) tag-lit)
                                                       (lt-result op)
                                                       (hcase (v* b) [(inner-eq-alt op c) [wp (gt-result op)]]))]]))))
           op-alt (fn [op c] [(con-pat c (as-names "a" (:arity c))) (inner-rhs op c)])
+          ;; mkTagCmp: unliftedOrdOp at Int#
           tag-cmp (fn [op]
-                    (let [ah (v* (lname "a#")) bh (v* (lname "b#"))
+                    (let [ops (get prim-ord-ops "Int#") ah (lname "a#") bh (lname "b#")
                           body (case op
-                                 :compare (if* (ap* (v* (gv classes "ltInt")) ah bh) (v* lt-c)
-                                               (if* (ap* (v* (gv classes "eqInt")) ah bh) (v* eq-c) (v* gt-c)))
-                                 :lt (ap* (v* (gv classes "ltInt")) ah bh))]
+                                 :compare (unlifted-compare ops ah bh (v* lt-c) (v* eq-c) (v* gt-c))
+                                 :lt (primcmp* (nth ops 0) (v* ah) (v* bh)))]
                       (hcase (tag* (v* a)) [[(vp "a#") (hcase (tag* (v* b)) [[(vp "b#") body]])]])))
           op-rhs (fn [op]
                    (cond
@@ -306,14 +316,14 @@
         a (v* (lname "a"))]
     [(funbind (gv enum-m "succ")
               [[[(vp "a")] (untag [["a" "a#"]]
-                                  (if* (ap* (v* eq-rdr) (int* maxtag) ah)
+                                  (if* (ap* (v* eq-rdr) (int* maxtag) (boxi* ah))
                                        (ap* (v* (gv enum-m "succError")) (str* occ-nm))
-                                       (t2c (ap* (v* plus) ah (int* 1)))))]])
+                                       (t2c (ap* (v* plus) (boxi* ah) (int* 1)))))]])
      (funbind (gv enum-m "pred")
               [[[(vp "a")] (untag [["a" "a#"]]
-                                  (if* (ap* (v* eq-rdr) (int* 0) ah)
+                                  (if* (ap* (v* eq-rdr) (int* 0) (boxi* ah))
                                        (ap* (v* (gv enum-m "predError")) (str* occ-nm))
-                                       (t2c (ap* (v* plus) ah (int* -1)))))]])
+                                       (t2c (ap* (v* plus) (boxi* ah) (int* -1)))))]])
      (funbind (gv enum-m "toEnum")
               [[[(vp "a")] (let [to-word (fn [e] (ap* (v* (gv enum-m "enumIntToWord")) e))]
                              (if* (ap* (v* le-rdr) (to-word a) (to-word (int* maxtag)))
@@ -321,13 +331,13 @@
                                   (ap* (v* (gv enum-m "toEnumError")) (str* occ-nm) a (tuple* [(int* 0) (int* maxtag)]))))]])
      (funbind (gv enum-m "enumFrom")
               [[[(vp "a")] (untag [["a" "a#"]]
-                                  (ap* (v* map-r) (lam* [(vp "t")] (t2c (v* (lname "t")))) (ap* (v* eft) ah (int* maxtag))))]])
+                                  (ap* (v* map-r) (lam* [(vp "t")] (t2c (v* (lname "t")))) (ap* (v* eft) (boxi* ah) (int* maxtag))))]])
      (funbind (gv enum-m "enumFromThen")
               [[[(vp "a") (vp "b")]
                 (untag [["a" "a#"] ["b" "b#"]]
                        (ap* (v* map-r) (lam* [(vp "t")] (t2c (v* (lname "t"))))
-                            (ap* (v* eftt) ah bh (if* (ap* (v* gt-rdr) ah bh) (int* 0) (int* maxtag)))))]])
-     (funbind (gv enum-m "fromEnum") [[[(vp "a")] (untag [["a" "a#"]] ah)]])]))
+                            (ap* (v* eftt) (boxi* ah) (boxi* bh) (if* (ap* (v* gt-rdr) (boxi* ah) (boxi* bh)) (int* 0) (int* maxtag)))))]])
+     (funbind (gv enum-m "fromEnum") [[[(vp "a")] (untag [["a" "a#"]] (boxi* ah))]])]))
 
 ;;; Ix ----------------------------------------------------------------------------------------
 
@@ -341,13 +351,13 @@
     (if (every? nullary? cons)
       [(funbind range-r [[[(tp [(vp "a") (vp "b")])]
                           (untag [["a" "a#"] ["b" "b#"]]
-                                 (ap* (v* map-r) (lam* [(vp "t")] (t2c (v* (lname "t")))) (ap* (v* eft) ah bh)))]])
+                                 (ap* (v* map-r) (lam* [(vp "t")] (t2c (v* (lname "t")))) (ap* (v* eft) (boxi* ah) (boxi* bh))))]])
        (funbind ui [[[(asp "c" (tp [(vp "a") wp])) (vp "d")]
                      (untag [["a" "a#"] ["d" "d#"]]
-                            (hcase (prim* "-#" dh ah) [[(vp "c") (v* (lname "c"))]]))]])
+                            (hcase (prim* "-#" dh ah) [[(vp "c") (boxi* (v* (lname "c")))]]))]])
        (funbind inr [[[(tp [(vp "a") (vp "b")]) (vp "c")]
                       (untag [["a" "a#"] ["b" "b#"] ["c" "c#"]]
-                             (ap* (v* and-rdr) (ap* (v* (gv classes "geInt")) ch ah) (ap* (v* (gv classes "leInt")) ch bh)))]])]
+                             (ap* (v* and-rdr) (primcmp* ">=#" ch ah) (primcmp* "<=#" ch bh)))]])]
       (let [c (first cons) k (:arity c)
             as (as-names "a" k) bs (as-names "b" k) cs (as-names "c" k)
             pat (fn [xs] (con-pat c xs))
@@ -587,7 +597,8 @@
 (defn derive-binds
   "The bindings of class CLS (its occurrence name) for the described type, or nil"
   [cls desc]
-  (when-let [g (get generators cls)] (g desc)))
+  (when-let [g (get generators cls)] (binding [*inst* (swap! inst-counter inc)]
+                                           (let [force (fn force [x] (when (coll? x) (doseq [y x] (force y))) x)] (force (g desc))))))
 
 (defn fun-subtypes
   "The type constructors (partial applications) a Functor-like instance needs an instance of for a field type:

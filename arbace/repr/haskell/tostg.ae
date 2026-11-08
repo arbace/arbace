@@ -97,9 +97,12 @@
 
 (defn- clean-occ [o] (str/replace (str o) #"[:/]" "_"))
 
+(defn- simpl-eta-tag [x] (arbace.repr.haskell.core/eta-tag x))
+
 (defn- local-name [x]
   (or (get @*names* x)
-      (let [n (str (clean-occ (second x)) "_" (swap! *n* inc))]
+      ;; CorePrep's eta binders: one name a position (their builtin uniques)
+      (let [n (if-let [t (simpl-eta-tag x)] (str "eta_E" t) (str (clean-occ (second x)) "_" (swap! *n* inc)))]
         (swap! *names* assoc x n) n)))
 
 (defn- fresh [o] (str o "_" (swap! *n* inc)))
@@ -364,7 +367,7 @@
     (when (and (head? a 'app) (or (lv? (second a)) (head? (second a) 'v)))
       (let [f (second a) k (if (lv? f) f (second f)) ar (get *arities* k) args (nth a 2)]
         (when (and ar (> ar (count args)) (pos? (count args)))
-          (let [xs (mapv (fn [_] (list 'lv "eta" (str "pe" (swap! *n* inc)))) (range (- ar (count args))))
+          (let [xs (mapv (fn [i] (list 'lv "eta" (str "E" (inc i) ".pe" (swap! *n* inc)))) (range (- ar (count args))))
                 t (if (lv? f) (get (:ltypes *r*) f) (global-type k))
                 tys (when t (drop (count args) (arg-types t)))]
             (doseq [[x t2] (map vector xs (concat tys (repeat nil)))] (swap! *lreps* assoc x (if t2 (type-reps t2) [:L])))
@@ -516,7 +519,7 @@
                          (let [n (fresh "sat")]
                            (list 'case call [n :L] '(poly) [(list 'alt :default [] (with-atoms (drop ar args) (fn [bs] (list 'app n bs))))]))))))
         ;; unsaturated: eta-expanded (CorePrep's maybeSaturate)
-        (let [xs (mapv (fn [i] (list 'lv "eta" (str "pe" (swap! *n* inc)))) (range (- ar (count args))))
+        (let [xs (mapv (fn [i] (list 'lv "eta" (str "E" (inc i) ".pe" (swap! *n* inc)))) (range (- ar (count args))))
               tys (drop (count args) (arg-types (global-type g)))]
           (doseq [[x t] (map vector xs tys)] (swap! *lreps* assoc x (type-reps t)))
           (expr (list 'lam xs (list 'app f (into (vec args) xs)))))))
@@ -873,6 +876,36 @@
                 (let [xs (mapv (fn [_] (fresh "eta")) (range (:arity ci)))]
                   (list 'bind [(gname c) :L] (list 'closure :r [] (mapv (fn [x r] [x r]) xs (concat (con-reps c) (repeat :L))) (strict-con c xs))))))}))
 
+(defn- void-binders
+  "Unarise's unariseFunArgBinder: every function argument binder of a void type is the one voidArgId (GHC's dumps name
+  it void_N throughout a module; a case binder of a void type keeps its own name); the binders' occurrences, which no
+  atom has (a void argument is void#), follow"
+  [forms]
+  (let [vs (atom #{}) nv (atom #{})
+        arg? (fn [y] (and (vector? y) (= 2 (count y)) (string? (first y)) (= :v (second y))))
+        coll (fn coll [y] (cond (and (seq? y) (= 'closure (first y)) (vector? (nth y 3 nil)))
+                                (do (doseq [a (nth y 3)] (when (arg? a) (swap! vs conj (first a))))
+                                    (doseq [z y] (coll z)))
+                                (and (vector? y) (= 2 (count y)) (string? (first y)) (keyword? (second y)))
+                                (when-not (= :v (second y)) (swap! nv conj (first y)))
+                                (and (seq? y) (= 'str (first y))) nil
+                                (coll? y) (doseq [z y] (coll z))
+                                :else nil))
+        _ (coll forms)
+        ;; a name bound at another representation too (CorePrep's eta binders share one a position): only its void
+        ;; argument binders renamed
+        occ (apply disj @vs @nv)
+        w (fn w [y] (cond (and (seq? y) (= 'closure (first y)) (vector? (nth y 3 nil)))
+                          (with-meta (apply list (concat (take 3 (map w y)) [(mapv (fn [a] (if (arg? a) ["void_0" :v] (w a))) (nth y 3))]
+                                                         (map w (drop 4 y))))
+                            (meta y))
+                          (and (string? y) (contains? occ y)) "void_0"
+                          (and (seq? y) (= 'str (first y))) y
+                          (seq? y) (with-meta (apply list (map w y)) (meta y))
+                          (vector? y) (mapv w y)
+                          :else y))]
+    (if (empty? @vs) forms (mapv w forms))))
+
 (def last-prog (atom nil)) ; the last module's Core as module-stg translated it (the Simplifier's output when it runs)
 
 (defn module-stg
@@ -923,13 +956,13 @@
                                  (remove (fn [[_ _ e]] (and (head? e 'lit) (str/starts-with? (second e) "foreign import"))) prog)))
               dfs (data-forms) sels (selectors)
               fix (fn [f] (if (head? f 'bind) (list 'bind (second f) (first (fv-rhs (nth f 2)))) f))]
-          (vec (concat [(list 'stg/module {:unit *unit* :module (module) :file file :ghc "9.14.1" :helper 4 :flags ["-O0"] :compiler "arbace.repr.haskell.tostg"})]
+          (void-binders (vec (concat [(list 'stg/module {:unit *unit* :module (module) :file file :ghc "9.14.1" :helper 4 :flags ["-O0"] :compiler "arbace.repr.haskell.tostg"})]
                        (map :data dfs) (map :data sels)
                        binds
                        (map fix (mapcat :binds dfs)) (map fix (mapcat :binds sels))
                        (when has-main?
                          [(list 'bind [(str "main::" (module) "/main") :L]
-                                (list 'closure :u [] [] (list 'app (ext-str "GHC.Internal.TopHandler" "runMainIO") [(ext-str (module) "main")])))]))))))))
+                                (list 'closure :u [] [] (list 'app (ext-str "GHC.Internal.TopHandler" "runMainIO") [(ext-str (module) "main")])))])))))))))
 
 (defn write-stg
   "The forms into DIR/MODULE.stg.ae"
