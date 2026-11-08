@@ -43,7 +43,10 @@
 #                                  queue 229: each code object of FILE (default: dis.py, textwrap.py, argparse.py of the
 #                                  pinned Lib) by the runtime's view (go/arbace/py/bytecode*.go) against python3's: co_code,
 #                                  co_consts, co_stacksize, co_linetable, co_exceptiontable, the first differences counted
-#                                  (TestBytecodeDiff); PYI_BC_SHOW=N: the first N code objects that differ
+#                                  (TestBytecodeDiff); PYI_BC_SHOW=N: the first N code objects that differ; queue 238: under
+#                                  REPR_PYTHON_VERSION=3.15 the view of 3.15 (the runtime's switch) against the 3.15.2 oracle's
+#                                  (REPR_PYTHON_ORACLE_315), in .tmp/repr-python/pyi/bytecode-check-315; PYI_BC_DEBUG=1: a
+#                                  code object whose view cannot be made prints the panic and its stack
 #   bin/pyi repl [--check]         PY5e: python3's basic REPL (go/arbace/py's repl.go): statements from stdin, prompts on
 #                                  stderr, expression statements' values displayed (sys.displayhook, builtins._); --check:
 #                                  test/python/pyi/*.in fed to it and to python3 -q -i, stdout, status and stderr
@@ -118,7 +121,9 @@
 #                                  timeout) and stderr's last line after the diff's first lines, and the negative controls of
 #                                  test/python/controls-runtime.edn (a program's and a session's run against another's outcome;
 #                                  their subjects run with every sample; PYI_RUNTIME_CONTROLS another file) end each family;
-#                                  tables: the two generators alone (the oracle tier's)
+#                                  tables: the two generators alone (the oracle tier's); queue 238: also the bytecode view's
+#                                  tables (tools/pyi/bytecode_table.py, 3.14.10's and --suffix 315's; opcode_table.py --suffix
+#                                  315 by the 3.15.2 oracle), each 3.15 one with its negative control (3.14.10's made into it)
 #   bin/pyi aot FILE.py [ARGS...]  PY8: FILE compiled by pyi's AOT (arbace.python.aot: the IR to Go forms over go/arbace/py, its
 #                                  module-level imports compiled ahead; printed by repr/go, built by TamaGo's go in
 #                                  .tmp/repr-python/pyi/aot/mod) and run; source compiled at run time by the host's compiler
@@ -1336,15 +1341,26 @@ runtime_read_other() {
   rm -rf "$t"
 }
 
+# oracle315: the 3.15.2 oracle (queue 236's default, REPR_PYTHON_ORACLE_315: the main checkout's .tmp/oracle315 build)
+oracle315() {
+  local m=${root%%/.tmp/gate-clean/*}; m=${m%%/.tmp/worktrees/*}
+  echo "${REPR_PYTHON_ORACLE_315:-$m/.tmp/oracle315/src/Python-3.15.2/python}"
+}
+
 cmd_bytecode_check() {
-  local d="$WORK/bytecode-check" f b irs="" refs=""
+  local d="$WORK/bytecode-check" f b irs="" refs="" py=python3
+  # under REPR_PYTHON_VERSION=3.15 (queue 238): the view of 3.15 (the runtime's switch) against the 3.15.2 oracle's
+  if [ "${REPR_PYTHON_VERSION:-}" = 3.15 ]; then
+    py=$(oracle315); d="$WORK/bytecode-check-315"
+    [ -x "$py" ] || die "REPR_PYTHON_VERSION=3.15: no 3.15.2 oracle at $py (REPR_PYTHON_ORACLE_315)"
+  fi
   mkdir -p "$d"
   [ $# -gt 0 ] || { local l; l=$(stdlib_lib); set -- "$l/dis.py" "$l/textwrap.py" "$l/argparse.py"; }
   [ -d "$RT/py" ] || runtime_print "$RT"
   for f in "$@"; do
     b="$d/$(echo "$f" | tr '/' '_')"
     pa_arbace ir --file "$f" --out "$b.ir"
-    python3 -I -B "$root/tools/pyi/bytecode_ref.py" "$f" "$b.json"
+    "$py" -I -B "$root/tools/pyi/bytecode_ref.py" "$f" "$b.json"
     irs="$irs $b.ir"; refs="$refs $b.json"
   done
   PYI_BC_SHOW=${PYI_BC_SHOW:-0} PYI_BC_IR="$irs" PYI_BC_REF="$refs" tamago_go go test ./py -run TestBytecodeDiff -count=1 -v | grep -v '^=== RUN\|^--- PASS\|^PASS\|^ok '
@@ -1399,6 +1415,7 @@ cmd_runtime() {
       elif python3 -I -S -B "$root/tools/pyi/unicodedata_table.py" "$top" "$t/src/py/builtins_unicodedata_table.go" --check; then
         echo "runtime: builtins_unicodedata_table.go is unicodedata_table.py's from the tarball's headers"
         ucd315_check "$t/src/py" || rc=1
+        bc_tables_check "$t/src/py" || rc=1
       else
         echo "runtime: builtins_unicodedata_table.go DIFFERS from unicodedata_table.py's"; rc=1
       fi
@@ -1438,6 +1455,7 @@ cmd_runtime() {
       python3 -I -S -B "$root/tools/pyi/unicodedata_table.py" "$top" "$t/src/py/builtins_unicodedata_table.go" --check \
         && echo "runtime: builtins_unicodedata_table.go is unicodedata_table.py's from the tarball's headers" || { echo "runtime: builtins_unicodedata_table.go DIFFERS"; rc=1; }
       ucd315_check "$t/src/py" || rc=1
+      bc_tables_check "$t/src/py" || rc=1
       python3 -I -S -B "$root/tools/pyi/cjkcodecs_table.py" "$top" "$t/src/py/builtins_cjk_table.go" --check \
         && echo "runtime: builtins_cjk_table.go is cjkcodecs_table.py's from the tarball's headers" || { echo "runtime: builtins_cjk_table.go DIFFERS"; rc=1; }
       return $rc ;;
@@ -1465,6 +1483,47 @@ ucd315_check() {
     echo "control passed: ucd315: 3.14.10's table judged equal to 3.15.2's headers"; return 1
   fi
   echo "control failed as it must: ucd315: 3.14.10's table against 3.15.2's headers"
+}
+
+# bc_tables_check DIR (queue 238): the bytecode view's tables in DIR against their generators: bytecode_table.go
+# (bytecode_table.py over 3.14.10's headers), bytecode_table315.go (--suffix 315 over 3.15.2's, 3.14.10's the base) and,
+# where the 3.15.2 oracle runs, builtins_opcode_table315.go (opcode_table.py --suffix 315 run by it); the negative
+# controls: 3.14.10's headers (and python3's _opcode) made into a 3.15 table must differ from the committed one.
+bc_tables_check() {
+  local dir=$1 a="$root/.tmp/repr-python/Python-3.14.10" b="$root/.tmp/repr-python/Python-3.15.2" c="$WORK/bc-tables" o rc=0
+  rm -rf "$c"; mkdir -p "$c"
+  python3 -I -S -B "$root/tools/pyi/bytecode_table.py" "$a" "$c/t314.go" && tamago_go gofmt "$c/t314.go" > "$c/t314f.go" \
+    && cmp -s "$c/t314f.go" "$dir/bytecode_table.go" \
+    && echo "runtime: bytecode_table.go is bytecode_table.py's from 3.14.10's headers" || { echo "runtime: bytecode_table.go DIFFERS"; rc=1; }
+  [ -d "$b/Include" ] || REPR_PYTHON_VERSION=3.15 "$root/bin/repr-python" pins --fetch >/dev/null 2>&1 || true
+  if [ ! -f "$b/Include/opcode_ids.h" ]; then
+    echo "runtime: bytecode_table315.go not judged: no 3.15.2 tarball (REPR_PYTHON_VERSION=3.15 bin/repr-python pins --fetch)"
+    return $rc
+  fi
+  python3 -I -S -B "$root/tools/pyi/bytecode_table.py" "$b" "$c/t315.go" --suffix 315 --base "$a" && tamago_go gofmt "$c/t315.go" > "$c/t315f.go" \
+    && cmp -s "$c/t315f.go" "$dir/bytecode_table315.go" \
+    && echo "runtime: bytecode_table315.go is bytecode_table.py --suffix 315's from 3.15.2's headers" || { echo "runtime: bytecode_table315.go DIFFERS"; rc=1; }
+  python3 -I -S -B "$root/tools/pyi/bytecode_table.py" "$a" "$c/x315.go" --suffix 315 --base "$a" && tamago_go gofmt "$c/x315.go" > "$c/x315f.go"
+  if cmp -s "$c/x315f.go" "$dir/bytecode_table315.go"; then
+    echo "control passed: bc315: 3.14.10's headers judged equal to bytecode_table315.go"; rc=1
+  else
+    echo "control failed as it must: bc315: 3.14.10's headers against bytecode_table315.go"
+  fi
+  o=$(oracle315)
+  if [ ! -x "$o" ]; then
+    echo "runtime: builtins_opcode_table315.go not judged: no 3.15.2 oracle at $o (REPR_PYTHON_ORACLE_315)"
+    return $rc
+  fi
+  "$o" -I -S -B "$root/tools/pyi/opcode_table.py" "$c/o315.go" --suffix 315 && tamago_go gofmt "$c/o315.go" > "$c/o315f.go" \
+    && cmp -s "$c/o315f.go" "$dir/builtins_opcode_table315.go" \
+    && echo "runtime: builtins_opcode_table315.go is opcode_table.py --suffix 315's run by the 3.15.2 oracle" || { echo "runtime: builtins_opcode_table315.go DIFFERS"; rc=1; }
+  python3 -I -S -B "$root/tools/pyi/opcode_table.py" "$c/y315.go" --suffix 315 && tamago_go gofmt "$c/y315.go" > "$c/y315f.go"
+  if sed 1d "$c/y315f.go" | cmp -s - <(sed 1d "$dir/builtins_opcode_table315.go"); then
+    echo "control passed: opcode315: python3's _opcode judged equal to builtins_opcode_table315.go"; rc=1
+  else
+    echo "control failed as it must: opcode315: python3's _opcode against builtins_opcode_table315.go"
+  fi
+  return $rc
 }
 
 # smoke_key FILE: a smoke program's or session's key: its bytes and test/python/pyi's subdirectories' files (the data it reads)
