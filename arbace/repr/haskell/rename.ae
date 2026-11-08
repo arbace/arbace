@@ -199,11 +199,14 @@
 (defn load-iface
   "The interface of module m ((hsiface/exports ...), (hsiface/fixities ...)), nil when there is none"
   [m]
-  (let [c @iface-cache k [*ifdirs* m]]
+  ;; keyed by the file's canonical path when the directories have it (HF9's second slice: a lib-check run's closure
+  ;; directories are links into one pool, so a key of the directories themselves parsed every interface again for
+  ;; each module and kept every copy: the process grew until its later modules ran 5 to 8 times slower)
+  (let [f (first (filter #(.isFile ^File %) (map #(File. (str % "/" m ".iface.edn")) *ifdirs*)))
+        c @iface-cache k (if f [(.getCanonicalPath ^File f) (.lastModified ^File f)] [*ifdirs* m])]
     (if (contains? c k)
       (get c k)
-      (let [f (first (filter #(.isFile ^File %) (map #(File. (str % "/" m ".iface.edn")) *ifdirs*)))
-            ;; a reexported module (a package's "M from unit:N", GHC.Prim's): its target's interface, by the
+      (let [;; a reexported module (a package's "M from unit:N", GHC.Prim's): its target's interface, by the
             ;; directories' reexports.edn ({"M" "N"}, ghc-pkg's exposed-modules)
             alias (when-not f
                     (some (fn [d] (let [af (File. (str d "/reexports.edn"))]
@@ -958,10 +961,29 @@
 
 (defn- rn-class [env v]
   ;; (ClassDecl ext ctx lname qtvs fix fundeps sigs binds ats atdefs docs)
-  (let [env1 (rn-qtvs env (arg v 4))]
+  (let [env1 (rn-qtvs env (arg v 4))
+        ;; a method signature's explicit forall scopes over its default method (ScopedTypeVariables; GHC.Rename.Bind's
+        ;; rnMethodBinds with the class's signatures, tcDefMeth: gmapQl's `forall r r'.` over its where's `k :: ...
+        ;; Const r ...`), as a top-level signature's over its binding
+        scoped (atom {})]
     (rn env1 (arg v 2)) (rn-tc-name env (arg v 3)) (rn env1 (arg v 6))
-    (doseq [s (arg v 7)] (rn env1 s))
-    (doseq [b (arg v 8)] (let [bv (lval b)] (if (= 'FunBind (con bv)) (rn-funbind (assoc env1 :sp (lsp b)) bv) (rn env1 b))))
+    (doseq [s (arg v 7)]
+      (let [sv (lval s)]
+        (if (= 'ClassOpSig (con sv))
+          (let [sig (arg sv 4)
+                _ (doseq [nl (arg sv 3)] (rn env1 nl))
+                r (rn-sig (assoc env1 :sp (lsp sig)) (lsp sig) (lval sig))]
+            (doseq [nl (arg sv 3)]
+              (let [o (rdr-occ (lval nl))]
+                ;; the method's own signature (the elaborator checks a default method at the method's type)
+                (when-not (true? (arg sv 2))
+                  (swap! scoped assoc o (:scoped r))))))
+          (rn env1 s))))
+    (doseq [b (arg v 8)]
+      (let [bv (lval b)]
+        (if (= 'FunBind (con bv))
+          (rn-funbind (assoc env1 :sp (lsp b)) bv :scoped (get @scoped (rdr-occ (lval (arg bv 2)))))
+          (rn env1 b))))
     (rn (assoc env1 :assoc-tvs true) (arg v 9)) (rn env (arg v 10))))
 
 (defn- children-of [n]

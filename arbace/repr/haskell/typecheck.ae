@@ -48,8 +48,8 @@
   (let [v (lval x)]
     (when (and (seq? v) (= 'rn/name (first v))) (second v))))
 
-(defn- ext? [n] (= "ext" (nth n 0)))
-(defn- occ [n] (if (ext? n) (nth n 3) (nth n 2)))
+(defn- ext? [n] (and (vector? n) (= "ext" (nth n 0))))
+(defn- occ [n] (cond (keyword? n) (name n) (ext? n) (nth n 3) :else (nth n 2)))
 (defn- nmod [n] (when (ext? n) (nth n 2)))
 (defn- ext-name [ns m o] ["ext" ns m o])
 
@@ -200,8 +200,16 @@
 ;; tcDataConPat: the implication's given equalities); unification inside reads a skolem through its given, as GHC's
 ;; solver rewrites a wanted by the inert givens (GHC.Tc.Solver.Rewrite), and the alternative's wanteds are rewritten
 ;; by them when it ends (infer-matches)
-(def ^:dynamic *given-eqs* nil) ; atom {SKOLEM type}
+;; REPR_HASKELL_TC_TRACE=1 (or stack): the failed unifications with the givens in scope, the givens as they are added
+(def ^:private trace? (System/getenv "REPR_HASKELL_TC_TRACE"))
+(def ^:dynamic *given-eqs* nil) ; atom {SKOLEM type, :pending [[a b]...]}
 (def ^:dynamic *deferred-eqs* nil) ; atom [[a b]...]: the equalities on stuck family applications, retried at the end
+;; HF9 (second slice): the implications' wanted equalities. A given equality whose sides are not known yet (a GADT
+;; pattern on a lambda's argument whose type a later argument fixes: fmap (\Refl -> x) (eqT :: Maybe (t :~: t'))) is
+;; pending in its scope (GHC keeps the given as it is and canonicalises it when the implication is solved, after the
+;; whole binding is typed); an equality that fails under pending givens is deferred with them, as GHC's implication
+;; keeps its wanteds, and retried when its binding ends and at the module's end
+(def ^:dynamic *implic-eqs* nil) ; atom [[a b GIVENS-ATOM]...]
 
 (defn- given-of [t]
   (when (and (= :tv (first t)) *given-eqs*) (get @*given-eqs* (second t))))
@@ -215,6 +223,16 @@
       (= :mv (first a)) (do (adjust-levels! b (:level (get @*metas* (second a))))
                             (swap! *metas* assoc-in [(second a) :ref] b) true)
       (= :mv (first b)) (unify b a)
+      ;; two polytypes of the same shape (withDict's (cls => r) against withKnownNat's (KnownNat n => r)): equal when
+      ;; their bodies and contexts are, the quantifiers the same skolems on both sides (GHC's eqType up to alpha)
+      (and (= :forall (first a)) (= :forall (first b)) (= (count (nth a 1)) (count (nth b 1))) (= (count (nth a 2)) (count (nth b 2)))
+           (every? true? (map (fn [[c1 _] [c2 _]] (or (= c1 c2) (= :cvar c1) (= :cvar c2))) (nth a 2) (nth b 2))))
+      (let [sks (mapv (fn [x] [:tv (str x "_sk" (fresh-id))]) (nth a 1))
+            ma (zipmap (nth a 1) sks) mb (zipmap (nth b 1) sks)
+            ;; a constraint as a type: a class's application, a variable constraint's type
+            pt (fn [m [c ts]] (let [ts (mapv #(subst m %) ts)] (if (= :cvar c) (first ts) [:tc c ts])))]
+        (and (every? true? (doall (map (fn [x y] (unify (pt ma x) (pt mb y))) (nth a 2) (nth b 2))))
+             (unify (subst ma (nth a 3)) (subst mb (nth b 3)))))
       ;; a higher-rank argument (runST's forall s. ST s a): trusted, its variables instantiated (no escape check)
       (= :forall (first a)) (let [[t ps] (instantiate a)] (doseq [p ps] (want! p)) (unify t b))
       (= :forall (first b)) (unify b a)
@@ -228,7 +246,14 @@
       (and (unify (nth a 1) [:tc (second b) (vec (butlast (nth b 2)))]) (unify (nth a 2) (last (nth b 2))))
       (and (= :app (first b)) (= :tc (first a)) (seq (nth a 2))) (unify b a)
       (and (= :app (first a)) (= :app (first b))) (and (unify (nth a 1) (nth b 1)) (unify (nth a 2) (nth b 2)))
-      :else (do (error! "cannot unify " (pr-str (zonk a)) " with " (pr-str (zonk b))) false))))
+      (and *implic-eqs* *given-eqs* (seq (:pending @*given-eqs*)))
+      (do (swap! *implic-eqs* conj [a b *given-eqs*]) true)
+      :else (do (error! "cannot unify " (pr-str (zonk a)) " with " (pr-str (zonk b)))
+                (when trace?
+                  (binding [*out* *err*]
+                    (println "tc-trace: cannot unify" (pr-str (zonk a)) (pr-str (zonk b)) "givens" (pr-str (some-> *given-eqs* deref)))
+                    (when (= "stack" trace?) (.printStackTrace (Exception. "tc-trace")))))
+                false))))
 
 (defn instantiate
   "A type's foralls instantiated with fresh metas (deeply: a forall under the constraints too): [type [pred...]]"
@@ -336,7 +361,9 @@
     app (mk-app (conv-type (nth f 1)) (conv-type (nth f 2)))
     fun (if (= 'c (nth f 1))
           (let [p (conv-type (nth f 3)) body (conv-type (nth f 4))
-                pred (when (= :tc (first p)) [(second p) (nth p 2)])]
+                ;; a constraint whose head is a variable (withDict's cls => r): [:cvar [type]], solved once the variable
+                ;; is a class's application
+                pred (case (first p) :tc [(second p) (nth p 2)] (:tv :app) [:cvar [p]] nil)]
             (if (= :forall (first body))
               (if (empty? (nth body 1)) [:forall [] (into (if pred [pred] []) (nth body 2)) (nth body 3)]
                   [:forall [] (if pred [pred] []) body])
@@ -503,7 +530,7 @@
 (defn- eq-pred?
   "An equality constraint (a ~ b, its kind first): solved by unification, its evidence a coercion, erased"
   [[c _]]
-  (and (vector? c) (= "~" (nth c 3 nil))))
+  (and (vector? c) (contains? #{"~" "~~"} (nth c 3 nil))))
 
 (def cls-coercible (ext-name "tc" "GHC.Internal.Types" "Coercible"))
 (def cls-ip (ext-name "tc" "GHC.Internal.Classes" "IP"))
@@ -522,10 +549,15 @@
     (coercible-pred? pred) (list 'co)
     :else
   (let [i (fresh-id)]
-    (swap! *wanteds* conj {:ev i :pred pred})
+    ;; a wanted made under given equalities keeps them (its implication's givens, GHC.Tc.Types.Constraint's
+    ;; Implication ic_given): it is solved later, after the alternative or the binding that gave them, rewritten by them
+    (swap! *wanteds* conj (cond-> {:ev i :pred pred} (and *given-eqs* (seq @*given-eqs*)) (assoc :geqs *given-eqs*)))
     (list 'ev i))))
 
-(defn- zonk-pred [[c ts]] [c (mapv (comp deep-expand zonk) ts)])
+(defn- zonk-pred [[c ts]]
+  (let [ts (mapv (comp deep-expand zonk) ts)]
+    ;; a variable constraint now a class's application is that class's predicate
+    (if (and (= :cvar c) (= :tc (first (first ts)))) [(second (first ts)) (nth (first ts) 2)] [c ts])))
 
 (defn- match-ty
   "One-way match of a pattern type (its variables in vs) against t: the extended map or nil"
@@ -576,12 +608,15 @@
         (when (every? some? subs)
           (reduce (fn [f x] (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrApp")) [f x])) con subs))))))
 
-(declare cls-callstack)
+(declare cls-callstack fresh-lv)
 
 (defn solve-pred
   "A dictionary term for pred from the givens or the instances, nil when none applies yet"
   [pred givens depth]
   (let [[c ts] (zonk-pred pred)]
+    (if (= :cvar c)
+      ;; a variable constraint known by now (cls := KnownNat n): its class's
+      (let [t (first ts)] (when (= :tc (first t)) (solve-pred [(second t) (nth t 2)] givens depth)))
     (if (eq-pred? [c ts])
       (do (unify (last (butlast ts)) (last ts)) (list 'co))
     (or (some (fn [[[gc gts] term]] (when (and (= gc c) (= (mapv zonk gts) ts)) term)) givens)
@@ -609,6 +644,16 @@
                           (let [f (part [:tc (second t) (vec (butlast (nth t 2)))]) x (part (last (nth t 2)))]
                             (when (and f x) (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrApp")) [f x]))))
                     nil)))))
+;; GHC.Tc.Instance.Class's matchWithDict (HF9's second slice): WithDict cls meth, cls a class of one method and
+        ;; no superclass, meth unified with the method's type at cls's arguments; the evidence withDict's, \sv k -> k sv
+        ;; (the dictionary of such a class is its method: GHC's sv |> co, a newtype coercion, erased)
+        (when (and (vector? c) (= "WithDict" (nth c 3)) (= 2 (count ts)))
+          (let [ct (first ts) info (when (= :tc (first ct)) (get @*classes* (second ct)))]
+            (when (and info (= 1 (count (:methods info))) (empty? (:supers info)))
+              (let [mt (get @*genv* (first (:methods info)))]
+                (when (= :forall (first mt))
+                  (unify (second ts) (subst (zipmap (:tvs info) (nth ct 2)) (nth mt 3)))
+                  (let [sv (fresh-lv "sv") k (fresh-lv "k")] (list 'lam [sv k] (list 'app k [sv]))))))))
         ;; GHC.Tc.Instance.Class's matchKnownNat, matchKnownSymbol, matchKnownChar: a literal's dictionary is the literal
         (when (and (vector? c) (= 1 (count ts)) (#{"KnownNat" "KnownSymbol" "KnownChar"} (nth c 3)))
           (let [t (zonk (first ts))]
@@ -623,7 +668,7 @@
                       (let [subs (map (fn [[pc pts]] (solve-pred [pc (mapv #(subst m %) pts)] givens (inc depth))) ctx)]
                         (when (every? some? subs)
                           (if (empty? ctx) (list 'v dfun) (list 'app (list 'v dfun) (vec subs))))))))
-                @*insts*))))))
+                @*insts*)))))))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Converting written types (the renamed tree's HsType)
@@ -673,7 +718,10 @@
       HsBangTy (hs-type tvs (arg v 3))
       HsOpTy (let [op (nm (arg v 4))] [:tc op [(hs-type tvs (arg v 3)) (hs-type tvs (arg v 5))]])
       HsQualTy (let [ctx (lval (arg v 2)) body (hs-type tvs (arg v 3))]
-                 [:forall [] (vec (keep (fn [c] (let [p (hs-type tvs c)] (when (= :tc (first p)) [(second p) (nth p 2)]))) ctx)) body])
+                 [:forall [] (vec (keep (fn [c] (let [p (hs-type tvs c)]
+                                                  (case (first p) :tc [(second p) (nth p 2)] (:tv :app) [:cvar [p]] nil)))
+                                        ctx))
+                  body])
       ;; RankNTypes: an inner forall a quantified type of its own (runST's (forall s. ST s a)); the elaborator
       ;; instantiates it where it is used (trusted: no skolem escape check), its binders' kinds trusted
       HsForAllTy (let [bs (let [tele (arg v 2)] (when (seq? tele) (arg tele 2)))
@@ -710,8 +758,10 @@
         names (mapv tv-key ns)
         tvs (zipmap ns (map (fn [x] [:tv x]) names))
         t (hs-type tvs body)]
+    ;; a body that is itself quantified (errorWithoutStackTrace's `forall (r :: RuntimeRep). forall (a :: TYPE r).`,
+    ;; or a context's [:forall [] ctx t]) is one quantifier with the outer's, its variables after them
     (if (= :forall (first t))
-      [:forall names (nth t 2) (nth t 3)]
+      [:forall (into names (nth t 1)) (nth t 2) (nth t 3)]
       [:forall names [] t])))
 
 ;;; ------------------------------------------------------------------------------------------
@@ -732,7 +782,7 @@
 ;;; ------------------------------------------------------------------------------------------
 ;;; Expressions
 
-(declare occurrences wrap-lets want! infer tc-local-binds infer-matches tc-pat infer-grhss rename-mono reduce-by-instance substitute)
+(declare occurrences wrap-lets want! infer check-expr scope-givens assume-eqs! dict-param solve-with-givens! retry-implications! tc-local-binds infer-matches tc-pat infer-grhss rename-mono reduce-by-instance substitute)
 
 ;; env: {NAME {:mono type} | {:poly type :core term}}
 
@@ -862,8 +912,9 @@
                    [r (app* cb [ce cr])]))
       BindStmt (let [[te ce] (infer env (arg v 3))
                      a (fresh-meta)
-                     [env1 pc] (tc-pat env (arg v 2) a)
-                     [tr cr] (infer-stmts env1 more)
+                     ;; the pattern's equalities given to the statements after it (tcDoStmt's implication)
+                     [env1 pc tr cr] (binding [*given-eqs* (scope-givens)]
+                                       (let [[env1 pc] (tc-pat env (arg v 2) a) [tr cr] (infer-stmts env1 more)] [env1 pc tr cr]))
                      [tb cb] (global-occ env ">>=" "GHC.Internal.Base")
                      r (fresh-meta)]
                  (unify tb (fn-ty te (fn-ty (fn-ty a tr) r)))
@@ -880,21 +931,52 @@
       (do (error! "statement not handled: " (con v)) [(fresh-meta) (list 'lit "?")]))))
 
 (defn- infer-listcomp
-  "A list comprehension's qualifiers then its result: [type core], the core (listcomp [QUAL...] RESULT)"
-  [env stmts]
-  (loop [env env ss stmts quals []]
-    (let [v (lval (first ss))]
-      (case (con v)
-        LastStmt (let [[t c] (infer env (arg v 2))] [(list-ty t) (list 'listcomp quals c)])
-        BindStmt (let [[te ce] (infer env (arg v 3)) a (fresh-meta)
-                       _ (unify te (list-ty a))
-                       [env1 pc] (tc-pat env (arg v 2) a)]
-                   (recur env1 (rest ss) (conj quals (list 'gen pc ce))))
-        BodyStmt (let [[t c] (infer env (arg v 2))] (unify t (con-ty tc-bool)) (recur env (rest ss) (conj quals c)))
-        LetStmt (let [[env1 bs] (tc-local-binds env (arg v 2))] (recur env1 (rest ss) (conj quals (list 'qlet bs))))
-        (do (error! "qualifier not handled: " (con v)) [(fresh-meta) (list 'lit "?")])))))
+  "A list comprehension's qualifiers then its result: [type core], the core (listcomp [QUAL...] RESULT); et, the
+  element type expected (checking mode). A generator's pattern gives its equalities to the qualifiers after it and
+  the result (GHC.Tc.Gen.Match's tcLcStmt: the pattern's implication scopes over the rest)"
+  [env stmts & [et quals]]
+  (let [ss stmts quals (or quals []) v (lval (first ss))]
+    (case (con v)
+      LastStmt (if et
+                 [(list-ty et) (list 'listcomp quals (check-expr env (arg v 2) et))]
+                 (let [[t c] (infer env (arg v 2))] [(list-ty t) (list 'listcomp quals c)]))
+      BindStmt (let [[te ce] (infer env (arg v 3)) a (fresh-meta)
+                     _ (unify te (list-ty a))
+]
+                 (binding [*given-eqs* (scope-givens)]
+                   (let [[env1 pc] (tc-pat env (arg v 2) a)]
+                     (infer-listcomp env1 (rest ss) et (conj quals (list 'gen pc ce))))))
+      BodyStmt (let [[t c] (infer env (arg v 2))] (unify t (con-ty tc-bool)) (infer-listcomp env (rest ss) et (conj quals c)))
+      LetStmt (let [[env1 bs] (tc-local-binds env (arg v 2))] (infer-listcomp env1 (rest ss) et (conj quals (list 'qlet bs))))
+      (do (error! "qualifier not handled: " (con v)) [(fresh-meta) (list 'lit "?")]))))
 
 (declare con-arg-types)
+
+(defn- split-fun
+  "A function type's argument and result (matchExpectedFunTys: a meta split into fresh ones, a forall instantiated)"
+  [t]
+  (let [t (expand (prune t))]
+    (cond (and (= :tc (first t)) (= fun-tc (second t))) [(first (nth t 2)) (second (nth t 2))]
+          (= :forall (first t)) (let [[t2 ps] (instantiate t)] (doseq [p ps] (want! p)) (split-fun t2))
+          :else (let [a (fresh-meta) r (fresh-meta)] (unify t (fn-ty a r)) [a r]))))
+
+;; HF9 (second slice): an application as GHC.Tc.Gen.App's tcApp makes it: the spine's head inferred and instantiated,
+;; its argument types split off, the result unified with the expected type first (Note [Unify with expected type
+;; before typechecking arguments]), then each argument checked against its type, so a lambda argument's GADT pattern
+;; (decSymbol's `Left (\Refl -> ...)`) meets the type its function gives it
+(defn- tc-app
+  "An application spine f a1 .. an (HsApp, or OpApp: the operator applied to its two operands): [type core]; expected
+  the type to check against or nil"
+  [env head args expected]
+  (let [[tf cf] (infer env head)
+        [ats r] (reduce (fn [[ats t] _] (let [[a r] (split-fun t)] [(conj ats a) r])) [[] tf] args)
+        _ (when expected (unify r expected))
+        cs (mapv (fn [a at] (check-expr env a at)) args ats)]
+    [r (app* cf cs)]))
+
+(defn- app-spine [v]
+  (loop [x v args ()] (if (= 'HsApp (con x)) (recur (lval (arg x 2)) (cons (arg x 3) args)) [x (vec args)])))
+
 (defn infer
   "An expression's type and core"
   [env e]
@@ -903,12 +985,8 @@
       HsVar (if-let [n (nm (arg v 2))]
               (var-occ env n (lsp (arg v 2)))
               (do (error! "unrenamed variable: " (pr-str (lval (arg v 2)))) [(fresh-meta) (list 'lit "?")]))
-      HsApp (let [[tf cf] (infer env (arg v 2)) [tx cx] (infer env (arg v 3)) r (fresh-meta)]
-              (unify tf (fn-ty tx r))
-              [r (app* cf [cx])])
-      OpApp (let [[to co] (infer env (arg v 3)) [tl cl] (infer env (arg v 2)) [tr cr] (infer env (arg v 4)) r (fresh-meta)]
-              (unify to (fn-ty tl (fn-ty tr r)))
-              [r (app* co [cl cr])])
+      HsApp (let [[h args] (app-spine v)] (tc-app env h args nil))
+      OpApp (tc-app env (arg v 3) [(arg v 2) (arg v 4)] nil)
       NegApp (let [[t c] (infer env (arg v 2))
                    [tn cn] (var-occ env (ext-name "var" "GHC.Internal.Num" "negate"))
                    r (fresh-meta)]
@@ -970,7 +1048,12 @@
       HsAppType (let [[h tas] (loop [x v tas []]
                                 (if (= 'HsAppType (con x)) (recur (lval (arg x 2)) (cons (arg (arg x 3) 2) tas)) [x (vec tas)]))
                       n (when (= 'HsVar (con h)) (nm (arg h 2)))
-                      sigma (when (and n (not (get env n))) (get @*genv* n))]
+                      ;; a binder of this module with a signature has specified quantifiers too (unsafeEqualityProof's
+                      ;; own recursive @a @b); an inferred binder's are not (GHC's InferredSpec)
+                      le (when n (get env n))
+                      sigma (cond (nil? n) nil
+                                  (nil? le) (get @*genv* n)
+                                  (:sig le) (:poly le))]
                   (if (and sigma (= :forall (first sigma)))
                     (let [occurs (fn [x t] (contains? (set (keep (fn [y] (when (and (vector? y) (= :tv (first y))) (second y))) (tree-seq coll? seq t))) x))
                           [t preds] (loop [t sigma tas tas m {} preds []]
@@ -985,8 +1068,8 @@
                                               ps (mapv (fn [[c ts]] [c (mapv #(subst ms %) ts)]) (nth t 2))]
                                           (recur (subst ms (nth t 3)) tas ms (into preds ps)))
                                         (let [[t2 p2] (instantiate t)] [t2 (into preds p2)])))
-                          core (list 'v (if (= "data" (nth n 1)) (ext-name "var" (nmod n) (occ n)) n))]
-                      [t (app* core (mapv #(want-at! % n (lsp (arg h 2))) preds))])
+                          core (or (:core le) (list 'v (if (= "data" (nth n 1)) (ext-name "var" (nmod n) (occ n)) n)))]
+                      [t (app* core (mapv #(if le (want! %) (want-at! % n (lsp (arg h 2)))) preds))])
                     (infer env (arg v 2))))
       ;; UnboxedSums (GHC.Tc.Gen.Expr's ExplicitSum): alternative alt of arity n, the other components fresh
       ExplicitSum (let [alt (arg v 2) n (arg v 3) [t c] (infer env (arg v 4))
@@ -1058,6 +1141,63 @@
                       [st c])
       (do (error! "expression not handled: " (con v)) [(fresh-meta) (list 'lit "?")]))))
 
+;; HF9 (second slice): checking mode, GHC.Tc.Gen.Expr's tcExpr against a Check ExpType. The expected type is pushed
+;; into a case's alternatives, an if's branches, a let's body, a multi-way if's and a lambda's right-hand sides, as
+;; GHC does before it infers: inside a GADT alternative the result is then compared under the alternative's given
+;; equalities (cmpSymbol's `case unsafeCoerce Refl :: (a :~: b) of Refl -> EQI` against OrderingI a b), where the
+;; inferred type, unified only after the alternative, would meet the outer type without them. Every other expression
+;; is inferred and its type unified with the expected one (tcWrapResult)
+(declare check-poly)
+
+(defn check-expr
+  "An expression checked against type t: core"
+  [env e t]
+  (let [v (lval e) tp (prune t)]
+    (if (and (= :forall (first tp)) (or (seq (nth tp 1)) (seq (nth tp 2))))
+      (check-poly env e tp)
+    (case (con v)
+      HsPar (check-expr env (arg v 2) t)
+      HsPragE (check-expr env (arg v 3) t)
+      HsApp (let [[h args] (app-spine v)] (second (tc-app env h args t)))
+      OpApp (second (tc-app env (arg v 3) [(arg v 2) (arg v 4)] t))
+      HsCase (let [[ts cs] (infer env (arg v 2))]
+               (second (infer-matches env (arg v 3) {:scrut [ts cs] :res t})))
+      HsIf (let [[tc cc] (infer env (arg v 2))
+                 _ (unify tc (con-ty tc-bool))
+                 ct (check-expr env (arg v 3) t)
+                 ce (check-expr env (arg v 4) t)]
+             (list 'case cc (fresh-lv "wild") [(list 'alt (ext-name "data" "GHC.Internal.Types" "False") [] ce)
+                                                (list 'alt (ext-name "data" "GHC.Internal.Types" "True") [] ct)]))
+      HsLet (let [sb (atom [])
+                  [env1 binds] (binding [*strict-binds* {:atom sb :level (inc *level*)}] (tc-local-binds env (arg v 2)))
+                  c (check-expr env1 (arg v 3) t)
+                  c (reduce (fn [c [pn pc]] (list 'match [(lv pn)] [(list 'clause [pc] c)])) c (reverse @sb))]
+              (wrap-lets binds c))
+      HsMultiIf (infer-grhss env (list 'GRHSs nil (arg v 2) (list 'EmptyLocalBinds 'NoExtField)) t)
+      HsLam (let [[t1 c] (infer-matches env (arg v 3) nil t)] (unify t1 t) c)
+      HsDo (let [fl (arg v 2)]
+             (if (= 'ListComp (if (seq? fl) (first fl) fl))
+               (let [et (fresh-meta)]
+                 (unify (list-ty et) t)
+                 (second (infer-listcomp env (lval (arg v 3)) et)))
+               (let [[t1 c] (infer env e)] (unify t1 t) c)))
+      (let [[t1 c] (infer env e)] (unify t1 t) c)))))
+
+;; a polytype expected (an argument of type KnownNat n => r, forall s. ST s a): GHC.Tc.Utils.Unify's tcSkolemise, the
+;; quantifiers skolems, the context given (its dictionaries the core's parameters), the expression checked at the
+;; body, its wanteds solved by the givens
+(defn- check-poly [env e t]
+  (let [sk (into {} (map (fn [x] [x [:tv (str x "_sk" (fresh-id))]]) (nth t 1)))
+        preds (mapv (fn [[c ts]] (zonk-pred [c (mapv #(subst sk %) ts)])) (nth t 2))
+        params (mapv dict-param preds)
+        givens (super-closure (mapv vector preds params))
+        ws (atom [])
+        c (binding [*wanteds* ws *given-eqs* (scope-givens)]
+            (assume-eqs! preds)
+            (let [c (check-expr env e (subst sk (nth t 3)))] (retry-implications! false) c))]
+    (solve-with-givens! @ws givens)
+    (if (empty? params) c (list 'lam params c))))
+
 ;;; ------------------------------------------------------------------------------------------
 ;;; Patterns: [env' core-pattern]
 
@@ -1100,7 +1240,7 @@
               env)]
     [env (list 'pcon cn (mapv (fn [f] (get pats f (list 'pwild))) flds))]))
 
-(declare tc-con-pat* rewrite-by-givens)
+(declare tc-con-pat* rewrite-by-givens assume-eqs! scope-givens dict-param solve-with-givens! retry-implications!)
 
 (defn- add-given!
   "A given equality a ~ b canonicalised as GHC.Tc.Solver.Equality's canEqNC does for givens: both sides rewritten by
@@ -1110,9 +1250,13 @@
   inaccessible alternative)"
   [a b]
   (let [a (rewrite-by-givens a) b (rewrite-by-givens b)]
+    (when trace? (binding [*out* *err*] (println "tc-trace: given" (pr-str a) (pr-str b))))
     (cond
       (= a b) nil
-      (or (= :mv (first a)) (= :mv (first b))) (unify a b)
+      ;; a side not known yet: pending, canonicalised when the scope's implication is solved (settle-givens!); unified
+      ;; there if still unknown (the elaborator trusts the program: GHC would leave it untouchable)
+      (or (= :mv (first a)) (= :mv (first b)))
+      (if (and *implic-eqs* *given-eqs*) (swap! *given-eqs* update :pending (fnil conj []) [a b]) (unify a b))
       (and (= :tv (first a)) *given-eqs* (not (some #{a} (tree-seq coll? seq b)))) (swap! *given-eqs* assoc (second a) b)
       (and (= :tv (first b)) *given-eqs* (not (some #{b} (tree-seq coll? seq a)))) (swap! *given-eqs* assoc (second b) a)
       (or (stuck-family? a) (stuck-family? b)) nil
@@ -1141,6 +1285,7 @@
         dpreds (mapv (fn [[c ts]] [c (mapv #(subst m %) ts)]) ctx)
         dvars (mapv (fn [[c _]] (fresh-lv (str "$d" (occ c)))) dpreds)
         _ (when *skolem-givens* (swap! *skolem-givens* into (super-closure (mapv vector dpreds dvars))))
+        _ (assume-eqs! dpreds)
         ps (pat-args (arg v 3))
         [env' pcs] (reduce (fn [[env pcs] [p at]] (let [[e c] (tc-pat env p (subst m at))] [e (conj pcs c)]))
                            [env []] (map vector ps args))]
@@ -1189,18 +1334,80 @@
                                   [(first (instantiate (or ct (fresh-meta)))) []])
                    dvars (mapv (fn [[c _]] (fresh-lv (str "$d" (occ c)))) dpreds)
                    _ (when *skolem-givens* (swap! *skolem-givens* into (super-closure (mapv vector dpreds dvars))))
+                   _ (assume-eqs! dpreds)
                    args (pat-args (arg v 3))
-                   [env' pcs res] (reduce (fn [[env pcs ty] a]
-                                            (let [ty (expand (prune ty))]
-                                              (if (and (= :tc (first ty)) (= fun-tc (second ty)))
-                                                (let [[env1 pc] (tc-pat env a (first (nth ty 2)))] [env1 (conj pcs pc) (second (nth ty 2))])
-                                                (let [a1 (fresh-meta) r (fresh-meta)]
-                                                  (unify ty (fn-ty a1 r))
-                                                  (let [[env1 pc] (tc-pat env a a1)] [env1 (conj pcs pc) r])))))
-                                          [env [] ity] args)]
-               (when-not ct (error! "no constructor type for " (pr-str cn)))
-               (unify res t)
+                   ;; the constructor's result unified with the scrutinee's type before its arguments' patterns
+                   ;; (tcDataConPat's matchExpectedConTy: the expected type pushed in, a nested GADT pattern's
+                   ;; scrutinee known)
+                   [ats res] (reduce (fn [[ats ty] _]
+                                       (let [ty (expand (prune ty))]
+                                         (if (and (= :tc (first ty)) (= fun-tc (second ty)))
+                                           [(conj ats (first (nth ty 2))) (second (nth ty 2))]
+                                           (let [a1 (fresh-meta) r (fresh-meta)]
+                                             (unify ty (fn-ty a1 r))
+                                             [(conj ats a1) r]))))
+                                     [[] ity] args)
+                   _ (when-not ct (error! "no constructor type for " (pr-str cn)))
+                   _ (unify res t)
+                   [env' pcs] (reduce (fn [[env pcs] [a at]] (let [[env1 pc] (tc-pat env a at)] [env1 (conj pcs pc)]))
+                                      [env []] (map vector args ats))]
                [env' (list 'pcon cn (into dvars pcs))]))
+
+;; HF9 (second slice): pattern synonyms (GHC.Tc.TyCl.PatSyn, GHC.Tc.Gen.Pat's tcPatSynPat). A synonym's type is
+;; GHC's pattern type, forall univ. req => forall ex. prov => args -> res: matching on it instantiates the universals
+;; (the result unified with the scrutinee's type first), wants the required context, makes the existentials skolems and
+;; gives the provided context to the alternative (its dictionaries bound, its equalities given), as a GADT constructor
+;; does; its builder is the expression forall univ ex. (req, prov) => args -> res. The desugaring (the matcher $mP
+;; applied to the scrutinee and the success and failure continuations) is the desugarer's (HF9's slice 7): the core
+;; pattern is (psyn NAME [req-evidence...] [prov-dictionary...] [pattern...]).
+(def ^:dynamic *patsyns* nil) ; atom {NAME {:univ :req :ex :prov :args :res :fields}}
+
+(defn- tvs-of [t] (set (keep (fn [x] (when (and (vector? x) (= :tv (first x))) (second x))) (tree-seq coll? seq t))))
+
+(defn- patsyn-info
+  "A pattern synonym's signature (PatSynSig's HsSig) as its pattern type's parts (tcPatSynSig): univ and req from the
+  outer quantifier and the first context, ex and prov from what follows; implicitly quantified, a variable the result
+  does not mention is existential"
+  [sig]
+  (let [st (sig-type sig)
+        outer (arg (lval sig) 2)
+        explicit? (= 'HsOuterExplicit (con (if (L? outer) (lval outer) outer)))
+        [ex prov rest] (loop [t (nth st 3) ex [] prov []]
+                         (if (= :forall (first t)) (recur (nth t 3) (into ex (nth t 1)) (into prov (nth t 2))) [ex prov t]))
+        [args res] (loop [t rest as []]
+                     (let [t (prune t)]
+                       (if (and (= :tc (first t)) (= fun-tc (second t))) (recur (second (nth t 2)) (conj as (first (nth t 2)))) [as t])))
+        in-res (tvs-of res)
+        [univ ex0] (if explicit? [(nth st 1) []] [(filterv in-res (nth st 1)) (filterv (complement in-res) (nth st 1))])]
+    {:univ univ :req (nth st 2) :ex (into ex0 ex) :prov prov :args args :res res}))
+
+(defn- builder-type [{:keys [univ req ex prov args res]}]
+  [:forall (into univ ex) (into req prov) (reduce (fn [acc a] (fn-ty a acc)) res (reverse args))])
+
+(declare tc-pat)
+
+(defn- tc-patsyn-pat
+  "A pattern on a pattern synonym (tcPatSynPat): [env' core]"
+  [env v t {:keys [univ req ex prov args res fields]}]
+  (let [cn (nm (arg v 2))
+        m (merge (zipmap univ (repeatedly fresh-meta)) (into {} (map (fn [x] [x [:tv (str x "_sk" (fresh-id))]]) ex)))
+        sp (fn [[c ts]] [c (mapv #(subst m %) ts)])
+        _ (unify (subst m res) t)
+        evs (mapv #(want! (sp %)) req)
+        dpreds (mapv sp prov)
+        dvars (mapv (fn [[c _]] (fresh-lv (str "$d" (occ c)))) dpreds)
+        _ (when *skolem-givens* (swap! *skolem-givens* into (super-closure (mapv vector dpreds dvars))))
+        _ (assume-eqs! dpreds)
+        ats (mapv #(subst m %) args)
+        details (arg v 3)
+        ps (if (= 'RecCon (con details))
+             (let [given (into {} (for [fb (arg (arg details 1) 2) :let [fbv (lval fb) lbl (lval (arg (lval (arg fbv 2)) 2))
+                                                                         [f x] (if (= 'rn/names (first lbl)) (second lbl) [(second lbl) nil])]]
+                                    [(occ f) (if (true? (arg fbv 4)) (list 'L nil (list 'VarPat nil (list 'L nil (list 'rn/name x)))) (arg fbv 3))]))]
+               (mapv (fn [f] (get given (occ f) (list 'L nil (list 'WildPat nil)))) fields))
+             (pat-args details))
+        [env' pcs] (reduce (fn [[env pcs] [p at]] (let [[e c] (tc-pat env p at)] [e (conj pcs c)])) [env []] (map vector ps ats))]
+    [env' (list 'psyn cn evs dvars pcs)]))
 
 (defn tc-pat [env p t]
   (let [v (lval p)]
@@ -1211,21 +1418,23 @@
       ;; a lazy pattern: kept for the match compiler (HF5), its variables bound by selectors
       LazyPat (let [[env1 pc] (tc-pat env (arg v 2) t)] [env1 (list 'plazy pc)])
       AsPat (let [n (nm (arg v 2)) _ (note-type! (lv n) t) [env1 pc] (tc-pat (assoc env n {:mono t}) (arg v 3) t)] [env1 (list 'pas (lv n) pc)])
-      ConPat (if (= 'RecCon (con (arg v 3)))
-               (tc-rec-pat env v t)
-               (tc-con-pat env v t))
+      ConPat (cond
+               (some-> *patsyns* deref (get (nm (arg v 2)))) (tc-patsyn-pat env v t (get @*patsyns* (nm (arg v 2))))
+               (= 'RecCon (con (arg v 3))) (tc-rec-pat env v t)
+               :else (tc-con-pat env v t))
       TuplePat (if (= 'Unboxed (arg v 3))
                  ;; an unboxed tuple: its constructor (#,...,#) of GHC.Internal.Types
                  (let [ps (arg v 2) cn (unboxed-con (count ps))
                        [ct _] (instantiate (get @*genv* cn))
                        [ats rt] (loop [ty ct ats []] (if (and (= :tc (first ty)) (= fun-tc (second ty)))
                                                          (recur (second (nth ty 2)) (conj ats (first (nth ty 2)))) [ats ty]))
+                       _ (unify t rt)
                        [env' pcs] (reduce (fn [[env pcs] [p1 t1]] (let [[e c] (tc-pat env p1 t1)] [e (conj pcs c)])) [env []] (map vector ps ats))]
-                   (unify t rt)
                    [env' (list 'pcon cn pcs)])
+               ;; tcTuplePat: the expected type split first (matchExpectedTyConApp), the components checked at its parts
                (let [ps (arg v 2) ts (mapv (fn [_] (fresh-meta)) ps)
+                     _ (unify t [:tc (tuple-tc (count ps)) ts])
                      [env' pcs] (reduce (fn [[env pcs] [p1 t1]] (let [[e c] (tc-pat env p1 t1)] [e (conj pcs c)])) [env []] (map vector ps ts))]
-                 (unify t [:tc (tuple-tc (count ps)) ts])
                  [env' (list 'pcon (ext-name "data" "GHC.Internal.Tuple" (occ (tuple-con (count ps)))) pcs)]))
       ;; ViewPatterns (GHC.Tc.Gen.Pat's ViewPat): the expression a function from the scrutinee's type, the pattern
       ;; at its result (the desugarer's (pview F P), HsToCore/Match's ViewPat group)
@@ -1234,12 +1443,12 @@
                 (let [[env' pc] (tc-pat env (arg v 3) r)] [env' (list 'pview cf pc)]))
       ;; UnboxedSums (GHC.Tc.Gen.Pat's SumPat): the alternative's constructor, the other components fresh
       SumPat (let [alt (arg v 3) n (arg v 4) ts (mapv (fn [_] (fresh-meta)) (range n))
+                   _ (unify t [:tc (usum-tc n) ts])
                    [env' pc] (tc-pat env (arg v 2) (nth ts (dec alt)))]
-               (unify t [:tc (usum-tc n) ts])
                [env' (list 'pcon (usum-con alt n) [pc])])
       ListPat (let [a (fresh-meta)
+                    _ (unify t (list-ty a))
                     [env' pcs] (reduce (fn [[env pcs] p1] (let [[e c] (tc-pat env p1 a)] [e (conj pcs c)])) [env []] (arg v 2))]
-                (unify t (list-ty a))
                 [env' (list 'plist pcs)])
       ;; GHC's tcNPat: the equality first, then the literal
       NPat (let [eqn (implicit-name v "==" (ext-name "var" "GHC.Internal.Classes" "=="))
@@ -1281,8 +1490,7 @@
         alts (mapv (fn [g]
                      (let [gv (lval g)
                            [env2 gs] (infer-guards env1 (arg gv 2))
-                           [t c] (infer env2 (arg gv 3))]
-                       (unify t r)
+                           c (check-expr env2 (arg gv 3) r)]
                        (if (empty? gs) c (list 'guarded gs c))))
                    (arg grhss 2))
         body (if (and (= 1 (count alts)) (not (and (seq? (first alts)) (= 'guarded (first (first alts)))))) (first alts) (list 'guards alts))]
@@ -1302,6 +1510,54 @@
   (swap! *wanteds* (fn [ws] (into (subvec ws 0 (min w0 (count ws)))
                                   (map (fn [w] (update w :pred (fn [[c ts]] [c (mapv rewrite-by-givens ts)])))
                                        (subvec ws (min w0 (count ws))))))))
+
+(defn- settle-givens!
+  "The pending givens of the scope g canonicalised again (those whose sides became known), still unknown ones left
+  pending, or unified when final?"
+  [g final?]
+  (when-let [ps (seq (:pending @g))]
+    (swap! g dissoc :pending)
+    (binding [*given-eqs* g]
+      (doseq [[a b] ps]
+        (if final?
+          (binding [*implic-eqs* nil] (add-given! a b))
+          (add-given! a b))))))
+
+(defn- retry-implications!
+  "The deferred equalities retried under their givens settled; one that still fails stays deferred, or is reported
+  when final?"
+  [final?]
+  (when *implic-eqs*
+    (loop [k 0]
+      (let [ds @*implic-eqs*]
+        (reset! *implic-eqs* [])
+        (doseq [[a b g] ds]
+          (settle-givens! g final?)
+          (binding [*given-eqs* g]
+            (if final?
+              (binding [*implic-eqs* nil] (unify a b))
+              (let [errs (atom [])]
+                (binding [*errors* errs] (unify a b))
+                (when (seq @errs) (swap! *implic-eqs* conj [a b g]))))))
+        (when (and (< k 4) (seq @*implic-eqs*) (not= (count ds) (count @*implic-eqs*))) (recur (inc k)))))))
+
+(defn- under-givens
+  "f of the wanted w with its pred rewritten by the given equalities it was made under (GHC.Tc.Solver's solving of an
+  implication's wanteds by its inert givens), inside their scope"
+  [w f]
+  (if-let [g (:geqs w)]
+    (do (settle-givens! g false)
+        (binding [*given-eqs* g] (f (update w :pred (fn [[c ts]] [c (mapv rewrite-by-givens ts)])))))
+    (f w)))
+
+(defn- assume-eqs!
+  "The equalities among a context's predicates (a ~ b, a ~~ b) given: a signature's, an instance's, a method's, a
+  constructor's (GHC's givens of the implication tcPolyCheck, tcInstDecl2 and tcDataConPat make)"
+  [preds]
+  (doseq [[_ ts :as p] preds :when (eq-pred? p)]
+    (add-given! (last (butlast ts)) (last ts))))
+
+(defn- scope-givens [] (atom (or (some-> *given-eqs* deref) {})))
 
 (defn infer-matches
   "A match group (MG origin (L sp [Match...])): [type core]; ctx {:scrut [t c] :res r} for a case; expected a type
@@ -1389,6 +1645,8 @@
         ;; simplify: solve by instances what has a known head, keep the rest
         ;; the constraints a local binding deferred come after the group's own (GHC solves them later)
         wanteds (concat (remove :late wanteds) (filter :late wanteds))
+        _ (retry-implications! false)
+        wanteds (map #(under-givens % identity) wanteds)
         simplified (loop [ws wanteds out []]
                      (if (empty? ws)
                        out
@@ -1448,25 +1706,87 @@
   constraint the instances solve to a dictionary variable is solved so, else by the instance's own dictionary's
   superclasses when they give it (as GHC's solver chose on the corpora)"
   [wanteds givens]
-  (doseq [w wanteds]
-    (if-let [term (let [t (solve-pred (:pred w) givens 0)]
-                    (if (and *self-givens* (not (and (seq? t) (contains? '#{v lv} (first t)))))
-                      (or (solve-pred (:pred w) *self-givens* 0) t)
-                      t))]
-      (swap! *evidence* assoc (:ev w) term)
-      (swap! *wanteds* conj w))))
+  (doseq [w0 wanteds]
+    (if-let [term (under-givens w0 (fn [w]
+                    (let [t (solve-pred (:pred w) givens 0)]
+                      (if (and *self-givens* (not (and (seq? t) (contains? '#{v lv} (first t)))))
+                        (or (solve-pred (:pred w) *self-givens* 0) t)
+                        t))))]
+      (swap! *evidence* assoc (:ev w0) term)
+      (swap! *wanteds* conj w0))))
 
 (defn- core-name [top? n] (if top? n (lv n)))
 (defn- bind-core [top? n] (if (and top? (ext? n)) n (lv n)))
 
+(defn- patsyn-bind?
+  [b]
+  (= 'PatSynBind (con (lval b))))
+
+(defn- tc-patsyn-bind!
+  "A pattern synonym's declaration (tcCheckPatSynDecl against its signature, else tcInferPatSynDecl): its pattern
+  checked at the result type, the universals skolems and the required context given, the existentials metas the
+  pattern's own existentials fill (Note [Checking against a pattern signature]), each argument variable at its
+  argument type, the provided context wanted from what the pattern binds; an explicit builder checked at the builder
+  type. Without a signature the pattern's type is inferred and closed over its metas (no context inferred). Registers
+  the synonym (*patsyns*) and its builder's type"
+  [env b]
+  (let [psb (arg (lval b) 2) n (nm (arg psb 2)) details (arg psb 3)
+        [argns fields] (case (con details)
+                         PrefixCon [(mapv nm (arg details 1)) nil]
+                         InfixCon [[(nm (arg details 1)) (nm (arg details 2))] nil]
+                         RecCon [(mapv #(nm (arg % 2)) (arg details 1)) (mapv #(nm (arg (arg % 1) 2)) (arg details 1))]
+                         [[] nil])
+        sig (get @*patsyns* n)
+        ws (atom [])]
+    (if (:sig sig)
+      (let [{:keys [univ req ex prov args res]} sig
+            skol (zipmap univ (map (fn [x] [:tv (str "sk_" x)]) univ))
+            m (merge skol (zipmap ex (repeatedly fresh-meta)))
+            sp (fn [[c ts]] [c (mapv #(subst m %) ts)])
+            req' (mapv sp req)
+            params (mapv dict-param req')]
+        (binding [*level* (inc *level*) *wanteds* ws *given-eqs* (scope-givens) *scoped-tvs* (merge *scoped-tvs* skol)]
+          (assume-eqs! req')
+          (let [[env1 _] (tc-pat env (arg psb 4) (subst m res))]
+            (doseq [[x at] (map vector argns args) :let [e (get env1 x)] :when (:mono e)] (unify (:mono e) (subst m at)))
+            (doseq [p prov] (want! (sp p)))
+            (retry-implications! false)))
+        (solve-with-givens! @ws (super-closure (mapv vector req' params)))
+        (swap! *patsyns* assoc-in [n :fields] fields)
+        ;; an explicit builder (pattern P x <- ... where P x = ...): checked at the builder type
+        (let [dir (arg psb 5)]
+          (when (and (seq? dir) (= 'ExplicitBidirectional (first dir)))
+            (let [bt (builder-type sig)
+                  bsk (zipmap (nth bt 1) (map (fn [x] [:tv (str "sk_" x)]) (nth bt 1)))
+                  bpreds (mapv (fn [[c ts]] [c (mapv #(subst bsk %) ts)]) (nth bt 2))
+                  bws (atom [])]
+              (binding [*level* (inc *level*) *wanteds* bws *given-eqs* (scope-givens) *scoped-tvs* (merge *scoped-tvs* bsk)]
+                (assume-eqs! bpreds)
+                (let [body (subst bsk (nth bt 3)) [t _] (infer-matches env (second dir) nil body)] (unify t body)))
+              (solve-with-givens! @bws (super-closure (mapv vector bpreds (mapv dict-param bpreds))))))))
+      ;; tcInferPatSynDecl: the pattern inferred, its type closed over its metas
+      (let [t (binding [*level* (inc *level*)] (fresh-meta))
+            [env1 _] (binding [*level* (inc *level*) *wanteds* ws] (tc-pat env (arg psb 4) t))
+            args (mapv #(or (:mono (get env1 %)) (fresh-meta)) argns)
+            gen (vec (distinct (mapcat metas-of (cons t args))))
+            names (mapv (fn [i] (str "p" i)) gen)]
+        (doseq [[i nn] (map vector gen names)] (swap! *metas* assoc-in [i :ref] [:tv nn]))
+        (doseq [w @ws] (swap! *wanteds* conj w))
+        (let [info {:univ names :req [] :ex [] :prov [] :args (mapv zonk args) :res (zonk t) :fields fields}]
+          (swap! *patsyns* assoc n info)
+          (swap! *genv* assoc n (builder-type info)))))
+    nil))
+
 (defn tc-group
   "A binding group: [env' [(bind B core)...]]; sigs {NAME type}"
   [env [rec binds] sigs top?]
-  (let [names (mapv bind-name binds)
+  (let [_ (doseq [b binds :when (patsyn-bind? b)] (tc-patsyn-bind! env b))
+        binds (vec (remove patsyn-bind? binds))
+        names (mapv bind-name binds)
         signed (filter #(get sigs (bind-name %)) binds)
         unsigned (remove #(get sigs (bind-name %)) binds)
         ;; the signed binders are polymorphic everywhere
-        env (reduce (fn [e b] (let [n (bind-name b)] (assoc e n {:poly (get sigs n) :core (if top? (list 'v n) (lv n))}))) env signed)
+        env (reduce (fn [e b] (let [n (bind-name b)] (assoc e n {:poly (get sigs n) :sig true :core (if top? (list 'v n) (lv n))}))) env signed)
         ;; the unsigned ones: inferred together; a pattern binding binds every variable of its pattern
         [env out1]
         (if (empty? unsigned)
@@ -1541,8 +1861,10 @@
                           params (mapv dict-param preds)
                           givens (super-closure (mapv vector preds params))
                           ws (atom [])
-                          c (binding [*level* (inc *level*) *wanteds* ws *scoped-tvs* (merge *scoped-tvs* skol)]
-                              (let [[t c] (bind-rhs env b body)] (unify t body) c))]
+                          c (binding [*level* (inc *level*) *wanteds* ws *scoped-tvs* (merge *scoped-tvs* skol)
+                                      *given-eqs* (scope-givens)]
+                              (assume-eqs! preds)
+                              (let [[t c] (bind-rhs env b body)] (unify t body) (retry-implications! false) c))]
                       (solve-with-givens! @ws givens)
                       (list 'bind (bind-core top? n) (if (empty? params) c (list 'lam params c))))))]
     [env (into out1 out2)]))
@@ -1639,6 +1961,9 @@
     (let [e (arg tfi 2)]
       (swap! *families* update (nm (arg e 2)) (fn [old] (update (merge {:flavour :open} old) :eqns (fnil conj []) (fam-eqn e)))))))
 
+(defn- selector-type [names res t]
+  (if (every? (tvs-of res) (tvs-of t)) [:forall names [] (fn-ty res t)] [:forall [] [] [:tc (tuple-tc 0) []]]))
+
 (defn- con-names
   "The constructors a ConDecl declares: a GADT declaration may name several (A, B :: T)"
   [cv]
@@ -1673,7 +1998,7 @@
                            [{} {}] (map-indexed vector rargs))
         ty (reduce (fn [acc a] (fn-ty a acc)) res (reverse argtys))]
     (swap! *genv* assoc cn [:forall names (vec ctx) ty])
-    (doseq [[f t] fields] (swap! *genv* assoc f [:forall names [] (fn-ty res t)]))
+    (doseq [[f t] fields] (swap! *genv* assoc f (selector-type names res t)))
     (swap! *cons* assoc cn {:arity (+ (count ctx) (count argtys)) :tycon tn :fields (mapv first fields)
                             :dicts (count ctx) :tag tag
                             :gadt {:univ univ :eqs eqs :tvs names :ctx (vec ctx) :args argtys :nres (count rargs)}
@@ -1723,8 +2048,9 @@
                      [])
             ty (reduce (fn [acc a] (fn-ty a acc)) res (reverse argtys))]
         (swap! *genv* assoc cn [:forall (into names exnames) (vec ctx) ty])
-        ;; a field's selector: forall tvs. T tvs -> field type
-        (doseq [[f t] fields] (swap! *genv* assoc f [:forall names [] (fn-ty res t)]))
+        ;; a field's selector: forall tvs. T tvs -> field type; a naughty one (its type mentions an existential) has
+        ;; type () (GHC.Tc.TyCl.Utils' mkOneRecordSelector: is_naughty, sel_ty = unitTy)
+        (doseq [[f t] fields] (swap! *genv* assoc f (selector-type names res t)))
         (swap! descs conj {:name cn :arity (count argtys) :labels (mapv first fields) :infix? (= 'InfixCon (con det)) :tys argtys})
         (swap! *cons* assoc cn {:arity (+ (count ctx) (count argtys)) :tycon tn :fields (mapv first fields)
                                 :ex (count exnames) :dicts (count ctx)
@@ -1960,8 +2286,10 @@
         givens (into givens (super-closure (mapv vector inner iparams)))
         ws (atom [])
         own (when (= :forall (first ty)) (into {} (map (fn [x] [x [:tv (str "sk_" x)]]) (nth ty 1))))
-        c (binding [*level* (inc *level*) *wanteds* ws *scoped-tvs* (merge *scoped-tvs* own)]
-            (let [[t c] (bind-rhs env b (when-not (= :forall (first body)) body))] (unify t body) c))]
+        c (binding [*level* (inc *level*) *wanteds* ws *scoped-tvs* (merge *scoped-tvs* own) *given-eqs* (scope-givens)]
+            ;; the instance's context's equalities and the method's own (instance (a ~ Char) => IsString [a])
+            (assume-eqs! (concat (map first givens) inner))
+            (let [[t c] (bind-rhs env b (when-not (= :forall (first body)) body))] (unify t body) (retry-implications! false) c))]
     (solve-with-givens! @ws givens)
     (let [ps (into params iparams)] (if (empty? ps) c (list 'lam ps c)))))
 
@@ -2098,6 +2426,7 @@
   first of (Integer, Double) that satisfies them all; then every wanted solved"
   [wanteds]
   (loop [k 0] (when (and (< k 4) (improve! wanteds)) (recur (inc k))))
+  (let [wanteds (map #(under-givens % identity) wanteds)]
   (let [ws (mapv #(assoc % :pred (zonk-pred (:pred %))) wanteds)
         by-meta (group-by (fn [w] (let [ts (second (:pred w))] (when (and (= 1 (count ts)) (= :mv (first (first ts)))) (second (first ts))))) ws)]
     (doseq [[i group] by-meta :when i]
@@ -2107,9 +2436,9 @@
                                       (cond-> (or *defaults* [(con-ty tc-integer) (con-ty tc-double)]) *control* reverse)))]
             (unify [:mv i] t)))))
     (doseq [w ws]
-      (if-let [term (solve-pred (:pred w) [] 0)]
+      (if-let [term (if-let [g (:geqs w)] (binding [*given-eqs* g] (solve-pred (:pred w) [] 0)) (solve-pred (:pred w) [] 0))]
         (swap! *evidence* assoc (:ev w) term)
-        (error! "unsolved: " (pr-str (zonk-pred (:pred w))))))))
+        (error! "unsolved: " (pr-str (zonk-pred (:pred w)))))))))
 
 (defn- fl-ratio
   "A FractionalLit (FL (src S) NEG (:% N D) EXP BASE) as the Core of its Rational: (:%) of two Integers, reduced"
@@ -2198,6 +2527,17 @@
                       (list 'app (v "GHC.Internal.Types" "TyCon")
                             [(list 'lit (str hi "#w64")) (list 'lit (str lo "#w64")) (list 'v modv) (trname (occ tn)) (list 'lit "0#") krep]))))))))
 
+(def ^:private phase-times? (some? (System/getenv "REPR_HASKELL_TC_TIMES")))
+(defmacro ^:private phase
+  "e's value; with REPR_HASKELL_TC_TIMES set its milliseconds on stderr, named k (the elaborator's phases, HF9's
+  second slice's measure of where a module's time goes)"
+  [k e]
+  `(if phase-times?
+     (let [t0# (System/currentTimeMillis) v# ~e]
+       (binding [*out* *err*] (println "tc-phase" ~k (- (System/currentTimeMillis) t0#)))
+       v#)
+     ~e))
+
 (defn typecheck-module
   "A renamed module (rn/module {...}) elaborated: {:types {NAME type} :core [(bind ...)...] :errors [...]}"
   [tree]
@@ -2208,11 +2548,12 @@
               *wanteds* (atom []) *evidence* (atom {}) *unfoldings* (atom {}) *tycons* (atom {})
               *derivs* (atom []) *fixities* (atom {}) *ddescs* (atom {}) *exts* (set (:exts (second tree)))
               *ltypes* (atom {}) *skolem-givens* (atom []) *kind-arity* (atom {}) *families* (atom {}) *deferred-eqs* (atom [])
+              *implic-eqs* (atom []) *patsyns* (atom {})
               *defaults* (some (fn [d] (let [v (lval d)]
                                          (when (and (= 'DefD (con v)) (= 'DefaultDecl (con (arg v 2))))
                                            (mapv #(hs-type {} %) (last (arg v 2))))))
                                decls)]
-      (load-ifaces!)
+      (phase :load-ifaces (load-ifaces!))
       (doseq [s sigs :let [sv (lval s)] :when (= 'FixSig (con sv))
               :let [fs (arg sv 2) fx (arg fs 3)] n (arg fs 2)]
         (swap! *fixities* assoc (nm n) [(nth fx 1) (nth fx 2)]))
@@ -2230,7 +2571,7 @@
                   (walk decls))
                 (doseq [fd @fds] (fam-decl! fd))
                 (doseq [tfi @tfis] (tyfam-inst! tfi)))
-            _ (doseq [t tycl] (case (con t) DataDecl (data-decl! m t) ClassDecl (class-decl! m t) nil))
+            _ (phase :data-class (doseq [t tycl] (case (con t) DataDecl (data-decl! m t) ClassDecl (class-decl! m t) nil)))
             ;; data family instances (TypeFamilies' data instance, top-level or associated): a data declaration of a
             ;; representation tycon whose constructors build the family applied to the instance's patterns
             _ (let [dfis (atom [])]
@@ -2252,17 +2593,25 @@
                                 (list 'bind n (list 'lit (str "foreign import " (occ n)))))))
             insts (vec (for [d decls :let [v (lval d)] :when (and (= 'InstD (con v)) (= 'ClsInstD (con (arg v 2))))]
                          (inst-decl! m (arg (arg v 2) 2))))
-            insts (into insts (derive-all! m decls))
+            insts (into insts (phase :derive (derive-all! m decls)))
             top-sigs (sigs-of sigs)
-            [env core] (reduce (fn [[env out] g] (let [[env1 bs] (tc-group env [(arg g 1) (arg g 2)] top-sigs true)] [env1 (into out bs)]))
-                               [{} []] binds)
-            dms (vec (mapcat (fn [t] (when (= 'ClassDecl (con t)) (default-methods env (nm (arg t 3))))) tycl))
-            ibs (vec (mapcat #(instance-binds env %) insts))
+            ;; the pattern synonyms' signatures: their pattern types, their builders' types
+            _ (doseq [s sigs :let [sv (lval s)] :when (= 'PatSynSig (con sv)) nl (arg sv 2)]
+                (let [info (assoc (patsyn-info (arg sv 3)) :sig true)]
+                  (swap! *patsyns* assoc (nm nl) info)
+                  (swap! *genv* assoc (nm nl) (builder-type info))))
+            [env core] (phase :binds (reduce (fn [[env out] g] (let [[env1 bs] (tc-group env [(arg g 1) (arg g 2)] top-sigs true)] [env1 (into out bs)]))
+                               [{} []] binds))
+            dms (phase :default-methods (vec (mapcat (fn [t] (when (= 'ClassDecl (con t)) (default-methods env (nm (arg t 3))))) tycl)))
+            ibs (phase :instances (vec (mapcat #(instance-binds env %) insts)))
             ;; GHC's record selectors (GHC.Tc.TyCl.Utils.mkOneRecordSelector): one a field, an alternative for each
             ;; constructor that has it, the others recSelError's (the DEFAULT, first as Core keeps it)
             sels (vec (for [[tn ti] (sort-by (comp str key) @*tycons*) :when (= m (nmod tn))
                             :let [cs (:cons ti) infos (mapv #(get @*cons* %) cs)]
                             f (distinct (mapcat :fields infos))]
+                        (if (= [:forall [] [] [:tc (tuple-tc 0) []]] (get @*genv* f))
+                          ;; a naughty selector is bound to () (mkOneRecordSelector's unit_rhs)
+                          (list 'bind f (list 'v (tuple-con 0)))
                         (let [ds (fresh-lv "ds")
                               alts (vec (for [[cn info] (map vector cs infos) :when (some #(= f %) (:fields info))]
                                           (let [xs (mapv (fn [g] (fresh-lv (occ g))) (:fields info))]
@@ -2273,15 +2622,16 @@
                                                         [(list 'lit (str (pr-str (occ f)) "#"))]))]
                                            alts)
                                      alts)]
-                          (list 'bind f (list 'lam [ds] (list 'case ds (fresh-lv "wild") alts))))))
+                          (list 'bind f (list 'lam [ds] (list 'case ds (fresh-lv "wild") alts)))))))
             ;; the deferred family equalities retried, as GHC's solver iterates to a fixed point; one still stuck is
             ;; left (trusted)
+            _ (retry-implications! true)
             _ (loop [i 0]
                 (let [ds @*deferred-eqs*]
                   (reset! *deferred-eqs* [])
                   (doseq [[a b] ds] (unify a b))
                   (when (and (< i 4) (seq @*deferred-eqs*) (not= (count ds) (count @*deferred-eqs*))) (recur (inc i)))))
-            _ (default! @*wanteds*)
+            _ (phase :default (default! @*wanteds*))
             types (into {} (for [[n e] env :when (and (vector? n) (ext? n) (= m (nmod n)))]
                              [n (zonk (:poly e))]))
             ;; the module's constructors (and their workers, the same names in the value namespace) and methods
@@ -2295,7 +2645,7 @@
          :cons (into {} (filter (fn [[n _]] (= m (nmod n))) @*cons*))
          :classes (into {} (for [[n info] @*classes* :when (= m (nmod n))] [n (dissoc info :binds)]))
          :insts (vec (filter (fn [i] (= m (nmod (:dfun i)))) @*insts*))
-         :core (mapv resolve-core (concat fimports core dms ibs sels (typeable-binds m)))
+         :core (phase :resolve-core (mapv resolve-core (concat fimports core dms ibs sels (typeable-binds m))))
          ;; the tables HF5-HF6 need (the match compiler's constructor families, STG's data and dictionaries)
          :all-cons @*cons* :tycons @*tycons*
          :all-classes (into {} (for [[n info] @*classes*] [n (dissoc info :binds)]))
