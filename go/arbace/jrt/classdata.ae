@@ -16,6 +16,15 @@
 ;;   G F NAME SIG
 ;;   E M NAME DESC T...       a method's or constructor's Exceptions attribute (binary names)
 ;;   E C DESC T...
+;;   Y T HEX                  JCS271 (b): the class's RuntimeVisibleTypeAnnotations attribute (JVMS 4.7.20) as
+;;   Y M NAME DESC HEX        the class file holds it, its info's bytes in hex, and its methods', constructors'
+;;   Y C DESC HEX             and fields' (DESC with binary names), indexing the constant pool entries of the
+;;   Y F NAME HEX             N records
+;;   N u "TEXT" | N i INT | N j LONG | N f BITS | N d BITS
+;;                            the constant pool entries the Y records index (CONSTANT_Utf8, Integer, Long, Float
+;;                            and Double, the last two as their raw bits), in index order from 1, a Long or Double
+;;                            taking two indices; read by jdk.internal.jrt.TypeAnnotationData's natives below
+;;                            (jdk26u's TypeAnnotationParser and AnnotationParser over a ConstantPool of them)
 ;; and decodes them on first use. What jdk26u's Class.java asks the VM (getSimpleBinaryName0,
 ;; getDeclaringClass0, getEnclosingMethod0, getModifiers' InnerClasses flags, getGenericSignature0,
 ;; JVM_GetDeclaredClasses) these answer, and Class's, Executable's and Field's Java over them is
@@ -28,7 +37,7 @@
 (in-ns 'go.arbace.jrt)
 
 (go/file "classdata.go"
-  :imports [[strconv "strconv"] [strings "strings"] [sort "sort"] [sync "sync"]])
+  :imports [[hex "encoding/hex"] [strconv "strconv"] [strings "strings"] [sort "sort"] [sync "sync"]])
 
 ;; ---------------------------------------------------------------------------------------
 ;; The decoded attributes
@@ -527,3 +536,49 @@ getExceptionTypes.\n"
   "ToGenericString__String is Field.toGenericString (ReflectSupport, jdk26u's).\n"
   ^{:tag (* String)} [^{:tag (* Field)} f]
   (ReflectSupport_FieldToGenericString_Field__String f))
+
+;; ---------------------------------------------------------------------------------------
+;; JCS271 (b): type annotations as the class file holds them (the Y and N records), for jdk.internal.jrt.
+;; TypeAnnotationData (overlay: what HotSpot's JVM_GetClassTypeAnnotations, JVM_GetMethodTypeAnnotations,
+;; JVM_GetFieldTypeAnnotations and JVM_GetClassConstantPool give jdk26u's TypeAnnotationParser)
+
+(go/func TypeAnnotationData_Bytes0_Class_String__B1_native
+  "TypeAnnotationData_Bytes0_Class_String__B1_native is the RuntimeVisibleTypeAnnotations info of c's Y record
+for key (T, M NAME DESC, C DESC, F NAME), or null when it has none.\n"
+  ^{:tag (* ByteArray)} [^{:tag (* Class)} c ^{:tag (* String)} key]
+  (let [k (.String (NN key))
+        info (.-info (NN c))]
+    (range [_ line (strings/Split (.-Annots info) "\n")]
+      (when (strings/HasPrefix line "Y ")
+        (let [r (subslice line 2)
+              i (strings/LastIndexByte r \space)]
+          (when (and (> i 0) (== (subslice r _ i) k))
+            (let [(values b err) (hex/DecodeString (subslice r (+ i 1)))]
+              (when (!= err nil) (return nil))
+              (let [a (NewByteArray (conv int32 (len b)))]
+                (range [j x b] (aset (.-A a) j (conv int8 x)))
+                (return a)))))))
+    nil))
+
+(go/func TypeAnnotationData_Pool0_Class__O1_native
+  "TypeAnnotationData_Pool0_Class__O1_native is c's constant pool entries the Y records index (the N records),
+by index (0 and a Long's or Double's second index null): a String, an Integer (an Integer's value or a Float's
+raw bits) or a Long (a Long's value or a Double's raw bits).\n"
+  ^{:tag (* RefArray)} [^{:tag (* Class)} c]
+  (let [info (.-info (NN c))
+        es (make (slice any) 1)]
+    (range [_ line (strings/Split (.-Annots info) "\n")]
+      (when (strings/HasPrefix line "N ")
+        (let [p (addr (lit annParser :s line :i 2))
+              t (.word p)]
+          (switch t
+            (case ["u"] (set! es (append es (.stringValue p))))
+            (case ["i" "f"]
+              (let [(values v _) (strconv/ParseInt (.word p) 10 64)]
+                (set! es (append es (Integer_ValueOf_I__Integer (conv int32 v))))))
+            (case ["j" "d"]
+              (let [(values v _) (strconv/ParseInt (.word p) 10 64)]
+                (set! es (append es (Long_ValueOf_J__Long v) nil))))))))
+    (let [a (NewRefArray Object_class (conv int32 (len es)))]
+      (range [i x es] (aset (.-A a) i x))
+      a)))

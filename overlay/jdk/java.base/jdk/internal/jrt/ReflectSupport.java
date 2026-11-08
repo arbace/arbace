@@ -24,8 +24,6 @@
  */
 package jdk.internal.jrt;
 
-import java.lang.annotation.Annotation;
-import java.lang.reflect.Array;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.GenericDeclaration;
@@ -328,37 +326,4 @@ public final class ReflectSupport {
 
     // ---- a type variable's annotations (TypeVariableImpl's variant, overlay/jdk/variants/TypeVariableImpl.ae)
 
-    /** TypeAnnotationParser.parseTypeVariableAnnotations(decl, index): the TYPE_PARAMETER type annotations of
-     *  type parameter index of decl. None: the closed world records no type annotations yet (F25; F14's
-     *  type annotations row, JCS261). */
-    public static Annotation[] typeVariableAnnotations(GenericDeclaration decl, int index) {
-        return new Annotation[0];
-    }
-
-    /** TypeVariableImpl.getAnnotation over its annotations: the one of type c, or null. */
-    public static <T extends Annotation> T annotation(Annotation[] all, Class<T> c) {
-        for (Annotation a : all) {
-            if (a.annotationType() == c) {
-                return c.cast(a);
-            }
-        }
-        return null;
-    }
-
-    /** TypeVariableImpl.getAnnotationsByType over its annotations: those of type c, directly present
-     *  (a type variable's are never in a container: AnnotationSupport.getDirectlyAndIndirectlyPresent
-     *  finds no container among type annotations the closed world does not record). */
-    @SuppressWarnings("unchecked")
-    public static <T extends Annotation> T[] annotationsByType(Annotation[] all, Class<T> c) {
-        int n = 0;
-        for (Annotation a : all) {
-            if (a.annotationType() == c) n++;
-        }
-        T[] out = (T[]) Array.newInstance(c, n);
-        int i = 0;
-        for (Annotation a : all) {
-            if (a.annotationType() == c) out[i++] = c.cast(a);
-        }
-        return out;
-    }
 }

@@ -480,6 +480,52 @@
    ["jdk/internal/jrt/AccessFlagSupport" "executableAccessFlags" "(ILjava/lang/Class;)Ljava/util/Set;"]
    ["jdk/internal/jrt/AccessFlagSupport" "fieldAccessFlags" "(ILjava/lang/Class;)Ljava/util/Set;"]])
 
+(defn type-annotations?
+  "Whether j2g writes Class, Method, Constructor and Field's getAnnotated* (JCS271 (b)): TypeAnnotationParser and
+  jrt's TypeAnnotationSupport translated."
+  []
+  (and (m/translated? "sun/reflect/annotation/TypeAnnotationParser") (m/translated? "jdk/internal/jrt/TypeAnnotationSupport")))
+
+(def type-annotation-calls
+  "JCS271 (b): each getAnnotated* j2g writes, [jrt type, the Java method, its Go name, returns an array?,
+  TypeAnnotationSupport's method, its descriptor]."
+  (let [at "Ljava/lang/reflect/AnnotatedType;" ats "[Ljava/lang/reflect/AnnotatedType;"
+        c "Ljava/lang/Class;" e "Ljava/lang/reflect/Executable;" f "Ljava/lang/reflect/Field;"]
+    (concat
+      [["Class" "getAnnotatedSuperclass" false "annotatedSuperclass" (str "(" c ")" at)]
+       ["Class" "getAnnotatedInterfaces" true "annotatedInterfaces" (str "(" c ")" ats)]
+       ["Field" "getAnnotatedType" false "annotatedType" (str "(" f ")" at)]]
+      (for [t ["Method" "Constructor"]
+            [jm arr sm] [["getAnnotatedReturnType" false "annotatedReturnType"]
+                         ["getAnnotatedReceiverType" false "annotatedReceiverType"]
+                         ["getAnnotatedParameterTypes" true "annotatedParameterTypes"]
+                         ["getAnnotatedExceptionTypes" true "annotatedExceptionTypes"]]]
+        [t jm arr sm (str "(" e ")" (if arr ats at))]))))
+
+(defn- ta-go-name [jm arr] (str (str/upper-case (subs jm 0 1)) (subs jm 1) "__AnnotatedType" (when arr "1")))
+
+(def type-annotation-methods
+  "The jrt types' methods the getAnnotated* add (main's scan)."
+  (vec (for [[t jm arr] type-annotation-calls] [t (ta-go-name jm arr)])))
+
+(def type-annotation-roots
+  "What the getAnnotated* methods j2g writes call (JCS271 (b)): TypeAnnotationSupport's methods, roots of the program."
+  (vec (distinct (for [[_ _ _ sm d] type-annotation-calls] ["jdk/internal/jrt/TypeAnnotationSupport" sm d]))))
+
+(defn- ta-support-forms
+  "The getAnnotated* methods of jrt's Class, Method, Constructor and Field (JCS271 (b))."
+  []
+  (for [[t jm arr sm d] type-annotation-calls
+        :let [gn (symbol (ta-go-name jm arr))
+              ret (if arr '(* RefArray) (m/go-type :jrt "Ljava/lang/reflect/AnnotatedType;"))
+              arg ({"Ljava/lang/Class;" "Class" "Ljava/lang/reflect/Executable;" "Executable" "Ljava/lang/reflect/Field;" "Field"}
+                   (subs d 1 (inc (.indexOf ^String d ")"))))
+              fn-name (symbol (str "TypeAnnotationSupport_" (str/upper-case (subs sm 0 1)) (subs sm 1) "_" arg "__AnnotatedType" (when arr "1")))]]
+    (list 'go/method gn
+          (str gn " is " t "." jm ": TypeAnnotationSupport." sm " (jdk26u's).\n")
+          (with-meta [(tag 'x (list '* (symbol t)))] {:tag ret})
+          (list fn-name 'x))))
+
 (defn support-forms
   "j2g's helpers in package jrt (j2g_support): what translated code calls besides jrt's API."
   []
@@ -618,13 +664,21 @@ module is this one, and the packages of module_table.ae for a named module, as a
                 (with-meta [(tag 'c '(* Class))] {:tag set-t})
                 '(AccessFlagSupport_ClassAccessFlags_Class__Set c))
           (list 'go/method 'AccessFlags__Set
-                "AccessFlags__Set is Executable.accessFlags: AccessFlagSupport.executableAccessFlags of the modifiers.\n"
-                (with-meta [(tag 'e '(* Executable))] {:tag set-t})
+                "AccessFlags__Set is Method.accessFlags (Executable's): AccessFlagSupport.executableAccessFlags of the modifiers.\n"
+                (with-meta [(tag 'e '(* Method))] {:tag set-t})
+                '(AccessFlagSupport_ExecutableAccessFlags_I_Class__Set (.GetModifiers__I e) (.GetDeclaringClass__Class e)))
+          (list 'go/method 'AccessFlags__Set
+                "AccessFlags__Set is Constructor.accessFlags (Executable's): AccessFlagSupport.executableAccessFlags of the modifiers.\n"
+                (with-meta [(tag 'e '(* Constructor))] {:tag set-t})
                 '(AccessFlagSupport_ExecutableAccessFlags_I_Class__Set (.GetModifiers__I e) (.GetDeclaringClass__Class e)))
           (list 'go/method 'AccessFlags__Set
                 "AccessFlags__Set is Field.accessFlags: AccessFlagSupport.fieldAccessFlags of the modifiers.\n"
                 (with-meta [(tag 'f '(* Field))] {:tag set-t})
                 '(AccessFlagSupport_FieldAccessFlags_I_Class__Set (.GetModifiers__I f) (.GetDeclaringClass__Class f)))]))
+     ;; Class, Method, Constructor and Field's getAnnotated* (JCS271 (b), doc/classes/JAVA-DEFERRED-TRIAGE.md, "As
+     ;; built: JCS271 (b) (write-ahead)"): jdk26u's bodies in jrt's own Java jdk.internal.jrt.TypeAnnotationSupport
+     (when (type-annotations?)
+       (ta-support-forms))
      ;; java.util.Date's default zone (JRT-NOTES.md, "Time"): jrt's Date computes its local
      ;; fields, toString's zone name and its local constructors through jrt's DateZone hooks,
      ;; which jrt's own Java jdk.internal.jrt.DefaultZone answers over the translated TimeZone
@@ -1215,10 +1269,19 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
         ;; phase 2B "Dates")
         instant? (m/translated? "java/time/Instant")
         ;; accessFlags (JCS273): support-forms' methods, found by reflection at the REPL too
-        flags? (access-flags?)]
-    (when (or (seq str-ms) streams? loaders? ci? pst-w? pst-s? getenv? instant? props? exec? flags?)
+        flags? (access-flags?)
+        ;; getAnnotated* (JCS271 (b))
+        tann? (type-annotations?)]
+    (when (or (seq str-ms) streams? loaders? ci? pst-w? pst-s? getenv? instant? props? exec? flags? tann?)
       [(apply list 'go/func 'init []
               (concat
+                (when tann?
+                  (for [[t jm arr] type-annotation-calls
+                        :let [c (symbol (str t "_class"))]]
+                    (list 'set! (list '.-Methods (list '.Info c))
+                          (list 'append (list '.-Methods (list '.Info c))
+                                (sig jm [] (if arr '(.ArrayClass AnnotatedType_class) 'AnnotatedType_class) 0x1
+                                     (list (symbol (str "." (ta-go-name jm arr))) (list 'assert (list '* (symbol t)) 'this)))))))
                 (when flags?
                   (for [[c t] '[[Class_class (* Class)] [Method_class (* Method)]
                                 [Constructor_class (* Constructor)] [Field_class (* Field)]]]

@@ -1071,6 +1071,89 @@ import java.lang.module.ModuleDescriptor;
 " "" 1]
          ["import static java.lang.classfile.ClassFile.*;" "import static jdk.internal.jrt.ClassFileAccess.*;" 1]]})
 
+;; ---------------------------------------------------------------------------------------
+;; JCS271 (b): sun.reflect.annotation's parsers over the recorded type annotations, where jdk26u asks the VM through
+;; JavaLangAccess (jrt's hand-written JavaLangAccess has not these members)
+
+(def ^:private ta-why
+  ["Arbace (overlay/jdk, doc/classes/JAVA-DEFERRED-TRIAGE.md, \"As built: JCS271 (b) (write-ahead)\"): jdk26u's"
+   "%s (src/java.base/share/classes/%s"
+   "at https://github.com/openjdk/jdk26u baf63fb), derived by test/jrt/derive.ae (bin/jrt-convert derive):"
+   "%s; nothing else changed. jdk26u's text Copyright (c) Oracle and/or its affiliates, under the GNU General"
+   "Public License version 2 with the Classpath Exception (LICENSE.md); the derivation Copyright (c) the Arbace"
+   "authors; Eclipse Public License 1.0."])
+
+(defn- ta [rel why reps]
+  {:path rel
+   :from (str "src/java.base/share/classes/" rel)
+   :header (fn [] (header (-> ta-why
+                              (update 1 #(format % (-> rel (str/replace ".java" "") (str/replace "/" ".")) rel))
+                              (update 3 #(format % why)))))
+   :ops reps})
+
+(def ^:private ta-derivations
+  [(ta "sun/reflect/annotation/TypeAnnotationParser.java"
+       (str "a class's or executable's RuntimeVisibleTypeAnnotations and its constant pool, which jdk26u asks the VM for"
+            " through JavaLangAccess, are the closed world's records (jdk.internal.jrt.TypeAnnotationData)")
+       [["import jdk.internal.access.SharedSecrets;\nimport jdk.internal.access.JavaLangAccess;\n" "" 1]
+        ["        JavaLangAccess javaLangAccess = SharedSecrets.getJavaLangAccess();\n" "" 1]
+        ["javaLangAccess.getRawClassTypeAnnotations(container)"
+         "jdk.internal.jrt.TypeAnnotationData.rawClassTypeAnnotations(container)" 1]
+        ["javaLangAccess.getRawExecutableTypeAnnotations(execDecl)"
+         "jdk.internal.jrt.TypeAnnotationData.rawExecutableTypeAnnotations(execDecl)" 1]
+        ["javaLangAccess.getConstantPool(container)" "jdk.internal.jrt.TypeAnnotationData.constantPool(container)" 1]])
+   (ta "sun/reflect/annotation/AnnotationType.java"
+       (str "the VM's per-class slot (JavaLangAccess.getAnnotationType, casAnnotationType) is a map of this class's, and"
+            " an annotation type's @Retention and @Inherited, which jdk26u parses from the class's raw annotations, are"
+            " the closed world's recorded declaration annotations (Class.getDeclaredAnnotation, F14)")
+       [["import jdk.internal.access.SharedSecrets;\nimport jdk.internal.access.JavaLangAccess;\n" "" 1]
+        ["        JavaLangAccess jla = SharedSecrets.getJavaLangAccess();
+        AnnotationType result = jla.getAnnotationType(annotationClass); // volatile read"
+         "        AnnotationType result = TYPES.get(annotationClass); // volatile read" 1]
+        ["            if (!jla.casAnnotationType(annotationClass, null, result)) {
+                // somebody was quicker -> read it's result
+                result = jla.getAnnotationType(annotationClass);"
+         "            if (TYPES.putIfAbsent(annotationClass, result) != null) {
+                // somebody was quicker -> read it's result
+                result = TYPES.get(annotationClass);" 1]
+        ["            JavaLangAccess jla = SharedSecrets.getJavaLangAccess();
+            Map<Class<? extends Annotation>, Annotation> metaAnnotations =
+                AnnotationParser.parseSelectAnnotations(
+                    jla.getRawClassAnnotations(annotationClass),
+                    jla.getConstantPool(annotationClass),
+                    annotationClass,
+                    Retention.class, Inherited.class
+                );
+            Retention ret = (Retention) metaAnnotations.get(Retention.class);
+            retention = (ret == null ? RetentionPolicy.CLASS : ret.value());
+            inherited = metaAnnotations.containsKey(Inherited.class);"
+         "            Retention ret = annotationClass.getDeclaredAnnotation(Retention.class);
+            retention = (ret == null ? RetentionPolicy.CLASS : ret.value());
+            inherited = annotationClass.getDeclaredAnnotation(Inherited.class) != null;" 1]
+        ["    public static AnnotationType getInstance("
+         "    // jrt: the VM's slot of each annotation type's Class
+    private static final java.util.concurrent.ConcurrentHashMap<Class<? extends Annotation>, AnnotationType> TYPES =
+        new java.util.concurrent.ConcurrentHashMap<>();
+
+    public static AnnotationType getInstance(" 1]])
+   (ta "sun/reflect/annotation/AnnotationSupport.java"
+       (str "the inherited search's declared annotations of a superclass, which jdk26u asks the VM for"
+            " (JavaLangAccess.getDeclaredAnnotationMap), are made from its getDeclaredAnnotations")
+       [["import jdk.internal.access.SharedSecrets;\nimport jdk.internal.access.JavaLangAccess;\n" "" 1]
+        ["    private static final JavaLangAccess LANG_ACCESS = SharedSecrets.getJavaLangAccess();\n" "" 1]
+        ["LANG_ACCESS.getDeclaredAnnotationMap(superDecl)" "declaredAnnotationMap(superDecl)" 1]
+        ["    public static <A extends Annotation> A[] getAssociatedAnnotations("
+         "    // jrt: JavaLangAccess.getDeclaredAnnotationMap (Class.declaredAnnotations), from the declared annotations
+    private static Map<Class<? extends Annotation>, Annotation> declaredAnnotationMap(Class<?> c) {
+        Map<Class<? extends Annotation>, Annotation> m = new java.util.LinkedHashMap<>();
+        for (Annotation a : c.getDeclaredAnnotations()) {
+            m.put(a.annotationType(), a);
+        }
+        return m;
+    }
+
+    public static <A extends Annotation> A[] getAssociatedAnnotations(" 1]])])
+
 (def derivations
   "Each derived overlay: :path below overlay/jdk/java.base, :from (jdk26u's file, relative to the checkout),
   :ops [[OLD NEW COUNT] or a function ...] (OLD a string or a regex, found exactly COUNT times, every one
@@ -1114,7 +1197,8 @@ import java.lang.module.ModuleDescriptor;
    (httpserver "sun/net/httpserver/HttpContextImpl.java" [(conj import-logger 1)])
    (httpserver "sun/net/httpserver/ServerConfig.java" [(conj import-logger 1) (conj import-level 1)])]
   jmx-derivations
-  [accessflag-derivation]))
+  [accessflag-derivation]
+  ta-derivations))
 
 ;; ---------------------------------------------------------------------------------------
 
