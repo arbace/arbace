@@ -738,3 +738,26 @@ plus batch 4's `bin/lib/ci`, `bin/lib/repr-c`). Checks: `gate.crops check` 0; `-
 references held) 0 problems, the matrix unchanged; `bin/crops-score --judge --strict --record` 0 with the rows held (unheld, the held rows'
 9 reap problems and 1 score problem stay until the night's records, as on batch 3). Scores: Go 94.9 -> 97.0 completeness, LLVM IR 96.0 ->
 96.4 (batch 3's), the rest as batch 4. The nights of batches 2-4 in one ordered list: the AGENDA's "Batches 2-4: the nights after batch 1".
+
+## 2026-11-08: HE9 ported by hand onto main (branch `he9-port`, from main 2a72c94aa)
+
+By batch 3's proposal 1 (a) (the user, 2026-11-07): `haskell-eval9`'s 3f57a1d32 (HE9's allocation counters and limits, allocLimit1-4,
+and the RTS's options from GHC 9.14.1's `rts/RtsFlags.c`, cgrun057 and T16916) ported onto main's hsi, which since moved (haskell-90's
+native read and own verdicts, hfs-i1's `--front native`, b193d0de8/2aafa3a35/6cc1ea87f's records and the stubs' lock). The forms are a
+read of their Go text (HES38), so the port was made on the text: 3f57a1d3's parent, 3f57a1d3 and main printed by `bin/repr-go print`
+(`go/arbace/hs.ae`, `test/haskell/hsi/cmd.ae`), 3f57a1d3's Go diff (14 hunks; the forms' diff is mostly positions) applied to main's
+print by `patch` (10 hunks, each with an offset or fuzz read again) and by hand (4: the driver's `--threaded` and `--with-rtsopts` beside
+main's `--c-main`, `rtsSize` removed, the Machine's `AllocGrace` beside main's `inCFin`), `gofmt`, `go vet`, `bin/hsi runtime read`:
+`hs.ae`'s `:files` and `:init-order` and `cmd.ae`'s made by the read. The three new files (`go/arbace/hs/alloclimit.ae`,
+`test/haskell/hsi/cmd/rtsflags.ae`, `rtsusage.ae`) are 3f57a1d3's byte for byte; `bin/lib/hsi/check`'s hunk (the program's
+`-threaded`, `-with-rtsopts`) re-applied. LICENSE.md and doc/ARBACE.md name the three files' GHC origins. Not taken: `haskell-eval9`'s
+records (recorded at helper 6542fb8a3e38 and over HE9's own C route, which main replaced by batch 3's HES60 (a) and HES64 (a)).
+Alternative considered: re-applying the hunks on the forms (rejected: every hunk shifts the positions of the forms after it, and the
+forms must stay a read of their print, `bin/hsi runtime check`).
+
+Checks (light, 2 jobs): the six programs 6 of 6 (main's hsi 0 of 6); 67 programs of the testsuite's core (the 13 with RTS options, a
+third of the concurrent tests, every twentieth other pass) 66 of 67, main's hsi 62, no pass lost (T8726 out of memory on both at
+`ARBACE_MEM_GIB=3`, passes alone); `bin/hsi runtime check` passes; hsi-essential's command 123 of 123, controls failing. Expected after the
+night's `bin/hsi check ... --record`: the testsuite's core 658 of 701 (652), the record 796 of 908; the divergences' edits and the night's
+commands in doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: HE9 on main (write-ahead)". HE9's 666 counted 11 programs whose references
+main's record-ref cannot build (the C includes GHC's `_stub.h`): HES83 proposed.
