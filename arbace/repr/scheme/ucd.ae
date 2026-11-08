@@ -1,0 +1,214 @@
+(ns arbace.repr.scheme.ucd
+  "SCS9 (c) (the user 2026-11-08; doc/scheme/SCHEME-SURVEY.md, \"As built: SCS9 (c), SCS10 (b), SCS11 (b)\"): the generator of
+  repr/scheme's and si's Unicode data from the Unicode Character Database 16.0.0, pinned by test/scheme/ucd.edn and fetched by
+  `bin/repr-scheme ucd fetch` into the main checkout's .tmp/scheme/ucd-16.0.0 (data only: nothing in it is run). It writes:
+
+    arbace/repr/scheme/category.ae   UCD 16.0.0's general categories (UnicodeData.txt's field 2, its First/Last ranges
+                                     expanded, every unlisted code point Cn), the report's character classes'
+                                     (arbace.repr.scheme.report: R6RS 4.2.1 names its classes by category)
+    arbace/repr/scheme/unicode.ae    the reader's tables (arbace.repr.scheme.read): the scalar values from U+0080 on that are
+                                     an <initial> and a <subsequent> by R6RS 4.2.1's rule over those categories
+    go/arbace/scm/unicode.ae         the same tables for si's runtime reader (go/arbace/scm/read.ae)
+
+  The rule is stated here once more, apart from the report's (a second statement: the read check compares the reader's tables
+  with the report's classes over every scalar value, SPEC 9): above U+007F an <initial> is a <constituent>, a character of Lu,
+  Ll, Lt, Lm, Lo, Mn, Nl, No, Pd, Pc, Po, Sc, Sm, Sk, So or Co; a <subsequent> is that or Nd, Mc or Me.
+
+    bin/repr-scheme ucd gen     (arbace_tool -m arbace.repr.scheme.ucd gen UCD-DIR ROOT): the three files written
+    bin/repr-scheme ucd check   (... check UCD-DIR ROOT OUT): written into OUT and compared byte for byte with the checkout's,
+                                and UnicodeData.txt's categories against extracted/DerivedGeneralCategory.txt's, code point
+                                for code point"
+  (:require [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(def names
+  "UAX #44's general categories, in its order; a category is its index here in the generated table (Cn, 0, is the default)."
+  ["Cn" "Lu" "Ll" "Lt" "Lm" "Lo" "Mn" "Mc" "Me" "Nd" "Nl" "No" "Pc" "Pd" "Ps" "Pe" "Pi" "Pf" "Po" "Sm" "Sc" "Sk" "So"
+   "Zs" "Zl" "Zp" "Cc" "Cf" "Cs" "Co"])
+
+(def ^:private code (into {} (map-indexed (fn [i n] [n i]) names)))
+
+(defn- hex ^long [^String s] (Long/parseLong (str/trim s) 16))
+
+(defn- cat-code ^long [^String n]
+  (or (code (str/trim n)) (throw (ex-info (str "unknown general category " n) {}))))
+
+(defn unicode-data
+  "UnicodeData.txt's general categories, a byte a code point (0 to U+10FFFF), Cn where no line names it; a <..., First> line
+  and its <..., Last> line give the range between them."
+  ^bytes [^String path]
+  (let [a (byte-array 0x110000)]
+    (loop [ls (str/split-lines (slurp path)) first-cp nil]
+      (when-let [l (first ls)]
+        (if (str/blank? l)
+          (recur (rest ls) first-cp)
+          (let [fs (str/split l #";" -1)
+                cp (hex (nth fs 0)) nm ^String (nth fs 1) c (cat-code (nth fs 2))]
+            (cond (.endsWith nm ", First>") (recur (rest ls) cp)
+                  (.endsWith nm ", Last>")
+                  (do (when-not first-cp (throw (ex-info (str "a Last line without its First: " l) {})))
+                      (loop [i (long first-cp)] (when (<= i cp) (aset a i (byte c)) (recur (inc i))))
+                      (recur (rest ls) nil))
+                  :else (do (aset a cp (byte c)) (recur (rest ls) nil)))))))
+    a))
+
+(defn derived-general-category
+  "extracted/DerivedGeneralCategory.txt's categories (lines `XXXX..YYYY ; Lu # ...`), a byte a code point; a code point it does not
+  list is marked -1 (the file lists every one, Cn too)."
+  ^bytes [^String path]
+  (let [a (byte-array 0x110000 (byte -1))]
+    (doseq [l (str/split-lines (slurp path))
+            :let [l (str/trim (first (str/split l #"#" 2)))]
+            :when (seq l)]
+      (let [[r c] (str/split l #";")
+            [lo hi] (str/split (str/trim r) #"\.\.")
+            lo (hex lo) hi (if hi (hex hi) lo) c (cat-code c)]
+        (loop [i lo] (when (<= i hi) (aset a i (byte c)) (recur (inc i))))))
+    a))
+
+(defn runs
+  "The runs [lo hi category] of equal category in a, the Cn runs left out."
+  [^bytes a]
+  (loop [i 0 acc []]
+    (if (>= i 0x110000)
+      acc
+      (let [c (aget a i)
+            j (loop [j (inc i)] (if (and (< j 0x110000) (== (aget a j) c)) (recur (inc j)) j))]
+        (recur (long j) (if (zero? c) acc (conj acc [i (dec j) (long c)])))))))
+
+;; ---- R6RS 4.2.1's classes, stated apart from the report's
+
+(def ^:private constituent (set (map code ["Lu" "Ll" "Lt" "Lm" "Lo" "Mn" "Nl" "No" "Pd" "Pc" "Po" "Sc" "Sm" "Sk" "So" "Co"])))
+(def ^:private subsequent-more (set (map code ["Nd" "Mc" "Me"])))
+
+(defn- ranges-of
+  "The ranges [lo hi] from U+0080 on of the scalar values whose category satisfies pred, flat."
+  [^bytes a pred]
+  (loop [i 0x80 start -1 acc []]
+    (let [in (and (< i 0x110000) (not (<= 0xD800 i 0xDFFF)) (pred (long (aget a i))))]
+      (cond (and in (neg? start)) (recur (inc i) i acc)
+            in (recur (inc i) start acc)
+            (>= i 0x110000) (if (neg? start) acc (conj acc start (dec i)))
+            (neg? start) (recur (inc i) -1 acc)
+            :else (recur (inc i) -1 (conj acc start (dec i)))))))
+
+(defn initial-ranges [a] (ranges-of a #(contains? constituent %)))
+(defn subsequent-ranges [a] (ranges-of a #(or (contains? constituent %) (contains? subsequent-more %))))
+
+;; ---- the generated files
+
+(def ^:private header-note
+  "Generated by `bin/repr-scheme ucd gen` (arbace.repr.scheme.ucd) from the Unicode Character Database 16.0.0, pinned by
+  test/scheme/ucd.edn (SCS9 (c)); `bin/repr-scheme ucd check` regenerates it and compares. Do not edit.")
+
+(defn- wrap
+  "The numbers xs as lines of per items, each line prefixed by indent."
+  [xs ^long per ^String indent]
+  (str/join "\n" (map #(str indent (str/join " " %)) (partition-all per xs))))
+
+(defn category-file ^String [^bytes a]
+  (let [rs (runs a)]
+    (str "(ns arbace.repr.scheme.category\n"
+         "  \"The general categories of the Unicode Character Database 16.0.0 (UnicodeData.txt), as R6RS 4.2.1's character classes\n"
+         "  name them (arbace.repr.scheme.report), in place of the host's tables (SCS9 (c)): the runs lo hi category of code points of\n"
+         "  one category, the category an index into `names`, the code points no run holds Cn. " header-note "\")\n\n"
+         "(def names\n  \"UAX #44's general categories; a run's category is its index here.\"\n  "
+         (pr-str names) ")\n\n"
+         "(def ^:private runs\n  \"The runs [lo hi category] of UnicodeData.txt, Cn's left out, flat (" (count rs) " runs).\"\n  (long-array [\n"
+         (wrap (mapcat identity rs) 30 "    ") "]))\n\n"
+         "(defn category\n  \"The general category of the code point cp (UCD 16.0.0), a name of `names`: \\\"Cn\\\" when it is unassigned.\"\n"
+         "  ^String [^long cp]\n"
+         "  (let [^longs rs runs]\n"
+         "    (loop [lo 0 hi (quot (alength rs) 3)]\n"
+         "      (if (< lo hi)\n"
+         "        (let [m (quot (+ lo hi) 2) b (* 3 m)]\n"
+         "          (cond (< cp (aget rs b)) (recur lo m)\n"
+         "                (> cp (aget rs (inc b))) (recur (inc m) hi)\n"
+         "                :else (nth names (aget rs (+ b 2)))))\n"
+         "        \"Cn\"))))\n")))
+
+(defn unicode-file ^String [^bytes a]
+  (str "(ns arbace.repr.scheme.unicode\n"
+       "  \"The reader's tables of the identifier characters above U+007F (doc/scheme/SPEC.md, 6): the scalar values that are an\n"
+       "  <initial> and a <subsequent> by R6RS 4.2.1's rule over the general categories of the Unicode Character Database 16.0.0,\n"
+       "  as ranges [lo hi] flattened (SCS9 (c); before, Chez Scheme 10.3.0's answers, SC21: the same ranges, Chez's Unicode data\n"
+       "  being 16.0's). " header-note "\")\n\n"
+       "(def initial-ranges\n  \"The ranges [lo hi] of the initial characters from U+0080 on, flat.\"\n  (long-array ["
+       (str/join " " (initial-ranges a)) "]))\n\n"
+       "(def subsequent-ranges\n  \"The ranges [lo hi] of the subsequent characters from U+0080 on, flat.\"\n  (long-array ["
+       (str/join " " (subsequent-ranges a)) "]))\n\n"
+       "(defn in-ranges?\n  \"Is the code point `cp` in one of the flat ranges `rs`?\"\n  [^longs rs ^long cp]\n"
+       "  (let [n (quot (alength rs) 2)]\n"
+       "    (loop [lo 0 hi n]\n"
+       "      (if (< lo hi)\n"
+       "        (let [m (quot (+ lo hi) 2)]\n"
+       "          (cond (< cp (aget rs (* 2 m))) (recur lo m)\n"
+       "                (> cp (aget rs (inc (* 2 m)))) (recur (inc m) hi)\n"
+       "                :else true))\n"
+       "        false))))\n"))
+
+(defn go-unicode-file ^String [^bytes a]
+  (str ";; si's runtime: the reader's identifier tables (as arbace.repr.scheme.unicode): the scalar values from U+0080 on that may\n"
+       ";; start (initial) and continue (subsequent) an identifier, by R6RS 4.2.1's rule over the general categories of the Unicode\n"
+       ";; Character Database 16.0.0, as flat ranges lo hi (SCS9 (c)). Generated by `bin/repr-scheme ucd gen` (arbace.repr.scheme.ucd)\n"
+       ";; from the database pinned by test/scheme/ucd.edn; `bin/repr-scheme ucd check` regenerates it and compares. Do not edit.\n"
+       "(in-ns 'go.arbace.scm)\n\n"
+       "(go/file \"unicode.go\"\n  :imports [])\n\n"
+       "(go/var ^{:tag (slice int32)} initialRanges\n  (lit (slice int32)\n" (wrap (initial-ranges a) 24 "    ") "))\n\n"
+       "(go/var ^{:tag (slice int32)} subsequentRanges\n  (lit (slice int32)\n" (wrap (subsequent-ranges a) 24 "    ") "))\n\n"
+       "(go/func inRanges \"inRanges is whether r is in one of the flat ranges rs (lo hi pairs, ascending).\\n\" ^bool [^{:tag (slice int32)} rs ^rune r]\n"
+       "  (let [lo 0 hi (/ (len rs) 2)]\n"
+       "    (while (< lo hi)\n"
+       "      (let [m (/ (+ lo hi) 2)]\n"
+       "        (cond (< r (aget rs (* 2 m))) (set! hi m)\n"
+       "              (> r (aget rs (+ (* 2 m) 1))) (set! lo (+ m 1))\n"
+       "              :else (return true))))\n"
+       "    false))\n\n"
+       "(go/func IsIdentInitial \"IsIdentInitial is whether r may start an identifier (R6RS 4.2.1 over UCD 16.0.0).\\n\" ^bool [^rune r]\n"
+       "  (when (< r 128)\n"
+       "    (return (or (and (>= r \\a) (<= r \\z)) (and (>= r \\A) (<= r \\Z))\n"
+       "                (== r \\!) (== r \\$) (== r \\%) (== r \\&) (== r \\*) (== r \\/) (== r \\:) (== r \\<) (== r \\=)\n"
+       "                (== r \\>) (== r \\?) (== r \\^) (== r \\_) (== r \\~))))\n"
+       "  (inRanges initialRanges r))\n\n"
+       "(go/func IsIdentSubsequent \"IsIdentSubsequent is whether r may continue an identifier.\\n\" ^bool [^rune r]\n"
+       "  (when (< r 128)\n"
+       "    (return (or (IsIdentInitial r) (and (>= r \\0) (<= r \\9)) (== r \\+) (== r \\-) (== r \\.) (== r \\@))))\n"
+       "  (inRanges subsequentRanges r))\n"))
+
+(def outputs
+  "The generated files, relative to the checkout, and their makers."
+  [["arbace/repr/scheme/category.ae" category-file]
+   ["arbace/repr/scheme/unicode.ae" unicode-file]
+   ["go/arbace/scm/unicode.ae" go-unicode-file]])
+
+(defn- cross-check
+  "UnicodeData.txt's categories against DerivedGeneralCategory.txt's: [] or the first 20 code points where they differ."
+  [^bytes a ^bytes d]
+  (vec (take 20 (filter #(not= (aget a (int %)) (aget d (int %))) (range 0x110000)))))
+
+(defn- load-ucd [^String dir]
+  (let [a (unicode-data (str dir "/UnicodeData.txt"))
+        d (derived-general-category (str dir "/extracted/DerivedGeneralCategory.txt"))
+        bad (cross-check a d)]
+    (println (str "ucd: UnicodeData.txt " (count (runs a)) " runs of an assigned category; DerivedGeneralCategory.txt "
+                  (if (empty? bad) "agrees code point for code point" (str "DIFFERS at " (pr-str bad)))))
+    [a (empty? bad)]))
+
+(defn -main [& [verb dir root out]]
+  (let [status
+        (case verb
+          "gen" (let [[a ok] (load-ucd dir)]
+                  (doseq [[f mk] outputs] (spit (str root "/" f) (mk a)) (println (str "wrote " f)))
+                  (if ok 0 1))
+          "check" (let [[a ok] (load-ucd dir)
+                        bad (doall (for [[f mk] outputs
+                                         :let [text (mk a) o (str out "/" (str/replace f "/" "__"))]
+                                         :when (do (spit o text) (let [cf (java.io.File. (str root "/" f))] (or (not (.exists cf)) (not= text (slurp cf)))))]
+                                     f))]
+                    (doseq [f bad] (println (str "ucd check: " f " DIFFERS from its generation (bin/repr-scheme ucd gen)")))
+                    (println (str "ucd check: " (- (count outputs) (count bad)) " of " (count outputs) " generated files equal to the checkout's, byte for byte"))
+                    (if (and ok (empty? bad)) 0 1))
+          (do (println "usage: -m arbace.repr.scheme.ucd gen UCD-DIR ROOT | check UCD-DIR ROOT OUT") 2))]
+    (flush)
+    (System/exit status)))
