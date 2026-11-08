@@ -129,6 +129,7 @@
 ;; The facts
 
 (def ^:dynamic *owner* nil)
+(def ^:dynamic *user-self* nil)   ; RF10: atom, a type-relative path's written self type (instantiate_value_path's self_ty.raw)
 (def ^:dynamic *extra* nil)   ; RF10: atom hir-id -> {:ty :adj :callee :pat-adj ...} (unresolved), when the builder asks
 (def ^:dynamic *facts* nil)  ; atom [fact]
 (def ^:dynamic *env* nil)    ; the bindings in scope: [{name type}] innermost last
@@ -1056,7 +1057,8 @@
             base-name (:ident (first segs))
             psp (when (vector? sp) [(nth sp 0) (nth sp 1) (nth sp 0) (+ (long (nth sp 1)) (count base-name))])
             base-res (or (get c/*res* psp) (:res path))
-            bty (try (body-ty {:kind :path :path {:segs [(first segs)] :res base-res :span psp}}) (catch Throwable _ nil))]
+            bty (try (body-ty {:kind :path :path {:segs [(first segs)] :res base-res :span psp}}) (catch Throwable _ nil))
+            _ (when (and *user-self* bty) (reset! *user-self* bty))]
         (when (and bty (not (#{:err :unknown} (first bty))))
           (or (probe-assoc-fn bty (:ident (peek segs)))
               ;; an enum's variant through a type (`Self::Auto`, an alias's): its constructor or its value
@@ -1098,12 +1100,70 @@
         :else [:unknown]))
 
 (declare probe-assoc-fn)
+
+(defn- impl-item-of
+  "An associated item's impl (the crate's id or std's path) when its container is an impl, else nil"
+  [def]
+  (cond (number? def) (let [p (c/def-of (:parent (c/def-of def)))] (when (str/starts-with? (str (:kind p)) "Impl") (:id p)))
+        (string? def) (let [pp (c/path-parent def)] (when (re-find #"\{impl#\d+\}$" (str pp)) pp))
+        :else nil))
+
+(defn canonical-user-ty
+  "RF10: write_user_type_annotation_from_args: TypeOf(DEF, ARGS) with the written self type SELF (a type-relative path to
+  an impl's item), canonicalized as canonicalize_user_type_annotation does (inference variables and regions the canonical
+  variables ^c_N in their order of appearance, the arguments then the self type); nil when it cannot contain user bounds
+  or is the identity"
+  [def args self]
+  (let [idx (atom {}) kinds (atom [])
+        var! (fn [k kf] (or (get @idx k) (let [i (count @kinds)] (swap! kinds conj (kf i)) (swap! idx assoc k i) i)))
+        canon (fn canon [t]
+                (let [t (if (tvar? t) (shallow t) t)]
+                  (cond (tvar? t) (case (second t)
+                                    :ty (let [i (var! [:t (nth t 2)] #(str "Ty { ui: U0, sub_root: " % " }"))] [:param i (str "^c_" i)])
+                                    :int (let [i (var! [:t (nth t 2)] (fn [_] "Int"))] [:param i (str "^c_" i)])
+                                    :float (let [i (var! [:t (nth t 2)] (fn [_] "Float"))] [:param i (str "^c_" i)])
+                                    :const (let [i (var! [:t (nth t 2)] (fn [_] "Const(U0)"))] [:cval (str "^c_BoundConst { var: " i ", .. }")])
+                                    t)
+                        (and (vector? t) (= :re-var (first t))) (do (var! [:r (second t)] (fn [_] "Region(U0)")) [:re-erased])
+                        (and (vector? t) (keyword? (first t))) (into [(first t)] (map #(cond (vector? %) (canon %) (map? %) (into {} (for [[k v] %] [k (canon v)])) :else %) (rest t)))
+                        (vector? t) (mapv canon t)
+                        :else t)))
+        free? (fn free? [t] (cond (tvar? (shallow t)) true
+                                  (and (vector? t) (#{:re-var :re-early :re-bound :param :proj} (first t))) true
+                                  (vector? t) (boolean (some #(cond (vector? %) (free? %) (map? %) (some free? (vals %)) :else false) t))
+                                  :else false))]
+    (when (or self (some free? args))
+      (let [cargs (mapv canon args)
+            ;; (identity: each argument a fresh variable, in order)
+            identity? (and (nil? self) (= (count @kinds) (count args))
+                           (every? true? (map-indexed (fn [i a] (let [a (if (tvar? a) (shallow a) a)]
+                                                                   (cond (tvar? a) (= i (get @idx [:t (nth a 2)]))
+                                                                         (and (vector? a) (= :re-var (first a))) (= i (get @idx [:r (second a)]))
+                                                                         :else false)))
+                                                      args)))
+            cself (when self (canon (second self)))]
+        (when-not identity?
+          (str "Canonical { value: TypeOf("
+               (binding [c/*in-value* false] (c/print-def-path def cargs))
+               (when self
+                 (let [ip (first self)]
+                   (str " at <impl "
+                        (if (number? ip)
+                          (binding [c/*in-value* false] (c/print-def-path (:parent (c/def-of ip)) []))
+                          (binding [c/*in-value* false] (c/print-def-path (c/path-parent ip) [])))
+                        "::<" (if (number? ip) (str "{impl#" (:disamb (c/def-of ip)) "}") (re-find #"\{impl#\d+\}$" ip)) "> for "
+                        (binding [c/*in-value* false] (c/print-ty cself)) ">")))
+               "), max_universe: U0, var_kinds: [" (str/join ", " @kinds) "] }"))))))
+
 (defn- lang-value-ty [names]
   (let [p (c/lang (first names))]
     (cond (nil? p) [:unknown]
           (= 1 (count names)) (std-value-ty p)
           ;; a lang item type's associated function (format_args!'s `Arguments::new`, `Argument::new_display`)
-          (and (= 2 (count names)) (get (:adts c/*si*) p)) (or (probe-assoc-fn [:adt p (fresh-args p)] (second names)) [:unknown])
+          (and (= 2 (count names)) (get (:adts c/*si*) p))
+          (let [raw [:adt p (fresh-args p)]]
+            (when *user-self* (reset! *user-self* raw))
+            (or (probe-assoc-fn [:adt p (fresh-args p)] (second names)) [:unknown]))
           :else [:unknown])))
 
 (defn- apply-turbofish
@@ -1625,7 +1685,11 @@
           ;; on the lowered self type
           :type-relative (let [_ (doseq [l (ty-consts (:qself e))] (anon-const! l true))
                                bt (body-ty (:qself e))]
-                           (or (when-not (#{:err :unknown} (first bt)) (probe-assoc-fn bt (:ident (:seg e)))) [:unknown]))
+                           (let [t (or (when-not (#{:err :unknown} (first bt)) (probe-assoc-fn bt (:ident (:seg e)))) [:unknown])]
+                             (when (and *extra* (= :fndef (first t)))
+                               (let [ip (impl-item-of (second t))]
+                                 (when-let [u (canonical-user-ty (second t) (nth t 2) (when ip [ip bt]))] (note! e :user-ty u))))
+                             t))
           ;; a qualified path `<T as Trait>::item`: the trait's item with Self the type (its other arguments fresh)
           :qpath (let [bt (body-ty (:qself e))
                        path (:path e) segs (:segs path)
@@ -1640,7 +1704,15 @@
                                  :else nil)))
                        [:unknown]))
           :path (do (doseq [seg (:segs (:path e)) a (:args (:args seg)) :when (and (map? (:const a)) (not (:node a)))] (anon-const! (:const a) true))
-                    (apply-turbofish e (path-ty e)))
+                    (binding [*user-self* (atom nil)]
+                      (let [t (apply-turbofish e (path-ty e))]
+                        ;; RF10: the path's user type annotation (instantiate_value_path)
+                        (when (and *extra* (#{:fndef} (first t)))
+                          (let [[_ d args] t
+                                ip (impl-item-of d)
+                                self (when (and ip @*user-self*) [ip @*user-self*])]
+                            (when-let [u (canonical-user-ty d args self)] (note! e :user-ty u))))
+                        t)))
           :call (check-call e expected)
           :method (let [rt (check-expr (:receiver e) nil)
                         _ (when (tvar? (shallow rt)) (solve-obligations!))]
@@ -1652,8 +1724,14 @@
                             (place-mutable! (:receiver e)))
                           ;; a turbofish: the method's own arguments
                           (when-let [ga (seq (filter :ty (:args (:args (:seg e)))))]
-                            (let [own (vec (take-last (count ga) (remove c/region? args)))]
-                              (doseq [[v a] (map vector own ga)] (unify v (body-ty (:ty a))))))
+                            (let [own (vec (take-last (count ga) (remove c/region? args)))
+                                  written (mapv #(body-ty (:ty %)) ga)]
+                              ;; RF10: instantiate_method_args' user type: the parent's arguments fresh, the method's as written
+                              (when *extra*
+                                (let [fresh-parent (vec (fresh-args def))
+                                      uargs (vec (concat (take (- (count args) (count own)) fresh-parent) written))]
+                                  (when-let [u (canonical-user-ty def uargs nil)] (note! e :user-ty u))))
+                              (doseq [[v a] (map vector own written)] (unify v a))))
                           (check-args! (map vector (:args e) (concat (rest (:inputs sig)) (repeat nil))))
                           (:output sig))
                       (do (when (System/getenv "TYPECK_TRACE") (binding [*out* *err*] (println "no method" (:ident (:seg e)) (deep rt))))

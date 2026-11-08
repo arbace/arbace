@@ -47,7 +47,7 @@
 
 (defn- root-src ^Src [] (:src *root*))
 
-(declare strip-cfg cfg-pred cfg-item include-expr unesc remark-1 rep-vars format-args expand-derives items->stream items-text concat-text attr-name)
+(declare fset strip-cfg cfg-pred cfg-item include-expr unesc remark-1 rep-vars format-args expand-derives items->stream items-text concat-text attr-name)
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Tokens
@@ -114,6 +114,13 @@
     (= 'DocComment (first k)) (ftok :DocComment (nth k 3) (keyword (name (nth k 1))) (keyword (name (nth k 2))) 0 sp)
     :else (throw (ex-info (str "expand: a token kind not taken: " (pr-str k)) {}))))
 
+(defn- with-fspan
+  "RF10: an item of a std macro's definition with its place in std's sources"
+  [it s]
+  (if (and (seq? s) (= 'span (first s)) (string? (second s)) (not (str/starts-with? (second s) "<")) (pos? (long (nth s 2))))
+    (assoc it :fspan (vec (take 5 (rest s))))
+    it))
+
 (defn dump-tts->items
   "A dump TokenStream's trees as items: the root's tokens at their spans (context 0) kept; others foreign, marked by
   their span's context (or MARK when given)"
@@ -144,10 +151,10 @@
                         (if-let [ok (delim-open delim)]
                           (let [oi (or (and (nil? mark) (vector? (:open dm)) (= 4 (count (:open dm))) (root-at (:open dm))
                                             (titem (root-at (:open dm)) 0))
-                                       (titem (ftok ok nil nil nil 0 (keyword (name (:open spm)))) (or mark (span-mark (:open dm)))))
+                                       (with-fspan (titem (ftok ok nil nil nil 0 (keyword (name (:open spm)))) (or mark (span-mark (:open dm)))) (:open dm)))
                                 ci (or (and (nil? mark) (vector? (:close dm)) (= 4 (count (:close dm))) (root-at (:close dm))
                                             (titem (root-at (:close dm)) 0))
-                                       (titem (ftok (open-close ok) nil nil nil 0 (keyword (name (:close spm)))) (or mark (span-mark (:close dm)))))]
+                                       (with-fspan (titem (ftok (open-close ok) nil nil nil 0 (keyword (name (:close spm)))) (or mark (span-mark (:close dm)))) (:close dm)))]
                             [{:g ok :open oi :close ci :kids kids}])
                           kids)))))
         trees)))
@@ -165,8 +172,9 @@
   ([it mark] (remark-1 it mark nil))
   ([it mark sp]
    (let [^Tok t (:t it)]
-     (assoc (titem (lx/tok (.-kind t) -1 -1 (.-sym t) (.-x t) (.-y t) (.-z t) (or sp (.-sp t))) mark)
-            :orig (if (>= (.-lo t) 0) t (:orig it))))))
+     (cond-> (assoc (titem (lx/tok (.-kind t) -1 -1 (.-sym t) (.-x t) (.-y t) (.-z t) (or sp (.-sp t))) mark)
+                    :orig (if (>= (.-lo t) 0) t (:orig it)))
+       (:fspan it) (assoc :fspan (:fspan it))))))
 
 (defn text->items
   "Rust text as foreign items of MARK (a builtin's template); identifiers __rf_frag_N replaced by (frags N)"
@@ -428,7 +436,10 @@
                                [(first r) (tkind (second r)) (drop 2 r)])]
               (recur r (conj out {:rep sub :sep sep :op op})))
             (and (ident-item? nx) (= "crate" (tsym nx)) transcriber?)
-            (recur (drop 2 xs) (conj out {:crate true}))
+            (recur (drop 2 xs) (conj out (cond-> {:crate true}
+                                           ;; (RF10: `$crate`'s place in std's macro: `$`'s start to `crate`'s end)
+                                           (and (:fspan (first xs)) (:fspan nx))
+                                           (assoc :fspan (let [a (:fspan (first xs)) b (:fspan nx)] [(a 0) (a 1) (a 2) (b 3) (b 4)])))))
             (ident-item? nx)
             (if (and (not transcriber?) (punct-item? (nth xs 2 nil) :Colon) (ident-item? (nth xs 3 nil)))
               (recur (drop 4 xs) (conj out {:var (tsym nx) :kind (keyword (tsym (nth xs 3)))}))
@@ -539,7 +550,7 @@
           (cond
             ;; transcribe.rs: a token of the definition is Alone; a delimiter keeps its spacing but `]` closes Alone
             (:tok p) [(if (:t (:tok p)) (remark-1 (:tok p) mark :Alone) (:tok p))]
-            (:crate p) [(titem (ftok :Ident "$crate" false nil 0 :Alone) mark)]
+            (:crate p) [(cond-> (titem (ftok :Ident "$crate" false nil 0 :Alone) mark) (:fspan p) (assoc :fspan (:fspan p)))]
             (:group p) (let [g (:group p)]
                          [{:g (:g g) :open (remark-1 (:open g) mark) :close (remark-1 (:close g) mark (when (= :OpenBracket (:g g)) :Alone))
                            :kids (transcribe (:sub p) env mark)}])
@@ -609,8 +620,8 @@
   [nm input call]
   (let [m (fresh-mark)]
     (case nm
-      ("format_args" "const_format_args") {:ast (format-args input false m)}
-      "format_args_nl" {:ast (format-args input true m)}
+      ("format_args" "const_format_args") {:ast (cond-> (format-args input false m) (:fspan call) (fset :span (apply list (concat (:fspan call) [m]))))}
+      "format_args_nl" {:ast (cond-> (format-args input true m) (:fspan call) (fset :span (apply list (concat (:fspan call) [m]))))}
       ("panic" "unreachable")
       {:ast (list 'Expr :kind (list 'MacCall (list 'MacCall :path (path-form ["$crate" "panic" (str nm "_2021")] m)
                                                    :args (list 'DelimArgs :dspan (list 'DelimSpan :open (foreign-span m) :close (foreign-span m))
@@ -722,7 +733,13 @@
                    :else nil)
         r (binding [*site* site]
             (cond user (expand-rules user input)
-                  (contains? std-builtins nm) (builtin nm input {:span (or site [0 0 0 0])})
+                  (contains? std-builtins nm)
+                  (builtin nm input {:span (or site [0 0 0 0])
+                                     ;; RF10: a call written in a std macro's definition: its place there (`$crate::format_args_nl!(..)`)
+                                     :fspan (let [cl (some-> (fget mac :args) (fget :dspan) (fget :close))]
+                                              (when (and (seq? sp) (string? (second sp)) (not (str/starts-with? (second sp) "<"))
+                                                         (seq? cl) (= (second sp) (second cl)))
+                                                (list 'span (second sp) (nth sp 2) (nth sp 3) (nth cl 4) (nth cl 5))))})
                   (get *std* nm) (expand-rules (get *std* nm) input)
                   :else (throw (ex-info (str "expand: no macro " nm) {:expand true}))))]
     (if (map? r)

@@ -331,7 +331,7 @@
       (mk e (if (contains? *upvars* sp) :upvar-ref :var-ref) ty :id sp)
       (let [rd (c/res-def path)]
         (cond
-          (= :fndef (first ty)) (mk e :zst-literal ty)
+          (= :fndef (first ty)) (mk e :zst-literal ty :user-ty (:user-ty (r-of e)) :fspan (:fspan e))
           (and (= :adt (first ty)) (ctor-info path))
           (let [[adt vi vid _] (ctor-info path)] (mk e :adt ty :adt adt :variant vi :vid vid :fields []))
           :else (unsupported "a path" (pr-str rd)))))))
@@ -375,6 +375,21 @@
               :args [arg-x] :from-hir false :fn-span span}]
     {:k :deref :ty place-ty :arg call :span span :tsi (:hir-id e)}))
 
+(defn- method-ident-span
+  "A method call's segment's span (method_callee's span: the method's name after the receiver's `.`), from the root's text"
+  [e]
+  (let [rs (:span (:receiver e)) src c/*src* nm (str (:ident (:seg e)))]
+    (when (and (vector? rs) src)
+      (let [{:keys [^ints cps lines n]} src
+            n (long n)
+            off (+ (long (nth lines (dec (long (rs 2))))) (dec (long (rs 3))))
+            at (fn [i] (when (< i n) (char (aget cps (int i)))))
+            i (loop [i off] (cond (>= i n) nil (= \. (at i)) (inc i) :else (recur (inc i))))
+            i (when i (loop [i i] (if (and (< i n) (Character/isWhitespace (char (at i)))) (recur (inc i)) i)))
+            lc (fn [o] (let [li (loop [a 0 b (dec (count lines))] (if (>= a b) a (let [m (quot (+ a b 1) 2)] (if (<= (long (nth lines m)) o) (recur m b) (recur a (dec m))))))]
+                         [(inc li) (inc (- o (long (nth lines li))))]))]
+        (when i (let [[l1 c1] (lc i) [l2 c2] (lc (+ i (count nm)))] [l1 c1 l2 c2]))))))
+
 (defn- capture-upvar
   "capture_upvar with convert_captured_hir_place: the captured place as THIR over the variable (an upvar of the current
   body or its own), by value or borrowed"
@@ -394,6 +409,7 @@
     (case (:kind e)
       :lit (mk e :literal ty :lit (:lit e) :neg false)
       :path (mirror-path e ty)
+      :type-relative (if (= :fndef (first ty)) (mk e :zst-literal ty :user-ty (:user-ty (r-of e))) (unsupported "a type-relative path" (first ty)))
       :unary (case (:op e)
                "-" (cond (not (#{:int :uint :float} (first (ty-of (:expr e)))))
                          (overloaded-operator e ty ["core::ops::arith::Neg" "neg"] [(ty-of (:expr e))] [(mirror-expr (:expr e))])
@@ -432,9 +448,17 @@
                               [nil 0])
                    idx (if vid (field-index vid (:ident e)) (parse-long (str (:ident e))))]
                (mk e :field ty :lhs (mirror-expr (:expr e)) :variant vi :name idx))
-      :index (if (:callee (r-of e))
-               (unsupported "an overloaded index")
-               (mk e :index ty :lhs (mirror-expr (:expr e)) :index (mirror-expr (:index e))))
+      :index (if (#{:array :slice} (first (adjusted-ty (:expr e))))
+               (mk e :index ty :lhs (mirror-expr (:expr e)) :index (mirror-expr (:index e)))
+               ;; an overloaded index: `*Index::index(&base, idx)` (IndexMut::index_mut for a mutable autoref)
+               (let [ax (mirror-expr (:expr e)) ix (mirror-expr (:index e))
+                     _ (when-not (= :ref (first (:ty ax))) (unsupported "an overloaded index without its autoref"))
+                     mutbl (boolean (nth (:ty ax) 2)) st (nth (:ty ax) 3)
+                     [tr m] (if mutbl ["core::ops::index::IndexMut" "index_mut"] ["core::ops::index::Index" "index"])
+                     call {:k :call :ty [:ref [:re-erased] mutbl ty] :span (:span e) :tsi (:hir-id e)
+                           :fun {:k :zst-literal :ty [:fndef (str tr "::" m) [st (adjusted-ty (:index e))]] :span (:span e) :tsi (:hir-id e)}
+                           :args [ax ix] :from-hir false :fn-span (:span e)}]
+                 (mk e :deref ty :arg call)))
       :tup (mk e :tuple ty :fields (mapv mirror-expr (:exprs e)))
       :array (mk e :array ty :fields (mapv mirror-expr (:exprs e)))
       :call (let [f (:func e)]
@@ -456,7 +480,7 @@
                   (mk e :call ty :fun (mirror-expr f) :args (mapv mirror-expr (:args e)) :from-hir true :fn-span (:span e)))))
       :method (let [[def args] (or (:callee (r-of e)) (unsupported "a method call without its callee"))
                     fty [:fndef def args]]
-                (mk e :call ty :fun {:k :zst-literal :ty fty :span (:span e) :tsi (:hir-id e)}
+                (mk e :call ty :fun {:k :zst-literal :ty fty :span (or (method-ident-span e) (:span e)) :tsi (:hir-id e) :user-ty (:user-ty (r-of e))}
                     :args (into [(mirror-expr (:receiver e))] (map mirror-expr (:args e))) :from-hir true :fn-span (:span e)))
       :struct (let [[adt vi vid] (or (ctor-info (:path e)) (unsupported "a struct expression" (:path e)))]
                 (when (:base e) (unsupported "functional update"))
@@ -727,7 +751,10 @@
 (defn- fn-const [t]
   [:const (binding [c/*in-value* true c/*erased-regions* true] (c/print-def-path (second t) (mapv #(if (c/region? %) [:re-erased] %) (nth t 2)))) t '(zst)])
 
+(declare push-user-type!)
+
 (defn- as-constant [x]
+  (when-let [u (:user-ty x)] (push-user-type! u (or (:fspan x) (:span x)) (:ty x)))
   (case (:k x)
     :literal (lit-const (:lit x) (:neg x) (:ty x))
     :zst-literal (if (= :fndef (first (:ty x))) (fn-const (:ty x)) unit-const)
@@ -975,6 +1002,23 @@
 (declare ast-block-stmts primary-bindings then-else-break-default as-operand as-temp as-place as-rvalue stmt-expr then-else-break match-expr expr-into-pattern declare-bindings
          storage-live-binding! schedule-drop-for-binding!)
 
+(def ^:dynamic *fake-borrow-temps* nil)   ; the outermost index expression's fake borrows (lower_index_expression)
+
+(defn- add-fake-borrows-of-base!
+  "add_fake_borrows_of_base: an inner index of a slice keeps the pointers of its base place by shallow fake borrows"
+  [bb base]
+  (when (= :slice (first (place-ty base)))
+    (loop [i (dec (count (:proj base)))]
+      (when (>= i 0)
+        (let [e (nth (:proj base) i) pre {:local (:local base) :proj (subvec (:proj base) 0 i)}]
+          (case (first e)
+            :deref (let [t (new-local! [:ref [:re-erased] false (place-ty pre)])]
+                     (assign! bb (place t) (list 'ref :fake-shallow (place-form pre)))
+                     (swap! *fake-borrow-temps* conj t)
+                     (recur (dec i)))
+            :index (when-not (= :slice (first (place-ty pre))) (recur (dec i)))
+            (recur (dec i))))))))
+
 (defn- var-local [id] (or (get (:var-indices (st)) id) (unsupported "a variable" id)))
 
 (defn- expr-as-place [bb x mutability]
@@ -986,22 +1030,36 @@
              [bb (resolve-upvar (project pb [:field (:name x) (:ty x)]))])
     :deref (let [[bb pb] (expr-as-place bb (:arg x) mutability)] [bb (resolve-upvar (project pb [:deref]))])
     :upvar-ref [bb (resolve-upvar {:upvar (:id x) :proj []})]
-    :index (let [[bb base] (expr-as-place bb (:lhs x) mutability)
-                 [bb idx] (as-temp bb (temporary-scope (:tsi (:index x))) (:index x) :not)
-                 bt (place-ty base)
-                 len (case (first bt)
-                       :array (do (push! bb (list 'fake-read "ForIndex" (place-form base)))
-                                  (let [n (c/print-const (nth bt 2))] [:const (str "const " n "_usize") usize-ty (list 'scalar (parse-long n) 8)]))
-                       (unsupported "an index of" bt))
-                 lt (temp! bool-ty)]
-             (assign! bb lt (list 'binop "Lt" (op-form [:copy (place idx)]) (op-form (to-copy len))))
-             (let [bb (assert! bb [:move lt] true (list 'bounds-check (op-form len) (op-form [:copy (place idx)])))]
-               [bb (project base [:index idx])]))
+    :index (let [outer? (nil? *fake-borrow-temps*)]
+             (binding [*fake-borrow-temps* (or *fake-borrow-temps* (atom []))]
+               (let [[bb base] (expr-as-place bb (:lhs x) mutability)
+                     [bb idx] (as-temp bb (temporary-scope (:tsi (:index x))) (:index x) :not)
+                     bt (place-ty base)
+                     ;; len_of_slice_or_array
+                     len (case (first bt)
+                           :array (do (push! bb (list 'fake-read "ForIndex" (place-form base)))
+                                      (let [n (c/print-const (nth bt 2))] [:const (str "const " n "_usize") usize-ty (list 'scalar (parse-long n) 8)]))
+                           :slice (let [ptr (if (and (= [[:deref]] (:proj base)) (copy? (local-ty (:local base))))
+                                              [:copy (place (:local base))]
+                                              (let [t (temp! [:ptr false bt])]
+                                                (assign! bb t (list 'rawptr "const (fake)" (place-form base)))
+                                                [:move t]))
+                                        l (temp! usize-ty)]
+                                    (assign! bb l (list 'unop "PtrMetadata" (op-form ptr)))
+                                    [:move l])
+                           (unsupported "an index of" bt))
+                     lt (temp! bool-ty)]
+                 (assign! bb lt (list 'binop "Lt" (op-form [:copy (place idx)]) (op-form (to-copy len))))
+                 (let [bb (assert! bb [:move lt] true (list 'bounds-check (op-form len) (op-form [:copy (place idx)])))]
+                   (if outer?
+                     (doseq [t @*fake-borrow-temps*] (push! bb (list 'fake-read "ForIndex" (place-form (place t)))))
+                     (add-fake-borrows-of-base! bb base))
+                   [bb (project base [:index idx])]))))
     :var-ref [bb (place (var-local (:id x)))]
     (let [[bb t] (as-temp bb (temporary-scope (:tsi x)) x mutability)] [bb (place t)])))
 
-(defn as-place [bb x] (expr-as-place bb x :mut))
-(defn- as-read-only-place [bb x] (expr-as-place bb x :not))
+(defn as-place [bb x] (binding [*fake-borrow-temps* nil] (expr-as-place bb x :mut)))
+(defn- as-read-only-place [bb x] (binding [*fake-borrow-temps* nil] (expr-as-place bb x :not)))
 
 (defn- in-block-tail? [] (= :tail (peek (:block-context (st)))))
 
@@ -2030,6 +2088,17 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Bodies (mod.rs: construct_fn, args_and_body)
 
+(defn- span-text [sp]
+  (cond (and (vector? sp) (= 5 (count sp))) (let [[f l1 c1 l2 c2] sp] (str f ":" l1 ":" c1 ": " l2 ":" c2))
+        (vector? sp) (let [[l1 c1 l2 c2] sp] (str *root-file* ":" l1 ":" c1 ": " l2 ":" c2))
+        :else "?"))
+
+(defn- push-user-type!
+  "as_constant's push_cuta: a constant's user type annotation (its canonical user type, its span, the inferred type)"
+  [u sp ty]
+  (upd! update :user-types (fnil conj [])
+        {:text (str "user_ty: " u ", span: " (span-text sp) ", inferred_ty: " (binding [c/*in-value* false] (c/print-ty ty)))}))
+
 (defn- finish
   "Builder::finish: the body map in MIR forms"
   [d name kind n-args ret]
@@ -2040,9 +2109,10 @@
      :debug (:debug s)
      :blocks (mapv (fn [b] {:cleanup (:cleanup b) :stmts (:stmts b) :after-dbg [] :term (:term b)}) (:blocks s))
      :allocs ""
-     :user-types (vec (for [{:keys [span ty]} (:user-types s)]
+     :user-types (vec (for [{:keys [span ty text]} (:user-types s)]
+                        (if text text
                         (let [[l1 c1 l2 c2] span t (ty-text ty)]
-                          (str "user_ty: Canonical { value: Ty(" t "), max_universe: U0, var_kinds: [] }, span: " *root-file* ":" l1 ":" c1 ": " l2 ":" c2 ", inferred_ty: " t))))}))
+                          (str "user_ty: Canonical { value: Ty(" t "), max_universe: U0, var_kinds: [] }, span: " *root-file* ":" l1 ":" c1 ": " l2 ":" c2 ", inferred_ty: " t)))))}))
 
 (defn print-built
   "A built body's text as -Zdump-mir prints it after the header line: the user type annotations, then the body"

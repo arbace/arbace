@@ -174,6 +174,8 @@
 ;; Paths and types
 
 (declare lower-ty lower-expr lower-pat lower-block lower-generic-args lower-format-args bind-pat)
+(def ^:dynamic *fmt-fspan* nil)   ; RF10: the format_args! call's place in std's macros ([FILE l1 c1 l2 c2]), for user type annotations
+
 
 (defn- res-at [span] (get *res* span))
 
@@ -507,7 +509,11 @@
       Break (let [[_ l v] k] (ex {:kind :break :label (label-name l) :expr (some-> (some-val v) lower-expr)}))
       Continue (ex {:kind :continue :label (label-name (second k))})
       ;; :expansion: a macro's output (RF7: the def collector meets its closures when the expansion is collected)
-      FormatArgs (-> (lower-format-args (second k) sp) (update :attrs into attrs) (assoc :expansion true))
+      FormatArgs (-> (binding [*fmt-fspan* (let [s (fv x :span)]
+                                             (when (and (seq? s) (= 'span (first s)) (string? (second s)) (not (str/starts-with? (second s) "<")))
+                                               (vec (take 5 (rest s)))))]
+                       (lower-format-args (second k) sp))
+                     (update :attrs into attrs) (assoc :expansion true))
       (ex {:kind :err :ast (if (seq? k) (first k) k)}))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -642,7 +648,7 @@
               (let [s (str incomplete (:lit pc))]
                 (if (and (= (inc i) (count tpl)) (empty? bc))
                   (e {:kind :call :span sp
-                      :func (e {:kind :path :path (lang-path* ["format_arguments" (if allow-const "from_str" "from_str_nonconst")]) :span sp})
+                      :func (e {:kind :path :path (lang-path* ["format_arguments" (if allow-const "from_str" "from_str_nonconst")]) :span sp :fspan *fmt-fspan*})
                       :args [(e {:kind :lit :lit {:lit-kind 'Str :value s} :span fa-span})]})
                   (let [bs (utf8 s)
                         bc (loop [bs bs bc bc]
@@ -681,7 +687,7 @@
         (let [bc (conj bc 0)
               template (e {:kind :lit :lit {:lit-kind 'ByteStr :bytes bc} :span sp})
               args-path (fn [] (e {:kind :path :path {:segs [{:ident "args"}]} :span sp}))
-              call-new (fn [args-e] (e {:kind :call :span sp :func (e {:kind :path :path (lang-path* ["format_arguments" "new"]) :span sp})
+              call-new (fn [args-e] (e {:kind :call :span sp :func (e {:kind :path :path (lang-path* ["format_arguments" "new"]) :span sp :fspan *fmt-fspan*})
                                         :args [template (e {:kind :addr-of :expr args-e :span sp})]}))
               unsafe-block (fn [x] (e {:kind :block :span sp :block (node {:node :block :stmts [] :expr x :span sp :rules :unsafe-generated})}))]
           (if (empty? args)
@@ -692,7 +698,7 @@
                           :exprs (vec (for [[[ai ty] psp] @argmap]
                                         (if (< -1 ai (count args))
                                           (e {:kind :call :span sp
-                                              :func (e {:kind :path :path (lang-path* ["format_argument" (if (= ty :usize) "from_usize" (new-fns ty))]) :span sp})
+                                              :func (e {:kind :path :path (lang-path* ["format_argument" (if (= ty :usize) "from_usize" (new-fns ty))]) :span (if (vector? psp) psp sp)})
                                               :args [(e {:kind :field :expr (args-path) :ident (str ai) :span sp})]})
                                           (e {:kind :err :span sp}))))})
                   st (fn [x] (node {:node :stmt :kind :let :super true :pat (bind-pat "args" false sp) :init x :span sp}))]
