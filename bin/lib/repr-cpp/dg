@@ -4,6 +4,9 @@
 #   dg-error    the files with a dg-error directive (not preprocess, not modules/): each run as DejaGnu runs it at one
 #               standard; the oracle (clang 23.1.5 through tools/cxxdump) accepts the unit, then repr/cpp reads it into
 #               forms, or rejects it with its errors; the errors' lines judged against the dg-error lines (C's verdicts);
+#               since CP247 (a) the oracle's dumps are read from the pack test/repr/cpp/records/cxxdump-dg-error (cxxdump
+#               -records, no clang; `bin/repr-cpp record-dumps dg-error` by hand), REPR_CPP_LIVE=1 runs clang (the oracle tier's
+#               cpp-dg-oracle, and the recording);
 #   preprocess  the dg-do preprocess files: the shared preprocessor's errors judged the same way;
 #   modules     modules/ but its preprocess files: each file read and printed as a single translation unit by the round
 #               trip (bin/lib/repr-cpp/roundtrip --no-objects, key gxx-modules-*: test/repr/cpp/roundtrip-oracle.edn,
@@ -12,7 +15,7 @@
 # with --record-ref (its errors by line recorded in test/cpp/ref-dg-gxx15.edn; the judge reads the record).
 #
 # Usage: bin/repr-cpp dg [--corpus dg-error,preprocess,modules] [--dirs D,...] [--only LIST] [--sample N]
-#                        [--record] [--record-ref] [--judge] [--own] [--reader native|clang]
+#                        [--record] [--record-ref] [--judge] [--own] [--reader native|clang] [--dumps-only]
 #   --corpus   the parts (default dg-error,preprocess)
 #   --dirs     only the files under these directories of g++.dg (`.` its top level)
 #   --only     only the files of LIST (names under g++.dg/ or gxx-dg/NAME, one a line)
@@ -24,7 +27,9 @@
 #   --judge    the last run judged again, nothing run
 #   --own      each part by its own verdict alone, no toolchain (cpp-target, ORS31 (a)): preprocess as always (the shared preprocessor's
 #              errors against the dg directives), modules' round trip --judge own (levels 1 and 5 on the native parser); the dg-error part,
-#              clang's acceptance and errors, is refused (the oracle tier's cpp-dg-oracle, CP242)
+#              clang's acceptance and errors, from the recorded dumps (CP247 (a); refused with REPR_CPP_LIVE; with no pack pinned yet it
+#              prints "no record yet" and is skipped, exit 0)
+#   --dumps-only  the dg-error part's oracle run alone (bin/repr-cpp record-dumps's), no read, no judgment
 #   --reader   clang (the default): an accepted unit's forms from the oracle's dump; native: by the native parser (CX11,
 #              doc/cpp/NATIVE.md), the oracle still judging acceptance and errors, and the modules part's round trip --reader native
 # Writes under .tmp/repr-cpp-dg/ (REPR_CPP_DG_WORK): PART/{dg.edn,run.tsv,clang/,forms/,read.edn,rows.edn,gxx/}.
@@ -34,7 +39,7 @@ root=$(cd "$(dirname "$0")/../../.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
 . "$root/bin/lib/tools.bash"
 cd "$root"
-parts=dg-error,preprocess dirs= only= sample= record= recref= judge= reader=clang own=
+parts=dg-error,preprocess dirs= only= sample= record= recref= judge= reader=clang own= dumps_only=
 while [ $# -gt 0 ]; do
   case $1 in
     --corpus) parts=$2; shift 2 ;;
@@ -45,11 +50,18 @@ while [ $# -gt 0 ]; do
     --record-ref) recref=1; shift ;;
     --judge) judge=1; shift ;;
     --own) own=1; shift ;;
+    --dumps-only) dumps_only=1; shift ;;
     --reader) case $2 in native|clang) reader=$2 ;; *) echo "repr-cpp dg: --reader native|clang" >&2; exit 2 ;; esac; shift 2 ;;
-    *) sed -n '14,31p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+    *) sed -n '17,37p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
   esac
 done
-case ",$parts," in *,dg-error,*) [ -z "$own" ] || { echo "repr-cpp dg: --own: the dg-error part is clang's acceptance and errors (the oracle tier's)" >&2; exit 2; } ;; esac
+live=${REPR_CPP_LIVE:-}
+. "$root/test/oracle-records/oracle.bash"
+. "$root/test/oracle-records/cpp.bash"
+case ",$parts," in *,dg-error,*) [ -z "$own" ] || [ -z "$live" ] || { echo "repr-cpp dg: --own reads the dg-error part's recorded dumps; REPR_CPP_LIVE runs clang (the oracle tier's)" >&2; exit 2; } ;; esac
+[ -z "$dumps_only" ] || [ "$parts" = dg-error ] || { echo "repr-cpp dg: --dumps-only is the dg-error part's" >&2; exit 2; }
+[ -z "$dumps_only" ] || [ -n "$live" ] || { echo "repr-cpp dg: --dumps-only makes the dumps: REPR_CPP_LIVE=1 (bin/repr-cpp record-dumps)" >&2; exit 2; }
+# the records' paths name the checkout as @ROOT@ and the g++.dg tree as @TREE@ (tools/cxxdump's rootRel): a pack is every checkout's
 # the records are the clang reader's
 if [ "$reader" = native ] && [ -n "$record$recref" ]; then echo "repr-cpp dg: --record and --record-ref are the clang reader's" >&2; exit 2; fi
 export GOMAXPROCS=${GOMAXPROCS:-4} GOMEMLIMIT=${GOMEMLIMIT:-1500MiB} REPR_CPP_READER=$reader
@@ -65,10 +77,28 @@ for c in "$root/.tmp/cpp-gcc/gcc-15.2.0/gcc/testsuite/g++.dg" "$main/.tmp/cpp-gc
 done
 [ -n "$gxxdg" ] || { echo "repr-cpp dg: no g++.dg tree (bin/repr-cpp pp-check extracts the pinned tarball; or REPR_CPP_GXX_DG)" >&2; exit 1; }
 exe=${REPR_CPP_CXXDUMP_EXE:-$root/.tmp/repr-cpp/cxxdump}
-# the oracle's filter (no clang is run by --own: its parts make no dump)
-[ -n "$own" ] || [ -x "$exe" ] || "$root/bin/repr-cpp" cxxdump-build >&2
+export CXXDUMP_ROOT=$root CXXDUMP_TREE=$gxxdg
 cache=${REPR_CPP_CXXDUMP_CACHE:-$root/.tmp/repr-cpp/cxxdump-cache}
 mkdir -p "$cache"
+# the oracle's filter, from the checkout's tools/cxxdump, for the dg-error part (live: into the cache; else: the records, no clang)
+cacheargs=
+case ",$parts," in
+  *,dg-error,*)
+    [ -n "${REPR_CPP_CXXDUMP_EXE:-}" ] || "$root/bin/repr-cpp" cxxdump-ensure >&2 || exit 1
+    if [ -n "$live" ]; then cacheargs="-cache $cache"
+    elif [ -z "$judge" ]; then
+      if ! ls "$root"/test/repr/cpp/records/cxxdump-dg-error.sha256 > "$TMPDIR/repr-cpp-dg-pin.out" 2>&1; then
+        # CP247 (a)'s write-ahead: until the night records the pack the part has no record to read
+        echo "dg-error: no record yet (CP247 (a): bin/repr-cpp record-dumps dg-error, by hand on a host with clang); skipped"
+        parts=$(echo ",$parts," | sed 's/,dg-error,/,/; s/^,//; s/,$//')
+        [ -n "$parts" ] || exit 0
+      else
+        recs=$(cpr_dump_dirs) || { echo "repr-cpp dg: the dg-error part's records are refused (bin/oracle-records check)" >&2; exit 1; }
+        cacheargs="-records $recs"
+        export CXXDUMP_CLANG_ID; CXXDUMP_CLANG_ID=$(cpr_clang_line)
+      fi
+    fi ;;
+esac
 # arbace.c.dg is embedded in the executable (C9): -s loads the checkout's (its dg-line names, review 196's finding 4)
 filt() { grep -v 'Reflection\|recur arg\|Auto-boxing' | head -c 200000; }
 
@@ -87,7 +117,7 @@ clang1() { # NAME CLANG-ARGS: the oracle's dump of the file, its status, diagnos
   o=$wd/clang/${n//\//__}
   t0=$(date +%s%N)
   # shellcheck disable=SC2086
-  (cd "$gxxdg" && timeout 300 "$exe" -implicit=false -cache "$cache" -o "$o.edn" -- -x c++ -std=$3 $cargs -ferror-limit=0 -Wno-unknown-warning-option -iquote "$(dirname "$gxxdg/$n")" "$n") > "$o.err" 2>&1
+  (cd "$gxxdg" && timeout 300 "$exe" -implicit=false $cacheargs -o "$o.edn" -- -x c++ -std=$3 $cargs -ferror-limit=0 -Wno-unknown-warning-option -iquote "$(dirname "$gxxdg/$n")" "$n") > "$o.err" 2>&1
   echo $? > "$o.status"
   t1=$(date +%s%N)
   echo "$(( (t1 - t0) / 1000000 ))" | awk '{printf "%.3f\n", $1/1000}' > "$o.secs"
@@ -101,7 +131,7 @@ gxx1() { # NAME STD G++-ARGS ACTION: g++'s diagnostics of the file (-S, or -E), 
   echo "${PIPESTATUS[0]}" > "$o.status"
   rm -f "$o.out"
 }
-export -f clang1 gxx1; export exe cache gxxdg
+export -f clang1 gxx1; export exe cache gxxdg cacheargs
 
 status=0
 IFS=, read -r -a ps <<< "$parts"
@@ -127,6 +157,7 @@ for part in "${ps[@]}"; do
       tr '\t\n' '\037\0' < "$wd/run.tsv" | xargs -0 -r -P "$jobs" -I{} nice bash -c 'IFS=$'"'"'\037'"'"' read -r n s g c <<< "$1"; clang1 "$n" "$c" "$s"' _ {}
     fi
     t1=$(date +%s)
+    if [ -n "$dumps_only" ]; then echo "$part: oracle $((t1-t0)) s (--dumps-only)"; continue; fi
     arbace_tool -s arbace.c.dg -m arbace.repr.cpp.dg read "$work" "$part" 2>&1 | filt
     t2=$(date +%s)
     if [ -n "$recref" ]; then
