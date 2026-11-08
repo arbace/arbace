@@ -1,0 +1,1194 @@
+;; Ported from rustc 1.99.1 (https://github.com/rust-lang/rust at 58cf8f9c3, the sources of Alpine's rust-src-1.99.1-r0,
+;; pinned by tools/rsdump/apks.sha256): RF10's first slice of
+;; compiler/rustc_hir_analysis/src/check/region.rs (the region scope tree: resolve_block, resolve_cond, resolve_arm,
+;;   resolve_stmt, resolve_expr, the terminating scopes) and compiler/rustc_middle/src/middle/region.rs (temporary_scope),
+;; compiler/rustc_mir_build/src/thir/cx/{expr.rs (mirror_expr_inner, apply_adjustment, make_mirror_unadjusted's kinds the
+;;   slice takes), block.rs (mirror_block, mirror_stmts)}, thir/pattern/mod.rs (lower_pattern: bindings, wildcards,
+;;   constants, tuples, structs and variants, references, the implicit dereferences),
+;; compiler/rustc_mir_build/src/builder/{mod.rs (construct_fn, args_and_body), cfg.rs, scope.rs (Scopes, DropTree,
+;;   in_scope, in_breakable_scope, in_if_then_scope, break_scope, break_for_else, leave_top_scope, build_scope_drops,
+;;   build_exit_tree, diverge_cleanup, diverge_from, build_unwind_tree, schedule_drop), block.rs (ast_block,
+;;   ast_block_stmts), misc.rs, expr/{into.rs, stmt.rs, as_operand.rs, as_temp.rs, as_rvalue.rs (build_binary_op),
+;;   as_place.rs (expr_as_place, lower_index_expression, bounds_check), as_constant.rs, category.rs},
+;;   matches/{mod.rs, test.rs, util.rs, match_pair.rs}'s paths the slice takes (then_else_break, declare_bindings,
+;;   storage_live_binding, expr_into_pattern, match_expr's candidates and tests over integers, booleans and enums)};
+;; rustc is dual-licensed MIT OR Apache-2.0 (LICENSE.md, "Rust (rustc 1.99.1)").
+
+(ns arbace.rust.front.build
+  "RF10's first slice (doc/rust/FRONTEND-SURVEY.md, \"As built: RF10 (first slice)\"): THIR and MIR building from the native
+  front end: a body's HIR (arbace.rust.front.lower) and its type-check results (arbace.rust.front.typeck/body-results)
+  through the region scope tree, THIR's mirror and rustc_mir_build's builder, into MIR forms (doc/rust/MIR.md) at the
+  `built` phase, printed by arbace.rust.front.mir as rustc's -Zdump-mir=built prints them.
+
+    (build-body DEF OPTS)    within collect/with-crate: a body map of MIR forms (:name :kind :args :ret :locals :scopes
+                             :debug :blocks); OPTS {:overflow-checks bool :edition N}"
+  (:require [arbace.rust.front.collect :as c] [arbace.rust.front.typeck :as tc] [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(defn- unsupported [what & [x]] (throw (ex-info (str "build: unsupported " what) {:what what :x x})))
+
+;; ---------------------------------------------------------------------------------------------
+;; Types: the type checker's types as MIR's type forms (ty TEXT STRUCT)
+
+(def ^:private unit-ty [:tuple []])
+(def ^:private bool-ty [:bool])
+(def ^:private usize-ty [:uint "usize"])
+
+(defn ty-text [t] (binding [c/*in-value* false] (c/print-ty t)))
+
+(defn ty-form
+  "A type as MIR forms write it: (ty TEXT STRUCT)"
+  [t]
+  (list 'ty (ty-text t)
+        (case (first t)
+          :bool 'bool :char 'char :str 'str :never 'never
+          :int (list 'int (second t)) :uint (list 'uint (second t)) :float (list 'float (second t))
+          :tuple (apply list 'tuple (map ty-form (second t)))
+          :array (list 'array (ty-form (second t)) (c/print-const (nth t 2)))
+          :slice (list 'slice (ty-form (second t)))
+          :ref (list 'ref (ty-form (nth t 3)) (boolean (nth t 2)))
+          :ptr (list 'ptr (ty-form (nth t 2)) (boolean (second t)))
+          :adt (list 'adt (binding [c/*in-value* false] (c/print-def-path (second t) [])) (str (second t))
+                     (vec (for [a (nth t 2)] (if (c/region? a) '(lt) (ty-form a)))))
+          :fndef (list 'fndef (binding [c/*in-value* true] (c/print-def-path (second t) (nth t 2)))
+                       (vec (for [a (nth t 2)] (if (c/region? a) '(lt) (ty-form a)))))
+          :fnptr '(fnptr)
+          :param (list 'param (nth t 2))
+          (list 'other (str (first t))))))
+
+(def ^:private int-bits {"i8" 8 "i16" 16 "i32" 32 "i64" 64 "i128" 128 "isize" 64 "u8" 8 "u16" 16 "u32" 32 "u64" 64 "u128" 128 "usize" 64})
+
+(defn- pow2 [n] (reduce * 1N (repeat n 2N)))
+
+(defn- integral? [t] (#{:int :uint} (first t)))
+(defn- signed? [t] (= :int (first t)))
+
+;; the solver's questions, asked with the type checker's state bound (tc/with-solver)
+(defn- copy? [t] (tc/copy-type? t))
+
+(defn- adt-def [t] (when (= :adt (first t)) (second t)))
+
+(defn needs-drop?
+  "Ty::needs_drop, for the slice: Copy types never; a local ADT by its fields unless it implements Drop; std's ADTs
+  that are not Copy: yes"
+  [t]
+  (cond (copy? t) false
+        :else (case (first t)
+                (:bool :char :int :uint :float :ptr :fndef :fnptr :never :str) false
+                :ref false
+                :tuple (boolean (some needs-drop? (second t)))
+                :array (needs-drop? (second t))
+                :slice (needs-drop? (second t))
+                :adt (let [d (second t)]
+                       (if (number? d)
+                         (or (tc/implements-drop? t)
+                             (boolean (some (fn [[_ ft]] (needs-drop? ft)) (tc/all-fields d (nth t 2)))))
+                         true))
+                true)))
+
+;; ---------------------------------------------------------------------------------------------
+;; The region scope tree (region.rs): scopes [HIR-ID DATA], DATA :node :destruction :call-site :arguments :if-then
+;; :if-then-rescope :match-guard or [:remainder I]
+
+(def ^:dynamic *rt* nil)   ; atom {:parent {scope parent} :var {binding-key scope} :cx {:parent :var-parent}}
+
+(defn- record-parent! [child]
+  (swap! *rt* assoc-in [:parent child] (get-in @*rt* [:cx :parent])))
+(defn- enter-scope! [s] (record-parent! s) (swap! *rt* assoc-in [:cx :parent] s))
+(defn- enter-node-scope-with-dtor! [id terminating]
+  (when terminating (enter-scope! [id :destruction]))
+  (enter-scope! [id :node]))
+(defn- cx [] (:cx @*rt*))
+(defn- set-cx! [x] (swap! *rt* assoc :cx x))
+(defn- var-parent-here! [] (swap! *rt* assoc-in [:cx :var-parent] (get-in @*rt* [:cx :parent])))
+
+(defn binding-key
+  "A binding's identity: its pattern's span (a local path's resolution names it), else its HIR id"
+  [p]
+  (let [[l1 c1 l2 c2 :as sp] (:span p) n (count (str (:name p)))]
+    (cond (not (vector? sp)) (:hir-id p)
+          (:sub p) [l1 c1 l1 (+ c1 n)]
+          :else [l2 (- c2 n) l2 c2])))
+
+(declare resolve-expr resolve-block)
+
+(defn- resolve-pat [p]
+  (when (map? p)
+    (when (= :binding (:kind p))
+      (when-let [vp (:var-parent (cx))] (swap! *rt* assoc-in [:var (binding-key p)] vp)))
+    (doseq [k [:sub :pat] :let [x (get p k)] :when (map? x)] (resolve-pat x))
+    (doseq [x (:pats p)] (resolve-pat x))
+    (doseq [f (:fields p)] (resolve-pat (:pat f)))))
+
+(defn- resolve-local [pat init]
+  (when init (resolve-expr init false))
+  (when pat (resolve-pat pat)))
+
+(defn- resolve-stmt [s]
+  (if (and (= :let (:kind s)) (:super s))
+    (resolve-local (:pat s) (:init s))
+    (let [prev (:parent (cx))]
+      (enter-node-scope-with-dtor! (:hir-id s) true)
+      (case (:kind s)
+        :let (do (resolve-local (:pat s) (:init s)) (when (:els s) (resolve-block (:els s) false)))
+        (:semi :expr) (resolve-expr (:expr s) false)
+        nil)
+      (swap! *rt* assoc-in [:cx :parent] prev))))
+
+(def ^:dynamic *edition* 2024)
+
+(defn resolve-block [b terminating]
+  (let [prev (cx)]
+    (enter-node-scope-with-dtor! (:hir-id b) terminating)
+    (var-parent-here!)
+    (doseq [[i s] (map-indexed vector (:stmts b))]
+      (case (:kind s)
+        :let (if (:els s)
+               (let [pc (cx)]
+                 (enter-scope! [(:hir-id b) [:remainder i]]) (var-parent-here!)
+                 (resolve-stmt (dissoc s :els))
+                 (let [after (cx)] (set-cx! pc) (resolve-block (:els s) true) (set-cx! after)))
+               (do (enter-scope! [(:hir-id b) [:remainder i]]) (var-parent-here!) (resolve-stmt s)))
+        :item nil
+        (resolve-stmt s)))
+    (when-let [t (:expr b)] (resolve-expr t (>= *edition* 2024)))
+    (set-cx! prev)))
+
+(defn- logical? [e] (and (= :binary (:kind e)) (#{"&&" "||"} (:op e))))
+
+(defn- resolve-cond [e] (resolve-expr e (not (or (= :let (:kind e)) (logical? e)))))
+
+(defn- resolve-arm [a]
+  (let [prev (cx)]
+    (enter-node-scope-with-dtor! (:hir-id a) true)
+    (var-parent-here!)
+    (resolve-pat (:pat a))
+    (when-let [g (:guard a)]
+      (enter-scope! [(:hir-id a) :match-guard]) (var-parent-here!)
+      (resolve-cond g))
+    (resolve-expr (:body a) false)
+    (set-cx! prev)))
+
+(defn- walk-expr [e]
+  (doseq [k [:func :receiver :lhs :rhs :expr :cond :index :init :base]
+          :let [x (get e k)] :when (and (map? x) (= :expr (:node x)))]
+    (resolve-expr x false))
+  (when (= :let (:kind e)) (resolve-pat (:pat e)))
+  (doseq [k [:args :exprs] x (get e k) :when (map? x)] (resolve-expr x false))
+  (doseq [f (:fields e) :when (map? (:expr f))] (resolve-expr (:expr f) false))
+  (when-let [b (:block e)] (resolve-block b false))
+  (doseq [a (:arms e)] (resolve-arm a)))
+
+(defn resolve-expr [e terminating]
+  (let [prev (cx)]
+    (enter-node-scope-with-dtor! (:hir-id e) terminating)
+    (case (:kind e)
+      :binary (if (logical? e)
+                (do (resolve-expr (:lhs e) (not (or (= :let (:kind (:lhs e))) (logical? (:lhs e)))))
+                    (resolve-expr (:rhs e) (not= :let (:kind (:rhs e)))))
+                (walk-expr e))
+      :assign-op (do (resolve-expr (:rhs e) false) (resolve-expr (:lhs e) false))
+      :if (let [ecx (cx)]
+            (enter-scope! [(:hir-id (:then e)) (if (>= *edition* 2024) :if-then-rescope :if-then)])
+            (var-parent-here!)
+            (resolve-cond (:cond e))
+            (resolve-expr (:then e) true)
+            (set-cx! ecx)
+            (when (:else e) (resolve-expr (:else e) true)))
+      :loop (resolve-block (:block e) true)
+      :drop-temps (resolve-expr (:expr e) true)
+      :closure (unsupported "closure")
+      (walk-expr e))
+    (set-cx! prev)))
+
+(defn- scope-tree
+  "The body's region scope tree: its body block BODY (a function's) with the parameters' patterns"
+  [params body-expr]
+  (binding [*rt* (atom {:parent {} :var {} :cx {:parent nil :var-parent nil}})]
+    (let [id (:hir-id body-expr)]
+      (enter-scope! [id :call-site])
+      (enter-scope! [id :arguments])
+      (var-parent-here!)
+      (doseq [p params] (resolve-pat p))
+      (resolve-expr body-expr true))
+    @*rt*))
+
+(def ^:dynamic *tree* nil)
+
+(defn temporary-scope
+  "temporary_scope(expr): the innermost enclosing scope whose parent is a destruction scope (or an if-then rescope or a
+  match guard, itself)"
+  [id]
+  (loop [s [id :node]]
+    (when-let [p (get (:parent *tree*) s)]
+      (case (second p)
+        :destruction s
+        (:if-then-rescope :match-guard) p
+        (recur p)))))
+
+(defn- var-scope [k] (get (:var *tree*) k))
+
+;; ---------------------------------------------------------------------------------------------
+;; THIR (thir/cx): expressions as maps {:k KIND :ty TYPE :span SPAN :tsi HIR-ID ...}
+
+(def ^:dynamic *res* nil)   ; the body's type-check results by HIR id (tc/body-results)
+
+(defn- r-of [e] (get *res* (:hir-id e)))
+(defn- ty-of [e] (or (:ty (r-of e)) (unsupported "an expression without a type" (:kind e))))
+
+(declare mirror-expr mirror-block lower-pattern)
+
+(defn- local-res [path] (let [r (first (:res path))] (when (= 'local (first r)) (second r))))
+
+(def ^:private bin-ops
+  {"+" "Add" "-" "Sub" "*" "Mul" "/" "Div" "%" "Rem" "^" "BitXor" "&" "BitAnd" "|" "BitOr" "<<" "Shl" ">>" "Shr"
+   "==" "Eq" "<" "Lt" "<=" "Le" "!=" "Ne" ">=" "Ge" ">" "Gt"})
+
+(defn- ctor-info
+  "A path's constructor: [adt-id variant-index variant-def-id ctor-kind] for a struct's or a variant's constructor"
+  [path]
+  (let [rd (c/res-def path)]
+    (when (= :local (first rd))
+      (let [[_ id k] rd d (c/def-of id)]
+        (cond
+          (str/starts-with? (str k) "Ctor(")
+          (if (= "Variant" (:kind d))
+            [(:parent d) (tc/variant-index id) id (if (str/includes? (str k) "Fn") :fn :const)]
+            [id 0 id (if (str/includes? (str k) "Fn") :fn :const)])
+          (= "Variant" k) [(:parent d) (tc/variant-index id) id :struct]
+          (= "Struct" k) [id 0 id :struct]
+          :else nil)))))
+
+(def ^:dynamic *loops* nil)   ; the enclosing loops and labeled blocks, innermost first
+
+(defn- loop-target
+  "A break's or continue's target: the region scope of the loop (or labeled block) its label names, else the innermost loop"
+  [e]
+  (let [t (if-let [l (:label e)] (some #(when (= l (:label %)) %) *loops*) (some #(when-not (:block? %) %) *loops*))]
+    (if t [(:id t) :node] (unsupported "a break target"))))
+
+(defn- mk [e k ty & kvs] (merge {:k k :ty ty :span (:span e) :tsi (:hir-id e)} (apply hash-map kvs)))
+
+(defn- field-index [vid nm]
+  (let [fs (tc/all-fields-of-variant vid)]
+    (or (first (keep-indexed (fn [i [n _]] (when (= (str n) (str nm)) i)) fs))
+        (when (re-matches #"\d+" (str nm)) (parse-long (str nm)))
+        (unsupported "a field" nm))))
+
+(defn- mirror-path [e ty]
+  (let [path (:path e)]
+    (if-let [sp (local-res path)]
+      (mk e :var-ref ty :id sp)
+      (let [rd (c/res-def path)]
+        (cond
+          (= :fndef (first ty)) (mk e :zst-literal ty)
+          (and (= :adt (first ty)) (ctor-info path))
+          (let [[adt vi vid _] (ctor-info path)] (mk e :adt ty :adt adt :variant vi :vid vid :fields []))
+          :else (unsupported "a path" (pr-str rd)))))))
+
+(defn- mirror-unadjusted [e]
+  (let [ty (ty-of e)]
+    (case (:kind e)
+      :lit (mk e :literal ty :lit (:lit e) :neg false)
+      :path (mirror-path e ty)
+      :unary (case (:op e)
+               "-" (cond (:callee (r-of e)) (unsupported "an overloaded operator")
+                         (= :lit (:kind (:expr e))) (mk e :literal ty :lit (:lit (:expr e)) :neg true)
+                         :else (mk e :unary ty :op "Neg" :arg (mirror-expr (:expr e))))
+               "!" (if (:callee (r-of e)) (unsupported "an overloaded operator") (mk e :unary ty :op "Not" :arg (mirror-expr (:expr e))))
+               "*" (let [at (ty-of (:expr e))]
+                     (if (or (#{:ref :ptr} (first at)) (= "alloc::boxed::Box" (adt-def at)))
+                       (mk e :deref ty :arg (mirror-expr (:expr e)))
+                       (unsupported "an overloaded deref"))))
+      :binary (cond (:callee (r-of e)) (unsupported "an overloaded operator")
+                    (logical? e) (mk e :logical ty :op (if (= "&&" (:op e)) :and :or) :lhs (mirror-expr (:lhs e)) :rhs (mirror-expr (:rhs e)))
+                    :else (mk e :binary ty :op (get bin-ops (:op e)) :lhs (mirror-expr (:lhs e)) :rhs (mirror-expr (:rhs e))))
+      :assign (mk e :assign ty :lhs (mirror-expr (:lhs e)) :rhs (mirror-expr (:rhs e)))
+      :assign-op (if (:callee (r-of e))
+                   (unsupported "an overloaded compound assignment")
+                   (mk e :assign-op ty :op (get bin-ops (str/replace (str (:op e)) "=" "")) :lhs (mirror-expr (:lhs e)) :rhs (mirror-expr (:rhs e))))
+      :addr-of (if (:raw e)
+                 (mk e :raw-borrow ty :mutbl (boolean (:mutbl e)) :arg (mirror-expr (:expr e)))
+                 (mk e :borrow ty :bk (if (:mutbl e) :mut :shared) :arg (mirror-expr (:expr e))))
+      :cast (let [src (:expr e)]
+              (cond (:coercion-cast (r-of src)) (mk e :use ty :source (mirror-expr src))
+                    :else (mk e :cast ty :source (mirror-expr src))))
+      :drop-temps (mk e :use ty :source (mirror-expr (:expr e)))
+      :field (let [bt (let [x (r-of (:expr e)) t (:ty x)] (reduce (fn [_ [_ tt]] tt) t (:adj x)))
+                   [vid vi] (if (= :adt (first bt))
+                              (let [d (second bt)] (if (number? d) [(tc/single-variant d) 0] (unsupported "a std field")))
+                              [nil 0])
+                   idx (if vid (field-index vid (:ident e)) (parse-long (str (:ident e))))]
+               (mk e :field ty :lhs (mirror-expr (:expr e)) :variant vi :name idx))
+      :index (if (:callee (r-of e))
+               (unsupported "an overloaded index")
+               (mk e :index ty :lhs (mirror-expr (:expr e)) :index (mirror-expr (:index e))))
+      :tup (mk e :tuple ty :fields (mapv mirror-expr (:exprs e)))
+      :array (mk e :array ty :fields (mapv mirror-expr (:exprs e)))
+      :call (let [f (:func e)]
+              (if-let [[adt vi vid kind] (and (= :path (:kind f)) (= :fn (nth (ctor-info (:path f)) 3 nil)) (ctor-info (:path f)))]
+                (mk e :adt ty :adt adt :variant vi :vid vid :fields (vec (map-indexed (fn [i a] [i (mirror-expr a)]) (:args e))))
+                (mk e :call ty :fun (mirror-expr f) :args (mapv mirror-expr (:args e)) :from-hir true :fn-span (:span e))))
+      :method (let [[def args] (or (:callee (r-of e)) (unsupported "a method call without its callee"))
+                    fty [:fndef def args]]
+                (mk e :call ty :fun {:k :zst-literal :ty fty :span (:span e) :tsi (:hir-id e)}
+                    :args (into [(mirror-expr (:receiver e))] (map mirror-expr (:args e))) :from-hir true :fn-span (:span e)))
+      :struct (let [[adt vi vid] (or (ctor-info (:path e)) (unsupported "a struct expression" (:path e)))]
+                (when (:base e) (unsupported "functional update"))
+                (mk e :adt ty :adt adt :variant vi :vid vid
+                    :fields (mapv (fn [f] [(field-index vid (:ident f)) (mirror-expr (:expr f))]) (:fields e))))
+      :block (if (:label e)
+               (binding [*loops* (cons {:label (:label e) :id (:hir-id e) :block? true} *loops*)]
+                 (mk e :block ty :block (assoc (mirror-block (:block e)) :targeted-by-break true)))
+               (mk e :block ty :block (mirror-block (:block e))))
+      :if (mk e :if ty :cond (mirror-expr (:cond e)) :then (mirror-expr (:then e)) :else (some-> (:else e) mirror-expr)
+              :if-then-scope [(:hir-id (:then e)) (if (>= *edition* 2024) :if-then-rescope :if-then)])
+      :loop (let [b (:block e)]
+              (binding [*loops* (cons {:label (:label e) :id (:hir-id e)} *loops*)]
+                (mk e :loop ty :body {:k :block :ty unit-ty :span (:span b) :tsi (:hir-id b) :block (mirror-block b)})))
+      :break (mk e :break ty :label (loop-target e) :value (some-> (:expr e) mirror-expr))
+      :continue (mk e :continue ty :label (loop-target e))
+      :ret (mk e :return ty :value (some-> (:expr e) mirror-expr))
+      :let (mk e :let ty :expr (mirror-expr (:init e)) :pat (lower-pattern (:pat e)))
+      :match (mk e :match ty :scrutinee (mirror-expr (:expr e))
+                 :arms (mapv (fn [a] {:pat (lower-pattern (:pat a)) :guard (some-> (:guard a) mirror-expr) :body (mirror-expr (:body a))
+                                      :scope [(:hir-id a) :node] :span (:span a) :hir-id (:hir-id a)})
+                             (:arms e)))
+      (unsupported "an expression" (:kind e)))))
+
+(defn- pointer-cast-kind [k] (let [m (re-find #"\((\w+)" (str k))] (if m (second m) "Unsize")))
+
+(defn- apply-adjustment [e x [k target]]
+  (let [base {:ty target :span (:span x) :tsi (:tsi x)}]
+    (cond
+      (= k "NeverToAny") (if (= [:never] target) x (assoc base :k :never-to-any :source x))
+      (= k "Deref") (let [st (:ty x)]
+                      (if (or (#{:ref :ptr} (first st)) (= "alloc::boxed::Box" (adt-def st)))
+                        (assoc base :k :deref :arg x)
+                        (unsupported "an overloaded deref adjustment")))
+      (= k "Borrow") (if (= :ptr (first target))
+                       (assoc base :k :raw-borrow :mutbl (boolean (second target)) :arg x)
+                       (assoc base :k :borrow :bk (if (nth target 2) :mut :shared) :arg x))
+      (str/starts-with? (str k) "Pointer") (assoc base :k :pointer-coercion :cast (pointer-cast-kind k) :source x)
+      :else (unsupported "an adjustment" k))))
+
+(defn mirror-expr [e]
+  (let [x (mirror-unadjusted e)
+        x (reduce (partial apply-adjustment e) x (:adj (r-of e)))]
+    {:k :scope :region [(:hir-id e) :node] :hir-id (:hir-id e) :value x :ty (:ty x) :span (:span e) :tsi (:hir-id e)}))
+
+(defn mirror-block [b]
+  {:region [(:hir-id b) :node] :span (:span b) :hir-id (:hir-id b)
+   :targeted-by-break (boolean (:targeted-by-break b))
+   :stmts (vec (keep-indexed
+                (fn [i s]
+                  (case (:kind s)
+                    (:semi :expr) {:k :expr :scope [(:hir-id s) :node] :expr (mirror-expr (:expr s))}
+                    :let {:k :let :remainder [(:hir-id b) [:remainder i]] :init-scope [(:hir-id s) :node]
+                          :pattern (lower-pattern (:pat s)) :init (some-> (:init s) mirror-expr)
+                          :else (some-> (:els s) mirror-block) :hir-id (:hir-id s) :span (:span s)}
+                    nil))
+                (:stmts b)))
+   :expr (some-> (:expr b) mirror-expr)})
+
+;; patterns (thir/pattern): {:k :wild|:binding|:constant|:leaf|:variant|:deref|:or :ty T ...}
+(defn lower-pattern [p]
+  (let [r (r-of p)
+        ty (:ty r)
+        inner
+        (case (:kind p)
+          :wild {:k :wild :ty ty}
+          :binding (let [[by-ref m] (or (:mode r) [:no false])]
+                     {:k :binding :ty ty :name (:name p) :var (binding-key p) :by-ref by-ref :mutbl m :span (:span p)
+                      :sub (some-> (:sub p) lower-pattern) :primary true})
+          :lit (let [x (:expr p)
+                     [lit neg] (if (and (= :unary (:kind x)) (= "-" (:op x))) [(:lit (:expr x)) true] [(:lit x) false])]
+                 {:k :constant :ty ty :lit lit :neg neg})
+          :tuple {:k :leaf :ty ty :subpatterns (vec (map-indexed (fn [i sp] [i (lower-pattern sp)]) (:pats p)))}
+          (:tuple-struct :struct :path)
+          (let [[adt vi vid] (or (ctor-info (:path p)) (unsupported "a pattern path" (:path p)))
+                subs (case (:kind p)
+                       :tuple-struct (vec (map-indexed (fn [i sp] [i (lower-pattern sp)]) (:pats p)))
+                       :struct (mapv (fn [f] [(field-index vid (:ident f)) (lower-pattern (:pat f))]) (:fields p))
+                       [])]
+            (if (tc/enum? adt)
+              {:k :variant :ty ty :adt adt :variant vi :vid vid :subpatterns subs}
+              {:k :leaf :ty ty :subpatterns subs}))
+          :ref {:k :deref :ty ty :sub (lower-pattern (:pat p))}
+          :or {:k :or :ty ty :pats (mapv lower-pattern (:pats p))}
+          (unsupported "a pattern" (:kind p)))]
+    ;; the implicit dereferences of match ergonomics, outermost first
+    (reduce (fn [x rt] {:k :deref :ty rt :sub x}) inner (reverse (:pat-adj r)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The builder's state
+
+(def ^:dynamic *b* nil)   ; atom: the builder (below)
+
+(defn- st [] @*b*)
+(defn- upd! [f & args] (apply swap! *b* f args))
+
+;; CFG (cfg.rs)
+(defn- start-new-block! [& [cleanup]]
+  (let [n (count (:blocks (st)))] (upd! update :blocks conj {:stmts [] :term nil :cleanup (boolean cleanup)}) n))
+(defn- push! [bb s] (upd! update-in [:blocks bb :stmts] conj s))
+(defn- terminate! [bb t] (upd! assoc-in [:blocks bb :term] t))
+(defn- term-of [bb] (get-in (st) [:blocks bb :term]))
+(defn- goto! [from to] (terminate! from (list 'goto to)))
+
+;; places {:local N :proj [elem...]}, elems [:deref] [:field i ty] [:index local] [:downcast name vi ty]
+(defn- place [l & proj] {:local l :proj (vec proj)})
+(defn- project [p e] (update p :proj conj e))
+
+(defn- local-ty [l] (:ty (get (:locals (st)) l)))
+
+(defn- place-ty [p]
+  (reduce (fn [t e]
+            (case (first e)
+              :deref (case (first t) :ref (nth t 3) :ptr (nth t 2) :adt (first (nth t 2)) (unsupported "a deref of" t))
+              :field (nth e 2)
+              :index (second t)
+              :downcast t))
+          (local-ty (:local p)) (:proj p)))
+
+(defn- place-form [p]
+  (apply list 'place (:local p)
+         (for [e (:proj p)]
+           (case (first e)
+             :deref '(deref)
+             :field (list 'field (second e) (ty-form (nth e 2)))
+             :index (list 'index (second e))
+             :downcast (list 'downcast (second e) (nth e 2))))))
+
+(defn- new-local! [ty & {:keys [mut scope] :or {mut true scope 0}}]
+  (let [n (count (:locals (st)))] (upd! update :locals conj {:ty ty :mut mut :scope scope}) n))
+
+(defn- temp! [ty] (place (new-local! ty)))
+
+;; operands [:copy P] [:move P] [:const TEXT TY VALUE]
+(defn- op-form [o]
+  (case (first o)
+    :copy (list 'copy (place-form (second o)))
+    :move (list 'move (place-form (second o)))
+    :const (let [[_ text t v] o] (list 'const text (ty-form t) v))))
+
+(defn- to-copy [o] (if (= :move (first o)) [:copy (second o)] o))
+
+(defn- consume [p] (if (copy? (place-ty p)) [:copy p] [:move p]))
+
+(defn- assign! [bb p rv] (push! bb (list 'assign (place-form p) rv)))
+(defn- use-rv [o] (list 'use (op-form o)))
+
+;; constants (as_constant.rs, lit_to_mir_constant) and their text (rustc_middle's pretty printer of scalars)
+(defn- int-text [v t]
+  (let [n (second t) bits (int-bits n)]
+    (cond
+      (and (signed? t) (= v (- (pow2 (dec bits))))) (str n "::MIN")
+      (and (signed? t) (= v (dec (pow2 (dec bits))))) (str n "::MAX")
+      (and (not (signed? t)) (= v (dec (pow2 bits))) (not= n "u8")) (str n "::MAX")
+      :else (str v "_" n))))
+
+(defn- scalar-bits [v t]
+  (let [bits (int-bits (second t))]
+    (if (neg? v) (+ v (pow2 bits)) v)))
+
+(defn int-const [v t]
+  [:const (str "const " (int-text (bigint v) t)) t (list 'scalar (scalar-bits (bigint v) t) (quot (int-bits (second t)) 8))])
+
+(defn- bool-const [b] [:const (str "const " b) bool-ty (list 'scalar (if b 1 0) 1)])
+(def ^:private unit-const [:const "const ()" unit-ty '(zst)])
+
+(defn- parse-int-lit [lit]
+  (let [s (str/replace (str (:symbol lit)) "_" "")]
+    (cond (str/starts-with? s "0x") (BigInteger. (subs s 2) 16)
+          (str/starts-with? s "0o") (BigInteger. (subs s 2) 8)
+          (str/starts-with? s "0b") (BigInteger. (subs s 2) 2)
+          :else (BigInteger. s))))
+
+(defn- lit-const [lit neg t]
+  (case (str (:lit-kind lit))
+    "Integer" (let [v (bigint (parse-int-lit lit)) v (if neg (- v) v)]
+                (if (integral? t) (int-const v t) (unsupported "a float literal")))
+    "Bool" (bool-const (= "true" (str (:symbol lit))))
+    (unsupported "a literal" (:lit-kind lit))))
+
+(defn- fn-const [t]
+  [:const (binding [c/*in-value* true] (c/print-def-path (second t) (nth t 2))) t '(zst)])
+
+(defn- as-constant [x]
+  (case (:k x)
+    :literal (lit-const (:lit x) (:neg x) (:ty x))
+    :zst-literal (if (= :fndef (first (:ty x))) (fn-const (:ty x)) unit-const)
+    (unsupported "a constant" (:k x))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Scopes and drop trees (scope.rs)
+
+(def ^:private max-local Long/MAX_VALUE)
+
+(defn- drop-tree [] {:nodes [{:local max-local :kind :storage :next nil}] :map {} :entries []})
+
+(defn- add-drop [tree data next]
+  (let [k [next (:local data)]]
+    (if-let [i (get (:map tree) k)]
+      [tree i]
+      (let [i (count (:nodes tree))]
+        [(-> tree (update :nodes conj (assoc data :next next)) (assoc-in [:map k] i)) i]))))
+
+(defn- add-entry [tree from to] (update tree :entries conj [to from]))
+
+(defn- build-drop-tree-mir!
+  "DropTree::build_mir: assign_blocks then link_blocks; BUILDER :exit or :unwind; returns the blocks by node"
+  [tree builder root-block]
+  (let [nodes (:nodes tree) n (count nodes)
+        blocks (atom (assoc (vec (repeat n nil)) 0 root-block))
+        needs (atom (assoc (vec (repeat n :none)) 0 (if root-block :own :none)))
+        entries (atom (vec (sort (:entries tree))))
+        make (fn [] (if (= builder :unwind) (start-new-block! true) (start-new-block!)))
+        link (fn [from to]
+               (if (= builder :exit)
+                 (let [t (term-of from)]
+                   (if (= 'resume (first t)) (goto! from to) (unsupported "an exit entry" t)))
+                 (let [t (term-of from)]
+                   (case (first t)
+                     (call assert false-unwind)
+                     (terminate! from (concat (butlast t) [(list 'cleanup to)]))
+                     drop (if (= 'cleanup (first (nth t 3)))
+                            (goto! (second (nth t 3)) to)
+                            (terminate! from (apply list (assoc (vec t) 3 (list 'cleanup to)))))
+                     (unsupported "an unwind entry" t)))))]
+    (doseq [i (range (dec n) -1 -1)]
+      (let [node (nth nodes i)]
+        (when (and (seq @entries) (= i (first (peek @entries))))
+          (let [b (or (nth @blocks i) (let [b (make)] (swap! blocks assoc i b) b))]
+            (swap! needs assoc i :own)
+            (while (and (seq @entries) (= i (first (peek @entries))))
+              (let [[_ from] (peek @entries)] (swap! entries pop) (link from b)))))
+        (let [nb (nth @needs i)]
+          (when-not (= :none nb)
+            (if (= :own nb)
+              (when-not (nth @blocks i) (swap! blocks assoc i (make)))
+              (swap! blocks assoc i (nth @blocks (second nb))))
+            (if (= :value (:kind node))
+              (swap! needs assoc (:next node) :own)
+              (when (pos? i)
+                (let [p (nth @needs (:next node))]
+                  (swap! needs assoc (:next node) (case (if (vector? p) :shares p) :none [:shares i] :shares :own :own :own)))))))))
+    ;; link_blocks
+    (doseq [i (range (dec n) -1 -1)]
+      (when-let [b (nth @blocks i)]
+        (let [node (nth nodes i)]
+          (case (:kind node)
+            :value (terminate! b (list 'drop (place-form (place (:local node))) (nth @blocks (:next node)) '(terminate "cleanup") false nil))
+            :storage (when (pos? i)
+                       (push! b (list 'storage-dead (:local node)))
+                       (let [tgt (nth @blocks (:next node))] (when (not= tgt b) (goto! b tgt))))))))
+    @blocks))
+
+(defn- push-scope! [region] (upd! update :scopes conj {:region region :source-scope (:source-scope (st)) :drops [] :moved [] :cached nil}))
+
+(defn- scope-index [region]
+  (let [ss (:scopes (st))] (or (last (keep-indexed (fn [i s] (when (= region (:region s)) i)) ss)) (unsupported "a scope not on the stack" region))))
+
+(defn- needs-cleanup? [s] (some #(= :value (:kind %)) (:drops s)))
+
+(defn- diverge-cleanup-target! [region]
+  (let [target (scope-index region)
+        ss (:scopes (st))
+        [uncached cached] (or (some (fn [i] (when-let [c (:cached (nth ss i))] [(inc i) c])) (range target -1 -1)) [0 0])]
+    (if (> uncached target)
+      cached
+      (loop [i uncached cd cached]
+        (if (> i target)
+          cd
+          (let [cd (reduce (fn [cd d] (if (= :value (:kind d))
+                                        (let [[t j] (add-drop (:unwind (st)) d cd)] (upd! assoc :unwind t) j)
+                                        cd))
+                           cd (:drops (nth (:scopes (st)) i)))]
+            (upd! assoc-in [:scopes i :cached] cd)
+            (recur (inc i) cd)))))))
+
+(defn- diverge-cleanup! [] (diverge-cleanup-target! (:region (peek (:scopes (st))))))
+
+(defn- diverge-from! [bb] (let [d (diverge-cleanup!)] (upd! update :unwind add-entry bb d)))
+
+(defn- build-scope-drops! [s bb unwind-to]
+  (loop [ds (rseq (:drops s)) bb bb unwind-to unwind-to]
+    (if-let [d (first ds)]
+      (case (:kind d)
+        :value (let [unwind-to (:next (nth (:nodes (:unwind (st))) unwind-to))]
+                 (if (some #{(:local d)} (:moved s))
+                   (recur (rest ds) bb unwind-to)
+                   (do (upd! update :unwind add-entry bb unwind-to)
+                       (let [next (start-new-block!)]
+                         (terminate! bb (list 'drop (place-form (place (:local d))) next '(continue) false nil))
+                         (recur (rest ds) next unwind-to)))))
+        :storage (do (push! bb (list 'storage-dead (:local d))) (recur (rest ds) bb unwind-to)))
+      bb)))
+
+(defn- leave-top-scope! [bb]
+  (let [s (peek (:scopes (st)))
+        unwind-to (if (needs-cleanup? s) (diverge-cleanup!) max-local)]
+    (build-scope-drops! (peek (:scopes (st))) bb unwind-to)))
+
+(defn- pop-scope! [region bb]
+  (let [bb (leave-top-scope! bb)]
+    (upd! update :scopes pop)
+    bb))
+
+(defmacro ^:private in-scope
+  "in_scope: BODY (returning [block value] or a block) inside the region scope REGION"
+  [region & body]
+  `(let [ss# (:source-scope (st))
+         _# (push-scope! ~region)
+         r# (do ~@body)
+         [bb# v#] (if (vector? r#) r# [r# nil])
+         bb# (pop-scope! ~region bb#)]
+     (upd! assoc :source-scope ss#)
+     [bb# v#]))
+
+(defn- blk [r] (if (vector? r) (first r) r))
+
+(defn- schedule-drop! [region local kind]
+  (let [ss (:scopes (st))
+        i (or (last (keep-indexed (fn [i s] (when (= region (:region s)) i)) ss)) (unsupported "a drop's scope" region))]
+    (when (= kind :value)
+      (doseq [j (range i (count ss))] (upd! assoc-in [:scopes j :cached] nil)))
+    (upd! update-in [:scopes i :drops] conj {:local local :kind kind})))
+
+(defn- schedule-drop-storage! [region local] (schedule-drop! region local :storage))
+(defn- schedule-drop-value! [region local] (when (needs-drop? (local-ty local)) (schedule-drop! region local :value)))
+
+(defn- record-operands-moved! [ops]
+  (let [i (dec (count (:scopes (st)))) s (nth (:scopes (st)) i)]
+    (doseq [o ops :when (and (= :move (first o)) (empty? (:proj (second o))))]
+      (let [l (:local (second o))]
+        (when (some #(and (= l (:local %)) (= :value (:kind %))) (:drops s))
+          (upd! update-in [:scopes i :moved] conj l))))))
+
+(defn- local-scope [] (:region (peek (:scopes (st)))))
+
+(defn- build-exit-tree!
+  "build_exit_tree: the exits' drop tree into blocks; the root's block (or nil)"
+  [tree else-region continue-block]
+  (let [blocks (build-drop-tree-mir! tree :exit continue-block)]
+    (when (some #(= :value (:kind %)) (:nodes tree))
+      (let [ut (diverge-cleanup-target! else-region)
+            idx (atom [ut])]
+        (doseq [i (range 1 (count (:nodes tree)))]
+          (let [node (nth (:nodes tree) i)]
+            (if (= :value (:kind node))
+              (let [[t j] (add-drop (:unwind (st)) node (nth @idx (:next node)))]
+                (upd! assoc :unwind t)
+                (upd! update :unwind add-entry (nth blocks i) (nth @idx (:next node)))
+                (swap! idx conj j))
+              (swap! idx conj (nth @idx (:next node))))))))
+    (nth blocks 0)))
+
+(defn- in-breakable-scope [loop-block dest f]
+  (let [region (local-scope)]
+    (upd! update :breakables conj {:region region :dest dest :break (drop-tree) :continue (when loop-block (drop-tree))})
+    (let [normal (f)
+          bs (peek (:breakables (st)))]
+      (upd! update :breakables pop)
+      (let [brk (build-exit-tree! (:break bs) region nil)]
+        (when (:continue bs) (build-exit-tree! (:continue bs) region loop-block))
+        (cond (and normal (nil? brk)) normal
+              (and (nil? normal) brk) brk
+              (and (nil? normal) (nil? brk)) (start-new-block!)
+              :else (let [t (start-new-block!)] (goto! normal t) (goto! brk t) t))))))
+
+(defn- in-if-then-scope [region f]
+  (let [prev (:if-then (st))]
+    (upd! assoc :if-then {:region region :else (drop-tree)})
+    (let [then (blk (f))
+          its (:if-then (st))]
+      (upd! assoc :if-then prev)
+      [then (or (build-exit-tree! (:else its) region nil) (start-new-block!))])))
+
+(defn- drops-above [stack-index]
+  (for [s (subvec (:scopes (st)) (inc stack-index)) d (:drops s)] d))
+
+(declare expr-into-dest)
+
+(defn- break-scope! [bb value target]
+  (let [bss (:breakables (st))
+        [bi dest] (case (first target)
+                    :return [0 (:dest (nth bss 0))]
+                    :break (let [i (or (last (keep-indexed (fn [i b] (when (= (second target) (:region b)) i)) bss)) (unsupported "a break target"))]
+                             [i (:dest (nth bss i))])
+                    :continue [(or (last (keep-indexed (fn [i b] (when (= (second target) (:region b)) i)) bss)) (unsupported "a continue target")) nil])
+        bb (cond (and dest value) (do (upd! update :block-context conj :sub-expr)
+                                      (let [b (blk (expr-into-dest dest bb value))] (upd! update :block-context pop) b))
+                 dest (do (assign! bb dest (use-rv unit-const)) bb)
+                 :else bb)
+        region (:region (nth (:breakables (st)) bi))
+        si (scope-index region)
+        k (if dest :break :continue)
+        [tree idx] (reduce (fn [[t i] d] (add-drop t d i)) [(get-in (st) [:breakables bi k]) 0] (drops-above si))]
+    (upd! assoc-in [:breakables bi k] (add-entry tree bb idx))
+    (terminate! bb '(resume))
+    (start-new-block!)))
+
+(defn- break-for-else! [bb]
+  (let [its (:if-then (st))
+        si (scope-index (:region its))
+        [tree idx] (reduce (fn [[t i] d] (add-drop t d i)) [(:else its) 0] (drops-above si))]
+    (upd! assoc-in [:if-then :else] (add-entry tree bb idx))
+    (terminate! bb '(resume))))
+
+(defn- new-source-scope! []
+  (let [n (count (:source-scopes (st)))] (upd! update :source-scopes conj [(:source-scope (st)) nil]) n))
+
+(defn- assert! [bb cond expected msg]
+  (let [ok (start-new-block!)]
+    (terminate! bb (list 'assert (op-form cond) expected msg ok '(continue)))
+    (diverge-from! bb)
+    ok))
+
+(defn- get-unit-temp! []
+  (or (:unit-temp (st)) (let [p (temp! unit-ty)] (upd! assoc :unit-temp p) p)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Expressions (expr/*.rs)
+
+(defn- category [x]
+  (case (:k x)
+    :scope nil
+    (:field :deref :index :var-ref) :place
+    (:logical :match :if :let :never-to-any :use :adt :borrow :raw-borrow :call :loop :block :break :continue :return) :into
+    (:array :tuple :unary :binary :cast :pointer-coercion :repeat :assign :assign-op) :rvalue
+    (:literal :zst-literal :named-const) :constant))
+
+(declare ast-block-stmts primary-bindings then-else-break-default as-operand as-temp as-place as-rvalue stmt-expr then-else-break match-expr expr-into-pattern declare-bindings
+         storage-live-binding! schedule-drop-for-binding!)
+
+(defn- var-local [id] (or (get (:var-indices (st)) id) (unsupported "a variable" id)))
+
+(defn- expr-as-place [bb x mutability]
+  (case (:k x)
+    :scope (in-scope (:region x) (expr-as-place bb (:value x) mutability))
+    :field (let [[bb pb] (expr-as-place bb (:lhs x) mutability)
+                 lt (:ty (:lhs x))
+                 pb (if (and (= :adt (first lt)) (tc/enum? (second lt))) (project pb [:downcast nil (:variant x) lt]) pb)]
+             [bb (project pb [:field (:name x) (:ty x)])])
+    :deref (let [[bb pb] (expr-as-place bb (:arg x) mutability)] [bb (project pb [:deref])])
+    :index (let [[bb base] (expr-as-place bb (:lhs x) mutability)
+                 [bb idx] (as-temp bb (temporary-scope (:tsi (:index x))) (:index x) :not)
+                 bt (place-ty base)
+                 len (case (first bt)
+                       :array (do (push! bb (list 'fake-read "ForIndex" (place-form base)))
+                                  (let [n (c/print-const (nth bt 2))] [:const (str "const " n "_usize") usize-ty (list 'scalar (parse-long n) 8)]))
+                       (unsupported "an index of" bt))
+                 lt (temp! bool-ty)]
+             (assign! bb lt (list 'binop "Lt" (op-form [:copy (place idx)]) (op-form (to-copy len))))
+             (let [bb (assert! bb [:move lt] true (list 'bounds-check (op-form len) (op-form [:copy (place idx)])))]
+               [bb (project base [:index idx])]))
+    :var-ref [bb (place (var-local (:id x)))]
+    (let [[bb t] (as-temp bb (temporary-scope (:tsi x)) x mutability)] [bb (place t)])))
+
+(defn as-place [bb x] (expr-as-place bb x :mut))
+(defn- as-read-only-place [bb x] (expr-as-place bb x :not))
+
+(defn- in-block-tail? [] (= :tail (peek (:block-context (st)))))
+
+(defn as-temp [bb temp-lifetime x mutability]
+  (if (= :scope (:k x))
+    (let [[bb v] (in-scope (:region x) (as-temp bb temp-lifetime (:value x) mutability))] [bb v])
+    (let [t (new-local! (:ty x) :mut (not= mutability :not))]
+      (when-not (or (#{:break :continue :return} (:k x))
+                    (and (= :block (:k x)) (nil? (:expr (:block x))) (not (:targeted-by-break (:block x))) (= [:never] (:ty x))))
+        (push! bb (list 'storage-live t))
+        (when temp-lifetime (schedule-drop-storage! temp-lifetime t)))
+      (let [bb (blk (expr-into-dest (place t) bb x))]
+        (when temp-lifetime (schedule-drop-value! temp-lifetime t))
+        [bb t]))))
+
+(defn as-operand [bb scope x & [needs-temp]]
+  (if (= :scope (:k x))
+    (in-scope (:region x) (as-operand bb scope (:value x) needs-temp))
+    (case (category x)
+      :constant (if (or (= needs-temp :no) (not (needs-drop? (:ty x))))
+                  [bb (as-constant x)]
+                  (let [[bb t] (as-temp bb scope x :mut)] [bb [:move (place t)]]))
+      (let [[bb t] (as-temp bb scope x :mut)] [bb [:move (place t)]]))))
+
+(defn- as-local-operand [bb x] (as-operand bb (local-scope) x :maybe))
+(defn- as-local-call-operand [bb x] (as-operand bb (local-scope) x :maybe))
+
+(defn- min-const [t] (int-const (- (pow2 (dec (int-bits (second t))))) t))
+
+(defn- build-binary-op [bb op ty lhs rhs]
+  (let [co (:check-overflow (st))]
+    (cond
+      (and (#{"Add" "Sub" "Mul"} op) co (integral? ty))
+      (let [res (temp! [:tuple [ty bool-ty]])]
+        (assign! bb res (list 'binop (str op "WithOverflow") (op-form (to-copy lhs)) (op-form (to-copy rhs))))
+        (let [bb (assert! bb [:move (project res [:field 1 bool-ty])] false (list 'overflow op (op-form lhs) (op-form rhs)))]
+          [bb (use-rv [:move (project res [:field 0 ty])])]))
+      (and (#{"Shl" "Shr"} op) co (integral? ty))
+      (let [rt (case (first rhs) :const (nth rhs 2) (place-ty (second rhs)))
+            [bb urhs uty] (if (= :uint (first rt))
+                            [bb (to-copy rhs) rt]
+                            (let [ut [:uint (str "u" (subs (second rt) 1))] tmp (temp! ut)]
+                              (assign! bb tmp (list 'cast "IntToInt" (op-form (to-copy rhs)) (ty-form ut)))
+                              [bb [:move tmp] ut]))
+            bits (int-const (int-bits (second ty)) uty)
+            inb (temp! bool-ty)]
+        (assign! bb inb (list 'binop "Lt" (op-form urhs) (op-form bits)))
+        (let [bb (assert! bb [:move inb] true (list 'overflow op (op-form (to-copy lhs)) (op-form (to-copy rhs))))]
+          [bb (list 'binop op (op-form lhs) (op-form rhs))]))
+      (and (#{"Div" "Rem"} op) (integral? ty))
+      (let [zero-err (if (= op "Div") (list 'div-zero (op-form (to-copy lhs))) (list 'rem-zero (op-form (to-copy lhs))))
+            of-err (list 'overflow op (op-form (to-copy lhs)) (op-form (to-copy rhs)))
+            isz (temp! bool-ty)]
+        (assign! bb isz (list 'binop "Eq" (op-form (to-copy rhs)) (op-form (int-const 0 ty))))
+        (let [bb (assert! bb [:move isz] false zero-err)
+              bb (if (signed? ty)
+                   (let [n1 (temp! bool-ty) mn (temp! bool-ty) of (temp! bool-ty)]
+                     (assign! bb n1 (list 'binop "Eq" (op-form (to-copy rhs)) (op-form (int-const -1 ty))))
+                     (assign! bb mn (list 'binop "Eq" (op-form (to-copy lhs)) (op-form (min-const ty))))
+                     (assign! bb of (list 'binop "BitAnd" (op-form [:move n1]) (op-form [:move mn])))
+                     (assert! bb [:move of] false of-err))
+                   bb)]
+          [bb (list 'binop op (op-form lhs) (op-form rhs))]))
+      :else [bb (list 'binop op (op-form lhs) (op-form rhs))])))
+
+(defn- cast-kind [from to]
+  (cond (and (integral? from) (integral? to)) "IntToInt"
+        (and (= :bool (first from)) (integral? to)) "IntToInt"
+        (and (= :char (first from)) (integral? to)) "IntToInt"
+        (and (integral? from) (= :float (first to))) "IntToFloat"
+        (and (= :float (first from)) (integral? to)) "FloatToInt"
+        (and (= :float (first from)) (= :float (first to))) "FloatToFloat"
+        (and (= :ptr (first from)) (= :ptr (first to))) "PtrToPtr"
+        :else (unsupported "a cast" [from to])))
+
+(defn as-rvalue [bb scope x]
+  (case (:k x)
+    :scope (in-scope (:region x) (as-rvalue bb scope (:value x)))
+    :binary (let [[bb l] (as-operand bb scope (:lhs x) :maybe)
+                  [bb r] (as-operand bb scope (:rhs x) :no)]
+              (build-binary-op bb (:op x) (:ty x) l r))
+    :unary (let [[bb a] (as-operand bb scope (:arg x) :no)
+                 bb (if (and (:check-overflow (st)) (= "Neg" (:op x)) (signed? (:ty x)))
+                      (let [m (temp! bool-ty)]
+                        (assign! bb m (list 'binop "Eq" (op-form (to-copy a)) (op-form (min-const (:ty x)))))
+                        (assert! bb [:move m] false (list 'overflow-neg (op-form (to-copy a)))))
+                      bb)]
+             [bb (list 'unop (:op x) (op-form a))])
+    :cast (let [src (:source x) st* (:ty src)]
+            (if (and (= :adt (first st*)) (tc/enum? (second st*)))
+              (let [[bb t] (as-temp bb scope src :not)
+                    dt (tc/discr-ty (second st*))
+                    d (temp! dt)]
+                (assign! bb d (list 'discriminant (place-form (place t))))
+                [bb (list 'cast (cast-kind dt (:ty x)) (op-form [:move d]) (ty-form (:ty x)))])
+              (let [[bb s] (as-operand bb scope src :no)]
+                [bb (list 'cast (cast-kind st* (:ty x)) (op-form s) (ty-form (:ty x)))])))
+    :pointer-coercion (let [[bb s] (as-operand bb scope (:source x) :no)]
+                        [bb (list 'cast (str "PointerCoercion(" (:cast x) ", Implicit)") (op-form s) (ty-form (:ty x)))])
+    :array (let [[bb os] (reduce (fn [[bb os] f] (let [[bb o] (as-operand bb scope f :maybe)] [bb (conj os o)])) [bb []] (:fields x))]
+             [bb (list 'aggregate (list 'array (ty-form (second (:ty x)))) (mapv op-form os))])
+    :tuple (let [[bb os] (reduce (fn [[bb os] f] (let [[bb o] (as-operand bb scope f :maybe)] [bb (conj os o)])) [bb []] (:fields x))]
+             [bb (list 'aggregate '(tuple) (mapv op-form os))])
+    (:assign :assign-op) (let [bb (blk (stmt-expr bb x nil))] [bb (use-rv unit-const)])
+    (:literal :zst-literal :named-const) [bb (use-rv (as-constant x))]
+    ;; the rest: an operand (into a temporary)
+    (let [[bb o] (as-operand bb scope x :no)] [bb (use-rv o)])))
+
+(defn- as-local-rvalue [bb x] (as-rvalue bb (local-scope) x))
+
+(defn- adt-agg [x os]
+  (let [vid (:vid x) adt (:adt x) enum (tc/enum? adt)
+        args (nth (:ty x) 2)
+        tn (binding [c/*in-value* true] (c/print-def-path adt []))
+        nm (if enum (str tn "::" (second (:data (c/def-of vid)))) tn)
+        kind (tc/variant-ctor-kind vid)]
+    (list 'adt nm kind (mapv (comp str first) (tc/all-fields-of-variant vid))
+          (binding [c/*in-value* false] (c/print-def-path adt [])) (:variant x) (vec (for [a args] (if (c/region? a) '(lt) (ty-form a)))))))
+
+(defn expr-into-dest [dest bb x]
+  (let [scope? (#{:block :scope} (:k x))]
+    (when-not scope? (upd! update :block-context conj :sub-expr))
+    (let [r
+          (case (:k x)
+            :scope (in-scope (:region x) (expr-into-dest dest bb (:value x)))
+            :block (let [b (:block x)]
+                     (in-scope (:region b)
+                       (if (:targeted-by-break b)
+                         (in-breakable-scope nil dest (fn [] (blk (ast-block-stmts dest bb b))))
+                         (blk (ast-block-stmts dest bb b)))))
+            :match (match-expr dest bb x)
+            :if (let [then-x (:then x)
+                      cond-scope (local-scope)
+                      [[then-b else-b] _]
+                      (let [ss (:source-scope (st))
+                            _ (push-scope! (:if-then-scope x))
+                            [tb eb] (do (when (= :let (:k (:value (:cond x)))) (upd! assoc :source-scope (new-source-scope!)))
+                                        (in-if-then-scope cond-scope
+                                          (fn [] (let [tb (blk (then-else-break bb (:cond x) cond-scope))]
+                                                   (blk (expr-into-dest dest tb then-x))))))
+                            tb (pop-scope! (:if-then-scope x) tb)]
+                        (upd! assoc :source-scope ss)
+                        [[tb eb] nil])
+                      else-b (if (:else x)
+                               (blk (expr-into-dest dest else-b (:else x)))
+                               (do (assign! else-b dest (use-rv unit-const)) else-b))
+                      join (start-new-block!)]
+                  (goto! then-b join) (goto! else-b join) join)
+            :never-to-any (let [src (:source x)
+                                call? (= :call (:k (loop [s src] (if (= :scope (:k s)) (recur (:value s)) s))))
+                                [bb _] (as-temp bb (local-scope) src :mut)]
+                            (if call? bb (do (terminate! bb '(unreachable)) (start-new-block!))))
+            :logical (let [cs (local-scope)
+                           [then-b else-b] (in-if-then-scope cs (fn [] (then-else-break bb (:lhs x) cs)))
+                           [short cont c] (if (= :and (:op x)) [else-b then-b false] [then-b else-b true])]
+                       (assign! short dest (use-rv (bool-const c)))
+                       (let [rb (blk (expr-into-dest dest cont (:rhs x)))
+                             t (start-new-block!)]
+                         (goto! rb t) (goto! short t) t))
+            :loop (let [lb (start-new-block!)]
+                    (goto! bb lb)
+                    (in-breakable-scope lb dest
+                      (fn []
+                        (let [body (start-new-block!)]
+                          (terminate! lb (list 'false-unwind body '(continue)))
+                          (diverge-from! lb)
+                          (let [tmp (get-unit-temp!)
+                                end (blk (expr-into-dest tmp body (:body x)))]
+                            (goto! end lb)
+                            nil)))))
+            :call (let [[bb f] (as-local-operand bb (:fun x))
+                        [bb args] (reduce (fn [[bb as] a] (let [[bb o] (as-local-call-operand bb a)] [bb (conj as o)])) [bb []] (:args x))
+                        ok (start-new-block!)]
+                    (record-operands-moved! args)
+                    (terminate! bb (list 'call (op-form f) (mapv op-form args) (place-form dest) ok '(continue)))
+                    (diverge-from! bb)
+                    ok)
+            :use (expr-into-dest dest bb (:source x))
+            :borrow (let [[bb p] (if (= :shared (:bk x)) (as-read-only-place bb (:arg x)) (as-place bb (:arg x)))]
+                      (assign! bb dest (list 'ref (:bk x) (place-form p))) bb)
+            :raw-borrow (let [[bb p] (if (:mutbl x) (as-place bb (:arg x)) (as-read-only-place bb (:arg x)))]
+                          (assign! bb dest (list 'rawptr (if (:mutbl x) "mut" "const") (place-form p))) bb)
+            :adt (let [scope (local-scope)
+                       [bb m] (reduce (fn [[bb m] [i f]] (let [[bb o] (as-operand bb scope f :maybe)] [bb (assoc m i o)])) [bb {}] (:fields x))
+                       n (count (tc/all-fields-of-variant (:vid x)))
+                       os (keep #(get m %) (range n))]
+                   (assign! bb dest (list 'aggregate (adt-agg x os) (mapv op-form os))) bb)
+            (:assign :assign-op) (let [bb (blk (stmt-expr bb x nil))] (assign! bb dest (use-rv unit-const)) bb)
+            (:continue :break :return) (blk (stmt-expr bb x nil))
+            (:var-ref :field :deref :index)
+            (let [[bb p] (as-place bb x)] (assign! bb dest (use-rv (consume p))) bb)
+            ;; rvalues and constants
+            (let [[bb rv] (as-local-rvalue bb x)] (assign! bb dest rv) bb))]
+      (when-not scope? (upd! update :block-context pop))
+      r)))
+
+(defn stmt-expr [bb x stmt-scope]
+  (case (:k x)
+    :scope (in-scope (:region x) (blk (stmt-expr bb (:value x) stmt-scope)))
+    :assign (do (upd! update :block-context conj :sub-expr)
+                (when (needs-drop? (:ty (:lhs x))) (unsupported "an assignment that drops"))
+                (let [[bb rv] (as-local-rvalue bb (:rhs x))
+                      [bb p] (as-place bb (:lhs x))]
+                  (assign! bb p rv)
+                  (upd! update :block-context pop)
+                  bb))
+    :assign-op (do (upd! update :block-context conj :sub-expr)
+                   (let [[bb r] (as-local-operand bb (:rhs x))
+                         [bb p] (as-place bb (:lhs x))
+                         [bb rv] (build-binary-op bb (:op x) (:ty (:lhs x)) [:copy p] r)]
+                     (assign! bb p rv)
+                     (upd! update :block-context pop)
+                     bb))
+    :continue (break-scope! bb nil [:continue (:label x)])
+    :break (break-scope! bb (:value x) [:break (:label x)])
+    :return (break-scope! bb (:value x) [:return])
+    (let [tail-adjust (when (= :block (:k x)) (:expr (:block x)))]
+      (when tail-adjust (upd! update :block-context conj :tail-ignored))
+      (let [[bb _] (as-temp bb stmt-scope x :not)]
+        (when tail-adjust (upd! update :block-context pop))
+        bb))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Blocks (block.rs)
+
+(defn- ast-block-stmts [dest bb b]
+  (let [outer (:source-scope (st))
+        lets (atom [])
+        bb (reduce
+            (fn [bb s]
+              (case (:k s)
+                :expr (do (upd! update :block-context conj :stmt)
+                          (let [bb (blk (in-scope (:scope s) (stmt-expr bb (:expr s) (:scope s))))]
+                            (upd! update :block-context pop) bb))
+                :let (do
+                       (when (:else s) (unsupported "let-else"))
+                       (upd! update :block-context conj :stmt)
+                       (push-scope! (:remainder s))
+                       (swap! lets conj (:remainder s))
+                       (let [vis (new-source-scope!)
+                             bb (if-let [init (:init s)]
+                                  (blk (in-scope (:init-scope s)
+                                         (declare-bindings vis (:pattern s))
+                                         (expr-into-pattern bb (:pattern s) init)))
+                                  (do (in-scope (:init-scope s) (declare-bindings vis (:pattern s)) bb)
+                                      (doseq [p (primary-bindings (:pattern s))]
+                                        (storage-live-binding! bb (:var p))
+                                        (schedule-drop-for-binding! (:var p)))
+                                      bb))]
+                         (upd! assoc :source-scope vis)
+                         (upd! update :block-context pop)
+                         bb))))
+            bb (:stmts b))
+        dty (place-ty dest)
+        bb (if-let [x (:expr b)]
+             (do (upd! update :block-context conj :tail)
+                 (let [bb (blk (expr-into-dest dest bb x))] (upd! update :block-context pop) bb))
+             (do (when (= unit-ty dty) (assign! bb dest (use-rv unit-const))) bb))
+        bb (reduce (fn [bb r] (pop-scope! r bb)) bb (rseq @lets))]
+    (upd! assoc :source-scope outer)
+    bb))
+
+;; ---------------------------------------------------------------------------------------------
+;; Bindings and patterns (matches/mod.rs)
+
+(defn- walk-pat [p f]
+  (when p
+    (f p)
+    (case (:k p)
+      :binding (walk-pat (:sub p) f)
+      (:leaf :variant) (doseq [[_ sp] (:subpatterns p)] (walk-pat sp f))
+      :deref (walk-pat (:sub p) f)
+      :or (walk-pat (first (:pats p)) f)
+      nil)))
+
+(defn- primary-bindings [p] (let [acc (atom [])] (walk-pat p #(when (= :binding (:k %)) (swap! acc conj %))) @acc))
+
+(defn- binding-local-ty [p] (case (:by-ref p) :not [:ref [:re-erased] false (:ty p)] :mut [:ref [:re-erased] true (:ty p)] (:ty p)))
+
+(defn declare-bindings [vis pattern]
+  (doseq [p (primary-bindings pattern)]
+    (let [l (new-local! (:ty p) :mut (:mutbl p) :scope (:source-scope (st)))]
+      (upd! update :debug conj {:name (:name p) :scope vis :value (place-form (place l))})
+      (upd! assoc-in [:var-indices (:var p)] l)))
+  vis)
+
+(defn storage-live-binding! [bb var]
+  (let [l (var-local var)]
+    (push! bb (list 'storage-live l))
+    (when-let [r (var-scope var)] (schedule-drop-storage! r l))
+    (place l)))
+
+(defn schedule-drop-for-binding! [var]
+  (when-let [r (var-scope var)] (schedule-drop-value! r (var-local var))))
+
+(declare lower-match-tree bind-pattern)
+
+(defn expr-into-pattern [bb pat init]
+  (if (and (= :binding (:k pat)) (= :no (:by-ref pat)) (nil? (:sub pat)))
+    (let [p (storage-live-binding! bb (:var pat))
+          bb (blk (expr-into-dest p bb init))]
+      (push! bb (list 'fake-read "ForLet(None)" (place-form p)))
+      (schedule-drop-for-binding! (:var pat))
+      bb)
+    (unsupported "a let with a pattern")))
+
+(defn then-else-break [bb x temp-scope]
+  (case (:k x)
+    :logical (if (= :and (:op x))
+               (let [lb (blk (then-else-break bb (:lhs x) temp-scope))] (blk (then-else-break lb (:rhs x) temp-scope)))
+               (let [ls (local-scope)
+                     [lok fail] (in-if-then-scope ls (fn [] (then-else-break bb (:lhs x) temp-scope)))
+                     rok (blk (then-else-break fail (:rhs x) temp-scope))
+                     ok (start-new-block!)]
+                 (goto! lok ok) (goto! rok ok) ok))
+    :unary (if (= "Not" (:op x))
+             (let [ls (local-scope)
+                   [ok fail] (in-if-then-scope ls (fn [] (then-else-break bb (:arg x) temp-scope)))]
+               (break-for-else! ok)
+               fail)
+             (then-else-break-default bb x temp-scope))
+    :scope (blk (in-scope (:region x) (then-else-break bb (:value x) temp-scope)))
+    :use (then-else-break bb (:source x) temp-scope)
+    :let (unsupported "if let")
+    (then-else-break-default bb x temp-scope)))
+
+(defn- then-else-break-default [bb x temp-scope]
+  (let [ts (or temp-scope (local-scope))
+        [bb t] (as-temp bb ts x :mut)
+        then-b (start-new-block!)
+        else-b (start-new-block!)]
+    (terminate! bb (list 'switch (op-form [:move (place t)]) [[0 else-b]] then-b))
+    (break-for-else! else-b)
+    then-b))
+
+(defn match-expr [dest bb x] (unsupported "match"))
+
+;; ---------------------------------------------------------------------------------------------
+;; Bodies (mod.rs: construct_fn, args_and_body)
+
+(defn- finish
+  "Builder::finish: the body map in MIR forms"
+  [d name kind n-args ret]
+  (let [s (st)]
+    {:name name :kind kind :args n-args :ret (ty-form ret)
+     :locals (mapv (fn [l] {:mut (:mut l) :scope (:scope l) :ty (ty-form (:ty l))}) (:locals s))
+     :scopes (:source-scopes s)
+     :debug (:debug s)
+     :blocks (mapv (fn [b] {:cleanup (:cleanup b) :stmts (:stmts b) :after-dbg [] :term (:term b)}) (:blocks s))
+     :allocs ""}))
+
+(defn build-body
+  "construct_fn over a function's HIR and its type-check results (within collect/with-crate)"
+  [d opts]
+  (let [n (:node d)
+        res (tc/body-results d)
+        sig (tc/erased-sig (:id d))
+        ret (:output sig)
+        name (binding [c/*in-value* true] (c/print-def-path (:id d) []))
+        body-expr {:node :expr :kind :block :block (:body n) :span (:span (:body n)) :hir-id [(first (:hir-id n)) :body]}
+        res (assoc res (:hir-id body-expr) {:ty ret})
+        pats (map :pat (:params n))]
+    (tc/with-solver d
+      (fn []
+        (binding [*edition* (or (:edition opts) 2024)
+                  *res* res
+                  *tree* (binding [*edition* (or (:edition opts) 2024)] (scope-tree pats body-expr))
+                  *b* (atom {:blocks [] :locals [{:ty ret :mut true :scope 0}] :source-scopes [] :source-scope 0 :debug []
+                             :scopes [] :breakables [] :if-then nil :unwind (drop-tree) :var-indices {} :unit-temp nil
+                             :block-context [] :check-overflow (boolean (:overflow-checks opts))})]
+          (let [thir-body (binding [*edition* (or (:edition opts) 2024)] (mirror-expr (assoc-in body-expr [:block :hir-id] (:hir-id (:body n)))))
+                params (mapv (fn [p t] {:pat (lower-pattern (:pat p)) :ty t}) (:params n) (:inputs sig))]
+            (start-new-block!)
+            (upd! update :source-scopes conj [nil nil])
+            (let [call-site [(:hir-id body-expr) :call-site]
+                  arg-scope [(:hir-id body-expr) :arguments]]
+              (in-scope call-site
+                (let [ret-block
+                      (in-breakable-scope nil (place 0)
+                        (fn []
+                          (blk (in-scope arg-scope
+                                 ;; args_and_body
+                                 (doseq [[i p] (map-indexed vector params)]
+                                   (let [l (new-local! (:ty p) :mut false)]
+                                     (when (and (= :binding (:k (:pat p))) (nil? (:sub (:pat p))))
+                                       (upd! update :debug conj {:name (:name (:pat p)) :scope 0 :value (place-form (place l))}))))
+                                 (let [scope (atom nil) bb (atom 0)]
+                                   (doseq [[i p] (map-indexed vector params)]
+                                     (let [l (inc i) pat (:pat p)]
+                                       (schedule-drop-value! arg-scope l)
+                                       (cond (and (= :binding (:k pat)) (= :no (:by-ref pat)) (nil? (:sub pat)))
+                                             (do (upd! assoc-in [:locals l :mut] (:mutbl pat))
+                                                 (upd! assoc-in [:var-indices (:var pat)] l))
+                                             (= :wild (:k pat)) nil
+                                             :else (unsupported "a parameter pattern"))))
+                                   (blk (expr-into-dest (place 0) @bb thir-body)))))))]
+                  (terminate! ret-block '(return))
+                  ;; build_drop_trees: the unwind tree, its root a resume block
+                  (let [blocks (build-drop-tree-mir! (:unwind (st)) :unwind nil)]
+                    (when-let [r (nth blocks 0)] (terminate! r '(resume))))
+                  ret-block)))
+            (finish d name :fn (count params) ret)))))))
