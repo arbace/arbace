@@ -64,6 +64,10 @@ END {
       if (key == "stderr" && val == "/dev/null") { env = env " @stderr=null"; continue }
       if (key == "ocamlopt_flags" || key == "reason" || key == "exit_status" || key == "binary_modules") continue
       if (key == "arguments") { args = val; continue }
+      # the program's own C stubs (the C API on ci, doc/ocaml/OCAML-SURVEY.md "As built: the C API on ci"): modules that are all C
+      # files of the test's directory, built by ci beside the program (bin/oi's cstubs_nodes, the run's @cstubs=FILE,...); at the AOT
+      # levels (-v aot=1) the class it was
+      if (key == "modules" && aot != 1 && val ~ /^[A-Za-z0-9_.]+\.c( +[A-Za-z0-9_.]+\.c)*$/) { cs = val; csclass = key " = " val; gsub(/ +/, ",", cs); env = env " @cstubs=" cs; continue }
       if (key == "ocamlrunparam") { print "class\theader: ocamlrunparam " val; exit }
       print "class\theader: " key " = " val; exit
     }
@@ -87,9 +91,14 @@ END {
     # a later alternative that skips (lib-threads' "{ include systhreads; hassysthreads; }{ reason = ...; skip; ... }"): the run is the
     # first alternative's, read up to here (OT9's fifth fix); a test whose only branch skips stays a class
     if (s == "skip" && incs != "") break
+    if (s == "bytecode") sawbyte = 1
+    if (s == "native") sawnative = 1
     if (s == "bytecode" || s == "native" || s == "no-tsan" || s == "not-target-windows" || s == "multicore" || s == "native-compiler" || s == "arch64" || s == "not-macos" || s == "no-flambda" || s == "linux" || s == "not-windows" || s == "not-bsd" || s == "not_macos_amd64_tsan" || s == "hasunix" || s == "hassysthreads" || s == "hasstr") continue
     print "class\theader: " s; exit
   }
   if (args ~ /\$VAR/) { print "class\theader: arguments = " args; exit }
+  # a test of C stubs that runs only native (int64-unboxing: its externals' bytecode names are "", the unboxed native ones the C's)
+  # stays its class: oi calls an external by its bytecode name
+  if (csclass != "" && sawnative && !sawbyte) { print "class\theader: " csclass; exit }
   print "run\t" trim(flags) "\t" trim(incs) "\t" args "\t" trim(env)
 }

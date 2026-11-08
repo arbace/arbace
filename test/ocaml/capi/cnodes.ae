@@ -1,0 +1,34 @@
+;; bin/oi cnodes OUT [OPTION...] FILE... (doc/ocaml/OCAML-SURVEY.md, "As built: the C API on ci"): a test's C stubs read by
+;; repr/c, checked by ci's checker and linked with oi's C runtime (test/ocaml/capi/runtime.c, over Arbace's own caml/*.h in
+;; test/ocaml/capi/include) and what they need of musl (ci's prebuilt runtime, arbace.c.runtime/link-text) into one node
+;; program, OUT, which oi run loads into go/arbace/ci beside the program (OI_CSTUBS, go/arbace/oicapi). A main of nothing
+;; (test/ocaml/capi/main.c) is linked when the stubs have none: oi initializes musl itself and calls no main. The target is
+;; ARBACE_C_HOST's (bin/oi sets Arbace's own, c/target, with its sysroot). Run on the tools' host from the checkout (as
+;; test/haskell/eval/cnodes.ae, whose shape this follows); the exit status 0, else 1 with ci's reason on the standard error.
+(require '[arbace.c.run :as run]
+         '[arbace.c.runtime :as rt]
+         '[arbace.c.musl :as musl]
+         '[arbace.repr.c.host :as host]
+         '[arbace.string :as str])
+
+(let [[root out & args] *command-line-args*
+      h (host/load-host (or (System/getenv "ARBACE_C_HOST") (str root "/c/target")))
+      inc (str "-I" root "/test/ocaml/capi/include")
+      opts (into [inc] (for [a args :when (re-find #"^-(I|D|U|std=)" a)] a))
+      files (vec (remove #(str/starts-with? % "-") args))
+      base (System/getProperty "user.dir")
+      us (mapv #(run/read-unit h opts base %) files)
+      bad (first (remove #(= :ok (:status %)) us))
+      fail (fn [msg] (binding [*out* *err*] (println msg)) (System/exit 1))]
+  (when bad (fail (str (name (:status bad)) ": " (:message bad))))
+  (let [has-main (some #(contains? (musl/unit-defs (:forms (:rd %))) "main") us)
+        glue (cond-> [(run/read-unit h [inc] base (str root "/test/ocaml/capi/runtime.c"))]
+               (not has-main) (conj (run/read-unit h [] base (str root "/test/ocaml/capi/main.c"))))
+        _ (when-let [b (first (remove #(= :ok (:status %)) glue))] (fail (str "runtime: " (name (:status b)) ": " (:message b))))
+        lib (rt/library h root)
+        r (try {:text (rt/link-text lib (into us glue))}
+               (catch arbace.lang.ExceptionInfo e
+                 {:refused (or (:ci/refused (ex-data e)) :error) :message (.getMessage e)}))]
+    (if (:text r)
+      (do (spit out (:text r)) (System/exit 0))
+      (fail (str "refused (" (name (:refused r)) "): " (:message r))))))

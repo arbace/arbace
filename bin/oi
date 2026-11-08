@@ -206,7 +206,8 @@ inc_ref() {
 run_redirected() {
   local e=$1 out=$2 kv i=0 n=0; shift 2
   local v=()
-  for kv in $e; do case $kv in @stdin=null) i=1 ;; @stderr=null) n=1 ;; *) v+=("$kv") ;; esac; done
+  # (@cstubs=FILES: the program's C stubs, the runner's own concern: oi_one's cstubs_nodes)
+  for kv in $e; do case $kv in @stdin=null) i=1 ;; @stderr=null) n=1 ;; @cstubs=*) ;; *) v+=("$kv") ;; esac; done
   [ $i = 1 ] && : > "$out.stdin"
   # (a subshell exports the variables: CMD may be a shell function)
   case $i$n in
@@ -240,7 +241,28 @@ complib_need() {
   for m in $COMPLIB_UNITS; do M="$(echo "${m:0:1}" | tr a-z A-Z)${m:1}"; [ -n "${seen[$M]:-}" ] && echo "$COMPLIB/$M.ae"; done
   return 0
 }
-export -f inc_I inc_units inc_dirs lib_missing inc_ref dump_required complib_need run_redirected env_vars
+# cstubs_nodes DIR FILES: the node program of a test's C stubs (FILES, comma-separated, in DIR) linked with oi's C runtime and musl by
+# test/ocaml/capi/cnodes.ae on the tools' host (the C API on ci), in .tmp/oi/cstubs/KEY.nodes, KEY the stubs', the runtime's and the
+# headers' sources and the target's; built once (a lock around the build: jobs of one check share it); its path on stdout
+cstubs_nodes() {
+  local dir=$1 files k out f
+  files=$(echo "$2" | tr ',' ' ')
+  k=$( { for f in $files; do sha256sum < "$dir/$f"; done
+         (cd "$root" && find test/ocaml/capi -type f | LC_ALL=C sort | xargs sha256sum); echo "${ARBACE_C_TARGET:-arbace}"; } | sha256sum | cut -c1-20)
+  out=$OI_DIR/cstubs/$k.nodes
+  mkdir -p "$OI_DIR/cstubs"
+  (
+    flock 8
+    if [ ! -s "$out" ]; then
+      "$root/bin/ci" musl ensure > "$OI_DIR/cstubs/$k.musl.log" 2>&1 || { cat "$OI_DIR/cstubs/$k.musl.log" >&2; exit 1; }
+      ( . "$root/bin/lib/repr-c/sysroot.bash"; c_sysroot || exit 1
+        cd "$dir" && ARBACE_PATH=$root "$(arbace_exe)" "$root/test/ocaml/capi/cnodes.ae" "$root" "$out.new" $files ) || exit 1
+      mv "$out.new" "$out"
+    fi
+  ) 8> "$OI_DIR/cstubs/build.lock" || return 1
+  echo "$out"
+}
+export -f inc_I inc_units inc_dirs lib_missing inc_ref dump_required complib_need run_redirected env_vars cstubs_nodes
 
 # oi's own level runs a program under limited_cpu: TIMEOUT seconds of CPU and a wall cap of four times that, as o2j_cpu (re-review 042's finding 1:
 # twice was a load band: a program needing more than half the cap in CPU timed out on a host slowed twofold)
@@ -578,7 +600,9 @@ forms_key() {
   if [ -n "${OI_GO_SRC:-}" ]; then
     find "$OI_GO_SRC" -name '*.go' -not -name '*_test.go' | LC_ALL=C sort | xargs sha256sum | sha256sum | cut -d' ' -f1
   else
-    { find "$root/go/arbace/oi" "$root/test/ocaml/oi" -type f | LC_ALL=C sort | xargs sha256sum; sha256sum "$root/go/arbace/oi.ae"; } | sha256sum | cut -d' ' -f1
+    # the C API (go/arbace/oicapi) and ci's back end it loads the stubs into (go/arbace/ci, go/arbace/crt) are the driver's too
+    { find "$root/go/arbace/oi" "$root/go/arbace/oicapi" "$root/go/arbace/ci" "$root/go/arbace/crt" "$root/test/ocaml/oi" -type f | LC_ALL=C sort | xargs sha256sum
+      sha256sum "$root/go/arbace/oi.ae" "$root/go/arbace/oicapi.ae" "$root/go/arbace/ci.ae" "$root/go/arbace/crt.ae"; } | sha256sum | cut -d' ' -f1
   fi
 }
 
@@ -587,15 +611,20 @@ cmd_build() {
   local key; key=$(forms_key)
   if [ -x "$EXE" ] && [ "$(cat "$OI_DIR/bin/key" 2>&1)" = "$key" ]; then return 0; fi
   local mod=$OI_DIR/mod
-  rm -rf "$mod"; mkdir -p "$mod/oi/cmd/oi"
+  rm -rf "$mod"; mkdir -p "$mod/oi/cmd/oi" "$mod/oicapi" "$mod/ci" "$mod/crt"
   printf 'module arbace\n\ngo 1.27\n' > "$mod/go.mod"
   if [ -n "${OI_GO_SRC:-}" ]; then
     cp "$OI_GO_SRC"/oi/*.go "$mod/oi/"; rm -f "$mod"/oi/*_test.go
     cp "$OI_GO_SRC"/oi/cmd/oi/*.go "$mod/oi/cmd/oi/"
+    for p in oicapi ci crt; do cp "$OI_GO_SRC/$p"/*.go "$mod/$p/"; rm -f "$mod/$p"/*_test.go; done
   else
     local exe; exe=$(arbace_exe)
     ARBACE_HOST_EXE=$exe GOMAXPROCS=4 "$root/bin/repr-go" print "$root/go/arbace/oi.ae" "$mod/oi" > "$OI_DIR/print.log" 2>&1 || { cat "$OI_DIR/print.log" >&2; die "print go/arbace/oi"; }
     ARBACE_HOST_EXE=$exe GOMAXPROCS=4 "$root/bin/repr-go" print "$root/test/ocaml/oi/cmd.ae" "$mod/oi/cmd/oi" >> "$OI_DIR/print.log" 2>&1 || { cat "$OI_DIR/print.log" >&2; die "print the driver"; }
+    local p
+    for p in oicapi ci crt; do
+      ARBACE_HOST_EXE=$exe GOMAXPROCS=4 "$root/bin/repr-go" print "$root/go/arbace/$p.ae" "$mod/$p" >> "$OI_DIR/print.log" 2>&1 || { cat "$OI_DIR/print.log" >&2; die "print go/arbace/$p"; }
+    done
   fi
   mkdir -p "$mod/oi/testdata"; cp "$root/test/ocaml/oi/testdata/"* "$mod/oi/testdata/"
   (cd "$mod" && GOCACHE=$OI_DIR/gocache GOFLAGS=-p=4 GOMAXPROCS=4 CGO_ENABLED=0 GOTOOLCHAIN=local GOENV=off "$GO" build -trimpath -o "$EXE" ./oi/cmd/oi) || die "go build"
@@ -666,7 +695,8 @@ cmd_corpus() {
   for r in $(cd "$TESTS" && find . -name '*.reference' | LC_ALL=C sort); do
     b=${r#./}; b=${b%.reference}
     [ -f "$TESTS/$b.ml" ] || continue
-    h=$(awk -f "$root/bin/lib/oi/header.awk" "$TESTS/$b.ml")
+    # (the AOT levels read a test with C stubs as its class: the C API is oi's alone, the light and compiled levels' runtime has none)
+    h=$(awk -v aot="${AOT:-0}" -f "$root/bin/lib/oi/header.awk" "$TESTS/$b.ml")
     # a program header.awk classes that the suite's reading runs (modules, readonly data files) is the suite corpus's alone (OT9's third
     # fix): one row a program across the two corpora, the REAP cell counting it once
     case $h in class*) case $(awk -f "$root/bin/lib/oi/actions.awk" "$TESTS/$b.ml") in run*) continue ;; esac ;; esac
@@ -777,6 +807,16 @@ oi_one() {
   units=$(inc_units "$incs" "$d/$u.ae" | tr '\n' ' ')
   local miss; miss=$(lib_missing $units)
   if [ -n "$miss" ]; then printf '%s\t-\t-\t0\t0\tdump: typer: %s\n' "$id" "$miss"; return; fi
+  # the program's own C stubs: their node program built by ci (cached by the sources' key), loaded by oi beside the program
+  local cs="" kv
+  for kv in $env; do case $kv in @cstubs=*) cs=${kv#@cstubs=} ;; esac; done
+  if [ -n "$cs" ]; then
+    local nodes
+    if ! nodes=$(cstubs_nodes "$(dirname "$TESTS/$id")" "$cs" 2> "$d/cnodes.err"); then
+      printf '%s\t-\t-\t0\t0\tcstubs: %s\n' "$id" "$(grep -v '^Reflection\|^Auto-boxing\|recur arg' "$d/cnodes.err" | tail -1 | head -c 200 | tr '\t' ' ')"; return
+    fi
+    env="$env OI_CSTUBS=$nodes"
+  fi
   local st=0 t0 t1
   t0=$(date +%s.%N); times > "$d/cpu0"
   local lib=$LIB; [ "${NATIVE:-0}" = 1 ] && lib=${LIB_NATIVE:-$LIB}
