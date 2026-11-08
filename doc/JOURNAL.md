@@ -891,3 +891,31 @@ compiles a command line's C before its Haskell, checked by hand) or the `_ghci` 
   after the night's record; `runtime check`, `own-verdicts --check`, hsi-essential's command 123 of 123.
 - Proposed: HES84 (the threaded ways' references and `hs_exit`'s shutdown), HES85 (nofib's C in record-ref). Details and the
   night's commands: doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: HES83 (write-ahead)".
+## 2026-11-08: ocamllex ported, compiler-libs typed natively, OC185's switch prepared (branch `ocaml-lex`, from next bd33e27cc)
+
+By the brief's recommended items (OC186 (a), OC188 (a), OC185 (a) decided 2026-11-07), depth first, under the day's light rules (doc/ocaml/
+OCAML-SURVEY.md, "As built: ocamllex ported (OC186 (a)), compiler-libs typed natively (OC188 (a)), OC185's switch prepared").
+
+- **ocamllex** (`arbace/repr/ocaml/ocamllex.ae`): OCaml 5.5.0's `lex/` (the release tarball https://caml.inria.fr/pub/distrib/ocaml-5.5/
+  ocaml-5.5.0.tar.xz, SHA-256 fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba: lexer.mll, parser.mly, cset.ml, table.ml,
+  lexgen.ml, compact.ml, common.ml, output.ml, main.ml) and stdlib/set.ml's AVL trees ported by hand, rule for rule (LGPL 2.1 with the
+  linking exception: LICENSE.md, doc/ARBACE.md). The tree shapes of Set matter: a union keeps one of two equal identifiers by height, and its
+  location is printed; OCaml's evaluation orders matter too (a constructor's arguments right to left, `let ... and` left to right). The
+  parser is a shift-reduce on ocamlyacc's precedences, with ocamlyacc's default reduction of `regexp: Tident` before the lookahead (found by
+  400 mutants against the host's ocamllex: 399 equal before, 400 after). `bin/repr-ocaml ocamllex`, `ocamllex-check` (29 .mll: the tarball's
+  18, the opam set's 3, 8 samples of `test/ocaml/ocamllex/`; byte for byte the host's ocamllex 5.5.0's outputs and messages, recorded in
+  `test/ocaml/ocamllex-expected.edn` by `--host --record`; a negative control), in `ocaml-read-essential`. `-ml` (outputbis.ml) not ported:
+  its order is OCaml's Hashtbl's (OC191). Alternatives considered: committing ocamllex's `lexer.ml` (OC186 (c), a toolchain record), running
+  lex/ on oi (OC186 (b), it needs a lexer generator to bootstrap).
+- **bin/oi**: compiler-libs' `lexer.ml` from the native ocamllex (`OI_OCAMLLEX=host` the host's). The native library then built Lexer; the
+  typer's fixes (typing/typecore.ml's disambiguate_by_ids, unify_kept, type_approx, Ppat_open; env.ml's normalize_module_path through
+  applications; includemod.ml's add_signature of the implementation; datarepr.ml's inline records of exceptions, Record_extension, and of GADT
+  constructors) took compiler-libs from 35 to 44 of 44 units (doc/ocaml/TYPER.md §25). Under stubs of the toolchain (none called): the five
+  compiler-libs programs of the run corpus 5 of 5 natively (2 before), libs4's 18 with the essential list 75 of 76 run (the one other
+  `-safer-matching`, classed), typer-check 79 of 79, repl-check 24 of 24.
+- **OC185**: `bin/oi reap-switch [--apply]` (`test/ocaml/oc185.ae`): the four native records' passes against their oracle twins', and the
+  cells' and the independence facts' edit when none has fewer (proved on a scratch copy). Not applied: the native records of the suite and
+  the AOT level are the night's.
+- **The by-design review**: eval's 205 (180 by a decided rule, 25 `c-api` deferred); 14 reachable cases their rules do not cover:
+  Proposed OC192-OC197 (finalisers, max_domains, ocamlyacc, a test's second program, speed, the `.mll` tests), with OC191.
+- Scores (crops-score, the records unchanged): OCaml 80.9 / 95.2 / 100 / 87.4, before and after; the night's commands in the survey's section.

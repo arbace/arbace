@@ -175,6 +175,10 @@ code. Three kinds of things live here:
   as Menhir 20250912 does and writes it as the generated `tables.ae`, `parser.ae` drives it as MenhirLib's engine
   (boot/menhir/menhirLib.ml of the same tarball) does (LICENSE.md: the OCaml Core System; Menhir and MenhirLib); the
   rest (the converter, the printer, the checks, `native.ae`) is Arbace's own.
+  ocamllex (2026-11-08, OC186 (a), "As built: ocamllex ported (OC186)"): `repr/ocaml/ocamllex.ae`
+  (`arbace.repr.ocaml.ocamllex`) ports the same tarball's lex/ (lexer.mll, parser.mly, cset.ml, table.ml, lexgen.ml, compact.ml,
+  common.ml, output.ml, main.ml; outputbis.ml's -ml mode not, Proposed OC191) with stdlib/set.ml's AVL trees, by hand, the file
+  carrying OCaml's notice (LICENSE.md: the OCaml Core System); its `check` verb is Arbace's own.
   Its native front end for oi (2026-11-05, doc/ocaml/TYPER.md), `repr/ocaml/typer.ae` and `repr/ocaml/typer/`
   (`arbace.repr.ocaml.typer.*`), ports from the same tarball typing/'s types.ml, btype.ml, ctype.ml, predef.ml,
   printtyp.ml, env.ml, typetexp.ml, typedecl.ml, datarepr.ml, patterns.ml, parmatch.ml, typecore.ml and typemod.ml's

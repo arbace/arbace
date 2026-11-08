@@ -345,7 +345,8 @@ Prior art:
     `menhir --check`, `judges-test --fixtures`); ocamlc's and ocdump's levels (`roundtrip --cmi`, `dumps`, `native-check`,
     `stdlib-check`, `typer-check`'s fresh dumps, `suite expect`) are the oracle tier's `ocaml-dumps` and `ocaml-oracle`
     (`test/gate/crops/ocaml-oracle.edn`, spliced into the planner's `:phase :oracle` at batch 4: `bin/gate --oracle`); the native library (`bin/oi stdlib`) types unix,
-    threads, str and compiler-libs' units too (`libs_native`; compiler-libs' `lexer.ml` only with `OI_OCAMLLEX=1`), and the
+    threads, str and compiler-libs' units too (`libs_native`; compiler-libs' `lexer.ml` by the native ocamllex, `arbace/repr/ocaml/ocamllex.ae`,
+    `bin/repr-ocaml ocamllex`, `ocamllex-check`, OC186 (a); `OI_OCAMLLEX=host` the host's), and the
     suite's native path keeps a unit's signature as data (`NAME.cmi.ae`, OC184 (a)).
     repr/ocaml reads natively (doc/ocaml/OCAML-SURVEY.md, "As built: the native reader"; the default of `read` and `roundtrip`
     since 2026-11-07, "As built: the crop's independence"; the helper `tools/ocdump` the oracle's, `--reader helper`): `arbace/repr/ocaml/menhir.ae` builds parser.mly's LALR(1) automaton as Menhir does into the

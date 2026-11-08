@@ -27,7 +27,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   repr-scheme repr-scheme-roundtrip-record si-essential si-aot-essential scheme-read-essential scheme-essential \
   repr-python-lex-check repr-python-lex-record repr-python-pegen repr-python-pegen-check repr-python-parse-check repr-python-parse-record repr-python-ast-check repr-python-records-record repr-python-records-verify pyi-lib-test-record pyi-runtime-tables pyi-aot pyi-aot-check pyi-aot-check-record pyi-bench pyi-bench-record pyi-check pyi-check-record pyi-divergences pyi-cover pyi-c2j-check pyi-table-check pyi-clib-build pyi-clib-verify python-essential \
   oi-check-compiled check-makefile \
-  repr-ocaml-native-check repr-ocaml-menhir \
+  repr-ocaml-native-check repr-ocaml-menhir repr-ocaml-ocamllex-check oi-reap-switch \
   oi-typer-check oi-stdlib-check oi-check-native oi-typer-probe oi-repl-check-native repr-ocaml-types oi-judges-fixtures \
   oi-check-ocdump oi-own-verdicts \
   repr-haskell-native-check repr-haskell-tables-check repr-haskell-rename-check repr-haskell-typecheck-check repr-haskell-stg-check repr-haskell-run-check repr-haskell-run-check-nofib hsi-pins hsi-spec-check hsi-tests hsi-dumps hsi-generate hsi-record-ref hsi-build hsi-stubs-build hsi-repl-session hsi-check hsi-check-core hsi-check-essential hsi-check-aot hsi-check-aot-o1 hsi-record-ref-o1 hsi-primops hsi-libm-check hsi-runtime-check repr-haskell-test-oracle repr-haskell-record-corpus hsi-record-libs hsi-record-progs oracle-records-list oracle-records-check oracle-records-verify oracle-records-record oracle-records-mirror
@@ -649,6 +649,8 @@ repr-ocaml-native-check: ## the native reader (lexer.mll and parser.mly in Arbac
 	bin/repr-ocaml native-check --layout
 repr-ocaml-menhir: ## the native parser's LALR(1) tables built from parser.mly equal to Menhir's own (boot/menhir/parser.ml) and to the committed arbace/repr/ocaml/tables.ae (bin/repr-ocaml menhir --check, --verify)
 	bin/repr-ocaml menhir --check
+repr-ocaml-ocamllex-check: ## OC186 (a): the native ocamllex over every .mll of the corpora and test/ocaml/ocamllex/, the outputs against the host's recorded ones (bin/repr-ocaml ocamllex-check; --host live)
+	bin/repr-ocaml ocamllex-check
 	bin/repr-ocaml menhir --verify
 oi-stdlib: ## O5: the stdlib built by ocamlc in dependency order and its Lambda dumped for oi, into .tmp/oi/lib/ (bin/oi stdlib)
 	bin/oi stdlib
@@ -674,6 +676,8 @@ oi-repl-check-native: ## T11: the recorded toplevel session with each phrase typ
 	bin/oi repl-check --native
 oi-divergences: ## O5: oi's recorded results against test/ocaml/divergences.edn's classes (bin/oi divergences)
 	bin/oi divergences
+oi-reap-switch: ## OC185 (a): the native records' passes against their oracle twins', the REAP cells' switch when none has fewer (bin/oi reap-switch; --apply)
+	bin/oi reap-switch
 oi-record-ref: ## O5: ocamlc's and ocamlopt's runs of oi's run corpus recorded into test/ocaml/ref-ocaml55.edn (bin/oi record-ref)
 	bin/oi record-ref
 oi-repl: ## O5: the toplevel on oi: phrases typed and lowered by the oracle, values printed with their types (bin/oi repl)

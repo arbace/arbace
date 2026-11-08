@@ -2489,3 +2489,148 @@ take a missing tarball from the main checkout's `.tmp/repr-ocaml/src` by hard li
 has none, and never download there (the main checkout fetches once). Proved under stubs of curl, wget and the C compilers (each exiting
 99): the refusal, then the eleven tarballs taken; `native-check samples stdlib` 8 + 150 files equal to the helper's dumps byte for byte
 (the speed commits re-applied on batch 3 included), `errors-check` 100 of 100; no stub called.
+
+## As built: ocamllex ported (OC186 (a)), compiler-libs typed natively (OC188 (a)), OC185's switch prepared (2026-11-08, branch `ocaml-lex`, from next `bd33e27cc`)
+
+Under the day's light rules (sample checks only, at most two processes of 2 GiB, the stub runs with `ocamlc ocamlopt ocamllex ocamlfind
+ocaml ocamlrun ocamldep ocamlyacc` first on `PATH` as scripts exiting 99, their log empty after each run). OC186 and OC188 were
+recommended (a); taken as the brief's decisions.
+
+**ocamllex (OC186 (a)).** `arbace/repr/ocaml/ocamllex.ae` (`arbace.repr.ocaml.ocamllex`) ports OCaml 5.5.0's `lex/` rule for rule
+(the release tarball, SHA-256 `fcc6ae66...f015ba`, LGPL 2.1 with the linking exception; LICENSE.md, doc/ARBACE.md): `lexer.mll`, the
+lexer of lexer definitions, hand-written with its longest-match and first-rule choices (the `#` line directives, nested comments,
+strings with their escapes and warnings, quoted strings `{id|...|id}`, character literals and `skip_char`'s "perilous" empty match,
+the action's bracket stack, `handle_lexical_error`'s relocation of an unpositioned error), `parser.mly` as a shift-reduce parser that
+decides each conflict by ocamlyacc's precedences (`%right Tas`, `%left Tor`, `CONCAT`, the postfix operators, `%left Thash`, the
+regexp starts), `regexp: Tident` reduced before the next token is read (ocamlyacc's default reduction: an unbound name is reported
+before a lexical error after it, the one difference 400 mutants found); `cset.ml`, `table.ml`; `lexgen.ml` whole: the variable
+analyses (`remove_nested_as`, optional, double and char variables) over a port of `stdlib/set.ml`'s AVL trees (a union keeps one of
+two equal identifiers by the trees' heights, and the kept location is the one the output names), `encode_regexp`, the static
+optimisation of tags (`opt_regexp`'s forward and backward passes, the memory cells, `Ident_string`'s arguments evaluated right to left
+as OCaml does), Berry-Sethi positions, the tagged DFA (`StateMap` keys, `MemKey` classes, `create_new_state`'s cells, `move_to`,
+`sort_mvs`'s temporary cell, `split_env` with its left-to-right `let ... and`, shortest match); `compact.ml` (the tables' packing, the
+memory code); `common.ml` and `output.ml` (the line tracker reading the output back, `copy_chunk`, the env's bindings sorted by
+position, the tables' escapes, `new_engine` when memory is used, the refill handler); `main.ml`'s command line and messages (`-q`,
+`-o`, `-v`, `-vnum`; the statistics on stdout; the errors' status 3, an unbound name's 2 with its empty file). Not ported:
+`outputbis.ml`, the `-ml` mode (it iterates a `Hashtbl` whose order is OCaml's hash: Proposed OC191); no corpus file uses it.
+
+`bin/repr-ocaml ocamllex [-q] [-o OUT] FILE.mll` is the command; `bin/repr-ocaml ocamllex-check` generates every `.mll` of the
+tarball (18), of the opam set (3: yojson's two, containers' `CCSexp_lex`) and of `test/ocaml/ocamllex/` (8 of Arbace's own: bindings
+the optimisation cannot place, in alternatives, repetitions and `shortest`, a refill handler with arguments and a `#` directive,
+five error cases and a warning case) in one process (about 19 s), and compares each output's and each message's SHA-256 with
+`test/ocaml/ocamllex-expected.edn` (no host tool; a negative control crosses one file's output with another's record); `--host
+[--record]` (the oracle tier's) runs the host's ocamllex 5.5.0 beside and compares byte for byte. Results: 29 of 29 equal to the host's
+(the `.ml`, stdout and stderr, the status); 400 mutants of eight files (a byte deleted, a token inserted, a span cut; 253 that
+generate, 147 errors) 399 of 400 equal before the default-reduction fix, 400 of 400 after it (scratch, not committed).
+
+`bin/oi`'s native library takes `parsing/lexer.ml` from it (`complib_sources`; `OI_OCAMLLEX=host` the host's, the key names the
+choice), so `Lexer` and the units that link it build without a host tool. The essential step `ocaml-read-essential` runs `bin/repr-ocaml ocamllex-check` after its
+other commands (`test/gate/steps.edn` and `crops/ocaml.edn`; about 22 s, 415 MB; `gate.crops check` 0 problems, `bin/gate --plan` and
+`--full --plan` clean).
+
+**compiler-libs typed natively (OC188 (a)).** The native library built 40 of its 49 units (35 of compiler-libs' 44); with Lexer and
+seven typer fixes all 49 build (`DIR/failed.txt` absent), under the stubs, about 7 minutes at `OI_LIB_JOBS=2`. The fixes, each a
+port of the typer's own rule (doc/ocaml/TYPER.md §25):
+
+| unit | gap | fix |
+|---|---|---|
+| `Lexer` | no `lexer.ml` without ocamllex | the native ocamllex |
+| `Stable_matching` | `{ left; pairs; right = ... }` took the latest record with `left` | Typecore.disambiguate_by_ids: the record that has every field named (closed: no other) |
+| `Location` | `{ x with txt = f x.txt }` forced `'a loc -> 'a loc` | Typecore's unify_kept: the copied record a type of its own, each kept field shared |
+| `Numbers` | `Set.Make(Int_base.T).t` against `Set.Make(T).t` | Env.normalize_module_path normalizes an application's functor and argument (aliases followed) |
+| `Identifiable` | `Make_map`'s `keys : 'a t -> T_set.t`: T_set unbound in Includemod | Includemod.signatures' Env.add_signature of the implementation |
+| `Consistbl` | `exception Inconsistency of { ... }` | exceptions with inline records: Record_extension (the slot, then the fields; matching's and translcore's offsets) |
+| `Local_store` | GADT constructors with inline records | Datarepr's inline record over the constructor's variables (existentials made abstract by the pattern) |
+| `Pprintast` | `binding ~is_method:true` before `and binding ?(is_method=false)` | Typecore.type_approx of a recursive binding (its parameters' labels, an optional one's option) |
+| `Ast_mapper` | `Ppat_open` | `M.(p)`: p typed with M opened |
+
+Proofs (stubs, `OI_JOBS=2`): `bin/oi check --native --only-list` of the five compiler-libs programs of the run corpus
+(`parsing/change_start_loc`, `formatting/errors_batch`, `misc/stable_matching_test`, `utils/edit_distance`, `lib-marshal/compressed`):
+5 of 5 (2 of 5 before: change_start_loc stopped at Numbers once Lexer built, errors_batch at Location, stable_matching_test at
+Stable_matching); `bin/oi check --native --only-list` of libs4's 18 programs and the essential list (79 ids, 76 run): 75 pass, the one other `basic-more/safer_matching` (`-safer-matching` not modelled, classed `:typer-flag`), where libs4's 18 gave 14 (now 17: the three compiler-libs ones), 8 min 50 s; `OI_TYPER_NO_OCDUMP=1 bin/oi typer-check` 79 of 79 (types, raw and simplified Lambda equal to the committed oracle dumps; the runs equal to the toplevel's); `bin/oi repl-check --native` 24 of 24; an exception with an inline record (raise, match, a mutable field set, `{r with ...}` rebuilt)
+run on oi prints what the toplevel prints.
+
+**OC185's switch, prepared.** `bin/oi reap-switch` (`test/ocaml/oc185.ae`) prints each native record's passes against its oracle
+twin's (`check-oi-native.edn` 273 of 309 against `check-oi.edn` 336 of 541 today; the suite's and the AOT level's native records not
+written yet) and exits 0 only when every native record is there with no fewer passes; `--apply` then rewrites the four sources of
+`test/reap/cells.edn`'s `[:ocaml :eval]` and `[:ocaml :aot]` (the native files, the eval cell's classes `[divergences-native.edn
+divergences.edn]`) and `test/crops/independence.edn`'s OCaml eval and AOT scores to 1, each edit an exact text found once (else
+nothing is written). Proved on a scratch copy whose native records were their oracle twins: the four sources and the two scores
+edited, nothing else.
+
+**OCaml's by-design cases at eval reviewed (205).** The eval cell's non-passes of the run corpus (`check-oi.edn`, 541 programs, 205 not
+passing; the suite's 25 are classed apart), class by class, against the decided rules (a case is by design only where a decision says
+so):
+
+| class | cases | decided | what is reachable | recommendation |
+|---|---:|---|---|---|
+| `tools-and-targets` | 40 | survey §8.2 | none: TSan (10), frame pointers (8), flambda (3), the native debugger on Linux and macOS (7), `tool-debugger` (5), Windows (4), `arch_power`, `function_sections`, a skipped `execvpe` | by design, as decided |
+| `gc-and-memory` | 29 | OC11 (a); OC64, OC68 | Gc.Memprof (11), the words allocated and the major collector's work (7), weak arrays and ephemerons emptied (6) are OC11 (a)'s; the five finaliser cases (`callback/test_finaliser_gc`, `basic-more/simplif_under_lambda`, `weak-ephe-final/finaliser2`, `finaliser_handover`, `pr12001`) need only a finaliser run by `Gc.full_major`: OC11 (a) names finalisation's *order*, not its absence | by design but the five finalisers: Proposed OC192 |
+| `runtime-parameters` | 23 | OC11 (a) | backtraces under `b=1` (19) and the stack limit `l=` (2) are OC11 (a)'s; `parallel/max_domains1`, `max_domains2` (`OCAMLRUNPARAM d=1`, `d=129`) are a limit on `Domain.spawn`, no rule names it | by design but max_domains: Proposed OC193 |
+| `c-runtime-internals` | 21 | OT6 (a) | none (global roots, C threads, finalizers of custom blocks, caml_startup, Windows) | by design, as decided |
+| `compiler-output` | 19 | OT2 (a) | not as a run: shapes, uids, `.cmt`, arities, dumpobj compare the compiler's output; OT2 (a) leaves them to a typer check of their own (T12) | by design at eval, as decided |
+| `ocamltest-tools` | 19 | OT3 (a) | `tool-lexyacc/calc` needs ocamlyacc only now (its `calc_lexer.mll` is the native ocamllex's); the four programs that run a second program of the test (`lib-filename/quotecommand`, `lib-unix/common/redirections`, `wait_nohang`, `test_unix_cmdline`) need oi as that program's executable; ocamldoc (5), caml-tex (2), the debugger, ocamldep, ocamlobjinfo, the toplevel, `use_runtime = false` and the two flambda references stay tools | by design but calc (Proposed OC194) and the four second programs (Proposed OC195) |
+| `runtime-events` | 7 | OT4 (a) | none | by design, as decided |
+| `dynlink` | 6 | OT5 (a) | none without a loader of the units' Lambda (the tests build `.cmo`/`.cmxs` with ocamlc) | by design, as decided |
+| `backtraces` | 4 | OC11 (a); OC68 | none (the bytecode's debug events) | by design, as decided |
+| `unix-fork` | 4 | OT1 (a) | none (Go's runtime cannot fork) | by design, as decided |
+| `header-none` | 3 | the corpus's (`:corpus`) | none: ocamltest runs no action for them | by design (the corpus's) |
+| `speed` | 2 | OC65 | `ast-invariants/test` (the compiler-libs walk of the whole testsuite) and `parallel/fib_threads` time out at 120 s; a speed limit, not a rule of the language | deferred, not by design: Proposed OC196 |
+| `obj-representation` | 2 | OC11 (a); OC65 | none (Obj.reachable_words, the heaps of a lazy) | by design, as decided |
+| `packs` | 1 | OT19 (a) | `link-test/test`: a pack is reachable as a module of modules built from its units' Lambda, OT19 (a) decided otherwise | by design, as decided |
+| `c-api` (`:deferred`) | 25 | OT6 (c) | the C API shim on ci, DEFERRED-TRIAGE's item 9 | deferred, as decided |
+
+So 180 of the 205 are by design by a decided rule, 25 deferred (`c-api`); of the 180, 14 are reachable and their rules do not cover
+them (the five finalisers, two max_domains, calc, four second programs, two speed): the proposals OC192-OC196 below. The suite's
+non-passes (25: `opam-not-run` 10, `gc-and-memory` 6, `backend` 2, `marshal-closures` 2, `speed` 2, `unix-fork` 2,
+`reference-uncompilable` 1) follow the same rules (OC66 (a)'s `backend`: oi runs as ocamlopt does and is judged against ocamlc;
+OT7 (a)'s `marshal-closures`).
+
+**Scores** (`bin/crops-score --crop ocaml`): completeness 80.9% (95.2% without by design), maturity 100%, independence 87.4%, before and after: the cells read the records, and this branch writes none (the native path's gains, the three compiler-libs programs among them, reach the cells with the night's records and OC185). After the night's native records and `bin/oi reap-switch --apply`: independence about 99.8% (eval and AOT 1, as the typer line's merge measured), completeness by the records' passes.
+
+**The night's commands for OCaml** (in order, one check process at a time, each process at most 1.5 GB: `OI_TYPER_GOMEMLIMIT=1200MiB`,
+`O2J_JOBS=1`):
+1. `bin/oi stdlib` (the native library, compiler-libs' 44 units now with Lexer: about 7 minutes at `OI_LIB_JOBS=2`).
+2. `bin/oi check --record` (writes `check-oi-native.edn` over the 541 programs, libs4's 68 rows among them; about 35 minutes at `OI_JOBS=2`).
+3. `bin/oi check --aot --record` (writes `check-aot-native.edn`; about 40 minutes at `O2J_JOBS=1`).
+4. `bin/oi suite check --record` (writes `check-suite-oi-native.edn`; about 35 minutes).
+5. `bin/oi suite check --aot --record` (writes `check-suite-aot-native.edn`; about 35 minutes).
+6. `bin/oi reap-switch` (seconds): when it says every native record has no fewer passes, `bin/oi reap-switch --apply`, then
+   `bin/reap --record`, `bin/crops-score --record`, and the facts' `:why` of OCaml's eval and AOT in `test/crops/independence.edn` brought to the
+   native records (the scores the switch wrote).
+7. `bin/repr-ocaml ocamllex-check --host` (the oracle tier's: the host's ocamllex beside, byte for byte; 25 s).
+8. `bin/oi stdlib-check` (the oracle tier's, ocamlc on the host: the native library's units, the nine new ones among them, against
+   ocamlc's Lambda; the typer fixes above were proved by the runs and typer-check, not yet unit by unit against ocamlc).
+
+## Proposed (OC191-OC197; options with costs, a recommendation each, none decided)
+
+- **OC191 ocamllex's `-ml` mode.** `outputbis.ml` writes the automaton as OCaml code; its clauses follow `Hashtbl.iter` over the
+  moves, an order OCaml's hash decides. (a) port it with `caml_hash` of the moves (`Backtrack` an immediate, `Goto n` a block) and
+  `Hashtbl`'s buckets and resizing, compared with the host's `ocamllex -ml` in `ocamllex-check --host`: half a day; (b) leave `-ml`
+  refused (no file of the corpora uses it). *Recommended: (b)* until a file needs it.
+- **OC192 Finalisers run by a full major collection.** Five run-corpus programs (`callback/test_finaliser_gc`,
+  `basic-more/simplif_under_lambda`, `weak-ephe-final/finaliser2`, `finaliser_handover`, `pr12001`) need only `Gc.finalise`'s
+  functions called once their values are unreachable at `Gc.full_major` (OC11 (a) names finalisation's order, not its absence).
+  (a) oi's and the AOT runtime's `Gc.finalise` register a Go finaliser (`runtime.SetFinalizer`, Go's `weak` package for the
+  value's reachability) whose call is queued, `Gc.full_major`/`Gc.major`/`Gc.compact` run `runtime.GC` twice and then the queue in
+  registration order: a day; (b) keep them in `gc-and-memory`. *Recommended: (a)*.
+- **OC193 `OCAMLRUNPARAM`'s `d` (max_domains).** `parallel/max_domains1`, `max_domains2`. (a) oi and the AOT runtime read
+  `OCAMLRUNPARAM`'s `d=` and `Domain.spawn` fails beyond it as the runtime does (`Failure "failed to allocate domain"`), the header's
+  `ocamlrunparam` passed by the check: an hour; (b) keep them in `runtime-parameters`. *Recommended: (a)*.
+- **OC194 ocamlyacc ported.** `tool-lexyacc/calc` is ocamllex's (native now) and ocamlyacc's (`calc_parser.mly`). (a) a clean
+  implementation of ocamlyacc's LALR(1) construction and its `Parsing` tables (yacc/ is Berkeley yacc's C, public domain, under
+  OCaml's tree: read, the output format reproduced byte for byte against the host's `ocamlyacc` in an `ocamlyacc-check --host`;
+  `menhir.ae`'s DeRemer-Pennello sets reused), `bin/repr-ocaml ocamlyacc`: one to two days; (b) leave calc a tool's test.
+  *Recommended: (a)*, with OC197.
+- **OC195 A test's second program.** `lib-filename/quotecommand`, `lib-unix/common/redirections`, `wait_nohang`,
+  `test_unix_cmdline` build a second program (`myecho.ml`, `reflector.ml`, `cmdline_prog.ml`) and run it by `Sys.command` or
+  `Unix.create_process`. (a) the check writes that program's executable as a script running `bin/oi run-native PROG.ml` (the AOT
+  level: its compiled program), at the path the test names: half a day; (b) keep them in `ocamltest-tools` (OT3 (a)).
+  *Recommended: (a)*.
+- **OC196 `speed` deferred, not by design.** `ast-invariants/test` and `parallel/fib_threads` (and the suite's two) exceed the
+  check's 120 s; no rule makes speed part of the language. (a) the class `:kind :deferred` (owned by the AOT level and oi's speed
+  work): minutes, the score's by-design share falls by 4; (b) as decided (OC65). *Recommended: (a)*.
+- **OC197 The tests whose main file is a `.mll`.** `tool-lexyacc/csets`, `mpr7760` and `chars` (and `warnings/mnemonics`) are not in
+  the run corpus (ocamltest's `ocamllex` action before the program's). (a) the corpus takes them, the `.mll` generated by the native
+  ocamllex at check time (`OI_OCAMLLEX=host` the host's), then typed and run as the others: an hour, four programs; (b) leave them
+  out. *Recommended: (a)*.
