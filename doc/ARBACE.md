@@ -271,6 +271,13 @@ code. Three kinds of things live here:
   analysis after `rustc_hir_typeck/src/{upvar,expr_use_visitor}.rs` and `rustc_passes/src/upvars.rs`, closure bodies, overloaded
   operators, derefs and indexing, constants and allocations, canonical user type annotations (with `typeck.ae`'s part, after
   `fn_ctxt/_impl.rs` and `method/confirm.rs`) and lint scopes, the same revision and sources; `capture_check.ae` is Arbace's own.
+  RF10's third slice (2026-11-08, "As built: RF10 (third slice)") ports into `build.ae` the rest of the match lowering after
+  `rustc_mir_build/src/builder/matches/{mod,match_pair,buckets,test,util}.rs` (or-patterns' subcandidates, guards and their fake
+  borrows, range, slice, string and scalar tests, let-else and `if let` after `builder/block.rs` and `lower_let_expr`), the
+  patterns of `thir/pattern/{mod,const_to_pat}.rs` (ranges, slices, `enumerate_and_adjust`), `construct_const` and statics'
+  references after `builder/mod.rs` and `thir/cx/expr.rs`, functional update and `write_box_via_move` after `builder/expr/into.rs`;
+  and `arbace/rust/front/passes.ae`, mir_built's passes after `rustc_mir_transform/src/{lib,lint_and_remove_uninhabited,simplify}.rs`,
+  the same revision and sources (LICENSE.md; MIT OR Apache-2.0).
   `arbace/rust/check.ae`'s own-verdict judge (`own-verdict`, `run-class`, `verdict-met?`) ports rustc 1.99.1's compiletest
   (`src/tools/compiletest/src/runtest/ui.rs`'s run checks, `directives.rs`'s directive lines; the pinned `rustc-1.99.1-src.tar.xz`),
   by hand on 2026-11-07 (rust-90, doc/rust/EVAL.md §13; LICENSE.md; MIT OR Apache-2.0); evaluated from the checkout.
