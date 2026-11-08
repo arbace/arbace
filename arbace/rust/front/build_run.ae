@@ -41,10 +41,50 @@
             (dissoc b :alloc-data)))
     {:fsym @fsym :callee @callee :tys @tys}))
 
+(defn- static-name
+  "The static our allocation ID names (its text `allocID (static: NAME, ..)`), else nil"
+  [ours id]
+  (when-let [t (get (:alloc-texts ours) id)]
+    (second (re-find #"^\s*alloc\d+ \(static: ([^,]+)," t))))
+
+(defn- alloc-bytes
+  "Our allocation ID's bytes, read back from its text (write_allocation's hex columns), else nil"
+  [ours id]
+  (when-let [t (get (:alloc-texts ours) id)]
+    (vec (for [l (rest (str/split-lines (str/trim t)))
+               :when (str/includes? l "│")
+               :let [l (str/trim l) l (if (str/starts-with? l "0x") (subs l (+ 2 (str/index-of l "│"))) l)
+                     hex (subs l 0 (str/last-index-of l "│"))]
+               b (remove str/blank? (str/split (str/trim hex) #"\s+"))]
+           (if (re-matches #"[0-9a-f]{2}" b) (Integer/parseInt b 16) (throw (ex-info (str "allocation " id " holds a pointer") {})))))))
+
 (defn- runtime-body
-  "Our built body made the runtime body codegen takes, with the record's facts"
+  "Our built body made the runtime body codegen takes, with the record's facts; a static's pointer (static-ptr ID) the record's
+  static (its symbol, by the static's name) as rustc's optimized MIR gives it: (ptr allocS<ID> 0 8) with that allocation's data"
   [ours rec facts abort?]
-  (let [unwind (fn [u] (if abort? '(unreachable) u))
+  (let [static-data (atom [])
+        fix-static (fn [x]
+                     (if (and (seq? x) (= 'static-ptr (first x)))
+                       (let [id (second x) nm (static-name ours id)
+                             st (or (get (:statics facts) nm) (throw (ex-info (str "no static " nm " in the record") {})))
+                             a (str "allocS" id)]
+                         (swap! static-data conj [a (merge {:kind :static :symbol (:symbol st) :def (:def st)}
+                                                           ;; its initializer from our own allocation (the static's evaluated bytes)
+                                                           (when-let [bs (alloc-bytes ours id)]
+                                                             {:bytes (apply str (map #(format "%02x" %) bs))
+                                                              :align (parse-long (or (second (re-find #"align: (\d+)\)" (get (:alloc-texts ours) id))) "1"))
+                                                              :mutable true}))])   ; the record does not say `mut`; writable either way at -O0
+                         (list 'ptr (symbol a) 0 8))
+                       (if (and (seq? x) (#{'raw-str 'raw-bytes} (first x)))
+                         ;; a string's or byte string's bytes (allocate_bytes_dedup): rustc's (slice allocN LEN) for &str, a
+                         ;; pointer for &[u8; N], the bytes an immutable memory allocation of alignment 1
+                         (let [id (second x) bs (or (alloc-bytes ours id) (throw (ex-info (str "no bytes for allocation " id) {})))
+                               a (str "allocB" id)]
+                           (swap! static-data conj [a {:kind :memory :align 1 :mutable false :bytes (apply str (map #(format "%02x" %) bs))
+                                                       :init (apply str (repeat (count bs) "1")) :relocs []}])
+                           (if (= 'raw-str (first x)) (list 'slice (symbol a) (count bs)) (list 'ptr (symbol a) 0 8)))
+                         x)))
+        unwind (fn [u] (if abort? '(unreachable) u))
         loc (list 'loc "?" 0 0)
         fix-ty (fn [x] (if (and (seq? x) (= 'ty (first x))) (get (:tys facts) (second x) x) x))
         fix-const (fn [x] (if (and (seq? x) (= 'const (first x)) (get (:fsym facts) (second x)) (not (some #{:fn-symbol} x)))
@@ -63,7 +103,7 @@
                  t))
         keep-stmt? (fn [s] (not (or (#{'fake-read 'place-mention} (first s))
                                     (and (= 'raw (first s)) (str/starts-with? (str (second s)) "AscribeUserType")))))]
-    (walk (comp fix-const fix-ty)
+    (-> (walk (comp fix-static fix-const fix-ty)
           (merge (select-keys rec [:def :def-id :phase :instance :symbol :name :kind :track-caller :spread-arg])
                  {:args (:args ours) :ret (:ret ours)
                   :locals (:locals ours)
@@ -71,7 +111,8 @@
                   :debug (:debug ours)
                   :blocks (mapv (fn [b] {:cleanup (:cleanup b) :stmts (vec (filter keep-stmt? (:stmts b))) :after-dbg [] :term (term (:term b))})
                                 (:blocks ours))
-                  :allocs "" :alloc-data []}))))
+                  :allocs "" :alloc-data []}))
+        (assoc :alloc-data (vec (distinct @static-data))))))
 
 ;; layouts the record lacks (rustc's optimized MIR drops the unit temporaries and the overflow checks' tuples our built
 ;; MIR keeps): rustc_abi's layout of scalars, unit and pairs of scalars (univariant's scalar pair), the rest refused
@@ -102,7 +143,9 @@
   (let [abort? (some #{"--panic-abort"} flags)
         forms (read-forms (slurp record))
         rec-bodies (for [f forms :when (= 'mir/body (first f))] (second f))
-        facts (record-facts rec-bodies)
+        facts (assoc (record-facts rec-bodies)
+                     :statics (into {} (for [f forms :when (= 'mir/static (first f)) :let [m (second f)]]
+                                         [(str/replace (last (str/split (str (:def m)) #"::")) #"\)$" "") m])))
         ours (into {} (for [[nm b err] (bc/build-program front-dir n)] [nm [b err]]))
         lines (atom [])
         new-forms (for [f forms]
