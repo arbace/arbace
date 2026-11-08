@@ -598,6 +598,17 @@
     (swap! *wanteds* conj (cond-> {:ev i :pred pred} (and *given-eqs* (seq @*given-eqs*)) (assoc :geqs *given-eqs*)))
     (list 'ev i))))
 
+(def ^:private inst-index (atom [nil {}])) ; [the *insts* vector it was made of, {CLASS [inst...]}]
+
+(defn- insts-of
+  "The instances of class c, in the table's order (an index of *insts* by class, made again when the table changes:
+  HF9's second slice, the derived instances of TH.Syntax looked up over the whole table)"
+  [c]
+  (let [v @*insts* [v0 m] @inst-index]
+    (if (identical? v v0)
+      (get m c)
+      (let [m (group-by (comp first :head) v)] (reset! inst-index [v m]) (get m c)))))
+
 (defn- zonk-pred [[c ts]]
   (let [ts (mapv (comp deep-expand zonk) ts)]
     ;; a variable constraint now a class's application is that class's predicate
@@ -720,7 +731,7 @@
                       (let [subs (map (fn [[pc pts]] (solve-pred [pc (mapv #(subst m %) pts)] givens (inc depth))) ctx)]
                         (when (every? some? subs)
                           (if (empty? ctx) (list 'v dfun) (list 'app (list 'v dfun) (vec subs))))))))
-                @*insts*)))))))
+                (insts-of c))))))))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Converting written types (the renamed tree's HsType)
@@ -1774,7 +1785,7 @@
           (when (= (first head) c)
             (when-let [m (reduce (fn [m [p t]] (match-ty (set tvs) m p t)) {} (map vector (second head) ts))]
               [dfun (mapv (fn [[pc pts]] [pc (mapv #(subst m %) pts)]) ctx)])))
-        @*insts*))
+        (insts-of c)))
 
 (def ^:dynamic *self-givens* nil) ; an instance's own dictionary and its superclasses, for its methods
 
@@ -1998,7 +2009,9 @@
   (vec (keep (fn [t] (let [b (arg (lval t) 3)] (when (= 'HsBndrVar (con b)) (nm (arg b 2))))) (arg qtvs 2))))
 
 (def constructor-classes
-  #{"Functor" "Applicative" "Monad" "Foldable" "Traversable" "MonadFail" "Alternative" "MonadPlus" "MonadFix" "MonadZip"})
+  #{"Functor" "Applicative" "Monad" "Foldable" "Traversable" "MonadFail" "Alternative" "MonadPlus" "MonadFix" "MonadZip"
+    ;; Generic1's head drops the last parameter too (a class of type constructors), its context empty
+    "Generic1"})
 
 ;; a deriving strategy written in a clause or a standalone declaration (a Maybe of an LDerivStrategy): [:stock],
 ;; [:newtype], [:anyclass] or [:via SIG]; nil when none is written
@@ -2205,7 +2218,11 @@
               :else
               (swap! *insts* conj {:dfun (ext-name "var" m (str "$f" (occ cls) (occ tn)))
                                    :tvs names
-                                   :ctx (vec (for [[n x] (map vector tvn names) :when (contains? used n)] [cls [[:tv x]]]))
+                                   ;; Generic's derived instance has no context (GHC.Tc.Deriv.Infer's inferConstraints
+                                   ;; for Generic: the representation type needs none); the others one on each variable
+                                   :ctx (if (= "Generic" (occ cls))
+                                          []
+                                          (vec (for [[n x] (map vector tvn names) :when (contains? used n)] [cls [[:tv x]]])))
                                    :head [cls [res]]}))))))
     (swap! *ddescs* assoc tn {:desc {:tn tn :cons @descs :fix @*fixities* :newtype? (= 'NewTypeCon (con cs))} :names names})))
 
@@ -2218,7 +2235,7 @@
       :tv [p]
       :tc (if-let [[i m] (some (fn [i] (when (= (first (:head i)) c)
                                          (when-let [m (match-ty (set (:tvs i)) {} (first (second (:head i))) t)] [i m])))
-                               @*insts*)]
+                               (insts-of c))]
             (vec (mapcat (fn [[pc pts]] (simplify-pred [pc (mapv #(subst m %) pts)])) (:ctx i)))
             (if (some #(and (vector? %) (= :tv (first %))) (tree-seq vector? seq t)) [p] []))
       [p])))
@@ -2341,15 +2358,20 @@
                    :else (distinct-last (mapcat (fn [c] (mapcat (fn [t] (simplify-pred [(:cls r) [t]])) (:tys c)))
                                                 (:cons (:desc r))))))]
     (doseq [r reqs] (swap! *insts* conj {:dfun (dfun r) :tvs (:tvs r) :ctx (if (:standalone? r) (:ctx r) []) :head [(:cls r) (:ts r)]}))
-    (dotimes [_ 5]
-      (doseq [r reqs :when (not (:standalone? r))]
-        (let [ctx (ctx-of r)]
-          (swap! *insts* (fn [is] (mapv (fn [i] (if (= (:dfun i) (dfun r)) (assoc i :ctx ctx) i)) is))))))
-    (vec (for [r reqs]
-           {:dfun (dfun r) :tvs (:tvs r) :ctx (:ctx (some #(when (= (:dfun %) (dfun r)) %) @*insts*))
-            :cls (:cls r) :ts (:ts r)
-            :gnd (gnd-of r)
-            :binds (when-not (or (gnd-of r) (:anyclass? r)) (deriv/derive-binds (occ (:cls r)) (:desc r)))}))))
+    ;; the contexts by fixpoint, every inferred one at once from the previous round's (GHC.Tc.Deriv.Infer's
+    ;; simplifyDeriv iterated by GHC.Tc.Deriv's inferInstanceContexts), until none changes
+    (loop [k 0]
+      (let [cur (into {} (map (fn [i] [(:dfun i) (:ctx i)]) @*insts*))
+            ctxs (into {} (for [r reqs :when (not (:standalone? r))] [(dfun r) (ctx-of r)]))]
+        (when (some (fn [[d c]] (not= c (get cur d))) ctxs)
+          (swap! *insts* (fn [is] (mapv (fn [i] (if-let [c (get ctxs (:dfun i))] (assoc i :ctx c) i)) is)))
+          (when (< k 20) (recur (inc k))))))
+    (let [ctx-by (into {} (map (fn [i] [(:dfun i) (:ctx i)]) @*insts*))]
+      (vec (for [r reqs]
+             {:dfun (dfun r) :tvs (:tvs r) :ctx (get ctx-by (dfun r))
+              :cls (:cls r) :ts (:ts r)
+              :gnd (gnd-of r)
+              :binds (when-not (or (gnd-of r) (:anyclass? r)) (deriv/derive-binds (occ (:cls r)) (:desc r)))})))))
 
 (defn- syn-decl! [d]
   (let [tn (nm (arg d 2)) tvn (qtvs-names (arg d 3))
@@ -2552,7 +2574,7 @@
                                (when (= (first head) c)
                                  (when-let [m (reduce (fn [m p] (match-ty (set tvs) m (nth (second head) p) (nth ts p))) {} ls)]
                                    [i m])))
-                             @*insts*)]
+                             (insts-of c))]
             :when inst]
       (let [[{:keys [tvs head]} m] inst
             m (into (into {} (map (fn [v] [v (fresh-meta)]) tvs)) m)]
