@@ -1512,9 +1512,19 @@ oracle tier); doc/haskell/NATIVE.md, "The native reads' inputs: derived", has th
   `haskell-target-oracle`, `test/gate/crops/haskell.edn`). `haskell-roundtrip` runs `target hsc` first; the two Haskell read steps
   declare C's inputs (musl's pin, `bin/ci`, `c/target/`).
 
-### Results
+### Results (light: one process, under 2 GiB, `ARBACE_HOST_EXE` main's stage 0)
 
-RESULTS_TBD
+- **The oracle tier** (`bin/repr-haskell target compare`): 335 of the pack's 337 members byte for byte (an `.hspp.edn` on its
+  `:hsc2hs`), none differing; the two left are GHCi/FFI.hsc's (below, HFS-I11). In order of building: the records, settings and
+  headers 147; the configure answers 156; DerivedConstants.h and the 89 .hsc modules 335.
+- **The reads** (stubs `ghc ghc-pkg runghc ghci hsc2hs gcc cc clang cpp c99 ld` first on PATH, exiting 99; none was called):
+  `REPR_HASKELL_ONLY_PACKAGES='unix ghc-heap hpc haskeline'` and `'directory process time'` `bin/repr-haskell read --reader native
+  --corpus`: the 166 modules' native dumps byte for byte those read from the pack (`REPR_HASKELL_INPUTS=pack`); `roundtrip --text
+  --layout` over the seven packages: 166 of 166 equal at the tree, layout and text levels, 61 of them .hsc modules, 60 CPP module views.
+- **Times**: `target derive` 24 s; `target hsc` 46 min (DerivedConstants.h about 3 min, then about 30 s a module); `target probe`
+  about 65 min (the compile tests 60).
+- **Scores** (`bin/crops-score --crop haskell`): before 96.3 / 100 / 74.9 (read 0.804), after 96.3 / 100 / 78.8 (read 1.000: 1,344
+  modules by their own inputs, 1 by the pack, (1344 + 0.5) / 1345 = 0.9996); `test/crops/scores.edn` recorded.
 
 ### Proposed (HFS-I8 to HFS-I10)
 
@@ -1534,6 +1544,12 @@ RESULTS_TBD
   -I paths already are); (b) port Hadrian's `Hadrian.Haskell.Hash` (the ids from the packages' sources and flags); (c) leave the
   fingerprints out of the derived records (the comparison then differs in one line of 44 records). *Recommended: (a)*; (b) once the
   front end compiles the boot libraries (HF9, HF10), which needs the ids it would then compute.
+- **HFS-I11 GHCi/FFI.hsc's libffi.** Its C includes `<ffi.h>`, libffi's generated header (the installation's system libffi), which
+  neither musl nor the tarball holds; the module's hsc2hs output stays the pack's (BORROWED), 1 of the 1,345 modules. (a) libffi 3.x's
+  release tarball pinned in the main checkout's `.tmp/` (as musl's) and `ffi.h` and `ffitarget.h` derived for x86_64 as its configure
+  makes them (`ffi.h.in`'s substitutions: a few values), then the module made on ci; about half a day; (b) Arbace's own `ffi.h` in
+  `c/include` (the types and constants GHCi/FFI.hsc reads: `ffi_cif`, `ffi_type`, `FFI_DEFAULT_ABI`, the ABI enum) from the libffi
+  ABI for x86_64 written anew; (c) keep the record. *Recommended: (a)*, the faithful one; the fetch is the main session's.
 - Beside them, for C's crop: ci's checker accepts `enum { v = ((void (*)(int))0) }` and `(timer_t)0.2` (a pointer in an integer
   constant expression, a floating value cast to a pointer), which gcc rejects; recorded here for the C line's agenda (the probe works
   around it with the declarations' types).

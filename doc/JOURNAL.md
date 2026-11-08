@@ -791,3 +791,38 @@ third of the concurrent tests, every twentieth other pass) 66 of 67, main's hsi 
 night's `bin/hsi check ... --record`: the testsuite's core 658 of 701 (652), the record 796 of 908; the divergences' edits and the night's
 commands in doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: HE9 on main (write-ahead)". HE9's 666 counted 11 programs whose references
 main's record-ref cannot build (the C includes GHC's `_stub.h`): HES83 proposed.
+
+## 2026-11-08: HFS-I2 (a), Haskell's read stage's inputs derived (branch `hs-inputs`, from `next` bd33e27cc)
+
+The user's decision of 2026-11-07, HFS-I2 (a): the native reads' inputs, held until now by the pack
+`haskell-native-inputs-ghc-9.14.1` (GHC's installation's files, recorded by hand), derived without GHC or a C compiler, data first,
+then hsc2hs's C program on ci. Sources: GHC 9.14.1's source tarball (https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz,
+SHA-256 `2a83779c...101e77`, the corpus's pin: hadrian's `src/Rules/Generate.hs` and `bindist/Makefile`, `rts/configure.ac`,
+`rts/gen_event_types.py`, the packages' `configure.ac`s, `libraries/ghc-internal/aclocal.m4`, `utils/deriveConstants/Main.hs`,
+`utils/hsc2hs/src/`, `libraries/Cabal/Cabal-syntax` 3.16.0.0) and musl 1.2.6's tarball (C's pin, test/c/corpora.edn).
+
+- **Built.** `arbace.repr.haskell.target` (the tree in the pack's layout: the settings file in hadrian's order, the 47 package records
+  through `arbace.repr.haskell.cabal`, a port of Cabal-syntax's field parser, conditions, free text and `showInstalledPackageInfo`, then
+  the bindist's `patchpackageconf`; the installed headers by `install-includes`; ghcversion.h, ghcplatform.h, the event headers,
+  HsIntegerGmp.h, ghc-gmp.h, musl's stdc-predef.h); `arbace.repr.haskell.configure` (the seven configure headers by config.status's
+  rewrite over `test/haskell/target/answers.edn`, which `bin/repr-haskell target probe` computes on Arbace's C target: a check's kind
+  from its autoheader comment or a rule of its configure.ac, headers in musl's tree and `c/include`, functions among libc.a's
+  definitions, compile tests by ci's checker, the constants' and htypes' types by `bin/ci annot`, values by `bin/ci run`);
+  `arbace.repr.haskell.constants` (deriveConstants: its `wanteds` read from Main.hs, the arrays' sizes from ci's checker's annotations
+  in place of nm); `arbace.repr.haskell.hsc2hs` (hsc2hs 0.68.10's direct mode, its program built and run by `bin/ci run`);
+  `test/haskell/target/installation.edn` (the installation's names and choices); `bin/repr-haskell target derive|hsc|probe|compare`,
+  the derived tree the native reads' default (`REPR_HASKELL_INPUTS=pack` the pack, now the oracle tier's), what is not made yet taken
+  from the pack and named in `BORROWED`; `haskell-roundtrip` runs `target hsc` first; the oracle tier's step `haskell-target-oracle`.
+- **Proved.** `target compare`: 335 of the pack's 337 members byte for byte; the two left are GHCi/FFI.hsc's, whose C reads libffi's
+  `ffi.h` (HFS-I11 proposed). The native dumps of seven packages (166 modules, 61 .hsc, 60 CPP views) byte for byte the same from the
+  derived tree as from the pack; `roundtrip --text --layout` over them 166 of 166 at every level with ghc, ghc-pkg, runghc, ghci, hsc2hs,
+  gcc, cc, clang, cpp, c99 and ld first on PATH as stubs exiting 99, none called.
+- **Found.** ci's checker accepts a pointer in an integer constant expression and a double cast to a pointer (gcc rejects both): the
+  probe decides FP_COMPUTE_INT's and FPTOOLS_CHECK_HTYPE's cases by the declarations' types instead; building the RTS's headers is
+  refused (SpinLock.h's inline assembly), so deriveConstants reads sizes from the checker, as Main.hs reads them from an object file.
+  ci's musl index leaves out `src/ldso` and the assembly sources (vfork, dlopen, dlinfo): the probe scans them.
+- **Scores** (`bin/crops-score --crop haskell`): 96.3 / 100 / 74.9 (read 0.804) before, 96.3 / 100 / 78.8 (read 1.000) after;
+  `test/crops/independence.edn`'s read facts and `test/crops/scores.edn` recorded.
+- **Alternatives considered.** Porting Hadrian's unit-id hash (the ids stay recorded names, HFS-I10); committing the hsc2hs outputs
+  or packing them (HFS-I8: made by key in `.tmp/` as built); a configure.ac interpreter (the templates' autoheader comments name the
+  macros; the rest is 120 rules with their configure.ac's logic, each checked against the pack).

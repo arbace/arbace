@@ -425,9 +425,12 @@ it); sizes, alignments, constants and FPTOOLS_CHECK_HTYPE's choice are printed b
 The two facts of the build host, `/dev/ptmx` and `/dev/ptc` (AC_CHECK_FILE), are Linux's.
 
 **The comparison** (the oracle tier: `bin/repr-haskell target compare`, the derived tree against the pack member for member, an
-`.hspp.edn` on its `:hsc2hs`): RESULTS_TBD. What the derivation does not make yet is taken from the pack when it is in the store
+`.hspp.edn` on its `:hsc2hs`): 335 of the pack's 337 members equal (2026-11-08): the settings, the 47 records, the
+104 installed headers with DerivedConstants.h and the seven configure headers, the four configured/ files, stdc-predef.h, LIBDIR, and 89
+of the 90 .hsc modules with their records. The two left are GHCi/FFI.hsc's: its C includes libffi's `ffi.h` (rts.cabal's
+use-system-libffi: the host's libffi, neither musl's nor the tarball's), which ci does not have (FRONTEND-SURVEY's HFS-I11). What the derivation does not make yet is taken from the pack when it is in the store
 and named in the tree's `BORROWED` (none once `target hsc` has run: `bin/repr-haskell target hsc` makes DerivedConstants.h and the
-90 modules, about MINUTES_TBD minutes of ci, the night's).
+90 modules, 46 minutes of ci on this host, one process, under 2 GiB; the night's or `haskell-roundtrip`'s first run).
 
 ## Messages
 

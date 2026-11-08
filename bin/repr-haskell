@@ -439,7 +439,7 @@ target_derive() {
   local d=$rh/target/derived k
   k=$(target_key)
   if [ ! -f "$d.key" ] || [ "$(cat "$d.key")" != "$k" ]; then
-    rm -rf "$d" "$d.key"
+    rm -rf "$d" "$d.key" "$d.hsc-made"
     echo "== repr-haskell: the installation derived (arbace.repr.haskell.target)" >&2
     arbace_tool -m arbace.repr.haskell.target derive "$d" --src "$TSRC" --musl "$TMUSL" > "$rh/target/derive.log" 2>&1 \
       || { tail -20 "$rh/target/derive.log" >&2; return 1; }
@@ -460,14 +460,20 @@ target_derive() {
   local dcp
   if [ -f "$rh/target/DerivedConstants.h" ]; then
     dcp=$(cd "$d" && ls -d sysroot/usr/lib/ghc-*/lib/*-ghc-*/rts-*/include)/DerivedConstants.h
-    if ! cmp -s "$rh/target/DerivedConstants.h" "$d/$dcp"; then
-      cp "$rh/target/DerivedConstants.h" "$d/$dcp"
-      [ ! -f "$d/BORROWED" ] || { grep -v 'DerivedConstants.h$' "$d/BORROWED" > "$d/BORROWED.new" || true; mv "$d/BORROWED.new" "$d/BORROWED"; }
-    fi
+    cp "$rh/target/DerivedConstants.h" "$d/$dcp"
+    [ ! -f "$d/BORROWED" ] || { grep -v 'DerivedConstants.h$' "$d/BORROWED" > "$d/BORROWED.new" || true; mv "$d/BORROWED.new" "$d/BORROWED"; }
   fi
-  if [ -f "$rh/target/hsc.key" ] && [ -d "$rh/target/hsc" ] && [ ! -f "$d/hsc.made" ]; then
-    rm -rf "$d/hsc"; cp -r "$rh/target/hsc" "$d/hsc"; touch "$d/hsc.made"
+  if [ -f "$rh/target/hsc.key" ] && [ "$(cat "$rh/target/hsc.key")" = "$(target_hsc_key)" ] && [ -d "$rh/target/hsc" ] \
+     && [ ! -f "$d.hsc-made" ]; then
+    local m
     [ ! -f "$d/BORROWED" ] || { grep -v '^hsc/' "$d/BORROWED" > "$d/BORROWED.new" || true; mv "$d/BORROWED.new" "$d/BORROWED"; }
+    rm -rf "$d/hsc"; cp -r "$rh/target/hsc" "$d/hsc"; touch "$d.hsc-made"
+    # a module ci could not make: the pack's, borrowed
+    if [ -f "$rh/target/hsc.failed" ] && pd=$(native_pack_dir 2>"$TMPDIR/repr-haskell-pack.err"); then
+      while read -r m; do
+        for x in "$m" "$m.hspp.edn"; do mkdir -p "$(dirname "$d/hsc/$x")"; cp "$pd/hsc/$x" "$d/hsc/$x"; echo "hsc/$x" >> "$d/BORROWED"; done
+      done < "$rh/target/hsc.failed"
+    fi
   fi
   TDERIVED=$d; libdir=$(cat "$d/LIBDIR")
 }
@@ -495,10 +501,14 @@ target_probe() {
 # target_hsc: the corpus's .hsc modules through hsc2hs on ci (HFS-I2's second part): arbace.repr.haskell.hsc2hs writes the C
 # program hsc2hs writes, bin/ci runs it (no C compiler), its output the module; into .tmp/repr-haskell/target/hsc/PKG/X.hs with
 # X.hs.hspp.edn (the record's :hsc2hs, as the helper's cpp verb wrote it); kept by key; REPR_HASKELL_ONLY_PACKAGES selects
+target_hsc_key() {
+  { target_key; sha256sum < "$root/arbace/repr/haskell/hsc2hs.ae"; sha256sum < "$root/arbace/repr/haskell/constants.ae"
+    REPR_HASKELL_ONLY_PACKAGES="" corpus_plan_raw ghc-9.14.1 all; } | sha256sum | cut -c1-64
+}
 target_hsc() {
   target_derive || return 1
   local d=$rh/target/hsc w=$rh/target/hsc-work k name dir flags files hargs f base fl args cf rawf wd ok=0 bad=0
-  k=$( { target_key; sha256sum < "$root/arbace/repr/haskell/hsc2hs.ae"; REPR_HASKELL_ONLY_PACKAGES="" corpus_plan_raw ghc-9.14.1 all; } | sha256sum | cut -c1-64)
+  k=$(target_hsc_key)
   if [ -f "$d.key" ] && [ "$(cat "$d.key")" = "$k" ] && [ -z "${REPR_HASKELL_ONLY_PACKAGES:-}" ]; then echo "$d"; return 0; fi
   # DerivedConstants.h first (deriveConstants' C file, its objects' sizes from ci's checker's annotations)
   local rinc=$TDERIVED/sysroot$libdir/../lib/$(cd "$TDERIVED/sysroot$libdir/../lib" && ls -d *-ghc-*)/rts-1.0.3/include
@@ -511,7 +521,7 @@ target_hsc() {
   fi
   corpus_fetch ghc-9.14.1 > "$TMPDIR/repr-haskell-fetch.txt" 2>&1 || { cat "$TMPDIR/repr-haskell-fetch.txt" >&2; return 1; }
   nin=$TDERIVED; nhsc=""; native_place_inputs ghc-9.14.1
-  [ -n "${REPR_HASKELL_ONLY_PACKAGES:-}" ] || rm -rf "$d" "$d.key"
+  [ -n "${REPR_HASKELL_ONLY_PACKAGES:-}" ] || rm -rf "$d" "$d.key" "$d.failed"
   mkdir -p "$d" "$w"
   while IFS=$'\t' read -r name dir flags files hargs; do
     case " $files " in *.hsc*) ;; *) continue ;; esac
@@ -537,11 +547,13 @@ target_hsc() {
         ok=$((ok + 1))
       else
         echo "repr-haskell target hsc: $name/$f failed ($wd/run.log)" >&2; rm -f "$d/$name/${f%c}"; bad=$((bad + 1))
+        echo "$name/${f%c}" >> "$d.failed"
       fi
     done
   done < <(corpus_plan_raw ghc-9.14.1 all)
   echo "repr-haskell target hsc: $ok modules made, $bad failed" >&2
-  [ "$bad" -gt 0 ] || [ -n "${REPR_HASKELL_ONLY_PACKAGES:-}" ] || echo "$k" > "$d.key"
+  # the key kept with the failures named (hsc.failed: a module ci cannot build yet stays the pack's, BORROWED)
+  [ -n "${REPR_HASKELL_ONLY_PACKAGES:-}" ] || echo "$k" > "$d.key"
   echo "$d"
 }
 # native_env: libdir, nsysroot, nin and nhsc for the native reads: the derived tree (the default), the pack's (REPR_HASKELL_INPUTS=pack,
@@ -1752,6 +1764,7 @@ case $cmd in
     case ${1:-} in
       derive) target_derive && echo "$TDERIVED" ;;
       hsc) target_hsc ;;
+      hsc-key) target_src > "$TMPDIR/repr-haskell-tsrc.txt" 2>&1; target_hsc_key ;;
       probe) shift; target_probe "$@" ;;
       compare) target_derive || exit 1; d=$(native_pack_dir) || exit 1
                arbace_tool -m arbace.repr.haskell.target compare "$TDERIVED" "$d" ;;
