@@ -3642,3 +3642,127 @@ of 5,624.
   iteration), each judged by its own check line (no "Error: Benchmark program returned wrong result"); `run-benchmark` needs
   Larceny's `(primitives run-benchmark)` and stays refused; (c) (b) with the corpus's inputs (nboyer 5: 51,507,739 rewrites, minutes to
   hours on si: night only). *Recommended: (b)*: two programs become tests of the language with their own verdict.
+
+## Decided (the user, 2026-11-08, about 19:45): SCS7 (c), SCS8 (b)
+
+SCS7 (c): the corpora's files judged by R6RS's grammar too (`arbace.repr.scheme.report`), instead of their Chez dumps; the three
+lexical scans stay on their dumps, to be measured: their differences between Java's Unicode tables and Chez's, reported. SCS8 (b):
+Larceny's earley and nboyer run as their authors meant: the harness moves the leading library forms onto the library path, small
+inputs of our own (nboyer 0, earley one iteration), each judged by its own result check; `run-benchmark` stays refused.
+
+## As built: SCS7 (c), SCS8 (b), the files by the report, Larceny's benchmarks by their own checks (2026-11-08, branch scheme-props)
+
+From `mac/next` (5ec43f7b7, scheme-scs4 merged).
+
+### SCS7 (c): the corpora's files by the report's grammar
+
+`arbace.repr.scheme.check/judge-file` judges a corpus file as `judge-probe` judges a probe: the report's reading of the whole text
+(`rep/read-all`) where it decides it, compared with Arbace's by `report-diff` (data, offsets, count, an error and its class, each datum
+written and read back), the dump in the pack not read; Chez's dump where the report leaves a datum of the file to the implementation
+(the first `:undecided` datum makes the file's reading Chez's) or a rule of `test/scheme/report-chez.edn` names the file's key (none
+does: no file has a datum Chez reads past the grammar). `check-dumps` records each file's judge, and `bin/repr-scheme check` prints the
+count beside the probes' (`files (SCS7 (c)): N judged by the report's grammar, M by Chez's dump`). `bin/repr-scheme report-check` (by
+hand, the oracle tier's) reads the files three ways too, from `DIR/dump-ID.edn`, and fails on a file where the report differs from
+Chez's dump or from Arbace's reader, or where a rule is stale.
+
+The 115 files: 112 by the report, 3 by their dump, each for one complex number whose parts differ in exactness (R6RS keeps each part's
+exactness, si's tower, Chez's, makes both inexact: SCS5's undecided class): `racket-r6rs/r6rs/base.sls`, `racket-r6rs/r6rs/io/ports.sls`,
+`chibi-r7rs/r7rs-tests.scm`. `report-check`: 1,140 probes and 112 files agree three ways, the 37 named probes differ from Chez as named,
+72 probes and 3 files undecided; nowhere does the report differ from Chez or from Arbace on a decided file.
+
+### SCS7 (c): the lexical scans measured (the scans stay judged by their dumps)
+
+`bin/repr-scheme report-scans [--record]` (by hand, from the recorded dumps, no Chez run; `--record` writes
+`test/scheme/report-scans.edn`): dump.ss's three reading scans (`whitespace`: `a<c>b` reads as `a` and `b`; `ident-initial`: `<c>a` one
+identifier; `ident-subsequent`: `a<c>`) over every scalar value by the report's character classes (`rep/whitespace?`, `rep/initial?`,
+`rep/subsequent?`: R6RS 4.2.1's categories over `Character/getType`, jrt's tables from jdk26u, Unicode 17.0), each class confirmed by the
+report's own reading of the scan's text on every differing scalar value and every 97th of the others (`report-scan-readings`; a
+disagreement fails the verb: none; a reading of all 3.3 million texts did not end in 45 minutes, the classes 28 s, 0.7 GB):
+
+| scan | Chez 10.3.0 | the report (Java's tables) | only the report's | only Chez's |
+|---|---|---|---|---|
+| `whitespace` | 25 | 25 | 0 | 0 |
+| `ident-initial` | 290,846 | 295,636 | 4,790 (48 ranges) | 0 |
+| `ident-subsequent` | 292,091 | 296,894 | 4,803 (47 ranges) | 0 |
+
+Every difference is a character Chez's Unicode data does not assign and Java's do: 4,803 is Unicode 17.0's count of new characters,
+and the blocks are 17.0's (CJK Unified Ideographs Extension J 4,298, Tangut Components Supplement 115 and Tangut Supplement 22, Tai Yo
+55, Beria Erfe 50, Tolong Siki 54 with its 10 digits, Sidetic 26, Sharada Supplement 8, 17.0's additions to Arabic Extended-C, Latin
+Extended-D, Combining Diacritical Marks Extended, Miscellaneous Symbols Supplement, Supplemental Arrows-C, Symbols for Legacy Computing
+(Supplement), Arabic Presentation Forms-A, Chess, Alchemical and Transport symbols, a currency sign, a few Kannada, Telugu, CJK Extension C
+and E and Tangut characters); `ident-initial`'s 13 fewer are the 10 Tolong Siki digits (Nd) and 3 Sharada spacing marks (Mc), which are
+`<subsequent>` only. No character changes its category between the two: Chez 10.3.0's tables are Unicode 16.0's (its Garay, 16.0, is
+there), Java's 17.0's. The whitespace scan agrees whole. So the scans' Chez dumps judge nothing but Chez's Unicode version; SCS9 proposes
+how to judge them without Chez. The reader's tables stay Chez's (`arbace.repr.scheme.unicode`, SC21).
+
+### SCS8 (b): earley and nboyer as Larceny runs them
+
+`arbace.scheme.check/split-libraries` (verb `split-libraries FILE OUT`): a file whose leading data are `(library NAME ...)` forms and then
+a top-level program, Larceny's layout (R6RS 8.1's top-level program begins with its `import`, so si and Chez refuse the file whole): each
+leading library datum is written to `OUT/lib/a/b.sls` for `(a b)` (psyntax's `library-path` and `library-extensions`), the program is the
+text with the libraries' characters blanked but their line ends (its lines keep their numbers); a file that reads with an error, has no
+leading library or no `import` after them is refused. `test/scheme/si/programs.edn`: `:libraries-first true` (bin/si's `split_program`
+splits into `.tmp/si/split/ID/`, the run in that directory with the split's `lib` first on si's library path, Chez's `--libdirs` too, and at
+the compiled level `aot_compile`'s first library directory), `:own-input` (an input of the checkout's, `test/scheme/si/inputs/earley-1.input`
+and `nboyer-0.input`; `:input` stays the corpus's), `:bench NAME`: the judge `:bench` (`bench-items`): status 0, run-benchmark's banner
+and then NAME printed (`earley`, `nboyer0`: the benchmark ran), and no line "Error: Benchmark program returned wrong result" (the result
+predicate the benchmark's author wrote: earley's 1430 parse trees, nboyer's 95,024 rewrites at size 0). The golden files `earley.out` and
+`nboyer.out` (the refusal's empty output) are gone; `run-benchmark` keeps its golden refusal (`(primitives run-benchmark)` is Larceny's),
+so the refusal stays tested. `judge-test` gains five cases (a passing benchmark, a wrong result, no banner, another benchmark's banner, an
+error status); a negative control `_control/nboyer-vs-earley` (nboyer's run against earley's name: a no-report item); both programs join
+the AOT essential subset (the control's programs are in both). `bin/si own` takes `:bench` as an own verdict (2 of 2 agree with Chez's
+runs); `test/scheme/si/ref-chez.edn`'s two entries re-recorded from Chez's runs of the split (`bin/si check --record-ref --only`, by hand;
+the outputs byte for byte si's). Times: earley 0.4 s, nboyer 0 about 10 s interpreted (with the driver's start); compiled 2 and 8 s to compile, 0.18 and 0.07 s to run.
+
+### The numbers
+
+`bin/repr-scheme check` on the essential corpora (scheme-read-essential's command, 51 s, 0.53 GB): 1,358 files and probes equal to their
+judge, 1,140 probes and 106 files by the report, 109 probes and 3 files by their dump; the controls differ, report-test ok, round trip
+1,358, spec-check 9 of 9, `bin/si corpora files` 220. `--corpus whimsical --corpus scans` (2 min 15 s, 1.4 GB): 6 of 6 by the report, the 7
+scans equal to Chez's. `bin/si check --only test/scheme/essential-check.txt` (54 s, 0.75 GB): 44 of 49 pass, 10 items all classed,
+judges 27 own report, 2 own result check, 20 golden, 0 by Chez's run; no regression; the four controls differ. `bin/si check --aot --only
+test/scheme/essential-aot.txt` (58 s, 0.71 GB): 11 of 13, 6 items classed, 12 of 13 compiled runs the interpreted ones (1 refused, as
+before). `--record --only larceny/earley --only larceny/nboyer` at both levels (verdicts unchanged: pass). `bin/repr-scheme c2j-check`: 19 of
+19. `bin/si corpora controls-test`: ok. `bin/reap --record` (0 problems; the matrix's source names), `bin/crops-score --record`, `--judge
+--strict` (0 problems).
+
+| `bin/crops-score --crop scheme` | before (next 5ec43f7b7) | after |
+|---|---|---|
+| completeness | 97.3 (98.8 without by design) | 97.3 (98.8): unchanged, earley and nboyer passed as refusals and pass as benchmarks |
+| maturity | 100.0 | 100.0 |
+| independence | 99.6 (judge 0.979) | 99.8 (judge 0.989) |
+
+The judge's cases: read 1,252 at 1 (1,140 probes and 112 files by the report) and 119 at 0.5 (the scans 7, the 109 probes and 3 files by
+their dump), print 1,364, `bin/si check` and `--aot` 50 each, r7rs 1,232, srfi 1,231, chibi-tests 268, ecraven 58, all at 1: 5,564.5 of 5,624.
+
+### Night commands
+
+- `bin/repr-scheme check --record` (every corpus, the probes, the scans; about 3 min, 1.4 GB): the read level's record afresh (no row
+  change expected).
+- `bin/si check --record` and `bin/si check --aot --record` (the 50 programs at each level; about 2 and 6 min): the records afresh (no
+  change expected).
+- `bin/repr-scheme report-check` and `bin/repr-scheme report-scans` (by hand; about 2 min and 30 s), `bin/si own --list`, `bin/si own --aot --list`.
+- The gate's `scheme-read-essential`, `scheme-read`, `si-essential`, `si-aot-essential`, `si-check`, `si-aot`, `scheme-c2j`, `reap`,
+  `crops-score`.
+
+### Proposed
+
+- **SCS9 The lexical scans without Chez.** The read judge's last 0.5 terms but the undecided: the 7 scans. The 3 reading scans differ
+  from the report only by Unicode 17.0's 4,803 new characters (measured above). (a) leave (judge 0.989, independence 99.8); (b) judge the
+  3 reading scans by the report's classes over a pinned Unicode Character Database 16.0 (`UnicodeData.txt`'s general categories and
+  `DerivedAge.txt`, fetched by pin as the corpora are, Unicode's license in LICENSE.md; the report's classes then name their version),
+  and the 4 printing scans (`string-escaped`, `char-hex`, `symbol-escaped-first`, `symbol-escaped-rest`) stay Chez's, as `write`'s choices
+  are the implementation's (judge about 0.9895); (c) (b) and the reader's tables (`arbace.repr.scheme.unicode`) derived from the same UCD
+  instead of Chez's answers (no difference today: Chez's are 16.0's; the tables then follow a pin, not Chez's version). *Recommended: (c)*:
+  the reader's last data taken from Chez become the Unicode Consortium's, at the cost of one pinned fetch and a generator.
+- **SCS10 The implementation's choices, stated.** 72 probes and 3 files are undecided by the report and judged by Chez's dumps. (a) leave;
+  (b) state si's choices in doc/scheme/SPEC.md as rules the report module applies where R6RS defers (a complex of mixed exactness both
+  parts inexact, as si's tower, SM5; `#e` on an infinity or a NaN and an exact ratio over zero a lexical violation; a mantissa width
+  ignored; `#!fold-case`, `#!no-fold-case` and `#!chezscheme` as Chez documents them, any other `#!<identifier>` a violation), each probe
+  and file then judged by the stated rule (75 cases to 1; the 24 polar numbers stay on their dumps: the transcendental functions' last
+  bit); (c) (b) for the complex numbers alone (the 3 files and 3 probes). *Recommended: (b)*: the choices are si's design already
+  (SM1, SM5), and stating them makes the read judge Chez-free but for the polar numbers and the 37 where Chez reads past the grammar.
+- **SCS11 earley and nboyer at the corpus's sizes.** (a) leave (the small inputs of SCS8 (b)); (b) two more programs at the compiled level
+  only, with the corpus's inputs (nboyer 5: 51,507,739 rewrites, about 40 s compiled by the size-0 run's rate; earley 1,000 iterations,
+  about 3 min), judged by the same result checks, in the night's `si-aot`; (c) (b) interpreted too (hours). *Recommended: (b)*: the
+  benchmarks' own checks at the sizes their authors chose, within the night budget.

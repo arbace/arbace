@@ -19,9 +19,11 @@
                                first, the results test/scheme/check-aot-linux-amd64.edn
     compare SI-DIR AOT-DIR     the interpreted and the compiled runs of each program compared (status and
                                stdout): the same, differing, or refused
+    split-libraries FILE OUT   SCS8 (b): a file of libraries and then a top-level program (Larceny's layout) split: each leading
+                               (library NAME ...) form into OUT/lib/NAME.sls, the program into OUT/NAME-OF-FILE
     own DIR [--list]           SCS1, SCS3: the runs judged by the check's judges and by Chez's runs, compared (by hand)
     divergences [RESULTS]      the recorded results' items by class (none unclassified)"
-  (:require [arbace.string :as str] [arbace.scheme.regress :as rg]))
+  (:require [arbace.string :as str] [arbace.scheme.regress :as rg] [arbace.repr.scheme.read :as rd]))
 
 (defn- root [] (or (System/getenv "ARBACE_ROOT") "."))
 (defn- path [& xs] (apply str (root) "/" xs))
@@ -276,9 +278,10 @@
 ;; run (items-of). Chez's runs of the first two kinds are not read at check time (bin/si own compares them, by hand).
 
 (defn judge-of
-  "The judge of program p: :own (its test report), :golden (its expected output) or :chez (Chez's recorded run)."
+  "The judge of program p: :own (its test report), :bench (a benchmark's own result check, SCS8 (b)), :golden (its expected
+  output) or :chez (Chez's recorded run)."
   [p]
-  (cond (:suite p) :own (:golden p) :golden :else :chez))
+  (cond (:suite p) :own (:bench p) :bench (:golden p) :golden :else :chez))
 
 (defn golden-text
   "The golden output of program p (its :golden file's text), nil when it has none or the file is missing."
@@ -304,6 +307,24 @@
                (cond (nil? tests) [(str "count " id ": " (:tests rep) " tests, and no expected count (test/scheme/si/programs.edn's :tests)")]
                      (not= tests (:tests rep)) [(str "count " id ": " (:tests rep) " tests for the expected " tests)])
                (when (not= 0 (:status r)) [(str "status " id " " (:status r) " after " (:tests rep) " tests: " (first-line (:err r)))])))))))
+
+(def ^:private bench-banner "--------------------------------------------------------")
+
+(defn bench-items
+  "SCS8 (b): the own verdict of a benchmark of Larceny's (p's :bench, the name its run-benchmark prints): the run ends with status 0,
+  its run-benchmark ran (the banner and then the benchmark's name), and its own result check found nothing (run-benchmark prints
+  \"Error: Benchmark program returned wrong result: R\" when the result predicate the benchmark's author wrote refuses R: earley's
+  1430 parses, nboyer's rewrite count of its problem size)."
+  [{:keys [id bench]} r]
+  (cond
+    (nil? r) [(str "not-run " id)]
+    (:refused r) [(str "refused " id ": " (:refused r))]
+    (not= 0 (:status r)) [(str "crash " id " status " (:status r) ": " (first-line (:err r)))]
+    :else (let [ls (vec (str/split-lines (:out r)))
+                ran (some (fn [i] (and (= bench-banner (nth ls i)) (= bench (nth ls (inc i) nil)))) (range (count ls)))
+                wrong (some #(when (str/starts-with? % "Error: Benchmark program returned wrong result") %) ls)]
+            (vec (concat (when-not ran [(str "no-report " id " status 0: run-benchmark's banner for " (pr-str bench) " not printed")])
+                         (when wrong [(str "fails " id " " wrong)]))))))
 
 (defn golden-items
   "The golden judge's items for program p's run r against its expected output gold (SCS3): the status (p's :status, default 0),
@@ -348,6 +369,16 @@
                ["another error of the expected status is an error-differs item"
                 (golden-items {:id "t/e" :status 255 :error [:library-not-found "(x y)"]} (run 255 "" "Exception in car: 1 is not a pair") "")
                 #(= ["error-differs t/e: [:text \"Exception in car: 1 is not a pair\"] for the golden's [:library-not-found \"(x y)\"]"] %)]
+               ["a benchmark whose own check passes" (bench-items {:id "t/b" :bench "nb0"} (run 0 (str "\n" bench-banner "\nnb0\n95024 rewrites\n") "")) empty?]
+               ["a benchmark's wrong result is a fails item"
+                (bench-items {:id "t/b" :bench "nb0"} (run 0 (str "\n" bench-banner "\nnb0\nError: Benchmark program returned wrong result: #f\n") ""))
+                #(= ["fails t/b Error: Benchmark program returned wrong result: #f"] %)]
+               ["a benchmark that never ran run-benchmark is a no-report item" (bench-items {:id "t/b" :bench "nb0"} (run 0 "Running\n" ""))
+                #(some (fn [i] (str/starts-with? i "no-report t/b")) %)]
+               ["another benchmark's banner is a no-report item" (bench-items {:id "t/b" :bench "nb0"} (run 0 (str bench-banner "\nearley\n") ""))
+                #(some (fn [i] (str/starts-with? i "no-report t/b")) %)]
+               ["a benchmark's error status is a crash" (bench-items {:id "t/b" :bench "nb0"} (run 255 "" "Exception: x"))
+                #(some (fn [i] (str/starts-with? i "crash t/b status 255")) %)]
                ["an expected error with status 0 is a crash" (golden-items {:id "t/e" :status 255 :error [:text "x"]} (run 0 "" "") "")
                 #(some (fn [i] (str/starts-with? i "crash t/e status 0")) %)]]]
     (vec (for [[what items ok?] cases :when (not (ok? items))] (str what ": " (pr-str items))))))
@@ -355,7 +386,7 @@
 (defn- judge-test-code []
   (let [f (judge-test-failures)]
     (if (empty? f)
-      (do (println "judge-test: ok (an early stop with status 0, a failing test, a status, no report, a golden difference, another error: each found)") 0)
+      (do (println "judge-test: ok (an early stop with status 0, a failing test, a status, no report, a golden difference, another error, a benchmark's wrong result: each found)") 0)
       (do (doseq [l f] (println "  FAILING judge-test" l)) 1))))
 
 (defn program-items
@@ -363,6 +394,7 @@
   [p r ref gold]
   (case (judge-of p)
     :own (suite-items p r)
+    :bench (bench-items p r)
     :golden (golden-items p r gold)
     :chez (vec (items-of p r ref))))
 
@@ -376,8 +408,8 @@
         rows (vec (for [p (programs) :let [r (run-of dir (:id p))] :when r
                         :let [ref (refs (:id p)) chez (vec (items-of p r ref)) j (judge-of p)
                               items (program-items p r ref (golden-text p))
-                              own (when (not= :chez j) [(if (empty? items) :pass :fail) (or (first items) (second (own-verdict p r)) "golden output")])
-                              kind (if (= :golden j)
+                              own (when (not= :chez j) [(if (empty? items) :pass :fail) (or (first items) (second (own-verdict p r)) (if (= :bench j) "own result check" "golden output"))])
+                              kind (if (#{:golden :bench} j)
                                      (cond (= (empty? items) (empty? chez)) (if (empty? items) :agree-pass :agree-fail)
                                            (empty? items) :own-pass-ref-fail :else :own-fail-ref-pass)
                                      (agreement-kind own chez ref))]]
@@ -385,7 +417,7 @@
         by (group-by :kind rows)
         n (count rows) k (count (remove #(= :no-own (:kind %)) rows))]
     (println (str n " programs run, " k " judged without Chez (" (format "%.1f" (* 100.0 (/ k (max n 1)))) "%: "
-                  (count (filter #(= :own (:judge %)) rows)) " by their own report, " (count (filter #(= :golden (:judge %)) rows))
+                  (count (filter #(= :own (:judge %)) rows)) " by their own report, " (count (filter #(= :bench (:judge %)) rows)) " by their own result check, " (count (filter #(= :golden (:judge %)) rows))
                   " by their golden output), " (- n k) " by Chez's recorded run"))
     (doseq [kind [:agree-pass :agree-fail :chez-fails-too :chez-errors-too :own-pass-ref-fail :own-fail-ref-pass :no-own]]
       (println (str "  " (name kind) ": " (count (by kind))))
@@ -428,6 +460,7 @@
   [p r q ref-q gold-q]
   (case (judge-of p)
     :own (when (:tests q) (suite-items (assoc p :tests (:tests q)) r))
+    :bench (when (:bench q) (bench-items (assoc p :bench (:bench q)) r))
     :golden (when gold-q (golden-items p r gold-q))
     :chez (when ref-q (vec (items-of p r ref-q)))))
 
@@ -452,7 +485,7 @@
         refs (into {} (map (juxt :id identity) (read-string (slurp (path "test/scheme/si/ref-chez.edn")))))
         golds (fn [id] (some-> (progs id) golden-text))
         rs (for [c (controls)] [c (control-result progs refs golds #(run-of dir %) only c)])
-        expect (fn [subject] (case (some-> (progs subject) judge-of) :own "count of tests" :golden "golden output" "Chez run"))]
+        expect (fn [subject] (case (some-> (progs subject) judge-of) :own "count of tests" :bench "benchmark's name" :golden "golden output" "Chez run"))]
     (doseq [[{:keys [id subject reference]} v] rs]
       (let [against (str subject " against " reference "'s " (expect subject))]
         (println (case v
@@ -488,7 +521,7 @@
   [results]
   (let [by (group-by :judge results)
         part (fn [k what] (let [rs (by k)] (str (count rs) " by " what " (" (count (filter #(= :pass (:verdict %)) rs)) " pass)")))]
-    (println (str "judges: " (part :own "their own test report") ", " (part :golden "their golden output") ", "
+    (println (str "judges: " (part :own "their own test report") ", " (part :bench "their own result check") ", " (part :golden "their golden output") ", "
                   (part :chez "Chez's recorded run") "; bin/si own compares the first two with Chez's runs"))))
 
 (defn- cmd-judge [[dir & opts]]
@@ -508,6 +541,47 @@
         (println "wrote" (results-file) (if (seq only) (str "(" (count results) " results run, " (- (count all) (count results)) " kept from the record)") ""))))
     (judges-line results)
     (max (summary results) (rg/regress-code rec results recording? (load-classes)) (controls-code dir only) (judge-test-code))))
+
+;; SCS8 (b) (the user 2026-11-08; doc/scheme/SCHEME-SURVEY.md, "As built: SCS7 (c), SCS8 (b)"): Larceny's benchmarks as their authors
+;; meant them. Larceny runs a file whose leading forms are library forms and then a top-level program (R6RS 8.1 begins a top-level
+;; program with its import form, so si and Chez refuse the file whole); the harness does what Larceny's loader does: each leading
+;; (library NAME ...) datum goes onto the library path as NAME's file, LIB/a/b.sls for (a b) as psyntax's library-path and
+;; library-extensions find it, and the program is the rest of the text, the libraries' characters blanked but their line ends, so
+;; that the program's lines keep their numbers.
+
+(defn split-libraries
+  "Split the text of a file of leading library forms and then a top-level program: {:libraries [[NAME-PARTS TEXT] ...] :program
+  TEXT}, or {:error WHY} (the file reads with an error, or no library form leads it)."
+  [^String text]
+  (let [r (rd/read-all text {})
+        cps (.toArray (.codePoints text))
+        head (fn [f] (when (and (seq? f) (symbol? (first f))) (name (first f))))
+        libs (vec (take-while #(= "library" (head (:form %))) (:data r)))
+        sub (fn [[a b]] (String. ^ints cps (int a) (int (- b a))))]
+    (cond (:error r) {:error (str "the file does not read: " (pr-str (:error r)))}
+          (empty? libs) {:error "no library form leads the file"}
+          (not= "import" (head (:form (nth (:data r) (count libs) nil)))) {:error "the libraries are not followed by an import form"}
+          :else
+          (let [blank (int-array cps)]
+            (doseq [{[a b] :off} libs, i (range a b)]
+              (when-not (#{10 13} (aget blank (int i))) (aset blank (int i) (int 32))))
+            {:libraries (vec (for [{:keys [form off]} libs]
+                               [(mapv #(if (symbol? %) (name %) (str %)) (second form)) (sub off)]))
+             :program (String. ^ints blank 0 (alength blank))}))))
+
+(defn- cmd-split-libraries [[file out]]
+  (let [{:keys [error libraries program]} (split-libraries (slurp file))]
+    (if error
+      (do (println (str "split-libraries " file ": " error)) 1)
+      (do (doseq [[parts text] libraries
+                  :let [f (java.io.File. (str out "/lib/" (str/join "/" parts) ".sls"))]]
+            (.mkdirs (.getParentFile f))
+            (spit f (str ";; " (str/join " " parts) ": the library form of " (.getName (java.io.File. ^String file))
+                         ", put on the library path by the harness (SCS8 (b))\n" text "\n")))
+          (spit (str out "/" (.getName (java.io.File. ^String file))) program)
+          (println (str "split-libraries " file ": " (count libraries) " libraries (" (str/join ", " (map #(str "(" (str/join " " (first %)) ")") libraries))
+                        "), the program after them"))
+          0))))
 
 (defn- cmd-compare
   "The interpreted runs in si-dir and the compiled runs in aot-dir, program by program."
@@ -545,6 +619,7 @@
              "judge" (binding [*aot* (boolean (some #{"--aot"} args))] (max (cmd-judge (remove #{"--aot"} args)) (duplicates-code)))
              "compare" (cmd-compare args)
              "own" (cmd-own args)
+             "split-libraries" (cmd-split-libraries args)
              "ref-test" (cmd-ref-test)
              "divergences" (binding [*aot* (boolean (some #{"--aot"} args))] (cmd-divergences (remove #{"--aot"} args)))
              (do (println "usage: arbace.scheme.check record-ref DIR | judge DIR [--record] [--aot] | compare SI-DIR AOT-DIR | divergences [--aot] [RESULTS] | ref-test") 2))]

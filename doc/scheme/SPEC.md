@@ -274,6 +274,11 @@ infinity or a NaN, a mantissa width below 53 or with `#e`, a complex number of m
 for an exact zero angle to the implementation: those probes, and the 37 where Chez's R6RS mode reads past the grammar
 (`test/scheme/report-chez.edn`), are judged by their dump. `bin/repr-scheme report-check` compares the three readings.
 
+Since SCS7 (c) a corpus file is judged the same way (`arbace.repr.scheme.check/judge-file`): by the report wherever it
+decides the whole text, else (a datum it leaves to the implementation, or a rule of `test/scheme/report-chez.edn` naming the
+file) by its dump. The scans stay judged by their dumps; `bin/repr-scheme report-scans` measures them against the report's
+character classes over Java's Unicode tables (`test/scheme/report-scans.edn`: Unicode 17.0's new characters only).
+
 ## 10. The corpora
 
 `test/scheme/corpora.edn`: Racket's R6RS tests (`racket/r6rs`, `r6rs-test/tests`, Apache-2.0 OR MIT), Larceny's

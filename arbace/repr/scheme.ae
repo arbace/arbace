@@ -149,8 +149,8 @@
     (if (seq bad) 1 (do (println (str "report-test: ok (" (count report-tests) " numbers of known binary64 or exact value, by the report's conversion)")) 0))))
 
 (defn- cmd-report-check
-  "report-check DIR (the oracle tier's, by hand): every probe of DIR/probes read by the report's grammar, by Arbace's reader and
-  against Chez's dump (DIR/dump-probes.edn): where the report decides, the three must agree (data, offsets, an error's
+  "report-check DIR (the oracle tier's, by hand): every probe of DIR/probes and (SCS7 (c)) every corpus file of DIR/dump-ID.edn read
+  by the report's grammar, by Arbace's reader and against Chez's dump (DIR/dump-probes.edn, DIR/dump-ID.edn): where the report decides, the three must agree (data, offsets, an error's
   presence), but where test/scheme/report-chez.edn names the probe (there the report and Chez must differ, or the rule is
   stale). 0 when they do."
   [[dir]]
@@ -166,10 +166,50 @@
                      (not (same r (dumps f))) [:report-differs-from-chez f]
                      (not (same r (rd/read-all text {}))) [:report-differs-from-arbace f]
                      :else [:agree f]))
-        fr (frequencies (map first rows))]
-    (doseq [r rows :when (#{:stale-rule :report-differs-from-chez :report-differs-from-arbace} (first r))] (println (pr-str r)))
-    (println (str "report-check: " (count rows) " probes: " (pr-str (into (sorted-map) fr))))
-    (if (some #{:stale-rule :report-differs-from-chez :report-differs-from-arbace} (map first rows)) 1 0)))
+        ;; SCS7 (c): the corpora's files the same way, from DIR/dump-ID.edn (the files the dumps name, keyed as the check keys them)
+        corpora (remove #(false? (:check %)) (:corpora (read-string (slurp (str (root) "/test/scheme/corpora.edn")))))
+        keyed (into {} (mapcat (fn [c] (map (fn [[k p]] [p k]) (ck/corpus-files (root) c))) corpora))
+        frows (for [c corpora
+                    :let [f (str dir "/dump-" (name (:id c)) ".edn")]
+                    :when (.exists (java.io.File. f))
+                    d (ck/read-dumps f)
+                    :let [k (keyed (:file d) (:file d)) text (slurp (:file d)) r (rep/read-all text) rule (ck/report-exception rules k)]]
+                (cond (:undecided r) [:undecided k (:undecided r)]
+                      rule (if (same r d) [:stale-rule k (:id rule)] [:chez-past-report k (:id rule)])
+                      (not (same r d)) [:report-differs-from-chez k]
+                      (not (same r (rd/read-all text {}))) [:report-differs-from-arbace k]
+                      :else [:agree k]))
+        bad #{:stale-rule :report-differs-from-chez :report-differs-from-arbace}]
+    (doseq [r (concat rows frows) :when (bad (first r))] (println (pr-str r)))
+    (doseq [r frows :when (= :undecided (first r))] (println (pr-str r)))
+    (println (str "report-check: " (count rows) " probes: " (pr-str (into (sorted-map) (frequencies (map first rows))))))
+    (println (str "report-check: " (count frows) " corpus files: " (pr-str (into (sorted-map) (frequencies (map first frows))))))
+    (if (some bad (map first (concat rows frows))) 1 0)))
+
+(defn- cmd-report-scans
+  "report-scans DIR [OUT] (SCS7 (c), by hand: a measurement, not a judge): the three reading scans of DIR (scan-whitespace.edn,
+  scan-ident-initial.edn, scan-ident-subsequent.edn, Chez's recorded dumps) against the report's grammar reading the same texts
+  over every scalar value, its categories Java's (jrt's tables, jdk26u's Unicode 17.0); the differing code points counted by
+  Java's general category and block; OUT, the measurement as data (test/scheme/report-scans.edn). 1 when the report's character
+  classes and its reading of a text disagree (an unconfirmed scalar value), else 0."
+  [[dir out]]
+  (let [rows (vec (for [k ["whitespace" "ident-initial" "ident-subsequent"]
+                        :let [f (str dir "/scan-" k ".edn")]
+                        :when (.exists (java.io.File. f))]
+                    (ck/report-scan-diffs (read-string (slurp f)))))]
+    (doseq [r rows]
+      (println (str "scan " (name (:scan r)) ": Chez " (:chez r) ", the report " (:report r) " code points; only the report's "
+                    (:n-only-report r) " (" (:ranges-only-report r) " ranges), only Chez's " (:n-only-chez r) " (" (:ranges-only-chez r) " ranges); the classes confirmed by the report's reading of "
+                    (:confirmed-by-reading r) " texts" (when (seq (:unconfirmed r)) (str ", UNCONFIRMED " (pr-str (:unconfirmed r))))))
+      (doseq [[[c b] n] (:only-report r)] (println (str "  only-report " c " " b " " n)))
+      (doseq [[[c b] n] (:only-chez r)] (println (str "  only-chez " c " " b " " n))))
+    (when out
+      (spit out (str ";; SCS7 (c) (doc/scheme/SCHEME-SURVEY.md, \"As built: SCS7 (c), SCS8 (b)\"): the lexical scans' differences between the\n"
+                     ";; report's grammar over Java's Unicode tables (jrt's, jdk26u: Unicode 17.0) and Chez Scheme 10.3.0's reader, by Java's\n"
+                     ";; general category and block; written by bin/repr-scheme report-scans --record. A measurement: the scans stay judged by\n"
+                     ";; Chez's dumps. Read with the Clojure reader.\n"
+                     (pr-str rows) "\n")))
+    (if (some (comp seq :unconfirmed) rows) 1 0)))
 
 (defn roundtrip-found [{:keys [subject reference]}]
   (if-let [r (roundtrip-file subject (or reference subject))] [(pr-str r)] []))
@@ -256,6 +296,9 @@
     (let [fr (frequencies (for [[k j] judges :when (.startsWith ^String k "probe/")] j))]
       (println (str "probes (SCS5 (b)): " (get fr :report 0) " judged by the report's grammar (arbace.repr.scheme.report, no dump read), "
                     (get fr :dump 0) " by Chez's dump (the report leaves them to the implementation, or test/scheme/report-chez.edn names them)")))
+    (let [fr (frequencies (for [[k j] judges :when (not (.startsWith ^String k "probe/"))] j))]
+      (println (str "files (SCS7 (c)): " (get fr :report 0) " judged by the report's grammar (no dump read), "
+                    (get fr :dump 0) " by Chez's dump (a datum the report leaves to the implementation, or test/scheme/report-chez.edn names them)")))
     (let [r (ck/symbol-rule)]
       (println (str "symbol rule: " (:names r) " names, " (:bare r) " bare, bad " (pr-str (:bad r))))
       (when (seq (:bad r)) (reset! rule-bad true)))
@@ -323,6 +366,7 @@
                  "prepare" (cmd-prepare more)
                  "controls" (cmd-controls more)
                  "report-check" (cmd-report-check more)
+                 "report-scans" (cmd-report-scans more)
                  "check-dumps" (cmd-check-dumps more)
                  "spec-check" (cmd-spec-check more)
                  (do (println "usage: -m arbace.repr.scheme read|print|prepare|check-dumps ...") 2))]

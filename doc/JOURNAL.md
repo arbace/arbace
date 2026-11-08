@@ -1090,3 +1090,32 @@ Checked: scheme-read-essential's command (1,358 files and probes, 1,140 by the r
 --record` and `--judge --strict` (0 problems). Scheme's scores: completeness 96.8 to 97.3, maturity 100, independence 97.5 to 99.6 (judge
 0.876 to 0.979). Night: `bin/repr-scheme check --record`, `bin/si check --record`, `bin/si check --aot --record`. Proposed: SCS7 (the
 corpora's files by the report), SCS8 (Larceny's earley and nboyer run as their authors meant, their own result checks).
+
+## 2026-11-08: SCS7 (c), SCS8 (b), Scheme's corpus files by the report and Larceny's benchmarks by their own checks (branch `scheme-props`, from `mac/next` 5ec43f7b7)
+
+The user's decisions of 2026-11-08 (about 19:45) on scheme-scs4's proposals (doc/scheme/SCHEME-SURVEY.md, "As built: SCS7 (c), SCS8
+(b)"). SCS7 (c): `arbace.repr.scheme.check/judge-file` judges each corpus file by R6RS's grammar (`arbace.repr.scheme.report`, SCS5's) where
+it decides the whole text, its Chez dump unread: 112 of the 115 files; the 3 with a complex number of mixed exactness (Racket's base.sls and
+io/ports.sls, Chibi's r7rs-tests.scm) by their dumps; `bin/repr-scheme report-check` reads the files three ways too (112 agree, 3
+undecided). The scans stay on their dumps and were measured (`bin/repr-scheme report-scans`, `test/scheme/report-scans.edn`): the report's
+character classes over Java's Unicode tables (jrt's, jdk26u, Unicode 17.0), each confirmed by the report's reading of the scan's text on
+every differing value and a sample, against Chez 10.3.0's: whitespace equal; `ident-initial` 4,790 and `ident-subsequent` 4,803 code points
+only the report's, none only Chez's: exactly Unicode 17.0's new characters (CJK Extension J 4,298, Tangut's supplements, Tai Yo, Beria Erfe,
+Tolong Siki, Sidetic and 17.0's additions elsewhere); Chez's tables are 16.0's, no category differs. SCS8 (b): `split-libraries` puts the
+leading library forms of Larceny's earley.sch and nboyer.sch onto a library path of the run's own (as Larceny loads that layout; R6RS 8.1
+begins a program with `import`), the program after them keeps its line numbers; bin/si's `split_program` at both levels; inputs of our own
+(`test/scheme/si/inputs/`: earley 1 iteration, nboyer size 0); the judge `:bench` (`bench-items`): status 0, run-benchmark's banner with the
+benchmark's name, no "Error: Benchmark program returned wrong result" (earley's 1430 trees, nboyer's 95,024 rewrites); judge-test's five
+cases, the control `_control/nboyer-vs-earley`; run-benchmark.sch stays refused (Larceny's `(primitives run-benchmark)`). Chez's reference
+runs of the two re-recorded by hand (`--record-ref --only`, the same bytes as si's). Alternatives considered: the scans by the report now
+(not decided: the measurement first, SCS9); reading all 3.3 million scan texts by the report (did not end in 45 minutes: the classes with a
+confirming sample instead); keeping earley and nboyer's refusal entries beside new split ones (rejected: run-benchmark keeps the refusal
+tested); a golden output for the benchmarks (not needed: their authors' result checks are the verdict).
+
+Checked: scheme-read-essential's command (1,358 files and probes, 106 files and 1,140 probes by the report, controls, report-test, round
+trip, spec-check, corpora files), `--corpus whimsical --corpus scans`, `bin/si check` and `--aot` on their essential subsets (no Chez run
+read, no regression, the four controls differ), `--record --only` for the two at both levels, `bin/si own` (2 of 2 agree), `bin/repr-scheme
+c2j-check` (19 of 19), `bin/si corpora controls-test`, `bin/reap --record`, `bin/crops-score --record`, `--judge --strict` (0 problems).
+Scheme's scores: completeness 97.3 (unchanged), maturity 100, independence 99.6 to 99.8 (judge 0.979 to 0.989). Night: `bin/repr-scheme
+check --record`, `bin/si check --record`, `bin/si check --aot --record`. Proposed: SCS9 (the scans by a pinned UCD 16.0, the reader's tables
+from it), SCS10 (si's choices where R6RS defers stated and applied by the report), SCS11 (earley and nboyer at the corpus's sizes, compiled).
