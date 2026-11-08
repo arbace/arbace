@@ -88,7 +88,11 @@ code. Three kinds of things live here:
   `simplcmp.ae`, the simplified Core's judge, is Arbace's own),
   `deriv.ae` (HF4, 2026-11-05) ports the generators of `compiler/GHC/Tc/Deriv/Generate.hs` (Eq, Ord, Enum, Bounded, Ix, Read,
   Show) and `Deriv/Functor.hs` (Functor, Foldable, Traversable) from the same tarball, the file carrying GHC's notice;
-  `Deriv/Infer.hs` and `Deriv.hs` read as the specification of the contexts and strategies),
+  `Deriv/Infer.hs` and `Deriv.hs` read as the specification of the contexts and strategies; outside `arbace/` but recorded
+  here with the crop, hsi's `go/arbace/hs/alloclimit.ae` follows `rts/Schedule.c`'s schedulePostRunThread and
+  `rts/PrimOps.cmm`'s allocation counter primops, and its driver's `test/haskell/hsi/cmd/rtsflags.ae` ports
+  `rts/RtsFlags.c`'s procRtsOpts with `rtsusage.ae` its `usage_text[]` transcribed, from the same tarball, HE9 on
+  `haskell-eval9`'s 3f57a1d3, ported onto main 2026-11-08, doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: HE9 on main"),
   `repr/c/` (repr/c, C's bridge,
   `arbace.repr.c.*`; doc/C23-SURVEY.md, doc/c/SPEC.md: its lexer and preprocessor, `repr/c/lex.ae` and
   `pp.ae`, are ports of modernc.org/cc/v4 v4.29.7 as go-whim carries it, https://github.com/arbace/go-whim

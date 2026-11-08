@@ -2032,3 +2032,71 @@ onto batch 3's hsi, the day after batch 3's night has re-recorded hsi's packs: i
 `test/haskell/hsi/cmd/main.ae` and `bin/lib/hsi/check` re-applied, `go/arbace/hs.ae`'s files and init order made again; proved by
 cgrun057 and T16916 byte for byte and the night's `bin/hsi check`. HFS-I4 (b)'s rebase did not apply (ten files conflict). The GPL line's
 branches (`haskell-pp`, `haskell-cpp`, `haskell-full2`) are deleted once batch 3 is on `next` (batch 3's proposal 3 (a)).
+
+## As built: HE9 on main (write-ahead)
+
+Built 2026-11-08 on branch `he9-port` from main `2a72c94aa`, by 1 (a) above: `haskell-eval9`'s 3f57a1d3 ported by hand onto main's
+hsi (haskell-90's native read and own verdicts, hfs-i1's `--front native`, the re-recorded records and the stubs' lock kept as they are).
+
+- **How.** The runtime's forms are a read of their Go text (HES38), so the port was made on the Go text, not on the forms: the
+  three trees (3f57a1d3's parent, 3f57a1d3, main) printed by `bin/repr-go print` (`go/arbace/hs.ae`, `test/haskell/hsi/cmd.ae`),
+  3f57a1d3's own Go diff taken (14 hunks in `cmd/main.go`, `alloc.go`, `ffi.go`, `machine.go`, `prim_ctl.go`; the forms' 2,600
+  changed lines are mostly positions) and applied to main's print with `patch`: 10 hunks applied (four with an offset or fuzz,
+  each read again), 4 by hand where main's code had moved (the driver's flags beside main's `--c-main`, the `--c` NODES of
+  HES64 (a) where HE9 had its `--c FILE`; `rtsSize`'s removal; the Machine's `AllocGrace` beside main's `inCFin` of HES60 (a)
+  where HE9 had `inCFins` of its clink), `gofmt`, `go vet`, then `bin/hsi runtime read`: the forms, `hs.ae`'s `:files` and
+  `:init-order` and `cmd.ae`'s (`[rtsUsage]`) made by the read, not by hand. The new files `go/arbace/hs/alloclimit.ae`,
+  `test/haskell/hsi/cmd/rtsflags.ae` and `rtsusage.ae` are 3f57a1d3's byte for byte (they depend on nothing main changed:
+  `accepts`, `throwMsg`, `raiseAsync`, `cf`, `pc` are main's as they were). `bin/lib/hsi/check`'s hunk (the program's
+  `-threaded` and `-with-rtsopts` passed to the driver) re-applied after main's `--image`; the compiled level's executable is
+  the same driver, so `check --aot` passes them too.
+- **What it does** (3f57a1d3's, unchanged): each thread's allocation counter counts down the words of the heap objects hsi makes
+  (`newConN`, `newThunkN`, `newFunN`), checked every 256 bounces of the run loop when its limit is enabled
+  (AllocationLimitExceeded as rts/Schedule.c's schedulePostRunThread throws it, queued while masked, the counter set to the
+  grace `+RTS -xq`); `setThreadAllocationCounter#`, `setOtherThreadAllocationCounter#`, `stg_getThreadAllocationCounterzh`,
+  `rts_enable/disableThreadAllocationLimit` the thread's (no longer no-ops); the RTS's options parsed as rts/RtsFlags.c's
+  procRtsOpts, `-with-rtsopts`' first, an error ending the run with GHC's message and usage text (status 1); hsi uses `-K` and
+  `-xq`.
+- **Not taken**: `haskell-eval9`'s records (`check-hsi.edn`, `check-hsi-aot.edn`, `divergences.edn`: recorded at the old helper
+  `6542fb8a3e38`, and over HE9's own C route, 8bce6a85/d539b644, which main replaced by batch 3's HES60 (a) and HES64 (a),
+  `rtsapi.ae` and `cprog.ae`). The classes keep allocLimit1-4 (`:rts`), cgrun057 and T16916 (`:rts-options`, whose class then goes) until the night's record: a passing
+  program in a class does not fail the check, and the committed record still has them failing.
+- **Checks** (light: 2 jobs, `ARBACE_MEM_GIB=3`; main's hsi built from main's print beside it, `HSI_EXE`):
+  - cgrun057, T16916 and allocLimit1-4 (`bin/hsi check --corpus testsuite-core --only ...`): **6 of 6** pass (cgrun057's and
+    T16916's usage texts byte for byte, allocLimit1-4 in 0.05 to 0.19 s); main's hsi 0 of 6 (allocLimit1, 2 and 4 killed at the
+    CPU limit, allocLimit3 wrong, the two RTS-option programs without GHC's message).
+  - 67 programs of the testsuite's core: the 13 whose all.T flags or run options give the RTS options (`-threaded`,
+    `-with-rtsopts`, `+RTS ...`: T14346, T15892's `-G1 -A32k`, T3677's `-K8k`, cgrun060, T3429's `-C0.001`, conc007's `-H128M`,
+    conc012, conc019, conc030, conc034, allocLimit4's `-xq300k`, cgrun057, T16916), a third of the concurrent tests main
+    passes (the run loop's new check is theirs) and every twentieth other pass of main's record: **66 of 67** pass; main's hsi
+    on the same programs 62 (cgrun057, T16916, allocLimit4 and T14346 fail: T14346's and T16916's only because the check now
+    passes `--threaded`, which main's driver refuses). T8726 (`:speed`) fails on both at `ARBACE_MEM_GIB=3` (Go out of
+    memory at 1.8 GB in use, under load), passes alone on the port: no pass lost.
+  - `bin/hsi runtime check`: the committed forms are a read of their own print. hsi-essential's command (`bin/hsi
+    own-verdicts --check && bin/hsi check --corpus samples,synthetic,testsuite-core --only @test/haskell/hsi/essential.txt`):
+    123 of 123, the four controls failing as they must, own-verdicts current (580 of 908 by their own verdict), 51 s.
+- **Expected** after the night's record: the testsuite's core **658 of 701** on main's hsi (652 in the committed record, plus
+  the six), the record 796 of 908 (790 plus the six). `haskell-eval9`'s 666 of 701 counted 11 programs main does not pass:
+  T20735, the `_ghci` tests, ffi002, T5594, T5402, ffi023, hs_try_putmvar002 and 003, rts_clearMemory, whose GHC reference is
+  `:no-build` on main (`test/haskell/ref-ghc914.edn`: the C includes the `_stub.h` GHC writes for the Haskell, and main's
+  record-ref builds the C first); d539b644 built them (record-ref compiling the Haskell first, `rts_clearMemory`), outside 1
+  (a): proposal HES83 below. main passes three HE9's branch did not (T16846, compareByteArrays, T21969).
+- **Night** (heavy or whole-corpus, the main session's): `bin/hsi check --corpus nofib,samples,synthetic,testsuite-core --jobs 4
+  --record` (the gate's hsi-check with `--record`; T16846 needs about 10 GB: under the heavy lock, or rerun alone
+  `bin/hsi check --corpus testsuite-core --only testsuite/codeGen/should_run/T16846 --record` if killed on a loaded host);
+  then `test/haskell/divergences.edn`: allocLimit1-4 out of `:rts` (its `:why` without "allocation counters and limits"),
+  `:rts-options` removed (cgrun057, T16916), and `bin/hsi divergences`; `bin/hsi check --aot --corpus
+  nofib,samples,synthetic,testsuite-core --jobs 2 --record` (the compiled level's executable is the same driver: the six
+  are expected to pass compiled, as on `haskell-eval9`); `bin/hsi check --front native --corpus samples,synthetic,testsuite-core
+  --record` if `check-hsi-native.edn` is kept current (the native front end's programs with RTS options take the same flags).
+  The packs need no re-record: the programs' STG and the libraries' are unchanged (the runtime is no key of theirs).
+
+### Proposed (HES83)
+
+- **HES83: the 11 programs of `haskell-eval9`'s C route main lacks.** Their references are GHC's `:no-build` on main.
+  - Options: (a) port d539b644's record-ref order (the Haskell compiled first, its `_stub.h` beside the C) and record the 11
+    references by GHC, by hand at the oracle tier (`bin/hsi record-ref --only ...`), with hsi's `rts_clearMemory` (a no-op) and
+    whatever main's rtsapi then lacks, proved program by program: about half a day, GHC once; (b) judge the ones with a
+    `.stdout` file by their own verdict (haskell-90's `own-verdicts`), no GHC: fewer programs (the `_ghci` tests and T20735
+    have no reference GHC builds as the testsuite does), no oracle run; (c) leave them in `:no-reference`.
+  - Recommendation: (b) for those that have a verdict of their own, (a) for the rest; the core would reach about 666-669 of 701.
