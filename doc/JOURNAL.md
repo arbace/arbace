@@ -791,3 +791,19 @@ third of the concurrent tests, every twentieth other pass) 66 of 67, main's hsi 
 night's `bin/hsi check ... --record`: the testsuite's core 658 of 701 (652), the record 796 of 908; the divergences' edits and the night's
 commands in doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: HE9 on main (write-ahead)". HE9's 666 counted 11 programs whose references
 main's record-ref cannot build (the C includes GHC's `_stub.h`): HES83 proposed.
+
+## 2026-11-08: the round trip's `--record` without gcc, CS282 (a) (branch `c-rt-record`, from next bd33e27cc)
+
+By the user's decision of 2026-11-08 (CS282 (a)): `bin/repr-c roundtrip --record` in the default mode records levels 1-2 and keeps
+levels 3-4 and gcc's acceptance from the results file's recorded rows, as the token check's record keeps its `:gcc` level (c-triage's
+T.5), so the night can record C's print on C's own target. Built in `arbace.repr.c.rtcheck` (`load-recorded`, `recorded-levels`,
+`judge`'s recorded mode and the verb `judge-recorded`; `record` sorts each corpus's entries) and `bin/lib/repr-c/roundtrip` (`--record`
+no longer implies gcc; `--no-gcc --record` allowed). Two rules found on the samples: a file with no recorded level 3 keeps a known
+entry of a class only levels 3-4 give (zlib inflate.c, read only since CDF.8); a row known by such a class whose entry the known file
+dropped since (reverse-complement-5.c, 808d08d60) loses its recorded levels 3-4. Alternatives considered: deferring the stale entries
+as the no-gcc judge's awk does (rejected: the record would drop them from the known file); keeping `--record` the oracle tier's
+(CS282 (b), not chosen). Test `roundtrip-record-keeps-oracle-levels-under-own-verdict` (with the round trip's and token record's
+tests: 6 tests, 60 assertions, 0 failures); the record over tcc-pp, zlib, gcc-va-opt and benchmarksgame (exit 0, 98 pass, 3 known,
+the known file unchanged; its rows not committed). fprintf-1's and fprintf-chk-1's rows tidied from an `--only` run judged by
+`judge-recorded` (both pass), `bin/reap --record` (C print 4,770 passing) and `bin/crops-score --record`. Details and the night's
+command: doc/C23-SURVEY.md, "As built: CS282".
