@@ -2100,3 +2100,86 @@ hsi (haskell-90's native read and own verdicts, hfs-i1's `--front native`, the r
     `.stdout` file by their own verdict (haskell-90's `own-verdicts`), no GHC: fewer programs (the `_ghci` tests and T20735
     have no reference GHC builds as the testsuite does), no oracle run; (c) leave them in `:no-reference`.
   - Recommendation: (b) for those that have a verdict of their own, (a) for the rest; the core would reach about 666-669 of 701.
+
+## Decided (the user, 2026-11-08: HES83)
+
+HES83: (b) where a program ships its own `.stdout`, judged by its own verdict; (a) for the rest: d539b644's record-ref order
+ported (the Haskell compiled first, so its C can include the `_stub.h` GHC writes), their GHC references recorded at the oracle
+tier, and `rts_clearMemory` added to hsi. The 11 programs: T20735, the `_ghci` tests (T1288_ghci, T2276_ghci, ffi018_ghci),
+ffi002, T5594, T5402, ffi023, hs_try_putmvar002 and 003, rts_clearMemory.
+
+## As built: HES83 (write-ahead)
+
+Built 2026-11-08 on branch `hs-hes83` from next `bd33e27cc` (HE9 merged).
+
+- **record-ref** (`bin/lib/hsi/record-ref`). The testsuite's own route, read from the tests' `all.T` and `Makefile`s: each of
+  the 11 has a `pre_cmd` running a `NAME_setup` rule, which is `$(TEST_HC) $(TEST_HC_OPTS) -c NAME.hs` (ffi002, T5402, T5594,
+  ffi023, rts_clearMemory, conc059, hs_try_putmvar002 and 003: "to ensure that we generate NAME_stub.h before compiling
+  NAME_c.c", as ffi/should_run/all.T says; GHC compiles a command line's C before its Haskell, so one `ghc ... NAME.hs
+  NAME_c.c` fails, as checked by hand) or `-c NAME_c.c -o NAME_c.o` (the three `_ghci` tests, whose all.T names the object).
+  record-ref now does the same first when a program's flags name C, Cmm, assembly or objects (d539b644's order): the Haskell by
+  `ghc -O0 --make -no-link` with `-odir`/`-hidir` but no `-stubdir`, so `NAME_stub.h` lands beside the sources, and an `X.o`
+  flag with `X.c` beside it and no `X.o` made by `ghc -O0 -c X.c -o X.o`; then the build as before. T20735 already built:
+  main's run_plan passes `multi_compile_and_run`'s extra C since HES64 (a), and its `:no-build` was older than that. The plan
+  (`test/haskell/eval/run_plan.ae`) and `bin/hsi check` are unchanged: d539b644's run_plan hunk spelled a `pre_cmd`'s object
+  as its C, which would change the plan check shares; record-ref makes the object instead, as the `pre_cmd` does, and check
+  already maps an object to its C.
+- **The references** (`bin/hsi record-ref --corpus testsuite-core --only` the 11 and conc059, GHC 9.14.1 by hand, the oracle
+  tier): all 12 build now. T20735, T1288_ghci, T2276_ghci, ffi018_ghci, T5594 and ffi002 give their shipped `.stdout`
+  (`:expected :same`), so `bin/hsi own-verdicts --record` lists them (580 to 586 of 908): (b), judged by their own verdict,
+  the record not read. T5402 (status 42, all.T's `exit_code(42)`), hs_try_putmvar002, hs_try_putmvar003 (status 1, "This
+  test requires -threaded": all.T runs it only in the threaded ways, record-ref's one normal way gets the C's refusal),
+  ffi023 and rts_clearMemory ship no `.stdout` (`:expected :none`): (a), judged by GHC's recorded run. Their statuses and
+  digests are d539b644's (`haskell-eval9`) line for line. conc059 (`only_ways` threaded) times out under GHC's non-threaded RTS: its
+  reference is `:timeout` now (was `:no-build`), its class below.
+- **hsi.** `rts_clearMemory` (`rtsapi.ae`): GHC 9.14.1's `rts/sm/Storage.c` zeroes the heap's unused memory (the free list,
+  the nurseries', the empty pinned and the GC threads' free blocks); hsi's heap is Go's, with no unused memory of its own:
+  a no-op, nothing a program observes. And the collector's roots (`rts.ae`'s `gc`): a thread in a foreign call that called
+  back (`nested`'s `inForeign`) is now a root marked before the blocked threads are decided, as GHC's `markCapability` marks
+  the capability's `suspended_ccalls`. It was marked only in the loop that decided them, after the threads met before it:
+  ffi023's main, blocked on the MVar a forked thread in `out` (`hs_perform_gc`, then a call-in) will put, was resurrected
+  with BlockedIndefinitelyOnMVar when another thread's `hs_perform_gc` ran during the first one's call-in (found with a
+  traced build: thread 2 `inForeign`, thread 1 unmarked). Both made on the printed Go (`bin/hsi runtime print`, the edit,
+  `gofmt`, `go vet`, `bin/hsi runtime read`), as HE9's port.
+- **Classes** (`test/haskell/divergences.edn`). The 10 that pass leave `:no-reference`, whose `:why` names what is left
+  (T17920, T24809, nofib's callbacks and the 57 programs of HE5); conc059 moves to a new `:threaded-only` (deferred): its
+  reference is the normal way's `:timeout`, and hsi matches neither it nor the shipped threaded verdict ("exiting...", 5000,
+  "exited."): hsi's `hs_exit` runs the forked threads to their end and prints their ten "hello" lines, where GHC's threaded
+  RTS stops them at shutdown (HES84). rts_clearMemory stays in `:test-c` until the night's record (its committed row is
+  main's C fault; a passing program in a class does not fail the check).
+- **Checks** (light: 2 jobs, `ARBACE_MEM_GIB=2` or 3):
+  - the 12 (`bin/hsi check --corpus testsuite-core --only ...`): **10 of 11 pass** (T20735 and the `_ghci` three, ffi002,
+    T5594 by their own verdict; T5402, hs_try_putmvar002 and 003, ffi023 by GHC's run); main's hsi 0 of 11. rts_clearMemory
+    runs out of memory under a 2 or 3 GiB cap: `foo(1000000)`'s `force [0 .. n]` is a stack 1,000,000 deep, about 2.3 KB a
+    level on hsi; a copy with `foo(100000)` passes (status 0, 294 MB, its eight `rts_clearMemory` calls made) and with
+    300000 (714 MB), so the whole one needs about 2.4 GB: it is expected to pass under the night's 16 GiB. conc059 fails, in
+    its class.
+  - no pass lost by the collector's change: the 44 passing programs of main's record whose source has a foreign export, a
+    wrapper, BlockedIndefinitely, performGC, a weak pointer or a finalizer, with the 11: **54 of 55** (conc059 in its class).
+  - recorded: `bin/hsi check --corpus testsuite-core --only` the 11 but rts_clearMemory `--record` (the other lines kept);
+    `bin/hsi divergences`: 908 programs, 800 pass, 108 in a class, 0 not; the testsuite's core 662 of 701 in the record (652).
+  - `bin/hsi runtime check` passes; `bin/hsi own-verdicts --check` current (586 of 908); hsi-essential's command 123 of 123,
+    the four controls failing as they must.
+- **Expected** after the night (HE9's six and rts_clearMemory): the testsuite's core **669 of 701** on hsi (662 recorded, the
+  six of HE9 and rts_clearMemory), the record 807 of 908.
+- **Night** (the main session's; the HE9 commands of "As built: HE9 on main" first, which re-record every program): `bin/hsi
+  check --corpus nofib,samples,synthetic,testsuite-core --jobs 4 --record`; then in `test/haskell/divergences.edn`
+  rts_clearMemory out of `:test-c` (its `:why` without "or an RTS function of a test of the RTS itself (rts_clearMemory)"),
+  and HE9's edits; `bin/hsi divergences`; `bin/hsi check --aot --corpus nofib,samples,synthetic,testsuite-core --jobs 2
+  --record` (the 11 compiled; ffi023's fix is the runtime's, shared); `bin/hsi check --front native --corpus
+  samples,synthetic,testsuite-core --record` if `check-hsi-native.edn` is kept current. A whole `bin/hsi record-ref` is not
+  needed: the new step runs only for a program whose flags name C or objects, and those 12 are recorded; one at the next
+  helper or GHC change would show the other such programs' lines unchanged but their `:build` times.
+
+### Proposed (HES84, HES85)
+
+- **HES84: the threaded ways.** conc059 (and the threaded-only tests the core passes today on the normal way's reference, as
+  hs_try_putmvar003 through its C's refusal) is judged against the normal way. (a) record-ref records a test `only_ways` the
+  threaded ways with `-threaded` (all.T's first listed way), hsi runs it `--threaded`, and hsi's `hs_exit` ports
+  `exitScheduler`'s shutdown (the threads still in foreign calls not resumed, the others killed): conc059 would pass, other
+  references would change (a night's record and a look at each); (b) the class `:threaded-only` (as built). *Recommended:
+  (b)* until the RTS's threaded semantics are taken up (`:rts`'s HE4f-HE4g); then (a).
+- **HES85: nofib's C in record-ref.** nofib/smp/callback001 and 002 are `:no-build` because record-ref's nofib plan passes no
+  `.c` of the directory, which `bin/hsi check`'s does (HES64 (a), target.mk builds every `.c` with the program). (a) the same
+  in record-ref, the two recorded by GHC by hand: minutes; (b) leave them in `:no-reference`. *Recommended: (a)*, at the next
+  oracle-tier recording.

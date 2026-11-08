@@ -864,3 +864,30 @@ target's verify and oracle; `pp-check --essential` (53 files as before, the cont
 20` (904 files, as test/cpp/host gives) under strace, no file of test/cpp/host or the installed headers opened; the dg check's preprocess
 part and modules `--own --sample 20` (60 of 60); the samples' own round trip (9 of 9). `bin/crops-score --crop cpp`: 76.1 / 100 / 54.3 to
 76.1 / 100 / 67.7 (read 0.148 to 0.648, judge 0.568 to 0.735), recorded in test/crops/scores.edn. Proposed CP247-CP249.
+
+## 2026-11-08: HES83, the 11 programs of HE9's C route (branch `hs-hes83`, from next bd33e27cc)
+
+By the user's decision of 2026-11-08 (HES83: (b) own verdicts where a program ships its `.stdout`, (a) for the rest). Source
+studied: GHC 9.14.1's testsuite (`.tmp/hsi/ghc-9.14.1/testsuite/tests`, the pinned tarball): each of the 11 tests' `all.T` runs a
+`pre_cmd` whose `Makefile` rule compiles the Haskell first (`-c NAME.hs`, so `NAME_stub.h` exists before the C is compiled; GHC
+compiles a command line's C before its Haskell, checked by hand) or the `_ghci` tests' object (`-c NAME_c.c -o NAME_c.o`); and
+`rts/sm/Storage.c`'s `rts_clearMemory` and `rts/include/RtsAPI.h` (GHC 9.14.1's source tarball), for the no-op's reasoning.
+
+- `bin/lib/hsi/record-ref`: d539b644's order (`haskell-eval9`) ported: a program whose flags name C, Cmm, assembly or objects has
+  its Haskell compiled first (`--make -no-link`, no `-stubdir`), and an object with its C beside it made by `ghc -c`, then the
+  build. Alternative considered: d539b644's run_plan hunk (the object spelled as its C), rejected: the plan is shared with
+  `bin/hsi check`, which maps objects already; running the Makefile's rule itself (needs make and the testsuite's variables).
+- The references recorded by GHC 9.14.1 by hand (`bin/hsi record-ref --corpus testsuite-core --only` the 11 and conc059): all
+  build, the same statuses and digests as d539b644's; `bin/hsi own-verdicts --record`: 586 of 908 (580), the six with a shipped
+  `.stdout` GHC's run gives (T20735, the three `_ghci` tests, T5594, ffi002) judged by their own verdict.
+- hsi (`go/arbace/hs/rtsapi.ae`, `rts.ae`, made on the printed Go and read back): `rts_clearMemory` a no-op (hsi's heap is Go's);
+  the collector marks the threads in a foreign call that called back as roots before deciding the blocked ones (GHC's
+  `markCapability` marks `suspended_ccalls`): ffi023's main had been resurrected with BlockedIndefinitelyOnMVar.
+- `test/haskell/divergences.edn`: the 10 passing leave `:no-reference`; conc059 (only the threaded ways; GHC's normal-way run times
+  out, hsi's `hs_exit` lets the forked threads print) in a new `:threaded-only`; rts_clearMemory stays in `:test-c` until the night.
+- Checks (light): the 11, 10 pass (rts_clearMemory out of memory under the 2-3 GiB cap only: a 1,000,000-deep stack, its copies at
+  100,000 and 300,000 pass at 294 and 714 MB); 54 of 55 with 44 passing callback, finalizer and deadlock programs (no pass lost);
+  `--record` of the 10 and conc059; `bin/hsi divergences` 800 pass, 0 unclassed; the core 662 of 701 recorded (652), 669 expected
+  after the night's record; `runtime check`, `own-verdicts --check`, hsi-essential's command 123 of 123.
+- Proposed: HES84 (the threaded ways' references and `hs_exit`'s shutdown), HES85 (nofib's C in record-ref). Details and the
+  night's commands: doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: HES83 (write-ahead)".
