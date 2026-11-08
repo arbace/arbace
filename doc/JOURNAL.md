@@ -1061,3 +1061,32 @@ a difference far from its cause; built MIR is the builder's own output), running
 links through rustc as the linker driver, which the stubs forbid). `bin/crops-score` Rust 75.0 / 95.8 / 80.0 before and after: under
 RES54 (a) eval and AOT stay 0.5 while std's records are consumed, until RF12. Proposed: RFP22 (the order after the slice), RFP23 (the run's
 record as packs), RFP24 (no gate step yet).
+
+## 2026-11-08: SCS4 (a), SCS5 (b), SCS6 (b), Scheme's probes by the report and Larceny's programs by golden outputs (branch `scheme-scs4`, from `mac/scheme-scs3` d026b47f1)
+
+The user's decisions of 2026-11-08 (about 17:00) on scheme-scs3's proposals. SCS4 (a): si keeps Chez's semantics for the five Racket
+tests it fails by design; nothing built, the three classes' `:decided` name it. SCS5 (b): `arbace.repr.scheme.report`, R6RS 4.1-4.3's
+lexical and datum grammar written from the report rule for rule, apart from the reader (which reads as Chez does), its numbers by exact
+arithmetic and its own correctly rounded binary64 conversion (`nearest-double`), its outcome the data, a syntax violation or
+"undecided" where the report leaves the reading to the implementation (`#!<identifier>`, `#e` on an infinity, an exact ratio over zero,
+a mantissa width below 53 or with `#e`, a complex of mixed exactness, a polar number but for an exact zero angle: 72 probes). The read
+check judges each probe it decides by it (`check/judge-probe`, `report-diff`: data, offsets, count, error and its class, write then read
+back), its dump in the pack unread: 1,140 of 1,249 probes. `bin/repr-scheme report-check` (by hand, from the recorded dumps) reads every
+probe three ways: 1,140 agree, and the 37 where Chez's R6RS mode reads past the grammar are named in `test/scheme/report-chez.edn` (upper
+case `+INF.0`, a mantissa width outside radix 10, a `#` after a prefixed number) and judged by their dump, as the reader stays Chez's
+(SM1). Checks of the judge: `report-test` (17 numbers of known binary64 or exact value, at every check) and a control family
+`:read-report` (6 controls and a sanity entry; `bin/si corpora controls-test` 35 ok). SCS6 (b): golden outputs of Larceny's 13 programs
+(`test/scheme/si/golden/larceny/`, from si's runs, reviewed line by line against R6RS: doc/scheme/SCHEME-SURVEY.md, "As built:
+SCS4-SCS6"), with `:status` and `:error` (the error's kind) for the five that end with an error; `golden-items` checks the kind too
+(`error-differs`), `judge-test` three more cases; no program reads Chez's run at check time; the class `chez-conditions` left
+(larceny/exceptions passes: its golden states si's R6RS conditions). Alternatives considered: the report's verdict on the 37 with
+Arbace's reader changed to the report's (rejected: SM1 makes the reader Chez's, and SCS4 (a) keeps Chez's semantics), a regex in place
+of the 37 ids (rejected: the regexes matched 12 more probes where both readings are errors), the corpora's files by the report too
+(measured, 106 of 109 essential files agree, proposed as SCS7: SCS5's recommendation kept them on the dumps).
+
+Checked: scheme-read-essential's command (1,358 files and probes, 1,140 by the report, controls, report-test, round trip, spec-check),
+`bin/si check` and `--aot` on their essential subsets (no Chez run read, no regression, the controls differ) and on Larceny's 13 with
+`--record --only`, `bin/si own` (49 of 49 judged without Chez), `bin/repr-scheme c2j-check` (19 of 19), `bin/reap --record`, `bin/crops-score
+--record` and `--judge --strict` (0 problems). Scheme's scores: completeness 96.8 to 97.3, maturity 100, independence 97.5 to 99.6 (judge
+0.876 to 0.979). Night: `bin/repr-scheme check --record`, `bin/si check --record`, `bin/si check --aot --record`. Proposed: SCS7 (the
+corpora's files by the report), SCS8 (Larceny's earley and nboyer run as their authors meant, their own result checks).

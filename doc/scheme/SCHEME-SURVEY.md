@@ -3488,3 +3488,157 @@ source's name too), `test/crops/scores.edn`, `test/crops/independence.edn`.
 - **SCS6 Larceny's 13 programs.** (a) keep Chez's recorded runs (0.5, as decided); (b) golden outputs of our own as for si's programs,
   reviewed against R6RS (their outputs are values: nboyer's and earley's results, the benchmarks' answers), Chez's runs then the oracle
   tier's (si-check's judge 1.0, judge 0.877). *Recommended: (b)* at the next review round, with the same line-by-line review.
+
+## Decided (the user, 2026-11-08): SCS4 (a), SCS5 (b), SCS6 (b)
+
+SCS4 (a): si keeps Chez's semantics for the five tests of Racket's suite it fails by design, classed (`chez-exact-zero`,
+`chez-console-port`, `chez-condition-message`). SCS5 (b): the read check's probes judged by the properties the report states, no
+dump, where the report decides them. SCS6 (b): Larceny's 13 programs judged by golden outputs of our own, reviewed.
+
+## As built: SCS4-SCS6, the probes by the report, Larceny's by golden outputs (2026-11-08, branch scheme-scs4)
+
+From `mac/scheme-scs3` (d026b47f1).
+
+### SCS4 (a): nothing to build
+
+The three classes stand as SCS3 wrote them (`test/scheme/divergences.edn`, `:design`, decided "§5.4, SM5, SCS3" and §5.3); the
+completeness they cost (eval 4 by design, AOT 3) is the price of SM5's reference, recorded. Their `:decided` now also names SCS4 (a).
+
+### SCS5 (b): the probes by R6RS's grammar
+
+`arbace.repr.scheme.report` (`arbace/repr/scheme/report.ae`) is R6RS 4.1-4.3 as the report states them, rule for rule, written apart
+from the reader (`arbace.repr.scheme.read` and `number` read as Chez does; nothing of theirs is called, only the forms' spellings of
+SPEC 3 are shared): the lexical grammar of 4.2.1 (delimiters, whitespace, `;` comments to a line ending or paragraph separator, nested
+comments, `#;` datum comments, `#!r6rs`; identifiers with the categories of `<constituent>` and `<subsequent>` from Unicode's general
+categories, inline hex escapes, the peculiar identifiers; booleans `#t #T #f #F` only; characters by name, hex scalar value or any
+character, each ended by a delimiter; strings with the escapes of 4.2.7, a line ending in a string a linefeed; the number grammar of
+4.2.1 production for production, `<prefix R>`, `<complex R>`, `<real R>`, `<ureal R>`, `<decimal 10>`, `<suffix>`, `<mantissa
+width>`, `<naninf>`), the datum syntax of 4.3 (lists with `(` or `[` and their matching closer, dotted tails, vectors, `#vu8(` of
+exact integers 0 to 255, the eight abbreviations), and R6RS 4.1's rule that "an implementation must not extend the lexical or datum
+syntax in any way" but for `#!<identifier>`: every extension is a violation. A number's value is computed by exact arithmetic: an
+exact one the exact rational of its digits (`#e1.2` is 6/5), an inexact one the binary64 nearest that value, ties to even
+(`nearest-double`: integer arithmetic alone, a 53-bit significand and a binary exponent, subnormals at 2^-1074, overflow past the
+largest finite's half ulp; not the reader's `ratio->double`, not Java's `parseDouble`), a negative zero for `-0.0`. Its outcome is
+the data with their offsets, the data before a syntax violation and its class (`:unexpected-eof`, `:unexpected-close`, `:bad-dot`,
+`:bad-string-escape`, `:bad-bytevector`, or `:token`, a run that is no lexeme: which of Chez's messages names it is Chez's), or
+`:undecided` where the report leaves the reading to the implementation:
+
+| undecided | why | probes |
+|---|---|---|
+| `#!<identifier>` but `#!r6rs` | R6RS 4.1's one exception | 7 |
+| `#e` on an infinity or a NaN | R6RS 11.7.4.1's `exact`: no exact equivalent, the implementation's restriction | 21 |
+| an exact ratio with a zero denominator (`1/0`, `#i1/0`) | the report gives it no value | 13 |
+| a mantissa width with `#e`, or below 53 | 4.2.8 leaves the precision to the implementation | 4 |
+| a complex number whose parts differ in exactness (`1+2.5i`, `+inf.0i`) | R6RS keeps each part's exactness, si's tower (Chez's) makes both inexact; an exact zero imaginary part is decided (the real: `(real? -2.5+0i)`) | 3 |
+| a polar number but for an exact zero angle | the transcendental functions' last bit is the implementation's | 24 |
+
+The check (`arbace.repr.scheme.check/judge-probe`, in `check-dumps`): each probe the report decides is compared with Arbace's reading
+(`report-diff`): E-tree, E-off, the count of data, E-error (an error where the grammar has no production, of the grammar's class; a
+`:token` run any of the reader's token classes, an end of file among them, as `#e` before the end) and E-write as a property (each datum
+written by Arbace's writer and read back alone, the same datum); its dump in the pack is not read. The others are compared with their
+dump as before.
+
+**Where Chez reads past the report** (`bin/repr-scheme report-check`, below): 37 probes, all of the number grammar, named in
+`test/scheme/report-chez.edn` and judged by their dump: `+INF.0` and its prefixed forms (8: the grammar spells `nan.0 | inf.0` in lower
+case, while it spells the other cases it allows, `#B`, `#E`, `#T`, the exponent markers, the hex digits), a mantissa width in radix 2, 8 or
+16 (7: `<decimal R>` exists only for radix 10), and a `#` after a prefixed number (22: `#` is a delimiter, so `#e1#` is `#e1` and then
+`#`; Chez keeps R5RS's digit placeholder inside a prefixed token and refuses the whole token). repr/scheme's reader is Chez's by SM1's
+decision, so these stay Chez's readings; the file says why each rule holds and which probes it names.
+
+**Checks of the judge itself.** `report-test` (at every check): 17 numbers whose binary64 is known apart from any reader (0.1's nearest,
+`1e23`, the two halfway cases at 2^53 ties to even, the largest finite and the next halfway beyond it, the largest finite below that
+halfway, the smallest subnormal and the halfway below it, the largest subnormal, `-0.0`, `#i1/3`) and exact ones (`#e1.2`, `#e1e3`,
+`1/2+3/4i`, `#x-1.0` no number). The negative controls, a new family `:read-report` in `test/scheme/controls.edn` (judge
+`report-found`: the subject as Arbace reads it against the report's reading of the reference text): another datum, 0.1 against the next
+binary64 above it (the last bit), `1.5` against `#e1.5` (exactness), other offsets, an extra error, a violation Arbace misses (`a'b`),
+and a sanity entry; `bin/si corpora controls-test` takes the family (35 cases ok). `bin/repr-scheme report-check` (by hand; the oracle
+tier's comparison, from the recorded dumps, no Chez run): every probe read three ways, the report, Arbace's reader and Chez's dump; it
+fails on a decided probe where the report differs from either, and on a probe the rules name where the report and Chez agree (a stale
+rule). At SCS5: 1,140 agree three ways, 37 as named, 72 undecided; nowhere do Arbace and Chez agree against the report but in the 37,
+and nowhere does the report agree with one of them and not the other.
+
+Measured beside, not built (SCS7 below): the essential corpora's 109 files read by the report: 106 agree, 3 undecided (a complex of mixed
+exactness in each: Chibi's r7rs-tests, Racket's base.sls and io/ports.sls).
+
+### SCS6 (b): Larceny's 13 programs by golden outputs
+
+`test/scheme/si/golden/larceny/NAME.out`, Arbace's own expected stdout of each, from si's run of 2026-11-08 (byte for byte Chez
+10.3.0's recorded run but for exceptions.sch's first and last lines, below); `test/scheme/si/programs.edn` gives each `:golden`, and the five
+that end with an error `:status 255` and `:error`, the kind of error the first stderr line must name (`error-of`'s, so the spelling of
+the message is si's own only where the kind is `:text`). `golden-items` checks the status, stdout byte for byte and, for an expected
+error, its kind (`error-differs`); `judge-test` gains three cases (the expected error passes, another error of the same status is an
+`error-differs` item, the expected error with status 0 a crash). No program is judged by Chez's run now (`judge-of`'s `:chez` stays for
+a program without a golden); `test/scheme/si/ref-chez.edn` is `bin/si own`'s, by hand. Reviewed line by line against R6RS:
+
+- `hello`, `cmdline`, `nothing`, `nothingBig`: `Hello world!`; `("cmdline.sch")`, `(command-line)` a list of strings whose first is the
+  program's name (R6RS libraries 10, the implementation's spelling of it); nothing.
+- `fib` (input 40): `Computing (fib 40)` and 102334155, F(40).
+- `regression`: nothing (each ticket's test raises `assertion-violation` when it fails; status 0 is its own verdict).
+- `cpointR6` (22 lines): R6RS libraries 6.3's example of the syntactic layer, line for line the report's answers (`#t #t #f #f #f #t 1 2
+  3 4 (rgb . red) 17`, `(1 2 3)`, `1`, `(2 3)`, ex3's `#t (rgb . red) 17 18`, `(record? ex3-i1)` `#f`, opaque); the implementation's:
+  the written record type `#<record type point-4893d957-...>` (its nongenerative uid) and record `#<ex3>` (Chez's printing, §4.2).
+- `grabbag` (15 lines): `"Λarceny"` (`string-titlecase`, libraries 1.2), `little`, `(a b c q)` (`fold-right`), the sorted vector,
+  `unless when` (`(unless #t #f)` returns unspecified values, which si, as Chez, makes a true value: the implementation's), the
+  procedural layer's `(1 2)` and `#(x y)`, `#<enum-set>` (an enum set put as a datum: the implementation's), `Hello world!`, `#t`
+  (`hello.sch` in the corpus's directory, where the check runs), `("grabbag.sch")`, -947 (`(fxior (fxarithmetic-shift-left -1 10) 77)`),
+  `1.0`, 2^100+1, 11 (`hashtable-update!` then `sqrt` of 121).
+- `exceptions` (status 255, `Exception in +: four is not a number`): R6RS libraries 7.1's examples: the conditions of `(+ 1 2 3 'four 5 6)`,
+  `&assertion &who &message &irritants` (si's R6RS conditions, §5.3: Chez adds `&format` and `&continuation`, the class
+  `chez-conditions` SCS3 had, now no item: the golden states si's), `I am error:` then `error`, `should be a number` then 65 (42 + 23),
+  the conditions again and the uncaught re-raise, a non-continuable exception ending the program with a non-zero status.
+- `cpoint` (status 255, `[:library-not-found "(err5rs records inspection)"]`): ERR5RS's records library is Larceny's, no R6RS library.
+- `earley`, `nboyer`, `run-benchmark` (status 255, `[:program-without-import nil]`): each file is a `(library ...)` form and then a
+  program, Larceny's layout; R6RS 8.1's top-level program begins with its `import` form, so si (and Chez) refuse it (SCS7 proposes running
+  them as their authors meant).
+
+The interpreted and compiled records of the 13 rewritten (`--record --only`): `larceny/exceptions` passes (it was the `chez-conditions`
+item), the class leaves `test/scheme/divergences.edn`; compiled, 12 of 13 the same as interpreted, `larceny/regression` refused as before
+(`syntax-constants`). The control `_control/run-benchmark-vs-exceptions` is judged against exceptions's golden output.
+
+### The numbers
+
+`bin/repr-scheme check` on the essential corpora (scheme-read-essential's command, 46 s): 1,358 files and probes equal to their judge,
+1,140 probes by the report (no dump read), 109 by their dump; the `read`, `read-report` and `roundtrip` controls differ, report-test ok,
+round trip 1,358 files, spec-check 9 of 9. `bin/si check --only test/scheme/essential-check.txt` (47 s): 44 of 49 pass, 10 items all
+classed, judges 27 own report and 22 golden, 0 by Chez's run, no regression, the three controls differ. `bin/si check --aot --only
+test/scheme/essential-aot.txt` (48 s): 9 of 11, 6 items classed, 0 by Chez's run, 10 of 11 compiled runs the same. Larceny's 13 run
+with `--record` interpreted (88 s) and compiled (74 s). `bin/si own`: 49 of 49 judged without Chez; 43 agree with Chez's run on a pass, the
+5 classed Chez fails too, `larceny/exceptions` passes where Chez's run differs (§5.3). `bin/repr-scheme c2j-check`: 19 of 19 sources.
+`bin/si corpora controls-test`: 35 ok. `bin/reap --record` (0 problems), `bin/crops-score --record`, `--judge --strict` (0 problems).
+
+| `bin/crops-score --crop scheme` | before (scheme-scs3 d026b47f1) | after |
+|---|---|---|
+| completeness | 96.8 (98.8 without by design) | 97.3 (98.8): eval 2,827 / 4 / 6, AOT 43 / 3 / 2 |
+| maturity | 100.0 | 100.0 |
+| independence | 97.5 (judge 0.876) | 99.6 (judge 0.979) |
+
+The judge's cases: read 1,140 at 1 (the probes by the report) and 231 at 0.5 (the corpora's 115 files, the scans, the 109 probes by
+their dump), print 1,364, `bin/si check` and `--aot` 50 each, r7rs 1,232, srfi 1,231, chibi-tests 268, ecraven 58, all at 1: 5,508.5
+of 5,624.
+
+### Night commands
+
+- `bin/repr-scheme check --record` (every corpus, the probes, the scans; about 2 min, 1 GB): the read level's record afresh (rows
+  unchanged expected: every probe passes either way), `test/scheme/check-known.edn` unchanged.
+- `bin/si check --record` (50 programs, about 2 min, 0.7 GB) and `bin/si check --aot --record` (about 6 min, 0.9 GB): the records afresh
+  (no change expected but the AOT entries' `:known-differences nil` SCS3 kept); then `bin/reap --record`, `bin/crops-score --record` if a
+  count moves.
+- `bin/repr-scheme report-check` (seconds; by hand, the oracle tier's) and `bin/si own --list`, `bin/si own --aot --list`.
+- The gate's `scheme-read-essential`, `scheme-read`, `si-essential`, `si-aot-essential`, `si-check`, `si-aot`, `scheme-c2j`, `reap`,
+  `crops-score`.
+
+### Proposed
+
+- **SCS7 The corpora's files by the report too.** The read judge's last 0.5 terms: the corpora's 115 files (and the 3 lexical scans).
+  (a) leave (judge 0.979, independence 99.6); (b) judge the corpora's files by the report's grammar as the probes (the judge exists; on
+  the essential corpora 106 of 109 agree, 3 undecided by one complex number of mixed exactness each), and the three lexical scans
+  (`whitespace`, `ident-initial`, `ident-subsequent`) by R6RS 4.2.1's categories, the printing scans staying Chez's (judge about 0.995,
+  independence about 99.9; cost an hour, plus classing the scans' differences between Java's Unicode tables and Chez's, unmeasured);
+  (c) (b) for the files alone. *Recommended: (c)* now, the scans after a measurement of their differences.
+- **SCS8 Larceny's three benchmarks as their authors meant.** `earley`, `nboyer` and `run-benchmark` are refused as programs (a library
+  form first), so their benchmarks' own result checks (earley's 1430 parses, nboyer's rewrite counts) never run. (a) leave (they test
+  the refusal); (b) the harness splits a file's leading `library` forms into the library path (Larceny's convention for these files)
+  and runs the program after them, with inputs of our own small enough for si interpreted (nboyer 0, 95,024 rewrites; earley one
+  iteration), each judged by its own check line (no "Error: Benchmark program returned wrong result"); `run-benchmark` needs
+  Larceny's `(primitives run-benchmark)` and stays refused; (c) (b) with the corpus's inputs (nboyer 5: 51,507,739 rewrites, minutes to
+  hours on si: night only). *Recommended: (b)*: two programs become tests of the language with their own verdict.

@@ -5,7 +5,8 @@
   (:require [arbace.string :as str]
             [arbace.repr.scheme.forms :as fm]
             [arbace.repr.scheme.read :as rd]
-            [arbace.repr.scheme.print :as pr]))
+            [arbace.repr.scheme.print :as pr]
+            [arbace.repr.scheme.report :as rep]))
 
 (def chez-classes
   "Chez's messages (position taken off) to the reader's error classes, first match."
@@ -19,7 +20,7 @@
    [#"found in bytevector" :bad-bytevector]
    [#"symbol syntax is not allowed|symbol escape|delimiter . is not allowed|open brace|close brace|symbol hex escape|invalid .*symbol" :bad-symbol]])
 
-(declare first-diff-path char-or-nil)
+(declare first-diff-path char-or-nil compare-file)
 
 (defn chez-class [^String msg]
   (or (some (fn [[re k]] (when (re-find re msg) k)) chez-classes) :other))
@@ -49,6 +50,60 @@
                 ca {:kind :error-missing :chez (chez-class (:message ca)) :chez-message (:message ca) :at (:at ca)})))))
 
 (defn- first-diff-path [a b] (fm/first-difference a b))
+
+;; ---- the probes' own verdict (SCS5 (b), the user 2026-11-08; doc/scheme/SCHEME-SURVEY.md, "As built: SCS5"): the report's
+;; grammar (arbace.repr.scheme.report) in place of Chez's dump, for every probe it decides and test/scheme/report-chez.edn does not
+;; name; the properties: the same data (numbers by exact arithmetic), the same offsets, an error where the grammar has no
+;; production (of the class the grammar gives; a run that is no lexeme any of the token classes), and each datum written and read
+;; back the same
+
+(def token-classes
+  "The reader's classes of a run that is no lexeme (the report's :token: which one names it is Chez's taxonomy, an end of file
+  too where more text could have made the run a lexeme, as #e before the end and its whitespace)."
+  #{:bad-number :bad-symbol :invalid-sharp :bad-char-name :unexpected-eof})
+
+(defn report-exceptions [root] (read-string (slurp (str root "/test/scheme/report-chez.edn"))))
+
+(defn report-exception
+  "The rule of test/scheme/report-chez.edn that names the probe id (Chez's R6RS mode reads past the report there), or nil."
+  [rules ^String id]
+  (some #(when (some #{id} (:ids %)) %) rules))
+
+(defn- class-ok? [rep-err mine-class]
+  (if (= :token (:class rep-err))
+    (contains? token-classes mine-class)
+    (= (:class rep-err) mine-class)))
+
+(defn report-diff
+  "The first way Arbace's reading `mine` ({:data :error}) of a text differs from the report's reading `r` (rep/read-all, decided),
+  or nil: E-tree, E-off, the count, E-error (presence and class) and E-write's property (each datum written by Arbace's writer
+  and read back the same datum, alone)."
+  [mine r]
+  (let [md (:data mine) rd* (:data r) n (min (count md) (count rd*))]
+    (or (some (fn [i]
+                (let [a (nth md i) b (nth rd* i)]
+                  (cond (not (fm/tree= (:form a) (:form b))) {:kind :tree :index i :at (first-diff-path (:form a) (:form b)) :off (:off b)}
+                        (not= (:off a) (:off b)) {:kind :off :index i :mine (:off a) :report (:off b)})))
+              (range n))
+        (when (not= (count md) (count rd*)) {:kind :count :mine (count md) :report (count rd*)})
+        (let [ma (:error mine) ra (:error r)]
+          (cond (and ma ra) (when-not (class-ok? ra (:class ma)) {:kind :error-class :mine (:class ma) :report (:class ra) :report-message (:message ra)})
+                ma {:kind :error-extra :mine (:class ma) :message (:message ma) :at (:at ma)}
+                ra {:kind :error-missing :report (:class ra) :report-message (:message ra) :at (:at ra)}))
+        (some (fn [[i a]]
+                (let [w (pr/write-form (:form a)) back (rd/read-all w {})]
+                  (when-not (and (nil? (:error back)) (== 1 (count (:data back))) (fm/tree= (:form a) (:form (first (:data back)))))
+                    {:kind :write :index i :mine w :back (mapv :form (:data back))})))
+              (map vector (range) md)))))
+
+(defn judge-probe
+  "A probe's text judged: [judge diff-or-nil], judge :report (the report's grammar decides it) or :dump (Chez's dump: the report
+  leaves it to the implementation, or a rule of report-chez.edn names it; dump nil, a :no-dump difference)."
+  [rules ^String id ^String text dump]
+  (let [r (rep/read-all text)]
+    (if (or (:undecided r) (report-exception rules id))
+      [:dump (if dump (compare-file text dump) {:kind :no-dump})]
+      [:report (report-diff (rd/read-all text {}) r)])))
 
 (defn compare-file
   "Compare the text of a file with its dump: nil when they agree, else the first difference."
@@ -132,26 +187,41 @@
 
 (defn check-dumps
   "Compare every dump in DIR (dump-ID.edn, dump-probes.edn, scan-*.edn) with Arbace's reading. Returns
-  {:results {key diff-or-nil} :scans [...] :dumps {key dump}}; :dumps holds the dumps of the keys in KEEP only (the negative controls'
+  {:results {key diff-or-nil} :scans [...] :dumps {key dump} :judges {key :report|:dump}} (SCS5 (b): a probe the report's grammar
+  decides is judged by it, arbace.repr.scheme.check/judge-probe, its dump not read); :dumps holds the dumps of the keys in KEEP only (the negative controls'
   files, GT9), none by default."
   [root dir & [keep]]
   (let [corpora (remove #(false? (:check %)) (:corpora (load-edn (str root "/test/scheme/corpora.edn"))))
         keyed (into {} (mapcat (fn [c] (map (fn [[k p]] [p k]) (corpus-files root c))) corpora))
         probe-dir (str dir "/probes/")
         results (atom (sorted-map))
-        dumps (atom {})]
+        judges (atom (sorted-map))
+        dumps (atom {})
+        probe-dumps (atom {})
+        probe-key (fn [^String p] (when (.startsWith p probe-dir) (str "probe/" (subs p (count probe-dir) (- (count p) 3)))))]
     (doseq [f (cons "probes" (map (comp name :id) corpora))
             :let [path (str dir "/dump-" f ".edn")]
             :when (.exists (java.io.File. ^String path))]
       (doseq [d (read-dumps path)]
         (let [p (:file d)
-              k (or (keyed p) (when (.startsWith ^String p probe-dir) (str "probe/" (subs p (count probe-dir) (- (count p) 3)))) p)
-              text (slurp p)]
+              k (or (keyed p) (probe-key p) p)]
           (when (contains? keep k) (swap! dumps assoc k d))
-          (swap! results assoc k (compare-file text d)))))
+          (if (probe-key p)
+            (swap! probe-dumps assoc k d)
+            (do (swap! judges assoc k :dump) (swap! results assoc k (compare-file (slurp p) d)))))))
+    ;; SCS5 (b): each probe by the report's grammar where it decides, else by its dump; the probes are judged when their unit was
+    ;; selected (DIR/dump-probes.edn: the dumps of the undecided ones are read from it)
+    (when (.exists (java.io.File. (str dir "/dump-probes.edn")))
+      (let [rules (report-exceptions root)]
+        (doseq [f (sort (.list (java.io.File. ^String probe-dir)))
+                :let [p (str probe-dir f) k (probe-key p)]]
+          (let [[j d] (judge-probe rules (subs k 6) (slurp p) (@probe-dumps k))]
+            (when (contains? keep k) (when-let [x (@probe-dumps k)] (swap! dumps assoc k x)))
+            (swap! judges assoc k j)
+            (swap! results assoc k d)))))
     (let [scans (vec (for [f (sort (.list (java.io.File. ^String dir))) :when (.startsWith ^String f "scan-")]
                        (scan-diffs (load-edn (str dir "/" f)))))]
-      {:results @results :scans scans :dumps @dumps})))
+      {:results @results :scans scans :dumps @dumps :judges @judges})))
 
 (defn judge
   "Results against the known differences (a map key -> {:kind K ...}): [unlisted gone] lists."
