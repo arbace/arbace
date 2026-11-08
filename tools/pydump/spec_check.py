@@ -20,6 +20,11 @@ imported: the tarball is data, read in place), then requires:
      with short spellings or written as symbols (Name, Constant, alias, arg, the contexts and the operators),
      the top Module and the format specs (vectors in the forms), has its head in the example's forms.
 
+Python 3.15 (queue 236): a field of the checklist marked " (3.15)" after its slot is 3.15's Python.asdl's: on a 3.14
+oracle (with 3.14.10's Python.asdl) it must be absent from the file and is left out, on a 3.15 one it is a field as
+any; the worked examples of a "```forms-3.15" block are parsed only by a 3.15 oracle (their text is written out and
+read by Arbace's reader either way).
+
 It writes every forms block's text to OUTDIR/NNN.forms (the script's caller reads them with Arbace's reader) and
 prints one line per failure and a summary; exit 1 when anything fails.
 """
@@ -106,7 +111,9 @@ def parse_asdl(text):
 # --- the spec's table -------------------------------------------------------------------------------------------
 
 ROW = re.compile(r"^\| `([a-z_]+)` \| (\*attributes\*|`[A-Za-z_]+`) \|([^|]*)\|([^|]*)\|\s*$")
-FIELD = re.compile(r"`([a-z_]+)→([^`]+)`")
+FIELD = re.compile(r"`([a-z_]+)→([^`]+)`(?: \(3\.15\))?")
+FIELD315 = re.compile(r"`([a-z_]+)→[^`]+` \(3\.15\)")
+PY315 = sys.version_info[:2] >= (3, 15)
 SLOT = re.compile(r"^(?:[1-9][0-9]*|:[a-z][a-z-]*|meta:[a-z][a-z-]*|spelling|dropped)$")
 
 
@@ -126,7 +133,7 @@ def checklist(spec):
         heads = re.findall(r"`([^`]+)`", r.group(3))
         flds = FIELD.findall(r.group(4))
         rest = FIELD.sub("", r.group(4)).replace(",", "").strip()
-        rows.append((r.group(1), ctor, heads, flds, rest, line))
+        rows.append((r.group(1), ctor, heads, flds, rest, line, set(FIELD315.findall(r.group(4)))))
     return rows
 
 
@@ -137,9 +144,12 @@ EXEMPT = {"Module", "Name", "Constant", "alias", "arg", "Load", "Store", "Del"}
 
 
 def examples(spec):
-    blocks = re.findall(r"^```forms\n(.*?)^```$", spec, re.S | re.M)
+    tagged = re.findall(r"^```forms(-3\.15)?\n(.*?)^```$", spec, re.S | re.M)
+    blocks = [b for _, b in tagged]
     entries = []
-    for b in blocks:
+    for tag, b in tagged:
+        if tag and not PY315:
+            continue
         cur = None
         for line in b.split("\n"):
             if line.startswith(";; py: ") or line == ";; py:":
@@ -171,7 +181,15 @@ def main():
         if row[0] == "BAD":
             fail("a checklist row does not parse: " + row[1])
             continue
-        typ, ctor, heads, flds, rest, line = row
+        typ, ctor, heads, flds, rest, line, since315 = row
+        if not PY315:
+            # 3.15's fields on a 3.14 oracle: absent from its Python.asdl, left out (queue 236)
+            t0 = types.get(typ, {"ctors": {}})
+            have = [f[2] for f in t0["ctors"].get(ctor, [])] if ctor != "*attributes*" else []
+            for f in since315:
+                if f in have:
+                    fail("%s %s: field %s marked (3.15) is in this Python.asdl" % (typ, ctor, f))
+            flds = [x for x in flds if x[0] not in since315]
         if rest:
             fail("%s %s: text in the fields column that is no field: %r" % (typ, ctor, rest))
         if (typ, ctor) in seen:
