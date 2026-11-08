@@ -1,0 +1,212 @@
+;; Ported from GHC 9.14.1 (https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz, SHA-256
+;; 2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77): compiler/GHC/Core/FamInstEnv.hs
+;; (reduceTyFamApp_maybe, lookupFamInstEnv's matching, chooseBranch, findBranch, apartnessCheck, compatibleBranches,
+;; computeAxiomIncomps) and compiler/GHC/Core/Unify.hs (tcMatchTys, tcUnifyTysFG with alwaysBindFam and alwaysBindTv),
+;; by hand on 2026-11-08, on Arbace's types without kinds or coercions; GHC's notice follows (LICENSE.md, "GHC: the
+;; Glasgow Haskell Compiler License"):
+;;
+;; The Glasgow Haskell Compiler License
+;;
+;; Copyright 2002, The University Court of the University of Glasgow.
+;; All rights reserved.
+;;
+;; Redistribution and use in source and binary forms, with or without
+;; modification, are permitted provided that the following conditions are met:
+;;
+;; - Redistributions of source code must retain the above copyright notice,
+;; this list of conditions and the following disclaimer.
+;;
+;; - Redistributions in binary form must reproduce the above copyright notice,
+;; this list of conditions and the following disclaimer in the documentation
+;; and/or other materials provided with the distribution.
+;;
+;; - Neither name of the University nor the names of its contributors may be
+;; used to endorse or promote products derived from this software without
+;; specific prior written permission.
+;;
+;; THIS SOFTWARE IS PROVIDED BY THE UNIVERSITY COURT OF THE UNIVERSITY OF
+;; GLASGOW AND THE CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
+;; INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+;; FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+;; UNIVERSITY COURT OF THE UNIVERSITY OF GLASGOW OR THE CONTRIBUTORS BE LIABLE
+;; FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+;; DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+;; SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+;; CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+;; LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+;; OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+;; DAMAGE.
+
+(ns arbace.repr.haskell.famenv
+  "Type families for the elaborator (doc/haskell/FRONTEND-SURVEY.md, \"As built: HF9 (first slice)\"): a port of
+  GHC 9.14.1's reduction of a type family application, compiler/GHC/Core/FamInstEnv.hs (reduceTyFamApp_maybe,
+  lookupFamInstEnv's matching, chooseBranch, findBranch, apartnessCheck, compatibleBranches, computeAxiomIncomps)
+  over GHC.Core.Unify's tcMatchTys and tcUnifyTysFG (alwaysBindFam, alwaysBindTv: the pre-unification of the
+  \"Closed Type Families\" paper, Eisenberg, Vytiniotis, Peyton Jones, Weirich, POPL 2014), rule for rule, on the
+  elaborator's types without kinds or coercions (the evidence of a reduction is erased: hsi runs untyped STG).
+
+  Types: [:tc NAME [arg...]] [:tv NAME] [:mv ID] [:app F X] [:lit V] [:lit-char C], zonked and with synonyms expanded
+  by the caller. A family: {:flavour :closed|:open|:data|:builtin :arity n :eqns [{:tvs [..] :lhs [..] :rhs t
+  :incomps [i...]}]} (a closed family's branches in order, an open family's instances in any order: they cannot
+  overlap but compatibly, so any match will do, as GHC's lookupFamInstEnv returns them all and reduceTyFamApp_maybe
+  takes the first).
+
+  GHC's notice above (the Glasgow Haskell Compiler License, BSD 3-Clause)."
+  (:require [arbace.set :as set]))
+
+(def ^:dynamic *family?* (fn [_] false)) ; NAME -> is it a type family (the caller's table): tcUnifyTysFG's flattening
+
+;;; ------------------------------------------------------------------------------------------
+;;; GHC.Core.Unify: tcMatchTys (one way), tcUnifyTysFG (two way, families bindable)
+
+(defn- mk-app [f x]
+  (if (= :tc (first f)) [:tc (second f) (conj (nth f 2) x)] [:app f x]))
+
+(defn- split-app
+  "GHC's tcSplitAppTy_maybe: an application's function and last argument, nil for another type (a family
+  application never splits: it is not a type constructor application in the sense of decomposition)"
+  [t]
+  (case (first t)
+    :app [(nth t 1) (nth t 2)]
+    :tc (when (and (seq (nth t 2)) (not (*family?* (second t))))
+          [[:tc (second t) (vec (butlast (nth t 2)))] (last (nth t 2))])
+    nil))
+
+(defn match-tys
+  "tcMatchTys: a substitution {TV type} of the template variables tvs making each template equal the target, nil
+  when none; the target's variables and metas are rigid (match_ty's tv case binds only template variables)"
+  [tvs tmpls targets]
+  (let [tvs (set tvs)]
+    (letfn [(go [s p t]
+              (cond
+                (nil? s) nil
+                (and (= :tv (first p)) (contains? tvs (second p)))
+                (if-let [old (get s (second p))] (when (= old t) s) (assoc s (second p) t))
+                (and (= :tc (first p)) (= :tc (first t)) (= (second p) (second t)) (= (count (nth p 2)) (count (nth t 2))))
+                (reduce (fn [s [a b]] (go s a b)) s (map vector (nth p 2) (nth t 2)))
+                ;; an application against a type constructor application (match_ty's AppTy case, tcSplitAppTy_maybe)
+                (or (= :app (first p)) (= :app (first t)))
+                (let [ps (split-app p) ts (split-app t)]
+                  (when (and ps ts) (go (go s (first ps) (first ts)) (second ps) (second ts))))
+                (= p t) s
+                :else nil))]
+      (when (= (count tmpls) (count targets))
+        (reduce (fn [s [p t]] (go s p t)) {} (map vector tmpls targets))))))
+
+(defn- var-key [t] (case (first t) :tv [:tv (second t)] :mv [:mv (second t)] nil))
+
+(defn- tsubst [s t]
+  (if-let [k (var-key t)]
+    (if-let [r (get s k)] (tsubst s r) t)
+    (case (first t)
+      :tc [:tc (second t) (mapv #(tsubst s %) (nth t 2))]
+      :app (mk-app (tsubst s (nth t 1)) (tsubst s (nth t 2)))
+      t)))
+
+(defn- occurs? [k s t]
+  (let [t (tsubst s t)]
+    (or (= k (var-key t))
+        (case (first t)
+          :tc (some #(occurs? k s %) (nth t 2))
+          :app (or (occurs? k s (nth t 1)) (occurs? k s (nth t 2)))
+          false))))
+
+(defn unify-tys-fg
+  "tcUnifyTysFG alwaysBindFam alwaysBindTv: :apart (SurelyApart), :maybe (MaybeApart) or [:unifiable subst]; every
+  variable and meta of either side bindable, a family application bindable as a variable (its flattening: unify_ty's
+  family case, which makes the result at best MaybeApart when it is decomposed against something else), an occurs
+  check failure MaybeApart (the infinite types of Note [Infinitary substitution in lookup])"
+  [as bs]
+  (let [maybe (volatile! false)]
+    (letfn [(fam? [t] (and (= :tc (first t)) (*family?* (second t))))
+            (go [s a b]
+              (if (= :apart s)
+                s
+                (let [a (tsubst s a) b (tsubst s b)]
+                  (cond
+                    (= a b) s
+                    (var-key a) (if (occurs? (var-key a) s b) (do (vreset! maybe true) s) (assoc s (var-key a) b))
+                    (var-key b) (go s b a)
+                    ;; a family application: bindable, so never SurelyApart against anything, and its arguments are
+                    ;; not decomposed (it is not injective)
+                    (or (fam? a) (fam? b)) (do (vreset! maybe true) s)
+                    (and (= :tc (first a)) (= :tc (first b)))
+                    (if (and (= (second a) (second b)) (= (count (nth a 2)) (count (nth b 2))))
+                      (reduce (fn [s [x y]] (go s x y)) s (map vector (nth a 2) (nth b 2)))
+                      (let [sa (split-app a) sb (split-app b)]
+                        (if (and sa sb (not= (second a) (second b)) (not= (count (nth a 2)) (count (nth b 2))))
+                          (go (go s (first sa) (first sb)) (second sa) (second sb))
+                          :apart)))
+                    (or (= :app (first a)) (= :app (first b)))
+                    (let [sa (split-app a) sb (split-app b)]
+                      (if (and sa sb) (go (go s (first sa) (first sb)) (second sa) (second sb)) :apart))
+                    :else :apart))))]
+      (let [s (reduce (fn [s [a b]] (go s a b)) {} (map vector as bs))]
+        (cond (= :apart s) :apart
+              @maybe :maybe
+              :else [:unifiable s])))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; GHC.Core.FamInstEnv
+
+(defn- rename-tvs
+  "A branch's variables made distinct from another's (Note [CoAxBranch type variables]: the two branches' cab_tvs
+  distinct before tcUnifyTysFG)"
+  [br suffix]
+  (let [m (into {} (map (fn [v] [v [:tv (str v suffix)]]) (:tvs br)))
+        sub (fn sub [t] (case (first t)
+                          :tv (get m (second t) t)
+                          :tc [:tc (second t) (mapv sub (nth t 2))]
+                          :app (mk-app (sub (nth t 1)) (sub (nth t 2)))
+                          t))]
+    (assoc br :tvs (mapv #(str % suffix) (:tvs br)) :lhs (mapv sub (:lhs br)) :rhs (sub (:rhs br)))))
+
+(defn compatible-branches?
+  "compatibleBranches: the common prefix of the two left-hand sides SurelyApart, or unifiable with equal right-hand
+  sides under the unifier; MaybeApart is incompatible"
+  [b1 b2]
+  (let [b1 (rename-tvs b1 "'1") b2 (rename-tvs b2 "'2")
+        n (min (count (:lhs b1)) (count (:lhs b2)))]
+    (let [r (unify-tys-fg (subvec (vec (:lhs b1)) 0 n) (subvec (vec (:lhs b2)) 0 n))]
+      (cond (= :apart r) true
+            (= :maybe r) false
+            :else (let [s (second r)] (= (tsubst s (:rhs b1)) (tsubst s (:rhs b2))))))))
+
+(defn compute-incomps
+  "computeAxiomIncomps: each branch's :incomps, the earlier branches it is not compatible with (their indices)"
+  [branches]
+  (vec (map-indexed (fn [i br]
+                      (assoc br :incomps (vec (for [j (range i) :when (not (compatible-branches? br (nth branches j)))] j))))
+                    branches)))
+
+(defn- apartness-check
+  "apartnessCheck: the target SurelyApart from every incompatible earlier branch's left-hand side"
+  [branches target br]
+  (every? (fn [j] (= :apart (unify-tys-fg target (:lhs (rename-tvs (nth branches j) "'a")))))
+          (:incomps br)))
+
+(defn- inst-rhs [s br] (tsubst (into {} (map (fn [[v t]] [[:tv v] t]) s)) (:rhs br)))
+
+(defn find-branch
+  "findBranch: the first branch whose left-hand side matches the target and which is apart from its incompatible
+  predecessors: [index rhs], nil when none (the application is stuck)"
+  [branches target]
+  (some (fn [[i br]]
+          (when-let [s (match-tys (:tvs br) (:lhs br) target)]
+            (when (apartness-check branches target br)
+              [i (inst-rhs s br)])))
+        (map-indexed vector branches)))
+
+(defn reduce-fam-app
+  "reduceTyFamApp_maybe at the nominal role: one step of the family application F args (over-saturated allowed: the
+  extra arguments applied to the result), its result or nil. An open family by its instances (lookupFamInstEnv:
+  any match), a closed one by chooseBranch, a data family never (it is not a synonym family), a built-in one by
+  the caller (builtin)"
+  [fam args builtin]
+  (let [n (:arity fam) [target extra] (if (and n (> (count args) n)) [(subvec (vec args) 0 n) (drop n args)] [(vec args) []])
+        r (case (:flavour fam)
+            :open (some (fn [br] (when-let [s (match-tys (:tvs br) (:lhs br) target)] (inst-rhs s br))) (:eqns fam))
+            :closed (second (find-branch (:eqns fam) target))
+            :builtin (when builtin (builtin target))
+            nil)]
+    (when r (reduce mk-app r extra))))
