@@ -1782,7 +1782,10 @@ wheels_suite_cpython() { # DIR RUNNER LOG ARGS...: CPython's outcomes (stdout), 
   wheels_arbace outcomes --runner "$runner" --log "$log"
 }
 wheels_suite() {
-  need_python "wheels suite (CPython's run of the same suite: the oracle tier's)"
+  # queue 234: each test judged by its own verdict (PYI_VERDICT own, the default): pyi's run alone; ref: against CPython's
+  # run of the same suite (the oracle tier's)
+  local verdict; verdict=$(judge_verdict "")
+  [ "$verdict" = own ] || need_python "wheels suite (CPython's run of the same suite: the oracle tier's)"
   [ $# -ge 1 ] || die "usage: bin/pyi wheels suite NAME [TEST...]"
   local want=$1; shift
   local name file url sha bytes sroot runner args found=0 bad=0 site tsite
@@ -1796,21 +1799,27 @@ wheels_suite() {
     [ -f "$src" ] && [ "$(sha256sum < "$src" | cut -c1-64)" = "$sha" ] || die "wheels suite: $src not as pinned (bin/pyi wheels fetch)"
     if [ $# -gt 0 ]; then sel=("$@"); else read -ra sel <<< "$args"; fi
     rm -rf "$W"; mkdir -p "$W/cpython" "$W/pyi"
-    tar xzf "$src" -C "$W/cpython"; tar xzf "$src" -C "$W/pyi"
+    tar xzf "$src" -C "$W/pyi"
     local t0=$SECONDS key
-    key=$(pyrec_key "$WHEELS_PINS" "$root/arbace/python/wheels.ae" "$src"; printf '%s\n' "${sel[@]}" | sha256sum | cut -c1-16)
-    key=$(echo "$key" | tr '\n' ':')
-    pyrec_outcome "wheels/suite-$name-$(printf '%s ' "${sel[@]}" | sha256sum | cut -c1-8)" "$key" \
-      wheels_suite_cpython "$W/cpython/$sroot" "$runner" "$W/cpython.log" "${sel[@]}" > "$W/cpython.tsv" || true
-    echo "  CPython: $(wc -l < "$W/cpython.tsv") tests, $(tail -1 "$W/cpython.log" 2>/dev/null) ($((SECONDS - t0)) s)"
+    : > "$W/cpython.tsv"
+    if [ "$verdict" = ref ]; then
+      tar xzf "$src" -C "$W/cpython"
+      key=$(pyrec_key "$WHEELS_PINS" "$root/arbace/python/wheels.ae" "$src"; printf '%s\n' "${sel[@]}" | sha256sum | cut -c1-16)
+      key=$(echo "$key" | tr '\n' ':')
+      pyrec_outcome "wheels/suite-$name-$(printf '%s ' "${sel[@]}" | sha256sum | cut -c1-8)" "$key" \
+        wheels_suite_cpython "$W/cpython/$sroot" "$runner" "$W/cpython.log" "${sel[@]}" > "$W/cpython.tsv" || true
+      echo "  CPython: $(wc -l < "$W/cpython.tsv") tests, $(tail -1 "$W/cpython.log" 2>/dev/null) ($((SECONDS - t0)) s)"
+    fi
     t0=$SECONDS
     wheels_suite_run pyi "$W/pyi/$sroot" "$runner" "$W/pyi.log" "${sel[@]}"
     wheels_arbace outcomes --runner "$runner" --log "$W/pyi.log" > "$W/pyi.tsv"
     echo "  pyi: $(wc -l < "$W/pyi.tsv") tests, $(tail -1 "$W/pyi.log") ($((SECONDS - t0)) s)"
-    wheels_arbace judge --suite "$name" --divergences "$root/test/python/divergences.edn" --cpython "$W/cpython.tsv" --pyi "$W/pyi.tsv" || bad=1
-    # the negative control: CPython's own outcomes, the first passed test made failed
-    awk -F'\t' 'BEGIN { OFS = "\t" } !d && $2 == "passed" { $2 = "failed"; d = 1 } { print }' "$W/cpython.tsv" > "$W/control.tsv"
-    if wheels_arbace judge --suite "$name" --divergences "$root/test/python/divergences.edn" --cpython "$W/cpython.tsv" --pyi "$W/control.tsv" > "$W/control.out"; then
+    wheels_arbace judge --suite "$name" --verdict "$verdict" --divergences "$root/test/python/divergences.edn" --cpython "$W/cpython.tsv" --pyi "$W/pyi.tsv" || bad=1
+    # the negative control: the judged side's outcomes (own: pyi's; ref: CPython's own, judged as pyi's), the first passed
+    # test made failed
+    local base="$W/cpython.tsv"; [ "$verdict" = ref ] || base="$W/pyi.tsv"
+    awk -F'\t' 'BEGIN { OFS = "\t" } !d && $2 == "passed" { $2 = "failed"; d = 1 } { print }' "$base" > "$W/control.tsv"
+    if wheels_arbace judge --suite "$name" --verdict "$verdict" --divergences "$root/test/python/divergences.edn" --cpython "$W/cpython.tsv" --pyi "$W/control.tsv" > "$W/control.out"; then
       echo "  FAIL control: a passed test made failed judged equal"; bad=1
     else echo "  control refused: $(grep -m1 '^  FAIL' "$W/control.out" | sed 's/^  FAIL //')"; fi
   done < <(wheels_arbace suites --pins "$WHEELS_PINS")
