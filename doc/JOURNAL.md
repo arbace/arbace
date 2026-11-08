@@ -891,3 +891,23 @@ compiles a command line's C before its Haskell, checked by hand) or the `_ghci` 
   after the night's record; `runtime check`, `own-verdicts --check`, hsi-essential's command 123 of 123.
 - Proposed: HES84 (the threaded ways' references and `hs_exit`'s shutdown), HES85 (nofib's C in record-ref). Details and the
   night's commands: doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: HES83 (write-ahead)".
+
+## 2026-11-08: JCS167's slices 2 and 3, write-ahead (branch `java-serial2`, on `java-serial` 05504ace6)
+
+The user's JCS167 (a) (2026-11-07), its plan's slices 2 and 3 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS167 slices
+2-3 (write-ahead)"). Slice 2: jrt's hand-written serializable classes (Throwable, StackTraceElement, Date, StringBuilder,
+StringBuffer, the four atomics) get jdk26u's serial forms (openjdk/jdk26u at `baf63fb`, the classes' `writeObject`/`readObject`
+ported over jrt's state, their serialVersionUIDs and serial fields) in `go/arbace/jrt/serial_classes.ae`, as member tables decoded
+on reflection's first use (`MemberTable.DataFn`), their hooks calling the translated streams by reflection; StackTraceElement gains
+jdk26u's loader, module and format fields with its `toString`, `equals`, `hashCode`. Proved by `go test ./jrt`'s TestSerialForms
+against the bytes jdk26u's JDK writes (`test/jrt/serialization/SerialRecord.java`, recorded once by hand: 16 cases written, read
+and written again byte for byte) through a test stream written after jdk26u's protocol, since jrt's package has not the
+translated streams; a negative control. Considered and left: editing the generated `reflect_tables.ae` (generated from the JVM's
+public members) and hand-written hooks against the streams' Go types (jrt cannot name them). Slice 3: JCS168 (a) built behind a
+switch (`J2G_DEFAULT_SUID=1`, off until the user decides JCS190): `arbace/classes/suid.ae` ports `computeDefaultSUID` over the
+declaration as javac compiles it (Lower's synthetic members of a serializable class), j2g writes `ClassInfo.SerialUID`, the
+interpreter computes it for every interpreted Serializable class, and the variant's `computeDefaultSUID` asks
+`SerialAlloc.defaultSUID` first (`variants.py` replayed); the interpreted classes publish their inherited methods for dispatch
+only and their `this$0`/`val$x` fields. Proved on two samples' 26 classes against jdk26u's values (`test/jrt/serialization/suid/`:
+26 of 26 on stage 0, control 25 of 26); the JDK's 118 classes without a declared one recorded for the night
+(`default-suids-jdk26.txt`). The joint javac check: 0 errors. The night's commands join slice 1's; proposals JCS190-JCS193.

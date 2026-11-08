@@ -6,7 +6,8 @@
 # bin/jrt-convert derive):
 #   python3 test/jrt/serialization/variants.py JDK OUT   (JDK: jdk26u's checkout; OUT: a java.base tree,
 #   overlay/jdk/java.base for the committed overlays)
-# ObjectStreamClass: the serializable constructor is jrt's allocation (jdk.internal.jrt.SerialAlloc,
+# ObjectStreamClass: computeDefaultSUID returns the value computed ahead of time when there is one
+# (SerialAlloc.defaultSUID, JCS168); the serializable constructor is jrt's allocation (jdk.internal.jrt.SerialAlloc,
 # ReflectionFactory.newConstructorForSerialization's), the field reflector reads and writes fields by
 # java.lang.reflect.Field (Unsafe's offsets are not in the world), a record is made by its canonical
 # Constructor from the stream's values (RecordSupport.Ctr, method handles are not in the world), a record's
@@ -399,6 +400,22 @@ s = replace_member(s, '    static final class RecordSupport {', '''    static fi
             return 0d;
         }
     }''')
+# the default serialVersionUID computed ahead of time (JCS168: ClassInfo.SerialUID, arbace.classes.suid)
+s = sub(s, '''        if (!Serializable.class.isAssignableFrom(cl) || Proxy.isProxyClass(cl))
+        {
+            return 0L;
+        }
+''', '''        if (!Serializable.class.isAssignableFrom(cl) || Proxy.isProxyClass(cl))
+        {
+            return 0L;
+        }
+        // Arbace (JCS168): the value computed ahead of time from the class's declaration as javac
+        // compiles it (j2g's, the Java forms' host's): reflection over a class of the Go build sees the
+        // members its table lists, not every member javac wrote
+        if (SerialAlloc.hasDefaultSUID(cl)) {
+            return SerialAlloc.defaultSUID(cl);
+        }
+''')
 os.makedirs(out + '/java/io', exist_ok=True)
 open(out + '/java/io/ObjectStreamClass.java', 'w').write(HDR % ('ObjectStreamClass', 'ObjectStreamClass') + s)
 

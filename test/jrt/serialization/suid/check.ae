@@ -1,0 +1,35 @@
+;; JCS168's check (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS167 slices 2-3 (write-ahead)"): the default
+;; serialVersionUID arbace.classes.suid computes for each Serializable class of the samples (src/, converted into
+;; forms/ by bin/repr-java read --no-javac) against jdk26u's computeDefaultSUID (jdk-suids.txt, SuidRecord.java).
+;; The samples are loaded at the REPL (the interpreted classes' compilation); each class's value is taken as the
+;; interpreter publishes it. Run from the checkout on Arbace's executable:
+;;   ARBACE_PATH=$PWD:$PWD/test/jrt/serialization/suid/forms EXE -e '(load-file "test/jrt/serialization/suid/check.ae")'
+;; It prints a line per class (ok or BAD, the JDK's value, ours) and "suid-check: N of M" and exits 1 on a BAD line.
+;; On an executable whose world has java.io.ObjectStreamClass (JCS167) it also asks ObjectStreamClass.lookupAny for
+;; each class but the records (whose serialVersionUID is 0 there): the value the interpreter handed to ClassInfo.SerialUID.
+(require 'arbace.classes.interp)
+(require 'arbace.classes.suid)
+(def results (atom {}))
+(alter-var-root #'arbace.classes.interp/publish!
+  (fn [f]
+    (fn [k]
+      (let [n (.-iname ^arbace.lang.Compiler$CF$Klass k)]
+        (swap! results assoc n (try (arbace.classes.suid/default-suid n) (catch Throwable e (str "ERR " e)))))
+      (f k))))
+(require 'suid)
+(def osc (try (Class/forName "java.io.ObjectStreamClass") (catch Throwable _ nil)))
+(def bad (atom 0))
+(def lines (arbace.string/split-lines (slurp "test/jrt/serialization/suid/jdk-suids.txt")))
+(doseq [l lines
+        :let [[n v] (arbace.string/split l #" ")
+              want (Long/parseLong v)
+              got (@results (arbace.string/replace n "." "/"))
+              looked (when (and osc (not (arbace.string/includes? n "Rec")))
+                       (arbace.lang.Reflector/invokeInstanceMethod
+                         (arbace.lang.Reflector/invokeStaticMethod osc "lookupAny" (object-array [(Class/forName n)]))
+                         "getSerialVersionUID" (object-array [])))
+              ok (and (= got want) (or (nil? looked) (= looked want)))]]
+  (when-not ok (swap! bad inc))
+  (println (if ok "ok  " "BAD ") n want got (if looked (str "lookup " looked) "")))
+(println "suid-check:" (- (count lines) @bad) "of" (count lines))
+(when (pos? @bad) (System/exit 1))

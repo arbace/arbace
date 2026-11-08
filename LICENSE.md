@@ -728,6 +728,19 @@ covers what.
   `baf63fb`, `src/java.base/share/classes/java/lang/FdLibm.java` (doc/go/JRT-NOTES.md, phase 1
   and "Phase 2B (step 5)"): Copyright (c) Oracle and/or its affiliates, under the GNU General
   Public License version 2 with the Classpath Exception (text below).
+- `go/arbace/jrt/serial_classes.ae` (JCS167's second slice, doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS167
+  slices 2-3 (write-ahead)"): the serialization hooks of jrt's hand-written classes port the bodies of
+  https://github.com/openjdk/jdk26u at `baf63fb`, `src/java.base/share/classes/java/lang/{Throwable,StringBuilder,StringBuffer}.java`'s
+  and `java/util/Date.java`'s `writeObject` and `readObject` (Throwable's validation of what it reads), with their
+  classes' serialVersionUIDs and serial fields, and `StackTraceElement`'s `toString`, `equals` and `hashCode` in
+  `go/arbace/jrt/throwable.ae` port `java/lang/StackTraceElement.java`'s at the same commit: Copyright (c) Oracle
+  and/or its affiliates, under the GNU General Public License version 2 with the Classpath Exception (text below);
+  the rest of these files is Arbace's own, under the Eclipse Public License 1.0. `arbace/classes/suid.ae`
+  (JCS168) ports `src/java.base/share/classes/java/io/ObjectStreamClass.java`'s `computeDefaultSUID` and the parts of
+  `src/jdk.compiler/share/classes/com/sun/tools/javac/comp/Lower.java` that name a serializable class's synthetic
+  members (`outerThisName`, `shouldEmitOuterThis`, `assertFlagTest`) at the same commit, under the same license;
+  the samples of `test/jrt/serialization/suid/` and the recorders `test/jrt/serialization/{SerialRecord,DefaultSUIDs}.java`
+  and `suid/runner/` are Arbace's own (Eclipse Public License 1.0).
 - `arbace/repr/c/` (repr/c, C's bridge; doc/C23-SURVEY.md, "As built: C2"): `lex.ae` and `pp.ae`,
   repr/c's lexer and preprocessor, are Arbace forms porting, function by function,
   modernc.org/cc/v4 v4.29.7 as go-whim carries it, https://github.com/arbace/go-whim at
