@@ -8,7 +8,8 @@
     (read-all \"(a . 1.5) #\\\\x41\")
       => {:data [{:off [0 9] :form (scm/dot (a) 1.5)} {:off [10 15] :form \\A}] :error nil}
     (read-all \"(a\")     => {:data [] :error {:class :unexpected-eof :token false :at 2}}
-    (read-all \"1@2\")    => {:undecided \"a polar number ...\"}
+    (read-all \"1@2\")    => {:data [{:off [0 3] :form (scm/complex -0.4161468365471424 0.9092974268256817)}] :error nil :choices #{:polar}}
+    (binding [*choices* false] (read-all \"1@2\"))  => {:undecided \"a polar number ...\"}   ; the report alone
     (read-all \"#!fold-case A\") => {:data [{:off [12 13] :form a}] :error nil :choices #{:fold-case}}   ; si's choice, SPEC 12
 
   :error is a syntax violation: a text no production of the grammar derives. Its :class is :unexpected-eof (the text ends
@@ -20,7 +21,8 @@
   extension of Chez's is a violation here, and #!<identifier> is :undecided.
 
   Since SCS10 (b) si's stated choices (doc/scheme/SPEC.md 12, *choices* below) decide most of what the report leaves open
-  (the polar numbers and the exponents beyond the limits stay :undecided); with *choices* bound false, the report alone.
+  (the exponents beyond the limits stay :undecided; since SCS14 (b) the polar numbers are a choice too, :polar, by the correctly
+  rounded cosine and sine below); with *choices* bound false, the report alone.
   Since SCS9 (c) the character classes are over the Unicode Character Database 16.0.0 (arbace.repr.scheme.category).
 
   :undecided names what the report leaves to the implementation, where the check falls back to Chez's recorded dump:
@@ -36,7 +38,8 @@
   \"the best binary floating-point approximation\"), by nearest-double below, the report's own conversion (not the reader's
   ratio->double nor Java's parseDouble); -0.0 for a negative zero."
   (:require [arbace.repr.scheme.forms :as fm]
-            [arbace.repr.scheme.category :as uc])
+            [arbace.repr.scheme.category :as uc]
+            [arbace.repr.scheme.casefold :as cf])
   (:import [java.math BigInteger]))
 
 (set! *warn-on-reflection* true)
@@ -213,6 +216,95 @@
             x (if (> (long e) 971) Double/POSITIVE_INFINITY (Math/scalb (.doubleValue ^BigInteger q) (int e)))]
         (if neg (- x) x)))))
 
+;; ---- the correctly rounded cosine and sine (SCS14 (b), the user 2026-11-08; doc/scheme/SPEC.md 12 :polar)
+;;
+;; cr-cos and cr-sin give the binary64 nearest the exact cosine and sine of a binary64 x (ties cannot occur: the cosine and
+;; the sine of a nonzero rational are transcendental, Lindemann), by integer arithmetic alone, Ziv's way: at a precision of P
+;; bits after the point the value is computed with a proven bound E on its error (in units of 2^-P); when both ends of
+;; [value - E, value + E] round to the same binary64 (rounding is monotone, so every value between them does too), that is
+;; the answer, else P is doubled. The steps and their bounds (u = 2^-P, the unit of the last place kept):
+;;   pi       Machin's 16 atan(1/5) - 4 atan(1/239), each a series of truncated terms (each term within 3 u of its own value,
+;;            fewer than 2^40 terms), at Q + 64 bits and cut to Q: within 2 u(Q) of pi.
+;;   reduce   x = M 2^E exactly; at Q = P + max(0, E + 53) + 8 bits, k the integer nearest x / (pi/2), r = x - k pi/2, cut to P:
+;;            within |k| 2 u(Q) + 1 u(P) of the exact r, |k| 2 u(Q) <= 1 u(P) by Q's choice, so within 2 u; |r| < 0.8.
+;;   series   sin r = r - r^3/3! + ..., cos r = 1 - r^2/2! + ..., each term from the one before by r^2 / (n (n + 1)), every
+;;            product and quotient truncated: a term within 3 u of its value given r (the error of the one before halved at
+;;            least, |r^2| / 2 < 1/2, plus 2), the tail after the last term (once a term is 0) at most 4 u, alternating
+;;            and decreasing; so within 3 N + 4 u for N terms, and within 3 N + 4 + 2 u of the exact value (sin and cos
+;;            move by at most |dr|).
+;; x = +-0.0: sin x = x, cos x = 1.0; an infinity or a NaN: NaN (IEEE 754's).
+
+(defn- pi-fixed
+  "pi 2^q, truncated, within 2 of the exact pi 2^q (q >= 1)."
+  ^BigInteger [^long q]
+  (let [g (+ q 64)
+        atan-inv (fn [^long n]   ; atan(1/n) 2^g, every term truncated
+                   (let [nn (BigInteger/valueOf (* n n))]
+                     (loop [pw (.divide (.shiftLeft BigInteger/ONE (int g)) (BigInteger/valueOf n)) k 0 acc BigInteger/ZERO]
+                       (if (zero? (.signum pw))
+                         acc
+                         (let [term (.divide pw (BigInteger/valueOf (inc (* 2 k))))]
+                           (recur (.divide pw nn) (inc k) (if (even? k) (.add acc term) (.subtract acc term))))))))]
+    (let [^BigInteger a5 (atan-inv 5) ^BigInteger a239 (atan-inv 239)]
+      (.shiftRight (.subtract (.multiply a5 (BigInteger/valueOf 16)) (.multiply a239 (BigInteger/valueOf 4))) 64))))
+
+(def ^:private pi-cache (atom {}))
+(defn- pi-at ^BigInteger [^long q] (or (@pi-cache q) (let [v (pi-fixed q)] (swap! pi-cache assoc q v) v)))
+
+(defn- trig-at
+  "[value bound] of sin x (which :sin) or cos x at precision p: value 2^p truncated and bound in units of 2^-p, x = m 2^e
+  (m a nonzero BigInteger)."
+  [which ^BigInteger m ^long e ^long p]
+  (let [q (+ p (max 0 (+ e 53)) 8)
+        xq (if (>= (+ e q) 0) (.shiftLeft m (int (+ e q))) (.shiftRight m (int (- (+ e q)))))
+        hp (.shiftRight (pi-at q) 1)                ; pi/2 2^q, within 2
+        qr (.divideAndRemainder xq hp)
+        ^BigInteger k0 (aget qr 0) ^BigInteger rem (aget qr 1)
+        ;; k the integer nearest x / (pi/2): the quotient, or one more (less) when the remainder passes half pi/2
+        ^BigInteger k (cond (>= (.compareTo (.shiftLeft rem 1) hp) 0) (.add k0 BigInteger/ONE)
+                            (<= (.compareTo (.shiftLeft rem 1) (.negate hp)) 0) (.subtract k0 BigInteger/ONE)
+                            :else k0)
+        rq (.subtract xq (.multiply k hp))
+        ^BigInteger r (.shiftRight rq (int (- q p)))           ; floor: within 1 u(p) more
+        one (.shiftLeft BigInteger/ONE (int p))
+        r2 (.shiftRight (.multiply r r) (int p))
+        series (fn [^BigInteger t0 ^long n0]        ; sum of t0, -t0 r^2/((n0+1)(n0+2)), ...: [sum terms]
+                 (loop [t t0 n n0 acc BigInteger/ZERO cnt 0 plus true]
+                   (if (zero? (.signum t))
+                     [acc cnt]
+                     (recur (.divide (.shiftRight (.multiply t r2) (int p)) (BigInteger/valueOf (* (inc n) (+ n 2))))
+                            (+ n 2) (if plus (.add acc t) (.subtract acc t)) (inc cnt) (not plus)))))
+        [s ns] (series r 1)
+        [c nc] (series one 0)
+        km (long (.intValue (.mod k (BigInteger/valueOf 4))))
+        v (case which
+            :sin (case km 0 s 1 c 2 (.negate ^BigInteger s) 3 (.negate ^BigInteger c))
+            :cos (case km 0 c 1 (.negate ^BigInteger s) 2 (.negate ^BigInteger c) 3 s))]
+    [v (+ (* 3 (max (long ns) (long nc))) 4 2 1)]))
+
+(defn- trig-cr ^double [which ^double x]
+  (cond
+    (or (Double/isNaN x) (Double/isInfinite x)) Double/NaN
+    (== x 0.0) (if (= which :sin) x 1.0)
+    :else
+    (let [bits (Double/doubleToRawLongBits x)
+          be (bit-and (bit-shift-right bits 52) 0x7FF)
+          fr (bit-and bits 0xFFFFFFFFFFFFF)
+          [mant e] (if (zero? be) [fr -1074] [(bit-or fr 0x10000000000000) (- be 1075)])
+          m (cond-> (BigInteger/valueOf mant) (neg? bits) .negate)
+          ;; enough bits after the point for a tiny x's sine to keep 64 significant bits
+          p0 (+ 128 (max 0 (- (+ e 53))))]
+      (loop [p p0]
+        (when (> p 100000) (throw (ex-info "trig-cr: no rounding decided below 100,000 bits" {:x x})))
+        (let [[^BigInteger v ^long b] (trig-at which m e p)
+              d (fn [^BigInteger y] (nearest-double (/ (bigint y) (bigint (.shiftLeft BigInteger/ONE (int p))))))
+              lo (d (.subtract v (BigInteger/valueOf b)))
+              hi (d (.add v (BigInteger/valueOf b)))]
+          (if (and (== lo hi) (not (zero? lo))) lo (recur (* 2 p))))))))
+
+(defn cr-cos "The binary64 nearest cos x, x a binary64 (SPEC 12 :polar)." ^double [^double x] (trig-cr :cos x))
+(defn cr-sin "The binary64 nearest sin x, x a binary64 (SPEC 12 :polar)." ^double [^double x] (trig-cr :sin x))
+
 (defn- digits-value ^BigInteger [t ^long i ^long j ^long radix]
   (if (== i j) BigInteger/ZERO (BigInteger. (text-of (subvec t i j)) (int radix))))
 
@@ -358,8 +450,7 @@
 (defn number-value
   "The value of the number token t (code points, prefixes included) as the forms' numbers (a long, a BigInt, a Ratio, a
   double, or [:complex re im]); nil when no production derives it, or (SPEC 12) when si's choice makes it no number. Throws
-  :undecided where the report leaves it open and *choices* is false (or no choice is stated: a polar number, an exponent beyond
-  the limits)."
+  :undecided where the report leaves it open and *choices* is false (or no choice is stated: an exponent beyond the limits)."
   [t]
   (try (number-value* t)
        (catch arbace.lang.ExceptionInfo ex (if (::no-number (ex-data ex)) nil (throw ex)))))
@@ -378,8 +469,18 @@
             (when-let [c (complex* body (or radix 10))]
               (cond
                 (:real c) (second (part-value (:real c) ex))
-                (:polar c) (let [[m a] (:polar c) [ae av] (part-value a ex)]
-                             (if (and ae (zero? av)) (second (part-value m ex)) (undecided "a polar number with an angle other than an exact zero")))
+                (:polar c) (let [[m a] (:polar c) [ae av] (part-value a ex) [me mv] (part-value m ex)]
+                             (if (and ae (zero? av))
+                               mv
+                               ;; SPEC 12 :polar (SCS14 (b)): an exact zero magnitude the exact 0; #e otherwise no number (no exact
+                               ;; equivalent); else m cos a + i m sin a in binary64, the parts' nearest binary64 taken, the cosine and
+                               ;; the sine correctly rounded, each product rounded once
+                               (choose :polar "a polar number with an angle other than an exact zero"
+                                       #(cond (and me (zero? mv)) 0
+                                              (= ex :e) (no-number)
+                                              :else (let [d (fn [x] (if (instance? Double x) x (nearest-double x)))
+                                                          md (double (d mv)) ad (double (d av))]
+                                                      [:complex (* md (cr-cos ad)) (* md (cr-sin ad))])))))
                 :else (let [[re im] (:rect c)
                             [ie iv] (part-value im ex)
                             [re' rv] (if re (part-value re ex) [(not= ex :i) (if (= ex :i) 0.0 0)])]
@@ -429,9 +530,12 @@
                     (identifier-name tok)
                     (let [nm (text-of tok) why (str "#!" nm ": the implementation's (R6RS 4.1)")]
                       (case nm
-                        ;; SPEC 12 :fold-case: #!fold-case folds the identifiers after it to lower case, #!no-fold-case stops it
+                        ;; SPEC 12 :fold-case: #!fold-case folds the identifiers and the character names after it (full case
+                        ;; folding, CaseFolding.txt's C and F: arbace.repr.scheme.casefold, SCS12 (c)), #!no-fold-case stops it
                         ("fold-case" "no-fold-case")
                         (do (choose :fold-case why #(when *fold* (vreset! *fold* (= nm "fold-case")))) (recur (long e)))
+                        ;; SPEC 12 :hash-bang (SCS12 (c)): #!chezscheme is taken and has no effect on the reading
+                        "chezscheme" (do (choose :hash-bang why (constantly nil)) (recur (long e)))
                         ;; SPEC 12 :hash-bang: any other #!<identifier> is a syntax violation
                         (choose :hash-bang why #(token-violation t i e))))
                     :else (token-violation t i e)))
@@ -480,7 +584,8 @@
       (if (== e (inc j))
         [(fm/char-form (t j)) e]
         (let [nm (subvec t j e)]
-          (if-let [v (char-names (text-of nm))]
+          ;; SPEC 12 :fold-case: after #!fold-case a <character name> is folded (R7RS 2.1; Chez); the x of a hex scalar value is not
+          (if-let [v (char-names (cond-> (text-of nm) (and *fold* @*fold*) cf/fold))]
             [(fm/char-form v) e]
             (if (and (== (t j) 120) (every? hex-digit? (subvec nm 1)))
               (let [v (hex-value nm 1 (count nm))]
@@ -528,7 +633,7 @@
         (if (some? v)
           [(fm/number-form v) e]
           (if-let [nm (identifier-name tok)]
-            [(fm/sym (if (and *fold* @*fold*) (.toLowerCase ^String nm java.util.Locale/ROOT) nm)) e]
+            [(fm/sym (if (and *fold* @*fold*) (cf/fold nm) nm)) e]
             (if (and (>= e (count t)) (re-find #"\\x[0-9a-fA-F]*$" (text-of tok)))
               (eof i "an inline hex escape")
               (token-violation t i e))))))))

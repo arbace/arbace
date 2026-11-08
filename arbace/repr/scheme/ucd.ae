@@ -10,11 +10,23 @@
                                      an <initial> and a <subsequent> by R6RS 4.2.1's rule over those categories
     go/arbace/scm/unicode.ae         the same tables for si's runtime reader (go/arbace/scm/read.ae)
 
+  Since SCS12 (c) and SCS13 (b) (the user 2026-11-08) also, from the same pin:
+
+    arbace/repr/scheme/casefold.ae   full case folding (CaseFolding.txt's C and F mappings: R6RS's string-foldcase, Chez's
+                                     #!fold-case), the code points that fold to something else, for the reader's and the
+                                     report's #!fold-case (SPEC 12 :fold-case: identifiers and character names), and si's
+                                     runtime's in go/arbace/scm/unicode.ae (its reader, string-foldcase and char-foldcase:
+                                     the simple folding, CaseFolding.txt's C and S mappings, beside)
+    the readers' whitespace          R6RS 4.2.1's <whitespace> (tab, line feed, line tabulation, form feed, carriage
+                                     return, next line, Zs, Zl, Zp) and <intraline whitespace> (tab, Zs) over UnicodeData.txt's
+                                     categories, in unicode.ae (whitespace?, intraline?) and si's file (IsWhitespace,
+                                     IsIntralineSpace), in place of Java's Character/getType and Go's unicode tables
+
   The rule is stated here once more, apart from the report's (a second statement: the read check compares the reader's tables
   with the report's classes over every scalar value, SPEC 9): above U+007F an <initial> is a <constituent>, a character of Lu,
   Ll, Lt, Lm, Lo, Mn, Nl, No, Pd, Pc, Po, Sc, Sm, Sk, So or Co; a <subsequent> is that or Nd, Mc or Me.
 
-    bin/repr-scheme ucd gen     (arbace_tool -m arbace.repr.scheme.ucd gen UCD-DIR ROOT): the three files written
+    bin/repr-scheme ucd gen     (arbace_tool -m arbace.repr.scheme.ucd gen UCD-DIR ROOT): the four files written
     bin/repr-scheme ucd check   (... check UCD-DIR ROOT OUT): written into OUT and compared byte for byte with the checkout's,
                                 and UnicodeData.txt's categories against extracted/DerivedGeneralCategory.txt's, code point
                                 for code point"
@@ -96,6 +108,29 @@
 (defn initial-ranges [a] (ranges-of a #(contains? constituent %)))
 (defn subsequent-ranges [a] (ranges-of a #(or (contains? constituent %) (contains? subsequent-more %))))
 
+;; R6RS 4.2.1: <whitespace> is tab, line feed, line tabulation, form feed, carriage return, next line (the six controls) or a
+;; character of Zs, Zl or Zp; <intraline whitespace> is tab or a character of Zs. Below U+0080 the generated functions state the
+;; controls and the space; from U+0080 on these ranges (U+0085, next line, is Cc: stated with the controls).
+(def ^:private whitespace-cats (set (map code ["Zs" "Zl" "Zp"])))
+(defn whitespace-ranges [a] (ranges-of a #(contains? whitespace-cats %)))
+(defn zs-ranges [a] (ranges-of a #(== (long %) (long (code "Zs")))))
+
+(defn case-folding
+  "CaseFolding.txt's mappings (lines `code; status; mapping; # name`): {:full (sorted [cp [cp ...]]) :simple (sorted [cp cp])}:
+  full case folding is the C and F lines (UCD's CaseFolding.txt: \"use C + F\"; T, the Turkic, left out: R6RS's string-foldcase
+  and Chez's), the simple the C and S lines (char-foldcase)."
+  [^String path]
+  (let [rows (for [l (str/split-lines (slurp path))
+                   :let [l (str/trim (first (str/split l #"#" 2)))]
+                   :when (seq l)
+                   :let [[c st m] (map str/trim (str/split l #";"))]]
+               [(hex c) st (mapv hex (str/split m #" +"))])]
+    (doseq [[c st m] rows]
+      (when-not (#{"C" "F" "S" "T"} st) (throw (ex-info (str "CaseFolding.txt: unknown status " st) {})))
+      (when (and (#{"C" "S" "T"} st) (not= 1 (count m))) (throw (ex-info (str "CaseFolding.txt: a simple mapping of " (count m) " code points at " c) {}))))
+    {:full (vec (sort-by first (for [[c st m] rows :when (#{"C" "F"} st)] [c m])))
+     :simple (vec (sort-by first (for [[c st m] rows :when (#{"C" "S"} st)] [c (first m)])))}))
+
 ;; ---- the generated files
 
 (def ^:private header-note
@@ -107,8 +142,8 @@
   [xs ^long per ^String indent]
   (str/join "\n" (map #(str indent (str/join " " %)) (partition-all per xs))))
 
-(defn category-file ^String [^bytes a]
-  (let [rs (runs a)]
+(defn category-file ^String [{:keys [^bytes cats]}]
+  (let [a cats rs (runs a)]
     (str "(ns arbace.repr.scheme.category\n"
          "  \"The general categories of the Unicode Character Database 16.0.0 (UnicodeData.txt), as R6RS 4.2.1's character classes\n"
          "  name them (arbace.repr.scheme.report), in place of the host's tables (SCS9 (c)): the runs lo hi category of code points of\n"
@@ -128,16 +163,14 @@
          "                :else (nth names (aget rs (+ b 2)))))\n"
          "        \"Cn\"))))\n")))
 
-(defn unicode-file ^String [^bytes a]
+(defn unicode-file ^String [{:keys [^bytes cats]}]
+  (let [a cats]
   (str "(ns arbace.repr.scheme.unicode\n"
        "  \"The reader's tables of the identifier characters above U+007F (doc/scheme/SPEC.md, 6): the scalar values that are an\n"
        "  <initial> and a <subsequent> by R6RS 4.2.1's rule over the general categories of the Unicode Character Database 16.0.0,\n"
        "  as ranges [lo hi] flattened (SCS9 (c); before, Chez Scheme 10.3.0's answers, SC21: the same ranges, Chez's Unicode data\n"
-       "  being 16.0's). " header-note "\")\n\n"
-       "(def initial-ranges\n  \"The ranges [lo hi] of the initial characters from U+0080 on, flat.\"\n  (long-array ["
-       (str/join " " (initial-ranges a)) "]))\n\n"
-       "(def subsequent-ranges\n  \"The ranges [lo hi] of the subsequent characters from U+0080 on, flat.\"\n  (long-array ["
-       (str/join " " (subsequent-ranges a)) "]))\n\n"
+       "  being 16.0's); and R6RS 4.2.1's <whitespace> and <intraline whitespace> over the same categories (SCS13 (b); before, Java's\n"
+       "  Character/getType). " header-note "\")\n\n"
        "(defn in-ranges?\n  \"Is the code point `cp` in one of the flat ranges `rs`?\"\n  [^longs rs ^long cp]\n"
        "  (let [n (quot (alength rs) 2)]\n"
        "    (loop [lo 0 hi n]\n"
@@ -146,13 +179,63 @@
        "          (cond (< cp (aget rs (* 2 m))) (recur lo m)\n"
        "                (> cp (aget rs (inc (* 2 m)))) (recur (inc m) hi)\n"
        "                :else true))\n"
-       "        false))))\n"))
+       "        false))))\n\n"
+       "(def initial-ranges\n  \"The ranges [lo hi] of the initial characters from U+0080 on, flat.\"\n  (long-array ["
+       (str/join " " (initial-ranges a)) "]))\n\n"
+       "(def subsequent-ranges\n  \"The ranges [lo hi] of the subsequent characters from U+0080 on, flat.\"\n  (long-array ["
+       (str/join " " (subsequent-ranges a)) "]))\n\n"
+       "(def whitespace-ranges\n  \"The ranges [lo hi] of Zs, Zl and Zp from U+0080 on, flat.\"\n  (long-array ["
+       (str/join " " (whitespace-ranges a)) "]))\n\n"
+       "(def zs-ranges\n  \"The ranges [lo hi] of Zs from U+0080 on, flat.\"\n  (long-array ["
+       (str/join " " (zs-ranges a)) "]))\n\n"
+       "(defn whitespace?\n  \"Is the code point `cp` a <whitespace> (R6RS 4.2.1: tab, line feed, line tabulation, form feed, carriage return, next\n"
+       "  line, or a character of Zs, Zl or Zp)?\"\n  [^long cp]\n"
+       "  (if (< cp 128)\n    (or (== cp 32) (and (>= cp 9) (<= cp 13)))\n    (or (== cp 0x85) (in-ranges? whitespace-ranges cp))))\n\n"
+       "(defn intraline?\n  \"Is the code point `cp` an <intraline whitespace> (R6RS 4.2.1: tab, or a character of Zs)?\"\n  [^long cp]\n"
+       "  (or (== cp 9) (== cp 32) (and (> cp 127) (in-ranges? zs-ranges cp))))\n")))
 
-(defn go-unicode-file ^String [^bytes a]
+(defn casefold-file ^String [{:keys [fold]}]
+  (let [full (:full fold)
+        starts (reductions + 0 (map (comp count second) full))]
+    (str "(ns arbace.repr.scheme.casefold\n"
+         "  \"Full case folding of the Unicode Character Database 16.0.0 (CaseFolding.txt's C and F mappings, the Turkic T left out:\n"
+         "  R6RS's string-foldcase, Chez Scheme's #!fold-case), the folding of #!fold-case (doc/scheme/SPEC.md 12 :fold-case: the\n"
+         "  identifiers and the character names after it) for the reader (arbace.repr.scheme.read) and the report\n"
+         "  (arbace.repr.scheme.report), in place of String.toLowerCase (SCS12 (c)): the code points that fold to something else\n"
+         "  (" (count full) "), ascending, and what each folds to. " header-note "\")\n\n"
+         "(def ^:private from\n  \"The code points that fold to something else, ascending.\"\n  (long-array [\n"
+         (wrap (map first full) 24 "    ") "]))\n\n"
+         "(def ^:private start\n  \"Where each one's folding starts in `to` (one more at the end).\"\n  (long-array [\n"
+         (wrap starts 24 "    ") "]))\n\n"
+         "(def ^:private to\n  \"The foldings, one after another.\"\n  (long-array [\n"
+         (wrap (mapcat second full) 24 "    ") "]))\n\n"
+         "(defn- index\n  \"The index of `cp` in `from`, or -1.\"\n  ^long [^long cp]\n"
+         "  (let [^longs f from]\n"
+         "    (loop [lo 0 hi (alength f)]\n"
+         "      (if (< lo hi)\n"
+         "        (let [m (quot (+ lo hi) 2) v (aget f m)]\n"
+         "          (cond (< cp v) (recur lo m) (> cp v) (recur (inc m) hi) :else m))\n"
+         "        -1))))\n\n"
+         "(defn fold\n  \"The string `s` by full case folding.\"\n  ^String [^String s]\n"
+         "  (let [sb (StringBuilder.) n (.length s) ^longs st start ^longs t to]\n"
+         "    (loop [i 0]\n"
+         "      (if (< i n)\n"
+         "        (let [cp (.codePointAt s (int i)) k (index cp)]\n"
+         "          (if (neg? k)\n"
+         "            (.appendCodePoint sb (int cp))\n"
+         "            (dotimes [j (- (aget st (inc k)) (aget st k))] (.appendCodePoint sb (int (aget t (+ (aget st k) j))))))\n"
+         "          (recur (+ i (Character/charCount (int cp)))))\n"
+         "        (.toString sb)))))\n")))
+
+(defn go-unicode-file ^String [{:keys [^bytes cats fold]}]
+  (let [a cats]
   (str ";; si's runtime: the reader's identifier tables (as arbace.repr.scheme.unicode): the scalar values from U+0080 on that may\n"
        ";; start (initial) and continue (subsequent) an identifier, by R6RS 4.2.1's rule over the general categories of the Unicode\n"
-       ";; Character Database 16.0.0, as flat ranges lo hi (SCS9 (c)). Generated by `bin/repr-scheme ucd gen` (arbace.repr.scheme.ucd)\n"
-       ";; from the database pinned by test/scheme/ucd.edn; `bin/repr-scheme ucd check` regenerates it and compares. Do not edit.\n"
+       ";; Character Database 16.0.0, as flat ranges lo hi (SCS9 (c)); R6RS 4.2.1's <whitespace> and <intraline whitespace> over the\n"
+       ";; same categories (SCS13 (b); before, Go's unicode tables); the case foldings of CaseFolding.txt, full (C and F: #!fold-case,\n"
+       ";; string-foldcase) and simple (C and S: char-foldcase) (SCS12 (c); before, Go's unicode.ToLower and Chez's answers). Generated\n"
+       ";; by `bin/repr-scheme ucd gen` (arbace.repr.scheme.ucd) from the database pinned by test/scheme/ucd.edn; `bin/repr-scheme ucd\n"
+       ";; check` regenerates it and compares. Do not edit.\n"
        "(in-ns 'go.arbace.scm)\n\n"
        "(go/file \"unicode.go\"\n  :imports [])\n\n"
        "(go/var ^{:tag (slice int32)} initialRanges\n  (lit (slice int32)\n" (wrap (initial-ranges a) 24 "    ") "))\n\n"
@@ -174,12 +257,56 @@
        "(go/func IsIdentSubsequent \"IsIdentSubsequent is whether r may continue an identifier.\\n\" ^bool [^rune r]\n"
        "  (when (< r 128)\n"
        "    (return (or (IsIdentInitial r) (and (>= r \\0) (<= r \\9)) (== r \\+) (== r \\-) (== r \\.) (== r \\@))))\n"
-       "  (inRanges subsequentRanges r))\n"))
+       "  (inRanges subsequentRanges r))\n\n"
+       "(go/var ^{:tag (slice int32)} whitespaceRanges\n  (lit (slice int32)\n" (wrap (whitespace-ranges a) 24 "    ") "))\n\n"
+       "(go/var ^{:tag (slice int32)} zsRanges\n  (lit (slice int32)\n" (wrap (zs-ranges a) 24 "    ") "))\n\n"
+       "(go/func IsWhitespace \"IsWhitespace is whether r is a <whitespace> (R6RS 4.2.1: tab, line feed, line tabulation, form feed, carriage return, next line, Zs, Zl, Zp over UCD 16.0.0).\\n\" ^bool [^rune r]\n"
+       "  (when (< r 128)\n"
+       "    (return (or (== r 32) (and (>= r 9) (<= r 13)))))\n"
+       "  (or (== r 0x85) (inRanges whitespaceRanges r)))\n\n"
+       "(go/func IsIntralineSpace \"IsIntralineSpace is whether r is an <intraline whitespace> (R6RS 4.2.1: tab, Zs over UCD 16.0.0).\\n\" ^bool [^rune r]\n"
+       "  (or (== r 9) (== r 32) (and (> r 127) (inRanges zsRanges r))))\n\n"
+       ";; the foldings: foldFullData is code point, count, the code points it folds to, ...; foldSimpleData code point, code point, ...\n"
+       "(go/var ^{:tag (slice int32)} foldFullData\n  (lit (slice int32)\n"
+       (wrap (mapcat (fn [[c m]] (list* c (count m) m)) (:full fold)) 24 "    ") "))\n\n"
+       "(go/var ^{:tag (slice int32)} foldSimpleData\n  (lit (slice int32)\n"
+       (wrap (mapcat identity (:simple fold)) 24 "    ") "))\n\n"
+       "(go/func foldFullMap ^{:tag (map rune (slice rune))} [^{:tag (slice int32)} d]\n"
+       "  (let [m (make (map rune (slice rune)))\n"
+       "        i 0]\n"
+       "    (while (< i (len d))\n"
+       "      (let [n (conv int (aget d (+ i 1)))]\n"
+       "        (aset m (aget d i) (conv (slice rune) (subslice d (+ i 2) (+ i 2 n))))\n"
+       "        (set! i (+ i 2 n))))\n"
+       "    m))\n\n"
+       "(go/func foldSimpleMap ^{:tag (map rune rune)} [^{:tag (slice int32)} d]\n"
+       "  (let [m (make (map rune rune))]\n"
+       "    (for [i 0] (< i (len d)) (set! i (+ i 2))\n"
+       "      (aset m (aget d i) (aget d (+ i 1))))\n"
+       "    m))\n\n"
+       "(go/var ^{:tag (map rune (slice rune))} foldFull (foldFullMap foldFullData))\n\n"
+       "(go/var ^{:tag (map rune rune)} foldSimple (foldSimpleMap foldSimpleData))\n\n"
+       "(go/func FoldRune \"FoldRune is r by simple case folding (CaseFolding.txt's C and S: char-foldcase).\\n\" ^rune [^rune r]\n"
+       "  (let [(values f ok) (aget foldSimple r)]\n"
+       "    (when ok\n"
+       "      (return f))\n"
+       "    r))\n\n"
+       "(go/func FoldRunes \"FoldRunes is rs by full case folding (CaseFolding.txt's C and F: string-foldcase, #!fold-case).\\n\" ^{:tag (slice rune)} [^{:tag (slice rune)} rs]\n"
+       "  (let [out (make (slice rune) 0 (len rs))]\n"
+       "    (range [_ r rs]\n"
+       "      (let [(values f ok) (aget foldFull r)]\n"
+       "        (if ok\n"
+       "          (set! out (append out (spread f)))\n"
+       "          (set! out (append out r)))))\n"
+       "    out))\n\n"
+       "(go/func FoldCase \"FoldCase is s by full case folding (#!fold-case's identifiers and character names).\\n\" ^string [^string s]\n"
+       "  (conv string (FoldRunes (conv (slice rune) s))))\n")))
 
 (def outputs
   "The generated files, relative to the checkout, and their makers."
   [["arbace/repr/scheme/category.ae" category-file]
    ["arbace/repr/scheme/unicode.ae" unicode-file]
+   ["arbace/repr/scheme/casefold.ae" casefold-file]
    ["go/arbace/scm/unicode.ae" go-unicode-file]])
 
 (defn- cross-check
@@ -190,10 +317,12 @@
 (defn- load-ucd [^String dir]
   (let [a (unicode-data (str dir "/UnicodeData.txt"))
         d (derived-general-category (str dir "/extracted/DerivedGeneralCategory.txt"))
-        bad (cross-check a d)]
+        bad (cross-check a d)
+        f (case-folding (str dir "/CaseFolding.txt"))]
     (println (str "ucd: UnicodeData.txt " (count (runs a)) " runs of an assigned category; DerivedGeneralCategory.txt "
-                  (if (empty? bad) "agrees code point for code point" (str "DIFFERS at " (pr-str bad)))))
-    [a (empty? bad)]))
+                  (if (empty? bad) "agrees code point for code point" (str "DIFFERS at " (pr-str bad)))
+                  "; CaseFolding.txt " (count (:full f)) " full foldings (C, F), " (count (:simple f)) " simple (C, S)"))
+    [{:cats a :fold f} (empty? bad)]))
 
 (defn -main [& [verb dir root out]]
   (let [status

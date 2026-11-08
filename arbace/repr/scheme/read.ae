@@ -11,7 +11,8 @@
   (:require [arbace.string :as str]
             [arbace.repr.scheme.forms :as fm]
             [arbace.repr.scheme.number :as num]
-            [arbace.repr.scheme.unicode :as uc]))
+            [arbace.repr.scheme.unicode :as uc]
+            [arbace.repr.scheme.casefold :as cf]))
 
 
 (defn- fail [kind msg ^long at]
@@ -34,13 +35,10 @@
 (defmacro ^:private pos [st] `(aget ~(with-meta st {:tag "[J"}) 0))
 
 (defn ws?
-  "Is the character whitespace (report 4.2.1: tab, line feed, line tab, form feed, return, next line, Zs, Zl, Zp)?"
+  "Is the character whitespace (report 4.2.1: tab, line feed, line tab, form feed, return, next line, Zs, Zl, Zp)? The table
+  generated from the Unicode Character Database 16.0.0 (arbace.repr.scheme.unicode, SCS13 (b); before, Character/getType)."
   [c]
-  (let [n (int c)]
-    (or (== n 32) (and (>= n 9) (<= n 13)) (== n 0x85)
-        (and (> n 127)
-             (let [t (Character/getType n)]
-               (or (== t Character/SPACE_SEPARATOR) (== t Character/LINE_SEPARATOR) (== t Character/PARAGRAPH_SEPARATOR)))))))
+  (uc/whitespace? (int c)))
 
 (defn delimiter?
   "Does the character end a token (whitespace, ( ) [ ] \" ; and #)?"
@@ -129,6 +127,9 @@
                               "r6rs" (do (aset st 2 1) (recur (long e)))
                               "fold-case" (do (aset st 1 1) (recur (long e)))
                               "no-fold-case" (do (aset st 1 0) (recur (long e)))
+                              ;; SPEC 12 :hash-bang (SCS12 (c)): Chez's directive back to its own syntax, taken and ignored
+                              ;; (the reading stays R6RS's)
+                              "chezscheme" (recur (long e))
                               (fail :invalid-sharp (str "invalid syntax #!" tok) i)))
                 :else (aset st 0 (long i))))
             :else (aset st 0 (long i))))))))
@@ -166,7 +167,7 @@
                                      (.appendCodePoint sb (.intValue cp))
                                      (recur (long (inc j))))))
                   ;; \<intraline whitespace>*<line ending><intraline whitespace>*
-                  (let [intra? (fn [ch] (or (= ch \tab) (and (> (int ch) 127) (== (Character/getType (int ch)) Character/SPACE_SEPARATOR)) (= ch \space)))
+                  (let [intra? (fn [ch] (uc/intraline? (int ch)))
                         j (loop [j (inc i)] (if (and (< j n) (intra? (.charAt s j))) (recur (inc j)) j))]
                     (if (and (< j n) (contains? #{\newline \return (char 0x85) (char 0x2028)} (.charAt s j)))
                       (let [j (if (and (= (.charAt s j) \return) (< (inc j) n) (= (.charAt s (inc j)) \newline)) (+ j 2) (inc j))
@@ -175,7 +176,10 @@
                       (fail :bad-string-escape (str "invalid string character \\" d) (inc i)))))))
           :else (do (.append sb c) (recur (inc i))))))))
 
-(defn- read-char-lit [^String s ^longs st]
+(defn- read-char-lit
+  "A character literal; after #!fold-case (SPEC 12 :fold-case, SCS12 (c)) a character name is folded by full case folding
+  before it is looked up (#\\SPACE is #\\space), as Chez and R7RS 2.1 fold it; #\\X41 stays no hex scalar value."
+  [^String s ^longs st]
   (let [start (aget st 0)
         n (.length s)
         i (+ start 2)]
@@ -186,9 +190,10 @@
       (aset st 0 (long e))
       (if (empty? tail)
         (fm/char-form cp)
-        (let [name (str (String. (Character/toChars (int cp))) tail)]
+        (let [name (str (String. (Character/toChars (int cp))) tail)
+              key (if (== (aget st 1) 1) (cf/fold name) name)]
           (cond
-            (contains? char-names name) (fm/char-form (char-names name))
+            (contains? char-names key) (fm/char-form (char-names key))
             (and (== cp (int \x)) (every? hex-digit? tail))
             (let [v (BigInteger. ^String tail 16)]
               (if (and (<= (.bitLength v) 31) (scalar? (.longValue v)))
@@ -223,7 +228,8 @@
             (do (.appendCodePoint sb (int cp)) (recur (+ i len) false))
             :else (fail :bad-symbol "symbol syntax is not allowed in #!r6rs mode" at)))))
     (let [name (.toString sb)]
-      (if fold (.toLowerCase name java.util.Locale/ROOT) name))))
+      ;; SPEC 12 :fold-case: full case folding, CaseFolding.txt's C and F (SCS12 (c); before, String.toLowerCase)
+      (if fold (cf/fold name) name))))
 
 (defn- peculiar-or-valid?
   "R6RS: a token that is no number is an identifier; the identifiers that start with a character an

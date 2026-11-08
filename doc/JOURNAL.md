@@ -1155,3 +1155,35 @@ choices-test, controls, round trip, spec-check, corpora files), `--corpus whimsi
 (judge 0.989 to 0.994). Night: `bin/repr-scheme check --record`, `bin/si check --aot --record`, `bin/si check --record`. Proposed: SCS12 (the
 readers' folding and `#!chezscheme` as Chez's, full case folding from the pin), SCS13 (the readers' whitespace from the pin), SCS14 (the polar
 numbers by a correctly rounded reference).
+
+## 2026-11-08: SCS12 (c), SCS13 (b), SCS14 (b), Scheme's readers fold and space by Unicode's data, the polar numbers by a correctly rounded reference (branch `scheme-props`, from ccc0eadb8)
+
+Decided by the user (about 21:30; doc/scheme/SCHEME-SURVEY.md, "Decided" and "As built: SCS12-SCS14"). One more fetch, by the user's allowance:
+https://www.unicode.org/Public/16.0.0/ucd/CaseFolding.txt (86,092 bytes, SHA-256 `6f1f9c58...599e09bb`, `CaseFolding-16.0.0.txt` of
+2024-04-30) into the main checkout's `.tmp/scheme/ucd-16.0.0`, pinned in `test/scheme/ucd.edn`; Unicode License V3 as for SCS9's files (LICENSE.md,
+doc/ARBACE.md extended). SCS12 (c): `arbace.repr.scheme.ucd` reads it (full folding C + F, the Turkic T left out; simple C + S) and generates
+`arbace/repr/scheme/casefold.ae` (1,557 foldings) and si's `FoldCase`, `FoldRunes`, `FoldRune` in `go/arbace/scm/unicode.ae`; repr/scheme's reader,
+the report and si's runtime reader fold identifiers and character names after `#!fold-case` by them (before `String.toLowerCase`, Go's
+`strings.ToLower`) and take `#!chezscheme` with no effect on the reading; si's `char-foldcase` and `string-foldcase` use them too, replacing Chez
+10.3.0's recorded answers (measured first: equal entry for entry, 1,484 simple and 1,557 full). Found and fixed: si's `Port` was no `FoldState`, so
+`#!fold-case` was lost between two reads of a port. choices.edn's three classes are gone; 15 cases added (recorded by hand with Chez's dump.ss and
+`bin/si run`); one narrower class, `:chezscheme-extensions` (an extension after `#!chezscheme`: Chez's and si's runtime's syntaxes, not R6RS's),
+proposed as SCS15. SCS13 (b): the generator states R6RS 4.2.1's `<whitespace>` and `<intraline whitespace>` over the categories into the reader's
+`unicode.ae` and si's file; `Character/getType` and Go's `unicode` tables are out of both readers (no reading changed). SCS14 (b): SPEC 12's
+`:polar` (an exact zero magnitude the exact 0, `#e` otherwise no number, else m cos a + i m sin a with the cosine and the sine correctly rounded);
+`arbace.repr.scheme.report`'s `cr-cos`, `cr-sin` by integer arithmetic (Machin's pi, reduction at a precision covering the exponent, truncated
+Taylor series, each step's bound stated) and Ziv's rounding test. Alternatives considered: a property judge (within one ulp, SCS14 (c): hides
+the last bit), BigDecimal's or a library's functions (no proven rounding on jrt), sharing the reference with the reader (would make the judge
+circular; the reader keeps jrt's StrictMath and its last-bit differences are classed `:polar-last-bit`, verified to be one ulp and no more).
+Validated against bc -l (70 digits, rounded by Python's float) on 2,008 angles: 4,016 of 4,016 equal; on the same angles StrictMath 95 values
+off by one ulp, Chez (musl's libm) 87, si's runtime (Go's math) none; 16 of them held by report-test. The 24 polar probes and Racket's
+base.sls are judged by the report now (report-check: `:polar` 25 agree with Chez, none undecided).
+
+Checked: scheme-read-essential's command (1,358 equal; 1,212 probes and 109 files by the report, 37 probes by dumps; report-test, choices-test 33
+cases, controls, round trip, spec-check, corpora files), `ucd check` 4 of 4, `--corpus whimsical --corpus scans`, `report-check`, `report-scans`,
+`pins check`, `bin/si unit` (TestFoldAndWhitespace added), `test --si`, `check` and `check --aot` on their essential subsets (controls differ, no
+regression), `r7rs`, `srfi`, `bin/si own`, `bin/repr-scheme c2j-check` (22 of 22), `bin/gate --full --plan`, `bin/reap --record`, `bin/crops-score
+--record`, `--judge --strict` (0 problems). Scheme's scores: completeness 97.41 (98.88) unchanged, maturity 100, independence 99.88 to 99.92 (judge
+0.994 to 0.996). Night: `bin/repr-scheme check --record`, `bin/si check --record`, `bin/si check --aot --record`. Proposed: SCS15 (`#!chezscheme`'s
+extensions: leave), SCS16 (si's `(rnrs unicode)` from the pin), SCS17 (the printing scans by stated rules), SCS18 (the 37 probes where Chez reads
+past the grammar refused as R6RS does).
