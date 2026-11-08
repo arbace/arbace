@@ -37,6 +37,7 @@
 (def ^:dynamic *root-file* nil)
 (def ^:dynamic *fixed-temps-scope* nil)   ; a guard's scope, whose temporaries the sub-branches of an or-pattern share
 (def ^:dynamic *let-vis* nil)   ; the source scope an `if`'s let bindings are visible in (its variable source info's)
+(declare char-text lit-const int-const)
 (def ^:dynamic *guard-vars* #{})   ; the bindings of the enclosing guards (guard_context): their places through their references
 
 (declare span-text ctor-info field-span-of-ty)
@@ -552,6 +553,23 @@
                  (mk e :borrow ty :bk (if (:mutbl e) :mut :shared) :arg (mirror-expr (:expr e))))
       :cast (let [src (:expr e)]
               (cond (:coercion-cast (r-of src)) (mk e :use ty :source (mirror-expr src))
+                    ;; a unit variant cast to an integer: its discriminant as the last explicit one's constant plus the
+                    ;; offset from it (discriminant_def_for_variant), in the enum's repr type
+                    (when-let [[adt vi _ k] (and (= :path (:kind src)) (ctor-info (:path src)))]
+                      (and (number? adt) (= :const k)))
+                    (let [[adt vi] (ctor-info (:path src))
+                          vs (tc/variants-of adt)
+                          dt (tc/discr-ty adt)
+                          j (last (filter #(:disr (:node (nth vs %))) (range (inc vi))))
+                          off (int-const (- vi (or j 0)) dt)
+                          lit {:k :const-op :ty dt :span (:span src) :tsi (:hir-id src) :c off}
+                          source (if j
+                                   {:k :binary :op "Add" :ty dt :span (:span src) :tsi (:hir-id src)
+                                    :lhs {:k :named-const :ty dt :span (:span src) :tsi (:hir-id src)
+                                          :text (str (binding [c/*in-value* true] (c/print-def-path (:id (nth vs j)) [])) "::{constant#0}")}
+                                    :rhs lit}
+                                   lit)]
+                      (mk e :cast ty :source source))
                     :else (mk e :cast ty :source (mirror-expr src))))
       :drop-temps (mk e :use ty :source (mirror-expr (:expr e)))
       :field (let [bt (let [x (r-of (:expr e)) t (:ty x)] (reduce (fn [_ [_ tt]] tt) t (:adj x)))
@@ -686,7 +704,6 @@
    :expr (some-> (:expr b) mirror-expr)})
 
 ;; patterns (thir/pattern): {:k :wild|:binding|:constant|:leaf|:variant|:deref|:or :ty T ...}
-(declare char-text lit-const int-const)
 (defn- char-const [c t] [:const (str "const " (char-text c)) t (list 'scalar c 4)])
 
 (defn- pat-expr-const
@@ -1008,6 +1025,40 @@
          (apply str (map-indexed (fn [i ch] (line (* 16 i) ch)) (partition-all 16 bytes)))
          "}\n")))
 
+(defn- str-unescape
+  "A string literal's value from its symbol (unescape_unicode's escapes, a line continuation)"
+  [^String sym]
+  (let [sb (StringBuilder.) n (count sym)]
+    (loop [i 0]
+      (if (>= i n)
+        (str sb)
+        (let [c (.charAt sym i)]
+          (if (and (= c \\) (< (inc i) n))
+            (let [d (.charAt sym (inc i))]
+              (case d
+                \n (do (.append sb \newline) (recur (+ i 2))) \r (do (.append sb "\r") (recur (+ i 2))) \t (do (.append sb "\t") (recur (+ i 2)))
+                \0 (do (.append sb (char 0)) (recur (+ i 2))) \\ (do (.append sb "\\") (recur (+ i 2)))
+                \' (do (.append sb "'") (recur (+ i 2))) \" (do (.append sb "\"") (recur (+ i 2)))
+                \x (do (.append sb (char (Integer/parseInt (subs sym (+ i 2) (+ i 4)) 16))) (recur (+ i 4)))
+                \u (let [j (str/index-of sym "}" i)]
+                     (.appendCodePoint sb (Integer/parseInt (str/replace (subs sym (+ i 3) j) "_" "") 16)) (recur (inc j)))
+                \newline (recur (loop [j (+ i 2)] (if (and (< j n) (#{\space \tab \newline \return} (.charAt sym j))) (recur (inc j)) j)))
+                (do (.append sb d) (recur (+ i 2)))))
+            (do (.append sb c) (recur (inc i)))))))))
+
+(defn- str-debug
+  "<str as Debug>: the string quoted, \\t \\r \\n \\\\ \\\" and \\0 escaped, other control characters as \\u{..}"
+  [^String v]
+  (let [sb (StringBuilder. "\"")]
+    (doseq [cp (loop [i 0 acc []] (if (>= i (count v)) acc (let [cp (.codePointAt v (int i))] (recur (+ i (Character/charCount cp)) (conj acc cp)))))]
+      (let [cp (long cp)]
+        (case cp
+          9 (.append sb "\\t") 13 (.append sb "\\r") 10 (.append sb "\\n") 92 (.append sb "\\\\") 34 (.append sb "\\\"") 0 (.append sb "\\0")
+          (if (or (< cp 32) (= cp 127) (<= 0x80 cp 0x9f))
+            (.append sb (str "\\u{" (Integer/toHexString cp) "}"))
+            (.appendCodePoint sb cp)))))
+    (str (.append sb "\""))))
+
 (defn- lit-const [lit neg t]
   (case (str (:lit-kind lit))
     "Integer" (let [v (bigint (parse-int-lit lit)) v (if neg (- v) v)]
@@ -1022,9 +1073,9 @@
     "Byte" (let [sym (str (:symbol lit))
                  c (long (if (str/starts-with? sym "\\") (int (first (unesc-char sym))) (.codePointAt sym 0)))]
              (int-const c t))
-    ("Str" "StrRaw") (let [v (str (:value lit (:symbol lit)))]
-                       (intern-alloc! (map #(bit-and (long %) 0xff) (.getBytes v "UTF-8")))
-                       [:const (str "const " (pr-str v)) t '(raw-str)])
+    ("Str" "StrRaw") (let [v (or (:value lit) (if (= "Str" (str (:lit-kind lit))) (str-unescape (str (:symbol lit))) (str (:symbol lit))))]
+                       (intern-alloc! (map #(bit-and (long %) 0xff) (.getBytes ^String v "UTF-8")))
+                       [:const (str "const " (str-debug v)) t '(raw-str)])
     ("ByteStr" "ByteStrRaw")
     (let [bs (or (:bytes lit) (byte-unesc (str (:symbol lit)) (= "ByteStrRaw" (str (:lit-kind lit)))))]
       (intern-alloc! bs)
@@ -1043,8 +1094,9 @@
     :zst-literal (if (= :fndef (first (:ty x))) (fn-const (:ty x)) unit-const)
     :static-ref (let [id (intern-static-alloc! (:def x))]
                   [:const (str "const {alloc" id ": " (ty-text (:ty x)) "}") (:ty x) '(static-ptr)])
-    :named-const [:const (str "const " (binding [c/*in-value* true c/*erased-regions* true] (c/print-def-path (:def x) (:args x)))) (:ty x)
-                  (list 'unevaluated (str (:def x)) [] nil)]
+    :named-const [:const (str "const " (or (:text x) (binding [c/*in-value* true c/*erased-regions* true] (c/print-def-path (:def x) (:args x))))) (:ty x)
+                  (list 'unevaluated (str (or (:def x) (:text x))) [] nil)]
+    :const-op (:c x)
     (unsupported "a constant" (:k x))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -1312,7 +1364,7 @@
     (:field :deref :index :var-ref :upvar-ref) :place
     (:logical :match :if :let :never-to-any :use :adt :borrow :raw-borrow :call :loop :block :break :continue :return) :into
     (:array :tuple :closure :unary :binary :cast :pointer-coercion :repeat :assign :assign-op) :rvalue
-    (:literal :zst-literal :named-const :static-ref) :constant))
+    (:literal :zst-literal :named-const :static-ref :const-op) :constant))
 
 (declare lower-let-expr in-if-then-scope ast-block-stmts primary-bindings then-else-break-default as-operand as-temp as-place as-rvalue stmt-expr then-else-break match-expr expr-into-pattern declare-bindings
          storage-live-binding! schedule-drop-for-binding!)
@@ -1447,6 +1499,10 @@
   (cond (and (integral? from) (integral? to)) "IntToInt"
         (and (= :bool (first from)) (integral? to)) "IntToInt"
         (and (= :char (first from)) (integral? to)) "IntToInt"
+        (and (= [:uint "u8"] from) (= :char (first to))) "IntToInt"
+        (and (= :ptr (first from)) (integral? to)) "PointerExposeProvenance"
+        (and (integral? from) (= :ptr (first to))) "PointerWithExposedProvenance"
+        (and (= :fndef (first from)) (= :fnptr (first to))) "PointerCoercion(ReifyFnPointer, AsCast)"
         (and (integral? from) (= :float (first to))) "IntToFloat"
         (and (= :float (first from)) (integral? to)) "FloatToInt"
         (and (= :float (first from)) (= :float (first to))) "FloatToFloat"
@@ -1497,7 +1553,7 @@
                    names (if (seq (:upvar-names info)) (mapv str (:upvar-names info)) (mapv str (range (count os))))]
                [bb (list 'aggregate (list 'closure text [] (vec (take (count os) names)) span) (mapv op-form os))])
     (:assign :assign-op) (let [bb (blk (stmt-expr bb x nil))] [bb (use-rv unit-const)])
-    (:literal :zst-literal :named-const :static-ref) [bb (use-rv (as-constant x))]
+    (:literal :zst-literal :named-const :static-ref :const-op) [bb (use-rv (as-constant x))]
     ;; the rest: an operand (into a temporary)
     (let [[bb o] (as-operand bb scope x :no)] [bb (use-rv o)])))
 
@@ -2852,7 +2908,7 @@
   "Builder::finish: the body map in MIR forms"
   [d name kind n-args ret]
   (let [s (st)]
-    {:name name :kind kind :args n-args :ret (ty-form ret)
+    {:name name :kind kind :args n-args :ret (ty-form ret) :local-tys (mapv :ty (:locals s))
      :locals (mapv (fn [l] (cond-> {:mut (:mut l) :scope (:scope l) :ty (ty-form (:ty l))} (:user-ty l) (assoc :user-ty (:user-ty l)))) (:locals s))
      :scopes (:source-scopes s)
      :debug (:debug s)
@@ -2868,6 +2924,12 @@
                         (if text text
                         (let [[l1 c1 l2 c2] span t (ty-text ty)]
                           (str "user_ty: Canonical { value: Ty(" t "), max_universe: U0, var_kinds: [] }, span: " *root-file* ":" l1 ":" c1 ": " l2 ":" c2 ", inferred_ty: " t)))))}))
+
+(defn uninhabited-adt?
+  "An ADT with no variant (the crate's enums, std's Infallible), the slice's uninhabited ADTs"
+  [t]
+  (let [d (second t)]
+    (and (tc/enum? d) (if (number? d) (empty? (tc/variants-of d)) (empty? (tc/variants-any d))))))
 
 (defn print-built
   "A built body's text as -Zdump-mir prints it after the header line: the user type annotations, then the body"

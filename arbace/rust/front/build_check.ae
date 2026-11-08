@@ -8,18 +8,20 @@
     bin/rust-front build-check [NAME...]   (BUILD_VERBOSE=1: the first differing lines; BUILD_DUMP=DIR: our texts;
                                             BUILD_FORMS=DIR: our bodies as MIR forms, NAME.built.edn)"
   (:require [arbace.rust.front.lower :as lower] [arbace.rust.front.collect :as collect] [arbace.rust.front.typeck :as tc]
-            [arbace.rust.front.build :as build] [arbace.rust.front.mir :as mir] [arbace.string :as str])
+            [arbace.rust.front.build :as build] [arbace.rust.front.passes :as passes] [arbace.rust.front.mir :as mir] [arbace.string :as str])
   (:import [java.io File]))
 
 (defn- source-file [n]
   (some #(let [f (File. (str "test/rust/" % "/" n ".rs"))] (when (.exists f) (.getCanonicalPath f))) ["front" "synthetic" "sample" "eval"]))
 
+(def ^:private pass (or (System/getenv "BUILD_PASS") "built"))
+
 (defn- oracle-bodies
-  "rustc's built MIR files of one program: {name text}"
+  "rustc's MIR files of one program after PASS (BUILD_PASS: built, or SimplifyCfg-initial after mir_built's passes): {name text}"
   [^File dir]
-  (into {} (for [^File f (.listFiles dir) :when (str/ends-with? (.getName f) ".built.after.mir")]
+  (into {} (for [^File f (.listFiles dir) :when (str/ends-with? (.getName f) (str "." pass ".after.mir"))]
              (let [t (slurp f)
-                   nm (second (re-find #"^// MIR for `(.*)` after built\n" t))
+                   nm (second (re-find (re-pattern (str "^// MIR for `(.*)` after " pass "\n")) t))
                    body (subs t (inc (str/index-of t "\n")))
                    body (if (str/starts-with? body "\n") (subs body 1) body)]
                [nm body]))))
@@ -165,7 +167,10 @@
         (vec (for [n names]
                (let [want (oracle-bodies (File. (str built-dir "/" n)))
                      got (try (build-program front-dir n) (catch Throwable e (println n "ERROR" e) []))
-                     texts (into {} (for [[nm b _] got :when b] [nm (try (build/print-built b) (catch Throwable e (str "print failed: " e)))]))
+                     texts (into {} (for [[nm b _] got :when b]
+                                      [nm (try (build/print-built (if (= pass "built") b
+                                                                    (passes/mir-built-passes b (:local-tys b) build/uninhabited-adt?)))
+                                               (catch Throwable e (str "print failed: " e)))]))
                      rows (for [[nm b err detail] got :when (contains? want nm)]
                             (let [w (get want nm) g (get texts nm)]
                               (cond err [:refused nm err detail]
@@ -189,11 +194,11 @@
                  {:name n :total (count want) :rows rows :texts texts :want want})))
         cnt (fn [r k] (count (filter #(= k (first %)) (:rows r))))]
     (doseq [r results]
-      (println (format "%-12s %3d of %3d bodies equal to rustc's built MIR, %3d more but for the allocations' ids, %3d but for their text, %3d differ, %3d refused, %3d not built"
-                       (:name r) (cnt r :equal) (:total r) (cnt r :equal-alloc-ids) (cnt r :equal-allocs) (cnt r :differ) (cnt r :refused) (- (:total r) (count (:rows r))))))
+      (println (format "%-12s %3d of %3d bodies equal to rustc's MIR after %s, %3d more but for the allocations' ids, %3d but for their text, %3d differ, %3d refused, %3d not built"
+                       (:name r) (cnt r :equal) (:total r) pass (cnt r :equal-alloc-ids) (cnt r :equal-allocs) (cnt r :differ) (cnt r :refused) (- (:total r) (count (:rows r))))))
     (let [sum (fn [k] (reduce + (map #(cnt % k) results)))]
-      (println (format "build-check: %d of %d bodies equal to rustc's built MIR, %d more but for the allocations' ids, %d more but for their text (%d differ, %d refused), %d programs whole of %d"
-                       (sum :equal) (reduce + (map :total results)) (sum :equal-alloc-ids) (sum :equal-allocs) (sum :differ) (sum :refused)
+      (println (format "build-check: %d of %d bodies equal to rustc's MIR after %s, %d more but for the allocations' ids, %d more but for their text (%d differ, %d refused), %d programs whole of %d"
+                       (sum :equal) (reduce + (map :total results)) pass (sum :equal-alloc-ids) (sum :equal-allocs) (sum :differ) (sum :refused)
                        (count (filter #(= (cnt % :equal) (:total %)) results)) (count results)))
       (println "refusals:" (pr-str (frequencies (for [r results [k _ e] (:rows r) :when (= k :refused)] e)))))
     ;; the negative control: the first program's first equal body against another body's text

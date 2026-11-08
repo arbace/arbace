@@ -1,0 +1,178 @@
+;; Ported from rustc 1.99.1 (https://github.com/rust-lang/rust at 58cf8f9c3, the sources of Alpine's rust-src-1.99.1-r0,
+;; pinned by tools/rsdump/apks.sha256): RF10's third slice, the first of the passes after MIR building:
+;; compiler/rustc_mir_transform/src/{lib.rs (mir_built's pass list), lint_and_remove_uninhabited.rs
+;;   (LintAndRemoveUninhabited's removal of the returns of calls to an uninhabited destination), simplify.rs (SimplifyCfg:
+;;   CfgSimplifier's collapse_goto_chain, merge_successor, simplify_branch, strip_nops, remove_dead_blocks)},
+;; compiler/rustc_middle/src/mir/terminator.rs (successors' order), mir/traversal.rs (preorder, reachable).
+;; rustc is dual-licensed MIT OR Apache-2.0 (LICENSE.md, "Rust (rustc 1.99.1)").
+
+(ns arbace.rust.front.passes
+  "RF10's third slice (doc/rust/FRONTEND-SURVEY.md, \"As built: RF10 (third slice)\"): MIR passes over the bodies of
+  arbace.rust.front.build (MIR forms), each as rustc runs it, judged against rustc's -Zdump-mir after the pass.
+
+    (mir-built-passes BODY)   mir_built's passes after the `built` dump: LintAndRemoveUninhabited, SimplifyCfg-initial"
+  (:require [arbace.string :as str]))
+
+(defn- cleanup-of [u] (when (and (seq? u) (= "cleanup" (name (first u)))) (second u)))
+
+(defn successors
+  "Terminator::successors in rustc's order (a switch's targets then otherwise; a call's return then its unwind cleanup)"
+  [t]
+  (if (nil? t)
+    []
+    (case (name (first t))
+      "goto" [(second t)]
+      "switch" (conj (mapv second (nth t 2)) (nth t 3))
+      "drop" (let [[_ _ target u _ drop] t] (cond-> [target] (cleanup-of u) (conj (cleanup-of u)) drop (conj drop)))
+      "call" (let [[_ _ _ _ target u] t] (cond-> [] target (conj target) (cleanup-of u) (conj (cleanup-of u))))
+      "assert" (let [[_ _ _ _ target u] t] (cond-> [target] (cleanup-of u) (conj (cleanup-of u))))
+      "false-edge" [(second t) (nth t 2)]
+      "false-unwind" (let [[_ real u] t] (cond-> [real] (cleanup-of u) (conj (cleanup-of u))))
+      "yield" (let [[_ _ resume _ drop] t] (cond-> [resume] drop (conj drop)))
+      [])))
+
+(defn map-successors
+  "Terminator::successors_mut: each successor replaced by (F block), in successors' order"
+  [t f]
+  (let [u! (fn [u] (if-let [c (cleanup-of u)] (list (first u) (f c)) u))
+        v (vec t)]
+    (apply list
+           (case (name (first t))
+             "goto" (assoc v 1 (f (nth v 1)))
+             "switch" (let [vals (mapv (fn [[x b]] [x (f b)]) (nth v 2))] (-> v (assoc 2 vals) (assoc 3 (f (nth v 3)))))
+             "drop" (let [v (assoc v 2 (f (nth v 2))) v (assoc v 3 (u! (nth v 3)))] (if (nth v 5 nil) (assoc v 5 (f (nth v 5))) v))
+             "call" (let [v (if (nth v 4) (assoc v 4 (f (nth v 4))) v)] (assoc v 5 (u! (nth v 5))))
+             "assert" (-> v (assoc 4 (f (nth v 4))) (assoc 5 (u! (nth v 5))))
+             "false-edge" (-> v (assoc 1 (f (nth v 1))) (assoc 2 (f (nth v 2))))
+             "false-unwind" (-> v (assoc 1 (f (nth v 1))) (assoc 2 (u! (nth v 2))))
+             "yield" (let [v (assoc v 2 (f (nth v 2)))] (if (nth v 4 nil) (assoc v 4 (f (nth v 4))) v))
+             v))))
+
+(defn- preorder
+  "traversal::preorder from the start block: each reachable block once, in preorder"
+  [blocks]
+  (let [seen (atom #{}) out (atom [])]
+    (loop [stack [0]]
+      (when-let [b (peek stack)]
+        (let [stack (pop stack)]
+          (if (contains? @seen b)
+            (recur stack)
+            (do (swap! seen conj b) (swap! out conj b)
+                (recur (into stack (rseq (vec (successors (:term (nth blocks b))))))))))))
+    @out))
+
+;; ---------------------------------------------------------------------------------------------
+;; LintAndRemoveUninhabited: a call whose destination's type is uninhabited returns nowhere
+
+(defn- uninhabited?
+  "Ty::is_inhabited_from's negation for the types the slice meets: `!`, a tuple or a nonempty array of one, an enum with
+  no inhabited variant (UNINHABITED-ADT? answers for an ADT)"
+  [t uninhabited-adt?]
+  (case (first t)
+    :never true
+    :tuple (boolean (some #(uninhabited? % uninhabited-adt?) (second t)))
+    :adt (boolean (uninhabited-adt? t))
+    false))
+
+(defn lint-and-remove-uninhabited
+  "LintAndRemoveUninhabited: each call into a local of an uninhabited type loses its return target (LOCAL-TYS the
+  locals' types)"
+  [body local-tys uninhabited-adt?]
+  (update body :blocks
+          (fn [bs]
+            (mapv (fn [b]
+                    (let [t (:term b)]
+                      (if (and (seq? t) (= "call" (name (first t))) (nth t 4)
+                               (let [[_ l & proj] (nth t 3)] (and (empty? proj) (uninhabited? (nth local-tys l) uninhabited-adt?))))
+                        (assoc b :term (apply list (assoc (vec t) 4 nil)))
+                        b)))
+                  bs))))
+
+;; ---------------------------------------------------------------------------------------------
+;; SimplifyCfg
+
+(defn simplify-cfg
+  "simplify_cfg: CfgSimplifier::simplify (goto chains collapsed, single-predecessor successors merged; a switch's equal
+  targets kept before the runtime phases, preserve_switch_reads) then remove_dead_blocks"
+  [body & [{:keys [preserve-switch-reads] :or {preserve-switch-reads true}}]]
+  (let [bbs (atom (:blocks body))
+        n (count @bbs)
+        pred (atom (vec (repeat n 0)))
+        term (fn [b] (:term (nth @bbs b)))
+        set-term! (fn [b t] (swap! bbs assoc-in [b :term] t))
+        take-simple-goto! (fn [b] (let [blk (nth @bbs b) t (:term blk)]
+                                    (when (and (empty? (:stmts blk)) (seq? t) (= "goto" (name (first t))))
+                                      (set-term! b nil) t)))
+        changed (atom false)]
+    (swap! pred assoc 0 1)
+    (doseq [b (preorder @bbs) s (successors (term b))] (swap! pred update s inc))
+    (letfn [(collapse-goto-chain [start]
+              (let [chain (loop [current start acc []]
+                            (if-let [t (take-simple-goto! current)]
+                              (recur (second t) (conj acc [current t]))
+                              [current acc]))
+                    [last terms] chain]
+                (when (not= start last) (reset! changed true))
+                (doseq [[current t] (rseq terms)]
+                  (when (not= (second t) last) (reset! changed true))
+                  (if (= 1 (nth @pred current))
+                    (swap! pred assoc current 0)
+                    (do (swap! pred update last inc) (swap! pred update current dec)))
+                  (set-term! current (list (first t) last)))
+                last))
+            (merge-successor! [merged t]
+              (if (and (seq? t) (= "goto" (name (first t))) (= 1 (nth @pred (second t))))
+                (let [target (second t) nt (term target)]
+                  (if (nil? nt)
+                    [false t]
+                    (do (set-term! target nil)
+                        (swap! merged conj target)
+                        (swap! pred assoc target 0)
+                        [true nt])))
+                [false t]))
+            (simplify-branch [t]
+              (if (or preserve-switch-reads (not (and (seq? t) (= "switch" (name (first t))))))
+                [false t]
+                (let [ss (successors t)]
+                  (if (apply = ss)
+                    (do (swap! pred update (first ss) - (dec (count ss))) [true (list 'goto (first ss))])
+                    [false t]))))]
+      (loop []
+        (reset! changed false)
+        (doseq [bb (range n) :when (pos? (nth @pred bb))]
+          (let [t0 (term bb)
+                _ (set-term! bb nil)
+                t (map-successors t0 collapse-goto-chain)
+                merged (atom [])
+                t (loop [t t]
+                    (let [[c1 t] (simplify-branch t)
+                          [c2 t] (merge-successor! merged t)]
+                      (when (or c1 c2) (reset! changed true))
+                      (if (or c1 c2) (recur t) t)))]
+            (when (pos? (reduce + (map #(count (:stmts (nth @bbs %))) @merged)))
+              (let [stmts (into (vec (:stmts (nth @bbs bb))) (mapcat #(:stmts (nth @bbs %)) @merged))]
+                (doseq [m @merged] (swap! bbs assoc-in [m :stmts] []))
+                (swap! bbs assoc-in [bb :stmts] stmts)))
+            (set-term! bb t)))
+        (when @changed (recur))))
+    ;; remove_dead_blocks
+    (let [blocks @bbs
+          reachable (set (preorder blocks))
+          empty-unreachable? (fn [b] (and (:term b) (empty? (:stmts b)) (= "unreachable" (name (first (:term b)))) (not (:cleanup b))))
+          eu (count (filter #(and (reachable %) (empty-unreachable? (nth blocks %))) (range n)))]
+      (if (and (= n (count reachable)) (<= eu 1))
+        (assoc body :blocks blocks)
+        (let [[kept repl] (loop [i 0 used 0 kept [] repl {} keep-u nil]
+                            (if (>= i n)
+                              [kept repl]
+                              (let [b (nth blocks i)]
+                                (cond (not (reachable i)) (recur (inc i) used kept repl keep-u)
+                                      (and (empty-unreachable? b) keep-u) (recur (inc i) used kept (assoc repl i keep-u) keep-u)
+                                      :else (recur (inc i) (inc used) (conj kept b) (assoc repl i used)
+                                                   (if (empty-unreachable? b) used keep-u))))))]
+          (assoc body :blocks (mapv (fn [b] (update b :term map-successors #(get repl %))) kept)))))))
+
+(defn mir-built-passes
+  "mir_built's passes after the `built` dump that change a body: LintAndRemoveUninhabited, then SimplifyCfg-initial"
+  [body local-tys uninhabited-adt?]
+  (-> body (lint-and-remove-uninhabited local-tys uninhabited-adt?) simplify-cfg))
