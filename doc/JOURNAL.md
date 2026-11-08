@@ -1346,3 +1346,47 @@ and 14 compiled to pass, beyond the 121 the night's record shows. Alternatives c
 logging through variants of every member that names Level (whole methods copied: rejected for the derivation's two lines a
 file); java.net.http's client first (101,314 lines with QUIC and HTTP/3 for 8 tests: JCS254); RMI by JCS132 (a) (JCS255:
 serialization is being ported). Proposed: JCS250-JCS255.
+
+## 2026-11-08: serialization's slice 4, JCS169 (a) and JCS170 (a) (branch `java-serial4`, from mac/java-night 639d42ab9)
+
+By the user's decisions of 2026-11-08 (JCS168 (a) the night's J2G_DEFAULT_SUID run, JCS169 (a) after slices 2-4, JCS170 (a),
+JCS171 (a); doc/classes/JAVA-DEFERRED-TRIAGE.md, "Decided (the user, 2026-11-08: JCS168-JCS171)"), by day and write-ahead
+(nothing converted, translated or built; the night's commands in the triage, "The night's commands (slice 4, JCS169,
+JCS170)").
+
+Slice 4 (the JDK variants' cut serialization members): a scan of every world file's serialization members against the
+world (`.tmp/s4/hookscan.py`) found four outside classes; `readObject` restored in the variants of DESKey, DESedeKey, PBEKey
+and PasswordCallback without the Cleaner (jdk26u baf63fb's code as repr/java converts it, the variants' rule), LogRecord's
+and URL's `serialPersistentFields` no longer cut, SealedObject's variant removed (its SharedSecrets access one of j2g's
+serialization accessors, JCEKS's secret keys working), java.time's and java.time.chrono's Ser classes into `time-sources`.
+Checked: j2g's `apply-variant` on the committed forms (stage 0); the joint javac check.
+
+JCS170 (a): java.lang.reflect.Proxy over Dyn. jrt's Proxy (newProxyInstance, getProxyClass, isProxyClass,
+getInvocationHandler) over a hook arbace/lang's j2g_dyn.go sets to `Compiler$ProxySupport.proxyClass`, which follows jdk26u's
+ProxyBuilder (validation, `jdk.proxy1.$ProxyN`, a class per list) and ProxyGenerator (Object's three methods first, a method
+per signature and return type, collectCompatibleTypes, checkReturnTypes), each method a `Compiler$ProxyFn` calling the
+handler; `Compiler$Dyn.defineJavaProxy` (j2g's native) makes the class with superclass Proxy, registered and allocatable for
+deserialization; Proxy's serial form (`h`) in serial_classes.ae; `InvocationHandler_Cast` so Dyn implements the interface
+(found by the day's check: an interpreted handler would not cast); UndeclaredThrowableException into the world; Dyn over a
+program's own non-public interfaces. Alternatives considered: Proxy in jrt's Go entirely (would need a Go IFn type of all
+arities: rejected), jdk26u's Proxy.java translated (needs ProxyGenerator's class files and a class loader: J2G-SPEC §12),
+proxies at the REPL only (JCS170 (b), not decided). Divergence: no throws clauses in jrt's tables, so undeclared checked
+exceptions pass unwrapped (JCS240). Checked: `go test ./jrt` (TestProxy), `go vet ./jrt` amd64 and arm64, the rules
+interpreted on stage 0 over `defineProxyClass` (a copy in `.tmp/s4/forms`).
+
+JCS169 (a): serializable lambdas. jrt's own `jdk.internal.jrt.SerialLambdas` holds the sites (what javac's altMetafactory
+call and `$deserializeLambda$` know) and the lambdas' serial state; jdk26u's SerializedLambda into the world with a variant
+(readResolve by SerialLambdas, toString without MethodHandleInfo). j2g: a serializable site's value made by a factory closure
+of its captured values, the site's adapter code with the captured Go names shadowed (one translation of the body, no
+re-translation), the site registering itself; the adapter's `Ser` and `writeReplace`. The interpreter: the lambda's class
+registered when built, its factory allocating the class's object with the captured values, `writeReplace` through the host;
+and a bug fixed, an intersection-cast lambda's class (`(IntSupplier & Serializable) ...`) did not implement Serializable at
+the interpreted level. Alternatives considered: javac's desugaring (a `lambda$` method per site and a `$deserializeLambda$`
+per class) in j2g, a second translation of each body into a package-level function (left for JCS242's registration at class
+initialization); identity of lambdas within one process (not the algorithm: rejected). Checked: the interpreter's sites on
+stage 0 over a stand-in (javac's names `lambda$st$97ab7abf$1`, signatures `(I)I`, kinds 6 and 7, the factories' lambdas
+answering 6 and 103). Night checks committed: `test/jrt/serialization/proxy_check.ae`, `test/jrt/serialization/lambda/check.ae`.
+
+JCS171 (a): accepted; the night's build measures the size. Proposed: JCS240 (throws clauses in the member tables), JCS241
+(InvocationHandler.invokeDefault), JCS242 (serializable lambdas' sites registered at class initialization), JCS243
+(Clojure's types' serialization, slice 8, next). JCS191-JCS193 stay the user's.

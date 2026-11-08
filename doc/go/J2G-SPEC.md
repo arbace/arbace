@@ -2080,11 +2080,13 @@ each check; j2g may generate them later.
   `altMetafactory` makes the lambda's class implement them; javac's cast to `Serializable`
   after such a lambda then succeeds (`Comparator.comparing`, `thenComparing`,
   `Map.Entry.comparingByKey`) (amendment JB5, accepted 2026-10-10). Serializability itself is
-  cut (§12).
+  cut (§12); since JCS169 (a) a serializable lambda is made by its site's factory of its captured values and its
+  adapter's `writeReplace` answers a `SerializedLambda` (`arbace.j2g.code/serial-lambda-val`).
 - `FromFn` in the functional interface's class (§5.11) wraps an `IFn` into the adapter, `Fn`
   calling `invoke`: that is how jrt's `Reflector` support adapts a Clojure function passed where
   a functional interface is expected, without `java.lang.reflect.Proxy` (cut).
-  `Proxy.newProxyInstance` throws `UnsupportedOperationException`; the `Reflector` variant's
+  `Proxy.newProxyInstance` throws `UnsupportedOperationException` (since JCS170 (a) it makes a class over `Dyn`,
+  §12's amendment, but `Reflector` keeps the adapters); the `Reflector` variant's
   `boxArg` calls `jrt.AdaptFn(paramType, arg)`, which is the interface's `FromFn`. j2g therefore
   generates the adapter and sets `FromFn` for every interface `Compiler.FISupport` may adapt,
   the `@FunctionalInterface` ones, whether or not a lambda targets it, and
@@ -3276,7 +3278,10 @@ D6's other cuts were reversed one by one (the status at the top, B1-PLAN.md D6).
   Amended by JCS167 (a) (the user, 2026-11-07; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS167
   (write-ahead)"): serialization is ported, jdk26u's object streams in the world; j2g lists a
   Serializable class's serial members in its table, reaches their hooks and writes its allocation
-  (`C_SerialNew`, `cfSerialFor`); serializable lambdas and proxies stay out until JCS169, JCS170.
+  (`C_SerialNew`, `cfSerialFor`); serializable lambdas and proxies stay out until JCS169, JCS170. Amended by JCS169 (a)
+  and JCS170 (a) (the user, 2026-11-08; the triage's "As built: JCS169 (write-ahead)", "As built: JCS170 (write-ahead)"):
+  a serializable lambda's site registers with jrt's `jdk.internal.jrt.SerialLambdas` (§7.11's adapter gains `Ser` and
+  `writeReplace`), and `java.lang.reflect.Proxy` makes its classes over `Dyn` (§5.12, `Compiler$ProxySupport`).
 - **Annotations at run time** and generic reflection (`getAnnotation`, `ParameterizedType`)
   (amendment R16, accepted 2026-10-08):
   - no annotations are kept: `isAnnotationPresent` is false, except

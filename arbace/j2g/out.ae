@@ -283,6 +283,12 @@
                 (list 'func (vec (map #(m/go-type pkg %) ps)))
                 (list 'func (vec (map #(m/go-type pkg %) ps)) [(m/go-type pkg r)]))
         call (apply list (list '.-Fn 't) pn)
+        ;; JCS169: a serializable lambda's adapter holds its serial state (Ser, SerialLambdas.instance:
+        ;; code/serial-lambda-val) and its writeReplace answers the SerializedLambda, as
+        ;; InnerClassLambdaMetafactory's class of a FLAG_SERIALIZABLE lambda
+        ser? (and (m/translated? c/serial-lambdas)
+                  (or (env/assignable? (str "L" fi ";") "Ljava/io/Serializable;")
+                      (some #{"java/io/Serializable"} markers)))
         ;; the SAM's bridges (its other erased descriptors, a/find-sam): methods of their own
         ;; descriptors calling Fn, the arguments and the result converted through Object, as
         ;; LambdaMetafactory's FLAG_BRIDGES (JCS63 (a), JCS116 (a), "As built: JC4c"); a bridge
@@ -313,11 +319,18 @@
                                          (map-indexed (fn [i p] (arg-conv pkg p (list 'aget 'args i))) eps))]
                         {:line (str "M1 " (:name sam) " " (dotted-desc d))
                          :body (if (= "V" er) [ecall '(return nil)] [(list 'return (result-any pkg er ecall))])}))
-        [tfns table] (member-table-form pkg a {:methods (map entry (cons (:desc sam) (map :desc bridges)))})]
+        replace-desc "(Ljava/lang/Object;)Ljava/lang/Object;"
+        write-replace {:line "M18 writeReplace ()Ljava.lang.Object;"
+                       :body [(list 'return (list (m/class-sym pkg c/serial-lambdas (str "_" (nm/method-base "replace" replace-desc)))
+                                                  (list '.-Ser recv-of)))]}
+        [tfns table] (member-table-form pkg a {:methods (concat (map entry (cons (:desc sam) (map :desc bridges)))
+                                                                (when ser? [write-replace]))})]
     (concat
       [(list 'j2g/comment (str "---- the lambda adapter of " (str/replace fi "/" ".")
                                (apply str (map #(str " & " (str/replace % "/" ".")) markers))))
-       (list 'go/type (symbol a) (list 'struct (m/jrt-sym pkg "Object") (tag 'Fn ftype)))
+       (list 'go/type (symbol a) (if ser?
+                                    (list 'struct (m/jrt-sym pkg "Object") (tag 'Fn ftype) (tag 'Ser 'any))
+                                    (list 'struct (m/jrt-sym pkg "Object") (tag 'Fn ftype))))
        (list 'go/method (symbol (nm/method-base (:name sam) (:desc sam)))
              (cond-> (vec (cons recv (map #(tag %1 (m/go-type pkg %2)) pn ps)))
                (not= "V" r) (vary-meta assoc :tag (m/go-type pkg r)))

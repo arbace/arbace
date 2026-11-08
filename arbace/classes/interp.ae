@@ -1309,6 +1309,17 @@
     (set! (.-info k) {:fields [] :field-index {} :statics [] :static-index {} :lambda true})
     k))
 
+(defn- lambda-markers
+  "The marker interfaces of a lambda's class: the intersection's, and Serializable for a serializable
+  lambda whose interface does not extend it ((IntSupplier & Serializable) () -> 1: the analyzer keeps it
+  out of :markers, LambdaMetafactory's altMetafactory makes the class implement it; JCS169), as j2g's
+  arbace.j2g.code/lambda-markers."
+  [an]
+  (vec (distinct (concat (:markers an)
+                         (when (and (:serializable an)
+                                    (not (env/assignable? (t/internal->desc (:fi an)) "Ljava/io/Serializable;")))
+                           ["java/io/Serializable"])))))
+
 (declare publish! publish-members!)
 
 (defn- lambda-done!
@@ -1339,12 +1350,47 @@
   (publish! k)
   k)
 
+(def ^:private serial-lambdas-class
+  "jdk.internal.jrt.SerialLambdas when the world has it (JCS169), else nil."
+  (delay (try (Class/forName "jdk.internal.jrt.SerialLambdas") (catch Throwable _ nil))))
+
+(defn- serial-lambda!
+  "JCS169 (a) (the user's decision of 2026-11-08; doc/classes/JAVA-DEFERRED-TRIAGE.md, \"As built: JCS169
+  (write-ahead)\"): a serializable lambda's or method reference's class k (its objects' n fields the captured
+  values, the receiver first) registered with SerialLambdas as javac's $deserializeLambda$ would find it (the
+  capturing class, the functional interface's method, the implementation [kind class name signature]), its
+  factory making an object of k from captured values; and k's writeReplace (private final, as
+  InnerClassLambdaMetafactory's class has it) answering the SerializedLambda of an object's fields. Nothing
+  when the node is not serializable or the world has not SerialLambdas."
+  [^arbace.lang.Compiler$CF$Klass k an n [kind icls iname isig]]
+  (when-let [sl (and (:serializable an) @serial-lambdas-class)]
+    (let [sam (:sam an)
+          site (arbace.lang.Reflector/invokeStaticMethod
+                 ^Class sl "register"
+                 (object-array [(internal->class (:class an)) (:fi an) (:name sam) (:desc sam) (int kind)
+                                icls iname isig (:inst-desc an)
+                                (fn [^objects caps]
+                                  (let [o (.alloc (host) k)]
+                                    (dotimes [i n] (.setField (host) o (int i) (aget caps i)))
+                                    o))]))]
+      ;; the Go host's member table entry (Compiler$CFGo.setMethod: a virtual method by key), by name as
+      ;; interp.ae names the Go host
+      (arbace.lang.Reflector/invokeStaticMethod
+        (Class/forName "arbace.lang.Compiler$CFGo") "setMethod"
+        (object-array [(.-cls k) "writeReplace" (make-array Class 0) Object (int 0x12)
+        (fn [this]
+          (arbace.lang.Reflector/invokeStaticMethod
+            ^Class sl "replace"
+            (object-array [(arbace.lang.Reflector/invokeStaticMethod
+                             ^Class sl "instance"
+                             (object-array [site (object-array (map #(.field (host) this (int %)) (range n)))]))])))])))))
+
 (defmethod build-op :lambda [ctx an]
   (let [b (:boundary an)
         inst? (boolean @(:uses-this b))
         caps @(:captures b)
         sam (:sam an)
-        k (new-lambda-klass (:class ctx) (:fi an) (:markers an) (+ (count caps) (if inst? 1 0)))
+        k (new-lambda-klass (:class ctx) (:fi an) (lambda-markers an) (+ (count caps) (if inst? 1 0)))
         lctx (new-ctx (:class ctx) (:ret an))
         self (when inst? (slot! lctx "Ljava/lang/Object;"))
         lctx (assoc lctx :self (if inst? self -1) :klass (:klass ctx))
@@ -1357,6 +1403,9 @@
     (set! (.-ctypes mt) (char-array (concat (when inst? [\L]) (map #(tc (:type %)) caps))))
     (finish! lctx mt body)
     (lambda-done! k mt (:bridges sam))
+    (serial-lambda! k an (+ (count caps) (if inst? 1 0))
+                    [(if inst? 7 6) (:class ctx) (:name an)
+                     (t/method-desc (concat (map :type caps) (map :type (:params an))) (:ret an))])
     (arbace.lang.Compiler$CF$MakeLambda. k (nodes (concat (when inst? [(arbace.lang.Compiler$CF$Local. \L (int (:self ctx)))])
                                               (map #(local-node ctx %) caps))))))
 
@@ -1366,7 +1415,7 @@
         [ips iret] (t/parse-method-desc (:inst-desc an))
         [mps mret] (t/parse-method-desc desc)
         bound? (= kind :bound)
-        k (new-lambda-klass (:class ctx) (:fi an) (:markers an) (if bound? 1 0))
+        k (new-lambda-klass (:class ctx) (:fi an) (lambda-markers an) (if bound? 1 0))
         lctx (new-ctx (:class ctx) iret)
         recv (when bound? (slot! lctx "Ljava/lang/Object;"))
         pslots (mapv #(slot! lctx %) ips)
@@ -1410,6 +1459,8 @@
     (finish! lctx mt body)
     (set! (.-self mt) (int -1))
     (lambda-done! k mt (:bridges sam))
+    (serial-lambda! k an (if bound? 1 0)
+                    [(case kind :static 6 :new 8 (if (env/interface? owner) 9 5)) owner name desc])
     (arbace.lang.Compiler$CF$MakeLambda. k (nodes (when bound?
                                         [(let [r (node ctx (:recv an))]
                                            (if (:null-check an) (arbace.lang.Compiler$CF$NullChecked. r) r))])))))

@@ -9253,7 +9253,209 @@
 
     ;; a proxy's superclass methods that reflection does not list (the protected ones of
     ;; jrt's classes: ThreadLocal.initialValue) and that have no fn: (factory name) is theirs
-    (method ^:public ^:static ^:native fillProxySlots ^void [^Class c ^IFn factory]))
+    (method ^:public ^:static ^:native fillProxySlots ^void [^Class c ^IFn factory])
+
+    ;; java.lang.reflect.Proxy's class (JCS170 (a), Compiler$ProxySupport): a class named name extending
+    ;; java.lang.reflect.Proxy with these modifiers, implementing the interfaces, without fields (the
+    ;; handler is its objects' field 0, Proxy's h to reflection), registered with jrt as a proxy class
+    ;; (Proxy.isProxyClass) and allocated for deserialization with no handler (Proxy's h read into it)
+    (method ^:public ^:static ^:native defineJavaProxy ^Class [^String name ^Class/1 interfaces
+                                                               ^int modifiers]))
+
+  ;; java.lang.reflect.Proxy over Dyn (JCS170 (a), the user's decision of 2026-11-08;
+  ;; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS170 (write-ahead)"): jrt's Proxy.newProxyInstance
+  ;; and getProxyClass ask proxyClass (jrt.ProxyClassFor, set by j2g_dyn.go). A proxy class is a class
+  ;; made at run time (Dyn: its methods for every public interface of the world; reflection's member
+  ;; table for an interpreted interface), each of its methods a ProxyFn calling the handler, as
+  ;; jdk26u's ProxyGenerator writes them: Object's hashCode, equals and toString first, then each
+  ;; interface's non-static methods in order, one method per signature (name and parameters) and return
+  ;; type, its Method the first interface's (Object's for those three), its exceptions those compatible
+  ;; with every duplicate's (collectCompatibleTypes); the rules of ProxyBuilder's validation and naming
+  ;; (jdk.proxy1.$ProxyN for public interfaces, the package of the non-public ones; one class per list
+  ;; of interfaces). jdk26u's java/lang/reflect/Proxy.java and ProxyGenerator.java (baf63fb; Copyright
+  ;; (c) Oracle and/or its affiliates, GPL 2 with the Classpath Exception: LICENSE.md) are the rules'
+  ;; source; the code is Arbace's
+  (defclass ^:public ^:static ProxySupport
+    (field ^:static ^:final ^HashMap CACHE (HashMap.))
+
+    (field ^:static ^:final ^java.util.concurrent.atomic.AtomicLong NEXT
+           (java.util.concurrent.atomic.AtomicLong.))
+
+    ;; Proxy.getProxyClass's class of the interfaces (List.of's NullPointerException for a null one)
+    (method ^:public ^:static proxyClass ^Class [^Class/1 interfaces]
+      (let [ifs (.clone interfaces)]
+        (for-each [^Class i ifs] (java.util.Objects/requireNonNull i))
+        (let [key (Arrays/asList ifs)
+              ^:mutable ^Class c nil]
+          (locking CACHE
+            (set! c (cast Class (.get CACHE key)))
+            (when (nil? c)
+              (set! c (Compiler$ProxySupport/define ifs))
+              (.put CACHE key c)))
+          c)))
+
+    ;; ProxyBuilder's validation and naming, then ProxyGenerator's methods
+    (method ^:static define ^Class [^Class/1 ifs]
+      (when (> (alength ifs) 65535)
+        (throw (IllegalArgumentException. (java-str "interface limit exceeded: " (alength ifs)))))
+      (let [seen (HashSet.)
+            ^:mutable ^String pkg nil]
+        (for-each [^Class i ifs]
+          (when-not (.isInterface i)
+            (throw (IllegalArgumentException. (java-str (.getName i) " is not an interface"))))
+          (when (.isHidden i)
+            (throw (IllegalArgumentException. (java-str (.getName i) " is a hidden interface"))))
+          (when (.isSealed i)
+            (throw (IllegalArgumentException. (java-str (.getName i) " is a sealed interface"))))
+          (when-not (.add seen i)
+            (throw (IllegalArgumentException. (java-str "repeated interface: " (.getName i))))))
+        (for-each [^Class i ifs]
+          (when-not (Modifier/isPublic (.getModifiers i))
+            (let [p (.getPackageName i)]
+              (when (and (some? pkg) (not (.equals pkg p)))
+                (throw (IllegalArgumentException. "cannot have non-public interfaces in different packages")))
+              (set! pkg p))))
+        (let [public (nil? pkg)
+              p (if public "jdk.proxy1" pkg)
+              num (.getAndIncrement NEXT)
+              name (if (.isEmpty p) (java-str "$Proxy" num) (java-str p ".$Proxy" num))
+              ms (java.util.LinkedHashMap.)]
+          (Compiler$ProxySupport/add ms (.getMethod Object "hashCode" (new Class/1 0)))
+          (Compiler$ProxySupport/add ms (.getMethod Object "equals" (new Class/1 [Object])))
+          (Compiler$ProxySupport/add ms (.getMethod Object "toString" (new Class/1 0)))
+          (for-each [^Class i ifs]
+            (for-each [^java.lang.reflect.Method m (.getMethods i)]
+              (when-not (Modifier/isStatic (.getModifiers m))
+                (Compiler$ProxySupport/add ms m))))
+          (for-each [^List l (.values ms)]
+            (Compiler$ProxySupport/checkReturnTypes l))
+          (let [c (Compiler$Dyn/defineJavaProxy name ifs
+                                                (if public (bit-or-int Modifier/PUBLIC Modifier/FINAL) Modifier/FINAL))]
+            (Compiler$Dyn/defineCtor c (new Class/1 [java.lang.reflect.InvocationHandler]) nil)
+            (for-each [^List l (.values ms)]
+              (for-each [^Object/1 pm l]
+                (let [m (cast java.lang.reflect.Method (aget pm 0))]
+                  (Compiler$Dyn/setMethod c (.getName m) (.getParameterTypes m) (.getReturnType m)
+                                          (Compiler$ProxyFn. m (cast Class/1 (aget pm 1)))))))
+            c))))
+
+    ;; addProxyMethod: by signature (name and parameter descriptors), a method per return type, [Method
+    ;; exceptions]; a duplicate of the same return type narrows the exceptions to the compatible ones
+    (method ^:static add ^void [^java.util.LinkedHashMap ms ^java.lang.reflect.Method m]
+      (let [sb (StringBuilder. (.getName m))]
+        (.append sb "(")
+        (for-each [^Class t (.getParameterTypes m)] (.append sb (Compiler$ProxySupport/descriptor t)))
+        (.append sb ")")
+        (let [sig (.toString sb)
+              ^:mutable ^List l (cast List (.get ms sig))
+              ex (.getExceptionTypes m)]
+          (when (nil? l)
+            (set! l (ArrayList.))
+            (.put ms sig l))
+          (for-each [^Object/1 pm l]
+            (when (identical? (.getReturnType (cast java.lang.reflect.Method (aget pm 0))) (.getReturnType m))
+              (let [legal (ArrayList.)
+                    old (cast Class/1 (aget pm 1))]
+                (Compiler$ProxySupport/collectCompatibleTypes ex old legal)
+                (Compiler$ProxySupport/collectCompatibleTypes old ex legal)
+                (aset pm 1 (.toArray legal (new Class/1 0)))
+                (return))))
+          (.add l (new Object/1 [m ex])))))
+
+    (method ^:static collectCompatibleTypes ^void [^Class/1 from ^Class/1 with ^List list]
+      (for-each [^Class fc from]
+        (when-not (.contains list fc)
+          (loop [^int j 0]
+            (when (< j (alength with))
+              (if (.isAssignableFrom (aget with j) fc)
+                  (.add list fc)
+                  (recur (unchecked-inc-int j))))))))
+
+    ;; checkReturnTypes: the return types of one signature's methods, one assignable to all the others
+    (method ^:static checkReturnTypes ^void [^List methods]
+      (when (>= (.size methods) 2)
+        (let [uncovered (ArrayList.)
+              sig (Compiler$ProxySupport/signature (cast java.lang.reflect.Method (aget (cast Object/1 (.get methods 0)) 0)))]
+          (for-each [^Object/1 pm methods]
+            (let [nt (.getReturnType (cast java.lang.reflect.Method (aget pm 0)))]
+              (when (.isPrimitive nt)
+                (throw (IllegalArgumentException.
+                         (java-str "methods with same signature " sig " but incompatible return types: "
+                                   (.getName nt) " and others"))))
+              (let [^:mutable covered false
+                    ^:mutable added false
+                    it (.listIterator uncovered)]
+                (loop []
+                  (when (and (not covered) (.hasNext it))
+                    (let [u (cast Class (.next it))]
+                      (cond
+                        (.isAssignableFrom nt u) (set! covered true)
+                        (.isAssignableFrom u nt) (if added (.remove it) (do (.set it nt) (set! added true)))))
+                    (recur)))
+                (when (and (not covered) (not added)) (.add uncovered nt)))))
+          (when (> (.size uncovered) 1)
+            (throw (IllegalArgumentException.
+                     (java-str "methods with same signature " sig " but incompatible return types: " uncovered)))))))
+
+    (method ^:static signature ^String [^java.lang.reflect.Method m]
+      (let [sb (StringBuilder. (.getName m))]
+        (.append sb "(")
+        (for-each [^Class t (.getParameterTypes m)] (.append sb (Compiler$ProxySupport/descriptor t)))
+        (.append sb ")")
+        (.toString sb)))
+
+    (method ^:static descriptor ^String [^Class c]
+      (cond
+        (.isArray c) (java-str "[" (Compiler$ProxySupport/descriptor (.getComponentType c)))
+        (identical? c Integer/TYPE) "I" (identical? c Long/TYPE) "J" (identical? c Boolean/TYPE) "Z" (identical? c Byte/TYPE) "B"
+        (identical? c Character/TYPE) "C" (identical? c Short/TYPE) "S" (identical? c Float/TYPE) "F" (identical? c Double/TYPE) "D"
+        (identical? c Void/TYPE) "V"
+        :else (java-str "L" (.replace (.getName c) \. \/) ";")))
+
+    ;; the wrapper class of primitive class c
+    (method ^:static wrapper ^Class [^Class c]
+      (cond
+        (identical? c Integer/TYPE) Integer (identical? c Long/TYPE) Long (identical? c Boolean/TYPE) Boolean (identical? c Byte/TYPE) Byte
+        (identical? c Character/TYPE) Character (identical? c Short/TYPE) Short (identical? c Float/TYPE) Float :else Double)))
+
+  ;; a proxy's method (JCS170): the handler's invoke with the proxy, the Method and the arguments (null for
+  ;; none); an exception the method may throw (an Error, a RuntimeException, one its exceptions allow)
+  ;; propagates, another is wrapped in UndeclaredThrowableException (only when the method's exceptions are
+  ;; known: the member tables keep no throws clauses, JCS240); the result is the return type's (null
+  ;; for a primitive NullPointerException, another type ClassCastException), as ProxyGenerator's code does
+  (defclass ^:public ^:static ProxyFn
+    :extends RestFn
+    (field ^:public ^:final ^java.lang.reflect.Method m)
+    (field ^:public ^:final ^Class/1 ex)
+    (constructor ^:public [this ^java.lang.reflect.Method m ^Class/1 ex]
+      (set! (.-m this) m)
+      (set! (.-ex this) ex))
+    (method ^:public getRequiredArity ^int [this] 1)
+    (method ^:protected doInvoke [this proxy args]
+      (let [a (RT/seqToArray (RT/seq args))
+            h (cast java.lang.reflect.InvocationHandler (Compiler$Dyn/getField proxy 0))
+            ^:mutable r nil]
+        (try
+          (set! r (.invoke h proxy m (if (== (alength a) 0) nil a)))
+          (catch Throwable t
+            ;; the member tables keep no throws clauses (jrt's Method.getExceptionTypes is empty): a
+            ;; method whose exceptions are not known lets every exception through (JCS240)
+            (if (or (instance? Error t) (instance? RuntimeException t) (== (alength ex) 0)
+                    (Compiler$ProxyFn/declared ex t))
+                (throw (Util/sneakyThrow t))
+                (throw (java.lang.reflect.UndeclaredThrowableException. t)))))
+        (let [rt (.getReturnType m)]
+          (cond
+            (identical? rt Void/TYPE) nil
+            (.isPrimitive rt) (do (when (nil? r) (throw (NullPointerException.)))
+                                  (.cast (Compiler$ProxySupport/wrapper rt) r))
+            :else (.cast rt r)))))
+
+    (method ^:static declared ^boolean [^Class/1 ex ^Throwable t]
+      (loop [^int i 0]
+        (if (< i (alength ex))
+            (if (.isInstance (aget ex i) t) true (recur (unchecked-inc-int i)))
+            false))))
 
   (defclass ^:public ^:static Evaluator
     ;; what RecurExpr returns to its loop or fn method
