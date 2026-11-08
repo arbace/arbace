@@ -264,6 +264,16 @@ from inexact, flonums by bits), E-off (the datum's offsets), E-write (the printe
 (the same class), and per scan the ranges equal. A difference not in `test/scheme/check-known.edn` fails, and so
 does a listed one that no longer occurs.
 
+Since SCS5 (b) a probe is judged by the report instead of Chez's dump wherever the report decides it:
+`arbace.repr.scheme.report` reads the text by R6RS 4.1-4.3's grammar rule for rule, apart from the reader, its numbers
+by exact arithmetic (an inexact one the binary64 nearest its exact value, ties to even, by its own conversion), and the
+check compares Arbace's reading with it: E-tree, E-off, the count, E-error (an error where the grammar has no
+production; a run that is no lexeme any of the token classes) and E-write as a property (each datum written and read
+back the same datum). The report leaves `#!<identifier>` (4.1), an exact ratio with a zero denominator, `#e` on an
+infinity or a NaN, a mantissa width below 53 or with `#e`, a complex number of mixed exactness and a polar number but
+for an exact zero angle to the implementation: those probes, and the 37 where Chez's R6RS mode reads past the grammar
+(`test/scheme/report-chez.edn`), are judged by their dump. `bin/repr-scheme report-check` compares the three readings.
+
 ## 10. The corpora
 
 `test/scheme/corpora.edn`: Racket's R6RS tests (`racket/r6rs`, `r6rs-test/tests`, Apache-2.0 OR MIT), Larceny's
