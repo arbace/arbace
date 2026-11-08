@@ -1,0 +1,121 @@
+(ns arbace.repr.cpp.diag
+  "Arbace's own C++ front end's diagnostics (doc/cpp/CPP-SURVEY.md, CX12, \"As built: CX12 (first slice)\"): a C++ file's
+  errors as a compiler gives them, `FILE:LINE:COL: error: MESSAGE [RULE]`, from the shared preprocessor (its errors,
+  arbace.repr.c.pp in C++ mode), the native parser (arbace.repr.cpp.parse: a construct the grammar does not derive, at the
+  token the parse failed at) and the checks over the parser's tree and scopes (`checks` below, each a port of the clang
+  Sema check that gives the diagnostic, over the facts the parser records on its nodes). No clang and no gcc: the dg check's dg-error part judges each test's
+  errors by its own dg-error lines (arbace.repr.cpp.dg's verdict) with these in place of clang's (`bin/repr-cpp dg --front
+  native`), so that a test passing on them is judged by Arbace alone.
+
+  A diagnostic is a map {:line :col :kind :msg :rule}: :kind :error (the verdict's), :rule the check that made it
+  (:pp, :syntax, or a Sema rule's keyword)."
+  (:require [arbace.repr.cpp.native :as native]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(defn- latin1 ^String [^String path]
+  (String. (java.nio.file.Files/readAllBytes (.toPath (java.io.File. path))) "ISO-8859-1"))
+
+(defn line-starts ^java.util.ArrayList [^String s]
+  (let [v (java.util.ArrayList.)]
+    (.add v (long 0))
+    (dotimes [i (.length s)] (when (= \newline (.charAt s i)) (.add v (long (inc i)))))
+    v))
+
+(defn line-col
+  "The 1-based [line column] of offset `off` in the text whose line starts are `starts`."
+  [^java.util.ArrayList starts ^long off]
+  (let [i (java.util.Collections/binarySearch starts off)
+        l (if (neg? i) (- (- i) 1) (inc i))]
+    [l (inc (- off (long (.get starts (dec l)))))]))
+
+;; ---------------------------------------------------------------------------------------------
+;; Sema's checks: each (fn [unit starts] -> [diagnostic ...]) over the parse's result (its main-file nodes, clang's AST as
+;; data, with the parser's facts under :_ keys)
+
+(defn- walk-nodes
+  "Calls (f node parent) for every node of the tree `x` (maps with :kind, through every map and vector value)."
+  [f x parent]
+  (cond
+    (map? x) (do (when (:kind x) (f x parent))
+                 (doseq [[k v] x :when (and (not= k :_ent) (or (map? v) (vector? v) (seq? v)))]
+                   (walk-nodes f v (if (:kind x) x parent))))
+    (or (vector? x) (seq? x)) (doseq [y x] (walk-nodes f y parent))
+    :else nil))
+
+(def ^:private literal-kinds
+  #{"IntegerLiteral" "FloatingLiteral" "StringLiteral" "CharacterLiteral" "CXXBoolLiteralExpr" "CXXNullPtrLiteralExpr"})
+
+(defn- adl-free?
+  "Whether a call's arguments have no associated namespace or class ([basic.lookup.argdep]/3: a fundamental type's
+  argument has none): every argument a literal (an expression of a fundamental type the parser knows without types)."
+  [call]
+  (every? #(contains? literal-kinds (:kind %)) (rest (:inner call))))
+
+(defn undeclared
+  "Sema::DiagnoseEmptyLookup's \"use of undeclared identifier 'X'\" (clang/lib/Sema/SemaExpr.cpp, ActOnIdExpression): an
+  unqualified id-expression no unqualified lookup finds, outside a template (the parser's :_undecl, at the name), not
+  the callee of a call ADL could still resolve ([basic.lookup.argdep]: a call whose arguments are not all of
+  fundamental types; Sema::ActOnCallExpr's ADL happens before the diagnostic). Each name once a line."
+  [u starts]
+  (let [out (java.util.ArrayList.)]
+    (walk-nodes (fn [n parent]
+                  (when-let [[off nm] (:_undecl n)]
+                    ;; in a template a non-dependent name is bound at its definition ([temp.res.general]/1, clang's two-phase
+                    ;; lookup), so the same diagnostic; a call's name with a type-dependent argument waits for ADL at the
+                    ;; instantiation ([temp.dep.candidate]): the literal-argument rule below covers both
+                    (let [callee? (and parent (= "CallExpr" (:kind parent)) (identical? n (first (:inner parent))))]
+                      (when (or (not callee?) (adl-free? parent))
+                        (let [[l c] (line-col starts (long off))]
+                          (.add out {:line l :col c :kind :error :rule :undeclared
+                                     :msg (str "use of undeclared identifier '" nm "'")}))))))
+                (:nodes u) nil)
+    (distinct (vec out))))
+
+(def checks (atom [undeclared]))
+
+(defn- pp-diag
+  "A preprocessor error `FILE:LINE:COL: msg` (the port's) as a diagnostic, the main file's alone (nil else)."
+  [^String main ^String e]
+  (when-let [[_ f ln col msg] (re-find #"^(.*?):(\d+):(?:(\d+):)? (.*)$" e)]
+    (when (= f main)
+      {:line (Long/parseLong ln) :col (if col (Long/parseLong col) 1) :kind :error :msg msg :rule :pp})))
+
+(defn diagnose
+  "The diagnostics of the C++ file at `path` (named `main`, as the oracle names it), read at the standard `std` with the
+  options `args`: {:diags [...] :other n (errors outside the main file) :declines n} or {:refused why :message m}."
+  [^String path ^String main ^String std args]
+  (try
+    (let [u (native/parse-file path main std args)
+          src (latin1 path)
+          starts (line-starts src)
+          pps (keep #(pp-diag main (str %)) (:pp-errors u))
+          other (count (remove #(pp-diag main (str %)) (filter #(re-find #"^.*?:\d+:" (str %)) (:pp-errors u))))
+          syn (for [[off why tok] (:syntax u)
+                    :let [[l c] (line-col starts (long off))]]
+                {:line l :col c :kind :error :rule :syntax
+                 :msg (str (str/replace (str why) #"^(statement|declaration): " "") " (at '" tok "')")})
+          sema (mapcat (fn [f] (f u starts)) @checks)
+          ds (->> (concat pps syn sema) (sort-by (juxt :line :col)) vec)]
+      {:diags ds :other other :declines (:declines u)})
+    (catch arbace.lang.ExceptionInfo e
+      (if-let [g (or (:cpp/gap (ex-data e)) (when (:cpp/parse (ex-data e)) :parse))]
+        {:refused g :message (ex-message e)}
+        (throw e)))))
+
+(defn format-diag ^String [^String main {:keys [line col kind msg rule]}]
+  (str main ":" line ":" col ": " (name kind) ": " msg " [" (name rule) "]"))
+
+(defn read-map
+  "The dg verdict's read (arbace.repr.cpp.dg/verdict's): {:status :accepted|:rejected :lines {line n} :other n :fatal 0
+  :message first-error :diags [...]}."
+  [^String main r]
+  (if (:refused r)
+    {:status :refused :lines {} :message (str (name (:refused r)) ": " (str/replace (str (:message r)) #"[\t\n\r]" " "))}
+    (let [es (filter #(= :error (:kind %)) (:diags r))]
+      {:status (if (or (seq es) (pos? (long (:other r 0)))) :rejected :accepted)
+       :lines (into (sorted-map) (frequencies (map :line es)))
+       :other (:other r 0) :fatal 0
+       :message (if-let [e (first es)] (format-diag main e) "")
+       :diags (mapv #(format-diag main %) es)})))

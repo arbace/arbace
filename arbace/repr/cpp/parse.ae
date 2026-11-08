@@ -133,6 +133,7 @@
 (def ^:private ^:const USES 11)     ; the special members' uses (arbace.repr.cpp.sema's resolve-uses: an ArrayList)
 (def ^:private ^:const RET 12)      ; the return type of the function whose body is being parsed
 (def ^:private ^:const DECLTYPES 13) ; G4: decltype's operands parsed ({text-without-spaces node}, a HashMap; *full-headers* only)
+(def ^:private ^:const DIAGS 14)   ; CX12: the main file's syntax errors, one a decline: [offset why] in an ArrayList (arbace.repr.cpp.diag)
 (def ^:private ^:const PATTRS 10)   ; the attributes the ptr-operators of the declarator being parsed carried     ; the template header the next declaration is under: its parameters' names (for the injected class name)
 
 (defn- stv [^P p k] (aget ^objects (.-st p) (int k)))
@@ -1618,6 +1619,13 @@
                                                             (class-member? p (:s lp)))
                                                    en)
                                            :_objdep (dep-this? p)
+                                           ;; CX12: an unqualified name no lookup finds, not in a class template's member (Sema's
+                                           ;; ActOnIdExpression -> DiagnoseEmptyLookup, "use of undeclared identifier"; a call's
+                                           ;; ADL decided by arbace.repr.cpp.check over the final tree): the name token's offset
+                                           :_undecl (when (and (nil? en) (= 1 (count (:parts qn))) (not (:g qn)) (:s lp) (not (:args lp))
+                                                               (not (str/starts-with? (:s lp) "__")) (main-tok? p b)
+                                                               (not (dep-this? p)))
+                                                      [(.-o (tok-at p b)) (:s lp) (boolean (in-template? p))])
                                            :referencedDecl {:name (or (:s lp) (when (:op lp) (if (re-find #"^[a-z]" (:op lp)) (str "operator " (:op lp)) (str "operator" (:op lp)))) "")}}))))
       :else (perr p "an expression"))))
 
@@ -1774,10 +1782,18 @@
 (def ^:private debug? (boolean (System/getenv "REPR_CPP_NATIVE_DEBUG")))
 
 (defn- decline!
-  "A main-file construct the parser declines, counted by `why`."
-  [^P p ^String why]
-  (st! p DECLINES (inc (long (stv p DECLINES))))
-  (let [^HashMap m (stv p REASONS)] (.put m why (inc (long (or (.get m why) 0))))))
+  "A main-file construct the parser declines, counted by `why`; CX12: the token it failed at (`at`, the failure's
+  index: ex-data's :at, else the construct's first token `b`) kept with the reason as the construct's syntax error, at
+  that token's offset when it is the main file's (else at the construct's first token: a macro's or header's token)."
+  ([^P p ^String why] (decline! p why nil nil))
+  ([^P p ^String why at b]
+   (st! p DECLINES (inc (long (stv p DECLINES))))
+   (let [^HashMap m (stv p REASONS)] (.put m why (inc (long (or (.get m why) 0)))))
+   (when-let [^ArrayList d (stv p DIAGS)]
+     (let [i (long (or at b 0))
+           i (if (main-tok? p i) i (long (or b i)))
+           ^T t (tok-at p i)]
+       (.add d [(.-o t) why (.-s t)])))))
 
 (defn- skip-statement!
   "The cursor from a statement's first token `b` to after its end: its ; at depth 0, or the } closing a block it opened
@@ -1807,7 +1823,7 @@
              (let [_ (when debug? (binding [*out* *err*] (println "decline:" (ex-message x))))
                    [e _] (skip-statement! p b)]
                (if (main-tok? p b)
-                 (decline! p (str "statement: " (:why (ex-data x))))
+                 (decline! p (str "statement: " (:why (ex-data x))) (:at (ex-data x)) b)
                  (when (System/getenv "CPP_HDR_TRACE")
                    (binding [*out* *err*] (println "header statement decline:" (.-f (tok-at p b)) (.-o (tok-at p b)) (ex-message x)))))
                (node p "NativeDecline" b (max b (long e)) {}))
@@ -3810,7 +3826,7 @@
                  (do (when (and *full-headers* (not (skim? p)) (System/getenv "CPP_HDR_TRACE"))
                        (binding [*out* *err*] (println "header decline:" (.-f (tok-at p b)) (.-o (tok-at p b)) (ex-message x))))
                      [])
-                 (do (decline! p (str "declaration: " (:why (ex-data x))))
+                 (do (decline! p (str "declaration: " (:why (ex-data x))) (:at (ex-data x)) b)
                      [(node p "NativeDecline" b (max b (long e)) {})])))
              (throw x))))))
 
@@ -3935,7 +3951,7 @@
   (let [root (sc/new-scope :ns nil {:k :ns :name ""})
         p (P. toks (alength toks) (long-array 1) (object-array 16) main src year gnu)]
     (st! p SCOPE root) (st! p ROOT root) (st! p SKIM false) (st! p MTMPL (HashSet.)) (st! p DECLINES 0) (st! p GTOP true)
-    (st! p UNNAMED 0) (st! p REASONS (HashMap.)) (st! p CLS nil) (st! p THDR nil) (st! p PATTRS (ArrayList.)) (st! p USES (ArrayList.)) (st! p DECLTYPES (HashMap.))
+    (st! p UNNAMED 0) (st! p REASONS (HashMap.)) (st! p CLS nil) (st! p THDR nil) (st! p PATTRS (ArrayList.)) (st! p USES (ArrayList.)) (st! p DECLTYPES (HashMap.)) (st! p DIAGS (ArrayList.))
     (doseq [nm builtin-types] (sc/declare! root {:k :type :name nm}))
     (let [[cached pre] (if *full-headers* (full-headers! p cache-parts) [(skim-headers! p cache-parts) []])
           nodes (loop [out (vec pre)]
@@ -3947,4 +3963,4 @@
                     r (when (and (seq us) (not *full-headers*)) (sema/resolve-uses (vec us) year))]
                 (this-members (if (seq r) (sema/patch-defaulted nodes r) nodes)))
        :declines (stv p DECLINES) :reasons (into {} (stv p REASONS)) :root (stv p ROOT) :skim-cache cached
-       :decltypes (into {} (stv p DECLTYPES))}))))
+       :decltypes (into {} (stv p DECLTYPES)) :syntax (vec (stv p DIAGS))}))))

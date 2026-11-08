@@ -22,6 +22,7 @@
             [arbace.repr.c.host :as chost]
             [arbace.repr.c.pp :as pp]
             [arbace.repr.cpp :as rc]
+            [arbace.repr.cpp.diag :as diag]
             [arbace.repr.cpp.host :as host]
             [arbace.string :as str])
   (:import [java.util.concurrent Executors Callable Future]))
@@ -401,6 +402,18 @@
               (catch Throwable x {:status :crash :lines {} :message (one-line x)}))]
     [nm (assoc res :secs (/ (- (System/nanoTime) t0) 1e9))]))
 
+(defn- read-own
+  "A dg-error file's read by Arbace's own front end (CX12, REPR_CPP_FRONT=native): the native parser's and Sema's checks'
+  diagnostics (arbace.repr.cpp.diag), no oracle: accepted when it gives no error."
+  [^String root [nm r]]
+  (let [t0 (System/nanoTime)
+        src (str root "/" nm)
+        res (try (diag/read-map nm (diag/diagnose src nm (:std r) (into (vec (:clang r)) ["-iquote" (str (.getParent (java.io.File. src)))])))
+                 (catch Throwable x {:status :crash :lines {} :message (str "diag: " (one-line x))}))]
+    [nm (assoc res :secs (/ (- (System/nanoTime) t0) 1e9))]))
+
+(defn own-front? [part] (and (= part "dg-error") (= "native" (System/getenv "REPR_CPP_FRONT"))))
+
 (defn read-cmd [^String work ^String part]
   (let [d (str work "/" part)
         root (str/trim (slurp (str d "/base.txt")))
@@ -408,7 +421,9 @@
         todo (remove (comp :unsupported val) dg)
         t0 (System/nanoTime)
         h (when (= part "preprocess") (host/load-host (host/gxx-dir) "gxx"))
-        rs (pool-map (if (= part "preprocess") #(read-pp h root %) #(read-clang d root %)) todo)]
+        rs (pool-map (cond (= part "preprocess") #(read-pp h root %)
+                           (own-front? part) #(read-own root %)
+                           :else #(read-clang d root %)) todo)]
     (spit (str d "/read.edn") (str "{\n" (str/join "\n" (map (fn [[k v]] (str (pr-str k) " " (pr-str v))) (sort rs))) "\n}\n"))
     (println (str part ": read " (count rs) " files, " (pr-str (frequencies (map (comp :status second) rs))) ", "
                   (Math/round (double (/ (- (System/nanoTime) t0) 1e9))) " s"))))
@@ -597,6 +612,117 @@
     (shutdown-agents)
     (System/exit (if (seq @failing) 1 0))))
 
+(def own-record-file "test/cpp/check-dg-own-linux-amd64.edn")
+
+;; CX12's measure: the dg-error lines' expected messages grouped by the diagnostic they name (gcc's wording, the directive's regex)
+(def diag-groups
+  [[:expected-token #"(?i)^expected|before .* token|expected primary|expected unqualified|expected .* before"]
+   [:undeclared #"(?i)not declared|undeclared|was not declared|has not been declared|is not a member|no member named|does not name a|unknown type|not a type|not a template|not a class|not a namespace|no type named"]
+   [:redeclaration #"(?i)redefinition|redeclar|conflicting|previous|already|multiple definition|duplicate"]
+   [:no-match #"(?i)no matching|no viable|candidate|cannot be overloaded|ambiguous|call of overloaded"]
+   [:conversion #"(?i)cannot convert|invalid conversion|could not convert|narrowing|cannot bind|invalid initialization|discards|incompatible|no suitable|binding reference"]
+   [:constexpr #"(?i)constexpr|constant expression|constant-expression|consteval|constinit|non-constant|not a constant|integral constant"]
+   [:access #"(?i)private|protected|inaccessible|within this context"]
+   [:deleted #"(?i)deleted|use of deleted"]
+   [:template #"(?i)template|deduc|specializ|instantiat|parameter pack|explicit"]
+   [:concepts #"(?i)concept|constraint|satisf|requires"]
+   [:type #"(?i)incomplete|abstract|virtual|override|final|lvalue|rvalue|const|volatile|qualif|reference|pointer|array|void|return|type"]
+   [:static-assert #"(?i)static.assert|static assertion"]
+   [:empty-or-any #"^$|^\.\*$"]
+   [:other #""]])
+
+(defn diag-group [^String m]
+  (some (fn [[k re]] (when (re-find re (or m "")) k)) diag-groups))
+
+(defn own-cmd
+  "own WORK [--record]: the dg-error part's own read (REPR_CPP_FRONT=native) judged by each test's dg-error lines; each
+  file's row beside clang's recorded one (test/cpp/check-dg-linux-amd64.edn, the oracle tier's comparison), and the
+  expected error lines by the diagnostic they name: those Arbace's front end gives an error on, those it misses. A file
+  whose own verdict passes is judged by Arbace alone (1 in the independence's read stage); --record writes the rows
+  (test/cpp/check-dg-own-linux-amd64.edn; the rows of files not run kept)."
+  [^String work & args]
+  (let [d (str work "/dg-error")
+        dg (read-edn (str d "/dg.edn") {})
+        rd (read-edn (str d "/read.edn") {})
+        clang (into {} (map (juxt first identity) (read-edn record-file [])))
+        rows (vec (for [[nm dd] dg :when (not (:unsupported dd))
+                        :let [r (get rd nm) v (verdict dd r) id (str corpus "/" nm)]]
+                    (if (= :pass (first v)) [id :pass "own"] [id :fail (str (name (second v)) ": " (nth v 2))])))
+        cross (frequencies (for [[id res] rows] [res (second (get clang id))]))
+        ;; the expected error lines by group: hit (an own error on the line) or not
+        lines (for [[nm dd] dg :when (not (:unsupported dd))
+                    :let [r (get rd nm) ours (set (keys (:lines r)))]
+                    l (distinct (get-in dd [:expect :error]))]
+                [(diag-group (first (get-in dd [:msgs l]))) (contains? ours l) nm])
+        by (group-by first lines)
+        extra (for [[nm dd] dg :when (not (:unsupported dd))
+                    :let [r (get rd nm)
+                          allowed (-> (set (get-in dd [:expect :error])) (into (get-in dd [:xfail :error])) (into (:allow dd)))]
+                    e (:diags r)
+                    :let [[_ ln] (re-find #"^[^:]*:(\d+):" e)]
+                    :when (and ln (not (allowed (Long/parseLong ln))))]
+                (-> e (str/replace #"^[^ ]* error: " "") (str/replace #" \(at '.*'\) \[" " [")))]
+    (println (format "dg-error own: %d files, own pass %d; own x clang: %s" (count rows) (count (filter #(= :pass (second %)) rows))
+                     (pr-str (into (sorted-map) (map (fn [[[a b] n]] [(str (name a) "/" (if b (name b) "none")) n]) cross)))))
+    (println "| diagnostic (the dg-error's message) | expected lines | an own error on the line | files |")
+    (println "|---|---:|---:|---:|")
+    (doseq [[k _] diag-groups :let [xs (get by k)] :when xs]
+      (println (format "| %s | %d | %d | %d |" (name k) (count xs) (count (filter second xs)) (count (distinct (map #(nth % 2) xs))))))
+    (println "the own errors on lines that expect none, by reason (the grammar's gaps or wrong diagnostics):")
+    (doseq [[m n] (take 25 (sort-by (comp - val) (frequencies extra)))] (println (format "%5d  %s" n m)))
+    ;; --clang DIR: clang's diagnostics of the same runs (DIR/NAME.err, clang -fsyntax-only by hand: the oracle tier's), the expected
+    ;; lines grouped by clang's error on the line, its quoted names as X (the Sema diagnostic to port)
+    (when-let [cd (second (drop-while #(not= "--clang" %) args))]
+      (let [norm (fn [^String m] (-> m (str/replace #"'[^']*'" "X") (str/replace #"\d+" "N")))
+            ls (for [[nm dd] dg :when (not (:unsupported dd))
+                     :let [f (str cd "/" (esc nm) ".err")
+                           errs (when (exists? f)
+                                  (group-by first (for [l (str/split-lines (slurp-latin1 f))
+                                                        :let [[_ fl ln m] (re-find #"^(.*?):(\d+):\d+: (?:fatal )?error: (.*)$" l)]
+                                                        :when (= fl nm)]
+                                                    [(Long/parseLong ln) (norm m)])))
+                           ours (set (keys (:lines (get rd nm))))]
+                     l (distinct (get-in dd [:expect :error]))]
+                 [(or (second (first (get errs l))) "(clang: no error on the line)") (contains? ours l) nm l])
+            g (group-by first ls)]
+        ;; the files one diagnostic keeps from passing: no extra error, every missed line of that one clang diagnostic
+        (let [blk (for [[nm dd] dg :when (not (:unsupported dd))
+                        :let [r (get rd nm) v (verdict dd r)]
+                        :when (= :missed (second v))
+                        :let [f (str cd "/" (esc nm) ".err")
+                              errs (when (exists? f)
+                                     (group-by first (for [l (str/split-lines (slurp-latin1 f))
+                                                           :let [[_ fl ln m] (re-find #"^(.*?):(\d+):\d+: (?:fatal )?error: (.*)$" l)]
+                                                           :when (= fl nm)]
+                                                       [(Long/parseLong ln) (norm m)])))
+                              ours (set (keys (:lines r)))
+                              ks (set (for [l (get-in dd [:expect :error]) :when (not (ours l))]
+                                        (or (second (first (get errs l))) "(clang: no error on the line)")))]
+                        :when (= 1 (count ks))]
+                    (first ks))]
+          (println "the files that miss lines of one clang diagnostic alone (no extra error), the 25 largest:")
+          (doseq [[m n] (take 25 (sort-by (comp - val) (frequencies blk)))] (println (format "%5d  %s" n m))))
+        (println "own passes clang's record fails:" (pr-str (for [[id res] rows :when (and (= :pass res) (not= :pass (second (get clang id))))] [id (nth (get clang id) 2)])))
+        ;; CX12_SHOW=REGEX: the missed lines of the clang diagnostics it matches
+        (when-let [re (System/getenv "CX12_SHOW")]
+          (doseq [[m hit nm l] ls :when (and (not hit) (re-find (re-pattern re) m))] (println "  missed" (str nm ":" l) m)))
+        (println "the expected error lines by clang's error on the line (the first one), the 40 largest:")
+        (println "| clang's diagnostic | expected lines | an own error on the line |")
+        (println "|---|---:|---:|")
+        (doseq [[m xs] (take 40 (sort-by (comp - count val) g))]
+          (println (format "| %s | %d | %d |" (str/replace m "|" "\\|") (count xs) (count (filter second xs)))))))
+    (spit (str d "/own-rows.edn") (str "[\n" (str/join "\n" (map pr-str rows)) "\n]\n"))
+    (when (some #{"--record"} args)
+      (let [now (into {} (map (juxt first identity) rows))
+            keep (remove (fn [[id]] (contains? now id)) (read-edn own-record-file []))
+            all (sort-by first (concat keep rows))]
+        (spit own-record-file (str ";; C++'s dg check, the dg-error part by Arbace's own front end (bin/repr-cpp dg --front native --record; doc/cpp/CPP-SURVEY.md,\n"
+                                   ";; \"As built: CX12 (first slice)\"): each g++.dg file, [ID RESULT REASON]: the native parser's and Sema's checks' errors\n"
+                                   ";; (arbace.repr.cpp.diag) against the test's own dg-error lines, no clang. Read with the Clojure reader.\n[\n"
+                                   (str/join "\n" (map pr-str all)) "\n]\n"))
+        (println "recorded" own-record-file (count all) "files")))
+    (shutdown-agents)))
+
 (defn -main [verb & args]
   (case verb
     "lists" (let [[work gxxdg part only sample] args]
@@ -605,4 +731,5 @@
     "read" (let [[work & parts] args] (doseq [p parts] (read-cmd work p)) (shutdown-agents))
     "ref" (let [[work part & more] args] (ref-cmd work part (some #{"--record"} more)) (shutdown-agents))
     "judge" (apply judge-cmd args)
+    "own" (apply own-cmd args)
     (do (println "dg: lists, read, ref or judge") (System/exit 2))))
