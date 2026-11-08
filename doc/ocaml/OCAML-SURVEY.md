@@ -2766,3 +2766,121 @@ path's check-oi.edn until OC185's switch; the native record has the same 17 pass
   programs as the light level's TY24 (a) path does, its record `check-aot-compiled-native.edn`), so OC185's AOT independence holds at
   the compiled level too. About +30 passes, completeness about +1.1 points; (b) the light level as now. *Recommended: (a)*, the night
   after OC185's switch.
+
+## Decided (the user, 2026-11-08, about 20:30): OC198-OC202
+
+Relayed by the main session: **OC198 (a)** (the C API's route kept as built on oi's light driver; the AOT levels' mirror after the
+embedding), **OC199 (b)** (the two native-only stub tests by design at eval), **OC200 (a)** (bigarrfml's Fortran stub by design),
+**OC201 (a)** (a test's C helper program built and run), **OC202 (a)** (the AOT cell at the compiled level: its whole records the next
+night's slot, then `test/reap/cells.edn`'s switch). OC195 (a test's OCaml second program) is still undecided: OC201 is built for the
+helpers that are C (a C program, or an OCaml program with C stubs), and the four OCaml-only second programs keep their class.
+
+## As built: OC199-OC201 (2026-11-08, branch `ocaml-compl`, from `265bb7911`)
+
+**OC199 (b), OC200 (a).** Two `:design` classes before `:c-api` in `test/ocaml/divergences.edn`: `:native-only` (int64-unboxing/test,
+unboxed-primitive-args/test: oi is judged as ocamlc, which does not run them) and `:fortran` (lib-bigarray-2/bigarrfml: gfortran is a
+host toolchain), the latter also in `divergences-aot.edn` and `divergences-aot-compiled.edn` (its reason holds at every level). At the
+AOT levels the two native-only tests stay `:c-api` (OC198's mirror, judged against ocamlopt).
+
+**OC201 (a).** ocamltest's structure of the two tests, read as ocamltest runs its first (bytecode) alternative:
+`setup-ocamlc.byte-build-env`, then `program = NAME; all_modules = FILES; ocamlc.byte` once a program (the helper's, then the test's),
+then one `run; check-program-output` a run (cloexec: `arguments = "execv"`, then `"create_process"`), and the test's hook `TEST.run`
+in place of the run action when the source directory has one (ocamltest's `main.ml` `install_hook`, `actions_helpers.ml` `run_hook`:
+delayintr's `delayintr.run` starts the program in the background and sends it SIGINT by `./sigint $pid` two seconds later).
+
+- `bin/lib/oi/header.awk`'s helper mode: a test whose header has `setup-ocamlc.byte-build-env` and `readonly_files` of `.c` and `.ml`
+  files with at least one `.c`; the run line's environment names each helper (`@helper=NAME:FILE,...`), the test's own C stubs
+  (`@cstubs=`), the runs beyond the first (`@runs=ARGS,...`) and the hook (`@hook=run`); the alternative ends at
+  `setup-ocamlopt.*-build-env`; any other statement in it gives the class the test had (its readonly_files statement), so no other
+  test's reason moves (the corpus's 1,745 headers read before and after: only delayintr and cloexec change, and lib-threads/signal,
+  which has no `.reference` and so is in no corpus). The AOT levels (`-v aot=1`) keep the class.
+- `bin/oi`'s `oi_helper`: a helper of C files alone is a C program, read and linked by `test/ocaml/capi/cnodes.ae --program` (repr/c,
+  ci's checker, musl's prebuilt runtime, Arbace's own C target, as the stubs are; no oi runtime glue) and run by oi's driver,
+  `oi cmain NODES ARG...` (`go/arbace/oicapi`'s `RunMain`: the node program loaded as the stubs are, then its `main(argc, argv,
+  envp)`); a helper of C files and one `.ml` is an OCaml program, dumped as the test's own (the native typer, or ocdump on the oracle
+  path) and run by oi with its stubs on ci (`OI_CSTUBS`). Each is written as the executable the test names, in the run's directory.
+  `oi_one` runs the hook under `sh` with `program` (the test's program, a script that execs oi, so the hook's `$!` is oi's pid) and
+  `output`; the further runs are judged against the same verdict: the row is the first run that differs from the first's, else the
+  first's.
+- Why `oi cmain` and not `tools/cirun`: crt (ci's emulated kernel) refuses `kill` of a process other than the program or its own
+  children (`ESRCH`), by design for ci's checks; oicapi's host natives make `getpid`, `kill` and `raise` the host's, as for the stubs.
+  oicapi now gives `fstat` and `close` the host's too (errno set through musl's `__errno_location`): a stub's descriptor is the
+  process's, as OCaml's `Unix.file_descr` is (fdstatus_aux.c's `fstat` of the inherited descriptors); crt's own table holds the
+  standard streams alone.
+- oi's driver opens Go's poller (epoll and its eventfd) at its start while descriptors 3 to 63 are held (`highPoller`): OCaml's runtime
+  holds no descriptor beyond the standard streams, so a program's descriptors are the lowest free ones and a program exec'd by
+  another sees exactly what it inherited; before, the poller took the descriptor cloexec's `O_CLOEXEC` file had freed in the exec'd
+  fdstatus.exe, which then reported it open (strace: `eventfd2` = 7, the closed `f2`).
+- `test/ocaml/capi/include/caml/unixsupport.h`: Arbace's own clean-room header (`Nothing`, the error raisers and the close-on-exec
+  default declared, from unix.mli and OCaml's manual); a stub that calls a raiser is refused at its link.
+
+**Results** (`bin/oi check --only-list`, the 25 C API programs and the six signal programs of check-oi.edn; `--record` by list):
+
+| program | before | native path | oracle path (`--ocdump`) |
+|---|---|---|---|
+| lib-threads/delayintr | `:c-api` | pass | pass |
+| lib-unix/common/cloexec (both runs) | `:c-api` | pass | pass |
+| int64-unboxing/test, unboxed-primitive-args/test | `:c-api` | `:native-only` | `:native-only` |
+| lib-bigarray-2/bigarrfml | `:c-api` | `:fortran` | `:fortran` |
+| the 17 C API passes, the six signal programs | pass | pass | pass |
+
+Eval's `c-api` is empty: of the 25, 19 pass, 6 by design (2 `:marshal-closures`, 1 `:speed`, 2 `:native-only`, 1 `:fortran`).
+
+One rule of OCaml's on the way: `Unix.openfile`'s `O_CLOEXEC` wins over `O_KEEPEXEC` (`open_unix.c`: CLOEXEC, else KEEPEXEC, else the
+default, false); oi kept the descriptor when both were given.
+
+**Checks** (light, by list; main's stage 0, `OI_JOBS=1`, `OI_TYPER_GOMEMLIMIT=1200MiB`, no host toolchain at check time): `bin/oi
+check --only-list` of the 25 C API programs and the six signal programs (native: 24 of 24 run programs pass, the classes
+`:marshal-closures` 2, `:speed` 1; `--record` merged into check-oi-native.edn), the 25 with `--ocdump` (19 pass, `:native-only` 2,
+`:fortran` 1, `:marshal-closures` 2, `:speed` 1; recorded into check-oi.edn), cloexec's two runs each equal to the `.reference`;
+the essential list 58 of 58 with its negative control differing; the 14 passing lib-unix programs after the `O_KEEPEXEC` fix, 14 of
+14; `bin/oi own-verdicts --check` (0 differ); the five judgments (`divergences`, `--aot`, `suite divergences`, `--aot`, `divergences
+--compiled`: 0 failing); `bin/oi test`; `test/gate/gate-key-crops-test.bash` PASS; `bin/gate --plan` and `--full --plan`.
+
+**Scores** (`bin/reap --record`: 0 problems; `bin/crops-score --record`, `--judge --strict`: 0 problems): OCaml completeness 81.5% to
+**81.6%** (96.3% to **96.6%** without by design), maturity 100%, independence 87.4%; eval 458 / 208 / 5 to **460 / 211 / 0** (pass /
+design / deferred), AOT 405 / 202 / 64 to 405 / 203 / 63 (bigarrfml's `:fortran`).
+
+**The AOT level's `:light-speed` (35) and `:light-depth` (4), and what OC202's compiled level judges of them** (from the partial
+compiled records, `check-aot-compiled.edn` 117 rows and `check-suite-aot-compiled.edn` 17, oracle path):
+
+| light class | cases | compiled: pass | by design | deferred | not yet recorded |
+|---|---:|---:|---:|---:|---:|
+| `:light-speed` (run corpus 26, suite 9) | 35 | 26 | 2 (`:gc-and-memory`: parallel/major_gc_wait_backup, callback/test_gc_alarm) | 2 (`:compiled-speed`: memory-model/forbidden, opam/uutf/test_uutf) | 5 (ast-invariants/test, misc/stable_matching_test, parallel/fib_threads, parallel/mctest, parsetree/test) |
+| `:light-depth` | 4 | 3 (effect-syntax/coroutines, lib-threads/prodcons2, misc/sieve) | 0 | 1 (`:compiled-depth`: parallel/test_issue_11094, its 100,000 nested handlers) | 0 |
+
+So of the 39, 29 pass compiled, 2 are by design, 3 stay deferred, 5 wait for the whole record: about +29 AOT passes, completeness
+about +1 point (AOT 405 to about 434 of 671), if the compiled level passes what the light level passes (its record, 117 rows, has 113
+passes and no failure outside a class). The cell switch is ready, not applied: `.tmp/oc202-cells.patch` (against cells.edn after
+`bin/oi reap-switch --apply`, OC185: `[:ocaml :aot]`'s classes `divergences-aot-compiled.edn`, its sources
+`check-aot-compiled-native.edn` with `:same-cases check-oi-native.edn` and `check-suite-aot-compiled-native.edn` with
+`divergences-suite-aot-compiled.edn`).
+
+**The night's commands for OCaml** (after the day's merge, in order; each process at most 1.5 GB: `OI_TYPER_GOMEMLIMIT=1200MiB`,
+`O2J_JOBS=1`, `OI_LIB_JOBS=2`):
+1. `bin/oi stdlib` (bin/oi moved the native library's key).
+2. `bin/oi check --record` (the native record whole: delayintr, cloexec and the six signal programs among its passes).
+3. `bin/oi check --aot --record`, `bin/oi suite check --record`, `bin/oi suite check --aot --record`.
+4. `bin/oi reap-switch`, then `--apply` when it says so (OC185); `bin/reap --record`, `bin/crops-score --record`.
+5. OC202 (a), the next night's slot: `bin/oi check --aot --level compiled --record` and `bin/oi suite check --aot --level compiled
+   --record` (heavy: j2g and the shards' builds, under the big lock; they write `check-aot-compiled-native.edn` and
+   `check-suite-aot-compiled-native.edn`), `bin/oi divergences --compiled` and the suite's, then `git apply .tmp/oc202-cells.patch`
+   (in the worktree `.tmp/worktrees/ocaml-compl`), `bin/reap --record`, `bin/crops-score --record`, `--judge
+   --strict`.
+
+## Proposed (OC203-OC205; options with costs, a recommendation each, none decided)
+
+- **OC203 ocamltest's hooks for every run test.** The run corpus honours `TEST.run` only in helper mode. `lib-threads/swapchan.run`
+  (`${program} | ${SORT} > ${output}`) sorts the threads' output before the comparison, which is why swapchan is in `own-verdict.edn`;
+  `lib-threads/signal` has a `.check-program-output` hook and no `.reference`, so no corpus holds it. (a) every run test's `TEST.run`
+  and `TEST.check-program-output` hooks run as ocamltest's `install_hook` runs them (`SORT` the host's `sort`, the corpus taking a test
+  whose check is its hook): an hour, swapchan's waiver dropped, signal a program more; (b) as now. *Recommended: (a)*.
+- **OC204 OC195 now costs an hour.** The helper mode builds an OCaml helper already (cloexec's fdstatus.exe); OC195's four
+  (quotecommand, redirections, wait_nohang, test_unix_cmdline) differ only by having no C file, the one condition header.awk keeps for
+  OC201. (a) decide OC195 (a): the condition dropped, the four run and judged by their own verdict: an hour; (b) OC195 (b).
+  *Recommended: (a)*.
+- **OC205 A C helper on crt or on oicapi.** crt (ci's kernel) refuses `kill` of another process and sees none of the host's
+  descriptors beyond the standard streams, so a C program run by `tools/cirun` cannot be sigint.c; this branch runs C helpers by oi's
+  driver (`oi cmain`, oicapi's host natives: getpid, kill, raise, fstat, close). (a) keep it (the crop's paths alone, no key moves);
+  (b) crt gives a host mode (`cirun --host`: the process's descriptors and pids the host's) shared by C's own checks: C's embedded
+  runtime and every key move, a day. *Recommended: (a)*.

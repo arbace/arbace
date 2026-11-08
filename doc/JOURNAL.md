@@ -1090,3 +1090,26 @@ record as packs), RFP24 (no gate step yet).
 - **Scores**: OCaml 80.9 / 95.2 / 100 / 87.4 to **81.5** / 96.3 / 100 / 87.4 (eval 441 / 205 / 25 to 458 / 208 / 5); `bin/reap` and
   `crops-score --judge --strict` 0 problems. Proposed OC198-OC202 (the route and the AOT mirror, native-only stubs, a Fortran stub, a
   test's C helper program, the AOT cell at the compiled level); the night's commands in the survey's section.
+
+## 2026-11-08: OC199 (b), OC200 (a), OC201 (a) built, OC198 (a) and OC202 (a) recorded; OCaml's eval `c-api` empty (branch `ocaml-compl`, from 265bb7911)
+
+- **Decided** (the user, about 20:30, relayed): OC198 (a), OC199 (b), OC200 (a), OC201 (a), OC202 (a) (doc/ocaml/OCAML-SURVEY.md,
+  "Decided (the user, 2026-11-08, about 20:30)"). OC195 is undecided, so OC201 is built for C helpers alone.
+- **Built.** OC199 (b), OC200 (a): the classes `:native-only` (int64-unboxing, unboxed-primitive-args; eval) and `:fortran`
+  (bigarrfml; eval and both AOT levels), `:design`. OC201 (a): header.awk's helper mode reads ocamltest's first alternative (the
+  helper's and the test's `ocamlc.byte` builds, each `run`, the source directory's `TEST.run` hook, as ocamltest's main.ml and
+  actions_helpers.ml run them, ocamltest/ of the pinned OCaml 5.5.0 tarball read); bin/oi's `oi_helper` builds a C helper by
+  `test/ocaml/capi/cnodes.ae --program` on Arbace's own C target and runs it by oi's driver (`oi cmain`, oicapi's `RunMain`), an
+  OCaml helper with C stubs dumped and run by oi with its stubs on ci; `oi_one` runs the hook and the further runs. oicapi's host
+  natives add `fstat` and `close` (a stub's descriptor is the process's); oi's driver opens Go's poller while descriptors 3 to 63 are
+  held (found by strace: the poller's eventfd took the descriptor cloexec's `O_CLOEXEC` file had freed); Arbace's own
+  `caml/unixsupport.h`; `Unix.openfile`'s `O_CLOEXEC` wins over `O_KEEPEXEC` (open_unix.c's rule).
+- **Alternatives.** tools/cirun for the C helper (rejected: crt refuses a kill of another pid, by design for C's checks; changing it
+  moves C's keys: Proposed OC205); a hook mode for every test (OC203, proposed: swapchan's sort); the OCaml-only second programs of
+  OC195 (one condition away: OC204).
+- **Checked** (light, by list): the 25 C API programs and six signal programs native (24 of 24 run pass) and `--ocdump` (19 pass, 6
+  by design), both recorded by list; the essential list 58 of 58 with its control; 14 lib-unix programs; own-verdicts --check; the
+  five divergences judgments; `bin/oi test`; gate-key-crops-test; `bin/gate --plan`, `--full --plan`.
+- **Scores**: OCaml 81.5 / 96.3 / 100 / 87.4 to **81.6** / 96.6 / 100 / 87.4 (eval 460 / 211 / 0). The AOT light level's 39
+  deferred: 29 pass compiled in the partial records, 2 by design, 3 deferred, 5 unrecorded; OC202's cell switch prepared as a patch in
+  the worktree's `.tmp/oc202-cells.patch`, not applied. Proposed OC203-OC205.

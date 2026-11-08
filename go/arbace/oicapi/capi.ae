@@ -4,6 +4,7 @@
     [os "os"]
     [strconv "strconv"]
     [strings "strings"]
+    [syscall "syscall"]
     [ci "arbace/ci"]
     [crt "arbace/crt"]
     [oi "arbace/oi"]])
@@ -108,6 +109,22 @@
   (when (and (!= the nil) (!= (.-flush the) nil))
     (defer ((fn [] (recover))))
     (.Call (.-p the) (.-Main (.-p the)) (.-flush the) nil)))
+
+(go/func RunMain "RunMain runs a C program of its own on ci (a test's helper program, OC201 (a), doc/ocaml/OCAML-SURVEY.md \"As built:\nOC199-OC201\"): the node program at path loaded as Load loads the stubs (musl initialized, the process's getpid, kill and\nraise the host's: a helper's kill of another process reaches it, which ci's own emulation, crt's, refuses), then its main\ncalled with argv and the environment; main's status, C's stdio flushed.\n"
+  [^string path ^{:tag (slice string)} argv] :results [int error]
+  (when [err (Load path argv)] (!= err nil)
+    (return 0 err))
+  (let [c the
+        f (aget (.-ByName (.-p c)) "main")]
+    (when (or (== f nil) (== (.-Code f) nil))
+      (return 0 (fmt/Errorf "%s: no main" path)))
+    (let [env (os/Environ)
+          (values envp _) (.stack c argv env)
+          av (- envp (conv uint64 (* 8 (+ (len argv) 1))))
+          r (.Call (.-p c) (.-Main (.-p c)) f (lit (slice ci/Arg) (lit ci/Arg :K \i :I (conv int64 (len argv))) (lit ci/Arg :K \i :I (conv int64 av))
+                                                (lit ci/Arg :K \i :I (conv int64 envp))))]
+      (Flush)
+      (return (conv int (conv int32 (.-I r))) nil))))
 
 (go/method stack "stack is an initial stack's vector as Linux's: argv's pointers, 0, the environment's, 0, the auxiliary vector\n(AT_PAGESZ, AT_RANDOM); the environment's address and argv[0]'s.\n"
   [^{:tag (* capi)} c ^{:tag (slice string)} argv ^{:tag (slice string)} env] :results [uint64 uint64]
@@ -644,7 +661,7 @@
       (return nil 0 0 false))
     (return (.decode c r) (conv int (.Load64 (.-m c) (.-scratch c))) (conv int (.Load64 (.-m c) (+ (.-scratch c) 8))) true)))
 
-(go/method hostNatives "hostNatives are musl's functions the stubs call that act on the process itself: getpid, kill and raise, as the host's\n(a stub's kill of Unix.getpid's pid, a raise, reach the signal handlers oi installed).\n"
+(go/method hostNatives "hostNatives are musl's functions the stubs call that act on the process itself: getpid, kill and raise, fstat and\nclose, as the host's\n(a stub's kill of Unix.getpid's pid, a raise, reach the signal handlers oi installed).\n"
   ^{:tag (map string (func [(* ci/Thread) (slice ci/Arg)] [ci/Arg]))} [^{:tag (* capi)} c]
   (let [res (fn ^ci/Arg [^error err]
               (when (!= err nil)
@@ -655,4 +672,33 @@
       ["kill" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
                 (res (oi/SignalProcess (conv int (conv int32 (.-I (aget a 0)))) (conv int (conv int32 (.-I (aget a 1)))))))]
       ["raise" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
-                 (res (oi/SignalProcess (os/Getpid) (conv int (conv int32 (.-I (aget a 0)))))))])))
+                 (res (oi/SignalProcess (os/Getpid) (conv int (conv int32 (.-I (aget a 0)))))))]
+      ;; the process's descriptors (OC201 (a)): a stub's fstat and close of a descriptor are the host's, as OCaml's Unix.file_descr
+      ;; oi gives it is (ci's own table, crt's, holds the standard streams alone); errno set as musl's wrapper sets it
+      ["fstat" (fn ^ci/Arg [^{:tag (* ci/Thread)} t ^{:tag (slice ci/Arg)} a]
+                 (let [^syscall/Stat_t st (zero syscall/Stat_t)]
+                   (when [err (syscall/Fstat (conv int (conv int32 (.-I (aget a 0)))) (addr st))] (!= err nil)
+                     (return (.failErrno c t err)))
+                   (let [m (.-m c)
+                         b (conv uint64 (.-I (aget a 1)))]
+                     (.Store64 m b (.-Dev st)) (.Store64 m (+ b 8) (.-Ino st)) (.Store64 m (+ b 16) (.-Nlink st))
+                     (.Store32 m (+ b 24) (.-Mode st)) (.Store32 m (+ b 28) (.-Uid st)) (.Store32 m (+ b 32) (.-Gid st)) (.Store32 m (+ b 36) 0)
+                     (.Store64 m (+ b 40) (.-Rdev st)) (.Store64 m (+ b 48) (conv uint64 (.-Size st)))
+                     (.Store64 m (+ b 56) (conv uint64 (.-Blksize st))) (.Store64 m (+ b 64) (conv uint64 (.-Blocks st)))
+                     (.Store64 m (+ b 72) (conv uint64 (.-Sec (.-Atim st)))) (.Store64 m (+ b 80) (conv uint64 (.-Nsec (.-Atim st))))
+                     (.Store64 m (+ b 88) (conv uint64 (.-Sec (.-Mtim st)))) (.Store64 m (+ b 96) (conv uint64 (.-Nsec (.-Mtim st))))
+                     (.Store64 m (+ b 104) (conv uint64 (.-Sec (.-Ctim st)))) (.Store64 m (+ b 112) (conv uint64 (.-Nsec (.-Ctim st))))
+                     (lit ci/Arg :K \i :I 0))))]
+      ["close" (fn ^ci/Arg [^{:tag (* ci/Thread)} t ^{:tag (slice ci/Arg)} a]
+                 (when [err (syscall/Close (conv int (conv int32 (.-I (aget a 0)))))] (!= err nil)
+                   (return (.failErrno c t err)))
+                 (lit ci/Arg :K \i :I 0))])))
+
+(go/method failErrno "failErrno is a host native's failure as musl's wrappers return one: errno (its thread's, __errno_location's) set\nto err's number, -1.\n"
+  ^ci/Arg [^{:tag (* capi)} c ^{:tag (* ci/Thread)} t ^error err]
+  (let [n (conv uint32 22)]
+    (when [(values e ok) (assert syscall/Errno err)] ok
+      (set! n (conv uint32 e)))
+    (when [f (aget (.-ByName (.-p c)) "__errno_location")] (and (!= f nil) (!= (.-Code f) nil))
+      (.Store32 (.-m c) (conv uint64 (.-I (.Call (.-p c) t f nil))) n))
+    (lit ci/Arg :K \i :I -1)))
