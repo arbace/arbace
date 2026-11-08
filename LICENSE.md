@@ -869,6 +869,12 @@ covers what.
   scalar pairs after `compiler/rustc_abi/src/layout.rs`: copyright the Rust project's contributors, dual-licensed under the MIT License or
   the Apache License 2.0 at the licensee's option, taken here under the MIT License ("Rust (rustc 1.99.1): MIT License or Apache License
   2.0" below). The rest (the judge `build_check.ae`, the rest of `build_run.ae`) is Arbace's own, under the Eclipse Public License 1.0.
+  RF10's second slice (doc/rust/FRONTEND-SURVEY.md, "As built: RF10 (second slice)") adds to `build.ae`, from the same sources and
+  under the same terms, the closures' capture analysis after `compiler/rustc_hir_typeck/src/{upvar,expr_use_visitor}.rs` and
+  `compiler/rustc_passes/src/upvars.rs`, the canonical user type annotations after `compiler/rustc_hir_typeck/src/fn_ctxt/_impl.rs`,
+  `method/confirm.rs` and `compiler/rustc_middle/src/ty/{typeck_results,print/pretty}.rs` (with `typeck.ae`'s part), lint scopes
+  after `builder/scope.rs`' `maybe_new_source_scope`, allocations after `compiler/rustc_middle/src/mir/pretty.rs`' `write_allocations`;
+  the judge `arbace/rust/front/capture_check.ae` and the helper's `--captures` are Arbace's own (the helper's terms are its own, above).
 - The own-verdict judge of `arbace/rust/check.ae` (`own-verdict`, `run-class`, `verdict-met?`, `directives`; rust-90,
   doc/rust/EVAL.md §13): Arbace forms written after rustc 1.99.1's compiletest, the same revision and sources (the pinned
   `rustc-1.99.1-src.tar.xz`'s `src/tools/compiletest/src/runtest/ui.rs`: `run_ui_test`'s RunResult of the run and the

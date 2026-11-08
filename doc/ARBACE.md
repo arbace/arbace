@@ -267,7 +267,10 @@ code. Three kinds of things live here:
   `rustc_hir_analysis/src/check/region.rs`) and `build_run.ae` (CleanupPostBorrowck's changes, the layouts of scalars and scalar pairs
   after `rustc_abi`) port rustc 1.99.1, the same revision and sources, by hand on 2026-11-08 (RF10's first slice,
   doc/rust/FRONTEND-SURVEY.md, "As built: RF10 (first slice)"; LICENSE.md names the files; MIT OR Apache-2.0); evaluated from the
-  checkout, out of `gate_key` (RFS13).
+  checkout, out of `gate_key` (RFS13). RF10's second slice (2026-11-08, "As built: RF10 (second slice)") adds to `build.ae` the capture
+  analysis after `rustc_hir_typeck/src/{upvar,expr_use_visitor}.rs` and `rustc_passes/src/upvars.rs`, closure bodies, overloaded
+  operators, derefs and indexing, constants and allocations, canonical user type annotations (with `typeck.ae`'s part, after
+  `fn_ctxt/_impl.rs` and `method/confirm.rs`) and lint scopes, the same revision and sources; `capture_check.ae` is Arbace's own.
   `arbace/rust/check.ae`'s own-verdict judge (`own-verdict`, `run-class`, `verdict-met?`) ports rustc 1.99.1's compiletest
   (`src/tools/compiletest/src/runtest/ui.rs`'s run checks, `directives.rs`'s directive lines; the pinned `rustc-1.99.1-src.tar.xz`),
   by hand on 2026-11-07 (rust-90, doc/rust/EVAL.md §13; LICENSE.md; MIT OR Apache-2.0); evaluated from the checkout.

@@ -1090,3 +1090,33 @@ Checked: scheme-read-essential's command (1,358 files and probes, 1,140 by the r
 --record` and `--judge --strict` (0 problems). Scheme's scores: completeness 96.8 to 97.3, maturity 100, independence 97.5 to 99.6 (judge
 0.876 to 0.979). Night: `bin/repr-scheme check --record`, `bin/si check --record`, `bin/si check --aot --record`. Proposed: SCS7 (the
 corpora's files by the report), SCS8 (Larceny's earley and nboyer run as their authors meant, their own result checks).
+
+## 2026-11-08: RF10's second slice, closures with their captures (RFP20 (a)), operators, constants and the format machinery's MIR (branch `rust-rf10b`, from next `5ec43f7b7`)
+
+The brief: RF10's next items in their stated order (doc/rust/FRONTEND-SURVEY.md, "As built: RF10 (first slice)", slices 1 then 2),
+measured as the first slice measured (`bin/rust-front build-check`: our built MIR against rustc 1.99.1's `-Zdump-mir=built`, byte for
+byte), the biggest group of failing bodies first; RFP22-RFP24 not built (they await the user). Measured on the first slice's corpus (88
+programs, 510 bodies, 92 equal): closures were the biggest group (212 bodies), then format_args!'s lowering (75 refused), so slice 4's
+built-MIR half was taken after slice 1 (it needs no PromoteTemps at the `built` phase), then slice 2's operators and constants, then
+the tail. RFP20 (a) first, as decided: the helper's `--captures` (`tools/rsdump/front.rs`) and a port of `rustc_hir_typeck`'s
+`upvar.rs` and `expr_use_visitor.rs` with `rustc_passes`' `upvars.rs` into `arbace/rust/front/build.ae`, judged by `bin/rust-front
+capture-check` (`capture_check.ae`): 173 of 174 closures equal (kind, captures, fake reads; the one left inside a user macro's
+expansion). Then closure bodies and expressions (`capture_upvar`, `UpvarRef`'s resolution, `insert_upvar_arg`, `limit_capture_mutability`),
+calls through the Fn traits, overloaded operators, derefs and indexing (`overloaded_operator`, `overloaded_place`), slices' bounds
+checks (`PtrMetadata`, fake borrows), drop-and-replace, repeats, floats, chars, byte strings, named constants, allocations
+(`allocate_bytes_dedup`, `write_allocations`), canonical user type annotations (`write_user_type_annotation_from_args`,
+`instantiate_method_args`, `TypeOf(.. at <impl ..>)`, `Ty(..)` lets with their locals' projections and ascriptions), std macro tokens'
+places kept through expansion for those annotations' spans, lint scopes (`maybe_new_source_scope`), `super let` and lifetime extension
+(`resolve_local`). The helper's `--std-iface` gained the lang item ADTs no public module reaches (`core::fmt::rt::Argument`) and
+enums' repr and discriminants: `test/rust/front/std-iface.sha256` re-pinned (only additions). The judge counts a body equal but for its
+allocations' ids apart (the ids are the session's interning order, which follows the order rustc builds bodies in, not the source's).
+
+Results: build-check 92 → 361 of 510 bodies equal, 25 more but for the allocations' ids (4 before but for their text), 5 → 51
+programs whole; the samples a1-a7 51 of 54 and 1 (47 and 1 before). Regressions checked: `typeck-check` 11,140 → 11,144 (`--ours`
+11,138 → 11,142), `hir-check --ours` 90 and 1 but for whitespace (unchanged, after regenerating expand2's oracle, whose path length
+changed with the worktree), `expand-check` 92 of 92 crates (unchanged), `run-built` 6 of 6 no_std samples from Arbace's MIR, stubs'
+log empty (unchanged); `bin/crops-score` Rust 75.0 / 95.8 / 80.0 (RES54 (a): unchanged until RF12). Alternatives considered: slice 2
+before format_args! (rejected: the format machinery blocked most of the remaining bodies, and the brief asks for the biggest group
+first); capture analysis inside typeck replacing its closure-kind estimate (deferred: typeck-check depends on it and the port runs on
+the resolved results, as rustc's runs after the main typeck); allocations judged by content only (kept as a class apart, RFP25).
+Proposed: RFP25 (the allocations' ids), RFP26 (the helper's std interface facts), RFP27 (a gate step for the judges).
