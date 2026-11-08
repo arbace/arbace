@@ -230,8 +230,10 @@ cmd_suite_check() {
 # the compiled level of the suite corpus (OT9's first fix; bin/oi's c2_programs): the units suite_dump dumps translated in the compiled
 # style, built in shards and run alone; test/ocaml/check-suite-aot-compiled.edn, classes divergences-suite-aot-compiled.edn
 cmd_suite_check_compiled() {
-  cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_build; cmd_suite_corpus > "$S/corpus.log"; cmd_aot_clib
-  export -f limited_cpu oi_wall oi_status oi_cpu_secs suite_oi_one suite_dump suite_stage suite_names; export S OI_DIR TESTS TESTLIB UNIXLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
+  # the native path as the light level's (TY24 (a), OC202): suite_dump types the units by Arbace's typer, the record
+  # check-suite-aot-compiled-native.edn (suite_results)
+  cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_build; cmd_suite_corpus > "$S/corpus.log"; cmd_aot_clib; suite_native_env
+  export -f limited_cpu oi_wall oi_status oi_cpu_secs suite_oi_one suite_dump suite_dump_native suite_stage suite_names; export S OI_DIR TESTS TESTLIB UNIXLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
   suite_selected > "$S/selected.tsv"; export OI_SELECTED=$S/selected.tsv
   oi_rows_for "$S/check.tsv" "$S/oi.tsv" "$S/selected.tsv" suite_oi_one 6 "$S/corpus.tsv"
   C2=$S/compiled; rm -rf "$C2"; mkdir -p "$C2"
@@ -254,9 +256,10 @@ cmd_suite_check_compiled() {
   [ "${O2J_KEEP:-}" = 1 ] || rm -f "$C2"/s*/prog
   local mode=judge; [ "$RECORD" = 1 ] && mode=record
   [ -n "$ONLY" ] && mode=$mode-only
+  local res; res=$(suite_results "$root/test/ocaml/check-suite-aot-compiled.edn" check-suite-aot-compiled)
   O2J_LEVEL=compiled O2J_KNOWN=$root/test/ocaml/aot-compiled-known.edn O2J_SLOW=$root/test/ocaml/aot-compiled-slow.edn \
     "$(arbace_exe)" "$root/test/ocaml/o2j_check.ae" "$mode" "$out" "$S/corpus.tsv" "$SUITE_REFS" "$S/oi.tsv" \
-    "$root/test/ocaml/check-suite-aot-compiled.edn" "$root/test/ocaml/divergences-suite-aot-compiled.edn"
+    "$res" "$root/test/ocaml/divergences-suite-aot-compiled.edn"
 }
 
 cmd_suite_check_aot() {

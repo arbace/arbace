@@ -1061,3 +1061,32 @@ a difference far from its cause; built MIR is the builder's own output), running
 links through rustc as the linker driver, which the stubs forbid). `bin/crops-score` Rust 75.0 / 95.8 / 80.0 before and after: under
 RES54 (a) eval and AOT stay 0.5 while std's records are consumed, until RF12. Proposed: RFP22 (the order after the slice), RFP23 (the run's
 record as packs), RFP24 (no gate step yet).
+
+## 2026-11-08: the C API on ci, OCaml's eval `c-api` from 25 deferred to 5 (branch `ocaml-compl`, from next 7744e70b4)
+
+- **Why.** OCaml's completeness was 80.9%; its cells' deferred cases were eval's `c-api` 25, AOT's `c-api` 25, `:light-speed` 35 and
+  `:light-depth` 4, print's `:string-bytes` 2, none pending. `c-api` (DEFERRED-TRIAGE's item 9, OT27 (a)) was the biggest cause; the
+  light level's 39 wait for the compiled level's whole record (OT8 (a)).
+- **Built.** A test's C stubs run on ci beside oi: Arbace's own clean-room `caml/*.h` and C runtime (`test/ocaml/capi/`, from OCaml's
+  manual chapter 22 and, for BLAKE2b, RFC 7693's specification; no OCaml runtime source read for them), linked with the stubs and musl
+  by `test/ocaml/capi/cnodes.ae` (repr/c, ci's checker, the prebuilt musl, Arbace's own C target) into a node program that
+  `go/arbace/oicapi` loads into ci inside oi's light driver (`OI_CSTUBS`): OCaml's value layout in ci's memory, oi's values copied at
+  the boundary (once a pass, identity kept, read back on return, raise and callback, written again after a callback), callbacks on a
+  stack of no effect handlers, exceptions, named values, bigarrays, C custom blocks marshalled by their operations, getpid, kill and
+  raise as the host's. oi's hooks in `go/arbace/oi/ext_capi.ae`; header.awk runs `modules = "X.c"` tests at eval (the AOT levels and
+  native-only tests keep the class); two rules of OCaml's on the way (an allocation is a poll point; a stub's signal to the process
+  is pending when it returns); the typer's Ptyp_open (doc/ocaml/TYPER.md §26). The compiled AOT level and its suite now take the native
+  path too (for OC202), unrun: its builds exceed the day's memory.
+- **Route.** OT27 (a) chose ci over a clean-room `caml/*.h` after oi's embedding in the shipped program, the one executable thought
+  to hold both; the light driver links ci's back end itself, so it is built now (Proposed OC198 asks to confirm). Alternatives
+  considered: handles for blocks (OT27's sketch; rejected: `Field(v, i)` and `&Field(args, 0)` are memory in the stubs, so the copies
+  keep OCaml's layout), a subprocess to the tools' host (OT27 (b): a round trip a callback), the stubs ported to Go (OT27 (c): no C
+  checked).
+- **Checked** (light, by list, main's stage 0): the 25 programs on the native path and on the oracle path (`--ocdump`), each 17 pass,
+  2 Marshal's Closures flag (`:marshal-closures`, OT7 (a), now in the run corpus's classes), 1 `:speed` (subarraystub), 5 still
+  `:c-api`; both recorded by list (check-oi-native.edn, check-oi.edn; the known file's two pins attested); the essential list 58 of 58,
+  six signal programs, `bin/oi test`, `repl-check --native` 24 of 24, `own-verdicts --check`, the four divergences judgments,
+  gate-key-crops-test, `bin/gate --plan` and `--full --plan`.
+- **Scores**: OCaml 80.9 / 95.2 / 100 / 87.4 to **81.5** / 96.3 / 100 / 87.4 (eval 441 / 205 / 25 to 458 / 208 / 5); `bin/reap` and
+  `crops-score --judge --strict` 0 problems. Proposed OC198-OC202 (the route and the AOT mirror, native-only stubs, a Fortran stub, a
+  test's C helper program, the AOT cell at the compiled level); the night's commands in the survey's section.
