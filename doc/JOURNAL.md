@@ -896,3 +896,38 @@ item's modules by day and on the whole of ghc-internal at the end; doc/haskell/F
   the cache's intent); a fresh process per module (15 s of start-up each); eager unification of a GADT given's unknown sides (the
   first slice's: wrong when a later argument fixes the scrutinee's type); generating Data/Generic/Lift's methods now (unmeasured by
   lib-check; with the desugaring slice instead).
+
+## 2026-11-08: HF10's first slice: ghc-internal's modules desugared and made STG natively (branch `hs-hf10`, from `mac/hs-hf9` 7ed40299a)
+
+Haskell's eval and AOT cases count 0.5 because every hsi run executes the boot libraries' STG GHC made (the pack
+`haskell-stg-libs`). HF10 starts the native front end's compile of the libraries themselves; doc/haskell/FRONTEND-SURVEY.md,
+"As built: HF10 (first slice)", holds the design (HF10-D1 to D6) and the measures.
+
+- **Design.** The libraries take the programs' pipeline (desugar to untyped Core, SimpleOpt, the `-O0` Simplifier, CorePrep,
+  CoreToStg, Unarise), in their own unit. The reference is GHC's `-O0` STG of the same packages compiled from the pinned tarball by
+  `bin/hsi dumps`' recipe (`HSI_DUMP_OPT=-O0`, new): the pack's `-O2` STG cannot be equalled by a `-O0` front end. The judge
+  (`stgcmp`) compares each exported binding with the internal top-level bindings it reaches, renamed together, and records the
+  first difference of each, so the differences rank into rule classes. The slice: the 55 modules at levels 0 to 12 of
+  ghc-internal's import graph, all elaborated by HF9's lib-check (`test/haskell/lib-stg.txt`).
+- **Running.** Programs compiled against the helper's `-O2` interfaces name `-O2`-only bindings (`sameTypeRep`), so a coherent
+  `-O0` library set runs 35 of 63; the slice runs on the pack's ABI instead, each module's own bindings that the judge finds equal
+  in place of the pack's, the pack's other bindings kept beside them (`libcheck merge`): 595 exported bindings of 52 modules
+  Arbace's own, 59 of 63 programs pass as on the pack, none lost. With every own binding (`LIB_STG_REPLACE=all`) three programs
+  fail on the representations of clone binders (Base's `bindIO`): the bugs list.
+- **Rules ported** (GHC 9.14.1, written from the source as before): CorePrep's speculative evaluation of dictionaries
+  (mkNonRecFloat, exprOkForSpecEval's app_ok), its case floats out of scrutinees, cpeArgArity's eta expansion of local partial
+  applications, CoreToStg's alternative types from the scrutinee, typePrimRep through synonyms; the match compiler's bang patterns
+  (tidy_bang_pat, matchBangs) and strict variable bindings (the elaborator had dropped every bang); Core.Make's bindNonRec for an
+  unlifted effect; getDFunTyKey's type variables; tagToEnum#'s tycon; strict unlifted fields. Equal bindings 435 of 1,004 at the
+  first measure, 595 of 1,149 at the end.
+- **Checks**: typecheck-check 24 of 24 (control 13); run-check 59 of 63, 62 as recorded (one intermediate state lost nine
+  `primops-*` programs to a case on an unboxed tuple, caught by it and fixed); the judge's negative control 0 of 171.
+- **Left**: deriving's tag code (GHC's `dataToTag#` and `Int#` primops against deriv.ae's boxed `eqInt`), the methods' eta
+  expansion through casts, clone binders' representations, the Simplifier's `isTrue#` case rules, join points, foreign imports (49
+  modules, two STG stops). Proposed: HF10-P1 (the `-O0` reference as a pack), P2 (lib-stg as a recorded check), P3 (the front
+  end's own interfaces, bottom-up, the coherent `-O0` set), P4 (behaviour first), P5 (foreign imports).
+- Alternatives considered: direct STG without Core (rejected: GHC's reference passes through Core, and one pipeline keeps programs
+  and libraries checked together); the pack's `-O2` STG as the reference (no `-O0` binding can equal it); whole-module replacement
+  in the pack (the `-O2` importers name workers and floated bindings the `-O0` module lacks); the `-O0` set (needs `-O0`
+  interfaces: P3); replacing every own binding by default (three programs fail: the equal ones only, GHC's `-O0` code by
+  construction).
