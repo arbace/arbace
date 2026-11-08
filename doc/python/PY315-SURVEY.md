@@ -263,3 +263,82 @@ to record (`REPR_PYTHON_VERSION=3.15 bin/repr-python parse-check --record ...`).
 parameter, the whole Lib/test, `test_fstring.py`'s debug text (pydump.py keeps a comment inside the expression's span,
 3.14 and 3.15 alike), the level 5 helper determinism, and the embedding of parser315.ae (embedded with repr/python since
 W2; loaded only under 3.15).
+
+## As built: 237, the runtime's additions (proposal P4a, 2026-11-08, the Mac VM)
+
+pyi's runtime follows Python 3.15 behind the reader's switch, `REPR_PYTHON_VERSION=3.15` (236's: one switch for the
+reader and the runtime, so a program is read and run by one version); without it 3.14 runs as before.
+
+- **The switch** (`go/arbace/py/version.ae`): the package variable `pyMinor` (14, or 15 under the switch: a variable, so
+  every file's `init` sees it) and `py315()`; `since315` names the builtins 3.15 adds (`sentinel`, `frozendict`), left
+  out of the builtins module under 3.14. `sys.version_info`, `cache_tag` and the standard library stay 3.14.10's (P7
+  moves them with the pin). Under the switch `bin/pyi` still fetches the 3.14 pins (`env -u REPR_PYTHON_VERSION
+  bin/repr-python pins --fetch`: before, a run under the switch in a fresh worktree extracted 3.15.2's tree and put a
+  3.14 Lib that was not there on sys.path). The IR cache is keyed by the reader's version under 3.15 (`arbace.python.run`'s
+  and `bin/pyi`'s compiler digest begin with `REPR_PYTHON_VERSION=3.15\0`; 3.14's keys unchanged): **run**, the base
+  served a 3.14 run 3.15's answer its 3.15 probes had cached ("Generator expression must be parenthesized" for
+  test_exceptions' test_encodings, 3.14's "invalid syntax"); the head does not.
+- **Ported from 3.15.2's own source**, each `py315()`-gated:
+  - `sentinel` (`sentinel.ae`; `Objects/sentinelobject.c`): `sentinel(name, /, *, repr=None)`, the caller's module
+    (the running function's `__module__`, a body's globals' `__name__`), `__name__` read-only and `__module__`
+    writable members, `__copy__`/`__deepcopy__` the object itself, `__reduce__` the name (pickled as a global of its
+    module), `|` a union (3.15's `is_unionable`), not subclassable, `__flags__` immutable and GC.
+  - `frozendict` (`frozendict.ae`; `Objects/dictobject.c`'s frozendict): a Go type of its own over a `Dict` filled once
+    (no `*Dict` path of the runtime takes it, so nothing writes into one; dict's readers take it where 3.15's
+    `PyAnyDict_Check` does): `frozendict_hash` (frozenset's mixing over `tuple_hash` of each pair, cached,
+    RecursionError "while hashing a frozendict"), `frozendict_or`/`_PyDict_Or` (an exact empty operand gives the other;
+    `dict | fd` a dict), `frozendict(fd)` the same object, `copy`, `fromkeys` (`_PyDict_FromKeys`: `cls()` then
+    `cls(copy)` for a subclass; dict's `fromkeys` likewise when the constructor returns a frozendict), `__getnewargs__`
+    (protocol 2 and up; below it CPython's refusal), "as a frozendict key", a subclass's `__missing__`, the dict views,
+    `__class_getitem__`, mapping and class patterns; `type(name, bases, fd)`, `str.maketrans(fd)`, and `exec`/`eval`
+    globals (read through it, stores refused by it, "cannot assign __builtins__ to frozendict globals").
+  - `math.integer` (`builtins_math.ae`; `Modules/mathintegermodule.c`, `math_exec`'s end): `_math_integer` named
+    `math.integer`, in `sys.modules` under both names and bound as `math.integer`; math's six integer functions are its
+    (`__module__` and messages `math.integer.NAME()`).
+  - The small changes: `slice[...]`; `bytearray.take_bytes(n=None, /)` (`bytearray_take_bytes_impl`); ImportError's
+    repr with `name=`/`path=` (`ImportError_repr`, a keyword None shown); any `__slots__` on a tuple subclass and
+    `__weakref__` on a variable-size base (`type_new_slots`; "arbitrary __slots__ not supported" for int and bytes);
+    one shared `__dict__` and `__weakref__` descriptor for every class (`<attribute '__dict__'>`, `__objclass__` object).
+  - UTF-8 mode by default (`sys.ae`; `preconfig_init_utf8_mode`): `sys.flags.utf8_mode` 1 unless `-X utf8=0` or
+    `PYTHONUTF8=0` (which `-E` and `-I` ignore); another value is the fatal start error. 3.14's stays pyi's 1.
+  - Unicode 17 (`builtins_unicodedata_table315.ae`, `builtins_unicodedata.ae`): `tools/pyi/unicodedata_table.py
+    --suffix 315` over 3.15.2's generated headers (UCD 17.0.0; 3.15's three new record fields, the grapheme
+    functions', left out; 3.14.10's table regenerates byte for byte), the tables chosen by version at start (`ucdSel`),
+    3.15's `_getucname` (every derived prefix), `unicodedata.isxidstart` and `isxidcontinue`. `bin/pyi runtime tables`
+    (and `runtime check` where the oracle runs live) judges the 3.15 table against 3.15.2's headers, then its negative
+    control (3.14.10's table against them must differ: run, it does).
+- **For both versions**: `math.factorial` past int64 now raises CPython's OverflowError (big's `MulRange` took
+  `Int64()`'s wrap).
+
+**Counts** (probed: each 3.15.2 test module copied over 3.14.10's Lib/test, run by `bin/pyi aot` of
+test/python/libtest.py under the switch, 3.15's `mapping_tests.py` and `support/warnings_helper.py` beside it; the
+3.15.2 oracle runs the same module in its own tree; own verdict: unittest's ok; base 440e5a380 with the switch set):
+
+| module (3.15.2's) | oracle: methods / ok | base: ok (methods) | head: ok (methods) | head agrees with the oracle |
+|---|---:|---:|---:|---:|
+| test_math_integer | 19 / 19 | import fails (`math.integer`) | 17 (19) | 17 |
+| test_dict | 145 / 145 | import fails (`frozendict`) | 131 (145) | 131 |
+| test_builtin | 157 / 145 | import fails (`sentinel`) | 89 (142) | 97 |
+| test_unicodedata | 73 / 66 | 45 (73) | 55 (73) | 62 |
+| test_exceptions | 115 / 112 | 97 (115) | 99 (115) | 102 |
+| test_descr | 168 / 167 | 142 (168) | 146 (168) | 147 |
+| test_utf8_mode | 12 / 11 | 6 (12) | 8 (12) | 9 |
+| test_slice, test_copy | 11 / 11, 84 / 84 | 9, 82 | 9, 82 | 9, 82 |
+
+Every frozendict test of test_dict passes (FrozenDictTests, FrozenDictMappingTests), every sentinel test of
+test_builtin but `test_sentinel_str_subclass_name_cycle` (gc.is_tracked, pyi's GC class), every math.integer test but the
+two `cpython_only`; the non-passes left are the existing classes (cpython_only skips, cycle collection) and the 3.15
+parts not ported (below). **3.14 unchanged** (run, the same 3.14.10 modules on base and head, no switch): test_builtin
+81/132, test_dict 110/122, test_unicodedata 53/61, test_descr 143/163, test_str 126/139, test_math 83/89, test_tuple
+35/39, test_ucn 16/18, test_copy 81/81, test_slice 9/11, test_unicode_identifiers 3/3 the same on both, method for method;
+test_exceptions 96 to 97, the one difference the base's poisoned IR cache above. `make python-essential`: the same on both
+(check --aot 21 programs: 20 pass, 1 classed). The feature probe (sentinel, frozendict, math.integer, the small changes,
+UTF-8 mode, UCD 17, exec/eval: 64 lines) prints 3.15.2's text under the switch and 3.14.10's without it on the head, and
+fails on the base.
+
+Not done (P4a's rest): unicodedata's other 3.15 functions (`block`, `iter_graphemes`, `grapheme_cluster_break`,
+`indic_conjunct_break`, `extended_pictographic`: their tables need the generator to keep the three record fields and
+the block table; 8 methods of test_unicodedata), frozendict's place in 3.14's Lib (`collections.abc.Mapping.register`,
+`copy`, `json`, `pprint`, `marshal`: 3.15's Lib does them, with the move), `memoryview`'s `Zf`/`Zd`, `bytes.replace(count=)`
+as a keyword, the removed names (P4b/P7 with the Lib), the UTF-8 mode's stdio error handlers (test_utf8_mode's
+test_stdio and test_cmd_line, a pyi gap of 3.14 too).

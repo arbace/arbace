@@ -211,6 +211,17 @@ covers what.
   `Python/tracemalloc.c`'s API, and `Python/instrumentation.c`'s and `Python/legacy_tracing.c`'s call events, from the
   same release tarball, by hand on 2026-11-05: Copyright (c) 2001 Python Software Foundation, All Rights Reserved,
   under the PSF License Agreement for Python 3.14 (text below).
+- `go/arbace/py/sentinel.ae`, `frozendict.ae` and `builtins_unicodedata_table315.ae`, and the Python 3.15 parts of
+  `builtins_math.ae`, `bytearray.ae`, `exc.ae`, `class.ae`, `attr.ae`, `sys.ae` and `builtins_unicodedata.ae` (queue 237,
+  2026-11-08; doc/python/PY315-SURVEY.md, "As built: 237": pyi's runtime under REPR_PYTHON_VERSION=3.15): ports to Go of
+  CPython 3.15.2's `Objects/sentinelobject.c`, `Objects/dictobject.c`'s frozendict, `Modules/mathintegermodule.c`,
+  `Objects/bytearrayobject.c`'s `take_bytes`, `Objects/exceptions.c`'s `ImportError_repr`, `Objects/typeobject.c`'s
+  slots and shared descriptors, `Python/preconfig.c`'s UTF-8 mode and `Modules/unicodedata.c`'s 3.15 parts, and the
+  tables of its generated `Objects/unicodetype_db.h`, `Modules/unicodedata_db.h` and `Modules/unicodename_db.h` (UCD
+  17.0.0) taken by `tools/pyi/unicodedata_table.py --suffix 315`, from CPython 3.15.2's release tarball (SHA-256
+  8b5536d280142ecf6cdfe15d12a21ba1c65e300bbf7b28a8d0cdb849575797de), by hand: Copyright (c) 2001 Python Software
+  Foundation, All Rights Reserved, under the PSF License Agreement for Python 3.15 (its LICENSE the same bytes as
+  3.14.10's, text below); the Unicode data under the Unicode License v3 as CPython distributes it.
 - `go/arbace/py/builtins_ssl.ae`, `builtins_ssl_cert.ae` and `builtins_ssl_conn.ae` (queue 209, PYS22 (a): pyi's module
   `_ssl` over Go's crypto/tls; doc/python/PYTHON-SURVEY.md, "As built: 209"): written after CPython 3.14.10's
   `Modules/_ssl.c`, `Modules/clinic/_ssl.c.h`, `Modules/_ssl/cert.c` and `Modules/_ssl/distrusted_spki.h` (its digests

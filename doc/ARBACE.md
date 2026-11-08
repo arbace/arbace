@@ -91,6 +91,11 @@ code. Three kinds of things live here:
   `:cpython-3.15.2` in test/python/corpora.edn), and `peg.ae` and `lex.ae` port 3.15.2's new helpers
   (`Parser/action_helpers.c`: `_PyPegen_checked_from_import`, `_warn_relative_import_of_lazy`,
   `_PyPegen_raise_error_for_missing_comma`) and lexer message (`Parser/lexer/lexer.c`), each carrying CPython's notice.
+  Since queue 237 (2026-11-08, doc/python/PY315-SURVEY.md, "As built: 237") pyi's runtime under REPR_PYTHON_VERSION=3.15
+  ports the same 3.15.2 tarball's `Objects/sentinelobject.c` (`go/arbace/py/sentinel.ae`), `Objects/dictobject.c`'s
+  frozendict (`frozendict.ae`), `Modules/mathintegermodule.c`, `take_bytes`, `ImportError_repr`, the slots and shared
+  descriptors of `Objects/typeobject.c`, the UTF-8 mode of `Python/preconfig.c` and `Modules/unicodedata.c`'s 3.15 parts,
+  its UCD 17.0.0 tables taken from the generated headers into `builtins_unicodedata_table315.ae`.
   pyi's module `pyexpat` (`go/arbace/pyexpat.ae` and `go/arbace/pyexpat/`, package `arbace/pyexpat`, queue 202e, 2026-11-04) ports the same tarball's
   `Modules/pyexpat.c`, and the Go forms it imports, `go/arbace/expat.ae` and `go/arbace/expat/` (package `arbace/expat`,
   outside `arbace/` but recorded here with the binding), port the tarball's vendored Expat 2.9.0 (`Modules/expat/`:
