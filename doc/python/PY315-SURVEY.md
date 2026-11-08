@@ -189,3 +189,12 @@ None needed for this survey (no code, no record). When P1 lands: `bin/repr-pytho
 
 `.tmp/q233/{a,b}` (the two unpacked trees), `.tmp/q233/d-gram.txt` (the grammar diff), `.tmp/q233/lib-read.log`, `.tmp/cache/python/Python-3.15.2.tar.xz`. Sources: `Grammar/python.gram`, `Parser/Python.asdl`, `Parser/action_helpers.c`, `Python/symtable.c`, `codegen.c`,
 `flowgraph.c`, `Include/opcode_ids.h`, `Include/internal/pycore_magic_number.h`, `Doc/whatsnew/3.15.rst`, `Lib/test` of both tarballs (3.15.2 and 3.14.10, python.org).
+
+## Decided (the user, 2026-11-08)
+
+1. **(a): build CPython 3.15.2 now** from the pinned tarball (SHA-256 8b5536d2...797de, 27,960,396 bytes) as the 3.15
+   oracle in `.tmp/oracle315/`, reopening PYS26 (a)'s wait for Alpine's 3.15: the move's checks become run, not read.
+   The build is the first task of the 3.15 series (proposal 1), not done by queue 233.
+2. **(a): out by design**: the JIT, the sampling profiler (`_remote_debugging`), the C API, and `dis`'s specializing
+   names (as 229's `:specializing`); about 2,000 test methods leave the judged set; `profiling.tracing` stays in, as
+   `cProfile`.
