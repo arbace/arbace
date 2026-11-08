@@ -5021,3 +5021,28 @@ JAVA_CHECK_EXE=$PWD/$X J2G_GO_EXE=$PWD/$X JAVA_CHECK_HEAVY=$PWD/bin/heavy-lock b
 **Fallbacks.** (1) j2g refusing `CryptoPolicyParser` (its reflection) or `CryptoPermissions` (serialization's fields): the report
 names it; the fallback is the old `JceSecurity` and `JceSecurityManager` (the policy unlimited; TestUnlimited fails, the other
 three still pass on java.home alone). (2) A start that cannot write its cache (a read-only home): java.home `""`, as before.
+
+## As built: JCS230 (b): Kerberos's permissions, the rest by design (2026-11-08; branch `java-http`, write-ahead)
+
+- **The permissions.** `test/jrt/jrt_sources.ae`'s `kerberos-sources`: jdk26u's (`baf63fb`)
+  `src/java.security.jgss/share/classes/javax/security/auth/kerberos/DelegationPermission.java` and `ServicePermission.java`,
+  KIND `share:java.security.jgss` (translated into java.base's tree as java.security.sasl's are), 933 lines. Each file holds its
+  collection (`KrbDelegationPermissionCollection`, `KrbServicePermissionCollection`), so the proposal's "4 files" are 2. They
+  need only `BasicPermission`, `Permission`, `PermissionCollection` (F4) and the object streams (JCS167); no variant, no Go. Go
+  names: the four simple names collide with nothing in `jdk/forms`, `overlay/` or jrt.
+- **The class.** `test/java/divergences.edn`'s `:kerberos`, `:kind :design`, `:levels [:interp :compiled]`, after
+  `:design-also-compiled` and before `:j2g-unresolved` and `:security` (which the same tests' reasons match): `:tests` the five by
+  design (t05298 `java/security/Principal/Implies`, which builds a `KerberosPrincipal`; t08051 `KerberosHashEqualsTest`, t08052
+  `KerberosNullsAndDestroyTest`, t08199 `krb5/NullStringToKey`, t08201 `krb5/etype/UnsupportedKeyType`), and `:match` the
+  Kerberos API's other classes, `sun.security.krb5`, `org.ietf.jgss` and `sun.security.jgss` (not the two permissions: a
+  permission test failing for another cause is not hidden). Checked on stage 0: the file reads (89 classes), the regex finds
+  "javax.security.auth.kerberos.EncryptionKey" and "Unable to resolve class: KerberosPrincipal", not "DelegationPermission" or
+  "ServicePermission".
+- **Light checks.** The joint javac check: 2,510 files, 0 errors, 5,333 classes. `read-jdk --check` (with JCS233's four): 0 failed,
+  0 javac errors; `--no-javac`: native, identical.
+- **Expected yield**: `javax/security/auth/kerberos/` DelegationPermissionCollection (t08048), DelegationPermissionHash (t08049),
+  DelegationPermissionInit (t08050), ServicePermissionCollection (t08054), ServicePermissionTest (t08055): **5 pass** at interp
+  and compiled; the other 5 move from deferred to by design (completeness's denominator unchanged, the strict count by 5).
+- **The night's**: the conversion (`jdk/forms/javax/security/auth/kerberos/` + 2 files), `bin/jrt modules` (javax.security.auth.kerberos
+  as java.security.jgss's), the edge (`javax.security.auth.kerberos` exported), the build, then
+  `bin/java-check --levels interp,compiled --only 'jdk/(javax/security/auth/kerberos|sun/security/krb5|java/security/Principal)'`.
