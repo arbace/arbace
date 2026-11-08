@@ -418,6 +418,14 @@
     (lv? a) [(local-name a) []]
     (and (head? a 'v) (void-global? (second a))) [(void-atom) []]
     (and (head? a 'v) (con-name? (second a)) (newtype-con? (as-data (second a)))) (let [n (fresh "sat")] [n [[n (rhs a)]]])
+    ;; a data constructor of fields as an argument: CorePrep saturates it (maybeSaturate), a function closure
+    (and (head? a 'v) (con-name? (second a)) (not (unboxed-con? (second a))) (not (class-of-dcon (second a)))
+         (pos? (or (:arity (con-info (as-data (second a)))) 0)))
+    (let [c (as-data (second a)) ar (:arity (con-info c)) rs (concat (con-reps c) (repeat :L))
+          xs (mapv (fn [i] (list 'lv "eta" (str "E" (inc i) ".pc" (swap! *n* inc)))) (range ar))
+          n (fresh "sat")]
+      (doseq [[x r] (map vector xs rs)] (swap! *lreps* assoc x (if (= :v r) [] [r])))
+      [n [[n (rhs (list 'lam xs (list 'app a xs)))]]])
     ;; a newtype class's selector on an atom (ip d): d |> co, trivial (CorePrep: the selector has no binding, its
     ;; unfolding \d -> d |> co)
     (let [a (flatten-app a)]
@@ -775,8 +783,14 @@
              (float-scrut (expr s) (fn [se] (list 'case se [bn brep] at salts))))))
       (do (binding [*out* *err*] (println "tostg: expression not handled:" (pr-str (first e)))) (list 'int 0)))))
 
+(defn- sat-con?
+  "A data constructor of fields as an argument (atom-of saturates it into a closure)"
+  [a]
+  (and (head? a 'v) (con-name? (second a)) (not (unboxed-con? (second a))) (not (class-of-dcon (second a)))
+       (not (newtype-con? (as-data (second a)))) (pos? (or (:arity (con-info (as-data (second a)))) 0))))
+
 (defn- atomic-args? [args]
-  (every? (fn [a] (or (lv? a) (and (head? a 'v) (not (and (con-name? (second a)) (newtype-con? (as-data (second a))))))
+  (every? (fn [a] (or (lv? a) (and (head? a 'v) (not (and (con-name? (second a)) (newtype-con? (as-data (second a))))) (not (sat-con? a)))
                       (and (head? a 'lit) (not (string-lit? a))))) args))
 
 (defn rhs
@@ -810,7 +824,8 @@
       (or (nil? f) (head? e 'lam) (string-lit? (first args)) (some #(not= [:L] (expr-reps %)) args)) (rhs e)
       (and (head? f 'v) (con-name? (second f)))
       (let [c (as-data (second f))]
-        (if (and (not (newtype-con? c)) (not (class-of-dcon (second f))) (= (:arity (con-info c)) (count args))
+        (if (and (not (newtype-con? c)) (not (and (class-of-dcon (second f)) (newtype-class? (class-of-dcon (second f)))))
+                 (= (:arity (con-info c)) (count args))
                  (not (some true? (con-strict c))))
           (let [rs (mapv atom-of args)]
             (if (some (fn [[_ bs]] (some #(= :case (first %)) bs)) rs)

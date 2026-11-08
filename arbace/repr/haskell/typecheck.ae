@@ -637,8 +637,15 @@
       (= p t) m
       :else nil)))
 
+(declare ^:dynamic *ltypes*)
+(defn- wrap-ev-binds [binds c] (reduce (fn [acc [x t]] (list 'let [(list 'bind x t)] acc)) c (reverse binds)))
+(def ^:dynamic *ev-binds* nil) ; atom [[lv term]...]: a binding's superclass evidence, bound once after its dictionary
+                               ; lambdas (GHC's evidence bindings, dsEvBinds: $dApplicative = $p1Alternative $dAlternative)
+(def ev-binders (atom #{}))    ; the evidence binders made, for the unused ones' removal (resolve-ev-lets)
+
 (defn- super-closure
-  "Givens [[pred term]...] closed under superclasses: (app (v $pNCls) [d])"
+  "Givens [[pred term]...] closed under superclasses: (app (v $pNCls) [d]); with *ev-binds* each selection let-bound
+  once to an evidence variable, the variable the term"
   [givens]
   (loop [todo givens out []]
     (if (empty? todo)
@@ -646,8 +653,15 @@
       (let [[[c ts] term :as g] (first todo)
             info (get @*classes* c)
             subs (map-indexed (fn [i [sc sts]]
-                                [[sc (mapv #(subst (zipmap (:tvs info) ts) %) sts)]
-                                 (list 'app (list 'v (ext-name "var" (nmod c) (str "$p" (inc i) (occ c)))) [term])])
+                                (let [p [sc (mapv #(subst (zipmap (:tvs info) ts) %) sts)]
+                                      sel (list 'app (list 'v (ext-name "var" (nmod c) (str "$p" (inc i) (occ c)))) [term])]
+                                  (if (and *ev-binds* term)
+                                    (let [x (list 'lv (str "$d" (occ sc)) (str "ev" (swap! *counter* inc)))]
+                                      (swap! *ev-binds* conj [x sel])
+                                      (swap! ev-binders conj x)
+                                      (when *ltypes* (swap! *ltypes* assoc x [:tc sc (second p)]))
+                                      [p x])
+                                    [p sel])))
                               (:supers info))]
         (recur (concat (rest todo) (remove (fn [[p _]] (some #(= p (first %)) out)) subs)) (conj out g))))))
 
@@ -1973,14 +1987,15 @@
                           [body inner-preds] (if (= :forall (first body)) [(nth body 3) (nth body 2)] [body []])
                           preds (into (mapv (fn [[c ts]] [c (mapv #(subst skol %) ts)]) (nth s 2)) inner-preds)
                           params (mapv dict-param preds)
-                          givens (super-closure (mapv vector preds params))
+                          evb (atom [])
+                          givens (binding [*ev-binds* evb] (super-closure (mapv vector preds params)))
                           ws (atom [])
                           c (binding [*level* (inc *level*) *wanteds* ws *scoped-tvs* (merge *scoped-tvs* skol)
                                       *given-eqs* (scope-givens)]
                               (assume-eqs! preds)
                               (let [[t c] (bind-rhs env b body)] (unify t body) (retry-implications! false) c))]
                       (solve-with-givens! @ws givens)
-                      (list 'bind (bind-core top? n) (if (empty? params) c (list 'lam params c))))))]
+                      (list 'bind (bind-core top? n) (if (empty? params) c (list 'lam params (wrap-ev-binds @evb c)))))))]
     [env (into out1 out2)]))
 
 (defn- rename-mono
@@ -2474,7 +2489,13 @@
                             [t []]))
         [body inner] (skol-body ty)
         iparams (mapv dict-param inner)
-        givens (into givens (super-closure (mapv vector inner iparams)))
+        ;; the method's superclass evidence bound once after its dictionaries (GHC's evidence bindings of the method's
+        ;; implication): the givens' superclasses again from the dictionary parameters, each selection a variable
+        evb (atom [])
+        givens (if (seq params)
+                 (binding [*ev-binds* evb] (super-closure (vec (filter (fn [[_ t]] (some #(= t %) params)) givens))))
+                 givens)
+        givens (into givens (binding [*ev-binds* evb] (super-closure (mapv vector inner iparams))))
         ws (atom [])
         own (when (= :forall (first ty)) (into {} (map (fn [x] [x [:tv (str "sk_" x)]]) (nth ty 1))))
         c (binding [*level* (inc *level*) *wanteds* ws *scoped-tvs* (merge *scoped-tvs* own) *given-eqs* (scope-givens)]
@@ -2482,7 +2503,7 @@
             (assume-eqs! (concat (map first givens) inner))
             (let [[t c] (bind-rhs env b (when-not (= :forall (first body)) body))] (unify t body) (retry-implications! false) c))]
     (solve-with-givens! @ws givens)
-    (let [ps (into params iparams)] (if (empty? ps) c (list 'lam ps c)))))
+    (let [ps (into params iparams)] (if (empty? ps) c (list 'lam ps (wrap-ev-binds @evb c))))))
 
 (defn- default-methods
   "A class's default methods: (bind $dmop (lam [$dCls] core))"
@@ -2681,6 +2702,19 @@
                 ;; another type: fromRational of the literal as a Rational, n :% d reduced (dsFractionalLitToRational)
                 (list 'app (list 'v f) [ev (fl-ratio val)]))))))
 
+(defn- drop-unused-ev
+  "The evidence bindings nothing uses removed (the desugarer binds only the evidence the solver needed), after the
+  placeholders' resolution"
+  [c]
+  (cond
+    (and (seq? c) (= 'let (first c)) (= 1 (count (second c))) (contains? @ev-binders (second (first (second c)))))
+    (let [[_ [[_ x t]] body] c body2 (drop-unused-ev body)
+          occ? (fn occ? [y] (cond (= y x) true (coll? y) (boolean (some occ? y)) :else false))]
+      (if (occ? body2) (list 'let [(list 'bind x (drop-unused-ev t))] body2) body2))
+    (seq? c) (with-meta (apply list (map drop-unused-ev c)) (meta c))
+    (vector? c) (mapv drop-unused-ev c)
+    :else c))
+
 (defn resolve-core
   "The core with every evidence placeholder replaced by its term and the literals resolved"
   [c]
@@ -2856,7 +2890,7 @@
          :cons (into {} (filter (fn [[n _]] (= m (nmod n))) @*cons*))
          :classes (into {} (for [[n info] @*classes* :when (= m (nmod n))] [n (dissoc info :binds)]))
          :insts (vec (filter (fn [i] (= m (nmod (:dfun i)))) @*insts*))
-         :core (phase :resolve-core (mapv resolve-core (concat fimports core dms ibs sels (typeable-binds m))))
+         :core (phase :resolve-core (mapv (comp drop-unused-ev resolve-core) (concat fimports core dms ibs sels (typeable-binds m))))
          ;; the tables HF5-HF6 need (the match compiler's constructor families, STG's data and dictionaries)
          :all-cons @*cons* :tycons @*tycons*
          :all-classes (into {} (for [[n info] @*classes*] [n (dissoc info :binds)]))
