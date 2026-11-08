@@ -1383,7 +1383,7 @@ that word. `arbace/repr/llvm/read.ae`'s `parse-args` now does the same. llvm-as 
 | `check verify-rt` (`REPR_LLVM_JUDGE=live`) | 62 of 62 verdicts, 41 of 41 messages and 62 of 62 whole stderr as opt 23.1.5's; `rt-noterm-vs-valid` fails as it must |
 | `check verify-rt-heldout` (`REPR_LLVM_JUDGE=live`) | 41 of 42 before the reader's fix (the one above), 42 of 42 after; `rt-noterm-vs-undef` fails as it must |
 | `rs.g0` alone (27,924 lines, the largest module) | round trip equal, the verifier's verdict the same; 83 s, 0.84 GB |
-| unchanged by the reader's fix | `check roundtrip-llvmtest` 304/304, `verify-llvmtest` 792/806, `verify-probes` 472/478, `text-llvmtest` 304/304 (0 failing against the records); controls-test's repr/llvm parts all ok |
+| unchanged by the reader's fix | `check roundtrip-llvmtest` 304/304, `verify-llvmtest` 792/806, `verify-probes` 472/478, `text-llvmtest` 304/304 (0 failing against the records); `bin/llvmi check --essential` 10 of 10, 4 controls fail; `test/repr/llvm/controls-test.bash` all ok |
 | `bin/reap --record` | `test/reap/matrix.edn` gains the four sources as absent; `bin/reap`: 0 problems |
 
 Without records, the subset's checks print "not recorded" for every module, as they must until the night records them.
