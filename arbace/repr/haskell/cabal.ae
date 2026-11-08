@@ -1,0 +1,290 @@
+(ns arbace.repr.haskell.cabal
+  "Cabal's package descriptions and installed-package records, in Arbace (HFS-I2 (a), doc/haskell/NATIVE.md, \"The native
+  reads' inputs\"): a `.cabal` file read as Cabal-syntax 3.16's field parser reads it (Distribution.Fields.Parser's layout:
+  fields, sections, `if`/`elif`/`else`), its conditions resolved for a platform and a flag assignment (finalizePD's
+  `os(...)`, `arch(...)`, `impl(ghc ...)`, `flag(...)`), its free text as fieldlinesToFreeText(3) makes it; and an
+  InstalledPackageInfo printed as ghc-pkg writes it (Distribution.InstalledPackageInfo's showInstalledPackageInfo:
+  ipiFieldGrammar's fields in order, Distribution.Fields.Pretty's renderFields over Text.PrettyPrint's layout, here
+  arbace.repr.haskell.doc). Ports of Cabal-syntax 3.16.0.0's Haskell (the corpus's libraries/Cabal/Cabal-syntax, BSD-3-Clause),
+  rule for rule where they print; nothing of it runs."
+  (:require [arbace.repr.haskell.doc :as pp]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+;;; ------------------------------------------------------------------------------------------
+;;; The field parser (Distribution.Fields.Parser, the layout part): a field is `name:` and its
+;;; lines, the first after the colon, the rest indented deeper than the name; a section is a
+;;; line without a colon and the deeper-indented block after it. Comments: a line whose first
+;;; non-blank characters are `--`. Positions are kept (row, column, 1-based) for free text.
+
+(defn- indent-of ^long [^String l] (count (take-while #(or (= % \space) (= % \tab)) l)))
+
+(defn- clean-lines
+  "The file's lines as [row col text] (text without its indentation), comments and blank lines dropped"
+  [^String text]
+  (vec (keep-indexed
+        (fn [i ^String l]
+          (let [l (str/replace l #"\r$" "")
+                k (indent-of l)
+                t (subs l k)]
+            (when-not (or (str/blank? t) (str/starts-with? t "--"))
+              [(inc i) (inc k) (str/trimr t)])))
+        (str/split-lines text))))
+
+(declare parse-block)
+
+(defn- field-start [^String t] (re-matches #"([A-Za-z0-9_-]+)[ \t]*:(.*)" t))
+
+(defn- parse-block
+  "The items of the lines from i on whose column is at least col: [items next-i]"
+  [ls i col]
+  (loop [i i items []]
+    (if (>= i (count ls))
+      [items i]
+      (let [[row c t] (nth ls i)]
+        (if (< c col)
+          [items i]
+          (if-let [[_ name rest] (field-start t)]
+            ;; a field: its lines are the first (after the colon) and every next line deeper than c
+            (let [first (str/trim rest)
+                  more (vec (take-while (fn [[_ c2 _]] (> c2 c)) (subvec ls (inc i))))
+                  fls (vec (concat (when-not (str/blank? first)
+                                     [[row (+ c (- (count t) (count (str/triml rest)))) first]])
+                                   more))]
+              (recur (+ i 1 (count more))
+                     (conj items {:field (str/lower-case name) :pos [row c] :lines fls})))
+            ;; a section: its name, its arguments, the deeper block (a line of neither kind, a brace, is skipped)
+            (if-let [[_ sname sargs] (re-matches #"([A-Za-z0-9_-]+)\s*(.*)" t)]
+             (let [
+                  [body j] (if (and (< (inc i) (count ls)) (> (second (nth ls (inc i))) c))
+                             (parse-block ls (inc i) (second (nth ls (inc i))))
+                             [[] (inc i)])]
+              (recur j (conj items {:section (str/lower-case sname) :args (str/trim sargs) :body body})))
+             (recur (inc i) items))))))))
+
+(defn parse
+  "A .cabal file's fields and sections: [item...], an item {:field name :pos [row col] :lines [[row col text]...]} or
+  {:section name :args text :body [item...]}"
+  [^String text]
+  (first (parse-block (clean-lines text) 0 1)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Conditions (Distribution.Types.Condition, Distribution.PackageDescription.Configuration's
+;;; evaluation for one platform): os, arch, impl with a version range, flag, true, false, !, &&, ||
+
+(defn- version-of [^String s] (mapv #(Long/parseLong %) (re-seq #"\d+" s)))
+
+(defn- vcmp ^long [a b]
+  (loop [a (seq a) b (seq b)]
+    (cond (and (nil? a) (nil? b)) 0
+          (nil? a) -1
+          (nil? b) 1
+          (< (long (first a)) (long (first b))) -1
+          (> (long (first a)) (long (first b))) 1
+          :else (recur (next a) (next b)))))
+
+(defn version-in?
+  "Whether version v (a vector of numbers) is in the range text (Distribution.Types.VersionRange: ==, >=, >, <=, <, ^>=,
+  ==X.*, ||, &&, -any)"
+  [v ^String range]
+  (let [r (str/trim range)]
+    (cond
+      (or (str/blank? r) (= r "-any")) true
+      (re-find #"\|\|" r) (boolean (some #(version-in? v %) (str/split r #"\|\|")))
+      (re-find #"&&" r) (every? #(version-in? v %) (str/split r #"&&"))
+      (str/starts-with? r "(") (version-in? v (subs r 1 (dec (count r))))
+      :else
+      (let [[_ op ver] (re-matches #"(==|>=|<=|\^>=|>|<)\s*([0-9.*]+)" r)
+            star (str/ends-with? ver ".*")
+            w (version-of ver)]
+        (case op
+          "==" (if star (= (take (count w) v) w) (zero? (vcmp v w)))
+          ">=" (>= (vcmp v w) 0)
+          ">" (pos? (vcmp v w))
+          "<=" (<= (vcmp v w) 0)
+          "<" (neg? (vcmp v w))
+          "^>=" (and (>= (vcmp v w) 0) (neg? (vcmp v (conj (vec (take 1 w)) (inc (long (nth w 1 0))))))))))))
+
+(defn- cond-tokens [^String s]
+  (re-seq #"\(|\)|!|&&|\|\||[A-Za-z0-9_.-]+(?:\s*\((?:[^()]|\([^()]*\))*\))?" s))
+
+(defn eval-cond
+  "A condition's value in env {:os :arch :impl [name version] :flags {name bool}}"
+  [env ^String s]
+  (let [toks (vec (cond-tokens s))
+        pos (long-array [0])
+        peek* #(get toks (aget pos 0))
+        next! #(let [t (peek*)] (aset pos 0 (inc (aget pos 0))) t)]
+    (letfn [(atom* []
+              (let [t (next!)]
+                (cond
+                  (= t "!") (not (atom*))
+                  (= t "(") (let [v (orx)] (next!) v)
+                  :else
+                  (let [[_ f arg] (re-matches #"(?s)([A-Za-z0-9_-]+)\s*\((.*)\)" t)
+                        lt (str/lower-case (or f t))]
+                    (case lt
+                      "true" true
+                      "false" false
+                      "os" (= (str/lower-case (str/trim arg)) (:os env))
+                      "arch" (= (str/lower-case (str/trim arg)) (:arch env))
+                      "flag" (boolean (get (:flags env) (str/lower-case (str/trim arg))))
+                      "impl" (let [[_ n r] (re-matches #"(?s)\s*([A-Za-z]+)\s*(.*)" arg)
+                                   [in iv] (:impl env)]
+                               (and (= (str/lower-case n) in) (version-in? iv r)))
+                      (throw (ex-info (str "cabal: unknown condition " t) {})))))))
+            (andx [] (loop [v (atom*)] (if (= (peek*) "&&") (do (next!) (let [w (atom*)] (recur (and v w)))) v)))
+            (orx [] (loop [v (andx)] (if (= (peek*) "||") (do (next!) (let [w (andx)] (recur (or v w)))) v)))]
+      (orx))))
+
+(defn flag-defaults
+  "The package's flags {name bool}: their defaults, then the assignment's (+name, -name)"
+  [items assignment]
+  (let [defs (into {} (for [{:keys [section args body]} items :when (= section "flag")]
+                        [(str/lower-case args)
+                         (let [d (some #(when (= (:field %) "default") (str/lower-case (str/trim (str/join " " (map last (:lines %)))))) body)]
+                           (not= d "false"))]))]
+    (reduce (fn [m ^String a] (assoc m (str/lower-case (subs a 1)) (str/starts-with? a "+"))) defs assignment)))
+
+(defn resolve-items
+  "A block's fields with its conditionals resolved: [field...] in order (an `if`'s then-block or else/elif's)"
+  [env items]
+  (loop [xs (seq items) out [] prev nil]
+    (if-not xs
+      out
+      (let [{:keys [section args body] :as it} (first xs)]
+        (cond
+          (:field it) (recur (next xs) (conj out it) nil)
+          (= section "if") (let [v (eval-cond env args)]
+                             (recur (next xs) (if v (into out (resolve-items env body)) out) {:taken v}))
+          (= section "elif") (let [v (and prev (not (:taken prev)) (eval-cond env args))]
+                               (recur (next xs) (if v (into out (resolve-items env body)) out) {:taken (or (:taken prev) v)}))
+          (= section "else") (recur (next xs) (if (and prev (not (:taken prev))) (into out (resolve-items env body)) out) nil)
+          :else (recur (next xs) out nil))))))
+
+(defn package
+  "A .cabal file read and finalized for env (without :flags; flags: the assignment, hadrian's `+flag`/`-flag`): {:top
+  {field [lines...]}, :library [field...] (the main library's fields resolved, `import`ed common stanzas in place),
+  :cabal-version}"
+  [^String text env assignment]
+  (let [items (parse text)
+        env (assoc env :flags (flag-defaults items assignment))
+        commons (into {} (for [{:keys [section args body]} items :when (= section "common")] [args body]))
+        expand (fn expand [body]
+                 (vec (mapcat (fn [it]
+                                (cond
+                                  (= (:field it) "import")
+                                  (mapcat #(expand (get commons (str/trim %))) (str/split (str/join " " (map last (:lines it))) #"[,\s]+"))
+                                  (:section it) [(update it :body expand)]
+                                  :else [it]))
+                              body)))
+        top (vec (filter :field items))
+        lib (some #(when (and (= (:section %) "library") (str/blank? (:args %))) %) items)]
+    {:top (into {} (for [f top] [(:field f) f]))
+     :library (resolve-items env (expand (:body lib)))
+     :flags (:flags env)
+     :cabal-version (some-> (get-in (into {} (for [f top] [(:field f) f])) ["cabal-version" :lines]) first last
+                            (str/replace #"^>=\s*" "") str/trim version-of)}))
+
+;;; Field values
+
+(defn words-of "A list field's items (commas and blanks separate them)" [lines]
+  (vec (remove str/blank? (str/split (str/join " " (map last lines)) #"[,\s]+"))))
+
+(defn lib-field
+  "Every occurrence of a field of the resolved library, their items concatenated (monoidal fields)"
+  [pkg ^String name]
+  (vec (mapcat #(words-of (:lines %)) (filter #(= (:field %) name) (:library pkg)))))
+
+(defn deps
+  "build-depends' package names, in order, each once"
+  [pkg]
+  (vec (distinct (for [f (:library pkg) :when (= (:field f) "build-depends")
+                       ^String d (str/split (str/join " " (map last (:lines f))) #",")
+                       :let [n (re-find #"^\s*([A-Za-z0-9-]+)" d)]
+                       :when n]
+                   (second n)))))
+
+(defn free-text
+  "A free-text field's text (fieldlinesToFreeText3 for cabal-version 3.0 and later, fieldlinesToFreeText before)"
+  [pkg ^String name]
+  (when-let [{[row col] :pos fls :lines} (get-in pkg [:top name])]
+    (let [v3 (>= (vcmp (or (:cabal-version pkg) [1 0]) [3 0]) 0)]
+      (cond
+        (empty? fls) ""
+        (not v3) (if (= (map last fls) ["."]) "."
+                     (str/join "\n" (map (fn [[_ _ t]] (let [s (str/trim t)] (if (= s ".") "" s))) fls)))
+        (= 1 (count fls)) (last (first fls))
+        :else
+        (let [[[r1 c1 t1] & more] fls
+              same (= row r1)
+              mcol (reduce min (if same (min c1 (second (first more))) c1) (map second more))
+              body (loop [p r1 xs more acc []]
+                     (if-let [[q cq t] (first xs)]
+                       (recur q (next xs) (conj acc (str (apply str (repeat (- q p) \newline)) (apply str (repeat (- cq mcol) \space)) t)))
+                       acc))]
+          (apply str (if same t1 (str (apply str (repeat (- c1 mcol) \space)) t1)) body))))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The installed-package record printed (showInstalledPackageInfo): ipiFieldGrammar's fields in
+;;; order, each a Doc; an empty Doc is no field. renderFields: fw the longest name printed; a
+;;; doc that renders as one line shorter than 60 at line length 100-fw follows the name padded
+;;; to fw; else the name alone and the doc's lines at the default style indented 4, a margin
+;;; (a blank line) after it.
+
+(defn- lines-of [^String s] (if (= s "") [] (str/split s #"\n" -1)))
+
+(defn render-fields
+  "[[name doc]...] as showFields writes them (the docs arbace.repr.haskell.doc's)"
+  ^String [fields]
+  (let [fields (remove (fn [[_ d]] (pp/is-empty? d)) fields)
+        fw (reduce max 0 (map (comp count first) fields))
+        blocks (for [[^String name d] fields]
+                 (let [narrow (pp/render d (- 100 fw))
+                       ls (lines-of narrow)]
+                   (cond
+                     (empty? ls) {:after false :lines [(str name ":")]}
+                     (and (= 1 (count ls)) (< (count (first ls)) 60))
+                     {:after false :lines [(str name ": " (apply str (repeat (- fw (count name)) \space)) narrow)]}
+                     :else {:after true :lines (vec (cons (str name ":") (map #(if (= % "") "" (str "    " %)) (lines-of (pp/render d)))))})))]
+    (str (str/join "\n" (loop [bs blocks prev nil acc []]
+                          (if-let [b (first bs)]
+                            (recur (next bs) b (into (if (:after prev) (conj acc "") acc) (:lines b)))
+                            acc)))
+         "\n")))
+
+(defn text-doc "showFreeTextV3 (or showFreeText for an older spec: blank lines as dots)" [^String s v3]
+  (if (or (nil? s) (= s "")) pp/empty
+      (pp/vcat (for [l (str/split s #"\n" -1)] (pp/text (if (and (not v3) (= l "")) "." l))))))
+
+(defn fsep-doc [xs] (if (empty? xs) pp/empty (pp/fsep (map pp/text xs))))
+
+(defn ipi-text
+  "An InstalledPackageInfo's text: ipi a map of the record's fields (strings, lists of strings, booleans), printed in
+  ipiFieldGrammar's order, the free text by showFreeTextV3 (ghc-pkg writes with cabalSpecLatest)"
+  ^String [ipi]
+  (let [t #(if (str/blank? (get ipi %)) pp/empty (pp/text (get ipi %)))
+        ft #(text-doc (get ipi %) true)
+        b #(if (get ipi %) (pp/text "True") pp/empty)
+        l #(fsep-doc (get ipi %))]
+    (render-fields
+     [["name" (t :name)] ["version" (t :version)] ["visibility" (pp/text "public")]
+      ["id" (t :id)] ["key" (t :key)] ["license" (t :license)]
+      ["copyright" (ft :copyright)] ["maintainer" (ft :maintainer)] ["author" (ft :author)]
+      ["stability" (ft :stability)] ["homepage" (ft :homepage)] ["package-url" (ft :package-url)]
+      ["synopsis" (ft :synopsis)] ["description" (ft :description)] ["category" (ft :category)]
+      ["abi" (t :abi)] ["exposed" (b :exposed)]
+      ["exposed-modules" (let [ms (:exposed-modules ipi)]
+                           (cond (empty? ms) pp/empty
+                                 (every? string? ms) (fsep-doc ms)
+                                 :else (pp/fsep (pp/punctuate (pp/text ",") (map #(pp/text (if (string? %) % (str (first %) " from " (second %)))) ms)))))]
+      ["hidden-modules" (l :hidden-modules)] ["trusted" (b :trusted)]
+      ["import-dirs" (l :import-dirs)] ["library-dirs" (l :library-dirs)] ["library-dirs-static" (l :library-dirs-static)]
+      ["dynamic-library-dirs" (l :dynamic-library-dirs)] ["data-dir" (t :data-dir)]
+      ["hs-libraries" (l :hs-libraries)] ["extra-libraries" (l :extra-libraries)]
+      ["extra-libraries-static" (l :extra-libraries-static)] ["extra-ghci-libraries" (l :extra-ghci-libraries)]
+      ["include-dirs" (l :include-dirs)] ["includes" (l :includes)] ["depends" (l :depends)]
+      ["cc-options" (l :cc-options)] ["cxx-options" (l :cxx-options)] ["ld-options" (l :ld-options)]
+      ["framework-dirs" (l :framework-dirs)] ["frameworks" (l :frameworks)]
+      ["haddock-interfaces" (l :haddock-interfaces)] ["haddock-html" (l :haddock-html)]])))
