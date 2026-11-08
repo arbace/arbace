@@ -2813,7 +2813,7 @@ check; a missing reference is not judged and fails; a selection leaves the contr
 | C `bin/repr-c check --tokens`, `parse-check`, `bin/ci annotations`, `bin/repr-c roundtrip` | P (queue 144; its judges' deftests pass on stage 0, 31 assertions; the runs over the corpora at the window; judged in the `--full` steps `c-tokens`, `c-parse`, `c-annotations`, `c-roundtrip`, their benchmarksgame parts): `test/c/controls.edn` `:lex`, `:pp`, `:gcc-digest`, `:tree`, `:annot`, `:roundtrip`, fannkuchredux.c against fasta-8.c | after the corpora, from the dumps the run keeps: `arbace.repr.c.ppcheck/token-controls` (`same-dump?`, `gcc-digest-agrees?`), `parsecheck/tree-controls` (`same-tree?`; `check-file` keeps the controls' dumps), `annot/annot-controls` (`annot-status`), `rtcheck/roundtrip-controls` (levels 3 and 4 crossed, `judge-row`); each in its judge's exit | not in `files.tsv`, the known files, the results files or the counts | none (the corpus's own dumps) |
 | C++ `bin/cppi runtime-build`, `bin/repr-cpp roundtrip`, `pp-check`; `bin/repr-llvm roundtrip` | M | | | |
 | repr/java `parse-check`, `front-check`, `attr-check`, `nojavac-check`, `roundtrip`, `check --jdk`, `check --suite` | M | | | |
-| repr/go `native-check`, `roundtrip`; repr/clojure `check` | repr/go P (GTS88 (b), below: `test/repr/go/native-controls.edn`, `test/repr/go/roundtrip-controls.txt`); repr/clojure M | | | |
+| repr/go `native-check`, `roundtrip`; repr/clojure `check` | repr/go P (GTS88 (b), below: `test/repr/go/native-controls.edn`, `test/repr/go/roundtrip-controls.txt`; since `controls-cg`, 2026-11-08, also the known differences, level `:known`, and the directory tests, kind `dirtest`); repr/clojure P (`controls-cg`: `test/repr/clojure/rules-controls.edn`, `roundtrip-controls.edn`; "As built: GTS81 (a), Clojure's and Go's last families") | | | |
 | `bin/generated-check`, `bin/j2g-edge verify`, `bin/provenance-check`, `bin/reap` | M (VM report 041's GTS110-GTS115 cover them) | | | |
 
 **The pairs**, each checked against the records here: C run, fannkuchredux.c and fasta.c (status 0 both, other stdout
@@ -4799,6 +4799,44 @@ GTS81 (a)'s controls for repr/go's two check families, the Go crop's last missin
   writes the Go tree's path as `${GOROOT}` in the message (`test/goi/judge-test.bash` checks it); no reader takes the message
   but the divergences classes' pattern, which stops before it.
 - The change is to `arbace/repr/go/annotate.ae`, which the executables embed: the gate's key changes (all builds rerun).
+
+## As built: GTS81 (a), Clojure's and Go's last families (branch `controls-cg`, 2026-11-08)
+
+GTS81 (a)'s controls for the four check families `bin/crops-score` found without one on `mac/next` (5ec43f7b): Clojure's
+`:controls` 0.7778 (7 of 9: "repr/clojure's one-way rules", the read cell; "repr/clojure's round trip", the print cell) and
+Go's 0.7500 (6 of 8: "native-check's known differences", the read cell; "bin/repr-go roundtrip --dirs linux/amd64", the print
+cell). Each is a crossed pair judged by the family's own judge, which must find the difference; a control that passes fails the
+check; `test/crops/crops.edn` names each by a `:match` its file must hold. Both crops' maturity 100.
+
+| family | controls file | pair(s) | the judge it goes through | in the step |
+|---|---|---|---|---|
+| repr/clojure's rules (their `:way` claims) | `test/repr/clojure/rules-controls.edn` | one a rule (5): a text the rule rewrites and which comes back, against another text | `arbace.repr.clojure.rules/round-trip` (read by the rules, printed back, byte for byte; print_test's `samples-round-trip` now asserts it too), `control-verdict`; a rule that does not rewrite its subject, or a subject that does not come back, is a vacuous control and fails too | `bin/repr-clojure check` (print_test's `deftest controls`; `REPR_CLOJURE_RULES_CONTROLS`), step `repr-clojure` |
+| repr/clojure's round trip | `test/repr/clojure/roundtrip-controls.edn` | one a corpus (8): frozen set.clj/string.clj, the suite's data.clj/string.clj (three modes), the libraries' tools.reader edn.clj/tools.namespace file.clj (three modes), arbace/'s set.ae/walk.ae | `arbace.repr.clojure/control-verdict`: what comes back of the subject (`roundtrip`'s `:texts`, kept for `:keep`) against the reference's original, byte for byte with the first differing line, then `known-matches?` (run-roundtrip's judge of the known entries, factored out): an excused crossed difference fails too | `bin/repr-clojure roundtrip --controls FILE` per corpus from `bin/lib/repr-clojure/check --roundtrip` (`REPR_CLOJURE_ROUNDTRIP_CONTROLS`; under `--only` a control whose subject is not listed is left), step `repr-clojure` |
+| repr/go native-check's known differences | `test/repr/go/native-controls.edn` (the four pairs list `:levels [:tree :ann :forms :known]`) | the existing four | level `:known` of `arbace.repr.go.annotate/control-verdicts`: once another level found the crossed difference, the subject's result judged by `known-difference?` (check-corpus's `known?`, factored out) against the entries a known difference of the reference would be (its dump's key, its files' keys, its package unless the subject's) | `bin/repr-go native-check`, step `repr-go-native` (the ids already in `:rotate :always`) |
+| repr/go round trip `--dirs` | `test/repr/go/roundtrip-controls.txt` (kind `dirtest`) | closure5.go/ddd2.go both ways | `bin/lib/repr-go/check`'s `run_controls`: the subject's printed FILE.dir staged under the reference's FILE.dir's `.go` names in order, `gocmp -dirtest` at the tree level alone, which must fail | `bin/repr-go roundtrip --dirs amd64`, `--dirs linux/amd64` (the other runs leave them), step `repr-go` |
+
+**Checked, light** (stage 0 of the main checkout; the suite's tree and the libraries' jars copied from the main checkout's
+`.tmp/`): `bin/repr-clojure check` 20 tests, 290 assertions, 0 failures, the five rules' controls "fail as they must"; a fake
+file (a rule's text against itself; a rule that does not rewrite its subject) fails the check, 2 failures. `bin/repr-clojure
+check --roundtrip` (61 s, 758 MB peak): every corpus as recorded, the eight controls hold; a fake control (set.clj against
+itself, `--only`) exits 1, `CONTROL FAILED`. `test/repr/clojure/judge-test.bash` (its new case `controls`: a crossed pair holds,
+one that passes fails, an excused crossed difference fails, a missing subject is left, another corpus's not judged): all hold.
+`bin/repr-go native-check --only` helloworld.go/printbig.go with `:known` (13 s, 729 MB): held at the four levels; with
+`known-difference?` broken on purpose (it excused anything once a known map is not empty) the control failed, `passed [:known]`,
+exit 1. `bin/repr-go check --goos linux --dirtests --only '^(closure5|ddd2)\.go$'` on the two directories copied as the
+candidate (12 s): both dirtest controls hold (gocmp: `File.Name.Name ddd vs a`); a directory test against itself fails the
+run. `test/repr/go/controls-test.bash` covers both (20 s). The corpora's whole runs are the night's `repr-clojure`,
+`repr-go` and `repr-go-native`.
+
+**Found**: `bin/repr-clojure check --roundtrip` failed on `mac/next` before this branch: arbace/'s `:outside` count 152, recorded
+151; the 152nd is `genclass.ae` (clojure-cdr's CDR3, a4258506f), line 65's comment naming upstream's
+`src/clj/clojure/genclass.clj`, a text read itself changes. `test/repr/clojure/roundtrip-known.edn` records 152 (measured on
+`mac/next`'s tree and on 0f507e78's, the one file between them).
+
+**Keys.** `arbace/repr/clojure.ae`, `arbace/repr/clojure/rules.ae` and `arbace/repr/go/annotate.ae` are embedded: the gate's
+key moves (`87234529dd27` to `8d0f7834608c`) and javac's (`34e3a3200c4e` to `e556b7de7898`); the runtime's does not
+(`6baefbe7230d`). `bin/gate --full --plan` against `mac/next`: 133 of the 221 steps with a key planned move, the rest wait on
+the program hosts' builds.
 
 ### GT9.8 As built: the crops' read and print controls (GTS218 (a); branches `crop-controls`, `crop-controls-{ocaml,haskell,rust,cpp}`, 2026-11-04)
 
