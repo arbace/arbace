@@ -4954,3 +4954,286 @@ checkout.
   their code, and moves `jdk/provenance.edn`'s digests.
 - **(b)** Keep them as the derivations' first record.
 - *Recommended: (a)*, folded into the Java night's conversion.
+
+## As built: F26 (classfile), write-ahead: java.lang.classfile in the world (JCS260 (b))
+
+Branch `java-classfile` from `mac/java-props` (`a9aebc62f`), 2026-11-08, by day under the light rules. Nothing is
+converted, translated or built here; the night's commands are below. The brief: JCS260 (b), decided by the user on
+2026-11-08. jdk26u's class-file API and its implementation come into the Go build's world, as F9 and F23 did: jdk26u's
+own Java converted by repr/java, listed in `test/jrt/jrt_sources.ae`, natives only where needed, variants as few as
+possible. F25 is left to the day's other Java branches, so this is F26.
+
+### What uses it: the corpus's 44 tests
+
+`test/java/ref-jdk26.edn`'s source sets were scanned for `java.lang.classfile`, `java.lang.constant`,
+`jdk.internal.classfile` and `AccessFlag`. **44 tests** match, and the JDK passes all 44. At the committed records they are
+`:load-failed` at interp and `:refused` at compiled. jdk26u's own `test/jdk/jdk/classfile` (52 JUnit tests) is not in the
+corpus, whose categories are main runs only.
+
+| family | tests | what they do with the API | interp's host |
+|---|---:|---|---|
+| javac's typeAnnotations | 17: t05992-t06008 | compile sources with javac in-process, parse the class files, count type annotations | javac's tool (F6) |
+| line numbers, `resolve`, `classfiles` | 8: t06042, t06043, t06326-t06329, t06390, t06072 | parse the test's own class files from `test.classes` or `getResourceAsStream` | executable |
+| other javac tests | 5: t05847, t05856, t05857, t05915, t05921 | compile in-process or by ToolProvider, then parse | javac's tool |
+| `ByteCodeTest` | 1: t06156 | the constant pool by a visitor that names `MethodHandleInfo` | javac's tool |
+| build and define | 6: t04537, t04712-t04715, t04865 | `ClassFile.of().build(...)`, then `ClassLoader.defineClass` of the bytes | executable |
+| `AccessFlag` | 5: t04830-t04833, t04835 | `Class`/`Field`/`Method`/`ModuleDescriptor` `accessFlags()`, `AccessFlag.maskToAccessFlags` | executable |
+| `CallerSensitive` | 2: t08102, t08103 | parse the JDK's own class files through the `jrt:/` file system | executable |
+
+### What came in, and how (jdk26u at `baf63fb`)
+
+`test/jrt/jrt_sources.ae`'s `classfile-sources` lists **260 files and 58,652 lines**, all of KIND `share`, unpatched. They
+are:
+
+- `java/lang/classfile` with `attribute`, `constantpool` and `instruction`: 154 files.
+- `jdk/internal/classfile/impl` (69), `impl/verifier` (8) and `components` (5): ClassPrinter, ClassRemapper and the code
+  transforms, whose implementations are in `impl`.
+- `java/lang/constant`'s other nine (Constable and ConstantDesc were added-sources' already) and `jdk/internal/constant`'s nine.
+- What those name that the world lacked, found by a constant-pool scan of their class files against the gate executable's
+  23,035 translated classes and jrt's manifest (`.tmp/cf/scripts/cpdeps.py`):
+  - `java/lang/reflect/AccessFlag` and `ClassFileFormatVersion`;
+  - `java/lang/invoke/TypeDescriptor` (ClassDesc's and MethodTypeDesc's interfaces);
+  - `sun/invoke/util/Wrapper` (the primitive class descriptors');
+  - `java/lang/VerifyError` (`ClassFile.verify`'s);
+  - `jdk/internal/access/JavaUtilCollectionAccess`.
+
+The rest of what they name stays outside the world as J2G-SPEC's operation-level stubs: java.lang.invoke's run-time classes
+(`resolveConstantDesc(Lookup)` everywhere, `ClassHierarchyResolver.ofClassLoading(Lookup)`, DynamicConstantDesc's enum and
+VarHandle canonicalizations, which catch a stub's exception and keep the description), `BootstrapMethodError`, and the JIT's
+annotations. The lambdas, records and pattern switches are j2g's own, as everywhere.
+
+| part | how |
+|---|---|
+| the lists from trusted arrays | `SharedSecrets.getJavaUtilCollectionAccess().listFromTrustedArray(...)`: ClassImpl's interfaces, the annotation reader, `Util`'s lists. No variant: `arbace.j2g.model/serial-accessors` gains `JavaUtilCollectionAccess`, whose setter `ImmutableCollections$Access`'s static initializer calls, as JCS167's accessors work. j2g then writes `SharedSecrets_GetJavaUtilCollectionAccess__JavaUtilCollectionAccess`, which initializes `ImmutableCollections$Access` first. The same accessor serves Gatherers' windows, the four `:unavailable` entries of night 8's report |
+| `JavaLangAccess.concat` | jrt's Go (`go/arbace/jrt/access.ae`, with `TestJavaLangAccessConcat`). `ConstantUtils.concat` builds every `ClassDesc`'s and `MethodTypeDesc`'s descriptor with it, so without it the API cannot make a descriptor. It is jdk26u's `StringConcatHelper.concat`: prefix, `String.valueOf(value)`, suffix, and a null prefix or suffix is `"null"`. jrt had the other three JLA methods the API calls (`countPositives`, `inflateBytesToChars`, `countNonZeroAscii`) |
+| `Unsafe`'s unaligned reads | RawBytecodeHelper's `getCharUnaligned`, `getShortUnaligned` and `getIntUnaligned` with the big-endian flag: already in jrt's Unsafe |
+| Go names | seven renames in `arbace.j2g.names/renames`: `Classfile_Annotation` (jrt's `Annotation`), `Classfile_Attribute` (javax.naming.directory's), `Classfile_Attributes` (java.util.jar's), `Classfile_Signature` (java.security's), `Classfile_MethodInfo` (jrt's member tables' `MethodInfo`), `Classfile_Util` (sun.management's), `Invoke_Wrapper` (java.sql's). They were found by checking the 631 named classes against the world, jrt's manifest and jrt's Go identifiers (`.tmp/cf/scripts/gonames.py`). No package-private method is overridden across Java packages (W4; `pkgpriv.py`: 0 pairs) |
+| the interpreter's `Class.getResource` | j2g's support code adds `Class.getResource` over `ClassPathResources.getResource`, the name resolved as `getResourceAsStream` resolves it. Both go into `Class`'s member table, which the interpreter reads: F19's day finding, "No accessible method getResourceAsStream in java.lang.Class". A test helper that only declares a method calling them failed to load, as javac's `ClassfileTestHelper.getClassFile(String)` does |
+
+### Light checks
+
+All ran with main's stage 0 as `ARBACE_HOST_EXE`, javac's tool `javac-5ad357331dbcd7cfb0fd` with `REPR_JAVA_STALE_OK=1`, and
+the gate executable `ad3066cf41ea6faf1566`. Each process stayed under 2 GiB under a watchdog. Scratch is in the worktree's
+`.tmp/cf/`.
+
+- **The joint javac check.** `.tmp/night7/all9-run.sh` on the branch: 2,766 files (2,506 + 260), **0 errors**, 6,013
+  classes, 22 s, 0.97 GB.
+- **The read.** `bin/repr-java read-jdk --check` of the 260 files as a patch of java.base, as the convert step reads them:
+  260 converted, 0 failed, 0 javac errors, 0 unreadable, 274 files, 1,678,284 bytes, 32 s, 1.39 GB. With `--no-javac`:
+  260 native, 0 fallbacks, the forms byte for byte the same (1.93 GB peak at two threads).
+- **j2g's world, by day.** This is `bin/jrt-convert vet --forms` on a copy of `jdk/forms` with the 274 new files merged, and
+  JCS253's steps:
+  - the declaration: **5,161 classes declared**, and no class of the port fails its parse, declaration, header, members or
+    bridges (`--others`: only the known `FilePermission`);
+  - the analysis, bodies and all, of the 633 classes by a scratch copy of `jrt.vet` (`.tmp/cf/vetns/jrt/cfvet.ae`,
+    `analyze-class!` on them): 3 refusals, all the edge's: `DirectMethodHandleDesc` and `BytecodeHelpers` (the
+    `MethodHandleInfo.REF_*` constants), and `DynamicConstantDesc` (`Enum$EnumDesc.of`, `VarHandle$VarHandleDesc.of*`).
+    `jdk/edge.edn` has none of the three classes, and the night's `bin/j2g-edge update` records them from the JVM. With those
+    three entries in a scratch copy of the edge (`.tmp/cf/edge-sim.edn`: MethodHandleInfo's nine constants, EnumDesc's and
+    VarHandleDesc's factories), **0 refused** on the 1,024 classes of java.lang, jdk.internal and sun.invoke.util, 27 s,
+    1.50 GB.
+- **jrt.** The two files F26 changes, printed by `bin/repr-go print --layout gofmt` (`bin/jrt test` prints all of `go/`, at
+  4.2 GB), differ from java-older's printed module of today only by the additions. With them in a copy of that module,
+  `go vet ./jrt` is clean and `go test ./jrt` reports ok, `TestJavaLangAccessConcat` included (5.5 s, 0.3 GB).
+- **j2g's new forms.** The Go method and the table entries, printed: `gofmt -e` clean. j2g's names on stage 0: the
+  accessor's bases are `GetJavaUtilCollectionAccess__JavaUtilCollectionAccess` and
+  `SetJavaUtilCollectionAccess_JavaUtilCollectionAccess__V`, the calls' own, and concat's is `Concat_String_O_String__String`.
+- **`bin/gate --plan`.** Exit 0; every step is keyed (15 s, 0.4 GB).
+
+### The API on Arbace's runtime, by day: the smoke, identical to the JDK
+
+The forms ran interpreted on the gate executable, the same Java as the build will translate. The smoke program
+(`.tmp/cf/smoke/src/cfsmoke/Smoke.java`) does the following:
+
+- builds a class with a loop, a field and a branch, whose stack maps are made through the default class hierarchy resolver
+  by class loading;
+- parses it back, element by element, then verifies it;
+- transforms it (drops the field, replaces a constant);
+- uses ConstantPoolBuilder and `AccessFlag.maskToAccessFlags`;
+- parses javac's class files of a sample with generics, a synchronized block, a string switch, a record, an enum and a
+  lambda, and for each: its attributes, line tables, annotations, a round trip by `ACCEPT_ALL`, a new pool and `verify`;
+- prints a class with `ClassPrinter.toYaml`.
+
+**Its output is the JDK's byte for byte** (`.tmp/cf/smoke/go.out`, `jdk.out`), in 11 s at 1.0 GB.
+
+The interpreter cannot define the API's own packages as `run.ae` does: they import each other in cycles, and an import names
+a class that is not yet defined. So the smoke's loader (`.tmp/cf/smoke/load.ae`, `.tmp/cf/scripts/flatten.py`):
+
+- renames the 14 packages into one;
+- enters every class in one top-level `do`;
+- leaves out the 17 members that name java.lang.invoke's run-time classes (the interpreter has no edge, so it cannot declare
+  them; j2g stubs them);
+- answers jrt's `SharedSecrets.getJavaUtilCollectionAccess` and `JavaLangAccess` by a small converted helper
+  (`SmokeAccess`), because the interpreter cannot reach jrt's Go `SharedSecrets`.
+
+None of this is in the build.
+
+### The 44 tests on the port, interpreted, by day
+
+The same loader ran each test, its forms from main's read cache (the newest passing read), its main renamed. Tool tests ran
+on javac's tool with its platform, as F6 runs them. Each was judged on status and stdout's digest against the JDK's record
+(`.tmp/cf/scripts/runtest.sh`, `results2.tsv`, `results3.tsv`). t06072 has no cached read (package `test`).
+
+| result | tests | what stops them |
+|---|---:|---|
+| **pass** | 3 | t04835 VersionedLocationsTest, t05856 DuplicateConstantPoolEntry, t06042 SyntheticClasses |
+| **pass with F26's `Class.getResource`** | 2 + 2 | t05994 and t06004 pass with the helper's unused method left out, as the table entry makes it loadable. t05992 and t05993 reach their two hundred cases, each printing "Pass" (javac on Arbace compiling in-process, the API parsing its class files), until the day's 2 GiB watchdog stops them at 2.36 GB |
+| the test's own class files | 18 | t05995-t06003, t06006-t06008 (`getClassFile("X$Test.class")` of a class jtreg's `@compile` made), t06043, t06326-t06329, t06390. The interp level's `test.classes` is empty (bin/java-check compiles the test only on the JDK's side), so these read nothing: **JCS300** |
+| jrt's reflection | 4 | t04830 `Class.getDeclaredClasses`, t04831 `Field.getAnnotation`, t04832 `java.lang.reflect.Parameter`, t04833 `ModuleDescriptor`, then each its `accessFlags()`: **JCS301** |
+| `defineClass` of built bytes | 6 | t04537, t04712-t04715 (and `AnnotationTypeMismatchException`, not in the world), t04865: **JCS302** |
+| javac on Arbace | 4 | t05847 (a jar on the class path: "package j does not exist"), t05857 and t05915 (`--release 16`: "release version 16 not supported"), t05921 ("Cannot find javac") |
+| java.lang.invoke | 1 | t06156 (`MethodHandleInfo.referenceKindToString`: `:invoke`, JCS94 (b)) |
+| the `jrt:/` file system | 2 | t08102, t08103 (the JDK's own class files: by design) |
+| `java.lang.annotation.Repeatable` | 1 | t06005 (the meta-annotation is not in the world) |
+| no read | 1 | t06072 |
+
+**Expected after the night.**
+
+- At interp, 5 to 7 of the 44 pass: the three, t05994 and t06004, and t05992 and t05993 under the night's limits. With
+  JCS300 (b) or (c), up to 18 more.
+- At compiled, the executable's non-tool tests that pass at interp: t04835 and t06042. The tool tests are JCS261's.
+- The rest leave `:classfile` for the classes above.
+- **JCS135, the growth.** +58,652 Java lines on the closure's 1,017,154 (+5.8%), +1.68 MB of forms on `jdk/forms`' 21.6 MB
+  (+7.8%). By F4's ratio the executable grows by about 9 MB. The API is large: most of its classes are records and sealed
+  interfaces, which j2g translates as ordinary classes.
+
+### Findings for the interpreter (no test of the corpus needs them)
+
+- **Imports.** The interpreter defines a package's classes one by one, so an import naming a class not yet defined fails.
+  This is F19's day finding again, now with fourteen packages in a cycle. Entering every class in one `do` across packages
+  works (the smoke's loader).
+- **The source lookup's re-entrancy.** Entering `UnboundAttribute.ae` from source, while its header names a class whose own
+  file names `UnboundAttribute$AdHocAttribute`, resolves AdHocAttribute's members before its header has set its type
+  variables: "Unknown type: T" (`analyze/enter-ctor`). The one-`do` entry avoids it.
+
+### The night's commands
+
+Run them in the night's worktree with this branch merged, folded into the Java night's conversion. Heavy ones go under
+`bin/heavy-lock`.
+
+```sh
+# 0. the joint javac check of the merged tree: 0 errors, the sources line +260
+.tmp/night7/all9-run.sh /root/arbace/.tmp/worktrees/next
+# 1. jdk/ converted afresh: +260 `java.base share` lines, 0 failed, 0 javac errors, no javac: 0 fallbacks; jdk/forms +274
+#    files (the namespaces java.lang.classfile, .attribute, .constantpool, .instruction, jdk.internal.classfile.impl,
+#    .verifier, .components, jdk.internal.constant, sun.invoke.util, java.lang.invoke new; java.lang, java.lang.reflect,
+#    java.lang.constant, jdk.internal.access merged)
+REPR_JAVA_EXE=$(ls -td /root/arbace/.tmp/gate-exe/javac-*/ | head -1)arbace-javac REPR_JAVA_STALE_OK=1 \
+  ARBACE_HEAVY_CMD=$PWD/bin/heavy-lock bin/jrt-convert update
+# 2. the package table (java.base only: no change expected, --check), j2g's edge, javac's world's edge; the edge must then hold
+#    java/lang/invoke/MethodHandleInfo with :const REF_getField..REF_invokeInterface 1..9, java/lang/Enum$EnumDesc and
+#    java/lang/invoke/VarHandle$VarHandleDesc (the day's vet refused DirectMethodHandleDesc, BytecodeHelpers and
+#    DynamicConstantDesc without them)
+bin/jrt modules --check && bin/heavy-lock bin/j2g-edge update && bin/heavy-lock bin/javac-vendor edge
+grep -c '"java/lang/invoke/MethodHandleInfo"\|"java/lang/Enum\$EnumDesc"\|"java/lang/invoke/VarHandle\$VarHandleDesc"' jdk/edge.edn
+# 3. the variants and the port's classes on j2g's world (JCS253): the known nine refusals go with the conversion
+bin/jrt-convert vet --others
+# 4. the executable; j2g's report: no :analysis-failures under java/lang/classfile, jdk/internal/classfile,
+#    java/lang/constant, jdk/internal/constant; :unavailable for the port only resolveConstantDesc, resolveCallSiteDesc,
+#    ofClassLoading(Lookup), the canonicalize* and DynamicConstantDesc's bootstrap's; no collision; the Go
+#    SharedSecrets_GetJavaUtilCollectionAccess__JavaUtilCollectionAccess written; Gatherers' four :unavailable gone
+bin/heavy-lock bin/arbace-go --build && bin/arbace-go --smoke && bin/jrt test
+# 5. F26's smoke on the new executable, its output against the JDK's (byte for byte on the day's interpreted run; the
+#    last line, ClassPrinter's, may say "not translated": jdk.internal.classfile.components is exported to no module the
+#    REPL world roots, repl-visible?, and only the API's own calls reach it)
+S=/root/arbace/.tmp/worktrees/java-classfile/.tmp/cf/smoke
+(cd $S && ARBACE_PATH=$S/forms $OLDPWD/target/arbace-go/amd64/arbace $OLDPWD/test/java/run.ae --load files $S/forms \
+   cfsmoke.Smoke -- jdkout/cfsmoke/Sample.class 'jdkout/cfsmoke/Sample$P.class' 'jdkout/cfsmoke/Sample$E.class' > night.out) \
+  && diff $S/night.out $S/jdk.out && echo F26-SMOKE-OK
+# 6. javac's tool (its world takes jdk/forms: the typeAnnotations tests run there)
+bin/heavy-lock bin/javac-vendor tool
+# 7. Java's levels interp and compiled on the 44 (the list: their ids, one a line; then the whole corpus with the night's
+#    others): saved, not recorded;
+#    expect 5-7 to pass at interp (t04835 t05856 t06042 t05994 t06004, t05992 t05993), t04835 and t06042 compiled
+JAVA_CHECK_EXE=$PWD/target/arbace-go/amd64/arbace J2G_GO_EXE=$PWD/target/arbace-go/amd64/arbace \
+  JAVA_CHECK_HEAVY=$PWD/bin/heavy-lock bin/java-check --levels interp,compiled --jobs 8 \
+  --list /root/arbace/.tmp/worktrees/java-classfile/.tmp/cf/ids.txt
+  --save .tmp/f26-night/check
+```
+
+**Risks and fallbacks.**
+
+- If the edge update records none of the three classes, the port's code is stubs, because `BytecodeHelpers` is refused. The
+  fallback is a variant of `BytecodeHelpers.isConstantDynamicBootstrap` and `DirectMethodHandleDesc$Kind`'s constants that
+  writes the nine `REF_*` values as literals (the values of `.tmp/cf/edge-sim.edn`), plus DynamicConstantDesc's three
+  canonicalizations cut.
+- j2g's translation of the records and sealed hierarchies at this size (about 690 classes) cannot be measured by day. If the
+  report refuses some classes, the triage's usual route is a variant for each.
+- The accessor's class `ImmutableCollections$Access` is non-trivially initialized. If j2g's `trivial-init?` decides
+  otherwise, the getter returns nil and the API fails with an NPE at its first list. The smoke (step 5) would show it.
+- `Class.getResource`'s support method calls `ClassPathResources.getResource`, which the REPL world reaches today. If a build
+  has no ClassPathResources, the method is not written (`cp-resources?`).
+
+## Proposed (F26)
+
+Numbered from JCS300, with JCS260-JCS299 left to the day's other branches.
+
+### JCS300 The interp level's `test.classes`: the test's own class files
+
+Eighteen of the 44 parse their own class files, from `test.classes` (jtreg's `@compile` output) or by
+`Class.getResourceAsStream("X.class")`. bin/java-check compiles a test only on the JDK's side (`record_runs`), so Arbace's
+run finds nothing, at interp and at compiled.
+
+- **(a)** As now: the 18 fail on null bytes.
+- **(b)** Every test: javac on Arbace (the tool, as the classes level runs it, with the test's javac options and `-g`)
+  compiles its sources into `WORK/classes/ID` before its run, and `WORK/classes/ID` joins `ARBACE_PATH`, so a class's
+  `getResource(AsStream)` finds its class file. Cost: one tool run per test (2-10 s), about +4 hours of CPU for the 4,853
+  at night.
+- **(c)** Only the tests whose sources name `java.lang.classfile` or `test.classes` (about 30). Cost: an hour to build; a
+  few minutes a night.
+- *Recommended: (c)*, the plan's `compile` line from the source scan, as F6's tool tests are chosen.
+
+### JCS301 AccessFlag's reflection in jrt
+
+`Class.accessFlags()`, `Field`, `Method` and `Constructor` `accessFlags()`, `Parameter`, `Class.getDeclaredClasses`, and
+`Field.getAnnotation` in the interpreter's tables. This is the family of t04830-t04833. AccessFlag is translated, and jrt's
+Go cannot name a translated class, so these are j2g support methods, as `Class.getResource` is
+(`AccessFlag.maskToAccessFlags(getModifiers(), Location.X)`, the class-file flags where they differ: `ACC_SUPER`,
+synthetic, mandated).
+
+- **(a)** Defer them to F14's reflection.
+- **(b)** Build them after the night proves the port.
+- Cost of (b): half a day, with a jrt Go test each.
+- *Recommended: (b).*
+
+### JCS302 `ClassLoader.defineClass` of class files the API builds
+
+Six tests build a class and define it: t04537, t04712-t04715 and t04865. The Go build defines classes at run time only from
+Java forms (J2G-SPEC V9).
+
+- **(a)** By design, a class `:define-bytes` of its own.
+- **(b)** A class-file loader: a `ClassModel` decompiled into Java forms (structured control flow from the code's labels
+  and stack maps) and then interpreted. Cost: weeks, and new risk to the interpreter.
+- **(c)** A bytecode interpreter over the API's `CodeModel`. Cost: weeks, and a second evaluator.
+- *Recommended: (a)*, revisited if the box's tool guests need class files.
+
+### JCS303 The `:classfile` class after the night's rerun
+
+`test/java/divergences.edn`'s `:classfile` is `:kind :design` (JCS95 (a)); JCS260 (b) reverses it.
+
+- **(a)** Keep it until the records say what is left.
+- **(b)** After the night's whole-corpus rerun, re-sort the 44 into the classes above: JCS300's, `:invoke`, the javac
+  tool's, `jrt:/` by design and JCS302's. `:classfile` then keeps only what names the API's own missing pieces, as
+  `:world`.
+- REAP's cells and `bin/crops-score`'s scores move with it, so the re-sort is recorded with the night's records, not by day.
+- *Recommended: (b)*, by the main session with the records.
+
+### JCS304 `Runtime.Version.parse` in jrt
+
+`ClassFileFormatVersion.runtimeVersion()` calls it, and jrt's hand-written `Runtime$Version` has no `parse`, so it is an
+operation-level stub.
+
+- **(a)** As now: only `runtimeVersion` fails.
+- **(b)** jdk26u's `Runtime.Version.parse` ported rule for rule (its regex, its errors) into jrt's Go, with a test. Cost: an
+  hour.
+- *Recommended: (b).*
+
+### JCS305 The stream variants that avoided JavaUtilCollectionAccess
+
+`overlay/jdk/variants/ReferencePipeline.ae` (`toList`) and `Collectors.ae` (`toUnmodifiableList`) were written because
+SharedSecrets' accessor was outside the world. With F26 it is inside.
+
+- **(a)** Keep both.
+- **(b)** Remove them once the night's smoke proves the accessor. jdk26u's own code then runs: `toList` over
+  `listFromTrustedArrayNullsAllowed`.
+- *Recommended: (b)*, the morning after the night's build.
