@@ -4337,3 +4337,57 @@ show a gain.
 
 Left: `test_lifecycle.StartupTests.test_sys_path_0` under `-c` (the sub's `sys.path[0]` is the `-c` file's directory, not ''),
 `TestInterpreterClose.test_remaining_daemon_threads` (its subprocess exits 1), the shared GIL (the DECISION).
+
+## As built: 232, pip on pyi and the pinned wheels' own suites: tomli and click (2026-11-08, the Mac VM, queue 232)
+
+The user's decision on 232's DECISION (2026-11-08): **tomli** and **click** join the pins. What was built:
+
+- **The pins** (`test/python/wheels.edn`): `:wheels` gains tomli 2.5.0 and click 8.5.1 (py3-none-any, PyPI's SHA-256 and
+  size, pinned 2026-11-08; neither has a dependency on Linux), each with a sample (`test/python/wheels/use_tomli.py`,
+  `use_click.py`). Two new vectors: `:test-wheels`, what the suites need beyond the pins (pytest 9.2.0 with iniconfig
+  2.3.1, pluggy 1.7.0 and pygments 2.21.0, all py3-none-any; packaging is already a pin), installed by
+  `arbace.python.wheels` into a site of their own (`site-test-KEY`); and `:suites`, each pin's own test suite at the
+  pinned version: click's PyPI sdist (it carries `tests/`), tomli's repository tag archive (its sdist carries no tests;
+  GitHub's archive bytes are pinned like the rest, a changed archive refused). `bin/pyi wheels fetch` fetches all three
+  sets once (the sources into `${REPR_PYTHON_SRC:-.tmp/repr-python}/sdists/`).
+- **`bin/pyi wheels suite NAME [TEST...]`**: the archive extracted afresh for each side, the suite's runner
+  (`python -m unittest -v`, `python -m pytest -v`) run in its root against the installed wheels (the archive's `src/` is
+  not on the path) by `python3 -S -B` (PYTHONPATH the two sites) and by pyi (PYI_SITE the same), TMPDIR and pytest's
+  `--basetemp` under the run's own directory; each log read as outcomes (`arbace.python.wheels outcomes`), CPython's
+  through the oracle's records (`pyrec_outcome`, live on the VM: nothing recorded is committed), judged test for test by
+  `arbace.python.wheels judge` against `test/python/divergences.edn` (a class's `:tests` names `wheels-NAME/ID`, or its
+  `:match` finds `pyi OUTCOME cpython OUTCOME`), and a negative control (CPython's outcomes with one passed test made
+  failed, judged as pyi's: refused). TEST... runs a sample in place of the suite's `:args`.
+- **pip on pyi** (`bin/pyi wheels pip-probe`) takes the two new pins with no change: 11 runs equal to CPython's pip, 8
+  installed trees (331 files) equal, 2 controls refused; the no-ssl warning is gone since `_ssl` (217).
+
+What the suites found in pyi (each fixed with a program of `test/python/pyi/` equal to CPython):
+
+- `_operator`'s operator functions were operator.py's pure ones, so one stored in a class bound as a method: glob's
+  `_StringGlobber.concat_path = operator.add` made pathlib's recursive glob fail (tomli's `tests/test_data.py` at import).
+  `builtins_operator.go` now has Modules/_operator.c's operators, in-place forms, comparisons, truth, `is_`, `getitem`'s
+  family and `concat` as built-in functions (`w232-operator-builtins.py`); `countOf`, `indexOf`, `length_hint`, `call`
+  and the getter classes stay operator.py's.
+- `BaseExceptionGroup[...]` (`__class_getitem__`, pytest's `RaisesGroup`).
+- compile() of an AST unparses it (PY6h's design), so pytest's assertion rewriting, whose temporaries are named
+  `@py_assert1`, `@py_builtins`, `@pytest_ar` and whose mark expressions name `$stress`, was a syntax error. Such names are
+  respelled in a copy of the tree before the unparse and put back into the compiled code (names, locals, cells, frees,
+  str constants, nested code), so they reach a mapping as given (`w232-ast-names.py`).
+- `ast.parse` of a str constant holding a lone surrogate gave U+FFFD: the native reader's JSON answer spelled it
+  `\udce2`, which Go's JSON decoder replaces. Such a str is now `{"$": "str", "u": [UTF-16 units]}`
+  (`arbace.repr.python.astjson`, `tools/pyi/ast_json.py`, `tools/pydump/astdump.py` alike: ast-check stays byte for
+  byte) (`w232-ast-surrogates.py`).
+- print() to a file object writes each argument, separator and end apart, as `builtin_print_impl`.
+
+Samples on the VM (aarch64), each against CPython's run of the same suite with the same wheels:
+
+| suite | sample | result |
+|---|---|---|
+| tomli 2.5.0 | the whole suite (18 tests; test_data runs toml-test's valid and invalid files) | 18 equal (before: 16 equal, test_data failing at import) |
+| click 8.5.1 | tests/test_basic.py | 109 equal (before: 0, conftest's rewritten import a syntax error) |
+| click 8.5.1 | test_arguments, test_termui, test_testing, test_imports, test_utils/, test_compat | 1191: 1189 equal, 2 classed (`:pyio`), 0 failing |
+
+The two classed tests are io being `_pyio` (`:pyio`, by design): `_pyio.StringIO.__init__` writes its initial value
+through the subclass's `write` and seeks, and `_pyio`'s seek calls the subclass's `flush` before its `__init__` has set
+its attributes; CPython running `_pyio` does the same (probed). The whole click suite (2,459 tests, the stress tests
+deselected by its pyproject) is the main host's run.
