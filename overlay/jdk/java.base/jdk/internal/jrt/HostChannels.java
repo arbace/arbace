@@ -47,6 +47,8 @@ public final class HostChannels {
     public static final int ECONNREFUSED = 111;
     public static final int EHOSTUNREACH = 113;
     public static final int EINPROGRESS = 115;
+    /** ENOPROTOOPT (JCS200: LinuxSocketOptions.c's handleError). */
+    public static final int ENOPROTOOPT = 92;
     /** jrt's own: the host has no descriptors (a host without channels, the box's). */
     public static final int ENOHOST = -1;
 
@@ -342,4 +344,36 @@ public final class HostChannels {
 
     /** The inherited descriptor entered into the table as a blocking channel's (non-blocking in the kernel): 0 or THROWN. */
     public static native int inheritedAdopt0(int fd, int[] err);
+
+    // -- jdk.net's LinuxSocketOptions.c natives (JCS200 (a); doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS200"):
+    //    jdk.net.LinuxSocketOptions, derived over these (test/jrt/derive.ae) --
+
+    /**
+     * LinuxSocketOptions.c's handleError: ENOPROTOOPT an UnsupportedOperationException "unsupported socket
+     * option", else JNU_ThrowByNameWithLastError's SocketException (the error's text, else detail).
+     */
+    public static RuntimeException extUnsupported(int errno) {
+        return errno == ENOPROTOOPT ? new UnsupportedOperationException("unsupported socket option") : null;
+    }
+
+    /** The SocketException of handleError (when extUnsupported is null). */
+    public static SocketException extException(int errno, String detail) {
+        String text = text(errno);
+        return new SocketException(text == null || text.isEmpty() ? detail : text);
+    }
+
+    /** getsockopt(2) of an int at level, opt: 0 with the value in value[0], or THROWN. */
+    public static native int extGetInt0(int fd, int level, int opt, int[] value, int[] err);
+
+    /** setsockopt(2) of the int value at level, opt: 0 or THROWN. */
+    public static native int extSetInt0(int fd, int level, int opt, int value, int[] err);
+
+    /**
+     * socketOptionSupported: whether a TCP socket (IPv6, else IPv4) answers getsockopt(2) of level, opt
+     * with anything but ENOPROTOOPT (false when no socket can be made).
+     */
+    public static native boolean extSupported0(int level, int opt);
+
+    /** SO_PEERCRED: 0 with the peer's uid and gid in ids[0], ids[1], or THROWN. */
+    public static native int extPeerCred0(int fd, int[] ids, int[] err);
 }
