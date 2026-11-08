@@ -31,6 +31,10 @@
 ;; State
 
 (def ^:dynamic *src* "")
+;; CX12 (arbace.repr.cpp.diag): an atom of the last node with a position analyzed, and the handler of an entry's refusal
+;; ((fn [ex node]) called with the refusal and that node, the analysis going on with the next entry); nil: off
+(def ^:dynamic *at* nil)
+(def ^:dynamic *on-refusal* nil)
 (def ^:dynamic *fns* nil)    ; atom {id fn}
 (def ^:dynamic *vars* nil)   ; atom {id var}
 (def ^:dynamic *ids* nil)    ; atom counter
@@ -2543,6 +2547,7 @@
 (defn analyze
   "The typed expression of the tree node `n` in the context `ctx` ({:scope :fn :this-type ...})."
   [ctx n]
+  (when-let [a *at*] (when (:range n) (reset! a n)))
   (case (:kind n)
     "IntegerLiteral" (let [t (int-type-of (get-in n [:type :qualType]))] {:op :int :v (let [v (bigint (:value n))] (if (> v Long/MAX_VALUE) (long (- v 18446744073709551616N)) (long v))) :ty t :cat :pr})
     "CharacterLiteral" {:op :int :v (long (:value n)) :ty (int-type-of (get-in n [:type :qualType] "char")) :cat :pr}
@@ -2922,6 +2927,7 @@
 (defn stmt
   "The typed statement of a tree node."
   [ctx n]
+  (when-let [a *at*] (when (:range n) (reset! a n)))
   (case (:kind n)
     nil {:s :null}
     "CompoundStmt" (let [c (block-ctx ctx)] {:s :block :items (vec (mapcat #(let [x (stmt c %)] (if (vector? x) x [x])) (kids n)))})
@@ -3315,7 +3321,13 @@ protected:
                           :fn (let [f (fnd id)]
                                 (when-not (or (:lazy f) (:analyzed f))
                                   (cond
-                                    (and (:body f) (not (:tbody f))) (do (upd-fn! id assoc :analyzed true) (analyze-fn! id))
+                                    (and (:body f) (not (:tbody f)))
+                                    (do (upd-fn! id assoc :analyzed true)
+                                        (if-let [h *on-refusal*]
+                                          (try (analyze-fn! id)
+                                               (catch arbace.lang.ExceptionInfo e
+                                                 (if (:codegen/refused (ex-data e)) (h e (some-> *at* deref)) (throw e))))
+                                          (analyze-fn! id)))
                                     ;; (a closure's implicit members are analyzed, or deleted, where the lambda is)
                                     (and (or (:implicit f) (:defaulted f)) (not (:params f)) (not (:deleted f)))
                                     (do (upd-fn! id assoc :analyzed true)

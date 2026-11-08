@@ -10,6 +10,7 @@
   A diagnostic is a map {:line :col :kind :msg :rule}: :kind :error (the verdict's), :rule the check that made it
   (:pp, :syntax, or a Sema rule's keyword)."
   (:require [arbace.repr.cpp.native :as native]
+            [arbace.repr.cpp.parse :as ps]
             [arbace.string :as str]))
 
 (set! *warn-on-reflection* true)
@@ -256,6 +257,56 @@
       (decls! (java.util.HashMap.) :ns (java.util.HashMap.) (:nodes u) ""))
     (vec out)))
 
+;; The code generator's Sema (arbace.cpp.sema, doc/cpp/CODEGEN.md §3: lookup, expressions' types, overload resolution,
+;; initialization) run over the unit as a checker: each function's body analyzed in turn (sema's *on-refusal*), a refusal
+;; that is one of Sema's own errors -- the program ill-formed, not the slice exceeded -- a diagnostic at the node the
+;; analysis was at (its line), the function's later errors not looked for (the analysis stops at its first). Each rule:
+;; [class message-regex clang's diagnostic].
+(def sema-rules
+  [[:overload #"^codegen: no viable function among [1-9]" "no matching function for call"]
+   [:overload #"^codegen: ambiguous call" "call is ambiguous"]
+   [:init #"^codegen: no default constructor for " "no matching constructor for initialization"]
+   [:init #"^codegen: a non-const reference to a temporary" "non-const lvalue reference cannot bind to a temporary"]
+   [:init #"^codegen: too many initializers" "excess elements in initializer"]
+   [:init #"^codegen: several values for a scalar" "excess elements in scalar initializer"]
+   [:assign #"^codegen: assignment to an rvalue" "expression is not assignable"]
+   [:assign #"^codegen: no operator=" "no viable overloaded '='"]
+   [:member #"^codegen: no member " "no member named in the class"]
+   [:member #"^codegen: member of a non-class" "member reference base type is not a structure or union"]
+   [:call #"^codegen: missing argument" "too few arguments to function call"]
+   [:call #"^codegen: call of a non-function" "called object type is not a function or function pointer"]
+   [:deref #"^codegen: \* of a non-pointer" "indirection requires pointer operand"]])
+
+(def ^:dynamic *sema-log* nil)
+
+(defn sema-errors
+  "The code generator's Sema's errors over the unit `u` (parsed with the headers in full) of the text `src`."
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        sema (requiring-resolve 'arbace.cpp.sema/analyze-program)
+        at-var (requiring-resolve 'arbace.cpp.sema/*at*)
+        on-var (requiring-resolve 'arbace.cpp.sema/*on-refusal*)
+        dts (requiring-resolve 'arbace.cpp.sema/*decltypes*)
+        mn (requiring-resolve 'arbace.cpp.sema/*main-name*)
+        md (requiring-resolve 'arbace.cpp.sema/*main-dir*)
+        _ (require 'arbace.cpp.template)
+        h (fn [e n]
+            (let [cls (:codegen/refused (ex-data e)) m (str (ex-message e))
+                  rule (some (fn [[c re d]] (when (and (= c cls) (re-find re m)) d)) sema-rules)
+                  off (get-in n [:range :begin :offset])]
+              (when *sema-log* (swap! *sema-log* conj [cls (subs m 0 (min 120 (count m))) (boolean rule)]))
+              (when (and rule off (= main (get-in n [:range :begin :file])))
+                (let [[l c] (line-col starts (long off))]
+                  (.add out {:line l :col c :kind :error :rule :sema :msg (str rule " (" (subs m 9 (min 100 (count m))) ")")})))))]
+    (try
+      (with-bindings {at-var (atom nil) on-var h dts (:decltypes u) mn main md (:dir u)}
+        (sema (:nodes u) (:root u) src))
+      (catch arbace.lang.ExceptionInfo e
+        (when *sema-log* (swap! *sema-log* conj [(or (:codegen/refused (ex-data e)) :other) (str "unit: " (subs (str (ex-message e)) 0 (min 100 (count (str (ex-message e))))))  false])))
+      (catch Throwable e
+        (when *sema-log* (swap! *sema-log* conj [:crash (str "unit: " e) false]))))
+    (vec out)))
+
 (def checks (atom [undeclared redefinitions]))
 
 (defn- pp-diag
@@ -270,7 +321,9 @@
   options `args`: {:diags [...] :other n (errors outside the main file) :declines n} or {:refused why :message m}."
   [^String path ^String main ^String std args]
   (try
-    (let [u (native/parse-file path main std args)
+    (let [sema? (not= "0" (System/getenv "REPR_CPP_DIAG_SEMA"))
+          u (assoc (binding [ps/*full-headers* sema?] (native/parse-file path main std args))
+                   :dir (.getParent (.getAbsoluteFile (java.io.File. path))))
           src (latin1 path)
           starts (line-starts src)
           pps (keep #(pp-diag main (str %)) (:pp-errors u))
@@ -279,7 +332,9 @@
                     :let [[l c] (line-col starts (long off))]]
                 {:line l :col c :kind :error :rule :syntax
                  :msg (str (str/replace (str why) #"^(statement|declaration): " "") " (at '" tok "')")})
-          sema (mapcat (fn [f] (f u starts src main)) @checks)
+          sema (concat (mapcat (fn [f] (f u starts src main)) @checks)
+                       ;; (a unit the parser declined a construct of is not analyzed: the code generator's refusal)
+                       (when (and sema? (zero? (long (:declines u 0)))) (sema-errors u starts src main)))
           ds (->> (concat pps syn sema) (sort-by (juxt :line :col)) vec)]
       {:diags ds :other other :declines (:declines u)})
     (catch arbace.lang.ExceptionInfo e
