@@ -211,3 +211,55 @@ until it is). The host packages added for it, by the user's leave: `openssl-dev`
 
 It is a VM-local build in `.tmp/`, not committed: references it gives are VM-recorded, so under the records rule they
 serve the 3.15 series' checks on the VM; the record itself is the main host's, from its own 3.15.2 build of the same pin.
+
+## As built: 236, the reader for 3.15 (proposal P2, 2026-11-08, the Mac VM)
+
+The reader reads Python 3.15 behind one switch, `REPR_PYTHON_VERSION` (3.14 the default, 3.15), and 3.14 reads as
+before: the 3.14 checks' samples print the same text before and after (run, below).
+
+- **The switch**: `arbace.repr.python.lex/*minor*` (14, or 15 when `REPR_PYTHON_VERSION=3.15`) selects the generated
+  parser (`native/grammar`: `arbace.repr.python.parser` or `parser315`, the second loaded only when asked, by
+  `requiring-resolve`), the ASDL tables astjson writes by, `_feature_version`'s current minor, and the lexer's 3.15
+  message. `bin/repr-python` under `REPR_PYTHON_VERSION=3.15` takes the pin `:cpython-3.15.2` (new in
+  `test/python/corpora.edn`: no corpus of its own; a corpus of `:cpython-3.14.10` is read at the same paths of 3.15.2's
+  tree), the 3.15.2 oracle live (`REPR_PYTHON_ORACLE_315`, default the main checkout's `.tmp/oracle315/...`, first in
+  PATH as `python3`; the records stay 3.14's: any other `REPR_PYTHON_ORACLE` is refused), the helper
+  `tools/pydump/pydump315.py`, the known and results files `*-315.edn`, the work dirs `.tmp/repr-python/*-315`; its verbs
+  `pins --fetch|--check`, `pegen`, `spec-check`, `read`, `print`, `roundtrip` (no `--record`), `lex-check`,
+  `parse-check`, `ast-check`; the rest refuse.
+- **parser315.ae**: `bin/repr-python pegen` under 3.15 (pegen.ae takes the namespace from the output's name and the
+  release from `Include/patchlevel.h`; parser.ae regenerates byte for byte). Nothing in pegen's translator needed
+  changing: `lazy ? 1 : 0`, the `memo` on `import_stmt`, the new `invalid_*` rules all translate as 3.14's did.
+- **The helpers** (peg.ae, ported from 3.15.2's `action_helpers.c`): `checked-from-import` (`lazy from __future__`
+  refused, barry_as_FLUFL's flag, `is_lazy`), `warn-relative-import-of-lazy` (the SyntaxWarning of `from . lazy import`,
+  its error under an "error" filter as `_PyErr_RaiseSyntaxError` makes it: UTF-8 columns plus one, no text),
+  `raise-error-for-missing-comma` (a multi-line left side pointed at on its last line). The lexer (lex.ae): `f-string:
+  expecting '}' to close '{' on line N`. The `module=` argument of 3.15's compile() (warning filters by module) is not
+  the reader's: P3, with compile().
+- **The forms**: `is_lazy` is `:lazy true` (left out at 0; 3.14's trees have no such field), `DictComp` without a value
+  `(dict-comp KEY nil [GEN...])`, a starred element of a comprehension `(starred x)` as its element: native.ae's writer,
+  `tools/pydump/pydump315.py` (a subclass of pydump.py's Writer: pydump.py is unchanged, the 3.14 records are keyed by
+  its digest), print.ae (`lazy import`, `lazy from`, `{**d for ...}`), convert.ae unchanged (generic). doc/python/SPEC.md
+  §5.2, §8, §9, §13 (the fields marked `(3.15)`), `forms-3.15` blocks; `tools/pydump/spec_check.py` requires a marked
+  field of 3.15's Python.asdl and leaves it out of 3.14's, and parses the `forms-3.15` examples on a 3.15 oracle only.
+  `tools/pyi/asdl_table.py` names the tree's release in its header (3.14.10's table regenerates byte for byte; 3.15's
+  differs by the three fields; pyi's committed table stays 3.14's until P3).
+
+Counts against the 3.15.2 oracle (run, the VM; before: the base 54e77ba65's reader on the same references):
+
+| corpus (3.15.2's) | files | before: equal / differ | after: equal / differ / refused |
+|---|---:|---|---|
+| stdlib (`Lib` less `Lib/test`, 758) | 758 | 731 / 27 | 758 / 0 / 0 |
+| syntax-errors (syntax_cases.py over 3.15.2's Lib/test) | 935 | 846 / 87 (2 refused) | 933 / 0 / 2 (`:charset`) |
+| lex-errors | 62 | 62 / 0 | 62 / 0 / 0 |
+| samples | 6 | 6 / 0 | 6 / 0 / 0 |
+| lib-test, a sample (35 files with lazy imports, 1 in 25, the grammar's tests) | 99 | 66 / 33 | 98 / 1 (`test_fstring.py`, the helper's, also on 3.14) / 0 |
+
+The same corpora in mode `--full`, lex-check over stdlib (758 equal) and the lib-test sample (99 equal), the mutants,
+`roundtrip` and `roundtrip --text` over the 30 lazy files (levels 1-4 all 30; level 5 29, `webbrowser.py`'s marshal
+depends on what the helper's process compiled before it) and ast-check (the same 1 and 3 warning-prefix differences as
+3.14's) were run; every negative control failed as it must. The known and results files of 3.15 are the main host's
+to record (`REPR_PYTHON_VERSION=3.15 bin/repr-python parse-check --record ...`). Remaining for P3 and P7: the `module=`
+parameter, the whole Lib/test, `test_fstring.py`'s debug text (pydump.py keeps a comment inside the expression's span,
+3.14 and 3.15 alike), the level 5 helper determinism, and the embedding of parser315.ae (embedded with repr/python since
+W2; loaded only under 3.15).
