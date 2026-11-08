@@ -236,7 +236,9 @@ code. Three kinds of things live here:
   (the collector's traversal, after `rustc_monomorphize/src/collector.rs`) and `tools/rsdump/mirdata.rs` (the helper's `mir`, `census` and
   `iface` modes, walking rustc_middle's `Body` as `pretty.rs` does) port rustc 1.99.1, the same revision and sources as above, by
   hand on 2026-11-05 (RF1-RF3, doc/rust/FRONTEND-SURVEY.md, "As built: RF1-RF3 (trial)"; LICENSE.md names the files; MIT OR
-  Apache-2.0); evaluated from the checkout, not embedded, out of `gate_key` (RFS13).
+  Apache-2.0); evaluated from the checkout, not embedded, out of `gate_key` (RFS13). On 2026-11-08 (RFP23 (b)) `codegen.ae` gained
+  `intrinsic.rs`' `volatile_load`/`volatile_store` (and the unaligned ones) and `rustc_codegen_llvm/src/consts.rs`' `codegen_static` for a
+  static whose bytes the allocation carries, the same revision.
   `arbace/rust/front/expand.ae` with `expand_format.ae` and `expand_derive.ae` (macro expansion: macro_rules! after
   `rustc_expand/src/mbe/`, the builtins after `rustc_builtin_macros/src/{format,assert,edition_panic,source_util,concat,cfg}.rs` and
   `rustc_parse_format`, the derives after `rustc_builtin_macros/src/deriving/`, cfg after `rustc_expand/src/config.rs`),

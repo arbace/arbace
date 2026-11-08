@@ -1919,3 +1919,116 @@ later phase (RemoveNoopLandingPads, AddCallGuards) or in a shim is judged at its
   definers' hidden types are not substituted). Options: (a) **typeck's opaque type carries its OpaqueTy def id (collect already
   makes the def), its hidden type recorded by the defining body's typeck (`TypeckResults::concrete_opaque_types`)**; (b) keep the
   structural match. *Recommended: (a)*: it is rustc's representation and typeck-check judges it.
+
+## As built: RFP23 (b), RFP24 (b) (2026-11-08)
+
+Branch `rust-rf10b` (continued from `7c7fe2d63`), the user's decision of 2026-11-08: RFP23 (b) first (the run's symbols, instances and
+layouts recorded as packs, `run-built` needing no helper at check time), then RFP24 (b) with RFP27 (a) (`build-check` over
+`test/rust/front/a*.rs` an essential step, its oracle texts pinned, `capture-check` in it). RFP23 (c) (the ports) is next; RFP28-RFP33
+await the user and were not built.
+
+### The packs (`bin/lib/repr-rust/front-records.bash`)
+
+Four packs in the oracle-records format (doc/ORACLE-RECORDS-SURVEY.md §3.2, `test/oracle-records/oracle.bash`: a deterministic tar.xz
+in the store `.tmp/oracle-packs/`, its pin `test/rust/records/NAME.sha256` and manifest `NAME.tsv` committed), one kind each, made by hand
+on the host with rustc and the helper (`bin/rust-front records make [KIND...]`, ORS5 (a)), `:rustc b789fd432132e37d` (rustc 1.99.1,
+Alpine r0), the helper at `6378914b5a9b...` (`tools/rsdump`'s source digest):
+
+| Pack | What | Members | Raw | xz | SHA-256 |
+|---|---|---|---|---|---|
+| `rust-front-std` | the helper's `std-names.edn` and `std-iface.edn` (RFS4, RFP26 (a)), their digests `test/rust/front/std-*.sha256`'s (checked at the make) | 2 | 18.2 MB | 514,512 | `a0375288...` |
+| `rust-front-built` | rustc's MIR after mir_built and after each of the 21 passes to runtime MIR (`-Zdump-mir`, the `.after.mir` files: the judge reads no `.before.mir`, RFP31 (a)'s half) of a1-a7 | 1,108 | 0.97 MB | 24,580 | `9e3e5586...` |
+| `rust-front-captures` | the helper's `--captures` of `test/rust/synthetic/closures.rs` and the seven `test/rust/front/` programs with a closure (RFP27 (a)) | 8 | 2 KB | 840 | `bc8cd109...` |
+| `rust-front-mono` | `run-built`'s record of a1-a7 (RFP23 (b)): the helper's `--mono-mir` dump (each mono item's optimized body, its symbol and instance, std's and core's resolved callees, the layouts) and rustc's executable's exit status and output | 21 | 145 KB | 11,108 | `b44d85ab...` |
+
+The packs total 551 KB in the store; the committed side is the four pins and manifests, 208 KB (the built pack's manifest, one line a
+dump, 202 KB of it). An entry's key: the kind, the program's path and the SHA-256 of its bytes, the helper's source digest
+(`bin/repr-rust`'s `helper_hash`), the flags (`build-oracles`', `run-built`'s and `capture-oracles`' as they were) and, for `built`, the
+passes dumped; the toolchain's identity is the manifest's header's, not the key's, so the check computes keys with no rustc. A
+program the check needs whose key the manifest lacks is UNRECORDED, one whose key moved (the program, the helper's source or the
+flags changed) STALE: either fails (`rfr_stage`, checked: a2.rs with a comment appended is STALE, a missing program UNRECORDED). The
+mono record's one path, the checkout's in the locations' file names, is written `@ROOT@/` and put back at the read.
+`bin/rust-front records verify [KIND...] [--sample N]` makes every entry afresh into `.tmp/rust-front/records/verify/` and compares it
+member by member (ORS6 (a)'s verdict: under the identity the record names a difference fails, under another rustc it is reported),
+then each kind's crossed pair (ORS7 (a): the first program afresh against the second's member; std: the names against the
+interface), which must differ. Run here: 1, 7, 8 and 7 entries equal, the four controls differing. Kinds `rust front-std`,
+`front-built`, `front-captures`, `front-mono` in `test/oracle-records/kinds.edn` (`bin/oracle-records list`, `pins`, `verify rust`).
+
+### The readers
+
+- `bin/rust-front build-check --records [NAME...]` and `capture-check --records [NAME...]`: std's data and the captures linked from the
+  staged packs into `.tmp/rust-front/records/front/`, rustc's MIR the unpacked `rust-front-built`; no helper.
+- `bin/rust-front run-built [--records] [FILE...]` (default a1-a7): the record from `rust-front-mono` when the program is recorded at
+  its key; `--records` only from it (else the program fails); `RF_LIVE=1`, or a program not recorded, made live by the helper (by
+  hand, the oracle's way). The lowered C now runs on ci (`bin/ci run --std gnu23`: repr/c, ci's checker and builder, musl's forms,
+  cirun) instead of gcc -O0 (`RF10_CC=gcc` by hand), so the run needs no C compiler either; rustc, rustdoc, cargo, gcc, cc and clang
+  are stubs exiting 99 first on PATH (`RF10_STUBS=0`: not).
+- a6 runs now (it was left out: codegen refused it): `arbace.rust.back.codegen` takes `volatile_store` and `volatile_load` (and the
+  unaligned ones) as rustc_codegen_llvm's `intrinsic.rs` lowers them (`store volatile`/`load volatile` of the immediate, the
+  pointee's alignment, 1 unaligned), and a static the allocation's data defines (rustc's `codegen_static`: an internal global of its
+  bytes); `arbace.rust.front.build-run` turns our bodies' `(static-ptr ID)` into rustc's `(ptr allocS<ID> 0 8)` with the record's
+  static (its symbol, by the static's name) and our own evaluation of its initializer (the bytes of our allocation's text; writable,
+  the record not saying `mut`), and our `(raw-str ID)` and `(raw-bytes ID)` into rustc's `(slice allocB<ID> LEN)` and pointer with
+  an immutable memory allocation of their bytes (the record's own bodies keep theirs).
+
+### The essential step (RFP24 (b), RFP27 (a))
+
+`bin/rust-front essential` (`make rust-front-essential`): with rustc, rustdoc, cargo, gcc, cc and clang stubbed first on PATH,
+`build-check --records` (a1-a7), `capture-check --records` (closures and the seven `test/rust/front/` programs), `bin/ci musl ensure` (ci's musl forms
+current), `run-built --records` (a1-a7) and the run's negative control (`RF10_CONTROL=1` on a1: every Add a Sub, its status must differ from the
+record's); the three summary lines held to `test/rust/front/essential-known.txt` line for line (`--record` rewrites it, by hand), the
+crossed pairs of build-check (a body's text against another body's) and capture-check (a closure's line against another program's)
+and the run control differing (`test/rust/front/controls.edn`), the stubs' log empty. The gate step `rust-front-essential`
+(`test/gate/steps.edn`, chain `rust-essential` after `rsi-judge-test`; `:mem-gib 2`, `:hosts [:stage0 :go]`, the four pins and musl's
+`test/c/corpora.edn`, inputs `:rust :rust-helper :c :c-run` with `bin/rust-front` and `test/oracle-records/`; its control in
+`:controls`), and the oracle tier's `rust-front-records-verify` (`bin/repr-rust helper && bin/rust-front records verify`, `:phase
+:oracle`, `:hosts [:stage0 :rustc]`, its crossed pairs waived as the verify's own). `gate.crops check`: 0 problems; `bin/gate --plan`:
+`run rust-front-essential ... never passed`; `bin/gate --oracle --plan`: `run rust-front-records-verify`.
+RFP30 (the pass judge in the step) awaits the user: the step judges built MIR; the pack already holds every pass's dumps, so
+RFP30 (a) is the command's `BUILD_PASS=SimplifyCfg-pre-optimizations` and a line of the known file.
+
+### Results
+
+- `bin/rust-front essential` (and `--record`, which wrote `test/rust/front/essential-known.txt`), main's stage 0, with the six tools
+  stubbed: **build-check 54 of 54 bodies equal to rustc's built MIR byte for byte, 7 programs whole; capture-check 30 of 31 closures
+  equal; run-built 7 of 7 programs from Arbace's MIR give rustc's status and output** (a1-a7: 5, 212, 41, 17, 45, 6, 21; a6 newly), the
+  three controls differing (the run control a1: 156 for 5), the stubs' log empty; 6 min 21 s (`--record`) and 8 min 36 s (the check against the known file, with `bin/ci musl ensure`), peak
+  1.44 GB (`GOMEMLIMIT=1500MiB`):
+  build-check 54 s and 1.36 GB, capture-check 65 s and 1.38 GB, each run about 45 s (most of it ci reading the lowered C with
+  musl's forms). The one closure not equal is `expand1`'s `(|| $b)()` inside a `macro_rules!` body: rustc's span is the definition
+  site's (41:21-41:28), ours none (the closure's tokens joined across the macro's definition and its call site), so the closure has no
+  line; RFP34 below.
+- `RF10_CC=gcc bin/rust-front run-built --records`: the same 7 of 7 with gcc -O0 (3 min 18 s), so ci and gcc agree on the seven.
+- `bin/rust-front records verify`: every entry equal, the four crossed pairs differing; `bin/oracle-records pins`: the four packs in the
+  store with their members, the tampered control refused.
+- `gate.crops check`: 0 problems. `bin/crops-score --judge --strict`: Rust 75.0 / 95.8 / 80.0 unchanged (maturity's check families are
+  the REAP row's, 3 of 3 with controls, and no REAP cell reads the front end's checks; and the eval stage stays 0.5: every run still consumes the mono record's
+  symbols, instances, layouts and core's bodies, `test/crops/independence.edn`'s Rust eval and judge facts now name the step).
+
+### What remains
+
+- RFP23 (c), decided: the ports that take the mono record off the run: the v0 symbols (`rustc_symbol_mangling/src/v0.rs`, with
+  the crate hash RFP29 names), instance resolution (`Instance::resolve` and the collector's mono items, RF3's
+  `arbace.rust.back.collect` grown to the program's own items), and the layouts (`rustc_abi`'s `layout_of` for the samples' types,
+  started for scalars and pairs in `build_run.ae`). Then the run takes from the pack only core's bodies, the part RF12 removes.
+- RFP28-RFP33 await the user; the expansion's macro-site spans (RFP34).
+
+### Proposed (RFP23 (b), RFP24 (b))
+
+- **RFP34 Closures in `macro_rules!` bodies.** `expand1`'s closure `(|| $b)()` has rustc's span at the macro's definition (Span::to of
+  the closure's first and last tokens, both the definition's once `$b` is wrapped); our expansion joins a definition-site token with a
+  call-site one and the closure gets no root-file span, so capture-check cannot name it (1 of 31 in the step, 1 of 174 overall).
+  Options: (a) **port `Span::to`'s rule for tokens of different contexts (the outer expansion's span, `rustc_span/src/lib.rs`
+  `Span::to` with `find_ancestor_in_same_ctxt`) in RF4's expansion, so the closure's span is the definition site's**; (b) keep it a
+  known line of `essential-known.txt` until RF4's derive spans are taken up. *Recommended: (a)*, with RF4's derive spans (the same
+  machinery): about half a day, judged by capture-check and expand-check.
+- **RFP35 The packs' key and the helper.** The key holds the helper's whole source digest (as Haskell's and Rust's other records do), so
+  any change to `tools/rsdump` (a new mode for another check) makes all four packs STALE and fails `rust-front-essential` until they
+  are made again by hand on the host with rustc (30 s). Options: (a) **as built: the whole helper's digest**; (b) the digest of the
+  modes' sources only (`front.rs`, `mirdata.rs`, the driver), a change elsewhere keeping the packs; (c) no helper digest, freshness left
+  to the oracle tier's verify. *Recommended: (a)*: the records are the helper's outputs, a re-make costs 30 s, and (b) would trust a
+  hand-kept list of which files a mode reads.
+- **RFP36 The essential step's runs.** The seven runs are 5 to 7 of the step's 6.5 to 8.5 minutes (ci reads each program's lowered C with musl's
+  forms). Options: (a) **as built: all seven in the essential step**; (b) a1 and a6 (the scalar and the unwinding programs) in the
+  essential step, the seven in `--full`; (c) the runs batched into one ci session (`arbace.c.run nodes` over seven programs: one read of
+  musl's forms), about 2 minutes. *Recommended: (c) then (a)*: the same coverage at a third of the time; (b) if (c) waits.

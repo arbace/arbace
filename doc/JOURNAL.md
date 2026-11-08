@@ -1194,3 +1194,43 @@ so only the dataflow gives rustc's text); a structural hash for opaque types (ta
 Found on the way: a `swap!` whose update function swapped the same atom looped forever (Derefer, ElaborateBoxDerefs: now one
 `swap!` after the walk). Proposed: RFP30 (the pass judge in RFP24 (b)'s essential step), RFP31 (the oracles' size), RFP32 (std's
 function attributes), RFP33 (opaque types' identity).
+
+## 2026-11-08: RFP23 (b) and RFP24 (b) with RFP27 (a): the front end's oracle facts as packs, its essential step (branch `rust-rf10b`)
+
+The user's decision (2026-11-08): RFP23 (b) first, the run's symbols, instances and layouts recorded as packs so that `run-built`
+needs no helper at check time, then RFP24 (b), `build-check` over `test/rust/front/a*.rs` an essential gate step with its oracle texts
+pinned, and RFP27 (a), `capture-check` in it. doc/rust/FRONTEND-SURVEY.md, "As built: RFP23 (b), RFP24 (b)".
+
+What was done. `bin/lib/repr-rust/front-records.bash` (sourced by `bin/rust-front`, out of every key): four packs in the
+oracle-records format (doc/ORACLE-RECORDS-SURVEY.md §3.2, `test/oracle-records/oracle.bash`'s `oracle_make`, `oracle_unpack`), made
+by hand with the helper as rustc (`bin/rust-front records make`, 31 s; `:rustc b789fd432132e37d`, rustc 1.99.1 Alpine r0; helper
+`6378914b5a9b`): `rust-front-std` (std-names.edn and std-iface.edn, their digests `test/rust/front/std-*.sha256`'s; 514,512 bytes xz),
+`rust-front-built` (rustc's `.after.mir` dumps of a1-a7 after mir_built and each of the 21 passes, 1,108 members, 24,580 bytes),
+`rust-front-captures` (the closures program's and the seven test/rust/front programs' `--captures`, 840 bytes) and `rust-front-mono`
+(a1-a7's `--mono-mir` record with rustc's executable's status and output, the checkout's path written `@ROOT@`, 11,108 bytes); pins
+and manifests in `test/rust/records/`, the packs in the main checkout's `.tmp/oracle-packs/`. Keys: the kind, the program's path and
+bytes, the helper's source digest, the flags (and the passes); UNRECORDED and STALE fail (checked). `records verify` reruns every
+entry and each kind's crossed pair (all equal, the four controls differing); kinds `rust front-*` in `test/oracle-records/kinds.edn`.
+`build-check --records`, `capture-check --records` and `run-built [--records]` read the packs; `run-built` runs the lowered C on ci
+(`bin/ci run`) instead of gcc (`RF10_CC=gcc` by hand), so the run needs no C compiler either. a6 (the unwinding no_std sample) runs
+now: codegen ports `rustc_codegen_llvm`'s `volatile_store`/`volatile_load` and `codegen_static` (an internal global of a static's bytes),
+and `build-run` carries our bodies' static, string and byte-string allocations into the run (the static's symbol from the record by its
+name, its bytes our own evaluation). `bin/rust-front essential` (with rustc, rustdoc, cargo, gcc, cc and clang stubbed exiting 99):
+build-check 54 of 54 bodies, capture-check 30 of 31 closures, run-built 7 of 7 programs (statuses 5, 212, 41, 17, 45, 6, 21), the three
+controls differing, the stubs' log empty, held to `test/rust/front/essential-known.txt`; 6 min 21 s, 1.39 GB. The gate step
+`rust-front-essential` (essential, chain rust-essential, `:mem-gib 2`, `:hosts [:stage0 :go]`, the packs' pins, control
+`test/rust/front/controls.edn`) and the oracle tier's `rust-front-records-verify`; `gate.crops check` 0 problems, `bin/gate --plan` and
+`--oracle --plan` show them; `bin/crops-score --judge --strict` Rust unchanged (75.0 / 75.0 / 95.8 / 80.0: the eval stage stays 0.5,
+each run still consuming the mono record; `test/crops/independence.edn`'s Rust eval and judge facts name the step).
+
+Alternatives considered: the facts committed in the tree as plain text (`test/rust/records/essential/`, as Scheme's) instead of
+packs (rejected: std's interface is 18 MB raw; the brief asks the pack format); one pack for the four kinds (rejected: the kinds change
+at different times, std's with RFP26's regeneration, the dumps with the programs); keeping gcc for the run (rejected: ci removes the
+last host tool of the run, at about 45 s a program); taking a static's initializer from the helper (would need a helper change and a
+re-record of every pack: our own evaluation is used, as the run judges it). Found on the way: `bin/ci musl ensure` with
+`CI_MUSL_FORMS` pointing at the main checkout's forms cache deleted that cache when its key differed (this branch's repr/c is not
+main's) and began rereading it; stopped at once and reread in the worktree instead. The main checkout's `.tmp/ci-musl/forms` is left
+partial without its key: its next `bin/ci musl ensure` rereads it (`bin/ci check`, `bin/rsi check` and now `bin/rust-front essential` run ensure before
+reading the forms; `bin/ci run` alone does not). Proposed: RFP34 (closures
+in macro_rules! bodies: Span::to across contexts), RFP35 (the packs' key and the helper), RFP36 (the essential step's runs batched in one
+ci session).
