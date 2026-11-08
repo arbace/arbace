@@ -791,3 +791,39 @@ third of the concurrent tests, every twentieth other pass) 66 of 67, main's hsi 
 night's `bin/hsi check ... --record`: the testsuite's core 658 of 701 (652), the record 796 of 908; the divergences' edits and the night's
 commands in doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: HE9 on main (write-ahead)". HE9's 666 counted 11 programs whose references
 main's record-ref cannot build (the C includes GHC's `_stub.h`): HES83 proposed.
+
+## 2026-11-08: C++'s runtime by our route, libsupc++ (branch `cpp-runtime-own`, from next bd33e27cc; CP240 (c), CODEGEN.md G5c)
+
+By the user's decision CP240 (c) (2026-11-07): libsupc++'s 63 C++ units of `test/cpp/runtime/units.edn` (gcc 15.2.0's
+`libstdc++-v3/libsupc++` and `config/cpu/generic/atomicity_builtins/atomicity.h`, from the pinned tarball) compiled by
+Arbace's route (the native parser, `arbace.cpp.sema`, `arbace.cpp.codegen`) instead of clang's IR. cpp-90 had 41 of 62
+generating; a names level written first (each unit's external names against the oracle's IR from the pack
+`cpp-runtime-ir`, both ways) showed "generated" meant little: eleven `eh_*` units generated empty (a quoted `"unwind.h"`
+not found, the preprocessor's error ignored), no unit emitted its key function's vtable, type_info, D0 or C1/D1. The fixes,
+each a rule of the standard, the Itanium ABI or clang's -O0 code generation as its IR shows it (doc/cpp/CODEGEN.md G5c.1's
+table): using-directive cycles, restrict references, the `__atomic` builtins, the bit builtins, `__builtin_offsetof`,
+const-int's casts and unsigned compares, preprocessor errors fatal, typedef names for linkage, GNU's `mode`, `used`,
+`noreturn` and `aligned` (on a class), `thread_local`, qualified definitions of extern variables, a qualified member's body
+looked up in its namespace, key functions (vtable, VTT, type_info strong where defined), C1/D1 and D0 of defined
+constructors and destructors, out-of-line `= default`, the fundamental types' type_info, internal linkage of unnamed
+namespaces' classes, no code after a terminator, `__cxa_end_catch` an invoke when it may throw (terminate pads while
+unwinding), `__cxa_guard_abort`, `__cxa_bad_typeid`, a static member function template's call in a template argument and
+its mangling. Three sema gaps of the branch's base on today's tree were fixed on the way (the native parser's
+CXXDependentScopeMemberExpr, a reference dynamic_cast's value category, `:delegatingInit`: 11 codegen samples failed at
+bd33e27cc).
+
+`bin/cppi runtime-build` takes `CPPI_RUNTIME_ROUTE=ours|auto` (`CPPI_RUNTIME_OURS`, default `libsupc++/`), the oracle's IR
+kept as `clang.ll`, the names level in `runtime-judge`, the route in the runtime's key; `bin/cppi runtime-swap` (new) proves
+the runtime by our route unit by unit: codegen-check's programs (by clang's IR and by ours) linked with the runtime built
+from clang's IR, then with each unit by our route alone swapped in, then all of them; every status and stdout the
+baseline's. It found what the names level could not: `__cxa_refcounted_exception` 8 bytes short (GNU's `aligned` on
+`_Unwind_Exception` ignored), harmless while every unit agreed, a crash when eh_ptr.cc by ours met eh_throw.cc by clang's.
+Results (doc/cpp/CODEGEN.md G5c.4): 62 of 63 units by our route, names equal; runtime-build 198 of 198 with 62 by our route, also from the records with clang, gcc and the LLVM tools stubbed (their log empty); runtime-swap: no run of 102 programs changes with any one unit swapped, none of 298 with all; codegen-check on that runtime 148 of 149 (hdr-vector known); native-check samples 9 of 9, native 1 of 1.
+
+Not by our route: `eh_alloc.cc` (C++17's `std::pair<std::string_view, int>` constructors: their enable_if conditions still
+false; it keeps the oracle's IR under `auto`) and libstdc++-v3/src's 136 units (P22). Sources: the Itanium C++ ABI (§2.5,
+§2.9.4-§2.9.5, §3.3.2-§3.3.3, §5.1, §5.2.3), ISO/IEC 14882:2024, GCC's manual (the attributes), libsupc++'s sources read as
+the program compiled; clang's IR (the packs) as the oracle; no clang code ported. Alternatives considered: proving by the
+IR's text against clang's (rejected: the routes' IR differs in names of temporaries and in clang's attributes everywhere;
+the names level and the runs are the contract); the swap over every program for every unit (18,000 links; the per-unit
+runs take the 102 programs (51 samples by both routes) of exceptions, RTTI, guards, allocation and headers, and the whole swap every program).

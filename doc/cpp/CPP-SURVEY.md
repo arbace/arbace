@@ -3340,3 +3340,23 @@ programs, but the runtime is still clang's IR, so 0.5 until CP240 (c)) and the p
 Two throwaway commands wrote to `/dev/null` (a `diff` of mm_malloc.h's candidates and a `head` of a refusal file), against the day's
 rules. Scratch in the worktree's `.tmp/`: `gcc/` (the tarball's extracted members), `ct/` (the first tree), `cpp-target/` (the trees by
 key), `rt-rec/` (the runtime from the packs), `lower-ess/`, `gen-ess/`, `ppcheck*.log`, `pp*.strace`, `stubs/`.
+
+## As built: G5c (2026-11-08)
+
+On the branch `cpp-runtime-own` from next bd33e27cc, by the user's CP240 (c): libsupc++'s units by our route (the native
+parser, Sema and the code generator), doc/cpp/CODEGEN.md "G5c. The runtime by our route". In short: 62 of libsupc++'s 63 C++
+units generate (`eh_alloc.cc` keeps the oracle's IR under `CPPI_RUNTIME_ROUTE=auto`), each defining exactly the oracle's external
+names; `CPPI_GCC=1 CPPI_RUNTIME_ROUTE=auto bin/cppi runtime-build` 198 of 198 with 62 by our route, and the same from the records
+with clang, gcc and the LLVM tools stubbed (their log empty); `bin/cppi runtime-swap` (new): each of the 62 units alone swapped
+into the runtime built from clang's IR changes no run of 102 programs, all 62 at once none of 298; codegen-check on that runtime
+148 of 149 (hdr-vector known). Independence unchanged in the checkout's facts (54.3) until the gate's runtime takes `auto`
+(CODEGEN.md P21); then eval and AOT 0.578 each, independence 57.5. Proposed there: P20 (clang's resource headers in the target
+tree, cpp-target's), P21 (the runtime's proof and route in the gate), P22 (libstdc++-v3/src by our route).
+
+### Slips, scratch
+
+One throwaway command wrote to `/dev/null` (a `sed -n ... > /dev/null` while cutting a sample), against the day's rules; and the
+disk was at 81% before the branch started (other worktrees), so bin/cppi's runs took `CPPI_DISK_MAX=82`; the branch's scratch is about 0.6 GB
+Scratch in the worktree's `.tmp/`: `cppi/gcc` (the tarball's members), `rt-clang`, `rt-ours2`, `rt-stub` (the
+runtimes), `cg-ours2` (codegen-check), `swap2` (runtime-swap), `rto/` (the units by gen-batch), `bb/` (the bisection's files),
+`stubs/`.
