@@ -1268,6 +1268,131 @@ import java.lang.module.ModuleDescriptor;
          ["return newThread(systemThreadGroup, runnable, name, daemon);" "return newThread(runnable, name, daemon);" 1]
          ["return newThread(userThreadGroup, runnable, name, daemon);" "return newThread(runnable, name, daemon);" 1]])])
 
+;; F27's JMX-2: javax.management.remote's connectors, java.management's and java.management.rmi's
+
+(def ^:private jmx2-why
+  ["Arbace (overlay/jdk, doc/classes/JAVA-DEFERRED-TRIAGE.md, \"As built: F27 (write-ahead)\", JMX-2; JCS284): jdk26u's"
+   "%s (src/%s/share/classes/%s"
+   "at https://github.com/openjdk/jdk26u baf63fb), derived by test/jrt/derive.ae (bin/jrt-convert derive):"
+   "%s; nothing else changed. jdk26u's text Copyright (c) Oracle and/or its affiliates, under the GNU General"
+   "Public License version 2 with the Classpath Exception (LICENSE.md); the derivation Copyright (c) the Arbace"
+   "authors; Eclipse Public License 1.0."])
+
+(defn- jmx2 [module rel why reps]
+  {:path rel
+   :from (str "src/" module "/share/classes/" rel)
+   :header (fn [] (header (-> jmx2-why
+                              (update 1 #(format % (-> rel (str/replace ".java" "") (str/replace "/" ".")) module rel))
+                              (update 3 #(format % why)))))
+   :ops reps})
+
+(def ^:private jmx2-thread-why
+  (str "the thread is made without a thread group, a stack size or jdk26u's choice not to inherit the inheritable thread"
+       " locals (jrt has no thread groups and no stack sizes: Thread(Runnable, String), as F24's ServerImpl's dispatcher)"))
+
+(def ^:private jmx2-provider-why
+  (str "the providers java.util.ServiceLoader would find (out of the Go build: no module layer, no META-INF/services)"
+       " are jdk.internal.jrt.JmxProviders', the closed world's (java.management.rmi's ClientProvider and"
+       " ServerProvider, which its module-info provides), with ServiceLoader.Provider's interface"))
+
+(def ^:private jmx2-derivations
+  [(jmx2 "java.management" "javax/management/remote/JMXConnectorFactory.java" jmx2-provider-why
+         [["import java.util.ServiceLoader;\nimport java.util.ServiceLoader.Provider;\n"
+           "import jdk.internal.jrt.JmxProviders.Provider;\n" 1]
+          ["        ServiceLoader<P> serviceLoader = loader == null
+                ? ServiceLoader.loadInstalled(providerClass)
+                : ServiceLoader.load(providerClass, loader);
+        Stream<Provider<P>> stream = serviceLoader.stream().filter(filter);"
+           "        Stream<Provider<P>> stream =
+                jdk.internal.jrt.JmxProviders.providers(providerClass, loader).filter(filter);" 1]])
+   (jmx2 "java.management" "javax/management/remote/JMXConnectorServerFactory.java" jmx2-provider-why
+         [["import java.util.ServiceLoader.Provider;\n" "import jdk.internal.jrt.JmxProviders.Provider;\n" 1]])
+   (jmx2 "java.management" "com/sun/jmx/remote/internal/ClientCommunicatorAdmin.java" jmx2-thread-why
+         [["            Thread t = new Thread(null,
+                                  checker,
+                                  \"JMX client heartbeat \" +  (++threadNo),
+                                  0,
+                                  false);"
+           "            Thread t = new Thread(checker,
+                                  \"JMX client heartbeat \" +  (++threadNo));" 1]])
+   (jmx2 "java.management" "com/sun/jmx/remote/internal/ServerCommunicatorAdmin.java" jmx2-thread-why
+         [["            final Thread t = new Thread(null,
+                                        timeoutTask,
+                                        \"JMX-Server-Admin-Timeout\",
+                                        0,
+                                        false);"
+           "            final Thread t = new Thread(timeoutTask,
+                                        \"JMX-Server-Admin-Timeout\");" 1]])
+   (jmx2 "java.management" "com/sun/jmx/remote/internal/ClientNotifForwarder.java" jmx2-thread-why
+         [["                thread = new Thread(
+                    null,
+                    ()-> {" "                thread = new Thread(
+                    ()-> {" 1]
+          ["                    \"ClientNotifForwarder-\" + ++threadId,
+                    0,
+                    false
+                );" "                    \"ClientNotifForwarder-\" + ++threadId
+                );" 1]])
+   (jmx2 "java.management.rmi" "javax/management/remote/rmi/RMIConnector.java"
+         (str "the RemoteRef class jdk26u fabricates from bytes in a module of its own (NoCallStackClassLoader,"
+              " jdk.internal.module.Modules: the call stack's class loading the RMI stub would otherwise see) is not made:"
+              " the Go build defines no class from bytes and its class loading reads no call stack, so the static"
+              " initializer takes jdk26u's own branch for its failure (no proxy reference constructor) and getConnection"
+              " returns the connection stub unwrapped, as jdk26u does when it cannot wrap it")
+         [["import java.lang.module.ModuleDescriptor;\n" "" 1]
+          ["import jdk.internal.module.Modules;\n" "" 1]
+          ["import static java.lang.module.ModuleDescriptor.Modifier.SYNTHETIC;\n" "" 1]
+          ["        final String pRefByteCodeString =" "        final String pRefByteCodeStringUnused =" 1]
+          ["        final byte[] pRefByteCode =
+                NoCallStackClassLoader.stringToBytes(pRefByteCodeString);
+" "" 1]
+          ["            Class<RMIConnector> thisClass = RMIConnector.class;
+            ClassLoader thisLoader = thisClass.getClassLoader();
+            ProtectionDomain thisProtectionDomain =
+                    thisClass.getProtectionDomain();
+
+            String proxyRefCName = ProxyRef.class.getName();
+            ClassLoader cl =
+                    new NoCallStackClassLoader(pRefClassName,
+                    pRefByteCode,
+                    new String[] { proxyRefCName },
+                    thisLoader,
+                    thisProtectionDomain);
+
+            Module jmxModule = ProxyRef.class.getModule();
+            Module rmiModule = RemoteRef.class.getModule();
+
+            String pkg = packageOf(pRefClassName);
+            assert pkg != null && pkg.length() > 0 &&
+                    !pkg.equals(packageOf(proxyRefCName));
+
+            ModuleDescriptor descriptor =
+                ModuleDescriptor.newModule(\"jdk.remoteref\", Set.of(SYNTHETIC))
+                    .packages(Set.of(pkg))
+                    .build();
+            Module m = Modules.defineModule(cl, descriptor, null);
+
+            // jdk.remoteref needs to read to java.base and jmxModule
+            Modules.addReads(m, Object.class.getModule());
+            Modules.addReads(m, jmxModule);
+            Modules.addReads(m, rmiModule);
+
+            // jdk.remoteref needs access to ProxyRef class
+            Modules.addExports(jmxModule, packageOf(proxyRefCName), m);
+
+            // java.management needs to instantiate the fabricated RemoteRef class
+            Modules.addReads(jmxModule, m);
+            Modules.addExports(m, pkg, jmxModule);
+
+            Class<?> c = cl.loadClass(pRefClassName);
+
+            constr = c.getConstructor(RemoteRef.class);"
+           "            // jrt: no class is defined from bytes (jdk26u's PRef in a module of its own): the
+            // connection stubs are not wrapped, as jdk26u's failure branch below leaves them
+            constr = null;" 1]
+          ["            if (c.getClass() == rmiConnectionImplStubClass)"
+           "            if (c.getClass() == rmiConnectionImplStubClass && proxyRefConstructor != null)" 1]])])
+
 (def derivations
   "Each derived overlay: :path below overlay/jdk/java.base, :from (jdk26u's file, relative to the checkout),
   :ops [[OLD NEW COUNT] or a function ...] (OLD a string or a regex, found exactly COUNT times, every one
@@ -1313,7 +1438,8 @@ import java.lang.module.ModuleDescriptor;
   jmx-derivations
   [accessflag-derivation]
   ta-derivations
-  rmi-derivations))
+  rmi-derivations
+  jmx2-derivations))
 
 ;; ---------------------------------------------------------------------------------------
 

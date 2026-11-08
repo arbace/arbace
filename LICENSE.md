@@ -820,6 +820,22 @@ covers what.
   records and `go/arbace/jrt/classdata.ae`'s natives are Arbace's own, under the Eclipse Public License 1.0. F13's
   overlays `LockInfo.java`, `MonitorInfo.java`, `MemoryUsage.java`, `javax/management/ObjectName.java` and
   `openmbean/CompositeData.java` are removed (jdk26u's in their place).
+- Java RMI (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F27 (write-ahead)"; recorded by the rule of B7): the derived
+  overlays `overlay/jdk/java.base/java/rmi/server/RMIClassLoader.java` and
+  `overlay/jdk/java.base/sun/rmi/{transport/GC,transport/DGCClient,runtime/Log,runtime/RuntimeUtil}.java` are jdk26u's files
+  of the same paths (https://github.com/openjdk/jdk26u at `baf63fb`, `src/java.rmi/share/classes/`) with the exact
+  replacements `test/jrt/derive.ae` makes, whose tables hold their replaced text (each file's header says so); and the
+  jdk26u sources the closure adds (`test/jrt/jrt_sources.ae`'s `rmi-sources`: 89 files of `src/java.rmi/share/classes`
+  and `src/java.base/share/classes/java/lang/NoSuchMethodError.java`) join `jdk/forms/` (the converted closure); likewise
+  JMX-2's, its connectors: the derived overlays `overlay/jdk/java.base/javax/management/remote/{JMXConnectorFactory,
+  JMXConnectorServerFactory}.java`, `com/sun/jmx/remote/internal/{ClientCommunicatorAdmin,ServerCommunicatorAdmin,
+  ClientNotifForwarder}.java` (`src/java.management/share/classes/`) and `javax/management/remote/rmi/RMIConnector.java`
+  (`src/java.management.rmi/share/classes/`), and `jmx-remote-sources`' 41 files of those two trees: Copyright
+  (c) Oracle and/or its affiliates, under the GNU General Public License version 2 with the Classpath Exception (text
+  below), the derivations Arbace's own; `go/arbace/jrt/rmi.ae` (GC.maxObjectInspectionAge's native, after librmi's
+  `GC.c`, written anew over Go's runtime/debug) and its test, `overlay/jdk/java.base/jdk/internal/jrt/JmxProviders.java` (the
+  providers java.management.rmi's module-info names), jrt's Thread context class loader (`go/arbace/jrt/thread.ae`)
+  and the throws records (`arbace/classes/annot.ae`) are Arbace's own, under the Eclipse Public License 1.0.
 - java.lang.management without JMX (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F13 (write-ahead)";
   recorded by the rule of B7): `overlay/jdk/java.base/java/lang/management/{ManagementFactory,ThreadInfo,LockInfo,MonitorInfo,MemoryUsage}.java`
   `overlay/jdk/java.base/sun/management/{ManagementFactoryHelper,VMManagementImpl}.java` and
