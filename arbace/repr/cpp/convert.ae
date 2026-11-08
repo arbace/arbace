@@ -69,9 +69,47 @@
   (when (> (long b) (long e)) (gap :text "a range that ends before it begins"))
   (subs ^String *src* (int b) (int e)))
 
+(defn- skip-ws ^long [^String s ^long j]
+  (loop [j j] (if (and (< j (.length s)) (Character/isWhitespace (.charAt s (int j)))) (recur (inc j)) j)))
+
+(defn- close-parens
+  "The offset past the `)` that closes `depth` open parentheses from offset j of s (string and character literals skipped), or
+  nil when the text ends first."
+  [^String s ^long j ^long depth]
+  (loop [k j d depth]
+    (if (>= k (.length s))
+      nil
+      (let [c (.charAt s (int k))]
+        (cond (or (= c \") (= c \'))
+              (recur (loop [i (inc k)] (cond (>= i (.length s)) i
+                                              (= \\ (.charAt s (int i))) (recur (+ i 2))
+                                              (= c (.charAt s (int i))) (inc i)
+                                              :else (recur (inc i))))
+                     d)
+              (= c \() (recur (inc k) (inc d))
+              (= c \)) (if (= d 1) (inc k) (recur (inc k) (dec d)))
+              :else (recur (inc k) d))))))
+
+(defn- unbalanced-opens
+  "CP265 (the user, 2026-11-08): the parentheses a macro's replacement list leaves open, its last definition in the main file
+  before offset `before` ([cpp.rescan]: an invocation whose expansion ends in `name(` takes the following source text as its
+  arguments, so the macro's extent runs on to the `)` that closes them: `#define a z(` then `a\\u{})`). 0 for a macro the main
+  file does not define (a header's: the shared preprocessor's expansion would know it) or one that balances."
+  ^long [^String s ^String name ^long before]
+  (let [m (re-matcher (re-pattern (str "(?m)^[ \\t]*#[ \\t]*define[ \\t]+" (java.util.regex.Pattern/quote name) "(\\([^)]*\\))?((?:[^\\n\\\\]|\\\\.)*(?:\\\\\\n(?:[^\\n\\\\]|\\\\.)*)*)"))
+                      (subs s 0 (int before)))
+        body (loop [b nil] (if (.find m) (recur (.group m 2)) b))]
+    (if-not body
+      0
+      (let [t (-> ^String body (str/replace #"\\\n" " ") (str/replace #"/\*.*?\*/" " ") (str/replace #"//.*" "")
+                  (str/replace #"\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'" "\"\""))
+            d (- (count (filter #(= \( %) t)) (count (filter #(= \) %) t)))]
+        (max 0 d)))))
+
 (defn macro-extent
   "A macro node's text in the main file: from its first token's expansion to its last's, an invocation's argument
-  list included (the expansion location is the macro's name: a ( after it opens the arguments)."
+  list included (the expansion location is the macro's name: a ( after it opens the arguments), and the arguments its
+  expansion's unbalanced `(` takes from the text after it (CP265, unbalanced-opens)."
   [n]
   (let [r (:range n) b (exp-loc (:begin r)) e (exp-loc (:end r))
         s ^String *src*]
@@ -86,8 +124,15 @@
                              (= \) (.charAt s (int k))) (if (= d 1) (inc k) (recur (inc k) (dec d)))
                              :else (recur (inc k) d)))
                      e0))
-                 e0)]
-        [(long (:offset b)) e1]))))
+                 e0)
+            ;; CP265: the macro named at the last token's expansion leaves parentheses open: the text up to their `)`
+            e2 (if (macro-loc? (:end r))
+                 (let [o (long (:offset e)) tl (long (:tokLen e))
+                       nm (when (<= (+ o tl) (.length s)) (subs s (int o) (int (+ o tl))))
+                       u (if (and nm (re-matches #"[A-Za-z_][A-Za-z_0-9]*" nm)) (unbalanced-opens s nm o) 0)]
+                   (or (when (pos? u) (close-parens s e1 u)) e1))
+                 e1)]
+        [(long (:offset b)) e2]))))
 (defn- ntext ^String [n] (when-let [[b e] (rng n)] (text-at b e)))
 
 (defn- semi-end
