@@ -1120,3 +1120,10 @@ before format_args! (rejected: the format machinery blocked most of the remainin
 first); capture analysis inside typeck replacing its closure-kind estimate (deferred: typeck-check depends on it and the port runs on
 the resolved results, as rustc's runs after the main typeck); allocations judged by content only (kept as a class apart, RFP25).
 Proposed: RFP25 (the allocations' ids), RFP26 (the helper's std interface facts), RFP27 (a gate step for the judges).
+
+## 2026-11-08: the user's decisions on RFP22-RFP24, recorded (branch `rust-rf10b`)
+
+RFP22 (a): RFP20's captures judged first, then RF10's slices 1-2 on the corpus, then slice 3; RFP23 (b) then (c): the run's symbols,
+instances and layouts as packs first, then ported; RFP24 (a): no Rust front-end gate step until RF11, (b) at RFP23 (b). The second
+slice (entry above) already followed RFP22 (a)'s order; recorded in doc/rust/FRONTEND-SURVEY.md, "Decided (2026-11-08, the user:
+RFP22-RFP24)"; RFP27 rewritten to ride with RFP24 (b). Next by that order: slice 3.
