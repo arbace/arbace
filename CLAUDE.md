@@ -323,6 +323,10 @@ Prior art:
     `test/oracle-records/`, `bin/oracle-records`; `bin/cppi record-ir` by hand, `CPPI_LIVE=1` live, no gcc unless `CPPI_GCC=1`), and the readers
     read libstdc++'s headers and gcc's include directory as `test/cpp/target.ae` makes them from the pinned gcc tarball and `cpp/target/`
     (`bin/repr-cpp target tree|answers|oracle`, with musl's headers from its tarball: `bin/lib/repr-cpp/sysroot.bash`, `REPR_CPP_HEADERS=arbace|libstdcxx|host`);
+    since cpp-target (2026-11-08; "As built: cpp-target", CP244 (b)) the token check's predefined macros, option deltas, `__has_` answers and
+    search list are Arbace's own C++ target's, `cpp/target/host` made by `test/cpp/predef.ae` from C's `c/target/abi.edn` and `cpp/target/dialect.edn`
+    (`bin/repr-cpp target gen|verify|host-oracle|option-lists`; `REPR_CPP_TARGET=gxx`: g++'s recorded `test/cpp/host`, the oracle tier's), and the
+    dg check's dg-error part (clang's Sema) and the round trips' clang levels are the oracle tier's (`cpp-dg-oracle`, `cpp-roundtrip-oracle`; ORS31 (a));
     the live parts wait in `test/gate/crops/cpp-oracle.edn` for the oracle tier.
     repr/cpp's native parser (doc/cpp/NATIVE.md, CX11): `read --reader native`, `bin/repr-cpp native-check LIST WORK` against clang's
     AST (`--tree`: the tree level, `arbace.repr.cpp.tcheck`, `test/repr/cpp/native-tree-known.edn`; its controls
