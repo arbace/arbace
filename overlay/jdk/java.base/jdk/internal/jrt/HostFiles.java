@@ -141,6 +141,15 @@ public final class HostFiles {
         setLength0(checked(h), len);
     }
 
+    /**
+     * Enters the kernel's descriptor fd, opened by sun.nio.fs's UnixNativeDispatcher (UnixChannelFactory's overlay),
+     * into the table, which owns it from then on: its handle (doc/classes/JAVA-DEFERRED-TRIAGE.md, F9).
+     */
+    public static int adopt(int fd, String path) {
+        return adopt0(fd, path);
+    }
+
+    private static native int adopt0(int fd, String path);
     private static native int open0(String path, int mode, String[] error);
     private static native long position0(int h) throws IOException;
     private static native void seek0(int h, long pos) throws IOException;

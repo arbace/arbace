@@ -197,6 +197,55 @@ daemon Threads; the numbers are distinct among live threads and small.\n"
       (when (< (time/Since t0) (* 4 time/Millisecond))
         (.Error t "parkNanos returned early")))))
 
+;; JCS162: a thread's blocker (sun.nio.ch.Interruptible's methods), called by another thread's interrupt
+(go/type nioTestBlocker (struct ^{:tag atomic/Int32} interrupts ^{:tag atomic/Int32} posts ^{:tag (atomic/Pointer Thread)} target))
+(go/method Interrupt_Thread__V [^{:tag (* nioTestBlocker)} b ^Thread_I th]
+  (.Add (.-interrupts b) 1)
+  (.Store (.-target b) (.Self_Thread th)))
+(go/method PostInterrupt__V [^{:tag (* nioTestBlocker)} b] (.Add (.-posts b) 1))
+
+(go/func TestInterruptBlocker
+  "JCS162: Thread.interrupt from another thread calls the blocker's interrupt(Thread), under the interrupt lock,
+then postInterrupt, as jdk26u's; a thread interrupting itself, or a thread without a blocker, calls neither; the
+status is set either way; an object without Interruptible's methods is a ClassCastException.\n"
+  [^{:tag (* testing/T)} t]
+  (let [b (new nioTestBlocker)
+        ready (make (chan (struct)))
+        release (make (chan (struct)))
+        cleared (make (chan (struct)))
+        done (make (chan (struct)))
+        ^int32 selfCalls -1
+        th (Thread_New_Runnable (RunnableOf (fn []
+                                              ;; a self-interrupt with a blocker: not called (this == currentThread)
+                                              (HostThreads_BlockedOn_O__V_native b)
+                                              (.Interrupt__V (CurrentThread))
+                                              (set! selfCalls (+ (.Load (.-interrupts b)) (.Load (.-posts b))))
+                                              (Thread_Interrupted__Z)
+                                              (close ready)
+                                              (<! release)
+                                              (HostThreads_BlockedOn_O__V_native nil)
+                                              (close cleared)
+                                              (<! done))))]
+    (.Start__V th)
+    (<! ready)
+    (when (!= selfCalls 0)
+      (.Errorf t "a self-interrupt called the blocker %d times" selfCalls))
+    (.Interrupt__V th)
+    (when (or (!= (.Load (.-interrupts b)) 1) (!= (.Load (.-posts b)) 1) (!= (.Load (.-target b)) th)
+              (not (.IsInterrupted__Z th)))
+      (.Errorf t "interrupt: %d interrupts, %d posts, the target %v, interrupted %v" (.Load (.-interrupts b))
+               (.Load (.-posts b)) (== (.Load (.-target b)) th) (.IsInterrupted__Z th)))
+    (close release)
+    (<! cleared)
+    (.Interrupt__V th)
+    (when (or (!= (.Load (.-interrupts b)) 1) (!= (.Load (.-posts b)) 1))
+      (.Errorf t "after blockedOn(null): %d interrupts, %d posts" (.Load (.-interrupts b)) (.Load (.-posts b))))
+    (close done)
+    (.Join__V th))
+  (let [got (res (fn ^string [] (HostThreads_BlockedOn_O__V_native (Str "x")) "set"))]
+    (when (!= got "!java.lang.ClassCastException: not a sun.nio.ch.Interruptible")
+      (.Errorf t "blockedOn of a string: %s" got))))
+
 (go/type testHandler (struct Object ^{:tag (func [Thread_I Throwable_I])} f))
 (go/method UncaughtException_Thread_Throwable__V [^{:tag (* testHandler)} h ^Thread_I th ^Throwable_I e] ((.-f h) th e))
 (go/method Is_Thread_UncaughtExceptionHandler [^{:tag (* testHandler)} h])

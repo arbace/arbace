@@ -163,7 +163,10 @@ ThreadInfo stack)\n"} waitStack
           ^{:tag uint32 :doc "the evaluator's method runs and recurs on the thread, counted for its yield on TamaGo
 (natives.go: Compiler_CodeRun_Tick__V_native)\n"} evalTicks
           ^{:tag any :doc "goi's state of the goroutine (its *goi.Thread: doc/go/GOI-SPEC.md §4.3, S22), set on
-its first interpreted call\n"} Interp))
+its first interpreted call\n"} Interp
+          ^{:tag sync/Mutex :doc "jdk26u's Thread.interruptLock: guards nioBlocker (JCS162)\n"} interruptMu
+          ^{:tag nioInterruptible :doc "jdk26u's Thread.nioBlocker: the sun.nio.ch.Interruptible of the channel or selector
+the thread is blocked on (AbstractInterruptibleChannel.blockedOn), or nil (JCS162)\n"} nioBlocker))
 
 (go/var Thread_class
   (Define (addr (lit ClassInfo :Name "java.lang.Thread" :Kind KindClass :Modifiers AccPublic
@@ -284,13 +287,52 @@ ignored, as the JVM ignores it.\n"
       (runCatching (fn [] (.UncaughtException_Thread_Throwable__V h (.-self t) e)))
       (runCatching (fn [] (Uncaught (.String (.Load (.-name t))) e))))))
 
+(go/type nioInterruptible
+  "nioInterruptible is sun.nio.ch.Interruptible's Go method set, as j2g names it: jrt's hand-written Go cannot
+name the translated interface, and any translated implementation (AbstractInterruptibleChannel's and
+AbstractSelector's anonymous classes) has these methods (JCS162).\n"
+  (interface
+    (Interrupt_Thread__V [^Thread_I target])
+    (PostInterrupt__V [])))
+
 (go/method Impl_Interrupt__V
   "Impl_Interrupt__V is Thread.interrupt: sets the status (the token), which wakes the
-thread from wait, sleep, join, park and the interruptible waits of locks and executors.\n"
+thread from wait, sleep, join, park and the interruptible waits of locks and executors; then, as
+jdk26u's Thread.interrupt (baf63fb, src/java.base/share/classes/java/lang/Thread.java), when another
+thread interrupts it, the I/O operation it is blocked in: its blocker's interrupt(Thread) under the
+interrupt lock (a channel closes, a selector wakes up), postInterrupt after it (JCS162).\n"
   [^{:tag (* Thread)} t ^Thread_I this]
+  ;; setting the interrupt status must be done before reading nioBlocker
   (select
     (case (>! (.-intr t) (lit (struct))))
-    (default)))
+    (default))
+  (when (!= t (CurrentThread))
+    (let [b ((fn ^nioInterruptible []
+               (.Lock (.-interruptMu t))
+               (defer (.Unlock (.-interruptMu t)))
+               (let [b (.-nioBlocker t)]
+                 (when (!= b nil)
+                   (.Interrupt_Thread__V b this))
+                 b)))]
+      (when (!= b nil)
+        (.PostInterrupt__V b)))))
+
+(go/func HostThreads_BlockedOn_O__V_native
+  "HostThreads_BlockedOn_O__V_native is jdk26u's Thread.blockedOn(Interruptible) (JavaLangAccess.blockedOn, which
+AbstractInterruptibleChannel.blockedOn calls, overlay/jdk/variants/AbstractInterruptibleChannel.ae): the current
+thread's blocker set under its interrupt lock, nil cleared; an object without Interruptible's methods is a
+ClassCastException (JCS162).\n"
+  [^any b]
+  (let [me (CurrentThread)
+        ^nioInterruptible i nil]
+    (when (!= b nil)
+      (let [(values v ok) (assert nioInterruptible b)]
+        (when (not ok)
+          (panic (ClassCastException_New_String (Str "not a sun.nio.ch.Interruptible"))))
+        (set! i v)))
+    (.Lock (.-interruptMu me))
+    (set! (.-nioBlocker me) i)
+    (.Unlock (.-interruptMu me))))
 
 (go/method Impl_IsInterrupted__Z ^bool [^{:tag (* Thread)} t ^Thread_I this]
   (> (len (.-intr t)) 0))

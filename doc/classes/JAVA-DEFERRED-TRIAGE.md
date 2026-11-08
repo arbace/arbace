@@ -3532,3 +3532,238 @@ by jrt's public accessors, one variant per use. (a) j2g's VarHandle table (`arba
 does), half a day with j2g's tests; (b) a variant per use as F10b did. **Recommended: (a)** when a second area needs it; (b)
 until then.
 
+
+## As built: JCS162
+
+Branch `java-f9` (from `next`, `bd33e27cc`), 2026-11-08, by day under the light rules: the user's JCS162 (a). jrt's
+hand-written Thread (`go/arbace/jrt/thread.ae`) gains jdk26u's `nioBlocker` and `interruptLock`
+(`src/java.base/share/classes/java/lang/Thread.java` at `baf63fb`): the fields `nioBlocker` and `interruptMu`, and
+`Thread.interrupt` as jdk26u's, rule for rule: the status set first (the token), then, when the interrupted thread is
+not the current one, its blocker read under the interrupt lock and its `interrupt(Thread)` called there, its
+`postInterrupt()` after the lock is released. `Thread.blockedOn(Interruptible)` (jdk26u's `JavaLangAccess.blockedOn`,
+which only `AbstractInterruptibleChannel.blockedOn` calls; `AbstractSelector`'s begin and end call that) is jrt's
+native `jdk.internal.jrt.HostThreads.blockedOn(Object)` (a new overlay, one native), which
+`AbstractInterruptibleChannel`'s variant now calls; the variant's `end` is gone (jdk26u's begin and end again: F7's
+check of the status at `end` stood in for the blocker).
+
+**No reference to a translated type.** The proposal named a registration by the translated `Interruptible`; none is
+needed: jrt declares sun.nio.ch.Interruptible's Go method set as j2g names it (`Interrupt_Thread__V(Thread_I)`,
+`PostInterrupt__V()`, read off the gate executable's `sun_nio_ch_Interruptible.ae`) as its own interface,
+`nioInterruptible`, and the native asserts the blocker to it (an object without the methods: ClassCastException), so
+every translated implementation (AbstractInterruptibleChannel's and AbstractSelector's anonymous classes) is one,
+and jrt builds and tests without the translation.
+
+**What it makes work** (jdk26u's code above the blocker, unchanged): a thread blocked in a socket channel's or a
+pipe's read, write, connect or accept (F10a: blocked in Go's poller) is woken by the channel's close, which the
+interruptor does (`implCloseChannel` → `preClose`), and gets ClosedByInterruptException; a thread blocked in
+`Selector.select` is woken by `wakeup()` (the eventfd or the pipe); a file channel's operation (jrt's own
+FileChannelImpl) closes the channel on an interrupt from another thread during it, as before at `begin`.
+
+**Checked** (light): `bin/jrt build --arch amd64` then `go build` and `go vet` of `./jrt`; `go test ./jrt`: every test
+passes, the new `TestInterruptBlocker` among them (another thread's interrupt calls the blocker once, its target the
+thread, then postInterrupt once, the status set; a self-interrupt calls neither; after `blockedOn(null)` an interrupt
+calls nothing; a String as blocker is ClassCastException); the variant applied and parsed (F4's `vet.ae`:
+AbstractInterruptibleChannel `{:replaced 1, :cut 0, :added 0}`); the joint javac check with F9's slice below.
+
+**Expected tests** (the night's interp and compiled runs, with F7's and F10a's areas): `jdk/java/nio/channels/
+Selector/LotsOfInterrupts.java#platform` (t05166), `Pipe/PipeInterrupt.java` (t05153), `FileChannel/
+ClosedByInterrupt.java` (t05121), `FileChannel/InterruptDeadlock.java` (t05126), `FileChannel/InterruptMapDeadlock.java`
+(t05127), `etc/AdaptorCloseAndInterrupt.java` (t05199, with F11's datagrams), and F10a's interrupt cases inside
+`SocketChannel/*` and `Selector/*`: about 6 tests, as JCS162 counted. The nights' commands are F10a's (step 5's
+`--only` covers them); the conversion adds one overlay (`jdk/internal/jrt/HostThreads.java`).
+
+## As built: F9 (write-ahead)
+
+Branch `java-f9` (from `next`, `bd33e27cc`), 2026-11-08, by day under the light rules: the user's decision of 2026-11-07,
+the triage's rank 14, **java.nio.file from jdk26u's own Java** (FileSystems, Path, Files, the attribute views, directory
+streams, walks, file stores, user principals, the watch service) with Linux's default provider, sun.nio.fs's Unix and
+Linux classes, **over jrt's natives**: libnio's `UnixNativeDispatcher.c`, `UnixFileSystem.c`, `LinuxNativeDispatcher.c`
+and `LinuxWatchService.c` ported into Go. It replaces jrt's own `Path`, `Files`, `HostPath` and `GlobPatterns`
+(JRT-NOTES' FS2, reversed) and F7's `FileChannel` overlay (jdk26u's `open` again, through the provider). The closure's
+list, the overlays, the Go natives with their tests, light checks only; nothing converted, translated or built into
+an executable.
+
+**The shape.** As F10a's channels, jdk26u's Java stays as it is and jrt gives it the native layer, rule for rule; unlike
+F10a, the natives are the JDK classes' own `native` methods (j2g calls the Go function of a native by its mangled name,
+J2G-SPEC §9.1), so `UnixNativeDispatcher`, `LinuxNativeDispatcher`, `LinuxWatchService` and `UnixFileSystem` keep their
+declarations and jrt implements them (`go/arbace/jrt/nio_fs_linux.ae`, 66 functions, each the C function's system
+calls with its flags, RESTARTABLE loops, results and errors: statx preferred to stat as on Linux with statx, the birth
+time when STATX_BTIME comes back, glibc's makedev; copy_file_range then sendfile with the C's fallbacks and the
+cancellation flag; inotify, the socketpair and poll of the watch service). What JNI gives the C, jrt gives in Go:
+
+- **Native memory** (`go/arbace/jrt/nativemem.ae`, new): `Unsafe.allocateMemory`'s blocks are Go byte slices, an
+  address a token (the block's number in the high 32 bits, the offset in the low 32), so Java's address arithmetic
+  holds within a block; Unsafe's absolute accesses (getByte(long), putInt(long, int), copyMemory(long, long, long),
+  setMemory, reallocateMemory, getAddress) and its (Object, long) accesses with a null base (`unsafe.ae`'s arrayBytes,
+  intSlot and longSlot: copyMemory(null, address, array, ...), putIntVolatile(null, address, v)) reach the block; an
+  address outside every block is an InternalError. So `NativeBuffer`, `NativeBuffers`, `Cancellable` (its polling
+  address), the xattr views' buffers and LinuxWatchService's event parsing (`unsafe.getInt(address)`) are jdk26u's
+  code, and the natives read a path as the C string at its address (`nativeCString`).
+- **Set*Field**: a native that fills `UnixFileAttributes`, `UnixFileStoreAttributes` or `UnixMountEntry` sets the
+  translated object's `F_name` field by Go's reflection (jrt cannot name a translated type; the field paths cached).
+- **UnixException**: the natives throw it through a factory `UnixNativeDispatcher`'s static initializer registers
+  (`jrtExceptions(UnixException::new)`, an `IntFunction` asserted to its Go method set), as the C's
+  JNU_NewObjectByName.
+- **The C library's databases**: getpwuid_r and the rest are Go's `os/user` over `/etc/passwd` and `/etc/group` (no
+  NSS: Arbace has no C library); setmntent's FILE*, rewind and getlinelen a table of buffered files, getmntent_r's
+  parse Go's (blank and comment lines skipped, the `\ooo` escapes); opendir's DIR* a table of descriptors read by
+  getdents64 (fdopendir owns its descriptor, as glibc's).
+- **Descriptors** are the kernel's; `UnixChannelFactory`'s overlay enters the one it opened into jrt's file table
+  (`jdk.internal.jrt.HostFiles.adopt`, an `os.File` owning it), whose handle the FileDescriptor names, so the channel is
+  jrt's FileChannelImpl (F7), which gains jdk26u's `setUninterruptible` (Files' and the provider's streams).
+
+**What comes in** (jdk26u at `baf63fb`; `test/jrt/jrt_sources.ae`'s `nio-file-sources`, one line in `sources`): 92
+files, 70 of `src/java.base/share/classes` (java.nio.file's remaining 31 classes with Path, .attribute's 22, .spi's
+FileTypeDetector, sun.nio.fs's 15 shared ones, java.nio.channels.FileChannel), 15 unix (UnixFileSystemProvider,
+UnixFileAttributes and the views, the directory streams, file stores, principals, the URI utilities), 6 linux
+(DefaultFileSystemProvider, LinuxFileSystem, LinuxFileSystemProvider, LinuxFileStore, the DOS and user-defined views)
+and the generated `UnixConstants`; the overlays below; the closure computed by F1's `closure.py` (the linux root added,
+the world this branch's print-sources): outside the world and the list only `AsynchronousFileChannel` and its
+implementation and thread pool (operation-level stubs: `newAsynchronousFileChannel`), `ObjectInputStream`
+(DirectoryIteratorException's readObject, by design) and what the overlays remove.
+
+| overlay (derived: `.tmp/f9/derive.py`, each replacement asserted once) | the change |
+|---|---|
+| `java/nio/file/Files.java` | readString and writeString code through `jdk.internal.jrt.NioStrings` (the charset's coders with REPORT) where jdk26u asks JavaLangAccess; no installed FileTypeDetectors (no ServiceLoader) |
+| `FileSystems.java` | getDefault without `jdk.internal.misc.VM`; a provider named by `java.nio.file.spi.DefaultFileSystemProvider` by Class.forName (no ClassLoaders); newFileSystem through installed providers only |
+| `spi/FileSystemProvider.java` | no installed providers beyond the default (jdk.zipfs and jrtfs are not in the Go build) |
+| `FileChannelLinesSpliterator.java` | unmap without JavaNioAccess (a mapping is a heap copy, F7) |
+| `sun/nio/fs/UnixNativeDispatcher.java`, `LinuxNativeDispatcher.java`, `LinuxWatchService.java` | no library loaded; UnixException's factory registered (the watch service's initializer initializes UnixNativeDispatcher) |
+| `UnixFileSystem.java` | copyFile's buffered copy through a NativeBuffer, not a temporary direct buffer's address |
+| `UnixChannelFactory.java` | the descriptor adopted by jrt's file table; the append mode to FileChannelImpl's open; no JavaIOFileDescriptorAccess |
+| `UnixPath.java` | encode through NioStrings |
+| `NativeBuffer.java`, `NativeBuffers.java` | no Cleaner (free() frees once), a plain ThreadLocal (no TerminatingThreadLocal): a dead thread's cached buffers are not freed |
+| `UnixUserDefinedFileAttributeView.java` | no JavaNioAccess (jrt's direct buffers are heap buffers: the direct branches are never taken) |
+
+jrt's own beside them: `jdk/internal/jrt/NioStrings.java`, `HostFiles.java`'s `adopt`; removed: `java/nio/file/Path.java`,
+`jdk/internal/jrt/HostPath.java`, `sun/nio/fs/GlobPatterns.java`, `java/nio/channels/FileChannel.java` (F7's) and the
+variant `FilePermission.ae` (its builtInFS is jdk26u's again), `File.ae`'s toPath. j2g renames (`arbace.j2g.names`):
+`sun/nio/fs/UnixFileSystem` → `Fs_UnixFileSystem` (java.io's), `sun/nio/fs/Util` → `Fs_Util` (sun.management's),
+`java/nio/file/attribute/UserPrincipal` → `Nio_UserPrincipal` (JAAS's com.sun.security.auth.UserPrincipal); 147 classes
+(nested ones included) checked against the gate executable's generated types and jrt's hand-written ones, these the only
+collisions. javac's world: its `FileSystems` overlay (`overlay/jdk/javac/java.base/java/nio/file/`) and `bin/javac-vendor`'s
+eight `java/nio/file` base files leave it (the program's world has them now). Off Linux (`nio_fs_other.ae`, TamaGo's, the
+box) every native throws "java.nio.file's default file system not available" (JCS180). `nio_fs_linux_amd64.ae` and
+`_arm64.ae` name statx's and copy_file_range's numbers, which Go's syscall package has not.
+
+**Light checks done** (main's stage 0 as `ARBACE_HOST_EXE`, javac's tool `.tmp/gate-exe/javac-5ad357331dbcd7cfb0fd`,
+`REPR_JAVA_STALE_OK=1`, `GOMEMLIMIT=1400MiB`, each process under 1 GB):
+- **the joint javac check** (`.tmp/night7/all9-run.sh` on the branch): 2,379 files (2,278 before F9), **0 errors**, 5,097
+  classes (18 s, 0.9 GB); its first run found jrt's FileChannelImpl without `setUninterruptible` (3 errors), added;
+- the read: `bin/repr-java read-jdk --check` of the 110 files (the list, the overlays, HostFiles, HostFileChannels,
+  FileChannelImpl) as a patch of java.base: 110 converted, 0 failed, 0 javac errors (8.5 s, 0.75 GB); `--no-javac`: 110
+  native, 0 fallbacks, the forms identical;
+- the natives' names: the 77 native methods of the read forms (UnixNativeDispatcher 49 with jrtExceptions,
+  LinuxNativeDispatcher 6, LinuxWatchService 8, UnixFileSystem 1, HostFiles' adopt0, HostThreads' blockedOn, ...) mangled as
+  j2g names them (the renames applied), each defined in `nio_fs_linux.ae` (or thread.ae, files.ae) and in
+  `nio_fs_other.ae`;
+- jrt: `bin/jrt manifest` (Unsafe's 18 new members), `bin/jrt print`, `go vet` of `./jrt` for linux/amd64 and arm64, `go test
+  ./jrt`: every test passes, the new ones among them: `TestNativeMemory` (the accesses, copies both ways, reallocation,
+  an access after free and beyond a block), `TestNioFsNatives` (stat0 against stat(2): ino, dev, nanoseconds; a missing
+  file's errno and UnixException; open0, fstat0, read0, close0's EBADF; mkdir0, symlink0, readlink0, realpath0, lstat0,
+  fstatat0; the directory's five entries; fdopendir; access0; rename0, chmod0, utimensat0's times; directCopy0 and
+  bufferedCopy0 with a cancellation flag; statvfs0; /proc/mounts' `/` through setmntent0, getlinelen, rewind, getmntent0;
+  the escapes; getpwuid, getpwnam, getgrgid; strerror; getcwd; an adopted descriptor read through HostFiles),
+  `TestNioFsXattr` (fsetxattr0, fgetxattr0's size and value, flistxattr, fremovexattr0's ENODATA), `TestNioFsInotify` (an
+  IN_CREATE event with its name, poll of inotify and a socketpair).
+
+**JCS135, the closure's growth**: +23,105 Java lines (15,844 of jdk26u's listed files, 9,935 of the derived overlays and
+NioStrings, less jrt's 2,674 removed): about **+3.4%** on the closure; by F4's ratio about +4 MB of executable.
+
+**Expected yield.** The interp record's non-passes naming java.nio.file (the triage's 28 / 30 touched, 13 / 13 alone):
+`jdk/java/nio/file/Files/walkFileTree/Nulls` (t05225), `PathMatcher/Basic` (t05227), `WatchService/DeleteInterference`,
+`LotsOfCancels`, `LotsOfCloses`, `UpdateInterference` (t05228-t05231), `attribute/AclEntry/EmptySet` (t05232),
+`Files/probeContentType/ForceLoad` (t05224), `Path/UriImportExport` (t05226, a failing result today: jrt's own Path's
+URI), `jdk/java/io/File/IsHidden`, `ListRoots`, `SymLinks` (t04259, t04261, t04267),
+`jdk/sun/net/www/protocol/jar/FileURLConnectionLeak` (t08144, Files.list), `B6449504` (t08142, a NoSuchFileException
+today), `jdk/java/util/logging/CheckLockLocationTest` (t05744), `jdk/java/util/zip/TestExtraTime` (t05832): about **12 / 12
+expected**; not expected: `Files/CopyToNonDefaultFS` (t05222, zipfs), `jdk/internal/jrtfs/PathOps` (t08098, the jrt file
+system), `tools/jlink/CheckExecutable` (t08310) and the eleven `tools/launcher` tests (t08312-t08322: they start a JDK's
+`java`). With JCS162's six, about +18 at each level. **At risk: every test and tool that uses java.nio.file** (Clojure's
+java.io, arbace.main, the suite, javac's tool's file manager): jrt's Path and Files were their implementation; the
+night's whole corpus, the suite and the gate are the proof, not the area alone.
+
+**The night's commands** (in the night's worktree with this branch merged; heavy ones under `bin/heavy-lock`; the
+conversion shared with the night's others):
+
+```sh
+# 0. the joint javac check of the merged tree (0 errors expected; a light minute)
+.tmp/night7/all9-run.sh /root/arbace/.tmp/worktrees/next
+# 1. jdk/ converted afresh: expect the sources line +70 share, +15 unix, +6 linux, +1 gensrc (UnixConstants), the
+#    overlays +15 (the 13 derived, NioStrings, HostThreads) -4 (Path, HostPath, GlobPatterns, F7's FileChannel); 0 failed,
+#    0 javac errors, no javac: 0 fallbacks; jdk/forms + about 105 files
+REPR_JAVA_EXE=$(ls -td /root/arbace/.tmp/gate-exe/javac-*/ | head -1)arbace-javac REPR_JAVA_STALE_OK=1 \
+  ARBACE_HEAVY_CMD=$PWD/bin/heavy-lock bin/jrt-convert update
+# 2. javac's world afresh (its FileSystems overlay and eight java/nio/file base files gone), j2g's edge, javac's edge
+bin/heavy-lock bin/javac-vendor convert && bin/heavy-lock bin/j2g-edge update && bin/heavy-lock bin/javac-vendor edge
+# 3. the executable; j2g's report: no native without its Go function (the 77 above), the renames Fs_UnixFileSystem,
+#    Fs_Util, Nio_UserPrincipal, no "a variant for a class not in the inputs" (FilePermission's variant is gone)
+bin/heavy-lock bin/arbace-go --build && bin/arbace-go --smoke && bin/jrt test
+# 4. a smoke of F9: expect "true 5 [a.txt d]", "rw-r--r-- true", "[ENTRY_CREATE n]", "glob true", "sun.nio.fs.LinuxFileSystemProvider"
+target/arbace-go/amd64/arbace -e '(import (quote (java.nio.file Files Path FileSystems StandardWatchEventKinds LinkOption)) (quote (java.nio.file.attribute PosixFilePermissions FileAttribute)) (quote (java.util.concurrent TimeUnit)))
+  (let [d (Files/createTempDirectory "f9" (make-array FileAttribute 0)) f (.resolve d "a.txt")]
+    (Files/writeString f "hello" (make-array java.nio.file.OpenOption 0))
+    (Files/createDirectory (.resolve d "d") (make-array FileAttribute 0))
+    (println (Files/exists f (make-array LinkOption 0)) (Files/size f)
+             (with-open [s (Files/list d)] (vec (sort (map #(str (.getFileName %)) (iterator-seq (.iterator s)))))))
+    (println (PosixFilePermissions/toString (Files/getPosixFilePermissions f (make-array LinkOption 0)))
+             (.isRegularFile (Files/readAttributes f java.nio.file.attribute.BasicFileAttributes (make-array LinkOption 0))))
+    (let [w (.newWatchService (FileSystems/getDefault))]
+      (.register d w (into-array java.nio.file.WatchEvent$Kind [StandardWatchEventKinds/ENTRY_CREATE]))
+      (Files/createFile (.resolve d "n") (make-array FileAttribute 0))
+      (let [k (.poll w 5 TimeUnit/SECONDS)]
+        (println (vec (map #(str (.kind %) " " (.context %)) (.pollEvents k)))))
+      (.close w))
+    (println "glob" (.matches (.getPathMatcher (FileSystems/getDefault) "glob:*.txt") (.getFileName f)))
+    (println (.getName (class (.provider (FileSystems/getDefault))))))'
+# 5. Java's levels interp and compiled on F9's and JCS162's areas, then the whole corpus with the night's others (F9
+#    changes every java.nio.file user): saved, not recorded; expect about 18 / 18 of the tests above to pass, no
+#    passing test lost
+JAVA_CHECK_EXE=$PWD/target/arbace-go/amd64/arbace J2G_GO_EXE=$PWD/target/arbace-go/amd64/arbace \
+  JAVA_CHECK_HEAVY=$PWD/bin/heavy-lock bin/java-check --levels interp,compiled --jobs 8 \
+  --only 'jdk/(java/nio/file|java/io/File/(IsHidden|ListRoots|SymLinks)|java/util/logging/CheckLockLocationTest|java/util/zip/TestExtraTime|sun/net/www/protocol/jar|java/nio/channels/(FileChannel|Pipe/PipeInterrupt|Selector/LotsOfInterrupts|etc/AdaptorCloseAndInterrupt))' \
+  --save .tmp/f9-night/check
+# 6. the gate, essential then --full (Clojure's suite, the oracle, javac's tool and repr/java's checks all read files
+#    through java.nio.file now)
+bin/gate && bin/gate --full
+```
+
+None of the slice's tests runs before the night: the classes they name (`FileSystems`, `FileVisitOption`,
+`StandardWatchEventKinds`, ...) are not in the committed `jdk/forms` and the gate's executable.
+
+**Risks and fallbacks**: (1) a behaviour of jrt's own Path that Arbace relied on and jdk26u's has not (the night's suite,
+oracle and gate show it; jdk26u's is the JDK's, so the fix is on the user's side, recorded); (2) Go's reflection on a
+translated field: a field j2g renames (a Go keyword, a collision) would not be found (InternalError "no field"): the
+UnixFileAttributes', UnixFileStoreAttributes' and UnixMountEntry's names are plain; (3) statx under a seccomp filter that
+refuses it: the C falls back to stat only when the function is absent, so here too a refusal is the error; (4) the
+blocking calls (poll of the watch service, a read of a FIFO) hold an OS thread in a system call, as the JDK's; (5)
+should j2g refuse a member of the new forms, the night's fallback is the branch's parent (jrt's own Path and Files): F9
+is one commit of the list, the overlays and the natives, revertible alone; JCS162 does not depend on it.
+
+**What is left of F9**: the night's run and the day's classification and records; jdk.zipfs's provider (CopyToNonDefaultFS,
+the jar file systems javac's file manager could use) and the jrt file system (JCS181); the box's default file system
+(JCS180); UNIX domain sockets over F9's paths (JCS164, decided (a), 1 day); the derivations as Arbace (JCS166, decided (a):
+`.tmp/f9/derive.py` joins `gennet.py` and the others).
+
+## Proposed (F9)
+
+Numbered from JCS180 (JCS168-JCS179 left to the branches of the same day: F10b, serialization).
+
+### JCS180 The box's default file system
+
+On TamaGo (the box) jrt has no system calls: `nio_fs_other.ae` throws "java.nio.file's default file system not
+available", so Path's operations fail in the box where jrt's own Path worked over java.io.File and the box's store. (a)
+the box's natives over its store (the same natives' Go names, `nio_fs_tamago.ae`: stat from the store's file info, the
+directory streams from its listings, no inotify: the watch service then sun.nio.fs's PollingWatchService, which is in the
+closure), 2 days when the box is unparked; (b) the box keeps jrt's own Path and Files as variants of its build (two
+worlds: against one closure); (c) as now until the box is unparked. **Recommended: (c) then (a)**: the box is parked (the
+user, 2026-10-26), and (a) keeps one closure.
+
+### JCS181 jdk.zipfs and the jrt file system
+
+`Files/CopyToNonDefaultFS` and the jar file systems (FileSystems.newFileSystem of a jar, javac's file manager's jars,
+`jdk/internal/jrtfs/PathOps`) need jdk.zipfs's `ZipFileSystemProvider` (plain Java over SeekableByteChannel and
+java.util.zip) and jdk.internal.jrtfs (over the image, which the Go build has not). (a) jdk.zipfs into the world as an
+installed provider (FileSystemProvider's overlay lists it in place of ServiceLoader), about 1.5 days with its tests (the
+`jdk/nio/zipfs` corpus, not yet in `test/java/corpora.edn`); (b) neither. **Recommended: (a)** after the night's records,
+jrtfs never (no image).
