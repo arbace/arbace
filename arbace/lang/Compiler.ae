@@ -6391,6 +6391,71 @@
             (.invoke ctor o args)
             o)))
 
+      ;; JCS167 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS167 (write-ahead)"): an
+      ;; interpreted Serializable class k's serialization constructor, as
+      ;; jdk.internal.reflect.ReflectionFactory.newConstructorForSerialization (jdk26u) finds it:
+      ;; up k's interpreted superclasses while Serializable, each with a superclass constructor
+      ;; accessible to it (superHasAccessibleConstructor), to the first non-serializable one S:
+      ;; S's no-argument constructor (a Meth), not private and, unless public or protected, in
+      ;; k's package; or, past the interpreted classes, the nearest class of the world (a Class:
+      ;; the host's serialInit part, j2g's cfSerialFor, decided ahead of time). nil: none (the
+      ;; JDK's null constructor, InvalidClassException "no valid constructor" when read)
+      (method ^:public ^:static serialPlan [^Klass k]
+        (let [^:mutable ^Klass prev k
+              ^:mutable ^Klass s (.-sup k)]
+          (loop []
+            (if (nil? s)
+                ;; the rest of the chain is the world's
+                (let [w (.-superClass prev)]
+                  (if (.serialSuper HOST w) w nil))
+                (if (not (Rt/superCtorAccessible prev s))
+                    nil
+                    (if (.implementsClass s Serializable)
+                        (do (set! prev s)
+                            (set! s (.-sup s))
+                            (recur))
+                        (let [c (cast Meth (.get (.-ctors s) "()V"))]
+                          (cond
+                            (nil? c) nil
+                            (not (== 0 (bit-and-int (.-flags c) 0x0002))) nil
+                            (and (== 0 (bit-and-int (.-flags c) 0x0005))
+                                 (not (.equals (Rt/packageOf (.-name k)) (Rt/packageOf (.-name s))))) nil
+                            :else c))))))))
+
+      ;; the package of binary name n
+      (method ^:public ^:static packageOf ^String [^String n]
+        (let [i (.lastIndexOf n ".")]
+          (if (< i 0) "" (.substring n 0 i))))
+
+      ;; ReflectionFactory.superHasAccessibleConstructor(prev), s its interpreted superclass: in
+      ;; prev's package any non-private constructor of s, else s public or protected with a public
+      ;; or protected constructor
+      (method ^:public ^:static superCtorAccessible ^boolean [^Klass prev ^Klass s]
+        (let [same (.equals (Rt/packageOf (.-name prev)) (Rt/packageOf (.-name s)))
+              it (.iterator (.values (.-ctors s)))]
+          (if (and (not same) (== 0 (bit-and-int (.-flags s) 0x0005)))
+              false
+              (loop []
+                (if (.hasNext it)
+                    (let [c (cast Meth (.next it))]
+                      (if (if same
+                              (== 0 (bit-and-int (.-flags c) 0x0002))
+                              (not (== 0 (bit-and-int (.-flags c) 0x0005))))
+                          true
+                          (recur)))
+                    false)))))
+
+      ;; an object of k made by its serialization constructor (plan: serialPlan's): k
+      ;; initialized and allocated, its fields zero, then the plan's constructor run on it, k's
+      ;; own and its serializable superclasses' not
+      (method ^:public ^:static serialNew [^Klass k plan]
+        (.init k)
+        (let [o (.alloc HOST k)]
+          (if (instance? Meth plan)
+              (.invoke (cast Meth plan) o (new Object/1 0))
+              (.serialInit HOST o (cast Class plan)))
+          o))
+
       ;; the arguments of a call into the callee's frame g, by the parameters' kinds; false
       ;; when an argument jumped
       (method ^:public ^:static args ^boolean [^Meth m ^Node/1 args ^Frame f ^Frame g]
@@ -6472,7 +6537,13 @@
       (method ^:public outer ^void [this ^Klass k ^Class outer ^String simple] nil)
       ;; k's members published so far forgotten, to be published again (a sibling class its
       ;; members' types named is defined since: doc/STANDALONE-NOTES.md, SA90 (b))
-      (method ^:public clearMembers ^void [this ^Klass k] nil))
+      (method ^:public clearMembers ^void [this ^Klass k] nil)
+      ;; JCS167: k's objects are made for deserialization by f (no arguments: the object)
+      (method ^:public setSerialNew ^void [this ^Klass k ^IFn f] nil)
+      ;; whether c, the nearest superclass of the world of an interpreted Serializable class,
+      ;; allows its serialization constructor, and that constructor's part run on o
+      (method ^:public serialSuper ^boolean [this ^Class c] (identical? c Object))
+      (method ^:public serialInit ^void [this o ^Class c] nil))
 
     ;; the JVM's stand-in for classes made at run time: objects are Obj (tests only)
     (defclass ^:public ^:static Obj
@@ -7384,6 +7455,8 @@
       (field ^Thread initThread)
       ;; a Clojure fn's class (arbace.lang.AFunction, RestFn): its objects are FnObj
       (field ^:public ^boolean fnClass)
+      ;; a record class (Class.isRecord; JCS167)
+      (field ^:public ^boolean record)
       ;; an interface that declares a default method: initialized with a class implementing it
       ;; (JLS 12.4.1, 12.4.2 step 7; JC4b)
       (field ^:public ^boolean hasDefaults)
@@ -8715,7 +8788,7 @@
           (CFGo/defineClass (.-name k)
                             (if (some? (.-sup k)) (.-cls (.-sup k)) (.-superClass k))
                             all (bit-and-int (.-flags k) (bit-not-int 0x20))
-                            (int (cond (.-iface k) 1 (.-fnClass k) 2 :else 0))
+                            (int (cond (.-iface k) 1 (.-fnClass k) 2 (.-record k) 3 :else 0))
                             k)))
 
       (method ^:public alloc [this ^CF$Klass k]
@@ -8758,6 +8831,16 @@
 
       (method ^:public clearMembers ^void [this ^CF$Klass k]
         (CFGo/clearMembers (.-cls k)))
+
+      (method ^:public setSerialNew ^void [this ^CF$Klass k ^IFn f]
+        (CFGo/setSerialNew (.-cls k) f))
+
+      (method ^:public serialSuper ^boolean [this ^Class c]
+        (or (identical? c Object) (CFGo/serialSuper c)))
+
+      (method ^:public serialInit ^void [this o ^Class c]
+        (when-not (identical? c Object)
+          (CFGo/serialInit o c)))
 
       (method ^:public ctor ^void [this ^CF$Klass k ^CF$Meth m]
         (CFGo/addCtor (.-cls k) (.-params m) (.-flags m) (CF$CtorFn. m)))
@@ -8822,7 +8905,13 @@
     ;; the members published so far forgotten (and reflection's lists computed from them)
     (method ^:public ^:static ^:native clearMembers ^void [^Class c])
     ;; an enum class: its Kind, and Enum.valueOf's constants (values's fn)
-    (method ^:public ^:static ^:native setEnum ^void [^Class c ^IFn values]))
+    (method ^:public ^:static ^:native setEnum ^void [^Class c ^IFn values])
+    ;; JCS167: c's objects made for deserialization by f (ClassInfo.SerialNew, jdk.internal.jrt.SerialAlloc);
+    ;; whether superclass c of the world allows an interpreted class's serialization constructor
+    ;; (j2g's cfSerialFor), and its part run on o
+    (method ^:public ^:static ^:native setSerialNew ^void [^Class c ^IFn f])
+    (method ^:public ^:static ^:native serialSuper ^boolean [^Class c])
+    (method ^:public ^:static ^:native serialInit ^void [o ^Class c]))
 
   (defclass ^:public ^:static Frame
     ;; the locals of one invocation, by LocalBinding.idx

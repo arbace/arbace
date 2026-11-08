@@ -1,12 +1,16 @@
 /*
- * Arbace (CDR10, doc/CLOJURE-DESIGN-REVIEW.md, the user's decision of 2026-11-06; staged in
- * test/jrt/serialization, doc/go/JRT-NOTES.md "Serialization"): the allocation of a deserialized object, what
+ * Arbace (CDR10, doc/CLOJURE-DESIGN-REVIEW.md, the user's decision of 2026-11-06; JCS167 (a), the user's decision of
+ * 2026-11-07, doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS167 (write-ahead)"; doc/go/JRT-NOTES.md,
+ * "Serialization"): the allocation of a deserialized object, what
  * jdk.internal.reflect.ReflectionFactory.newConstructorForSerialization's constructor does on a JVM: an
  * object of class cl made by the no-argument constructor of cl's first superclass that is not
- * Serializable, cl's own constructors and those of its serializable superclasses not run. Its native is
- * jrt's Go (SerialAlloc_Allocate0_Class__O_native): the class's ClassInfo.SerialNew, which j2g writes for
- * each concrete Serializable class of the world whose first non-serializable superclass has an accessible
- * no-argument constructor. Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+ * Serializable, cl's own constructors and those of its serializable superclasses not run, or none when
+ * that constructor is not accessible (ReflectionFactory's rule, superHasAccessibleConstructor's included).
+ * Its natives are jrt's Go (go/arbace/jrt/serial.ae): the class's ClassInfo.SerialNew, which j2g writes for
+ * each instantiated Serializable class of the world the rule allows (arbace.j2g.model/serial-super), and
+ * the Java forms' host sets for an interpreted class (Compiler$CF$Rt.serialPlan, the rule over the
+ * interpreter's classes, then the nearest class of the world's part: j2g's cfSerialFor).
+ * Copyright (c) the Arbace authors; Eclipse Public License 1.0.
  */
 package jdk.internal.jrt;
 

@@ -927,6 +927,8 @@
                                                 (:methods d)))))
     (set! (.-fnClass k) (boolean (and (:clojure-fn (:meta d))
                                       (#{(t/lang-class "AFunction") (t/lang-class "RestFn")} (:super d)))))
+    ;; a record class (Class.isRecord: the host's kind 3; JCS167)
+    (set! (.-record k) (= :record (:kind d)))
     k))
 
 (defn- layout!
@@ -1536,6 +1538,22 @@
                       (let [[ctx body] (build)] (finish! ctx mt body)))))
             (set! (.-clinit k) (arbace.lang.Compiler$CF$CallI. \V mt nil (nodes [])))))))))
 
+(defn- serial-new!
+  "JCS167 (doc/classes/JAVA-DEFERRED-TRIAGE.md, \"As built: JCS167 (write-ahead)\"): the allocation
+  for deserialization of k (class n) when it is a concrete Serializable class, neither an enum nor a
+  record (ObjectStreamClass makes those by name and by the canonical constructor):
+  Compiler$CF$Rt.serialPlan's constructor (ReflectionFactory.newConstructorForSerialization's
+  rule), handed to the host as the class's SerialNew; none when the rule finds no constructor
+  (ObjectStreamClass's \"no valid constructor\")."
+  [^arbace.lang.Compiler$CF$Klass k n]
+  (let [d (a/decl n)]
+    (when (and (.-cls k) (not (.-iface k)) (not (.-fnClass k)) (not (.-record k))
+               (not (has? (.-flags k) ACC_ABSTRACT))
+               (not (#{:enum} (:kind d))) (not (:enum-body d))
+               (.implementsClass k java.io.Serializable))
+      (when-let [plan (arbace.lang.Compiler$CF$Rt/serialPlan k)]
+        (.setSerialNew (host) k (fn [] (arbace.lang.Compiler$CF$Rt/serialNew k plan)))))))
+
 (defn define!
   "Compiles Java forms (each the rest of a defclass form) in namespace ns as one compilation,
   the sibling Java forms entered as declarations, into interpreted classes. Returns [[dotted-name
@@ -1557,6 +1575,7 @@
             (let [^arbace.lang.Compiler$CF$Klass k (ks n)]
               (set! (.-cls k) (.define (host) k))
               (set! (.-info k) (assoc (.-info k) :compile-set @env/*compile-set* :klasses ks))))
+          (doseq [n sorted] (serial-new! (ks n) n))
           (doseq [n sorted] (vtable! (ks n)))
           ;; fn classes: their variadic arity by name (CF$FnObj)
           (doseq [n order
