@@ -65,23 +65,97 @@
       (collect/with-crate hir res-map std {:source src :edition ed :si si}
         (fn [] (f oc ed))))))
 
+(def ^:dynamic *macro-ranges* [])   ; the root file's macro calls as [[line col] [line col]] (1-based lines, 1-based columns)
+
+(defn- macro-ranges
+  "The root file's macro invocations' argument ranges (`name!(..)`, `[..]`, `{..}`): the anonymous constants inside
+  one are collected when it is expanded, after the code around it"
+  [^String src]
+  (let [n (count src) out (atom [])]
+    (loop [i 0 line 1 col 1 stack []]
+      (if (>= i n)
+        @out
+        (let [c (.charAt src i)
+              nl? (= c \newline)
+              [line2 col2] (if nl? [(inc line) 1] [line (inc col)])]
+          (cond
+            (= c \") (let [j (loop [j (inc i)] (cond (>= j n) j (= \\ (.charAt src j)) (recur (+ j 2)) (= \" (.charAt src j)) (inc j) :else (recur (inc j))))
+                            seg (subs src i (min j n))
+                            nls (count (filter #(= % \newline) seg))]
+                        (recur j (+ line nls) (if (pos? nls) (- (count seg) (str/last-index-of seg "\n")) (+ col (count seg))) stack))
+            (and (= c \!) (> i 0) (Character/isJavaIdentifierPart (.charAt src (dec i))) (< (inc i) n) (#{\( \[ \{} (.charAt src (inc i))))
+            (recur (+ i 2) line (+ col 2) (conj stack [:macro [line (+ col 2)]]))
+            (#{\( \[ \{} c) (recur (inc i) line2 col2 (conj stack [:plain nil]))
+            (#{\) \] \}} c) (let [[k st] (peek stack)]
+                               (when (= k :macro) (swap! out conj [st [line col]]))
+                               (recur (inc i) line2 col2 (if (seq stack) (pop stack) stack)))
+            :else (recur (inc i) line2 col2 stack)))))))
+
+(defn- macro-depth [[l c]]
+  (count (filter (fn [[a b]] (and (neg? (compare a [l c])) (neg? (compare [l c] b)))) *macro-ranges*)))
+
+(defn- anon-consts
+  "The anonymous constants of a definition's HIR (array types' lengths, repeat counts; a const parameter's path is none)
+  as [owner-hir-id-or-nil expr], a closure's own under its HIR id, in source order"
+  [node]
+  (let [acc (atom [])]
+    (letfn [(walk [x owner]
+              (cond
+                (map? x)
+                (when-not (= :item (:kind x))
+                  (let [owner (if (and (= :expr (:node x)) (= :closure (:kind x))) (:hir-id x) owner)]
+                    (when (and (= :ty (:node x)) (= :array (:kind x)) (:len x) (vector? (:span (:len x)))
+                               (not (and (= :path (:kind (:len x))) (re-find #"ConstParam" (pr-str (:res (:path (:len x))))))))
+                      (swap! acc conj [owner (:len x)]))
+                    (when (and (= :expr (:node x)) (= :repeat (:kind x)) (vector? (:span (:count x))))
+                      (swap! acc conj [owner (:count x)]))
+                    (doseq [[k v] x :when (not (#{:len :count} k))] (walk v owner))
+                    (doseq [k [:len :count] :let [v (get x k)] :when v] (walk v owner))))
+                (sequential? x) (doseq [y x] (walk y owner))
+                :else nil))]
+      (walk node nil))
+    (sort-by (fn [[_ e]] (let [p (vec (take 2 (:span e)))] [(macro-depth p) p])) (distinct @acc))))
+
 (defn build-program
   "The pipeline over one program, then each function body built: [[name body-or-nil error-or-nil] ...]"
   [front-dir n]
   (with-program front-dir n
     (fn [oc ed]
-      (binding [build/*allocs* (atom {:next 1 :ids {}})]
+      (binding [build/*allocs* (atom {:next 1 :ids {}}) *macro-ranges* []]
       (let [rc (atom {})]
-        (vec (for [d (collect/defs) :when (or (and (#{"Fn" "AssocFn"} (:kind d)) (:body (:node d)))
-                                              (= "Closure" (:kind d))
-                                              (and (= "Variant" (:kind d)) (:disr (:node d))))]
-               (let [disr? (= "Variant" (:kind d))
-                     nm (if disr? (str (binding [collect/*in-value* true] (collect/print-def-path (:id d) [])) "::{constant#0}") (build/mir-name d))]
-                 (try [nm (cond disr? (build/build-discriminant d {:edition ed})
-                                :else (build/build-body d {:overflow-checks oc :edition ed :root-cache rc})) nil]
-                      (catch Throwable e
-                        (when (System/getenv "BUILD_TRACE") (.printStackTrace e))
-                        [nm nil (str (or (:what (ex-data e)) e)) (pr-str (:x (ex-data e)))]))))))))))
+        (let [const? (fn [d] (let [k (str (:kind d))] (and (or (str/starts-with? k "Const") (str/starts-with? k "Static") (str/starts-with? k "AssocConst"))
+                                                             (:expr (:node d)))))
+              _ (set! *macro-ranges* (macro-ranges (slurp (source-file n))))
+              closure-defs (into {} (for [d (collect/defs) :when (= "Closure" (:kind d))] [(:hir-id (:node d)) d]))
+              bodies
+              (vec (for [d (collect/defs) :when (or (and (#{"Fn" "AssocFn"} (:kind d)) (:body (:node d)))
+                                                    (= "Closure" (:kind d))
+                                                    (const? d)
+                                                    (and (= "Variant" (:kind d)) (:disr (:node d))))]
+                     (let [disr? (= "Variant" (:kind d))
+                           nm (if disr? (str (binding [collect/*in-value* true] (collect/print-def-path (:id d) [])) "::{constant#0}") (build/mir-name d))]
+                       (try [nm (cond disr? (build/build-discriminant d {:edition ed})
+                                      (const? d) (build/build-const d {:overflow-checks oc :edition ed})
+                                      :else (build/build-body d {:overflow-checks oc :edition ed :root-cache rc})) nil]
+                            (catch Throwable e
+                              (when (System/getenv "BUILD_TRACE") (.printStackTrace e))
+                              [nm nil (str (or (:what (ex-data e)) e)) (pr-str (:x (ex-data e)))])))))
+              ;; the anonymous constants, numbered per owner (DefCollector's disambiguators)
+              anon (vec (for [d (collect/defs) :when (and (#{"Fn" "AssocFn" "Struct" "Union" "Enum"} (str (:kind d))) (map? (:node d)) (not (:derive (:node d))))
+                              :let [groups (group-by first (anon-consts (if (= "Enum" (:kind d)) (:variants (:node d)) (:node d))))]
+                              [owner xs] groups
+                              [i [_ x]] (map-indexed vector xs)]
+                          (let [od (if owner (get closure-defs owner) d)
+                                nm (str (build/mir-name od) "::{constant#" i "}")]
+                            (try [nm (build/anon-const-body nm x) nil]
+                                 (catch Throwable e [nm nil (str (or (:what (ex-data e)) e)) (pr-str (:x (ex-data e)))])))))
+              anon-c (vec (for [d (collect/defs) :when (const? d)
+                                :let [xs (anon-consts (dissoc (:node d) :expr))]
+                                [i [_ x]] (map-indexed vector (concat xs (anon-consts (:expr (:node d)))))]
+                            (let [nm (str (build/mir-name d) "::{constant#" i "}")]
+                              (try [nm (build/anon-const-body nm x) nil]
+                                   (catch Throwable e [nm nil (str (or (:what (ex-data e)) e)) (pr-str (:x (ex-data e)))])))))]
+          (into (into bodies anon) anon-c)))))))
 
 (defn -main [front-dir built-dir & names]
   (let [verbose (System/getenv "BUILD_VERBOSE")

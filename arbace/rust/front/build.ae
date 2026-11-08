@@ -360,8 +360,9 @@
           (if (= "Variant" (:kind d))
             [(:parent d) (tc/variant-index id) id (if (str/includes? (str k) "Fn") :fn :const)]
             [id 0 id (if (str/includes? (str k) "Fn") :fn :const)])
-          (= "Variant" k) [(:parent d) (tc/variant-index id) id :struct]
-          (= "Struct" k) [id 0 id :struct]
+          ;; a path without its resolution (a derive's) names the variant: its constructor's kind
+          (= "Variant" k) [(:parent d) (tc/variant-index id) id (keyword (tc/variant-ctor-kind id))]
+          (#{"Struct" "Union"} k) [id 0 id :struct]
           :else nil))
       :ext
       (let [[_ p _] rd
@@ -415,6 +416,11 @@
           ;; a constant (NamedConst): the crate's or std's, or an associated one by its type
           (:named-const (r-of e)) (let [[d args] (:named-const (r-of e))] (mk e :named-const ty :def d :args args))
           (and (#{:local :ext} (first rd)) (str/starts-with? (str (nth rd 2)) "Const")) (mk e :named-const ty :def (second rd) :args [])
+          ;; a static: the deref of its allocation's pointer (StaticRef: `&T`, `*mut T` for a mutable one)
+          (and (= :local (first rd)) (str/starts-with? (str (nth rd 2)) "Static"))
+          (let [mut? (str/includes? (str (nth rd 2)) "mutability: Mut")
+                pt (if mut? [:ptr true ty] [:ref [:re-erased] false ty])]
+            (mk e :deref ty :arg (mk e :static-ref pt :def (second rd))))
           (and (= :adt (first ty)) (ctor-info path))
           (let [[adt vi vid _] (ctor-info path)] (mk e :adt ty :adt adt :variant vi :vid vid :fields []))
           :else (unsupported "a path" (pr-str [rd (mapv :ident (:segs path)) (boolean (:lang path)) (first ty)])))))))
@@ -590,8 +596,7 @@
                 (mk e :call ty :fun {:k :zst-literal :ty fty :span (or (method-ident-span e) (:span e)) :tsi (:hir-id e) :user-ty (:user-ty (r-of e))}
                     :args (into [(mirror-expr (:receiver e))] (map mirror-expr (:args e))) :from-hir true :fn-span (:span e)))
       :struct (let [[adt vi vid] (or (ctor-info (:path e)) (unsupported "a struct expression" (:path e)))]
-                (when (:base e) (unsupported "functional update"))
-                (mk e :adt ty :adt adt :variant vi :vid vid
+                (mk e :adt ty :adt adt :variant vi :vid vid :base (some-> (:base e) mirror-expr)
                     :fields (mapv (fn [f] [(field-index vid (:ident f)) (mirror-expr (:expr f))]) (:fields e))))
       :block (if (:label e)
                (binding [*loops* (cons {:label (:label e) :id (:hir-id e) :block? true} *loops*)]
@@ -879,7 +884,7 @@
     (cond
       (and (signed? t) (= v (- (pow2 (dec bits))))) (str n "::MIN")
       (and (signed? t) (= v (dec (pow2 (dec bits))))) (str n "::MAX")
-      (and (not (signed? t)) (= v (dec (pow2 bits))) (not= n "u8")) (str n "::MAX")
+      (and (not (signed? t)) (= v (dec (pow2 bits)))) (str n "::MAX")
       :else (str v "_" n))))
 
 (defn- scalar-bits [v t]
@@ -974,9 +979,24 @@
       (upd! update :allocs-used (fnil conj #{}) id)
       id)))
 
+(declare static-bytes)
+
+(defn- intern-static-alloc!
+  "reserve_and_set_static_alloc: a static's allocation (its evaluated bytes, its name), one per static; its id"
+  [def]
+  (when *allocs*
+    (let [k [:static def]
+          id (or (get-in @*allocs* [:ids k])
+                 (let [i (:next @*allocs*) [bs align] (static-bytes def)]
+                   (swap! *allocs* #(-> % (assoc-in [:ids k] i) (assoc-in [:static i] {:name (second (:data (c/def-of def))) :align align}) (update :next inc)))
+                   (swap! *allocs* assoc-in [:static-bytes i] bs)
+                   i))]
+      (upd! update :allocs-used (fnil conj #{}) id)
+      id)))
+
 (defn- alloc-text
   "write_allocation: an allocation's bytes, sixteen a line (an offset column past sixteen bytes), as ASCII beside"
-  [id bytes]
+  [id bytes & [static]]
   (let [n (count bytes)
         w (max 1 (count (Long/toHexString (long n))))
         line (fn [off chunk]
@@ -984,7 +1004,7 @@
                     (apply str (map #(format "%02x " (bit-and (long %) 0xff)) chunk))
                     (apply str (repeat (- 16 (count chunk)) "   "))
                     "│ " (apply str (map #(let [b (bit-and (long %) 0xff)] (if (<= 0x20 b 0x7e) (str (char b)) ".")) chunk)) "\n"))]
-    (str "\nalloc" id " (size: " n ", align: 1) {\n"
+    (str "\nalloc" id " (" (when static (str "static: " (:name static) ", ")) "size: " n ", align: " (or (:align static) 1) ") {\n"
          (apply str (map-indexed (fn [i ch] (line (* 16 i) ch)) (partition-all 16 bytes)))
          "}\n")))
 
@@ -999,6 +1019,9 @@
                  c (long (if (str/starts-with? sym "\\") (int (first (unesc-char sym))) (.codePointAt sym 0)))]
              [:const (str "const " (char-text c)) t (list 'scalar c 4)])
     "Bool" (bool-const (= "true" (str (:symbol lit))))
+    "Byte" (let [sym (str (:symbol lit))
+                 c (long (if (str/starts-with? sym "\\") (int (first (unesc-char sym))) (.codePointAt sym 0)))]
+             (int-const c t))
     ("Str" "StrRaw") (let [v (str (:value lit (:symbol lit)))]
                        (intern-alloc! (map #(bit-and (long %) 0xff) (.getBytes v "UTF-8")))
                        [:const (str "const " (pr-str v)) t '(raw-str)])
@@ -1018,6 +1041,8 @@
   (case (:k x)
     :literal (lit-const (:lit x) (:neg x) (:ty x))
     :zst-literal (if (= :fndef (first (:ty x))) (fn-const (:ty x)) unit-const)
+    :static-ref (let [id (intern-static-alloc! (:def x))]
+                  [:const (str "const {alloc" id ": " (ty-text (:ty x)) "}") (:ty x) '(static-ptr)])
     :named-const [:const (str "const " (binding [c/*in-value* true c/*erased-regions* true] (c/print-def-path (:def x) (:args x)))) (:ty x)
                   (list 'unevaluated (str (:def x)) [] nil)]
     (unsupported "a constant" (:k x))))
@@ -1287,7 +1312,7 @@
     (:field :deref :index :var-ref :upvar-ref) :place
     (:logical :match :if :let :never-to-any :use :adt :borrow :raw-borrow :call :loop :block :break :continue :return) :into
     (:array :tuple :closure :unary :binary :cast :pointer-coercion :repeat :assign :assign-op) :rvalue
-    (:literal :zst-literal :named-const) :constant))
+    (:literal :zst-literal :named-const :static-ref) :constant))
 
 (declare lower-let-expr in-if-then-scope ast-block-stmts primary-bindings then-else-break-default as-operand as-temp as-place as-rvalue stmt-expr then-else-break match-expr expr-into-pattern declare-bindings
          storage-live-binding! schedule-drop-for-binding!)
@@ -1472,7 +1497,7 @@
                    names (if (seq (:upvar-names info)) (mapv str (:upvar-names info)) (mapv str (range (count os))))]
                [bb (list 'aggregate (list 'closure text [] (vec (take (count os) names)) span) (mapv op-form os))])
     (:assign :assign-op) (let [bb (blk (stmt-expr bb x nil))] [bb (use-rv unit-const)])
-    (:literal :zst-literal :named-const) [bb (use-rv (as-constant x))]
+    (:literal :zst-literal :named-const :static-ref) [bb (use-rv (as-constant x))]
     ;; the rest: an operand (into a temporary)
     (let [[bb o] (as-operand bb scope x :no)] [bb (use-rv o)])))
 
@@ -1497,10 +1522,12 @@
 
 (defn- adt-agg [x os]
   (let [vid (:vid x) adt (:adt x) enum (tc/enum? adt)
-        args (nth (:ty x) 2)
+        args (or (nth (:ty x) 2 nil) (unsupported "an aggregate of" [(:ty x) vid]))
         nm (binding [c/*in-value* true] (c/print-def-path vid args))
         kind (tc/variant-ctor-kind vid)]
-    (list 'adt nm kind (mapv (comp str first) (tc/all-fields-of-variant vid))
+    (list 'adt nm kind (let [fs (mapv (comp str first) (tc/all-fields-of-variant vid))]
+                         ;; a union's aggregate: its one active field
+                         (if (and (number? adt) (= "Union" (:kind (c/def-of adt)))) (vec (keep-indexed (fn [i f] (when (some #{i} (:active x)) f)) fs)) fs))
           (binding [c/*in-value* false] (c/print-def-path adt [])) (:variant x) (vec (for [a args] (if (c/region? a) '(lt) (ty-form a)))))))
 
 (defn expr-into-dest [dest bb x]
@@ -1582,7 +1609,15 @@
             :adt (let [scope (local-scope)
                        [bb m] (reduce (fn [[bb m] [i f]] (let [[bb o] (as-operand bb scope f :maybe)] [bb (assoc m i o)])) [bb {}] (:fields x))
                        n (count (tc/all-fields-of-variant (:vid x)))
-                       os (keep #(get m %) (range n))]
+                       ;; functional update: each field the expression does not give read from the base place
+                       [bb m] (if-let [base (:base x)]
+                                (let [[bb pb] (as-place bb base)
+                                      fts (tc/all-fields (:adt x) (nth (:ty x) 2))]
+                                  [bb (into m (for [[i [_ ft]] (map-indexed vector fts) :when (not (contains? m i))]
+                                                [i (consume (project pb [:field i ft]))]))])
+                                [bb m])
+                       os (keep #(get m %) (range n))
+                       x (assoc x :active (vec (sort (keys m))))]
                    (assign! bb dest (list 'aggregate (adt-agg x os) (mapv op-form os))) bb)
             (:assign :assign-op) (let [bb (blk (stmt-expr bb x nil))] (assign! bb dest (use-rv unit-const)) bb)
             (:continue :break :return) (blk (stmt-expr bb x nil))
@@ -2824,7 +2859,10 @@
      :blocks (mapv (fn [b] {:cleanup (:cleanup b) :stmts (:stmts b) :after-dbg [] :term (:term b)}) (:blocks s))
      :allocs (if-let [used (seq (:allocs-used s))]
                (let [by-id (into {} (for [[k v] (:ids @*allocs*)] [v k]))]
-                 (apply str (for [id (sort > used)] (alloc-text id (get by-id id)))))
+                 (apply str (for [id (sort > used)]
+                              (if-let [si (get-in @*allocs* [:static id])]
+                                (alloc-text id (get-in @*allocs* [:static-bytes id]) si)
+                                (alloc-text id (get by-id id))))))
                "")
      :user-types (vec (for [{:keys [span ty text]} (:user-types s)]
                         (if text text
@@ -2880,6 +2918,71 @@
               (let [blocks (build-drop-tree-mir! (:unwind (st)) :unwind nil)]
                 (when-let [r (nth blocks 0)] (terminate! r '(resume))))
               (finish d name :anon-const 0 t))))))))
+
+(defn- scalar-size [t]
+  (case (first t)
+    (:int :uint) (quot (int-bits (second t)) 8) :bool 1 :char 4 :float (if (= "f32" (second t)) 4 8)
+    nil))
+
+(defn- const-eval-bytes
+  "A static's value as bytes (little endian) for the initializers the slice evaluates: scalar literals (negated) and
+  arrays of them (CTFE's share, §3.8); [bytes align]"
+  [x t]
+  (let [x (loop [x x] (if (#{:paren :drop-temps} (:kind x)) (recur (:expr x)) x))]
+    (cond
+      (and (scalar-size t) (or (= :lit (:kind x)) (and (= :unary (:kind x)) (= "-" (:op x)) (= :lit (:kind (:expr x))))))
+      (let [[lit neg] (if (= :lit (:kind x)) [(:lit x) false] [(:lit (:expr x)) true])
+            c (binding [*allocs* nil] (lit-const lit neg t))
+            v (bigint (second (nth c 3))) n (scalar-size t)]
+        [(vec (for [i (range n)] (long (mod (quot v (pow2 (* 8 i))) 256)))) n])
+      (and (= :array (first t)) (= :array (:kind x)))
+      (let [parts (mapv #(const-eval-bytes % (second t)) (:exprs x))]
+        [(vec (mapcat first parts)) (or (second (first parts)) 1)])
+      :else (unsupported "a static's value" (:kind x)))))
+
+(defn static-bytes [def]
+  (let [d (c/def-of def)] (const-eval-bytes (:expr (:node d)) (tc/erase-ty (c/type-of def)))))
+
+(defn build-const
+  "construct_const: a constant's or a static's body (its initializer into the return place), its temporaries without a
+  scope (the region tree's var_parent none: they live as long as the value)"
+  [d opts]
+  (let [n (:node d)
+        res (tc/body-results d)
+        t (tc/erase-ty (c/type-of (:id d)))
+        k (str (:kind d))
+        kind (cond (str/starts-with? k "Static") (if (str/includes? k "mutability: Mut") :static-mut :static) :else :const)
+        x (:expr n)]
+    (tc/with-solver d
+      (fn []
+        (binding [*edition* (or (:edition opts) 2024) *res* res *self-var* nil *names* {}
+                  *closure-info* {} *upvars* #{} *captures* []
+                  *tree* (binding [*rt* (atom {:parent {} :var {} :cx {:parent nil :var-parent nil}})]
+                           (enter-scope! [(:hir-id x) :call-site])
+                           (enter-scope! [(:hir-id x) :arguments])
+                           (swap! *rt* assoc-in [:cx :var-parent] nil)
+                           (resolve-local nil x) @*rt*)
+                  *b* (atom {:blocks [] :locals [{:ty t :mut true :scope 0}] :source-scopes [[nil nil]] :source-scope 0 :debug []
+                             :scopes [] :breakables [] :if-then nil :unwind (drop-tree) :var-indices {} :unit-temp nil
+                             :block-context [] :check-overflow (boolean (:overflow-checks opts))})]
+          (let [tx (mirror-expr x)]
+            (start-new-block!)
+            (let [bb (blk (expr-into-dest (place 0) 0 tx))]
+              (terminate! bb '(return))
+              (let [blocks (build-drop-tree-mir! (:unwind (st)) :unwind nil)]
+                (when-let [r (nth blocks 0)] (terminate! r '(resume))))
+              (finish d (mir-name d) kind 0 t))))))))
+
+(defn anon-const-body
+  "An anonymous constant of an array type's length or a repeat's count (`[T; 3]`, `[x; 3]`): its literal as usize"
+  [name x]
+  (let [c (case (:kind x)
+            :lit (binding [*allocs* nil *b* (atom {})] (lit-const (:lit x) false usize-ty))
+            (unsupported "an anonymous constant" (:kind x)))]
+    {:name name :kind :anon-const :args 0 :ret (ty-form usize-ty)
+     :locals [{:mut true :scope 0 :ty (ty-form usize-ty)}] :scopes [[nil nil]] :debug []
+     :blocks [{:cleanup nil :stmts [(list 'assign (place-form (place 0)) (use-rv c))] :after-dbg [] :term '(return)}]
+     :allocs "" :user-types []}))
 
 (defn build-body
   "construct_fn over a function's or a closure's HIR and its typeck root's results (within collect/with-crate); OPTS
