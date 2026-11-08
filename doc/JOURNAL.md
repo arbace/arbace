@@ -1090,3 +1090,24 @@ Checked: scheme-read-essential's command (1,358 files and probes, 1,140 by the r
 --record` and `--judge --strict` (0 problems). Scheme's scores: completeness 96.8 to 97.3, maturity 100, independence 97.5 to 99.6 (judge
 0.876 to 0.979). Night: `bin/repr-scheme check --record`, `bin/si check --record`, `bin/si check --aot --record`. Proposed: SCS7 (the
 corpora's files by the report), SCS8 (Larceny's earley and nboyer run as their authors meant, their own result checks).
+
+## 2026-11-08: C's completeness, the deferred classes on the checkout's ci (branch `c-compl`, from next 5ec43f7b7)
+
+The brief: raise C's crops-score completeness (95.1%, 98.7% without by design) by its largest deferred and pending classes. Measured
+first: of the 167 deferred items, sixty were the seed's ci in the records (T.1 of the own target's triage): the complex integers, the
+VLA sizeofs, `__builtin_va_arg_pack`, signals, static and thread-local compound literals, threads and the twelve
+`:ci-run-consolidation` cases pass with the checkout's ci (`bin/ci check --only` and `--aot --only` on 77 programs). Fixed, each after
+gcc 15.2's own code (c-decl.cc declspecs_add_type and build_enumerator, c-typeck.cc c_alignof_expr, set_init_index, do_case and
+output_init_element, c-common.cc c_add_case_label, libcpp's search_path_head and cpp_classify_number; no code copied): `__alignof__`
+of a declaration reads its merged DECL_ALIGN (align-3), an overwritten initializer's side effects are dropped (embed-12), the bool
+keyword specifiers, an enumeration redefinition's range, a non-integer array designator, a no-argument attribute's arguments, a case
+range's conversions and overlap, and `#embed <...>` with no embed directory in gcc's words (eight `:wrong-reason` files), C23's
+decimal suffixes d32, d64, d128 and d64x in the converter and the printer, with `DEC64X_` in Arbace's float.h (six dg and six
+round-trip files). The `--only` runs' rows merged into the records (the night's whole records replace them), four stale entries of
+`test/c/check-known.edn` and six of `test/repr/c/roundtrip-known.edn` removed. Alternatives considered: re-recording whole corpora by
+day (against the day's rules; the night's T.7 list covers it), CS278 (a) for 95_bitfields (not built: the re-entered copies share one
+CFile, so a pragma needs stream-order stamping, proposed as CS290), turning the converter's refusals in error tests into diagnostics
+(CS291) and a dg-wording family for the parser's syntax-error wording (CS292), proposed rather than done. Checked: dg `--essential`
+92 of 92, the essential eval and AOT lists 0 failing, `bin/repr-c check --c23` 59 / 3 / 0, `bin/ci judge-test`, `bin/reap --record`
+0 problems, `bin/crops-score --record` and `--judge --strict`. C: 95.1% to 95.9% (98.7% to 99.6%), maturity 100, independence 99.7.
+Details: doc/C23-SURVEY.md, "As built: C's completeness, the deferred classes measured on the checkout's ci".
