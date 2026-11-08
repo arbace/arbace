@@ -1188,6 +1188,8 @@ adds it.
 
 ## Proposed
 
+JCS240-JCS243 are serialization's slice 4 and JCS169-JCS170's (at the end, "Proposed (serialization slice 4, JCS169-JCS170)",
+branch `java-serial4`; JCS168-JCS171 decided by the user 2026-11-08, "Decided (the user, 2026-11-08: JCS168-JCS171)");
 JCS190-JCS193 are JCS167's slices 2 and 3 (at the end, "Proposed (JCS167 slices 2-3)", branch `java-serial2`; JCS190
 the DECISION on JCS168's switch);
 JCS168-JCS171 are JCS167's first slice's (at the end, "Proposed (JCS167)", branch `java-serial`);
@@ -4167,3 +4169,217 @@ stops the night for the morning, nothing reverted and nothing fast-forwarded.
 
 **The day after**: the new failures' classes, `bin/java-check --record` of the levels (the whole corpus with the gate's
 `--full`), `bin/reap --record`, `bin/crops-score --record`; JCS190 (the switch's default) on step p's comparison.
+
+## Decided (the user, 2026-11-08: JCS168-JCS171)
+
+**JCS168 (a)**: j2g's default serialVersionUID ahead of time, the night's `J2G_DEFAULT_SUID=1` run (the shipped default
+remains JCS190's, on that run's comparison); **JCS169 (a)** after slices 2-4: serializable lambdas (built below);
+**JCS170 (a)**: `java.lang.reflect.Proxy` over Dyn at both levels, with serialization's proxy class descriptors (built
+below); **JCS171 (a)**: the executable's growth accepted (measured at the night's build, below). JCS191 (the locks'
+serial forms), JCS192 and JCS193 are not decided: left for the user.
+
+## As built: serialization slice 4 (write-ahead)
+
+Branch `java-serial4` (from `mac/java-night` 639d42ab9), 2026-11-08, by day under the light rules: JCS167's fourth
+slice ("The remaining slices": the JDK variants that cut serialization members, restored). Slice 1 brought
+`java.io`'s streams into the world, so the members j2g had stubbed for naming them (`ObjectInputStream`,
+`ObjectStreamField`, `Externalizable` outside the world: `KeepAliveCache`'s `writeObject`, `SerialBlob`'s and
+`SerialClob`'s hooks, `UnixDomainSocketAddress`'s `readObject`, `DirectoryIteratorException`'s, the `<clinit>`s of the
+classes with `serialPersistentFields`) translate as they are. What was left is what the variants and the source list cut
+by hand, found by a scan of every world file's serialization members (`.tmp/s4/hookscan.py`: the bodies of
+`readObject`, `writeObject`, `readObjectNoData`, `readResolve`, `writeReplace`, `readExternal`, `writeExternal`, the
+`serialPersistentFields` initializers and the methods taking a stream, against the world: the joint check's sources and
+jrt's classes): 24 classes named 4 classes outside it.
+
+| what | was | now |
+|---|---|---|
+| `DESKey`, `DESedeKey`, `PBEKey`, `PasswordCallback` | `readObject` cut (`PBEKey`, `PasswordCallback`) or naming `CleanerFactory` (F17's Cleaner is not in the world) | `readObject` jdk26u's in the variants without the Cleaner's registration, as their constructors (the key zeroed by `destroy`, the password by `clearPassword`; `PBEKey` and `PasswordCallback` keep the clearing action as their `cleanable`) |
+| `LogRecord`, `URL` | `serialPersistentFields` cut (its initializer named `ObjectStreamField`) | jdk26u's (the variants' cut removed) |
+| `SealedObject` | its static initializer cut (`SharedSecrets.setJavaxCryptoSealedObjectAccess`, which jrt's hand-written SharedSecrets has not) | the variant removed: `JavaxCryptoSealedObjectAccess` is one of j2g's serialization accessors (`m/serial-accessors`, slice 1's mechanism: set by SealedObject's initializer, its getter initializing SealedObject first), so JCEKS's secret keys (`SealedObjectForKeyProtector.getKey`) work, "by design" no longer |
+| `java.time.Ser`, `java.time.chrono.Ser` | out of `time-sources` (Externalizable outside the world): the `writeReplace` of 16 java.time classes and 4 of java.time.chrono stubbed | in `time-sources`; chrono's cases of the Japanese, Hijrah, Minguo and Thai Buddhist dates (not in the world) are operation-level stubs |
+| `ConcurrentSkipListMap.readObject` | names `VarHandle` | its fences are j2g's (`vh.ae`), nothing to do |
+
+`test/jrt/jrt_sources.ae`'s comments that said serialization was outside the build are corrected (SerialBlob, the
+java.io exceptions, the JCA's SealedObject, JCEKS, UnixDomainSocketAddress); LICENSE.md's line for `SealedObject.ae`.
+Each restored variant applied to its class's committed forms by j2g's own `apply-variant` (`.tmp/s4/vcheck.ae`, stage 0):
+DESKey and DESedeKey 2 replaced, PBEKey and PasswordCallback 4 replaced, each with a `readObject` and no
+`CleanerFactory`; LogRecord and URL with their `serialPersistentFields`.
+
+## As built: JCS170 (write-ahead)
+
+The user's JCS170 (a): `java.lang.reflect.Proxy` over Dyn, at both levels, with serialization's proxy class descriptors.
+
+- **jrt** (`reflect.ae`, `serial.ae`, `serial_classes.ae`, `access.ae`): `Proxy.newProxyInstance` (the handler required,
+  the class's constructor of `InvocationHandler` called), `getProxyClass` (ObjectInputStream's `resolveProxyClass`),
+  `isProxyClass` (the classes registered by `RegisterProxyClass`) and the new `getInvocationHandler` ("not a proxy
+  instance"), over `ProxyClassFor`, a hook arbace/lang's `j2g_dyn.go` sets (`dynSetProxyHook`); without the evaluator's Dyn
+  they throw `UnsupportedOperationException` as before. `Proxy` is Serializable with jdk26u's serial form
+  (serialVersionUID -2222568056686623797, the protected field `h` read and written through the proxy object's first field,
+  `proxyHandlerField`); `InvocationHandler_Cast`, so that Dyn has the interface's method (an interpreted or deftype handler
+  is a Dyn: without it the handler's cast failed, found by the day's check) and its `IsInstance`; `JavaLangAccess.setCause`
+  (UndeclaredThrowableException's `readObject`). `bin/jrt manifest`: Proxy gains `getInvocationHandler` and
+  `java.io.Serializable`; "edge members ... 0".
+- **arbace/lang** (`Compiler.ae`): `Compiler$ProxySupport.proxyClass` follows jdk26u's `Proxy.ProxyBuilder` (the interface
+  limit, "is not an interface", hidden, sealed, "repeated interface", null elements; non-public interfaces of one package,
+  "cannot have non-public interfaces in different packages"; the name `jdk.proxy1.$ProxyN` for public interfaces, the
+  non-public ones' package otherwise; modifiers `public final` or `final`; one class per list of interfaces) and
+  `ProxyGenerator`'s methods (Object's `hashCode`, `equals`, `toString` first, each interface's non-static methods in
+  order, one method per signature and return type, the first interface's `Method`, the duplicates' exceptions narrowed by
+  `collectCompatibleTypes`, `checkReturnTypes`' "methods with same signature ... but incompatible return types"); each
+  method a `Compiler$ProxyFn` (a RestFn: the handler's `invoke` with the proxy, the Method and the arguments or null; the
+  result checked as the generated code checks it: null for a primitive NullPointerException, another type
+  ClassCastException; Errors and RuntimeExceptions propagate, a checked exception the method does not declare is wrapped in
+  `UndeclaredThrowableException`). `Compiler$Dyn.defineJavaProxy` (a native, `arbace.j2g.dyn`): a Dyn class whose
+  superclass is Proxy, no fields (the handler the object's field 0), registered as a proxy class, `SerialNew` an object
+  without a handler (read into it through Proxy's `h`).
+- **j2g** (`dyn.ae`): the native, the hook, `proxyClass` as a root, and Dyn over a program's own non-public interfaces too
+  (`nm/own-class?`, package lang: a compiled test's package-private interface can be proxied).
+- **The world**: jdk26u's `java/lang/reflect/UndeclaredThrowableException.java` (`serial-sources`).
+
+**Divergence, recorded**: jrt's member tables keep no throws clauses (`Method.getExceptionTypes` is empty), so a proxy's
+method whose exceptions are unknown lets a checked exception through instead of wrapping it (JCS240 proposes the
+clauses). `InvocationHandler.invokeDefault` is not built (JCS241).
+
+**Checked by day**: `go test ./jrt` passes, `TestProxy` among them (`proxy_test.ae`: the hook's absence, a stand-in
+ProxyClassFor, isProxyClass, getProxyClass's one class, getInvocationHandler and its refusal, Proxy's serialVersionUID and
+`h` read and written by reflection); `go vet ./jrt` on amd64 and arm64. The rules of `ProxySupport` and `ProxyFn`,
+interpreted on stage 0 over `defineProxyClass` (a copy, `.tmp/s4/forms/jcs170`, the handler an IFn there: stage 0's Dyn
+has not InvocationHandler): Runnable's run, Function's apply, Comparable's compareTo, the three Object methods with Object's
+Methods, one class per list (`jdk.proxy1.$Proxy1` twice), "java.lang.String is not an interface", "repeated interface:
+java.lang.Runnable", the null element's NullPointerException, a declared exception through, null for an int's
+NullPointerException, a String for an int's ClassCastException, "methods with same signature length() but incompatible
+return types: int and others" (CharSequence and java.sql.Clob), Supplier and Callable's covariant `get`/`call` accepted.
+Not checked by day (no build): the Java forms of `Compiler.ae` in the build's analysis, j2g's output, the real streams.
+
+## As built: JCS169 (write-ahead)
+
+The user's JCS169 (a), after slices 2-4: serializable lambdas and method references. javac compiles one into an
+`altMetafactory` call with FLAG_SERIALIZABLE (its class's `writeReplace` answers a `SerializedLambda`) and a
+`$deserializeLambda$` in the capturing class (a switch over the SerializedLambda that makes the lambda again from its
+captured arguments, called by `SerializedLambda.readResolve`). The Go build has neither invokedynamic nor classes made
+for translated lambdas, so the two halves meet in jrt's own Java:
+
+- **`jdk.internal.jrt.SerialLambdas`** (overlay): a site registers what its SerializedLambda holds (the capturing class,
+  the functional interface's class, method and signature, the implementation's REF_ kind, class, name and signature, the
+  instantiated type) with a `Factory` of the lambda from captured values; a lambda's object holds an `Instance` (its site
+  and captured values); `replace` is the SerializedLambda; `deserialize` finds the site by the capturing class and the
+  implementation's name and signature and checks the rest as `$deserializeLambda$` does, else jdk26u's
+  InvalidObjectException "ReflectiveOperationException during deserialization" around javac's IllegalArgumentException
+  "Invalid lambda deserialization".
+- **jdk26u's `SerializedLambda`** in the world (`serial-sources`), its variant (`overlay/jdk/variants/SerializedLambda.ae`):
+  `readResolve` is `SerialLambdas.deserialize` (no `$deserializeLambda$` to call), `toString` names the kind without
+  java.lang.invoke's MethodHandleInfo.
+- **j2g** (`code.ae`'s `serial-lambda-val`, `out.ae`'s adapters, `main.ae`'s roots): a serializable lambda's or method
+  reference's value is made by a factory closure of its captured values, the site's own adapter code with the captured
+  Go names (the receiver `this`, its struct `t` when not a leaf, the captured locals, a bound reference's receiver)
+  shadowed by the factory's arguments, so there is one translation of the body; the site registers itself and calls the
+  factory with its values; the adapter of a serializable interface (or with the Serializable marker) has a field `Ser`
+  and the member `writeReplace` (private final, as InnerClassLambdaMetafactory's) calling `SerialLambdas.replace`.
+  The implementation's facts are javac's: the analyzer's serializable lambda name (`lambda$m$hash$N`, LambdaToMethod's),
+  REF_invokeStatic or, capturing this, REF_invokeSpecial; a method reference's own method and kind.
+- **The interpreter** (`arbace.classes.interp/serial-lambda!`): a serializable site's lambda class is registered when built,
+  its factory allocating the class's object with the captured values as its fields, and given `writeReplace` through the
+  host (`Compiler$CFGo.setMethod`); and the class of an intersection-cast lambda now implements Serializable
+  (`lambda-markers`, as j2g's): `(IntSupplier & Serializable) () -> 1` was not Serializable at the interpreted level, a
+  bug found by the day's check.
+
+**Divergences, recorded**: the capturing class has no `$deserializeLambda$` (reflection does not list it); an interpreted
+site registers when its method is built, so a stream read before the site ran in this process is refused (a translated
+site likewise registers when it runs; JCS242 proposes registering at class initialization); an adapter of a Clojure fn to
+a serializable interface (no site) is refused with NotSerializableException.
+
+**Checked by day**: the joint javac check (SerialLambdas, SerializedLambda); the interpreter's sites on stage 0 over a
+stand-in of SerialLambdas (`.tmp/s4/sl`, `interp.ae` as a copy without slice 1's runtime calls): `(IntSupplier &
+Serializable) () -> x + 1` registered as `[jcs169/T IntSupplier getAsInt ()I 6 jcs169/T lambda$st$97ab7abf$1 (I)I ()I]`
+with captured `[5]`, its factory's lambda answering 6; an instance lambda of a Serializable interface `[... 7 ...
+lambda$inst$8783a704$1 (I)I ()I]` with this and 3 captured, remade to 103; a plain Runnable without writeReplace. The
+night's check with the real streams is `test/jrt/serialization/lambda/check.ae` (its sample in `src/`, forms in `forms/`).
+
+## JCS171 (a): the growth, measured at the night's build
+
+Accepted as decided; the night records the executable's size against the night before's (step 3 below) in this file.
+
+## The night's commands (slice 4, JCS169, JCS170)
+
+After the Java night, in a worktree of `java-night` (or `next`) with `java-serial4` merged; heavy commands under the lock:
+
+```sh
+# 0. the joint javac check (0 errors: 2,425 files, 5,200 classes on this branch)
+.tmp/night7/all9-run.sh $PWD
+# 1. jdk/ converted afresh: the sources line +2 share (java/time/Ser, java/time/chrono/Ser), +2 share (UndeclaredThrowableException,
+#    SerializedLambda), +1 overlay (SerialLambdas); 0 failed, 0 javac errors, no javac: 0 fallbacks
+REPR_JAVA_EXE=$(ls -td /root/arbace/.tmp/gate-exe/javac-*/ | head -1)arbace-javac REPR_JAVA_STALE_OK=1 \
+  ARBACE_HEAVY_CMD=$PWD/bin/heavy-lock bin/jrt-convert update
+# 2. the edges (SerialLambdas, SerializedLambda, JavaxCryptoSealedObjectAccess's accessor, JavaLangAccess.setCause)
+bin/heavy-lock bin/j2g-edge update && bin/heavy-lock bin/javac-vendor edge
+# 3. the executable (JCS168's switch on, as the Java night's); j2g's report: no native without its Go function
+#    (defineJavaProxy), the variants' counts (DESKey 2, DESedeKey 2, PBEKey 4, PasswordCallback 4, LogRecord 1+1, URL 1/2 cut,
+#    SerializedLambda 2+1); the size against the night before's (JCS171), recorded here
+J2G_DEFAULT_SUID=1 bin/heavy-lock bin/arbace-go --build && bin/arbace-go --smoke && bin/jrt test && ls -l target/arbace-go/amd64/arbace
+# 4. the smokes: "proxy-check: 9 of 9", "lambda-check: 6 of 6", and slice 1's (the Java night's) again
+target/arbace-go/amd64/arbace -e '(load-file "test/jrt/serialization/proxy_check.ae")'
+ARBACE_PATH=$PWD:$PWD/test/jrt/serialization/lambda/forms target/arbace-go/amd64/arbace -e '(load-file "test/jrt/serialization/lambda/check.ae")'
+# 5. Java's levels on the areas: saved, not recorded; no passing test lost
+JAVA_CHECK_EXE=$PWD/target/arbace-go/amd64/arbace J2G_GO_EXE=$PWD/target/arbace-go/amd64/arbace \
+  JAVA_CHECK_HEAVY=$PWD/bin/heavy-lock bin/java-check --levels interp,compiled --jobs 8 \
+  --only 'jdk/java/lang/reflect/Proxy/|jdk/java/io/Serializable/(proxy|resolveProxyClass)|jdk/java/io/ObjectInputStream/(ResolveProxyClass|TestObjectStreamClass)|jdk/java/lang/annotation/UnitTest|jdk/java/lang/invoke/lambda/[A-Za-z]*Serializ|langtools/tools/javac/lambda/(SerializableObjectMethods|SerializedLambdaIn|LambdaLambdaSerialized|GenericMethodRefImplClass)|jdk/java/util/concurrent/atomic/Serial|jdk/java/util/logging/SerializeLogRecord|jdk/java/net/URL/(Test|RestoreURL)|jdk/com/sun/crypto/provider/Cipher/DES/Sealtest|jdk/java/time/' \
+  --save .tmp/serial4-night/check
+# 6. the day after: the new failures' classes (narrower than :serialization), bin/reap --record, bin/crops-score --record
+```
+
+**Risks and fallbacks**: (1) `Compiler.ae`'s ProxySupport or ProxyFn fails the build's analysis: revert `Compiler.ae`'s
+two classes and `defineJavaProxy`, `dyn.ae`'s hook falls back to its `false` form (Proxy throws as before), the rest
+stands; (2) j2g's factory closure does not compile (a captured name the shadowing misses: Go's "declared and not used"
+or an undefined name): `serial-site?` false (one line, `code.ae`) leaves serializable lambdas as before (not
+deserializable), the interpreter's half stands; (3) Dyn over the own non-public interfaces breaks a compiled program:
+revert that one `or`; (4) `SerializedLambda`'s variant refuses (its converted shape differs): drop the source line and the
+variant with SerialLambdas (j2g's and the interpreter's halves are inert without `jdk/internal/jrt/SerialLambdas`).
+
+### Expected yield
+
+Of the class's tests (slice 1's scan, `.tmp/js/classify.txt` of `java-serial`): the proxies' 11 (`java/io/Serializable/proxy`,
+`resolveProxyClass`, `ObjectInputStream/ResolveProxyClass`, `TestObjectStreamClass`, `annotation/UnitTest`,
+`ManagementFactory/ThreadMXBeanProxy`, `ResponseCache/getResponseCode`, `URL/RestoreURL`, `URL/Test`) less those needing
+class loaders or the security manager, and the 9 lambdas' (`LambdaSerialization`, `RepetitiveLambdaSerialization`,
+`atomic/Serial`, javac's `SerializedLambdaIn*`, `LambdaLambdaSerialized`, `SerializableObjectMethods`,
+`GenericMethodRefImplClass`; `LambdaClassLoaderSerialization` needs a loader): about **10-14** at each level; java.lang.reflect's
+9 Proxy tests in the corpus (Basic1, Boxing, CharType, NullClassLoader, ProxyClashTest, nonJavaNames, nonPublicProxy's two,
+returnTypes; outside `:serialization`, in reflection's class) about **5-7**; slice 4's: logging's `SerializeLogRecordTest`, the
+DES `Sealtest`, java.time's serialization cases, about **3-6**. Together about +20-25 at eval and +15-20 at AOT: Java's two cells
+about +0.6 point each.
+
+## Proposed (serialization slice 4, JCS169-JCS170)
+
+Numbered from JCS240 (JCS220-JCS222 are F10b's, JCS230+ left to the day's other branches).
+
+### JCS240 Throws clauses in the member tables
+
+jrt's `Method.getExceptionTypes` and `Constructor.getExceptionTypes` are empty: the tables keep no throws clauses, though
+j2g knows them (`jdk/edge.edn`'s `:throws`, the Java forms' `:throws`) and the interpreter too. A proxy cannot tell a
+declared checked exception from an undeclared one (JCS170 lets every one through), and reflection's `getExceptionTypes`,
+`toGenericString` and `Executable.toString` print none. (a) j2g writes them in the tables' lines (an `E` suffix of class
+names, decoded lazily), the interpreter publishes its methods' and constructors', `ProxyFn` then wraps as the JDK: half a
+day, the tables a few hundred KB larger; (b) only for the methods of interfaces (a proxy's), smaller; (c) as now.
+**Recommended: (a)**: reflection's answers are the JDK's, and the size is JCS171's kind of growth.
+
+### JCS241 InvocationHandler.invokeDefault
+
+Java 16's `InvocationHandler.invokeDefault(proxy, method, args)` runs an interface's default method on a proxy. (a) jrt's
+static over the default method's Go function (j2g's `Iface_m` defaults, by the Method's key) and, for an interpreted
+interface, the interpreter's method: half a day; (b) UnsupportedOperationException as now (the method is missing).
+**Recommended: (a)** with JCS240.
+
+### JCS242 Serializable lambdas' sites registered at class initialization
+
+A site registers when it runs (the interpreter: when its method is built), so a stream written by another process (or
+before the lambda was made in this one) cannot be read: javac's `$deserializeLambda$` exists from the class's loading.
+(a) j2g registers each class's serializable sites in its initialization (their factories as package-level functions of the
+captured values, the body translated a second time) and the interpreter when the class is defined (its lambdas' classes
+made eagerly): a day; (b) as now. **Recommended: (a)** when a test reads lambdas from a file (none of the class's do now).
+
+### JCS243 A deftype's and a record's serialization (JCS167's slice 8 first)
+
+The day's proxy check cannot serialize a proxy whose handler is a deftype: Clojure's own types have no SerialNew and no
+serial fields (CDR10's remainder, slice 8). (a) slice 8 next (a deftype's and defrecord's Dyn allocation, their fields as
+serial fields, `arbace.lang`'s hooks): a day; (b) after slices 5-7. **Recommended: (a)**: Clojure's suite's `serialization`
+9 and every Clojure handler of a serialized proxy.

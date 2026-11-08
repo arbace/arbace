@@ -505,7 +505,16 @@ covers what.
   files of the same names (https://github.com/openjdk/jdk26u at `baf63fb`, `src/java.base/share/classes/java/io/`) edited
   by `test/jrt/serialization/variants.py` (each file's header says so): Copyright (c) Oracle and/or its affiliates, under
   the GNU General Public License version 2 with the Classpath Exception (text below), the edits Arbace's own;
-  `overlay/jdk/java.base/java/io/ClassCache.java` and `jdk/internal/jrt/SerialAlloc.java` are Arbace's own.
+  `overlay/jdk/java.base/java/io/ClassCache.java` and `jdk/internal/jrt/SerialAlloc.java` are Arbace's own. Since
+  serialization's slice 4, JCS169 and JCS170 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: serialization slice 4",
+  "As built: JCS169 (write-ahead)", "As built: JCS170 (write-ahead)"): `overlay/jdk/variants/SerializedLambda.ae` keeps
+  the code of jdk26u's `src/java.base/share/classes/java/lang/invoke/SerializedLambda.java` where it keeps it (its
+  `toString`'s format; the kinds' names of `MethodHandleInfo.java`), and the `readObject`s the variants `DESKey.ae`,
+  `DESedeKey.ae`, `PBEKey.ae` and `PasswordCallback.ae` restore are jdk26u's as repr/java converts them, less the
+  Cleaner's registration: Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2
+  with the Classpath Exception (text below), the rest Arbace's own; `overlay/jdk/java.base/jdk/internal/jrt/SerialLambdas.java`
+  is Arbace's own; `arbace/lang/Compiler.ae`'s `Compiler$ProxySupport` and `Compiler$ProxyFn` are Arbace's own code
+  following the rules of jdk26u's `java/lang/reflect/Proxy.java` and `ProxyGenerator.java` (their messages quoted).
 - Security (doc/go/JRT-NOTES.md, "Security"): `overlay/jdk/java.base/javax/crypto/JceSecurity.java`
   holds the `getInstance` methods of https://github.com/openjdk/jdk26u at `baf63fb`
   (`src/java.base/share/classes/javax/crypto/JceSecurity.java.template`),
