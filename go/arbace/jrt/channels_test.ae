@@ -327,3 +327,105 @@ name (Linux's: the first byte NUL), which the C's rule reads as empty; a blocked
         (when (!= (HostChannels_UnixAccept0_I_I1_B2_I1__I_native l nfd pa e) 1)
           (.Errorf t "an accept at the abstract name: errno %d" (aget (.-A e) 0)))
         (HostChannels_Close0_I_I1__I_native (aget (.-A nfd) 0) nil)))))
+
+(go/func TestChannelInherited
+  "InheritedChannel.c's natives (JCS201): SO_TYPE, the family, the peer and connectedness of a socket pair's
+end (AF_UNIX, connected, unnamed), a loopback listener (AF_INET, no peer) and its accepted connection (the
+client's address and port); a pipe not a socket; dup and dup2 (the copy reads what the original's peer
+wrote); open of a scratch file and its modes; adopt entering a socket into the table, closed by close0.\n"
+  [^{:tag (* testing/T)} t]
+  (let [e (chErr)
+        (values pr err) (syscall/Socketpair syscall/AF_UNIX syscall/SOCK_STREAM 0)]
+    (when (!= err nil)
+      (.Fatal t err))
+    (let [a (conv int32 (aget pr 0))
+          b (conv int32 (aget pr 1))
+          path (NewRefArray (.ArrayClass Prim_byte) 1)]
+      (defer (syscall/Close (conv int b)))
+      (when (or (!= (HostChannels_InheritedSoType0_I__I_native a) 1) (!= (HostChannels_InheritedFamily0_I__I_native a) 3)
+                (not (HostChannels_InheritedConnected0_I__Z_native a)))
+        (.Errorf t "socket pair: type %d family %d" (HostChannels_InheritedSoType0_I__I_native a) (HostChannels_InheritedFamily0_I__I_native a)))
+      (HostChannels_InheritedUnixPeer0_I_B2__V_native a path)
+      (when (or (== (aget (.-A path) 0) nil) (!= (unixName path) ""))
+        (.Errorf t "socket pair's peer name %v" (aget (.-A path) 0)))
+      ;; dup: the copy reads what b writes; dup2 onto a second copy
+      (let [d (HostChannels_InheritedDup0_I_I1__I_native a e)
+            p2 (NewRefArray (.ArrayClass Prim_byte) 1)]
+        (when (< d 0)
+          (.Fatalf t "dup: errno %d" (aget (.-A e) 0)))
+        (syscall/Write (conv int b) (lit (slice byte) 104 105))
+        (let [buf (make (slice byte) 4)
+              (values n _) (syscall/Read (conv int d) buf)]
+          (when (!= (conv string (subslice buf 0 n)) "hi")
+            (.Errorf t "dup's copy read %q" (subslice buf 0 n))))
+        (let [(values f2 _) (syscall/Dup (conv int b))]
+          (when (!= (HostChannels_InheritedDup20_I_I_I1__I_native d (conv int32 f2) e) 0)
+            (.Errorf t "dup2: errno %d" (aget (.-A e) 0)))
+          (when (!= (HostChannels_InheritedFamily0_I__I_native (conv int32 f2)) 3)
+            (.Error t "dup2's target not the socket"))
+          (when (!= (HostChannels_InheritedDup20_I_I_I1__I_native d d e) 0)
+            (.Error t "dup2 onto itself"))
+          (syscall/Close f2))
+        (HostChannels_InheritedUnixPeer0_I_B2__V_native d p2)
+        ;; adopt: into the table; close0 closes it
+        (when (!= (HostChannels_InheritedAdopt0_I_I1__I_native d e) 0)
+          (.Errorf t "adopt: errno %d" (aget (.-A e) 0)))
+        (when (== (chanGet d) nil)
+          (.Error t "adopt: not in the table"))
+        (when (!= (HostChannels_Close0_I_I1__I_native d e) 0)
+          (.Error t "close0 of the adopted descriptor")))
+      (syscall/Close (conv int a))))
+  ;; a loopback listener: AF_INET, no peer; its accepted connection: the client's port
+  (let [e (chErr)
+        (values l port) (chListen t)
+        c (HostChannels_Socket0_Z_Z_Z_I1__I_native false true false e)
+        addr (NewRefArray (.ArrayClass Prim_byte) 1)
+        pp (NewIntArray 2)]
+    (defer (HostChannels_Close0_I_I1__I_native l nil))
+    (defer (HostChannels_Close0_I_I1__I_native c nil))
+    (when (or (!= (HostChannels_InheritedSoType0_I__I_native l) 1) (!= (HostChannels_InheritedFamily0_I__I_native l) 1)
+              (HostChannels_InheritedConnected0_I__Z_native l) (!= (HostChannels_InheritedPeer0_I_B2_I1__I_native l addr pp) 0))
+      (.Error t "listener: type, family or a peer"))
+    (when (!= (HostChannels_Connect0_I_B1_I_I_I1__I_native c (loopback4) 0 port e) 1)
+      (.Fatalf t "connect: errno %d" (aget (.-A e) 0)))
+    (let [nfd (NewIntArray 1)
+          ca (NewRefArray (.ArrayClass Prim_byte) 1)
+          cp (NewIntArray 2)]
+      (when (!= (HostChannels_Accept0_I_I1_B2_I1_I1__I_native l nfd ca cp e) 1)
+        (.Fatalf t "accept: errno %d" (aget (.-A e) 0)))
+      (let [s (aget (.-A nfd) 0)]
+        (defer (HostChannels_Close0_I_I1__I_native s nil))
+        (HostChannels_Address0_I_Z_B2_I1_I1__I_native c true ca cp e)
+        (when (or (!= (HostChannels_InheritedPeer0_I_B2_I1__I_native s addr pp) 1) (!= (aget (.-A pp) 0) (aget (.-A cp) 0))
+                  (!= (len (.-A (assert (* ByteArray) (aget (.-A addr) 0)))) 4)
+                  (!= (aget (.-A (assert (* ByteArray) (aget (.-A addr) 0))) 0) 127))
+          (.Errorf t "accepted: peer port %d, want %d" (aget (.-A pp) 0) (aget (.-A cp) 0))))))
+  ;; a pipe is no socket; a datagram socket's type
+  (let [fds (make (slice int) 2)]
+    (when [err (syscall/Pipe fds)] (!= err nil)
+      (.Fatal t err))
+    (when (or (!= (HostChannels_InheritedSoType0_I__I_native (conv int32 (aget fds 0))) -1)
+              (!= (HostChannels_InheritedFamily0_I__I_native (conv int32 (aget fds 0))) -1))
+      (.Error t "a pipe: a socket type or family"))
+    (syscall/Close (aget fds 0))
+    (syscall/Close (aget fds 1)))
+  (let [(values u _) (syscall/Socket syscall/AF_INET syscall/SOCK_DGRAM 0)]
+    (when (!= (HostChannels_InheritedSoType0_I__I_native (conv int32 u)) 2)
+      (.Error t "a datagram socket's type"))
+    (syscall/Close u))
+  ;; open: a scratch file written and read
+  (let [e (chErr)
+        p (+ (.TempDir t) "/f")
+        w (HostChannels_InheritedOpen0_B1_I_I1__I_native (javaBytes p) 1 e)]
+    (when (!= w -5)
+      (.Error t "open O_WRONLY of a missing file succeeded"))
+    (when [err (syscall/Close (firstFD (syscall/Creat p 0600)))] (!= err nil)
+      (.Fatal t err))
+    (let [r (HostChannels_InheritedOpen0_B1_I_I1__I_native (javaBytes p) 2 e)]
+      (when (< r 0)
+        (.Fatalf t "open O_RDWR: errno %d" (aget (.-A e) 0)))
+      (syscall/Close (conv int r)))))
+
+(go/func firstFD "firstFD is a descriptor of a (fd, err) pair, the test failing elsewhere on the error.\n"
+  ^int [^int fd ^error err]
+  fd)

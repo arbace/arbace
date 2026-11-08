@@ -309,4 +309,37 @@ public final class HostChannels {
 
     /** UnixDomainSockets.localAddress0: 0 with getsockname's name in path[0] (null: not AF_UNIX), or THROWN. */
     public static native int unixLocalAddress0(int fd, byte[][] path, int[] err);
+
+    // -- InheritedChannel.c's natives (JCS201 (a); doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS201"):
+    //    jdk26u's sun.nio.ch.InheritedChannel, derived over these (test/jrt/derive.ae) --
+
+    /** InheritedChannel.dup: dup(2) of fd, not entered into the table: the new descriptor or THROWN. */
+    public static native int inheritedDup0(int fd, int[] err);
+
+    /** InheritedChannel.dup2: dup2(2) of fd onto fd2: 0 or THROWN. */
+    public static native int inheritedDup20(int fd, int fd2, int[] err);
+
+    /** InheritedChannel.open0: open(2) of path's bytes with oflag (0 O_RDONLY, 1 O_WRONLY, 2 O_RDWR): the descriptor or THROWN. */
+    public static native int inheritedOpen0(byte[] path, int oflag, int[] err);
+
+    /** InheritedChannel.soType0: SO_TYPE: 1 SOCK_STREAM, 2 SOCK_DGRAM, -1 another type or not a socket. */
+    public static native int inheritedSoType0(int fd);
+
+    /** InheritedChannel.addressFamily: getsockname(2)'s family: 1 AF_INET, 2 AF_INET6, 3 AF_UNIX, -1 another or none. */
+    public static native int inheritedFamily0(int fd);
+
+    /** InheritedChannel.isConnected: whether getpeername(2) succeeds. */
+    public static native boolean inheritedConnected0(int fd);
+
+    /**
+     * InheritedChannel.inetPeerAddress0 and peerPort0: 1 with getpeername(2)'s address in addr[0] (4 or 16 bytes, a
+     * v4-mapped address its 4) and its port and scope in port[0], port[1] (an AF_INET or AF_INET6 peer), else 0.
+     */
+    public static native int inheritedPeer0(int fd, byte[][] addr, int[] port);
+
+    /** InheritedChannel.unixPeerAddress0: getpeername(2)'s AF_UNIX name in path[0] (left null for another family or none). */
+    public static native void inheritedUnixPeer0(int fd, byte[][] path);
+
+    /** The inherited descriptor entered into the table as a blocking channel's (non-blocking in the kernel): 0 or THROWN. */
+    public static native int inheritedAdopt0(int fd, int[] err);
 }
