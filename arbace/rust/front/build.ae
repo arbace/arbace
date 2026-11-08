@@ -37,7 +37,7 @@
 (def ^:dynamic *root-file* nil)
 (def ^:dynamic *fixed-temps-scope* nil)   ; a guard's scope, whose temporaries the sub-branches of an or-pattern share
 (def ^:dynamic *let-vis* nil)   ; the source scope an `if`'s let bindings are visible in (its variable source info's)
-(declare char-text lit-const int-const)
+(declare char-text lit-const int-const finish*)
 (def ^:dynamic *guard-vars* #{})   ; the bindings of the enclosing guards (guard_context): their places through their references
 
 (declare span-text ctor-info field-span-of-ty)
@@ -56,7 +56,8 @@
 (defn ty-form
   "A type as MIR forms write it: (ty TEXT STRUCT)"
   [t]
-  (list 'ty (ty-text t)
+  (with-meta
+   (list 'ty (ty-text t)
         (case (first t)
           :bool 'bool :char 'char :str 'str :never 'never
           :int (list 'int (second t)) :uint (list 'uint (second t)) :float (list 'float (second t))
@@ -71,7 +72,8 @@
                        (vec (for [a (nth t 2)] (if (c/region? a) '(lt) (ty-form a)))))
           :fnptr '(fnptr)
           :param (list 'param (nth t 2))
-          (list 'other (str (first t))))))
+          (list 'other (str (first t)))))
+   {:tc t}))
 
 (def ^:private int-bits {"i8" 8 "i16" 16 "i32" 32 "i64" 64 "i128" 128 "isize" 64 "u8" 8 "u16" 16 "u32" 32 "u64" 64 "u128" 128 "usize" 64})
 
@@ -825,7 +827,7 @@
 ;; CFG (cfg.rs)
 (defn- start-new-block! [& [cleanup]]
   (let [n (count (:blocks (st)))] (upd! update :blocks conj {:stmts [] :term nil :cleanup (boolean cleanup)}) n))
-(defn- push! [bb s] (upd! update-in [:blocks bb :stmts] conj s))
+(defn- push! [bb s] (upd! update-in [:blocks bb :stmts] conj (with-meta s {:scope (:source-scope (st))})))
 (defn- terminate! [bb t] (upd! assoc-in [:blocks bb :term] t))
 (defn- term-of [bb] (get-in (st) [:blocks bb :term]))
 (defn- goto! [from to] (terminate! from (list 'goto to)))
@@ -886,8 +888,8 @@
              :subslice (list 'subslice (nth e 1) (nth e 2) (nth e 3))
              :downcast (list 'downcast (second e) (nth e 2))))))
 
-(defn- new-local! [ty & {:keys [mut scope] :or {mut true scope 0}}]
-  (let [n (count (:locals (st)))] (upd! update :locals conj {:ty ty :mut mut :scope scope}) n))
+(defn- new-local! [ty & {:keys [mut scope user] :or {mut true scope 0}}]
+  (let [n (count (:locals (st)))] (upd! update :locals conj (cond-> {:ty ty :mut mut :scope scope} user (assoc :user true))) n))
 
 (defn- temp! [ty] (place (new-local! ty)))
 
@@ -941,15 +943,62 @@
     s))
 
 (defn- float-text
-  "rustc_apfloat's Display as MIR prints a float constant: the exact value to 17 (f64) or 9 (f32) significant digits,
-  trailing zeros dropped"
+  "rustc_apfloat's Display (ieee.rs, `{}`: width 3, precision 2 + PRECISION*59/196: 9 for f32, 17 for f64) as MIR prints
+  a float constant: the exact decimal digits of the value (the low ones past the precision's bits discarded), rounded to
+  the precision half up, plain unless the exponent's padding passes the width, else `D.DDDE+N`"
   [^double d bits]
   (cond (Double/isNaN d) "NaN"
         (Double/isInfinite d) (if (pos? d) "+Inf" "-Inf")
         (zero? d) (if (neg? (Math/copySign 1.0 d)) "-0" "0")
-        :else (let [bd (.round (java.math.BigDecimal. d) (java.math.MathContext. (if (= bits 32) 9 17) java.math.RoundingMode/HALF_EVEN))
-                    bd (.stripTrailingZeros bd)]
-                (.toPlainString bd))))
+        :else
+        (let [neg (neg? d)
+              precision (if (= bits 32) 9 17)
+              raw (Double/doubleToRawLongBits (Math/abs d))
+              be (bit-and (bit-shift-right raw 52) 0x7ff)
+              frac (bit-and raw 0xfffffffffffff)
+              [m e] (if (zero? be) [frac -1074] [(bit-or frac (bit-shift-left 1 52)) (- be 1075)])
+              tz (Long/numberOfTrailingZeros m)
+              m (biginteger (bit-shift-right m tz)) e (+ e tz)
+              [sig exp] (cond (zero? e) [m 0]
+                              (pos? e) [(.shiftLeft ^java.math.BigInteger m (int e)) 0]
+                              :else [(.multiply ^java.math.BigInteger m (.pow (biginteger 5) (int (- e)))) e])
+              required (quot (+ (* precision 196) 58) 59)
+              discard (quot (* (max 0 (- (.bitLength ^java.math.BigInteger sig) required)) 59) 196)
+              ;; the digits, lowest first
+              [buf exp] (loop [sig sig exp exp discard discard trail true buf []]
+                          (if (zero? (.signum ^java.math.BigInteger sig))
+                            [buf exp]
+                            (let [[q r] (.divideAndRemainder ^java.math.BigInteger sig (biginteger 10))
+                                  dg (long r)]
+                              (cond (pos? discard) (recur q (inc exp) (dec discard) trail buf)
+                                    (and trail (zero? dg)) (recur q (inc exp) discard trail buf)
+                                    :else (recur q exp discard false (conj buf dg))))))
+              [buf exp] (if (> (count buf) precision)
+                          (let [fs (- (count buf) precision)
+                                [buf fs] (if (< (nth buf (dec fs)) 5)
+                                           [buf (loop [fs fs] (if (and (< fs (count buf)) (zero? (nth buf fs))) (recur (inc fs)) fs))]
+                                           (loop [i fs buf buf fs fs]
+                                             (if (>= i (count buf)) [buf fs]
+                                                 (if (= 9 (nth buf i)) (recur (inc i) buf (inc fs)) [(assoc buf i (inc (nth buf i))) fs]))))
+                                exp (+ exp fs)
+                                buf (subvec buf fs)]
+                            [(if (empty? buf) [1] buf) exp])
+                          [buf exp])
+              digits (count buf)
+              width 3
+              scientific (if (>= exp 0)
+                           (or (> exp width) (> (+ digits exp) precision))
+                           (let [msd (+ exp (dec digits))] (if (>= msd 0) false (> (- msd) width))))
+              hi (rseq buf)
+              txt (cond scientific
+                        (let [x (+ exp (dec digits))]
+                          (str (first hi) "." (if (= digits 1) "0" (apply str (rest hi))) "E" (if (neg? x) "-" "+") (Math/abs (long x))))
+                        (>= exp 0) (str (apply str hi) (apply str (repeat exp "0")))
+                        :else (let [u (- exp)]
+                                (if (< u digits)
+                                  (str (apply str (take (- digits u) hi)) "." (apply str (drop (- digits u) hi)))
+                                  (str "0." (apply str (repeat (- u digits) "0")) (apply str hi)))))]
+          (str (when neg "-") txt))))
 
 (defn float-const [^String txt neg t]
   (let [n (second t)
@@ -1094,12 +1143,10 @@
                  c (long (if (str/starts-with? sym "\\") (int (first (unesc-char sym))) (.codePointAt sym 0)))]
              (int-const c t))
     ("Str" "StrRaw") (let [v (or (:value lit) (if (= "Str" (str (:lit-kind lit))) (str-unescape (str (:symbol lit))) (str (:symbol lit))))]
-                       (intern-alloc! (map #(bit-and (long %) 0xff) (.getBytes ^String v "UTF-8")))
-                       [:const (str "const " (str-debug v)) t '(raw-str)])
+                       [:const (str "const " (str-debug v)) t (list 'raw-str (intern-alloc! (map #(bit-and (long %) 0xff) (.getBytes ^String v "UTF-8"))))])
     ("ByteStr" "ByteStrRaw")
     (let [bs (or (:bytes lit) (byte-unesc (str (:symbol lit)) (= "ByteStrRaw" (str (:lit-kind lit)))))]
-      (intern-alloc! bs)
-      [:const (str "const b\"" (apply str (map escape-ascii bs)) "\"") t '(raw-bytes)])
+      [:const (str "const b\"" (apply str (map escape-ascii bs)) "\"") t (list 'raw-bytes (intern-alloc! bs))])
     (unsupported "a literal" (:lit-kind lit))))
 
 (defn- fn-const [t]
@@ -1113,7 +1160,7 @@
     :literal (lit-const (:lit x) (:neg x) (:ty x))
     :zst-literal (if (= :fndef (first (:ty x))) (fn-const (:ty x)) unit-const)
     :static-ref (let [id (intern-static-alloc! (:def x))]
-                  [:const (str "const {alloc" id ": " (ty-text (:ty x)) "}") (:ty x) '(static-ptr)])
+                  [:const (str "const {alloc" id ": " (ty-text (:ty x)) "}") (:ty x) (list 'static-ptr id)])
     :named-const [:const (str "const " (or (:text x) (binding [c/*in-value* true c/*erased-regions* true] (c/print-def-path (:def x) (:args x))))) (:ty x)
                   (list 'unevaluated (str (or (:def x) (:text x))) [] nil)]
     :const-op (:c x)
@@ -1836,14 +1883,14 @@
   [vis pattern & [user-ty has-guard]]
   (reduce (fn [vis p]
             (let [vis (or vis (new-source-scope!))
-                  l (new-local! (:var-ty p) :mut (:mutbl p) :scope (:source-scope (st)))]
+                  l (new-local! (:var-ty p) :mut (:mutbl p) :scope (:source-scope (st)) :user true)]
               ;; declare_binding's user type projections: the let's annotation, at the binding's field projections
               (when-let [projs (and user-ty (binding-projs pattern p))]
                 (upd! assoc-in [:locals l :user-ty] [(str "UserTypeProjection { base: UserType(" user-ty "), projs: [" (str/join ", " projs) "] }")]))
               (upd! update :debug conj {:name (:name p) :scope vis :value (place-form (place l))})
               (upd! assoc-in [:var-indices (:var p)] l)
               (when has-guard
-                (let [g (new-local! [:ref [:re-erased] false (:var-ty p)] :mut false :scope (:source-scope (st)))]
+                (let [g (new-local! [:ref [:re-erased] false (:var-ty p)] :mut false :scope (:source-scope (st)) :user true)]
                   (upd! update :debug conj {:name (:name p) :scope vis :value (place-form (place g))})
                   (upd! assoc-in [:guard-indices (:var p)] g)))
               vis))
@@ -2923,12 +2970,34 @@
   (upd! update :user-types (fnil conj [])
         {:text (str "user_ty: " u ", span: " (span-text sp) ", inferred_ty: " (binding [c/*in-value* false] (c/print-ty ty)))}))
 
+(def ^:dynamic *after-finish*
+  "Applied to each body finish makes, within the builder's bindings (the solver's state, the closures' types): the
+  judge's passes (arbace.rust.front.passes)"
+  nil)
+
+(defn- alloc-text-of [id]
+  (if-let [si (get-in @*allocs* [:static id])]
+    (alloc-text id (get-in @*allocs* [:static-bytes id]) si)
+    (alloc-text id (get (into {} (for [[k v] (:ids @*allocs*)] [v k])) id))))
+
 (defn- finish
   "Builder::finish: the body map in MIR forms"
   [d name kind n-args ret]
+  (let [b (finish* d name kind n-args ret)]
+    (if *after-finish* (*after-finish* b) b)))
+
+(defn- finish*
+  [d name kind n-args ret]
   (let [s (st)]
     {:name name :kind kind :args n-args :ret (ty-form ret) :local-tys (mapv :ty (:locals s))
-     :locals (mapv (fn [l] (cond-> {:mut (:mut l) :scope (:scope l) :ty (ty-form (:ty l))} (:user-ty l) (assoc :user-ty (:user-ty l)))) (:locals s))
+     :def d
+     :const-kind (cond (#{:const :anon-const} kind) :const (#{:static :static-mut} kind) :static
+                       (and (map? (:node d)) (= :const (get-in (:node d) [:header :constness]))) :const-fn
+                       :else nil)
+     ;; the allocations' texts and their pointers (a body's are its constants' allocations, transitively)
+     :alloc-texts (when *allocs* (into {} (for [id (:allocs-used s)] [id (alloc-text-of id)])))
+     :alloc-deps (when *allocs* (into {} (for [id (:allocs-used s)] [id (vec (keep :ptr (filter map? (get-in @*allocs* [:static-bytes id]))))])))
+     :locals (mapv (fn [l] (cond-> {:mut (:mut l) :scope (:scope l) :ty (ty-form (:ty l))} (:user-ty l) (assoc :user-ty (:user-ty l)) (:user l) (assoc :user true))) (:locals s))
      :scopes (:source-scopes s)
      :debug (:debug s)
      :blocks (mapv (fn [b] {:cleanup (:cleanup b) :stmts (:stmts b) :after-dbg [] :term (:term b)}) (:blocks s))

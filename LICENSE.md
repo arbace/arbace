@@ -875,6 +875,12 @@ covers what.
   `method/confirm.rs` and `compiler/rustc_middle/src/ty/{typeck_results,print/pretty}.rs` (with `typeck.ae`'s part), lint scopes
   after `builder/scope.rs`' `maybe_new_source_scope`, allocations after `compiler/rustc_middle/src/mir/pretty.rs`' `write_allocations`;
   the judge `arbace/rust/front/capture_check.ae` and the helper's `--captures` are Arbace's own (the helper's terms are its own, above).
+  RF10's third slice (doc/rust/FRONTEND-SURVEY.md, "As built: RF10 (third slice)") adds to `build.ae`, from the same sources and under
+  the same terms, the rest of `compiler/rustc_mir_build/src/builder/matches/{mod,match_pair,buckets,test,util}.rs` and `builder/block.rs`'
+  let-else, `thir/pattern/{mod,const_to_pat}.rs`' ranges, slices and string constants, `builder/mod.rs`' `construct_const` and
+  `builder/expr/into.rs`' `write_box_via_move` and functional update; and `arbace/rust/front/passes.ae`, Arbace forms written after
+  `compiler/rustc_mir_transform/src/{lib,lint_and_remove_uninhabited,simplify}.rs` and `compiler/rustc_middle/src/mir/{terminator,traversal}.rs`,
+  the same terms.
 - The own-verdict judge of `arbace/rust/check.ae` (`own-verdict`, `run-class`, `verdict-met?`, `directives`; rust-90,
   doc/rust/EVAL.md §13): Arbace forms written after rustc 1.99.1's compiletest, the same revision and sources (the pinned
   `rustc-1.99.1-src.tar.xz`'s `src/tools/compiletest/src/runtest/ui.rs`: `run_ui_test`'s RunResult of the run and the
