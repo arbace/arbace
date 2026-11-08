@@ -342,6 +342,23 @@ int __flt_rounds(void);
 #undef DEC_EVAL_METHOD
 #define DEC_EVAL_METHOD __DEC_EVAL_METHOD__
 #endif
+/* Annex H.11's _Decimal64x characteristics, with the interchange and extended types' want macro (c23-decimal64x-4) */
+#if defined __STDC_WANT_IEC_60559_TYPES_EXT__ && defined __DEC64X_MANT_DIG__
+#undef DEC64X_MANT_DIG
+#define DEC64X_MANT_DIG __DEC64X_MANT_DIG__
+#undef DEC64X_MIN_EXP
+#define DEC64X_MIN_EXP __DEC64X_MIN_EXP__
+#undef DEC64X_MAX_EXP
+#define DEC64X_MAX_EXP __DEC64X_MAX_EXP__
+#undef DEC64X_MAX
+#define DEC64X_MAX __DEC64X_MAX__
+#undef DEC64X_EPSILON
+#define DEC64X_EPSILON __DEC64X_EPSILON__
+#undef DEC64X_MIN
+#define DEC64X_MIN __DEC64X_MIN__
+#undef DEC64X_TRUE_MIN
+#define DEC64X_TRUE_MIN __DEC64X_SUBNORMAL_MIN__
+#endif
 #ifdef __ARBACE_C23
 #undef DEC_INFINITY
 #define DEC_INFINITY (__builtin_infd32())

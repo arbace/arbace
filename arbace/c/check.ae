@@ -293,6 +293,15 @@
       (w t 0))
     (str b)))
 
+(defn- gcc-int-name
+  "An integer type's name as gcc's diagnostics print it (\"long unsigned int\"), else tstr's."
+  [t]
+  (case (:k t)
+    :char "char" :schar "signed char" :uchar "unsigned char" :short "short int" :ushort "short unsigned int"
+    :int "int" :uint "unsigned int" :long "long int" :ulong "long unsigned int" :llong "long long int"
+    :ullong "long long unsigned int" :int128 "__int128" :uint128 "__int128 unsigned" :bool "_Bool"
+    (tstr t)))
+
 (def ^:dynamic *compat-depth* 0)
 
 (declare compatible?)
@@ -517,7 +526,10 @@
   (doseq [[n args parens ns gnu am] (apply attrs-of m all-attr-keys)
           :when (and parens (not gnu) (nil? ns))]
     (cond
-      (contains? std-no-arg-attrs n) (err! (str "'" n "' attribute does not take any arguments"))
+      ;; arguments given (not an empty list): gcc's parser stops at them first ("expected"), then the attribute's error, two
+      ;; diagnostics of the line (c23-attr-reproducible-3, -unsequenced-3; noreturn-3 takes either)
+      (contains? std-no-arg-attrs n) (do (when (seq args) (err! "expected ')'"))
+                                         (err! (str "'" n "' attribute does not take any arguments")))
       (contains? std-string-attrs n)
       (cond (empty? args) (err! "parentheses must be omitted if attribute argument list is empty")
             (not (and (= 1 (count args)) (or (string? (first args)) (and (seq? (first args)) (= 'byte-string (ffirst args))))
@@ -1160,6 +1172,13 @@
                   v (if has-vf (when (integer? (:v rv)) (:v rv)) nxt)
                   _ (when (and under (some? v) (integer? v) (not= :bitint (:k (unq under))) (not= (wrap v under) v))
                       (err! (if vf "enumerator value outside the range of the underlying type" "overflow in enumeration values")))
+                  ;; C23 6.7.3.3: a redefinition of an enumeration without a fixed type has the first definition's
+                  ;; underlying type, and gcc's build_enumerator holds every value of the redefinition to it, an implicit
+                  ;; one too (c23-tag-enum-6)
+                  _ (when (and (not under) redef (not nested-under) (some? v) (integer? v))
+                      (when-let [ru (.get ^HashMap redef :under)]
+                        (when (and (int-type? ru) (not= (wrap v ru) v))
+                          (err! "enumerator value outside the range of underlying type"))))
                   v (if (and under (some? v)) (wrap v under) v)
                   _ (when under (feat! :cc-enum-type))
                   ;; C23 (6.7.3.3): during the definition a constant that int cannot hold has its
@@ -1958,10 +1977,16 @@
     (doseq [e (rest init)]
       (cond
         (keyword? e) nil
-        (and (seq? e) (= 'at (first e))) (doseq [d (rest e)]
-                                            (cond (keyword? d) nil
-                                                  (vector? d) (doseq [x d] (exi x))
-                                                  :else (exi d)))
+        ;; an array designator's index: c-typeck.cc's set_init_index, "not of integer type" for one that is not of integer
+        ;; type (nullptr's among them; c23-nullptr-6)
+        (and (seq? e) (= 'at (first e))) (let [idx! (fn [x] (let [r (ex x) k (:k (decay (unq (:t r))))]
+                                                              (when-not (or (int-type? (unq (:t r))) (#{:invalid :enum :bool} k))
+                                                                (err! "array index in initializer not of integer type"))
+                                                              r))]
+                                           (doseq [d (rest e)]
+                                             (cond (keyword? d) nil
+                                                   (vector? d) (doseq [x d] (idx! x))
+                                                   :else (idx! d))))
         (and et (not (seq? e))) (let [r (ex e)] (ptr-conv! et r "initialization") r)
         :else (check-init e)))
     (and (seq? init) (= 'c/embed (first init))) nil
@@ -2118,7 +2143,11 @@
                      (when (bit-field? r) (err! "'sizeof' applied to a bit-field"))
                      (emit! (if (var-size? (:t r)) (res t-ulong) (sizeof-res (:t r)))))
             sizeof-type (let [t (parse-type (first args))] (emit! (if (var-size? t) (res t-ulong :tt t) (sizeof-res t)))) ; :tt, the builder's (queue 165)
-            alignof (let [r (ex (first args))] (when (bit-field? r) (err! "'_Alignof' applied to a bit-field")) (emit! (res t-ulong :v (or (:malign r) (align-of (unq (:t r)))))))
+            alignof (let [r (ex (first args))
+                          dal (when (and (:entry r) (or (symbol? (first args)) (and (seq? (first args)) (= 'c/id (first (first args))))))
+                                (:dalign (:entry r)))]
+                      (when (bit-field? r) (err! "'_Alignof' applied to a bit-field"))
+                      (emit! (res t-ulong :v (or (:malign r) (if dal (max (long dal) (long (align-of (unq (:t r))))) (align-of (unq (:t r))))))))
             alignof-type (let [t (parse-type (first args))]
                            (when (incomplete-type? t) (err! "invalid application of 'alignof' to incomplete type"))
                            (emit! (res t-ulong :v (align-of (unq t)))))
@@ -2255,11 +2284,26 @@
       (assoc new :params (mapv pick (:params old) (:params new))))
     :else new))
 
+(def ^:private spec-modifiers #{"long" "short" "signed" "__signed" "__signed__" "unsigned" "_Complex" "__complex" "__complex__" "_Sat"})
+
+(defn- bad-specs-msg
+  "The error of a declaration's invalid type specifiers (the converter's :c/bad-specs, the words as written), as gcc's
+  declspecs_add_type gives it: the first type word (not long, short, signed, unsigned or _Complex) after another one is the
+  error, and when it is bool or _Bool the message names it (C23: \"'bool' cannot be defined via 'typedef'\" in a typedef,
+  else \"cannot be used here\"; c23-bool-errors-1, -2); otherwise two or more data types."
+  [m]
+  (let [ws (:c/bad-specs m)
+        words (when (vector? ws) (vec (remove spec-modifiers ws)))
+        w (when (>= (count words) 2) (second words))]
+    (if (#{"bool" "_Bool"} w)
+      (str "'" w "' cannot " (if (:c/typedef m) "be defined via 'typedef'" "be used here"))
+      "two or more data types in declaration specifiers")))
+
 (defn- declare-object!
   "A declared object or function: entered in its scope, its d annotation written."
   [^String n t m kind init param]
   (when (or (= n "_Bool") (and (= n "bool") (c23?))) (err! (str "'" n "' cannot be used here")))
-  (when (:c/bad-specs m) (err! "two or more data types in declaration specifiers"))
+  (when (:c/bad-specs m) (err! (bad-specs-msg m)))
   (let [t (if param (case (:k (unq t)) :array (ptr (:of (unq t))) :fn (ptr t) t) t) ; a parameter's adjusted type (6.7.7.4)
         fn? (= :fn (:k (unq t)))
         lk (linkage-of n m fn? param)
@@ -2280,8 +2324,13 @@
                      (not= :invalid (:k (:t prev*))) (not= :invalid (:k t)))
             (err! (str "conflicting types for '" n "'")))
         t (if (and prev (#{:obj :fn} (:kind prev))) (composite (:t prev) t) t)
+        ;; the declaration's own alignment (gcc's DECL_ALIGN: the aligned attributes and alignment specifiers of every
+        ;; declaration of the identifier, merged by duplicate_decls), which __alignof__ of the name reads (c_alignof_expr's
+        ;; DECL_P case; align-3: a function declared aligned(256), defined without it)
+        dal (max (long (or (:dalign prev*) 0)) (long (or (:c/declared-align m) 0))
+                 (long (reduce max 0 (keep #(when (= "aligned" (first %)) (aligned-value (second %))) (apply attrs-of m all-attr-keys)))))
         e {:kind kind :t t :linkage lk :v (when (and (:constexpr m) (some? init)) (:v init)) :m m :feats (cx :feats)
-           :id (Object.) :file-scope (file-scope?) :name n}]
+           :id (Object.) :file-scope (file-scope?) :name n :dalign (when (pos? dal) dal)}]
     (attr-args! m)
     (binding [*line* (or (:line m) *line*)] (decl-position-attrs! m kind t))
     ;; cc types a library function gcc knows as a builtin by its __builtin_ declaration
@@ -2547,7 +2596,7 @@
         t (if (= :union (:k t)) (assoc t :typedef-name n) t)]
     (attr-args! m)
     (decl-position-attrs! (assoc m :tag tf) :typedef t)
-    (when (:c/bad-specs m) (err! "two or more data types in declaration specifiers"))
+    (when (:c/bad-specs m) (err! (bad-specs-msg (assoc m :c/typedef true))))
     (when (or (= n "_Bool") (and (= n "bool") (c23?))) (err! (str "'" n "' cannot be defined via 'typedef'")))
     (let [prev (.get ^HashMap (:ord (top-scope)) n)]
       (when (and prev (= :typedef (:kind prev)) (not (type-eq (:t prev) t)))
@@ -2571,7 +2620,7 @@
                 (binding [*base* bt] (doseq [d ds] (check-decl d))))
       c/static-assert (let [[_ e] f r (exi e)]
                         (if (and (integer? (:v r)) (zero? (:v r)) (not= :nullptr (:k (unq (:t r)))) (not (cx :exec-charset))) (err! "static assertion failed")))
-      c/declare-specs (do (when (:c/bad-specs (meta f)) (err! "two or more data types in declaration specifiers"))
+      c/declare-specs (do (when (:c/bad-specs (meta f)) (err! (bad-specs-msg (meta f))))
                           (when (and (:c/implicit-int (meta f)) (seq (:c/decl-attrs (meta f))))
                             ;; `[[...]];` at file scope reads as attribute-only specifiers
                             (attr-decl-check! (cons 'c/attr-decl (:c/decl-attrs (meta f))) nil :top))
@@ -2684,11 +2733,18 @@
                    (let [iv (fn [r] (let [v (:v r)] (when (integer? v) (wrap v t))))
                          lo (iv ra)
                          hi (if has-b (iv rb) lo)]
+                     (when has-b (pedwarn-c2y! "ISO C does not support range expressions in switch statements before C2Y"))
+                     ;; c-typeck.cc's do_case: a range's bound the controlling type cannot hold is converted, a pedwarn
+                     ;; (c23-switch-1)
+                     (when has-b
+                       (doseq [r [ra rb] :let [v (:v r)] :when (and (integer? v) (not= (wrap v t) v))]
+                         (pedwarn! (str "conversion of '" v "' to '" (gcc-int-name t) "' in range expression changes value to '" (wrap v t) "'"))))
                      (when (and (some? lo) (some? hi) (<= lo hi))
+                       ;; c-common.cc's c_add_case_label: a range's duplicate is "duplicate (or overlapping)"
                        (when (some (fn [[l h]] (and (<= lo h) (<= l hi))) @seen)
-                         (err! "duplicate case value"))
+                         (err! (if has-b "duplicate (or overlapping) case value" "duplicate case value")))
                        (swap! seen conj [lo hi]))))
-                 (when has-b (pedwarn-c2y! "ISO C does not support range expressions in switch statements before C2Y"))
+                 (when (and has-b (not *switch*)) (pedwarn-c2y! "ISO C does not support range expressions in switch statements before C2Y"))
                  nil)
           c/asm (do (feat! :asm) (asm-operands! (first args)) nil)
           (continue break) (do (when (seq args)
