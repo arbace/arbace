@@ -104,6 +104,13 @@ by a program):
     line tables were the original's, DWARF was not (purego's `collectStackArgs`). Outside
     generic declarations names of equal type, doc and tag are grouped (the converter gives a
     field's doc to each of its names), so `h1, h2 T` under a doc comment prints as one field.
+    "Equal type" is `arbace.repr.go.types/same-type?` (2026-11-08): the type forms `=` and the
+    type metadata inside them equal too (a name's `:tag`, the type of a func type's parameter or
+    named result, a struct type's field or a type parameter; a field's `:go/tag`; `:go/grouped`),
+    since `=` ignores metadata: `(func [^{:tag (* Ptr)} toP])` and `(func [^{:tag (* Ptr16)} toP])`
+    compared equal, and expat's `utf8Convert` and `utf16Convert` printed as one field of the first's
+    type (case `s05_type_identity`, test `type-identity`). In mode `:full` a group also needs the
+    types' one recorded position, so only the source's groups print there.
     The parameters' `)` stays on the line of the results (the line they record, else the last
     parameter's); the body of a function whose signature spans lines is indented from the
     line `func` began on. The values of a spec or return after the first follow their
@@ -151,7 +158,7 @@ checks that every head of §13.5, the metadata the printer reads and the `go/pac
 | §4.3 | `go/file` `:build`, `:directives`, `:doc`, `:package`, `:imports` (`[name "path"]`, `^:alias`, `_`, `.`, a `go/directive` among them: C4) | `s04_files`, `s04_testpkg`, `s15_roundtrip` |
 | §4.4 | `pkg/Name`, dot-imported names, labels, `go/call` (`fn`, `len`), `go/id` (`true`; tagged as a parameter name: C5), heads as plain symbols (`do`, `when`) | `s04_files`, `s15_roundtrip` |
 | §5.1-5.2 | `* slice array map chan func struct interface \| tilde inst`, `(G T...)`, `(array ... T)`, `chan (<-chan T)`, `unsafe/Pointer` | `s05_types`, `s07_exprs` |
-| §5.3 | parameters, unnamed and variadic (`&`), single and named results, results vectors of function types | `s05_types`, `s06_decls`, `s05_groups` |
+| §5.3 | parameters, unnamed and variadic (`&`), single and named results, results vectors of function types; names of one type grouped (type metadata included) | `s05_types`, `s06_decls`, `s05_groups`, `s05_type_identity` |
 | §5.4 | fields, embedded (also `*T`, generic), `:go/tag`, `:doc`, interface methods, embedded interfaces, type sets | `s05_types`, `s10_positions` |
 | §5.5 | `:type-params` (constraints, trailing comma `[P *int,]`), generic receivers, generic methods (Go 1.27), `inst`, `:inst`; field groups of generic declarations (`^:go/grouped`, A1) | `s05_types`, `s06_decls`, `s07_exprs`, `s12_printer`, `s05_groups` |
 | §6 | `go/type` (alias, generic alias, groups, a group of one), `go/const` (`values`, implicit repetition, `:val`), `go/var` (no init, `nil` init, `values`, groups), `go/func`, `go/method` (unnamed receiver, `^:extern`, `init`, implicit return, `panic`), doc comments | `s06_decls`, `s09_directives` |
