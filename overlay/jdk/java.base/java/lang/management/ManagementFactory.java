@@ -28,8 +28,8 @@
  * java.lang.management.ManagementFactory, jdk26u's (https://github.com/openjdk/jdk26u at baf63fb,
  * src/java.management/share/classes/java/lang/management/ManagementFactory.java) without JMX (JCS95 (a)), but since
  * JMX-1 (JCS263, "As built: JMX-1 (write-ahead)") the platform MBean server (getPlatformMBeanServer: jdk26u's, over
- * the table below, each bean registered by jdk26u's addMXBean under its own ObjectName); no MXBean proxies over an
- * MBeanServerConnection
+ * the table below, each bean registered by jdk26u's addMXBean under its own ObjectName) and newPlatformMXBeanProxy
+ * (jdk26u's, over JMX.newMXBeanProxy); not the getPlatformMXBean(s) that take an MBeanServerConnection
  * (newPlatformMXBeanProxy and the getPlatformMXBean(s) taking one), no PlatformMBeanProvider found by
  * ServiceLoader. The platform components are a table of jrt's own, in jdk26u's precedence (jdk.management's
  * provider before java.management's): the threads' bean (jdk.management's HotSpotThreadImpl, which is also a
@@ -44,6 +44,9 @@ package java.lang.management;
 
 import javax.management.DynamicMBean;
 import javax.management.InstanceAlreadyExistsException;
+import javax.management.InstanceNotFoundException;
+import javax.management.JMX;
+import javax.management.MBeanServerConnection;
 import javax.management.MBeanRegistrationException;
 import javax.management.MBeanServer;
 import javax.management.MBeanServerFactory;
@@ -204,6 +207,63 @@ public class ManagementFactory {
         }
         return platformMBeanServer;
     }
+
+    // jrt (JMX-1): jdk26u's
+    public static <T> T
+        newPlatformMXBeanProxy(MBeanServerConnection connection,
+                               String mxbeanName,
+                               Class<T> mxbeanInterface)
+            throws java.io.IOException {
+
+        // Only allow MXBean interfaces from the platform modules loaded by the
+        // bootstrap or platform class loader
+        final Class<?> cls = mxbeanInterface;
+        ClassLoader loader = cls.getClassLoader();
+        if (!jdk.internal.misc.VM.isSystemDomainLoader(loader)) {
+            throw new IllegalArgumentException(mxbeanName +
+                " is not a platform MXBean");
+        }
+
+        try {
+            final ObjectName objName = new ObjectName(mxbeanName);
+            String intfName = mxbeanInterface.getName();
+            if (!isInstanceOf(connection, objName, intfName)) {
+                throw new IllegalArgumentException(mxbeanName +
+                    " is not an instance of " + mxbeanInterface);
+            }
+
+            // check if the registered MBean is a notification emitter
+            boolean emitter = connection.isInstanceOf(objName, NOTIF_EMITTER);
+
+            // create an MXBean proxy
+            return JMX.newMXBeanProxy(connection, objName, mxbeanInterface,
+                                      emitter);
+        } catch (InstanceNotFoundException|MalformedObjectNameException e) {
+            throw new IllegalArgumentException(e);
+        }
+    }
+
+    private static boolean isInstanceOf(MBeanServerConnection connection,
+            ObjectName objName, String intfName)
+            throws InstanceNotFoundException, java.io.IOException
+    {
+        // special case for java.util.logging.LoggingMXBean.
+        // java.util.logging.LoggingMXBean is deprecated and
+        // replaced with java.lang.management.PlatformLoggingMXBean,
+        // so we will consider that any MBean implementing
+        // java.lang.management.PlatformLoggingMXBean also implements
+        // java.util.logging.LoggingMXBean.
+        if ("java.util.logging.LoggingMXBean".equals(intfName)) {
+            if (connection.isInstanceOf(objName,
+                    PlatformLoggingMXBean.class.getName())) {
+                return true;
+            }
+        }
+        return connection.isInstanceOf(objName, intfName);
+    }
+
+    private static final String NOTIF_EMITTER =
+        "javax.management.NotificationEmitter";
 
     private static void addMXBean(final MBeanServer mbs, String name, final Object pmo)
     {
