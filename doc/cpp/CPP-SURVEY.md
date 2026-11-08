@@ -3703,7 +3703,7 @@ The verdicts, own x clang's record (`own .tmp/WORK --clang DIR`):
 Of the 416 failures before, 400 were missed errors and 15 extra ones: the front end accepted too much; after, the files that fail by an extra
 error of the front end (21: 17 with missed lines too, 4 extra alone; the grammar's gaps: attributes, declarations, `>`; the code generator's Sema's gaps: CP272), 368 by missed errors alone, 1 a crash.
 
-The expected error lines by clang's diagnostic on the line (the 30 largest of the sample's 1,474 lines; "own" an error of the front end
+The expected error lines by clang's diagnostic on the line (the 30 largest of the sample's 1,438 lines; "own" an error of the front end
 on the line):
 
 | clang's diagnostic on the expected line | lines | own before | own after |
@@ -3833,7 +3833,7 @@ the journal's entry).
 
 The whole part's record (the night's) and the read fact's cases from it; CP270-CP274; the 1 crash of the sample (init/ptrfn2.C: the
 parser's InitListChecker port, `arbace.repr.cpp.sema`'s implicit-list, on an ill-formed pointer-to-member element: no judgment, clang's
-record stays); g++'s own lines (209 of the sample's 1,474 have no clang error: extensions and pedantic errors of g++'s front end, which
+record stays); g++'s own lines (209 of the sample's 1,438 have no clang error: extensions and pedantic errors of g++'s front end, which
 the dg directives of the corpus expect).
 
 ### Slips, scratch
