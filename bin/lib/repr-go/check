@@ -46,9 +46,10 @@
 #                        files, the export data and code of the package and its test
 #                        variants), test-only packages included; work directory GOOS-GOARCH-tests
 #   --controls FILE      the negative controls (GTS81 (a), doc/GATE-SURVEY.md "As built: GTS88 (b)"): lines "KIND SUBJECT REFERENCE"
-#                        (KIND package or test; both the corpus entries' paths; # comments; other kinds,
+#                        (KIND package, test or dirtest; both the corpus entries' paths; # comments; other kinds,
 #                        text, are bin/repr-go roundtrip --text's): the candidate's SUBJECT compared by gocmp with the
-#                        ORIGINAL of REFERENCE, which must fail at the tree level. A control that passes fails the run
+#                        ORIGINAL of REFERENCE, which must fail at the tree level (a dirtest's subject FILE.dir staged
+#                        under the reference's .go names, compared at the tree level alone). A control that passes fails the run
 #                        (exit 1, whatever else); one whose subject is not in the run, or does not pass tree there, is
 #                        left (reported). Rows CONTROL ok|FAILED|left KIND SUBJECT vs REFERENCE
 #   --reference FILE     results to compare with: an entry passing a level there and not here
@@ -396,13 +397,28 @@ run_controls() {
         fi
         for i in "${!sf[@]}"; do cp "$cand/src/$sdir/${sf[$i]}" "$b/${rf[$i]}"; done ;;
       test) a=$goroot/test/$rdir; b=$cand/test/$sdir ;;
-      *) echo "controls: kind $kind (package or test)" >&2; exit 2 ;;
+      dirtest)
+        # a directory test (--dirtests): the subject's printed FILE.dir staged under the reference's FILE.dir's file names,
+        # in order (gocmp -dirtest reads the candidate's files by the original's names), against the reference's FILE.go
+        local sd=${sdir%.go}.dir rd=${rdir%.go}.dir
+        a=$goroot/test/$rdir; b=$work/controls/$(echo "$subj-vs-$ref" | tr '/ ' '__')
+        rm -rf "$b"; mkdir -p "$b"
+        { [ -d "$cand/test/$sd" ] && find "$cand/test/$sd" -maxdepth 1 -name '*.go' -printf '%f\n'; } | LC_ALL=C sort > "$work/controls/subject.ls"
+        { [ -d "$goroot/test/$rd" ] && find "$goroot/test/$rd" -maxdepth 1 -name '*.go' -printf '%f\n'; } | LC_ALL=C sort > "$work/controls/reference.ls"
+        mapfile -t sf < "$work/controls/subject.ls"
+        mapfile -t rf < "$work/controls/reference.ls"
+        if [ ${#sf[@]} -ne ${#rf[@]} ] || [ ${#sf[@]} -eq 0 ]; then
+          echo "CONTROL left $kind $subj vs $ref (the directories' files differ in number: ${#sf[@]} and ${#rf[@]})"; left=$((left + 1)); continue
+        fi
+        for i in "${!sf[@]}"; do cp "$cand/test/$sd/${sf[$i]}" "$b/${rf[$i]}"; done ;;
+      *) echo "controls: kind $kind (package, test or dirtest)" >&2; exit 2 ;;
     esac
     if [ ! -e "$a" ] || [ ! -e "$b" ]; then
       echo "CONTROL left $kind $subj vs $ref (no $([ -e "$a" ] || echo "$a")$([ -e "$b" ] || echo " $b"))"; left=$((left + 1)); continue
     fi
     log=$work/logs/control-${kind}-$(echo "$subj-vs-$ref" | tr '/ ' '__').log
-    res=$("$0" --worker "$(printf '%s\t%s\t%s\t%s\t%s\t' "$kind" "$subj" "$a" "$b" "$log")")
+    # a directory test's control at the tree level alone, its judgment (the other levels compile and run both sides)
+    res=$(REPR_GO_LEVELS=$([ "$kind" = dirtest ] && echo tree || echo "$REPR_GO_LEVELS") "$0" --worker "$(printf '%s\t%s\t%s\t%s\t%s\t' "$kind" "$subj" "$a" "$b" "$log")")
     st=$(echo "$res" | cut -f3)
     case " $st " in
       *" tree=fail "*) echo "CONTROL ok $kind $subj vs $ref ($st)"; held=$((held + 1)) ;;
