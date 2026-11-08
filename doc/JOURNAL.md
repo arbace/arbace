@@ -791,3 +791,28 @@ third of the concurrent tests, every twentieth other pass) 66 of 67, main's hsi 
 night's `bin/hsi check ... --record`: the testsuite's core 658 of 701 (652), the record 796 of 908; the divergences' edits and the night's
 commands in doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: HE9 on main (write-ahead)". HE9's 666 counted 11 programs whose references
 main's record-ref cannot build (the C includes GHC's `_stub.h`): HES83 proposed.
+
+## 2026-11-08: RF10's first slice, MIR building from the native front end (branch `rust-rf10`, from next bd33e27cc)
+
+The user's order of 2026-11-07 (RES54 (a): RFP20, RFP15, then RF10): RFP20 (captures in the helper's `--typeck`, upvar.rs ported in
+full, 2-3 days) and RFP15 (`mod m;` loading, a few days) are not small and neither is read by a first slice on single files without
+closures, so RF10's first slice came first; both stay next (doc/rust/FRONTEND-SURVEY.md, "As built: RF10 (first slice)", RFP22).
+Sources: rustc 1.99.1 (`58cf8f9c3`, Alpine's rust-src-1.99.1-r0 apk pinned by tools/rsdump/apks.sha256), read in
+`compiler/rustc_hir_analysis/src/check/region.rs`, `rustc_middle/src/middle/region.rs`, `rustc_mir_build/src/thir/{cx,pattern}/`
+and `rustc_mir_build/src/builder/{mod,cfg,scope,block,misc}.rs`, `builder/expr/`, `builder/matches/{mod,match_pair,buckets,test}.rs`,
+ported by hand under MIT into `arbace/rust/front/build.ae` (region scope tree, THIR, scopes and drop trees, expressions, the match
+lowering); typeck keeps its results by HIR id for it. Two fixes of earlier stages: a `while`'s `break` an expression statement (typeck
+coerces it to `()`), path patterns peel references; typeck-check and hir-check unchanged. Judge: `bin/rust-front build-oracles`
+(rustc's `-Zdump-mir=built` by the helper as rustc) and `build-check` (our pipeline's bodies printed by arbace.rust.front.mir against
+rustc's text byte for byte): test/rust/front's seven no_std samples 47 of 54 bodies equal and one more but for rustc's allocations text
+(a1, a2, a4, a5 whole); the corpus of 88 programs 92 of 510 equal and 4 more, five programs whole, the refusals classed (closures,
+desugarings' lang item calls, overloaded operators, constants' bodies). Run: `bin/rust-front run-built` puts our bodies, after
+CleanupPostBorrowck's changes and the abort strategy's unwinds, in place of the helper's `--mono-mir` record's bodies (the record keeps
+the symbols, std's callees and the layouts; unit's, scalars' and scalar pairs' layouts it lacks computed after rustc_abi) and runs them
+through RF3's codegen, rsi's lowering and gcc with rustc, rustdoc and cargo stubs exiting 99 on PATH: a1-a5 and a7 give rustc's
+statuses (5, 212, 41, 17, 45, 21), every body ours, the stubs' log empty; the control (Add as Sub) differs. Alternatives considered:
+building MIR from the helper's typeck data (RFP16 (b), rejected earlier: the pipeline is the goal), judging at runtime MIR only (rejected:
+a difference far from its cause; built MIR is the builder's own output), running the std programs by run-native (rejected here: it
+links through rustc as the linker driver, which the stubs forbid). `bin/crops-score` Rust 75.0 / 95.8 / 80.0 before and after: under
+RES54 (a) eval and AOT stay 0.5 while std's records are consumed, until RF12. Proposed: RFP22 (the order after the slice), RFP23 (the run's
+record as packs), RFP24 (no gate step yet).

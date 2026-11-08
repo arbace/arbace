@@ -21,7 +21,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   repr-llvm-check repr-llvm-check-essential llvm-controls-test llvmi-check-essential \
   repr-rust-native-check \
   repr-rust-native-errors \
-  rust-front-corpus rust-front-mir-check rust-front-codegen-check rust-front-coverage rust-front-collect rust-front-run-native rust-front-oracles rust-front-expand-check rust-front-resolve-check rust-front-hir-check rust-front-collect-check rust-front-typeck-check \
+  rust-front-corpus rust-front-mir-check rust-front-codegen-check rust-front-coverage rust-front-collect rust-front-run-native rust-front-oracles rust-front-expand-check rust-front-resolve-check rust-front-hir-check rust-front-collect-check rust-front-typeck-check rust-front-build-check rust-front-run-built \
   suite-aot suite-aot-essential suite-divergences java-forms-verify java-forms-update reap-record-native-check \
   repr-c-gcc-tests repr-scheme-fetch repr-scheme-check repr-scheme-check-quick repr-scheme-record repr-scheme-spec repr-scheme-roundtrip si-vendor-verify si-boot si-boot-check si-test si-test-record si-check-suite si-fixpoint si-unit si-light si-test-si si-check si-check-record-ref si-srfi si-srfi-record si-srfi-aot si-aot-check si-aot-check-record si-bench si-divergences si-r7rs si-r7rs-record si-r7rs-chez si-r7rs-chez-record si-r7rs-chibi si-r7rs-chibi-record si-r7rs-chibi-test si-r7rs-chibi-test-record si-chibi-tests si-chibi-tests-record si-ecraven si-ecraven-record si-ecraven-chez si-ecraven-chez-record si-ecraven-chibi si-ecraven-chibi-record si-mats si-mats-record si-corpora-files si-corpora-divergences repr-ocaml-ocdump repr-ocaml-spec-check repr-ocaml-samples repr-ocaml-corpus repr-ocaml-corpus-count repr-ocaml-roundtrip repr-ocaml-roundtrip-all repr-ocaml-check repr-ocaml-text repr-ocaml-cmi repr-ocaml-dumps oi-stdlib oi-build oi-check oi-divergences oi-record-ref oi-repl oi-aot-lib oi-check-aot oi-divergences-aot oi-suite-check oi-suite-check-aot oi-suite-divergences oi-suite-expect oi-suite-rollup oi-suite-record-ref repr-ocaml-opam repr-python-fetch repr-python-pins repr-python-count repr-python-spec-check repr-python-samples repr-python-roundtrip repr-python-record repr-python-check repr-python-text repr-python-text-record pyi-gen pyi-gen-check pyi-record-ref pyi-record-ref-check pyi-scope-check pyi-compile-check pyi-run pyi-repl pyi-repl-check pyi-lib-test pyi-lib-test-oracle pyi-runtime-print pyi-runtime-read pyi-runtime-vet pyi-runtime-check \
   repr-scheme repr-scheme-roundtrip-record si-essential si-aot-essential scheme-read-essential scheme-essential \
@@ -433,6 +433,10 @@ rust-front-collect-check: ## RF7: arbace.rust.front.collect (generics, types, si
 	bin/rust-front collect-check && bin/rust-front collect-check --ours
 rust-front-typeck-check: ## RF9: arbace.rust.front.typeck (expressions' types and adjustments, bindings) over both inputs against the helper's typeck (bin/rust-front typeck-check)
 	bin/rust-front typeck-check && bin/rust-front typeck-check --ours
+rust-front-build-check: ## RF10: our built MIR (THIR and MIR building over the pipeline) against rustc's -Zdump-mir=built for the no_std samples (bin/rust-front build-check)
+	bin/rust-front build-oracles && bin/rust-front build-check a1 a2 a3 a4 a5 a6 a7
+rust-front-run-built: ## RF10: the no_std samples run from Arbace's MIR with rustc, rustdoc and cargo stubbed (bin/rust-front run-built)
+	bin/rust-front run-built test/rust/front/a1.rs test/rust/front/a2.rs test/rust/front/a3.rs test/rust/front/a4.rs test/rust/front/a5.rs test/rust/front/a7.rs
 rsi-check-essential: ## RE5: the essential programs (test/rust/essential.txt) on ci against the judge's runs (bin/rsi check --essential)
 	bin/rsi check --essential
 rsi-divergences: ## RE4: the recorded check's non-passes by class (bin/rsi divergences [--aot])
