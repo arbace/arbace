@@ -593,6 +593,29 @@ module is this one, and the packages of module_table.ae for a named module, as a
           (set! DateZoneName (fn ^string [^int64 ms] (return (.String (DefaultZone_Name_J__String ms)))))
           true)
         '(go/var ^bool j2gDateZoneSet (j2gSetDateZone))])
+     ;; SharedSecrets' serialization accessors (JCS167, m/serial-accessors): a variable per
+     ;; access interface, its setter, and its getter, which initializes the class that sets it
+     ;; first (jdk26u's ensureClassInitialized)
+     (apply concat
+       (for [[i owner] (sort m/serial-accessors)
+             :when (m/translated? i)
+             :let [[gb sb] (m/serial-accessor-bases i)
+                   v (symbol (str "SharedSecrets_" (subs gb 3 (.indexOf ^String gb "__"))))
+                   ty (m/go-type :jrt (str "L" i ";"))]]
+         [(list 'go/var (tag v ty))
+          (list 'go/func (symbol (str "SharedSecrets_" sb))
+                (str "SharedSecrets_" sb " is SharedSecrets' setter (m/serial-accessors).\n")
+                [(tag 'access ty)]
+                (list 'set! v 'access))
+          (list 'go/func (symbol (str "SharedSecrets_" gb))
+                (str "SharedSecrets_" gb " is SharedSecrets' getter: " (str/replace owner "/" ".")
+                     " initialized first when the access is not set yet.\n")
+                (with-meta [] {:tag ty})
+                (list 'when (list '== v nil)
+                      (if (and (m/translated? owner) (not (m/trivial-init? owner)))
+                        (list (symbol (str (m/go-name owner) "_Init")))
+                        '(do)))
+                v)]))
      (remove nil? [(list 'go/var (tag 'J2g_AssertionsDisabled 'bool) true)
      (list 'go/func 'J2g_NotTranslated (with-meta [(tag 'what 'string)] {:tag 'Throwable_I})
            (list 'UnsupportedOperationException_New_String (list 'Str (list '+ "j2g: not translated: " 'what))))
@@ -861,7 +884,11 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
           ;; JC4c"); the shipped program's classes are none of them
           own (and *absent-members* (nm/own-class? n))
           public? (if own (constantly true) public?)
-          listed? #(or (public? %) (and (m/has? (:flags %) Opcodes/ACC_PROTECTED) (m/static? %)))
+          ;; JCS167: a Serializable class's serialization hooks and serial fields (m/serial-hook?,
+          ;; m/serial-field?), which ObjectStreamClass finds by reflection, whatever their access
+          serial (and (not iface) (m/serialization?) (m/serializable? n))
+          listed? #(or (public? %) (and (m/has? (:flags %) Opcodes/ACC_PROTECTED) (m/static? %))
+                       (and serial (m/serial-hook? %)))
           cls (fn [dd] (c/class-val dd))
           methods (for [mm (d/class-methods n)
                         :when (and (listed? mm) (not= "<init>" (:name mm)))
@@ -950,7 +977,7 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                        :body [(list 'return (apply list (symbol (nm/new-name g real))
                                                    (map-indexed (fn [i p] (arg-conv pkg p (list 'aget 'args i))) ps)))]}))
           fields (for [f (d/class-fields n)
-                       :when (public? f)
+                       :when (or (public? f) (and serial (m/serial-field? f)))
                        :let [static (m/static? f)
                              place (if static (symbol (nm/static-field-name g (:name f)))
                                        (list (symbol (str ".-" (nm/field-name (:name f))))
@@ -958,12 +985,15 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                                                  (list (symbol (str ".Self_" g)) (list 'assert rty 'o)))))
                              vol (c/volatile-field? f)
                              cval (env/const-value f)
-                             final (m/has? (:flags f) Opcodes/ACC_FINAL)]]
+                             final (m/has? (:flags f) Opcodes/ACC_FINAL)
+                             ;; a final instance field has a Set too: jrt's Field.set writes it when
+                             ;; made accessible, as the JDK's (JCS167; serialization's reflector)
+                             settable (or (not final) (not static))]]
                    (do (cls (:desc f))
-                       {:line (str (if final "G" "F") (bit-and (:flags f) 0x5fff) " " (:name f) " " (dotted-desc (:desc f)))
+                       {:line (str (if settable "F" "G") (bit-and (:flags f) 0x5fff) " " (:name f) " " (dotted-desc (:desc f)))
                         :get [(list 'return (let [r (if vol (c/volatile-read place (:desc f)) place)]
                                               (or (result-any pkg (:desc f) r) r)))]
-                        :set (when-not final
+                        :set (when settable
                                [(if vol
                                   (c/volatile-write place (:desc f) (arg-conv pkg (:desc f) 'v))
                                   (list 'set! place (arg-conv pkg (:desc f) 'v)))])}))]

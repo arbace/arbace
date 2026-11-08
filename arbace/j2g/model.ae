@@ -91,14 +91,31 @@
 
 (defn translated? [n] (contains? (T) n))
 
+(def serial-accessors
+  "JCS167: SharedSecrets' serialization accessors (jdk26u's jdk.internal.access.SharedSecrets): the
+  access interface -> the class whose initialization sets it (the getter's ensureClassInitialized)."
+  {"jdk/internal/access/JavaObjectInputStreamAccess" "java/io/ObjectInputStream"
+   "jdk/internal/access/JavaObjectInputStreamReadString" "java/io/ObjectInputStream"
+   "jdk/internal/access/JavaObjectInputFilterAccess" "java/io/ObjectInputFilter$Config"})
+
+(defn serial-accessor-bases
+  "The Go base names of SharedSecrets' getter and setter of access interface i: [get set]."
+  [i]
+  (let [s (subs i (inc (.lastIndexOf ^String i "/")))]
+    [(str "Get" s "__" s) (str "Set" s "_" s "__V")]))
+
 (defn j2g-static?
   "A static method of jrt's hand-written class cls (Go base name base) that j2g writes itself,
   in the program's support code, because its type is a translated class jrt cannot name:
   System.getProperties(), a Properties (out.ae; JRT-NOTES.md, \"Text and locales\":
-  StaticProperty reads it)."
+  StaticProperty reads it); SharedSecrets' serialization accessors (JCS167: serial-accessors), when
+  their interfaces are translated."
   [cls base]
-  (and (= cls "java/lang/System") (= base "GetProperties__Properties")
-       (translated? "java/util/Properties")))
+  (or (and (= cls "java/lang/System") (= base "GetProperties__Properties")
+           (translated? "java/util/Properties"))
+      (and (= cls "jdk/internal/access/SharedSecrets")
+           (boolean (some (fn [i] (and (translated? i) (some #{base} (serial-accessor-bases i))))
+                          (keys serial-accessors))))))
 
 (defn jrt-class
   "jrt's hand-written (or stand-in) class n, when jrt defines it: {:go :var :standin :file}."
@@ -537,34 +554,117 @@
             cands (remove (fn [x] (some #(and (not= (:owner %) (:owner x)) (env/subclass? (:owner %) (:owner x))) cands)) cands)]
         (first cands))))
 
-(defn serial-super
-  "CDR10 (doc/go/JRT-NOTES.md, \"Serialization\"): when class n's objects are made for deserialization
-  by jrt's allocation (jdk.internal.jrt.SerialAlloc, ReflectionFactory.newConstructorForSerialization's
-  rule), [S ctor] for its first superclass S that is not Serializable and S's no-argument constructor
-  (nil for Object's, which does nothing); else nil. Only when java.io.ObjectStreamClass is in the world,
-  for a concrete translated class of it that is Serializable and neither an enum nor a record (those
-  are made by name and by their canonical constructor), S's constructor accessible to n (public,
-  protected, or of n's package) and taking nothing in Go (no outer instance)."
+(defn serialization?
+  "JCS167: is Java serialization in the world (java.io.ObjectStreamClass has Java forms)? Then the
+  Serializable classes' serialization members are in their member tables (out/member-tables), their
+  hooks reached (reach/serial-reach!) and their allocation written (serial-super)."
+  []
+  (boolean (a/decl "java/io/ObjectStreamClass")))
+
+(defn serializable?
+  "Is class n Serializable (java.io.Serializable among its supertypes)?"
   [n]
-  (when (and (translated? "java/io/ObjectStreamClass") (translated? n)
-             (not (interface? n)) (not (abstract? n)))
-    (let [d (a/decl n)
-          ser? (fn [c] (some #{"java/io/Serializable"} (env/all-supertypes c)))]
-      (when (and d (not (#{:enum :record} (:kind d))) (not (:enum-body d)) (ser? n)
+  (boolean (some #{"java/io/Serializable"} (env/all-supertypes n))))
+
+(def serial-hooks
+  "JCS167: the members ObjectStreamClass finds by reflection on a Serializable class: [name desc]
+  -> :private (writeObject, readObject, readObjectNoData: getPrivateMethod's, private and not
+  static) or :any (writeReplace, readResolve: getInheritableMethod's, any access, not static)."
+  {["writeObject" "(Ljava/io/ObjectOutputStream;)V"] :private
+   ["readObject" "(Ljava/io/ObjectInputStream;)V"] :private
+   ["readObjectNoData" "()V"] :private
+   ["writeReplace" "()Ljava/lang/Object;"] :any
+   ["readResolve" "()Ljava/lang/Object;"] :any})
+
+(defn serial-hook?
+  "Is method mm of a Serializable class one of its serialization hooks (serial-hooks)?"
+  [mm]
+  (when-let [k (serial-hooks [(:name mm) (:desc mm)])]
+    (and (not (static? mm)) (or (= k :any) (private? mm)))))
+
+(defn serial-field?
+  "Is field f of a Serializable class one serialization reads by reflection: an instance field
+  (getDefaultSerialFields, the reflector, records' components), serialVersionUID or
+  serialPersistentFields (getDeclaredSUID, getDeclaredSerialFields)?"
+  [f]
+  (or (not (static? f)) (#{"serialVersionUID" "serialPersistentFields"} (:name f))))
+
+(defn- java-pkg [n] (let [i (.lastIndexOf ^String n "/")] (if (neg? i) "" (subs n 0 i))))
+
+(defn- class-access
+  "Class n's access flags as Class.getModifiers reports them (a member class's inner flags)."
+  [n]
+  (let [d (a/decl n)]
+    (or (if (and d (not= :top (:nesting d))) (:inner-flags d) (:flags (or d (info n)))) 0)))
+
+(defn- ctors-of [n] (filter #(= "<init>" (:name %)) (methods-of n)))
+
+(defn- super-ctor-accessible?
+  "jdk.internal.reflect.ReflectionFactory.superHasAccessibleConstructor(cl) (jdk26u): in cl's
+  package, any non-private constructor of its superclass (or the two nestmates); else the
+  superclass public or protected with a public or protected constructor."
+  [cl]
+  (let [s (:super (info cl))
+        pp (bit-or Opcodes/ACC_PUBLIC Opcodes/ACC_PROTECTED)
+        top (fn [c] (first (str/split c #"\$")))]
+    (cond
+      (nil? s) false
+      (= s "java/lang/Object") true
+      (= (java-pkg cl) (java-pkg s)) (or (boolean (some #(not (private? %)) (ctors-of s)))
+                                         (= (top cl) (top s)))
+      :else (and (has? (class-access s) pp)
+                 (boolean (some #(has? (:flags %) pp) (ctors-of s)))))))
+
+(defn serial-chain-super
+  "ReflectionFactory.newConstructorForSerialization's rule on Serializable class n's superclass
+  chain (serial-super's, without its conditions on n itself): [S ctor] (S nil for Object), or nil."
+  [n]
+  (let [chain (superclass-chain n)
+        sers (take-while serializable? chain)
+        s (first (drop-while serializable? chain))]
+    (when (every? super-ctor-accessible? sers)
+      (cond
+        (or (nil? s) (= s "java/lang/Object")) [nil nil]
+        (not (in-world? s)) nil
+        :else
+        (let [k (first (filter #(= "()V" (:desc %)) (ctors-of s)))
+              fl (or (:flags k) 0)
+              ok (and k (not (private? k))
+                      (or (has? fl Opcodes/ACC_PUBLIC) (has? fl Opcodes/ACC_PROTECTED)
+                          (= (java-pkg s) (java-pkg n))))
+              sd (a/decl s)]
+          (when (and ok (or (not sd) (not (:outer-instance? sd))))
+            [s k]))))))
+
+(defn serial-super
+  "CDR10, JCS167 (doc/go/JRT-NOTES.md, \"Serialization\"; doc/classes/JAVA-DEFERRED-TRIAGE.md,
+  \"As built: JCS167 (write-ahead)\"): when class n's objects are made for deserialization by
+  jrt's allocation (jdk.internal.jrt.SerialAlloc), [S ctor] for its first superclass S that is
+  not Serializable and S's no-argument constructor (nil for Object's, which does nothing); else
+  nil. ReflectionFactory.newConstructorForSerialization's rule (jdk26u): each serializable class
+  up the chain has a superclass with a constructor accessible to it (super-ctor-accessible?), and
+  S's no-argument constructor is not private and, unless public or protected, in n's package.
+  Only when serialization is in the world (serialization?), for a concrete translated class that
+  is Serializable, neither an enum nor a record (they are made by name and by their canonical
+  constructor), instantiated by the program (reach's :inst, when the world has it: RTA's,
+  serial-reach! reaches S's constructor), S's constructor taking nothing in Go (no outer
+  instance)."
+  [n]
+  (when (and (serialization?) (translated? "java/io/ObjectStreamClass") (translated? n)
+             (not (interface? n)) (not (abstract? n))
+             (or (nil? (:inst *w*)) (contains? (:inst *w*) n)))
+    (let [d (a/decl n)]
+      (when (and d (not (#{:enum :record} (:kind d))) (not (:enum-body d)) (serializable? n)
                  (not (#{:local :anon} (:nesting d))))
-        (let [s (first (remove ser? (rest (superclass-chain n))))]
-          (cond
-            (or (nil? s) (= s "java/lang/Object")) [nil nil]
-            (not (in-world? s)) nil
-            :else
-            (let [k (first (filter #(and (= "<init>" (:name %)) (= "()V" (:desc %))) (methods-of s)))
-                  fl (or (:flags k) 0)
-                  ok (and k (not (private? k))
-                          (or (has? fl Opcodes/ACC_PUBLIC) (has? fl Opcodes/ACC_PROTECTED)
-                              (= (pkg s) (pkg n))))
-                  sd (a/decl s)]
-              (when (and ok (or (not sd) (not (:outer-instance? sd))))
-                [s k]))))))))
+        (serial-chain-super n)))))
+
+(defn foreign-super-accessible?
+  "superHasAccessibleConstructor's answer for a subclass of n in another package (an interpreted
+  class extending n, JCS167's cfSerialFor): n public or protected, with a public or protected
+  constructor."
+  [n]
+  (let [pp (bit-or Opcodes/ACC_PUBLIC Opcodes/ACC_PROTECTED)]
+    (and (has? (class-access n) pp) (boolean (some #(has? (:flags %) pp) (ctors-of n))))))
 
 (defn code-class?
   "Is class n a compiled fn's code (standalone S6, :c2j/code; SA156)? Not a Java object in Go:

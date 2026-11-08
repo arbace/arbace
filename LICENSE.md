@@ -493,6 +493,12 @@ covers what.
   `Inet6AddressImpl.java`, `Inet6Address.java`, `sun/net/util/IPAddressUtil.java`, `jdk/internal/util/Exceptions.java`) where they keep it: Copyright (c)
   Oracle and/or its affiliates, under the GNU General Public License version 2 with the Classpath
   Exception (text below); the rest of those files is Arbace's own.
+- Serialization (JCS167, doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS167 (write-ahead)"; doc/go/JRT-NOTES.md,
+  "Serialization"): `overlay/jdk/java.base/java/io/ObjectStreamClass.java` and `ObjectInputStream.java` are jdk26u's
+  files of the same names (https://github.com/openjdk/jdk26u at `baf63fb`, `src/java.base/share/classes/java/io/`) edited
+  by `test/jrt/serialization/variants.py` (each file's header says so): Copyright (c) Oracle and/or its affiliates, under
+  the GNU General Public License version 2 with the Classpath Exception (text below), the edits Arbace's own;
+  `overlay/jdk/java.base/java/io/ClassCache.java` and `jdk/internal/jrt/SerialAlloc.java` are Arbace's own.
 - Security (doc/go/JRT-NOTES.md, "Security"): `overlay/jdk/java.base/javax/crypto/JceSecurity.java`
   holds the `getInstance` methods of https://github.com/openjdk/jdk26u at `baf63fb`
   (`src/java.base/share/classes/javax/crypto/JceSecurity.java.template`),

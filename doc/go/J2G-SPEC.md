@@ -3267,6 +3267,10 @@ D6's other cuts were reversed one by one (the status at the top, B1-PLAN.md D6).
   call in translated code is a translation error.
 - **Serialization** (`writeReplace`, `readObject`, serializable lambdas' `$deserializeLambda$`):
   cut with `ObjectInputStream`/`ObjectOutputStream`; their members are cut by variants. For good.
+  Amended by JCS167 (a) (the user, 2026-11-07; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS167
+  (write-ahead)"): serialization is ported, jdk26u's object streams in the world; j2g lists a
+  Serializable class's serial members in its table, reaches their hooks and writes its allocation
+  (`C_SerialNew`, `cfSerialFor`); serializable lambdas and proxies stay out until JCS169, JCS170.
 - **Annotations at run time** and generic reflection (`getAnnotation`, `ParameterizedType`)
   (amendment R16, accepted 2026-10-08):
   - no annotations are kept: `isAnnotationPresent` is false, except

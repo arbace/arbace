@@ -4160,3 +4160,14 @@ written only when `java/io/ObjectStreamClass` is in the world. (2) jrt: `ClassIn
 (deftype, defrecord, proxy) has no `SerialNew` (its fields are slots): a defrecord's serialization is the case to build
 next (`Compiler$Dyn`'s allocation without constructor). Then Clojure's suite's `serialization` (9 tests) and
 `test-proxy-non-serializable`, and Java's `serialization` class.
+
+**In the world (JCS167 (a), the user's decision of 2026-11-07; branch `java-serial`, 2026-11-08).** The staging's
+(1)-(3) are built: the Java in `overlay/jdk/java.base` (the variants made by `variants.py`, which now keeps jdk26u's
+JavaLangAccess and SharedSecrets calls and leaves ObjectOutputStream unvaried), `serial.ae` in jrt with
+`ClassInfo.SerialNew`, the sources in `jrt_sources.ae`'s `serial-sources`; and beyond it, jrt's `Field` writes a final
+instance field made accessible (the JDK's rule) and has the typed accessors, j2g's tables list a Serializable class's
+serial members, RTA reaches the hooks, `serial-super` follows ReflectionFactory's rule entire, SharedSecrets'
+serialization accessors are j2g's, and an interpreted class's allocation is the interpreter's
+(`Compiler$CF$Rt.serialPlan`) with j2g's `cfSerialFor` for the world's part. The design, its table of the JVM's
+services and jrt's answers, the checks and the night's commands: doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built:
+JCS167 (write-ahead)". (4), Clojure's types, is its slice 8.

@@ -129,6 +129,26 @@
                                            (m/pointer-desc? d) (list 'let ['v rd] '(when (== v nil) (return nil)) '(return v))
                                            :else (list 'return rd)))))])))))])))
 
+(defn- serial-init-body
+  "The statements of cfSerialFor's function for DynSub class n (o the object), or nil (no valid
+  constructor): ReflectionFactory's rule from an interpreted subclass in another package."
+  [n]
+  (when (and (m/serialization?) (not (m/hand-written? n)) (m/foreign-super-accessible? n))
+    (let [g (sub-name n)
+          recv (list '* (symbol g))
+          on-t (fn [s k]
+                 (let [real (if (m/translated? s) (a/ctor-real-desc s k) (:desc k))]
+                   [(list 'let ['t (list 'assert recv 'o)]
+                          (list (symbol (str "." (nm/ctor-base real))) (list (symbol (str ".-" (m/go-name s))) 't) 't))]))]
+      (if (m/serializable? n)
+        (when-let [[s k] (m/serial-chain-super n)]
+          (if s (on-t s k) ['(do)]))
+        ;; n is the first non-serializable superclass: its own no-argument constructor
+        (let [pp (bit-or 0x0001 0x0004)
+              k (first (filter #(and (= "<init>" (:name %)) (= "()V" (:desc %))) (:methods (a/decl n))))]
+          (when (and k (pos? (bit-and (or (:flags k) 0) pp)) (not (:outer-instance? (a/decl n))))
+            (on-t n k)))))))
+
 (defn subs-forms
   "The forms of the superclasses of the world, and cfSubFor (nil when c has none)."
   [T]
@@ -147,6 +167,23 @@
                             (list 'return (symbol (str "dynCfNew_" g)) (symbol (str "dynCfCtors_" g))
                                   (symbol (str "dynCfSupers_" g))))))
              '(return nil nil nil))
+       ;; JCS167: the world's part of an interpreted class's allocation for deserialization
+       (list 'go/func 'cfSerialFor
+             "cfSerialFor: what jdk.internal.reflect.ReflectionFactory.newConstructorForSerialization's
+constructor runs on a DynSub object of superclass c of the world for an interpreted Serializable class
+extending c (JCS167; Compiler$CF$Rt.serialPlan): c not Serializable, its no-argument constructor; c
+Serializable, its first non-serializable superclass's (none for Object's); nil when the rule allows no
+constructor (superHasAccessibleConstructor from another package: c public or protected with a public
+or protected constructor; the no-argument constructor public or protected) or c has no DynSub type.\n"
+             (with-meta [(tag 'c '(* jrt/Class))] {:tag '(func [any])})
+             (apply list 'switch 'c
+                    (for [p cs
+                          :let [g (sub-name p)
+                                body (serial-init-body p)]
+                          :when body]
+                      (list 'case [(m/class-sym :lang p "_class")]
+                            (list 'return (list* 'fn [(tag 'o 'any)] body)))))
+             '(return nil))
        (list 'go/func 'cfFieldsFor
              "cfFieldsFor: the protected instance fields of superclass c of the world and its
 superclasses, by name (nil: c has no DynSub type).\n"
@@ -214,6 +251,9 @@ or CF$FnObj, whose getClass is their class).\n"
                   dc (addr (lit DynClass :Slots (make (slice IFn) (len slots)) :SlotMap slots :Own bown
                                 :Ifaces (make (map (* jrt/Class) bool)) :ByKey (make (map string IFn))
                                 :CF klass))]
+              ;; kind 3: a record class (Class.isRecord; JCS167: serialization makes a record by
+              ;; its canonical constructor)
+              (when (== kind 3) (set! (.-Kind info) jrt/KindRecord))
               (when (== nw nil)
                 (set! (.-SlotMap dc) dynSlots)
                 (set! (.-Slots dc) (make (slice IFn) (len dynSlots))))
@@ -276,6 +316,20 @@ or CF$FnObj, whose getClass is their class).\n"
                                    (jrt/Str (+ "field " (.-Name (.Info c)) "." (.String name) " is not in the Go build"))))))
             (when (== o nil) (panic (jrt/Thrown (jrt/NPE))))
             (f o set x)))
+   ;; JCS167: an interpreted class's allocation for deserialization (Compiler$CF$Rt.serialPlan)
+   (list 'go/func (native-name "setSerialNew" "(Ljava/lang/Class;Larbace/lang/IFn;)V")
+         [(tag 'c '(* jrt/Class)) (tag 'f 'IFn)]
+         '(set! (.-SerialNew (.Info c)) (fn ^any [] (return (.Invoke__O f)))))
+   (list 'go/func (native-name "serialSuper" "(Ljava/lang/Class;)Z")
+         (with-meta [(tag 'c '(* jrt/Class))] {:tag 'bool})
+         '(!= (cfSerialFor c) nil))
+   (list 'go/func (native-name "serialInit" "(Ljava/lang/Object;Ljava/lang/Class;)V")
+         [(tag 'o 'any) (tag 'c '(* jrt/Class))]
+         '(let [f (cfSerialFor c)]
+            (when (== f nil)
+              (panic (jrt/Thrown (jrt/UnsupportedOperationException_New_String
+                                   (jrt/Str (+ "the serialization constructor of " (.-Name (.Info c)) " is not in the Go build"))))))
+            (f o)))
    (list 'go/func (native-name "setOuter" "(Ljava/lang/Class;Ljava/lang/Class;Ljava/lang/String;)V")
          [(tag 'c '(* jrt/Class)) (tag 'outer '(* jrt/Class)) (tag 'simple '(* jrt/String))]
          '(let [info (.Info c)]
