@@ -1046,6 +1046,19 @@ covers what.
   BSD 3-Clause License, "GHC: the Glasgow Haskell Compiler License" below); the context inference and the choice of
   strategy of `compiler/GHC/Tc/Deriv/{Infer,Utils}.hs` and `Deriv.hs` read as the specification, written anew in
   `typecheck.ae`.
+- `arbace/repr/haskell/target.ae`, `configure.ae` and `hsc2hs.ae` (the native reads' inputs derived, HFS-I2 (a),
+  doc/haskell/NATIVE.md, "The native reads' inputs: derived"): ports of GHC 9.14.1,
+  https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz (SHA-256
+  `2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77`, the corpus's pin), by hand on 2026-11-08: hadrian's
+  `src/Rules/Generate.hs` (generateSettings' order, templateRules) and `bindist/Makefile` (lib/settings, patchpackageconf),
+  `rts/configure.ac`'s ghcplatform.h and ghcautoconf.h steps, `rts/gen_event_types.py`'s two outputs, the packages'
+  `configure.ac`s' defines and `aclocal.m4`'s FPTOOLS_CHECK_HTYPE and FP_CHECK_CONST, and `utils/hsc2hs/src/{HSCParser,C,
+  DirectCodegen,UtilsCodegen}.hs` (hsc2hs 0.68.10's direct mode), under the Glasgow Haskell Compiler License (below);
+  autoconf's config.status header rewrite written from its documented behaviour. `arbace/repr/haskell/cabal.ae`: a port of
+  the same tarball's `libraries/Cabal/Cabal-syntax` 3.16.0.0 (`Distribution/Fields/{Parser,Pretty}.hs`'s layout,
+  `Distribution/FieldGrammar/{Parsec,Pretty}.hs`'s free text, `Distribution/Types/InstalledPackageInfo/FieldGrammar.hs`'s
+  ipiFieldGrammar, `Distribution/Types/Condition.hs`), under Cabal's BSD 3-Clause License ("Cabal: BSD 3-Clause License"
+  below).
 - `arbace/repr/haskell/unlit.ae` (repr/haskell's native unlit, doc/haskell/NATIVE.md): a port of the
   same tarball's `utils/unlit/unlit.c`, under the Glasgow Haskell Compiler License (below), on
   2026-11-04; `arbace/repr/haskell/driver.ae` (GHC's driver's preprocessing: `GHC/SysTools/Cpp.hs`'s
@@ -3809,6 +3822,49 @@ CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
 LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
 OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
 DAMAGE.
+```
+
+## Cabal: BSD 3-Clause License
+
+The license of Cabal-syntax 3.16.0.0 (GHC 9.14.1's tarball, `libraries/Cabal/Cabal-syntax/LICENSE`), covering
+`arbace/repr/haskell/cabal.ae`:
+
+```
+Copyright (c) 2003-2025, Cabal Development Team.
+See the AUTHORS file for the full list of copyright holders.
+
+See */LICENSE for the copyright holders of the subcomponents.
+
+
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+    * Redistributions of source code must retain the above copyright
+      notice, this list of conditions and the following disclaimer.
+
+    * Redistributions in binary form must reproduce the above
+      copyright notice, this list of conditions and the following
+      disclaimer in the documentation and/or other materials provided
+      with the distribution.
+
+    * Neither the name of Isaac Jones nor the names of other
+      contributors may be used to endorse or promote products derived
+      from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
 ## CPython: the PSF License Agreement for Python 3.14

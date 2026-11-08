@@ -67,6 +67,12 @@ code. Three kinds of things live here:
   Arbace's own (2026-11-04): written from the documented behaviour of `-traditional` and judged against Alpine's
   gcc 15.2.0 `cpp -traditional` as a black box (its output and line markers on probe inputs), no GCC code read
   or kept; `ast.ae`, `parse.ae`, `native.ae`, `mutate.ae`, `driver.ae` are Arbace's own;
+  `target.ae`, `configure.ae` and `hsc2hs.ae` (the native reads' inputs derived, HFS-I2 (a), 2026-11-08) port hadrian's
+  `src/Rules/Generate.hs` and `bindist/Makefile` (the settings file, the package records' patch), `rts/configure.ac`'s
+  ghcplatform.h and ghcautoconf.h steps, `rts/gen_event_types.py`, the packages' `configure.ac` defines with
+  `aclocal.m4`'s FPTOOLS_CHECK_HTYPE and FP_CHECK_CONST, and `utils/hsc2hs/src/{HSCParser,C,DirectCodegen,UtilsCodegen}.hs`
+  from the same tarball; `cabal.ae` ports Cabal-syntax 3.16.0.0's field parser, conditions, free text and
+  showInstalledPackageInfo (`libraries/Cabal/Cabal-syntax`, Cabal's BSD 3-Clause License);
   `rename.ae`, the renamer of the front end (doc/haskell/FRONTEND-SURVEY.md, HF2), ports `mkOpAppRn`, `mkNegAppRn`,
   `mkConOpPatRn`, `mkHsOpTyRn` of `compiler/GHC/Rename/HsType.hs` and `compareFixity` of `compiler/GHC/Types/Fixity.hs`
   from the same tarball on 2026-11-05, reading the rest of `compiler/GHC/Rename/` as the specification, the file

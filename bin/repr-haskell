@@ -28,6 +28,16 @@
 #   bin/repr-haskell verify-corpus [--sample N] [CORPUS]
 #                                 the helper's live outputs of N packages (default all) against the pack's members byte for byte
 #                                 (ORS6 (a)'s verdict) and the crossed pair; exit 1 when entries differ under the identity the record names
+#   bin/repr-haskell target derive|probe [--verify]|compare
+#                                 HFS-I2 (a), doc/haskell/NATIVE.md "The native reads' inputs: derived": derive: the GHC
+#                                 installation the native reads read, made without GHC or a C compiler into .tmp/repr-haskell/target/derived
+#                                 (arbace.repr.haskell.target: the tarball, musl's, test/haskell/target/installation.edn's facts and
+#                                 answers.edn), cached by its inputs' key; probe: the configure answers computed on Arbace's C target
+#                                 (arbace.repr.haskell.configure; ci's checker and ci) into test/haskell/target/answers.edn, --verify:
+#                                 computed again and compared; compare: the oracle tier's, the derived tree against the pack
+#                                 haskell-native-inputs-ghc-9.14.1 (GHC's installation's files) member for member, byte for byte
+#   REPR_HASKELL_INPUTS=pack      the native reads take the pack haskell-native-inputs-ghc-9.14.1 (the oracle tier's) for
+#                                 the derived tree (the default since HFS-I2 (a))
 #   REPR_HASKELL_LIVE=1           read --corpus and roundtrip's originals' dumps and trees made by the helper, not read from the pack
 #   bin/repr-haskell dump [--full] --corpus [CORPUS]   the same with --full into dumps/CORPUS-full/
 #   bin/repr-haskell dump [--full] [-o DIR] FILE... [--ghc FLAG...]
@@ -389,15 +399,154 @@ corpus_records_get() {
 # process, time), hsc/PKG/ the corpus's .hsc modules through hsc2hs (X.hs, and the helper's record X.hs.hspp.edn), LIBDIR the
 # installation's path the reads name. REPR_HASKELL_LIVE=1: the host's GHC installation and hsc2hs, as before.
 ninputs_pin=$root/test/haskell/records/haskell-native-inputs-ghc-9.14.1.sha256
-nsysroot="" nin=""
+nsysroot="" nin="" nhsc=""
 # the pack's key: the source tarball's SHA-256, the helper's identity (its cpp verb ran hsc2hs) and the corpus's plan
 native_inputs_key() {
   { arbace_tool -e "(println (:sha256 (:tarball (read-string (slurp \"$(corpus_file ghc-9.14.1)\")))))"
     hsr_helper_hash; REPR_HASKELL_ONLY_PACKAGES="" corpus_plan_raw ghc-9.14.1 all; corpus_configure ghc-9.14.1; } | sha256sum | cut -c1-64
 }
-# native_env: libdir, nsysroot and nin for the native reads: the pack's (checked: its bytes, its members, its key), or live
+# ---- the derived installation (HFS-I2 (a), the user 2026-11-07): what the pack held, made by arbace.repr.haskell.target from the
+# tarball, musl's tarball and test/haskell/target/'s facts and answers; no GHC, no C compiler
+tsrc_paths="rts mk/system-cxx-std-lib-1.0.conf.in compiler/ghc.cabal.in utils/ghc-toolchain/ghc-toolchain.cabal utils/haddock/haddock-api/haddock-api.cabal utils/haddock/haddock-library/haddock-library.cabal libraries"
+# target_src: the tarball's parts the derivation reads, extracted once into .tmp/repr-haskell/target/src (TSRC)
+target_src() {
+  export ARBACE_REPO=$root
+  local c=ghc-9.14.1 f sha name tb d=$rh/target
+  f=$(corpus_file "$c")
+  read -r sha name <<< "$(arbace_tool -e "(let [t (:tarball (read-string (slurp \"$f\")))] (println (:sha256 t) (:root t)))")"
+  corpus_fetch "$c" > "$TMPDIR/repr-haskell-fetch.txt" 2>&1 || { cat "$TMPDIR/repr-haskell-fetch.txt" >&2; return 1; }
+  tb=$rh/corpus/$name-src.tar.xz
+  mkdir -p "$d"
+  if [ ! -f "$d/src.extracted" ] || [ "$(cat "$d/src.extracted")" != "$sha $tsrc_paths" ]; then
+    rm -rf "$d/src"; mkdir -p "$d/src"
+    # shellcheck disable=SC2086
+    tar -xJf "$tb" -C "$d/src" $(for p in $tsrc_paths; do echo "$name/$p"; done)
+    echo "$sha $tsrc_paths" > "$d/src.extracted"
+  fi
+  TSRC=$d/src/$name
+  # musl's tree (C's: its tarball by its pin, extracted and its headers derived without a compiler)
+  "$root/bin/ci" musl prepare > "$TMPDIR/repr-haskell-musl.txt" 2>&1 || { cat "$TMPDIR/repr-haskell-musl.txt" >&2; return 1; }
+  TMUSL=$root/.tmp/ci-musl/musl-1.2.6
+}
+target_key() {
+  { cat "$rh/target/src.extracted"; sha256sum < "$TMUSL/include/stdc-predef.h"
+    (cd "$root" && find arbace/repr/haskell/target.ae arbace/repr/haskell/cabal.ae arbace/repr/haskell/configure.ae arbace/repr/haskell/doc.ae \
+       test/haskell/target test/haskell/corpus-ghc-9.14.1.edn c/target/abi.edn -type f | LC_ALL=C sort | xargs sha256sum); } | sha256sum | cut -c1-64
+}
+# target_derive: the derived tree, made when its key moved
+target_derive() {
+  target_src || return 1
+  local d=$rh/target/derived k
+  k=$(target_key)
+  if [ ! -f "$d.key" ] || [ "$(cat "$d.key")" != "$k" ]; then
+    rm -rf "$d" "$d.key"
+    echo "== repr-haskell: the installation derived (arbace.repr.haskell.target)" >&2
+    arbace_tool -m arbace.repr.haskell.target derive "$d" --src "$TSRC" --musl "$TMUSL" > "$rh/target/derive.log" 2>&1 \
+      || { tail -20 "$rh/target/derive.log" >&2; return 1; }
+    # what the derivation does not make yet (HFS-I2's second part: hsc2hs's C programs and deriveConstants' on ci): the pack's
+    # hsc2hs outputs (the .hsc modules' X.hs and records) and DerivedConstants.h (hsi's programs' C reads Rts.h through ci), borrowed
+    # when the pack is in the store, each named in BORROWED (the read stage's .hsc modules stay the pack's: crops-score's :recorded)
+    local pd m
+    if pd=$(native_pack_dir 2>"$TMPDIR/repr-haskell-pack.err"); then
+      : > "$d/BORROWED"
+      (cd "$pd" && find hsc sysroot -type f -path 'hsc/*' -o -type f -name DerivedConstants.h) | LC_ALL=C sort | while read -r m; do
+        [ -f "$d/$m" ] && continue
+        mkdir -p "$(dirname "$d/$m")"; cp "$pd/$m" "$d/$m"; echo "$m" >> "$d/BORROWED"
+      done
+    fi
+    echo "$k" > "$d.key"
+  fi
+  # hsc2hs's outputs made on ci (target_hsc), when they are current: in place of the borrowed ones
+  if [ -f "$rh/target/hsc.key" ] && [ -d "$rh/target/hsc" ] && [ ! -f "$d/hsc.made" ]; then
+    rm -rf "$d/hsc"; cp -r "$rh/target/hsc" "$d/hsc"; touch "$d/hsc.made"
+    [ ! -f "$d/BORROWED" ] || { grep -v '^hsc/' "$d/BORROWED" > "$d/BORROWED.new" || true; mv "$d/BORROWED.new" "$d/BORROWED"; }
+  fi
+  TDERIVED=$d
+}
+# target_probe [--verify]: the configure answers on Arbace's C target (ci's checker for the compile tests, ci for the values)
+target_probe() {
+  target_src || return 1
+  local w=$rh/target/probe out=$root/test/haskell/target/answers.edn p
+  [ "${1:-}" = --verify ] && out=$w/answers.edn
+  rm -rf "$w"; mkdir -p "$w"
+  arbace_tool -m arbace.repr.haskell.configure plan "$w" --src "$TSRC" --musl "$TMUSL" | tee "$w/plan.log"
+  if grep -q "no rule for" "$w/plan.log"; then echo "repr-haskell target probe: a check without a rule" >&2; return 1; fi
+  "$root/bin/ci" diagnose "$w"/compile/*.c > "$w/compile.out" 2>&1 || true
+  arbace_tool -m arbace.repr.haskell.configure programs "$w" --src "$TSRC" --musl "$TMUSL"
+  "$root/bin/ci" musl ensure > "$w/musl.log" 2>&1 || { tail -5 "$w/musl.log" >&2; return 1; }
+  for p in "$w"/run/*.c; do
+    "$root/bin/ci" run "$p" > "${p%.c}.out" 2> "${p%.c}.err" || { echo "repr-haskell target probe: $p failed (${p%.c}.err)" >&2; return 1; }
+  done
+  arbace_tool -m arbace.repr.haskell.configure answers "$w" --src "$TSRC" --musl "$TMUSL" --forms "$root/.tmp/ci-musl/forms" --out "$out"
+  if [ "${1:-}" = --verify ]; then
+    if cmp -s "$out" "$root/test/haskell/target/answers.edn"; then echo "repr-haskell target probe --verify: the answers as committed"
+    else diff "$root/test/haskell/target/answers.edn" "$out" | head -20; echo "repr-haskell target probe --verify: the answers differ" >&2; return 1; fi
+  fi
+}
+# target_hsc: the corpus's .hsc modules through hsc2hs on ci (HFS-I2's second part): arbace.repr.haskell.hsc2hs writes the C
+# program hsc2hs writes, bin/ci runs it (no C compiler), its output the module; into .tmp/repr-haskell/target/hsc/PKG/X.hs with
+# X.hs.hspp.edn (the record's :hsc2hs, as the helper's cpp verb wrote it); kept by key; REPR_HASKELL_ONLY_PACKAGES selects
+target_hsc() {
+  target_derive || return 1
+  local d=$rh/target/hsc w=$rh/target/hsc-work k name dir flags files hargs f base fl args cf rawf ok=0 bad=0
+  k=$( { target_key; sha256sum < "$root/arbace/repr/haskell/hsc2hs.ae"; REPR_HASKELL_ONLY_PACKAGES="" corpus_plan_raw ghc-9.14.1 all; } | sha256sum | cut -c1-64)
+  if [ -f "$d.key" ] && [ "$(cat "$d.key")" = "$k" ] && [ -z "${REPR_HASKELL_ONLY_PACKAGES:-}" ]; then echo "$d"; return 0; fi
+  corpus_fetch ghc-9.14.1 > "$TMPDIR/repr-haskell-fetch.txt" 2>&1 || { cat "$TMPDIR/repr-haskell-fetch.txt" >&2; return 1; }
+  nin=$TDERIVED; nhsc=""; native_place_inputs ghc-9.14.1
+  [ -n "${REPR_HASKELL_ONLY_PACKAGES:-}" ] || rm -rf "$d" "$d.key"
+  mkdir -p "$d" "$w"
+  while IFS=$'\t' read -r name dir flags files hargs; do
+    case " $files " in *.hsc*) ;; *) continue ;; esac
+    rm -rf "${d:?}/$name"
+    # the package's hsc2hs flags: as the corpus writes them (the record's :command), and for ci (the installation's directories
+    # in the derived tree, the package's own made absolute)
+    rawf=$(printf '%s\n' $hargs | grep -v '^--hsc2hs-arg$' || true)
+    for f in $files; do
+      case $f in *.hsc) ;; *) continue ;; esac
+      base=$(basename "$f" .hsc); fl=(); args=("-I$TSRC/utils/hsc2hs/data")
+      for cf in $rawf; do
+        cf=${cf//\$libdir/$TDERIVED/sysroot$libdir}; cf=${cf//\$repo/$root}
+        fl+=("$cf")
+        case $cf in -I/*) args+=("$cf") ;; -I*) args+=("-I$srcroot/$dir/${cf#-I}") ;; --cflag=/*) args+=("-I$(dirname "${cf#--cflag=}")") ;; esac
+      done
+      rm -rf "${w:?}/$name/$base"; mkdir -p "$w/$name/$base" "$d/$name/$(dirname "$f")"
+      if (cd "$srcroot/$dir" && arbace_tool -m arbace.repr.haskell.hsc2hs gen "$w/$name/$base" "$f" "$TSRC/utils/hsc2hs/data/template-hsc.h" "${fl[@]}") > "$w/$name/$base/gen.log" 2>&1 \
+         && "$root/bin/ci" run "${args[@]}" "$w/$name/$base/${base}_hsc_make.c" "$w/$name/$base/${base}_hsc_utils.c" > "$d/$name/${f%c}" 2> "$w/$name/$base/run.log"; then
+        { printf '(hsdump/config {:hsc2hs {:command ["hsc2hs"'
+          for cf in $rawf; do printf ' "%s"' "$cf"; done
+          printf '] :version "0.68.10" :file "%s" :input "sha256:%s" :output "sha256:%s"}})\n' "$f" \
+            "$(sha256sum < "$srcroot/$dir/$f" | cut -c1-64)" "$(sha256sum < "$d/$name/${f%c}" | cut -c1-64)"; } > "$d/$name/${f%c}.hspp.edn"
+        ok=$((ok + 1))
+      else
+        echo "repr-haskell target hsc: $name/$f failed ($w/$name/$base/run.log)" >&2; rm -f "$d/$name/${f%c}"; bad=$((bad + 1))
+      fi
+    done
+  done < <(corpus_plan_raw ghc-9.14.1 all)
+  echo "repr-haskell target hsc: $ok modules made, $bad failed" >&2
+  [ "$bad" -gt 0 ] || [ -n "${REPR_HASKELL_ONLY_PACKAGES:-}" ] || echo "$k" > "$d.key"
+  echo "$d"
+}
+# native_env: libdir, nsysroot, nin and nhsc for the native reads: the derived tree (the default), the pack's (REPR_HASKELL_INPUTS=pack,
+# checked: its bytes, its members, its key), or live; nhsc the hsc2hs outputs' directory (hsc/PKG/), the pack's until hsc2hs runs on
+# ci (HFS-I2's second part: the derived tree has no hsc/ yet)
 native_env() {
-  if [ -n "$live" ]; then ghc_check; nsysroot=""; nin=""; return 0; fi
+  if [ -n "$live" ]; then ghc_check; nsysroot=""; nin=""; nhsc=""; return 0; fi
+  if [ "${REPR_HASKELL_INPUTS:-derived}" = derived ]; then
+    target_derive || return 1
+    nin=$TDERIVED; nsysroot=$nin/sysroot; libdir=$(cat "$nin/LIBDIR")
+    mkdir -p "$nsysroot/usr/include/fortify" "$nsysroot/usr/include" "$nsysroot/usr/lib/gcc/x86_64-alpine-linux-musl/15.2.0/include"
+    if [ -d "$nin/hsc" ]; then nhsc=$nin/hsc; return 0; fi
+    local pin_dir; pin_dir=$(native_pack_dir) || return 1
+    nhsc=$pin_dir/hsc
+    return 0
+  fi
+  local d; d=$(native_pack_dir) || return 1
+  nin=$d; nsysroot=$nin/sysroot; libdir=$(cat "$nin/LIBDIR"); nhsc=$nin/hsc
+  # the system include directories the preprocessor probes for (cpp.ae's host), as directories
+  mkdir -p "$nsysroot/usr/include/fortify" "$nsysroot/usr/include" "$nsysroot/usr/lib/gcc/x86_64-alpine-linux-musl/15.2.0/include"
+}
+# native_pack_dir: the pack haskell-native-inputs-ghc-9.14.1 unpacked (checked: its bytes, its members, its key)
+native_pack_dir() {
   local man u k want
   man=$(oracle_manifest "$ninputs_pin")
   [ -f "$ninputs_pin" ] && [ -f "$man" ] || { echo "repr-haskell: UNRECORDED: no $ninputs_pin (bin/repr-haskell record-native-inputs, by hand on a host with GHC; REPR_HASKELL_LIVE=1 the host's GHC)" >&2; return 1; }
@@ -405,9 +554,7 @@ native_env() {
   k=$(awk -F'\t' '!/^#/ && NF {print $2; exit}' "$man")
   [ "$k" = "$want" ] || { echo "repr-haskell: STALE haskell-native-inputs-ghc-9.14.1: the tarball's pin, the helper or the corpus's plan changed since the record (bin/repr-haskell record-native-inputs)" >&2; return 1; }
   u=$(oracle_unpack "$ninputs_pin") || return 1
-  nin=$u/$(oracle_pin_name "$ninputs_pin"); nsysroot=$nin/sysroot; libdir=$(cat "$nin/LIBDIR")
-  # the system include directories the preprocessor probes for (cpp.ae's host), as directories
-  mkdir -p "$nsysroot/usr/include/fortify" "$nsysroot/usr/include" "$nsysroot/usr/lib/gcc/x86_64-alpine-linux-musl/15.2.0/include"
+  echo "$u/$(oracle_pin_name "$ninputs_pin")"
 }
 # native_place_inputs CORPUS: the pack's configure products and hsc2hs outputs put into the extracted tree, where Cabal's
 # build would make them (corpus_fetch's configure step and the helper's hsc2hs run, live, do the same)
@@ -416,8 +563,8 @@ native_place_inputs() {
   [ ! -d "$nin/configured" ] || cp -r "$nin/configured/." "$srcroot/"
   local name dir flags files hargs f
   while IFS=$'\t' read -r name dir flags files hargs; do
-    [ -d "$nin/hsc/$name" ] || continue
-    for f in $files; do case $f in *.hsc) [ -f "$nin/hsc/$name/${f%c}" ] && cp "$nin/hsc/$name/${f%c}" "$srcroot/$dir/${f%c}" ;; esac; done
+    [ -n "$nhsc" ] && [ -d "$nhsc/$name" ] || continue
+    for f in $files; do case $f in *.hsc) [ -f "$nhsc/$name/${f%c}" ] && cp "$nhsc/$name/${f%c}" "$srcroot/$dir/${f%c}" ;; esac; done
   done < <(corpus_plan "$1" all)
 }
 # native_dump_corpus CORPUS OUT MODE [CANDDIR]: every module of the corpus read natively (mode lines or full) into
@@ -431,7 +578,7 @@ native_dump_corpus() {
     [ -n "$files" ] || continue
     if [ -z "$cdir" ]; then
       base=$srcroot/$dir; hsp=-
-      if [ -n "$nin" ] && [ -d "$nin/hsc/$name" ]; then hsp=$nin/hsc/$name
+      if [ -n "$nhsc" ] && [ -d "$nhsc/$name" ]; then hsp=$nhsc/$name
       elif [ -n "$live" ] && printf '%s\n' $files | grep -q '\.hsc$'; then
         # live: the helper's cpp verb runs hsc2hs (X.hs beside X.hsc) and writes its record
         hsp=$out/hspp/$name; mkdir -p "$hsp"
@@ -1583,6 +1730,15 @@ case $cmd in
   run-check) ghc_check; build; run_check "$@" ;;
   test) exec "$root/bin/lib/repr-haskell/test" "$@" ;;
   record-native-inputs) record_native_inputs "$@" ;;
+  target)
+    case ${1:-} in
+      derive) target_derive && echo "$TDERIVED" ;;
+      hsc) target_hsc ;;
+      probe) shift; target_probe "$@" ;;
+      compare) target_derive || exit 1; d=$(native_pack_dir) || exit 1
+               arbace_tool -m arbace.repr.haskell.target compare "$TDERIVED" "$d" ;;
+      *) echo "repr-haskell target: derive, probe [--verify] or compare" >&2; exit 2 ;;
+    esac ;;
   native-libdir) corpus_fetch ghc-9.14.1 > "$TMPDIR/repr-haskell-fetch.txt"; native_env; echo "$nsysroot$libdir" ;;
   *) sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
