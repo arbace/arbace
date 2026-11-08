@@ -1149,3 +1149,11 @@ its `:crops :haskell` entry, its waiver), as batch 4 spliced the rest of the fra
 `test/gate/crops-test.bash` ok, `bin/gate --oracle --plan` lists it (never passed). Alternatives: splicing the whole fragment again
 (rejected: its other steps are in the table already and would be twice); leaving it to a later batch (rejected: the oracle tier's
 next run would not compare the derived installation).
+
+The same rehearsal found one interaction: on the merged tree `bin/gate --oracle --plan` stops with a NullPointerException in
+`gate.lanes/hm` (test/gate/lanes.ae:148). gate-lane2 prints the lanes' schedule with every plan, and `simulate` scheduled only the
+`:essential` and `:full` phases, so the oracle tier's steps had no start. On `mac/gate-lane2` alone it fails the same way; on next
+(no lanes printed for that plan) it does not. Fixed in `simulate`: the `:oracle` phase scheduled after `:full`, its steps one
+chain (the oracle tier runs one after another, ORS8 (a)). Checked on gate-lane2 with the fix merged: `bin/gate --oracle --plan`
+passes, `test/gate/lanes-test.bash` 50 checks, 0 failed. Alternative: printing no lanes for `--oracle` (rejected: the plan's
+budget lines are wanted there too).
