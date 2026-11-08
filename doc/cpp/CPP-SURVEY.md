@@ -777,6 +777,15 @@ targets, `test/gate/steps.edn` untouched).
   lists 197,228 entries. The `.sig` (466 bytes) was not verified (no gpg). The tarball stays in the worktree's `.tmp/llvm/` (scratch,
   gitignored), nothing of it extracted. Also pinned, **not fetched**: the release's `test-suite-23.1.4.src.tar.xz` (172,751,524 bytes, SHA-256
   `f3c8d4da...f562` from the assets API) for CP8 (b).
+- **Re-pinned to clang 23.1.5 (2026-11-08, the user's decision; branch `cpp-repin`)**: the host's Alpine moved to `clang23-23.1.5-r0`. The pins above
+  now name 23.1.5 (`test/cpp/corpora.edn`: `:llvmorg-23.1.5`, `:llvm-test-suite-23.1.5`, `:alpine-clang23`; the 23.1.4 text above is the record of CX1):
+  tag `llvmorg-23.1.5` (tag object `604d7ddf...`, GitHub: signature valid; commit `392dfff97d29b59d77e5cac6d4b6ef2585fe7117`, 2026-11-03),
+  `llvm-project-23.1.5.src.tar.xz` 179,220,264 bytes, SHA-256 `fb50b1eac93ddeb3aa8dab4cfe324dff74f4a9c2bdee6160c9e36188f8d06a6e` (the digest GitHub
+  publishes for the asset), SHA-512 `fae39af4...ab5880` (equal to Alpine's APKBUILD line), `xz -t` passes, `tar -t` lists 197,239 entries; the `.sig`
+  (119 bytes) not verified (no gpg); the test-suite tarball (172,700,828 bytes, SHA-256 `14d955b2...ab`) pinned, not fetched. APKBUILD at aports
+  `03cb9a15bb287ab788d73f542ce1c51d8a22609e` ("main/clang23: upgrade to 23.1.5"), SHA-256
+  `2f6e63a658b3ffb7a99f90916d00b39130df454962f169fd38588a70ac9104ce`, 15,153 bytes, the six patches' SHA-512s unchanged. `bin/repr-cpp pins check`
+  now reads the tarball and the APKBUILD from the main checkout's `.tmp/` (worktrees share them). Records made on 23.1.4 are re-recorded at night.
 - **Alpine's `clang23` APKBUILD** at aports commit `8a39512a7631101da2e7883603b5ca5e1f55ecc6` ("main/clang23: upgrade to 23.1.4"): SHA-256
   `b299a9b7...a9b66`, 15,153 bytes, the six source patches' SHA-512s (musl triples, stack protector and fortify by default, as-needed). It is pinned by
   digest and URL, not committed (it is Alpine's file; a copy would need a LICENSE.md entry): `bin/repr-cpp pins check` reads it from `.tmp/cpp-pins/`.

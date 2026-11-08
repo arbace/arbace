@@ -470,7 +470,7 @@ Night B (the night after, keyed: what A did not reach):
 
 ### Proposed (batch 2) (1 (a), 2 (c) and 3 (b) meanwhile decided by the user, 2026-11-07)
 
-1. **The C++ runtime's IR pin after clang 23.1.5.** (a) Re-record `test/cpp/runtime/ir.sha256` (`bin/cppi runtime-build --update`, only
+1. **The C++ runtime's IR pin after clang 23.1.5.** (Decided by the user 2026-11-08: re-pin to 23.1.5; the pins done on branch `cpp-repin`, `bin/gate --pins` passes; the records re-recorded at night, journal 2026-11-08.) (a) Re-record `test/cpp/runtime/ir.sha256` (`bin/cppi runtime-build --update`, only
    `!ident` differs) and the clang pins with it, before the night; cost: C++'s and the lowering's records keep their numbers, the pin names
    23.1.5. (b) Pin clang back to 23.1.4 (an apk downgrade on the host). (c) Leave the steps failing. *Recommended: (a).* It affects batch 1's
    night too.
