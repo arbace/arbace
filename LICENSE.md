@@ -757,6 +757,20 @@ covers what.
   skeletons `overlay/jdk/java.base/javax/management/ObjectName.java` and `openmbean/CompositeData.java` (written for
   JMX's documented signatures), `jdk/internal/jrt/HostManagement.java` and `go/arbace/jrt/management{,_linux,_tamago}.ae` are Arbace's
   own (written for jdk26u's documented natives and Linux's /proc and syscalls). Their jdk26u sources join `jdk/forms/` (the converted closure, under the same license): 29 of management-sources.
+- `go/arbace/jrt/annotation.ae` (F14, doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F14 (first slice,
+  write-ahead)"): `AnnotationObj`'s `Equals_O__Z`, `HashCode__I`, `ToString__String`, `Element` and their helpers
+  (`memberValueEquals`, `memberValueHashCode`, `memberValueToString`, the `*SourceString` functions, `quoteChar`,
+  `cloneMember`, `memberMethods`), `withDefaults` and `hashMapOrder` (AnnotationParser's memberValues over
+  AnnotationType's memberDefaults), `classAnnotations` (Class.createAnnotationData), `directlyAndIndirectlyPresent`,
+  `containerFirst` and `containerType` (AnnotationSupport), the `AnnotatedElement_*` default functions, and the
+  Field primitive accessors of `go/arbace/jrt/reflect.ae` (`getMessage`, `setPrimMessage`, `getPrim`, `setPrim`, the
+  `Get*`/`Set*` methods) follow the code of https://github.com/openjdk/jdk26u at `baf63fb`
+  (`src/java.base/share/classes/sun/reflect/annotation/{AnnotationInvocationHandler,AnnotationParser,AnnotationType,
+  AnnotationSupport}.java`, `java/lang/Class.java`, `java/lang/reflect/AnnotatedElement.java`, `java/util/HashMap.java`'s
+  iteration order, `jdk/internal/reflect/FieldAccessorImpl.java`): Copyright (c) Oracle and/or its affiliates, under the
+  GNU General Public License version 2 with the Classpath Exception (text below); recorded as ports, by the rule of B7.
+  The data format, its decoder, the per-type annotation classes, `annotation_test.ae`, `arbace/classes/annot.ae` and
+  j2g's annotation types are Arbace's own.
 - `go/arbace/jrt/fdlibm.ae` and the `FdLibm` part of `go/arbace/jrt/math.ae` (`Log`, `Cbrt`,
   `Pow`): jrt's hand-written Go forms porting, as written, https://github.com/openjdk/jdk26u at
   `baf63fb`, `src/java.base/share/classes/java/lang/FdLibm.java` (doc/go/JRT-NOTES.md, phase 1

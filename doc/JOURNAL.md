@@ -1018,3 +1018,43 @@ the day's rule; the night's. Independence (`test/crops/independence.edn`, `score
 Alternatives considered: a new verdict kind beside the diagnostics' `:golden` (rejected: the same meaning, a golden file the
 test ships); judging the golden file after `mask_hashes` (rejected: no line prints a hash, and a byte comparison is jtreg's);
 rewriting the programs so no line rests on the JDK (proposal JCV8, not done). Proposals JCV7-JCV9 in the survey.
+
+## 2026-11-08: F14's first slice, declaration annotations at run time (branch `java-f14`, from next 13895c06e)
+
+The Java triage's next unbuilt rank (doc/classes/JAVA-DEFERRED-TRIAGE.md, F14: annotations and generic signatures at run
+time, J2G-SPEC's R16 reversed), its first slice by tests a day, by day under the light rules (write-ahead: nothing converted
+or built into an executable). Details, the ranking, the expected tests and the night's commands: the triage's "As built: F14
+(first slice, write-ahead)".
+
+- Measured first: the class `:reflection` holds 75 interpreted and 72 compiled tests now (`test/reap/main.ae`'s
+  classification re-run in Python over the records, scratch `.tmp/f14/classify.py`); read by need, declaration annotations
+  (20 touched, 14 alone, a day) and Field's primitive accessors (3, a fifth of a day) lead; generics (11), type annotations
+  (11), the metadata (18), Proxy (7), Parameter (5), AccessFlag (4), member classes (4) follow at 2-6 a day.
+- Design (alternatives considered: jdk26u's AnnotationParser over class-file bytes, rejected: no class files in the closed
+  world; Proxy-based annotation objects, rejected: no Proxy, and serialization's branch owns it, JCS170; jrt's own Java for
+  the annotation object, rejected: jrt's Go could not reach it in its own tests): the closed world records each class's
+  RUNTIME-visible declaration annotations ahead of time as text data, `ClassInfo.Annots`, one encoder
+  (`arbace/classes/annot.ae`, new) for j2g and the interpreter, one decoder in jrt (`go/arbace/jrt/annotation.ae`, new),
+  as the member tables (SZ3) record members. j2g gives every annotation type a Go type of its annotations (`C_ann`
+  embedding `jrt.AnnotationObj`, `ClassInfo.AnnNew`: decls/annotation-impl-forms, out/class-registration); the interpreter
+  hands its classes' data to jrt (`Compiler$CF$Host.annotations`, the native `CFGo.setAnnotations` in
+  `arbace/j2g/dyncf.ae`), its annotation types' instance checks accept jrt's objects (`jrt.AnnotationTypeOf`) and CallV
+  calls an interpreted interface's member on an object of the world through its class's method (`Rt.receiverMethod`).
+- Ported (jdk26u `baf63fb`, LICENSE.md's new entry): `sun/reflect/annotation/AnnotationInvocationHandler.java`'s
+  equalsImpl, hashCodeImpl, toStringImpl, member access and cloneArray, `AnnotationParser`'s and `AnnotationType`'s
+  memberValues with defaults (HashMap(0)'s iteration order emulated, checked against JDK 26), `Class.java`'s
+  createAnnotationData (@Inherited), `AnnotationSupport.java`'s directly and indirectly present (@Repeatable),
+  `AnnotatedElement.java`'s defaults, `jdk/internal/reflect/FieldAccessorImpl.java`'s primitive accessors and messages.
+- The analysis (`arbace/classes/analyze.ae`): `*lenient*` (an annotation resolved alone, left out when it does not
+  resolve), `element-default`, an array value's element descriptor, a class value written `Integer/TYPE` (found failing on
+  t05990's forms: "Unknown type: Byte/TYPE"). The encoder reverses a declaration's annotations (the reader assocs each
+  outer `^` map onto the inner one: JCS212).
+- The closure: `annotation-sources` (14 jdk26u files: java.lang.annotation's 11 but Annotation, java.lang's Deprecated,
+  FunctionalInterface, SafeVarargs); javac's world gave up its copies of five (bin/javac-vendor's `base_files`, its forms,
+  `sources.txt`, provenance's counts by hand). jrt's manifest, member tables and test data regenerated on the frozen jar.
+- Checks (light): `go test ./jrt` on amd64, every test passing, four new (values, toString and hashCode against JDK 26's
+  for the same program, every value kind, the object's class, the HashMap order, Field's accessors); the joint javac check
+  2,291 files, 0 errors; the encoder on the frozen JVM over nine tests' read forms; j2g on the frozen JVM over a one-file
+  slice (its data, AnnNew, the `_ann` type). Not run: the levels (no conversion, no executable by day).
+- Expected: about 14 / 14 of 17 tests (ids in the triage). Proposed: JCS210 (annotations as proxies), JCS211 (the JDK's
+  members' annotations), JCS212 (the order of a declaration's annotations), JCS213 (IncompleteAnnotationException).

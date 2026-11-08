@@ -1231,7 +1231,9 @@ Erased, as the analyzer erases them: a type variable is its bound's Go type, a p
 type its class's. The analyzer has already written the erasure casts javac's `TransTypes`
 inserts (classes/SPEC.md §5.5), which are `C_Cast` calls here. `Signature` attributes have no
 counterpart; generic reflection is cut (JAVA-SURFACE.md): its methods that jrt keeps return
-plain `Class` objects (§12, amendment R16).
+plain `Class` objects (§12, amendment R16; R16's reversal for declaration annotations, F14's
+first slice, leaves this as it is: the `Signature` strings, which the analysis has as `:sig`,
+are F14's generic-signatures slice).
 
 ### 5.11 Class objects and member tables
 
@@ -3276,6 +3278,20 @@ D6's other cuts were reversed one by one (the status at the top, B1-PLAN.md D6).
   - no annotations are kept: `isAnnotationPresent` is false, except
     `isAnnotationPresent(FunctionalInterface)`, answered by `ClassInfo.FromFn != nil` (§7.11),
     which `Compiler.FISupport` needs;
+  - **R16 reversed for declaration annotations** (F14's first slice, 2026-11-08, JCS94 (b)'s
+    amendment; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F14 (first slice, write-ahead)"):
+    j2g records each translated class's RUNTIME-visible declaration annotations and an
+    annotation type's element defaults as data, `ClassInfo.Annots` (a `--program`'s own classes
+    their members' and parameters' too), in the format `arbace.classes.annot` writes and
+    `go/arbace/jrt/annotation.ae` decodes; every annotation type gets a Go type of its
+    annotations, `C_ann` (embedding `jrt.AnnotationObj`: AnnotationInvocationHandler's
+    equals, hashCode, toString; a method a member) made by `ClassInfo.AnnNew`, in place of the
+    JDK's Proxy; Class, Method, Constructor and Field answer `getAnnotation`,
+    `getAnnotations`, `getDeclaredAnnotations`, `getAnnotationsByType` (with @Inherited and
+    @Repeatable), `isAnnotationPresent` from it, `FunctionalInterface` by FromFn as before
+    besides; java.lang.annotation.Annotation and java.lang.reflect.AnnotatedElement are jrt's
+    hand-written interfaces. The bullets below (generic reflection, exception types) still hold;
+    type annotations, `Parameter` and `AccessFlag` are F14's later slices;
   - generic reflection returns plain `Class` objects: `getGenericInterfaces` and
     `getGenericSuperclass` give the classes in a `Type[]` and as a `Type`, so no
     `ParameterizedType` is ever seen (`HashMap.comparableClassFor` finds none and orders tree
@@ -4179,7 +4195,8 @@ folded into the text above, marked "(amendment Xn, accepted 2026-10-08)" where t
   every `@FunctionalInterface` interface: §5.11, §7.11, §10.1, §12. R14 the API additions: §11.
   R15 j2g's list of classes with declared members (`java.util.Random`): §5.11, Q13. R16 no
   annotations but `FunctionalInterface`, generic reflection as plain `Class` objects, no
-  exception types: §5.10, §12. R17 the default locale `en_US` with root data: §12. R18 three
+  exception types: §5.10, §12 (declaration annotations kept since F14's first slice, 2026-11-08:
+  §12's note). R17 the default locale `en_US` with root data: §12. R18 three
   charsets: §12, V9. R19 `standin_reflect.ae` among the stand-ins: §4.3.
 - **Phase 2a (T):** T11 `RegisterGoType` and `Unsafe`'s offsets: §5.11, §9.2. T12
   `AtomicInteger` and `AtomicLong` embed `Object` until `Number` is translated: §5.3. T13 the

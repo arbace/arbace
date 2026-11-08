@@ -1,0 +1,964 @@
+;; jrt: annotations at run time (J2G-SPEC §12, amendment R16 reversed for declaration annotations:
+;; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F14 (first slice, write-ahead)").
+;;
+;; The closed world records each class's RUNTIME-visible declaration annotations ahead of time as
+;; data (ClassInfo.Annots: j2g writes it for the translated classes, the interpreter's host sets it
+;; for the classes it makes, SetAnnotations), in one text format both encoders share
+;; (arbace.classes.annot). jrt decodes it on first use into annotation objects: AnnotationObj, the
+;; member values of one annotation, with jdk26u's AnnotationInvocationHandler's equals, hashCode,
+;; toString and member access (sun/reflect/annotation/AnnotationInvocationHandler.java at jdk26u
+;; baf63fb, ported rule for rule), the inherited and repeatable lookups of Class.annotationData and
+;; AnnotationSupport (java/lang/Class.java, sun/reflect/annotation/AnnotationSupport.java). An
+;; annotation type j2g translated has a Go type of its own embedding AnnotationObj and implementing
+;; the type's Go interface (ClassInfo.AnnNew, arbace.j2g.decls/annotation-impl-forms); an interpreted
+;; one has plain AnnotationObj values, which its class's instance check accepts (AnnotationTypeOf).
+;; No Proxy is made: the object's class is a per-type class made by jrt, named as the JDK's proxy
+;; classes are, whose member table has the elements (Class.getMethods, Method.invoke on it).
+;;
+;; The data, one record a line, tokens separated by one space:
+;;   T ANN                    an annotation of the class
+;;   M NAME DESC ANN          of its method NAME DESC (DESC with binary names: (ILjava.lang.String;)V)
+;;   C DESC ANN               of its constructor DESC
+;;   F NAME ANN               of its field NAME
+;;   P NAME DESC I ANN        of parameter I of the method (NAME <init>: a constructor)
+;;   D NAME VALUE             an annotation type's element NAME's default
+;; ANN is @DESC N followed by N pairs NAME VALUE (an element's NAME and VALUE); a VALUE is Z0 Z1,
+;; B S C I J then the value in decimal (C a UTF-16 code unit), F and D then the raw bits in decimal
+;; (Float.floatToRawIntBits, Double.doubleToRawLongBits, signed), "TEXT" a String (\" \\ and
+;; \uXXXX for every code unit outside printable ASCII), cDESC a Class (cI, cV, c[I,
+;; cLjava.lang.String;), eDESCNAME an enum constant (eLjava.lang.annotation.ElementType;TYPE), an
+;; ANN (nested) or [DESC N followed by N VALUEs (an array of component DESC). A record whose
+;; annotation names a class the closed world does not have is skipped, as AnnotationParser skips
+;; an annotation of a type it cannot load.
+(in-ns 'go.arbace.jrt)
+
+(go/file "annotation.go"
+  :imports [[fmt "fmt"] [math "math"] [strconv "strconv"] [strings "strings"] [sync "sync"]
+            [atomic "sync/atomic"]])
+
+;; ---------------------------------------------------------------------------------------
+;; java.lang.annotation.Annotation and java.lang.reflect.AnnotatedElement
+
+(go/type Annotation
+  "Annotation is java.lang.annotation.Annotation (its equals, hashCode and toString are
+Object_I's).\n"
+  (interface Object_I (Is_Annotation [])
+    (AnnotationType__Class ^{:tag (* Class)} [])))
+
+(go/var Annotation_class
+  (Define (addr (lit ClassInfo :Name "java.lang.annotation.Annotation" :Kind KindInterface
+                     :Modifiers (bit-or AccPublic AccInterface AccAbstract) :Go "arbace/jrt.Annotation"))))
+
+(go/func Annotation_InstanceOf ^bool [^any x]
+  (let [(values _ ok) (assert Annotation x)] (dynNominal x Annotation_class ok)))
+(go/func Annotation_Cast ^Annotation [^any x]
+  (when (== x nil) (return nil))
+  (let [(values v ok) (assert Annotation x)]
+    (when (not (dynNominal x Annotation_class ok))
+      (panic (ClassCast x Annotation_class)))
+    v))
+
+(go/type AnnotatedElement
+  "AnnotatedElement is java.lang.reflect.AnnotatedElement: Class, Method, Constructor and
+Field implement it.\n"
+  (interface Object_I (Is_AnnotatedElement [])
+    (GetAnnotation_Class__Annotation ^Annotation [^{:tag (* Class)} a])
+    (IsAnnotationPresent_Class__Z ^bool [^{:tag (* Class)} a])
+    (GetAnnotations__Annotation1 ^{:tag (* RefArray)} [])
+    (GetDeclaredAnnotations__Annotation1 ^{:tag (* RefArray)} [])
+    (GetAnnotationsByType_Class__Annotation1 ^{:tag (* RefArray)} [^{:tag (* Class)} a])
+    (GetDeclaredAnnotation_Class__Annotation ^Annotation [^{:tag (* Class)} a])
+    (GetDeclaredAnnotationsByType_Class__Annotation1 ^{:tag (* RefArray)} [^{:tag (* Class)} a])))
+
+(go/var AnnotatedElement_class
+  (Define (addr (lit ClassInfo :Name "java.lang.reflect.AnnotatedElement" :Kind KindInterface
+                     :Modifiers (bit-or AccPublic AccInterface AccAbstract) :Go "arbace/jrt.AnnotatedElement"))))
+
+(go/func AnnotatedElement_InstanceOf ^bool [^any x]
+  (let [(values _ ok) (assert AnnotatedElement x)] (dynNominal x AnnotatedElement_class ok)))
+(go/func AnnotatedElement_Cast ^AnnotatedElement [^any x]
+  (when (== x nil) (return nil))
+  (let [(values v ok) (assert AnnotatedElement x)]
+    (when (not (dynNominal x AnnotatedElement_class ok))
+      (panic (ClassCast x AnnotatedElement_class)))
+    v))
+
+;; AnnotatedElement's default methods (java/lang/reflect/AnnotatedElement.java), for a class that
+;; implements it without them (a class made at run time: Dyn)
+(go/func AnnotatedElement_IsAnnotationPresent_Class__Z ^bool [^AnnotatedElement this ^{:tag (* Class)} a]
+  (!= (.GetAnnotation_Class__Annotation this a) nil))
+(go/func AnnotatedElement_GetDeclaredAnnotation_Class__Annotation ^Annotation [^AnnotatedElement this ^{:tag (* Class)} a]
+  (NN a)
+  (findAnnotation (.-A (.GetDeclaredAnnotations__Annotation1 this)) a))
+(go/func AnnotatedElement_GetDeclaredAnnotationsByType_Class__Annotation1 ^{:tag (* RefArray)} [^AnnotatedElement this ^{:tag (* Class)} a]
+  (NN a)
+  (annotationArray a (directlyAndIndirectlyPresent (.-A (.GetDeclaredAnnotations__Annotation1 this)) a)))
+(go/func AnnotatedElement_GetAnnotationsByType_Class__Annotation1 ^{:tag (* RefArray)} [^AnnotatedElement this ^{:tag (* Class)} a]
+  ;; (the default's inherited search is Class's own, which Class overrides)
+  (.GetDeclaredAnnotationsByType_Class__Annotation1 this a))
+
+;; ---------------------------------------------------------------------------------------
+;; the annotation object (AnnotationInvocationHandler's state and methods)
+
+(go/type AnnotationObj
+  "AnnotationObj is one annotation: its type and member values (memberValues, in the
+LinkedHashMap's order AnnotationParser gives them: the type's defaults in HashMap order, then
+the explicit members not among them, in the class file's order), each in the invocation
+handler's form (primitives boxed, arrays as arrays). self is the Java object (the type's own Go
+type embedding it, or the AnnotationObj).\n"
+  (struct Object ^{:tag (* Class)} typ ^{:tag (slice string)} names ^{:tag (slice any)} vals ^any self))
+
+(go/type annotationBased
+  "annotationBased is an annotation object: AnnotationObj, or a Go type embedding it.\n"
+  (interface (annBase ^{:tag (* AnnotationObj)} [])))
+
+(go/method annBase ^{:tag (* AnnotationObj)} [^{:tag (* AnnotationObj)} a] a)
+(go/method Is_Annotation [^{:tag (* AnnotationObj)} a])
+(go/method AnnotationType__Class ^{:tag (* Class)} [^{:tag (* AnnotationObj)} a] (.-typ a))
+(go/method Ref ^any [^{:tag (* AnnotationObj)} a] (when (== a nil) (return nil)) (.-self a))
+(go/method Clone__O ^any [^{:tag (* AnnotationObj)} a] (panic (CloneNotSupported a)))
+(go/method GetClass__Class "GetClass__Class: the type's proxy-like class (annotationClass).\n"
+  ^{:tag (* Class)} [^{:tag (* AnnotationObj)} a] (annotationClass (.-typ a)))
+
+(go/func AnnotationTypeOf
+  "AnnotationTypeOf is the annotation type of x when x is an annotation object jrt made, else
+nil (the instance check of an interpreted annotation type: arbace.j2g.dyncf).\n"
+  ^{:tag (* Class)} [^any x]
+  (let [(values b ok) (assert annotationBased x)]
+    (when (not ok) (return nil))
+    (.-typ (.annBase b))))
+
+(go/method index ^int [^{:tag (* AnnotationObj)} a ^string name]
+  (range [i n (.-names a)]
+    (when (== n name) (return i)))
+  -1)
+
+(go/method Element
+  "Element is the value of member name, as the invocation handler returns it: a non-empty
+array cloned. j2g's annotation types call it (unboxing a primitive).\n"
+  ^any [^{:tag (* AnnotationObj)} a ^string name]
+  (let [i (.index a name)]
+    (when (< i 0)
+      (panic (Thrown (UnsupportedOperationException_New_String
+                       (Str (+ "IncompleteAnnotationException: " (.-Name (.-info (.-typ a))) " missing element " name))))))
+    (cloneMember (aget (.-vals a) i))))
+
+(go/method Member
+  "Member is Element in the member tables' convention (a primitive as its Go value): what the
+element methods of j2g's annotation types return.\n"
+  ^any [^{:tag (* AnnotationObj)} a ^string name]
+  (let [v (.Element a name)
+        (values p code) (unwrap v)]
+    (when (!= code 0) (return p))
+    v))
+
+(go/func cloneMember "cloneMember: cloneArray of a non-empty array, else v.\n" ^any [^any v]
+  (type-switch [x v]
+    (case [(* BooleanArray)] (when (> (len (.-A x)) 0) (return (.Copy x))))
+    (case [(* ByteArray)] (when (> (len (.-A x)) 0) (return (.Copy x))))
+    (case [(* CharArray)] (when (> (len (.-A x)) 0) (return (.Copy x))))
+    (case [(* ShortArray)] (when (> (len (.-A x)) 0) (return (.Copy x))))
+    (case [(* IntArray)] (when (> (len (.-A x)) 0) (return (.Copy x))))
+    (case [(* LongArray)] (when (> (len (.-A x)) 0) (return (.Copy x))))
+    (case [(* FloatArray)] (when (> (len (.-A x)) 0) (return (.Copy x))))
+    (case [(* DoubleArray)] (when (> (len (.-A x)) 0) (return (.Copy x))))
+    (case [(* RefArray)] (when (> (len (.-A x)) 0) (return (.Copy x)))))
+  v)
+
+(go/func memberMethods
+  "memberMethods: the annotation type's element methods (its own public abstract methods
+without parameters, not synthetic), as getMemberMethods and AnnotationType list them.\n"
+  ^{:tag (slice (* MethodInfo))} [^{:tag (* Class)} typ]
+  (EnsureMembers (.-info typ))
+  (let [^{:tag (slice (* MethodInfo))} out nil]
+    (range [i _ (.-Methods (.-info typ))]
+      (let [m (addr (aget (.-Methods (.-info typ)) i))]
+        (when (and (== (len (.-Params m)) 0)
+                   (!= (bit-and (.-Modifiers m) AccAbstract) 0)
+                   (== (bit-and (.-Modifiers m) (bit-or AccStatic AccSynthetic)) 0))
+          (set! out (append out m)))))
+    out))
+
+(go/method Equals_O__Z
+  "Equals_O__Z is equalsImpl: the same object, or an instance of the type whose every member
+equals ours (another implementation's members by its methods).\n"
+  ^bool [^{:tag (* AnnotationObj)} a ^any o]
+  (let [(values oo ok) (assert Object_I o)]
+    (when (and ok (== (.Self_Object oo) (addr (.-Object a))))
+      (return true)))
+  (when (not (.IsInstance_O__Z (.-typ a) o))
+    (return false))
+  (let [(values ob us) (assert annotationBased o)]
+    (range [_ m (memberMethods (.-typ a))]
+      (let [i (.index a (.-Name m))
+            ^any ours nil
+            ^any theirs nil]
+        (when (>= i 0) (set! ours (aget (.-vals a) i)))
+        (if us
+          (let [b (.annBase ob)
+                j (.index b (.-Name m))]
+            (when (>= j 0) (set! theirs (aget (.-vals b) j))))
+          (let [^Throwable_I exc nil]
+            (set! theirs ((fn ^any [] :results [^any v]
+                            (defer (Catch (addr exc)))
+                            (set! v (Box ((.-Invoke m) o nil)))
+                            (return))))
+            (when (!= exc nil)
+              (return false))))
+        (when (not (memberValueEquals ours theirs))
+          (return false)))))
+  true)
+
+(go/func memberValueEquals ^bool [^any v1 ^any v2]
+  (when (== v1 nil) (return (== v2 nil)))
+  (type-switch [x v1]
+    (case [(* RefArray)]
+      (let [(values y ok) (assert (* RefArray) v2)]
+        (when (not ok) (return false))
+        (when (!= (len (.-A x)) (len (.-A y))) (return false))
+        (range [i e (.-A x)]
+          (let [f (aget (.-A y) i)]
+            (if (== e nil)
+              (when (!= f nil) (return false))
+              (when (not (.Equals_O__Z (assert Object_I e) f)) (return false)))))
+        (return true)))
+    (case [(* BooleanArray)]
+      (let [(values y ok) (assert (* BooleanArray) v2)]
+        (when (or (not ok) (!= (len (.-A x)) (len (.-A y)))) (return false))
+        (range [i e (.-A x)] (when (!= e (aget (.-A y) i)) (return false)))
+        (return true)))
+    (case [(* ByteArray)]
+      (let [(values y ok) (assert (* ByteArray) v2)]
+        (when (or (not ok) (!= (len (.-A x)) (len (.-A y)))) (return false))
+        (range [i e (.-A x)] (when (!= e (aget (.-A y) i)) (return false)))
+        (return true)))
+    (case [(* CharArray)]
+      (let [(values y ok) (assert (* CharArray) v2)]
+        (when (or (not ok) (!= (len (.-A x)) (len (.-A y)))) (return false))
+        (range [i e (.-A x)] (when (!= e (aget (.-A y) i)) (return false)))
+        (return true)))
+    (case [(* ShortArray)]
+      (let [(values y ok) (assert (* ShortArray) v2)]
+        (when (or (not ok) (!= (len (.-A x)) (len (.-A y)))) (return false))
+        (range [i e (.-A x)] (when (!= e (aget (.-A y) i)) (return false)))
+        (return true)))
+    (case [(* IntArray)]
+      (let [(values y ok) (assert (* IntArray) v2)]
+        (when (or (not ok) (!= (len (.-A x)) (len (.-A y)))) (return false))
+        (range [i e (.-A x)] (when (!= e (aget (.-A y) i)) (return false)))
+        (return true)))
+    (case [(* LongArray)]
+      (let [(values y ok) (assert (* LongArray) v2)]
+        (when (or (not ok) (!= (len (.-A x)) (len (.-A y)))) (return false))
+        (range [i e (.-A x)] (when (!= e (aget (.-A y) i)) (return false)))
+        (return true)))
+    (case [(* FloatArray)]
+      ;; Arrays.equals(float[]): floatToIntBits equal
+      (let [(values y ok) (assert (* FloatArray) v2)]
+        (when (or (not ok) (!= (len (.-A x)) (len (.-A y)))) (return false))
+        (range [i e (.-A x)] (when (!= (annFloatBits e) (annFloatBits (aget (.-A y) i))) (return false)))
+        (return true)))
+    (case [(* DoubleArray)]
+      (let [(values y ok) (assert (* DoubleArray) v2)]
+        (when (or (not ok) (!= (len (.-A x)) (len (.-A y)))) (return false))
+        (range [i e (.-A x)] (when (!= (annDoubleBits e) (annDoubleBits (aget (.-A y) i))) (return false)))
+        (return true))))
+  (.Equals_O__Z (assert Object_I v1) v2))
+
+(go/func annFloatBits ^int32 [^float32 f]
+  (when (!= f f) (return 0x7fc00000))
+  (conv int32 (math/Float32bits f)))
+
+(go/func annDoubleBits ^int64 [^float64 d]
+  (when (!= d d) (return 0x7ff8000000000000))
+  (conv int64 (math/Float64bits d)))
+
+(go/func longHash ^int32 [^int64 v] (conv int32 (bit-xor v (conv int64 (>> (conv uint64 v) 32)))))
+
+(go/method HashCode__I
+  "HashCode__I is hashCodeImpl: the sum of (127 * name.hashCode()) ^ the value's hash.\n"
+  ^int32 [^{:tag (* AnnotationObj)} a]
+  (let [r (conv int32 0)]
+    (range [i n (.-names a)]
+      (set! r (+ r (bit-xor (* 127 (.HashCode__I (Intern n))) (memberValueHashCode (aget (.-vals a) i))))))
+    r))
+
+(go/func memberValueHashCode "memberValueHashCode: Arrays.hashCode of an array, else hashCode.\n"
+  ^int32 [^any v]
+  (let [h (conv int32 1)]
+    (type-switch [x v]
+      (case [(* RefArray)]
+        (range [_ e (.-A x)]
+          (if (== e nil)
+            (set! h (* 31 h))
+            (set! h (+ (* 31 h) (.HashCode__I (assert Object_I e))))))
+        (return h))
+      (case [(* BooleanArray)]
+        (range [_ e (.-A x)] (if e (set! h (+ (* 31 h) 1231)) (set! h (+ (* 31 h) 1237))))
+        (return h))
+      (case [(* ByteArray)] (range [_ e (.-A x)] (set! h (+ (* 31 h) (conv int32 e)))) (return h))
+      (case [(* CharArray)] (range [_ e (.-A x)] (set! h (+ (* 31 h) (conv int32 e)))) (return h))
+      (case [(* ShortArray)] (range [_ e (.-A x)] (set! h (+ (* 31 h) (conv int32 e)))) (return h))
+      (case [(* IntArray)] (range [_ e (.-A x)] (set! h (+ (* 31 h) e))) (return h))
+      (case [(* LongArray)] (range [_ e (.-A x)] (set! h (+ (* 31 h) (longHash e)))) (return h))
+      (case [(* FloatArray)] (range [_ e (.-A x)] (set! h (+ (* 31 h) (annFloatBits e)))) (return h))
+      (case [(* DoubleArray)] (range [_ e (.-A x)] (set! h (+ (* 31 h) (longHash (annDoubleBits e))))) (return h))))
+  (.HashCode__I (assert Object_I v)))
+
+(go/method ToString__String
+  "ToString__String is toStringImpl: @, the type's canonical name, its members in parentheses
+(a lone value member without its name).\n"
+  ^{:tag (* String)} [^{:tag (* AnnotationObj)} a]
+  (let [b (lit strings/Builder)
+        cn (.GetCanonicalName__String (.-typ a))
+        lone (== (len (.-names a)) 1)]
+    (.WriteString (addr b) "@")
+    (if (== cn nil)
+      (.WriteString (addr b) "<no canonical name>")
+      (.WriteString (addr b) (.String cn)))
+    (.WriteString (addr b) "(")
+    (range [i n (.-names a)]
+      (when (> i 0) (.WriteString (addr b) ", "))
+      (when (or (not lone) (!= n "value"))
+        (.WriteString (addr b) n)
+        (.WriteString (addr b) "="))
+      (set! lone false)
+      (.WriteString (addr b) (memberValueToString (aget (.-vals a) i))))
+    (.WriteString (addr b) ")")
+    (Str (.String (addr b)))))
+
+(go/func memberValueToString ^string [^any v]
+  (type-switch [x v]
+    (case [(* Class)] (return (classSourceString x)))
+    (case [(* String)] (return (stringSourceString x)))
+    (case [(* Character)] (return (charSourceString (.-F_value x))))
+    (case [(* Double)] (return (doubleSourceString (.-F_value x))))
+    (case [(* Float)] (return (floatSourceString (.-F_value x))))
+    (case [(* Long)] (return (+ (strconv/FormatInt (.-F_value x) 10) "L")))
+    (case [(* Byte)] (return (byteSourceString (.-F_value x))))
+    (case [(* BooleanArray)]
+      (let [ss (make (slice string) (len (.-A x)))]
+        (range [i e (.-A x)] (if e (aset ss i "true") (aset ss i "false")))
+        (return (joinSource ss))))
+    (case [(* ByteArray)]
+      (let [ss (make (slice string) (len (.-A x)))]
+        (range [i e (.-A x)] (aset ss i (byteSourceString e)))
+        (return (joinSource ss))))
+    (case [(* CharArray)]
+      (let [ss (make (slice string) (len (.-A x)))]
+        (range [i e (.-A x)] (aset ss i (charSourceString e)))
+        (return (joinSource ss))))
+    (case [(* ShortArray)]
+      (let [ss (make (slice string) (len (.-A x)))]
+        (range [i e (.-A x)] (aset ss i (strconv/Itoa (conv int e))))
+        (return (joinSource ss))))
+    (case [(* IntArray)]
+      (let [ss (make (slice string) (len (.-A x)))]
+        (range [i e (.-A x)] (aset ss i (strconv/Itoa (conv int e))))
+        (return (joinSource ss))))
+    (case [(* LongArray)]
+      (let [ss (make (slice string) (len (.-A x)))]
+        (range [i e (.-A x)] (aset ss i (+ (strconv/FormatInt e 10) "L")))
+        (return (joinSource ss))))
+    (case [(* FloatArray)]
+      (let [ss (make (slice string) (len (.-A x)))]
+        (range [i e (.-A x)] (aset ss i (floatSourceString e)))
+        (return (joinSource ss))))
+    (case [(* DoubleArray)]
+      (let [ss (make (slice string) (len (.-A x)))]
+        (range [i e (.-A x)] (aset ss i (doubleSourceString e)))
+        (return (joinSource ss))))
+    (case [(* RefArray)]
+      (let [ss (make (slice string) (len (.-A x)))
+            comp (.-Comp x)]
+        (range [i e (.-A x)]
+          (cond
+            (== e nil) (aset ss i "null")
+            (== comp Class_class) (aset ss i (classSourceString (assert (* Class) e)))
+            (== comp String_class) (aset ss i (stringSourceString (assert (* String) e)))
+            (.IsEnum__Z comp) (aset ss i (.String (.Name__String (assert Enum_I e))))
+            :else (aset ss i (.String (.ToString__String (assert Object_I e))))))
+        (return (joinSource ss)))))
+  (let [(values en ok) (assert Enum_I v)]
+    (when ok (return (.String (.Name__String en)))))
+  (.String (.ToString__String (assert Object_I v))))
+
+(go/func joinSource ^string [^{:tag (slice string)} ss] (+ "{" (strings/Join ss ", ") "}"))
+
+(go/func classSourceString ^string [^{:tag (* Class)} c]
+  (let [cn (.GetCanonicalName__String c)]
+    (when (== cn nil) (return "<no canonical name>.class"))
+    (+ (.String cn) ".class")))
+
+(go/func floatSourceString ^string [^float32 f]
+  (cond
+    (!= f f) (return "0.0f/0.0f")
+    (math/IsInf (conv float64 f) 1) (return "1.0f/0.0f")
+    (math/IsInf (conv float64 f) -1) (return "-1.0f/0.0f"))
+  (+ (FormatFloat f) "f"))
+
+(go/func doubleSourceString ^string [^float64 d]
+  (cond
+    (!= d d) (return "0.0/0.0")
+    (math/IsInf d 1) (return "1.0/0.0")
+    (math/IsInf d -1) (return "-1.0/0.0"))
+  (FormatDouble d))
+
+(go/func byteSourceString ^string [^int8 b] (fmt/Sprintf "(byte)0x%02x" (conv uint8 b)))
+
+(go/func quoteChar "quoteChar is quote(ch, charContext).\n" ^string [^uint16 ch ^bool charContext]
+  (switch ch
+    (case [\backspace] (return "\\b"))
+    (case [\formfeed] (return "\\f"))
+    (case [\newline] (return "\\n"))
+    (case [\return] (return "\\r"))
+    (case [\tab] (return "\\t"))
+    (case [\'] (if charContext (return "\\'") (return "'")))
+    (case [\"] (if charContext (return "\"") (return "\\\"")))
+    (case [\\] (return "\\\\")))
+  (when (and (>= ch 0x20) (<= ch 0x7e))
+    (return (conv string (conv rune ch))))
+  (fmt/Sprintf "\\u%04x" (conv int ch)))
+
+(go/func charSourceString ^string [^uint16 c] (+ "'" (quoteChar c true) "'"))
+
+(go/func stringSourceString ^string [^{:tag (* String)} s]
+  (let [b (lit strings/Builder)]
+    (.WriteString (addr b) "\"")
+    (range [_ c (.-value s)]
+      (.WriteString (addr b) (quoteChar c false)))
+    (.WriteString (addr b) "\"")
+    (.String (addr b))))
+
+;; ---------------------------------------------------------------------------------------
+;; the per-type class of the annotation objects (the JDK's proxy class's place)
+
+(go/var ^{:tag sync/Map} annotationClasses)
+(go/var ^{:tag atomic/Int32} annotationClassCount)
+
+(go/func annotationClass
+  "annotationClass: the class of typ's annotation objects, made once: final, public when typ
+is, named jdk.proxy1.$ProxyN (typ's package's when typ is not public), extending Proxy,
+implementing typ, its member table the elements and Annotation's methods.\n"
+  ^{:tag (* Class)} [^{:tag (* Class)} typ]
+  (let [(values v ok) (.Load annotationClasses typ)]
+    (when ok (return (assert (* Class) v))))
+  (let [mods AccFinal
+        pkg "jdk.proxy1"
+        tn (.-Name (.-info typ))]
+    (if (!= (bit-and (.-Modifiers (.-info typ)) AccPublic) 0)
+      (set! mods (bit-or mods AccPublic))
+      (let [i (strings/LastIndexByte tn \.)]
+        (if (< i 0) (set! pkg "") (set! pkg (subslice tn 0 i)))))
+    (let [n (.Add annotationClassCount 1)
+          name (+ "$Proxy" (strconv/Itoa (conv int n)))]
+      (when (!= pkg "") (set! name (+ pkg "." name)))
+      (let [info (addr (lit ClassInfo :Name name :Kind KindClass :Modifiers mods :Super Proxy_class
+                            :Interfaces (lit (slice (* Class)) typ) :Simple (+ "$Proxy" (strconv/Itoa (conv int n)))
+                            :Go "arbace/jrt.AnnotationObj"))
+            ^{:tag (slice MethodInfo)} ms nil]
+        (range [_ m (memberMethods typ)]
+          (let [nm (.-Name m)]
+            (set! ms (append ms (lit MethodInfo :Name nm :Return (.-Return m) :Modifiers (bit-or AccPublic AccFinal)
+                                     :Invoke (fn ^any [^any this ^{:tag (slice any)} args]
+                                               (return (.Element (.annBase (assert annotationBased this)) nm))))))))
+        (set! ms (append ms
+                         (lit MethodInfo :Name "annotationType" :Return Class_class :Modifiers (bit-or AccPublic AccFinal)
+                              :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (return (.-typ (.annBase (assert annotationBased this))))))
+                         (lit MethodInfo :Name "equals" :Params (lit (slice (* Class)) Object_class) :Return Prim_boolean
+                              :Modifiers (bit-or AccPublic AccFinal)
+                              :Invoke (fn ^any [^any this ^{:tag (slice any)} args]
+                                        (return (.Equals_O__Z (.annBase (assert annotationBased this)) (aget args 0)))))
+                         (lit MethodInfo :Name "hashCode" :Return Prim_int :Modifiers (bit-or AccPublic AccFinal)
+                              :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (return (.HashCode__I (.annBase (assert annotationBased this))))))
+                         (lit MethodInfo :Name "toString" :Return String_class :Modifiers (bit-or AccPublic AccFinal)
+                              :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (return (.ToString__String (.annBase (assert annotationBased this))))))))
+        (set! (.-Methods info) ms)
+        (let [c (Define info)]
+          (set! (.-IsInstance info)
+                (fn ^bool [^any x]
+                  (let [(values b ok) (assert annotationBased x)]
+                    (and ok (== (.-typ (.annBase b)) typ)))))
+          (let [(values w _) (.LoadOrStore annotationClasses typ c)]
+            (assert (* Class) w)))))))
+
+;; ---------------------------------------------------------------------------------------
+;; making annotations
+
+(go/func newAnnotation
+  "newAnnotation: the annotation of type typ with members names and vals (in memberValues'
+order): an object of typ's own Go type when j2g gave it one (AnnNew), else an AnnotationObj.\n"
+  ^any [^{:tag (* Class)} typ ^{:tag (slice string)} names ^{:tag (slice any)} vals]
+  (let [^any o nil
+        ^{:tag (* AnnotationObj)} b nil]
+    (if (!= (.-AnnNew (.-info typ)) nil)
+      (do (set! o ((.-AnnNew (.-info typ))))
+          (set! b (.annBase (assert annotationBased o))))
+      (do (set! b (addr (lit AnnotationObj)))
+          (set! o b)))
+    (set! (.-typ b) typ)
+    (set! (.-names b) names)
+    (set! (.-vals b) vals)
+    (set! (.-self b) o)
+    o))
+
+(go/func NewAnnotation
+  "NewAnnotation is an annotation of type typ with the given explicit members (in order), its
+defaults added as AnnotationParser adds them (jrt's tests, and code making annotations by
+hand).\n"
+  ^any [^{:tag (* Class)} typ ^{:tag (slice string)} names ^{:tag (slice any)} vals]
+  (let [(values ns vs) (withDefaults typ names vals)]
+    (newAnnotation typ ns vs)))
+
+(go/func withDefaults
+  "withDefaults: memberValues as AnnotationParser builds it, new LinkedHashMap(memberDefaults)
+then the explicit members put in order (a default's place kept).\n"
+  [^{:tag (* Class)} typ ^{:tag (slice string)} names ^{:tag (slice any)} vals]
+  :results [^{:tag (slice string)} ns ^{:tag (slice any)} vs]
+  (let [d (annotationDefaults typ)]
+    (range [_ n (hashMapOrder (.-names d))]
+      (set! ns (append ns n))
+      (set! vs (append vs (aget (.-vals d) n))))
+    (range [i n names]
+      (let [j -1]
+        (range [k m ns] (when (== m n) (set! j k)))
+        (if (>= j 0)
+          (aset vs j (aget vals i))
+          (do (set! ns (append ns n))
+              (set! vs (append vs (aget vals i)))))))
+    (return ns vs)))
+
+(go/func hashMapOrder
+  "hashMapOrder: the iteration order of a java.util.HashMap made by new HashMap<>(0) with the
+keys put in order (AnnotationType's memberDefaults): the table grows from 1 bucket (2 after the
+first put, doubling while size > 0.75 capacity), keys by bucket (hash ^ hash >>> 16) & (n - 1),
+a bucket's in insertion order.\n"
+  ^{:tag (slice string)} [^{:tag (slice string)} keys]
+  (when (== (len keys) 0) (return nil))
+  (let [n 2]
+    (while (> (len keys) (/ (* n 3) 4)) (set! n (* n 2)))
+    (let [buckets (make (slice (slice string)) n)]
+      (range [_ k keys]
+        (let [h (conv uint32 (.HashCode__I (Intern k)))
+              i (bit-and (bit-xor h (>> h 16)) (conv uint32 (- n 1)))]
+          (aset buckets i (append (aget buckets i) k))))
+      (let [^{:tag (slice string)} out nil]
+        (range [_ b buckets] (set! out (append out (spread b))))
+        out))))
+
+;; ---------------------------------------------------------------------------------------
+;; the recorded data
+
+(go/type annDefaults "annDefaults: an annotation type's element defaults, in declaration order.\n"
+  (struct ^{:tag (slice string)} names ^{:tag (map string any)} vals))
+
+(go/type annTarget "annTarget: one element's annotations, in order.\n"
+  (struct ^{:tag (slice any)} anns))
+
+(go/type annData
+  "annData: a class's decoded annotations: the class's, its members' by key (M name desc,
+C desc, F name), its parameters' by key (P name desc) and index.\n"
+  (struct ^{:tag (slice any)} class
+          ^{:tag (map string (slice any))} members
+          ^{:tag (map string (slice (slice any)))} params))
+
+(go/var ^{:tag sync/Map :doc "annotationData: *ClassInfo -> *annData, decoded once.\n"} annotationDataCache)
+(go/var ^{:tag sync/Map :doc "annotationDefaultsCache: *ClassInfo -> *annDefaults.\n"} annotationDefaultsCache)
+
+(go/func SetAnnotations
+  "SetAnnotations sets class c's annotation data (the interpreter's host, for the classes it
+makes: arbace.classes.interp), forgetting what was decoded from its earlier data.\n"
+  [^{:tag (* Class)} c ^{:tag (* String)} data]
+  (let [s ""]
+    (when (!= data nil) (set! s (.String data)))
+    (set! (.-Annots (.-info c)) s)
+    (.Delete annotationDataCache (.-info c))
+    (.Delete annotationDefaultsCache (.-info c))))
+
+(go/func annotationDefaults ^{:tag (* annDefaults)} [^{:tag (* Class)} typ]
+  (let [info (.-info typ)
+        (values v ok) (.Load annotationDefaultsCache info)]
+    (when ok (return (assert (* annDefaults) v)))
+    (let [d (addr (lit annDefaults :vals (make (map string any))))]
+      (range [_ line (strings/Split (.-Annots info) "\n")]
+        (when (strings/HasPrefix line "D ")
+          (let [p (addr (lit annParser :s line :i 2))
+                name (.word p)
+                (values val ok) (.value p)]
+            (when ok
+              (set! (.-names d) (append (.-names d) name))
+              (aset (.-vals d) name val)))))
+      (let [(values w _) (.LoadOrStore annotationDefaultsCache info d)]
+        (assert (* annDefaults) w)))))
+
+(go/func annotations "annotations: c's decoded annotation data.\n" ^{:tag (* annData)} [^{:tag (* Class)} c]
+  (let [info (.-info c)
+        (values v ok) (.Load annotationDataCache info)]
+    (when ok (return (assert (* annData) v)))
+    (let [d (addr (lit annData :members (make (map string (slice any))) :params (make (map string (slice (slice any))))))]
+      (when (!= (.-Annots info) "")
+        (range [_ line (strings/Split (.-Annots info) "\n")]
+          (when (> (len line) 2)
+            (let [p (addr (lit annParser :s line :i 2))]
+              (switch (aget line 0)
+                (case [\T]
+                  (let [(values a ok) (.annotation p)]
+                    (when ok (set! (.-class d) (append (.-class d) a)))))
+                (case [\M]
+                  (let [k (+ "M " (.word p) " " (.word p))
+                        (values a ok) (.annotation p)]
+                    (when ok (aset (.-members d) k (append (aget (.-members d) k) a)))))
+                (case [\C]
+                  (let [k (+ "C " (.word p))
+                        (values a ok) (.annotation p)]
+                    (when ok (aset (.-members d) k (append (aget (.-members d) k) a)))))
+                (case [\F]
+                  (let [k (+ "F " (.word p))
+                        (values a ok) (.annotation p)]
+                    (when ok (aset (.-members d) k (append (aget (.-members d) k) a)))))
+                (case [\P]
+                  (let [k (+ "P " (.word p) " " (.word p))
+                        (values i _) (strconv/Atoi (.word p))
+                        (values a ok) (.annotation p)]
+                    (when ok
+                      (let [ps (aget (.-params d) k)]
+                        (while (<= (len ps) i) (set! ps (append ps nil)))
+                        (aset ps i (append (aget ps i) a))
+                        (aset (.-params d) k ps))))))))))
+      (let [(values w _) (.LoadOrStore annotationDataCache info d)]
+        (assert (* annData) w)))))
+
+(go/type annParser "annParser reads one record of the data from position i.\n"
+  (struct ^string s ^int i))
+
+(go/method word "word: the next token (up to a space or the end).\n" ^string [^{:tag (* annParser)} p]
+  (let [j (strings/IndexByte (subslice (.-s p) (.-i p)) \space)]
+    (if (< j 0)
+      (let [w (subslice (.-s p) (.-i p))]
+        (set! (.-i p) (len (.-s p)))
+        (return w))
+      (let [w (subslice (.-s p) (.-i p) (+ (.-i p) j))]
+        (set! (.-i p) (+ (.-i p) j 1))
+        (return w)))))
+
+(go/method annotation
+  "annotation: an ANN (its type a class of the closed world, its values decoded); false when a
+class it names is not in the closed world.\n"
+  [^{:tag (* annParser)} p] :results [^any a ^bool ok]
+  (let [w (.word p)]
+    (when (or (== (len w) 0) (!= (aget w 0) \@))
+      (return nil false))
+    (let [typ (descClassOrNil (subslice w 1))
+          (values n _) (strconv/Atoi (.word p))
+          names (make (slice string) 0 n)
+          vals (make (slice any) 0 n)
+          good (!= typ nil)]
+      (for [k 0] (< k n) (inc! k)
+        (let [name (.word p)
+              (values v vok) (.value p)]
+          (when (not vok) (set! good false))
+          (set! names (append names name))
+          (set! vals (append vals v))))
+      (when (not good)
+        (return nil false))
+      (let [(values ns vs) (withDefaults typ names vals)]
+        (return (newAnnotation typ ns vs) true)))))
+
+(go/func descClassOrNil "descClassOrNil: descClass, nil when the closed world has no such class.\n"
+  ^{:tag (* Class)} [^string d]
+  (when (== d "V") (return Prim_void))
+  (let [(values c rest) (parseArrayName d)]
+    (when (!= rest "") (return nil))
+    c))
+
+(go/method value "value: a VALUE; false when it names a class outside the closed world.\n"
+  [^{:tag (* annParser)} p] :results [^any v ^bool ok]
+  (let [s (.-s p)]
+    (when (>= (.-i p) (len s)) (return nil false))
+    (switch (aget s (.-i p))
+      (case [\"] (return (.stringValue p) true))
+      (case [\@] (return (.annotation p)))
+      (case [\[]
+        (let [comp (descClassOrNil (subslice (.word p) 1))
+              (values n _) (strconv/Atoi (.word p))
+              good (!= comp nil)
+              ^{:tag (slice any)} xs nil]
+          (for [k 0] (< k n) (inc! k)
+            (let [(values x xok) (.value p)]
+              (when (not xok) (set! good false))
+              (set! xs (append xs x))))
+          (when (not good) (return nil false))
+          (return (annArray comp xs) true)))))
+  (let [w (.word p)
+        rest (subslice w 1)]
+    (switch (aget w 0)
+      (case [\Z] (return (Boolean_ValueOf_Z__Boolean (== rest "1")) true))
+      (case [\B] (let [(values x _) (strconv/ParseInt rest 10 8)] (return (Byte_ValueOf_B__Byte (conv int8 x)) true)))
+      (case [\S] (let [(values x _) (strconv/ParseInt rest 10 16)] (return (Short_ValueOf_S__Short (conv int16 x)) true)))
+      (case [\C] (let [(values x _) (strconv/ParseUint rest 10 16)] (return (Character_ValueOf_C__Character (conv uint16 x)) true)))
+      (case [\I] (let [(values x _) (strconv/ParseInt rest 10 32)] (return (Integer_ValueOf_I__Integer (conv int32 x)) true)))
+      (case [\J] (let [(values x _) (strconv/ParseInt rest 10 64)] (return (Long_ValueOf_J__Long x) true)))
+      (case [\F] (let [(values x _) (strconv/ParseInt rest 10 32)] (return (Float_ValueOf_F__Float (math/Float32frombits (conv uint32 (conv int32 x)))) true)))
+      (case [\D] (let [(values x _) (strconv/ParseInt rest 10 64)] (return (Double_ValueOf_D__Double (math/Float64frombits (conv uint64 x))) true)))
+      (case [\c]
+        (let [c (descClassOrNil rest)]
+          (return c (!= c nil))))
+      (case [\e]
+        (let [i (strings/IndexByte rest \;)]
+          (when (< i 0) (return nil false))
+          (let [c (descClassOrNil (subslice rest 0 (+ i 1)))]
+            (when (or (== c nil) (== (.-Enum (.-info c)) nil)) (return nil false))
+            (return (enumConstant c (subslice rest (+ i 1)))))))))
+  (return nil false))
+
+(go/func enumConstant "enumConstant: the constant of enum c named name; false when there is none.\n"
+  [^{:tag (* Class)} c ^string name] :results [^any v ^bool ok]
+  (when (!= (.-Init (.-info c)) nil)
+    ((.-Init (.-info c))))
+  (range [_ e (.-A ((.-Enum (.-info c))))]
+    (when (== (.String (.Name__String (assert Enum_I e))) name)
+      (return e true)))
+  (return nil false))
+
+(go/method stringValue "stringValue: a \"TEXT\" token.\n" ^{:tag (* String)} [^{:tag (* annParser)} p]
+  (let [s (.-s p)
+        i (+ (.-i p) 1)
+        ^{:tag (slice uint16)} u nil]
+    (while (and (< i (len s)) (!= (aget s i) \"))
+      (if (== (aget s i) \\)
+        (if (== (aget s (+ i 1)) \u)
+          (let [(values x _) (strconv/ParseUint (subslice s (+ i 2) (+ i 6)) 16 16)]
+            (set! u (append u (conv uint16 x)))
+            (set! i (+ i 6)))
+          (do (set! u (append u (conv uint16 (aget s (+ i 1)))))
+              (set! i (+ i 2))))
+        (do (set! u (append u (conv uint16 (aget s i))))
+            (inc! i))))
+    ;; past the closing quote and the space after it
+    (set! (.-i p) (min (+ i 2) (len s)))
+    (NewStringUTF16 u)))
+
+(go/func annArray "annArray: the array of component comp holding xs (primitives unboxed).\n"
+  ^any [^{:tag (* Class)} comp ^{:tag (slice any)} xs]
+  (let [n (conv int32 (len xs))]
+    (switch (.-desc comp)
+      (case [\Z] (let [a (NewBooleanArray n)] (range [i x xs] (aset (.-A a) i (.-F_value (assert (* Boolean) x)))) (return a)))
+      (case [\B] (let [a (NewByteArray n)] (range [i x xs] (aset (.-A a) i (.-F_value (assert (* Byte) x)))) (return a)))
+      (case [\C] (let [a (NewCharArray n)] (range [i x xs] (aset (.-A a) i (.-F_value (assert (* Character) x)))) (return a)))
+      (case [\S] (let [a (NewShortArray n)] (range [i x xs] (aset (.-A a) i (.-F_value (assert (* Short) x)))) (return a)))
+      (case [\I] (let [a (NewIntArray n)] (range [i x xs] (aset (.-A a) i (.-F_value (assert (* Integer) x)))) (return a)))
+      (case [\J] (let [a (NewLongArray n)] (range [i x xs] (aset (.-A a) i (.-F_value (assert (* Long) x)))) (return a)))
+      (case [\F] (let [a (NewFloatArray n)] (range [i x xs] (aset (.-A a) i (.-F_value (assert (* Float) x)))) (return a)))
+      (case [\D] (let [a (NewDoubleArray n)] (range [i x xs] (aset (.-A a) i (.-F_value (assert (* Double) x)))) (return a))))
+    (let [a (NewRefArray comp n)]
+      (copy (.-A a) xs)
+      a)))
+
+;; ---------------------------------------------------------------------------------------
+;; the lookups (Class.annotationData, AnnotationSupport)
+
+(go/func annotationArray ^{:tag (* RefArray)} [^{:tag (* Class)} comp ^{:tag (slice any)} as]
+  (let [a (NewRefArray comp (conv int32 (len as)))]
+    (copy (.-A a) as)
+    a))
+
+(go/func findAnnotation ^Annotation [^{:tag (slice any)} as ^{:tag (* Class)} typ]
+  (range [_ a as]
+    (when (== (AnnotationTypeOf a) typ)
+      (return (assert Annotation a))))
+  nil)
+
+(go/func isInherited "isInherited: whether annotation type typ is @Inherited.\n" ^bool [^{:tag (* Class)} typ]
+  (range [_ a (.-class (annotations typ))]
+    (when (== (.-Name (.-info (AnnotationTypeOf a))) "java.lang.annotation.Inherited")
+      (return true)))
+  false)
+
+(go/func classAnnotations
+  "classAnnotations: Class.annotationData's annotations: the superclass's inherited ones, then
+the declared ones (a declared one taking an inherited one's place).\n"
+  ^{:tag (slice any)} [^{:tag (* Class)} c]
+  (let [declared (.-class (annotations c))
+        s (.-Super (.-info c))]
+    (when (== s nil) (return declared))
+    (let [^{:tag (slice any)} out nil]
+      (range [_ a (classAnnotations s)]
+        (when (isInherited (AnnotationTypeOf a))
+          (set! out (append out a))))
+      (range [_ a declared]
+        (let [t (AnnotationTypeOf a)
+              j -1]
+          (range [k b out] (when (== (AnnotationTypeOf b) t) (set! j k)))
+          (if (>= j 0) (aset out j a) (set! out (append out a)))))
+      out)))
+
+(go/func directlyAndIndirectlyPresent
+  "directlyAndIndirectlyPresent is AnnotationSupport.getDirectlyAndIndirectlyPresent.\n"
+  ^{:tag (slice any)} [^{:tag (slice any)} as ^{:tag (* Class)} typ]
+  (let [^{:tag (slice any)} result nil
+        direct (findAnnotation as typ)]
+    (when (!= direct nil) (set! result (append result direct)))
+    (let [container (containerType typ)]
+      (when (!= container nil)
+        (let [ca (findAnnotation as container)]
+          (when (!= ca nil)
+            (let [vs (.Element (.annBase (assert annotationBased ca)) "value")
+                  (values arr ok) (assert (* RefArray) vs)]
+              (when (not ok)
+                (panic (Thrown (UnsupportedOperationException_New_String
+                                 (Str (+ (.String (.ToString__String ca)) " is an invalid container for repeating annotations"))))))
+              (range [_ x (.-A arr)]
+                (when (not (.IsInstance_O__Z typ x))
+                  (panic (Thrown (UnsupportedOperationException_New_String
+                                   (Str (+ (.String (.ToString__String ca)) " is an invalid container for repeating annotations of type: "
+                                           (.String (.ToString__String typ)))))))))
+              (when (> (len (.-A arr)) 0)
+                ;; indirect first unless the direct one comes before the container
+                (let [first (or (== direct nil) (containerFirst as typ container))]
+                  (if first
+                    (set! result (append (append (lit (slice any)) (spread (.-A arr))) (spread result)))
+                    (set! result (append result (spread (.-A arr))))))))))))
+    result))
+
+(go/func containerFirst ^bool [^{:tag (slice any)} as ^{:tag (* Class)} typ ^{:tag (* Class)} container]
+  (range [_ a as]
+    (let [t (AnnotationTypeOf a)]
+      (when (== t container) (return true))
+      (when (== t typ) (return false))))
+  false)
+
+(go/func containerType "containerType: the container of a @Repeatable type, else nil.\n"
+  ^{:tag (* Class)} [^{:tag (* Class)} typ]
+  (range [_ a (.-class (annotations typ))]
+    (when (== (.-Name (.-info (AnnotationTypeOf a))) "java.lang.annotation.Repeatable")
+      (let [(values c _) (assert (* Class) (.Element (.annBase (assert annotationBased a)) "value"))]
+        (return c))))
+  nil)
+
+;; Class's methods (AnnotatedElement)
+
+(go/method Is_AnnotatedElement [^{:tag (* Class)} c])
+(go/method GetAnnotation_Class__Annotation "GetAnnotation_Class__Annotation is Class.getAnnotation.\n"
+  ^Annotation [^{:tag (* Class)} c ^{:tag (* Class)} a]
+  (findAnnotation (classAnnotations c) (NN a)))
+(go/method IsAnnotationPresent_Class__Z
+  "IsAnnotationPresent_Class__Z is Class.isAnnotationPresent. FunctionalInterface is also
+present on every interface whose ClassInfo has FromFn (Compiler.FISupport's question, answered
+so before annotations were recorded).\n"
+  ^bool [^{:tag (* Class)} c ^{:tag (* Class)} a]
+  (when (!= (.GetAnnotation_Class__Annotation c a) nil) (return true))
+  (and (== (.-Name (.-info a)) "java.lang.FunctionalInterface") (!= (.-FromFn (.-info c)) nil)))
+(go/method GetAnnotations__Annotation1 ^{:tag (* RefArray)} [^{:tag (* Class)} c]
+  (annotationArray Annotation_class (classAnnotations c)))
+(go/method GetDeclaredAnnotations__Annotation1 ^{:tag (* RefArray)} [^{:tag (* Class)} c]
+  (annotationArray Annotation_class (.-class (annotations c))))
+(go/method GetDeclaredAnnotation_Class__Annotation ^Annotation [^{:tag (* Class)} c ^{:tag (* Class)} a]
+  (findAnnotation (.-class (annotations c)) (NN a)))
+(go/method GetDeclaredAnnotationsByType_Class__Annotation1 ^{:tag (* RefArray)} [^{:tag (* Class)} c ^{:tag (* Class)} a]
+  (annotationArray (NN a) (directlyAndIndirectlyPresent (.-class (annotations c)) a)))
+(go/method GetAnnotationsByType_Class__Annotation1
+  "GetAnnotationsByType_Class__Annotation1 is AnnotationSupport.getAssociatedAnnotations: the
+declared ones, else for an @Inherited type the nearest superclass's.\n"
+  ^{:tag (* RefArray)} [^{:tag (* Class)} c ^{:tag (* Class)} a]
+  (let [r (directlyAndIndirectlyPresent (.-class (annotations c)) (NN a))]
+    (when (isInherited a)
+      (let [s (.-Super (.-info c))]
+        (while (and (== (len r) 0) (!= s nil))
+          (set! r (directlyAndIndirectlyPresent (.-class (annotations s)) a))
+          (set! s (.-Super (.-info s))))))
+    (annotationArray a r)))
+
+;; members' (Executable, Method, Constructor, Field)
+
+(go/func methodKey ^string [^string name ^{:tag (slice (* Class))} params ^{:tag (* Class)} ret]
+  (let [b (lit strings/Builder)]
+    (.WriteString (addr b) name)
+    (.WriteString (addr b) " (")
+    (range [_ p params] (.WriteString (addr b) (binaryDescriptor p)))
+    (.WriteString (addr b) ")")
+    (if (== ret nil) (.WriteString (addr b) "V") (.WriteString (addr b) (binaryDescriptor ret)))
+    (.String (addr b))))
+
+(go/func binaryDescriptor "binaryDescriptor: a descriptor with binary names (Ljava.lang.String;).\n"
+  ^string [^{:tag (* Class)} c]
+  (strings/ReplaceAll (descriptorOf c) "/" "."))
+
+(go/method declaredAnnotationList ^{:tag (slice any)} [^{:tag (* Method)} m]
+  (aget (.-members (annotations (.-clazz m))) (+ "M " (methodKey (.-Name (.-info m)) (.-params m) (.-Return (.-info m))))))
+(go/method declaredAnnotationList ^{:tag (slice any)} [^{:tag (* Constructor)} k]
+  (aget (.-members (annotations (.-clazz k))) (+ "C " (subslice (methodKey "" (.-params k) nil) 1))))
+(go/method declaredAnnotationList ^{:tag (slice any)} [^{:tag (* Field)} f]
+  (aget (.-members (annotations (.-clazz f))) (+ "F " (.-Name (.-info f)))))
+
+(go/method Is_AnnotatedElement [^{:tag (* AccessibleObject)} a])
+
+(go/method GetAnnotation_Class__Annotation ^Annotation [^{:tag (* Method)} m ^{:tag (* Class)} a]
+  (findAnnotation (.declaredAnnotationList m) (NN a)))
+(go/method GetAnnotation_Class__Annotation ^Annotation [^{:tag (* Constructor)} k ^{:tag (* Class)} a]
+  (findAnnotation (.declaredAnnotationList k) (NN a)))
+(go/method GetAnnotation_Class__Annotation ^Annotation [^{:tag (* Field)} f ^{:tag (* Class)} a]
+  (findAnnotation (.declaredAnnotationList f) (NN a)))
+(go/method GetDeclaredAnnotation_Class__Annotation ^Annotation [^{:tag (* Method)} m ^{:tag (* Class)} a]
+  (.GetAnnotation_Class__Annotation m a))
+(go/method GetDeclaredAnnotation_Class__Annotation ^Annotation [^{:tag (* Constructor)} k ^{:tag (* Class)} a]
+  (.GetAnnotation_Class__Annotation k a))
+(go/method GetDeclaredAnnotation_Class__Annotation ^Annotation [^{:tag (* Field)} f ^{:tag (* Class)} a]
+  (.GetAnnotation_Class__Annotation f a))
+(go/method IsAnnotationPresent_Class__Z ^bool [^{:tag (* Method)} m ^{:tag (* Class)} a]
+  (!= (.GetAnnotation_Class__Annotation m a) nil))
+(go/method IsAnnotationPresent_Class__Z ^bool [^{:tag (* Constructor)} k ^{:tag (* Class)} a]
+  (!= (.GetAnnotation_Class__Annotation k a) nil))
+(go/method IsAnnotationPresent_Class__Z ^bool [^{:tag (* Field)} f ^{:tag (* Class)} a]
+  (!= (.GetAnnotation_Class__Annotation f a) nil))
+(go/method GetDeclaredAnnotations__Annotation1 ^{:tag (* RefArray)} [^{:tag (* Method)} m]
+  (annotationArray Annotation_class (.declaredAnnotationList m)))
+(go/method GetDeclaredAnnotations__Annotation1 ^{:tag (* RefArray)} [^{:tag (* Constructor)} k]
+  (annotationArray Annotation_class (.declaredAnnotationList k)))
+(go/method GetDeclaredAnnotations__Annotation1 ^{:tag (* RefArray)} [^{:tag (* Field)} f]
+  (annotationArray Annotation_class (.declaredAnnotationList f)))
+(go/method GetAnnotations__Annotation1 ^{:tag (* RefArray)} [^{:tag (* Method)} m] (.GetDeclaredAnnotations__Annotation1 m))
+(go/method GetAnnotations__Annotation1 ^{:tag (* RefArray)} [^{:tag (* Constructor)} k] (.GetDeclaredAnnotations__Annotation1 k))
+(go/method GetAnnotations__Annotation1 ^{:tag (* RefArray)} [^{:tag (* Field)} f] (.GetDeclaredAnnotations__Annotation1 f))
+(go/method GetAnnotationsByType_Class__Annotation1 ^{:tag (* RefArray)} [^{:tag (* Method)} m ^{:tag (* Class)} a]
+  (annotationArray (NN a) (directlyAndIndirectlyPresent (.declaredAnnotationList m) a)))
+(go/method GetAnnotationsByType_Class__Annotation1 ^{:tag (* RefArray)} [^{:tag (* Constructor)} k ^{:tag (* Class)} a]
+  (annotationArray (NN a) (directlyAndIndirectlyPresent (.declaredAnnotationList k) a)))
+(go/method GetAnnotationsByType_Class__Annotation1 ^{:tag (* RefArray)} [^{:tag (* Field)} f ^{:tag (* Class)} a]
+  (annotationArray (NN a) (directlyAndIndirectlyPresent (.declaredAnnotationList f) a)))
+(go/method GetDeclaredAnnotationsByType_Class__Annotation1 ^{:tag (* RefArray)} [^{:tag (* Method)} m ^{:tag (* Class)} a]
+  (.GetAnnotationsByType_Class__Annotation1 m a))
+(go/method GetDeclaredAnnotationsByType_Class__Annotation1 ^{:tag (* RefArray)} [^{:tag (* Constructor)} k ^{:tag (* Class)} a]
+  (.GetAnnotationsByType_Class__Annotation1 k a))
+(go/method GetDeclaredAnnotationsByType_Class__Annotation1 ^{:tag (* RefArray)} [^{:tag (* Field)} f ^{:tag (* Class)} a]
+  (.GetAnnotationsByType_Class__Annotation1 f a))
+
+(go/func parameterAnnotations ^{:tag (* RefArray)} [^{:tag (slice (slice any))} ps ^int n]
+  (let [inner (.ArrayClass Annotation_class)
+        a (NewRefArray inner (conv int32 n))]
+    (for [i 0] (< i n) (inc! i)
+      (let [^{:tag (slice any)} xs nil]
+        (when (< i (len ps)) (set! xs (aget ps i)))
+        (aset (.-A a) i (annotationArray Annotation_class xs))))
+    a))
+
+(go/method GetParameterAnnotations__Annotation2
+  "GetParameterAnnotations__Annotation2 is Method.getParameterAnnotations.\n"
+  ^{:tag (* RefArray)} [^{:tag (* Method)} m]
+  (parameterAnnotations
+    (aget (.-params (annotations (.-clazz m))) (+ "P " (methodKey (.-Name (.-info m)) (.-params m) (.-Return (.-info m)))))
+    (len (.-params m))))
+(go/method GetParameterAnnotations__Annotation2
+  "GetParameterAnnotations__Annotation2 is Constructor.getParameterAnnotations.\n"
+  ^{:tag (* RefArray)} [^{:tag (* Constructor)} k]
+  (parameterAnnotations
+    (aget (.-params (annotations (.-clazz k))) (+ "P " (methodKey "<init>" (.-params k) nil)))
+    (len (.-params k))))
+
+(go/method GetDefaultValue__O
+  "GetDefaultValue__O is Method.getDefaultValue: an annotation element's default, else null.\n"
+  ^any [^{:tag (* Method)} m]
+  (when (or (!= (len (.-params m)) 0) (not (.IsAnnotation__Z (.-clazz m))))
+    (return nil))
+  (let [(values v ok) (aget (.-vals (annotationDefaults (.-clazz m))) (.-Name (.-info m)))]
+    (when (not ok) (return nil))
+    (cloneMember v)))
