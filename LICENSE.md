@@ -527,7 +527,7 @@ covers what.
   General Public License version 2 with the Classpath Exception (text below); the rest of those
   files, the digests' variants (`MD5.ae`, `SHA.ae`, `SHA2.ae`, `SHA5.ae`, `SHA3.ae`), the JCA's
   variants that only cut or set (`SecretKeySpec.ae`, `EncodedKeySpec.ae`, `SealedObject.ae`,
-  `Signature.ae`, `GaloisCounterMode.ae`), `jdk/internal/jrt/HostRandom.java`,
+  `Signature.ae`; `GaloisCounterMode.ae` until F23, below), `jdk/internal/jrt/HostRandom.java`,
   `jdk/internal/jrt/CryptoAccess.java`, `sun/security/provider/JrtServices.java`,
   `com/sun/crypto/provider/JceServices.java` and `sun/security/rsa/RsaServices.java` (their service
   class names are jdk26u's providers') are Arbace's own.
@@ -620,6 +620,17 @@ covers what.
   `src/jdk.security.auth/share/classes`, 1 of `src/java.logging/share/classes`) and the 2 security
   message bundles the build's `CompileProperties` generates, and 219 of pki-sources (218 of
   `src/java.base/share/classes`, 1 of `src/jdk.security.auth/share/classes`).
+- The JCA's tail and SASL (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F23 (write-ahead)"; recorded by the rule
+  of B7): the variants `overlay/jdk/variants/GaloisCounterMode.ae` (since F23 its `overlapDetection` and `GCMDecrypt.doFinal`)
+  and `ProviderConfigSasl.ae` keep the jdk26u members they replace (https://github.com/openjdk/jdk26u at `baf63fb`,
+  `src/java.base/share/classes/com/sun/crypto/provider/GaloisCounterMode.java`, `sun/security/jca/ProviderConfig.java`) as
+  repr/java converts them, with the changes they name: Copyright (c) Oracle and/or its affiliates, under the GNU General
+  Public License version 2 with the Classpath Exception (text below); the rest of those files and the cases F23 adds to
+  `overlay/jdk/java.base/com/sun/crypto/provider/JceServices.java` and `sun/security/provider/JrtServices.java` are Arbace's
+  own. Their jdk26u sources join `jdk/forms/` once `bin/jrt-convert update` has run: jca-tail-sources' 3 files of
+  `src/java.base/share/classes` (`CtrDrbg`, `MD4`, `GCMParameters`) and sasl-sources' 34 (28 of
+  `src/java.security.sasl/share/classes`, 5 of `src/java.base/share/classes/com/sun/security/ntlm`, 1 of
+  `src/jdk.security.auth/share/classes`), under the same license.
 - JC9b's small members, charsets, file channels and datagrams (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built:
   F16 (write-ahead)", "As built: F8 (write-ahead)", "As built: F7 (write-ahead)", "As built: F11 (write-ahead)";
   recorded by the rule of B7): jdk26u's files (https://github.com/openjdk/jdk26u at `baf63fb`) transcribed with
