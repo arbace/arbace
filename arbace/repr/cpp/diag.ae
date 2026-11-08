@@ -73,6 +73,24 @@
   [call]
   (every? #(contains? literal-kinds (:kind %)) (rest (:inner call))))
 
+(def ^:private clang-identifiers
+  "clang's identifiers a __ name may be (cpp/target/clang-builtins.edn, CP270 (a): the builtins Sema declares implicitly
+  in C++ -- LookupBuiltin: not the library builtins, which need their header's declaration -- and the lexer's keywords),
+  or nil when the table is not there (a __ name then not judged)."
+  (delay
+    (let [f (java.io.File. "cpp/target/clang-builtins.edn")] ; (the checkout's, the tools' working directory, as host.ae's)
+      (when (.exists f)
+        (let [t (read-string (slurp f))]
+          (into (set (:keywords t)) (keep (fn [[n k]] (when-not (#{:lib :target-lib} k) n)) (:builtins t))))))))
+
+(defn- dunder-ok?
+  "Whether the unqualified name `nm` no lookup found may be undeclared: any name not starting with __; a __ name only when
+  clang's table is there and holds neither a builtin nor a keyword of that spelling."
+  [^String nm]
+  (if (str/starts-with? nm "__")
+    (when-let [ids @clang-identifiers] (not (contains? ids nm)))
+    true))
+
 (defn undeclared
   "Sema::DiagnoseEmptyLookup's \"use of undeclared identifier 'X'\" (clang/lib/Sema/SemaExpr.cpp, ActOnIdExpression): an
   unqualified id-expression no unqualified lookup finds, outside a template (the parser's :_undecl, at the name), not
@@ -86,7 +104,7 @@
                     ;; lookup), so the same diagnostic; a call's name with a type-dependent argument waits for ADL at the
                     ;; instantiation ([temp.dep.candidate]): the literal-argument rule below covers both
                     (let [callee? (and parent (= "CallExpr" (:kind parent)) (identical? n (first (:inner parent))))]
-                      (when (and (or (not callee?) (adl-free? parent)) (not (contains? *params* nm)))
+                      (when (and (or (not callee?) (adl-free? parent)) (not (contains? *params* nm)) (dunder-ok? nm))
                         (let [[l c] (line-col starts (long off))]
                           (.add out {:line l :col c :kind :error :rule :undeclared
                                      :msg (str "use of undeclared identifier '" nm "'")}))))))
@@ -283,6 +301,11 @@
 ;; [class message-regex clang's diagnostic].
 (def sema-rules
   [[:overload #"^codegen: no viable function among [1-9]" "no matching function for call"]
+   [:overload #"^codegen: call to a deleted function" "call to deleted function"]
+   [:access #"^codegen: '.*' is a (private|protected) member of" "is a private member of"]
+   [:conversion #"^codegen: incompatible member function pointer types" "assigning to X from incompatible type X"]
+   [:mptr #"^codegen: pointer-to-member function type requires an" "pointer-to-member function type requires an lvalue/rvalue"]
+   [:constexpr #"^codegen: constexpr variable '.*' must be initialized by a constant expression" "constexpr variable must be initialized by a constant expression"]
    [:overload #"^codegen: ambiguous call" "call is ambiguous"]
    [:init #"^codegen: no default constructor for " "no matching constructor for initialization"]
    [:init #"^codegen: a non-const reference to a temporary" "non-const lvalue reference cannot bind to a temporary"]
@@ -298,6 +321,13 @@
 
 (def ^:dynamic *sema-log* nil)
 
+(defn cxx-year
+  "The year of the standard `std` names (c++98 and c++03 as 3, gnu++NN as c++NN; 17 when unknown)."
+  ^long [std]
+  (let [[_ y] (re-find #"\+\+(\d\d|[0-9a-z]{2})$" (str std))]
+    (case y ("98" "03") 3 "0x" 11 "1y" 14 "1z" 17 "2a" 20 "2b" 23 "2c" 26
+      (if (and y (re-matches #"\d\d" y)) (Long/parseLong y) 17))))
+
 (defn sema-errors
   "The code generator's Sema's errors over the unit `u` (parsed with the headers in full) of the text `src`."
   [u starts ^String src ^String main]
@@ -308,18 +338,21 @@
         dts (requiring-resolve 'arbace.cpp.sema/*decltypes*)
         mn (requiring-resolve 'arbace.cpp.sema/*main-name*)
         md (requiring-resolve 'arbace.cpp.sema/*main-dir*)
+        yr (requiring-resolve 'arbace.cpp.sema/*cxx-year*)
         _ (require 'arbace.cpp.template)
         h (fn [e n]
             (let [cls (:codegen/refused (ex-data e)) m (str (ex-message e))
                   ;; (a refusal over a type the slice leaves undeduced or dependent is the slice's, not the program's)
                   rule (when-not (re-find #":k :(auto|dep|tparam)" m) (some (fn [[c re d]] (when (and (= c cls) (re-find re m)) d)) sema-rules))
+                  ;; (a refusal that names its own node: the constant evaluation's operation)
+                  n (or (:cx/node (ex-data e)) n)
                   off (get-in n [:range :begin :offset])]
               (when *sema-log* (swap! *sema-log* conj [cls (subs m 0 (min 120 (count m))) (boolean rule)]))
               (when (and rule off (= main (get-in n [:range :begin :file])))
                 (let [[l c] (line-col starts (long off))]
                   (.add out {:line l :col c :kind :error :rule :sema :msg (str rule " (" (subs m 9 (min 100 (count m))) ")")})))))]
     (try
-      (with-bindings {at-var (atom nil) on-var h dts (:decltypes u) mn main md (:dir u)}
+      (with-bindings {at-var (atom nil) on-var h dts (:decltypes u) mn main md (:dir u) yr (cxx-year (:std u))}
         (sema (:nodes u) (:root u) src))
       (catch arbace.lang.ExceptionInfo e
         (when *sema-log* (swap! *sema-log* conj [(or (:codegen/refused (ex-data e)) :other) (str "unit: " (subs (str (ex-message e)) 0 (min 100 (count (str (ex-message e))))))  false])))
@@ -343,7 +376,7 @@
   (try
     (let [sema? (not= "0" (System/getenv "REPR_CPP_DIAG_SEMA"))
           u (assoc (binding [ps/*full-headers* sema?] (native/parse-file path main std args))
-                   :dir (.getParent (.getAbsoluteFile (java.io.File. path))))
+                   :dir (.getParent (.getAbsoluteFile (java.io.File. path))) :std std)
           src (latin1 path)
           starts (line-starts src)
           pps (keep #(pp-diag main (str %)) (:pp-errors u))

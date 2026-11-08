@@ -976,3 +976,42 @@ empty). doc/cpp/CPP-SURVEY.md, "As built: CX12 (first slice)".
   CL/NAME.err` (NAME's / as __); `REPR_CPP_FRONT=native arbace_tool ... read WORK dg-error`; `arbace_tool ... own WORK --clang CL`.
 - Scores (bin/crops-score --crop cpp): 76.1 / 100 / 67.7 before, 76.1 / 100 / 67.8 after (read 0.648 to 0.653: the sample record's 64 own-judged dg cases at 1; about 68.7 once the night records the whole part, about 650 own passes at the sample's rate); test/crops/scores.edn recorded. Proposed CP270 (clang's builtin table for the undeclared check), CP271 (the REAP read cell and the own record), CP272
   (the code generator's Sema as the checker, its gaps), CP273 (the next diagnostics by the measure), CP274 (the part's cost).
+
+## 2026-11-08: C++'s CX12, second slice: the measured order's diagnostics and clang's identifier table (branch `cpp-cx12`, from 64e7b9758)
+
+By the brief of 2026-11-08 (continue CX12 in CP273 (a)'s order) and the user's decisions of the same evening (CP270-CP274 as
+recommended, relayed by the coordinator: CP270 (a) to be built in this slice), under the day's light rules: the every-10th sample only, the
+compiler stubs first on PATH (their log empty). doc/cpp/CPP-SURVEY.md, "Decided (CP270-CP274)", "As built: CX12 (second slice)".
+
+- **Built**, every rule on the checker's side of the code generator's Sema (`arbace.cpp.sema/checking?`, true only while the diag's
+  `*on-refusal*` is bound): deleted functions as candidates, the call whose only viable function is deleted an error, the implicit copy
+  members deleted by a declared move ([class.copy.ctor]/6) and the implicit moves declared ([class.copy.ctor]/8); reference binding with
+  volatile and the cv inclusion order ([dcl.init.ref], [over.ics.rank]/3.2.6); member pointers in deduction (template.ae's port of
+  SemaTemplateDeduction's MemberPointer case, the method qualifiers, [temp.deduct.call]/6.2) and in conversion and `.*`
+  ([conv.mem], [expr.mptr.oper]/6); "no matching function" for templates only when each deduction failed surely; access control for a
+  non-member function in a unit without friends; constexpr variables' initializers evaluated, an undefined operation the error at its
+  line; a namespace-scope initializer's refusal reported and the analysis going on; init/ptrfn2's crash (the InitListChecker port's
+  empty class). CP270 (a): `test/cpp/builtins.ae` reads the pinned llvm-project-23.1.5 tarball's `clang/include/clang/Basic/Builtins.td`,
+  `BuiltinsBase.td`, `BuiltinsX86.td`, `BuiltinsX86Base.td`, `BuiltinsX86_64.td` (a TableGen subset: class, def, let ... in, foreach,
+  # pasting, NAME) and names the builtins as `clang/utils/TableGen/ClangBuiltinsEmitter.cpp`'s collectBuiltins does, with `TokenKinds.def`
+  and `TransformTypeTraits.def`'s keywords, into `cpp/target/clang-builtins.edn` (3,775 builtins, 395 keywords; `bin/repr-cpp target
+  builtins gen|verify`); the undeclared check judges a `__` name by it (LookupBuiltin: no library builtin in C++).
+- **Measured** on the sample, the same clang table as the first slice: own passes 64 → 68 (deleted, volatile, member pointers in
+  deduction) → 75 (access, member function pointer qualifiers, constexpr, implicit moves, global recovery) → 75 (sure deductions only)
+  → 76 (the identifier table). Expected lines with an own error: "call to implicitly-deleted copy constructor" 0 → 85 of 86, "no matching
+  function" 38 → 81 of 109, "assigning ... incompatible type" 0 → 12 of 12, "is a private member" 0 → 7 of 17, constexpr 0 → 5 of 25,
+  g++'s own 6 → 18 of 209.
+- **No false credit**: the 12 new passes read one by one against their sources and clang's outputs, each a real error on every expected
+  line (three with another reason than clang's); no first-slice pass lost. A measured run showed sure-looking template drops that were
+  the slice's (pack-indexing11, bit-cast4): the drop rule was narrowed to the named sure reasons before recording.
+- **The code generator unchanged**: `arbace.cpp.codegen gen-list` over test/cpp/codegen's 142 samples by 64e7b9758's tree and this
+  branch's, 404 of 404 files byte for byte (no clang; codegen-check with clang live is the night's).
+- **Alternatives considered**: the rules on for the code generator too (rejected for now: the brief keeps code generation unchanged;
+  they are correct and CP280 proposes taking them where the samples show gaps); a deleted best function always an error (rejected:
+  cpp1z/noexcept-type3's two overloads the slice merges); every template drop a sure one (rejected after the measure, above); `__`
+  names judged by a hand list (rejected: CP270 (a)'s table from the pin).
+- **Recorded**: test/cpp/check-dg-own-linux-amd64.edn (454 rows, 76 passes), the C++ read fact's cases (`:dg-own [76 1]
+  :dg-clang [4521 0.5]`), test/crops/scores.edn (C++ 76.1 / 100 / 67.78, read 0.654; about 68.9 when the night records the part).
+  `make check-makefile`, `gate.crops check`, `bin/gate --full --plan` pass; the dg control fails as it must. Proposed CP280 (the gaps the
+  global initializers show), CP281 (constraints' satisfaction as a sure failure), CP282 (g++'s own lines: attributes, then OpenMP), CP283
+  (the table's verify in the gate). Slips: one `<(...)` and one `2>/dev/null` in throwaway commands (the survey's "Slips").

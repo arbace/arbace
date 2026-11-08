@@ -158,6 +158,10 @@ code. Three kinds of things live here:
   "As built: CX12 (first slice)") is Arbace's own code whose diagnostics' texts are clang's (`clang/include/clang/Basic/DiagnosticSemaKinds.td`)
   and whose rules follow clang's Sema (`SemaExpr.cpp`'s `DiagnoseEmptyLookup`, `SemaDecl.cpp`'s redeclaration checks), the LLVM Project
   from `llvm-project-23.1.5.src.tar.xz` (the pin of `test/cpp/corpora.edn`), written by hand on 2026-11-08; the file carries clang's notice.
+  Its second slice (doc/cpp/CPP-SURVEY.md, "As built: CX12 (second slice)") reads `cpp/target/clang-builtins.edn`, clang's identifier
+  table made by `test/cpp/builtins.ae` from the same tarball's `Builtins*.td` and `TokenKinds.def` (CP270 (a); the reader carries clang's
+  notice), and its checker's rules in `cpp/sema.ae` (Arbace's own, after the standard's rules) and `cpp/template.ae` (the port of
+  SemaTemplateDeduction's MemberPointer case and method qualifiers), on only as a checker (`arbace.cpp.sema/checking?`), 2026-11-08.
 - `cpp/` (`arbace.cpp.*`, the C++ crop's eval: the lowering of LLVM forms to C forms, the code generator and its
   semantic analysis; doc/llvm/LOWER.md, doc/cpp/CODEGEN.md) is Arbace's own but for `cpp/template.ae`
   (`arbace.cpp.template`, templates, CODEGEN.md §G3), whose deduction ports parts of clang's

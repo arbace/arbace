@@ -35,6 +35,15 @@
 ;; ((fn [ex node]) called with the refusal and that node, the analysis going on with the next entry); nil: off
 (def ^:dynamic *at* nil)
 (def ^:dynamic *on-refusal* nil)
+;; CX12 (second slice): the checker's rules that the code generator does not apply (on with *on-refusal*: a program the
+;; checker reads may be ill-formed; the code generator's programs are not, and its analysis stays as it was)
+(defn checking? [] (some? *on-refusal*))
+;; the function templates of the call being resolved whose deduction gave no candidate: {:sure-drops n :unsure-drops m}
+(def ^:dynamic *drops* nil)
+;; the access of the class member being declared (the access-specifier before it)
+(def ^:dynamic *member-access* nil)
+;; the language's year (11, 14, 17, 20, 23, 26; 3 for C++98/03), bound by the checker
+(def ^:dynamic *cxx-year* 17)
 (def ^:dynamic *fns* nil)    ; atom {id fn}
 (def ^:dynamic *vars* nil)   ; atom {id var}
 (def ^:dynamic *ids* nil)    ; atom counter
@@ -371,8 +380,13 @@
                     :else (fail :type "type form " (pr-str f))))
       member-ptr (let [c (resolve-type-form scope (second f))
                        u (resolve-type-form scope (nth f 2))
-                       u (if (and (abi/fn? u) (or (:c u) (:const (meta (nth f 2))))) (-> u (dissoc :c) (assoc :cq true)) u)]
-                   {:k :mptr :cls (:id c) :to u})
+                       u (if (and (abi/fn? u) (or (:c u) (:const (meta (nth f 2))))) (-> u (dissoc :c) (assoc :cq true)) u)
+                       ;; (CX12, the checker: a volatile member function's type)
+                       u (if (and (checking?) (abi/fn? u) (or (:v u) (:volatile (meta (nth f 2))))) (-> u (dissoc :v) (assoc :vq true)) u)
+                       ;; (and its ref-qualifier, [dcl.fct]/4)
+                       u (if-let [r (when (and (checking?) (abi/fn? u)) (:cpp/ref (meta (nth f 2))))] (assoc u :refq (if (= r :&&) "&&" "&")) u)]
+                   ;; (CX12, the checker: a template parameter's class kept, T::* deduced)
+                   {:k :mptr :cls (if (and (checking?) (= :tparam (:k c))) c (:id c)) :to u})
       cpp/global (binding [] (resolve-type-form (loop [s scope] (if (:parent s) (recur (:parent s)) s)) (second f)))
       (fail :type "type form " (pr-str f)))
     :else (fail :type "type form " (pr-str f))))
@@ -405,6 +419,7 @@
        (catch arbace.lang.ExceptionInfo e (if (:codegen/refused (ex-data e)) (throw e) (fail :type "type " s ": " (.getMessage e))))))))
 
 (defn- method-const? [^String qt] (boolean (re-find #"\)\s*const(\s|$|&)" qt)))
+(defn- method-volatile? [^String qt] (boolean (re-find #"\)\s*(?:const\s*)?volatile(\s|$|&)" qt)))
 
 (defn- method-refq
   "A member function's ref-qualifier from its type's spelling: \"&\", \"&&\" or nil ([dcl.fct]/4)."
@@ -721,6 +736,9 @@
            :defaulted (when (:explicitlyDefaulted n) true) :deleted (boolean (:explicitlyDeleted n))
            :pos (long (or (:_b n) 0))
            :src *src*}
+        ;; (CX12, the checker: a deletion the program wrote, a call of which it diagnoses; a volatile member function)
+        f (cond-> f (checking?) (assoc :deleted-sure (boolean (:explicitlyDeleted n)) :vq (method-volatile? (or qt ""))
+                                       :access (when cid *member-access*)))
         old (find-redecl home f)
         id (or old (next-id))
         pinfo {:param-names (mapv :name pn)
@@ -729,6 +747,9 @@
       (upd-fn! id (fn [g] (cond-> (merge g (select-keys pinfo (if body [:param-names] [])))
                             (some some? (:defaults pinfo)) (assoc :defaults (:defaults pinfo))
                             (:always-inline f) (assoc :always-inline true)
+                            ;; (CX12, the checker: a deleted function redeclared -- ill-formed, or two overloads the
+                            ;; slice's types do not tell apart, noexcept among them -- is not trusted to be deleted)
+                            (and (checking?) (or (:deleted g) (:deleted f))) (assoc :deleted-sure false)
                             body (assoc :body body :node n :def-scope scope :inits (filter #(= "CXXCtorInitializer" (:kind %)) (kids n))
                                         :inline (or (:inline g) (boolean (:inline n))))
                             ;; a header's definition: analyzed when used (G4), as clang emits an inline function
@@ -773,7 +794,9 @@
                :internal (boolean (or (:internal home) (= "static" (:storageClass n)) (and (= st :global) (:c ty) (not= "extern" (:storageClass n)))))
                :def-scope scope
                :init-priority (let [x (gnu-attr-arg n "init_priority")] (when (number? x) x))
-               :pos (long (or (:_b n) 0))}]
+               :pos (long (or (:_b n) 0))}
+            ;; (CX12, the checker: a constexpr variable, its initializer checked as a constant expression)
+            v (cond-> v (and (checking?) (:constexpr n)) (assoc :cx-constexpr true :cx-range (:range n)))]
         ;; a header's definition: defined when odr-used (G4: clang emits an unused inline variable not at all)
         (swap! *vars* assoc id (if (and (header-node? n) (:defined v) (= st :global))
                                  (cond-> (assoc v :defined false :pending-def true) (not (:internal v)) (assoc :linkonce true))
@@ -854,7 +877,8 @@
                               (doseq [[mn es] (.entrySet ^java.util.HashMap (:names (:scope (abi/cls-of ft))))
                                       e es :when (#{:field :indirect} (:e e))]
                                 (enter! cs mn {:e :indirect :chain (into [[id i]] (if (= :field (:e e)) [[(:cls e) (:i e)]] (:chain e))) :pos -1})))))
-            (declare-node! cs k))))
+            (do (when (and (checking?) (= "FriendDecl" (:kind k))) (abi/update-cls! id assoc :has-friends true))
+                (binding [*member-access* @access] (declare-node! cs k))))))
       (finish-class! id)
       (when-not nm (reset! *last-anon* t)))
     t))
@@ -934,6 +958,8 @@
   (let [ps (:ps (:ty f))] (and (= :ctor (:kind f)) (= 1 (count ps)) (= :rref (:k (first ps))) (= id (:id (abi/unq (:to (first ps))))))))
 (defn- copy-assign? [f id]
   (let [ps (:ps (:ty f))] (and (= "operator=" (:name f)) (= 1 (count ps)) (= :ref (:k (first ps))) (= id (:id (abi/unq (:to (first ps))))))))
+(defn- move-assign? [f id]
+  (let [ps (:ps (:ty f))] (and (= "operator=" (:name f)) (= 1 (count ps)) (= :rref (:k (first ps))) (= id (:id (abi/unq (:to (first ps))))))))
 (defn- class-like-members [id]
   (concat (map :cls (:bases (abi/cls id)))
           (keep (fn [f] (let [t (loop [t (:ty f)] (if (abi/arr? t) (recur (:of t)) t))] (when (abi/class? t) (:id t)))) (:fields (abi/cls id)))))
@@ -1009,12 +1035,29 @@
                                                             (some #(let [b (abi/cls %)] (some (fn [y] (let [g (fnd y)] (and (empty? (:ps (:ty g))) (not (:trivial g))))) (:ctors b)))
                                                                   (class-like-members id))))))))
     ;; the copy constructor and the copy assignment
+    ;; CX12 (the checker): [class.copy.ctor]/6, [class.copy.assign]/2: a class that declares a move constructor or a move
+    ;; assignment operator has its implicit copy constructor and copy assignment defined as deleted
+    (let [moves (when (checking?)
+                  (or (has-ctor-of? id move-ctor?) (some #(move-assign? (fnd %) id) (:methods (abi/cls id)))))
+          del (when moves {:deleted true :deleted-sure true :deleted-why "a user-declared move constructor or move assignment operator"})]
     (when-not (has-ctor-of? id copy-ctor?)
-      (implicit-fn! id :ctor (:name c) {:k :fn :ret abi/void :ps [cref] :va false} :trivial (trivial-copy? id)))
+      (let [fid (implicit-fn! id :ctor (:name c) {:k :fn :ret abi/void :ps [cref] :va false} :trivial (trivial-copy? id))]
+        (when del (upd-fn! fid merge del))))
     (doseq [x (:ctors (abi/cls id))]
       (let [g (fnd x)] (when (and (:defaulted g) (copy-ctor? g id)) (upd-fn! x assoc :trivial (trivial-copy? id)))))
     (when-not (some #(copy-assign? (fnd %) id) (:methods (abi/cls id)))
-      (implicit-fn! id :method "operator=" {:k :fn :ret (abi/lref t) :ps [cref] :va false} :op "=" :trivial (trivial-copy? id)))
+      (let [fid (implicit-fn! id :method "operator=" {:k :fn :ret (abi/lref t) :ps [cref] :va false} :op "=" :trivial (trivial-copy? id))]
+        (when del (upd-fn! fid merge del))))
+    ;; CX12 (the checker): the implicit move constructor and move assignment ([class.copy.ctor]/8, [class.copy.assign]/4:
+    ;; declared when the class declares no copy or move member and no destructor); one defined as deleted is no
+    ;; candidate ([over.match.funcs]/8, ctor-candidates)
+    (when (and (checking?) (not moves)
+               (not-any? #(let [g (fnd %)] (and (not (:implicit g)) (copy-ctor? g id))) (:ctors (abi/cls id)))
+               (not-any? #(let [g (fnd %)] (and (not (:implicit g)) (copy-assign? g id))) (:methods (abi/cls id)))
+               (let [d (:dtor (abi/cls id))] (or (nil? d) (:implicit (fnd d)))))
+      (let [rref {:k :rref :to t}]
+        (implicit-fn! id :ctor (:name c) {:k :fn :ret abi/void :ps [rref] :va false} :trivial (trivial-copy? id) :cx-move true)
+        (implicit-fn! id :method "operator=" {:k :fn :ret (abi/lref t) :ps [rref] :va false} :op "=" :trivial (trivial-copy? id) :cx-move true))))
     (doseq [x (:methods (abi/cls id))]
       (let [g (fnd x)] (when (and (:defaulted g) (copy-assign? g id)) (upd-fn! x assoc :trivial (trivial-copy? id)))))
     (abi/update-cls! id assoc :user-ctor (boolean (seq (filter #(not (:implicit (fnd %))) (:ctors (abi/cls id)))))
@@ -1103,6 +1146,12 @@
 
 (declare analyze-fn! stmt ce-exec)
 
+(defn- ub!
+  "CX12 (the checker): an evaluation [expr.const]/5 makes not a core constant expression by the program's own operation
+  (undefined behaviour, [expr.shift]/1-3, [expr.mul]/4, [expr.pre]/4), sure: at the operation's node."
+  [e & msg]
+  (throw (ex-info (apply str "not a constant: " msg) {:codegen/not-constant true :cx/sure true :cx/at (:cx-at e)})))
+
 (defn- not-constant [& msg] (when (System/getenv "CPP_NC_STACK") (.printStackTrace (Exception. ^String (apply str msg)))) (throw (ex-info (apply str "not a constant: " msg) {:codegen/not-constant true})))
 
 (defn ce-wrap
@@ -1148,10 +1197,30 @@
                   (let [a (double a) b (double b)]
                     (ce-wrap t (case (:o e) "+" (+ a b) "-" (- a b) "*" (* a b) "/" (/ a b) (not-constant "op " (:o e)))))
                   (let [a (long a) b (long b) u (not (abi/signed? t))]
+                    ;; (CX12, the checker: the operations whose result is undefined, ExprConstant's diagnostics)
+                    (when (and (checking?) (abi/integral? t) (#{"+" "-" "*" "/" "%" "<<" ">>"} (:o e)))
+                      (let [bits (* 8 (long (abi/size-of (abi/underlying (abi/unq t)))))
+                            lo (if u 0 (- (bigint (bit-shift-left 1 (dec bits)))))
+                            hi (if u nil (dec (bigint (bit-shift-left 1 (dec bits)))))
+                            big (fn [x] (bigint x))
+                            out? (fn [r] (and hi (or (< r lo) (> r hi))))]
+                        (case (:o e)
+                          ("+" "-" "*") (let [r (case (:o e) "+" (+ (big a) (big b)) "-" (- (big a) (big b)) (* (big a) (big b)))]
+                                          (when (out? r) (ub! e "value " r " is outside the range of representable values")))
+                          ("/" "%") (when (and (not u) (= b -1) (= (big a) lo)) (ub! e "value " (- (big a)) " is outside the range of representable values"))
+                          ("<<" ">>") (cond
+                                        (neg? b) (ub! e "negative shift count " b)
+                                        (>= b bits) (ub! e "shift count " b " >= width of type (" bits " bits)")
+                                        (and (= "<<" (:o e)) (not u) (< (long *cxx-year*) 20) (neg? a)) (ub! e "left shift of negative value " a)
+                                        (and (= "<<" (:o e)) (not u) (< (long *cxx-year*) 20)
+                                             (> (* (big a) (reduce * 1N (repeat b 2N))) (dec (* 2 (inc (big hi))))))
+                                        (ub! e "signed left shift discards bits")
+                                        :else nil)
+                          nil)))
                     (ce-wrap t (case (:o e)
                                  "+" (+ a b) "-" (- a b) "*" (* a b)
-                                 "/" (if (zero? b) (not-constant "division by zero") (if u (Long/divideUnsigned a b) (quot a b)))
-                                 "%" (if (zero? b) (not-constant "division by zero") (if u (Long/remainderUnsigned a b) (rem a b)))
+                                 "/" (if (zero? b) (if (checking?) (ub! e "division by zero") (not-constant "division by zero")) (if u (Long/divideUnsigned a b) (quot a b)))
+                                 "%" (if (zero? b) (if (checking?) (ub! e "division by zero") (not-constant "division by zero")) (if u (Long/remainderUnsigned a b) (rem a b)))
                                  "<<" (bit-shift-left a b) ">>" (if u (unsigned-bit-shift-right a b) (bit-shift-right a b))
                                  "&" (bit-and a b) "|" (bit-or a b) "^" (bit-xor a b))))))
        :cmp (let [a (ev (:l e)) b (ev (:r e))
@@ -1277,7 +1346,8 @@
 
 (defn mptr-fn-node [fid]
   (let [f (fnd fid)]
-    {:op :mptr-fn :fn fid :ty {:k :mptr :cls (:cls f) :to (cond-> (:ty f) (:cq f) (assoc :cq true))} :cat :pr}))
+    {:op :mptr-fn :fn fid :ty {:k :mptr :cls (:cls f) :to (cond-> (:ty f) (:cq f) (assoc :cq true) (:vq f) (assoc :vq true)
+                                                              (and (checking?) (:refq f)) (assoc :refq (:refq f)))} :cat :pr}))
 
 (defn rv
   "The prvalue of a glvalue of non-class type (lvalue-to-rvalue), an array's decay, a function's."
@@ -1368,6 +1438,12 @@
       (and (abi/ptr? to) (abi/integral? from) explicit?) (cast-node e :int->ptr to)
       (and (abi/integral? to) (abi/ptr? from) explicit?) (cast-node e :ptr->int to)
       (and (abi/ptr? to) (= :nullptr (abi/bn from))) {:op :null :ty to :cat :pr}
+      ;; (CX12, the checker: two pointers to member functions of one class whose types differ only in the member
+      ;; function's qualifiers, [conv.mem]/2 converts neither way: clang's err_typecheck_convert_incompatible)
+      (and (checking?) (not explicit?) (abi/mptr? to) (abi/mptr? from) (abi/fn? (:to to)) (abi/fn? (:to from)) (= (:cls to) (:cls from))
+           (not= (:to to) (:to from))
+           (= (apply dissoc (:to to) [:refq :cq :vq]) (apply dissoc (:to from) [:refq :cq :vq])))
+      (fail :conversion "incompatible member function pointer types (qualifiers)")
       :else (fail :conversion "conversion from " (pr-str from) " to " (pr-str to)))))
 
 ;; Implicit conversion sequences: {:rank 0 exact, 1 promotion, 2 conversion, 3 user-defined, 4 ellipsis, :sub n}
@@ -1442,10 +1518,22 @@
       (abi/ref? p)
       (let [same (= (arr-unq at) (arr-unq pt))
             derived (and (class-id at) (class-id pt) (abi/derived-from? (class-id at) (class-id pt)))
-            cv-ok (or (:c (arr-cv pt)) (not (:c (arr-cv at))))]
+            cv-ok (and (or (:c (arr-cv pt)) (not (:c (arr-cv at))))
+                       ;; CX12 (the checker): volatile too ([dcl.init.ref]/4-5, reference-compatible: cv1 >= cv2)
+                       (or (not (checking?)) (:v (arr-cv pt)) (not (:v (arr-cv at)))))
+            cv-sup (or (not (checking?)) (not (or same derived))
+                       (and (or (:c (arr-cv pt)) (not (:c (arr-cv at)))) (or (:v (arr-cv pt)) (not (:v (arr-cv at))))))]
         (cond
-          (and (= :ref (:k p)) (lv? e) (= :lv (:cat e)) (or same derived) cv-ok) {:rank (if derived 2 0) :sub (if (and (:c pt) (not (:c at))) 1 0)}
-          (and (= :rref (:k p)) (not= :lv (:cat e)) (or same derived)) {:rank (if derived 2 0) :sub -1}
+          (and (= :ref (:k p)) (lv? e) (= :lv (:cat e)) (or same derived) cv-ok)
+          (cond-> {:rank (if derived 2 0) :sub (if (and (:c pt) (not (:c at))) 1 0)}
+            ;; (CX12, the checker: [over.ics.rank]/3.2.6 orders two such bindings by their cv-qualifiers' inclusion)
+            (checking?) (assoc :cvq (cond-> #{} (:c (arr-cv pt)) (conj :c) (:v (arr-cv pt)) (conj :v))))
+          (and (= :rref (:k p)) (not= :lv (:cat e)) (or same derived) cv-sup) {:rank (if derived 2 0) :sub -1}
+          ;; (CX12, the checker: a reference-related type losing a qualifier binds neither directly nor to a temporary,
+          ;; [dcl.init.ref]/5.4.4)
+          (not cv-sup) nil
+          ;; (CX12, the checker: an lvalue reference to volatile binds no rvalue, [dcl.init.ref]/5.4)
+          (and (checking?) (= :ref (:k p)) (:v (arr-cv pt))) nil
           (and (= :ref (:k p)) (lv? e) (not (:c pt))) nil
           (and (= :ref (:k p)) (not (:c pt))) nil
           ;; a const lvalue reference or an rvalue reference to a temporary
@@ -1476,7 +1564,10 @@
 
 (defn- better-ics? [a b]
   (or (< (long (:rank a)) (long (:rank b)))
-      (and (= (:rank a) (:rank b)) (< (long (or (:sub a) 0)) (long (or (:sub b) 0))))))
+      (and (= (:rank a) (:rank b))
+           (if (and (:cvq a) (:cvq b))
+             (let [x (:cvq a) y (:cvq b)] (and (not= x y) (every? y x)))
+             (< (long (or (:sub a) 0)) (long (or (:sub b) 0)))))))
 
 (declare resolve-overload*)
 
@@ -1517,8 +1608,20 @@
                                         (or (some true? (map better-ics? a b)) (tiebreak fa fb n0))))
         best (filter (fn [x] (every? #(or (identical? % x) (better x %)) viable)) viable)]
     (cond
-      (= 1 (count best)) (ffirst best)
-      (empty? viable) (fail :overload "no viable function among " (count (distinct cands)) " for " n0 " arguments: " (pr-str (map :ty (second (first cs)))))
+      (= 1 (count best)) (let [b (ffirst best) f (fnd b)]
+                           ;; CX12 (the checker): the best viable function deleted ([dcl.fct.def.delete]/2; clang's
+                           ;; err_ovl_deleted_call, err_ovl_deleted_special_init), when it was the only viable one: the
+                           ;; slice's ranking is not trusted to have chosen it over another)
+                           (when (and (checking?) (:deleted-sure f) (= 1 (count viable)))
+                             (fail :overload "call to a deleted function " (:name f) (if (:implicit f) " (implicitly deleted)" "")))
+                           b)
+      (empty? viable)
+      (let [{:keys [sure-drops unsure-drops]} (when (checking?) *drops*)]
+        ;; (CX12, the checker: the templates whose deduction failed by the algorithm alone count as candidates; one that may
+        ;; have failed by the slice keeps the call from being diagnosed)
+        (if (and unsure-drops (pos? (long unsure-drops)))
+          (fail :overload "no viable function (a template's deduction unsure) among " (count (distinct cands)) " for " n0 " arguments")
+          (fail :overload "no viable function among " (+ (count (distinct cands)) (long (or sure-drops 0))) " for " n0 " arguments: " (pr-str (map :ty (second (first cs)))))))
       :else (fail :overload "ambiguous call (" (count viable) " viable)" (when (System/getenv "CPP_HDR_TRACE") (str ": " (pr-str (map (fn [[f]] [(:name (fnd f)) (:ps (:ty (fnd f))) (loc-of (get-in (:node (fnd f)) [:range :begin]))]) viable))))))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -1539,7 +1642,13 @@
         obj (if (= :pr (:cat e)) (materialize e) e)]
     (rv (method-call ctx fid obj [] true))))
 
-(defn ctor-candidates [id] (remove #(:deleted (fnd %)) (:ctors (abi/cls id))))
+(defn ctor-candidates
+  "The constructors of class `id` overload resolution considers: the deleted ones too for the checker ([over.match.funcs]:
+  a deleted function is a candidate, and choosing it is the error, [dcl.fct.def.delete]/2), those it is sure of."
+  [id]
+  (if (checking?)
+    (remove #(let [f (fnd %)] (and (:deleted f) (or (:cx-move f) (not (:deleted-sure f))))) (:ctors (abi/cls id)))
+    (remove #(:deleted (fnd %)) (:ctors (abi/cls id)))))
 
 (defn- call-args
   "The parameters' initializers for a call of `f` with the typed arguments `args` (default arguments analyzed in the
@@ -1650,6 +1759,7 @@
   (let [cands (filter #(let [f (fnd %)] (<= (count (:ps (:ty f))) (count (filter some? (:defaults f))))) (ctor-candidates id))
         fid (first cands)]
     (when-not fid (fail :init "no default constructor for " (:name (abi/cls id))))
+    (when (and (checking?) (:deleted-sure (fnd fid))) (fail :overload "call to a deleted function " (:name (fnd fid))))
     (let [f (fnd fid)]
       (cond
         (:trivial f) (if value? {:i :zero} {:i :none})
@@ -1968,6 +2078,12 @@
       (let [obj (if (= o "->*") (deref-node l) l)
             m (rv r)
             mt (abi/unq (:ty m))
+            ;; (CX12, the checker: [expr.mptr.oper]/6, a ref-qualified member function's pointer and the object's category;
+            ;; C++20's const & taking an rvalue too)
+            _ (when (and (checking?) (abi/fn? (:to mt)))
+                (let [rq (:refq (:to mt)) lv (= :lv (:cat obj))]
+                  (when (or (and (= rq "&") (not lv) (not (:cq (:to mt)))) (and (= rq "&&") lv))
+                    (fail :mptr "pointer-to-member function type requires an " (if lv "rvalue" "lvalue")))))
             obj (if (= :pr (:cat obj)) (materialize obj) obj)
             obj (to-base-lv obj (:cls mt))]
         (if (abi/fn? (:to mt))
@@ -2008,6 +2124,18 @@
   (let [es (class-lookup cid nm)]
     (when (seq es) [(first (first es)) (mapv (comp :id second) (filter #(= :fn (:e (second %))) es)) (second (first es))])))
 
+(defn- check-access!
+  "CX12 (the checker): [class.access]/1-2 for a member named in an expression: a private or protected member of class
+  `cid` named in a function that is no class's member (nor in a class's scope), where neither that class nor any other
+  of the unit declares a friend (a friend could be that function, or a friend of a derived class, [class.protected]):
+  inaccessible. Everything else (members, friends, templates' patterns, using-declarations) is not judged."
+  [ctx cid nm access]
+  (when (and (checking?) (#{:private :protected} access) cid)
+    (let [f (when-let [i (:fn-id ctx)] (fnd i))]
+      (when (and f (not (:cls f)) (not (:this-type ctx)) (not (:tinst f))
+                 (not-any? :has-friends (vals @abi/*classes*)))
+        (fail :access "'" nm "' is a " (name access) " member of '" (:name (abi/cls cid)) "'")))))
+
 (defn- member-expr [ctx n]
   (let [[objn] (kids n)
         o (analyze ctx objn)
@@ -2037,13 +2165,15 @@
           fids (if qcid fids fids)]
       (cond
         (nil? e) (fail :member "no member " nm (when (System/getenv "CPP_HDR_TRACE") (str " (" (node-text n) ") of " (:name (abi/cls (or qcid cid))))))
-        (= :field (:e e)) (field-node (if (= :pr (:cat obj)) (materialize obj) obj) (:cls e) (:i e))
+        (= :field (:e e)) (do (check-access! ctx (:cls e) nm (:access (nth (:fields (abi/cls (:cls e))) (:i e))))
+                              (field-node (if (= :pr (:cat obj)) (materialize obj) obj) (:cls e) (:i e)))
         (= :indirect (:e e)) (reduce (fn [o [c i]] (field-node o c i)) (if (= :pr (:cat obj)) (materialize obj) obj) (:chain e))
         (= :var (:e e)) {:op :comma :l obj :r (var-node (:id e)) :ty (:ty (var* (:id e))) :cat :lv}
         (#{:fn :tmpl} (:e e))
         (let [tm (vec (keep (fn [[_ x]] (when (= :tmpl (:e x)) (:id x))) (class-lookup (or qcid cid) nm)))
               t (or (node-text n) "")]
           (cond-> {:op :fnset :fns fids :tmpls tm :name nm :obj (if (= :pr (:cat obj)) (materialize obj) obj) :ty {:k :overload} :cat :lv :qualified (boolean qcid)}
+            (checking?) (assoc :member-access true)
             (and (seq tm) (:_wn n) (:explicitTemplateArgs n)) (assoc :targs-text (written-targs n nm) :targs-scope (:scope ctx))
             (and (seq tm) (not (:_wn n)) (re-find #"<[^<>]*(?:<[^<>]*>[^<>]*)*>\s*$" t)) (assoc :targs-text (second (re-find #"(?:\.|->)\s*(?:template\s+)?(.*)$" t)) :targs-scope (:scope ctx))))
         (= :enumerator (:e e)) {:op :int :v (:val e) :ty (:ty e) :cat :pr}
@@ -2121,8 +2251,9 @@
                  cands (concat (:fns callee) tcands (when (and (not (:obj callee)) (not any-method)) (adl-fns args (or (:name callee) (:name (first ms))))))
                  _ (when (and (empty? cands) (empty? (:tmpls callee))) (fail :name "unknown name " (:name callee)))
                  ;; (a function found twice, through a using-declaration and its class: one candidate; G4)
-                 fid (resolve-overload (distinct cands) args obj)
+                 fid (binding [*drops* (meta tcands)] (resolve-overload (distinct cands) args obj))
                  f (fnd fid)
+                 _ (when (:member-access callee) (check-access! ctx (:cls f) (:name f) (:access f)))
                  std-builtin (when (and (= 1 (count args)) (= [[:ns "std"]] (:path f)) (not (:cls f)))
                                (std-builtins (:name f)))]
              (cond
@@ -2184,7 +2315,7 @@
                                          (count args))
                       (catch arbace.lang.ExceptionInfo x (if (= :overload (:codegen/refused (ex-data x)))
                                                            (do (when (System/getenv "CPP_OP_TRACE") (binding [*out* *err*] (println "operator" o (.getMessage x) (count members) (count frees))))
-                                                               (when (re-find #"ambiguous" (.getMessage x)) (throw x)))
+                                                               (when (re-find #"ambiguous|deleted function" (.getMessage x)) (throw x)))
                                                            (throw x))))]
         (cond
           (nil? best) (when (#{"<" ">" "<=" ">="} o) (rewritten-relational ctx o args))
@@ -2384,7 +2515,7 @@
 ;; (explicit, then implicit at first use), its operator() (const unless mutable, the return type deduced from the
 ;; first return), for a captureless lambda the conversion to a function pointer and its static __invoke
 
-(declare stmt nrvo-var analyze-implicit! deduce-auto)
+(declare stmt nrvo-var analyze-implicit! deduce-auto cx-check-constant!)
 
 (def ^:dynamic *lambda-counts* nil) ; atom {[enclosing-fid kind-key] n}
 
@@ -2544,8 +2675,16 @@
         (abi/update-cls! id update :methods (fnil conj []) cvid)))
     {:op :temp-obj :init {:i :list :cls id :items (mapv second inits) :fields-used (mapv first inits)} :ty t :cat :pr}))
 
+(declare analyze-node)
+
 (defn analyze
   "The typed expression of the tree node `n` in the context `ctx` ({:scope :fn :this-type ...})."
+  [ctx n]
+  (let [r (analyze-node ctx n)]
+    ;; (CX12, the checker: a binary operator's position kept, for the constant evaluation's diagnostics)
+    (if (and (checking?) (map? r) (= :binop (:op r)) (:range n)) (assoc r :cx-at (:range n)) r)))
+
+(defn- analyze-node
   [ctx n]
   (when-let [a *at*] (when (:range n) (reset! a n)))
   (case (:kind n)
@@ -2812,7 +2951,8 @@
   (let [ty (resolve-type (:scope ctx) (get-in n [:type :qualType]))
         id (next-id)
         st (if (= "static" (:storageClass n)) :static-local storage)
-        v {:id id :name (:name n) :ty ty :storage st :fn (:fn-id ctx) :init-node (init-kid n) :constexpr (boolean (:constexpr n))}
+        v (cond-> {:id id :name (:name n) :ty ty :storage st :fn (:fn-id ctx) :init-node (init-kid n) :constexpr (boolean (:constexpr n))}
+            (and (checking?) (:constexpr n)) (assoc :cx-constexpr true :cx-range (:range n)))
         ;; a constant local's initializer, for constant expressions (an array bound, a template argument)
         v (if (and (:c ty) (abi/integral? (abi/unq ty)) (init-kid n)) (assoc v :init (init-kid n) :def-scope (:scope ctx)) v)]
     (swap! *vars* assoc id v)
@@ -2866,6 +3006,7 @@
                                (upd-var! id assoc :sinit init)
                                {:s :static-local :var id}))
                          (let [init (decl-init ctx id d)
+                               _ (cx-check-constant! (var* id) init)
                                t (:ty (var* id))
                                ;; a constexpr local, or a const integral one, initialized by a constant: folded (clang
                                ;; emits the value)
@@ -3225,7 +3366,7 @@
       (when (= 1 (count (:ps (:ty f))))
         ;; the implicit copy: each base and member copied from the source's
         (let [src (var-node (first pids))
-              src {:op :deref :e {:op :load :e {:op :var :id (first pids) :ty (first (:ps (:ty f))) :cat :lv :raw true} :ty (abi/ptr (:to (first (:ps (:ty f))))) :cat :pr} :ty (:to (first (:ps (:ty f)))) :cat :lv}
+              src {:op :deref :e {:op :load :e {:op :var :id (first pids) :ty (first (:ps (:ty f))) :cat :lv :raw true} :ty (abi/ptr (:to (first (:ps (:ty f))))) :cat :pr} :ty (:to (first (:ps (:ty f)))) :cat (if (and (checking?) (= :rref (:k (first (:ps (:ty f)))))) :xv :lv)}
               c (abi/cls cls)]
           (binding [*cutoff* Long/MAX_VALUE]
             (upd-fn! fid assoc :tinits
@@ -3237,7 +3378,7 @@
                                                              (if (abi/arr? t) {:i :copy-bytes :e (field-node src cls (:i fl))}
                                                                  (init-for t [(field-node src cls (:i fl))] ctx :direct)))}))})))))
     (when (and (= :method (:kind f)) (= "=" (:op f)))
-      (let [src {:op :deref :e {:op :load :e {:op :var :id (first pids) :ty (first (:ps (:ty f))) :cat :lv :raw true} :ty (abi/ptr (:to (first (:ps (:ty f))))) :cat :pr} :ty (:to (first (:ps (:ty f)))) :cat :lv}
+      (let [src {:op :deref :e {:op :load :e {:op :var :id (first pids) :ty (first (:ps (:ty f))) :cat :lv :raw true} :ty (abi/ptr (:to (first (:ps (:ty f))))) :cat :pr} :ty (:to (first (:ps (:ty f)))) :cat (if (and (checking?) (= :rref (:k (first (:ps (:ty f)))))) :xv :lv)}
             me (deref-node (this-expr ctx))
             c (abi/cls cls)]
         (binding [*cutoff* Long/MAX_VALUE]
@@ -3252,6 +3393,19 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; The program
 
+(defn cx-check-constant!
+  "CX12 (the checker): a constexpr variable's scalar initializer `i` evaluated ([dcl.constexpr]/10: a constant
+  expression); an evaluation the program's own operation makes not constant (ub!) diagnosed at that operation, clang's
+  err_constexpr_var_requires_const_init. An evaluation the slice cannot do judges nothing."
+  [v i]
+  (when (and (checking?) (:cx-constexpr v) (= :expr (:i i)) (abi/scalar? (abi/unq (:ty v))))
+    (try (ce-eval (:e i))
+         (catch arbace.lang.ExceptionInfo x
+           (when (:cx/sure (ex-data x))
+             (throw (ex-info (str "codegen: constexpr variable '" (:name v) "' must be initialized by a constant expression ("
+                                  (subs (str (.getMessage x)) (count "not a constant: ")) ")")
+                             {:codegen/refused :constexpr :cx/node {:range (or (:cx/at (ex-data x)) (:cx-range v))}})))))))
+
 (defn global-init
   "A namespace-scope variable's initializer."
   [vid]
@@ -3261,7 +3415,8 @@
     (binding [*cutoff* Long/MAX_VALUE]
       (let [i (cond
                 (nil? init) (init-for (:ty v) nil ctx :value)
-                :else (decl-init ctx vid (assoc (or (:node v) {}) :init (:init-style v) :inner [init] :kind "VarDecl")))]
+                :else (decl-init ctx vid (assoc (or (:node v) {}) :init (:init-style v) :inner [init] :kind "VarDecl")))
+            _ (cx-check-constant! v i)]
         ;; a scalar initialized by a constant expression: constant initialization ([basic.start.static])
         (if (and (= :expr (:i i)) (abi/scalar? (abi/unq (:ty v))) (not (#{:int :float :null} (:op (:e i)))))
           (if-let [c (binding [*ce-fold* true] (ce-try (:e i)))] (assoc i :e c) i)
@@ -3347,10 +3502,19 @@ protected:
                                                (if (and (:implicit (fnd id))
                                                         (or (= :overload (:codegen/refused (ex-data e)))
                                                             (and (:codegen/refused (ex-data e)) (:header (abi/cls (:cls (fnd id)))))))
-                                                 (upd-fn! id assoc :deleted true :tinits nil)
+                                                 ;; (CX12: deleted for a subobject's deleted member, the checker sure of it)
+                                                 (upd-fn! id assoc :deleted true :tinits nil
+                                                          :deleted-sure (boolean (and (checking?) (re-find #"call to a deleted function" (str (.getMessage e))))))
                                                  (throw e)))))
                                     :else nil)))
-                          :var (let [v (var* id)] (when (and (:defined v) (not (:ginit v))) (upd-var! id assoc :ginit (global-init id))))))]
+                          :var (let [v (var* id)]
+                                 (when (and (:defined v) (not (:ginit v)))
+                                   ;; (CX12: as a checker a refused initializer is reported and the analysis goes on)
+                                   (if-let [h *on-refusal*]
+                                     (try (upd-var! id assoc :ginit (global-init id))
+                                          (catch arbace.lang.ExceptionInfo e
+                                            (if (:codegen/refused (ex-data e)) (do (upd-var! id assoc :ginit {:i :none}) (h e (some-> *at* deref))) (throw e))))
+                                     (upd-var! id assoc :ginit (global-init id)))))))]
            (loop [i 0]
              (let [order @*order*]
                (if (< i (count order))
