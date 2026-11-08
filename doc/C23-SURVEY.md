@@ -5014,3 +5014,136 @@ builtins' results, and the parser's prelude `void __atomic_load ();` (and store,
 "too many arguments". Samples `test/c/run/builtin-atomic.c` and `fnptr-result-width.c` (the `ci-run` corpus, 13 files). Not changed:
 `__atomic_is_lock_free` and `__atomic_always_lock_free` (queue 126), cf2g and go/arbace/{ci,crt} (the nodes used exist), the
 `ci-run` AOT subset (the two files' AOT rows are the next record's).
+
+## As built: the own target's triage (2026-11-08, branch `c-triage`)
+
+The brief (2026-11-08): C's records on its own target (c-indep-b1) committable with every non-pass in a real class, C at or above
+95 / 100 / 99.7 on `bin/crops-score`. Night 7 ran the records on the own target (reverted for the gate, 896f64eb6; copies in the
+main checkout's `.tmp/night7/c-own-target/`) and night 8 named the consolidated tree's failures `:ci-run-consolidation` (12 cases).
+On `c-triage` at main 2a72c94aa, light, by day, with main's stage 0 (`ARBACE_HOST_EXE`).
+
+### T.1 The cause of `:ci-run-consolidation`: stage 0 ran the seed's ci
+
+Not a merge. Stage 0 is built from the seed `d5548e72` (2026-11-05), which embeds ci (`arbace/c.ae`, `arbace/c/`) compiled, and
+RT.load runs a namespace through its compiled loader whenever the executable has one; `RT.toolSource` reloads only `arbace/repr/`,
+`arbace/j2g/`, `arbace/build/`, `arbace/c2j/` and `arbace/go/` from the checkout when they differ (CLAUDE.md's "stage 0 evaluates a
+changed one from the checkout until the next re-seed" holds for repr/c, not for ci). So every change to ci after the seed ran in no
+C check on main: LLS21 (a)'s atomics and function-pointer widths (2026-11-05), c-deferred's VLA structures, complex integers,
+signals' builder half, the re-entered main file's read (`arbace.c.run`, CDF.5) and `__builtin_va_arg_pack` (2026-11-06). Each passed
+on its own branch because it was proved there over the checkout's ci (CDF.2's wrapper, PB.6's `ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1
+ARBACE_NO_IMAGE=1`); the gate's C steps had the same trio from the backlog's merge to the re-seed (steps.edn's note) and lost it then.
+Proved on stage 0: `(arbace.lang.RT/resourceAsStream nil "arbace/c/build.ae")` differs from the checkout's and
+`Compiler$AOT/loader` is set for it; `bin/ci check --only` on ci-run's four programs fails as night 8 recorded (3 of 4: "too many
+arguments", stdout, stdout), then passes 4 of 4 with the checkout's ci.
+
+**Fix** (`bin/lib/ci/fresh.bash`, `c_ci_fresh`, called by `bin/ci` for every verb but `cirun-build`, `c2j-check`, `cinterp-check`,
+`synth` and `selfref`): when a source of `arbace/c.ae` or `arbace/c/` in the checkout differs from the host's embedded copy (or the
+host has none), the three variables are exported and said once on the standard error; nothing when they are the host's own (after a
+re-seed: compiled, as fast as before), when `ARBACE_NO_AOT` is set, or under `CI_FRESH=0`. The scripts that run `CI_EXE` (built from
+the checkout) unset them on it as before. Cost: every namespace evaluated: musl's forms cache and ci's prebuilt runtime are keyed by
+how they ran, so the first run after the switch rereads musl (7 to 10 minutes, 1.6 GB) and rebuilds the fragments; then 45 + 18
+programs of the essential list in T.6's time. The gate's C steps (`:c` inputs hold `bin/lib/ci/`) rerun at their new key and test
+the checkout's ci again. CS281 below for the lasting fix.
+
+### T.2 The twelve cases, each
+
+| case | eval | AOT | cause, fix |
+|---|---|---|---|
+| ci-run/builtin-atomic.c, fnptr-result-width.c | pass | pass | T.1 (LLS21 (a)'s checker and builder) |
+| ci-run/signal-sync.c, vla-struct.c | pass | pass | T.1 (CDF.1's builder; the AOT's SIGFPE was the seed's builder's node program) |
+| torture-execute 20020412-1, 20040423-1, 20041218-2, 20070919-1, pr82210 | pass | pass | T.1 (CDF.1's VLA structures) |
+| gcc-gnu23-run/gnu23-empty-init-1.c | pass | pass | T.1 (CDF.1) |
+| tcc-tests2/18_include.c | pass | pass | T.1 (CDF.5's `read-unit`, `arbace.c.run`) |
+| gcc-c23-run/c23-complit-4.c | pass | pass | threads run since CS276 (b)'s scheduler (rust-re6's `crt/sched.ae`, `ci/thread.ae`), but `(static thread_local int []){1, 2}` was an ordinary static: the builder's `compound-lit-object` now gives a `thread_local` compound literal thread storage duration (C23 6.5.2.5; static `:tls`, thread.go's block), and cf2g's `g` node takes a thread-local static through `ci.IStatic` (the running thread's object) where every other static stays `G[i]` |
+
+Also passing now at both levels: benchmarksgame/binary-trees-5.c (`:threads`, the scheduler). `:ci-run-consolidation` empties with
+the night's records (T.7), which also leave `:threads` a guard class.
+
+### T.3 The annotations' 14 failures
+
+| files | cause | fix or class |
+|---|---|---|
+| vprintf-1, vfprintf-1, vprintf-chk-1, vfprintf-chk-1 | refused before CDF.8; read now, and checked by the seed's checker (T.1) | pass with the checkout's checker (classed `cc-undeclared-builtin`) |
+| 20040629-1, tcc 95_bitfields | the re-entered main file (CDF.8) is the unit of the `#include` that entered it, whose items the checker does not annotate; cc's single file gives them at the main file's lines | `:item-placement` (its text extended); quickjs's unicode_gen.c too (T.4) |
+| zlib infback.c, inflate.c | `inffixed.h` included inside `fixedtables`' body: without `*include-inside*` its `lenfix`/`distfix` stayed the directive's, so the body's uses had no declaration (`? x2`, a false error) | `arbace.repr.c.annot/check-file` reads as ci reads (`*include-inside*`, queue 178, CS275 (b)): pass |
+| benchmarksgame fannkuchredux-4, mandelbrot-6, nbody-4, nbody-9, spectral-norm-5, spectral-norm-6 | Arbace's `mm_malloc.h` called `posix_memalign`, which musl's `<stdlib.h>` declares only under a POSIX or GNU feature test macro: at `-std=c99` an implicit declaration | `c/include/mm_malloc.h` declares POSIX's `posix_memalign` itself: pass (`vector-types` classed) |
+
+### T.4 The round trip's 11 failures
+
+| files | cause | fix or class |
+|---|---|---|
+| gcc-embed embed-15, embed-17, embed-2, embed-3 (gcc.dg/cpp and c-c++-common) | since CDF.8 the print writes back the inactive `#if __has_embed (__FILE__ ...)` family; the original is read by its absolute name (as DejaGnu names it), the print was reread by its relative one, so `__FILE__` named no file from the print's directory | `arbace.repr.c.rtcheck`: an original read by an absolute name is reread by the print's absolute name: 4 pass (gcc-embed's 47: 42 pass, 5 known) |
+| torture-execute fprintf-1, fprintf-chk-1 | stale: `:reexpansion` no longer happens (CDF.7's invocation printed as itself) | entries removed (`:reexpansion` a guard class) |
+| gcc-c23 c23-named-loops-1, tcc-pp 12.S, 13.S | stale only in the default judge: the first was recorded at level 3 (objects), the others by gcc's acceptance (port-only-rejects; cc rejects them too) | `bin/lib/repr-c/roundtrip`'s no-gcc deferral also defers a stale entry whose recorded row (the results file) has levels 1 and 2 equal, or `port-only-rejects`: the oracle tier's, kept |
+| torture-compile limits-externdecl, gcc-c23 c23-binary-constants-1 | `:eval-limits`: the read's budget, since repr/c's parser differs from the seed's and is evaluated (808d08d60 had removed the first as stale when it ran compiled) | entries back with `:eval-limits` (stale again at the re-seed: removed then) |
+
+### T.5 The token check's `:gcc` level under `--record`
+
+`bin/repr-c check --tokens --record` in the default mode ran gcc -E over the host's headers and judged the own target's streams by
+it: 430 "no class at :gcc", the `:pp` entries' digests overwritten with `:differs`, and `record-gcc` would rewrite
+`test/repr/c/pp-gcc.sha256` from the run. Now (`bin/lib/repr-c/check`, `arbace.repr.c.ppcheck/record`): gcc runs for `--record` only
+under `ARBACE_C_JUDGE=gcc`; in the default mode the record rewrites the `:pp` and `:lex` classes from the run, keeps each `:pp`
+entry's `:gcc` digest, the whole `:gcc` level and `pp-gcc.sha256` as recorded (the oracle tier's). Test
+`token-record-keeps-gcc-under-own-verdict` (test/c/judge_test.ae), and `token-record-writes-no-placeholder` now under the gcc judge.
+
+### T.6 What was checked (light, main's stage 0, the checkout's ci)
+
+| command | result |
+|---|---|
+| `bin/ci check --only` (ci-run's four), stage 0's ci / the checkout's | 1 / 4 of 4 pass |
+| `bin/ci check --only` (the other eight; then c23-complit-4 after its fix) | 7 of 8, then 8 of 8 |
+| `bin/ci check --aot --only` (the twelve and binary-trees-5) | 12 of 13, then 13 of 13 after cf2g's `g` |
+| `bin/ci annotations --only` (the 14), then `--corpus zlib,quickjs,tcc-tests2,benchmarksgame,compcert` | 14 pass or known; 189 files, 1 new difference (unicode_gen.c, classed) |
+| `bin/repr-c roundtrip --only` (34 files: the 11, the six self-including files, every gcc-embed file) | 0 failing after the known edits |
+| `bin/ci dg --essential` | 92 of 92 |
+| the two token record tests | pass |
+
+### T.7 The night's commands (the main session's, in `next`'s worktree after the merge, one at a time)
+
+Every `bin/ci` verb now evaluates the checkout's ci on stage 0 (T.1), so the records are the checkout's. With
+`H="bin/heavy-lock"` as the night's scripts run them; the read records first, as c-indep-b1's list, then the run records:
+
+1. `CI_THREADS=2 bin/ci musl read` (musl's forms under the evaluated ci's key; about 10 minutes, 1.6 GB).
+2. `$H bin/repr-c check --tokens --record` (no gcc since T.5: the `:pp` and `:lex` classes rewritten, the `:gcc` level kept).
+3. `$H bin/repr-c parse-check --record`.
+4. `$H bin/ci annotations --record` (expect no file of no class: T.3).
+5. `REPR_C_THREADS=2 GOMEMLIMIT=1800MiB $H bin/repr-c roundtrip` (a judge run, no gcc: expect exit 0, the deferred entries of T.4
+   listed; the two `:eval-limits` reads reach about 3 GB, so not beside another heavy run).
+6. `$H bin/ci check --record`, then `$H bin/ci check --aot --record`, then `$H bin/ci dg --record` (expect T.2's twelve and
+   binary-trees-5 to pass at both levels, no regression).
+7. `git apply /root/arbace/.tmp/worktrees/c-triage/.tmp/night/remove-ci-run-consolidation.patch` (the class, empty after 6).
+8. `bin/reap --record` (expect 0 problems), `bin/crops-score --judge --strict`, then `bin/crops-score --record`.
+9. Commit: "C's records on the own target with the checkout's ci (the own target's triage)", with the session trailers.
+
+A record that fails in 2-6 is kept out of the commit (`git checkout` of its files) and named in the morning's report; 7-8 only
+when 6 passed.
+
+### T.8 Rekeys
+
+`arbace/c/build.ae`, `arbace/c/cf2g.ae`, `arbace/repr/c/annot.ae`, `ppcheck.ae`, `rtcheck.ae` (embedded: gate_key, the gate's
+builds; stage 0 evaluates them as T.1 says). `c/include/mm_malloc.h` (the sysroot's key: the token check's digests of the files
+that include it). Outside gate_key: `bin/ci`, `bin/lib/ci/fresh.bash`, `bin/lib/repr-c/`, `test/`.
+
+### T.9 Left
+
+- The round trip's results file is not re-recorded by the default mode (`--record` runs gcc's levels 3-4): fprintf-1's and
+  fprintf-chk-1's rows stay `:known` with a class the known file no longer lists until the oracle tier's record (CS282).
+- The re-entered main file's items are not annotated (`:item-placement`); 95_bitfields' packed layout at eval is CS278 (a).
+- cf2g's thread-local statics are numbered statics only: a prebuilt library unit's placeholder static (`?sL`) stays `G`'s
+  (musl has no `_Thread_local` object).
+
+### Proposed (2026-11-08): CS281-CS283
+
+- **CS281 Stage 0 and ci's sources.** T.1's trio evaluates every namespace (the first run after a change rereads musl, about 10
+  minutes; then about twice the compiled time). (a) `RT.toolSource` also takes `arbace/c/` and `arbace/c.ae`, so stage 0 evaluates
+  only a changed ci, as it does repr/c: one line of RT, effective at the next re-seed (`fresh.bash` then finds them equal or
+  evaluated and stays off); (b) a C-only re-seed now, as `d5548e72` (a night); (c) keep the trio. *Recommended: (a) at the next
+  re-seed window, (c) until then.*
+- **CS282 The round trip's `--record` in the default mode.** (a) As T.5 for the token check: `--record` without gcc rewrites the
+  levels 1-2 rows and the known entries they give, keeps those levels 3-4 or gcc's acceptance gave (the results file's recorded
+  rows), no gcc; (b) keep `--record` the oracle tier's, by hand with gcc. Cost (a): half a day with a test. *Recommended: (a)*, so
+  the night can record the round trip as it records the other read checks.
+- **CS283 The evaluated reader's memory.** limits-externdecl.c and c23-binary-constants-1.c reach about 3 GB in the evaluated
+  read before its budget ends. (a) Run the round trip's night command with `REPR_C_THREADS=2 GOMEMLIMIT=1800MiB` (T.7) and let
+  CS281 (a)'s compiled reader end it; (b) skip an `:eval-limits` file's read in the default mode (its known entry judged without
+  it). *Recommended: (a)*.

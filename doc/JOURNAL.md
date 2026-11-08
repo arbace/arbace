@@ -738,3 +738,30 @@ plus batch 4's `bin/lib/ci`, `bin/lib/repr-c`). Checks: `gate.crops check` 0; `-
 references held) 0 problems, the matrix unchanged; `bin/crops-score --judge --strict --record` 0 with the rows held (unheld, the held rows'
 9 reap problems and 1 score problem stay until the night's records, as on batch 3). Scores: Go 94.9 -> 97.0 completeness, LLVM IR 96.0 ->
 96.4 (batch 3's), the rest as batch 4. The nights of batches 2-4 in one ordered list: the AGENDA's "Batches 2-4: the nights after batch 1".
+
+## 2026-11-08: C's own target triaged (branch `c-triage`, on main 2a72c94aa)
+
+The brief: C's records on its own target (c-indep-b1) committable, every non-pass in a real class, C at or above 95 / 100 / 99.7.
+Inputs: night 7's own-target records and logs (the main checkout's `.tmp/night7/`), night 8's class `:ci-run-consolidation` (12
+cases). Detail in doc/C23-SURVEY.md, "As built: the own target's triage" (T.1-T.9, CS281-CS283).
+
+- **The consolidation's cause** was not a merge: stage 0, built from the seed `d5548e72` (2026-11-05), embeds ci compiled and RT.load
+  takes the compiled loader; `RT.toolSource` reloads repr/c from the checkout but not `arbace/c/`, so LLS21 (a)'s and c-deferred's
+  ci changes (2026-11-05/06), proved on their branches over the checkout's ci, ran in no C check of main. Shown on stage 0 (the
+  embedded `arbace/c/build.ae` differs, its loader set) and by `bin/ci check --only`: ci-run's four fail as recorded, then pass with
+  the checkout's ci. Fix: `bin/lib/ci/fresh.bash`'s `c_ci_fresh` (from `bin/ci`): the three variables PB.6 used when the checkout's ci
+  differs from the host's. Alternatives: `-s`-loading ci's namespaces over the compiled ones (`arbace_tool -s`; rejected: compiled
+  callers and redefined types would mix two ci's), RT.toolSource (needs a re-seed: CS281 (a)), a re-seed now (CS281 (b)).
+- **c23-complit-4**: threads run since CS276 (b)'s scheduler, but a `static thread_local` compound literal was an ordinary static:
+  `arbace.c.build`'s compound literals take `:tls`, cf2g reads thread-local statics through `ci.IStatic`. All twelve and
+  binary-trees-5 pass at eval and AOT (`bin/ci check [--aot] --only`).
+- **Annotations** (14): four pass with the checkout's checker; zlib's two read as ci reads (`*include-inside*` in
+  `arbace.repr.c.annot`); the benchmarksgame six by Arbace's `mm_malloc.h` declaring `posix_memalign` (musl hides it under strict
+  ISO C); 20040629-1, 95_bitfields and quickjs's unicode_gen.c classed `:item-placement`.
+- **Round trip** (11): gcc-embed's four by rereading a print by its absolute name when the original was read so
+  (`arbace.repr.c.rtcheck`); fprintf-1's two stale entries removed; c23-named-loops-1, 12.S and 13.S deferred to the oracle tier by
+  their recorded rows (`bin/lib/repr-c/roundtrip`); limits-externdecl and c23-binary-constants-1 back as `:eval-limits`.
+- **The token check's `--record`** runs gcc only under `ARBACE_C_JUDGE=gcc` and keeps the `:gcc` level otherwise (`ppcheck/record`,
+  a test in test/c/judge_test.ae).
+- The night's commands: doc/C23-SURVEY.md T.7 (the records in order, the class's removal by
+  `.tmp/worktrees/c-triage/.tmp/night/remove-ci-run-consolidation.patch`, reap, the scores).
