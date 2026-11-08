@@ -2957,3 +2957,42 @@ wake channels and selectors; F10b's DatagramChannel then the asynchronous channe
 (`bin/jrt-convert check-javac` as a light essential gate step; the overlays' derivations as Arbace, `bin/jrt-convert derive --check`);
 **JCS167 (a)**: serialization ported (ObjectOutputStream, ObjectInputStream, ObjectStreamClass over jrt's reflection, j2g's SerialNew;
 clojure-cdr's staged port), its tests deferred again then regained, toward 90% strict.
+
+## As built: JCS162
+
+Branch `java-f9` (from `next`, `bd33e27cc`), 2026-11-08, by day under the light rules: the user's JCS162 (a). jrt's
+hand-written Thread (`go/arbace/jrt/thread.ae`) gains jdk26u's `nioBlocker` and `interruptLock`
+(`src/java.base/share/classes/java/lang/Thread.java` at `baf63fb`): the fields `nioBlocker` and `interruptMu`, and
+`Thread.interrupt` as jdk26u's, rule for rule: the status set first (the token), then, when the interrupted thread is
+not the current one, its blocker read under the interrupt lock and its `interrupt(Thread)` called there, its
+`postInterrupt()` after the lock is released. `Thread.blockedOn(Interruptible)` (jdk26u's `JavaLangAccess.blockedOn`,
+which only `AbstractInterruptibleChannel.blockedOn` calls; `AbstractSelector`'s begin and end call that) is jrt's
+native `jdk.internal.jrt.HostThreads.blockedOn(Object)` (a new overlay, one native), which
+`AbstractInterruptibleChannel`'s variant now calls; the variant's `end` is gone (jdk26u's begin and end again: F7's
+check of the status at `end` stood in for the blocker).
+
+**No reference to a translated type.** The proposal named a registration by the translated `Interruptible`; none is
+needed: jrt declares sun.nio.ch.Interruptible's Go method set as j2g names it (`Interrupt_Thread__V(Thread_I)`,
+`PostInterrupt__V()`, read off the gate executable's `sun_nio_ch_Interruptible.ae`) as its own interface,
+`nioInterruptible`, and the native asserts the blocker to it (an object without the methods: ClassCastException), so
+every translated implementation (AbstractInterruptibleChannel's and AbstractSelector's anonymous classes) is one,
+and jrt builds and tests without the translation.
+
+**What it makes work** (jdk26u's code above the blocker, unchanged): a thread blocked in a socket channel's or a
+pipe's read, write, connect or accept (F10a: blocked in Go's poller) is woken by the channel's close, which the
+interruptor does (`implCloseChannel` → `preClose`), and gets ClosedByInterruptException; a thread blocked in
+`Selector.select` is woken by `wakeup()` (the eventfd or the pipe); a file channel's operation (jrt's own
+FileChannelImpl) closes the channel on an interrupt from another thread during it, as before at `begin`.
+
+**Checked** (light): `bin/jrt build --arch amd64` then `go build` and `go vet` of `./jrt`; `go test ./jrt`: every test
+passes, the new `TestInterruptBlocker` among them (another thread's interrupt calls the blocker once, its target the
+thread, then postInterrupt once, the status set; a self-interrupt calls neither; after `blockedOn(null)` an interrupt
+calls nothing; a String as blocker is ClassCastException); the variant applied and parsed (F4's `vet.ae`:
+AbstractInterruptibleChannel `{:replaced 1, :cut 0, :added 0}`); the joint javac check with F9's slice below.
+
+**Expected tests** (the night's interp and compiled runs, with F7's and F10a's areas): `jdk/java/nio/channels/
+Selector/LotsOfInterrupts.java#platform` (t05166), `Pipe/PipeInterrupt.java` (t05153), `FileChannel/
+ClosedByInterrupt.java` (t05121), `FileChannel/InterruptDeadlock.java` (t05126), `FileChannel/InterruptMapDeadlock.java`
+(t05127), `etc/AdaptorCloseAndInterrupt.java` (t05199, with F11's datagrams), and F10a's interrupt cases inside
+`SocketChannel/*` and `Selector/*`: about 6 tests, as JCS162 counted. The nights' commands are F10a's (step 5's
+`--only` covers them); the conversion adds one overlay (`jdk/internal/jrt/HostThreads.java`).
