@@ -338,7 +338,10 @@
 
 (declare expr rhs)
 
-(defn- gname [g] (ext-str (nth g 2) (nth g 3)))
+(def ^:dynamic *internal-tops* {}) ; the module's top-level binders it does not export: their internal names (Tidy's
+                                   ; tidyTopName: external only when exported, -O0 exposing no unfolding)
+
+(defn- gname [g] (or (get *internal-tops* g) (ext-str (nth g 2) (nth g 3))))
 
 (defn- flatten-app [e]
   (if (and (head? e 'app) (head? (second e) 'app))
@@ -415,6 +418,19 @@
     (lv? a) [(local-name a) []]
     (and (head? a 'v) (void-global? (second a))) [(void-atom) []]
     (and (head? a 'v) (con-name? (second a)) (newtype-con? (as-data (second a)))) (let [n (fresh "sat")] [n [[n (rhs a)]]])
+    ;; a newtype class's selector on an atom (ip d): d |> co, trivial (CorePrep: the selector has no binding, its
+    ;; unfolding \d -> d |> co)
+    (let [a (flatten-app a)]
+      (and (head? a 'app) (head? (second a) 'v) (newtype-selector? (second (second a))) (= 1 (count (nth a 2)))
+           (atomic-args? (nth a 2))))
+    (atom-of (first (nth (flatten-app a) 2)))
+    ;; a newtype class's dictionary constructor on an expression (C:IP e): its unfolding \x -> x |> co applied, a
+    ;; thunk of let x = e in x
+    (let [a (flatten-app a)]
+      (and (head? a 'app) (head? (second a) 'v) (class-of-dcon (second (second a))) (newtype-class? (class-of-dcon (second (second a))))
+           (= 1 (count (nth a 2))) (not (atomic-args? (nth a 2)))))
+    (let [e (first (nth (flatten-app a) 2)) n (fresh "sat") x (fresh "x")]
+      [n [[n (list 'closure :u :fvs [] (list 'let (list 'bind [x :L] (rhs e)) (list 'app x [])))]]])
     (head? a 'v) [(gname (second a)) []]
     (and (head? a 'lit) (not (string-lit? a))) [(first (lit-form (second a))) []]
     (floatable-con a) (let [[c args] (floatable-con a) rs (mapv atom-of args) n (fresh "sat")]
@@ -443,13 +459,17 @@
         (let [n (fresh "sat")] [n [[n (rhs a)]]])))
     :else (let [n (fresh "sat")] [n [[n (rhs (or (pap-eta a) a))]]])))
 
+(declare float-scrut)
+
 (defn- wrap-binds [bnds body]
   (reduce (fn [b [n r :as bd]]
             (if (= :case n)
               (let [[_ x rep ex at] bd]
-                ;; a case float (CorePrep's CaseBound Float): marked, so that a case on it floats it out of its scrutinee
-                (with-meta (list 'case ex [x rep] (or at (if (vector? rep) (list 'multi (count rep)) (list 'prim rep))) [(list 'alt :default [] b)])
-                  {:float true}))
+                ;; a case float (CorePrep's CaseBound Float): marked, so that a case on it floats it out of its scrutinee;
+                ;; the floats of its own right-hand side float out with it (cpeArg's floats join the enclosing ones)
+                (float-scrut ex
+                  (fn [ex] (with-meta (list 'case ex [x rep] (or at (if (vector? rep) (list 'multi (count rep)) (list 'prim rep))) [(list 'alt :default [] b)])
+                             {:float true}))))
               (list 'let (list 'bind [n :L] r) b)))
           body (reverse bnds)))
 
@@ -644,7 +664,8 @@
             ;; a join point of the Simplifier (its case-of-case's $j): let-no-escape, its lambda's binders the arguments
             (let [[_ f fe] (first (second e)) fname (local-name f)
                   [bs body] (if (head? fe 'lam) [(second fe) (nth fe 2)] [[] fe])]
-              (float-past-join (list 'bind [fname :L] (list 'closure :j :fvs (binders bs) (expr body))) (expr (nth e 2))))
+              ;; a nullary join point's binder has its body's type (typePrimRep of the join's result)
+              (float-past-join (list 'bind [fname (if (empty? bs) (reps->rep (expr-reps body)) :L)] (list 'closure :j :fvs (binders bs) (expr body))) (expr (nth e 2))))
           (if (and (= 1 (count (second e))) (fail-var? (second (first (second e)))))
             ;; a failure handler shared by several alternatives: a join point over the void argument (GHC's
             ;; mkFailurePair, CoreToStg's let-no-escape), an ordinary closure when a call is under a closure
@@ -917,8 +938,9 @@
                           ds/*casts* simpl?
                           ds/*unboxed-tuple?* (fn [e] (some? (expr-comps e)))]
                   (ds/desugar-program r))
+          exported (ds/program-exported r prog0)
           [prog new-types raw] (if simpl?
-                             (simpl/simplify-module r prog0 (ds/program-exported r prog0)
+                             (simpl/simplify-module r prog0 (into exported (:rule-names r))
                                                     {:unlifted-type? (fn [t] (boolean (and t (not= [:L] (type-reps t)))))
                                                      :unlifted-expr? (fn [e] (not= [:L] (expr-reps e)))
                                                      :con-strict con-strict})
@@ -926,19 +948,37 @@
           _ (reset! last-prog raw)
           _ (set! *r* (update r :ltypes merge new-types))
           r *r*
-          top-names (set (concat (for [[_ b _] prog] (if (lv? b) (local-name b) (gname b)))))
+          internal (into {} (for [[_ b _] prog :when (and (vector? b) (= "var" (nth b 1)) (= (module) (nth b 2))
+                                                          (not (contains? exported b)) (not= "main" (nth b 3)))]
+                              [b (str (clean-occ (nth b 3)) "_" (swap! *n* inc))]))
+          top-names (set (concat (for [[_ b _] prog] (if (lv? b) (local-name b) (or (get internal b) (gname b))))))
           arities (into {} (for [[_ b e] prog]
                              [b (loop [e e n 0] (if (head? e 'lam) (recur (nth e 2) (+ n (count (second e)))) n))]))
           has-main? (some (fn [[_ b _]] (= b ["ext" "var" (module) "main"])) prog)]
-      (binding [*tops* (into top-names [(str "main::" (module) "/main")]) *arities* arities]
+      (binding [*tops* (into top-names [(str "main::" (module) "/main")]) *arities* arities
+                *internal-tops* internal]
         (let [binds (vec (mapcat (fn [[_ b e]]
                                    (binding [*floats* (atom [])]
                                      (let [n (if (lv? b) (local-name b) (gname b))]
                                       (binding [*rec-ids* #{n}]
-                                      (if (and (lv? b) (string-lit? e) (str/ends-with? (second e) "#"))
+                                      (cond
+                                       (and (lv? b) (string-lit? e) (str/ends-with? (second e) "#"))
                                        ;; a top-level string literal (the Simplifier's floats: StgTopStringLit)
                                        (do (swap! *reps* assoc n :addr)
                                            [(list 'string [n :addr] (second (first (lit-form (second e)))))])
+                                       ;; a CAF unpacking a string literal: CorePrep floats the literal to the top level
+                                       ;; (a top-level binding's floats are top-level, a LitString one StgTopStringLit)
+                                       (let [e2 (flatten-app e)]
+                                         (and (head? e2 'app) (head? (second e2) 'v)
+                                              (#{"unpackCString#" "unpackCStringUtf8#"} (nth (second (second e2)) 3))
+                                              (= 1 (count (nth e2 2))) (string-lit? (first (nth e2 2)))
+                                              (str/ends-with? (second (first (nth e2 2))) "#")))
+                                       (let [e2 (flatten-app e) sn (fresh "lvl")]
+                                         (swap! *reps* assoc sn :addr)
+                                         (set! *tops* (conj *tops* sn))
+                                         [(list 'string [sn :addr] (second (first (lit-form (second (first (nth e2 2)))))))
+                                          (list 'bind [n :L] (list 'closure :u [] [] (list 'app (gname (second (second e2))) [sn])))])
+                                       :else
                                      (let [r (binding [*body-tycon*
                                                        (let [t (some-> (if (lv? b) (get (:ltypes *r*) b) (global-type b)) (result-type (get arities b 0)))
                                                              t (when t (expand-syn (strip-forall t)))]

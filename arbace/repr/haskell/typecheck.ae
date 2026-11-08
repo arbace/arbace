@@ -880,8 +880,10 @@
                       [(cs (or label (occ n)))
                        (list 'app (list 'v (ext-name "var" "GHC.Internal.Stack.Types" "$WSrcLoc"))
                              [(cs *unit*) (cs *module*) (cs (or *srcfile* (str (str/replace *module* "." "/") ".hs"))) (i l1) (i c1) (i l2) (i c2)])])
+                ;; the stack it pushes onto: ?callStack itself, a new wanted (EvCsPushCall's), solved from the enclosing
+                ;; HasCallStack given, else defaulted to the empty stack
                 (list 'app (list 'v (ext-name "var" "GHC.Internal.Classes" "ip"))
-                      [(cip (list 'v (ext-name "var" "GHC.Internal.Stack.Types" "emptyCallStack")))])]))))
+                      [(want! [cls-callstack []])])]))))
 
 (defn- want-at!
   "The evidence of a predicate of an occurrence: HasCallStack solved at once, the others wanted"
@@ -896,7 +898,8 @@
       (do (when-not (:core e) (note-type! (lv n) (:mono e)))
           [(:mono e) (or (:core e) (lv n))])
       (let [[t preds] (instantiate (:poly e))]
-        [t (app* (:core e) (mapv want! preds))]))
+        ;; a binding of the module itself (or a local one) with HasCallStack pushes its call site too (EvCsPushCall)
+        [t (app* (:core e) (mapv #(want-at! % n sp label) preds))]))
     (if-let [t (get @*genv* (if (= "data" (nth n 1)) n n))]
       (let [[t preds] (instantiate t)
             core (list 'v (if (= "data" (nth n 1)) (ext-name "var" (nmod n) (occ n)) n))]
@@ -2858,6 +2861,14 @@
          :all-cons @*cons* :tycons @*tycons*
          :all-classes (into {} (for [[n info] @*classes*] [n (dissoc info :binds)]))
          :ltypes (into {} (for [[x t] @*ltypes*] [x (deep-expand (zonk t))]))
+         ;; the module's own values its RULES mention: the occurrence analyser keeps them alive (a rule's free
+         ;; variables are occurrences: never inlined unconditionally, never dropped)
+         :rule-names (let [acc (atom #{})
+                           w (fn w [x in?] (cond (and in? (vector? x) (= 4 (count x)) (= "ext" (nth x 0)) (= "var" (nth x 1)) (= m (nth x 2)))
+                                                 (swap! acc conj x)
+                                                 (coll? x) (let [in2 (or in? (and (seq? x) (= 'HsRule (first x))))] (doseq [y x] (w y in2)))
+                                                 :else nil))]
+                       (w decls false) @acc)
          :genv @*genv*
          :kind-arity @*kind-arity*
          :errors @*errors*}))))

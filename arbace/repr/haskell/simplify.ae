@@ -443,7 +443,9 @@
                    (let [i (:index (c/details f))]
                      (when (< i (count cargs))
                        [1 (c/wrap-binds floats (nth cargs i))]))))
-      :primop (when-let [r (cf/primop-rule (c/primop-of f) args)] [(count args) r])
+      :primop (when-let [r (or (cf/primop-rule (c/primop-of f) args)
+                               (cf/lit-eq (c/primop-of f) args #(c/fresh-local "wild" {:occ {:k :dead}})))]
+                [(count args) r])
       ;; ConstantFold's dataToTagRule: the tag of a known constructor (0-based)
       :data-to-tag (when (= 1 (count args))
                      (when-let [[floats con _] (expr-is-con-app env (first args))]
@@ -624,7 +626,7 @@
                   app (let [[f0 args] [(second e) (nth e 2)]
                             [fl f2] (anf f0)
                             [fl2 as2] (reduce (fn [[fl out] a]
-                                                (let [[f3 a2] (make-trivial env false :top occ a)]
+                                                (let [[f3 a2] (make-trivial env top? :top occ a)]
                                                   [(add-let-floats fl f3) (conj out a2)]))
                                               [fl []] args)]
                         [fl2 (c/mk-apps f2 as2)])
@@ -982,6 +984,8 @@
   "rebuildCase"
   [env scrut b alts k]
   (let [con-app (when-not (and (c/head? scrut 'lit) (not (c/lit-string? scrut))) (expr-is-con-app env scrut))
+        _ (when (and *trace* (System/getenv "SIMPL_TRACE_CASE") (c/head? scrut 'app) (c/gv? (second scrut)) (re-find #"#" (pr-str (second (second scrut)))))
+            (binding [*out* *err*] (println "case-on" (pr-str (second (second scrut))) (pr-str (c/info (second scrut))) (some? con-app))))
         simple-rhs (fn [env wfloats cb-rhs rhs]
                      (let [[fl1 env2] (simpl-aux-bind env b cb-rhs)
                            [fl2 e2] (simpl-expr-f env2 rhs k)]
@@ -1277,9 +1281,31 @@
         (let [v (when (and (vector? n) (= 4 (count n)))
                   (let [[_ k m o] n dn ["ext" "data" m o]]
                     (cond
+                      ;; the unboxed tuples' constructors (wired in: :all-cons has them without an arity)
+                      (and (= "GHC.Internal.Types" m) (re-matches #"\(#,*#\)" o))
+                      (let [k (if (= "(##)" o) 0 (inc (count (filter #{\,} o))))]
+                        {:details {:k :con :strict (vec (repeat k false)) :unary false} :arity k})
                       (contains? (:all-cons r) dn)
                       (let [ci (get (:all-cons r) dn)]
                         {:details {:k :con :strict (vec (con-strict dn)) :unary false} :arity (or (:arity ci) 0)})
+                      ;; a data constructor's wrapper ($WCon, mkDataConRep): its strict lifted fields evaluated, then
+                      ;; the constructor; an INLINE unfolding of its arity (alwaysInlinePragma)
+                      (and (str/starts-with? o "$W") (contains? (:all-cons r) ["ext" "data" m (subs o 2)]))
+                      (let [cn ["ext" "data" m (subs o 2)] ci (get (:all-cons r) cn) ar (or (:arity ci) 0)
+                            strict (concat (con-strict cn) (repeat false))
+                            ts (loop [t (get (:genv r) cn) out []]
+                                 (cond (and (vector? t) (= :forall (first t))) (recur (nth t 3) out)
+                                       (c/fun-ty? t) (recur (second (nth t 2)) (conj out (first (nth t 2))))
+                                       :else out))
+                            xs (mapv #(list 'lv "x" (str "w" o %)) (range ar))
+                            ys (mapv (fn [x s t] (if (and s (not (c/*unlifted-type?* t))) (list 'lv "x'" (str (nth x 2) "'")) x))
+                                     xs strict (concat ts (repeat nil)))
+                            body (reduce (fn [acc [x y]] (if (= x y) acc (list 'case x y [(list 'alt :default [] acc)])))
+                                         (c/mk-apps (list 'v ["ext" "var" m (subs o 2)]) ys) (reverse (map vector xs ys)))
+                            tm (c/mk-lams xs body)]
+                        {:arity ar
+                         :unf (assoc (c/mk-unfolding :inline true false false tm oa/occur-analyse-expr)
+                                     :guide {:k :when :arity ar :unsat-ok false :boring-ok true})})
                       (contains? dcons n) (get dcons n)
                       (contains? ops n) (get ops n)
                       (contains? error-ids n) (let [a (get error-ids n)] {:arity a :bot a})
