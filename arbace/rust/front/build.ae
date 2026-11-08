@@ -67,7 +67,15 @@
 (defn- signed? [t] (= :int (first t)))
 
 ;; the solver's questions, asked with the type checker's state bound (tc/with-solver)
-(defn- copy? [t] (tc/copy-type? t))
+(def ^:dynamic *closure-tys* {})
+(def ^:dynamic *closure-kinds* {})   ; a closure type's text -> its kind   ; a closure type's text -> its upvars' types (the root's closure_analyze)
+
+(defn- copy? [t]
+  (case (first t)
+    :closure (every? copy? (get *closure-tys* (second t)))
+    (:tuple) (every? copy? (second t))
+    :array (copy? (second t))
+    (tc/copy-type? t)))
 
 (defn- adt-def [t] (when (= :adt (first t)) (second t)))
 
@@ -78,6 +86,7 @@
   (cond (copy? t) false
         :else (case (first t)
                 (:bool :char :int :uint :float :ptr :fndef :fnptr :never :str) false
+                :closure (boolean (some needs-drop? (get *closure-tys* (second t))))
                 :ref false
                 :tuple (boolean (some needs-drop? (second t)))
                 :array (needs-drop? (second t))
@@ -201,7 +210,7 @@
             (when (:else e) (resolve-expr (:else e) true)))
       :loop (resolve-block (:block e) true)
       :drop-temps (resolve-expr (:expr e) true)
-      :closure (unsupported "closure")
+      :closure nil
       (walk-expr e))
     (set-cx! prev)))
 
@@ -292,6 +301,8 @@
         (unsupported "a field" nm))))
 
 (def ^:dynamic *self-var* nil)
+(def ^:dynamic *upvars* #{})   ; the current body's upvars (a closure's upvars_mentioned)
+(def ^:dynamic *closure-info* nil)   ; the typeck root's closures' captures by HIR id (closure-analyze)
 (def ^:dynamic *names* {})   ; the bindings in scope by name: a derive's or a desugaring's paths carry no resolution (`other`, `iter`)
 
 (defn- bind-names! [thir-pat]
@@ -309,13 +320,27 @@
                (when (and *self-var* (= "self" nm) (or (nil? (:res path)) (= [:unresolved "self"] (c/res-def path)))) *self-var*)
                (when (and nm (or (empty? (:res path)) (= :unresolved (first (c/res-def path))))) (get *names* nm)))]
     (if sp
-      (mk e :var-ref ty :id sp)
+      (mk e (if (contains? *upvars* sp) :upvar-ref :var-ref) ty :id sp)
       (let [rd (c/res-def path)]
         (cond
           (= :fndef (first ty)) (mk e :zst-literal ty)
           (and (= :adt (first ty)) (ctor-info path))
           (let [[adt vi vid _] (ctor-info path)] (mk e :adt ty :adt adt :variant vi :vid vid :fields []))
           :else (unsupported "a path" (pr-str rd)))))))
+
+(defn- capture-upvar
+  "capture_upvar with convert_captured_hir_place: the captured place as THIR over the variable (an upvar of the current
+  body or its own), by value or borrowed"
+  [e cap]
+  (let [base {:k (if (contains? *upvars* (:var cap)) :upvar-ref :var-ref) :id (:var cap) :ty (:base-ty cap) :span (:span e) :tsi (:hir-id e)}
+        x (reduce (fn [x [k t]]
+                    (case (first k)
+                      :deref {:k :deref :arg x :ty t :span (:span e) :tsi (:hir-id e)}
+                      :field {:k :field :lhs x :variant (nth k 2) :name (second k) :ty t :span (:span e) :tsi (:hir-id e)}))
+                  base (:proj cap))]
+    (if (= :by-value (:cap cap))
+      x
+      {:k :borrow :bk (case (second (:cap cap)) :imm :shared :mut :mut :unique :unique) :arg x :ty (:ty cap) :span (:span e) :tsi (:hir-id e)})))
 
 (defn- mirror-unadjusted [e]
   (let [ty (ty-of e)]
@@ -359,7 +384,20 @@
       :call (let [f (:func e)]
               (if-let [[adt vi vid kind] (and (= :path (:kind f)) (= :fn (nth (ctor-info (:path f)) 3 nil)) (ctor-info (:path f)))]
                 (mk e :adt ty :adt adt :variant vi :vid vid :fields (vec (map-indexed (fn [i a] [i (mirror-expr a)]) (:args e))))
-                (mk e :call ty :fun (mirror-expr f) :args (mapv mirror-expr (:args e)) :from-hir true :fn-span (:span e))))
+                (if-let [[k self-ty targs] (:fn-call (r-of e))]
+                  ;; an overloaded call: the Fn trait's method over the callee and the arguments' tuple
+                  (let [k (if (= :closure k)
+                            (case (get *closure-kinds* (second self-ty) :fn)
+                              :fn "core::ops::function::Fn" :fn-mut "core::ops::function::FnMut" :fn-once "core::ops::function::FnOnce")
+                            k)
+                        m (case k "core::ops::function::Fn" "call" "core::ops::function::FnMut" "call_mut" "core::ops::function::FnOnce" "call_once")
+                        adj-ty (fn [a] (let [x (r-of a)] (reduce (fn [_ [_ t]] t) (:ty x) (:adj x))))
+                        tt [:tuple (mapv adj-ty (:args e))]
+                        fty [:fndef (str k "::" m) [self-ty tt]]]
+                    (mk e :call ty :fun {:k :zst-literal :ty fty :span (:span e) :tsi (:hir-id e)}
+                        :args [(mirror-expr f) {:k :tuple :ty tt :fields (mapv mirror-expr (:args e)) :span (:span e) :tsi (:hir-id e)}]
+                        :from-hir true :fn-span (:span e)))
+                  (mk e :call ty :fun (mirror-expr f) :args (mapv mirror-expr (:args e)) :from-hir true :fn-span (:span e)))))
       :method (let [[def args] (or (:callee (r-of e)) (unsupported "a method call without its callee"))
                     fty [:fndef def args]]
                 (mk e :call ty :fun {:k :zst-literal :ty fty :span (:span e) :tsi (:hir-id e)}
@@ -388,6 +426,9 @@
                                          {:pat pat :guard (some-> (:guard a) mirror-expr) :body (mirror-expr (:body a))
                                       :scope [(:hir-id a) :node] :span (:span a) :hir-id (:hir-id a)})))
                              (:arms e)))
+      :closure (let [info (or (get *closure-info* (:hir-id e)) (unsupported "a closure without its captures"))]
+                 (when (seq (:fake-reads info)) (unsupported "a closure's fake reads"))
+                 (mk e :closure ty :info info :upvars (mapv #(capture-upvar e %) (:captures info))))
       (unsupported "an expression" (:kind e)))))
 
 (defn- pointer-cast-kind [k] (let [m (re-find #"\((\w+)" (str k))] (if m (second m) "Unsize")))
@@ -484,6 +525,33 @@
 
 (defn- local-ty [l] (:ty (get (:locals (st)) l)))
 
+(def ^:dynamic *captures* [])   ; the closure body's captures: {:var :hproj :use-place :mut :base-ty}
+
+(defn- hir-kinds
+  "convert_to_hir_projections_and_truncate_for_capture: [[kind count] ...], each HIR projection with the MIR elements it took"
+  [proj]
+  (loop [ps proj variant nil n 0 acc []]
+    (if-let [e (first ps)]
+      (case (first e)
+        :downcast (recur (rest ps) (nth e 2) (inc n) acc)
+        :deref (recur (rest ps) nil 0 (conj acc [[:deref] (inc n)]))
+        :field (recur (rest ps) nil 0 (conj acc [[:field (second e) (or variant 0)] (inc n)]))
+        acc)
+      acc)))
+
+(defn- resolve-upvar
+  "to_upvars_resolved_place_builder: an upvar place resolved through the capture whose place is its prefix, else as it is"
+  [p]
+  (if-not (:upvar p)
+    p
+    (let [hk (hir-kinds (:proj p))]
+      (if-let [c (first (filter (fn [c] (and (= (:upvar p) (:var c)) (<= (count (:hproj c)) (count hk))
+                                             (= (:hproj c) (mapv first (take (count (:hproj c)) hk)))))
+                                *captures*))]
+        (let [k (count (:hproj c)) used (reduce + 0 (map second (take k hk)))]
+          {:local (:local (:use-place c)) :proj (into (:proj (:use-place c)) (drop used (:proj p)))})
+        p))))
+
 (defn- place-ty [p]
   (reduce (fn [t e]
             (case (first e)
@@ -491,9 +559,10 @@
               :field (nth e 2)
               :index (second t)
               :downcast t))
-          (local-ty (:local p)) (:proj p)))
+          (if (:upvar p) (:base-ty (first (filter #(= (:upvar p) (:var %)) *captures*))) (local-ty (:local p))) (:proj p)))
 
 (defn- place-form [p]
+  (when (:upvar p) (unsupported "an unresolved upvar place" (:upvar p)))
   (apply list 'place (:local p)
          (for [e (:proj p)]
            (case (first e)
@@ -752,7 +821,7 @@
 (defn- drops-above [stack-index]
   (for [s (subvec (:scopes (st)) (inc stack-index)) d (:drops s)] d))
 
-(declare expr-into-dest)
+(declare expr-into-dest upvar-symbol-fields limit-capture-mutability! category)
 
 (defn- break-scope! [bb value target]
   (let [bss (:breakables (st))
@@ -798,9 +867,9 @@
 (defn- category [x]
   (case (:k x)
     :scope nil
-    (:field :deref :index :var-ref) :place
+    (:field :deref :index :var-ref :upvar-ref) :place
     (:logical :match :if :let :never-to-any :use :adt :borrow :raw-borrow :call :loop :block :break :continue :return) :into
-    (:array :tuple :unary :binary :cast :pointer-coercion :repeat :assign :assign-op) :rvalue
+    (:array :tuple :closure :unary :binary :cast :pointer-coercion :repeat :assign :assign-op) :rvalue
     (:literal :zst-literal :named-const) :constant))
 
 (declare ast-block-stmts primary-bindings then-else-break-default as-operand as-temp as-place as-rvalue stmt-expr then-else-break match-expr expr-into-pattern declare-bindings
@@ -814,8 +883,9 @@
     :field (let [[bb pb] (expr-as-place bb (:lhs x) mutability)
                  lt (:ty (:lhs x))
                  pb (if (and (= :adt (first lt)) (tc/enum? (second lt))) (project pb [:downcast nil (:variant x) lt]) pb)]
-             [bb (project pb [:field (:name x) (:ty x)])])
-    :deref (let [[bb pb] (expr-as-place bb (:arg x) mutability)] [bb (project pb [:deref])])
+             [bb (resolve-upvar (project pb [:field (:name x) (:ty x)]))])
+    :deref (let [[bb pb] (expr-as-place bb (:arg x) mutability)] [bb (resolve-upvar (project pb [:deref]))])
+    :upvar-ref [bb (resolve-upvar {:upvar (:id x) :proj []})]
     :index (let [[bb base] (expr-as-place bb (:lhs x) mutability)
                  [bb idx] (as-temp bb (temporary-scope (:tsi (:index x))) (:index x) :not)
                  bt (place-ty base)
@@ -935,10 +1005,37 @@
              [bb (list 'aggregate (list 'array (ty-form (second (:ty x)))) (mapv op-form os))])
     :tuple (let [[bb os] (reduce (fn [[bb os] f] (let [[bb o] (as-operand bb scope f :maybe)] [bb (conj os o)])) [bb []] (:fields x))]
              [bb (list 'aggregate '(tuple) (mapv op-form os))])
+    :closure (let [info (:info x)
+                   [bb os] (reduce (fn [[bb os] u]
+                                     (cond (= :place (category u)) (let [[bb p] (as-place bb u)] [bb (conj os (consume p))])
+                                           (and (= :borrow (:k u)) (= :mut (:bk u))) (let [[bb o] (limit-capture-mutability! bb u scope)] [bb (conj os o)])
+                                           :else (let [[bb o] (as-operand bb scope u :maybe)] [bb (conj os o)])))
+                                   [bb []] (:upvars x))
+                   text (second (:ty x))
+                   span (subs text (count "{closure@") (dec (count text)))
+                   names (if (seq (:upvar-names info)) (mapv str (:upvar-names info)) (mapv str (range (count os))))]
+               [bb (list 'aggregate (list 'closure text [] (vec (take (count os) names)) span) (mapv op-form os))])
     (:assign :assign-op) (let [bb (blk (stmt-expr bb x nil))] [bb (use-rv unit-const)])
     (:literal :zst-literal :named-const) [bb (use-rv (as-constant x))]
     ;; the rest: an operand (into a temporary)
     (let [[bb o] (as-operand bb scope x :no)] [bb (use-rv o)])))
+
+(defn- place-root [x] (case (:k x) (:field :deref) (place-root (or (:lhs x) (:arg x))) :scope (place-root (:value x)) x))
+
+(defn- limit-capture-mutability!
+  "limit_capture_mutability: a mutable capture's borrow into a temporary, `&uniq` when the captured variable (the parent's
+  local, or the enclosing closure's capture) is not mutable"
+  [bb u temp-lifetime]
+  (let [t (new-local! (:ty u))]
+    (push! bb (list 'storage-live t))
+    (let [[bb p] (as-place bb (:arg u))
+          mutable (if (= :upvar-ref (:k (place-root (:arg u))))
+                    (let [i (some (fn [e] (when (= :field (first e)) (second e))) (take 2 (:proj p)))]
+                      (:mut (nth *captures* i)))
+                    (:mut (get (:locals (st)) (:local p))))]
+      (assign! bb (place t) (list 'ref (if mutable :mut :unique) (place-form p)))
+      (when temp-lifetime (schedule-drop-storage! temp-lifetime t) (schedule-drop-value! temp-lifetime t))
+      [bb [:move (place t)]])))
 
 (defn- as-local-rvalue [bb x] (as-rvalue bb (local-scope) x))
 
@@ -1020,7 +1117,7 @@
                    (assign! bb dest (list 'aggregate (adt-agg x os) (mapv op-form os))) bb)
             (:assign :assign-op) (let [bb (blk (stmt-expr bb x nil))] (assign! bb dest (use-rv unit-const)) bb)
             (:continue :break :return) (blk (stmt-expr bb x nil))
-            (:var-ref :field :deref :index)
+            (:var-ref :upvar-ref :field :deref :index)
             (let [[bb p] (as-place bb x)] (assign! bb dest (use-rv (consume p))) bb)
             ;; rvalues and constants
             (let [[bb rv] (as-local-rvalue bb x)] (assign! bb dest rv) bb))]
@@ -1332,6 +1429,505 @@
     end))
 
 ;; ---------------------------------------------------------------------------------------------
+;; Closures' captures (RFP20 (a)): rustc_hir_typeck/src/upvar.rs (closure_analyze, analyze_closure,
+;; process_collected_capture_information, compute_min_captures, the restrictions and truncations, determine_capture_info,
+;; determine_capture_mutability, init_capture_kind_for_place) over expr_use_visitor.rs (consume_body, walk_expr, walk_stmt,
+;; walk_local, walk_block, walk_struct_expr, walk_adjustment, walk_autoref, walk_arm, walk_pat, walk_captures, cat_expr and
+;; its kinds, cat_res, cat_projection, cat_deref, cat_pattern) with InferBorrowKind as the delegate, and rustc_passes'
+;; upvars.rs (upvars_mentioned). Over the HIR and the typeck root's results (tc/body-results).
+;;
+;; A place {:base [:upvar KEY]|[:local KEY]|[:rvalue]|[:static] :base-ty T :proj [[KIND TY] ...]}, KIND [:deref]
+;; [:field I VI] [:index] [:subslice]; a capture kind :by-value or [:by-ref :imm|:unique|:mut].
+
+(defn- hir-children
+  "The expressions, blocks, statements, patterns and arms directly below a HIR node (not into nested items)"
+  [x]
+  (let [acc (java.util.ArrayList.)]
+    (doseq [[k v] x :when (not (#{:path :ty :output :lit :span :hir-id :attrs :res :seg} k))]
+      (cond (and (map? v) (:node v)) (.add acc v)
+            (and (map? v) (#{:block :els} k)) (.add acc (assoc v :node :block))
+            (map? v) (doseq [y (vals v)] (when (and (map? y) (:node y)) (.add acc y)))
+            (sequential? v) (doseq [y v] (cond (and (map? y) (:node y)) (.add acc y)
+                                               (map? y) (doseq [z (vals y)] (when (and (map? z) (or (:node z) (:kind z))) (.add acc (if (:node z) z (assoc z :node :x)))))
+                                               :else nil))
+            :else nil))
+    (vec acc)))
+
+(defn- walk-hir
+  "F over every HIR node below X (X included), not into a nested closure when SKIP-CLOSURES"
+  [x f skip-closures]
+  (when (map? x)
+    (f x)
+    (when-not (and skip-closures (= :closure (:kind x)) (= :expr (:node x)))
+      (doseq [c (hir-children x)] (walk-hir c f skip-closures)))))
+
+(defn- closure-locals
+  "LocalCollector: the bindings of a closure's parameters and body, not its nested closures'"
+  [cl]
+  (let [acc (java.util.HashSet.)
+        f (fn [y] (when (and (= :binding (:kind y)) (:name y) (not (= :expr (:node y)))) (.add acc (binding-key y))))]
+    (doseq [p (:params cl)] (walk-hir (:pat p) f true))
+    (walk-hir (:body cl) f true)
+    acc))
+
+(def ^:dynamic *upvars-mentioned* nil)   ; atom: closure hir-id -> [key ...] (in first-use order)
+
+(defn upvars-mentioned
+  "upvars_mentioned: the variables a closure's body (with its nested closures') uses that are not its own, in order"
+  [cl]
+  (or (get @*upvars-mentioned* (:hir-id cl))
+      (let [locals (closure-locals cl)
+            acc (java.util.LinkedHashSet.)
+            use! (fn [k] (when-not (.contains locals k) (.add acc k)))]
+        (letfn [(w [y]
+                  (when (map? y)
+                    (cond
+                      (and (= :expr (:node y)) (= :closure (:kind y))) (doseq [k (upvars-mentioned y)] (use! k))
+                      :else (do (when (and (= :expr (:node y)) (= :path (:kind y)))
+                                  (when-let [k (local-res (:path y))] (use! k)))
+                                (doseq [c (hir-children y)] (w c))))))]
+          (doseq [p (:params cl)] (w (:pat p)))
+          (w (:body cl)))
+        (let [v (vec acc)] (swap! *upvars-mentioned* assoc (:hir-id cl) v) v))))
+
+;; the analysis' state
+(def ^:dynamic *cx* nil)   ; {:owner closure-node :upvars #{key} :var-tys {key T} :modes {key [by-ref mut]} :caps atom :fakes atom}
+(def ^:dynamic *closure-info* nil)   ; atom: closure hir-id -> {:kind :captures :fake-reads}
+
+(defn- deref-ty [t]
+  (case (first t)
+    :ref (nth t 3) :ptr (nth t 2)
+    :adt (if (= "alloc::boxed::Box" (adt-def t)) (first (nth t 2)) (unsupported "a deref of" t))
+    (unsupported "a deref of" t)))
+
+(defn- p-ty [pl] (if-let [l (peek (:proj pl))] (second l) (:base-ty pl)))
+(defn- ty-before [pl i] (if (zero? i) (:base-ty pl) (second (nth (:proj pl) (dec i)))))
+(defn- rvalue-place [t] {:base [:rvalue] :base-ty t :proj []})
+(defn- cat-projection [pl t kind] (update pl :proj conj [kind t]))
+(defn- cat-deref [pl] (cat-projection pl (deref-ty (p-ty pl)) [:deref]))
+(defn- ref? [t] (= :ref (first t)))
+(defn- mut-ref? [t] (and (ref? t) (nth t 2)))
+(defn- deref-tys [pl] (for [[i [k _]] (map-indexed vector (:proj pl)) :when (= [:deref] k)] (ty-before pl i)))
+
+(defn- cat-res [e t]
+  (let [k (local-res (:path e))]
+    (cond
+      (nil? k) (if (= "Static" (str (nth (c/res-def (:path e)) 2 nil))) {:base [:static] :base-ty t :proj []} (rvalue-place t))
+      (contains? (:upvars *cx*) k) {:base [:upvar k] :base-ty (get (:var-tys *cx*) k) :proj []}
+      :else {:base [:local k] :base-ty t :proj []})))
+
+(declare cat-expr)
+
+(defn- field-of [pl e]
+  "the field index of a field expression on a place"
+  (let [bt (p-ty pl)]
+    (case (first bt)
+      :tuple [(parse-long (str (:ident e))) 0]
+      :adt (let [d (second bt)] (if (number? d) [(field-index (tc/single-variant d) (:ident e)) 0] (unsupported "a std field")))
+      (unsupported "a field of" bt))))
+
+(defn- cat-overloaded-place [e base]
+  (let [bt (let [x (r-of base)] (reduce (fn [_ [_ tt]] tt) (:ty x) (:adj x)))]
+    (when-not (ref? bt) (unsupported "an overloaded place's base" bt))
+    (cat-deref (rvalue-place [:ref [:re-erased] (nth bt 2) (ty-of e)]))))
+
+(defn- cat-unadjusted [e]
+  (let [t (ty-of e)]
+    (case (:kind e)
+      :unary (if (= "*" (:op e))
+               (if (:callee (r-of e)) (cat-overloaded-place e (:expr e)) (cat-deref (cat-expr (:expr e))))
+               (rvalue-place t))
+      :field (let [b (cat-expr (:expr e)) [i vi] (field-of b e)] (cat-projection b t [:field i vi]))
+      :index (if (:callee (r-of e)) (cat-overloaded-place e (:expr e)) (cat-projection (cat-expr (:expr e)) t [:index]))
+      :path (cat-res e t)
+      :type (cat-expr (:expr e))
+      (rvalue-place t))))
+
+(defn- builtin-deref? [t] (or (#{:ref :ptr} (first t)) (= "alloc::boxed::Box" (adt-def t))))
+
+(defn- cat-adjusted [pl [k target]]
+  (cond (= k "Deref") (if (builtin-deref? (p-ty pl)) (cat-deref pl) (cat-deref (rvalue-place [:ref [:re-erased] false target])))
+        :else (rvalue-place target)))
+
+(defn cat-expr [e] (reduce cat-adjusted (cat-unadjusted e) (:adj (r-of e))))
+
+;; InferBorrowKind (the delegate)
+(defn- upvar? [pl] (= :upvar (first (:base pl))))
+
+(defn- truncate! [pl kind len]
+  "truncate_place_to_len_and_update_capture_kind: [place kind]"
+  (let [kind (if (and (= kind [:by-ref :mut])
+                      (some (fn [i] (and (= [:deref] (first (nth (:proj pl) i))) (mut-ref? (ty-before pl i)))) (range len (count (:proj pl)))))
+               [:by-ref :unique] kind)]
+    [(update pl :proj #(subvec % 0 (min len (count %)))) kind]))
+
+(defn- raw-ptr? [t] (= :ptr (first t)))
+(defn- union-ty? [t] (and (= :adt (first t)) (number? (second t)) (= "Union" (:kind (c/def-of (second t))))))
+
+(defn- restrict-precision-for-unsafe [pl kind]
+  (let [[pl kind] (if (or (raw-ptr? (:base-ty pl)) (union-ty? (:base-ty pl))) (truncate! pl kind 0) [pl kind])]
+    (if-let [i (first (keep-indexed (fn [i [_ t]] (when (or (raw-ptr? t) (union-ty? t)) i)) (:proj pl)))]
+      (truncate! pl kind (inc i))
+      [pl kind])))
+
+(defn- restrict-capture-precision [pl kind]
+  (let [[pl kind] (restrict-precision-for-unsafe pl kind)]
+    (if-let [i (first (keep-indexed (fn [i [k _]] (when (#{[:index] [:subslice]} k) i)) (:proj pl)))]
+      (truncate! pl kind i)
+      [pl kind])))
+
+(defn- packed? [t] (and (= :adt (first t)) (number? (second t))
+                        (some (fn [a] (some #(and (string? %) (= "packed" %)) (:toks a))) (:attrs (:node (c/def-of (second t)))))))
+
+(defn- restrict-repr-packed [pl kind]
+  (if-let [i (first (keep-indexed (fn [i [k _]] (when (and (= :field (first k)) (packed? (ty-before pl i))) i)) (:proj pl)))]
+    (truncate! pl kind i)
+    [pl kind]))
+
+(defn- d-capture! [pl kind]
+  (when (upvar? pl) (swap! (:caps *cx*) conj [pl kind])))
+
+(defn- d-consume! [pl] (d-capture! pl :by-value))
+(defn- d-borrow! [pl bk]
+  (when (upvar? pl)
+    (let [[pl kind] (restrict-repr-packed pl [:by-ref bk])
+          kind (if (some raw-ptr? (deref-tys pl)) [:by-ref :imm] kind)]
+      (d-capture! pl kind))))
+(defn- d-mutate! [pl] (d-borrow! pl :mut))
+(defn- d-fake-read! [pl cause]
+  (when (upvar? pl)
+    (let [[pl _] (restrict-capture-precision pl [:by-ref :imm])
+          [pl _] (restrict-repr-packed pl [:by-ref :imm])]
+      (swap! (:fakes *cx*) conj [pl cause]))))
+
+;; ExprUseVisitor
+(defn- consume-or-copy! [pl] (if (copy? (p-ty pl)) (d-borrow! pl :imm) (d-consume! pl)))
+
+(declare euv-walk-expr euv-walk-block euv-walk-pat)
+
+(defn- euv-consume [e] (when e (consume-or-copy! (cat-expr e)) (euv-walk-expr e)))
+(defn- euv-mutate [e] (d-mutate! (cat-expr e)) (euv-walk-expr e))
+(defn- euv-borrow [e bk] (d-borrow! (cat-expr e) bk) (euv-walk-expr e))
+
+(defn- bk-of [mutbl] (if mutbl :mut :imm))
+
+(defn- euv-walk-adjustment [e]
+  (loop [pl (cat-unadjusted e) adjs (:adj (r-of e))]
+    (when-let [[k target :as a] (first adjs)]
+      (cond (or (= k "NeverToAny") (str/starts-with? (str k) "Pointer")) (consume-or-copy! pl)
+            (= k "Deref") (when-not (builtin-deref? (p-ty pl)) (d-borrow! pl :imm))
+            (= k "Borrow") (d-borrow! pl (bk-of (case (first target) :ref (nth target 2) :ptr (second target) false)))
+            :else nil)
+      (recur (cat-adjusted pl a) (rest adjs)))))
+
+(defn- fake-read-scrutinee! [pl refutable]
+  (d-fake-read! pl (if refutable "ForMatchedPlace" "ForLet")))
+
+(defn- euv-walk-local [init pat els f]
+  (euv-walk-expr init)
+  (let [pl (cat-expr init)]
+    (f)
+    (fake-read-scrutinee! pl (some? els))
+    (euv-walk-pat pl pat false)
+    (when els (euv-walk-block els))))
+
+(defn- euv-walk-stmt [s]
+  (case (:kind s)
+    :let (when (:init s) (euv-walk-local (:init s) (:pat s) (:els s) (fn [])))
+    (:semi :expr) (euv-consume (:expr s))
+    nil))
+
+(defn euv-walk-block [b]
+  (doseq [s (:stmts b)] (euv-walk-stmt s))
+  (when (:expr b) (euv-consume (:expr b))))
+
+(defn- euv-walk-struct [e]
+  (doseq [f (:fields e)] (euv-consume (:expr f)))
+  (when-let [w (:base e)]
+    (let [wp (cat-expr w) wt (p-ty wp)]
+      (when-not (= :adt (first wt)) (unsupported "functional update of" wt))
+      (let [vid (tc/single-variant (second wt))
+            mentioned (set (map #(field-index vid (:ident %)) (:fields e)))]
+        (doseq [[i [_ ft]] (map-indexed vector (tc/all-fields (second wt) (nth wt 2))) :when (not (mentioned i))]
+          (consume-or-copy! (cat-projection wp ft [:field i 0]))))
+      (euv-walk-expr w))))
+
+(defn- euv-walk-captures [cl]
+  (let [info (get @*closure-info* (:hir-id cl))
+        local? (fn [k] (not (contains? (:upvars *cx*) k)))]
+    (doseq [[fr cause] (:fake-reads info) :let [k (second (:base fr))] :when (not (local? k))]
+      (d-fake-read! fr cause))
+    (doseq [cap (:captures info) :let [k (:var cap)] :when (not (local? k))]
+      (let [pl {:base [:upvar k] :base-ty (:base-ty cap) :proj (:proj cap)}]
+        (case (:cap cap)
+          :by-value (consume-or-copy! pl)
+          (d-borrow! pl (second (:cap cap))))))))
+
+(defn euv-walk-expr [e]
+  (when (map? e)
+    (euv-walk-adjustment e)
+    (case (:kind e)
+      (:path :qpath :type-relative :lit :continue) nil
+      :type (euv-walk-expr (:expr e))
+      :unary (if (= "*" (:op e)) (euv-walk-expr (:expr e)) (euv-consume (:expr e)))
+      :field (euv-walk-expr (:expr e))
+      :index (do (euv-walk-expr (:expr e)) (euv-consume (:index e)))
+      :call (do (euv-consume (:func e)) (doseq [a (:args e)] (euv-consume a)))
+      :method (do (euv-consume (:receiver e)) (doseq [a (:args e)] (euv-consume a)))
+      :struct (euv-walk-struct e)
+      (:tup :array) (doseq [x (:exprs e)] (euv-consume x))
+      :if (do (euv-consume (:cond e)) (euv-consume (:then e)) (euv-consume (:else e)))
+      :let (euv-walk-local (:init e) (:pat e) nil #(euv-borrow (:init e) :imm))
+      :match (let [dp (cat-expr (:expr e))]
+               (fake-read-scrutinee! dp true)
+               (euv-walk-expr (:expr e))
+               (doseq [a (:arms e)]
+                 (euv-walk-pat dp (:pat a) (some? (:guard a)))
+                 (euv-consume (:guard a))
+                 (euv-consume (:body a))))
+      :addr-of (euv-borrow (:expr e) (bk-of (:mutbl e)))
+      :loop (euv-walk-block (:block e))
+      :binary (do (euv-consume (:lhs e)) (euv-consume (:rhs e)))
+      :block (euv-walk-block (:block e))
+      (:break :ret) (euv-consume (:expr e))
+      :assign (do (euv-mutate (:lhs e)) (euv-consume (:rhs e)))
+      :cast (euv-consume (:expr e))
+      :drop-temps (euv-consume (:expr e))
+      :assign-op (do (if (:callee (r-of e)) (euv-consume (:lhs e)) (euv-mutate (:lhs e))) (euv-consume (:rhs e)))
+      :repeat (euv-consume (:expr e))
+      :closure (euv-walk-captures e)
+      (unsupported "an expression in a closure" (:kind e)))))
+
+(defn- multivariant? [t]
+  (and (= :adt (first t)) (> (count (tc/variants-any (second t))) 1)))
+
+(defn- pat-ty-unadjusted [p]
+  (let [r (r-of p) t (:ty r)]
+    (if (and (= :binding (:kind p)) (#{:not :mut} (first (:mode r)))) (nth t 3) t)))
+
+(defn- pat-ty-adjusted [p] (or (first (:pat-adj (r-of p))) (pat-ty-unadjusted p)))
+
+(defn- enumerate-and-adjust
+  "enumerate_and_adjust: the subpatterns with their field indices, a `..` (a :rest pattern) skipping the fields it stands for"
+  [pats total]
+  (let [i (first (keep-indexed (fn [i p] (when (= :rest (:kind p)) i)) pats))]
+    (if (nil? i)
+      (map-indexed vector pats)
+      (let [before (subvec (vec pats) 0 i) after (subvec (vec pats) (inc i))]
+        (concat (map-indexed vector before) (map-indexed (fn [j p] [(+ (- total (count after)) j) p]) after))))))
+
+(defn- cat-pattern [pl p op]
+  (let [pl (reduce (fn [pl _] (cat-deref pl)) pl (:pat-adj (r-of p)))]
+    (op pl p)
+    (case (:kind p)
+      :tuple (let [t (p-ty pl)]
+               (doseq [[i sp] (enumerate-and-adjust (:pats p) (count (second t)))]
+                 (cat-pattern (cat-projection pl (pat-ty-adjusted sp) [:field i 0]) sp op)))
+      :tuple-struct (let [[_ vi vid] (or (ctor-info (:path p)) (unsupported "a pattern path" (:path p)))
+                          total (count (tc/all-fields-of-variant vid))]
+                      (doseq [[i sp] (enumerate-and-adjust (:pats p) total)]
+                        (cat-pattern (cat-projection pl (pat-ty-adjusted sp) [:field i vi]) sp op)))
+      :struct (let [[_ vi vid] (or (ctor-info (:path p)) (unsupported "a pattern path" (:path p)))]
+                (doseq [f (:fields p)]
+                  (cat-pattern (cat-projection pl (pat-ty-adjusted (:pat f)) [:field (field-index vid (:ident f)) vi]) (:pat f) op)))
+      :or (doseq [sp (:pats p)] (cat-pattern pl sp op))
+      :binding (when (:sub p) (cat-pattern pl (:sub p) op))
+      :guard (cat-pattern pl (:pat p) op)
+      (:ref :box) (cat-pattern (cat-deref pl) (:pat p) op)
+      :slice (unsupported "a slice pattern in a closure")
+      nil)))
+
+(defn euv-walk-pat [dp p has-guard]
+  (cat-pattern dp p
+    (fn [pl p]
+      (let [read-discr #(d-borrow! pl :imm)]
+        (case (:kind p)
+          :binding (do (when has-guard (read-discr))
+                       (let [[by-ref] (:mode (r-of p))]
+                         (if (#{:not :mut} by-ref) (d-borrow! pl (if (= :mut by-ref) :mut :imm)) (consume-or-copy! pl))))
+          :path (let [rd (c/res-def (:path p))]
+                  (if (re-find #"Const" (str (nth rd 2 nil)))
+                    (when-not (str/starts-with? (str (nth rd 2 nil)) "Ctor(") (read-discr))
+                    nil)
+                  (when (and (str/starts-with? (str (nth rd 2 nil "")) "Ctor(") (multivariant? (p-ty pl))) (read-discr))
+                  (when (and (not (str/starts-with? (str (nth rd 2 nil "")) "Ctor(")) (not (re-find #"Const" (str (nth rd 2 nil)))) (multivariant? (p-ty pl))) (read-discr)))
+          (:lit :range) (read-discr)
+          (:struct :tuple-struct) (when (multivariant? (p-ty pl)) (read-discr))
+          nil)))))
+
+;; analyze_closure's processing
+(defn- capture-rank [k] (case k :by-value 3 [:by-ref :mut] 2 [:by-ref :unique] 1 [:by-ref :imm] 0))
+
+(defn- determine-capture-info [a b]
+  (if (= a b) a (if (>= (capture-rank a) (capture-rank b)) a b)))
+
+(defn- truncate-for-optimization [pl kind]
+  (let [idx (last (keep-indexed (fn [i [k _]] (when (= [:deref] k) i)) (:proj pl)))]
+    (if (and idx (= :ref (first (ty-before pl idx))) (not (nth (ty-before pl idx) 2)))
+      (truncate! pl kind (inc idx))
+      [pl kind])))
+
+(defn- restrict-precision-for-drop-types [pl kind]
+  (if (and (not (copy? (p-ty pl))) (= :by-value kind))
+    (if-let [i (first (keep (fn [i] (let [t (ty-before pl i)] (when (and (= :adt (first t)) (number? (second t)) (tc/implements-drop? t)) i)))
+                            (range (count (:proj pl)))))]
+      (truncate! pl kind i)
+      [pl kind])
+    [pl kind]))
+
+(defn- process-captures
+  "process_collected_capture_information: [processed kind]"
+  [move? infos]
+  (let [kind (atom :fn)
+        processed (vec (for [[pl k] infos]
+                         (let [[pl k] (restrict-capture-precision pl k)
+                               [pl k] (truncate-for-optimization pl k)]
+                           (case k
+                             :by-value (reset! kind :fn-once)
+                             ([:by-ref :mut] [:by-ref :unique]) (when (= :fn @kind) (reset! kind :fn-mut))
+                             nil)
+                           (let [first-deref (first (keep-indexed (fn [i [x _]] (when (= [:deref] x) i)) (:proj pl)))
+                                 [pl k] (if move?
+                                          (let [[pl _] (if first-deref (truncate! pl k first-deref) [pl k])] [pl :by-value])
+                                          (if (and (= :by-value k) first-deref) (truncate! pl k first-deref) [pl k]))]
+                             (restrict-precision-for-drop-types pl k)))))]
+    [processed @kind]))
+
+(defn- ancestry [a b]
+  "determine_place_ancestry_relation of A relative to B"
+  (let [pa (mapv first (:proj a)) pb (mapv first (:proj b))]
+    (cond (not= (:base a) (:base b)) :divergent
+          (not (every? true? (map = pa pb))) :divergent
+          (> (count pb) (count pa)) :ancestor
+          (= (count pb) (count pa)) :same
+          :else :descendant)))
+
+(defn- capture-mutability [pl]
+  (let [k (second (:base pl))
+        m (boolean (second (get (:modes *cx*) k)))]
+    (loop [m m ts (deref-tys pl)]
+      (if-let [t (first ts)]
+        (cond (mut-ref? t) (recur true (rest ts))
+              (ref? t) false
+              :else (recur m (rest ts)))
+        m))))
+
+(defn- compute-min-captures
+  "compute_min_captures: the min capture lists by root variable (in insertion order), each sorted by its field projections"
+  [root-map infos]
+  (let [order (atom (vec (keys (:order root-map)))) m (atom (:lists root-map))]
+    (doseq [[pl k] infos]
+      (let [v (second (:base pl))]
+        (if-not (contains? @m v)
+          (do (swap! order conj v) (swap! m assoc v [{:place pl :kind k :mut (capture-mutability pl)}]))
+          (let [lst (get @m v)
+                desc-found (atom false)
+                upd (atom k)
+                lst (vec (remove (fn [d] (when (= :ancestor (ancestry pl (:place d)))
+                                           (reset! desc-found true)
+                                           (let [[_ dk] (truncate! (:place d) (:kind d) (count (:proj pl)))]
+                                             (swap! upd determine-capture-info dk))
+                                           true))
+                                 lst))
+                [lst found] (if @desc-found
+                              [lst false]
+                              (loop [i 0]
+                                (if (>= i (count lst))
+                                  [lst false]
+                                  (let [a (nth lst i)]
+                                    (case (ancestry pl (:place a))
+                                      :same [(assoc-in lst [i :kind] (determine-capture-info (:kind a) @upd)) true]
+                                      :descendant (let [[_ ck] (truncate! pl @upd (count (:proj (:place a))))]
+                                                    [(assoc-in lst [i :kind] (determine-capture-info (:kind a) ck)) true])
+                                      (recur (inc i)))))))
+                lst (if found lst (conj lst {:place pl :kind @upd :mut (capture-mutability pl)}))]
+            (swap! m assoc v lst)))))
+    (let [fields (fn [c] (keep (fn [[k _]] (when (= :field (first k)) (second k))) (:proj (:place c))))]
+      {:order (into (array-map) (map vector @order (repeat true)))
+       :lists (into {} (for [[v lst] @m] [v (vec (sort-by fields (fn [a b] (or (first (keep (fn [[x y]] (when (not= x y) (compare x y))) (map vector a b))) 0)) lst))]))})))
+
+(defn- init-capture-kind [pl move?]
+  (if (and move? (not (some ref? (deref-tys pl)))) :by-value [:by-ref :imm]))
+
+(defn- analyze-closure!
+  "analyze_closure over a closure's HIR node (its nested closures analyzed first)"
+  [cl var-tys modes]
+  (let [ups (upvars-mentioned cl)
+        caps (atom []) fakes (atom [])]
+    (binding [*cx* {:owner cl :upvars (set ups) :var-tys var-tys :modes modes :caps caps :fakes fakes}]
+      ;; consume_body: the parameters' patterns over rvalue places, then the body
+      (doseq [p (:params cl)]
+        (let [pl (rvalue-place (pat-ty-adjusted (:pat p)))]
+          (fake-read-scrutinee! pl false)
+          (euv-walk-pat pl (:pat p) false)))
+      (euv-consume (:body cl))
+      (let [move? (= :move (:capture cl))
+            [processed kind] (process-captures move? @caps)
+            mc (compute-min-captures {:order {} :lists {}} processed)
+            mc (if (< *edition* 2021)
+                 (compute-min-captures mc (for [k ups] (let [pl {:base [:upvar k] :base-ty (get var-tys k) :proj []}] [pl (init-capture-kind pl move?)])))
+                 mc)
+            captures (vec (for [v (keys (:order mc)) c (get (:lists mc) v)]
+                            {:var v :name (get-in modes [v 2]) :var-span (get-in modes [v 3]) :base-ty (:base-ty (:place c)) :proj (:proj (:place c)) :cap (:kind c) :mut (:mut c)
+                             :ty (let [t (p-ty (:place c))] (if (= :by-value (:kind c)) t [:ref [:re-erased] (not= [:by-ref :imm] (:kind c)) t]))}))
+            kind (or (:closure-kind (r-of cl)) kind)]
+        (swap! *closure-info* assoc (:hir-id cl)
+               {:kind kind :captures captures :fake-reads @fakes :upvars ups :upvar-names (mapv #(get-in modes [% 2]) ups)
+                :ty (:ty (r-of cl))})))))
+
+(defn closure-analyze
+  "closure_analyze over a typeck root's body (its HIR: the parameters and the body expression) with its results RES:
+  {closure-hir-id {:kind :fn|:fn-mut|:fn-once :captures [{:var :name :base-ty :proj :cap :mut}] :fake-reads [[place cause]]}}"
+  [params body res edition]
+  (binding [*res* res *edition* edition *upvars-mentioned* (atom {}) *closure-info* (atom {})]
+    (let [var-tys (java.util.HashMap.) modes (java.util.HashMap.)
+          f (fn [y] (when (and (= :binding (:kind y)) (:name y) (not= :expr (:node y)))
+                      (let [r (r-of y)] (.put var-tys (binding-key y) (:ty r)) (.put modes (binding-key y) [(first (:mode r)) (second (:mode r)) (str (:name y)) (:span y)]))))]
+      (doseq [p params] (walk-hir p f false))
+      (walk-hir body f false)
+      (let [var-tys (into {} var-tys) modes (into {} modes)]
+        (letfn [(visit [x]
+                  (when (map? x)
+                    (doseq [c (hir-children x)] (visit c))
+                    (when (and (= :expr (:node x)) (= :closure (:kind x)))
+                      (analyze-closure! x var-tys modes))))]
+          (doseq [p params] (visit p))
+          (visit body)))
+      @*closure-info*)))
+
+(defn place-capture-string
+  "place_to_string_for_capture"
+  [name base-ty proj]
+  (loop [s name t base-ty ps proj]
+    (if-let [[k pt] (first ps)]
+      (recur (case (first k)
+               :deref (str "*" s)
+               :field (str s "." (if (= :tuple (first t)) (second k)
+                                     (let [vid (if (tc/enum? (second t)) (:id (nth (tc/variants-any (second t)) (nth k 2))) (second t))]
+                                       (first (nth (tc/all-fields-of-variant vid) (second k))))))
+               s)
+             pt (rest ps))
+      s)))
+
+;; A closure's typeck root (its outermost enclosing body owner) and the root's results with its closures' captures
+
+(defn typeck-root [d]
+  (loop [d d] (if (= "Closure" (:kind d)) (recur (c/def-of (:parent d))) d)))
+
+(defn root-analysis
+  "A typeck root's results and closure_analyze's captures, kept in CACHE (an atom, or nil): {:res RES :closures INFO}"
+  [root edition & [cache]]
+  (or (when cache (get @cache (:id root)))
+      (let [res (tc/body-results root)
+            n (:node root)
+            fn? (#{"Fn" "AssocFn"} (:kind root))
+            body-expr (if fn? {:node :expr :kind :block :block (:body n) :span (:span (:body n)) :hir-id [(first (:hir-id n)) :body]} (:expr n))
+            info (tc/with-solver root (fn [] (closure-analyze (when fn? (map :pat (:params n))) body-expr res edition)))
+            v {:res res :closures info}]
+        (when cache (swap! cache assoc (:id root) v))
+        v)))
+
+;; ---------------------------------------------------------------------------------------------
 ;; Bodies (mod.rs: construct_fn, args_and_body)
 
 (defn- finish
@@ -1399,29 +1995,52 @@
               (finish d name :anon-const 0 t))))))))
 
 (defn build-body
-  "construct_fn over a function's HIR and its type-check results (within collect/with-crate)"
+  "construct_fn over a function's or a closure's HIR and its typeck root's results (within collect/with-crate); OPTS
+  {:overflow-checks :edition :root-cache}"
   [d opts]
-  (let [n (:node d)
-        res (tc/body-results d)
-        sig (tc/erased-sig (:id d))
+  (let [ed (or (:edition opts) 2024)
+        closure? (= "Closure" (:kind d))
+        n (:node d)
+        root (typeck-root d)
+        {:keys [res closures]} (root-analysis root ed (:root-cache opts))
+        info (when closure? (or (get closures (:hir-id n)) (unsupported "a closure without its analysis")))
+        cty (when closure? (:ty (get res (:hir-id n))))
+        sig (if closure?
+              (let [{:keys [inputs output]} (nth cty 2)] {:inputs (vec inputs) :output output})
+              (tc/erased-sig (:id d)))
+        env-ty (when closure? (case (:kind info) :fn [:ref [:re-erased] false cty] :fn-mut [:ref [:re-erased] true cty] cty))
         ret (:output sig)
         name (mir-name d)
-        body-expr {:node :expr :kind :block :block (:body n) :span (:span (:body n)) :hir-id [(first (:hir-id n)) :body]}
-        res (assoc res (:hir-id body-expr) {:ty ret})
-        pats (map :pat (:params n))]
-    (tc/with-solver d
+        body-expr (if closure?
+                    (:body n)
+                    {:node :expr :kind :block :block (:body n) :span (:span (:body n)) :hir-id [(first (:hir-id n)) :body]})
+        res (if closure? res (assoc res (:hir-id body-expr) {:ty ret}))
+        pats (map :pat (:params n))
+        env-proj (if (and closure? (not= :fn-once (:kind info))) [[:deref]] [])
+        captures (when closure?
+                   (vec (map-indexed (fn [i c] {:var (:var c) :hproj (mapv first (:proj c)) :mut (:mut c) :base-ty (:base-ty c) :name (:name c)
+                                                :use-place {:local 1 :proj (cond-> (conj env-proj [:field i (:ty c)]) (not= :by-value (:cap c)) (conj [:deref]))}
+                                                :cap c})
+                                     (:captures info))))]
+    (tc/with-solver root
       (fn []
-        (binding [*edition* (or (:edition opts) 2024)
+        (binding [*edition* ed
                   *self-var* nil *names* {}
                   *res* res
-                  *tree* (binding [*edition* (or (:edition opts) 2024)] (scope-tree pats body-expr))
+                  *closure-info* closures
+                  *closure-tys* (into {} (for [[_ ci] closures :when (= :closure (first (:ty ci)))] [(second (:ty ci)) (mapv :ty (:captures ci))]))
+                  *closure-kinds* (into {} (for [[_ ci] closures :when (= :closure (first (:ty ci)))] [(second (:ty ci)) (:kind ci)]))
+                  *upvars* (if closure? (set (:upvars info)) #{})
+                  *captures* (or captures [])
+                  *tree* (binding [*edition* ed] (scope-tree pats body-expr))
                   *b* (atom {:blocks [] :locals [{:ty ret :mut true :scope 0}] :source-scopes [] :source-scope 0 :debug []
                              :scopes [] :breakables [] :if-then nil :unwind (drop-tree) :var-indices {} :unit-temp nil
                              :block-context [] :check-overflow (boolean (:overflow-checks opts))})]
           (let [params (mapv (fn [p t] {:pat (lower-pattern (:pat p)) :ty t}) (:params n) (:inputs sig))
+                params (if closure? (into [{:pat nil :ty env-ty}] params) params)
                 _ (when-let [sp (first (filter #(= "self" (:name (:pat %))) params))] (set! *self-var* (:var (:pat sp))))
-                _ (doseq [p params] (bind-names! (:pat p)))
-                thir-body (mirror-expr (assoc-in body-expr [:block :hir-id] (:hir-id (:body n))))]
+                _ (doseq [p params :when (:pat p)] (bind-names! (:pat p)))
+                thir-body (if closure? (mirror-expr body-expr) (mirror-expr (assoc-in body-expr [:block :hir-id] (:hir-id (:body n)))))]
             (start-new-block!)
             (upd! update :source-scopes conj [nil nil])
             (let [call-site [(:hir-id body-expr) :call-site]
@@ -1436,11 +2055,16 @@
                                    (let [l (new-local! (:ty p) :mut false)]
                                      (when (and (= :binding (:k (:pat p))) (nil? (:sub (:pat p))))
                                        (upd! update :debug conj {:name (:name (:pat p)) :scope 0 :value (place-form (place l))}))))
+                                 ;; insert_upvar_arg: the captures' debug info
+                                 (doseq [c captures]
+                                   (upd! update :debug conj {:name (str/join "__" (cons (:name c) (upvar-symbol-fields (:cap c)))) :scope 0
+                                                             :value (place-form (:use-place c))}))
                                  (let [scope (atom nil) bb (atom 0)]
                                    (doseq [[i p] (map-indexed vector params)]
                                      (let [l (inc i) pat (:pat p)]
                                        (schedule-drop-value! arg-scope l)
-                                       (cond (and (= :binding (:k pat)) (= :no (:by-ref pat)) (nil? (:sub pat)))
+                                       (cond (nil? pat) nil
+                                             (and (= :binding (:k pat)) (= :no (:by-ref pat)) (nil? (:sub pat)))
                                              (do (upd! assoc-in [:locals l :mut] (:mutbl pat))
                                                  (upd! assoc-in [:var-indices (:var pat)] l))
                                              :else (do (when-let [v (declare-bindings @scope pat)] (reset! scope v))
@@ -1453,3 +2077,16 @@
                     (when-let [r (nth blocks 0)] (terminate! r '(resume))))
                   ret-block)))
             (finish d name :fn (count params) ret)))))))
+
+(defn- upvar-symbol-fields
+  "CapturedPlace::to_symbol's field names (`x__field`), derefs ignored"
+  [cap]
+  (loop [t (:base-ty cap) ps (:proj cap) acc []]
+    (if-let [[k pt] (first ps)]
+      (recur pt (rest ps)
+             (if (= :field (first k))
+               (conj acc (if (= :tuple (first t)) (str (second k))
+                             (let [vid (if (tc/enum? (second t)) (:id (nth (tc/variants-any (second t)) (nth k 2))) (second t))]
+                               (str (first (nth (tc/all-fields-of-variant vid) (second k)))))))
+               acc))
+      acc)))

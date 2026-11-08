@@ -37,32 +37,43 @@
       (let [v [(collect/load-std (str front-dir "/std-names.edn")) (collect/load-std-iface (str front-dir "/std-iface.edn"))]]
         (swap! std-cache assoc front-dir v) v)))
 
-(defn build-program
-  "The pipeline over one program, then each function body built: [[name body-or-nil error-or-nil] ...]"
-  [front-dir n]
+(defn with-program
+  "The pipeline over one program (the native reader, expansion, resolution, lowering), then F called within
+  collect/with-crate with the source's overflow-checks flag"
+  [front-dir n f]
   (let [std-file (str front-dir "/std-names.edn")
         [std si] (std-data front-dir)
         _ (require 'arbace.rust.front.expand 'arbace.rust.front.resolve)
         src-file (source-file n)
         src (slurp src-file)
+        ed (if (= n "edition2015") 2015 2024)
         mc (atom {})
         crate (with-bindings {(resolve 'arbace.rust.front.expand/*mark-crates*) mc}
-                ((resolve 'arbace.rust.front.expand/expand-file) src-file 2024 ((resolve 'arbace.rust.front.expand/load-std-macros) std-file)))
+                ((resolve 'arbace.rust.front.expand/expand-file) src-file ed ((resolve 'arbace.rust.front.expand/load-std-macros) std-file)))
         res ((resolve 'arbace.rust.front.resolve/resolve-crate) crate ((resolve 'arbace.rust.front.resolve/load-std-names) std-file) {:source src})
         res-map (into {} (for [[_ s rs] res] [s rs]))
         hir (lower/lower-crate crate res-map {:file src-file :mark-crates @mc :std-generics (lower/load-std-generics std-file)})
         oc (boolean (re-find #"(?m)^// rf: overflow-checks" src))]
     (binding [tc/*root-file* src-file build/*root-file* src-file]
-      (collect/with-crate hir res-map std {:source src :edition 2024 :si si}
-        (fn []
-          (vec (for [d (collect/defs) :when (or (and (#{"Fn" "AssocFn"} (:kind d)) (:body (:node d)))
-                                                (and (= "Variant" (:kind d)) (:disr (:node d))))]
-                 (let [disr? (= "Variant" (:kind d))
-                       nm (if disr? (str (binding [collect/*in-value* true] (collect/print-def-path (:id d) [])) "::{constant#0}") (build/mir-name d))]
-                   (try [nm (if disr? (build/build-discriminant d {:edition 2024}) (build/build-body d {:overflow-checks oc :edition 2024})) nil]
-                        (catch Throwable e
-                          (when (System/getenv "BUILD_TRACE") (.printStackTrace e))
-                          [nm nil (str (or (:what (ex-data e)) e)) (pr-str (:x (ex-data e)))]))))))))))
+      (collect/with-crate hir res-map std {:source src :edition ed :si si}
+        (fn [] (f oc ed))))))
+
+(defn build-program
+  "The pipeline over one program, then each function body built: [[name body-or-nil error-or-nil] ...]"
+  [front-dir n]
+  (with-program front-dir n
+    (fn [oc ed]
+      (let [rc (atom {})]
+        (vec (for [d (collect/defs) :when (or (and (#{"Fn" "AssocFn"} (:kind d)) (:body (:node d)))
+                                              (= "Closure" (:kind d))
+                                              (and (= "Variant" (:kind d)) (:disr (:node d))))]
+               (let [disr? (= "Variant" (:kind d))
+                     nm (if disr? (str (binding [collect/*in-value* true] (collect/print-def-path (:id d) [])) "::{constant#0}") (build/mir-name d))]
+                 (try [nm (cond disr? (build/build-discriminant d {:edition ed})
+                                :else (build/build-body d {:overflow-checks oc :edition ed :root-cache rc})) nil]
+                      (catch Throwable e
+                        (when (System/getenv "BUILD_TRACE") (.printStackTrace e))
+                        [nm nil (str (or (:what (ex-data e)) e)) (pr-str (:x (ex-data e)))])))))))))
 
 (defn -main [front-dir built-dir & names]
   (let [verbose (System/getenv "BUILD_VERBOSE")

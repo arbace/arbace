@@ -686,3 +686,80 @@ pub fn std_iface<'tcx>(tcx: TyCtxt<'tcx>) -> String {
     }
     out
 }
+
+/// RF10's oracle of RFP20 (a), `--captures FILE`: each closure of the root file (not an expansion's), per typeck root, with
+/// its kind and its minimal captures (upvar.rs's `closure_min_captures`, in their order: the closure's upvars' fields):
+/// `(tc/closure OWNER [span] "KIND" [(cap "VAR" [var-span] "PLACE" [PROJ...] "CAPTURE" "MUT") ...] [(fake-read "PLACE" "CAUSE") ...])`,
+/// PROJ `"Deref"` or `"Field(i, v)"`, CAPTURE `ByValue` or `ByRef(Immutable|Mutable|UniqueImmutable)`, MUT the capture's mutability
+pub fn captures<'tcx>(tcx: TyCtxt<'tcx>) -> String {
+    use rustc_middle::ty::print::with_no_trimmed_paths;
+    struct Cv<'a, 'tcx> {
+        tcx: TyCtxt<'tcx>,
+        root: String,
+        owner: String,
+        res: &'a rustc_middle::ty::TypeckResults<'tcx>,
+        out: String,
+    }
+    impl<'a, 'tcx> Visitor<'tcx> for Cv<'a, 'tcx> {
+        type NestedFilter = rustc_middle::hir::nested_filter::OnlyBodies;
+        fn maybe_tcx(&mut self) -> Self::MaybeTyCtxt {
+            self.tcx
+        }
+        fn visit_expr(&mut self, e: &'tcx rustc_hir::Expr<'tcx>) {
+            if let rustc_hir::ExprKind::Closure(c) = e.kind {
+                if let Some(sv) = span_vec(self.tcx, &self.root, e.span) {
+                    let kind = match self.res.node_type_opt(e.hir_id).map(|t| *t.kind()) {
+                        Some(rustc_middle::ty::Closure(_, args)) => format!("{:?}", args.as_closure().kind()),
+                        _ => "?".into(),
+                    };
+                    let mut caps = String::new();
+                    if let Some(m) = self.res.closure_min_captures.get(&c.def_id) {
+                        for (var, list) in m.iter() {
+                            for cp in list {
+                                let projs: Vec<String> = cp.place.projections.iter().map(|p| q(&format!("{:?}", p.kind))).collect();
+                                let _ = write!(
+                                    caps,
+                                    " (cap {} {} {} [{}] {} {})",
+                                    q(cp.var_ident.as_str()),
+                                    span_vec(self.tcx, &self.root, self.tcx.hir_span(*var)).unwrap_or_else(|| "nil".into()),
+                                    q(&cp.to_string(self.tcx)),
+                                    projs.join(" "),
+                                    q(&format!("{:?}", cp.info.capture_kind)),
+                                    q(&format!("{:?}", cp.mutability))
+                                );
+                            }
+                        }
+                    }
+                    let mut frs = String::new();
+                    if let Some(v) = self.res.closure_fake_reads.get(&c.def_id) {
+                        for (p, cause, _) in v {
+                            let base = match p.base {
+                                rustc_middle::hir::place::PlaceBase::Upvar(u) => self.tcx.hir_name(u.var_path.hir_id).to_string(),
+                                rustc_middle::hir::place::PlaceBase::Local(h) => self.tcx.hir_name(h).to_string(),
+                                _ => "?".into(),
+                            };
+                            let projs: Vec<String> = p.projections.iter().map(|x| format!("{:?}", x.kind)).collect();
+                            let _ = write!(frs, " (fake-read {} [{}] {})", q(&base), projs.iter().map(|s| q(s)).collect::<Vec<_>>().join(" "), q(&format!("{:?}", cause).split('(').next().unwrap_or("")));
+                        }
+                    }
+                    let _ = writeln!(self.out, "(tc/closure {} {} {} [{}] [{}])", q(&self.owner), sv, q(&kind), caps.trim_start(), frs.trim_start());
+                }
+            }
+            intravisit::walk_expr(self, e)
+        }
+    }
+    let root = root_name_at(tcx, tcx.hir_span(rustc_hir::CRATE_HIR_ID));
+    let mut out = String::new();
+    for def in tcx.hir_body_owners() {
+        if tcx.is_typeck_child(def.to_def_id()) {
+            continue;
+        }
+        let res = tcx.typeck(def);
+        let body = tcx.hir_body_owned_by(def);
+        let owner = with_no_trimmed_paths!(tcx.def_path_str(def.to_def_id()));
+        let mut v = Cv { tcx, root: root.clone(), owner, res, out: String::new() };
+        v.visit_body(body);
+        out.push_str(&v.out);
+    }
+    out
+}

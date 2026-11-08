@@ -54,6 +54,14 @@
 #                          run-built/NAME/), then with rustc, rustdoc and cargo on PATH stubs exiting 99 (RF10_STUBS=0: not):
 #                          the pipeline's built MIR of the program's own bodies through arbace.rust.front.build-run (the record's
 #                          bodies replaced), arbace.rust.back.codegen, rsi's lowering and gcc -O0, the run's status against rustc's
+#   bin/rust-front capture-oracles [FILE.rs...]
+#                          RFP20 (a)'s oracle: each closure's kind, minimal captures and fake reads (the helper's --captures,
+#                          upvar.rs's closure_min_captures) into .tmp/rust-front/front/NAME.cap.edn (default: the files of
+#                          front-oracles that have a closure)
+#   bin/rust-front capture-check [NAME...]
+#                          RFP20 (a): arbace.rust.front.build's port of upvar.rs and expr_use_visitor.rs (each closure's kind,
+#                          captured places, capture kinds, mutability and fake reads) against capture-oracles, closure by
+#                          closure (CAPTURE_VERBOSE=1: each difference); a negative control must differ
 #   bin/rust-front front-oracles [FILE.rs...]
 #                          RF4-RF6's oracles (tools/rsdump/front.rs): the helper's --expanded crate and --resolve paths per file
 #                          into .tmp/rust-front/front/NAME.{exp,res}.edn, rustc's -Zunpretty=hir text (the helper as rustc,
@@ -156,6 +164,22 @@ build_oracles() {
     (ulimit -v 4000000; cd "$out" && "$helper" rustc -- --edition 2024 --crate-type $ct -A warnings -C opt-level=0 -C debuginfo=0 $pf $oc \
        -Zdump-mir=built -Zdump-mir-dir="$n" -o "$n.bin" "$f" > "$n.log" 2>&1) || echo "build-oracles: $f failed (see $out/$n.log)" >&2
     rm -f "$out/$n.bin"
+  done
+}
+# RFP20 (a)'s oracle: the closures' captures
+capture_oracles() {
+  local out=$work/front f n
+  mkdir -p "$out"
+  for f in "$@"; do
+    grep -q '|' "$f" || continue
+    n=$(basename "$f" .rs); f=$(realpath "$f")
+    local ed=2024 ct=bin pf=""
+    grep -q "fn main" "$f" || ct=lib
+    [ "$n" = edition2015 ] && ed=2015
+    grep -q '^#!\[no_std\]' "$f" && pf="-C panic=abort"
+    (ulimit -v 2000000; cd "$out" && "$helper" rustc --captures "$n.cap.edn" -- --edition $ed --crate-type $ct -A warnings $pf -o "$n.cap.bin" "$f" > "$n.cap.log" 2>&1) ||
+      { echo "capture-oracles: $f failed (see $out/$n.cap.log)" >&2; rm -f "$out/$n.cap.edn"; }
+    rm -f "$out/$n.cap.bin"
   done
 }
 front_files() {
@@ -270,6 +294,12 @@ case ${1:-} in
     if [ ${#names[@]} -eq 0 ]; then names=($(cd "$work/built" && ls -d */ | tr -d /)); fi
     cd "$root" && arbace_tool -m arbace.rust.front.build-check "$work/front" "$work/built" "${names[@]}" 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing' ;;
   front-oracles) shift; front_oracles $(front_files "$@") ;;
+  capture-oracles) shift; capture_oracles $(front_files "$@") ;;
+  capture-check)
+    shift
+    names=("$@")
+    if [ ${#names[@]} -eq 0 ]; then names=($(cd "$work/front" && ls *.cap.edn | sed 's/\.cap\.edn$//')); fi
+    cd "$root" && arbace_tool -m arbace.rust.front.capture-check "$work/front" "${names[@]}" 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing' ;;
   expand-check)
     shift
     [ -s "$work/front/std-names.edn" ] || front_oracles
