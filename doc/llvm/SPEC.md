@@ -330,6 +330,13 @@ node of another kind, a record's variable, expression or location replaced, a `!
 `Debug Info Version` changed). Without a family every kind cycles (41 kinds). A mutant of the module's named types is not
 made (`%name` is also a type's spelling).
 
+**The mutants' own verdicts (LLS33 (b), 2026-11-08).** Each mutant's first line is its own verdict, written by its kind from the
+rule it breaks (`arbace.repr.llvm.expect`): `; MUTANT: KIND invalid|debug LAYER: MESSAGE`, `; MUTANT: KIND valid` or `; MUTANT:
+KIND unknown: WHY`. MESSAGE is a fragment of LLParser's or the Verifier's first message (LLVM 23.1.5's texts). `verify-check` holds
+a mutant to it as it holds an llvm/test file to its RUN and CHECK lines: the same verdict (a mutant's `valid` is valid alone), and
+MESSAGE in the output. An `unknown` mutant is judged by opt's record. `bin/repr-llvm mutants-oracle LIST WORK` checks the lines
+against opt (record or live), the oracle tier's (doc/llvm/LLVM-CROP-SURVEY.md, "As built: LLS33 (b)").
+
 On 2026-11-04, on the 282 modules of the lists above (all valid: **282 of 282 verdicts as opt's, 0 invalid**; one, `misc`, has `!dbg`
 attachments and no `Debug Info Version`, `debug` from both) the sets of each family (indices from 0; the rules were fitted to
 them), opt's verdicts and first messages:
