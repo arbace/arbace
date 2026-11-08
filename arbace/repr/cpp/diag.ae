@@ -310,6 +310,8 @@
    [:overload #"^codegen: call to a deleted function" "call to deleted function"]
    [:access #"^codegen: '.*' is a (private|protected) member of" "is a private member of"]
    [:conversion #"^codegen: incompatible member function pointer types" "assigning to X from incompatible type X"]
+   [:conversion #"^codegen: ambiguous conversion from derived class '.*' to base class" "ambiguous conversion from derived class X to base class X"]
+   [:conversion #"^codegen: cannot initialize a variable of type '.*' with a value of another type" "cannot initialize a variable of type X with a value of type X"]
    [:mptr #"^codegen: pointer-to-member function type requires an" "pointer-to-member function type requires an lvalue/rvalue"]
    [:constexpr #"^codegen: constexpr variable '.*' must be initialized by a constant expression" "constexpr variable must be initialized by a constant expression"]
    [:constexpr #"^codegen: constexpr if condition is not a constant expression" "constexpr if condition is not a constant expression"]
@@ -510,7 +512,50 @@
       (decls! (remove :_hdr (:nodes u))))
     (vec out)))
 
-(def checks (atom [undeclared redefinitions gnu-attrs constexpr-bodies]))
+;; [dcl.constexpr]/1: every declaration of a function has the same constexpr or consteval specifier as the others
+;; (clang/lib/Sema/SemaDeclCXX.cpp at llvmorg-23.1.5, Sema::MergeCXXFunctionDecl's err_constexpr_redecl_mismatch: the new
+;; declaration against the previous one): the main file's non-member functions declared by an unqualified name at namespace
+;; scope, and block-scope function declarations (which declare the innermost enclosing namespace's, [dcl.meaning]/3), each
+;; known by its namespace, name and parameter types as written (a typedef's spelling is another function: missed, never
+;; wrong), in order; a mismatch at the later declaration's name, which then does not become the previous one.
+(defn constexpr-redecls
+  [u starts ^String src main]
+  (let [out (java.util.ArrayList.)
+        prev (java.util.HashMap.)
+        kind-of (fn [n] (cond (:_consteval n) "consteval" (:constexpr n) "constexpr" :else "non-constexpr"))
+        params-of (fn [n] (second (re-find #"^[^(]*(\(.*)$" (str (get-in n [:type :qualType])))))
+        decl! (fn [path n]
+                (let [o (get-in n [:loc :offset])
+                      ps (params-of n)]
+                  (when (and o ps (string? (:name n)) (= main (get-in n [:range :begin :file]))
+                             (not (qualified-name? src (long o))))
+                    (let [k [path (:name n) ps]
+                          old (.get prev k)
+                          nk (kind-of n)]
+                      (if (and old (not= old nk))
+                        (let [[l c] (line-col starts (long o))]
+                          (.add out {:line l :col c :kind :error :rule :redeclaration
+                                     :msg (str nk " declaration of '" (:name n) "' follows " old " declaration")}))
+                        (.put prev k nk))))))
+        walk-body (fn walk [path x]
+                    (cond (map? x) (case (:kind x)
+                                     "DeclStmt" (doseq [d (:inner x)] (if (= "FunctionDecl" (:kind d)) (decl! path d) (walk path d)))
+                                     ("LambdaExpr" "CXXRecordDecl" "ClassTemplateDecl" "FunctionTemplateDecl") nil
+                                     (doseq [[k v] x :when (and (not= k :_ent) (coll? v))] (walk path v)))
+                          (sequential? x) (doseq [y x] (walk path y))
+                          :else nil))]
+    (letfn [(decls! [path ns]
+              (doseq [n ns]
+                (case (:kind n)
+                  "NamespaceDecl" (decls! (conj path (or (:name n) "(anonymous)")) (:inner n))
+                  ("LinkageSpecDecl" "ExportDecl") (decls! path (:inner n))
+                  "FunctionDecl" (do (decl! path n)
+                                     (when-let [b (last (filter #(= "CompoundStmt" (:kind %)) (:inner n)))] (walk-body path b)))
+                  nil)))]
+      (decls! [] (remove :_hdr (:nodes u))))
+    (vec out)))
+
+(def checks (atom [undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls]))
 
 (defn- pp-diag
   "A preprocessor error `FILE:LINE:COL: msg` (the port's) as a diagnostic, the main file's alone (nil else)."
