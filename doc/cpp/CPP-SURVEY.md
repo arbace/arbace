@@ -3631,10 +3631,214 @@ Then cpp-target's night commands as that section lists them (the own round-trip 
 
 ### Left
 
-The pack itself (the night's recording); CX12 (Sema's diagnostics natively, then the dg cases at 1); CP250, CP251.
+The pack itself (the night's recording); CX12 (Sema's diagnostics natively, then the dg cases at 1; its first slice: "As built: CX12 (first slice)"); CP250, CP251.
 
 ### Slips, scratch
 
 None against the day's rules. The 23-file sample pack sits in the worktree's own store (`.tmp/packs/`) and its pin and manifest were moved
 to `.tmp/sample-records/` (not committed). Scratch in the worktree's `.tmp/`: `llvm-src/` (the seven clang sources read), `stubs/`, `packs/`,
 `repr-cpp/record-dumps/`, `dg-rec/`, `dg-live/`, `dg-unrec/`, `dg-other/`, `dg-none/`, `cx-live/`, `nc-arbace/`, `*.log`.
+
+## As built: CX12 (first slice) (2026-11-08; branch `cpp-cx12` from mac/cpp-cp247 4ddab9d59)
+
+CX12 was planned (§11) as "the subset's checker"; CP242 (c) and CP247 (b) named it as the route to the dg check's 4,597 dg-error files
+judged with no clang: their acceptance and errors are clang's Sema today (the recorded dumps, 0.5 in crops-score's read stage). This slice
+gives Arbace's own front end its diagnostics and judges each file by its own dg-error lines on them.
+
+### The design
+
+- **Where the diagnostics live: `arbace.repr.cpp.diag`** (`arbace/repr/cpp/diag.ae`). A diagnostic is `{:line :col :kind :msg :rule}`,
+  printed as a compiler's `FILE:LINE:COL: error: MESSAGE [RULE]`, the messages clang's (DiagnosticSemaKinds.td's texts). Four sources, one
+  parse (the native parser with the headers in full, `*full-headers*`, as the code generator parses):
+  1. **the shared preprocessor's errors** in the main file (`#error`, a missing header: rule `:pp`);
+  2. **the native parser's syntax errors** (rule `:syntax`): a construct the grammar does not derive was already a decline (NATIVE.md §3.9,
+     a `NativeDecline` node); the parser now keeps each main-file decline with the token the parse failed at (`perr`'s `:at`; the parser's
+     slot `DIAGS`, `:syntax` in `parse-unit`'s result), so its line is the failing token's, as clang's "expected ..." is;
+  3. **Sema's checks over the final tree** (rules `:undeclared`, `:redefinition`): not during the parse, whose tentative parses are rolled
+     back, but over the committed tree, with the facts the parser records on its nodes under `:_` keys (`:_undecl` on a `DeclRefExpr` no
+     unqualified lookup found). `undeclared` is Sema::DiagnoseEmptyLookup's "use of undeclared identifier 'X'" (not a call ADL could still
+     resolve: a callee with an argument not a literal; not a class template member's, where a dependent base may hold it; not a `__`
+     name, which may be a clang builtin: CP270); `redefinitions` is SemaDecl's redeclaration checks over each declarative region in order
+     (namespace scope with reopened namespaces merged and linkage blocks transparent, classes, blocks, a function's parameters with its
+     outermost block, a condition's or init-statement's names with the substatement's outermost block, [basic.scope.block]/2): "redefinition
+     of 'X'", "... as different kind of symbol", "redefinition of parameter 'X'", "duplicate member 'X'", "class member cannot be
+     redeclared", and a member defined twice by its written path (`int S::foo() {}` after an in-class body; a specialization's members its
+     own; a qualifier that is not plain identifiers not followed);
+  4. **the code generator's Sema as a checker** (rule `:sema`): `arbace.cpp.sema` (CODEGEN.md §3: lookup, expressions' types, overload
+     resolution, initialization) analyzes every function's body; two hooks in it (`*at*`, the last node with a position analyzed;
+     `*on-refusal*`, a refused function or statement reported and the analysis going on with the next) make its refusals visible, and those
+     that are Sema's own errors (the program ill-formed, not the slice exceeded) become diagnostics at that node's line: diag's
+     `sema-rules` (no viable function among N > 0, an ambiguous call, no default constructor, a non-const reference to a temporary, too many
+     initializers, assignment to an rvalue, no operator=, no member, a member of a non-class, a missing argument, a call of a non-function,
+     `*` of a non-pointer), a refusal over an undeduced or dependent type excluded. Every other refusal is the slice's: no diagnostic.
+- **How they are matched to the dg lines: unchanged.** `arbace.repr.cpp.dg/verdict` (C's: each expected error line has an error, no
+  error on a line that expects none, the line-0 counts, dg-excess-errors, the fatal-error stop), the messages not compared, exactly as
+  for clang's errors: the own front end is judged by the same rule as the oracle was.
+- **How a case becomes own-judged.** `bin/repr-cpp dg --corpus dg-error --front native` reads every file with `diag` (no clang, no pack,
+  no filter: `REPR_CPP_FRONT=native`, its work in `.tmp/repr-cpp-dg-own/`), and the dg verb `own` judges each file by its own dg-error
+  lines: `[ID :pass "own"]` or the failure. Its record is `test/cpp/check-dg-own-linux-amd64.edn` (`--record`; the rows of files not run
+  kept); a recorded own pass that fails now fails the run, and the dg controls (test/cpp/controls.edn) are judged on the own reads too.
+  **A file whose own verdict passes is judged by Arbace alone: 1 in the read stage**; the others keep clang's recorded dumps (0.5) until
+  the front end gives their errors. The REAP read cell still reads clang's record (CP271). Each own run prints its rows beside clang's
+  recorded ones (own x clang) and, with `--clang DIR` (clang -fsyntax-only's outputs made by hand, the oracle tier's), the expected lines
+  grouped by clang's diagnostic on them, which drives the next slices.
+- **Why the verdicts can be trusted.** The front end diagnoses only where it is sure (a name no lookup finds in a context it fully knows;
+  two declarations it reads in the same region; an analysis Sema completed up to the error); everything it does not know it accepts, and a
+  wrong diagnostic falls on a line that expects none (an extra: the file fails, clang's record stays). A pass needs every expected line
+  and no other: the measure below counts the passes clang's record fails (6, all genuine: syntax errors clang reports elsewhere or
+  differently) and the sema-rules were trimmed by the extras they made (CHECKED below).
+
+### The measure (every 10th file of the part: 460, 454 supported; the native front end before and after; clang's diagnostics from clang -fsyntax-only on the same runs, by hand)
+
+The verdicts, own x clang's record (`own .tmp/WORK --clang DIR`):
+
+| front end | own passes | own pass, clang's record fails | clang passes, own fails | both fail |
+|---|---:|---:|---:|---:|
+| the native parser's declines alone (before) | 38 | 6 | 307 | 103 |
+| + `undeclared` | 45 | 6 | 300 | 103 |
+| + `redefinitions` | 51 | 6 | 294 | 103 |
+| + the code generator's Sema (a function a refusal) | 63 | 6 | 282 | 103 |
+| + its statements going on after a refusal (this branch) | **64** | 6 | 281 | 103 |
+
+Of the 416 failures before, 400 were missed errors and 15 extra ones: the front end accepted too much; after, the files that fail by an extra
+error of the front end (21: 17 with missed lines too, 4 extra alone; the grammar's gaps: attributes, declarations, `>`; the code generator's Sema's gaps: CP272), 368 by missed errors alone, 1 a crash.
+
+The expected error lines by clang's diagnostic on the line (the 30 largest of the sample's 1,474 lines; "own" an error of the front end
+on the line):
+
+| clang's diagnostic on the expected line | lines | own before | own after |
+|---|---:|---:|---:|
+| (no clang error: g++'s own, its extensions and pedantic errors) | 209 | 3 | 6 |
+| no matching function for call to X | 109 | 1 | 38 |
+| call to implicitly-deleted copy constructor of X | 86 | 0 | 0 |
+| use of undeclared identifier X | 51 | 9 | 20 |
+| call to function X that is neither visible in the template definition nor found by ADL | 28 | 0 | 0 |
+| constexpr variable X must be initialized by a constant expression | 25 | 0 | 0 |
+| called object type X is not a function or function pointer | 23 | 0 | 1 |
+| call to X is ambiguous | 23 | 0 | 10 |
+| duplicate asm qualifier X | 18 | 0 | 0 |
+| unsupported non-standard concatenation of string literals | 18 | 0 | 0 |
+| X is a private member of X | 17 | 0 | 0 |
+| no member named X in X | 16 | 0 | 12 |
+| expected variable name or data member of current class | 15 | 0 | 0 |
+| no viable conversion from X to X | 14 | 0 | 4 |
+| assigning to X from incompatible type X | 12 | 0 | 0 |
+| function with trailing return type must specify return type X, not X | 12 | 0 | 0 |
+| no viable constructor or deduction guide for deduction of template arguments of X | 11 | 0 | 0 |
+| no viable overloaded X | 10 | 0 | 0 |
+| call to non-static member function without an object argument | 10 | 0 | 1 |
+| increment clause of OpenMP for loop must perform simple addition or subtraction | 10 | 0 | 0 |
+| unknown type name X; did you mean X? | 10 | 6 | 6 |
+| unknown type name X | 9 | 4 | 4 |
+| reduction type cannot be qualified (OpenMP) | 9 | 0 | 0 |
+| initializer on function does not look like a pure-specifier | 9 | 5 | 5 |
+| invalid operands to binary expression | 17 | 0 | 0 |
+| X not allowed in template argument | 8 | 1 | 1 |
+| expected X / expected expression / expected unqualified-id | 23 | 18 | 18 |
+| the loop's condition or initializer depends on the loop control variable (OpenMP) | 15 | 0 | 4 |
+| unexpected character <U+...> | 7 | 7 | 7 |
+| redefinition of X (as different kind of symbol) | 8 | 0 | 6 |
+
+By the dg-error's own message (gcc's wording, grouped by keyword; `own` the lines with an own error): expected-token 49 lines (17 own),
+undeclared 68 (10 before, 28 after), redeclaration 35 (2, 8), no-match 50 (0, 4), conversion 34 (0, 1), constexpr 49 (2, 4), access 29 (0,
+0), deleted 99 (0, 1), template 66 (1, 1), concepts 14 (4, 5), type 264 (8, 24), static-assert 4 (0, 0), an empty or `.*` message 186 (10,
+60), the rest 491 (38, 52). The files one clang diagnostic alone keeps from passing (no extra error, every missed line of that diagnostic):
+44 have no clang error on the lines (g++'s own), then "no matching function" 11 (13 before), "constexpr variable ... constant expression"
+6, "use of undeclared identifier" 6 (12 before), "is a private member" 4, "no viable conversion" 4, "implicit instantiation of undefined
+template" 3, "field has incomplete type" 3, "redefinition ... as different kind of symbol" 2 (5 before).
+
+### What was built
+
+- `arbace/repr/cpp/diag.ae` (new, `arbace.repr.cpp.diag`): `diagnose` (the four sources, one parse with the headers in full;
+  `REPR_CPP_DIAG_SEMA=0` the skim parse without the code generator's Sema), `read-map` (the dg verdict's read), the checks `undeclared`,
+  `redefinitions` (with `qualifier`, `qualified-name?`), `sema-errors` and `sema-rules`; clang's notice (LICENSE.md, doc/ARBACE.md).
+- `arbace/repr/cpp/parse.ae`: the slot `DIAGS` (a decline's offset, reason and token, `decline!` given the failing token), `:syntax` in
+  `parse-unit`'s result, `:_undecl` on an unqualified `DeclRefExpr` no lookup found (not in a class template's member, not a `__` name).
+  The parser is in the skim cache's key: the cache's entries are made again once.
+- `arbace/cpp/sema.ae`: `*at*` and `*on-refusal*` (nil by default: the code generator unchanged), set by `analyze` and `stmt`, read by
+  `analyze-program`'s entry and a block's statements.
+- `arbace/repr/cpp/dg.ae`: `read-own` (`REPR_CPP_FRONT=native`), the verb `own` (the judgment, own x clang, the measure's tables,
+  `--clang DIR`, `CX12_SHOW=REGEX` the missed lines of a clang diagnostic, regressions and controls, `--record`).
+- `bin/lib/repr-cpp/dg`: `--front clang|native`; `test/gate/crops/cpp.edn` and `test/gate/steps.edn`: the part `cpp-dg.dg-error-own`.
+- `test/cpp/check-dg-own-linux-amd64.edn` (new): the sample's 454 rows, 64 passes (the night's whole run replaces it).
+- `test/crops/independence.edn`: C++'s read fact by its cases (`:cases {:tokens [1934 1] :dg-own [64 1] :dg-clang [4533 0.5]}`: the token
+  check's 1,934 at 1, the dg files' own passes at 1, the rest at 0.5); `test/crops/scores.edn` recorded.
+
+### Checked (light; clang, clang++, clang-23, g++, gcc, cc, cpp, c++, cc1, cc1plus, ld and as stubs exiting 99 first on PATH, their log empty)
+
+| check | result |
+|---|---|
+| the redeclaration rules on 2 probe files (24 constructs) against clang 23.1.5 -fsyntax-only | the same errors at the same lines and columns, 19 of 19, none else |
+| `bin/repr-cpp dg --corpus dg-error --front native --sample 10` (the stubs' log empty after it) | 454 files, own pass 63 (before the statements' recovery), exit 0, 7 min at two threads with the headers in full |
+| the same with `--record` (the committed record; the stubs' log empty after it) | 454 files, own pass 64 (58 also clang's record's passes, 6 its failures), exit 0, 8 min |
+| `bin/repr-cpp native-check samples` (the parser's change; clang live, the oracle's check) | 9 same, 68 of 68 items, 0 declines, as before; both controls fail as they must |
+| `--only` dr2082 and dr1423 (the dg control) | `_control/dg/dr2082-vs-dr1423 fails as it must` |
+| the 6 own passes clang's record fails, read | each a genuine error on the expected lines (conflict markers, a 100,000-character literal the parse refuses, a class template's malformed head, error62's nonsense lines, variadic170, intro1's `concept` before C++20) |
+| the 10 new passes by the code generator's Sema, read | each an error of Sema's on the expected line (spellcheck-fields' 11 "no member named", using14, crash37, Wvexing-parse6, error34, pr65954, ref6, lval1, error43, ambig2) |
+| `make check-makefile`; `gate.crops check . test/gate/steps.edn`; `bin/gate --full --plan` | pass; 0 problems; `cpp-dg.dg-error-own` planned beside `cpp-dg.dg-error` |
+| `bin/crops-score --crop cpp`; `--record`; `--judge --strict` | 76.1 / 100 / 67.8 (read 0.653); test/crops/scores.edn's C++ line alone changed; 0 facts refuted, 0 problems |
+
+### The numbers (bin/crops-score --crop cpp)
+
+| measure | before (cpp-cp247 4ddab9d59) | after (cpp-cx12, the sample's record) | after the night (the whole part recorded) |
+|---|---|---|---|
+| completeness | 76.1 (96.5 without by design) | 76.1 (96.5): the cell reads clang's record (CP271) | 76.1 |
+| maturity | 100.0 | 100.0 | 100.0 |
+| independence | 67.7 (read 0.648) | 67.8 (read 0.653: 64 own-judged dg cases) | about 68.7 (read about 0.698: about 650 of the 4,597 own-judged, the sample's 14.1%) |
+
+The read stage's dg cases move from 0.5 to 1 file by file as the front end gives their errors: each own pass is one case judged by Arbace
+alone. The sample's 64 of 454 project to about 650 of the part; every slice of CP273 adds its files.
+
+### The night's commands (one process at a time; `export ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace GOMEMLIMIT=1400MiB REPR_CPP_THREADS=2`)
+
+```
+PATH=<stubs>:$PATH bin/repr-cpp dg --corpus dg-error --front native --record   # CX12: the 4,597 files by Arbace's front end, about 70 min at two threads (the headers in full); writes test/cpp/check-dg-own-linux-amd64.edn
+# then test/crops/independence.edn's C++ read fact: :cases {:dg-own [N 1] :dg-clang [M 0.5]} with N the record's passes and M = 4597 - N; bin/crops-score --record
+bin/repr-cpp dg --corpus dg-error --front native                               # cpp-dg.dg-error-own's command: the record held (a recorded own pass that fails, fails)
+```
+
+With a host clang by hand, the measure again (the oracle tier's comparison): `bin/repr-cpp dg --corpus dg-error --front native --sample 10`,
+clang -fsyntax-only on the same `run.tsv` into a directory, then `bin/repr-cpp`'s `arbace.repr.cpp.dg own WORK --clang DIR` (the commands in
+the journal's entry).
+
+### Proposed (CP270-CP274; none decided)
+
+- **CP270: clang's builtin table for the undeclared check.** A `__` name is not diagnosed now (it may be a builtin: `__builtin_launder`
+  is, `__builtin_is_corresponding_member` is not in clang 23, `__for_begin` is nothing), so range-for36's and is-corresponding-member3's
+  lines are missed. (a) The names of clang's builtins computed from the pinned tarball's `Builtins.td`, `BuiltinsX86.td`,
+  `BuiltinsX86_64.td` as `clang/utils/TableGen/ClangBuiltinsEmitter.cpp` names them (Spellings, Template affixes and AsPrefix, X86's
+  `__builtin_ia32_` prefix, LibBuiltin's `__builtin_` aliases; the library builtins not declared in C++, SemaLookup's LookupBuiltin), a
+  small TableGen reader for the subset those files use (`def`, `class`, `let ... in`, `foreach`), into `cpp/target/clang-builtins.edn` with
+  a verify; costs about half a day; the oracle `__has_builtin` over the list by hand. (b) As now. **Recommended: (a).**
+- **CP271: the REAP read cell and the own record.** (a) As built: the cell's verdicts are clang's record's, the independence counts the
+  own passes at 1. (b) The cell reads both records, a file passing if either passes (the 6 own-only passes of the sample, about 60 on the
+  corpus, join the cell), each counted by its judge. **Recommended: (a)** until the own passes are a majority; then (b).
+- **CP272: the code generator's Sema as the checker, its scope.** Its refusals are trusted by class and message (`sema-rules`); the
+  extras of the sample show three gaps that look like errors (an explicit conversion function's candidates, a hidden friend found by
+  ADL, `decltype(this)` in a local class). (a) Keep the rules, each gap fixed in arbace.cpp.sema as found (the code generator gains too);
+  (b) a rule only for refusals with no gap seen on the corpus (the night's run lists them: `own --sema-log`, to build); (c) the checker
+  separate from the code generator. **Recommended: (a)**, with (b)'s list as its evidence.
+- **CP273: the next diagnostics by the measure.** By clang's diagnostic on the expected lines of the every-10th sample (the table above):
+  "call to implicitly-deleted copy constructor" (86 lines, the code generator's implicit members know deletedness: a rule), "constexpr
+  variable must be initialized by a constant expression" (25; the template hook's evaluator), access control ("is a private member",
+  17; the parser's class facts keep each member's access, :acc), "neither visible in the template definition nor found by ADL" (28;
+  two-phase lookup at the instantiation), "no viable conversion" and "assigning ... from incompatible type" (26; sema's conversions).
+  (a) In that order, a slice each; (b) syntax first: the gcc-only lines (209 with no clang error) are the extensions and pedantic errors
+  of g++'s own front end, no Sema needed. **Recommended: (a)**, then (b).
+- **CP274: the part's cost.** `dg-error-own` reads with the headers in full (the code generator's Sema needs them): about 3x the skim
+  read, about 30 minutes for the 4,597 files at two threads. (a) In `--full` as built; (b) the skim read for the files with no function
+  body to analyze. **Recommended: (a).**
+
+### Left
+
+The whole part's record (the night's) and the read fact's cases from it; CP270-CP274; the 1 crash of the sample (init/ptrfn2.C: the
+parser's InitListChecker port, `arbace.repr.cpp.sema`'s implicit-list, on an ill-formed pointer-to-member element: no judgment, clang's
+record stays); g++'s own lines (209 of the sample's 1,474 have no clang error: extensions and pedantic errors of g++'s front end, which
+the dg directives of the corpus expect).
+
+### Slips, scratch
+
+None against the day's rules. clang -fsyntax-only ran by hand on the sample's 454 files once, for the measure (the oracle tier's
+comparison, outside every own run). Scratch in the worktree's `.tmp/`: `m/` (the part's lists), `s100/`, `s10/` (the measure's runs, `cl/`
+clang's outputs), `s10b/`, `s10c/`, `s10-run1-dg/`, `repr-cpp-dg-own/`, `ctl/`, `t/` (probe files and scripts), `llvm-src/` (the clang
+sources read: Builtins*.td, ClangBuiltinsEmitter.cpp, SemaLookup.cpp, SemaExpr.cpp, SemaDecl.cpp, DiagnosticSemaKinds.td), `stubs/`, `*.log`.

@@ -943,3 +943,36 @@ By the user's decisions of 2026-11-08 (~17:00), under the day's light rules (doc
 - **CP249 (a)**: as now, nothing built.
 - Scores unchanged (76.1 / 100 / 67.7; the dg cases a record either way, the native parser's record in no counted case); independence.edn's
   C++ read fact rewritten to say so. Proposed CP250 (clang's option deltas), CP251 (the dg pack's dependencies on the host's headers).
+
+## 2026-11-08: C++'s CX12, first slice: Arbace's own front end's diagnostics for the dg-error part (branch `cpp-cx12`, from mac/cpp-cp247 4ddab9d59)
+
+By the brief of 2026-11-08 (Sema's diagnostics natively, so that the dg-error cases are judged by Arbace's front end), under the day's light
+rules: samples only (every 10th file of the part, 454 supported), no clang or gcc in the own runs (stubs exiting 99 first on PATH, their log
+empty). doc/cpp/CPP-SURVEY.md, "As built: CX12 (first slice)".
+
+- **Measured first**: the native parser on the sample with its declines as syntax errors, judged by the dg verdict: 38 of 454 pass (clang's
+  record: 3,359 of 4,566 corpus-wide). The expected error lines grouped by the dg-error's message and, from clang -fsyntax-only's outputs on
+  the same runs made by hand for the measure (the oracle tier's comparison), by clang's diagnostic on the line: "no matching function"
+  109, "call to implicitly-deleted copy constructor" 86, "use of undeclared identifier" 51, ... 209 lines with no clang error at all
+  (g++'s own). 400 of the 416 failures were missed errors, not extra ones: the front end accepted too much.
+- **Built**: `arbace.repr.cpp.diag` (the diagnostics: the preprocessor's, the parser's syntax errors at the failing token through a new
+  parser slot DIAGS, Sema's `undeclared` and `redefinitions` over the final tree, and the code generator's Sema, arbace.cpp.sema, as a
+  checker through two hooks, `*at*` and `*on-refusal*`, a refused function or statement reported and the analysis going on, its refusals
+  that are Sema's own errors mapped by `sema-rules`); `bin/repr-cpp dg --front native` and the dg verb `own` (each file by its own dg-error
+  lines, the record test/cpp/check-dg-own-linux-amd64.edn, regressions and the dg control judged); the gate part `cpp-dg.dg-error-own`.
+  The messages are clang's texts (DiagnosticSemaKinds.td) and the rules follow SemaExpr's DiagnoseEmptyLookup and SemaDecl's redeclaration
+  checks, from the pinned llvm-project-23.1.5 tarball (LICENSE.md, doc/ARBACE.md; the file carries clang's notice).
+- **Alternatives considered**: checks run during the parse (rejected: the tentative parses roll back, a check must see the committed tree);
+  a checker of its own beside the code generator's Sema (rejected for now, CP272: the code generator's analysis already decides overloads,
+  initialization and members, and a gap it shows is one the code generator has too); the declines alone as errors (CP242 (b): kept, as
+  one source of four).
+- **Checked**: the redeclaration rules against clang on two probe files (19 of 19 errors at clang's lines and columns); the sample by
+  `bin/repr-cpp dg --corpus dg-error --front native --sample 10 --record` with the compiler stubs first on PATH: 64 of 454 own passes (38
+  before), 6 of them passes clang's record fails (read: genuine), the dg control failing as it must on dr2082 and dr1423; `make
+  check-makefile`, `gate.crops check`, `bin/gate --full --plan` (`cpp-dg.dg-error-own` planned).
+- **The measure's commands** (by hand, the oracle tier's comparison): `arbace_tool -s arbace.c.dg -m arbace.repr.cpp.dg lists WORK
+  $GXXDG dg-error - 10`; then in the g++.dg tree, for each `run.tsv` line (NAME STD G++ARGS CLANGARGS), `clang++ -fsyntax-only -x c++
+  -std=STD CLANGARGS -ferror-limit=0 -fno-color-diagnostics -fno-caret-diagnostics -Wno-unknown-warning-option -iquote DIR NAME >
+  CL/NAME.err` (NAME's / as __); `REPR_CPP_FRONT=native arbace_tool ... read WORK dg-error`; `arbace_tool ... own WORK --clang CL`.
+- Scores (bin/crops-score --crop cpp): 76.1 / 100 / 67.7 before, 76.1 / 100 / 67.8 after (read 0.648 to 0.653: the sample record's 64 own-judged dg cases at 1; about 68.7 once the night records the whole part, about 650 own passes at the sample's rate); test/crops/scores.edn recorded. Proposed CP270 (clang's builtin table for the undeclared check), CP271 (the REAP read cell and the own record), CP272
+  (the code generator's Sema as the checker, its gaps), CP273 (the next diagnostics by the measure), CP274 (the part's cost).
