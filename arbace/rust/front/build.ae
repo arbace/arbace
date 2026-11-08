@@ -401,6 +401,9 @@
       (let [rd (c/res-def path)]
         (cond
           (= :fndef (first ty)) (mk e :zst-literal ty :user-ty (:user-ty (r-of e)) :fspan (:fspan e))
+          ;; a constant (NamedConst): the crate's or std's, or an associated one by its type
+          (:named-const (r-of e)) (let [[d args] (:named-const (r-of e))] (mk e :named-const ty :def d :args args))
+          (and (#{:local :ext} (first rd)) (str/starts-with? (str (nth rd 2)) "Const")) (mk e :named-const ty :def (second rd) :args [])
           (and (= :adt (first ty)) (ctor-info path))
           (let [[adt vi vid _] (ctor-info path)] (mk e :adt ty :adt adt :variant vi :vid vid :fields []))
           :else (unsupported "a path" (pr-str [rd (mapv :ident (:segs path)) (boolean (:lang path)) (first ty)])))))))
@@ -600,10 +603,16 @@
       (str/starts-with? (str k) "Pointer") (assoc base :k :pointer-coercion :cast (pointer-cast-kind k) :source x)
       :else (unsupported "an adjustment" k))))
 
+(def ^:dynamic *lint-root* :root)   ; the nearest enclosing node with a lint attribute (maybe_lint_level_root_bounded)
+
+(defn- lint-attrs? [e] (some #(re-find #"^(allow|warn|deny|forbid|expect)\b" (str (:unparsed %))) (:attrs e)))
+
 (defn mirror-expr [e]
-  (let [x (mirror-unadjusted e)
-        x (reduce (partial apply-adjustment e) x (:adj (r-of e)))]
-    {:k :scope :region [(:hir-id e) :node] :hir-id (:hir-id e) :value x :ty (:ty x) :span (:span e) :tsi (:hir-id e)}))
+  (binding [*lint-root* (if (lint-attrs? e) (:hir-id e) *lint-root*)]
+    (let [x (mirror-unadjusted e)
+          x (reduce (partial apply-adjustment e) x (:adj (r-of e)))]
+      {:k :scope :region [(:hir-id e) :node] :hir-id (:hir-id e) :value x :ty (:ty x) :span (:span e) :tsi (:hir-id e)
+       :lint *lint-root*})))
 
 (defn mirror-block [b]
   (binding [*names* *names*] (mirror-block* b)))
@@ -841,6 +850,32 @@
                 (recur (+ i 2) (conj acc (int d)))))
             (recur (inc i) (into acc (map #(bit-and (long %) 0xff) (.getBytes (str c) "UTF-8"))))))))))
 
+(def ^:dynamic *allocs* nil)   ; atom {:next N :ids {bytes id}}: the session's allocations (allocate_bytes_dedup), per program
+
+(defn- intern-alloc!
+  "allocate_bytes_dedup: a string's or byte string's bytes as an allocation, the same bytes the same one; its id"
+  [bytes]
+  (when *allocs*
+    (let [k (vec bytes)
+          id (or (get-in @*allocs* [:ids k])
+                 (let [i (:next @*allocs*)] (swap! *allocs* #(-> % (assoc-in [:ids k] i) (update :next inc))) i))]
+      (upd! update :allocs-used (fnil conj #{}) id)
+      id)))
+
+(defn- alloc-text
+  "write_allocation: an allocation's bytes, sixteen a line (an offset column past sixteen bytes), as ASCII beside"
+  [id bytes]
+  (let [n (count bytes)
+        w (max 1 (count (Long/toHexString (long n))))
+        line (fn [off chunk]
+               (str "    " (when (> n 16) (str "0x" (format (str "%0" w "x") off) " │ "))
+                    (apply str (map #(format "%02x " (bit-and (long %) 0xff)) chunk))
+                    (apply str (repeat (- 16 (count chunk)) "   "))
+                    "│ " (apply str (map #(let [b (bit-and (long %) 0xff)] (if (<= 0x20 b 0x7e) (str (char b)) ".")) chunk)) "\n"))]
+    (str "\nalloc" id " (size: " n ", align: 1) {\n"
+         (apply str (map-indexed (fn [i ch] (line (* 16 i) ch)) (partition-all 16 bytes)))
+         "}\n")))
+
 (defn- lit-const [lit neg t]
   (case (str (:lit-kind lit))
     "Integer" (let [v (bigint (parse-int-lit lit)) v (if neg (- v) v)]
@@ -852,9 +887,12 @@
                  c (long (if (str/starts-with? sym "\\") (int (first (unesc-char sym))) (.codePointAt sym 0)))]
              [:const (str "const " (char-text c)) t (list 'scalar c 4)])
     "Bool" (bool-const (= "true" (str (:symbol lit))))
-    ("Str" "StrRaw") [:const (str "const " (pr-str (str (:value lit (:symbol lit))))) t '(raw-str)]
+    ("Str" "StrRaw") (let [v (str (:value lit (:symbol lit)))]
+                       (intern-alloc! (map #(bit-and (long %) 0xff) (.getBytes v "UTF-8")))
+                       [:const (str "const " (pr-str v)) t '(raw-str)])
     ("ByteStr" "ByteStrRaw")
     (let [bs (or (:bytes lit) (byte-unesc (str (:symbol lit)) (= "ByteStrRaw" (str (:lit-kind lit)))))]
+      (intern-alloc! bs)
       [:const (str "const b\"" (apply str (map escape-ascii bs)) "\"") t '(raw-bytes)])
     (unsupported "a literal" (:lit-kind lit))))
 
@@ -868,6 +906,8 @@
   (case (:k x)
     :literal (lit-const (:lit x) (:neg x) (:ty x))
     :zst-literal (if (= :fndef (first (:ty x))) (fn-const (:ty x)) unit-const)
+    :named-const [:const (str "const " (binding [c/*in-value* true c/*erased-regions* true] (c/print-def-path (:def x) (:args x)))) (:ty x)
+                  (list 'unevaluated (str (:def x)) [] nil)]
     (unsupported "a constant" (:k x))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -993,6 +1033,34 @@
          r# (do ~@body)
          [bb# v#] (if (vector? r#) r# [r# nil])
          bb# (pop-scope! ~region bb#)]
+     (upd! assoc :source-scope ss#)
+     [bb# v#]))
+
+(defn- lint-root-of [sc]
+  (loop [s sc]
+    (or (get (:lint-roots (st)) s)
+        (if-let [p (first (nth (:source-scopes (st)) s nil))] (recur p) :root))))
+
+(declare new-source-scope!)
+
+(defn- lint-scope!
+  "maybe_new_source_scope: a THIR scope whose lint root (its nearest node with a lint attribute) differs from the current
+  source scope's opens a source scope of its own"
+  [lint]
+  (when (and lint (not= lint (lint-root-of (:source-scope (st)))))
+    (let [n (new-source-scope!)]
+      (upd! assoc-in [:lint-roots n] lint)
+      (upd! assoc :source-scope n))))
+
+(defmacro ^:private in-scope-x
+  "in_scope for a THIR scope expression X: its lint level, then its region scope"
+  [x & body]
+  `(let [ss# (:source-scope (st))
+         _# (lint-scope! (:lint ~x))
+         _# (push-scope! (:region ~x))
+         r# (do ~@body)
+         [bb# v#] (if (vector? r#) r# [r# nil])
+         bb# (pop-scope! (:region ~x) bb#)]
      (upd! assoc :source-scope ss#)
      [bb# v#]))
 
@@ -1133,7 +1201,7 @@
 
 (defn- expr-as-place [bb x mutability]
   (case (:k x)
-    :scope (in-scope (:region x) (expr-as-place bb (:value x) mutability))
+    :scope (in-scope-x x (expr-as-place bb (:value x) mutability))
     :field (let [[bb pb] (expr-as-place bb (:lhs x) mutability)
                  lt (:ty (:lhs x))
                  pb (if (and (= :adt (first lt)) (tc/enum? (second lt))) (project pb [:downcast nil (:variant x) lt]) pb)]
@@ -1175,7 +1243,7 @@
 
 (defn as-temp [bb temp-lifetime x mutability]
   (if (= :scope (:k x))
-    (let [[bb v] (in-scope (:region x) (as-temp bb temp-lifetime (:value x) mutability))] [bb v])
+    (let [[bb v] (in-scope-x x (as-temp bb temp-lifetime (:value x) mutability))] [bb v])
     (let [t (new-local! (:ty x) :mut (not= mutability :not))]
       (when-not (or (#{:break :continue :return} (:k x))
                     (and (= :block (:k x)) (nil? (:expr (:block x))) (not (:targeted-by-break (:block x))) (= [:never] (:ty x))))
@@ -1187,7 +1255,7 @@
 
 (defn as-operand [bb scope x & [needs-temp]]
   (if (= :scope (:k x))
-    (in-scope (:region x) (as-operand bb scope (:value x) needs-temp))
+    (in-scope-x x (as-operand bb scope (:value x) needs-temp))
     (case (category x)
       :constant (if (or (= needs-temp :no) (not (needs-drop? (:ty x))))
                   [bb (as-constant x)]
@@ -1247,7 +1315,7 @@
 
 (defn as-rvalue [bb scope x]
   (case (:k x)
-    :scope (in-scope (:region x) (as-rvalue bb scope (:value x)))
+    :scope (in-scope-x x (as-rvalue bb scope (:value x)))
     :binary (let [[bb l] (as-operand bb scope (:lhs x) :maybe)
                   [bb r] (as-operand bb scope (:rhs x) :no)]
               (build-binary-op bb (:op x) (:ty x) l r))
@@ -1325,7 +1393,7 @@
     (when-not scope? (upd! update :block-context conj :sub-expr))
     (let [r
           (case (:k x)
-            :scope (in-scope (:region x) (expr-into-dest dest bb (:value x)))
+            :scope (in-scope-x x (expr-into-dest dest bb (:value x)))
             :block (let [b (:block x)]
                      (in-scope (:region b)
                        (if (:targeted-by-break b)
@@ -1399,7 +1467,7 @@
 
 (defn stmt-expr [bb x stmt-scope]
   (case (:k x)
-    :scope (in-scope (:region x) (blk (stmt-expr bb (:value x) stmt-scope)))
+    :scope (in-scope-x x (blk (stmt-expr bb (:value x) stmt-scope)))
     :assign (do (upd! update :block-context conj :sub-expr)
                 (let [[bb rv] (as-local-rvalue bb (:rhs x))
                       [bb p] (as-place bb (:lhs x))
@@ -1489,6 +1557,16 @@
 
 (defn- binding-local-ty [p] (case (:by-ref p) :not [:ref [:re-erased] false (:ty p)] :mut [:ref [:re-erased] true (:ty p)] (:ty p)))
 
+(defn- binding-projs
+  "The projections from a pattern down to one of its bindings (`Field(0, ())` through tuples and structs), nil when one
+  goes through anything else"
+  [pat b]
+  (letfn [(w [p acc]
+            (cond (identical? p b) acc
+                  (= :leaf (:k p)) (some (fn [[i sp]] (w sp (conj acc (str "Field(" i ", ())")))) (:subpatterns p))
+                  :else nil))]
+    (w pat [])))
+
 (defn declare-bindings
   "declare_bindings: each primary binding a local in the current source scope, its debug info in VIS (made on the first
   binding when nil); the visibility scope"
@@ -1496,9 +1574,9 @@
   (reduce (fn [vis p]
             (let [vis (or vis (new-source-scope!))
                   l (new-local! (:var-ty p) :mut (:mutbl p) :scope (:source-scope (st)))]
-              ;; declare_binding's user type projections: the let's annotation at the pattern itself
-              (when (and user-ty (identical? p pattern))
-                (upd! assoc-in [:locals l :user-ty] [(str "UserTypeProjection { base: UserType(" user-ty "), projs: [] }")]))
+              ;; declare_binding's user type projections: the let's annotation, at the binding's field projections
+              (when-let [projs (and user-ty (binding-projs pattern p))]
+                (upd! assoc-in [:locals l :user-ty] [(str "UserTypeProjection { base: UserType(" user-ty "), projs: [" (str/join ", " projs) "] }")]))
               (upd! update :debug conj {:name (:name p) :scope vis :value (place-form (place l))})
               (upd! assoc-in [:var-indices (:var p)] l)
               vis))
@@ -1528,8 +1606,9 @@
           (push! bb (list 'raw (str "AscribeUserType(" (mir/place (place-form p)) ", o, UserTypeProjection { base: UserType(" i "), projs: [] })")))))
       (schedule-drop-for-binding! (:var pat))
       bb)
-    (let [[bb pb] (lower-scrutinee bb init)]
-      (place-into-pattern bb pat pb))))
+    (let [i0 (:let-user-ty (st))
+          [bb pb] (lower-scrutinee bb init)]
+      (place-into-pattern bb pat pb i0))))
 
 (defn then-else-break [bb x temp-scope]
   (case (:k x)
@@ -1546,7 +1625,7 @@
                (break-for-else! ok)
                fail)
              (then-else-break-default bb x temp-scope))
-    :scope (blk (in-scope (:region x) (then-else-break bb (:value x) temp-scope)))
+    :scope (blk (in-scope-x x (then-else-break bb (:value x) temp-scope)))
     :use (then-else-break bb (:source x) temp-scope)
     :let (unsupported "if let")
     (then-else-break-default bb x temp-scope)))
@@ -1693,8 +1772,13 @@
   (bind-for-arm-body! (:pre branch) (:bindings branch))
   (:pre branch))
 
-(defn place-into-pattern [bb pat pb]
+(defn place-into-pattern [bb pat pb & [ascription]]
   (let [[branch] (lower-match-tree bb pb [[pat false]])]
+    ;; ascribe_types: a let's annotation pushed again, ascribed to the matched place before the bindings
+    (when ascription
+      (let [i (count (:user-types (st)))]
+        (upd! update :user-types conj (nth (:user-types (st)) ascription))
+        (push! (:pre branch) (list 'raw (str "AscribeUserType(" (mir/place (place-form pb)) ", +, UserTypeProjection { base: UserType(" i "), projs: [] })")))))
     (bind-pattern! branch)))
 
 (defn- lower-scrutinee [bb x]
@@ -2237,7 +2321,10 @@
      :scopes (:source-scopes s)
      :debug (:debug s)
      :blocks (mapv (fn [b] {:cleanup (:cleanup b) :stmts (:stmts b) :after-dbg [] :term (:term b)}) (:blocks s))
-     :allocs ""
+     :allocs (if-let [used (seq (:allocs-used s))]
+               (let [by-id (into {} (for [[k v] (:ids @*allocs*)] [v k]))]
+                 (apply str (for [id (sort > used)] (alloc-text id (get by-id id)))))
+               "")
      :user-types (vec (for [{:keys [span ty text]} (:user-types s)]
                         (if text text
                         (let [[l1 c1 l2 c2] span t (ty-text ty)]

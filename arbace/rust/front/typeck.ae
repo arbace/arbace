@@ -129,6 +129,7 @@
 ;; The facts
 
 (def ^:dynamic *owner* nil)
+(def ^:dynamic *assoc-const* nil)   ; RF10: atom, a type-relative path's associated constant [def args] (THIR's NamedConst)
 (def ^:dynamic *user-self* nil)   ; RF10: atom, a type-relative path's written self type (instantiate_value_path's self_ty.raw)
 (def ^:dynamic *extra* nil)   ; RF10: atom hir-id -> {:ty :adj :callee :pat-adj ...} (unresolved), when the builder asks
 (def ^:dynamic *facts* nil)  ; atom [fact]
@@ -893,11 +894,12 @@
                   (if-let [[def k] (impl-item ip nm)]
                     (cond (= "AssocFn" k) (let [own (drop (count args) (fresh-args def))] [:fndef def (into (vec args) own)])
                           (str/starts-with? (str k) "AssocConst")
+                          (do (when *assoc-const* (reset! *assoc-const* [def (vec args)]))
                           (if (number? def)
                             (erase (c/subst (c/type-of def) (vec args)))
                             (if-let [v (some (fn [[n kk _ v]] (when (= n nm) v)) (:items (get (:impls c/*si*) ip)))]
                               (erase (c/subst (c/sty->ty v) (vec args)))
-                              (do (rollback! s) nil)))
+                              (do (rollback! s) nil))))
                           :else (do (rollback! s) nil))
                     (do (rollback! s) nil))
                   nil)))
@@ -1116,7 +1118,7 @@
   an impl's item), canonicalized as canonicalize_user_type_annotation does (inference variables and regions the canonical
   variables ^c_N in their order of appearance, the arguments then the self type); nil when it cannot contain user bounds
   or is the identity"
-  [def args self]
+  [def args self & [always]]
   (let [idx (atom {}) kinds (atom [])
         var! (fn [k kf] (or (get @idx k) (let [i (count @kinds)] (swap! kinds conj (kf i)) (swap! idx assoc k i) i)))
         canon (fn canon [t]
@@ -1135,7 +1137,7 @@
                                   (and (vector? t) (#{:re-var :re-early :re-bound :param :proj} (first t))) true
                                   (vector? t) (boolean (some #(cond (vector? %) (free? %) (map? %) (some free? (vals %)) :else false) t))
                                   :else false))]
-    (when (or self (some free? args))
+    (when (or always (some free? args) (and self (free? (second self))))
       (let [cargs (mapv canon args)
             ;; (identity: each argument a fresh variable, in order)
             identity? (and (nil? self) (= (count @kinds) (count args))
@@ -1171,6 +1173,8 @@
                                     :float (let [i (var! [:t (nth t 2)] (fn [_] "Float"))] [:param i (str "^c_" i)])
                                     t)
                         (and (vector? t) (= :re-var (first t))) (do (var! [:r (second t)] (fn [_] "Region(U0)")) [:re-erased])
+                        ;; (an elided lifetime of a written type: an inference region, each its own)
+                        (= [:re-erased] t) (do (var! [:r (gensym)] (fn [_] "Region(U0)")) [:re-erased])
                         (and (vector? t) (keyword? (first t))) (into [(first t)] (map #(cond (vector? %) (canon %) (map? %) (into {} (for [[k v] %] [k (canon v)])) :else %) (rest t)))
                         (vector? t) (mapv canon t)
                         :else t)))
@@ -1739,8 +1743,9 @@
                                  :else nil)))
                        [:unknown]))
           :path (do (doseq [seg (:segs (:path e)) a (:args (:args seg)) :when (and (map? (:const a)) (not (:node a)))] (anon-const! (:const a) true))
-                    (binding [*user-self* (atom nil)]
+                    (binding [*user-self* (atom nil) *assoc-const* (atom nil)]
                       (let [t (apply-turbofish e (path-ty e))]
+                        (when (and *extra* @*assoc-const*) (note! e :named-const @*assoc-const*))
                         ;; RF10: the path's user type annotation (instantiate_value_path)
                         (when (and *extra* (#{:fndef} (first t)))
                           (let [[_ d args] t
@@ -1765,7 +1770,8 @@
                               (when *extra*
                                 (let [fresh-parent (vec (fresh-args def))
                                       uargs (vec (concat (take (- (count args) (count own)) fresh-parent) written))]
-                                  (when-let [u (canonical-user-ty def uargs nil)] (note! e :user-ty u))))
+                                  ;; (instantiate_method_args writes it whenever it is not the identity)
+                                  (when-let [u (canonical-user-ty def uargs nil true)] (note! e :user-ty u))))
                               (doseq [[v a] (map vector own written)] (unify v a))))
                           (check-args! (map vector (:args e) (concat (rest (:inputs sig)) (repeat nil))))
                           (:output sig))
@@ -2357,13 +2363,13 @@
             (str/includes? (str (:kind (c/def-of ctor))) "Const") "const"
             :else "fn"))))
 
-(defn discr-ty [adt] (if (string? adt) [:int "isize"] (get c/prim-tys (repr-int (:node (c/def-of adt))))))
+(defn discr-ty [adt] (if (string? adt) (get c/prim-tys (or (:repr (get (:adts c/*si*) adt)) "isize")) (get c/prim-tys (repr-int (:node (c/def-of adt))))))
 
 (defn discriminant-values
   "An enum's discriminants by variant: an explicit one's literal, else the previous one's plus one"
   [adt]
   (if (string? adt)
-    (vec (range (count (std-variants adt))))
+    (or (some-> (:discrs (get (:adts c/*si*) adt)) vec) (vec (range (count (std-variants adt)))))
     (loop [vs (variants-of adt) prev -1 acc []]
       (if-let [v (first vs)]
         (let [x (:disr (:node v))

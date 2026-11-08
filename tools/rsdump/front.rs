@@ -573,7 +573,15 @@ pub fn std_iface<'tcx>(tcx: TyCtxt<'tcx>) -> String {
                         format!("{{:name {} :path {} :ctor {} :fields [{}]}}", q(v.name.as_str()), q(&def_path(tcx, v.def_id)), ctor, fs.join(" "))
                     })
                     .collect();
-                let _ = writeln!(out, "(si/adt {} {{:kind {} {} :variants [{}]}})", q(&p), kind(*k), generics(*d), vs.join(" "));
+                // RF10: an enum's discriminant type (its #[repr]) and its variants' discriminants, for MIR building
+                let extra = if a.is_enum() {
+                    let ds: Vec<String> = a.discriminants(tcx).map(|(_, d)| format!("{}", d)).collect();
+                    let repr = if a.repr().int.is_some() { { use rustc_middle::ty::util::IntTypeExt; q(&a.repr().discr_type().to_ty(tcx).to_string()) } } else { "nil".into() };
+                    format!(" :repr {} :discrs [{}]", repr, ds.join(" "))
+                } else {
+                    String::new()
+                };
+                let _ = writeln!(out, "(si/adt {} {{:kind {} {} :variants [{}]{}}})", q(&p), kind(*k), generics(*d), vs.join(" "), extra);
                 impls.extend(tcx.inherent_impls(*d).iter().copied().filter(|i| std_crate(*i)));
             }
             DefKind::Trait => {

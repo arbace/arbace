@@ -24,6 +24,13 @@
                    body (if (str/starts-with? body "\n") (subs body 1) body)]
                [nm body]))))
 
+(defn- alloc-ids-normal
+  "A body's text with its allocations' ids renumbered by their first appearance (the ids are the session's interning order)"
+  [t]
+  (let [ids (distinct (map second (re-seq #"alloc(\d+)" t)))
+        m (into {} (map-indexed (fn [i x] [x (str "A" i)]) ids))]
+    (str/replace t #"alloc(\d+)" (fn [[_ d]] (str "alloc" (get m d))))))
+
 (defn- strip-allocs [t]
   (let [i (str/index-of t "\n}\n\nalloc")] (if i (subs t 0 (+ i 3)) t)))
 
@@ -63,6 +70,7 @@
   [front-dir n]
   (with-program front-dir n
     (fn [oc ed]
+      (binding [build/*allocs* (atom {:next 1 :ids {}})]
       (let [rc (atom {})]
         (vec (for [d (collect/defs) :when (or (and (#{"Fn" "AssocFn"} (:kind d)) (:body (:node d)))
                                               (= "Closure" (:kind d))
@@ -73,7 +81,7 @@
                                 :else (build/build-body d {:overflow-checks oc :edition ed :root-cache rc})) nil]
                       (catch Throwable e
                         (when (System/getenv "BUILD_TRACE") (.printStackTrace e))
-                        [nm nil (str (or (:what (ex-data e)) e)) (pr-str (:x (ex-data e)))])))))))))
+                        [nm nil (str (or (:what (ex-data e)) e)) (pr-str (:x (ex-data e)))]))))))))))
 
 (defn -main [front-dir built-dir & names]
   (let [verbose (System/getenv "BUILD_VERBOSE")
@@ -90,7 +98,8 @@
                                     (= w g) [:equal nm]
                                     ;; rustc's allocations printed after the body (a string constant's bytes): their ids
                                     ;; are the session's interning order, which the slice does not print
-                                    (= (strip-allocs w) g) [:equal-allocs nm]
+                                    (= (alloc-ids-normal w) (alloc-ids-normal g)) [:equal-alloc-ids nm]
+                                    (= (strip-allocs w) (strip-allocs g)) [:equal-allocs nm]
                                     :else [:differ nm (first-diff w g)])))]
                  (when dump
                    (.mkdirs (File. ^String dump))
@@ -106,11 +115,11 @@
                  {:name n :total (count want) :rows rows :texts texts :want want})))
         cnt (fn [r k] (count (filter #(= k (first %)) (:rows r))))]
     (doseq [r results]
-      (println (format "%-12s %3d of %3d bodies equal to rustc's built MIR, %3d more but for the allocations' text, %3d differ, %3d refused, %3d not built"
-                       (:name r) (cnt r :equal) (:total r) (cnt r :equal-allocs) (cnt r :differ) (cnt r :refused) (- (:total r) (count (:rows r))))))
+      (println (format "%-12s %3d of %3d bodies equal to rustc's built MIR, %3d more but for the allocations' ids, %3d but for their text, %3d differ, %3d refused, %3d not built"
+                       (:name r) (cnt r :equal) (:total r) (cnt r :equal-alloc-ids) (cnt r :equal-allocs) (cnt r :differ) (cnt r :refused) (- (:total r) (count (:rows r))))))
     (let [sum (fn [k] (reduce + (map #(cnt % k) results)))]
-      (println (format "build-check: %d of %d bodies equal to rustc's built MIR, %d more but for the allocations' text (%d differ, %d refused), %d programs whole of %d"
-                       (sum :equal) (reduce + (map :total results)) (sum :equal-allocs) (sum :differ) (sum :refused)
+      (println (format "build-check: %d of %d bodies equal to rustc's built MIR, %d more but for the allocations' ids, %d more but for their text (%d differ, %d refused), %d programs whole of %d"
+                       (sum :equal) (reduce + (map :total results)) (sum :equal-alloc-ids) (sum :equal-allocs) (sum :differ) (sum :refused)
                        (count (filter #(= (cnt % :equal) (:total %)) results)) (count results)))
       (println "refusals:" (pr-str (frequencies (for [r results [k _ e] (:rows r) :when (= k :refused)] e)))))
     ;; the negative control: the first program's first equal body against another body's text
