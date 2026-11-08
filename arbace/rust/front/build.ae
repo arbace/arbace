@@ -28,7 +28,7 @@
 
 (def ^:dynamic *root-file* nil)
 
-(declare span-text ctor-info)
+(declare span-text ctor-info field-span-of-ty)
 
 (defn- unsupported [what & [x]] (throw (ex-info (str "build: unsupported " what) {:what what :x x})))
 
@@ -447,6 +447,29 @@
               :args [arg-x] :from-hir false :fn-span span}]
     {:k :deref :ty place-ty :arg call :span span :tsi (:hir-id e)}))
 
+(defn- field-span-of-ty
+  "A struct field's span from its type's (a derive's assertion is spanned by its field: `pub x: i32`), from the root's text"
+  [[l1 c1 l2 c2 :as sp]]
+  (let [src c/*src*]
+    (if-not src
+      sp
+      (let [{:keys [^ints cps lines]} src
+            off (+ (long (nth lines (dec (long l1)))) (dec (long c1)))
+            at (fn [i] (when (>= i 0) (char (aget cps (int i)))))
+            ws-back (fn [i] (loop [i i] (if (and (>= i 0) (Character/isWhitespace (char (at i)))) (recur (dec i)) i)))
+            id-back (fn [i] (loop [i i] (if (and (>= i 0) (let [ch (at i)] (or (Character/isLetterOrDigit (char ch)) (= \_ ch)))) (recur (dec i)) i)))
+            i (ws-back (dec off))
+            start (if (= \: (at i))
+                    (let [j (ws-back (dec i)) k (id-back j)
+                          ;; a `pub` before the name
+                          m (ws-back k) n (id-back m)]
+                      (if (and (= "pub" (apply str (map #(at %) (range (inc n) (inc m)))))) (inc n) (inc k)))
+                    off)
+            lc (fn [o] (let [li (loop [a 0 b (dec (count lines))] (if (>= a b) a (let [m (quot (+ a b 1) 2)] (if (<= (long (nth lines m)) o) (recur m b) (recur a (dec m))))))]
+                         [(inc li) (inc (- o (long (nth lines li))))]))
+            [sl sc] (lc start)]
+        [sl sc l2 c2]))))
+
 (defn- method-ident-span
   "A method call's segment's span (method_callee's span: the method's name after the receiver's `.`), from the root's text"
   [e]
@@ -633,8 +656,9 @@
                           :user-ty (when-let [tsp (and (:ty s)
                                                        (cond (sequential? (:span (:ty s))) (:span (:ty s))
                                                              ;; a derive's `let _: AssertParamIsClone<FieldTy>;`: the field type's span
-                                                             (:fspan s) (or (some #(when (vector? (:span (:ty %))) (:span (:ty %)))
-                                                                                  (:args (:args (peek (:segs (:path (:ty s)))))))
+                                                             (:fspan s) (or (some-> (some #(when (vector? (:span (:ty %))) (:span (:ty %)))
+                                                                                          (:args (:args (peek (:segs (:path (:ty s)))))))
+                                                                                    field-span-of-ty)
                                                                             (:fspan s))))]
                                      (if-let [u (:user-ty-text (r-of s))]
                                        {:text (str "user_ty: " u ", span: " (span-text tsp) ", inferred_ty: "
