@@ -278,6 +278,14 @@ code. Three kinds of things live here:
   references after `builder/mod.rs` and `thir/cx/expr.rs`, functional update and `write_box_via_move` after `builder/expr/into.rs`;
   and `arbace/rust/front/passes.ae`, mir_built's passes after `rustc_mir_transform/src/{lib,lint_and_remove_uninhabited,simplify}.rs`,
   the same revision and sources (LICENSE.md; MIT OR Apache-2.0).
+  RF10's fourth slice (2026-11-08, "As built: RF10 (fourth slice)") ports into `passes.ae` the passes from mir_promoted to runtime
+  MIR's cleanup after `rustc_mir_transform/src/{promote_consts,cleanup_post_borrowck,remove_noop_landing_pads,deref_separator,
+  add_call_guards,post_analysis_normalize,elaborate_drops,elaborate_drop,abort_unwinding_calls,erase_deref_temps,
+  elaborate_box_derefs,lower_intrinsics,remove_place_mention,patch}.rs`, `rustc_const_eval/src/check_consts/qualifs.rs`,
+  `rustc_mir_dataflow/src/{move_paths/{mod,builder}.rs,un_derefer.rs,drop_flag_effects.rs,impls/initialized.rs,framework/direction.rs}`
+  and `rustc_middle/src/ty/layout.rs`' `fn_can_unwind`, the same revision and sources; and into `build.ae` the float printing of
+  `rustc_apfloat` 0.2.3 (`src/ieee.rs`, `impl Display for IeeeFloat`; Apache-2.0 WITH LLVM-exception, from the cargo registry's
+  `rustc_apfloat-0.2.3+llvm-462a31f5a5ab`) (LICENSE.md).
   `arbace/rust/check.ae`'s own-verdict judge (`own-verdict`, `run-class`, `verdict-met?`) ports rustc 1.99.1's compiletest
   (`src/tools/compiletest/src/runtest/ui.rs`'s run checks, `directives.rs`'s directive lines; the pinned `rustc-1.99.1-src.tar.xz`),
   by hand on 2026-11-07 (rust-90, doc/rust/EVAL.md §13; LICENSE.md; MIT OR Apache-2.0); evaluated from the checkout.

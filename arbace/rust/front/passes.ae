@@ -441,6 +441,15 @@
 
 (defn- array-len [t] (when (= :array (first t)) (let [n (nth t 2)] (cond (number? n) n (= :cval (first n)) (let [v (second n)] (if (number? v) v (try (Long/parseLong (str/replace (str v) #"_usize$" "")) (catch Exception _ nil)))) :else nil))))
 
+(def ^:private promotable-fns
+  "The functions std marks #[rustc_promotable] (rust-src 1.99.1's library: ptr/mod.rs null and null_mut, mem/mod.rs size_of and
+  align_of, num/{int,uint}_macros.rs min_value and max_value, ops/range.rs RangeInclusive::new, task/wake.rs RawWaker::new and
+  RawWakerVTable::new), by their def paths"
+  #"^(core|std)::(ptr::null(_mut)?|mem::(size_of|align_of)|num::<impl [iu](8|16|32|64|128|size)>::(min|max)_value|ops::range::RangeInclusive::new|task::wake::(RawWaker|RawWakerVTable)::new)$")
+
+(defn- promotable-const-fn? [ft]
+  (and (= :fndef (first ft)) (string? (second ft)) (boolean (re-find promotable-fns (second ft)))))
+
 (defn- validate-candidates
   "validate_candidates: the candidates whose borrowed temporary is promotable (Validator's rules)"
   [body temps0 cands]
@@ -537,15 +546,16 @@
                 "aggregate" (every? validate-operand (nth r 2))
                 false))
             (validate-call [t bb]
-              (let [[_ f args] t]
+              (let [[_ f args] t
+                    ft (operand-tc body f)]
                 (and (validate-operand f) (every? validate-operand args)
-                     ;; #[rustc_promotable] (none the corpus calls), else only in a const's or static's initializer: a
-                     ;; const fn in a block that is not dead code
-                     (#{:static :const} ck)
-                     (let [ft (operand-tc body f)
-                           d (when (= :fndef (first ft)) (c/def-of (second ft)))]
-                       (and d (map? (:node d)) (= :const (get-in (:node d) [:header :constness]))))
-                     (contains? @safe bb))))]
+                     ;; #[rustc_promotable], else only in a const's or static's initializer: a const fn in a block that
+                     ;; is not dead code
+                     (or (promotable-const-fn? ft)
+                         (and (#{:static :const} ck)
+                              (let [d (when (and (= :fndef (first ft)) (number? (second ft))) (c/def-of (second ft)))]
+                                (and d (map? (:node d)) (= :const (get-in (:node d) [:header :constness]))))
+                              (contains? @safe bb))))))]
       (let [ok (vec (filter (fn [[bb i]]
                               (let [s (unwrap-dbg (nth (:stmts (nth (:blocks body) bb)) i))
                                     [_ kind p] (nth s 2)]
@@ -1544,6 +1554,18 @@
                 (new-block! (= :in-cleanup unwind)
                             (list 'call (drop-fn-operand t) [(list 'move (mk-place r []))] (mk-place u []) succ (into-action unwind))
                             [(list 'assign (mk-place r []) (list 'ref :mut (:place d)))])))
+            (open-drop-for-box-contents [d t succ unwind]
+              (let [inner (first (nth t 2))
+                    it (build/ty-text inner)
+                    unique-f (with-meta (list 'ty (str "std::ptr::Unique<" it ">") '(other "adt")) {:tc [:adt "core::ptr::unique::Unique" [inner]]})
+                    nonnull-f (with-meta (list 'ty (str "std::ptr::NonNull<" it ">") '(other "adt")) {:tc [:adt "core::ptr::non_null::NonNull" [inner]]})
+                    ptr-t [:ptr false inner]
+                    pl (new-temp! ptr-t)
+                    interior (mk-place pl [(list 'deref)])
+                    do-drop (drop-subpath d interior (deref-subpath (:path d)) succ unwind)
+                    src (mk-place (place-local (:place d)) (into (place-proj (:place d)) [(list 'field 0 unique-f) (list 'field 0 nonnull-f)]))]
+                (new-block! (= :in-cleanup unwind) (list 'goto do-drop)
+                            [(list 'assign (mk-place pl []) (list 'cast "Transmute" (list 'copy src) (build/ty-form ptr-t)))])))
             (open-drop-for-adt [d t]
               (let [vs (adt-variants t)]
                 (if (empty? vs)
@@ -1554,7 +1576,10 @@
                                               (let [[succ unwind] (ladder-bottom d)]
                                                 (drop-ladder d (fields-of d (:place d) (:path d) (nth (first vs) 2)) succ unwind))
                                               :else (let [[succ unwind] (ladder-bottom d)] (open-drop-for-multivariant d t succ unwind)))]
-                    (cond (box? t) (throw (ex-info "passes: an open drop of a Box" {:what "an open drop of a Box"}))
+                    (cond (box? t)
+                          (let [succ (destructor-call-block d csucc cunwind)
+                                unwind (if (= :in-cleanup cunwind) :in-cleanup [:to (destructor-call-block d (second cunwind) :in-cleanup)])]
+                            (drop-flag-test-block d (open-drop-for-box-contents d t succ unwind) csucc cunwind))
                           (adt-dtor? t) (drop-flag-test-block d (destructor-call-block d csucc cunwind) csucc cunwind)
                           :else csucc)))))
             (open-drop [d]

@@ -1161,3 +1161,36 @@ mir_built, before mir_promoted); a structural needs_drop guess for private std A
 dropped JoinInner's Arc; kept "needs drop" and proposed RFP28). The user's decisions RFP25 (a), RFP26 (a), RFP27 (a) recorded in
 doc/rust/FRONTEND-SURVEY.md, "Decided (2026-11-08, the user: RFP25-RFP27)". Proposed: RFP28 (the private std ADTs' fields in
 `--std-iface`), RFP29 (the crate hash in MIR text).
+
+## 2026-11-08: RF10's fourth slice: slice 3's passes from mir_promoted to runtime MIR's cleanup (branch `rust-rf10b`)
+
+Continued `rust-rf10b` from `8052a77c0` (doc/rust/FRONTEND-SURVEY.md, "As built: RF10 (fourth slice)"). Sources: rustc 1.99.1
+(`58cf8f9c3`, Alpine's rust-src-1.99.1-r0 pinned by `tools/rsdump/apks.sha256`, which carries `compiler/`), MIT OR Apache-2.0,
+taken under MIT; rustc_apfloat 0.2.3 (`rustc_apfloat-0.2.3+llvm-462a31f5a5ab`, the host's cargo registry, `src/ieee.rs`),
+Apache-2.0 WITH LLVM-exception (LICENSE.md, doc/ARBACE.md).
+
+`arbace/rust/front/passes.ae` gained the pipeline of `rustc_mir_transform/src/lib.rs` from PromoteTemps to
+SimplifyCfg-pre-optimizations (`passes/pipeline`, 21 passes): PromoteTemps (`promote_consts.rs`' collector, Validator and Promoter over
+`rustc_const_eval`'s qualifs; promoted bodies join at ImpossibleClauses), CleanupPostBorrowck, RemoveNoopLandingPads, the SimplifyCfg
+variants with strip_nops and the runtime phases' simplify_branch, Derefer and ElaborateBoxDerefs over MirPatch's statement insertion,
+AddCallGuards, PostAnalysisNormalize's opaque types, ElaborateDrops (`rustc_mir_dataflow`'s move paths, MaybeInitializedPlaces and
+MaybeUninitializedPlaces to their fixpoint, drop_flag_effects, and `elaborate_drop.rs`' DropCtxt: static, conditional, open drops with
+their ladders, enums' switch blocks, destructors, Box's contents), AbortUnwindingCalls over fn_can_unwind, EraseDerefTemps,
+LowerIntrinsics, RemovePlaceMention. `build.ae`'s statements carry their source scope, type forms their typeck type, locals whether
+they are user variables, constants their allocations' ids (a body's allocations recomputed after promotion). `bin/rust-front
+build-oracles` dumps all 21 passes (oracles regenerated for the 88 programs; constructs, edition2015 and lowered_table still fail in
+rustc after dumping, as before); `BUILD_PASS=NAME bin/rust-front build-check` judges each pass to NAME against its own dump, by its
+first phase (`passes/pass-phase`), `BUILD_FIRST=1` names each body's first unequal pass. Slice 2's tail: rustc_apfloat's float Display,
+coercion casts (a cast to its operand's type a Use), a derive's tuple-struct path its constructor.
+
+Results: after SimplifyCfg-pre-optimizations 499 of 616 bodies equal and 46 but for the allocations' ids, 60 programs whole; no pass
+loses a body (every unequal body is unequal at built, but two promoted bodies with typeck's `Option<_>` gap); built MIR 415 → 418 of
+510, refused 13 → 12; a1-a7 whole at built and after every pass. expand-check 92/92 and 857/857, hir-check --ours 90 + 1,
+typeck-check --ours 11,142 of 11,173, capture-check 173/174: unchanged. RFP28 holds back 2 bodies (float-f32's and float-f64's
+main), RFP29 1 (drops' main); neither built. Alternatives considered: judging each pass on rustc's input to it (the `.before.mir`
+dump) instead of our own previous pass's output (rejected: it needs a MIR text reader and would hide a pass's error in the next);
+ElaborateDrops by a structural guess of drop flags (rejected: the flags and their block numbering follow the dataflow's states,
+so only the dataflow gives rustc's text); a structural hash for opaque types (taken for now, RFP33 proposes typeck's def id).
+Found on the way: a `swap!` whose update function swapped the same atom looped forever (Derefer, ElaborateBoxDerefs: now one
+`swap!` after the walk). Proposed: RFP30 (the pass judge in RFP24 (b)'s essential step), RFP31 (the oracles' size), RFP32 (std's
+function attributes), RFP33 (opaque types' identity).

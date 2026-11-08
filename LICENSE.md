@@ -881,6 +881,14 @@ covers what.
   `builder/expr/into.rs`' `write_box_via_move` and functional update; and `arbace/rust/front/passes.ae`, Arbace forms written after
   `compiler/rustc_mir_transform/src/{lib,lint_and_remove_uninhabited,simplify}.rs` and `compiler/rustc_middle/src/mir/{terminator,traversal}.rs`,
   the same terms.
+  RF10's fourth slice ("As built: RF10 (fourth slice)") adds to `passes.ae`, from the same sources and under the same terms,
+  `compiler/rustc_mir_transform/src/{promote_consts,cleanup_post_borrowck,remove_noop_landing_pads,deref_separator,add_call_guards,
+  post_analysis_normalize,elaborate_drops,elaborate_drop,abort_unwinding_calls,erase_deref_temps,elaborate_box_derefs,lower_intrinsics,
+  remove_place_mention,patch}.rs`, `compiler/rustc_const_eval/src/check_consts/qualifs.rs`, `compiler/rustc_mir_dataflow/src/{move_paths/
+  {mod,builder}.rs,un_derefer.rs,drop_flag_effects.rs,impls/initialized.rs,framework/direction.rs}` and `compiler/rustc_middle/src/ty/
+  layout.rs`' `fn_can_unwind`; and to `build.ae` a port of rustc_apfloat 0.2.3's (`rustc_apfloat-0.2.3+llvm-462a31f5a5ab`,
+  `src/ieee.rs`, `impl Display for IeeeFloat`) float formatting, a port of LLVM's APFloat::toString, under the Apache License 2.0
+  with LLVM Exceptions (the text of section "LLVM (clang): Apache License 2.0 with LLVM Exceptions" below).
 - The own-verdict judge of `arbace/rust/check.ae` (`own-verdict`, `run-class`, `verdict-met?`, `directives`; rust-90,
   doc/rust/EVAL.md §13): Arbace forms written after rustc 1.99.1's compiletest, the same revision and sources (the pinned
   `rustc-1.99.1-src.tar.xz`'s `src/tools/compiletest/src/runtest/ui.rs`: `run_ui_test`'s RunResult of the run and the

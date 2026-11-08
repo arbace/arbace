@@ -1779,3 +1779,143 @@ passes).
   hashed with `StableHasher`, SipHasher13 over rustc's encoding) and the `DefIndex` in def-collection order**; (b) a class "equal but
   for the crate hash", the hash and index renumbered as RFP25 (a) renumbers allocations; (c) refuse those bodies. *Recommended: (b)
   now, (a) with RF11's v0 symbols (RFP23 (c)), which hash the same id*.
+
+## As built: RF10 (fourth slice), slice 3's passes to runtime MIR (2026-11-08)
+
+Branch `rust-rf10b` (continued from `8052a77c0`). The brief: the passes after mir_built in rustc's order, each judged against rustc's
+own dump after it, as SimplifyCfg-initial was; RFP28 and RFP29 await the user and were not built (the bodies they hold back are
+counted below); then slice 2's tail where no decision is needed.
+
+### The passes (`arbace/rust/front/passes.ae`)
+
+rustc 1.99.1's order (`rustc_mir_transform/src/lib.rs`: `mir_promoted`, `run_analysis_cleanup_passes`, `run_runtime_lowering_passes`,
+`run_runtime_cleanup_passes`), each a function over MIR forms, `passes/pipeline`:
+
+- **PromoteTemps** (`promote_consts.rs`, rule for rule): `collect_temps_and_candidates` (TempState over the reverse postorder, the MIR
+  visitor's place contexts as `Visitor::super_*` gives them, a projected place's context Projection), `Validator` (`validate_local`,
+  `validate_place` with the static and constant-index cases, `validate_operand`, `validate_ref`, `validate_rvalue` with the division
+  rules, `validate_call` with `#[rustc_promotable]` and const fns in initializers' safe blocks) over the qualifs of
+  `rustc_const_eval/src/check_consts/qualifs.rs` (`HasMutInterior` by Freeze, `NeedsDrop`, `in_rvalue`, `in_place`, `in_operand`;
+  a named constant's `mir_const_qualif` approximated by its type), and `Promoter` (`promote_candidate`, `promote_temp` for
+  statements and calls, keep_original for temporaries used twice, the promoted reference's local in the candidate's source scope,
+  the extra statements in reverse location order, the promoted-out temporaries' assignments, storage and drops removed). The
+  promoted bodies (`NAME::promoted[N]`) join the pipeline at ImpossibleClauses, as rustc's `promoted_mir` runs them, with their
+  allocations. The statements now carry their source scope as metadata (`build.ae`'s `push!`), the type forms their typeck type
+  (`ty-form`'s `:tc`), the locals whether they are user variables.
+- **SimplifyCfg** (all four: initial, promote-consts, post-analysis, pre-optimizations) with `strip_nops` first and `simplify_branch`
+  from the runtime phases on (`preserve_switch_reads` off); `remove_dead_blocks` on its own for AbortUnwindingCalls.
+- **CleanupPostBorrowck** (`cleanup_post_borrowck.rs`): AscribeUserType, FakeRead, fake borrows and drop hints `nop`, the two
+  pointer coercions `PtrToPtr`, false edges gotos, the user type annotations cleared.
+- **RemoveNoopLandingPads** (`remove_noop_landing_pads.rs`, when the session unwinds): the no-op landing pads in postorder, MirPatch's
+  resume block (the last statement-less resume block, else a new one), `unwind continue` for cleanup edges into them.
+- **Derefer** (`deref_separator.rs`): every place but debuginfo's with a deref past its first projection split through `deref_copy`
+  temporaries (MirPatch's `add_assign` and `apply`, stable by location), the temporaries marked as deref temporaries.
+- **AddCallGuards** (CriticalCallEdges): a call that may unwind into a cleanup returning to a block of several predecessors returns
+  through a new block.
+- **PostAnalysisNormalize** (`post_analysis_normalize.rs`): opaque types revealed, each by its defining function's hidden type (the
+  type of that function's body block in typeck's results); our typeck's opaque types carry no `OpaqueTy` id, so an opaque type is
+  matched by the signature outputs equal to it and left as it is when two functions define it alike (RFP33).
+- **ElaborateDrops** (`elaborate_drops.rs`, `elaborate_drop.rs`), with the dataflow it stands on: `MoveData::gather_moves`
+  (`move_paths/{mod,builder}.rs`: move paths of the places whose types need drop, first child newest, `move_path_for`'s stops at
+  references, destructors and slices, unions, `MovePathLookup::find`, the `UnDerefer` chains of deref temporaries; moves out,
+  StorageDead a move out, inits Deep or NonPanicPathOnly), `MaybeInitializedPlaces` (exclude_inactive_in_otherwise,
+  skipping_unreachable_unwind, precise_enum_drop_elaboration's mutable borrows and switch edges) and `MaybeUninitializedPlaces`
+  (mark_inactive_variants_as_uninit, the dead unwinds) to their fixpoints over `framework/direction.rs`' Forward edges
+  (`get_terminator_edges` before the terminator's effect, a call's return effect on its return edge, a switch's per-edge effects),
+  `drop_flag_effects.rs`; then `ElaborateDropsCtxt` (`collect_drop_flags`, `elaborate_drops`, the flags on init, for calls' returns,
+  arguments and locations) and `DropCtxt`'s drop styles (dead, static, conditional, open), `drop_flag_test_block`,
+  `drop_flag_reset_block`, `drop_ladder` with its unwind half-ladder, `open_drop_for_tuple`, `open_drop_for_adt` with
+  `open_drop_for_multivariant` and `adt_switch_block`, a destructor's `<T as Drop>::drop` call, Box's `open_drop_for_box_contents`;
+  arrays' and slices' drop loops and async drops are refused (none in the corpus).
+- **AbortUnwindingCalls** (`abort_unwinding_calls.rs` over `layout.rs`' `fn_can_unwind`): the intrinsics never unwind, a session
+  that aborts on panic unwinds nowhere but through foreign items, extern "C" bodies and calls by their ABI; then remove_dead_blocks.
+- **EraseDerefTemps** (`no_retag copy`), **ElaborateBoxDerefs** (`elaborate_box_derefs.rs`: `copy (b.0: Unique<T>) as *const T
+  (BoxDerefTransmute)`), **LowerIntrinsics** (`discriminant_value`, `unreachable`, `forget`, `assume`, the wrapping and unchecked
+  operators), **RemovePlaceMention**.
+- Identities where the corpus has nothing to change: ImpossibleClauses, Subtyper, AddMovesForPackedDrops, StateTransform.
+
+`#[rustc_promotable]` is a table of the nine functions rust-src 1.99.1's library marks (`ptr::null`, `ptr::null_mut`, `mem::size_of`,
+`mem::align_of`, the integers' `min_value`/`max_value`, `RangeInclusive::new`, `RawWaker::new`, `RawWakerVTable::new`), read from the
+pinned sources (RFP32).
+
+### The judge
+
+`bin/rust-front build-oracles` dumps every pass of the pipeline (`RF_DUMP_MIR`'s default, 21 passes; the 88 programs' dumps 193 MB,
+`.before.mir` with `.after.mir`), and `BUILD_PASS=NAME bin/rust-front build-check` runs the pipeline to NAME on every built body (in
+the builder's bindings, `build/*after-finish*`) and judges every pass to NAME against its own dump: a pass that rustc runs again in a
+later phase (RemoveNoopLandingPads, AddCallGuards) or in a shim is judged at its first phase's dump (`passes/pass-phase`).
+`BUILD_FIRST=1` prints each body's first pass where it is not equal; `PASS_TRACE=FILE` appends each pass as it starts. Built MIR is judged as before (`BUILD_PASS` unset).
+
+### Slice 2's tail
+
+- Floats printed as `rustc_apfloat`'s `Display` prints them (`ieee.rs`: the exact digits with the low ones past the precision's
+  bits discarded, half-up rounding, the scientific form past the width of 3: `1.0E+10f32`, `1.0E+30f64`, `1.2E-4f64`).
+- Coercion casts (`cast.rs`' `try_coercion_cast`): a cast to the type its operand already has is a Use (`7.5 as F`).
+- A derive's unresolved tuple-struct path is its constructor (`Id(Clone::clone(&self.0), ..)` an aggregate, not a call).
+- `if let` guards, deref patterns and named-constant patterns: none of the corpus's failing bodies needs them now (the patterns
+  program is whole but for its allocations' ids); not built.
+
+### Results
+
+- `BUILD_PASS=SimplifyCfg-pre-optimizations bin/rust-front build-check`, the 88 programs (about 8 minutes, one process under 1.8 GB
+  with `GOMEMLIMIT`), equal / but for the allocations' ids / of the bodies rustc dumps after the pass:
+
+  | pass | equal | ids | of |
+  |---|---|---|---|
+  | SimplifyCfg-initial | 382 | 29 | 475 |
+  | PromoteTemps, SimplifyCfg-promote-consts | 383 | 29 | 475 |
+  | ImpossibleClauses (the promoted bodies join) | 496 | 43 | 616 |
+  | CleanupPostBorrowck, SimplifyCfg-post-analysis, Derefer, AddCallGuards | 497 | 45 | 616 |
+  | RemoveNoopLandingPads (unwinding programs only) | 453 | 45 | 572 |
+  | PostAnalysisNormalize to RemovePlaceMention (each) | 497 | 44 | 616 |
+  | SimplifyCfg-pre-optimizations | 499 | 46 | 616 |
+
+  60 programs whole through every pass (was 56 after SimplifyCfg-initial). **No body is lost by a pass**: every body not equal after
+  a pass is already unequal at the built level (55 bodies first differ at SimplifyCfg-initial, as built MIR), but for two promoted
+  bodies whose `Option<_>` is typeck's gap (an unresolved `None` in `fmt` and `std`) and promoted bodies of parents not built.
+- Built MIR (`bin/rust-front build-check`): 415 → 418 of 510 equal, 29 but for the allocations' ids, 0 but for their text (was 3),
+  refused 13 → 12, 58 → 60 programs whole.
+- `test/rust/front/a1`-`a7`: 54 of 54 bodies equal at built, 52 of 52 after every pass (a5's two trivial constants have no pass
+  dumps), all seven whole (`make rust-front-pass-check`).
+- The bodies RFP28 holds back: `float-f32`'s and `float-f64`'s `main` (`Result<f32, ParseFloatError>` needs drop by our assumption:
+  `FloatErrorKind` has no fields in `--std-iface`), 2 bodies at every phase. RFP29's: `drops`' `main` (a closure's fake read names
+  the crate hash), refused, 1 body.
+- Checks of the earlier stages: `expand-check` 92 of 92 crates and 857 of 857 items, `hir-check --ours` 90 of 91 and one but for
+  whitespace (unchanged); `typeck-check --ours` 11,142 of 11,173; `capture-check` 173 of 174 closures; `run-built` 6 of 6 no_std samples from Arbace's MIR (the stubs' log empty). The negative controls differ.
+- `bin/crops-score`: Rust unchanged (no record of the cells changed).
+
+### What remains to RF12
+
+- Built MIR's 92 bodies (slice 2's tail, unchanged in kind): the unwind tree's block numbering in long bodies (`algorithms`,
+  `collections`, `errors`, `structs`), user type annotations of a few std paths (`Rc::strong_count`, `Result<..>` ascriptions in
+  `std` and `errors`), typeck's `Option<_>` and `{?}` gaps, qualified paths in expressions (`:qpath`), statics of thread locals,
+  const generics' paths; RFP28's two and RFP29's one.
+- The passes: arrays' and slices' open drops (drop loops), async drops, Subtyper's projections, AddMovesForPackedDrops,
+  StateTransform (coroutines), named constants' own qualifs (`mir_const_qualif` by dataflow over the constant's body); none is met
+  by the corpus yet.
+- Then, by the decided order: RFP23 (b)'s packs (now with every pass's dumps) and RFP24 (b)'s step with RFP27 (a); the optimization
+  passes rustc runs at `-C opt-level=0` (CheckAlignment to SimplifyCfg-final, the codegen's input); slice 4 (format_args!'s runtime
+  half), slice 5 (CTFE); RFP15; RF11; RF12.
+
+### Proposed (RF10's fourth slice)
+
+- **RFP30 The pass judge in the essential step.** RFP24 (b)'s step judges `test/rust/front/a*.rs`' built MIR. Options: (a) **the step
+  runs `BUILD_PASS=SimplifyCfg-pre-optimizations` over a1-a7 too (52 bodies through all 21 passes, about 40 s more), the packs
+  carrying their pass dumps' `.after.mir` files**; (b) keep the pass judge by hand (`make rust-front-pass-check`) until RF11.
+  *Recommended: (a)*: the passes are as deterministic as the builder, and they are what RF11's codegen will read.
+- **RFP31 The oracles' size.** The 88 programs' dumps are 193 MB (every pass's `.before.mir` beside its `.after.mir`; the
+  optimization passes' with them when `RF_DUMP_MIR=all`). Options: (a) **`build-oracles` keeps only the `.after.mir` files of the
+  listed passes (about half), the packs likewise**; (b) only the dumps that differ from the previous pass's (smaller, but the judge
+  then needs the chain); (c) as is. *Recommended: (a)*.
+- **RFP32 std's function attributes.** PromoteTemps needs `#[rustc_promotable]`, AbortUnwindingCalls `#[rustc_nounwind]`
+  (`NEVER_UNWIND`), const-fn promotion in initializers std's constness. As built: a table of the nine promotable functions read from
+  the pinned rust-src by hand, and the intrinsics' path as the only never-unwinding functions. Options: (a) **the helper's
+  `--std-iface` records these three attributes for every std function (pinned data as RFP26 (a)'s, regenerated by the night's
+  `front-oracles`)**; (b) read them natively from rust-src's library with the native reader (no rustc, but ahead of RF12's std
+  from source); (c) keep the table. *Recommended: (a) now, (b) with RF12*: the corpus meets only the table's functions, but std has
+  more `rustc_nounwind` functions than the intrinsics (`panic_nounwind`, `abort`), which a program calling them would show.
+- **RFP33 Opaque types' identity.** typeck's `[:opaque clauses]` carry no `OpaqueTy` id, so PostAnalysisNormalize reveals an opaque type
+  by the signatures equal to it (two functions returning `impl Fn(i32) -> i32` would be ambiguous and left unrevealed; generic
+  definers' hidden types are not substituted). Options: (a) **typeck's opaque type carries its OpaqueTy def id (collect already
+  makes the def), its hidden type recorded by the defining body's typeck (`TypeckResults::concrete_opaque_types`)**; (b) keep the
+  structural match. *Recommended: (a)*: it is rustc's representation and typeck-check judges it.

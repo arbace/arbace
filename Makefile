@@ -441,8 +441,8 @@ rust-front-typeck-check: ## RF9: arbace.rust.front.typeck (expressions' types an
 	bin/rust-front typeck-check && bin/rust-front typeck-check --ours
 rust-front-build-check: ## RF10: our built MIR (THIR and MIR building over the pipeline) against rustc's -Zdump-mir=built for the no_std samples (bin/rust-front build-check)
 	bin/rust-front build-oracles && bin/rust-front build-check a1 a2 a3 a4 a5 a6 a7
-rust-front-pass-check: ## RF10 (third slice): our bodies through mir_built's passes (LintAndRemoveUninhabited, SimplifyCfg-initial) against rustc's MIR after SimplifyCfg-initial (BUILD_PASS=SimplifyCfg-initial bin/rust-front build-check)
-	BUILD_PASS=SimplifyCfg-initial bin/rust-front build-check a1 a2 a3 a4 a5 a6 a7
+rust-front-pass-check: ## RF10 (third, fourth slices): our bodies through the passes to runtime MIR (PromoteTemps, CleanupPostBorrowck, ElaborateDrops, ... SimplifyCfg-pre-optimizations), each pass against rustc's MIR after it (BUILD_PASS=SimplifyCfg-pre-optimizations bin/rust-front build-check)
+	BUILD_PASS=SimplifyCfg-pre-optimizations bin/rust-front build-check a1 a2 a3 a4 a5 a6 a7
 rust-front-capture-check: ## RF10/RFP20: the closures' kinds and captures (the port of upvar.rs) against the helper's --captures (bin/rust-front capture-check)
 	bin/rust-front capture-oracles && bin/rust-front capture-check
 rust-front-run-built: ## RF10: the no_std samples run from Arbace's MIR with rustc, rustdoc and cargo stubbed (bin/rust-front run-built)
