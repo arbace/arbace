@@ -1076,6 +1076,13 @@ covers what.
   `Distribution/FieldGrammar/{Parsec,Pretty}.hs`'s free text, `Distribution/Types/InstalledPackageInfo/FieldGrammar.hs`'s
   ipiFieldGrammar, `Distribution/Types/Condition.hs`), under Cabal's BSD 3-Clause License ("Cabal: BSD 3-Clause License"
   below).
+- `arbace/repr/haskell/target.ae`'s `libffi-vars` and `libffi-headers` (the system libffi's two headers GHCi/FFI.hsc's hsc2hs run
+  includes, HFS-I11 (a), 2026-11-08): the substitution rules of libffi 3.8.0's `configure.ac` (AC_INIT's version, FFI_VERSION_NUMBER,
+  HAVE_LONG_DOUBLE, FFI_EXEC_TRAMPOLINE_TABLE, the ffitarget.h copy) and `configure.host` (x86_64's TARGET and TARGETDIR), ported by
+  hand from https://github.com/libffi/libffi/releases/download/v3.8.0/libffi-3.8.0.tar.gz (SHA-256
+  `7da3e2d9a171eb0a038f592ecad3ff2bb2550f3496d87b3b29ad0cf4430c0db4`, `test/haskell/target/libffi.edn`'s pin); the headers they make,
+  `include/ffi.h.in` substituted and `src/x86/ffitarget.h`, are libffi's text, made in `.tmp/` and not committed: libffi, Copyright (c)
+  1996-2026 Anthony Green, Red Hat, Inc and others, under the MIT License ("libffi: MIT License" below).
 - `arbace/repr/haskell/unlit.ae` (repr/haskell's native unlit, doc/haskell/NATIVE.md): a port of the
   same tarball's `utils/unlit/unlit.c`, under the Glasgow Haskell Compiler License (below), on
   2026-11-04; `arbace/repr/haskell/driver.ae` (GHC's driver's preprocessing: `GHC/SysTools/Cpp.hs`'s
@@ -3802,6 +3809,36 @@ to be subject to copyright, resulting in confusion over whether it
 negated the permissions granted in the license. In the spirit of
 permissive licensing, and of not having licensing issues being an
 obstacle to adoption, that text has been removed.
+## libffi: MIT License
+
+The `LICENSE` of libffi 3.8.0 (https://github.com/libffi/libffi/releases/download/v3.8.0/libffi-3.8.0.tar.gz,
+`test/haskell/target/libffi.edn`'s pin), whole; it covers what `arbace/repr/haskell/target.ae` ports of its configure and the
+two headers it makes from the tarball (above):
+
+```
+libffi - Copyright (c) 1996-2026  Anthony Green, Red Hat, Inc and others.
+See source files for details.
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+``Software''), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED ``AS IS'', WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
 ## GHC: the Glasgow Haskell Compiler License
 
 The `LICENSE` of GHC 9.14.1's source tarball (above), covering what repr/haskell's native reader

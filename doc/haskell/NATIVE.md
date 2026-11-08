@@ -413,7 +413,7 @@ substitutions; each fact's reason in the file) and `answers.edn` (the configure 
 | `hsc/PKG/X.hs.hspp.edn` | the record's `:hsc2hs` (command, version, file, the input's and output's SHA-256), as the native read takes it | |
 | `stdc-predef.h` | musl's own | musl's tarball |
 
-**The answers** (`bin/repr-haskell target probe`; `--verify` computes them again and compares). Each `#undef` of a template is a
+**The answers** (`bin/repr-haskell target probe`, run by `bin/repr-haskell-target probe`; `--verify` computes them again and compares, the `--full` step `haskell-target-probe` since HFS-I9 (b)). Each `#undef` of a template is a
 check; its autoheader comment names the autoconf macro that defines it (AC_CHECK_HEADERS, AC_CHECK_FUNCS, AC_CHECK_SIZEOF,
 AC_CHECK_ALIGNOF, AC_CHECK_MEMBERS, AC_CHECK_TYPES, AC_CHECK_DECLS, FP_CHECK_CONST, FPTOOLS_CHECK_HTYPE), and the others are the
 configure.ac's own AC_DEFINEs, ruled one by one in `configure.ae`'s `manual-rules` with the configure.ac's logic (HAVE_EPOLL: the
@@ -425,10 +425,13 @@ it); sizes, alignments, constants and FPTOOLS_CHECK_HTYPE's choice are printed b
 The two facts of the build host, `/dev/ptmx` and `/dev/ptc` (AC_CHECK_FILE), are Linux's.
 
 **The comparison** (the oracle tier: `bin/repr-haskell target compare`, the derived tree against the pack member for member, an
-`.hspp.edn` on its `:hsc2hs`): 335 of the pack's 337 members equal (2026-11-08): the settings, the 47 records, the
-104 installed headers with DerivedConstants.h and the seven configure headers, the four configured/ files, stdc-predef.h, LIBDIR, and 89
-of the 90 .hsc modules with their records. The two left are GHCi/FFI.hsc's: its C includes libffi's `ffi.h` (rts.cabal's
-use-system-libffi: the host's libffi, neither musl's nor the tarball's), which ci does not have (FRONTEND-SURVEY's HFS-I11). What the derivation does not make yet is taken from the pack when it is in the store
+`.hspp.edn` on its `:hsc2hs`): 337 of the pack's 337 members equal (2026-11-08): the settings, the 47 records, the
+104 installed headers with DerivedConstants.h and the seven configure headers, the four configured/ files, stdc-predef.h, LIBDIR, and the
+90 .hsc modules with their records. GHCi/FFI.hsc's C includes libffi's `ffi.h` (rts.cabal's use-system-libffi: the system's libffi,
+neither musl's nor GHC's tarball's): since HFS-I11 (a) (FRONTEND-SURVEY's "As built: HFS-I9 (b), HFS-I11 (a)") `ffi.h` and `ffitarget.h`
+are derived from libffi 3.8.0's pinned release tarball (`test/haskell/target/libffi.edn`) as its configure makes them, into the tree's
+`sysroot/usr/include`, named in `SYSTEM` (the comparison leaves them out: the pack holds no system header but stdc-predef.h), and
+`target hsc` gives every module's program that directory last, as gcc's `/usr/include`. What the derivation does not make yet is taken from the pack when it is in the store
 and named in the tree's `BORROWED` (none once `target hsc` has run: `bin/repr-haskell target hsc` makes DerivedConstants.h and the
 90 modules, 46 minutes of ci on this host, one process, under 2 GiB; the night's or `haskell-roundtrip`'s first run).
 

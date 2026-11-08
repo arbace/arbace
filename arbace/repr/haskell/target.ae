@@ -7,6 +7,8 @@
 
     LIBDIR                       the installation's path
     sysroot/usr/include/stdc-predef.h          musl's (the preprocessor's preinclude)
+    sysroot/usr/include/ffi.h, ffitarget.h     the system's libffi configured for the target (libffi-headers; in SYSTEM, not the
+                                               pack's: the host system's headers, which GHCi/FFI.hsc's hsc2hs run reads)
     sysroot/LIBDIR/settings                    hadrian's generateSettings (bindist Makefile's lib/settings) over the facts
     sysroot/LIBDIR/package.conf.d/ID.conf      each unit's record: its .cabal finalized for x86_64 Linux (arbace.repr.haskell.cabal)
                                                and printed as ghc-pkg writes it, patched as the bindist's patchpackageconf
@@ -17,7 +19,9 @@
                                                extracted tree holds them after configure
 
   Verbs (-m arbace.repr.haskell.target):
-    derive OUT --src TREE --musl MUSL     the tree into OUT (TREE: the tarball extracted, MUSL: musl's tree)
+    derive OUT --src TREE --musl MUSL [--libffi LIBFFI]
+                                           the tree into OUT (TREE: the tarball extracted, MUSL: musl's tree, LIBFFI: libffi's
+                                           release tree, whose ffi.h and ffitarget.h go to sysroot/usr/include, named in SYSTEM)
     compare OUT PACK                       OUT's members against PACK's (the oracle tier: the pack GHC's installation made), byte
                                            for byte; prints each differing member, exit 1 on a difference"
   (:require [arbace.repr.haskell.cabal :as cabal]
@@ -240,9 +244,49 @@
     (vec (for [h (cabal/lib-field pkg "install-includes")]
            [h (some #(let [f (File. (str dir "/" % "/" h))] (when (.isFile f) (str f))) dirs)]))))
 
+;;; The system's libffi (HFS-I11 (a), the user 2026-11-08): rts.cabal's +use-system-libffi makes the installation read the host's
+;;; libffi, whose ffi.h GHCi/FFI.hsc includes. Its release tarball (test/haskell/target/libffi.edn, pinned) is configured here for
+;;; x86_64-alpine-linux-musl as its configure makes the two installed headers: include/ffi.h from ffi.h.in by config.status's
+;;; AC_CONFIG_FILES substitutions (@VAR@: the values below, each from its rule in configure.ac or configure.host) and
+;;; include/ffitarget.h copied from src/TARGETDIR/ffitarget.h (configure.ac's config commands). No code of the tarball runs.
+
+(defn libffi-vars
+  "config.status's values for ffi.h.in, by configure's rules for the target (the triple, abi: c/target/abi.edn)"
+  [^String libffi abi ^String triple]
+  (let [ac (slurp (str libffi "/configure.ac"))
+        ;; AC_INIT([libffi],[X.Y.Z],[...]): AC_PACKAGE_VERSION, AM_INIT_AUTOMAKE's VERSION
+        version (or (second (re-find #"AC_INIT\(\[libffi\],\s*\[([^\]]+)\]" ac))
+                    (throw (ex-info "libffi: configure.ac has no AC_INIT version" {})))
+        ;; FFI_VERSION_NUMBER: X*10000 + Y*100 + Z, each field's leading digits (sed 's/[^0-9].*//')
+        num (fn [^String f] (let [d (re-find #"^[0-9]*" (or f ""))] (if (str/blank? d) 0 (Long/parseLong d))))
+        [a b c] (str/split version #"\.")
+        sz (:sizeof abi)
+        x86-64? (str/starts-with? triple "x86_64-")
+        _ (when-not x86-64? (throw (ex-info (str "libffi: no configure.host rule here for " triple) {})))
+        ;; configure.host's "i?86-*-* | x86_64-*-* | amd64-*": TARGETDIR=x86; TARGET=X86_64 unless sizeof(size_t) is 4
+        target (if (= 4 (get sz "SIZE_T")) "X86" "X86_64")
+        ;; configure.ac: HAVE_LONG_DOUBLE unset by configure.host for x86: 1 when sizeof(long double) is not 0 and differs from
+        ;; sizeof(double) (no long double variant: HAVE_LONG_DOUBLE_VARIANT 0)
+        ld (get sz "LONG_DOUBLE") d (get sz "DOUBLE")
+        have-ld (if (and (not= 0 ld) (not= d ld)) 1 0)
+        ;; configure.ac: FFI_EXEC_TRAMPOLINE_TABLE 1 only on *arm*-apple-* and aarch64-apple-*
+        tramp (if (re-find #"(arm.*|aarch64)-apple-" triple) 1 0)]
+    {:targetdir "x86"
+     :vars {"VERSION" version "TARGET" target "HAVE_LONG_DOUBLE" have-ld "FFI_VERSION_STRING" version
+            "FFI_VERSION_NUMBER" (+ (* 10000 (num a)) (* 100 (num b)) (num c)) "FFI_EXEC_TRAMPOLINE_TABLE" tramp}}))
+
+(defn libffi-headers
+  "{\"ffi.h\" text \"ffitarget.h\" text}: the installed headers of the configured tarball"
+  [^String libffi abi ^String triple]
+  (let [{:keys [targetdir vars]} (libffi-vars libffi abi triple)
+        h (subst-at (slurp (str libffi "/include/ffi.h.in")) vars)]
+    (when-let [left (re-find #"@[A-Za-z_][A-Za-z0-9_]*@" h)]
+      (throw (ex-info (str "libffi: ffi.h.in's " left " has no value") {})))
+    {"ffi.h" h "ffitarget.h" (slurp (str libffi "/src/" targetdir "/ffitarget.h"))}))
+
 (defn derive-tree
   "The tree into out; returns {:members n}"
-  [^String out ^String src ^String musl ^String repo]
+  [^String out ^String src ^String musl ^String repo & [^String libffi]]
   (let [facts (rd (str repo "/test/haskell/target/installation.edn"))
         abi (rd (str repo "/c/target/abi.edn"))
         answers (conf/load-answers repo)
@@ -267,6 +311,12 @@
         ev (event-headers src)]
     (spit-mk (str out "/LIBDIR") (str libdir "\n"))
     (copy-file (str musl "/include/stdc-predef.h") (str sys "/usr/include/stdc-predef.h"))
+    ;; the system's libffi headers (HFS-I11 (a)), where libffi-dev installs them: the host system's, not the installation's, so
+    ;; the pack (GHC's installation) holds neither; named in SYSTEM, which the comparison leaves out
+    (when libffi
+      (doseq [[h t] (libffi-headers libffi abi (:host (rd (str repo "/test/haskell/target/libffi.edn"))))]
+        (spit-mk (str sys "/usr/include/" h) t))
+      (spit-mk (str out "/SYSTEM") "sysroot/usr/include/ffi.h\nsysroot/usr/include/ffitarget.h\n"))
     (spit-mk (str sys libdir "/settings") (settings-text facts abi))
     (doseq [[n u] us]
       (spit-mk (str sys libdir "/package.conf.d/" (get ids n) ".conf") (conf-text n u facts exposed-of ids)))
@@ -308,7 +358,9 @@
 (defn compare-trees [^String out ^String pack]
   (let [bf (File. (str out "/BORROWED"))
         borrowed (set (when (.isFile bf) (remove str/blank? (str/split-lines (slurp bf)))))
-        a (apply dissoc (dissoc (members out) "BORROWED") borrowed)
+        sf (File. (str out "/SYSTEM"))
+        system (set (when (.isFile sf) (remove str/blank? (str/split-lines (slurp sf)))))
+        a (apply dissoc (dissoc (members out) "BORROWED" "SYSTEM") (concat borrowed system))
         b (apply dissoc (members pack) borrowed)
         hsc2hs-of (fn [^File f] (some #(when (and (seq? %) (= 'hsdump/config (first %))) (:hsc2hs (second %)))
                                       (read-string (str "[" (slurp f) "]"))))
@@ -326,7 +378,8 @@
     (doseq [m missing] (println "MISSING" m))
     (doseq [m extra] (println "EXTRA" m))
     (println (str "target compare: " (count same) " of " (count b) " derived members equal, " (count diff) " differ, "
-                  (count missing) " missing, " (count extra) " extra; " (count borrowed) " borrowed from the pack (BORROWED)"))
+                  (count missing) " missing, " (count extra) " extra; " (count borrowed) " borrowed from the pack (BORROWED)"
+                  (if (seq system) (str ", " (count system) " the system's (SYSTEM: libffi's headers)") "")))
     (and (empty? diff) (empty? missing) (empty? extra))))
 
 (defn -main [& args]
@@ -335,6 +388,6 @@
         pos (take-while #(not (str/starts-with? (str %) "--")) more)
         repo (or (System/getenv "ARBACE_REPO") (System/getProperty "user.dir"))]
     (case verb
-      "derive" (do (derive-tree (first pos) (get opts "--src") (get opts "--musl") repo) (System/exit 0))
+      "derive" (do (derive-tree (first pos) (get opts "--src") (get opts "--musl") repo (get opts "--libffi")) (System/exit 0))
       "compare" (System/exit (if (compare-trees (first pos) (second pos)) 0 1))
       (do (println "usage: -m arbace.repr.haskell.target derive OUT --src TREE --musl MUSL | compare OUT PACK") (System/exit 2)))))
