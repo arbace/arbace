@@ -1470,6 +1470,64 @@
     (is (= {"k.c" {:class :objects}} (get-in (read-string (slurp kf)) [:roundtrip :c])))
     (is (not (re-find #"unclassified" (slurp kf))))))
 
+(deftest roundtrip-record-keeps-oracle-levels-under-own-verdict
+  ;; CS282 (a) (the user, 2026-11-08; doc/C23-SURVEY.md, "As built: CS282"): the round trip's --record without gcc reruns
+  ;; levels 1 and 2 and keeps levels 3-4 and gcc's acceptance from the results file's recorded rows (the oracle tier's), as
+  ;; token-record-keeps-gcc-under-own-verdict keeps the token check's :gcc level. a.c: known :objects by its recorded level 3
+  ;; (a plain judge without gcc finds the entry stale; the record keeps it); b.c: fprintf-1's case, level 1 equal now, its
+  ;; recorded levels 3-4 pass: the row passes; c.c: rejected, gcc's recorded acceptance 0 (port-only-rejects): known kept;
+  ;; d.c: no recorded row (no level 3): passes on levels 1-2; e.c: a recorded level 4 that differs, no entry: fails; f.c: zlib
+  ;; inflate.c's case, read now, refused when recorded, known :objects-macro-body (a class only levels 3-4 give): known kept;
+  ;; g.c: reverse-complement-5.c's case, its row known :run-address by a level 4 that differed, the entry removed since (808d08d60):
+  ;; the row's levels 3-4 dropped, it passes
+  (let [w (str (System/getProperty "user.dir") "/.tmp/ci-judge-test-rt-record-own")
+        id "torture-execute"
+        kf (str w "/known.edn")
+        rf (str w "/rt.edn")
+        row (fn [n r why] [(str id " " n) r why])]
+    (put-files w {(str id "/forms.tsv") (str "a.c\tok\tequal\tequal\t\t\nb.c\tok\tequal\tequal\t\t\nc.c\terror\t-\t-\tc.c:1:1: boom\t\n"
+                                             "d.c\tok\tequal\tequal\t\t\ne.c\tok\tequal\tequal\t\t\nf.c\tok\tequal\tequal\t\t\ng.c\tok\tequal\tequal\t\t\n")
+                  "gcc.tsv" (str "# hdr\n# hdr\n0\t" id "/a.c\n0\t" id "/b.c\n0\t" id "/c.c\n0\t" id "/e.c\n0\t" id "/f.c\n0\t" id "/g.c\n")
+                  "known.edn" (pr-str {:classes {:objects "o" :objects-macro-body "m" :k "k" :reexpansion "r"}
+                                       :roundtrip {(keyword id) {"a.c" {:class :objects} "c.c" {:class :k} "gone.c" {:class :k}
+                                                                 "f.c" {:class :objects-macro-body}}}})
+                  "rt.edn" (pr-str [(row "a.c" :known "known: read ok, l1 equal, l2 equal, l3 differ, l4 -, gcc agree, class objects: x")
+                                    (row "b.c" :known "known: read ok, l1 differ, l2 equal, l3 equal, l4 same, gcc agree, class reexpansion: form 3")
+                                    (row "c.c" :known "known: read error, l1 -, l2 -, l3 -, l4 -, gcc port-only-rejects, class k: c.c:1:1: boom")
+                                    (row "e.c" :pass "pass: read ok, l1 equal, l2 equal, l3 equal, l4 differ, gcc agree")
+                                    (row "g.c" :known "known: read ok, l1 equal, l2 equal, l3 equal, l4 differ, gcc agree, class run-address")
+                                    (row "f.c" :known "known: read refused:split-declaration, l1 -, l2 -, l3 -, l4 -, gcc agree, class split-declaration: x")
+                                    ["zlib z.c" :pass "pass: read ok, l1 equal, l2 equal, l3 equal, l4 -, gcc agree"]])})
+    (with-redefs [rt/known-file kf rt/gcc-file (str w "/gcc.tsv")]
+      (is (= {"a.c" {:read "ok" :l3 "differ" :l4 "-" :accept "agree" :class :objects}} (select-keys (rt/load-recorded rf id) ["a.c"])))
+      (is (= [nil nil] (rt/recorded-levels {:read "ok" :l3 "equal" :l4 "same"} "error")) "a file not read now has no level 3")
+      ;; the plain judge without gcc: a.c passes levels 1-2, its entry stale (the driver defers it)
+      (is (re-find #"(?m)^FAIL torture-execute/a\.c\tknown entry stale" (with-out-str (rt/judge w id))))
+      (let [out (with-out-str (is (= 1 (rt/judge w id rf))))
+            st (into {} (map (fn [l] (let [xs (str/split l #"\t" -1)] [(first xs) (vec (rest xs))]))
+                             (str/split-lines (slurp (str w "/" id "/files.tsv")))))]
+        (is (re-find #"(?m)^FAIL torture-execute/e\.c\tlevels l4" out))
+        (is (re-find #"(?m)^FAIL torture-execute/gone\.c\tknown entry stale" out))
+        (is (= ["known" "ok" "equal" "equal" "differ" "-" "agree" "objects"] (subvec (st "a.c") 0 8)))
+        (is (= ["pass" "ok" "equal" "equal" "equal" "same" "agree"] (subvec (st "b.c") 0 7)))
+        (is (= ["known" "error" "-" "-" "-" "-" "port-only-rejects" "k"] (subvec (st "c.c") 0 8)))
+        (is (= ["pass" "ok" "equal" "equal" "-" "-" "unrecorded"] (subvec (st "d.c") 0 7)))
+        (is (= "fail" (first (st "e.c"))))
+        (is (= ["known" "ok" "equal" "equal" "-" "-" "agree" "objects-macro-body"] (subvec (st "f.c") 0 8)))
+        (is (= ["pass" "ok" "equal" "equal" "-" "-" "agree"] (subvec (st "g.c") 0 7))))
+      ;; the record: a.c's, c.c's and f.c's entries kept, gone.c's dropped, e.c of no class left out (counted)
+      (is (= 1 (rt/record w [id] kf)))
+      (is (= {"a.c" {:class :objects} "c.c" {:class :k} "f.c" {:class :objects-macro-body}}
+             (get-in (read-string (slurp kf)) [:roundtrip (keyword id)])))
+      (rt/judge w id rf)
+      (is (= 1 (results/write :roundtrip w rf {} [id])))
+      (let [rs (into {} (map (juxt first rest) (read-string (slurp rf))))]
+        (is (= [:known "known: read ok, l1 equal, l2 equal, l3 differ, l4 -, gcc agree, class objects"] (rs (str id " a.c"))))
+        (is (= [:pass "pass: read ok, l1 equal, l2 equal, l3 equal, l4 same, gcc agree"] (rs (str id " b.c"))))
+        (is (= :known (first (rs (str id " c.c")))))
+        (is (= :fail (first (rs (str id " e.c")))))
+        (is (= [:pass "pass: read ok, l1 equal, l2 equal, l3 equal, l4 -, gcc agree"] (rs "zlib z.c")) "another corpus's row kept")))))
+
 (deftest roundtrip-controls
   (require 'arbace.repr.c.rtcheck)
   (let [res (resolve 'arbace.repr.c.rtcheck/roundtrip-control-result)

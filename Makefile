@@ -14,7 +14,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   box box-smoke box-oracle box-suite box-goi box-tools box-rebuild box-convert mac-bundle mac-bundle-convert arm64-vm-check arm64-vm-goi \
   program programs-check programs-essential gate gate-full gate-full-parallel gate-plan gate-costs gate-why gate-audit gate-prune gate-queue corpus-dedup cover-build gate-clean gate-full-clean gate-full-clean-only gate-clean-plan gate-pins gate-full-concurrent gate-full-clean-lanes gate-lanes-plan gate-mem-check gate-demos java-check-judge provenance-check reap crops-score suite oracle diffcheck generated-check gate-tests verify jdk-verify edge-verify javac-verify javac-classes fixtures-verify tamago-verify \
   toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-go-native-check \
-  repr-java-check repr-java-roundtrip repr-java-text repr-java-jdk repr-java-parse-check repr-java-front-check repr-java-attr-check repr-java-nojavac-check repr-java-closure-check repr-java-platform-pack repr-java-platform-check repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test repr-cpp-host-record repr-cpp-host-check repr-cpp-pins-check repr-cpp-cxxdump-build repr-cpp-cxxdump-test repr-cpp-spec-check repr-cpp-c2j-check repr-scheme-c2j-check repr-ocaml-c2j-check repr-cpp-pp-check repr-cpp-pp-record repr-cpp-cxxdump-check repr-cpp-roundtrip repr-cpp-roundtrip-corpus repr-cpp-pp-essential repr-cpp-roundtrip-essential repr-cpp-pp-record-results repr-llvm-roundtrip cppi-lower-check cppi-lower-corpus cppi-lower-essential cpp-essential cppi-runtime-build cppi-testsuite cppi-selftest cppi-run cppi-runtime-ci cppi-record-ref cppi-check cppi-check-aot cppi-divergences cppi-divergences-aot repr-c-host-record repr-c-host-check repr-c-ccdump repr-c-check repr-c-record repr-c-parse-check repr-c-read repr-c-print repr-c-roundtrip repr-c-corpus-dedup repr-c-record-gcc repr-c-c23 ci-diagnose ci-run ci-check ci-check-aot ci-dg ci-dg-essential ci-judge-test ci-c2j-check ci-cinterp-check ci-aot-translate ci-repl-session ci-divergences ci-musl ci-runtime ci-cirun-build ci-annot ci-annotations ci-annotations-record ci-record-ref ci-synth ci-synth-check goi-annotations goi-test goi-check goi-check-aot goi-check-aot-essential goi-check-nethttp goi-check-nethttp-arbace goi-divergences goi-divergences-aot java-check java-check-compiled java-check-compiled-essential java-check-print java-check-nread java-check-diagnostics java-check-essential java-check-ref alpine-check alpine-test clean \
+  repr-java-check repr-java-roundtrip repr-java-text repr-java-jdk repr-java-parse-check repr-java-front-check repr-java-attr-check repr-java-nojavac-check repr-java-closure-check repr-java-platform-pack repr-java-platform-check repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test repr-cpp-host-record repr-cpp-host-check repr-cpp-pins-check repr-cpp-target-gen repr-cpp-target-verify repr-cpp-target-oracle repr-cpp-record-dumps repr-cpp-verify-dumps repr-cpp-cxxdump-build repr-cpp-cxxdump-test repr-cpp-spec-check repr-cpp-c2j-check repr-scheme-c2j-check repr-ocaml-c2j-check repr-cpp-pp-check repr-cpp-pp-record repr-cpp-cxxdump-check repr-cpp-roundtrip repr-cpp-roundtrip-corpus repr-cpp-pp-essential repr-cpp-roundtrip-essential repr-cpp-pp-record-results repr-llvm-roundtrip cppi-lower-check cppi-lower-corpus cppi-lower-essential cpp-essential cppi-runtime-build cppi-testsuite cppi-selftest cppi-run cppi-runtime-ci cppi-record-ref cppi-check cppi-check-aot cppi-route-compare cppi-divergences cppi-divergences-aot repr-c-host-record repr-c-host-check repr-c-ccdump repr-c-check repr-c-record repr-c-parse-check repr-c-read repr-c-print repr-c-roundtrip repr-c-corpus-dedup repr-c-record-gcc repr-c-c23 ci-diagnose ci-run ci-check ci-check-aot ci-dg ci-dg-essential ci-judge-test ci-c2j-check ci-cinterp-check ci-aot-translate ci-repl-session ci-divergences ci-musl ci-runtime ci-cirun-build ci-annot ci-annotations ci-annotations-record ci-record-ref ci-synth ci-synth-check goi-annotations goi-test goi-check goi-check-aot goi-check-aot-essential goi-check-nethttp goi-check-nethttp-arbace goi-divergences goi-divergences-aot java-check java-check-compiled java-check-compiled-essential java-check-print java-check-nread java-check-diagnostics java-check-essential java-check-ref alpine-check alpine-test clean \
   java-check-oracle java-check-rejudge java-verdicts \
   rsi-samples rsi-lower-check rsi-lower-check-all rsi-lower-check-native-all rsi-std-build rsi-runtime-build rsi-runtime-ci rsi-aot-lib ci-aot-lib rsi-record-ref rsi-check rsi-check-aot rsi-check-all rsi-divergences rsi-synthetic rsi-synthetic-check rsi-judge-test rsi-check-essential \
   repr-llvm-record-opt repr-llvm-record-rt llvmi-ir-make llvmi-run llvmi-check llvmi-check-aot llvmi-record-ref llvmi-divergences cppi-codegen-check \
@@ -27,7 +27,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   repr-scheme repr-scheme-roundtrip-record si-essential si-aot-essential scheme-read-essential scheme-essential \
   repr-python-lex-check repr-python-lex-record repr-python-pegen repr-python-pegen-check repr-python-parse-check repr-python-parse-record repr-python-ast-check repr-python-records-record repr-python-records-verify pyi-lib-test-record pyi-runtime-tables pyi-aot pyi-aot-check pyi-aot-check-record pyi-bench pyi-bench-record pyi-check pyi-check-record pyi-divergences pyi-cover pyi-c2j-check pyi-table-check pyi-clib-build pyi-clib-verify python-essential \
   oi-check-compiled check-makefile \
-  repr-ocaml-native-check repr-ocaml-menhir \
+  repr-ocaml-native-check repr-ocaml-menhir repr-ocaml-ocamllex-check oi-reap-switch \
   oi-typer-check oi-stdlib-check oi-check-native oi-typer-probe oi-repl-check-native repr-ocaml-types oi-judges-fixtures \
   oi-check-ocdump oi-own-verdicts \
   repr-haskell-native-check repr-haskell-tables-check repr-haskell-rename-check repr-haskell-typecheck-check repr-haskell-stg-check repr-haskell-run-check repr-haskell-run-check-nofib hsi-pins hsi-spec-check hsi-tests hsi-dumps hsi-generate hsi-record-ref hsi-build hsi-stubs-build hsi-repl-session hsi-check hsi-check-core hsi-check-essential hsi-check-aot hsi-check-aot-o1 hsi-record-ref-o1 hsi-primops hsi-libm-check hsi-runtime-check repr-haskell-test-oracle repr-haskell-record-corpus hsi-record-libs hsi-record-progs oracle-records-list oracle-records-check oracle-records-verify oracle-records-record oracle-records-mirror
@@ -346,12 +346,22 @@ repr-rust-native-check: ## the native reader (rustc's lexer and parser ported to
 	bin/repr-rust native-check
 repr-rust-native-errors: ## the native reader's first error of each file against rustc's (bin/repr-rust native-errors [--edition E] FILES=...)
 	bin/repr-rust native-errors $(FILES)
-repr-cpp-host-record: ## record g++ 15.2's and clang 23.1.4's answers under test/cpp/host/: predefined macros per standard, search lists, __has_* answers, sizes, libstdc++'s header digests (bin/repr-cpp host record)
+repr-cpp-host-record: ## record g++ 15.2's and clang 23.1.5's answers under test/cpp/host/: predefined macros per standard, search lists, __has_* answers, sizes, libstdc++'s header digests (bin/repr-cpp host record)
 	bin/repr-cpp host record
 repr-cpp-host-check: ## the host's compilers still give test/cpp/host/'s answers and libstdc++'s headers their digests (bin/repr-cpp host check)
 	bin/repr-cpp host check
 repr-cpp-pins-check: ## test/cpp/corpora.edn's pins against the tarballs and compilers on the host (bin/repr-cpp pins check)
 	bin/repr-cpp pins check
+repr-cpp-target-gen: ## Arbace's own C++ target: cpp/target/host/'s predefined macros, option deltas and __has_ answers made from c/target/abi.edn, cpp/target/dialect.edn and clang's half cpp/target/clang.edn (bin/repr-cpp target gen)
+	bin/repr-cpp target gen
+repr-cpp-target-verify: ## cpp/target/host/ is what bin/repr-cpp target gen makes (bin/repr-cpp target verify)
+	bin/repr-cpp target verify
+repr-cpp-target-oracle: ## cpp/target/host/'s answers against g++ 15.2's and clang 23's recorded ones, test/cpp/host (bin/repr-cpp target host-oracle; by hand)
+	bin/repr-cpp target host-oracle
+repr-cpp-record-dumps: ## CP247 (a): the dg check's dg-error dumps recorded by clang into the pack cxxdump-dg-error, by hand on a host with clang (bin/repr-cpp record-dumps dg-error)
+	bin/repr-cpp record-dumps dg-error
+repr-cpp-verify-dumps: ## the pack cxxdump-dg-error against clang afresh, SAMPLE=N (bin/repr-cpp verify-dumps dg-error; the oracle tier's)
+	bin/repr-cpp verify-dumps dg-error $(if $(SAMPLE),--sample $(SAMPLE))
 repr-cpp-cxxdump-build: ## build the oracle's filter tools/cxxdump into .tmp/repr-cpp/cxxdump (bin/repr-cpp cxxdump-build)
 	bin/repr-cpp cxxdump-build
 repr-cpp-cxxdump-test: ## go test of tools/cxxdump (bin/repr-cpp cxxdump-test)
@@ -455,6 +465,8 @@ cppi-check: ## C++'s run check on ci: the run corpora lowered and run on ci agai
 	bin/cppi check $(ARGS)
 cppi-check-aot: ## C++'s AOT check: the same programs translated by cf2g and built by TamaGo's go, against g++'s runs and test/cpp/divergences-aot.edn (bin/cppi check --aot; ARGS=...)
 	bin/cppi check --aot $(ARGS)
+cppi-route-compare: ## the runs' routes compared, CPPI_ROUTE=clang against auto, on the same programs; fails when auto loses a pass (bin/cppi route-compare; CORPUS=a,b SAMPLE=N AOT=1)
+	bin/cppi route-compare $(if $(AOT),--aot) $(if $(CORPUS),--corpus $(CORPUS)) $(if $(SAMPLE),--sample $(SAMPLE))
 cppi-divergences: ## the recorded C++ run check judged against its classes (bin/cppi divergences)
 	bin/cppi divergences
 cppi-divergences-aot: ## the recorded C++ AOT check judged against its classes (bin/cppi divergences --aot)
@@ -641,6 +653,8 @@ repr-ocaml-native-check: ## the native reader (lexer.mll and parser.mly in Arbac
 	bin/repr-ocaml native-check --layout
 repr-ocaml-menhir: ## the native parser's LALR(1) tables built from parser.mly equal to Menhir's own (boot/menhir/parser.ml) and to the committed arbace/repr/ocaml/tables.ae (bin/repr-ocaml menhir --check, --verify)
 	bin/repr-ocaml menhir --check
+repr-ocaml-ocamllex-check: ## OC186 (a): the native ocamllex over every .mll of the corpora and test/ocaml/ocamllex/, the outputs against the host's recorded ones (bin/repr-ocaml ocamllex-check; --host live)
+	bin/repr-ocaml ocamllex-check
 	bin/repr-ocaml menhir --verify
 oi-stdlib: ## O5: the stdlib built by ocamlc in dependency order and its Lambda dumped for oi, into .tmp/oi/lib/ (bin/oi stdlib)
 	bin/oi stdlib
@@ -666,6 +680,8 @@ oi-repl-check-native: ## T11: the recorded toplevel session with each phrase typ
 	bin/oi repl-check --native
 oi-divergences: ## O5: oi's recorded results against test/ocaml/divergences.edn's classes (bin/oi divergences)
 	bin/oi divergences
+oi-reap-switch: ## OC185 (a): the native records' passes against their oracle twins', the REAP cells' switch when none has fewer (bin/oi reap-switch; --apply)
+	bin/oi reap-switch
 oi-record-ref: ## O5: ocamlc's and ocamlopt's runs of oi's run corpus recorded into test/ocaml/ref-ocaml55.edn (bin/oi record-ref)
 	bin/oi record-ref
 oi-repl: ## O5: the toplevel on oi: phrases typed and lowered by the oracle, values printed with their types (bin/oi repl)

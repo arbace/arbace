@@ -270,6 +270,13 @@ covers what.
   MenhirLib's terms ("Menhir and MenhirLib", below). The rest of them (`ast.ae`'s dump, which ports Arbace's own
   tools/ocdump/ocdump.ml, `native.ae`, the LALR(1) construction of `menhir.ae`) is Arbace's own, under the Eclipse
   Public License 1.0.
+- ocamllex ported (doc/ocaml/OCAML-SURVEY.md, "As built: ocamllex ported (OC186)"): `arbace/repr/ocaml/ocamllex.ae` ports OCaml
+  5.5.0's lex/ (lexer.mll, parser.mly, cset.ml, table.ml, lexgen.ml, compact.ml, common.ml, output.ml, main.ml) and the parts of
+  stdlib/set.ml it relies on, from the same release tarball (SHA-256 `fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba`,
+  Copyright INRIA), by hand on 2026-11-08, the file carrying the notice: under the GNU Lesser General Public License version 2.1 with
+  the OCaml LGPL linking exception (below). Its `check` verb, `bin/repr-ocaml ocamllex-check`, `test/ocaml/oc185.ae` and the samples of
+  `test/ocaml/ocamllex/` are Arbace's own (Eclipse Public License 1.0); `test/ocaml/ocamllex-expected.edn` records the host's ocamllex
+  5.5.0's outputs' digests.
 - oi's native front end (doc/ocaml/TYPER.md): `arbace/repr/ocaml/typer/types.ae` (typing/types.ml, btype.ml, ctype.ml's
   levels, unification, generalization and instances, predef.ml, printtyp.ml with out_type.ml and oprint.ml),
   `env.ae` (typing/env.ml, typetexp.ml, typedecl.ml, datarepr.ml), `parmatch.ae` (typing/patterns.ml, parmatch.ml),
@@ -1224,6 +1231,13 @@ covers what.
   `abi` and the launcher's own package (the Eclipse Public License 1.0) and Go's runtime and
   standard library (Go's BSD 3-Clause License). A distribution of the box carries this file, as
   for the executables above.
+- `test/cpp/clang.ae` (`cpp.clang`, the clang half of Arbace's C++ target, doc/cpp/CPP-SURVEY.md, "As built: CP248 (a)"):
+  a port of parts of clang, the LLVM Project, from `llvm-project-23.1.5.src.tar.xz` (the pin of `test/cpp/corpora.edn`,
+  SHA-256 `fb50b1eac93ddeb3aa8dab4cfe324dff74f4a9c2bdee6160c9e36188f8d06a6e`): `clang/lib/Frontend/InitPreprocessor.cpp`'s
+  predefined macros and their helpers, `clang/lib/Basic/Targets/X86.cpp`'s `getTargetDefines` (the baseline CPU's part),
+  `Targets/OSTargets.h`'s `LinuxTargetInfo::getOSDefines` and `Targets.cpp`'s `DefineStd` and `defineCPUMacros`, under
+  the Apache License 2.0 with the LLVM Exceptions (section "LLVM (clang)" below), the file carrying clang's notice;
+  `cpp/target/clang.edn`, the facts it reads (PickFP's float strings among them, from the same file), likewise.
 - `test/java/` (bin/java-check, Java's conformance check, doc/classes/JAVA-CONFORMANCE-SURVEY.md,
   "As built: JC1"): its tools, data and the hand-curated programs of `test/java/jls/` are Arbace's
   own, under the Eclipse Public License 1.0. jdk26u's jtreg tests are read in place from the

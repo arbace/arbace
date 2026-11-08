@@ -364,6 +364,11 @@ minor release (C++'s CX1 recorded the moving compiler as a risk). Proposed (LLS4
   digests (C++'s `test/cpp/runtime/ir.sha256`, Rust's), the references and the verifier's messages re-recorded; the new
   release's `llvm/test` and LangRef's "Changes" read for new spellings; the forms extended, never renamed. clang and rustc's
   LLVM must agree on the version (rustc 1.99.1 is LLVM 23.1.3, read by clang 23.1.4: same minor, P2 of RUST-EVAL-SURVEY).
+- **The 23.1.5 bump (2026-11-08, the user's decision)**: the host's clang, `llvm23` and its libs are 23.1.5-r0; `:alpine-clang23`'s version and
+  installed packages, `:llvmorg-23.1.5` and `:llvm-test-suite-23.1.5` (`test/cpp/corpora.edn`), `bin/llvmi`'s and `bin/llvm-corpus`'s tarball names
+  now name 23.1.5, and `bin/repr-llvm pins check` holds. The 23.1.4 text of this survey is the record of its writing. Re-recorded at night:
+  the references and checks listed in the journal entry of that date (`test/llvm/ref-lli23.edn`, `ref-opt23.edn`, `check-*`, `ir/*.cmd`,
+  `llvm-test-counts.tsv`, `essential/`'s corpus lists against the new tarball).
 - Bitcode as an input (LL11, optional) would decouple readers from the text's churn; not v1.
 
 ## 13. Plan (LL1-LL9)

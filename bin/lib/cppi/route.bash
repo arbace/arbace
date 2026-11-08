@@ -5,8 +5,12 @@
 #                             generator, arbace.cpp.codegen gen-batch, no clang: a program it refuses is ir.status 98, its class in
 #                             ir.log), auto (ours for a program with no options of its dg-options, clang++ for the rest and for
 #                             those ours refuses). $work/files/ID/route says which made the IR.
+# The default route (CP240 (b), decided 2026-11-07): clang until the night's comparison (bin/cppi route-compare over the samples, the
+# runtime and gxx-dg-run's sampling, eval and AOT) holds every pass; then this one word becomes auto, the records are written again
+# (--record) and bin/lib/cppi/check's header names it (doc/cpp/CPP-SURVEY.md, "As built: cpp-target")
+cppi_route_default=clang
 cppi_ir_route() {
-  local todo=$1 jobs=$2 route=${CPPI_ROUTE:-clang} rest
+  local todo=$1 jobs=$2 route=${CPPI_ROUTE:-$cppi_route_default} rest
   case $route in clang|ours|auto) ;; *) echo "cppi: CPPI_ROUTE is clang, ours or auto" >&2; return 2 ;; esac
   rest=$todo
   if [ "$route" != clang ]; then
@@ -18,7 +22,10 @@ cppi_ir_route() {
       . "$root/bin/lib/repr-cpp/sysroot.bash"; cpp_sysroot || return 1
       GOMEMLIMIT=${GOMEMLIMIT:-1500MiB} arbace_tool -m arbace.cpp.codegen gen-batch "$todo.ours" > "$todo.ours.log" 2>&1 || { tail -5 "$todo.ours.log" >&2; return 1; }
     fi
-    while IFS=$'\t' read -r i s a p; do
+    # the fields read with a separator that is no whitespace (cpp-target): IFS=tab collapsed an empty options field, so a program ours
+    # refused that has no options fell back to clang with its path as its options (its pack's key then STALE)
+    tr '\t' '\037' < "$todo" > "$todo.us"
+    while IFS=$'\037' read -r i s a p; do
       local d=$work/files/$i
       if [ -f "$d/gen.ll" ] && [ ! -f "$d/gen.refused" ]; then
         cp "$d/gen.ll" "$d/x.ll"; echo 0 > "$d/ir.status"; echo ours > "$d/route"; echo 0 > "$d/ir.secs"
@@ -28,7 +35,7 @@ cppi_ir_route() {
       else
         printf '%s\t%s\t%s\t%s\n' "$i" "$s" "$a" "$p" >> "$rest"
       fi
-    done < "$todo"
+    done < "$todo.us"
   fi
   # shellcheck disable=SC2016
   tr '\t\n' '\037\0' < "$rest" | xargs -0 -r -P "$jobs" -I{} nice bash -c 'IFS=$'"'"'\037'"'"' read -r i s a p <<< "$1"; ir1 "$i" "$s" "$a" "$p"; echo clang > "$work/files/$i/route"' _ {}
