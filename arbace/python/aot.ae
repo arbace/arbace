@@ -795,19 +795,32 @@
 (defn- equal-ref? [o ref]
   (and (= (:status o) (:status ref)) (= (:stdout o) (:stdout ref)) (= (:stderr-last o) (or (:stderr-last ref) ""))))
 
+(defn- host-free
+  "TEXT without the machine's paths, for the record (queue 235; as arbace.repr.python.results/host-free): the checkout's
+  directory (the working directory: bin/pyi runs in it) as <checkout>, then any other absolute path under /root, /home,
+  /tmp or /Users as <root>/, <home>/, <tmp>/, <Users>/"
+  [s]
+  (let [root (str (.getCanonicalPath (java.io.File. ".")) "/")]
+    (-> (str s) (str/replace root "<checkout>/") (str/replace #"(?<![A-Za-z0-9_.@<>-])/(root|home|tmp|Users)/" "<$1>/"))))
+
 (defn- name-or [x] (if (keyword? x) (name x) (str x)))
 
 (defn control
-  "The judge's negative control (GTS81 (a)): the first two passing programs' compiled runs judged against each other's
-  references, which must not pass; nil when they do not (or when fewer than two pass), else the pair"
+  "The judge's negative control (GTS81 (a)): the first two passing programs' runs judged against each other's references,
+  which must not pass. A passing program's loop run is its compiled run (the pass rule), so the crossing judges the AOT
+  cell's source and the eval cell's compiled loop alike (queue 235). {:result :failed-as-it-must|:passed|:left :pair [A B]}:
+  :passed when a crossing passes (the judge took one program's run for another's), :left when fewer than two programs pass
+  in the selection (--only, --only-list: nothing to cross; printed, not a failure)"
   [runs refs]
   (let [ok (for [[id kind _ & more] runs
                  :when (= kind "ran")
-                 :let [aot (outcome (subvec (vec more) 0 3)) ref (get refs id)]
-                 :when (and ref (not (:excluded ref)) (equal-ref? aot ref))]
+                 :let [aot (outcome (subvec (vec more) 0 3)) loop (outcome (subvec (vec more) 3 6)) ref (get refs id)]
+                 :when (and ref (not (:excluded ref)) (equal-ref? aot ref) (= aot loop))]
              [id aot ref])
         [[a ao ar] [b bo br]] ok]
-    (when (and b (or (equal-ref? ao br) (equal-ref? bo ar))) [a b])))
+    (cond (nil? b) {:result :left :pair (if a [a] [])}
+          (or (equal-ref? ao br) (equal-ref? bo ar)) {:result :passed :pair [a b]}
+          :else {:result :failed-as-it-must :pair [a b]})))
 
 (defn- class-of
   "The class of a non-pass that the rule (:as-pyi) does not take: the first class of CLASSES whose :ids hold ID or
@@ -869,12 +882,14 @@
       (spit f (str ";; pyi's AOT (bin/pyi check --aot --record; doc/python/PYTHON-SURVEY.md, \"As built: PY8\"): each program of the\n"
                    ";; synthetic corpus and the samples compiled and run, judged against CPython's reference (ref-cpython314.edn),\n"
                    ";; the loop and pyi; :result :pass, :classed (:class, test/python/divergences-aot.edn or the rule :as-pyi) or\n"
-                   ";; :failed; the milliseconds are the recording machine's.\n"
-                   (lines) "\n")))
-    (if ctl
-      (println (str "  the negative control FAILS: " (first ctl) " and " (second ctl) " pass against each other's references"))
-      (println "  the negative control: two passing programs' runs judged against each other's references do not pass"))
-    (if (or ctl (pos? (get by :failed 0))) 1 0)))
+                   ";; :failed; the milliseconds are the recording machine's; no path of the machine (<checkout>, <tmp>: queue 235).\n"
+                   (host-free (lines)) "\n")))
+    (let [[a b] (:pair ctl)]
+      (case (:result ctl)
+        :passed (println (str "  control passed: the negative control FAILS: " a " and " b " (compiled or on the loop) pass against each other's references"))
+        :left (println (str "  the negative control: left (fewer than two programs pass in this selection" (when a (str ": " a)) ")"))
+        (println (str "  the negative control: " a "'s and " b "'s runs (compiled and on the loop) judged against each other's references do not pass, as they must"))))
+    (if (or (= :passed (:result ctl)) (pos? (get by :failed 0))) 1 0)))
 
 (defn -main [& [cmd & args]]
   (let [rc (case cmd
