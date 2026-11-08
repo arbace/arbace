@@ -407,7 +407,7 @@ native_inputs_key() {
 }
 # ---- the derived installation (HFS-I2 (a), the user 2026-11-07): what the pack held, made by arbace.repr.haskell.target from the
 # tarball, musl's tarball and test/haskell/target/'s facts and answers; no GHC, no C compiler
-tsrc_paths="rts mk/system-cxx-std-lib-1.0.conf.in compiler/ghc.cabal.in utils/ghc-toolchain/ghc-toolchain.cabal utils/haddock/haddock-api/haddock-api.cabal utils/haddock/haddock-library/haddock-library.cabal libraries"
+tsrc_paths="rts utils/hsc2hs utils/deriveConstants mk/system-cxx-std-lib-1.0.conf.in compiler/ghc.cabal.in utils/ghc-toolchain/ghc-toolchain.cabal utils/haddock/haddock-api/haddock-api.cabal utils/haddock/haddock-library/haddock-library.cabal libraries"
 # target_src: the tarball's parts the derivation reads, extracted once into .tmp/repr-haskell/target/src (TSRC)
 target_src() {
   export ARBACE_REPO=$root
@@ -430,7 +430,7 @@ target_src() {
 }
 target_key() {
   { cat "$rh/target/src.extracted"; sha256sum < "$TMUSL/include/stdc-predef.h"
-    (cd "$root" && find arbace/repr/haskell/target.ae arbace/repr/haskell/cabal.ae arbace/repr/haskell/configure.ae arbace/repr/haskell/doc.ae \
+    (cd "$root" && find arbace/repr/haskell/target.ae arbace/repr/haskell/constants.ae arbace/repr/haskell/cabal.ae arbace/repr/haskell/configure.ae arbace/repr/haskell/doc.ae \
        test/haskell/target test/haskell/corpus-ghc-9.14.1.edn c/target/abi.edn -type f | LC_ALL=C sort | xargs sha256sum); } | sha256sum | cut -c1-64
 }
 # target_derive: the derived tree, made when its key moved
@@ -456,7 +456,15 @@ target_derive() {
     fi
     echo "$k" > "$d.key"
   fi
-  # hsc2hs's outputs made on ci (target_hsc), when they are current: in place of the borrowed ones
+  # DerivedConstants.h and hsc2hs's outputs made on ci (target_hsc), when they are there: in place of the borrowed ones
+  local dcp
+  if [ -f "$rh/target/DerivedConstants.h" ]; then
+    dcp=$(cd "$d" && ls -d sysroot/usr/lib/ghc-*/lib/*-ghc-*/rts-*/include)/DerivedConstants.h
+    if ! cmp -s "$rh/target/DerivedConstants.h" "$d/$dcp"; then
+      cp "$rh/target/DerivedConstants.h" "$d/$dcp"
+      [ ! -f "$d/BORROWED" ] || { grep -v 'DerivedConstants.h$' "$d/BORROWED" > "$d/BORROWED.new" || true; mv "$d/BORROWED.new" "$d/BORROWED"; }
+    fi
+  fi
   if [ -f "$rh/target/hsc.key" ] && [ -d "$rh/target/hsc" ] && [ ! -f "$d/hsc.made" ]; then
     rm -rf "$d/hsc"; cp -r "$rh/target/hsc" "$d/hsc"; touch "$d/hsc.made"
     [ ! -f "$d/BORROWED" ] || { grep -v '^hsc/' "$d/BORROWED" > "$d/BORROWED.new" || true; mv "$d/BORROWED.new" "$d/BORROWED"; }
@@ -471,11 +479,12 @@ target_probe() {
   rm -rf "$w"; mkdir -p "$w"
   arbace_tool -m arbace.repr.haskell.configure plan "$w" --src "$TSRC" --musl "$TMUSL" | tee "$w/plan.log"
   if grep -q "no rule for" "$w/plan.log"; then echo "repr-haskell target probe: a check without a rule" >&2; return 1; fi
-  "$root/bin/ci" diagnose "$w"/compile/*.c > "$w/compile.out" 2>&1 || true
+  "$root/bin/ci" diagnose -I"$TSRC/libraries/ghc-internal/include" "$w"/compile/*.c > "$w/compile.out" 2>&1 || true
+  for p in "$w"/types/*.c; do "$root/bin/ci" annot -I"$TSRC/libraries/ghc-internal/include" "$p" > "${p%.c}.out" 2>&1 || true; done
   arbace_tool -m arbace.repr.haskell.configure programs "$w" --src "$TSRC" --musl "$TMUSL"
   "$root/bin/ci" musl ensure > "$w/musl.log" 2>&1 || { tail -5 "$w/musl.log" >&2; return 1; }
   for p in "$w"/run/*.c; do
-    "$root/bin/ci" run "$p" > "${p%.c}.out" 2> "${p%.c}.err" || { echo "repr-haskell target probe: $p failed (${p%.c}.err)" >&2; return 1; }
+    "$root/bin/ci" run -I"$TSRC/libraries/ghc-internal/include" "$p" > "${p%.c}.out" 2> "${p%.c}.err" || { echo "repr-haskell target probe: $p failed (${p%.c}.err)" >&2; return 1; }
   done
   arbace_tool -m arbace.repr.haskell.configure answers "$w" --src "$TSRC" --musl "$TMUSL" --forms "$root/.tmp/ci-musl/forms" --out "$out"
   if [ "${1:-}" = --verify ]; then
@@ -491,6 +500,15 @@ target_hsc() {
   local d=$rh/target/hsc w=$rh/target/hsc-work k name dir flags files hargs f base fl args cf rawf ok=0 bad=0
   k=$( { target_key; sha256sum < "$root/arbace/repr/haskell/hsc2hs.ae"; REPR_HASKELL_ONLY_PACKAGES="" corpus_plan_raw ghc-9.14.1 all; } | sha256sum | cut -c1-64)
   if [ -f "$d.key" ] && [ "$(cat "$d.key")" = "$k" ] && [ -z "${REPR_HASKELL_ONLY_PACKAGES:-}" ]; then echo "$d"; return 0; fi
+  # DerivedConstants.h first (deriveConstants' C file, its objects' sizes from ci's checker's annotations)
+  local rinc=$TDERIVED/sysroot$libdir/../lib/$(cd "$TDERIVED/sysroot$libdir/../lib" && ls -d *-ghc-*)/rts-1.0.3/include
+  if [ ! -f "$rh/target/DerivedConstants.h" ] || [ "$(cat "$rh/target/DerivedConstants.key" 2>"$TMPDIR/repr-haskell-dc.err")" != "$k" ]; then
+    mkdir -p "$w/constants"
+    arbace_tool -m arbace.repr.haskell.constants program "$TSRC/utils/deriveConstants/Main.hs" "$w/constants/dc.c"
+    "$root/bin/ci" annot -I"$TSRC/rts" -I"$rinc" -I"$TSRC/rts/include" "$w/constants/dc.c" > "$w/constants/annot.txt" 2>&1 \
+      && arbace_tool -m arbace.repr.haskell.constants header "$TSRC/utils/deriveConstants/Main.hs" "$w/constants/annot.txt" "$rh/target/DerivedConstants.h" \
+      && echo "$k" > "$rh/target/DerivedConstants.key" || echo "repr-haskell target hsc: DerivedConstants.h not made ($w/constants/annot.txt)" >&2
+  fi
   corpus_fetch ghc-9.14.1 > "$TMPDIR/repr-haskell-fetch.txt" 2>&1 || { cat "$TMPDIR/repr-haskell-fetch.txt" >&2; return 1; }
   nin=$TDERIVED; nhsc=""; native_place_inputs ghc-9.14.1
   [ -n "${REPR_HASKELL_ONLY_PACKAGES:-}" ] || rm -rf "$d" "$d.key"

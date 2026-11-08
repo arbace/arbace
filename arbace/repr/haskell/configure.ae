@@ -85,7 +85,8 @@
 ;;;   [:if r then else]
 ;;; The target: musl 1.2.6's headers (include/, arch/x86_64, arch/generic, the derived
 ;;; obj/include) and Arbace's c/include; musl's sources' external definitions (its forms
-;;; index); compile tests by ci's checker (bin/ci diagnose), values by ci (bin/ci run).
+;;; index); compile tests by ci's checker (bin/ci diagnose), values by ci (bin/ci run). A package's own header a check
+;;; includes (md5.h) is named by its name, found through -I of its directory (product-dirs).
 
 (def configure-ac
   {"rts/ghcautoconf.h.autoconf" "rts/configure.ac"
@@ -142,20 +143,28 @@
                            m ["ATIME" "ATIM_TV_NSEC" "BLKSIZE" "BLOCKS" "CTIME" "CTIM_TV_NSEC" "DEV" "GID" "INO" "MODE" "MTIME"
                               "MTIM_TV_NSEC" "NLINK" "RDEV" "SIZE" "UID"]]
                        [(str p "_STAT_ST_" m) [:lit nil]]))
-            {"OFFSET_UTIMBUF_ACTIME" [:lit nil] "OFFSET_UTIMBUF_MODTIME" [:lit nil]
+            {"SIZEOF_STRUCT_STAT" [:lit nil] "SIZEOF_STRUCT_UTIMBUF" [:lit nil] ; the same JavaScript branch
+             "OFFSET_UTIMBUF_ACTIME" [:lit nil] "OFFSET_UTIMBUF_MODTIME" [:lit nil]
              "SIZEOF_UTIMBUF_ACTIME" [:lit nil] "SIZEOF_UTIMBUF_MODTIME" [:lit nil]})
-     "libraries/ghc-internal/include/EventConfig.h" common
+     ;; the template has two lines no check of ghc-internal's configure.ac defines: epoll_create1 (not in its AC_CHECK_FUNCS)
+     ;; and memory.h (autoconf 2.72's AC_INCLUDES_DEFAULT no longer checks it)
+     "libraries/ghc-internal/include/EventConfig.h" (merge common {"HAVE_EPOLL_CREATE1" [:lit nil] "HAVE_MEMORY_H" [:lit nil]})
      "libraries/time/lib/include/HsTimeConfig.h"
      (merge common {"HAVE_TM_ZONE" [:member "struct tm" "tm_zone"]   ; AC_STRUCT_TIMEZONE
                     "HAVE_TZNAME" [:if [:member "struct tm" "tm_zone"] [:lit nil] [:decl "tzname"]]
+                    ;; AC_STRUCT_TIMEZONE checks tzname's declaration only without tm_zone
+                    "HAVE_DECL_TZNAME" [:if [:member "struct tm" "tm_zone"] [:lit nil] [:decl "tzname"]]
                     "TM_IN_SYS_TIME" [:lit nil]})                    ; AC_STRUCT_TM: <time.h> declares struct tm
      "libraries/unix/include/HsUnixConfig.h"
      (merge common
             {"HAVE_CLOCKS_PER_SEC" [:macro "CLOCKS_PER_SEC"]
              ;; AC_CHECK_FILE on the build host: Linux has /dev/ptmx, not AIX's /dev/ptc (the target's facts)
              "HAVE_DEV_PTC" [:lit nil] "HAVE_DEV_PTMX" [:lit "1"]
-             "HAVE_DIRENT_H" [:header "dirent.h"] "HAVE_NDIR_H" [:header "ndir.h"]
-             "HAVE_SYS_DIR_H" [:header "sys/dir.h"] "HAVE_SYS_NDIR_H" [:header "sys/ndir.h"]
+             ;; AC_HEADER_DIRENT: the first of dirent.h, sys/ndir.h, sys/dir.h, ndir.h that defines DIR, the others unchecked
+             "HAVE_DIRENT_H" [:header "dirent.h"]
+             "HAVE_SYS_NDIR_H" [:if [:header "dirent.h"] [:lit nil] [:header "sys/ndir.h"]]
+             "HAVE_SYS_DIR_H" [:if [:or [:header "dirent.h"] [:header "sys/ndir.h"]] [:lit nil] [:header "sys/dir.h"]]
+             "HAVE_NDIR_H" [:if [:or [:header "dirent.h"] [:header "sys/ndir.h"] [:header "sys/dir.h"]] [:lit nil] [:header "ndir.h"]]
              "HAVE_F_GETLK" [:macro "F_GETLK"] "HAVE_F_NOCACHE" [:macro "F_NOCACHE"] "HAVE_O_DIRECT" [:macro "O_DIRECT"]
              "HAVE_RTLDDEFAULT" [:macro "RTLD_DEFAULT"] "HAVE_RTLDNEXT" [:macro "RTLD_NEXT"]
              "HAVE_SC_GETGR_R_SIZE_MAX" [:macro "_SC_GETGR_R_SIZE_MAX"] "HAVE_SC_GETPW_R_SIZE_MAX" [:macro "_SC_GETPW_R_SIZE_MAX"]
@@ -193,6 +202,8 @@
              "RTS_LINKER_USE_MMAP" [:lit "1"]                    ; HostOS linux
              "USE_LARGE_ADDRESS_SPACE" [:and [:decl-yes "MAP_NORESERVE"] [:or [:decl-yes "MADV_FREE"] [:decl-yes "MADV_DONTNEED"]]]
              "USE_TIMER_CREATE" [:and [:func "timer_create"] [:func "timer_settime"]]})}))
+
+(def product-dirs "The -I directories of the checks' own headers" ["libraries/ghc-internal/include"])
 
 (defn template-items
   "A template's checks: [[name comment]...], the comment before each #undef line"
@@ -274,10 +285,21 @@
                            :macro (str "#ifndef " a "\n#error undefined\n#endif\nint probe(void) { return 0; }\n")
                            :compiles (str a "\n")
                            :const (str "enum { probe_value = (" a ") };\n")
-                           (:sizeof :align :htype) (str (when b (str "#include \"" src "/" b "\"\n")) "int probe(void) { return (int) sizeof (" a "); }\n")
+                           (:sizeof :align :htype) (str (when b (str "#include \"" (.getName (File. ^String b)) "\"\n")) "int probe(void) { return (int) sizeof (" a "); }\n")
                            nil)]
               :when body]
           [(str (c-id product) "--" (name k) "--" (c-id a) (when (and b (= k :member)) (str "--" (c-id b))) ".c") (str pro body)])))
+
+(defn type-probes
+  "A product's declarations whose types decide its consts and htypes (bin/ci annot): `__typeof__((X)) probe__ID;` for a
+  constant (FP_COMPUTE_INT computes an integer constant expression: another type gives the default), `T probe__ID;` for
+  FPTOOLS_CHECK_HTYPE's type (a pointer type is CUIntPtr: its memset test; an integer or a floating type is computed)"
+  [product items exists?]
+  (str (prologue product exists?)
+       (apply str (for [[_ [k a]] items :when (#{:const :htype} k)]
+                    (case k
+                      :const (str "__typeof__((" a ")) probe__" (c-id a) ";\n")
+                      :htype (str a " probe__" (c-id a) ";\n"))))))
 
 (defn- htype-code [t]
   (str "  if (((" t ")0.2 - (" t ")0.4 < 0 ? 0 : 1) == 0) {\n"
@@ -289,7 +311,7 @@
   "A product's value program: for each value check that compiles, one line NAME VALUE"
   [product items ok? exists? ^String src]
   (str (prologue product exists?)
-       (apply str (distinct (for [[_ [k a b]] items :when (and b (#{:sizeof :align :htype} k))] (str "#include \"" src "/" b "\"\n"))))
+       (apply str (distinct (for [[_ [k a b]] items :when (and b (#{:sizeof :align :htype} k))] (str "#include \"" (.getName (File. ^String b)) "\"\n"))))
        "int main(void) {\n"
        (apply str
               (for [[n [k a]] items
@@ -321,10 +343,40 @@
 (def musl-libs #{"c" "m" "rt" "pthread" "dl" "util" "xnet" "crypt" "resolv"})
 
 (defn musl-functions
-  "musl's external definitions (the forms index's :defs, bin/ci musl read's)"
-  [^String forms]
-  (let [ix (read-string (slurp (str forms "/index.edn")))]
-    (set (for [[_ {:keys [defs]}] ix [n _] defs] (str n)))))
+  "musl's external definitions, the members of libc.a as musl's Makefile makes it for x86_64 (src/*/*.c, src/*/x86_64/* in
+  place of the generic file of the same name): the forms index's :defs (bin/ci musl read's) and, for what it does not read
+  (src/ldso, the assembly sources), a scan: a C file's file-scope definitions not static and its weak_alias/strong_alias
+  names, an assembly file's .global/.globl symbols"
+  [^String forms ^String musl]
+  (let [ix (read-string (slurp (str forms "/index.edn")))
+        from-ix (set (for [[_ {:keys [defs]}] ix [n _] defs] (str n)))
+        src (File. (str musl "/src"))
+        files (for [^File d (sort (.listFiles src)) :when (.isDirectory d)
+                    :let [arch (File. d "x86_64")
+                          arch-files (when (.isDirectory arch) (vec (.listFiles arch)))
+                          arch-bases (set (map #(str/replace (.getName ^File %) #"\.[csS]$" "") arch-files))]
+                    ^File f (concat arch-files
+                                    (remove #(contains? arch-bases (str/replace (.getName ^File %) #"\.c$" ""))
+                                            (filter #(str/ends-with? (.getName ^File %) ".c") (.listFiles d))))]
+                f)
+        scanned (for [^File f files
+                      :let [t (slurp f)]
+                      n (if (str/ends-with? (.getName f) ".c")
+                          (concat (for [[_ n] (re-seq #"(?m)^(?!static\b)[A-Za-z_][A-Za-z0-9_ \*]*?\b([A-Za-z_][A-Za-z0-9_]*)\s*\([^;]*$" t)] n)
+                                  (for [[_ n] (re-seq #"(?:weak|strong)_alias\s*\(\s*\w+\s*,\s*(\w+)\s*\)" t)] n))
+                          (for [[_ n] (re-seq #"(?m)^\s*\.glob(?:a)?l\s+(\w+)" t)] n))]
+                  n)]
+    (into from-ix scanned)))
+
+(defn annot-types
+  "The probe declarations' types from bin/ci annot's lines `d probe_ID x TYPE` ({id type}, `?` for an undeclared one)"
+  [^String out]
+  (into {} (for [[_ id t] (re-seq #"(?m)^d probe__(\S+) x (.*)$" (slurp out))] [id t])))
+
+(def ^:private integer-types #{"char" "schar" "uchar" "short" "ushort" "int" "uint" "long" "ulong" "llong" "ullong" "bool" "_Bool"
+                               "signed char" "unsigned char" "unsigned short" "unsigned" "unsigned int" "unsigned long"
+                               "long long" "unsigned long long"})
+(defn- integer-type? [^String t] (boolean (and t (or (integer-types t) (re-matches #"u?int\d*|u?long|u?short|u?char|enum.*" t)))))
 
 (defn compile-errors
   "The compile tests that failed: the set of their file names (bin/ci diagnose's FILE:LINE: lines)"
@@ -337,13 +389,29 @@
 (defn- test-name [product k a b]
   (str (c-id product) "--" (name k) "--" (c-id a) (when (and b (= k :member)) (str "--" (c-id b))) ".c"))
 
-(defn ok-fn [failed]
-  (fn [product k a b] (not (contains? failed (test-name product k a b)))))
+(defn ok-fn
+  "Whether a check's test passed: its compile test accepted; for a constant, its type an integer type too; for an htype,
+  its type declared and not a pointer (that one CUIntPtr, see evaluate)"
+  [failed types]
+  (fn [product k a b]
+    (and (not (contains? failed (test-name product k a b)))
+         (case k
+           :const (integer-type? (get-in types [product (c-id a)]))
+           :htype (let [t (get-in types [product (c-id a)])] (and t (not= t "?") (not (str/starts-with? t "*"))))
+           true))))
+
+(defn pointer-type? [types product a] (some-> (get-in types [product (c-id a)]) (str/starts-with? "*")))
+
+(defn load-types
+  "WORK/types/PRODUCT.out's types (bin/ci annot of WORK/types/PRODUCT.c): {product {id type}}"
+  [^String work cs]
+  (into {} (for [[product _] cs :let [f (File. (str work "/types/" (c-id product) ".out"))] :when (.isFile f)]
+             [product (annot-types (str f))])))
 
 (defn evaluate
   "A rule's answer: a string, or nil for undefined"
-  [r {:keys [exists? funcs ok? values product package]}]
-  (let [ev #(evaluate % {:exists? exists? :funcs funcs :ok? ok? :values values :product product :package package})
+  [r {:keys [exists? funcs ok? values product package types] :as ctx}]
+  (let [ev #(evaluate % ctx)
         yes #(when % "1")
         [k a b] r]
     (case k
@@ -359,7 +427,8 @@
       :compiles (yes (ok? product :compiles a nil))
       (:sizeof :align) (if (ok? product k a nil) (get values [product a k]) "0")
       :const (if (ok? product :const a nil) (get values [product a :const]) b)
-      :htype (when (ok? product :htype a nil) (let [v (get values [product a :htype])] (when (not= v "-") v)))
+      :htype (cond (pointer-type? types product a) "CUIntPtr"
+                   (ok? product :htype a nil) (let [v (get values [product a :htype])] (when (not= v "-") v)))
       :package (let [v (get package a)] (str "\"" v "\""))
       :missing (throw (ex-info (str "configure: no rule for " product " " a) {}))
       :and (yes (every? ev (rest r)))
@@ -390,16 +459,19 @@
       "plan" (do (doseq [[p items] cs [n [k c]] items :when (= k :missing)] (println "configure: no rule for" n "in" p "::" c))
                  (doseq [[f t] (compile-tests cs exists? src)]
                    (let [o (File. (str work "/compile/" f))] (.mkdirs (.getParentFile o)) (spit o t)))
+                 (doseq [[product items] cs :when (some (fn [[_ [k]]] (#{:const :htype} k)) items)]
+                   (let [o (File. (str work "/types/" (c-id product) ".c"))] (.mkdirs (.getParentFile o)) (spit o (type-probes product items exists?))))
                  (println "configure: " (count (compile-tests cs exists? src)) "compile tests in" (str work "/compile")))
       ;; the value programs into WORK/run/, the compile tests' results read from WORK/compile.out
-      "programs" (let [ok? (ok-fn (compile-errors (str work "/compile.out")))]
+      "programs" (let [ok? (ok-fn (compile-errors (str work "/compile.out")) (load-types work cs))]
                    (doseq [[product items] cs
                            :when (some (fn [[_ [k]]] (#{:sizeof :align :const :htype} k)) items)]
                      (let [o (File. (str work "/run/" (c-id product) ".c"))]
                        (.mkdirs (.getParentFile o)) (spit o (run-program product items ok? exists? src)))))
       ;; the answers: test/haskell/target/answers.edn
-      "answers" (let [ok? (ok-fn (compile-errors (str work "/compile.out")))
-                      funcs (musl-functions (get opts "--forms"))
+      "answers" (let [types (load-types work cs)
+                      ok? (ok-fn (compile-errors (str work "/compile.out")) types)
+                      funcs (musl-functions (get opts "--forms") musl)
                       values (run-values cs (str work "/run"))
                       ans (into (sorted-map)
                                 (for [[product items] cs]
@@ -407,7 +479,7 @@
                                     [product (into (sorted-map)
                                                    (for [[n r] items]
                                                      [n (evaluate r {:exists? exists? :funcs funcs :ok? ok? :values values
-                                                                     :product product :package package})]))])))]
+                                                                     :product product :package package :types types})]))])))]
                   (spit (get opts "--out")
                         (str ";; The configure answers of GHC 9.14.1's packages on Arbace's C target (arbace.repr.haskell.configure's probe:\n"
                              ";; bin/repr-haskell target probe; `target probe --verify` computes them again). Read with the Clojure reader.\n"

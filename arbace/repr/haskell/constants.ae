@@ -1,0 +1,145 @@
+(ns arbace.repr.haskell.constants
+  "deriveConstants in Arbace (HFS-I2 (a); doc/haskell/NATIVE.md, \"The native reads' inputs: derived\"): the RTS's
+  DerivedConstants.h, the offsets and sizes of its structures. GHC's utils/deriveConstants/Main.hs compiles a C file of
+  `char derivedConstantNAME[1 + EXPR];` and reads the sizes back with nm; here its `wanteds` list is read from the
+  tarball's Main.hs (the DSL's calls: constantWord, structField, closureField, ... with their arguments) and expanded by
+  its definitions, the same C file over the same headers (Main.hs's `headers`: PROFILING, THREADED_RTS,
+  rts/PosixSource.h, Rts.h, StableName.h, Capability.h), its objects' sizes read from ci's checker's annotations (bin/ci
+  annot) where Main.hs reads nm's, and the header written by writeHeader. A port of the tarball's utils/deriveConstants/Main.hs (the Glasgow Haskell Compiler License).
+
+    -m arbace.repr.haskell.constants program MAIN.hs OUT.c     the value program
+    -m arbace.repr.haskell.constants header MAIN.hs ANNOT OUT   DerivedConstants.h from bin/ci annot's annotations of it"
+  (:require [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(def ^:private arity
+  {"constantInt" 2 "constantWord" 2 "constantNatural" 2 "constantBool" 2 "fieldOffset" 2 "fieldOffset_" 3
+   "fieldType'" 2 "fieldType_'" 3 "structField" 2 "structFieldH" 2 "structField_" 3 "closurePayload" 2
+   "closureField_" 3 "closureField" 2 "closureFieldOffset_" 3 "closureSize" 1 "closureFieldGcptr" 2
+   "closureFieldOffset" 2 "thunkSize" 1 "defIntOffset" 2 "structSize" 1})
+
+(defn- calls
+  "Main.hs's wanteds for Linux: [[fname where args...]...] (comments dropped, the Windows-only block left out)"
+  [^String main]
+  (let [a (str/index-of main "wanteds os = concat")
+        b (str/index-of main "getWanted ::")
+        body (->> (str/split-lines (subs main a b))
+                  (map #(str/replace % #"--.*$" ""))
+                  (str/join "\n"))
+        ;; `,if os == Just Windows then concat [...] else []`: not for Linux
+        body (str/replace body #"(?s),if os == Just Windows\s+then concat \[.*?\]\s+else \[\]" "")
+        toks (re-seq #"\"(?:[^\"\\]|\\.)*\"|[A-Za-z_][A-Za-z0-9_']*" body)]
+    (loop [ts toks acc []]
+      (if-let [t (first ts)]
+        (if-let [n (get arity t)]
+          (let [[w & more] (rest ts)
+                args (mapv #(read-string %) (take n more))]
+            (recur (drop n more) (conj acc (into [t w] args))))
+          (recur (rest ts) acc))
+        acc))))
+
+(defn wanteds
+  "The calls expanded by their definitions: [where kind name expr] (kind :word :int :natural :bool :fieldtype
+  :closuresize, or a macro kind with the name base)"
+  [^String main]
+  (letfn [(field-offset_ [w nb t f] [[w :word (str "OFFSET_" nb) (str "offsetof(" t ", " f ")")]])
+          (field-type_ [w nb t f] [[w :fieldtype (str "REP_" nb) (str "FIELD_SIZE(" t ", " f ")")]])
+          (cfo_ [w nb t f] [[w :word (str "OFFSET_" nb) (str "offsetof(" t ", " f ") - TYPE_SIZE(StgHeader)")]])
+          (closure-size [w t] (let [e (str "TYPE_SIZE(" t ") - TYPE_SIZE(StgHeader)")]
+                                [[w :word (str "SIZEOF_" t "_NoHdr") e] ["C" :closuresize (str "SIZEOF_" t) e]]))
+          (expand [[f w a b c]]
+            (case f
+              "constantInt" [[w :int a b]]
+              "constantWord" [[w :word a b]]
+              "constantNatural" [[w :natural a b]]
+              "constantBool" [[w :bool a b]]
+              "fieldOffset" (field-offset_ w (str a "_" b) a b)
+              "fieldOffset_" (field-offset_ w a b c)
+              "fieldType'" (field-type_ w (str a "_" b) a b)
+              "fieldType_'" (field-type_ w a b c)
+              "structField" (concat (field-offset_ w (str a "_" b) a b) (field-type_ "C" (str a "_" b) a b) [["C" :struct-macro (str a "_" b)]])
+              "structFieldH" (concat (field-offset_ w (str a "_" b) a b) (field-type_ w (str a "_" b) a b) [["C" :struct-macro (str a "_" b)]])
+              "structField_" (concat (field-offset_ w a b c) (field-type_ "C" a b c) [["C" :struct-macro a]])
+              "closurePayload" (concat (cfo_ w (str a "_" b) a b) [["C" :payload-macro (str a "_" b)]])
+              "closureField_" (concat (cfo_ w a b c) (field-type_ "C" a b c) [["C" :closure-macro a]])
+              "closureField" (concat (cfo_ w (str a "_" b) a b) (field-type_ "C" (str a "_" b) a b) [["C" :closure-macro (str a "_" b)]])
+              "closureFieldOffset_" (cfo_ w a b c)
+              "closureFieldOffset" (cfo_ w (str a "_" b) a b)
+              "closureSize" (closure-size w a)
+              "closureFieldGcptr" (concat (cfo_ w (str a "_" b) a b) [["C" :gcptr-macro (str a "_" b)] ["C" :closure-macro (str a "_" b)]])
+              "thunkSize" (concat [[w :word (str "SIZEOF_" a "_NoThunkHdr") (str "TYPE_SIZE(" a ") - TYPE_SIZE(StgThunkHeader)")]] (closure-size w a))
+              "defIntOffset" [[w :int (str "OFFSET_" a) b]]
+              "structSize" [[w :word (str "SIZEOF_" a) (str "TYPE_SIZE(" a ")")]]))]
+    (vec (mapcat expand (calls main)))))
+
+(def headers
+  ["#define IN_STG_CODE 0" "" "#define PROFILING" "#define THREADED_RTS" "" "#include \"rts/PosixSource.h\"" "#include \"Rts.h\""
+   "#include \"StableName.h\"" "#include \"Capability.h\"" "" "#include <inttypes.h>" "#include <stddef.h>" "#include <stdio.h>"
+   "#include <string.h>" "" "#define FIELD_SIZE(s_type, field) ((size_t)sizeof(((s_type*)0)->field))"
+   "#define TYPE_SIZE(type) (sizeof(type))" "#define FUN_OFFSET(sym) (offsetof(Capability,f.sym) - offsetof(Capability,r))" ""])
+
+(defn program
+  "getWanted's C file: Main.hs's headers and doWanted's arrays, `char derivedConstantNAME[1 + EXPR];` (its magnitude and sign
+  for an int, four 16-bit parts for a natural, [1] or [2] for a bool); `#pragma GCC poison sizeof` is left out (a guard
+  of Main.hs's own writing, no value depends on it)"
+  ^String [ws]
+  (str (str/join "\n" headers) "\n"
+       (apply str
+              (for [[_ k n e] ws
+                    :let [d (str "derivedConstant" n)]]
+                (case k
+                  (:word :fieldtype :closuresize) (str "char " d "[1 + " e "];\n")
+                  :int (str "char " d "Mag[1 + ((intptr_t)(" e ") >= 0 ? (" e ") : -(" e "))];\n"
+                            "char " d "Sig[(intptr_t)(" e ") >= 0 ? 3 : 1];\n")
+                  :natural (let [e2 (str "(uint64_t)(size_t)(" e ")")]
+                             (str "char " d "0[1 + ((" e2 ") & 0xFFFF)];\n" "char " d "1[1 + (((" e2 ") >> 16) & 0xFFFF)];\n"
+                                  "char " d "2[1 + (((" e2 ") >> 32) & 0xFFFF)];\n" "char " d "3[1 + (((" e2 ") >> 48) & 0xFFFF)];\n"))
+                  :bool (str "#if " e "\nchar " d "[1];\n#else\nchar " d "[2];\n#endif\n")
+                  "")))))
+
+(defn values
+  "lookupResult over the objects' sizes (ci's checker's annotations, `d NAME x [N]char`, in place of nm's): {name value}"
+  [ws ^String annot]
+  (let [m (into {} (for [[_ n k] (re-seq #"(?m)^d derivedConstant(\S+) x \[(\d+)\]char" annot)] [n (Long/parseLong k)]))
+        g #(or (get m %) (throw (ex-info (str "deriveConstants: can't find " %) {})))]
+    (when-not (= 292 (get m "CONTROL_GROUP_CONST_291")) (throw (ex-info "deriveConstants: CONTROL_GROUP_CONST_291 not round-tripped" {})))
+    (into {} (for [[_ k n] ws :when (#{:word :fieldtype :closuresize :int :natural :bool} k)]
+               [n (str (case k
+                         (:word :fieldtype :closuresize) (dec (g n))
+                         :int (* (dec (g (str n "Mag"))) (- (g (str n "Sig")) 2))
+                         :natural (+ (dec (g (str n "0"))) (bit-shift-left (dec (g (str n "1"))) 16)
+                                     (bit-shift-left (dec (g (str n "2"))) 32) (bit-shift-left (dec (g (str n "3"))) 48))
+                         :bool (case (g n) 1 1 2 0)))]))))
+
+(def genapply-fields #{"MAX_Real_Vanilla_REG" "MAX_Real_Float_REG" "MAX_Real_Double_REG" "MAX_Real_Long_REG" "MAX_Real_XMM_REG"
+                       "WORD_SIZE" "TAG_BITS" "BITMAP_BITS_SHIFT"})
+
+(defn header
+  "writeHeader: the genapply comments, HS_CONSTANTS (the Haskell side's values in order), the C side's defines"
+  ^String [ws vals]
+  (let [v #(or (get vals %) (throw (ex-info (str "deriveConstants: no value for " %) {})))]
+    (str "/* This file is created automatically.  Do not edit by hand.*/\n\n"
+         (apply str (for [[_ k n] ws :when (and (#{:word :int :natural} k) (genapply-fields n))] (str "// " n " " (v n) "\n")))
+         "#define HS_CONSTANTS \""
+         (str/join "," (for [[w k n] ws :when (and (#{"Haskell" "Both"} w) (#{:word :int :natural :bool :fieldtype :closuresize} k))] (v n)))
+         "\"\n"
+         (apply str
+                (for [[w k n] ws :when (#{"C" "Both"} w)]
+                  (str (case k
+                         :fieldtype (str "#define " n " b" (* 8 (Long/parseLong (v n))))
+                         :closuresize (str "#define " n " (SIZEOF_StgHeader+" (v n) ")")
+                         (:word :int :natural :bool) (str "#define " n " " (v n))
+                         :struct-macro (str "#define " n "(__ptr__) REP_" n "[__ptr__+OFFSET_" n "]")
+                         :closure-macro (str "#define " n "(__ptr__) REP_" n "[__ptr__+SIZEOF_StgHeader+OFFSET_" n "]")
+                         :payload-macro (str "#define " n "(__ptr__,__ix__) W_[__ptr__+SIZEOF_StgHeader+OFFSET_" n " + WDS(__ix__)]")
+                         :gcptr-macro (str "#define REP_" n " gcptr"))
+                       "\n"))))))
+
+(defn -main [& args]
+  (let [[verb main a b] args
+        ws (wanteds (slurp main))]
+    (case verb
+      "program" (spit a (program ws))
+      "header" (spit b (header ws (values ws (slurp a))))
+      (do (println "usage: -m arbace.repr.haskell.constants program MAIN.hs OUT.c | header MAIN.hs VALUES OUT") (System/exit 2)))))

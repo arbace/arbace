@@ -282,15 +282,21 @@
                   (when (= h "ghcautoconf.h") (some-> (get configured "rts/ghcautoconf.h.autoconf") ghcautoconf-h))
                   (when (= h "rts/EventLogConstants.h") (:defines ev))
                   (when (= h "rts/EventTypes.h") (:array ev))
-                  (get configured (str (subs (:dir u) (inc (count src))) "/include/" h))
+                  ;; a configure product, looked up in the package's include-dirs (time's lib/include) and its directory
+                  (some #(get configured (str (subs (:dir u) (inc (count src))) "/" % "/" h))
+                        (concat (cabal/lib-field (:pkg u) "include-dirs") ["."]))
                   (get configured (str (subs (:dir u) (inc (count src))) "/" h)))]
         (cond
           f (copy-file f to)
           g (spit-mk to g)
           :else (println "target: no source for" n h))))
     ;; the packages' configure products, where Cabal's build puts them in the extracted tree
-    (doseq [[path text] configured :when (str/starts-with? path "libraries/")]
-      (spit-mk (str out "/configured/" path) text))
+    ;; (the packages the corpus configures, :configure: Cabal's build-type Configure)
+    (doseq [p (vals (corpus-packages repo))
+            f (:configure p)
+            :let [path (str (:dir p) "/" f)]
+            :when (get configured path)]
+      (spit-mk (str out "/configured/" path) (get configured path)))
     {:members (count (file-seq (File. out)))}))
 
 ;;; The comparison (the oracle tier)
@@ -304,9 +310,15 @@
         borrowed (set (when (.isFile bf) (remove str/blank? (str/split-lines (slurp bf)))))
         a (apply dissoc (dissoc (members out) "BORROWED") borrowed)
         b (apply dissoc (members pack) borrowed)
-        same (filter #(and (get a %) (java.util.Arrays/equals ^bytes (Files/readAllBytes (.toPath ^File (get a %)))
-                                                              ^bytes (Files/readAllBytes (.toPath ^File (get b %)))))
-                     (keys b))
+        hsc2hs-of (fn [^File f] (some #(when (and (seq? %) (= 'hsdump/config (first %))) (:hsc2hs (second %)))
+                                      (read-string (str "[" (slurp f) "]"))))
+        ;; an .hsc module's record: the helper's holds its whole dump configuration, the derived one the :hsc2hs the
+        ;; native read takes from it (arbace.repr.haskell.native's config): compared on that
+        eq? (fn [m] (if (str/ends-with? m ".hspp.edn")
+                      (= (hsc2hs-of (get a m)) (hsc2hs-of (get b m)))
+                      (java.util.Arrays/equals ^bytes (Files/readAllBytes (.toPath ^File (get a m)))
+                                               ^bytes (Files/readAllBytes (.toPath ^File (get b m))))))
+        same (filter #(and (get a %) (eq? %)) (keys b))
         diff (remove (set same) (filter #(get a %) (keys b)))
         missing (remove #(get a %) (keys b))
         extra (remove #(get b %) (keys a))]
