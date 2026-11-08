@@ -574,11 +574,23 @@
   [[c _]]
   (= c cls-coercible))
 
+(def ^:dynamic *ip-givens* []) ; [[NAME type dict]...]: the implicit parameters a let ?x = e gives its body, innermost last
+
+(defmacro ^:private with-ips
+  "body under the implicit parameters env binds (tc-local-binds' ::ip)"
+  [env & body]
+  `(binding [*ip-givens* (into *ip-givens* (::ip ~env))] ~@body))
+
 (defn- want! [pred]
   (cond
     (eq-pred? pred)
     (do (unify (last (butlast (second pred))) (last (second pred))) (list 'co))
     (coercible-pred? pred) (list 'co)
+    ;; an implicit parameter a let ?x = e binds (the innermost): its type unified, its dictionary the evidence
+    (and (= cls-ip (first pred)) (seq *ip-givens*) (= :lit (first (prune (first (second pred)))))
+         (some #(= (second (prune (first (second pred)))) (first %)) *ip-givens*))
+    (let [[_ t d] (last (filter #(= (second (prune (first (second pred)))) (first %)) *ip-givens*))]
+      (unify (second (second pred)) t) d)
     :else
   (let [i (fresh-id)]
     ;; a wanted made under given equalities keeps them (its implication's givens, GHC.Tc.Types.Constraint's
@@ -676,7 +688,15 @@
                           (let [f (part [:tc (second t) (vec (butlast (nth t 2)))]) x (part (last (nth t 2)))]
                             (when (and f x) (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrApp")) [f x]))))
                     nil)))))
-;; GHC.Tc.Instance.Class's matchWithDict (HF9's second slice): WithDict cls meth, cls a class of one method and
+;; GHC.Tc.Instance.Class's matchDataToTag (HF9's second slice): DataToTag T for an algebraic data type T
+        ;; (not a newtype), its dictionary the primop dataToTagSmall# (a family of fewer constructors than the pointer tag
+        ;; can hold: 7 on a 64-bit target) or dataToTagLarge#
+        (when (and (vector? c) (= "DataToTag" (nth c 3)) (= 1 (count ts)) (= :tc (first (first ts))))
+          (when-let [ti (some-> *tycons* deref (get (second (first ts))))]
+            (when (= 'data (:flavour ti))
+              (list 'app (list 'v (ext-name "var" (nmod c) "C:DataToTag"))
+                    [(list 'v (ext-name "var" "GHC.Internal.Prim" (if (<= (count (:cons ti)) 7) "dataToTagSmall#" "dataToTagLarge#")))]))))
+        ;; GHC.Tc.Instance.Class's matchWithDict (HF9's second slice): WithDict cls meth, cls a class of one method and
         ;; no superclass, meth unified with the method's type at cls's arguments; the evidence withDict's, \sv k -> k sv
         ;; (the dictionary of such a class is its method: GHC's sv |> co, a newtype coercion, erased)
         (when (and (vector? c) (= "WithDict" (nth c 3)) (= 2 (count ts)))
@@ -1054,7 +1074,7 @@
                                                    (list 'alt (ext-name "data" "GHC.Internal.Types" "True") [] ct)])])
       HsLet (let [sb (atom [])
                   [env1 binds] (binding [*strict-binds* {:atom sb :level (inc *level*)}] (tc-local-binds env (arg v 2)))
-                  [t c] (infer env1 (arg v 3))
+                  [t c] (with-ips env1 (infer env1 (arg v 3)))
                   ;; the banged pattern bindings' matches around the body, innermost last
                   c (reduce (fn [c [pn pc]] (list 'match [(lv pn)] [(list 'clause [pc] c)])) c (reverse @sb))]
               [t (wrap-lets binds c)])
@@ -1223,7 +1243,7 @@
                                                 (list 'alt (ext-name "data" "GHC.Internal.Types" "True") [] ct)]))
       HsLet (let [sb (atom [])
                   [env1 binds] (binding [*strict-binds* {:atom sb :level (inc *level*)}] (tc-local-binds env (arg v 2)))
-                  c (check-expr env1 (arg v 3) t)
+                  c (with-ips env1 (check-expr env1 (arg v 3) t))
                   c (reduce (fn [c [pn pc]] (list 'match [(lv pn)] [(list 'clause [pc] c)])) c (reverse @sb))]
               (wrap-lets binds c))
       HsMultiIf (infer-grhss env (list 'GRHSs nil (arg v 2) (list 'EmptyLocalBinds 'NoExtField)) t)
@@ -1544,12 +1564,12 @@
   "(GRHSs ext [GRHS...] localbinds) against result type r: core"
   [env grhss r]
   (let [[env1 binds] (tc-local-binds env (arg grhss 3))
-        alts (mapv (fn [g]
+        alts (with-ips env1 (mapv (fn [g]
                      (let [gv (lval g)
                            [env2 gs] (infer-guards env1 (arg gv 2))
                            c (check-expr env2 (arg gv 3) r)]
                        (if (empty? gs) c (list 'guarded gs c))))
-                   (arg grhss 2))
+                   (arg grhss 2)))
         body (if (and (= 1 (count alts)) (not (and (seq? (first alts)) (= 'guarded (first (first alts)))))) (first alts) (list 'guards alts))]
     (wrap-lets binds body)))
 
@@ -1955,7 +1975,15 @@
                                           (conj out (list 'rec-group bs))
                                           (into out bs))]))
               [env []] groups))
-    [env []]))
+    (if (= 'HsIPBinds (con lb))
+      ;; ImplicitParams' let ?x = e (GHC.Tc.Gen.Bind's tcLocalBinds of HsIPBinds): each value bound to a dictionary
+      ;; variable (IP's dictionary C:IP e), given to the body: the body's wanted ?x is that variable (*ip-givens*)
+      (reduce (fn [[env out] b]
+                (let [bv (lval b) n (second (lval (arg bv 2))) [t c] (infer env (arg bv 3)) d (fresh-lv (str "$dIP" n))]
+                  [(update env ::ip (fnil conj []) [n t d])
+                   (conj out (list 'bind d (list 'app (list 'v (ext-name "var" "GHC.Internal.Classes" "C:IP")) [c])))]))
+              [env []] (arg (arg lb 2) 2))
+      [env []])))
 
 (defn- wrap-lets
   "Local bindings around a body: a let per binding, a letrec per recursive group"
@@ -2533,6 +2561,23 @@
             (when (not= want (zonk got)) (unify (nth ts p) got) (reset! changed true))))))
     @changed))
 
+(defn- default-ip
+  "GHC.Tc.Solver's simplifyTop defaulting of the implicit parameters it knows (defaultCallStacks, and
+  defaultExceptionContext since 9.10): an unsolved ?callStack :: CallStack (HasCallStack) is the empty stack, an
+  unsolved ?exceptionContext :: ExceptionContext (HasExceptionContext) the empty context; nil for another"
+  [pred]
+  (let [[c ts] (zonk-pred pred)
+        cip (fn [x] (list 'app (list 'v (ext-name "var" "GHC.Internal.Classes" "C:IP")) [x]))
+        nm (cond (= c cls-callstack) "callStack"
+                 (and (vector? c) (= "HasExceptionContext" (nth c 3))) "exceptionContext"
+                 (and (= c cls-ip) (= :lit (first (first ts)))) (second (first ts)))]
+    (case nm
+      "callStack" (do (when (= c cls-ip) (unify (second ts) (con-ty tc-callstack)))
+                      (cip (list 'v (ext-name "var" "GHC.Internal.Stack.Types" "emptyCallStack"))))
+      "exceptionContext" (do (when (= c cls-ip) (unify (second ts) (con-ty (ext-name "tc" "GHC.Internal.Exception.Context" "ExceptionContext"))))
+                             (cip (list 'v (ext-name "var" "GHC.Internal.Exception.Context" "emptyExceptionContext"))))
+      nil)))
+
 (defn default!
   "Haskell 2010 §4.3.4: each ambiguous meta of the wanteds whose classes are standard, one numeric, defaulted to the
   first of (Integer, Double) that satisfies them all; then every wanted solved"
@@ -2548,7 +2593,8 @@
                                       (cond-> (or *defaults* [(con-ty tc-integer) (con-ty tc-double)]) *control* reverse)))]
             (unify [:mv i] t)))))
     (doseq [w ws]
-      (if-let [term (if-let [g (:geqs w)] (binding [*given-eqs* g] (solve-pred (:pred w) [] 0)) (solve-pred (:pred w) [] 0))]
+      (if-let [term (or (if-let [g (:geqs w)] (binding [*given-eqs* g] (solve-pred (:pred w) [] 0)) (solve-pred (:pred w) [] 0))
+                        (default-ip (:pred w)))]
         (swap! *evidence* assoc (:ev w) term)
         (error! "unsolved: " (pr-str (zonk-pred (:pred w)))))))))
 
