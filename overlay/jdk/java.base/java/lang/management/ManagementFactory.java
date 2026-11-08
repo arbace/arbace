@@ -26,8 +26,10 @@
 /*
  * Arbace (overlay/jdk, doc/classes/JAVA-DEFERRED-TRIAGE.md, F13, "As built: F13 (write-ahead)"; JCS161 (a)): jrt's
  * java.lang.management.ManagementFactory, jdk26u's (https://github.com/openjdk/jdk26u at baf63fb,
- * src/java.management/share/classes/java/lang/management/ManagementFactory.java) without JMX (JCS95 (a)): no
- * platform MBean server (getPlatformMBeanServer), no MXBean proxies over an MBeanServerConnection
+ * src/java.management/share/classes/java/lang/management/ManagementFactory.java) without JMX (JCS95 (a)), but since
+ * JMX-1 (JCS263, "As built: JMX-1 (write-ahead)") the platform MBean server (getPlatformMBeanServer: jdk26u's, over
+ * the table below, each bean registered by jdk26u's addMXBean under its own ObjectName); no MXBean proxies over an
+ * MBeanServerConnection
  * (newPlatformMXBeanProxy and the getPlatformMXBean(s) taking one), no PlatformMBeanProvider found by
  * ServiceLoader. The platform components are a table of jrt's own, in jdk26u's precedence (jdk.management's
  * provider before java.management's): the threads' bean (jdk.management's HotSpotThreadImpl, which is also a
@@ -40,6 +42,17 @@
  */
 package java.lang.management;
 
+import javax.management.DynamicMBean;
+import javax.management.InstanceAlreadyExistsException;
+import javax.management.MBeanRegistrationException;
+import javax.management.MBeanServer;
+import javax.management.MBeanServerFactory;
+import javax.management.MalformedObjectNameException;
+import javax.management.NotCompliantMBeanException;
+import javax.management.NotificationEmitter;
+import javax.management.ObjectName;
+import javax.management.StandardEmitterMBean;
+import javax.management.StandardMBean;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -173,6 +186,42 @@ public class ManagementFactory {
                     sun.management.ManagementFactoryHelper.getVMManagement());
         }
         return osImpl;
+    }
+
+    private static MBeanServer platformMBeanServer;
+
+    // jrt (JMX-1): jdk26u's, its platform components the beans the Go build makes (jdk26u registers every
+    // PlatformComponent's nameToMBeanMap, the beans' getObjectName()s)
+    public static synchronized MBeanServer getPlatformMBeanServer() {
+        if (platformMBeanServer == null) {
+            platformMBeanServer = MBeanServerFactory.createMBeanServer();
+            PlatformManagedObject[] beans = {
+                threadBean(), sun.management.ManagementFactoryHelper.getRuntimeMXBean(), osBean()
+            };
+            for (PlatformManagedObject pmo : beans) {
+                addMXBean(platformMBeanServer, pmo.getObjectName().getCanonicalName(), pmo);
+            }
+        }
+        return platformMBeanServer;
+    }
+
+    private static void addMXBean(final MBeanServer mbs, String name, final Object pmo)
+    {
+        try {
+            ObjectName oname = ObjectName.getInstance(name);
+            // Make DynamicMBean out of MXBean by wrapping it with a StandardMBean
+            final DynamicMBean dmbean;
+            if (pmo instanceof DynamicMBean) {
+                dmbean = DynamicMBean.class.cast(pmo);
+            } else if (pmo instanceof NotificationEmitter) {
+                dmbean = new StandardEmitterMBean(pmo, null, true, (NotificationEmitter) pmo);
+            } else {
+                dmbean = new StandardMBean(pmo, null, true);
+            }
+            mbs.registerMBean(dmbean, oname);
+        } catch (MalformedObjectNameException | InstanceAlreadyExistsException | MBeanRegistrationException | NotCompliantMBeanException e) {
+            throw new IllegalArgumentException(e);
+        }
     }
 
     private static UnsupportedOperationException notYet(Class<?> intf) {

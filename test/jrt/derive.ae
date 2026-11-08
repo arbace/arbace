@@ -947,6 +947,83 @@ import sun.nio.fs.AbstractFileSystemProvider;
    :header (fn [] (header (update httpserver-why 1 #(format % (-> rel (str/replace ".java" "") (str/replace "/" ".")) rel))))
    :ops reps})
 
+;; ---------------------------------------------------------------------------------------
+;; JCS263 (JMX-1): java.management's classes with jdk.internal.jrt.SystemLoggers.Logger for System.Logger (F24's
+;; rule), EnvHelp without the connectors' factories
+
+(def ^:private jmx-why
+  ["Arbace (overlay/jdk, doc/classes/JAVA-DEFERRED-TRIAGE.md, \"As built: JMX-1 (write-ahead)\"; JCS263): jdk26u's"
+   "%s (src/java.management/share/classes/%s"
+   "at https://github.com/openjdk/jdk26u baf63fb), derived by test/jrt/derive.ae (bin/jrt-convert derive):"
+   "%s; nothing else changed. jdk26u's text Copyright (c) Oracle and/or its affiliates, under the GNU General"
+   "Public License version 2 with the Classpath Exception (LICENSE.md); the derivation Copyright (c) the Arbace"
+   "authors; Eclipse Public License 1.0."])
+
+(def ^:private jmx-logger-why
+  (str "System.Logger, which jrt's hand-written java.lang.System has not (JCS155), is jdk.internal.jrt.SystemLoggers.Logger"
+       " as F24 made it for jdk.httpserver (the same interface over java.util.logging, its Level the same constants)"))
+
+(defn- jmx [rel why reps]
+  {:path rel
+   :from (str "src/java.management/share/classes/" rel)
+   :header (fn [] (header (-> jmx-why
+                              (update 1 #(format % (-> rel (str/replace ".java" "") (str/replace "/" ".")) rel))
+                              (update 3 #(format % why)))))
+   :ops reps})
+
+(def ^:private jmx-level-only
+  ;; the files that import System.Logger.Level alone (their loggers JmxProperties')
+  ["com/sun/jmx/interceptor/DefaultMBeanServerInterceptor.java" "com/sun/jmx/mbeanserver/ClassLoaderRepositorySupport.java"
+   "com/sun/jmx/mbeanserver/JmxMBeanServer.java" "com/sun/jmx/mbeanserver/MBeanInstantiator.java"
+   "com/sun/jmx/mbeanserver/MBeanServerDelegateImpl.java" "com/sun/jmx/mbeanserver/Repository.java"
+   "javax/management/MBeanServerDelegate.java" "javax/management/MBeanServerFactory.java"
+   "javax/management/StandardMBean.java" "javax/management/loading/DefaultLoaderRepository.java"
+   "javax/management/timer/Timer.java" "javax/management/timer/TimerAlarmClock.java"])
+
+(def ^:private jmx-derivations
+  (concat
+    [(jmx "com/sun/jmx/defaults/JmxProperties.java" jmx-logger-why
+          [(conj import-logger 1)
+           ["System.getLogger(" "jdk.internal.jrt.SystemLoggers.getLogger(" 7]])
+     (jmx "com/sun/jmx/remote/util/ClassLogger.java" jmx-logger-why
+          [(conj import-logger 1) (conj import-level 1)
+           ["public class ClassLogger implements System.Logger {"
+            "public class ClassLogger implements jdk.internal.jrt.SystemLoggers.Logger {" 1]
+           ["logger = System.getLogger(subsystem);" "logger = jdk.internal.jrt.SystemLoggers.getLogger(subsystem);" 1]])
+     (jmx "com/sun/jmx/remote/util/EnvHelp.java"
+          (str "the connectors' factories (javax.management.remote, out of the Go build with RMI: JCS132) not imported,"
+               " the two attribute names they hold written as their values")
+          [["import javax.management.remote.JMXConnectorFactory;\n" "" 1]
+           ["import javax.management.remote.JMXConnectorServerFactory;\n" "" 1]
+           ["JMXConnectorFactory.DEFAULT_CLASS_LOADER;" "\"jmx.remote.default.class.loader\";" 1]
+           ["JMXConnectorServerFactory.DEFAULT_CLASS_LOADER_NAME;" "\"jmx.remote.default.class.loader.name\";" 1]])]
+    (for [rel jmx-level-only]
+      (jmx rel jmx-logger-why [(conj import-level 1)]))
+    ;; F13's ThreadInfo overlay, its open data back (JMX-1): jdk26u's text and the VM's factory alone
+    [(jmx "java/lang/management/ThreadInfo.java"
+          (str "since the JVM's management interface makes ThreadInfo objects through their private constructors (JNI),"
+               " a static initializer hands jdk.internal.jrt.HostManagement a factory over them for jrt's ThreadImpl"
+               " (F13, JCS161 (a)); from(CompositeData) and its constructor as jdk26u's since JMX-1")
+          [["public class ThreadInfo {\n"
+            (str "public class ThreadInfo {\n"
+                 "    // jrt (F13): the VM's way to the private constructors, handed to HostManagement\n"
+                 "    static {\n"
+                 "        jdk.internal.jrt.HostManagement.setThreadInfoFactory(new jdk.internal.jrt.HostManagement.ThreadInfoFactory() {\n"
+                 "            @Override\n"
+                 "            public ThreadInfo newThreadInfo(Thread t, int state, Object lockObj, Thread lockOwner,\n"
+                 "                                            long blockedCount, long blockedTime,\n"
+                 "                                            long waitedCount, long waitedTime,\n"
+                 "                                            StackTraceElement[] stackTrace,\n"
+                 "                                            Object[] monitors, int[] stackDepths,\n"
+                 "                                            Object[] synchronizers) {\n"
+                 "                return new ThreadInfo(t, state, lockObj, lockOwner, blockedCount, blockedTime,\n"
+                 "                                      waitedCount, waitedTime, stackTrace, monitors, stackDepths,\n"
+                 "                                      synchronizers);\n"
+                 "            }\n"
+                 "        });\n"
+                 "    }\n"
+                 "\n") 1]])]))
+
 (def derivations
   "Each derived overlay: :path below overlay/jdk/java.base, :from (jdk26u's file, relative to the checkout),
   :ops [[OLD NEW COUNT] or a function ...] (OLD a string or a regex, found exactly COUNT times, every one
@@ -988,7 +1065,8 @@ import sun.nio.fs.AbstractFileSystemProvider;
    (httpserver "sun/net/httpserver/ExchangeImpl.java" [(conj import-logger 1) (conj import-level 1)])
    (httpserver "sun/net/httpserver/HttpConnection.java" [(conj import-logger 1) (conj import-level 1)])
    (httpserver "sun/net/httpserver/HttpContextImpl.java" [(conj import-logger 1)])
-   (httpserver "sun/net/httpserver/ServerConfig.java" [(conj import-logger 1) (conj import-level 1)])]))
+   (httpserver "sun/net/httpserver/ServerConfig.java" [(conj import-logger 1) (conj import-level 1)])]
+  jmx-derivations))
 
 ;; ---------------------------------------------------------------------------------------
 
