@@ -1154,6 +1154,120 @@ import java.lang.module.ModuleDescriptor;
 
     public static <A extends Annotation> A[] getAssociatedAnnotations(" 1]])])
 
+;; ---------------------------------------------------------------------------------------
+;; F27 (JCS255 (b)): java.rmi, jdk26u's own, where it asks what the Go build has not
+
+(def ^:private rmi-why
+  ["Arbace (overlay/jdk, doc/classes/JAVA-DEFERRED-TRIAGE.md, \"As built: F27 (write-ahead)\"; JCS255 (b)): jdk26u's"
+   "%s (src/java.rmi/share/classes/%s"
+   "at https://github.com/openjdk/jdk26u baf63fb), derived by test/jrt/derive.ae (bin/jrt-convert derive):"
+   "%s; nothing else changed. jdk26u's text Copyright (c) Oracle and/or its affiliates, under the GNU General"
+   "Public License version 2 with the Classpath Exception (LICENSE.md); the derivation Copyright (c) the Arbace"
+   "authors; Eclipse Public License 1.0."])
+
+(defn- rmi [rel why reps]
+  {:path rel
+   :from (str "src/java.rmi/share/classes/" rel)
+   :header (fn [] (header (-> rmi-why
+                              (update 1 #(format % (-> rel (str/replace ".java" "") (str/replace "/" ".")) rel))
+                              (update 3 #(format % why)))))
+   :ops reps})
+
+(def ^:private rmi-derivations
+  [(rmi "java/rmi/server/RMIClassLoader.java"
+        (str "no provider is looked up by java.util.ServiceLoader (out of the Go build: no class path to read"
+             " META-INF/services from), so the provider is the java.rmi.server.RMIClassLoaderSpi property's class or"
+             " the default one, as on a JDK without a provider configuration file")
+        [["import java.util.Iterator;\nimport java.util.ServiceLoader;\n" "" 1]
+         ["        /*
+         * Next look for a provider configuration file installed:
+         */
+        Iterator<RMIClassLoaderSpi> iter =
+            ServiceLoader.load(RMIClassLoaderSpi.class,
+                               ClassLoader.getSystemClassLoader()).iterator();
+        if (iter.hasNext()) {
+            try {
+                return iter.next();
+            } catch (ClassCastException e) {
+                throw new LinkageError(
+                    \"provider class not assignable to RMIClassLoaderSpi\", e);
+            }
+        }
+
+" "        /*
+         * jrt: no provider configuration file (no ServiceLoader in the Go build)
+         */
+
+" 1]])
+   (rmi "sun/rmi/transport/GC.java"
+        (str "librmi is not loaded (System.loadLibrary: no native libraries in the Go build); its one native,"
+             " maxObjectInspectionAge, is jrt's (go/arbace/jrt/rmi.ae: the milliseconds since Go's last collection)")
+        [["    static {
+        System.loadLibrary(\"rmi\");
+    }
+" "    // jrt: maxObjectInspectionAge is jrt's native (no librmi to load)
+" 1]])
+   (rmi "sun/rmi/transport/DGCClient.java"
+        (str "a remote reference's entry is a weak reference to its LiveRef where jdk26u's is a phantom one: jrt has"
+             " no PhantomReference and no finalization, so a weak and a phantom reference to an object are cleared and"
+             " enqueued together, when it is collected; DGCClient never asks the reference for its referent")
+        [["import java.lang.ref.PhantomReference;\n" "import java.lang.ref.WeakReference;\n" 1]
+         ["private class PhantomLiveRef extends PhantomReference<LiveRef> {"
+          "private class PhantomLiveRef extends WeakReference<LiveRef> {" 1]])
+   (rmi "sun/rmi/runtime/Log.java"
+        (str "the logging caller's frame is the fourth element of a Throwable's stack trace, which holds the frames"
+             " jdk26u's StackWalker.walk skips over (java.lang.StackWalker is not in the Go build); a StackTraceElement"
+             " answers the getClassName and getMethodName a StackFrame does")
+        [["import java.lang.StackWalker.StackFrame;\n" "" 1]
+         ["    private static final StackWalker WALKER = StackWalker.getInstance(Set.of(), 4);\n\n" "" 1]
+         ["StackFrame sourceFrame = getSource();" "StackTraceElement sourceFrame = getSource();" 4]
+         ["    private static StackFrame getSource() {
+        return WALKER.walk(s -> s
+                                 .skip(3)
+                                 .findFirst()
+                                 .get());
+    }"
+          "    private static StackTraceElement getSource() {
+        // jrt: StackWalker.getInstance(Set.of(), 4).walk(s -> s.skip(3).findFirst().get()), over a
+        // Throwable's frames (this method's first, as the walker's stream)
+        StackTraceElement[] st = new Throwable().getStackTrace();
+        return st.length > 3 ? st[3] : new StackTraceElement(\"sun.rmi.runtime.Log\", \"log\", null, -1);
+    }" 1]])
+   (rmi "sun/rmi/runtime/RuntimeUtil.java"
+        (str "the RMI runtime's threads are made without thread groups (jrt has none: java.lang.ThreadGroup is not in"
+             " the Go build), so the system and \"RMI Runtime\" groups are gone and both kinds of thread are"
+             " Thread(Runnable, String), their context class loader, name and daemon status as jdk26u sets them")
+        [["    /**
+     * Cached reference to the system (root) thread group.
+     */
+    private static final ThreadGroup systemThreadGroup;
+    static {
+        ThreadGroup group = Thread.currentThread().getThreadGroup();
+        ThreadGroup parent;
+        while ((parent = group.getParent()) != null) {
+            group = parent;
+        }
+        systemThreadGroup = group;
+    }
+
+    /**
+     * Special child of the system thread group for running tasks that
+     * may execute user code. The need for a separate thread group may
+     * be a vestige of it having had a different security policy from
+     * the system thread group, so this might no longer be necessary.
+     */
+    private static final ThreadGroup userThreadGroup =
+        new ThreadGroup(systemThreadGroup, \"RMI Runtime\");
+" "    // jrt: no thread groups (the system group and RMI Runtime's are gone)
+" 1]
+         ["     * @param group the thread group, should be systemThreadGroup or userThreadGroup\n" "" 1]
+         ["private static Thread newThread(ThreadGroup group, Runnable runnable, String name, boolean daemon) {
+        Thread t = new Thread(group, runnable, \"RMI \" + name);"
+          "private static Thread newThread(Runnable runnable, String name, boolean daemon) {
+        Thread t = new Thread(runnable, \"RMI \" + name);" 1]
+         ["return newThread(systemThreadGroup, runnable, name, daemon);" "return newThread(runnable, name, daemon);" 1]
+         ["return newThread(userThreadGroup, runnable, name, daemon);" "return newThread(runnable, name, daemon);" 1]])])
+
 (def derivations
   "Each derived overlay: :path below overlay/jdk/java.base, :from (jdk26u's file, relative to the checkout),
   :ops [[OLD NEW COUNT] or a function ...] (OLD a string or a regex, found exactly COUNT times, every one
@@ -1198,7 +1312,8 @@ import java.lang.module.ModuleDescriptor;
    (httpserver "sun/net/httpserver/ServerConfig.java" [(conj import-logger 1) (conj import-level 1)])]
   jmx-derivations
   [accessflag-derivation]
-  ta-derivations))
+  ta-derivations
+  rmi-derivations))
 
 ;; ---------------------------------------------------------------------------------------
 
