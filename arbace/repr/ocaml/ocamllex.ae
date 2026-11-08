@@ -1,0 +1,1466 @@
+;; ocamllex, OCaml's lexer generator, ported from OCaml 5.5.0's lex/ (the release tarball
+;; https://caml.inria.fr/pub/distrib/ocaml-5.5/ocaml-5.5.0.tar.xz, SHA-256
+;; fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba): lexer.mll (the lexer of lexer definitions),
+;; parser.mly (their grammar, ocamlyacc's precedences), cset.ml, table.ml, lexgen.ml (the tagged DFA), compact.ml,
+;; common.ml, output.ml (the table-driven code) and main.ml, with the parts of stdlib/set.ml (the AVL sets whose
+;; shapes decide which of two equal identifiers a union keeps) they rely on; by hand, rule for rule, on 2026-11-08.
+;; Their notice:
+;;
+;;                                 OCaml
+;;
+;;             Xavier Leroy, projet Cristal, INRIA Rocquencourt
+;;
+;;   Copyright 1996 Institut National de Recherche en Informatique et
+;;     en Automatique.
+;;
+;;   All rights reserved.  This file is distributed under the terms of
+;;   the GNU Lesser General Public License version 2.1, with the
+;;   special exception on linking described in the file LICENSE.
+;;
+;; (LICENSE.md, "The OCaml Core System"). The command line around it (`check`) is Arbace's own.
+
+(ns arbace.repr.ocaml.ocamllex
+  "ocamllex in Arbace (doc/ocaml/OCAML-SURVEY.md, \"As built: ocamllex ported (OC186)\"): a lexer definition
+  (.mll) read by lex/lexer.mll's rules and parser.mly's grammar, its rules compiled to the tagged DFA of
+  lex/lexgen.ml (Berry-Sethi positions, Laurikari's tags, the memory cells and their moves), compacted as
+  compact.ml packs it and written as output.ml writes it: the same OCaml text as ocamllex 5.5.0's, byte for byte,
+  its line directives included.
+
+    lex [-q] [-o OUT] [-ml] FILE.mll    ocamllex's command line (-ml: refused, Proposed OC191)
+    check LIST                          each file of LIST (one path a line, relative to the current directory)
+                                        generated as ocamllex FILE.mll would, its messages in FILE.ml.out"
+  (:import [java.io File FileOutputStream]
+           [java.util ArrayList]))
+
+(set! *warn-on-reflection* false)
+
+;; ---------------------------------------------------------------------------------------------
+;; Byte strings (one char a byte, ISO-8859-1) and errors
+
+(defn- read-bstr ^String [^String path]
+  (String. ^bytes (java.nio.file.Files/readAllBytes (.toPath (File. path))) "ISO-8859-1"))
+
+(defn- write-bstr [^String path ^String s]
+  (with-open [o (FileOutputStream. path)] (.write o (.getBytes s "ISO-8859-1"))))
+
+(defn- fail [kind data] (throw (ex-info (name kind) (assoc data ::kind kind))))
+
+(def ^:private ^:dynamic *errs* nil)  ;; a StringBuilder for the warnings and errors (stderr's text)
+
+(defn- eprint [^String s] (if *errs* (.append ^StringBuilder *errs* s) (do (.print System/err s) (.flush System/err))))
+
+;; ---------------------------------------------------------------------------------------------
+;; stdlib/set.ml's AVL trees (Set.Make), for lexgen's IdSet: a union keeps one of two equal identifiers (equal by
+;; name, their locations differing) by the trees' heights, and the location it keeps is the one the output names.
+;; A tree is nil or [l v r h].
+
+(defn- avl-h ^long [t] (if (nil? t) 0 (long (nth t 3))))
+
+(defn- avl-node [l v r]
+  (let [hl (avl-h l) hr (avl-h r)] [l v r (if (>= hl hr) (inc hl) (inc hr))]))
+
+(defn- avl-bal [l v r]
+  (let [hl (avl-h l) hr (avl-h r)]
+    (cond
+      (> hl (+ hr 2))
+      (let [[ll lv lr] l]
+        (if (>= (avl-h ll) (avl-h lr))
+          (avl-node ll lv (avl-node lr v r))
+          (let [[lrl lrv lrr] lr] (avl-node (avl-node ll lv lrl) lrv (avl-node lrr v r)))))
+      (> hr (+ hl 2))
+      (let [[rl rv rr] r]
+        (if (>= (avl-h rr) (avl-h rl))
+          (avl-node (avl-node l v rl) rv rr)
+          (let [[rll rlv rlr] rl] (avl-node (avl-node l v rll) rlv (avl-node rlr rv rr)))))
+      :else [l v r (if (>= hl hr) (inc hl) (inc hr))])))
+
+(defn- avl-add [cmp x t]
+  (if (nil? t)
+    [nil x nil 1]
+    (let [[l v r] t c (long (cmp x v))]
+      (cond
+        (zero? c) t
+        (neg? c) (let [ll (avl-add cmp x l)] (if (identical? l ll) t (avl-bal ll v r)))
+        :else (let [rr (avl-add cmp x r)] (if (identical? r rr) t (avl-bal l v rr)))))))
+
+(defn- avl-add-min [x t] (if (nil? t) [nil x nil 1] (let [[l v r] t] (avl-bal (avl-add-min x l) v r))))
+(defn- avl-add-max [x t] (if (nil? t) [nil x nil 1] (let [[l v r] t] (avl-bal l v (avl-add-max x r)))))
+
+(defn- avl-join [l v r]
+  (cond
+    (nil? l) (avl-add-min v r)
+    (nil? r) (avl-add-max v l)
+    :else (let [[ll lv lr lh] l [rl rv rr rh] r]
+            (cond
+              (> (long lh) (+ (long rh) 2)) (avl-bal ll lv (avl-join lr v r))
+              (> (long rh) (+ (long lh) 2)) (avl-bal (avl-join l v rl) rv rr)
+              :else (avl-node l v r)))))
+
+(defn- avl-min [t] (let [[l v] t] (if (nil? l) v (recur l))))
+(defn- avl-remove-min [t] (let [[l v r] t] (if (nil? l) r (avl-bal (avl-remove-min l) v r))))
+(defn- avl-concat [t1 t2] (cond (nil? t1) t2 (nil? t2) t1 :else (avl-join t1 (avl-min t2) (avl-remove-min t2))))
+
+(defn- avl-split [cmp x t]
+  (if (nil? t)
+    [nil false nil]
+    (let [[l v r] t c (long (cmp x v))]
+      (cond
+        (zero? c) [l true r]
+        (neg? c) (let [[ll pres rl] (avl-split cmp x l)] [ll pres (avl-join rl v r)])
+        :else (let [[lr pres rr] (avl-split cmp x r)] [(avl-join l v lr) pres rr])))))
+
+(defn- avl-mem [cmp x t]
+  (loop [t t]
+    (if (nil? t)
+      false
+      (let [[l v r] t c (long (cmp x v))] (cond (zero? c) true (neg? c) (recur l) :else (recur r))))))
+
+(defn- avl-union [cmp s1 s2]
+  (cond
+    (nil? s1) s2
+    (nil? s2) s1
+    :else
+    (let [[l1 v1 r1 h1] s1 [l2 v2 r2 h2] s2]
+      (if (>= (long h1) (long h2))
+        (if (= 1 (long h2))
+          (avl-add cmp v2 s1)
+          (let [[l2' _ r2'] (avl-split cmp v1 s2)]
+            (avl-join (avl-union cmp l1 l2') v1 (avl-union cmp r1 r2'))))
+        (if (= 1 (long h1))
+          (avl-add cmp v1 s2)
+          (let [[l1' _ r1'] (avl-split cmp v2 s1)]
+            (avl-join (avl-union cmp l1' l2) v2 (avl-union cmp r1' r2))))))))
+
+(defn- avl-inter [cmp s1 s2]
+  (cond
+    (nil? s1) nil
+    (nil? s2) nil
+    :else (let [[l1 v1 r1] s1 [l2 pres r2] (avl-split cmp v1 s2)]
+            (if pres
+              (avl-join (avl-inter cmp l1 l2) v1 (avl-inter cmp r1 r2))
+              (avl-concat (avl-inter cmp l1 l2) (avl-inter cmp r1 r2))))))
+
+(defn- avl-diff [cmp s1 s2]
+  (cond
+    (nil? s1) nil
+    (nil? s2) s1
+    :else (let [[l1 v1 r1] s1 [l2 pres r2] (avl-split cmp v1 s2)]
+            (if pres
+              (avl-concat (avl-diff cmp l1 l2) (avl-diff cmp r1 r2))
+              (avl-join (avl-diff cmp l1 l2) v1 (avl-diff cmp r1 r2))))))
+
+(defn- avl-elements
+  "The elements in increasing order (Set.fold's order)"
+  [t]
+  (letfn [(go [t acc] (if (nil? t) acc (let [[l v r] t] (go l (cons v (go r acc))))))]
+    (go t ())))
+
+;; IdSet: identifiers [name location], compared by name (lexgen.ml's id_compare)
+(defn- id-cmp [a b] (compare (nth a 0) (nth b 0)))
+(defn- ids-add [x s] (avl-add id-cmp x s))
+(defn- ids-mem [x s] (avl-mem id-cmp x s))
+(defn- ids-union [a b] (avl-union id-cmp a b))
+(defn- ids-inter [a b] (avl-inter id-cmp a b))
+(defn- ids-diff [a b] (avl-diff id-cmp a b))
+(defn- ids-mem-name [name s] (boolean (some #(= name (nth % 0)) (avl-elements s))))
+
+;; ---------------------------------------------------------------------------------------------
+;; cset.ml: character sets as sorted lists of disjoint intervals [lo hi] (256 is eof)
+
+(defn- cset-singleton [c] (list [c c]))
+(defn- cset-interval [c1 c2] (if (<= (long c1) (long c2)) (list [c1 c2]) (list [c2 c1])))
+
+(defn- cset-union [s1 s2]
+  (cond
+    (empty? s1) s2
+    (empty? s2) s1
+    :else
+    (let [[c1 d1 :as p1] (first s1) r1 (rest s1) [c2 d2] (first s2) r2 (rest s2)
+          c1 (long c1) d1 (long d1) c2 (long c2) d2 (long d2)]
+      (if (> c1 c2)
+        (cset-union s2 s1)
+        (cond
+          (< (inc d1) c2) (cons p1 (cset-union r1 s2))
+          (< d1 d2) (cset-union (cons [c1 d2] r2) r1)
+          :else (cset-union s1 r2))))))
+
+(defn- cset-inter [l l']
+  (cond
+    (empty? l') ()
+    (empty? l) ()
+    :else
+    (let [[c1 c2] (first l) r (rest l) [c1' c2'] (first l') r' (rest l')
+          c1 (long c1) c2 (long c2) c1' (long c1') c2' (long c2')]
+      (cond
+        (< c2 c1') (cset-inter r l')
+        (< c2' c1) (cset-inter l r')
+        (< c2 c2') (cons [(max c1 c1') c2] (cset-inter r l'))
+        :else (cons [(max c1 c1') c2'] (cset-inter l r'))))))
+
+(defn- cset-diff [l l']
+  (cond
+    (empty? l') l
+    (empty? l) ()
+    :else
+    (let [[c1 c2] (first l) r (rest l) [c1' c2'] (first l') r' (rest l')
+          c1 (long c1) c2 (long c2) c1' (long c1') c2' (long c2')]
+      (cond
+        (< c2 c1') (cons [c1 c2] (cset-diff r l'))
+        (< c2' c1) (cset-diff l r')
+        :else (let [r'' (if (< c2' c2) (cons [(inc c2') c2] r) r)]
+                (if (< c1 c1')
+                  (cons [c1 (dec c1')] (cset-diff r'' r'))
+                  (cset-diff r'' r')))))))
+
+(def ^:private cset-eof (cset-singleton 256))
+(def ^:private cset-all (cset-interval 0 255))
+(def ^:private cset-all-eof (cset-interval 0 256))
+(defn- cset-complement [s] (cset-diff cset-all s))
+
+(defn- env-to-array
+  "Cset.env_to_array: the first pair's value everywhere, then each other pair's over its set"
+  [env]
+  (let [[_ x] (first env) res (object-array 257)]
+    (dotimes [k 257] (aset res k x))
+    (doseq [[c y] (rest env) [i j] c k (range (long i) (inc (long j)))] (aset res (int k) y))
+    res))
+
+;; ---------------------------------------------------------------------------------------------
+;; lexer.mll: the lexer of lexer definitions. The buffer: the text, and the current position's [cnum lnum bol]
+;; with its file name (Lexing.lex_curr_p, as the rules' incr_loc and update_loc change it).
+
+(defn- make-lexbuf [^String s fname] {:s s :n (count s) :p (long-array [0 1 0]) :fname (atom fname)})
+(defn- lb-pos
+  "The position of index i with the current line (Lexing.position: [fname lnum bol cnum])"
+  [lb i] (let [^longs p (:p lb)] [@(:fname lb) (aget p 1) (aget p 2) i]))
+(defn- incr-loc [lb end delta] (let [^longs p (:p lb)] (aset p 1 (inc (aget p 1))) (aset p 2 (- (long end) (long delta)))))
+(defn- update-loc [lb fname line end]
+  (let [^longs p (:p lb)] (when fname (reset! (:fname lb) fname)) (aset p 1 (long line)) (aset p 2 (long end))))
+
+(defn- ch ^long [^String s ^long n ^long i] (if (< i n) (long (.charAt s (int i))) -1))
+
+(defn- identstart? [^long c] (or (<= 65 c 90) (<= 97 c 122) (= c 95) (<= 192 c 214) (<= 216 c 246) (<= 248 c 255)))
+(defn- identbody? [^long c] (or (identstart? c) (= c 39) (<= 48 c 57)))
+(defn- lowercase? [^long c] (or (<= 97 c 122) (= c 95)))
+(defn- digit? [^long c] (<= 48 c 57))
+(defn- hex? [^long c] (or (<= 48 c 57) (<= 97 c 102) (<= 65 c 70)))
+(defn- blank? [^long c] (or (= c 32) (= c 9) (= c 12)))
+
+(defn- lexical-error
+  "raise_lexical_error: the message at the lexeme's start, its column counted from 1"
+  [lb start msg]
+  (let [[f l b c] (lb-pos lb start)] (fail :lexical {:msg msg :file f :line l :col (inc (- (long c) (long b)))})))
+(defn- raw-error [msg] (fail :lexical {:msg msg :file "" :line 0 :col 0}))
+
+(defn- handle-lexical-error
+  "handle_lexical_error: an error raised without a position gets the position of the lexeme that began the call"
+  [lb start f]
+  (let [[file line bol cnum] (lb-pos lb start)]
+    (try (f)
+         (catch arbace.lang.ExceptionInfo e
+           (let [d (ex-data e)]
+             (if (and (= :lexical (::kind d)) (= "" (:file d)) (= 0 (:line d)) (= 0 (:col d)))
+               (fail :lexical {:msg (:msg d) :file file :line line :col (inc (- (long cnum) (long bol)))})
+               (throw e)))))))
+
+(defn- warning [lb start msg]
+  (let [[f l b c] (lb-pos lb start)]
+    (eprint (str "ocamllex warning:\nFile \"" f "\", line " l ", character " (inc (- (long c) (long b))) ": " msg ".\n"))))
+
+(defn- hex-value ^long [^long d] (cond (>= d 97) (- d 87) (>= d 65) (- d 55) :else (- d 48)))
+(defn- char-for-backslash ^long [^long c] (case c 110 10 114 13 98 8 116 9 c))
+
+(defn- utf8-bytes
+  "Buffer.add_utf_8_uchar's bytes for the code point u"
+  [^long u]
+  (cond
+    (<= u 0x7F) [u]
+    (<= u 0x7FF) [(bit-or 0xC0 (bit-shift-right u 6)) (bit-or 0x80 (bit-and u 0x3F))]
+    (<= u 0xFFFF) [(bit-or 0xE0 (bit-shift-right u 12)) (bit-or 0x80 (bit-and (bit-shift-right u 6) 0x3F))
+                   (bit-or 0x80 (bit-and u 0x3F))]
+    :else [(bit-or 0xF0 (bit-shift-right u 18)) (bit-or 0x80 (bit-and (bit-shift-right u 12) 0x3F))
+           (bit-or 0x80 (bit-and (bit-shift-right u 6) 0x3F)) (bit-or 0x80 (bit-and u 0x3F))]))
+
+(defn- lex-string
+  "lexer.mll's string IN_PATTERN (:pattern :action :comment) from i, after the opening quote: the index after
+  the closing one, the characters stored into sb"
+  [lb i mode ^StringBuilder sb]
+  (let [^String s (:s lb) n (long (:n lb)) pat (= mode :pattern)
+        store (fn [c] (.append sb (char c)))]
+    (loop [i (long i)]
+      (let [c (ch s n i)]
+        (cond
+          (= c -1) (raw-error "unterminated string")
+          (= c 34) (inc i)
+          (= c 92)
+          (let [d (ch s n (inc i))
+                nl (loop [j (inc i)] (if (= 13 (ch s n j)) (recur (inc j)) j))]
+            (cond
+              (= d -1) (do (store 92) (recur (inc i)))
+              ;; '\\' ('\013'* '\010') ([' ' '\009']* as spaces)
+              (= 10 (ch s n nl))
+              (let [k (loop [k (inc nl)] (if (let [x (ch s n k)] (or (= x 32) (= x 9))) (recur (inc k)) k))]
+                (incr-loc lb k (- k (inc nl)))
+                (recur k))
+              (#{92 39 34 110 116 98 114 32} d) (do (store (char-for-backslash d)) (recur (+ i 2)))
+              (and (digit? d) (digit? (ch s n (+ i 2))) (digit? (ch s n (+ i 3))))
+              (let [d2 (ch s n (+ i 2)) d3 (ch s n (+ i 3))
+                    v (+ (* 100 (- d 48)) (* 10 (- d2 48)) (- d3 48))]
+                (when pat
+                  (if (> v 255)
+                    (lexical-error lb i (str "illegal backslash escape in string: '\\" (char d) (char d2) (char d3) "'"))
+                    (store v)))
+                (recur (+ i 4)))
+              (and (= d 111) (<= 48 (ch s n (+ i 2)) 51) (<= 48 (ch s n (+ i 3)) 55) (<= 48 (ch s n (+ i 4)) 55))
+              (do (store (+ (* 64 (- (ch s n (+ i 2)) 48)) (* 8 (- (ch s n (+ i 3)) 48)) (- (ch s n (+ i 4)) 48)))
+                  (recur (+ i 5)))
+              (and (= d 120) (hex? (ch s n (+ i 2))) (hex? (ch s n (+ i 3))))
+              (do (store (+ (* 16 (hex-value (ch s n (+ i 2)))) (hex-value (ch s n (+ i 3))))) (recur (+ i 4)))
+              (and (= d 117) (= 123 (ch s n (+ i 2))) (hex? (ch s n (+ i 3)))
+                   (= 125 (ch s n (loop [k (+ i 3)] (if (hex? (ch s n k)) (recur (inc k)) k)))))
+              (let [k (loop [k (+ i 3)] (if (hex? (ch s n k)) (recur (inc k)) k))
+                    hs (subs s (+ i 3) k)
+                    v (reduce (fn [acc c] (+ (* 16 acc) (hex-value (long c)))) 0 hs)]
+                (when pat
+                  (if (not (or (<= 0 v 0xD7FF) (<= 0xE000 v 0x10FFFF)))
+                    (lexical-error lb i (str "illegal uchar escape in string: '\\u{" hs "}'"))
+                    (doseq [b (utf8-bytes v)] (store b))))
+                (recur (inc k)))
+              :else
+              (do (when pat (warning lb i (str "illegal backslash escape in string: '\\" (char d) "'")))
+                  (store 92) (store d)
+                  (recur (+ i 2)))))
+          (or (= c 10) (and (= c 13) (= 10 (ch s n (loop [j i] (if (= 13 (ch s n j)) (recur (inc j)) j))))))
+          (let [j (loop [j i] (if (= 13 (ch s n j)) (recur (inc j)) j))]
+            (when (not= mode :comment) (warning lb i "unescaped newline in string"))
+            (.append sb (subs s i (inc j)))
+            (incr-loc lb (inc j) 0)
+            (recur (inc j)))
+          :else (do (store c) (recur (inc i))))))))
+
+(defn- quoted-open
+  "At '{': the quoted string's opening '{' ('%' '%'? extattrident blank*)? (lowercase* as delim) '|', as
+  [delim index-after], or nil"
+  [^String s n i]
+  (let [n (long n)
+        ident-end (fn [j] (loop [j (long j)] (if (identbody? (ch s n j)) (recur (inc j)) j)))
+        j (inc (long i))
+        j (if (= 37 (ch s n j))
+            (let [j (inc j) j (if (= 37 (ch s n j)) (inc j) j)]
+              (when (identstart? (ch s n j))
+                (let [j (loop [j (ident-end (inc j))]
+                          (if (and (= 46 (ch s n j)) (identstart? (ch s n (inc j)))) (recur (ident-end (+ j 2))) j))]
+                  (loop [j j] (if (blank? (ch s n j)) (recur (inc j)) j)))))
+            j)]
+    (when j
+      (let [k (loop [k (long j)] (if (lowercase? (ch s n k)) (recur (inc k)) k))]
+        (when (= 124 (ch s n k)) [(subs s j k) (inc k)])))))
+
+(defn- quoted-string
+  "lexer.mll's quoted_string DELIM from i: the index after the closing |delim}"
+  [lb i delim]
+  (let [^String s (:s lb) n (long (:n lb))]
+    (loop [i (long i)]
+      (let [c (ch s n i)]
+        (cond
+          (= c -1) (raw-error "unterminated string")
+          (or (= c 10) (= c 13))
+          (let [j (loop [j i] (if (= 13 (ch s n j)) (recur (inc j)) j))]
+            (if (= 10 (ch s n j)) (do (incr-loc lb (inc j) 0) (recur (inc j))) (recur (inc i))))
+          (= c 124)
+          (let [k (loop [k (inc i)] (if (lowercase? (ch s n k)) (recur (inc k)) k))]
+            (if (= 125 (ch s n k))
+              (if (= delim (subs s (inc i) k)) (inc k) (recur (inc k)))
+              (recur (inc i))))
+          :else (recur (inc i)))))))
+
+(defn- ocaml-ident-end
+  "lexer.mll's ocaml_ident from i (identstart_ext identchar_ext*, utf8 sequences in it), or nil"
+  [^String s n i]
+  (let [n (long n)
+        utf8 (fn [j] (loop [j (inc (long j))] (if (<= 128 (ch s n j) 191) (recur (inc j)) j)))
+        c (ch s n i)]
+    (when (or (<= 65 c 90) (<= 97 c 122) (= c 95) (<= 192 c 255))
+      (loop [j (if (<= 192 c 255) (utf8 i) (inc (long i)))]
+        (let [c (ch s n j)]
+          (cond
+            (or (<= 65 c 90) (<= 97 c 122) (= c 95) (= c 39) (<= 48 c 57)) (recur (inc j))
+            (<= 192 c 255) (recur (utf8 j))
+            :else j))))))
+
+(defn- skip-char
+  "lexer.mll's skip_char from i, after a quote: the index after the character literal, or i (\"\": a type
+  variable's quote)"
+  [lb i]
+  (let [^String s (:s lb) n (long (:n lb)) i (long i)
+        at (fn [k] (ch s n (+ i k)))
+        ;; '\\'? ('\013'* '\010') "'"
+        la (let [j (if (= 92 (at 0)) (inc i) i)
+                 k (loop [k j] (if (= 13 (ch s n k)) (recur (inc k)) k))]
+             (when (and (= 10 (ch s n k)) (= 39 (ch s n (inc k)))) (- (+ k 2) i)))
+        lb2 (when (and (not (#{92 39 10 13 -1} (at 0))) (= 39 (at 1))) 2)
+        lc (when (and (= 92 (at 0)) (not= -1 (at 1)) (= 39 (at 2))) 3)
+        ld (when (and (= 92 (at 0)) (digit? (at 1)) (digit? (at 2)) (digit? (at 3)) (= 39 (at 4))) 5)
+        le (when (and (= 92 (at 0)) (= 111 (at 1)) (<= 48 (at 2) 55) (<= 48 (at 3) 55) (<= 48 (at 4) 55) (= 39 (at 5))) 6)
+        lf (when (and (= 92 (at 0)) (= 120 (at 1)) (hex? (at 2)) (hex? (at 3)) (= 39 (at 4))) 5)
+        cands [[la :nl] [lb2 :ok] [lc :ok] [ld :ok] [le :ok] [lf :ok]]
+        [len kind] (reduce (fn [[bl bk] [l k]] (if (and l (> (long l) (long bl))) [l k] [bl bk])) [0 :none] cands)]
+    (when (= kind :nl) (incr-loc lb (+ i (long len)) 1))
+    (+ i (long len))))
+
+(declare lex-action)
+
+(defn- lex-comment
+  "lexer.mll's comment DEPTH from i, after \"(*\": the index after the closing \"*)\""
+  [lb i depth]
+  (let [^String s (:s lb) n (long (:n lb))]
+    (loop [i (long i) depth (long depth)]
+      (let [c (ch s n i)]
+        (cond
+          (= c -1) (raw-error "unterminated comment")
+          (and (= c 40) (= 42 (ch s n (inc i)))) (recur (+ i 2) (inc depth))
+          (and (= c 42) (= 41 (ch s n (inc i)))) (if (> depth 0) (recur (+ i 2) (dec depth)) (+ i 2))
+          (= c 34) (recur (long (lex-string lb (inc i) :comment (StringBuilder.))) depth)
+          (and (= c 123) (quoted-open s n i)) (let [[delim j] (quoted-open s n i)] (recur (long (quoted-string lb j delim)) depth))
+          (= c 39) (recur (long (skip-char lb (inc i))) depth)
+          (= c 10) (do (incr-loc lb (inc i) 0) (recur (inc i) depth))
+          (ocaml-ident-end s n i) (recur (long (ocaml-ident-end s n i)) depth)
+          :else (recur (inc i) depth))))))
+
+(defn- lex-action
+  "lexer.mll's action STK from i, after '{': the index of the closing '}' (Lexing.lexeme_start)"
+  [lb i]
+  (let [^String s (:s lb) n (long (:n lb))]
+    (loop [i (long i) stk ()]
+      (let [c (ch s n i)]
+        (cond
+          (= c -1) (raw-error "unterminated action")
+          (and (= c 40) (= 42 (ch s n (inc i)))) (recur (long (lex-comment lb (+ i 2) 0)) stk)
+          (= c 40) (recur (inc i) (cons \( stk))
+          (and (= c 123) (quoted-open s n i)) (let [[delim j] (quoted-open s n i)] (recur (long (quoted-string lb j delim)) stk))
+          (= c 123) (recur (inc i) (cons \{ stk))
+          (= c 41) (if (= \( (first stk)) (recur (inc i) (rest stk)) (lexical-error lb i "Unmatched ) in action"))
+          (= c 125) (cond (empty? stk) i
+                          (= \{ (first stk)) (recur (inc i) (rest stk))
+                          :else (lexical-error lb i "Unmatched } in action"))
+          (= c 34) (recur (long (handle-lexical-error lb i #(lex-string lb (inc i) :action (StringBuilder.)))) stk)
+          (= c 39) (recur (long (skip-char lb (inc i))) stk)
+          (= c 10) (do (incr-loc lb (inc i) 0) (recur (inc i) stk))
+          (ocaml-ident-end s n i) (recur (long (ocaml-ident-end s n i)) stk)
+          :else (recur (inc i) stk))))))
+
+(defn- string-escaped
+  "String.escaped of a one-character string"
+  [^long c]
+  (case c
+    34 "\\\"" 92 "\\\\" 10 "\\n" 9 "\\t" 13 "\\r" 8 "\\b"
+    (if (<= 32 c 126) (str (char c)) (format "\\%03d" c))))
+
+(def ^:private keywords
+  {"rule" :rule "parse" :parse "shortest" :shortest "and" :and "eof" :eof "let" :let "as" :as "refill" :refill})
+
+(defn- directive
+  "At '#': the line directive \"#\" [' ' '\\t']* digits [' ' '\\t']* ('\"' name '\"')? [^'\\n' '\\r']* '\\r'* '\\n',
+  as [line name index-after], or nil"
+  [^String s n i]
+  (let [n (long n)
+        sp (fn [j] (loop [j (long j)] (if (let [c (ch s n j)] (or (= c 32) (= c 9))) (recur (inc j)) j)))
+        j (sp (inc (long i)))
+        k (loop [k j] (if (digit? (ch s n k)) (recur (inc k)) k))]
+    (when (> k j)
+      (let [num (Long/parseLong (subs s j k))
+            j (sp k)
+            [name j] (if (= 34 (ch s n j))
+                       (let [e (loop [e (inc j)] (let [c (ch s n e)] (if (and (not= c -1) (not= c 10) (not= c 13) (not= c 34)) (recur (inc e)) e)))]
+                         (if (= 34 (ch s n e)) [(subs s (inc j) e) (inc e)] [nil j]))
+                       [nil j])
+            j (loop [j (long j)] (let [c (ch s n j)] (if (and (not= c -1) (not= c 10) (not= c 13)) (recur (inc j)) j)))
+            j (loop [j j] (if (= 13 (ch s n j)) (recur (inc j)) j))]
+        (when (= 10 (ch s n j)) [num name (inc j)])))))
+
+(defn- main-token
+  "lexer.mll's main: the next token, {:kind :val :start :end} (start and end Lexing positions)"
+  [lb]
+  (let [^String s (:s lb) n (long (:n lb)) ^longs p (:p lb)]
+    (loop [i (aget p 0)]
+      (let [c (ch s n i)
+            tok (fn [kind v len]
+                  (let [st (lb-pos lb i)] (aset p 0 (+ i (long len))) {:kind kind :val v :start st :last st :end (lb-pos lb (+ i (long len)))}))]
+        (cond
+          (= c -1) (tok :end nil 0)
+          (#{32 13 9 12} c) (recur (loop [j (inc i)] (if (#{32 13 9 12} (ch s n j)) (recur (inc j)) j)))
+          (= c 10) (do (incr-loc lb (inc i) 0) (recur (inc i)))
+          (and (= c 35) (directive s n i)) (let [[num name j] (directive s n i)] (update-loc lb name num j) (recur j))
+          (and (= c 40) (= 42 (ch s n (inc i))))
+          (do (aset p 0 (+ i 2))
+              (recur (long (handle-lexical-error lb i #(lex-comment lb (+ i 2) 0)))))
+          (and (= c 95) (not (identbody? (ch s n (inc i))))) (tok :underscore nil 1)
+          (identstart? c)
+          (let [j (loop [j (inc i)] (if (identbody? (ch s n j)) (recur (inc j)) j))
+                w (subs s i j)]
+            (if-let [k (keywords w)] (tok k nil (- j i)) (tok :ident w (- j i))))
+          (= c 34)
+          (let [st (lb-pos lb i) sb (StringBuilder.)
+                j (long (handle-lexical-error lb i #(lex-string lb (inc i) :pattern sb)))]
+            (aset p 0 j)
+            {:kind :string :val (.toString sb) :start st :last (lb-pos lb (dec j)) :end (lb-pos lb j)})
+          (= c 39)
+          (let [d (ch s n (inc i)) at (fn [k] (ch s n (+ i k)))]
+            (cond
+              (and (not= d 92) (not= d -1) (= 39 (at 2))) (tok :char d 3)
+              (= d 92)
+              (let [e (at 2)]
+                (cond
+                  (and (= e 111) (<= 48 (at 3) 51) (<= 48 (at 4) 55) (<= 48 (at 5) 55) (= 39 (at 6)))
+                  (tok :char (+ (* 64 (- (at 3) 48)) (* 8 (- (at 4) 48)) (- (at 5) 48)) 7)
+                  (and (digit? e) (digit? (at 3)) (digit? (at 4)) (= 39 (at 5)))
+                  (let [v (+ (* 100 (- e 48)) (* 10 (- (at 3) 48)) (- (at 4) 48))]
+                    (if (> v 255)
+                      (lexical-error lb i (str "illegal escape sequence \\" (char e) (char (at 3)) (char (at 4))))
+                      (tok :char v 6)))
+                  (and (= e 120) (hex? (at 3)) (hex? (at 4)) (= 39 (at 5)))
+                  (tok :char (+ (* 16 (hex-value (at 3))) (hex-value (at 4))) 6)
+                  (and (#{92 39 34 110 116 98 114 32} e) (= 39 (at 3))) (tok :char (char-for-backslash e) 4)
+                  (not= e -1) (lexical-error lb i (str "illegal escape sequence \\" (char e)))
+                  :else (lexical-error lb i (str "illegal character " (string-escaped c)))))
+              :else (lexical-error lb i (str "illegal character " (string-escaped c)))))
+          (= c 123)
+          (let [st (lb-pos lb i) n1 (inc i) _ (aset p 0 n1)
+                [f l1 s1] (lb-pos lb n1)
+                n2 (long (handle-lexical-error lb i #(lex-action lb n1)))]
+            (aset p 0 (inc n2))
+            {:kind :action :val {:file f :start n1 :end n2 :line l1 :col (- n1 (long s1))} :start st :last (lb-pos lb n2)
+             :end (lb-pos lb (inc n2))})
+          :else
+          (if-let [k ({61 :equal 124 :or 91 :lbracket 93 :rbracket 42 :star 63 :maybe 43 :plus 40 :lparen 41 :rparen
+                       94 :caret 45 :dash 35 :hash} c)]
+            (tok k nil 1)
+            (lexical-error lb i (str "illegal character " (string-escaped c)))))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; parser.mly: the grammar of lexer definitions. A shallow regexp: [:epsilon] [:characters cset] [:eof]
+;; [:sequence a b] [:alternative a b] [:repetition a] [:bind a [name loc]].
+
+(defn- regexp-for-string [^String s]
+  (let [n (count s)]
+    (letfn [(re-string [i] (cond (>= i n) [:epsilon]
+                                 (= (inc i) n) [:characters (cset-singleton (long (.charAt s (int i))))]
+                                 :else [:sequence [:characters (cset-singleton (long (.charAt s (int i))))] (re-string (inc i))]))]
+      (re-string 0))))
+
+(defn- remove-as [e]
+  (case (nth e 0)
+    :bind (remove-as (nth e 1))
+    (:epsilon :eof :characters) e
+    :sequence [:sequence (remove-as (nth e 1)) (remove-as (nth e 2))]
+    :alternative [:alternative (remove-as (nth e 1)) (remove-as (nth e 2))]
+    :repetition [:repetition (remove-as (nth e 1))]))
+
+(defn- as-cset [e pos]
+  (case (nth e 0)
+    :characters (nth e 1)
+    :alternative (cset-union (as-cset (nth e 1) pos) (as-cset (nth e 2) pos))
+    (fail :cset {:pos pos})))
+
+;; ocamlyacc's precedences: %right Tas, %left Tor, %nonassoc CONCAT, %nonassoc Tmaybe Tstar Tplus, %left Thash,
+;; %nonassoc Tident Tchar Tstring Tunderscore Teof Tlbracket Tlparen (the starts of a regexp)
+(def ^:private token-prec {:as [1 :right] :or [2 :left] :star [4 :nonassoc] :maybe [4 :nonassoc] :plus [4 :nonassoc]
+                           :hash [5 :left]})
+(def ^:private regexp-starts #{:underscore :eof :char :string :lbracket :lparen :ident})
+(def ^:private rule-prec {:concat 3 :or 2 :hash 5})
+
+(defn- parse-lexdef
+  "parser.mly's lexer_definition over main-token's tokens: {:header :refill :entrypoints :trailer}"
+  [lb]
+  (let [cur (volatile! (main-token lb))
+        named (volatile! {})
+        kind #(:kind @cur)
+        advance! #(vreset! cur (main-token lb))
+        parse-error #(fail :parse {:pos (:last @cur)})
+        expect! (fn [k] (if (= k (kind)) (let [t @cur] (advance!) t) (parse-error)))
+        default-loc {:file "" :start 0 :end 0 :line 1 :col 0}]
+    (letfn [(char-class1 []
+              (loop [acc nil]
+                (if (= :char (kind))
+                  (let [c1 (:val @cur)]
+                    (advance!)
+                    (let [cs (if (= :dash (kind))
+                               (do (advance!) (cset-interval c1 (:val (expect! :char))))
+                               (cset-singleton c1))]
+                      (recur (if acc (cset-union acc cs) cs))))
+                  (or acc (parse-error)))))
+            (char-class []
+              (if (= :caret (kind)) (do (advance!) (cset-complement (char-class1))) (char-class1)))
+            (primary []
+              (let [t @cur]
+                (case (:kind t)
+                  :underscore (do (advance!) [:characters cset-all])
+                  :eof (do (advance!) [:eof])
+                  :char (do (advance!) [:characters (cset-singleton (:val t))])
+                  :string (do (advance!) (regexp-for-string (:val t)))
+                  :lbracket (do (advance!) (let [c (char-class)] (expect! :rbracket) [:characters c]))
+                  :lparen (do (advance!) (let [r (regexp)] (expect! :rparen) r))
+                  ;; ocamlyacc reduces regexp: Tident by default, before it reads the next token: the name is looked up
+                  ;; first, so an unbound name is reported before a lexical error after it
+                  :ident (let [r (or (@named (:val t)) (fail :unbound {:pos (:start t) :name (:val t)}))] (advance!) r))))
+            (pending [st]
+              ;; the handle a reduction would take at the top of the stack: :concat, :or, :hash or nil
+              (let [n (count st)]
+                (when (and (>= n 2) (= :re (first (peek st))))
+                  (let [b (st (- n 2))]
+                    (cond
+                      (= :re (first b)) :concat
+                      (and (= :op (first b)) (>= n 3)) (second b))))))
+            (reduce-top [st]
+              (let [n (count st) r (pending st) b (second (peek st))]
+                (case r
+                  :concat (conj (subvec st 0 (- n 2)) [:re [:sequence (second (st (- n 2))) b]])
+                  :or (conj (subvec st 0 (- n 3)) [:re [:alternative (second (st (- n 3))) b]])
+                  :hash (let [a (second (st (- n 3))) pos (:last @cur)
+                              s1 (as-cset a pos) s2 (as-cset b pos)]
+                          (conj (subvec st 0 (- n 3)) [:re [:characters (cset-diff s1 s2)]])))))
+            (regexp []
+              (loop [st []]
+                (let [k (kind)]
+                  (cond
+                    (regexp-starts k) (recur (conj st [:re (primary)]))
+                    (token-prec k)
+                    (let [[p assoc] (token-prec k) r (pending st)]
+                      (if (and r (or (> (long (rule-prec r)) (long p))
+                                     (and (= (long (rule-prec r)) (long p)) (= assoc :left))))
+                        (recur (reduce-top st))
+                        (if (and r (= (long (rule-prec r)) (long p)) (= assoc :nonassoc))
+                          (parse-error)
+                          (if (not= :re (first (peek st)))
+                            (parse-error)
+                            (let [top (second (peek st)) st' (pop st)]
+                              (case k
+                                :star (do (advance!) (recur (conj st' [:re [:repetition top]])))
+                                :maybe (do (advance!) (recur (conj st' [:re [:alternative [:epsilon] top]])))
+                                :plus (do (advance!) (recur (conj st' [:re [:sequence [:repetition (remove-as top)] top]])))
+                                (:or :hash) (do (advance!) (recur (conj st [:op k])))
+                                :as (do (advance!)
+                                        (let [t (expect! :ident) [f l b c] (:start t)]
+                                          (recur (conj st' [:re [:bind top [(:val t) {:file f :start c :end (nth (:end t) 3)
+                                                                                       :line l :col (- (long c) (long b))}]]]))))))))))
+                    :else
+                    (if (pending st)
+                      (recur (reduce-top st))
+                      (if (and (= 1 (count st)) (= :re (first (peek st))))
+                        (second (peek st))
+                        (parse-error)))))))
+            (definition []
+              (let [name (:val (expect! :ident))
+                    args (loop [a []] (if (= :ident (kind)) (let [x (:val @cur)] (advance!) (recur (conj a x))) a))
+                    _ (expect! :equal)
+                    shortest (case (kind) :parse false :shortest true (parse-error))
+                    _ (advance!)
+                    _ (when (= :or (kind)) (advance!))
+                    clauses (loop [cs [(case-clause)]] (if (= :or (kind)) (do (advance!) (recur (conj cs (case-clause)))) cs))]
+                {:name name :shortest shortest :args args :clauses clauses}))
+            (case-clause []
+              (let [r (regexp)] [r (:val (expect! :action))]))]
+      (let [header (if (= :action (kind)) (:val (expect! :action)) default-loc)
+            _ (loop [] (when (= :let (kind))
+                         (advance!)
+                         (let [name (:val (expect! :ident))]
+                           (expect! :equal)
+                           (let [r (regexp)] (vswap! named assoc name r)))
+                         (recur)))
+            refill (when (= :refill (kind)) (advance!) (:val (expect! :action)))
+            _ (expect! :rule)
+            d1 (definition)
+            ds (loop [ds [d1]] (if (= :and (kind)) (do (advance!) (recur (conj ds (definition)))) ds))
+            trailer (if (= :action (kind)) (:val (expect! :action)) default-loc)]
+        (expect! :end)
+        {:header header :refill refill :entrypoints ds :trailer trailer}))))
+
+;; ---------------------------------------------------------------------------------------------
+;; lexgen.ml: variable cleaning and analysis
+
+(defn- do-remove-nested [to-remove e]
+  (case (nth e 0)
+    :bind (let [[_ e1 x] e]
+            (if (ids-mem x to-remove) (do-remove-nested to-remove e1) [:bind (do-remove-nested (ids-add x to-remove) e1) x]))
+    (:epsilon :eof :characters) e
+    :sequence [:sequence (do-remove-nested to-remove (nth e 1)) (do-remove-nested to-remove (nth e 2))]
+    :alternative [:alternative (do-remove-nested to-remove (nth e 1)) (do-remove-nested to-remove (nth e 2))]
+    :repetition [:repetition (do-remove-nested to-remove (nth e 1))]))
+
+(defn- stringset-delta [s1 s2] (ids-union (ids-diff s1 s2) (ids-diff s2 s1)))
+
+(defn- find-all-vars [e]
+  (case (nth e 0)
+    (:characters :epsilon :eof) nil
+    :bind (ids-add (nth e 2) (find-all-vars (nth e 1)))
+    (:sequence :alternative) (ids-union (find-all-vars (nth e 1)) (find-all-vars (nth e 2)))
+    :repetition (find-all-vars (nth e 1))))
+
+(defn- do-find-opt [e]
+  (case (nth e 0)
+    (:characters :epsilon :eof) [nil nil]
+    :bind (let [[opt all] (do-find-opt (nth e 1))] [opt (ids-add (nth e 2) all)])
+    :sequence (let [[o1 a1] (do-find-opt (nth e 1)) [o2 a2] (do-find-opt (nth e 2))] [(ids-union o1 o2) (ids-union a1 a2)])
+    :alternative (let [[o1 a1] (do-find-opt (nth e 1)) [o2 a2] (do-find-opt (nth e 2))]
+                   [(ids-union (ids-union o1 o2) (stringset-delta a1 a2)) (ids-union a1 a2)])
+    :repetition (let [r (find-all-vars (nth e 1))] [r r])))
+
+(defn- do-find-double [e]
+  (case (nth e 0)
+    (:characters :epsilon :eof) [nil nil]
+    :bind (let [x (nth e 2) [dbl all] (do-find-double (nth e 1))]
+            [(if (ids-mem x all) (ids-add x dbl) dbl) (ids-add x all)])
+    :sequence (let [[d1 a1] (do-find-double (nth e 1)) [d2 a2] (do-find-double (nth e 2))]
+                [(ids-union (ids-inter a1 a2) (ids-union d1 d2)) (ids-union a1 a2)])
+    :alternative (let [[d1 a1] (do-find-double (nth e 1)) [d2 a2] (do-find-double (nth e 2))]
+                   [(ids-union d1 d2) (ids-union a1 a2)])
+    :repetition (let [r (find-all-vars (nth e 1))] [r r])))
+
+(defn- add-some [x sz] (when sz (+ (long x) (long sz))))
+(defn- add-some-some [x y] (when (and x y) (+ (long x) (long y))))
+
+(defn- do-find-chars [sz e]
+  (case (nth e 0)
+    (:epsilon :eof) [nil nil sz]
+    :characters [nil nil (add-some 1 sz)]
+    :bind (let [x (nth e 2) [c s e-sz] (do-find-chars 0 (nth e 1))]
+            (if (= e-sz 1) [(ids-add x c) s (add-some 1 sz)] [c (ids-add x s) (add-some-some sz e-sz)]))
+    :sequence (let [[c1 s1 sz1] (do-find-chars sz (nth e 1)) [c2 s2 sz2] (do-find-chars sz1 (nth e 2))]
+                [(ids-union c1 c2) (ids-union s1 s2) sz2])
+    :alternative (let [[c1 s1 sz1] (do-find-chars sz (nth e 1)) [c2 s2 sz2] (do-find-chars sz (nth e 2))]
+                   [(ids-union c1 c2) (ids-union s1 s2) (if (= sz1 sz2) sz1 nil)])
+    :repetition (do-find-chars nil (nth e 1))))
+
+(defn- find-chars [e] (let [[c s] (do-find-chars 0 e)] (ids-diff c s)))
+
+;; ---------------------------------------------------------------------------------------------
+;; lexgen.ml: from shallow to deep syntax. A deep regexp: [:empty] [:chars n eof?] [:action n] [:tag tag]
+;; [:seq a b] [:alt a b] [:star a]; a tag [id start? action]; a tag address [base n], base :start, :end or a
+;; memory cell (a number).
+
+(def ^:private ^ArrayList chars-acc (ArrayList.))
+
+(defn- encode-regexp [char-vars act e]
+  (case (nth e 0)
+    :epsilon [:empty]
+    :characters (let [n (.size chars-acc)] (.add chars-acc (nth e 1)) [:chars n false])
+    :eof (let [n (.size chars-acc)] (.add chars-acc cset-eof) [:chars n true])
+    :sequence (let [r1 (encode-regexp char-vars act (nth e 1)) r2 (encode-regexp char-vars act (nth e 2))] [:seq r1 r2])
+    :alternative (let [r1 (encode-regexp char-vars act (nth e 1)) r2 (encode-regexp char-vars act (nth e 2))] [:alt r1 r2])
+    :repetition [:star (encode-regexp char-vars act (nth e 1))]
+    :bind (let [[_ r [name _ :as x]] e r (encode-regexp char-vars act r)]
+            (if (ids-mem x char-vars)
+              [:seq [:tag [name true act]] r]
+              [:seq [:tag [name true act]] [:seq r [:tag [name false act]]]]))))
+
+(defn- mk-seq [r1 r2] (cond (= :empty (nth r1 0)) r2 (= :empty (nth r2 0)) r1 :else [:seq r1 r2]))
+(defn- add-pos [p i] (when p [(nth p 0) (+ (long (nth p 1)) (long i))]))
+
+(defn- opt-regexp
+  "lexgen.ml's opt_regexp: the tags replaced by offsets from the start or the end of the match where they can
+  be, the rest given memory cells; [env-list regexp cell-count]"
+  [all-vars char-vars optional-vars double-vars r]
+  (let [env (volatile! {})
+        env-add! (fn [k a] (vswap! env assoc k a))
+        dbl? (fn [id] (ids-mem-name id double-vars))]
+    (letfn [(size-forward [pos r]
+              (case (nth r 0)
+                (:empty :tag) pos
+                :chars (if (nth r 2) pos (inc (long pos)))
+                :seq (when-let [p (size-forward pos (nth r 1))] (size-forward p (nth r 2)))
+                :alt (let [p1 (size-forward pos (nth r 1)) p2 (size-forward pos (nth r 2))] (if (= p1 p2) p1 nil))
+                :star nil))
+            (simple-forward [pos r]
+              (case (nth r 0)
+                :tag (let [[id start] (nth r 1)]
+                       (if (dbl? id) [r pos] (do (env-add! [id start] [:start pos]) [[:empty] pos])))
+                :empty [r pos]
+                :chars [r (if (nth r 2) pos (inc (long pos)))]
+                :seq (let [[r1 p] (simple-forward pos (nth r 1))]
+                       (if (nil? p) [(mk-seq r1 (nth r 2)) nil]
+                           (let [[r2 p] (simple-forward p (nth r 2))] [(mk-seq r1 r2) p])))
+                :alt (let [p1 (size-forward pos (nth r 1)) p2 (size-forward pos (nth r 2))] [r (if (= p1 p2) p1 nil)])
+                :star [r nil]))
+            (size-backward [pos r]
+              (case (nth r 0)
+                (:empty :tag) pos
+                :chars (if (nth r 2) pos (dec (long pos)))
+                :seq (when-let [p (size-backward pos (nth r 2))] (size-backward p (nth r 1)))
+                :alt (let [p1 (size-backward pos (nth r 1)) p2 (size-backward pos (nth r 2))] (if (= p1 p2) p1 nil))
+                :star nil))
+            (simple-backward [pos r]
+              (case (nth r 0)
+                :tag (let [[id start] (nth r 1)]
+                       (if (dbl? id) [r pos] (do (env-add! [id start] [:end pos]) [[:empty] pos])))
+                :empty [r pos]
+                :chars [r (if (nth r 2) pos (dec (long pos)))]
+                :seq (let [[r2 p] (simple-backward pos (nth r 2))]
+                       (if (nil? p) [(mk-seq (nth r 1) r2) nil]
+                           (let [[r1 p] (simple-backward p (nth r 1))] [(mk-seq r1 r2) p])))
+                :alt (let [p1 (size-backward pos (nth r 1)) p2 (size-backward pos (nth r 2))] [r (if (= p1 p2) p1 nil)])
+                :star [r nil]))]
+      (let [r (first (simple-forward 0 r))
+            r (first (simple-backward 0 r))
+            loc-count (volatile! 0)
+            get-tag-addr (fn [t] (or (@env t)
+                                     (let [n @loc-count] (vswap! loc-count inc) (env-add! t [n 0]) [n 0])))]
+        (letfn [(alloc-exp [pos r]
+                  (case (nth r 0)
+                    :tag (let [[id start] (nth r 1)]
+                           (cond (dbl? id) [r pos]
+                                 pos (do (env-add! [id start] pos) [[:empty] pos])
+                                 :else [r (get-tag-addr [id start])]))
+                    :empty [r pos]
+                    :chars [r (if (nth r 2) pos (add-pos pos 1))]
+                    :seq (let [[r1 p] (alloc-exp pos (nth r 1)) [r2 p] (alloc-exp p (nth r 2))] [(mk-seq r1 r2) p])
+                    :alt (let [off (size-forward 0 r)] (if off [r (add-pos pos off)] [r nil]))
+                    :star [r nil]))]
+          (let [[r _] (alloc-exp nil r)
+                m (reduce (fn [acc [name :as x]]
+                            (let [v (if (ids-mem x char-vars)
+                                      [:ichar (ids-mem x optional-vars) (get-tag-addr [name true])]
+                                      ;; Ident_string's arguments, evaluated right to left as OCaml does
+                                      (let [e (get-tag-addr [name false]) s (get-tag-addr [name true])]
+                                        [:istring (ids-mem x optional-vars) s e]))]
+                              (cons [x v] acc)))
+                          () (avl-elements all-vars))]
+            [m r @loc-count]))))))
+
+(defn- encode-casedef [casedef]
+  (reduce (fn [[reg actions count ntags] [expr act]]
+            (let [expr (do-remove-nested nil expr)
+                  char-vars (find-chars expr)
+                  r (encode-regexp char-vars count expr)
+                  opt-vars (first (do-find-opt expr))
+                  [double-vars all-vars] (do-find-double expr)
+                  [m r loc-ntags] (opt-regexp all-vars char-vars opt-vars double-vars r)]
+              [[:alt reg [:seq r [:action count]]] (cons [count m act] actions) (inc (long count)) (max (long loc-ntags) (long ntags))]))
+          [[:empty] () 0 0] casedef))
+
+(defn- encode-lexdef [def]
+  (.clear chars-acc)
+  (let [entries (mapv (fn [{:keys [name args shortest clauses]}]
+                        (let [[re actions _ ntags] (encode-casedef clauses)]
+                          [{:name name :regexp re :mem-tags ntags :actions (reverse actions)} args shortest]))
+                      def)
+        chr (vec chars-acc)]
+    (.clear chars-acc)
+    [chr entries]))
+
+;; ---------------------------------------------------------------------------------------------
+;; lexgen.ml: the tagged NFA (Berry-Sethi positions). A transition t_transition is a number: OnChars n is n,
+;; ToAction n is n + ACT (OnChars < ToAction, as Stdlib.compare orders the constructors); a TransSet element
+;; [t tags].
+
+(def ^:private ACT (bit-shift-left 1 40))
+(defn- to-action [n] (+ ACT (long n)))
+(defn- on-chars? [t] (< (long t) ACT))
+
+(defn- tag-cmp [a b]
+  (let [c (compare (nth a 0) (nth b 0))]
+    (if (zero? c) (let [c (compare (nth a 1) (nth b 1))] (if (zero? c) (compare (nth a 2) (nth b 2)) c)) c)))
+
+(defn- seq-cmp
+  "Set.compare: the sorted elements compared in turn, a prefix first"
+  [cmp a b]
+  (loop [x (seq a) y (seq b)]
+    (cond
+      (and (nil? x) (nil? y)) 0
+      (nil? x) -1
+      (nil? y) 1
+      :else (let [c (long (cmp (first x) (first y)))] (if (zero? c) (recur (next x) (next y)) c)))))
+
+(def ^:private tags-empty (sorted-set-by tag-cmp))
+(defn- trans-cmp [[t1 g1] [t2 g2]] (let [c (compare t1 t2)] (if (zero? c) (seq-cmp tag-cmp g1 g2) c)))
+(def ^:private transset-empty (sorted-set-by trans-cmp))
+(defn- stateset-cmp [a b] (seq-cmp compare a b))
+(def ^:private stateset-empty (sorted-set))
+(def ^:private statesetset-empty (sorted-set-by stateset-cmp))
+(defn- memkey-elt-cmp [[t1 e1] [t2 e2]] (let [c (tag-cmp t1 t2)] (if (zero? c) (seq-cmp stateset-cmp e1 e2) c)))
+(def ^:private memkey-empty (sorted-set-by memkey-elt-cmp))
+(defn- key-cmp [[s1 m1] [s2 m2]] (let [c (stateset-cmp s1 s2)] (if (zero? c) (seq-cmp memkey-elt-cmp m1 m2) c)))
+(def ^:private tagmap-empty (sorted-map-by tag-cmp))
+(def ^:private memmap-empty (sorted-map))
+
+(defn- nullable [r]
+  (case (nth r 0)
+    (:empty :tag) true
+    (:chars :action) false
+    :seq (and (nullable (nth r 1)) (nullable (nth r 2)))
+    :alt (or (nullable (nth r 1)) (nullable (nth r 2)))
+    :star true))
+
+(defn- emptymatch [r]
+  (case (nth r 0)
+    (:empty :chars :action) tags-empty
+    :tag (conj tags-empty (nth r 1))
+    :seq (into (emptymatch (nth r 1)) (emptymatch (nth r 2)))
+    :alt (if (nullable (nth r 1)) (emptymatch (nth r 1)) (emptymatch (nth r 2)))
+    :star (if (nullable (nth r 1)) (emptymatch (nth r 1)) tags-empty)))
+
+(defn- addtags [transs tags]
+  (reduce (fn [acc [t tags-t]] (conj acc [t (into tags tags-t)])) transset-empty transs))
+
+(defn- firstpos [r]
+  (case (nth r 0)
+    (:empty :tag) transset-empty
+    :chars (conj transset-empty [(nth r 1) tags-empty])
+    :action (conj transset-empty [(to-action (nth r 1)) tags-empty])
+    :seq (if (nullable (nth r 1))
+           (into (firstpos (nth r 1)) (addtags (firstpos (nth r 2)) (emptymatch (nth r 1))))
+           (firstpos (nth r 1)))
+    :alt (into (firstpos (nth r 1)) (firstpos (nth r 2)))
+    :star (firstpos (nth r 1))))
+
+(defn- followpos [size entries]
+  (let [v (object-array size)]
+    (dotimes [i size] (aset v i transset-empty))
+    (letfn [(fill [s r]
+              (case (nth r 0)
+                (:empty :action :tag) nil
+                :chars (aset v (int (nth r 1)) s)
+                :alt (do (fill s (nth r 1)) (fill s (nth r 2)))
+                :seq (let [r1 (nth r 1) r2 (nth r 2)]
+                       (fill (if (nullable r2) (into (firstpos r2) (addtags s (emptymatch r2))) (firstpos r2)) r1)
+                       (fill s r2))
+                :star (fill (into (firstpos (nth r 1)) s) (nth r 1))))]
+      (doseq [[entry] entries] (fill transset-empty (:regexp entry))))
+    v))
+
+;; ---------------------------------------------------------------------------------------------
+;; lexgen.ml: the DFA. A dfa_state {:final [act pri tagmap] :others memmap n -> [pri tagmap]}; a key
+;; [stateset memkey]; moves [:copy dst src] [:set dst]; tag actions [:settag a m] [:erasetag m].
+
+(def ^:private no-action Long/MAX_VALUE)
+(def ^:private dfa-state-empty {:final [no-action Long/MAX_VALUE tagmap-empty] :others memmap-empty})
+(defn- dfa-state-empty? [st] (and (= no-action (nth (:final st) 0)) (empty? (:others st))))
+
+(defn- env-to-class [m]
+  (let [env1 (reduce (fn [r [_ [tag s]]] (assoc r tag (conj (get r tag statesetset-empty) s))) tagmap-empty m)]
+    (reduce (fn [r [tag ss]] (conj r [tag ss])) memkey-empty env1)))
+
+(defn- inverse-mem-map [trans m r]
+  (reduce (fn [r [tag addr]]
+            (if-let [[otag s] (get r addr)] (assoc r addr [otag (conj s trans)]) (assoc r addr [tag (conj stateset-empty trans)])))
+          r m))
+
+(defn- get-key [{[act _ m-act] :final o :others}]
+  (let [env (reduce (fn [r [n [_ m]]] (inverse-mem-map n m r))
+                    (if (= act no-action) memmap-empty (inverse-mem-map (to-action act) m-act memmap-empty)) o)
+        state-key (reduce (fn [r [n]] (conj r n)) (if (= act no-action) stateset-empty (conj stateset-empty (to-action act))) o)]
+    [state-key (env-to-class env)]))
+
+(def ^:private dfa (atom nil))  ;; the generator's state: lexgen.ml's globals
+
+(defn- reset-state! []
+  (swap! dfa assoc :todo () :next-state-num 0 :state-table []))
+
+(defn- reset-state-partial! [ntags]
+  (swap! dfa assoc :next-mem-cell ntags :tag-cells {} :temp-pending false :state-map (sorted-map-by key-cmp)))
+
+(defn- do-alloc-temp []
+  (swap! dfa assoc :temp-pending true)
+  (:next-mem-cell @dfa))
+
+(defn- do-alloc-cell [used t]
+  (let [available (get (:tag-cells @dfa) t (sorted-set))
+        free (remove used available)]
+    (if (seq free)
+      (first free)
+      (let [n (long (:next-mem-cell @dfa))]
+        (swap! dfa assoc :temp-pending false)
+        (when (>= n 255) (fail :memory-overflow {}))
+        (swap! dfa (fn [d] (-> d (assoc-in [:tag-cells t] (conj available n)) (assoc :next-mem-cell (inc n)))))
+        n))))
+
+(defn- old-in-map [m r] (reduce (fn [r [_ addr]] (if (>= (long addr) 0) (conj r addr) r)) r m))
+
+(defn- alloc-map [used m mvs]
+  (reduce (fn [[r mvs] [tag a]]
+            (let [[a mvs] (if (< (long a) 0) (let [a (do-alloc-cell used tag)] [a (conj mvs a)]) [a mvs])]
+              [(assoc r tag a) mvs]))
+          [tagmap-empty mvs] m))
+
+(defn- create-new-state [{[act _ m-act] :final o :others}]
+  (let [used (reduce (fn [r [_ [_ m]]] (old-in-map m r)) (old-in-map m-act (sorted-set)) o)
+        [new-m-act mvs] (alloc-map used m-act (sorted-set))
+        [new-o mvs] (reduce (fn [[r mvs] [k [x m]]] (let [[m mvs] (alloc-map used m mvs)] [(assoc r k [x m]) mvs]))
+                            [memmap-empty mvs] o)]
+    [{:final [act 0 new-m-act] :others new-o}
+     (reduce (fn [r x] (cons [:set x] r)) () mvs)]))
+
+(defn- new-addr-gen [] (volatile! {:count -1 :env tagmap-empty}))
+
+(defn- alloc-new-addr [tag gen]
+  (or (get (:env @gen) tag)
+      (let [a (:count @gen)] (vswap! gen (fn [g] (-> g (assoc :count (dec (long a))) (assoc-in [:env tag] a)))) a)))
+
+(defn- create-mem-map [tags gen] (reduce (fn [r tag] (assoc r tag (alloc-new-addr tag gen))) tagmap-empty tags))
+
+(defn- create-init-state [pos]
+  (let [gen (new-addr-gen)]
+    (reduce (fn [st [t tags]]
+              (if (on-chars? t)
+                (assoc st :others (assoc (:others st) t [0 (create-mem-map tags gen)]))
+                (let [n (- (long t) ACT) on (nth (:final st) 0)]
+                  (if (< n (long on)) (assoc st :final [n 0 (create-mem-map tags gen)]) st))))
+            dfa-state-empty pos)))
+
+(defn- get-map [t st]
+  (if (on-chars? t) (second (get (:others st) t)) (nth (:final st) 2)))
+
+(defn- mv-dest [mv] (nth mv 1))
+(defn- mv-orig [mv] (if (= :copy (nth mv 0)) (nth mv 2) -1))
+
+(defn- sort-mvs
+  "lexgen.ml's sort_mvs: the moves in an order where none overwrites a cell a later one reads, a cycle broken by
+  a temporary cell"
+  [mvs]
+  (letfn [(do-rec [r mvs]
+            (if (empty? mvs)
+              r
+              (let [dests (set (map mv-dest mvs))
+                    rem (doall (filter #(contains? dests (mv-orig %)) mvs))
+                    here (doall (remove #(contains? dests (mv-orig %)) mvs))]
+                (if (empty? here)
+                  (let [[k d] (first rem)]
+                    (assert (= k :copy))
+                    (let [d' (do-alloc-temp)
+                          tail (do-rec r (doall (map (fn [mv] (if (= (mv-orig mv) d) [:copy (mv-dest mv) d'] mv)) rem)))]
+                      (cons [:copy d' d] tail)))
+                  (do-rec (doall (concat here r)) rem)))))]
+    (do-rec () mvs)))
+
+(defn- move-to [mem-key src tgt]
+  (sort-mvs
+    (reduce (fn [r [tag m]]
+              (reduce (fn [r s]
+                        (let [t (first s)
+                              sa (get (get-map t src) tag)
+                              ta (get (get-map t tgt) tag)]
+                          (if (not= sa ta)
+                            (if (< (long sa) 0) (cons [:set ta] r) (cons [:copy ta sa] r))
+                            r)))
+                      r m))
+            () mem-key)))
+
+(defn- get-state [st]
+  (let [key (get-key st)]
+    (if-let [num (get (:state-map @dfa) key)]
+      [num (move-to (second key) st (nth (:state-table @dfa) num))]
+      (let [num (:next-state-num @dfa)
+            _ (swap! dfa update :next-state-num inc)
+            [st mvs] (create-new-state st)]
+        (swap! dfa (fn [d] (-> d (update :state-table conj st) (update :state-map assoc key num) (update :todo #(cons [st num] %)))))
+        [num mvs]))))
+
+(defn- map-on-all-states [f old-res]
+  (loop [res old-res]
+    (if-let [[st i] (first (:todo @dfa))]
+      (do (swap! dfa update :todo rest)
+          (let [r (f st)] (recur (cons [r i] res))))
+      res)))
+
+(defn- goto-state [st]
+  (if (dfa-state-empty? st) [[:backtrack] ()] (let [[n moves] (get-state st)] [[:goto n] moves])))
+
+(defn- add-tags-to-map [gen tags m]
+  (reduce (fn [m tag] (assoc (dissoc m tag) tag (alloc-new-addr tag gen))) m tags))
+
+(defn- apply-transition [gen r pri m [t tags]]
+  (if (on-chars? t)
+    (if-let [[opri] (get (:others r) t)]
+      (if (< (long pri) (long opri))
+        (let [m (add-tags-to-map gen tags m)] (assoc r :others (assoc (dissoc (:others r) t) t [pri m])))
+        r)
+      (let [m (add-tags-to-map gen tags m)] (assoc r :others (assoc (:others r) t [pri m]))))
+    (let [n (- (long t) ACT) [on opri] (:final r)]
+      (if (or (< n (long on)) (and (= on n) (< (long pri) (long opri))))
+        (let [m (add-tags-to-map gen tags m)] (assoc r :final [n pri m]))
+        r))))
+
+(defn- apply-transitions [gen r pri m ts] (reduce (fn [r t] (apply-transition gen r pri m t)) r ts))
+
+(defn- split-env [gen follow pos m s env]
+  (if (empty? env)
+    ()
+    (let [[s1 st1 :as p] (first env) rem (rest env)
+          here (cset-inter s s1)]
+      (if (empty? here)
+        (cons p (split-env gen follow pos m s rem))
+        (let [rest (cset-diff s here)
+              rem (if (empty? rest) rem (doall (split-env gen follow pos m rest rem)))
+              new-st (apply-transitions gen st1 pos m follow)
+              stay (cset-diff s1 here)]
+          (if (empty? stay) (cons [here new-st] rem) (cons [stay st1] (cons [here new-st] rem))))))))
+
+(defn- comp-shift [gen chars follow st]
+  (reduce (fn [env [pos [_ m]]] (doall (split-env gen (aget ^objects follow (int pos)) pos m (nth chars pos) env)))
+          (list [cset-all-eof dfa-state-empty]) st))
+
+(defn- reachs [chars follow st]
+  (let [gen (new-addr-gen)
+        env (comp-shift gen chars follow st)
+        env (mapv (fn [[s d]] [s (goto-state d)]) env)]
+    (env-to-array env)))
+
+(defn- do-tag-actions [n env m]
+  (let [en (aget ^objects env (int n))
+        [used r] (reduce (fn [[used r] [t mm]] (let [a (get en t)] [(conj used a) (cons [:settag a mm] r)])) [#{} ()] m)
+        [_ r] (reduce (fn [[used r] [tag mm]] (if (and (not (contains? used mm)) (nth tag 1)) [(conj used mm) (cons [:erasetag mm] r)] [used r]))
+                      [used r] en)]
+    r))
+
+(defn- translate-state [shortest tags chars follow st]
+  (let [[n _ m] (:final st)]
+    (cond
+      (empty? (:others st)) [:perform n (do-tag-actions n tags m)]
+      shortest (if (= n no-action) [:shift [:no-remember] (reachs chars follow (:others st))] [:perform n (do-tag-actions n tags m)])
+      :else (let [moves (reachs chars follow (:others st))]
+              [:shift (if (= n no-action) [:no-remember] [:remember n (do-tag-actions n tags m)]) moves]))))
+
+(defn- make-tag-entry [id start act a r]
+  (if (and (number? (nth a 0)) (zero? (long (nth a 1)))) (assoc r [id start act] (nth a 0)) r))
+
+(defn- extract-tags [l]
+  (let [envs (object-array (count l))]
+    (dotimes [i (count l)] (aset envs i tagmap-empty))
+    (doseq [[act m] l]
+      (aset envs (int act)
+            (reduce (fn [r [[name] v]]
+                      (case (nth v 0)
+                        :ichar (make-tag-entry name true act (nth v 2) r)
+                        :istring (make-tag-entry name true act (nth v 2) (make-tag-entry name false act (nth v 3) r))))
+                    tagmap-empty (reverse m))))
+    envs))
+
+(defn- make-dfa [lexdef]
+  (let [[chars entries] (encode-lexdef lexdef)
+        follow (followpos (count chars) entries)
+        _ (reset! dfa {})
+        _ (reset-state!)
+        r-states (volatile! ())
+        initial (mapv (fn [[le args shortest]]
+                        (let [tags (extract-tags (:actions le))]
+                          (reset-state-partial! (:mem-tags le))
+                          (let [pos-set (firstpos (:regexp le))
+                                init (get-state (create-init-state pos-set))]
+                            (vreset! r-states (map-on-all-states #(translate-state shortest tags chars follow %) @r-states))
+                            {:name (:name le) :args args
+                             :mem-size (if (:temp-pending @dfa) (inc (long (:next-mem-cell @dfa))) (:next-mem-cell @dfa))
+                             :initial init :actions (:actions le)})))
+                      entries)
+        actions (object-array (:next-state-num @dfa))]
+    (doseq [[act i] @r-states] (aset actions (int i) act))
+    [initial (vec actions)]))
+
+;; ---------------------------------------------------------------------------------------------
+;; compact.ml
+
+(defn- compact-tables [state-v]
+  (let [code (ArrayList.)
+        memory (volatile! {})
+        mem-emit (fn [c] (or (@memory c)
+                             (let [r (.size code)] (doseq [i c] (.add code i)) (.add code 0xff) (vswap! memory assoc c r) r)))
+        _ (mem-emit [])
+        emit-tag-code (fn [c] (mem-emit (vec (mapcat (fn [i] (if (= :settag (nth i 0)) [(nth i 1) (nth i 2)] [(nth i 1) 0xff])) c))))
+        emit-mem-code (fn [c] (mem-emit (vec (mapcat (fn [i] (if (= :copy (nth i 0)) [(nth i 1) (nth i 2)] [(nth i 1) 0xff])) c))))
+        new-compact (fn [] (volatile! {:trans (long-array 1024) :check (long-array 1024 -1) :last 0}))
+        trans (new-compact) moves (new-compact)
+        grow! (fn [c] (let [{:keys [^longs trans ^longs check last]} @c n (alength trans)
+                            t2 (long-array (* 2 n)) c2 (long-array (* 2 n) -1)]
+                        (System/arraycopy trans 0 t2 0 (int last)) (System/arraycopy check 0 c2 0 (int last))
+                        (vswap! c assoc :trans t2 :check c2)))
+        most-frequent (fn [^longs v]
+                        (loop [i 0 freq {} maxf 0 most (aget v 0)]
+                          (if (< i (alength v))
+                            (let [e (aget v i) r (inc (long (get freq e 1)))]
+                              (if (> r (long maxf)) (recur (inc i) (assoc freq e r) r e) (recur (inc i) (assoc freq e r) maxf most)))
+                            most)))
+        do-pack (fn [state-num ^longs orig c]
+                  (let [default (most-frequent orig)
+                        nondef (filterv (fn [[_ e]] (not= e default)) (map-indexed (fn [i e] [i e]) orig))
+                        base (loop [b 0]
+                               (while (> (+ b 257) (alength ^longs (:trans @c))) (grow! c))
+                               (let [^longs check (:check @c)]
+                                 (if (every? (fn [[pos]] (= -1 (aget check (int (+ b (long pos)))))) nondef) b (recur (inc b)))))]
+                    (let [{:keys [^longs trans ^longs check]} @c]
+                      (doseq [[pos v] nondef]
+                        (aset trans (int (+ base (long pos))) (long v))
+                        (aset check (int (+ base (long pos))) (long state-num))))
+                    (when (> (+ base 257) (long (:last @c))) (vswap! c assoc :last (+ base 257)))
+                    [base default]))
+        pack-moves (fn [state-num move-t]
+                     (let [move-v (long-array 257) move-m (long-array 257)]
+                       (dotimes [i 257]
+                         (let [[act c] (nth move-t i)]
+                           (aset move-v i (long (if (= :backtrack (nth act 0)) -1 (nth act 1))))
+                           (aset move-m i (long (emit-mem-code c)))))
+                       (let [pk-trans (do-pack state-num move-v trans) pk-moves (do-pack state-num move-m moves)]
+                         [pk-trans pk-moves])))
+        n (count state-v)
+        base (long-array n) backtrk (long-array n -1) default (long-array n)
+        base-code (long-array n) backtrk-code (long-array n) default-code (long-array n)]
+    (dotimes [i n]
+      (let [s (nth state-v i)]
+        (case (nth s 0)
+          :perform (do (aset base i (long (- (inc (long (nth s 1))))))
+                       (aset base-code i (long (emit-tag-code (nth s 2)))))
+          :shift (let [[_ tr move] s]
+                   (when (= :remember (nth tr 0))
+                     (aset backtrk i (long (nth tr 1)))
+                     (aset backtrk-code i (long (emit-tag-code (nth tr 2)))))
+                   (let [[[b-trans d-trans] [b-moves d-moves]] (pack-moves i move)]
+                     (aset base i (long b-trans)) (aset default i (long d-trans))
+                     (aset base-code i (long b-moves)) (aset default-code i (long d-moves)))))))
+    (let [code (vec code)
+          sub (fn [c k] (vec (take (:last @c) (k @c))))]
+      (if (> (count code) 1)
+        {:base (vec base) :backtrk (vec backtrk) :default (vec default) :trans (sub trans :trans) :check (sub trans :check)
+         :base-code (vec base-code) :backtrk-code (vec backtrk-code) :default-code (vec default-code)
+         :trans-code (sub moves :trans) :check-code (sub moves :check) :code code}
+        {:base (vec base) :backtrk (vec backtrk) :default (vec default) :trans (sub trans :trans) :check (sub trans :check)
+         :base-code [] :backtrk-code [] :default-code [] :trans-code [] :check-code [] :code []}))))
+
+;; ---------------------------------------------------------------------------------------------
+;; common.ml and output.ml: the OCaml text. The output is built in a StringBuilder; the line tracker counts its
+;; lines as common.ml's update_tracker reads the file being written back.
+
+(defn- update-tracker [{:keys [^StringBuilder oc tr file]}]
+  (.append oc "\n")
+  (let [n (.length oc)
+        line (loop [i (long (:scanned @tr)) line (long (:line @tr)) cr false]
+               (if (< i n)
+                 (let [c (.charAt oc (int i))]
+                   (cond (and (= c \newline) (not cr)) (recur (inc i) (inc line) false)
+                         (= c \return) (recur (inc i) (inc line) true)
+                         :else (recur (inc i) line false)))
+                 line))]
+    (vreset! tr {:scanned n :line line})
+    (.append oc (str "# " (inc line) " \"" file "\"\n"))))
+
+(defn- copy-chunk [{:keys [^StringBuilder oc ^String src] :as ctx} loc add-parens]
+  (when (or (< (long (:start loc)) (long (:end loc))) add-parens)
+    (.append oc (str "# " (:line loc) " \"" (:file loc) "\"\n"))
+    (if add-parens
+      (do (dotimes [_ (dec (long (:col loc)))] (.append oc \space)) (.append oc \())
+      (dotimes [_ (:col loc)] (.append oc \space)))
+    (.append oc (subs src (:start loc) (:end loc)))
+    (when add-parens (.append oc \)))
+    (update-tracker ctx)))
+
+(defn- mem-access [i] (str "lexbuf.Lexing.lex_mem.(" i ")"))
+
+(defn- output-memory-actions [^StringBuilder oc pref mvs]
+  (when (seq mvs)
+    (.append oc "(* ")
+    (.append oc (str "L=" (count mvs) " "))
+    (doseq [mv mvs]
+      (.append oc (if (= :copy (nth mv 0)) (str "[" (nth mv 1) "] <- [" (nth mv 2) "] ;") (str "[" (nth mv 1) "] <- p ; "))))
+    (.append oc " *)\n")
+    (doseq [mv mvs]
+      (.append oc (if (= :copy (nth mv 0))
+                    (str pref (mem-access (nth mv 1)) " <- " (mem-access (nth mv 2)) " ;\n")
+                    (str pref (mem-access (nth mv 1)) " <- lexbuf.Lexing.lex_curr_pos ;\n"))))))
+
+(defn- base-mem [b] (case b :start "lexbuf.Lexing.lex_start_pos" :end "lexbuf.Lexing.lex_curr_pos" (mem-access b)))
+(defn- tag-access [[b i]] (if (zero? (long i)) (base-mem b) (str "(" (base-mem b) " + " i ")")))
+
+(defn- output-env [{:keys [^StringBuilder oc] :as ctx} env]
+  (when (seq env)
+    (let [env (sort-by (fn [[[_ p]]] (:start p)) env)]
+      (reduce (fn [pref [[_ pos] v]]
+                (.append oc (str pref "\n"))
+                (copy-chunk ctx pos false)
+                (.append oc (case (nth v 0)
+                              :istring (str "= Lexing.sub_lexeme" (if (nth v 1) "_opt" "") " lexbuf " (tag-access (nth v 2)) " " (tag-access (nth v 3)))
+                              :ichar (str "= Lexing.sub_lexeme_char" (if (nth v 1) "_opt" "") " lexbuf " (tag-access (nth v 2)))))
+                "\nand")
+              "let" env)
+      (.append oc " in\n"))))
+
+(defn- args-text [args] (apply str (map #(str % " ") args)))
+
+(defn- output-refill-handler [{:keys [^StringBuilder oc] :as ctx} rh]
+  (when rh
+    (.append oc "let __ocaml_lex_refill : (Lexing.lexbuf -> 'a) -> (Lexing.lexbuf -> 'a) =\n")
+    (copy-chunk ctx rh true)
+    true))
+
+(defn- check-overflow [lo hi v] (doseq [x v] (when (or (< (long x) (long lo)) (> (long x) (long hi))) (fail :table-overflow {}))))
+
+(defn- output-byte [^StringBuilder oc b]
+  (let [b (long b)] (.append oc \\) (.append oc (char (+ 48 (quot b 100)))) (.append oc (char (+ 48 (mod (quot b 10) 10)))) (.append oc (char (+ 48 (mod b 10))))))
+
+(defn- output-array [^StringBuilder oc v]
+  (.append oc "   \"")
+  (dotimes [i (count v)]
+    (let [x (long (nth v i))]
+      (output-byte oc (bit-and x 0xFF))
+      (output-byte oc (bit-and (bit-shift-right x 8) 0xFF))
+      (when (= 7 (bit-and i 7)) (.append oc "\\\n    "))))
+  (.append oc "\""))
+
+(defn- output-byte-array [^StringBuilder oc v]
+  (check-overflow 0 0xFF v)
+  (.append oc "   \"")
+  (dotimes [i (count v)]
+    (output-byte oc (bit-and (long (nth v i)) 0xFF))
+    (when (= 15 (bit-and i 15)) (.append oc "\\\n    ")))
+  (.append oc "\""))
+
+(defn- output-tables [^StringBuilder oc t]
+  (.append oc "let __ocaml_lex_tables = {\n")
+  (doseq [[field k u] [["lex_base" :base false] ["lex_backtrk" :backtrk false] ["lex_default" :default false]
+                       ["lex_trans" :trans false] ["lex_check" :check false] ["lex_base_code" :base-code true]
+                       ["lex_backtrk_code" :backtrk-code true] ["lex_default_code" :default-code true]
+                       ["lex_trans_code" :trans-code true] ["lex_check_code" :check-code false]]]
+    (.append oc (str "  Lexing." field " =\n"))
+    (if u (check-overflow 0 0xFFFF (k t)) (check-overflow -0x8000 0x7FFF (k t)))
+    (output-array oc (k t))
+    (.append oc ";\n"))
+  (.append oc "  Lexing.lex_code =\n")
+  (output-byte-array oc (:code t))
+  (.append oc ";\n")
+  (.append oc "}\n\n"))
+
+(defn- output-entry [{:keys [^StringBuilder oc] :as ctx} some-mem-code has-refill e]
+  (let [[init-num init-moves] (:initial e)
+        some-mem-code (and some-mem-code (> (long (:mem-size e)) 0))
+        name (:name e) args (args-text (:args e))]
+    (.append oc (str name " " args "lexbuf =\n  "))
+    (when some-mem-code (.append oc (str "lexbuf.Lexing.lex_mem <- Array.make " (:mem-size e) " (-1);")))
+    (output-memory-actions oc "  " init-moves)
+    (.append oc (str " __ocaml_lex_" name "_rec " args "lexbuf " init-num "\n"))
+    (.append oc (str "and __ocaml_lex_" name "_rec " args "lexbuf __ocaml_lex_state =\n"))
+    (.append oc (str "  match Lexing." (if some-mem-code "new_" "") "engine"))
+    (.append oc " __ocaml_lex_tables __ocaml_lex_state lexbuf with\n    ")
+    (doseq [[num env loc] (:actions e)]
+      (.append oc "  | ")
+      (.append oc (str num " ->\n"))
+      (output-env ctx env)
+      (copy-chunk ctx loc true)
+      (.append oc "\n"))
+    (.append oc
+             (if has-refill
+               (str "  | __ocaml_lex_state -> __ocaml_lex_refill\n      (fun lexbuf -> lexbuf.Lexing.refill_buff lexbuf;\n         __ocaml_lex_"
+                    name "_rec " args "lexbuf __ocaml_lex_state) lexbuf\n\n")
+               (str "  | __ocaml_lex_state -> lexbuf.Lexing.refill_buff lexbuf;\n      __ocaml_lex_" name "_rec " args
+                    "lexbuf __ocaml_lex_state\n\n")))))
+
+(defn- output-lexdef [{:keys [^StringBuilder oc quiet ^StringBuilder out] :as ctx} header rh tables entries trailer]
+  (let [len #(count (% tables))]
+    (when-not quiet
+      (.append out (str (len :base) " states, " (len :trans) " transitions, table size "
+                        (* 2 (+ (len :base) (len :backtrk) (len :default) (len :trans) (len :check))) " bytes\n")))
+    (let [size-groups (+ (* 2 (+ (len :base-code) (len :backtrk-code) (len :default-code) (len :trans-code) (len :check-code)))
+                         (len :code))]
+      (when (and (> size-groups 0) (not quiet))
+        (.append out (str size-groups " additional bytes used for bindings\n"))))
+    (when (> (len :trans) 0x8000) (fail :table-overflow {}))
+    (copy-chunk ctx header false)
+    (let [has-refill (output-refill-handler ctx rh)]
+      (output-tables oc tables)
+      (let [some-mem-code (> (len :code) 0)]
+        (.append oc "let rec ")
+        (output-entry ctx some-mem-code has-refill (first entries))
+        (doseq [e (rest entries)] (.append oc "and ") (output-entry ctx some-mem-code has-refill e))
+        (.append oc ";;\n\n")))
+    (copy-chunk ctx trailer false)))
+
+;; ---------------------------------------------------------------------------------------------
+;; main.ml
+
+(def ocaml-version "5.5.0")
+
+(def ^:private usage
+  (str "Usage: ocamllex [options] sourcefile\nOptions are:\n"
+       "  -ml  Output code that does not use the Lexing module built-in automata interpreter\n"
+       "  -o <file>  Set output file name to <file>\n"
+       "  -q  Do not display informational messages\n"
+       "  -v  Print version and exit\n"
+       "  -version  Print version and exit\n"
+       "  -vnum  Print version number and exit\n"
+       "  -help  Display this list of options\n"
+       "  --help  Display this list of options\n"))
+
+(defn generate
+  "ocamllex SOURCE -o DEST (main.ml's main) on the text of the source: {:status :ml :out :err}, :ml the file's
+  text (nil when ocamllex leaves none; \"\" when it leaves an empty file), :out and :err the messages"
+  [^String src source-name dest-name quiet]
+  (let [err (StringBuilder.) out (StringBuilder.)]
+    (binding [*errs* err]
+      (let [lb (make-lexbuf src source-name)
+            pos-text (fn [[f l b c]] (str "File \"" f "\", line " l ", character " (- (long c) (long b))))
+            r (try
+                (let [def (parse-lexdef lb)
+                      [entries transitions] (make-dfa (:entrypoints def))
+                      tables (compact-tables transitions)
+                      oc (StringBuilder.)
+                      ctx {:oc oc :src src :file dest-name :tr (volatile! {:scanned 0 :line 1}) :quiet quiet :out out}]
+                  (output-lexdef ctx (:header def) (:refill def) tables entries (:trailer def))
+                  {:status 0 :ml (.toString oc)})
+                (catch arbace.lang.ExceptionInfo e
+                  (let [d (ex-data e)]
+                    (case (::kind d)
+                      :cset (do (eprint (str (pos-text (:pos d)) ": character set expected.\n")) {:status 3})
+                      :parse (do (eprint (str (pos-text (:pos d)) ": syntax error.\n")) {:status 3})
+                      :lexical (do (eprint (str "File \"" (:file d) "\", line " (:line d) ", character " (:col d) ": " (:msg d) ".\n"))
+                                   {:status 3})
+                      :memory-overflow (do (eprint (str "File \"" source-name "\":\n Position memory overflow, too many bindings\n")) {:status 3})
+                      :table-overflow (do (eprint (str "File \"" source-name "\":\ntransition table overflow, automaton is too big\n")) {:status 3})
+                      :unbound (do (eprint (str (pos-text (:pos d)) ":\nReference to unbound regexp name `" (:name d) "'.\n"))
+                                   {:status 2 :ml ""})
+                      (throw e)))))]
+        (assoc r :out (.toString out) :err (.toString err))))))
+
+(defn- dest-for [^String source-name]
+  (if (.endsWith source-name ".mll") (str (subs source-name 0 (- (count source-name) 4)) ".ml") (str source-name ".ml")))
+
+(defn- run-lex
+  "ocamllex's command line: the status"
+  [args]
+  (loop [args args ml false out nil quiet false src nil]
+    (if (seq args)
+      (let [[a & more] args]
+        (case a
+          "-ml" (recur more true out quiet src)
+          "-o" (if (seq more) (recur (rest more) ml (first more) quiet src)
+                   (do (eprint (str "ocamllex: option '-o' needs an argument.\n" usage)) 2))
+          "-q" (recur more ml out true src)
+          ("-v" "-version") (do (println (str "The OCaml lexer generator, version " ocaml-version)) 0)
+          "-vnum" (do (println ocaml-version) 0)
+          ("-help" "--help") (do (print usage) (flush) 0)
+          (if (and (.startsWith ^String a "-") (not= a "-"))
+            (do (eprint (str "ocamllex: unknown option '" a "'.\n" usage)) 2)
+            (recur more ml out quiet a))))
+      (cond
+        (nil? src) (do (eprint usage) 2)
+        ml (do (eprint "ocamllex (Arbace): -ml is not ported (doc/ocaml/OCAML-SURVEY.md, Proposed OC191)\n") 2)
+        :else
+        (let [dest (or out (dest-for src))
+              r (generate (read-bstr src) src dest quiet)]
+          (print (:out r)) (flush)
+          (eprint (:err r))
+          (if (:ml r) (write-bstr dest (:ml r)) (.delete (File. ^String dest)))
+          (:status r))))))
+
+(defn -main [& args]
+  (let [[verb & more] args]
+    (case verb
+      "lex" (System/exit (int (run-lex more)))
+      "check"
+      ;; each listed .mll generated as `ocamllex FILE.mll` would (its .ml beside it), the status and messages in
+      ;; FILE.ml.out: one process for the list
+      (let [files (remove #(= "" %) (map #(.trim ^String %) (.split ^String (slurp (first more)) "\n")))
+            t0 (System/nanoTime)]
+        (doseq [f files]
+          (let [dest (dest-for f)
+                r (try (generate (read-bstr f) f dest false)
+                       (catch Throwable e {:status 99 :out "" :err (str "ocamllex (Arbace): " e "\n")}))]
+            (if (:ml r) (write-bstr dest (:ml r)) (.delete (File. ^String dest)))
+            (write-bstr (str dest ".out") (str "status " (:status r) "\n--- stdout\n" (:out r) "--- stderr\n" (:err r)))
+            (println (str "ocamllex: " f " status " (:status r)))))
+        (println (format "ocamllex: %d files (%.1f s)" (count files) (/ (- (System/nanoTime) t0) 1e9)))
+        (System/exit 0))
+      (do (println "usage: arbace.repr.ocaml.ocamllex lex [-q] [-o OUT] FILE.mll | check LIST") (System/exit 2)))))

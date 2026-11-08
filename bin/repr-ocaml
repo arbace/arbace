@@ -100,6 +100,14 @@
 #                                 automaton against Menhir's own tables in the tarball's boot/menhir/parser.ml (states,
 #                                 productions, nonterminals paired, every action, goto and default reduction equal);
 #                                 --verify: generated again, equal to the committed file
+#   bin/repr-ocaml ocamllex [-q] [-o OUT] FILE.mll   OC186 (a): ocamllex natively (arbace.repr.ocaml.ocamllex, lex/ of OCaml
+#                                 5.5.0 ported: the .mll lexer and grammar, lexgen's tagged DFA, compact's tables, output's text), the
+#                                 command line of ocamllex 5.5.0 (-ml not ported, Proposed OC191); no host tool
+#   bin/repr-ocaml ocamllex-check [--host [--record]]   every .mll of the tarball (18), of the opam set (3) and test/ocaml/ocamllex/'s
+#                                 samples (the error and warning cases among them) generated natively in .tmp/repr-ocaml/ocamllex/nat,
+#                                 the .ml's and the messages' (status, stdout, stderr) SHA-256 against test/ocaml/ocamllex-expected.edn
+#                                 (the host's ocamllex's, recorded); a negative control (one file's output against another's record) must
+#                                 differ; --host (the oracle tier's): the host's ocamllex run beside, byte for byte, --record rewrites the record
 # The checks of O1 run on small inputs, in seconds (corpus fetch: one 4.7 MB download).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -974,6 +982,68 @@ cmd_menhir() {
   esac
 }
 
+# ocamllex ARGS: the native ocamllex (OC186 (a))
+cmd_ocamllex() { rt_arbace_ns arbace.repr.ocaml.ocamllex lex "$@"; }
+
+# ocamllex-check [--host [--record]]: the native ocamllex over every .mll of the corpora and the samples (OC186 (a))
+cmd_ocamllex_check() {
+  local host="" record="" W="$root/.tmp/repr-ocaml/ocamllex" rec="$root/test/ocaml/ocamllex-expected.edn" d f m bad=0 n=0
+  while [ $# -gt 0 ]; do case $1 in --host) host=1 ;; --record) record=1 ;; *) echo "usage: bin/repr-ocaml ocamllex-check [--host [--record]]" >&2; return 2 ;; esac; shift; done
+  [ -z "$record" ] || [ -n "$host" ] || { echo "repr-ocaml: --record needs --host (the record is the host's ocamllex's)" >&2; return 2; }
+  cmd_corpus_fetch > "$root/.tmp/repr-ocaml/fetch.log" || { cat "$root/.tmp/repr-ocaml/fetch.log" >&2; return 1; }
+  rm -rf "$W"; mkdir -p "$W"
+  # the inputs at paths relative to the working directory, as the outputs' line directives name them
+  for d in nat ${host:+ref}; do
+    mkdir -p "$W/$d/ocaml-5.5.0" "$W/$d/opam" "$W/$d/samples"
+    (cd "$TOP" && find . -name '*.mll' -print0 | xargs -0 tar -cf -) | tar -xf - -C "$W/$d/ocaml-5.5.0"
+    (cd "$root/.tmp/repr-ocaml/opam" && find . -name '*.mll' -print0 | xargs -0 tar -cf -) | tar -xf - -C "$W/$d/opam"
+    cp "$root/test/ocaml/ocamllex/"*.mll "$W/$d/samples/"
+  done
+  (cd "$W/nat" && find . -name '*.mll' | sed 's|^\./||' | LC_ALL=C sort) > "$W/list.txt"
+  (cd "$W/nat" && rt_arbace_ns arbace.repr.ocaml.ocamllex check "$W/list.txt") > "$W/nat.log" 2>&1 || { tail -20 "$W/nat.log" >&2; return 1; }
+  if [ -n "$host" ]; then
+    command -v ocamllex > "$W/host.txt" || { echo "repr-ocaml: no ocamllex on PATH (--host is the oracle tier's)" >&2; return 1; }
+    ocamllex -version >> "$W/host.txt"
+    while read -r f; do
+      m=${f%.mll}.ml
+      (cd "$W/ref" && { st=0; ocamllex "$f" > "$m.stdout" 2> "$m.stderr" || st=$?; echo $st > "$m.status"; }
+        { echo "status $(cat "$m.status")"; echo "--- stdout"; cat "$m.stdout"; echo "--- stderr"; cat "$m.stderr"; } > "$m.out"
+        rm -f "$m.stdout" "$m.stderr" "$m.status")
+      n=$((n+1))
+      if ! cmp -s "$W/ref/$m.out" "$W/nat/$m.out"; then echo "DIFF messages $f"; bad=$((bad+1));
+      elif [ -f "$W/ref/$m" ] || [ -f "$W/nat/$m" ]; then cmp -s "$W/ref/$m" "$W/nat/$m" || { echo "DIFF ml $f"; bad=$((bad+1)); }; fi
+    done < "$W/list.txt"
+    echo "ocamllex-check --host: $n files, $((n-bad)) equal to the host's ocamllex byte for byte (the .ml and the messages), $bad differ"
+    if [ -n "$record" ] && [ $bad = 0 ]; then
+      { echo ";; The host's ocamllex 5.5.0 over every .mll of the corpora and test/ocaml/ocamllex/ (bin/repr-ocaml ocamllex-check --host --record):"
+        echo ";; [PATH SHA-256-OF-THE-ML-OR-none SHA-256-OF-THE-MESSAGES], the messages: status, stdout, stderr"
+        echo "["
+        while read -r f; do m=${f%.mll}.ml
+          if [ -f "$W/ref/$m" ]; then s=$(sha256sum < "$W/ref/$m" | cut -d' ' -f1); else s=none; fi
+          echo " [\"$f\" \"$s\" \"$(sha256sum < "$W/ref/$m.out" | cut -d' ' -f1)\"]"
+        done < "$W/list.txt"
+        echo "]"; } > "$rec"
+      echo "ocamllex-check: recorded $rec"
+    fi
+  fi
+  # the native outputs against the record (no host tool), and the negative control: the first file's outputs against the second's record
+  local got line sm so rf ok=0 diff=0 missing=0 first="" second=""
+  while read -r f; do
+    m=${f%.mll}.ml
+    line=$(grep -F "[\"$f\" " "$rec" || true)
+    if [ -z "$line" ]; then echo "UNRECORDED $f"; missing=$((missing+1)); continue; fi
+    [ -z "$first" ] && first=$f || { [ -z "$second" ] && second=$f; }
+    sm=$(echo "$line" | awk '{print $2}' | tr -d '"'); so=$(echo "$line" | awk '{print $3}' | tr -d '"]')
+    if [ -f "$W/nat/$m" ]; then got=$(sha256sum < "$W/nat/$m" | cut -d' ' -f1); else got=none; fi
+    if [ "$got" = "$sm" ] && [ "$(sha256sum < "$W/nat/$m.out" | cut -d' ' -f1)" = "$so" ]; then ok=$((ok+1)); else echo "DIFF $f (against the record)"; diff=$((diff+1)); fi
+  done < "$W/list.txt"
+  rf=$(grep -F "[\"$second\" " "$rec" | awk '{print $2}' | tr -d '"')
+  if [ "$(sha256sum < "$W/nat/${first%.mll}.ml" | cut -d' ' -f1)" = "$rf" ]; then echo "ocamllex-check: the control ($first against $second's record) passes: it must not"; diff=$((diff+1));
+  else echo "ocamllex-check: control $first against $second's record fails as it must"; fi
+  echo "ocamllex-check: $ok of $(wc -l < "$W/list.txt") files equal to the record ($rec), $diff differ, $missing unrecorded ($(tail -1 "$W/nat.log"))"
+  [ $diff = 0 ] && [ $missing = 0 ] && [ $bad = 0 ]
+}
+
 # the shipped build embeds nothing of repr/ocaml and nothing its keys (bin/lib/version.bash) do not name (review 008, finding 3)
 cmd_embed_check() {
   . "$root/bin/lib/version.bash"
@@ -1004,6 +1074,8 @@ case "${1:-}" in
   native-check) shift; cmd_native_check "$@" ;;
   errors-check) shift; cmd_errors_check "$@" ;;
   menhir) shift; cmd_menhir "$@" ;;
+  ocamllex) shift; cmd_ocamllex "$@" ;;
+  ocamllex-check) shift; cmd_ocamllex_check "$@" ;;
   print) shift; cmd_print "$@" ;;
   roundtrip) shift; cmd_roundtrip "$@" ;;
   types) shift; cmd_dumps "types" "$@" ;;
@@ -1019,11 +1091,11 @@ case "${1:-}" in
       fetch) cmd_corpus_fetch ;;
       count) cmd_corpus_count_or_check count ;;
       check) [ "${3:-}" = --host ] && CORPUS_HOST=1; cmd_corpus_count_or_check check ;;
-      *) sed -n '2,71p' "$0"; exit 2 ;;
+      *) sed -n '2,/^# The checks of O1/p' "$0"; exit 2 ;;
     esac ;;
   samples) cmd_samples ;;
   spec-check) shift; cmd_spec_check "$@" ;;
   embed-check) cmd_embed_check ;;
   c2j-check) exec "$root/bin/lib/crops/c2j-check" ocaml ;;
-  *) sed -n '2,71p' "$0"; exit 2 ;;
+  *) sed -n '2,/^# The checks of O1/p' "$0"; exit 2 ;;
 esac

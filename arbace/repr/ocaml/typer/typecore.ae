@@ -124,14 +124,29 @@
           (first (filter #(= n (:name %)) (ty/constructors-of p (:params d) ((:kind d) 1)))))
         (choose (env/lookup env :constrs lid) expected "constructor" lid))))
 
+(defn- disambiguate-by-ids
+  "Typecore.disambiguate_by_ids: the candidates whose record has every field the record names (ids), and when it is
+  closed (an expression without `with`, a pattern without `_`) only those with no other field, when any; the
+  candidates unchanged when none has every field (the error is the label's own then)"
+  [closed ids cands]
+  (let [names (fn [c] (set (map :name (ty/label-all c))))
+        with-ids (filter (fn [c] (every? (names c) ids)) cands)
+        exact (filter (fn [c] (or (not closed) (= (count ids) (count (ty/label-all c))))) with-ids)]
+    (cond (seq exact) exact (seq with-ids) with-ids :else cands)))
+
 (defn lookup-label
-  "A label by its name, the expected record type's first (an inline record's labels are only reached so)"
-  [env lid expected]
-  (let [p (when expected (expected-type-path expected))
-        n (lid-name lid)
-        typed (when (and p (= 1 (count (env/lid-parts lid))))
-                (first (filter #(= n (:name %)) (get @ty/record-labels p))))]
-    (or typed (choose (env/lookup env :labels lid) expected "field" lid))))
+  "A label by its name, the expected record type's first (an inline record's labels are only reached so); without an
+  expected record type, the first label of a record expression or pattern chosen among the records that have all its
+  fields (ids, Typecore's disambiguate_label_by_ids)"
+  ([env lid expected] (lookup-label env lid expected nil false))
+  ([env lid expected ids closed]
+   (let [p (when expected (expected-type-path expected))
+         n (lid-name lid)
+         typed (when (and p (= 1 (count (env/lid-parts lid))))
+                 (first (filter #(= n (:name %)) (get @ty/record-labels p))))
+         cands (env/lookup env :labels lid)
+         cands (if (and ids (seq cands)) (disambiguate-by-ids closed ids cands) cands)]
+     (or typed (choose cands expected "field" lid)))))
 
 (defn instance-constructor
   "Ctype.instance_constructor: [args res] as fresh instances (a GADT constructor's own result type)"
@@ -316,7 +331,8 @@
         (mk [:Tpat_construct c (mapv (fn [p t] (type-pat env p t vars)) sargs targs)] expected))
       :Ppat_record
       (let [fields (d 1)
-            l0 (lookup-label env (:txt (first (first fields))) expected)
+            l0 (lookup-label env (:txt (first (first fields))) expected (mapv (fn [[lid _]] (lid-name (:txt lid))) fields)
+                             (= :Closed (d 2)))
             [res _ args] (instance-label l0)
             _ (unify! res expected "pattern")
             typed (mapv (fn [[lid p]]
@@ -881,10 +897,10 @@
       :Pexp_record
       (let [fields (d 1) init-s (d 2)
             init (when init-s (type-exp env init-s))
-            l0 (lookup-label env (:txt (first (first fields))) (or (and init (:type init)) expected))
+            l0 (lookup-label env (:txt (first (first fields))) (or (and init (:type init)) expected)
+                             (mapv (fn [[lid _]] (lid-name (:txt lid))) fields) (nil? init-s))
             [res _ args] (instance-label l0)
             _ (unify! res expected "expression")
-            _ (when init (unify! (:type init) res "expression"))
             given (into {} (map (fn [[lid e]]
                                   (let [n (lid-name (:txt lid))
                                         l (or (first (filter #(= (:name %) n) (ty/label-all l0)))
@@ -896,11 +912,19 @@
                                   (let [[l _ _] (get given (:pos (first (filter #(= (:name %) (lid-name (:txt lid))) (ty/label-all l0)))))]
                                     [(:pos l) (type-expect env e (nth args (:pos l)))]))
                                 fields))
+            ;; Typecore's unify_kept: the record copied from (`with`) has a type of its own, an instance unified with it for each
+            ;; label, and a kept field's type is shared with the result's (a fresh instance per label): `{x with txt = f x.txt}`
+            ;; is 'a loc -> 'b loc
             defs (mapv (fn [l]
-                         (if-let [e (get typed (:pos l))]
-                           [l [:overridden e]]
-                           (do (when-not init (type-error (str "Some record fields are undefined: " (:name l))))
-                               [l [:kept (nth args (:pos l)) (:mut l)]])))
+                         (let [[r1 a1] (when init (instance-label l))]
+                           (when init (unify! (:type init) r1 "expression"))
+                           (if-let [e (get typed (:pos l))]
+                             [l [:overridden e]]
+                             (do (when-not init (type-error (str "Some record fields are undefined: " (:name l))))
+                                 (let [[r2 a2] (instance-label l)]
+                                   (unify! a1 a2 "expression")
+                                   (unify! res r2 "expression")
+                                   [l [:kept a1 (:mut l)]])))))
                        (ty/label-all l0))]
         (mkexp [:Texp_record defs (:repres l0) init] res loc))
       :Pexp_field (let [e (type-exp env (d 1))
