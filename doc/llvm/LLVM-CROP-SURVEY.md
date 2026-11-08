@@ -1286,6 +1286,178 @@ samples, `.o2` 41, `.lto` 50, `.win` 44: the builds clang accepted), the nine C+
    `bin/reap --record`, the read and judge facts recounted (read stays 1: the pack is pinned input in the crop's language, LLS27 (a);
    the judge gains the families' own verdicts and opt's records at 0.5), the gate's `llvm-read` and `llvm-print` taking the new
    families as parts. The numbers change once (new inputs: the corners dropped, the builds clang 23.1.5's).
+## As built: LLS31 (a), the pack rt's verb and families (2026-11-08, branch `llvm-rt-pack`)
+
+Decided by the user 2026-11-07, built on next `7696e50da` (clang 23.1.5 since cpp-repin). The day's part of "LLS31 (a): the pack rt,
+planned": the verb, the mutant sets, the families with controls, proved on subsets. The pack itself, its records and the cells' switch
+are the night's (below). Corrections to the plan: the first records held **41** torture programs, not 42 (the 41 `.o2` ids). Five of
+them are not in gcc 9.1.0's execute but are in gcc 15.2.0's: `alias-access-path-2`, `pr110165-1`, `pr119071`, `pr93582`, `pr99751`.
+The first records' fitted sets were 340 indices each (0-339 and 1000-1339, 315 mutants each, of the base family's 17 kinds), not "315 0"
+and "315 315". The held-out sets were 600 indices each (500000-500599 and 600000-600599, every kind).
+
+**`test/llvm/rt-builds.tsv`** (`bin/llvmi rt-list`, from the ids of `test/llvm/check-roundtrip-linux-amd64.edn`) has 257 modules, one line
+each with ID, SOURCE and BUILD:
+- the 41 torture programs from the pinned gcc 15.2.0 tarball (`gcc15:NAME.c`, `test/c/corpora.edn`'s `:gcc-15.2.0`, the main checkout's
+  `.tmp/c1/gcc/`), in the builds the first records had: `g0` 41, `g2` 41, `o2` 41, `lto` 41, `win` 39;
+- the nine C++ samples (`checkout:test/cpp/samples/NAME.cpp`): `g0`, `g2`, `lto` for all nine, `win` for five, `mac` for nine;
+- Rust's `test/rust/sample/shapes.rs` as `rs.g0`, `rs.g2` and `rs.lt`;
+- `stress1`-`stress10`.
+
+The 21 corner modules are dropped. The four `hw-*` stay committed (`test/llvm/hw.list`).
+
+**`bin/llvmi ir-make rt`** builds each line (`rt_compile`), as `modules` builds the tx lines:
+- torture: `clang -O0 -g` | `-O2 -g` | `-O2` | `-O2 -flto` | `-O2 --target=x86_64-pc-windows-msvc`, gnu17, `-w -fno-strict-aliasing`,
+  the tx flags;
+- C++: `clang++` with the same five builds, c++23, where `mac` is `-O0 --target=x86_64-apple-macosx -nostdlibinc -nostdinc++` on the
+  headers made without g++ (`cpp_full_sysroot`: the host has no macOS SDK, and the host's libstdc++ is not read);
+- Rust: `rustc -C opt-level=0 -g` | `-C opt-level=2 -g` | `-C opt-level=2 -C lto=fat`, with `-C codegen-units=1 --emit=llvm-ir`
+  (fat LTO writes one module; thin writes two);
+- stress: `llvm-stress -size=60 -seed=N`.
+
+Every build takes `-ffile-prefix-map=DIR/= -fdebug-compilation-dir=.` (`--remap-path-prefix` for rustc), so no checkout's path
+reaches the IR: without the flag, `-g`'s `DIFile` directory is the working directory.
+
+The verb then makes Arbace's mutants (`bin/repr-llvm mutants`, `arbace.repr.llvm.mutate`, the first records' kinds). Their input is
+the pack's modules followed by `hw.list`, in that order. The sets, `rt_mutant_sets`:
+
+| set | N | first index | family | input |
+|---|---|---|---|---|
+| a | 340 | 0 | base | modules |
+| b | 340 | 1000 | base | modules |
+| h1 | 600 | 500000 | all | modules |
+| h2 | 600 | 600000 | all | modules |
+| ctl | 1 | 900016 | base | hw |
+| ctlh | 1 | 900050 | base | hw |
+| ctlu | 1 | 900055 | base | hw |
+
+`ctl` and `ctlh` are `:noterm` mutants (index 2 mod 17): `hw-dbg.noterm.900016` and `hw-notes.noterm.900050`. `ctlu` is `:undef`
+(7 mod 17): `hw-implicit.undef.900055`. They are the verify controls' subjects and references, known by day whatever the pack holds.
+
+The pack `test/llvm/ir/rt.tar.xz` holds `ID.ll` and `mut/NAME.KIND.K.ll`. Its manifest `rt.tsv` gives ID, SOURCE, SOURCE-SHA256 and
+IR-SHA256; a mutant's SOURCE is `mutant-SET:BASE` and its SOURCE-SHA256 is the base's IR digest. Beside it are `rt.tar.xz.sha256`
+and `rt.cmd`. The tar is deterministic, as tx's is. `ir-make rt --mutants` makes the mutants again from the pack's modules, with no
+compiler. The mutants are packed rather than made at check time: they are judged against opt's record by digest, so a later change
+to the reader or the printer would otherwise make the whole set stale.
+
+The mutator's forms cache now holds at most four modules (it held them all). The mutants are unchanged: a subset made before and
+after the change is the same pack byte for byte. The subset's peak fell from 1.49 to 0.67 GB; the whole pack's 261 modules would
+not fit in 2 GiB.
+
+**`bin/repr-llvm check`** has four new families, read from the pack (`rt_pack`: the pack is checked against its pin and extracted once
+into `.tmp/repr-llvm/rt/PIN`; a checkout source whose digest is not the manifest's makes it stale, an error):
+
+| family | modules |
+|---|---|
+| `roundtrip-rt` | the 257 modules |
+| `text-rt` | the 257 modules |
+| `verify-rt` | the 257 modules, `hw.list`, and sets a, b, ctl |
+| `verify-rt-heldout` | sets h1, h2, ctlh, ctlu |
+
+The records are `test/llvm/check-{roundtrip,text,verify,verify-heldout}-rt-linux-amd64.edn`. A first `--record` writes their header.
+The families have no `--essential` subset. `hw-*` are left out of `roundtrip-rt` and `text-rt` because `roundtrip-llvmtest` and
+`text-llvmtest` already count them. `bin/repr-llvm rt-lists DIR` writes the lists, with absolute paths, for the oracle tier's records.
+
+The controls (`test/repr/llvm/*-controls.txt`) follow. A line whose names a list lacks is left, as before.
+
+| control | crossing | expected |
+|---|---|---|
+| `_control/rt-g0-vs-o2` | `20000224-1.g0` against `.o2` | the forms differ |
+| `_control/rt-stress1-vs-stress2` | `stress1` against `stress2` | the text differs |
+| `_control/rt-noterm-vs-valid` | `hw-dbg.noterm.900016` against `20000224-1.g0`'s opt reference | the verdict differs |
+| `_control/rt-noterm-vs-undef` | `hw-notes.noterm.900050` against `hw-implicit.undef.900055`'s | the message differs |
+
+**The reader: one rule ported.** A held-out mutant of the subset (`rs.g2.attr-returned.500016`, `metadata returned !5236` in a call)
+showed that `parseParameterList` was not followed. In LLParser a metadata argument takes no attributes, and its value is
+parseMetadataAsValue's: a word that is not a type (an attribute, or `null`) gets parseValueAsMetadata's "expected metadata operand" at
+that word. `arbace/repr/llvm/read.ae`'s `parse-args` now does the same. llvm-as 23.1.5 agrees on `metadata null` and on
+`metadata noundef !{}`. Arbace took both before.
+
+**Proved (light; stage 0, `REPR_LLVM_THREADS=2`):**
+
+| check | result |
+|---|---|
+| `bin/llvmi rt-list` | 257 modules; run twice, the same file |
+| `ir-make rt` on 17 ids (`LLVMI_RT_ONLY`: 20000224-1 in its five builds, pr119071.g0, auto in five, io.mac, io.g0, rs.g2, rs.lt, stress1, stress2), 20 mutants a set (`LLVMI_RT_MUT_N=20`) | 17 modules, 83 mutants; made twice from scratch, the same `rt.tsv` and `rt.tar.xz` byte for byte (`--mutants` again: the same); 1 min 30 s, 1.49 GB with the old cache, 0.67 GB with the bounded one |
+| `check roundtrip-rt` on that pack | 17 of 17 forms equal, 17 of 17 prints taken by the verifier, `rt-g0-vs-o2` fails as it must; 40 s, 0.79 GB |
+| `check text-rt` | 17 of 17 byte for byte, `rt-stress1-vs-stress2` fails as it must; 0.71 GB |
+| `check verify-rt` (`REPR_LLVM_JUDGE=live`) | 62 of 62 verdicts, 41 of 41 messages and 62 of 62 whole stderr as opt 23.1.5's; `rt-noterm-vs-valid` fails as it must |
+| `check verify-rt-heldout` (`REPR_LLVM_JUDGE=live`) | 41 of 42 before the reader's fix (the one above), 42 of 42 after; `rt-noterm-vs-undef` fails as it must |
+| `rs.g0` alone (27,924 lines, the largest module) | round trip equal, the verifier's verdict the same; 83 s, 0.84 GB |
+| unchanged by the reader's fix | `check roundtrip-llvmtest` 304/304, `verify-llvmtest` 792/806, `verify-probes` 472/478, `text-llvmtest` 304/304 (0 failing against the records); controls-test's repr/llvm parts all ok |
+| `bin/reap --record` | `test/reap/matrix.edn` gains the four sources as absent; `bin/reap`: 0 problems |
+
+Without records, the subset's checks print "not recorded" for every module, as they must until the night records them.
+
+**The cells.** `test/reap/cells.edn` names the four families as sources with `:until "LLS31 (a)'s night: ..."`. They print "not recorded
+yet" without a problem. The three retired `:beside` sources stay until the records exist; an `:until` whose file exists is then a
+problem, which forces the switch.
+
+### ORS30 (a): LLVM IR's oracle tier (built here)
+
+The fragment `test/gate/crops/llvm-oracle.edn`, spliced by hand into `test/gate/steps.edn`'s oracle tier (the crops entry `:llvm`, the
+controls), has two steps on the hosts `[:stage0 :llvm :cxx]`:
+- **`llvm-live`**: `bin/repr-llvm check {part}` with `REPR_LLVM_JUDGE=live` (clang -c's objects and llvm-as's bitcode, opt's verdict
+  and stderr), with the parts `roundtrip-llvmtest` and `verify-probes`. Measured: roundtrip-llvmtest passes 304 of 304 (256 objects and
+  304 bitcode equal), 1 min 41 s, 0.67 GB; verify-probes 472 of 478, as recorded. `verify-llvmtest` is not a part: its record is the
+  tests' own verdicts, and live opt judges every module by opt's whole stderr, where 30 of its 792 passes differ.
+- **`llvm-records-verify`**: `bin/repr-llvm records-verify --sample 25`, a new verb. It records every 25th entry of `ref-opt23.edn` and
+  `ref-rt23.edn` again into scratch records and compares them entry for entry. Each entry is `equal`, `input`, `print`, `address` (a
+  stderr that prints a value by its address), `moved` (another LLVM: reported, not failed, ORS6 (a)) or `differs` (a failure).
+  `:stderr-bytes` holds the raw path and is not compared. The verb also checks a crossed pair, which must differ (ORS7 (a)). Measured
+  on LLVM 23.1.5 against the 23.1.4 records: 52 opt entries (50 equal, 2 address) and 13 rt entries equal, 21 s, 0.5 GB.
+
+`gate.crops check` finds 0 problems, `test/gate/crops-test.bash` and `costs-test.bash` pass, and `bin/gate --oracle --plan` plans the
+three parts. The rt families join `llvm-live` as parts once their records exist.
+
+### The night's commands (LLS31 (a))
+
+Light (each process under 1 GB, measured on the subset), no heavy lock:
+
+    bin/llvmi ir-make rt                                   # clang 23.1.5, clang++, rustc 1.99.1, llvm-stress; then the mutants (Arbace):
+                                                           # about 257 builds and 2,483 mutant indices; expect 257 modules and about 2,300 mutants
+    git add test/llvm/ir/rt.*                              # the pack, its pin, manifest and command
+    bin/repr-llvm rt-lists .tmp/llvm/rt-lists
+    bin/repr-llvm record-opt .tmp/llvm/rt-lists/verify-rt.list .tmp/llvm/rt-lists/verify-rt-heldout.list   # opt's records, test/llvm/ref-opt23.edn
+    REPR_LLVM_THREADS=2 bin/repr-llvm record-rt .tmp/llvm/rt-lists/roundtrip-rt.list .tmp/llvm/rt-rec    # clang's and llvm-as's judges, ref-rt23.edn
+    for f in roundtrip-rt text-rt verify-rt verify-rt-heldout; do REPR_LLVM_THREADS=2 bin/repr-llvm check $f --record; done
+
+Then, by day:
+- in `test/reap/cells.edn`, remove the four `:until` keys and the three retired `:beside` sources, and delete their records
+  (`check-roundtrip`, `check-text`, `check-verify` and `check-verify-heldout-linux-amd64.edn`; `rt-builds.tsv` stays the source);
+- run `bin/reap --record`;
+- recount `test/crops/independence.edn`'s read and judge for LLVM IR;
+- add the parts `roundtrip-rt`, `verify-rt` and `verify-rt-heldout` to `llvm-read`, and `text-rt` to `llvm-print`;
+- add `roundtrip-rt`, `verify-rt` and `verify-rt-heldout` to `llvm-live`.
+
+**Expected.** Read:
+
+| family | expected |
+|---|---|
+| roundtrip-rt | 257 of 257 |
+| verify-rt | 261 modules about 261 of 261, the fitted mutants about 99 % (the old 905 of 912) |
+| verify-rt-heldout | about 96 % (the old 1,040 of 1,082) |
+
+So about 1,568 + 2,500 cases at about 98 %. Print: 304 + 257. Completeness stays about 96 (the old families were at these rates).
+Maturity stays 100: the four families have controls. Independence: read 1, and the judge gains the rt families' opt records at 0.5
+(about 2,600 of them): (2,068 + 0.5 x (948 + 2,600)) / (3,016 + 2,600), about 0.68 by the case-weighted rule, so independence goes
+from 96.9 to about 93.6. That is LLS33 below.
+
+### Proposed (llvm-rt-pack)
+
+- **LLS33 The rt families' judge.** The mutants and the pack's modules have no own verdict: opt's record (0.5) judges them, and their
+  number moves the judge from 0.843 to about 0.68.
+  - (a) Count them as LLS31 (b) did: beside, at the read level only. Cost: none. The read cell is unchanged.
+  - (b) Give each mutant an own verdict. The mutator knows the rule it broke, so each kind could write its expected verdict (invalid)
+    and LLParser's or the Verifier's message family. The verdict is then Arbace's own (1), and opt only checks the message (the oracle
+    tier). Cost: a day, a table of 41 kinds to messages (the Verifier's text, ported).
+  - (c) Accept the drop.
+  - *Recommended: (b)*, with (c) meanwhile. The mutants test LLVM's rules, and their expected rejection is known by construction.
+- **LLS34 The pack's C++ for win.** Four of the nine C++ samples have no `win` build (no MSVC headers), as in the first records.
+  - (a) Build them against the headers made without g++, as `mac` is. Cost: minutes; the IR is then a GNU STL for an MSVC triple, an
+    odd but valid input.
+  - (b) Keep the first records' set.
+  - *Recommended: (b)*.
+
 ## As built: LLS21 (a), ci's gaps (2026-11-05, branch `ci-lls21`)
 
 What the user decided (LLS21 (a)) is in ci, C's crop (`arbace/c/build.ae`, `arbace/c/check.ae`), no new native and no Go

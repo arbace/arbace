@@ -17,7 +17,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   repr-java-check repr-java-roundtrip repr-java-text repr-java-jdk repr-java-parse-check repr-java-front-check repr-java-attr-check repr-java-nojavac-check repr-java-closure-check repr-java-platform-pack repr-java-platform-check repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test repr-cpp-host-record repr-cpp-host-check repr-cpp-pins-check repr-cpp-cxxdump-build repr-cpp-cxxdump-test repr-cpp-spec-check repr-cpp-c2j-check repr-scheme-c2j-check repr-ocaml-c2j-check repr-cpp-pp-check repr-cpp-pp-record repr-cpp-cxxdump-check repr-cpp-roundtrip repr-cpp-roundtrip-corpus repr-cpp-pp-essential repr-cpp-roundtrip-essential repr-cpp-pp-record-results repr-llvm-roundtrip cppi-lower-check cppi-lower-corpus cppi-lower-essential cpp-essential cppi-runtime-build cppi-testsuite cppi-selftest cppi-run cppi-runtime-ci cppi-record-ref cppi-check cppi-check-aot cppi-divergences cppi-divergences-aot repr-c-host-record repr-c-host-check repr-c-ccdump repr-c-check repr-c-record repr-c-parse-check repr-c-read repr-c-print repr-c-roundtrip repr-c-corpus-dedup repr-c-record-gcc repr-c-c23 ci-diagnose ci-run ci-check ci-check-aot ci-dg ci-dg-essential ci-judge-test ci-c2j-check ci-cinterp-check ci-aot-translate ci-repl-session ci-divergences ci-musl ci-runtime ci-cirun-build ci-annot ci-annotations ci-annotations-record ci-record-ref ci-synth ci-synth-check goi-annotations goi-test goi-check goi-check-aot goi-check-aot-essential goi-check-nethttp goi-check-nethttp-arbace goi-divergences goi-divergences-aot java-check java-check-compiled java-check-compiled-essential java-check-print java-check-nread java-check-diagnostics java-check-essential java-check-ref alpine-check alpine-test clean \
   java-check-oracle java-check-rejudge java-verdicts \
   rsi-samples rsi-lower-check rsi-lower-check-all rsi-lower-check-native-all rsi-std-build rsi-runtime-build rsi-runtime-ci rsi-aot-lib ci-aot-lib rsi-record-ref rsi-check rsi-check-aot rsi-check-all rsi-divergences rsi-synthetic rsi-synthetic-check rsi-judge-test rsi-check-essential \
-  repr-llvm-record-opt repr-llvm-record-rt llvmi-ir-make llvmi-run llvmi-check llvmi-check-aot llvmi-record-ref llvmi-divergences cppi-codegen-check \
+  repr-llvm-record-opt repr-llvm-record-rt llvmi-ir-make llvmi-ir-make-rt repr-llvm-records-verify llvmi-run llvmi-check llvmi-check-aot llvmi-record-ref llvmi-divergences cppi-codegen-check \
   repr-llvm-check repr-llvm-check-essential llvm-controls-test llvmi-check-essential \
   repr-rust-native-check \
   repr-rust-native-errors \
@@ -459,7 +459,7 @@ cppi-divergences: ## the recorded C++ run check judged against its classes (bin/
 	bin/cppi divergences
 cppi-divergences-aot: ## the recorded C++ AOT check judged against its classes (bin/cppi divergences --aot)
 	bin/cppi divergences --aot
-repr-llvm-check: ## repr/llvm's check families against their records, the tests' own verdicts where they have one, no LLVM tool (bin/repr-llvm check FAMILY; FAMILY=roundtrip-llvmtest|text-llvmtest|verify-llvmtest|verify-probes)
+repr-llvm-check: ## repr/llvm's check families against their records, the tests' own verdicts where they have one, no LLVM tool (bin/repr-llvm check FAMILY; FAMILY=roundtrip-llvmtest|text-llvmtest|verify-llvmtest|verify-probes|roundtrip-rt|text-rt|verify-rt|verify-rt-heldout)
 	bin/repr-llvm check $(FAMILY)
 repr-llvm-check-essential: ## repr/llvm's essential subsets of the four families (the gate's llvm-read-essential, llvm-print-essential)
 	bin/repr-llvm check roundtrip-llvmtest --essential && bin/repr-llvm check verify-llvmtest --essential && bin/repr-llvm check verify-probes --essential && bin/repr-llvm check text-llvmtest --essential
@@ -471,6 +471,10 @@ repr-llvm-record-rt: ## the round trip's judges (clang -c's objects, llvm-as's b
 	bin/repr-llvm record-rt $(LIST) $(WORK)
 llvmi-ir-make: ## llvmi's pinned IR made afresh by clang 23 (test/llvm/ir/{tx,c}.tar.xz, their pins, manifests, commands; bin/llvmi ir-make)
 	bin/llvmi ir-make
+llvmi-ir-make-rt: ## the pack rt (LLS31 (a)): test/llvm/rt-builds.tsv's modules by clang, clang++, rustc and llvm-stress with Arbace's mutants (test/llvm/ir/rt.tar.xz; bin/llvmi ir-make rt)
+	bin/llvmi ir-make rt
+repr-llvm-records-verify: ## the oracle tier: every 25th entry of opt's and the round trip's records recorded again by the host's LLVM and compared (bin/repr-llvm records-verify)
+	bin/repr-llvm records-verify --sample 25
 llvmi-run: ## llvmi: an IR module lowered to C and run by ci (bin/llvmi run FILE; FILE=...)
 	bin/llvmi run $(FILE)
 llvmi-check: ## llvmi's eval check: llvm/test's ExecutionEngine modules, C's synth and run programs, gcc's torture sample and C++'s samples as clang 23's pinned IR (test/llvm/ir), lowered and run by ci judged by the tests' own verdicts (lit's, gcc's torture harness's), else against lli 23's recorded runs; no clang or lli (bin/llvmi check)

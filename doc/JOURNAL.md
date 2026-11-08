@@ -829,3 +829,56 @@ tests: 6 tests, 60 assertions, 0 failures); the record over tcc-pp, zlib, gcc-va
 the known file unchanged; its rows not committed). fprintf-1's and fprintf-chk-1's rows tidied from an `--only` run judged by
 `judge-recorded` (both pass), `bin/reap --record` (C print 4,770 passing) and `bin/crops-score --record`. Details and the night's
 command: doc/C23-SURVEY.md, "As built: CS282".
+
+## 2026-11-08: LLS31 (a), the pack rt's verb, mutants and families; ORS30 (a), LLVM IR's oracle tier (branch `llvm-rt-pack`, from next 7696e50da)
+
+The user decided LLS31 (a) on 2026-11-07: rebuild LLVM IR's first-record lists (the 282 modules and their mutants, whose clang-made
+inputs were lost with the removed worktrees). LLS31 (b) had retired the four families from the read cells, `:role :beside`, meanwhile.
+
+**What the inputs were.** The ids of `test/llvm/check-roundtrip-linux-amd64.edn` were reread:
+- 41 torture programs (the plan said 42). Five of them exist only in later gccs, so the source is gcc 15.2.0's
+  `gcc.c-torture/execute`, from the tarball C's crop pins (`test/c/corpora.edn` `:gcc-15.2.0`), where all 41 are.
+- 9 C++ samples, Rust's `shapes.rs` (three builds), 10 llvm-stress seeds, 21 corner modules (sources lost, dropped) and the four
+  committed `hw-*`.
+
+The mutants' names give their kinds and indices:
+- fitted: 0-339 and 1000-1339 of the base family's 17 kinds;
+- held-out: 500000-500599 and 600000-600599 of all 41 kinds.
+
+`arbace.repr.llvm.mutate` today assigns exactly those kinds to those indices: `k mod |kinds|`, checked on the record's names. So the
+mutator needed no new kinds, only these sets.
+
+**Built.**
+- `bin/llvmi rt-list` writes `test/llvm/rt-builds.tsv`: 257 modules.
+- `bin/llvmi ir-make rt [--mutants]` builds the pack `test/llvm/ir/rt.{tar.xz,tar.xz.sha256,tsv,cmd}`: the builds by clang, clang++
+  (Mach-O on `cpp_full_sysroot`'s headers), rustc and llvm-stress, all with prefix maps and `-fdebug-compilation-dir=.`. It then makes
+  Arbace's mutant sets a, b, h1, h2, plus three single mutants of `hw.list` (ctl, ctlh, ctlu) as the controls' subjects.
+- The mutator's cache is bounded to four modules. The output is unchanged and the peak is halved.
+- `bin/repr-llvm check` has four new families, `roundtrip-rt`, `text-rt`, `verify-rt` and `verify-rt-heldout`, with crossed-pair
+  controls. `bin/repr-llvm rt-lists` writes their lists.
+- Reader fix: LLParser's `parseParameterList` gives a metadata argument no attributes ("expected metadata operand"). A held-out mutant
+  of the subset found it against live opt.
+- reap: the four families are `:until` sources; `matrix.edn` was re-recorded, 0 problems.
+
+**Proved** on 17 modules and 83 mutants (light):
+- two builds from scratch give the same pack byte for byte;
+- roundtrip 17 of 17 and text 17 of 17;
+- verify-rt 62 of 62 and heldout 42 of 42 against live opt 23.1.5 (after the fix);
+- the controls fail as they must;
+- llvm/test's four families are unchanged.
+
+**ORS30 (a).**
+- `bin/repr-llvm records-verify`: the records against the live tools, with `moved`, `address`, and a crossed pair.
+- The oracle steps `llvm-live` (roundtrip-llvmtest and verify-probes live) and `llvm-records-verify`, from
+  `test/gate/crops/llvm-oracle.edn`, spliced by hand. `bin/gate --oracle --plan` plans them.
+- Not taken: verify-llvmtest live. Its record is the own verdicts, and opt's whole stderr differs on 30 of them.
+
+**Alternatives considered.**
+- Making the mutants at check time: not taken. Opt's record is keyed by the mutant's digest, so every change to the printer would make
+  them stale.
+- gcc 9.1.0's torture with the mirror snapshot: not taken. It covers 39 of the 41 programs, against all 41 in the pinned gcc 15.2.0.
+- The host's libstdc++ headers for the Mach-O builds: not taken in favour of the tree made without g++.
+
+**Left for the night.** The pack's full build, the opt and rt records, and the four families' `--record`. Then by day: the cells' switch,
+independence, and the gate parts. The commands are in doc/llvm/LLVM-CROP-SURVEY.md, "As built: LLS31 (a)". The proposals there are
+LLS33 and LLS34.
