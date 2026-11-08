@@ -1188,6 +1188,7 @@ adds it.
 
 ## Proposed
 
+JCS168-JCS171 are JCS167's first slice's (at the end, "Proposed (JCS167)", branch `java-serial`);
 JCS162-JCS167 are F10a's and the crop's 90% (at the end, "Proposed (F10a)", branch `java-complete`);
 JCS161 is F13's ("F13 (java.lang.management's MXBeans): not built, JCS161"); JCS158-JCS159 are F6's ("As built:
 F6"), JCS160 F12's ("As built: F12 (write-ahead)"), branch `java-jc9c`;
@@ -2957,3 +2958,207 @@ wake channels and selectors; F10b's DatagramChannel then the asynchronous channe
 (`bin/jrt-convert check-javac` as a light essential gate step; the overlays' derivations as Arbace, `bin/jrt-convert derive --check`);
 **JCS167 (a)**: serialization ported (ObjectOutputStream, ObjectInputStream, ObjectStreamClass over jrt's reflection, j2g's SerialNew;
 clojure-cdr's staged port), its tests deferred again then regained, toward 90% strict.
+
+## As built: JCS167 (write-ahead)
+
+Branch `java-serial` (from main `2a72c94aa`), 2026-11-08, by day under the light rules: JCS167 (a)'s **first slice**,
+Java serialization in the world end to end in code: jdk26u's object streams, their descriptors and filter, the
+allocation of a deserialized object without its constructors, reflection's serial members and final fields, for the
+three kinds of class a stream meets (translated JDK classes, a program's translated classes at the compiled level,
+interpreted classes at the REPL and the interpreted level). Nothing converted, translated or built into an
+executable: the night's commands below. CDR10's staging (`clojure-cdr`, doc/go/JRT-NOTES.md, "Serialization": j2g's
+`SerialNew`, `variants.py`, `SerialAlloc`, `ClassCache`) is the precedent, taken further and moved into the world.
+
+### The design: a closed world serializes the classes the program names
+
+jdk26u's serialization is plain Java over five things the JVM gives it: reflection over every member, whatever its
+access (the serial fields, the private hooks `writeObject`/`readObject`/`readObjectNoData`, `writeReplace`/`readResolve`
+of any access, `serialVersionUID`, `serialPersistentFields`); the writing of final fields; an object made without its
+constructors (`ReflectionFactory.newConstructorForSerialization`: the first non-serializable superclass's no-argument
+constructor run on an object of the class); method handles (records' canonical constructors); `Unsafe` (field offsets,
+the fence). The Go build has no run-time class loading and its reflection is the member tables j2g writes ahead of
+time (J2G-SPEC §5.11), public members only. The design keeps jdk26u's streams **unchanged** (ObjectOutputStream,
+ObjectStreamField, ObjectInputFilter and the rest are jdk26u's files; ObjectStreamClass and ObjectInputStream are
+variants by a replayable script, `test/jrt/serialization/variants.py`, of a few members each) and gives them what the
+JVM gives, decided ahead of time where the closed world allows and at run time where the REPL makes classes:
+
+| the JVM's | the Go build's (this slice) |
+|---|---|
+| reflection over a Serializable class's every member | j2g's member table of a Serializable class (`m/serialization?` and `m/serializable?`) lists, beside the public members, its serialization hooks (`m/serial-hooks`: the three private ones, private and not static; `writeReplace`, `readResolve` of any access) and its serial fields (`m/serial-field?`: every instance field, `serialVersionUID`, `serialPersistentFields`), whatever their access (`out/member-tables`); a program's own classes (the compiled level, `nm/own-class?`) list every member already (JCS117 (a)); an interpreted class publishes every member (`arbace.classes.interp/publish!`) |
+| the hooks are called by reflection only | RTA reaches them: an instantiated Serializable class reaches the hooks its superclass chain declares and its first non-serializable superclass's no-argument constructor (`reach/serial-reach!`, in `instantiate-st`); Externalizable's `readExternal`/`writeExternal` are virtual calls of the streams' code, its public no-argument constructor a root of the REPL's world |
+| Unsafe's writes of final fields | jrt's `Field.set` follows the JDK's rule (`Field.finalWritable`): a final field is written when `setAccessible(true)` succeeded, it is not static and its class is not a record; j2g gives every final instance field a `Set` (line `F`, the modifiers keep `final`); the variant's field reflector reads and writes by `java.lang.reflect.Field` and jrt's `Field` gains the sixteen typed accessors (`getInt`, `setLong`...: widening as the JDK's, its messages) |
+| `newConstructorForSerialization` | `jdk.internal.jrt.SerialAlloc` (jrt's Java) over `ClassInfo.SerialNew` (`serial.ae`'s natives), the rule decided by whoever knows the class: **j2g** for a translated class (`m/serial-super`, jdk26u's rule entire: `superHasAccessibleConstructor` up the chain by Java package, nestmates by their top-level class, the no-argument constructor not private and public, protected or of the package; for an instantiated class only, whose constructor RTA reached; `C_SerialNew` its zero struct with S's constructor body run on it, CDR10's form); **the interpreter** for an interpreted class (`Compiler$CF$Rt.serialPlan`: the same rule over the interpreter's classes, the plan a `Meth` or the nearest class of the world; `serialNew`: the class initialized, allocated with zero fields, the plan run; `arbace.classes.interp/serial-new!` hands it to the host, `CFGo.setSerialNew`), and for the world's part of an interpreted class's chain **j2g again**, per DynSub class (`j2g_cf.go`'s `cfSerialFor`: from another package, the DynSub class public or protected with a public or protected constructor, then its own no-argument constructor when it is not Serializable, else its chain's `serial-chain-super`, run on the DynSub object) |
+| method handles of records | the canonical `Constructor` called with each component's stream value (`RecordSupport.Ctr`; its exception unwrapped from `InvocationTargetException`, as `invokeExact` throws it); a record's components are its instance fields in declaration order (`recordComponentFields`: `RecordComponent` is not in the world, JLS 8.10.3); an interpreted record is `KindRecord` (`Klass.record`, the host's kind 3), so `Class.isRecord` holds at the REPL as on the JVM |
+| `ClassValue`, soft references | jrt's `ClassCache`: a `ConcurrentHashMap` (the closed world unloads no class) |
+| `SharedSecrets`' serialization accessors (`HashMap`, `ArrayList`, `Hashtable`... call `getJavaObjectInputStreamAccess().checkArray` in `readObject`) | written by j2g in the program's support code (`m/serial-accessors`, `m/j2g-static?`): a variable per access interface (translated: jdk26u's three interfaces), its setter, its getter initializing `ObjectInputStream` or `ObjectInputFilter$Config` first (jdk26u's `ensureClassInitialized`): jrt's hand-written `SharedSecrets` cannot name the translated interfaces |
+| `JavaLangAccess` | jrt's (`countPositives`, `inflateBytesToChars`, `countNonZeroAscii`): the streams keep jdk26u's calls |
+| `Proxy.isProxyClass`, `getProxyClass` | false; `UnsupportedOperationException` as `newProxyInstance` (no class is made at run time) |
+| `VM.latestUserDefinedLoader` | the application loader, every class's of the world and the REPL's: `resolveClass`'s `Class.forName` finds a translated class, an interpreted one (`DefineDynamic`'s registry) and an array class |
+| JFR's `DeserializationEvent`, `SerializationMisdeclarationEvent`; `Unsafe.storeFence` | not raised; no fence (Go's memory model publishes the graph through the synchronization that hands it over) |
+| `ObjectInputFilter` (`jdk.serialFilter`, the factory) | jdk26u's own, unchanged: its `Config` reads the system and security properties as on the JVM |
+
+**What comes in** (`test/jrt/jrt_sources.ae`'s `serial-sources`, one line in `sources`): jdk26u's `java/io/`
+`Externalizable`, `ObjectInput`, `ObjectInputFilter`, `ObjectOutput`, `ObjectOutputStream`, `ObjectStreamConstants`,
+`ObjectStreamField`, `SerialCallbackContext`, `SerializablePermission` and `jdk/internal/access/`
+`JavaObjectInputFilterAccess`, `JavaObjectInputStreamAccess`, `JavaObjectInputStreamReadString` (12 files); jrt's overlays
+`java/io/ObjectStreamClass.java`, `ObjectInputStream.java` (the variants), `ClassCache.java` and
+`jdk/internal/jrt/SerialAlloc.java`. `java.io.Serial` (an annotation, not kept) and `SerializationMisdeclarationChecker`
+(JFR's, cut by the variant) stay out. jrt: `go/arbace/jrt/serial.ae` (moved from CDR10's staging), `ClassInfo.SerialNew`,
+`Field`'s accessors and final rule (`reflect.ae`), the manifest and jrt's own tables regenerated (`bin/jrt manifest`).
+j2g: `model.ae` (`serialization?`, `serializable?`, `serial-hooks`, `serial-hook?`, `serial-field?`, `serial-chain-super`,
+`serial-super`, `foreign-super-accessible?`, `serial-accessors`), `reach.ae` (`serial-reach!`), `out.ae` (the tables, the
+accessors), `dyncf.ae` (`cfSerialFor`, three natives, kind 3), `main.ae` (`:inst` in the world). The runtime:
+`Compiler.ae`'s `CF$Rt.serialPlan`, `superCtorAccessible`, `packageOf`, `serialNew`, `Host`'s and `GoHost`'s
+`setSerialNew`, `serialSuper`, `serialInit`, `Klass.record`; `arbace.classes.interp/serial-new!`. The classes:
+`test/java/divergences.edn`'s `:serialization` deferred (`:world`, JCS167) rather than by design, as decided ("its tests
+deferred again then regained"): `bin/reap --record` and `bin/crops-score --record` move Java's eval by design 335 -> 167
+and AOT 308 -> 191 into deferred (strict 72.85% unchanged; without by design 80.36% -> 78.93% until the nights regain them).
+
+**Decided by the doc's earlier decisions, not proposed**: the variants by a replayable script like F7's and F10a's
+derivations (JCS166 (a) ports them all to Arbace, `bin/jrt-convert derive`); records without `RecordComponent`
+(`Class.getRecordComponents` is a reflection feature of its own, below); the filter jdk26u's own; proxies refused as
+J2G-SPEC §12 refuses them (JCS170 proposes them).
+
+### Light checks done
+
+(main's stage 0 as `ARBACE_HOST_EXE`, `GOMEMLIMIT=1400MiB`; scratch `.tmp/js/`)
+- **the joint javac check** (`.tmp/night7/all9-run.sh`, F10a's general script): 2,293 files (2,277 + 12 share + 4
+  overlay), 0 errors, 5,002 classes (16 s, 1.0 GB); its control (the variant's `recordComponentFields` call renamed):
+  1 error, exit 1;
+- the closure scan (F1's `closure.py`, the world being this branch's `print-sources`): every class the four overlays and
+  five of the new sources name is in the world (the scan of jdk26u's own files had found `RecordComponent`, `ClassValue`,
+  `ReflectionFactory`, the method handles and JFR's events, which the variants replace); the members they need that jrt
+  lacked are added (`Proxy.isProxyClass`, `getProxyClass`, `VM.latestUserDefinedLoader`, `Field`'s typed accessors);
+- jrt: `bin/jrt build --arch amd64` (its `go build ./...` stops at `arbace/expat`, the Python crop's, as on F10a's day),
+  `go vet ./jrt`, and `go test ./jrt`: every test passes, `TestReflectInvoke`'s six new cases among them (a final field
+  written once made accessible, refused otherwise; `getLong` widening an int; `getInt` of a double refused with the JDK's
+  message; `setInt` widening to double), `TestReflectAgainstJVM` with `bin/jrt testdata` afresh (the JVM's `Field`
+  members); `bin/jrt manifest` (12.9 s, 0.4 GB): 16 + 2 members added, "edge members of these classes jrt does not
+  define: 0";
+- j2g's namespaces load on stage 0 from the checkout (model, reach, out, dyncf, decls, main);
+  `arbace.classes.interp` loads up to its first call of the new `CF$Rt.serialPlan`, which stage 0's runtime has not (the
+  night's build has it);
+- `bin/reap --record`, `bin/crops-score --record`, then `bin/crops-score --judge --strict`: passes.
+
+Not checked by day (no build): the Java forms of `Compiler.ae`'s new methods (their analysis is the build's), j2g's
+output for the new tables, `cfSerialFor` and the accessors (the night's j2g run; `go build` of its output).
+
+### Expected yield
+
+The class's tests (`.tmp/js/ser-interp.txt`: the records' non-passes matching its pattern, 167 interpreted, 136 compiled),
+scanned for what this slice leaves out (proxies 11, records 4, serializable lambdas 9, RMI 8, the security manager 14,
+filters 3, class loaders 18, JDK-written streams read from files 57, jrt's hand-written serializable classes):
+**55 tests need none of it** (`t04245 t04310 t04375 t04377 t04378 t04379 t04380 t04381 t04382 t04383 t04389 t04390
+t04393 t04394 t04395 t04396 t04397 t04398 t04399 t04400 t04401 t04402 t04403 t04404 t04407 t04409 t04410 t04412 t04413
+t04414 t04416 t04417 t04429 t04431 t04434 t04436 t04437 t04438 t04439 t04441 t04442 t04445 t04446 t04448 t04450 t04452
+t04453 t05325 t05543 t05547 t05549 t05550 t05560 t05666 t08306`; 53 of them in the compiled level's list too), and **19
+more** serialize jdk26u's collections and numbers through their own hooks (`t04392 t04443 t04451 t04905 t05018 t05435
+t05449 t05494 t05495 t05499 t05512 t05514 t05518 t05520 t05521 t05556 t05565 t05671 t05672`: EnumSet's and EnumMap's
+proxies, Vector, Collections' singletons, BigDecimal, URI). About **0.6 of the 74, 45 interpreted and 40 compiled**:
+Java eval and AOT each about +1.4 points, the crop's strict completeness about +0.7. At risk: tests printing a
+descriptor's default `serialVersionUID` of a translated JDK class without one (its table lists only the serial members:
+JCS168), `ExpectedStackTrace` (Go's frames), the tests whose classes extend a class outside `class-supers` at the
+interpreted level ("a class extending ... is not in the Go build"), a JDK class with a variant that cut its serialization
+members (J2G-SPEC §12's operation-level stubs: LogRecord's `serialPersistentFields`, KeepAliveCache, SerialBlob...: slice
+4), and every stream holding an exception (Throwable is jrt's hand-written class: slice 2).
+
+### The night's commands
+
+In the night's worktree with this branch merged, after the night's other conversions; heavy ones under
+`bin/heavy-lock` (memory as F10a's: the conversion and the build are the night's heavy steps, each under the lock; the
+checks below about 1 GB each):
+
+```sh
+# 0. the joint javac check of the merged tree (0 errors expected; 30 s, 1 GB)
+.tmp/night7/all9-run.sh /root/arbace/.tmp/worktrees/next
+# 1. jdk/ converted afresh: expect the sources line +12 share and +4 of jrt's own (overlay), 0 failed, 0 javac
+#    errors, no javac: 0 fallbacks; jdk/forms + 16 files (java/io's 13, jdk/internal/access's 3), jdk/internal/jrt +1
+REPR_JAVA_EXE=$(ls -td /root/arbace/.tmp/gate-exe/javac-*/ | head -1)arbace-javac REPR_JAVA_STALE_OK=1 \
+  ARBACE_HEAVY_CMD=$PWD/bin/heavy-lock bin/jrt-convert update
+# 2. j2g's edge afresh (VM.latestUserDefinedLoader and Proxy's members as outside references; the new classes'), then
+#    javac's world's edge
+bin/heavy-lock bin/j2g-edge update && bin/heavy-lock bin/javac-vendor edge
+# 3. the executable; j2g's report: no "native without its Go function" (SerialAlloc's 2, ObjectStreamClass's 2,
+#    Compiler$CFGo's setSerialNew, serialSuper, serialInit), no "not in the declared edge" for java.io; the executable's
+#    size against the night before's (`ls -l`: serialization's reach brings every instantiated Serializable class's hooks,
+#    JCS171)
+bin/heavy-lock bin/arbace-go --build && bin/arbace-go --smoke && bin/jrt test
+# 4. a smoke of the slice (translated JDK classes through their hooks, an enum, EnumSet's serialization proxy):
+#    expect "[1 2 3] {a 1} 42 [x y] SECONDS true RegularEnumSet [SECONDS DAYS]"
+target/arbace-go/amd64/arbace -e '(import (quote (java.io ByteArrayOutputStream ObjectOutputStream ObjectInputStream ByteArrayInputStream)) (quote (java.util ArrayList HashMap UUID EnumSet)) (quote (java.util.concurrent TimeUnit)))
+  (defn rt [x] (let [b (ByteArrayOutputStream.) o (ObjectOutputStream. b)] (.writeObject o x) (.close o)
+                 (.readObject (ObjectInputStream. (ByteArrayInputStream. (.toByteArray b))))))
+  (let [s (rt (EnumSet/of TimeUnit/SECONDS TimeUnit/DAYS))]
+    (println (rt (ArrayList. [1 2 3])) (rt (doto (HashMap.) (.put "a" 1))) (rt (int 42)) (vec (rt (into-array String ["x" "y"])))
+             (rt TimeUnit/SECONDS) (= (rt (UUID. 1 2)) (UUID. 1 2)) (.getSimpleName (class s)) (vec (map str (sort s)))))'
+# 5. Java's levels interp and compiled on the class's tests: saved, not recorded; expect about 45 / 40 of the 74 above
+#    to pass, no passing test lost; then the whole corpus with the night's others
+JAVA_CHECK_EXE=$PWD/target/arbace-go/amd64/arbace J2G_GO_EXE=$PWD/target/arbace-go/amd64/arbace \
+  JAVA_CHECK_HEAVY=$PWD/bin/heavy-lock bin/java-check --levels interp,compiled --jobs 8 \
+  --only 'jdk/java/io/(Serializable|Externalizable|ObjectInputStream|InputStream/ReadParams|OutputStream/WriteParams)|jdk/java/util/(HashSet|Hashtable|Vector|EnumMap|EnumSet|LinkedHash|UUID|BitSet/StickySize|Arrays/ArrayObjectMethods|List/LockStep|Collections/(Ser|ReverseOrder))|jdk/java/math/BigDecimal/SerializationTests|jdk/java/net/URI/Test|jdk/java/security/SignedObject|jdk/sun/util/calendar/Bug6653944' \
+  --save .tmp/jcs167-night/check
+# 6. the day after: the new failures' classes (narrower than :serialization: proxies, jrt's hand-written classes, the
+#    default serialVersionUID, ...), the records, bin/reap --record, bin/crops-score --record
+```
+
+**Risks and fallbacks**: (1) a JDK class's `readObject` newly translated needs something outside the world: j2g stubs it
+(operation-level, reported), its tests fail in a class; (2) the executable's growth (every instantiated Serializable
+class's hooks and their callees): measured at step 3, JCS171; (3) `Compiler.ae`'s new Java forms fail the build's
+analysis: the night's fallback reverts `arbace/lang/Compiler.ae`, `arbace/classes/interp.ae` and dyncf's three natives
+(the interpreted level then has no allocation: `canAllocate` false, "no valid constructor"), the rest stands; (4) should
+the conversion refuse a new file, `serial-sources` and the four overlays leave together (j2g's rules are inert without
+`java/io/ObjectStreamClass`: `m/serialization?`).
+
+### The remaining slices (JCS167's 8-10 days, this one about 2)
+
+| slice | what | days | tests |
+|---|---|---|---|
+| 2 | jrt's hand-written serializable classes: `Throwable` (`detailMessage`, `cause`, `stackTrace`, `suppressedExceptions`, its `writeObject`/`readObject`) with `StackTraceElement`, `Date`, `StringBuilder`/`StringBuffer` (`serialPersistentFields`), the atomics, the locks: their serial fields and hooks in jrt's own tables (`test/jrt/tables.ae`), their `SerialNew` | 2 | every stream holding an exception (Throwable/*, the 6 "throwable?" ones, most of RMI's later), Date's |
+| 3 | the default `serialVersionUID` exact (JCS168): j2g computes it ahead of time for a translated class without one; interpreted classes' `getDeclaredMethods` without the inherited virtual methods and their synthetic `this$0` and captured fields; then the 57 tests reading JDK-written streams (`.ser` files, `test.src`) | 1.5 | about 25 |
+| 4 | the JDK variants that cut serialization members (J2G-SPEC §12's stubs: `LogRecord`, `KeepAliveCache`, `SerialBlob`/`SerialClob`, the security classes' `readObject`s F2-F4 left out) restored | 1 | logging 4, security 6, sql |
+| 5 | `Class.getRecordComponents` and `RecordComponent` (jrt's, from j2g's record facts and the interpreter's), records' tests | 0.5 | 4 + reflection's |
+| 6 | proxies (JCS170) | 2 | 11 |
+| 7 | serializable lambdas (JCS169): `SerializedLambda`, `$deserializeLambda$` | 1.5 | 9 |
+| 8 | Clojure's own types (CDR10's remainder: `arbace.lang`'s hooks, a defrecord's `Dyn` allocation) | 1 | the suite's `serialization` 9 |
+
+## Proposed (JCS167)
+
+Numbered after JCS167 (renumbered at the merge should another branch have taken these numbers).
+
+### JCS168 The default serialVersionUID of a translated class
+
+`ObjectStreamClass.computeDefaultSUID` hashes the class's name, modifiers, interfaces, its non-private fields, its static
+initializer's presence, its non-private constructors and methods (SHA-1). A translated JDK class's table lists only its
+public and serial members, so a class without a declared `serialVersionUID` gets another value than the JDK's: harmless
+within one program, wrong against a JDK-written stream (and for the tests that print it). (a) j2g computes it ahead of
+time from the declaration (the JDK's algorithm over `a/decl`: flags, members, `<clinit>` as javac emits it) into
+`ClassInfo.SerialUID`, which the variant's `computeDefaultSUID` asks first (`SerialAlloc.defaultSUID`), 1 day with a
+check against the JDK's values for the world's Serializable classes (recorded on the frozen JVM, `bin/j2g-edge`'s way);
+(b) list every member of every Serializable class (the tables grow, about +1 MB); (c) as now. **Recommended: (a)**.
+
+### JCS169 Serializable lambdas
+
+javac compiles a serializable lambda with `altMetafactory`'s `FLAG_SERIALIZABLE` and a `$deserializeLambda$` in the
+capturing class; j2g refuses both (`:deser-indy`, J2G-SPEC §12). (a) j2g's lambda adapter of a serializable lambda
+writes `writeReplace` returning a `SerializedLambda` (its capturing class, interface method, implementation and captured
+args, as `InnerClassLambdaMetafactory` does), and translates `$deserializeLambda$` (javac's own switch over the
+`SerializedLambda`'s fields): 1.5 days; (b) by design (a `:design` class of its own). **Recommended: (a)** after slices
+2-4 (9 tests, javac's lambda tests among them).
+
+### JCS170 java.lang.reflect.Proxy over Dyn
+
+`Proxy.newProxyInstance` throws in the Go build; a Proxy's class over `Dyn` (its interfaces' slots filled with the
+handler's `invoke`, `Proxy.isProxyClass` true for it, `getInvocationHandler`) is J2G-SPEC §5.12's machinery at run time,
+at the REPL; at the compiled level j2g would need the proxy's interfaces' adapters ahead of time (all of the world's
+public interfaces have `Dyn`'s methods already). (a) Proxy over `Dyn` at both levels, with serialization's proxy class
+descriptors (`resolveProxyClass`), 2 days; (b) the REPL only; (c) by design (J2G-SPEC §12 stands). **Recommended: (a)**:
+proxies are also reflection's and the JDK's own (annotations' implementations, MXBeans' proxies).
+
+### JCS171 The executable's growth
+
+`serial-reach!` reaches every instantiated Serializable class's hooks and their callees (`HashMap.readObject`,
+`ArrayList.writeObject`, the collections' serialization proxies...) and `serial-field?` lists their fields: an estimate
+of +1.5 to 3 MB, measured at the night's step 3. (a) accept it, as JCS135 accepted the closure's growth; (b) reach the
+hooks only of classes the REPL's world names publicly and the program's own (the shipped program's interpreted level
+needs them all); (c) a build option without serialization. **Recommended: (a)**, then (c) only if the box's guest
+needs it.
