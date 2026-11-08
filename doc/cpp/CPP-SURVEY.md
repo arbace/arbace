@@ -3805,3 +3805,132 @@ The pack itself (the night's recording); CX12 (Sema's diagnostics natively, then
 None against the day's rules. The 23-file sample pack sits in the worktree's own store (`.tmp/packs/`) and its pin and manifest were moved
 to `.tmp/sample-records/` (not committed). Scratch in the worktree's `.tmp/`: `llvm-src/` (the seven clang sources read), `stubs/`, `packs/`,
 `repr-cpp/record-dumps/`, `dg-rec/`, `dg-live/`, `dg-unrec/`, `dg-other/`, `dg-none/`, `cx-live/`, `nc-arbace/`, `*.log`.
+
+## As built: cpp-props (2026-11-08)
+
+On the branch `cpp-props` from `mac/cpp-compl` (f070d5247, on cpp-runtime-own), mac/cpp-cp247 (4ddab9d59) merged first (b733539ed;
+`bin/lib/repr-cpp/dg` takes cp247's `--own` and `--dumps-only` beside cpp-compl's `--rt-judge`, clang's `--embed-dir` kept; both docs'
+sections kept; scores re-recorded). The user's decisions of 2026-11-08 (about 19:45) on cpp-compl's CP260-CP265 and cpp-runtime-own's
+P20-P22 (doc/cpp/CODEGEN.md G5c.7): CP260 (a), CP261 (a), CP262 (b) (the read cell's classification side here; the native front end's
+diagnostics are CX12's, branch cpp-cx12, not merged: `arbace/cpp/sema.ae` and `arbace/repr/cpp/dg.ae` are its), CP263 (a), CP265, P20 (b),
+P21 (b), P22 (b)'s first step; decided and recorded: CP250 (a) when needed, CP251 (a) at the next re-record, CP264 a night task. The day's
+light tier: main's stage 0 by `ARBACE_HOST_EXE`, the affected files only, at most two processes under about 1.5 GiB, compiler stubs exiting
+99 first on PATH (their log empty), no gate but `--plan`.
+
+### CP260 (a): DejaGnu's UNSUPPORTED is not a result
+
+`test/cpp/divergences-dg.edn`'s and `test/c/divergences-dg.edn`'s `:dg-unsupported` and `test/cpp/divergences-read.edn`'s `:not-cxx` and
+`:target-option` are `:kind :na` (bin/reap: outside both denominators, reported beside the cell, as Go's AOT no-forms). bin/reap's
+per-file merge (`per-file`, the token check's levels) picks the first deferred entry, else the first counted one, else the first: a file
+not applicable at one level but judged at another is judged. C++ read: 36 cases n/a (33 dg, 3 token check); C read: 8.
+
+### CP261 (a): the token check where g++ -E is no reference
+
+`arbace.repr.cpp.ppcheck/gxx-no-reference?`: g++ -E refuses a file the port reads without an error (not for an option of another target,
+CP260's `:na`), or the file is read under -fmodules-ts (g++ -E rewrites its import directives). Such a file's stream is judged by clang's
+recorded raw tokens alone: the pp status `clang-tokens`, a pass (`clang-tokens?`: the port's raw tokens' digest is lex-clang.sha256's).
+Its negative control `_control/pp-clang/empty15-vs-cpp-11` (test/cpp/controls.edn, level `:pp-clang`: empty15.C by the rule against
+cpp-11.C's raw tokens) fails as it must. The classes gxx-rejects and modules-ts stay for a file whose raw tokens are not clang's either.
+`pp-check --record-results` takes `--only` now: the rows of its files alone replaced, each already in the record (a file outside the
+recorded sampling refused). On the known file's 29 :pp files: 27 clang-tokens, 2 target-option (n/a); their 27 known entries removed and
+their rows recorded (`--only --record-results`); `pp-check --essential` passes (cpp-lexical 19, gxx-dg 31, libstdcxx-headers 3, the
+three controls failing as they must). pp-check 1,903 to 1,930 passes of 1,934.
+
+### CP262 (b), the read cell's side: the files expecting only syntax errors
+
+`arbace.repr.cpp.dgsyntax` (`arbace/repr/cpp/dgsyntax.ae`): `syntax-only?`, a dg-error file whose every expected error line's every
+message is a syntax, lexical or preprocessor diagnostic (`arbace.c.dg/syntax-expectation?`, C's rule), no line-0 count, no
+dg-excess-errors; `list WORK [OUT]` writes `test/cpp/dg-syntax-only.txt` from the `lists` step's `dg-error/dg.edn`, `check WORK` holds it
+(`arbace_tool -s arbace.c.dg -m arbace.repr.cpp.dg lists WORK GXXDG dg-error - -`, then `-m arbace.repr.cpp.dgsyntax list WORK`): 234 files
+(clang's record passes 193, fails 41). bin/reap's new source key `:own-for {:file RECORD :list LIST :judge NAME}` (test/reap/main.ae
+`own-for`): the listed cases take RECORD's rows in place of the source's (a non-pass's reason headed `own: `), RECORD absent: nothing
+taken (said in the detail). C++'s dg source names CX12's own record `test/cpp/check-dg-own-linux-amd64.edn`; its failures are the class
+`:syntax-own` (deferred: the parser's or its diagnostics' gap), before every clang class. Tried with cpp-cx12's sample record (454 rows,
+then removed): 27 of the 234 in it, 12 own passes, 15 failures, the read cell 10 passes fewer (files clang passes that the native front
+end's errors do not meet). Once CX12's whole own record lands, expect about 200 of the 234 judged by it and the read cell about 85 passes
+lower: the honest cost of judging them by Arbace's own parser. Independence for these files is CX12's read fact (`:dg-own`).
+
+### CP263 (a), write-ahead: oracle-rejected under our route
+
+`arbace.cpp.check/ir-row`: a program whose IR clang did not make and whose directory holds our route's `gen.refused` (CPPI_ROUTE=auto
+tried ours first) is `ours-refused` (test/cpp/divergences.edn, deferred, our refusal its reason, clang's first error after it);
+`oracle-rejected` (by design) keeps the programs our route did not try (dg-options under auto, every one under clang).
+`bin/lib/cppi/route.bash` keeps `gen.refused` across `ir1` (which makes the directory afresh) and puts it back after clang. Nothing
+changes until CP240 (b)'s switch makes auto the default and the records are written again; checked on a probe directory (`ir-row` gives
+`ours-refused` with gen.refused, `oracle-rejected` without).
+
+### CP265: the macro extent of an invocation its own expansion opens
+
+`arbace.repr.cpp.convert/macro-extent`: when the macro named at a node's last token's expansion leaves parentheses open
+(`unbalanced-opens`: its last `#define` in the main file before the use, continuation lines joined, comments and literals dropped), the
+extent runs on through the text to the `)` that closes them (`close-parens`; [cpp.rescan]: the expansion's `name(` takes the following
+text as its arguments). A macro a header defines is not seen (the shared preprocessor would know it). `c-c++-common/cpp/delimited-escape-seq-5.c`
+(`#define a z(` then `a\u{})`): known (forms-differ) before, passes the own round trip after. Unchanged: 57 c-c++-common-every-10 files
+with a `#define` (57 pass), 25 gxx-dg-every-10 files with a function-like `#define` (25 pass), gxx-dg-essential 33 of 33, samples 9 of 9.
+
+### P20 (b), P21 (b), P22 (b): doc/cpp/CODEGEN.md G5c.9
+
+- **P20 (b)**: clang's resource directory in the target tree, made from the pinned llvm-project-23.1.5 tarball as its
+  clang/lib/Headers/CMakeLists.txt installs it (cpp/target/clang.edn's `:resource-include`; `bin/repr-cpp target oracle` compares it):
+  285 of 296 installed files, all equal byte for byte, the 11 TableGen products (ARM, AArch64, RISC-V, HLSL) not made, as described.
+  The runtime's units read clang's unwind.h (no -iquote of gcc's): the 13 eh_* units our route generates have the oracle's names.
+  Rechecked on the new tree: `pp-check --essential`, cpp-print-essential's two commands (33 of 33, 9 of 9), `native-check samples` (9 same,
+  68 of 68) and `native` (1, 30 of 30), all as before; no regression, so the resource headers apply as clang's search list has them.
+- **P21 (b)**, write-ahead: bin/cppi's `cppi_runtime_route_default` (clang until the night holds, then auto: the gate's cpp-runtime with
+  our route's names level) and the oracle tier's `cpp-runtime-swap-oracle`.
+- **P22 (b)**'s first measure: of c++98/'s and c++11/'s 103 units 52 generate by our route, 13 with the oracle's names exactly (G5c.9).
+
+### Decided (the user, 2026-11-08), recorded
+
+- **CP250 (a)** when a native-check file is found to differ by an option: clang's option deltas (half a day), not now.
+- **CP251 (a)** at the next re-record of the dg pack: the dumps recorded with `-isystem` the target tree (`bin/repr-cpp target tree`) in
+  place of the host's headers, so their dependencies are the pinned tarballs'; with P20 the tree now has clang's resource directory too.
+- **CP264**: threads (eval and AOT, 3 deferred) a night task, one job (the lowered runtime at the checkout's key, runtime-ci about 3 GB).
+
+### Checked (light; stubs exiting 99 first on PATH, their log empty, but native-check's clang)
+
+| check | result |
+|---|---|
+| `bin/repr-cpp pp-check --only` the 29 :pp known files; `--only --record-results` | 27 clang-tokens, 2 known (target-option, n/a); 29 rows recorded |
+| `bin/repr-cpp pp-check --essential` (before and after P20's tree) | pass; the three controls fail as they must |
+| bin/reap with cpp-cx12's sample own record in place (removed after) | 27 of the 234 by it: 12 pass, 15 syntax-own; 0 problems but the matrix |
+| `arbace.cpp.check/ir-row` on a probe directory | ours-refused with gen.refused, oracle-rejected without |
+| own round trip: delimited-escape-seq-5.c; 57 c-c++-common and 25 gxx-dg macro files; gxx-dg-essential; samples | known to pass; 57; 25; 33 of 33; 9 of 9 |
+| `bin/repr-cpp target oracle` | 834, 151 and 285 (of 296, 11 described) equal |
+| `CPPI_RUNTIME_OURS=libsupc++/eh_ CPPI_RUNTIME_ROUTE=ours bin/cppi runtime-build` (records mode) | 197 of 198, 13 eh_* by our route, names equal; eh_alloc refused (G5c.5) |
+| `native-check samples`, `native` (clang live: the oracle's check) | 9 same 68 of 68; 1 same 30 of 30; controls fail |
+| `gate.crops check . test/gate/steps.edn`; `bin/gate --oracle --plan` | 0 problems; cpp-runtime-swap-oracle planned |
+| `bin/reap --record`; `bin/crops-score --record`; `--judge --strict` | 0 problems; 0 problems |
+
+### The numbers (bin/crops-score --crop cpp)
+
+| measure | before (cpp-compl's record) | this branch (records) | after tomorrow's night (estimate) |
+|---|---|---|---|
+| completeness | 76.15 (96.8) | 76.4 (96.8): read 80.7 to 81.6 (36 n/a out, 27 token passes), C 95.1 | about 88.5 with cpp-compl's own print records; the read cell about 1.3 lower once CX12's whole own record lands (CP262 (b): about 85 of the 234 syntax files fail by the native front end's errors) |
+| maturity | 100 | 100 | 100 |
+| independence | 67.7 | 67.7 | about 70 with the runtime by auto (P21 (b): libsupc++'s 62 units at 1) and CX12's own passes |
+
+### The night's commands (one process at a time; `export ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace GOMEMLIMIT=1400MiB REPR_CPP_THREADS=2`)
+
+```
+# 1. the token check's recorded samplings with CP261's rule, recorded whole
+bin/repr-cpp pp-check --corpus cpp-lexical --record-results && bin/repr-cpp pp-check --corpus gxx-dg --sample 10 --record-results \
+  && bin/repr-cpp pp-check --corpus libstdcxx-headers --sample 8 --record-results
+# 2. cpp-compl's own print records (its "The night" step 2) and CX12's whole own record (cpp-cx12's night), then
+bin/reap --record && bin/crops-score --record && bin/crops-score --judge --strict
+# 3. CODEGEN.md G5c.8's runtime chain with CPPI_RUNTIME_ROUTE=auto; if it holds, bin/cppi's cppi_runtime_route_default=auto (P21 (b)) and,
+#    after cpp-target's route-compare, bin/lib/cppi/route.bash's cppi_route_default=auto (CP240 (b), CP263 (a)), then
+bin/cppi check --record && bin/cppi check --aot --record    # ours-refused takes the programs our route refuses
+# 4. P22 (b): CPPI_RUNTIME_OURS=c++11/ CPPI_RUNTIME_ROUTE=auto CPPI_GCC=1 bin/cppi runtime-build .tmp/cppi/rt-src11 (and c++98/)
+# 5. CP264: threads, one job (bin/cppi check --only the three thread programs on the runtime at the checkout's key)
+# 6. the oracle tier once: bin/gate --oracle (cpp-runtime-swap-oracle among it, about 45 min)
+```
+
+### Left
+
+The night's records (above); the read cell's syntax files once CX12's record lands (CX12's line); P22 (a); CP264.
+
+### Slips, scratch
+
+A Monitor command used `<(...)` once, against the day's rules; it was stopped at once. Scratch in the worktree's `.tmp/`: `p20/` (clang's
+headers extracted, the P22 lists, logs and names table), `cppi/rt-eh`, `ppc/`, `ppl/`, `dgl/`, `rt265*`, `rte*`, `rts*`, `nc-*`, `stubs/`.

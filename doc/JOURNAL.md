@@ -1013,3 +1013,43 @@ By the user's decisions of 2026-11-08 (~17:00), under the day's light rules (doc
 - **CP249 (a)**: as now, nothing built.
 - Scores unchanged (76.1 / 100 / 67.7; the dg cases a record either way, the native parser's record in no counted case); independence.edn's
   C++ read fact rewritten to say so. Proposed CP250 (clang's option deltas), CP251 (the dg pack's dependencies on the host's headers).
+
+## 2026-11-08: C++'s accepted proposals CP260-CP265 and P20-P22 built (branch `cpp-props`, from mac/cpp-compl f070d5247; write-ahead parts)
+
+The user accepted (2026-11-08, about 19:45) cpp-compl's CP260 (a), CP261 (a), CP262 (b), CP263 (a), CP265 and cpp-runtime-own's P20 (b),
+P21 (b), P22 (b), and decided CP250 (a) when needed, CP251 (a) at the next re-record, CP264 a night task (one job). mac/cpp-cp247 (4ddab9d59)
+merged first; cpp-cx12 (CX12, still running, `arbace/cpp/sema.ae` and `arbace/repr/cpp/dg.ae` its) not merged: CP262 (b)'s diagnostics are
+its, the read cell's classification here. Details in doc/cpp/CPP-SURVEY.md, "As built: cpp-props", and doc/cpp/CODEGEN.md G5c.9.
+- CP260 (a): dg-unsupported (C++'s and C's) and the token check's not-cxx and target-option `:kind :na`; bin/reap's per-file merge prefers
+  a counted class to `:na`. Alternative left: as now (by design, in the strict denominator).
+- CP261 (a): the token check judges a file g++ -E refuses (not for another target's option) or rewrites (-fmodules-ts) by clang's raw
+  tokens alone (`clang-tokens`), its control `_control/pp-clang/empty15-vs-cpp-11`; 27 files pass, their known entries gone, their rows
+  recorded by `pp-check --only --record-results` (new: a subset's rows replaced, each already recorded).
+- CP262 (b), the read side: `arbace.repr.cpp.dgsyntax` lists the 234 dg-error files expecting only syntax errors
+  (`test/cpp/dg-syntax-only.txt`); bin/reap's `:own-for` takes their verdicts from CX12's own record once it exists, a failure the class
+  `syntax-own` (deferred). On cpp-cx12's sample record 27 of them are judged, 12 pass, 15 fail (the cell 10 passes lower): the whole record
+  will lower the read cell by about 85 passes, the cost of judging them by the native front end. Alternative considered: taking an own
+  pass only (CX12's CP271 (b)), which would not be CP262 (b)'s judgment by the native parser.
+- CP263 (a), write-ahead: `ours-refused` (deferred) for a program our route refuses and clang rejects under CPPI_ROUTE=auto;
+  route.bash keeps gen.refused across ir1. In effect once CP240 (b)'s switch makes auto the default.
+- CP265: a macro's extent runs on through the arguments its expansion's unbalanced `(` takes from the text after it (the main file's
+  definition read); delimited-escape-seq-5.c passes the own round trip; 82 macro files of the samples and the essential lists unchanged.
+  A header's macro is not seen (the shared preprocessor's expansion would be the full answer).
+- P20 (b): clang's resource directory made from the pinned llvm-project-23.1.5 tarball as clang/lib/Headers/CMakeLists.txt installs it
+  (its set() lists and install(FILES) commands read as data, cpp/target/clang.edn's :resource-include): 285 of the 296 installed files,
+  all equal byte for byte; the 11 TableGen products for ARM, AArch64, RISC-V and HLSL not made (named in :not-made). The runtime's units
+  by our route read clang's unwind.h (no -iquote of gcc's): the 13 eh_* units our route generates have the oracle's names. Source read:
+  llvm-project-23.1.5.src.tar.xz (sha256 fb50b1ea...), clang/lib/Headers (Apache-2.0 with the LLVM exception, LICENSE.md's LLVM entry), files
+  copied into the generated tree under .tmp/, nothing committed of them.
+- P21 (b), write-ahead: bin/cppi's `cppi_runtime_route_default` (clang until the night's runs hold, then auto); the oracle tier's
+  `cpp-runtime-swap-oracle`.
+- P22 (b), the first measure: `arbace.cpp.codegen gen-batch` over the 103 units of c++98/ and c++11/ (27 min, one process): 52 generate, 13 with the oracle's
+  external names exactly (functexcept, functional, globals_io, cxx11-stdexcept, regex, mutex, snprintf_lite, parallel_settings and five
+  with none), 4 with one or two extra names (a terminate pad clang does not need, two inlined chrono constructors), 35 without the explicit
+  instantiations they exist for (G5b's); 51 refused (parse 11, name 10, type 7, string 6, the rest small). The measure's lists and logs in
+  the worktree's .tmp/p20/; P22 (a) next.
+- Checks on the affected cases only (stubs exiting 99 first on PATH, their log empty, but native-check's oracle): pp-check --only (29) and
+  --essential; the own round trips gxx-dg-essential 33/33, samples 9/9, the 57 + 25 macro files; native-check samples 9 same, native 1;
+  runtime-build of the eh_* units by our route (records mode); `gate.crops check` 0 problems; `bin/gate --oracle --plan`; bin/reap --record
+  (0 problems); crops-score --record, --judge --strict (0 problems). Scores: C++ 76.15 / 100 / 67.7 to 76.4 / 100 / 67.7 (read 80.7 to 81.6,
+  36 cases n/a), C 95.1 (8 n/a).
