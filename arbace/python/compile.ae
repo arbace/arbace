@@ -22,10 +22,14 @@
   _PyCompile_Warn); compile-source puts them in the module's code object as :warnings, the runtime emits them"
   nil)
 
+(def ^:dynamic *disable-warning*
+  "compile.c's c_disable_warning, an atom: above 0 in a finally body's second copy (COMPILE_FBLOCK_FINALLY_END)"
+  nil)
+
 (defn- warn!
   "A SyntaxWarning at *pos* (CPython's location: 1-based offsets)"
   [msg]
-  (when *warnings*
+  (when (and *warnings* (not (and *disable-warning* (pos? @*disable-warning*))))
     (let [[l c el ec] *pos*]
       (swap! *warnings* conj [msg l (some-> c inc) el (some-> ec inc)]))))
 
@@ -65,13 +69,13 @@
       (.setLength sb 0))))
 
 (defn decode-str
-  "The value of a string body as written (escapes decoded unless raw); a \\N{NAME} escape by the platform's Unicode
-  names (Character/codePointOf), one it does not know kept as the marker {:named NAME} in a vector of parts; two
-  surrogate escapes that a Java string would combine are parts of their own (pair-split!)"
+  "The value of a string body as written (escapes decoded unless raw); a \\N{NAME} escape by unicodedata's tables, the
+  reader's (arbace.repr.python.ucn, which has checked the name; queue 228: the platform's names did not know them all);
+  two surrogate escapes that a Java string would combine are parts of their own (pair-split!)"
   [^String body raw? bytes?]
   (if raw?
     body
-    (let [sb (StringBuilder.) parts (atom []) n (count body)]
+    (let [sb (StringBuilder.) n (count body)]
       (loop [i 0]
         (if (>= i n)
           nil
@@ -95,16 +99,12 @@
                                                 (.appendCodePoint sb cp) (recur (+ i 10)))
                   (and (not bytes?) (= d \N) (< (+ i 2) n) (= (.charAt body (+ i 2)) \{))
                   (let [e (.indexOf body "}" (int (+ i 3)))
-                        nm (subs body (+ i 3) e)
-                        cp (try (Character/codePointOf nm) (catch Throwable _ nil))]
-                    ;; the name by the platform's Unicode data (jrt's); one it does not know kept as a marker
-                    (if cp
-                      (.appendCodePoint sb (int cp))
-                      (do (swap! parts conj (str sb) {:named nm}) (.setLength sb 0)))
+                        nm (subs body (+ i 3) e)]
+                    (.appendCodePoint sb (int ((requiring-resolve 'arbace.repr.python.ucn/lookup) nm)))
                     (recur (inc e)))
                   :else (do (.append sb \\) (.append sb d) (recur (+ i 2)))))
               (do (.append sb c) (recur (inc i)))))))
-      (if (seq @parts) (conj @parts (str sb)) (str sb)))))
+      (str sb))))
 
 (defn- string-token-value [x]
   (let [[h [body] o _] (node x)
@@ -361,8 +361,15 @@
 
 ;; ---- frame blocks: loops, try-finally, with, except handlers (for break, continue, return) ----
 
-(defn- push-fblock! [u fb] (swap! u update :fblocks conj (assoc fb :hs (or (:hs fb) (:hstack @u)))))
-(defn- pop-fblock! [u] (swap! u update :fblocks pop))
+(defn- push-fblock!
+  "_PyCompile_PushFBlock: at most CO_MAXBLOCKS, 21"
+  [u fb]
+  (when (>= (count (:fblocks @u)) 21) (syntax-error "too many statically nested blocks"))
+  (when (and *disable-warning* (= :finally-end (:kind fb))) (swap! *disable-warning* inc))
+  (swap! u update :fblocks conj (assoc fb :hs (or (:hs fb) (:hstack @u)))))
+(defn- pop-fblock! [u]
+  (when (and *disable-warning* (= :finally-end (:kind (peek (:fblocks @u))))) (swap! *disable-warning* dec))
+  (swap! u update :fblocks pop))
 
 (defn- unwind-fblock!
   "The cleanup of one frame block on leaving it by break, continue or return (preserve: a return value is on the top)"
@@ -520,10 +527,11 @@
   (let [kwns (map #(second (node %)) kws)
         star (or (some starred? pos) (some #(nil? (first %)) kwns))]
     ;; codegen_validate_keywords
-    (loop [seen #{} [k & more] (keep #(some-> (first %) ident) kwns)]
+    (loop [seen #{} [k & more] (filter #(some? (first (second (node %)))) kws)]
       (when k
-        (when (seen k) (syntax-error (str "keyword argument repeated: " k)))
-        (recur (conj seen k) more)))
+        (let [n (ident (first (second (node k))))]
+          (when (seen n) (binding [*pos* (or (pos-of k) *pos*)] (syntax-error (str "keyword argument repeated: " n))))
+          (recur (conj seen n) more))))
     (if-not star
       (do (doseq [a pos] (expr! u a))
           (doseq [[_ v] kwns] (expr! u v))
@@ -547,6 +555,10 @@
                 (emit! u :call-ex true))
             (emit! u :call-ex false)))))))
 
+(def ^:dynamic *fstring-raw*
+  "The enclosing f-string's or t-string's rawness: a format spec's text decoded by it (the tokenizer mode's raw)"
+  false)
+
 (defn- fstring-items
   "An f-string's or t-string's parts as items: {:lit VALUE} for a literal (decoded by the token's prefix, its doubled
   braces undone) or a replacement field's form"
@@ -560,7 +572,7 @@
   (let [[_ [v] fo _] (node p)
         conv (or (:conversion fo) (when (and (:debug fo) (not (:format-spec fo))) 'r))]
     (expr! u v)
-    (when-let [spec (:format-spec fo)] ((resolve 'arbace.python.compile/fstring-of-items!) u (fstring-items spec false)))
+    (when-let [spec (:format-spec fo)] ((resolve 'arbace.python.compile/fstring-of-items!) u (fstring-items spec *fstring-raw*)))
     (emit! u :format [(some-> conv str) (boolean (:format-spec fo))])))
 
 (defn fstring-of-items! [u items]
@@ -576,7 +588,8 @@
 
 (defn- fstring! [u x]
   (let [[_ [parts] o _] (node x)]
-    (fstring-of-items! u (fstring-items parts (str/includes? (str/lower-case (get o :prefix "f")) "r")))))
+    (let [raw (str/includes? (str/lower-case (get o :prefix "f")) "r")]
+      (binding [*fstring-raw* raw] (fstring-of-items! u (fstring-items parts raw))))))
 
 (defn- tstring-of-items! [u items]
   (let [n (atom 0)]
@@ -587,7 +600,7 @@
           (when-let [d (:debug io)] (load-const! u d) (swap! n inc))
           (expr! u v)
           (load-const! u text)
-          (when-let [spec (:format-spec io)] (fstring-of-items! u (fstring-items spec false)))
+          (when-let [spec (:format-spec io)] (fstring-of-items! u (fstring-items spec *fstring-raw*)))
           (emit! u :build-interpolation [(some-> (or (:conversion io) (when (and (:debug io) (not (:format-spec io))) 'r)) str)
                                          (boolean (:format-spec io))])
           (swap! n inc))))
@@ -595,7 +608,8 @@
 
 (defn- tstring! [u x]
   (let [[_ [parts] o _] (node x)]
-    (tstring-of-items! u (fstring-items parts (str/includes? (str/lower-case (get o :prefix "t")) "r")))))
+    (let [raw (str/includes? (str/lower-case (get o :prefix "t")) "r")]
+      (binding [*fstring-raw* raw] (tstring-of-items! u (fstring-items parts raw))))))
 
 (defn- str-concat! [u x]
   (let [parts (second (node x))
@@ -786,13 +800,16 @@
 (defn- expr*! [u x]
   (cond
     (symbol? x) (case x None (load-const! u nil) True (load-const! u true) False (load-const! u false)
-                  ... (load-const! u :ellipsis) (name-op! u (str x) :load))
+                  ... (load-const! u :ellipsis)
+                  ;; a constant, whatever builtins hold (optimize_format's neighbour in codegen: Name __debug__ in Load)
+                  __debug__ (load-const! u true)
+                  (name-op! u (str x) :load))
     (integer? x) (load-const! u x)
     (string? x) (load-const! u x)
     (seq? x)
     (let [[h p o _] (node x)]
       (case h
-        name (name-op! u (ident (first p)) :load)
+        name (if (= "__debug__" (ident (first p))) (load-const! u true) (name-op! u (ident (first p)) :load))
         const (expr! u (first p))
         int (load-const! u (digits->int (first p)))
         float (load-const! u (Double/parseDouble (str/replace (first p) "_" "")))
@@ -827,7 +844,9 @@
         list (seq-elements! u (first p) :list)
         tuple (seq-elements! u (first p) :tuple)
         (list-comp set-comp dict-comp generator-exp) (comprehension! u x)
-        await (do (when-not (#{:function :lambda :comprehension} (:kind @u)) (syntax-error "'await' outside function"))
+        await (do (when-not (or (#{:function :lambda :comprehension} (:kind @u))
+                                  (and sc/*top-level-await* (= :module (:kind @u))))
+                        (syntax-error "'await' outside function"))
                   (expr! u (first p)) (emit! u :get-awaitable nil) (load-const! u nil) (emit! u :yield-from nil))
         yield (do (when-not (#{:function :lambda} (:kind @u)) (syntax-error "'yield' outside function"))
                   (if (some? (first p)) (expr! u (first p)) (load-const! u nil)) (emit! u :yield-value nil))
@@ -876,7 +895,7 @@
               (emit! u :unpack-ex [i (- (count es) i 1)]))
             (emit! u :unpack-sequence (count es)))
           (doseq [e es] (store-target! u (if (starred? e) (first (second (node e))) e))))
-        starred (syntax-error "starred assignment target must be in a list or tuple")
+        starred (binding [*pos* (or (pos-of t) *pos*)] (syntax-error "starred assignment target must be in a list or tuple"))
         (throw (ex-info (str "compile: cannot assign to " h) {}))))))
 
 (defn- delete-target! [u t]
@@ -1073,15 +1092,11 @@
                       (when (and (seq? t) (= 'attribute (first t)) (= self-name (name-of (second t))))
                         (swap! names conj (ident (nth t 2)))))
                     (doseq [c (rest x)] (walk self-name c)))
-                (and (seq? x) (#{'class-def 'function-def 'async-function-def 'lambda} (first x))) nil
+                ;; a nested class keeps its own (compiler_maybe_add_static_attribute_to_class: the nearest class on the stack)
+                (and (seq? x) (= 'class-def (first x))) nil
                 (coll? x) (doseq [c x] (walk self-name c))
                 :else nil))]
-      (doseq [s body]
-        (when (and (seq? s) (#{'function-def 'async-function-def} (first s)))
-          (let [[_ [_ args fbody] _ _] (node s)
-                ao (nth (node args) 2)
-                first-arg (first (concat (:posonly ao) (:args ao)))]
-            (when first-arg (walk-fn (arg-name first-arg) fbody))))))
+      (walk-fn "self" body))
     (vec (sort @names))))
 
 (defn- class-def! [u x]
@@ -1157,7 +1172,8 @@
   (reduce (fn [seen tp]
             (let [[_ [nm] o _] (node tp)]
               (when (and seen (nil? (:default o)))
-                (syntax-error (str "non-default type parameter '" (ident nm) "' follows default type parameter")))
+                (binding [*pos* (or (pos-of tp) *pos*)]
+                  (syntax-error (str "non-default type parameter '" (ident nm) "' follows default type parameter"))))
               (type-param! u tp)
               (or seen (some? (:default o)))))
           false tps))
@@ -1511,7 +1527,8 @@
           (let [[_ [hb] ho _] (node hd)
                 t (:type ho)
                 nm (some-> (:name ho) ident)]
-            (when (and (nil? t) (< i (dec (count handlers)))) (syntax-error "default 'except:' must be last"))
+            (when (and (nil? t) (< i (dec (count handlers))))
+              (binding [*pos* (or (pos-of hd) *pos*)] (syntax-error "default 'except:' must be last")))
             ;; the clause's instructions at the except clause's line (LOC(handler))
             (swap! u assoc :line (line-of hd) :loc (pos-of hd))
             (let [next-j (when t
@@ -1818,10 +1835,55 @@
       match-or (pattern-names (first (first p)))
       nil)))
 
+(defn- py-repr-str
+  "repr() of a str: its quotes, backslash and the common escapes, a control character as \\xNN"
+  ^String [^String s]
+  (let [q (if (and (str/includes? s "'") (not (str/includes? s "\""))) \" \')
+        sb (StringBuilder.)]
+    (.append sb q)
+    (doseq [c s]
+      (cond (= c q) (do (.append sb \\) (.append sb c))
+            (= c \\) (.append sb "\\\\")
+            (= c \newline) (.append sb "\\n")
+            (= c \tab) (.append sb "\\t")
+            (= c \return) (.append sb "\\r")
+            (or (< (int c) 32) (= (int c) 127)) (.append sb (format "\\x%02x" (int c)))
+            :else (.append sb c)))
+    (.append sb q)
+    (str sb)))
+
+(defn- check-stores!
+  "codegen_pattern_helper_store_name's duplicates and codegen_pattern_or's alternatives, in codegen's order at each
+  pattern's location; stores: an atom of the names stored so far"
+  [x stores]
+  (binding [*pos* (or (pos-of x) *pos*)]
+    (let [[h p o _] (node x)
+          store! (fn [n] (when (contains? @stores n)
+                           (syntax-error (str "multiple assignments to name '" n "' in pattern")))
+                   (swap! stores conj n))]
+      (case h
+        match-as (do (when (some? (first p)) (check-stores! (first p) stores))
+                     (when (some? (second p)) (store! (ident (second p)))))
+        match-star (when (some? (first p)) (store! (ident (first p))))
+        match-sequence (doseq [q (first p)] (check-stores! q stores))
+        match-mapping (do (doseq [q (second p)] (check-stores! q stores))
+                          (when-let [r (:rest o)] (store! (ident r))))
+        match-class (doseq [q (concat (second p) (:kwd-patterns o))] (check-stores! q stores))
+        match-or (let [alts (first p)
+                       control (reduce (fn [control q]
+                                         (let [mine (atom #{})]
+                                           (check-stores! q mine)
+                                           (when (and control (not= control @mine))
+                                             (binding [*pos* (or (pos-of x) *pos*)]
+                                               (syntax-error "alternative patterns bind different names")))
+                                           (or control @mine)))
+                                       nil alts)]
+                   (doseq [n (sort control)] (store! n)))
+        nil))))
+
 (defn- check-pattern-names! [x]
-  (let [ns (pattern-names x)
-        dup (first (for [[k c] (frequencies ns) :when (> c 1)] k))]
-    (when dup (syntax-error (str "multiple assignments to name '" dup "' in pattern")))
+  (let []
+    (check-stores! x (atom #{}))
     (letfn [(ors [y] (let [[h p o _] (node y)]
                        (when (= h 'match-or)
                          (let [sets (map (comp set pattern-names) (first p))]
@@ -1872,7 +1934,7 @@
                          [(if (and (== v (Math/rint v)) (< (Math/abs v) 1e18)) (long v) [:float v]) (pp/expr k 0)])
           (= 'imag h) (let [v (Double/parseDouble (str/replace (let [t (second k)] (subs t 0 (dec (count t)))) "_" ""))]
                         [(if (zero? v) 0 [:complex v]) (pp/expr k 0)])
-          (string? k) [[:str k] (pp/expr k 0)]
+          (string? k) [[:str k] (py-repr-str k)]
           (= 'True k) [1 "True"] (= 'False k) [0 "False"] (= 'None k) [[:none] "None"]
           (= 'int h) (let [v (digits->int (second k))] [v (str v)])
           (and (= 'const h) (not (seq? (second k)))) (key-value (second k))
@@ -1881,7 +1943,8 @@
           (let [[v r] (key-value (nth k 2 nil))]
             (if (integer? v) [(- v) (str (- v))] [[:form k] (pp/expr k 0)]))
           (= 'attribute h) nil
-          (#{'str 'bytes} h) (let [v (string-token-value k)] [[:str v] (pp/expr k 0)])
+          (= 'str h) (let [v (string-token-value k)] [[:str v] (py-repr-str v)])
+          (= 'bytes h) (let [v (string-token-value k)] [[:str v] (pp/expr k 0)])
           :else [[:form k] (pp/expr k 0)])))
 
 (declare pattern!)
@@ -1962,10 +2025,12 @@
                         (do (emit! u :copy-dict-without-keys nil) (name-op! u rest-name :store) (emit! u :pop nil))
                         (do (emit! u :pop nil) (emit! u :pop nil))))
       match-class (let [[cls ps] p]
-                    (reduce (fn [seen a]
-                              (when (seen a) (syntax-error (str "attribute name repeated in class pattern: " a)))
+                    (reduce (fn [seen [a q]]
+                              (when (seen a)
+                                (binding [*pos* (or (pos-of q) *pos*)]
+                                  (syntax-error (str "attribute name repeated in class pattern: " a))))
                               (conj seen a))
-                            #{} (map ident (:kwd-attrs o)))
+                            #{} (map vector (map ident (:kwd-attrs o)) (:kwd-patterns o)))
                     (expr! u cls)
                     (load-const! u {:tuple (mapv ident (:kwd-attrs o))})
                     (emit! u :match-class (count ps))
@@ -2353,13 +2418,43 @@
 
 (declare compile-source*)
 
+(defn- finally-warnings!
+  "ast_preprocess.c's control flow in a finally block (PEP 765; astfold_stmt's BEFORE_RETURN and BEFORE_LOOP_EXIT): a
+  SyntaxWarning for each return out of a finally block, and each break and continue out of one. `ctx` the top of
+  its stack: :finally, :funcdef, :loop or nil; a class body pushes none"
+  [stmts ctx]
+  (doseq [s stmts :when (seq? s)]
+    (let [[h p o _] (node s)
+          walk (fn [ss c] (finally-warnings! ss c))
+          warn (fn [kw] (binding [*pos* (or (pos-of s) *pos*)] (warn! (str "'" kw "' in a 'finally' block"))))]
+      (case h
+        (function-def async-function-def) (walk (nth p 2) :funcdef)
+        class-def (walk (second p) ctx)
+        return (when (= ctx :finally) (warn "return"))
+        (break continue) (when (= ctx :finally) (warn (str h)))
+        (for async-for) (do (walk (nth p 2) :loop) (walk (:else o) ctx))
+        (while if) (let [loop? (= h 'while)] (walk (second p) (if loop? :loop ctx)) (walk (:else o) ctx))
+        (with async-with) (walk (second p) ctx)
+        match (doseq [c (second p)] (walk (second (second (node c))) ctx))
+        (try try-star) (do (walk (first p) ctx)
+                           (doseq [hd (second p)] (walk (first (second (node hd))) ctx))
+                           (walk (:else o) ctx)
+                           (walk (:finally o) :finally))
+        nil))))
+
 (defn compile-source
   "compile()'s modes over a module's forms: :exec the module; :eval a module of one expression statement, its value
   returned (an expression's code object); :single the statements with each expression statement's value displayed
   (print-expr, the REPL's)"
   [module mode]
-  (binding [*warnings* (atom [])]
-    (let [code (compile-source* module mode)]
+  (binding [*warnings* (atom []) *disable-warning* (atom 0)]
+    (finally-warnings! (second module) nil)
+    (let [code (try (compile-source* module mode)
+                    ;; the warnings made before a SyntaxError are emitted before it
+                    (catch arbace.lang.ExceptionInfo e
+                      (if (and (seq @*warnings*) (= 'SyntaxError (:class (ex-data e))))
+                        (throw (ex-info (.getMessage e) (assoc (ex-data e) :warnings @*warnings*)))
+                        (throw e))))]
       (cond-> code (seq @*warnings*) (assoc :warnings @*warnings*)))))
 
 (defn- compile-source* [module mode]
@@ -2395,4 +2490,6 @@
         (stmts! u (if (docstring body) (rest body) body))
         (class-annotations! u ph)
         (no-loc! u #(do (load-const! u nil) (emit! u :return nil)))
+        ;; top-level await: the module's code a coroutine's (CO_COROUTINE)
+        (when (and sc/*top-level-await* (:coroutine @(:top t))) (swap! u update :flags conj :coroutine))
         (code-of u)))))

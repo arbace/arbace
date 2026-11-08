@@ -200,21 +200,29 @@
   (if-let [dump (get opts "--dump")]
     (slurp dump)
     (let [f (File. ^String (get opts "--file"))]
-      ((requiring-resolve 'arbace.repr.python.native/read-dump)
-       (java.nio.file.Files/readAllBytes (.toPath f)) (.getName f) true true))))
+      (with-bindings {(requiring-resolve 'arbace.repr.python.lex/*file-input*) (not= "__pyi_c.py" (.getName f))}
+        ((requiring-resolve 'arbace.repr.python.native/read-dump)
+         (java.nio.file.Files/readAllBytes (.toPath f)) (.getName f) true true)))))
 
 (defn- do-run [opts]
-  (let [d (cv/convert (run-dump opts))
-        ;; the main module's SyntaxError as the compiler's answer (queue 223): the runtime raises it and gives it to
-        ;; sys.excepthook (traceback's display: the location, the caret, a keyword's typo), as CPython reports it
+  (let [;; the main module's SyntaxError as the compiler's answer (queue 223): the runtime raises it and gives it to
+        ;; sys.excepthook (traceback's display: the location, the caret, a keyword's typo), as CPython reports it;
+        ;; the reader's warnings and the compiler's before it (queue 228)
         _ (require 'arbace.python.run)
         answer (resolve 'arbace.python.run/error-answer)
         file (let [f (get opts "--file")] (if (= "__pyi_c.py" (.getName (File. ^String f))) "<string>" f))
-        text (if (cv/error-form? d)
-               (answer d nil file)
-               (try (ir-text (pc/compile-module d))
-                    (catch Throwable e
-                      (if (= 'SyntaxError (:class (ex-data e))) (answer nil e file) (throw e)))))]
+        text ((resolve 'arbace.python.run/main-answer)
+              ;; a coding spec the host has no charset for: the runtime decodes by Python's codec and compiles (queue 228)
+              #(try (cv/convert (run-dump opts))
+                    (catch arbace.lang.ExceptionInfo e (if (= :charset (:class (ex-data e))) :charset (throw e))))
+              (fn [d]
+                (cond
+                  (= d :charset) "charset"
+                  (cv/error-form? d) (answer d nil file)
+                  :else
+                  (try (ir-text (pc/compile-source d :exec))
+                       (catch Throwable e
+                         (if (= 'SyntaxError (:class (ex-data e))) (answer nil e file) (throw e)))))))]
     ;; PY5e: the runtime's compiler (imports, exec, eval) and sys.argv, sys.path (arbace.python.run)
     ((resolve 'arbace.python.run/install!) (cons (get opts "--argv0" (get opts "--file")) (get opts :argv))
      (concat (remove nil? [(.getParent (File. ^String (get opts "--file"))) (get opts "--lib")]) (site-dirs opts)))

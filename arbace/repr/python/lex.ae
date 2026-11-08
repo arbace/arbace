@@ -184,6 +184,33 @@
 
 (defn- syntax-error ^long [^Lx lx ^String msg] (syntax-error-range lx msg -1 -1))
 
+(def ^:dynamic *file-input*
+  "True while reading a file as the main module's tokenizer does (file_tokenizer.c), not a string"
+  false)
+
+(def ^:dynamic *warnings*
+  "The reader's warnings, an atom of {:category :msg :lineno :error} in the order made, the warning's arguments and the
+  error it becomes under an \"error\" filter ([CLASS MSG L O EL EO TEXT]); nil: none kept (a second reading of the same
+  text). PyErr_WarnExplicitObject's runtime is pyi's: the host's reader records them, go/arbace/py emits them in
+  order (arbace.repr.python.astjson/warnings-prefix)"
+  nil)
+
+(defn add-warning!
+  "A reader's warning (queue 228): `error` as above"
+  [category ^String msg lineno error]
+  (when *warnings* (swap! *warnings* conj {:category category :msg msg :lineno lineno :error error})))
+
+(defl parser-warn [^String msg ^String error-msg]
+  ;; _PyTokenizer_parser_warn and _PyTokenizer_warn_invalid_escape_sequence: the warning at tok->lineno; the
+  ;; _PyTokenizer_syntaxerror it becomes under an "error" filter, read without leaving the lexer in error
+  (when *warnings*
+    (let [^objects box (.-box lx) saved (aget box 0) done (g :done)]
+      (syntax-error-range lx error-msg -1 -1)
+      (let [e (vec (aget box 0))]
+        (aset box 0 saved)
+        (s! :done done)
+        (add-warning! "SyntaxWarning" msg (g :lineno) e)))))
+
 (defl indent-error ^long []
   (s! :done E_TABSPACE)
   (s! :cur (g :inp))
@@ -333,7 +360,10 @@
               110 (lookahead lx "ot")
               false)]
       (cond
-        r (do (backup lx c) (nextc lx) true) ; a SyntaxWarning, "invalid %s literal": warnings are not errors here
+        r (do (backup lx c)
+              (let [m (str "invalid " kind " literal")] (parser-warn lx m m))
+              (nextc lx)
+              true)
         (and (>= c 0) (< c 128) (ident-char? c)) (do (backup lx c) (syntax-error lx (str "invalid " kind " literal")) false)
         :else true))))
 
@@ -383,7 +413,10 @@
       (do (s! :done E_LINECONT) -1)
       (let [c (nextc lx)]
         (if (== c -1)
-          (do (s! :done E_EOF) (s! :cur (g :inp)) -1)
+          (do (s! :done E_EOF) (s! :cur (g :inp))
+              ;; tok_underflow_file empties its buffer before reading, outside a token: at the end of a file cur is buf
+              (when (and *file-input* (< (g :start) 0)) (s! :buf (g :inp)))
+              -1)
           (do (backup lx c) c))))))
 
 (defl prefix-error [saw-b saw-r saw-u saw-f saw-t]
@@ -920,7 +953,11 @@
                         (== c 92)
                         (let [peek (nextc lx) peek (if (== peek 13) (nextc lx) peek)]
                           (if (or (== peek 123) (== peek 125))
-                            (do (backup lx peek) (recur 0 unicode-escape))
+                            (do (when (zero? (cm :raw))
+                                  (let [ch (char peek)]
+                                    (parser-warn lx (str "\"\\" ch "\" is an invalid escape sequence. Such sequences will not work in the future. Did you mean \"\\\\" ch "\"? A raw string is also an option.")
+                                                 (str "\"\\" ch "\" is an invalid escape sequence. Did you mean \"\\\\" ch "\"? A raw string is also an option."))))
+                                (backup lx peek) (recur 0 unicode-escape))
                             (if (and (zero? (cm :raw)) (== peek 78))
                               (let [p2 (nextc lx)]
                                 (if (== p2 123) (recur 0 true) (do (backup lx p2) (recur 0 unicode-escape))))

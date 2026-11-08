@@ -45,7 +45,7 @@
     (throw (ex-info "null bytes" {:python-error ["SyntaxError" "source code string cannot contain null bytes" nil nil nil nil nil]})))
   (let [t (-> source (str/replace "\r\n" "\n") (str/replace "\r" "\n"))
         t (if (and (= mode :exec) (seq t) (not (str/ends-with? t "\n"))) (str t "\n") t)
-        p (pk/set-feature-version (pk/parser t ps/keywords ps/soft-keywords (:type-comments opts) (= mode :single)) (long (or (:feature opts) -1)))
+        p (pk/set-feature-version (pk/parser t ps/keywords ps/soft-keywords (:type-comments opts) (contains? #{:single :eval} mode)) (long (or (:feature opts) -1)))
         p (if (= mode :single) (pk/set-single p (:dont-imply-dedent opts)) p)
         rule (case mode :exec ps/r-file :eval ps/r-eval :single ps/r-interactive :func_type ps/r-func_type)
         tree (pk/run-parser p rule {:incomplete (:incomplete opts) :single (= mode :single)})]
@@ -293,7 +293,21 @@
           (and (== c 92) (in? (ch s (inc k)) "\r\n")) (recur (+ k 2))
           :else k)))))
 
-(defn- nocomment [^String s] (str/replace s #"#[^\r\n]*" ""))
+(defn- nocomment
+  "set_ftstring_expr's comments removed from a debug expression's text (lexer.c): a quote opens a string to its own
+  character, a backslash takes the next character with it"
+  ^String [^String s]
+  (let [n (.length s) sb (StringBuilder.)]
+    (loop [i 0 q -1]
+      (when (< i n)
+        (let [c (long (int (.charAt s i)))]
+          (cond
+            (== c 92) (do (.append sb (char c)) (when (< (inc i) n) (.append sb (.charAt s (inc i)))) (recur (+ i 2) q))
+            (or (== c 34) (== c 39)) (do (.append sb (char c)) (recur (inc i) (long (cond (== q -1) c (== c q) -1 :else q))))
+            (and (== c 35) (== q -1)) (let [e (loop [k i] (if (and (< k n) (not= (int (.charAt s k)) 10)) (recur (inc k)) k))]
+                                       (recur (long e) q))
+            :else (do (.append sb (char c)) (recur (inc i) q))))))
+    (str sb)))
 
 (declare fbody)
 
@@ -304,7 +318,7 @@
         k (skip w ve ")")
         [k debug] (if (and (== (ch s k) 61) (not= (ch s (inc k)) 61))
                     (let [k2 (skip w (inc k) nil)]
-                      [k2 (str (nocomment (sub s (inc fs) vs)) (sub s vs ve) (nocomment (sub s ve k2)))])
+                      [k2 (nocomment (sub s (inc fs) k2))])
                     [k nil])
         [k conv] (if (== (ch s k) 33)
                    (let [c (sub s (inc k) (+ k 2))
@@ -653,7 +667,15 @@
   TEXT]}"
   [^bytes bs]
   (if (some #(zero? (long %)) bs)
-    {:error ["SyntaxError" "source code string cannot contain null bytes" nil nil nil nil nil]}
+    (if lex/*file-input*
+      ;; tok_nextc on the first line holding one (file_tokenizer.c): the line up to it, the column 0
+      (let [s (String. bs "ISO-8859-1")
+            z (.indexOf s (int 0))
+            before (subs s 0 z)
+            line (inc (count (filter #(= % \newline) before)))
+            text (subs before (inc (.lastIndexOf before "\n")))]
+        {:error ["SyntaxError" "source code cannot contain null bytes" line 0 line 0 text]})
+      {:error ["SyntaxError" "source code string cannot contain null bytes" nil nil nil nil nil]})
     (let [tr (translate-newlines bs 0)
           n (alength tr)
           bom (and (>= n 3) (== (aget tr 0) (unchecked-byte 0xEF)) (== (aget tr 1) (unchecked-byte 0xBB)) (== (aget tr 2) (unchecked-byte 0xBF)))
@@ -709,7 +731,8 @@
         (try
           (let [tree (parse-text stext false)
                 tc-tree (if (re-find #"#[ \t]*type[ \t]*:" stext)
-                          (try (parse-text stext true) (catch arbace.lang.ExceptionInfo e (if (:python-error (ex-data e)) :rejected (throw e))))
+                          (binding [lex/*warnings* nil]
+                            (try (parse-text stext true) (catch arbace.lang.ExceptionInfo e (if (:python-error (ex-data e)) :rejected (throw e)))))
                           tree)
                 extra (cond-> []
                         (= tc-tree :rejected) (conj [":type-comments" ":rejected"])
@@ -718,7 +741,7 @@
                         (and full (not= encoding "utf-8")) (conj [":encoding" (qstr encoding)])
                         (and full (>= (alength bs) 3) (== (aget bs 0) (unchecked-byte 0xEF)) (== (aget bs 1) (unchecked-byte 0xBB))
                              (== (aget bs 2) (unchecked-byte 0xBF))) (conj [":bom" "true"])
-                        full (conj [":tokens" (tokens-text text)]))]
+                        full (conj [":tokens" (binding [lex/*warnings* nil] (tokens-text text))]))]
             (str (module-text text tree (when (map? tc-tree) tc-tree) rel (boolean full) extra) "\n"))
           (catch arbace.lang.ExceptionInfo e
             (if-let [pe (:python-error (ex-data e))]

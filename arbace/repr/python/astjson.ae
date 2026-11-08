@@ -166,6 +166,23 @@
 (def ^:const PyCF_ALLOW_INCOMPLETE_INPUT 0x4000)
 (def ^:const PyCF_DONT_IMPLY_DEDENT 0x200)
 
+(defn- prefix-field
+  "A field of the prefix: its own separators (an invalid escape's character can be one) as \\x04 and a letter"
+  ^String [^String s]
+  (-> s (str/replace "\u0004" "\u0004d") (str/replace "\u0001" "\u0004a") (str/replace "\u0002" "\u0004b") (str/replace "\u0003" "\u0004c")))
+
+(defn warnings-prefix
+  "The reader's warnings ahead of a compiler's answer (queue 228; go/arbace/py's takeWarnings), for each of `ws`
+  (arbace.repr.python.lex/*warnings*) \\x01 and, joined by \\x02, its category, message, line and the error it becomes
+  (class, message, the location's four parts, text), then \\x03; \"\" when there are none"
+  ^String [ws]
+  (if (empty? ws)
+    ""
+    (str (apply str (for [{:keys [category msg lineno error]} ws
+                          :let [[cls emsg l o el eo text] error]]
+                      (str "\u0001" (str/join "\u0002" (map #(if (nil? %) "" (prefix-field (str %))) [category msg lineno cls emsg l o el eo text])))))
+         "\u0003")))
+
 (defn- error-answer
   "The compiler's answer for a parser's SyntaxError (pyi's import.go's syntaxError): \"CLASS: MSG\", then after NULs
   the location's four parts, the kind (p; m when `metadata`, the parser's [LINENO COL_OFFSET], follows: the exception's
@@ -183,18 +200,21 @@
         flags (Long/parseLong (or flags "0"))
         feature (Long/parseLong (or feature "-1"))]
     (try
-      (let [tree (nv/parse-source source (keyword (or m "exec"))
-                                  {:type-comments (pos? (bit-and flags PyCF_TYPE_COMMENTS))
-                                   :incomplete (pos? (bit-and flags PyCF_ALLOW_INCOMPLETE_INPUT))
-                                   :dont-imply-dedent (pos? (bit-and flags PyCF_DONT_IMPLY_DEDENT))
-                                   :feature feature})]
-        (str "AST:" (tree-json tree)))
-      (catch arbace.lang.ExceptionInfo e
-        (if-let [pe (:python-error (ex-data e))]
-          (if (#{"SyntaxError" "IndentationError" "TabError" "IncompleteInputError"} (first pe))
-            (error-answer pe (:metadata (ex-data e)))
-            (str (first pe) ": " (second pe)))
-          (throw e))))))
+      (binding [lex/*warnings* (atom [])]
+        (try
+          (let [tree (nv/parse-source source (keyword (or m "exec"))
+                                      {:type-comments (pos? (bit-and flags PyCF_TYPE_COMMENTS))
+                                       :incomplete (pos? (bit-and flags PyCF_ALLOW_INCOMPLETE_INPUT))
+                                       :dont-imply-dedent (pos? (bit-and flags PyCF_DONT_IMPLY_DEDENT))
+                                       :feature feature})]
+            (str (warnings-prefix @lex/*warnings*) "AST:" (tree-json tree)))
+          (catch arbace.lang.ExceptionInfo e
+            (if-let [pe (:python-error (ex-data e))]
+              (str (warnings-prefix @lex/*warnings*)
+                   (if (#{"SyntaxError" "IndentationError" "TabError" "IncompleteInputError"} (first pe))
+                     (error-answer pe (:metadata (ex-data e)))
+                     (str (first pe) ": " (second pe))))
+              (throw e))))))))
 
 ;; ---- _tokenize's TokenizerIter (go/arbace/py's builtins_tokenize.go): the compiler's mode "tokenize:EXTRA"
 
@@ -205,8 +225,9 @@
   stream; MODE \"tokenize:1\": extra tokens): \"TOK:\" and {\"t\": [[TYPE, STRING, SL, SC, EL, EC, LINE] ...],
   \"e\": null or [CLASS, MSG, L, O, EL, EO, TEXT]}"
   ^String [^String mode ^String file ^String source]
-  (let [{:keys [tokens error]} (lex/stream source (= mode "tokenize:1"))
-        sb (StringBuilder. "TOK:{\"t\":[")]
+  (let [ws (atom [])
+        {:keys [tokens error]} (binding [lex/*warnings* ws] (lex/stream source (= mode "tokenize:1")))
+        sb (StringBuilder. (str (warnings-prefix @ws) "TOK:{\"t\":["))]
     (doseq [[i [t s sl sc el ec line]] (map-indexed vector tokens)]
       (when (pos? i) (.append sb ","))
       (.append sb "[") (jnum sb t) (.append sb ",") (jstr sb s) (.append sb ",") (jnum sb sl) (.append sb ",") (jnum sb sc)
@@ -222,11 +243,27 @@
 
 (defn compile-answer
   "pyi's compiler hook's answers that the native reader gives (arbace.python.run's compile-source): the \"ast:\" and
-  \"tokenize:\" modes, nil for the others"
+  \"tokenize:\" modes, \"source-error\" (SOURCE a source's bytes as Latin-1 characters: string_tokenizer.c's decoding
+  error as the compiler's answer, \"\" when it has none or the runtime's codecs must decide), nil for the others"
   [^String mode ^String file ^String source]
   (cond
+    (= mode "source-error")
+    (let [e (try (:error (nv/source-text (.getBytes source "ISO-8859-1")))
+                 (catch arbace.lang.ExceptionInfo x (if (:class (ex-data x)) nil (throw x))))]
+      (if e (error-answer e) ""))
     (str/starts-with? mode "ast:") (answer mode file source)
     (str/starts-with? mode "tokenize:") (tokenize-answer mode file source)))
+
+(defn- start-rule-error
+  "SOURCE parsed by the start rule of MODE: nil when it parses so, else the error as the compiler's answer"
+  ^String [^String source mode & [opts]]
+  (try (nv/parse-source source mode (or opts {})) nil
+       (catch arbace.lang.ExceptionInfo e
+         (let [pe (:python-error (ex-data e))]
+           (cond
+             (nil? pe) (throw e)
+             (#{"SyntaxError" "IndentationError" "TabError" "IncompleteInputError"} (first pe)) (error-answer pe (:metadata (ex-data e)))
+             :else nil)))))
 
 (defn single-error
   "compile()'s mode single as CPython parses it (Py_single_input, the start rule interactive: one statement, then
@@ -234,19 +271,26 @@
   answer (\"multiple statements found while compiling a single statement\" at the statement's NEWLINE, or the parser's
   error where the statement ends, e.g. a compound statement followed by another)"
   ^String [^String source]
-  (try (nv/parse-source source :single {}) nil
-       (catch arbace.lang.ExceptionInfo e
-         (let [pe (:python-error (ex-data e))]
-           (cond
-             (nil? pe) (throw e)
-             (#{"SyntaxError" "IndentationError" "TabError"} (first pe)) (error-answer pe (:metadata (ex-data e)))
-             :else nil)))))
+  (start-rule-error source :single))
+
+(defn flags-error
+  "compile()'s parse under PyCF_ALLOW_INCOMPLETE_INPUT and PyCF_DONT_IMPLY_DEDENT (queue 228: codeop's; pegen.c's
+  _is_end_of_source, IncompleteInputError): nil, or the error as the compiler's answer"
+  ^String [^String source mode incomplete dedent]
+  (start-rule-error source mode {:incomplete incomplete :dont-imply-dedent dedent}))
+
+(defn eval-error
+  "compile()'s mode eval as CPython parses it (Py_eval_input, the start rule eval; queue 228): nil, or the error as the
+  compiler's answer"
+  ^String [^String source]
+  (start-rule-error source :eval))
 
 (defn read-forms
   "The compiler's reading of a source (str): the module's forms in mode :full, or its (python/error ...), as
   tools/pydump/pydump.py tree --full and arbace.repr.python.convert give them (the error with its :metadata)"
   [^String source]
-  (cv/convert (nv/read-dump (.getBytes source "UTF-8") "src.py" true true)))
+  ;; translate_newlines before all: a lone carriage return is a line's end for the positions too
+  (cv/convert (nv/read-dump (.getBytes (-> source (str/replace "\r\n" "\n") (str/replace "\r" "\n")) "UTF-8") "src.py" true true)))
 
 ;; ---- the check's driver: bin/repr-python ast-check
 
