@@ -44,6 +44,14 @@
 #                               arbace.cpp.codegen into LLVM forms (OUT/forms.ae, printed as OUT/gen.ll), lowered (OUT/gen.c),
 #                               gcc -O0 with the lowered runtime (--runtime DIR, default .tmp/cppi/runtime) and run: OUT/gen.out,
 #                               OUT/gen.status
+#   bin/cppi runtime-swap REF OURS CGWORK OUT [--units PREFIX] [--per-unit REGEX]
+#                               CP240 (c), CODEGEN.md G5c: the runtime by our route proved unit by unit: REF a runtime built by clang's
+#                               IR (runtime-build with CPPI_GCC=1), OURS one built with CPPI_RUNTIME_ROUTE=ours|auto, CGWORK a codegen-check's
+#                               work directory (its programs' lowered C, ref.c by clang's IR and gen.c by ours); each program linked
+#                               with REF's archive is the baseline, then for each unit of OURS made by our route (beginning with PREFIX,
+#                               default libsupc++/) the archive with that unit alone replaced by ours (the programs whose name matches
+#                               REGEX, default the exceptions', RTTI's, guards' and allocations' samples), and last with all of them: every
+#                               program's status and stdout the baseline's (OUT/results.tsv, OUT/summary.txt; exit 1 on a difference)
 #   bin/cppi codegen-check [LIST] WORK [--runtime DIR]
 #                               each sample of test/cpp/codegen (or LIST: NAME<tab>PATH lines) by both routes: clang's IR
 #                               (clang++ -O0 -S -emit-llvm) lowered and run, and the code generator's forms lowered and run with
@@ -625,6 +633,61 @@ cg_native() { # cg_native DIR: the code generator's IR built by clang++ (LLVM's 
 }
 export -f cg_run cg_native
 
+runtime_swap() { # CP240 (c): see the usage
+  local ref=$1 ours=$2 cg=$3 out=$4 pre=libsupc++/ per='^(rt-|eh-|rtti|virtual|covariant|dtors|ctor|newdelete|staticlocal|init-priority|fn-try|mi-|exitstatus|temp|hdr-)' u n k d st
+  shift 4
+  while [ $# -gt 0 ]; do case $1 in --units) pre=$2; shift 2 ;; --per-unit) per=$2; shift 2 ;; *) echo "runtime-swap: unknown option $1" >&2; exit 2 ;; esac; done
+  for d in "$ref" "$ours"; do [ -f "$d/rt.o" ] && [ -f "$d/units.tsv" ] || { echo "runtime-swap: $d is no runtime built with gcc (CPPI_GCC=1 bin/cppi runtime-build)" >&2; exit 2; }; done
+  rm -rf "$out"; mkdir -p "$out/progs" "$out/libs"; out=$(cd "$out" && pwd); ref=$(cd "$ref" && pwd); ours=$(cd "$ours" && pwd)
+  # the programs: each sample's lowered C by both routes, compiled once
+  for d in "$cg"/files/*/; do
+    n=$(basename "$d")
+    for k in ref gen; do
+      [ -f "$d/$k.c" ] || continue
+      # shellcheck disable=SC2086
+      gcc $GCC_FLAGS -c "$d/$k.c" -o "$out/progs/$n.$k.o" 2> "$out/progs/$n.$k.log" || rm -f "$out/progs/$n.$k.o"
+    done
+  done
+  cut -f1 "$ref/units.tsv" | grep -v '^exp/' > "$out/units.txt"
+  awk -v p="$pre" 'index($0, p) == 1' "$out/units.txt" | while read -r u; do
+    if [ "$(cat "$ours/units/$u/route" 2>"$TMPDIR/cppi-swap.err")" = ours ] && [ -f "$ours/units/$u/lowered.o" ]; then echo "$u"; fi
+  done > "$out/ours.txt"
+  lib() { # lib NAME UNIT...: REF's archive with the UNITs' objects OURS's
+    local nm=$1 x; shift
+    while read -r x; do
+      if printf '%s\n' "$@" | grep -F -x -q -e "$x" -e ALL && grep -F -x -q "$x" "$out/ours.txt"; then echo "$ours/units/$x/lowered.o"
+      elif [ -f "$ref/units/$x/lowered.o" ]; then echo "$ref/units/$x/lowered.o"; fi
+    done < "$out/units.txt" | xargs ar rcs "$out/libs/$nm.a"
+  }
+  runall() { # runall NAME [REGEX]: every program (whose name matches REGEX) linked with libs/NAME.a and run, NAME.tsv: program status stdout-digest
+    local nm=$1 rx=${2:-.} o p
+    for o in "$out"/progs/*.o; do
+      p=$(basename "$o" .o)
+      printf '%s' "$p" | grep -q -E "$rx" || continue
+      if gcc "$o" "$ours/rt.o" -Wl,--start-group "$out/libs/$nm.a" -Wl,--end-group -lm -latomic -o "$out/x.exe" 2> "$out/link.log"; then
+        ( cd "$out" && ulimit -f 1024 && timeout "${CPPI_RUN_TIMEOUT:-60}" ./x.exe 2> run.err | cap run.out; echo "${PIPESTATUS[0]}" > run.status ) || true
+        st=$(cat "$out/run.status")
+        printf '%s\t%s\t%s\n' "$p" "$st" "$(sha256sum < "$out/run.out" | cut -c1-16)"
+      else printf '%s\tlink\t-\n' "$p"; fi
+    done > "$out/$nm.tsv"; rm -f "$out/x.exe"
+  }
+  # (rt.o, the pending-flag layer, is the same text in both: arbace/cpp/rt/eh.c.ae)
+  cmp -s "$ref/rt.c" "$ours/rt.c" || { echo "runtime-swap: the two runtimes' rt.c differ" >&2; exit 2; }
+  lib base; runall base; grep -E "^($per)" "$out/base.tsv" > "$out/base-per.tsv" || true
+  : > "$out/results.tsv"
+  while read -r u; do
+    k=$(printf '%s' "$u" | tr '/+' '__'); lib "$k" "$u"; runall "$k" "$per"
+    printf '%s\t%s\n' "$u" "$(if cmp -s "$out/base-per.tsv" "$out/$k.tsv"; then echo same; else diff "$out/base-per.tsv" "$out/$k.tsv" | grep -c '^>'; fi)" >> "$out/results.tsv"
+    rm -f "$out/libs/$k.a"
+  done < "$out/ours.txt"
+  lib all ALL; runall all
+  printf 'ALL\t%s\n' "$(if cmp -s "$out/base.tsv" "$out/all.tsv"; then echo same; else diff "$out/base.tsv" "$out/all.tsv" | grep -c '^>'; fi)" >> "$out/results.tsv"
+  { echo "runtime-swap: $(wc -l < "$out/ours.txt") units by our route, $(ls "$out"/progs/*.o | wc -l) programs ($(awk -F'\t' '$2 == 0' "$out/base.tsv" | wc -l) exit 0 on the baseline)"
+    echo "  units whose swap changes no run of the $(wc -l < "$out/base-per.tsv") programs matching $per: $(grep -v '^ALL' "$out/results.tsv" | grep -c -P '\tsame$'); all units at once over every program: $(sed -n 's/^ALL\t//p' "$out/results.tsv")"
+    grep -v -P '\tsame$' "$out/results.tsv" | sed 's/^/  differs: /'; } | tee "$out/summary.txt"
+  ! grep -q -v -P '\tsame$' "$out/results.tsv"
+}
+
 codegen_one() {
   local f=$1 out=$2 rtdir=$root/.tmp/cppi/runtime
   shift 2
@@ -819,5 +882,6 @@ case ${1:-} in
                    list_essential > "$TMPDIR/cppi-essential.list"; lower_check "$TMPDIR/cppi-essential.list" "$w" "$@" ;;
   codegen) shift; codegen_one "$@" ;;
   codegen-check) shift; codegen_check "$@" ;;
+  runtime-swap) shift; runtime_swap "$@" ;;
   *) sed -n '2,/^set -e/p' "$0" | sed '$d;s/^# \{0,1\}//' >&2; exit 2 ;;
 esac

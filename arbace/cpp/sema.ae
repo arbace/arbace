@@ -889,7 +889,12 @@
                                          ;; a base dependent in a template's pattern (CODEGEN.md G3: [temp.dep]/4)
                                          (contains? (:dep-bases (abi/cls id)) bi) (assoc :dependent true))))))
       ;; alignas on the class ([dcl.align]): its alignment at least the strictest one written (a type's or a constant's)
-      (when-let [as (seq (keep :_arg (filter #(= "AlignedAttr" (:kind %)) (:inner n))))]
+      ;; (and GNU's aligned, G5c: unwind.h's `struct _Unwind_Exception { ... } __attribute__((__aligned__))`, without an
+      ;; argument the target's largest alignment, 16 on x86-64, as GCC documents it and clang's TargetInfo's
+      ;; getDefaultAlignForAttributeAligned)
+      (when-let [as (seq (concat (keep :_arg (filter #(= "AlignedAttr" (:kind %)) (:inner n)))
+                                 (for [a (:inner n) :when (and (= "NativeAttr" (:kind a)) (#{"aligned" "__aligned__"} (:_gnu a)))]
+                                   (let [x (some-> (:_arg a) str/trim)] (if (seq x) x "16")))))]
         (abi/update-cls! id assoc :align-attr
                          (apply max (for [a as]
                                       (long (or (parse-long (str/trim a))
@@ -2879,6 +2884,10 @@
 )
 ))
     "MemberExpr" (member-expr ctx n)
+    ;; a member of a type-dependent object, as the parser names it since cpp-90's tree (clang's CXXDependentScopeMemberExpr):
+    ;; in a specialization the object's type is known, the member looked up as a MemberExpr's (G5c: the templates'
+    ;; samples, hdr-iostream, failed on it)
+    "CXXDependentScopeMemberExpr" (member-expr ctx (assoc n :kind "MemberExpr" :name (or (:member n) (:name n))))
     ;; a member named in a template's pattern whose lookup clang left to the instantiation (f<T>() in a member)
     "UnresolvedMemberExpr" (if (seq (kids n))
                              (member-expr ctx (assoc n :name (or (get-in n [:referencedDecl :name]) (:name n))))
@@ -2944,6 +2953,12 @@
              :r {:op :typeid :t (abi/unq (:ty e)) :ty ti :cat :lv} :ty ti :cat :lv}))))
     "CXXDynamicCastExpr"
     (let [t (resolve-type (:scope ctx) (get-in n [:type :qualType]))
+          ;; (a cast to a reference: the tree's type is the referred type, its value category the reference's, as clang's
+          ;; dump writes it and the other casts read it)
+          t (cond (abi/ref? t) t
+                  (#{:xvalue "xvalue"} (:valueCategory n)) (abi/rref t)
+                  (= "lvalue" (:valueCategory n)) (abi/lref t)
+                  :else t)
           e (analyze ctx (first (kids n)))
           ref (abi/ref? t)
           src (if ref e (rv e))
@@ -3229,9 +3244,10 @@
   (let [cid (:cls f)
         c (abi/cls cid)
         given (into {} (for [i (:inits f)]
-                         (let [k (if-let [b (:baseInit i)]
+                         (let [k (if-let [b (or (:baseInit i) (:delegatingInit i))]
                                    ;; (the class's own name: a delegating constructor, the injected-class-name of a
-                                   ;; template's specialization written without its arguments, G5: istreambuf_iterator)
+                                   ;; template's specialization written without its arguments, G5: istreambuf_iterator; the
+                                   ;; parser's :delegatingInit since cpp-90's tree, G5c)
                                    [:base (if (= (str/trim (str (:qualType b))) (:name c)) cid (:id (resolve-type (:scope ctx) (:qualType b))))]
                                    [:field (get-in i [:anyInit :name])])
                                [x] (kids i)]
