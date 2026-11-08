@@ -1061,3 +1061,36 @@ a difference far from its cause; built MIR is the builder's own output), running
 links through rustc as the linker driver, which the stubs forbid). `bin/crops-score` Rust 75.0 / 95.8 / 80.0 before and after: under
 RES54 (a) eval and AOT stay 0.5 while std's records are consumed, until RF12. Proposed: RFP22 (the order after the slice), RFP23 (the run's
 record as packs), RFP24 (no gate step yet).
+
+## 2026-11-08: F23, Java's `:security` class sorted by what is missing, the JCA's tail and SASL (branch `java-security`, write-ahead)
+
+The brief: raise Java's completeness (72.9) through its largest deferred class, `:security` (359 interpreted, 234 compiled in
+`test/java/check-{interp,compiled}.edn`). Those records predate night 7's conversion of F1-F4 (b6a6093af), so the class's 361
+tests were first run again, read and interp only, on night 8's gate executable (`.tmp/gate-exe/ad3066cf41ea6faf1566`), two at
+a time, saved, not recorded: 261 pass already (the night's rerun records them); the other 100 sorted by the cause their stderr
+names (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F23 (write-ahead)", its table). The two largest were defects of F1 as
+converted, not missing classes: (1) j2g's analysis refused `com.sun.crypto.provider.GaloisCounterMode` (the executable's
+`report.edn`: "Unable to resolve symbol: NIO_ACCESS"): F1's variant cut the `JavaNioAccess` field but not its two users, so every
+AES/GCM cipher was outside the closed world (30 tests); (2) `ChaCha20Cipher.asLongView`, a byte-array view handle in
+`ByteOrder.nativeOrder()`, was not one of j2g's constant handles (J2G-SPEC §8.5 took only BIG_ENDIAN and LITTLE_ENDIAN), so
+ChaCha20's xor threw; with both, SunJSSE's TLS 1.3 suites fail (17 tests). Fixed: the variant replaces
+`GCMEngine.overlapDetection(ByteBuffer, ByteBuffer)` and `GCMDecrypt.doFinal(ByteBuffer, ByteBuffer)` with jdk26u's methods
+(jdk26u `baf63fb`, `src/java.base/share/classes/com/sun/crypto/provider/GaloisCounterMode.java`, as repr/java converts it) but
+their direct-buffer branches (copied; zeroed through put), and `arbace.j2g.vh/byte-order-arg` reads `nativeOrder()` as "LE" (both
+Go targets are little-endian). Added to the closure (`test/jrt/jrt_sources.ae`): `jca-tail-sources`, three classes the
+providers name by string (`sun.security.util.GCMParameters`, SunJCE's AlgorithmParameters.GCM, constructed by jrt's
+JceServices; `sun.security.provider.CtrDrbg`, DRBG's CTR mechanism; `MD4`, its own provider's service in JrtServices), and
+`sasl-sources` (JCS133 (a)'s SASL, after F1 and F4): jdk26u's `src/java.security.sasl/share/classes` (javax.security.sasl and
+com.sun.security.sasl's CRAM-MD5, DIGEST-MD5, EXTERNAL, PLAIN, NTLM: 28 files), `src/java.base/share/classes/com/sun/security/ntlm`
+(5) and `src/jdk.security.auth/share/classes/com/sun/security/auth/LdapPrincipal.java`, SunSASL named by a third ProviderConfig
+variant file (`ProviderConfigSasl.ae`), j2g's renames `Sasl_Provider`, `Digest_FactoryImpl`, `Ntlm_FactoryImpl` (the only Go name
+collisions of the 43 new classes against the executable's 23,035). Light checks: the joint javac check 2,314 files, 0 errors;
+`bin/repr-java read-jdk --check` of the new files, 0 errors, `--no-javac` identical; `bin/jrt test --arch amd64`'s `arbace/jrt` passes
+(jrt's Go unchanged); a smoke on today's executable reproduces the failures. Expected at the night's run: about 45-55 of the 60
+touched tests at interp, 35-45 compiled; `:security` from 359 to about 50 interpreted with the rerun. Alternatives considered:
+restoring `NIO_ACCESS` (JavaNioAccess and the direct buffers' addresses are outside the world by JCS151-JCS152: rejected), a
+ChaCha20Cipher variant with LITTLE_ENDIAN (it changes jdk26u's source where j2g's rule is the general fix: rejected), porting
+JNDI's LDAP provider and Kerberos in this slice (3 and 10 tests for 3 days each: proposed instead). Proposed: JCS230 (Kerberos's
+permissions, the rest by design), JCS231 (jar verification after F9's night), JCS232 (ProviderConfig's variants folded),
+JCS233 (`java.home` for the security files, with JCS140 (a)'s cacerts), JCS234 (JNDI's LDAP deferred), JCS235 (HashSet and the
+key specs extendable).

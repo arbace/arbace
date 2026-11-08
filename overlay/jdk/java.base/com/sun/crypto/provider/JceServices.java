@@ -11,7 +11,8 @@ import javax.crypto.KDFParameters;
  * nested ones, are package-private): every service class jdk26u's SunJCE.putEntries names, in its
  * order, but the KeyStore JCEKS (JceKeyStore: java.security.KeyStore is not in the Go build yet,
  * F2), for which newInstance answers null, as for a class it does not know. Generated from
- * jdk26u's SunJCE.java (baf63fb) by the F1 scratch script gensvc.py/genjava.py.
+ * jdk26u's SunJCE.java (baf63fb) by the F1 scratch script gensvc.py/genjava.py; since F23 also
+ * sun.security.util.GCMParameters, the one class SunJCE names outside its package.
  */
 public final class JceServices {
     private JceServices() {
@@ -388,6 +389,10 @@ public final class JceServices {
                 return new TlsKeyMaterialGenerator();
             case "com.sun.crypto.provider.TlsRsaPremasterSecretGenerator":
                 return new TlsRsaPremasterSecretGenerator();
+            // AlgorithmParameters.GCM, a class of sun.security.util (doc/classes/JAVA-DEFERRED-TRIAGE.md,
+            // "As built: F23"): F1's list left it out, so Cipher.getParameters of every GCM cipher failed
+            case "sun.security.util.GCMParameters":
+                return new sun.security.util.GCMParameters();
             default:
                 return null;
         }

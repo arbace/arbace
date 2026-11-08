@@ -792,6 +792,9 @@ providers' key classes named as the API's interfaces: `com/sun/crypto/provider/D
 `DHPrivateKey` ...), and `sun/security/provider/DSAKeyPairGenerator`, `DSAPrivateKey`,
 `DSAPublicKey` → `Sun_DSAKeyPairGenerator`, `Sun_DSAPrivateKey`, `Sun_DSAPublicKey`
 (java.security.interfaces' are `DSAKeyPairGenerator` ...).
+Since F23 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F23 (write-ahead)") SASL's: `com/sun/security/sasl/Provider` →
+`Sasl_Provider` (`java.security.Provider` is `Provider`), `com/sun/security/sasl/digest/FactoryImpl` and
+`com/sun/security/sasl/ntlm/FactoryImpl` → `Digest_FactoryImpl`, `Ntlm_FactoryImpl`.
 The check runs after translation (`arbace.j2g.checks`) over every Go package's package-level
 names and every type's method names, across j2g's generated files **and jrt's hand-written
 ones** (the stand-in files excepted, since replaced stand-ins are removed, §4.3); a collision is
@@ -2380,7 +2383,8 @@ j2g compiles them statically (`arbace.j2g.vh`):
   volatile one; a weak compare-and-set never fails spuriously. Java allows both.
 - **Views of byte arrays** (amendment SC1, accepted 2026-10-10). A constant handle may also be
   `MethodHandles.byteArrayViewVarHandle(int[].class or long[].class, ByteOrder.BIG_ENDIAN or
-  LITTLE_ENDIAN)`, with or without `.withInvokeExactBehavior()`: its plain `get` and `set` are
+  LITTLE_ENDIAN)` (or, since F23, `ByteOrder.nativeOrder()`, little-endian on both of the Go build's targets, amd64 and
+  arm64: `ChaCha20Cipher.asLongView`), with or without `.withInvokeExactBehavior()`: its plain `get` and `set` are
   jrt's `VhView{Get,Set}{Int,Long}{BE,LE}`, with the view's bounds check and message (the index
   below the array's length less the element's size less one, else
   `ArrayIndexOutOfBoundsException` with that reduced length); its other access modes are

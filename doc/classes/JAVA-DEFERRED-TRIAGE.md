@@ -2957,3 +2957,224 @@ wake channels and selectors; F10b's DatagramChannel then the asynchronous channe
 (`bin/jrt-convert check-javac` as a light essential gate step; the overlays' derivations as Arbace, `bin/jrt-convert derive --check`);
 **JCS167 (a)**: serialization ported (ObjectOutputStream, ObjectInputStream, ObjectStreamClass over jrt's reflection, j2g's SerialNew;
 clojure-cdr's staged port), its tests deferred again then regained, toward 90% strict.
+
+## As built: F23 (write-ahead): the `:security` class sorted again, the JCA's tail, SASL
+
+Branch `java-security` (from `next`, `7744e70b4`), 2026-11-08, by day under the light rules: the brief's "raise Java's
+completeness by taking on `:security`, its largest deferred class (359 interpreted, 234 compiled)". Nothing converted,
+translated or built; the night's commands below. F15 is the plan's `java.lang.invoke`, so this is F23, the next free number.
+
+**The class sorted by what is missing, measured, not scanned.** The records' 359 / 234 are from before night 7's conversion
+(b6a6093af: F1 the JCA, F4, F2, F3 converted into `jdk/forms`, every one of the class's first reasons, `ClassNotFoundException:
+javax.crypto.Cipher` 72, `KeyStore` 41, `KeyFactory` 24, ..., names a class that is in the world now); the whole-corpus rerun
+that records them is the Java night's. So the class's 361 tests (interp's 359 and compiled's 234, together) were run at the
+levels read and interp on the gate executable of night 8 (`.tmp/gate-exe/ad3066cf41ea6faf1566`, `next`'s world), two at a
+time, javac's tool `javac-5ad357331dbcd7cfb0fd` for the read (`REPR_JAVA_STALE_OK=1`), saved, not recorded (scratch
+`.tmp/sec/` of the worktree: `interp-now.tsv`, `groups.json`, the run directories with each test's stderr):
+**261 of 361 pass already**, the rest by the cause their stderr names:
+
+| cause | tests | what | where |
+|---|---:|---|---|
+| AES/GCM | 30 | `Cipher.getInstance("AES/GCM/NoPadding")`: "Cannot find any provider" / "No such algorithm", the services' class `GaloisCounterMode$AESGCM` "not in the closed world": j2g's analysis refused `GaloisCounterMode` and `GCMDecrypt` (the executable's `report.edn`, `:analysis-failures`: "Unable to resolve symbol: NIO_ACCESS (line 647)"), F1's variant having cut the field but not its two users, so every class of the file is a stub; and SunJCE's `AlgorithmParameters.GCM`, `sun.security.util.GCMParameters`, a class no list holds (`Cipher.getParameters`) | **F23** |
+| TLS | 17 | ChaCha20's `xor` and the AEAD tag compare: "VarHandle.get on a handle that is not a constant of its class": `ChaCha20Cipher.asLongView` is `byteArrayViewVarHandle(long[].class, ByteOrder.nativeOrder())`, and j2g's constant handles took only `BIG_ENDIAN`/`LITTLE_ENDIAN`; with GCM gone too, SunJSSE's TLS 1.3 suites fail (wrap's "internal_error", "No appropriate protocol", the peers waiting: the six timeouts) | **F23** |
+| SASL | 11 | `javax.security.sasl`, `com.sun.security.sasl` (JCS133 (a): "SASL deferred, after F1 and F4") | **F23** |
+| MD4 | 1 | `sun.security.provider.MD4` (DigestKAT; NTLM's digest) | **F23** |
+| Kerberos | 10 | `javax.security.auth.kerberos`'s permissions, principal and keys, `sun.security.krb5` | JCS133 (a) by design; JCS230 |
+| serialization | 6 | KeyStore's JCEKS and `SignedObject`, `SealedObject` through the object streams | JCS167 (a)'s port (`java-serial`) |
+| jar signing | 5 | signed jars read as unsigned (`ScanSignedJar` x2, `TurkCert`, `SignedJarFileGetInputStream`, `TestIndexedJarWithBadSignature`) | JCS141 (b), F2b; JCS231 |
+| LDAP | 4 | `LdapPrincipal` (1, **F23**), `LdapLoginModule` (2) and the LDAP `CertStore` (1): JNDI's LDAP provider | JCS234 |
+| reflection | 4 | `Proxy.getProxyClass`, `Class.getProtectionDomain`, `Field` `isRestricted`, `clone` of an interpreted subclass | F14, F21 |
+| extendable classes | 3 | "cannot extend java.util.HashSet yet" (2), `X509EncodedKeySpec` (1) | JCS235 |
+| `java.home` and cacerts | 4 | `${java.home}/conf/security/java.security` (2), `/lib/security/cacerts` (2: JCS140 (a), decided, not built) | JCS233 |
+| the rest | 5 | `MemorySegment` (FFM, by design), OCSP over the network, `getContextClassLoader`, `StrongSeedReader`'s seed file, DoPrivileged's stdout | as named |
+
+**What came in, and how** (jdk26u at `baf63fb`):
+
+| part | how |
+|---|---|
+| GCM | `overlay/jdk/variants/GaloisCounterMode.ae`: beside F1's cut of `NIO_ACCESS`, `GCMEngine.overlapDetection(ByteBuffer, ByteBuffer)` (its two-direct-buffers branch copies, as the overlapping case does: a Go build's buffer is never direct, F7's `DirectByteBuffer` answers `isDirect` false) and `GCMDecrypt.doFinal(ByteBuffer, ByteBuffer)` (a tag mismatch zeroes an output without an array through its absolute `put`, where the JDK sets its memory by address under the buffer's session), each jdk26u's method as repr/java converts it but that branch |
+| GCM's parameters | `sun/security/util/GCMParameters.java` into the closure (`test/jrt/jrt_sources.ae`'s new `jca-tail-sources`); jrt's `JceServices` constructs it (the one class SunJCE names outside its package) |
+| ChaCha20 | `arbace.j2g.vh/byte-order-arg`: `ByteOrder.nativeOrder()` is `"LE"` (both targets, amd64 and arm64, are little-endian; jrt's `Unsafe.isBigEndian` answers false), so `asLongView` is a constant view handle (J2G-SPEC §8.5) |
+| the DRBG's CTR mechanism | `sun/security/provider/CtrDrbg.java` (`jca-tail-sources`; DRBG's `createImpl` names it: the report's `:unavailable` "CtrDrbg is not in the closed world") |
+| MD4 | `sun/security/provider/MD4.java` (`jca-tail-sources`); its own provider's service constructed by jrt's `JrtServices` |
+| SASL | `sasl-sources`: java.security.sasl's 28 files (KIND `share:java.security.sasl`: the API's 10, SunSASL's provider and the CRAM-MD5, DIGEST-MD5, EXTERNAL, PLAIN and NTLM mechanisms' 18) and java.base's `com/sun/security/ntlm` (5), 7,417 + 947 lines; `ProviderConfigSasl.ae` (ProviderConfig's third file: F1's and F3's `getProvider` with `SunSASL` by name and class name; SunSASL's own `Provider.Service` subclass constructs its factories, so no services switch) |
+| LDAP's principal | `src/jdk.security.auth/share/classes/com/sun/security/auth/LdapPrincipal.java` (over F19's `LdapName`) |
+| j2g's names | `Sasl_Provider` (beside `java.security.Provider`), `Digest_FactoryImpl`, `Ntlm_FactoryImpl` (`arbace.j2g.names/renames`): the 43 new classes' Go names against the night 8 executable's 23,035 translated classes, these three the only collisions |
+
+**Light checks** (main's stage 0 as `ARBACE_HOST_EXE`, javac's tool `javac-5ad357331dbcd7cfb0fd`, `REPR_JAVA_STALE_OK=1`, each process
+under 1.1 GB):
+- the joint javac check (`.tmp/night7/all9-run.sh` on the branch): 2,314 files (2,277 on `next`, +3 tail, +33 SASL and NTLM, +1
+  LdapPrincipal), **0 errors**, 4,988 classes (24 s, 0.96 GB);
+- the read: `bin/repr-java read-jdk --check` of the 37 new files, `JceServices`, `JrtServices`, `RsaServices` and F5's java.util.logging
+  (the SASL mechanisms log through it) as a patch of java.base: all but `LogManager` converted (its patch needs its own module's
+  `sun.util.logging.internal`, as F5's own check found), 0 errors in the new files; `--no-javac`: every file native, the forms
+  identical byte for byte;
+- the variant read back as forms (`in-ns` and three variants); `arbace.j2g.vh` and `arbace.j2g.names` loaded from the checkout on
+  stage 0: `byte-order-arg` of `ByteOrder.nativeOrder()` is `"LE"`, the three renames apply;
+- `bin/jrt build --arch amd64` and `bin/jrt test --arch amd64`: `arbace/jrt` vets and its tests pass (6.1 s); jrt's Go is unchanged
+  by F23 (no new natives); the module's crop packages fail as on `next` (`arbace/expat`, `arbace/pyexpat` do not build, `arbace/oi`'s
+  four golden tests), none of F23's;
+- the smoke below on today's executable reproduces the four failures F23 fixes (GCM "Cannot find any provider", ChaCha20's
+  VarHandle, MD4 not found, the CTR DRBG not constructed, SASL not found).
+
+**JCS135, the closure's growth**: +9,446 Java lines (SASL and NTLM 8,364, CtrDrbg, MD4, GCMParameters and LdapPrincipal 1,082):
+about +1.3%; the executable about +1.5 MB by F4's ratio.
+
+**Expected yield** (interp; the compiled level the same tests where j2g translates them: 22 of the GCM ones are `:security` at
+compiled, 8 `:j2g-unresolved`; the TLS ones `:j2g-unresolved` 15; SASL `:j2g-unresolved` 8, `:security` 3):
+
+- AES/GCM, 30: `com/sun/crypto/provider/Cipher/AEAD/` AEADBufferTest, Encrypt, GCMLargeDataKAT, GCMParameterSpecTest,
+  GCMShortBuffer, GCMShortInput, KeyWrapper, OverlapByteBuffer, ReadWriteSkip, SealedObjectTest, WrongAAD (t07745-t07755),
+  `Cipher/AES/` CTR, Padding, Test4512524, Test4512704, Test4517355, Test4626070, TestAESCipher, TestAESWithDefaultProvider,
+  TestAESWithRemoveAddProvider, TestCopySafe, TestNonexpanding (t07757-t07771), `TextLength/SameBufferOverwrite` (t07808),
+  `javax/crypto/Cipher/CipherInputStreamExceptions`, `TestCipherMode` (t07886, t07893), `CipherSpi/CipherByteBufferOverwriteTest`,
+  `ResetByteBuffer` (t07896, t07898), `javax/net/ssl/SSLEngine/NoAuthClientAuth`, `SSLSession/ResumeTLS13withSNI` (t07987, t08000),
+  `sun/security/jca/PreferredProviderTest` (t08193);
+- TLS, 17: `javax/net/ssl/SSLSession/SessionCacheSizeTests`, `SessionTimeOutTests`, `SSLSocket/ClientExcOnAlert`,
+  `TLSCommon/ConcurrentClientAccessTest`, `TestSessionLocalPrincipal`, `templates/SSLEngineTemplate`, `SSLEngine/ExtendedKeySocket`,
+  `FinishedPresent`, `LargePacket`, `CheckTlsEngineResults`, `ConnectionTest`, `SSLSession/HttpsURLConnectionLocalCertificateChain`,
+  `sun/security/ssl/SSLContextImpl/MD2InTrustAnchor`, `SSLSocketImpl/ClientModeClientAuth`, `SSLSocketSSLEngineCloseInbound`,
+  `X509TrustManagerImpl/SelfIssuedCert`, `X509ExtendedTMEnabled` (t07981-t08019, t08265-t08295);
+- SASL, 11: `com/sun/security/sasl/digest/` AuthNoUtf8, AuthOnly, AuthRealmChoices, AuthRealms, CheckNegotiatedQOPs,
+  HasInitialResponse, Integrity, Privacy, PrivacyRc4 (t07871-t07880), `ntlm/Conformance` (t07881), `util/CheckAccess` (t07882);
+- MD4 and LDAP's principal, 2: `sun/security/provider/MessageDigest/DigestKAT` (t08351), `com/sun/security/auth/CreateLdapPrincipals`
+  (t07864).
+
+60 tests touched; by the triage's calibration (0.7 of a test unblocked passes; here the causes are measured, not scanned, so
+higher) about **45-55 at interp** and **35-45 at compiled** (the TLS tests' second causes are the risk: sockets in one process,
+the interpreted loops' speed). With the 261 the night's rerun records, `:security` falls from 359 to about 50 at interp.
+
+**The night's commands** (in the night's worktree with this branch merged, after the Java night's conversion or folded into
+it; heavy ones under `bin/heavy-lock`):
+
+```sh
+# 0. the joint javac check of the merged tree (0 errors expected; a light minute)
+.tmp/night7/all9-run.sh /root/arbace/.tmp/worktrees/next
+# 1. jdk/ converted afresh: expect the sources line +3 share (CtrDrbg, MD4, GCMParameters), +5 share (com/sun/security/ntlm),
+#    +28 share:java.security.sasl, +1 share:jdk.security.auth (LdapPrincipal); 0 failed, 0 javac errors, no javac: 0 fallbacks;
+#    jdk/forms + about 37 files
+REPR_JAVA_EXE=$(ls -td /root/arbace/.tmp/gate-exe/javac-*/ | head -1)arbace-javac REPR_JAVA_STALE_OK=1 \
+  ARBACE_HEAVY_CMD=$PWD/bin/heavy-lock bin/jrt-convert update
+# 2. the package-to-module table (javax.security.sasl, com.sun.security.sasl and its three packages: java.security.sasl),
+#    j2g's edge, javac's world's edge less it
+bin/jrt modules && bin/heavy-lock bin/j2g-edge update && bin/heavy-lock bin/javac-vendor edge
+# 3. the executable; j2g's report: no :analysis-failures for GaloisCounterMode or GCMDecrypt, no :unavailable for
+#    GaloisCounterMode's classes, ChaCha20Cipher's xor and doFinal, DRBG.createImpl; the renames Sasl_Provider,
+#    Digest_FactoryImpl, Ntlm_FactoryImpl; no "a variant for a class not in the inputs"
+bin/heavy-lock bin/arbace-go --build && bin/arbace-go --smoke && bin/jrt test
+# 4. a smoke of F23 (the file is the branch's .tmp/sec/smoke.clj, copied below): expect
+#    "gcm hello GCM", "chacha hello world, chacha", "md4 16", "ctr-drbg CTR_DRBG", "sasl CRAM-MD5 true u"
+target/arbace-go/amd64/arbace .tmp/f23-smoke.clj
+# 5. Java's levels interp and compiled on :security's 361 tests (then the whole corpus with the night's others): saved, not
+#    recorded; expect about 45-55 / 35-45 of the 60 above to pass, and the 261 that pass today, no passing test lost
+JAVA_CHECK_EXE=$PWD/target/arbace-go/amd64/arbace J2G_GO_EXE=$PWD/target/arbace-go/amd64/arbace \
+  JAVA_CHECK_HEAVY=$PWD/bin/heavy-lock bin/java-check --levels interp,compiled --jobs 8 \
+  --only 'jdk/(com/sun/crypto|com/sun/security|javax/crypto|javax/net/ssl|javax/security|java/security|sun/security)' \
+  --save .tmp/f23-night/check
+```
+
+The smoke (`.tmp/f23-smoke.clj`, each item caught so that one failure does not hide the others):
+
+```clojure
+(import '(javax.crypto Cipher KeyGenerator) '(javax.crypto.spec GCMParameterSpec IvParameterSpec)
+        '(java.security SecureRandom)
+        '(javax.security.auth.callback CallbackHandler NameCallback PasswordCallback))
+(defmacro item [n & body] `(println ~n (try (eval '(do ~@body)) (catch Throwable t# (str "FAILED " t#)))))
+(item "gcm" (let [k (.generateKey (doto (KeyGenerator/getInstance "AES") (.init 128))) c (Cipher/getInstance "AES/GCM/NoPadding")]
+  (.init c Cipher/ENCRYPT_MODE k (GCMParameterSpec. 128 (byte-array 12)))
+  (let [ct (.doFinal c (.getBytes "hello")) ps (.getParameters c)]
+    (.init c Cipher/DECRYPT_MODE k ps)
+    (str (String. (.doFinal c ct)) " " (.getAlgorithm ps)))))
+(item "chacha" (let [k (.generateKey (KeyGenerator/getInstance "ChaCha20")) c (Cipher/getInstance "ChaCha20-Poly1305")]
+  (.init c Cipher/ENCRYPT_MODE k (IvParameterSpec. (byte-array 12)))
+  (let [ct (.doFinal c (.getBytes "hello world, chacha"))]
+    (.init c Cipher/DECRYPT_MODE k (IvParameterSpec. (byte-array 12)))
+    (String. (.doFinal c ct)))))
+(item "md4" (count (.digest (sun.security.provider.MD4/getInstance) (.getBytes "abc"))))
+(item "ctr-drbg" (java.security.Security/setProperty "securerandom.drbg.config" "CTR_DRBG")
+  (let [r (SecureRandom/getInstance "DRBG")] (.nextBytes r (byte-array 8)) (first (.split (str r) ","))))
+(item "sasl" (let [h (reify CallbackHandler (handle [_ cbs] (doseq [cb cbs] (cond (instance? NameCallback cb) (.setName cb "u") (instance? PasswordCallback cb) (.setPassword cb (.toCharArray "p"))))))
+                   s (javax.security.sasl.Sasl/createSaslServer "CRAM-MD5" "ldap" "h" nil h)
+                   c (javax.security.sasl.Sasl/createSaslClient (into-array String ["CRAM-MD5"]) nil "ldap" "h" nil h)
+                   r (.evaluateResponse s (.evaluateChallenge c (.evaluateResponse s (byte-array 0))))]
+               (str (.getMechanismName c) " " (.isComplete s) " " (.getAuthorizationID s))))
+```
+
+**Risks and fallbacks**: (1) j2g refusing the GCM variant's methods (the forms are the converter's but two branches; `nil` as a
+`cond` branch in statement position is the converter's own spelling, TreeMap's): the report names it, and the night's fallback
+is F1's variant (GCM stays out, the 30 and the TLS tests wait); (2) another `nativeOrder` view elsewhere now compiled as a
+constant (only ChaCha20Cipher's in the world: the analysis made it a stub before); (3) the TLS tests reaching their second causes
+(the time limit, the interpreted handshake loops): `:speed`'s measure after the run; (4) a Go name collision the check above
+missed (nested classes' derived names): the build's collision check names it, a rename more.
+
+**What is left of `:security`** after F23 and the night's rerun, about 40 at interp: Kerberos 10 (JCS230), serialization 6
+(JCS167 (a)'s port), jar signing 5 (JCS231), LDAP 3 (JCS234), reflection 4 (F14, F21), the extendable classes 3 (JCS235),
+`java.home` and cacerts 4 (JCS233), and five single causes.
+
+## Proposed (F23)
+
+Numbered from JCS230 (JCS168-JCS229 left to the branches of the same days).
+
+### JCS230 Kerberos's API classes, or Kerberos by design as JCS133 (a) said
+
+JCS133 (a) put Kerberos and GSS-API by design (no KDC, no keytabs), but no class files them: 10 tests of `:security` need them,
+and 5 of those are `javax.security.auth.kerberos`'s permissions alone (`DelegationPermission{Collection,Hash,Init}`,
+`ServicePermission{Collection,Test}`), which parse principal names as strings and need no KDC.
+- (a) A `:kerberos` class, `:kind :design`, by its regex (`javax\.security\.auth\.kerberos|sun\.security\.krb5|jgss`): the 10
+  move from deferred to by design. No work; the completeness unchanged (by design is in the denominator), the strict mean
+  lowered by nothing.
+- (b) The permissions now (java.security.jgss's `DelegationPermission`, `ServicePermission` and their collections, 4 files,
+  half a day: 5 tests), the rest by design as (a).
+- (c) `javax.security.auth.kerberos` whole with `sun.security.krb5`'s principal names and configuration (no KDC: the keys from
+  passwords, `KerberosPrincipal`'s realm from `krb5.conf`), 3 days: about 8 of the 10.
+- *Recommended: (b)*: five tests for half a day, and the class says what is by design.
+
+### JCS231 Jar verification (JCS141 (b), F2b) as the next security slice
+
+JCS141 (b) made jar verification a small fix after F2. Its 5 tests are measured now (`ScanSignedJar` x2, `TurkCert`,
+`SignedJarFileGetInputStream`, `TestIndexedJarWithBadSignature`; and `CodeSource/CertsMatch`, `JarEntry/GetMethodsReturnClones`
+touched): jdk26u's `JarVerifier`, `ManifestEntryVerifier`, `SignatureFileVerifier`, `ManifestDigester` with jrt's `JarFile`
+calling the verifier as the JDK's does.
+- (a) Now, as F23b on the next Java day: 1.5 days, about 6 tests, the zip and jar tests rerun.
+- (b) After F9's night (java.nio.file's change touches `JarFile`'s neighbours): the same, a night later.
+- *Recommended: (b)*, the jar tests' world settled first.
+
+### JCS232 ProviderConfig's three variant files folded
+
+`ProviderConfig.ae` (F1), `ProviderConfigJsse.ae` (F3) and `ProviderConfigSasl.ae` (F23) each replace `getProvider`, the last
+file's winning, so that the branches merged without conflict.
+- (a) Folded into `ProviderConfig.ae` once F23 is on `next` (minutes; the variant's report counts unchanged).
+- (b) Kept: each slice adds a file.
+- *Recommended: (a)*.
+
+### JCS233 `java.home` for the security files (with JCS140 (a)'s cacerts)
+
+Four tests read `${java.home}/conf/security/java.security` or `${java.home}/lib/security/cacerts` as files; the Go build's
+`java.home` is empty (its `java.security` is resource data jrt reads), and JCS140 (a)'s cacerts was decided as data but is not
+built.
+- (a) `java.home` a directory the executable writes once per build key (the embedded `jdk/data`, about 1 MB with cacerts) under
+  the user's cache (`$XDG_CACHE_HOME/arbace/KEY/`), so that the JDK's readers and the tests find the files; cacerts added to the
+  data step (JCS140 (a)). A day; the 4 tests and `VerifyCACerts`' list.
+- (b) jrt's file layer serving `${java.home}/...` from the embedded data (a virtual directory: `FileInputStream`, `Files` and
+  `File.exists` of those paths), no disk write. Two days; the same tests, and a path that is not a file.
+- (c) Neither: the 4 tests deferred, cacerts as JCS140 (a) through `FilePaths`' variant alone.
+- *Recommended: (a)*: the JDK's own code reads the files it reads on the JDK.
+
+### JCS234 JNDI's LDAP provider
+
+`LdapLoginModule`'s two tests (`CheckConfigs`, `CheckOptions`) and the LDAP `CertStore` (`java/security/cert/GetInstance`) need
+`com.sun.jndi.ldap`'s context factory (java.naming, about 30k lines) behind F19's names; no directory server is needed for the
+tests' configurations.
+- (a) Deferred until JNDI's providers have tests of their own beyond these three.
+- (b) com.sun.jndi.ldap now: 3 days for 3 tests.
+- *Recommended: (a)*.
+
+### JCS235 `java.util.HashSet` and the key specs among the extendable classes
+
+Three tests define classes extending `java.util.HashSet` (`Subject/UnreliableContains`, `VerifyCACerts`) and
+`X509EncodedKeySpec` (`KeyFactoryGetKeySpecForInvalidSpec`): "The Go build's Java forms cannot extend ... yet". F1 added 18 JCA
+classes to `arbace.j2g.model/class-supers`.
+- (a) `HashSet`, `X509EncodedKeySpec` and `PKCS8EncodedKeySpec` added (JC4b's mechanism, an hour, each a DynSub more).
+- (b) A rule: every public non-final JDK class with an accessible constructor extendable (the executable's size: JC4b measured
+  one DynSub at a few KB; about 2,000 classes, some MB).
+- *Recommended: (a)* now, (b) as its own measurement.
