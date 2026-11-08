@@ -4188,3 +4188,46 @@ Sockaddr of the family).
 **Signal timing.** Where CPython raises a pending signal's exception right after a call (pthread_sigmask's
 PyErr_CheckSignals, the exit through SIGINT after an unhandled KeyboardInterrupt), the same here; the eval breaker's
 places in the compiled loop are not touched (no bench needed), and the blocking calls Go restarts stay classed.
+
+## As built: 231, `_multiprocessing`, posix's pointer calls, posix_spawn's signals, `_socket`'s rest and signal timing (2026-11-08, the Mac VM, queue 231)
+
+As designed above; the files are `builtins_multiprocessing.go` (SemLock, sem_unlink, flags; `_posixshmem`),
+`builtins_posix_ptr.go` (timerfd, tcgetpgrp/tcsetpgrp, unshare/setns, memfd_create, sched_get/setaffinity, the xattr
+functions, prlimit), `builtins_socket_msg.go` (recvmsg's ancillary walk, recvmsg_into, sendmsg_afalg, AF_ALG's bind,
+an empty sendmsg by a raw call) and `builtins_signal_wait.go` (the main thread's waits in ppoll with a wake pipe, the
+inherited signal mask), with posix_spawn's sets in `builtins_posix_spawn.go` and exit_sigint in `builtins_signal.go`.
+What the runs added to the design:
+
+- **A blocked own signal is pending at once.** `os.kill(os.getpid(), n)` of a blocked, notified signal went through
+  Go's signal thread, so `sigpending()` right after saw nothing (test_sigpending); it is now marked pending before kill
+  returns, as the kernel does.
+- **The inherited mask.** The child of `posix_spawn(setsigmask=...)` is pyi, whose pthread_sigmask's mask is kept by the
+  module: it now starts from the thread's mask at start, so `raise_signal` of a blocked signal stays pending instead of
+  faulthandler's default action (test_setsigmask, exit 138 after the mask was applied).
+- **Go's SendmsgN of no data sends a byte** (and asks SO_TYPE, which AF_ALG refuses with ENOTSUP): sendmsg_afalg's
+  `MSG_MORE` call before the data corrupted the cipher's input; such a call is a raw sendmsg(2) now.
+- **A handler's exception through the waits.** `sockErr` turned a raised exception into an OSError of its text; it now
+  passes a `*Raised` through (poll's and epoll's callers).
+- Small: ancillary items of any sequence (lists), recvmsg_into into an array, `__buffer__` for sendmsg's data, assoclen
+  None refused.
+
+The eval breaker's places are unchanged, so the compiled loop is as fast as before (no bench). The new waits cost the
+main thread one ppoll(2) before a select, poll, epoll_wait or socket wait with a timeout, and an fcntl(F_GETFL) plus a
+ppoll before a blocking os.read; other threads are unchanged.
+
+Counts (run, `bin/pyi lib-test --aot`; before at d4446bf26, after at the head):
+
+| module | before | after |
+|---|---|---|
+| test_posix (176) | 165 equal, 9 classed, 2 failing | 170 equal, 6 classed, 0 failing |
+| test_signal (53) | 38 equal, 15 classed | 42 equal, 11 classed |
+| test_socket (745) | 568 equal, 172 classed, 5 failing | 731 equal, 10 classed, 4 failing |
+| total (974) | 771 / 196 / 7 | 943 / 27 / 4 |
+
+By class in these modules: `:socket-gaps` 152 to 1 (test_socket_type: gc.is_tracked), `:signal-timing` 15 to 2
+(test__thread_interrupt_main, test_sendall_interrupted of the runner's skip list), `:pointer-syscall` 3 to 0. The four
+failing are the base's (TestLinuxAbstractNamespace's three, testMakefileCloseSocketDestroy), not this task's.
+test_multiprocessing_spawn, sampled (13 methods of WithProcessesTestLock, WithProcessesTestSemaphore and
+WithThreadsTestSemaphore, spawn children on goi, 2 minutes): 8 equal to CPython, 3 skipped for sharedctypes (no ctypes:
+`:ctypes`), 2 errors pickling a bound built-in method (`types.MethodDescriptorType` is builtin_function_or_method:
+`:data-model`); before, the whole package skipped ("requires multiprocessing").
