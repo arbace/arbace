@@ -87,7 +87,10 @@ code. Three kinds of things live here:
   `desugar.ae` (HF5, the match compiler) and `tostg.ae` (HF6, CorePrep, CoreToStg, Unarise) follow GHC 9.14.1's
   `compiler/GHC/HsToCore/Match*.hs`, `GuardedRHSs.hs`, `ListComp.hs`, `compiler/GHC/CoreToStg/Prep.hs`,
   `CoreToStg.hs`, `compiler/GHC/Stg/Unarise.hs`, `Stg/FVs.hs` from the same tarball (2026-11-05, written after their
-  algorithms, carrying GHC's notice), `stgcmp.ae` is Arbace's own; `simpleopt.ae` (2026-11-06) ports
+  algorithms, carrying GHC's notice), `stgcmp.ae` is Arbace's own; since HF10's first slice (2026-11-08) `tostg.ae` also follows `compiler/GHC/CoreToStg/Prep.hs`'s
+  speculative evaluation (mkNonRecFloat, decideFloatInfo, cpeArgArity) with `compiler/GHC/Core/Utils.hs`'s exprOkForSpecEval and
+  `compiler/GHC/CoreToStg.hs`'s mkStgAltType, and `desugar.ae` `compiler/GHC/HsToCore/Match.hs`'s tidy_bang_pat and matchBangs and
+  `compiler/GHC/Core/Make.hs`'s bindNonRec, from the same tarball; `libcheck.ae`'s HF10 verbs (`stg`, `merge`) are Arbace's own; `simpleopt.ae` (2026-11-06) ports
   `compiler/GHC/Core/SimpleOpt.hs` with the occurrence information of `Core/Opt/OccurAnal.hs` and the compulsory
   unfoldings of `Types/Id/Make.hs`, `constfold.ae` (2026-11-06) the `Float#`/`Double#` rules of
   `compiler/GHC/Core/Opt/ConstantFold.hs` with `Types/Literal.hs`'s conversions, both from the same tarball and carrying

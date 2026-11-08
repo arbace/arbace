@@ -351,6 +351,7 @@
 (declare floatable-con atomic-args? fail-var?)
 
 (def ^:dynamic *rec-ids* #{}) ; the enclosing recursive group's top-level names (CorePrep's cpe_rec_ids)
+(def ^:dynamic *body-tycon* nil) ; the top-level binding's result type constructor after its lambdas, when a data type
 (def ^:dynamic *arities* {})  ; the module's top-level binders (Core's lv or name vector) -> their lambdas' count
 
 (defn- pap-eta
@@ -475,7 +476,8 @@
   ([c atoms done]
   (let [st (con-strict c)
         ats (concat (field-alt-types c) (repeat '(poly)))
-        evald (mapv (fn [a s] (if (and s (string? a) (not (contains? done a))) [a (fresh "sat")] [a nil])) atoms (concat st (repeat false)))
+        reps (concat (con-reps c) (repeat :L))
+        evald (mapv (fn [a s r] (if (and s (= :L r) (string? a) (not (contains? done a))) [a (fresh "sat")] [a nil])) atoms (concat st (repeat false)) reps)
         body (list 'con (gname c) (mapv (fn [[a a2]] (or a2 a)) evald))]
     (reduce (fn [b [[a a2] at]] (if a2 (list 'case (list 'app a []) [a2 :L] at [(list 'alt :default [] b)]) b))
             body (reverse (map vector evald ats))))))
@@ -505,7 +507,11 @@
     (let [g (second f) ar (count (arg-types (global-type g)))]
       (if (>= (count args) ar)
         (with-atoms (take ar args)
-          (fn [as] (let [call (list 'primop (nth g 3) as)]
+          (fn [as] (let [call (if (= "tagToEnum#" (nth g 3))
+                                ;; tagToEnum#'s result type (StgOpApp's tycon): the binding's result type when the call is its
+                                ;; body (isTrue#), else Bool, the type of every tagToEnum# the elaborator itself writes
+                                (list 'primop (nth g 3) as {:tycon (or *body-tycon* (ext-str "GHC.Internal.Types" "Bool"))})
+                                (list 'primop (nth g 3) as))]
                      (if (= ar (count args)) call
                          (let [n (fresh "sat")]
                            (list 'case call [n :L] '(poly) [(list 'alt :default [] (with-atoms (drop ar args) (fn [bs] (list 'app n bs))))]))))))
@@ -524,10 +530,10 @@
         ;; argument's binding outermost
         (let [st (concat (con-strict c) (repeat false))
               ats (concat (field-alt-types c) (repeat '(poly)))
-              rs (mapv (fn [a s at] (if (and s (not (atomic-args? [a])))
-                                      (let [n (fresh "sat")] (swap! *reps* assoc n :L) [n [[:case n :L (expr a) at]]])
-                                      (atom-of a)))
-                       args st ats)]
+              rs (mapv (fn [a s at r] (if (and s (= :L r) (not (atomic-args? [a])))
+                                        (let [n (fresh "sat")] (swap! *reps* assoc n :L) [n [[:case n :L (expr a) at]]])
+                                        (atom-of a)))
+                       args st ats (concat (con-reps c) (repeat :L)))]
           (wrap-binds (vec (mapcat second (reverse rs)))
                       (strict-con c (mapv first rs) (set (for [[n bs] rs :when (some #(= :case (first %)) bs)] n)))))
         (= ar (count args)) (with-atoms args (fn [as] (strict-con c as)))
@@ -667,7 +673,9 @@
                     (and (lv? x) (not= [:L] (local-reps x)))
                     (let [rs (local-reps x) r (reps->rep rs) n (local-name x)]
                       (swap! *reps* assoc n r)
-                      (float-scrut (expr e2) (fn [se] (list 'case se [n r] (if (> (count rs) 1) (list 'multi (count rs)) (list 'prim r)) [(list 'alt :default [] b)]))))
+                      (if (= b (list 'app n []))
+                        (expr e2)
+                        (float-scrut (expr e2) (fn [se] (list 'case se [n r] (if (> (count rs) 1) (list 'multi (count rs)) (list 'prim r)) [(list 'alt :default [] b)])))))
                     (and (lv? x) (spec-eval e2))
                     (let [n (local-name x)]
                       (swap! *reps* assoc n :L)
@@ -873,7 +881,8 @@
   (binding [*r* r *units* units *names* (atom {}) *n* (atom 0) *reps* (atom {}) *joins* (atom #{}) *lreps* (atom {}) *multi* (atom {}) *mcomps* (atom {})]
     (let [simpl? (not= "0" (System/getenv "REPR_HASKELL_SIMPL"))
           prog0 (binding [arbace.repr.haskell.simpleopt/*unlifted?* (fn [e] (not= [:L] (expr-reps e)))
-                          ds/*casts* simpl?]
+                          ds/*casts* simpl?
+                          ds/*unboxed-tuple?* (fn [e] (some? (expr-comps e)))]
                   (ds/desugar-program r))
           [prog new-types raw] (if simpl?
                              (simpl/simplify-module r prog0 (ds/program-exported r prog0)
@@ -897,7 +906,16 @@
                                        ;; a top-level string literal (the Simplifier's floats: StgTopStringLit)
                                        (do (swap! *reps* assoc n :addr)
                                            [(list 'string [n :addr] (second (first (lit-form (second e)))))])
-                                     (let [r (top-rhs (if (lv? b) (second b) (nth b 3)) e)]
+                                     (let [r (binding [*body-tycon*
+                                                       (let [t (some-> (if (lv? b) (get (:ltypes *r*) b) (global-type b)) (result-type (get arities b 0)))
+                                                             t (when t (expand-syn (strip-forall t)))]
+                                                         ;; only a binding whose body is the call itself (isTrue# x = tagToEnum# x)
+                                                         (when (and (vector? t) (= :tc (first t)) (= 'data (:flavour (get (:tycons *r*) (second t))))
+                                                                    (let [body (loop [x e] (if (head? x 'lam) (recur (nth x 2)) x))]
+                                                                      (and (head? body 'app) (head? (second body) 'v)
+                                                                           (= "tagToEnum#" (nth (second (second body)) 3)))))
+                                                           (ext-str (nth (second t) 2) (nth (second t) 3))))]
+                                               (top-rhs (if (lv? b) (second b) (nth b 3)) e))]
                                        ;; the floats' names, internal top-level binders
                                        (set! *tops* (into *tops* (map second @*floats*)))
                                        (concat (for [[[_ fr] fname] @*floats*] (list 'bind [fname :L] (first (fv-rhs fr))))

@@ -21,8 +21,9 @@
 #   --run [ID...]  run-check's programs (default all of samples and synthetic) run twice on hsi: on the pack's libraries
 #                  (HSI_LIBS, GHC's -O2 STG: the ABI of the interfaces the programs are compiled against), then on the same
 #                  set with every module this run compiled replaced by its own STG merged over the pack's ABI (the
-#                  pack's bindings of names the own STG does not define kept; LIB_STG_REPLACE=equal: only the modules
-#                  whose every binding equals GHC's -O0); a pass lost is a failure
+#                  pack's bindings of names the own STG does not define kept): LIB_STG_REPLACE=equal (the default) the
+#                  own exported bindings judged equal to GHC's -O0 alone, with their internal closures; all: every own
+#                  binding; a pass lost is a failure
 #
 # Environment: LIB_STG_REUSE=1 (the last run's STG and results kept, --run alone), LIB_STG_REF (GHC's -O0 STG, a directory of PKG/M.stg.ae; default .tmp/hsi/dumps-O0/stg, made when
 # missing by HSI_DUMP_OPT=-O0 bin/hsi dumps), HSI_LIBS (the pack's STG for the other packages), LIB_CHECK_TIMEOUT.
@@ -96,17 +97,21 @@ arbace_tool -m arbace.repr.haskell.libcheck rank-stg "$w/results.edn" | tee "$w/
 # pack's, merged over the pack's ABI (libcheck merge: the pack's bindings of the names the own STG does not define, -O2's
 # workers and floated bindings that other modules and the interfaces' unfoldings name, kept beside it)
 mkset() { # DIR OWN?
-  local d=$1 own=$2 p l m
+  local d=$1 own=$2 p l m f
   rm -rf "$d"; mkdir -p "$d"
   IFS=: read -r -a dirs <<< "$libs"
   for l in "${dirs[@]}"; do
-    for p in "$l"/*/; do p=${p%/}; [ -d "$p" ] && [ ! -e "$d/$(basename "$p")" ] && ln -s "$p" "$d/$(basename "$p")"; done
+    # hsi takes a package's directory for a directory, not a link: real directories of linked files
+    for p in "$l"/*/; do
+      p=${p%/}; [ -d "$p" ] && [ ! -e "$d/$(basename "$p")" ] || continue
+      mkdir -p "$d/$(basename "$p")"
+      for f in "$p"/*; do ln -s "$f" "$d/$(basename "$p")/$(basename "$f")"; done
+    done
   done
+  rm -rf "$w/image-$(basename "$d" | sed 's/^libs-//')"
   [ "$own" = 1 ] || return 0
-  local gi; gi=$(readlink -f "$d/ghc-internal")
-  rm -f "$d/ghc-internal"; mkdir -p "$d/ghc-internal"
-  for l in "$gi"/*.stg.ae; do ln -s "$l" "$d/ghc-internal/$(basename "$l")"; done
-  arbace_tool -m arbace.repr.haskell.libcheck replaceable "$w/results.edn" "${LIB_STG_REPLACE:-all}" > "$w/replaceable.txt"
+  local gi; gi=$(dirname "$(readlink -f "$d/ghc-internal/GHC.Internal.Base.stg.ae")")
+  arbace_tool -m arbace.repr.haskell.libcheck replaceable "$w/results.edn" all > "$w/replaceable.txt"
   local args=()
   while read -r m; do
     [ -f "$out/stg/ghc-internal/$m.stg.ae" ] && [ -f "$gi/$m.stg.ae" ] || continue
@@ -114,9 +119,10 @@ mkset() { # DIR OWN?
     args+=("$out/stg/ghc-internal/$m.stg.ae" "$gi/$m.stg.ae" "$d/ghc-internal/$m.stg.ae")
   done < "$w/replaceable.txt"
   : > "$w/replaced.txt"
-  [ ${#args[@]} = 0 ] || arbace_tool -m arbace.repr.haskell.libcheck merge "${args[@]}" > "$w/replaced.txt"
-  awk '{o+=$2; k+=$3} END{print "lib-stg --run: " NR " modules replaced: " o " top-level bindings Arbace'"'"'s own, " k " of the pack'"'"'s kept for its ABI"}' "$w/replaced.txt"
+  [ ${#args[@]} = 0 ] || arbace_tool -m arbace.repr.haskell.libcheck merge "$mode" "$w/results.edn" "${args[@]}" > "$w/replaced.txt"
+  awk '{o+=$2; k+=$3} END{print "lib-stg --run: " NR " modules replaced: " o " exported bindings Arbace'"'"'s own, " k " of the pack'"'"'s kept for its ABI"}' "$w/replaced.txt"
 }
+mode=${LIB_STG_REPLACE:-equal}
 ga=(); [ ${#ids[@]} = 0 ] || ga=("${ids[@]}")
 st=0
 for side in ghc own; do

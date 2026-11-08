@@ -132,7 +132,7 @@
                            (:fail c) {:judge (:fail c)}
                            :else {:stg (select-keys c [:compared :equal :data-equal])
                                   :ghc-only (vec (take 12 (:ghc-only c))) :n-ghc-only (count (:ghc-only c))
-                                  :ours-only (vec (take 12 (:ours-only c))) :n-ours-only (count (:ours-only c))
+                                  :ours-only (vec (:ours-only c)) :n-ours-only (count (:ours-only c))
                                   :diff (vec (:diff c)) :why (:why c)})))))))))
 
 (defn- read-results [files]
@@ -198,11 +198,16 @@
   other -O2 modules and the interfaces' unfoldings name: GHC's ABI at -O2), with the internal top-level bindings they
   reach, renamed apart (ghc$...), each form as the dump wrote it. Written to OUT; [own kept] counts of top-level
   bindings"
-  [ours pack out]
-  (let [o (top-lines ours) g (top-lines pack)
-        nm (fn [f] (case (first f) (bind string) (first (second f)) nil))
-        members (fn [f] (if (= 'rec (first f)) (rest f) [f]))
+  ([ours pack out] (merge-abi ours pack out nil))
+  ([ours pack out only]
+  (let [nm (fn [f] (case (first f) (bind string) (first (second f)) nil))
         ext? (fn [n] (and (string? n) (re-find #"^[^/]*:" n)))
+        ;; ONLY (a set): the own exported bindings judged equal to GHC's -O0 alone (their internal closures with them), the
+        ;; module's data declarations the pack's
+        o (cond->> (top-lines ours)
+            only (remove (fn [[f]] (or (= 'stg/data (first f)) (and (ext? (nm f)) (not (contains? only (nm f))))))))
+        g (top-lines pack)
+        members (fn [f] (if (= 'rec (first f)) (rest f) [f]))
         own-names (set (keep nm (mapcat (comp members first) o)))
         gforms (filter #(contains? '#{bind string rec} (first (first %))) g)
         by-name (into {} (for [[f :as fl] gforms m (members f) :let [n (nm m)] :when n] [n fl]))
@@ -224,7 +229,8 @@
         odata (set (keep (fn [[f]] (when (= 'stg/data (first f)) (second f))) o2))
         gdata (filter (fn [[f]] (and (= 'stg/data (first f)) (not (contains? odata (second f))))) g)]
     (spit out (str (str/join "\n" (concat (map second o2) (map second gdata) (map (comp rn-line second) kept))) "\n"))
-    [(count (filter (comp nm first) o2)) (count (mapcat (comp members first) kept))]))
+    ;; the exported bindings each side gives (the internal ones follow them)
+    [(count (filter (fn [[f]] (ext? (nm f))) o2)) (count (filter #(ext? (nm %)) (mapcat (comp members first) kept)))])))
 
 (defn compare-runs
   "Two run-check results files (GHC's -O0 libraries, the own set): the passes lost and gained"
@@ -283,7 +289,19 @@
       "rank-stg" (rank-stg (read-results more))
       "replaceable" (replaceable (read-results [(first more)]) (or (second more) "all"))
       "compare-runs" (compare-runs (first more) (second more))
-      ;; merge OURS PACK OUT...: triples; one line a module, NAME OWN KEPT
-      "merge" (doseq [[a b c] (partition 3 more)]
-                (let [[k1 k2] (merge-abi a b c)] (println (.getName (File. ^String a)) k1 k2)))
+      ;; merge MODE RESULTS OURS PACK OUT...: triples; one line a module, NAME OWN KEPT; MODE all (every own binding) or
+      ;; equal (only the exported bindings equal to GHC's -O0, RESULTS' judge)
+      "merge" (let [[mode res & trip] more
+                    rs (into {} (map (juxt :name identity) (read-results [res])))]
+                (doseq [[a b c] (partition 3 trip)]
+                  (let [m (str/replace (.getName (File. ^String a)) #"\.stg\.ae$" "")
+                        r (get rs m)
+                        only (when (= mode "equal")
+                               (let [f (str (.getParent (File. ^String a)) "/" m ".stg.ae")
+                                     ext (for [l (str/split-lines (slurp f)) :when (str/starts-with? l "(bind")
+                                               :let [n (first (second (read-string l)))]
+                                               :when (re-find #"^[^/]*:" n)] n)]
+                                 (set (remove (set (concat (:diff r) (:ours-only r))) (remove #(re-find #"/\$(tr|tc|krep)" %) ext)))))
+                        [k1 k2] (merge-abi a b c only)]
+                    (println m k1 k2))))
       (do (println "usage: -m arbace.repr.haskell.libcheck check --plan FILE -o OUT | rank FILE...") (System/exit 2)))))
