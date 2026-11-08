@@ -75,7 +75,12 @@ code. Three kinds of things live here:
   `compiler/GHC/Tc/` and Jones's "Typing Haskell in Haskell" (1999) read as the specification, no code ported (its HF9 additions,
   2026-11-08, likewise: kinds erased from the interfaces' types, GADT constructors and their given equalities after
   `GHC.Tc.TyCl`'s rejigConRes and `GHC.Tc.Solver.Equality`'s canonicalisation, ScopedTypeVariables, the implicit parameters, the
-  type applications, the data family instances; doc/haskell/FRONTEND-SURVEY.md, "As built: HF9 (first slice)"); `famenv.ae`
+  type applications, the data family instances; doc/haskell/FRONTEND-SURVEY.md, "As built: HF9 (first slice)"; its second
+  slice, 2026-11-08, likewise: checking mode and tcApp's argument order, implications' givens and wanteds, pattern synonyms after
+  `GHC.Tc.TyCl.PatSyn` and `GHC.Tc.Gen.Pat`'s tcPatSynPat, matchDataToTag and matchWithDict, simplifyTop's implicit-parameter
+  defaulting, naughty record selectors; "As built: HF9 (second slice)"); `deriv.ae`'s tables of unlifted comparisons and boxings
+  (2026-11-08) are `compiler/GHC/Tc/Deriv/Generate.hs`'s primOrdOps (ordOpTbl), boxConTbl and postfixModTbl, under its notice;
+  `famenv.ae`
   (2026-11-08) ports `compiler/GHC/Core/FamInstEnv.hs`'s reduction of a type family application (reduceTyFamApp_maybe,
   chooseBranch, findBranch, apartnessCheck, compatibleBranches, computeAxiomIncomps) with `compiler/GHC/Core/Unify.hs`'s
   tcMatchTys and tcUnifyTysFG from the same tarball, carrying GHC's notice; `libcheck.ae` (HF9's measure) is Arbace's own;

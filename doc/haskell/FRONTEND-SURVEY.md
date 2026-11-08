@@ -14,7 +14,7 @@ art, licenses, papers) is marked "(memory, verify)".
 
 Contents: Summary · 1 What the front end must produce · 2 Measurements · 3 The pieces · 4 Judging · 5 Prior art ·
 6 Routes and tiers · 7 Milestones HF1-HF12 · 8 Risks · Proposed (HFS1-HFS9) · Decided · As built: HF1-HF2 · As built: HF3 (start)
-· ... · As built: HF9 (first slice).
+· ... · As built: HF9 (first slice) · As built: HF9 (second slice).
 
 ## Summary
 
@@ -1620,3 +1620,79 @@ Remaining HF9: about 17 to 30 days (the survey's 20-35 for all of HF9, of which 
   alone (2, 3, 4), speed with HF11. *Recommended: (a)*.
 - **HF9-P4 Kinds.** Options: (a) **erased, as built, until Typeable's `$krep` bindings of poly-kinded type constructors (HF10's
   STG) need them**; (b) PolyKinds/DataKinds inference now (`Tc/Gen/HsType`'s kind checking, 3-6 days). *Recommended: (a)*.
+
+## As built: HF9 (second slice) (2026-11-08, branch `hs-hf9`, from its first slice bfcfd7952)
+
+By an agent on the main host by day, as the first slice (the light tier; every process under about 1.6 GB, at most two at once;
+stage 0 `/root/arbace/target/seed/amd64/arbace`, the checkout's sources evaluated). The brief: the remaining items in HF9-P3
+(a)'s order: speed, GADT implications, pattern synonyms, deriving and the derived contexts; kinds stay erased (HF9-P4 (a)).
+
+### Before and after
+
+The same closures, dumps and judge as the first slice's end (its `.tmp/m/final-after2.edn`, 2026-11-08 morning), against this
+slice's end (`bin/repr-haskell lib-check`, the whole of ghc-internal in one process):
+
+| | first slice's end | second slice's end |
+|---|---:|---:|
+| ghc-internal: modules elaborated without an error (of 248) | 200 | **227** |
+| of them every binder's type equal to GHC's interface | 198 | **226** |
+| binders equal (of those compared) | 4,937 of 4,992 | **4,955 of 4,992** |
+| the whole run, one process (the modules' own times) | about 75 minutes (2,782 s) | **about 12 minutes (592 s)** |
+| base's sample (every 9th, 26 judged): without an error, all types equal | 26 | **26 of 26 (99 of 99 binders)** |
+
+### The items, in the brief's order (modules from failing to passing, measured on each item's modules by day)
+
+| item | what was built (GHC's rule as the specification) | modules |
+|---|---|---|
+| 1 speed | the renamer's interface cache keyed by the file (lib-check's closures are links into one pool: the key of the directories parsed every interface again for every module and kept each copy, so the process grew and its later modules ran 5 to 9 times slower: the corpus's last 53 modules 2,124 s → 221 s); the instance table indexed by class (`insts-of`); derived contexts by a simultaneous fixpoint until none changes (GHC.Tc.Deriv's inferInstanceContexts, each round from the previous one's: was five rounds of one instance at a time over the whole table); lib-check's renamed tree kept in memory, without the renamer's projection on the facts | TH.Syntax 570 s (in the run) / 108 s (alone) → 32 s; System.Posix.Types 222 s → 19 s; Types 200 s → 24 s |
+| 2 GADTs and implications | checking mode (GHC.Tc.Gen.Expr's Check ExpType: a case's alternatives, if, let, lambda, multi-way if, a list comprehension's result; GHC.Tc.Gen.App's tcApp: the head inferred, the result unified with the expected type before the arguments are checked; tcSkolemise of an expected polytype: `(KnownNat n => r)`, `forall d. Data d => d -> r'`); sub-patterns checked at the pushed type (tcConPat's matchExpectedConTy before the arguments; tuples, lists, sums); equality givens of signatures', instances', methods' and constructors' contexts (`instance (a ~ Char) => IsString [a]`); a pattern's givens scoped over the statements after it (tcDoStmt, tcLcStmt); wanteds made under givens keep them (an implication's ic_given), solved later rewritten by them; a given whose sides are not known yet pending, settled when its binding ends (`fmap (\Refl -> x) (eqT :: Maybe (t :~: t'))`), an equality failing under pending givens deferred with them and retried; type applications on a signed binder of the module; a signature's nested foralls one quantifier; class method signatures' explicit variables over their default methods (renamer); polytypes unified up to alpha | Data.Data, Data.String, Data.Type.Equality, Err, TypeLits, TypeNats, Unsafe.Coerce (7 of the 12); left: Data.Dynamic (an imported pattern synonym, `Fun`), Data.Typeable and Exception.Context (names of hidden modules), Data.Typeable.Internal (kinds), IO.Encoding.Iconv (the helper's missing synonym, below) |
+| 3 pattern synonyms | GHC.Tc.TyCl.PatSyn: a signature's pattern type split as tcPatSynSig does (univ and req, then ex and prov; implicitly quantified, a variable the result does not mention existential); the declaration checked against it (tcCheckPatSynDecl: the universals skolems, the existentials metas the pattern's own existentials fill, each argument at its type, prov wanted from what the pattern binds), an explicit builder checked at the builder type, inferred without a signature; a use in a pattern (tcPatSynPat: the result first, req wanted, ex skolems, prov given) and as an expression (the builder's type); record pattern synonyms by field; the core pattern `(psyn NAME [req...] [prov...] [pat...])`, the matcher's desugaring left to slice 7 | Tuple, Natural, TypeLits, TypeNats, Exception, IO.Encoding.Types (6 of 7; Data.Typeable.Internal: kinds) |
+| 4 deriving and the derived contexts | standalone deriving of an imported type (`deriving instance Bounded Bool`: its constructors from the interface); derived Eq, Ord and Show on unlifted fields (`compiler/GHC/Tc/Deriv/Generate.hs`'s primOrdOps, boxConTbl and postfixModTbl, under deriv.ae's notice: `Ptr Addr#`, URec's `Char#`, `Double#`); the newtype strategy for a class of type constructors only when the representation eta-reduces (GHC.Tc.Deriv's eta_ok: `Par1 p = Par1 p` is derived stock); Generic's and Generic1's contexts empty; a data instance's derived heads and GADT constructors at the family's application; existential and GADT record patterns (as positional ones: IO's `Handle__ {haDevice = dev}` binds `IODevice dev`); `C {}` on a constructor without fields; RecordWildCards in expressions (`RTSStats{..}`) | Enum, Show, Ptr, Stats, IO.Handle, IO.Handle.Internals, IO.Handle.Text, IO.Handle.FD, IO.Handle.Types (42 of 42 binders); Generics 53 → 9 errors (all `SingKind k`: kinds) |
+| beside them | DataToTag solved for a data type (matchDataToTag: `dataToTagSmall#` below 8 constructors); WithDict (matchWithDict); implicit-parameter bindings `let ?x = e` given to their body; `?callStack` and `?exceptionContext` defaulted at the top (simplifyTop); variable constraints (`cls => r`, `c => DictBox c`) kept as `[:cvar [type]]`; data families generative (never stuck); a family applied beyond its arity decomposed (`Rep a x`, `Rep1 f a`); `e :: sig` checked; promoted lists; a tycon's non-leading invisible kind binder erased (`Code m r a`); naughty record selectors typed `()` (mkOneRecordSelector); default signatures kept apart from methods' types (`lift`'s `r ~ BoxedRep Lifted`) | TH.Syntax (392 of 392), Types, TH.Lift (but its quotes), IO.Exception, IO, Exception.Backtrace, Exception.Type, Conc.Sync, Foreign.Marshal.Pool, Magic.Dict |
+
+### What is left (ghc-internal, the end's run)
+
+21 modules with errors, 1 elaborated with unequal types (Event.Internal, 3 of 7: its types name hidden modules' tycons):
+
+| class | modules | why |
+|---|---|---|
+| names of hidden modules (GHC-87110: the helper cannot load their interfaces; HF9-P2) | Conc.IO, Data.Typeable, Event.IntTable, Event.Manager, Event.Thread, Event.TimerManager, Event.TimeOut (`Unique`'s representation dictionary), Exception.Context, IO.Handle.Lock, Type.Reflection.Unsafe, Unicode (and Event.Internal's types) | oracle: the helper |
+| a synonym the defining module does not export (`CodeBuffer#`, `CodingBuffer#`: the helper's interface omits it; HF9-P5) | IO.Encoding, IO.Encoding.Iconv, IO.Encoding.Latin1, UTF8, UTF16, UTF32 | oracle: the helper |
+| an imported pattern synonym's type (`Fun`; HF9-P2) | Data.Dynamic | oracle: the helper |
+| kinds (HF9-P4, HF9-P6) | Generics (`SingKind k`, 9 errors, its only ones), Data.Typeable.Internal (levity, kind arithmetic of `TypeRep`) | elaborator: slice 5 |
+| Template Haskell quotes (HsUntypedBracket: section 3.9, outside HF9) | TH.Lift (2 errors; its 3 binders equal) | out of scope |
+
+So of the 21, 18 wait for the helper (an oracle-side change, HF9-P2 and HF9-P5), 2 for kinds, 1 for Template Haskell.
+
+### Checks
+
+| check | result |
+|---|---|
+| `bin/repr-haskell lib-check` (ghc-internal, 248 modules, one process) | 227 without an error, 226 all types equal (200 and 198 at the first slice's end) |
+| `bin/repr-haskell lib-check --package base --every 9` | 26 of 26 (99 of 99 binders) |
+| `bin/repr-haskell typecheck-check` | 24 of 24 modules equal, the negative control differs (13 of 24) |
+| `bin/repr-haskell run-check` (`REPR_HASKELL_FRONT_SHARDS=1`, `HSI_LIBS` the unpacked `haskell-stg-libs` of today's records) | 59 of 63 pass, the negative control fails; 62 of 63 as recorded, the one differing the first slice's (`synthetic/primops-word`, `:no-stg`: the StackOverflowError in the STG stage, the same at the branch's start) |
+
+### Proposed (HF9-P5 to HF9-P8; options with costs, a recommendation each, none decided)
+
+- **HF9-P5 What the helper's interfaces leave out (extends HF9-P2).** Besides the hidden modules and the pattern synonyms' types,
+  the `iface` verb writes only the module's *exported* things: a synonym it does not export but its exported types use
+  (`CodeBuffer#`, `CodingBuffer#` of GHC.Internal.IO.Encoding.Types) has no declaration, so its importers' types do not expand
+  (IO.Encoding, Latin1, UTF8, UTF16, UTF32, Iconv: 6 modules, about 230 errors). Options: (a) the second verb of HF9-P2 (b) also
+  writes every type constructor of the module's type environment (GHC's interface has their declarations), its records
+  re-recorded under its own version; (b) the closure takes the missing synonyms from Arbace's own renamed and elaborated
+  defining module (HF10's own interfaces, early). *Recommended: (a)*, with HF9-P2 (b): one new verb, the packs of the first
+  untouched; it moves 17 to 18 modules (hidden names 11, these 6, Data.Dynamic's `Fun`) out of the oracle's class.
+- **HF9-P6 Kinds (revisits HF9-P4).** Erased kinds now block two modules the elaborator otherwise types: GHC.Internal.Generics
+  (`SingKind k`, a class over a kind: `fromSing (sing :: Sing nt)`) and Data.Typeable.Internal (`TypeRep (a :: k)`'s kind
+  arithmetic, levity); the data family `Sing`'s instances differ only by kind, so their representation tycons collide. Options:
+  (a) keep erasure, these two in a recorded class `:kinds`; (b) kinds proper (Tc/Gen/HsType's kind checking, the
+  invisible arguments kept as types; 3 to 6 days, the survey's slice 5). *Recommended: (a) until HF10's Typeable bindings
+  need (b)*.
+- **HF9-P7 Deriving Data, Generic and Lift's code.** The instances' heads and contexts are entered (what the measure
+  judges); their methods (gen_Data_binds, GHC.Tc.Deriv.Generics' `Rep` instance with `from` and `to`, gen_Lift_binds) are not
+  generated, so the core lacks them. Options: (a) port them with slice 7 (desugaring and STG of the new forms), where STG needs
+  them; (b) now, unmeasured by lib-check. *Recommended: (a)*.
+- **HF9-P8 The measure as a check (revisits HF9-P1).** The whole run is now about 12 minutes (592 s) instead of 75 minutes. Options as
+  HF9-P1's; *recommended: HF9-P1 (a)*, the results recorded (`--record test/haskell/lib-check-ghc-internal.edn`, from this
+  slice's end) and the step's budget the night's.
