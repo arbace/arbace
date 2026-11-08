@@ -1540,3 +1540,45 @@ replaced, 1 cut); the closure scan; the encoder on the frozen JVM over six tests
 `bin/jrt test` (arbace/jrt ok, classdata_test's three new tests); `go vet ./jrt` amd64 and arm64. Expected tonight: about 13
 of F25's 17 interpreted, 11 compiled. Proposed: JCS270-JCS274 (the JDK's members' Signatures, type annotations as recorded
 bytes with a ConstantPool, getDeclaredClasses' order, AccessFlag and Parameter, `:nio`'s remainder).
+
+## 2026-11-08: Java's accepted proposals built, JCS265 (b), JCS263 (JMX-1), JCS273 (AccessFlag), JCS271 (b) (branch `java-more`)
+
+The user accepted these on 2026-11-08 at about 21:00 (doc/classes/JAVA-CONFORMANCE-SURVEY.md, "Decided (the user,
+2026-11-08, about 21:00): JCS260-JCS265"; doc/classes/JAVA-DEFERRED-TRIAGE.md, "Decided ...: JCS270-JCS274, and JCS263").
+
+**The branch and its merges.** `java-more` started from `mac/java-props` (`a9aebc62f`, the Java night's input until now);
+`mac/java-j2g` (`2dfcbe268`, JCS69 (b)) and `mac/java-refl` (`6d51db05b`, F25) merged into it, neither containing
+java-props (both from java-night `639d42ab9`). Conflicts: doc/JOURNAL.md and JAVA-CONFORMANCE-SURVEY.md (java-j2g), doc/JOURNAL.md
+and JAVA-DEFERRED-TRIAGE.md (java-refl), each an append at the file's end on both sides, resolved by keeping java-props' text
+first and the other's after it; `go/arbace/jrt.ae`'s `:test-files`, the union (proxy_test.go, classdata_test.go). jrt's
+manifest, manifest_test, reflect_tables and test/jrt/manifest.ae auto-merged (Proxy's getInvocationHandler beside F25's
+generic members, disjoint lines). java-more is the Java night's input in place of java-props.
+
+**JCS265 (b)**: `bin/j2g --analyze-only` (the load and its failures, no translation; GOMEMLIMIT 1800MiB, no heavy lock;
+`J2G_SOURCES`), `bin/java-check --analyze-only` (a shard's analysis attributed as the compiled level's refusals), unit
+tests; java.check's refusals now take a class's root failure first. The 120 tests java-j2g left refused, measured again:
+120 of 120 refused by the class the world lacks (2.04 GB peak, 15 minutes), 16 of them now reported by their root cause.
+Then the verb over a predicted world (the slices converted by day laid over jdk/forms): 19 of the 27 JMX and SASL tests and 11
+of the 13 AccessFlag and type annotation tests analyze; the prediction found MethodUtil, JavaBeansAccess and
+newPlatformMXBeanProxy, fixed before the night.
+
+**JCS263**: javax.management's core (JMX-1: 166 files of java.management, 21 derived overlays: System.Logger, EnvHelp,
+MethodUtil, JavaBeansAccessor, ThreadInfo; F13's skeletons removed; ManagementFactory's platform server and
+newPlatformMXBeanProxy); SASL needs nothing beyond F23's slice. **JCS273**: AccessFlag (derived without java.lang.classfile,
+ClassFileFormatVersion, jrt's AccessFlagSupport, j2g's accessFlags methods). **JCS271 (b)**: the RuntimeVisibleTypeAnnotations
+bytes and their pool entries recorded (`Y`, `N` records; 28 of 29 of a sample's annotations equal javac's, the 29th
+stage 0's world), jdk26u's sun.reflect.annotation over jrt's own ConstantPool and TypeAnnotationData natives, j2g's 11
+getAnnotated* methods, TypeVariableImpl's annotation members jdk26u's again. All write-ahead: checked by the joint javac
+check (2,749 files, 0 errors), `read-jdk --check` (306 files, 0 failed, `--no-javac` identical), `bin/jrt-convert derive
+--check` (50), `bin/jrt test` (arbace/jrt ok), `go vet ./jrt` (amd64, arm64), bin/j2g-unit (20); the conversion, the edge, the
+build and the levels are the night's (the triage's "The night's commands (java-more)").
+
+Alternatives considered: re-measuring the 120 with a scratch loader again (JCS265 (a): rejected, the verb is the decision);
+JMX's connectors with it (RMI is JCS132's and JCS255's; rejected); MethodUtil translated (its trampoline defines a class from
+bytes, which the closed world cannot; Method.invoke is the call it makes); AccessFlag over java.lang.classfile whole (JCS260
+waits); type annotations as text records with a TypeAnnotationParser variant (JCS271 (a), not chosen by the user); the
+type annotations' Proxy objects replaced by F14's `C_ann` (it would change AnnotationParser; jdk26u's Proxy path runs since
+JCS170). Proposals JCS280-JCS285 in the triage: Parameter (JCS280), the platform server's other beans (JCS281), a committed check
+of the type annotation records (JCS282), a prediction verb (JCS283), JMX's connectors and HotSpot's beans (JCS284), `bin/jrt
+test` within the day's budget (JCS285).
+

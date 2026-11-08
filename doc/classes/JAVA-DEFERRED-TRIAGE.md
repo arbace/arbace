@@ -5161,3 +5161,212 @@ to j2g (the action's flags), the names recorded then (1.5 days). Recommended: Ac
 After F9 `:nio` keeps 11: jdk.charsets' three (JCS146 (b): later), FFM's MemorySegment (by design with JCS95's
 java.lang.foreign), F23's java.security file, and singles. Recommended: reclassify them by their pieces after the night's
 record (`:charsets-locales`, `:security`, `:classloader`), closing `:nio` as a class of its own.
+
+## Decided (the user, 2026-11-08, about 21:00): JCS270-JCS274, and JCS263
+
+- **JCS270 (a)**: the JDK's members' Signatures stay unrecorded until a test asks.
+- **JCS271 (b)**: type annotations as the class file's bytes and a ConstantPool over the recorded entries, jdk26u's
+  TypeAnnotationParser unchanged: built below ("As built: JCS271 (b) (write-ahead)").
+- **JCS272 (a)**: getDeclaredClasses keeps its name order.
+- **JCS273**: AccessFlag first (a variant cutting java.lang.classfile), then Parameter (`-parameters` passed through):
+  AccessFlag built below ("As built: JCS273 (write-ahead)"); Parameter is JCS280's.
+- **JCS274**: `:nio`'s rest reclassified by its pieces after the night's record.
+- **JCS263** (doc/classes/JAVA-CONFORMANCE-SURVEY.md): world slices for javax.management (built below, "As built: JMX-1")
+  and javax.security.sasl (F23's slice already holds every class its 8 tests name).
+
+## As built: JMX-1 (write-ahead): javax.management's core (JCS263; branch `java-more`, 2026-11-08)
+
+By day under the light rules: nothing converted into jdk/, nothing translated or built; the slice's files read and analyzed
+by day as below, the night converts them.
+
+**The slice** (`test/jrt/jrt_sources.ae`'s `jmx-sources`, jdk26u `baf63fb`'s `src/java.management/share/classes` translated as
+java.base's: 166 files of java.management beyond F13's 25, and JavaBeansAccess): javax.management's API whole (86 with F13's
+three exceptions: the MBean server and its factory and builder, standard and dynamic MBeans, MXBeans, notifications,
+queries, descriptors, the permissions), javax.management.openmbean (25), loading (3), timer (5), com.sun.jmx.mbeanserver (31: the introspectors, the MXBean mappings over F25's generics, the repository, the
+instantiator), com.sun.jmx.interceptor (2), com.sun.jmx.defaults (2), com.sun.jmx.remote.util's EnvHelp and ClassLogger,
+com.sun.jmx.remote.security's NotificationAccessController; sun.management's LazyCompositeData, MappedMXBeanType and the
+composite data of MemoryUsage, MemoryNotificationInfo, LockInfo, MonitorInfo, ThreadInfo and StackTraceElement;
+java.lang.management's MemoryUsage, LockInfo, MonitorInfo (F13's overlays without their open data removed) and
+MemoryNotificationInfo; jdk.internal.access.JavaBeansAccess. F13's skeletons javax.management.ObjectName and
+openmbean.CompositeData are gone (jdk26u's in their place). Not in it: the connectors (javax.management.remote, com.sun.jmx.remote's
+rest: RMI, JCS132), the model, monitor and relation services, com.sun.management's HotSpot beans.
+
+**Derived** (`test/jrt/derive.ae`, JCS166 (a)'s mechanism; `bin/jrt-convert derive --check`: 50 overlays, 0 not as derived,
+the control failing as it must): System.Logger as `jdk.internal.jrt.SystemLoggers.Logger` (F24's rule) in JmxProperties,
+ClassLogger and the 12 files that import `System.Logger.Level`; EnvHelp without the connectors' factories (their two attribute
+names written as their values); `sun.reflect.misc.MethodUtil.invoke(m, obj, args)` as `m.invoke(obj, args)` (MethodUtil's
+trampoline defines a class from bytes: no class loader in the Go build) in ConvertingMethod, DefaultMXBeanMappingFactory,
+Introspector, StandardMBeanIntrospector and OpenMBeanAttributeInfoSupport; JavaBeansAccessor's access none (java.beans is not in
+the Go build: isAvailable false, as on a JDK without java.desktop); ThreadInfo, F13's overlay, now jdk26u's text with F13's
+factory for jrt's ThreadImpl inserted (its open data back).
+
+**jrt's ManagementFactory** (overlay) gains jdk26u's `getPlatformMBeanServer` over its table of beans (the threads', the
+runtime's, the operating system's, each registered by jdk26u's `addMXBean` under its own `getObjectName()`) and jdk26u's
+`newPlatformMXBeanProxy` (JMX.newMXBeanProxy over a connection). The platform server's other components (memory, class
+loading, compilation, the collectors and pools, logging, buffer pools) are F13's later slices, as before.
+
+**Checked by day.** The joint javac check (`.tmp/night7/all9-run.sh`): 2,749 files with this branch's other slices, 0
+errors. `bin/repr-java read-jdk --check` of the slice with its context (java.util.logging, sun.management's overlays, jrt's
+SystemLoggers and HostManagement; `REPR_JAVA_PATCH_ALL=1`, one chunk): 228 converted, 0 failed, 0 javac errors; `--no-javac`
+the same forms byte for byte. j2g's analysis of the slice by `bin/j2g --analyze-only` over jdk/forms with the converted
+slice laid over it (doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JCS265 (b)"): the first run named MethodUtil (6
+classes), JavaBeansAccess and newPlatformMXBeanProxy, fixed above; the second, none of the slice's classes but Introspector's
+UndeclaredThrowableException (JCS170's, converted tonight). Of the 19 javax.management and java.lang.management tests
+refused, 11 analyze; the 8 others need the connectors (2), HotSpot's beans (4), getPlatformMXBean over a connection (1) or
+the edge (1).
+
+**Expected**: of the 11 that analyze, about 7 pass interpreted and compiled (DuplicateGetterTest, AttributeListTypeSafeTest,
+MBeanExceptionTest, ImmutableDescriptorSerialHashCodeTest and MemoryUsageCompositeData plainly; CustomQueryTest and
+PreRegisterNameTest over the platform server; PostExceptionTest's URLClassLoader and the deadlock tests' timing are the
+risks); the interpreted level's count comes from the same world.
+
+## As built: JCS273 (write-ahead): AccessFlag
+
+`java.lang.reflect.AccessFlag` derived (test/jrt/derive.ae): the imports of java.lang.classfile's models and of
+ModuleDescriptor, which only its documentation names, dropped, ClassFile's access flags imported from jrt's own
+`jdk.internal.jrt.ClassFileAccess` (the same names and values, JVMS 4.1-4.7); jdk26u's `ClassFileFormatVersion` in the
+closure (`accessflag-sources`). `jdk.internal.jrt.AccessFlagSupport` (overlay) holds jdk26u's `Class.accessFlags`,
+`Executable.accessFlags` and `Field.accessFlags` over `ReflectionFactory.parseAccessFlags`, the closed world's facts in place
+of the VM's: a class's class file version is javac 26's (major 70, minor 0: `ClassFileFormatVersion.latest()`), and its class
+file access flags (`getClassFileAccessFlags`) are its modifiers with ACC_SUPER on every class that is not an interface, as javac
+writes them. j2g writes `AccessFlags__Set` on jrt's Class, Method, Constructor and Field (`arbace.j2g.out/support-forms`) and
+their member table entries once AccessFlag and AccessFlagSupport are translated, AccessFlagSupport's three methods roots
+(main's scan and roots). Checked: the joint javac check; `read-jdk --check` of the four files, 0 failed, `--no-javac` the same;
+bin/j2g-unit's tables; on the predicted world t04830, t04831 and t04835 analyze, t04832 names Parameter (JCS280). Expected: 3
+pass (ClassAccessFlagTest's nested classes rest on F25's InnerClasses flags; FieldAccessFlagTest; VersionedLocationsTest is
+AccessFlag's own tables).
+
+## As built: JCS271 (b) (write-ahead): type annotations as the class file holds them
+
+**Slice 1, the data** (`arbace.classes.annot/type-annotation-lines`, in `class-data` beside F14's and F25's records; format in
+`go/arbace/jrt/classdata.ae`'s header): `Y T HEX`, `Y M NAME DESC HEX`, `Y C DESC HEX`, `Y F NAME HEX`, each a
+RuntimeVisibleTypeAnnotations attribute's info (JVMS 4.7.20: target_type and target_info from the analysis' ASM type
+reference value, the type_path from its path string, the annotation and its element values JVMS 4.7.16's), and `N` records,
+the constant pool entries they index (Utf8, Integer, Long, Float and Double as raw bits), in index order from 1, a Long or
+Double taking two indices, each constant once. Only RUNTIME annotations (reflection reads no RuntimeInvisibleTypeAnnotations),
+each resolved alone (`*lenient*`). Both writers carry them: j2g (ClassInfo.Annots) and the interpreter's host. **Checked by
+day against javac**: a sample with every declaration target (class and method type parameters and their bounds, the
+superclass and interfaces, fields, returns, receivers, formal parameters, throws), every path step (arrays, nested types,
+wildcard bounds, type arguments) and every element value kind, compiled by the JDK's javac and read by repr/java; the class
+files' attributes and Arbace's records both resolved through their pools (a scratch reader, `.tmp/ta/scripts/norm.py`) and
+compared: **28 of 29 annotations equal**; the 29th, `@B(e = ElementType.METHOD)`, encodes as a string on stage 0, whose world
+does not know java.lang.annotation.ElementType as an enum (F14's closure, tonight; the sample's own enum, `Color.GREEN`,
+encodes as javac's `e`).
+
+**Slice 2, the reading.** jdk26u's `sun.reflect.annotation` in the closure (`type-annotation-sources`: AnnotationParser,
+AnnotationInvocationHandler, AnnotatedTypeFactory, TypeAnnotation, the exception proxies) with java.lang.reflect's
+AnnotatedArrayType, AnnotatedParameterizedType, AnnotatedTypeVariable and AnnotatedWildcardType; three derived where jdk26u asks
+the VM through JavaLangAccess: TypeAnnotationParser (the raw bytes and the pool from `jdk.internal.jrt.TypeAnnotationData`),
+AnnotationType (its per-class slot a map; an annotation type's @Retention and @Inherited from the recorded declaration
+annotations, where jdk26u parses the raw ones) and AnnotationSupport (a superclass's declared annotations from
+getDeclaredAnnotations). jrt's own: `jdk.internal.reflect.ConstantPool` (getSize, getIntAt, getLongAt, getFloatAt,
+getDoubleAt, getUTF8At over the entries), `jdk.internal.jrt.TypeAnnotationData` (natives `bytes0`, `pool0` in classdata.ae
+decoding the Y and N records), `jdk.internal.jrt.TypeAnnotationSupport` (jdk26u's getAnnotatedSuperclass,
+getAnnotatedInterfaces, getAnnotatedReturnType(0), getAnnotatedReceiverType with Constructor's, parameterize,
+getAnnotatedParameterTypes with getAllGenericParameterTypes' branch without MethodParameters, getAnnotatedExceptionTypes,
+Field.getAnnotatedType). j2g writes the 11 methods of jrt's Class (2), Field (1), Method and Constructor (4 each) and their
+member table entries once TypeAnnotationParser and TypeAnnotationSupport are translated, the 7 support methods roots.
+TypeVariableImpl's variant is down to getGenericDeclaration: its getAnnotations, getAnnotation, getAnnotationsByType and
+getAnnotatedBounds are jdk26u's again (F25's placeholders in ReflectSupport removed). The annotations a type annotation gives
+are jdk26u's Proxy objects (AnnotationParser.annotationForMap, JCS170's Proxy over Dyn); declaration annotations stay F14's
+`C_ann` objects.
+
+**Checked by day**: the joint javac check, 2,749 files, 0 errors; `read-jdk --check` of the three slices with their
+context (306 files), 0 failed, 0 javac errors, `--no-javac` identical; `bin/jrt test --arch amd64`: arbace/jrt ok (the
+natives compiled and vetted; the crops' expat, pyexpat and oi fail by themselves, as on next); `go vet ./jrt` clean for
+amd64 and arm64; bin/j2g-unit 20 of 20. On the predicted world: TypeVariableImpl's variant applies (1 replaced, 0 cut, 0
+added), AnnotationParser, TypeAnnotationParser, AnnotationType, AnnotationInvocationHandler and TypeAnnotationSupport analyze;
+the annotated types' bridges need AnnotatedElement's generics in the edge (`bin/j2g-edge update`, tonight, as F25's) and
+AnnotationSupport F14's AnnotationFormatError (tonight's conversion). Of the 9 type annotation tests, 8 analyze (t04723 names
+Parameter). **Expected**: about 5 of the 9 pass at interp and compiled (the Annotated*Type tests compare toString and equals of
+the annotated types and annotations: AnnotatedTypeFactory's and AnnotationInvocationHandler's own code, translated).
+Not checked by day: the natives' decoding against the encoder (no executable has both; the night's smoke below), the Proxy
+annotations at the compiled level.
+
+### The night's commands (java-more)
+
+In the Java night's worktree with `java-more` as its input (it holds java-props, java-j2g and java-refl), heavy ones under
+`bin/heavy-lock`, after the other branches' steps (one conversion and one build take every area):
+
+```sh
+# 0. the joint javac check (expect 2,749 files, 0 errors) and the derivations (50, 0 not as derived)
+/root/arbace/.tmp/night7/all9-run.sh $PWD && bin/jrt-convert derive --check
+# 1. jdk/ converted afresh: + JMX-1's 167 (jmx-sources) and derived overlays, AccessFlag's 4, the type annotations' 18 with
+#    jrt's TypeAnnotationData, TypeAnnotationSupport, ConstantPool; 0 failed, 0 javac errors; the module table again
+#    (javax.management.openmbean, .loading, .timer, com.sun.jmx.* java.management's)
+REPR_JAVA_EXE=$(ls -td /root/arbace/.tmp/gate-exe/javac-*/ | head -1)arbace-javac REPR_JAVA_STALE_OK=1 \
+  ARBACE_HEAVY_CMD=$PWD/bin/heavy-lock bin/jrt-convert update && bin/jrt modules
+# 2. the edges (AnnotatedElement's generics, JMX's JDK classes)
+bin/heavy-lock bin/j2g-edge update && bin/heavy-lock bin/javac-vendor edge
+# 3. the executable; report.edn: no :analysis-failures of javax/management, com/sun/jmx, sun/management,
+#    sun/reflect/annotation, jdk/internal/jrt/(TypeAnnotation|AccessFlag)Support, java/lang/reflect/AccessFlag;
+#    variant TypeVariableImpl 1/0/0
+bin/heavy-lock bin/arbace-go --build && bin/arbace-go --smoke && bin/jrt test
+grep -A12 ':analysis-failures' target/arbace-go/amd64/j2g/report.edn
+# 4. smokes: expect "[PUBLIC, FINAL, SUPER]", a JVM name, and the annotated superclass's type
+target/arbace-go/amd64/arbace -e '(println (str (.accessFlags String))
+  (.getAttribute (java.lang.management.ManagementFactory/getPlatformMBeanServer) (javax.management.ObjectName. "java.lang:type=Runtime") "VmName")
+  (str (.getType (.getAnnotatedSuperclass java.util.ArrayList))))'
+# 5. the levels on the areas, saved, not recorded: expect about 7 of JMX's 11, 3 AccessFlag, 5 type annotations, F23's SASL
+JAVA_CHECK_EXE=$PWD/target/arbace-go/amd64/arbace J2G_GO_EXE=$PWD/target/arbace-go/amd64/arbace \
+  JAVA_CHECK_HEAVY=$PWD/bin/heavy-lock bin/java-check --levels interp,compiled --jobs 8 \
+  --only 'jdk/javax/management|jdk/java/lang/management|jdk/com/sun/management|javax/security/sasl|jdk/java/lang/reflect/(AccessFlag|Parameter|TypeAnnotation)|jdk/java/lang/annotation/typeAnnotations' \
+  --save .tmp/more-night/check
+# 6. the 120 analyzed again on the night's world, light (JCS265 (b)): what each still lacks
+bin/java-check --levels read,compiled --analyze-only --list .tmp/an/still.txt --shard-size 30 --jobs 2 --save .tmp/more-night/an120
+```
+
+**Risks and fallbacks.** (1) JMX's introspection leans on reflection jrt answers from tables (getMethods' order, generic
+returns through F25, Proxy through JCS170): a wrong answer fails a test, not the build. (2) A JMX class j2g refuses tonight
+(report.edn) takes its tests to `:j2g-unresolved`'s successor class; the slice's revert is one commit (jrt_sources' two lines,
+the overlays and derivations) and gives F13's skeletons back. (3) The type annotation natives decode what the encoder writes;
+should a test's annotations come out empty, the night's step 4 shows whether the records reached ClassInfo.Annots (`Y`
+lines) before the parsers are looked at.
+
+### Proposed (java-more): JCS280-JCS285
+
+#### JCS280 Parameter
+
+`java.lang.reflect.Parameter` blocks t04723 and t04832 beside its own four tests (t04717, t04868-t04870, t05910). Without
+MethodParameters an executable's parameters are synthesized (`arg0`..., modifiers 0: jdk26u's synthesizeAllParams); with
+`@compile -parameters` (CaptureTest, t05910) javac writes them. (a) Parameter in the world with synthesized parameters only
+(Executable.getParameters over the parameter count; Parameter.getAnnotatedType through getAnnotatedParameterTypes) — half a
+day, but a translated Parameter calls them through Executable, whose Go interface is jrt's hand-written Executable_I: j2g's
+support forms must add the methods there (a jrt edit beside them); (b) (a) and MethodParameters recorded (`R` records of the
+analysis' parameter names and flags when the test's action passes `-parameters` to the read and j2g) — 1.5 days. Recommended:
+(a) now, (b) with JCS273's decision's second half.
+
+#### JCS281 The platform MBean server's other beans
+
+getPlatformMBeanServer registers the threads', runtime's and operating system's beans; the PlatformLoggingMXBean tests (t04792,
+t04793) and most of `jdk/java/lang/management` need logging, memory, class loading and the collectors registered too.
+(a) F13's later slices as planned; (b) the logging bean now (jdk26u's ManagementFactoryHelper.PlatformLoggingImpl over F5's
+LogManager), and getPlatformMXBean(s) over a connection. Cost: (b) half a day. Recommended: (b), after the night's record of
+JMX-1.
+
+#### JCS282 A committed check of the type annotation records
+
+The encoder was compared with javac's class files by hand (`.tmp/ta`). (a) as now; (b) the sample and its javac attributes,
+normalized as data (recorded by hand with the JDK, as test/java's ref-jdk26.edn is), committed under test/jrt/, and a light
+check on stage 0 comparing the encoder's records with them (no javac at check time), in bin/j2g-unit or a gate step. Cost:
+(b) half a day. Recommended: (b).
+
+#### JCS283 A prediction verb
+
+The predicted world (the changed closure files converted and laid over jdk/forms, then `--analyze-only`) found three gaps
+before the night. (a) by hand, as now; (b) `bin/jrt-convert predict [PATH...]` (the files changed since a commit, their
+context from the closure, a scratch world, and `bin/java-check --analyze-only` over the tests of a list). Cost: (b) half a
+day. Recommended: (b).
+
+#### JCS284 JMX's remote connectors and HotSpot's beans
+
+t07843, t07954 (javax.management.remote's RMI connector), t07844, t07845, t07848, t07854 (com.sun.management's GcInfo,
+HotSpotDiagnosticMXBean, VMOption). (a) by design: RMI is JCS132's, the HotSpot beans describe HotSpot; (b) deferred with
+JCS255 (RMI). Recommended: the connectors deferred with RMI, HotSpot's beans by design.
+
+#### JCS285 `bin/jrt test` within the day's budget
+
+`bin/jrt test --arch amd64` tests every package of the module: 4.9 GB peak over its processes (go's compiles), above the day's
+2 GiB. (a) as now (by night, or accepted by day); (b) `--package P` (go test of one package, `-p 1`), the day's form. Cost:
+(b) an hour. Recommended: (b).
+

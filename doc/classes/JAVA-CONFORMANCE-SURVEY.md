@@ -4185,3 +4185,60 @@ before its conversion):
 6. **JCS265, a day-light analysis verb**: `bin/j2g --analyze-only` (the load and its failures, no translation), which this
    measurement wrote as a scratch script (2.1 GB for jdk/forms and 30 tests; j2g's translation needs more than 2 GiB even
    for one test). (a) Scratch, as now; (b) the verb, documented. Cost: (b) an hour. Recommended: (b).
+
+## Decided (the user, 2026-11-08, about 21:00): JCS260-JCS265
+
+- **JCS260 (b)**: java.lang.classfile into the closure, after the open slices (the Java night's F9, F10b, F14, JCS164,
+  JCS167, F23, F24, F25, JMX-1, JCS271 (b), JCS273): not now.
+- **JCS261 (a)**: ToolProvider's compiled tests wait until the javac-tool shard is measured by night.
+- **JCS262 (b)**: the edge's gaps for the tests' classes (MulticastChannel, ObjectOutputStream's and CountDownLatch's
+  generics, and since JCS265's re-measure Thread.UncaughtExceptionHandler's) recorded by a frozen-JVM night command, with
+  java-net's DatagramChannel work (not this branch).
+- **JCS263**: world slices for javax.management (JMX-1, built: doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JMX-1
+  (write-ahead)") and javax.security.sasl (F23's `sasl-sources` already cover all 8 tests' classes: checked, nothing to
+  add).
+- **JCS264 (a)**: no method-level stubs for an unresolved class.
+- **JCS265 (b)**: the verb, built below.
+
+## As built: JCS265 (b), `bin/j2g --analyze-only`, and the 120 refused tests measured again (2026-11-08, branch `java-more`)
+
+**The verb.** `bin/j2g --analyze-only` (J2G-SPEC §4.1, "The analysis alone") runs `w/load-world` and stops: no
+reachability, no translation, no Go; `OUT/report.edn` holds `:analyze-only true`, `:files`, `:classes`,
+`:analysis-failures` (a translation's format, `[class message]` pairs), `:variants` and `:times {:load s}`, each failure
+also printed (`j2g: analysis failure CLASS: MSG`); the status is 0, `--program` embeds nothing, `GOMEMLIMIT` defaults to
+1800MiB and no heavy lock is taken. `J2G_SOURCES` loads namespaces from the checkout before j2g's (`arbace.classes.analyze`
+on stage 0, whose analysis predates `*lenient*`: as bin/j2g-unit's `J2G_UNIT_SOURCES`). `bin/java-check --levels
+read,compiled --analyze-only --save DIR [--shard-size 30]` runs it a shard at a time (`analyze_shard`: jdk/forms, or
+`JRT_CONV`, and the shard's test forms; no runtime forms and no compiled namespaces, which no jtreg test names), attributes
+the failures as the compiled level's refusals (`java.check/refusals`) and saves each test `refused` (j2g's reason) or
+`analyzed`; never judged or recorded (`--analyze-only` without `--save` or the compiled level is refused). The
+attribution takes a class's own `header`/`members`/`bridges` failure before the analysis failures (`root-first`): an outer
+class whose method meets a member class's unresolved members fails with "Cannot convert value of method  of type :null",
+which names no class for `world/unresolved-cause`; 16 of the 120 were reported by that symptom before. Unit tests:
+`bin/j2g-unit`'s `analyze-only` checks (5: the report written and marked, status 0, Holder's members failure and User's
+named cause, nothing translated, 3 classes counted) and the support tables' (4), 20 checks in all, all pass.
+
+**The re-measure.** The 120 tests java-j2g left refused (`still.txt`), on this branch (java-props + java-j2g + java-refl)
+with its committed jdk/forms, on main's stage 0 with `J2G_SOURCES=arbace.classes.analyze`, their forms from java-j2g's read
+cache (the read 120 of 120 pass): `bin/java-check --levels read,compiled --analyze-only --list still.txt --shard-size 30
+--jobs 2 --save .tmp/an/save120`, 4 shards, 14 min 56 s, peak 2.04 GB (2,061,096 kB summed over the process group; one
+process). **120 of 120 still refused**, each by the class the world lacks, the same cause as java-j2g's for 104 and the root
+cause of the other 16 now (java.lang.classfile 21 + 3, javax.management 12 + openmbean 2 + remote.rmi 1, com.sun.management
+3, java.lang.management's getPlatformMBeanServer 1, MulticastChannel 9, ToolProvider 9, javax.security.sasl 8, java.net.http
+4, java.nio.channels 4, java.rmi 5, javax.tools 4, java.lang.reflect 3, java.nio.file 3 + Files.list 1, kerberos 3,
+com.sun.jdi 3, com.sun.net.httpserver 3, the edge's generics 3, java.lang.ref 2, one each in sun.misc, java.lang.invoke,
+jdk.net, java.util, javax.lang.model, javax.naming (2), com.sun.nio.sctp, javax.xml (4: xpath, parsers, transform, dom) and
+jdk.dynalink): jdk/forms is the same world java-j2g measured (the night converts).
+
+**The night's world predicted by day.** The verb's use beyond the measure: the slices' files converted by day
+(`bin/repr-java read-jdk --check`, a few hundred files with their context, as the convert step reads them) and laid over a
+copy of jdk/forms (`JRT_CONV`), the refused tests analyzed on it. JMX-1, AccessFlag (JCS273) and type annotations (JCS271
+(b)) with F23's SASL (doc/classes/JAVA-DEFERRED-TRIAGE.md's "As built" sections): of the 27 javax.management, com.sun.management
+and javax.security.sasl tests, **19 analyze** (the 8 SASL, 11 JMX: t04783, t04793, t07933, t07935-t07939, t07943, t07950,
+t07957); 8 stay refused (the remote connectors t07843, t07954; HotSpot's beans t07844, t07845, t07848, t07854;
+newPlatformMXBeanProxy's MBeanServerConnection overloads of getPlatformMXBean, t04792; the edge's generics of
+Thread.UncaughtExceptionHandler, t07956: JCS262). The prediction also found what j2g would have refused tonight, fixed before
+the night: `sun.reflect.misc.MethodUtil` (5 files), `JavaBeansAccess`, `newPlatformMXBeanProxy`. Of the 13 AccessFlag and type
+annotation tests, **11 analyze** (t04830, t04831, t04835; t04731, t04733, t04734, t04738-t04742); t04723 and t04832 name
+java.lang.reflect.Parameter (JCS280). Analyzing is not passing: translation, Go and the run are the night's.
+

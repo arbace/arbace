@@ -3333,6 +3333,16 @@ D6's other cuts were reversed one by one (the status at the top, B1-PLAN.md D6).
     besides; java.lang.annotation.Annotation and java.lang.reflect.AnnotatedElement are jrt's
     hand-written interfaces. The bullets below (generic reflection, exception types) still hold;
     type annotations, `Parameter` and `AccessFlag` are F14's later slices;
+  - **R16 reversed for type annotations** (JCS271 (b), 2026-11-08; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built:
+    JCS271 (b) (write-ahead)"): the same data holds each class's and member's RuntimeVisibleTypeAnnotations
+    attribute as the class file holds it (`Y` records, its bytes in hex) and the constant pool entries it indexes
+    (`N` records), so that jdk26u's TypeAnnotationParser, AnnotationParser and AnnotatedTypeFactory, translated,
+    read them through jrt's own `jdk.internal.reflect.ConstantPool` (`jdk.internal.jrt.TypeAnnotationData`'s
+    natives decode the records); j2g writes the `getAnnotated*` methods of jrt's Class, Method, Constructor and
+    Field (`arbace.j2g.out/support-forms`, with their member table entries) over `jdk.internal.jrt.
+    TypeAnnotationSupport` once TypeAnnotationParser is translated; their annotations are the JDK's Proxy
+    objects (AnnotationParser.annotationForMap over §5.12's `Dyn`), where declaration annotations stay `C_ann`;
+    likewise `accessFlags` (JCS273: jrt's `AccessFlagSupport` once `AccessFlag` is translated);
   - generic reflection returns plain `Class` objects: `getGenericInterfaces` and
     `getGenericSuperclass` give the classes in a `Type[]` and as a `Type`, so no
     `ParameterizedType` is ever seen (`HashMap.comparableClassFor` finds none and orders tree
