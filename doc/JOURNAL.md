@@ -791,3 +791,25 @@ third of the concurrent tests, every twentieth other pass) 66 of 67, main's hsi 
 night's `bin/hsi check ... --record`: the testsuite's core 658 of 701 (652), the record 796 of 908; the divergences' edits and the night's
 commands in doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: HE9 on main (write-ahead)". HE9's 666 counted 11 programs whose references
 main's record-ref cannot build (the C includes GHC's `_stub.h`): HES83 proposed.
+
+## 2026-11-08: C++ and LLVM IR re-pinned to clang 23.1.5 (branch `cpp-repin`, from next bd33e27cc)
+
+The user decided (2026-11-08) to follow the host: Alpine's `clang23` is 23.1.5-r0 (with `llvm23`, `llvm23-libs`, `clang23-libs`, `clang23-headers`), the pins
+said 23.1.4, and `bin/gate --pins` failed on C++ and LLVM alone. The network was allowed for this task only; fetched:
+- `https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.5/llvm-project-23.1.5.src.tar.xz`: 179,220,264 bytes, SHA-256
+  `fb50b1eac93ddeb3aa8dab4cfe324dff74f4a9c2bdee6160c9e36188f8d06a6e` (equal to the digest of the release's assets API), SHA-512 `fae39af4...ab5880`
+  (equal to the line of the APKBUILD), `xz -t` ok, 197,239 tar entries; kept in the main checkout's `.tmp/llvm/`. The `.sig` was not fetched (no gpg).
+- `https://gitlab.alpinelinux.org/alpine/aports/-/raw/03cb9a15bb287ab788d73f542ce1c51d8a22609e/main/clang23/APKBUILD` ("main/clang23: upgrade to 23.1.5",
+  found by the commits API of main/clang23/APKBUILD): SHA-256 `2f6e63a658b3ffb7a99f90916d00b39130df454962f169fd38588a70ac9104ce`, 15,153 bytes; pkgver 23.1.5,
+  pkgrel 0, the six patches' SHA-512s as before; kept in the main checkout's `.tmp/cpp-pins/`.
+- the release metadata (assets API) and the tag object `604d7ddfacefc074968a9ba0d88c667ab31b42bd` (commit `392dfff97d29b59d77e5cac6d4b6ef2585fe7117`, verified).
+Changed: `test/cpp/corpora.edn` (keys `:llvmorg-23.1.5`, `:llvm-test-suite-23.1.5`; tag, commit, sizes, digests, `:alpine-clang23`'s commit, digest, version,
+installed packages; the test-suite tarball's size and SHA-256 from the assets API, still not fetched), `bin/repr-cpp` (version checks, the pin keys; the
+tarball and APKBUILD default to the main checkout's `.tmp/`, so worktrees need no copy), `bin/llvm-corpus`, `bin/llvmi`, `bin/lib/repr-cpp/dg`, the
+Makefile line, the surveys' notes (CPP-SURVEY, LLVM-CROP-SURVEY), AGENDA's proposal 1. Not changed: the ports' origin comments in `arbace/` (they ported
+23.1.4 sources; in `gate_key`), LICENSE.md's origin lines, and every record (below). `test/cpp/host/` already holds 23.1.5's answers.
+`bin/gate --pins` passes. Records made on 23.1.4, to re-record at night: `test/llvm/{ref-lli23,ref-opt23}.edn`, `check-{text,roundtrip,verify}*-linux-amd64.edn`
+(`bin/repr-llvm check ... --record`, as each file's header names), `test/llvm/llvm-test-counts.tsv` (`bin/llvm-corpus scan` against the new tarball) and the
+lists under `.tmp/llvm/lists`/`test/llvm/essential*` against it, `test/llvm/ir/{c,tx}.cmd` and the IR packs (`bin/llvmi ir-make`), `test/cpp/check-dg-linux-amd64.edn`
+and `divergences-dg.edn` (`bin/ci`-style dg run, `bin/repr-cpp dg --record`), `test/cpp/runtime/ir.sha256` and `units.edn` (`bin/cppi runtime-build --update`),
+`test/rust/runtime/std.edn` (`:clang` line), and the oracle packs of cpp-ir-* (`bin/oracle-records`). The old 23.1.4 tarball in `.tmp/llvm/` stays until those are done.

@@ -346,7 +346,7 @@ repr-rust-native-check: ## the native reader (rustc's lexer and parser ported to
 	bin/repr-rust native-check
 repr-rust-native-errors: ## the native reader's first error of each file against rustc's (bin/repr-rust native-errors [--edition E] FILES=...)
 	bin/repr-rust native-errors $(FILES)
-repr-cpp-host-record: ## record g++ 15.2's and clang 23.1.4's answers under test/cpp/host/: predefined macros per standard, search lists, __has_* answers, sizes, libstdc++'s header digests (bin/repr-cpp host record)
+repr-cpp-host-record: ## record g++ 15.2's and clang 23.1.5's answers under test/cpp/host/: predefined macros per standard, search lists, __has_* answers, sizes, libstdc++'s header digests (bin/repr-cpp host record)
 	bin/repr-cpp host record
 repr-cpp-host-check: ## the host's compilers still give test/cpp/host/'s answers and libstdc++'s headers their digests (bin/repr-cpp host check)
 	bin/repr-cpp host check
