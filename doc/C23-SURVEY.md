@@ -5064,7 +5064,7 @@ the night's records (T.7), which also leave `:threads` a guard class.
 | files | cause | fix or class |
 |---|---|---|
 | vprintf-1, vfprintf-1, vprintf-chk-1, vfprintf-chk-1 | refused before CDF.8; read now, and checked by the seed's checker (T.1) | pass with the checkout's checker (classed `cc-undeclared-builtin`) |
-| 20040629-1, tcc 95_bitfields | the re-entered main file (CDF.8) is the unit of the `#include` that entered it, whose items the checker does not annotate; cc's single file gives them at the main file's lines | `:item-placement` (its text extended); quickjs's unicode_gen.c too (T.4) |
+| 20040629-1, tcc 95_bitfields | the re-entered main file (CDF.8) is the unit of the `#include` that entered it, whose items the checker does not annotate; cc's single file gives them at the main file's lines | `:item-placement` (its text extended); quickjs's unicode_gen.c too (read since `*include-inside*`: its tables included inside a declaration). The three entries are the night's patch (T.7, step 4): the committed results file still passes them (refused before CDF.8), and a known entry the results pass is a REAP problem |
 | zlib infback.c, inflate.c | `inffixed.h` included inside `fixedtables`' body: without `*include-inside*` its `lenfix`/`distfix` stayed the directive's, so the body's uses had no declaration (`? x2`, a false error) | `arbace.repr.c.annot/check-file` reads as ci reads (`*include-inside*`, queue 178, CS275 (b)): pass |
 | benchmarksgame fannkuchredux-4, mandelbrot-6, nbody-4, nbody-9, spectral-norm-5, spectral-norm-6 | Arbace's `mm_malloc.h` called `posix_memalign`, which musl's `<stdlib.h>` declares only under a POSIX or GNU feature test macro: at `-std=c99` an implicit declaration | `c/include/mm_malloc.h` declares POSIX's `posix_memalign` itself: pass (`vector-types` classed) |
 
@@ -5097,6 +5097,10 @@ entry's `:gcc` digest, the whole `:gcc` level and `pp-gcc.sha256` as recorded (t
 | `bin/repr-c roundtrip --only` (34 files: the 11, the six self-including files, every gcc-embed file) | 0 failing after the known edits |
 | `bin/ci dg --essential` | 92 of 92 |
 | the two token record tests | pass |
+| `CI_LINK_CHECK=1 bin/ci check --only` (the essential list, ci-run's 17, binary-trees-5: 59 programs) | 0 failing, the link check equal (9 min 20 s) |
+| `bin/ci check --aot --only test/c/essential-aot.txt` | 0 failing (binary-trees-5 now passes) |
+| `bin/repr-c check --c23` | 59 pass, 3 expected, 0 failing |
+| `bin/reap --record` (the known edits; C's print cell: design 5 to 3, deferred 45 to 47), `bin/crops-score --record`, `--judge --strict` | 0 problems; C 95.1% / 100.0% / 99.7% (without by design 98.72% to 98.71%) |
 
 ### T.7 The night's commands (the main session's, in `next`'s worktree after the merge, one at a time)
 
@@ -5106,7 +5110,8 @@ Every `bin/ci` verb now evaluates the checkout's ci on stage 0 (T.1), so the rec
 1. `CI_THREADS=2 bin/ci musl read` (musl's forms under the evaluated ci's key; about 10 minutes, 1.6 GB).
 2. `$H bin/repr-c check --tokens --record` (no gcc since T.5: the `:pp` and `:lex` classes rewritten, the `:gcc` level kept).
 3. `$H bin/repr-c parse-check --record`.
-4. `$H bin/ci annotations --record` (expect no file of no class: T.3).
+4. `git apply /root/arbace/.tmp/worktrees/c-triage/.tmp/night/annot-known-item-placement.patch` (T.3's three `:item-placement`
+   entries), then `$H bin/ci annotations --record` (expect no file of no class).
 5. `REPR_C_THREADS=2 GOMEMLIMIT=1800MiB $H bin/repr-c roundtrip` (a judge run, no gcc: expect exit 0, the deferred entries of T.4
    listed; the two `:eval-limits` reads reach about 3 GB, so not beside another heavy run).
 6. `$H bin/ci check --record`, then `$H bin/ci check --aot --record`, then `$H bin/ci dg --record` (expect T.2's twelve and

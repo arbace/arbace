@@ -757,11 +757,14 @@ cases). Detail in doc/C23-SURVEY.md, "As built: the own target's triage" (T.1-T.
   binary-trees-5 pass at eval and AOT (`bin/ci check [--aot] --only`).
 - **Annotations** (14): four pass with the checkout's checker; zlib's two read as ci reads (`*include-inside*` in
   `arbace.repr.c.annot`); the benchmarksgame six by Arbace's `mm_malloc.h` declaring `posix_memalign` (musl hides it under strict
-  ISO C); 20040629-1, 95_bitfields and quickjs's unicode_gen.c classed `:item-placement`.
+  ISO C); 20040629-1, 95_bitfields and quickjs's unicode_gen.c classed `:item-placement` (their entries the night's patch
+  `.tmp/worktrees/c-triage/.tmp/night/annot-known-item-placement.patch`, applied before `annotations --record`: the committed
+  results still pass them, and a known entry the results pass is a REAP problem).
 - **Round trip** (11): gcc-embed's four by rereading a print by its absolute name when the original was read so
   (`arbace.repr.c.rtcheck`); fprintf-1's two stale entries removed; c23-named-loops-1, 12.S and 13.S deferred to the oracle tier by
   their recorded rows (`bin/lib/repr-c/roundtrip`); limits-externdecl and c23-binary-constants-1 back as `:eval-limits`.
 - **The token check's `--record`** runs gcc only under `ARBACE_C_JUDGE=gcc` and keeps the `:gcc` level otherwise (`ppcheck/record`,
   a test in test/c/judge_test.ae).
+- `bin/reap --record` and `bin/crops-score --record` on the tree for the known edits (0 problems; C 95.1 / 100.0 / 99.7).
 - The night's commands: doc/C23-SURVEY.md T.7 (the records in order, the class's removal by
   `.tmp/worktrees/c-triage/.tmp/night/remove-ci-run-consolidation.patch`, reap, the scores).
