@@ -74,16 +74,52 @@
                         :diff (vec (take 6 (:diff c)))
                         :missing (vec (take 12 (:missing c)))})))))))))
 
+(defn- read-results [files]
+  (vec (for [f files line (str/split-lines (slurp f)) :when (str/starts-with? line "{:name")] (read-string line))))
+
+(defn rank
+  "The measure of a run (its results files): the modules by stage, those that elaborate without an error and with
+  every binder's type equal to GHC's, and the features by the modules whose errors need them (a module counts once
+  per feature; sole: the feature is the module's only one)"
+  [rs]
+  (let [n (count rs)
+        by-stage (frequencies (map :stage rs))
+        clean (filter #(= :ok (:stage %)) rs)
+        equal (filter #(and (= :ok (:stage %)) (:types %) (= (:compared (:types %)) (:equal (:types %))) (zero? (:missing (:types %) 0))) rs)
+        tot (fn [k] (reduce + (map #(get-in % [:types k] 0) rs)))
+        feats (frequencies (mapcat (comp keys :features) rs))
+        errs (apply merge-with + (map :features rs))
+        sole (frequencies (keep #(when (= 1 (count (:features %))) (first (keys (:features %)))) rs))]
+    (println (str "lib-check: " n " modules; " (count clean) " elaborate without an error, " (count equal)
+                  " of them with every type equal to GHC's; binders " (tot :equal) " of " (tot :compared) " equal, "
+                  (tot :missing) " GHC's only; stages " (pr-str (into (sorted-map) by-stage))))
+    (println "feature                                  modules  errors  sole")
+    (doseq [[k c] (sort-by (fn [[k c]] [(- c) k]) feats)]
+      (println (format "%-40s %7d %7d %5d" k c (get errs k 0) (get sole k 0))))
+    (doseq [r rs :when (#{:rename :typecheck} (:stage r))]
+      (println "stopped" (name (:stage r)) (:name r) (subs (str (:msg r)) 0 (min 120 (count (str (:msg r)))))))))
+
 (defn -main
-  "check --plan FILE -o OUT: each module of the plan through the front end, one EDN map a line"
+  "check --plan FILE -o OUT: each module of the plan through the front end, one EDN map a line; rank FILE...: the
+  measure of results files"
   [& args]
   (let [[verb & more] args
-        opts (apply hash-map more)
+        opts (when (even? (count more)) (apply hash-map more))
         out (get opts "-o" ".tmp/repr-haskell/lib-check")]
     (case verb
-      "check" (doseq [line (str/split-lines (slurp (get opts "--plan")))
-                      :when (not (str/blank? line))]
-                (let [r (one (str/split line #"\t") out)]
-                  (binding [*print-length* nil *print-level* nil] (println (pr-str r)))
-                  (flush)))
-      (do (println "usage: -m arbace.repr.haskell.libcheck check --plan FILE -o OUT") (System/exit 2)))))
+      ;; a module over the time limit (--timeout SECONDS, default 900) is recorded :timeout and the process exits 3,
+      ;; its runaway thread with it: the driver goes on with the plan's next module in a fresh process
+      "check" (let [limit (* 1000 (Long/parseLong (get opts "--timeout" "900")))]
+                (doseq [line (str/split-lines (slurp (get opts "--plan")))
+                        :when (not (str/blank? line))]
+                  (let [t0 (System/currentTimeMillis)
+                        task (future (one (str/split line #"\t") out))
+                        r0 (deref task limit nil)
+                        r (assoc (or r0 {:name (first (str/split line #"\t")) :stage :timeout})
+                                 :ms (- (System/currentTimeMillis) t0))]
+                    (binding [*print-length* nil *print-level* nil] (println (pr-str r)))
+                    (flush)
+                    (when-not r0 (System/exit 3))))
+                (shutdown-agents))
+      "rank" (rank (read-results more))
+      (do (println "usage: -m arbace.repr.haskell.libcheck check --plan FILE -o OUT | rank FILE...") (System/exit 2)))))

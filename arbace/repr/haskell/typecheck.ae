@@ -316,7 +316,17 @@
                     k (if (and (= "GHC.Internal.Types" (nth n 2)) (re-matches #"(Tuple|Sum)[0-9]+#" (nth n 3)))
                         (quot (count as) 2)
                         (min (count as) (or (some-> *kind-arity* deref (get n)) 0)))]
-                [:tc n (if (pos? k) (subvec as k) as)])
+                (cond
+                  (= ["ext" "tc" "GHC.Internal.Prim" "FUN"] n)
+                  ;; FUN as a type constructor: its multiplicity and two representations dropped, the elaborator's
+                  ;; function type constructor
+                  [:tc fun-tc (vec (drop 3 as))]
+                  ;; (->), GHC.Internal.Types' synonym of FUN 'Many (instance Category (->)): its two representations
+                  ;; dropped
+                  (= ["ext" "tc" "GHC.Internal.Types" "->"] n)
+                  [:tc fun-tc (vec (drop 2 as))]
+                  :else
+                  [:tc n (if (pos? k) (subvec as k) as)]))
     app (mk-app (conv-type (nth f 1)) (conv-type (nth f 2)))
     fun (if (= 'c (nth f 1))
           (let [p (conv-type (nth f 3)) body (conv-type (nth f 4))
@@ -612,13 +622,28 @@
 ;;; ------------------------------------------------------------------------------------------
 ;;; Converting written types (the renamed tree's HsType)
 
+;; ScopedTypeVariables (HF9): a signature's type variables scope over its binding's body (GHC.Tc.Gen.Bind's
+;; tcPolyCheck brings the skolems into scope; an instance's head variables over its methods, tcInstDecl2): the
+;; renamer gave an inner occurrence the outer binder's Name, so the key of a type variable is its Name's
+;; (occurrence and binding position), as sig-type names them
+(def ^:dynamic *scoped-tvs* {}) ; {"a_L_C_L_C" type}
+;; a pattern signature's free type variables are bound by the pattern (GHC.Tc.Gen.Pat's tcPatSig: fresh metas, in scope
+;; for the rest of the match): per clause
+(def ^:dynamic *pat-tvs* nil)   ; atom {"a_L_C_L_C" type}
+(defn- tv-key [n] (str (occ n) "_" (apply str (interpose "_" (drop 3 n)))))
+
 (defn hs-type
   "An HsType of the renamed tree as a type; tvs maps a type variable's Name to its type"
   [tvs t]
   (let [v (lval t)]
     (case (con v)
       HsTyVar (let [n (nm (arg v 3))]
-                (if (= "tv" (nth n 1)) (or (get tvs n) [:tv (occ n)]) [:tc n []]))
+                (cond (= "tv" (nth n 1)) (or (get tvs n) (get *scoped-tvs* (tv-key n)) (some-> *pat-tvs* deref (get (tv-key n)))
+                                             [:tv (occ n)])
+                      ;; (->) as a type constructor: FUN at the many multiplicity (GHC.Internal.Types' type (->) =
+                      ;; FUN 'Many), the function type's constructor
+                      (and (= "GHC.Internal.Types" (nmod n)) (= "->" (occ n))) [:tc fun-tc []]
+                      :else [:tc n []]))
       HsAppTy (mk-app (hs-type tvs (arg v 2)) (hs-type tvs (arg v 3)))
       HsFunTy (fn-ty (hs-type tvs (arg v 3)) (hs-type tvs (arg v 4)))
       HsListTy (list-ty (hs-type tvs (arg v 2)))
@@ -643,7 +668,15 @@
       HsOpTy (let [op (nm (arg v 4))] [:tc op [(hs-type tvs (arg v 3)) (hs-type tvs (arg v 5))]])
       HsQualTy (let [ctx (lval (arg v 2)) body (hs-type tvs (arg v 3))]
                  [:forall [] (vec (keep (fn [c] (let [p (hs-type tvs c)] (when (= :tc (first p)) [(second p) (nth p 2)]))) ctx)) body])
-      HsForAllTy (hs-type tvs (arg v 3))
+      ;; RankNTypes: an inner forall a quantified type of its own (runST's (forall s. ST s a)); the elaborator
+      ;; instantiates it where it is used (trusted: no skolem escape check), its binders' kinds trusted
+      HsForAllTy (let [bs (let [tele (arg v 2)] (when (seq? tele) (arg tele 2)))
+                       ns (vec (keep (fn [b] (let [bv (lval b) bb (arg bv 3)] (when (= 'HsBndrVar (con bb)) (nm (arg bb 2))))) bs))
+                       names (mapv tv-key ns)
+                       body (hs-type (merge tvs (zipmap ns (map (fn [x] [:tv x]) names))) (arg v 3))]
+                   (cond (empty? names) body
+                         (= :forall (first body)) [:forall (into names (nth body 1)) (nth body 2) (nth body 3)]
+                         :else [:forall names [] body]))
       (do (error! "type not handled: " (con v)) (fresh-meta)))))
 
 (defn- tv-names-of [t]
@@ -659,8 +692,16 @@
   "A signature (HsSig ext outer body) as a closed type: [:forall [tv...] [pred...] body]"
   [sig]
   (let [s (lval sig) body (arg s 3)
-        ns (tv-names-of body)
-        names (mapv (fn [n] (str (occ n) "_" (apply str (interpose "_" (drop 3 n))))) ns)
+        ;; the variables of an enclosing signature in scope are not quantified again (ScopedTypeVariables), nor those an
+        ;; inner forall binds (its own quantifier, hs-type's HsForAllTy)
+        inner (set (for [x (tree-seq coll? seq body)
+                         :when (and (seq? x) (= 'HsForAllTy (first x)))
+                         b (let [tele (arg x 2)] (when (seq? tele) (arg tele 2)))
+                         :let [bb (arg (lval b) 3)] :when (= 'HsBndrVar (con bb))]
+                     (nm (arg bb 2))))
+        ns (remove #(or (contains? *scoped-tvs* (tv-key %)) (some-> *pat-tvs* deref (contains? (tv-key %))) (contains? inner %))
+                   (tv-names-of body))
+        names (mapv tv-key ns)
         tvs (zipmap ns (map (fn [x] [:tv x]) names))
         t (hs-type tvs body)]
     (if (= :forall (first t))
@@ -1203,6 +1244,10 @@
              [env (list 'plit ce lc t)])
       LitPat (let [[lt lc] (hslit v)] (unify lt t) [env (list 'plit lc)])
       SigPat (let [sig (arg (arg v 3) 2)
+                   _ (when *pat-tvs*
+                       (doseq [n (tv-names-of sig) :let [k (tv-key n)]
+                               :when (not (or (contains? *scoped-tvs* k) (contains? @*pat-tvs* k)))]
+                         (swap! *pat-tvs* assoc k (fresh-meta))))
                    st (hs-type {} sig)]
                (unify st t)
                (tc-pat env (arg v 2) t))
@@ -1267,7 +1312,7 @@
         r (or (:res ctx) (when (and expected r0 (= n (count args))) r0) (fresh-meta))
         clauses (mapv (fn [m]
                         (let [outer (some-> *given-eqs* deref)]
-                          (binding [*given-eqs* (atom (or outer {}))]
+                          (binding [*given-eqs* (atom (or outer {})) *pat-tvs* (atom (or (some-> *pat-tvs* deref) {}))]
                             (let [w0 (count @*wanteds*)
                                   mv (lval m) pats (lval (arg mv 3))
                                   [env1 pcs] (reduce (fn [[env pcs] [p t]] (let [[e c] (tc-pat env p t)] [e (conj pcs c)]))
@@ -1490,7 +1535,7 @@
                           params (mapv dict-param preds)
                           givens (super-closure (mapv vector preds params))
                           ws (atom [])
-                          c (binding [*level* (inc *level*) *wanteds* ws]
+                          c (binding [*level* (inc *level*) *wanteds* ws *scoped-tvs* (merge *scoped-tvs* skol)]
                               (let [[t c] (bind-rhs env b body)] (unify t body) c))]
                       (solve-with-givens! @ws givens)
                       (list 'bind (bind-core top? n) (if (empty? params) c (list 'lam params c))))))]
@@ -1693,7 +1738,9 @@
               :let [dct (lval (arg cv 3))
                     sigs (case (con dct) DctMulti (arg dct 2) DctSingle [(arg dct 2)] [])]
               sg sigs]
-        (let [body (lval (arg (lval sg) 3))
+        (let [body (loop [b (lval (arg (lval sg) 3))]
+                     ;; a class documented in the clause (-- ^ @since ...): HsDocTy around it
+                     (if (#{'HsDocTy 'HsParTy} (con b)) (recur (lval (arg b 2))) b))
               cls (when (= 'HsTyVar (con body)) (nm (arg body 3)))]
           (when cls
             (cond
@@ -1784,7 +1831,7 @@
                    tn (when (= :tc (first t0)) (second t0))
                    info (get @*ddescs* tn)]
              :when (and info (= :tc (first head)))]
-         {:cls cls :tn tn :tvs (:names st) :ts ts :ctx (nth st 2) :ctor? (contains? constructor-classes (occ cls))
+         {:cls cls :tn tn :tvs (nth st 1) :ts ts :ctx (nth st 2) :ctor? (contains? constructor-classes (occ cls))
           :desc (assoc (:desc info) :var (last (:names info))) :stock? (if kw (= kw :stock) (contains? deriv/generators (occ cls))) :standalone? true
           :strat kw :anyclass? (= kw :anyclass) :via (when via (nth (sig-type via) 3)) :dnames (:names info)})))
 
@@ -1906,7 +1953,8 @@
         iparams (mapv dict-param inner)
         givens (into givens (super-closure (mapv vector inner iparams)))
         ws (atom [])
-        c (binding [*level* (inc *level*) *wanteds* ws]
+        own (when (= :forall (first ty)) (into {} (map (fn [x] [x [:tv (str "sk_" x)]]) (nth ty 1))))
+        c (binding [*level* (inc *level*) *wanteds* ws *scoped-tvs* (merge *scoped-tvs* own)]
             (let [[t c] (bind-rhs env b (when-not (= :forall (first body)) body))] (unify t body) c))]
     (solve-with-givens! @ws givens)
     (let [ps (into params iparams)] (if (empty? ps) c (list 'lam ps c)))))
@@ -1918,9 +1966,11 @@
         self [cn (mapv (fn [x] [:tv (str "sk_" x)]) tvs)]
         p (dict-param self)
         givens (super-closure [[self p]])]
-    (vec (for [b (:binds info) :let [n (bind-name b)] :when n]
-           (let [ty (subst (zipmap tvs (map (fn [x] [:tv (str "sk_" x)]) tvs)) (nth (get @*genv* n) 3))]
-             (list 'bind (get (:defaults info) n) (check-method env b ty givens [p])))))))
+    ;; the class's variables scope over its default methods (ScopedTypeVariables)
+    (binding [*scoped-tvs* (merge *scoped-tvs* (into {} (map (fn [x] [x [:tv (str "sk_" x)]]) tvs)))]
+      (vec (for [b (:binds info) :let [n (bind-name b)] :when n]
+             (let [ty (subst (zipmap tvs (map (fn [x] [:tv (str "sk_" x)]) tvs)) (nth (get @*genv* n) 3))]
+               (list 'bind (get (:defaults info) n) (check-method env b ty givens [p]))))))))
 
 ;; a superclass dictionary that applies a dictionary function to the instance's own parameters alone: GHC's simple
 ;; optimiser inlines it into the dictionary (a $cpN binding used once)
@@ -1928,8 +1978,16 @@
   (and (seq? term) (= 'app (first term)) (seq? (second term)) (= 'v (first (second term)))
        (seq (nth term 2)) (every? (fn [a] (some #(= a %) params)) (nth term 2))))
 
+(declare instance-binds*)
+
 (defn- instance-binds
-  "An instance's dictionary function and its methods, as GHC's desugarer gives them"
+  "An instance's dictionary function and its methods, as GHC's desugarer gives them; the head's variables scope over
+  the methods"
+  [env inst]
+  (binding [*scoped-tvs* (merge *scoped-tvs* (into {} (map (fn [x] [x [:tv (str "sk_" x)]]) (:tvs inst))))]
+    (instance-binds* env inst)))
+
+(defn- instance-binds*
   [env {:keys [dfun tvs ctx cls ts binds gnd]}]
   (let [skol (zipmap tvs (map (fn [x] [:tv (str "sk_" x)]) tvs))
         ts (mapv #(subst skol %) ts)
@@ -1977,7 +2035,7 @@
                             (list 'app (list 'v (ext-name "var" "GHC.Internal.Control.Exception.Base" "noMethodBindingError")) [(list 'lit (occ mn))]))))]))
         supers (for [[sc sts] (:supers info)]
                  (or (solve-pred [sc (mapv #(subst (zipmap (:tvs info) ts) %) sts)] (super-closure (mapv vector ctx params)) 0)
-                     (do (error! "no superclass dictionary " (occ sc)) (list 'lit "?"))))
+                     (do (error! "no superclass dictionary " (occ sc) " " (pr-str [sc (mapv #(subst (zipmap (:tvs info) ts) %) sts)])) (list 'lit "?"))))
         dcon (list 'v (ext-name "var" (nmod cls) (str "C:" (occ cls))))
         ;; an instance with a context: each superclass dictionary a binding of its own over the context's
         ;; dictionaries ($cp1Cls), as GHC's tcSuperClasses makes it; without one the dictionary inline
@@ -2296,6 +2354,21 @@
 ;;; ------------------------------------------------------------------------------------------
 ;;; The judge: types alpha-equivalent; evidence
 
+(defn- alpha-inner
+  "An inner forall's binders renamed by their place (a rank-n argument's: GHC's names and ours differ)"
+  [t]
+  (let [n (volatile! 0)]
+    (letfn [(go [t]
+              (case (first t)
+                :forall (let [m (into {} (map (fn [v] [v [:tv (str "q" (vswap! n inc))]]) (nth t 1)))]
+                          [:forall (mapv (comp second m) (nth t 1))
+                           (mapv (fn [[c ts]] [c (mapv #(go (subst m %)) ts)]) (nth t 2))
+                           (go (subst m (nth t 3)))])
+                :tc [:tc (second t) (mapv go (nth t 2))]
+                :app (mk-app (go (nth t 1)) (go (nth t 2)))
+                t))]
+      (go t))))
+
 (defn- canon-type
   "A closed type in a canonical form: synonyms expanded, the foralls dropped, variables renamed by first occurrence
   in the body, the constraints renamed alike and sorted, multiplicities ignored"
@@ -2318,7 +2391,7 @@
               (w body)
               (doseq [[_ ts] ctx x ts] (w (ex x))))
           ren (into {} (map-indexed (fn [i v] [v [:tv (str "a" i)]]) @order))]
-      [(vec (sort-by pr-str (map (fn [[c ts]] [c (mapv #(subst ren (ex %)) ts)]) ctx))) (subst ren body)])))
+      [(vec (sort-by pr-str (map (fn [[c ts]] [c (mapv #(alpha-inner (subst ren (ex %))) ts)]) ctx))) (alpha-inner (subst ren body))])))
 
 (defn- ghc-types
   "GHC's types of the module's things (tc verb; an interface's with key hsiface/things): {NAME type}, the synonyms

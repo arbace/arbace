@@ -1,0 +1,130 @@
+#!/bin/bash
+# bin/repr-haskell lib-check [--package PKG] [--every N] [--only FILE] [--jobs N] [--record FILE]
+#
+# HF9's measure (doc/haskell/FRONTEND-SURVEY.md, "As built: HF9 (first slice)"): the boot libraries' modules through
+# Arbace's front end, each module's native dump (bin/repr-haskell read --reader native --corpus, the package alone)
+# renamed and elaborated against the interfaces of its imports, its binders' types judged against GHC's interface of
+# the module itself, and the failures ranked by the feature each needs (arbace.repr.haskell.libcheck).
+#
+# GHC's part is the oracle tier's: the helper's iface verb (tools/hsdump, the host's GHC 9.14.1) dumps, per module, the
+# interfaces of its imports (its closure, the module's own left out) and the module's own (the judge); a hidden module
+# of the package (GHC-87110: not exposed, so not importable from outside) has no interface the helper can read and is
+# left out. Everything after is Arbace's: no GHC compiles anything.
+#
+#   --package PKG   ghc-internal (default) or base (each base module with Prelude among its imports)
+#   --every N       every Nth module of the package (a sample), in file order
+#   --only FILE     the modules FILE names (GHC/Internal/X paths, one a line)
+#   --jobs N        the elaborator's processes (default 1, each under about 1.5 GiB)
+#   --record FILE   the results (one EDN map a module) copied to FILE
+# A module over LIB_CHECK_TIMEOUT seconds (default 900) is recorded :timeout.
+# Work in .tmp/repr-haskell/lib-check/PKG/ (pool/: the interfaces, closure/: each module's, ln/: its directory of
+# links, out/ or LIB_CHECK_OUT: the results); reruns reuse the closures already made; LIB_CHECK_PLAN_ONLY=1 stops
+# after the plan.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/tools.bash"
+pkg=ghc-internal every=1 only="" jobs=1 record=""
+while [ $# -gt 0 ]; do
+  case $1 in
+    --package) pkg=$2; shift 2 ;;
+    --every) every=$2; shift 2 ;;
+    --only) only=$2; shift 2 ;;
+    --jobs) jobs=$2; shift 2 ;;
+    --record) record=$2; shift 2 ;;
+    *) echo "lib-check: unknown argument $1" >&2; exit 2 ;;
+  esac
+done
+helper=${REPR_HASKELL_HELPER:-$root/.tmp/hsdump/hsdump}
+[ -x "$helper" ] || { echo "lib-check: no helper $helper (bin/repr-haskell helper)" >&2; exit 1; }
+libdir=$(ghc --print-libdir)
+w=$root/.tmp/repr-haskell/lib-check/$pkg
+nd=$root/.tmp/repr-haskell/ndumps/ghc-9.14.1/$pkg
+out=${LIB_CHECK_OUT:-$w/out}
+mkdir -p "$w/pool" "$w/closure" "$out"
+# the package's native dumps, read once into the work directory (the read's own directory is shared by every package)
+if [ ! -d "$w/nd/src" ]; then
+  echo "== lib-check: the native dumps of $pkg (bin/repr-haskell read --reader native --corpus)" >&2
+  REPR_HASKELL_ONLY_PACKAGES=$pkg "$root/bin/repr-haskell" read --reader native --corpus > "$w/read.log" 2>&1
+  rm -rf "$w/nd"; cp -r "$nd" "$w/nd"
+fi
+nd=$w/nd
+# MonadFail's interface too: a failable do pattern's fail is GHC's to find (GHC.Tc.Gen.Match's tcMonadFailOp), not an import
+extra=GHC.Internal.Control.Monad.Fail; [ "$pkg" = base ] && extra="Prelude $extra"
+if [ -n "$only" ]; then cp "$only" "$w/files.txt"
+else
+  (cd "$nd" && find src -name '*.edn' ! -name '*.hs-boot.edn' | sed 's|^src/||; s|\.hsc\.edn$||; s|\.hs\.edn$||' | sort) |
+    awk -v n="$every" 'NR % n == 1 || n == 1' > "$w/files.txt"
+fi
+echo "== lib-check: $(wc -l < "$w/files.txt") modules of $pkg" >&2
+# the closures (the helper, GHC's interfaces)
+while read -r f; do
+  m=$(echo "$f" | tr / .)
+  [ -s "$w/closure/$m.txt" ] && continue
+  t=$(mktemp -d "$TMPDIR/lib-check.XXXXXX")
+  # every (mod "M") of the dump: its imports ({-# SOURCE #-} ones too) and its header's
+  imps=$(cat "$nd/src/$f.hs.edn" "$nd/src/$f.hsc.edn" 2>> "$t/err" | grep -a -o '(mod "[A-Za-z0-9_.]*")' | grep -o '"[^"]*"' | tr -d '"' | sort -u | grep -v -x "$m" | tr '\n' ' ' || true)
+  # shellcheck disable=SC2086
+  "$helper" iface --libdir "$libdir" -o "$t/if" --ghc -XGHC2021 -package ghc-internal --files $extra $imps > "$t/log" 2>&1 || true
+  "$helper" iface --libdir "$libdir" -o "$t/own" --ghc -XGHC2021 -package ghc-internal --files "$m" >> "$t/log" 2>&1 || true
+  { (cd "$t/if" 2>> "$t/err" && ls | grep -v -x "$m.iface.edn") || true; echo "# done"; } > "$w/closure/$m.txt.part"
+  for x in "$t"/if/* "$t"/own/*; do [ -f "$x" ] || continue; b=$(basename "$x"); [ -f "$w/pool/$b" ] || mv "$x" "$w/pool/$b"; done
+  mv "$w/closure/$m.txt.part" "$w/closure/$m.txt"
+  rm -rf "$t"
+done < "$w/files.txt"
+# the modules an interface names (its things' types, instances, families): GHC loads their interfaces on demand
+# (a synonym expanded, an instance looked up), so the closure is the helper's grown to a fixed point over them
+refs() {
+  local x=$1 r=$w/refs/$1.txt
+  [ -f "$r" ] || { mkdir -p "$w/refs"; grep -a -o '(ext [a-z]* "[^"]*"' "$w/pool/$x" | cut -d'"' -f2 | sort -u > "$r.part" || true; mv "$r.part" "$r"; }
+  cat "$r"
+}
+# the plan: a module with its closure's directory and GHC's own interface (a hidden module has none: left out)
+plan=$w/plan.txt; : > "$plan"; hidden=0
+while read -r f; do
+  m=$(echo "$f" | tr / .)
+  d=$nd/src/$f.hs.edn; [ -f "$d" ] || d=$nd/src/$f.hsc.edn
+  [ -f "$w/pool/$m.iface.edn" ] || { hidden=$((hidden + 1)); continue; }
+  l=$w/ln/$m; rm -rf "$l"; mkdir -p "$l"
+  declare -A have=(); todo=()
+  while read -r x; do [ -n "$x" ] && [ "$x" != "# done" ] && { have[$x]=1; todo+=("$x"); }; done < "$w/closure/$m.txt"
+  for e in $extra; do y=$e.iface.edn; [ "$e" = "$m" ] || [ -n "${have[$y]:-}" ] || [ ! -f "$w/pool/$y" ] || { have[$y]=1; todo+=("$y"); }; done
+  while [ ${#todo[@]} -gt 0 ]; do
+    x=${todo[0]}; todo=("${todo[@]:1}")
+    case $x in *.iface.edn) ;; *) continue ;; esac
+    for r in $(refs "$x"); do
+      y=$r.iface.edn
+      [ "$r" = "$m" ] || [ -n "${have[$y]:-}" ] || [ ! -f "$w/pool/$y" ] || { have[$y]=1; todo+=("$y"); }
+    done
+  done
+  for x in "${!have[@]}"; do ln -s "$w/pool/$x" "$l/$x"; done
+  unset have
+  printf '%s\t%s\t%s\t%s\n' "$m" "$d" "$l" "$w/pool/$m.iface.edn" >> "$plan"
+done < "$w/files.txt"
+echo "== lib-check: $(wc -l < "$plan") judged, $hidden without GHC's interface (hidden modules)" >&2
+[ -z "${LIB_CHECK_PLAN_ONLY:-}" ] || exit 0
+rm -f "$out"/shard.*
+split -n "l/$jobs" -d "$plan" "$out/shard."
+pids=()
+# a shard's process exits 3 after a module over the time limit (LIB_CHECK_TIMEOUT seconds, default 900): the rest of the
+# shard in a fresh process
+run_shard() {
+  local s=$1 done
+  : > "$s.edn"
+  while :; do
+    done=$(wc -l < "$s.edn")
+    tail -n +$((done + 1)) "$s" > "$s.rest"
+    [ -s "$s.rest" ] || break
+    GOMEMLIMIT=${GOMEMLIMIT:-1500MiB} arbace_tool -m arbace.repr.haskell.libcheck check --plan "$s.rest" -o "$out/work" \
+      --timeout "${LIB_CHECK_TIMEOUT:-900}" >> "$s.edn" 2>> "$s.err" && break
+    [ "$(wc -l < "$s.edn")" -gt "$done" ] || break
+  done
+}
+for s in "$out"/shard.??; do
+  run_shard "$s" &
+  pids+=($!)
+done
+for p in "${pids[@]}"; do wait "$p" || true; done
+cat "$out"/shard.??.edn > "$out/results.edn"
+[ -z "$record" ] || cp "$out/results.edn" "$record"
+arbace_tool -m arbace.repr.haskell.libcheck rank "$out/results.edn" | tee "$out/rank.txt"
