@@ -129,6 +129,8 @@
     (+ (long n) (count-nl s (inc (long end)) b))
     (inc (count-nl s 0 b))))
 
+(declare tparam-kinds)
+
 (defn text-form
   "The node as its source text, or a refusal; `semi`: a statement's or a declaration's text, the ; after it
   included. A node from a macro expansion is its extent's text, the invocations as written."
@@ -136,7 +138,15 @@
   ([n why semi]
    (if-let [[b e] (if (macro-node? n) (macro-extent n) (rng n))]
      (let [s ^String *src*
-           e (if semi (semi-end e) e)]
+           e (if semi (semi-end e) e)
+           ;; cpp-compl: a template whose declaration is written under outer headers (an out-of-line member template of a class
+           ;; template, `template<...> template<...> int C<D,E>::f(...)`, g++.old-deja g++.pt/ttp33.C): the declaration's range
+           ;; begins at the outermost header, the template's at its own (clang's getOuterLocStart): the text from the first
+           b (if (and (not (macro-node? n)) (#{"FunctionTemplateDecl" "ClassTemplateDecl" "VarTemplateDecl"} (kind n)))
+               (let [d (first (remove #(or (tparam-kinds (kind %)) (.endsWith ^String (kind %) "Attr")) (kids n)))
+                     [db] (when d (rng d))]
+                 (if (and db (< (long db) (long b))) db b))
+               b)]
        (when *texts* (swap! *texts* update (keyword why) (fnil inc 0)))
        ;; a macro invocation keeps its line: its expansion may hold __LINE__ (the printer writes a #line before it)
        (let [f (list 'cpp/text (utf8 (close-split (text-at b e))))]
@@ -1608,7 +1618,16 @@
           ("FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "CXXConversionDecl") (with-headers n outer? #(vector (fn-form n)))
           "CXXRecordDecl" [(record-form n ctx)]
           "EnumDecl" [(enum-form n)]
-          "TypedefDecl" (do (when (has-attrs? n) (gap :attr "a typedef's attributes")) [(list 'c/typedef (or (decl-name n) (gap :typedef "a name")) (type-of (qt n)))])
+          "TypedefDecl" (let [m (when (has-attrs? n)
+                                  ;; cpp-compl: standard attributes written before `typedef` ([dcl.attr.grammar]/5: they appertain to
+                                  ;; the declared typedef-name; g++.dg diagnostic/maybe_unused1.C) as :cpp/attrs; the others (GNU's,
+                                  ;; whose place decides what they apply to: vector_size, mode ...) stay the text form's
+                                  (let [m (attrs-of n)
+                                        [db] (rng n)
+                                        lead? (every? (fn [a] (let [[b] (rng a)] (and b db (< (long b) (long db)))))
+                                                      (filter #(.endsWith ^String (kind %) "Attr") (kids n)))]
+                                    (if (and lead? (= (set (keys m)) #{:cpp/attrs})) m (gap :attr "a typedef's attributes"))))]
+                          [(cond-> (list 'c/typedef (or (decl-name n) (gap :typedef "a name")) (type-of (qt n))) m (with-meta m))])
           "TypeAliasDecl" (do (when (has-attrs? n) (gap :attr "an alias's attributes")) [(list 'cpp/alias (decl-name n) (type-of (qt n)))])
           "NamespaceDecl"
           (let [[nm inner inl] (loop [nm [(:name n)] n n inl []]

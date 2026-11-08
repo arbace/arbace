@@ -118,7 +118,8 @@
                    (str "operator" (op-text o))))
       <> (let [args (map (fn [a] (if (type-arg? a) (type-name a) (expr-str a 16))) (nnext x))
                s (str/join ", " args)]
-           (str (name-str (second x)) "<" s (if (.endsWith s ">") " >" ">")))
+           ;; cpp-compl: `< ::D`, not `<::D`: before C++11 `<:` is the digraph of `[` (g++.old-deja g++.pt/ttp23.C, C++98)
+           (str (name-str (second x)) (if (.startsWith s ":") "< " "<") s (if (.endsWith s ">") " >" ">")))
       pack-expand (str (name-str (second x)) "...")
       (fail "a name" x))
     :else (fail "a name" x)))
@@ -293,8 +294,10 @@
             (case h
               (c/id cpp/text cpp/global cpp/scope <> template operator) [(name-str x) 0]
               cpp/macro [(at-line (second x) (nth x 3 nil)) 0] ; CP73 (c): the invocation's text, the value is the forms'
+              ;; cpp-compl: a unary operator's operand is a cast-expression ([expr.unary.general]), so `-(int)x` needs no
+              ;; parentheses (g++.dg other/const4.C: the print's `-((int)...)` read again as a parenthesized cast)
               (+ -) (if (= 1 (count args))
-                      [(prefix (name h) (a 1 2)) 2]
+                      [(prefix (name h) (a 1 3)) 2]
                       (let [[p op] (binops h)] [(str (a 1 p) " " op " " (a 2 (dec p))) p]))
               (* / % << >> <=> < > <= >= == != bit-and bit-xor bit-or and or .* ->*)
               (let [[p op] (binops h)] [(str (a 1 p) " " op " " (a 2 (dec p))) p])
@@ -328,7 +331,7 @@
               conv [(str "(" (type-name (nth x 1)) ")" (a 2 3)) 3]
               (cpp/static-cast cpp/dynamic-cast cpp/reinterpret-cast cpp/const-cast)
               [(str ({'cpp/static-cast "static_cast" 'cpp/dynamic-cast "dynamic_cast" 'cpp/reinterpret-cast "reinterpret_cast"
-                      'cpp/const-cast "const_cast"} h) "<" (type-name (nth x 1)) ">(" (a 2 17) ")") 1]
+                      'cpp/const-cast "const_cast"} h) (let [t (type-name (nth x 1))] (str (if (.startsWith t ":") "< " "<") t)) ">(" (a 2 17) ")") 1]
               cpp/construct [(str (type-name (nth x 1)) "(" (args-str x 2) ")") 1]
               cpp/brace [(str (type-name (nth x 1)) "{" (args-str x 2) "}") 1]
               cpp/init-list [(str "{" (args-str x 1) "}") 0]
@@ -337,7 +340,9 @@
               aget [(str (a 1 1) "[" (str/join ", " (map #(a % 17) (range 2 (count x)))) "]") 1]
               -> [(str (a 1 1) "->" (name-str (nth x 2))) 1]
               throw (if (= 1 (count x)) ["throw" 16] [(str "throw " (a 1 16)) 16])
-              pack-expand [(str (a 1 1) "...") 1]
+              ;; cpp-compl: a pack expansion is an element of a list (an initializer-clause, a template or function argument,
+              ;; [temp.variadic]/5): its pattern an assignment-expression, `&typeid(l)...` unparenthesized (analyzer/infinite-recursion-2.C)
+              pack-expand [(str (a 1 16) "...") 1]
               cpp/new (let [m (meta x) [x pl] (split-place x) [_ t init] x]
                         [(str (when (:cpp/global m) "::") "new " (place-str pl) (type-name t) (new-init init)) 2])
               cpp/new-array (let [m (meta x) [x pl] (split-place x) [_ t n init] x
@@ -533,7 +538,7 @@
                          m (meta names)
                          [s d] (split-type (:tag m) (str "[" (str/join ", " (map name-str names)) "]"))]
                      (str (join-sp (decl-head m) s) " " d (when (seq init) (init-str (first init))) ";"))
-    c/typedef (let [[_ x t] f [s d] (split-type t (name-str x))] (str "typedef " (join-sp s d) ";"))
+    c/typedef (let [[_ x t] f [s d] (split-type t (name-str x))] (str (join-sp (attrs-head (meta f)) "typedef") " " (join-sp s d) ";"))
     cpp/alias (let [[_ x t] f] (str "using " (name-str x) " = " (type-name t) ";"))
     cpp/using (str "using " (when (:typename (meta f)) "typename ") (name-str (second f)) ";")
     cpp/using-namespace (str "using namespace " (name-str (second f)) ";")
@@ -687,6 +692,10 @@
   (cond
     (empty? v) ";"
     (and (= 1 (count v)) (not (and (seq? (first v)) (decl-heads (first (first v)))))) (str (expr-str (first v) 17) ";")
+    ;; cpp-compl: a declaration a macro invocation writes (`for (COUNTERTYPE i = 0; ...)`, c-c++-common goacc/kernels-loop-2.c):
+    ;; its text, as item! writes it (no #line inside the header)
+    (and (= 1 (count v)) (seq (:cpp/macro (meta (first v)))))
+    (let [^String t (:cpp/macro (meta (first v)))] (if (.endsWith (str/trimr t) ";") (str/trimr t) (str t ";")))
     (= 1 (count v)) (decl-str (first v))
     :else (fail "a for's init" v)))
 
@@ -730,8 +739,10 @@
                  (branch! b (second args) (contains? (:c/bare m) 2))
                  (line b "else")
                  (branch! b (nth args 2) (contains? (:c/bare m) 3)))
+          ;; cpp-compl: a switch whose body is no compound statement (`switch (0) case 0: { ... }`, g++.dg pr54655.C) holds its
+          ;; labels and their statement as items: all of them printed, the labels outdented as in a block
           switch (do (line b (str "switch (" (init-prefix m) (cond-str (first args) m 1) ")"))
-                     (if (:c/bare m) (branch! b (second args) true) (block! b (rest args))))
+                     (if (:c/bare m) (binding [*indent* (inc *indent*)] (stmts! b (rest args))) (block! b (rest args))))
           while (do (line b (str "while (" (cond-str (first args) m 1) ")"))
                     (if (:c/bare m) (branch! b (second args) true) (block! b (rest args))))
           do-while (do (line b "do")
