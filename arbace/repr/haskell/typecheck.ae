@@ -652,6 +652,7 @@
         (recur (concat (rest todo) (remove (fn [[p _]] (some #(= p (first %)) out)) subs)) (conj out g))))))
 
 (def ^:dynamic *srcfile* nil)  ; the source file's path as the compiler was given it (HasCallStack's SrcLoc)
+(def ^:dynamic *unit* "main")  ; the unit the module is compiled in (SrcLoc's package, Typeable's $trModule; HF10: ghc-internal)
 (def ^:dynamic *skolem-givens* nil) ; atom [[pred term]...]: the dictionaries existential patterns bind
 
 (def cls-typeable (ext-name "tc" "GHC.Internal.Data.Typeable.Internal" "Typeable"))
@@ -878,7 +879,7 @@
                [(list 'app (list 'v (ext-name "var" "GHC.Internal.Tuple" "(,)"))
                       [(cs (or label (occ n)))
                        (list 'app (list 'v (ext-name "var" "GHC.Internal.Stack.Types" "$WSrcLoc"))
-                             [(cs "main") (cs *module*) (cs (or *srcfile* (str (str/replace *module* "." "/") ".hs"))) (i l1) (i c1) (i l2) (i c2)])])
+                             [(cs *unit*) (cs *module*) (cs (or *srcfile* (str (str/replace *module* "." "/") ".hs"))) (i l1) (i c1) (i l2) (i c2)])])
                 (list 'app (list 'v (ext-name "var" "GHC.Internal.Classes" "ip"))
                       [(cip (list 'v (ext-name "var" "GHC.Internal.Stack.Types" "emptyCallStack")))])]))))
 
@@ -1508,7 +1509,9 @@
     (case (con v)
       VarPat (let [n (nm (arg v 2))] (note-type! (lv n) t) [(assoc env n {:mono t}) (lv n)])
       WildPat [env (list 'pwild)]
-      (ParPat BangPat) (tc-pat env (arg v 2) t)
+      ParPat (tc-pat env (arg v 2) t)
+      ;; a bang pattern: kept for the match compiler (HF10; GHC.HsToCore.Match's tidy1 and matchBangs)
+      BangPat (let [[env1 pc] (tc-pat env (arg v 2) t)] [env1 (list 'pbang pc)])
       ;; a lazy pattern: kept for the match compiler (HF5), its variables bound by selectors
       LazyPat (let [[env1 pc] (tc-pat env (arg v 2) t)] [env1 (list 'plazy pc)])
       AsPat (let [n (nm (arg v 2)) _ (note-type! (lv n) t) [env1 pc] (tc-pat (assoc env n {:mono t}) (arg v 3) t)] [env1 (list 'pas (lv n) pc)])
@@ -1871,10 +1874,19 @@
           (swap! *genv* assoc n (builder-type info)))))
     nil))
 
+(defn- strict-var-bind?
+  "A strict variable binding `!x = e` (FunRhs's SrcStrict: GHC's strict binding, dsStrictBind)"
+  [b]
+  (boolean (some (fn [x] (and (seq? x) (= 'FunRhs (first x)) (some #{'SrcStrict} x))) (take 400 (tree-seq coll? seq b)))))
+
 (defn tc-group
   "A binding group: [env' [(bind B core)...]]; sigs {NAME type}"
   [env [rec binds] sigs top?]
   (let [_ (doseq [b binds :when (patsyn-bind? b)] (tc-patsyn-bind! env b))
+        ;; a let's strict variable bindings: the body forces each (dsStrictBind: let x = e in x `seq` body)
+        _ (when (and *strict-binds* (= (inc *level*) (:level *strict-binds*)))
+            (doseq [b binds :when (and (bind-name b) (strict-var-bind? b))]
+              (swap! (:atom *strict-binds*) conj [(bind-name b) (list 'pbang (list 'pwild))])))
         binds (vec (remove patsyn-bind? binds))
         names (mapv bind-name binds)
         signed (filter #(get sigs (bind-name %)) binds)
@@ -2411,13 +2423,18 @@
                                :binds (arg d 8)})))
 
 (defn- head-occs
-  "The type constructors' occurrence names of an instance head, as GHC's dictionary functions spell them"
-  [ts]
+  "The type constructors' occurrence names of an instance head, as GHC's dictionary functions spell them
+  (GHC.Tc.Utils.Instantiate's getDFunTyKey: a type constructor's name, a type variable's own, an application's head's)"
+  ([ts] (head-occs ts {}))
+  ([ts tv-occ]
   ;; each argument's outermost type constructor, synonyms expanded (State Env: StateT)
-  (apply str (map (fn [t] (let [t (deep-expand (zonk t))]
+  (apply str (map (fn [t] (loop [t (deep-expand (zonk t))]
                             (case (first t)
                               :tc (occ (second t))
-                              ""))) ts)))
+                              :tv (get tv-occ (second t) "")
+                              :app (recur (second t))
+                              :forall (recur (nth t 3))
+                              ""))) ts))))
 
 (defn- inst-decl!
   "An instance: its dictionary function's entry in the instance table; the declaration kept for the methods"
@@ -2428,7 +2445,7 @@
         t (hs-type (zipmap tvn (map (fn [x] [:tv x]) names)) body)
         [ctx head] (if (= :forall (first t)) [(nth t 2) (nth t 3)] [[] t])
         cls (second head) ts (nth head 2)
-        dfun (ext-name "var" m (str "$f" (occ cls) (head-occs ts)))]
+        dfun (ext-name "var" m (str "$f" (occ cls) (head-occs ts (zipmap names (map occ tvn)))))]
     (swap! *insts* conj {:dfun dfun :tvs names :ctx ctx :head [cls (mapv deep-expand ts)]})
     {:dfun dfun :tvs names :ctx ctx :cls cls :ts ts :binds (arg d 3)}))
 
@@ -2703,9 +2720,9 @@
         trname (fn [s] (list 'app (v "GHC.Internal.Types" "TrNameS") [(list 'lit (str (pr-str s) "#"))]))
         modv (ext-name "var" m "$trModule")]
     (when (seq @*tycons*)
-      (cons (list 'bind modv (list 'app (v "GHC.Internal.Types" "Module") [(trname "main") (trname m)]))
+      (cons (list 'bind modv (list 'app (v "GHC.Internal.Types" "Module") [(trname *unit*) (trname m)]))
             (for [[tn info] @*tycons* :when (= m (nmod tn))]
-              (let [[hi lo] (tycon-fingerprint "main" m (occ tn))
+              (let [[hi lo] (tycon-fingerprint *unit* m (occ tn))
                     arity (count (:tvs info []))
                     star (v "GHC.Internal.Types" "krep$*")
                     krep (reduce (fn [acc _] (list 'app (v "GHC.Internal.Types" "KindRepFun") [star acc])) star (range arity))]

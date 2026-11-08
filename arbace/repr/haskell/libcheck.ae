@@ -10,7 +10,9 @@
   :diff [...]}."
   (:require [arbace.string :as str]
             [arbace.repr.haskell.rename :as rn]
-            [arbace.repr.haskell.typecheck :as tc])
+            [arbace.repr.haskell.typecheck :as tc]
+            [arbace.repr.haskell.tostg :as tostg]
+            [arbace.repr.haskell.stgcmp :as stgcmp])
   (:import [java.io File]))
 
 (defn- msg [^Throwable e] (str/replace (str (.getName (class e)) ": " (ex-message e)) #"\s+" " "))
@@ -83,6 +85,56 @@
                         :diff (vec (take 6 (:diff c)))
                         :missing (vec (take 12 (:missing c)))})))))))))
 
+(defn- stg-one
+  "HF10: a module of the plan through the whole front end, desugared (arbace.repr.haskell.desugar, the -O0 Simplifier)
+  and made STG (arbace.repr.haskell.tostg) in its own unit, into OUT/stg/UNIT/MODULE.stg.ae; with REF (a directory of
+  GHC's -O0 STG of the package, the oracle's) its bindings judged against GHC's by arbace.repr.haskell.stgcmp"
+  [[nm dump ifdir _] out units unit ref]
+  (let [w (str out "/work/" nm)
+        local (str w "/ifl")
+        dirs (vec (remove empty? (str/split ifdir #",")))]
+    (.mkdirs (File. ^String w))
+    (let [rr (try (binding [rn/*ifdirs* (vec (cons local dirs)) rn/*projection?* false]
+                    (rn/rename-file dump nil local))
+                  (catch Throwable e {:fail (msg e)}))]
+      (if (:fail rr)
+        {:name nm :stage :rename :msg (:fail rr)}
+        (let [gref (when ref (str ref "/" nm ".stg.ae"))
+              ;; the source path GHC was given (patError's and SrcLoc's text): the reference's header's, else the package's
+              srcfile (or (when (and gref (.exists (File. ^String gref)))
+                            (with-open [rd (java.io.BufferedReader. (java.io.FileReader. ^String gref))]
+                              (second (re-find #":file \"([^\"]*)\"" (or (.readLine rd) "")))))
+                          (str "libraries/" unit "/src/" (str/replace nm "." "/") ".hs"))
+              r (try (binding [tc/*ifdirs* (conj dirs local) tc/*srcfile* srcfile tc/*unit* unit] (tc/typecheck-module (:tree rr)))
+                     (catch Throwable e {:fail (msg e)}))]
+          (if (:fail r)
+            {:name nm :stage :typecheck :msg (:fail r)}
+            (let [errs (:errors r)
+                  sdir (str out "/stg/" unit)
+                  f (try (let [forms (binding [tostg/*unit* unit tc/*unit* unit] (tostg/module-stg r units srcfile))]
+                           (tostg/write-stg forms sdir (:module r))
+                           (when (System/getenv "LIB_STG_CORE")
+                             (binding [*print-length* nil *print-level* nil *print-meta* false]
+                               (spit (str w "/" (:module r) ".core.edn") (str/join "\n" (map pr-str (:core r))))
+                               (spit (str w "/" (:module r) ".simpl.edn") (str/join "\n" (map pr-str @tostg/last-prog)))))
+                           nil)
+                         (catch Throwable e
+                           (when (System/getenv "LIB_CHECK_TRACE") (.printStackTrace e))
+                           (msg e)))
+                  ours (str sdir "/" (:module r) ".stg.ae")
+                  c (when (and (nil? f) gref (.exists (File. ^String gref)))
+                      (try (stgcmp/compare-files gref ours) (catch Throwable e {:fail (msg e)})))]
+              (merge {:name nm :stage (cond f :stg (seq errs) :errors :else :ok)
+                      :n-errors (count errs)}
+                     (when f {:msg f})
+                     (when (seq errs) {:errors (vec (take 6 (map #(subs % 0 (min 300 (count %))) errs)))})
+                     (cond (nil? c) (when (and (nil? f) gref) {:judge :no-reference})
+                           (:fail c) {:judge (:fail c)}
+                           :else {:stg (select-keys c [:compared :equal :data-equal])
+                                  :ghc-only (vec (take 12 (:ghc-only c))) :n-ghc-only (count (:ghc-only c))
+                                  :ours-only (vec (take 12 (:ours-only c))) :n-ours-only (count (:ours-only c))
+                                  :diff (vec (:diff c)) :why (:why c)})))))))))
+
 (defn- read-results [files]
   (vec (for [f files line (str/split-lines (slurp f)) :when (str/starts-with? line "{:name")] (read-string line))))
 
@@ -108,6 +160,87 @@
     (doseq [r rs :when (#{:rename :typecheck} (:stage r))]
       (println "stopped" (name (:stage r)) (:name r) (subs (str (:msg r)) 0 (min 120 (count (str (:msg r)))))))))
 
+(defn rank-stg
+  "HF10's measure of a run: modules by stage, bindings equal to GHC's -O0 STG, the first differences by class"
+  [rs]
+  (let [tot (fn [k] (reduce + (map #(get-in % [:stg k] 0) rs)))
+        full (filter #(and (:stg %) (pos? (:compared (:stg %))) (= (:compared (:stg %)) (:equal (:stg %)))) rs)
+        cls (fn [[g o]] (str (re-find #"^\(?[^ \[\]\"]*" g) " / " (re-find #"^\(?[^ \[\]\"]*" o)))
+        whys (frequencies (map cls (mapcat (comp vals :why) rs)))]
+    (println (str "lib-stg: " (count rs) " modules, stages " (pr-str (into (sorted-map) (frequencies (map :stage rs))))
+                  "; bindings equal to GHC's -O0 STG " (tot :equal) " of " (tot :compared)
+                  "; modules with every binding equal " (count full) " (of " (count (filter #(pos? (get-in % [:stg :compared] 0)) rs))
+                  " with bindings); GHC's only " (reduce + (map #(:n-ghc-only % 0) rs))
+                  ", ours only " (reduce + (map #(:n-ours-only % 0) rs))))
+    (doseq [r (sort-by :name rs)]
+      (println (format "  %-46s %-8s %s" (:name r) (name (:stage r))
+                       (if-let [c (:stg r)] (str (:equal c) "/" (:compared c) (if (:data-equal c) "" " data differs")) (subs (str (:msg r "")) 0 (min 70 (count (str (:msg r "")))))))))
+    (println "first differences (GHC's / ours), by binding:")
+    (doseq [[k n] (take 30 (sort-by (comp - val) whys))] (println (format "  %5d  %s" n k)))))
+
+(defn replaceable
+  "The modules whose own STG may replace GHC's in a run: all those made (mode all), or those whose every binding
+  equals GHC's (mode equal)"
+  [rs mode]
+  (doseq [r rs :when (and (#{:ok :errors} (:stage r))
+                          (or (= mode "all")
+                              (and (:stg r) (= (:compared (:stg r)) (:equal (:stg r))) (zero? (:n-ghc-only r 0)))))]
+    (println (:name r))))
+
+(defn- top-lines
+  "A dump's top-level forms, one a line: [[form line]...]"
+  [f]
+  (vec (for [l (str/split-lines (slurp f)) :when (str/starts-with? l "(")] [(read-string l) l])))
+
+(defn merge-abi
+  "HF10's run on the installed libraries' ABI: a module's own STG (OURS) in place of the pack's (PACK, GHC's -O2), the
+  pack's bindings of the names ours does not define kept beside it (workers, specialisations, floated bindings the
+  other -O2 modules and the interfaces' unfoldings name: GHC's ABI at -O2), with the internal top-level bindings they
+  reach, renamed apart (ghc$...), each form as the dump wrote it. Written to OUT; [own kept] counts of top-level
+  bindings"
+  [ours pack out]
+  (let [o (top-lines ours) g (top-lines pack)
+        nm (fn [f] (case (first f) (bind string) (first (second f)) nil))
+        members (fn [f] (if (= 'rec (first f)) (rest f) [f]))
+        ext? (fn [n] (and (string? n) (re-find #"^[^/]*:" n)))
+        own-names (set (keep nm (mapcat (comp members first) o)))
+        gforms (filter #(contains? '#{bind string rec} (first (first %))) g)
+        by-name (into {} (for [[f :as fl] gforms m (members f) :let [n (nm m)] :when n] [n fl]))
+        need0 (for [[f] gforms m (members f) :let [n (nm m)] :when (and (ext? n) (not (own-names n)))] n)
+        refs (fn [f] (let [acc (atom [])]
+                       ((fn w [y] (cond (and (string? y) (not (ext? y)) (contains? by-name y)) (swap! acc conj y)
+                                        (coll? y) (doseq [z y] (w z)) :else nil)) f)
+                       @acc))
+        kept (loop [todo (vec need0) seen #{} out []]
+               (if (empty? todo) out
+                   (let [n (first todo) fl (get by-name n)]
+                     (if (or (nil? fl) (contains? seen fl)) (recur (subvec todo 1) seen out)
+                         (recur (into (subvec todo 1) (concat (keep nm (members (first fl))) (refs (first fl))))
+                                (conj seen fl) (conj out fl))))))
+        kept-names (set (keep nm (mapcat (comp members first) kept)))
+        ren (into {} (for [n kept-names :when (not (ext? n))] [n (str "ghc$" n)]))
+        rn-line (fn [l] (str/replace l #"\"((?:[^\"\\]|\\.)*)\"" (fn [[m x]] (if-let [r (get ren x)] (str "\"" r "\"") m))))
+        o2 (remove (fn [[f]] (and (nm f) (contains? kept-names (nm f)))) o)
+        odata (set (keep (fn [[f]] (when (= 'stg/data (first f)) (second f))) o2))
+        gdata (filter (fn [[f]] (and (= 'stg/data (first f)) (not (contains? odata (second f))))) g)]
+    (spit out (str (str/join "\n" (concat (map second o2) (map second gdata) (map (comp rn-line second) kept))) "\n"))
+    [(count (filter (comp nm first) o2)) (count (mapcat (comp members first) kept))]))
+
+(defn compare-runs
+  "Two run-check results files (GHC's -O0 libraries, the own set): the passes lost and gained"
+  [a b]
+  (let [rd (fn [f] (into {} (for [l (str/split-lines (slurp f)) :when (str/starts-with? l "{")] (let [m (read-string l)] [(:id m) m]))))
+        ra (rd a) rb (rd b)
+        pass? (fn [m] (= :pass (:result m)))
+        lost (sort (filter #(and (pass? (ra %)) (not (pass? (rb %)))) (keys ra)))
+        gained (sort (filter #(and (pass? (rb %)) (not (pass? (ra %)))) (keys rb)))]
+    (println (str "lib-stg --run: " (count (filter pass? (vals ra))) " of " (count ra) " pass on GHC's -O0 libraries, "
+                  (count (filter pass? (vals rb))) " of " (count rb) " on Arbace's own STG of the replaced modules; "
+                  (count lost) " lost, " (count gained) " gained"))
+    (doseq [i lost] (println "  lost" i (pr-str (rb i))))
+    (doseq [i gained] (println "  gained" i))
+    (when (seq lost) (System/exit 1))))
+
 (defn -main
   "check --plan FILE -o OUT: each module of the plan through the front end, one EDN map a line; rank FILE...: the
   measure of results files"
@@ -130,5 +263,27 @@
                     (flush)
                     (when-not r0 (System/exit 3))))
                 (shutdown-agents))
+      ;; HF10: stg --plan FILE -o OUT --libs DIR,... [--unit U] [--ref DIR]
+      "stg" (let [limit (* 1000 (Long/parseLong (get opts "--timeout" "900")))
+                  units (tostg/units-of (remove empty? (str/split (or (get opts "--libs") "") #",")))
+                  unit (get opts "--unit" "ghc-internal")
+                  ref (get opts "--ref")]
+              (doseq [line (str/split-lines (slurp (get opts "--plan")))
+                      :when (not (str/blank? line))]
+                (let [t0 (System/currentTimeMillis)
+                      task (future (stg-one (str/split line #"\t") out units unit ref))
+                      r0 (deref task limit nil)
+                      r (assoc (or r0 {:name (first (str/split line #"\t")) :stage :timeout})
+                               :ms (- (System/currentTimeMillis) t0))]
+                  (binding [*print-length* nil *print-level* nil] (println (pr-str r)))
+                  (flush)
+                  (when-not r0 (System/exit 3))))
+              (shutdown-agents))
       "rank" (rank (read-results more))
+      "rank-stg" (rank-stg (read-results more))
+      "replaceable" (replaceable (read-results [(first more)]) (or (second more) "all"))
+      "compare-runs" (compare-runs (first more) (second more))
+      ;; merge OURS PACK OUT...: triples; one line a module, NAME OWN KEPT
+      "merge" (doseq [[a b c] (partition 3 more)]
+                (let [[k1 k2] (merge-abi a b c)] (println (.getName (File. ^String a)) k1 k2)))
       (do (println "usage: -m arbace.repr.haskell.libcheck check --plan FILE -o OUT | rank FILE...") (System/exit 2)))))

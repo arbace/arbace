@@ -1,0 +1,133 @@
+#!/bin/bash
+# bin/repr-haskell lib-stg [--only FILE] [--every N] [--jobs N] [--record FILE] [--run [ID...]]
+#
+# HF10's check (doc/haskell/FRONTEND-SURVEY.md, "As built: HF10 (first slice)"): the boot libraries' modules through
+# the whole of Arbace's front end, each module's native dump renamed and elaborated against its imports' interfaces
+# (lib-check's plan and closures), desugared (arbace.repr.haskell.desugar with the -O0 Simplifier) and made STG
+# (arbace.repr.haskell.tostg) in the unit ghc-internal, and its STG judged against GHC's own -O0 STG of the module,
+# binding by binding (arbace.repr.haskell.stgcmp: each exported binding with the internal top-level bindings it reaches,
+# renamed together; the Typeable bindings apart). Then, with --run, programs run on hsi with the modules' own STG in
+# place of GHC's.
+#
+# GHC's part is the oracle tier's and only data: the reference, GHC's -O0 STG of ghc-internal, base, ghc-prim and
+# ghc-bignum compiled from the pinned tarball as bin/hsi dumps compiles the installed libraries (HES6 (a): one-shot, the
+# installed unit ids, hadrian's paths), at -O0 (HSI_DUMP_OPT=-O0) instead of -O2: the level Arbace's front end
+# produces (HFS6 (a)); the interfaces of lib-check's closures (the helper's iface verb). Everything else is Arbace's.
+#
+#   --only FILE    the modules FILE names (one a line, module names; # comments), default test/haskell/lib-stg.txt
+#   --every N      every Nth module of lib-check's plan instead (a sample; 1: all of ghc-internal's judged modules)
+#   --jobs N       the front end's processes (default 1, each under about 1.5 GiB)
+#   --record FILE  the results (one EDN map a module) copied to FILE
+#   --run [ID...]  run-check's programs (default all of samples and synthetic) run twice on hsi: on the pack's libraries
+#                  (HSI_LIBS, GHC's -O2 STG: the ABI of the interfaces the programs are compiled against), then on the same
+#                  set with every module this run compiled replaced by its own STG merged over the pack's ABI (the
+#                  pack's bindings of names the own STG does not define kept; LIB_STG_REPLACE=equal: only the modules
+#                  whose every binding equals GHC's -O0); a pass lost is a failure
+#
+# Environment: LIB_STG_REUSE=1 (the last run's STG and results kept, --run alone), LIB_STG_REF (GHC's -O0 STG, a directory of PKG/M.stg.ae; default .tmp/hsi/dumps-O0/stg, made when
+# missing by HSI_DUMP_OPT=-O0 bin/hsi dumps), HSI_LIBS (the pack's STG for the other packages), LIB_CHECK_TIMEOUT.
+# Work in .tmp/repr-haskell/lib-stg/ (stg/: the modules' own STG; results.edn, summary.txt; libs-ghc/, libs-own/: the
+# run's library sets; replaced.txt: each replaced module's own and kept bindings; run-ghc/, run-own/: run-check's results).
+set -euo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/tools.bash"
+only=$root/test/haskell/lib-stg.txt every="" jobs=1 record="" run="" ids=()
+while [ $# -gt 0 ]; do
+  case $1 in
+    --only) only=$2; shift 2 ;;
+    --every) every=$2; only=""; shift 2 ;;
+    --jobs) jobs=$2; shift 2 ;;
+    --record) record=$2; shift 2 ;;
+    --run) run=1; shift; while [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; do ids+=("$1"); shift; done ;;
+    *) echo "lib-stg: unknown argument $1" >&2; exit 2 ;;
+  esac
+done
+w=$root/.tmp/repr-haskell/lib-stg
+lc=$root/.tmp/repr-haskell/lib-check/ghc-internal
+ref=${LIB_STG_REF:-$root/.tmp/hsi/dumps-O0/stg}
+libs=${HSI_LIBS:-$root/.tmp/hsi/dumps/stg}
+mkdir -p "$w"
+# the reference: GHC's -O0 STG of the four packages (the oracle's, by hand)
+if [ ! -d "$ref/ghc-internal" ] || [ ! -d "$ref/base" ]; then
+  echo "== lib-stg: GHC's -O0 STG (HSI_DUMP_OPT=-O0 bin/hsi dumps, the oracle tier)" >&2
+  HSI_DUMP_OPT=-O0 HSI_JOBS=${HSI_JOBS:-2} "$root/bin/hsi" dumps --packages ghc-internal,base,ghc-prim,ghc-bignum \
+    --out "$(dirname "$ref")" > "$w/dumps.log" 2>&1 || { tail -5 "$w/dumps.log" >&2; exit 1; }
+fi
+# lib-check's plan (its closures: the helper's interfaces)
+[ -s "$lc/plan.txt" ] || LIB_CHECK_PLAN_ONLY=1 "$root/bin/lib/repr-haskell/lib-check" > "$w/plan.log" 2>&1 || { tail -5 "$w/plan.log" >&2; exit 1; }
+plan=$w/plan.txt
+if [ -n "$every" ]; then awk -v n="$every" 'NR % n == 1 || n == 1' "$lc/plan.txt" > "$plan"
+else
+  grep -v '^#' "$only" | awk 'NF {print $1}' > "$w/only.txt"
+  awk -F'\t' 'NR == FNR {w[$1] = 1; next} ($1 in w)' "$w/only.txt" "$lc/plan.txt" > "$plan"
+fi
+echo "== lib-stg: $(wc -l < "$plan") modules" >&2
+out=$w/out
+if [ -n "${LIB_STG_REUSE:-}" ] && [ -s "$w/results.edn" ]; then
+  echo "== lib-stg: the last run's STG reused (LIB_STG_REUSE)" >&2
+else
+rm -rf "$out"; mkdir -p "$out"
+split -n "l/$jobs" -d "$plan" "$out/shard."
+# libs: every directory of HSI_LIBS (the front end reads the libraries' constructors from them)
+lj=${libs//:/,}
+pids=()
+for s in "$out"/shard.??; do
+  (: > "$s.edn"
+   while :; do
+     done=$(wc -l < "$s.edn")
+     tail -n +$((done + 1)) "$s" > "$s.rest"
+     [ -s "$s.rest" ] || break
+     GOMEMLIMIT=${GOMEMLIMIT:-1500MiB} arbace_tool -m arbace.repr.haskell.libcheck stg --plan "$s.rest" -o "$out" \
+       --libs "$lj" --ref "$ref/ghc-internal" --timeout "${LIB_CHECK_TIMEOUT:-900}" >> "$s.edn" 2>> "$s.err" && break
+     [ "$(wc -l < "$s.edn")" -gt "$done" ] || break
+   done) &
+  pids+=($!)
+done
+for p in "${pids[@]}"; do wait "$p" || true; done
+cat "$out"/shard.??.edn > "$w/results.edn"
+fi
+[ -z "$record" ] || cp "$w/results.edn" "$record"
+arbace_tool -m arbace.repr.haskell.libcheck rank-stg "$w/results.edn" | tee "$w/summary.txt"
+[ -n "$run" ] || exit 0
+
+# --run: the two library sets as directories of links, PKG/M.stg.ae: GHC's (the pack, HSI_LIBS, the installed libraries'
+# -O2 STG the programs' interfaces describe) and the own set, the same with each compiled module's own STG in place of the
+# pack's, merged over the pack's ABI (libcheck merge: the pack's bindings of the names the own STG does not define, -O2's
+# workers and floated bindings that other modules and the interfaces' unfoldings name, kept beside it)
+mkset() { # DIR OWN?
+  local d=$1 own=$2 p l m
+  rm -rf "$d"; mkdir -p "$d"
+  IFS=: read -r -a dirs <<< "$libs"
+  for l in "${dirs[@]}"; do
+    for p in "$l"/*/; do p=${p%/}; [ -d "$p" ] && [ ! -e "$d/$(basename "$p")" ] && ln -s "$p" "$d/$(basename "$p")"; done
+  done
+  [ "$own" = 1 ] || return 0
+  local gi; gi=$(readlink -f "$d/ghc-internal")
+  rm -f "$d/ghc-internal"; mkdir -p "$d/ghc-internal"
+  for l in "$gi"/*.stg.ae; do ln -s "$l" "$d/ghc-internal/$(basename "$l")"; done
+  arbace_tool -m arbace.repr.haskell.libcheck replaceable "$w/results.edn" "${LIB_STG_REPLACE:-all}" > "$w/replaceable.txt"
+  local args=()
+  while read -r m; do
+    [ -f "$out/stg/ghc-internal/$m.stg.ae" ] && [ -f "$gi/$m.stg.ae" ] || continue
+    rm -f "$d/ghc-internal/$m.stg.ae"
+    args+=("$out/stg/ghc-internal/$m.stg.ae" "$gi/$m.stg.ae" "$d/ghc-internal/$m.stg.ae")
+  done < "$w/replaceable.txt"
+  : > "$w/replaced.txt"
+  [ ${#args[@]} = 0 ] || arbace_tool -m arbace.repr.haskell.libcheck merge "${args[@]}" > "$w/replaced.txt"
+  awk '{o+=$2; k+=$3} END{print "lib-stg --run: " NR " modules replaced: " o " top-level bindings Arbace'"'"'s own, " k " of the pack'"'"'s kept for its ABI"}' "$w/replaced.txt"
+}
+ga=(); [ ${#ids[@]} = 0 ] || ga=("${ids[@]}")
+st=0
+for side in ghc own; do
+  mkset "$w/libs-$side" "$([ $side = own ] && echo 1 || echo 0)"
+  echo "== lib-stg --run: run-check on the $side set" >&2
+  HSI_LIBS=$w/libs-$side HSI_IMAGE=$w/image-$side REPR_HASKELL_FRONT_SHARDS=${REPR_HASKELL_FRONT_SHARDS:-1} \
+    "$root/bin/repr-haskell" run-check "${ga[@]}" > "$w/run-$side.log" 2>&1 || true
+  rm -rf "$w/run-$side"; mkdir -p "$w/run-$side"
+  cp "$root/.tmp/repr-haskell/run-check/results.edn" "$w/run-$side/results.edn"
+  grep '^run-check:' "$w/run-$side.log" | sed "s/^/  $side: /"
+done
+# the judge: a program that passes on GHC's -O0 libraries and not on the own set is a pass lost
+arbace_tool -m arbace.repr.haskell.libcheck compare-runs "$w/run-ghc/results.edn" "$w/run-own/results.edn" | tee "$w/runs.txt" || st=1
+exit $st

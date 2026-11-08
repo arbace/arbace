@@ -71,6 +71,7 @@
 (def ^:dynamic *reps* nil)    ; atom {"name" rep}
 (def ^:dynamic *tops* nil)    ; #{top-level names}
 (def lib-data (atom {}))      ; {MODULE {CON {:reps [...] :marks [...] :tycon T}}}
+(def ^:dynamic *unit* "main") ; the unit the module is compiled in (HF10: a boot library's, ghc-internal)
 
 (defn- head? [x h] (and (seq? x) (= h (first x))))
 (defn- lv? [x] (head? x 'lv))
@@ -91,7 +92,7 @@
 
 (defn- ext-str [m o]
   (if (= m (module))
-    (str "main:" m "/" o)
+    (str *unit* ":" m "/" o)
     (str (or (:unit (get *units* m)) "main") ":" m "/" o)))
 
 (defn- clean-occ [o] (str/replace (str o) #"[:/]" "_"))
@@ -218,10 +219,24 @@
 (defn- strip-forall [t] (if (= :forall (first t)) (recur (nth t 3)) t))
 (defn- fun-ty? [t] (and (= :tc (first t)) (= tc/fun-tc (second t))))
 
+(defn- expand-syn
+  "A type synonym at the head expanded (the module's and its interfaces' synonyms, the elaborator's :syns): HF10's
+  library types name their representations through synonyms (BigNat# = WordArray# = ByteArray#), typePrimRep looks
+  through them"
+  [t]
+  (loop [t t k 0]
+    (if-let [[tvs rhs] (and (< k 20) (= :tc (first t)) (get (:syns *r*) (second t)))]
+      (let [as (nth t 2)]
+        (if (and (>= (count as) (count tvs)) (or (= (count as) (count tvs)) (= :tc (first rhs))))
+          (let [r (@#'tc/subst (zipmap tvs as) rhs)]
+            (recur (if (> (count as) (count tvs)) [:tc (second r) (into (vec (nth r 2)) (drop (count tvs) as))] r) (inc k)))
+          t))
+      t)))
+
 (defn type-reps
   "A type's PrimReps after unarisation: a vector, empty for a void type"
   [t]
-  (let [t (strip-forall t)]
+  (let [t (expand-syn (strip-forall t))]
     (if (= :tc (first t))
       (let [[_ n args] t]
         (cond
@@ -252,7 +267,7 @@
 
 (def ^:dynamic *lreps* nil)   ; atom {(lv ...) reps}: the desugarer's binders' representations, from their right-hand sides
 
-(defn- global-type [g] (get (:genv *r*) g))
+(defn- global-type [g] (or (get (:genv *r*) g) (get (:types *r*) g)))
 
 (defn local-reps [x]
   (or (get @*lreps* x)
@@ -335,6 +350,55 @@
 
 (declare floatable-con atomic-args? fail-var?)
 
+(def ^:dynamic *rec-ids* #{}) ; the enclosing recursive group's top-level names (CorePrep's cpe_rec_ids)
+(def ^:dynamic *arities* {})  ; the module's top-level binders (Core's lv or name vector) -> their lambdas' count
+
+(defn- pap-eta
+  "CorePrep's cpeArg at -O0 (cpeArgArity's exprArity, cpeEtaExpand): an argument that is a partial application of one
+  of the module's top-level functions, whose arity is known, is eta-expanded to that arity: a function closure, not a
+  thunk (the imported functions' arities are not in -O0 interfaces: GHC's -fomit-interface-pragmas). The lambda, or
+  nil"
+  [a]
+  (let [a (flatten-app a)]
+    (when (and (head? a 'app) (or (lv? (second a)) (head? (second a) 'v)))
+      (let [f (second a) k (if (lv? f) f (second f)) ar (get *arities* k) args (nth a 2)]
+        (when (and ar (> ar (count args)) (pos? (count args)))
+          (let [xs (mapv (fn [_] (list 'lv "eta" (str "pe" (swap! *n* inc)))) (range (- ar (count args))))
+                t (if (lv? f) (get (:ltypes *r*) f) (global-type k))
+                tys (when t (drop (count args) (arg-types t)))]
+            (doseq [[x t2] (map vector xs (concat tys (repeat nil)))] (swap! *lreps* assoc x (if t2 (type-reps t2) [:L])))
+            (list 'lam xs (list 'app f (into (vec args) xs)))))))))
+
+(defn- spec-eval
+  "CorePrep's speculative evaluation (Note [Speculative evaluation], mkNonRecFloat's exprOkForSpecEval with
+  -fspec-eval and -fspec-eval-dictfun on, their defaults): a binding of a superclass selection from a dictionary (a
+  ClassOpId whose result is a dictionary, is_terminating_result) or of a saturated dictionary function's application
+  (a DFunId of a class that is not unary) is case-bound, not a thunk; never a call of the enclosing recursive group.
+  The alternatives' type, (alg CLASS) or (poly), or nil when the expression is not ok for speculation"
+  [e]
+  (let [e (flatten-app e)]
+    (when (and (head? e 'app) (head? (second e) 'v) (vector? (second (second e))))
+      (let [g (second (second e)) args (nth e 2) o (nth g 3)
+            t (global-type g)
+            npreds (if (and t (= :forall (first t))) (count (nth t 2)) 0)
+            res (when t (strip-forall (result-type t (count args))))
+            ;; the dictionary's class: a selector's superclass (the class's :supers), a DFun's result (a type or a
+            ;; predicate [CLASS TYPES])
+            sel (when-let [[_ k c] (re-find #"^\$p([0-9]+)(.*)$" o)]
+                  (let [info (get (:all-classes *r*) ["ext" "tc" (nth g 2) c])]
+                    (first (nth (vec (:supers info)) (dec (Long/parseLong k)) nil))))
+            cls (or sel
+                    (when (vector? res) (cond (= :tc (first res)) (second res) (vector? (first res)) (first res))))
+            alg (fn [] (if (vector? cls) (list 'alg (ext-str (nth cls 2) (nth cls 3))) '(poly)))]
+        (cond
+          (contains? *rec-ids* (gname g)) nil
+          (and (re-find #"^\$p[0-9]+" o) (= 1 (count args)) (atomic-args? args)) (alg)
+          (and (str/starts-with? o "$f") (pos? npreds) (= npreds (count args)) cls
+               (every? #(or (atomic-args? [%]) (spec-eval %)) args)
+               (contains? (:all-classes *r*) cls) (not (newtype-class? cls)))
+          (alg)
+          :else nil)))))
+
 (defn- atom-of
   "An argument as an atom: [atom [[name stg-rhs]...]], the bindings outermost first; a saturated constructor
   application's own arguments' bindings floated out before it (CorePrep floats out of a value's right-hand side)"
@@ -351,6 +415,11 @@
     (and (head? a 'lit) (not (string-lit? a))) [(first (lit-form (second a))) []]
     (floatable-con a) (let [[c args] (floatable-con a) rs (mapv atom-of args) n (fresh "sat")]
                         [n (conj (vec (mapcat second (reverse rs))) [n (list 'rcon (gname c) (mapv first rs))])])
+    ;; a speculatable dictionary: case-bound (Note [Speculative evaluation])
+    (spec-eval a)
+    (let [at (spec-eval a) n (fresh "sat")]
+      (swap! *reps* assoc n :L)
+      [n [[:case n :L (expr a) at]]])
     ;; an argument of an unlifted type: evaluated first, case-bound (CorePrep's cpeArg: a case float)
     (not= [:L] (expr-reps a))
     (let [rs (expr-reps a) r (reps->rep rs) n (fresh "sat")]
@@ -368,13 +437,15 @@
         (let [[at bs] (atom-of inner)]
           [at (into (vec (for [[b r] binds] [(local-name b) (rhs r)])) bs)])
         (let [n (fresh "sat")] [n [[n (rhs a)]]])))
-    :else (let [n (fresh "sat")] [n [[n (rhs a)]]])))
+    :else (let [n (fresh "sat")] [n [[n (rhs (or (pap-eta a) a))]]])))
 
 (defn- wrap-binds [bnds body]
   (reduce (fn [b [n r :as bd]]
             (if (= :case n)
               (let [[_ x rep ex at] bd]
-                (list 'case ex [x rep] (or at (if (vector? rep) (list 'multi (count rep)) (list 'prim rep))) [(list 'alt :default [] b)]))
+                ;; a case float (CorePrep's CaseBound Float): marked, so that a case on it floats it out of its scrutinee
+                (with-meta (list 'case ex [x rep] (or at (if (vector? rep) (list 'multi (count rep)) (list 'prim rep))) [(list 'alt :default [] b)])
+                  {:float true}))
               (list 'let (list 'bind [n :L] r) b)))
           body (reverse bnds)))
 
@@ -503,6 +574,46 @@
       (recur (nth b 2) (conj binds (second b)))
       (reduce (fn [acc bd] (list 'let bd acc)) (list 'letne jbind b) (reverse binds)))))
 
+(defn- expr-type
+  "A Core expression's type when the elaborator's tables give it, else nil"
+  [e]
+  (case (first e)
+    lv (get (:ltypes *r*) e)
+    v (global-type (second e))
+    app (let [[_ f args] e]
+          (cond (head? f 'v) (some-> (global-type (second f)) (result-type (count args)))
+                (lv? f) (some-> (get (:ltypes *r*) f) (result-type (count args)))))
+    (let letrec) (expr-type (nth e 2))
+    nil))
+
+(defn- scrut-alg
+  "CoreToStg's mkStgAltType for a case without constructor alternatives: (alg T) when the scrutinee's type is an
+  algebraic data type (a class's dictionary too), else nil (poly)"
+  [s b]
+  (let [t (or (get (:ltypes *r*) b) (expr-type s))
+        t (when t (expand-syn (strip-forall t)))]
+    (when (and (vector? t) (= :tc (first t)))
+      (let [n (second t)]
+        (cond (= 'data (:flavour (get (:tycons *r*) n))) (list 'alg (ext-str (nth n 2) (nth n 3)))
+              (and (contains? (:all-classes *r*) n) (not (newtype-class? n))) (list 'alg (ext-str (nth n 2) (nth n 3)))
+              :else nil)))))
+
+(defn- float-scrut
+  "A case's scrutinee's floats taken out of it (CorePrep: a case's scrutinee is a strict context, its lets and its
+  case-bound floats float out, StrictContextFloatable): (mk SCRUTINEE) inside them"
+  [se mk]
+  (loop [se se wraps []]
+    (cond
+      (head? se 'let) (recur (nth se 2) (conj wraps [:let (second se)]))
+      (and (head? se 'case) (:float (meta se)))
+      (let [[_ ex b at [[_ _ _ inner]]] se] (recur inner (conj wraps [:case ex b at])))
+      :else
+      (reduce (fn [body [k & w]]
+                (if (= k :let)
+                  (list 'let (first w) body)
+                  (let [[ex b at] w] (with-meta (list 'case ex b at [(list 'alt :default [] body)]) {:float true}))))
+              (mk se) (reverse wraps)))))
+
 (defn expr
   "A Core expression as an STG expression"
   [e]
@@ -556,7 +667,11 @@
                     (and (lv? x) (not= [:L] (local-reps x)))
                     (let [rs (local-reps x) r (reps->rep rs) n (local-name x)]
                       (swap! *reps* assoc n r)
-                      (list 'case (expr e2) [n r] (if (> (count rs) 1) (list 'multi (count rs)) (list 'prim r)) [(list 'alt :default [] b)]))
+                      (float-scrut (expr e2) (fn [se] (list 'case se [n r] (if (> (count rs) 1) (list 'multi (count rs)) (list 'prim r)) [(list 'alt :default [] b)]))))
+                    (and (lv? x) (spec-eval e2))
+                    (let [n (local-name x)]
+                      (swap! *reps* assoc n :L)
+                      (list 'case (expr e2) [n :L] (spec-eval e2) [(list 'alt :default [] b)]))
                     :else
                     (if-let [[c args] (floatable-con e2)]
                       (let [rs (mapv atom-of args)]
@@ -587,10 +702,12 @@
                      (swap! *names* assoc x n))))
                (expr body))
            (let [[_ s b alts] e
-                 at (alt-type alts)
+                 at (let [a0 (alt-type alts)] (if (= '(poly) a0) (or (scrut-alg s b) a0) a0))
                  srs (expr-reps s)
                  ubx (some (fn [[_ c]] (and (vector? c) (unboxed-con? c))) alts)
-                 [at brep] (cond ubx [(list 'multi (count srs)) (reps->rep srs)]
+                 void? (and (empty? srs) (not ubx))
+                 [at brep] (cond void? ['(multi 0) :v]
+                                 ubx [(list 'multi (count srs)) (reps->rep srs)]
                                  (= 'prim (first at)) [at (second at)]
                                  (and (= '(poly) at) (not= [:L] srs)) [(if (> (count srs) 1) (list 'multi (count srs)) (list 'prim (reps->rep srs))) (reps->rep srs)]
                                  :else [at :L])
@@ -599,6 +716,8 @@
                  _ (swap! *reps* assoc bn brep)
                  salts (vec (for [[_ c xs body] (sort-by (fn [[_ c]] (if (= :default c) 0 1)) alts)]
                               (cond
+                                ;; a void scrutinee (State#, an effect's result): Unarise's (##) alternative
+                                (and (= :default c) void?) (list 'alt (unboxed-name 0) [] (expr body))
                                 (= :default c) (list 'alt :default [] (expr body))
                                 (head? c 'lit) (list 'alt (first (lit-form (second c))) [] (expr body))
                                 (not (vector? c)) (do (binding [*out* *err*] (println "tostg: alternative not handled:" (pr-str c)))
@@ -614,10 +733,8 @@
                                                      xs (concat reps (repeat :L)))]
                                         (list 'alt (gname c) bs (expr body))))))]
              ;; the scrutinee's lets floated out of the case (CorePrep's cpeBody floats)
-             (loop [se (expr s) wraps []]
-               (if (head? se 'let)
-                 (recur (nth se 2) (conj wraps (second se)))
-                 (reduce (fn [b bd] (list 'let bd b)) (list 'case se [bn brep] at salts) (reverse wraps)))))))
+             ;; and its case floats (a strict context: StrictContextFloatable, Note [BindInfo and FloatInfo])
+             (float-scrut (expr s) (fn [se] (list 'case se [bn brep] at salts))))))
       (do (binding [*out* *err*] (println "tostg: expression not handled:" (pr-str (first e)))) (list 'int 0)))))
 
 (defn- atomic-args? [args]
@@ -768,11 +885,14 @@
           _ (set! *r* (update r :ltypes merge new-types))
           r *r*
           top-names (set (concat (for [[_ b _] prog] (if (lv? b) (local-name b) (gname b)))))
+          arities (into {} (for [[_ b e] prog]
+                             [b (loop [e e n 0] (if (head? e 'lam) (recur (nth e 2) (+ n (count (second e)))) n))]))
           has-main? (some (fn [[_ b _]] (= b ["ext" "var" (module) "main"])) prog)]
-      (binding [*tops* (into top-names [(str "main::" (module) "/main")])]
+      (binding [*tops* (into top-names [(str "main::" (module) "/main")]) *arities* arities]
         (let [binds (vec (mapcat (fn [[_ b e]]
                                    (binding [*floats* (atom [])]
                                      (let [n (if (lv? b) (local-name b) (gname b))]
+                                      (binding [*rec-ids* #{n}]
                                       (if (and (lv? b) (string-lit? e) (str/ends-with? (second e) "#"))
                                        ;; a top-level string literal (the Simplifier's floats: StgTopStringLit)
                                        (do (swap! *reps* assoc n :addr)
@@ -781,11 +901,11 @@
                                        ;; the floats' names, internal top-level binders
                                        (set! *tops* (into *tops* (map second @*floats*)))
                                        (concat (for [[[_ fr] fname] @*floats*] (list 'bind [fname :L] (first (fv-rhs fr))))
-                                               [(list 'bind [n :L] (first (fv-rhs r)))]))))))
+                                               [(list 'bind [n :L] (first (fv-rhs r)))])))))))
                                  (remove (fn [[_ _ e]] (and (head? e 'lit) (str/starts-with? (second e) "foreign import"))) prog)))
               dfs (data-forms) sels (selectors)
               fix (fn [f] (if (head? f 'bind) (list 'bind (second f) (first (fv-rhs (nth f 2)))) f))]
-          (vec (concat [(list 'stg/module {:unit "main" :module (module) :file file :ghc "9.14.1" :helper 4 :flags ["-O0"] :compiler "arbace.repr.haskell.tostg"})]
+          (vec (concat [(list 'stg/module {:unit *unit* :module (module) :file file :ghc "9.14.1" :helper 4 :flags ["-O0"] :compiler "arbace.repr.haskell.tostg"})]
                        (map :data dfs) (map :data sels)
                        binds
                        (map fix (mapcat :binds dfs)) (map fix (mapcat :binds sels))
