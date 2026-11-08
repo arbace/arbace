@@ -36,6 +36,7 @@
 #   bin/repr-llvm mutants LIST OUT [N [FIRST [FAMILY]]] N mutants (default 300; the FIRST-th on, default 0) of LIST's
 #                                              modules, each one change meant to be invalid, into OUT/, OUT/mutants.list;
 #                                              FAMILY: base, attrs, cc, musttail, bundles, ... (arbace.repr.llvm.mutate/families)
+#   bin/repr-llvm rt-lists DIR                 the pack rt's families' lists (DIR/{roundtrip-rt,verify-rt,verify-rt-heldout}.list), absolute
 #   bin/repr-llvm record-opt LIST...         opt -passes=verify's verdicts of the lists' modules recorded (test/llvm/ref-opt23.edn: digests,
 #                                              first message, stderr's digest with the paths normalized): no LLVM tool at the check
 #   bin/repr-llvm record-rt LIST WORK          the round trip with the tools, its judges recorded (test/llvm/ref-rt23.edn: the original's and the
@@ -58,6 +59,9 @@
 #                                              subset (test/llvm/essential.txt, with essential-verify.txt's rejections for verify),
 #                                              judged against the same record; --record rewrites the record from the run (not with
 #                                              --essential). FAMILY: roundtrip-llvmtest, text-llvmtest, verify-llvmtest, verify-probes;
+#                                              the pack rt's (test/llvm/ir/rt.tar.xz, bin/llvmi ir-make rt; LLS31 (a), no --essential):
+#                                              roundtrip-rt, text-rt (its 257 modules), verify-rt (those, test/llvm/hw.list and the
+#                                              mutant sets a, b, ctl), verify-rt-heldout (the sets h1, h2, ctlh, ctlu);
 #                                              WORK default .tmp/repr-llvm/check/FAMILY. llvm/test's files from the pinned tarball,
 #                                              extracted (bin/llvm-corpus extract)
 #   bin/repr-llvm roundtrip --text LIST WORK   mode :full's round trip: each file read in :full, its .ae text read
@@ -175,6 +179,40 @@ own_verdicts() {
                 if (q in pre) { f = l; sub(/^.*error: */, "", f); gsub(/\{\{[^}]*\}\}/, "", f); gsub(/\[\[[^]]*\]\]/, "", f); sub(/[[:space:]]+$/, "", f); frag = f } } }
             printf "%s\t%s\t%s\t%s\n", n, v, frag, sx }' "$p"
   done < "$1" > "$2"
+}
+
+# The pack rt (LLS31 (a); doc/llvm/LLVM-CROP-SURVEY.md, "As built: LLS31 (a)"; bin/llvmi ir-make rt): test/llvm/ir/rt.tar.xz, pinned by
+# rt.tar.xz.sha256, its manifest rt.tsv (ID, SOURCE, SOURCE-SHA256, IR-SHA256; a mutant's SOURCE mutant-SET:BASE). rt_pack: extracted
+# once (.tmp/repr-llvm/rt/PIN), its directory on stdout; a checkout source (the C++ samples, Rust's sample, the hand-written modules a
+# mutant was made from) whose digest is not the manifest's makes the pack stale, an error
+rt_ir=${REPR_LLVM_IRDIR:-$root/test/llvm/ir}
+rt_pack() {
+  local d bad
+  [ -f "$rt_ir/rt.tar.xz" ] || { echo "repr-llvm: no $rt_ir/rt.tar.xz (bin/llvmi ir-make rt: clang's, at night)" >&2; return 1; }
+  (cd "$rt_ir" && sha256sum -c --quiet rt.tar.xz.sha256) >&2 || { echo "repr-llvm: rt.tar.xz does not match its pin" >&2; return 1; }
+  d=$root/.tmp/repr-llvm/rt/$(cut -c1-16 "$rt_ir/rt.tar.xz.sha256")
+  if [ ! -f "$d/.ok" ]; then rm -rf "$d"; mkdir -p "$d"; xz -dc "$rt_ir/rt.tar.xz" | tar -xf - -C "$d" && : > "$d/.ok"; fi
+  bad=$(awk -F'\t' -v r="$root" -v hw="$root/test/llvm/hw.list" 'BEGIN { while ((getline l < hw) > 0) { split(l, a, "\t"); H[a[1]] = a[2] } }
+      { p = ""; s = $2
+        if (sub(/^checkout:/, "", s)) p = r "/" s
+        else if (s ~ /^mutant-/) { sub(/^mutant-[^:]*:/, "", s); if (s in H) p = r "/" H[s] }
+        if (p != "") { c = "sha256sum < \"" p "\""; h = ""; c | getline h; close(c); split(h, a, " "); if (a[1] != $3) print $1 } }' "$rt_ir/rt.tsv" | head -5)
+  [ -z "$bad" ] || { echo "repr-llvm: the pack rt is stale for: $(echo $bad) (bin/llvmi ir-make rt; a hand-written module's mutants: ir-make rt --mutants)" >&2; return 1; }
+  echo "$d"
+}
+# rt_list FAMILY DIR: the family's modules NAME<tab>PATH, absolute: roundtrip-rt and text-rt the pack's modules; verify-rt those, the
+# hand-written modules (test/llvm/hw.list, the mutants' other input) and the mutant sets a, b, ctl; verify-rt-heldout the sets h1, h2, ctlh, ctlu
+rt_list() {
+  local fam=$1 d=$2
+  case $fam in
+    roundtrip-rt|text-rt) awk -F'\t' -v d="$d" '$2 !~ /^mutant-/ { print $1 "\t" d "/" $1 ".ll" }' "$rt_ir/rt.tsv" ;;
+    verify-rt)
+      awk -F'\t' -v d="$d" '$2 !~ /^mutant-/ { print $1 "\t" d "/" $1 ".ll" }' "$rt_ir/rt.tsv"
+      awk -F'\t' -v r="$root" 'NF { print $1 "\t" r "/" $2 }' "$root/test/llvm/hw.list"
+      awk -F'\t' -v d="$d" '$2 ~ /^mutant-(a|b|ctl):/ { print $1 "\t" d "/mut/" $1 ".ll" }' "$rt_ir/rt.tsv" ;;
+    verify-rt-heldout) awk -F'\t' -v d="$d" '$2 ~ /^mutant-(h1|h2|ctlh|ctlu):/ { print $1 "\t" d "/mut/" $1 ".ll" }' "$rt_ir/rt.tsv" ;;
+    *) return 2 ;;
+  esac
 }
 
 # pins_check (GT9, GTS211; the gate's `bin/gate --pins`; 058168d99's, which a merge of the LLVM line had dropped): the host's LLVM against
@@ -323,8 +361,14 @@ case ${1:-} in
       text-llvmtest) kind=text lists="$t/llvm-test-valid.list $t/essential.txt $t/hw.list" record=$t/check-text-llvmtest-linux-amd64.edn ;;
       verify-llvmtest) kind=verify lists="$t/llvm-test-valid.list $t/llvm-test-reject.list $t/llvm-test-split.list $t/llvm-test-reject-opt.list" record=$t/check-verify-llvmtest-linux-amd64.edn ;;
       verify-probes) kind=verify lists="$t/probes.list" record=$t/check-verify-probes-linux-amd64.edn known=$t/probes-known.tsv ;;
-      *) echo "repr-llvm check: FAMILY is roundtrip-llvmtest, text-llvmtest, verify-llvmtest or verify-probes" >&2; exit 2 ;;
+      # the pack rt's (LLS31 (a)): its lists from the pack (rt_list), written into WORK first
+      roundtrip-rt) kind=roundtrip lists=rt record=$t/check-roundtrip-rt-linux-amd64.edn ;;
+      text-rt) kind=text lists=rt record=$t/check-text-rt-linux-amd64.edn ;;
+      verify-rt) kind=verify lists=rt record=$t/check-verify-rt-linux-amd64.edn ;;
+      verify-rt-heldout) kind=verify lists=rt record=$t/check-verify-rt-heldout-linux-amd64.edn ;;
+      *) echo "repr-llvm check: FAMILY is roundtrip-llvmtest, text-llvmtest, verify-llvmtest, verify-probes, roundtrip-rt, text-rt, verify-rt or verify-rt-heldout" >&2; exit 2 ;;
     esac
+    if [ "$lists" = rt ] && [ -n "$ess" ]; then echo "repr-llvm check: $fam has no essential subset (the pack rt's families are --full's)" >&2; exit 2; fi
     if [ -n "$ess" ]; then
       [ -z "$rec" ] || { echo "repr-llvm check: --record takes the whole family, not --essential" >&2; exit 2; }
       case $kind in verify) lists="$t/essential.txt $t/essential-verify.txt" ;; *) lists=$t/essential.txt ;; esac
@@ -334,6 +378,10 @@ case ${1:-} in
     rm -rf "$work"; mkdir -p "$work"; work=$(cd "$work" && pwd)
     # the lists' paths: llvm/test/... and split/... from the pinned tarball's extraction (bin/llvm-corpus resolve), test/... the checkout's;
     # an id in two lists is one module (the essential copies of the valid sample's files)
+    if [ "$lists" = rt ]; then
+      rtd=$(rt_pack) || exit 2
+      rt_list "$fam" "$rtd" > "$work/rt.list"; lists=$work/rt.list
+    fi
     cat $lists | grep . | awk -F'\t' '!s[$1]++' > "$work/rel.list"
     # the essential subset: the family's modules among the essential lists (those its record holds)
     if [ -n "$ess" ]; then
@@ -341,7 +389,7 @@ case ${1:-} in
       mv "$work/rel.new" "$work/rel.list"
     fi
     "$root/bin/llvm-corpus" resolve "$work/rel.list" "$work/abs.list"
-    awk -F'\t' -v r="$root" 'FILENAME == ARGV[1] { a[$1] = $2; next } { print $1 "\t" ($2 ~ /^test\// ? r "/" $2 : a[$1]) }' "$work/abs.list" "$work/rel.list" > "$work/list"
+    awk -F'\t' -v r="$root" 'FILENAME == ARGV[1] { a[$1] = $2; next } { print $1 "\t" ($2 ~ /^\// ? $2 : $2 ~ /^test\// ? r "/" $2 : a[$1]) }' "$work/abs.list" "$work/rel.list" > "$work/list"
     missing=$(awk -F'\t' '{ if ((getline l < $2) < 0) print $1; close($2) }' "$work/list" | head -3)
     [ -z "$missing" ] || { echo "repr-llvm check: not found: $missing ... (bin/llvm-corpus extract; the split sections: bin/llvm-corpus scan)" >&2; exit 2; }
     # the run's own exit status is not the check's: its non-passes are the record's to hold (bin/reap classes them); its
@@ -367,11 +415,21 @@ case ${1:-} in
       END { printf "repr-llvm check %s: %d modules, %d pass; %d failing against the record, %d fixed; %d negative controls fail as they must\n", fam, n, p, f, x, nctl; exit (f > 0) }' "$work/rows.edn" || st=1
     if [ -n "$rec" ]; then
       if grep -q '^control passed\|^control not judged' "$work/run.out"; then echo "repr-llvm check: --record refused: a negative control passes" >&2; exit 1; fi
+      if [ ! -f "$record" ]; then  # a family's first record (the pack rt's): its header
+        { echo ";; repr/llvm's check family $fam (bin/repr-llvm check $fam --record; doc/llvm/LLVM-CROP-SURVEY.md, \"As built: LLS31 (a)\"): rows [ID RESULT REASON]"
+          echo ";; Written by bin/lib/repr-llvm/results $kind (the check's work directory as rows, $(date -u +%Y-%m-%d), on the pack test/llvm/ir/rt.tar.xz and the checkout's repr/llvm); read by bin/reap (test/reap/cells.edn, the :llvm row). Read with the Clojure reader."; } > "$record"
+      fi
       { grep '^;;' "$record"; echo "["; LC_ALL=C sort "$work/rows.edn"; echo "]"; } > "$record.new" && mv "$record.new" "$record"
       echo "repr-llvm check: recorded $(grep -c '^\[' "$work/rows.edn") rows into ${record#$root/}"
       exit 0
     fi
     exit $st ;;
+  rt-lists)
+    # rt-lists DIR: the pack rt's families' lists, absolute (DIR/FAMILY.list), for the oracle tier's records (record-opt over verify-rt's
+    # and verify-rt-heldout's, record-rt over roundtrip-rt's)
+    out=${2:?usage: bin/repr-llvm rt-lists DIR}; mkdir -p "$out"
+    rtd=$(rt_pack) || exit 2
+    for f in roundtrip-rt verify-rt verify-rt-heldout; do rt_list "$f" "$rtd" > "$out/$f.list"; echo "rt-lists: $(wc -l < "$out/$f.list") modules in $out/$f.list"; done ;;
   mutants)
     list=$2 out=$3
     mkdir -p "$out"; out=$(cd "$out" && pwd)
