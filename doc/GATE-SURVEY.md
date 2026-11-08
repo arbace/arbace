@@ -5073,7 +5073,8 @@ parts, counted at 0.
 - **8d.** `bin/gate`'s switches: shared off by default, the state beside the store, the rule's two defaults, and a third
   value refused.
 
-`bin/gate-tests` was run whole; its result is in the journal's entry.
+`bin/gate-tests` was run whole. 35 of 36 passed. `gate-reads-test` failed, which caught 8d's first version: it read the
+tree through `gate_env`. After the fix, `gate-reads-test`, which runs the whole of `bin/gate-tests` under strace, passes.
 
 **How the night uses it.** The first night runs `gate-lane2`, which contains `gate-lane`, with the default
 `GATE_LANE_SHARED=0`: one gate, its own lane state, exactly `gate-lane`'s behaviour plus `--concurrent`'s free rule.

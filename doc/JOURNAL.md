@@ -868,6 +868,7 @@ Checked (light, no gate):
 - `bin/gate --full --concurrent --plan`: 6:22 on the free rule against 6:58 on the budget, at 48.7 GiB free.
 - `--full --clean --concurrent --plan`: 7:02 on the budget, and 6:11 with `GATE_LANE_RULE=free`. That plan declares up
   to 73 GiB at 52 GiB free, which is GTS255.
-- `bin/gate-tests`: the result is in the report and in the next entry if it differs.
+- `bin/gate-tests`: 35 of 36 before the refusal's fix, gate-reads-test failing. After it, `gate-reads-test`, which runs
+  the whole of `bin/gate-tests` under strace, passes in 6 minutes: the canary is seen and every read is declared.
 
 Proposed: GTS252 to GTS255.
