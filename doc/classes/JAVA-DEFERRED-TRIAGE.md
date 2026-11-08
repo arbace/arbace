@@ -4954,3 +4954,70 @@ checkout.
   their code, and moves `jdk/provenance.edn`'s digests.
 - **(b)** Keep them as the derivations' first record.
 - *Recommended: (a)*, folded into the Java night's conversion.
+
+## As built: JCS233 (a) with JCS140 (a): `java.home`, the crypto policy, cacerts (2026-11-08; branch `java-http`, write-ahead)
+
+Branch `java-http` from `mac/java-props` (`a9aebc62f`), by day under the light rules: nothing converted, translated or built;
+the night's commands below. jdk26u at `baf63fb`.
+
+| part | what |
+|---|---|
+| `java.home` | `go/arbace/jrt/javahome.ae` (new): a directory per key, `$XDG_CACHE_HOME/arbace/java-home/KEY` (else `$HOME/.cache/...`), KEY the first 20 hex digits of the SHA-256 of the embedded files' names and bytes, written at the first read of the property (a temporary directory renamed into place; a loser of the race takes the winner's); `ARBACE_JAVA_HOME` overrides; `""` when none can be had (the box). doc/go/JRT-NOTES.md, "`java.home`". The decision's `$XDG_CACHE_HOME/arbace/KEY/` gained the subdirectory `java-home/`, so that the cache can hold other things later |
+| the files | `javaHomeFiles`, at the image's paths: `conf/logging.properties`, `conf/net.properties`, `conf/security/java.security`, `conf/security/policy/` (README.txt; limited's `default_US_export`, `default_local`, `exempt_local`; unlimited's `default_US_export`, `default_local`), `lib/security/cacerts`, `lib/tzdb.dat` |
+| the property | `system.ae`'s `initProps` puts the sentinel `javaHomeUnset`; `System_GetProperty_String__String` replaces it by `JavaHome` on the first read; `-Djava.home=...` (JAVA_TOOL_OPTIONS) and `setProperty` win as for any property |
+| the data step | `bin/jrt-convert`'s generate: `conf/security/policy/` copied from `src/java.base/share/conf/security/policy/` as `GendataCryptoPolicy.gmk` installs it; `lib/security/cacerts` copied from the JDK build's `images/jdk/lib/security/cacerts` (JCS140 (a): GenerateCacerts needs KeyStore and CertificateFactory, which javac's tool's world lacks), `generated.edn`'s `:data` naming it `:build-image`; the step fails without a build image |
+| the crypto policy | jrt's `JceSecurity` (overlay) gains jdk26u's `setupJurisdictionPolicies`, its static initializer, `getDefaultPolicy`, `getExemptPolicy` and `isRestricted` (the template's, `@@JCE_DEFAULT_POLICY@@` as `unlimited`, the build's UNLIMITED_CRYPTO default); without java.home the unlimited policy as before. `JceSecurityManager` (overlay) answers jdk26u's `getDefaultPermission` (no class has a code base in the Go build, so the JDK's walk would return the same). jca-sources + `javax/crypto/CryptoPermissions`, `CryptoPolicyParser` |
+| not changed | `Security.ae`'s `loadMaster` (the embedded resource: it works without java.home); `ZoneInfoFile`'s, `NetProperties`' and `LogManager`'s variants; `FilePaths`, `TrustStoreManager`, `KeyStoreUtil`, `AnchorCertificates` are jdk26u's and now find `${java.home}/lib/security/cacerts` |
+
+**Light checks.**
+- The joint javac check (`.tmp/night7/all9-run.sh`): 2,508 files (2,506 on `java-props`), **0 errors**, 5,329 classes.
+- `bin/repr-java read-jdk --check` of `JceSecurity`, `JceSecurityManager`, `CryptoPermissions`, `CryptoPolicyParser` (with the two
+  of JCS230) as a patch of java.base: 6 converted, 0 failed, 0 javac errors; `--no-javac`: 6 native, 0 fallbacks, the forms
+  identical byte for byte.
+- `bin/jrt build --arch all` (go build and vet, linux/amd64 and arm64): `arbace/jrt` clean; `bin/jrt test --arch amd64`: `arbace/jrt` ok
+  (5.1 s; the crops' `expat`, `pyexpat`, `hs`, `oi` fail by themselves, as on `next`). New: `TestJavaHome` (no cache directory,
+  `ARBACE_JAVA_HOME`, no embedded file; the key's directory, its files and only the list's, made once, `HOME`'s `.cache`, another
+  key for other data, eight concurrent first readers sharing one directory, no temporary left), `TestJavaHomeProperty` (the
+  first read, `setProperty`, `-Djava.home`), `BenchmarkJavaHome` (0.26 ms a start once the directory exists). Negative control:
+  the key cut to 16 digits fails `TestJavaHome` ("the directory: ...").
+- The policy's code on the JDK: the overlay's `JceSecurity` and `JceSecurityManager` with jdk26u's `CryptoPermission`,
+  `CryptoAllPermission`, `CryptoPermissions`, `CryptoPolicyParser` in a scratch package (`.tmp/jcs233/`, java.home read as the
+  property), run on jdk26u's JDK for TestUnlimited's eleven cases: `use_default`, `unlimited`, `unlimited/` give AES and RC5
+  unlimited and not restricted, `limited` 128 and restricted, the seven others "Can not initialize cryptographic mechanism",
+  as TestUnlimited expects. The interpreter cannot run the scratch copy (it cannot extend `java.security.Permission` yet), so
+  the Go build's run of it is the night's.
+
+**Expected yield** (interp; compiled the same where j2g translates them): `javax/crypto/CryptoPermissions/CryptoPolicyFallback`
+(t07905), `TestUnlimited` (t07906, eleven runs), `javax/net/ssl/sanity/CacertsExplorer` (t08012), `sun/security/rsa/TestCACerts`
+(t08242): **4**, and `sun/security/lib/cacerts/VerifyCACerts` (t08202) with JCS235 (a)'s HashSet, 5 touched. At risk: TestCACerts'
+110 signature checks at the interpreted level's speed; `Files.newDirectoryStream`'s glob (F9's provider) and `CryptoPolicyParser`'s
+reflective `RC2ParameterSpec`/`RC5ParameterSpec` constructors (the limited policy) in the Go build, unchecked by day.
+
+**Beyond the tests.** Every `TrustManagerFactory.init((KeyStore) null)` and `SSLContext.getDefault()` now has the JDK's
+anchors: PKIX validation against public CAs as on the JDK (no network at check time, so the corpus does not show it).
+
+**The night's commands** (in the night's worktree with this branch merged):
+
+```sh
+/root/arbace/.tmp/night7/all9-run.sh $PWD                     # 0 errors
+# jdk/ converted afresh: + CryptoPermissions, CryptoPolicyParser (and JCS230's two, JCS254's); jdk/data + 7 files
+# (conf/security/policy/*, lib/security/cacerts); generated.edn :data "lib/security/cacerts" :build-image
+REPR_JAVA_EXE=$(ls -td /root/arbace/.tmp/gate-exe/javac-*/ | head -1)arbace-javac REPR_JAVA_STALE_OK=1 \
+  ARBACE_HEAVY_CMD=$PWD/bin/heavy-lock bin/jrt-convert update && bin/jrt modules
+bin/jrt-convert vet --strict                                  # JceSecurity's users unchanged; no refusal
+bin/heavy-lock bin/j2g-edge update && bin/heavy-lock bin/javac-vendor edge
+bin/heavy-lock bin/arbace-go --build && bin/arbace-go --smoke && bin/jrt test
+# a smoke: expect "home /…/arbace/java-home/<20 hex> true", "aes 2147483647", "limited 128", "anchors <about 110>"
+X=target/arbace-go/amd64/arbace
+$X -e '(println "home" (System/getProperty "java.home") (.exists (java.io.File. (str (System/getProperty "java.home") "/lib/security/cacerts"))))
+       (println "aes" (javax.crypto.Cipher/getMaxAllowedKeyLength "AES"))
+       (println "anchors" (count (.getAcceptedIssuers (first (.getTrustManagers (doto (javax.net.ssl.TrustManagerFactory/getInstance "PKIX") (.init nil)))))))'
+$X -e '(java.security.Security/setProperty "crypto.policy" "limited") (println "limited" (javax.crypto.Cipher/getMaxAllowedKeyLength "AES"))'
+JAVA_CHECK_EXE=$PWD/$X J2G_GO_EXE=$PWD/$X JAVA_CHECK_HEAVY=$PWD/bin/heavy-lock bin/java-check --levels interp,compiled --jobs 4 \
+  --only 'jdk/(javax/crypto/CryptoPermissions|javax/net/ssl/sanity|sun/security/rsa/TestCACerts|sun/security/lib/cacerts)' \
+  --save .tmp/jcs233-night/check
+```
+
+**Fallbacks.** (1) j2g refusing `CryptoPolicyParser` (its reflection) or `CryptoPermissions` (serialization's fields): the report
+names it; the fallback is the old `JceSecurity` and `JceSecurityManager` (the policy unlimited; TestUnlimited fails, the other
+three still pass on java.home alone). (2) A start that cannot write its cache (a read-only home): java.home `""`, as before.

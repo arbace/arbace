@@ -785,6 +785,19 @@ covers what.
   `LogManager.ae`'s `LoggingProviderAccess` keep the jdk26u members they replace as repr/java converts them (the same
   license), with the changes they name. Their jdk26u sources join `jdk/forms/` (the converted closure, under the same
   license): 38 of httpserver-sources (`src/jdk.httpserver/share/classes`).
+- java.home, the crypto policy and the trust anchors (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS233"; recorded
+  by the rule of B7): since JCS233 (a) `overlay/jdk/java.base/javax/crypto/JceSecurity.java` also holds jdk26u's
+  `setupJurisdictionPolicies`, its static initializer, `getDefaultPolicy`, `getExemptPolicy` and `isRestricted`
+  (https://github.com/openjdk/jdk26u at `baf63fb`, `src/java.base/share/classes/javax/crypto/JceSecurity.java.template`, its
+  `@@JCE_DEFAULT_POLICY@@` as `unlimited`), and `JceSecurityManager.java` jdk26u's `getCryptoPermission` (but the code
+  base's walk) and `getDefaultPermission` (`javax/crypto/JceSecurityManager.java`): Copyright (c) Oracle and/or its
+  affiliates, under the GNU General Public License version 2 with the Classpath Exception (text below), the rest Arbace's
+  own; jca-sources' `javax/crypto/CryptoPermissions.java` and `CryptoPolicyParser.java` join `jdk/forms/` under the same
+  license. The resource data `jdk/data/conf/security/policy/` (README.txt and the limited and unlimited policies,
+  `src/java.base/share/conf/security/policy/`) and `jdk/data/lib/security/cacerts` (the JDK build's image file, made by
+  `make/modules/java.base/Gendata.gmk`'s GenerateCacerts from `src/java.base/share/data/cacerts/`, jdk26u's CA list:
+  public certificates, under the same license as jdk26u's tree) are jdk26u's; `go/arbace/jrt/javahome.ae` and its test
+  are Arbace's own (Eclipse Public License 1.0).
 - jrt's derivations as data (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS251 (a), JCS253"; recorded by the rule
   of B7): `test/jrt/derive.ae`'s tables hold, as the OLD and NEW strings of its replacements, text of jdk26u's files
   (https://github.com/openjdk/jdk26u at `baf63fb`: `src/java.base/share/classes/sun/nio/ch/Net.java`,
