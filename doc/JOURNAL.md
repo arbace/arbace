@@ -1124,3 +1124,13 @@ built as "As built: HFS-I9 (b), HFS-I11 (a)".
 - Night: `bin/repr-haskell target hsc` whole (the key moved with libffi.edn: about an hour of ci), then `bin/repr-haskell target compare`
   (337 of 337 expected) and `bin/gate --full` (haskell-target-probe's first pass, haskell-roundtrip). Proposed: HFS-I12 (the probe's
   negative control), HFS-I13 (the clean run's two hours of ci).
+
+## 2026-11-08: HFS-I12 (a) built, HFS-I13 (a) recorded (branch `hs-hfsi9`, from 88af58be2)
+
+The user accepted HFS-I12 (a) and HFS-I13 (a) (doc/haskell/FRONTEND-SURVEY.md, "Decided (the user, 2026-11-08, later: HFS-I12,
+HFS-I13)"; "As built: HFS-I12 (a)"). `haskell-target-probe`'s waiver is replaced by a control: two planted compile tests,
+`test/haskell/target/controls/control-{no,yes}.c`, which `bin/repr-haskell-target controls` runs through `bin/ci diagnose` and
+which the probe runs first; a flipped answer fails it in about 20 seconds. Wired in steps.edn (`:controls`, the directory in
+`:inputs`). Checked by flipping each planted answer once by hand (REPR_HASKELL_CONTROLS): the probe's control fails each time
+with the flipped test named. Alternatives: planting beside the 308 in the one diagnose run (rejected: a flip shows after 36
+minutes); keeping the waiver. HFS-I13 (a): nothing to build. the controls passed first, then the 308 compile tests, types and values: "the answers as committed", 33 min wall (40 min CPU), one process.

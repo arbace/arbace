@@ -1612,7 +1612,29 @@ oracle tier); doc/haskell/NATIVE.md, "The native reads' inputs: derived", has th
 - **The probe's run** (the moved script, whole, by day: one process, 0.9 GiB peak): `bin/repr-haskell target probe --verify` (through
   `bin/repr-haskell-target probe --verify`), 308 compile tests, "the answers as committed", 36 min (65 on hs-inputs' first run).
 
-### Proposed (HFS-I12 to HFS-I13)
+## Decided (the user, 2026-11-08, later: HFS-I12, HFS-I13)
+
+- **HFS-I12 (a)**: the probe gets a negative control of two planted compile tests. Built ("As built: HFS-I12 (a)").
+- **HFS-I13 (a)**: keep the clean run's two hours of ci (light, beside the serial run) until GT8's budget for the clean run objects.
+  Nothing to build.
+
+## As built: HFS-I12 (a) (2026-11-08, branch `hs-hfsi9`, from 88af58be2)
+
+- **The control**: `test/haskell/target/controls/control-no.c` (`#include <stdlib.h>` and `void unsetenv(const char *);`, a
+  conflicting declaration, the shape of the probe's own `compiles` checks) must be answered "no", and `control-yes.c` (stdlib.h
+  and a function using `abs`) "yes". `bin/repr-haskell-target controls` runs the two through `bin/ci diagnose` as the probe runs
+  the 308 and reads the result as `arbace.repr.haskell.configure/compile-errors` does (a `FILE.c:LINE:` line on the file means
+  no); either answer flipped, exit 1 naming it. `probe` runs it first, so a flip fails in about 20 seconds instead of after the
+  36 minutes. `REPR_HASKELL_CONTROLS=DIR` names another directory (the flips below).
+- **The step**: `haskell-target-probe`'s waiver in `:controls` is replaced by `"test/haskell/target/controls/control-no.c"`, and
+  the directory joins its `:inputs` (so the control is in its key: `bin/gate --full --plan` shows 188 files, never passed).
+  `gate.crops check`: 0 problems; `test/gate/crops-test.bash`: ok.
+- **Checked, light**: the real controls: "control-no.c answered no, control-yes.c answered yes", exit 0. The no-test replaced by the
+  yes-test: "control-no.c was answered yes (it must be no)", exit 1. The yes-test replaced by the no-test: "control-yes.c was
+  answered no (it must be yes)", exit 1.
+- **The whole probe** (by day, `bin/repr-haskell-target probe --verify`): the controls passed first, then the 308 compile tests, types and values: "the answers as committed", 33 min wall (40 min CPU), one process.
+- **Why not planted among the 308**: the answers file reads only the 308 by name, so a planted pair would be harmless there too,
+  but a failure would show only after the long diagnose run; a separate early run costs one more 20-second ci start.
 
 - **HFS-I12 The probe's negative control.** The step is waived. (a) **A control check in the plan**: one compile test the probe must
   answer "no" (a header that does not exist, a function musl lacks) and one it must answer "yes", planted beside the 308, the probe
