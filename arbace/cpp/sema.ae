@@ -60,10 +60,17 @@
 
 (declare class-lookup)
 
-(defn- own-names [scope ^String nm]
-  (let [es (.get ^java.util.HashMap (:names scope) nm)
-        es (if (= :ns (:kind scope)) (filterv #(< (long (or (:pos %) -1)) (long *cutoff*)) es) es)]
-    (concat es (mapcat #(own-names % nm) (:usings scope)))))
+(defn- own-names
+  "The entities `nm` names in `scope` and, transitively, in the namespaces its using-directives nominate, each namespace
+  once ([namespace.udir]/2-3, [basic.lookup.unqual]/2: the nominated sets' union; a cycle of directives -- libsupc++'s
+  tinfo.h nominating __cxxabiv1 from inside a namespace __cxxabiv1 nominates -- is the same set)."
+  ([scope ^String nm] (own-names scope nm (java.util.IdentityHashMap.)))
+  ([scope ^String nm ^java.util.IdentityHashMap seen]
+   (when-not (.containsKey seen (:names scope))
+     (.put seen (:names scope) true)
+     (let [es (.get ^java.util.HashMap (:names scope) nm)
+           es (if (= :ns (:kind scope)) (filterv #(< (long (or (:pos %) -1)) (long *cutoff*)) es) es)]
+       (concat es (doall (mapcat #(own-names % nm seen) (:usings scope))))))))
 
 (defn- find-here
   "The entities `nm` names in `scope` itself (a class: with its bases', [class.member.lookup])."
@@ -1065,25 +1072,33 @@
 
 (declare analyze rv init-list-elem)
 
-(declare ce-eval)
+(declare ce-eval ce-wrap)
 
 (defn const-int [scope n]
   (let [e (binding [*cutoff* Long/MAX_VALUE] (rv (analyze {:scope scope} n)))]
     (letfn [(ev [e]
               (case (:op e)
                 :int (:v e)
-                :cast (let [v (ev (:e e))] (if (abi/integral? (:ty e)) v (fail :const "constant cast")))
+                ;; G5c: the value converted to the cast's type ([conv.integral]/3: modulo 2^N for an unsigned one), so that
+                ;; libstdc++'s __numeric_traits_integer<unsigned>::__is_signed, (_Value)(-1) < 0, is false
+                :cast (let [v (ev (:e e))] (if (abi/integral? (:ty e)) (ce-wrap (:ty e) v) (fail :const "constant cast")))
                 :unop (let [v (ev (:e e))] (case (:o e) "-" (- (long v)) "+" v "~" (bit-not (long v)) "!" (if (zero? (long v)) 1 0)))
-                :binop (let [a (long (ev (:l e))) b (long (ev (:r e)))]
-                         (case (:o e) "+" (+ a b) "-" (- a b) "*" (* a b) "/" (quot a b) "%" (rem a b) "<<" (bit-shift-left a b)
-                               ">>" (bit-shift-right a b) "&" (bit-and a b) "|" (bit-or a b) "^" (bit-xor a b)
-                               "<" (if (< a b) 1 0) ">" (if (> a b) 1 0) "<=" (if (<= a b) 1 0) ">=" (if (>= a b) 1 0)
-                               "==" (if (= a b) 1 0) "!=" (if (not= a b) 1 0) "&&" (if (and (not= a 0) (not= b 0)) 1 0)
-                               "||" (if (or (not= a 0) (not= b 0)) 1 0)))
+                :binop (let [a (long (ev (:l e))) b (long (ev (:r e)))
+                             u (and (abi/integral? (:ty e)) (not (abi/signed? (:ty e))))
+                             r (case (:o e) "+" (+ a b) "-" (- a b) "*" (* a b)
+                                     "/" (if u (Long/divideUnsigned a b) (quot a b)) "%" (if u (Long/remainderUnsigned a b) (rem a b))
+                                     "<<" (bit-shift-left a b) ">>" (if u (unsigned-bit-shift-right a b) (bit-shift-right a b))
+                                     "&" (bit-and a b) "|" (bit-or a b) "^" (bit-xor a b)
+                                     "<" (if (< a b) 1 0) ">" (if (> a b) 1 0) "<=" (if (<= a b) 1 0) ">=" (if (>= a b) 1 0)
+                                     "==" (if (= a b) 1 0) "!=" (if (not= a b) 1 0) "&&" (if (and (not= a 0) (not= b 0)) 1 0)
+                                     "||" (if (or (not= a 0) (not= b 0)) 1 0))]
+                         (if (abi/integral? (:ty e)) (ce-wrap (:ty e) r) r))
                 :cond (if (zero? (long (ev (:c e)))) (ev (:else e)) (ev (:then e)))
-                :cmp (let [a (long (ev (:l e))) b (long (ev (:r e)))]
-                       (case (:o e) "<" (if (< a b) 1 0) ">" (if (> a b) 1 0) "<=" (if (<= a b) 1 0) ">=" (if (>= a b) 1 0)
-                             "==" (if (= a b) 1 0) "!=" (if (not= a b) 1 0)))
+                ;; (compared in the operands' common type: unsigned ones as unsigned, [expr.rel]/5, [conv.arith])
+                :cmp (let [a (long (ev (:l e))) b (long (ev (:r e)))
+                           c (if (and (:ct e) (abi/integral? (:ct e)) (not (abi/signed? (:ct e)))) (Long/compareUnsigned a b) (compare a b))]
+                       (case (:o e) "<" (if (neg? c) 1 0) ">" (if (pos? c) 1 0) "<=" (if (<= c 0) 1 0) ">=" (if (>= c 0) 1 0)
+                             "==" (if (zero? c) 1 0) "!=" (if (zero? c) 0 1)))
                 :not (if (zero? (long (ev (:e e)))) 1 0)
                 :land (if (and (not= 0 (long (ev (:l e)))) (not= 0 (long (ev (:r e))))) 1 0)
                 :lor (if (or (not= 0 (long (ev (:l e)))) (not= 0 (long (ev (:r e))))) 1 0)
@@ -2089,13 +2104,65 @@
 
 (declare block-ctx)
 
+;; ---------------------------------------------------------------------------------------------
+;; GNU's __atomic builtins (G5c; clang's AtomicExpr: Sema::BuildAtomicExpr's operand forms for the GNU builtins, the
+;; operands' conversions of [atomics.types.operations] as GCC documents them, "Built-in Functions for Memory Model Aware
+;; Atomic Operations"): libsupc++'s guard.cc, new_handler.cc, atomicity.h, std::atomic's members
+
+(def ^:private atomic-forms
+  ;; name -> [which shape rmw-op post?]: shape the operands after the pointer, :v a value of T, :vp a pointer to T,
+  ;; :o an order, :w the weak flag
+  (merge
+   {"__atomic_load_n" [:load [:o]] "__atomic_load" [:load [:rp :o]]
+    "__atomic_store_n" [:store [:v :o]] "__atomic_store" [:store [:vp :o]]
+    "__atomic_exchange_n" [:xchg [:v :o]] "__atomic_exchange" [:xchg [:vp :rp :o]]
+    "__atomic_compare_exchange_n" [:cmpxchg [:ep :v :w :o :fo]] "__atomic_compare_exchange" [:cmpxchg [:ep :vp :w :o :fo]]
+    "__atomic_test_and_set" [:tas [:o]] "__atomic_clear" [:clear [:o]]}
+   (into {} (for [op ["add" "sub" "and" "or" "xor" "nand" "min" "max"]
+                  [nm post] [[(str "__atomic_fetch_" op) false] [(str "__atomic_" op "_fetch") true]]]
+              [nm [:rmw [:v :o] (keyword op) post]]))))
+
+(defn atomic-builtin? [^String nm] (contains? atomic-forms nm))
+
+(defn- atomic-expr
+  "The node of a GNU __atomic builtin `nm` applied to the argument nodes `args`."
+  [ctx ^String nm args]
+  (let [[which shape rmw post] (or (atomic-forms nm) (fail :expr "the atomic builtin " nm))
+        _ (when-not (= (count args) (inc (count shape))) (fail :expr nm " with " (count args) " arguments"))
+        p (rv (analyze ctx (first args)))
+        _ (when-not (abi/ptr? (abi/unq (:ty p))) (fail :expr nm " of a non-pointer"))
+        vt (let [t (abi/unq (:to (abi/unq (:ty p))))] (dissoc t :v))
+        vt (if (#{:tas :clear} which) abi/char* vt)
+        _ (when-not (or (abi/integral? vt) (abi/ptr? vt) (= :enum (:k vt)) (#{:tas :clear} which)) (fail :type nm " of " (pr-str vt)))
+        _ (when (and (= :rmw which) (not (abi/integral? vt))) (fail :type nm " of " (pr-str vt)))
+        _ (when-not (#{1 2 4 8} (abi/size-of vt)) (fail :type nm " of a " (abi/size-of vt) "-byte type"))
+        ops (into {} (map (fn [k a]
+                            (let [e (rv (analyze ctx a))]
+                              [k (case k
+                                   :v (convert-scalar e vt false)
+                                   (:o :fo) (convert-scalar e abi/int* false)
+                                   :w (convert-scalar e abi/bool* false)
+                                   (:vp :rp :ep) e)]))
+                          shape (rest args)))
+        const (fn [k] (when-let [e (ops k)] (:v (ce-try e))))]
+    (merge {:op :atomic :which which :rmw rmw :post post :p p :vt vt :oc (const :o) :foc (const :fo) :wc (const :w) :cat :pr
+            :ty (case which (:load :xchg) (if (or (:rp ops) (:vp ops)) abi/void vt) :rmw vt (:cmpxchg :tas) abi/bool* abi/void)}
+           ops)))
+
 (def ^:private value-builtins
   {"__builtin_expect" :expect "__builtin_expect_with_probability" :expect "__builtin_constant_p" :constant-p
    "__builtin_is_constant_evaluated" :is-constant-evaluated
    "__builtin_addressof" :addressof
    "__builtin_alloca" :alloca
    "__builtin_va_start" :va-start "__builtin_c23_va_start" :va-start "__builtin_va_end" :va-end "__builtin_va_copy" :va-copy
-   "__builtin_add_overflow" :add-overflow "__builtin_sub_overflow" :sub-overflow "__builtin_mul_overflow" :mul-overflow})
+   "__builtin_add_overflow" :add-overflow "__builtin_sub_overflow" :sub-overflow "__builtin_mul_overflow" :mul-overflow
+   ;; the bit counts and byte swaps (G5c: <bit>'s std::__popcount, __countl_zero, __countr_zero over __builtin_popcountg,
+   ;; __builtin_clzg, __builtin_ctzg; libsupc++'s new_opa.cc), clang's CGBuiltin: llvm.ctpop, llvm.ctlz and llvm.cttz with
+   ;; zero undefined (x86's isCLZForZeroUndef), a fallback operand selected for zero, the count an int; llvm.bswap
+   "__builtin_popcount" [:ctpop :uint] "__builtin_popcountl" [:ctpop :ulong] "__builtin_popcountll" [:ctpop :ullong] "__builtin_popcountg" [:ctpop nil]
+   "__builtin_clz" [:ctlz :uint] "__builtin_clzl" [:ctlz :ulong] "__builtin_clzll" [:ctlz :ullong] "__builtin_clzg" [:ctlz nil]
+   "__builtin_ctz" [:cttz :uint] "__builtin_ctzl" [:cttz :ulong] "__builtin_ctzll" [:cttz :ullong] "__builtin_ctzg" [:cttz nil]
+   "__builtin_bswap16" [:bswap :ushort] "__builtin_bswap32" [:bswap :uint] "__builtin_bswap64" [:bswap :ulong]})
 
 (def ^:private std-builtins
   {"move" :cast "forward" :cast "move_if_noexcept" :cast "as_const" :cast "forward_like" :cast "addressof" :addr "__addressof" :addr})
@@ -2559,11 +2626,32 @@
                    :float [{:kind "FloatingLiteral" :value (str (:value u)) :type {:qualType "long double"} :valueCategory "prvalue"}])]
         (analyze ctx {:kind "CallExpr" :inner (vec (cons callee args)) :range (:range n)}))
       (fail :expr "a user-defined literal"))
+    "AtomicExpr" (if (:_atomic n) (atomic-expr ctx (:_atomic n) (:_args n)) (fail :expr "AtomicExpr"))
     ;; __builtin_va_arg(ap, T) (clang's VAArgExpr; G5): the next argument of a va_list
-    "BuiltinExpr" (if-let [x (:_vaarg n)]
+    ;; __builtin_offsetof(T, m.n[i]) ([support.types.layout]/1; clang's OffsetOfExpr, folded by ExprConstant's
+    ;; VisitOffsetOfExpr): the fields' offsets in their classes' layouts, a member of a base class at its base's offset, an
+    ;; index times its element's size
+    "BuiltinExpr" (if-let [{:keys [type path]} (:_offsetof n)]
+                    (loop [t (resolve-type (:scope ctx) type) off 0 [c & cs] path]
+                      (if-not c
+                        {:op :int :v off :ty abi/ulong* :cat :pr}
+                        (if-let [nm (:f c)]
+                          (let [cid (or (class-id t) (fail :expr "offsetof in a non-class " (pr-str t)))
+                                [owner e] (first (class-lookup cid nm))
+                                bo (when owner (let [[_ o vb] (abi/base-path cid owner)] (when vb (fail :expr "offsetof through a virtual base")) o))
+                                chain (case (:e e) :field [[(:cls e) (:i e)]] :indirect (:chain e) (fail :expr "offsetof of a non-field " nm))
+                                fo (reduce (fn [a [k i]] (+ (long a) (long (get (:fields (abi/layout k)) i)))) 0 chain)
+                                [k i] (peek chain)]
+                            (when (:bits (nth (:fields (abi/cls k)) i)) (fail :expr "offsetof of a bit-field"))
+                            (recur (:ty (nth (:fields (abi/cls k)) i)) (+ off (long bo) (long fo)) cs))
+                          (let [at (abi/unq t)
+                                _ (when-not (abi/arr? at) (fail :expr "offsetof's [] of a non-array"))
+                                i (or (:v (ce-try (rv (analyze ctx (:i c))))) (fail :expr "offsetof's index not a constant"))]
+                            (recur (:of at) (+ off (* (long i) (long (abi/size-of (:of at))))) cs)))))
+                  (if-let [x (:_vaarg n)]
                     (let [t (resolve-type (:scope ctx) (:_vatype n))]
                       {:op :va-arg :e (rv (analyze ctx x)) :ty (abi/unq t) :cat :pr})
-                    (fail :expr "a builtin expression " (node-text n)))
+                    (fail :expr "a builtin expression " (node-text n))))
     "TypeTraitExpr" (let [t (or (:_text n) (node-text n))
                           v (if-let [h (:trait-text @hooks)] (h (:scope ctx) t) (fail :expr "a type trait"))]
                       (when (map? v) (fail :expr "a dependent type trait " t))
@@ -2675,9 +2763,19 @@
       ;; __builtin_operator_new/delete: the global operator new or delete called as by a new- or delete-expression
       ;; (clang's EmitBuiltinNewDeleteCall; G4: std::allocator's allocate and deallocate)
       (analyze ctx (assoc n :inner (vec (cons (assoc (first (kids n)) :referencedDecl {:name op} :_wn true :globalQualifier true) (rest (kids n))))))
+    (if (and (= "DeclRefExpr" (:kind (first (kids n)))) (atomic-builtin? (str (get-in (first (kids n)) [:referencedDecl :name]))))
+      ;; an __atomic builtin a template's pattern wrote as a call (the parser keeps AtomicExpr outside templates)
+      (atomic-expr ctx (get-in (first (kids n)) [:referencedDecl :name]) (rest (kids n)))
     (if-let [b (when (= "DeclRefExpr" (:kind (first (kids n)))) (value-builtins (get-in (first (kids n)) [:referencedDecl :name])))]
       ;; the builtins that are their operand's value (G4: the headers' __builtin_expect(e, v): e as a long;
       ;; __builtin_constant_p: 0 at run time, as clang folds it at -O0 when e is not a constant)
+      (if (vector? b)
+        (let [[which tn] b
+              x (rv (analyze ctx (second (kids n))))
+              t (if tn (abi/b tn) (abi/unq (:ty x)))
+              _ (when-not (and (abi/integral? t) (#{1 2 4 8} (abi/size-of t))) (fail :type (name which) " of " (pr-str t)))
+              fb (when-let [f (nth (kids n) 2 nil)] (convert-scalar (rv (analyze ctx f)) abi/int* false))]
+          {:op :bitop :which which :e (convert-scalar x t false) :fb fb :ty (if (= :bswap which) t abi/int*) :cat :pr})
       (case b
         :expect (convert-scalar (rv (analyze ctx (second (kids n)))) abi/long* false)
         :constant-p {:op :int :v (if (ce-try (rv (analyze ctx (second (kids n))))) 1 0) :ty abi/int* :cat :pr}
@@ -2697,7 +2795,7 @@
               dst (deref-node (rv r))
               o ({:add-overflow "+" :sub-overflow "-" :mul-overflow "*"} b)]
           {:op :comma :l (assign-node ctx dst (convert-scalar (arith-binop o x y) (abi/unq (:ty dst)) false)) :r {:op :int :v 0 :ty abi/bool* :cat :pr}
-           :ty abi/bool* :cat :pr}))
+           :ty abi/bool* :cat :pr})))
     (let [[cn & an] (kids n)
           ;; a pseudo-destructor call (p->~T() of a scalar T, [expr.prim.id.dtor]): its object evaluated, no effect (G4:
           ;; std::destroy_at<int>)
@@ -2712,7 +2810,7 @@
         (or (operator-call ctx "()" (into [callee] args)) (fail :call "no operator()"))
         (analyze-call ctx (if (and (= :fnset (:op callee)) (if (:_wn cn) (boolean (or (:globalQualifier cn) (seq (:qualifier cn)))) (str/includes? (or (node-text cn) "") "::"))) (assoc callee :qualified true) callee) args)))))
 )
-)
+))
     "MemberExpr" (member-expr ctx n)
     ;; a member named in a template's pattern whose lookup clang left to the instantiation (f<T>() in a member)
     "UnresolvedMemberExpr" (if (seq (kids n))

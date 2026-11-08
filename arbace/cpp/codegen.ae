@@ -838,6 +838,134 @@
         (declare! nm 'void (mapv first args) :nounwind true)
         (emit! (list 'call 'void (gsym nm) args :attrs [:nounwind]))))))
 
+;; ---------------------------------------------------------------------------------------------
+;; GNU's __atomic builtins (G5c), as clang's CGAtomic.cpp writes them at -O0 for a lock-free size (EmitAtomicExpr,
+;; EmitAtomicOp, emitAtomicCmpXchgFailureSet): a constant order one instruction of its LLVM ordering (an order the
+;; operation does not take, a release load or an acquire store, emits nothing, as clang's "avoid crashing on code with
+;; undefined behavior"); a run-time order a switch over the C ABI's values (default monotonic); the result through a
+;; temporary
+
+(def ^:private cabi-orders {0 :monotonic 1 :acquire 2 :acquire 3 :release 4 :acq_rel 5 :seq_cst})
+
+(defn- atomic-ord
+  "The LLVM ordering of the C ABI order `o` for an operation (nil: clang emits nothing for it)."
+  [o load? store?]
+  (case (long o)
+    0 :monotonic
+    (1 2) (when-not store? :acquire)
+    3 (when-not load? :release)
+    4 (when-not (or load? store?) :acq_rel)
+    5 :seq_cst
+    :monotonic))
+
+(defn- by-order!
+  "(f ordering) at the order `oc` (a constant) or the run-time value of `oe`: clang's switch, its blocks joining after."
+  [oc oe load? store? f]
+  (if oc
+    (when-let [o (atomic-ord oc load? store?)] (f o))
+    (let [v (emit-rv oe)
+          lc (new-label "atomic.continue")
+          blocks (cond-> [[:monotonic (new-label "monotonic") []]]
+                   (not store?) (conj [:acquire (new-label "acquire") [1 2]])
+                   (not load?) (conj [:release (new-label "release") [3]])
+                   (not (or load? store?)) (conj [:acq_rel (new-label "acqrel") [4]])
+                   true (conj [:seq_cst (new-label "seqcst") [5]]))]
+      (emit! (list 'switch 'i32 v (second (first blocks)) (vec (for [[_ l ks] (rest blocks) k ks] ['i32 k l]))))
+      (close-block!)
+      (doseq [[o l] blocks] (start! l) (f o) (br! lc) (close-block!))
+      (start! lc))))
+
+(defn- cmpxchg-fail-ord [o]
+  (case (long o) (1 2) :acquire 5 :seq_cst :monotonic))
+
+(defn- mem-val
+  "A value of type `t` as memory holds it (bool an i8)."
+  [t v]
+  (if (= :bool (abi/bn (abi/underlying (abi/unq t)))) (if (boolean? v) (if v 1 0) (val! (list 'zext 'i1 v 'i8))) v))
+
+(defn- emit-atomic! [e]
+  (let [vt (:vt e) lt (abi/llvm-type vt) a (abi/size-of vt)
+        p (emit-rv (:p e))
+        which (:which e)
+        res (when-not (abi/void? (:ty e)) (slot! (:ty e)))
+        val-of (fn [] (if-let [v (:v e)] (mem-val vt (emit-rv v)) (val! (list 'load lt ['ptr (emit-rv (:vp e))] :align a))))
+        out! (fn [v] (cond (:rp e) (emit! (list 'store [lt v] ['ptr (emit-rv (:rp e))] :align a))
+                           res (emit! (list 'store [lt v] ['ptr res] :align a))))
+        signed (abi/signed? vt)]
+    (case which
+      :load (let [rp (when (:rp e) (emit-rv (:rp e)))]
+              (by-order! (:oc e) (:o e) true false
+                         (fn [o] (let [v (val! (list 'load lt ['ptr p] :atomic o :align a))]
+                                   (emit! (list 'store [lt v] ['ptr (or rp res)] :align a))))))
+      :store (let [v (val-of)] (by-order! (:oc e) (:o e) false true (fn [o] (emit! (list 'store [lt v] ['ptr p] :atomic o :align a)))))
+      :clear (by-order! (:oc e) (:o e) false true (fn [o] (emit! (list 'store ['i8 0] ['ptr p] :atomic o :align 1))))
+      :tas (by-order! (:oc e) (:o e) false false
+                      (fn [o] (let [r (val! (list 'atomicrmw :xchg ['ptr p] ['i8 1] o :align 1))
+                                    b (val! (list 'icmp :ne 'i8 r 0))]
+                                (store! abi/bool* b res))))
+      :xchg (let [v (val-of) rp (when (:rp e) (emit-rv (:rp e)))]
+              (by-order! (:oc e) (:o e) false false
+                         (fn [o] (let [r (val! (list 'atomicrmw :xchg ['ptr p] [lt v] o :align a))]
+                                   (emit! (list 'store [lt r] ['ptr (or rp res)] :align a))))))
+      :rmw (let [v (val-of)
+                 op (case (:rmw e) :min (if signed :min :umin) :max (if signed :max :umax) (:rmw e))]
+             (by-order! (:oc e) (:o e) false false
+                        (fn [o] (let [r (val! (list 'atomicrmw op ['ptr p] [lt v] o :align a))
+                                      r (if-not (:post e) r
+                                                (case (:rmw e)
+                                                  :add (val! (list 'add lt r v)) :sub (val! (list 'sub lt r v))
+                                                  :and (val! (list 'and lt r v)) :or (val! (list 'or lt r v)) :xor (val! (list 'xor lt r v))
+                                                  :nand (val! (list 'xor lt (val! (list 'and lt r v)) -1))
+                                                  (:min :max) (let [c (val! (list 'icmp (case (:rmw e) :min (if signed :slt :ult) (if signed :sgt :ugt)) lt r v))]
+                                                                (val! (list 'select ['i1 c] [lt r] [lt v])))))]
+                                  (emit! (list 'store [lt r] ['ptr res] :align a))))))
+      :cmpxchg (let [ep (emit-rv (:ep e))
+                     v (val-of)
+                     weak (if (some? (:wc e)) (not (zero? (long (:wc e)))) (fail :atomic "a run-time weak flag"))
+                     one (fn [s f]
+                           (let [c (val! (list 'load lt ['ptr ep] :align a))
+                                 pr (val! (apply list (cond-> ['cmpxchg ['ptr p] [lt c] [lt v] s f] weak (conj :weak true) true (conj :align a))))
+                                 old (val! (list 'extractvalue [(list 'struct lt 'i1) pr] 0))
+                                 ok (val! (list 'extractvalue [(list 'struct lt 'i1) pr] 1))
+                                 ls (new-label "cmpxchg.store_expected") lc (new-label "cmpxchg.continue")]
+                             (condbr! ok lc ls)
+                             (begin! ls)
+                             (emit! (list 'store [lt old] ['ptr ep] :align a))
+                             (begin! lc)
+                             (store! abi/bool* ok res)))
+                     fails (fn [s]
+                             (if (:foc e)
+                               (one s (cmpxchg-fail-ord (:foc e)))
+                               (let [fv (emit-rv (:fo e)) lc (new-label "atomic.continue")
+                                     bm (new-label "monotonic_fail") ba (new-label "acquire_fail") bs (new-label "seqcst_fail")]
+                                 (emit! (list 'switch 'i32 fv bm [['i32 1 ba] ['i32 2 ba] ['i32 5 bs]]))
+                                 (close-block!)
+                                 (doseq [[l f] [[bm :monotonic] [ba :acquire] [bs :seq_cst]]] (start! l) (one s f) (br! lc) (close-block!))
+                                 (start! lc))))]
+                 ;; clang's success order: a constant one as is (acq_rel and the rest), a run-time one switched
+                 (if (:oc e)
+                   (fails (or (cabi-orders (long (:oc e))) :monotonic))
+                   (by-order! nil (:o e) false false fails))))
+    (when res (load! (:ty e) res))))
+
+(defn- emit-bitop! [e]
+  (let [t (abi/unq (:ty (:e e))) lt (abi/llvm-type t) x (emit-rv (:e e))
+        w (subs (name lt) 1)]
+    (case (:which e)
+      :bswap (if (= lt 'i8) x
+                 (let [nm (str "llvm.bswap." lt)]
+                   (declare! nm lt [lt] :nounwind true)
+                   (val! (list 'call lt (gsym nm) [[lt x]]))))
+      (let [nm (str "llvm." (name (:which e)) "." lt)
+            zu (not= :ctpop (:which e))
+            _ (declare! nm lt (if zu [lt 'i1] [lt]) :nounwind true)
+            r (val! (list 'call lt (gsym nm) (if zu [[lt x] ['i1 true]] [[lt x]])))
+            r (int-cast! (abi/b :uint) abi/int* (int-cast! t (abi/b :uint) r))]
+        (if-let [fb (:fb e)]
+          (let [z (val! (list 'icmp :eq lt x 0))]
+            (val! (list 'select ['i1 z] ['i32 (emit-rv fb)] ['i32 r])))
+          r)))))
+
 (defn emit-rv
   "The operand of the scalar prvalue `e`."
   [e]
@@ -1000,6 +1128,8 @@
                  nil))
     :exn-ptr (:exn-adj @*f*)
     :alloca (val! (list 'alloca 'i8 :count ['i64 (emit-rv (:e e))] :align 16))
+    :atomic (emit-atomic! e)
+    :bitop (emit-bitop! e)
     ;; va_arg as clang's X86_64ABIInfo::EmitVAArg writes it for one INTEGER or SSE eightbyte: from the register save
     ;; area while gp_offset <= 40 (fp_offset <= 160), else from the overflow area
     :va-arg (let [t (:ty e)
