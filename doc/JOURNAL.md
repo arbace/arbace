@@ -1015,3 +1015,37 @@ compiler stubs first on PATH (their log empty). doc/cpp/CPP-SURVEY.md, "Decided 
   `make check-makefile`, `gate.crops check`, `bin/gate --full --plan` pass; the dg control fails as it must. Proposed CP280 (the gaps the
   global initializers show), CP281 (constraints' satisfaction as a sure failure), CP282 (g++'s own lines: attributes, then OpenMP), CP283
   (the table's verify in the gate). Slips: one `<(...)` and one `2>/dev/null` in throwaway commands (the survey's "Slips").
+
+## 2026-11-08: C++'s CX12, third slice: lookup, constraints, static_assert, access, constexpr, conversions; CP280-CP283 (branch `cpp-cx12`, from dd3f526dc)
+
+- **Decided** (the user, 2026-11-08): CP280-CP283 (a) (doc/cpp/CPP-SURVEY.md, "Decided (the user, 2026-11-08: CP280-CP283)").
+- **Built** (doc/cpp/CPP-SURVEY.md, "As built: CX12 (third slice)"), each rule the checker's (`arbace.cpp.sema/checking?`) unless
+  said: an operator expression on classes no operator and no conversion function serves, with two-phase lookup's definition-point
+  cutoff in function templates' specializations, and a call there nothing finds though a later declaration names it, both where the
+  associated namespaces are sure ([over.match.oper]/3, [over.built], [temp.dep.candidate]); CP281 (a): satisfaction with a doubt flag
+  (a refusal read as not satisfied), a false with no doubt a sure drop; a compound requirement's return-type-requirement evaluated
+  ([expr.prim.req.compound]/1.3; the parser keeps `-> C<...>` as `:_ret`); `__is_same_as`; static_assert's conditions; access
+  through private member typedefs; constexpr initializers' calls of non-constexpr functions, pointer-integer conversions and loads of
+  unusable variables ([expr.const]/5.2, /5.9, /5.15); callees declared nowhere and sure-ADL undeclared calls; the explicit-specifier
+  evaluated and direct-initialization's explicit conversions (CP280 (a)), "no viable conversion" from a class with only explicit
+  conversion functions; C++20's returned-local lvalue retry; `typedef struct { ... } T` (the unnamed class named for linkage: every
+  `T t;` was refused before, pr56961's real gap); C++20's parenthesized aggregates (CP280 (a), under the file's standard); CP282 (a)'s
+  first rule, a standard attribute with no arguments and `...` ([dcl.attr.grammar]/4), a syntax error that declines nothing; CP283
+  (a): the `--full` step `cpp-builtins`.
+- **Measured** on the every-10th sample (454 files, clang's table from the first slice's outputs): own passes 76 → 77 → 82 → 87 → 86.
+  Expected lines with an own error: "no matching function" 81 → 90 of 109, "use of undeclared identifier" 30 → 39 of 51, "is a
+  private member" 7 → 10 of 17, "no viable conversion" 5 → 8 of 14, "cannot be used as an attribute pack" 0 → 7 of 7.
+- **No false credit**: the eleven new passes read against their sources and clang's outputs; template/access19 passed by a wrong
+  reason (the explicit-specifier's pattern without a word boundary made `explicit_t(...)` explicit) and was withdrawn by the fix;
+  the ten others genuine. No earlier pass lost; extras 98 → 92 lines, none new.
+- **The code generator unchanged**: `gen-list` over test/cpp/codegen's 142 samples by dd3f526dc's tree and this branch's, 404 of 404
+  files byte for byte, before and after the fix (no clang; codegen-check live is the night's).
+- **Alternatives considered**: generic lambdas for lookup/operator-3a's 37 lines (left: a code generator feature, CP290); unknown GNU
+  attributes as tree nodes as CP282 (a) words it (not built: the tree is compared with clang's AST, CP294); every constraint false a
+  sure failure (rejected: the requires-expression's refusals read as false); constexpr's sure rules inside called functions
+  (rejected: gcc and clang place those errors at the inner call, lines the dg directives differ on).
+- **Recorded**: test/cpp/check-dg-own-linux-amd64.edn (454 rows, 86 passes), the C++ read fact (`:dg-own [86 1] :dg-clang
+  [4511 0.5]`), test/crops/scores.edn (C++ 76.1 / 100 / 67.80, read 0.655). `make check-makefile`, `gate.crops check`, `bin/gate
+  --full --plan`, `bin/repr-cpp target builtins verify` pass; the dg control fails as it must. Proposed CP290 (generic lambdas), CP291
+  (fold expressions), CP292 (the return-type-requirement for the code generator), CP293 (the file's standard in the code generator),
+  CP294 (gcc's unknown attributes as data, not nodes).

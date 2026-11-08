@@ -1796,6 +1796,14 @@
            ^T t (tok-at p i)]
        (.add d [(.-o t) why (.-s t)])))))
 
+(defn- soft-diag!
+  "CX12, CP282 (a): a main-file error the grammar diagnoses without declining the construct (the parse goes on, the tree
+  unchanged: an attribute's rules), at token `i`."
+  [^P p ^long i ^String why]
+  (when-let [^ArrayList d (stv p DIAGS)]
+    (when (main-tok? p i)
+      (let [^T t (tok-at p i)] (.add d [(.-o t) why (.-s t)])))))
+
 (defn- skip-statement!
   "The cursor from a statement's first token `b` to after its end: its ; at depth 0, or the } closing a block it opened
   (an else, catch or while after it continuing it), stopping before the } of the enclosing block. The decline's last
@@ -2060,8 +2068,15 @@
                               ns? (and (is-at? p 1 "::") (or (identical? :id (tk (nxt p 2))) (identical? :kw (tk (nxt p 2)))))
                               nsname (when ns? (ts (cur p)))]
                           (adv! p) (when ns? (adv! p) (adv! p))
-                          (when (is? p "(") (skip-balanced! p))
-                          (when (is? p "...") (adv! p))
+                          (let [args? (is? p "(")]
+                            (when args? (skip-balanced! p))
+                            (when (is? p "...")
+                              ;; ([dcl.attr.grammar]/4: an attribute followed by an ellipsis is a pack expansion; the
+                              ;; standard attributes take none -- clang's err_cxx11_attribute_forbids_ellipsis, gcc's
+                              ;; "attribute with no arguments contains no parameter packs")
+                              (when (and (nil? nsname) (not args?) (contains? std-attrs (ts (tok-at p b))))
+                                (soft-diag! p b (str "attribute '" (ts (tok-at p b)) "' cannot be used as an attribute pack")))
+                              (adv! p)))
                           (recur (if (cond (nil? nsname) (contains? std-attrs (ts (tok-at p b)))
                                            (#{"gnu" "__gnu__"} nsname) (known-gnu-attr? (ts (tok-at p (+ b 2))))
                                            :else (known-attr-ns? nsname))
@@ -3717,9 +3732,15 @@
                    (is? p "{") (do (adv! p)
                                    (let [x (with-gt p true (parse-expr p))]
                                      (expect! p "}")
-                                     (accept! p "noexcept")
-                                     (skip-until! p #{";"}) (expect! p ";")
-                                     (recur (conj out {:kind "CompoundRequirement" :inner [x]}))))
+                                     (let [nx (accept! p "noexcept")
+                                           ;; (CX12, CP281 (a): the return-type-requirement's type-constraint as written)
+                                           rb (when (accept! p "->") (ix p))]
+                                       (skip-until! p #{";"})
+                                       (let [rt (when (and rb (> (long (ix p)) (long rb))) (tok-text p rb (last-ix p)))]
+                                         (expect! p ";")
+                                         (recur (conj out (cond-> {:kind "CompoundRequirement" :inner [x]}
+                                                            nx (assoc :_noexcept true)
+                                                            rt (assoc :_ret rt))))))))
                    (is? p "requires") (do (adv! p)
                                           (let [x (with-gt p true (parse-expr p))] (expect! p ";")
                                             (recur (conj out {:kind "NestedRequirement" :inner [x]}))))

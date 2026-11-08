@@ -272,6 +272,8 @@
 
 (def ^:private value-traits
   {"__is_same" (fn [_ [a b]] (= a b))
+   ;; (clang's alias of __is_same, TokenKinds.def's ALIAS("__is_same_as", __is_same, KEYCXX))
+   "__is_same_as" (fn [_ [a b]] (= a b))
    "__is_void" (fn [_ [a]] (abi/void? (abi/unq a)))
    "__is_integral" (fn [_ [a]] (contains? abi/int-ranks (abi/bn (abi/unq a))))
    "__is_floating_point" (fn [_ [a]] (boolean (abi/floating? (abi/unq a))))
@@ -1344,15 +1346,20 @@
 
 
 (defn- concept-satisfied?
-  "The satisfaction of the concept `c` (its template entry) for the arguments `args`, memoized."
+  "The satisfaction of the concept `c` (its template entry) for the arguments `args`, memoized (with whether it was
+  doubtful, CP281 (a): sema/*constraint-doubt*)."
   [c args]
-  (let [k [(:id c) (canonical args)]]
-    (if-let [m *satisfaction*]
-      (let [v (get @m k ::none)]
-        (if (= ::none v)
-          (let [r (sema/constraint-satisfied? (bind-scope (:scope c) (:params c) args nil) (:expr c))] (swap! m assoc k r) r)
-          v))
-      (sema/constraint-satisfied? (bind-scope (:scope c) (:params c) args nil) (:expr c)))))
+  (let [k [(:id c) (canonical args)]
+        eval1 (fn [] (let [d (atom false)
+                           r (binding [sema/*constraint-doubt* d]
+                               (sema/constraint-satisfied? (bind-scope (:scope c) (:params c) args nil) (:expr c)))]
+                       [r @d]))
+        [r d] (if-let [m *satisfaction*]
+                (let [v (get @m k ::none)]
+                  (if (= ::none v) (let [x (eval1)] (swap! m assoc k x) x) v))
+                (eval1))]
+    (when d (sema/doubt!))
+    r))
 
 (defn- type-constraints-satisfied?
   "Each constrained type parameter's concept satisfied by its argument ([temp.param]/4: the immediately-declared
@@ -1398,11 +1405,16 @@
             ps (bind-scope (:scope t) (:params t) args nil)
             ;; the template's associated constraints ([temp.constr.decl]/3: its requires-clause, then the trailing one;
             ;; P14 (b)): not satisfied, no specialization ([temp.deduct]/5, [over.match.viable]/3)
+            ;; (CX12, CP281 (a), the checker: a constraint that evaluated to false with no doubt is a sure failure)
+            d (atom false)
+            unsat (fn [what]
+                    (throw (ex-info (str "codegen: " what " not satisfied for " (:name t))
+                                    {:codegen/refused :template :cx/constraint-false (and (sema/checking?) (not @d))})))
             _ (when-let [rc (:constraint t)]
-                (when-not (sema/constraint-satisfied? ps rc) (fail :template "constraints not satisfied for " (:name t))))
-            _ (when-not (type-constraints-satisfied? t args) (fail :template "type-constraints not satisfied for " (:name t)))
-            fid (binding [sema/*cutoff* Long/MAX_VALUE] (#'sema/declare-fn! ps (:pattern t)))
-            _ (when-not fid (fail :template "constraints not satisfied for " (:name t)))
+                (when-not (binding [sema/*constraint-doubt* d] (sema/constraint-satisfied? ps rc)) (unsat "constraints")))
+            _ (when-not (binding [sema/*constraint-doubt* d] (type-constraints-satisfied? t args)) (unsat "type-constraints"))
+            fid (binding [sema/*cutoff* Long/MAX_VALUE sema/*constraint-doubt* d] (#'sema/declare-fn! ps (:pattern t)))
+            _ (when-not fid (unsat "constraints"))
             ;; the specialization is found through its template, not by its name in the parameters' scope
             _ (.remove ^java.util.HashMap (:names ps) (:name (:pattern t)))]
         (upd-fn! fid assoc :lazy true :inline true :keep-def-scope true
@@ -1456,7 +1468,8 @@
                                              (when-let [a (deduce-call t ex args)] (instantiate-fn tid a)))
                                            (catch arbace.lang.ExceptionInfo e
                                              (when (System/getenv "CPP_TMPL_TRACE") (binding [*out* *err*] (println "template" (:name t) "drops out:" (.getMessage e))))
-                                             (reset! u true)
+                                             ;; (CP281 (a): a constraint surely false is the program's, a sure drop)
+                                             (if (:cx/constraint-false (ex-data e)) (reset! sr true) (reset! u true))
                                              (if (#{:template-pack :template-template} (:codegen/refused (ex-data e))) (throw e) nil))))
                                 ;; (CX12, the checker: a template whose deduction failed by the algorithm alone)
                                 _ (when-not fid (swap! (if (and (not @u) (or @sr (too-few-args? t args))) sure doubt) inc))]
@@ -1955,6 +1968,22 @@
                                [{:e :type :ty {:k :tdep :base (:ty e) :names (vec (rest parts))} :pos -1}])))
          :trait-type (fn [scope nm forms] (if (contains? type-traits nm) (trait-type scope nm forms) (fail :type "unknown type " nm)))
          :trait-text (fn [scope t] (binding [sema/*cutoff* Long/MAX_VALUE] (eval-text scope t)))
+         ;; (CX12, CP281 (a): a type-constraint `C<A...>` (or `C`) applied to the type `T`, C<T, A...>: true, false, or
+         ;; nil when the slice cannot tell)
+         :type-constraint (fn [scope ^String text T]
+                            (try
+                              (let [[_ nm rest] (re-matches #"(?s)\s*((?:[A-Za-z_][A-Za-z_0-9]*::)*[A-Za-z_][A-Za-z_0-9]*)\s*(?:<(.*)>)?\s*" text)
+                                    parts (when nm (str/split nm #"::"))
+                                    e (when parts (first (filter #(and (= :tmpl (:e %)) (= :concept (:tk %)))
+                                                                 (if (next parts) (sema/lookup-qualified scope parts) (sema/lookup scope nm)))))]
+                                (when e
+                                  (let [t (tmpl (:id e))
+                                        bs (new-scope :block scope)
+                                        _ (enter! bs "__cx_ret_t" {:e :type :ty T :pos -1})
+                                        args (complete-args t (explicit-args t (str (last parts) "<__cx_ret_t" (when (and rest (not (str/blank? rest))) (str ", " rest)) ">") bs))]
+                                    (when (and args (not (dependent? args)))
+                                      (concept-satisfied? t args)))))
+                              (catch arbace.lang.ExceptionInfo x (when (System/getenv "CPP_TMPL_TRACE") (binding [*out* *err*] (println "type-constraint" text (.getMessage x)))) nil)))
          :concept-id (fn [ctx e n]
                        (let [t (tmpl (:id e))
                              args (or (complete-args t (or (explicit-args t (sema/written-targs n (:name t)) (:scope ctx)) []))
