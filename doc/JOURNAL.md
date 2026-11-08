@@ -827,3 +827,37 @@ the program compiled; clang's IR (the packs) as the oracle; no clang code ported
 IR's text against clang's (rejected: the routes' IR differs in names of temporaries and in clang's attributes everywhere;
 the names level and the runs are the contract); the swap over every program for every unit (18,000 links; the per-unit
 runs take the 102 programs (51 samples by both routes) of exceptions, RTTI, guards, allocation and headers, and the whole swap every program).
+
+## 2026-11-08: C++'s completeness: the dg harness's DejaGnu rules and the own judge's failures (branch `cpp-compl`, from mac/cpp-runtime-own 9681152c4)
+
+The brief: C++'s `bin/crops-score` completeness 76.1 (96.5 without by design); fix the largest deferred classes' causes, review the
+by-design ones and propose. The gap's shape (test/reap/matrix.edn): read's deferred 77 were the dg harness's (prune-output 51,
+gxx-disagrees 19); print's 1,665 by design are the clang judge's own blind spots (oracle-rejects 1,584, gxx-objects-location 81),
+which the decided own judge (CP243 (a)) judges once its night records exist, so the print work was the own judge's failures.
+
+The dg check (arbace.repr.cpp.dg), against gcc 15.2.0's testsuite library as the source of the rules (gcc/testsuite/lib/gcc-dg.exp
+lines 398-403, gcc-dg-prune; lines 1226-1283, process-message; target-supports-dg.exp, dg-require-dll and -ifunc): dg-prune-output
+applied as gcc-dg-prune's regsub after the directives took their lines (cpp0x/initlist19.C, `dg-prune-output "error"` with a passing
+dg-error, decided the order; the first version pruned first and lost six passes); a line-numbered directive matching an error of any
+file (DejaGnu's pattern names no file: cpp0x/deleted16a.C); a message's later top-level branches matched on any diagnostic at the line
+(process-message splices the message as text: cpp0x/defaulted10.C's `previously|declared` on g++'s note); dg-require-dll and -ifunc
+false here (g++ 15.2 on musl: "'ifunc' is not supported on this target"); `--embed-dir` for `#embed __FILE__`; the class musl-libc
+(musl's NULL is nullptr, measured; musl's iconv writes `*` for an unencodable character, measured with a C program). g++'s
+reference re-recorded for the 167 files affected and their rows recorded (`bin/repr-cpp dg --only --record-ref`, `--judge --record`):
+10 more passes, prune-output 0, gxx-disagrees 2; the every-40th sample unchanged. Considered and not applied: dg.exp's directive grep
+(white space before the closing brace), which cpp1z/fold1.C supports and cpp1y/udlit-char-template-sfinae-neg.C contradicts; dg.exp
+itself is not in the tarball, so the rule stays as it was.
+
+The own judge's runs (`roundtrip-corpus KEY --judge own --only-list`: the known file's deferred files of each key, the gxx-dg
+gxx-objects-location files, every 5th oracle-rejected file of gxx-dg-every-10 and every 40th other, old-deja's alike): 13 failures,
+each fixed in the printer or the converter by the grammar's rule (a bare switch's items, a unary operand a cast-expression, a pack
+expansion's pattern an assignment-expression, `< ::` against C++98's digraph, a template's text from its outermost header, a
+typedef's leading standard attributes, a macro-written for-init, attributes before `auto`, a statement's `;` after a comment, an
+argumentless explicit specialization, a type-id's pack expansion); rtcheck lets a known file of a level the own judge does not run
+take its own levels' class; `bin/repr-cpp dg --rt-judge own` records the modules keys (cpp-90's night list named
+`roundtrip-corpus gxx-modules-all`, which has no corpus). After: 63 of 64 deferred files, 48 of 48 objects files, 176 of 176 and 24
+of 24 of the samples, the essential list 33 of 33 (recorded), the samples 9 of 9 with the control failing.
+
+Scores: completeness 76.1 to 76.2 on the records (read 80.6 to 80.7), about 88.5 expected after the night's own records (print to
+about 98). Proposals CP260-CP265 in doc/cpp/CPP-SURVEY.md, "As built: cpp-compl" (UNSUPPORTED as :na; the token check by clang's
+tokens where g++ -E is no reference; the dg check's clang-* classes; oracle-rejected under our route; threads; the macro extent).
