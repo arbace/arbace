@@ -164,7 +164,9 @@
 #                                  linux/arm64, tamago/amd64, tamago/arm64; linux's by bin/goi table-configs, which converts
 #                                  linux's std once) with no error; --tables: the generator tables a list of them alone
 #                                  (.tmp/repr-python/pyi/table/), the members counted
-# Environment: REPR_PYTHON_SRC as for bin/repr-python (the tarball's source). python3 (the oracle) is looked for only by
+# Environment: REPR_PYTHON_SRC as for bin/repr-python (the tarball's source). REPR_PYTHON_VERSION=3.15 (queue 237, the
+# reader's switch of queue 236): the runtime and the reader follow Python 3.15 (go/arbace/py's version.go: 3.15's
+# additions present), the standard library, the references and the records stay 3.14.10's (the pins fetched as 3.14's). python3 (the oracle) is looked for only by
 # the verbs that run it (queue 213): run, python, repl, aot, check --aot --no-pyi, c2j-check and table-check need none.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -299,7 +301,7 @@ core_modules() {
 
 tarball_test() {
   local top="$root/.tmp/repr-python/Python-3.14.10"
-  [ -d "$top/Lib/test" ] || "$root/bin/repr-python" pins --fetch >/dev/null
+  [ -d "$top/Lib/test" ] || env -u REPR_PYTHON_VERSION "$root/bin/repr-python" pins --fetch >/dev/null
   mkdir -p "$WORK/pypath"; ln -sfn "$top/Lib/test" "$WORK/pypath/test"
 }
 
@@ -413,8 +415,8 @@ corpus_list() {
   [ -n "$line" ] || die "no corpus $id in test/python/corpora.edn"
   read -r base paths excl <<< "$line"
   case $base in
-    cpython-3.14.10) base="$root/.tmp/repr-python/Python-3.14.10"; [ -d "$base/Lib" ] || "$root/bin/repr-python" pins --fetch >/dev/null ;;
-    site-packages) base="$root/.tmp/repr-python/site-packages/$(uname -m)"; [ -d "$base" ] || "$root/bin/repr-python" pins --fetch >/dev/null ;;
+    cpython-3.14.10) base="$root/.tmp/repr-python/Python-3.14.10"; [ -d "$base/Lib" ] || env -u REPR_PYTHON_VERSION "$root/bin/repr-python" pins --fetch >/dev/null ;;
+    site-packages) base="$root/.tmp/repr-python/site-packages/$(uname -m)"; [ -d "$base" ] || env -u REPR_PYTHON_VERSION "$root/bin/repr-python" pins --fetch >/dev/null ;;
     root:*) base="$root/${base#root:}" ;;
   esac
   local -a args=(); IFS=, read -ra pa <<< "$paths"; args+=("${pa[@]}")
@@ -508,7 +510,7 @@ cmd_compile_check() {
 # stdlib_lib: the pinned tarball's Lib, sys.path's standard library until python/Lib is vendored (PY6; survey §6.6)
 stdlib_lib() {
   local top="$root/.tmp/repr-python/Python-3.14.10"
-  [ -d "$top/Lib" ] || "$root/bin/repr-python" pins --fetch >/dev/null
+  [ -d "$top/Lib" ] || env -u REPR_PYTHON_VERSION "$root/bin/repr-python" pins --fetch >/dev/null
   echo "$top/Lib"
 }
 
@@ -815,7 +817,9 @@ SH
 # name and text, NUL-terminated: compile, ir, scope and run, then arbace/repr/python's namespaces in name order
 compiler_digest() {
   local f
-  { for f in arbace/python/compile.ae arbace/python/ir.ae arbace/python/scope.ae arbace/python/run.ae \
+  # under REPR_PYTHON_VERSION=3.15 the reader's version first (queue 237; arbace.python.run's compiler-digest)
+  { [ "${REPR_PYTHON_VERSION:-}" != 3.15 ] || printf 'REPR_PYTHON_VERSION=3.15\0'
+    for f in arbace/python/compile.ae arbace/python/ir.ae arbace/python/scope.ae arbace/python/run.ae \
              $(cd "$root" && ls arbace/repr/python/*.ae | LC_ALL=C sort); do
       [ -f "$root/$f" ] || continue
       printf '%s\0' "$f"; cat "$root/$f"; printf '\0'
@@ -977,7 +981,7 @@ cmd_bench() {
   while [ $# -gt 0 ]; do case $1 in --record) record=1; shift ;; --pyi) pyi=1; shift ;; *) bms+=("$1"); shift ;; esac; done
   # the sdist's full benchmark directories (data files, variants' tomls: PY6h's REQUEST, queue 200)
   local src="$root/.tmp/repr-python/pyperformance-1.14.0/pyperformance/data-files/benchmarks"
-  [ -d "$src" ] || "$root/bin/repr-python" pins --fetch >/dev/null
+  [ -d "$src" ] || env -u REPR_PYTHON_VERSION "$root/bin/repr-python" pins --fetch >/dev/null
   aot_module
   local d="$AOT/bench"; mkdir -p "$d"; : > "$d/bench.tsv"
   local -A cls=()
@@ -1387,13 +1391,14 @@ cmd_runtime() {
       # the Unicode database's tables (PY6c): builtins_unicodedata_table.go as tools/pyi/unicodedata_table.py makes it
       # from the pinned tarball's generated headers
       local top="$root/.tmp/repr-python/Python-3.14.10"
-      [ -d "$top/Lib" ] || "$root/bin/repr-python" pins --fetch >/dev/null
+      [ -d "$top/Lib" ] || env -u REPR_PYTHON_VERSION "$root/bin/repr-python" pins --fetch >/dev/null
       # (queue 213: python3's generators over the tarball's headers, the committed tables their record: the oracle tier's,
       # bin/pyi runtime tables; here only where the oracle runs live)
       if ! pyrec_live; then
         echo "runtime: builtins_unicodedata_table.go and builtins_cjk_table.go against their generators: the oracle tier's (bin/pyi runtime tables)"
       elif python3 -I -S -B "$root/tools/pyi/unicodedata_table.py" "$top" "$t/src/py/builtins_unicodedata_table.go" --check; then
         echo "runtime: builtins_unicodedata_table.go is unicodedata_table.py's from the tarball's headers"
+        ucd315_check "$t/src/py" || rc=1
       else
         echo "runtime: builtins_unicodedata_table.go DIFFERS from unicodedata_table.py's"; rc=1
       fi
@@ -1428,15 +1433,38 @@ cmd_runtime() {
       # the oracle tier's (queue 213): the generated tables against python3's generators over the tarball's headers
       need_python "runtime tables"
       local t="$WORK/runtime-tables" top="$root/.tmp/repr-python/Python-3.14.10" rc=0
-      [ -d "$top/Lib" ] || "$root/bin/repr-python" pins --fetch >/dev/null
+      [ -d "$top/Lib" ] || env -u REPR_PYTHON_VERSION "$root/bin/repr-python" pins --fetch >/dev/null
       rm -rf "$t"; mkdir -p "$t"; runtime_print "$t/src"
       python3 -I -S -B "$root/tools/pyi/unicodedata_table.py" "$top" "$t/src/py/builtins_unicodedata_table.go" --check \
         && echo "runtime: builtins_unicodedata_table.go is unicodedata_table.py's from the tarball's headers" || { echo "runtime: builtins_unicodedata_table.go DIFFERS"; rc=1; }
+      ucd315_check "$t/src/py" || rc=1
       python3 -I -S -B "$root/tools/pyi/cjkcodecs_table.py" "$top" "$t/src/py/builtins_cjk_table.go" --check \
         && echo "runtime: builtins_cjk_table.go is cjkcodecs_table.py's from the tarball's headers" || { echo "runtime: builtins_cjk_table.go DIFFERS"; rc=1; }
       return $rc ;;
     *) die "usage: bin/pyi runtime print|read|vet|check|tables" ;;
   esac
+}
+
+# ucd315_check DIR (queue 237): DIR's builtins_unicodedata_table315.go (UCD 17.0.0, the 3.15 switch's) against
+# unicodedata_table.py --suffix 315 over the 3.15.2 tarball's headers (extracted by REPR_PYTHON_VERSION=3.15
+# bin/repr-python pins --fetch; absent: said and not judged), then its negative control (GTS81 (a)): 3.14.10's table
+# judged against 3.15.2's headers must differ ("control passed" fails)
+ucd315_check() {
+  local dir=$1 top="$root/.tmp/repr-python/Python-3.15.2" c="$WORK/ucd315-control"
+  [ -d "$top/Modules" ] || REPR_PYTHON_VERSION=3.15 "$root/bin/repr-python" pins --fetch >/dev/null 2>&1 || true
+  if [ ! -f "$top/Modules/unicodedata_db.h" ]; then
+    echo "runtime: builtins_unicodedata_table315.go not judged: no 3.15.2 tarball (REPR_PYTHON_VERSION=3.15 bin/repr-python pins --fetch)"
+    return 0
+  fi
+  python3 -I -S -B "$root/tools/pyi/unicodedata_table.py" "$top" "$dir/builtins_unicodedata_table315.go" --check --suffix 315 \
+    || { echo "runtime: builtins_unicodedata_table315.go DIFFERS from unicodedata_table.py --suffix 315's"; return 1; }
+  rm -rf "$c"; mkdir -p "$c"
+  sed 's/^\(\(const\|var\) [A-Za-z0-9]*\)\b/\1315/; s/^\t\([A-Za-z0-9]*\)\( *=\)/\t\1315\2/; s/^const ucdBlob = "/const ucdBlob315 = "/' \
+    "$dir/builtins_unicodedata_table.go" > "$c/builtins_unicodedata_table315.go"
+  if python3 -I -S -B "$root/tools/pyi/unicodedata_table.py" "$top" "$c/builtins_unicodedata_table315.go" --check --suffix 315 >/dev/null 2>&1; then
+    echo "control passed: ucd315: 3.14.10's table judged equal to 3.15.2's headers"; return 1
+  fi
+  echo "control failed as it must: ucd315: 3.14.10's table against 3.15.2's headers"
 }
 
 # smoke_key FILE: a smoke program's or session's key: its bytes and test/python/pyi's subdirectories' files (the data it reads)
@@ -1777,7 +1805,7 @@ pip_tree() {
 wheels_pip_probe() {
   need_python "wheels pip-probe (CPython's pip beside pyi's: the oracle tier's)"
   local W="$WORK/wheels/pip-probe" sp="$root/.tmp/repr-python/site-packages/$(uname -m)/usr/lib/python3.14/site-packages"
-  [ -d "$sp/pip" ] || "$root/bin/repr-python" pins --fetch >/dev/null
+  [ -d "$sp/pip" ] || env -u REPR_PYTHON_VERSION "$root/bin/repr-python" pins --fetch >/dev/null
   rm -rf "$W"; mkdir -p "$W/path" "$W/pyi" "$W/cpython"; ln -s "$sp/pip" "$W/path/pip"
   local whls=() names=() file url sha bytes rest
   while IFS=$'\t' read -r file url sha bytes rest; do
