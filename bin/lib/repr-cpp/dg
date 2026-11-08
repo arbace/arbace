@@ -15,7 +15,7 @@
 # with --record-ref (its errors by line recorded in test/cpp/ref-dg-gxx15.edn; the judge reads the record).
 #
 # Usage: bin/repr-cpp dg [--corpus dg-error,preprocess,modules] [--dirs D,...] [--only LIST] [--sample N]
-#                        [--record] [--record-ref] [--judge] [--own] [--reader native|clang] [--dumps-only]
+#                        [--record] [--record-ref] [--judge] [--own] [--front clang|native] [--reader native|clang] [--dumps-only]
 #   --corpus   the parts (default dg-error,preprocess)
 #   --dirs     only the files under these directories of g++.dg (`.` its top level)
 #   --only     only the files of LIST (names under g++.dg/ or gxx-dg/NAME, one a line)
@@ -30,6 +30,11 @@
 #              clang's acceptance and errors, from the recorded dumps (CP247 (a); refused with REPR_CPP_LIVE; with no pack pinned yet it
 #              prints "no record yet" and is skipped, exit 0)
 #   --dumps-only  the dg-error part's oracle run alone (bin/repr-cpp record-dumps's), no read, no judgment
+#   --front    clang (the default): the dg-error part's acceptance and errors clang's (the recorded dumps, or live); native (CX12,
+#              doc/cpp/CPP-SURVEY.md, "As built: CX12 (first slice)"): Arbace's own front end's (arbace.repr.cpp.diag: the native parser's
+#              syntax errors, Sema's checks, the code generator's Sema as a checker), no clang and no pack, each file judged by its own
+#              dg-error lines (the own verb of arbace.repr.cpp.dg: its record test/cpp/check-dg-own-linux-amd64.edn with --record, the
+#              rows beside clang's recorded ones); REPR_CPP_DIAG_SEMA=0 leaves the code generator's Sema out
 #   --reader   clang (the default): an accepted unit's forms from the oracle's dump; native: by the native parser (CX11,
 #              doc/cpp/NATIVE.md), the oracle still judging acceptance and errors, and the modules part's round trip --reader native
 # Writes under .tmp/repr-cpp-dg/ (REPR_CPP_DG_WORK): PART/{dg.edn,run.tsv,clang/,forms/,read.edn,rows.edn,gxx/}.
@@ -39,7 +44,7 @@ root=$(cd "$(dirname "$0")/../../.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
 . "$root/bin/lib/tools.bash"
 cd "$root"
-parts=dg-error,preprocess dirs= only= sample= record= recref= judge= reader=clang own= dumps_only=
+parts=dg-error,preprocess dirs= only= sample= record= recref= judge= reader=clang own= dumps_only= front=clang
 while [ $# -gt 0 ]; do
   case $1 in
     --corpus) parts=$2; shift 2 ;;
@@ -52,10 +57,16 @@ while [ $# -gt 0 ]; do
     --own) own=1; shift ;;
     --dumps-only) dumps_only=1; shift ;;
     --reader) case $2 in native|clang) reader=$2 ;; *) echo "repr-cpp dg: --reader native|clang" >&2; exit 2 ;; esac; shift 2 ;;
-    *) sed -n '17,37p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+    --front) case $2 in native|clang) front=$2 ;; *) echo "repr-cpp dg: --front native|clang" >&2; exit 2 ;; esac; shift 2 ;;
+    *) sed -n '17,42p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
   esac
 done
 live=${REPR_CPP_LIVE:-}
+# CX12: the dg-error part by Arbace's own front end: no clang, no pack, no filter
+if [ "$front" = native ]; then
+  [ -z "$live$recref$dumps_only" ] || { echo "repr-cpp dg: --front native runs no clang and no g++ (REPR_CPP_LIVE, --record-ref, --dumps-only are clang's)" >&2; exit 2; }
+  export REPR_CPP_FRONT=native
+fi
 . "$root/test/oracle-records/oracle.bash"
 . "$root/test/oracle-records/cpp.bash"
 case ",$parts," in *,dg-error,*) [ -z "$own" ] || [ -z "$live" ] || { echo "repr-cpp dg: --own reads the dg-error part's recorded dumps; REPR_CPP_LIVE runs clang (the oracle tier's)" >&2; exit 2; } ;; esac
@@ -66,7 +77,7 @@ case ",$parts," in *,dg-error,*) [ -z "$own" ] || [ -z "$live" ] || { echo "repr
 if [ "$reader" = native ] && [ -n "$record$recref" ]; then echo "repr-cpp dg: --record and --record-ref are the clang reader's" >&2; exit 2; fi
 export GOMAXPROCS=${GOMAXPROCS:-4} GOMEMLIMIT=${GOMEMLIMIT:-1500MiB} REPR_CPP_READER=$reader
 jobs=${REPR_CPP_THREADS:-4}; export REPR_CPP_THREADS=$jobs
-work=${REPR_CPP_DG_WORK:-$root/.tmp/repr-cpp-dg}
+work=${REPR_CPP_DG_WORK:-$root/.tmp/repr-cpp-dg$([ "$front" = native ] && printf %s -own)}
 mkdir -p "$work"; work=$(cd "$work" && pwd)
 main=$root
 case $root in */.tmp/worktrees/*) main=${root%%/.tmp/worktrees/*} ;; esac
@@ -82,7 +93,8 @@ cache=${REPR_CPP_CXXDUMP_CACHE:-$root/.tmp/repr-cpp/cxxdump-cache}
 mkdir -p "$cache"
 # the oracle's filter, from the checkout's tools/cxxdump, for the dg-error part (live: into the cache; else: the records, no clang)
 cacheargs=
-case ",$parts," in
+case ",$parts,$front" in
+  *,dg-error,*native) ;;
   *,dg-error,*)
     [ -n "${REPR_CPP_CXXDUMP_EXE:-}" ] || "$root/bin/repr-cpp" cxxdump-ensure >&2 || exit 1
     if [ -n "$live" ]; then cacheargs="-cache $cache"
@@ -153,7 +165,7 @@ for part in "${ps[@]}"; do
     arbace_tool -s arbace.c.dg -m arbace.repr.cpp.dg lists "$work" "$gxxdg" "$part" "${only:--}" "${sample:--}" 2>&1 | filt
     [ "${PIPESTATUS[0]}" -eq 0 ] || { echo "repr-cpp dg: the lists failed" >&2; exit 1; }
     t0=$(date +%s)
-    if [ "$part" = dg-error ]; then
+    if [ "$part" = dg-error ] && [ "$front" = clang ]; then
       tr '\t\n' '\037\0' < "$wd/run.tsv" | xargs -0 -r -P "$jobs" -I{} nice bash -c 'IFS=$'"'"'\037'"'"' read -r n s g c <<< "$1"; clang1 "$n" "$c" "$s"' _ {}
     fi
     t1=$(date +%s)
@@ -168,7 +180,11 @@ for part in "${ps[@]}"; do
     t3=$(date +%s)
     echo "$part: oracle $((t1-t0)) s, read $((t2-t1)) s, g++ $((t3-t2)) s" | tee "$wd/times.txt"
   fi
-  arbace_tool -s arbace.c.dg -m arbace.repr.cpp.dg judge "$work" ${record:+--record} "$part" 2>&1 | filt
+  if [ "$part" = dg-error ] && [ "$front" = native ]; then
+    arbace_tool -s arbace.c.dg -m arbace.repr.cpp.dg own "$work" ${record:+--record} 2>&1 | filt
+  else
+    arbace_tool -s arbace.c.dg -m arbace.repr.cpp.dg judge "$work" ${record:+--record} "$part" 2>&1 | filt
+  fi
   [ "${PIPESTATUS[0]}" -eq 0 ] || status=1
 done
 exit $status
