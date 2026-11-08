@@ -23,3 +23,9 @@ t2 = ast.parse("x = 1")
 t2.body[0].targets[0].id = "1x"
 exec(compile(t2, "<t2>", "exec"), {})
 print("compiled", ast.dump(t2.body[0].targets[0]))
+t3 = ast.parse("import os.path as p\nfrom os import sep as s\nprint(p.join('a', 'b'), s)\n")
+t3.body[0].names[0].asname = "@pytest_ar"
+t3.body[1].names[0].asname = "@s"
+t3.body[2].value.args[0].func.value.id = "@pytest_ar"
+t3.body[2].value.args[1].id = "@s"
+exec(compile(t3, "<t3>", "exec"), {})
