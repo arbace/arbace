@@ -1489,9 +1489,13 @@
           :else (let [[s u] (if ua [b a] [a b])]
                   (if (> (abi/size-of s) (abi/size-of u)) s (abi/b (unsigned-of (abi/bn s))))))))))
 
-(defn- null-constant? [e]
+(defn- null-constant?
+  "A null pointer constant ([conv.ptr]/1): a prvalue of type std::nullptr_t, or an integral zero; (CX12, the checker) from
+  C++11 an integer literal ([conv.ptr]/1 since CWG 903), so `false`, a bool, is none."
+  [e]
   (or (= :nullptr (abi/bn (:ty e)))
-      (and (= :int (:op e)) (zero? (long (:v e))) (abi/integral? (:ty e)) (not (abi/enum? (:ty e))))))
+      (and (= :int (:op e)) (zero? (long (:v e))) (abi/integral? (:ty e)) (not (abi/enum? (:ty e)))
+           (not (and (checking?) (>= (long *cxx-year*) 11) (= :bool (abi/bn (:ty e))))))))
 
 (defn- class-id [t] (when (abi/class? (abi/unq t)) (:id (abi/unq t))))
 
@@ -3100,9 +3104,20 @@
                                (let [id (next-id)]
                                  (swap! *vars* assoc id {:id id :name (:name pn) :ty (resolve-type (:scope c) (get-in pn [:type :qualType])) :storage :local :fn (:fn-id ctx)})
                                  (when (:name pn) (enter! (:scope c) (:name pn) {:e :var :id id}))))
+                           ;; (CX12, the checker: a requirement the program surely fails is false with no doubt: a type
+                           ;; requirement naming a member of a type that is no class, [temp.res.general]/3's typename-
+                           ;; specifier over a scalar or pointer; an expression requirement whose analysis failed by an error
+                           ;; Sema is sure of, `*` of a non-pointer or a member of a non-class)
+                           type-sure-false? (fn [r]
+                                              (when-let [[_ q] (re-matches #"(?:typename\s+)?(.+?)\s*::\s*(?:template\s+)?[A-Za-z_]\w*(?:<.*>)?" (str/trim (str (get-in r [:type :qualType]))))]
+                                                (let [qt (try (abi/unq (abi/non-ref (resolve-type (:scope c) q))) (catch arbace.lang.ExceptionInfo _ nil))]
+                                                  (and qt (or (abi/arith? qt) (abi/ptr? qt) (abi/void? qt))))))
+                           sure-expr-failure? (fn [e] (re-find #"^codegen: (\* of a non-pointer|member of a non-class)" (str (ex-message e))))
                            ok? (fn [r]
                                  (try (case (:kind r)
-                                        "TypeRequirement" (do (resolve-type (:scope c) (get-in r [:type :qualType])) true)
+                                        "TypeRequirement" (try (resolve-type (:scope c) (get-in r [:type :qualType])) true
+                                                               (catch arbace.lang.ExceptionInfo e
+                                                                 (if (and (checking?) (type-sure-false? r)) false (throw e))))
                                         "NestedRequirement" (constraint-satisfied? (:scope c) (first (:inner r)))
                                         (let [x (analyze c (first (:inner r)))]
                                           (cond
@@ -3124,7 +3139,7 @@
                                                     :else ok))
                                             (or (:_ret r) (:_noexcept r)) (do (doubt!) true)
                                             :else true)))
-                                      (catch arbace.lang.ExceptionInfo _ (doubt!))))]
+                                      (catch arbace.lang.ExceptionInfo e (if (and (checking?) (sure-expr-failure? e)) false (doubt!)))))]
                        {:op :int :v (if (every? ok? (:inner n)) 1 0) :ty abi/bool* :cat :pr}))
     ;; noexcept(e) ([expr.unary.noexcept]): e unevaluated, true when no function it calls may throw (an implicit or
     ;; defaulted special member counted as not throwing; G4)
@@ -3559,7 +3574,15 @@
                {:s :block :items (vec (concat (when init-s [init-s]) (when cvar-s [cvar-s])
                                               (if (:isConstexpr n)
                                                 ;; if constexpr ([stmt.if]/2): the condition a constant, the discarded branch not analyzed
-                                                [(if (not= 0 (long (const-int (:scope c) cn)))
+                                                ;; (CX12, the checker: a condition [expr.const]/5 makes surely not constant, clang's
+                                                ;; err_constexpr_if_condition_expression_is_not_constant, at the condition)
+                                                [(if (not= 0 (long (try (const-int (:scope c) cn)
+                                                                        (catch arbace.lang.ExceptionInfo x
+                                                                          (if (and (checking?) (:cx/sure (ex-data x)))
+                                                                            (throw (ex-info (str "codegen: constexpr if condition is not a constant expression ("
+                                                                                                 (str/replace (str (ex-message x)) #"^not a constant: " "") ")")
+                                                                                            {:codegen/refused :constexpr :cx/node {:range (or (:cx/at (ex-data x)) (:range cn))}}))
+                                                                            (throw x))))))
                                                    (stmt (block-ctx c) (nth ks 1))
                                                    (if (:hasElse n) (stmt (block-ctx c) (nth ks 2)) {:s :null}))]
                                                 [{:s :if :cond (fold-mark (cond-of c cn)) :then (stmt (block-ctx c) (nth ks 1))

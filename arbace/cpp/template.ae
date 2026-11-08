@@ -581,7 +581,19 @@
                      m (abi/mangle-var v)]
                  {:decl [:var (:id e)] :ty pt :ref (boolean (abi/ref? pt))
                   :mangled (if (str/starts-with? m "_Z") m (str "_Z" (abi/source-name m)))})
-          (fail :template "a pointer argument " text))))))
+          (do
+            ;; (CX12, the checker: `(T)f`, a function cast to a pointer to function of another type, is a reinterpret_cast
+            ;; ([expr.cast]/4), never a converted constant expression ([temp.arg.nontype]/2, [expr.const]/5.15): the
+            ;; explicit argument is invalid, the template surely no candidate)
+            (when (sema/checking?)
+              (when-let [[_ ty fname] (re-matches #"\(\s*([^()]+?)\s*\)\s*&?\s*([A-Za-z_]\w*)" text)]
+                (let [ct (try (abi/unq (sema/resolve-type scope ty)) (catch arbace.lang.ExceptionInfo _ nil))
+                      fs (sema/lookup scope fname)]
+                  (when (and ct (abi/ptr? ct) (abi/fn? (:to ct)) (seq fs) (every? #(= :fn (:e %)) fs)
+                             (not-any? #(= (abi/unq (:ty (sema/fnd (:id %)))) (abi/unq (:to ct))) fs))
+                    (throw (ex-info (str "codegen: a reinterpret_cast as a template argument: " text)
+                                    {:codegen/refused :template :cx/sure-drop true}))))))
+            (fail :template "a pointer argument " text)))))))
 
 (defn resolve-arg
   "A template argument's form for the parameter `p` in `scope`."
@@ -993,7 +1005,14 @@
         ps (if pk (vec (butlast all)) all)
         tid (:id t)
         explicit-b (into {} (map-indexed vector explicit))
-        b (atom explicit-b)]
+        b (atom explicit-b)
+        ;; (CX12, the checker) the template parameters of parameters that are non-deduced contexts by the program's own
+        ;; argument ([temp.deduct.call]/1: a braced list for a P that is no initializer_list nor array; /6: an overload
+        ;; set of two or more functions for a P that any of them would deduce): left undeduced, a sure failure
+        ;; when no other parameter names them (bare-tparam: P a template parameter of tid alone, cv and references
+        ;; removed)
+        nondeduced (atom #{})
+        bare-tparam (fn [P] (let [q (abi/unq (abi/non-ref (abi/unq P)))] (when (and (= :tparam (:k q)) (= tid (:tid q)) (not (:pack q))) (:i q))))]
     (when (or (<= (count args) (count ps)) (:va sig) pk)
       (when (every? true?
                     (for [[P e] (map vector ps args)
@@ -1016,6 +1035,11 @@
                                           (:fns e))]
                             (reset! b (if (= 1 (count oks)) (first oks) snap))
                             true)
+                          ;; (CX12, the checker: the non-deduced contexts above)
+                          (and (sema/checking?) (bare-tparam P)
+                               (or (= :init-list (:op e))
+                                   (and (= :fnset (:op e)) (empty? (:tmpls e)) (not (:obj e)) (>= (count (distinct (map #(:ty (sema/fnd %)) (:fns e)))) 2))))
+                          (do (swap! nondeduced conj (bare-tparam P)) true)
                           :else (unsure!)))))
         ;; a trailing function parameter pack: its pattern deduced from each remaining argument, each pack the
         ;; elements so deduced ([temp.deduct.call]/1)
@@ -1029,7 +1053,17 @@
                     (when (every? some? elems)
                       (doseq [i packs :when (not (contains? @b i))] (swap! b assoc i {:pack (mapv #(get % i) elems)}))
                       true)))
-          (finish-deduction t @b))))))
+          (let [r (finish-deduction t @b)]
+            (when (and (nil? r) (seq @nondeduced))
+              (let [named-elsewhere (fn [i] (some (fn [P] (and (not= i (bare-tparam P)) (some #{i} (tparams-in P tid)))) all))
+                    ps-t (:params t)]
+                (when (some (fn [i] (and (not (contains? @b i)) (< (long i) (count ps-t))
+                                         (not (:default (nth ps-t i))) (not (:pack (nth ps-t i)))
+                                         (not (named-elsewhere i))
+                                         (= 1 (count (filter #(= i (bare-tparam %)) all)))))
+                            @nondeduced)
+                  (sure!))))
+            r))))))
 
 (declare instantiate-fn)
 
@@ -1463,14 +1497,18 @@
                           :let [t (tmpl tid)
                                 u (atom false)
                                 sr (atom false)
+                                ;; (the checker's position stays the call's: the template's signature and pattern are
+                                ;; analyzed while deducing, CX12)
+                                at sema/*at* at-saved (some-> at deref)
                                 fid (binding [*unsure* u *sure* sr]
                                       (try (let [ex (explicit-args t (:targs-text callee) (or (:targs-scope callee) (:scope ctx)))]
                                              (when-let [a (deduce-call t ex args)] (instantiate-fn tid a)))
                                            (catch arbace.lang.ExceptionInfo e
                                              (when (System/getenv "CPP_TMPL_TRACE") (binding [*out* *err*] (println "template" (:name t) "drops out:" (.getMessage e))))
                                              ;; (CP281 (a): a constraint surely false is the program's, a sure drop)
-                                             (if (:cx/constraint-false (ex-data e)) (reset! sr true) (reset! u true))
-                                             (if (#{:template-pack :template-template} (:codegen/refused (ex-data e))) (throw e) nil))))
+                                             (if (or (:cx/constraint-false (ex-data e)) (:cx/sure-drop (ex-data e))) (reset! sr true) (reset! u true))
+                                             (if (#{:template-pack :template-template} (:codegen/refused (ex-data e))) (throw e) nil))
+                                           (finally (when at (reset! at at-saved)))))
                                 ;; (CX12, the checker: a template whose deduction failed by the algorithm alone)
                                 _ (when-not fid (swap! (if (and (not @u) (or @sr (too-few-args? t args))) sure doubt) inc))]
                           :when fid]

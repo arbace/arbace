@@ -312,6 +312,7 @@
    [:conversion #"^codegen: incompatible member function pointer types" "assigning to X from incompatible type X"]
    [:mptr #"^codegen: pointer-to-member function type requires an" "pointer-to-member function type requires an lvalue/rvalue"]
    [:constexpr #"^codegen: constexpr variable '.*' must be initialized by a constant expression" "constexpr variable must be initialized by a constant expression"]
+   [:constexpr #"^codegen: constexpr if condition is not a constant expression" "constexpr if condition is not a constant expression"]
    [:overload #"^codegen: ambiguous call" "call is ambiguous"]
    [:sassert #"^codegen: static assertion failed" "static assertion failed"]
    [:noconv #"^codegen: no viable conversion from" "no viable conversion"]
@@ -423,7 +424,93 @@
                 (:nodes u) nil)
     (vec out)))
 
-(def checks (atom [undeclared redefinitions gnu-attrs]))
+;; A constexpr function's definition (clang/lib/Sema/SemaDeclCXX.cpp at llvmorg-23.1.5: CheckConstexprFunctionBody,
+;; CheckConstexprDeclStmt, CheckConstexprMissingReturn; Sema::ActOnFunctionDeclarator's err_constexpr_dtor), [dcl.constexpr]/3
+;; as C++11 to C++17 word it: the rules a definition's text decides, over the main file's non-template definitions (a
+;; template's pattern is not judged here: its dependent types are the specializations'):
+;; - a constexpr function returning non-void (no deduced return type) whose body has no return statement: "no return
+;;   statement in constexpr function" at its name, before C++23 (CheckConstexprMissingReturn; from C++14 a void one is not);
+;; - before C++20 a definition of a local variable for which no initialization is performed (ext_constexpr_local_var_no_init,
+;;   which g++ makes an error before C++20): a scalar, or a class the unit defines whose default constructor is trivial and
+;;   leaves its members uninitialized (no constructor declared, no base, no virtual member, every member a scalar with no
+;;   default member initializer), with no initializer, not static, not extern, not a for-range variable; in a constexpr
+;;   function, constructor or a lambda declared constexpr (the parser's :_cexpr), at the variable's name;
+;; - before C++20 a destructor declared constexpr ("destructor cannot be declared constexpr", [dcl.constexpr]/1 of C++17), at
+;;   the declaration.
+;; Everything else of the body (C++11's single return statement, the literal types) is not judged.
+
+(def ^:private scalar-type-re
+  #"(?:(?:const|volatile)\s+)*(?:(?:unsigned|signed|short|long|int|char|bool|float|double|wchar_t|char8_t|char16_t|char32_t)\s*)+|.*\*\s*(?:const\s*)?")
+
+(defn constexpr-bodies
+  [u starts _ main]
+  (let [out (java.util.ArrayList.)
+        year (cxx-year (:std u))
+        recs (into {} (for [n (:nodes u) :when (and (= "CXXRecordDecl" (:kind n)) (:completeDefinition n) (string? (:name n)))] [(:name n) n]))
+        scalar? (fn [qt] (boolean (re-matches scalar-type-re (str/trim (str qt)))))
+        uninit-class? (fn [qt]
+                        (when-let [r (get recs (str/trim (str/replace (str qt) #"^(?:struct|class)\s+" "")))]
+                          (let [fs (filter #(= "FieldDecl" (:kind %)) (:inner r))]
+                            (and (empty? (:bases r)) (seq fs)
+                                 (every? #(and (scalar? (get-in % [:type :qualType])) (not (:hasInClassInitializer %)) (empty? (:inner %))) fs)
+                                 (not-any? #(or (#{"CXXConstructorDecl" "CXXRecordDecl"} (:kind %)) (:virtual %)) (:inner r))))))
+        at! (fn [n msg rule]
+              (let [o (or (get-in n [:loc :offset]) (get-in n [:range :begin :offset]))]
+                (when (and o (= main (get-in n [:range :begin :file])))
+                  (let [[l c] (line-col starts (long o))]
+                    (.add out {:line l :col c :kind :error :rule rule :msg msg})))))
+        ;; the statements of a body, not into a lambda's body nor a local class
+        walk-stmts (fn walk [f x]
+                     (cond (map? x) (do (f x)
+                                        (when-not (#{"LambdaExpr" "CXXRecordDecl" "FunctionDecl" "CXXMethodDecl"} (:kind x))
+                                          (doseq [[k v] x :when (and (not= k :_ent) (coll? v))] (walk f v))))
+                           (sequential? x) (doseq [y x] (walk f y))
+                           :else nil))
+        declined? (fn [b] (let [d (volatile! false)] (walk-stmts #(when (= "NativeDecline" (:kind %)) (vreset! d true)) b) @d))
+        uninit! (fn [body]
+                  (when (and (< year 20) (not (declined? body)))
+                    (walk-stmts (fn [x]
+                                  (when (= "DeclStmt" (:kind x))
+                                    (doseq [v (:inner x)
+                                            :when (and (= "VarDecl" (:kind v)) (nil? (:init v)) (empty? (:inner v))
+                                                       (nil? (:storageClass v)) (not (:tls v)))
+                                            :let [qt (get-in v [:type :qualType])]
+                                            :when (or (scalar? qt) (uninit-class? qt))]
+                                      (at! v "uninitialized variable in a constexpr function" :constexpr))))
+                                body)))
+        lambdas! (fn [body]
+                   (walk-nodes (fn [x _] (when (and (= "LambdaExpr" (:kind x)) (:_cexpr x))
+                                           (when-let [b (last (filter #(= "CompoundStmt" (:kind %)) (:inner x)))] (uninit! b))))
+                               body nil))
+        fn! (fn [n]
+              (let [body (last (filter #(= "CompoundStmt" (:kind %)) (:inner n)))]
+                (when body (lambdas! body))
+                (when (and (= "CXXDestructorDecl" (:kind n)) (:constexpr n) (< year 20))
+                  (let [o (get-in n [:range :begin :offset])]
+                    (when (= main (get-in n [:range :begin :file]))
+                      (let [[l c] (line-col starts (long o))]
+                        (.add out {:line l :col c :kind :error :rule :constexpr :msg "destructor cannot be declared constexpr"})))))
+                (when (and body (or (:constexpr n) (:_consteval n)))
+                  (uninit! body)
+                  (when (#{"FunctionDecl" "CXXMethodDecl"} (:kind n))
+                    (let [qt (str (get-in n [:type :qualType]))
+                          ret (second (re-find #"^(.*?)\s*\(" qt))
+                          rets (volatile! 0)]
+                      (walk-stmts #(when (= "ReturnStmt" (:kind %)) (vswap! rets inc)) body)
+                      (when (and ret (not (re-find #"\b(auto|decltype)\b|^$" ret)) (zero? (long @rets)) (not (declined? body))
+                                 (if (= "void" (str/trim ret)) (< year 14) (< year 23)))
+                        (at! n "no return statement in constexpr function" :constexpr)))))))]
+    (letfn [(decls! [ns]
+              (doseq [n ns]
+                (case (:kind n)
+                  ("NamespaceDecl" "LinkageSpecDecl" "ExportDecl") (decls! (:inner n))
+                  "CXXRecordDecl" (decls! (:inner n))
+                  ("FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl") (fn! n)
+                  nil)))]
+      (decls! (remove :_hdr (:nodes u))))
+    (vec out)))
+
+(def checks (atom [undeclared redefinitions gnu-attrs constexpr-bodies]))
 
 (defn- pp-diag
   "A preprocessor error `FILE:LINE:COL: msg` (the port's) as a diagnostic, the main file's alone (nil else)."
