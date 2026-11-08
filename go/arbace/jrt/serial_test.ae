@@ -105,8 +105,8 @@ modifiers (public, final, interface, abstract), the first eight bytes little-end
         (set! (.-fields d) nil)
         (.SetAccessible_Z__V spf true)
         (range [_ x (.-A (assert (* RefArray) (.Get_O__O spf nil)))]
-          (let [o (assert (* serOSF) x)]
-            (set! (.-fields d) (append (.-fields d) (lit serField :name (.-name o) :typ (.-typ o))))))))
+          (let [(values n typ) (serOSFParts x)]
+            (set! (.-fields d) (append (.-fields d) (lit serField :name n :typ typ)))))))
     (range [i _ (.-fields d)]
       (let [f (addr (aget (.-fields d) i))]
         (set! (.-code f) (serCode (.-typ f)))
@@ -505,7 +505,7 @@ modifiers (public, final, interface, abstract), the first eight bytes little-end
 (go/method fields "fields is defaultReadFields: the stream's values set into the local class's fields of their names.\n"
   [^{:tag (* serIn)} r ^any x ^{:tag (* serDesc)} d]
   (let [vs (.values r d)
-        local (serDescOf (.-c d))]
+        local (serDescOf (serLocalClass x (.-name d) (.-c d)))]
     (range [_ f (.-fields local)]
       (let [(values v ok) (aget vs (.-name f))]
         (when (and ok (!= (.-f f) nil))
@@ -540,18 +540,100 @@ modifiers (public, final, interface, abstract), the first eight bytes little-end
 (go/method ToString__String ^{:tag (* String)} [^{:tag (* serEmptyList)} l] (Str "[]"))
 (go/method Clone__O ^any [^{:tag (* serEmptyList)} l] (panic (CloneNotSupported l)))
 
-(go/func serStandin ^{:tag (* Class)} [^string name ^Kind kind ^{:tag (slice (* Class))} ifs]
+(go/var ^{:tag bool :doc "serProg: the package is a program root of j2g's (bin/jrt test --prog, JCS193 (b)): the
+classes the stand-ins stand for are the translated ones, so the stand-ins are those classes, the test streams stand
+in for the translated streams through serialCall's serialTestStream, and the cases over translated hooks (which
+need the real streams: streams_check.ae's) are left out\n"} serProg)
+
+(go/func serStandin
+  "serStandin is the class named name: the world's when it has one (j2g's program), else a stand-in defined here.\n"
+  ^{:tag (* Class)} [^string name ^Kind kind ^{:tag (slice (* Class))} ifs]
+  (when [c (ForName name)] (!= c nil)
+    (return c))
   (return (Define (addr (lit ClassInfo :Name name :Kind kind :Modifiers AccPublic :Super Object_class :Interfaces ifs)))))
 
-(go/var serOut_class (serStandin "java.io.ObjectOutputStream" KindClass nil))
-(go/var serPut_class (serStandin "java.io.ObjectOutputStream$PutField" KindClass nil))
-(go/var serIn_class (serStandin "java.io.ObjectInputStream" KindClass nil))
-(go/var serGet_class (serStandin "java.io.ObjectInputStream$GetField" KindClass nil))
-(go/var serOSF_class (serStandin "java.io.ObjectStreamField" KindClass nil))
-(go/var serList_class (serStandin "java.util.List" KindInterface nil))
-(go/var serArrayList_class (serStandin "java.util.ArrayList" KindClass (lit (slice (* Class)) Serializable_class)))
-(go/var serCollections_class (serStandin "java.util.Collections" KindClass nil))
-(go/var serEmptyList_class (serStandin "java.util.Collections$EmptyList" KindClass (lit (slice (* Class)) Serializable_class)))
+(go/var ^{:tag (* Class)} serOut_class)
+(go/var ^{:tag (* Class)} serPut_class)
+(go/var ^{:tag (* Class)} serIn_class)
+(go/var ^{:tag (* Class)} serGet_class)
+(go/var ^{:tag (* Class)} serOSF_class)
+(go/var ^{:tag (* Class)} serList_class)
+(go/var ^{:tag (* Class)} serArrayList_class)
+(go/var ^{:tag (* Class)} serCollections_class)
+(go/var ^{:tag (* Class)} serEmptyList_class)
+
+(go/func serStandins
+  "serStandins makes the stand-ins (in init, after every class of the package was defined: a program root's
+translated classes are defined by its variables).\n"
+  []
+  (set! serProg (!= (ForName "java.io.ObjectOutputStream") nil))
+  (set! serOut_class (serStandin "java.io.ObjectOutputStream" KindClass nil))
+  (set! serPut_class (serStandin "java.io.ObjectOutputStream$PutField" KindClass nil))
+  (set! serIn_class (serStandin "java.io.ObjectInputStream" KindClass nil))
+  (set! serGet_class (serStandin "java.io.ObjectInputStream$GetField" KindClass nil))
+  (set! serOSF_class (serStandin "java.io.ObjectStreamField" KindClass nil))
+  (set! serList_class (serStandin "java.util.List" KindInterface nil))
+  (set! serArrayList_class (serStandin "java.util.ArrayList" KindClass (lit (slice (* Class)) Serializable_class)))
+  (set! serCollections_class (serStandin "java.util.Collections" KindClass nil))
+  (set! serEmptyList_class (serStandin "java.util.Collections$EmptyList" KindClass (lit (slice (* Class)) Serializable_class))))
+
+;; the streams' methods the hooks call (serialCall's serialTestStream)
+(go/method serialStreamCall ^any [^{:tag (* serOut)} o ^string name ^{:tag (slice any)} a]
+  (switch name
+    (case ["defaultWriteObject"] (.defaultWriteObject o))
+    (case ["writeInt"] (.u32 o (conv uint32 (assert int32 (aget a 0)))))
+    (case ["writeLong"] (.u64 o (conv uint64 (assert int64 (aget a 0)))))
+    (case ["writeObject"] (.writeObject0 o (aget a 0)))
+    (case ["putFields"]
+      (let [p (addr (lit serPut :d (.-curDesc o) :vals (make (map string any))))]
+        (set! (.-put o) p)
+        (return p)))
+    (case ["writeFields"] (.writeFields o))
+    (default (serFail (+ "serOut: no method " name))))
+  (return nil))
+
+(go/method serialStreamCall ^any [^{:tag (* serPut)} p ^string name ^{:tag (slice any)} a]
+  (when (!= name "put")
+    (serFail (+ "serPut: no method " name)))
+  (aset (.-vals p) (.String (assert (* String) (aget a 0))) (aget a 1))
+  (return nil))
+
+(go/method serialStreamCall ^any [^{:tag (* serIn)} r ^string name ^{:tag (slice any)} a]
+  (switch name
+    (case ["defaultReadObject"] (.defaultReadObject r) (return nil))
+    (case ["readInt"] (return (conv int32 (.r32 r))))
+    (case ["readLong"] (return (conv int64 (.r64 r))))
+    (case ["readObject"] (return (.readObject0 r)))
+    (case ["readFields"] (return (.readFields r))))
+  (serFail (+ "serIn: no method " name))
+  (return nil))
+
+(go/method serialStreamCall ^any [^{:tag (* serGet)} g ^string name ^{:tag (slice any)} a]
+  (when (!= name "get")
+    (serFail (+ "serGet: no method " name)))
+  (let [(values v ok) (aget (.-vals g) (.String (assert (* String) (aget a 0))))]
+    (when ok
+      (return v))
+    (return (aget a 1))))
+
+(go/func serOSFParts
+  "serOSFParts is an ObjectStreamField's name and type: the stand-in's, or the translated class's getName and
+getType.\n"
+  [^any x] :results [string (* Class)]
+  (let [(values o ok) (assert (* serOSF) x)]
+    (when ok
+      (return (.-name o) (.-typ o))))
+  (return (.String (assert (* String) (serialCall x "java.io.ObjectStreamField" "getName" nil nil)))
+          (assert (* Class) (serialCall x "java.io.ObjectStreamField" "getType" nil nil))))
+
+(go/func serLocalClass
+  "serLocalClass is the class of x's hierarchy named name (ObjectStreamClass.getClassDataLayout0's match by name:
+a stream's descriptor of a class jrt twins, serial_locks.ae's, is the twin's slot), else c.\n"
+  ^{:tag (* Class)} [^any x ^string name ^{:tag (* Class)} c]
+  (for [k (GetClass x)] (!= k nil) (set! k (.-Super (.-info k)))
+    (when (== (.-Name (.-info k)) name)
+      (return k)))
+  (return c))
 
 (go/func serM ^MethodInfo [^string name ^int32 mods ^{:tag (func [any (slice any)] [any])} f & ^{:tag (slice (* Class))} ps]
   (return (lit MethodInfo :Name name :Params ps :Modifiers mods :Invoke f)))
@@ -563,44 +645,15 @@ modifiers (public, final, interface, abstract), the first eight bytes little-end
   (return nil))
 
 (go/func init []
+  (serStandins)
+  (when serProg
+    (return))
   (set! (.-IsInstance (.Info serArrayList_class)) (fn ^bool [^any x] (let [(values _ ok) (assert (* serArrayList) x)] (return ok))))
   (set! (.-IsInstance (.Info serEmptyList_class)) (fn ^bool [^any x] (let [(values _ ok) (assert (* serEmptyList) x)] (return ok))))
   (set! (.-IsInstance (.Info serList_class))
         (fn ^bool [^any x] (let [(values _ ok) (assert (* serArrayList) x) (values _ ok2) (assert (* serEmptyList) x)] (return (or ok ok2)))))
   (let [os (fn ^{:tag (* serOut)} [^any x] (return (assert (* serOut) x)))
         is (fn ^{:tag (* serIn)} [^any x] (return (assert (* serIn) x)))]
-    (set! (.-Methods (.Info serOut_class))
-      (lit (slice MethodInfo)
-        (serM "defaultWriteObject" 1 (fn ^any [^any o ^{:tag (slice any)} a] (.defaultWriteObject (os o)) (return nil)))
-        (serM "writeInt" 1 (fn ^any [^any o ^{:tag (slice any)} a] (.u32 (os o) (conv uint32 (assert int32 (aget a 0)))) (return nil)) Prim_int)
-        (serM "writeLong" 1 (fn ^any [^any o ^{:tag (slice any)} a] (.u64 (os o) (conv uint64 (assert int64 (aget a 0)))) (return nil)) Prim_long)
-        (serM "writeObject" 1 (fn ^any [^any o ^{:tag (slice any)} a] (.writeObject0 (os o) (aget a 0)) (return nil)) Object_class)
-        (serM "putFields" 1 (fn ^any [^any o ^{:tag (slice any)} a]
-                              (let [p (addr (lit serPut :d (.-curDesc (os o)) :vals (make (map string any))))]
-                                (set! (.-put (os o)) p)
-                                (return p))))
-        (serM "writeFields" 1 (fn ^any [^any o ^{:tag (slice any)} a] (.writeFields (os o)) (return nil)))))
-    (let [put (fn ^any [^any p ^{:tag (slice any)} a]
-                (aset (.-vals (assert (* serPut) p)) (.String (assert (* String) (aget a 0))) (aget a 1))
-                (return nil))]
-      (set! (.-Methods (.Info serPut_class))
-        (lit (slice MethodInfo)
-          (serM "put" 1 put String_class Object_class) (serM "put" 1 put String_class Prim_int)
-          (serM "put" 1 put String_class Prim_boolean))))
-    (set! (.-Methods (.Info serIn_class))
-      (lit (slice MethodInfo)
-        (serM "defaultReadObject" 1 (fn ^any [^any o ^{:tag (slice any)} a] (.defaultReadObject (is o)) (return nil)))
-        (serM "readInt" 1 (fn ^any [^any o ^{:tag (slice any)} a] (return (conv int32 (.r32 (is o))))))
-        (serM "readLong" 1 (fn ^any [^any o ^{:tag (slice any)} a] (return (conv int64 (.r64 (is o))))))
-        (serM "readObject" 1 (fn ^any [^any o ^{:tag (slice any)} a] (return (.readObject0 (is o)))))
-        (serM "readFields" 1 (fn ^any [^any o ^{:tag (slice any)} a] (return (.readFields (is o)))))))
-    (let [get (fn ^any [^any g ^{:tag (slice any)} a]
-                (let [(values v ok) (aget (.-vals (assert (* serGet) g)) (.String (assert (* String) (aget a 0))))]
-                  (when ok
-                    (return v))
-                  (return (aget a 1))))]
-      (set! (.-Methods (.Info serGet_class))
-        (lit (slice MethodInfo) (serM "get" 1 get String_class Object_class) (serM "get" 1 get String_class Prim_int))))
     (set! (.-Ctors (.Info serOSF_class))
       (lit (slice CtorInfo)
         (lit CtorInfo :Params (lit (slice (* Class)) String_class Class_class) :Modifiers 1
@@ -765,6 +818,10 @@ showing what the made one shows, and written again to the same bytes.\n"
     (range [_ n names]
       (let [want (aget jdkStreams n)
             x (aget cases n)]
+        ;; in a program root of j2g's (JCS193 (b)) the suppressed exceptions' list is the translated ArrayList, whose
+        ;; hooks need the translated streams (streams_check.ae's)
+        (when (and serProg (== n "throwable-cause-suppressed"))
+          (continue))
         (when (== x nil)
           (.Errorf t "%s: no case" n)
           (continue))
