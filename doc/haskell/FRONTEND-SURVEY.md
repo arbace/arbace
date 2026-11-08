@@ -1828,3 +1828,16 @@ StaticPtr.Internal; Unicode.Bits, Char.DerivedCoreProperties and the five Unicod
 | `--verify-pack --sample 4` against that pack | 4 modules, 233 interfaces equal in the normal form, the crossed pair differs |
 | the judge's own negatives: one binder fewer equal, a module out of its class | worse, unclassed: exit 1 |
 | `gate.crops check` | 0 problems |
+| `bin/repr-haskell typecheck-check` (the elaborator after `add-things!`'s pattern synonyms) | 24 of 24 modules equal, the negative control differs (13 of 24) |
+| `bin/gate --full --plan` | haskell-lib-check planned (a light `:full` chain beside the serial run) |
+| `bin/reap --record`, `bin/crops-score --record`, `--judge --strict` | Haskell eval 797 / 64 / 47, AOT 137 / 1 / 1 (HES87 (a)); 0 problems; Haskell 96.6 / 100 / 74.9 to 96.3 / 100 / 74.9 (completeness 0.9661 to 0.9632) |
+
+### Night (the main session's, by hand at the oracle tier: GHC 9.14.1)
+
+1. `bin/repr-haskell lib-check --live --record-pack --record test/haskell/lib-check-ghc-internal.edn` (the iface2 verb over every
+   module of ghc-internal: two helper sessions a module, about 4 s each, then the measure, one process, about 12 minutes; the pack
+   haskell-lib-ifaces-ghc-9.14.1 pinned and the record rewritten from one run), `bin/repr-haskell lib-check --verify-pack --sample 8`,
+   then add `test/haskell/records/haskell-lib-ifaces-ghc-9.14.1.sha256` to haskell-lib-check's `:pins` in `test/gate/steps.edn`; a
+   commit of its own naming :ghc's identity; `bin/oracle-records mirror --push`.
+2. `bin/repr-haskell lib-check --judge test/haskell/lib-check-ghc-internal.edn` (the step's command, no GHC): 0 worse, the control
+   differs; a module that moved with the whole run's interfaces (the 227 rows recorded with the first verb) is then the record's.
