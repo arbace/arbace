@@ -791,3 +791,37 @@ third of the concurrent tests, every twentieth other pass) 66 of 67, main's hsi 
 night's `bin/hsi check ... --record`: the testsuite's core 658 of 701 (652), the record 796 of 908; the divergences' edits and the night's
 commands in doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: HE9 on main (write-ahead)". HE9's 666 counted 11 programs whose references
 main's record-ref cannot build (the C includes GHC's `_stub.h`): HES83 proposed.
+
+## 2026-11-08: JCS162 and F9 (write-ahead): interrupts wake channels and selectors; java.nio.file from jdk26u (branch `java-f9`, from next bd33e27cc)
+
+By the user's decisions of 2026-11-07 (JCS162 (a); F9 as the next rank after F10a), by day under the light rules
+(doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS162", "As built: F9 (write-ahead)").
+
+JCS162: jrt's hand-written Thread (`go/arbace/jrt/thread.ae`) gains jdk26u's nioBlocker and interrupt lock
+(openjdk/jdk26u `baf63fb`, `src/java.base/share/classes/java/lang/Thread.java`): interrupt sets the status, then, for
+another thread, calls the blocker's interrupt(Thread) under the lock and postInterrupt after it; blockedOn is the native
+`jdk.internal.jrt.HostThreads.blockedOn`, which `AbstractInterruptibleChannel`'s variant now calls (its end is jdk26u's
+again). The proposal's registration by the translated Interruptible proved unneeded: jrt asserts the blocker to
+Interruptible's Go method set as j2g names it. Checked: `go test ./jrt` (TestInterruptBlocker), the variant applied
+(1 replaced), the joint javac check 0 errors.
+
+F9: jdk26u's java.nio.file, .attribute, .spi and sun.nio.fs's Unix and Linux provider (`test/jrt/jrt_sources.ae`'s
+`nio-file-sources`, 92 files: `src/java.base/{share,unix,linux}/classes` and the generated UnixConstants) replace jrt's own
+Path, Files, HostPath and GlobPatterns (JRT-NOTES' FS2 reversed) and F7's FileChannel overlay. The natives are the JDK
+classes' own, ported into Go from `src/java.base/unix/native/libnio/fs/{UnixNativeDispatcher,UnixFileSystem}.c` and
+`src/java.base/linux/native/libnio/fs/{LinuxNativeDispatcher,LinuxWatchService}.c` (`go/arbace/jrt/nio_fs_linux.ae`: the same
+system calls, flags, RESTARTABLE loops, results, errors), over a new native memory for Unsafe (`nativemem.ae`: blocks as Go
+slices named by token addresses, so NativeBuffer, Cancellable and the watch service's parsing stay jdk26u's), JNI's
+Set*Field by Go's reflection on the translated F_ fields, UnixException through a factory UnixNativeDispatcher registers,
+os/user for the C library's user database. Thirteen overlays derived from jdk26u's files by asserted replacements
+(`.tmp/f9/derive.py`: no ServiceLoader, VM, ClassLoaders, JavaLangAccess coding, Cleaner, TerminatingThreadLocal,
+JavaNioAccess or direct buffer address; the descriptor adopted by jrt's file table, `HostFiles.adopt`); j2g renames
+Fs_UnixFileSystem, Fs_Util, Nio_UserPrincipal; javac's world's FileSystems overlay and eight base files out. Alternatives
+considered: F10a's way (natives in a jrt Java class with error numbers in an int[]: every native's Java rewritten, rejected
+for the JDK's own declarations); filling UnixFileAttributes through an added method (an overlay of a plain class, rejected
+for JNI's field setting); widening jrt's own Path and Files (the triage's first sketch, rejected by the user's decision).
+Checked (light): the joint javac check 2,379 files, 0 errors (its first run found FileChannelImpl's missing
+setUninterruptible); the read of the 110 files 0 failed, `--no-javac` identical; the 77 natives defined on Linux and off it;
+`go vet` amd64 and arm64, `go test ./jrt` with TestNativeMemory, TestNioFsNatives, TestNioFsXattr, TestNioFsInotify. Expected
+after the night's conversion, build and runs: about 12 of F9's tests and JCS162's 6 at each level; the night's commands and
+risks in the triage's section; JCS180 (the box's file system) and JCS181 (jdk.zipfs) proposed.
