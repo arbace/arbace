@@ -1390,3 +1390,95 @@ answering 6 and 103). Night checks committed: `test/jrt/serialization/proxy_chec
 JCS171 (a): accepted; the night's build measures the size. Proposed: JCS240 (throws clauses in the member tables), JCS241
 (InvocationHandler.invokeDefault), JCS242 (serializable lambdas' sites registered at class initialization), JCS243
 (Clojure's types' serialization, slice 8, next). JCS191-JCS193 stay the user's.
+
+## 2026-11-08: Java's accepted proposals built; the day's Java branches merged as the night's input (branch `java-props`)
+
+The user accepted these proposals on 2026-11-08, at about 19:45.
+
+**The branch and its merges.** `java-props` started from `mac/java-night` (`639d42ab9`). Four branches were merged into it, in
+this order: `mac/java-jcv7` (`be3af4bed`), `mac/java-security` (`848eb64a8`), `mac/java-net` (`1fe7fbe72`) and
+`mac/java-serial4` (`e1e193fcd`). This branch is the Java night's input.
+
+- **The append-only conflicts.** `doc/JOURNAL.md` conflicted in all four merges, and `doc/classes/JAVA-DEFERRED-TRIAGE.md` in
+  the last three. In each case both sides had only appended. The resolution kept ours, then appended the other side's new text
+  after the merge base's end, after checking that this text was a pure append. serial4's insertion near the triage's "Proposed"
+  index merged by itself.
+- **`test/jrt/jrt_sources.ae`.** java-security's `jca-tail-sources` and `sasl-sources` sat beside java-night's `nio-file-sources`
+  and `unix-socket-sources`. Both were kept.
+- **`LICENSE.md`.** java-security's and java-serial4's rewordings of the JCA variants' line were combined: `SealedObject.ae`
+  "until serialization's slice 4", `GaloisCounterMode.ae` "until F23".
+- **The joint javac check after the merges.** `.tmp/night7/all9-run.sh` reported 2,506 files, 0 errors and 5,323 classes, in
+  14.5 s and 0.96 GB.
+
+**JCV11 (b), which reopens RPS9 (a).** Java's print cell now passes on the round trip's own checks, and the class files are a
+sub-level beside it.
+
+- **The rule.** `test/java/print.ae` gains `classes-note?`: a test whose only failing step is classes passes when every
+  difference is one of the named kinds, and the row keeps the reason as its note.
+- **The record.** `java.print rejudge` re-judged `test/java/check-print.edn` from the committed record alone: 582 rows now pass.
+  581 of them were `:print-classes`. The other, t06357, leaves `:print-erasure`'s `:tests`.
+- **The matrix.** REAP's `:java-check` reader reports the sub-level in the source's detail (`:sub-level :classes`).
+- **Proved, light.** Four tests were run at read and print (38 s, 1.5 GiB) and judged: 4 of 4 as recorded.
+- **The numbers.** Java print went from 2,600 / 616 / 109 to 3,182 / 34 / 109, which is 78.2% to 95.7%. Java's completeness went
+  from 72.85% to 77.23%, and from 78.93% to 79.11% without by design. `bin/reap --record` and `bin/crops-score --record` were
+  run.
+- **Where it is recorded.** doc/FULL-SUPPORT-SURVEY.md has "Decided (the user, 2026-11-08): RPS9 (a) reopened by JCV11 (b)" and
+  "As built: JCV11 (b)". doc/classes/JAVA-CONFORMANCE-SURVEY.md has the decision and its As built.
+- **Alternative considered.** A result keyword of its own, such as `:pass-classes`. It was rejected: every reader would have
+  needed it, while a `:pass` row with a reason is already read as a pass everywhere.
+
+**JCV12 (b).** `bin/java-check --record-ref --only` now matches a test's id as well as its path ("ID "), and fails with status 1
+when `--only` plans no test.
+
+- `--only t03212` recorded t03212's line byte for byte as it was. The 4,852 other lines were kept.
+- `--only no-such-test` exits 1.
+
+**JCS232 (a).** ProviderConfig's three variant files are now one, `ProviderConfig.ae`, holding F23's `getProvider`.
+
+**JCS235 (a).** `HashSet`, `X509EncodedKeySpec` and `PKCS8EncodedKeySpec` were added to `arbace.j2g.model/class-supers`, which
+now holds 130 classes. The night's build and tests t08045, t08202 and t05275 will prove it.
+
+**JCS251 (a).** The scratch derivations now live in `test/jrt/derive.ae`, as tables taken from the scripts' own data:
+
+- F7's `gendirect.py`;
+- F10a's `gennet.py` (with F10b's hand-edited multicast bodies), `genpoll.py` and `genopts.py`;
+- F9's `.tmp/f9/derive.py`;
+- JCS164's `.tmp/unix/derive.py`.
+
+The scripts were found in `.tmp/keep/java-jc9b/jc9b/F7/`, `.tmp/keep/wt/java-complete/f10/` and the java-f9 and java-unix
+worktrees' `.tmp/`.
+
+- **The engine.** It gains ordered `:ops`: exact replacements, a regex replacement, or a function of the text. It also gains
+  `:verify`, a function of the overlay.
+- **The result.** `bin/jrt-convert derive --check` finds 24 overlays, 0 not as derived, so each is byte for byte the committed
+  file. The headers are unchanged; JCS257 proposes renaming them.
+- **The controls.** A miscounted replacement must throw, and an overlay one character off must differ.
+- **The gate step.** The essential step `jrt-derive` was added to `test/gate/steps.edn`.
+
+**JCS253.** `bin/jrt-convert vet` (`test/jrt/vet.ae`) checks the variants with j2g's own analyzer.
+
+- **How it works.** The world is entered, declared and resolved with j2g's own steps, from `jdk/forms` or from `--forms DIR`,
+  with every variant applied and the edge as in j2g's run. Only the variants' classes are then analyzed. It runs in about 20 s,
+  at a peak of 1.48 GiB.
+- **The negative control.** The three variants F24 fixed, restored to their text from before the fix, are refused with the
+  night's messages. The fixed texts pass.
+- **On the committed forms.** 9 refusals, all from `jdk/forms` being older than the day's sources: five classes not converted
+  yet (SerializedLambda, HttpServerProvider, DatagramSocketAdaptor's two, DatagramChannelImpl), and File, DatagramSocket,
+  AbstractInterruptibleChannel and ProviderConfig, whose new dependencies are not converted. So vet runs on the night's
+  conversion output.
+- **Alternatives considered.**
+  - A per-class world, with the class's packages from source and the rest resolved from the host. It was measured and rejected:
+    the host world's gaps cascade into false refusals.
+  - A full j2g world load with every class analyzed. It was rejected as heavy.
+
+**The texts decided, nothing built.** JCS230 (b), JCS231 after F9's night, JCS233 (a), JCS234 (a), JCS240-JCS243 (a), JCS250
+(recorded without an option, read as recommended: (a) after F24's night), JCS252 (b), JCS254 (b) and JCS255 (b). They are in the
+triage's "Decided (the user, 2026-11-08, about 19:45: ...)". New proposals: JCS256 (vet as a gate step) and JCS257 (the derived
+headers).
+
+**Checks.**
+
+- `go vet ./jrt` is clean on linux/amd64 and arm64, and `go test ./jrt` reports ok. The crops' expat, pyexpat, hs and oi packages
+  fail by themselves, as they do on `next`.
+- `bin/reap` and `bin/crops-score --judge --strict` report 0 problems.
+- `bin/gate --plan` plans `jrt-derive` with every step keyed.

@@ -652,7 +652,7 @@ doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F23 (write-ahead)": `test/jrt/jr
 F1's import scan could not find) and `sasl-sources` (java.security.sasl's API and SunSASL's mechanisms, KIND
 `share:java.security.sasl`; java.base's `com/sun/security/ntlm`; jdk.security.auth's `LdapPrincipal`): 37 files, 9,446
 lines; jrt's `JceServices` and `JrtServices` gain GCMParameters' and MD4's constructions, ProviderConfig a third variant
-file (`ProviderConfigSasl.ae`), `GaloisCounterMode.ae` the two methods that used the cut `NIO_ACCESS`. Not converted yet
+file (`ProviderConfigSasl.ae`; folded into `ProviderConfig.ae` by JCS232 (a), 2026-11-08), `GaloisCounterMode.ae` the two methods that used the cut `NIO_ACCESS`. Not converted yet
 (the night's).
 
 ## The committed forms (standalone S1, 2026-10-12)

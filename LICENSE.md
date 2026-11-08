@@ -631,7 +631,7 @@ covers what.
   `src/java.base/share/classes`, 1 of `src/jdk.security.auth/share/classes`).
 - The JCA's tail and SASL (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F23 (write-ahead)"; recorded by the rule
   of B7): the variants `overlay/jdk/variants/GaloisCounterMode.ae` (since F23 its `overlapDetection` and `GCMDecrypt.doFinal`)
-  and `ProviderConfigSasl.ae` keep the jdk26u members they replace (https://github.com/openjdk/jdk26u at `baf63fb`,
+  and `ProviderConfig.ae`'s SunSASL case (`ProviderConfigSasl.ae` until JCS232 (a) folded it in) keep the jdk26u members they replace (https://github.com/openjdk/jdk26u at `baf63fb`,
   `src/java.base/share/classes/com/sun/crypto/provider/GaloisCounterMode.java`, `sun/security/jca/ProviderConfig.java`) as
   repr/java converts them, with the changes they name: Copyright (c) Oracle and/or its affiliates, under the GNU General
   Public License version 2 with the Classpath Exception (text below); the rest of those files and the cases F23 adds to
@@ -742,7 +742,7 @@ covers what.
   Arbace's own.
 - TLS (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F3 (write-ahead)"; recorded by the rule of B7): the
   variants `overlay/jdk/variants/SSLContext.ae`, `SNIHostName.ae`, `SSLSocketImpl.ae`,
-  `InetAddressAccess.ae` and `ProviderConfigJsse.ae` keep the jdk26u members they replace or add
+  `InetAddressAccess.ae` and `ProviderConfig.ae`'s SunJSSE case (`ProviderConfigJsse.ae` until JCS232 (a)) keep the jdk26u members they replace or add
   (https://github.com/openjdk/jdk26u at `baf63fb`, the classes' files of `src/java.base/share/classes`)
   as repr/java converts them, with the changes they name, and `overlay/jdk/java.base/sun/security/ssl/SSLLogger.java`
   is jdk26u's `SSLLogger.java` transcribed with the changes its header names: Copyright (c) Oracle and/or
@@ -785,6 +785,15 @@ covers what.
   `LogManager.ae`'s `LoggingProviderAccess` keep the jdk26u members they replace as repr/java converts them (the same
   license), with the changes they name. Their jdk26u sources join `jdk/forms/` (the converted closure, under the same
   license): 38 of httpserver-sources (`src/jdk.httpserver/share/classes`).
+- jrt's derivations as data (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS251 (a), JCS253"; recorded by the rule
+  of B7): `test/jrt/derive.ae`'s tables hold, as the OLD and NEW strings of its replacements, text of jdk26u's files
+  (https://github.com/openjdk/jdk26u at `baf63fb`: `src/java.base/share/classes/sun/nio/ch/Net.java`,
+  `SocketOptionRegistry.java.template`, `UnixDomainSockets.java`, `src/java.base/unix/classes/sun/nio/ch/PollSelectorImpl.java`,
+  the thirteen files of F9's table under `src/java.base/{share,unix,linux}/classes/`, and the JDK build's generated
+  `java/nio/HeapByteBuffer.java` and `HeapByteBufferR.java`): Copyright (c) Oracle and/or its affiliates, under the GNU
+  General Public License version 2 with the Classpath Exception (text below); the rest of `test/jrt/derive.ae`, the
+  bodies and helpers it writes and `test/jrt/vet.ae` are Arbace's own. The overlays it makes are covered above with
+  their features (F7, F9, F10a, F10b, JCS164, F24).
 - java.lang.management without JMX (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F13 (write-ahead)";
   recorded by the rule of B7): `overlay/jdk/java.base/java/lang/management/{ManagementFactory,ThreadInfo,LockInfo,MonitorInfo,MemoryUsage}.java`
   `overlay/jdk/java.base/sun/management/{ManagementFactoryHelper,VMManagementImpl}.java` and

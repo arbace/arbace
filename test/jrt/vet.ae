@@ -1,0 +1,168 @@
+(ns jrt.vet
+  "JCS253 (doc/classes/JAVA-DEFERRED-TRIAGE.md, \"Proposed (F24)\"; the user, 2026-11-08): jrt's Go-build variants
+  (overlay/jdk/variants) vetted by day, as j2g's world takes them, without a whole-program j2g. On 2026-11-07 six
+  classes left the night's world because their variants, parsed by day, failed j2g's analysis (the build's
+  report, :analysis-failures), and their dependants went with them unseen until a whole-corpus run.
+
+    bin/jrt-convert vet [--forms DIR] [--variants DIR] [--known FILE] [--strict] [--others] [FILE...]
+
+  The committed world (jdk/forms, or --forms DIR: the conversion's output, .tmp/jrt/conv after bin/jrt-convert;
+  every variant file of overlay/jdk/variants, or --variants DIR's, applied) entered, declared and resolved as j2g's
+  (arbace.j2g.world's own steps: apply-variant, parse, declare-class!, resolve-header!, resolve-members!,
+  add-bridges!), then analyze-class! (j2g's analysis, bodies and all) run on the variants' classes alone (default
+  every variant file's; FILE a variant file's name or path), not on the world's other classes: the heavy part of
+  j2g's load is the analysis of every class, which this does not do. A variant's class that fails anywhere
+  (its parse, its declaration, header, members, bridges or analysis) is refused, as j2g's report would list it,
+  unless the known file (default test/jrt/vet-known.edn: [FILE CLASS MESSAGE-PREFIX WHY] rows) names it; a
+  failure of another class is not this check's (the whole-program run's report has it). A known row no failure
+  matches is reported stale (a failure with --strict); --others lists the other classes' failures too, as
+  j2g's report would (the committed world's: the declarations a variant's class depends on). The classes that are not from source (jrt's hand-written
+  classes) come from j2g's edge, jdk/edge.edn, as in j2g's run."
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io]
+            [arbace.classes.env :as env]
+            [arbace.classes.parse :as p]
+            [arbace.classes.analyze :as a]
+            [arbace.j2g.edge :as edge]
+            [arbace.j2g.world :as w]))
+
+(def ^:private ^:dynamic *variants-dir* "overlay/jdk/variants")
+(def ^:private ^:dynamic *forms-dir* "jdk/forms")
+
+(defn- ae-files [dir]
+  (sort (filter #(str/ends-with? (str %) ".ae") (.listFiles (io/file dir)))))
+
+(defn- variant-files [args]
+  (if (empty? args)
+    (ae-files *variants-dir*)
+    (for [a args]
+      (let [f (io/file (if (str/includes? a "/") a (str *variants-dir* "/" (if (str/ends-with? a ".ae") a (str a ".ae")))))]
+        (when-not (.isFile f) (throw (ex-info (str "jrt.vet: no variant file " a) {})))
+        f))))
+
+(defn- top-of [^String n] (let [i (.indexOf n "$")] (if (neg? i) n (subs n 0 i))))
+
+(defn- members-of
+  "Class n and its member classes, declared (the nest's members, recursively)."
+  [n]
+  (cons n (mapcat members-of (keep #(when (a/decl %) %) (vals (:member-classes (a/decl n)))))))
+
+(defn vet
+  "The world entered and resolved, the variants' classes of vfiles analyzed: {:failed [[file class msg]...]
+  :variants {class counts} :classes N :missing [[file class]...]}."
+  [vfiles]
+  (let [all-v (w/read-variants (ae-files *variants-dir*))
+        variants (dissoc all-v :arbace.j2g.world/erase)
+        by-file (into {} (for [f vfiles] [(.getName (io/file f)) (keys (dissoc (w/read-variants [f]) :arbace.j2g.world/erase))]))
+        file-of (into {} (for [[f ns] by-file n ns] [n f]))
+        applied (atom {})
+        failed (atom [])
+        fail! (fn [n msg] (swap! failed conj [(str n) (str msg)]))
+        cs (atom {})
+        unit {:order (atom []) :counters (atom {}) :switch-maps (atom {}) :switch-holders (atom {})
+              :source-tried (atom #{}) :assert-holders (atom {}) :holder-first (atom {})}
+        files (w/source-files {:root *forms-dir* :tree true})
+        parsed (vec (for [f files]
+                      (try (let [forms (w/read-forms f)] {:file f :forms forms :ns (#'w/ns-of-forms forms)})
+                           (catch Exception e (fail! f (str "read: " (.getMessage e))) {:file f :forms [] :ns nil}))))
+        tops (set (mapcat (fn [{:keys [ns forms]}] (when ns (#'w/top-names ns forms))) parsed))
+        from-source (fn [n] (contains? tops (top-of n)))]
+    (binding [env/*compile-set* cs
+              a/*unit* unit
+              env/*from-source* from-source]
+      ;; enter (j2g's enter!: the namespace forms, the classes with their variants applied, parsed, declared)
+      (doseq [{:keys [file forms ns]} parsed :when ns]
+        (binding [*ns* *ns*]
+          (doseq [fm forms :when (and (seq? fm) (symbol? (first fm)) (#{"in-ns" "import" "refer-vars"} (name (first fm))))]
+            (if (= "refer-vars" (name (first fm)))
+              (#'w/refer-vars! *ns* (second fm))
+              (a/eval-ns-form! fm)))
+          (let [nsobj *ns*]
+            (doseq [cf (#'w/class-forms forms)]
+              (let [n (first (#'w/top-names ns [cf]))]
+                (try
+                  (let [vfs (get variants n)
+                        [cf counts] (w/apply-variant cf (or vfs []) n #(get variants %) applied)
+                        _ (when vfs (swap! applied assoc n counts))
+                        pc (p/parse-class {:ns nsobj :nesting :top} (rest cf))]
+                    (when-not (a/decl (a/top-name nsobj pc))
+                      (a/declare-class! {:nesting :top} pc)))
+                  (catch Throwable e (fail! n (str "parse: " (.getMessage e))))))))))
+      ;; resolve (j2g's resolve!, in the unit's order; supertypes first as par-levels orders them)
+      (let [names @(:order unit)]
+        (doseq [l (#'w/levels names #(some-> (a/decl %) :outer vector)) n l]
+          (when-not (:headers-done (a/decl n))
+            (try (a/resolve-header! n) (catch Throwable e (fail! n (str "header: " (.getMessage e)))))))
+        (doseq [l (#'w/levels names #'w/supers-of) n l]
+          (try (a/resolve-members! n) (catch Throwable e (fail! n (str "members: " (.getMessage e))))))
+        (doseq [l (#'w/levels names #'w/supers-of) n l]
+          (try (a/add-bridges! n) (catch Throwable e (fail! n (str "bridges: " (.getMessage e))))))
+        (doseq [n names]
+          (try (#'a/mark-enum-abstract! n) (catch Throwable e (fail! n (str "enum: " (.getMessage e))))))
+        ;; analyze the variants' classes alone (their nests: a member class's analysis is its holder's part)
+        (let [vtops (set (map top-of (mapcat val by-file)))
+              targets (filter #(vtops (top-of %)) names)]
+          (doseq [n targets :when (a/decl n)]
+            (try (a/analyze-class! n)
+                 (catch Throwable e
+                   (fail! n (str "analysis: " (.getMessage e) (some->> (.getCause e) .getMessage (str " / ")))))))
+          (let [ours (fn [n] (vtops (top-of n)))]
+            {:classes (count names)
+             :variants (select-keys @applied (filter ours (keys @applied)))
+             :missing (vec (for [[f ns] by-file n ns :when (not (contains? @applied n))] [f n]))
+             :others (vec (remove (comp ours first) @failed))
+             :failed (vec (for [[n msg] @failed :when (ours n)]
+                            [(or (file-of n) (file-of (top-of n))
+                                 (some (fn [[f ns]] (when (some #(= (top-of %) (top-of n)) ns) f)) by-file))
+                             n msg]))}))))))
+
+(defn- read-edn [f] (with-open [r (java.io.PushbackReader. (io/reader f))] (read r)))
+
+(defn -main [& args]
+  (let [opt (fn [k] (second (drop-while #(not= k %) args)))
+        known-file (or (opt "--known") "test/jrt/vet-known.edn")
+        strict? (some #{"--strict"} args)
+        names (remove (set (concat ["--known" "--strict" "--others" "--forms" "--variants"] (when-let [k (opt "--known")] [k]))) args)
+        vdir (or (opt "--variants") *variants-dir*)
+        files (binding [*variants-dir* vdir] (variant-files (remove (set [(opt "--forms") (opt "--variants")]) names)))
+        t0 (System/nanoTime)
+        ;; the classes outside the forms from the edge (jdk/edge.edn), no Java forms sources from the class path,
+        ;; as j2g's run binds them (arbace.j2g.main/run)
+        e (edge/read-edge "jdk/edge.edn")
+        {:keys [failed variants missing classes others]} (binding [*forms-dir* (or (opt "--forms") *forms-dir*)
+                                                                   *variants-dir* vdir
+                                                                   env/*declared* (:classes e)
+                                                                   edge/*edge* e
+                                                                   a/*source-lookup* false]
+                                                           (vet files))
+        _ (when (some #{"--others"} args)
+            (doseq [[n msg] others] (println (str "other    " n ": " msg))))
+        known (if (.isFile (io/file known-file)) (read-edn known-file) [])
+        scope (set (map #(.getName (io/file %)) files))
+        used (atom #{})
+        bad (atom 0)]
+    (doseq [[f n] missing]
+      (swap! bad inc) (println (str "MISSING  " f ": " n ": a variant for a class not in the inputs")))
+    (doseq [[f n msg] failed]
+      (if-let [k (first (filter (fn [[kf kc km]] (and (= kf f) (= kc n) (str/starts-with? msg km))) known))]
+        (do (swap! used conj k) (println (str "known    " f ": " n ": " msg)))
+        (do (swap! bad inc) (println (str "REFUSED  " f ": " n ": " msg))
+            ;; the class a message names whose own declaration failed: the refusal follows it (j2g's world
+            ;; refuses the class the same, as the night of 2026-11-07 cut its variants' dependants)
+            (doseq [c (distinct (map #(str/replace (second %) "." "/") (re-seq #"(?:in|of) ([A-Za-z_][\w.$]*)" msg)))
+                    [_ m] (filter #(= c (first %)) others)]
+              (println (str "   after  " c ": " m))))))
+    (doseq [f (sort scope)
+            :let [mine (filter #(= f (first %)) failed)
+                  vs (w/read-variants [(io/file vdir f)])]
+            :when (empty? mine)]
+      (println (str "ok       " f ": " (str/join " " (for [n (sort (keys (dissoc vs :arbace.j2g.world/erase)))
+                                                           :let [c (get variants n)]]
+                                                       (str n " " (:replaced c) "/" (:cut c) "/" (:added c)))))))
+    (let [stale (remove #(@used %) (filter #(scope (first %)) known))]
+      (doseq [k stale] (println (str "stale    " (pr-str (vec (take 3 k))))))
+      (when strict? (swap! bad + (count stale)))
+      (println (str "jrt.vet: " (count files) " variant files, " classes " classes declared, " @bad " refused"
+                    (when (seq stale) (str ", " (count stale) " known rows stale"))
+                    (format " (%.1f s)" (/ (- (System/nanoTime) t0) 1e9))))
+      (System/exit (if (pos? @bad) 1 0)))))

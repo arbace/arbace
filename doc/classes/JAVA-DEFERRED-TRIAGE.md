@@ -4825,3 +4825,132 @@ The day's proxy check cannot serialize a proxy whose handler is a deftype: Cloju
 serial fields (CDR10's remainder, slice 8). (a) slice 8 next (a deftype's and defrecord's Dyn allocation, their fields as
 serial fields, `arbace.lang`'s hooks): a day; (b) after slices 5-7. **Recommended: (a)**: Clojure's suite's `serialization`
 9 and every Clojure handler of a serialized proxy.
+
+## Decided (the user, 2026-11-08, about 19:45: F23's, F24's and serialization slice 4's proposals)
+
+To build, and built below ("As built: JCS232, JCS235, JCS251, JCS253"):
+
+- **JCS232 (a):** ProviderConfig's three variant files are folded into one.
+- **JCS235 (a):** `HashSet`, `X509EncodedKeySpec` and `PKCS8EncodedKeySpec` become extendable classes.
+- **JCS251 (a):** F7's, F9's and F10a's scratch derivations move into `test/jrt/derive.ae`, and `derive --check` becomes a
+  light gate step.
+- **JCS253:** variants are checked by day with j2g's analyzer. This is a light command: it applies every variant and runs j2g's
+  analysis on the variant classes alone, and it fails on a refused one.
+
+Decided as texts only, nothing built:
+
+- **JCS230 (b):** the Kerberos permissions are ported now: java.security.jgss's `DelegationPermission`, `ServicePermission` and
+  their collections, 4 files, about half a day for 5 tests. The rest of Kerberos is by design, as option (a) put it: a
+  `:kerberos` class, `:kind :design`.
+- **JCS231:** jar verification comes after F9's night, which is option (b).
+- **JCS233 (a):** `java.home` is a directory the executable writes once per build key, under the user's cache. Cacerts joins the
+  data step (JCS140 (a)).
+- **JCS234 (a):** JNDI's LDAP provider is deferred until JNDI's providers have tests of their own.
+- **JCS240 (a):** j2g writes throws clauses into the member tables, and `ProxyFn` wraps exceptions as the JDK does.
+- **JCS241 (a):** `InvocationHandler.invokeDefault` is built, with JCS240.
+- **JCS242 (a):** j2g registers serializable lambdas' sites at class initialization, and the interpreter registers them when the
+  class is defined.
+- **JCS243 (a):** serialization's slice 8 comes next: deftypes' and records' serialization.
+- **JCS250:** the triage records it as decided with no option named. Read as recommended, that is (a): `System.Logger` in jrt as
+  JCS155 (a) decided, after F24's night, with the derivations' Logger renaming dropped.
+- **JCS252 (b):** the simple file server stays out until a test of the corpus names it.
+- **JCS254 (b):** java.net.http's client is HTTP/1.1, HTTP/2 and WebSocket, with HTTP/3 cut by variants, after F10b's night.
+- **JCS255 (b):** RMI is deferred again and ported after JCS167's slices.
+
+## As built: JCS232, JCS235, JCS251, JCS253 (2026-11-08; branch `java-props`, write-ahead)
+
+Branch `java-props` started from `mac/java-night` (`639d42ab9`) with `mac/java-jcv7`, `mac/java-security`, `mac/java-net` and
+`mac/java-serial4` merged into it. It is the Java night's input. All work was done by day under the light rules.
+
+**JCS232 (a).**
+
+- `overlay/jdk/variants/ProviderConfig.ae` is now the one variant of `sun.security.jca.ProviderConfig`. Its `getProvider` is
+  F23's: SUN, SunRsaSign, SunJCE, SunEC, SunJSSE and SunSASL are made directly, each found by its name and by its class name.
+- `ProviderConfigJsse.ae` (F3) and `ProviderConfigSasl.ae` (F23) are removed.
+- Nothing translates differently. Before the fold, j2g applied the three files in order and the last one's `getProvider` won;
+  the folded file holds that same text.
+- `LICENSE.md`, `test/jrt/jrt_sources.ae`'s comments and doc/go/JRT-SOURCES.md name the fold.
+
+**JCS235 (a).**
+
+- `arbace.j2g.model/class-supers` gains `java/util/HashSet`, `java/security/spec/X509EncodedKeySpec` and
+  `java/security/spec/PKCS8EncodedKeySpec`, so the list now has 130 classes. Each one gets its DynSub_C at the next build.
+- The tests it is for are t08045 (`Subject/UnreliableContains`), t08202 (`VerifyCACerts`) and t05275
+  (`KeyFactoryGetKeySpecForInvalidSpec`). Today they stop at "The Go build's Java forms cannot extend ... yet".
+- These tests can only be checked at night: the change needs a whole-program j2g run, and a new executable to interpret them on.
+
+**JCS251 (a).** `test/jrt/derive.ae` holds the scratch derivations as tables taken from the scripts' own data.
+
+| derivation | script it replaces | what the table does |
+|---|---|---|
+| F7's `DirectByteBuffer` and `DirectByteBufferR` | `gendirect.py` | Starts from the JDK build's generated `HeapByteBuffer(R).java`. Applies its renames and mapping replacements, each with its own count for the plain and the read-only file. Its one regex is `$1, mapping)`. Inserts the constructors before the marker. |
+| F10a's `Net` | `gennet.py` | Gives each native declaration its body. These are gennet's 40 bodies, with F10b's eight multicast bodies, which were later edited into the overlay by hand. The helpers follow, without F10b's removed `multicast()`. Verified: no `native` left outside comments. |
+| `PollSelectorImpl` | `genpoll.py` | 15 replacements. Verified: `pollArray.`, `Unsafe` and `Blocker` are gone. |
+| `SocketOptionRegistry` | `genopts.py` | Starts from the template, as GensrcMisc.gmk does, with Linux's constants. Verified: its option tuples equal the JDK build's gensrc. |
+| F9's thirteen | `.tmp/f9/derive.py` | Each replacement once. |
+| JCS164's `UnixDomainSockets` | `.tmp/unix/derive.py` | Four replacements. Verified: no native declaration is left. |
+
+- **The engine.** An entry's `:ops` are applied in order. An op is `[OLD NEW COUNT]` (OLD a string or a regex) or a function of
+  the text. `:verify` is a function of the overlay that returns its problems.
+- **The result.** `bin/jrt-convert derive --check` re-derives 24 overlays and finds 0 not as derived, so all 24 are byte for
+  byte the committed files. They are F24's five plus the 19 above.
+  - The headers are unchanged, so they still name the scripts that first made them. The overlays did not move, so no conversion
+    is needed.
+  - The scripts' own outputs had been checked first: each reproduces its overlay, except Net's (F10b's hand edits), which the
+    table now includes.
+- **The negative control.** It is part of `--check`: the PollSelectorImpl entry, with one count raised by one, must throw, and an
+  overlay one character off must differ. A line appended to Net.java gives DIFFERS and exit 1.
+- **The gate step.** `jrt-derive` is an essential step on stage 0, keyed by the platform's pin, the overlays, `derive.ae`, `bin/jrt-convert`
+  and its libraries. It takes seconds.
+
+**JCS253.** `bin/jrt-convert vet [--forms DIR] [--variants DIR] [--known FILE] [--strict] [--others] [FILE...]`
+(`test/jrt/vet.ae`, `jrt.vet`).
+
+- **What it runs.** j2g's own world steps: the committed `jdk/forms` (or `--forms`) is read, and the variants are applied by
+  `arbace.j2g.world/apply-variant`. Every class is parsed, declared, header-resolved, member-resolved and bridged. Only the
+  variants' classes and their nests then go through `analyze-class!`.
+- **What resolves the rest.** The classes outside the forms come from j2g's edge (`jdk/edge.edn`), with `a/*source-lookup*`
+  false, as in j2g's run.
+- **Why it is light.** The heavy part of j2g's load is analyzing every class, and this skips it. The whole world (4,530 classes)
+  is declared in about 20 s, at a peak RSS of 1.48 GiB (`GOMEMLIMIT` defaults to 1500 MiB).
+- **What fails it.** A variant's class that fails at any step, or a variant whose class has no forms (MISSING), unless
+  `test/jrt/vet-known.edn` names it. The file is empty today. A refusal that follows from another class's failed declaration
+  prints that cause under it (`after`).
+- **Proved: the negative control.** The three variants F24 fixed were restored to their texts before the fix (`--variants` over a
+  copy). Vet refuses them with the night's own messages:
+  - SimpleFormatter: "Cannot convert value for format of type Object to String";
+  - ThreadImpl: "... [Ljava/lang/Object; to [Ljava/lang/StackTraceElement;";
+  - HttpClient: "Unable to resolve symbol: serverSocket".
+- **Proved: the fixed texts.** The texts as fixed pass: ThreadImpl 17/0/3, SimpleFormatter 1/0/1, HttpClient 1/0/1.
+- **Today's result on the committed `jdk/forms`.** 146 variant files, 9 refused. Each refusal is the committed conversion being
+  older than the day's sources:
+  - five MISSING, classes not converted yet: SerializedLambda, HttpServerProvider, DatagramSocketAdaptor's two and
+    DatagramChannelImpl;
+  - `File` (F9's `java.nio.file.FileSystem`);
+  - `DatagramSocket` (F10b's `MulticastChannel`);
+  - `AbstractInterruptibleChannel` (F9's `HostThreads.blockedOn`);
+  - `ProviderConfig` (F23's `com.sun.security.sasl.Provider`).
+
+  Each goes away with the night's conversion. So vet is meant to run on the conversion's output, before j2g:
+  `bin/jrt-convert vet --forms .tmp/jrt/conv`, or after `bin/jrt-convert update` on `jdk/forms`.
+- **No gate step yet.** On today's committed forms the step would fail. JCS256 proposes it.
+
+## Proposed (java-props)
+
+### JCS256 `bin/jrt-convert vet` as a gate step
+
+- **(a)** An essential light step after `jrt-derive`, on stage 0. It is keyed by `jdk/forms`, `overlay/jdk/variants`,
+  `jdk/edge.edn`, `test/jrt/vet*.{ae,edn}` and j2g's world and analyzer namespaces, and takes about 20 s and 1.5 GiB. It could
+  first pass once a conversion has made `jdk/forms` current, which happens at the night after the next `bin/jrt-convert update`.
+- **(b)** A step of the Java night's script only (`--forms .tmp/jrt/conv`, before the build).
+- *Recommended: (a)*, from the morning after the Java night's conversion is committed. Until then, use (b).
+
+### JCS257 The derived overlays' headers name `test/jrt/derive.ae`
+
+The 19 headers JCS251 moved still name their scratch scripts (`.tmp/f10/gennet.py`, ...), which no longer exist in any
+checkout.
+
+- **(a)** Rewrite the headers to name `test/jrt/derive.ae`, at the next conversion. This changes the overlays' text but not
+  their code, and moves `jdk/provenance.edn`'s digests.
+- **(b)** Keep them as the derivations' first record.
+- *Recommended: (a)*, folded into the Java night's conversion.
