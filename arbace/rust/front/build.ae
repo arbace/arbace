@@ -22,9 +22,11 @@
 
     (build-body DEF OPTS)    within collect/with-crate: a body map of MIR forms (:name :kind :args :ret :locals :scopes
                              :debug :blocks); OPTS {:overflow-checks bool :edition N}"
-  (:require [arbace.rust.front.collect :as c] [arbace.rust.front.typeck :as tc] [arbace.string :as str]))
+  (:require [arbace.rust.front.collect :as c] [arbace.rust.front.typeck :as tc] [arbace.rust.front.mir :as mir] [arbace.string :as str]))
 
 (set! *warn-on-reflection* true)
+
+(def ^:dynamic *root-file* nil)
 
 (defn- unsupported [what & [x]] (throw (ex-info (str "build: unsupported " what) {:what what :x x})))
 
@@ -246,10 +248,14 @@
    "==" "Eq" "<" "Lt" "<=" "Le" "!=" "Ne" ">=" "Ge" ">" "Gt"})
 
 (defn- ctor-info
-  "A path's constructor: [adt-id variant-index variant-def-id ctor-kind] for a struct's or a variant's constructor"
+  "A path's constructor: [adt-id variant-index variant-def-id ctor-kind] for a struct's or a variant's constructor
+  (the crate's by their definitions, std's by their paths; a desugaring's lang item path, Some or None, by its lang item)"
   [path]
-  (let [rd (c/res-def path)]
-    (when (= :local (first rd))
+  (let [rd (if (:lang path)
+             (when-let [lp (c/lang (:ident (first (:segs path))))] [:ext lp nil])
+             (c/res-def path))]
+    (case (first rd)
+      :local
       (let [[_ id k] rd d (c/def-of id)]
         (cond
           (str/starts-with? (str k) "Ctor(")
@@ -258,7 +264,15 @@
             [id 0 id (if (str/includes? (str k) "Fn") :fn :const)])
           (= "Variant" k) [(:parent d) (tc/variant-index id) id :struct]
           (= "Struct" k) [id 0 id :struct]
-          :else nil)))))
+          :else nil))
+      :ext
+      (let [[_ p _] rd
+            p (if (re-find #"\{constructor#\d+\}$" p) (c/path-parent p) p)
+            kind (fn [vid] (keyword (tc/variant-ctor-kind vid)))]
+        (cond (tc/std-variant p) [(c/path-parent p) (tc/variant-index p) p (kind p)]
+              (get (:adts c/*si*) p) [p 0 p (kind p)]
+              :else nil))
+      nil)))
 
 (def ^:dynamic *loops* nil)   ; the enclosing loops and labeled blocks, innermost first
 
@@ -276,9 +290,14 @@
         (when (re-matches #"\d+" (str nm)) (parse-long (str nm)))
         (unsupported "a field" nm))))
 
+(def ^:dynamic *self-var* nil)   ; the `self` parameter's binding (a derive's `self` paths carry no resolution)
+
 (defn- mirror-path [e ty]
-  (let [path (:path e)]
-    (if-let [sp (local-res path)]
+  (let [path (:path e)
+        sp (or (local-res path)
+               (when (and *self-var* (= ["self"] (mapv :ident (:segs path))) (nil? (:res path)) ) *self-var*)
+               (when (and *self-var* (= ["self"] (mapv :ident (:segs path))) (= [:unresolved "self"] (c/res-def path))) *self-var*))]
+    (if sp
       (mk e :var-ref ty :id sp)
       (let [rd (c/res-def path)]
         (cond
@@ -387,6 +406,7 @@
                     (:semi :expr) {:k :expr :scope [(:hir-id s) :node] :expr (mirror-expr (:expr s))}
                     :let {:k :let :remainder [(:hir-id b) [:remainder i]] :init-scope [(:hir-id s) :node]
                           :pattern (lower-pattern (:pat s)) :init (some-> (:init s) mirror-expr)
+                          :user-ty (when (sequential? (:span (:ty s))) {:span (:span (:ty s)) :ty (:ty (r-of (:pat s)))})
                           :else (some-> (:els s) mirror-block) :hir-id (:hir-id s) :span (:span s)}
                     nil))
                 (:stmts b)))
@@ -400,7 +420,7 @@
         (case (:kind p)
           :wild {:k :wild :ty ty}
           :binding (let [[by-ref m] (or (:mode r) [:no false])]
-                     {:k :binding :ty ty :name (:name p) :var (binding-key p) :by-ref by-ref :mutbl m :span (:span p)
+                     {:k :binding :ty (if (#{:not :mut} by-ref) (nth ty 3) ty) :var-ty ty :name (:name p) :var (binding-key p) :by-ref by-ref :mutbl m :span (:span p)
                       :sub (some-> (:sub p) lower-pattern) :primary true})
           :lit (let [x (:expr p)
                      [lit neg] (if (and (= :unary (:kind x)) (= "-" (:op x))) [(:lit (:expr x)) true] [(:lit x) false])]
@@ -511,6 +531,7 @@
     "Integer" (let [v (bigint (parse-int-lit lit)) v (if neg (- v) v)]
                 (if (integral? t) (int-const v t) (unsupported "a float literal")))
     "Bool" (bool-const (= "true" (str (:symbol lit))))
+    ("Str" "StrRaw") [:const (str "const " (pr-str (str (:value lit (:symbol lit))))) t '(raw-str)]
     (unsupported "a literal" (:lit-kind lit))))
 
 (defn- fn-const [t]
@@ -903,8 +924,7 @@
 (defn- adt-agg [x os]
   (let [vid (:vid x) adt (:adt x) enum (tc/enum? adt)
         args (nth (:ty x) 2)
-        tn (binding [c/*in-value* true] (c/print-def-path adt []))
-        nm (if enum (str tn "::" (second (:data (c/def-of vid)))) tn)
+        nm (binding [c/*in-value* true] (c/print-def-path vid args))
         kind (tc/variant-ctor-kind vid)]
     (list 'adt nm kind (mapv (comp str first) (tc/all-fields-of-variant vid))
           (binding [c/*in-value* false] (c/print-def-path adt [])) (:variant x) (vec (for [a args] (if (c/region? a) '(lt) (ty-form a)))))))
@@ -1030,6 +1050,8 @@
                        (push-scope! (:remainder s))
                        (swap! lets conj (:remainder s))
                        (let [vis (new-source-scope!)
+                             ut (when-let [u (:user-ty s)] (let [i (count (:user-types (st)))] (upd! update :user-types (fnil conj []) u) i))
+                             _ (upd! assoc :let-user-ty ut)
                              bb (if-let [init (:init s)]
                                   (blk (in-scope (:init-scope s)
                                          (declare-bindings vis (:pattern s))
@@ -1069,12 +1091,17 @@
 
 (defn- binding-local-ty [p] (case (:by-ref p) :not [:ref [:re-erased] false (:ty p)] :mut [:ref [:re-erased] true (:ty p)] (:ty p)))
 
-(defn declare-bindings [vis pattern]
-  (doseq [p (primary-bindings pattern)]
-    (let [l (new-local! (:ty p) :mut (:mutbl p) :scope (:source-scope (st)))]
-      (upd! update :debug conj {:name (:name p) :scope vis :value (place-form (place l))})
-      (upd! assoc-in [:var-indices (:var p)] l)))
-  vis)
+(defn declare-bindings
+  "declare_bindings: each primary binding a local in the current source scope, its debug info in VIS (made on the first
+  binding when nil); the visibility scope"
+  [vis pattern]
+  (reduce (fn [vis p]
+            (let [vis (or vis (new-source-scope!))
+                  l (new-local! (:var-ty p) :mut (:mutbl p) :scope (:source-scope (st)))]
+              (upd! update :debug conj {:name (:name p) :scope vis :value (place-form (place l))})
+              (upd! assoc-in [:var-indices (:var p)] l)
+              vis))
+          vis (primary-bindings pattern)))
 
 (defn storage-live-binding! [bb var]
   (let [l (var-local var)]
@@ -1085,16 +1112,19 @@
 (defn schedule-drop-for-binding! [var]
   (when-let [r (var-scope var)] (schedule-drop-value! r (var-local var))))
 
-(declare lower-match-tree bind-pattern)
+(declare lower-match-tree bind-pattern lower-scrutinee place-into-pattern)
 
 (defn expr-into-pattern [bb pat init]
   (if (and (= :binding (:k pat)) (= :no (:by-ref pat)) (nil? (:sub pat)))
     (let [p (storage-live-binding! bb (:var pat))
           bb (blk (expr-into-dest p bb init))]
       (push! bb (list 'fake-read "ForLet(None)" (place-form p)))
+      (when-let [i (:let-user-ty (st))]
+        (push! bb (list 'raw (str "AscribeUserType(" (mir/place (place-form p)) ", o, UserTypeProjection { base: UserType(" i "), projs: [] })"))))
       (schedule-drop-for-binding! (:var pat))
       bb)
-    (unsupported "a let with a pattern")))
+    (let [[bb pb] (lower-scrutinee bb init)]
+      (place-into-pattern bb pat pb))))
 
 (defn then-else-break [bb x temp-scope]
   (case (:k x)
@@ -1125,7 +1155,160 @@
     (break-for-else! else-b)
     then-b))
 
-(defn match-expr [dest bb x] (unsupported "match"))
+;; the match lowering (matches/mod.rs, match_pair.rs, buckets.rs, test.rs): candidates as atoms
+;; {:pairs [pair] :subs [] :guard bool :bindings [binding] :pre :otherwise :fe-start}, a pair {:place P :case CASE
+;; :subpairs [pair]}, CASE [:variant ADT VI] [:const VALUE :int|:bool]
+
+(defn- inter-pat
+  "InterPat::lower_thir_pat squashed (squash_inter_pat): [pairs bindings] of a pattern at a place"
+  [pb pat]
+  (let [pairs (atom []) bindings (atom [])]
+    (letfn [(walk [pb pat out]
+              (let [subs (atom [])
+                    case
+                    (case (:k pat)
+                      :wild nil
+                      :binding (do (when (:sub pat) (walk pb (:sub pat) subs))
+                                   (swap! bindings conj {:span (:span pat) :source pb :var (:var pat) :by-ref (:by-ref pat)})
+                                   nil)
+                      :constant (let [c (lit-const (:lit pat) (:neg pat) (:ty pat))]
+                                  [:const c (if (= :bool (first (:ty pat))) :bool :int)])
+                      :leaf (do (doseq [[f sp] (:subpatterns pat)] (walk (project pb [:field f (:ty sp)]) sp subs)) nil)
+                      :variant (let [dp (project pb [:downcast (tc/variant-name (:vid pat)) (:variant pat) (:ty pat)])]
+                                 (doseq [[f sp] (:subpatterns pat)] (walk (project dp [:field f (:ty sp)]) sp subs))
+                                 (when (> (count (tc/variants-any (:adt pat))) 1) [:variant (:adt pat) (:variant pat)]))
+                      :deref (do (walk (project pb [:deref]) (:sub pat) subs) nil)
+                      (unsupported "a pattern" (:k pat)))]
+                (if case
+                  (swap! out conj {:place pb :case case :subpairs @subs})
+                  (swap! out into @subs))))]
+      ;; (the binding's push follows its subpatterns': bindings are pushed post-order by walk itself)
+      (walk pb pat pairs))
+    [@pairs @bindings]))
+
+(defn- new-candidate [pb pat guard]
+  (let [[pairs bindings] (inter-pat pb pat)]
+    (atom {:pairs pairs :bindings bindings :guard guard :span (:span pat)})))
+
+(defn- pick-test [cands]
+  (let [mp (first (:pairs @(first cands)))
+        kind (case (first (:case mp)) :variant [:switch (second (:case mp))] :const (if (= :bool (nth (:case mp) 2)) [:if] [:switch-int]))]
+    [(:place mp) kind]))
+
+(defn- choose-bucket! [place test cand]
+  (let [ps (:pairs @cand)
+        i (first (keep-indexed (fn [i mp] (when (= place (:place mp)) i)) ps))]
+    (when i
+      (let [mp (nth ps i)
+            [branch full]
+            (case (first test)
+              :switch (if (= :variant (first (:case mp))) [[:variant (nth (:case mp) 2)] true] [nil false])
+              :switch-int (if (and (= :const (first (:case mp))) (= :int (nth (:case mp) 2))) [[:const (second (:case mp))] true] [nil false])
+              :if (if (and (= :const (first (:case mp))) (= :bool (nth (:case mp) 2)))
+                    [(if (= "const true" (second (second (:case mp)))) [:success] [:failure]) true]
+                    [nil false]))]
+        (when full
+          (swap! cand (fn [c] (assoc c :pairs (into (vec (concat (subvec ps 0 i) (subvec ps (inc i)))) (:subpairs mp))))))
+        branch))))
+
+(defn- discriminants [adt]
+  (tc/discriminant-values adt))
+
+(declare match-candidates)
+
+(defn- perform-test! [bb otherwise place test targets]
+  (let [target (fn [br] (or (some (fn [[b blk]] (when (= b br) blk)) targets) otherwise))]
+    (case (first test)
+      :switch (let [adt (second test)
+                    vals (keep (fn [[vi d]] (when-let [b (some (fn [[br blk]] (when (= br [:variant vi]) blk)) targets)] [d b])) (map-indexed vector (discriminants adt)))
+                    dt (tc/discr-ty adt)
+                    d (temp! dt)]
+                (assign! bb d (list 'discriminant (place-form place)))
+                (terminate! bb (list 'switch (op-form [:move d]) (vec vals) (target [:failure]))))
+      :switch-int (let [vals (keep (fn [[br blk]] (when (= :const (first br)) [(second (nth (second br) 3)) blk])) targets)]
+                    (terminate! bb (list 'switch (op-form [:copy place]) (vec vals) (target [:failure]))))
+      :if (terminate! bb (list 'switch (op-form [:copy place]) [[0 (target [:failure])]] (target [:success]))))))
+
+(defn- test-candidates! [cands start]
+  (let [[place test] (pick-test cands)
+        buckets (atom []) ; [[branch [cand...]]] in insertion order
+        rest-cands (loop [cs cands]
+                     (if-let [c (first cs)]
+                       (if-let [br (choose-bucket! place test c)]
+                         (do (swap! buckets (fn [bs] (if-let [i (first (keep-indexed (fn [i [b _]] (when (= b br) i)) bs))]
+                                                       (update-in bs [i 1] conj c)
+                                                       (conj bs [br [c]]))))
+                             (recur (rest cs)))
+                         (vec cs))
+                       []))
+        remainder (start-new-block!)
+        targets (vec (for [[br cs] @buckets]
+                       (let [bs (start-new-block!)
+                             bo (match-candidates bs cs)]
+                         (goto! bo remainder)
+                         [br bs])))]
+    (perform-test! start remainder place test targets)
+    [remainder rest-cands]))
+
+(defn match-candidates [start cands]
+  (when-let [c (first cands)] (when-not (:fe-start @c) (swap! c assoc :fe-start start)))
+  (cond
+    (empty? cands) start
+    (empty? (:pairs @(first cands)))
+    (let [c (first cands) o (start-new-block!)]
+      (swap! c assoc :pre start :otherwise o)
+      (match-candidates o (vec (rest cands))))
+    :else (let [[s r] (test-candidates! cands start)] (match-candidates s r))))
+
+(defn- lower-match-tree [bb pb pats+guards]
+  (let [cands (mapv (fn [[p g]] (new-candidate pb p g)) pats+guards)
+        _ (when (some second pats+guards) (unsupported "a match guard"))
+        otherwise (match-candidates bb cands)
+        next (atom nil)]
+    (doseq [c (rseq cands)]
+      (when-let [n @next]
+        (let [old (:pre @c) new (start-new-block!)]
+          (terminate! old (list 'false-edge new n))
+          (swap! c assoc :pre new)))
+      (reset! next (:fe-start @c)))
+    (push! otherwise (list 'fake-read "ForMatchedPlace(None)" (place-form pb)))
+    (terminate! otherwise '(unreachable))
+    (mapv deref cands)))
+
+(defn- bind-for-arm-body! [bb bindings]
+  (doseq [b bindings]
+    (let [p (storage-live-binding! bb (:var b))]
+      (schedule-drop-for-binding! (:var b))
+      (assign! bb p (case (:by-ref b)
+                      :no (use-rv (consume (:source b)))
+                      :not (list 'ref :shared (place-form (:source b)))
+                      :mut (list 'ref :mut (place-form (:source b))))))))
+
+(defn- bind-pattern! [branch]
+  (bind-for-arm-body! (:pre branch) (:bindings branch))
+  (:pre branch))
+
+(defn place-into-pattern [bb pat pb]
+  (let [[branch] (lower-match-tree bb pb [[pat false]])]
+    (bind-pattern! branch)))
+
+(defn- lower-scrutinee [bb x]
+  (let [[bb p] (as-place bb x)]
+    (push! bb (list 'place-mention (place-form p)))
+    [bb p]))
+
+(defn match-expr [dest bb x]
+  (let [[bb pb] (lower-scrutinee bb (:scrutinee x))
+        branches (lower-match-tree bb pb (mapv (fn [a] [(:pat a) (boolean (:guard a))]) (:arms x)))
+        ends (vec (for [[a br] (map vector (:arms x) branches)]
+                    (blk (in-scope (:scope a)
+                           (let [vis (declare-bindings nil (:pat a))
+                                 ab (bind-pattern! br)]
+                             (when vis (upd! assoc :source-scope vis))
+                             (blk (expr-into-dest dest ab (:body a))))))))
+        end (start-new-block!)]
+    (doseq [e ends] (goto! e end))
+    end))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Bodies (mod.rs: construct_fn, args_and_body)
@@ -1139,7 +1322,60 @@
      :scopes (:source-scopes s)
      :debug (:debug s)
      :blocks (mapv (fn [b] {:cleanup (:cleanup b) :stmts (:stmts b) :after-dbg [] :term (:term b)}) (:blocks s))
-     :allocs ""}))
+     :allocs ""
+     :user-types (vec (for [{:keys [span ty]} (:user-types s)]
+                        (let [[l1 c1 l2 c2] span t (ty-text ty)]
+                          (str "user_ty: Canonical { value: Ty(" t "), max_universe: U0, var_kinds: [] }, span: " *root-file* ":" l1 ":" c1 ": " l2 ":" c2 ", inferred_ty: " t))))}))
+
+(defn print-built
+  "A built body's text as -Zdump-mir prints it after the header line: the user type annotations, then the body"
+  [b]
+  (str (when (seq (:user-types b))
+         (str "| User Type Annotations\n"
+              (apply str (map-indexed (fn [i u] (str "| " i ": " u "\n")) (:user-types b)))
+              "|\n"))
+       (mir/print-body b)))
+
+
+(defn mir-name
+  "A body's name as write_mir_pretty prints it: its def path, an impl as `<impl at FILE:L:C: L:C>`"
+  [d]
+  (let [p (c/def-of (:parent d))]
+    (if (and p (str/starts-with? (str (:kind p)) "Impl") (vector? (:span (:node p))))
+      (let [[l1 c1 l2 c2] (:span (:node p))
+            ;; def_span: an impl's header, to its self type (its where clause) when the item's text is the root file's
+            [l2 c2] (let [st (:span (:self-ty (:node p)))
+                          wh (keep :span (:where (:generics (:node p))))]
+                      (if (and (vector? st) (= l1 (first st)) (not (some #{:derive} [(:derive (:node p))])))
+                        (let [e (or (last (sort (map (fn [x] [(nth x 2) (nth x 3)]) wh))) [(nth st 2) (nth st 3)])]
+                          (if (pos? (compare [l2 c2] e)) e [l2 c2]))
+                        [l2 c2]))]
+        (str "<impl at " *root-file* ":" l1 ":" c1 ": " l2 ":" c2 ">::" (second (:data d))))
+      (binding [c/*in-value* true] (c/print-def-path (:id d) [])))))
+
+(defn build-discriminant
+  "construct_const for an explicit discriminant (`A = 1`): the anonymous constant `Variant::{constant#0}`"
+  [d opts]
+  (let [v (:node d)
+        res (tc/body-results d)
+        t (tc/discr-ty (:parent d))
+        name (str (binding [c/*in-value* true] (c/print-def-path (:id d) [])) "::{constant#0}")]
+    (tc/with-solver (c/def-of (:parent d))
+      (fn []
+        (binding [*edition* (or (:edition opts) 2024) *res* res *self-var* nil
+                  *tree* (binding [*rt* (atom {:parent {} :var {} :cx {:parent nil :var-parent nil}})]
+                           (enter-scope! [(:hir-id (:disr v)) :destruction])
+                           (resolve-expr (:disr v) false) @*rt*)
+                  *b* (atom {:blocks [] :locals [{:ty t :mut true :scope 0}] :source-scopes [[nil nil]] :source-scope 0 :debug []
+                             :scopes [] :breakables [] :if-then nil :unwind (drop-tree) :var-indices {} :unit-temp nil
+                             :block-context [] :check-overflow true})]
+          (let [x (mirror-expr (:disr v))]
+            (start-new-block!)
+            (let [bb (blk (expr-into-dest (place 0) 0 x))]
+              (terminate! bb '(return))
+              (let [blocks (build-drop-tree-mir! (:unwind (st)) :unwind nil)]
+                (when-let [r (nth blocks 0)] (terminate! r '(resume))))
+              (finish d name :anon-const 0 t))))))))
 
 (defn build-body
   "construct_fn over a function's HIR and its type-check results (within collect/with-crate)"
@@ -1148,20 +1384,22 @@
         res (tc/body-results d)
         sig (tc/erased-sig (:id d))
         ret (:output sig)
-        name (binding [c/*in-value* true] (c/print-def-path (:id d) []))
+        name (mir-name d)
         body-expr {:node :expr :kind :block :block (:body n) :span (:span (:body n)) :hir-id [(first (:hir-id n)) :body]}
         res (assoc res (:hir-id body-expr) {:ty ret})
         pats (map :pat (:params n))]
     (tc/with-solver d
       (fn []
         (binding [*edition* (or (:edition opts) 2024)
+                  *self-var* nil
                   *res* res
                   *tree* (binding [*edition* (or (:edition opts) 2024)] (scope-tree pats body-expr))
                   *b* (atom {:blocks [] :locals [{:ty ret :mut true :scope 0}] :source-scopes [] :source-scope 0 :debug []
                              :scopes [] :breakables [] :if-then nil :unwind (drop-tree) :var-indices {} :unit-temp nil
                              :block-context [] :check-overflow (boolean (:overflow-checks opts))})]
-          (let [thir-body (binding [*edition* (or (:edition opts) 2024)] (mirror-expr (assoc-in body-expr [:block :hir-id] (:hir-id (:body n)))))
-                params (mapv (fn [p t] {:pat (lower-pattern (:pat p)) :ty t}) (:params n) (:inputs sig))]
+          (let [params (mapv (fn [p t] {:pat (lower-pattern (:pat p)) :ty t}) (:params n) (:inputs sig))
+                _ (when-let [sp (first (filter #(= "self" (:name (:pat %))) params))] (set! *self-var* (:var (:pat sp))))
+                thir-body (mirror-expr (assoc-in body-expr [:block :hir-id] (:hir-id (:body n))))]
             (start-new-block!)
             (upd! update :source-scopes conj [nil nil])
             (let [call-site [(:hir-id body-expr) :call-site]
@@ -1183,8 +1421,9 @@
                                        (cond (and (= :binding (:k pat)) (= :no (:by-ref pat)) (nil? (:sub pat)))
                                              (do (upd! assoc-in [:locals l :mut] (:mutbl pat))
                                                  (upd! assoc-in [:var-indices (:var pat)] l))
-                                             (= :wild (:k pat)) nil
-                                             :else (unsupported "a parameter pattern"))))
+                                             :else (do (when-let [v (declare-bindings @scope pat)] (reset! scope v))
+                                                       (reset! bb (place-into-pattern @bb pat (place l)))))))
+                                   (when @scope (upd! assoc :source-scope @scope))
                                    (blk (expr-into-dest (place 0) @bb thir-body)))))))]
                   (terminate! ret-block '(return))
                   ;; build_drop_trees: the unwind tree, its root a resume block

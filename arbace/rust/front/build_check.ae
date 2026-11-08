@@ -44,15 +44,17 @@
         res-map (into {} (for [[_ s rs] res] [s rs]))
         hir (lower/lower-crate crate res-map {:file src-file :mark-crates @mc :std-generics (lower/load-std-generics std-file)})
         oc (boolean (re-find #"(?m)^// rf: overflow-checks" src))]
-    (binding [tc/*root-file* src-file]
+    (binding [tc/*root-file* src-file build/*root-file* src-file]
       (collect/with-crate hir res-map std {:source src :edition 2024 :si si}
         (fn []
-          (vec (for [d (collect/defs) :when (and (#{"Fn" "AssocFn"} (:kind d)) (:body (:node d)))]
-                 (let [nm (binding [collect/*in-value* true] (collect/print-def-path (:id d) []))]
-                   (try [nm (build/build-body d {:overflow-checks oc :edition 2024}) nil]
+          (vec (for [d (collect/defs) :when (or (and (#{"Fn" "AssocFn"} (:kind d)) (:body (:node d)))
+                                                (and (= "Variant" (:kind d)) (:disr (:node d))))]
+                 (let [disr? (= "Variant" (:kind d))
+                       nm (if disr? (str (binding [collect/*in-value* true] (collect/print-def-path (:id d) [])) "::{constant#0}") (build/mir-name d))]
+                   (try [nm (if disr? (build/build-discriminant d {:edition 2024}) (build/build-body d {:overflow-checks oc :edition 2024})) nil]
                         (catch Throwable e
                           (when (System/getenv "BUILD_TRACE") (.printStackTrace e))
-                          [nm nil (str (or (:what (ex-data e)) e))]))))))))))
+                          [nm nil (str (or (:what (ex-data e)) e)) (pr-str (:x (ex-data e)))]))))))))))
 
 (defn -main [front-dir built-dir & names]
   (let [verbose (System/getenv "BUILD_VERBOSE")
@@ -62,10 +64,10 @@
         (vec (for [n names]
                (let [want (oracle-bodies (File. (str built-dir "/" n)))
                      got (try (build-program front-dir n) (catch Throwable e (println n "ERROR" e) []))
-                     texts (into {} (for [[nm b _] got :when b] [nm (try (mir/print-body b) (catch Throwable e (str "print failed: " e)))]))
-                     rows (for [[nm b err] got :when (contains? want nm)]
+                     texts (into {} (for [[nm b _] got :when b] [nm (try (build/print-built b) (catch Throwable e (str "print failed: " e)))]))
+                     rows (for [[nm b err detail] got :when (contains? want nm)]
                             (let [w (get want nm) g (get texts nm)]
-                              (cond err [:refused nm err]
+                              (cond err [:refused nm err detail]
                                     (= w g) [:equal nm]
                                     :else [:differ nm (first-diff w g)])))]
                  (when dump
@@ -74,8 +76,11 @@
                  (when forms
                    (.mkdirs (File. ^String forms))
                    (spit (str forms "/" n ".built.edn") (with-out-str (doseq [[nm b _] got :when b] (prn (list 'mir/body (assoc b :def nm)))))))
-                 (doseq [[k nm x] rows :when (not= k :equal)]
-                   (when verbose (println "  " n nm (name k) (pr-str x))))
+                 (doseq [[k nm x y] rows :when (not= k :equal)]
+                   (when verbose (println "  " n nm (name k) (pr-str x) (or y ""))))
+                 (when verbose
+                   (doseq [nm (keys want) :when (not (some #(= nm (first %)) got))]
+                     (println "  " n nm "not built (ours:" (pr-str (mapv first got)) ")")))
                  {:name n :total (count want) :rows rows :texts texts :want want})))
         cnt (fn [r k] (count (filter #(= k (first %)) (:rows r))))]
     (doseq [r results]
