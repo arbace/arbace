@@ -1238,6 +1238,12 @@ covers what.
   `Targets/OSTargets.h`'s `LinuxTargetInfo::getOSDefines` and `Targets.cpp`'s `DefineStd` and `defineCPUMacros`, under
   the Apache License 2.0 with the LLVM Exceptions (section "LLVM (clang)" below), the file carrying clang's notice;
   `cpp/target/clang.edn`, the facts it reads (PickFP's float strings among them, from the same file), likewise.
+- `arbace/repr/cpp/diag.ae` (`arbace.repr.cpp.diag`, Arbace's own C++ front end's diagnostics, doc/cpp/CPP-SURVEY.md, "As built:
+  CX12 (first slice)"): its diagnostics' texts are clang's (`clang/include/clang/Basic/DiagnosticSemaKinds.td`) and its rules follow
+  clang's Sema (`clang/lib/Sema/SemaExpr.cpp`'s `DiagnoseEmptyLookup`, `SemaDecl.cpp`'s `MergeVarDecl`, `MergeFunctionDecl`,
+  `ActOnTag`, `CheckRedeclaration`, `ActOnParamDeclarator`, `ActOnField`), the LLVM Project from `llvm-project-23.1.5.src.tar.xz` (the
+  pin of `test/cpp/corpora.edn`), under the Apache License 2.0 with the LLVM Exceptions (section "LLVM (clang)" below), the file
+  carrying clang's notice.
 - `test/java/` (bin/java-check, Java's conformance check, doc/classes/JAVA-CONFORMANCE-SURVEY.md,
   "As built: JC1"): its tools, data and the hand-curated programs of `test/java/jls/` are Arbace's
   own, under the Eclipse Public License 1.0. jdk26u's jtreg tests are read in place from the

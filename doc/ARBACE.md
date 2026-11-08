@@ -154,6 +154,10 @@ code. Three kinds of things live here:
   Expat's notice (LICENSE.md: Expat's MIT License; the binding under the PSF License Agreement).
 - `llvm/` (`arbace.llvm.*`: llvmi, LLVM IR's evaluator, `arbace.llvm.run` and its judge `arbace.llvm.check`, and the C forms of the
   personality-free layer `llvm/rt/none.c.ae`; doc/llvm/LLVM-CROP-SURVEY.md, "As built: llvmi") is Arbace's own.
+- `repr/cpp/diag.ae` (`arbace.repr.cpp.diag`, CX12: the C++ front end's diagnostics over the native parser's tree, doc/cpp/CPP-SURVEY.md,
+  "As built: CX12 (first slice)") is Arbace's own code whose diagnostics' texts are clang's (`clang/include/clang/Basic/DiagnosticSemaKinds.td`)
+  and whose rules follow clang's Sema (`SemaExpr.cpp`'s `DiagnoseEmptyLookup`, `SemaDecl.cpp`'s redeclaration checks), the LLVM Project
+  from `llvm-project-23.1.5.src.tar.xz` (the pin of `test/cpp/corpora.edn`), written by hand on 2026-11-08; the file carries clang's notice.
 - `cpp/` (`arbace.cpp.*`, the C++ crop's eval: the lowering of LLVM forms to C forms, the code generator and its
   semantic analysis; doc/llvm/LOWER.md, doc/cpp/CODEGEN.md) is Arbace's own but for `cpp/template.ae`
   (`arbace.cpp.template`, templates, CODEGEN.md §G3), whose deduction ports parts of clang's

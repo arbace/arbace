@@ -1,3 +1,15 @@
+;; Part of Arbace. Its diagnostics' texts are clang's (clang/include/clang/Basic/DiagnosticSemaKinds.td: err_undeclared_var_use,
+;; err_redefinition, err_redefinition_different_kind, err_param_redefinition, err_duplicate_member, err_member_redeclared) and its
+;; rules follow clang's Sema (clang/lib/Sema/SemaExpr.cpp's DiagnoseEmptyLookup, SemaDecl.cpp's MergeVarDecl, MergeFunctionDecl,
+;; ActOnTag, CheckRedeclaration, ActOnParamDeclarator, ActOnField; SemaLookup.cpp's LookupBuiltin) of the LLVM Project
+;; (llvm-project-23.1.5.src.tar.xz, the pin of test/cpp/corpora.edn, sha256
+;; fb50b1eac93ddeb3aa8dab4cfe324dff74f4a9c2bdee6160c9e36188f8d06a6e), written by hand on 2026-11-08 (doc/cpp/CPP-SURVEY.md,
+;; "As built: CX12 (first slice)"). Their notice:
+;;
+;;   Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+;;   See https://llvm.org/LICENSE.txt for license information.
+;;   SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+;;
 (ns arbace.repr.cpp.diag
   "Arbace's own C++ front end's diagnostics (doc/cpp/CPP-SURVEY.md, CX12, \"As built: CX12 (first slice)\"): a C++ file's
   errors as a compiler gives them, `FILE:LINE:COL: error: MESSAGE [RULE]`, from the shared preprocessor (its errors,
@@ -35,13 +47,20 @@
 ;; Sema's checks: each (fn [unit starts] -> [diagnostic ...]) over the parse's result (its main-file nodes, clang's AST as
 ;; data, with the parser's facts under :_ keys)
 
+(def ^:dynamic *params*
+  "The names of the parameters of the function declarators enclosing the node being walked (a default argument may name
+  an earlier parameter, [basic.scope.param], DR 2082; the parser declares them with the body)."
+  #{})
+
 (defn- walk-nodes
   "Calls (f node parent) for every node of the tree `x` (maps with :kind, through every map and vector value)."
   [f x parent]
   (cond
     (map? x) (do (when (:kind x) (f x parent))
-                 (doseq [[k v] x :when (and (not= k :_ent) (or (map? v) (vector? v) (seq? v)))]
-                   (walk-nodes f v (if (:kind x) x parent))))
+                 (binding [*params* (if-let [ps (seq (keep #(when (= "ParmVarDecl" (:kind %)) (:name %)) (when (vector? (:inner x)) (:inner x))))]
+                                      (into *params* ps) *params*)]
+                   (doseq [[k v] x :when (and (not= k :_ent) (or (map? v) (vector? v) (seq? v)))]
+                     (walk-nodes f v (if (:kind x) x parent)))))
     (or (vector? x) (seq? x)) (doseq [y x] (walk-nodes f y parent))
     :else nil))
 
@@ -67,7 +86,7 @@
                     ;; lookup), so the same diagnostic; a call's name with a type-dependent argument waits for ADL at the
                     ;; instantiation ([temp.dep.candidate]): the literal-argument rule below covers both
                     (let [callee? (and parent (= "CallExpr" (:kind parent)) (identical? n (first (:inner parent))))]
-                      (when (or (not callee?) (adl-free? parent))
+                      (when (and (or (not callee?) (adl-free? parent)) (not (contains? *params* nm)))
                         (let [[l c] (line-col starts (long off))]
                           (.add out {:line l :col c :kind :error :rule :undeclared
                                      :msg (str "use of undeclared identifier '" nm "'")}))))))
