@@ -645,7 +645,7 @@ covers what.
   `src/java.base/unix/native/libnet/net_util_md.c`'s `NET_SetSockOpt`, `NET_GetSockOpt` and `NET_Bind` (their system
   calls, flags, conversions and results): Copyright (c) Oracle and/or its affiliates, under the GNU General Public
   License version 2 with the Classpath Exception (text below); the rest of those files, `IOUtil.java`,
-  `SocketDispatcher.java`, `Poller.java`, `UnixDomainSockets.java`, `EPoll.java`, `FileDispatcherImpl.java` (jdk26u's
+  `SocketDispatcher.java`, `Poller.java`, `EPoll.java`, `FileDispatcherImpl.java` (jdk26u's
   names and signatures, jrt's code), `jdk/internal/jrt/HostChannels.java`, the variants `SocketChannelImpl.ae`,
   `PollSelectorProvider.ae` and `EPollSelectorProvider.ae`, `go/arbace/jrt/channels_other.ae` and `channels_test.ae`
   are Arbace's own.
@@ -669,6 +669,16 @@ covers what.
   are Arbace's own. Their jdk26u sources join `jdk/forms/` once `bin/jrt-convert update` has run: 91 files of
   nio-file-sources (70 of `src/java.base/share/classes`, 15 of `src/java.base/unix/classes`, 6 of
   `src/java.base/linux/classes`) and the generated `sun/nio/fs/UnixConstants.java`.
+- JCS164's UNIX domain sockets (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS164 (write-ahead)"; recorded by the
+  rule of B7): jdk26u's `src/java.base/share/classes/sun/nio/ch/UnixDomainSockets.java` (https://github.com/openjdk/jdk26u
+  at `baf63fb`) derived with the changes its header names (`.tmp/unix/derive.py`'s asserted replacements) into
+  `overlay/jdk/java.base/sun/nio/ch/UnixDomainSockets.java`, and `go/arbace/jrt/channels_linux.ae`'s UNIX section, a port
+  to Go forms of jdk26u's `src/java.base/unix/native/libnio/ch/UnixDomainSockets.c` (its system calls, its sockaddr_un's
+  layout and lengths, results and errors): Copyright (c) Oracle and/or its affiliates, under the GNU General Public
+  License version 2 with the Classpath Exception (text below); the rest of those files, `HostChannels.java`'s five
+  `unix` natives, `channels_other.ae`'s and `channels_test.ae`'s UNIX parts are Arbace's own. Their jdk26u sources join
+  `jdk/forms/` once `bin/jrt-convert update` has run: the 2 files of unix-socket-sources (`java/net/UnixDomainSocketAddress.java`
+  of `src/java.base/share/classes`, `sun/nio/ch/UnixDomainSocketsUtil.java` of `src/java.base/unix/classes`).
 - Other Go-build variants (J2G-SPEC §4.6; recorded by the rule of B7):
   `overlay/jdk/variants/AbstractChronology.ae`, `BitSet.ae`, `CRC32.ae`, `Collectors.ae`,
   `File.ae`, `FileHandler.ae`, `ParseUtil.ae`, `TimeZone.ae`, `TzdbZoneRulesProvider.ae`,

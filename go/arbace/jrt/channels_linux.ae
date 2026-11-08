@@ -819,3 +819,169 @@ order), as convertReturnVal.\n"
     (.PutUint64 binary/NativeEndian b 1)
     (let [(values n e) (syscall/Write (conv int efd) b)]
       (convertReturn n e false errs))))
+
+;; ---------------------------------------------------------------------------------------
+;; UNIX domain sockets (JCS164; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS164 (write-ahead)"): ports of
+;; jdk26u's src/java.base/unix/native/libnio/ch/UnixDomainSockets.c (baf63fb), which jrt's overlay of
+;; sun.nio.ch.UnixDomainSockets calls. The sockaddr_un is built and read as the C builds and reads it (raw system
+;; calls on syscall.RawSockaddrUnix, not Go's SockaddrUnix, whose lengths and '@' spelling of abstract names differ):
+;; bind and connect pass offsetof(sun_path) + the name's bytes + 1, an accepted or local address is empty when its
+;; length is offsetof(sun_path) (an unnamed socket) and else the name up to its first NUL (Linux's rule; an abstract
+;; name, whose first byte is NUL, is empty too, as the JDK's: a Java path cannot hold a NUL). The descriptors are
+;; F10a's (non-blocking in the kernel, on Go's poller; one configured blocking waits there).
+
+;; offsetof(struct sockaddr_un, sun_path): sun_family's two bytes
+(go/const [^{:val 2} unixPathOffset 2])
+
+(go/func unixSockaddr
+  "unixSockaddr is UnixDomainSockets.c's unixSocketAddressToSockaddr: path's bytes in a zeroed sockaddr_un and its
+length, offsetof(sun_path) + the bytes + 1 (the overlay checked MAX_UNIX_DOMAIN_PATH_LEN; a longer path is
+ENAMETOOLONG here).\n"
+  [^{:tag (* ByteArray)} path] :results [syscall/RawSockaddrUnix int error]
+  (let [sa (lit syscall/RawSockaddrUnix :Family syscall/AF_UNIX)]
+    (when (> (len (.-A path)) (- (len (.-Path sa)) 2))
+      (return sa 0 syscall/ENAMETOOLONG))
+    (range [i b (.-A path)]
+      (aset (.-Path sa) i b))
+    (return sa (+ unixPathOffset (len (.-A path)) 1) nil)))
+
+(go/func unixAddressBytes
+  "unixAddressBytes is UnixDomainSockets.c's sockaddrToUnixAddressBytes of sa, n bytes long: an AF_UNIX address's
+name (none when n is offsetof(sun_path), an unnamed socket's; else up to the first NUL), nil for another family.\n"
+  ^{:tag (* ByteArray)} [^{:tag (* syscall/RawSockaddrUnix)} sa ^uint32 n]
+  (when (!= (.-Family sa) syscall/AF_UNIX)
+    (return nil))
+  (let [namelen 0]
+    (when (!= n unixPathOffset)
+      (while (and (< namelen (len (.-Path sa))) (!= (aget (.-Path sa) namelen) 0))
+        (set! namelen (+ namelen 1))))
+    (let [b (NewByteArray (conv int32 namelen))]
+      (copy (.-A b) (subslice (.-Path sa) 0 namelen))
+      b)))
+
+(go/func HostChannels_UnixSocket0_I1__I_native
+  "HostChannels_UnixSocket0_I1__I_native is UnixDomainSockets.socket0: socket(PF_UNIX, SOCK_STREAM, 0) (close-on-exec,
+as Net.socket0's), blocking: the descriptor or THROWN.\n"
+  ^int32 [^{:tag (* IntArray)} errs]
+  (let [(values fd err) (syscall/Socket syscall/AF_UNIX (bit-or syscall/SOCK_STREAM syscall/SOCK_CLOEXEC) 0)]
+    (when (!= err nil)
+      (return (chThrown errs err)))
+    (when [e (chanAdd fd true)] (!= e nil)
+      (syscall/Close fd)
+      (return (chThrown errs e)))
+    (conv int32 fd)))
+
+(go/func HostChannels_UnixBind0_I_B1_I1__I_native
+  "HostChannels_UnixBind0_I_B1_I1__I_native is UnixDomainSockets.bind0: bind(2) of fd to path's sockaddr_un: 0 or
+THROWN.\n"
+  ^int32 [^int32 fd ^{:tag (* ByteArray)} path ^{:tag (* IntArray)} errs]
+  (let [(values sa n err) (unixSockaddr path)]
+    (when (!= err nil)
+      (return (chThrown errs err)))
+    (let [(values _ _ e) (syscall/Syscall syscall/SYS_BIND (conv uintptr fd) (conv uintptr (conv unsafe/Pointer (addr sa)))
+                                          (conv uintptr n))]
+      (when (!= e 0)
+        (return (chThrown errs e)))
+      0)))
+
+(go/func HostChannels_UnixConnect0_I_B1_I1__I_native
+  "HostChannels_UnixConnect0_I_B1_I1__I_native is UnixDomainSockets.connect0: 1 connected, UNAVAILABLE on EINPROGRESS,
+INTERRUPTED on EINTR, else THROWN. Linux's AF_UNIX stream connect never answers EINPROGRESS: a non-blocking socket
+whose listener's backlog is full gets EAGAIN (thrown, as the C's handleSocketError), a blocking one waits in the
+kernel; here (every descriptor non-blocking in the kernel) a socket configured blocking tries again after a pause
+(1 ms doubling to 32 ms) until it connects, fails otherwise or is pre-closed (EBADF).\n"
+  ^int32 [^int32 fd ^{:tag (* ByteArray)} path ^{:tag (* IntArray)} errs]
+  (let [(values sa n err) (unixSockaddr path)]
+    (when (!= err nil)
+      (return (chThrown errs err)))
+    (let [c (chanGet fd)
+          pause time/Millisecond]
+      (while true
+        (let [(values _ _ e) (syscall/Syscall syscall/SYS_CONNECT (conv uintptr fd)
+                                              (conv uintptr (conv unsafe/Pointer (addr sa))) (conv uintptr n))]
+          (when (== e 0)
+            (return 1))
+          (when (== e syscall/EINPROGRESS)
+            (return iosUnavailable))
+          (when (== e syscall/EINTR)
+            (return iosInterrupted))
+          (when (or (!= e syscall/EAGAIN) (== c nil))
+            (return (chThrown errs e)))
+          (let [(values blocking pre) (chanState c)]
+            (when pre
+              (return (chThrown errs syscall/EBADF)))
+            (when (not blocking)
+              (return (chThrown errs e))))
+          (time/Sleep pause)
+          (when (< pause (* 32 time/Millisecond))
+            (set! pause (* pause 2))))))))
+
+(go/func HostChannels_UnixAccept0_I_I1_B2_I1__I_native
+  "HostChannels_UnixAccept0_I_I1_B2_I1__I_native is UnixDomainSockets.accept0: 1 with the new descriptor (blocking)
+in newfd[0] and the peer's name in path[0] (sockaddrToUnixAddressBytes); UNAVAILABLE (EAGAIN, a non-blocking socket
+with none pending), INTERRUPTED (EINTR) or THROWN (the C's \"Accept failed\"); a blocking socket waits for a
+connection in Go's poller.\n"
+  ^int32 [^int32 fd ^{:tag (* IntArray)} newfd ^{:tag (* RefArray)} path ^{:tag (* IntArray)} errs]
+  (let [c (chanGet fd)]
+    (when (== c nil)
+      (return (chBadFD errs)))
+    (let [^int nfd -1
+          sa (lit syscall/RawSockaddrUnix)
+          ^uint32 salen 0
+          ^error aerr nil
+          ^int32 status 0
+          (values blocking _) (chanState c)
+          werr (waitFD c false (lit time/Time)
+                       (fn ^bool [^int d]
+                         (set! salen (conv uint32 syscall/SizeofSockaddrUnix))
+                         (let [(values r _ e) (syscall/Syscall6 syscall/SYS_ACCEPT4 (conv uintptr d)
+                                                                (conv uintptr (conv unsafe/Pointer (addr sa)))
+                                                                (conv uintptr (conv unsafe/Pointer (addr salen)))
+                                                                (conv uintptr (bit-or syscall/SOCK_NONBLOCK syscall/SOCK_CLOEXEC))
+                                                                0 0)]
+                           (when (== e 0)
+                             (set! nfd (conv int r))
+                             (return true))
+                           (when (== e syscall/EAGAIN)
+                             (when blocking
+                               (return false))
+                             (set! status iosUnavailable)
+                             (return true))
+                           (when (== e syscall/EINTR)
+                             (set! status iosInterrupted)
+                             (return true))
+                           (set! aerr e)
+                           true)))]
+      (when (and (preclosed c) (< nfd 0))
+        (return (chThrown errs syscall/EBADF)))
+      (when (!= werr nil)
+        (return (chThrown errs werr)))
+      (when (!= status 0)
+        (return status))
+      (when (!= aerr nil)
+        (return (chThrown errs aerr)))
+      (when [e (chanAdd nfd true)] (!= e nil)
+        (syscall/Close nfd)
+        (return (chThrown errs e)))
+      (aset (.-A newfd) 0 (conv int32 nfd))
+      (let [b (unixAddressBytes (addr sa) salen)]
+        (when (== b nil)
+          (return (chThrown errs syscall/EAFNOSUPPORT)))
+        (aset (.-A path) 0 b))
+      1)))
+
+(go/func HostChannels_UnixLocalAddress0_I_B2_I1__I_native
+  "HostChannels_UnixLocalAddress0_I_B2_I1__I_native is UnixDomainSockets.localAddress0: getsockname(2)'s name in
+path[0] (sockaddrToUnixAddressBytes; left null for another family): 0 or THROWN.\n"
+  ^int32 [^int32 fd ^{:tag (* RefArray)} path ^{:tag (* IntArray)} errs]
+  (let [sa (lit syscall/RawSockaddrUnix)
+        salen (conv uint32 syscall/SizeofSockaddrUnix)
+        (values _ _ e) (syscall/Syscall syscall/SYS_GETSOCKNAME (conv uintptr fd)
+                                        (conv uintptr (conv unsafe/Pointer (addr sa)))
+                                        (conv uintptr (conv unsafe/Pointer (addr salen))))]
+    (when (!= e 0)
+      (return (chThrown errs e)))
+    (let [b (unixAddressBytes (addr sa) salen)]
+      (when (!= b nil)
+        (aset (.-A path) 0 b)))
+    0))

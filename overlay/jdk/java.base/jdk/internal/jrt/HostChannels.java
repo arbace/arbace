@@ -50,6 +50,9 @@ public final class HostChannels {
     /** jrt's own: the host has no descriptors (a host without channels, the box's). */
     public static final int ENOHOST = -1;
 
+    /** nio_util.h's MAX_UNIX_DOMAIN_PATH_LEN: sizeof(sockaddr_un.sun_path) - 2, Linux's 108 - 2. */
+    public static final int MAX_UNIX_DOMAIN_PATH_LEN = 106;
+
     private HostChannels() {
     }
 
@@ -224,4 +227,27 @@ public final class HostChannels {
 
     /** EventFD.set0: the counter's one added (an 8-byte write), as convertReturnVal. */
     public static native int eventfdSet0(int efd, int[] err);
+
+    // -- UnixDomainSockets.c's natives (JCS164; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS164") --
+
+    /** UnixDomainSockets.socket0: socket(PF_UNIX, SOCK_STREAM, 0), blocking: the descriptor or THROWN. */
+    public static native int unixSocket0(int[] err);
+
+    /**
+     * UnixDomainSockets.bind0: binds fd to path (the sockaddr_un of path's bytes, its length
+     * offsetof(sun_path) + the bytes + 1; at most MAX_UNIX_DOMAIN_PATH_LEN bytes): 0 or THROWN.
+     */
+    public static native int unixBind0(int fd, byte[] path, int[] err);
+
+    /** UnixDomainSockets.connect0: 1, UNAVAILABLE (EINPROGRESS), INTERRUPTED or THROWN; a blocking socket waits. */
+    public static native int unixConnect0(int fd, byte[] path, int[] err);
+
+    /**
+     * UnixDomainSockets.accept0: 1 with the new descriptor (blocking) in newfd[0] and the peer's
+     * name in path[0] (sockaddrToUnixAddressBytes: empty when unnamed); UNAVAILABLE, INTERRUPTED or THROWN.
+     */
+    public static native int unixAccept0(int fd, int[] newfd, byte[][] path, int[] err);
+
+    /** UnixDomainSockets.localAddress0: 0 with getsockname's name in path[0] (null: not AF_UNIX), or THROWN. */
+    public static native int unixLocalAddress0(int fd, byte[][] path, int[] err);
 }
