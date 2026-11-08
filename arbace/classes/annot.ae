@@ -1,0 +1,110 @@
+(ns arbace.classes.annot
+  "The run-time annotations' data (F14's first slice; doc/classes/JAVA-DEFERRED-TRIAGE.md, \"As
+  built: F14 (first slice, write-ahead)\"; J2G-SPEC §12, amendment R16's note): a class's
+  RUNTIME-visible declaration annotations, its members' and its parameters', and an annotation
+  type's element defaults, as the text jrt decodes (go/arbace/jrt/annotation.ae, its format in the
+  header there). Its two writers: j2g for the classes it translates (ClassInfo.Annots, j2g's
+  out/class-registration), the interpreter for the classes it makes (Compiler$CF$Host.annotations,
+  arbace.classes.interp). Each annotation is resolved alone (arbace.classes.analyze/*lenient*):
+  one whose type or values the world cannot resolve is left out, as AnnotationParser skips an
+  annotation of a type it cannot load."
+  (:require [arbace.string :as str]
+            [arbace.classes.types :as t]
+            [arbace.classes.analyze :as a]))
+
+(defn- bin "A descriptor with binary names." [d] (str/replace d "/" "."))
+
+(defn enc-string
+  "\"TEXT\": \\\" and \\\\ escaped, every code unit outside printable ASCII as \\uXXXX."
+  [^String s]
+  (let [sb (StringBuilder. "\"")]
+    (dotimes [i (.length s)]
+      (let [c (.charAt s i)
+            ci (int c)]
+        (cond
+          (= c \") (.append sb "\\\"")
+          (= c \\) (.append sb "\\\\")
+          (and (>= ci 32) (<= ci 126)) (.append sb c)
+          :else (.append sb (str "\\u" (subs (Integer/toHexString (+ 0x10000 ci)) 1))))))
+    (.append sb "\"")
+    (.toString sb)))
+
+(declare enc-annotation)
+
+(defn enc-value
+  "A VALUE of the data: v as arbace.classes.analyze's ann-value gives it."
+  [v]
+  (cond
+    (contains? v :array)
+    (let [xs (:array v)]
+      (apply str "[" (bin (:desc v)) " " (count xs) (map #(str " " (enc-value %)) xs)))
+    (contains? v :annotation) (enc-annotation (:annotation v))
+    (contains? v :class) (str "c" (bin (:class v)))
+    (contains? v :enum) (str "e" (bin (:enum v)) (:name v))
+    (contains? v :const)
+    (let [c (:const v)
+          x (:val c)]
+      (case (:type c)
+        "Z" (if x "Z1" "Z0")
+        "B" (str "B" (long x))
+        "S" (str "S" (long x))
+        "C" (str "C" (int (if (char? x) (int x) x)))
+        "I" (str "I" (long x))
+        "J" (str "J" (long x))
+        "F" (str "F" (Float/floatToRawIntBits (float x)))
+        "D" (str "D" (Double/doubleToRawLongBits (double x)))
+        (enc-string (str x))))
+    :else (throw (ex-info (str "annot: no value " (pr-str v)) {:value v}))))
+
+(defn enc-annotation
+  "An ANN: @DESC N NAME VALUE ..."
+  [an]
+  (let [vs (:values an)]
+    (apply str "@" (bin (:type an)) " " (count vs)
+           (for [[k v] vs] (str " " k " " (enc-value v))))))
+
+(defn- visible
+  "The RUNTIME-visible annotations of an analyzed list (a delay), each encoded, in the source's
+  order; an annotation that does not encode is left out. The source's order is the list's
+  reversed: repr/java writes one ^{A ...} a declaration annotation, and the reader assocs each
+  outer ^ map onto the inner one's (LispReader's MetaReader), so the last written comes first."
+  [anns]
+  (keep #(when (:visible %) (try (enc-annotation %) (catch Exception _ nil)))
+        (reverse (binding [a/*lenient* true]
+                   (try (force anns) (catch Exception _ nil))))))
+
+(defn class-data
+  "The data of class n (internal name, analyzed: arbace.classes.analyze/decl): its own
+  annotations and its element defaults (an annotation type's), and with :members its methods',
+  constructors', fields' and parameters'. nil when there is none."
+  [n & {:keys [members]}]
+  (when-let [d (a/decl n)]
+    (binding [a/*lenient* true]
+      (let [lines (concat
+                    (for [x (visible (:annotations d))] (str "T " x))
+                    (when (= :annotation (:kind d))
+                      (for [mm (:methods d)
+                            :when (and (= :method (:kind mm)) (:has-default mm))
+                            :let [v (try (enc-value (a/element-default mm)) (catch Exception _ nil))]
+                            :when v]
+                        (str "D " (:name mm) " " v)))
+                    (when members
+                      (concat
+                        (for [mm (:methods d)
+                              :when (#{:method :ctor} (:kind mm))
+                              :let [ctor (= :ctor (:kind mm))
+                                    head (if ctor
+                                           (str "C " (bin (:desc mm)))
+                                           (str "M " (:name mm) " " (bin (:desc mm))))]
+                              x (visible (:annotations mm))]
+                          (str head " " x))
+                        (for [mm (:methods d)
+                              :when (#{:method :ctor} (:kind mm))
+                              [i pa] (map-indexed vector (:param-annotations mm))
+                              x (visible pa)]
+                          (str "P " (if (= :ctor (:kind mm)) "<init>" (:name mm)) " " (bin (:desc mm)) " " i " " x))
+                        (for [f (:fields d)
+                              x (visible (:annotations f))]
+                          (str "F " (:name f) " " x)))))]
+        (when (seq lines)
+          (str/join "\n" lines))))))
