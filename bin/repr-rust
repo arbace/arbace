@@ -167,6 +167,7 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash" # TMPDIR: .tmp/tmp when unset
 . "$root/bin/lib/tools.bash"
+. "$root/bin/lib/crops/take.bash" # crop_take: a worktree's fetched inputs from the main checkout
 work=$root/.tmp/repr-rust
 helper=$work/rsdump
 apks=$work/apks
@@ -231,6 +232,32 @@ apks_fetch() {
         echo "$sha" > "$apks/$name.extracted"
       fi
     done < "$root/tools/rsdump/apks.sha256"
+  ) 8> "$work/fetch.lock"
+}
+
+# rust_src_take: the rust-src apk extracted for the corpora of its :apk (the native reader's, which needs no rustc, so no build
+# fetched it): when $apks has no current extraction, the pinned apk from REPR_RUST_APKS or, in a linked worktree or the gate's
+# clean clone, from the main checkout's .tmp/repr-rust/apks/ (crop_take: a worktree never downloads), checked by its SHA-256 and
+# extracted; in the main checkout without one, corpus_root's message names bin/repr-rust corpus fetch
+rust_src_take() {
+  local line sha f
+  line=$(grep ' rust-src-' "$root/tools/rsdump/apks.sha256"); sha=${line%% *}; f=${line##* }
+  [ "$(catf "$apks/rust-src.extracted")" != "$sha" ] || return 0
+  mkdir -p "$apks"
+  (
+    flock 8
+    if [ ! -f "$apks/$f" ] && [ -n "${REPR_RUST_APKS:-}" ] && [ -f "$REPR_RUST_APKS/$f" ]; then
+      echo "== repr-rust: $f from the cache $REPR_RUST_APKS" >&2
+      cp "$REPR_RUST_APKS/$f" "$apks/$f.part.$$" && mv "$apks/$f.part.$$" "$apks/$f"
+    fi
+    if [ ! -f "$apks/$f" ]; then crop_take "$apks/$f" "bin/repr-rust corpus fetch" || exit 0; fi
+    if [ "$(sha256sum < "$apks/$f" | cut -c1-64)" != "$sha" ]; then
+      echo "repr-rust: $apks/$f: SHA-256 differs from tools/rsdump/apks.sha256's $sha" >&2
+      exit 1
+    fi
+    rm -rf "${apks:?}/rust-src"; mkdir -p "$apks/rust-src"
+    tar --warning=no-unknown-keyword -xzf "$apks/$f" -C "$apks/rust-src"
+    echo "$sha" > "$apks/rust-src.extracted"
   ) 8> "$work/fetch.lock"
 }
 
@@ -311,6 +338,7 @@ corpus_root() {
     tarball_fetch "$pins" "$tsha" "$turl" "$where" "$textract"
     srcroot=$work/src/$where
   else
+    mkdir -p "$work"; rust_src_take
     srcroot=$apks/rust-src/$where
   fi
   [ -d "$srcroot" ] || { echo "repr-rust: no $srcroot (bin/repr-rust corpus fetch)" >&2; return 1; }
