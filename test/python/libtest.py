@@ -40,41 +40,47 @@ except BaseException as e:
     sys.exit(0)
 
 
+def _tid(test):
+    # the test's id by its class's method: a test that rebinds its id attribute (test__interpreters: self.id = an
+    # interpreter's id) still has its unittest id, so one failure does not hide the module's other results
+    return type(test).id(test)
+
+
 class Result(unittest.TestResult):
     def startTest(self, test):
         super().startTest(test)
-        line("START", test.id())  # the judge names the test a driver that stops stopped in
+        line("START", _tid(test))  # the judge names the test a driver that stops stopped in
 
     def addSuccess(self, test):
-        line("CASE", test.id(), "ok", "")
+        line("CASE", _tid(test), "ok", "")
 
     def addFailure(self, test, err):
-        line("CASE", test.id(), "failure", err[1])
+        line("CASE", _tid(test), "failure", err[1])
 
     def addError(self, test, err):
         msg = str(err[1])
-        if test.id().startswith("unittest.loader._FailedTest."):
+        if _tid(test).startswith("unittest.loader._FailedTest."):
             # a submodule the loader could not import: its traceback's last line (the judge classes its methods)
             msg = [l for l in msg.splitlines() if l.strip()][-1].strip() if msg.strip() else msg
-        line("CASE", test.id(), "error", msg)
+        line("CASE", _tid(test), "error", msg)
 
     def addSkip(self, test, reason):
-        line("CASE", test.id(), "skipped", reason)
+        line("CASE", _tid(test), "skipped", reason)
 
     def addExpectedFailure(self, test, err):
-        line("CASE", test.id(), "ok", "expected failure")
+        line("CASE", _tid(test), "ok", "expected failure")
 
     def addUnexpectedSuccess(self, test):
-        line("CASE", test.id(), "failure", "unexpected success")
+        line("CASE", _tid(test), "failure", "unexpected success")
 
     def addSubTest(self, test, subtest, err):
         # a failing subtest fails its test, which then reports neither success nor failure itself (regrtest's
         # JUnit result names the test failed); the first failing subtest's reason, one line per test
         super().addSubTest(test, subtest, err)
-        if err is not None and test.id() not in self.subfailed:
-            self.subfailed.add(test.id())
+        if err is not None and _tid(test) not in self.subfailed:
+            self.subfailed.add(_tid(test))
             kind = "failure" if issubclass(err[0], test.failureException) else "error"
-            line("CASE", test.id(), kind, err[1])
+            line("CASE", _tid(test), kind, err[1])
 
 
 Result.subfailed = set()
