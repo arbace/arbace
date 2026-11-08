@@ -1511,3 +1511,32 @@ message. The runtime's and javac's builds have no header or members failure in t
 not change; the tests' refusal reasons do. Alternatives considered: method-level stubs for the unresolved class (JCS264,
 recommended against: the interp level fails these tests at load too and few would pass) and the analyzer resolving an
 unknown import to an opaque class (the same, deeper). Proposals JCS260-JCS265 in the survey.
+
+## 2026-11-08: F25, `:reflection` and `:nio` sorted; generic signatures and the nesting attributes (branch `java-refl`, from java-night 639d42ab9)
+
+The brief: raise Java's completeness through the deferred classes `:reflection` and `:nio`. Measured first, interpreted on
+the newest gate executable (`.tmp/gate-exe/ad3066cf41ea6faf1566`, next after night 8; java-night's slices not in it), the
+forms the main read cache's newest passing reads (java-net's method: `linkforms.py`, two jobs, a 2 GiB watchdog; 190 tests in
+334 s): `:nio` 69 of 109 pass already (F7, F8), 28 are F9's tonight, the rest singles; `:reflection` 5 pass, 17 are F14's
+tonight, 7 Proxy's (JCS170), and the biggest groups nobody's: type annotations 13, InnerClasses/EnclosingMethod 9, generic
+signatures 8. Built the last two (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F25 (write-ahead)"): the class file
+attributes jdk26u's reflection reads through the VM (Signature, InnerClasses, EnclosingMethod, Exceptions) recorded as more
+lines of F14's annotation data by the one encoder (`arbace/classes/annot.ae`'s `attribute-lines`, from the analysis'
+`:signature`, `:sig`, `:inner-flags`, `:nesting`, `:enclosing-method`, `:throws`), decoded by jrt (`go/arbace/jrt/classdata.ae`,
+new), Class's nesting members ported from jdk26u's `Class.java` at `baf63fb` (isLocalOrAnonymousClass, getSimpleBinaryName,
+getSimpleName0, getCanonicalName0, getEnclosingClass, getEnclosingMethod/Constructor, getClasses; getDeclaredClasses as
+JVM_GetDeclaredClasses; getModifiers as JVM_GetClassModifiers), getExceptionTypes and the throws clause of toString, and the
+generic members through jdk26u's `sun/reflect/generics` (50 files) and java.lang.reflect's eight generic types translated
+unchanged (`test/jrt/jrt_sources.ae`'s `generics-sources`) behind jrt's own `jdk.internal.jrt.ReflectSupport` (overlay; the
+bodies of jdk26u's getGenericInfo, getFactory, generic getters and toGenericString, transcribed, GPL-2.0 with the Classpath
+Exception, LICENSE.md), its stand-in with TypeVariable's and GenericDeclaration's in `standin_reflectsupport.ae`; the variant
+`TypeVariableImpl.ae` (no type annotations recorded yet, no ReflectionFactory copies). Alternatives considered: a Go port of
+the Signature parser and the reflective objects (rejected: jdk26u's Java runs unchanged on jrt, as F9's and F10a's channels
+do; a port would have to keep equals, hashCode, toString and the lazy reification rule for rule by hand); calling the Java
+reflectively from Go by name (serialization's `serialCall`; rejected: j2g would not root the classes, the stand-in's names
+make them roots and the calls direct); recording the members' Signatures of the JDK too (left: JCS270). Checks by day: the
+joint javac check 2,479 files, 0 errors; `bin/repr-java read-jdk --check` of the 59, 0 failed; the variant vetted (5
+replaced, 1 cut); the closure scan; the encoder on the frozen JVM over six tests' forms; `bin/jrt manifest`, `testdata`;
+`bin/jrt test` (arbace/jrt ok, classdata_test's three new tests); `go vet ./jrt` amd64 and arm64. Expected tonight: about 13
+of F25's 17 interpreted, 11 compiled. Proposed: JCS270-JCS274 (the JDK's members' Signatures, type annotations as recorded
+bytes with a ConstantPool, getDeclaredClasses' order, AccessFlag and Parameter, `:nio`'s remainder).

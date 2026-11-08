@@ -4954,3 +4954,210 @@ checkout.
   their code, and moves `jdk/provenance.edn`'s digests.
 - **(b)** Keep them as the derivations' first record.
 - *Recommended: (a)*, folded into the Java night's conversion.
+
+## As built: F25 (write-ahead): `:reflection` and `:nio` sorted, generic signatures and nesting attributes
+
+Branch `java-refl` from `java-night` (`639d42ab9`), 2026-11-08, by day under the light rules (no j2g of the world, no
+build, no conversion; each process under 2 GiB, two at a time). The brief: raise Java's completeness through the deferred
+classes `:reflection` and `:nio`, measured first on today's world, sorted by the missing piece, the biggest groups ported
+from jdk26u onto jrt. F25 is F14's second slice: the rows "generic signatures" and "member classes" of F14's table and the
+InnerClasses/EnclosingMethod part of its "metadata" row.
+
+### The two classes measured on today's world
+
+The committed records predate night 7's conversion (F7, F8, F10a, F11, F12, F13). The classes' tests (the classification of
+`java-net`'s `cls-interp.tsv`/`cls-compiled.tsv`: 82 tests in `:reflection` and 109 in `:nio` at either level, 76 / 93 at
+interp) were run **interpreted on the newest gate executable** (`.tmp/gate-exe/ad3066cf41ea6faf1566`, `next` after night 8:
+F7, F8, F10a, F11, F12, F13 in; java-night's F9, F10b, F14, JCS164, JCS167 not), their forms the newest passing read of each
+in the main checkout's read cache (`java-net`'s `linkforms.py`; t03491 has none), two at a time under a 2 GiB watchdog:
+`bin/java-check --levels interp --list .tmp/refl/run.ids --save .tmp/refl/s1` with `JAVA_CHECK_EXE`,
+`JAVA_CHECK_FORMS_ONLY=1`; 334 s for 190 tests, no test above 2 GiB. By what each stops at:
+
+| tests | the missing piece | whose |
+|---:|---|---|
+| **69 of 109** `:nio` | **pass already** (F7's channels and buffers, F8's charsets and coders, JC9b's direct buffers) | the night's whole-corpus record |
+| 28 | `java.nio.file` (FileSystems, Files.walk/list/probeContentType, the attribute views, the watch service, user principals) | **F9, tonight** |
+| 3 | jdk.charsets' extended charsets (ISO-2022-JP, x-eucJP-Open, MS950) | JCS146 (b): later; JCS274 |
+| 8 | one each: MemorySegment.allocate(int) (FFM), a ClassLoader subclass's defineClass (2), `conf/security/java.security` (2, F23's), a stack trace, a timeout (t08163), a lost assertion (t05226) | the tail |
+| **5 of 82** `:reflection` | pass already | |
+| 17 | declaration annotations, Field's primitive accessors | **F14, tonight** |
+| 7 | Proxy (newProxyInstance, getProxyClass, isProxyClass; annotations as proxies) | JCS170 (`java-serial4`), JCS210 |
+| **13** | **type annotations** (AnnotatedType and its kinds, getAnnotatedSuperclass/Interfaces/ReceiverType, a type variable's annotations, Parameter.getAnnotatedType) | JCS271 below, the next slice |
+| **9** | **InnerClasses and EnclosingMethod** (getDeclaredClasses, getClasses, isLocalClass, isAnonymousClass, getSimpleName and getCanonicalName of local and anonymous classes, getEnclosingMethod/Constructor, the inner classes' modifiers) | **F25** |
+| **8** | **generic signatures** (getTypeParameters, getGenericReturnType/ParameterTypes/ExceptionTypes, getGenericType, toGenericString, TypeVariable, ParameterizedType, WildcardType) | **F25** |
+| 4 | AccessFlag (Class/Member.accessFlags, ClassFileFormatVersion) | JCS273 |
+| 4 | Parameter (MethodParameters, -parameters; BadClassFiles reads class file bytes) | JCS273 |
+| 15 | the tail: getProtectionDomain, Package's annotations (t04730), AnnotatedElement's defaults over generics (t04836), Retention's annotation status (t04508), javac's synthetic lambda methods (t06144, t06157, t06306), an inner class's outer field (t06345), a nested class's constructor with its outer parameter (t07678), nestmates' access errors (t07688), the array dimension limit (t04837), getMethods of a star inheritance (t04531), an http: connection (t08137), Writer.append's IOException (t04464), arrayType's error (t04504) | F14's metadata row, JCS123 |
+
+So `:nio` is nearly done (69 + 28 of 109 with F9); its remainder has no group above three. `:reflection`'s biggest groups not
+anyone's were the type annotations (13), the nesting attributes (9) and the generic signatures (8); the last two are F25 (the
+type annotations build on the generic types: JCS271).
+
+### The design: the class file attributes reflection reads, recorded beside the annotations
+
+F14 records each class's RUNTIME annotations as text data (`ClassInfo.Annots`, one encoder for j2g and the interpreter's
+host). F25 adds the attributes jdk26u's `Class`, `Executable` and `Field` read through the VM, as more records of the same
+data (`arbace.classes.annot/attribute-lines`; the format in `go/arbace/jrt/classdata.ae`'s header):
+
+| record | attribute | written for |
+|---|---|---|
+| `S SIG` | the class's Signature | every class that has one (the JDK's too: `Class.getTypeParameters` of Map, Enum, Class; HashMap.comparableClassFor's `Comparable<C>`) |
+| `K FLAGS KIND OUTER NAME` | its InnerClasses entry: the inner flags, member / local / anonymous, the declaring or enclosing class, the simple name | every nested class |
+| `Q NAME DESC` | its EnclosingMethod's method | a local or anonymous class in a method or constructor |
+| `G M\|C\|F ... SIG` | a member's Signature | a class's own members as the annotations' (a program's, the interpreter's; the JDK's: JCS270) |
+| `E M\|C ... T...` | a method's or constructor's Exceptions | the same |
+
+The analysis already computes them as javac does (`:signature`, `:sig`, `:inner-flags`, `:nesting`, `:enclosing-method`,
+`:throws`; the frozen JVM back end wrote them into class files): the encoder only prints them. jrt decodes them on first use
+(`classdata.ae`, `attrsOf`, dropped by `SetAnnotations` with the annotations); jrt's hand-written generic classes (Class, Enum,
+ThreadLocal, the references, AtomicReference, Future, ForkJoinTask, Constructor) have their Signature in a table
+(`handSignatures`: jdk26u's, as javap prints them, less the interfaces jrt's classes do not implement).
+
+**Ported rule for rule** (java/lang/Class.java at jdk26u `baf63fb`): `isLocalOrAnonymousClass`, `isAnonymousClass`,
+`isLocalClass`, `isMemberClass`, `getSimpleBinaryName`, `getSimpleName0`, `getCanonicalName0`, `getEnclosingClass`,
+`getEnclosingMethod`/`getEnclosingConstructor` (EnclosingMethodInfo's descriptor parsed into classes, the candidates
+searched by name, parameters and return type), `getClasses`; `getModifiers` of a nested class its InnerClasses flags
+(JVM_GetClassModifiers; the interpreter's classes had their class file flags: `private class` read as package-private);
+`getDeclaredClasses` (JVM_GetDeclaredClasses) the closed world's member classes of the class, by name (JCS272);
+`getExceptionTypes` the Exceptions attribute, so `Method.toString` and `Constructor.toString` print their throws clause as
+the JDK's do. The generic members (`getTypeParameters`, `getGenericSuperclass`, `getGenericInterfaces` of Class;
+`getTypeParameters`, `getGenericReturnType`, `getGenericParameterTypes`, `getGenericExceptionTypes`, `toGenericString` of
+Method and Constructor; `getGenericType`, `toGenericString` of Field) answer as jdk26u's do without a Signature (the erased
+types) and with one through **jdk26u's sun.reflect.generics translated unchanged**: the Signature parser, its trees, the
+reifying visitor, CoreReflectionFactory, the scopes, the repositories and the reflective objects (50 files), with
+java.lang.reflect's `TypeVariable`, `ParameterizedType`, `WildcardType`, `GenericArrayType`, `GenericDeclaration`,
+`AnnotatedType`, `MalformedParameterizedTypeException`, `GenericSignatureFormatError` (`test/jrt/jrt_sources.ae`'s
+`generics-sources`, 58 files). jrt's Go reaches them through **`jdk.internal.jrt.ReflectSupport`** (overlay, new): static
+methods holding the bodies of jdk26u's `getGenericInfo`, `getFactory`, the generic getters and `toGenericString`
+(`sharedToGenericString`, `printModifiersIfNonzero`, `typeVarBounds`, `addSealingInfo`, `hasSealedAncestor`), their receiver a
+parameter; jrt keeps each class's ClassRepository (Class.genericInfo) and each member's by its class. In jrt's own build
+`standin_reflectsupport.ae` stands in for ReflectSupport, `TypeVariable` and `GenericDeclaration` (j2g's translations replace
+them; its `standin-roots` make ReflectSupport's methods the program's roots). Class implements GenericDeclaration (and Type,
+as the JDK's: `Class_class`'s interfaces, the manifest's), Executable implements GenericDeclaration.
+
+**The variant** `overlay/jdk/variants/TypeVariableImpl.ae` (5 replaced, 1 cut): a type variable's annotations are type
+annotations (TYPE_PARAMETER), parsed by jdk26u from the class file's RuntimeVisibleTypeAnnotations through the constant pool,
+which the closed world does not record yet: `getAnnotations` asks `ReflectSupport.typeVariableAnnotations` (none until
+JCS271), `getAnnotation` and `getAnnotationsByType` look in them (ReflectSupport's helpers, AnnotationType's retention map
+cut), `getAnnotatedBounds` refuses (UnsupportedOperationException naming F25), and `getGenericDeclaration` returns the
+declaration where jdk26u copies a Method or Constructor through ReflectionFactory (jrt's hold no mutable state but the
+accessible flag).
+
+### Light checks done
+
+(main's stage 0 as `ARBACE_HOST_EXE`, the frozen jar of the main checkout, `GOMEMLIMIT=1500MiB`, scratch `.tmp/refl/`)
+- **the joint javac check** (`.tmp/night7/all9-run.sh`): **2,479 files, 0 errors**, 5,251 classes (15.5 s, 0.98 GB): the
+  branch's 2,420 + the 58 + ReflectSupport;
+- the read: `bin/repr-java read-jdk --check` of the 59 (`REPR_JAVA_PATCH_ALL=1`, javac's tool `javac-5ad357331dbcd7cfb0fd`
+  with `REPR_JAVA_STALE_OK=1`): 59 converted, 0 failed, 0 javac errors (1.5 s); the variant applied to the converted
+  TypeVariableImpl and parsed (F4's `vet.ae`): 5 replaced, 1 cut, 0 added;
+- the closure scan (F3's `closure.py` against the branch's print-sources, the manifest and the gate executable's Go types):
+  the 58 reach nothing outside the world but TypeVariableImpl's annotation parsing (AnnotationSupport, AnnotationType,
+  TypeAnnotationParser, ReflectionFactory: the variant's) and jrt's Class, Object, ClassFormatError;
+- **the encoder** on the frozen JVM (`.tmp/refl/scripts/encode.clj`, F14's, over the read forms of t04524, t04511, t04849,
+  t04850, t04532, t04525): every record as javac writes the attribute: `K 2 m t04532.ForInnerClass Inner`, `K 4 m ...
+  Protected`, `K 8 m t04850.Test Inner1`, `Q <init> (I)V` for EnclosingConstructorTests' second local class, no `Q` for the
+  anonymous class of a static initializer, `S <T:Ljava/lang/Object;>Ljava/lang/Object;`, `G M max (Ljava.util.Collection;)
+  Ljava.lang.Object; <S:Ljava/lang/Object;:Ljava/lang/Comparable<-TS;>;>(Ljava/util/Collection<+TS;>;)TS;`, `G M f ...
+  (Lt04849/SignatureTest<Ljava/lang/String;>.Inner1.Inner11;)V`, `E M main ([Ljava.lang.String;)V java.lang.Exception`;
+- `bin/jrt manifest` (Class's getClasses, getDeclaredClasses, getTypeParameters, toGenericString; Method's, Constructor's
+  and Field's generic members; GenericDeclaration among Class's and Executable's interfaces), `bin/jrt testdata`;
+  **`bin/jrt test --arch amd64`: `arbace/jrt` ok**, with `classdata_test.ae`'s three tests (a member, a private inner, a
+  local and an anonymous class as the encoder writes them: their modifiers, names, enclosing class and method,
+  getDeclaredClasses, getClasses, Method.toString with its throws clause, the decoded Signature with the stand-in's erased
+  answers) and TestReflectAgainstJVM; the crops' `expat`, `pyexpat`, `oi` fail by themselves, as on `next`; **`go vet ./jrt`
+  clean** for linux/amd64 and arm64.
+
+Not checked by day: j2g's analysis of the 58 and of ReflectSupport, the stand-ins' replacement, and the generic answers
+themselves (no executable has them).
+
+### Expected yield
+
+Interpreted, of `:reflection`'s 76: F25's 17 (generics t04847, t04848, t04849, t04850, t04852, t04853, t04855, t06420;
+nesting t04511, t04514, t04518, t04519, t04520, t04524, t04525, t04532, t04533), **about 13 expected** (t04848, t04855,
+t04524 and t04525 need F14's annotations too, tonight; t04849's and t04850's stdout depends on getDeclaredMethods' order
+against the JDK's; t04847 prints the type variables' hash codes, the declarations' identity hashes in them), with F14's
+about 14 and the 5 passing: about 32 of 76. Of `:nio`'s 93: 69 pass and F9's 28, about 22 expected, tonight. Compiled: the
+same tests where the records hold them now, F25's about 11 (a compiled program's classes are `nm/own-class?`, so their
+members' Signatures are recorded as the interpreter's are). Java eval and AOT each about +0.4 point for F25 beyond the
+night's slices.
+
+### The night's commands
+
+In the night's worktree with this branch merged (after java-night's slices; its own revert is one merge), heavy ones under
+`bin/heavy-lock`; one conversion and one build take every area of the night:
+
+```sh
+# 0. the joint javac check (expect 0 errors; the sources line + 59 beyond java-night's)
+/root/arbace/.tmp/night7/all9-run.sh $PWD
+# 1. jdk/ converted afresh: + 50 sun/reflect/generics, 8 java/lang/reflect, 1 of jrt's own (ReflectSupport); 0 failed,
+#    0 javac errors, no javac: 0 fallbacks; then the module table (bin/jrt modules: sun.reflect.generics.* java.base's)
+REPR_JAVA_EXE=$(ls -td /root/arbace/.tmp/gate-exe/javac-*/ | head -1)arbace-javac REPR_JAVA_STALE_OK=1 \
+  ARBACE_HEAVY_CMD=$PWD/bin/heavy-lock bin/jrt-convert update && bin/jrt modules
+# 2. j2g's edge afresh, javac's world's edge
+bin/heavy-lock bin/j2g-edge update && bin/heavy-lock bin/javac-vendor edge
+# 3. the executable; j2g's report: variant TypeVariableImpl 5/1/0, no "a variant for a class not in the inputs", no
+#    :analysis-failures of sun/reflect/generics or ReflectSupport; the stand-ins ReflectSupport, TypeVariable and
+#    GenericDeclaration replaced (no duplicate Go names)
+bin/heavy-lock bin/arbace-go --build && bin/arbace-go --smoke && bin/jrt test
+grep -A8 ':analysis-failures' target/arbace-go/amd64/j2g/report.edn
+# 4. a smoke: expect "[K V] java.util.AbstractList<E> java.lang.Comparable<java.lang.Integer> public final class java.lang.Class<T> true"
+target/arbace-go/amd64/arbace -e '(println (mapv str (.getTypeParameters java.util.Map)) (str (.getGenericSuperclass java.util.ArrayList))
+  (str (first (.getGenericInterfaces Integer))) (.toGenericString Class) (.isMemberClass java.util.Map$Entry))'
+# 5. Java's levels interp and compiled on the two classes' areas (then the whole corpus with the night's others): saved,
+#    not recorded; expect about 13 / 11 of F25's 17, the passing ones to hold
+JAVA_CHECK_EXE=$PWD/target/arbace-go/amd64/arbace J2G_GO_EXE=$PWD/target/arbace-go/amd64/arbace \
+  JAVA_CHECK_HEAVY=$PWD/bin/heavy-lock bin/java-check --levels interp,compiled --jobs 8 \
+  --only 'jdk/java/lang/(Class|reflect|annotation)|langtools/tools/javac/types/BadSigTest|jdk/java/nio' \
+  --save .tmp/f25-night/check
+```
+
+**Risks and fallbacks**: (1) the stand-ins' replacement: should j2g not reach GenericDeclaration or TypeVariable, the
+stand-ins stay (they compile alone) and the generic answers keep working through the translated implementations; should a
+translated interface's method set differ from what jrt's Class, Method and Constructor have (GenericDeclaration over F14's
+AnnotatedElement), Go's compiler says so: the fix is in `classdata.ae` (a missing method), not a revert; (2) `S` records for
+every JDK class: more data in every executable (about one line a generic class), and HashMap's tree bins now order
+Comparable keys by compareTo as the JDK's do (comparableClassFor finds `Comparable<C>`); (3) a nested class's `getModifiers`
+is now its InnerClasses flags at the interpreted level too, as j2g's ClassInfo.Modifiers already were; (4)
+`Class.getSimpleName` of a top-level class whose name holds `$` (c2j's compiled fns, `core$map$fn__123`) is the whole name
+after the package, the JDK's answer, where jrt split at the last `$`; (5) the change of `arbace/classes/annot.ae` moves the
+gate's key (the interpreter embeds it).
+
+### Proposed (F25)
+
+#### JCS270 The JDK's members' Signatures
+
+The encoder writes a JDK class's own Signature but not its members' (as F14's JCS211 for their annotations), so
+`List.class.getMethod("get", int.class).getGenericReturnType()` is `Object` where the JDK says `E`. (a) as built; (b) every
+member's (a measure of the data first: thousands of lines); (c) the public members of the public API's classes. Cost: (b) or
+(c) a line in `annot.ae` and a night's measure. Recommended: (a) until a test asks; none of the 82 does.
+
+#### JCS271 Type annotations: recorded data or recorded bytes
+
+The 13 tests of the type annotations row need `RuntimeVisibleTypeAnnotations` (TypeAnnotationParser, AnnotatedTypeFactory).
+(a) as F14 did for declaration annotations: text records of the analysis' type annotations (TypeReference and TypePath as
+javac writes them) decoded by a variant of TypeAnnotationParser into TypeAnnotation objects, AnnotatedTypeFactory unchanged;
+3 days; (b) record the attribute's bytes and a ConstantPool over the recorded entries (jdk.internal.reflect.ConstantPool's
+natives in Go), jdk26u's TypeAnnotationParser and AnnotationParser unchanged: the real algorithm, and F14's text decoder
+could move onto it later; 3-4 days; (c) by design. Recommended: (b), the parser rule for rule over the class file's own
+format.
+
+#### JCS272 getDeclaredClasses' order
+
+HotSpot returns the InnerClasses entries in the attribute's order, which is javac's pool order; jrt sorts the member classes
+by name. (a) as built (the tests compare sets); (b) record the order (`I` records from the analysis' member classes).
+Recommended: (a).
+
+#### JCS273 AccessFlag and Parameter
+
+AccessFlag (4 tests) imports java.lang.classfile (by design out of the world, JCS95 (a)): a variant cutting its class file
+members, jdk26u's `maskToAccessFlags` and `ClassFileFormatVersion` translated, `Class/Member.accessFlags` over the modifiers
+and the InnerClasses flags F25 records (1 day). Parameter (4 tests, one reading class file bytes: by design) needs
+MethodParameters, which javac writes only with `-parameters`: the check's `@compile -parameters` handed to the interpreter and
+to j2g (the action's flags), the names recorded then (1.5 days). Recommended: AccessFlag first, with JCS271.
+
+#### JCS274 `:nio`'s remainder
+
+After F9 `:nio` keeps 11: jdk.charsets' three (JCS146 (b): later), FFM's MemorySegment (by design with JCS95's
+java.lang.foreign), F23's java.security file, and singles. Recommended: reclassify them by their pieces after the night's
+record (`:charsets-locales`, `:security`, `:classloader`), closing `:nio` as a class of its own.
