@@ -1231,6 +1231,13 @@ covers what.
   `abi` and the launcher's own package (the Eclipse Public License 1.0) and Go's runtime and
   standard library (Go's BSD 3-Clause License). A distribution of the box carries this file, as
   for the executables above.
+- `test/cpp/clang.ae` (`cpp.clang`, the clang half of Arbace's C++ target, doc/cpp/CPP-SURVEY.md, "As built: CP248 (a)"):
+  a port of parts of clang, the LLVM Project, from `llvm-project-23.1.5.src.tar.xz` (the pin of `test/cpp/corpora.edn`,
+  SHA-256 `fb50b1eac93ddeb3aa8dab4cfe324dff74f4a9c2bdee6160c9e36188f8d06a6e`): `clang/lib/Frontend/InitPreprocessor.cpp`'s
+  predefined macros and their helpers, `clang/lib/Basic/Targets/X86.cpp`'s `getTargetDefines` (the baseline CPU's part),
+  `Targets/OSTargets.h`'s `LinuxTargetInfo::getOSDefines` and `Targets.cpp`'s `DefineStd` and `defineCPUMacros`, under
+  the Apache License 2.0 with the LLVM Exceptions (section "LLVM (clang)" below), the file carrying clang's notice;
+  `cpp/target/clang.edn`, the facts it reads (PickFP's float strings among them, from the same file), likewise.
 - `test/java/` (bin/java-check, Java's conformance check, doc/classes/JAVA-CONFORMANCE-SURVEY.md,
   "As built: JC1"): its tools, data and the hand-curated programs of `test/java/jls/` are Arbace's
   own, under the Eclipse Public License 1.0. jdk26u's jtreg tests are read in place from the
