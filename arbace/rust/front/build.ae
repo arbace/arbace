@@ -37,7 +37,7 @@
 (def ^:private bool-ty [:bool])
 (def ^:private usize-ty [:uint "usize"])
 
-(defn ty-text [t] (binding [c/*in-value* false] (c/print-ty t)))
+(defn ty-text [t] (binding [c/*in-value* false c/*erased-regions* true] (c/print-ty t)))
 
 (defn ty-form
   "A type as MIR forms write it: (ty TEXT STRUCT)"
@@ -79,6 +79,8 @@
 
 (defn- adt-def [t] (when (= :adt (first t)) (second t)))
 
+(def ^:dynamic *needs-drop-stack* #{})
+
 (defn needs-drop?
   "Ty::needs_drop, for the slice: Copy types never; a local ADT by its fields unless it implements Drop; std's ADTs
   that are not Copy: yes"
@@ -92,10 +94,16 @@
                 :array (needs-drop? (second t))
                 :slice (needs-drop? (second t))
                 :adt (let [d (second t)]
-                       (if (number? d)
-                         (or (tc/implements-drop? t)
-                             (boolean (some (fn [[_ ft]] (needs-drop? ft)) (tc/all-fields d (nth t 2)))))
-                         true))
+                       (cond (number? d)
+                             (or (tc/implements-drop? t)
+                                 (boolean (some (fn [[_ ft]] (needs-drop? ft)) (tc/all-fields d (nth t 2)))))
+                             ;; std's ADTs by their interface: a Drop impl, else a field that needs drop (ManuallyDrop never)
+                             (= "core::mem::manually_drop::ManuallyDrop" d) false
+                             (and (tc/std-adt-known? d) (not (contains? *needs-drop-stack* d)))
+                             (binding [*needs-drop-stack* (conj *needs-drop-stack* d)]
+                               (or (tc/implements-drop? t)
+                                   (boolean (some (fn [[_ ft]] (needs-drop? ft)) (tc/std-all-fields d (nth t 2))))))
+                             :else true))
                 true)))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -328,6 +336,45 @@
           (let [[adt vi vid _] (ctor-info path)] (mk e :adt ty :adt adt :variant vi :vid vid :fields []))
           :else (unsupported "a path" (pr-str rd)))))))
 
+(def ^:private op-methods
+  {"+" ["core::ops::arith::Add" "add"] "-" ["core::ops::arith::Sub" "sub"] "*" ["core::ops::arith::Mul" "mul"]
+   "/" ["core::ops::arith::Div" "div"] "%" ["core::ops::arith::Rem" "rem"] "&" ["core::ops::bit::BitAnd" "bitand"]
+   "|" ["core::ops::bit::BitOr" "bitor"] "^" ["core::ops::bit::BitXor" "bitxor"] "<<" ["core::ops::bit::Shl" "shl"]
+   ">>" ["core::ops::bit::Shr" "shr"] "==" ["core::cmp::PartialEq" "eq"] "!=" ["core::cmp::PartialEq" "ne"]
+   "<" ["core::cmp::PartialOrd" "lt"] "<=" ["core::cmp::PartialOrd" "le"] ">" ["core::cmp::PartialOrd" "gt"]
+   ">=" ["core::cmp::PartialOrd" "ge"]})
+
+(defn- int-like? [t] (#{:int :uint} (first t)))
+(defn- scalar-ty? [t] (#{:bool :char :int :uint :float :fndef :fnptr :ptr} (first t)))
+
+(defn- builtin-binop?
+  "is_builtin_binop over the operands' resolved types"
+  [op lt rt]
+  (cond (#{"&&" "||"} op) true
+        (#{"<<" ">>"} op) (and (int-like? lt) (int-like? rt))
+        (#{"+" "-" "*" "/" "%"} op) (or (and (int-like? lt) (int-like? rt)) (and (= :float (first lt)) (= :float (first rt))))
+        (#{"&" "|" "^"} op) (or (and (int-like? lt) (int-like? rt)) (and (= :bool (first lt)) (= :bool (first rt))))
+        :else (and (scalar-ty? lt) (scalar-ty? rt))))
+
+(defn- adjusted-ty [e] (let [x (r-of e)] (reduce (fn [_ [_ t]] t) (:ty x) (:adj x))))
+
+(defn- overloaded-operator
+  "overloaded_operator: the operator's trait method called on the operands (as mirrored, their autorefs applied)"
+  [e ty [tr m] targs args]
+  (mk e :call ty :fun {:k :zst-literal :ty [:fndef (str tr "::" m) targs] :span (:span e) :tsi (:hir-id e)}
+      :args args :from-hir false :fn-span (:span e)))
+
+(defn- overloaded-place
+  "overloaded_place: `*Deref::deref(arg)` (deref_mut when the receiver's borrow is mutable), its call's type a reference to
+  the place's"
+  [e place-ty arg-x callee-self span]
+  (let [mutbl (boolean (nth (:ty arg-x) 2 false))
+        [tr m] (if mutbl ["core::ops::deref::DerefMut" "deref_mut"] ["core::ops::deref::Deref" "deref"])
+        call {:k :call :ty [:ref [:re-erased] mutbl place-ty] :span span :tsi (:hir-id e)
+              :fun {:k :zst-literal :ty [:fndef (str tr "::" m) [callee-self]] :span span :tsi (:hir-id e)}
+              :args [arg-x] :from-hir false :fn-span span}]
+    {:k :deref :ty place-ty :arg call :span span :tsi (:hir-id e)}))
+
 (defn- capture-upvar
   "capture_upvar with convert_captured_hir_place: the captured place as THIR over the variable (an upvar of the current
   body or its own), by value or borrowed"
@@ -348,15 +395,24 @@
       :lit (mk e :literal ty :lit (:lit e) :neg false)
       :path (mirror-path e ty)
       :unary (case (:op e)
-               "-" (cond (:callee (r-of e)) (unsupported "an overloaded operator")
+               "-" (cond (not (#{:int :uint :float} (first (ty-of (:expr e)))))
+                         (overloaded-operator e ty ["core::ops::arith::Neg" "neg"] [(ty-of (:expr e))] [(mirror-expr (:expr e))])
                          (= :lit (:kind (:expr e))) (mk e :literal ty :lit (:lit (:expr e)) :neg true)
                          :else (mk e :unary ty :op "Neg" :arg (mirror-expr (:expr e))))
-               "!" (if (:callee (r-of e)) (unsupported "an overloaded operator") (mk e :unary ty :op "Not" :arg (mirror-expr (:expr e))))
+               "!" (if (not (#{:int :uint :bool} (first (ty-of (:expr e)))))
+                     (overloaded-operator e ty ["core::ops::bit::Not" "not"] [(ty-of (:expr e))] [(mirror-expr (:expr e))])
+                     (mk e :unary ty :op "Not" :arg (mirror-expr (:expr e))))
                "*" (let [at (ty-of (:expr e))]
                      (if (or (#{:ref :ptr} (first at)) (= "alloc::boxed::Box" (adt-def at)))
                        (mk e :deref ty :arg (mirror-expr (:expr e)))
-                       (unsupported "an overloaded deref"))))
+                       (let [ax (mirror-expr (:expr e))]
+                         (when-not (= :ref (first (:ty ax))) (unsupported "an overloaded deref without its autoref"))
+                         (assoc (overloaded-place e ty ax at (:span e)) :tsi (:hir-id e))))))
       :binary (cond (:callee (r-of e)) (unsupported "an overloaded operator")
+                    (and (not (logical? e)) (not (builtin-binop? (:op e) (ty-of (:lhs e)) (ty-of (:rhs e)))))
+                    (overloaded-operator e ty (get op-methods (:op e))
+                                         [(ty-of (:lhs e)) (if (#{"==" "!=" "<" "<=" ">" ">="} (:op e)) (ty-of (:rhs e)) (adjusted-ty (:rhs e)))]
+                                         [(mirror-expr (:lhs e)) (mirror-expr (:rhs e))])
                     (logical? e) (mk e :logical ty :op (if (= "&&" (:op e)) :and :or) :lhs (mirror-expr (:lhs e)) :rhs (mirror-expr (:rhs e)))
                     :else (mk e :binary ty :op (get bin-ops (:op e)) :lhs (mirror-expr (:lhs e)) :rhs (mirror-expr (:rhs e))))
       :assign (mk e :assign ty :lhs (mirror-expr (:lhs e)) :rhs (mirror-expr (:rhs e)))
@@ -440,7 +496,10 @@
       (= k "Deref") (let [st (:ty x)]
                       (if (or (#{:ref :ptr} (first st)) (= "alloc::boxed::Box" (adt-def st)))
                         (assoc base :k :deref :arg x)
-                        (unsupported "an overloaded deref adjustment")))
+                        ;; an overloaded deref: `*Deref::deref(&x)` (DerefMut's when a later autoref is mutable)
+                        (let [mutbl (boolean (some (fn [[k2 t2]] (and (= "Borrow" k2) (= :ref (first t2)) (nth t2 2))) (drop-while #(not= % [k target]) (:adj (r-of e)))))
+                              bx (assoc base :k :borrow :bk (if mutbl :mut :shared) :arg x :ty [:ref [:re-erased] mutbl st])]
+                          (overloaded-place e target bx st (:span x)))))
       (= k "Borrow") (if (= :ptr (first target))
                        (assoc base :k :raw-borrow :mutbl (boolean (second target)) :arg x)
                        (assoc base :k :borrow :bk (if (nth target 2) :mut :shared) :arg x))
@@ -616,16 +675,57 @@
           (str/starts-with? s "0b") (BigInteger. (subs s 2) 2)
           :else (BigInteger. s))))
 
+(defn- unesc-char
+  "A char literal's escape (`\\n`, `\\u{..}`, `\\x41`)"
+  [^String s]
+  (case (subs s 1 2)
+    "n" "\n" "r" "\r" "t" "\t" "0" "\u0000" "'" "'" "\"" "\"" "\\" "\\"
+    "x" (str (char (Integer/parseInt (subs s 2 4) 16)))
+    "u" (String. (Character/toChars (Integer/parseInt (subs s 3 (dec (count s))) 16)))
+    s))
+
+(defn- float-text
+  "rustc_apfloat's Display as MIR prints a float constant: the exact value to 17 (f64) or 9 (f32) significant digits,
+  trailing zeros dropped"
+  [^double d bits]
+  (cond (Double/isNaN d) "NaN"
+        (Double/isInfinite d) (if (pos? d) "+Inf" "-Inf")
+        (zero? d) (if (neg? (Math/copySign 1.0 d)) "-0" "0")
+        :else (let [bd (.round (java.math.BigDecimal. d) (java.math.MathContext. (if (= bits 32) 9 17) java.math.RoundingMode/HALF_EVEN))
+                    bd (.stripTrailingZeros bd)]
+                (.toPlainString bd))))
+
+(defn float-const [^String txt neg t]
+  (let [n (second t)
+        txt (str/replace txt "_" "")
+        txt (str/replace txt #"f(32|64)$" "")]
+    (if (= n "f32")
+      (let [f (float (Double/parseDouble txt)) f (if neg (- f) f)]
+        [:const (str "const " (float-text (double f) 32) "f32") t (list 'scalar (bit-and (long (Float/floatToRawIntBits f)) 0xffffffff) 4)])
+      (let [d (Double/parseDouble txt) d (if neg (- d) d)]
+        [:const (str "const " (float-text d 64) "f64") t (list 'scalar (let [b (Double/doubleToRawLongBits d)] (if (neg? b) (+ (bigint b) (pow2 64)) b)) 8)]))))
+
+(defn- char-text [^long c]
+  (case c
+    10 "'\\n'" 13 "'\\r'" 9 "'\\t'" 0 "'\\0'" 39 "'\\''" 92 "'\\\\'"
+    (str "'" (String. (Character/toChars (int c))) "'")))
+
 (defn- lit-const [lit neg t]
   (case (str (:lit-kind lit))
     "Integer" (let [v (bigint (parse-int-lit lit)) v (if neg (- v) v)]
-                (if (integral? t) (int-const v t) (unsupported "a float literal")))
+                (cond (integral? t) (int-const v t)
+                      (= :float (first t)) (float-const (str/replace (str (:symbol lit)) "_" "") neg t)
+                      :else (unsupported "a literal of" t)))
+    "Float" (if (= :float (first t)) (float-const (str (:symbol lit)) neg t) (unsupported "a float literal of" t))
+    "Char" (let [sym (str (:symbol lit))
+                 c (long (if (str/starts-with? sym "\\") (int (first (unesc-char sym))) (.codePointAt sym 0)))]
+             [:const (str "const " (char-text c)) t (list 'scalar c 4)])
     "Bool" (bool-const (= "true" (str (:symbol lit))))
     ("Str" "StrRaw") [:const (str "const " (pr-str (str (:value lit (:symbol lit))))) t '(raw-str)]
     (unsupported "a literal" (:lit-kind lit))))
 
 (defn- fn-const [t]
-  [:const (binding [c/*in-value* true] (c/print-def-path (second t) (nth t 2))) t '(zst)])
+  [:const (binding [c/*in-value* true c/*erased-regions* true] (c/print-def-path (second t) (mapv #(if (c/region? %) [:re-erased] %) (nth t 2)))) t '(zst)])
 
 (defn- as-constant [x]
   (case (:k x)
@@ -2014,7 +2114,7 @@
         body-expr (if closure?
                     (:body n)
                     {:node :expr :kind :block :block (:body n) :span (:span (:body n)) :hir-id [(first (:hir-id n)) :body]})
-        res (if closure? res (assoc res (:hir-id body-expr) {:ty ret}))
+        res (if (or closure? (get res (:hir-id body-expr))) res (assoc res (:hir-id body-expr) {:ty ret}))
         pats (map :pat (:params n))
         env-proj (if (and closure? (not= :fn-once (:kind info))) [[:deref]] [])
         captures (when closure?

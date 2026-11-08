@@ -129,7 +129,11 @@
                       [(titem rt 0)]
                       [(cond-> (titem (dump-kind->tok (:kind m) sp) (or mark (span-mark s)))
                          (and (seq? s) (pos? (long (nth s 2))))
-                         (assoc :orig (root-at (vec (take 4 (drop 2 s))))))])))
+                         (assoc :orig (root-at (vec (take 4 (drop 2 s)))))
+                         ;; RF10: a std macro definition's token keeps its place in std's sources (a user type
+                         ;; annotation's span: `macros.rs:148:28: 148:61`)
+                         (and (seq? s) (string? (second s)) (not (str/starts-with? (second s) "<")) (pos? (long (nth s 2))))
+                         (assoc :fspan (vec (take 5 (rest s)))))])))
             Delimited (let [[_ ds dsp delim ts] tr
                             dm (apply hash-map (rest ds)) spm (apply hash-map (rest dsp))
                             kids (dump-tts->items (second ts) mark)]
@@ -212,10 +216,11 @@
         out (java.util.ArrayList.)
         starts (java.util.ArrayList.)
         origs (java.util.ArrayList.)
-        place (fn [^String text kind sym x y z sp mark ^Tok orig]
+        fspans (java.util.ArrayList.)
+        place (fn [^String text kind sym x y z sp mark ^Tok orig & [fspan]]
                 (let [lo (aget pos 0) n (.codePointCount text 0 (.length text))]
                   (.append sb text) (.append sb " ")
-                  (dotimes [_ (inc n)] (.add marks (Long/valueOf (long mark))) (.add origs orig))
+                  (dotimes [_ (inc n)] (.add marks (Long/valueOf (long mark))) (.add origs orig) (.add fspans fspan))
                   (aset pos 0 (+ lo n 1))
                   (lx/tok kind lo (+ lo n) sym x y z sp)))
         add-item (fn [it]
@@ -227,7 +232,7 @@
                              (if (and (>= (.-lo t) 0) (zero? (long (:mark it))))
                                (.add out t)
                                (.add out (place (tok-text t) (.-kind t) (.-sym t) (.-x t) (.-y t) (.-z t) (.-sp t) (:mark it)
-                                                 (if (>= (.-lo t) 0) t (:orig it))))))))]
+                                                 (if (>= (.-lo t) 0) t (:orig it)) (:fspan it)))))))]
     (doseq [it items]
       (.add starts (Long/valueOf (.size out)))
       (let [fl (flat [it] (java.util.ArrayList.))]
@@ -244,7 +249,7 @@
           (cond (contains? open-close k) (.add stk (Long/valueOf i))
                 (contains? #{:CloseParen :CloseBrace :CloseBracket} k)
                 (let [o (long (.remove stk (dec (.size stk))))] (aset mt (int o) (int i)) (aset mt i (int o))))))
-      {:src (lx/source (str sb)) :toks toks :mt mt :n0 n0 :marks (long-array (map long marks)) :origs (.toArray origs)
+      {:src (lx/source (str sb)) :toks toks :mt mt :n0 n0 :marks (long-array (map long marks)) :origs (.toArray origs) :fspans (.toArray fspans)
        :starts (vec starts) :eof (dec cnt)})))
 
 (defn- mark-at ^long [ctx ^long pos]
@@ -256,6 +261,10 @@
 (defn- orig-at ^Tok [ctx ^long pos]
   (let [n0 (long (:n0 ctx)) ^objects os (:origs ctx) i (- pos n0 1)]
     (when (and (>= i 0) (< i (alength os))) (aget os i))))
+
+(defn- fspan-at [ctx ^long pos]
+  (let [n0 (long (:n0 ctx)) ^objects fs (:fspans ctx) i (- pos n0 1)]
+    (when (and fs (>= i 0) (< i (alength fs))) (aget fs i))))
 
 (defn- cspan
   "A span out of an assembled array: the root's [l1 c1 l2 c2]; a foreign one (span \"<expansion>\" l1 c1 l2 c2 M), at
@@ -269,7 +278,11 @@
                   (if (and a b)
                     (let [[l1 c1] (lx/span-vec (root-src) (.-lo a) (.-hi a)) [_ _ l2 c2] (lx/span-vec (root-src) (.-lo b) (.-hi b))]
                       (list 'span "<expansion>" l1 c1 l2 c2 m))
-                    (foreign-span m))))))
+                    ;; RF10: tokens of a std macro's definition, from one file: their place there
+                    (let [fa (fspan-at ctx lo) fb (fspan-at ctx (max lo (dec hi)))]
+                      (if (and fa fb (= (first fa) (first fb)))
+                        (list 'span (first fa) (nth fa 1) (nth fa 2) (nth fb 3) (nth fb 4) m)
+                        (foreign-span m))))))))
 
 (defn- tok-kind-out [^Tok t]
   (case (.-kind t)
