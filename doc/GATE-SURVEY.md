@@ -4977,3 +4977,151 @@ Also `bin/gate-tests` (below) and `bin/gate --plan` and `bin/gate --full --plan`
   room in the memory lane" on the big steps that follow diffcheck.
 - `bin/gate --mem-check`.
 - Then `.tmp/gate/lanes/events.tsv` and `.tmp/gate/mem.tsv`'s MemAvailable minimum, to confirm the margin.
+
+## Decided (2026-11-08, the user): GTS248-GTS251
+
+Late on 2026-11-08 the user accepted the four proposals of "As built: the essential memory lane":
+- **GTS248 (a)**: one lane state for the host, in the main checkout's `.tmp/gate-lanes/`, shared by concurrent gates like the
+  store of passes, each entry's order prefixed by its gate's start so that the earlier gate goes first. To be built now, as
+  write-ahead, and turned on by default only after a night has proved the lane itself.
+- **GTS249 (a)** for `--full --concurrent`: the free-memory rule in place of the fixed budget. **(b)** for the clean run: it
+  keeps the fixed budget until its first run in the lanes.
+- **GTS250 (a)**: the declarations stay the clean runs' largest peaks, with no warm second number. Nothing to build.
+- **GTS251 (a)**: a `:heavy true` step that waits for another job's big lock keeps its room in the lane. Nothing to build:
+  the runner already takes the lane first and the lock second.
+
+## As built: GTS248, GTS249 (write-ahead, branch `gate-lane2` on `gate-lane`, 2026-11-08)
+
+Not run as a gate: the light rules allowed only `--plan` and the gate's own tests. Changed: `bin/gate-lane`, `bin/gate`,
+`test/gate/lanes.ae` (the view's title only) and `test/gate/lanes-test.bash`. The runner, `bin/lib/gate-run.bash`, is
+unchanged from `gate-lane`, so nothing is rekeyed beyond what `gate-lane` rekeys already. These files are inputs of
+`gate-tests` alone, so `gate-tests` reruns.
+
+**GTS248 (a), the host's lane state** (`bin/gate-lane`, `bin/gate`).
+- *The switch.* `GATE_LANE_SHARED=1` turns it on. The default is 0 until a night's gate has run the lane, which is the
+  user's condition. Turning it on for good is one line in `bin/gate`: `"${GATE_LANE_SHARED:-0}" = 1` becomes
+  `"${GATE_LANE_SHARED:-1}" = 1`, plus the matching grep in `lanes-test`'s check 8d. After that, `GATE_LANE_SHARED=0`
+  gives each run its own state again, as before. The variable is kept through the gate's environment scrub. It decides
+  only where the scheduler's state is kept, never what passes.
+- *Where the state lives.* With the switch on, any gate whose lane uses the free rule exports
+  `GATE_LANE_HOST_DIR=$(dirname STORE)/gate-lanes`: the essential memory lane, and since GTS249 (a) `--concurrent`'s lanes.
+  STORE is the store of passes, so by default that is the main checkout's `.tmp/gate-lanes`. A store of the tests' own
+  gets a lane directory of its own, so the gate's tests never touch the real one. `bin/gate-lane`'s free mode then keeps
+  `run/`, `wait/`, `.lock` and `events.tsv` in that directory instead of `GATE_LANE_DIR`. The budget mode never reads
+  `GATE_LANE_HOST_DIR`.
+- *The order.* `bin/gate` also exports `GATE_LANE_GATE`, the gate's id: `%010d%07d` of its start time in seconds and its
+  PID. Each entry is named `GATE-ORDER-NAME.PID`. Both rules take waiters in sorted name order, so an earlier gate's steps
+  come before a later gate's, and each gate's own steps stay in plan order. An id that is not 17 digits is replaced by
+  the waiter's own start time and PID.
+- *The rule is unchanged.* It now sees every gate's running steps, and each of them holds back its declaration less its
+  RSS, not just its RSS. "Nothing of the run runs and none was admitted" now means nothing of any gate. A step too big
+  for the free memory therefore runs alone on the host, as it would serially. A later gate's head big step only holds
+  back room from the waiters behind it.
+- *Events.* The host's `events.tsv` gains a seventh column, the gate's id. Each run's own directory (`.tmp/gate/lanes`)
+  still gets its own steps' events in the six columns of before, so a run's log is read as it was.
+- *Display.* `--state` names the host's directory. A waiter's stderr line marks another gate's running steps as
+  "(another gate)".
+- *Not shared.* The clean run, which is a clone of its own under the big lock (GTS254 below), and the budget rule.
+- *Pruning.* Entries are pruned by their process's start time, as before, so a killed gate's entries clear themselves on
+  the next look.
+
+**GTS249, the lanes' rule** (`bin/gate`). The new variable `lane_rule` records which rule the run uses:
+- `free` for the essential memory lane.
+- For `--concurrent` (GTS249 (a)), `free` unless `GATE_LANE_RULE=budget`. With the free rule `bin/gate` exports
+  `GATE_LANE_MODE=free`. The runner's GTS227 (a) branch passes it to `bin/gate-lane` unchanged, so `--concurrent`'s steps
+  are admitted against MemAvailable less `GATE_LANE_MARGIN_GIB` (2). Two big steps run together when their declarations
+  fit. The rest is unchanged: the run holds the big lock once, the steps run with `ARBACE_HEAVY_HELD=1`, and nothing
+  locks again.
+- For the clean run (`--clean --concurrent`, GTS249 (b)), `budget` unless `GATE_LANE_RULE=free`. `clean_launch` passes
+  `GATE_LANE_RULE` and `GATE_LANE_MARGIN_GIB` into the clone. The record's `:lanes` now names its rule:
+  `{:rule :budget :budget-gib B :big-gib 16}` or `{:rule :free :margin-gib 2 :big-gib 16}`. Older records, which lack
+  `:rule`, were budget runs.
+- Any other value of `GATE_LANE_RULE` is refused with exit 2, before the environment is set up, so that the refusal reads nothing of the checkout. Checked by gate-reads-test: the first version ran `gate_env` first, which hashes the tree.
+- `--plan` prints "the memory lane's rule: R; its state: S" before the simulated schedule. A free `--concurrent` plan is
+  simulated by `decide-free` with the chains at once, under the title "the free memory lanes (GTS249 (a), --concurrent)".
+
+**The plans** (light, from the worktree, against the main store's medians, on a busy host):
+
+| plan | rule; state | free less 2 | simulated wall | the big steps one at a time | at once |
+|---|---|---|---|---|---|
+| `bin/gate --plan` | free; this run's | 50.7 GiB | 0:46 | 0:53 | 0:42 |
+| `GATE_LANE_SHARED=1 bin/gate --plan` | free; the host's `/root/arbace/.tmp/gate-lanes` | 50.7 GiB | 0:46 | 0:53 | 0:42 |
+| `bin/gate --full --concurrent --plan` | free (GTS249 (a)); this run's | 48.7 GiB | 6:22 | 6:41 | 5:33 |
+| `GATE_LANE_RULE=budget bin/gate --full --concurrent --plan` | budget 58 GiB | - | 6:58 | - | - |
+| `bin/gate --full --plan` (serial, the crops' chains beside) | free; this run's | 52.1 GiB | 9:54 | 10:01 | 9:51 |
+| `bin/gate --full --clean --concurrent --plan` | budget 58 GiB (GTS249 (b)) | - | 7:02 | - | - |
+| `GATE_LANE_RULE=free bin/gate --full --clean --concurrent --plan` | free | 52 GiB | 6:11 | 6:50 | 5:19 |
+
+At about 49 GiB free, `--full --concurrent` on
+the free rule is about 36 minutes shorter than on the fixed budget, because the budget rule never runs two big steps at
+once. The free rule's declared sum reached 53 GiB at once on `--full --concurrent` and 73 on the free clean plan (GTS255). Most of the 62 unmeasured steps are the crops' newer
+parts, counted at 0.
+
+**The tests** (`test/gate/lanes-test.bash`, 46 checks, 8 of them new):
+- **8a.** Entries prefixed by their gates' ids are decided earlier gate first, in both modes. Without the ids, the lower
+  plan order wins.
+- **8b.** Two gates on one temporary `GATE_LANE_HOST_DIR`, with 13 GiB free and two waiters of 8 GiB each. Gate A's
+  blocker declares 10 GiB but holds a sleep's RSS. Gate B's step waits for the blocker, then A's later step goes first
+  and B's after it. As a control, the same two gates on their own states overlap over the free memory: B's step starts
+  beside A's blocker.
+- **8b** also checks that the host's events carry the gates' ids, that each run's events hold its own steps alone, and
+  that no state lands in the runs' directories.
+- **8b** also checks the waiter's "(another gate)", and that `--state` names the host's directory and prunes the ended
+  entries.
+- **8c.** The runner's `GATE_LANES=1` branch with `GATE_LANE_MODE=free` is admitted by MemAvailable, with
+  `ARBACE_HEAVY_HELD=1` inside.
+- **8d.** `bin/gate`'s switches: shared off by default, the state beside the store, the rule's two defaults, and a third
+  value refused.
+
+`bin/gate-tests` was run whole; its result is in the journal's entry.
+
+**How the night uses it.** The first night runs `gate-lane2`, which contains `gate-lane`, with the default
+`GATE_LANE_SHARED=0`: one gate, its own lane state, exactly `gate-lane`'s behaviour plus `--concurrent`'s free rule.
+That night proves the lane. One of the night's later gates, for example the `--full`, can then run with
+`GATE_LANE_SHARED=1` to prove the host's state with one gate, which should behave the same. The default turns on the day
+after.
+
+**Proposed** (each needs the user):
+- **GTS252 A lock-waiting step's room on the host's state.** With the state shared, GTS251 (a)'s cost is no longer the
+  waiting gate's alone. A day gate's `:heavy true` step that waits for the big lock held by a night `--concurrent` run
+  holds its declaration out of the night's room for as long as it waits. That can be 14 GiB for hours.
+  - (a) The runner marks the entry while the step waits for the lock (bin/heavy-lock writing a file the rule reads as
+    "holds 0"). This changes the runner, so it rekeys every check: batch it with the next runner change.
+  - (b) Accept: day agents run no gates at night, by the rules.
+
+  *Recommended: (b) now, (a) with the next runner change.*
+- **GTS253 The clean run's rule after its first run in the lanes.** GTS249 (b)'s condition, decided by that run's record.
+  - (a) Make the free rule the clean run's default once the first clean run in the lanes has passed within its night.
+  - (b) Keep the budget rule for the records' comparability.
+
+  *Recommended: (a); `GATE_LANE_RULE=free` already runs it.*
+- **GTS254 The clean run in the host's state.** The clean run keeps a state of its own in its clone, so a gate beside it
+  sees only its RSS.
+  - (a) Once GTS253 (a) holds, share it too: its `GATE_LANE_HOST_DIR` would be the invoking checkout's.
+  - (b) Keep it apart: it holds the big lock, so another gate's heavy steps wait anyway.
+
+  *Recommended: (a) with GTS253 (a).*
+- **GTS255 The free rule's big admission beside many small chains.** A big waiter is admitted when no big step runs
+  and G <= A, the free memory less the margin. That test ignores what the running small steps may still take. With the
+  essential lane's few chains this stays within a GiB: 51 declared at 50.7 free. With `--concurrent`'s many chains it
+  does not:
+  - `--full --concurrent --plan` simulates 53 GiB declared at 48.7 free.
+  - `GATE_LANE_RULE=free --full --clean --concurrent --plan` simulates 73 GiB declared at 52 free (wall 6:11, against
+    7:02 on the budget).
+
+  The simulation holds every declaration whole, so the real use is lower: RSS so far, and cold peaks.
+  - (a) For a big waiter, require G <= ROOM as for every other step. The head big step's reservation already drains the
+    small steps ahead of it, so it is not starved. It costs the walls a little. It changes `bin/gate-lane` and
+    `lanes.ae`'s `decide-free` alone, so nothing is rekeyed.
+  - (b) (a) only under `--concurrent` (`GATE_LANE_MODE=free-strict`).
+  - (c) Accept.
+
+  *Recommended: (b) before GTS253 (a).*
+
+**The night's commands** (main session, under the big lock as usual, after the merge of `gate-lane2` into `next`):
+- `bin/gate` on `next`: the lane's first night, its own state, as in "As built: the essential memory lane".
+- `bin/gate --mem-check`.
+- Optionally `GATE_LANE_SHARED=1 bin/gate --full`: the host's state with one gate. Check
+  `/root/arbace/.tmp/gate-lanes/events.tsv`: seven columns, one gate id. Check that `.tmp/gate/lanes/events.tsv` holds
+  the same admissions.
+- A `--full --concurrent` now uses the free rule; `GATE_LANE_RULE=budget` gives GTS227 (a)'s fixed budget.

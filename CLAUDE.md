@@ -568,7 +568,11 @@ Prior art:
   the essential memory lane (`bin/gate-lane`'s free mode: a step's `:mem-gib` against the host's MemAvailable less 2 GiB,
   the running steps' declarations not yet taken held back, two big steps at once when they fit, never none while one
   waits; then the heavy lock as before; `GATE_MEM_LANE=0` off; a peak over its declaration flagged in the summary;
-  doc/GATE-SURVEY.md, "As built: the essential memory lane"); `bin/gate-demos` repeats GTS42 (a)'s two demonstrations as plans (`bin/gate
+  doc/GATE-SURVEY.md, "As built: the essential memory lane"; since GTS249 (a) `--full --concurrent`'s lanes on the same free
+  rule, `GATE_LANE_RULE=budget` GTS227 (a)'s budget, the clean run's the budget until its first run in the lanes, GTS249 (b);
+  GTS248 (a), write-ahead: `GATE_LANE_SHARED=1` keeps the free lane's state for the host in the main checkout's
+  `.tmp/gate-lanes/` beside the store, the earlier gate's steps first, off by default until a night proves the lane: "As
+  built: GTS248, GTS249"); `bin/gate-demos` repeats GTS42 (a)'s two demonstrations as plans (`bin/gate
   --full --plan --builds`); the executables and javac's tool are kept by key in
   `ARBACE_GATE_EXES` (default the main checkout's `.tmp/gate-exe`), shared by the worktrees;
   the programs of goi, Java's interpreted level, the suite and the oracle run under CPU-time limits with

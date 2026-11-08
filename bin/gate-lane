@@ -30,6 +30,14 @@
 #   does not fit holds nothing back (greedy first fit: it never delays the big ones). Hence two big steps run together
 #   when their declarations fit the free memory, one at a time when they do not, and never none while one waits.
 #
+# One lane state for the host (GTS248 (a), doc/GATE-SURVEY.md, "As built: GTS248, GTS249"; write-ahead, bin/gate's
+# GATE_LANE_SHARED=1 until a night has proved the lane): with GATE_LANE_HOST_DIR set (the free mode alone) the state
+# (run/, wait/, .lock, events.tsv) is that directory, the main checkout's .tmp/gate-lanes beside the store of passes,
+# shared by every gate on the host, in place of GATE_LANE_DIR (which still gets the run's own events.tsv); each entry
+# named GATE-ORDER-NAME.PID, GATE (GATE_LANE_GATE) the gate's start and process, %010d%07d, so that the plan's order is
+# the earlier gate's first and every gate's running steps hold back their declarations, not their RSS alone. The rule
+# is the same: "nothing of the run runs" then means nothing of any gate.
+#
 # Usage: bin/gate-lane CMD [ARG...]    wait for the admission, then exec CMD (its process the admission's: the
 #                                      admission ends with it)
 #        bin/gate-lane --decide DIR    the waiters of DIR's state admitted now, one a line (the rule alone; the tests)
@@ -40,7 +48,8 @@
 #   (16), GATE_LANE_POLL (seconds between looks, default 2), HEAVY_LOCK_WAITS (a file the seconds waited are appended to),
 #   GATE_LANE_MODE (budget, the default: the rule above; free: the essential memory lane), GATE_LANE_MARGIN_GIB (free: 2),
 #   GATE_LANE_MEMAVAIL_KIB (free: MemAvailable given, the tests'), GATE_LANE_WAITS (a file the seconds waited are
-#   appended to, in place of HEAVY_LOCK_WAITS)
+#   appended to, in place of HEAVY_LOCK_WAITS), GATE_LANE_HOST_DIR (free: the host's state, GTS248 (a)), GATE_LANE_GATE
+#   (with it: the gate's id, %010d%07d of its start and PID, the entries' prefix)
 set -uo pipefail
 
 budget_gib() {
@@ -48,6 +57,8 @@ budget_gib() {
   awk -v r="${GATE_MEM_RESERVE_GIB:-4}" '/^MemTotal:/ {b = int($2 / 1048576 - r); print (b < 1 ? 1 : b)}' /proc/meminfo
 }
 big_gib() { echo "${GATE_LANE_BIG_GIB:-16}"; }
+# an entry's step: its file name less the gate's id (GTS248 (a)'s shared state), the order and the PID
+bare() { sed -E 's/^[0-9]{17}-//; s/^[0-9]*-//; s/\.[0-9]*$//'; }
 
 # a process's start time (field 22 of /proc/PID/stat): a reused PID is not taken for the step
 starttime() { local s; s=$(cat "/proc/$1/stat" 2>"$d/.err") || return 1; s=${s##*) }; set -- $s; echo "${20}"; }
@@ -111,6 +122,14 @@ lane_decide_free() {
 }
 # events.tsv's fifth column in the free mode: MemAvailable in KiB at the decision
 free_col() { [ "${GATE_LANE_MODE:-budget}" = free ] && printf '\t%s' "$(memavail_kib)"; }
+# the running steps' names for the waiter's line, another gate's marked (GTS248 (a))
+running_names() {
+  local f b
+  for f in $(ls "$d/run"); do
+    b=$(echo "$f" | bare)
+    if [ -n "${gate:-}" ] && [ "${f:0:17}" != "$gate" ]; then printf '%s(another gate) ' "$b"; else printf '%s ' "$b"; fi
+  done
+}
 decide() { if [ "${GATE_LANE_MODE:-budget}" = free ]; then lane_decide_free; else lane_decide; fi; }
 state() {
   local f
@@ -119,6 +138,7 @@ state() {
   else
     echo "budget $(budget_gib) GiB, big from $(big_gib) GiB"
   fi
+  [ -n "${GATE_LANE_HOST_DIR:-}" ] && echo "the host's state (GTS248 (a)): $d"
   for f in "$d"/run/*; do [ -f "$f" ] && echo "running ${f##*/} $(cut -d' ' -f1 "$f") GiB"; done
   for f in $(ls "$d/wait" | LC_ALL=C sort); do echo "waiting $f $(cut -d' ' -f1 "$d/wait/$f") GiB"; done
 }
@@ -130,10 +150,31 @@ case ${1:-} in
 esac
 
 d=${GATE_LANE_DIR:?bin/gate-lane: GATE_LANE_DIR is not set}
+# GTS248 (a): the free mode's state the host's (GATE_LANE_HOST_DIR), the run's own directory keeping its events
+own=
+if [ "${GATE_LANE_MODE:-budget}" = free ] && [ -n "${GATE_LANE_HOST_DIR:-}" ]; then
+  mkdir -p "$d" || exit 1
+  own=$d d=$GATE_LANE_HOST_DIR
+fi
 mkdir -p "$d/run" "$d/wait" || exit 1
 name=${GATE_LANE_STEP:-step} gib=${GATE_LANE_GIB:-1} order=${GATE_LANE_ORDER:-0}
 case $gib in ''|-|*[!0-9.]*) gib=1 ;; esac
-me=$(printf '%05d' "$order")-$name.$$
+gate=
+if [ -n "$own" ]; then
+  gate=${GATE_LANE_GATE:-}
+  case $gate in [0-9]*) [ ${#gate} = 17 ] && [ -z "${gate//[0-9]/}" ] || gate= ;; *) gate= ;; esac
+  # (none given: this process's start and PID, so that it still sorts by its start)
+  [ -n "$gate" ] || gate=$(printf '%010d%07d' "$(date +%s)" $$)
+fi
+me=${gate:+$gate-}$(printf '%05d' "$order")-$name.$$
+# event TYPE: a line of events.tsv (time, type, step, GiB, the declared sum running, the free mode's MemAvailable); in the
+# host's state with the gate's id last, and the same line without it in the run's own
+event() {
+  local l
+  l=$(printf '%s\t%s\t%s\t%s\t%s%s' "$(date +%s)" "$1" "$name" "$gib" "$(awk '{s += $1} END {print s + 0}' "$d"/run/* 2>"$d/.err")" "$(free_col)")
+  if [ -n "$own" ]; then printf '%s\t%s\n' "$l" "$gate" >> "$d/events.tsv"; printf '%s\n' "$l" >> "$own/events.tsv"
+  else printf '%s\n' "$l" >> "$d/events.tsv"; fi
+}
 st=$(starttime $$) || exit 1
 t0=$(date +%s)
 exec 9>>"$d/.lock"
@@ -147,15 +188,15 @@ while :; do
   prune
   if decide | grep -qxF "$me"; then
     mv "$d/wait/$me" "$d/run/$me"
-    printf '%s\tadmit\t%s\t%s\t%s%s\n' "$(date +%s)" "$name" "$gib" "$(awk '{s += $1} END {print s + 0}' "$d"/run/* 2>"$d/.err")" "$(free_col)" >> "$d/events.tsv"
+    event admit
     flock -u 9
     break
   fi
   if [ -z "$announced" ]; then
-    printf '%s\twait\t%s\t%s\t%s%s\n' "$(date +%s)" "$name" "$gib" "$(awk '{s += $1} END {print s + 0}' "$d"/run/* 2>"$d/.err")" "$(free_col)" >> "$d/events.tsv"
+    event wait
     if [ "${GATE_LANE_MODE:-budget}" = free ]; then room="MemAvailable $(awk -v k="$(memavail_kib)" 'BEGIN {printf "%.1f", k / 1048576}') GiB"
     else room="$(budget_gib) GiB"; fi
-    echo "gate-lane: $name ($gib GiB) waits for room in the lanes ($room; running: $(ls "$d/run" | sed 's/^[0-9]*-//; s/\.[0-9]*$//' | tr '\n' ' '))" >&2
+    echo "gate-lane: $name ($gib GiB) waits for room in the lanes ($room; running: $(running_names))" >&2
     announced=1
   fi
   flock -u 9
@@ -166,4 +207,7 @@ trap - TERM INT HUP
 # the seconds waited: GATE_LANE_WAITS (the free mode's, the runner's NAME.lane-wait), else HEAVY_LOCK_WAITS
 w=${GATE_LANE_WAITS:-${HEAVY_LOCK_WAITS:-}}
 [ -z "$w" ] || echo $(( $(date +%s) - t0 )) >> "$w"
+# (GTS248 (a): the host's state is the gate's, not its steps': a step that runs the runner itself, a test of the gate's
+# own, keeps its toy steps out of it)
+unset GATE_LANE_HOST_DIR GATE_LANE_GATE
 exec "$@"

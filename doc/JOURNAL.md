@@ -824,3 +824,50 @@ RSS. Proved on samples: `test/gate/lanes-test.bash`, 38 checks (17 new), passing
 `bin/gate --plan` and `--full --plan`. The essential plan simulates to 0:46 at 54 GiB free, against 0:53 with the big steps
 one at a time and 0:42 at once; `--full` serially to 9:54, against 10:01 and 9:51. The runner's change rekeys every check:
 each runs once on the next night. Proposed: GTS248-GTS251.
+
+## 2026-11-08: GTS248 (a) and GTS249 built, GTS250 (a) and GTS251 (a) recorded (branch `gate-lane2`, from `gate-lane` 9da94ac0e)
+
+Late on 2026-11-08 the user accepted "As built: the essential memory lane"'s four proposals: GTS248 (a), GTS249 (a) for
+`--full --concurrent` and (b) for the clean run, GTS250 (a) and GTS251 (a). The last two need no code. Built as
+write-ahead (doc/GATE-SURVEY.md, "Decided (2026-11-08, the user): GTS248-GTS251" and "As built: GTS248, GTS249"):
+
+- **GTS248 (a)**, `bin/gate-lane`'s free mode with `GATE_LANE_HOST_DIR`. The state is kept for the host, in the main
+  checkout's `.tmp/gate-lanes` beside the store of passes; a store of the tests' own gets its own directory. Each entry is
+  named `GATE-ORDER-NAME.PID`, GATE being `%010d%07d` of the gate's start and its PID (`GATE_LANE_GATE`), so the earlier
+  gate's steps sort first. The host's `events.tsv` carries the gate in a seventh column, and each run keeps its own
+  six-column events. The step is not handed the host's state.
+- **GTS248's switch.** `bin/gate` turns it on with `GATE_LANE_SHARED=1`. It is off by default, by the user's condition,
+  until a night has proved the lane. Turning it on is one line, `${GATE_LANE_SHARED:-0}` becoming `:-1`, plus
+  lanes-test's grep.
+- **GTS249.** `bin/gate`'s `lane_rule`: `--concurrent` is free by default and exports `GATE_LANE_MODE=free` to the
+  runner's unchanged GTS227 (a) branch; `GATE_LANE_RULE=budget` brings back the fixed budget. The clean run stays on the
+  budget by default, and `GATE_LANE_RULE=free` (passed into the clone) switches it. Its record's `:lanes` names
+  `:rule`. `--plan` prints the rule and the state.
+
+Found and fixed on the way, in `gate-lane` itself: a step admitted by the lane inherits `GATE_LANE_MODE=free`,
+`GATE_LANE_DIR` and the other lane variables, because `bin/gate-lane` execs the step. Run as `gate-tests`' step under
+tonight's essential lane, `lanes-test` would have taken its budget cases for the free rule. Reproduced by hand with a
+step's environment: 9 of 38 checks failed. `lanes-test` now unsets the lane variables first.
+
+Also caught by `gate-reads-test` (the whole of `bin/gate-tests` under strace): lanes-test's check that `bin/gate` refuses a
+third `GATE_LANE_RULE` first ran `gate_env`, which hashes the checkout for the gate's key. That read about 6,100
+undeclared files. The refusal now comes before the environment, in 0.01 s, and reads nothing.
+
+Alternatives considered:
+- For the state's place, a variable naming the main checkout directly. Rejected for the store's own directory, which
+  keeps the gate's tests out of the real state by construction.
+- For the order, the gate's start alone. Its PID was added so that two gates started in the same second still sort
+  apart.
+- Changing the runner to pass the host's directory. Rejected: the runner is in every check's key, and the environment
+  needed no runner change, so nothing is rekeyed beyond what `gate-lane` rekeys already.
+
+Checked (light, no gate):
+- `test/gate/lanes-test.bash`: 46 checks, 8 new, passing plain and with a lane step's inherited environment.
+- `bin/gate --plan`: 0:46, unchanged, with either state.
+- `bin/gate --full --plan`: 9:54.
+- `bin/gate --full --concurrent --plan`: 6:22 on the free rule against 6:58 on the budget, at 48.7 GiB free.
+- `--full --clean --concurrent --plan`: 7:02 on the budget, and 6:11 with `GATE_LANE_RULE=free`. That plan declares up
+  to 73 GiB at 52 GiB free, which is GTS255.
+- `bin/gate-tests`: the result is in the report and in the next entry if it differs.
+
+Proposed: GTS252 to GTS255.
