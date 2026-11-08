@@ -4016,6 +4016,7 @@ bin/cppi codegen-check .tmp/cppi/codegen-check                                 #
 
 Two throwaway commands broke the day's rules: one compared two runs with a process substitution (`<(...)`), one waited with
 `2>/dev/null` in its loop; neither wrote anything, both were caught and the scripts since (`.tmp/t/passdiff.sh`) write their lists to
-files. Scratch in the worktree's `.tmp/`: `w1/`-`w4/` (the measure's runs), `base-tree/` (64e7b9758's `arbace/` and `bin/` for the
-code generator's comparison), `gen-base/`, `gen-new/`, `bt/`, `llvm-src2/`, `repr-cpp-builtins/`, `ctl2/`, `t/` (one.sh, onef.sh,
-all.sh, passdiff.sh, extras.ae, gencmp.sh, probes), `*.log`.
+files. Scratch kept in the worktree's `.tmp/`: `w4/` (the recorded run, `own-rec.txt` its tables), `bt/` (the table's inputs and
+first output), `ctl2/` (the control's run), `t/` (one.sh, onef.sh, all.sh, passdiff.sh, extras.ae, gencmp.sh, probes), `*.log`; the
+earlier runs (`w1/`-`w3/`) and the code generator's comparison trees (`base-tree/`, `gen-base/`, `gen-new/`) removed after the
+measure (their numbers above), the disk at 82% at the start.
