@@ -2190,7 +2190,10 @@ All accepted by the user 2026-10-10 and folded where they belong (J2G-SPEC §16,
   JRT-SOURCES.md ("The closure as grown", Files).*
 - **FS2 (decision) `java.nio.file` as jrt's own `Path`, `Files` and `HostPath`** (above,
   Decisions), and no `RandomAccessFile`. *Accepted 2026-10-10; it stays here, in Decisions, and
-  J2G-SPEC §4.1 refers to it.*
+  J2G-SPEC §4.1 refers to it.* *Reversed by F9 (the user's decision of 2026-11-07; doc/classes/JAVA-DEFERRED-TRIAGE.md,
+  "As built: F9 (write-ahead)"): jdk26u's own `java.nio.file` and sun.nio.fs's Linux provider over jrt's Go
+  natives (`go/arbace/jrt/nio_fs_linux.ae`) and native memory (`nativemem.ae`); `Path`, `Files`, `HostPath` and
+  `GlobPatterns` removed from `overlay/jdk`.*
 - **FS3 (J2G-SPEC §9.4, the host interface) An optional `HostFS` beside `Host`.** A host's
   file system calls beyond `Host`'s are a second interface a host may implement
   (`CurrentHostFS`); jrt's natives fall back to the JDK's failure results without it. Keeps

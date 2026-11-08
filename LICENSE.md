@@ -518,19 +518,12 @@ covers what.
   `jdk/internal/jrt/CryptoAccess.java`, `sun/security/provider/JrtServices.java`,
   `com/sun/crypto/provider/JceServices.java` and `sun/security/rsa/RsaServices.java` (their service
   class names are jdk26u's providers') are Arbace's own.
-- `overlay/jdk/java.base/jdk/internal/jrt/HostPath.java` (doc/go/JRT-NOTES.md, "Files") holds code
-  transcribed from https://github.com/openjdk/jdk26u at `baf63fb`
-  (`src/java.base/unix/classes/sun/nio/fs/UnixPath.java`: the path operations, its header names
-  them), `overlay/jdk/java.base/java/nio/file/Path.java` its default methods `resolve` (the two
-  varargs overloads), `resolveSibling(Path)` and `iterator` (`java/nio/file/Path.java`),
-  `overlay/jdk/java.base/java/nio/file/Files.java` its `readAllLines(Path, Charset)` and
-  `copy(Path, OutputStream)` (`java/nio/file/Files.java`), and `go/arbace/jrt/filesystem.ae` jrt's
-  Go forms following `src/java.base/unix/native/libjava/canonicalize_md.c` (`JDK_Canonicalize`) and
-  `path_util.c` (`collapse`) and the results of `UnixFileSystem_md.c`: Copyright (c) Oracle and/or
-  its affiliates, under the GNU General Public License version 2 with the Classpath Exception (text
-  below); recorded by the rule of B7. The rest of those files is Arbace's own, and the other files
-  of the change are written from the documented APIs, as the overlay's other files (but for the
-  variants keeping jdk26u's code, listed below).
+- `go/arbace/jrt/filesystem.ae` (doc/go/JRT-NOTES.md, "Files") holds jrt's Go forms following jdk26u's
+  (https://github.com/openjdk/jdk26u at `baf63fb`) `src/java.base/unix/native/libjava/canonicalize_md.c`
+  (`JDK_Canonicalize`) and `path_util.c` (`collapse`) and the results of `UnixFileSystem_md.c`: Copyright (c) Oracle
+  and/or its affiliates, under the GNU General Public License version 2 with the Classpath Exception (text below);
+  recorded by the rule of B7. The rest of it is Arbace's own. (jrt's own `HostPath.java`, `Path.java`, `Files.java`
+  and `GlobPatterns.java`, which held code transcribed from jdk26u's UnixPath, Path and Files, left with F9 below.)
 - Processes (doc/go/JRT-NOTES.md, "Processes"; recorded by the rule of B7): the variants
   `overlay/jdk/variants/ProcessImpl.ae`, `Process.ae`, `ProcessBuilder.ae` and
   `ProcessHandleImpl.ae` keep the code of the jdk26u methods they replace
@@ -619,7 +612,7 @@ covers what.
   recorded by the rule of B7): jdk26u's files (https://github.com/openjdk/jdk26u at `baf63fb`) transcribed with
   the changes their headers name, `overlay/jdk/java.base/java/util/concurrent/atomic/AtomicIntegerFieldUpdater.java`,
   `AtomicLongFieldUpdater.java`, `AtomicReferenceFieldUpdater.java` (F16) and `java/nio/channels/FileChannel.java`
-  (F7); `java/nio/DirectByteBuffer.java` and `DirectByteBufferR.java` (F7), derived from the JDK build's generated
+  (F7, until F9: jdk26u's file again); `java/nio/DirectByteBuffer.java` and `DirectByteBufferR.java` (F7), derived from the JDK build's generated
   `HeapByteBuffer.java` and `HeapByteBufferR.java` (`make/modules/java.base/gensrc/GensrcBuffer.gmk` over
   `src/java.base/share/classes/java/nio/Heap-X-Buffer.java.template`); `java/nio/MappedByteBuffer.java` and
   `sun/nio/ch/FileChannelImpl.java` (F7), which keep jdk26u's public members' documented behaviour, checks,
@@ -658,6 +651,24 @@ covers what.
   are Arbace's own.
   Their jdk26u sources join `jdk/forms/` once `bin/jrt-convert update` has run: 47 files of selector-sources (40 of
   `src/java.base/share/classes`, 4 of `src/java.base/unix/classes`, 3 of `src/java.base/linux/classes`).
+- F9's java.nio.file and JCS162's interrupts (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F9 (write-ahead)", "As
+  built: JCS162"; recorded by the rule of B7): jdk26u's files (https://github.com/openjdk/jdk26u at `baf63fb`) derived
+  with the changes their headers name (`.tmp/f9/derive.py`'s asserted replacements), in `overlay/jdk/java.base/`:
+  `java/nio/file/Files.java`, `FileSystems.java`, `FileChannelLinesSpliterator.java`, `spi/FileSystemProvider.java`,
+  `sun/nio/fs/UnixNativeDispatcher.java`, `LinuxNativeDispatcher.java`, `LinuxWatchService.java`, `UnixFileSystem.java`,
+  `UnixChannelFactory.java`, `UnixPath.java`, `NativeBuffer.java`, `NativeBuffers.java` and
+  `UnixUserDefinedFileAttributeView.java`; `sun/nio/ch/FileChannelImpl.java`'s `setUninterruptible` (jdk26u's);
+  `go/arbace/jrt/nio_fs_linux.ae`, a port to Go forms of jdk26u's
+  `src/java.base/unix/native/libnio/fs/{UnixNativeDispatcher,UnixFileSystem}.c` and
+  `src/java.base/linux/native/libnio/fs/{LinuxNativeDispatcher,LinuxWatchService}.c` (their system calls, flags,
+  results and errors), and `go/arbace/jrt/thread.ae`'s `Thread.interrupt` and `blockedOn` (jdk26u's
+  `java/lang/Thread.java`'s): Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2
+  with the Classpath Exception (text below); the rest of those files, `go/arbace/jrt/nativemem.ae`, `nio_fs_other.ae`,
+  `nio_fs_linux_amd64.ae`, `nio_fs_linux_arm64.ae`, `nio_fs_test.ae`, `jdk/internal/jrt/NioStrings.java`,
+  `jdk/internal/jrt/HostThreads.java`, `HostFiles.java`'s `adopt` and the variant `AbstractInterruptibleChannel.ae`
+  are Arbace's own. Their jdk26u sources join `jdk/forms/` once `bin/jrt-convert update` has run: 91 files of
+  nio-file-sources (70 of `src/java.base/share/classes`, 15 of `src/java.base/unix/classes`, 6 of
+  `src/java.base/linux/classes`) and the generated `sun/nio/fs/UnixConstants.java`.
 - Other Go-build variants (J2G-SPEC §4.6; recorded by the rule of B7):
   `overlay/jdk/variants/AbstractChronology.ae`, `BitSet.ae`, `CRC32.ae`, `Collectors.ae`,
   `File.ae`, `FileHandler.ae`, `ParseUtil.ae`, `TimeZone.ae`, `TzdbZoneRulesProvider.ae`,
