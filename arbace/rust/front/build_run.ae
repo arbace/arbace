@@ -1,0 +1,131 @@
+(ns arbace.rust.front.build-run
+  "RF10's run (doc/rust/FRONTEND-SURVEY.md, \"As built: RF10 (first slice)\"): a program's own bodies from Arbace's MIR in
+  place of rustc's. The pipeline (arbace.rust.front.build-check/build-program: no rustc) builds each body at the built phase;
+  the passes rustc runs before codegen that change what the slice's bodies mean are applied (CleanupPostBorrowck: fake
+  reads, place mentions and user type ascriptions removed, false edges and false unwinds made gotos; with panic=abort,
+  every unwind action unreachable as AbortUnwindingCalls and the abort strategy leave it); then each body takes the
+  place of the record's body of the same name in the helper's --mono-mir dump (the oracle tier's record: the program's
+  symbols, std's resolved callees, the layouts), the facts codegen reads that are not the body's own carried over from
+  the record (the symbol, a callee's instance and symbol, a function constant's symbol). arbace.rust.back.codegen then
+  makes its LLVM forms as from rustc's MIR.
+
+    -main FRONT-DIR RECORD OUT NAME [--panic-abort]   RECORD the helper's mono dump; OUT the dump with our bodies; prints
+                                                       one line per body (ours, or the record's and why)"
+  (:require [arbace.rust.front.build-check :as bc] [arbace.rust.front.mir :as mir] [arbace.string :as str])
+  (:import [java.io File]))
+
+(defn- read-forms [s] (let [r (java.io.PushbackReader. (java.io.StringReader. s))]
+                        (loop [acc []] (let [x (read {:eof ::eof} r)] (if (= x ::eof) acc (recur (conj acc x)))))))
+
+(defn- walk [f x]
+  (let [x (f x)]
+    (cond (seq? x) (apply list (map #(walk f %) x))
+          (vector? x) (mapv #(walk f %) x)
+          (map? x) (into {} (for [[k v] x] [k (walk f v)]))
+          :else x)))
+
+(defn- record-facts
+  "From the record's bodies: each function constant's text -> its symbol; each callee's const text -> [callee loc]; each
+  type's text -> its form (rustc's DefIds)"
+  [bodies]
+  (let [fsym (atom {}) callee (atom {}) tys (atom {})]
+    (doseq [b bodies]
+      (walk (fn [x]
+              (when (and (seq? x) (= 'const (first x)) (some #{:fn-symbol} x))
+                (swap! fsym assoc (second x) (second (drop-while #(not= :fn-symbol %) x))))
+              (when (and (seq? x) (= 'call (first x)) (> (count x) 6))
+                (swap! callee assoc (second (second x)) [(nth x 6) (nth x 7)]))
+              (when (and (seq? x) (= 'ty (first x)) (string? (second x)))
+                (swap! tys assoc (second x) x))
+              x)
+            (dissoc b :alloc-data)))
+    {:fsym @fsym :callee @callee :tys @tys}))
+
+(defn- runtime-body
+  "Our built body made the runtime body codegen takes, with the record's facts"
+  [ours rec facts abort?]
+  (let [unwind (fn [u] (if abort? '(unreachable) u))
+        loc (list 'loc "?" 0 0)
+        fix-ty (fn [x] (if (and (seq? x) (= 'ty (first x))) (get (:tys facts) (second x) x) x))
+        fix-const (fn [x] (if (and (seq? x) (= 'const (first x)) (get (:fsym facts) (second x)) (not (some #{:fn-symbol} x)))
+                            (concat x [:fn-symbol (get (:fsym facts) (second x))])
+                            x))
+        term (fn [t]
+               (case (first t)
+                 false-edge (list 'goto (second t))
+                 false-unwind (list 'goto (second t))
+                 call (let [[_ f args dest target u] t
+                            [cal l] (or (get (:callee facts) (second f))
+                                        (throw (ex-info (str "no callee in the record for " (second f)) {})))]
+                        (list 'call f args dest target (unwind u) cal l 0))
+                 assert (let [[_ c e m target u] t] (list 'assert c e m target (unwind u) loc 0))
+                 drop (let [[_ p target u r d] t] (list 'drop p target (unwind u) r d nil))
+                 t))
+        keep-stmt? (fn [s] (not (or (#{'fake-read 'place-mention} (first s))
+                                    (and (= 'raw (first s)) (str/starts-with? (str (second s)) "AscribeUserType")))))]
+    (walk (comp fix-const fix-ty)
+          (merge (select-keys rec [:def :def-id :phase :instance :symbol :name :kind :track-caller :spread-arg])
+                 {:args (:args ours) :ret (:ret ours)
+                  :locals (:locals ours)
+                  :scopes (mapv (fn [[p _]] [p nil nil nil false]) (:scopes ours))
+                  :debug (:debug ours)
+                  :blocks (mapv (fn [b] {:cleanup (:cleanup b) :stmts (vec (filter keep-stmt? (:stmts b))) :after-dbg [] :term (term (:term b))})
+                                (:blocks ours))
+                  :allocs "" :alloc-data []}))))
+
+;; layouts the record lacks (rustc's optimized MIR drops the unit temporaries and the overflow checks' tuples our built
+;; MIR keeps): rustc_abi's layout of scalars, unit and pairs of scalars (univariant's scalar pair), the rest refused
+(def ^:private max64 18446744073709551615N)
+(defn- scalar-of [st]
+  (let [k (first st)]
+    (case k
+      bool [1 1 (list 'int 8 false [0 1])]
+      char [4 4 (list 'int 32 false [0 1114111])]
+      (int uint) (let [n (second st) bits (case n ("isize" "usize") 64 (parse-long (subs n 1)))]
+                   [(quot bits 8) (min 8 (quot bits 8)) (list 'int bits (= k 'int) [0 (dec (reduce * 1N (repeat bits 2N)))])])
+      (ref ptr) [8 8 (list 'ptr [(if (= k 'ref) 1 0) max64])]
+      nil)))
+
+(defn- layout-of [[_ text st]]
+  (let [st (if (symbol? st) (list st) st)]
+    (cond
+      (= text "()") {:size 0 :align 1 :abi '(memory true) :fields [] :variants '(single 0) :uninhabited false}
+      (scalar-of st) (let [[sz al sc] (scalar-of st)] {:size sz :align al :abi (list 'scalar sc) :fields '(primitive) :variants '(single 0) :uninhabited false})
+      (and (= 'tuple (first st)) (= 2 (count (rest st))) (every? #(scalar-of (let [x (nth % 2)] (if (symbol? x) (list x) x))) (rest st)))
+      (let [[a b] (map #(scalar-of (let [x (nth % 2)] (if (symbol? x) (list x) x))) (rest st))
+            off (* (:align {} (second b) (second b)) (quot (+ (first a) (dec (second b))) (second b)))
+            al (max (second a) (second b))]
+        {:size (* al (quot (+ off (first b) (dec al)) al)) :align al :abi (list 'pair (nth a 2) (nth b 2) off) :fields [0 off] :variants '(single 0) :uninhabited false})
+      :else nil)))
+
+(defn -main [front-dir record out n & flags]
+  (let [abort? (some #{"--panic-abort"} flags)
+        forms (read-forms (slurp record))
+        rec-bodies (for [f forms :when (= 'mir/body (first f))] (second f))
+        facts (record-facts rec-bodies)
+        ours (into {} (for [[nm b err] (bc/build-program front-dir n)] [nm [b err]]))
+        lines (atom [])
+        new-forms (for [f forms]
+                    (if (= 'mir/body (first f))
+                      (let [rec (second f) [b err] (get ours (:name rec))]
+                        (if b
+                          (try (let [r (runtime-body b rec facts abort?)
+                                     ;; the negative control (RF10_CONTROL=1): every Add of our bodies a Sub, so the run must differ
+                                     r (if (System/getenv "RF10_CONTROL") (walk #(if (= "Add" %) "Sub" (if (= "AddWithOverflow" %) "SubWithOverflow" %)) r) r)
+                                     r (assoc r :phase "arbace-built+cleanup")]
+                                 (swap! lines conj (str "ours   " (:name rec)))
+                                 (list 'mir/body r))
+                               (catch Throwable e (swap! lines conj (str "record " (:name rec) " (" (.getMessage e) ")")) f))
+                          (do (swap! lines conj (str "record " (:name rec) " (" (if err err "not ours: std's or a shim") ")")) f)))
+                      f))]
+    (let [new-forms (doall new-forms)
+          have (set (for [f forms :when (= 'mir/layouts (first f)) [t _] (second f)] t))
+          used (atom {})
+          _ (doseq [f new-forms :when (= 'mir/body (first f))]
+              (walk (fn [x] (when (and (seq? x) (= 'ty (first x)) (string? (second x)) (not (have (second x)))) (swap! used assoc (second x) x)) x) (:locals (second f))))
+          extra (keep (fn [[t x]] (when-let [l (layout-of x)] [t l])) @used)
+          new-forms (for [f new-forms] (if (= 'mir/layouts (first f)) (list 'mir/layouts (vec (sort-by first (concat (second f) extra)))) f))]
+      (spit out (with-out-str (doseq [f new-forms] (prn f)))))
+    (doseq [l @lines] (println l))
+    (println (format "build-run: %s: %d of %d bodies ours" n (count (filter #(str/starts-with? % "ours") @lines)) (count @lines)))
+    (System/exit 0)))
