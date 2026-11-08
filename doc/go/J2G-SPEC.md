@@ -581,6 +581,22 @@ calls members by name must root the members it may call (§10.6; amendment P2, a
   named (test/java/divergences.edn). The runtime's and javac's builds have no header or members
   failure, so their translations do not change. Unit tests: `bin/j2g-unit` (test/j2g/unit.ae, the
   fixture test/j2g/unit/unresolved).
+- **The analysis alone** (JCS265 (b), decided 2026-11-08, built 2026-11-08: doc/classes/JAVA-CONFORMANCE-SURVEY.md,
+  "As built: JCS265 (b)"). `bin/j2g --analyze-only` runs the load (`w/load-world`: read, enter, headers,
+  members, bridges, analysis, the variants applied) and stops: nothing is reached, translated or written but
+  `OUT/report.edn`, `{:analyze-only true :files N :classes N :analysis-failures [[class msg] ...] :variants
+  {...} :times {:load s}}`, the failures in a translation's report's format, each also printed (`j2g:
+  analysis failure CLASS: MSG`); the status is 0 whatever failed, and `--program` embeds nothing. Its
+  default `GOMEMLIMIT` is 1800MiB (a translation's 20GiB) and it takes no heavy lock: jdk/forms with a batch
+  of tests stays within 2 GiB (about 2.0 GB peak with 5 or 30 tests, a load of about 1 minute), where a
+  translation of one test does not. `J2G_SOURCES` names namespaces loaded from the checkout before j2g's
+  (`arbace.classes.analyze` on an executable whose analysis is older than the checkout's). `bin/java-check
+  --levels read,compiled --analyze-only --save DIR [--shard-size 30]` runs it a shard at a time over jdk/forms
+  and the tests' forms alone (no runtime forms, no compiled namespaces: a jtreg test names none of them),
+  attributes the failures as the compiled level's refusals (`java.check/refusals`), and saves each test as
+  `refused` (j2g's reason) or `analyzed` (none of its classes refused; what translation, Go or the run
+  would meet is not measured): the day's light measurement, never judged or recorded. Unit test: bin/j2g-unit's
+  `analyze-only` checks.
 
 ### 4.2 Go packages
 

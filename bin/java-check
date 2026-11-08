@@ -58,7 +58,12 @@
 #                                 refuses or whose Go does not compile taken out (refused, j2g's or
 #                                 Go's reason) and the shard translated again; each main action run
 #                                 on the program and judged as interp's; JAVA_CHECK_HEAVY, a command
-#                                 prefix for j2g and the build (a slot of the host's)
+#                                 prefix for j2g and the build (a slot of the host's);
+#                                 --analyze-only (JCS265 (b), with --save): j2g's analysis alone, a
+#                                 shard's world jdk/forms and its tests' forms (bin/j2g --analyze-only),
+#                                 each test refused (j2g's reason) or analyzed, nothing translated or
+#                                 built: the day's light measurement (--shard-size 30 stays within
+#                                 2 GiB), its results never judged or recorded
 #                        classes  javac on Arbace's class files (bin/repr-java javac, -g:none -nowarn
 #                                 -XDsuppressNotes -proc:none -implicit:none and the test's options):
 #                                 since JCV1 pass when javac accepts the test (none is @compile/fail),
@@ -882,6 +887,33 @@ compiled_shard() {
   rm -rf "$s/prog" "$s/forms"
 }
 
+# analyze_shard K DIR: --analyze-only's shard (JCS265 (b), J2G-SPEC §4.1, "The analysis alone"): the
+# tests of DIR/tests.txt merged as compiled_shard merges them, j2g's world loaded and analyzed over
+# jdk/forms (JRT_CONV) and their forms alone (bin/j2g --analyze-only on the executable; no program, no
+# runtime's forms, no compiled namespaces: a test names none of them), within 2 GiB for 30 tests (with
+# --shard-size 30); j2g's analysis failures attributed as the compiled level's refusals are
+# (java.check/refusals); a test refused, the others "analyzed" (none of their classes refused: what a
+# translation and a build would meet after it is not measured). DIR/results.tsv; DIR/out/report.edn
+# kept. Status 3 when j2g died (run_shard splits the shard)
+analyze_shard() {
+  local k=$1 s=$2 st=0
+  : > "$s/refused.tsv"
+  jc merge "$work" "$s" > "$s/merge.log" || { cat "$s/merge.log"; return 1; }
+  if [ ! -s "$s/built.txt" ]; then : > "$s/results.tsv"; return 0; fi
+  echo "== java-check compiled --analyze-only: shard $k: j2g's analysis, $(wc -l < "$s/built.txt") tests ($(since_t0))" >&2
+  rm -rf "$s/out"
+  (cd "$root" && J2G_GO_EXE=$rexe bin/j2g --analyze-only --jdk "${JRT_CONV:-jdk/forms}" --input "$s/forms" --out "$s/out") > "$s/j2g1.log" 2>&1 || st=$?
+  if [ ! -f "$s/out/report.edn" ]; then
+    tail -20 "$s/j2g1.log" >&2; echo "java-check compiled --analyze-only: shard $k: j2g failed ($s/j2g1.log)" >&2; return 3
+  fi
+  jc refusals "$work" "$s" > "$s/refusals1.log"; cat "$s/refusals1.log" >&2
+  {
+    awk -F'\t' '{print $1 "\tcompiled\trefused\t" $2}' "$s/refused.tsv"
+    awk -F'\t' 'FILENAME == ARGV[1] { r[$1] = 1; next } !($1 in r) { print $1 "\tcompiled\tanalyzed\tj2g'"'"'s analysis refused none of its classes (--analyze-only)" }' "$s/refused.tsv" "$s/built.txt"
+  } | sed -e "s|$root|.|g" > "$s/results.tsv"
+  rm -rf "$s/forms"
+}
+
 # run_shard K DIR: shard K (DIR/tests.txt) by compiled_shard, its results in DIR/results.tsv; a
 # shard whose j2g dies (compiled_shard's status 3) split in two halves (DIR/h1, DIR/h2) and each
 # run again likewise (JCS48 (b)), down to JAVA_CHECK_SPLIT_MIN tests (default 25); a shard that
@@ -890,7 +922,7 @@ compiled_shard() {
 run_shard() {
   local k=$1 d=$2 st=0 n h
   rm -f "$d/results.tsv"; rm -rf "$d/h1" "$d/h2"
-  compiled_shard "$k" "$d" || st=$?
+  "${shard_fn:-compiled_shard}" "$k" "$d" || st=$?
   [ "$st" = 0 ] && return 0
   n=$(wc -l < "$d/tests.txt")
   if [ "$st" = 3 ] && [ "$n" -gt "${JAVA_CHECK_SPLIT_MIN:-25}" ]; then
@@ -959,6 +991,23 @@ aot_fresh() {
 # results fails it (report 003's finding 2)
 compiled_level() {
   gotable=${JAVA_CHECK_GOTABLE:-} heavy=${JAVA_CHECK_HEAVY:-}
+  if [ -n "${analyze_only:-}" ]; then
+    # JCS265 (b): no program, so no compiled namespaces and no Go toolchain
+    shard_fn=analyze_shard
+    [ -n "$shard_only" ] || rm -rf "$work/j2g"
+    mkdir -p "$work/j2g"
+    jc shards "$work" "$shard_size" >&2 || { echo "java-check compiled: java.check's shards failed" >&2; return 1; }
+    local s
+    for s in $(cd "$work/j2g" && ls -d s* | sed 's/^s//' | sort -n); do
+      if [ -z "$shard_only" ] || [[ ",$shard_only," == *",$s,"* ]]; then
+        run_shard "$s" "$work/j2g/s$s"
+      fi
+      [ -f "$work/j2g/s$s/results.tsv" ] || { echo "java-check compiled: shard $s has no results ($work/j2g/s$s)" >&2; return 1; }
+      cat "$work/j2g/s$s/results.tsv"
+    done
+    return 0
+  fi
+  shard_fn=compiled_shard
   java_check_base || return 1
   goroot=${ARBACE_GOROOT:-/root/tamago-go}
   [ -f "$aot/packages.edn" ] || { echo "java-check compiled: no compiled namespaces $aot (bin/arbace-go --build, or JAVA_CHECK_AOT)" >&2; return 1; }
@@ -1177,7 +1226,7 @@ check() {
   local only="" corpus="" record="" essential="" list=""
   save=""
   jobs=8 t0=$SECONDS shard_size=${JAVA_CHECK_SHARD_SIZE:-500} shard_only=""
-  levels=read,interp timeout=20 from_committed="" load=${JAVA_CHECK_LOAD:-files}
+  levels=read,interp timeout=20 from_committed="" load=${JAVA_CHECK_LOAD:-files} analyze_only=""
   while [ $# -gt 0 ]; do
     case $1 in
       --levels) levels=$2; shift 2 ;;
@@ -1192,9 +1241,15 @@ check() {
       --record) record=1; shift ;;
       --essential) essential=1; shift ;;
       --save) save=$2; shift 2 ;;
+      --analyze-only) analyze_only=1; shift ;;
       *) echo "java-check: unknown option $1 (bin/java-check --help)" >&2; return 2 ;;
     esac
   done
+  # JCS265 (b): --analyze-only, the compiled level's j2g analysis alone, its results saved, never judged
+  if [ -n "$analyze_only" ]; then
+    case ",$levels," in *,compiled,*) ;; *) echo "java-check: --analyze-only is the compiled level's (--levels ...,compiled)" >&2; return 2 ;; esac
+    [ -n "$save" ] || { echo "java-check: --analyze-only saves its results (--save DIR): they are no compiled level's to judge or record" >&2; return 2; }
+  fi
   # GT8 (the rotation's lists): --list FILE, the tests' ids (tNNNNN) one a line, blank and # lines left out (plan's --list)
   if [ -n "$list" ]; then
     [ -f "$list" ] || { echo "java-check: --list $list: no such file" >&2; return 2; }

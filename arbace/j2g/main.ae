@@ -46,7 +46,14 @@
     --record-edge FILE instead, ask the JVM (reflection, class files) and write what this run
                        asked into FILE (bin/j2g-edge update merges the builds' runs)
     --jvm-reflection   instead, ask the JVM, without recording (a world the edge does not
-                       cover)"
+                       cover)
+    --analyze-only     the world loaded and analyzed (w/load-world), nothing reached,
+                       translated or written but DIR/report.edn: :analyze-only true, :files,
+                       :classes (analyzed), :analysis-failures (as a translation's report has
+                       them), :variants, :times {:load s}; each failure printed (j2g: analysis
+                       failure CLASS: MSG). No --program embedding. The day's light measurement
+                       of what the analysis refuses (J2G-SPEC §4.1, The analysis alone;
+                       JCS265 (b)): jdk/forms and a batch of tests within 2 GiB"
   (:require [arbace.string :as str]
             [arbace.java.io :as io]
             [arbace.classes.types :as t]
@@ -112,6 +119,7 @@
       "--java-namespaces" (recur (rest more) (update opts :java-namespaces (fnil conj []) (first more)))
       "--record-edge" (recur (rest more) (assoc opts :record-edge (first more)))
       "--jvm-reflection" (recur more (assoc opts :jvm-reflection true))
+      "--analyze-only" (recur more (assoc opts :analyze-only true))
       (throw (ex-info (str "j2g: unknown option " a) {})))))
 
 (defn- internal [s] (str/replace s "." "/"))
@@ -548,6 +556,26 @@
                     :else (pr-str v)))]
     (str "{" (str/join ",\n " (for [[k v] report] (str (pr-str k) " " (val-str v)))) "}\n")))
 
+(defn- analysis-report
+  "--analyze-only (JCS265 (b), J2G-SPEC §4.1, \"The analysis alone\"): the loaded world's
+  analysis failures, printed a line each and written into OUT/report.edn as a translation's report
+  has them (:analysis-failures, [class message] pairs), with the counts and the load's seconds; no
+  reachability, translation or Go. Returns the report (no :errors: the status is 0 whatever
+  failed)."
+  [opts world t-load]
+  (let [failed (vec (:failed world))
+        report {:analyze-only true
+                :files (count (:files world))
+                :classes (count @(:compile-set world))
+                :analysis-failures failed
+                :variants (:variants world)
+                :times {:load t-load}}]
+    (doseq [[n msg] failed]
+      (println (str "j2g: analysis failure " n ": " (str/replace (str msg) #"\s+" " "))))
+    (write! (str (:out opts) "/report.edn") (report-str report))
+    (println (str "j2g: --analyze-only: " (count failed) " analysis failures; " (:out opts) "/report.edn"))
+    report))
+
 (defn run*
   "j2g's run, in the class environment run binds."
   [opts]
@@ -556,7 +584,7 @@
         root-dir "."
         ;; the converted JDK: --jdk, else $JRT_CONV, else the committed forms (jdk/README.md)
         jdk (or (:jdk opts) (System/getenv "JRT_CONV") "jdk/forms")
-        opts (if (:program opts)
+        opts (if (and (:program opts) (not (:analyze-only opts)))
                (let [srcs (embed/sources root-dir (:embed opts))
                      ;; the JDK's resource data, next to the converted JDK (jdk/data)
                      data (embed/data (str (.getParent (io/file jdk)) "/data"))
@@ -605,7 +633,11 @@
             (println (str "j2g: variant of " n ": " (:replaced c) " replaced, " (:cut c) " cut, " (:added c) " added")))
         t-load (secs t0)
         _ (println (str "j2g: " (count (:files world)) " files, " (count @(:compile-set world)) " classes analyzed in " t-load " s"
-                        (when (seq (:failed world)) (str ", " (count (:failed world)) " failures"))))
+                        (when (seq (:failed world)) (str ", " (count (:failed world)) " failures"))))]
+   (if (:analyze-only opts)
+    ;; --analyze-only: the load's report alone (JCS265 (b))
+    (analysis-report opts world t-load)
+    (let [
         jrt-dir "go/arbace/jrt"
         scan (jrt/scan jrt-dir)
         manifest (manifest-classes jrt-dir)
@@ -1080,7 +1112,7 @@
               (println (str "j2g: " (reduce + (map count (vals races))) " candidate two-word race fields in "
                             (count races) " classes (report.edn :race-candidates); "
                             (count collisions) " name collisions, " (count pp-overrides) " package-private overrides"))
-              report)))))))
+              report)))))))))
 
 (def id-floor
   "Where the runtime's id counter (RT/nextID, gensym's) stands when j2g's run starts. The
