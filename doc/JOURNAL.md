@@ -791,3 +791,31 @@ third of the concurrent tests, every twentieth other pass) 66 of 67, main's hsi 
 night's `bin/hsi check ... --record`: the testsuite's core 658 of 701 (652), the record 796 of 908; the divergences' edits and the night's
 commands in doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: HE9 on main (write-ahead)". HE9's 666 counted 11 programs whose references
 main's record-ref cannot build (the C includes GHC's `_stub.h`): HES83 proposed.
+
+## 2026-11-08: F10b, DatagramChannel and multicast through jdk26u's DatagramChannelImpl (branch `java-f10b`, on next bd33e27cc)
+
+By JCS163 (a) (the user, 2026-11-07): Java's datagram channels as jdk26u's own code over F10a's native layer
+(doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F10b (write-ahead)"). Sources: https://github.com/openjdk/jdk26u at `baf63fb`,
+`src/java.base/share/classes/java/nio/channels/{DatagramChannel,MulticastChannel,MembershipKey}.java` and
+`sun/nio/ch/{DatagramChannelImpl,DatagramSocketAdaptor,MembershipKeyImpl,MembershipRegistry}.java` taken as they are (the new list
+`datagram-channel-sources` of `test/jrt/jrt_sources.ae`); `share/classes/sun/nio/ch/NativeSocketAddress.java` and
+`unix/classes/sun/nio/ch/DatagramDispatcher.java` transcribed as overlays (a struct sockaddr as a byte array of Linux's layout; the
+dispatcher over HostChannels' read0 and write0); `src/java.base/unix/native/libnio/ch/DatagramChannelImpl.c`, `DatagramDispatcher.c`
+and `Net.c`'s multicast natives ported rule for rule into `go/arbace/jrt/channels_linux.ae` (nine natives of
+`jdk.internal.jrt.HostChannels`: recvfrom and sendto of the sockaddr's bytes, connect to AF_UNSPEC, IP_ADD/DROP_MEMBERSHIP,
+the source-specific options, MCAST_JOIN/LEAVE_SOURCE_GROUP of a group_source_req, IP/IPV6_MULTICAST_IF). Variants:
+DatagramChannelImpl (no Cleaner; the two native-address methods over the buffer's array), DatagramSocketAdaptor (jrt's public
+accessors of NetworkInterface.getDefault, its constructor and DatagramSocket.NO_DELEGATE in place of a private lookup's method
+handles), DatagramSocket (F11's createDelegate replacement removed: the NIO adaptor is the default delegate, JCS153 (c)'s second
+step), NetworkInterface (the accessors). Alternatives considered: deriving the whole DatagramChannelImpl as an overlay as F10a did
+Net (rejected: 1,949 lines for six members); NativeSocketAddress's address as a token naming a Go-side buffer, as F10a's EPoll
+(rejected: the byte array is the sockaddr itself, which the kernel reads and writes directly); keeping F11's legacy delegate as
+DatagramSocket's default (rejected by JCS153 (c): the JDK's own path); the asynchronous channels in the same slice (left: JCS168).
+
+Checks (light): the joint javac check (`.tmp/night7/all9-run.sh`) 2,286 files, 0 errors, 4,959 classes; `bin/repr-java read-jdk
+--check` of the new files with the overlays 20 of 20, 0 javac errors; the variants applied and parsed (DatagramChannelImpl 6/4/1);
+`go build` and `go vet` of `./jrt` on linux/amd64 and arm64, `go test ./jrt` passing with the new TestChannelDatagram and
+TestChannelMulticast (a join on the loopback and a datagram to the group received). Expected after the night's conversion, build
+and levels: 16 tests of java/nio/channels become runnable, about 12 passing; the 31 datagram tests of java/net move to the adaptor.
+Proposed: JCS168 (the asynchronous channels, jdk26u's EPollPort group recommended), JCS169 (F11's HostDatagramSocketImpl retired
+after a release), JCS170 (j2g's constant method handles of private lookups).
