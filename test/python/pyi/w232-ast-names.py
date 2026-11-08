@@ -29,3 +29,24 @@ t3.body[1].names[0].asname = "@s"
 t3.body[2].value.args[0].func.value.id = "@pytest_ar"
 t3.body[2].value.args[1].id = "@s"
 exec(compile(t3, "<t3>", "exec"), {})
+
+
+class M(dict):
+    def __missing__(self, key):
+        return "seen " + key
+
+
+e = ast.Expression(ast.BoolOp(ast.Or(), [ast.Name("$stress", ast.Load()), ast.Name("$x y", ast.Load())]))
+ast.fix_missing_locations(e)
+c = compile(e, "<pytest match expression>", "eval")
+print(eval(c, {"__builtins__": {}}, M()), c.co_names)
+g = {}
+exec(compile(t, "<t>", "exec"), g)
+print(sorted(k for k in g if not k.startswith("__")), g["f"].__code__.co_varnames)
+t4 = ast.parse("def h(a, *, k=1): return a + k\nprint(h(1, k=2))")
+t4.body[0].args.kwonlyargs[0].arg = "@k"
+t4.body[0].body[0].value.right.id = "@k"
+t4.body[1].value.args[0].keywords[0].arg = "@k"
+ns4 = {}
+exec(compile(t4, "<t4>", "exec"), ns4)
+print(ns4["h"].__code__.co_varnames, ns4["h"].__kwdefaults__)
