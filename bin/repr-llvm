@@ -2,6 +2,9 @@
 # repr/llvm, LLVM IR's bridge (doc/llvm/SPEC.md; doc/cpp/CPP-SURVEY.md §5.2, "As built: CX6"): LLVM IR text as LLVM forms
 # and back, arbace.repr.llvm on the tools' host (evaluated from the checkout).
 #
+#   bin/repr-llvm pins check   (GT9; bin/gate --pins) the host's LLVM against its pins, no fetch: the tools' version (test/cpp/
+#                              corpora.edn's :alpine-clang23), the installed packages, test/llvm's probe list
+#
 # The judges (doc/llvm/LLVM-CROP-SURVEY.md, "As built: LL9a"; the user's decision of 2026-11-07): by default a test's own
 # verdict wherever it has one, so no LLVM tool runs at the check and none of its records is read for such a test: the round
 # trip's forms read again equal and the print taken by Arbace's verifier as its original is; mode :full's text printed back
@@ -174,7 +177,38 @@ own_verdicts() {
   done < "$1" > "$2"
 }
 
+# pins_check (GT9, GTS211; the gate's `bin/gate --pins`; 058168d99's, which a merge of the LLVM line had dropped): the host's LLVM against
+# its pins (test/cpp/corpora.edn's :pins :alpine-clang23: the version and the installed packages, the tarball's own pin being repr-cpp's
+# `pins check`), the tools the judges run, and test/llvm's probe list: every probe file there, every probe test/llvm/probes-known.tsv
+# classes in the list. No fetch, no network.
+pins_check() {
+  local bad=0 bin=${REPR_LLVM_BIN:-/usr/lib/llvm23/bin} want pkg t have n=0 pk=$TMPDIR/repr-llvm-pins.$$
+  want=$(arbace_tool -e "(print (get-in (read-string (slurp \"$root/test/cpp/corpora.edn\")) [:pins :alpine-clang23 :pkgver]))")
+  [ -n "$want" ] || { echo "  PIN no :alpine-clang23's :pkgver in test/cpp/corpora.edn"; return 1; }
+  for t in llvm-as opt lli FileCheck clang; do
+    [ -x "$bin/$t" ] || { echo "  PIN $bin/$t is missing"; bad=1; continue; }
+    have=$("$bin/$t" --version 2>&1 | grep -o -m1 '[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*' | head -1)
+    [ "$have" = "$want" ] || { echo "  PIN $t is $have, the pin is $want"; bad=1; }
+  done
+  arbace_tool -e "(doseq [p (get-in (read-string (slurp \"$root/test/cpp/corpora.edn\")) [:pins :alpine-clang23 :installed])] (println p))" > "$pk"
+  while read -r pkg; do
+    [ -n "$pkg" ] || continue
+    apk list -I "${pkg%%-[0-9]*}" 2>"$pk.err" | grep -q "^$pkg " || { echo "  PIN $pkg is not the installed package"; bad=1; }
+  done < "$pk"
+  rm -f "$pk" "$pk.err"
+  while IFS=$'\t' read -r _ p; do
+    [ -n "$p" ] || continue
+    n=$((n + 1)); [ -f "$root/$p" ] || { echo "  PIN test/llvm/probes.list names $p, which is not a file"; bad=1; }
+  done < "$root/test/llvm/probes.list"
+  while IFS=$'\t' read -r id _; do
+    case $id in ''|'#'*) continue ;; esac
+    grep -q "^$id	" "$root/test/llvm/probes.list" || { echo "  PIN test/llvm/probes-known.tsv classes $id, which is not in probes.list"; bad=1; }
+  done < "$root/test/llvm/probes-known.tsv"
+  if [ $bad = 0 ]; then echo "llvm pins: LLVM $want (llvm-as, opt, lli, FileCheck, clang), the installed packages, $n probes"; else echo "llvm pins: NOT held" >&2; return 1; fi
+}
+
 case ${1:-} in
+  pins) case ${2:-} in check) pins_check ;; *) echo "usage: bin/repr-llvm pins check" >&2; exit 2 ;; esac ;;
   read|print|verify) arbace_tool -m arbace.repr.llvm "$@" ;;
   roundtrip)
     if [ "${2:-}" = --text ]; then
