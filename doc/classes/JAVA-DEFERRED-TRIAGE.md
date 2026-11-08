@@ -2957,3 +2957,184 @@ wake channels and selectors; F10b's DatagramChannel then the asynchronous channe
 (`bin/jrt-convert check-javac` as a light essential gate step; the overlays' derivations as Arbace, `bin/jrt-convert derive --check`);
 **JCS167 (a)**: serialization ported (ObjectOutputStream, ObjectInputStream, ObjectStreamClass over jrt's reflection, j2g's SerialNew;
 clojure-cdr's staged port), its tests deferred again then regained, toward 90% strict.
+
+## As built: F14 (first slice, write-ahead)
+
+Branch `java-f14` (from `next` `13895c06e`), 2026-11-08, by day under the light rules: F14, the triage's rank 16 and
+the first not built (JC9's plan, decided by the user 2026-11-05), **its first slice: declaration annotations at run time
+(J2G-SPEC's R16 reversed for them), with Field's primitive accessors**. jrt's Go, j2g's tables, the interpreter's hand-off,
+the closure's list, light checks only; nothing converted, translated as a program or built into an executable. Proxy is
+not used (serialization's JCS170, branch `java-serial2`, keeps it): an annotation is no proxy here (JCS210).
+
+**The 75 / 72 measured first** (`test/reap/main.ae`'s classification re-run over `check-interp.edn` and
+`check-compiled.edn`, `.tmp/f14/classify.py`, `rows.json`; the class `:reflection` holds 75 interpreted and 72 compiled,
+the triage's 74 / 68 since JC9's records), each test's failure and source read, grouped by what it needs (a test under
+each need; interp, the compiled level the same tests within a few):
+
+| need | tests | of them only this | days | tests/day |
+|---|---:|---:|---:|---:|
+| declaration annotations (getAnnotation and the rest on Class, Method, Constructor, Field; java.lang.annotation's types and exceptions; @Inherited, @Repeatable) | 20 | 14 | 1 | 14 |
+| Field's primitive accessors (getInt, setByte ...) | 3 | 3 | 0.2 | 15 |
+| member classes (getClasses, getDeclaredClasses) | 4 | 3 | 0.5 | 6 |
+| AccessFlag (Class/Member.accessFlags, the enum) | 4 | 2 | 1 | 2 |
+| Parameter, MethodParameters | 5 | 3 | 1.5 | 2 |
+| generic signatures (TypeVariable, ParameterizedType, getGeneric*) | 11 | 7 | 3 | 2.3 |
+| type annotations (AnnotatedType and its kinds) | 11 | 9 | 3 (after generics) | 3 |
+| Proxy (newProxyInstance, getProxyClass, isProxyClass) | 7 | 6 | 2 | 3 |
+| the metadata (local and anonymous classes, getEnclosingMethod/Constructor, InnerClasses modifiers, canonical names, javac's synthetic lambda methods, nestmates' constructors, array dimensions) | 18 | 15 | 3+ | 5 |
+
+So the slice is the first two rows: about 17 of the 75 for 1.2 days, the triage's average for F14 (6 a day) three times.
+
+**The design (the closed world records, jrt decodes).** Annotations are recorded ahead of time as data, the way the
+member tables are (amendment SZ3) and CDR4's tables are: no class file, no constant pool, no parser of attributes. One
+text format, decoded by jrt (`go/arbace/jrt/annotation.ae`'s header gives it: a line a record, `T` the class's, `M`
+`C` `F` a member's by name and descriptor, `P` a parameter's, `D` an annotation type's element default; a value
+self-typed: `I5`, `"TEXT"` with `\uXXXX`, `cLjava.lang.String;`, `eLjava.lang.annotation.ElementType;TYPE`, a nested
+`@DESC N ...`, `[DESC N ...`), written by one encoder, `arbace.classes.annot`, which both writers call:
+- **j2g** (`out/class-registration`): `ClassInfo.Annots` of every class it translates: the class's RUNTIME-visible
+  annotations and an annotation type's defaults; a `--program`'s own classes (the conformance check's tests, a user's
+  program: `nm/own-class?`, as their member tables list every member, JCS117 (a)) also their members' and parameters'.
+  The JDK's members' annotations are not recorded (JCS211). Every annotation type it translates gets a Go type of its
+  annotations (`decls/annotation-impl-forms`): `C_ann` embeds `jrt.AnnotationObj` and has C's markers and one method a
+  member, returning `AnnotationObj.Member` at the member's Go type; `ClassInfo.AnnNew` makes one. That object
+  satisfies C's Go interface, so translated code's cast and member call are the ordinary ones. In place of the JDK's
+  Proxy of C (AnnotationParser.annotationForMap).
+- **the interpreter** (`arbace.classes.interp`'s define!): the same data of every class it defines, members and
+  parameters included, handed to jrt (`Compiler$CF$Host.annotations`, the native `CFGo.setAnnotations` in
+  `arbace.j2g.dyncf`, `jrt.SetAnnotations`). An interpreted annotation type's objects are plain `AnnotationObj`s: its
+  Class's instance check accepts them (`jrt.AnnotationTypeOf`), its Kind is `KindAnnotation` (isAnnotation), and a call of
+  its member (CallV without a reflective method) goes to the receiver's class's public method of that key
+  (`Rt.receiverMethod`: the JVM's invokeinterface on an object of the world implementing an interpreted interface).
+- Each annotation is resolved alone (`arbace.classes.analyze/*lenient*`): one whose type or values the world cannot
+  resolve (a type outside the closed world, an edge fact not recorded) is left out, as AnnotationParser skips an
+  annotation of a type it cannot load; a class of the world is never refused for its annotations. A recorded annotation
+  whose type jrt's world has not (a cut class) is skipped when decoded.
+- **jrt** (`annotation.ae`): `java.lang.annotation.Annotation` and `java.lang.reflect.AnnotatedElement` hand-written
+  (Class, AccessibleObject and so Method, Constructor, Field implement it), with AnnotatedElement's default methods as
+  functions (a class made at run time, Dyn, implementing it); `AnnotationObj`, jdk26u's AnnotationInvocationHandler rule
+  for rule (`equalsImpl` with another implementation's members by its methods, `hashCodeImpl`, `toStringImpl` with
+  every `toSourceString`, a member's array cloned); memberValues as AnnotationParser builds it (the defaults in
+  `new HashMap<>(0)`'s iteration order, emulated: `hashMapOrder`, checked against JDK 26's, then the explicit members
+  in order); Class's `annotationData` with @Inherited from the superclass, `getAnnotationsByType` with
+  AnnotationSupport's @Repeatable containers and their order; the members' `getAnnotation`, `getDeclaredAnnotations`,
+  `getAnnotationsByType`; `getParameterAnnotations`; `Method.getDefaultValue`. An object's class is jrt's, made once per
+  type: `jdk.proxy1.$ProxyN` (the type's package when it is not public), final, extending Proxy, implementing the type,
+  its member table the elements and Annotation's four (so `getClass().getMethod("value").invoke(a)` works).
+  `isAnnotationPresent(FunctionalInterface)` keeps its answer by FromFn (Compiler.FISupport) beside the recorded one.
+- **Field's primitive accessors** (`reflect.ae`): `getBoolean` ... `getDouble`, `setBoolean` ... `setDouble`, after
+  jdk26u's FieldAccessorImpl: widening on get and set, `newGetIllegalArgumentException`'s and `getSetMessage`'s messages.
+- **The closure** (`test/jrt/jrt_sources.ae`'s `annotation-sources`, 14 files of jdk26u): java.lang.annotation's
+  `AnnotationFormatError`, `AnnotationTypeMismatchException`, `Documented`, `ElementType`,
+  `IncompleteAnnotationException`, `Inherited`, `Native`, `Repeatable`, `Retention`, `RetentionPolicy`, `Target`, and
+  java.lang's `Deprecated`, `FunctionalInterface`, `SafeVarargs`. javac's world gave up its copies of five of them
+  (`bin/javac-vendor`'s `base_files`; its forms, source list and provenance's counts by hand: 821 sources, 909 forms).
+- The analysis: a class value written `Integer/TYPE` (repr/java's spelling of `int.class`, `Void/TYPE` of `void.class`)
+  is the primitive class (it failed: "Unknown type: Byte/TYPE"); an array value keeps its element's descriptor.
+- Order: repr/java writes one `^{A ...}` per annotation and the reader assocs each outer map onto the inner one's, so a
+  declaration's annotations come in reverse; the encoder reverses them (JCS212).
+
+**Light checks done** (main's stage 0 as `ARBACE_HOST_EXE`, the frozen jar `FROZEN_JAR` of the main checkout, each
+process under 1.6 GB):
+- `go test ./jrt` on amd64 (`bin/jrt test --arch amd64`): every test passes, the new `TestAnnotationValues`,
+  `TestAnnotationAllKinds`, `TestAnnotationHashMapOrder`, `TestFieldPrimitives` among them: an annotation type and an
+  annotated class written as j2g writes them, their toString and hashCode equal to JDK 26's for the same program
+  (`.tmp/f14/jo/test/Host.java`; Class's identity hash taken out of the comparison), every value kind, the parameters'
+  annotation of a type outside the world skipped, the object's class and its member invoked;
+- `bin/jrt manifest` (jrt's manifest and member tables regenerated: Class's, Method's, Constructor's, Field's new
+  members, Annotation and AnnotatedElement), `bin/jrt testdata` (TestReflectAgainstJVM then passes);
+- the joint javac check (`.tmp/night7/all9-run.sh`): **2,291 files, 0 errors**, 4,956 classes (16 s, 1.0 GB);
+- the encoder on the frozen JVM (`.tmp/f14/encode.clj`: the conformance check's read forms of t05990, t06338, t07647,
+  t04860, t04861, t03578, t04536, t04524, t04525 analyzed, each class's data printed): every annotation the tests read
+  is recorded with its values and defaults, in source order;
+- j2g on the frozen JVM, a slice of one fixture (`.tmp/f14/fx/f14/Annots.ae`: an annotation type with defaults, an
+  annotated class, field, method and parameter; `--slice '^f14/' --jvm-reflection`, 1.4 GB heap): `ClassInfo.Annots`
+  of both classes, `AnnNew`, the type's `_ann` Go type and its three members as designed.
+
+**Expected tests** (each needs only what the slice built, as read from its source; interp / compiled):
+t05990 (Primitives: class values, void and arrays), t06338 (Pos04), t07647 (TestAnnotatedStringEncoding; passes compiled
+already, vacuously), t04860 (IsDefaultTest), t03578 (TestFMA), t04716 (FoundType), t04722
+(TestIncompleteAnnotationExceptionNPE), t04720 (RecursiveAnnotation), t04728 (NonInheritableContainee), t04729
+(OrderUnitTest), t04727 (InheritedAssociatedAnnotations), t04843 (StaticFieldTest), t07681 and t07691 (the nestmates'
+private fields), and possibly t04861 (DefaultMethodModeling), t04536 (TestPrimitiveAndArrayModifiers: the member classes'
+modifiers too) and t04841 (TestParameterAnnotations: its constructors' strings): **about 14 / 14 expected** of 17, Java eval
+and AOT each about +0.4 points. Still failing for another row of the table: t04718 (Proxy.getInvocationHandler), t04855 and
+t04848 (generics), t04524 and t04525 (getEnclosingConstructor/Method), t04730 (Package), t04836 (AnnotatedElement's
+defaults on a class of the program, with generics of the edge).
+
+**The night's commands** (heavy ones under `bin/heavy-lock`; in the night's worktree with this branch merged; one
+`bin/jrt-convert update` and one build take every area of the night):
+
+```sh
+# 0. the joint javac check of the merged tree (0 errors expected)
+.tmp/night7/all9-run.sh /root/arbace/.tmp/worktrees/next
+# 1. jdk/ converted afresh: the sources line + 14 share (java/lang/annotation's 11, Deprecated, FunctionalInterface,
+#    SafeVarargs), 0 failed, 0 javac errors; jdk/forms + 14 files and the package index java/lang/annotation.ae
+REPR_JAVA_EXE=$(ls -td /root/arbace/.tmp/gate-exe/javac-*/ | head -1)arbace-javac REPR_JAVA_STALE_OK=1 \
+  ARBACE_HEAVY_CMD=$PWD/bin/heavy-lock bin/jrt-convert update
+# 2. j2g's edge afresh (the annotation types' :retention and :targets facts the JDK's forms now ask), javac's world's
+#    edge and forms (base_files less the five: bin/javac-vendor convert, or verify against the hand edit)
+bin/heavy-lock bin/j2g-edge update && bin/heavy-lock bin/javac-vendor edge && bin/heavy-lock bin/javac-vendor verify
+# 3. the executable; j2g's report: no new refusal; the natives check finds CFGo.setAnnotations
+bin/heavy-lock bin/arbace-go --build && bin/arbace-go --smoke && bin/jrt test
+# 4. a smoke: expect "@java.lang.FunctionalInterface() true RUNTIME"
+target/arbace-go/amd64/arbace -e '(println (.getAnnotation Runnable FunctionalInterface)
+  (.isAnnotationPresent java.util.function.Function FunctionalInterface)
+  (.value (.getAnnotation java.lang.annotation.Retention java.lang.annotation.Retention)))'
+# 5. Java's levels on the area, then the corpus with the night's others: saved, not recorded; expect about 14 / 14
+JAVA_CHECK_EXE=$PWD/target/arbace-go/amd64/arbace J2G_GO_EXE=$PWD/target/arbace-go/amd64/arbace \
+  JAVA_CHECK_HEAVY=$PWD/bin/heavy-lock bin/java-check --levels interp,compiled --jobs 8 \
+  --only 'jdk/java/lang/(annotation|reflect/(Field|Method|Constructor)|Class/getModifiers)|javac/(annotations|multicatch/Pos04)|runtime/(Annotations|Nestmates/private)|compiler/floatingpoint/TestFMA' \
+  --save .tmp/f14-night/check
+```
+
+**Risks and fallbacks**: (1) a JDK class whose annotation types resolve now (Deprecated, FunctionalInterface in the world)
+records its class annotations: more data (one line a class; the JDK's members are not recorded); (2) the interpreter
+forces its classes' annotations at define!: an annotation that does not resolve is left out (`*lenient*`), and the whole
+encoding is in a try, so no class fails to define for it; (3) should the conversion or j2g refuse a file of
+`annotation-sources`, the night drops it from the list: jrt's Annotation and AnnotatedElement stand alone, the annotation
+types then resolve as cut classes and are skipped; (4) the change of `Compiler.ae` (Host.annotations, CallV's fallback)
+moves the runtime's key: the first build compiles the namespaces anew.
+
+**Left of F14** (the table's rows, by tests a day): member classes (getClasses, getDeclaredClasses: the closed world's
+member classes from `ClassInfo.Declaring`, half a day), AccessFlag and Parameter/MethodParameters (the recorded
+`MethodParameters` beside the annotations' data; jdk26u's AccessFlag enum translated, Class/Member.accessFlags over the
+modifiers), the generic signatures (the analysis's `:sig` recorded as `Signature` strings and jdk26u's
+sun.reflect.generics parser, factory and reflective objects translated over them: the real algorithm, no Go port), the
+type annotations after them (TypeAnnotationParser over recorded data), Proxy (JCS210, with serialization's JCS170), and
+the metadata row (local and anonymous classes, the enclosing method, InnerClasses' modifiers: the analysis knows them).
+
+## Proposed (F14)
+
+### JCS210 Annotations as proxies, or jrt's annotation classes
+
+An annotation here is no `java.lang.reflect.Proxy`: `Proxy.isProxyClass(a.getClass())` is false and
+`Proxy.getInvocationHandler(a)` throws (t04718, EqualityTest). (a) keep jrt's per-type classes, answer `isProxyClass`
+true for them and `getInvocationHandler` with an InvocationHandler over the AnnotationObj (jdk26u's
+AnnotationInvocationHandler's invoke), half a day, with the Proxy row; (b) annotations as real proxies once Proxy exists
+(F14's Proxy row, JCS170's serialization), the j2g types dropped; (c) as built, the two tests by design. Recommended:
+(a), on the Proxy row's day: the JDK's observable behaviour without its class generation.
+
+### JCS211 The JDK's members' annotations
+
+j2g records the annotations of a translated JDK class itself and of an annotation type's elements, not of its members
+(@Deprecated, @Stable ... on thousands of methods), so `String.class.getMethod("getBytes", ...).getAnnotations()` is
+empty where the JDK has @Deprecated. (a) as built; (b) every member's (more data in every executable, a measure first);
+(c) only the java.lang.annotation and java.lang annotation types' (@Deprecated, @FunctionalInterface, @SafeVarargs).
+Recommended: (c) if a test asks it; none of the 75 does.
+
+### JCS212 The order of a declaration's annotations
+
+The reader assocs `^{A ...} ^{B ...}`'s outer map onto the inner one's, so the metadata holds B before A; the encoder
+reverses a declaration's annotations, which is the source's order for repr/java's forms (one map an annotation) and the
+reverse of it for `^{A ... B ...}` written by hand. (a) as built; (b) repr/java writes a declaration's annotations in one
+map, in order (every form of `jdk/forms` with two annotations changes: a reconversion and the round trips' references);
+(c) the forms record the order (`:annotation-order` metadata). Recommended: (a); getDeclaredAnnotations' order is the
+class file's, which nothing in the 75 checks across two annotation types but OrderUnitTest, which compares two lists of
+the same order.
+
+### JCS213 IncompleteAnnotationException from a missing member
+
+A member without a value or default (an annotation type changed after its use was compiled: impossible in the closed
+world, possible at the REPL) throws UnsupportedOperationException naming IncompleteAnnotationException, jrt's hand-written
+Go not reaching the translated class. (a) as built; (b) a hook jrt calls, set by jdk.internal.jrt's Java at start (the
+real IncompleteAnnotationException), a few lines. Recommended: (b) with the next slice.
