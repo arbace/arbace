@@ -198,3 +198,16 @@ None needed for this survey (no code, no record). When P1 lands: `bin/repr-pytho
 2. **(a): out by design**: the JIT, the sampling profiler (`_remote_debugging`), the C API, and `dis`'s specializing
    names (as 229's `:specializing`); about 2,000 test methods leave the judged set; `profiling.tracing` stays in, as
    `cProfile`.
+
+## As built: the 3.15.2 oracle (proposal 1, 2026-11-08, the Mac VM)
+
+CPython 3.15.2 built from the pinned tarball (SHA-256 checked) in `.tmp/oracle315/src/Python-3.15.2/python`
+(`./configure --prefix=.tmp/oracle315/install --without-ensurepip`, `make -j6`, 33 s on the VM; GCC 15.2.0,
+linux-aarch64 musl): 116 modules checked, 37 built in, 76 shared, 0 failed on import. Present: the test modules
+(`_testcapi`, `_testinternalcapi`, `_testmultiphase`, `_testbuffer`, `_ctypes_test`), `_ssl` and `_hashlib` (OpenSSL
+3.5.9), `_lzma`, `readline`, `_zstd`, `_bz2`, `_sqlite3`, `_ctypes`. Missing: `_tkinter` (not needed) and `_decimal`
+(3.15 no longer bundles libmpdec: Alpine's `mpdecimal-dev`, not installed; test_decimal's C half has no 3.15 reference
+until it is). The host packages added for it, by the user's leave: `openssl-dev`, `xz-dev`, `readline-dev`.
+
+It is a VM-local build in `.tmp/`, not committed: references it gives are VM-recorded, so under the records rule they
+serve the 3.15 series' checks on the VM; the record itself is the main host's, from its own 3.15.2 build of the same pin.
