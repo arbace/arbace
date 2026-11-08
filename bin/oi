@@ -58,6 +58,8 @@
 #   bin/oi pins [--attest]         the pins of the known files (kind "status ") against test/ocaml/pins-attested.tsv, the digests of the runs they were
 #                                  made for (no run); --attest writes it from the last runs' rows
 #   bin/oi divergences [--aot]     the recorded results judged against the classes alone (no runs)
+#   bin/oi reap-switch [--apply]   OC185 (a): each native record (check-oi-native.edn ...) against its oracle twin's passes; --apply, when
+#                                  none has fewer, moves REAP's eval and AOT cells to them (test/ocaml/oc185.ae)
 #   bin/oi aot-lib                 AOT (O6, OC7 (a)): the stdlib's Lambda (bin/oi stdlib's) translated by
 #                                  arbace.o2j into Java forms over the runtime jdk/ocaml/, into .tmp/o6/lib/
 #                                  (kept by the translator's, the runtime's and the stdlib's key)
@@ -338,8 +340,8 @@ stdlib_prepare() {
 native_key() {
   local s t e
   s=$(sha256sum "$TOP/stdlib/"*.ml "$TOP/stdlib/"*.mli "$TOP/stdlib/StdlibModules" "$TOP/testsuite/lib/testing.ml" "$TOP/testsuite/lib/testing.mli" "$TOP/otherlibs/unix/unix.mli" "$TOP/otherlibs/unix/unix_unix.ml" "$TOP/otherlibs/unix/unixLabels.mli" "$TOP/otherlibs/unix/unixLabels.ml" "$TOP/otherlibs/systhreads/thread.ml" "$TOP/otherlibs/systhreads/thread.mli" "$TOP/otherlibs/systhreads/event.ml" "$TOP/otherlibs/systhreads/event.mli" "$TOP/otherlibs/str/str.ml" "$TOP/otherlibs/str/str.mli" "$TOP"/utils/*.ml* "$TOP"/parsing/*.ml* "$TOP/build-aux/ocaml_version.m4") || { echo "oi: key: the stdlib's sources cannot be read" >&2; return 1; }
-  # the libraries' one host tool, ocamllex (compiler-libs' lexer.ml), taken or not (OI_OCAMLLEX)
-  s="$s ocamllex=${OI_OCAMLLEX:-0}"
+  # compiler-libs' lexer.ml: the native ocamllex's (OC186 (a), its sources among the typer's forms below) or the host's (OI_OCAMLLEX=host)
+  s="$s ocamllex=${OI_OCAMLLEX:-native}"
   t=$(cat "$root"/arbace/repr/ocaml/*.ae "$root"/arbace/repr/ocaml/typer/*.ae | sha256sum) || return 1
   e=$(sha256sum "$(arbace_exe)" | cut -d' ' -f1) || return 1
   { echo native; echo "$s"; echo "$t"; echo "$e"; cat "$0"; } | sha256sum | cut -d' ' -f1
@@ -430,8 +432,8 @@ STRLIB str - -"
 # libs_sources: the libraries' sources of the pinned tarball in their directories (UNIXLIB, THREADLIB, STRLIB, COMPLIB), as otherlibs'
 # Makefiles and ocamlcommon's take them: unix.ml is unix_unix.ml (the Unix implementation), config.ml config.fixed.ml (the bootstrap
 # configuration) and config.common.ml.in with the magic numbers of build-aux/ocaml_version.m4 (equal to the host's ocamlc -config, OT21 (b)),
-# parser.ml boot/menhir's with its MenhirLib renamed as the Makefile does, lexer.ml ocamllex's (the oracle's library; the native one only with
-# OI_OCAMLLEX=1: OCAML-SURVEY, "As built: the typer line's merge", Proposed OC186)
+# parser.ml boot/menhir's with its MenhirLib renamed as the Makefile does, lexer.ml generated from parsing/lexer.mll by the native ocamllex
+# (bin/repr-ocaml ocamllex, OC186 (a): byte for byte the host's ocamllex's, bin/repr-ocaml ocamllex-check; OI_OCAMLLEX=host: the host's)
 libs_sources() {
   rm -rf "$UNIXLIB" "$THREADLIB" "$STRLIB"; mkdir -p "$UNIXLIB" "$THREADLIB" "$STRLIB"
   cp "$TOP/otherlibs/unix/unix.mli" "$TOP/otherlibs/unix/unixLabels.mli" "$TOP/otherlibs/unix/unixLabels.ml" "$UNIXLIB/"
@@ -470,11 +472,11 @@ complib_sources() {
       config) cp "$U/config.mli" "$COMPLIB/" ;;
       camlinternalMenhirLib) cp "$B/menhirLib.ml" "$COMPLIB/$m.ml"; { echo '[@@@ocaml.warning "-67"]'; cat "$B/menhirLib.mli"; } > "$COMPLIB/$m.mli" ;;
       parser) sed 's/MenhirLib/CamlinternalMenhirLib/g' "$B/parser.ml" > "$COMPLIB/parser.ml"; sed 's/MenhirLib/CamlinternalMenhirLib/g' "$B/parser.mli" > "$COMPLIB/parser.mli" ;;
-      # lexer.ml is ocamllex's output: the oracle's library always runs it; the native library only with OI_OCAMLLEX=1 (the host's
-      # ocamllex, a toolchain tool at check time: without it the native compiler-libs lack Lexer and what needs it, a typer note
-      # of the programs that link them; Proposed OC186)
+      # lexer.ml is ocamllex's output: the native ocamllex's by default (OC186 (a), no host tool), the host's with OI_OCAMLLEX=host;
+      # the two are the same bytes (bin/repr-ocaml ocamllex-check --host)
       lexer) cp "$P/lexer.mli" "$COMPLIB/"
-        if [ "$OI_STDLIB" = ocamlc ] || [ "${OI_OCAMLLEX:-0}" = 1 ]; then ocamllex -q -o "$COMPLIB/lexer.ml" "$P/lexer.mll" || die "stdlib: ocamllex parsing/lexer.mll"; fi ;;
+        if [ "${OI_OCAMLLEX:-native}" = host ]; then ocamllex -q -o "$COMPLIB/lexer.ml" "$P/lexer.mll" || die "stdlib: ocamllex parsing/lexer.mll"
+        else "$root/bin/repr-ocaml" ocamllex -q -o "$COMPLIB/lexer.ml" "$P/lexer.mll" || die "stdlib: the native ocamllex on parsing/lexer.mll"; fi ;;
       *) if [ -f "$U/$m.mli" ]; then cp "$U/$m.mli" "$COMPLIB/"; [ -f "$U/$m.ml" ] && cp "$U/$m.ml" "$COMPLIB/"
          else cp "$P/$m.mli" "$COMPLIB/"; [ -f "$P/$m.ml" ] && cp "$P/$m.ml" "$COMPLIB/"; fi ;;
     esac
@@ -520,7 +522,7 @@ libs_native() {
     printf '%s %s %s %s\n' "$d" "$m" "$incs" "$nf" >> "$tasks"
   done <<< "$LIB_UNITS"
   for m in $COMPLIB_UNITS; do
-    if [ ! -f "$COMPLIB/$m.ml" ]; then echo "$m	no $m.ml (parsing/lexer.mll needs ocamllex: OI_OCAMLLEX=1, Proposed OC186)" >> "$COMPLIB/failed.txt"; continue; fi
+    if [ ! -f "$COMPLIB/$m.ml" ]; then echo "$m	no $m.ml (parsing/lexer.mll's ocamllex failed)" >> "$COMPLIB/failed.txt"; continue; fi
     printf '%s %s %s -\n' "$COMPLIB" "$m" "$COMPLIB" >> "$tasks"
   done
   # the units are typed independently (each reads the others' interfaces, not their Lambda): OI_LIB_JOBS processes at once (default 3)
@@ -1453,6 +1455,9 @@ case $cmd in
   record-ref) cmd_record_ref "$@" ;;
   check) cmd_check "$@" ;;
   divergences) cmd_divergences "$@" ;;
+  # OC185 (a): REAP's eval and AOT cells to the native records once each has no fewer passes (test/ocaml/oc185.ae; --apply edits
+  # test/reap/cells.edn and test/crops/independence.edn)
+  reap-switch) (cd "$root" && "$(arbace_exe)" "$root/test/ocaml/oc185.ae" "$([ "${2:-}" = --apply ] && echo apply || echo compare)") ;;
   aot-cpu) o2j_cpu ;;
   pins) cmd_pins "$@" ;;
   own-verdicts) cmd_own_verdicts "$@" ;;

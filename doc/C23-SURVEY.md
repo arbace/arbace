@@ -5153,3 +5153,46 @@ that include it). Outside gate_key: `bin/ci`, `bin/lib/ci/fresh.bash`, `bin/lib/
   read before its budget ends. (a) Run the round trip's night command with `REPR_C_THREADS=2 GOMEMLIMIT=1800MiB` (T.7) and let
   CS281 (a)'s compiled reader end it; (b) skip an `:eval-limits` file's read in the default mode (its known entry judged without
   it). *Recommended: (a)*.
+
+## As built: CS282, the round trip's `--record` without gcc (2026-11-08, branch `c-rt-record`)
+
+Decided by the user (2026-11-08): CS282 (a). On `c-rt-record` at next bd33e27cc, light, with main's stage 0.
+
+- **The rule.** `bin/repr-c roundtrip --record` no longer implies gcc (only `--record-gcc`, `--record-orig`, `--verify-orig` and
+  `ARBACE_C_JUDGE=gcc` do). Without gcc it reads and judges levels 1 and 2 as the default judge does and takes levels 3 and 4 and gcc's
+  acceptance from the results file's recorded rows (`test/repr/c/roundtrip-results.edn`, `REPR_C_RESULTS_FILE`), the oracle tier's
+  record: the judge's new verb `judge-recorded WORK RESULTS ID...` (`arbace.repr.c.rtcheck/judge`'s third argument). `load-recorded`
+  parses a row's reason (read, l3, l4, gcc, class), `recorded-levels` turns l3 and l4 back into the driver's `obj.tsv` and `run.tsv`
+  rows `judge-row` reads (`equal`/`differ`, `orig-fails`, `print-rejected`; `same`/`differ`), and the acceptance is gcc's recorded
+  one (`test/repr/c/parse-gcc.tsv`, `load-gcc`). The record (`record`), the second judgment and the results file
+  (`arbace.repr.c.results`) then run as under gcc, so the known entries only levels 3-4 or gcc's acceptance gave stay known by
+  their rows (no deferral list): c23-named-loops-1's level 3, tcc-pp's 12.S and 13.S `port-only-rejects`, the `:objects` entries.
+- **Levels 3-4 are kept only where they still say something.** A file not read now, or not read when the row was recorded (zlib
+  infback.c and inflate.c, `refused:split-declaration` before CDF.8), has no recorded level 3: it is judged on levels 1-2, except
+  that a known entry of a class only levels 3-4 give (`oracle-classes`: `:objects`, `:objects-macro-body`, `:run-address`,
+  `:print-grammar`, the driver's deferral list) keeps it known ("levels 3-4 not recorded: the oracle tier's"). A row known by such a
+  class whose entry the known file no longer holds (removed after the row: 808d08d60 removed reverse-complement-5.c's
+  `:run-address` when gcc's runs passed it) has its levels 3-4 dropped, else the record would fail a file the oracle tier passed.
+  A file whose levels 1-2 changed keeps its recorded levels 3-4 (fprintf-1's: level 1 equal now, levels 3-4 as recorded): the
+  oracle tier's next record measures the new print.
+- **Controls.** The `:roundtrip` control (levels 3-4 crossed) is left in such a run (no object file); the level 1 and 2 controls
+  run as before.
+- **The known file's order.** `record` writes each corpus's entries sorted by name (they came out in hash order for corpora of more
+  than eight entries; the record of a few corpora reordered the others').
+- **fprintf-1's rows tidied.** `bin/repr-c roundtrip --corpus torture-execute --only` (fprintf-1.c, fprintf-chk-1.c), then
+  `rtcheck judge-recorded` on that run: both pass (read ok, l1 equal, l2 equal, l3 equal, l4 same, gcc agree); the two rows of the
+  results file replaced by `arbace.repr.c.results/rows`' (an `--only` run never records, so by hand, the rest of the file as it
+  was). `bin/reap --record` (C print 4,768 to 4,770 passing, 0 problems) and `bin/crops-score --record` (`--judge --strict`: 0
+  problems).
+- **Checked.** The test `roundtrip-record-keeps-oracle-levels-under-own-verdict` (test/c/judge_test.ae; seven made-up files: a
+  level-3 class kept, a fixed print passing on its recorded levels, gcc's acceptance kept, a new file, a recorded level 4 that fails,
+  an unread row's class kept, a removed entry's row dropped) with the round trip's and the token record's tests: 6 tests, 60
+  assertions, 0 failures. `REPR_C_THREADS=2 GOMEMLIMIT=1800MiB bin/repr-c roundtrip --corpus tcc-pp,zlib,gcc-va-opt,benchmarksgame
+  --record` (101 files, about 4 minutes): exit 0, 98 pass, 3 known, the known file unchanged; the rows' changes were the three
+  above (reverse-complement-5.c passes, zlib infback.c passes, inflate.c known `:objects-macro-body`) and the worktree's longer path
+  clipping four details: not committed, the night's record makes them. `bin/gate --plan`: reap and crops-score rerun.
+- **Rekeys.** `arbace/repr/c/rtcheck.ae` (embedded: gate_key); outside it `bin/lib/repr-c/roundtrip`, `test/`.
+- **The night** (in place of T.7's step 5, the main session's, under the heavy lock): `REPR_C_THREADS=2 GOMEMLIMIT=1800MiB
+  bin/heavy-lock bin/repr-c roundtrip --record` (every corpus; no gcc; expect exit 3 only for a failing file of no class, printed),
+  then `bin/reap --record` and `bin/crops-score --record`. The oracle tier's record stays `ARBACE_C_JUDGE=gcc bin/repr-c roundtrip
+  --record` by hand.

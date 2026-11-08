@@ -896,3 +896,135 @@ item's modules by day and on the whole of ghc-internal at the end; doc/haskell/F
   the cache's intent); a fresh process per module (15 s of start-up each); eager unification of a GADT given's unknown sides (the
   first slice's: wrong when a later argument fixes the scrutinee's type); generating Data/Generic/Lift's methods now (unmeasured by
   lib-check; with the desugaring slice instead).
+
+## 2026-11-08: the round trip's `--record` without gcc, CS282 (a) (branch `c-rt-record`, from next bd33e27cc)
+
+By the user's decision of 2026-11-08 (CS282 (a)): `bin/repr-c roundtrip --record` in the default mode records levels 1-2 and keeps
+levels 3-4 and gcc's acceptance from the results file's recorded rows, as the token check's record keeps its `:gcc` level (c-triage's
+T.5), so the night can record C's print on C's own target. Built in `arbace.repr.c.rtcheck` (`load-recorded`, `recorded-levels`,
+`judge`'s recorded mode and the verb `judge-recorded`; `record` sorts each corpus's entries) and `bin/lib/repr-c/roundtrip` (`--record`
+no longer implies gcc; `--no-gcc --record` allowed). Two rules found on the samples: a file with no recorded level 3 keeps a known
+entry of a class only levels 3-4 give (zlib inflate.c, read only since CDF.8); a row known by such a class whose entry the known file
+dropped since (reverse-complement-5.c, 808d08d60) loses its recorded levels 3-4. Alternatives considered: deferring the stale entries
+as the no-gcc judge's awk does (rejected: the record would drop them from the known file); keeping `--record` the oracle tier's
+(CS282 (b), not chosen). Test `roundtrip-record-keeps-oracle-levels-under-own-verdict` (with the round trip's and token record's
+tests: 6 tests, 60 assertions, 0 failures); the record over tcc-pp, zlib, gcc-va-opt and benchmarksgame (exit 0, 98 pass, 3 known,
+the known file unchanged; its rows not committed). fprintf-1's and fprintf-chk-1's rows tidied from an `--only` run judged by
+`judge-recorded` (both pass), `bin/reap --record` (C print 4,770 passing) and `bin/crops-score --record`. Details and the night's
+command: doc/C23-SURVEY.md, "As built: CS282".
+
+## 2026-11-08: C++'s own target, the route's switch prepared, C++'s last `:cxx` steps off --full (branch `cpp-target`, from next bd33e27cc)
+
+Three steps toward C++'s independence (doc/cpp/CPP-SURVEY.md, "As built: cpp-target"):
+
+- **CP244 (b)** (recommended in "As built: cpp-indep", taken): the token check read g++'s recorded answers (test/cpp/host: predefined macros
+  per standard, the option lists' deltas, `__has_` answers, the search list). `test/cpp/predef.ae` now computes them from C's ABI
+  description (`c/target/abi.edn` through `c.target/macros`, the C standard of the same inline semantics, C's own macros dropped, the
+  double constants in C++'s functional cast) and `cpp/target/dialect.edn` (`__cplusplus`, the 78 feature-test macros by year from SD-6,
+  g++'s own macros, char8_t, the options' rules, the x86 ISA's implications, Table 21's attribute values, the GNU attribute and builtin
+  lists), with `cpp/target/probes.tsv` (the 118 names the corpora ask) and `cpp/target/option-lists.txt` (334 lists harvested from the
+  token check's samplings), into `cpp/target/host/` in test/cpp/host's layout. No GPL source was ported: the rules are stated from
+  ISO/IEC 14882:2024 [cpp.predefined] and [cpp.cond], WG21's SD-6, the GCC 15.2 manual and musl 1.2.6's include/stdc-predef.h, and checked
+  against the recorded outputs: `bin/repr-cpp target host-oracle`, 19 of 19 files equal (16 standards line for line, 118 answers, 324 option
+  lists, the search list; the 10 lists g++ refused have no answer to compare). `REPR_CPP_TARGET=arbace` the default
+  (`arbace.repr.cpp.host/gxx-dir`; `gxx` the record); the sysroot's roots from the target's search list; `cpp-read-essential` verifies the
+  target first. Alternatives: computing the deltas at check time from the options (rejected for now: the generated file keeps load-host
+  and the check unchanged, and verify proves it current); taking the 324 recorded keys as the list (rejected: harvested from the lists
+  instead, `target option-lists`).
+- **CP240 (b)** (decided 2026-11-07), prepared: `bin/cppi route-compare` (clang's route against auto on the same programs, judgments side
+  by side, exit 1 when auto loses a pass) and the one-word switch `cppi_route_default` in bin/lib/cppi/route.bash. Found and fixed: the
+  route's list was read with `IFS=$'\t'`, which collapses an empty options field, so every auto fallback to clang of a program with no
+  options was STALE. Proved by day on the IR stage alone (the samples and the runtime programs, the packs for clang's half) and on made-up
+  judgments; the full comparison needs runtime-ci (about 3 GB) and a disk under 80%: the night's.
+- **ORS31 (a)** (batch 4's proposal): `cpp-roundtrip` and `cpp-roundtrip-dg` `--judge own` on stage 0; `cpp-dg` `--own` (a new option:
+  preprocess's dg directives on the shared preprocessor, modules' round trip by its own levels) on stage 0; clang's dg-error part and the
+  round trips' clang levels moved to the oracle tier (`cpp-dg-oracle`, `cpp-roundtrip-oracle`), as the user's decision of 2026-11-07
+  moves the toolchain's runs. Alternative: keeping dg-error in `--full` on `:cxx` (rejected by that decision; CP247 proposes its packs to
+  bring it back on records).
+
+Checked with clang, clang++, clang-23, g++, gcc, cc, cpp, c++, cc1, cc1plus, ld and as stubs exiting 99 first on PATH (none called): the
+target's verify and oracle; `pp-check --essential` (53 files as before, the controls failing as they must) and `--corpus gxx-dg --sample
+20` (904 files, as test/cpp/host gives) under strace, no file of test/cpp/host or the installed headers opened; the dg check's preprocess
+part and modules `--own --sample 20` (60 of 60); the samples' own round trip (9 of 9). `bin/crops-score --crop cpp`: 76.1 / 100 / 54.3 to
+76.1 / 100 / 67.7 (read 0.148 to 0.648, judge 0.568 to 0.735), recorded in test/crops/scores.edn. Proposed CP247-CP249.
+
+## 2026-11-08: HES83, the 11 programs of HE9's C route (branch `hs-hes83`, from next bd33e27cc)
+
+By the user's decision of 2026-11-08 (HES83: (b) own verdicts where a program ships its `.stdout`, (a) for the rest). Source
+studied: GHC 9.14.1's testsuite (`.tmp/hsi/ghc-9.14.1/testsuite/tests`, the pinned tarball): each of the 11 tests' `all.T` runs a
+`pre_cmd` whose `Makefile` rule compiles the Haskell first (`-c NAME.hs`, so `NAME_stub.h` exists before the C is compiled; GHC
+compiles a command line's C before its Haskell, checked by hand) or the `_ghci` tests' object (`-c NAME_c.c -o NAME_c.o`); and
+`rts/sm/Storage.c`'s `rts_clearMemory` and `rts/include/RtsAPI.h` (GHC 9.14.1's source tarball), for the no-op's reasoning.
+
+- `bin/lib/hsi/record-ref`: d539b644's order (`haskell-eval9`) ported: a program whose flags name C, Cmm, assembly or objects has
+  its Haskell compiled first (`--make -no-link`, no `-stubdir`), and an object with its C beside it made by `ghc -c`, then the
+  build. Alternative considered: d539b644's run_plan hunk (the object spelled as its C), rejected: the plan is shared with
+  `bin/hsi check`, which maps objects already; running the Makefile's rule itself (needs make and the testsuite's variables).
+- The references recorded by GHC 9.14.1 by hand (`bin/hsi record-ref --corpus testsuite-core --only` the 11 and conc059): all
+  build, the same statuses and digests as d539b644's; `bin/hsi own-verdicts --record`: 586 of 908 (580), the six with a shipped
+  `.stdout` GHC's run gives (T20735, the three `_ghci` tests, T5594, ffi002) judged by their own verdict.
+- hsi (`go/arbace/hs/rtsapi.ae`, `rts.ae`, made on the printed Go and read back): `rts_clearMemory` a no-op (hsi's heap is Go's);
+  the collector marks the threads in a foreign call that called back as roots before deciding the blocked ones (GHC's
+  `markCapability` marks `suspended_ccalls`): ffi023's main had been resurrected with BlockedIndefinitelyOnMVar.
+- `test/haskell/divergences.edn`: the 10 passing leave `:no-reference`; conc059 (only the threaded ways; GHC's normal-way run times
+  out, hsi's `hs_exit` lets the forked threads print) in a new `:threaded-only`; rts_clearMemory stays in `:test-c` until the night.
+- Checks (light): the 11, 10 pass (rts_clearMemory out of memory under the 2-3 GiB cap only: a 1,000,000-deep stack, its copies at
+  100,000 and 300,000 pass at 294 and 714 MB); 54 of 55 with 44 passing callback, finalizer and deadlock programs (no pass lost);
+  `--record` of the 10 and conc059; `bin/hsi divergences` 800 pass, 0 unclassed; the core 662 of 701 recorded (652), 669 expected
+  after the night's record; `runtime check`, `own-verdicts --check`, hsi-essential's command 123 of 123.
+- Proposed: HES84 (the threaded ways' references and `hs_exit`'s shutdown), HES85 (nofib's C in record-ref). Details and the
+  night's commands: doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: HES83 (write-ahead)".
+## 2026-11-08: ocamllex ported, compiler-libs typed natively, OC185's switch prepared (branch `ocaml-lex`, from next bd33e27cc)
+
+By the brief's recommended items (OC186 (a), OC188 (a), OC185 (a) decided 2026-11-07), depth first, under the day's light rules (doc/ocaml/
+OCAML-SURVEY.md, "As built: ocamllex ported (OC186 (a)), compiler-libs typed natively (OC188 (a)), OC185's switch prepared").
+
+- **ocamllex** (`arbace/repr/ocaml/ocamllex.ae`): OCaml 5.5.0's `lex/` (the release tarball https://caml.inria.fr/pub/distrib/ocaml-5.5/
+  ocaml-5.5.0.tar.xz, SHA-256 fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba: lexer.mll, parser.mly, cset.ml, table.ml,
+  lexgen.ml, compact.ml, common.ml, output.ml, main.ml) and stdlib/set.ml's AVL trees ported by hand, rule for rule (LGPL 2.1 with the
+  linking exception: LICENSE.md, doc/ARBACE.md). The tree shapes of Set matter: a union keeps one of two equal identifiers by height, and its
+  location is printed; OCaml's evaluation orders matter too (a constructor's arguments right to left, `let ... and` left to right). The
+  parser is a shift-reduce on ocamlyacc's precedences, with ocamlyacc's default reduction of `regexp: Tident` before the lookahead (found by
+  400 mutants against the host's ocamllex: 399 equal before, 400 after). `bin/repr-ocaml ocamllex`, `ocamllex-check` (29 .mll: the tarball's
+  18, the opam set's 3, 8 samples of `test/ocaml/ocamllex/`; byte for byte the host's ocamllex 5.5.0's outputs and messages, recorded in
+  `test/ocaml/ocamllex-expected.edn` by `--host --record`; a negative control), in `ocaml-read-essential`. `-ml` (outputbis.ml) not ported:
+  its order is OCaml's Hashtbl's (OC191). Alternatives considered: committing ocamllex's `lexer.ml` (OC186 (c), a toolchain record), running
+  lex/ on oi (OC186 (b), it needs a lexer generator to bootstrap).
+- **bin/oi**: compiler-libs' `lexer.ml` from the native ocamllex (`OI_OCAMLLEX=host` the host's). The native library then built Lexer; the
+  typer's fixes (typing/typecore.ml's disambiguate_by_ids, unify_kept, type_approx, Ppat_open; env.ml's normalize_module_path through
+  applications; includemod.ml's add_signature of the implementation; datarepr.ml's inline records of exceptions, Record_extension, and of GADT
+  constructors) took compiler-libs from 35 to 44 of 44 units (doc/ocaml/TYPER.md §25). Under stubs of the toolchain (none called): the five
+  compiler-libs programs of the run corpus 5 of 5 natively (2 before), libs4's 18 with the essential list 75 of 76 run (the one other
+  `-safer-matching`, classed), typer-check 79 of 79, repl-check 24 of 24.
+- **OC185**: `bin/oi reap-switch [--apply]` (`test/ocaml/oc185.ae`): the four native records' passes against their oracle twins', and the
+  cells' and the independence facts' edit when none has fewer (proved on a scratch copy). Not applied: the native records of the suite and
+  the AOT level are the night's.
+- **The by-design review**: eval's 205 (180 by a decided rule, 25 `c-api` deferred); 14 reachable cases their rules do not cover:
+  Proposed OC192-OC197 (finalisers, max_domains, ocamlyacc, a test's second program, speed, the `.mll` tests), with OC191.
+- Scores (crops-score, the records unchanged): OCaml 80.9 / 95.2 / 100 / 87.4, before and after; the night's commands in the survey's section.
+
+## 2026-11-08: HES84 (b) and HES85 (a), the threaded ways kept in their class and nofib's C in record-ref (branch `hs-hes84`, from next 5af7d0058)
+
+By the user's decisions of 2026-11-08 (HES84 (b), HES85 (a); doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: HES84 (b), HES85 (a)").
+Sources studied: nofib at its pinned commit (`.tmp/hsi/nofib`, `test/haskell/eval-corpora.edn`'s `:nofib` pin): `mk/ghc-paths.mk`
+(`ALL_SRCS`, `SRCS`, `EXCLUDED_SRCS`, `C_SRCS`), `mk/target.mk`, the Makefiles of the nine program directories with C;
+GHC 9.14.1's testsuite (`test/haskell/eval/testsuite-run.edn`, the tests whose `only_ways` names only threaded ways).
+
+- HES84 (b): no code; `:threaded-only`'s `:decided` names it. What it leaves judged against the normal way: 14 tests of the core,
+  7 passing, four of them on the normal way's refusal or another output than the shipped one (T21651, ffi014, hs_try_putmvar003,
+  numsparks001): HES87 proposed.
+- HES85 (a): `bin/lib/hsi/record-ref`'s nofib plan passes `nofib_c_srcs`, the C nofib's make links (`C_SRCS`: the Makefile's
+  `SRCS` when it sets one, else the directory's sources less `EXCLUDED_SRCS`): callback001, callback002 and fft2. Alternative
+  considered: every `.c` of the directory, as `bin/hsi check`'s plan and the proposal's text had it, rejected: six Makefiles set
+  `SRCS` to leave a C version out (paraffins' has its own `main`), so GHC would fail to link them at the next whole record.
+  Recorded by GHC 9.14.1 by hand (`bin/hsi record-ref --corpus nofib --only nofib/smp/callback001,nofib/smp/callback002`): both
+  status 0, callback001 its shipped `.faststdout`; with fft2 and paraffins added, every line as committed but its seconds.
+  `bin/hsi own-verdicts --record`: 587 of 908. hsi: callback001 passes by its own verdict (recorded); callback002 passes by hand at
+  3 GiB (0.71 GB resident at 300,000 callbacks), stopped by the light 2 GiB cap: it waits in `:no-reference` for the night's record.
+- `test/crops/independence.edn`'s judge cases from the records (eval 587 own, 321 recorded); `bin/reap --record` (eval 801 / 64 / 43),
+  `bin/crops-score --record`: Haskell 96.6 / 100 / 74.9 (0.9659 to 0.9661; independence 0.7492 to 0.7494). Independence stays near 75
+  until the native front end's STG is the eval and AOT cells' source (HFS-I1).
+- Checks: own-verdicts current, hsi-essential's command 123 of 123 with the controls, `bin/hsi divergences` 0 unclassed, `bin/reap`
+  and `bin/crops-score --judge --strict` 0 problems.
+- Proposed: HES86 (bin/hsi check's nofib C by the same rule, at the next haskell-stg-progs recording), HES87 (the four threaded-only
+  passes on a refusal into a deferred class).

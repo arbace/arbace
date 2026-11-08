@@ -124,14 +124,29 @@
           (first (filter #(= n (:name %)) (ty/constructors-of p (:params d) ((:kind d) 1)))))
         (choose (env/lookup env :constrs lid) expected "constructor" lid))))
 
+(defn- disambiguate-by-ids
+  "Typecore.disambiguate_by_ids: the candidates whose record has every field the record names (ids), and when it is
+  closed (an expression without `with`, a pattern without `_`) only those with no other field, when any; the
+  candidates unchanged when none has every field (the error is the label's own then)"
+  [closed ids cands]
+  (let [names (fn [c] (set (map :name (ty/label-all c))))
+        with-ids (filter (fn [c] (every? (names c) ids)) cands)
+        exact (filter (fn [c] (or (not closed) (= (count ids) (count (ty/label-all c))))) with-ids)]
+    (cond (seq exact) exact (seq with-ids) with-ids :else cands)))
+
 (defn lookup-label
-  "A label by its name, the expected record type's first (an inline record's labels are only reached so)"
-  [env lid expected]
-  (let [p (when expected (expected-type-path expected))
-        n (lid-name lid)
-        typed (when (and p (= 1 (count (env/lid-parts lid))))
-                (first (filter #(= n (:name %)) (get @ty/record-labels p))))]
-    (or typed (choose (env/lookup env :labels lid) expected "field" lid))))
+  "A label by its name, the expected record type's first (an inline record's labels are only reached so); without an
+  expected record type, the first label of a record expression or pattern chosen among the records that have all its
+  fields (ids, Typecore's disambiguate_label_by_ids)"
+  ([env lid expected] (lookup-label env lid expected nil false))
+  ([env lid expected ids closed]
+   (let [p (when expected (expected-type-path expected))
+         n (lid-name lid)
+         typed (when (and p (= 1 (count (env/lid-parts lid))))
+                 (first (filter #(= n (:name %)) (get @ty/record-labels p))))
+         cands (env/lookup env :labels lid)
+         cands (if (and ids (seq cands)) (disambiguate-by-ids closed ids cands) cands)]
+     (or typed (choose cands expected "field" lid)))))
 
 (defn instance-constructor
   "Ctype.instance_constructor: [args res] as fresh instances (a GADT constructor's own result type)"
@@ -316,7 +331,8 @@
         (mk [:Tpat_construct c (mapv (fn [p t] (type-pat env p t vars)) sargs targs)] expected))
       :Ppat_record
       (let [fields (d 1)
-            l0 (lookup-label env (:txt (first (first fields))) expected)
+            l0 (lookup-label env (:txt (first (first fields))) expected (mapv (fn [[lid _]] (lid-name (:txt lid))) fields)
+                             (= :Closed (d 2)))
             [res _ args] (instance-label l0)
             _ (unify! res expected "pattern")
             typed (mapv (fn [[lid p]]
@@ -356,6 +372,9 @@
                    (unify! (:type p) expected "pattern")
                    p)
       :Ppat_exception (mk [:Tpat_exception (type-pat env (d 1) (ty/type-exn) vars)] expected)
+      ;; Typecore's Ppat_open: M.(p), p typed in the environment with M opened
+      :Ppat_open (let [e (env/lookup-module env (:txt (d 1)))]
+                   (type-pat (env/open-components env (env/entry-components e)) (d 2) expected vars))
       :Ppat_lazy (let [t (ty/newvar)]
                    (unify! (ty/tconstr ty/path-lazy-t [t]) expected "pattern")
                    (mk [:Tpat_lazy (type-pat env (d 1) t vars)] expected))
@@ -881,10 +900,10 @@
       :Pexp_record
       (let [fields (d 1) init-s (d 2)
             init (when init-s (type-exp env init-s))
-            l0 (lookup-label env (:txt (first (first fields))) (or (and init (:type init)) expected))
+            l0 (lookup-label env (:txt (first (first fields))) (or (and init (:type init)) expected)
+                             (mapv (fn [[lid _]] (lid-name (:txt lid))) fields) (nil? init-s))
             [res _ args] (instance-label l0)
             _ (unify! res expected "expression")
-            _ (when init (unify! (:type init) res "expression"))
             given (into {} (map (fn [[lid e]]
                                   (let [n (lid-name (:txt lid))
                                         l (or (first (filter #(= (:name %) n) (ty/label-all l0)))
@@ -896,11 +915,19 @@
                                   (let [[l _ _] (get given (:pos (first (filter #(= (:name %) (lid-name (:txt lid))) (ty/label-all l0)))))]
                                     [(:pos l) (type-expect env e (nth args (:pos l)))]))
                                 fields))
+            ;; Typecore's unify_kept: the record copied from (`with`) has a type of its own, an instance unified with it for each
+            ;; label, and a kept field's type is shared with the result's (a fresh instance per label): `{x with txt = f x.txt}`
+            ;; is 'a loc -> 'b loc
             defs (mapv (fn [l]
-                         (if-let [e (get typed (:pos l))]
-                           [l [:overridden e]]
-                           (do (when-not init (type-error (str "Some record fields are undefined: " (:name l))))
-                               [l [:kept (nth args (:pos l)) (:mut l)]])))
+                         (let [[r1 a1] (when init (instance-label l))]
+                           (when init (unify! (:type init) r1 "expression"))
+                           (if-let [e (get typed (:pos l))]
+                             [l [:overridden e]]
+                             (do (when-not init (type-error (str "Some record fields are undefined: " (:name l))))
+                                 (let [[r2 a2] (instance-label l)]
+                                   (unify! a1 a2 "expression")
+                                   (unify! res r2 "expression")
+                                   [l [:kept a1 (:mut l)]])))))
                        (ty/label-all l0))]
         (mkexp [:Texp_record defs (:repres l0) init] res loc))
       :Pexp_field (let [e (type-exp env (d 1))
@@ -1382,6 +1409,40 @@
         [[{:pat p :expr e :attrs nil}] (add-pattern-vars env @vars)])
     (type-let* env rec svbs))))
 
+(defn- type-approx
+  "Typecore.type_approx: a recursive binding's expression's type approximated from its shape before it is typed (its
+  parameters' labels and an optional one's option type: a use of the function before its definition, with labels,
+  is then typed against them), unified into ty; the rest left a variable"
+  [env sexp ty]
+  (let [d (:pexp_desc sexp)]
+    (case (d 0)
+      :Pexp_let (recur env (d 3) ty)
+      :Pexp_function
+      (loop [params (seq (d 1)) ty ty]
+        (if-let [sp (first params)]
+          (let [pd (:pparam_desc sp)]
+            (when (= :Pparam_val (pd 0))
+              (let [[_ l default spat] pd sd (:ppat_desc spat)]
+                (when-not (and (nil? default) (= :Ppat_unpack (sd 0)) (:txt (sd 1)) (not (ty/is-optional l)))
+                  (let [[targ tret] (split-arrow ty l)]
+                    (when (ty/is-optional l) (unify! targ (ty/type-option (ty/newvar)) "parameter"))
+                    (recur (next params) tret))))))
+          (let [body (d 3)]
+            (case (body 0)
+              :Pfunction_body (when-not (d 2) (type-approx env (body 1) ty))
+              :Pfunction_cases (when-not (d 2)
+                                 (when-let [c (first (body 1))]
+                                   (let [[_ tret] (split-arrow ty [:Nolabel])] (type-approx env (:pc_rhs c) tret))))
+              nil))))
+      :Pexp_match (when-let [c (first (d 2))] (recur env (:pc_rhs c) ty))
+      :Pexp_try (recur env (d 1) ty)
+      :Pexp_tuple (let [ts (mapv (fn [[l _]] [l (ty/newvar)]) (d 1))]
+                    (unify! (ty/newty [:Ttuple ts]) ty "expression")
+                    (doseq [[[_ e] [_ t]] (map vector (d 1) ts)] (type-approx env e t)))
+      :Pexp_ifthenelse (recur env (d 2) ty)
+      :Pexp_sequence (recur env (d 2) ty)
+      nil)))
+
 (defn- type-let*
   [env rec svbs]
   (let [res (ty/with-local-level
@@ -1390,6 +1451,7 @@
                                           [p @vars]))
                                svbs)
                     _ (doseq [[p _] pats] (pressure-variants! [p]))
+                    _ (when (= rec :Recursive) (doseq [[vb [p _]] (map vector svbs pats)] (type-approx env (:pvb_expr vb) (:type p))))
                     env-rec (if (= rec :Recursive) (reduce (fn [e [_ vs]] (add-pattern-vars e vs)) env pats) env)
                     exprs (mapv (fn [vb [p _]]
                                   (let [e (if-let [c (:pvb_constraint vb)]

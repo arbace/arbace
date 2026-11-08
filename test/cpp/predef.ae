@@ -1,0 +1,330 @@
+(ns cpp.predef
+  "Arbace's C++ target description (doc/cpp/CPP-SURVEY.md, \"As built: cpp-target\", CP244 (b)): the predefined macros of each
+  C++ standard and of each option list the corpora give, and the __has_ answers, computed from C's ABI description
+  (c/target/abi.edn, through c.target's macros: the data representation, the floating characteristics, the GNU identification)
+  and the C++ dialect's facts (cpp/target/dialect.edn: __cplusplus, the feature-test macros by standard, g++'s own macros, the
+  options' rules, the attribute and builtin tables), written into cpp/target/host/ in the layout repr/cpp's preprocessor reads
+  (arbace.repr.cpp.host/load-host: host.edn, search-gxx.txt, predefined/gxx/STD.h, has.tsv, opt-deltas-gxx.edn). No compiler is
+  run or read: the oracle (`oracle`) compares what this makes with g++ 15.2's recorded answers (test/cpp/host/), by hand.
+
+  gen DIR          write DIR/host/ (DIR: cpp/target) from abi.edn, dialect.edn, probes.tsv and option-lists.txt
+  verify DIR       the committed DIR/host/ equals what gen makes (exit 1 else)
+  oracle DIR REF   DIR/host/'s answers against REF's (test/cpp/host: g++'s), file by file, the differences listed (exit 1 on one)
+  option-lists WORK ID...  the option lists of pp-check's lists (WORK/ID/gxx.list: STD and the options g++ is given), one a line"
+  (:require [arbace.string :as str]
+            [c.target :as ct]))
+
+(set! *warn-on-reflection* true)
+
+(defn- rd [^String f] (read-string (slurp f)))
+
+(def ^:private abi-file "c/target/abi.edn")
+
+;; ---------------------------------------------------------------------------------------------
+;; the standards
+
+(defn std-year
+  "The standard's year (1998 for c++98 and c++03, 2011 ... 2026)."
+  ^long [^String std]
+  (let [y (Long/parseLong (subs std (+ 2 (.indexOf std "++"))))] (cond (= y 3) 1998 (< y 50) (+ 2000 y) :else (+ 1900 y))))
+
+(defn- at-year
+  "A feature's value in year y: the last [from value] whose from is at most y (nil: none yet, or not from then on)."
+  [entries y]
+  (reduce (fn [v [from x]] (if (<= (long from) (long y)) x v)) nil entries))
+
+(defn- c-base
+  "C's macros for the C++ standard (dialect.edn's :c-base: the C standard of the same inline semantics) as {name value}, less
+  C's own, the double constants' cast in C++'s functional notation."
+  [abi dl ^String std]
+  (let [y (std-year std) iso? (str/starts-with? std "c++")
+        cy (at-year (sort (:c-base dl)) y)
+        cstd (str (if iso? "c" "gnu") cy)
+        drop? (set (:c-only dl))]
+    (into {} (for [[n v] (ct/macros abi cstd) :when (not (drop? n))
+                   :let [v (str v)
+                         v (if-let [[_ t x] (and (:functional-cast dl) (re-matches #"\(\((\w+)\)(.*)\)" v))] (str t "(" x ")") v)]]
+               [n v]))))
+
+;; ---------------------------------------------------------------------------------------------
+;; the options
+
+(defn- closure
+  "The ISA extension x and every extension it implies."
+  [exts x]
+  (loop [todo [x] seen #{}]
+    (if-let [e (first todo)]
+      (if (seen e) (recur (rest todo) seen) (recur (concat (rest todo) (get-in exts [e :implies])) (conj seen e)))
+      seen)))
+
+(defn options
+  "The options' state, applied in order (the last of a kind wins): {:opt nil|:o|:s :no-inline :fast-math :pedantic :exceptions
+  :rtti :weak :cfi :char8 :pic [LEVEL PIE?] :ssp :cet :sanitize :snan :rounding :abi :features #{...} :isa #{...} :cpu :defs}."
+  [dl abi opts]
+  (let [exts (get-in dl [:isa :extensions])]
+    (reduce
+      (fn [s ^String o]
+        (cond
+          (#{"-O" "-O1" "-O2" "-O3" "-Og"} o) (assoc s :opt :o)
+          (= o "-Ofast") (assoc s :opt :o :fast-math true)
+          (#{"-Os" "-Oz"} o) (assoc s :opt :s)
+          (= o "-O0") (assoc s :opt nil)
+          (= o "-fno-inline") (assoc s :no-inline true)
+          (= o "-finline") (assoc s :no-inline false)
+          (= o "-ffast-math") (assoc s :fast-math true)
+          (= o "-fno-fast-math") (assoc s :fast-math false)
+          (#{"-pedantic" "-pedantic-errors" "-Wpedantic"} o) (assoc s :pedantic true)
+          (= o "-Wno-pedantic") (assoc s :pedantic false)
+          (#{"-fexceptions" "-fno-exceptions"} o) (assoc s :exceptions (= o "-fexceptions"))
+          (#{"-frtti" "-fno-rtti"} o) (assoc s :rtti (= o "-frtti"))
+          (#{"-fweak" "-fno-weak"} o) (assoc s :weak (= o "-fweak"))
+          (#{"-fdwarf2-cfi-asm" "-fno-dwarf2-cfi-asm"} o) (assoc s :cfi (= o "-fdwarf2-cfi-asm"))
+          (#{"-fchar8_t" "-fno-char8_t"} o) (assoc s :char8 (= o "-fchar8_t"))
+          (= o "-fconcepts") (update s :features conj :concepts)
+          (= o "-fcontracts") (update s :features conj :contracts)
+          (#{"-fmodules" "-fmodules-ts"} o) (update s :features conj :modules)
+          (= o "-fgnu-tm") (update s :features conj :gnu-tm)
+          (= o "-fopenmp") (update s :features conj :openmp)
+          (= o "-fopenacc") (update s :features conj :openacc)
+          (= o "-fpic") (assoc s :pic [1 false])
+          (= o "-fPIC") (assoc s :pic [2 false])
+          (= o "-fpie") (assoc s :pic [1 true])
+          (= o "-fPIE") (assoc s :pic [2 true])
+          (#{"-fno-pic" "-fno-PIC" "-fno-pie" "-fno-PIE"} o) (assoc s :pic nil)
+          (= o "-fstack-protector") (assoc s :ssp ["__SSP__" "1"])
+          (= o "-fstack-protector-all") (assoc s :ssp ["__SSP_ALL__" "2"])
+          (= o "-fstack-protector-strong") (assoc s :ssp ["__SSP_STRONG__" "3"])
+          (= o "-fstack-protector-explicit") (assoc s :ssp ["__SSP_EXPLICIT__" "4"])
+          (= o "-fno-stack-protector") (assoc s :ssp nil)
+          (#{"-fcf-protection" "-fcf-protection=full"} o) (assoc s :cet "3")
+          (= o "-fcf-protection=branch") (assoc s :cet "1")
+          (= o "-fcf-protection=return") (assoc s :cet "2")
+          (= o "-fcf-protection=none") (assoc s :cet nil)
+          (str/starts-with? o "-fsanitize=") (update s :sanitize into (str/split (subs o 11) #","))
+          (= o "-fsignaling-nans") (assoc s :snan true)
+          (= o "-frounding-math") (assoc s :rounding true)
+          (str/starts-with? o "-fabi-version=") (assoc s :abi (Long/parseLong (subs o 14)))
+          (str/starts-with? o "-march=") (let [c (subs o 7) cpu (get-in dl [:isa :cpus c])]
+                                           (if cpu
+                                             (assoc s :cpu c :isa (into (:isa s) (mapcat #(closure exts %) (:extensions cpu))))
+                                             s))
+          (and (str/starts-with? o "-mno-") (contains? exts (subs o 5)))
+          (let [x (subs o 5)] (assoc s :isa (set (remove #(contains? (closure exts %) x) (:isa s)))))
+          (and (str/starts-with? o "-m") (contains? exts (subs o 2))) (update s :isa into (closure exts (subs o 2)))
+          (str/starts-with? o "-D") (update s :defs conj [:def (subs o 2)])
+          (str/starts-with? o "-U") (update s :defs conj [:undef (subs o 2)])
+          :else s))
+      {:opt nil :exceptions true :rtti true :weak true :cfi true :pic [(:pic abi) true] :ssp ["__SSP_STRONG__" (str (:ssp-strong abi))]
+       :features #{} :isa #{} :sanitize #{} :defs []}
+      opts)))
+
+;; ---------------------------------------------------------------------------------------------
+;; the macros
+
+(defn macros
+  "The predefined macros of standard `std` under the options `opts`, {name value}."
+  [abi dl ^String std opts]
+  (let [y (std-year std) iso? (str/starts-with? std "c++")
+        s (options dl abi opts)
+        exts (get-in dl [:isa :extensions])
+        char8? (if (some? (:char8 s)) (:char8 s) (>= y (long (get-in dl [:char8 :from]))))
+        fs (into {} (for [[f es] (:features dl) :let [v (at-year es y)] :when v] [(str "__cpp_" f) (str v "L")]))
+        fs (if char8? (assoc fs "__cpp_char8_t" (str (at-year (get-in dl [:features "char8_t"]) 2020) "L")) (dissoc fs "__cpp_char8_t"))
+        ped (when (:pedantic s)
+              (for [[f {:keys [before iso]}] (:pedantic dl)
+                    :when (and (or (nil? before) (< y (long before))) (or (not iso) iso?))]
+                (str "__cpp_" (name f))))
+        m (-> (c-base abi dl std)
+              (into (:always dl))
+              (into (for [[from n v] (:from-year dl) :when (>= y (long from))] [n v]))
+              (into (when-not iso? (:gnu-only dl)))
+              (into (when char8? (get-in dl [:char8 :macros])))
+              (assoc "__GNUG__" (str (:gnug dl)) "__cplusplus" (get (:cplusplus dl) y))
+              (into fs))
+        m (apply dissoc m ped)
+        ;; the options
+        m (cond-> m
+            (:opt s) (assoc "__OPTIMIZE__" "1" "_FORTIFY_SOURCE" (:fortify dl))
+            (= :s (:opt s)) (assoc "__OPTIMIZE_SIZE__" "1")
+            (and (:opt s) (not (:no-inline s))) (dissoc "__NO_INLINE__")
+            (:fast-math s) (into (:fast-math dl))
+            (not (:exceptions s)) (dissoc "__EXCEPTIONS" "__cpp_exceptions")
+            (not (:rtti s)) (dissoc "__GXX_RTTI" "__cpp_rtti")
+            (not (:weak s)) (assoc "__GXX_WEAK__" "0")
+            (not (:cfi s)) (dissoc "__GCC_HAVE_DWARF2_CFI_ASM")
+            (:snan s) (assoc "__SUPPORT_SNAN__" "1")
+            (:rounding s) (assoc "__ROUNDING_MATH__" "1")
+            (:cet s) (assoc "__CET__" (:cet s))
+            ((:sanitize s) "address") (assoc "__SANITIZE_ADDRESS__" "1")
+            ((:sanitize s) "thread") (assoc "__SANITIZE_THREAD__" "1"))
+        m (reduce (fn [m f]
+                    (let [{:keys [from macros]} (get-in dl [:option-features f])]
+                      (if (or (nil? from) (>= y (long from))) (into m macros) m)))
+                  m (sort (:features s)))
+        ;; -fabi-version
+        m (let [a (:abi s)]
+            (if (and a (pos? (long a)))
+              (cond-> (assoc m "__GXX_ABI_VERSION" (str (+ 1000 (long a))))
+                (and (< (long a) (long (get-in dl [:old-inheriting-ctors :below-abi]))) (m "__cpp_inheriting_constructors"))
+                (assoc "__cpp_inheriting_constructors" (get-in dl [:old-inheriting-ctors :value])))
+              m))
+        ;; position independence, the stack protector
+        m (let [m (dissoc m "__pic__" "__PIC__" "__pie__" "__PIE__")
+                [lv pie] (:pic s)]
+            (cond-> m lv (assoc "__pic__" (str lv) "__PIC__" (str lv)) (and lv pie) (assoc "__pie__" (str lv) "__PIE__" (str lv))))
+        m (let [m (dissoc m "__SSP__" "__SSP_ALL__" "__SSP_STRONG__" "__SSP_EXPLICIT__")]
+            (if-let [[n v] (:ssp s)] (assoc m n v) m))
+        ;; the ISA
+        m (if-let [c (:cpu s)]
+            (into (apply dissoc m (get-in dl [:isa :baseline-arch])) (for [n (get-in dl [:isa :cpus c :macros])] [n "1"]))
+            m)
+        m (into m (for [e (:isa s) :let [mc (get-in exts [e :macro])] :when mc] [mc "1"]))
+        m (let [ba (keep #(get-in exts [% :biggest-alignment]) (:isa s))]
+            (if (seq ba) (assoc m "__BIGGEST_ALIGNMENT__" (str (apply max (Long/parseLong (m "__BIGGEST_ALIGNMENT__")) ba))) m))
+        ;; musl's <stdc-predef.h>: __STDC_IEC_559__ only while __GCC_IEC_559 > 0
+        m (if (= "0" (m "__GCC_IEC_559")) (dissoc m "__STDC_IEC_559__") m)
+        ;; -D and -U, in order
+        m (reduce (fn [m [k ^String v]]
+                    (let [i (.indexOf v "=")]
+                      (if (= k :def)
+                        (if (neg? i) (assoc m v "1") (assoc m (subs v 0 i) (subs v (inc i))))
+                        (dissoc m v))))
+                  m (:defs s))]
+    m))
+
+(defn- line [[n v]] (str "#define " n " " v))
+
+(defn predefined
+  "The text of predefined/gxx/STD.h: the macros as `#define` lines in byte order, then __DATE__ and __TIME__ at the epoch."
+  [abi dl std]
+  (let [ls (sort (map line (macros abi dl std [])))]
+    (str (str/join "\n" (concat ls (take 2 (#'ct/date-macros (:epoch abi))))) "\n")))
+
+(defn delta
+  "An option list's effect on the standard's predefined macros, as bin/lib/repr-cpp/pp-check's recorder writes it: an #undef for
+  each name gone, then each #define line new or changed, in byte order."
+  [abi dl ^String std opts]
+  (let [b (macros abi dl std []) o (macros abi dl std opts)
+        gone (sort (remove #(contains? o %) (keys b)))
+        new (sort (for [[n v :as e] o :when (not= v (get b n))] (line e)))]
+    (str/join (map #(str % "\n") (concat (map #(str "#undef " %) gone) new)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; the __has_ answers
+
+(defn- unscope [^String nm] (let [i (.indexOf nm "::")] (if (neg? i) [nil nm] [(subs nm 0 i) (subs nm (+ i 2))])))
+(defn- bare [^String n] (if (and (> (count n) 4) (str/starts-with? n "__") (str/ends-with? n "__")) (subs n 2 (- (count n) 2)) n))
+
+(defn answer
+  "The dialect's answer to `op(nm)` (dialect.edn's rules)."
+  [dl ^String op ^String nm]
+  (let [stda (:std-attributes dl) gnu (set (:gnu-attributes dl)) clang (set (:clang-attributes dl))
+        [scope n] (unscope nm) n (bare n) scope (when scope (bare scope))]
+    (case op
+      "__has_cpp_attribute" (cond (nil? scope) (get stda n 0)
+                                  (= scope "gnu") (if (gnu n) 1 0)
+                                  (= scope "clang") (if (clang n) 1 0)
+                                  :else 0)
+      "__has_attribute" (cond (nil? scope) (cond (stda n) (stda n) (gnu n) 1 :else 0)
+                              (= scope "gnu") (if (gnu n) 1 0)
+                              :else 0)
+      "__has_builtin" (cond ((set (:builtins dl)) nm) 1 ((:builtin-values dl) nm) ((:builtin-values dl) nm) :else 0)
+      "__has_feature" (if ((set (:features-on dl)) nm) 1 0)
+      0)))
+
+(defn- probes [^String f]
+  (distinct (for [l (str/split-lines (slurp f)) :when (and (not (str/blank? l)) (not (str/starts-with? l "#")))]
+              (vec (take 2 (str/split l #"\t"))))))
+
+(defn has-tsv [dl ^String f]
+  (str (str/join "\n" (sort (for [[op nm] (probes f)] (str op "\t" nm "\t" (answer dl op nm))))) "\n"))
+
+;; ---------------------------------------------------------------------------------------------
+;; commands
+
+(defn- option-lists [^String f]
+  (distinct (for [l (str/split-lines (slurp f)) :when (and (not (str/blank? l)) (not (str/starts-with? l "#")))] (str/trim l))))
+
+(defn- deltas-edn [abi dl ^String f]
+  (str ";; The effect of the corpora's option lists on the predefined macros (made by test/cpp/predef.ae from c/target/abi.edn and\n"
+       ";; cpp/target/dialect.edn for each line of cpp/target/option-lists.txt; g++'s recorded ones are test/cpp/host's): for a\n"
+       ";; standard and the options, the lines added to predefined/gxx/STD.h (#define, and #undef of what the options remove).\n"
+       ";; Read with the Clojure reader.\n"
+       "{" (str/join "\n " (for [k (sort (option-lists f))
+                                 :let [[std & opts] (str/split k #"\s+")]]
+                             (str (pr-str k) " " (pr-str (delta abi dl std opts)))))
+       "}\n"))
+
+(defn- host-edn [abi dl]
+  (str ";; Arbace's C++ target, x86_64-linux-musl (doc/cpp/CPP-SURVEY.md, \"As built: cpp-target\"), in the layout repr/cpp's\n"
+       ";; preprocessor reads (arbace.repr.cpp.host/load-host; g++'s recorded answers in test/cpp/host/ have the same layout): made\n"
+       ";; by test/cpp/predef.ae (bin/repr-cpp target gen) from c/target/abi.edn, cpp/target/dialect.edn, probes.tsv and\n"
+       ";; option-lists.txt. Read with the Clojure reader.\n"
+       "{:gxx \"Arbace's C++ (x86_64-linux-musl; the GNU dialect of g++ 15.2, CP244 (b))\"\n"
+       " :epoch " (:epoch abi) "\n"
+       " :source-date \"2026-10-28 00:00:00 UTC\"\n"
+       " :stds " (pr-str (:stds dl)) "\n"
+       " :has-std " (pr-str (:has-std dl)) "}\n"))
+
+(defn- outputs [dir]
+  (let [abi (rd abi-file) dl (rd (str dir "/dialect.edn"))]
+    (into (sorted-map "host.edn" (host-edn abi dl)
+                      "search-gxx.txt" (str (str/join "\n" (:search dl)) "\n")
+                      "has.tsv" (has-tsv dl (str dir "/probes.tsv"))
+                      "opt-deltas-gxx.edn" (deltas-edn abi dl (str dir "/option-lists.txt")))
+          (for [s (:stds dl)] [(str "predefined/gxx/" s ".h") (predefined abi dl s)]))))
+
+(defn- diff-lines [a b]
+  (let [as (set (str/split-lines a)) bs (set (str/split-lines b))]
+    [(sort (remove bs as)) (sort (remove as bs))]))
+
+(defn- oracle-rows
+  "Each output against REF's file of the same answers: the predefined files line for line; has.tsv by its answers (REF's
+  has.tsv and has-extra.tsv, g++'s column); opt-deltas by key, the deltas as text. host.edn is no answer."
+  [dir ref]
+  (let [outs (outputs dir)
+        refhas (into {} (for [f ["has.tsv" "has-extra.tsv"] :let [g (java.io.File. (str ref "/" f))] :when (.exists g)
+                              l (str/split-lines (slurp g)) :let [c (str/split l #"\t")] :when (>= (count c) 3)]
+                          [[(c 0) (c 1)] (str/replace (c 2) "L" "")]))]
+    (concat
+      (for [[f t] outs :when (str/starts-with? f "predefined/")
+            :let [g (java.io.File. (str ref "/" f))] :when (.exists g)]
+        (let [[a b] (diff-lines t (slurp g))] [f a b]))
+      [(let [rows (for [l (str/split-lines (get outs "has.tsv")) :let [[op nm v] (str/split l #"\t")]] [[op nm] v])
+             bad (for [[k v] rows :when (not= v (get refhas k))] k)]
+         ["has.tsv" (map #(str (str/join " " %) " " (get (into {} rows) %)) bad) (map #(str (str/join " " %) " " (get refhas %)) bad)])]
+      (let [ours (read-string (get outs "opt-deltas-gxx.edn"))
+            theirs (rd (str ref "/opt-deltas-gxx.edn"))
+            ;; an option list g++ refused (-march=pentium4, an AArch64 option...) has no recorded delta: not an answer to compare
+            bad (sort (for [[k v] ours :when (contains? theirs k) :when (not= v (get theirs k))] k))
+            _ (println (str "opt-deltas: " (count (filter #(contains? theirs %) (keys ours))) " option lists compared, "
+                            (count (remove #(contains? theirs %) (keys ours))) " without g++'s answer (g++ refused them), "
+                            (count (remove #(contains? ours %) (keys theirs))) " recorded beyond option-lists.txt"))]
+        [["opt-deltas-gxx.edn" (map #(str % " => " (pr-str (get ours %))) bad) (map #(str % " => " (pr-str (get theirs %))) bad)]])
+      [(let [[a b] (diff-lines (get outs "search-gxx.txt") (slurp (str ref "/search-gxx.txt")))] ["search-gxx.txt" a b])])))
+
+(defn -main [cmd dir & more]
+  (case cmd
+    "gen" (do (.mkdirs (java.io.File. (str dir "/host/predefined/gxx")))
+              (let [os (outputs dir)]
+                (doseq [[f t] os] (spit (str dir "/host/" f) t))
+                (println "cpp target: wrote" (count os) "files under" (str dir "/host"))))
+    "verify" (let [os (outputs dir)
+                   bad (for [[f t] os :let [g (java.io.File. (str dir "/host/" f))]
+                             :when (not (and (.exists g) (= t (slurp g))))] f)]
+               (if (seq bad)
+                 (do (println "cpp target: stale (bin/repr-cpp target gen):" (str/join " " bad)) (System/exit 1))
+                 (println "cpp target:" (count os) "files as abi.edn and dialect.edn make them")))
+    "oracle" (let [ref (first more)
+                   rows (doall (oracle-rows dir ref))
+                   n (count (filter (fn [[_ a b]] (or (seq a) (seq b))) rows))]
+               (doseq [[f a b] rows :when (or (seq a) (seq b))]
+                 (println "differ" f) (doseq [l (take 12 a)] (println "  arbace:" l)) (doseq [l (take 12 b)] (println "  ref:   " l)))
+               (println (str "cpp target oracle: " (- (count rows) n) " of " (count rows) " files equal to " ref "'s"))
+               (when (pos? n) (System/exit 1)))
+    "option-lists" (let [ks (sort (distinct (for [id more
+                                                   :let [f (java.io.File. (str dir "/" id "/gxx.list"))] :when (.exists f)
+                                                   l (str/split-lines (slurp f))
+                                                   :let [c (str/split l #"\t")] :when (and (> (count c) 2) (not (str/blank? (c 2))))]
+                                               (str (c 1) " " (c 2)))))]
+                     (doseq [k ks] (println k)))))
