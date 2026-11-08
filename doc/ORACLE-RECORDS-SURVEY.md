@@ -1532,3 +1532,11 @@ additions where they add.
   (b) leave. *Recommended: (a)*, with batch 3's C++ lines.
 - **ORS32 The line's unpinned packs.** Rust's 7, OCaml's 6, LLVM's `llvm-opt-verify` and C++'s two cxxdump packs sit in the store with no
   pin. (a) Keep them until ORS29 and the crops' own records decide; (b) remove them. *Recommended: (a).*
+
+## As built: ORS30 (a), LLVM IR's live judges (2026-11-08, branch `llvm-rt-pack`)
+
+LLVM IR's oracle tier: `llvm-live` and `llvm-records-verify` on `[:stage0 :llvm :cxx]` (`test/gate/crops/llvm-oracle.edn`, spliced into
+`test/gate/steps.edn` by hand). The new verb is `bin/repr-llvm records-verify --sample N`: ORS6 (a)'s `moved`, ORS7 (a)'s crossed pair,
+and an `address` class for opt's stderr that prints a value by its address. Measured on 23.1.5 against the 23.1.4 records: 50 of 52 opt
+entries equal, 2 address; 13 of 13 rt entries equal. The details and the measures are in doc/llvm/LLVM-CROP-SURVEY.md, "As built: LLS31 (a)",
+"ORS30 (a)". The oracle tier gains 2 steps (3 parts).

@@ -16,6 +16,10 @@
 #                                        samples and runtime samples through clang++ -O0)
 #   bin/llvmi ir-make [PACK...]          the pinned IR made afresh by clang (packs tx, c; test/llvm/ir/): a pack per corpus set, its manifest
 #                                        and command; the check reads the IR from the packs and needs no clang (LLVMI_CLANG=1: compiled now)
+#   bin/llvmi ir-make rt [--mutants]     the pack rt (LLS31 (a)): test/llvm/rt-builds.tsv's modules by clang, clang++, rustc and llvm-stress
+#                                        with Arbace's mutants of them (repr/llvm's families roundtrip-rt, text-rt, verify-rt, verify-rt-heldout);
+#                                        --mutants: the mutants made again from the pack's modules, no compiler
+#   bin/llvmi rt-list [RECORD]           test/llvm/rt-builds.tsv from the first records' ids (the corners dropped)
 #   bin/llvmi record-ref [--corpus C,...] [--only LIST]
 #                                        lli's runs (empty stdin, no arguments, 10 s) recorded into test/llvm/ref-lli23.edn (--only:
 #                                        those ids rewritten, the others kept)
@@ -68,7 +72,7 @@ tool() { # an Arbace tool on the tools' host, its compiler's warnings filtered o
 # test/llvm/ir/PACK.tar.xz (deterministic), its SHA-256 PACK.tar.xz.sha256, its manifest PACK.tsv (ID, SOURCE, SOURCE-SHA256,
 # IR-SHA256) and PACK.cmd (the clang and the command that made it, bin/llvmi ir-make PACK); the check reads the IR from the pack and needs
 # no clang (LLVMI_CLANG=1: compiled afresh, as before). Packs: tx (tx-O0, tx-O2), c (c-O0, c-O2, cpp).
-irdir=$root/test/llvm/ir
+irdir=${LLVMI_IRDIR:-$root/test/llvm/ir}  # LLVMI_IRDIR: another directory (a subset's proof, not the pins)
 pack_of() { case $1 in tx-O0|tx-O2) echo tx ;; c-O0|c-O2|cpp) echo c ;; *) return 1 ;; esac; }
 # pinned WORK PACK CORPUS: the corpus' modules (ID<tab>PATH) out of the pack, extracted once into WORK/pin/PACK; a source the manifest
 # names that exists here with another digest makes the pack stale (an error: bin/llvmi ir-make PACK)
@@ -87,6 +91,155 @@ pinned() {
   [ -z "$bad" ] || { echo "llvmi: the pinned IR of $pk is stale for: $(echo $bad | head -c 400) (bin/llvmi ir-make $pk)" >&2; return 1; }
   awk -F'\t' -v c="$c." -v d="$d" 'index($1, c) == 1 { print $1 "\t" d "/" $1 ".ll" }' "$irdir/$pk.tsv" |
     if [ -n "${only_ids:-}" ]; then awk -F'\t' 'FILENAME == ARGV[1] { w[$1] = 1; next } ($1 in w)' "$only_ids" -; else cat; fi
+}
+
+# The pack rt (LLS31 (a); doc/llvm/LLVM-CROP-SURVEY.md, "As built: LLS31 (a)"): the first records' 282-module lists made again
+# but their 21 corner modules (sources lost), the input of repr/llvm's families roundtrip-rt, text-rt, verify-rt and verify-rt-heldout
+# (bin/repr-llvm check), not of llvmi's run. test/llvm/rt-builds.tsv (ID, SOURCE, BUILD; bin/llvmi rt-list) names each module: SOURCE
+# gcc15:NAME.c (gcc 15.2.0's gcc.c-torture/execute from the pinned tarball, test/c/corpora.edn's :gcc-15.2.0: all 41 programs of the
+# first records are there, 5 of them not in gcc 9.1.0's), checkout:PATH (the C++ samples, Rust's sample) or llvm-stress:SEED; BUILD its command
+# (rt_compile). The pack holds the modules (ID.ll) and Arbace's mutants of them (mut/NAME.KIND.K.ll, rt_mutant_sets), its manifest
+# rt.tsv: ID, SOURCE (for a mutant mutant-SET:BASE), SOURCE-SHA256 (a mutant's: its base module's IR), IR-SHA256.
+rt_builds=$root/test/llvm/rt-builds.tsv
+# the mutant sets, SET N FIRST FAMILY INPUT (bin/repr-llvm mutants LIST OUT N FIRST FAMILY): the first records' (their names' indices:
+# a fitted set 0-339 and 1000-1339 of the base family's 17 kinds, the held-out sets 500000-500599 and 600000-600599 of every kind),
+# over the pack's modules and test/llvm/hw.list in that order (`modules`); ctl, ctlh and ctlu one mutant each of hw.list, the negative
+# controls' subjects and references (test/repr/llvm/verify-controls.txt): two :noterm (index 2 mod 17; the bases hw-dbg and hw-notes by
+# the mutator's start) and one :undef (7 mod 17, hw-implicit), known by day, whatever the pack holds
+rt_mutant_sets="a 340 0 base modules
+b 340 1000 base modules
+h1 600 500000 - modules
+h2 600 600000 - modules
+ctl 1 900016 base hw
+ctlh 1 900050 base hw
+ctlu 1 900055 base hw"
+# rt_cpp_isystem: the -isystem flags of C++'s headers made without g++ (bin/lib/repr-cpp/sysroot.bash's cpp_full_sysroot: libstdc++'s
+# from the pinned gcc-15.2.0 tarball, musl's from its tarball), the Mach-O build's (the host has no macOS SDK)
+rt_cpp_isystem() {
+  local s r
+  s=$( (. "$root/bin/lib/repr-cpp/sysroot.bash"; cpp_full_sysroot) ) || return 1
+  while read -r r; do
+    case $r in */lib/clang/*) continue ;; esac  # clang's own resource directory stays clang's (-nostdlibinc keeps it)
+    [ -d "$s$r" ] && printf -- '-isystem %s ' "$s$r"
+  done < "$s/roots.txt"
+  return 0
+}
+# rt_torture: gcc 15.2.0's gcc.c-torture/execute's programs rt-builds.tsv names, extracted once from the pinned tarball (the main
+# checkout's .tmp/c1/gcc/gcc-15.2.0.tar.xz, as C's and C++'s crops take it; REPR_CPP_GCC_TARBALL another) into .tmp/llvmi/rt-gcc15
+rt_torture() {
+  local t=${REPR_CPP_GCC_TARBALL:-$main/.tmp/c1/gcc/gcc-15.2.0.tar.xz} d=$root/.tmp/llvmi/rt-gcc15 want e=gcc-15.2.0/gcc/testsuite/gcc.c-torture/execute
+  if [ ! -f "$d/.ok" ]; then
+    want=$(sed -n '/^ {:gcc-15.2.0$/,/:sha256/s/^ *:sha256 "\([0-9a-f]*\)".*/\1/p' "$root/test/c/corpora.edn" | head -1)
+    [ -f "$t" ] || { echo "llvmi: no $t (gcc 15.2.0's tarball, test/c/corpora.edn's :gcc-15.2.0)" >&2; return 1; }
+    [ "$(sha256sum < "$t" | cut -c1-64)" = "$want" ] || { echo "llvmi: $t is not the pinned gcc-15.2.0 tarball" >&2; return 1; }
+    rm -rf "$d"; mkdir -p "$d"
+    awk -F'\t' -v e="$e" '$2 ~ /^gcc15:/ { f = $2; sub(/^gcc15:/, "", f); if (!s[f]++) print e "/" f }' "$rt_builds" > "$d.names"
+    tar -xJf "$t" -C "$d" -T "$d.names" || return 1
+    rm -f "$d.names"; : > "$d/.ok"
+  fi
+  echo "$d/$e"
+}
+# rt_compile ID SOURCE BUILD OUT: one module made into OUT (its log OUT.log); status 0 when made
+rt_compile() {
+  local id=$1 so=$2 b=$3 out=$4 f o rd
+  case $so in
+    gcc15:*)
+      f=${so#gcc15:}
+      case $b in g0) o="-O0 -g" ;; g2) o="-O2 -g" ;; o2) o=-O2 ;; lto) o="-O2 -flto" ;; win) o="-O2 --target=x86_64-pc-windows-msvc" ;; *) return 2 ;; esac
+      (cd "$rt_tx" && clang $o -S -emit-llvm -std=gnu17 -w -fno-strict-aliasing $tx_flags -ffile-prefix-map="$rt_tx/"= -fdebug-compilation-dir=. -o "$out" "$f") 2> "$out.log" ;;
+    checkout:*.cpp)
+      f=${so#checkout:}
+      case $b in g0) o="-O0 -g" ;; g2) o="-O2 -g" ;; lto) o="-O2 -flto" ;; win) o="-O2 --target=x86_64-pc-windows-msvc" ;;
+        mac) o="-O0 --target=x86_64-apple-macosx -nostdlibinc -nostdinc++ $rt_isystem" ;; *) return 2 ;; esac
+      (cd "$root" && clang++ $o -S -emit-llvm -std=c++23 -w -ffile-prefix-map="$root/"= -fdebug-compilation-dir=. -o "$out" "$f") 2> "$out.log" ;;
+    checkout:*.rs)
+      # rustc (the oracle tier's, by hand) into a scratch directory: -C lto=fat writes one module
+      f=${so#checkout:}
+      case $b in g0) o="-C opt-level=0 -g" ;; g2) o="-C opt-level=2 -g" ;; lt) o="-C opt-level=2 -C lto=fat" ;; *) return 2 ;; esac
+      rd=$(mktemp -d "$TMPDIR/llvmi-rs.XXXXXX")
+      (cd "$root" && rustc $o -C codegen-units=1 --emit=llvm-ir --crate-type=bin --edition 2021 --remap-path-prefix="$root/"= -o "$rd/m.ll" "$f") 2> "$out.log" \
+        && mv "$rd/m.ll" "$out"; local st=$?; rm -rf "$rd"; return $st ;;
+    llvm-stress:*)
+      [ "$b" = stress ] || return 2
+      "$llvm_bin/llvm-stress" -size=60 -seed="${so#llvm-stress:}" -o "$out" 2> "$out.log" ;;
+    *) return 2 ;;
+  esac
+}
+# rt_source_sha SOURCE: the digest a manifest row records for it (a file's; llvm-stress's seed has none: -)
+rt_source_sha() {
+  case $1 in
+    gcc15:*) sha256sum < "$rt_tx/${1#gcc15:}" | cut -d' ' -f1 ;;
+    checkout:*) sha256sum < "$root/${1#checkout:}" | cut -d' ' -f1 ;;
+    *) echo - ;;
+  esac
+}
+# rt_make [--mutants]: the pack made into $irdir/rt.{tar.xz,tar.xz.sha256,tsv,cmd} (LLVMI_RT_ONLY=LIST: only those ids of
+# rt-builds.tsv, LLVMI_RT_MUT_N=N: at most N mutants a set, a subset's proof; with LLVMI_IRDIR elsewhere than the pins);
+# --mutants: the modules taken from the existing pack, no compiler run, the mutants made again (the mutator or the reader changed)
+rt_make() {
+  local w=$root/.tmp/llvmi/ir-make/rt mutonly= id so b set n first fam inp list
+  [ "${1:-}" = --mutants ] && mutonly=1
+  [ -f "$rt_builds" ] || { echo "llvmi ir-make rt: no $rt_builds (bin/llvmi rt-list)" >&2; return 1; }
+  rm -rf "$w"; mkdir -p "$w/stage/mut" "$w/log"
+  if [ -n "$mutonly" ]; then
+    [ -f "$irdir/rt.tar.xz" ] || { echo "llvmi ir-make rt --mutants: no $irdir/rt.tar.xz" >&2; return 1; }
+    (cd "$irdir" && sha256sum -c --quiet rt.tar.xz.sha256) >&2 || { echo "llvmi: rt.tar.xz does not match its pin" >&2; return 1; }
+    mkdir -p "$w/old"; xz -dc "$irdir/rt.tar.xz" | tar -xf - -C "$w/old" || return 1
+    awk -F'\t' '$2 !~ /^mutant-/' "$irdir/rt.tsv" > "$w/modules.tsv"
+    cut -f1 "$w/modules.tsv" | while read -r id; do cp "$w/old/$id.ll" "$w/stage/$id.ll"; done
+  else
+    rt_isystem=$(rt_cpp_isystem) || { echo "llvmi ir-make rt: C++'s headers (cpp_full_sysroot) failed" >&2; return 1; }
+    rt_tx=$(rt_torture) || return 1
+    : > "$w/modules.tsv"
+    while IFS=$'\t' read -r id so b; do
+      case $id in ''|'#'*) continue ;; esac
+      [ -z "${LLVMI_RT_ONLY:-}" ] || grep -qxF "$id" "$LLVMI_RT_ONLY" || continue
+      if rt_compile "$id" "$so" "$b" "$w/stage/$id.ll"; then
+        printf '%s\t%s\t%s\t%s\n' "$id" "$so" "$(rt_source_sha "$so")" "$(sha256sum < "$w/stage/$id.ll" | cut -d' ' -f1)" >> "$w/modules.tsv"
+      else
+        rm -f "$w/stage/$id.ll"; echo "llvmi ir-make rt: $id not made ($b of ${so}): $(head -1 "$w/stage/$id.ll.log" | cut -c1-160)" >&2
+      fi
+      [ -f "$w/stage/$id.ll.log" ] && mv "$w/stage/$id.ll.log" "$w/log/$id.log"
+    done < "$rt_builds"
+  fi
+  # the mutator's inputs: the pack's modules in the manifest's order, then the hand-written modules (their committed files)
+  awk -F'\t' -v d="$w/stage" '{ print $1 "\t" d "/" $1 ".ll" }' "$w/modules.tsv" > "$w/in-modules.list"
+  awk -F'\t' -v r="$root" 'NF { print $1 "\t" r "/" $2 }' "$root/test/llvm/hw.list" > "$w/in-hw.list"
+  cat "$w/in-modules.list" "$w/in-hw.list" > "$w/in-all.list"
+  : > "$w/mutants.tsv"
+  while read -r set n first fam inp; do
+    [ "$inp" = hw ] && list=$w/in-hw.list || list=$w/in-all.list
+    [ -n "${LLVMI_RT_MUT_N:-}" ] && [ "$n" -gt "$LLVMI_RT_MUT_N" ] && n=$LLVMI_RT_MUT_N
+    [ "$fam" = - ] && fam=
+    "$root/bin/repr-llvm" mutants "$list" "$w/mut-$set" "$n" "$first" $fam > "$w/log/mutants-$set.log" 2>&1 \
+      || { cat "$w/log/mutants-$set.log" >&2; return 1; }
+    while IFS=$'\t' read -r id p; do
+      [ -n "$id" ] || continue
+      base=$(echo "$id" | sed -E 's/\.[^.]+\.[0-9]+$//')
+      bp=$(awk -F'\t' -v n="$base" '$1 == n { print $2; exit }' "$list")
+      mv "$p" "$w/stage/mut/$id.ll"
+      printf '%s\tmutant-%s:%s\t%s\t%s\n' "$id" "$set" "$base" "$(sha256sum < "$bp" | cut -d' ' -f1)" "$(sha256sum < "$w/stage/mut/$id.ll" | cut -d' ' -f1)" >> "$w/mutants.tsv"
+    done < "$w/mut-$set/mutants.list"
+    echo "llvmi ir-make rt: mutant set $set: $(grep -c "	mutant-$set:" "$w/mutants.tsv") of $n"
+  done <<< "$rt_mutant_sets"
+  mkdir -p "$irdir"
+  cat "$w/modules.tsv" "$w/mutants.tsv" > "$irdir/rt.tsv"
+  (cd "$w/stage" && LC_ALL=C tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner --format=gnu -cf - .) | xz -9e -T1 > "$irdir/rt.tar.xz"
+  (cd "$irdir" && sha256sum rt.tar.xz > rt.tar.xz.sha256)
+  if [ -z "$mutonly" ] || [ ! -f "$irdir/rt.cmd" ]; then
+    { echo ";; the pack rt's IR (bin/llvmi ir-make rt; doc/llvm/LLVM-CROP-SURVEY.md, \"As built: LLS31 (a)\"): test/llvm/rt-builds.tsv's modules and Arbace's mutants"
+      echo "clang: $(clang --version | head -1)"
+      echo "rustc: $(rustc --version 2>&1 | head -1)"
+      echo "llvm-stress: $("$llvm_bin/llvm-stress" --version 2>&1 | grep -m1 -i version | sed 's/^ *//')"
+      echo "torture BUILD: clang -O0 -g (g0) | -O2 -g (g2) | -O2 (o2) | -O2 -flto (lto) | -O2 --target=x86_64-pc-windows-msvc (win) -S -emit-llvm -std=gnu17 -w -fno-strict-aliasing $tx_flags -ffile-prefix-map=TX/= -fdebug-compilation-dir=. NAME.c (TX: gcc-15.2.0.tar.xz's gcc/testsuite/gcc.c-torture/execute)"
+      echo "C++ BUILD: clang++ -O0 -g (g0) | -O2 -g (g2) | -O2 -flto (lto) | -O2 --target=x86_64-pc-windows-msvc (win) | -O0 --target=x86_64-apple-macosx -nostdlibinc -nostdinc++ -isystem TREE/... (mac; TREE: cpp_full_sysroot, the headers made without g++) -S -emit-llvm -std=c++23 -w -ffile-prefix-map=ROOT/= -fdebug-compilation-dir=. test/cpp/samples/NAME.cpp"
+      echo "Rust BUILD: rustc -C opt-level=0 -g (g0) | -C opt-level=2 -g (g2) | -C opt-level=2 -C lto=fat (lt) -C codegen-units=1 --emit=llvm-ir --crate-type=bin --edition 2021 --remap-path-prefix=ROOT/= test/rust/sample/shapes.rs"
+      echo "stress: llvm-stress -size=60 -seed=N"
+      echo "mutants (bin/repr-llvm mutants LIST OUT N FIRST FAMILY, arbace.repr.llvm.mutate; SET N FIRST FAMILY INPUT):"
+      echo "$rt_mutant_sets" | sed 's/^/  /'
+      echo "modules: a build the compiler refuses is not one; the manifest rt.tsv: ID, SOURCE (mutant-SET:BASE), SOURCE-SHA256 (a mutant's base's IR), IR-SHA256"; } > "$irdir/rt.cmd"
+  fi
+  echo "llvmi ir-make: rt: $(wc -l < "$w/modules.tsv") modules, $(wc -l < "$w/mutants.tsv") mutants, $(wc -c < "$irdir/rt.tar.xz") bytes"
 }
 
 # modules WORK CORPORA: WORK/modules.tsv
@@ -221,8 +374,9 @@ case $cmd in
     # the packs made afresh by clang (the pin's: clang 23.1.5) into test/llvm/ir/: the IR, its manifest, its command
     [ $# -gt 0 ] || set -- tx c
     mkdir -p "$irdir"
+    if [ "$1" = rt ]; then shift; rt_make "$@"; exit; fi
     for pk in "$@"; do
-      case $pk in tx) cs=tx-O0,tx-O2 ;; c) cs=c-O0,c-O2,cpp ;; *) echo "llvmi ir-make: no pack $pk (tx, c)" >&2; exit 2 ;; esac
+      case $pk in tx) cs=tx-O0,tx-O2 ;; c) cs=c-O0,c-O2,cpp ;; *) echo "llvmi ir-make: no pack $pk (tx, c; rt alone: bin/llvmi ir-make rt [--mutants])" >&2; exit 2 ;; esac
       w=$root/.tmp/llvmi/ir-make/$pk
       rm -rf "$w"; mkdir -p "$w/stage"
       LLVMI_CLANG=1 modules "$w" "$cs"
@@ -242,6 +396,30 @@ case $cmd in
         echo "modules: a file clang refuses, or without a main, is not one; the manifest $pk.tsv: ID, SOURCE, SOURCE-SHA256, IR-SHA256"; } > "$irdir/$pk.cmd"
       echo "llvmi ir-make: $pk: $(wc -l < "$irdir/$pk.tsv") modules, $(wc -c < "$irdir/$pk.tar.xz") bytes"
     done ;;
+  rt-list)
+    # rt-list [RECORD]: test/llvm/rt-builds.tsv written from the first records' ids (test/llvm/check-roundtrip-linux-amd64.edn): the
+    # suffix gives the build, the name the source; the hand-written hw-* are committed (test/llvm/hw.list), the 21 corners dropped
+    from=${1:-$root/test/llvm/check-roundtrip-linux-amd64.edn}
+    # gcc 15.2.0's torture programs: the pinned tarball's names (tar -t) under gcc.c-torture/execute
+    t=${REPR_CPP_GCC_TARBALL:-$main/.tmp/c1/gcc/gcc-15.2.0.tar.xz} gl=$root/.tmp/llvmi/rt-gcc15.names
+    [ -f "$t" ] || { echo "llvmi rt-list: no $t (gcc 15.2.0's tarball, test/c/corpora.edn's :gcc-15.2.0)" >&2; exit 1; }
+    mkdir -p "$root/.tmp/llvmi"; tar -tJf "$t" --wildcards 'gcc-15.2.0/gcc/testsuite/gcc.c-torture/execute/*.c' > "$gl" || exit 1
+    grep -o '^\["[^"]*"' "$from" | sed 's/^\["//; s/"$//' | while read -r id; do
+      n=${id%.*} b=${id##*.}
+      case $id in
+        hw-*) ;;
+        stress[0-9]*) printf '%s\tllvm-stress:%s\tstress\n' "$id" "${id#stress}" ;;
+        rs.g0|rs.g2|rs.lt) printf '%s\tcheckout:test/rust/sample/shapes.rs\t%s\n' "$id" "$b" ;;
+        *.g0|*.g2|*.o2|*.lto|*.win|*.mac)
+          if [ -f "$root/test/cpp/samples/$n.cpp" ]; then printf '%s\tcheckout:test/cpp/samples/%s.cpp\t%s\n' "$id" "$n" "$b"
+          elif grep -qxF "gcc-15.2.0/gcc/testsuite/gcc.c-torture/execute/$n.c" "$gl"; then printf '%s\tgcc15:%s.c\t%s\n' "$id" "$n" "$b"
+          else echo "llvmi rt-list: no source for $id" >&2; fi ;;
+        *) echo "llvmi rt-list: $id dropped (a corner module, its source lost)" >&2 ;;
+      esac
+    done | LC_ALL=C sort > "$rt_builds.new"
+    { echo "# the pack rt's modules (bin/llvmi rt-list from ${from#$root/}; bin/llvmi ir-make rt): ID, SOURCE, BUILD"; cat "$rt_builds.new"; } > "$rt_builds"
+    rm -f "$rt_builds.new"
+    echo "llvmi rt-list: $(grep -vc '^#' "$rt_builds") modules in ${rt_builds#$root/}" ;;
   record-ref)
     corpora=$all_corpora only=
     while [ $# -gt 0 ]; do
@@ -266,7 +444,7 @@ case $cmd in
         --essential) only=$root/test/llvm/essential-check.txt; shift ;;
         --record) record=1; shift ;;
         --judge) judge=1; shift ;;
-        *) sed -n '20,30p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+        *) sed -n '24,34p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
       esac
     done
     level=eval; [ -n "$aot" ] && level=aot
@@ -349,5 +527,5 @@ case $cmd in
   divergences)
     level=eval; [ "${1:-}" = --aot ] && level=aot
     tool -m arbace.llvm.check divergences "$level" "$root/test/llvm/check-$level-linux-amd64.edn" ;;
-  *) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+  *) sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
 esac
