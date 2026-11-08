@@ -406,6 +406,8 @@
   (let [es (sema/lookup scope nm)]
     (some #(or (= :tmpl (:e %)) (and (= :type (:e %)) (abi/class? (:ty %)) (:tmpl (abi/cls (:id (:ty %)))))) es)))
 
+(declare static-call-value)
+
 (defn eval-text
   "The value of a constant expression's text in `scope` (integers, the operators, parentheses, the conditional
   operator, names of constants and of non-type parameters, members of classes (X<T>::value), sizeof(type), true and
@@ -472,18 +474,26 @@
                     (sema/ce-call-fn (:id (first cands)) args))
                   (= k :id)
                   ;; a name, qualified, its parts maybe template-ids: Name<...>::member
-                  (let [parts (loop [ps [t]]
+                  (let [tkw (atom false)
+                        parts (loop [ps [t]]
                                 (cond
-                                  (and (= "<" (peek)) (template-name? scope (last ps)))
+                                  (and (= "<" (peek)) (or (template-name? scope (last ps)) (and @tkw (> (count ps) 1))))
                                   (do (next!) (recur (conj (pop ps) (str (last ps) "<" (run "<" ">") ">"))))
-                                  (= "::" (peek)) (do (next!) (recur (conj ps (second (next!)))))
+                                  ;; (`X::template f<...>`: a member template named after a dependent qualifier)
+                                  (= "::" (peek)) (do (next!) (when (= "template" (peek)) (next!) (reset! tkw true)) (recur (conj ps (second (next!)))))
                                   :else ps))]
-                    (if (some #(str/includes? % "<") parts)
+                    (cond
+                      ;; a call without arguments of a static member (function template's specialization), G5c:
+                      ;; `_PCCP::template _ConstructiblePair<_U1, _U2>() && ...` (libstdc++'s C++17 std::pair)
+                      (and (> (count parts) 1) (= "(" (peek)) (= ")" (nth (get ts (inc @pos)) 1 nil)))
+                      (do (next!) (next!) (static-call-value scope (ct/parse-name (str/join "::" parts))))
+                      (some #(str/includes? % "<") parts)
                       (let [r (member-constant (sema/resolve-type scope (str/join "::" (butlast parts))) (last parts))
                             tp (last (butlast parts))
                             i (str/index-of tp "<")]
                         ;; (an unresolved name's spelling for its mangling: its arguments as written, its namespaces)
                         r)
+                      :else
                       (let [es (when (> (count parts) 1) (sema/lookup scope (first parts)))
                             e (first (filter #(= :type (:e %)) es))]
                         (if (and e (dependent? (:ty e)))
@@ -501,6 +511,37 @@
         (when (< (long @pos) (count ts)) (fail :template "constant expression " s))
         v))))
 
+(declare resolve-args complete-args instantiate-fn)
+
+(defn- static-call-value
+  "The value of a call without arguments of a constexpr static member function, or of a specialization of a static
+  member function template given its template arguments (`_PCCP::template _ConstructiblePair<_U1, _U2>()`, libstdc++'s
+  C++17 std::pair constructors' enable_if conditions; G5c: libsupc++'s eh_alloc.cc); dependent in a pattern's signature
+  ({:k :texpr :o :mcall})."
+  [scope callee]
+  (let [[cls tf] (if (and (seq? callee) (= 'cpp/scope (first callee))) [(second callee) (last callee)] [nil callee])
+        tf (if (and (seq? tf) (= 'template (first tf))) (second tf) tf)
+        [nsym targs] (if (and (seq? tf) (= '<> (first tf))) [(second tf) (vec (nnext tf))] [tf nil])
+        ;; (a qualified name read as one symbol, P/f: its qualifier the class)
+        [cls nm] (if (and (nil? cls) (symbol? nsym) (namespace nsym)) [(symbol (namespace nsym)) (name nsym)] [cls (str nsym)])
+        ct (when cls (sema/resolve-type-form scope cls))]
+    (if (and ct (dependent? ct))
+      {:k :texpr :o :mcall :base ct :name nm}
+      (try
+      (let [_ (when (and ct (not (abi/class? (abi/unq ct)))) (fail :template "a member call of a non-class: " nm))
+            es (if ct (map second (sema/class-lookup (:id (abi/unq ct)) nm false)) (sema/lookup scope nm))
+            fid (if targs
+                  (let [e (or (first (filter #(and (= :tmpl (:e %)) (= :fn (:tk %))) es)) (fail :template "no member function template " nm))
+                        t (tmpl (:id e))
+                        args (or (complete-args t (resolve-args scope t targs false)) (fail :template "the template arguments of " nm))
+                        ;; (the template's own parameters in a pattern's signature: dependent, evaluated once substituted)
+                        _ (when (some dependent? args) (throw (ex-info "dependent" {::dependent true ::targs args})))]
+                    (instantiate-fn (:id e) args))
+                  (:id (or (first (filter #(and (= :fn (:e %)) (empty? (:ps (:ty (sema/fnd (:id %)))))) es)) (fail :template "no function " nm))))]
+        (sema/ce-call-fn fid []))
+      (catch arbace.lang.ExceptionInfo x
+        (if (::dependent (ex-data x)) {:k :texpr :o :mcall :base ct :name nm :targs (::targs (ex-data x))} (throw x)))))))
+
 (defn- const-form
   "A constant of a template argument's or array bound's form: a number, a name, X<T>::member, (cpp/text s)."
   [scope f]
@@ -517,6 +558,9 @@
     ;; a type trait's value (G4: __is_same(T, U))
     (and (seq? f) (= 'fn (first f)) (vector? (second f)) (symbol? (nth f 2 nil)) (contains? value-traits (str (nth f 2))))
     (trait-value scope (str (nth f 2)) (second f))
+    ;; a call without arguments of a static member (function template's specialization), G5c
+    (and (seq? f) (= 'fn (first f)) (= [] (second f)) (let [c (nth f 2 nil)] (and (seq? c) (#{'cpp/scope '<>} (first c)))))
+    (static-call-value scope (nth f 2))
     ;; a functional cast T(e) of a constant (G4: the headers' bool(_Bn::value))
     (and (seq? f) (= 'fn (first f)) (vector? (second f)) (= 1 (count (second f))))
     (let [v (const-form scope (first (second f)))
@@ -1830,6 +1874,9 @@
       (swap! *scanned* conj [:fn id])
       (walk-refs acc [(:tbody f) (:tinits f) (:tassign f)])
       (doseq [v (:statics f)] (walk-refs acc (:sinit (sema/var* v)))))
+    ;; (a destructor or constructor defaulted out of line, G5c's nested_exception::~nested_exception() = default: its class's
+    ;; members' and bases' destructors used, as its definition destroys them)
+    (doseq [[_ f] @sema/*fns* :when (and (:out-of-line-default f) (:cls f))] (swap! acc update :classes conj (:cls f)))
     (doseq [[id v] @sema/*vars*]
       (when (and (:ginit v) (not (contains? @*scanned* [:var id]))) (swap! *scanned* conj [:var id]) (walk-refs acc (:ginit v)))
       ;; (a variable not defined, a header's not used among them, uses no class's members: G4)

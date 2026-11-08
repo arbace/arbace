@@ -171,7 +171,9 @@
 (def ^:private nothrow-libc
   #{"memcpy" "memmove" "memset" "memcmp" "memchr" "strlen" "strcmp" "strncmp" "strcpy" "strncpy" "strcat" "strncat" "strchr"
     "strrchr" "strstr" "strspn" "strcspn" "strpbrk" "abs" "labs" "llabs" "fabs" "sqrt" "sin" "cos" "tan" "exp" "log" "pow" "floor"
-    "ceil" "fmod" "malloc" "calloc" "realloc" "free" "toupper" "tolower" "isalpha" "isdigit" "isspace" "isupper" "islower" "isalnum"})
+    "ceil" "fmod" "malloc" "calloc" "realloc" "free" "toupper" "tolower" "isalpha" "isdigit" "isspace" "isupper" "islower" "isalnum"
+    ;; (G5c: the ones that do not return, Builtins' NoThrow and NoReturn)
+    "abort" "exit" "_Exit" "quick_exit"})
 
 (defn header-entities
   "Our entities for the header declaration the parts name ([\"printf\"], [\"std\" \"printf\"]), or nil."
@@ -181,7 +183,7 @@
     (or (get @*header-cache* parts)
         (let [id (next-id)]
           (swap! *fns* assoc id {:id id :name "abort" :kind :fn :ty {:k :fn :ret abi/void :ps [] :va false} :linkage :c :path []
-                                 :scope *root* :param-names [] :defaults [] :pos -1 :header true})
+                                 :scope *root* :param-names [] :defaults [] :pos -1 :header true :noreturn true})
           (swap! *header-cache* assoc parts [{:e :fn :id id :pos -1}])
           [{:e :fn :id id :pos -1}]))
   (when *proot*
@@ -198,7 +200,9 @@
                                  f {:id id :name (:name pe) :kind :fn :ty (resolve-type *root* (:qt pe)) :linkage :c :path []
                                     :scope *root* :param-names [] :defaults [] :pos -1 :header true
                                     ;; the C library functions clang knows as nothrow builtins (nounwind at their calls)
-                                    :noexcept (boolean (nothrow-libc (:name pe)))}]
+                                    :noexcept (boolean (nothrow-libc (:name pe)))
+                                    ;; (and as not returning: Builtins.def's abort, exit, _Exit, quick_exit; G5c)
+                                    :noreturn (contains? #{"abort" "exit" "_Exit" "quick_exit"} (:name pe))}]
                              (swap! *fns* assoc id f)
                              [{:e :fn :id id :pos -1}]))
                      :var (when (and (:clink pe) (:ty pe) (not (:tmpl pe)))
@@ -248,7 +252,8 @@
         (let [id (next-id)
               es [{:e :fn :id id :pos -1}]]
           (swap! *fns* assoc id {:id id :name cn :kind :fn :ty (resolve-type *root* qt) :linkage :c :path [] :scope *root*
-                                 :param-names [] :defaults [] :pos -1 :header true :noexcept (not= cn "abort")})
+                                 :param-names [] :defaults [] :pos -1 :header true :noexcept (not= cn "abort")
+                                 :noreturn (contains? #{"abort" "exit"} cn)})
           (swap! *header-cache* assoc [:builtin nm] es)
           es))))
 
@@ -575,6 +580,28 @@
            (or (some-> (:_arg %) str/trim parse-long) true))
         (:inner n)))
 
+(def ^:private mode-bits
+  ;; GCC's machine modes as clang's Sema::AddModeAttr (parseModeAttrArg) reads them for x86-64: QI, HI, SI, DI, TI, byte,
+  ;; word (64), pointer (64), unwind_word (the target's: word), libgcc_cmp_return and libgcc_shift_count (word)
+  {"QI" 8 "HI" 16 "SI" 32 "DI" 64 "TI" 128 "byte" 8 "word" 64 "pointer" 64 "unwind_word" 64 "libgcc_cmp_return" 64 "libgcc_shift_count" 64})
+
+(defn- mode-type
+  "The type `t` of a declaration `n` under GNU's mode attribute (G5c: cxxabi.h's `typedef int __guard
+  __attribute__((mode (__DI__)))`, unwind.h's _Unwind_Word): an integer type of the mode's width and `t`'s signedness,
+  the first of char, short, int, long, long long, __int128 of that width (clang's ASTContext::getIntTypeForBitwidth);
+  `t` without one."
+  [n t]
+  (if-let [a (some #(when (and (= "NativeAttr" (:kind %)) (#{"mode" "__mode__"} (:_gnu %))) %) (:inner n))]
+    (let [m (str/replace (str/trim (str (:_arg a))) #"^__|__$" "")
+          w (or (mode-bits m) (fail :type "the mode " m))
+          u (abi/unq t)]
+      (when-not (and (abi/integral? u) (not= :enum (:k u))) (fail :type "the mode " m " of " (pr-str t)))
+      (let [signed (abi/signed? u)
+            n (case (long w) 8 (if signed :schar :uchar) 16 (if signed :short :ushort) 32 (if signed :int :uint) 64 (if signed :long :ulong)
+                    (fail :type "the mode " m " (no 128-bit integer type modelled)"))]
+        (merge (abi/b n) (select-keys t [:c :v]))))
+    t))
+
 (defn- init-kid
   "A variable declaration's initializer node: its first child that is not an attribute (__attribute__((init_priority(N)))
   comes first in the tree; G5)."
@@ -662,6 +689,14 @@
   [n]
   (boolean (some #(and (= "NativeAttr" (:kind %)) (#{"always_inline" "__always_inline__"} (:_gnu %))) (:inner n))))
 
+(defn- noreturn-node?
+  "Whether a function declaration says it does not return ([[noreturn]], __attribute__((noreturn)); [dcl.attr.noreturn])."
+  [n]
+  (boolean (some #(and (= "NativeAttr" (:kind %))
+                       (or (#{"noreturn" "__noreturn__"} (:_gnu %))
+                           (and (nil? (:_gnu %)) (re-find #"^\s*\[\[\s*(?:std\s*::\s*)?noreturn\b" (str (node-text %))))))
+                 (:inner n))))
+
 (defn- declare-fn!
   "A function, method, constructor or destructor declaration (or definition) in `scope`; out-of-line definitions join
   their declaration. One whose trailing requires-clause is not satisfied is not declared (nil; P14 (b), G4)."
@@ -710,9 +745,16 @@
            ;; GNU's always_inline (clang's AlwaysInlineAttr, `alwaysinline` in the IR: inlined at -O0 by LLVM's
            ;; AlwaysInliner, arbace.cpp.inline; P16 (a))
            :always-inline (always-inline-node? n)
+           ;; G5c: a call of it ends its block (clang's EmitCall: the call, then unreachable), so a catch (...) { abort(); }
+           ;; ends no catch on the normal path
+           :noreturn (noreturn-node? n)
+           ;; GNU's used (G5c: exception_ptr.h's _GLIBCXX_EH_PTR_USED members in eh_ptr.cc): emitted though inline and
+           ;; unused, as clang's UsedAttr keeps a definition (CodeGenModule::addUsedGlobal, MustBeEmitted)
+           :used (boolean (gnu-attr-arg n "used"))
            ;; __attribute__((constructor(N))): run before main, in llvm.global_ctors at its priority (65535 unwritten)
            :ctor-attr (when-let [x (gnu-attr-arg n "constructor")] (if (number? x) x 65535))
-           :noexcept (noexcept-of tscope qt)
+           ;; (a C library function clang knows as a nothrow builtin, declared by the C library's header, G5c: musl's abort)
+           :noexcept (or (noexcept-of tscope qt) (and (linkage-c? home) (not cid) (contains? nothrow-libc nm)))
            :noexcept-false (boolean (re-find #"\bnoexcept\s*\(\s*false" (or qt "")))
            :linkage (if (linkage-c? home) :c :cpp)
            :internal (boolean (or (and (not cid) (= "static" (:storageClass n))) (:internal home)))
@@ -732,13 +774,18 @@
       (upd-fn! id (fn [g] (cond-> (merge g (select-keys pinfo (if body [:param-names] [])))
                             (some some? (:defaults pinfo)) (assoc :defaults (:defaults pinfo))
                             (:always-inline f) (assoc :always-inline true)
+                            (:used f) (assoc :used true)
+                            (:noreturn f) (assoc :noreturn true)
+                            ;; an out-of-line `= default` definition (G5c: nested_exception::~nested_exception() noexcept = default
+                            ;; in nested_exception.cc): defined here, not inline, the class's key function
+                            (and (:defaulted f) (not (header-node? n))) (assoc :defaulted true :out-of-line-default true)
                             body (assoc :body body :node n :def-scope scope :inits (filter #(= "CXXCtorInitializer" (:kind %)) (kids n))
                                         :inline (or (:inline g) (boolean (:inline n))))
                             ;; a header's definition: analyzed when used (G4), as clang emits an inline function
-                            (and body (header-node? n)) (assoc :lazy true))))
+                            (and body (header-node? n) (not (or (:used f) (:used g)))) (assoc :lazy true))))
       (do (swap! *fns* assoc id (merge f pinfo {:id id :node n :def-scope scope}
                                       (when body {:body body :inits (filter #(= "CXXCtorInitializer" (:kind %)) (kids n))})
-                                      (when (and (or body (:explicitlyDefaulted n)) (header-node? n)) {:lazy true})))
+                                      (when (and (or body (:explicitlyDefaulted n)) (header-node? n) (not (:used f))) {:lazy true})))
           (enter! home (if (= k :ctor) " ctor" (if (= k :dtor) " dtor" nm)) {:e :fn :id id :pos (:pos f)})
           (when (= k :ctor) (abi/update-cls! cid update :ctors (fnil conj []) id))
           (when (= k :dtor) (abi/update-cls! cid assoc :dtor id))
@@ -764,7 +811,9 @@
         init (init-kid n)
         st (if (:cls home) :member-static storage)]
     (if (and old (seq q))
-      (do (upd-var! old assoc :init init :init-style (:init n) :defined true :def-scope scope)
+      ;; a qualified definition of a namespace member declared `extern` (libsupc++'s `const nothrow_t std::nothrow = ...`,
+      ;; `terminate_handler __cxxabiv1::__terminate_handler = ...`): the definition, no longer extern ([basic.def]/2)
+      (do (upd-var! old assoc :init init :init-style (:init n) :defined true :extern false :def-scope scope)
           (when (header-node? n) (upd-var! old #(cond-> (assoc % :defined false :pending-def true) (not (:internal %)) (assoc :linkonce true))))
           old)
       (let [id (next-id)
@@ -776,6 +825,8 @@
                :internal (boolean (or (:internal home) (= "static" (:storageClass n)) (and (= st :global) (:c ty) (not= "extern" (:storageClass n)))))
                :def-scope scope
                :init-priority (let [x (gnu-attr-arg n "init_priority")] (when (number? x) x))
+               ;; thread_local, _Thread_local, __thread ([basic.stc.thread]; G5c: libsupc++'s eh_globals.cc)
+               :tls (boolean (:tls n))
                :pos (long (or (:_b n) 0))}]
         ;; a header's definition: defined when odr-used (G4: clang emits an unused inline variable not at all)
         (swap! *vars* assoc id (if (and (header-node? n) (:defined v) (= st :global))
@@ -818,7 +869,10 @@
         ^java.util.HashMap m (:names scope)
         old (when nm (some #(when (and (= :type (:e %)) (abi/class? (:ty %))) (:id (:ty %))) (.get m nm)))
         id (or old (next-id))
-        cs (or (:scope (abi/cls id)) (new-scope :class scope :cls id :path (conj (:path scope) [:cls id])))
+        ;; (a class of an unnamed namespace, or local to an internal function, has internal linkage and so have its
+        ;; members, [basic.link]/4; G5c: libsupc++'s vec.cc's uncatch_exception, atexit_thread.cc's key_s)
+        internal (loop [s scope] (cond (nil? s) false (:internal s) true (= :ns (:kind s)) false :else (recur (:parent s))))
+        cs (or (:scope (abi/cls id)) (new-scope :class scope :cls id :path (conj (:path scope) [:cls id]) :internal internal))
         t {:k :class :id id}]
     (when-not old
       (swap! abi/*classes* assoc id {:id id :name nm :path (:path scope) :scope cs :fields [] :bases [] :outer scope
@@ -905,7 +959,19 @@
     "VarDecl" (declare-var! scope n :global)
     "CXXRecordDecl" (declare-class! scope n)
     "EnumDecl" (declare-enum! scope n)
-    ("TypedefDecl" "TypeAliasDecl") (enter! scope (:name n) {:e :type :ty (resolve-type scope (get-in n [:type :qualType])) :pos (long (or (:_b n) 0))})
+    ("TypedefDecl" "TypeAliasDecl")
+    (let [qt (get-in n [:type :qualType])
+          ;; `typedef enum { ... } E;` ([dcl.typedef]/9, the typedef name for linkage): the parser writes the type as
+          ;; `enum E`, the unnamed enumeration or class just declared (G5c: unwind.h's _Unwind_Reason_Code); it takes the
+          ;; name for its mangling
+          ;; (only when the written type names nothing else: `typedef struct X X;` of a named X resolves)
+          t0 (try (resolve-type scope qt) (catch arbace.lang.ExceptionInfo e (if (:codegen/refused (ex-data e)) nil (throw e))))
+          own (when-let [[_ nm] (when-not t0 (re-matches #"(?:enum|struct|union|class) (\S+)" (str qt)))]
+                (when (and (= nm (:name n)) *last-anon* @*last-anon*)
+                  (let [t @*last-anon*]
+                    (cond (= :enum (:k t)) (when-not (:name (get @abi/*enums* (:id t))) (swap! abi/*enums* assoc-in [(:id t) :name] nm) t)
+                          (abi/class? t) (when-not (:name (abi/cls (:id t))) (abi/update-cls! (:id t) assoc :name nm) t)))))]
+      (enter! scope (:name n) {:e :type :ty (mode-type n (or t0 own (resolve-type scope qt))) :pos (long (or (:_b n) 0))}))
     "NamespaceAliasDecl" (let [t (node-text n)
                                [_ target] (re-find #"=\s*([^;]+);?\s*$" (or t ""))
                                parts (vec (map str/trim (remove str/blank? (str/split (str/trim target) #"::"))))
@@ -2904,8 +2970,9 @@
 (defn- local-var! [ctx n storage]
   (let [ty (resolve-type (:scope ctx) (get-in n [:type :qualType]))
         id (next-id)
-        st (if (= "static" (:storageClass n)) :static-local storage)
-        v {:id id :name (:name n) :ty ty :storage st :fn (:fn-id ctx) :init-node (init-kid n) :constexpr (boolean (:constexpr n))}
+        ;; (thread_local at block scope implies static, [dcl.stc]/4)
+        st (if (or (= "static" (:storageClass n)) (:tls n)) :static-local storage)
+        v {:id id :name (:name n) :ty ty :storage st :fn (:fn-id ctx) :init-node (init-kid n) :constexpr (boolean (:constexpr n)) :tls (boolean (:tls n))}
         ;; a constant local's initializer, for constant expressions (an array bound, a template argument)
         v (if (and (:c ty) (abi/integral? (abi/unq ty)) (init-kid n)) (assoc v :init (init-kid n) :def-scope (:scope ctx)) v)]
     (swap! *vars* assoc id v)
@@ -3219,7 +3286,11 @@
   [fid]
   (let [f (fnd fid)
         cls (:cls f)
-        fs (new-scope :fn (or (:def-scope f) (:scope f)))
+        ;; a namespace member defined outside its namespace by a qualified name (`void std::terminate() { get_terminate(); }`,
+        ;; libsupc++'s eh_terminate.cc): its body's names are looked up in the namespace, then the enclosing ones
+        ;; ([basic.lookup.unqual]/4: the scopes of the declarations' target scope)
+        home-ns (let [h (:scope f)] (when (and (not cls) (not (:keep-def-scope f)) h (= :ns (:kind h)) (not (identical? h (:def-scope f)))) h))
+        fs (new-scope :fn (or home-ns (:def-scope f) (:scope f)) :internal (boolean (:internal f)))
         ;; a class or enumeration declared in the body is local to the function: its names mangle as Z <encoding> E ...
         ;; (abi's [:local f] path, as G2's closures have it)
         fs (assoc fs :path [[:local (select-keys f [:id :name :kind :cls :ty :cq :op :static :linkage :internal-l :internal :path :tinst :inline])]])

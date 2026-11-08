@@ -263,6 +263,8 @@ rt_ir_records() { # rt_ir_records UNIT SRC STD FLAGS SHIM DIR
 }
 rt_two() { # rt_two UNIT: the print's object against the IR's, gcc -O0 on the lowered C; the texts dropped once judged
   local d=$rt/units/$1
+  # a unit by our route (CP240 (c)): its round trip's object is our IR's, compiled by the oracle when live
+  if [ "$(cat "$d/route" 2>"$TMPDIR/cppi-rt2.err")" = ours ]; then rm -f "$d/x.o"; cpr_live && ( cd "$d" && timeout 600 clang -c x.ll -o x.o ) 2>&1 | cap "$d/obj.log"; fi
   [ -f "$d/print.ll" ] && cpr_live && { ( cd "$d" && timeout 600 clang -c print.ll -o print.o; echo $? > print-obj.status ) 2>&1 | cap "$d/print-obj.log"; }
   if [ -f "$d/x.o" ] && [ -f "$d/print.o" ]; then
     if cmp -s "$d/x.o" "$d/print.o"; then echo same > "$d/object"; else echo differs > "$d/object"; fi
@@ -293,6 +295,13 @@ runtime_key() { # what the lowered runtime is built from, a digest a line (revie
   printf '%s  musl-dev package\n' "$( (apk list -I musl-dev musl 2>&1 || true) | sha256sum | cut -d' ' -f1)"
   printf '%s  /usr/include/*.h\n' "$(sha256sum /usr/include/*.h | sha256sum | cut -d' ' -f1)"
   printf '%s  bin/cppi:rt_ir,rt_two,runtime_build\n' "$(declare -f rt_ir rt_two runtime_build | sha256sum | cut -d' ' -f1)"
+  # CP240 (c): the units by our route, the route's namespaces (the front end, the analysis, the code generator) and the headers' tree
+  if [ "${CPPI_RUNTIME_ROUTE:-clang}" != clang ]; then
+    printf 'route  %s %s\n' "$CPPI_RUNTIME_ROUTE" "$(rt_ours_glob)"
+    ( cd "$root" && sha256sum arbace/cpp/sema.ae arbace/cpp/abi.ae arbace/cpp/codegen.ae arbace/cpp/template.ae arbace/cpp/inline.ae \
+        arbace/repr/cpp/*.ae arbace/repr/cpp.ae cpp/target/libstdcxx.edn test/cpp/target.ae bin/lib/repr-cpp/sysroot.bash 2>"$TMPDIR/cppi-key.err" )
+    printf '%s  bin/cppi:runtime_ours\n' "$(declare -f runtime_ours rt_ours_glob | sha256sum | cut -d' ' -f1)"
+  fi
   printf '%s  GCC_FLAGS\n' "$(printf '%s' "$GCC_FLAGS" | sha256sum | cut -d' ' -f1)"
   # ORS27: gcc builds the runtime's objects only when CPPI_LIVE is set; the records' key names no gcc (OUT/key.records, which a live
   # build writes too, so that a runtime built by the oracle tier serves the gate's records mode)
@@ -349,6 +358,52 @@ runtime_ir() { # runtime_ir: the units' IR into $rt/units (rt and jobs set): fro
     (spit \"$rt/units.tsv\" (apply str (for [r (:units u)] (str (apply str (interpose \"\t\" r)) \"\n\"))))
     (spit \"$rt/shims.txt\" (apply str (for [[k v] (:shims u)] (str k \"\n\" v \"\n\")))))"
   tr '\t\n' '\037\0' < "$rt/units.tsv" | xargs -0 -P "$jobs" -I{} nice bash -c 'IFS=$'"'"'\037'"'"' read -r u s a f <<< "$1"; rt_ir "$u" "$s" "$a" "$f"' _ {}
+  case ${CPPI_RUNTIME_ROUTE:-clang} in clang) ;; ours|auto) runtime_ours ;; *) echo "runtime-build: CPPI_RUNTIME_ROUTE is clang, ours or auto" >&2; exit 2 ;; esac
+}
+
+rt_ours_glob() { echo "${CPPI_RUNTIME_OURS:-libsupc++/}"; }
+runtime_ours() { # CP240 (c), CODEGEN.md G5c: the C++ units whose name begins with CPPI_RUNTIME_OURS (default libsupc++/) by Arbace's
+  # route, the native parser, arbace.cpp.sema and arbace.cpp.codegen over the tarball's sources (arbace.cpp.codegen gen-batch, one
+  # process; no clang): their IR is OUT/units/U/x.ll, the oracle's (the pack's, or clang's when live) kept as clang.ll for the names
+  # level (arbace.cpp.check runtime-judge). CPPI_RUNTIME_ROUTE=ours: a unit our route refuses fails (ir.status 98); auto: it keeps
+  # the oracle's IR. OUT/units/U/route says which made each unit's IR.
+  local route=${CPPI_RUNTIME_ROUTE} g t u s a f fl x d
+  g=$(rt_ours_glob)
+  if [ ! -f "$gcc_root/libstdc++-v3/libsupc++/new_op.cc" ]; then
+    t=$(tarball_check); mkdir -p "$root/.tmp/cppi/gcc"
+    tar -xJf "$t" -C "$root/.tmp/cppi/gcc" gcc-15.2.0/libstdc++-v3/src gcc-15.2.0/libstdc++-v3/libsupc++ gcc-15.2.0/libstdc++-v3/config gcc-15.2.0/libgcc/unwind-pe.h
+  fi
+  mkdir -p "$rt/gen/bits"; : > "$rt/gen/bits/largefile-config.h"
+  [ -f "$rt/gen/tzdata.zi.h" ] || { echo 'static const char tzdata_chars[] = R"__libstdcxx__('; cat "$gcc_root/libstdc++-v3/src/c++20/tzdata.zi"; echo ')__libstdcxx__";'; } > "$rt/gen/tzdata.zi.h"
+  : > "$rt/ours.tsv"
+  while IFS=$'\t' read -r u s a f; do
+    [ "$a" = c ] && continue
+    case $u in "$g"*) ;; *) continue ;; esac
+    x=$(grep -F -x -A1 "$s" "$rt/shims.txt" | sed -n 2p || true)
+    if [ -n "$x" ]; then x=$root/test/cpp/runtime/shims/$x; else x=$gcc_root/$s; fi
+    # the preprocessor's options of rt_ir's command line (the -f flags are the compiler's, not the reader's)
+    fl=$(printf '%s' "$f" | tr ' ' '\n' | grep -E '^-[DUI]' | tr '\n' ' ' || true)
+    d=$rt/units/$u/ours; rm -rf "$d"; mkdir -p "$d"
+    # (unwind-cxx.h's quoted "unwind.h": the compiler's, gcc's own from the target tree, -iquote; clang's resource directory is no
+    # root of the tree, P20)
+    printf '%s\t%s\t%s\t%s\n' "$x" "$a" "$d" "-D_GNU_SOURCE -I$rt/gen -I$gcc_root/libgcc -I$gcc_root/libstdc++-v3/libsupc++ -I$gcc_root/$(dirname "$s") $fl -iquote/usr/lib/gcc/x86_64-alpine-linux-musl/15.2.0/include" >> "$rt/ours.tsv"
+  done < "$rt/units.tsv"
+  [ -s "$rt/ours.tsv" ] || { echo "runtime-build: no unit begins with $g" >&2; exit 2; }
+  . "$root/bin/lib/repr-cpp/sysroot.bash"; cpp_sysroot || exit 1
+  GOMEMLIMIT=${GOMEMLIMIT:-1500MiB} arbace_tool -m arbace.cpp.codegen gen-batch "$rt/ours.tsv" > "$rt/ours.log" 2>&1 || { tail -5 "$rt/ours.log" >&2; exit 1; }
+  while IFS=$'\t' read -r x a d f; do
+    u=${d%/ours}; u=${u#"$rt/units/"}
+    if [ -f "$d/gen.ll" ] && [ ! -f "$d/gen.refused" ]; then
+      [ -f "$rt/units/$u/x.ll" ] && mv "$rt/units/$u/x.ll" "$rt/units/$u/clang.ll"
+      cp "$d/gen.ll" "$rt/units/$u/x.ll"; echo 0 > "$rt/units/$u/ir.status"; echo ours > "$rt/units/$u/route"
+    elif [ "$route" = ours ]; then
+      rm -f "$rt/units/$u/x.ll"; echo 98 > "$rt/units/$u/ir.status"; echo ours > "$rt/units/$u/route"
+      { printf 'our route refused: '; cat "$d/gen.refused" 2>"$TMPDIR/cppi-ours.err" || echo "not generated"; } > "$rt/units/$u/ir.log"
+    else echo clang > "$rt/units/$u/route"
+    fi
+    rm -f "$d/forms.ae" "$d/gen.c" # the IR is the unit's; the lowering below makes its C
+  done < "$rt/ours.tsv"
+  echo "runtime-build: our route (CPPI_RUNTIME_ROUTE=$route, units $g*): $(cat "$rt"/units/*/route "$rt"/units/*/*/route 2>"$TMPDIR/cppi-ours.err" | sort | uniq -c | awk '{printf "%s%s %s", (n++ ? ", " : ""), $2, $1}')" >&2
 }
 
 runtime_build() {
@@ -364,11 +419,23 @@ runtime_build() {
   local t0 t1 t2 t3
   t0=$(date +%s)
   runtime_ir
+  # the oracle's IR against its pin (a unit by our route: its oracle IR, clang.ll; the IR of ours listed in OUT/ir-ours.sha256)
   cut -f1 "$rt/units.tsv" | while read -r u; do
-    if [ -f "$rt/units/$u/x.ll" ]; then printf '%s  %s\n' "$(sha256sum < "$rt/units/$u/x.ll" | cut -d' ' -f1)" "$u"; fi
+    if [ -f "$rt/units/$u/clang.ll" ]; then printf '%s  %s\n' "$(sha256sum < "$rt/units/$u/clang.ll" | cut -d' ' -f1)" "$u"
+    elif [ "$(cat "$rt/units/$u/route" 2>"$TMPDIR/cppi-rt.err")" = ours ]; then :
+    elif [ -f "$rt/units/$u/x.ll" ]; then printf '%s  %s\n' "$(sha256sum < "$rt/units/$u/x.ll" | cut -d' ' -f1)" "$u"; fi
   done > "$rt/ir.sha256"
+  cut -f1 "$rt/units.tsv" | while read -r u; do
+    if [ "$(cat "$rt/units/$u/route" 2>"$TMPDIR/cppi-rt.err")" = ours ] && [ -f "$rt/units/$u/x.ll" ]; then printf '%s  %s\n' "$(sha256sum < "$rt/units/$u/x.ll" | cut -d' ' -f1)" "$u"; fi
+  done > "$rt/ir-ours.sha256"
   if [ -n "$update" ]; then
     cp "$rt/ir.sha256" "$root/test/cpp/runtime/ir.sha256"
+  elif [ "${CPPI_RUNTIME_ROUTE:-clang}" != clang ] && [ -s "$rt/ir-ours.sha256" ]; then
+    # our route: the oracle's IR of the units it made need not be at hand (a refused or missing record is not this build's input);
+    # the units the oracle made still at the pin
+    if ! awk 'NR == FNR { h[$2] = $1; next } ($2 in h) && h[$2] != $1 { bad = 1 } END { exit bad }' "$root/test/cpp/runtime/ir.sha256" "$rt/ir.sha256"; then
+      echo "runtime-build: the IR differs from test/cpp/runtime/ir.sha256 (the oracle or the headers changed: --update after a look)" >&2; exit 1
+    fi
   elif ! cmp -s "$rt/ir.sha256" "$root/test/cpp/runtime/ir.sha256"; then
     echo "runtime-build: the IR differs from test/cpp/runtime/ir.sha256 (the oracle or the headers changed: --update after a look)" >&2
     diff "$root/test/cpp/runtime/ir.sha256" "$rt/ir.sha256" | head -20 >&2; exit 1
