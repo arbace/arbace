@@ -5100,6 +5100,7 @@ entry's `:gcc` digest, the whole `:gcc` level and `pp-gcc.sha256` as recorded (t
 | `CI_LINK_CHECK=1 bin/ci check --only` (the essential list, ci-run's 17, binary-trees-5: 59 programs) | 0 failing, the link check equal (9 min 20 s) |
 | `bin/ci check --aot --only test/c/essential-aot.txt` | 0 failing (binary-trees-5 now passes) |
 | `bin/repr-c check --c23` | 59 pass, 3 expected, 0 failing |
+| `bin/ci judge-test` (with the checkout's ci) | 105 tests, 468 assertions, 0 failures (24 min: musl reread) |
 | `bin/reap --record` (the known edits; C's print cell: design 5 to 3, deferred 45 to 47), `bin/crops-score --record`, `--judge --strict` | 0 problems; C 95.1% / 100.0% / 99.7% (without by design 98.72% to 98.71%) |
 
 ### T.7 The night's commands (the main session's, in `next`'s worktree after the merge, one at a time)
