@@ -415,7 +415,11 @@
 
 (defn- record-tag [repres] (if (vector? repres) (repres 1) 0))
 
-(defn- transl-record [loc fields repres init]
+(defn- field-pos
+  "A label's field in its block: Record_extension's after the exception's slot"
+  [lbl] (if (= :extension (:repres lbl)) (inc (long (:pos lbl))) (:pos lbl)))
+
+(defn- transl-record [loc fields repres init & [slot]]
   (let [size (count fields)
         init-id (ty/ident-create "init")
         lv (mapv (fn [[lbl df]]
@@ -423,14 +427,16 @@
                      :kept (let [t (df 1)]
                              [(if (= :float repres)
                                 [:Lprim (l/prim (str "floatfield " (:pos lbl))) [[:Lvar init-id]]]
-                                [:Lprim (l/pfield (:pos lbl) (ty/maybe-pointer t) (df 2)) [[:Lvar init-id]]])
+                                [:Lprim (l/pfield (field-pos lbl) (ty/maybe-pointer t) (df 2)) [[:Lvar init-id]]])
                               (ty/value-kind t)])
                      :overridden [(transl-exp (df 1)) (ty/value-kind (:type (df 1)))]))
                  fields)
         ll (mapv first lv) shape (mapv second lv)
         mut (some (fn [[lbl _]] (:mut lbl)) fields)
-        cl (when-not mut (let [cs (map extract-constant ll)] (when (every? some? cs) (vec cs))))
+        cl (when-not (or mut slot) (let [cs (map extract-constant ll)] (when (every? some? cs) (vec cs))))
         lam (cond
+              ;; Record_extension: makeblock 0 of the exception's slot and the fields
+              slot [:Lprim (l/pmakeblock 0 (boolean mut) (vec (cons "" shape))) (vec (cons slot ll))]
               cl (if (= :float repres) [:Lconst [:float-array (mapv second cl)]] [:Lconst [:block (record-tag repres) cl]])
               (= :float repres) [:Lprim (l/prim (str (if mut "makearray" "makearray_imm") "[float]")) ll]
               :else [:Lprim (l/pmakeblock (record-tag repres) (boolean mut) shape) ll])]
@@ -570,7 +576,13 @@
                       [:Lconst [:block 0 (vec cs)]]
                       [:Lprim (l/pmakeblock 0 false shape) ll]))
       :Texp_construct
-      (let [c (d 1) [ll shape] (transl-list-with-shape (d 2)) tag (:tag c)]
+      (let [c (d 1) tag (:tag c)
+            ;; an exception's inline record: built with its slot (Record_extension)
+            ext-rec (and (:inlined c) (= :Cstr_extension (tag 0)) (= :Texp_record ((:desc (first (d 2))) 0)))
+            [ll shape] (if ext-rec
+                         (let [rd (:desc (first (d 2)))]
+                           [[(transl-record (:loc e) (rd 1) (rd 2) (rd 3) (transl-extension-path (tag 1)))] [""]])
+                         (transl-list-with-shape (d 2)))]
         (case (if (or (:inlined c) (:unboxed c)) :inlined (tag 0))
           :inlined (first ll)
           :Cstr_constant (l/lconst-int (tag 1))
@@ -596,14 +608,14 @@
                       [:Lprim (l/prim "atomic_load") [targ (l/lconst-int (:pos lbl))]]
                     (if (= :float (:repres lbl))
                       [:Lprim (l/prim (str "floatfield " (:pos lbl))) [targ]]
-                      [:Lprim (l/pfield (:pos lbl) (ty/maybe-pointer (:type e)) (:mut lbl)) [targ]])))
+                      [:Lprim (l/pfield (field-pos lbl) (ty/maybe-pointer (:type e)) (:mut lbl)) [targ]])))
       :Texp_setfield (let [lbl (d 2) v (d 3)]
                        (if (:atomic lbl)
                          [:Lprim (l/prim "ignore") [[:Lprim (l/pccall "caml_atomic_exchange_field")
                                                      [(transl-exp (d 1)) (l/lconst-int (:pos lbl)) (transl-exp v)]]]]
                        [:Lprim (if (= :float (:repres lbl))
                                  (l/prim (str "setfloatfield " (:pos lbl)))
-                                 (l/psetfield (:pos lbl) (ty/maybe-pointer (:type v))))
+                                 (l/psetfield (field-pos lbl) (ty/maybe-pointer (:type v))))
                         [(transl-exp (d 1)) (transl-exp v)]]))
       :Texp_array (transl-array e (d 1) (false? (get d 2)))
       :Texp_ifthenelse [:Lifthenelse (transl-exp (d 1)) (transl-exp (d 2)) (if (d 3) (transl-exp (d 3)) l/lambda-unit)]

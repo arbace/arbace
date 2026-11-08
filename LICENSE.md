@@ -270,6 +270,13 @@ covers what.
   MenhirLib's terms ("Menhir and MenhirLib", below). The rest of them (`ast.ae`'s dump, which ports Arbace's own
   tools/ocdump/ocdump.ml, `native.ae`, the LALR(1) construction of `menhir.ae`) is Arbace's own, under the Eclipse
   Public License 1.0.
+- ocamllex ported (doc/ocaml/OCAML-SURVEY.md, "As built: ocamllex ported (OC186)"): `arbace/repr/ocaml/ocamllex.ae` ports OCaml
+  5.5.0's lex/ (lexer.mll, parser.mly, cset.ml, table.ml, lexgen.ml, compact.ml, common.ml, output.ml, main.ml) and the parts of
+  stdlib/set.ml it relies on, from the same release tarball (SHA-256 `fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba`,
+  Copyright INRIA), by hand on 2026-11-08, the file carrying the notice: under the GNU Lesser General Public License version 2.1 with
+  the OCaml LGPL linking exception (below). Its `check` verb, `bin/repr-ocaml ocamllex-check`, `test/ocaml/oc185.ae` and the samples of
+  `test/ocaml/ocamllex/` are Arbace's own (Eclipse Public License 1.0); `test/ocaml/ocamllex-expected.edn` records the host's ocamllex
+  5.5.0's outputs' digests.
 - oi's native front end (doc/ocaml/TYPER.md): `arbace/repr/ocaml/typer/types.ae` (typing/types.ml, btype.ml, ctype.ml's
   levels, unification, generalization and instances, predef.ml, printtyp.ml with out_type.ml and oprint.ml),
   `env.ae` (typing/env.ml, typetexp.ml, typedecl.ml, datarepr.ml), `parmatch.ae` (typing/patterns.ml, parmatch.ml),
@@ -919,6 +926,16 @@ covers what.
   contributors, dual-licensed under the MIT License or the Apache License 2.0 at the licensee's option, taken here under the MIT License
   ("Rust (rustc 1.99.1): MIT License or Apache License 2.0" below). The rest (the judge `typeck_check.ae`) is Arbace's own, under the
   Eclipse Public License 1.0.
+- `arbace/rust/front/build.ae` (RF10's first slice, doc/rust/FRONTEND-SURVEY.md, "As built: RF10 (first slice)"): Arbace forms written
+  after rustc 1.99.1, the same revision and sources, reading `compiler/rustc_hir_analysis/src/check/region.rs` and
+  `compiler/rustc_middle/src/middle/region.rs` (the region scope tree, temporary scopes), `compiler/rustc_mir_build/src/thir/cx/{mod,expr,block}.rs`
+  and `thir/pattern/mod.rs` (THIR), `compiler/rustc_mir_build/src/builder/{mod,cfg,scope,block,misc}.rs`,
+  `builder/expr/{into,stmt,as_operand,as_temp,as_rvalue,as_place,as_constant,category}.rs` and
+  `builder/matches/{mod,match_pair,buckets,test}.rs` (MIR building: scopes and drop trees, expressions, the match lowering), and the
+  passes `CleanupPostBorrowck` and `AbortUnwindingCalls`' effect in `arbace/rust/front/build_run.ae`, with the layouts of scalars and
+  scalar pairs after `compiler/rustc_abi/src/layout.rs`: copyright the Rust project's contributors, dual-licensed under the MIT License or
+  the Apache License 2.0 at the licensee's option, taken here under the MIT License ("Rust (rustc 1.99.1): MIT License or Apache License
+  2.0" below). The rest (the judge `build_check.ae`, the rest of `build_run.ae`) is Arbace's own, under the Eclipse Public License 1.0.
 - The own-verdict judge of `arbace/rust/check.ae` (`own-verdict`, `run-class`, `verdict-met?`, `directives`; rust-90,
   doc/rust/EVAL.md §13): Arbace forms written after rustc 1.99.1's compiletest, the same revision and sources (the pinned
   `rustc-1.99.1-src.tar.xz`'s `src/tools/compiletest/src/runtest/ui.rs`: `run_ui_test`'s RunResult of the run and the
@@ -1113,6 +1130,19 @@ covers what.
   BSD 3-Clause License, "GHC: the Glasgow Haskell Compiler License" below); the context inference and the choice of
   strategy of `compiler/GHC/Tc/Deriv/{Infer,Utils}.hs` and `Deriv.hs` read as the specification, written anew in
   `typecheck.ae`.
+- `arbace/repr/haskell/target.ae`, `configure.ae` and `hsc2hs.ae` (the native reads' inputs derived, HFS-I2 (a),
+  doc/haskell/NATIVE.md, "The native reads' inputs: derived"): ports of GHC 9.14.1,
+  https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz (SHA-256
+  `2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77`, the corpus's pin), by hand on 2026-11-08: hadrian's
+  `src/Rules/Generate.hs` (generateSettings' order, templateRules) and `bindist/Makefile` (lib/settings, patchpackageconf),
+  `rts/configure.ac`'s ghcplatform.h and ghcautoconf.h steps, `rts/gen_event_types.py`'s two outputs, the packages'
+  `configure.ac`s' defines and `aclocal.m4`'s FPTOOLS_CHECK_HTYPE and FP_CHECK_CONST, and `utils/hsc2hs/src/{HSCParser,C,
+  DirectCodegen,UtilsCodegen}.hs` (hsc2hs 0.68.10's direct mode), under the Glasgow Haskell Compiler License (below);
+  autoconf's config.status header rewrite written from its documented behaviour. `arbace/repr/haskell/cabal.ae`: a port of
+  the same tarball's `libraries/Cabal/Cabal-syntax` 3.16.0.0 (`Distribution/Fields/{Parser,Pretty}.hs`'s layout,
+  `Distribution/FieldGrammar/{Parsec,Pretty}.hs`'s free text, `Distribution/Types/InstalledPackageInfo/FieldGrammar.hs`'s
+  ipiFieldGrammar, `Distribution/Types/Condition.hs`), under Cabal's BSD 3-Clause License ("Cabal: BSD 3-Clause License"
+  below).
 - `arbace/repr/haskell/unlit.ae` (repr/haskell's native unlit, doc/haskell/NATIVE.md): a port of the
   same tarball's `utils/unlit/unlit.c`, under the Glasgow Haskell Compiler License (below), on
   2026-11-04; `arbace/repr/haskell/driver.ae` (GHC's driver's preprocessing: `GHC/SysTools/Cpp.hs`'s
@@ -3876,6 +3906,49 @@ CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
 LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
 OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
 DAMAGE.
+```
+
+## Cabal: BSD 3-Clause License
+
+The license of Cabal-syntax 3.16.0.0 (GHC 9.14.1's tarball, `libraries/Cabal/Cabal-syntax/LICENSE`), covering
+`arbace/repr/haskell/cabal.ae`:
+
+```
+Copyright (c) 2003-2025, Cabal Development Team.
+See the AUTHORS file for the full list of copyright holders.
+
+See */LICENSE for the copyright holders of the subcomponents.
+
+
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+    * Redistributions of source code must retain the above copyright
+      notice, this list of conditions and the following disclaimer.
+
+    * Redistributions in binary form must reproduce the above
+      copyright notice, this list of conditions and the following
+      disclaimer in the documentation and/or other materials provided
+      with the distribution.
+
+    * Neither the name of Isaac Jones nor the names of other
+      contributors may be used to endorse or promote products derived
+      from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
 ## CPython: the PSF License Agreement for Python 3.14

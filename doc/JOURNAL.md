@@ -480,6 +480,7 @@ coercibility now (needs a Coercible solver; left to HF5's Core).
   0.53 s, tak 2.23, rfib 2.98, fibheaps 3.97, sphere 2.39), 6.0-8.7 times HES73's numbers: the target of 3 met. `bin/hsi check
   --aot --opt O1` on the essential list: 123 of 123, all the same as hsi on the same dumps, the controls failing; after the
   machine's change `bin/hsi check --aot` (`-O0`) and `bin/hsi check` (hsi) on the essential list 123 of 123 each. Details: doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: HES74 (c)".
+
 ## 2026-11-07: F10a, java.nio's selectors and socket channels over jrt's natives at sun.nio.ch's layer (branch java-complete)
 
 Branch `java-complete` from `mac/batch1` 0edacad62, the main session's brief: raise Java's completeness (72.9% strict, 80.4%
@@ -1058,3 +1059,172 @@ or built into an executable). Details, the ranking, the expected tests and the n
   slice (its data, AnnNew, the `_ann` type). Not run: the levels (no conversion, no executable by day).
 - Expected: about 14 / 14 of 17 tests (ids in the triage). Proposed: JCS210 (annotations as proxies), JCS211 (the JDK's
   members' annotations), JCS212 (the order of a declaration's annotations), JCS213 (IncompleteAnnotationException).
+
+## 2026-11-08: ocamllex ported, compiler-libs typed natively, OC185's switch prepared (branch `ocaml-lex`, from next bd33e27cc)
+
+By the brief's recommended items (OC186 (a), OC188 (a), OC185 (a) decided 2026-11-07), depth first, under the day's light rules (doc/ocaml/
+OCAML-SURVEY.md, "As built: ocamllex ported (OC186 (a)), compiler-libs typed natively (OC188 (a)), OC185's switch prepared").
+
+- **ocamllex** (`arbace/repr/ocaml/ocamllex.ae`): OCaml 5.5.0's `lex/` (the release tarball https://caml.inria.fr/pub/distrib/ocaml-5.5/
+  ocaml-5.5.0.tar.xz, SHA-256 fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba: lexer.mll, parser.mly, cset.ml, table.ml,
+  lexgen.ml, compact.ml, common.ml, output.ml, main.ml) and stdlib/set.ml's AVL trees ported by hand, rule for rule (LGPL 2.1 with the
+  linking exception: LICENSE.md, doc/ARBACE.md). The tree shapes of Set matter: a union keeps one of two equal identifiers by height, and its
+  location is printed; OCaml's evaluation orders matter too (a constructor's arguments right to left, `let ... and` left to right). The
+  parser is a shift-reduce on ocamlyacc's precedences, with ocamlyacc's default reduction of `regexp: Tident` before the lookahead (found by
+  400 mutants against the host's ocamllex: 399 equal before, 400 after). `bin/repr-ocaml ocamllex`, `ocamllex-check` (29 .mll: the tarball's
+  18, the opam set's 3, 8 samples of `test/ocaml/ocamllex/`; byte for byte the host's ocamllex 5.5.0's outputs and messages, recorded in
+  `test/ocaml/ocamllex-expected.edn` by `--host --record`; a negative control), in `ocaml-read-essential`. `-ml` (outputbis.ml) not ported:
+  its order is OCaml's Hashtbl's (OC191). Alternatives considered: committing ocamllex's `lexer.ml` (OC186 (c), a toolchain record), running
+  lex/ on oi (OC186 (b), it needs a lexer generator to bootstrap).
+- **bin/oi**: compiler-libs' `lexer.ml` from the native ocamllex (`OI_OCAMLLEX=host` the host's). The native library then built Lexer; the
+  typer's fixes (typing/typecore.ml's disambiguate_by_ids, unify_kept, type_approx, Ppat_open; env.ml's normalize_module_path through
+  applications; includemod.ml's add_signature of the implementation; datarepr.ml's inline records of exceptions, Record_extension, and of GADT
+  constructors) took compiler-libs from 35 to 44 of 44 units (doc/ocaml/TYPER.md §25). Under stubs of the toolchain (none called): the five
+  compiler-libs programs of the run corpus 5 of 5 natively (2 before), libs4's 18 with the essential list 75 of 76 run (the one other
+  `-safer-matching`, classed), typer-check 79 of 79, repl-check 24 of 24.
+- **OC185**: `bin/oi reap-switch [--apply]` (`test/ocaml/oc185.ae`): the four native records' passes against their oracle twins', and the
+  cells' and the independence facts' edit when none has fewer (proved on a scratch copy). Not applied: the native records of the suite and
+  the AOT level are the night's.
+- **The by-design review**: eval's 205 (180 by a decided rule, 25 `c-api` deferred); 14 reachable cases their rules do not cover:
+  Proposed OC192-OC197 (finalisers, max_domains, ocamlyacc, a test's second program, speed, the `.mll` tests), with OC191.
+- Scores (crops-score, the records unchanged): OCaml 80.9 / 95.2 / 100 / 87.4, before and after; the night's commands in the survey's section.
+
+## 2026-11-08: HFS-I2 (a), Haskell's read stage's inputs derived (branch `hs-inputs`, from `next` bd33e27cc)
+
+The user's decision of 2026-11-07, HFS-I2 (a): the native reads' inputs, held until now by the pack
+`haskell-native-inputs-ghc-9.14.1` (GHC's installation's files, recorded by hand), derived without GHC or a C compiler, data first,
+then hsc2hs's C program on ci. Sources: GHC 9.14.1's source tarball (https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz,
+SHA-256 `2a83779c...101e77`, the corpus's pin: hadrian's `src/Rules/Generate.hs` and `bindist/Makefile`, `rts/configure.ac`,
+`rts/gen_event_types.py`, the packages' `configure.ac`s, `libraries/ghc-internal/aclocal.m4`, `utils/deriveConstants/Main.hs`,
+`utils/hsc2hs/src/`, `libraries/Cabal/Cabal-syntax` 3.16.0.0) and musl 1.2.6's tarball (C's pin, test/c/corpora.edn).
+
+- **Built.** `arbace.repr.haskell.target` (the tree in the pack's layout: the settings file in hadrian's order, the 47 package records
+  through `arbace.repr.haskell.cabal`, a port of Cabal-syntax's field parser, conditions, free text and `showInstalledPackageInfo`, then
+  the bindist's `patchpackageconf`; the installed headers by `install-includes`; ghcversion.h, ghcplatform.h, the event headers,
+  HsIntegerGmp.h, ghc-gmp.h, musl's stdc-predef.h); `arbace.repr.haskell.configure` (the seven configure headers by config.status's
+  rewrite over `test/haskell/target/answers.edn`, which `bin/repr-haskell target probe` computes on Arbace's C target: a check's kind
+  from its autoheader comment or a rule of its configure.ac, headers in musl's tree and `c/include`, functions among libc.a's
+  definitions, compile tests by ci's checker, the constants' and htypes' types by `bin/ci annot`, values by `bin/ci run`);
+  `arbace.repr.haskell.constants` (deriveConstants: its `wanteds` read from Main.hs, the arrays' sizes from ci's checker's annotations
+  in place of nm); `arbace.repr.haskell.hsc2hs` (hsc2hs 0.68.10's direct mode, its program built and run by `bin/ci run`);
+  `test/haskell/target/installation.edn` (the installation's names and choices); `bin/repr-haskell target derive|hsc|probe|compare`,
+  the derived tree the native reads' default (`REPR_HASKELL_INPUTS=pack` the pack, now the oracle tier's), what is not made yet taken
+  from the pack and named in `BORROWED`; `haskell-roundtrip` runs `target hsc` first; the oracle tier's step `haskell-target-oracle`.
+- **Proved.** `target compare`: 335 of the pack's 337 members byte for byte; the two left are GHCi/FFI.hsc's, whose C reads libffi's
+  `ffi.h` (HFS-I11 proposed). The native dumps of seven packages (166 modules, 61 .hsc, 60 CPP views) byte for byte the same from the
+  derived tree as from the pack; `roundtrip --text --layout` over them 166 of 166 at every level with ghc, ghc-pkg, runghc, ghci, hsc2hs,
+  gcc, cc, clang, cpp, c99 and ld first on PATH as stubs exiting 99, none called.
+- **Found.** ci's checker accepts a pointer in an integer constant expression and a double cast to a pointer (gcc rejects both): the
+  probe decides FP_COMPUTE_INT's and FPTOOLS_CHECK_HTYPE's cases by the declarations' types instead; building the RTS's headers is
+  refused (SpinLock.h's inline assembly), so deriveConstants reads sizes from the checker, as Main.hs reads them from an object file.
+  ci's musl index leaves out `src/ldso` and the assembly sources (vfork, dlopen, dlinfo): the probe scans them.
+- **Scores** (`bin/crops-score --crop haskell`): 96.3 / 100 / 74.9 (read 0.804) before, 96.3 / 100 / 78.8 (read 1.000) after;
+  `test/crops/independence.edn`'s read facts and `test/crops/scores.edn` recorded.
+- **Alternatives considered.** Porting Hadrian's unit-id hash (the ids stay recorded names, HFS-I10); committing the hsc2hs outputs
+  or packing them (HFS-I8: made by key in `.tmp/` as built); a configure.ac interpreter (the templates' autoheader comments name the
+  macros; the rest is 120 rules with their configure.ac's logic, each checked against the pack).
+
+## 2026-11-08: SCS3, Scheme's suites judged by their own verdict alone (branch `scheme-scs3`, from next 7696e50da)
+
+SCS3 (b), recommended in scheme-90's report under the user's own-verdict decision of 2026-11-07: `bin/si check` and `check --aot`
+(`arbace.scheme.check`) judge each program by one judge (`judge-of`): Racket's 27 R6RS suite programs by their own report alone
+(`suite-items`: each failing test an item, the report's count of tests against the program's new `:tests` in
+`test/scheme/si/programs.edn`, taken from the first record, where si's and Chez's reports agree on all 25 that report: the blind spot
+scheme-90 noted, a run that stops early with status 0, now fails); si's 10 programs by golden outputs of Arbace's own
+(`test/scheme/si/golden/`, from si's runs, equal to Chez's recorded runs, reviewed line by line against R6RS and si's documented design:
+doc/scheme/SCHEME-SURVEY.md, "As built: SCS3"); Larceny's 13 by Chez's recorded run, as before. The five programs Chez fails the same
+way, which the recorded-output judge passed, are classed in `test/scheme/divergences.edn`: `chez-exact-zero` (racket/base's five
+division and angle tests: Chez's exact-zero rules, si's tower by SM5), `chez-console-port` (racket/io/ports: the console's input/output
+port), `chez-condition-message` (racket/exceptions: a lexical violation's message a format string), all `:design`, and `suite-ill-formed`
+(`:na`: racket/run imports a library the suite lacks, racket/test calls an identifier its library does not export). Controls one a
+judge (`test/scheme/si/controls.edn`, a third: larceny/run-benchmark against larceny/exceptions's Chez run), and `judge-test`, the judges
+on made-up runs at every judgment. `judge --record --only` keeps the record's other entries (as SC182 (b)'s mats). Alternatives
+considered: counting tests from the source (rejected: the suites' macros make tests in loops, test/output runs two), keeping the
+recorded-output judge beside (SCS3 (a), rejected by the recommendation: it reads Chez's runs at check time), classing the ill-formed
+programs `:design` (rejected: they are not programs of the language).
+
+Checked: the essential interpreted subset (49 programs: 43 pass, 11 items all classed, no regression, the controls differ, judge-test ok),
+larceny/fib alone, the essential AOT subset (11) and the nine other programs whose compiled verdict changes, `bin/si own` (37 of 49 judged
+without Chez; the 5 classed are Chez's failures too), `bin/repr-scheme c2j-check` (18 of 18), `bin/reap --record`, `bin/crops-score --record`.
+Scheme's scores: completeness 98.4 to 96.8 (by design out 98.9 to 98.8: three programs now fail their own tests by design, two leave the
+denominator), maturity 100, independence 97.5 (judge 0.874 to 0.876; bin/si check's terms 0.77 to 0.87). Night: `bin/si check --record`,
+`bin/si check --aot --record`. Proposed: SCS4 (the five tests: keep Chez's semantics), SCS5 (the read check's 1,249 probes judged by the
+report's properties: the judge's largest term), SCS6 (Larceny's golden outputs).
+
+## 2026-11-08: LLS31 (a), the pack rt's verb, mutants and families; ORS30 (a), LLVM IR's oracle tier (branch `llvm-rt-pack`, from next 7696e50da)
+
+The user decided LLS31 (a) on 2026-11-07: rebuild LLVM IR's first-record lists (the 282 modules and their mutants, whose clang-made
+inputs were lost with the removed worktrees). LLS31 (b) had retired the four families from the read cells, `:role :beside`, meanwhile.
+
+**What the inputs were.** The ids of `test/llvm/check-roundtrip-linux-amd64.edn` were reread:
+- 41 torture programs (the plan said 42). Five of them exist only in later gccs, so the source is gcc 15.2.0's
+  `gcc.c-torture/execute`, from the tarball C's crop pins (`test/c/corpora.edn` `:gcc-15.2.0`), where all 41 are.
+- 9 C++ samples, Rust's `shapes.rs` (three builds), 10 llvm-stress seeds, 21 corner modules (sources lost, dropped) and the four
+  committed `hw-*`.
+
+The mutants' names give their kinds and indices:
+- fitted: 0-339 and 1000-1339 of the base family's 17 kinds;
+- held-out: 500000-500599 and 600000-600599 of all 41 kinds.
+
+`arbace.repr.llvm.mutate` today assigns exactly those kinds to those indices: `k mod |kinds|`, checked on the record's names. So the
+mutator needed no new kinds, only these sets.
+
+**Built.**
+- `bin/llvmi rt-list` writes `test/llvm/rt-builds.tsv`: 257 modules.
+- `bin/llvmi ir-make rt [--mutants]` builds the pack `test/llvm/ir/rt.{tar.xz,tar.xz.sha256,tsv,cmd}`: the builds by clang, clang++
+  (Mach-O on `cpp_full_sysroot`'s headers), rustc and llvm-stress, all with prefix maps and `-fdebug-compilation-dir=.`. It then makes
+  Arbace's mutant sets a, b, h1, h2, plus three single mutants of `hw.list` (ctl, ctlh, ctlu) as the controls' subjects.
+- The mutator's cache is bounded to four modules. The output is unchanged and the peak is halved.
+- `bin/repr-llvm check` has four new families, `roundtrip-rt`, `text-rt`, `verify-rt` and `verify-rt-heldout`, with crossed-pair
+  controls. `bin/repr-llvm rt-lists` writes their lists.
+- Reader fix: LLParser's `parseParameterList` gives a metadata argument no attributes ("expected metadata operand"). A held-out mutant
+  of the subset found it against live opt.
+- reap: the four families are `:until` sources; `matrix.edn` was re-recorded, 0 problems.
+
+**Proved** on 17 modules and 83 mutants (light):
+- two builds from scratch give the same pack byte for byte;
+- roundtrip 17 of 17 and text 17 of 17;
+- verify-rt 62 of 62 and heldout 42 of 42 against live opt 23.1.5 (after the fix);
+- the controls fail as they must;
+- llvm/test's four families are unchanged.
+
+**ORS30 (a).**
+- `bin/repr-llvm records-verify`: the records against the live tools, with `moved`, `address`, and a crossed pair.
+- The oracle steps `llvm-live` (roundtrip-llvmtest and verify-probes live) and `llvm-records-verify`, from
+  `test/gate/crops/llvm-oracle.edn`, spliced by hand. `bin/gate --oracle --plan` plans them.
+- Not taken: verify-llvmtest live. Its record is the own verdicts, and opt's whole stderr differs on 30 of them.
+
+**Alternatives considered.**
+- Making the mutants at check time: not taken. Opt's record is keyed by the mutant's digest, so every change to the printer would make
+  them stale.
+- gcc 9.1.0's torture with the mirror snapshot: not taken. It covers 39 of the 41 programs, against all 41 in the pinned gcc 15.2.0.
+- The host's libstdc++ headers for the Mach-O builds: not taken in favour of the tree made without g++.
+
+**Left for the night.** The pack's full build, the opt and rt records, and the four families' `--record`. Then by day: the cells' switch,
+independence, and the gate parts. The commands are in doc/llvm/LLVM-CROP-SURVEY.md, "As built: LLS31 (a)". The proposals there are
+LLS33 and LLS34.
+
+## 2026-11-08: RF10's first slice, MIR building from the native front end (branch `rust-rf10`, from next bd33e27cc)
+
+The user's order of 2026-11-07 (RES54 (a): RFP20, RFP15, then RF10): RFP20 (captures in the helper's `--typeck`, upvar.rs ported in
+full, 2-3 days) and RFP15 (`mod m;` loading, a few days) are not small and neither is read by a first slice on single files without
+closures, so RF10's first slice came first; both stay next (doc/rust/FRONTEND-SURVEY.md, "As built: RF10 (first slice)", RFP22).
+Sources: rustc 1.99.1 (`58cf8f9c3`, Alpine's rust-src-1.99.1-r0 apk pinned by tools/rsdump/apks.sha256), read in
+`compiler/rustc_hir_analysis/src/check/region.rs`, `rustc_middle/src/middle/region.rs`, `rustc_mir_build/src/thir/{cx,pattern}/`
+and `rustc_mir_build/src/builder/{mod,cfg,scope,block,misc}.rs`, `builder/expr/`, `builder/matches/{mod,match_pair,buckets,test}.rs`,
+ported by hand under MIT into `arbace/rust/front/build.ae` (region scope tree, THIR, scopes and drop trees, expressions, the match
+lowering); typeck keeps its results by HIR id for it. Two fixes of earlier stages: a `while`'s `break` an expression statement (typeck
+coerces it to `()`), path patterns peel references; typeck-check and hir-check unchanged. Judge: `bin/rust-front build-oracles`
+(rustc's `-Zdump-mir=built` by the helper as rustc) and `build-check` (our pipeline's bodies printed by arbace.rust.front.mir against
+rustc's text byte for byte): test/rust/front's seven no_std samples 47 of 54 bodies equal and one more but for rustc's allocations text
+(a1, a2, a4, a5 whole); the corpus of 88 programs 92 of 510 equal and 4 more, five programs whole, the refusals classed (closures,
+desugarings' lang item calls, overloaded operators, constants' bodies). Run: `bin/rust-front run-built` puts our bodies, after
+CleanupPostBorrowck's changes and the abort strategy's unwinds, in place of the helper's `--mono-mir` record's bodies (the record keeps
+the symbols, std's callees and the layouts; unit's, scalars' and scalar pairs' layouts it lacks computed after rustc_abi) and runs them
+through RF3's codegen, rsi's lowering and gcc with rustc, rustdoc and cargo stubs exiting 99 on PATH: a1-a5 and a7 give rustc's
+statuses (5, 212, 41, 17, 45, 21), every body ours, the stubs' log empty; the control (Add as Sub) differs. Alternatives considered:
+building MIR from the helper's typeck data (RFP16 (b), rejected earlier: the pipeline is the goal), judging at runtime MIR only (rejected:
+a difference far from its cause; built MIR is the builder's own output), running the std programs by run-native (rejected here: it
+links through rustc as the linker driver, which the stubs forbid). `bin/crops-score` Rust 75.0 / 95.8 / 80.0 before and after: under
+RES54 (a) eval and AOT stay 0.5 while std's records are consumed, until RF12. Proposed: RFP22 (the order after the slice), RFP23 (the run's
+record as packs), RFP24 (no gate step yet).

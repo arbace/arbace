@@ -3367,3 +3367,124 @@ recorded), r7rs 1,232, srfi 1,231, chibi-tests 268, ecraven 58 at 1: 4,230 of 5,
 - **SCS3 Judge by the own verdict alone for the suites.** (a) as built (the recorded-output judge beside, the own verdict reported); (b) the suites' programs
   judged by their own verdict only, the 5 programs that Chez fails too classed (`chez-fails-too`, `chez-errors-too`), Chez's run for the programs without a
   report alone. *Recommended: (b) when the records are next remade (a night's run): the recorded runs of the 27 programs then leave the oracle tier's reach.*
+
+## As built: SCS3, the suites by their own verdict alone (2026-11-08, branch scheme-scs3)
+
+SCS3 (b) (recommended in scheme-90's report, under the user's own-verdict decision of 2026-11-07): `bin/si check` and `check --aot` judge
+each program by one judge, `arbace.scheme.check/judge-of`, and read no Chez run for the programs that have a verdict of their own.
+
+### The judges
+
+| programs | judge | items | Chez's run read |
+|---|---|---|---|
+| Racket's R6RS suite's 27 run programs (`:suite`) | `suite-items`: the run's own report alone | `fails ID EXPR => RESULT` (each test the report says failed), `count` (the report's count of tests is not the program's `:tests`), `status` (a report, then a non-zero status), `no-report ID status S: KIND` (no report; the error's kind, `error-of`) | no |
+| si's own 10 programs (`:golden`) | `golden-items`: the golden output, `test/scheme/si/golden/NAME.out` | `crash` (another status than `:status`, default 0), `differs` (stdout byte for byte, the first differing line), `no-golden` | no |
+| Larceny's 13 programs | `items-of`, as before: Chez's recorded run (`test/scheme/si/ref-chez.edn`) | `crash`, `differs`, `error-differs` | yes (0.5) |
+
+**The count (scheme-90's blind spot).** A run that stops early with status 0 prints a smaller "N tests passed", which its own verdict
+cannot tell from a pass. Each suite program has `:tests` in `test/scheme/si/programs.edn`, the count its report must give: taken from
+the first record (si's and Chez's reports of 2026-11-08 give the same count for all 25 programs that report; the source cannot give it:
+`test/output` runs two tests, and the suites' own macros make tests in loops). A suite program without `:tests` is an item too.
+`judge-test` (`judge-test-failures`, run at every judgment, as the controls are) checks the judges on made-up runs: an early stop with
+status 0 (a count item), a failing test, a report and then a status, no report, a missing `:tests`, a golden difference, another status,
+a missing golden; each must give its item and the passing runs none.
+
+**Controls** (`test/scheme/si/controls.edn`, one a judge; each subject's run judged by its own judge against the reference program's
+expectation, `control-items`): `racket/enums` against `racket/lists`'s `:tests` (26 tests for 72: a run cut short), `si/amb` against
+`si/data`'s golden, and since SCS3 `larceny/run-benchmark` against `larceny/exceptions`'s Chez run. All three programs pairs are in both
+essential subsets. A reference without the expectation the subject's judge needs is "not judged", a failure.
+
+**Partial records.** `judge --record --only ID...` (`bin/si check --record --only ...`) writes the programs run and keeps the record's other
+entries (as SC182 (b)'s mats); the records no longer hold `:known-differences` (the suites no longer compare with Chez's output) nor a
+`:judge` key (derived from programs.edn).
+
+`bin/si own` is the oracle tier's comparison, by hand: the check's judges against Chez's recorded runs, program by program (kinds as
+SCS1's, and `own-fail-ref-pass` for a golden program).
+
+### The five programs that fail their own tests, classed
+
+Chez fails the same tests (`bin/si own`: `chez-fails-too` 3, `chez-errors-too` 2), so the recorded-output judge passed them; their own
+reports fail them. Classes in `test/scheme/divergences.edn`, each item matched by its expression and its result:
+
+| class | kind | program, tests | why |
+|---|---|---|---|
+| `chez-exact-zero` | design | `racket/base`: `(/ 1.0 0)`, `(/ 0.0 0)` raise; `(/ 0 3.5)`, `(/ 0 0.0)` are exact 0; `(angle +inf.0)` is exact 0 | si's tower is Chez's (§5.4, SM5's "Chez's exact-zero rules"); the suite expects the inexact results |
+| `chez-console-port` | design | `racket/io/ports`: `(output-port? (current-input-port))`, `(input-port? (current-output-port))` are `#t` | the console's port is one textual input/output port, as Chez's; (rnrs io ports) asks for a textual input and a textual output port, not that neither be the other too |
+| `chez-condition-message` | design | `racket/exceptions`: a lexical violation's `condition-message` is `"~? at char ~a of ~s"` | si's conditions have Chez's parts (§5.3): the message a format string, its arguments the irritants; R6RS specifies the condition's types, not the text; the suite expects Racket's words |
+| `suite-ill-formed` | na | `racket/run` (imports `(tests r6rs run)`, which the suite lacks), `racket/test` (calls `run-test-tests`, which `(tests r6rs test)` does not export) | not programs of the language: a syntax violation found at expansion, as si and Chez raise; no test is reached, so the case is none of the level's (bin/reap leaves it out of the denominator) |
+
+### si's golden outputs, reviewed
+
+`test/scheme/si/golden/NAME.out`: Arbace's own expected stdout of each of si's programs (status 0), from si's run of 2026-11-08, which is
+byte for byte Chez 10.3.0's recorded run; reviewed line by line against R6RS (and R7RS where named) and, where the reports leave the answer
+to the implementation, against si's documented design (Chez's behaviour, §4.2, §5.3-§5.5):
+
+- `amb` (2 lines): the first Pythagorean triple with a < b in depth-first chronological backtracking, (3 4 5), and SICP's multiple dwelling
+  (3 2 4 5 1): the puzzles' known answers.
+- `data` (16 lines): records with parent and protocol (R6RS libraries 6: the protocol doubles x), a condition type (`&error`'s child: `error?` and
+  `message-condition?` of the compound), equal and eqv hashtables, `string-upcase "Straße"` = `"STRASSE"` (libraries 1.2, special casing),
+  the numbers (shortest round-trip digits; `(round 2.5)` 2.0 and `(round 7/2)` 4, even rounding; exact `(sqrt 16)`), `write`'s escapes
+  (`a\x20;b`, R6RS 4.2.4). Implementation's: `1e21`'s layout and `"FF"`'s case (Chez's printing, §4.2), `''q` written `(quote q)`, and the last
+  line, `(/ 1. 0)` raising with irritants `(0)`: Chez's exact-zero rule, the class `chez-exact-zero` of racket/base.
+- `deep-recursion`, `tail-loop` (3 lines each): arithmetic of the loops (10^6 deep, 10^7 iterations in constant space, R6RS 5.11).
+- `dynamic-wind` (12 lines): re-entry through `dynamic-wind` (three passes of in/out), escape `[]`, `raise-continuable`'s 43, `guard`'s
+  clauses and its re-raise in the raise's dynamic environment (`<>` once), `&non-continuable`, `error`'s who, message and irritants
+  (R6RS libraries 7.1-7.3); `"~s is not a pair"`, `(car 5)`'s message, is Chez's text (§5.3).
+- `generators` (7 lines): re-entrant continuations; `map`'s earlier result unchanged by a later return (R6RS 11.9's rule for `map`).
+- `list-checks` (41 lines): `(chezscheme)`'s checks of circular, improper and altered lists (`ok` or `raise` a call): Chez's (CSUG); R6RS
+  asks the checks only "to the extent necessary" (`memp`, `find`, `assp` answer before the bad tail: `ok`).
+- `complex` (162 lines), `numeric-corners` (282 lines), `ports-pushback` (33 lines): Chez's numeric tower and port procedures as `(chezscheme)`
+  gives them (SMR4, re-review 033), by construction Chez's answers; the R6RS-determined lines checked (complex arithmetic such as
+  `(/ 1+2i 3+4i)` = 11/25+2/25i, `(sqrt 3+4i)` = 2+1i, `(sqrt -3-4i)` = 1-2i; magnitudes and angles), the rest si's design (Chez's
+  layouts `0+1i`, `number->string`'s precision suffix `|53`, `string->number`'s extensions).
+
+### The numbers
+
+`bin/si check --only test/scheme/essential-check.txt` (49 programs): 43 pass, 11 items, 0 unclassed (`chez-exact-zero` 5, `chez-console-port`
+2, `suite-ill-formed` 2, `chez-condition-message` 1, `chez-conditions` 1); judges: 27 by their own report (22 pass), 10 by their golden
+output (10 pass), 12 by Chez's run (11 pass); no regression against the record; the three controls differ; judge-test ok; 65 s, 0.65 GB.
+`bin/si check --only larceny/fib --record` (the 50th): pass. `bin/si check --aot --only test/scheme/essential-aot.txt` (11): 8 pass, 7 items
+classed (`syntax-constants` 1 refused); 10 of 11 compiled runs the interpreted ones (1 refused); the controls differ; 74 s, 0.75 GB; and
+`--aot --record --only` the nine others whose verdict changes (racket/exceptions, io/ports, run, test; si's deep-recursion, dynamic-wind,
+list-checks, numeric-corners, ports-pushback): 5 pass, 5 classed; 82 s, 0.86 GB. `bin/si own`: 37 of 49 judged without Chez, 32 agree with
+Chez's run on a pass, the 5 above Chez fails too. `bin/repr-scheme c2j-check`: 18 of 18 sources. `bin/reap --record`, `bin/crops-score --record`.
+
+| `bin/crops-score --crop scheme` | before (next 7696e50da) | after |
+|---|---|---|
+| completeness | 98.4 (98.9 without by design) | 96.8 (98.8): eval 2,826 / 5 / 6, AOT 42 / 4 / 2 (2 n/a each) |
+| maturity | 100.0 | 100.0 |
+| independence | 97.5 (judge 0.874) | 97.5 (judge 0.876: bin/si check and --aot 0.77 to 0.87, 37 of 50 at 1, Larceny's 13 at 0.5) |
+
+Completeness falls by the three programs that fail their own tests by design (they passed while Chez's run was their judge); the two
+ill-formed ones leave the denominator. Independence moves little: the judge is the cases' mean, and the read check's 1,371 cases at 0.5
+(1,249 of them the probes) outweigh the check's 100 (SCS5 below).
+
+Records changed: `test/scheme/check-linux-amd64.edn` (50 entries, from the essential run and fib's), `check-aot-linux-amd64.edn` (20 entries run,
+30 kept: their verdicts do not change, as the interpreted run shows; the night's full run rewrites them), `test/reap/matrix.edn` (the
+source's name too), `test/crops/scores.edn`, `test/crops/independence.edn`.
+
+### Night commands
+
+- `bin/si check --record` (50 programs, about 2 min, 0.7 GB) and `bin/si check --aot --record` (50 compiled, about 6 min, 0.9 GB): the
+  whole records afresh under the new judges (no difference expected but the 30 kept AOT entries' `:known-differences nil`); then
+  `bin/reap --record` and `bin/crops-score --record` if a count moves.
+- `bin/si own --list` and `bin/si own --aot --list` after them (the oracle tier's comparison with Chez's runs, by hand).
+- The gate's `si-essential`, `si-aot-essential`, `si-check`, `si-aot`, `scheme-c2j`, `reap`, `crops-score`.
+
+### Proposed
+
+- **SCS4 The five tests si fails by Chez's design.** (a) keep Chez's semantics, classed (`chez-exact-zero`, `chez-console-port`,
+  `chez-condition-message`; completeness 96.8); (b) follow the suite where R6RS's own examples decide (the exact-zero division and angle;
+  separate console input and output ports), Chez's answers then classed in the mats and si's goldens changed (si/data's last line), a
+  departure from SC2's reference; (c) reclassify them `:na` (rejected: they are tests of the language). *Recommended: (a)*: si's tower and
+  ports are Chez's by SM5's decision, and the classes say so.
+- **SCS5 The read check's own verdict.** The judge's largest term below 1: the read check's 1,371 cases at 0.5 (Chez's dumps, SCS2 (a)), 1,249
+  of them Arbace's own probes (`test/scheme/probes.edn`, generated by SM1). (a) leave (judge 0.876, independence 97.5); (b) the probes judged
+  by properties the report states, no dump: a numeric token's datum is the exact value of its digits (R6RS 4.2.8), rounded to nearest for
+  an inexact one, checked by exact arithmetic apart from the reader; a lexical error where R6RS's grammar has no production; `write` then
+  `read` the same datum (the probes at 1: judge about 0.99, independence about 99.7); (c) the probes' dumps as Arbace's golden files,
+  reviewed by sample (the user decides whether a recording kept as a golden counts as an own verdict). *Recommended: (b)* for the numeric and
+  character probes, (a) for the corpora's 115 files.
+- **SCS6 Larceny's 13 programs.** (a) keep Chez's recorded runs (0.5, as decided); (b) golden outputs of our own as for si's programs,
+  reviewed against R6RS (their outputs are values: nboyer's and earley's results, the benchmarks' answers), Chez's runs then the oracle
+  tier's (si-check's judge 1.0, judge 0.877). *Recommended: (b)* at the next review round, with the same line-by-line review.

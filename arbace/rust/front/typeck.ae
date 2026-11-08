@@ -129,6 +129,7 @@
 ;; The facts
 
 (def ^:dynamic *owner* nil)
+(def ^:dynamic *extra* nil)   ; RF10: atom hir-id -> {:ty :adj :callee :pat-adj ...} (unresolved), when the builder asks
 (def ^:dynamic *facts* nil)  ; atom [fact]
 (def ^:dynamic *env* nil)    ; the bindings in scope: [{name type}] innermost last
 (def ^:dynamic *ret* nil)    ; the body's return type
@@ -145,12 +146,20 @@
 (defn- record! [e ty & [adj]]
   ;; a desugaring's lang item path is no fact of rustc's (its span is the desugared expression's)
   (when (and (vector? (:span e)) (not (:synthesized e)) (not (and (= :path (:kind e)) (:lang (:path e)))))
-    (swap! *facts* conj {:owner *owner* :span (:span e) :kind (get kind-names (:kind e) (str (:kind e))) :ty ty :adj (or adj [])}))
+    (swap! *facts* conj {:owner *owner* :span (:span e) :kind (get kind-names (:kind e) (str (:kind e))) :ty ty :adj (or adj []) :hir-id (:hir-id e)}))
+  (when (and *extra* (:hir-id e)) (swap! *extra* assoc-in [(:hir-id e) :ty] ty))
   ty)
+
+(defn- note!
+  "RF10: a fact of an expression or pattern beyond rustc's --typeck dump (the callee of a method call or overloaded
+  operator, a pattern's implicit dereferences), kept by HIR id for THIR and MIR building (arbace.rust.front.build)"
+  [e k v]
+  (when (and *extra* (:hir-id e)) (swap! *extra* assoc-in [(:hir-id e) k] v)))
 
 (defn- adjust!
   "Adjustments recorded on an expression after the fact (coercions, autoderef of a field's base)"
   [e adj]
+  (when (and (seq adj) *extra* (:hir-id e)) (swap! *extra* update-in [(:hir-id e) :adj] (fnil into []) adj))
   (when (seq adj)
     (swap! *facts* (fn [fs] (let [i (last (keep-indexed (fn [i f] (when (and (= (:span f) (:span e)) (= (:kind f) (get kind-names (:kind e)))) i)) fs))]
                               (if i (update-in fs [i :adj] into adj) fs))))))
@@ -1629,6 +1638,7 @@
                         _ (when (tvar? (shallow rt)) (solve-obligations!))]
                     (if-let [[def args sig adj] (probe-method rt (:ident (:seg e)))]
                       (do (adjust! (:receiver e) adj)
+                          (note! e :callee [def args])
                           ;; a mutable autoref of the receiver: its place's index and deref operators made mutable
                           (when (some (fn [[k t]] (and (= "Borrow" k) (= :ref (first t)) (nth t 2))) adj)
                             (place-mutable! (:receiver e)))
@@ -1824,7 +1834,9 @@
            (when (:els s) (let [bt (check-block (:els s) [:never])] bt))
            (set! *env* (conj *env* @env))
            (when (:init s) t))
-    (:semi :expr) (check-expr (:expr s) (when (= :expr (:kind s)) unit))
+    :semi (check-expr (:expr s) nil)
+    ;; check_expr_has_type_or_error(unit): a diverging expression statement coerced to `()` (NeverToAny)
+    :expr (let [t (check-expr (:expr s) unit)] (when (= [:never] (shallow t)) (coerce! (:expr s) t unit)) t)
     nil))
 
 (defn- fresh-diverging
@@ -1863,15 +1875,20 @@
   [p expected env dbm]
   (let [ex (shallow expected)
         ;; peel references for non-reference patterns (match ergonomics)
-        [ex dbm] (if (and (#{:tuple :struct :tuple-struct :lit} (:kind p)) (= :ref (first ex)))
+        [ex dbm] (if (and (#{:tuple :struct :tuple-struct :lit :path} (:kind p)) (= :ref (first ex)))
                    (loop [t ex m dbm] (if (= :ref (first t)) (recur (shallow (nth t 3)) (if (or (= m :ref) (not (nth t 2))) :ref :ref-mut)) [t m]))
                    [ex dbm])]
+    (when (and *extra* (:hir-id p))
+      (note! p :ty ex)
+      (when (#{:tuple :struct :tuple-struct :lit :path} (:kind p))
+        (note! p :pat-adj (loop [t (shallow expected) acc []] (if (= :ref (first t)) (recur (shallow (nth t 3)) (conj acc t)) acc)))))
     (case (:kind p)
       :binding (let [by-ref (or (:by-ref p) (case dbm :ref :not :ref-mut :mut nil))
                      t (case by-ref :not [:ref [:re-erased] false ex] :mut [:ref [:re-erased] true ex] ex)]
                  (swap! env assoc (:name p) t)
                  (when (and (vector? (:span p)) (not (:synthesized p)))
                    (swap! *facts* conj {:owner *owner* :span (:span p) :ty t :pat true :mode (bm-text by-ref (:mutbl p))}))
+                 (note! p :ty t) (note! p :mode [(or by-ref :no) (boolean (:mutbl p))])
                  (when (:sub p) (check-pat (:sub p) ex env dbm)))
       :tuple (let [ts (if (= :tuple (first ex)) (second ex) (vec (repeatedly (count (:pats p)) #(fresh :ty))))]
                (when-not (= :tuple (first ex)) (unify ex [:tuple ts]))
@@ -2004,6 +2021,7 @@
 (defn- unadjust!
   "Drop the last adjustment of E's fact"
   [e]
+  (when (and *extra* (:hir-id e) (seq (get-in @*extra* [(:hir-id e) :adj]))) (swap! *extra* update-in [(:hir-id e) :adj] pop))
   (swap! *facts* (fn [fs] (let [i (last (keep-indexed (fn [i f] (when (and (= (:span f) (:span e)) (= (:kind f) (get kind-names (:kind e)))) i)) fs))]
                             (if (and i (seq (:adj (nth fs i)))) (update-in fs [i :adj] pop) fs)))))
 
@@ -2035,6 +2053,19 @@
   [t]
   (let [t (erase-all (deep-normalize t))]
     (binding [c/*in-value* false] (c/print-ty t))))
+
+(defn- resolve-extra!
+  "RF10: the builder's table resolved as writeback resolves the facts (types normalized, regions erased)"
+  []
+      (when *extra*
+        (let [rt (fn [t] (if (vector? t) (erase-all (deep-normalize t)) t))
+              rv (fn rv [v] (cond (and (vector? v) (keyword? (first v))) (rt v) (vector? v) (mapv rv v) :else v))]
+          (swap! *extra* (fn [m] (into {} (for [[id x] m]
+                                            [id (cond-> x
+                                                  (:ty x) (update :ty rt)
+                                                  (:adj x) (update :adj (fn [as] (mapv (fn [[k t]] [k (rt t)]) as)))
+                                                  (:pat-adj x) (update :pat-adj (fn [ts] (mapv rt ts)))
+                                                  (:callee x) (update :callee (fn [[d as]] [d (mapv rv as)])))])))))))
 
 (defn- check-body
   "One typeck root's body: a function's parameters and block, a constant's or static's initializer"
@@ -2084,6 +2115,7 @@
           (println "profile" owner "budget left" @*budget*)
           (doseq [[k n] (take 12 (sort-by (comp - val) @*profile*))] (println "  " n k)))
         (reset! *profile* {}))
+      (resolve-extra!)
       (mapv (fn [f] (-> f (update :ty #(if (string? %) % (print-fact-ty %))) (update :adj (fn [as] (mapv (fn [[k t]] [k (if (string? t) t (print-fact-ty t))]) (or as []))))))
             @facts))))
 
@@ -2104,8 +2136,17 @@
       (c/in-def (:parent d)
         (let [x (check-expr (:disr v) t)] (coerce! (:disr v) x t)))
       (fallback!)
+      (resolve-extra!)
       (mapv (fn [f] (-> f (update :ty #(if (string? %) % (print-fact-ty %))) (update :adj (fn [as] (mapv (fn [[k t]] [k (if (string? t) t (print-fact-ty t))]) (or as []))))))
             @facts))))
+
+(defn body-results
+  "RF10: one typeck root's results for THIR and MIR building (within collect/with-crate): {hir-id {:ty :adj :callee
+  :pat-adj :mode}}, types resolved and regions erased"
+  [d]
+  (binding [*extra* (atom {}) *scope-traits* (or *scope-traits* (std-traits-in-scope))]
+    (if (= "Variant" (:kind d)) (check-discriminant d) (check-body d))
+    @*extra*))
 
 (defn check-crate
   "RF9: every typeck root's facts (within collect/with-crate)"
@@ -2122,3 +2163,91 @@
                                             (str/starts-with? (str (:kind d)) "AssocConst"))
                                         (:expr (:node d)))))
                        (c/defs))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; RF10: the questions THIR and MIR building ask (arbace.rust.front.build), within collect/with-crate
+
+(defn with-solver
+  "F called with the solver's state bound as for D's body (its parameter environment, a fresh inference table)"
+  [d f]
+  (binding [*vars* (atom {}) *next-var* (atom 0) *facts* (atom []) *obligations* (atom []) *anon-consts* (atom 0)
+            *budget* (atom 200000) *select-cache* (atom {}) *norm-cache* (atom {}) *param-env-cache* (atom {})
+            *scalar-fixes* (atom []) *casts* (atom []) *closures* (atom []) *closure-calls* (atom []) *env* [{}] *loops* nil
+            *scope-traits* (or *scope-traits* (std-traits-in-scope))]
+    (c/in-def (:id d) (f))))
+
+(defn copy-type? [t] (copy-ty? t))
+
+(defn implements-drop? [t]
+  (let [s (snapshot) r (impls-for t (c/lang "drop") [])] (rollback! s) (vector? r)))
+
+(defn- std-variants [adt] (:variants (get (:adts c/*si*) adt)))
+
+(defn enum? [adt]
+  (if (string? adt)
+    (= "Enum" (:kind (get (:adts c/*si*) adt)))
+    (and (number? adt) (= "Enum" (:kind (c/def-of adt))))))
+
+(defn variants-of [adt] (vec (filter #(and (= adt (:parent %)) (= "Variant" (:kind %))) (c/defs))))
+
+(defn variants-any
+  "An ADT's variants (one for a struct)"
+  [adt]
+  (cond (string? adt) (or (std-variants adt) [adt])
+        (enum? adt) (variants-of adt)
+        :else [adt]))
+
+(defn variant-index [vid]
+  (if (string? vid)
+    (or (first (keep-indexed (fn [i v] (when (= vid (:path v)) i)) (std-variants (c/path-parent vid)))) 0)
+    (let [v (c/def-of vid)] (or (first (keep-indexed (fn [i x] (when (= vid (:id x)) i)) (variants-of (:parent v)))) 0))))
+
+(defn variant-name [vid]
+  (if (string? vid) (c/path-name vid) (second (:data (c/def-of vid)))))
+
+(defn std-variant [vid]
+  (some #(when (= vid (:path %)) %) (std-variants (c/path-parent vid))))
+
+(defn single-variant [adt] (if (enum? adt) (throw (ex-info "build: a field of an enum" {:adt adt})) adt))
+
+(defn all-fields-of-variant
+  "A struct's or variant's fields [[name type]] at its identity arguments"
+  [vid]
+  (if (string? vid)
+    (let [v (or (std-variant vid) (first (:variants (get (:adts c/*si*) vid))))]
+      (vec (for [[n t] (:fields v)] [n (erase (c/sty->ty t))])))
+    (vec (for [f (filter #(and (= vid (:parent %)) (= "Field" (:kind %))) (c/defs))] [(second (:data f)) (erase (c/type-of (:id f)))]))))
+
+(defn all-fields [adt args]
+  (if (enum? adt)
+    (vec (mapcat #(adt-fields (:id %) args) (variants-of adt)))
+    (adt-fields adt args)))
+
+(defn variant-ctor-kind
+  "The aggregate's constructor kind as MIR prints it: const (a unit variant or struct), fn (a tuple one), struct"
+  [vid]
+  (if (string? vid)
+    (case (:ctor (or (std-variant vid) (first (:variants (get (:adts c/*si*) vid))))) "Const" "const" "Fn" "fn" "struct")
+    (let [d (c/def-of vid) ctor (:ctor d)]
+      (cond (nil? ctor) "struct"
+            (str/includes? (str (:kind (c/def-of ctor))) "Const") "const"
+            :else "fn"))))
+
+(defn discr-ty [adt] (if (string? adt) [:int "isize"] (get c/prim-tys (repr-int (:node (c/def-of adt))))))
+
+(defn discriminant-values
+  "An enum's discriminants by variant: an explicit one's literal, else the previous one's plus one"
+  [adt]
+  (if (string? adt)
+    (vec (range (count (std-variants adt))))
+    (loop [vs (variants-of adt) prev -1 acc []]
+      (if-let [v (first vs)]
+        (let [x (:disr (:node v))
+              d (cond (nil? x) (inc prev)
+                      (= :lit (:kind x)) (parse-long (str/replace (str (:symbol (:lit x))) "_" ""))
+                      (and (= :unary (:kind x)) (= "-" (:op x)) (= :lit (:kind (:expr x)))) (- (parse-long (str (:symbol (:lit (:expr x))))))
+                      :else (throw (ex-info "build: a discriminant expression" {})))]
+          (recur (rest vs) d (conj acc d)))
+        acc))))
+
+(defn erased-sig [id] (erase (c/fn-sig id)))

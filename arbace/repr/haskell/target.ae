@@ -1,0 +1,340 @@
+(ns arbace.repr.haskell.target
+  "The GHC installation the native reads read, derived (HFS-I2 (a), the user 2026-11-07; doc/haskell/NATIVE.md, \"The native
+  reads' inputs: derived\"): no GHC, no C compiler, no file a toolchain made. From the corpus's pinned source tarball (GHC
+  9.14.1's), musl 1.2.6's pinned tarball (C's), the installation's facts (test/haskell/target/installation.edn: names and
+  choices) and the configure answers ci computed (test/haskell/target/answers.edn, arbace.repr.haskell.configure), the tree
+  the pack haskell-native-inputs-ghc-9.14.1 held, in its layout:
+
+    LIBDIR                       the installation's path
+    sysroot/usr/include/stdc-predef.h          musl's (the preprocessor's preinclude)
+    sysroot/LIBDIR/settings                    hadrian's generateSettings (bindist Makefile's lib/settings) over the facts
+    sysroot/LIBDIR/package.conf.d/ID.conf      each unit's record: its .cabal finalized for x86_64 Linux (arbace.repr.haskell.cabal)
+                                               and printed as ghc-pkg writes it, patched as the bindist's patchpackageconf
+    sysroot/LIBDIR/../lib/ABIDIR/ID/include/   each unit's install-includes: the tarball's headers, the generated ones made
+                                               here (ghcversion.h, ghcplatform.h, ghcautoconf.h, the configure headers,
+                                               EventLogConstants.h and EventTypes.h by gen_event_types.py's rules, ...)
+    configured/DIR/FILE                        the packages' configure headers (Cabal's build-type Configure), as the
+                                               extracted tree holds them after configure
+
+  Verbs (-m arbace.repr.haskell.target):
+    derive OUT --src TREE --musl MUSL     the tree into OUT (TREE: the tarball extracted, MUSL: musl's tree)
+    compare OUT PACK                       OUT's members against PACK's (the oracle tier: the pack GHC's installation made), byte
+                                           for byte; prints each differing member, exit 1 on a difference"
+  (:require [arbace.repr.haskell.cabal :as cabal]
+            [arbace.repr.haskell.configure :as conf]
+            [arbace.string :as str])
+  (:import [java.io File]
+           [java.nio.file Files]))
+
+(set! *warn-on-reflection* true)
+
+(defn- rd [^String f] (read-string (slurp f)))
+(defn- spit-mk [^String f ^String s] (.mkdirs (.getParentFile (File. f))) (spit f s))
+(defn- copy-file [^String from ^String to]
+  (.mkdirs (.getParentFile (File. to)))
+  (Files/write (.toPath (File. to)) (Files/readAllBytes (.toPath (File. from))) (make-array java.nio.file.OpenOption 0)))
+
+;;; The project's version (m4/fp_setup_project_version.m4): 9.14.1 -> Int 914, ForLib 9.1401, the patch levels
+
+(defn project-vars [^String v]
+  (let [[a b c] (str/split v #"\.")
+        b (Long/parseLong b) c (Long/parseLong (or c "0"))]
+    {"ProjectVersion" v "ProjectVersionMunged" v
+     "ProjectVersionInt" (str a (format "%02d" b))
+     "ProjectVersionForLib" (str a "." b (format "%02d" c))
+     "ProjectPatchLevel" (str c) "ProjectPatchLevel1" (str c) "ProjectPatchLevel2" "0"}))
+
+(defn subst-at "@VAR@ replaced by vars' values (hadrian's runInterpolations, config.status's AC_CONFIG_FILES)" [^String s vars]
+  (reduce (fn [^String s [k v]] (.replace s (str "@" k "@") (str v))) s vars))
+
+;;; The units: their .cabal files finalized
+
+(def ^:private env {:os "linux" :arch "x86_64" :impl ["ghc" [9 14 1]]})
+
+(defn- corpus-packages [^String repo]
+  (into {} (for [p (:packages (rd (str repo "/test/haskell/corpus-ghc-9.14.1.edn")))
+                 :when (not (str/ends-with? (:name p) "-Setup"))]
+             [(:name p) p])))
+
+(defn- cabal-file [^String src name facts corpus]
+  (if-let [f (get-in facts [:cabal name :file])]
+    (str src "/" f)
+    (let [d (str src "/" (:dir (get corpus name)) "/" name ".cabal")]
+      (if (.isFile (File. d)) d (str d ".in")))))
+
+(defn units
+  "Every unit's finalized package: {name {:pkg :dir :file}}"
+  [^String src ^String repo facts]
+  (let [corpus (corpus-packages repo)
+        vars (merge (project-vars (:ghc facts)) {"Suffix" "" "SourceRoot" "."})]
+    (into (sorted-map)
+          (for [name (keys (:units facts)) :when (not= name "system-cxx-std-lib")]
+            (let [f (cabal-file src name facts corpus)
+                  flags (or (get-in facts [:cabal name :flags]) (:cabal-flags (get corpus name)) [])
+                  dir (.getParent (File. ^String f))
+                  bi (File. (str dir "/" name ".buildinfo.in"))
+                  pkg (cabal/package (subst-at (slurp f) vars) env flags)
+                  ;; Cabal's build-type Configure: the .buildinfo's fields before the library's own
+                  pkg (if (.isFile bi)
+                        (update pkg :library #(into (vec (cabal/parse (subst-at (slurp bi) (get-in facts [:buildinfo name])))) %))
+                        pkg)]
+              [name {:file f :dir dir :pkg pkg}])))))
+
+;;; The records (ghc-pkg's .conf files)
+
+(def ^:private spdx {"BSD3" "BSD-3-Clause" "BSD2" "BSD-2-Clause" "MIT" "MIT" "ISC" "ISC" "PublicDomain" "LicenseRef-PublicDomain"
+                     "Apache-2.0" "Apache-2.0" "BSD-3-Clause" "BSD-3-Clause" "BSD-2-Clause" "BSD-2-Clause"})
+
+(def empty-abi "GHC's fingerprint of no interfaces" "58d8da4e4c1c51b92726bb8097eb8f26")
+
+(defn- reexports
+  "reexported-modules' items as [new [unit-id orig]] (Cabal's parsecOptCommaList of ModuleReexport: `orig`, `orig as new`,
+  `pkg:orig as new`, commas optional), a bare one found among the dependencies' exposed modules"
+  [pkg exposed-of ids]
+  (let [ds (cabal/deps pkg)
+        ws (remove str/blank? (str/split (str/join " " (mapcat #(map last (:lines %)) (filter #(= (:field %) "reexported-modules") (:library pkg)))) #"[,\s]+"))]
+    (loop [ws ws acc []]
+      (if-let [w (first ws)]
+        (let [[_ q orig] (re-matches #"(?:([A-Za-z0-9-]+):)?(.+)" w)
+              [new rest] (if (= "as" (second ws)) [(nth ws 2) (drop 3 ws)] [orig (rest ws)])
+              ;; exposed-of: {unit {module [origin-unit origin-module]}}, a dependency's own and reexported modules
+              [fu fm] (or (when q [q orig]) (some #(get-in exposed-of [% orig]) ds) [nil orig])]
+          (recur rest (conj acc [new [(get ids fu) fm]])))
+        acc))))
+
+(defn- dep-order "The units' names, each after its dependencies" [us]
+  (let [seen (java.util.LinkedHashSet.)]
+    (letfn [(visit [n] (when (and (contains? us n) (not (.contains seen n)))
+                         (doseq [d (cabal/deps (:pkg (get us n)))] (when (not= d n) (visit d)))
+                         (.add seen n)))]
+      (doseq [n (keys us)] (visit n)))
+    (vec seen)))
+
+(defn conf-text
+  "A unit's record, as the installation's package database holds it"
+  [name u facts exposed-of ids]
+  (let [{:keys [pkg]} u
+        top #(cabal/free-text pkg %)
+        id (get-in facts [:units name :id])
+        version (str/trim (top "version"))
+        abi-dir (:abi-dir facts)
+        lib (str "${pkgroot}/../lib/" abi-dir "/" id)
+        exposed (cabal/lib-field pkg "exposed-modules")
+        rx (reexports pkg exposed-of ids)
+        incs (cabal/lib-field pkg "install-includes")
+        hs (or (seq exposed) (seq (cabal/lib-field pkg "other-modules")) (seq (cabal/lib-field pkg "c-sources")))
+        lic (str/trim (or (top "license") ""))
+        ipi {:name name :version version :id id :key id
+             :license (get spdx lic lic)
+             :copyright (top "copyright") :maintainer (top "maintainer") :author (top "author") :stability (top "stability")
+             :homepage (top "homepage") :package-url (top "package-url") :synopsis (top "synopsis") :description (top "description")
+             :category (top "category")
+             :abi (or (get-in facts [:units name :abi]) empty-abi)
+             :exposed (not= "false" (some-> (last (cabal/lib-field pkg "exposed")) str/lower-case))
+             :exposed-modules (vec (sort-by #(if (string? %) % (first %))
+                                             (concat exposed (map (fn [[n [i o]]] [n (str i ":" o)]) rx))))
+             :hidden-modules (cabal/lib-field pkg "other-modules")
+             :import-dirs (when (seq (concat exposed (cabal/lib-field pkg "other-modules"))) [lib])
+             :library-dirs [lib] :library-dirs-static [lib]
+             :dynamic-library-dirs [(str "${pkgroot}/../lib/" abi-dir)]
+             :data-dir (str "${pkgroot}/../share/" abi-dir "/" name "-" version)
+             :hs-libraries [(str "HS" id)]
+             :extra-libraries (cabal/lib-field pkg "extra-libraries")
+             :include-dirs (when (seq incs) [(str lib "/include")])
+             :includes (cabal/lib-field pkg "includes")
+             :depends (vec (sort (keep #(get ids %) (cabal/deps pkg))))
+             :haddock-interfaces (when (not= name "rts") [(str "${pkgroot}/../../doc/html/libraries/" id "/" name ".haddock")])
+             :haddock-html (when (not= name "rts") [(str "${pkgroot}/../../doc/html/libraries/" id)])}
+        text (cabal/ipi-text ipi)]
+    ;; the bindist Makefile's patchpackageconf: the haddock fields' paths made relative to the docs directory
+    (->> (str/split text #"\n" -1)
+         (map (fn [^String l]
+                (cond
+                  (str/starts-with? l "haddock-interfaces") (str "haddock-interfaces: \"${pkgroot}/" (:docs-rel facts) "/html/libraries/" id "/" name ".haddock\"")
+                  (str/starts-with? l "haddock-html") (str "haddock-html: \"${pkgroot}/" (:docs-rel facts) "/html/libraries/" id "\"")
+                  (str/starts-with? l "    ${pkgroot}/../../doc/html/") ""
+                  :else l)))
+         (str/join "\n"))))
+
+;;; The settings file (hadrian/bindist/Makefile's lib/settings, Rules/Generate.hs's generateSettings: the same order)
+
+(def settings-keys
+  ["C compiler command" "C compiler flags" "C++ compiler command" "C++ compiler flags" "C compiler link flags"
+   "C compiler supports -no-pie" "CPP command" "CPP flags" "Haskell CPP command" "Haskell CPP flags" "JavaScript CPP command"
+   "JavaScript CPP flags" "C-- CPP command" "C-- CPP flags" "C-- CPP supports -g0" "ld supports compact unwind"
+   "ld supports filelist" "ld supports single module" "ld is GNU ld" "Merge objects command" "Merge objects flags"
+   "Merge objects supports response files" "ar command" "ar flags" "ar supports at file" "ar supports -L" "ranlib command"
+   "otool command" "install_name_tool command" "windres command" "unlit command" "cross compiling" "target platform string"
+   "target os" "target arch" "target word size" "target word big endian" "target has GNU nonexec stack"
+   "target has .ident directive" "target has subsections via symbols" "target has libm" "Unregisterised" "LLVM target"
+   "LLVM llc command" "LLVM opt command" "LLVM llvm-as command" "LLVM llvm-as flags" "Use inplace MinGW toolchain"
+   "target RTS linker only supports shared libraries" "Use interpreter" "Support SMP" "RTS ways" "Tables next to code"
+   "Leading underscore" "Use LibFFI" "RTS expects libdw" "Relative Global Package DB" "base unit-id"])
+
+(defn settings-text [facts abi]
+  (let [[arch _ os] (str/split (:host facts) #"-")
+        v (merge (:toolchain facts)
+                 {"unlit command" "$topdir/../bin/unlit" "cross compiling" "NO" "target platform string" (:host facts)
+                  "target os" (case os "linux" "OSLinux") "target arch" (case arch "x86_64" "ArchX86_64")
+                  "target word size" (str (get-in abi [:sizeof "POINTER"])) "target word big endian" "NO"
+                  "Relative Global Package DB" "package.conf.d" "base unit-id" (get-in facts [:units "base" :id])})
+        show #(str "\"" (str/replace (str/replace % "\\" "\\\\") "\"" "\\\"") "\"")]
+    (str "[" (str/join "\n," (for [k settings-keys] (str "(" (show k) ", " (show (get v k)) ")"))) "\n]\n")))
+
+;;; The RTS's generated headers
+
+(defn ghcplatform-h
+  "rts/configure.ac's ghcplatform.h: ghcplatform.h.top (AC_CONFIG_FILES over the canonical triples' parts, FPTOOLS_SET_PLATFORM_VARS'
+  _CPP names) and ghcplatform.h.bottom"
+  [^String src facts]
+  (let [parts (fn [t] (let [[a v o] (str/split t #"-")] {:arch a :vendor v :os o :cpp (str/replace t "-" "_")}))
+        b (parts (:build facts)) h (parts (:host facts))
+        vars {"BuildPlatform_CPP" (:cpp b) "HostPlatform_CPP" (:cpp h) "BuildArch_CPP" (:arch b) "HostArch_CPP" (:arch h)
+              "BuildOS_CPP" (:os b) "HostOS_CPP" (:os h) "BuildVendor_CPP" (:vendor b) "HostVendor_CPP" (:vendor h)}]
+    (str (subst-at (slurp (str src "/rts/ghcplatform.h.top.in")) vars) (slurp (str src "/rts/ghcplatform.h.bottom")))))
+
+(defn ghcautoconf-h
+  "rts/configure.ac's ghcautoconf.h: the guard around config.status's ghcautoconf.h.autoconf, its PACKAGE_ defines undone and
+  the __GLASGOW_HASKELL and REMOVE ME lines dropped"
+  [^String autoconf]
+  (str "#if !defined(__GHCAUTOCONF_H__)\n#define __GHCAUTOCONF_H__\n"
+       (apply str (for [^String l (str/split autoconf #"\n")
+                        :when (not (or (str/includes? l "__GLASGOW_HASKELL") (str/includes? l "REMOVE ME")))]
+                    (str (if-let [[_ ws n] (re-matches #"^([\t ]*)#[\t ]*define[\t ]+(PACKAGE_[A-Z]*)[\t ]+\".*\".*$" l)]
+                           (str ws "/* #undef " n " */")
+                           l)
+                         "\n")))
+       "#endif /* __GHCAUTOCONF_H__ */\n"))
+
+;; rts/gen_event_types.py: the event types' table and its two outputs
+(defn- event-types [^String src]
+  (let [py (str/join "\n" (remove #(re-find #"^\s*#" %) (str/split-lines (slurp (str src "/rts/gen_event_types.py")))))
+        sizes {"ThreadId" "EventThreadID" "KernelThreadId" "EventKernelThreadId" "CapNo" "EventCapNo" "CapsetType" "EventCapsetType"
+               "Timestamp" "EventTimestamp" "CapsetId" "EventCapsetID" "TaskId" "EventTaskId"
+               "Word8" "StgWord8" "Word16" "StgWord16" "Word32" "StgWord32" "Word64" "StgWord64"}]
+    (vec (for [[_ n name fields desc] (re-seq #"EventType\(\s*(\d+),\s*'([A-Z0-9_]+)',\s*(VariableLength|(?:\d+\s*\*\s*)?\[[^\]]*\](?:\s*\+\s*(?:\d+\s*\*\s*)?\[[^\]]*\])*)\s*,\s*'([^']*)'\)" py)]
+           {:n (Long/parseLong n) :name name :desc desc
+            ;; a list expression: a sum of [T, ...] and K*[T, ...]
+            :fields (when-not (= fields "VariableLength")
+                      (vec (mapcat (fn [[_ k ts]]
+                                     (let [one (mapv #(get sizes %) (re-seq #"\w+" ts))]
+                                       (apply concat (repeat (if k (Long/parseLong k) 1) one))))
+                                   (re-seq #"(?:(\d+)\s*\*\s*)?\[([^\]]*)\]" fields))))}))))
+
+(defn event-headers
+  "gen_event_types.py's --event-types-defines (EventLogConstants.h) and --event-types-array (EventTypes.h)"
+  [^String src]
+  (let [py (slurp (str src "/rts/gen_event_types.py"))
+        ets (event-types src)]
+    {:defines (conf/py-event-defines py ets)
+     :array (conf/py-event-array py ets)}))
+
+;;; The tree
+
+(defn- installed-includes
+  "A unit's installed headers: [name source-file-or-nil], install-includes looked up in its include-dirs, the package's
+  directory, the generated ones (no source) left to the caller"
+  [u]
+  (let [{:keys [pkg dir]} u
+        dirs (concat (cabal/lib-field pkg "include-dirs") ["."])]
+    (vec (for [h (cabal/lib-field pkg "install-includes")]
+           [h (some #(let [f (File. (str dir "/" % "/" h))] (when (.isFile f) (str f))) dirs)]))))
+
+(defn derive-tree
+  "The tree into out; returns {:members n}"
+  [^String out ^String src ^String musl ^String repo]
+  (let [facts (rd (str repo "/test/haskell/target/installation.edn"))
+        abi (rd (str repo "/c/target/abi.edn"))
+        answers (conf/load-answers repo)
+        libdir (:libdir facts)
+        sys (str out "/sysroot")
+        us (units src repo facts)
+        ids (into {} (for [[n {:keys [id]}] (:units facts)] [n id]))
+        own (into {} (for [[n u] us] [n (into {} (for [m (cabal/lib-field (:pkg u) "exposed-modules")] [m [n m]]))]))
+        ;; each unit's reexports resolved over its dependencies' (a dependency first: the units in dependency order)
+        exposed-of (reduce (fn [eo n]
+                             (assoc eo n (into (get own n)
+                                               (for [[new [i o]] (reexports (:pkg (get us n)) eo ids)]
+                                                 [new [(some (fn [[k v]] (when (= v i) k)) ids) o]]))))
+                           own (dep-order us))
+        abs (str sys libdir "/../lib/" (:abi-dir facts))
+        configured (conf/products src answers)
+        gen {"ghcversion.h" (subst-at (slurp (str src "/rts/include/ghcversion.h.in")) (project-vars (:ghc facts)))
+             "ghcplatform.h" (ghcplatform-h src facts)
+             ;; ghc-internal's configure for a system GMP: AC_CONFIG_FILES' HsIntegerGmp.h, and ghc-gmp.h naming gmp.h
+             "HsIntegerGmp.h" (subst-at (slurp (str src "/libraries/ghc-internal/include/HsIntegerGmp.h.in")) (:gmp facts))
+             "ghc-gmp.h" "#include <gmp.h>\n"}
+        ev (event-headers src)]
+    (spit-mk (str out "/LIBDIR") (str libdir "\n"))
+    (copy-file (str musl "/include/stdc-predef.h") (str sys "/usr/include/stdc-predef.h"))
+    (spit-mk (str sys libdir "/settings") (settings-text facts abi))
+    (doseq [[n u] us]
+      (spit-mk (str sys libdir "/package.conf.d/" (get ids n) ".conf") (conf-text n u facts exposed-of ids)))
+    (let [cx (:cxx-std-lib facts)]
+      (spit-mk (str sys libdir "/package.conf.d/system-cxx-std-lib-1.0.conf")
+               (subst-at (slurp (str src "/mk/system-cxx-std-lib-1.0.conf.in"))
+                         {"CXX_STD_LIB_LIBS" (:libs cx) "CXX_STD_LIB_LIB_DIRS" (:lib-dirs cx) "CXX_STD_LIB_DYN_LIB_DIRS" (:dyn-lib-dirs cx)})))
+    ;; the units' installed headers
+    (doseq [[n u] us
+            [h f] (installed-includes u)]
+      (let [to (str abs "/" (get ids n) "/include/" h)
+            g (or (get gen h)
+                  (when (= h "ghcautoconf.h") (some-> (get configured "rts/ghcautoconf.h.autoconf") ghcautoconf-h))
+                  (when (= h "rts/EventLogConstants.h") (:defines ev))
+                  (when (= h "rts/EventTypes.h") (:array ev))
+                  ;; a configure product, looked up in the package's include-dirs (time's lib/include) and its directory
+                  (some #(get configured (str (subs (:dir u) (inc (count src))) "/" % "/" h))
+                        (concat (cabal/lib-field (:pkg u) "include-dirs") ["."]))
+                  (get configured (str (subs (:dir u) (inc (count src))) "/" h)))]
+        (cond
+          f (copy-file f to)
+          g (spit-mk to g)
+          :else (println "target: no source for" n h))))
+    ;; the packages' configure products, where Cabal's build puts them in the extracted tree
+    ;; (the packages the corpus configures, :configure: Cabal's build-type Configure)
+    (doseq [p (vals (corpus-packages repo))
+            f (:configure p)
+            :let [path (str (:dir p) "/" f)]
+            :when (get configured path)]
+      (spit-mk (str out "/configured/" path) (get configured path)))
+    {:members (count (file-seq (File. out)))}))
+
+;;; The comparison (the oracle tier)
+
+(defn- members [^String root]
+  (let [r (File. root) n (inc (count (str r)))]
+    (into (sorted-map) (for [^File f (file-seq r) :when (.isFile f)] [(subs (str f) n) f]))))
+
+(defn compare-trees [^String out ^String pack]
+  (let [bf (File. (str out "/BORROWED"))
+        borrowed (set (when (.isFile bf) (remove str/blank? (str/split-lines (slurp bf)))))
+        a (apply dissoc (dissoc (members out) "BORROWED") borrowed)
+        b (apply dissoc (members pack) borrowed)
+        hsc2hs-of (fn [^File f] (some #(when (and (seq? %) (= 'hsdump/config (first %))) (:hsc2hs (second %)))
+                                      (read-string (str "[" (slurp f) "]"))))
+        ;; an .hsc module's record: the helper's holds its whole dump configuration, the derived one the :hsc2hs the
+        ;; native read takes from it (arbace.repr.haskell.native's config): compared on that
+        eq? (fn [m] (if (str/ends-with? m ".hspp.edn")
+                      (= (hsc2hs-of (get a m)) (hsc2hs-of (get b m)))
+                      (java.util.Arrays/equals ^bytes (Files/readAllBytes (.toPath ^File (get a m)))
+                                               ^bytes (Files/readAllBytes (.toPath ^File (get b m))))))
+        same (filter #(and (get a %) (eq? %)) (keys b))
+        diff (remove (set same) (filter #(get a %) (keys b)))
+        missing (remove #(get a %) (keys b))
+        extra (remove #(get b %) (keys a))]
+    (doseq [m diff] (println "DIFF" m))
+    (doseq [m missing] (println "MISSING" m))
+    (doseq [m extra] (println "EXTRA" m))
+    (println (str "target compare: " (count same) " of " (count b) " derived members equal, " (count diff) " differ, "
+                  (count missing) " missing, " (count extra) " extra; " (count borrowed) " borrowed from the pack (BORROWED)"))
+    (and (empty? diff) (empty? missing) (empty? extra))))
+
+(defn -main [& args]
+  (let [[verb & more] args
+        opts (into {} (map vec (partition 2 (filter some? (drop-while #(not (str/starts-with? (str %) "--")) more)))))
+        pos (take-while #(not (str/starts-with? (str %) "--")) more)
+        repo (or (System/getenv "ARBACE_REPO") (System/getProperty "user.dir"))]
+    (case verb
+      "derive" (do (derive-tree (first pos) (get opts "--src") (get opts "--musl") repo) (System/exit 0))
+      "compare" (System/exit (if (compare-trees (first pos) (second pos)) 0 1))
+      (do (println "usage: -m arbace.repr.haskell.target derive OUT --src TREE --musl MUSL | compare OUT PACK") (System/exit 2)))))
