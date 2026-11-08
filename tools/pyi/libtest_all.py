@@ -12,7 +12,9 @@ usage: python3 -I -S -B libtest_all.py VERB ...
       after refs.py record: an entry no unittest driver can name excluded, "runner: regrtest's JUnit names no test id"
       (a testcase of no name, or the number a test rebound its id attribute to: test__interpreters), and one whose
       reason names the checkout's paths or their length (AF_UNIX's limit) excluded, "machine: its reason names the
-      checkout's paths"
+      checkout's paths"; a reason naming another path of the machine (under /root, /home, /tmp, /Users: Alpine's build
+      directory) kept, the path's head written <home>/ and the like (queue 235: a record holds no host path; idempotent,
+      rerun on a committed reference rewrites those lines alone)
   run --root ROOT --modules FILE --dir DIR [--jobs N] [--test-timeout S] [--module-timeout S] [--oracle LIB] [--tmp-base D]
       each module through test/python/libtest_run.py, by pyi (ROOT/bin/pyi run) or with --oracle by python3 (the
       control: PYTHONPATH LIB): DIR/MODULE.out, .err, .status in test/python/libtest_judge.ae's format. A test that
@@ -158,9 +160,13 @@ def cmd_refs(args):
     sys.exit(1 if any(rcs) else 0)
 
 
+# an absolute path of the machine (crops-score's :abs-path; queue 235)
+HOST_PATH = re.compile(r"(?<![A-Za-z0-9_.@<>-])/(root|home|tmp|Users)/")
+
+
 def cmd_fixrefs(args):
     ref, root = arg(args, "--ref"), os.path.abspath(arg(args, "--root"))
-    lines, n_id, n_path = [], 0, 0
+    lines, n_id, n_path, n_host = [], 0, 0, 0
     for l in open(ref, encoding="utf-8"):
         m = re.match(r'\{:id "([^"/]*)/([^"]*)" (:outcome .*)\}$', l.rstrip("\n"))
         if m:
@@ -168,12 +174,16 @@ def cmd_fixrefs(args):
             if tid == "None" or tid.isdigit():  # a doctest's id (typing.get_args) is an id
                 l = '{:id "%s/%s" :excluded "runner: regrtest\'s JUnit names no test id"}\n' % (m.group(1), tid)
                 n_id += 1
-            elif root in body or "path too long" in body:
+            elif root in body or "<checkout>/" in body or "path too long" in body:
                 l = '{:id "%s/%s" :excluded "machine: its reason names the checkout\'s paths"}\n' % (m.group(1), tid)
                 n_path += 1
+            elif HOST_PATH.search(body):
+                # queue 235: another path of the machine (Alpine's build directory, /tmp) written as <home>/, <tmp>/...
+                l = '{:id "%s/%s" %s}\n' % (m.group(1), tid, HOST_PATH.sub(r"<\1>/", body))
+                n_host += 1
         lines.append(l)
     open(ref, "w", encoding="utf-8").write("".join(lines))
-    print("fixrefs: %d entries of no test id and %d naming the checkout's paths excluded" % (n_id, n_path))
+    print("fixrefs: %d entries of no test id and %d naming the checkout's paths excluded, %d other paths of the machine written host-free" % (n_id, n_path, n_host))
 
 
 def last_line(text):

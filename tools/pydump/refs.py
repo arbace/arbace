@@ -53,6 +53,18 @@ def clean(s):
     return s.replace("\t", " ").replace("\r", " ").replace("\n", " ")
 
 
+# a reference holds no path of the machine (queue 235): the checkout's directory (the working directory: bin/pyi runs here)
+# as <checkout>, then any other absolute path under /root, /home, /tmp or /Users (crops-score's :abs-path: Alpine's build
+# directory /home/buildozer/aports/... that python3's sysconfig names) as <root>/, <home>/, <tmp>/, <Users>/; no judge reads a
+# reason or a line (the outcome, the status and stdout's digest are the reference)
+HOST_PATH = re.compile(r"(?<![A-Za-z0-9_.@<>-])/(root|home|tmp|Users)/")
+
+
+def host_free(s, root=None):
+    root = (root or os.getcwd()).rstrip("/") + "/"
+    return HOST_PATH.sub(r"<\1>/", s.replace(root, "<checkout>/"))
+
+
 def arg(args, name, default=None):
     return args[args.index(name) + 1] if name in args else default
 
@@ -131,9 +143,9 @@ def entries(kind, path):
         if kind == "programs":
             rid, status, sha, n, first, err, secs, flags = r
             st = ":timeout" if status == "timeout" else status
-            fields = ":status %s :stdout %s :bytes %s :first %s" % (st, q(sha), n, q(first))
+            fields = ":status %s :stdout %s :bytes %s :first %s" % (st, q(sha), n, q(host_free(first)))
             if err:
-                fields += " :stderr-last %s" % q(err)
+                fields += " :stderr-last %s" % q(host_free(err))
             out[rid] = (fields, flags, secs)
         else:
             mod, tid, outcome, reason, secs, flags = r
@@ -142,7 +154,7 @@ def entries(kind, path):
             else:
                 f = ":outcome :%s" % outcome
                 if reason:
-                    f += " :reason %s" % q(reason)
+                    f += " :reason %s" % q(host_free(reason))
                 out[mod + "/" + tid] = (f, flags, secs)
     return out
 
