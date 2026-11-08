@@ -1,0 +1,473 @@
+;; Ported in part from jdk26u (https://github.com/openjdk/jdk26u at baf63fbe42b8758448fee570a9d9bb914272d259),
+;; src/java.base/share/classes/java/util/concurrent/{locks/ReentrantLock,locks/ReentrantReadWriteLock,
+;; locks/AbstractQueuedSynchronizer,locks/AbstractQueuedLongSynchronizer,locks/AbstractOwnableSynchronizer,
+;; Semaphore,ForkJoinTask}.java (their serial forms and serialization hooks), whose notice follows
+;; (LICENSE.md, "OpenJDK (jdk26u)"); the classes were written by Doug Lea with assistance from members of
+;; JCP JSR-166 Expert Group and released to the public domain, as explained at
+;; http://creativecommons.org/publicdomain/zero/1.0/ (their files' header).
+;;
+;; DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+;;
+;; This code is free software; you can redistribute it and/or modify it
+;; under the terms of the GNU General Public License version 2 only, as
+;; published by the Free Software Foundation.  Oracle designates this
+;; particular file as subject to the "Classpath" exception as provided
+;; by Oracle in the LICENSE file that accompanied this code.
+;;
+;; This code is distributed in the hope that it will be useful, but WITHOUT
+;; ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+;; FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+;; version 2 for more details (a copy is included in the LICENSE file that
+;; accompanied this code).
+;;
+;; You should have received a copy of the GNU General Public License version
+;; 2 along with this work; if not, write to the Free Software Foundation,
+;; Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+;;
+;; Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+;; or visit www.oracle.com if you need additional information or have any
+;; questions.
+
+;; jrt: the serial forms of jrt's locks, Semaphore and ForkJoinTask (JCS191 (a), the user's decision of
+;; 2026-11-08; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS191"), after serial_classes.ae's. jdk26u's
+;; ReentrantLock, ReentrantReadWriteLock and Semaphore keep their state in a hidden Sync object, which their serial
+;; forms hold: the stream names ReentrantLock$NonfairSync (or $FairSync), ReentrantLock$Sync, the
+;; AbstractQueuedSynchronizer's state and AbstractOwnableSynchronizer (ReentrantReadWriteLock's over
+;; AbstractQueuedLongSynchronizer, a long state). jrt's locks keep their state in Go, so the Sync is a
+;; descriptor object (lockSync): made with the lock's state when the lock's sync field is read (the hold count,
+;; the permits, the read holds << 32 | the write holds, as the JDK's AQS state), its class the JDK's (fair or
+;; not), and read back into jrt's lock by the lock's sync field's setter (fairness and the permits; a lock read is
+;; unlocked, Sync.readObject's setState(0)). The synchronizers' classes are translated into the world (j2g, from
+;; jdk26u), so the descriptor classes' superclasses are twins of them (lockTwin): classes of the same names,
+;; serialVersionUIDs and serial fields over lockSync, not registered (Class.forName gives the translated one):
+;; ObjectInputStream's getClassDataLayout matches a stream's class descriptors to the local class's hierarchy by
+;; name, so the twin's slot reads the state into the lockSync. ForkJoinTask: its status (DONE, ABNORMAL, THROWN
+;; and the tag, as jdk26u packs them) from jrt's task state, its writeObject's exception, its readObject's
+;; (trySetThrown's aux); its adapters' fields.
+;;   java.util.concurrent.locks.ReentrantLock           sync
+;;   ...ReentrantLock$Sync                             readObject (state 0); $NonfairSync, $FairSync
+;;   ...ReentrantReadWriteLock                          readerLock, sync, writerLock; $ReadLock, $WriteLock sync
+;;   ...ReentrantReadWriteLock$Sync                    readObject (state 0); $NonfairSync, $FairSync
+;;   java.util.concurrent.Semaphore                     sync; $Sync, $NonfairSync, $FairSync
+;;   ...AbstractOwnableSynchronizer (twin)              (exclusiveOwnerThread, transient)
+;;   ...AbstractQueuedSynchronizer (twin)               state (int)
+;;   ...AbstractQueuedLongSynchronizer (twin)           state (long)
+;;   java.util.concurrent.ForkJoinTask                  status; writeObject, readObject (the exception)
+;;   ForkJoinTask$AdaptedRunnable, $AdaptedRunnableAction, $AdaptedCallable: runnable or callable, result
+;; Not here: AbstractQueuedSynchronizer$ConditionObject (jrt's condition is ReentrantLock$ConditionObject, its
+;; serial form AQS's inner class's, this$0), the head and tail nodes (transient, of classes jrt has not).
+;; Checked by serial_locks_test.ae against the bytes jdk26u's ObjectOutputStream writes
+;; (test/jrt/serialization/SerialRecordLocks.java).
+(in-ns 'go.arbace.jrt)
+
+(go/file "serial_locks.go"
+  :imports [[math "math"]])
+
+;; ---------------------------------------------------------------------------------------
+;; The descriptor object and classes
+
+(go/type lockSync
+  "lockSync is the Sync object of a lock's serial form: its class (the JDK's NonfairSync or FairSync), the
+AbstractQueuedSynchronizer's state, and for a ReentrantReadWriteLock read from a stream the lock it was read
+into and the read and write locks waiting for it (views).\n"
+  (struct Object
+          ^{:tag (* Class)} cls
+          ^int64 state
+          ^{:tag (* ReentrantReadWriteLock)} rw
+          ^{:tag (slice any)} views))
+
+(go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* lockSync)} s] (.-cls s))
+(go/method Ref ^any [^{:tag (* lockSync)} s] (when (== s nil) (return nil)) s)
+(go/method Clone__O ^any [^{:tag (* lockSync)} s] (panic (CloneNotSupported s)))
+(go/method ToString__String ^{:tag (* String)} [^{:tag (* lockSync)} s] (Object_toString s))
+(go/method Is_Serializable [^{:tag (* lockSync)} s])
+
+(go/func lockClass
+  "lockClass is a descriptor class of lockSync objects: registered (a nested class jrt's lock replaces, which no
+translated class names), or a twin (register false: a class the world translates, the same name not registered).\n"
+  ^{:tag (* Class)} [^string name ^int32 mods ^{:tag (* Class)} super ^{:tag (slice (* Class))} ifs
+                     ^{:tag (* Class)} declaring ^string simple ^bool register]
+  (let [info (addr (lit ClassInfo :Name name :Kind KindClass :Modifiers mods :Super super :Interfaces ifs
+                        :Declaring declaring :Simple simple :Go "arbace/jrt.lockSync"))]
+    (when register
+      (return (Define info)))
+    (let [c (addr (lit Class :info info))]
+      (presetClassHash c name)
+      (return c))))
+
+(go/var
+  [lockAOS_class
+   (lockClass "java.util.concurrent.locks.AbstractOwnableSynchronizer" (bit-or AccPublic AccAbstract) Object_class
+              (lit (slice (* Class)) Serializable_class) nil "" false)]
+  [lockAQS_class
+   (lockClass "java.util.concurrent.locks.AbstractQueuedSynchronizer" (bit-or AccPublic AccAbstract) lockAOS_class
+              nil nil "" false)]
+  [lockAQLS_class
+   (lockClass "java.util.concurrent.locks.AbstractQueuedLongSynchronizer" (bit-or AccPublic AccAbstract) lockAOS_class
+              nil nil "" false)]
+  [rlSync_class
+   (lockClass "java.util.concurrent.locks.ReentrantLock$Sync" (bit-or AccStatic AccAbstract) lockAQS_class
+              nil ReentrantLock_class "Sync" true)]
+  [rlNonfairSync_class
+   (lockClass "java.util.concurrent.locks.ReentrantLock$NonfairSync" (bit-or AccStatic AccFinal) rlSync_class
+              nil ReentrantLock_class "NonfairSync" true)]
+  [rlFairSync_class
+   (lockClass "java.util.concurrent.locks.ReentrantLock$FairSync" (bit-or AccStatic AccFinal) rlSync_class
+              nil ReentrantLock_class "FairSync" true)]
+  [rwSync_class
+   (lockClass "java.util.concurrent.locks.ReentrantReadWriteLock$Sync" (bit-or AccStatic AccAbstract) lockAQLS_class
+              nil ReentrantReadWriteLock_class "Sync" true)]
+  [rwNonfairSync_class
+   (lockClass "java.util.concurrent.locks.ReentrantReadWriteLock$NonfairSync" (bit-or AccStatic AccFinal) rwSync_class
+              nil ReentrantReadWriteLock_class "NonfairSync" true)]
+  [rwFairSync_class
+   (lockClass "java.util.concurrent.locks.ReentrantReadWriteLock$FairSync" (bit-or AccStatic AccFinal) rwSync_class
+              nil ReentrantReadWriteLock_class "FairSync" true)]
+  [semSync_class
+   (lockClass "java.util.concurrent.Semaphore$Sync" (bit-or AccStatic AccAbstract) lockAQS_class
+              nil Semaphore_class "Sync" true)]
+  [semNonfairSync_class
+   (lockClass "java.util.concurrent.Semaphore$NonfairSync" (bit-or AccStatic AccFinal) semSync_class
+              nil Semaphore_class "NonfairSync" true)]
+  [semFairSync_class
+   (lockClass "java.util.concurrent.Semaphore$FairSync" (bit-or AccStatic AccFinal) semSync_class
+              nil Semaphore_class "FairSync" true)])
+
+(go/func syncOf "syncOf is a sync field's value: a lockSync, or nil.\n" ^{:tag (* lockSync)} [^any v]
+  (return ((inst As (* lockSync)) v)))
+
+(go/func syncNew "syncNew is the SerialNew of a concrete Sync class c: a lockSync of c, its state 0.\n"
+  ^{:tag (func [] [any])} [^{:tag (* Class)} c]
+  (return (fn ^any [] (return (addr (lit lockSync :cls c))))))
+
+(go/func uidOnly
+  "uidOnly is the getters of a table whose only member is its serialVersionUID.\n"
+  ^{:tag (slice (func [any] [any]))} [^int64 uid]
+  (return (lit (slice (func [any] [any])) (fn ^any [^any o] (return uid)))))
+
+(go/func syncReadObject
+  "syncReadObject is ReentrantLock.Sync's and ReentrantReadWriteLock.Sync's readObject: s.defaultReadObject(),
+then setState(0), the lock read unlocked.\n"
+  ^any [^any o ^{:tag (slice any)} args]
+  (serialDefaultRead (aget args 0))
+  (set! (.-state (assert (* lockSync) o)) 0)
+  (return nil))
+
+;; ---------------------------------------------------------------------------------------
+;; The locks' Sync objects
+
+(go/method serialSync
+  "serialSync is ReentrantLock's sync field as its serial form holds it: a NonfairSync or FairSync whose state
+is the hold count (0 when unlocked).\n"
+  ^any [^{:tag (* ReentrantLock)} l]
+  (.Lock (.-mu l))
+  (let [c rlNonfairSync_class
+        st (conv int64 0)]
+    (when (.-fair l)
+      (set! c rlFairSync_class))
+    (when (!= (.-owner l) nil)
+      (set! st (conv int64 (.-holds l))))
+    (.Unlock (.-mu l))
+    (return (addr (lit lockSync :cls c :state st)))))
+
+(go/method serialSync
+  "serialSync is Semaphore's sync field: a NonfairSync or FairSync whose state is the permits.\n"
+  ^any [^{:tag (* Semaphore)} s]
+  (.Lock (.-mu s))
+  (let [c semNonfairSync_class
+        st (conv int64 (.-permits s))]
+    (when (.-fair s)
+      (set! c semFairSync_class))
+    (.Unlock (.-mu s))
+    (return (addr (lit lockSync :cls c :state st)))))
+
+(go/method serialSync
+  "serialSync is ReentrantReadWriteLock's sync field, which its read and write locks share (one object per
+lock, the stream's one handle): a NonfairSync or FairSync whose state is the read holds << 32 | the write holds
+(ReentrantReadWriteLock.Sync's SHARED_SHIFT, 32 over AbstractQueuedLongSynchronizer's long state).\n"
+  ^any [^{:tag (* ReentrantReadWriteLock)} rw]
+  (.Lock (.-mu rw))
+  (defer (.Unlock (.-mu rw)))
+  (when (== (.-ser rw) nil)
+    (let [c rwNonfairSync_class]
+      (when (.-fair rw)
+        (set! c rwFairSync_class))
+      (set! (.-ser rw) (addr (lit lockSync :cls c :rw rw)))))
+  (let [w (conv int64 0)]
+    (when (!= (.-writer rw) nil)
+      (set! w (conv int64 (.-wholds rw))))
+    (set! (.-state (.-ser rw)) (bit-or (<< (conv int64 (.-nreaders rw)) 32) w)))
+  (return (.-ser rw)))
+
+(go/method serialLockOf
+  "serialLockOf is the lock a read or write lock read from a stream belongs to: the ReentrantReadWriteLock its
+sync was read into, or (a view read before its lock, or alone) a new lock of the sync's fairness, replaced by
+the stream's lock when its sync field is set.\n"
+  ^{:tag (* ReentrantReadWriteLock)} [^{:tag (* lockSync)} s ^any view]
+  (when (== (.-rw s) nil)
+    (let [rw (ReentrantReadWriteLock_New_Z (== (.-cls s) rwFairSync_class))]
+      (set! (.-ser rw) s)
+      (set! (.-rw s) rw)))
+  (set! (.-views s) (append (.-views s) view))
+  (return (.-rw s)))
+
+(go/method serialSetSync
+  "serialSetSync is ReentrantReadWriteLock's sync field set by a stream: the lock's fairness, and the read and
+write locks read before it made views of this lock.\n"
+  [^{:tag (* ReentrantReadWriteLock)} rw ^{:tag (* lockSync)} s]
+  (when (== s nil)
+    (return))
+  (set! (.-fair rw) (== (.-cls s) rwFairSync_class))
+  (set! (.-ser rw) s)
+  (set! (.-rw s) rw)
+  (range [_ v (.-views s)]
+    (type-switch [l v]
+      (case [(* ReentrantReadWriteLock_ReadLock)] (set! (.-rw l) rw))
+      (case [(* ReentrantReadWriteLock_WriteLock)] (set! (.-rw l) rw)))))
+
+;; ---------------------------------------------------------------------------------------
+;; ForkJoinTask's status
+
+(go/const
+  [^{:tag int32 :val 65536 :doc "ForkJoinTask.ABNORMAL: cancelled or completed exceptionally\n"} fjAbnormal 0x10000]
+  [^{:tag int32 :val 131072 :doc "ForkJoinTask.THROWN: an exception stored\n"} fjThrown 0x20000]
+  [^{:tag int32 :val 65535 :doc "ForkJoinTask.SMASK: the tag's bits\n"} fjSMask 0xffff])
+
+(go/method serialStatus
+  "serialStatus is ForkJoinTask's status as jdk26u packs it: the tag's 16 bits; once done DONE (the sign bit),
+with ABNORMAL when cancelled, ABNORMAL | THROWN when completed with an exception.\n"
+  ^int32 [^{:tag (* ForkJoinTask)} t]
+  (.Lock (.-mu t))
+  (defer (.Unlock (.-mu t)))
+  (let [s (bit-and (.Load (.-tag t)) fjSMask)]
+    (when (== (.Load (.-state t)) fjDone)
+      (set! s (bit-or s math/MinInt32))
+      (cond
+        (.-cancelled t) (set! s (bit-or s fjAbnormal))
+        (!= (.-exc t) nil) (set! s (bit-or s fjAbnormal fjThrown))))
+    (return s)))
+
+(go/method serialSetStatus
+  "serialSetStatus sets a task read from a stream to the status s: its tag; done when DONE, cancelled (with
+jrt's CancellationException) when ABNORMAL without THROWN; the thrown exception is readObject's.\n"
+  [^{:tag (* ForkJoinTask)} t ^int32 s]
+  (.Store (.-tag t) (bit-and s fjSMask))
+  (when (< s 0)
+    (.Store (.-state t) fjDone)
+    (when (== (bit-and s (bit-or fjAbnormal fjThrown)) fjAbnormal)
+      (set! (.-cancelled t) true)
+      (set! (.-exc t) (CancellationException_New)))))
+
+(go/method serialException
+  "serialException is the exception ForkJoinTask.writeObject writes (aux's): the one the task completed with,
+null when it is not done, done normally or cancelled.\n"
+  ^any [^{:tag (* ForkJoinTask)} t]
+  (.Lock (.-mu t))
+  (defer (.Unlock (.-mu t)))
+  (when (or (!= (.Load (.-state t)) fjDone) (.-cancelled t) (== (.-exc t) nil))
+    (return nil))
+  (return (.-exc t)))
+
+(go/func fjtOf ^{:tag (* ForkJoinTask)} [^any o] (return (.Self_ForkJoinTask (assert ForkJoinTask_I o))))
+
+;; ---------------------------------------------------------------------------------------
+;; The tables
+
+(go/func init
+  []
+  ;; the twins: AbstractOwnableSynchronizer (its transient owner), AbstractQueuedSynchronizer's int state,
+  ;; AbstractQueuedLongSynchronizer's long state
+  (serialClass lockAOS_class
+    (serialTable "G26 serialVersionUID J\nF130 exclusiveOwnerThread Ljava.lang.Thread;\n" nil
+      (lit (slice (func [any] [any]))
+        (fn ^any [^any o] (return (conv int64 3737899427754241961)))
+        (fn ^any [^any o] (return nil)))
+      (lit (slice (func [any any])) nil (fn [^any o ^any v])))
+    nil)
+  (serialClass lockAQS_class
+    (serialTable "G26 serialVersionUID J\nF66 state I\n" nil
+      (lit (slice (func [any] [any]))
+        (fn ^any [^any o] (return (conv int64 7373984972572414691)))
+        (fn ^any [^any o] (return (conv int32 (.-state (assert (* lockSync) o))))))
+      (lit (slice (func [any any]))
+        nil
+        (fn [^any o ^any v] (set! (.-state (assert (* lockSync) o)) (conv int64 (assert int32 v))))))
+    nil)
+  (serialClass lockAQLS_class
+    (serialTable "G26 serialVersionUID J\nF66 state J\n" nil
+      (lit (slice (func [any] [any]))
+        (fn ^any [^any o] (return (conv int64 7373984972572414692)))
+        (fn ^any [^any o] (return (.-state (assert (* lockSync) o)))))
+      (lit (slice (func [any any]))
+        nil
+        (fn [^any o ^any v] (set! (.-state (assert (* lockSync) o)) (assert int64 v)))))
+    nil)
+
+  ;; ReentrantLock: sync; its Sync's readObject
+  (serialClass ReentrantLock_class
+    (serialTable "G26 serialVersionUID J\nF18 sync Ljava.util.concurrent.locks.ReentrantLock$Sync;\n" nil
+      (lit (slice (func [any] [any]))
+        (fn ^any [^any o] (return (conv int64 7373984872572414699)))
+        (fn ^any [^any o] (return (.serialSync (assert (* ReentrantLock) o)))))
+      (lit (slice (func [any any]))
+        nil
+        (fn [^any o ^any v]
+          (let [s (syncOf v)]
+            (when (!= s nil)
+              (set! (.-fair (assert (* ReentrantLock) o)) (== (.-cls s) rlFairSync_class)))))))
+    (fn ^any [] (return (ReentrantLock_New))))
+  (serialClass rlSync_class
+    (serialTable "G26 serialVersionUID J\nM2 readObject (Ljava.io.ObjectInputStream;)V\n"
+      (lit (slice (func [any (slice any)] [any])) syncReadObject)
+      (uidOnly -5179523762034025860) (lit (slice (func [any any])) nil))
+    nil)
+  (serialClass rlNonfairSync_class
+    (serialTable "G26 serialVersionUID J\n" nil (uidOnly 7316153563782823691) (lit (slice (func [any any])) nil))
+    (syncNew rlNonfairSync_class))
+  (serialClass rlFairSync_class
+    (serialTable "G26 serialVersionUID J\n" nil (uidOnly -3000897897090466540) (lit (slice (func [any any])) nil))
+    (syncNew rlFairSync_class))
+
+  ;; ReentrantReadWriteLock: readerLock, sync, writerLock (the three share the Sync); its locks' sync
+  (serialClass ReentrantReadWriteLock_class
+    (serialTable
+      (+ "G26 serialVersionUID J\n"
+         "F18 readerLock Ljava.util.concurrent.locks.ReentrantReadWriteLock$ReadLock;\n"
+         "F18 writerLock Ljava.util.concurrent.locks.ReentrantReadWriteLock$WriteLock;\n"
+         "F16 sync Ljava.util.concurrent.locks.ReentrantReadWriteLock$Sync;\n")
+      nil
+      (lit (slice (func [any] [any]))
+        (fn ^any [^any o] (return (conv int64 -6992448646407690164)))
+        (fn ^any [^any o] (return (.Ref (.-rl (assert (* ReentrantReadWriteLock) o)))))
+        (fn ^any [^any o] (return (.Ref (.-wl (assert (* ReentrantReadWriteLock) o)))))
+        (fn ^any [^any o] (return (.serialSync (assert (* ReentrantReadWriteLock) o)))))
+      (lit (slice (func [any any]))
+        nil
+        (fn [^any o ^any v] (set! (.-rl (assert (* ReentrantReadWriteLock) o)) ((inst As (* ReentrantReadWriteLock_ReadLock)) v)))
+        (fn [^any o ^any v] (set! (.-wl (assert (* ReentrantReadWriteLock) o)) ((inst As (* ReentrantReadWriteLock_WriteLock)) v)))
+        (fn [^any o ^any v] (.serialSetSync (assert (* ReentrantReadWriteLock) o) (syncOf v)))))
+    (fn ^any [] (return (ReentrantReadWriteLock_New))))
+  (serialClass ReentrantReadWriteLock_ReadLock_class
+    (serialTable "G26 serialVersionUID J\nF18 sync Ljava.util.concurrent.locks.ReentrantReadWriteLock$Sync;\n" nil
+      (lit (slice (func [any] [any]))
+        (fn ^any [^any o] (return (conv int64 -5992448646407690164)))
+        (fn ^any [^any o] (return (.serialSync (.-rw (assert (* ReentrantReadWriteLock_ReadLock) o))))))
+      (lit (slice (func [any any]))
+        nil
+        (fn [^any o ^any v]
+          (let [s (syncOf v)]
+            (when (!= s nil)
+              (set! (.-rw (assert (* ReentrantReadWriteLock_ReadLock) o)) (.serialLockOf s o)))))))
+    (fn ^any [] (return (addr (lit ReentrantReadWriteLock_ReadLock)))))
+  (serialClass ReentrantReadWriteLock_WriteLock_class
+    (serialTable "G26 serialVersionUID J\nF18 sync Ljava.util.concurrent.locks.ReentrantReadWriteLock$Sync;\n" nil
+      (lit (slice (func [any] [any]))
+        (fn ^any [^any o] (return (conv int64 -4992448646407690164)))
+        (fn ^any [^any o] (return (.serialSync (.-rw (assert (* ReentrantReadWriteLock_WriteLock) o))))))
+      (lit (slice (func [any any]))
+        nil
+        (fn [^any o ^any v]
+          (let [s (syncOf v)]
+            (when (!= s nil)
+              (set! (.-rw (assert (* ReentrantReadWriteLock_WriteLock) o)) (.serialLockOf s o)))))))
+    (fn ^any [] (return (addr (lit ReentrantReadWriteLock_WriteLock)))))
+  (serialClass rwSync_class
+    (serialTable "G26 serialVersionUID J\nM2 readObject (Ljava.io.ObjectInputStream;)V\n"
+      (lit (slice (func [any (slice any)] [any])) syncReadObject)
+      (uidOnly 6317671515068378041) (lit (slice (func [any any])) nil))
+    nil)
+  (serialClass rwNonfairSync_class
+    (serialTable "G26 serialVersionUID J\n" nil (uidOnly -8159625535654395037) (lit (slice (func [any any])) nil))
+    (syncNew rwNonfairSync_class))
+  (serialClass rwFairSync_class
+    (serialTable "G26 serialVersionUID J\n" nil (uidOnly -2274990926593161451) (lit (slice (func [any any])) nil))
+    (syncNew rwFairSync_class))
+
+  ;; Semaphore: sync, the permits its state (Semaphore.Sync has no readObject: the permits are read)
+  (serialClass Semaphore_class
+    (serialTable "G26 serialVersionUID J\nF18 sync Ljava.util.concurrent.Semaphore$Sync;\n" nil
+      (lit (slice (func [any] [any]))
+        (fn ^any [^any o] (return (conv int64 -3222578661600680210)))
+        (fn ^any [^any o] (return (.serialSync (assert (* Semaphore) o)))))
+      (lit (slice (func [any any]))
+        nil
+        (fn [^any o ^any v]
+          (let [s (syncOf v)
+                m (assert (* Semaphore) o)]
+            (when (!= s nil)
+              (set! (.-fair m) (== (.-cls s) semFairSync_class))
+              (set! (.-permits m) (conv int32 (.-state s))))))))
+    (fn ^any [] (return (addr (lit Semaphore)))))
+  (serialClass semSync_class
+    (serialTable "G26 serialVersionUID J\n" nil (uidOnly 1192457210091910933) (lit (slice (func [any any])) nil))
+    nil)
+  (serialClass semNonfairSync_class
+    (serialTable "G26 serialVersionUID J\n" nil (uidOnly -2694183684443567898) (lit (slice (func [any any])) nil))
+    (syncNew semNonfairSync_class))
+  (serialClass semFairSync_class
+    (serialTable "G26 serialVersionUID J\n" nil (uidOnly 2014338818796000944) (lit (slice (func [any any])) nil))
+    (syncNew semFairSync_class))
+
+  ;; ForkJoinTask: status; writeObject's s.defaultWriteObject() and s.writeObject(aux's exception), readObject's
+  ;; s.defaultReadObject() and the exception read (trySetThrown's aux)
+  (serialClass ForkJoinTask_class
+    (serialTable
+      (+ "G26 serialVersionUID J\n"
+         "F64 status I\n"
+         "M2 writeObject (Ljava.io.ObjectOutputStream;)V\n"
+         "M2 readObject (Ljava.io.ObjectInputStream;)V\n")
+      (lit (slice (func [any (slice any)] [any]))
+        (fn ^any [^any o ^{:tag (slice any)} args]
+          (let [s (aget args 0)]
+            (serialDefaultWrite s)
+            (serialWriteObject s (.serialException (fjtOf o))))
+          (return nil))
+        (fn ^any [^any o ^{:tag (slice any)} args]
+          (let [s (aget args 0)]
+            (serialDefaultRead s)
+            (let [ex (serialReadObject s)]
+              (when (!= ex nil)
+                (let [t (fjtOf o)
+                      x (Throwable_Cast ex)]
+                  (.Lock (.-mu t))
+                  (set! (.-exc t) x)
+                  (.Unlock (.-mu t))))))
+          (return nil)))
+      (lit (slice (func [any] [any]))
+        (fn ^any [^any o] (return (conv int64 -7721805057305804111)))
+        (fn ^any [^any o] (return (.serialStatus (fjtOf o)))))
+      (lit (slice (func [any any]))
+        nil
+        (fn [^any o ^any v] (.serialSetStatus (fjtOf o) (assert int32 v)))))
+    nil)
+  (serialClass ForkJoinTask_AdaptedRunnable_class
+    (serialTable "G26 serialVersionUID J\nF16 runnable Ljava.lang.Runnable;\nF0 result Ljava.lang.Object;\n" nil
+      (lit (slice (func [any] [any]))
+        (fn ^any [^any o] (return (conv int64 5232453952276885070)))
+        (fn ^any [^any o] (return (.-runnable (assert (* ForkJoinTask_AdaptedRunnable) o))))
+        (fn ^any [^any o] (return (.-result (assert (* ForkJoinTask_AdaptedRunnable) o)))))
+      (lit (slice (func [any any]))
+        nil
+        (fn [^any o ^any v] (set! (.-runnable (assert (* ForkJoinTask_AdaptedRunnable) o)) ((inst As Runnable) v)))
+        (fn [^any o ^any v] (set! (.-result (assert (* ForkJoinTask_AdaptedRunnable) o)) v))))
+    (fn ^any [] (return (addr (lit ForkJoinTask_AdaptedRunnable)))))
+  (serialClass ForkJoinTask_AdaptedRunnableAction_class
+    (serialTable "G26 serialVersionUID J\nF16 runnable Ljava.lang.Runnable;\n" nil
+      (lit (slice (func [any] [any]))
+        (fn ^any [^any o] (return (conv int64 5232453952276885070)))
+        (fn ^any [^any o] (return (.-runnable (assert (* ForkJoinTask_AdaptedRunnableAction) o)))))
+      (lit (slice (func [any any]))
+        nil
+        (fn [^any o ^any v] (set! (.-runnable (assert (* ForkJoinTask_AdaptedRunnableAction) o)) ((inst As Runnable) v)))))
+    (fn ^any [] (return (addr (lit ForkJoinTask_AdaptedRunnableAction)))))
+  (serialClass ForkJoinTask_AdaptedCallable_class
+    (serialTable "G26 serialVersionUID J\nF16 callable Ljava.util.concurrent.Callable;\nF0 result Ljava.lang.Object;\n" nil
+      (lit (slice (func [any] [any]))
+        (fn ^any [^any o] (return (conv int64 2838392045355241008)))
+        (fn ^any [^any o] (return (.-callable (assert (* ForkJoinTask_AdaptedCallable) o))))
+        (fn ^any [^any o] (return (.-result (assert (* ForkJoinTask_AdaptedCallable) o)))))
+      (lit (slice (func [any any]))
+        nil
+        (fn [^any o ^any v] (set! (.-callable (assert (* ForkJoinTask_AdaptedCallable) o)) ((inst As Callable) v)))
+        (fn [^any o ^any v] (set! (.-result (assert (* ForkJoinTask_AdaptedCallable) o)) v))))
+    (fn ^any [] (return (addr (lit ForkJoinTask_AdaptedCallable))))))
