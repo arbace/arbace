@@ -1028,3 +1028,36 @@ GHC 9.14.1's testsuite (`test/haskell/eval/testsuite-run.edn`, the tests whose `
   and `bin/crops-score --judge --strict` 0 problems.
 - Proposed: HES86 (bin/hsi check's nofib C by the same rule, at the next haskell-stg-progs recording), HES87 (the four threaded-only
   passes on a refusal into a deferred class).
+
+## 2026-11-08: Haskell's accepted proposals: HES86 (a), HES87 (a), HF9-P1 (a) + P8, HF9-P2 (b) + P5 (a), HF9-P6 (a), HF9-P7 (a) (branch `hs-props`, from mac/hs-hf9 7ed40299a, mac/hs-hes84 merged)
+
+The user's decisions of 2026-11-08 (about 19:45), built by an agent on the main host, light (doc/haskell/HASKELL-EVAL-SURVEY.md,
+"As built: HES86 (a), HES87 (a)"; doc/haskell/FRONTEND-SURVEY.md, "As built: HF9-P1, P2, P5, P6, P7, P8").
+
+- HES87 (a): a rule, not a list: `bin/hsi own-verdicts` computes `test/haskell/threaded-way.tsv`, the tests all.T runs only in
+  threaded ways whose recorded normal-way run is not their own verdict (10); `bin/lib/hsi/check` records a match of such a run
+  `:threaded-way` (`:would :pass`), so exactly T21651, ffi014, hs_try_putmvar003 and numsparks001 leave the passes (T10414, T14346,
+  T21969 keep theirs: GHC's run is their own verdict). The deferred class `:threaded-way` in `divergences.edn` (the four) and
+  `divergences-aot.edn` (ffi014, the one the AOT level runs); the committed rows rewritten as the check writes them (checked by
+  `bin/hsi check --only` the four and T14346: threaded-way 4, pass 1). Eval 801 to 797, AOT 138 to 137. Alternative: the four ids
+  listed by hand in the class (rejected: the rule is the reason, and a re-record keeps it).
+- HES86 (a): `nofib_c_srcs` moved into `bin/lib/hsi/records.bash`, record-ref and the check both use it; six programs' C goes
+  (paraffins, primes, compress, fasta, reverse-complement, simple), their haskell-stg-progs entries STALE until the night records
+  them again (write-ahead, as decided).
+- HF9-P2 (b) + P5 (a): `tools/hsdump/iface2/Iface2.hs`, a second executable under its own version and key (`hsr_iface2_hash`), built
+  with HsRn.hs's export list opened in a copy so its forms are the iface verb's and `hsr_helper_hash` does not move: hidden modules
+  found among the units' hidden modules and read by getModuleInfo; every unexported type constructor from the external package
+  state (not classes, implicit things or family-instance tycons); pattern synonyms as patSynSig's parts and the builder type (GHC's
+  pretty-printed type left out: it carries session uniques). The elaborator takes imported pattern synonyms' signatures. Alternative
+  considered: a verb inside tools/hsdump's main (rejected: the glob `tools/hsdump/*.hs` is every pack's key).
+- HF9-P1 (a) + P8: lib-check reads the pack haskell-lib-ifaces-ghc-9.14.1 (pool and closures, keyed by the iface2 verb), `--live`
+  the helper, `--record-pack`, `--verify-pack` (uniques renumbered, the crossed pair), `--record`, `--judge` (worse modules,
+  missing ones, unclassed ones, the negative control Either judged against Maybe's interface); the `--full` step haskell-lib-check
+  (2 GiB). The record `test/haskell/lib-check-ghc-internal.edn`: 266 modules, 261 pass; the pack is the night's (the whole package's
+  closures by GHC), so the step is UNRECORDED until then.
+- HF9-P6 (a), HF9-P7 (a): `test/haskell/divergences-lib-check.edn`: `:kinds` (Generics, Data.Typeable.Internal, Data.Dynamic),
+  `:default-signatures` (Exception.Context, found today: the default method checked at the method's type, its default signature's
+  Show not given; with slice 7), `:th-quotes` (TH.Lift). The derived Data/Generic/Lift methods wait for slice 7.
+- lib-check on the 18 helper-limited modules with the iface2 verb: 16 pass (were 0), Exception.Context 5 to 1 error, Data.Dynamic
+  4 to 2 (both now the elaborator's), Event.Internal 3 to 7 of 7 binders equal; the 18 hidden modules, never judged before, all pass.
+  ghc-internal: 248 judged, 227 clean and 226 equal, to 266 judged, 261 clean and equal.

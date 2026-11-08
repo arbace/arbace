@@ -1696,3 +1696,135 @@ So of the 21, 18 wait for the helper (an oracle-side change, HF9-P2 and HF9-P5),
 - **HF9-P8 The measure as a check (revisits HF9-P1).** The whole run is now about 12 minutes (592 s) instead of 75 minutes. Options as
   HF9-P1's; *recommended: HF9-P1 (a)*, the results recorded (`--record test/haskell/lib-check-ghc-internal.edn`, from this
   slice's end) and the step's budget the night's.
+
+## Decided (the user, 2026-11-08, about 19:45: HF9-P1 to P8)
+
+HF9-P1 (a) with HF9-P8: lib-check a recorded check (`test/haskell/lib-check-ghc-internal.edn`), the interfaces packed as an oracle
+pack, a `--full` step that fails when a module gets worse. HF9-P2 (b) with HF9-P5 (a): a second helper verb that dumps hidden
+modules' interfaces, every type constructor including the unexported ones and the imported pattern synonyms' types, so that the
+packs keyed by the current helper stay valid; built on the host's GHC 9.14.1, pinned. HF9-P6 (a): kinds erased, the two
+kind-blocked modules in a recorded class. HF9-P7 (a): Data, Generic and Lift's derived methods with slice 7. (HF9-P3 (a) and
+HF9-P4 (a) were decided before the second slice.) Then lib-check again over the 18 modules the helper limited, from the new verb's
+dumps.
+
+## As built: HF9-P1, P2, P5, P6, P7, P8 (2026-11-08, branch `hs-props`, from `mac/hs-hf9` 7ed40299a with `mac/hs-hes84`)
+
+By an agent on the main host, the light tier (every process under about 1.5 GiB, at most two at once; stage 0
+`/root/arbace/target/seed/amd64/arbace`, the checkout's sources evaluated); the night's host load made the runs slow, not heavy.
+
+### The second interface verb (HF9-P2 (b), HF9-P5 (a))
+
+- `tools/hsdump/iface2/Iface2.hs`: an executable of its own, `hsdump-iface2 iface2 -o OUTDIR --libdir DIR [--ghc FLAG... --files]
+  MODULE...`, under its own version (`iface2Version`, 1). It is compiled with `tools/hsdump/HsRn.hs`, its export list opened in a
+  copy (`bin/repr-haskell`'s `build_iface2`, into `.tmp/hsdump/iface2/`, kept by its own key: `hsr_iface2_hash`, the SHA-256 of
+  `tools/hsdump/iface2/*.hs`, `HsRn.hs` and `GHC_VERSION`, with the ghc unit), so its forms are the iface verb's own (`thingF`,
+  `typeF`, `nameF`, `availF`, the closure's rule) and nothing of `tools/hsdump/*.hs` changed: `hsr_helper_hash` (the glob
+  `tools/hsdump/*.hs`, which does not reach `iface2/`) and every pack keyed by it (haskell-ifaces, -stg-progs, -stg-libs, the
+  dumps) are as they were. The helper refuses no GHC of its own (it is linked against the host's ghc library, the pin checked by
+  the build's `ghc_check`).
+- What it adds to the iface verb's output, each GHC's own answer:
+  - **hidden modules**: a module `findModule` refuses (GHC-87110) is found among the units' `unitHiddenModules` (ghc-internal's
+    first) and its interface read by `getModuleInfo`, which loads a package module's interface by its `Module` whatever its
+    exposure (`getPackageModuleInfo`, `hscGetModuleInterface`);
+  - **every type constructor of the module**: the interface's declarations are in the external package state once it is loaded
+    (`eps_PTE`), every TyCon among them (GHC.Iface.Tidy keeps all of them); the ones the module does not export are added to
+    `(hsiface/things ...)`, as `thingF` writes them, but not classes (their methods would enter the judge's comparison), implicit
+    things or family instances' representation tycons. So `CodeBuffer#` and `CodingBuffer#` of GHC.Internal.IO.Encoding.Types,
+    synonyms its exported types use, now expand in their importers;
+  - **pattern synonyms' signatures**: `(patsyn NAME {:univ [TV...] :req [T...] :ex [TV...] :prov [T...] :args [T...] :res T
+    :fields [...] :builder T|nil})`, `patSynSig`'s parts (GHC.Core.PatSyn) and the builder's type, where the iface verb writes
+    `(patsyn NAME)` alone. GHC's pretty-printed pattern type is left out: it names variables by their uniques, which differ
+    between two sessions.
+  - the header `(hsiface/module "M" {:unit "U" :verb "iface2" :iface2 1})`.
+- The elaborator reads it (`arbace.repr.haskell.typecheck`'s `add-things!`): an imported pattern synonym with a signature enters
+  `*patsyns*` (tcPatSynPat's input: the universals instantiated, the required context wanted, the existentials skolems, the
+  provided context given) and, with a builder, `*genv*` (the builder type `forall univ ex. (req, prov) => args -> res`, as a local
+  synonym's). A `(patsyn NAME)` without one is skipped as before.
+
+### lib-check as a recorded check (HF9-P1 (a), HF9-P8)
+
+- `bin/repr-haskell lib-check` reads its interfaces from the pack **haskell-lib-ifaces-ghc-9.14.1**
+  (`test/haskell/records/haskell-lib-ifaces-ghc-9.14.1.sha256` and `.tsv`, the store of `test/oracle-records/oracle.bash`): its members
+  `pool/M.iface.edn` (every interface a closure names) and `closure/M.txt` (each module's closure as the helper dumped it), each keyed
+  by `hsr_iface2_hash`; a key that is not the current one is STALE, an absent pin UNRECORDED, a member off its digest REFUSED, each a
+  failure, and a module of the run whose closure the pack lacks UNRECORDED. No GHC runs. `--live` makes the closures with the
+  iface2 verb (the oracle tier), `--live --record-pack` packs them (the other modules' closures of a pinned pack kept; class B,
+  `:host ghc`), `--live --verb iface` measures with the first verb as HF9's slices did. `--verify-pack [--sample N]` (the kind
+  `lib-ifaces` of `test/oracle-records/kinds.edn`): N modules' closures dumped afresh and compared with the pack file by file in a
+  normal form (`bin/lib/repr-haskell/iface-norm.awk`: GHC's uniques, of type variables, Core binders and pretty-printed local
+  names, differ between sessions and order the sorted things, so each is renumbered by its first appearance on its line and the
+  lines are sorted; the first runs, which compared bytes, found GHC.Internal.Types', Tuple's and Bits' interfaces "different"), a difference reported
+  rather than failed when GHC moved (ORS6 (a)), then the crossed pair (one module's fresh interface against another's packed one,
+  which must differ). The work directory is `.tmp/repr-haskell/lib-check/VERB/PKG/`.
+- `--record FILE` writes the results with a header (`arbace.repr.haskell.libcheck`'s `record`; a partial run, `--only` or
+  `--every`, replaces its modules' rows); `--judge FILE` (`judge`) fails when a module is worse than its row (its stage ranks lower:
+  `:ok` > `:errors` > `:typecheck` > `:rename` > `:timeout`; or at the same stage fewer binders equal, more GHC's only, or more
+  errors), when a whole run lacks a recorded module or has one the record lacks, or when a module that does not pass is in no class
+  of `test/haskell/divergences-lib-check.edn`; a better module is reported (re-record it), never a failure. The negative control
+  (GTS81 (a)), `test/haskell/lib-check-controls.tsv`: GHC.Internal.Data.Either judged against GHC.Internal.Data.Maybe's interface
+  with Maybe's module name put in Either's place (`control`): the judge must not find it equal (it finds 9 binders GHC's only).
+- The gate step `haskell-lib-check` (`test/gate/steps.edn`, `:phase :full`, `:mem-gib 2`, after haskell-read-essential, on stage 0
+  alone; its pins the corpus, the native inputs and the new pack; its control the controls file): `bin/repr-haskell lib-check
+  --judge test/haskell/lib-check-ghc-internal.edn`, about 12 minutes in one process. The Makefile's `repr-haskell-lib-check` runs
+  it, `repr-haskell-lib-check-record` records the pack and the measure by hand.
+- The record `test/haskell/lib-check-ghc-internal.edn` (266 rows, ghc-internal's every module now: the 248 of HF9's second slice and
+  the 18 hidden ones) is provisional until the night: 227 rows are the second slice's end (the first verb, live), the 39 modules
+  run today the iface2 verb's. The pack is not recorded yet (it needs every closure of the package: the night's, by hand), so the
+  step fails UNRECORDED until then.
+
+### Kinds and derived methods (HF9-P6 (a), HF9-P7 (a))
+
+- `test/haskell/divergences-lib-check.edn`, goi's format: `:kinds` (deferred; HF9-P6 (a)): GHC.Internal.Generics (SingKind k),
+  Data.Typeable.Internal (TypeRep's kind arithmetic and levity) and, found today, Data.Dynamic (dynApply's `typeRep @Type` against
+  `typeRepKind tr`: a kind instantiated through an invisible binder, under Fun's provided `k ~ Type`; its other errors left with
+  the patterns' types); `:default-signatures` (deferred): GHC.Internal.Exception.Context, found once its hidden imports' names
+  resolved: the default method of `class ExceptionAnnotation` is checked at the method's type, not at its default signature's
+  (`Show a =>`), so its Show is not given (GHC types `$dm` at the default signature, its context's dictionaries parameters an
+  instance passes: GHC.Tc.TyCl.Class, GHC.Tc.TyCl.Instance's mkDefMethBind); the instance's side is the desugaring's, so with slice
+  7; `:th-quotes` (deferred): TH.Lift's brackets, section 3.9.
+- HF9-P7 (a): nothing built; gen_Data_binds, GHC.Tc.Deriv.Generics' `Rep` instances with `from` and `to`, and gen_Lift_binds go
+  with slice 7 (desugaring and STG of the new forms), where STG needs them; the measure judges the instances' heads and contexts,
+  which are entered.
+
+### lib-check before and after on the 18 modules the helper limited
+
+The second slice's end (its record) against today's run (the iface2 verb, live, 39 modules: the 18, Event.Internal, Either and
+Maybe, and the 18 hidden modules):
+
+| module | before (the iface verb) | after (the iface2 verb) |
+|---|---|---|
+| Conc.IO | 9 errors (unrenamed:qual 9) | ok, 10 of 10 equal |
+| Data.Typeable | 44 errors (unrenamed, no-con-type, Show) | ok, all equal |
+| Event.IntTable | 20 errors (unrenamed) | ok, all equal |
+| Event.Manager | 101 errors (unrenamed, Monoid, Eq) | ok, all equal |
+| Event.Thread | 32 errors (unrenamed) | ok, all equal |
+| Event.TimerManager | 37 errors | ok, all equal |
+| Event.TimeOut | 9 errors (deriving:rep-dict) | ok, all equal |
+| Exception.Context | 5 errors (unrenamed, GADT, Show) | 1 error (unsolved Show: `:default-signatures`), 9 of 9 equal |
+| IO.Handle.Lock | 3 errors (unrenamed) | ok, all equal |
+| Type.Reflection.Unsafe | 1 error (unrenamed) | ok, all equal |
+| Unicode | 6 errors (unrenamed) | ok, 52 of 52 equal |
+| IO.Encoding | 2 errors (unify: CodeBuffer#) | ok, 21 of 21 equal |
+| IO.Encoding.Iconv | 1 error | ok, all equal |
+| IO.Encoding.Latin1 | 38 errors | ok, all equal |
+| IO.Encoding.UTF8 | 47 errors | ok, all equal |
+| IO.Encoding.UTF16 | 50 errors | ok, all equal |
+| IO.Encoding.UTF32 | 44 errors | ok, all equal |
+| Data.Dynamic | 4 errors (no-con-type, GADT, Typeable 2: the pattern synonym Fun's type missing) | 2 errors (Typeable 2: `:kinds`), 7 of 7 equal |
+| (Event.Internal) | ok, 3 of 7 equal | ok, 7 of 7 equal |
+
+So 16 of the 18 pass now (and Event.Internal's types are equal); the two left are the elaborator's, not the helper's. The 18
+hidden modules (Event.Arr, Array, EPoll, IntVar, KQueue, PSQ, Poll; IO.Handle.Lock.Flock, LinuxOFD, NoOp, Windows;
+StaticPtr.Internal; Unicode.Bits, Char.DerivedCoreProperties and the five UnicodeData tables), out of the measure before, all pass
+(76 of 76 binders). ghc-internal as recorded: **266 modules, 261 without an error and every type equal** (was 248 judged, 227 and
+226), binders 5,067 of 5,068 equal; the five left in their classes (`:kinds` 3, `:default-signatures` 1, `:th-quotes` 1).
+
+### Checks
+
+| check | result |
+|---|---|
+| `bin/repr-haskell lib-check --live --only` the 39 modules (the iface2 verb) | 37 pass, 2 in a class; `--judge` against the record: 0 worse, the control differs (9 GHC's only) |
+| the same from a test pack (`ARBACE_ORACLE_PACKS` a scratch store, `--live --record-pack`, then the pack read with no GHC, `--judge`) | the same results, 0 worse, the control differs |
+| `--verify-pack --sample 4` against that pack | 4 modules, 233 interfaces equal in the normal form, the crossed pair differs |
+| the judge's own negatives: one binder fewer equal, a module out of its class | worse, unclassed: exit 1 |
+| `gate.crops check` | 0 problems |

@@ -10,12 +10,16 @@
 #   a PACK (oracle_make, oracle_get): the same lines, the members in the store
 #
 #   hsr_helper_hash                      the helper's identity: its sources' and GHC_VERSION's SHA-256 (what the helper's dumps name as :helper-hash)
+#   hsr_iface2_hash                      the second interface verb's (tools/hsdump/iface2/, HF9-P2 (b)): the lib-check pack's key
 #   hsr_records_unpack MAN DIR KEY WORK  every file of the committed record into WORK/ID, all keys KEY
 #   hsr_records_make MAN DIR WORK FILES KEY CMD   FILES (a file of IDs under WORK) copied into DIR, the manifest written (:ghc's identity)
 #   hsr_records_verify MAN DIR WORK FILES         WORK's files against DIR's, ORS6 (a)'s verdict, and the crossed pair (which must differ)
 . "$root/test/oracle-records/oracle.bash"
 
 hsr_helper_hash() { cat "$root"/tools/hsdump/*.hs "$root/tools/hsdump/GHC_VERSION" | sha256sum | cut -c1-64; }
+# the second interface verb's identity (HF9-P2 (b)): tools/hsdump/iface2/'s sources, the HsRn.hs it is built with and GHC_VERSION; the
+# helper's own identity above does not take tools/hsdump/iface2/, so no pack keyed by the helper moves with it
+hsr_iface2_hash() { cat "$root"/tools/hsdump/iface2/*.hs "$root/tools/hsdump/HsRn.hs" "$root/tools/hsdump/GHC_VERSION" | sha256sum | cut -c1-64; }
 
 hsr_records_unpack() {  # MAN DIR KEY WORK
   local man=$1 dir=$2 key=$3 work=$4 id k sha size got bad=0 n=0

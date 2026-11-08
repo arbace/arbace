@@ -110,3 +110,19 @@ hsi_record_ifaces() { # DIR CMD: DIR/*.iface.edn and DIR/reexports.edn packed, e
   oracle_make "$hsi_ifaces_pin" "$stage" "$stage/ids" "$how" ghc || return 1
   rm -rf "$stage"
 }
+
+# nofib_c_srcs DIR (HES85 (a), HES86 (a); record-ref and bin/hsi check): the C sources nofib's mk/ghc-paths.mk links into DIR's program (C_SRCS), one a line
+nofib_c_srcs() {
+  local d=$1 mk=$1/Makefile set srcs excl f
+  # the Makefile's own SRCS and EXCLUDED_SRCS (their continuation lines joined; += appends)
+  set=$(grep -c '^SRCS *[+:]\{0,1\}=' "$mk" || true)
+  srcs=$(awk '/^SRCS *[+:]?=/ {v = 1; sub(/^SRCS *[+:]?= */, "")} v {c = sub(/\\$/, ""); printf "%s ", $0; v = c}' "$mk")
+  excl=$(awk '/^EXCLUDED_SRCS *[+:]?=/ {v = 1; sub(/^EXCLUDED_SRCS *[+:]?= */, "")} v {c = sub(/\\$/, ""); printf "%s ", $0; v = c}' "$mk")
+  if [ "$set" = 0 ]; then srcs=$(cd "$d" && ls -1 -- *.c *.S 2> "$TMPDIR/hsi-nofib-ls.log" | tr '\n' ' '); fi
+  for f in $srcs; do
+    case $f in *_stub.c) continue ;; *.c|*.S) ;; *) continue ;; esac
+    [[ " $excl " == *" $f "* ]] && continue
+    [ -f "$d/$f" ] && echo "$f"
+  done
+  return 0
+}

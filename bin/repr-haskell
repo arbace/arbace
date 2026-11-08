@@ -185,10 +185,14 @@
 #                                 (default test/haskell/typecheck): types and evidence equal, the negative control differs;
 #                                 HF4: a LIST.txt (test/haskell/typecheck-check.txt) the nofib programs it names instead,
 #                                 each a session of its own, the known non-passes in their recorded classes
-#   bin/repr-haskell lib-check [--package ghc-internal|base] [--every N] [--only FILE] [--jobs N] [--record FILE]
+#   bin/repr-haskell lib-check [--package ghc-internal|base] [--every N] [--only FILE] [--jobs N] [--record FILE] [--judge FILE]
+#                              [--live [--record-pack] [--verb iface|iface2]] [--verify-pack [--sample N]]
 #                                 HF9's measure (bin/lib/repr-haskell/lib-check): the boot libraries' modules natively
-#                                 read, renamed and elaborated against their imports' interfaces (the helper's, GHC's),
-#                                 their binders' types against GHC's interface of each, the failures ranked by feature
+#                                 read, renamed and elaborated against their imports' interfaces (the pack
+#                                 haskell-lib-ifaces-ghc-9.14.1; --live: the helper's iface2 verb, tools/hsdump/iface2, built
+#                                 apart with its own key), their binders' types against GHC's interface of each, the failures
+#                                 ranked by feature; --judge: against the record (test/haskell/lib-check-ghc-internal.edn), its
+#                                 classes and its negative control (HF9-P1 (a), HF9-P8)
 #   bin/repr-haskell rename-check [LIST]
 #                                 HF2: the renamer (arbace.repr.haskell.rename) against the rn dump over the lists'
 #                                 modules (default test/haskell/rename-check.txt: 47 samples, 33 modules of
@@ -253,6 +257,29 @@ build() {
     mv -f "$helper.new.$$" "$helper"
     echo "$key" > "$work/key"
   ) 7> "$work/build.lock"
+}
+
+# the second interface verb (HF9-P2 (b), tools/hsdump/iface2/Iface2.hs): an executable of its own, built with HsRn.hs's export list
+# opened (a copy in its work directory), kept by its own key, so the helper's identity and its packs do not move with it
+iface2=${REPR_HASKELL_IFACE2:-$work/iface2/hsdump-iface2}
+build_iface2() {
+  ghc_check
+  [ -z "${REPR_HASKELL_IFACE2:-}" ] || return 0
+  local w=$work/iface2 key
+  mkdir -p "$w/src" "$w/obj"
+  key="$(hsr_iface2_hash) $(ghc_unit)"
+  (
+    flock 7
+    if [ -x "$iface2" ] && [ -f "$w/key" ] && [ "$(cat "$w/key")" = "$key" ]; then exit 0; fi
+    echo "== repr-haskell: building the helper's iface2 verb (ghc $pin, $(ghc_unit))" >&2
+    sed 's/^module HsRn (rnVerb, ifaceVerb, tcVerb) where$/module HsRn where/' "$root/tools/hsdump/HsRn.hs" > "$w/src/HsRn.hs"
+    grep -q '^module HsRn where$' "$w/src/HsRn.hs" || { echo "repr-haskell: HsRn.hs's module line is not the one build_iface2 opens" >&2; exit 1; }
+    cp "$root/tools/hsdump/iface2/Iface2.hs" "$w/src/Iface2.hs"
+    ghc -O0 -package ghc "-i$w/src" -outputdir "$w/obj" -o "$iface2.new.$$" "$w/src/Iface2.hs" > "$w/build.log" 2>&1 ||
+      { cat "$w/build.log" >&2; rm -f "$iface2.new.$$"; exit 1; }
+    mv -f "$iface2.new.$$" "$iface2"
+    echo "$key" > "$w/key"
+  ) 7> "$work/build-iface2.lock"
 }
 
 hsdump() {
@@ -1583,7 +1610,13 @@ case $cmd in
            while [ $# -gt 0 ]; do case $1 in --ghc) shift; flags=("$@"); break ;; *) files+=("$1"); shift ;; esac; done
            hsdump tc -o "$out" --ghc "${flags[@]}" --files "${files[@]}" ;;
   typecheck-check) ghc_check; build; typecheck_check "$@" ;;
-  lib-check) ghc_check; build; REPR_HASKELL_HELPER=$helper exec "$root/bin/lib/repr-haskell/lib-check" "$@" ;;
+  lib-check)
+    # GHC only for --live (the helper's interfaces made afresh); else the pack haskell-lib-ifaces-ghc-9.14.1
+    case " $* " in
+      *" --live "*|*" --verify-pack "*) build_iface2; export REPR_HASKELL_IFACE2=$iface2
+                    case " $* " in *" --verb iface "*) build; export REPR_HASKELL_HELPER=$helper ;; esac ;;
+    esac
+    exec "$root/bin/lib/repr-haskell/lib-check" "$@" ;;
   stg-check) ghc_check; build; stg_check "$@" ;;
   run-check) ghc_check; build; run_check "$@" ;;
   test) exec "$root/bin/lib/repr-haskell/test" "$@" ;;
