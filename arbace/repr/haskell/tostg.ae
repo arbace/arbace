@@ -536,6 +536,9 @@
     (let [s (fresh "sat")]
       (list 'case (first (lit-form (second (first args)))) [s :addr] '(prim :addr)
             [(list 'alt :default [] (list 'app (gname (second f)) [s]))]))
+    ;; a newtype class's dictionary constructor (C:IP, kept to CorePrep): the identity (its unfolding x |> co)
+    (and (head? f 'v) (class-of-dcon (second f)) (newtype-class? (class-of-dcon (second f))) (seq args))
+    (if (= 1 (count args)) (expr (first args)) (expr (list 'app (first args) (vec (rest args)))))
     (and (head? f 'v) (unboxed-con? (second f)))
     ;; an unboxed tuple: its non-void components (Unarise)
     (let [keep (filterv #(seq (expr-reps %)) args)]
@@ -662,9 +665,10 @@
   [e]
   (let [e (flatten-app e)]
     (case (first e)
-      lv (if (contains? @*joins* (local-name e))
-           (list 'app (local-name e) [(void-atom)])
-           (list 'app (local-name e) []))
+      lv (cond (contains? @*joins* (local-name e)) (list 'app (local-name e) [(void-atom)])
+               ;; a variable of a void type returned: Unarise's (##)
+               (empty? (local-reps e)) (list 'con (unboxed-name 0) [])
+               :else (list 'app (local-name e) []))
       v (let [g (second e)]
           (if (con-name? g)
             (let [c (as-data g)]
@@ -725,8 +729,14 @@
                                     (list 'let (list 'bind [(local-name x) :L] (list 'rcon (gname c) (mapv first rs))) b)))
                       (let [[bn r] (bind-pair bd)] (list 'let (list 'bind bn r) b)))))
                   (expr (nth e 2)) (reverse (second e))))))
-      letrec (list 'let (apply list 'rec (map (fn [bd] (let [[bn r] (bind-pair bd)] (list 'bind bn r))) (second e)))
-                   (expr (nth e 2)))
+      letrec (if (every? (fn [[_ b r]] (and (lv? b) (:join (meta b)) (head? r 'lam))) (second e))
+               ;; a recursive join point group (OccurAnal's tagRecBinders): let-no-escape, each a join closure
+               (list 'letne (apply list 'rec (map (fn [bd] (let [[bn r] (bind-pair bd)]
+                                                           (list 'bind bn (if (head? r 'closure) (apply list 'closure :j (drop 2 r)) r))))
+                                                  (second e)))
+                     (expr (nth e 2)))
+               (list 'let (apply list 'rec (map (fn [bd] (let [[bn r] (bind-pair bd)] (list 'bind bn r))) (second e)))
+                     (expr (nth e 2))))
       case (if (and (= 1 (count (nth e 3))) (vector? (second (first (nth e 3)))) (newtype-con? (second (first (nth e 3)))))
              ;; a newtype's constructor matched: its field is the scrutinee
              (let [[_ s b [[_ _ [x] body]]] e]
@@ -879,7 +889,7 @@
                     rs (map (fn [[_ bn r]] (let [[r2 f] (fv-rhs r)] [(list 'bind bn r2) f])) bs)
                     [b2 f2] (fv-expr body)]
                 ;; a recursive group's closures capture each other: the group's own names stay free in them
-                [(list 'let (apply list 'rec (map first rs)) b2)
+                [(list (first e) (apply list 'rec (map first rs)) b2)
                  (vec (distinct (remove names (concat (mapcat second rs) f2))))])
               (let [[_ bn r] bd [r2 f] (fv-rhs r) [b2 f2] (fv-expr body)]
                 [(list (first e) (list 'bind bn r2) b2) (vec (distinct (concat f (remove #{(first bn)} f2))))])))
@@ -964,7 +974,8 @@
                              (simpl/simplify-module r prog0 (into exported (:rule-names r))
                                                     {:unlifted-type? (fn [t] (boolean (and t (not= [:L] (type-reps t)))))
                                                      :unlifted-expr? (fn [e] (not= [:L] (expr-reps e)))
-                                                     :con-strict con-strict})
+                                                     :con-strict con-strict
+                                                     :con-reps con-reps})
                              [prog0 {} prog0])
           _ (reset! last-prog raw)
           _ (set! *r* (update r :ltypes merge new-types))

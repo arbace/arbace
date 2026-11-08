@@ -1277,7 +1277,7 @@
   "The IdDetails of the global names: GHC's implicit Ids (constructor workers, class-op and superclass selectors,
   primops, dictionary functions) and the wired-in error Ids; nothing else of an imported Id (-O0 ignores the
   interfaces' pragmas)"
-  [r con-strict]
+  [r con-strict & [con-reps]]
   (let [classes (:all-classes r)
         ops (into {} (for [[cls i] classes
                            :let [ns (or (:nsupers i) (count (:supers i))) fields (+ ns (count (:methods i))) unary (= 1 fields)]
@@ -1303,18 +1303,34 @@
                         {:details {:k :con :strict (vec (con-strict dn)) :unary false} :arity (or (:arity ci) 0)})
                       ;; a data constructor's wrapper ($WCon, mkDataConRep): its strict lifted fields evaluated, then
                       ;; the constructor; an INLINE unfolding of its arity (alwaysInlinePragma)
+                      ;; A field the libraries' constructor holds unpacked (an -O2 library's {-# UNPACK #-} strict field,
+                      ;; its rep the boxed type's field's) is unboxed by the wrapper: case x of I# x# (dataConRep's
+                      ;; unboxers)
                       (and (str/starts-with? o "$W") (contains? (:all-cons r) ["ext" "data" m (subs o 2)]))
                       (let [cn ["ext" "data" m (subs o 2)] ci (get (:all-cons r) cn) ar (or (:arity ci) 0)
                             strict (concat (con-strict cn) (repeat false))
+                            reps (concat ((or con-reps (constantly [])) cn) (repeat :L))
                             ts (loop [t (get (:genv r) cn) out []]
                                  (cond (and (vector? t) (= :forall (first t))) (recur (nth t 3) out)
                                        (c/fun-ty? t) (recur (second (nth t 2)) (conj out (first (nth t 2))))
                                        :else out))
+                            boxer (fn [t] (let [t (c/strip-forall t)]
+                                            (when (and (vector? t) (= :tc (first t)))
+                                              (let [cs (:cons (get (:tycons r) (second t)))]
+                                                (when (and (= 1 (count cs)) (= 1 (:arity (get (:all-cons r) (first cs))))) (first cs))))))
                             xs (mapv #(list 'lv "x" (str "w" o %)) (range ar))
-                            ys (mapv (fn [x s t] (if (and s (not (c/*unlifted-type?* t))) (list 'lv "x'" (str (nth x 2) "'")) x))
-                                     xs strict (concat ts (repeat nil)))
-                            body (reduce (fn [acc [x y]] (if (= x y) acc (list 'case x y [(list 'alt :default [] acc)])))
-                                         (c/mk-apps (list 'v ["ext" "var" m (subs o 2)]) ys) (reverse (map vector xs ys)))
+                            ;; [arg-of-the-constructor wrap-fn] per field
+                            fields (mapv (fn [x s t rp i]
+                                           (cond (and (not= :L rp) t (boxer t))
+                                                 (let [y (list 'lv "x'" (str "w" o i "'")) z (list 'lv "x#" (str "w" o i "#"))]
+                                                   [z (fn [acc] (list 'case x y [(list 'alt (boxer t) [z] acc)]))])
+                                                 (and s (not (c/*unlifted-type?* t)))
+                                                 (let [y (list 'lv "x'" (str "w" o i "'"))]
+                                                   [y (fn [acc] (list 'case x y [(list 'alt :default [] acc)]))])
+                                                 :else [x identity]))
+                                         xs strict (concat ts (repeat nil)) reps (range))
+                            body (reduce (fn [acc [_ wrap]] (wrap acc))
+                                         (c/mk-apps (list 'v ["ext" "var" m (subs o 2)]) (mapv first fields)) (reverse fields))
                             tm (c/mk-lams xs body)]
                         {:arity ar
                          :unf (assoc (c/mk-unfolding :inline true false false tm oa/occur-analyse-expr)
@@ -1408,7 +1424,7 @@
                                  (fn ue2 [e] (cond (c/lv? e) (if-let [t (c/id-type e)] (ut t) (ue e))
                                                    (c/head? e 'cast) (ue2 (second e))
                                                    :else (ue e))))
-            c/*globals* (globals-of r (:con-strict hooks))
+            c/*globals* (globals-of r (:con-strict hooks) (:con-reps hooks))
             c/*con-family* (fn [con] (some-> (get (:all-cons r) con) :tycon (->> (get (:tycons r))) :cons count))
             *family-cons* (fn [con] (some-> (get (:all-cons r) con) :tycon (->> (get (:tycons r))) :cons))
             *con-arity* (fn [con] (:arity (get (:all-cons r) con)))
@@ -1429,6 +1445,8 @@
                       prog)
           _ (when-let [f (System/getenv "REPR_HASKELL_SIMPL_DUMP")]
               (spit f (binding [*print-length* nil *print-level* nil] (str (str/join "\n" (map pr-str binds)) "\n"))))
+          ;; the desugarer's binders typed before the Simplifier too (its unlifted tests: doCaseToLet, needsCaseBinding)
+          _ (when-not (= "0" (System/getenv "REPR_HASKELL_INFER_TYPES")) (c/infer-binder-types! binds))
           out (simplify-pgm binds 4)
           ;; HF10: the binders the desugarer and the Simplifier made without a type given theirs (exprType)
           _ (when-not (= "0" (System/getenv "REPR_HASKELL_INFER_TYPES")) (c/infer-binder-types! out))]
