@@ -104,6 +104,8 @@
                 (:bool :char :int :uint :float :ptr :fndef :fnptr :never :str) false
                 :closure (boolean (some needs-drop? (get *closure-tys* (second t))))
                 :ref false
+                ;; a projection (a std field's `<I::Item as IntoIterator>::IntoIter`): its normal form's
+                :proj (let [n (try (tc/normalize-deep t) (catch Throwable _ t))] (if (= n t) true (needs-drop? n)))
                 :tuple (boolean (some needs-drop? (second t)))
                 :array (needs-drop? (second t))
                 :slice (needs-drop? (second t))
@@ -115,8 +117,13 @@
                              (= "core::mem::manually_drop::ManuallyDrop" d) false
                              (and (tc/std-adt-known? d) (not (contains? *needs-drop-stack* d)))
                              (binding [*needs-drop-stack* (conj *needs-drop-stack* d)]
-                               (or (tc/implements-drop? t)
+                               (or (tc/std-drop-adt? d) (tc/implements-drop? t)
                                    (boolean (some (fn [[_ ft]] (needs-drop? ft)) (tc/std-all-fields d (nth t 2))))))
+                             ;; a private std ADT the interface lacks (FlattenCompat, FloatErrorKind): a Drop impl, else its
+                             ;; type arguments' (an approximation until the interface carries their fields, RFP28)
+                             (and (string? d) (not (contains? *needs-drop-stack* d)))
+                             (binding [*needs-drop-stack* (conj *needs-drop-stack* d)]
+                               (or (tc/std-drop-adt? d) (tc/implements-drop? t) (boolean (some #(and (vector? %) (not (c/region? %)) (needs-drop? %)) (nth t 2)))))
                              :else true))
                 true)))
 
@@ -641,7 +648,8 @@
                  (mk e :closure ty :info info :upvars (mapv #(capture-upvar e %) (:captures info))))
       (unsupported "an expression" (:kind e)))))
 
-(defn- pointer-cast-kind [k] (let [m (re-find #"\((\w+)" (str k))] (if m (second m) "Unsize")))
+(defn- pointer-cast-kind [k]
+  (let [s (str k) i (str/index-of s "(")] (if i (subs s (inc i) (str/last-index-of s ")")) "Unsize")))
 
 (defn- apply-adjustment [e x [k target]]
   (let [base {:ty target :span (:span x) :tsi (:tsi x)}]
@@ -657,7 +665,12 @@
       (= k "Borrow") (if (= :ptr (first target))
                        (assoc base :k :raw-borrow :mutbl (boolean (second target)) :arg x)
                        (assoc base :k :borrow :bk (if (nth target 2) :mut :shared) :arg x))
-      (str/starts-with? (str k) "Pointer") (assoc base :k :pointer-coercion :cast (pointer-cast-kind k) :source x)
+      (str/starts-with? (str k) "Pointer")
+      (assoc base :k :pointer-coercion :source x
+             :cast (cond (and (= :closure (first (:ty x))) (= :fnptr (first target))) "ClosureFnPointer(Safe)"
+                         (and (= :fndef (first (:ty x))) (= :fnptr (first target))) "ReifyFnPointer(Safe)"
+                         (and (#{:ref :ptr} (first (:ty x))) (= :ptr (first target)) (= (last (:ty x)) (last target))) "MutToConstPointer"
+                         :else (pointer-cast-kind k)))
       :else (unsupported "an adjustment" k))))
 
 (def ^:dynamic *lint-root* :root)   ; the nearest enclosing node with a lint attribute (maybe_lint_level_root_bounded)
@@ -1004,11 +1017,12 @@
   (when *allocs*
     (let [k [:static def]
           id (or (get-in @*allocs* [:ids k])
-                 (let [i (:next @*allocs*) [bs align] (static-bytes def)]
+                 (let [[bs align] (static-bytes def) i (:next @*allocs*)]
                    (swap! *allocs* #(-> % (assoc-in [:ids k] i) (assoc-in [:static i] {:name (second (:data (c/def-of def))) :align align}) (update :next inc)))
                    (swap! *allocs* assoc-in [:static-bytes i] bs)
                    i))]
       (upd! update :allocs-used (fnil conj #{}) id)
+      (doseq [x (get-in @*allocs* [:static-bytes id]) :when (map? x)] (upd! update :allocs-used conj (:ptr x)))
       id)))
 
 (defn- alloc-text
@@ -1016,14 +1030,20 @@
   [id bytes & [static]]
   (let [n (count bytes)
         w (max 1 (count (Long/toHexString (long n))))
+        center (fn [^String t width] (let [pad (max 0 (- width (count t))) l (quot pad 2)]
+                                       (str (apply str (repeat l "─")) t (apply str (repeat (- pad l) "─")))))
+        hexs (fn [x] (cond (map? x) (str "╾" (center (str "alloc" (:ptr x) "<imm>") 21) "╼ ")
+                           (= :ptr-rest x) ""
+                           :else (format "%02x " (bit-and (long x) 0xff))))
+        ascii (fn [x] (cond (map? x) "╾──────╼" (= :ptr-rest x) ""
+                            :else (let [b (bit-and (long x) 0xff)] (if (<= 0x20 b 0x7e) (str (char b)) "."))))
         line (fn [off chunk]
                (str "    " (when (> n 16) (str "0x" (format (str "%0" w "x") off) " │ "))
-                    (apply str (map #(format "%02x " (bit-and (long %) 0xff)) chunk))
+                    (apply str (map hexs chunk))
                     (apply str (repeat (- 16 (count chunk)) "   "))
-                    "│ " (apply str (map #(let [b (bit-and (long %) 0xff)] (if (<= 0x20 b 0x7e) (str (char b)) ".")) chunk)) "\n"))]
-    (str "\nalloc" id " (" (when static (str "static: " (:name static) ", ")) "size: " n ", align: " (or (:align static) 1) ") {\n"
-         (apply str (map-indexed (fn [i ch] (line (* 16 i) ch)) (partition-all 16 bytes)))
-         "}\n")))
+                    "│ " (apply str (map ascii chunk)) "\n"))]
+    (str "\nalloc" id " (" (when static (str "static: " (:name static) ", ")) "size: " n ", align: " (or (:align static) 1) ") {" (if (zero? n) "}\n" "\n")
+         (if (zero? n) "" (str (apply str (map-indexed (fn [i ch] (line (* 16 i) ch)) (partition-all 16 bytes))) "}\n")))))
 
 (defn- str-unescape
   "A string literal's value from its symbol (unescape_unicode's escapes, a line continuation)"
@@ -1045,6 +1065,9 @@
                 \newline (recur (loop [j (+ i 2)] (if (and (< j n) (#{\space \tab \newline \return} (.charAt sym j))) (recur (inc j)) j)))
                 (do (.append sb d) (recur (+ i 2)))))
             (do (.append sb c) (recur (inc i)))))))))
+
+(declare str-unescape)
+(defn- str-unescape-lit [lit] (or (:value lit) (if (= "Str" (str (:lit-kind lit))) (str-unescape (str (:symbol lit))) (str (:symbol lit)))))
 
 (defn- str-debug
   "<str as Debug>: the string quoted, \\t \\r \\n \\\\ \\\" and \\0 escaped, other control characters as \\u{..}"
@@ -1502,7 +1525,7 @@
         (and (= [:uint "u8"] from) (= :char (first to))) "IntToInt"
         (and (= :ptr (first from)) (integral? to)) "PointerExposeProvenance"
         (and (integral? from) (= :ptr (first to))) "PointerWithExposedProvenance"
-        (and (= :fndef (first from)) (= :fnptr (first to))) "PointerCoercion(ReifyFnPointer, AsCast)"
+        (and (= :fndef (first from)) (= :fnptr (first to))) "PointerCoercion(ReifyFnPointer(Safe), AsCast)"
         (and (integral? from) (= :float (first to))) "IntToFloat"
         (and (= :float (first from)) (integral? to)) "FloatToInt"
         (and (= :float (first from)) (= :float (first to))) "FloatToFloat"
@@ -1581,9 +1604,8 @@
         args (or (nth (:ty x) 2 nil) (unsupported "an aggregate of" [(:ty x) vid]))
         nm (binding [c/*in-value* true] (c/print-def-path vid args))
         kind (tc/variant-ctor-kind vid)]
-    (list 'adt nm kind (let [fs (mapv (comp str first) (tc/all-fields-of-variant vid))]
-                         ;; a union's aggregate: its one active field
-                         (if (and (number? adt) (= "Union" (:kind (c/def-of adt)))) (vec (keep-indexed (fn [i f] (when (some #{i} (:active x)) f)) fs)) fs))
+    ;; a union's aggregate prints its fields' names zipped with its one operand (the first field's name, as rustc's Debug)
+    (list 'adt nm kind (mapv (comp str first) (tc/all-fields-of-variant vid))
           (binding [c/*in-value* false] (c/print-def-path adt [])) (:variant x) (vec (for [a args] (if (c/region? a) '(lt) (ty-form a)))))))
 
 (defn expr-into-dest [dest bb x]
@@ -2997,13 +3019,23 @@
             c (binding [*allocs* nil] (lit-const lit neg t))
             v (bigint (second (nth c 3))) n (scalar-size t)]
         [(vec (for [i (range n)] (long (mod (quot v (pow2 (* 8 i))) 256)))) n])
+      ;; a `&str`: its pointer to the string's allocation, then its length
+      (and (= :ref (first t)) (= [:str] (nth t 3)) (= :lit (:kind x)) (#{"Str" "StrRaw"} (str (:lit-kind (:lit x)))))
+      (let [c (lit-const (:lit x) false t)
+            bs (vec (.getBytes ^String (str-unescape-lit (:lit x)) "UTF-8"))
+            id (get-in @*allocs* [:ids (mapv #(bit-and (long %) 0xff) bs)])
+            n (count bs)]
+        [(into [{:ptr id}] (concat (repeat 7 :ptr-rest) (for [i (range 8)] (long (mod (quot n (pow2 (* 8 i))) 256))))) 8])
       (and (= :array (first t)) (= :array (:kind x)))
       (let [parts (mapv #(const-eval-bytes % (second t)) (:exprs x))]
         [(vec (mapcat first parts)) (or (second (first parts)) 1)])
       :else (unsupported "a static's value" (:kind x)))))
 
 (defn static-bytes [def]
-  (let [d (c/def-of def)] (const-eval-bytes (:expr (:node d)) (tc/erase-ty (c/type-of def)))))
+  (let [d (c/def-of def) x (:expr (:node d)) t (tc/erase-ty (c/type-of def))]
+    ;; a string's allocation interned before the static's (the static's body built first)
+    (when (and (= :lit (:kind x)) (#{"Str" "StrRaw"} (str (:lit-kind (:lit x))))) (lit-const (:lit x) false t))
+    (const-eval-bytes x t)))
 
 (defn build-const
   "construct_const: a constant's or a static's body (its initializer into the return place), its temporaries without a

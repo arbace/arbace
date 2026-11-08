@@ -96,6 +96,11 @@
 (defn- macro-depth [[l c]]
   (count (filter (fn [[a b]] (and (neg? (compare a [l c])) (neg? (compare [l c] b)))) *macro-ranges*)))
 
+(defn- after-pass
+  "A built body through mir_built's passes when BUILD_PASS asks for them (within collect/with-crate)"
+  [b]
+  (if (= pass "built") b (passes/mir-built-passes b (:local-tys b) build/uninhabited-adt?)))
+
 (defn- anon-consts
   "The anonymous constants of a definition's HIR (array types' lengths, repeat counts; a const parameter's path is none)
   as [owner-hir-id-or-nil expr], a closure's own under its HIR id, in source order"
@@ -136,9 +141,10 @@
                                                     (and (= "Variant" (:kind d)) (:disr (:node d))))]
                      (let [disr? (= "Variant" (:kind d))
                            nm (if disr? (str (binding [collect/*in-value* true] (collect/print-def-path (:id d) [])) "::{constant#0}") (build/mir-name d))]
-                       (try [nm (cond disr? (build/build-discriminant d {:edition ed})
-                                      (const? d) (build/build-const d {:overflow-checks oc :edition ed})
-                                      :else (build/build-body d {:overflow-checks oc :edition ed :root-cache rc})) nil]
+                       (try [nm (after-pass
+                                 (cond disr? (build/build-discriminant d {:edition ed})
+                                       (const? d) (build/build-const d {:overflow-checks oc :edition ed})
+                                       :else (build/build-body d {:overflow-checks oc :edition ed :root-cache rc}))) nil]
                             (catch Throwable e
                               (when (System/getenv "BUILD_TRACE") (.printStackTrace e))
                               [nm nil (str (or (:what (ex-data e)) e)) (pr-str (:x (ex-data e)))])))))
@@ -168,9 +174,8 @@
                (let [want (oracle-bodies (File. (str built-dir "/" n)))
                      got (try (build-program front-dir n) (catch Throwable e (println n "ERROR" e) []))
                      texts (into {} (for [[nm b _] got :when b]
-                                      [nm (try (build/print-built (if (= pass "built") b
-                                                                    (passes/mir-built-passes b (:local-tys b) build/uninhabited-adt?)))
-                                               (catch Throwable e (str "print failed: " e)))]))
+                                      [nm (try (build/print-built b)
+                                               (catch Throwable e (when (System/getenv "BUILD_TRACE") (.printStackTrace e)) (str "print failed: " e)))]))
                      rows (for [[nm b err detail] got :when (contains? want nm)]
                             (let [w (get want nm) g (get texts nm)]
                               (cond err [:refused nm err detail]
