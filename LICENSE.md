@@ -1248,7 +1248,9 @@ covers what.
   port of `SemaTemplateDeduction.cpp` (its MemberPointer case and the method qualifiers' mismatch, under that file's LLVM notice).
   Its rules for GNU attributes clang does not know (`gnu-attrs`, `gattr-rules`; CP294 (a), doc/cpp/CPP-SURVEY.md, "As built:
   CP290-CP294") are Arbace's own, written clean-room from the GCC 15.2 manual's description of each attribute (no GCC code read or
-  ported; the messages Arbace's own).
+  ported; the messages Arbace's own). Its fifth slice (doc/cpp/CPP-SURVEY.md, "As built: CX12 (fifth slice)") follows
+  `clang/lib/Sema/SemaDeclCXX.cpp`'s `CheckConstexprFunctionBody`, `CheckConstexprDeclStmt`, `CheckConstexprMissingReturn` and
+  `MergeCXXFunctionDecl` of the same release (`constexpr-bodies`, `constexpr-redecls`), its texts clang's.
 - `test/cpp/builtins.ae` (`cpp.builtins`) and `cpp/target/clang-builtins.edn` (CX12, CP270 (a)): the table is computed from the same
   tarball's `clang/include/clang/Basic/Builtins.td`, `BuiltinsBase.td`, `BuiltinsX86.td`, `BuiltinsX86Base.td`, `BuiltinsX86_64.td`
   (read as data, the names as `clang/utils/TableGen/ClangBuiltinsEmitter.cpp` makes them) and `TokenKinds.def`,

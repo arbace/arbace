@@ -4377,3 +4377,163 @@ say never `<(...)`); nothing else was affected, the comparison redone with files
 `gen1.sh`, `genb.sh`, `onem.sh`, `subm.sh`, `ex.sh`, the features' list `feat-all.txt`, `gccdoc/` the manual's file read), `y1/`-`y3/` (the
 sample's runs; `y3/` the recorded one), `f0/`-`f3/` (the features' runs, `f0` the base's, `f3` the final), `gen-h0/`, `gen-h1/`, `gen-h2/` (the code
 generator's comparison), `base-tree/` (013681c7e's `arbace/`), `*.log`.
+
+## As built: CX12 (fifth slice) (2026-11-08; branch `cpp-cx12` from 1443ba1c5)
+
+CP273 (a)'s order after CP290-CP294: "no matching function"'s rest, constexpr, access, conversions, each rule the checker's
+(`arbace.cpp.sema/checking?`) unless said, each diagnosing only where the slice is sure. The every-10th sample's own passes go from
+89 to **108** of 454; the extras (own errors on lines that expect none) stay the same 92 lines. The code generator's output over
+test/cpp/codegen's 142 samples: 141 of 141 generated forms byte for byte against 1443ba1c5's (rtti refused as before). None of
+CP300-CP305 was needed by a step below; none was built.
+
+### The design
+
+- **"No matching function": non-deduced contexts** ([temp.deduct.call]/1, /6; SemaTemplateDeduction's
+  DeduceTemplateArgumentsFromCallArgument and ResolveOverloadForDeduction): a braced list for a parameter that is a bare
+  template parameter (no initializer_list, no array), and an overload set of two or more non-template functions of distinct types
+  for such a parameter, leave it undeduced; when no other function parameter names it, it has no default and no explicit argument,
+  the template's drop is sure (overload/unknown1, cpp0x/initlist-deduce). The checker's position stays the call's while a
+  template's signature is deduced (`call-candidates` restores `*at*`: initlist-deduce's error was at the signature's decltype).
+  **C++11's null pointer constant** ([conv.ptr]/1 since CWG 903: an integer literal): `false` converts to no pointer from C++11
+  (warn/Wconversion2). **A reinterpret_cast as a template argument** ([temp.arg.nontype]/2, [expr.const]/5.15): `(cfi)f` with
+  `f`'s functions none of `cfi`'s pointee type is never a converted constant expression, a sure drop (template/pr52819).
+  **A requirement surely false** ([expr.prim.req]): a type requirement naming a member of a scalar, pointer or void type, and an
+  expression requirement whose analysis failed by `*` of a non-pointer or a member of a non-class, are false with no doubt
+  (CP281 (a)'s flag; concepts/diagnostic5).
+- **Constexpr** (clang/lib/Sema/SemaDeclCXX.cpp at llvmorg-23.1.5: CheckConstexprFunctionBody, CheckConstexprDeclStmt,
+  CheckConstexprMissingReturn, MergeCXXFunctionDecl; read from the pinned tarball, LICENSE.md): new tree checks in
+  `arbace.repr.cpp.diag`: `constexpr-bodies` (a non-template constexpr function returning non-void, no deduced type, with no
+  return statement, before C++23, a void one before C++14; before C++20 a local variable with no initialization performed, a
+  scalar or a class of the unit whose default constructor is trivial and leaves scalar members uninitialized, in a constexpr
+  function, constructor or a lambda declared constexpr -- the parser keeps that as `:_cexpr` on the LambdaExpr -- which g++ makes
+  an error; before C++20 a constexpr destructor) and `constexpr-redecls` ([dcl.constexpr]/1: a namespace's function redeclared,
+  by name and parameter types as written, block-scope declarations among them, with another constexpr/consteval specifier, at the
+  later name; clang's texts). In Sema: **if constexpr's condition** evaluated with the constant evaluator's sure rules, "constexpr
+  if condition is not a constant expression" at the condition (cpp1z/constexpr-if13).
+- **Access**: a namespace-scope variable's own initializer is a context no friend names ([class.friend]/1-2): the constructor it
+  calls, private or protected, is inaccessible there whatever friends the unit declares (cpp1z/aggr-base2's base subobject); a
+  template-id's member type (`Beta<0>::Y`) and a member type named in `T()` or `T(args)` checked as a declaration's type, in
+  non-member function templates' specializations too (template/typedef11); **ambiguous bases** ([class.mi]/4-6,
+  [class.member.lookup]): the conversion of an object to a base two subobjects of which it holds (`base-subobjects`: a path through
+  a virtual base the same subobject past it) is "ambiguous conversion from derived class", a qualified member first converted to
+  its naming class (`B::f` in D: B's A) so only a really ambiguous one is diagnosed (inherit/ambig1).
+- **Conversions**: a const object's conversion functions are its const ones ([over.match.funcs]/4-5; conversion/op5); in
+  direct-initialization an explicit conversion function is a candidate only when it yields the type ([over.match.conv]/1.1:
+  cpp2a/concepts-conv1's `int i{a}` from `explicit operator bool`); an enumeration initialized from another scoped enumeration, or
+  in copy-initialization from any other arithmetic type ([conv.integral]/1, [dcl.init.list]/3.8; cpp1z/direct-enum-init2).
+  **Class template argument deduction from no initializer** ([over.match.class.deduct]): `S s;` of a class template every
+  parameter of which has a default is `S<>` (cpp2a/explicit6's `S s;`). For the code generator too: a defaulted default
+  constructor whose member has no default constructor is deleted ([class.default.ctor]/2.5) where the unit's analysis stopped before
+  (cpp0x/initlist38; not sure-deleted, so no use of it is diagnosed as deleted); no codegen sample changed.
+
+### The measure (the every-10th sample, 454 supported; clang's table from the first slice's outputs, by hand)
+
+| step | own passes | own pass, clang's record fails | the step's new passes (each read) |
+|---|---:|---:|---|
+| CP290-CP294 (1443ba1c5) | 89 | 10 | |
+| + "no matching function"'s non-deduced contexts, null pointer constants, the reinterpret_cast argument, sure requirements; constexpr's bodies and if constexpr (30bd9d0b2) | 99 | 10 | overload/unknown1, cpp0x/initlist-deduce, template/pr52819, warn/Wconversion2, concepts/diagnostic5; cpp1y/constexpr-96182, cpp1y/constexpr-83921-3, cpp1z/constexpr-lambda12, cpp2a/constexpr-dtor1, cpp1z/constexpr-if13 |
+| + access, conversions, constexpr redeclarations, CTAD from defaults (the recorded run) | **108** | 10 | cpp1z/aggr-base2, template/typedef11, inherit/ambig1; conversion/op5, cpp2a/concepts-conv1, cpp1z/direct-enum-init2, cpp2a/explicit6, cpp0x/initlist38; diagnostic/redeclaration-6 (8 lines) |
+
+Expected lines with an own error, by clang's diagnostic on the line, before and after: "no matching function" 90 → 95 of 109,
+"is a private member" 10 → 12 of 17, "no viable conversion" 8 → 12 of 14; "constexpr variable ... constant expression" 6 of 25
+unchanged (its files' lines are the calls' and immediate functions', below).
+
+**The no-false-credit review**: each of the 19 new passes read against its source and clang's output; each own error is the
+program's error on every expected line, by the rule above (diagnostic5's `foo<char>` fails every disjunct surely; pr52819's
+argument is a reinterpret_cast; direct-enum-init2's `Apple a{o}` from a scoped `Orange`; ambig1's `A::foo()` through D's two A
+subobjects; redeclaration-6's eight mismatches equal clang's, line and column). Probes of the valid forms (`.tmp/t6/v1.cpp`,
+c++11/17/20: a single function and a braced list for an initializer_list or a defaulted parameter, `(cfi)f` of the right type,
+const conversion functions, explicit ones yielding the type, `E e{E::a}`, a protected constructor from a derived class's, public
+member types of template-ids, constexpr functions with returns in branches, if constexpr on constants; `.tmp/t6/c5.cpp`: `B::f`
+and `d.B::x` in D, virtual bases) give no diagnostic. No earlier pass lost; the extras' 92 lines the same.
+
+### Left
+
+"No matching function": sfinae24 (a default template argument instantiated with the class), pack-indexing11 (C++26's pack indexing
+in a parameter), desig29, the CTAD files with initializers (class-deduction28, -108, -inherited1, alias5: CP311), placeholder5,
+lambda-generic-ice5, concepts-placeholder12's syntax. Constexpr: the errors inside called functions and immediate functions'
+addresses (consteval24, consteval-prop1, -prop3, constexpr-nonlit13, -diag1, -neg2, -friend: CP310), C++11's single-return body and
+literal types, constexpr-initlist7 (a template never instantiated), constexpr-trivial2 (C++11's non-constexpr implicit
+assignment), constexpr-95307 (`auto p{...}` deduction in C++11). Access: using-enum-1 (using-declarations' access), decomp4
+(structured bindings), lookup/scoped15 (the injected-class-name), template/access19 (constructor templates), all in units with
+friends or other contexts (CP313). Conversions: cond11 (the conditional operator's ambiguous conversion), explicit1, ptrmem6,
+enum29, pr43064-1, elision2, dr1423.
+
+### What was built
+
+- `arbace/cpp/template.ae`: `deduce-call`'s non-deduced contexts and their sure undeduced parameters; `call-candidates` keeps the
+  checker's position; `decl-arg`'s reinterpret_cast refusal (`:cx/sure-drop`).
+- `arbace/cpp/sema.ae`: `null-constant?` from C++11; the requirement's sure failures; if constexpr's refusal; `conv-for`'s object
+  constness and explicit qualification, `user-conv`'s "no viable conversion" for direct-initialization; the enumeration rule in
+  `init-for`; `cx-ctor-access!`, `global-init`'s `:cx-global`; `check-type-access!` for template-ids, `T()` and `T(args)`, in
+  non-member specializations; `base-subobjects`, `cx-naming-class`, `cx-via`, `to-base-lv`'s ambiguity; `local-var!`'s CTAD from
+  defaults; the deleted implicit default constructor ([class.default.ctor]/2.5).
+- `arbace/repr/cpp/diag.ae`: `constexpr-bodies`, `constexpr-redecls`; sema-rules for if constexpr, enumeration initialization and
+  ambiguous bases.
+- `arbace/repr/cpp/parse.ae`: a constexpr or consteval lambda's `:_cexpr` (a `:_` key: the tree compared with clang's unchanged;
+  the parser is in the skim cache's key).
+- `test/cpp/check-dg-own-linux-amd64.edn` recorded again (454 rows, 108 passes); `test/crops/independence.edn`'s C++ read fact
+  (`:dg-own [108 1] :dg-clang [4489 0.5]`); `test/crops/scores.edn`.
+
+### Checked (light; clang, clang++, clang-23, g++, gcc, cc, cpp, c++, cc1, cc1plus, ld and as stubs exiting 99 first on PATH, their log empty)
+
+| check | result |
+|---|---|
+| the sample by the own front end (`.tmp/t6/sample.sh`: `arbace.repr.cpp.dg read`, `own --clang`; two runs) | 454 files, own pass 99 → 108, no earlier pass lost, the extras' 92 lines unchanged, about 12 min each at two threads |
+| `own .tmp/t6/r2 --clang .tmp/s10/cl --record` (the committed record) | 454 rows, 108 passes |
+| the dg control (dr2082, dr1423 by the own front end) | `_control/dg/dr2082-vs-dr1423 fails as it must` |
+| the code generator: `gen-list` over test/cpp/codegen's 142 samples, 1443ba1c5's tree and this branch | 141 of 141 forms byte for byte; rtti refused as before |
+| probes (`.tmp/t6/`: c2-c6 the rules' errors, v1 and c5 the valid forms) | the errors where the standard has them, none on the valid lines |
+| `make check-makefile`; `gate.crops check . test/gate/steps.edn`; `bin/gate --full --plan` | pass; 0 problems; `cpp-dg.dg-error-own` planned (no step changed) |
+| `bin/crops-score --crop cpp`; `--record`; `--judge --strict` | 76.1 / 100 / 67.82 (read 0.655 → 0.656); scores.edn's C++ line alone changed; 0 refuted, 0 problems |
+
+### The numbers (bin/crops-score --crop cpp)
+
+| measure | before (1443ba1c5) | after (the sample's record) | after the night (the whole part recorded) |
+|---|---|---|---|
+| completeness | 76.1 (96.5 without by design) | 76.1 (96.5): the cell reads clang's record (CP271 (a)) | 76.1 |
+| maturity | 100.0 | 100.0 | 100.0 |
+| independence | 67.80 (read 0.655) | 67.82 (read 0.656: 108 own-judged dg cases) | about 69.3 (read about 0.732: about 1,090 of the 4,597 own-judged, the sample's 23.8%) |
+
+### The night's commands (one process at a time; `export ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace GOMEMLIMIT=1400MiB REPR_CPP_THREADS=2`)
+
+```
+PATH=<stubs>:$PATH bin/repr-cpp dg --corpus dg-error --front native --record   # the 4,597 files by Arbace's front end, about 80 min at two threads; writes test/cpp/check-dg-own-linux-amd64.edn
+# then test/crops/independence.edn's C++ read fact: :cases {:dg-own [N 1] :dg-clang [M 0.5]} with N the record's passes, M = 4597 - N; bin/crops-score --record
+bin/repr-cpp dg --corpus dg-error --front native                               # cpp-dg.dg-error-own's command: the record held
+bin/cppi codegen-check .tmp/cppi/codegen-check                                 # clang and gcc live: 141 of 142 expected (the deleted implicit default constructor changed no sample)
+bin/repr-cpp native-check samples                                              # clang live: :_cexpr is a :_ key, the trees as they were
+```
+
+### Proposed (CP310-CP314; none decided)
+
+- **CP310: constexpr errors inside called functions.** The sure rules judge only the initializer's own operations; gcc places an
+  error met inside a called constexpr function at the inner operation's line for undefined operations and non-constant reads, but at
+  the call ("called in a constant expression") for a function that can never be constant, and an immediate function's escaped
+  address at the variable (consteval24's 7 lines). (a) Each kind placed as gcc's own diagnostics place it, written from the dg
+  corpus's directives (no GCC code), about a day; (b) only the immediate functions' rules ([expr.const]/16-18: an immediate
+  invocation's result holding an immediate function's address), half a day; (c) as now. **Recommended: (b)**, then (a) once the
+  night's whole-part record shows the kinds' counts.
+- **CP311: class template argument deduction with initializers.** `S s{...}`, `S s(...)` and `S s = ...` are refused (the 11 CTAD
+  lines of the sample, "no viable constructor or deduction guide"). (a) Port SemaTemplateDeductionGuide's implicit guides (one per
+  constructor, the copy guide, aggregate guides) and the user's guides, deduced by the existing deduction, for the code generator too,
+  about two days with codegen-check; (b) the checker only; (c) as now. **Recommended: (a).**
+- **CP312: the fifth slice's conversion rules for the code generator.** A const object's conversion functions and the explicit ones'
+  qualification rule are the checker's; the code generator may call a non-const conversion function of a const object where the
+  program has also a const one. (a) Both rules for the code generator too, with codegen-check; (b) as now. **Recommended: (a).**
+- **CP313: access in units with friends.** The checker judges a member's access only where no class of the unit declares a friend
+  (the third slice's gate), so using-enum-1, decomp4, scoped15 and access19's classes are not judged. (a) clang's EffectiveContext
+  (SemaAccess.cpp): the friends of each class, function and class friends matched against the context, [class.protected]'s rule,
+  using-declarations' own access, about a day and a half; (b) as now. **Recommended: (a).**
+- **CP314: C++11's constexpr function body.** Before C++14 a constexpr function's body is a single return statement with only
+  null statements, static_assert, typedefs and using-declarations beside it (CheckConstexprFunctionStmt's C++11 cases); g++ errors,
+  clang warns under -pedantic-errors. (a) The rule in `constexpr-bodies`, its line the function's (g++'s "body of constexpr function
+  not a return-statement"), checked against the corpus's c++11 files first; (b) as now. **Recommended: (a)**, small.
+
+### Slips, scratch
+
+Two slips against the day's rules: a throwaway `grep ... /dev/null` read (an empty file argument in a dump's search) and a `2>/dev/null`
+in a wait loop's test; both only read, nothing written there, the commands not repeated. Scratch in the worktree's `.tmp/`: `t6/` (probes
+c1-c6, v1, `one.sh`, `one.ae`, `dumpr.ae`, `sample.sh`, the runs `r1/` and `r2/` (the recorded one), `w1/` (the first step's files),
+`ctl/` (the control), `gen-base/` and `gen-new/` (the code generator's comparison), `*.log`), `base-tree/` (now 1443ba1c5's `arbace/`
+and `cpp/`), `llvm-src/` (SemaDeclCXX.cpp, SemaInit.cpp, SemaOverload.cpp, SemaTemplateDeduction.cpp added).

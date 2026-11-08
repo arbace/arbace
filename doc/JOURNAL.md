@@ -1091,3 +1091,34 @@ compiler stubs first on PATH (their log empty). doc/cpp/CPP-SURVEY.md, "Decided 
   constraints), CP301 (a generic lambda's conversion to a pointer to function), CP302 (the code generator's light half in `--full`),
   CP303 (the next unknown GNU attributes), CP304 (implicit captures in unevaluated operands), CP305 (explicit instantiation
   definitions in the checker).
+
+## 2026-11-08: C++'s CX12, fifth slice: "no matching function"'s rest, constexpr, access, conversions (branch `cpp-cx12`, from 1443ba1c5)
+
+- **Built** (doc/cpp/CPP-SURVEY.md, "As built: CX12 (fifth slice)"), in CP273 (a)'s order, each rule the checker's unless said:
+  non-deduced contexts ([temp.deduct.call]/1, /6: a braced list or an overload set of two or more functions for a bare template
+  parameter, undeduced and named by no other parameter: a sure drop) with the checker's position kept at the call while deducing;
+  C++11's null pointer constants (`false` none, CWG 903); a reinterpret_cast as a template argument ([temp.arg.nontype]/2) a sure
+  drop; a requirement surely false (a member type of a scalar, `*` of a non-pointer); `constexpr-bodies` and `constexpr-redecls`
+  in arbace.repr.cpp.diag after SemaDeclCXX.cpp's CheckConstexprFunctionBody, CheckConstexprDeclStmt, CheckConstexprMissingReturn
+  and MergeCXXFunctionDecl (llvm-project-23.1.5, read from the pinned tarball; the texts clang's), the parser's `:_cexpr` on a
+  constexpr lambda; if constexpr's condition by the evaluator's sure rules; a namespace-scope initializer's private constructors,
+  template-ids' member types and `T()`'s, ambiguous bases (a qualified member through its naming class); a const object's conversion
+  functions, explicit ones only yielding the type in direct-initialization ([over.match.conv]/1.1), enumerations' initialization;
+  CTAD from no initializer by the defaults; for the code generator too, an implicit default constructor deleted by a member with
+  none ([class.default.ctor]/2.5). None of CP300-CP305 built or needed.
+- **Measured** on the every-10th sample (454 files, clang's table from the first slice's outputs): own passes 89 → 99 → 108; the
+  extras' 92 lines the same. Lines with an own error: "no matching function" 90 → 95 of 109, "is a private member" 10 → 12 of 17,
+  "no viable conversion" 8 → 12 of 14.
+- **No false credit**: the 19 new passes read against their sources and clang's outputs, each the program's error on every expected
+  line; probes of the valid forms give no diagnostic; no earlier pass lost.
+- **The code generator**: `gen-list` over test/cpp/codegen's 142 samples by 1443ba1c5's tree and this branch's: 141 of 141 forms
+  byte for byte (rtti refused as before).
+- **Alternatives considered**: the conversion rules for the code generator too (left to CP312: a change of generated programs
+  wants codegen-check live); access in units with friends by a friend-aware context (CP313); the in-call constexpr errors at the
+  variable as clang places them (rejected: the dg lines are gcc's, which place them by kind, CP310); `auto x{e}` in C++11 (left).
+- **Recorded**: test/cpp/check-dg-own-linux-amd64.edn (454 rows, 108 passes), the C++ read fact (`:dg-own [108 1] :dg-clang
+  [4489 0.5]`), test/crops/scores.edn (C++ 76.1 / 100 / 67.82, read 0.656). `make check-makefile`, `gate.crops check`, `bin/gate
+  --full --plan`, `bin/crops-score --judge --strict` pass; the dg control fails as it must. Two slips: a read of `/dev/null` as an
+  empty grep argument and a `2>/dev/null` in a wait loop (the survey's "Slips"). Proposed CP310 (constexpr errors inside calls and
+  immediate functions' addresses), CP311 (CTAD with initializers), CP312 (the conversion rules for the code generator), CP313
+  (access in units with friends), CP314 (C++11's constexpr function body).
