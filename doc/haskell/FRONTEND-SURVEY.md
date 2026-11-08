@@ -1609,7 +1609,8 @@ oracle tier); doc/haskell/NATIVE.md, "The native reads' inputs: derived", has th
   `bin/gate --full --plan`: `run haskell-target-probe key 8549e6f01260, 186 files; never passed`, among the light chains beside the
   serial run. `gate.crops check`: 0 problems.
 - **The oracle tier**: `haskell-target-oracle` (`test/gate/crops/haskell.edn`, not spliced yet) keeps `target hsc && target compare`.
-- **The probe's run**: see the journal's entry of 2026-11-08 (the extracted script run whole by day, light).
+- **The probe's run** (the moved script, whole, by day: one process, 0.9 GiB peak): `bin/repr-haskell target probe --verify` (through
+  `bin/repr-haskell-target probe --verify`), 308 compile tests, "the answers as committed", 36 min (65 on hs-inputs' first run).
 
 ### Proposed (HFS-I12 to HFS-I13)
 
