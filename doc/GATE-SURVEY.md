@@ -4855,3 +4855,125 @@ errors lines' and cpp-tree's scripts). Haskell's round-trip pair (`6dc54221`) wa
 built crossed-pair controls of the tree, text and interface levels in the same file, `test/haskell/roundtrip-controls.edn`, judged
 by its own-verdict comparisons (`compare-forms`, `compare-text --bytes-only`, `compare-iface`): the same design, so the branch's
 older pair is superseded. This section came in by `0d1ae970` picked on batch 3.
+
+## As built: the essential memory lane (write-ahead, branch `gate-lane`, 2026-11-08)
+
+Decided by the user on 2026-11-08: the essential gate's big steps are admitted by a memory lane, not serialized. Twice on
+the nights of 2026-11-07 and 11-08, four big essential steps ran at once on the 62 GiB host (diffcheck 21 GiB, java-compiled
+17, suite-aot-essential 14, programs 10, by their peaks). The night's gate runs under the big lock with `GATE_HEAVY_CMD=env`,
+and those four are `:heavy :inner`, so nothing held them apart. diffcheck's j2g was OOM-killed both times, and a plain rerun
+passed. GTS227 (a)'s lanes are now in every gate that runs without `--concurrent`, in a mode of their own. Not run as a gate
+yet: the light rules allowed only `--plan` and the gate's own tests.
+
+**The rule** (`bin/gate-lane`'s free mode, `GATE_LANE_MODE=free`, `lane_decide_free`; the same in `test/gate/lanes.ae`'s
+`decide-free`). It depends only on the state: MemAvailable from /proc/meminfo, and each running step's process-tree RSS
+counted the way the runner's sampler counts it. A = MemAvailable less `GATE_LANE_MARGIN_GIB` (2). Each running step holds
+back O = max(0, its `:mem-gib` less its tree's RSS now), the memory it may still take. ROOM = A less the sum of the O. The
+waiters are taken in the plan's order:
+- A waiter of G GiB is admitted when G <= ROOM, which then drops by G.
+- It is also admitted when nothing of the run is running and no waiter has been admitted yet. A step too big for the free
+  memory then runs alone, as a serial run would run it.
+- A big waiter (`GATE_LANE_BIG_GIB`, 16, or more) is also admitted when no big step runs or was admitted and G <= A.
+  Small steps alone never keep the big ones waiting.
+- The first big waiter that does not fit while no big step runs holds its G of ROOM back. The small steps behind it then
+  drain, so it is not starved.
+- A small waiter that does not fit holds nothing back. This is greedy first fit, and it never delays a big step.
+
+So two big steps run together when their declarations fit the free memory and one at a time when they do not. While a big
+step waits, one always runs, except while the small steps drain for a head big step that the free memory cannot hold even
+alone. Unlike GTS227 (a)'s budget rule, which is fixed at MemTotal less 4 with one big step at a time, this rule reads the
+host as it is: other processes' memory is already out of MemAvailable, and a running step's growth is held back by its
+declaration.
+
+**Where it applies.** `bin/gate` without `--concurrent` and outside the clean run sets `GATE_LANES=free` (`mem_lane`):
+the builds, the essential chains, `--full`'s serial steps and the crops' chains beside them, `--nightly` and `--oracle`.
+`GATE_MEM_LANE=0` turns it off, which is the behaviour before 2026-11-08. `--concurrent` keeps GTS227 (a)'s lanes. The
+clean run keeps its serial run or `--concurrent`'s lanes. The variables kept through the environment scrub are
+`GATE_MEM_LANE` and `GATE_LANE_MARGIN_GIB`, plus `GATE_LANE_MEMAVAIL_KIB` (MemAvailable given) only with a store of the
+tests' own, as `GATE_NOW` is kept.
+
+**The runner** (`bin/lib/gate-run.bash`'s `step`). Under `GATE_LANES=free` each step of the plan starts as
+`env GATE_LANE_MODE=free ... bin/gate-lane [GATE_HEAVY_CMD] bash -c ...`. The admission comes first. Then, for a
+`:heavy true` step, the heavy lock as before: `bin/heavy-lock`'s FIFO, or `env` when the caller holds the big lock.
+Waiting for the lock never holds memory that a step has not taken, and the big lock is never held while the step waits for
+memory. The tools of an `:inner` step lock their heavy process as before, and today's chains are unchanged. The lane's wait
+goes to `NAME.lane-wait` (`GATE_LANE_WAITS`), and the summary prints "waited M for room in the memory lane" apart from the
+lock's wait. `report` flags a peak that exceeds the step's `:mem-gib` by mem-check's margin (10% and 0.5 GiB): "OVER ITS
+DECLARED :mem-gib N". This is a warning. `bin/gate --mem-check` and gate-tests' lanes-test hold the declarations to the
+recorded peaks. `events.tsv` gains a column, MemAvailable in KiB at each wait and admission.
+
+**A fix found on the way: the sampler.** The host's awk is busybox's. When it cannot open a file it stops, and END
+does not run. The runner's sampler read `/proc/meminfo /proc/[0-9]*/stat` as files, so a process that ended between
+the glob and its read lost the whole sample's step trees. In main's last gate's `mem.tsv` that was 611 of 3,848 samples:
+3,848 MemAvailable lines but 3,237 "gate" lines. Both the sampler and the free mode's `used_kib` now read through
+`cat`, which goes past a missing file. The lost samples mean the store's tree peaks so far (`:tree-peak-kib`, which
+mem-check holds the declarations to) may be low. `:maxrss-kib`, the largest process's, is busybox time's and is
+unaffected. lanes-test under strace caught this: the slower run let processes end mid-glob.
+
+**The plan's view.** `bin/gate [--full] --plan` without `--concurrent` prints the plan, then the lanes' schedule
+simulated by `decide-free`, with the free memory as it is now less the margin. Each running step's declaration is held
+whole, since the simulation knows no RSS. A serial `--full` is simulated as run: its steps one chain, the crops' chains
+beside it (`GATE_LANES_FULL_SERIAL`). Each schedule is printed against the two it replaces: the big steps one at a time,
+which is the bound it must keep (the budget rule with no budget), and every step at once (the gate before 2026-11-08, memory
+unbounded). On next `bd33e27cc` with the runner's change, so every check runs, using the main store's medians:
+
+| run | MemAvailable less 2 | the lane | the big steps one at a time | every step at once |
+|---|---|---|---|---|
+| essential | 54 GiB | 0:46 | 0:53 | 0:42 |
+| `--full`, serial | 54 GiB | 9:54 | 10:01 | 9:51 |
+
+The essential walls include 0:22 of pre steps and builds: go-build's cold wall in the clean record. At a cached key that is
+seconds, so the essential checks take about 24 minutes in the lane, against 31 with the big steps one at a time and 20 at
+once. The 20 is the schedule that OOMs. At most 54 GiB is declared at once. At 56 GiB free, diffcheck (31) and
+java-compiled (22) run together, and suite-aot-essential and programs follow as room comes back.
+
+**What it rekeys.** `bin/lib/gate-run.bash` is in every check's logic lines (`test/gate/plan.ae`), so every check of every
+tier has a new key and runs once: the essential gate's 42 checks and 1 after, and `--full`'s 311 steps. The builds are
+cached by their own keys (`gate_key`, `arbace_javac_key`), which do not hold the runner, so they are not rebuilt.
+`bin/gate-lane`, `test/gate/lanes.ae` and `CLAUDE.md` are in `gate-tests`' inputs, which reruns anyway.
+
+**Tests** (`test/gate/lanes-test.bash`, 38 checks, 17 of them new, about 50 s; passes plain and under gate-reads-test's
+strace):
+- The free rule in both implementations on nine states: four big steps over the free memory (two admitted), two that fit
+  with a small one, a small one beside a big one, a running step's RSS counted and not, the head big step over the small
+  ones' hold, the head big step's reservation, a step alone over the free memory, and a greedy small step.
+- Synthetic steps through `bin/gate-lane`. A blocker of the whole 13 GiB is followed by four big steps of 6 GiB (24 GiB,
+  over the free 13) and a small one. b1, b2 and s1 are admitted together, then b3 and b4 in turn. Never over 13 GiB, two
+  big steps at once, the small one beside them. The events carry MemAvailable, the wait lands in `GATE_LANE_WAITS`, and
+  the waiter says so on stderr.
+- A real process of about 200 MiB, declared 1 GiB, holds back only the rest of its declaration, read from /proc.
+- The runner's `step` in the free lane: admitted, then the heavy lock (a fake that records itself) for the heavy step
+  alone, `ARBACE_HEAVY_HELD=1` inside it only.
+- `report`'s flag of a peak over its declaration.
+- The view in the free mode on the made-up plan: g1 beside j1 at 76 GiB, wall 0:41, against 0:49 with the big steps one
+  at a time.
+- `bin/gate`'s default.
+
+Also `bin/gate-tests` (below) and `bin/gate --plan` and `bin/gate --full --plan` (above).
+
+**Proposed** (each needs the user):
+- **GTS248 One lane state for the host.** Two gates at once, say in two worktrees, each see only their own reservations;
+  the other's running steps count only by their RSS now. (a) The free mode's state in the main checkout's
+  `.tmp/gate-lanes/`, shared like the store of passes, with each entry's order prefixed by its gate's start so that the
+  earlier gate goes first. This is an hour's work, rekeys nothing but gate-tests, and the runner's state directory moves.
+  (b) Keep one state per run. *Recommended: (a), after a night of the lane.*
+- **GTS249 GTS227 (a)'s lanes on the free memory too.** `--concurrent` and the clean run keep a fixed budget, MemTotal
+  less 4, and one big step at a time. (a) Give them the free rule. Java's levels at 48-53 GiB still run alone, since two
+  never fit, but a 20 GiB step could run beside a 31. This rekeys nothing: `bin/gate-lane` and `bin/gate` are in no
+  check's logic lines. (b) Keep the budget rule for the clean run's record, which is easier to compare between runs.
+  *Recommended: (a) for `--full --concurrent`, (b) for the clean run until its first run in the lanes.*
+- **GTS250 The night's declarations.** The four steps' declarations (31, 22, 20, 21) are the largest peaks of the clean
+  runs, which have cold caches and are audited. The nights' warm peaks were 21, 17, 14 and 10. With these declarations only
+  two run at once. (a) Keep them: the lane is safe by construction. (b) A `:mem-gib-warm` for the ordinary gate, taken from
+  the store's passes alone and checked by mem-check like `:mem-gib`, would let three run at once: about 3 minutes less
+  in the essential gate, and a second number to keep true. *Recommended: (a).*
+- **GTS251 A heavy step waiting for the big lock keeps its room.** During the day a `:heavy true` step (suite-go, 14 GiB)
+  admitted by the lane holds its declaration while it waits for another job's big lock. (a) Accept: the gate's own steps
+  are what is delayed, and at night the gate holds the lock. (b) Take the lock first and then the lane, which holds the
+  host's big lock while waiting for memory and so blocks other users. *Recommended: (a).*
+
+**The night's commands** (main session, under the big lock as usual):
+- `bin/gate` on `next` after the merge: the first gate in the lane. Expect every essential check to run, and "waited ... for
+  room in the memory lane" on the big steps that follow diffcheck.
+- `bin/gate --mem-check`.
+- Then `.tmp/gate/lanes/events.tsv` and `.tmp/gate/mem.tsv`'s MemAvailable minimum, to confirm the margin.

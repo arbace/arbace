@@ -46,6 +46,33 @@
         (recur (+ r mem) (if b? (inc bigs) bigs) (rest ws) (if ok (conj out name) out)))
       out)))
 
+(defn decide-free
+  "the essential memory lane's rule (bin/gate-lane's lane_decide_free, the same): RUNNING [{:mem :used}] the steps
+  running (:used their trees' GiB now, 0 when not known: the simulation's), WAITERS [{:name :mem}] in the plan's order,
+  AVAIL the free memory less the margin in GiB; ROOM = AVAIL less what the running steps may still take (:mem less
+  :used, at least 0); a waiter is admitted when it fits ROOM, or nothing runs and none was admitted yet, or it is big
+  (BIG GiB or more) and no big one runs or was admitted and it fits AVAIL; the first big one that does not fit while no
+  big one runs holds its GiB of ROOM back; a small one that does not fit holds nothing"
+  [running waiters avail big]
+  (let [held (reduce + 0 (map (fn [{:keys [mem used]}] (max 0 (- mem (or used 0)))) running))]
+    (loop [room (- avail held) bigs (count (filter #(>= (:mem %) big) running)) nadm 0 reserved false ws waiters out []]
+      (if-let [{:keys [name mem]} (first ws)]
+        (let [b? (>= mem big)
+              ok (or (and (empty? running) (zero? nadm)) (<= mem room) (and b? (zero? bigs) (<= mem avail)))]
+          (cond ok (recur (- room mem) (if b? (inc bigs) bigs) (inc nadm) reserved (rest ws) (conj out name))
+                (and b? (zero? bigs) (not reserved)) (recur (- room mem) bigs nadm true (rest ws) out)
+                :else (recur room bigs nadm reserved (rest ws) out)))
+        out))))
+
+(defn- free? [] (= "free" (System/getenv "GATE_LANE_MODE")))
+(defn- admit
+  "the rule of the run: GATE_LANE_MODE=free the essential memory lane's (BUDGET the free memory less the margin), else
+  GTS227 (a)'s"
+  [running waiters budget big]
+  (if (free?)
+    (decide-free (map (fn [m] {:mem m :used 0}) running) waiters budget big)
+    (decide running waiters budget big)))
+
 ;; ---- the declarations' check
 
 (defn- table [root]
@@ -112,7 +139,8 @@
 (defn simulate
   "STEPS [{:name :ix :phase :chain :after :mem :dur :runs?}] in the plan's order: each step's {:start :end}, the
   pre steps and builds one after another, then each phase's chains at once under decide"
-  [steps budget big]
+  ([steps budget big] (simulate steps budget big admit))
+  ([steps budget big rule]
   (let [serial (filter #(or (= :pre (:phase %)) (= "build" (:kind %))) steps)
         [t0 out] (reduce (fn [[t m] s] (let [d (if (:runs? s) (:dur s) 0)] [(+ t d) (assoc m (:name s) {:start t :end (+ t d)})]))
                          [0 {}] serial)]
@@ -137,7 +165,7 @@
                       waiters (->> chains
                                    (keep (fn [c] (let [h (first (qs c))] (when (and h (not (running c)) (ready? h)) (assoc h :c c)))))
                                    (sort-by :ix))
-                      adm (set (decide (map (comp :mem :s) (vals running)) (map #(select-keys % [:name :mem]) waiters) budget big))
+                      adm (set (rule (map (comp :mem :s) (vals running)) (map #(select-keys % [:name :mem]) waiters) budget big))
                       started (filter #(adm (:name %)) waiters)
                       running (into running (for [h started] [(:c h) {:s h :end (+ t (:dur h))}]))
                       qs (reduce (fn [qs h] (update qs (:c h) subvec 1)) qs started)
@@ -152,7 +180,7 @@
                           done (for [[c r] running :when (= tn (:end r))] c)]
                       (recur tn qs (apply dissoc running done) out peak)))))]
           (recur (rest phases) t out peak))
-        {:wall t :at out :peak peak :serial-end t0}))))
+        {:wall t :at out :peak peak :serial-end t0})))))
 
 (defn view [logs store budget big records]
   (let [rows (for [l (str/split-lines (slurp (str logs "/plan.tsv")))
@@ -162,6 +190,13 @@
                 :kind (case d "build" "build" "always" "always" nil)})
         names (map :name rows)
         durs (durations names store records)
+        ;; GATE_LANES_FULL_SERIAL "serial CHAIN...": --full run serially (bin/gate without GATE_FULL_PARALLEL), the full
+        ;; phase's steps one chain in the table's order but the crops' chains named, which run beside it
+        fs (System/getenv "GATE_LANES_FULL_SERIAL")
+        beside (when (and fs (str/starts-with? fs "serial")) (set (rest (str/split (str/trim fs) #"\s+"))))
+        rows (if beside
+               (for [r rows] (if (and (= :full (:phase r)) (not (beside (:chain r)))) (assoc r :chain "full-serial" :after nil) r))
+               rows)
         steps (vec (map-indexed (fn [i r] (let [[s src] (durs (:name r))]
                                             (assoc r :ix i :dur s :src src
                                                    :runs? (contains? #{"run" "after" "build" "always"} (:dec r)))))
@@ -169,8 +204,11 @@
         {:keys [wall at peak serial-end]} (simulate steps budget big)
         ran (filter :runs? steps)
         lane #(if (>= (:mem %) big) 1 2)]
-    (println (format "lanes (GTS227 (a)): budget %s GiB, lane 1 from %s GiB (one at a time), lane 2 beside it; %d steps run"
-                     (gnum budget) (gnum big) (count ran)))
+    (if (free?)
+      (println (format "the essential memory lane: %s GiB free (MemAvailable now less the margin), big from %s GiB (two at once when they fit, never none while one waits); %d steps run"
+                       (gnum budget) (gnum big) (count ran)))
+      (println (format "lanes (GTS227 (a)): budget %s GiB, lane 1 from %s GiB (one at a time), lane 2 beside it; %d steps run"
+                       (gnum budget) (gnum big) (count ran))))
     (println "   start  end    lane  GiB  step (duration's source)")
     (doseq [s (sort-by (fn [s] [(:start (at (:name s))) (:ix s)]) ran)
             :let [{:keys [start end]} (at (:name s))]]
@@ -183,6 +221,14 @@
       (println (format "lanes: simulated wall %s (the pre steps and builds %s), serial sum %s; lane 1 %d steps, %s; the declared memory at most %s GiB at once"
                        (hm wall) (hm serial-end) (hm sum) (count l1) (hm (reduce + 0 (map :dur l1)))
                        (gnum peak)))
+      ;; the essential memory lane against the two schedules it replaces: the big steps one at a time (the bound it must
+      ;; keep: decide with no budget) and every step at once (the gate before it, memory unbounded)
+      (when (free?)
+        (let [inf 1.0e9
+              ser (:wall (simulate steps inf big decide))
+              all (:wall (simulate steps inf inf decide))]
+          (println (format "lanes: against the big steps one at a time %s (%s), every step at once %s (memory unbounded)"
+                           (hm ser) (if (<= wall ser) "not longer" "LONGER") (hm all)))))
       (let [un (filter #(= "unmeasured" (:src %)) ran)]
         (when (seq un) (println (str "lanes: " (count un) " unmeasured (counted 0): " (str/join " " (map :name un)))))))))
 
@@ -196,5 +242,11 @@
                    running (for [x xs :when (str/starts-with? x "R:")] (Double/parseDouble (subs x 2)))
                    waiters (for [x xs :when (str/starts-with? x "W:") :let [[_ n g] (str/split x #":")]] {:name n :mem (Double/parseDouble g)})]
                (doseq [n (decide running waiters (Double/parseDouble budget) (Double/parseDouble big))] (println n)))
-    (do (println "usage: gate.lanes mem-check ROOT STORE RECORD... | view LOGS STORE BUDGET BIG RECORD... | decide BUDGET BIG R:GIB... W:NAME:GIB...")
+    "decide-free" (let [[_ avail big & xs] args
+                        ;; decide-free AVAIL BIG R:GIB[:USED] ... W:NAME:GIB ...: the essential lane's rule alone (the tests')
+                        running (for [x xs :when (str/starts-with? x "R:") :let [[_ g u] (str/split x #":")]]
+                                  {:mem (Double/parseDouble g) :used (if u (Double/parseDouble u) 0)})
+                        waiters (for [x xs :when (str/starts-with? x "W:") :let [[_ n g] (str/split x #":")]] {:name n :mem (Double/parseDouble g)})]
+                    (doseq [n (decide-free running waiters (Double/parseDouble avail) (Double/parseDouble big))] (println n)))
+    (do (println "usage: gate.lanes mem-check ROOT STORE RECORD... | view LOGS STORE BUDGET BIG RECORD... | decide BUDGET BIG R:GIB... W:NAME:GIB... | decide-free AVAIL BIG R:GIB[:USED]... W:NAME:GIB...")
         (System/exit 2))))

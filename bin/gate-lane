@@ -15,6 +15,21 @@
 #   R and BIGS (a waiter that does not fit keeps its place: a later one is admitted only beside it, so a big step is
 #   never starved by small ones passing it: conservative backfill).
 #
+# The essential memory lane (GATE_LANE_MODE=free; doc/GATE-SURVEY.md, "As built: the essential memory lane", the user's
+# decision of 2026-11-08): the ordinary gate's steps (bin/gate without --concurrent: the essential chains, the builds,
+# --full's serial steps and the crops' chains beside them) admitted against the host's free memory in place of a fixed
+# budget, the heavy lock kept (the admission first, then GATE_HEAVY_CMD's FIFO for a :heavy true step; an :inner step's
+# tools lock as before). Its rule (lane_decide_free, a function of the state alone: /proc/meminfo's MemAvailable and the
+# running steps' process trees, GATE_LANE_MEMAVAIL_KIB and the entries' third field for the tests):
+#   A = MemAvailable less GATE_LANE_MARGIN_GIB (2); each running step i holds back O_i = max(0, its :mem-gib less its
+#   process tree's RSS now) (what it may still take); ROOM = A less the sum of O_i. The waiters in the plan's order: a
+#   waiter of G GiB is admitted when G <= ROOM (then ROOM -= G), or nothing of the run runs and none was admitted yet
+#   (alone, as serially); a big one (GATE_LANE_BIG_GIB, 16, or more) also when no big one runs or was admitted (G <= A:
+#   the big steps never wait for each other's absence longer than one after another would); a big one that does not fit
+#   while no big one runs holds G of ROOM back (the small ones behind it drain, so it is not starved); a small one that
+#   does not fit holds nothing back (greedy first fit: it never delays the big ones). Hence two big steps run together
+#   when their declarations fit the free memory, one at a time when they do not, and never none while one waits.
+#
 # Usage: bin/gate-lane CMD [ARG...]    wait for the admission, then exec CMD (its process the admission's: the
 #                                      admission ends with it)
 #        bin/gate-lane --decide DIR    the waiters of DIR's state admitted now, one a line (the rule alone; the tests)
@@ -22,7 +37,10 @@
 # Environment: GATE_LANE_DIR (the state: run/, wait/, events.tsv, .lock; bin/gate's .tmp/gate/lanes), GATE_LANE_STEP
 #   (the step), GATE_LANE_GIB (its :mem-gib, default 1), GATE_LANE_ORDER (its index in the plan, default 0),
 #   GATE_MEM_BUDGET_GIB (default the host's MemTotal less GATE_MEM_RESERVE_GIB, 4: 58 GiB of 62.7), GATE_LANE_BIG_GIB
-#   (16), GATE_LANE_POLL (seconds between looks, default 2), HEAVY_LOCK_WAITS (a file the seconds waited are appended to)
+#   (16), GATE_LANE_POLL (seconds between looks, default 2), HEAVY_LOCK_WAITS (a file the seconds waited are appended to),
+#   GATE_LANE_MODE (budget, the default: the rule above; free: the essential memory lane), GATE_LANE_MARGIN_GIB (free: 2),
+#   GATE_LANE_MEMAVAIL_KIB (free: MemAvailable given, the tests'), GATE_LANE_WAITS (a file the seconds waited are
+#   appended to, in place of HEAVY_LOCK_WAITS)
 set -uo pipefail
 
 budget_gib() {
@@ -56,15 +74,57 @@ lane_decide() {
                 if ((r == 0 || r + g <= B + 0) && !(big && bigs > 0)) print $3
                 r += g; if (big) bigs++ }'
 }
+# the free mode's inputs: MemAvailable (KiB) and each running entry's process tree's RSS (KiB; an entry's third field
+# when it has one, the tests'; a process that is gone 0)
+memavail_kib() {
+  if [ -n "${GATE_LANE_MEMAVAIL_KIB:-}" ]; then echo "$GATE_LANE_MEMAVAIL_KIB"; return; fi
+  awk '/^MemAvailable:/ {print $2}' /proc/meminfo
+}
+# used_kib PID...: "PID KIB" a line, each PID's process tree's resident set (as bin/lib/gate-run.bash's sampler counts it)
+used_kib() {
+  [ $# -gt 0 ] || return 0
+  # (through cat: busybox awk stops at a file it cannot open, and a process may end between the glob and its read)
+  cat /proc/[0-9]*/stat 2>"$d/.err-proc" | awk -v roots="$*" '
+    { s = $0; i = index(s, ")"); while ((j = index(substr(s, i + 1), ")")) > 0) i += j
+               pid = $1; n = split(substr(s, i + 2), f, " "); rss[pid] = f[22] * 4; kids[f[2]] = kids[f[2]] " " pid }
+    function tree(p,   k, a, n, sum) { sum = rss[p]; n = split(kids[p], a, " "); for (k = 1; k <= n; k++) sum += tree(a[k]); return sum }
+    END { n = split(roots, r, " "); for (k = 1; k <= n; k++) print r[k], (r[k] in rss) ? tree(r[k]) : 0 }
+  '
+}
+lane_decide_free() {
+  local f pids=() u
+  for f in "$d"/run/*; do [ -f "$f" ] && pids+=("${f##*.}"); done
+  u=$(used_kib "${pids[@]}")
+  {
+    echo "U $u" | tr '\n' ' '; echo
+    for f in "$d"/run/*; do [ -f "$f" ] && echo "R $(cut -d' ' -f1 "$f") ${f##*.} $(cut -s -d' ' -f3 "$f")"; done
+    for f in $(ls "$d/wait" | LC_ALL=C sort); do echo "W $(cut -d' ' -f1 "$d/wait/$f") $f"; done
+  } | awk -v A="$(memavail_kib)" -v M="${GATE_LANE_MARGIN_GIB:-2}" -v G="$(big_gib)" '
+    $1 == "U" { for (k = 2; k < NF; k += 2) used[$k] = $(k + 1); next }
+    $1 == "R" { u = ($4 != "") ? $4 : used[$3]; o = $2 - u / 1048576; if (o < 0) o = 0
+                held += o; nrun++; if ($2 + 0 >= G + 0) bigs++; next }
+    $1 == "W" { if (!started) { avail = A / 1048576 - M; room = avail - held; started = 1 }
+                g = $2 + 0; big = (g >= G + 0)
+                ok = (nrun == 0 && nadm == 0) || g <= room || (big && bigs == 0 && g <= avail)
+                if (ok) { print $3; room -= g; nadm++; if (big) bigs++ }
+                else if (big && bigs == 0 && !reserved) { room -= g; reserved = 1 } }'
+}
+# events.tsv's fifth column in the free mode: MemAvailable in KiB at the decision
+free_col() { [ "${GATE_LANE_MODE:-budget}" = free ] && printf '\t%s' "$(memavail_kib)"; }
+decide() { if [ "${GATE_LANE_MODE:-budget}" = free ]; then lane_decide_free; else lane_decide; fi; }
 state() {
   local f
-  echo "budget $(budget_gib) GiB, big from $(big_gib) GiB"
+  if [ "${GATE_LANE_MODE:-budget}" = free ]; then
+    echo "free: MemAvailable $(awk -v k="$(memavail_kib)" 'BEGIN {printf "%.1f", k / 1048576}') GiB less ${GATE_LANE_MARGIN_GIB:-2}, big from $(big_gib) GiB"
+  else
+    echo "budget $(budget_gib) GiB, big from $(big_gib) GiB"
+  fi
   for f in "$d"/run/*; do [ -f "$f" ] && echo "running ${f##*/} $(cut -d' ' -f1 "$f") GiB"; done
   for f in $(ls "$d/wait" | LC_ALL=C sort); do echo "waiting $f $(cut -d' ' -f1 "$d/wait/$f") GiB"; done
 }
 
 case ${1:-} in
-  --decide) [ $# -eq 2 ] || exit 2; d=$2; mkdir -p "$d/run" "$d/wait"; lane_decide; exit 0 ;;
+  --decide) [ $# -eq 2 ] || exit 2; d=$2; mkdir -p "$d/run" "$d/wait"; decide; exit 0 ;;
   --state) [ $# -eq 2 ] || exit 2; d=$2; mkdir -p "$d/run" "$d/wait"; exec 9>>"$d/.lock"; flock 9; prune; state; exit 0 ;;
   ""|-h|--help) sed -n '2,/^set -uo/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2; exit 2 ;;
 esac
@@ -85,15 +145,17 @@ poll=${GATE_LANE_POLL:-2} announced=
 while :; do
   flock 9
   prune
-  if lane_decide | grep -qxF "$me"; then
+  if decide | grep -qxF "$me"; then
     mv "$d/wait/$me" "$d/run/$me"
-    printf '%s\tadmit\t%s\t%s\t%s\n' "$(date +%s)" "$name" "$gib" "$(awk '{s += $1} END {print s + 0}' "$d"/run/* 2>"$d/.err")" >> "$d/events.tsv"
+    printf '%s\tadmit\t%s\t%s\t%s%s\n' "$(date +%s)" "$name" "$gib" "$(awk '{s += $1} END {print s + 0}' "$d"/run/* 2>"$d/.err")" "$(free_col)" >> "$d/events.tsv"
     flock -u 9
     break
   fi
   if [ -z "$announced" ]; then
-    printf '%s\twait\t%s\t%s\t%s\n' "$(date +%s)" "$name" "$gib" "$(awk '{s += $1} END {print s + 0}' "$d"/run/* 2>"$d/.err")" >> "$d/events.tsv"
-    echo "gate-lane: $name ($gib GiB) waits for room in the lanes ($(budget_gib) GiB; running: $(ls "$d/run" | sed 's/^[0-9]*-//; s/\.[0-9]*$//' | tr '\n' ' '))" >&2
+    printf '%s\twait\t%s\t%s\t%s%s\n' "$(date +%s)" "$name" "$gib" "$(awk '{s += $1} END {print s + 0}' "$d"/run/* 2>"$d/.err")" "$(free_col)" >> "$d/events.tsv"
+    if [ "${GATE_LANE_MODE:-budget}" = free ]; then room="MemAvailable $(awk -v k="$(memavail_kib)" 'BEGIN {printf "%.1f", k / 1048576}') GiB"
+    else room="$(budget_gib) GiB"; fi
+    echo "gate-lane: $name ($gib GiB) waits for room in the lanes ($room; running: $(ls "$d/run" | sed 's/^[0-9]*-//; s/\.[0-9]*$//' | tr '\n' ' '))" >&2
     announced=1
   fi
   flock -u 9
@@ -101,5 +163,7 @@ while :; do
 done
 exec 9>&-
 trap - TERM INT HUP
-[ -z "${HEAVY_LOCK_WAITS:-}" ] || echo $(( $(date +%s) - t0 )) >> "$HEAVY_LOCK_WAITS"
+# the seconds waited: GATE_LANE_WAITS (the free mode's, the runner's NAME.lane-wait), else HEAVY_LOCK_WAITS
+w=${GATE_LANE_WAITS:-${HEAVY_LOCK_WAITS:-}}
+[ -z "$w" ] || echo $(( $(date +%s) - t0 )) >> "$w"
 exec "$@"

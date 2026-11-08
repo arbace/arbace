@@ -32,7 +32,10 @@
 # The memory lanes (GTS227 (a), "As built: GTS227 (a)"): with GATE_LANES=1 (bin/gate --full [--clean] --concurrent)
 # every step of the plan runs under bin/gate-lane in place of GATE_HEAVY_CMD, admitted by its declared :mem-gib
 # (run_one's step_lane) and its index in the plan (ordix), ARBACE_HEAVY_HELD=1 inside (the run holds the big lock);
-# the admission's state and events in LOGS/lanes/.
+# the admission's state and events in LOGS/lanes/. With GATE_LANES=free (bin/gate without --concurrent: the essential
+# memory lane, doc/GATE-SURVEY.md, "As built: the essential memory lane") every step of the plan is admitted by bin/gate-lane's
+# free mode (its :mem-gib against MemAvailable) before GATE_HEAVY_CMD, which a :heavy true step still takes; report flags a
+# peak over the declaration.
 
 # Outputs (GT5): a step with :outputs writes into GATE_OUT (.tmp/gate/out/NAME), kept with its pass
 # (STORE/NAME/KEY.out) and put back when it is skipped; a step whose :uses name them reads them under
@@ -156,15 +159,17 @@ sampler() {
   while :; do
     t=$(date +%s) steps=
     for f in "$logs"/*.pid; do [ -f "$f" ] && steps="$steps $(basename "$f" .pid):$(cat "$f" 2>"$logs/sampler.err")"; done
-    awk -v t="$t" -v gate="$$" -v steps="$steps" '
-      FILENAME == "/proc/meminfo" { if ($1 == "MemAvailable:") print t "\tMemAvailable\t" $2; next }
-      FNR == 1 { s = $0; i = index(s, ")"); while ((j = index(substr(s, i + 1), ")")) > 0) i += j
+    # (through cat: busybox awk stops at a file it cannot open, and a process may end between the glob and its read,
+    # which lost the whole sample)
+    { cat /proc/meminfo; cat /proc/[0-9]*/stat; } 2>>"$logs/sampler.err" | awk -v t="$t" -v gate="$$" -v steps="$steps" '
+      $1 ~ /:$/ { if ($1 == "MemAvailable:") print t "\tMemAvailable\t" $2; next }
+      { s = $0; i = index(s, ")"); while ((j = index(substr(s, i + 1), ")")) > 0) i += j
                  pid = $1; n = split(substr(s, i + 2), f, " "); ppid[pid] = f[2]; rss[pid] = f[22] * 4
                  kids[f[2]] = kids[f[2]] " " pid }
       function tree(p,   k, a, n, sum) { sum = rss[p]; n = split(kids[p], a, " "); for (k = 1; k <= n; k++) sum += tree(a[k]); return sum }
       END { print t "\tgate\t" tree(gate)
             n = split(steps, st, " "); for (k = 1; k <= n; k++) { split(st[k], q, ":"); if (q[2] in rss) print t "\t" q[1] "\t" tree(q[2]) } }
-    ' /proc/meminfo /proc/[0-9]*/stat >> "$logs/mem.tsv" 2>>"$logs/sampler.err"
+    ' >> "$logs/mem.tsv" 2>>"$logs/sampler.err"
     sleep 5
   done
 }
@@ -178,7 +183,14 @@ step() {  # step NAME HEAVY COMMAND...: one step, logged, timed, measured (GT1);
   # the plan (run_one's step_lane, its declared :mem-gib) admitted by bin/gate-lane, by its declared memory and its place
   # in the plan, in place of the heavy lock; the run holds the host's big lock as a whole, so its tools take none
   # (ARBACE_HEAVY_HELD=1: the admission is the step's, :inner ones too)
-  if [ -n "${GATE_LANES:-}" ] && [ -n "${step_lane:-}" ]; then
+  if [ "${GATE_LANES:-}" = free ] && [ -n "${step_lane:-}" ]; then
+    # the essential memory lane (GATE_LANES=free: bin/gate without --concurrent, GATE_MEM_LANE=0 not): admitted against
+    # the host's free memory first (bin/gate-lane's free mode), then the heavy lock as before (a :heavy true step's
+    # GATE_HEAVY_CMD, its FIFO; an :inner step's tools lock their heavy process), the lane's wait in NAME.lane-wait
+    rm -f "${logs:?}/${name:?}.lane-wait"
+    pre=(env GATE_LANE_MODE=free GATE_LANE_DIR="$logs/lanes" GATE_LANE_STEP="$name" GATE_LANE_GIB="$step_lane"
+         GATE_LANE_ORDER="${ordix[$name]:-0}" GATE_LANE_WAITS="$logs/$name.lane-wait" "$root/bin/gate-lane" ${pre[@]+"${pre[@]}"})
+  elif [ -n "${GATE_LANES:-}" ] && [ -n "${step_lane:-}" ]; then
     pre=(env GATE_LANE_DIR="$logs/lanes" GATE_LANE_STEP="$name" GATE_LANE_GIB="$step_lane" GATE_LANE_ORDER="${ordix[$name]:-0}"
          "$root/bin/gate-lane")
     hv=yes
@@ -487,9 +499,22 @@ report() {  # report NAME: a step's outcome, times, memory and summary lines
   local c; c=$(mem_of "$n" cpu-s); c=${c%.*}
   w="$w, cpu $(mmss "${c:-0}"), peak $(gib "$(mem_of "$n" maxrss-kib)") (tree $(gib "$(mem_of "$n" tree-peak-kib)"))"
   wt=$(cat "$logs/$n.wait" 2>"$logs/count.err"); wt=${wt:-0}
+  # the essential memory lane: the wait for room in it (NAME.lane-wait, bin/gate-lane's), the rest the lock's
+  local lw; lw=$(cat "$logs/$n.lane-wait" 2>"$logs/count.err"); lw=${lw:-0}
+  [ "$lw" -ge 5 ] && w="$w, waited $(mmss "$lw") for room in the memory lane"
+  wt=$(( wt - lw ))
   [ "$wt" -ge 5 ] && w="$w, waited $(mmss "$wt") for the lock"
   wt=$(mem_of "$n" inner-wait-s); wt=${wt:-0}
   [ "$wt" -ge 5 ] && w="$w, its tools waited $(mmss "$wt") for the lock"
+  # the essential memory lane: a peak (the larger of the largest process's and the tree's) over the step's declared
+  # :mem-gib by test/gate/lanes.ae's mem-check margin (10% and 0.5 GiB) flagged, never failed (bin/gate --mem-check
+  # and gate-tests' lanes-test hold the declarations to the recorded peaks)
+  local mg=${memgib[$n]:--} pk
+  if [ "$mg" != - ]; then
+    pk=$(mem_of "$n" maxrss-kib); local tp; tp=$(mem_of "$n" tree-peak-kib)
+    awk -v a="${pk:-0}" -v b="${tp:-0}" -v d="$mg" 'BEGIN {p = (a > b ? a : b) / 1048576; exit !(p > d * 1.1 + 0.5)}' \
+      && w="$w; OVER ITS DECLARED :mem-gib $mg"
+  fi
   # GT6, GTS17 (a): a budget is a warning (three times the longest of its last passes), never a kill
   b=${budget[$n]:--}
   if [ "$b" != - ] && [ "$s" -gt "$b" ]; then w="$w; OVER ITS BUDGET of $(mmss "$b")"; fi

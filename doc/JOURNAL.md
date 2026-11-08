@@ -791,3 +791,36 @@ third of the concurrent tests, every twentieth other pass) 66 of 67, main's hsi 
 night's `bin/hsi check ... --record`: the testsuite's core 658 of 701 (652), the record 796 of 908; the divergences' edits and the night's
 commands in doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: HE9 on main (write-ahead)". HE9's 666 counted 11 programs whose references
 main's record-ref cannot build (the C includes GHC's `_stub.h`): HES83 proposed.
+
+## 2026-11-08: the essential memory lane (branch `gate-lane`, from next bd33e27cc)
+
+By the user's decision of 2026-11-08, the essential gate's big steps are admitted by a memory lane rather than serialized.
+On both of the nights 2026-11-07 and 11-08, diffcheck's j2g was OOM-killed when diffcheck, java-compiled, suite-aot-essential and
+programs ran at once: peaks 21, 17, 14 and 10 GiB on the 62 GiB host. They are `:heavy :inner`, and the night's gate holds
+the big lock with `GATE_HEAVY_CMD=env`.
+
+Built (doc/GATE-SURVEY.md, "As built: the essential memory lane"):
+- `bin/gate-lane`'s free mode. Each step's `:mem-gib` is set against MemAvailable less 2 GiB. The running steps hold back
+  their declarations less their process trees' RSS. A step is admitted when it fits, or alone. A big step (16 GiB or more)
+  is also admitted when no big step runs. The head big step holds room back when even the free memory cannot hold it. A
+  small step that does not fit holds nothing back.
+- `bin/gate`'s default without `--concurrent` and outside the clean run (`GATE_LANES=free`; `GATE_MEM_LANE=0` off).
+- The runner's `step`: the lane first, then the heavy lock as before. The lane's wait is reported apart, and the summary
+  flags a peak over its declaration.
+- `test/gate/lanes.ae`: `decide-free`, and the free view in `bin/gate --plan`, with a serial `--full` simulated as run,
+  printed against the big steps one at a time and against every step at once.
+
+Alternatives considered:
+- Serializing the big steps (the heavy lock around them whole): the essential checks take about 31 minutes against the
+  lane's 24.
+- GTS227 (a)'s fixed budget with one big step at a time: it cannot run diffcheck and java-compiled together (53 GiB), and
+  it does not see other processes.
+- Holding back the blocked small steps too, as GTS227 (a)'s conservative backfill does: in the simulation it stalls every
+  light chain behind a waiting big step.
+
+Fixed on the way: the runner's sampler. busybox awk stops at a `/proc/PID/stat` that vanished between the glob and its
+read, which lost 611 of 3,848 samples' step trees in main's last gate. It now reads through `cat`, and so does the lane's
+RSS. Proved on samples: `test/gate/lanes-test.bash`, 38 checks (17 new), passing plain and under strace; `bin/gate-tests`; and
+`bin/gate --plan` and `--full --plan`. The essential plan simulates to 0:46 at 54 GiB free, against 0:53 with the big steps
+one at a time and 0:42 at once; `--full` serially to 9:54, against 10:01 and 9:51. The runner's change rekeys every check:
+each runs once on the next night. Proposed: GTS248-GTS251.
