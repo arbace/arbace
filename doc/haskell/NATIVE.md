@@ -386,7 +386,8 @@ and the corpus's plan: a change to any is STALE until it is recorded again.
 What would make these 1 (no toolchain's product read): the configure products and `MachDeps.h`, `ghcautoconf.h`, `ghcplatform.h`
 derived from the target's facts (they are a few dozen `#define`s of sizes and features), the installation's package database
 from the corpus's own `.cabal` files, and hsc2hs's run on ci (the C program hsc2hs writes, run by Arbace's C interpreter, as
-`bin/hsi`'s programs' own C already is): FRONTEND-SURVEY's proposal HFS-I2.
+`bin/hsi`'s programs' own C already is): FRONTEND-SURVEY's proposal HFS-I2, decided (a) and built (the next section): the pack is
+the oracle tier's since, `REPR_HASKELL_INPUTS=pack`.
 
 ## The native reads' inputs: derived (HFS-I2 (a), 2026-11-08, branch `hs-inputs`)
 

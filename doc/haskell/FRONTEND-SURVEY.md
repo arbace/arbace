@@ -1479,3 +1479,61 @@ checkout's store, `.tmp/oracle-packs/haskell-ifaces-ghc-9.14.1/`, and the mirror
   corpora's import closure). A program importing a library module outside it is ineligible (none of the 908 today). Options: (a)
   **re-record the pack whenever a corpus grows (`--record-ifaces`)**, until HF10 makes the front end write the libraries' interfaces
   itself; (b) the closure of every exposed module of the 41 packages (about 2,000 interfaces, about 60 MB). *Recommended: (a)*.
+
+## As built: HFS-I2 (a) (2026-11-08, branch `hs-inputs`, from `next` bd33e27cc)
+
+The user's decision HFS-I2 (a): the read stage's inputs derived, the configure products and the package database first (data), then
+hsc2hs's C program on ci. Built in that order, each part compared byte for byte with the pack `haskell-native-inputs-ghc-9.14.1` (the
+oracle tier); doc/haskell/NATIVE.md, "The native reads' inputs: derived", has the members and how each is made.
+
+### What was built
+
+- **`arbace.repr.haskell.target`** (`bin/repr-haskell target derive`): the tree in the pack's layout from the tarball, musl's tarball
+  and `test/haskell/target/installation.edn` (the installation's names and choices, each with its reason). The settings file in
+  hadrian's order; the 47 package records by **`arbace.repr.haskell.cabal`**, a port of Cabal-syntax 3.16's field parser, conditions,
+  free text and `showInstalledPackageInfo` (each unit's `.cabal`, `.cabal.in` or `.buildinfo.in` finalized for x86_64 Linux with
+  hadrian's flags), then the bindist's `patchpackageconf`; the units' installed headers by their `install-includes`; ghcversion.h,
+  ghcplatform.h, the event headers (gen_event_types.py's rules), HsIntegerGmp.h, ghc-gmp.h, musl's stdc-predef.h.
+- **`arbace.repr.haskell.configure`** (`target probe [--verify]`): the seven configure headers by config.status's rewrite of each
+  template over `test/haskell/target/answers.edn`, which the probe computes on Arbace's C target: each check's kind from its autoheader
+  comment or a rule of the configure.ac (`manual-rules`), headers in musl's tree and `c/include`, functions among libc.a's definitions
+  (musl's forms index and a scan of its `src/ldso` and assembly sources), 308 compile tests by ci's checker (`bin/ci diagnose`), the
+  constants' and htypes' types by `bin/ci annot` (the checker accepts a pointer in an integer constant expression and a double cast to
+  a pointer: the type, not the compile test, decides FP_COMPUTE_INT's failure and FPTOOLS_CHECK_HTYPE's CUIntPtr), four value programs
+  by `bin/ci run`. The probe takes about an hour, nearly all of it the compile tests.
+- **`arbace.repr.haskell.constants`**: deriveConstants. Its `wanteds` are read from the tarball's `utils/deriveConstants/Main.hs` and
+  expanded by the DSL's definitions; the C file of `char derivedConstantX[1 + EXPR]` arrays is checked by ci's checker and the arrays'
+  sizes read from `bin/ci annot` where Main.hs reads nm's (building the RTS's headers is refused: SpinLock.h's inline assembly).
+- **`arbace.repr.haskell.hsc2hs`** (`target hsc`): hsc2hs 0.68.10's direct mode ported (the parser, the C program, the utilities'
+  file), the program built and run by `bin/ci run`; with DerivedConstants.h into `.tmp/repr-haskell/target/hsc`, kept by key, about 40
+  seconds a module.
+- `bin/repr-haskell`: the native reads take the derived tree (`REPR_HASKELL_INPUTS=pack` the pack); a member the derivation has not made
+  yet (before `target hsc` has run) is the pack's and named in the tree's `BORROWED`; `target compare` (the oracle tier's step
+  `haskell-target-oracle`, `test/gate/crops/haskell.edn`). `haskell-roundtrip` runs `target hsc` first; the two Haskell read steps
+  declare C's inputs (musl's pin, `bin/ci`, `c/target/`).
+
+### Results
+
+RESULTS_TBD
+
+### Proposed (HFS-I8 to HFS-I10)
+
+- **HFS-I8 Where the hsc2hs outputs live for the gate.** `target hsc` takes about an hour of ci on a fresh tree (90 modules, one
+  process, under 2 GiB). (a) **As built: made by `haskell-roundtrip`, kept by key in the checkout's `.tmp/`** (a night in the main
+  checkout pays it once per change of the tarball, the derivation or hsc2hs.ae; the clean run pays it every time, light); (b) a pack
+  of Arbace's own outputs in the store (`bin/oracle-records`'s format, recorded by `target hsc`, verified by a rerun in the oracle
+  tier): the clean run free of the hour, a record to keep; (c) the outputs committed (about 0.9 MB) with `target hsc --verify`.
+  *Recommended: (a)*, (b) if the clean run's budget (GT8) objects.
+- **HFS-I9 The probe's place.** `target probe --verify` (about an hour of ci's checker) is in the oracle tier's `haskell-target-oracle`.
+  (a) **As built: by hand at a tag, and whenever `configure.ae`, `answers.edn`, musl's pin or `c/` changes** (the answers are committed;
+  no read recomputes them); (b) a `--full` step keyed on those inputs (it runs only when they change). *Recommended: (b)*: no toolchain
+  runs in it, and the key keeps it off most nights.
+- **HFS-I10 The installation's identities.** The units' ids (Hadrian's 4-digit hashes), the ABI directory's and the 44 ABI fingerprints
+  are recorded facts (`installation.edn`): the reads quote the ids and the directory in their `:cpp` records; no read consumes an ABI
+  hash, which is only in the records for the byte comparison. (a) **Keep them as facts** (names of the installation, as the corpus's
+  -I paths already are); (b) port Hadrian's `Hadrian.Haskell.Hash` (the ids from the packages' sources and flags); (c) leave the
+  fingerprints out of the derived records (the comparison then differs in one line of 44 records). *Recommended: (a)*; (b) once the
+  front end compiles the boot libraries (HF9, HF10), which needs the ids it would then compute.
+- Beside them, for C's crop: ci's checker accepts `enum { v = ((void (*)(int))0) }` and `(timer_t)0.2` (a pointer in an integer
+  constant expression, a floating value cast to a pointer), which gcc rejects; recorded here for the C line's agenda (the probe works
+  around it with the declarations' types).
