@@ -753,6 +753,18 @@ covers what.
   they name: Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2 with the
   Classpath Exception (text below); the rest of the variants is Arbace's own. Their jdk26u sources join `jdk/forms/`
   (the converted closure, under the same license): 63 of naming-script-sources.
+- jdk.httpserver (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F24 (write-ahead)"; recorded by the rule of B7):
+  `overlay/jdk/java.base/sun/net/httpserver/{ServerImpl,ExchangeImpl,HttpConnection,HttpContextImpl,ServerConfig}.java`
+  are jdk26u's files of the same names (https://github.com/openjdk/jdk26u at `baf63fb`,
+  `src/jdk.httpserver/share/classes/sun/net/httpserver/`) with the exact replacements `test/jrt/derive.ae` makes (each
+  file's header says so): Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2
+  with the Classpath Exception (text below), the derivation Arbace's own; `overlay/jdk/java.base/jdk/internal/jrt/SystemLoggers.java`
+  holds jdk26u's `java.lang.System.Logger` interface (`src/java.base/share/classes/java/lang/System.java`) and the
+  System.Logger half of `LoggingProviderImpl.JULWrapper` (`src/java.logging/share/classes/sun/util/logging/internal/`)
+  under the same license, the rest Arbace's own; the variants `overlay/jdk/variants/HttpServerProvider.ae` and
+  `LogManager.ae`'s `LoggingProviderAccess` keep the jdk26u members they replace as repr/java converts them (the same
+  license), with the changes they name. Their jdk26u sources join `jdk/forms/` (the converted closure, under the same
+  license): 38 of httpserver-sources (`src/jdk.httpserver/share/classes`).
 - java.lang.management without JMX (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F13 (write-ahead)";
   recorded by the rule of B7): `overlay/jdk/java.base/java/lang/management/{ManagementFactory,ThreadInfo,LockInfo,MonitorInfo,MemoryUsage}.java`
   `overlay/jdk/java.base/sun/management/{ManagementFactoryHelper,VMManagementImpl}.java` and

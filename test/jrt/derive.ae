@@ -1,0 +1,105 @@
+(ns jrt.derive
+  "jrt's derived overlays (doc/classes/JAVA-DEFERRED-TRIAGE.md, JCS166 (a), the user's decision of 2026-11-07;
+  first used by F24, \"As built: F24 (write-ahead)\"): an overlay of overlay/jdk/java.base that is jdk26u's file
+  with a few exact replacements, made here from jdk26u's file (at the platform's pin, jdk/javac/platform.sha256)
+  rather than kept by hand: each replacement asserted to match exactly as often as the table says, an Arbace
+  header naming the file's origin, the change and its license put before jdk26u's text. derive writes the
+  overlays, check compares the committed ones byte for byte (a stale or edited overlay fails).
+
+    bin/jrt-convert derive [--check] [NAME...]   (the overlays named, by their path below overlay/jdk/java.base;
+                                                  default all)
+
+  The derivations of F7, F9 and F10a (DirectByteBuffer, Net, PollSelectorImpl, SocketOptionRegistry, F9's
+  thirteen) are scratch scripts still; JCS251 proposes moving them here."
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io]))
+
+(def jdk (or (System/getenv "JDK") "/root/jdk26u"))
+
+(defn- header [lines]
+  (str "/*\n" (apply str (map #(str " * " % "\n") lines)) " */\n"))
+
+;; ---------------------------------------------------------------------------------------
+;; F24: jdk.httpserver's classes with jdk.internal.jrt.SystemLoggers.Logger for System.Logger
+
+(def ^:private httpserver-why
+  ["Arbace (overlay/jdk, doc/classes/JAVA-DEFERRED-TRIAGE.md, \"As built: F24 (write-ahead)\"): jdk26u's"
+   "%s (src/jdk.httpserver/share/classes/%s"
+   "at https://github.com/openjdk/jdk26u baf63fb), derived by test/jrt/derive.ae (bin/jrt-convert derive):"
+   "System.Logger, which jrt's hand-written java.lang.System has not (JCS155), is"
+   "jdk.internal.jrt.SystemLoggers.Logger, the same interface over"
+   "java.util.logging as the JDK's System.getLogger answers a system module (its Level the same constants);"
+   "ServerImpl's dispatcher thread made without a thread group (jrt has none); nothing else changed. jdk26u's"
+   "text Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2 with the"
+   "Classpath Exception (LICENSE.md); the derivation Copyright (c) the Arbace authors; Eclipse Public License 1.0."])
+
+(def ^:private import-logger
+  ["import java.lang.System.Logger;" "import jdk.internal.jrt.SystemLoggers.Logger;"])
+(def ^:private import-level
+  ["import java.lang.System.Logger.Level;" "import jdk.internal.jrt.SystemLoggers.Logger.Level;"])
+
+(defn- httpserver [rel reps]
+  {:path rel
+   :from (str "src/jdk.httpserver/share/classes/" rel)
+   :header (fn [] (header (update httpserver-why 1 #(format % (-> rel (str/replace ".java" "") (str/replace "/" ".")) rel))))
+   :replace reps})
+
+(def derivations
+  "Each derived overlay: :path below overlay/jdk/java.base, :from (jdk26u's file, relative to the checkout),
+  :replace [[OLD NEW COUNT] ...] (OLD found exactly COUNT times, every one replaced), :header (the Arbace
+  comment before jdk26u's text)."
+  [(httpserver "sun/net/httpserver/ServerImpl.java"
+               [(conj import-logger 1) (conj import-level 1)
+                ["System.getLogger (\"com.sun.net.httpserver\")"
+                 "jdk.internal.jrt.SystemLoggers.getLogger (\"com.sun.net.httpserver\")" 1]
+                ;; jrt's Thread has no thread groups and no stack sizes: Thread(Runnable, String), the current
+                ;; thread's group as a null group gives, the default stack as 0 asks; jdk26u's false (no
+                ;; inheritable thread locals inherited) is not kept, the dispatcher's code reads none
+                ["new Thread(null, dispatcher, \"HTTP-Dispatcher\", 0, false)"
+                 "new Thread(dispatcher, \"HTTP-Dispatcher\")" 1]])
+   (httpserver "sun/net/httpserver/ExchangeImpl.java" [(conj import-logger 1) (conj import-level 1)])
+   (httpserver "sun/net/httpserver/HttpConnection.java" [(conj import-logger 1) (conj import-level 1)])
+   (httpserver "sun/net/httpserver/HttpContextImpl.java" [(conj import-logger 1)])
+   (httpserver "sun/net/httpserver/ServerConfig.java" [(conj import-logger 1) (conj import-level 1)])])
+
+;; ---------------------------------------------------------------------------------------
+
+(defn- occurrences [^String s ^String sub]
+  (loop [i 0 n 0]
+    (let [j (.indexOf s sub i)]
+      (if (neg? j) n (recur (+ j (count sub)) (inc n))))))
+
+(defn derive-text
+  "The overlay's text: jdk26u's file with the replacements, the header first. Throws when a replacement does
+  not match as often as the table says."
+  [{:keys [path from header replace]}]
+  (let [src (slurp (str jdk "/" from))
+        out (reduce (fn [^String s [old new n]]
+                      (let [k (occurrences s old)]
+                        (when (not= k n)
+                          (throw (ex-info (str path ": " (pr-str old) " found " k " times, not " n)
+                                          {:path path :old old :found k :expected n})))
+                        (.replace s ^CharSequence old ^CharSequence new)))
+                    src replace)]
+    (str (header) out)))
+
+(defn- target [path] (str "overlay/jdk/java.base/" path))
+
+(defn -main [& args]
+  (let [check? (some #{"--check"} args)
+        names (set (remove #{"--check"} args))
+        ds (filter #(or (empty? names) (names (:path %))) derivations)
+        bad (atom 0)]
+    (when (and (seq names) (not= (count ds) (count names)))
+      (binding [*out* *err*] (println "jrt.derive: no derivation of" (pr-str (remove (set (map :path ds)) names))))
+      (System/exit 2))
+    (doseq [d ds
+            :let [t (derive-text d) f (io/file (target (:path d)))]]
+      (if check?
+        (let [have (when (.exists f) (slurp f))]
+          (if (= have t)
+            (println "same     " (:path d))
+            (do (swap! bad inc) (println (if have "DIFFERS  " "MISSING  ") (:path d)))))
+        (do (io/make-parents f) (spit f t) (println "derived  " (:path d)))))
+    (println (str "jrt.derive: " (count ds) " overlays" (when check? (str ", " @bad " not as derived"))))
+    (System/exit (if (pos? @bad) 1 0))))

@@ -4167,3 +4167,224 @@ stops the night for the morning, nothing reverted and nothing fast-forwarded.
 
 **The day after**: the new failures' classes, `bin/java-check --record` of the levels (the whole corpus with the gate's
 `--full`), `bin/reap --record`, `bin/crops-score --record`; JCS190 (the switch's default) on step p's comparison.
+
+## As built: F24 (write-ahead): the `:net` class sorted, jdk.httpserver, the variants the night's j2g cut
+
+Branch `java-net` from `java-night` (`639d42ab9`), 2026-11-08, by day under the light rules (no j2g, no build, no
+conversion; each process under 2 GiB). The brief: raise Java's completeness through `:net` (227 interpreted, 150 compiled
+deferred tests in the committed records), sorted by the missing piece, the biggest group ported from jdk26u's own Java. The
+number F24 (F23 is `java-security`'s, the same day).
+
+### The class measured on today's world
+
+The records (`test/java/check-{interp,compiled}.edn`) predate the conversion of F7, F8, F10a, F11, F12 and F13 (night step 0,
+`b6a6093af`, 2026-11-07): they say nothing of what is still missing. So the class's 230 tests (227 at interp, 3 at compiled
+alone) were run **interpreted on the newest gate executable** (`.tmp/gate-exe/ad3066cf41ea6faf1566`, `next` after night 8: F7,
+F8, F10a, F11, F12, F13 in; F10b, F9, JCS164 not), their forms from the read's cache (the newest passing read of each test,
+copied into the worktree's own cache: `.tmp/net/scripts/linkforms.py`), two at a time, a watchdog stopping any test above 2 GiB
+(ExpandingMap): `bin/java-check --levels interp --only <the 230> --save .tmp/net/s1` with `JAVA_CHECK_EXE`,
+`JAVA_CHECK_FORMS_ONLY=1`; 1,627 s. **121 of the 227 pass already** (the records will say so after the night's whole-corpus
+run); the 108 that do not, by what they stop at:
+
+| tests | the missing piece | whose |
+|---:|---|---|
+| 42 | datagrams and multicast: `DatagramSocket` (21), `MulticastSocket` (7), `DatagramChannel` (14): today's `DatagramSocket` is cut (F11's variant failed j2g's analysis: `NetMulticastSocket(Object)`) | F10b, tonight |
+| 11 | asynchronous channels (`AsynchronousChannelGroup`, `...ServerSocketChannel`, `...FileChannel`, `...Channel`) | JCS220, waits for the night's records |
+| 11 | RMI (`java.rmi.Remote`, `LocateRegistry`, `RemoteServer`, `MarshalledObject`, ...) | JCS132; JCS255 below |
+| 8 | the HTTP client `java.net.http` (`HttpClient`, `HttpRequest`, `HttpClient$Version`) | F12b's client half; JCS254 below |
+| 8 | **jdk.httpserver** (`com.sun.net.httpserver.HttpServer`, `HttpExchange`, `Authenticator$Failure`) | **F24, below** |
+| 6 | **`sun.net.www.http.HttpClient` not in the closed world**: F12's variant failed j2g's analysis, so every http: URL connection is cut (OpenStream, Responses, B8025710, MultiThreadTest, ProxyTest, HttpsProxyStackOverflow) | **F24's fix** |
+| 2 | **`jdk.internal.logger.DefaultLoggerFinder` not in the closed world**: LogManager's `LoggingProviderAccess.demandLoggerFor` (`isSystem`), which PlatformLogger's JulBridge calls on its first use (Encode, ProtocolRedirect) | **F24's fix** |
+| 2 | **`com.sun.management.internal.HotSpotThreadImpl` not in the closed world**: F13's `ThreadImpl` variant failed j2g's analysis (RegisterDuringSelect, SelectAndClose) | **F24's fix** |
+| 1 | `java.net.HttpURLConnection` extended by a test (getResponseCode): not in j2g's `class-supers` | **F24** |
+| 2 | UNIX domain sockets (`UnixDomainSocketAddress`) | JCS164, tonight |
+| 15 | one each: `FileOutputStream` extended (2), `System.inheritedChannel` (2), `Thread.ofPlatform`, `System.runFinalization`, `InetAddress.isReachable`, urgent data (OutOfBand), SCTP, IDN's ICU normalizer (`UseSTD3ASCIIRules`: an initializer's failure), NetParamsTest's interface flags (5 bytes), cookies (B6644726: the order of a store's cookies), and the timeouts InterruptDeadlock, KeySets, ExpandingMap (interrupts, JCS162; memory) | the tail |
+
+The largest group, datagrams, is F10b's (tonight); the next two wait or need a decision; **jdk.httpserver is the largest group
+that is nobody's**, and three of the groups are not missing pieces at all but **variants that j2g's analysis refused on the
+night of 2026-11-07** (the gate executable's `j2g/report.edn`, `:analysis-failures`: six classes; their dependants are "not in
+the closed world"): F12's `HttpClient`, F5's `SimpleFormatter`, F13's `ThreadImpl` (and `DatagramSocket`, F10b's to replace;
+`GaloisCounterMode` and its `GCMDecrypt`, `NIO_ACCESS`, left to `java-security`'s JCA line). F24 is the server and those fixes.
+
+### What comes in, and how
+
+**jdk.httpserver** (jdk26u at `baf63fb`; `test/jrt/jrt_sources.ae`'s `httpserver-sources`, one line in `sources`): 43 files,
+8,297 lines, all `share:jdk.httpserver` (translated as java.base's, as java.logging's and java.sql's): `com.sun.net.httpserver`'s
+API (15: `HttpServer`, `HttpsServer`, `HttpContext`, `HttpExchange`, `HttpsExchange`, `Headers`, `Filter`, `Authenticator`,
+`BasicAuthenticator`, `HttpHandler`, `HttpHandlers`, `HttpPrincipal`, `HttpsConfigurator`, `HttpsParameters`, `Request`), its
+`spi/HttpServerProvider`, and `sun.net.httpserver`'s server (27): `ServerImpl` over F10a's `ServerSocketChannel` and `Selector`,
+its dispatcher thread, the idle and request/response timers over F16's `java.util.Timer`, the exchange's chunked and fixed-length
+streams, HTTPS over F3's `SSLEngine` (`SSLStreams`, `HttpsServerImpl`). jdk26u's code unchanged but for:
+
+| part | how |
+|---|---|
+| System.Logger | jrt's `java.lang.System` is hand-written Go without System.Logger (JCS155). `jdk.internal.jrt.SystemLoggers` (overlay, new) holds jdk26u's `System.Logger` interface as `SystemLoggers.Logger` (its `Level`, its abstract and default methods, verbatim) and `getLogger(name)`: what the JDK's `System.getLogger` answers a system module when java.logging is present, LazyLoggers' lazy logger over `LoggingProviderImpl.JULWrapper`, here the JULWrapper's System.Logger half (verbatim, `spi2JulLevelMapping`) over the java.util.logging logger demanded on first use through F5's `LoggingProviderImpl` access, as PlatformLogger's JulBridge demands it (JCS155 (b)'s way, F3's SSLLogger's and F12's PlatformLogger's) |
+| the derived overlays (5) | `ServerImpl`, `ExchangeImpl`, `HttpConnection`, `HttpContextImpl`, `ServerConfig`: jdk26u's files with `import java.lang.System.Logger[.Level]` as `jdk.internal.jrt.SystemLoggers.Logger[.Level]` and `System.getLogger` as `SystemLoggers.getLogger`; and ServerImpl's dispatcher `new Thread(null, dispatcher, "HTTP-Dispatcher", 0, false)` as `new Thread(dispatcher, "HTTP-Dispatcher")` (jrt has no thread groups and no stack sizes; the inheritable thread locals jdk26u does not pass are inherited: the dispatcher reads none). Made by **`test/jrt/derive.ae`** (below), not by hand |
+| the variant (1) | `HttpServerProvider.ae`: `provider()` the property's class, else `DefaultHttpServerProvider`; `loadProviderAsService` cut (no ServiceLoader, as SelectorProvider's variant) |
+| j2g | renames (`arbace/j2g/names.ae`, J2G-SPEC §4.4: the Go names are the simple names): `com/sun/net/httpserver/Authenticator` → `Hs_Authenticator` (java.net's, SunJSSE's), `Filter` → `Hs_Filter` (java.util.logging's), `sun/net/httpserver/ChunkedInputStream`, `ChunkedOutputStream` → `Hs_...` (sun.net.www.http's), `Event` → `Hs_Event` (jdk.internal.event's), `Request` → `Hs_Request` (the API's `Request`); checked against the gate executable's 5,736 Go types and the branch's closure, nested classes included: no other collision. `class-supers` + `com/sun/net/httpserver/BasicAuthenticator` (BasicAuthToken extends it) and `java/net/HttpURLConnection` (getResponseCode extends it) |
+| left out | the simple file server (`SimpleFileServer`, `sun.net.httpserver.simpleserver`: jwebserver's, with one KIND unix file of jdk.httpserver, which print-sources has no kind for: JCS252); its classes' calls are j2g's operation-level stubs. java.net.http's client (JCS254) |
+
+**The variants' fixes** (the night's `:analysis-failures`; each reproduced and fixed on the gate executable's REPL, below):
+- F12's `HttpClient.ae`: the added `jrtServerSocket` read the inherited protected field as a bare `serverSocket` ("Unable to
+  resolve symbol: serverSocket"); it is `(.-serverSocket this)`, as repr/java converts the class's own reads of it. With it the
+  http: handler's connections (`sun.net.www.protocol.http.HttpURLConnection` and the keep-alive cache) are in the world again.
+- F5's `SimpleFormatter.ae`: `Function.apply`'s result into the `String` local without a cast ("Cannot convert value for format
+  of type Object to String"): `(cast String ...)`. Without the fix every `ConsoleHandler` and `FileHandler`'s default formatter is
+  cut (the logging tests, TaskRejectedTest's handler).
+- F13's `ThreadImpl.ae`: `Arrays.copyOf`'s `Object[]` into the `StackTraceElement[]` local: `(cast StackTraceElement/1 ...)`; with
+  it `HotSpotThreadImpl` and the thread bean's `getThreadInfo` are in the world again.
+- F5's LogManager: `LoggingProviderAccess.demandLoggerFor` asks jdk26u's `DefaultLoggerFinder.isSystem` (jdk.internal.logger is
+  out of the Go build, JCS136), so every PlatformLogger's first use failed; `LogManager.ae`'s new nested variant keeps the method
+  with isSystem's body, `VM.isSystemDomainLoader(module.getClassLoader())` (jrt's hand-written VM function).
+
+**`test/jrt/derive.ae`, `bin/jrt-convert derive [--check] [PATH...]`** (JCS166 (a), decided 2026-11-07, its first part): a derived
+overlay is a table entry (jdk26u's file, the exact replacements each with its count, the header naming the origin, the change
+and the licenses), written by `derive`, compared byte for byte by `derive --check` (exit 1 on a difference, the overlay's name
+printed DIFFERS or MISSING); on the tools' host, seconds. F24's five overlays are its first entries; F7's, F9's and F10a's
+scratch derivations are JCS251.
+
+No Go: the server is plain Java over F10a's natives; no new native, `HostChannels` unchanged.
+
+### Light checks done
+
+(main's stage 0 as `ARBACE_HOST_EXE`; javac's tool `.tmp/gate-exe/javac-5ad357331dbcd7cfb0fd` with `REPR_JAVA_STALE_OK=1`;
+`GOMEMLIMIT=1500MiB`; scratch `.tmp/net/`)
+- the closure (F3's `closure.py` against the branch's print-sources and jrt's manifest, scope `com.sun.net.httpserver`, `.spi`,
+  `sun.net.httpserver`): the 43 files; outside the world and the list only `ServiceLoader` (the variant) and `System.Logger`
+  (SystemLoggers); jrt's hand-written members the files call (System, Thread, Class, ClassLoader, String): all in the manifest but
+  Thread's five-argument constructor (the derivation);
+- **the joint javac check** (`.tmp/night7/all9-run.sh`): **2,464 files, 0 errors**, 5,269 classes (17 s, 1.0 GB; the branch's
+  2,420 + 38 share + 5 derived + SystemLoggers); its negative control (SystemLoggers moved away): 64 errors, exit 1;
+- `bin/jrt-convert derive --check`: 5 overlays, 0 not as derived; its control (a line appended to HttpContextImpl): DIFFERS, exit 1;
+- the read: `bin/repr-java read-jdk --check` of the 44 with java.util.logging and sun.util.logging as a patch of java.base
+  (`REPR_JAVA_PATCH_ALL=1`): 64 converted, 0 failed, 0 javac errors (4 s, 0.7 GB); `--no-javac`: 64 native, 0 fallbacks, the forms
+  identical;
+- the variants applied and parsed (F4's `vet.ae`): HttpServerProvider 1/1/0 (replaced/cut/added), LogManager 4/0/1 with
+  `$Cleaner` 1/0/0 and `$LoggingProviderAccess` 1/0/0, SimpleFormatter 1/0/1, ThreadImpl 17/0/3, HttpClient 1/0/1;
+- **the fixes analyzed on the gate executable's REPL** (its analyzer is j2g's): ThreadImpl with the variant applied
+  (`.tmp/net/vet/emit.ae`, the class renamed) loads, and without the cast fails with the night's message ("Cannot convert value
+  for st of type [Ljava/lang/Object; to [Ljava/lang/StackTraceElement;"); the minimal cases of the other two (a String local from
+  `Function.apply`; a NetworkClient subclass reading `serverSocket`) fail with the night's messages without the fix and analyze
+  with it;
+- j2g's changed namespaces load (`class-supers` 127, `Hs_Request`); `bin/jrt test --arch amd64`: `arbace/jrt` ok (the crops'
+  `expat`, `pyexpat`, `oi` fail by themselves, as on `next`); `go vet ./jrt` clean for linux/amd64 and arm64.
+
+Not checked by day: j2g's analysis of the 43 new classes and the derived overlays (the night's; their Go names above), and the
+server's behaviour (no executable has it).
+
+### Expected yield
+
+Interpreted, of `:net`'s 227: **121 pass on today's world** (unrecorded: the night's whole-corpus record moves them), then F24:
+httpserver 8 (t07855-t07862), the http: connection 6 (t05030, t05061, t08121, t08122, t08123, t08137), the logger 2 (t04313,
+t08136), the thread bean 2 (t05172, t05174), HttpURLConnection 1 (t04950): **19 touched, about 15 expected**; F10b's and JCS164's
+tonight about 34 of their 44. At risk: TruncatedRequestBody's and B6361557's timing at the interpreted level, TaskRejectedTest's
+log line (its handler on java.util.logging's logger, demanded as a system logger here as in the JDK). Beyond `:net`: SimpleFormatter
+and the LoggingProviderAccess fix are under every test that logs to a console or file handler or reaches a PlatformLogger
+(`:logging`'s and the HTTP tests'; not counted here). Compiled: the same tests where `:net`, `:j2g-unresolved` and `:logging` hold
+them now (httpserver 8, the http: connection's 6), about **14 expected**. Java eval and AOT each about +0.5 point beyond the
+night's other slices.
+
+### The night's commands
+
+In the night's worktree with this branch merged (after java-night's slices; its own revert is one merge), heavy ones under
+`bin/heavy-lock`, about 1 hour with the areas' checks, the conversion shared with the night's:
+
+```sh
+# 0. the joint javac check and the derivations (light)
+/root/arbace/.tmp/night7/all9-run.sh $PWD          # expect 0 errors
+bin/jrt-convert derive --check                     # expect 5 overlays, 0 not as derived
+# 1. jdk/ converted afresh: expect the night's count + 38 share:jdk.httpserver + 6 of jrt's own (the 5 derived,
+#    SystemLoggers), 0 failed, 0 javac errors, no javac: 0 fallbacks; jdk/forms + com/sun/net/httpserver (16) and
+#    sun/net/httpserver (27), jdk/internal/jrt/SystemLoggers; then the module table (bin/jrt modules: + com.sun.net.httpserver,
+#    .spi and sun.net.httpserver as jdk.httpserver's)
+REPR_JAVA_EXE=$(ls -td /root/arbace/.tmp/gate-exe/javac-*/ | head -1)arbace-javac REPR_JAVA_STALE_OK=1 \
+  ARBACE_HEAVY_CMD=$PWD/bin/heavy-lock bin/jrt-convert update && bin/jrt modules
+# 2. j2g's edge afresh (com.sun.net.httpserver exported, sun.net.httpserver not: the edge's :unexported), javac's world's edge
+bin/heavy-lock bin/j2g-edge update && bin/heavy-lock bin/javac-vendor edge
+# 3. the executable; j2g's report: :analysis-failures without HttpClient, SimpleFormatter, ThreadImpl (and without DatagramSocket
+#    after F10b), none of sun/net/httpserver or SystemLoggers; variants HttpServerProvider 1/1/0, LogManager$LoggingProviderAccess
+#    1/0/0, HttpClient 1/0/1, SimpleFormatter 1/0/1, ThreadImpl 17/0/3; no "a variant for a class not in the inputs"
+bin/heavy-lock bin/arbace-go --build && bin/arbace-go --smoke && bin/jrt test
+grep -A8 ':analysis-failures' target/arbace-go/amd64/j2g/report.edn
+# 4. a smoke: the server on loopback, an http: connection to it, a system logger through java.util.logging; expect "200 ok"
+target/arbace-go/amd64/arbace -e '(import (quote (com.sun.net.httpserver HttpServer HttpHandler)) (quote (java.net InetSocketAddress InetAddress URL)))
+  (let [s (HttpServer/create (InetSocketAddress. (InetAddress/getLoopbackAddress) 0) 0)]
+    (.createContext s "/" (reify HttpHandler (handle [_ x] (let [b (.getBytes "ok")] (.sendResponseHeaders x 200 (alength b))
+                                                            (with-open [o (.getResponseBody x)] (.write o b))))))
+    (.start s)
+    (let [c (.openConnection (URL. (str "http://127.0.0.1:" (.getPort (.getAddress s)) "/")))]
+      (println (.getResponseCode c) (slurp (.getInputStream c))))
+    (.stop s 0))'
+# 5. Java's levels interp and compiled on the class's areas (then the whole corpus with the night's others): saved, not
+#    recorded; expect about 15 / 14 of F24's 19 to pass, the 121 to hold, no passing test lost
+JAVA_CHECK_EXE=$PWD/target/arbace-go/amd64/arbace J2G_GO_EXE=$PWD/target/arbace-go/amd64/arbace \
+  JAVA_CHECK_HEAVY=$PWD/bin/heavy-lock bin/java-check --levels interp,compiled --jobs 8 \
+  --only 'jdk/(com/sun/net/httpserver|java/net/|java/nio/channels/|sun/net/|java/io/OutputStreamWriter/Encode|java/util/logging)' \
+  --save .tmp/f24-night/check
+```
+
+**Risks and fallbacks**: (1) a collision or refusal in j2g on the new classes: the fallback drops `httpserver-sources`' line, the
+five derived overlays, SystemLoggers and HttpServerProvider.ae (the variants' fixes and the class-supers stay: they need nothing
+of the server); (2) a variant fix analyzed differently in the whole world than at the REPL: that variant's old text again and its
+class in its class as before; (3) the server's loopback runs under the interpreted level's limits (the dispatcher's selector loop
+wakes at least each second, `selector.select(1000)`).
+
+**The day after**: the class's tests judged and recorded with the whole corpus; the 121 now passing and F24's move from `:net`
+to pass; the tail's new classes (the sixteen above); doc/go/JRT-NOTES.md's "Sockets" (the server) and "Logging" (SystemLoggers).
+
+## Proposed (F24)
+
+### JCS250 System.Logger in jrt (JCS155 (a)), or SystemLoggers as the classes' Logger
+
+F24's server logs through `jdk.internal.jrt.SystemLoggers.Logger`, jdk26u's interface under another name, its five files derived
+for the import. JCS155 decided (a) "as its own fix": `System.Logger`, `Level` and `LoggerFinder` as jrt's hand-written types, the
+default methods as package functions (F14's AnnotatedElement shows the shape: `Iface_Method(this, ...)`, which j2g's forwarders
+name), `System.getLogger` as j2g's own static (`m/j2g-static?`, as `System.getProperties`) over `SystemLoggers.getLogger`.
+- (a) Now, after F24's night: the derivations dropped (jdk26u's files as they are), SSLLogger's and ObjectInputStream's
+  System.Logger paths and LoggerInterfaceTest (`:logging`, 1 test) gained; 1.5 days by day plus a night (j2g's first
+  hand-written interface with defaults that translated classes implement).
+- (b) SystemLoggers stays the classes' Logger, a derivation for each new user.
+- *Recommended: (a)*, after the night proves SystemLoggers' behaviour (its JULWrapper half moves into the hand-written type's
+  implementation unchanged).
+
+### JCS251 F7's, F9's and F10a's derivations into `test/jrt/derive.ae`
+
+JCS166 (a) decided the derivations as Arbace with `derive --check`; F24 built the table and the verb with its own five. F7's
+DirectByteBuffer (gendirect.py), F10a's Net, PollSelectorImpl and SocketOptionRegistry (gennet.py, genpoll.py, genopts.py) and F9's
+thirteen (derive.py) are scratch Python in worktrees' `.tmp/`, some with multi-line rewrites (Net's natives' bodies) the table's
+exact replacements express as long OLD/NEW pairs. (a) Moved, each overlay re-derived byte for byte, 1 day; then `derive --check`
+in the essential gate (beside `bin/jrt-convert check-javac`, JCS165), a light step; (b) only new derivations in the table.
+*Recommended: (a).*
+
+### JCS252 The simple file server (SimpleFileServer, jwebserver)
+
+`sun.net.httpserver.simpleserver` has one file of KIND unix in jdk.httpserver (`URIPathSegment`); print-sources and the
+conversion have unix only for java.base. (a) A KIND `unix:MODULE` in print-sources, bin/jrt-convert's tree and the joint check,
+the six files in (with FileServerHandler derived for System.Logger); 0.5 day; the corpus has no SimpleFileServer test today; (b) out.
+*Recommended: (b)* until a test of the corpus names it.
+
+### JCS253 Variants analyzed by day
+
+Six classes left the night's world on 2026-11-07 because their variants, parsed by day, failed j2g's analysis (F12's, F5's, F13's,
+F11's, F1's): their dependants went with them (every http: connection, every console handler's formatter, the thread bean), and
+the records cannot show it until a whole-corpus run. F24 analyzed its fixes on a gate executable's REPL. (a) `bin/jrt-convert vet`:
+each variant applied to its class's forms and the class analyzed by `arbace.classes.analyze` in the committed world (j2g's world
+load without translation; to be measured, it may be heavy: a night step then, before the build); (b) the REPL way, the class
+renamed and loaded on the gate executable (light, but a class whose dependants are cut cannot load, and package-private access
+differs); (c) as now, the build's report. *Recommended: (a)* if its world load stays light, else (b) for every new variant.
+
+### JCS254 java.net.http's client
+
+8 tests (`HttpClient`, `HttpRequest`, `Version`). The module is 313 files, 101,314 lines: HTTP/1.1 and HTTP/2 over F10a's
+selectors and F3's TLS, HTTP/3 over QUIC (DatagramChannel, F10b; QUIC's TLS engine, JCS156 (a)), WebSocket. (a) All of it, after
+F10b's records, 4-5 days; (b) HTTP/1.1, HTTP/2 and WebSocket, HTTP/3 cut by variants (`HttpClientImpl`, `ExchangeImpl`,
+`MultiExchange`, `Exchange`: 40 references), 3 days; (c) deferred. *Recommended: (b)* after F10b's night, (a) when QUIC's tests
+come with it (the corpus has none today).
+
+### JCS255 RMI now that serialization is ported
+
+JCS132 recommended RMI by design beside serialization (the user's JCS128-JCS135 as recommended, 2026-11-05), but no class
+applied it (`:net` matches `java\.rmi`: 11 tests), and JCS167 (a) has since ported serialization. (a) Apply JCS132 (a): a `:rmi`
+`:design` class before `:net` (11 interpreted, 12 compiled); (b) RMI deferred again, ported after JCS167's slices (java.rmi's
+registry, the transport over sockets, stubs over Dyn's proxies: JCS170), 3-4 days. *Recommended: (b)*, as JCS167 reversed the
+reason JCS132 gave; (a) only if the strict count must move before then.

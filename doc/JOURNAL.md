@@ -1254,3 +1254,38 @@ conflicts differ with each dropped slice); taken: `git revert -m 1` with a resol
 (`.tmp/javanight/revert-slice.sh`), tried on a scratch worktree for each slice and four combinations: all resolved, the joint
 check 0 errors, `go vet ./jrt` clean. The night's script `.tmp/javanight/run.sh` waits for night 9 and is launched by the
 main session.
+
+## 2026-11-08: F24, Java's `:net` sorted on today's world; jdk.httpserver; four variants the night's j2g refused (branch `java-net`, from java-night 639d42ab9)
+
+By the brief (raise Java's completeness through the deferred class `:net`, 227 interpreted and 150 compiled tests; async channels
+wait), by day under the light rules (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F24 (write-ahead)"; F23 was taken the same
+day by `java-security`). The committed records predate the night that converted F7, F8, F10a, F11, F12 and F13
+(`b6a6093af`), so the class was measured rather than scanned: its 230 tests run interpreted on the newest gate executable
+(`.tmp/gate-exe/ad3066cf41ea6faf1566`), their forms copied from the read's cache, two at a time under a 2 GiB watchdog: 121 of
+the 227 pass already; the 108 others stop at datagrams (42, F10b tonight), asynchronous channels (11, waiting), RMI (11),
+java.net.http's client (8), jdk.httpserver (8), UNIX domain sockets (2, JCS164 tonight), a tail of 15 singles, and 11 at
+classes cut from the world because their variants failed j2g's analysis on 2026-11-07 (the gate executable's
+`j2g/report.edn` `:analysis-failures`: F12's HttpClient, F5's SimpleFormatter, F13's ThreadImpl; and F5's LogManager reaching
+jdk.internal.logger's DefaultLoggerFinder.isSystem on every PlatformLogger's first use).
+
+Built: jdk.httpserver from jdk26u `baf63fb` (`src/jdk.httpserver/share/classes`: com.sun.net.httpserver's API and spi,
+sun.net.httpserver's server; 43 files, 8,297 lines; `test/jrt/jrt_sources.ae`'s `httpserver-sources`) over F10a's channels,
+F16's Timer and F3's SSLEngine; System.Logger as `jdk.internal.jrt.SystemLoggers` (overlay: jdk26u's `System.Logger` interface
+from `src/java.base/share/classes/java/lang/System.java` and the System.Logger half of `LoggingProviderImpl.JULWrapper` from
+`src/java.logging/share/classes/sun/util/logging/internal/LoggingProviderImpl.java`, over F5's LogManager access); five of the
+server's files derived for that import and ServerImpl's thread-group constructor by `test/jrt/derive.ae` with `bin/jrt-convert
+derive [--check]` (JCS166 (a)'s mechanism, its first entries); the variant `HttpServerProvider.ae` (no ServiceLoader); j2g's
+renames Hs_Authenticator, Hs_Filter, Hs_ChunkedInputStream, Hs_ChunkedOutputStream, Hs_Event, Hs_Request, and `class-supers` +
+BasicAuthenticator, HttpURLConnection. Fixed: HttpClient.ae's `jrtServerSocket` reads the inherited field as `(.-serverSocket
+this)`; SimpleFormatter.ae and ThreadImpl.ae cast `Function.apply`'s and `Arrays.copyOf`'s results; LogManager.ae's new
+`LoggingProviderAccess` variant keeps demandLoggerFor with isSystem's body (`VM.isSystemDomainLoader`). LICENSE.md extended.
+
+Checked by day: the joint javac check 2,464 files, 0 errors (its control: 64 errors); `derive --check` 5 of 5 (its control
+DIFFERS); repr/java's read of the 44 with java.util.logging, 0 failed, 0 javac errors, `--no-javac` the same forms; the variants
+applied and parsed; the three fixes analyzed on the gate executable's REPL, each failing without the fix with the night's own
+message; `bin/jrt test` (arbace/jrt ok), `go vet ./jrt` amd64 and arm64. Expected: 19 of `:net` touched, about 15 interpreted
+and 14 compiled to pass, beyond the 121 the night's record shows. Alternatives considered: System.Logger in jrt itself now
+(JCS155 (a); no j2g run by day to try a hand-written interface with defaults that translated classes implement: JCS250); the
+logging through variants of every member that names Level (whole methods copied: rejected for the derivation's two lines a
+file); java.net.http's client first (101,314 lines with QUIC and HTTP/3 for 8 tests: JCS254); RMI by JCS132 (a) (JCS255:
+serialization is being ported). Proposed: JCS250-JCS255.
