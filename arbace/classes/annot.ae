@@ -73,14 +73,66 @@
         (reverse (binding [a/*lenient* true]
                    (try (force anns) (catch Exception _ nil))))))
 
+(defn- safe-ctor-desc
+  "The descriptor of constructor mm of class n with its implicit parameters (the class file's,
+  which jrt's Constructor has: an inner class's outer instance, an enum's name and ordinal), else
+  its own."
+  [n mm]
+  (try (a/ctor-real-desc n mm) (catch Exception _ (:desc mm))))
+
+(defn attribute-lines
+  "F25 (doc/classes/JAVA-DEFERRED-TRIAGE.md, \"As built: F25 (write-ahead)\"): the class file
+  attributes reflection reads, as data lines beside the annotations' (go/arbace/jrt/classdata.ae
+  decodes them; jdk26u's Class, Method, Constructor and Field read the same attributes through
+  the VM): the class's Signature (S), its InnerClasses entry and EnclosingMethod (K, Q), and with
+  members its methods', constructors' and fields' Signatures (G) and Exceptions (E)."
+  [n d members]
+  (concat
+    (when-let [s (:signature d)] [(str "S " s)])
+    (when (#{:member :local :anon} (:nesting d))
+      (concat
+        [(str "K " (or (:inner-flags d) 0) " " (case (:nesting d) :member "m" :local "l" :anon "a")
+              " " (bin (or (:outer d) "-")) " " (if (= :anon (:nesting d)) "-" (or (:simple d) "-")))]
+        (when (#{:local :anon} (:nesting d))
+          (when-let [em (:enclosing-method d)]
+            (when-let [m (:method em)]
+              (when-not (#{"<clinit>"} (:name em))
+                (let [ctor (= "<init>" (:name em))
+                      desc (if ctor (safe-ctor-desc (or (:owner m) (:outer d)) m) (:desc m))]
+                  (when desc
+                    [(str "Q " (:name em) " " (bin desc))]))))))))
+    (when members
+      (concat
+        (for [mm (:methods d)
+              :when (#{:method :ctor} (:kind mm))
+              :let [sig (:sig mm)]
+              :when sig]
+          (if (= :ctor (:kind mm))
+            (str "G C " (bin (safe-ctor-desc n mm)) " " sig)
+            (str "G M " (:name mm) " " (bin (:desc mm)) " " sig)))
+        (for [f (:fields d)
+              :let [sig (:sig f)]
+              :when sig]
+          (str "G F " (:name f) " " sig))
+        (for [mm (:methods d)
+              :when (#{:method :ctor} (:kind mm))
+              :let [ts (seq (:throws mm))]
+              :when ts]
+          (str "E " (if (= :ctor (:kind mm))
+                      (str "C " (bin (safe-ctor-desc n mm)))
+                      (str "M " (:name mm) " " (bin (:desc mm))))
+               (apply str (map #(str " " (bin %)) ts))))))))
+
 (defn class-data
   "The data of class n (internal name, analyzed: arbace.classes.analyze/decl): its own
   annotations and its element defaults (an annotation type's), and with :members its methods',
-  constructors', fields' and parameters'. nil when there is none."
+  constructors', fields' and parameters'; since F25 the reflected attributes beside them
+  (attribute-lines). nil when there is none."
   [n & {:keys [members]}]
   (when-let [d (a/decl n)]
     (binding [a/*lenient* true]
       (let [lines (concat
+                    (try (doall (attribute-lines n d members)) (catch Exception _ nil))
                     (for [x (visible (:annotations d))] (str "T " x))
                     (when (= :annotation (:kind d))
                       (for [mm (:methods d)
