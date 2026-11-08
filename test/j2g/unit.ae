@@ -1,0 +1,77 @@
+(ns j2g.unit
+  "j2g's unit tests (doc/go/J2G-SPEC.md), each over a fixture of test/j2g/unit/ or a function alone,
+  with the edge (jdk/edge.edn) as j2g binds it and no JDK forms: light (seconds, well under a GiB).
+  Run: bin/j2g-unit (arbace_tool -p test -m j2g.unit); prints each test's name and pass or FAIL,
+  exits 1 on a failure."
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io]
+            [arbace.classes.env :as env]
+            [arbace.classes.analyze :as a]
+            [arbace.j2g.edge :as edge]
+            [arbace.j2g.main :as jm]
+            [arbace.j2g.model :as m]
+            [arbace.j2g.world :as w]))
+
+(def ^:private failures (atom 0))
+
+(defn- check [what ok & [detail]]
+  (println (str (if ok "pass  " "FAIL  ") what (when (and (not ok) detail) (str "\n      " detail))))
+  (when-not ok (swap! failures inc)))
+
+(defn- load-fixture
+  "j2g's world over the fixture tree dir alone (load-world as bin/j2g binds it: the edge, no
+  source lookup)."
+  [dir]
+  (#'jm/advance-ids!)
+  (let [e (edge/read-edge "jdk/edge.edn")]
+    (binding [m/*run* true env/*declared* (:classes e) edge/*edge* e a/*source-lookup* false]
+      (w/load-world [{:root dir :tree true}] :variant-files []))))
+
+;; JCS69 (b): the analysis fails at the unresolved class itself, not at the conversion after it
+
+(defn test-unresolved-cause []
+  (let [causes {"p/C$D" "members: Unknown type: X (the import q.X)"}]
+    (check "unresolved-cause: a constructor of the class named"
+           (= (w/unresolved-cause causes "analysis: No accessible constructor of p.C$D (line 4) / No accessible constructor of p.C$D")
+              "analysis: No accessible constructor of p.C$D (line 4) / No accessible constructor of p.C$D (because p/C$D: members: Unknown type: X (the import q.X))"))
+    (check "unresolved-cause: a static field, by the internal name"
+           (= (w/unresolved-cause causes "analysis: No static field f in p/C$D (line 2)")
+              "analysis: No static field f in p/C$D (line 2) (because p/C$D: members: Unknown type: X (the import q.X))"))
+    (check "unresolved-cause: a longer name is not the class (p.C$DE)"
+           (= (w/unresolved-cause causes "analysis: No accessible constructor of p.C$DE")
+              "analysis: No accessible constructor of p.C$DE"))
+    (check "unresolved-cause: not an analysis failure"
+           (= (w/unresolved-cause causes "members: No accessible constructor of p.C$D")
+              "members: No accessible constructor of p.C$D"))
+    (check "unresolved-cause: no causes"
+           (= (w/unresolved-cause {} "analysis: x") "analysis: x"))))
+
+(defn test-unresolved-world []
+  (let [world (load-fixture "test/j2g/unit/unresolved")
+        failed (:failed world)
+        of (fn [n] (vec (for [[c msg] failed :when (= c n)] msg)))
+        st (fn [n] (w/with-world world @(:state (a/decl n))))]
+    (check "unresolved: Holder's failure is its members', the class named with its import"
+           (= (of "p/Holder") ["members: Unknown type: Gadget (the import javax.nonesuch.Gadget)"])
+           (pr-str (of "p/Holder")))
+    (check "unresolved: Holder not analyzed, marked failed with that cause"
+           (let [s (st "p/Holder")] (and (:analyzed s) (= (:analysis-failed s) "members: Unknown type: Gadget")))
+           (pr-str (select-keys (st "p/Holder") [:analyzed :analysis-failed])))
+    (check "unresolved: User's failure names Holder's cause"
+           (let [[m & more] (of "p/User")]
+             (and (nil? more) (str/starts-with? m "analysis: No accessible constructor of p.Holder")
+                  (str/ends-with? m "(because p/Holder: members: Unknown type: Gadget (the import javax.nonesuch.Gadget))")))
+           (pr-str (of "p/User")))
+    (check "unresolved: Clean analyzed, no failure"
+           (and (empty? (of "p/Clean")) (:analyzed (st "p/Clean")) (nil? (:analysis-failed (st "p/Clean"))))
+           (pr-str (of "p/Clean")))
+    (check "unresolved: no empty conversion message (\"Cannot convert ... to \")"
+           (not-any? (fn [[_ msg]] (re-find #"Cannot convert .* to\s*$" (str msg))) failed)
+           (pr-str failed))))
+
+(defn -main [& _]
+  (test-unresolved-cause)
+  (test-unresolved-world)
+  (println (str "j2g.unit: " (if (zero? @failures) "all passed" (str @failures " failed"))))
+  (shutdown-agents)
+  (System/exit (if (zero? @failures) 0 1)))
