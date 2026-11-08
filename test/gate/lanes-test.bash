@@ -211,16 +211,16 @@ else no "bin/gate's options: $st1 $st2: $(head -2 "$t/opt1.txt" "$t/opt2.txt")";
 # 7a. the rule, both implementations: CASE AVAIL BIG "R:GIB[:USED]..." "W:NAME:GIB..." EXPECTED (AVAIL: MemAvailable
 # less the margin, in GiB; USED: the running step's tree now, GiB)
 rule_free() {
-  local name=$1 a=$2 g=$3 rs=$4 ws=$5 want=$6 d=$t/free-$1 i=0 x gb u got1 got2
+  local name=$1 a=$2 g=$3 rs=$4 ws=$5 want=$6 strict=${7:-0} d=$t/free-$1 i=0 x gb u got1 got2
   mkdir -p "$d/run" "$d/wait"
   for x in $rs; do i=$((i + 1)); x=${x#R:}; gb=${x%%:*}; u=0; case $x in *:*) u=${x#*:} ;; esac
     echo "$gb $mst $(awk -v u="$u" 'BEGIN {printf "%d", u * 1048576}')" > "$d/run/00000-r$i.$me"; done
   i=0
   for x in $ws; do i=$((i + 1)); x=${x#W:}; echo "${x#*:} $mst" > "$d/wait/$(printf '%05d' "$i")-${x%%:*}.$me"; done
-  got1=$(GATE_LANE_MODE=free GATE_LANE_MARGIN_GIB=0 GATE_LANE_MEMAVAIL_KIB=$(awk -v a="$a" 'BEGIN {printf "%d", a * 1048576}') \
+  got1=$(GATE_LANE_STRICT=$strict GATE_LANE_MODE=free GATE_LANE_MARGIN_GIB=0 GATE_LANE_MEMAVAIL_KIB=$(awk -v a="$a" 'BEGIN {printf "%d", a * 1048576}') \
          GATE_LANE_BIG_GIB=$g "$here/bin/gate-lane" --decide "$d" | sed 's/^[0-9]*-//; s/\.[0-9]*$//' | tr '\n' ' ')
   # shellcheck disable=SC2086
-  got2=$(lanes decide-free "$a" "$g" $rs $ws 2>"$d.err" | tr '\n' ' ')
+  got2=$(GATE_LANE_STRICT=$strict lanes decide-free "$a" "$g" $rs $ws 2>"$d.err" | tr '\n' ' ')
   if [ "$got1" = "$want" ] && [ "$got2" = "$want" ]; then ok "free rule $name: admitted [$want]"
   else no "free rule $name: bin/gate-lane [$got1], gate.lanes [$got2], want [$want]"; fi
 }
@@ -233,6 +233,12 @@ rule_free head-big      30 16 "R:10 R:10" "W:b:25 W:s:1"                     "b 
 rule_free head-reserved 30 16 "R:3"       "W:b:40 W:s:2"                     ""
 rule_free alone-over    10 16 ""          "W:b:40 W:s:1"                     "b "
 rule_free greedy-small  40 16 "R:31"      "W:b:22 W:s:3 W:t:9"               "s "
+# GTS255 (b): --concurrent's strict rule. 50 GiB declared at 48.7 free: the free rule admits the big one beside the
+# small steps (44 <= 48.7), the strict one refuses it (ROOM 42.7) and holds its place; a fit is admitted in both
+rule_free big-beside-small    48.7 16 "R:3 R:3"   "W:b:44 W:s:1"  "b "
+rule_free big-beside-small-st 48.7 16 "R:3 R:3"   "W:b:44 W:s:1"  ""  1
+rule_free big-fits-st         48.7 16 "R:3 R:3"   "W:b:40 W:s:1"  "b s "  1
+rule_free big-alone-st        10 16 ""            "W:b:40 W:s:1"  "b "  1
 
 # 7b. the admission: a blocker of the whole free memory (13 GiB) first, then four big steps (6 GiB each, big from 5: 24
 # GiB, over the 13 free) and a small one (1 GiB) waiting; then b1 and b2 at once (12), s1 beside them (13), b3 and b4 in

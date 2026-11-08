@@ -872,3 +872,15 @@ Checked (light, no gate):
   the whole of `bin/gate-tests` under strace, passes in 6 minutes: the canary is seen and every read is declared.
 
 Proposed: GTS252 to GTS255.
+
+## 2026-11-08: GTS252-GTS255 decided, GTS255 (b) built (branch `gate-lane2`, from 2acb2463d)
+
+The user accepted GTS252 (b) now and (a) with the next runner change, GTS253 (a), GTS254 (a) and GTS255 (b), as recommended
+(doc/GATE-SURVEY.md, "Decided (2026-11-08, the user, later): GTS252-GTS255"). GTS252 (a), GTS253 (a) and GTS254 (a) wait (the
+next runner change; the first clean run in the lanes). GTS255 (b) is built ("As built: GTS255 (b)"): `bin/gate-lane` and
+`test/gate/lanes.ae` only, so no key moves. Under `--concurrent` (`GATE_LANES=1`, in the plan the view's title) a big waiter
+must fit ROOM like every other step; the essential lane is unchanged. `GATE_LANE_STRICT=1|0` overrides, for the tests. The
+brief's `GATE_LANE_MODE=free-strict` was not used: the runner tests the mode `= free` and is in every key. Alternatives: a
+fourth mode in gate-lane (rejected, the same reason); strictness from `GATE_LANE_RULE` (rejected, it is bin/gate's, not
+visible to the step). Checked: lanes-test 50 checks (4 new), 0 failed; `bin/gate --full --concurrent --plan` 6:41 at 53.8
+GiB free (non-strict 6:48 at 51.7: free memory moved), peak declared 53 (the java-interp steps, alone).

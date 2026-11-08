@@ -4990,6 +4990,38 @@ Late on 2026-11-08 the user accepted the four proposals of "As built: the essent
 - **GTS251 (a)**: a `:heavy true` step that waits for another job's big lock keeps its room in the lane. Nothing to build:
   the runner already takes the lane first and the lock second.
 
+## Decided (2026-11-08, the user, later): GTS252-GTS255
+
+The user accepted the four proposals of "As built: GTS248, GTS249", each as recommended:
+- **GTS252 (b)** now, **(a)** with the next runner change: day agents run no gates at night; the runner marks a lock-waiting
+  step's entry as holding 0 when it is next changed (it rekeys every check, so it is batched). Nothing to build now.
+- **GTS253 (a)**: the free rule becomes the clean run's default once the first clean run in the lanes has passed within its
+  night. Waits for that run.
+- **GTS254 (a)**: with GTS253 (a), the clean run shares the host's state (its `GATE_LANE_HOST_DIR` the invoking checkout's).
+  Waits for the same run.
+- **GTS255 (b)**: under `--concurrent` only, a big waiter must fit ROOM like every other step. Built (below).
+
+## As built: GTS255 (b) (branch `gate-lane2`, 2026-11-08)
+
+`bin/gate-lane`'s `lane_decide_free` and `test/gate/lanes.ae`'s `decide-free` take a strict flag. Strict drops the free rule's
+third clause (a big waiter admitted when no big step runs and G <= A) and keeps the others: G <= ROOM, the alone rule and the
+head big step's reservation, so the small steps ahead of it drain and it is not starved. Strict is on when `GATE_LANES=1`
+(`--concurrent`, the clean run's included), off for the essential lane (`GATE_LANES=free`), where nothing changes;
+`GATE_LANE_STRICT=1|0` sets it by hand (the tests'). In `--plan` bin/gate passes no `GATE_LANES`, so the view takes strict
+from the title `bin/gate` gives its `--concurrent` view (`GATE_LANES_TITLE`). Only `bin/gate-lane` and `lanes.ae` changed:
+neither is in a key, so nothing is rekeyed. (The brief's name `GATE_LANE_MODE=free-strict` is not used: the mode is tested
+for `= free` in the runner, which is in every key.)
+
+- **The tests**: `lanes-test.bash` 50 checks, 4 new (7a): 50 GiB declared at 48.7 free, running R:3 R:3, waiting a 44 GiB
+  big step and a 1 GiB one. Free rule: the big step is admitted (44 <= 48.7). Strict: nothing is admitted (ROOM 42.7, the
+  big step holds its place and its reservation). Strict with a 40 GiB big step: it and the small one are admitted. Strict
+  alone, 10 GiB free and a 40 GiB big step: admitted alone. Both implementations agree on each.
+- **The plan**: `bin/gate --full --concurrent --plan` simulates 6:41 at 53.8 GiB free (peak declared 53 GiB), and with
+  `GATE_LANE_STRICT=0` 6:48 at 51.7 GiB free: the host's free memory moved between the runs (the plan reads it live), so the
+  two are not at one point. Both peaks are 53, which is the `java-interp.*` steps, each declaring 53 GiB and run alone
+  (the alone rule, unchanged), not a big step beside small ones. The simulation holds declarations whole and RSS unknown, so
+  it can show little of the effect; the night's `events.tsv` (declared sum at each admission) shows it.
+
 ## As built: GTS248, GTS249 (write-ahead, branch `gate-lane2` on `gate-lane`, 2026-11-08)
 
 Not run as a gate: the light rules allowed only `--plan` and the gate's own tests. Changed: `bin/gate-lane`, `bin/gate`,
@@ -5082,7 +5114,7 @@ That night proves the lane. One of the night's later gates, for example the `--f
 `GATE_LANE_SHARED=1` to prove the host's state with one gate, which should behave the same. The default turns on the day
 after.
 
-**Proposed** (each needs the user):
+**Proposed** (each needs the user; decided 2026-11-08, "Decided (2026-11-08, the user, later): GTS252-GTS255"):
 - **GTS252 A lock-waiting step's room on the host's state.** With the state shared, GTS251 (a)'s cost is no longer the
   waiting gate's alone. A day gate's `:heavy true` step that waits for the big lock held by a night `--concurrent` run
   holds its declaration out of the night's room for as long as it waits. That can be 14 GiB for hours.

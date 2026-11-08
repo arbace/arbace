@@ -52,25 +52,36 @@
   AVAIL the free memory less the margin in GiB; ROOM = AVAIL less what the running steps may still take (:mem less
   :used, at least 0); a waiter is admitted when it fits ROOM, or nothing runs and none was admitted yet, or it is big
   (BIG GiB or more) and no big one runs or was admitted and it fits AVAIL; the first big one that does not fit while no
-  big one runs holds its GiB of ROOM back; a small one that does not fit holds nothing"
-  [running waiters avail big]
+  big one runs holds its GiB of ROOM back; a small one that does not fit holds nothing. STRICT (GTS255 (b),
+  --concurrent's): a big one is admitted by ROOM alone like every other step, not by AVAIL beside the running small
+  steps (it keeps its reservation, so the small steps ahead of it drain and it is not starved)"
+  ([running waiters avail big] (decide-free running waiters avail big false))
+  ([running waiters avail big strict]
   (let [held (reduce + 0 (map (fn [{:keys [mem used]}] (max 0 (- mem (or used 0)))) running))]
     (loop [room (- avail held) bigs (count (filter #(>= (:mem %) big) running)) nadm 0 reserved false ws waiters out []]
       (if-let [{:keys [name mem]} (first ws)]
         (let [b? (>= mem big)
-              ok (or (and (empty? running) (zero? nadm)) (<= mem room) (and b? (zero? bigs) (<= mem avail)))]
+              ok (or (and (empty? running) (zero? nadm)) (<= mem room) (and (not strict) b? (zero? bigs) (<= mem avail)))]
           (cond ok (recur (- room mem) (if b? (inc bigs) bigs) (inc nadm) reserved (rest ws) (conj out name))
                 (and b? (zero? bigs) (not reserved)) (recur (- room mem) bigs nadm true (rest ws) out)
                 :else (recur room bigs nadm reserved (rest ws) out)))
-        out))))
+        out)))))
 
 (defn- free? [] (= "free" (System/getenv "GATE_LANE_MODE")))
+(defn- strict?
+  "GTS255 (b): bin/gate-lane's strict test, the same: GATE_LANE_STRICT 1 or 0, else --concurrent's (GATE_LANES 1, or in
+  the plan the title bin/gate gives its view)"
+  []
+  (case (System/getenv "GATE_LANE_STRICT")
+    "1" true
+    "0" false
+    (or (= "1" (System/getenv "GATE_LANES")) (not (str/blank? (System/getenv "GATE_LANES_TITLE"))))))
 (defn- admit
   "the rule of the run: GATE_LANE_MODE=free the essential memory lane's (BUDGET the free memory less the margin), else
   GTS227 (a)'s"
   [running waiters budget big]
   (if (free?)
-    (decide-free (map (fn [m] {:mem m :used 0}) running) waiters budget big)
+    (decide-free (map (fn [m] {:mem m :used 0}) running) waiters budget big (strict?))
     (decide running waiters budget big)))
 
 ;; ---- the declarations' check
@@ -244,10 +255,11 @@
                    waiters (for [x xs :when (str/starts-with? x "W:") :let [[_ n g] (str/split x #":")]] {:name n :mem (Double/parseDouble g)})]
                (doseq [n (decide running waiters (Double/parseDouble budget) (Double/parseDouble big))] (println n)))
     "decide-free" (let [[_ avail big & xs] args
+                        strict (strict?)
                         ;; decide-free AVAIL BIG R:GIB[:USED] ... W:NAME:GIB ...: the essential lane's rule alone (the tests')
                         running (for [x xs :when (str/starts-with? x "R:") :let [[_ g u] (str/split x #":")]]
                                   {:mem (Double/parseDouble g) :used (if u (Double/parseDouble u) 0)})
                         waiters (for [x xs :when (str/starts-with? x "W:") :let [[_ n g] (str/split x #":")]] {:name n :mem (Double/parseDouble g)})]
-                    (doseq [n (decide-free running waiters (Double/parseDouble avail) (Double/parseDouble big))] (println n)))
+                    (doseq [n (decide-free running waiters (Double/parseDouble avail) (Double/parseDouble big) strict)] (println n)))
     (do (println "usage: gate.lanes mem-check ROOT STORE RECORD... | view LOGS STORE BUDGET BIG RECORD... | decide BUDGET BIG R:GIB... W:NAME:GIB... | decide-free AVAIL BIG R:GIB[:USED]... W:NAME:GIB...")
         (System/exit 2))))
