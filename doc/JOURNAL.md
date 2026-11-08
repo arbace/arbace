@@ -1134,3 +1134,18 @@ which the probe runs first; a flipped answer fails it in about 20 seconds. Wired
 `:inputs`). Checked by flipping each planted answer once by hand (REPR_HASKELL_CONTROLS): the probe's control fails each time
 with the flipped test named. Alternatives: planting beside the 308 in the one diagnose run (rejected: a flip shows after 36
 minutes); keeping the waiver. HFS-I13 (a): nothing to build. the controls passed first, then the 308 compile tests, types and values: "the answers as committed", 33 min wall (40 min CPU), one process.
+
+## 2026-11-08: night 10's merge stage rehearsed; haskell-target-oracle spliced (branch `night10-fixes`, from `mac/hs-hfsi9` 11ecb9ffa)
+
+The second dry run of night 10's merge stage (`.tmp/night10/merge.sh next|java --dry`, a scratch worktree detached at mac/next
+5ec43f7b7 and then at mac/java-night 639d42ab9; nothing merged into next or main, nothing pushed but this branch) took the
+finished branches as they were on mac late on 2026-11-08 (go-tests, gate-lane2, cpp-compl, cpp-cx12, hs-hes84, hs-hf9,
+ocaml-compl, cpp-props, hs-props, hs-hf10, scheme-props, hs-hfsi9, llvm-lls33, controls-cg, c-compl, rust-rf10b into next; java-more,
+java-older, java-classfile, java-http and next onto java-night). The conflicts and their resolutions are recorded beside the script
+(`resolve-BRANCH-FILE.{ours,theirs,merged}`, used only for the exact two blobs they were made from). One by-day edit the branches
+left: `test/gate/crops/haskell.edn`'s `haskell-target-oracle` (HFS-I2 (a)'s `target hsc && target compare`, the oracle tier's) was
+never spliced into `test/gate/steps.edn`. Spliced here with `gate.crops splice` over a fragment holding that step alone (its step,
+its `:crops :haskell` entry, its waiver), as batch 4 spliced the rest of the fragment: `gate.crops check` 0 problems,
+`test/gate/crops-test.bash` ok, `bin/gate --oracle --plan` lists it (never passed). Alternatives: splicing the whole fragment again
+(rejected: its other steps are in the table already and would be twice); leaving it to a later batch (rejected: the oracle tier's
+next run would not compare the derived installation).
