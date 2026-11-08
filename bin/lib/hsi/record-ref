@@ -9,7 +9,9 @@
 #
 # Each program: built by `ghc -O0 -rtsopts FLAGS MAIN -o NAME` in a fresh copy of its directory (its files, and a
 # testsuite test's flags from all.T, a nofib program's from its Makefile), NAME the testsuite's name, the sample's or
-# nofib's program name (GHC prints it in its messages); run there with `env -i` and a fixed environment (PATH,
+# nofib's program name (GHC prints it in its messages; a program with its own C or objects: its Haskell compiled first,
+# -no-link, so the NAME_stub.h its C includes is beside it, and an object X.o made from X.c beside it by ghc -c, as the
+# all.T's pre_cmd does: HES83 (a)); run there with `env -i` and a fixed environment (PATH,
 # LANG=C.UTF-8, TZ=UTC, no GHCRTS, HOME the directory), its stdin NAME.stdin (nofib: NAME.faststdin, else NAME.stdin)
 # or an empty file, its arguments (a testsuite test's extra_run_opts through sh, /dev/null spelled as the empty file;
 # nofib's FAST_OPTS; a sample's NAME.args), 10 s of CPU (HSI_REF_TIMEOUT) and three times that of wall time at most. Recorded per program: :status (the
@@ -115,6 +117,22 @@ one() {
   fi
   t0=$(date +%s.%N)
   local fl=(); [ "$flags" != - ] && read -r -a fl <<< "$flags"
+  # HES83 (a), d539b644's order: a program with its own C, the Haskell compiled first (-no-link, without -outputdir, which
+  # is also -stubdir), so the stub headers NAME_stub.h its C includes are beside the sources, as the testsuite's directory
+  # has them (GHC compiles a command line's C before its Haskell); and an object all.T's pre_cmd makes from the C beside
+  # it (the _ghci tests' NAME_setup: `ghc -c NAME_c.c -o NAME_c.o`) made the same way first
+  local hfl=() f hasc=""
+  for f in ${fl[@]+"${fl[@]}"}; do
+    case $f in
+      *.c|*.cmm|*.s|*.S) hasc=1 ;;
+      *.o) hasc=1; [ -f "$w/$f" ] || [ ! -f "$w/${f%.o}.c" ] ||
+             (cd "$w" && timeout 300 ghc -$opt -no-user-package-db -c "${f%.o}.c" -o "$f") >> "$w.pre.log" 2>&1 || true ;;
+      *) hfl+=("$f") ;;
+    esac
+  done
+  if [ -n "$hasc" ]; then
+    (cd "$w" && timeout 300 ghc -$opt -no-user-package-db --make -no-link ${hfl[@]+"${hfl[@]}"} "$main" -odir .pre -hidir .pre) >> "$w.pre.log" 2>&1 || true
+  fi
   if (cd "$w" && timeout 300 ghc -$opt -rtsopts -no-user-package-db "${fl[@]}" "$main" -o "$name" -outputdir .obj) > "$w.build.log" 2>&1; then
     ebuild=""
   else
@@ -124,7 +142,7 @@ one() {
   t1=$(date +%s.%N)
   if [ -n "$ebuild" ] || [ ! -x "$w/$name" ]; then
     echo "{:id \"$id\" :status :no-build :error \"$(esc "${ebuild:-no executable}")\" :build $(printf '%.2f' "$(echo "$t1 - $t0" | bc)")}" > "$r"
-    rm -rf "$w"; return
+    rm -rf "$w" "$w.pre.log"; return
   fi
   local cmd="./$name"
   if [ "$ropts" != - ]; then cmd="$cmd ${ropts//\/dev\/null/.empty}"; fi
@@ -148,7 +166,7 @@ one() {
   elif [ "$kind" != plain ]; then expv=" :expected :none"; fi
   local ex=""; [ "$exit" != 0 ] && ex=" :exit $exit"
   echo "{:id \"$id\" :status $status :stdout \"$so\" :bytes $(stat -c %s "$w.stdout") :first \"$(esc "$fo")\" :stderr \"$se\" :err-bytes $(stat -c %s "$w.stderr") :err-first \"$(esc "$fe")\"$expv$ex :build $(printf '%.2f' "$(echo "$t1 - $t0" | bc)") :run $(printf '%.2f' "$(echo "$t2 - $t1" | bc)")}" > "$r"
-  rm -rf "$w" "$w.build.log" "$w.cp.log" "$w.stdout" "$w.stderr"
+  rm -rf "$w" "$w.build.log" "$w.pre.log" "$w.cp.log" "$w.stdout" "$w.stderr"
 }
 export -f one
 export work plan opt
