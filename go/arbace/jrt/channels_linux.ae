@@ -819,3 +819,291 @@ order), as convertReturnVal.\n"
     (.PutUint64 binary/NativeEndian b 1)
     (let [(values n e) (syscall/Write (conv int efd) b)]
       (convertReturn n e false errs))))
+
+;; ---------------------------------------------------------------------------------------
+;; datagrams and multicast (F10b, "As built: F10b"): DatagramChannelImpl.c's receive0, send0 and disconnect0
+;; and Net.c's joinOrDrop4/6, blockOrUnblock4/6, setInterface4/6 and getInterface4/6. A socket address
+;; crosses as NativeSocketAddress's bytes, the kernel's struct sockaddr itself (recvfrom writes the sender's,
+;; sendto reads the target's).
+
+;; net_util.h's MAX_PACKET_LEN; in.h's and in6.h's multicast options (Linux's, the same on amd64 and arm64;
+;; IP_ADD_SOURCE_MEMBERSHIP and IP_DROP_SOURCE_MEMBERSHIP are udp_linux.ae's)
+(go/const
+  [^{:val 65536} maxPacketLen 65536]
+  [^{:val 32} ipMulticastIf 32]
+  [^{:val 35} ipAddMembership 35]
+  [^{:val 36} ipDropMembership 36]
+  [^{:val 37} ipUnblockSource 37]
+  [^{:val 38} ipBlockSource 38]
+  [^{:val 17} ipv6MulticastIf 17]
+  [^{:val 20} ipv6AddMembership 20]
+  [^{:val 21} ipv6DropMembership 21]
+  [^{:val 43} mcastBlockSource 43]
+  [^{:val 44} mcastUnblockSource 44]
+  [^{:val 46} mcastJoinSourceGroup 46]
+  [^{:val 47} mcastLeaveSourceGroup 47])
+
+(go/func bytesPtr "bytesPtr is the address of p's first byte (0 for an empty p), for a raw system call.\n"
+  ^uintptr [^{:tag (slice byte)} p]
+  (when (== (len p) 0)
+    (return 0))
+  (conv uintptr (conv unsafe/Pointer (unsafe/SliceData p))))
+
+(go/func recvfromRaw
+  "recvfromRaw is recvfrom(2) of fd into p, the sender's struct sockaddr into sa: the count and the error.\n"
+  [^int fd ^{:tag (slice byte)} p ^{:tag (slice byte)} sa] :results [int syscall/Errno]
+  (let [salen (conv uint32 (len sa))
+        (values r _ e) (syscall/Syscall6 syscall/SYS_RECVFROM (conv uintptr fd) (bytesPtr p) (conv uintptr (len p)) 0
+                                         (bytesPtr sa) (conv uintptr (conv unsafe/Pointer (addr salen))))]
+    (when (!= e 0)
+      (return -1 e))
+    (return (conv int r) 0)))
+
+(go/func sendtoRaw
+  "sendtoRaw is sendto(2) of p to fd, to the struct sockaddr sa: the count and the error.\n"
+  [^int fd ^{:tag (slice byte)} p ^{:tag (slice byte)} sa] :results [int syscall/Errno]
+  (let [(values r _ e) (syscall/Syscall6 syscall/SYS_SENDTO (conv uintptr fd) (bytesPtr p) (conv uintptr (len p)) 0
+                                         (bytesPtr sa) (conv uintptr (len sa)))]
+    (when (!= e 0)
+      (return -1 e))
+    (return (conv int r) 0)))
+
+(go/func HostChannels_Receive0_I_B1_I_I_B1_Z_I1__I_native
+  "HostChannels_Receive0_I_B1_I_I_B1_Z_I1__I_native is DatagramChannelImpl.receive0: one datagram of fd, at most
+len bytes (MAX_PACKET_LEN at most) into b at off, the sender's struct sockaddr into sender (recvfrom); ECONNREFUSED
+retried when not connected, else THROWN with it (the PortUnreachableException); UNAVAILABLE (EAGAIN: a blocking
+descriptor waits for a datagram), INTERRUPTED (EINTR) or THROWN; a pre-closed descriptor reads 0, as the dup2'd
+socket.\n"
+  ^int32 [^int32 fd ^{:tag (* ByteArray)} b ^int32 off ^int32 n ^{:tag (* ByteArray)} sender ^bool connected
+          ^{:tag (* IntArray)} errs]
+  (let [c (chanGet fd)]
+    (when (== c nil)
+      (return (chBadFD errs)))
+    (when (> n maxPacketLen)
+      (set! n maxPacketLen))
+    (let [p (byteView b off n)
+          sa (byteView sender 0 (conv int32 (len (.-A sender))))
+          ^int k -1
+          ^syscall/Errno rerr 0
+          ^int32 status 0
+          (values blocking _) (chanState c)
+          werr (waitFD c false (lit time/Time)
+                       (fn ^bool [^int d]
+                         (while true
+                           (let [(values m e) (recvfromRaw d p sa)]
+                             (when (== e 0)
+                               (set! k m)
+                               (return true))
+                             (when (== e syscall/EAGAIN)
+                               (when blocking
+                                 (return false))
+                               (set! status iosUnavailable)
+                               (return true))
+                             (when (== e syscall/EINTR)
+                               (set! status iosInterrupted)
+                               (return true))
+                             (when (and (== e syscall/ECONNREFUSED) (not connected))
+                               (continue))
+                             (set! rerr e)
+                             (return true)))))]
+      (when (and (preclosed c) (< k 0))
+        (return 0))
+      (when (!= werr nil)
+        (return (chThrown errs werr)))
+      (when (!= status 0)
+        (return status))
+      (when (!= rerr 0)
+        (return (chThrown errs rerr)))
+      (conv int32 k))))
+
+(go/func HostChannels_Send0_I_B1_I_I_B1_I_I1__I_native
+  "HostChannels_Send0_I_B1_I_I_B1_I_I1__I_native is DatagramChannelImpl.send0: len bytes of b from off (MAX_PACKET_LEN
+at most) as one datagram to the struct sockaddr of target's first targetLen bytes (sendto): the count, UNAVAILABLE
+(EAGAIN: a blocking descriptor waits for room), INTERRUPTED or THROWN (ECONNREFUSED: the PortUnreachableException);
+a pre-closed descriptor fails with EPIPE.\n"
+  ^int32 [^int32 fd ^{:tag (* ByteArray)} b ^int32 off ^int32 n ^{:tag (* ByteArray)} target ^int32 targetLen
+          ^{:tag (* IntArray)} errs]
+  (let [c (chanGet fd)]
+    (when (== c nil)
+      (return (chBadFD errs)))
+    (when (> n maxPacketLen)
+      (set! n maxPacketLen))
+    (let [p (byteView b off n)
+          sa (byteView target 0 targetLen)
+          ^int k -1
+          ^syscall/Errno serr 0
+          ^int32 status 0
+          (values blocking _) (chanState c)
+          werr (waitFD c true (lit time/Time)
+                       (fn ^bool [^int d]
+                         (let [(values m e) (sendtoRaw d p sa)]
+                           (when (== e 0)
+                             (set! k m)
+                             (return true))
+                           (when (== e syscall/EAGAIN)
+                             (when blocking
+                               (return false))
+                             (set! status iosUnavailable)
+                             (return true))
+                           (when (== e syscall/EINTR)
+                             (set! status iosInterrupted)
+                             (return true))
+                           (set! serr e)
+                           true)))]
+      (when (and (preclosed c) (< k 0))
+        (return (chThrown errs syscall/EPIPE)))
+      (when (!= werr nil)
+        (return (chThrown errs werr)))
+      (when (!= status 0)
+        (return status))
+      (when (!= serr 0)
+        (return (chThrown errs serr)))
+      (conv int32 k))))
+
+(go/func HostChannels_Disconnect0_I_Z_I1__I_native
+  "HostChannels_Disconnect0_I_Z_I1__I_native is DatagramChannelImpl.disconnect0 (Linux's): connect(2) to a socket
+address of family AF_UNSPEC, of sockaddr_in6's size on an IPv6 socket, else sockaddr_in's: 0 or THROWN.\n"
+  ^int32 [^int32 fd ^bool isIPv6 ^{:tag (* IntArray)} errs]
+  (let [sa (make (slice byte) 28)
+        n 16]
+    (when isIPv6
+      (set! n 28))
+    (let [(values _ _ e) (syscall/Syscall syscall/SYS_CONNECT (conv uintptr fd) (bytesPtr sa) (conv uintptr n))]
+      (when (!= e 0)
+        (return (chThrown errs e)))
+      0)))
+
+(go/func mcastResult
+  "mcastResult is the outcome of a multicast setsockopt e: 0; UNAVAILABLE when it may be (a join or a block) and the
+host does not support it (ENOPROTOOPT, EOPNOTSUPP); else THROWN.\n"
+  ^int32 [^error e ^bool mayBeUnavailable ^{:tag (* IntArray)} errs]
+  (when (== e nil)
+    (return 0))
+  (when (and mayBeUnavailable (or (errors/Is e syscall/ENOPROTOOPT) (errors/Is e syscall/EOPNOTSUPP)))
+    (return iosUnavailable))
+  (chThrown errs e))
+
+(go/func HostChannels_JoinOrDrop40_I_Z_I_I_I_I1__I_native
+  "HostChannels_JoinOrDrop40_I_Z_I_I_I_I1__I_native is Net.joinOrDrop4: without a source (0) IP_ADD_MEMBERSHIP or
+IP_DROP_MEMBERSHIP of a struct ip_mreq (the group, the interface), else IP_ADD_SOURCE_MEMBERSHIP or
+IP_DROP_SOURCE_MEMBERSHIP of a struct ip_mreq_source (the group, the interface, the source), each address in
+network order: 0, UNAVAILABLE (a join the host does not support) or THROWN.\n"
+  ^int32 [^int32 fd ^bool join ^int32 group ^int32 interf ^int32 source ^{:tag (* IntArray)} errs]
+  (let [^int opt 0
+        ^{:tag (slice byte)} req nil]
+    (if (== source 0)
+      (do
+        (set! req (make (slice byte) 8))
+        (.PutUint32 binary/BigEndian (subslice req 0 4) (conv uint32 group))
+        (.PutUint32 binary/BigEndian (subslice req 4 8) (conv uint32 interf))
+        (set! opt ipDropMembership)
+        (when join
+          (set! opt ipAddMembership)))
+      (do
+        (set! req (make (slice byte) 12))
+        (.PutUint32 binary/BigEndian (subslice req 0 4) (conv uint32 group))
+        (.PutUint32 binary/BigEndian (subslice req 4 8) (conv uint32 interf))
+        (.PutUint32 binary/BigEndian (subslice req 8 12) (conv uint32 source))
+        (set! opt ipDropSourceMembership)
+        (when join
+          (set! opt ipAddSourceMembership))))
+    (let [(values _ err) (sockoptRaw (conv int fd) syscall/IPPROTO_IP opt req false)]
+      (mcastResult err join errs))))
+
+(go/func HostChannels_BlockOrUnblock40_I_Z_I_I_I_I1__I_native
+  "HostChannels_BlockOrUnblock40_I_Z_I_I_I_I1__I_native is Net.blockOrUnblock4: IP_BLOCK_SOURCE or IP_UNBLOCK_SOURCE
+of a struct ip_mreq_source: 0, UNAVAILABLE (a block the host does not support) or THROWN.\n"
+  ^int32 [^int32 fd ^bool block ^int32 group ^int32 interf ^int32 source ^{:tag (* IntArray)} errs]
+  (let [req (make (slice byte) 12)
+        opt ipUnblockSource]
+    (.PutUint32 binary/BigEndian (subslice req 0 4) (conv uint32 group))
+    (.PutUint32 binary/BigEndian (subslice req 4 8) (conv uint32 interf))
+    (.PutUint32 binary/BigEndian (subslice req 8 12) (conv uint32 source))
+    (when block
+      (set! opt ipBlockSource))
+    (let [(values _ err) (sockoptRaw (conv int fd) syscall/IPPROTO_IP opt req false)]
+      (mcastResult err block errs))))
+
+(go/func groupSourceReq
+  "groupSourceReq is Net.c's initGroupSourceReq: a struct group_source_req (gsr_interface, then gsr_group and
+gsr_source, each a sockaddr_storage aligned to 8 holding a sockaddr_in6 of family AF_INET6 and the address), zeroed
+elsewhere.\n"
+  ^{:tag (slice byte)} [^{:tag (* ByteArray)} group ^int32 index ^{:tag (* ByteArray)} source]
+  (let [req (make (slice byte) 264)]
+    (.PutUint32 binary/NativeEndian (subslice req 0 4) (conv uint32 index))
+    (.PutUint16 binary/NativeEndian (subslice req 8 10) syscall/AF_INET6)
+    (copy (subslice req 16 32) (byteView group 0 16))
+    (.PutUint16 binary/NativeEndian (subslice req 136 138) syscall/AF_INET6)
+    (copy (subslice req 144 160) (byteView source 0 16))
+    req))
+
+(go/func HostChannels_JoinOrDrop60_I_Z_B1_I_B1_I1__I_native
+  "HostChannels_JoinOrDrop60_I_Z_B1_I_B1_I1__I_native is Net.joinOrDrop6: without a source (null)
+IPV6_ADD_MEMBERSHIP or IPV6_DROP_MEMBERSHIP of a struct ipv6_mreq (the group, the interface's index), else
+MCAST_JOIN_SOURCE_GROUP or MCAST_LEAVE_SOURCE_GROUP of a struct group_source_req: 0, UNAVAILABLE or THROWN.\n"
+  ^int32 [^int32 fd ^bool join ^{:tag (* ByteArray)} group ^int32 index ^{:tag (* ByteArray)} source
+          ^{:tag (* IntArray)} errs]
+  (let [^int opt 0
+        ^{:tag (slice byte)} req nil]
+    (if (== source nil)
+      (do
+        (set! req (make (slice byte) 20))
+        (copy (subslice req 0 16) (byteView group 0 16))
+        (.PutUint32 binary/NativeEndian (subslice req 16 20) (conv uint32 index))
+        (set! opt ipv6DropMembership)
+        (when join
+          (set! opt ipv6AddMembership)))
+      (do
+        (set! req (groupSourceReq group index source))
+        (set! opt mcastLeaveSourceGroup)
+        (when join
+          (set! opt mcastJoinSourceGroup))))
+    (let [(values _ err) (sockoptRaw (conv int fd) syscall/IPPROTO_IPV6 opt req false)]
+      (mcastResult err join errs))))
+
+(go/func HostChannels_BlockOrUnblock60_I_Z_B1_I_B1_I1__I_native
+  "HostChannels_BlockOrUnblock60_I_Z_B1_I_B1_I1__I_native is Net.blockOrUnblock6: MCAST_BLOCK_SOURCE or
+MCAST_UNBLOCK_SOURCE of a struct group_source_req: 0, UNAVAILABLE or THROWN.\n"
+  ^int32 [^int32 fd ^bool block ^{:tag (* ByteArray)} group ^int32 index ^{:tag (* ByteArray)} source
+          ^{:tag (* IntArray)} errs]
+  (let [opt mcastUnblockSource]
+    (when block
+      (set! opt mcastBlockSource))
+    (let [(values _ err) (sockoptRaw (conv int fd) syscall/IPPROTO_IPV6 opt (groupSourceReq group index source) false)]
+      (mcastResult err block errs))))
+
+(go/func HostChannels_SetInterface0_I_Z_I_I1__I_native
+  "HostChannels_SetInterface0_I_Z_I_I1__I_native is Net.setInterface4 (IP_MULTICAST_IF of a struct in_addr, value in
+network order) or, v6, setInterface6 (IPV6_MULTICAST_IF of an int, the interface's index): 0 or THROWN.\n"
+  ^int32 [^int32 fd ^bool v6 ^int32 value ^{:tag (* IntArray)} errs]
+  (let [b (make (slice byte) 4)
+        level syscall/IPPROTO_IP
+        opt ipMulticastIf]
+    (if v6
+      (do
+        (.PutUint32 binary/NativeEndian b (conv uint32 value))
+        (set! level syscall/IPPROTO_IPV6)
+        (set! opt ipv6MulticastIf))
+      (.PutUint32 binary/BigEndian b (conv uint32 value)))
+    (let [(values _ err) (sockoptRaw (conv int fd) level opt b false)]
+      (when (!= err nil)
+        (return (chThrown errs err)))
+      0)))
+
+(go/func HostChannels_GetInterface0_I_Z_I1_I1__I_native
+  "HostChannels_GetInterface0_I_Z_I1_I1__I_native is Net.getInterface4 (IP_MULTICAST_IF's struct in_addr, in host
+order) or, v6, getInterface6 (IPV6_MULTICAST_IF's index): 0 with the value in value[0], or THROWN.\n"
+  ^int32 [^int32 fd ^bool v6 ^{:tag (* IntArray)} value ^{:tag (* IntArray)} errs]
+  (let [b (make (slice byte) 4)
+        level syscall/IPPROTO_IP
+        opt ipMulticastIf]
+    (when v6
+      (set! level syscall/IPPROTO_IPV6)
+      (set! opt ipv6MulticastIf))
+    (let [(values _ err) (sockoptRaw (conv int fd) level opt b true)]
+      (when (!= err nil)
+        (return (chThrown errs err)))
+      (if v6
+        (aset (.-A value) 0 (conv int32 (.Uint32 binary/NativeEndian b)))
+        (aset (.-A value) 0 (conv int32 (.Uint32 binary/BigEndian b))))
+      0)))
