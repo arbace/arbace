@@ -1228,3 +1228,29 @@ a difference far from its cause; built MIR is the builder's own output), running
 links through rustc as the linker driver, which the stubs forbid). `bin/crops-score` Rust 75.0 / 95.8 / 80.0 before and after: under
 RES54 (a) eval and AOT stay 0.5 while std's records are consumed, until RF12. Proposed: RFP22 (the order after the slice), RFP23 (the run's
 record as packs), RFP24 (no gate step yet).
+
+## 2026-11-08: the Java night prepared (branch `java-night`, from next 13895c06e)
+
+By the user's decision (2026-11-08: the Java slices tonight, after night 9): one branch with the day's seven Java slices,
+each one merge commit so it reverts alone, and a night script that converts, builds, checks and gates them
+(doc/classes/JAVA-DEFERRED-TRIAGE.md, "The Java night (`java-night`, write-ahead)"). Merged in order from mac/:
+`java-serial` 05504ace6 (JCS167 slice 1; its record is the triage's, it has no journal entry) as `33b6d9b85`,
+`java-serial2` c62dac3e0 as `42efaaad4`, `java-f10b` 7b4944e36 as `ad20fb5a3`, `java-f9` 1ff91c764 as `8d526f981`,
+`java-unix` 2e6a1dfdb as `9fa6ceea2`, `java-jcv2` 79f4658d5 as `14a168531`, `java-f14` 5bbf24b7e as `386749ca8`, then
+mac/next 7744e70b4 (the day's crop merges) as `9aa350afb`. Correction to the F10b entry above: its proposals JCS168-JCS170
+are JCS220-JCS222 since this merge (the triage renumbered them; JCS167's slices 2-3 had taken JCS168-JCS171).
+
+Conflicts were the records (both kept), `go/arbace/jrt.ae`'s lists (united), the natives F10b and JCS164 both appended to
+`channels_linux.ae`, `channels_other.ae` and `HostChannels.java` (both kept), and F14 against JCS167 (`Compiler.ae`'s CF
+natives, `ClassInfo`'s fields, `interp.ae`'s requires: both; Field's primitive accessors: F14's port of jdk26u's
+FieldAccessorImpl over JCS167's simpler primGet/primSet; the generated manifest and tables: F14's superset, `bin/jrt
+manifest` unchanged after). Two interactions fixed in F14's merge: its setX refused every final field, now the ones JCS167's
+`finalWritable` allows are written (as Field.set; serialization's field reflector needs it), and JCS167's test of setInt on an
+inaccessible final field expects jdk26u's message "to (int)1". Checks by day: the joint javac check 2,420 files, 0 errors;
+`go test ./jrt` and `go vet ./jrt` (amd64, arm64); `bin/reap` 0 problems; the scores recorded again (`bin/crops-score
+--record`); `bin/gate --plan`. Alternatives considered for the reverts: plain `git revert -m 1` (every slice's revert but
+F14's conflicts, in the records and in the adjacent insertions above) and rebuilding the branch without a slice (its
+conflicts differ with each dropped slice); taken: `git revert -m 1` with a resolver for those conflicts
+(`.tmp/javanight/revert-slice.sh`), tried on a scratch worktree for each slice and four combinations: all resolved, the joint
+check 0 errors, `go vet ./jrt` clean. The night's script `.tmp/javanight/run.sh` waits for night 9 and is launched by the
+main session.

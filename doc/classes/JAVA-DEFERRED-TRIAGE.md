@@ -4095,3 +4095,75 @@ A member without a value or default (an annotation type changed after its use wa
 world, possible at the REPL) throws UnsupportedOperationException naming IncompleteAnnotationException, jrt's hand-written
 Go not reaching the translated class. (a) as built; (b) a hook jrt calls, set by jdk.internal.jrt's Java at start (the
 real IncompleteAnnotationException), a few lines. Recommended: (b) with the next slice.
+
+## The Java night (`java-night`, write-ahead)
+
+The user's decision of 2026-11-08: the day's seven Java slices on one branch, converted and tested together in the
+night after night 9, each slice revertable on its own. Branch `java-night` from `next` `13895c06e`, one merge commit a
+slice (mac/ refs), then `next` again (`7744e70b4`, the day's five crop branches) at `9aa350afb`.
+
+**The merges and their conflicts** (resolutions in each merge commit's message):
+
+- `java-serial` (05504ace6): none.
+- `java-serial2` (c62dac3e0, on java-serial): the journal (both kept).
+- `java-f10b` (7b4944e36): the journal and this file (both kept; **F10b's proposals JCS168-JCS170 renumbered JCS220-JCS222**:
+  JCS167's slices had taken JCS168-JCS171); `go/arbace/jrt.ae` (the test files of both).
+- `java-f9` (1ff91c764, F9 and JCS162): the journal, this file, LICENSE.md (both kept); `go/arbace/jrt.ae` (the lists and loads
+  united).
+- `java-unix` (2e6a1dfdb, JCS164, on java-f9): `go/arbace/jrt/channels_linux.ae`, `channels_other.ae` and
+  `overlay/jdk/java.base/jdk/internal/jrt/HostChannels.java` (F10b's datagram natives and JCS164's UNIX natives inserted at the
+  same place: both, F10b's first); `test/jrt/jrt_sources.ae` (selector-sources' comment rewritten for both).
+- `java-jcv2` (79f4658d5): the journal; the Makefile (java-golden); `test/crops/scores.edn` (recorded again after the merges).
+- `java-f14` (5bbf24b7e): the journal and this file (both); `bin/javac-vendor` (F9's java.nio.file and F14's annotation files
+  both out of javac's base files); `arbace/classes/interp.ae` (both requires: suid, annot); `arbace/lang/Compiler.ae` (CF's
+  natives of both); `go/arbace/jrt/class.ae` (ClassInfo's SerialNew, SerialUID, HasSerialUID and Annots, AnnNew);
+  `go/arbace/jrt/reflect.ae` (Field's primitive accessors: F14's port of FieldAccessorImpl in place of JCS167's primGet/primSet);
+  the generated `manifest.edn`, `manifest_test.ae`, `reflect_tables.ae` (F14's side, a superset; `bin/jrt manifest` afterwards
+  leaves them unchanged). **Interactions fixed**: F14's Field.setX refused every final field; it now allows the ones JCS167's
+  `finalWritable` allows, as `Field.set` does (serialization's field reflector writes accessible final fields); JCS167's test of
+  setInt on a final field not made accessible expects jdk26u's message, "to (int)1" (FieldAccessorImpl's
+  `throwFinalFieldIllegalAccessException(int)`).
+
+**Light checks** (by day, on the merged head): the joint javac check (`.tmp/night7/all9-run.sh`): 2,420 files, **0 errors**, 5,192
+classes (16 s, 1.0 GB), the same after next's merge; `go test ./jrt` passes (amd64; go/'s crop packages expat, pyexpat and oi
+fail by themselves, as on next); `go vet ./jrt` clean on linux/amd64 and arm64; `bin/jrt manifest` unchanged; `bin/reap` 0
+problems; `bin/crops-score --judge --strict` 0 after `--record` (Java's cells as JCS167's matrix, independence 99.72% as
+JCV2's); `bin/gate --plan`: 48 steps, 42 to run. Each slice's revert (and the combinations f14+f10b, f14+unix+f9+f10b,
+f14+serial2+serial, jcv2+unix+f9+f10b+serial2+serial) made by the night's revert tool on a scratch worktree: every one
+resolved, balanced, the joint javac check 0 errors, `go vet ./jrt` clean (JCS167's slice 1 after `bin/jrt manifest`).
+
+**The revert table** (newest first; `.tmp/javanight/run.sh` holds the same):
+
+| slice | branch (head) | merge on java-night | revert first | kept at its revert |
+|---|---|---|---|---|
+| F14's first slice | `java-f14` (5bbf24b7e) | `386749ca8` | | |
+| JCV2 | `java-jcv2` (79f4658d5) | `14a168531` | | |
+| JCS164 | `java-unix` (2e6a1dfdb) | `9fa6ceea2` | | |
+| F9, JCS162 | `java-f9` (1ff91c764) | `8d526f981` | JCS164 | |
+| F10b | `java-f10b` (7b4944e36) | `ad20fb5a3` | | |
+| JCS167 slices 2-3 | `java-serial2` (c62dac3e0) | `42efaaad4` | | |
+| JCS167 slice 1 | `java-serial` (05504ace6) | `33b6d9b85` | slices 2-3 | `reflect.ae`, `reflect_test.ae` (F14's) |
+
+A revert is `git revert -m 1` of the merge by `.tmp/javanight/revert-slice.sh`: the records (the journal, this file,
+LICENSE.md, the scores) keep the slice's text; `go/arbace/jrt.ae` drops the deleted files; any other conflict is each hunk's
+current text less the lines the slice added there (its brackets rebalanced); `bin/jrt manifest` afterwards.
+
+**The night's script** (`.tmp/javanight/run.sh`, logs and progress.log in `.tmp/javanight/`, heavy commands under
+`.tmp/heavy bin/heavy-lock`): (w) wait for night 9's "night 9 done" (or a stop line); (m) `mac/next` merged in (night 9's
+records; the journal's entries both kept, the scores and the matrix next's, anything else stops the night); (p) the pipeline:
+the joint check; `bin/javac-vendor convert`; `bin/jrt-convert update` on javac's newest tool (`GOMEMLIMIT=28GiB`); `bin/jrt
+modules`; `bin/j2g-edge update`; `bin/javac-vendor edge` and `verify`; `bin/generated-check`; `bin/arbace-go --build` with
+`J2G_DEFAULT_SUID=1 J2G_DEFAULT_SUID_OUT` (JCS168, decided (a)), `--smoke`, `bin/jrt test` (arbace/jrt's lines on amd64 and
+arm64); the slices' smokes against their expected output (JCS167's round trips, streams-check 16 of 16 and suid-check 26 of 26,
+F10b's datagrams, F9's files, JCS164's UNIX socket, F14's annotations); JCS168's comparison with the JDK's 118 values (a
+difference goes to JCS190's record, no revert); JCV2's `bin/java-check golden` and `verdicts --verify`; `bin/java-check
+--levels interp,compiled --only <the active slices' areas> --save` and `--judge` (saved and judged, not recorded: a regression
+or a passing control reverts the slices whose areas it falls in, "in no class" is the day's classification); the conversion
+committed, `bin/reap`, `bin/crops-score` (recorded again if it differs); (g) `bin/gate` (one plain rerun); on a pass next and main
+fast-forwarded to java-night (`next`'s worktree and mac, origin main, mac main), never forced. A failing step's error lines are
+matched against each slice's names (or, for Java's tests, its areas); the newest matching slice is reverted (with the slices
+depending on it), the uncommitted outputs dropped and the pipeline run again, at most four reverts; a failure no slice matches
+stops the night for the morning, nothing reverted and nothing fast-forwarded.
+
+**The day after**: the new failures' classes, `bin/java-check --record` of the levels (the whole corpus with the gate's
+`--full`), `bin/reap --record`, `bin/crops-score --record`; JCS190 (the switch's default) on step p's comparison.
