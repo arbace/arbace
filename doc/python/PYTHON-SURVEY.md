@@ -4337,3 +4337,89 @@ show a gain.
 
 Left: `test_lifecycle.StartupTests.test_sys_path_0` under `-c` (the sub's `sys.path[0]` is the `-c` file's directory, not ''),
 `TestInterpreterClose.test_remaining_daemon_threads` (its subprocess exits 1), the shared GIL (the DECISION).
+
+## Design: 231, `_multiprocessing`, posix's pointer calls, posix_spawn's signals, `_socket`'s rest and signal timing (2026-11-08, the Mac VM, queue 231)
+
+The classes `:multiprocessing`, `:pointer-syscall`, `:spawn-signals`, `:socket-gaps` and `:signal-timing`, base d4446bf26.
+Judged by test_posix, test_signal, test_socket (`bin/pyi lib-test --aot`) and test_multiprocessing_spawn (sampled). Before
+any change (run): 974 methods, 771 equal, 196 classed, 7 failing; by class `:socket-gaps` 152, `:signal-timing` 15,
+`:pointer-syscall` 3; failing test_posix's two test_setsigmask (the child pyi died of SIGUSR1: the mask was never applied)
+and five of test_socket's (TestLinuxAbstractNamespace's three, testInterruptedTimeout, testMakefileCloseSocketDestroy).
+
+**`_multiprocessing` as a port of semaphore.c over musl's semaphores.** SemLock's methods follow
+Modules/_multiprocessing/semaphore.c (ISMINE, the recursive count, `release`'s maxvalue check by sem_getvalue,
+`_rebuild`'s sem_open by name, the messages). Under it, sem_open, sem_post, sem_trywait, sem_timedwait, sem_getvalue,
+sem_unlink and sem_close are musl's: the file `/dev/shm/NAME` (`__shm_mapname`'s rules), a 32-byte sem_t mapped shared,
+created under a temporary name and linked (no opener sees it half written), one mapping per name and process (musl's
+table: `_rebuild` in the same process gets the same handle, as CPython shows). Go forms have no atomic operation on a
+mapping's memory, so what musl does by compare-and-swap is done under a lock: flock(2) on the file between processes and a
+mutex between this process's threads; the waiters sleep in futex(2) on the value's address (reflect's Pointer of the
+mapping, as mmap's msync takes it) and sem_post wakes one. Go restarts a futex wait after its own signal handlers, so a
+waiter on the main thread sleeps in slices of 20 ms and runs the pending handlers between them, semaphore.c's own
+`sem_timedwait_save` algorithm. Alternatives: System V semaphores (no pointer to shared memory) were rejected: their
+IPC_RMID destroys at once where sem_unlink leaves open handles working, and a crashed process leaks them system-wide;
+`_posixshmem`'s shm_open and shm_unlink come with it (musl's over /dev/shm).
+
+**The pointer calls.** The class was by design because a raw system call took no pointer; queue 220 showed reflect's
+Pointer of a live slice does (mmap, isatty, openpty). With it: timerfd_create, settime(_ns), gettime(_ns),
+tcgetpgrp/tcsetpgrp, memfd_create, sched_getaffinity (the real mask, it was the CPU count) and sched_setaffinity, the
+xattr functions and resource.prlimit, each as posixmodule.c's and resource.c's (the buffers grown on ERANGE/EINVAL as C
+grows them). unshare and setns run on every thread (`syscall.AllThreadsSyscall`): Python's main thread is a goroutine on
+any of Go's threads and /proc/self is the leader's, so only all threads give the calling thread's view C gives.
+
+**posix_spawn's signals.** ForkExec takes no signal sets, but its child restores the forking thread's mask (Go's
+BeforeFork saves it) and resets to SIG_DFL every signal Go handles while keeping an ignored one. So setsigmask is the mask
+set on the forking thread (the goroutine locked to it) for the fork alone, and setsigdef of an ignored signal makes Go
+handle it (notified to a channel nobody reads, which drops it as SIG_IGN would) for the fork alone.
+
+**`_socket`.** recvmsg's ancillary data walked as C walks it (musl's CMSG_NXTHDR, get_cmsg_data_len, the truncation's
+RuntimeWarning; Go's ParseSocketControlMessage refused a truncated buffer whole), recvmsg_into (one receive scattered
+over the buffers, `__buffer__` taken), sendmsg_afalg, and AF_ALG's bind and accept by raw calls (Go's syscall has no
+Sockaddr of the family).
+
+**Signal timing.** Where CPython raises a pending signal's exception right after a call (pthread_sigmask's
+PyErr_CheckSignals, the exit through SIGINT after an unhandled KeyboardInterrupt), the same here; the eval breaker's
+places in the compiled loop are not touched (no bench needed), and the blocking calls Go restarts stay classed.
+
+## As built: 231, `_multiprocessing`, posix's pointer calls, posix_spawn's signals, `_socket`'s rest and signal timing (2026-11-08, the Mac VM, queue 231)
+
+As designed above; the files are `builtins_multiprocessing.go` (SemLock, sem_unlink, flags; `_posixshmem`),
+`builtins_posix_ptr.go` (timerfd, tcgetpgrp/tcsetpgrp, unshare/setns, memfd_create, sched_get/setaffinity, the xattr
+functions, prlimit), `builtins_socket_msg.go` (recvmsg's ancillary walk, recvmsg_into, sendmsg_afalg, AF_ALG's bind,
+an empty sendmsg by a raw call) and `builtins_signal_wait.go` (the main thread's waits in ppoll with a wake pipe, the
+inherited signal mask), with posix_spawn's sets in `builtins_posix_spawn.go` and exit_sigint in `builtins_signal.go`.
+What the runs added to the design:
+
+- **A blocked own signal is pending at once.** `os.kill(os.getpid(), n)` of a blocked, notified signal went through
+  Go's signal thread, so `sigpending()` right after saw nothing (test_sigpending); it is now marked pending before kill
+  returns, as the kernel does.
+- **The inherited mask.** The child of `posix_spawn(setsigmask=...)` is pyi, whose pthread_sigmask's mask is kept by the
+  module: it now starts from the thread's mask at start, so `raise_signal` of a blocked signal stays pending instead of
+  faulthandler's default action (test_setsigmask, exit 138 after the mask was applied).
+- **Go's SendmsgN of no data sends a byte** (and asks SO_TYPE, which AF_ALG refuses with ENOTSUP): sendmsg_afalg's
+  `MSG_MORE` call before the data corrupted the cipher's input; such a call is a raw sendmsg(2) now.
+- **A handler's exception through the waits.** `sockErr` turned a raised exception into an OSError of its text; it now
+  passes a `*Raised` through (poll's and epoll's callers).
+- Small: ancillary items of any sequence (lists), recvmsg_into into an array, `__buffer__` for sendmsg's data, assoclen
+  None refused.
+
+The eval breaker's places are unchanged, so the compiled loop is as fast as before (no bench). The new waits cost the
+main thread one ppoll(2) before a select, poll, epoll_wait or socket wait with a timeout, and an fcntl(F_GETFL) plus a
+ppoll before a blocking os.read; other threads are unchanged.
+
+Counts (run, `bin/pyi lib-test --aot`; before at d4446bf26, after at the head):
+
+| module | before | after |
+|---|---|---|
+| test_posix (176) | 165 equal, 9 classed, 2 failing | 170 equal, 6 classed, 0 failing |
+| test_signal (53) | 38 equal, 15 classed | 42 equal, 11 classed |
+| test_socket (745) | 568 equal, 172 classed, 5 failing | 731 equal, 10 classed, 4 failing |
+| total (974) | 771 / 196 / 7 | 943 / 27 / 4 |
+
+By class in these modules: `:socket-gaps` 152 to 1 (test_socket_type: gc.is_tracked), `:signal-timing` 15 to 2
+(test__thread_interrupt_main, test_sendall_interrupted of the runner's skip list), `:pointer-syscall` 3 to 0. The four
+failing are the base's (TestLinuxAbstractNamespace's three, testMakefileCloseSocketDestroy), not this task's.
+test_multiprocessing_spawn, sampled (13 methods of WithProcessesTestLock, WithProcessesTestSemaphore and
+WithThreadsTestSemaphore, spawn children on goi, 2 minutes): 8 equal to CPython, 3 skipped for sharedctypes (no ctypes:
+`:ctypes`), 2 errors pickling a bound built-in method (`types.MethodDescriptorType` is builtin_function_or_method:
+`:data-model`); before, the whole package skipped ("requires multiprocessing").
