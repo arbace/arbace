@@ -565,6 +565,22 @@ calls members by name must root the members it may call (§10.6; amendment P2, a
   `java.net.URLClassLoader`, which java.classpath extends, was on the list until it joined the
   world (amendment FX6, accepted 2026-10-10: jrt's own Java, finding resources as the JDK's and
   loading no classes; JRT-NOTES.md, "Resources by URL"; §10.3).
+- **Refusals at the unresolved class** (amendment JCS69 (b), decided 2026-10-25, built 2026-11-08:
+  doc/classes/JAVA-CONFORMANCE-SURVEY.md, "Decided (2026-10-25): JCS60-JCS69"). A class of the inputs
+  whose header or members name a class neither the forms, jrt nor the edge has fails at that step
+  (`header: ...`, `members: Unknown type: X (the import q.X)`, the import named as JCS44 (a) names it)
+  and is **not analyzed**: `arbace.j2g.world/load-world` marks it analyzed with that failure
+  (`:analysis-failed`, so that reachability makes it unavailable and an outer class analyzing its
+  member classes in place skips it). Until then its analysis ran on the members the failed step had
+  left without a type and stopped at the first conversion with an empty target (`Cannot convert
+  initializer of field  of type "J" to `, `value of method  of type :null`), a symptom that sorted
+  before the cause and became the compiled level's refusal (`:j2g-unresolved`, 236 tests). An analysis
+  failure of another class naming such a class (`No accessible constructor of p.C$D`, `No static field
+  f in p/C`: the missing members) carries its cause, `(because p/C$D: members: ...)`
+  (`world/unresolved-cause`). A test refused so falls in the world's classes by the area of the class
+  named (test/java/divergences.edn). The runtime's and javac's builds have no header or members
+  failure, so their translations do not change. Unit tests: `bin/j2g-unit` (test/j2g/unit.ae, the
+  fixture test/j2g/unit/unresolved).
 
 ### 4.2 Go packages
 

@@ -1482,3 +1482,32 @@ headers).
   fail by themselves, as they do on `next`.
 - `bin/reap` and `bin/crops-score --judge --strict` report 0 problems.
 - `bin/gate --plan` plans `jrt-derive` with every step keyed.
+
+## 2026-11-08: JCS69 (b), j2g's refusals at the unresolved class; `:j2g-unresolved` measured again (branch `java-j2g`, from mac/java-night 639d42ab9)
+
+The brief: raise the compiled level by attacking `:j2g-unresolved` (236 tests in JCV10's count; 302 rows of night 7's
+test/java/check-compiled.edn match its patterns). Measured first, light: the 302 tests read again (`bin/java-check --levels
+read --jobs 2`, javac's tool `.tmp/gate-exe/javac-5ad357331dbcd7cfb0fd` with `REPR_JAVA_STALE_OK=1`, into the worktree's own
+forms cache: 302 pass), then j2g's world loaded alone over jdk/forms and 30 tests at a time (a scratch namespace calling
+`arbace.j2g.world/load-world` with the edge bound as `arbace.j2g.main/run` binds it, on main's stage 0 in an archive of main
+2aafa3a35's bin, arbace, jdk, overlay and go: java-night's j2g needs the checkout's analysis, `a/*lenient*`, which no
+executable built today has; jdk/forms are the same on both). Each process peaked at 2.04-2.09 GB; a translation of even one
+test went over 2.1 GB and was stopped, so the translation is the night's.
+
+Findings: every empty conversion (`Cannot convert initializer of field  of type "J" to `, `value of method  of type :null`)
+was the analysis of a class whose members (or header) had failed to resolve, a symptom sorted before the cause, which the
+check took as the refusal; `No accessible constructor of tNNNNN.X` and `No static field f in tNNNNN/X` were the missing
+members of such a class. On today's world 182 of the 302 analyze cleanly (the world's additions since night 7); 120 still name
+a class the world lacks (java.lang.classfile 24, java.nio.channels 13, javax.management's family 19, ToolProvider 9,
+javax.security.sasl 8, ...: doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JCS69 (b)").
+
+Built JCS69 (b), decided 2026-10-25 (J2G-SPEC §4.1, "Refusals at the unresolved class"): `load-world` skips the analysis of a
+class whose header or members failed (marked analyzed with that failure, so reachability makes it unavailable and an outer
+class skips it in place), and `world/unresolved-cause` appends the cause to another class's analysis failure naming it.
+`:j2g-unresolved`'s third pattern leaves a refusal with a named cause to the world's classes by area. j2g had no unit tests:
+`bin/j2g-unit` (test/j2g/unit.ae; `make j2g-unit`) runs fixture-sized checks with the edge and no JDK forms, 0.5 GB, seconds;
+10 checks pass (on stage 0 with `J2G_UNIT_SOURCES=arbace.classes.analyze`), and with the skip removed 3 fail with the old
+message. The runtime's and javac's builds have no header or members failure in their report.edn, so their translations do
+not change; the tests' refusal reasons do. Alternatives considered: method-level stubs for the unresolved class (JCS264,
+recommended against: the interp level fails these tests at load too and few would pass) and the analyzer resolving an
+unknown import to an opaque class (the same, deeper). Proposals JCS260-JCS265 in the survey.

@@ -191,6 +191,8 @@ jrt-derive-check: ## jrt's derived overlays made again from jdk26u and compared 
 	bin/jrt-convert derive --check
 edge-verify: ## j2g's edge, on the frozen JVM (bin/j2g-edge verify)
 	bin/j2g-edge verify
+j2g-unit: ## j2g's unit tests, each over a small fixture of test/j2g/unit/ with the edge and no JDK forms: seconds (bin/j2g-unit)
+	bin/j2g-unit
 javac-verify: ## jdk/javac, javac's forms (and the JDK build's tools, java.xml's SAX parser) read by javac on Arbace (the fixpoint), all of jdk.compiler's generated sources generated on the tool by the build's langtools tools (FlagsEnum through javac on Arbace's javax.tools API), its edge on the frozen JVM; j2g translates javac's world (bin/javac-vendor verify, check)
 	bin/javac-vendor verify
 	bin/javac-vendor check
@@ -854,6 +856,7 @@ repr-ocaml-check: ## O2's check: the round trip over the default corpora and ove
 	bin/repr-ocaml check
 
 ## OCaml's row of the REAP matrix and its gate steps (O8, doc/ocaml/OCAML-SURVEY.md, "As built: O8 (write-ahead)")
+.PHONY: j2g-unit
 .PHONY: repr-ocaml-record-results ocaml-read-essential oi-essential oi-divergences-all ocaml-essential ocaml-judges
 repr-ocaml-record-results: ## the round trip over every corpus at every level, recording the read and print levels' test/ocaml/{read,print}-results.edn (bin/repr-ocaml roundtrip --cmi --record-results all)
 	bin/repr-ocaml roundtrip --cmi --record-results all

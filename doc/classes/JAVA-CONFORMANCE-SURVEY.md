@@ -4126,3 +4126,62 @@ and after. Java: completeness 72.9% (80.4% without by design), maturity 100%, in
   4,852 other lines were kept (`ref-unchanged`).
 - `--only 'no-such-test'` exits 1 after the scan, with "plans no test". Before this change, such a selection exited 0 and
   recorded nothing.
+
+## As built: JCS69 (b), the refusals at the unresolved class (2026-11-08, branch `java-j2g`, write-ahead)
+
+`:j2g-unresolved` (test/java/divergences.edn) held the compiled level's tests whose j2g refusal was an empty conversion
+(`Cannot convert value of method  of type :null to `, `initializer of field  of type "J" to `) or a missing member of a test's
+own class (`No accessible constructor of tNNNNN.X`, `No static field f in tNNNNN/X`): 302 rows of check-compiled.edn
+(night 7's record) match its patterns. Measured by day on the analysis alone (j2g's `load-world` over jdk/forms and the
+tests' forms, the edge bound as bin/j2g binds it, 30 tests a process, each under 2.1 GB; a translation does not fit in
+2 GiB): the conversion was always the symptom of a class whose **members** (or header) had failed to resolve, the
+failure sorted after it (`members: Unknown type: X (the import q.X)`), and the missing members of other classes followed
+from it.
+
+Built (J2G-SPEC §4.1, "Refusals at the unresolved class"): `arbace.j2g.world/load-world` does not analyze a class whose
+header or members failed (marked analyzed with that failure), and `world/unresolved-cause` appends the cause to an analysis
+failure naming such a class (`(because p/C$D: members: ...)`). `:j2g-unresolved`'s third pattern no longer takes a refusal
+with a named cause, so these tests fall in the world's classes by area. The runtime's and javac's builds have no header
+or members failure (their report.edn), so no translation of theirs changes. Unit tests: `bin/j2g-unit` (test/j2g/unit.ae,
+fixture test/j2g/unit/unresolved: 10 checks; its negative control, the skip removed, fails 3 of them with the old message).
+
+The re-measure on the world of the night's branch (jdk/forms as on main 2aafa3a35, which java-night does not change
+before its conversion):
+
+- **182 of the 302 analyze without a failure now** (the world's additions since night 7: java.security, javax.crypto,
+  java.lang.management, java.util.logging, java.net's datagrams...): they leave `:j2g-unresolved` at the night's compiled
+  level whatever this branch does, to a run or to a later refusal (translation, Go, a class extending one outside the
+  world: not measurable by day): t03861 t04307 t04309 t04378 t04385 t04394 t04439 t04613 t04791 t04799 t04800 t04812 t04813 t04925 t04930 t04933 t04942 t04944 t04945 t04947 t04972 t04989 t05132 t05141 t05160 t05164 t05168 t05172 t05174 t05186 t05209 t05211 t05218 t05257 t05272 t05275 t05283 t05285 t05287 t05292 t05321 t05329 t05330 t05331 t05334 t05335 t05349 t05357 t05358 t05361 t05362 t05623 t05654 t05656 t05751 t05752 t05753 t05754 t05755 t05756 t05759 t05762 t05763 t05764 t05765 t05766 t05767 t05768 t05773 t05779 t05781 t07744 t07747 t07748 t07753 t07755 t07774 t07775 t07777 t07780 t07781 t07784 t07787 t07788 t07794 t07795 t07796 t07801 t07804 t07805 t07809 t07812 t07813 t07814 t07815 t07817 t07830 t07831 t07885 t07886 t07899 t07911 t07919 t07920 t07921 t07928 t07929 t07958 t07961 t07976 t07978 t07980 t07981 t07982 t07983 t07984 t07985 t07987 t07997 t07999 t08000 t08001 t08002 t08003 t08006 t08008 t08009 t08010 t08019 t08021 t08023 t08024 t08025 t08026 t08027 t08028 t08029 t08030 t08031 t08032 t08039 t08121 t08138 t08182 t08189 t08190 t08192 t08193 t08202 t08210 t08215 t08217 t08220 t08222 t08228 t08238 t08239 t08240 t08241 t08243 t08245 t08248 t08249 t08250 t08255 t08261 t08265 t08268 t08271 t08276 t08280 t08282 t08283 t08287 t08288 t08292 t08293 t08294 t08295 t08296 t08297 t08303.
+- **120 are still refused**, now by the class the world lacks; by package: java.lang.classfile 21 (and its attribute
+  package 3), java.nio.channels 13 (MulticastChannel 9: DatagramChannel's superinterface the edge does not record;
+  AsynchronousChannelGroup, CompletionHandler), javax.management 12 (with openmbean 2, remote.rmi 1, com.sun.management 3,
+  java.lang.management 1), java.util.spi.ToolProvider 9, javax.security.sasl 8, java.net.http 4, java.nio.file 4
+  (WatchService), java.rmi 5, javax.tools 4, java.lang.reflect.AccessFlag 3, javax.security.auth.kerberos 3, com.sun.jdi
+  3, com.sun.net.httpserver 3, java.lang.ref.PhantomReference 2, the edge's missing generics 3 (ObjectOutputStream's 2,
+  CountDownLatch's 1), and one each in sun.misc, java.lang.invoke, jdk.net, java.util, javax.lang.model, javax.naming (2),
+  com.sun.nio.sctp, javax.xml (4) and jdk.dynalink. Their refusal text changes (the tests' output: their reasons); none
+  passes by it.
+
+### Proposed (JCS260-JCS265)
+
+1. **JCS260, java.lang.classfile in the world** (24 tests). (a) Leave them in `:classfile`; (b) jdk26u's
+   java.lang.classfile and jdk.internal.classfile.impl into the closure (a large library, all Java, no natives). Cost: (b)
+   days (the conversion, the closure, jrt's tables), it would also serve the reflection tests. Recommended: (b) after the
+   Java night's slices, since it is the largest single group.
+2. **JCS261, java.util.spi.ToolProvider on the compiled level** (9). The interp level runs these on javac's tool executable
+   (F6); the compiled level builds them on the gate's. (a) As now; (b) the compiled level's programs for these tests built
+   with javac's world (its compiled forms on javac's tool build). Cost: (b) a shard kind of its own, hours. Recommended:
+   (a) until the javac-tool shard is measured by night.
+3. **JCS262, the edge's gaps for the tests** (MulticastChannel's 9, ObjectOutputStream's and CountDownLatch's generics 3):
+   the edge (jdk/edge.edn) records what the builds ask, not what the tests' classes ask. (a) As now; (b) `bin/j2g-edge
+   update` with a recording run over the compiled level's test forms as one more build (frozen JVM, by night). Cost: (b)
+   an hour, a heavy run. Recommended: (b), with java-net's DatagramChannel slice.
+4. **JCS263, javax.management and javax.security.sasl** (19 with openmbean, remote, com.sun.management and ManagementFactory's cut; and 8): world slices of their own (JC6's triage). Recommended:
+   ranked with JCV10 (b)'s table.
+5. **JCS264, method-level stubs for an unresolved class** (J2G-SPEC's operation-level stubs one level up): a member naming
+   a class no world has dropped, a method whose body fails at it translated as a throwing stub, so the test runs and fails
+   only if it reaches it. (a) No: the interp level fails these tests at load too, and few would pass (the class is the
+   test's subject); (b) yes. Cost: (b) days, in the analyzer and j2g. Recommended: (a).
+6. **JCS265, a day-light analysis verb**: `bin/j2g --analyze-only` (the load and its failures, no translation), which this
+   measurement wrote as a scratch script (2.1 GB for jdk/forms and 30 tests; j2g's translation needs more than 2 GiB even
+   for one test). (a) Scratch, as now; (b) the verb, documented. Cost: (b) an hour. Recommended: (b).
