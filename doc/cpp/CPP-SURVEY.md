@@ -4209,3 +4209,171 @@ None against the day's rules. One debugging script printed a scope (a cyclic map
 Scratch kept in the worktree's `.tmp/`: `x1/`-`x4/` (the measure's runs; `x4/` the recorded one, `own-rec.txt` its tables),
 `t3/` (the probes, `dbg.ae`, the extras' lists), `base-tree/`, `gen-base/`, `gen-new/`, `gen-new2/` (the code generator's
 comparison), `ctl3.log`, `*.log`.
+
+## Decided (the user, 2026-11-08: CP290-CP294)
+
+All five as recommended (a): CP290, generic lambdas in the code generator's Sema, the closure's `operator()` a member function
+template; CP291, fold expressions, the comma fold among them, parsed and expanded at instantiation; CP292, the return-type-requirement
+for the code generator too; CP293, the file's standard bound in the code generator; CP294, gcc's unknown attributes kept by the
+parser as `:_gattrs` data (no tree node), each checked by its rules, strict_flex_array first.
+
+## As built: CP290-CP294 (2026-11-08; branch `cpp-cx12` from 013681c7e)
+
+The five decisions, each in the code generator's Sema where the decision puts it (so the generated programs gain them too) and in
+the checker. The every-10th sample's own passes go from 86 to **89** of 454; the extras (own errors on lines that expect none)
+stay 92 lines, the same lines. The code generator's output over test/cpp/codegen's 142 samples: 131 byte for byte, 10 that were
+refused since a14d52531 generated again (below), rtti refused as before.
+
+### The design
+
+- **CP290 (a), generic lambdas** ([expr.prim.lambda.closure]/3-4, [dcl.fct]/22): the native parser keeps a generic lambda's closure
+  empty as before (clang's AST has its `FunctionTemplateDecl` there, the tree compared with clang's unchanged) and its parts as data,
+  `:_glam` on the closure's record: the explicit template-parameter-list's nodes, the parameters, the operator's type as written.
+  `arbace.cpp.sema/generic-lambda-expr` makes the closure class and declares its `operator()` as a member function template through
+  the templates' `:declare` hook: one invented type template parameter for each parameter's `auto` (a pack for `auto...`), after the
+  explicit ones, the pattern a `CXXMethodDecl` over the parameters and the lambda's body (const unless `mutable`; the trailing return
+  type when written). A call deduces it and instantiates it as any member function template (arbace.cpp.template: deduction,
+  `instantiate-fn`, the lazy definition); the specialization's body is analyzed in the lambda's context: `analyze-fn!` gives it the
+  lambda's captures (`:glam` on the closure), its init-captures' names, and the names visible at the lambda (the cutoff at its
+  position, [temp.res]: two-phase lookup's definition point, which lookup/operator-3a's operators declared after it need); a body
+  with no return statement returns void. The closure object is made at the lambda, so its captures are found there: the explicit
+  ones, and for a capture-default the variables and `this` its body names ([expr.prim.lambda.capture]/7: in a generic lambda an
+  entity named in a dependent full-expression is captured), in the order written (`glam-names`, through fold operands and nested
+  generic lambdas' parameters; `glam-declared` the body's own names); a specialization that needs a capture the scan did not find
+  is refused (`:sealed`), never added to an object already built. The closure mangles as clang's: `$_N` outside an inline function
+  (its specializations internal, `_ZZ4mainENK3$_0clIiEEDaT_i`), `Ul<the parameters>E_` in one (`_ZZN1S1gEvENKUlT_E_clIiEEDaT_`).
+  Not built: the conversion function template to a pointer to function of a captureless generic lambda ([expr.prim.lambda.closure]/9):
+  a use is refused, and in the checker a call no candidate takes with a generic closure among its arguments is not diagnosed (its
+  conversion may have made one viable; diagnostic/param-type-mismatch-3's pass withdrawn by this rule: CP301).
+- **Found with CP290: a member of a type-dependent object** (`x.f()` with `x` of a template parameter's type, `this->c.s()` in a
+  class template): since a14d52531 (2026-11-04) the native tree has clang's `CXXDependentScopeMemberExpr` for it, which the code
+  generator's Sema refused, so 10 samples of test/cpp/codegen (tmpl-members, tmpl-dependent, hdr-vector, hdr-iostream, ...) were
+  refused since; re-analyzed in a specialization it is a member access as a `MemberExpr` is. Their functions' names against clang's
+  IR of the same samples (cpp-runtime-own's codegen-check of today, its `x.ll`): equal, but hdr-vector's known `_Vector_impl`
+  constructor (Q not mangled, G5.6). In the checker it gives diagnostic/pr79304's `this->c.s()` (a member of a pointer).
+- **Found with CP290: `template <class...>`, a parameter list of unnamed parameters** is a template's: the parser's `in-template?`
+  asked the scope for names, so such a template's deduced return type was taken from its body as outside templates (`(lambda at
+  ...) ()`, which the code generator cannot resolve); the scope now holds a name no lookup can spell. The pattern's type is `auto ()`,
+  clang's.
+- **Found with CP290: [class.copy.ctor]/7, [class.copy.assign]/2**: the implicit copy constructor's parameter is `X&` when a base or
+  member of class type `M` has copy constructors none of which takes a `const M&` (B's `C(C&)` in cpp1y/lambda-generic-89419), the
+  copy assignment's alike; it was `const X&` always, so such a class's copy was deleted and `return g;` of one was refused (an extra
+  once the generic lambda before it analyzed). For the code generator too: the implicit member mangles `C2ERS_` as clang's.
+- **CP291 (a), fold expressions** ([expr.prim.fold], [temp.variadic]/11-12): the parser's check of a parenthesized fold now takes the
+  comma among the fold-operators (the comma fold was a decline), and in the code generator's mode (the headers in full) parses the
+  four forms (`parse-fold`: the operator the token beside the `...`, a `>>` or `>=` of glued `>` tokens among them; each operand a
+  cast-expression with the operators that bind tighter, clang's recovery) into `:_fold {:op :l :r}` on the node, which stays the text
+  node it was (the tree unchanged). Sema expands the pattern over its packs' elements (the `:expand-pack` hook, the side that names a
+  pack the pattern) and applies the operator from the right or the left, the init on its side, each step analyzed as the written
+  binary operator would be (overloaded operators, `&&`'s and `,`'s rules: an operand already analyzed passed as `__Typed`); an empty
+  unary fold is `true` for `&&`, `false` for `||`, `void()` for `,`, else ill-formed, the checker's diagnostic "unary fold expression
+  has empty expansion". The parser's final pass (`this-members`) walks the operands too.
+- **CP292 (a)**: a compound requirement's return-type-requirement is evaluated for the code generator too (a constraint the program
+  fails drops the candidate: `pick(B{})` takes the other overload, as clang); what the slice cannot evaluate, or a false met with a
+  doubt (CP281 (a)'s flag), stays true for the code generator as before, a doubt in the checker.
+- **CP293 (a)**: `arbace.cpp.sema/cxx-year` (moved from the diag namespace) is bound from the file's standard in `gen-file` too, so
+  the code generator's C++20 parenthesized aggregates and the constant evaluator's year-dependent rules (a negative left shift is
+  defined from C++20) follow the standard the file is built at (`gen-list` and codegen-check: c++23; cppi's route: the test's).
+- **CP294 (a), gcc's unknown attributes as data**: `attr-nodes` records a GNU attribute clang does not know (`gnu-attrs`, which drops
+  it) written in the main file, `__attribute__((x))` or `[[gnu::x]]`, in the parser's slot `GATTRS` (its name without `__` affixes,
+  its arguments' texts split at their top-level commas, its offset); a `FieldDecl` or `VarDecl` takes those of its declarator and, the
+  first of a declaration, of its declaration-specifiers, as `:_gattrs` (a `:_` key: the tree compared with clang's unchanged).
+  `arbace.repr.cpp.diag/gnu-attrs` applies each attribute's rules (`gattr-rules`), written from the GCC 15.2 manual's "Common Variable
+  Attributes" (gcc/doc/extend.texi of the pinned gcc-15.2.0.tar.xz), clean-room, the messages Arbace's own: strict_flex_array takes
+  one argument, applies to a field of array type, its level an integer constant from 0 to 3 (a non-constant judged only when it is a
+  namespace-scope variable of the main file neither const nor constexpr; the field's being the trailing one not checked).
+
+### The measure (the every-10th sample, 454 supported; clang's table from the first slice's outputs, by hand)
+
+| step | own passes | own pass, clang's record fails | the step's new passes (each read) |
+|---|---:|---:|---|
+| the third slice (013681c7e) | 86 | 9 | |
+| + CP293, CP290 with the dependent member access and the unnamed parameters | 88 | 9 | lookup/operator-3a (37 lines: each statement's operator on `N::A` with the operators declared after the lambda), diagnostic/pr79304 (`this->c.s()`, `c` a pointer) |
+| + CP291, CP292, CP294 | 89 | 10 | strict-flex-array-1 (its 5 lines, each by its rule; clang knows no such attribute) |
+| + the implicit copy's `X&`, generic closures' conversions unsure (the recorded run) | **89** | 10 | none (the two rules keep the sample as it was; on the features' files below they withdraw one pass and keep one) |
+
+The features' files of the whole part (99 dg-error files naming a generic lambda, a fold or strict_flex_array; `.tmp/t5/feat-all.txt`),
+the base tree against this branch: own passes 12 → 16 (`.tmp/f0`, `.tmp/f3`). Gained: lookup/operator-3a, operator-4, operator-4a, operator-5a (the folds' 56
+lines each), strict-flex-array-1; diagnostic/param-type-mismatch-3 gained and withdrawn (below). Lost: cpp2a/concepts-lambda19 (and, in an intermediate run, cpp1y/lambda-generic-89419: its `return g;` was refused by the implicit copy's form, an extra once the generic lambda before it analyzed; fixed, above).
+
+**The no-false-credit review**: every new pass was read against its source. operator-3a, -4, -4a, -5a: each expected line an
+operator no candidate serves ("no match for 'operator@'", the operators declared after the template's definition, N's namespace
+declaring none), none on the valid lines (`&x`, `x, x`, the commas). pr79304: the member of a pointer, gcc's error. strict-flex-array-1:
+the five rules on their lines. Two were withdrawn: diagnostic/param-type-mismatch-3 passed by "no matching function" at line 10,
+which the slice would also say of a valid call, since it has no conversion of a generic closure to a pointer to function (the rule
+above makes such a call unsure); cpp2a/concepts-lambda19 passed before by the parser's decline of the comma fold (a syntax error on
+a valid line that happened to be the expected one); parsed now, its real error (the lambda's constraint at the explicit
+instantiation `f<int, int, char>`, which the checker does not instantiate) is not judged: a false credit gone. No other pass lost;
+the extras' lines are the same 92.
+
+### What was built
+
+- `arbace/cpp/sema.ae`: `generic-lambda-expr`, `glam-names`, `glam-declared`, `node-children`; `capture-field`'s sealed refusal;
+  `analyze-fn!`'s generic lambda context and cutoff; `CXXDependentScopeMemberExpr` (an expression and a callee); `CXXFoldExpr` and
+  `__Typed`; the return-type-requirement for both (CP292); `cxx-year`; the implicit copy members' `X&`; the overload refusal unsure
+  with a generic closure argument.
+- `arbace/cpp/codegen.ae`: `gen-file` binds `*cxx-year*` (CP293).
+- `arbace/repr/cpp/parse.ae`: `:_glam`; the unnamed template parameters' scope name; `fold-op-token?`, `fold-operand`, `parse-fold`
+  and `:_fold`, `this-members` through it; the slot `GATTRS`, `unknown-gnu-attr!`, `gattrs-in`, `:_gattrs` on fields and variables.
+  The parser is in the skim cache's key: the cache's entries are made again once.
+- `arbace/repr/cpp/diag.ae`: `gnu-attrs`, `gattr-rules` (strict_flex_array), `int-literal`; the rule for an empty unary fold;
+  `cxx-year` from sema.
+- `test/cpp/check-dg-own-linux-amd64.edn` recorded again (454 rows, 89 passes); `test/crops/independence.edn`'s C++ read fact
+  (`:dg-own [89 1] :dg-clang [4508 0.5]`); `test/crops/scores.edn`.
+
+### Checked (light; clang, clang++, clang-23, g++, gcc, cc, cpp, c++, cc1, cc1plus, ld and as stubs exiting 99 first on PATH, their log empty)
+
+| check | result |
+|---|---|
+| the sample by the own front end (`arbace.repr.cpp.dg read`, `own --clang`; three runs) | 454 files, own pass 88 → 89 → 89, no earlier pass lost, the extras' 92 lines unchanged |
+| `own .tmp/y3 --clang .tmp/s10/cl --record` (the committed record) | 454 rows, 89 passes |
+| the features' 99 files of the whole part, base 013681c7e and this branch | own pass 12 → 16 (above) |
+| the code generator: `gen-list` over test/cpp/codegen's 142 samples, base 013681c7e and this branch (twice) | 131 byte for byte; 10 generated that were refused since a14d52531 (their function names equal clang's IR's, hdr-vector's known one aside); rtti refused as before |
+| probes (`.tmp/t5/`: generic lambdas with every capture form, packs, explicit template parameters, mutable, nested, `this`; the four fold forms and the comma; constrained overloads with a return-type-requirement; strict_flex_array) | the code generator's IR as clang names and orders it (the closures' specializations, a right fold's evaluation order); no diagnostic on the valid probes, the errors where the standard has them |
+| `bin/repr-cpp dg --corpus dg-error --front native --only` dr2082, dr1423 (the dg control) | `_control/dg/dr2082-vs-dr1423 fails as it must` |
+| `make check-makefile`; `gate.crops check . test/gate/steps.edn`; `bin/gate --full --plan` | pass; 0 problems; `cpp-dg.dg-error-own` planned (no step changed) |
+| `bin/crops-score --crop cpp`; `--record`; `--judge --strict` | 76.1 / 100 / 67.8 (read 0.655: 89 own-judged dg cases, the fourth decimal); scores.edn unchanged; 0 refuted, 0 problems |
+
+### The night's commands (one process at a time; `export ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace GOMEMLIMIT=1400MiB REPR_CPP_THREADS=2`)
+
+```
+PATH=<stubs>:$PATH bin/repr-cpp dg --corpus dg-error --front native --record   # the 4,597 files by Arbace's front end, about 75 min at two threads; writes test/cpp/check-dg-own-linux-amd64.edn
+# then test/crops/independence.edn's C++ read fact: :cases {:dg-own [N 1] :dg-clang [M 0.5]} with N the record's passes, M = 4597 - N; bin/crops-score --record
+bin/repr-cpp dg --corpus dg-error --front native                               # cpp-dg.dg-error-own's command: the record held
+bin/cppi codegen-check .tmp/cppi/codegen-check                                 # clang and gcc live: the 10 samples generated again judged (expected: back to 141 of 142, hdr-vector known)
+bin/repr-cpp native-check samples                                              # clang live: the comma fold no longer a decline, `template <class...> auto f()`'s type auto as clang's; :_glam, :_fold, :_gattrs are :_ keys
+```
+
+### Proposed (CP300-CP305; none decided)
+
+- **CP300: function templates that differ only by their constraints.** `declare-template` takes two function templates of the same
+  signature and parameters for one, their requires-clauses aside, so `template <class T> int f(T) requires C<T>` and an unconstrained
+  `f(T)` are one template (the later pattern wins); and no candidate is more constrained than another. (a) Constraints in the
+  redeclaration's identity ([temp.over.link]/7) and the tie-break by subsumption ([temp.constr.order], clang's IsAtLeastAsConstrained
+  over the normal forms), about a day; (b) the overloads distinct, an ambiguity refused; (c) leave. **Recommended: (a).**
+- **CP301: a captureless generic lambda's conversion to a pointer to function** ([expr.prim.lambda.closure]/9). A conversion function
+  template whose specialization's `__invoke` calls the matching `operator()` specialization; deduction from the target type
+  ([temp.deduct.conv]). (a) Build it (half a day); (b) as built: refused, the checker unsure. **Recommended: (a).**
+- **CP302: the code generator's light half in the gate.** The 10 samples refused since a14d52531 went unnoticed for four days:
+  codegen-check needs clang and gcc (the night's), and no step generates the samples. (a) A `--full` step `cpp-codegen-gen`: `gen-list`
+  over the 142 samples (no clang, about 5 minutes at one thread), the refusals against a recorded list
+  (`test/cpp/codegen/refusals.edn`) and the forms' digests against a record; (b) in the essential gate (5 minutes); (c) as now.
+  **Recommended: (a).**
+- **CP303: the next unknown GNU attributes.** In the whole part's files: musttail (22 uses), no_dangling (14), transaction_safe,
+  transaction_unsafe, transaction_wrap (14, `-fgnu-tm`), warn_if_not_aligned (4). (a) Their rules from the manual, as
+  strict_flex_array's, in that order, a measure each; (b) only those whose dg-error lines are in the part's failing files. **Recommended:
+  (a)** with (b)'s list as the order.
+- **CP304: a generic lambda's implicit captures in unevaluated operands.** The scan captures every variable the body names; clang does
+  not capture one named only in an unevaluated operand (`sizeof`, `decltype`, `noexcept`, `alignof`, a requires-expression), so a
+  closure's size can differ. (a) The scan skips unevaluated operands; (b) leave. **Recommended: (a)**, small.
+- **CP305: explicit instantiation definitions in the checker.** `template void f<int, int, char>();` is analyzed only when used, so
+  its errors (concepts-lambda19's) are not judged. (a) The checker analyzes an explicit instantiation definition's specialization
+  ([temp.explicit]/10); the code generator as now (clang emits it weak_odr: the names check); (b) both. **Recommended: (a).**
+
+### Slips, scratch
+
+One slip against the day's rules: a throwaway `diff <(...) <(...)` comparing two extras lists used process substitution (the rules
+say never `<(...)`); nothing else was affected, the comparison redone with files. Scratch kept in the worktree's `.tmp/`: `t5/` (probes,
+`gen1.sh`, `genb.sh`, `onem.sh`, `subm.sh`, `ex.sh`, the features' list `feat-all.txt`, `gccdoc/` the manual's file read), `y1/`-`y3/` (the
+sample's runs; `y3/` the recorded one), `f0/`-`f3/` (the features' runs, `f0` the base's, `f3` the final), `gen-h0/`, `gen-h1/`, `gen-h2/` (the code
+generator's comparison), `base-tree/` (013681c7e's `arbace/`), `*.log`.

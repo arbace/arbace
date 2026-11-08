@@ -328,16 +328,16 @@
    [:member #"^codegen: member of a non-class" "member reference base type is not a structure or union"]
    [:call #"^codegen: missing argument" "too few arguments to function call"]
    [:call #"^codegen: call of a non-function" "called object type is not a function or function pointer"]
-   [:deref #"^codegen: \* of a non-pointer" "indirection requires pointer operand"]])
+   [:deref #"^codegen: \* of a non-pointer" "indirection requires pointer operand"]
+   ;; (CP291 (a): [temp.variadic]/12, a unary fold of an empty pack over an operator with no fallback value)
+   [:fold #"^codegen: a unary fold expression with an empty expansion" "unary fold expression has empty expansion for operator"]])
 
 (def ^:dynamic *sema-log* nil)
 
 (defn cxx-year
-  "The year of the standard `std` names (c++98 and c++03 as 3, gnu++NN as c++NN; 17 when unknown)."
+  "The year of the standard `std` names (arbace.cpp.sema/cxx-year's)."
   ^long [std]
-  (let [[_ y] (re-find #"\+\+(\d\d|[0-9a-z]{2})$" (str std))]
-    (case y ("98" "03") 3 "0x" 11 "1y" 14 "1z" 17 "2a" 20 "2b" 23 "2c" 26
-      (if (and y (re-matches #"\d\d" y)) (Long/parseLong y) 17))))
+  ((requiring-resolve 'arbace.cpp.sema/cxx-year) std))
 
 (defn sema-errors
   "The code generator's Sema's errors over the unit `u` (parsed with the headers in full) of the text `src`."
@@ -372,7 +372,58 @@
         (when *sema-log* (swap! *sema-log* conj [:crash (str "unit: " e) false]))))
     (vec out)))
 
-(def checks (atom [undeclared redefinitions]))
+;; GNU's attributes clang does not know (CP294 (a)): the native parser keeps them as data on the declaration they appertain
+;; to (:_gattrs, no node: the tree compared with clang's stays clang's), and each is checked by its rules as GCC's
+;; documentation states them (the GCC 15.2 manual's "Common Variable Attributes", strict_flex_array: gcc/doc/extend.texi of
+;; the pinned gcc-15.2.0.tar.xz), clean-room: no GCC code read or ported, the messages Arbace's own (the dg verdict compares
+;; lines, not messages).
+
+(defn- int-literal
+  "The value of a decimal, octal or hexadecimal integer literal's text (a suffix allowed), or nil."
+  [^String t]
+  (when-let [[_ d] (re-matches #"(?i)\s*(0x[0-9a-f]+|0[0-7]*|[1-9][0-9]*)(?:u|l|ul|lu|ll|ull|llu)?\s*" t)]
+    (cond (str/starts-with? (str/lower-case d) "0x") (Long/parseLong (subs d 2) 16)
+          (and (str/starts-with? d "0") (> (count d) 1)) (Long/parseLong (subs d 1) 8)
+          :else (Long/parseLong d))))
+
+(def gattr-rules
+  "The rules of an unknown GNU attribute by name: (fn [attr node vars] -> message or nil), `vars` the namespace-scope
+  variables of the main file by name (their nodes)."
+  {"strict_flex_array"
+   ;; (the manual: one argument, the level, an integer from 0 to 3, on a structure's trailing array field): one argument; a
+   ;; field, of array type; the argument an integer constant in [0, 3] (that the field is the trailing one is not checked)
+   (fn [{:keys [args]} n vars]
+     (let [a (first args)
+           v (when a (int-literal a))]
+       (cond
+         (not= 1 (count args)) "the strict_flex_array attribute takes one argument, its level"
+         (not= "FieldDecl" (:kind n)) (str "the strict_flex_array attribute applies to a structure's array field, not to '" (:name n) "'")
+         (not (re-find #"\]\s*$" (str (get-in n [:type :qualType])))) "the strict_flex_array attribute applies to an array field"
+         ;; (not an integer constant: only a variable the slice sees is no constant, an object of the main file's that is
+         ;; neither const nor constexpr; any other expression is not judged)
+         (and (nil? v) (re-matches #"[A-Za-z_][A-Za-z_0-9]*" (str/trim a))
+              (when-let [d (get vars (str/trim a))]
+                (and (= "VarDecl" (:kind d)) (not (:constexpr d)) (not (re-find #"\bconst\b" (str (get-in d [:type :qualType])))))))
+         "the strict_flex_array attribute's level is not an integer constant"
+         (and v (not (<= 0 (long v) 3))) (str "the strict_flex_array attribute's level " v " is not between 0 and 3")
+         :else nil)))})
+
+(defn gnu-attrs
+  "CP294 (a): the unknown GNU attributes' rules (gattr-rules) over the declarations that carry them, each error at the
+  attribute's name."
+  [u starts _ _]
+  (let [out (java.util.ArrayList.)
+        vars (into {} (for [n (:nodes u) :when (and (= "VarDecl" (:kind n)) (string? (:name n)))] [(:name n) n]))]
+    (walk-nodes (fn [n _]
+                  (doseq [a (:_gattrs n)]
+                    (when-let [r (get gattr-rules (:name a))]
+                      (when-let [m (r a n vars)]
+                        (let [[l c] (line-col starts (long (:off a)))]
+                          (.add out {:line l :col c :kind :error :rule :gnu-attr :msg m}))))))
+                (:nodes u) nil)
+    (vec out)))
+
+(def checks (atom [undeclared redefinitions gnu-attrs]))
 
 (defn- pp-diag
   "A preprocessor error `FILE:LINE:COL: msg` (the port's) as a diagnostic, the main file's alone (nil else)."

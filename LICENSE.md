@@ -1246,6 +1246,9 @@ covers what.
   carrying clang's notice. Its second slice (doc/cpp/CPP-SURVEY.md, "As built: CX12 (second slice)") adds the checker's rules to the
   code generator's Sema, `arbace/cpp/sema.ae` (Arbace's own, written after the standard's rules), and to `arbace/cpp/template.ae`'s
   port of `SemaTemplateDeduction.cpp` (its MemberPointer case and the method qualifiers' mismatch, under that file's LLVM notice).
+  Its rules for GNU attributes clang does not know (`gnu-attrs`, `gattr-rules`; CP294 (a), doc/cpp/CPP-SURVEY.md, "As built:
+  CP290-CP294") are Arbace's own, written clean-room from the GCC 15.2 manual's description of each attribute (no GCC code read or
+  ported; the messages Arbace's own).
 - `test/cpp/builtins.ae` (`cpp.builtins`) and `cpp/target/clang-builtins.edn` (CX12, CP270 (a)): the table is computed from the same
   tarball's `clang/include/clang/Basic/Builtins.td`, `BuiltinsBase.td`, `BuiltinsX86.td`, `BuiltinsX86Base.td`, `BuiltinsX86_64.td`
   (read as data, the names as `clang/utils/TableGen/ClangBuiltinsEmitter.cpp` makes them) and `TokenKinds.def`,

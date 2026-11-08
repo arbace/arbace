@@ -1049,3 +1049,45 @@ compiler stubs first on PATH (their log empty). doc/cpp/CPP-SURVEY.md, "Decided 
   --full --plan`, `bin/repr-cpp target builtins verify` pass; the dg control fails as it must. Proposed CP290 (generic lambdas), CP291
   (fold expressions), CP292 (the return-type-requirement for the code generator), CP293 (the file's standard in the code generator),
   CP294 (gcc's unknown attributes as data, not nodes).
+
+## 2026-11-08: C++'s CP290-CP294 built: generic lambdas, fold expressions, the return-type-requirement and the standard in the code generator, gcc's unknown attributes as data (branch `cpp-cx12`, from 013681c7e)
+
+- **Decided** (the user, 2026-11-08 evening): CP290-CP294 (a) (doc/cpp/CPP-SURVEY.md, "Decided (the user, 2026-11-08: CP290-CP294)").
+- **Built** (doc/cpp/CPP-SURVEY.md, "As built: CP290-CP294"): CP290, a generic lambda's closure with its `operator()` a member
+  function template (invented type parameters for each `auto`, a pack for `auto...`, after the explicit ones; declared through the
+  templates' `:declare` hook, deduced and instantiated by arbace.cpp.template; the specialization's body analyzed in the lambda's
+  context with the definition-point cutoff, [temp.res]; captures found at the lambda by a scan of the body for a capture-default, a
+  later need refused); the native parser keeps the parts as `:_glam` data, its tree unchanged. Found with it and fixed: the code
+  generator's Sema refused `CXXDependentScopeMemberExpr` (the native tree has it since a14d52531, 2026-11-04), so 10 of
+  test/cpp/codegen's 142 samples were refused since; `template <class...>` (unnamed parameters) was not seen as a template by the
+  parser's `in-template?`, so its deduced return type was taken from the body; the implicit copy constructor's and copy assignment's
+  parameter is `X&` when a subobject has no const copy ([class.copy.ctor]/7, [class.copy.assign]/2). CP291, fold expressions: the
+  comma among the fold-operators, the four forms parsed into `:_fold` data in the code generator's mode, expanded at instantiation
+  ([temp.variadic]/11-12), each step the written operator's analysis. CP292, the return-type-requirement for the code generator (a
+  false met with a doubt stays true there). CP293, `*cxx-year*` bound by `gen-file` (cxx-year moved to arbace.cpp.sema). CP294, GNU
+  attributes clang drops kept in the parser's slot `GATTRS` and as `:_gattrs` on fields and variables, checked by
+  arbace.repr.cpp.diag's `gattr-rules`: strict_flex_array's, written clean-room from the GCC 15.2 manual's "Common Variable
+  Attributes" (gcc/doc/extend.texi of the pinned gcc-15.2.0.tar.xz, read; no GCC code), the messages Arbace's own.
+- **Measured**: the every-10th sample's own passes 86 → 88 → 89 → 89 (lookup/operator-3a, diagnostic/pr79304, strict-flex-array-1),
+  the extras' 92 lines the same; the whole part's 99 files with a generic lambda, a fold or strict_flex_array, base against branch:
+  12 → 16 (operator-3a, operator-4, -4a, -5a, strict-flex-array-1; concepts-lambda19 lost).
+- **No false credit**: every new pass read. Withdrawn: diagnostic/param-type-mismatch-3 (passed by "no matching function", which the
+  slice would also say of a valid conversion of a generic closure to a pointer to function: such a call is now unsure in the
+  checker); concepts-lambda19's earlier pass was the parser's decline of the comma fold on a valid line; parsed now, its real error (at
+  an explicit instantiation the checker does not instantiate) is not judged.
+- **The code generator**: `gen-list` over test/cpp/codegen's 142 samples, base 013681c7e and branch: 131 byte for byte; the 10
+  refused since a14d52531 generated, their defined names equal clang's IR's of the same samples (cpp-runtime-own's codegen-check
+  of today, `x.ll`) but hdr-vector's known one; rtti refused as before. Probes of every capture form, folds and constrained
+  overloads generate the IR clang names. The live codegen-check (clang, gcc) is the night's.
+- **Alternatives considered**: a generic lambda's specialization analyzed inside the lambda's expression (rejected: specializations
+  are made by later calls; the closure object is built first, hence the capture scan and the sealed refusal); fold operands as
+  tree nodes (rejected: the tree is compared with clang's, `:_fold` data as `:_ret` before); gcc's messages for the attribute
+  rules (rejected: the dg verdict compares lines, the messages written anew); the generic-closure rule removed and the pass kept
+  (rejected: false credit).
+- **Recorded**: test/cpp/check-dg-own-linux-amd64.edn (454 rows, 89 passes), the C++ read fact (`:dg-own [89 1] :dg-clang
+  [4508 0.5]`), test/crops/scores.edn unchanged (C++ 76.1 / 100 / 67.80, read 0.655). `make check-makefile`, `gate.crops check`,
+  `bin/gate --full --plan`, `bin/crops-score --judge --strict` pass; the dg control fails as it must. One slip: a throwaway
+  `diff <(...) <(...)` (process substitution, against the day's rules), redone with files. Proposed CP300 (templates differing by
+  constraints), CP301 (a generic lambda's conversion to a pointer to function), CP302 (the code generator's light half in `--full`),
+  CP303 (the next unknown GNU attributes), CP304 (implicit captures in unevaluated operands), CP305 (explicit instantiation
+  definitions in the checker).

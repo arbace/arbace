@@ -133,6 +133,7 @@
 (def ^:private ^:const USES 11)     ; the special members' uses (arbace.repr.cpp.sema's resolve-uses: an ArrayList)
 (def ^:private ^:const RET 12)      ; the return type of the function whose body is being parsed
 (def ^:private ^:const DECLTYPES 13) ; G4: decltype's operands parsed ({text-without-spaces node}, a HashMap; *full-headers* only)
+(def ^:private ^:const GATTRS 15)  ; CP294 (a): the main file's GNU attributes clang does not know, by their first token (a HashMap)
 (def ^:private ^:const DIAGS 14)   ; CX12: the main file's syntax errors, one a decline: [offset why] in an ArrayList (arbace.repr.cpp.diag)
 (def ^:private ^:const PATTRS 10)   ; the attributes the ptr-operators of the declarator being parsed carried     ; the template header the next declaration is under: its parameters' names (for the injected class name)
 
@@ -985,6 +986,11 @@
 
 (defn- assign-op? [^String op] (= 2 (long (bin-prec op))))
 
+(defn- fold-op-token?
+  "A fold-operator's token ([expr.prim.fold]/1: the binary operators, the assignments and the comma)."
+  [^T t]
+  (and (identical? :punct (tk t)) (or (contains? bin-prec (ts t)) (= "," (ts t))) (not= "?" (ts t))))
+
 (declare use-binary!)
 
 (defn- bin-node [^P p ^String op l r]
@@ -1055,6 +1061,50 @@
   "A conditional-expression (a constant-expression: no assignment, no comma)."
   [^P p]
   (parse-rhs p (parse-cast-expr p) 3))
+
+(defn- fold-operand
+  "A fold expression's operand: a cast-expression, with the operators that bind tighter than the fold's `op` (clang
+  parses them and diagnoses; the code generator analyzes the expression they make)."
+  [^P p ^String op]
+  (if (= op ",")
+    (parse-assign-expr p)
+    (parse-rhs p (parse-cast-expr p) (inc (long (bin-prec op))))))
+
+(defn- parse-fold
+  "CP291 (a): a fold expression at its ( ([expr.prim.fold]): (E op ...), (... op E), (E1 op ... op E2), the cursor after
+  its ). {:op :l :r} with :l or :r nil for a unary fold's missing side; the template expands it ([temp.variadic]/11).
+  The fold-operator is the token beside the `...` (a glued `>>`, `>=` or `>>=` is not taken: the text node as before)."
+  [^P p]
+  (expect! p "(")
+  (with-gt p true
+    (let [b (ix p)
+          j (loop [j b d 0]
+              (let [^T x (tok-at p j)]
+                (cond (or (t= x "(") (t= x "[") (t= x "{")) (recur (inc j) (inc d))
+                      (or (t= x ")") (t= x "]") (t= x "}")) (if (zero? d) (perr p "a fold's ...") (recur (inc j) (dec d)))
+                      (and (zero? d) (t= x "...")) j
+                      :else (recur (inc j) d))))
+          ;; the operator starting at token i: [op tokens] (binop-at's, a `>>` or `>=` of glued `>` tokens among them)
+          op-at (fn [^long i] (let [s0 (ix p)]
+                                (seek! p i)
+                                (let [r (if (is? p ",") ["," 1] (let [[o n] (binop-at p)] (when (and o (not= o "?")) [o n])))]
+                                  (seek! p s0) r)))
+          f (if (= j b)
+              (let [[op n] (or (op-at (inc j)) (perr p "a fold-operator"))]
+                (adv! p) (dotimes [_ n] (adv! p))
+                {:op op :l nil :r (fold-operand p op)})
+              (let [[op n] (or (some (fn [k] (when-let [[o n] (op-at (- j k))] (when (= n k) [o n]))) [3 2 1]) (perr p "a fold-operator"))
+                    l (fold-operand p op)]
+                (when-not (= (ix p) (- j (long n))) (perr p "a fold's left operand"))
+                (dotimes [_ n] (adv! p)) (expect! p "...")
+                (if (is? p ")")
+                  {:op op :l l :r nil}
+                  (let [[op2 n2] (or (op-at (ix p)) (perr p "a fold-operator"))]
+                    (when-not (= op op2) (perr p "the same fold-operator"))
+                    (dotimes [_ n2] (adv! p))
+                    {:op op :l l :r (fold-operand p op)}))))]
+      (expect! p ")")
+      f)))
 
 (defn- paren-args
   "A parenthesized expression list at the cursor ( ... ): its nodes (pack expansions and braced lists among them)."
@@ -1508,12 +1558,19 @@
             (cond (>= j e) false
                   (let [^T x (tok-at p j)] (or (t= x "(") (t= x "[") (t= x "{"))) (recur (inc j) (inc d))
                   (let [^T x (tok-at p j)] (or (t= x ")") (t= x "]") (t= x "}"))) (recur (inc j) (dec d))
+                  ;; (CP291 (a): the comma among the fold-operators, [expr.prim.fold]/1)
                   (and (zero? d) (t= (tok-at p j) "...")
-                       (or (and (> j (inc b)) (contains? bin-prec (ts (tok-at p (dec j)))) (identical? :punct (tk (tok-at p (dec j)))))
-                           (and (< (inc j) e) (contains? bin-prec (ts (tok-at p (inc j)))) (identical? :punct (tk (tok-at p (inc j)))))))
+                       (or (and (> j (inc b)) (fold-op-token? (tok-at p (dec j))))
+                           (and (< (inc j) e) (fold-op-token? (tok-at p (inc j))))))
                   true
                   :else (recur (inc j) d))))
-        (do (skip-balanced! p) (text-node p "CXXFoldExpr" b))
+        (let [f (when (and *full-headers* (not (skim? p)))
+                  (let [r (tentatively p (fn [p] (let [f (parse-fold p)] [f (ix p)])))]
+                    (when (vector? r) r)))]
+          (skip-balanced! p)
+          (cond-> (text-node p "CXXFoldExpr" b)
+            ;; (the operands as data, the node the text it was: the tree compared with clang's unchanged)
+            (and f (= (second f) (ix p))) (assoc :_fold (first f))))
         :else (do (adv! p)
                   (let [x (with-gt p true (parse-expr p))]
                     (expect! p ")")
@@ -2051,6 +2108,33 @@
   #{"noreturn" "carries_dependency" "deprecated" "fallthrough" "likely" "unlikely" "maybe_unused" "nodiscard" "no_unique_address"
     "assume" "indeterminate" "optimize_for_synchronized" "noinline" "always_inline"})
 
+(defn- unknown-gnu-attr!
+  "CP294 (a): a GNU attribute clang does not know (it drops it, so the tree has no node for it), written in the main file,
+  kept as data for the checker (arbace.repr.cpp.diag's gnu-attr rules): its name (`__` affixes dropped), its arguments'
+  texts split at their top-level commas (nil without parentheses), its token's offset; the name at token `ni`, the
+  attribute's first token `b`, the cursor after it."
+  [^P p ^long b ^long ni args?]
+  (when-let [^HashMap m (stv p GATTRS)]
+    (when (main-tok? p b)
+      (let [nm (str/replace (ts (tok-at p ni)) #"^__|__$" "")
+            args (when args?
+                   (let [t (tok-text p (+ ni 2) (- (ix p) 2))]
+                     (if (str/blank? t) [] (loop [i 0 d 0 st 0 out []]
+                                             (if (= i (count t))
+                                               (conj out (str/trim (subs t st)))
+                                               (let [c (.charAt ^String t i)]
+                                                 (cond (#{\( \[ \{} c) (recur (inc i) (inc d) st out)
+                                                       (#{\) \] \}} c) (recur (inc i) (dec d) st out)
+                                                       (and (= c \,) (zero? d)) (recur (inc i) d (inc i) (conj out (str/trim (subs t st i))))
+                                                       :else (recur (inc i) d st out))))))))]
+        (.put m b {:name nm :args args :off (.-o ^T (tok-at p ni)) :i b})))))
+
+(defn- gattrs-in
+  "CP294 (a): the unknown GNU attributes recorded between tokens `b` and `e`, in order."
+  [^P p ^long b ^long e]
+  (when-let [^HashMap m (stv p GATTRS)]
+    (not-empty (vec (sort-by :i (filter #(<= b (long (:i %)) e) (vals m)))))))
+
 (defn attr-nodes
   "The attribute-specifiers at the cursor: [[...]], __attribute__((...)), alignas(...): their nodes."
   [^P p]
@@ -2077,6 +2161,8 @@
                               (when (and (nil? nsname) (not args?) (contains? std-attrs (ts (tok-at p b))))
                                 (soft-diag! p b (str "attribute '" (ts (tok-at p b)) "' cannot be used as an attribute pack")))
                               (adv! p)))
+                          (when (and (#{"gnu" "__gnu__"} nsname) (not (known-gnu-attr? (ts (tok-at p (+ b 2))))))
+                            (unknown-gnu-attr! p b (+ b 2) (t= (tok-at p (+ b 3)) "(")))
                           (recur (if (cond (nil? nsname) (contains? std-attrs (ts (tok-at p b)))
                                            (#{"gnu" "__gnu__"} nsname) (known-gnu-attr? (ts (tok-at p (+ b 2))))
                                            :else (known-attr-ns? nsname))
@@ -2095,6 +2181,7 @@
                               ;; format with a kind of gcc's own (__gcc_diag__ ...): clang drops the attribute
                               gcc-kind (and (is-at? p 1 "(") (re-matches #"__gcc_\w+__|gcc_\w+" (ts (tok-at p (+ b 2)))))]
                           (adv! p) (when (is? p "(") (skip-balanced! p))
+                          (when-not (known-gnu-attr? (ts (tok-at p b))) (unknown-gnu-attr! p b b (t= (tok-at p (inc b)) "(")))
                           (recur (if (and (known-gnu-attr? (ts (tok-at p b))) (not gcc-kind))
                                    (conj out (node p "NativeAttr" b (last-ix p) (cond-> {:_gnu (ts (tok-at p b))}
                                                                                   (t= (tok-at p (inc b)) "(") (assoc :_arg (tok-text p (+ b 2) (- (ix p) 2))))))
@@ -2351,7 +2438,9 @@
   (letfn [(walk [n]
             (if-not (map? n)
               n
-              (let [n (if-let [in (:inner n)] (assoc n :inner (mapv walk in)) n)]
+              (let [n (if-let [in (:inner n)] (assoc n :inner (mapv walk in)) n)
+                    ;; (a fold expression's operands, kept as data: CP291 (a))
+                    n (if-let [f (:_fold n)] (assoc n :_fold (cond-> f (:l f) (update :l walk) (:r f) (update :r walk))) n)]
                 (cond
                   (and (:_depscope n) (= "MemberExpr" (:kind n)))
                   (-> n (dissoc :name :_depscope) (assoc :kind "CXXDependentScopeMemberExpr" :member (:name n)))
@@ -3121,13 +3210,16 @@
                   _ (when-not (or field (= ctx :member) (:friend ds) (= "extern" (:storage ds)) (:typedef ds))
                       (use-var-init! p ty init x))
                   ty (if (and (:constexpr ds) (not field) (not (#{:lr :rr} (:t ty)))) (with-cv ty true nil) ty)
+                  ;; (CP294 (a): the declarator's unknown GNU attributes, and the declaration-specifiers' for the first)
+                  ga (vec (concat (when (empty? out) (gattrs-in p (:b ds) (dec (long (:b d))))) (gattrs-in p (:b d) (last-ix p))))
                   n (if field
                       (node p "FieldDecl" (:b ds) e
                             (cond-> {:name nn :loc (loc p ni) :type {:qualType (qt ty)}
                                      :inner (vec (concat (when bits [bits]) (when x [x]) (:attrs ds) (:attrs d) as1))}
                               (:mutable ds) (assoc :mutable true)
                               bits (assoc :isBitfield true)
-                              x (assoc :hasInClassInitializer true)))
+                              x (assoc :hasInClassInitializer true)
+                              (seq ga) (assoc :_gattrs ga)))
                       (node p "VarDecl" (:b ds) e
                             (cond-> {:name nn :loc (loc p ni) :type {:qualType (qt ty)}
                                      :inner (vec (concat (:attrs ds) (:attrs d) as1 (when x [x])))
@@ -3137,7 +3229,8 @@
                               (:constexpr ds) (assoc :constexpr true)
                               (:tls ds) (assoc :tls "static")
                               init (assoc :init init)
-                              (:args lp) (assoc :_args (:args lp)))))]
+                              (:args lp) (assoc :_args (:args lp))
+                              (seq ga) (assoc :_gattrs ga))))]
               (when (and nm (nil? (:args lp))) (declare! p (cond-> {:k :var :name nm :tmpl (boolean (and tmpl (pos? (long (:n tmpl))))) :ty ty}
                                                              (and (= :auto (:t ty)) (= "LambdaExpr" (:kind x))) (assoc :closure true)
                                                              (= "static" (:storage ds)) (assoc :static true)
@@ -3230,7 +3323,14 @@
                          nm (assoc :name nm) pack (assoc :isParameterPack true)))
                  (when nm (str nm (when pack "...")))]))]
         (let [ns (conj ns n) names (conj names nm)]
-          (if (accept! p ",") (recur ns names) [ns names]))))))
+          (if (accept! p ",") (recur ns names)
+              (do
+                ;; (a list of unnamed parameters, `template <class...>`, is a template's all the same: in-template? asks
+                ;; the scope for names, so it holds one no lookup can spell; CP290 (a): such a template's deduced return
+                ;; type stays `auto`, as clang's pattern has it)
+                (when (zero? (.size ^java.util.HashMap (sc/names-of (scope p))))
+                  (.put ^java.util.HashMap (sc/names-of (scope p)) " unnamed" {:k :type :name " unnamed" :tparam true}))
+                [ns names])))))))
 
 (defn- fold-const
   "An integral constant expression's value (a specialization's template argument), or nil."
@@ -3790,9 +3890,10 @@
                                     (is? p "(") (let [as (paren-args p)] (recur (into inits (take 1 as))))
                                     :else (recur inits)))
                             (perr p "a capture")))))
+            ;; (an explicit template-parameter-list's nodes: CP290 (a)'s generic lambda keeps them as data)
             tmpl (when (is? p "<")
                    (let [ts (sc/new-scope :tparams (scope p) nil)]
-                     (st! p SCOPE ts) (adv! p) (parse-template-params p) (expect! p ">") true))
+                     (st! p SCOPE ts) (adv! p) (let [[tns] (parse-template-params p)] (expect! p ">") (vec tns))))
             _ (when (is? p "requires") (skip-requires-clause! p))
             pl (when (is? p "(") (adv! p) (parse-param-list p))
             _ (loop [] (cond (or (is? p "mutable") (is? p "constexpr") (is? p "consteval") (is? p "static")) (do (adv! p) (recur))
@@ -3808,8 +3909,13 @@
                    (try (with-scope p :fparams nil (declare-params! p (:names pl) (:types pl)) (parse-compound-stmt p))
                         (finally (st! p RET old))))
             op-type {:t :f :ps (:types pl) :va (:va pl) :r (or ret {:t :auto}) :tr (boolean ret)}
-            rec {:kind "CXXRecordDecl" :isImplicit true
-                 :inner (if generic [] [{:kind "CXXMethodDecl" :name "operator()" :type {:qualType (qt op-type)} :inner (or (:params pl) [])}])}]
+            rec (cond-> {:kind "CXXRecordDecl" :isImplicit true
+                         :inner (if generic [] [{:kind "CXXMethodDecl" :name "operator()" :type {:qualType (qt op-type)} :inner (or (:params pl) [])}])}
+                  ;; (CP290 (a): a generic lambda's call operator is a member function template, clang's FunctionTemplateDecl
+                  ;; in the closure; the native tree keeps the closure empty as before, compared with clang's as it was, and
+                  ;; the template's parts as data for the code generator's Sema: the explicit template parameters, the
+                  ;; parameters, the operator's type as written)
+                  generic (assoc :_glam {:tparams (if (vector? tmpl) tmpl []) :params (vec (:params pl)) :qt (qt op-type)}))]
         (node p "LambdaExpr" b (ne body) {:inner (vec (concat [rec] inits [body]))})))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -3973,7 +4079,7 @@
   (let [root (sc/new-scope :ns nil {:k :ns :name ""})
         p (P. toks (alength toks) (long-array 1) (object-array 16) main src year gnu)]
     (st! p SCOPE root) (st! p ROOT root) (st! p SKIM false) (st! p MTMPL (HashSet.)) (st! p DECLINES 0) (st! p GTOP true)
-    (st! p UNNAMED 0) (st! p REASONS (HashMap.)) (st! p CLS nil) (st! p THDR nil) (st! p PATTRS (ArrayList.)) (st! p USES (ArrayList.)) (st! p DECLTYPES (HashMap.)) (st! p DIAGS (ArrayList.))
+    (st! p UNNAMED 0) (st! p REASONS (HashMap.)) (st! p CLS nil) (st! p THDR nil) (st! p PATTRS (ArrayList.)) (st! p USES (ArrayList.)) (st! p DECLTYPES (HashMap.)) (st! p DIAGS (ArrayList.)) (st! p GATTRS (HashMap.))
     (doseq [nm builtin-types] (sc/declare! root {:k :type :name nm}))
     (let [[cached pre] (if *full-headers* (full-headers! p cache-parts) [(skim-headers! p cache-parts) []])
           nodes (loop [out (vec pre)]

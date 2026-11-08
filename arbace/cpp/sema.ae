@@ -42,8 +42,16 @@
 (def ^:dynamic *drops* nil)
 ;; the access of the class member being declared (the access-specifier before it)
 (def ^:dynamic *member-access* nil)
-;; the language's year (11, 14, 17, 20, 23, 26; 3 for C++98/03), bound by the checker
+;; the language's year (11, 14, 17, 20, 23, 26; 3 for C++98/03), bound from the file's standard by the checker and, since
+;; CP293 (a), by the code generator (arbace.cpp.codegen/gen-file)
 (def ^:dynamic *cxx-year* 17)
+
+(defn cxx-year
+  "The year of the standard `std` names (c++98 and c++03 as 3, gnu++NN as c++NN; 17 when unknown)."
+  ^long [std]
+  (let [[_ y] (re-find #"\+\+(\d\d|[0-9a-z]{2})$" (str std))]
+    (case y ("98" "03") 3 "0x" 11 "1y" 14 "1z" 17 "2a" 20 "2b" 23 "2c" 26
+      (if (and y (re-matches #"\d\d" y)) (Long/parseLong y) 17))))
 (def ^:dynamic *fns* nil)    ; atom {id fn}
 (def ^:dynamic *vars* nil)   ; atom {id var}
 (def ^:dynamic *ids* nil)    ; atom counter
@@ -1089,14 +1097,22 @@
     (let [moves (when (checking?)
                   (or (has-ctor-of? id move-ctor?) (some #(move-assign? (fnd %) id) (:methods (abi/cls id)))))
           del (when moves {:deleted true :deleted-sure true :deleted-why "a user-declared move constructor or move assignment operator"})]
+    ;; ([class.copy.ctor]/7, [class.copy.assign]/2: the implicit copy constructor's parameter is X& when a base or member
+    ;; of class type M has copy constructors none of which takes a const M&, else const X&; the copy assignment's alike)
+    (let [non-const? (fn [pred sel]
+                       (some (fn [m] (let [cs (filter #(pred (fnd %) m) (sel (abi/cls m)))]
+                                       (and (seq cs) (not-any? #(:c (:to (first (:ps (:ty (fnd %)))))) cs))))
+                             (class-like-members id)))
+          ctor-p (if (non-const? copy-ctor? :ctors) (abi/lref t) cref)
+          assign-p (if (non-const? copy-assign? :methods) (abi/lref t) cref)]
     (when-not (has-ctor-of? id copy-ctor?)
-      (let [fid (implicit-fn! id :ctor (:name c) {:k :fn :ret abi/void :ps [cref] :va false} :trivial (trivial-copy? id))]
+      (let [fid (implicit-fn! id :ctor (:name c) {:k :fn :ret abi/void :ps [ctor-p] :va false} :trivial (trivial-copy? id))]
         (when del (upd-fn! fid merge del))))
     (doseq [x (:ctors (abi/cls id))]
       (let [g (fnd x)] (when (and (:defaulted g) (copy-ctor? g id)) (upd-fn! x assoc :trivial (trivial-copy? id)))))
     (when-not (some #(copy-assign? (fnd %) id) (:methods (abi/cls id)))
-      (let [fid (implicit-fn! id :method "operator=" {:k :fn :ret (abi/lref t) :ps [cref] :va false} :op "=" :trivial (trivial-copy? id))]
-        (when del (upd-fn! fid merge del))))
+      (let [fid (implicit-fn! id :method "operator=" {:k :fn :ret (abi/lref t) :ps [assign-p] :va false} :op "=" :trivial (trivial-copy? id))]
+        (when del (upd-fn! fid merge del)))))
     ;; CX12 (the checker): the implicit move constructor and move assignment ([class.copy.ctor]/8, [class.copy.assign]/4:
     ;; declared when the class declares no copy or move member and no destructor); one defined as deleted is no
     ;; candidate ([over.match.funcs]/8, ctor-candidates)
@@ -1693,8 +1709,14 @@
       (let [{:keys [sure-drops unsure-drops]} (when (checking?) *drops*)]
         ;; (CX12, the checker: the templates whose deduction failed by the algorithm alone count as candidates; one that may
         ;; have failed by the slice keeps the call from being diagnosed)
-        (if (and unsure-drops (pos? (long unsure-drops)))
+        (cond
+          (and unsure-drops (pos? (long unsure-drops)))
           (fail :overload "no viable function (a template's deduction unsure) among " (count (distinct cands)) " for " n0 " arguments")
+          ;; (CP290 (a): a generic lambda's closure has conversion function templates to pointers to function the slice does
+          ;; not declare: a candidate it may have made viable is not known not to be)
+          (and (checking?) (some (fn [[_ args]] (some #(when-let [i (class-id (:ty %))] (:glam (abi/cls i))) args)) cs))
+          (fail :overload "no viable function (a generic lambda's conversion not modeled) among " (count (distinct cands)) " for " n0 " arguments")
+          :else
           (fail :overload "no viable function among " (+ (count (distinct cands)) (long (or sure-drops 0))) " for " n0 " arguments: " (pr-str (map :ty (second (first cs)))))))
       :else (fail :overload "ambiguous call (" (count viable) " viable)" (when (System/getenv "CPP_HDR_TRACE") (str ": " (pr-str (map (fn [[f]] [(:name (fnd f)) (:ps (:ty (fnd f))) (loc-of (get-in (:node (fnd f)) [:range :begin]))]) viable))))))))
 
@@ -2757,7 +2779,11 @@
         obj (deref-node {:op :this :ty (:this-type ctx) :cat :pr})]
     (if-let [i (get @caps k)]
       (let [f (nth (:fields (abi/cls lid)) i)] (if (= :this k) (rv (field-node obj lid i)) (field-node obj lid i)))
-      (let [mode (or (get (:explicit lam) k) (:default lam))
+      (let [_ (when (some-> (:sealed lam) deref)
+                ;; (CP290 (a): a generic lambda's closure object is made where the lambda is; a capture its call operator's
+                ;; specialization finds that the definition's scan did not is refused, not added to an object already built)
+                (fail :lambda "a capture of a generic lambda its definition did not name: " (if (= :this k) "this" (:name (var* k)))))
+            mode (or (get (:explicit lam) k) (:default lam))
             v (when (not= :this k) (var* k))]
         (cond
           (= :this k)
@@ -2794,7 +2820,11 @@
     (swap! (:inits lam) conj [i (if byref {:i :bind :e e} (init-for ft e encl :copy))])
     (enter! fs nm {:e :capfield :i i})))
 
+(declare generic-lambda-expr)
+
 (defn- lambda-expr [ctx n]
+  (if (:_glam (first (kids n)))
+    (generic-lambda-expr ctx n)
   (let [ks (kids n)
         rd (first ks) body (last ks)
         init-nodes (vec (butlast (rest ks)))
@@ -2879,6 +2909,136 @@
                                               :param-names [] :params []
                                               :tbody {:s :block :items [{:s :return :init {:i :expr :e {:op :fnaddr :fn ivid :ty (abi/ptr ft) :cat :pr}}}]}}))
         (abi/update-cls! id update :methods (fnil conj []) cvid)))
+    {:op :temp-obj :init {:i :list :cls id :items (mapv second inits) :fields-used (mapv first inits)} :ty t :cat :pr})))
+
+(defn- node-children
+  "A node's children for the generic lambda's scans: its :inner, a fold expression's operands (CP291 (a)) and a nested
+  generic lambda's parameters (CP290 (a)), kept as data."
+  [x]
+  (concat (:inner x) (keep #(get (:_fold x) %) [:l :r]) (:params (:_glam x))))
+
+(defn- glam-names
+  "CP290 (a): the names a generic lambda's body refers to by an unqualified id, and whether it uses `this`, in the
+  order written ([{:name s} or :this])."
+  [body]
+  (let [out (java.util.ArrayList.) seen (java.util.HashSet.)]
+    (letfn [(walk [x]
+              (cond
+                (map? x) (do (cond
+                               (and (= "DeclRefExpr" (:kind x)) (not (:qualifier x)) (not (:globalQualifier x)))
+                               (let [nm (get-in x [:referencedDecl :name])]
+                                 (when (and (string? nm) (seq nm) (.add seen nm)) (.add out nm)))
+                               (= "CXXThisExpr" (:kind x)) (when (.add seen :this) (.add out :this)))
+                             (doseq [k (node-children x)] (walk k)))
+                (sequential? x) (doseq [k x] (walk k))))]
+      (walk body))
+    (vec out)))
+
+(defn- glam-declared
+  "The names a generic lambda's body declares (its variables, bindings, functions' parameters): a reference to one of
+  them is not taken for a capture."
+  [body]
+  (set (for [x (tree-seq (fn [x] (or (map? x) (sequential? x))) (fn [x] (if (map? x) (node-children x) x)) body)
+             :when (and (map? x) (#{"VarDecl" "ParmVarDecl" "BindingDecl" "DecompositionDecl"} (:kind x)) (:name x))]
+         (:name x))))
+
+(defn- generic-lambda-expr
+  "CP290 (a): a generic lambda ([expr.prim.lambda.closure]/3-4: a parameter declared `auto` or a template-parameter-list):
+  its closure's function call operator is a member function template, one invented type template parameter for each
+  parameter's `auto` (a pack for `auto...`) after the explicit ones, its specializations deduced from a call and
+  instantiated on use as a function template's are (arbace.cpp.template), their bodies analyzed in the lambda's context
+  (the captures, `this`). The closure object is made here, so its captures are found here: the explicit ones, and for a
+  capture-default the variables and `this` the body names ([expr.prim.lambda.capture]/7: in a generic lambda an entity
+  named in a dependent full-expression is captured), in the order written; a specialization that needs another is
+  refused. No conversion to a pointer to function (a conversion function template): a use of one is refused."
+  [ctx n]
+  (let [ks (kids n)
+        rd (first ks) body (last ks)
+        init-nodes (vec (butlast (rest ks)))
+        init-i (atom -1)
+        glam (:_glam rd)
+        text (node-text n)
+        intro (capture-intro text)
+        head (subs text 0 (max 0 (- (long (get-in body [:range :begin :offset])) (long (get-in n [:range :begin :offset])))))
+        mutable (boolean (re-find #"\)\s*mutable\b" head))
+        ;; the invented template parameters ([dcl.fct]/22: one for each placeholder of a parameter's type)
+        explicit-tps (vec (:tparams glam))
+        inv (atom 0)
+        pn (mapv (fn [p]
+                   (let [qt (str (get-in p [:type :qualType]))]
+                     (if (re-find #"\bauto\b" qt)
+                       (let [nm (str "__lambda_auto_" (swap! inv inc))]
+                         (assoc-in (assoc p :_inv nm :_invpack (boolean (re-find #"\.\.\.\s*$" qt)))
+                                   [:type :qualType] (str/replace-first qt #"\bauto\b" nm)))
+                       p)))
+                 (:params glam))
+        _ (when (some #(re-find #"\bdecltype\s*\(\s*auto" (str (get-in % [:type :qualType]))) pn) (fail :generic-lambda "a decltype(auto) parameter"))
+        tps (into explicit-tps (for [p pn :when (:_inv p)]
+                                 (cond-> {:kind "TemplateTypeParmDecl" :name (:_inv p) :inner [] :isImplicit true}
+                                   (:_invpack p) (assoc :isParameterPack true))))
+        tr (when-let [[_ r] (re-find #"->\s*(.+?)\s*$" head)] r)
+        qt (str (or tr "auto") " (" (str/join ", " (map #(get-in % [:type :qualType]) pn)) ")" (when-not mutable " const"))
+        pattern {:kind "CXXMethodDecl" :name "operator()" :type {:qualType qt} :inline true
+                 :inner (conj (vec (map #(dissoc % :_inv :_invpack) pn)) body) :_b (:_b n)}
+        encl-f (when (:fn-id ctx) (fnd (:fn-id ctx)))
+        inline? (boolean (and encl-f (:inline encl-f) (not (:internal encl-f))))
+        ul? (or inline? (boolean (and encl-f (:cls encl-f) (:lambda (abi/cls (:cls encl-f))))))
+        path (if encl-f [[:local encl-f]] (vec (:path (:scope ctx))))
+        id (next-id)
+        ;; (its specializations of internal linkage outside an inline function, as the non-generic operator is)
+        cs (new-scope :class (:scope ctx) :cls id :path (conj path [:cls id]) :internal (not inline?))
+        t {:k :class :id id}
+        _ (swap! abi/*classes* assoc id {:id id :name nil :mname nil :dollar-key (when-not ul? [:fn (:fn-id ctx)]) :path path :scope cs :fields [] :bases [] :outer (:scope ctx) :lambda true})
+        ;; the call operator template, declared in the closure as a member template is (the :declare hook)
+        _ (let [h (or (:declare @hooks) (fail :generic-lambda "a generic lambda without templates"))]
+            (h cs {:kind "FunctionTemplateDecl" :name "operator()" :inner (conj tps pattern) :_b (:_b n)}))
+        tid (some #(when (= :tmpl (:e %)) (:id %)) (.get ^java.util.HashMap (:names cs) "operator()"))
+        _ (when-not tid (fail :generic-lambda "the call operator template not declared"))
+        ;; clang names a closure Ul<the parameters, the template's own>E_ in an inline function's body
+        sps (when ul? (:ps ((requiring-resolve 'arbace.cpp.template/sym-sig) ((requiring-resolve 'arbace.cpp.template/tmpl) tid))))
+        ckey [(:fn-id ctx) (if ul? (abi/mangle-params sps) :dollar)]
+        k (long (or (get @*lambda-counts* ckey) 0))
+        _ (swap! *lambda-counts* assoc ckey (inc k))
+        _ (when ul? (abi/update-cls! id assoc :mname (str "Ul" (abi/mangle-params sps) "E" (if (zero? k) "" (dec k)) "_")))
+        items (if (str/blank? intro) [] (split-top intro))
+        default (some #(case % "=" :copy "&" :ref nil) items)
+        fs (new-scope :fn (:scope ctx))
+        lam {:cls id :caps (atom {}) :inits (atom []) :default default :encl ctx :explicit {} :sealed (atom false)}
+        lctx {:scope fs :fn-id nil :this-type (abi/ptr (cond-> t (not mutable) (assoc :c true))) :statics (atom []) :lambda lam}
+        explicit (into {} (for [it items :when (not (#{"=" "&"} it)) :when (not (str/includes? it "="))
+                                :let [byref (str/starts-with? it "&") nm (str/trim (str/replace it #"^&" ""))]]
+                            (cond (= nm "this") [:this :copy]
+                                  (= nm "*this") (fail :lambda "a capture of *this")
+                                  :else (let [e (first (filter #(= :var (:e %)) (lookup (:scope ctx) nm)))]
+                                          (when-not e (fail :lambda "capture of " nm))
+                                          [(:id e) (if byref :ref :copy)]))))
+        lam (assoc lam :explicit explicit)
+        lctx (assoc lctx :lambda lam)
+        _ (doseq [it items :when (not (#{"=" "&"} it))]
+            (if-let [[_ amp nm _] (re-matches #"(?s)(&?)\s*([A-Za-z_][A-Za-z_0-9]*)\s*=\s*(.+)" it)]
+              (init-capture! lctx fs amp nm (nth init-nodes (swap! init-i inc)))
+              (let [nm (str/trim (str/replace it #"^&" ""))]
+                (capture-field lctx (if (= nm "this") :this (:id (first (filter #(= :var (:e %)) (lookup (:scope ctx) nm)))))))))
+        ;; the implicit captures of a capture-default: what the body names, in order
+        _ (when default
+            (let [own (into (glam-declared body) (keep :name pn))
+                  caps-by-name (set (keys (:names fs)))]
+              (doseq [x (glam-names body)]
+                (if (= :this x)
+                  (when (:this-type ctx) (capture-field lctx :this))
+                  (when-not (or (own x) (caps-by-name x))
+                    (when-let [e (first (lookup (:scope ctx) x))]
+                      (when (= :var (:e e))
+                        (let [v (var* (:id e))]
+                          (when (and (#{:local :param} (:storage v)) (:fn v))
+                            (capture-field lctx (:id e)))))))))))
+        _ (reset! (:sealed lam) true)
+        ;; the init-captures' names in the specializations' bodies, the lambda's context for them
+        _ (abi/update-cls! id assoc :glam (assoc lam :names (into {} (:names fs))) :glam-cutoff (long (or (:_b n) *cutoff*)))
+        _ (finish-class! id)
+        _ (doseq [m (:methods (abi/cls id)) :let [g (fnd m)] :when (:implicit g)]
+            (try (analyze-implicit! m) (catch arbace.lang.ExceptionInfo _ (upd-fn! m assoc :deleted true))))
+        inits (sort-by first @(:inits lam))]
     {:op :temp-obj :init {:i :list :cls id :items (mapv second inits) :fields-used (mapv first inits)} :ty t :cat :pr}))
 
 (declare analyze-node)
@@ -2948,14 +3108,20 @@
                                           (cond
                                             ;; (CX12, CP281 (a): a compound requirement's return-type-requirement,
                                             ;; [expr.prim.req.compound]/1.3: the type-constraint's immediately-declared
-                                            ;; constraint satisfied by decltype((E)); without the checker, or for a
-                                            ;; noexcept the slice does not check, true as before -- in the checker a doubt)
-                                            (and (:_ret r) (checking?) (:type-constraint @hooks))
+                                            ;; constraint satisfied by decltype((E)); since CP292 (a) for the code
+                                            ;; generator too. What the slice cannot evaluate, and a noexcept it does
+                                            ;; not check: in the checker a doubt, for the code generator true as before)
+                                            (and (:_ret r) (:type-constraint @hooks))
                                             (let [t (abi/non-ref (:ty x))
                                                   dt (case (:cat x) :lv (abi/lref t) :xv (abi/rref t) t)
-                                                  ok ((:type-constraint @hooks) (:scope c) (str/trim (:_ret r)) dt)]
+                                                  d (atom false)
+                                                  ok (binding [*constraint-doubt* d] ((:type-constraint @hooks) (:scope c) (str/trim (:_ret r)) dt))]
+                                              (when @d (doubt!))
                                               (when (:_noexcept r) (doubt!))
-                                              (if (nil? ok) (doubt!) ok))
+                                              (cond (nil? ok) (if (checking?) (doubt!) true)
+                                                    ;; (a false met with a doubt: for the code generator true, as before)
+                                                    (and (not ok) @d (not (checking?))) true
+                                                    :else ok))
                                             (or (:_ret r) (:_noexcept r)) (do (doubt!) true)
                                             :else true)))
                                       (catch arbace.lang.ExceptionInfo _ (doubt!))))]
@@ -3069,6 +3235,7 @@
     (let [[cn & an] (kids n)
           ;; a pseudo-destructor call (p->~T() of a scalar T, [expr.prim.id.dtor]): its object evaluated, no effect (G4:
           ;; std::destroy_at<int>)
+          cn (if (= "CXXDependentScopeMemberExpr" (:kind cn)) (-> cn (assoc :kind "MemberExpr" :name (:member cn)) (dissoc :member)) cn)
           pseudo (when (and (= "MemberExpr" (:kind cn)) (str/starts-with? (str (:name cn)) "~") (empty? an))
                    (let [o (analyze ctx (first (kids cn))) o (if (:isArrow cn) (deref-node o) o)]
                      (when-not (class-id (:ty o)) o)))]
@@ -3082,6 +3249,9 @@
 )
 )
     "MemberExpr" (member-expr ctx n)
+    ;; a member of a type-dependent object (the native tree's CXXDependentScopeMemberExpr since a14d52531, clang's): in a
+    ;; specialization, re-analyzed, the object's type is known and the member is looked up in it as a MemberExpr's
+    "CXXDependentScopeMemberExpr" (member-expr ctx (-> n (assoc :kind "MemberExpr" :name (:member n)) (dissoc :member)))
     ;; a member named in a template's pattern whose lookup clang left to the instantiation (f<T>() in a member)
     "UnresolvedMemberExpr" (if (seq (kids n))
                              (member-expr ctx (assoc n :name (or (get-in n [:referencedDecl :name]) (:name n))))
@@ -3109,6 +3279,39 @@
     "CXXScalarValueInitExpr" (let [t (resolve-type (:scope ctx) (get-in n [:type :qualType]))] {:op :zero-val :ty t :cat :pr})
     "InitListExpr" {:op :init-list :items (analyze-args ctx (kids n)) :ty {:k :init-list}}
     ;; sizeof...(pack): the number of a pack's elements (CODEGEN.md G3)
+    ;; (an operand already analyzed, given to an operator's analysis: a fold expression's elements, CP291 (a))
+    "__Typed" (:e n)
+    ;; a fold expression ([expr.prim.fold], [temp.variadic]/11; CP291 (a)): its pattern expanded over its packs' elements,
+    ;; the operator applied from the right ((E op ...): E1 op (... op (EN-1 op EN)), with an init EN op I) or from the
+    ;; left ((... op E): ((E1 op E2) op ...) op EN, with an init I op E1); a unary fold of an empty pack is true for &&,
+    ;; false for ||, void() for the comma, else ill-formed ([temp.variadic]/12)
+    "CXXFoldExpr"
+    (if-let [{:keys [op l r]} (:_fold n)]
+      (let [h (or (:expand-pack @hooks) (fail :pack "a fold expression"))
+            expand (fn [pat] (try (h ctx {:kind "PackExpansionExpr" :inner [pat]})
+                                  (catch arbace.lang.ExceptionInfo e
+                                    (if (re-find #"without a pack" (str (ex-message e))) nil (throw e)))))
+            [dir es init] (cond (nil? l) [:left (or (expand r) (fail :pack "a fold over no pack")) nil]
+                                (nil? r) [:right (or (expand l) (fail :pack "a fold over no pack")) nil]
+                                :else (if-let [es (expand l)]
+                                        [:right es (analyze ctx r)]
+                                        [:left (or (expand r) (fail :pack "a fold over no pack")) (analyze ctx l)]))
+            typed (fn [e] {:kind "__Typed" :e e})
+            kind (if (and (not= op "=") (contains? #{"*=" "/=" "%=" "+=" "-=" "<<=" ">>=" "&=" "^=" "|="} op)) "CompoundAssignOperator" "BinaryOperator")
+            combine (fn [a b] (analyze ctx {:kind kind :opcode op :inner [(typed a) (typed b)] :range (:range n)}))
+            es (vec es)]
+        (cond
+          (and (empty? es) init) init
+          (empty? es) (case op
+                        "&&" {:op :int :v 1 :ty abi/bool* :cat :pr}
+                        "||" {:op :int :v 0 :ty abi/bool* :cat :pr}
+                        "," (cast-expr ctx abi/void {:op :int :v 0 :ty abi/int* :cat :pr} true)
+                        (fail :fold "a unary fold expression with an empty expansion for operator '" op "'"))
+          (= dir :right) (let [xs (if init (conj es init) es)]
+                           (reduce (fn [acc e] (combine e acc)) (peek xs) (rseq (pop xs))))
+          :else (let [xs (if init (into [init] es) es)]
+                  (reduce combine (first xs) (rest xs)))))
+      (fail :expr "a fold expression the parser kept as its text"))
     "SizeOfPackExpr" (let [e (first (lookup (:scope ctx) (:name n)))]
                        (when-not (#{:pack :varpack} (:e e)) (fail :pack "sizeof... of a non-pack " (:name n)))
                        {:op :int :v (count (or (:elems e) (:ids e))) :ty abi/ulong* :cat :pr})
@@ -3532,8 +3735,12 @@
         _ (doseq [[nm idxs] (:param-packs f)] (enter! fs nm {:e :varpack :ids (mapv #(nth pids %) idxs)}))
         this-t (when (and cls (not (:static f))) (abi/ptr (cond-> {:k :class :id cls} (:cq f) (assoc :c true))))
         cut (if cls (let [outer (loop [id cls] (let [c (abi/cls id) s (:outer c)] (if (= :class (:kind s)) (recur (:cls s)) c)))] Long/MAX_VALUE) (:pos f))
-        ctx {:scope fs :fn-id fid :this-type this-t :statics (atom [])}]
-    (binding [*cutoff* (if cls Long/MAX_VALUE (max (long cut) (long (or (:_b (:body f)) 0))))
+        ;; (CP290 (a): a generic lambda's call operator specialization: the lambda's captures, its init-captures' names,
+        ;; and the names visible at the lambda, [temp.res])
+        glam (when cls (:glam (abi/cls cls)))
+        _ (when glam (doseq [[nm es] (:names glam) e es] (enter! fs nm e)))
+        ctx (cond-> {:scope fs :fn-id fid :this-type this-t :statics (atom [])} glam (assoc :lambda glam))]
+    (binding [*cutoff* (cond glam (long (:glam-cutoff (abi/cls cls))) cls Long/MAX_VALUE :else (max (long cut) (long (or (:_b (:body f)) 0))))
               *src* (or (:src f) *src*)]
       (let [trace (fn [g] (if (System/getenv "CPP_HDR_TRACE")
                             (try (g) (catch arbace.lang.ExceptionInfo e
@@ -3549,7 +3756,9 @@
             body (if (and body (= "CXXTryStmt" (:kind (:body f))) (contains? #{:ctor :dtor} (:kind f)) (= :try (:s body)))
                    (update body :handlers (fn [hs] (mapv (fn [h] (update h :body (fn [b] {:s :block :items [b {:s :expr :e {:op :throw :ty abi/void :cat :pr}}]}))) hs)))
                    body)]
-        (upd-fn! fid assoc :params pids :tbody body :tinits inits :nrvo (when body (nrvo-var body)) :statics @(:statics ctx))))))
+        (upd-fn! fid assoc :params pids :tbody body :tinits inits :nrvo (when body (nrvo-var body)) :statics @(:statics ctx))
+        ;; (a generic lambda's body with no return statement: void, [expr.prim.lambda.closure]/4's deduction)
+        (when (and glam (has-auto? (:ret (:ty (fnd fid))))) (upd-fn! fid assoc-in [:ty :ret] abi/void))))))
 
 (defn- defaulted-comparison!
   "A defaulted == or <=> ([class.compare.default], [class.eq], [class.spaceship]): the bases' and members' comparisons
