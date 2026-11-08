@@ -5144,3 +5144,50 @@ engine, `sun.security.ssl.QuicTLSEngineImpl`, which F3's forms already hold), wh
 `test/jdk/java/net/httpclient`'s 378 tests the corpus holds these 8: 259 name an `@library` (the test library's HTTP/1.1, HTTP/2
 and HTTP/3 servers, `/test/jdk/java/net/httpclient/lib`, and `/test/lib`), and most of the other 119 run as TestNG or JUnit
 tests (63 and 30 `@run` lines), which the corpus's categories leave out: JCS311 below.
+
+## Proposed (java-http: JCS233, JCS230, JCS254)
+
+Numbered from JCS310 (JCS258-JCS309 left to the day's other branches).
+
+### JCS310 Where the checks' java.home goes
+
+jrt writes java.home under `$XDG_CACHE_HOME` or `$HOME/.cache` (JCS233 (a)'s "the user's cache"), so every gate step, Java
+check and test run that reads `java.home` writes one directory per data key (about 360 KB) into the host user's cache, outside
+the checkout and the clean run's fresh clone; RT.doInit's `System.getProperties()` reads it at every start.
+- (a) `ARBACE_CACHE_HOME`, read by jrt before `XDG_CACHE_HOME` (Arbace's cache root alone: Go's own build cache, which reads
+  `XDG_CACHE_HOME` when `GOCACHE` is unset, is not moved), set by `bin/lib/tmpdir.bash` to the checkout's `.tmp/cache` when unset:
+  the checks write only inside the checkout, the clean run inside its clone. An hour; `TestJavaHome` gains the variable.
+- (b) As built: the user's cache for everything; a few keys a week (the data changes with the conversion).
+- *Recommended: (a)*: the checks' outputs stay in `.tmp/`, as the rest of the scratch does.
+
+### JCS311 java.net.http's jtreg tests that use the test library
+
+`test/jdk/java/net/httpclient` has 378 tests; the corpus holds 8 (JCS254's). 259 name an `@library` (the HTTP/1.1, HTTP/2 and
+HTTP/3 test servers of `/test/jdk/java/net/httpclient/lib`, `jdk.test.lib`), and 93 of the rest run under TestNG or JUnit:
+the corpus's categories (`:run-plain`, `:run-compile`, `:run-jitopts`, `:compile-fail-ref`) take neither.
+- (a) A survey of `@library` and TestNG/JUnit runs for Java's check (JC-level: the libraries' sources read and loaded with the test,
+  TestNG's and JUnit's runners as forms or a minimal runner of Arbace's own that reports as jtreg does), its first corpus the
+  HTTP client's: 1-2 days of survey, then the runner; hundreds of tests across `jdk/` beyond these.
+- (b) Deferred: the 8 stand for the client until the check takes libraries.
+- *Recommended: (a)* as its own survey, after the Java night records JCS254's 8: the libraries are the largest part of jtreg the
+  check does not reach.
+
+### JCS312 Security's `loadMaster` from java.home
+
+With java.home a directory (JCS233), jdk26u's `Security.SecPropLoader.loadMaster` could read `${java.home}/conf/security/java.security`
+as the JDK does, and `Security.ae`'s `loadMaster` variant (the embedded resource) could go.
+- (a) The variant dropped: the JDK's code; but a Go build without java.home (the box, a read-only home) then has no security
+  properties at all and every provider lookup fails.
+- (b) The variant kept: the resource is the same bytes as the file; the JDK's own readers of the file (the tests, `FilePaths`) read
+  java.home's.
+- *Recommended: (b)*.
+
+### JCS313 `bin/jrt-convert vet --classes RE`
+
+JCS254's day check analyzed a new slice's classes (385) on the committed world plus the day's read, by a scratch copy of
+`jrt.vet` whose targets are a regex (`.tmp/http/vetns/jrt/hvet.ae`): 24 s, 1.67 GiB, and it found what the night would have
+(`Thread.Builder.OfPlatform`, fixed the same day). Any slice that adds sources has the same need.
+- (a) `vet --classes RE [--forms-add DIR...]`: the classes matching RE analyzed beside the variants', DIRs' forms laid over the
+  committed ones (the day's `read-jdk --check` output); an hour, documented in the triage's checklist for new slices.
+- (b) Left as the scratch script.
+- *Recommended: (a)*.
