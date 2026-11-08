@@ -4476,3 +4476,74 @@ The two classed tests are io being `_pyio` (`:pyio`, by design): `_pyio.StringIO
 through the subclass's `write` and seeks, and `_pyio`'s seek calls the subclass's `flush` before its `__init__` has set
 its attributes; CPython running `_pyio` does the same (probed). The whole click suite (2,459 tests, the stress tests
 deselected by its pyproject) is the main host's run.
+
+## As built: 234, Lib/test judged by each test's own verdict (2026-11-08, the Mac VM, queue 234)
+
+The user's rule of 2026-11-07 (doc/CROPS-SCORE.md on main, "Decided"): a test's own verdict is a judge no toolchain made
+(1); a record a toolchain made is 0.5; a mixed stage the case-weighted mean. CPython's Lib/test is self-checking
+(unittest's ok, skipped, failure, error per method), so its judge no longer needs CPython's runs.
+
+- **The judge** (`test/python/libtest_judge.ae`): `--verdict own`, the default, passes a method when unittest's outcome
+  under pyi is ok (an expected failure ok, an unexpected success a failure, as the drivers say). The methods are the
+  inventory (every reference line's id, `:excluded` ones too, but the runner's lines that name no test) with every test
+  pyi's run reported (pyi-only tests, e.g. the families' modules that have no reference, are judged now); a module with
+  neither gives one row `MODULE/*` (its import line). No CPython outcome is read. `--verdict ref` is the old judge
+  (pyi's outcome against CPython's recorded one), the oracle tier's. `--skips pass` makes a skip a pass (the DECISION's
+  option (b)). `--agreement` prints both verdicts of every method and the disagreements by kind per corpus (`--dir`, or
+  `--results` of a ref judge's `--save`). The record's header names its verdict (`;; (verdict own)`); a record of the
+  other verdict is not judged against ("re-record it"), so a change of rule is not a storm of regressions.
+- **Two classes** (`test/python/divergences.edn`, `:verdict :own`: the own verdict's alone, the ref judge leaves them
+  out): `:fails-under-cpython-too` (the 11 methods CPython's recorded run fails on the recording host: the ref judge
+  passed them as equal outcomes) and `:skipped-by-test`, last in the file (`^skipped`, `^import SkipTest: `, the wheels'
+  `pyi skipped`): a skip is the test's "not run here", a non-pass by design; every earlier class (C modules, _testcapi,
+  specialization ...) takes the skips that name pyi's gaps first, and the record still makes ok -> skipped a regression.
+- **No python3 at check time**: `bin/pyi check` and `lib-test-all` ran `tools/pyi/libtest_all.py` (the universe's
+  `owned`, the restartable runner `run`, `controls`, `table`) by python3. They run it compiled by pyi's AOT now
+  (`pyrun`, `runner_exe`, `bin/pyi runner`, kept by the runtime's key, the generator's and the script's digests; about
+  2.5 minutes the first time on the VM); `PYI_RUNNER=python3|pyi` the others; `--oracle` and the cover run keep python3.
+  With python3, python and python3.14 stubs exiting 99 first on PATH, `bin/pyi check --fresh test_bool test_getopt`
+  ran with the stub's log empty.
+- **The negative controls hold**: the crossed pairs fail on the inventory (test_bool's run as test_int: 83 methods, 52
+  failing; test_getopt as test_filecmp: 26, 16 failing); a new `:flip` pair (control 3) is the verdict's own control:
+  test_bool's first ok test judged alone passes, the same run with that outcome made a failure fails; a judge blind to
+  the verdict is "not sharp". All three fail as they must under both verdicts.
+- **The wheels' suites** (`arbace.python.wheels judge --verdict own`, the default; `bin/pyi wheels suite`): pyi's run
+  alone, passed and xfail pass, no CPython run unless `PYI_VERDICT=ref`; the control flips the judged side's first
+  passed test. tomli: 18 tests, 17 pass, 1 `:skipped-by-test` (ref: 18 equal), with python3 stubbed.
+
+**Agreement on saved results** (the newest complete run of each module the VM's task directories kept, 152 modules:
+language-core 11, stdlib-tests 58, lib-test-asyncio 35, lib-test-all 48; 19,921 methods; many runs older than the
+current runtime: this measures the judges, not pyi):
+
+| corpus | methods | both verdicts | agree | disagree | own verdict alone |
+|---|---:|---:|---:|---:|---:|
+| language-core | 1,149 | 1,145 | 1,137 (99.30%) | 8 | 4 |
+| stdlib-tests | 10,073 | 10,012 | 9,408 (93.97%) | 604 | 61 |
+| lib-test-asyncio | 2,975 | 2,975 | 2,909 (97.78%) | 66 | 0 |
+| lib-test-all (48 modules) | 5,724 | 5,712 | 5,646 (98.84%) | 66 | 12 |
+| all | 19,921 | 19,844 | 19,100 (96.25%) | 744 | 77 |
+
+The disagreements, by kind: 738 "ref pass, own non-pass: both skipped" (a skip CPython makes too: the ref judge's
+pass, the own verdict's `:skipped-by-test`), 6 "own pass, ref non-pass: pyi ok, CPython skipped" (the ref judge's
+`:runs-where-cpython-skips`). On every ok, failure and error the two verdicts agree: no method is a pass of one and a
+failure of the other but by a skip. With `--skips pass`: 915 "pyi skipped, CPython ok" become passes (95.36% agree):
+pyi's gaps would count as passes. The 77 judged by their own verdict alone: 59 skips, 10 ok, 4 failures or errors
+(test_importlib's Frozen_/Source_FindSpecTests.test_module, test_module's finalization at shutdown: tests the ref judge
+never saw), 2 imports, 2 not run. The failing sets with the classes: the ref judge fails 274 methods the own verdict
+classes (pyi's skips that no class names any more: "No ssl module", "requires the C _functools module", pidfds ...,
+old runs from before those were fixed; the own verdict hides such a skip of a test that never passed until the oracle
+tier), the own verdict 3 the ref judge never judged.
+
+**Fresh samples on this branch** (the VM, both verdicts of the same runs): `bin/pyi check --corpus language-core` (11
+modules, 1,149 methods): own 1,065 pass, 82 classed, 2 failing; ref 1,073 equal, 70 classed, 2 failing: the same two
+(test_exceptions' test_assertion_error_location and test_fstring's test_many_expressions past the 300 s test timeout on
+the loaded VM); the 8 more classed are both-skipped tests, 4 more methods the excluded ones. `bin/pyi wheels suite click
+tests/test_basic.py tests/test_utils`: 681 tests, 681 pass by their own verdict, the control refused, python3 stubbed.
+
+**The independence facts** (a patch for main's `test/crops/independence.edn`, `:python :at "mac/mac/201-python-py7-py11"`,
+in queue 234's report): read 1; eval 0.5 and AOT 0.5 (the runtime consumes five tables recorded from CPython's own
+modules: errno, posix, fcntl, socket, _opcode); print 0.5 (the round trips print forms converted from CPython's recorded
+dumps of the originals); judge 0.962, `:cases {:self 51346 :recorded 4189}` (Lib/test's 48,546 methods and print's 2,800
+files by their own verdict; the 151 programs' 453 cases and read's 3,736 files against records): 69.2% (20.0% before;
+89.2% if the tables count as platform data; 99.2% with the tables made from pinned sources and the originals read
+natively). Scored by main's `bin/crops-score --crop python` in a scratch overlay: 69.2%, 0 refuted, 0 problems.
