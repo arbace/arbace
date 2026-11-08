@@ -2183,3 +2183,82 @@ Built 2026-11-08 on branch `hs-hes83` from next `bd33e27cc` (HE9 merged).
   `.c` of the directory, which `bin/hsi check`'s does (HES64 (a), target.mk builds every `.c` with the program). (a) the same
   in record-ref, the two recorded by GHC by hand: minutes; (b) leave them in `:no-reference`. *Recommended: (a)*, at the next
   oracle-tier recording.
+
+## Decided (the user, 2026-11-08: HES84, HES85)
+
+HES84: (b), the class `:threaded-only` as built, the core's threaded-only tests judged against the normal way's reference until
+the RTS's threaded semantics are taken up (`:rts`'s HE4f-HE4g); then (a). HES85: (a), record-ref passes a nofib program's `.c`
+files as `bin/hsi check`'s plan does, and smp/callback001 and 002 are recorded by GHC by hand.
+
+## As built: HES84 (b), HES85 (a)
+
+Built 2026-11-08 on branch `hs-hes84` from next `5af7d0058` (HES83 merged).
+
+- **HES84 (b).** Nothing of hsi or the plan changes: `test/haskell/divergences.edn`'s `:threaded-only` records the decision
+  (`:decided`). What (b) leaves judged against the normal way, read from `test/haskell/eval/testsuite-run.edn` (the tests whose
+  `only_ways` names only threaded ways) and the records: 14 tests of the core. 7 pass: T10414, T14346, T21969 (status 0, the
+  normal way's output, which for T10414 and T21969 is also the shipped `.stdout`), and four whose normal-way run differs from
+  the shipped `.stdout` (`:expected :differs`) and which hsi matches, the threaded RTS's verdict not being what is judged:
+  T21651 and ffi014 (status 1, an uncaught IOException of the non-threaded RTS), hs_try_putmvar003 (status 1, its C's "This
+  test requires -threaded"), numsparks001 (status 0, another output than the shipped one). 6 fail or stop in their classes
+  (conc037, conc038, setnumcapabilities001 in `:rts`; conc059 in `:threaded-only`; hs_try_putmvar001 and IncallAffinity in
+  their C classes); T4262 is skipped by all.T. None of the four is in `own-verdicts.tsv` (a listed program's shipped files
+  are GHC's recorded run), so they are judged by GHC's record (0.5) and their verdict is the normal way's: HES86 below.
+- **HES85 (a).** `bin/lib/hsi/record-ref`'s nofib plan passes the program's C as nofib's own make links it, read from the
+  pinned nofib's `mk/ghc-paths.mk` and `mk/target.mk`: `C_SRCS` is the `.c` and `.S` of `SRCS` but the `*_stub.c`, and `SRCS`
+  is every source of the directory (`ALL_SRCS`, with `ALL_DIRS`) less `EXCLUDED_SRCS`, unless the Makefile sets `SRCS` itself.
+  Six programs with a C file set it to leave their C versions out (imaginary/paraffins, imaginary/primes, real/compress,
+  shootout/fasta, shootout/reverse-complement, spectral/simple: `SRCS = Main.hs` or the modules; paraffins' Makefile says so),
+  so three programs link C: smp/callback001 and 002 (`cbits.c`) and spectral/fft2 (`fft.c`). `nofib_c_srcs` computes it (the
+  Makefile's `SRCS` and `EXCLUDED_SRCS` with their continuation lines; the 144 nofib programs give those three and no other),
+  and HES83's step then compiles the Haskell first (`--make -no-link`, the `_stub.h` beside the sources), then the build. This
+  is narrower than `bin/lib/hsi/check`'s plan, which passes every `.c` of the directory (HES64 (a)'s reading of target.mk) and so
+  also builds the six programs' unused C versions by ci: left as it is, since the flags are in each program's key and the
+  pack haskell-stg-progs would have to be recorded again for the five of them it holds (HES86 below). One program's plan line is
+  now read with a here-string instead of a process substitution (the same fields).
+- **The references** (GHC 9.14.1, by hand, the oracle tier; the other lines kept): `bin/hsi record-ref --corpus nofib --only
+  nofib/smp/callback001,nofib/smp/callback002 --jobs 2`: both build (they were `:no-build`, "ld returned 1 exit status": `cbits.c`
+  not linked). callback001 (`FAST_OPTS = 100`) status 0, its 101 bytes the shipped `callback001.faststdout` (`:expected :same`);
+  callback002 (`FAST_OPTS = 300000`, no expected file) status 0, no output (`:expected :none`). Then, as a check of the rule,
+  the same with spectral/fft2 and imaginary/paraffins added (fft.c now linked, paraffins' C left out): every line equal to the
+  committed one but its `:build` and `:run` seconds (that file not kept). `bin/hsi own-verdicts --record`: 587 of 908 (586),
+  callback001 judged by its own verdict; callback002 by GHC's run.
+- **hsi** (light, `ARBACE_MEM_GIB=2`): `bin/hsi check --corpus nofib --only nofib/smp/callback001,nofib/smp/callback002`:
+  callback001 **passes** (`:judge :own`, 6.6 s; recorded, `--record --only` it); callback002 is stopped by the light cap (status
+  137, `:limit`, 9 s), as main's row records. Run by hand under `ulimit -v` 3 GiB (`hsi run` with the program's STG, its C
+  nodes, the pack's libraries and the image): status 0, no output, as GHC's, at N = 1,000, 10,000, 30,000, 100,000 and 300,000
+  (0.19, 0.32, 0.38, 0.43 and 0.71 GB resident; 9.3 s at 300,000): it is expected to pass under the night's 16 GiB. It stays in
+  `:no-reference` until the night's record (its `:why` says so); callback001 left it.
+- **Classes** (`test/haskell/divergences.edn`): `:threaded-only`'s and `:no-reference`'s `:decided` name HES84 (b) and HES85
+  (a). `bin/hsi divergences`: 908 programs, 801 pass, 107 in a class, 0 not. `bin/reap --record` (Haskell's eval 801 / 64 / 43,
+  was 800 / 65 / 43; no other cell moved), `bin/crops-score --record`.
+- **Checks**: `bin/hsi own-verdicts --check` current (587 of 908); hsi-essential's command (`bin/hsi own-verdicts --check &&
+  bin/hsi check --corpus samples,synthetic,testsuite-core --only @test/haskell/hsi/essential.txt`, 2 jobs, 3 GiB): 123 of
+  123, the four controls failing as they must; `bin/reap` 0 problems; `bin/crops-score --judge --strict` 0 problems.
+- **Scores** (`bin/crops-score`): Haskell 96.6 / 100 / 74.9 before (completeness 0.9659, independence 0.7492, judge 0.942), 96.6
+  / 100 / 74.9 after (0.9661, 0.7494; judge 0.943: `test/crops/independence.edn`'s judge cases `{:self 3331 :recorded 426}`, eval
+  587 own and 321 recorded: HES83's 586 had not reached the fact, and callback001). Independence stays near 75 because eval and
+  AOT (0.5 each) run GHC's STG from the packs: the native front end's STG as the cells' source (HFS-I1, the front end's line) is
+  what moves it, not the references. Expected after the night: eval 802 (callback002), and HES83's and HE9's own.
+- **Night** (the main session's, after HES83's and HE9's commands, which re-record every program): nothing new beyond them:
+  `bin/hsi check --corpus nofib,samples,synthetic,testsuite-core --jobs 4 --record` records callback002 at the 16 GiB cap; then
+  in `test/haskell/divergences.edn` `nofib/smp/callback002` out of `:no-reference` (its `:why` without the "until the night's
+  record" clause), `bin/hsi divergences`, `bin/reap --record`, `bin/crops-score --record`. If it is run alone: `bin/hsi check
+  --corpus nofib --only nofib/smp/callback002 --record`. The AOT level (`check --aot`) takes no nofib smp program today.
+
+### Proposed (HES86, HES87)
+
+- **HES86: bin/hsi check's nofib C as nofib's make links it.** `bin/lib/hsi/check` passes every `.c` of a nofib directory;
+  nofib's make links only `SRCS`'s when the Makefile sets it, so five programs that pass (paraffins, primes, fasta,
+  reverse-complement, simple; compress does not build) have an unused C version built by ci and loaded with them (paraffins'
+  has its own `main`). (a) `check` takes record-ref's `nofib_c_srcs` (one function in `bin/lib/hsi/records.bash`): the five
+  programs' flags, so their keys, change; their STG entries in haskell-stg-progs recorded again by the helper (`bin/hsi check
+  --live --dump-only --record-progs --only` the five, GHC by hand at the oracle tier, minutes), their runs no longer need ci or
+  musl (the eval fact's C cases 87 to 82): about an hour; (b) leave it: the extra C is never called, the verdicts are the same.
+  *Recommended: (a)* at the next recording of haskell-stg-progs (the plans of the reference and of the check equal again).
+- **HES87: the threaded-only tests that pass on the normal way's refusal.** Under HES84 (b), four tests all.T runs only in the
+  threaded ways pass against GHC's normal-way reference whose output is not the shipped one (`:expected :differs`): T21651 and
+  ffi014 (status 1, an uncaught IOException), hs_try_putmvar003 (its C's "This test requires -threaded"), numsparks001. hsi
+  matches the non-threaded RTS's refusal, not the test. (a) a class `:threaded-way` (deferred) taking them out of the passes
+  until HES84 (a) (the eval cell 801 to 797); (b) keep them as passes, the survey recording why (as built). *Recommended: (a)*:
+  a refusal to run is no evidence of the test's behaviour, and HES84 (a) will judge them in their own way.
