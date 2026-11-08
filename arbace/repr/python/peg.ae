@@ -2,7 +2,10 @@
 ;; de414a57119abef52784d8993e341d53aed635fc2b05c2607d9f98a2c5b72032): Parser/pegen.c (the token buffer, keywords, the memo,
 ;; the token functions, lookahead helpers), Parser/action_helpers.c (the grammar's helpers) and the parts of
 ;; Parser/string_parser.c the parser's nodes need, Copyright (c) 2001 Python Software Foundation, All Rights Reserved,
-;; under the PSF License Agreement for Python 3.14 (LICENSE.md, "CPython: the PSF License Agreement for Python 3.14").
+;; under the PSF License Agreement for Python 3.14 (LICENSE.md, "CPython: the PSF License Agreement for Python 3.14"). Since
+;; queue 236 also from CPython 3.15.2 (https://www.python.org/ftp/python/3.15.2/Python-3.15.2.tar.xz, SHA-256
+;; 8b5536d280142ecf6cdfe15d12a21ba1c65e300bbf7b28a8d0cdb849575797de): Parser/action_helpers.c's
+;; _PyPegen_checked_from_import, _warn_relative_import_of_lazy and _PyPegen_raise_error_for_missing_comma, the same notice.
 
 (ns arbace.repr.python.peg
   "The runtime of Python's generated parser (arbace.repr.python.parser; doc/python/PYTHON-SURVEY.md, \"As built: PY9b\"):
@@ -35,14 +38,14 @@
   (^Parser [^String text keywords soft type-comments no-fake]
   (let [p (Parser. (lex/lexer text false type-comments true no-fake) (java.util.ArrayList.) (long-array 9) (java.util.HashMap.)
                    keywords (set soft) (java.util.ArrayList.) (object-array [(int-array 1024)]))]
-    (aset ^longs (.-st p) 4 14)
+    (aset ^longs (.-st p) 4 (long lex/*minor*))
     p)))
 
 (defn set-feature-version
   "compile()'s _feature_version (PyCF_ONLY_AST): the minor version the grammar's CHECK_VERSIONs hold the source to (a
-  negative one is the current, 14)"
+  negative one is the current: 14, or 15 under arbace.repr.python.lex/*minor*, queue 236)"
   [^Parser p ^long v]
-  (aset ^longs (.-st p) 4 (if (neg? v) 14 v))
+  (aset ^longs (.-st p) 4 (if (neg? v) (long lex/*minor*) v))
   p)
 
 (defn set-single
@@ -507,6 +510,55 @@
     (aset ^longs (.-st p) 3 1)
     (lex/set-barry! (.-lx p)))
   (into {:t :ImportFrom :module module :names names :level level} ex))
+
+(declare check-legacy-stmt)
+
+;; Python 3.15's import helpers (queue 236; action_helpers.c of 3.15.2: _PyPegen_checked_from_import,
+;; _warn_relative_import_of_lazy, _PyPegen_raise_error_for_missing_comma)
+
+(defn- warn-relative-import-of-lazy
+  "_warn_relative_import_of_lazy: `from . lazy import x` (a space between the dots and the name) warned of as the
+  transposition of `lazy from . import x`, at the module's name; not in the second pass"
+  [^Parser p dots module]
+  (when (and lex/*warnings* (not (call-invalid? p)))
+    (let [d (last dots)]
+      (when-not (and (c= (:end_lineno d) (:lineno module)) (c= (:end_col_offset d) (:col_offset module)))
+        (let [b (apply str (repeat (seq-count-dots dots) "."))
+              msg (str "'from " b " lazy import' is the same as 'from " b "lazy import'; did you mean 'lazy from " b " import'?")
+              ;; _PyErr_EmitSyntaxWarning's error under an "error" filter: _PyErr_RaiseSyntaxError's, the columns the
+              ;; node's UTF-8 offsets plus one, the text the file's line (PyErr_ProgramTextObject: none for a string)
+              e ["SyntaxError" msg (:lineno module) (inc (long (:col_offset module))) (:end_lineno module)
+                 (inc (long (:end_col_offset module))) nil]]
+          (lex/add-warning! "SyntaxWarning" msg (:lineno module) e))))))
+
+(defn checked-from-import
+  "_PyPegen_checked_from_import (3.15): the dots counted, `lazy from __future__` refused, barry_as_FLUFL's flag set as
+  _PyPegen_checked_future_import did, `from . lazy import` warned of; an ImportFrom with is_lazy 1 or 0"
+  [^Parser p dots module-name names lazy ex]
+  (let [module (:id module-name) level (seq-count-dots dots)]
+    (cond
+      (and (c= level 0) (= module "__future__"))
+      (do (when lazy (syntax-error-at p lazy "lazy from __future__ import is not allowed"))
+          (when (some #(= "barry_as_FLUFL" (:name %)) names)
+            (aset ^longs (.-st p) 3 1)
+            (lex/set-barry! (.-lx p))))
+      (and (pos? level) (nil? lazy) (= module "lazy"))
+      (warn-relative-import-of-lazy p dots module-name))
+    (into {:t :ImportFrom :module module :names names :level level :is_lazy (if lazy 1 0)} ex)))
+
+(defn raise-error-for-missing-comma
+  "_PyPegen_raise_error_for_missing_comma (3.15): nothing for a legacy statement or outside brackets; a multi-line `a`
+  (a string concatenation) pointed at on its last line"
+  [^Parser p a b]
+  (cond
+    (check-legacy-stmt p a) nil
+    (c= 0 (:level (token-at p (dec (mark p))))) nil
+    (> (long (:end_lineno a)) (long (:lineno a)))
+    (RAISE-ERROR-KNOWN-LOCATION p :SyntaxError (:end_lineno a) (:col_offset a) (:end_lineno a) (:end_col_offset a)
+                                "invalid syntax. Perhaps you forgot a comma?")
+    :else
+    (RAISE-ERROR-KNOWN-LOCATION p :SyntaxError (:lineno a) (:col_offset a) (:end_lineno b) (:end_col_offset b)
+                                "invalid syntax. Perhaps you forgot a comma?")))
 
 (defn check-barry-as-flufl
   "_PyPegen_check_barry_as_flufl: 0 when the token is the flags' spelling of not-equal"

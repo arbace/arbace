@@ -13,6 +13,25 @@
 (set! *warn-on-reflection* true)
 
 ;; ---------------------------------------------------------------------------------------------
+;; The grammars (queue 236): 3.14.10's parser, or 3.15.2's under arbace.repr.python.lex/*minor* 15, loaded when first asked
+
+(defn- grammar-of [ns]
+  (let [v #(deref (requiring-resolve (symbol ns %)))]
+    {:minor (if (= ns "arbace.repr.python.parser") 14 15)
+     :keywords (v "keywords") :soft-keywords (v "soft-keywords") :file (v "r-file") :eval (v "r-eval")
+     :interactive (v "r-interactive") :func_type (v "r-func_type") :asdl-fields (v "asdl-fields")
+     :asdl-positioned (set (v "asdl-positioned")) :asdl-seqs (set (v "asdl-seqs"))}))
+
+(def ^:private g314 (delay (grammar-of "arbace.repr.python.parser")))
+(def ^:private g315 (delay (grammar-of "arbace.repr.python.parser315")))
+
+(defn grammar
+  "The generated parser of the reader's Python (arbace.repr.python.lex/*minor*): its keywords, soft keywords, start
+  rules (:file :eval :interactive :func_type) and Parser/Python.asdl's tables (:asdl-fields, :asdl-positioned, :asdl-seqs)"
+  ([] (grammar lex/*minor*))
+  ([minor] (if (== 15 (long minor)) @g315 @g314)))
+
+;; ---------------------------------------------------------------------------------------------
 ;; The parse
 
 ;; the future features (Python/future.c's future_parse, as compile()'s AST preprocessing runs it for ast.parse)
@@ -45,9 +64,10 @@
     (throw (ex-info "null bytes" {:python-error ["SyntaxError" "source code string cannot contain null bytes" nil nil nil nil nil]})))
   (let [t (-> source (str/replace "\r\n" "\n") (str/replace "\r" "\n"))
         t (if (and (= mode :exec) (seq t) (not (str/ends-with? t "\n"))) (str t "\n") t)
-        p (pk/set-feature-version (pk/parser t ps/keywords ps/soft-keywords (:type-comments opts) (contains? #{:single :eval} mode)) (long (or (:feature opts) -1)))
+        g (grammar)
+        p (pk/set-feature-version (pk/parser t (:keywords g) (:soft-keywords g) (:type-comments opts) (contains? #{:single :eval} mode)) (long (or (:feature opts) -1)))
         p (if (= mode :single) (pk/set-single p (:dont-imply-dedent opts)) p)
-        rule (case mode :exec ps/r-file :eval ps/r-eval :single ps/r-interactive :func_type ps/r-func_type)
+        rule (case mode :exec (:file g) :eval (:eval g) :single (:interactive g) :func_type (:func_type g))
         tree (pk/run-parser p rule {:incomplete (:incomplete opts) :single (= mode :single)})]
     (if (#{:exec :single} mode) (future-check tree) tree)))
 
@@ -56,8 +76,9 @@
   [^String text type-comments]
   (let [t (-> text (str/replace "\r\n" "\n") (str/replace "\r" "\n"))
         t (if (str/ends-with? t "\n") t (str t "\n"))
-        p (pk/parser t ps/keywords ps/soft-keywords type-comments)]
-    (future-check (pk/run-parser p ps/r-file))))
+        g (grammar)
+        p (pk/parser t (:keywords g) (:soft-keywords g) type-comments)]
+    (future-check (pk/run-parser p (:file g)))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; The writer (tools/pydump/pydump.py's Writer, the spec's vocabulary)
@@ -221,9 +242,11 @@
         (form (if (= :Try (:t n)) "try" "try-star") [(b (:body n)) (vecs hs)]
               [[":else" (when (seq (:orelse n)) (b (:orelse n)))] [":finally" (when (seq (:finalbody n)) (b (:finalbody n)))]] extra))
       :Assert (form "assert" [(e (:test n)) (when (:msg n) (e (:msg n)))] [] extra)
-      :Import (form "import" [(vecs (map #(alias-w w %) (:names n)))] [] extra)
+      ;; is_lazy (3.15, queue 236): :lazy true; absent in 3.14's trees
+      :Import (form "import" [(vecs (map #(alias-w w %) (:names n)))] [[":lazy" (when (pk/truthy? (:is_lazy n)) "true")]] extra)
       :ImportFrom (form "import-from" [(or (:module n) "nil") (vecs (map #(alias-w w %) (:names n)))]
-                        [[":level" (when (pk/truthy? (:level n)) (str (:level n)))]] extra)
+                        [[":level" (when (pk/truthy? (:level n)) (str (:level n)))]
+                         [":lazy" (when (pk/truthy? (:is_lazy n)) "true")]] extra)
       :Global (form "global" [(vecs (map ident (:names n)))] [] extra)
       :Nonlocal (form "nonlocal" [(vecs (map ident (:names n)))] [] extra)
       :Expr (form "expr" [(e (:value n))] [] extra)
@@ -426,7 +449,8 @@
       :ListComp (form "list-comp" [(e (:elt n)) (gens w (:generators n))] [] nil)
       :SetComp (form "set-comp" [(e (:elt n)) (gens w (:generators n))] [] nil)
       :GeneratorExp (form "generator-exp" [(e (:elt n)) (gens w (:generators n))] [] nil)
-      :DictComp (form "dict-comp" [(e (:key n)) (e (:value n)) (gens w (:generators n))] [] nil)
+      ;; 3.15's {**d for ...} (queue 236): no value
+      :DictComp (form "dict-comp" [(e (:key n)) (when (:value n) (e (:value n))) (gens w (:generators n))] [] nil)
       :Await (form "await" [(e (:value n))] [] nil)
       :Yield (form "yield" [(when (:value n) (e (:value n)))] [] nil)
       :YieldFrom (form "yield-from" [(e (:value n))] [] nil)
