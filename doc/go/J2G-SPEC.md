@@ -596,7 +596,12 @@ calls members by name must root the members it may call (§10.6; amendment P2, a
   attributes the failures as the compiled level's refusals (`java.check/refusals`), and saves each test as
   `refused` (j2g's reason) or `analyzed` (none of its classes refused; what translation, Go or the run
   would meet is not measured): the day's light measurement, never judged or recorded. Unit test: bin/j2g-unit's
-  `analyze-only` checks.
+  `analyze-only` checks. Since F27, `J2G_MISSING` (a regex of internal names) adds `:missing` to the report, `[class
+  reason]` pairs, each printed (`j2g: missing in CLASS: REASON`): what the translation of the classes it names would
+  stub at the operation level (`arbace.j2g.code/missing-reason` over every node of their analyzed bodies: a member jrt's
+  hand-written classes lack, `jrt lacks java.lang.Thread.getContextClassLoader()...`, a class outside the world), the
+  scan of jrt's classes as the translation adjusts it (`world-scan`: the support code's String, Class, Module and
+  System members), every class of the world counted as translated.
 
 ### 4.2 Go packages
 
@@ -3350,6 +3355,12 @@ D6's other cuts were reversed one by one (the status at the top, B1-PLAN.md D6).
     `getTypeParameters` and `getGenericParameterTypes` are cut;
   - `getExceptionTypes` is empty and `Method.toString` has no throws clause
     (`NewInstanceExpr`'s `exclasses` feed only the class writer, which the evaluator has not).
+    Reversed for the Java forms' classes: F25 recorded a program's and the interpreter's Exceptions attributes (the `E`
+    records of `go/arbace/jrt/classdata.ae`), and since F27 (JCS240 (a), doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built:
+    F27 (write-ahead)") j2g writes them for every class it translates, the JDK's too (`arbace.classes.annot/throws-lines`,
+    `class-data`'s `:throws`), so that java.rmi's `Util.checkMethod` sees the JDK's remote interfaces declare
+    `RemoteException`; jrt's hand-written classes keep none (their member tables have no throws), nor do Clojure's
+    evaluated fns;
 - **Modules and packages** as run-time objects (`Module`, `Package`), the security manager.
 - **Finalization** (V8), thread groups and priorities (V10).
 - **Locales** (amendment R17, accepted 2026-10-08; refines JAVA-SURFACE.md decision 2): the

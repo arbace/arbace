@@ -1582,3 +1582,47 @@ JCS170). Proposals JCS280-JCS285 in the triage: Parameter (JCS280), the platform
 of the type annotation records (JCS282), a prediction verb (JCS283), JMX's connectors and HotSpot's beans (JCS284), `bin/jrt
 test` within the day's budget (JCS285).
 
+
+## 2026-11-08: F27, java.rmi ported, and JMX's remote connectors with it (JCS255 (b), JCS284; branch `java-rmi`, from mac/java-more 3e876ad36)
+
+The user's JCS255 (b): RMI ported now that serialization is (JCS167), not JCS132's by-design class. Write-ahead, by day under the
+light rules; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F27 (write-ahead)" has the detail, the night's commands and the
+proposals.
+
+**Measured first**: the corpus's RMI users that pass on the JDK are 18 of `jdk/java/rmi` (t05236, t05237, t05241-t05256), t08020
+(`javax/rmi/ssl`) and JMX's connector tests t07952-t07954, t07956, with the three DiagnosticCommandMBean tests t07841-t07843. A
+joint javac check of java.rmi's 94 files with the closure compiled at once (0 errors); jdk/forms lacks 568 of the closure's
+files tonight (the serialization slices among them), so the prediction converted them with the slice and laid them over a copy
+of jdk/forms. The analysis alone accepts calls j2g then stubs, so `bin/j2g --analyze-only` got `J2G_MISSING`
+(code/missing-reason over the analyzed bodies, with the translation's scan of jrt's classes factored out as `world-scan`): it
+named jrt's missing Thread context class loader, ThreadGroup, StackWalker, ServiceLoader, `System.loadLibrary`, and the
+analysis DGCClient's PhantomReference.
+
+**Built**: `rmi-sources`, 89 of jdk26u's java.rmi files (`baf63fb`, `src/java.rmi/share/classes`: java.rmi, .server, .registry,
+.dgc, javax.rmi.ssl, sun.rmi's server, transport, tcp and registry; not sun.rmi.log, activation's, nor RMISecurityManager) and
+java.lang.NoSuchMethodError; five derived overlays (RMIClassLoader without ServiceLoader, GC without loadLibrary, DGCClient's
+entries weak references, Log's caller frame from a Throwable, RuntimeUtil without thread groups); GC.maxObjectInspectionAge as
+jrt's native over Go's last collection (`go/arbace/jrt/rmi.ae`, written anew after librmi's GC.c); jrt's Thread
+getContextClassLoader and setContextClassLoader (`bin/jrt manifest` regenerated the manifest and tables); JCS240 (a)'s j2g half,
+every translated class's throws clauses as F25's E records (Util.checkMethod needs the JDK's remote interfaces' RemoteException),
+with bin/j2g-unit checks; j2g renames for RMI's eight colliding simple names and for JMX-1's com.sun.jmx.mbeanserver.Util, which
+collides with sun.management.Util. JMX-2: `jmx-remote-sources`, 41 files of java.management's javax.management.remote and
+com.sun.jmx.remote and of java.management.rmi, six derived (the two factories over jrt's new `JmxProviders`, the providers
+java.management.rmi's module-info names, behind ServiceLoader.Provider's interface; three thread makers without groups;
+RMIConnector without the PRef class it defines from bytes, jdk26u's own failure branch). And java-more's 24 duplicate source
+lines (derived files whose jdk26u sources their lists also name: the night's origins map would hold duplicate keys, which the
+Clojure reader refuses) are printed once.
+
+**Checked by day**: joint javac check 2,892 files, 0 errors (control: 12 errors); `derive --check` 61, 0 not as derived;
+`read-jdk --check` of the slices with their context 533 of 541 converted (the 8 failures context files of other slices), the 159
+RMI and JMX-2 forms identical with `--no-javac`; the prediction: 23 of the 24 tests analyze (t07956 waits for the edge), no class
+of the slices fails or is stubbed, two tests' own calls would be (Thread.getAllStackTraces, ThreadGroup); bin/j2g-unit 23 of 23;
+`bin/jrt test --arch amd64 -p 1` arbace/jrt ok; `go vet ./jrt` amd64 and arm64; `bin/gate --plan` clean. Expected about 15-20 of
+the 23 at each level after the night.
+
+Alternatives considered: JCS132 (a), RMI by design (the user chose (b)); RMI's PhantomReference, thread groups and StackWalker
+added to jrt now (JCS321, JCS322; derivations kept the diff to RMI and are each one table entry); JCS240 for remote interfaces
+alone (rejected: (a) was decided whole, and the records are of the order of 400 KB); JMX's connectors deferred again (JCS284's
+recommendation tied them to RMI, so they come with it); RMIConnector's PRef defined by a class of jrt's own (rejected: it exists
+to defeat stack-based class loading, which the Go build has not). Proposed: JCS320-JCS326 (getAllStackTraces, PhantomReference,
+thread groups, ProxyFn's exceptions, the prediction's check, RMI's own class, the DiagnosticCommandMBean tests).

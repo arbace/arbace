@@ -1148,7 +1148,12 @@ build constraints.
   `VirtualThread[#22,name]/runnable`.
 - **`getStackTrace()`**: the current thread's Java frames (phase 1's frame mapping); another
   thread's stack cannot be read from Go, so it is empty.
-- **The context class loader** is not there (`ClassLoader` is reworked, JAVA-SURFACE.md).
+- **The context class loader** is not there (`ClassLoader` is reworked, JAVA-SURFACE.md). Since F27 (2026-11-08,
+  doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F27 (write-ahead)"; java.rmi's transport sets it around each call):
+  `getContextClassLoader` and `setContextClassLoader` are jdk26u's, a field of the Thread set by its constructor to the
+  creating thread's loader and by `setContextClassLoader` (no security manager, no check); an adopted thread's (the main
+  thread's) is the system class loader, as the JVM's main thread's. jrt has no thread groups: the JDK classes that make
+  threads in a group (sun.rmi.runtime.RuntimeUtil, JMX's communicator admins) are derived without one.
 
 ## Thread locals
 

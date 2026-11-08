@@ -5370,3 +5370,221 @@ JCS255 (RMI). Recommended: the connectors deferred with RMI, HotSpot's beans by 
 2 GiB. (a) as now (by night, or accepted by day); (b) `--package P` (go test of one package, `-p 1`), the day's form. Cost:
 (b) an hour. Recommended: (b).
 
+
+## As built: F27 (write-ahead): java.rmi, and JMX's remote connectors with it (JCS255 (b), JCS284; branch `java-rmi`)
+
+The user's JCS255 (b) (2026-11-08): RMI ported after serialization instead of JCS132's by-design class. Branch `java-rmi`
+from `mac/java-more` (`3e876ad36`), 2026-11-08, by day under the light rules (nothing converted into jdk/, nothing
+translated or built; each process under about 2 GiB). F27 is the next free number (F26 is `java-classfile`'s). JMX's RMI
+connectors, which JCS284 recommended deferring with RMI, come in as F27's second slice, JMX-2.
+
+### The tests measured
+
+Of the corpus's tests (`test/java/ref-jdk26.edn`), those whose source names `java.rmi`, `javax.rmi` or
+`javax.management.remote` and that pass on the JDK: **18 of `jdk/java/rmi`** (t05236, t05237, t05241-t05256; the 5 others
+of the directory, t05234, t05235, t05238-t05240, fail on the JDK: they need the jtreg test library's `TestLibrary`),
+**t08020** (`javax/rmi/ssl`), and JMX's connector tests **t07952** (DaemonRMIExporterTest), **t07953** (JMXServiceURLProtocol),
+**t07954** (ConnectorStopDeadlockTest), **t07956** (ConcurrentModificationTest), with the three DiagnosticCommandMBean tests
+(t07841-t07843: HotSpot's diagnostic commands over a connector). The records hold them at `:net` (`java\.rmi`) and at the
+compiled level's refusals (MarshalledObject, Remote, LocateRegistry...: the classes were not in the world). What the tests
+use: the API's exceptions and MarshalledObject (serialization of Throwables and Class objects, JCS167's slices),
+UnicastRemoteObject's export and unexport over the TCP transport on loopback, the rmic stubs the tests carry (`*_Stub`,
+`Impl1_Skel`: RemoteStub, the 1.1 skeleton protocol) and the dynamic stubs (`java.rmi.server.ignoreStubClasses`: JCS170's
+Proxy over RemoteObjectInvocationHandler), the registry (LocateRegistry.createRegistry: ExportException on a port in
+use), the DGC's Unreferenced after a collection (MarshalledObjectGet, `sun.rmi.dgc.client.gcInterval`), the socket
+factories and the failure handler (RMISocketFactory, CloseServerSocketOnTermination), the server's stack traces in the
+client's exception (ServerStackTrace, SuppressStackTraces), `java.rmi.server.hostname` (ChangeHostName), the context
+class loader (RuntimeThreadInheritanceLeak), and SunJSSE's socket factories' equality (t08020).
+
+### What comes in, and how
+
+**java.rmi** (`test/jrt/jrt_sources.ae`'s `rmi-sources`: jdk26u at `baf63fb`, 89 files of `src/java.rmi/share/classes`
+translated as java.base's, KIND `share:java.rmi`): java.rmi (20 with Naming and MarshalledObject), java.rmi.server (27 with
+RMIClassLoaderSpi, the socket factories, RemoteObjectInvocationHandler, the deprecated LoaderHandler, LogStream, Skeleton and
+Operation), java.rmi.registry (3), java.rmi.dgc (3), javax.rmi.ssl (2), and sun.rmi's runtime: sun.rmi.server (11: the unicast
+references, the marshal streams over jdk26u's ObjectInputStream and ObjectOutputStream, LoaderHandler, Util,
+DeserializationChecker), sun.rmi.transport (17: LiveRef, the object table, the targets, DGCImpl with its stub and skeleton,
+DGCAckHandler, the stream calls and the connections) and its tcp transport (5: TCPEndpoint, TCPTransport's accept loop and
+connection threads, TCPChannel's connection reuse over F10a's sockets), sun.rmi.registry (RegistryImpl with its stub and
+skeleton); and java.base's `java/lang/NoSuchMethodError.java` (the rmic stubs' static initializers throw it when a remote
+method is missing). Not in it: sun.rmi.log (activation's log, gone with activation in JDK 17: nothing else uses it) and
+RMISecurityManager (a SecurityManager).
+
+| part | how |
+|---|---|
+| the derived overlays (5, `test/jrt/derive.ae`'s `rmi-derivations`) | `RMIClassLoader` (the provider the `java.rmi.server.RMIClassLoaderSpi` property's class or the default, no ServiceLoader lookup of META-INF/services); `sun.rmi.transport.GC` (librmi not loaded: no native libraries in the Go build); `DGCClient` (a remote reference's entry a WeakReference to its LiveRef where jdk26u's is a PhantomReference: jrt has no PhantomReference and no finalization, so the two are cleared and enqueued together; DGCClient never asks the referent); `sun.rmi.runtime.Log` (the logging caller's frame the fourth of a Throwable's stack trace, as jdk26u's StackWalker.walk skips three: no StackWalker in the Go build); `RuntimeUtil` (the RMI runtime's threads made without thread groups: jrt has none) |
+| the native (1) | `GC.maxObjectInspectionAge` (librmi's GC.c, JVM_MaxObjectInspectionAge: the milliseconds since the last whole-heap collection) is jrt's `GC_MaxObjectInspectionAge__J_native` (`go/arbace/jrt/rmi.ae`): the milliseconds since Go's last collection (runtime/debug's LastGC), since the runtime's start before the first; its test `rmi_test.ae` |
+| jrt's Thread | `getContextClassLoader` and `setContextClassLoader` (the RMI transport sets the target's loader around each call; RuntimeThreadInheritanceLeak sets its own): jdk26u's semantics, the creating thread's loader at construction, the system class loader for an adopted (the main) thread; `bin/jrt manifest` regenerated the manifest and the member tables (Thread's two methods, their test references) |
+| JCS240 (a), j2g's half | every class j2g translates writes its methods' and constructors' throws clauses (the `E` records F25 wrote for a program's own classes: `arbace.classes.annot/throws-lines`, `class-data`'s `:throws`, `arbace.j2g.out/class-registration`), the JDK's too: `sun.rmi.server.Util.checkMethod` refuses a remote interface whose method does not declare `RemoteException` (the JDK's are Registry, DGC and JMX's RMIServer and RMIConnection, whose dynamic stubs it checks), and RemoteObjectInvocationHandler rethrows what the method declares, an UnexpectedException otherwise. About 7,000 methods of the world declare exceptions: of the order of 400 KB of data, decoded on first use. ProxyFn's leniency (a method without known exceptions lets every exception through) stays, JCS323 |
+| j2g's renames (`arbace/j2g/names.ae`) | java.rmi's `AlreadyBoundException`, `ConnectException`, `UnknownHostException` (java.nio.channels', java.net's) → `Rmi_...`, java.rmi.server's `LoaderHandler` (sun.rmi.server's) → `Rmi_LoaderHandler`, sun.rmi's `Util`, `Channel`, `Connection`, `Target` (sun.nio's, java.nio.channels', java.sql's, java.lang.annotation's) → `Rmi_...`; found by a scan of the predicted world's simple names, which also found **JMX-1's `com.sun.jmx.mbeanserver.Util` beside F13's `sun.management.Util`** (→ `Jmx_Util`: the night would have met it) |
+
+**JMX-2, the connectors** (`jmx-remote-sources`: 41 files of `src/java.management/share/classes` and
+`src/java.management.rmi/share/classes`): javax.management.remote's API (the connector and connector server interfaces and
+their MBean, JMXServiceURL, the connection notifications, JMXPrincipal, the subject delegation permission, the provider
+interfaces), com.sun.jmx.remote.internal (the notification buffers, ArrayQueue, the client's and server's notification
+forwarders), com.sun.jmx.remote.security (the access controllers, the file login module, the hashed password manager),
+com.sun.jmx.remote.util's ClassLoaderWithRepository and OrderClassLoaders; java.management.rmi's RMIConnectorServer,
+RMIJRMPServerImpl, RMIServerImpl and RMIConnectionImpl with their rmic stubs (`RMIServerImpl_Stub`, `RMIConnectionImpl_Stub`:
+jdk26u's sources), RMIConnection, RMIServer, ProxyRef, RMIExporter and the two providers. Derived (`jmx2-derivations`):
+`JMXConnectorFactory` and `JMXConnectorServerFactory` ask **`jdk.internal.jrt.JmxProviders`** (overlay, new) for the providers
+ServiceLoader would stream: java.management.rmi's ClientProvider and ServerProvider, which its module-info provides, behind
+ServiceLoader.Provider's interface (`type`, `get`), so the factories' filters, `isSystemProvider` among them (the provider's
+module named java.management.rmi: `bin/jrt modules` after the night's conversion), are jdk26u's; `ClientCommunicatorAdmin`,
+`ServerCommunicatorAdmin` and `ClientNotifForwarder` make their threads without groups and stack sizes (F24's rule);
+`RMIConnector`'s static initializer does not fabricate jdk26u's PRef class from bytes in a module of its own
+(NoCallStackClassLoader, jdk.internal.module.Modules: what keeps RMI's stack-based class loading from seeing the stub), the
+Go build defining no class from bytes and reading no call stack for class loading: it takes jdk26u's own failure branch (no
+proxy reference constructor) and getConnection returns the connection stub unwrapped, as jdk26u does when it cannot wrap it.
+NoCallStackClassLoader stays out. JMX-1's EnvHelp derivation (the factories' two attribute names written as their values)
+stays: the values are the factories'.
+
+**`bin/j2g --analyze-only`'s `J2G_MISSING`** (`arbace/j2g/main.ae`): with a regex of internal names, the report's `:missing`
+lists what the translation of those classes would stub at the operation level, `arbace.j2g.code/missing-reason` over every
+node of their analyzed bodies (`jrt lacks java.lang.Thread.getContextClassLoader()...`, `class java.lang.ThreadGroup is not in
+the closed world`), with the translation's own scan of jrt's classes (run*'s support-code adjustments factored out unchanged
+into `world-scan`). The analysis alone accepts a body whose call j2g then stubs: the scan is what found the context class
+loader, the thread groups, StackWalker, ServiceLoader and `System.loadLibrary` before the night (JCS283's prediction verb
+would run it).
+
+**Found on the way, fixed** (java-more's, under this branch): `jrt.jrt-sources/print-sources` printed 24 files twice, JMX-1's
+21 and JCS271 (b)'s 3 derived overlays whose jdk26u sources their lists also name; bin/jrt-convert's origins map, which the
+Clojure reader reads, would have held 24 duplicate keys (`Duplicate key`: the night's conversion stops). A file an overlay
+replaces is now printed once, as the overlay.
+
+### Light checks done
+
+(main's stage 0 as `ARBACE_HOST_EXE`; javac's tool `.tmp/gate-exe/javac-5ad357331dbcd7cfb0fd` with `REPR_JAVA_STALE_OK=1`;
+scratch `.tmp/an`, `.tmp/conv`, `.tmp/jmxr` in the worktree)
+- **the joint javac check** (`.tmp/night7/all9-run.sh`): **2,892 files, 0 errors**, 5,843 classes (20 s, 1.0 GB; java-more's
+  2,749 + 89 java.rmi + 5 derived + NoSuchMethodError + 41 JMX-2 + 6 derived + JmxProviders, less nothing); its negative control
+  (JmxProviders moved away): 12 errors, exit 1; no line of sources.txt twice;
+- `bin/jrt-convert derive --check`: **61 overlays, 0 not as derived** (java-more's 50 + 5 + 6), the control failing as it must;
+- **the read**: `bin/repr-java read-jdk --check` of the two slices with their context (the closure's java.management,
+  java.management.rmi, java.rmi, java.logging, java.naming and jdk.management files and every overlay, `REPR_JAVA_PATCH_ALL=1`,
+  `GOMEMLIMIT=1500MiB`): 541 files, 533 converted, the 159 forms of RMI and JMX-2 (and JmxProviders, NoSuchMethodError) all of
+  them, 8 context files of other slices failed for their own context's absence (httpserver, java.sql, the locale data); 1.6 GB;
+  `--no-javac`: the same 159 forms byte for byte;
+- **the prediction** (JCS265 (b)'s way: the converted files, and the 568 closure files jdk/forms lacks tonight, the serialization
+  slices among them, laid over a copy of jdk/forms; `bin/java-check --levels read,compiled --analyze-only` with `J2G_MISSING`;
+  2.1 GB peak, a shard of 24 tests): **23 of the 24 tests analyze** (the 18 of java/rmi, t08020, t07843, t07952, t07953, t07954);
+  t07956 is refused by the edge's generics of Thread.UncaughtExceptionHandler (JCS262, tonight's `bin/j2g-edge update`). No
+  class of java.rmi, sun.rmi, javax.rmi, javax.management.remote or com.sun.jmx.remote fails its analysis, and none would be
+  stubbed (`:missing []`) after the five derivations, the native and the context class loader (the first scan named 22 stubs in 14
+  classes: the context class loader 10, StackWalker 4, `System.err` 4 and `String.split` 1 (these two the scan's own before
+  `world-scan`), ServiceLoader, ThreadGroup, `System.loadLibrary`). Two tests' own code would be stubbed: t05256's `Thread.getAllStackTraces`
+  (JCS320) and t07952's ThreadGroup (JCS322);
+- bin/j2g-unit: 23 of 23 (the new `throws` checks: an interface's and a class's E records with `:throws` alone, none without,
+  once with `:members`); the changed j2g namespaces load on stage 0;
+- `bin/jrt test --arch amd64 -p 1 -run '...'` (one package at a time, 1.5 GB): `arbace/jrt` ok (TestGCMaxObjectInspectionAge,
+  TestProxy, TestWeakReferences, TestLiveThreads; the crops' expat, pyexpat, cinterp, goi fail by themselves, as on next); `go
+  vet ./jrt` clean for linux/amd64 and arm64;
+- `bin/gate --plan`: no table error; jrt-derive and the light steps the shared files' changes move.
+
+Not checked by day: j2g's translation and Go of the new classes, the transport's behaviour (no executable has it: the night's
+smoke below), JCS240's records' size in the build.
+
+### Expected yield
+
+Interpreted and compiled, of the 23 that analyze: **likely** NullReference, Chaining, NotExtending, ToStub, SetLogNull, AddrInUse,
+MarshalAfterUnexport, MarshalAfterUnexport2, UseDynamicProxies, PrimitiveClasses, CloseServerSocketOnTermination, ChangeHostName,
+GcDuringExport, SocketFactoryTest and JMXServiceURLProtocol (15); **at risk** UnrecognizedRefType (Class.newInstance of a class
+without a no-argument constructor must throw InstantiationException), ServerStackTrace and SuppressStackTraces (the server's frames
+in the exception as jrt's stack traces give them), MarshalledObjectGet (Unreferenced after System.gc: the DGC's weak references
+cleared by Go's collector within the test's 120 s) and ConnectorStopDeadlockTest (ThreadInfo.getLockOwnerId over F13's records);
+**not expected**: RuntimeThreadInheritanceLeak (JCS320), DaemonRMIExporterTest (JCS322), ConcurrentModificationTest (JCS262) and
+the three DiagnosticCommandMBean tests (HotSpot's commands: JCS284's by design). About **15 to 20 expected** at each level, from
+`:net` and `:serialization` (java.rmi's classes, MarshalledObject) and the compiled refusals; Java eval and AOT each about +0.5 point.
+
+### The night's commands
+
+In the Java night's worktree with this branch merged (after java-more's steps: it holds them), heavy ones under
+`bin/heavy-lock`; the conversion and the build shared with the night's other slices:
+
+```sh
+# 0. the joint javac check (expect 2,892 files, 0 errors, no duplicate line) and the derivations (61, 0 not as derived)
+/root/arbace/.tmp/night7/all9-run.sh $PWD && bin/jrt-convert derive --check
+awk '{print $3}' .tmp/jc9-check/sources.txt | sort | uniq -d   # expect nothing
+# 1. jdk/ converted afresh: + 89 share:java.rmi, NoSuchMethodError, 41 of JMX-2, 11 derived, JmxProviders; 0 failed, 0 javac
+#    errors; the module table (java.rmi's packages java.rmi's, javax.management.remote.rmi and com.sun.jmx.remote.protocol.rmi
+#    java.management.rmi's: JMXConnectorFactory.isSystemProvider reads it)
+REPR_JAVA_EXE=$(ls -td /root/arbace/.tmp/gate-exe/javac-*/ | head -1)arbace-javac REPR_JAVA_STALE_OK=1 \
+  ARBACE_HEAVY_CMD=$PWD/bin/heavy-lock bin/jrt-convert update && bin/jrt modules
+grep -n "java.rmi\|management.rmi" go/arbace/jrt/module_table.ae | head
+# 2. the edges (java.rmi's JDK classes; Thread.UncaughtExceptionHandler's generics for t07956)
+bin/heavy-lock bin/j2g-edge update && bin/heavy-lock bin/javac-vendor edge
+# 3. the executable; report.edn: no :analysis-failures of java/rmi, sun/rmi, javax/rmi, javax/management/remote, com/sun/jmx/remote;
+#    no "a variant for a class not in the inputs"; the binary's growth (JCS240's records) beside JCS171's measure
+bin/heavy-lock bin/arbace-go --build && bin/arbace-go --smoke && bin/jrt test --arch amd64 -p 1
+grep -A12 ':analysis-failures' target/arbace-go/amd64/j2g/report.edn
+# 4. smokes on loopback: JCS240's records of a JDK remote interface, a registry exported and unexported;
+#    expect "3" (Registry.lookup's throws: RemoteException, NotBoundException, AccessException) and sun.rmi.registry.RegistryImpl
+target/arbace-go/amd64/arbace -e '(import (quote (java.rmi.registry LocateRegistry)) (quote (java.rmi.server UnicastRemoteObject)) (quote (java.lang.reflect Proxy)))
+  (println (count (.getExceptionTypes (.getMethod java.rmi.registry.Registry "lookup" (into-array Class [String])))))
+  (let [r (LocateRegistry/createRegistry 0)] (println (class r)) (UnicastRemoteObject/unexportObject r true))'
+# 5. the levels on the areas, saved, not recorded: expect about 15-20 of the 23, no passing test lost
+JAVA_CHECK_EXE=$PWD/target/arbace-go/amd64/arbace J2G_GO_EXE=$PWD/target/arbace-go/amd64/arbace \
+  JAVA_CHECK_HEAVY=$PWD/bin/heavy-lock bin/java-check --levels interp,compiled --jobs 4 \
+  --only 'jdk/java/rmi/|jdk/javax/rmi/|jdk/javax/management/remote/|jdk/com/sun/management/DiagnosticCommandMBean' \
+  --save .tmp/rmi-night/check
+```
+
+**Risks and fallbacks.** (1) A j2g refusal of a new class (report.edn): the class's slice's revert is one commit each (F27's
+java.rmi, `6f934fca0` with the NoSuchMethodError line; JMX-2, `cc53c80f8`), JCS240's and the context class loader's commits stand
+alone. (2) JCS240's records for every class: a class whose data was nil until now has its E lines; should the build grow past
+JCS171's budget, `:throws` is one keyword in `arbace/j2g/out.ae` (false: only the program's own classes, as F25). (3) The RMI
+threads' and the DGC's timing at the interpreted level (the GC daemon waits an hour by default; MarshalledObjectGet asks one
+second). (4) The rmic stubs' method hashes (Util.computeMethodHash over SHA-1 of the name and descriptor) must equal the
+server's for the static stubs to dispatch: the descriptor is built from getParameterTypes and getReturnType, jrt's Method's.
+
+**The day after**: the tests judged with the whole corpus; those still failing classed by their pieces (JCS325); doc/go/JRT-NOTES.md's
+"Sockets" (RMI's transport) after the run.
+
+### Proposed (F27): JCS320-JCS326
+
+#### JCS320 Thread.getAllStackTraces
+
+RuntimeThreadInheritanceLeak (t05256) and other tests of the corpus call it; jrt's Thread has not, and it returns a translated type
+(Map). (a) j2g's support code writes it (as System.getProperties) over HostManagement's `threads0` and `stackTrace0` (another
+thread's frames when it waits, F13's records; empty otherwise): an hour; (b) as now (stubbed). Recommended: (a).
+
+#### JCS321 PhantomReference in jrt
+
+DGCClient is derived to hold weak references (jrt has no PhantomReference). (a) jrt's PhantomReference beside Weak and Soft (a
+weak pointer whose `get` answers null, enqueued by the same cleanup; the manifest and the member tables regenerated), DGCClient's
+derivation dropped, java/lang/ref's phantom tests in reach: half a day; (b) as now. Recommended: (a), when java/lang/ref's tests are
+next measured.
+
+#### JCS322 Thread groups
+
+RuntimeUtil and JMX's three thread makers are derived without groups; DaemonRMIExporterTest (t07952) enumerates its thread group,
+and `Thread.getThreadGroup` is cut (V10). (a) a minimal ThreadGroup in jrt (the system and main groups, a thread's group at
+construction, `getThreadGroup`, `enumerate`, `activeCount`, `getParent`, `getName`; no priorities or daemon status of groups,
+deprecated since JDK 16) and the derivations dropped: a day; (b) as now. Recommended: (b) until a second test asks; (a) then.
+
+#### JCS323 ProxyFn's exceptions as the JDK's
+
+ProxyFn lets every exception through when a method declares none it knows (JCS170's leniency, from when no throws clause was
+recorded). With JCS240's records the JDK's and the programs' classes have theirs; jrt's hand-written classes and Clojure's
+interfaces do not. (a) the leniency kept for jrt's hand-written interfaces alone (their tables get no throws), the rest wrapped as
+the JDK wraps (UndeclaredThrowableException): an hour after the night's build shows the records; (b) jrt's member tables carry
+throws too (bin/jrt manifest from the JVM's reflection), then no leniency: half a day; (c) as now. Recommended: (a) after the
+night, (b) with JCS241.
+
+#### JCS324 A light check of the predicted world
+
+The predicted world (the day's conversion laid over jdk/forms) is a scratch procedure in each branch's `.tmp`; it found, today,
+the context class loader, the thread groups and JMX-1's Util collision before the night. (a) JCS283's `bin/jrt-convert predict`
+with `J2G_MISSING` as its second half (a list of class prefixes, the analysis and the stubs both reported); (b) by hand, as now.
+Recommended: (a), with JCS283.
+
+#### JCS325 RMI's own class
+
+After the night, the RMI tests that still fail are held by `:net`'s `java\.rmi` match. (a) a `:rmi` class before `:net`,
+`:kind :deferred`, by piece (stack traces, the DGC's timing, thread groups), reclassified from the night's record; (b) left in
+`:net`. Recommended: (a).
+
+#### JCS326 The DiagnosticCommandMBean tests
+
+t07841-t07843 need HotSpot's diagnostic commands (`com.sun.management.DiagnosticCommandMBean`, the VM's `jcmd` set) over JMX's
+connectors, which F27 brings. (a) by design, a `:hotspot-diagnostic` class (JCS284's recommendation for HotSpot's beans); (b) the
+commands the tests list ported over jrt (VM.version, Thread.print, GC.run, ...). Recommended: (a).
