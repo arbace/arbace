@@ -1254,3 +1254,27 @@ conflicts differ with each dropped slice); taken: `git revert -m 1` with a resol
 (`.tmp/javanight/revert-slice.sh`), tried on a scratch worktree for each slice and four combinations: all resolved, the joint
 check 0 errors, `go vet ./jrt` clean. The night's script `.tmp/javanight/run.sh` waits for night 9 and is launched by the
 main session.
+
+## 2026-11-08: JCV7 (b) and JCV8 (a), InitOrder's array line and the JDK's lines kept (branch `java-jcv7`, from java-jcv2 79f4658d5)
+
+By the user's decision of 2026-11-08 (doc/classes/JAVA-CONFORMANCE-SURVEY.md, "Decided (the user, 2026-11-08): JCV7 (b),
+JCV8 (a); JCV9 nothing now"). JCV7 (b): `test/java/jls/InitOrder.java`'s last line tested nothing (Lazy, its array's component
+type, was initialized two lines before); a class `Unused` of its own, used by nothing before, replaces it: `new Unused[2]` and
+`new Unused[2][3]` print no initialization (12.4.1, 15.10.2), `Unused.class` neither (15.8.2; the array's component type is
+that class, `Class.getComponentType`), then `Unused.touch()` initializes it (12.4.1), the line that shows the two before it
+could fail. Each line worked out from 12.4.1's list first, then the JDK's run made by hand as JCV2's (jdk26u's image, the
+program in package t03212, `javac -d`, `java -cp`, 257 bytes) and written as `InitOrder.out`; t03212's line of
+`test/java/ref-jdk26.edn` recorded again (`bin/java-check --record-ref --jobs 1 --only 'jls/InitOrder\.java'`; `--only
+t03212` plans nothing, the regexp is over the plan's path: proposal JCV12), the other 4,852 lines byte for byte; the review
+`test/java/jls/golden.edn` 196 lines to 198 (two `:jls`, one `:jls :api`); the essential test's committed forms
+`test/java/forms/t03212/` written again (`--forms update` on javac's tool `javac-c91cd0f6`, the provenance's, unchanged; the
+verify before it differed in that file alone). jrt's run equals the JDK's byte for byte. Proved light on the gate's
+executable of main ad3066cf: t03212 at read, interp (by the new golden file), classes, print and nread pass, judged as
+recorded with no regression; `bin/java-check golden`, `golden --oracle`, `verdicts --verify`, `bin/crops-score --judge
+--strict` pass. The compiled level is the night's (a whole-program j2g). JCV8 (a): no change; the 21 `:jdk` lines stay
+(JCV7's lines rest on the JLS and the API). Java's scores unchanged (completeness 72.9%, maturity 100%, independence 99.7%):
+the test passed before and after. Alternatives considered: keeping `new Lazy[2]` beside the new lines (rejected: a line that
+holds either way is no test), a class literal left out (rejected: 12.4.1's list is the whole rule, and jrt holds it), a
+separate program (rejected: InitOrder is 12.4's program, its review in place). Proposals JCV10-JCV12 in the survey: the
+deferred classes that hold completeness's gap (JCV10), the print cell's `:print-classes` by design (JCV11), `--record-ref
+--only` by id (JCV12).

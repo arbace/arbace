@@ -4010,3 +4010,83 @@ their golden files and writing c00004's rows; `--record` after it as for JCV1.
 3. **JCV9, the 207 other `:stdout` tests** (JCV2's (c) again, now with a tool): `bin/java-check golden` takes any test's
    review, so a jtreg test's JDK output could be committed and reviewed as these were; or a crops-score formula of the
    stage's own share (JCV4). Recommended: neither now; the user's decision of 2026-11-07 keeps them at 0.5.
+
+## Decided (the user, 2026-11-08): JCV7 (b), JCV8 (a); JCV9 nothing now
+
+JCV7 (b): InitOrder's array line gets a class of its own, so 12.4.1's rule for array creation is tested; t03212's JDK
+record, golden file and review written again. JCV8 (a): the 21 lines resting on the JDK stay; the review names them
+(`:jdk`), jrt follows the JDK. JCV9: neither a review of the 207 other `:stdout` tests nor a new formula, now.
+
+## As built: JCV7, JCV8 (2026-11-08; branch `java-jcv7`, from `java-jcv2` 79f4658d5)
+
+**JCV7, the program.** `test/java/jls/InitOrder.java` gains `static class Unused { static { p("Unused.static"); } static
+void touch() { } }`, used by nothing before its last three lines, which replace the line of `new Lazy[2]` (Lazy had been
+initialized two lines above it, so the line held either way):
+
+    arrays of Unused: 2 3 []          new Unused[2] and new Unused[2][3]: no initialization (12.4.1, 15.10.2)
+    Unused.class: true []             a class literal, and the array's class's component type that class: none (12.4.1, 15.8.2, 10.8)
+    Unused.touch: Unused.static       a static method's invocation initializes it: the two lines above test something (12.4.1)
+
+The `@summary` cites 15.10.2 and 15.8.2. Each line was worked out from 12.4.1's list (an instance created, a static method
+invoked, a static field assigned, a non-constant static field used; nothing else but reflection) before the run. The last
+line is the line's own negative control: an implementation that never initialized Unused would print `Unused.touch: ` and
+fail, one that initialized at array creation or at the class literal would print `Unused.static` in a bracket.
+
+**The record, the golden file, the review.** The JDK's run made by hand as JCV2's were (jdk26u's image: `package t03212; `
+before the first line, `javac -d`, `java -cp`): 257 bytes, written as `test/java/jls/InitOrder.out`. The reference's line
+recorded again by `bin/java-check --record-ref --jobs 1 --only 'jls/InitOrder\.java'` (28 s, 0.67 GiB; `--only` is a regexp
+over the scan's `plan.tsv`, which holds the test's path, not its id: `--only t03212` plans none): t03212's `:classes`
+7f41d74e089861f8 to 9fab04ddde42ae2d, `:out` 448894f8f4b4f39a to 20acdaebdd121236, `:out-len` 201 to 257, the other 4,852
+lines byte for byte (`ref-unchanged`). `test/java/jls/golden.edn`: InitOrder's line 7 rewritten, lines 8 and 9 added
+(`:jls`, `:jls :api` for `Class.getComponentType`, `:jls`): 198 lines, 120 `:jls`, 34 `:jls :api`, 23 `:api`, 18 `:jls
+:jdk`, 3 `:api :jdk`. t03212 is essential: its committed forms `test/java/forms/t03212/` written again by `bin/java-check
+--forms update` on javac's tool `javac-c91cd0f6` (the provenance's host; `REPR_JAVA_STALE_OK=1`): `--forms verify` first
+differed in t03212's file alone (427 tests byte for byte, c00001 as it must), the provenance unchanged.
+
+**Proved** (light; the gate's executable of main `ad3066cf`, `ARBACE_HOST_EXE` main's stage 0): `bin/java-check --only
+'t03212 ' --levels read,interp,classes,print --jobs 1 --save` (27 s, peak 1.4 GiB): read, interp (judged by the new golden
+file), classes and print pass; jrt's output equals the JDK's byte for byte (`cmp`), so no `interp.jdk` row; `--levels nread`
+passes; `bin/java-check --judge --partial` of both: as recorded at every level, no regression, the own verdict and the JDK's
+record agree. Before the golden file was written the same run's interp row differed from the old one at line 7, as it must.
+`bin/java-check golden` and `golden --oracle` (the 15 golden files' digests equal the JDK's recorded stdout, InitOrder's the
+new record's), `bin/java-check verdicts --verify` (as recorded: t03212 stays `:golden`), `bin/crops-score --judge --strict`
+(0 problems) pass. Not run by day: the compiled level (a whole-program j2g, the night's).
+
+**JCV8 (a).** Nothing changes: the 21 `:jdk` lines (18 `:jls :jdk`, 3 `:api :jdk`) are the table of "As built: JCV2", kept
+by decision; JCV7's three new lines rest on the JLS and the API alone, so the count stays 21. A new `:jdk` line in a later
+program is a review entry like these, named in its `why`.
+
+**The score.** No change, as expected: t03212 passed at every level before and after, the judge counted it `:golden` before
+and after. Java: completeness 72.9% (80.4% without by design), maturity 100%, independence 99.7% (judge 0.986).
+
+**The night** (after the Java night; light but the compiled level): `bin/java-check golden`, `bin/java-check verdicts
+--verify`, `bin/java-check --forms verify` (seconds to a minute); the gate's Java steps at their new keys (`test/java/` in
+`:java-run`): the essential `java-check` (t03212 interpreted from its new forms against its golden file), `java-check-judge`,
+`java-essential-compiled` (`bin/java-check --essential-compiled`: one program, t03212's new forms translated by j2g, heavy);
+`--full`'s `java-interp`, `java-compiled-full`, `java-classes`, `java-print`, `java-judge`; then `bin/java-check --judge
+--record` as for JCV1 if a row moved (none is expected).
+
+### Proposed (JCV10-JCV12)
+
+1. **JCV10, where completeness's 90% is.** Java's eval cell is 1,866 of 3,325 run tests (56.1%) and AOT 1,939 (58.3%); 90%
+   needs about 1,130 more passing at each, while the jls corpus has 15 and the verdict work moves no pass. The deferred
+   classes that hold that many: `:security` 359 (234 compiled), `:net` 227 (150), `:serialization` 168 (117, java-serial's
+   slices), `:nio` 93 (87, java-unix's), `:reflection` 75 (72), `:j2g-unresolved` 236 compiled. (a) Leave the ranking to
+   JC6's triage as now; (b) a ranking by tests freed per jrt class (doc/classes/JAVA-DEFERRED-TRIAGE.md's table re-sorted
+   after the Java night's merge, each class's members by the first missing JDK class or member), the next slices taken from
+   its top: java.security's providers (`:security`, about a fifth of the gap) first. Cost: (b) an hour of triage from the
+   records; the ports are weeks. Recommended: (b), after the Java night's records.
+2. **JCV11, the print cell's by-design share.** Print is 78.2% with 616 by design and 96.0% without; 581 of the 616 are
+   `:print-classes` (test/java/divergences.edn): the printed Java's class files differ from the original's only by what the
+   forms do not record (?: against if, an increment's place, a local's default initializer, fall-through repeated, the
+   constant pool's order), every other sub-check passing (javac on Arbace accepts the printed Java, it reads back to the
+   same forms, mode `:full` prints the original byte for byte). (a) Keep it: byte-identical class files are the print
+   level's pass (RPS9 (a)); (b) the print cell's pass is the round trip's own levels (accepted, the same forms, `:full`
+   byte for byte), the class files a sub-level reported beside it (as `bin/repr-java roundtrip`'s classes level),
+   `:print-classes` then a note, not a non-pass; `:print-classes-unnamed` (72) stays deferred. Cost: (b) the judgment's
+   rule in test/java/print.ae and the REAP reader, a re-judge from the saved results, light; it reopens RPS9 (a), the
+   user's. Print would read about 95.7%, Java's completeness about 77%. Recommended: (b), since the forms by design do not
+   carry what the class files differ by.
+3. **JCV12, `--record-ref --only` by id.** `--only` matches `plan.tsv`'s text (the path), so `--only tNNNNN` silently
+   records nothing (0 tests planned, exit 0). (a) Leave it, documented here; (b) match the id too, and fail when `--only`
+   plans no test. Cost: (b) minutes. Recommended: (b).
