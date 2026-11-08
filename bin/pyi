@@ -119,7 +119,7 @@
 #   bin/pyi bench [--pyi] [--record] [BM...]
 #                                  PY8: pyperformance 1.14.0's pure benchmarks (test/python/bench) run by CPython, compiled and
 #                                  on the loop (--pyi: by pyi on goi too), the milliseconds; --record: bench-aot-linux-ARCH.edn
-#   bin/pyi wheels fetch|install|verify|path|run SCRIPT [ARGS...]|check [NAME...]|pip-probe
+#   bin/pyi wheels fetch|install|verify|path|run SCRIPT [ARGS...]|check [NAME...]|pip-probe|suite NAME [TEST...]
 #                                  queue 205 (PYS23-PYS25 (a), survey "As built: 205"): the pinned pure-Python wheels of
 #                                  test/python/wheels.edn; fetch: each into ${REPR_PYTHON_SRC:-.tmp/repr-python}/wheels
 #                                  (the one network step, checked by SHA-256 and size); install: the site site-KEY beside
@@ -133,6 +133,11 @@
 #                                  list, an offline --target install of each pin and one --find-links install of all,
 #                                  list --path: each run and each installed tree equal to CPython's, but the classed
 #                                  differences (the no-ssl warning, a console script's #! line)
+#                                  suite NAME [TEST...]: queue 232, a pin's own test suite (the pins' :suites: tomli,
+#                                  click; its source archive fetched by fetch) run by pyi and by CPython against the
+#                                  installed wheels and the test site (:test-wheels: pytest), test for test, every
+#                                  difference equal, classed in test/python/divergences.edn (wheels-NAME/ID) or failing;
+#                                  TEST... a sample of the suite in place of its :args; a negative control
 #   bin/pyi c2j-check              queue 206 (AFTER-PY11.md §4.4, the re-seed window's light check, as bin/ci c2j-check): the
 #                                  namespaces of arbace/python and arbace/repr/python compiled by c2j alone on stage 0 (no j2g,
 #                                  no Go build), as the build's first pass compiles an embedded namespace; ends "N namespaces:
@@ -1469,25 +1474,41 @@ wheels_site() {
   echo "$WHEELS_CACHE/site-$key"
 }
 
+# the suites' site (queue 232): the pins' :test-wheels (pytest and its dependencies), site-test-KEY beside the site
+wheels_test_site() {
+  local key; key=$(cat "$WHEELS_PINS" "$root/arbace/python/wheels.ae" | sha256sum | cut -c1-20)
+  echo "$WHEELS_CACHE/site-test-$key"
+}
+
+# wheels_fetch_one SUBDIR FILE URL SHA256 BYTES: one pinned file into WHEELS_CACHE/SUBDIR unless it is there as pinned;
+# 0 when fetched, 1 when cached already
+wheels_fetch_one() {
+  local sub=$1 file=$2 url=$3 sha=$4 bytes=$5 f="$WHEELS_CACHE/$1/$2"
+  mkdir -p "$WHEELS_CACHE/$sub"
+  if [ -f "$f" ] && [ "$(sha256sum < "$f" | cut -c1-64)" = "$sha" ]; then return 1; fi
+  rm -f "$f.part.$$"
+  # GTS212 (a), queue 212: a worktree's or the clean clone's file from the main checkout's cache when it holds it
+  local m=${root%%/.tmp/gate-clean/*}; m=${m%%/.tmp/worktrees/*}
+  if [ -z "${REPR_PYTHON_SRC:-}" ] && [ "$m" != "$root" ] && [ -f "$m/.tmp/repr-python/$sub/$file" ]; then
+    cp "$m/.tmp/repr-python/$sub/$file" "$f.part.$$"
+  else
+    curl -fsSL --retry 2 -o "$f.part.$$" "$url" || { rm -f "$f.part.$$"; die "wheels fetch: $url failed"; }
+  fi
+  [ "$(sha256sum < "$f.part.$$" | cut -c1-64)" = "$sha" ] && [ "$(stat -c %s "$f.part.$$")" = "$bytes" ] \
+    || { rm -f "$f.part.$$"; die "wheels fetch: $file's SHA-256 or size is not the pin's (moving a pin is a recorded decision)"; }
+  mv "$f.part.$$" "$f"
+}
+
+# the pins' wheels and test wheels into WHEELS_CACHE/wheels, the suites' source archives into WHEELS_CACHE/sdists
 wheels_fetch() {
-  local file url sha bytes rest f n=0 got=0
-  mkdir -p "$WHEELS_CACHE/wheels"
+  local file url sha bytes rest name n=0 got=0 ns=0
   while IFS=$'\t' read -r file url sha bytes rest; do
-    n=$((n + 1)); f="$WHEELS_CACHE/wheels/$file"
-    if [ -f "$f" ] && [ "$(sha256sum < "$f" | cut -c1-64)" = "$sha" ]; then continue; fi
-    rm -f "$f.part.$$"
-    # GTS212 (a), queue 212: a worktree's or the clean clone's wheel from the main checkout's cache when it holds it
-    local m=${root%%/.tmp/gate-clean/*}; m=${m%%/.tmp/worktrees/*}
-    if [ -z "${REPR_PYTHON_SRC:-}" ] && [ "$m" != "$root" ] && [ -f "$m/.tmp/repr-python/wheels/$file" ]; then
-      cp "$m/.tmp/repr-python/wheels/$file" "$f.part.$$"
-    else
-      curl -fsSL --retry 2 -o "$f.part.$$" "$url" || { rm -f "$f.part.$$"; die "wheels fetch: $url failed"; }
-    fi
-    [ "$(sha256sum < "$f.part.$$" | cut -c1-64)" = "$sha" ] && [ "$(stat -c %s "$f.part.$$")" = "$bytes" ] \
-      || { rm -f "$f.part.$$"; die "wheels fetch: $file's SHA-256 or size is not the pin's (moving a pin is a recorded decision)"; }
-    mv "$f.part.$$" "$f"; got=$((got + 1))
-  done < <(wheels_arbace list --pins "$WHEELS_PINS")
-  echo "wheels fetch: $n pinned wheels in $WHEELS_CACHE/wheels ($got fetched)"
+    n=$((n + 1)); if wheels_fetch_one wheels "$file" "$url" "$sha" "$bytes"; then got=$((got + 1)); fi
+  done < <(wheels_arbace list --pins "$WHEELS_PINS"; wheels_arbace list --pins "$WHEELS_PINS" --set test-wheels)
+  while IFS=$'\t' read -r name file url sha bytes rest; do
+    ns=$((ns + 1)); if wheels_fetch_one sdists "$file" "$url" "$sha" "$bytes"; then got=$((got + 1)); fi
+  done < <(wheels_arbace suites --pins "$WHEELS_PINS")
+  echo "wheels fetch: $n pinned wheels in $WHEELS_CACHE/wheels, $ns suites' sources in $WHEELS_CACHE/sdists ($got fetched)"
 }
 
 # wheels_cmp NAME A B: two runs' stdout, status and stderr's last line
@@ -1692,6 +1713,75 @@ wheels_pip_probe() {
   else echo "wheels pip-probe: FAILED (runs in $W)"; return 1; fi
 }
 
+# a pin's own test suite (queue 232; the user's decision 2026-11-08: tomli, click): the pins' :suites entry NAME, its
+# source archive extracted afresh for each side under $WORK/wheels-suite/NAME/{cpython,pyi} (not under wheels check's $WORK/wheels, which it removes), its :runner run in :root
+# with :args (TEST... in their place: a sample of the suite) against the installed wheels (the site and the test site,
+# the archive's src/ not on the path), by python3 -S -B with PYTHONPATH the sites and by pyi with PYI_SITE the sites
+# (both exported, so a test's child interpreter sees them); each log read as its tests' outcomes (arbace.python.wheels
+# outcomes), CPython's as an outcome of the oracle's records (live on the VM; the main host records it), judged test for
+# test by arbace.python.wheels judge against test/python/divergences.edn; a negative control: CPython's outcomes with
+# its first passed test made failed, judged as pyi's, must fail
+wheels_suite_run() { # SIDE DIR RUNNER LOG ARGS...: the run's status on LOG's last line
+  local side=$1 d=$2 runner=$3 log=$4 rc=0 sites; shift 4
+  sites="$(wheels_site)/lib:$(wheels_test_site)/lib"
+  # the tests' temporary files under the run's own directory, never /tmp (TMPDIR; pytest's tmp_path under --basetemp)
+  local tmp="${log%.log}.tmp"; rm -rf "$tmp"; mkdir -p "$tmp/t"
+  local argv=()
+  case $runner in
+    unittest) argv=(-m unittest "$@" -v) ;;
+    pytest) argv=(-m pytest -p no:cacheprovider -v --color=no --basetemp="$tmp/pytest" "$@") ;;
+    *) die "wheels suite: runner $runner: unittest or pytest" ;;
+  esac
+  case $side in
+    cpython) (cd "$d" && TMPDIR="$tmp/t" PYTHONHASHSEED=0 LC_ALL=C.UTF-8 TZ=UTC COLUMNS=200 PYTHONPATH="$sites" \
+                timeout "${PYI_SUITE_TIMEOUT:-3600}" python3 -S -B "${argv[@]}") > "$log" 2>&1 || rc=$? ;;
+    pyi) (cd "$d" && TMPDIR="$tmp/t" PYTHONHASHSEED=0 LC_ALL=C.UTF-8 TZ=UTC COLUMNS=200 PYI_SITE="$sites" \
+            timeout "${PYI_SUITE_TIMEOUT:-3600}" "$root/bin/pyi" python "${argv[@]}") > "$log" 2>&1 || rc=$? ;;
+  esac
+  echo "status $rc" >> "$log"
+}
+wheels_suite_cpython() { # DIR RUNNER LOG ARGS...: CPython's outcomes (stdout), its log beside
+  local d=$1 runner=$2 log=$3; shift 3
+  wheels_suite_run cpython "$d" "$runner" "$log" "$@"
+  wheels_arbace outcomes --runner "$runner" --log "$log"
+}
+wheels_suite() {
+  need_python "wheels suite (CPython's run of the same suite: the oracle tier's)"
+  [ $# -ge 1 ] || die "usage: bin/pyi wheels suite NAME [TEST...]"
+  local want=$1; shift
+  local name file url sha bytes sroot runner args found=0 bad=0 site tsite
+  site=$(wheels_site); tsite=$(wheels_test_site)
+  wheels_arbace install --pins "$WHEELS_PINS" --cache "$WHEELS_CACHE/wheels" --site "$site" > /dev/null || return 1
+  wheels_arbace install --pins "$WHEELS_PINS" --cache "$WHEELS_CACHE/wheels" --site "$tsite" --set test-wheels > /dev/null || return 1
+  while IFS=$'\t' read -r name file url sha bytes sroot runner args; do
+    [ "$name" = "$want" ] || continue
+    found=1
+    local src="$WHEELS_CACHE/sdists/$file" W="$WORK/wheels-suite/$name" sel=()
+    [ -f "$src" ] && [ "$(sha256sum < "$src" | cut -c1-64)" = "$sha" ] || die "wheels suite: $src not as pinned (bin/pyi wheels fetch)"
+    if [ $# -gt 0 ]; then sel=("$@"); else read -ra sel <<< "$args"; fi
+    rm -rf "$W"; mkdir -p "$W/cpython" "$W/pyi"
+    tar xzf "$src" -C "$W/cpython"; tar xzf "$src" -C "$W/pyi"
+    local t0=$SECONDS key
+    key=$(pyrec_key "$WHEELS_PINS" "$root/arbace/python/wheels.ae" "$src"; printf '%s\n' "${sel[@]}" | sha256sum | cut -c1-16)
+    key=$(echo "$key" | tr '\n' ':')
+    pyrec_outcome "wheels/suite-$name-$(printf '%s ' "${sel[@]}" | sha256sum | cut -c1-8)" "$key" \
+      wheels_suite_cpython "$W/cpython/$sroot" "$runner" "$W/cpython.log" "${sel[@]}" > "$W/cpython.tsv" || true
+    echo "  CPython: $(wc -l < "$W/cpython.tsv") tests, $(tail -1 "$W/cpython.log" 2>/dev/null) ($((SECONDS - t0)) s)"
+    t0=$SECONDS
+    wheels_suite_run pyi "$W/pyi/$sroot" "$runner" "$W/pyi.log" "${sel[@]}"
+    wheels_arbace outcomes --runner "$runner" --log "$W/pyi.log" > "$W/pyi.tsv"
+    echo "  pyi: $(wc -l < "$W/pyi.tsv") tests, $(tail -1 "$W/pyi.log") ($((SECONDS - t0)) s)"
+    wheels_arbace judge --suite "$name" --divergences "$root/test/python/divergences.edn" --cpython "$W/cpython.tsv" --pyi "$W/pyi.tsv" || bad=1
+    # the negative control: CPython's own outcomes, the first passed test made failed
+    awk -F'\t' 'BEGIN { OFS = "\t" } !d && $2 == "passed" { $2 = "failed"; d = 1 } { print }' "$W/cpython.tsv" > "$W/control.tsv"
+    if wheels_arbace judge --suite "$name" --divergences "$root/test/python/divergences.edn" --cpython "$W/cpython.tsv" --pyi "$W/control.tsv" > "$W/control.out"; then
+      echo "  FAIL control: a passed test made failed judged equal"; bad=1
+    else echo "  control refused: $(grep -m1 '^  FAIL' "$W/control.out" | sed 's/^  FAIL //')"; fi
+  done < <(wheels_arbace suites --pins "$WHEELS_PINS")
+  [ $found = 1 ] || die "wheels suite: no suite $want in $WHEELS_PINS"
+  return $bad
+}
+
 cmd_wheels() {
   local verb=${1:-}; shift || true
   case $verb in
@@ -1705,7 +1795,8 @@ cmd_wheels() {
          cd "$caller_pwd"; PYI_EXECUTABLE="$root/tools/pyi/python3" exec "$s" "$@" ;;
     check) mkdir -p "$WORK"; wheels_check "$@" ;;
     pip-probe) mkdir -p "$WORK"; wheels_pip_probe ;;
-    *) die "usage: bin/pyi wheels fetch|install|verify|path|run SCRIPT [ARGS...]|check [NAME...]|pip-probe" ;;
+    suite) mkdir -p "$WORK"; wheels_suite "$@" ;;
+    *) die "usage: bin/pyi wheels fetch|install|verify|path|run SCRIPT [ARGS...]|check [NAME...]|pip-probe|suite NAME [TEST...]" ;;
   esac
 }
 
