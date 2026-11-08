@@ -36,6 +36,8 @@
 #   bin/repr-llvm mutants LIST OUT [N [FIRST [FAMILY]]] N mutants (default 300; the FIRST-th on, default 0) of LIST's
 #                                              modules, each one change meant to be invalid, into OUT/, OUT/mutants.list;
 #                                              FAMILY: base, attrs, cc, musttail, bundles, ... (arbace.repr.llvm.mutate/families)
+#   bin/repr-llvm records-verify [--sample N]  (ORS30 (a), the oracle tier) every N-th module of ref-opt23.edn and ref-rt23.edn recorded
+#                                              again by opt, clang and llvm-as and compared with the records (another LLVM: moved, reported)
 #   bin/repr-llvm rt-lists DIR                 the pack rt's families' lists (DIR/{roundtrip-rt,verify-rt,verify-rt-heldout}.list), absolute
 #   bin/repr-llvm record-opt LIST...         opt -passes=verify's verdicts of the lists' modules recorded (test/llvm/ref-opt23.edn: digests,
 #                                              first message, stderr's digest with the paths normalized): no LLVM tool at the check
@@ -423,6 +425,65 @@ case ${1:-} in
       echo "repr-llvm check: recorded $(grep -c '^\[' "$work/rows.edn") rows into ${record#$root/}"
       exit 0
     fi
+    exit $st ;;
+  records-verify)
+    # records-verify [--sample N] (ORS30 (a): the oracle tier's llvm-records-verify): every N-th module (default 25) of the records
+    # test/llvm/ref-opt23.edn and ref-rt23.edn recorded again by the tools (record-opt, record-rt into scratch records) and compared
+    # entry for entry with the committed ones: `equal`, `input` (the module is not the recorded one: the record is stale, the checks'
+    # STALE), `print` (rt: repr/llvm prints it otherwise now: the record's judges are for another print), `address` (opt's stderr prints a
+    # value by its address: no stable digest), `moved` (another LLVM than
+    # the record's: reported, not failed, ORS6 (a)) or `differs` (the same LLVM, another answer: a failure); and a crossed pair (one
+    # module's entry against another's record, ORS7 (a)) that must differ. Exit 1 on a `differs` or a crossed pair that is equal
+    every=25
+    [ "${2:-}" = --sample ] && every=${3:-25}
+    opt=${REPR_LLVM_OPT:-/usr/lib/llvm23/bin/opt}
+    [ -x "$opt" ] && command -v clang > "$TMPDIR/repr-llvm-rv.which" || { echo "records-verify: needs $opt and clang (the oracle tier's hosts :llvm, :cxx)" >&2; exit 2; }
+    work=$root/.tmp/repr-llvm/records-verify; rm -rf "$work"; mkdir -p "$work"
+    t=$root/test/llvm
+    # the modules the records name, NAME<tab>PATH (the check families' lists, the pack rt's when it is there)
+    cat "$t/llvm-test-valid.list" "$t/llvm-test-reject.list" "$t/llvm-test-split.list" "$t/llvm-test-reject-opt.list" "$t/probes.list" \
+        "$t/essential.txt" "$t/essential-verify.txt" "$t/hw.list" | grep . | awk -F'\t' '!s[$1]++' > "$work/rel.list"
+    "$root/bin/llvm-corpus" resolve "$work/rel.list" "$work/abs.list"
+    awk -F'\t' -v r="$root" 'FILENAME == ARGV[1] { a[$1] = $2; next } { print $1 "\t" ($2 ~ /^test\// ? r "/" $2 : a[$1]) }' "$work/abs.list" "$work/rel.list" > "$work/all.list"
+    if [ -f "$rt_ir/rt.tar.xz" ]; then rtd=$(rt_pack) || exit 2; for f in verify-rt verify-rt-heldout; do rt_list "$f" "$rtd"; done >> "$work/all.list"; fi
+    ids() { grep -o '^{:id "[^"]*"' "$1" | sed 's/^{:id "//; s/"$//'; }
+    # sample REF OUT: every N-th id of REF (its order) whose module is in the lists and readable
+    sample() { ids "$1" | awk -v n="$every" 'NR % n == 1' | awk -F'\t' 'FILENAME == ARGV[1] { p[$1] = $2; next } ($1 in p) { f = p[$1]; if ((getline l < f) >= 0) print $1 "\t" f; close(f) }' "$work/all.list" - > "$2"; }
+    sample "$optref" "$work/opt.list"; sample "$rtref" "$work/rt.list"
+    : > "$work/opt.edn"; : > "$work/rt.edn"
+    REPR_LLVM_REF=$work/opt.edn "$0" record-opt "$work/opt.list" > "$work/record-opt.log" 2>&1 || { cat "$work/record-opt.log" >&2; exit 1; }
+    REPR_LLVM_RTREF=$work/rt.edn "$0" record-rt "$work/rt.list" "$work/rt" > "$work/record-rt.log" 2>&1 || { tail -5 "$work/record-rt.log" >&2; exit 1; }
+    # a stderr that prints a value by its address (`<0x...>`, test/llvm/probes-known.tsv's printed-address) has no stable digest: `address`
+    grep -l '<0x[0-9a-f]*>' "$root"/.tmp/repr-llvm/record-opt/opt/*.log 2> "$work/address.err" | sed 's|.*/||; s|\.log$||' > "$work/address.txt" || true
+    live=$("$opt" --version | grep -o -m1 '[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*' | head -1)
+    rec=$(sed -n 's/^;; LLVM version \([0-9.]*\).*/\1/p' "$optref" | head -1)
+    # cmp KIND NEW COMMITTED: each new entry against the committed one of its id
+    cmpref() {
+      awk -v kind="$1" -v live="$live" -v rec="$rec" -v addr="$work/address.txt" 'BEGIN { while ((getline l < addr) > 0) A[l] = 1 } function f(l, k) { if (match(l, ":" k " [:\"][^ \"}]*")) return substr(l, RSTART, RLENGTH); return "" }
+        # :stderr-bytes counts the raw stderr, the module'"'"'s path in it (the digest is of the normalized text): not compared
+        { sub(/ :stderr-bytes [0-9]+/, "") }
+        FILENAME == ARGV[1] { if (match($0, /^\{:id "[^"]*"/)) R[substr($0, 7, RLENGTH - 7)] = $0; next }
+        match($0, /^\{:id "[^"]*"/) { id = substr($0, 7, RLENGTH - 7); o = R[id]
+          if (o == $0) v = "equal"
+          else if (f(o, "ll") != f($0, "ll")) v = "input"
+          else if (kind == "rt" && f(o, "print") != f($0, "print")) v = "print"
+          else if (kind == "opt" && (id in A) && f(o, "verdict") == f($0, "verdict") && f(o, "first") == f($0, "first")) v = "address"
+          else if (kind == "opt" && live != rec) v = "moved"
+          else v = "differs"
+          n[v]++; if (v != "equal") print kind " " v ": " id
+          if (v == "differs") bad = 1 }
+        END { printf "records-verify %s: %d sampled, %d equal, %d input, %d print, %d address, %d moved (LLVM %s, the record %s), %d differ\n", kind, n["equal"] + n["input"] + n["print"] + n["address"] + n["moved"] + n["differs"], n["equal"], n["input"], n["print"], n["address"], n["moved"], live, rec, n["differs"]; exit bad }' "$3" "$2"
+    }
+    st=0
+    cmpref opt "$work/opt.edn" "$optref" || st=1
+    cmpref rt "$work/rt.edn" "$rtref" || st=1
+    # the crossed pair: the first sampled module's new opt entry under the id of one whose recorded verdict differs, against that record
+    a=$(grep -m1 ':verdict :valid' "$work/opt.edn"); b=$(grep -m1 ':verdict :invalid' "$optref")
+    if [ -n "$a" ] && [ -n "$b" ]; then
+      bid=$(echo "$b" | sed 's/^{:id "\([^"]*\)".*/\1/'); x=$(echo "$a" | sed "s/^{:id \"[^\"]*\"/{:id \"$bid\"/; s/:ll \"[0-9a-f]*\"/$(echo "$b" | grep -o ':ll "[0-9a-f]*"')/")
+      if [ "$x" = "$b" ]; then echo "FAIL the crossed pair is equal: $(echo "$a" | cut -c1-60) against $bid's record"; st=1
+      else echo "control _control/records-crossed fails as it must ($(echo "$a" | sed 's/^{:id "\([^"]*\)".*/\1/')'s live entry against $bid's record)"; fi
+    else echo "FAIL the crossed pair: no valid sampled module or no invalid record"; st=1; fi
     exit $st ;;
   rt-lists)
     # rt-lists DIR: the pack rt's families' lists, absolute (DIR/FAMILY.list), for the oracle tier's records (record-opt over verify-rt's
