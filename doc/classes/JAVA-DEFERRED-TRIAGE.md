@@ -5046,3 +5046,101 @@ three still pass on java.home alone). (2) A start that cannot write its cache (a
 - **The night's**: the conversion (`jdk/forms/javax/security/auth/kerberos/` + 2 files), `bin/jrt modules` (javax.security.auth.kerberos
   as java.security.jgss's), the edge (`javax.security.auth.kerberos` exported), the build, then
   `bin/java-check --levels interp,compiled --only 'jdk/(javax/security/auth/kerberos|sun/security/krb5|java/security/Principal)'`.
+
+## As built: JCS254 (b): java.net.http's client without HTTP/3 (2026-11-08; branch `java-http`, write-ahead)
+
+F10b's datagram channels are on `java-props` (this branch's base), as the decision's "after F10b" asks; HTTP/3 stays out all
+the same (option (b)), so nothing here needs them. jdk26u at `baf63fb`, `src/java.net.http/share/classes` (313 files, 101,314
+lines).
+
+**What comes in.** `test/jrt/jrt_sources.ae`'s `http-client-sources`: the module but `jdk.internal.net.http.http3`, `.quic`,
+`.qpack`, the eleven `Http3*` classes, `HttpQuicConnection` and `H3FrameOrderVerifier` (156 files, 51k lines, out): **155 files,
+49,719 lines** (`java.net.http`'s API 13 less package-info, `jdk.internal.net.http` 57, `common` 27, `frame` 18, `hpack` 22,
+`websocket` 18), KIND `share:java.net.http`; 140 listed, 15 derived overlays (below); **385 classes**. HTTP/1.1, HTTP/2 (frames,
+HPACK, ALPN over F3's SSLEngine), WebSocket, the body handlers, publishers and subscribers, authentication, cookies, redirects,
+proxies; over F10a's `SocketChannel` and `Selector` and F16's `java.util.concurrent` (`Flow`, `CompletableFuture`).
+
+**The cut, as derivations** (`test/jrt/derive.ae`'s `http-derivations`, JCS166 (a)'s mechanism, `bin/jrt-convert derive
+--check`): the decision named variants, but the joint javac check and the read see jdk26u's Java, where a file naming
+`Http3ClientImpl` does not compile without it; a derived overlay is the cut at the source level, exact and re-derivable.
+The client a JDK has when its `SSLContext` is not QUIC compatible (`HttpClientImpl.client3 == null`) is the model: every
+HTTP/3 path is the JDK's own "no HTTP/3" path.
+
+| overlay | change |
+|---|---|
+| `HttpClientImpl` | `isQuicCompatible` false, `client3` an `Object` that stays null, its stop and abort gone; the selector manager's thread `new Thread(selmgr, name)` + `setDaemon(true)` (jrt has no `Thread.Builder.OfPlatform`, no `inheritInheritableThreadLocals`; the JDK's default is a virtual thread, a daemon) |
+| `ExchangeImpl` | `attemptHttp3Exchange` through the HTTP/3 `createExchangeImpl` cut (one block); `get`'s HTTP/3 branch fails with "HTTP3 is not supported" (unreachable: `MultiExchange` downgrades first, `sendAsync` fails an `HTTP_3_URI_ONLY` request first) |
+| `Exchange`, `HttpConnection`, `Response` | no `HttpQuicConnection`: the aborter's QUIC connection never set, no HTTP/3 connection, no QUIC TLS session |
+| `AltSvcProcessor` | `Http3ClientProperties.ALTSVC_ALLOW_LOCAL_HOST_ORIGIN` read in place (the same property and default) |
+| `common/Log` | the QUIC packets' and frames' logging cut (the ten `quic` imports, `isLogging(QuicFrame)` to `quicPacketInLoggable`, `logQuicPacketOut/In`) |
+| `common/Log`, `Logger`, `DebugLogger`, `Utils`, `hpack/HPACK`, `Http1Response`, `WindowController`, `RawChannelTube` | `System.Logger` as `jdk.internal.jrt.SystemLoggers.Logger`, `System.getLogger` as `SystemLoggers.getLogger` (F24's, JCS155 (b); dropped with JCS250 (a)) |
+| `HttpClientFacade`, `RawChannelTube` | no `Cleaner` (not in the Go build): the selector manager notices a collected facade at its next wake-up (`NODEADLINE`, 3 s, as the JDK's loop does); WebSocket's debug-only `CleanupChecker` not registered |
+
+**j2g's names** (`arbace/j2g/names.ae`): `Hc_HttpClient`, `Hc_ExchangeImpl`, `Hc_HeaderParser`, `Hc_HeaderParser_ParserIterator`,
+`Hc_HttpConnection`, `Hc_Stream`, `Hc_Logger`, `Hc_Utils`, `Hc_ISO_8859_1`, `Hc_StringReader`, `Hc_StringWriter`: the 385 classes'
+Go names against the closure's 5,718 classes (javac's class files, nested and anonymous ones included) and jrt's 305 Go types,
+these eleven the collisions.
+
+**Light checks.**
+- The closure (F1's scan, `.tmp/http/closure2.py`, the overlays first): outside the world and the set only `Object`, `Class` (jrt's)
+  and `MethodHandles`/`VarHandle` (`Http1Response$ClientRefCountTracker.STATE`, `Stream.DEREGISTERED`: `findVarHandle` constants,
+  J2G-SPEC §8.5).
+- The joint javac check: **2,665 files, 0 errors**, 5,718 classes (23 s, 1.0 GB). Negative control: `HttpClientImpl`'s overlay moved
+  away, 63 errors, exit 1.
+- `bin/jrt-convert derive --check`: **39 overlays** (24 + 15), 0 not as derived, its own control passing.
+- The read: `bin/repr-java read-jdk --check` of the 155 with SystemLoggers and java.util.logging (175 files): 175 converted, 0 failed,
+  0 javac errors (26 s, 1.4 GB); `--no-javac`: 175 native, 0 fallbacks, the forms identical; 1.33 MB of forms for the module.
+- **j2g's analysis by day** (`.tmp/http/vetns/jrt/hvet.ae`, `bin/jrt-convert vet`'s `jrt.vet` with the targets a regex): the committed
+  `jdk/forms` with the day's read of the 175 (and UndeclaredThrowableException, JCS170's, not converted yet) entered, declared,
+  resolved and bridged as j2g does, then every class of `java.net.http` and `jdk.internal.net.http` analyzed: **385 classes, 0
+  refused** (4,908 in the world; 24 s, 1.67 GB). Its first run refused `HttpClientImpl` ("Unknown class:
+  java.lang.Thread$Builder$OfPlatform"), which the derivation's thread fixed. The same run with JCS233's and JCS230's classes:
+  `DelegationPermission`, `ServicePermission`, `CryptoPermissions`, `CryptoPolicyParser`, `JceSecurityManager` analyze;
+  `JceSecurity` waits for F9's `DirectoryIteratorException` (in the sources, converted tonight).
+
+**Expected yield**: `:net`'s 8 (`jdk/java/net/httpclient/` HeadersTest t05071, HeadersTest2 t05072, Http1ChunkedTest t05073,
+HttpRequestBuilderTest t05074, InterruptedBlockingSend t05075, ShortRequestBody t05076, TimeoutOrdering t05077, `http2/Timeout`
+t05078): the builders' tests need no server; the others a `ServerSocket` (or an `SSLServerSocket`, http2/Timeout) on the loopback
+address. About **6 at interp** (the timing tests, TimeoutOrdering and InterruptedBlockingSend, at risk at the interpreted speed),
+about 6 compiled. Beyond the corpus: `HttpClient` is the JDK's HTTP API, for every program of the Go build.
+
+**JCS135, the closure's growth**: +49,719 Java lines (+6.5% on the closure's ~760k), the executable about +7 MB by F4's ratio.
+
+**The night's commands** (in the night's worktree with this branch merged; heavy ones under `bin/heavy-lock`):
+
+```sh
+/root/arbace/.tmp/night7/all9-run.sh $PWD                       # 2,665 files (+ the night's other branches), 0 errors
+bin/jrt-convert derive --check                                  # 39 overlays, 0 not as derived
+REPR_JAVA_EXE=$(ls -td /root/arbace/.tmp/gate-exe/javac-*/ | head -1)arbace-javac REPR_JAVA_STALE_OK=1 \
+  ARBACE_HEAVY_CMD=$PWD/bin/heavy-lock bin/jrt-convert update     # + 140 share:java.net.http, 15 overlays; 0 failed
+bin/jrt modules                                                 # java.net.http, jdk.internal.net.http.* as java.net.http's
+bin/jrt-convert vet --strict
+bin/heavy-lock bin/j2g-edge update && bin/heavy-lock bin/javac-vendor edge   # java.net.http exported
+bin/heavy-lock bin/arbace-go --build && bin/arbace-go --smoke && bin/jrt test
+grep -A12 ':analysis-failures' target/arbace-go/amd64/j2g/report.edn   # none of java/net/http, jdk/internal/net/http
+# a smoke on loopback: jdk.httpserver's server (F24) and the client; expect "200 ok HTTP_1_1"
+target/arbace-go/amd64/arbace -e '(import (quote (com.sun.net.httpserver HttpServer HttpHandler)) (quote (java.net InetSocketAddress InetAddress URI))
+    (quote (java.net.http HttpClient HttpRequest HttpResponse$BodyHandlers)))
+  (let [s (HttpServer/create (InetSocketAddress. (InetAddress/getLoopbackAddress) 0) 0)]
+    (.createContext s "/" (reify HttpHandler (handle [_ x] (let [b (.getBytes "ok")] (.sendResponseHeaders x 200 (alength b))
+                                                            (with-open [o (.getResponseBody x)] (.write o b))))))
+    (.start s)
+    (let [c (HttpClient/newHttpClient)
+          r (.send c (.build (HttpRequest/newBuilder (URI. (str "http://127.0.0.1:" (.getPort (.getAddress s)) "/")))) (HttpResponse$BodyHandlers/ofString))]
+      (println (.statusCode r) (.body r) (.version r)))
+    (.stop s 0))'
+JAVA_CHECK_EXE=$PWD/target/arbace-go/amd64/arbace J2G_GO_EXE=$PWD/target/arbace-go/amd64/arbace \
+  JAVA_CHECK_HEAVY=$PWD/bin/heavy-lock bin/java-check --levels interp,compiled --jobs 4 \
+  --only 'jdk/java/net/httpclient/' --save .tmp/jcs254-night/check
+```
+
+**Risks and fallbacks.** (1) A refusal in the whole world the day's analysis did not see (the night's world is newer): the report
+names it; a fix is a derivation more; the fallback drops `http-client-sources`' line and the 15 overlays (the renames stay harmless).
+(2) The HTTP/2 tests' TLS (ALPN `h2` over F3's SSLEngine). (3) The selector manager's loop at the interpreted level (its select
+wakes at least every 3 s).
+
+**What is left of java.net.http**: HTTP/3 and QUIC (JCS254 (a): 156 files over F10b's `DatagramChannel` and the JDK's QUIC TLS
+engine, `sun.security.ssl.QuicTLSEngineImpl`, which F3's forms already hold), when a corpus test needs it. Of
+`test/jdk/java/net/httpclient`'s 378 tests the corpus holds these 8: 259 name an `@library` (the test library's HTTP/1.1, HTTP/2
+and HTTP/3 servers, `/test/jdk/java/net/httpclient/lib`, and `/test/lib`), and most of the other 119 run as TestNG or JUnit
+tests (63 and 30 `@run` lines), which the corpus's categories leave out: JCS311 below.

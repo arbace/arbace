@@ -803,6 +803,15 @@ covers what.
   `src/java.security.jgss/share/classes/javax/security/auth/kerberos/DelegationPermission.java` and
   `ServicePermission.java`, join `jdk/forms/` (the converted closure): Copyright (c) Oracle and/or its affiliates, under
   the GNU General Public License version 2 with the Classpath Exception (text below).
+- java.net.http's client (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS254 (b)"; recorded by the rule of B7): the 15
+  overlays `overlay/jdk/java.base/jdk/internal/net/http/{HttpClientImpl,ExchangeImpl,Exchange,HttpConnection,Response,AltSvcProcessor,Http1Response,WindowController,RawChannelTube,HttpClientFacade}.java`,
+  `common/{Log,Logger,DebugLogger,Utils}.java` and `hpack/HPACK.java` are jdk26u's files of the same names
+  (https://github.com/openjdk/jdk26u at `baf63fb`, `src/java.net.http/share/classes/jdk/internal/net/http/`) with the exact
+  replacements and cuts `test/jrt/derive.ae` makes (each file's header says so), and `test/jrt/derive.ae`'s
+  `http-derivations` hold text of those files as its OLD strings: Copyright (c) Oracle and/or its affiliates, under the
+  GNU General Public License version 2 with the Classpath Exception (text below), the derivation Arbace's own. Their
+  jdk26u sources join `jdk/forms/` (the converted closure, under the same license): 140 of http-client-sources
+  (`src/java.net.http/share/classes`).
 - jrt's derivations as data (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS251 (a), JCS253"; recorded by the rule
   of B7): `test/jrt/derive.ae`'s tables hold, as the OLD and NEW strings of its replacements, text of jdk26u's files
   (https://github.com/openjdk/jdk26u at `baf63fb`: `src/java.base/share/classes/sun/nio/ch/Net.java`,

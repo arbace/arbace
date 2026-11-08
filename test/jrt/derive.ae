@@ -947,6 +947,118 @@ import sun.nio.fs.AbstractFileSystemProvider;
    :header (fn [] (header (update httpserver-why 1 #(format % (-> rel (str/replace ".java" "") (str/replace "/" ".")) rel))))
    :ops reps})
 
+;; ---------------------------------------------------------------------------------------
+;; JCS254 (b): java.net.http's client without HTTP/3 (HTTP/1.1, HTTP/2 and WebSocket; doc/classes/JAVA-DEFERRED-TRIAGE.md,
+;; "As built: JCS254 (b)"): the files that name HTTP/3's classes (jdk.internal.net.http.http3, .quic, .qpack, Http3*,
+;; HttpQuicConnection, H3FrameOrderVerifier: not in the Go build) cut to the client a JDK whose SSLContext is not QUIC
+;; compatible has (HttpClientImpl's client3 null: the code's own path without HTTP/3), System.Logger as F24's
+;; jdk.internal.jrt.SystemLoggers.Logger (JCS155, JCS250), and the facade's Cleaner dropped (no Cleaner in the Go build:
+;; the selector manager notices a collected facade at its next wake-up, NODEADLINE, 3 s, as the JDK's does without it)
+
+(defn- cut
+  "An op removing the text from start (inclusive) to end (exclusive, searched after start), each found once."
+  [start end]
+  (fn [^String s]
+    (let [i (.indexOf s ^String start)
+          j (when (>= i 0) (.indexOf s ^String end (+ i (count start))))]
+      (when (or (neg? i) (not= i (.lastIndexOf s ^String start)) (nil? j) (neg? j))
+        (throw (ex-info (str "cut: " (pr-str (subs start 0 (min 60 (count start)))) " .. "
+                             (pr-str (subs end 0 (min 60 (count end)))) " not found once")
+                        {:start start :end end})))
+      (str (subs s 0 i) (subs s j)))))
+
+(defn- system-logger
+  "System.Logger as jdk.internal.jrt.SystemLoggers.Logger: the Level import (imports, then the qualified names, count n),
+  System.getLogger (count g)."
+  [imports n g]
+  (cond-> []
+    (pos? imports) (conj ["import java.lang.System.Logger.Level;" "import jdk.internal.jrt.SystemLoggers.Logger.Level;" imports])
+    (pos? n) (conj [#"(?<![\w.])System\.Logger\b" "jdk.internal.jrt.SystemLoggers.Logger" n])
+    (pos? g) (conj ["System.getLogger(" "jdk.internal.jrt.SystemLoggers.getLogger(" g])))
+
+(def ^:private http-why
+  ["Arbace (overlay/jdk, doc/classes/JAVA-DEFERRED-TRIAGE.md, \"As built: JCS254 (b)\"): jdk26u's"
+   "%s (src/java.net.http/share/classes/%s"
+   "at https://github.com/openjdk/jdk26u baf63fb), derived by test/jrt/derive.ae (bin/jrt-convert derive): %s;"
+   "nothing else changed. jdk26u's text Copyright (c) Oracle and/or its affiliates, under the GNU General Public"
+   "License version 2 with the Classpath Exception (LICENSE.md); the derivation Copyright (c) the Arbace authors;"
+   "Eclipse Public License 1.0."])
+
+(defn- http [rel what ops]
+  {:path rel
+   :from (str "src/java.net.http/share/classes/" rel)
+   :header (fn [] (header (-> http-why
+                              (update 1 #(format % (-> rel (str/replace ".java" "") (str/replace "/" ".")) rel))
+                              (update 2 #(format % what)))))
+   :ops ops})
+
+(def ^:private http-derivations
+  [(http "jdk/internal/net/http/HttpClientImpl.java"
+         "no HTTP/3 client (client3 null, as for an SSLContext that is not QUIC compatible: QuicTLSContext is not in the Go build); the selector manager's thread made by Thread(Runnable, String), a daemon (jrt has no Thread.Builder.OfPlatform)"
+         [["import static jdk.internal.net.quic.QuicTLSContext.isQuicCompatible;\n" "" 1]
+          ["final boolean sslCtxSupportedForH3 = isQuicCompatible(sslContext);"
+           "final boolean sslCtxSupportedForH3 = false; // no QUIC in the Go build (JCS254 (b))" 1]
+          ["private final Http3ClientImpl client3;" "private final Object client3; // null: no HTTP/3 in the Go build (JCS254 (b))" 1]
+          ["client3 = h3Supported ? new Http3ClientImpl(this) : null;" "client3 = null;" 1]
+          ["        // close client3\n        if (client3 != null) {\n            // close client3\n            client3.stop();\n        }\n" "" 1]
+          ["Optional<Http3ClientImpl> client3() {" "Optional<Object> client3() {" 1]
+          ["            var client3 = owner.client3;\n            if (client3 != null) {\n                client3.abort(t);\n            }\n" "" 1]
+          ;; jrt has no Thread.Builder.OfPlatform and no inheritInheritableThreadLocals (its threads are goroutines,
+          ;; Thread.ofVirtual's too): the selector manager a daemon thread of the same name, as either of the JDK's is
+          ["        selmgrThread = useVtForSelector()\n                ? Thread.ofVirtual().name(\"HttpClient-\" + id + \"-SelectorManager\")\n                .inheritInheritableThreadLocals(false).unstarted(selmgr)\n                : Thread.ofPlatform().name(\"HttpClient-\" + id + \"-SelectorManager\")\n                .inheritInheritableThreadLocals(false).daemon().unstarted(selmgr);\n"
+           "        // jrt: no Thread.Builder.OfPlatform, no inheritInheritableThreadLocals (JCS254 (b)); a daemon, as the JDK's\n        selmgrThread = new Thread(selmgr, \"HttpClient-\" + id + \"-SelectorManager\");\n        selmgrThread.setDaemon(true);\n" 1]])
+   (http "jdk/internal/net/http/ExchangeImpl.java"
+         "the HTTP/3 exchange's methods cut (attemptHttp3Exchange to the HTTP/3 createExchangeImpl), get's HTTP/3 branch failing as the JDK does for a client without HTTP/3, no HttpQuicConnection"
+         [["import java.net.http.HttpOption.Http3DiscoveryMode;\n" "" 1]
+          ["            return attemptHttp3Exchange(exchange, connection);"
+           "            // no HTTP/3 in the Go build (JCS254 (b)): MultiExchange downgrades a secure HTTP/3 request first\n            return MinimalFuture.failedFuture(\n                    new UnsupportedProtocolVersionException(\"HTTP3 is not supported\"));" 1]
+          ["        if (connection instanceof HttpQuicConnection) return false;\n" "" 1]
+          (cut "    private static <U> CompletableFuture<? extends ExchangeImpl<U>>\n    attemptHttp3Exchange("
+               "    private static <U, T extends ExchangeImpl<U>> T checkCancelled(")])
+   (http "jdk/internal/net/http/Exchange.java"
+         "the connection aborter's QUIC connection never set (no HttpQuicConnection in the Go build)"
+         [["                    if (connection instanceof HttpQuicConnection quicConnection) {\n                        this.quicConnection = quicConnection;\n                    } else {\n                        this.connection = connection;\n                    }\n"
+           "                    this.connection = connection; // no QUIC connection in the Go build (JCS254 (b))\n" 1]
+          ["HttpQuicConnection quicConnection;" "HttpConnection quicConnection;" 2]
+          ["!upgraded && !(connection instanceof HttpQuicConnection)" "!upgraded" 1]])
+   (http "jdk/internal/net/http/HttpConnection.java"
+         "no HTTP/3 connection (client3 is never present in the Go build)"
+         [["            } else if (version == HTTP_3 && client.client3().isPresent()) {\n                // We only come here after we have checked the HTTP/3 connection pool,\n                // and if the client config supports HTTP/3\n                if (DEBUG_LOGGER.on())\n                    DEBUG_LOGGER.log(\"Attempting to get an HTTP/3 connection\");\n                return HttpQuicConnection.getHttpQuicConnection(addr, proxy, request, exchange, client);\n"
+           "" 1]])
+   (http "jdk/internal/net/http/Response.java"
+         "no HttpQuicConnection's TLS session (no HTTP/3 in the Go build)"
+         [["            } else if (connection instanceof HttpQuicConnection qc) {\n                // TODO: consider adding Optional<SSLSession> getSession() to HttpConnection?\n                var session = qc.quicConnection().getTLSEngine().getSession();\n                sslSession = Utils.immutableSession(session);\n"
+           "" 1]])
+   (http "jdk/internal/net/http/AltSvcProcessor.java"
+         "Http3ClientProperties' ALTSVC_ALLOW_LOCAL_HOST_ORIGIN read in place (Http3ClientProperties is HTTP/3's)"
+         [["import static jdk.internal.net.http.Http3ClientProperties.ALTSVC_ALLOW_LOCAL_HOST_ORIGIN;\n" "" 1]
+          ["allowLocalHostOrigin = ALTSVC_ALLOW_LOCAL_HOST_ORIGIN;"
+           "allowLocalHostOrigin = Utils.getBooleanProperty(\n            \"jdk.httpclient.altsvc.allowLocalHostOrigin\", true); // Http3ClientProperties' (JCS254 (b))" 1]])
+   (http "jdk/internal/net/http/common/Log.java"
+         "the QUIC packets' and frames' logging cut (QUIC is not in the Go build); System.Logger as jdk.internal.jrt.SystemLoggers.Logger (JCS155)"
+         (into [[#"import jdk\.internal\.net\.http\.quic\.[\w.]+;\n" "" 10]
+                (cut "    private static boolean isLogging(QuicFrame frame) {" "    public static void logQuic(String s, Object... s1) {")
+                (cut "    public static void logQuicPacketOut(String connectionTag, QuicPacket packet) {" "    public static void logError(String s, Object... s1) {")]
+               (system-logger 0 3 1)))
+   (http "jdk/internal/net/http/common/Logger.java" "System.Logger as jdk.internal.jrt.SystemLoggers.Logger (JCS155)" (system-logger 0 2 0))
+   (http "jdk/internal/net/http/common/DebugLogger.java" "System.Logger as jdk.internal.jrt.SystemLoggers.Logger (JCS155)" (system-logger 0 14 3))
+   (http "jdk/internal/net/http/common/Utils.java" "System.Logger as jdk.internal.jrt.SystemLoggers.Logger (JCS155)" (system-logger 1 3 0))
+   (http "jdk/internal/net/http/hpack/HPACK.java" "System.Logger as jdk.internal.jrt.SystemLoggers.Logger (JCS155)" (system-logger 0 14 0))
+   (http "jdk/internal/net/http/Http1Response.java" "System.Logger as jdk.internal.jrt.SystemLoggers.Logger (JCS155)" (system-logger 1 0 0))
+   (http "jdk/internal/net/http/WindowController.java" "System.Logger as jdk.internal.jrt.SystemLoggers.Logger (JCS155)" (system-logger 1 0 0))
+   (http "jdk/internal/net/http/RawChannelTube.java"
+         "the WebSocket debug's Cleaner dropped (no Cleaner in the Go build; it only checked a debug invariant); System.Logger as jdk.internal.jrt.SystemLoggers.Logger (JCS155)"
+         (into [["import java.lang.ref.Cleaner;\n" "" 1]
+                ["    private static final Cleaner cleaner =\n            Utils.ASSERTIONSENABLED  && Utils.DEBUG_WS ? Cleaner.create() : null;\n" "" 1]
+                ["        if (Utils.ASSERTIONSENABLED && Utils.DEBUG_WS) {\n            // this is just for debug...\n            cleaner.register(this, new CleanupChecker(closed, debug));\n        }\n" "" 1]]
+               (system-logger 1 2 0)))
+   (http "jdk/internal/net/http/HttpClientFacade.java"
+         "no Cleaner (not in the Go build): the selector manager notices a collected facade at its next wake-up (NODEADLINE, 3 s), as the JDK's does when the Cleaner has not run yet"
+         [["import java.lang.ref.Cleaner;\n" "" 1]
+          ["import jdk.internal.ref.CleanerFactory;\n" "" 1]
+          ["    static final Cleaner cleaner = CleanerFactory.cleaner();\n\n" "" 1]
+          ["        // wakeup the impl when the facade is gc'ed\n        cleaner.register(this, impl::facadeCleanup);\n" "" 1]])])
+
 (def derivations
   "Each derived overlay: :path below overlay/jdk/java.base, :from (jdk26u's file, relative to the checkout),
   :ops [[OLD NEW COUNT] or a function ...] (OLD a string or a regex, found exactly COUNT times, every one
@@ -988,7 +1100,8 @@ import sun.nio.fs.AbstractFileSystemProvider;
    (httpserver "sun/net/httpserver/ExchangeImpl.java" [(conj import-logger 1) (conj import-level 1)])
    (httpserver "sun/net/httpserver/HttpConnection.java" [(conj import-logger 1) (conj import-level 1)])
    (httpserver "sun/net/httpserver/HttpContextImpl.java" [(conj import-logger 1)])
-   (httpserver "sun/net/httpserver/ServerConfig.java" [(conj import-logger 1) (conj import-level 1)])]))
+   (httpserver "sun/net/httpserver/ServerConfig.java" [(conj import-logger 1) (conj import-level 1)])]
+  http-derivations))
 
 ;; ---------------------------------------------------------------------------------------
 
