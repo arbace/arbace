@@ -192,6 +192,37 @@ py() { local s=$1; shift; python3 -I -S -B "$root/tools/pydump/$s" "$@"; }
 PYREC_VERB="bin/pyi $*"
 trap 'rc=$?; pyrec_flush || rc=1; exit $rc' EXIT
 pyall() { python3 -I -S -B "$root/tools/pyi/libtest_all.py" "$@"; }
+# pyrun VERB ...: the check's verbs of tools/pyi/libtest_all.py (owned, run, controls, table) with no python3 (queue 234:
+# Lib/test's judge by each test's own verdict needs no CPython at check time, and its runner none either): the runner
+# compiled by pyi's AOT (runner_exe), run as aot_run runs a program; PYI_RUNNER=python3: by python3 as before (pyall),
+# PYI_RUNNER=pyi: by bin/pyi run (slow: about 45 s a start on the VM)
+pyrun() {
+  case ${PYI_RUNNER:-aot} in
+    python3) pyall "$@" ;;
+    pyi) "$root/bin/pyi" run "$root/tools/pyi/libtest_all.py" "$@" ;;
+    aot) local r; r=$(runner_exe) || return 1; PYI_AOT_COMPILER="$AOT/compiler.sh" "$r" "$root/tools/pyi/libtest_all.py" "$@" ;;
+    *) die "PYI_RUNNER=$PYI_RUNNER: aot, pyi or python3" ;;
+  esac
+}
+# judge_verdict ORACLE: Lib/test's verdict (queue 234): PYI_VERDICT, else own (each test's own, unittest's outcome under
+# pyi: the user's rule of 2026-11-07), ref with --oracle (python3's runs judged against CPython's records, the runner's
+# control)
+judge_verdict() { if [ -n "${PYI_VERDICT:-}" ]; then echo "$PYI_VERDICT"; elif [ -n "$1" ]; then echo ref; else echo own; fi; }
+# runner_exe: tools/pyi/libtest_all.py compiled by pyi's AOT into WORK/aot/bin/p_libtest_all, kept by the runtime's key,
+# the generator's digest and the script's (compiled again when one changes); prints its path. Its progress on stderr
+runner_exe() {
+  local out="$AOT/bin/p_libtest_all" key
+  aot_module >&2
+  key="$(cat "$AOT/mod/runtime.key") $(aot_gen) $(sha256sum < "$root/tools/pyi/libtest_all.py" | cut -c1-16)"
+  if [ "$(cat "$out.key" 2>/dev/null)" != "$key" ] || [ ! -x "$out" ]; then
+    echo "pyi: the runner (tools/pyi/libtest_all.py) compiled by pyi's AOT" >&2
+    aot_compile p_libtest_all "$root/tools/pyi/libtest_all.py" "$out" >&2
+    [ ! -f "$out.refused" ] || die "the runner is refused by pyi's AOT: $(cat "$out.refused")"
+    [ -x "$out" ] || die "the runner did not build ($AOT/log/p_libtest_all.*)"
+    echo "$key" > "$out.key"
+  fi
+  echo "$out"
+}
 
 check_oracle() {
   local want have
@@ -644,9 +675,10 @@ in_group() {
 # pyi's runs skip the tests of test/python/lib-test-skip.tsv (PYI_LIB_TEST_SKIP; ID<TAB>REASON, each an error naming
 # the reason, which the known file classes): those that would wait forever on what pyi cannot do yet
 cmd_lib_test() {
-  local oracle="" record="" judge="" aot="" corpus="" mods=() m d="$WORK/lib-test" lib rc=0
+  local oracle="" record="" judge="" aot="" corpus="" verdict="" mods=() m d="$WORK/lib-test" lib rc=0
   while [ $# -gt 0 ]; do case $1 in --oracle) oracle=1; shift ;; --record) record=1; shift ;; --aot) aot=1; shift ;;
-    --corpus) corpus=$2; shift 2 ;; --judge) judge=$2; shift 2 ;; *) mods+=("$1"); shift ;; esac; done
+    --corpus) corpus=$2; shift 2 ;; --judge) judge=$2; shift 2 ;; --verdict) verdict=$2; shift 2 ;; *) mods+=("$1"); shift ;; esac; done
+  verdict=${verdict:-$(judge_verdict "$oracle")}
   if [ ${#mods[@]} -eq 0 ]; then
     if [ -n "$corpus" ]; then IFS=, read -ra mods <<< "$(corpus_modules "$corpus")"; else IFS=, read -ra mods <<< "$(core_modules)"; fi
   fi
@@ -687,7 +719,7 @@ cmd_lib_test() {
     wait
   fi
   local m2c="$d/modules.tsv"; [ -n "$judge" ] && [ -f "$m2c" ] || module_corpora "${mods[@]}" > "$m2c"
-  "$(arbace_exe)" "$root/test/python/libtest_judge.ae" --dir "$d" --ref "$refs" --modules "$m2c" \
+  "$(arbace_exe)" "$root/test/python/libtest_judge.ae" --dir "$d" --ref "$refs" --modules "$m2c" --verdict "$verdict" \
     $(if [ -n "$oracle" ]; then echo --no-classes; else echo --classes "$DIV" --record "$CHECK_RECORD"; fi) ${record:+--write-record} || rc=$?
   return $rc
 }
@@ -981,16 +1013,17 @@ cmd_aot() {
 
 # lib-test-all [--oracle] [--record] [--judge DIR] [--fresh] [--all] [MODULE...] (PY6i): see the header
 cmd_lib_test_all() {
-  local oracle="" record="" judge="" fresh="" all="" mods=() d rc=0
+  local oracle="" record="" judge="" fresh="" all="" verdict="" mods=() d rc=0 runner=pyrun
   while [ $# -gt 0 ]; do case $1 in --oracle) oracle=1; shift ;; --record) record=1; shift ;; --fresh) fresh=1; shift ;; --all) all=1; shift ;;
-    --judge) judge=$2; shift 2 ;; *) mods+=("$1"); shift ;; esac; done
+    --judge) judge=$2; shift 2 ;; --verdict) verdict=$2; shift 2 ;; *) mods+=("$1"); shift ;; esac; done
+  verdict=${verdict:-$(judge_verdict "$oracle")}; [ -z "$oracle" ] || runner=pyall
   [ -f "$REF_ALL" ] || die "no $REF_ALL (bin/pyi record-ref lib-test-all)"
   local owners="$root/test/python/lib-test-all-owners.tsv" refmods="$WORK/lib-test-all/ref-modules.txt"
   mkdir -p "$WORK/lib-test-all"; sed -n 's/^{:id "\([^"/]*\)" :module true.*/\1/p' "$REF_ALL" > "$refmods"
   # the modules a family owns are the family's to measure (test/python/lib-test-all-owners.tsv), but by --all or --oracle
   if [ ${#mods[@]} -eq 0 ]; then
     if [ -n "$all$oracle" ]; then mapfile -t mods < "$refmods"
-    else mapfile -t mods < <(pyall owned --owners "$owners" --modules "$refmods" --invert); fi
+    else mapfile -t mods < <($runner owned --owners "$owners" --modules "$refmods" --invert); fi
   fi
   if [ -n "$judge" ]; then
     d=$(cd "$caller_pwd" && cd "$judge" && pwd)
@@ -998,21 +1031,21 @@ cmd_lib_test_all() {
     d="$WORK/lib-test-all/run${oracle:+-oracle}"
     [ -z "$fresh" ] || rm -rf "$d"
     mkdir -p "$d"; printf '%s\n' "${mods[@]}" > "$d/modules.txt"
-    PYI_LIB_TEST_SKIP="${PYI_LIB_TEST_SKIP-$root/test/python/lib-test-skip.tsv}" pyall run --root "$root" --modules "$d/modules.txt" --dir "$d" --jobs "${PYI_LIB_TEST_JOBS:-2}" \
+    PYI_LIB_TEST_SKIP="${PYI_LIB_TEST_SKIP-$root/test/python/lib-test-skip.tsv}" $runner run --root "$root" --modules "$d/modules.txt" --dir "$d" --jobs "${PYI_LIB_TEST_JOBS:-2}" \
       --test-timeout "${PYI_LIB_TEST_TEST_TIMEOUT:-300}" --module-timeout "${PYI_LIB_TEST_TIMEOUT:-3600}" ${oracle:+--oracle "$(stdlib_lib)"} \
       --tmp-base "${PYI_LIB_TEST_TMP:-$root/.tmp/t6i}"
   fi
   rm -f "$d/summary.tsv"
   [ -n "$judge" ] && [ -f "$d/modules.tsv" ] || printf '%s\tlib-test-all\n' "${mods[@]}" > "$d/modules.tsv"
-  "$(arbace_exe)" "$root/test/python/libtest_judge.ae" --dir "$d" --ref "$REF_ALL" --modules "$d/modules.tsv" \
+  "$(arbace_exe)" "$root/test/python/libtest_judge.ae" --dir "$d" --ref "$REF_ALL" --modules "$d/modules.tsv" --verdict "$verdict" \
     $(if [ -n "$oracle" ]; then echo --no-classes; else echo --classes "$DIV" --record "$CHECK_RECORD"; fi) ${record:+--write-record} > "$d/judge.log" || rc=$?
   grep -v '^  FAIL ' "$d/judge.log" | tail -n 1
   echo "lib-test-all: $(grep -c '^  FAIL ' "$d/judge.log") methods failing (listed in $d/judge.log)"
   # the table's rows of the families' and the not-run modules: regrtest's whole list (record-ref lib-test-all's)
   local allmods="$WORK/lib-test-all/all-modules.txt"; [ -f "$allmods" ] || allmods=$refmods
-  pyall table --dir "$d" --summary "$d/summary.tsv" --out "$d/table.md" ${oracle:---owners "$owners" --modules "$allmods"}
-  pyall controls --dir "$d" --controls "$CONTROLS" --ref "$REF_ALL" \
-    --judge "$(arbace_exe)" "$root/test/python/libtest_judge.ae" || rc=1
+  $runner table --dir "$d" --summary "$d/summary.tsv" --out "$d/table.md" ${oracle:---owners "$owners" --modules "$allmods"}
+  $runner controls --dir "$d" --controls "$CONTROLS" --ref "$REF_ALL" \
+    --judge "$(arbace_exe)" "$root/test/python/libtest_judge.ae" --verdict "$verdict" || rc=1
   return $rc
 }
 
@@ -1033,7 +1066,7 @@ check_universe() {
                    {m = $1; c = n[m]; if (c == "") { split(m, q, "."); c = n[q[1]] } if (c != "") print order[c] "\t" m "\t" c}' "$WORK/corpus-names.tsv" - \
       | sort -t$'\t' -k1,1n -k2,2 | cut -f2- > "$u.new"
     sed -n 's/^{:id "\([^"/]*\)" :module true.*/\1/p' "$REF_ALL" > "$WORK/ref-all-modules.txt"
-    pyall owned --owners "$root/test/python/lib-test-all-owners.tsv" --modules "$WORK/ref-all-modules.txt" --invert | sed 's/$/\tlib-test-all/' >> "$u.new"
+    pyrun owned --owners "$root/test/python/lib-test-all-owners.tsv" --modules "$WORK/ref-all-modules.txt" --invert | sed 's/$/\tlib-test-all/' >> "$u.new"
     awk -F'\t' '!seen[$1]++' "$u.new" > "$u"; rm -f "$u.new"; echo "$k" > "$u.key"
   fi
   cat "$u"
@@ -1058,12 +1091,15 @@ module_corpora() {
 # of no class); --judge DIR: DIR's run judged again, nothing run; --oracle: the driver by python3 (the runner's control:
 # every method equal but the references' :excluded and the 2 of test_tracemalloc's frames, PY6i).
 cmd_check_lib() {
-  local corpora="" only="" record="" judge="" oracle="" fresh="" cover="" mods=() d rc=0 onlyf=""
+  local corpora="" only="" record="" judge="" oracle="" fresh="" cover="" verdict="" mods=() d rc=0 onlyf="" runner=pyrun
   while [ $# -gt 0 ]; do case $1 in --corpus) corpora=$2; shift 2 ;; --only) only=$(cd "$caller_pwd" && realpath "$2"); shift 2 ;;
-    --cover) cover=$2; shift 2 ;;
+    --cover) cover=$2; shift 2 ;; --verdict) verdict=$2; shift 2 ;;
     --record) record=1; shift ;; --judge) judge=$2; shift 2 ;; --oracle) oracle=1; shift ;; --fresh) fresh=1; shift ;;
     -*) die "check: unknown option $1" ;; *) mods+=("$1"); shift ;; esac; done
   [ -z "$record" ] || [ -z "$only$oracle$cover" ] || die "check --record of a selection, the oracle or the cover run: refused"
+  verdict=${verdict:-$(judge_verdict "$oracle")}
+  # the oracle's runs and the cover run (its own AOT module, WORK/aot-cover) keep python3's runner
+  [ -z "$oracle$cover" ] || runner=pyall
   local refs=(--ref "$REF_LT"); local r; for r in "$root"/test/python/ref-cpython314-lib-test-*.edn; do refs+=(--ref "$r"); done
   if [ -n "$judge" ]; then
     d=$(cd "$caller_pwd" && cd "$judge" && pwd)
@@ -1092,13 +1128,13 @@ cmd_check_lib() {
     if [ -n "$cover" ]; then AOT="$WORK/aot-cover"; drv=$(cover_driver) || return 1; ctests="$cover/tests"; mkdir -p "$ctests"; fi
     PYI_LIB_TEST_DRIVER_EXE="$drv" PYI_AOT_COMPILER="${drv:+$AOT/compiler.sh}" PYI_LIB_TEST_COVER_TESTS="$ctests" \
     PYI_LIB_TEST_ONLY="${only:+$WORK/check-only.txt}" PYI_LIB_TEST_SKIP="${PYI_LIB_TEST_SKIP-$root/test/python/lib-test-skip.tsv}" \
-      pyall run --root "$root" --modules "$d/modules.txt" --dir "$d" --jobs "${PYI_LIB_TEST_JOBS:-2}" \
+      $runner run --root "$root" --modules "$d/modules.txt" --dir "$d" --jobs "${PYI_LIB_TEST_JOBS:-2}" \
       --test-timeout "${PYI_LIB_TEST_TEST_TIMEOUT:-300}" --module-timeout "${PYI_LIB_TEST_TIMEOUT:-3600}" ${oracle:+--oracle "$lib"} \
       --tmp-base "${PYI_LIB_TEST_TMP:-$root/.tmp/t6i}"
     if [ -n "$only" ]; then cp "$WORK/check-only.txt" "$d/only.txt"; else rm -f "$d/only.txt"; fi
   fi
   [ ! -f "$d/only.txt" ] || onlyf="$d/only.txt"
-  "$(arbace_exe)" "$root/test/python/libtest_judge.ae" --name "pyi check" --dir "$d" --modules "$d/modules.tsv" "${refs[@]}" \
+  "$(arbace_exe)" "$root/test/python/libtest_judge.ae" --name "pyi check" --dir "$d" --modules "$d/modules.tsv" "${refs[@]}" --verdict "$verdict" \
     ${onlyf:+--only "$onlyf"} --save "$d/results.tsv" \
     $(if [ -n "$oracle" ]; then echo --no-classes; else echo --classes "$DIV" --record "$CHECK_RECORD"; fi) ${record:+--write-record} > "$d/judge.log" || rc=$?
   grep -v '^  FAIL \|^   failing: \|^pyi check test' "$d/judge.log" || true
@@ -1106,7 +1142,7 @@ cmd_check_lib() {
   echo "pyi check: $(grep -c '^   failing: ' "$d/judge.log") methods failing (listed in $d/judge.log)"
   if [ -z "$oracle" ]; then
     local refsc; refsc=$(printf '%s\n' "${refs[@]}" | grep -v '^--ref$' | paste -sd,)
-    pyall controls --dir "$d" --controls "$CONTROLS" --ref "$refsc" --judge "$(arbace_exe)" "$root/test/python/libtest_judge.ae" || rc=1
+    $runner controls --dir "$d" --controls "$CONTROLS" --ref "$refsc" --judge "$(arbace_exe)" "$root/test/python/libtest_judge.ae" --verdict "$verdict" || rc=1
   fi
   return $rc
 }
@@ -1821,5 +1857,6 @@ case "${1:-}" in
   wheels) shift; cmd_wheels "$@" ;;
   c2j-check) shift; mkdir -p "$WORK"; cmd_c2j_check "$@" ;;
   table-check) shift; mkdir -p "$WORK"; cmd_table_check "$@" ;;
+  runner) shift; mkdir -p "$WORK"; if [ $# -eq 0 ]; then runner_exe; else pyrun "$@"; fi ;;
   *) sed -n '2,/^# Environment:/p' "$0"; exit 2 ;;
 esac
