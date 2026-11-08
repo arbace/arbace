@@ -852,6 +852,16 @@ covers what.
   contributors, dual-licensed under the MIT License or the Apache License 2.0 at the licensee's option, taken here under the MIT License
   ("Rust (rustc 1.99.1): MIT License or Apache License 2.0" below). The rest (the judge `typeck_check.ae`) is Arbace's own, under the
   Eclipse Public License 1.0.
+- `arbace/rust/front/build.ae` (RF10's first slice, doc/rust/FRONTEND-SURVEY.md, "As built: RF10 (first slice)"): Arbace forms written
+  after rustc 1.99.1, the same revision and sources, reading `compiler/rustc_hir_analysis/src/check/region.rs` and
+  `compiler/rustc_middle/src/middle/region.rs` (the region scope tree, temporary scopes), `compiler/rustc_mir_build/src/thir/cx/{mod,expr,block}.rs`
+  and `thir/pattern/mod.rs` (THIR), `compiler/rustc_mir_build/src/builder/{mod,cfg,scope,block,misc}.rs`,
+  `builder/expr/{into,stmt,as_operand,as_temp,as_rvalue,as_place,as_constant,category}.rs` and
+  `builder/matches/{mod,match_pair,buckets,test}.rs` (MIR building: scopes and drop trees, expressions, the match lowering), and the
+  passes `CleanupPostBorrowck` and `AbortUnwindingCalls`' effect in `arbace/rust/front/build_run.ae`, with the layouts of scalars and
+  scalar pairs after `compiler/rustc_abi/src/layout.rs`: copyright the Rust project's contributors, dual-licensed under the MIT License or
+  the Apache License 2.0 at the licensee's option, taken here under the MIT License ("Rust (rustc 1.99.1): MIT License or Apache License
+  2.0" below). The rest (the judge `build_check.ae`, the rest of `build_run.ae`) is Arbace's own, under the Eclipse Public License 1.0.
 - The own-verdict judge of `arbace/rust/check.ae` (`own-verdict`, `run-class`, `verdict-met?`, `directives`; rust-90,
   doc/rust/EVAL.md §13): Arbace forms written after rustc 1.99.1's compiletest, the same revision and sources (the pinned
   `rustc-1.99.1-src.tar.xz`'s `src/tools/compiletest/src/runtest/ui.rs`: `run_ui_test`'s RunResult of the run and the

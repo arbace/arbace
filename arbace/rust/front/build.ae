@@ -108,8 +108,9 @@
 (defn binding-key
   "A binding's identity: its pattern's span (a local path's resolution names it), else its HIR id"
   [p]
-  (let [[l1 c1 l2 c2 :as sp] (:span p) n (count (str (:name p)))]
-    (cond (not (vector? sp)) (:hir-id p)
+  (let [sp (:span p) n (count (str (:name p)))
+        [l1 c1 l2 c2] (when (sequential? sp) sp)]
+    (cond (not (sequential? sp)) (:hir-id p)
           (:sub p) [l1 c1 l1 (+ c1 n)]
           :else [l2 (- c2 n) l2 c2])))
 
@@ -239,7 +240,7 @@
 (defn- r-of [e] (get *res* (:hir-id e)))
 (defn- ty-of [e] (or (:ty (r-of e)) (unsupported "an expression without a type" (:kind e))))
 
-(declare mirror-expr mirror-block lower-pattern)
+(declare mirror-expr mirror-block mirror-block* lower-pattern)
 
 (defn- local-res [path] (let [r (first (:res path))] (when (= 'local (first r)) (second r))))
 
@@ -290,13 +291,23 @@
         (when (re-matches #"\d+" (str nm)) (parse-long (str nm)))
         (unsupported "a field" nm))))
 
-(def ^:dynamic *self-var* nil)   ; the `self` parameter's binding (a derive's `self` paths carry no resolution)
+(def ^:dynamic *self-var* nil)
+(def ^:dynamic *names* {})   ; the bindings in scope by name: a derive's or a desugaring's paths carry no resolution (`other`, `iter`)
+
+(defn- bind-names! [thir-pat]
+  (let [acc (atom *names*)]
+    (letfn [(w [p] (when p
+                     (when (= :binding (:k p)) (swap! acc assoc (:name p) (:var p)))
+                     (doseq [x (concat [(:sub p)] (map second (:subpatterns p)) (take 1 (:pats p)))] (w x))))]
+      (w thir-pat))
+    (set! *names* @acc)))   ; the `self` parameter's binding (a derive's `self` paths carry no resolution)
 
 (defn- mirror-path [e ty]
   (let [path (:path e)
+        nm (when (= 1 (count (:segs path))) (:ident (first (:segs path))))
         sp (or (local-res path)
-               (when (and *self-var* (= ["self"] (mapv :ident (:segs path))) (nil? (:res path)) ) *self-var*)
-               (when (and *self-var* (= ["self"] (mapv :ident (:segs path))) (= [:unresolved "self"] (c/res-def path))) *self-var*))]
+               (when (and *self-var* (= "self" nm) (or (nil? (:res path)) (= [:unresolved "self"] (c/res-def path)))) *self-var*)
+               (when (and nm (or (empty? (:res path)) (= :unresolved (first (c/res-def path))))) (get *names* nm)))]
     (if sp
       (mk e :var-ref ty :id sp)
       (let [rd (c/res-def path)]
@@ -361,18 +372,21 @@
                (binding [*loops* (cons {:label (:label e) :id (:hir-id e) :block? true} *loops*)]
                  (mk e :block ty :block (assoc (mirror-block (:block e)) :targeted-by-break true)))
                (mk e :block ty :block (mirror-block (:block e))))
-      :if (mk e :if ty :cond (mirror-expr (:cond e)) :then (mirror-expr (:then e)) :else (some-> (:else e) mirror-expr)
-              :if-then-scope [(:hir-id (:then e)) (if (>= *edition* 2024) :if-then-rescope :if-then)])
+      :if (binding [*names* *names*] (mk e :if ty :cond (mirror-expr (:cond e)) :then (mirror-expr (:then e)) :else (some-> (:else e) mirror-expr)
+              :if-then-scope [(:hir-id (:then e)) (if (>= *edition* 2024) :if-then-rescope :if-then)]))
       :loop (let [b (:block e)]
               (binding [*loops* (cons {:label (:label e) :id (:hir-id e)} *loops*)]
                 (mk e :loop ty :body {:k :block :ty unit-ty :span (:span b) :tsi (:hir-id b) :block (mirror-block b)})))
       :break (mk e :break ty :label (loop-target e) :value (some-> (:expr e) mirror-expr))
       :continue (mk e :continue ty :label (loop-target e))
       :ret (mk e :return ty :value (some-> (:expr e) mirror-expr))
-      :let (mk e :let ty :expr (mirror-expr (:init e)) :pat (lower-pattern (:pat e)))
+      :let (let [x (mirror-expr (:init e)) pat (lower-pattern (:pat e))] (bind-names! pat) (mk e :let ty :expr x :pat pat))
       :match (mk e :match ty :scrutinee (mirror-expr (:expr e))
-                 :arms (mapv (fn [a] {:pat (lower-pattern (:pat a)) :guard (some-> (:guard a) mirror-expr) :body (mirror-expr (:body a))
-                                      :scope [(:hir-id a) :node] :span (:span a) :hir-id (:hir-id a)})
+                 :arms (mapv (fn [a] (binding [*names* *names*]
+                                       (let [pat (lower-pattern (:pat a))]
+                                         (bind-names! pat)
+                                         {:pat pat :guard (some-> (:guard a) mirror-expr) :body (mirror-expr (:body a))
+                                      :scope [(:hir-id a) :node] :span (:span a) :hir-id (:hir-id a)})))
                              (:arms e)))
       (unsupported "an expression" (:kind e)))))
 
@@ -398,16 +412,23 @@
     {:k :scope :region [(:hir-id e) :node] :hir-id (:hir-id e) :value x :ty (:ty x) :span (:span e) :tsi (:hir-id e)}))
 
 (defn mirror-block [b]
+  (binding [*names* *names*] (mirror-block* b)))
+
+(defn- mirror-block* [b]
   {:region [(:hir-id b) :node] :span (:span b) :hir-id (:hir-id b)
    :targeted-by-break (boolean (:targeted-by-break b))
    :stmts (vec (keep-indexed
                 (fn [i s]
                   (case (:kind s)
                     (:semi :expr) {:k :expr :scope [(:hir-id s) :node] :expr (mirror-expr (:expr s))}
-                    :let {:k :let :remainder [(:hir-id b) [:remainder i]] :init-scope [(:hir-id s) :node]
-                          :pattern (lower-pattern (:pat s)) :init (some-> (:init s) mirror-expr)
+                    :let (let [init (some-> (:init s) mirror-expr)
+                               pat (lower-pattern (:pat s))
+                               els (some-> (:els s) mirror-block)]
+                           (bind-names! pat)
+                           {:k :let :remainder [(:hir-id b) [:remainder i]] :init-scope [(:hir-id s) :node]
+                          :pattern pat :init init
                           :user-ty (when (sequential? (:span (:ty s))) {:span (:span (:ty s)) :ty (:ty (r-of (:pat s)))})
-                          :else (some-> (:els s) mirror-block) :hir-id (:hir-id s) :span (:span s)}
+                          :else els :hir-id (:hir-id s) :span (:span s)})
                     nil))
                 (:stmts b)))
    :expr (some-> (:expr b) mirror-expr)})
@@ -1341,12 +1362,12 @@
   "A body's name as write_mir_pretty prints it: its def path, an impl as `<impl at FILE:L:C: L:C>`"
   [d]
   (let [p (c/def-of (:parent d))]
-    (if (and p (str/starts-with? (str (:kind p)) "Impl") (vector? (:span (:node p))))
+    (if (and p (str/starts-with? (str (:kind p)) "Impl") (sequential? (:span (:node p))))
       (let [[l1 c1 l2 c2] (:span (:node p))
             ;; def_span: an impl's header, to its self type (its where clause) when the item's text is the root file's
             [l2 c2] (let [st (:span (:self-ty (:node p)))
                           wh (keep :span (:where (:generics (:node p))))]
-                      (if (and (vector? st) (= l1 (first st)) (not (some #{:derive} [(:derive (:node p))])))
+                      (if (and (sequential? st) (= l1 (first st)) (not (some #{:derive} [(:derive (:node p))])))
                         (let [e (or (last (sort (map (fn [x] [(nth x 2) (nth x 3)]) wh))) [(nth st 2) (nth st 3)])]
                           (if (pos? (compare [l2 c2] e)) e [l2 c2]))
                         [l2 c2]))]
@@ -1391,7 +1412,7 @@
     (tc/with-solver d
       (fn []
         (binding [*edition* (or (:edition opts) 2024)
-                  *self-var* nil
+                  *self-var* nil *names* {}
                   *res* res
                   *tree* (binding [*edition* (or (:edition opts) 2024)] (scope-tree pats body-expr))
                   *b* (atom {:blocks [] :locals [{:ty ret :mut true :scope 0}] :source-scopes [] :source-scope 0 :debug []
@@ -1399,6 +1420,7 @@
                              :block-context [] :check-overflow (boolean (:overflow-checks opts))})]
           (let [params (mapv (fn [p t] {:pat (lower-pattern (:pat p)) :ty t}) (:params n) (:inputs sig))
                 _ (when-let [sp (first (filter #(= "self" (:name (:pat %))) params))] (set! *self-var* (:var (:pat sp))))
+                _ (doseq [p params] (bind-names! (:pat p)))
                 thir-body (mirror-expr (assoc-in body-expr [:block :hir-id] (:hir-id (:body n))))]
             (start-new-block!)
             (upd! update :source-scopes conj [nil nil])

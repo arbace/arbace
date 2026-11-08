@@ -253,6 +253,11 @@ code. Three kinds of things live here:
   RF9a"; RF9b's second slice, the same day: ambiguity and where-clause candidates, normalization through the parameter environment and
   item bounds, CoerceMany, closure kinds, writeback's fix-ups, "As built: RF9b"; LICENSE.md names the files; MIT OR Apache-2.0);
   evaluated from the checkout, out of `gate_key` (RFS13).
+  `arbace/rust/front/build.ae` (THIR and MIR building after `rustc_mir_build/src/{thir,builder}/`, the region scope tree after
+  `rustc_hir_analysis/src/check/region.rs`) and `build_run.ae` (CleanupPostBorrowck's changes, the layouts of scalars and scalar pairs
+  after `rustc_abi`) port rustc 1.99.1, the same revision and sources, by hand on 2026-11-08 (RF10's first slice,
+  doc/rust/FRONTEND-SURVEY.md, "As built: RF10 (first slice)"; LICENSE.md names the files; MIT OR Apache-2.0); evaluated from the
+  checkout, out of `gate_key` (RFS13).
   `arbace/rust/check.ae`'s own-verdict judge (`own-verdict`, `run-class`, `verdict-met?`) ports rustc 1.99.1's compiletest
   (`src/tools/compiletest/src/runtest/ui.rs`'s run checks, `directives.rs`'s directive lines; the pinned `rustc-1.99.1-src.tar.xz`),
   by hand on 2026-11-07 (rust-90, doc/rust/EVAL.md §13; LICENSE.md; MIT OR Apache-2.0); evaluated from the checkout.
