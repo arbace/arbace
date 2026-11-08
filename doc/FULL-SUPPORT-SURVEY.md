@@ -4055,3 +4055,48 @@ The user's decisions:
   `bin/lib/program.bash`'s `program_base`.
 - **RPS162 (a):** as built. `bin/clojure-tests --aot` takes its executables from the gate's, where the test build is,
   and checks their compiled namespaces with `program_aot_current`.
+
+## Decided (the user, 2026-11-08): RPS9 (a) reopened by JCV11 (b)
+
+The user's decision of 2026-11-08 (doc/classes/JAVA-CONFORMANCE-SURVEY.md, "Proposed (JCV10-JCV12)", JCV11): Java's
+print cell passes on the round trip's own checks, the printer printing every file, javac on Arbace accepting the
+printed Java, the printed Java read back to the same forms, and mode `:full` printed back byte for byte. The class
+files' equality becomes a sub-level reported beside the pass, as `bin/repr-java roundtrip`'s classes level is. RPS9
+(a) had made byte-identical class files part of the print level's pass. That part is reversed. The rest of RPS9 (a)
+stands: `print` in `bin/java-check`, and the type-argument files deferred until JFS75 (b)'s model carries them.
+
+- A test whose only failing step is the classes step passes, as long as every class file is the original's and every
+  difference is one of the kinds `test/java/print.ae` names: a value's control flow, an increment's place, a local's
+  initializer, a switch's arms, the constant pool's order, the code's order. The forms do not record these choices,
+  so they are differences by design. The row keeps the classes step's reason as the pass's note.
+- The classes step still counts against a test in three cases: an unnamed code difference, a class file present on
+  one side only, or a class file that cannot be read. These stay `:print-classes-unnamed` (deferred, VM audit 149's
+  F1).
+
+## As built: JCV11 (b) (2026-11-08; branch `java-props`)
+
+- **The judgment.** `test/java/print.ae` gains `class-kinds` (the named kinds' set) and `classes-note?`. `judge`
+  passes a test whose only step not passing is classes when `classes-note?` takes that step's reason, and keeps the
+  reason as the row's note.
+- **The record.** It was re-judged from the committed record alone. `java.print`'s new verb `rejudge FILE` applies
+  the same rule to `test/java/check-print.edn`'s rows (`arbace_tool -p test -m java.print rejudge
+  test/java/check-print.edn`, 2 s): 582 rows went from `:differ "classes: ..."` to `:pass "classes: ..."`. 581 of
+  them were `:print-classes`. The other one, t06357, was listed in `:print-erasure`'s `:tests`, but its row differed
+  only by named kinds, so it leaves that list.
+  - A row whose reason the record cut at 600 characters would stay a non-pass, and the next whole run would judge it
+    from its steps. None of the 582 was cut.
+- **The classes.** `:print-classes` stays in `test/java/divergences.edn`, with a comment: it describes the
+  sub-level, and it would classify the row of a judge that did not apply the rule.
+- **The matrix.** REAP's `:java-check` reader takes a source key, `:sub-level :classes` (on the print source in
+  `test/reap/cells.edn`). It prints the sub-level in the source's detail, reported and not counted: "2600 of 3182
+  passes with the original's class files byte for byte, 582 with class files that differ by what the forms do not
+  record".
+- **Proved, light.** `bin/java-check --only 't03218 |t03216 |t03220 |t03208 ' --levels read,print --jobs 1 --save`
+  took 38 s, peak 1.5 GiB, on the gate executable `ad3066cf` and javac's tool `javac-c91cd0f6`.
+  - t03218 and t03220 pass, with the classes note.
+  - t03216 still differs at forms: the overload cast, "(also: classes)".
+  - t03208 passes.
+  - `bin/java-check --judge --partial` of those results: 4 of 4 as recorded, no regressions.
+- **The numbers.** Java print went from 2,600 / 616 / 109 to 3,182 / 34 / 109, which is 78.2% to 95.7%. Java's
+  completeness went from 72.85% to 77.23%, and from 78.93% to 79.11% without by design. `bin/reap --record` and
+  `bin/crops-score --record` were run; `bin/reap` and `bin/crops-score --judge --strict` report 0 problems.

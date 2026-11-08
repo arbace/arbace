@@ -4090,3 +4090,39 @@ and after. Java: completeness 72.9% (80.4% without by design), maturity 100%, in
 3. **JCV12, `--record-ref --only` by id.** `--only` matches `plan.tsv`'s text (the path), so `--only tNNNNN` silently
    records nothing (0 tests planned, exit 0). (a) Leave it, documented here; (b) match the id too, and fail when `--only`
    plans no test. Cost: (b) minutes. Recommended: (b).
+
+## Decided (the user, 2026-11-08, about 19:45): JCV11 (b), JCV12 (b)
+
+- **JCV11 (b):** Java's print cell passes on the round trip's own checks: printed, accepted by javac on Arbace, read back to the
+  same forms, and mode `:full` byte for byte. The class files' equality is a sub-level reported beside the pass.
+  `:print-classes` becomes a note, not a non-pass. `:print-classes-unnamed` stays deferred. This reopens RPS9 (a): see
+  doc/FULL-SUPPORT-SURVEY.md, "Decided (the user, 2026-11-08): RPS9 (a) reopened by JCV11 (b)".
+- **JCV12 (b):** `bin/java-check --record-ref --only` matches test ids too, and fails when `--only` plans no test.
+- **JCV10:** not decided.
+
+## As built: JCV11 (b), JCV12 (b) (2026-11-08; branch `java-props`, from `java-night` 639d42ab9 with the day's Java branches merged)
+
+**JCV11 (b).** The details are in doc/FULL-SUPPORT-SURVEY.md, "As built: JCV11 (b)".
+
+- **The judgment.** `test/java/print.ae`'s `classes-note?` applies the rule. A row that passes this way keeps the classes
+  step's reason as its note (`:pass "classes: ..."`).
+- **The record.** `java.print rejudge` re-judged `test/java/check-print.edn` from the committed record: 582 rows now pass. 581
+  were `:print-classes`. The other is t06357, which leaves `:print-erasure`'s `:tests`: its row differed only by the named
+  kinds.
+- **The matrix.** REAP's reader reports the sub-level in the print source's detail (`:sub-level :classes`).
+- **The numbers.** Print went from 78.2% to 95.7%. Java's completeness went from 72.85% to 77.23%, and from 78.93% to 79.11%
+  without by design.
+- **Proved.** A light run of four tests at read and print matched the re-judged record: 4 of 4 as recorded.
+
+**JCV12 (b).** The change is in `bin/java-check`'s plan for `--record-ref` (`--only REGEX`):
+
+- it matches a test's id as well as its path, so `--only t03212` plans t03212;
+- a run whose `--only` plans no test stops with status 1 and writes nothing.
+
+**Proved (JCV12).**
+
+- `bin/java-check --record-ref --jobs 1 --only t03212` planned t03212 (26 s, 0.65 GiB). Before this change, the same
+  selection planned none. The run kept the reference byte for byte: t03212's line came out as JCV7 recorded it, and the
+  4,852 other lines were kept (`ref-unchanged`).
+- `--only 'no-such-test'` exits 1 after the scan, with "plans no test". Before this change, such a selection exited 0 and
+  recorded nothing.
