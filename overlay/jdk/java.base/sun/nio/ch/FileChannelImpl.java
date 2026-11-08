@@ -160,6 +160,22 @@ public class FileChannelImpl
         return fc;
     }
 
+    // Arbace: jdk26u's uninterruptible mode (Files' and the provider's streams, F9): an interrupt
+    // neither closes the channel nor ends an operation
+    private volatile boolean uninterruptible;
+
+    public void setUninterruptible() {
+        uninterruptible = true;
+    }
+
+    private void beginBlocking() {
+        if (!uninterruptible) begin();
+    }
+
+    private void endBlocking(boolean completed) throws java.nio.channels.AsynchronousCloseException {
+        if (!uninterruptible) end(completed);
+    }
+
     private int handle() {
         return HostFiles.handle(fd);
     }
@@ -271,13 +287,13 @@ public class FileChannelImpl
         synchronized (fd) {
             int n = 0;
             try {
-                begin();
+                beginBlocking();
                 if (!isOpen())
                     return 0;
                 n = readInto(dst, -1);
                 return n;
             } finally {
-                end(n > 0);
+                endBlocking(n > 0);
             }
         }
     }
@@ -291,7 +307,7 @@ public class FileChannelImpl
         synchronized (fd) {
             long total = 0;
             try {
-                begin();
+                beginBlocking();
                 if (!isOpen())
                     return 0;
                 for (int i = offset; i < offset + length; i++) {
@@ -308,7 +324,7 @@ public class FileChannelImpl
                 }
                 return total;
             } finally {
-                end(total > 0);
+                endBlocking(total > 0);
             }
         }
     }
@@ -322,13 +338,13 @@ public class FileChannelImpl
         synchronized (fd) {
             int n = 0;
             try {
-                begin();
+                beginBlocking();
                 if (!isOpen())
                     return 0;
                 n = writeFrom(src, -1);
                 return n;
             } finally {
-                end(n > 0);
+                endBlocking(n > 0);
             }
         }
     }
@@ -342,14 +358,14 @@ public class FileChannelImpl
         synchronized (fd) {
             long total = 0;
             try {
-                begin();
+                beginBlocking();
                 if (!isOpen())
                     return 0;
                 for (int i = offset; i < offset + length; i++)
                     total += writeFrom(srcs[i], -1);
                 return total;
             } finally {
-                end(total > 0);
+                endBlocking(total > 0);
             }
         }
     }
@@ -362,14 +378,14 @@ public class FileChannelImpl
         synchronized (fd) {
             long p = -1;
             try {
-                begin();
+                beginBlocking();
                 if (!isOpen())
                     return 0;
                 // in append-mode then position is advanced to end before writing
                 p = append ? HostFiles.length(handle()) : HostFiles.position(handle());
                 return p;
             } finally {
-                end(p > -1);
+                endBlocking(p > -1);
             }
         }
     }
@@ -382,14 +398,14 @@ public class FileChannelImpl
         synchronized (fd) {
             boolean done = false;
             try {
-                begin();
+                beginBlocking();
                 if (!isOpen())
                     return null;
                 HostFiles.seek(handle(), newPosition);
                 done = true;
                 return this;
             } finally {
-                end(done);
+                endBlocking(done);
             }
         }
     }
@@ -400,13 +416,13 @@ public class FileChannelImpl
         synchronized (fd) {
             long s = -1;
             try {
-                begin();
+                beginBlocking();
                 if (!isOpen())
                     return -1;
                 s = HostFiles.length(handle());
                 return s;
             } finally {
-                end(s > -1);
+                endBlocking(s > -1);
             }
         }
     }
@@ -441,7 +457,7 @@ public class FileChannelImpl
         synchronized (fd) {
             boolean done = false;
             try {
-                begin();
+                beginBlocking();
                 if (!isOpen())
                     return null;
                 int h = handle();
@@ -457,7 +473,7 @@ public class FileChannelImpl
                 done = true;
                 return this;
             } finally {
-                end(done);
+                endBlocking(done);
             }
         }
     }
@@ -560,13 +576,13 @@ public class FileChannelImpl
             throw new NonReadableChannelException();
         int n = 0;
         try {
-            begin();
+            beginBlocking();
             if (!isOpen())
                 return -1;
             n = readInto(dst, position);
             return n;
         } finally {
-            end(n > 0);
+            endBlocking(n > 0);
         }
     }
 
@@ -581,13 +597,13 @@ public class FileChannelImpl
             throw new NonWritableChannelException();
         int n = 0;
         try {
-            begin();
+            beginBlocking();
             if (!isOpen())
                 return -1;
             n = writeFrom(src, position);
             return n;
         } finally {
-            end(n > 0);
+            endBlocking(n > 0);
         }
     }
 
@@ -624,7 +640,7 @@ public class FileChannelImpl
         byte[] contents = new byte[(int) size];
         boolean done = false;
         try {
-            begin();
+            beginBlocking();
             if (!isOpen())
                 return null;
             synchronized (fd) {
@@ -647,7 +663,7 @@ public class FileChannelImpl
             }
             done = true;
         } finally {
-            end(done);
+            endBlocking(done);
         }
         HostFileChannels.Mapping m = new HostFileChannels.Mapping(fd, path, position, writeBack);
         MappedByteBuffer mbb = HostFileChannels.map(contents, m, readOnly);
@@ -676,13 +692,13 @@ public class FileChannelImpl
         HostFileChannels.addLock(lockKey, fli);
         boolean completed = false;
         try {
-            begin();
+            beginBlocking();
             completed = isOpen();
         } finally {
             if (!completed)
                 HostFileChannels.removeLock(lockKey, fli);
             try {
-                end(completed);
+                endBlocking(completed);
             } catch (ClosedByInterruptException e) {
                 throw new FileLockInterruptionException();
             }
