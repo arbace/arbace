@@ -694,6 +694,20 @@
        (let [d (callee-decl m (:callee sg))
              dp (when d (get (vec (filter vector? (nth d 3))) pi))]
          (if (and dp (some #(= % :immarg) dp)) (unknown "immarg on an immediate parameter") (verifier "immarg may not apply only to call sites"))))
+     ;; V:3985-4006: a varargs call's arguments past the fixed parameters
+     (when (and (:call? sg) (:varargs? sg))
+       (let [fixed (take (:nfixed sg) (:params sg)) extra (drop (:nfixed sg) (:params sg))
+             saw-nest (some (fn [[_ as]] (some #(= (aname %) "nest") as)) fixed)
+             saw-ret (some (fn [[_ as]] (some #(= (aname %) "returned") as)) fixed)]
+         (some (fn [[t as]]
+                 (let [ns (names as)]
+                   (when-let [e (or (param-attrs-check as t)
+                                    (when (and (ns "nest") saw-nest) "More than one parameter has attribute nest!")
+                                    (when (and (ns "returned") saw-ret) "More than one parameter has attribute returned!")
+                                    (when (and (ns "returned") (not (bitcastable? t (:ret sg)))) "Incompatible argument and return types for 'returned' attribute")
+                                    (when (ns "sret") "Attribute 'sret' cannot be used for vararg call arguments!"))]
+                     (verifier e))))
+               extra)))
      (when (some #(= :unknown (fn-value-check % sg)) (if (= where :fn) (filter #(not (#{"noinline" "alwaysinline" "optnone" "minsize" "optsize" "optdebug" "jumptable"} (aname %))) added) []))
        (unknown "a function attribute's value the port does not check"))
      (when (some #(#{"jumptable"} (aname %)) added) (unknown "jumptable's unnamed_addr"))
@@ -946,9 +960,11 @@
         (cond
           (contains? local-scopes tk) (unknown "a DILocation's scope sent to another local scope")
           ;; V:3335: visitFunction's walk of its instructions' !dbg locations comes before their visits
-          (some #(and (not (dbg-record? %)) (= id (md-dbg %))) items) (debugv "DILocation's scope must be a DILocalScope")
+          ;; (a call of an old debug intrinsic is a debug record by then: its location is a record's)
+          (some #(and (not (dbg-record? %)) (not (old-dbg? (nth (body %) 2 nil))) (= id (md-dbg %))) items) (debugv "DILocation's scope must be a DILocalScope")
           ;; V:1076 visitDILocation, from a debug record's location
-          (some #(and (dbg-record? %) (= id (peek (vec (body %))))) items) (debugv "location requires a valid scope")
+          (some #(or (and (dbg-record? %) (= id (peek (vec (body %))))) (and (old-dbg? (nth (body %) 2 nil)) (= id (md-dbg %)))) items)
+          (debugv "location requires a valid scope")
           :else (unknown "a DILocation no instruction or record uses")))
       (unknown (str "the field " (fname field) " of " kind)))))
 
