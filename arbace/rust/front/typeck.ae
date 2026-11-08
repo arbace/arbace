@@ -208,7 +208,7 @@
                           (sort-by (fn [[n expn]] [(if expn 1 0) (if expn (long (second expn)) 0) (let [h (:hir-id n)] (if h (long (second h)) -1))])
                                    (vec acc))))))
 
-(declare check-expr coerce! solve-obligations! fallback! print-fact-ty mut-borrow! unadjust! deduced-kind scalar?)
+(declare byte-count check-expr coerce! solve-obligations! fallback! print-fact-ty mut-borrow! unadjust! deduced-kind scalar?)
 (def ^:dynamic *obligations* nil)   ; atom: the clauses the instantiated items' predicates registered ([:trait [D ARGS]], [:proj AD ARGS TERM])
 (def ^:dynamic *select-cache* nil)
 (def ^:dynamic *norm-cache* nil)
@@ -1030,7 +1030,8 @@
       "Bool" [:bool]
       "Char" [:char]
       ("Str" "StrRaw") [:ref [:re-static] false [:str]]
-      "ByteStr" [:ref [:re-erased] false [:array [:uint "u8"] [:cval (str (count (str (:symbol l))))]]]
+      ;; (format_args!'s template: its bytes; a written literal: its symbol's escapes cooked)
+      "ByteStr" [:ref [:re-erased] false [:array [:uint "u8"] [:cval (str (if (:bytes l) (count (:bytes l)) (byte-count (str (:symbol l)))))]]]
       "Byte" [:uint "u8"]
       [:unknown])))
 
@@ -1051,7 +1052,9 @@
      (when (> (count segs) 2)
        (let [r (c/res-def (assoc path :segs (vec (butlast segs)) :res nil :span nil))]
          (when (and (#{:ext :local} (first r)) (#{"Struct" "Enum" "Union"} (nth r 2)))
-           (probe-assoc-fn [:adt (second r) (fresh-args (second r))] (:ident (peek segs))))))
+           (let [raw [:adt (second r) (fresh-args (second r))]]
+             (when *user-self* (reset! *user-self* raw))
+             (probe-assoc-fn [:adt (second r) (fresh-args (second r))] (:ident (peek segs)))))))
     (when (= 2 (count segs))
       (let [sp (:span path)
             base-name (:ident (first segs))
@@ -1154,6 +1157,38 @@
                         "::<" (if (number? ip) (str "{impl#" (:disamb (c/def-of ip)) "}") (re-find #"\{impl#\d+\}$" ip)) "> for "
                         (binding [c/*in-value* false] (c/print-ty cself)) ">")))
                "), max_universe: U0, var_kinds: [" (str/join ", " @kinds) "] }"))))))
+
+(defn canonical-user-ty-of
+  "RF10: a written type's user type annotation, `Ty(T)` with its inference variables and regions canonical"
+  [t]
+  (let [idx (atom {}) kinds (atom [])
+        var! (fn [k kf] (or (get @idx k) (let [i (count @kinds)] (swap! kinds conj (kf i)) (swap! idx assoc k i) i)))
+        canon (fn canon [t]
+                (let [t (if (tvar? t) (shallow t) t)]
+                  (cond (tvar? t) (case (second t)
+                                    :ty (let [i (var! [:t (nth t 2)] #(str "Ty { ui: U0, sub_root: " % " }"))] [:param i (str "^c_" i)])
+                                    :int (let [i (var! [:t (nth t 2)] (fn [_] "Int"))] [:param i (str "^c_" i)])
+                                    :float (let [i (var! [:t (nth t 2)] (fn [_] "Float"))] [:param i (str "^c_" i)])
+                                    t)
+                        (and (vector? t) (= :re-var (first t))) (do (var! [:r (second t)] (fn [_] "Region(U0)")) [:re-erased])
+                        (and (vector? t) (keyword? (first t))) (into [(first t)] (map #(cond (vector? %) (canon %) (map? %) (into {} (for [[k v] %] [k (canon v)])) :else %) (rest t)))
+                        (vector? t) (mapv canon t)
+                        :else t)))
+        ct (canon t)]
+    (str "Canonical { value: Ty(" (binding [c/*in-value* false] (c/print-ty ct)) "), max_universe: U0, var_kinds: [" (str/join ", " @kinds) "] }")))
+
+(defn- byte-count
+  "A byte string literal's length from its symbol (each escape one byte, a line continuation none)"
+  [^String sym]
+  (loop [i 0 n 0]
+    (if (>= i (count sym))
+      n
+      (if (= \\ (.charAt sym i))
+        (case (.charAt sym (inc i))
+          \x (recur (+ i 4) (inc n))
+          \newline (recur (loop [j (+ i 2)] (if (and (< j (count sym)) (Character/isWhitespace (.charAt sym j))) (recur (inc j)) j)) n)
+          (recur (+ i 2) (inc n)))
+        (recur (inc i) (inc n))))))
 
 (defn- lang-value-ty [names]
   (let [p (c/lang (first names))]
@@ -1910,6 +1945,8 @@
   (case (:kind s)
     :let (let [_ (doseq [l (ty-consts (:ty s))] (anon-const! l true))
                decl (when (:ty s) (body-ty (:ty s)))
+               ;; RF10: the let's user type annotation, `Ty(T)` canonicalized before any unification
+               _ (when (and decl *extra*) (note! s :user-ty-text (canonical-user-ty-of decl)))
                ;; check_decl_initializer: the initializer coerced to the local's type (a fresh variable without a type
                ;; annotation, which a block initializer takes as its coercion target)
                t (if-let [init (:init s)]

@@ -28,6 +28,8 @@
 
 (def ^:dynamic *root-file* nil)
 
+(declare span-text ctor-info)
+
 (defn- unsupported [what & [x]] (throw (ex-info (str "build: unsupported " what) {:what what :x x})))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -141,13 +143,78 @@
     (doseq [x (:pats p)] (resolve-pat x))
     (doseq [f (:fields p)] (resolve-pat (:pat f)))))
 
-(defn- resolve-local [pat init]
+(defn- default-temporary-scope*
+  "default_temporary_scope over the tree being built"
+  [inner]
+  (loop [s inner]
+    (if-let [p (get (:parent @*rt*) s)]
+      (case (second p)
+        :destruction s
+        (:if-then-rescope :match-guard) p
+        (recur p))
+      s)))
+
+(defn- binding-pat?
+  "is_binding_pat: a pattern with an explicit `ref` binding"
+  [p]
+  (case (:kind p)
+    :binding (boolean (:by-ref p))
+    :struct (boolean (some #(binding-pat? (:pat %)) (:fields p)))
+    (:slice :or :tuple-struct :tuple) (boolean (some binding-pat? (:pats p)))
+    (:box :deref :guard) (binding-pat? (:pat p))
+    false))
+
+(defn- record-subexpr-extended!
+  "record_subexpr_extended_temp_scopes"
+  [e lifetime]
+  (when (map? e)
+    (swap! *rt* assoc-in [:extended (:hir-id e)] lifetime)
+    (when (or (= :addr-of (:kind e)) (and (= :unary (:kind e)) (= "*" (:op e))) (#{:field :index} (:kind e)))
+      (record-subexpr-extended! (:expr e) lifetime))))
+
+(defn- record-rvalue-scope-if-borrow!
+  "record_rvalue_scope_if_borrow_expr"
+  [e blk]
+  (when (map? e)
+    (case (:kind e)
+      :addr-of (do (record-rvalue-scope-if-borrow! (:expr e) blk) (record-subexpr-extended! (:expr e) blk))
+      :struct (doseq [f (:fields e)] (record-rvalue-scope-if-borrow! (:expr f) blk))
+      (:array :tup) (doseq [x (:exprs e)] (record-rvalue-scope-if-borrow! x blk))
+      :cast (record-rvalue-scope-if-borrow! (:expr e) blk)
+      :block (let [b (:block e)]
+               (when (:expr b) (record-rvalue-scope-if-borrow! (:expr b) blk))
+               (doseq [st (:stmts b) :when (and (= :let (:kind st)) (:super st))]
+                 (swap! *rt* assoc-in [:ext-super (:hir-id (:pat st))] blk)))
+      :if (do (record-rvalue-scope-if-borrow! (:then e) blk) (when (:else e) (record-rvalue-scope-if-borrow! (:else e) blk)))
+      :match (doseq [a (:arms e)] (record-rvalue-scope-if-borrow! (:body a) blk))
+      :call (let [f (:func e)]
+              (when (and (= :path (:kind f)) (= :fn (nth (ctor-info (:path f)) 3 nil)))
+                (doseq [a (:args e)] (record-rvalue-scope-if-borrow! a blk))))
+      nil)))
+
+(defn- resolve-local
+  "resolve_local: a `let`'s initializer's temporaries extended to its bindings' scope (a `super let` not itself extended:
+  its bindings and temporaries in the enclosing expression's temporary scope)"
+  [pat init & [super?]]
+  (let [extend (if super?
+                 (if (contains? (:ext-super @*rt*) (:hir-id pat))
+                   (do (swap! *rt* assoc-in [:cx :var-parent] (get-in @*rt* [:ext-super (:hir-id pat)]))
+                       (swap! *rt* update :ext-super dissoc (:hir-id pat))
+                       true)
+                   (do (when-let [inner (get-in @*rt* [:cx :var-parent])]
+                         (swap! *rt* assoc-in [:cx :var-parent] (default-temporary-scope* inner)))
+                       false))
+                 true)
+        vp (get-in @*rt* [:cx :var-parent])]
+    (when (and init extend)
+      (record-rvalue-scope-if-borrow! init vp)
+      (when (and pat (binding-pat? pat)) (record-subexpr-extended! init vp))))
   (when init (resolve-expr init false))
   (when pat (resolve-pat pat)))
 
 (defn- resolve-stmt [s]
   (if (and (= :let (:kind s)) (:super s))
-    (resolve-local (:pat s) (:init s))
+    (resolve-local (:pat s) (:init s) true)
     (let [prev (:parent (cx))]
       (enter-node-scope-with-dtor! (:hir-id s) true)
       (case (:kind s)
@@ -240,12 +307,14 @@
   "temporary_scope(expr): the innermost enclosing scope whose parent is a destruction scope (or an if-then rescope or a
   match guard, itself)"
   [id]
+  (if (contains? (:extended *tree*) id)
+    (get (:extended *tree*) id)
   (loop [s [id :node]]
     (when-let [p (get (:parent *tree*) s)]
       (case (second p)
         :destruction s
         (:if-then-rescope :match-guard) p
-        (recur p)))))
+        (recur p))))))
 
 (defn- var-scope [k] (get (:var *tree*) k))
 
@@ -334,7 +403,7 @@
           (= :fndef (first ty)) (mk e :zst-literal ty :user-ty (:user-ty (r-of e)) :fspan (:fspan e))
           (and (= :adt (first ty)) (ctor-info path))
           (let [[adt vi vid _] (ctor-info path)] (mk e :adt ty :adt adt :variant vi :vid vid :fields []))
-          :else (unsupported "a path" (pr-str rd)))))))
+          :else (unsupported "a path" (pr-str [rd (mapv :ident (:segs path)) (boolean (:lang path)) (first ty)])))))))
 
 (def ^:private op-methods
   {"+" ["core::ops::arith::Add" "add"] "-" ["core::ops::arith::Sub" "sub"] "*" ["core::ops::arith::Mul" "mul"]
@@ -460,6 +529,7 @@
                            :args [ax ix] :from-hir false :fn-span (:span e)}]
                  (mk e :deref ty :arg call)))
       :tup (mk e :tuple ty :fields (mapv mirror-expr (:exprs e)))
+      :repeat (if (= :array (first ty)) (mk e :repeat ty :value (mirror-expr (:expr e)) :count (nth ty 2)) (unsupported "a repeat of" ty))
       :array (mk e :array ty :fields (mapv mirror-expr (:exprs e)))
       :call (let [f (:func e)]
               (if-let [[adt vi vid kind] (and (= :path (:kind f)) (= :fn (nth (ctor-info (:path f)) 3 nil)) (ctor-info (:path f)))]
@@ -551,7 +621,16 @@
                            (bind-names! pat)
                            {:k :let :remainder [(:hir-id b) [:remainder i]] :init-scope [(:hir-id s) :node]
                           :pattern pat :init init
-                          :user-ty (when (sequential? (:span (:ty s))) {:span (:span (:ty s)) :ty (:ty (r-of (:pat s)))})
+                          :user-ty (when-let [tsp (and (:ty s)
+                                                       (cond (sequential? (:span (:ty s))) (:span (:ty s))
+                                                             ;; a derive's `let _: AssertParamIsClone<FieldTy>;`: the field type's span
+                                                             (:fspan s) (or (some #(when (vector? (:span (:ty %))) (:span (:ty %)))
+                                                                                  (:args (:args (peek (:segs (:path (:ty s)))))))
+                                                                            (:fspan s))))]
+                                     (if-let [u (:user-ty-text (r-of s))]
+                                       {:text (str "user_ty: " u ", span: " (span-text tsp) ", inferred_ty: "
+                                                   (binding [c/*in-value* false] (c/print-ty (:ty (r-of (:pat s))))))}
+                                       {:span tsp :ty (:ty (r-of (:pat s)))}))
                           :else els :hir-id (:hir-id s) :span (:span s)})
                     nil))
                 (:stmts b)))
@@ -734,6 +813,34 @@
     10 "'\\n'" 13 "'\\r'" 9 "'\\t'" 0 "'\\0'" 39 "'\\''" 92 "'\\\\'"
     (str "'" (String. (Character/toChars (int c))) "'")))
 
+(defn- escape-ascii
+  "u8::escape_ascii: a byte as a byte string's Debug writes it"
+  [b]
+  (let [b (bit-and (long b) 0xff)]
+    (case b
+      9 "\\t" 13 "\\r" 10 "\\n" 39 "\\'" 34 "\\\"" 92 "\\\\"
+      (if (<= 0x20 b 0x7e) (str (char b)) (format "\\x%02x" b)))))
+
+(defn- byte-unesc
+  "A byte string literal's bytes from its symbol (the escapes \\n \\r \\t \\\\ \\0 \\' \\\" \\xNN, a line continuation)"
+  [^String sym raw?]
+  (if raw?
+    (vec (.getBytes sym "UTF-8"))
+    (loop [i 0 acc []]
+      (if (>= i (count sym))
+        acc
+        (let [c (.charAt sym i)]
+          (if (= c \\)
+            (let [d (.charAt sym (inc i))]
+              (case d
+                \n (recur (+ i 2) (conj acc 10)) \r (recur (+ i 2) (conj acc 13)) \t (recur (+ i 2) (conj acc 9))
+                \0 (recur (+ i 2) (conj acc 0)) \\ (recur (+ i 2) (conj acc 92)) \' (recur (+ i 2) (conj acc 39))
+                \" (recur (+ i 2) (conj acc 34))
+                \x (recur (+ i 4) (conj acc (Integer/parseInt (subs sym (+ i 2) (+ i 4)) 16)))
+                \newline (recur (loop [j (+ i 2)] (if (and (< j (count sym)) (Character/isWhitespace (.charAt sym j))) (recur (inc j)) j)) acc)
+                (recur (+ i 2) (conj acc (int d)))))
+            (recur (inc i) (into acc (map #(bit-and (long %) 0xff) (.getBytes (str c) "UTF-8"))))))))))
+
 (defn- lit-const [lit neg t]
   (case (str (:lit-kind lit))
     "Integer" (let [v (bigint (parse-int-lit lit)) v (if neg (- v) v)]
@@ -746,6 +853,9 @@
              [:const (str "const " (char-text c)) t (list 'scalar c 4)])
     "Bool" (bool-const (= "true" (str (:symbol lit))))
     ("Str" "StrRaw") [:const (str "const " (pr-str (str (:value lit (:symbol lit))))) t '(raw-str)]
+    ("ByteStr" "ByteStrRaw")
+    (let [bs (or (:bytes lit) (byte-unesc (str (:symbol lit)) (= "ByteStrRaw" (str (:lit-kind lit)))))]
+      [:const (str "const b\"" (apply str (map escape-ascii bs)) "\"") t '(raw-bytes)])
     (unsupported "a literal" (:lit-kind lit))))
 
 (defn- fn-const [t]
@@ -1159,6 +1269,11 @@
                 [bb (list 'cast (cast-kind st* (:ty x)) (op-form s) (ty-form (:ty x)))])))
     :pointer-coercion (let [[bb s] (as-operand bb scope (:source x) :no)]
                         [bb (list 'cast (str "PointerCoercion(" (:cast x) ", Implicit)") (op-form s) (ty-form (:ty x)))])
+    :repeat (let [n (c/print-const (:count x))]
+              (if (= "0" (str n))
+                (unsupported "a zero-length repeat")
+                (let [[bb o] (as-operand bb scope (:value x) :no)]
+                  [bb (list 'repeat (op-form o) (str n))])))
     :array (let [[bb os] (reduce (fn [[bb os] f] (let [[bb o] (as-operand bb scope f :maybe)] [bb (conj os o)])) [bb []] (:fields x))]
              [bb (list 'aggregate (list 'array (ty-form (second (:ty x)))) (mapv op-form os))])
     :tuple (let [[bb os] (reduce (fn [[bb os] f] (let [[bb o] (as-operand bb scope f :maybe)] [bb (conj os o)])) [bb []] (:fields x))]
@@ -1286,10 +1401,17 @@
   (case (:k x)
     :scope (in-scope (:region x) (blk (stmt-expr bb (:value x) stmt-scope)))
     :assign (do (upd! update :block-context conj :sub-expr)
-                (when (needs-drop? (:ty (:lhs x))) (unsupported "an assignment that drops"))
                 (let [[bb rv] (as-local-rvalue bb (:rhs x))
-                      [bb p] (as-place bb (:lhs x))]
-                  (assign! bb p rv)
+                      [bb p] (as-place bb (:lhs x))
+                      bb (if (needs-drop? (:ty (:lhs x)))
+                           ;; build_drop_and_replace: the old value dropped (a replace), the assignment on both edges
+                           (let [assign (start-new-block!) assign-unwind (start-new-block! true)]
+                             (assign! assign p rv)
+                             (assign! assign-unwind p rv)
+                             (terminate! bb (list 'drop (place-form p) assign (list 'cleanup assign-unwind) true nil))
+                             (diverge-from! bb)
+                             assign)
+                           (do (assign! bb p rv) bb))]
                   (upd! update :block-context pop)
                   bb))
     :assign-op (do (upd! update :block-context conj :sub-expr)
@@ -1330,9 +1452,9 @@
                              _ (upd! assoc :let-user-ty ut)
                              bb (if-let [init (:init s)]
                                   (blk (in-scope (:init-scope s)
-                                         (declare-bindings vis (:pattern s))
+                                         (declare-bindings vis (:pattern s) ut)
                                          (expr-into-pattern bb (:pattern s) init)))
-                                  (do (in-scope (:init-scope s) (declare-bindings vis (:pattern s)) bb)
+                                  (do (in-scope (:init-scope s) (declare-bindings vis (:pattern s) ut) bb)
                                       (doseq [p (primary-bindings (:pattern s))]
                                         (storage-live-binding! bb (:var p))
                                         (schedule-drop-for-binding! (:var p)))
@@ -1370,10 +1492,13 @@
 (defn declare-bindings
   "declare_bindings: each primary binding a local in the current source scope, its debug info in VIS (made on the first
   binding when nil); the visibility scope"
-  [vis pattern]
+  [vis pattern & [user-ty]]
   (reduce (fn [vis p]
             (let [vis (or vis (new-source-scope!))
                   l (new-local! (:var-ty p) :mut (:mutbl p) :scope (:source-scope (st)))]
+              ;; declare_binding's user type projections: the let's annotation at the pattern itself
+              (when (and user-ty (identical? p pattern))
+                (upd! assoc-in [:locals l :user-ty] [(str "UserTypeProjection { base: UserType(" user-ty "), projs: [] }")]))
               (upd! update :debug conj {:name (:name p) :scope vis :value (place-form (place l))})
               (upd! assoc-in [:var-indices (:var p)] l)
               vis))
@@ -1392,11 +1517,15 @@
 
 (defn expr-into-pattern [bb pat init]
   (if (and (= :binding (:k pat)) (= :no (:by-ref pat)) (nil? (:sub pat)))
-    (let [p (storage-live-binding! bb (:var pat))
+    (let [i0 (:let-user-ty (st))
+          p (storage-live-binding! bb (:var pat))
           bb (blk (expr-into-dest p bb init))]
       (push! bb (list 'fake-read "ForLet(None)" (place-form p)))
-      (when-let [i (:let-user-ty (st))]
-        (push! bb (list 'raw (str "AscribeUserType(" (mir/place (place-form p)) ", o, UserTypeProjection { base: UserType(" i "), projs: [] })"))))
+      ;; expr_into_pattern's ascription: the annotation pushed again (declare_bindings pushed it first), after the initializer
+      (when i0
+        (let [i (count (:user-types (st)))]
+          (upd! update :user-types conj (nth (:user-types (st)) i0))
+          (push! bb (list 'raw (str "AscribeUserType(" (mir/place (place-form p)) ", o, UserTypeProjection { base: UserType(" i "), projs: [] })")))))
       (schedule-drop-for-binding! (:var pat))
       bb)
     (let [[bb pb] (lower-scrutinee bb init)]
@@ -2104,7 +2233,7 @@
   [d name kind n-args ret]
   (let [s (st)]
     {:name name :kind kind :args n-args :ret (ty-form ret)
-     :locals (mapv (fn [l] {:mut (:mut l) :scope (:scope l) :ty (ty-form (:ty l))}) (:locals s))
+     :locals (mapv (fn [l] (cond-> {:mut (:mut l) :scope (:scope l) :ty (ty-form (:ty l))} (:user-ty l) (assoc :user-ty (:user-ty l)))) (:locals s))
      :scopes (:source-scopes s)
      :debug (:debug s)
      :blocks (mapv (fn [b] {:cleanup (:cleanup b) :stmts (:stmts b) :after-dbg [] :term (:term b)}) (:blocks s))

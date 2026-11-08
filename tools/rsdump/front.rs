@@ -546,6 +546,13 @@ pub fn std_iface<'tcx>(tcx: TyCtxt<'tcx>) -> String {
             }
         }
     }
+    // RF10: the lang item ADTs desugarings name though no public module reaches them (format_args!'s
+    // `core::fmt::rt::Argument`), with their inherent impls below
+    for (_, d) in tcx.lang_items().iter() {
+        if std_crate(d) && matches!(tcx.def_kind(d), DefKind::Struct | DefKind::Enum) && !skip(&def_path(tcx, d)) {
+            items.push((tcx.def_kind(d), d));
+        }
+    }
     items.sort_by_key(|(_, d)| def_path(tcx, *d));
     items.dedup_by_key(|(_, d)| *d);
     for (k, d) in &items {
