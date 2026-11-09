@@ -318,6 +318,12 @@ code. Three kinds of things live here:
   `rustc_abi/src/{layout.rs,layout/simple.rs,lib.rs,wrapping_range.rs}` and `rustc_ty_utils/src/layout.rs`; with rustc-stable-hash
   0.1.2's `src/{sip128,stable_hasher}.rs` (https://github.com/rust-lang/rustc-stable-hash, as rustc's Cargo.lock pins it); LICENSE.md
   names the files (MIT OR Apache-2.0); `mono_check.ae` is Arbace's own; evaluated from the checkout, out of `gate_key` (RFS13).
+  RFP28-RFP41 (2026-11-09, doc/rust/FRONTEND-SURVEY.md, "As built: the rest of RFP28-RFP41") port into `build.ae`, `passes.ae`,
+  `collect.ae`, `lower.ae` and `expand.ae`, from rustc 1.99.1, the same revision and sources: `rustc_middle/src/ty/print/pretty.rs`'
+  `pretty_print_const_scalar_ptr`, `rustc_mir_build/src/builder/expr/as_rvalue.rs`' closure fake reads, `rustc_middle/src/mir/consts.rs`'
+  `span_as_caller_location` with `rustc_span/src/hygiene.rs`' `expansion_cause`, `rustc_mir_transform/src/post_analysis_normalize.rs`
+  (opaque types by their definition), `rustc_expand/src/mbe/transcribe.rs`' `mk_delimited` with `rustc_span/src/lib.rs`' `Span::to`;
+  LICENSE.md names them (MIT OR Apache-2.0); `ci_batch.ae` (RFP36 (c): the essential step's ci session) is Arbace's own.
   `arbace/rust/front/build.ae` (THIR and MIR building after `rustc_mir_build/src/{thir,builder}/`, the region scope tree after
   `rustc_hir_analysis/src/check/region.rs`) and `build_run.ae` (CleanupPostBorrowck's changes, the layouts of scalars and scalar pairs
   after `rustc_abi`) port rustc 1.99.1, the same revision and sources, by hand on 2026-11-08 (RF10's first slice,

@@ -2992,3 +2992,53 @@ proposal, light (no build, no heavy lock; the prediction verb's runs at 2.07 GB)
   `:define-bytes`; the matrix's counts move with the night's records (bin/reap's problems on the branch: java-night's 11 plus the
   classes' rows). JCS311 (a): the survey of @library and TestNG/JUnit in doc/classes/JAVA-CONFORMANCE-SURVEY.md (JCS330-JCS333
   proposed). The rest recorded (JCS213, JCS281, JCS290-JCS292, JCS303, JCS305, JCS312, JCS321-JCS323), each for its stated time.
+
+## 2026-11-09: RFP30 (a), RFP31 (a), RFP36 (c), RFP40 (c): the front end's essential step, 8.5 to 3.5 minutes (branch `rust-props`)
+
+The user's decisions of 2026-11-09 (~06:15, RFP28-RFP41 all as recommended; doc/rust/FRONTEND-SURVEY.md, "Decided (2026-11-09)"),
+the night-relevant four first, on `rust-props` from `rust-rf10b` at `c0f226f3b`.
+- RFP31 (a): `build-oracles` deletes the `.before.mir` dumps; the pack `rust-front-built` keeps the `.after.mir` files the judge reads
+  (each pass at its first phase, `rfr_judged`, in the key): 1,050 of 1,108 members, every kept member's digest unchanged, remade by
+  hand with rustc 1.99.1 (Alpine r0) and the helper at the pinned digest, pin `36526aa2...`; `records verify built` equal.
+- RFP36 (c), RFP40 (c): `run-built`'s batch (`arbace.rust.front.build-run`'s `batch`, `native-run`; the new `arbace.rust.front.ci-batch`
+  over `arbace.c.run`'s `read-unit` and `nodes`, nothing of C changed): one process for every program's pipeline, mono-check, codegen
+  and lowering, one for ci's node programs, cirun a program; the run control and mono-check's crossed control in the same runs.
+  Alternatives: ci's `nodes-list` (one file a program: the driver concatenated, rejected for changing the C read; extending it would
+  move C's keys), one process for both halves (rejected: ci must run evaluated from the checkout while the host's embedded copy differs,
+  `c_ci_fresh`, which would evaluate the rust half too).
+- RFP30 (a): the pass judge (`BUILD_PASS=SimplifyCfg-pre-optimizations build-check --records`) in the step, its 21 lines held in
+  `essential-known.txt` (recorded, `--record`), its crossed control `_control/pass/crossed`.
+- The step: 3 min 22 s (`--record`) and 3 min 38 s, from 8 min 36 s, the same summary lines but the 21 new ones, the five controls
+  differing, 0 stub calls; `steps.edn`'s summary 32 lines; `gate.crops check` 0 problems; `bin/gate --plan`: run rust-front-essential.
+
+## 2026-11-09: the rest of RFP28-RFP41 built (branch `rust-props`)
+
+The user's decisions of 2026-11-09 (all as recommended), after the night's four; doc/rust/FRONTEND-SURVEY.md, "As built: the rest of
+RFP28-RFP41". Sources: rustc 1.99.1 (rust-lang/rust 58cf8f9c3, Alpine's rust-src-1.99.1-r0, `compiler/`), as LICENSE.md and
+doc/ARBACE.md name them.
+- RFP29 (b): `build-check`'s class "but for the crate hash" (local DefIds' index and hash made one, allocations renumbered canonically);
+  the builder prints a byte-array static's `<static(DefId(0:? ~ CRATE[????]::PATH))>` (`pretty_print_const_scalar_ptr`) and builds a
+  closure's fake reads (`as_rvalue.rs`; refused before). The 88 programs at built: 418 → 420 of 510, `structs`' main in the class.
+  Alternative (a), the exact index and hash from `arbace.rust.front.mono`, waits for RF11 as decided.
+- RFP28 (a), RFP37 (a): the helper's `--std-iface` adds the std ADTs a written field names, transitively (182 lines, additions only);
+  `std-iface.sha256` and the four packs re-made by hand with rustc (std `fe79f73b`; the other three the same bytes). float-f32/f64's
+  `main` equal through every pass; mono-check's layouts 223 of 223.
+- RFP32 (a): `si/fn`'s `:const`, `:promotable`, `:nounwind` (is_const_fn, is_promotable_const_fn, NEVER_UNWIND) read by PromoteTemps,
+  const-fn promotion in initializers and fn_can_unwind; the hand table (whose `<impl i8>` paths never met std's `{impl#N}`) removed.
+  The packs re-made (std `5116eb09`). The 88 programs after every pass: 506 of 616 (499), 63 whole (60).
+- RFP33 (a): `[:opaque CLAUSES ID ARGS]`, revealed by the definer's body with the use's args, function constants' types revealed too;
+  `test/rust/front/opaque1.rs` in the packs built (`3f84e0a6`) and captures (`e41dfc4e`), not mono (its run is RF11's): 8 of 8 through
+  every pass (4 before). Alternative: keeping the structural match with a tie-break by signature position (rejected: not rustc's).
+- RFP34 (a), RFP38 (a): fragments' metavariable spans (`mk_delimited`) and caller locations at `expansion_cause`; capture-check 174 of
+  174 over every program, mono-check's locations 34 of 34; hir-check and typeck-check unchanged. Not ported: `tt` metavariable spans and
+  the different-context fallback of `prepare_to_combine` (no sample meets them).
+- RFP35 (a), RFP41 (a), RFP39 (a) then (c): as built, recorded in the survey.
+- The essential step re-recorded after each change that moved a line (`essential-known.txt`): 8 programs built (62 of 62, the passes
+  60 of 60), capture-check 34 of 34, run-built 7 of 7, mono-check every fact but core's closure (0 of 3, RF12's); about 3.5 minutes.
+  `bin/crops-score --judge --strict`: Rust unchanged.
+
+## 2026-11-09: correction (the packs' digests of the entry above)
+
+The entry "the rest of RFP28-RFP41 built" names `rust-front-built` `3f84e0a6` and `rust-front-captures` `e41dfc4e`: those were made while
+the sample was `a8.rs`; renamed `opaque1.rs` (kept out of the mono kind) the packs were made again, `c7005a5a` and `19e9947c`, the pins
+committed with RFP33 (a). `bin/oracle-records pins`: the four Rust front packs in the store as their manifests say.
