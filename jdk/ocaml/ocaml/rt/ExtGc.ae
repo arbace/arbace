@@ -1,11 +1,22 @@
 ;; The GC's, memprof's, weak arrays' and ephemerons', finalisers' and backtraces' externals
 ;; (gc_ctrl.c, gc_stats.c, memprof.c, weak.c, finalise.c, backtrace.c), ported from oi's
 ;; ext_sys.go: the counters are zeros (OC64 (a)), weak arrays and ephemerons hold their keys and
-;; data strongly (OC68 (a)), finalisers are accepted and never run, no backtrace is recorded.
+;; data strongly (OC68 (a)), no backtrace is recorded. Finalisers (finalise.c; OC192 (a), the user 2026-11-09, after oi's
+;; ext_final.go) run once their values are unreachable: a value with finalisers is held by a WeakReference on a queue (jrt's
+;; weak pointers), its registrations beside it. Gc.finalise's function gets the value, which the Java world cannot
+;; resurrect: a block's function gets a block of the same tag over the same field array, kept strongly (so the fields it
+;; reads and writes are the dead value's own, and no other reference to the old block exists: its identity is unobservable),
+;; and the other values (strings, float arrays, closures, custom blocks) take only Gc.finalise_last, whose function gets
+;; unit, their Gc.finalise accepted and never run, as OCaml's static data (and an int32 or a float, a java.lang.Integer or Double
+;; the Java world may share, not at all). Gc.full_major, major, compact and minor run
+;; System.gc and the functions of the values found cleared; a call's tick (Rt/tick) polls the queue every 1024 turns while a
+;; value has finalisers. The functions of one collection run as finalise.c's batches: Gc.finalise's before Gc.finalise_last's,
+;; each in the reverse of the registration order; a value with both has its Gc.finalise_last ones wait for the block given to
+;; its Gc.finalise functions to be unreachable in turn (finalise.c updates the last table after the first values were darkened).
 
 (in-ns 'ocaml.rt)
 
-(import '(java.util Arrays))
+(import '(java.util Arrays ArrayList Collections Comparator) '(java.lang.ref WeakReference ReferenceQueue))
 
 (defclass ^:public ^:final ExtGc
   (field ^:static ^boolean runtimeWarnings false)
@@ -47,12 +58,13 @@
       (loop [^int i 0]
         (when (< i n) (aset gcControl i (aget f i)) (recur (unchecked-inc-int i))))
       Rt/UNIT))
-  (method ^:public ^:static caml_gc_minor [u] Rt/UNIT)
-  (method ^:public ^:static caml_gc_major [u] Rt/UNIT)
+  (method ^:public ^:static caml_gc_minor [u] (ExtGc/finCollect) Rt/UNIT)
+  (method ^:public ^:static caml_gc_major [u] (ExtGc/finCollect) Rt/UNIT)
   (method ^:public ^:static caml_gc_full_major [u]
     (set! forcedMajorCount (unchecked-add forcedMajorCount 1))
+    (ExtGc/finCollect)
     Rt/UNIT)
-  (method ^:public ^:static caml_gc_compaction [u] Rt/UNIT)
+  (method ^:public ^:static caml_gc_compaction [u] (ExtGc/finCollect) Rt/UNIT)
   (method ^:public ^:static caml_gc_major_slice [n] (Long/valueOf 0))
   (method ^:public ^:static caml_get_minor_free [u] (Long/valueOf 262144))
 
@@ -92,14 +104,112 @@
       (Rt/tuple (new Object/1 [v (Long/valueOf 0)]))))
   (method ^:public ^:static caml_ml_gc_ramp_down [w] Rt/UNIT)
 
-  ;; finalise.c: accepted, never called
-  (method ^:public ^:static caml_final_register [f v]
+  ;; finalise.c (OC192 (a)): finObjs holds a value's record [WeakReference tag fields entries], entries an ArrayList of
+  ;; [fn seq last]; finQueue the fired calls [fn arg seq last] in the order they run
+  (field ^:static ^:final ^ArrayList finObjs (ArrayList.))
+  (field ^:static ^:final ^ArrayList finQueue (ArrayList.))
+  (field ^:static ^:final ^ReferenceQueue finRefs (ReferenceQueue.))
+  (field ^:public ^:static ^int finCount 0)
+  (field ^:static ^int finTicks 0)
+  (field ^:static ^long finSeq 0)
+  (field ^:static ^boolean finRunning false)
+  ;; the order of a collection's calls [fn arg seq last]: last false first, then the greater seq first
+  (field ^:static ^:final ^Comparator finOrder
+    (lambda Comparator [a b]
+      (let [x (cast Object/1 a) y (cast Object/1 b)
+            xl (.booleanValue (cast Boolean (aget x 3))) yl (.booleanValue (cast Boolean (aget y 3)))]
+        (cond (and xl (not yl)) (int 1)
+              (and yl (not xl)) (int -1)
+              :else (Long/compare (.longValue (cast Long (aget y 2))) (.longValue (cast Long (aget x 2))))))))
+
+  ;; the record of v when it is the latest registered value (a value registered twice in a row, finaliser2's test2: one search, not
+  ;; a scan of every record), or a new one
+  (method ^:static finRecord ^Object/1 [v]
+    (let [n (.size finObjs)
+          lr (if (> n 0) (cast Object/1 (.get finObjs (unchecked-dec-int n))) nil)]
+      (if (and (not (nil? lr)) (identical? (.get (cast WeakReference (aget lr 0))) v))
+        lr
+        (let [r (new Object/1 [(WeakReference. v finRefs)
+                               (if (instance? Block v) (Integer/valueOf (.-tag (cast Block v))) nil)
+                               (if (instance? Block v) (.-f (cast Block v)) nil)
+                               (ArrayList.)])]
+          (.add finObjs r)
+          (set! finCount (.size finObjs))
+          r))))
+
+  (method ^:static finRegister [f v ^boolean last]
     (when (instance? Long v) (throw (Rt/invalidArg "Gc.finalise")))
+    (when (or (instance? Block v) (and last (not (instance? Double v)) (not (instance? Integer v))))
+      (let [r (ExtGc/finRecord v)]
+        (set! finSeq (unchecked-add finSeq 1))
+        (.add (cast ArrayList (aget r 3)) (new Object/1 [f (Long/valueOf finSeq) (Boolean/valueOf last)]))))
     Rt/UNIT)
-  (method ^:public ^:static caml_final_register_called_without_value [f v]
-    (when (instance? Long v) (throw (Rt/invalidArg "Gc.finalise")))
-    Rt/UNIT)
-  (method ^:public ^:static caml_final_release [u] Rt/UNIT)
+
+  ;; the records whose values were cleared: their entries fired, sorted as finalise.c's batches, onto finQueue
+  (method ^:static finScan ^void []
+    (loop [] (when (not (nil? (.poll finRefs))) (recur)))
+    (let [batch (ArrayList.) keep (ArrayList.)]
+      (loop [^int i 0]
+        (when (< i (.size finObjs))
+          (let [r (cast Object/1 (.get finObjs i))
+                es (cast ArrayList (aget r 3))]
+            (if (not (nil? (.get (cast WeakReference (aget r 0)))))
+              (.add keep r)
+              (let [^:mutable first false rest (ArrayList.)]
+                (loop [^int j 0]
+                  (when (< j (.size es))
+                    (when (not (.booleanValue (cast Boolean (aget (cast Object/1 (.get es j)) 2)))) (set! first true))
+                    (recur (unchecked-inc-int j))))
+                (let [arg (if (nil? (aget r 1)) Rt/UNIT (Block. (.intValue (cast Integer (aget r 1))) (cast Object/1 (aget r 2))))]
+                  (loop [^int j 0]
+                    (when (< j (.size es))
+                      (let [e (cast Object/1 (.get es j))
+                            l (.booleanValue (cast Boolean (aget e 2)))]
+                        (cond (not l) (.add batch (new Object/1 [(aget e 0) arg (aget e 1) Boolean/FALSE]))
+                              first (.add rest e)
+                              :else (.add batch (new Object/1 [(aget e 0) Rt/UNIT (aget e 1) Boolean/TRUE]))))
+                      (recur (unchecked-inc-int j))))
+                  (when (> (.size rest) 0)
+                    (.add keep (new Object/1 [(WeakReference. arg finRefs) (aget r 1) (aget r 2) rest]))))))
+            (recur (unchecked-inc-int i)))))
+      (.clear finObjs)
+      (.addAll finObjs keep)
+      (set! finCount (.size finObjs))
+      ;; Gc.finalise's before Gc.finalise_last's, each from the latest registration (a stable sort by the two keys)
+      (Collections/sort batch ExtGc/finOrder)
+      (.addAll finQueue batch)))
+
+  ;; caml_final_do_calls: one at a time, never re-entered; an exception ends the calls
+  (method ^:static finRun ^void []
+    (when (not finRunning)
+      (loop []
+        (when (> (.size finQueue) 0)
+          (let [e (cast Object/1 (.remove finQueue (unchecked-int 0)))]
+            (set! finRunning true)
+            (try (Rt/ap1 (aget e 0) (aget e 1))
+                 (finally (set! finRunning false)))
+            (recur))))))
+
+  ;; a forced collection (Gc.full_major, major, compact, minor) and the finalisers it fires
+  (method ^:static finCollect ^void []
+    (when (> finCount 0)
+      (System/gc)
+      (ExtGc/finScan))
+    (ExtGc/finRun))
+
+  ;; Rt/tick's poll while a value has a finaliser: every 1024 turns, the queue's news
+  (method ^:public ^:static finPoll ^void []
+    (set! finTicks (unchecked-inc-int finTicks))
+    (when (> finTicks 1024)
+      (set! finTicks 0)
+      (when (not (nil? (.poll finRefs)))
+        (ExtGc/finScan)
+        (ExtGc/finRun))))
+
+  (method ^:public ^:static caml_final_register [f v] (ExtGc/finRegister f v false))
+  (method ^:public ^:static caml_final_register_called_without_value [f v] (ExtGc/finRegister f v true))
+  ;; Gc.finalise_release: the other finalisers' calls allowed
+  (method ^:public ^:static caml_final_release [u] (set! finRunning false) Rt/UNIT)
 
   ;; weak.c: [| link; data; key0; key1; ... |] as strong blocks (tag 251)
   (method ^:static ephLen ^int [e] (alength (.-f (cast Block e))))
