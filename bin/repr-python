@@ -414,7 +414,7 @@ dump_parallel() {
 # that need CPython are the oracle tier's), the TSV in the helper's columns: REL STATUS - - - SHA (level 4's) 0 0 0
 native_dumps() {
   local base=$1 list=$2 out=$3 tsv=$4
-  parsecheck dump --base "$base" --list "$list" --out "$out" > "$tsv.native"
+  parsecheck dump --base "$base" --list "$list" --out "$out" ${FULL:+--full} > "$tsv.native"
   (cd "$base" && tr '\n' '\0' < "$list" | xargs -0 -r sha256sum) | awk '{ r = substr($0, 67); sub(/^\*/, "", r); print r "\t" substr($0, 1, 64) }' > "$tsv.sha"
   awk -F'\t' -v OFS='\t' 'NR == FNR { sha[$1] = $2; next } { st = ($2 ~ /^refused/) ? $2 : $2; print $1, st, "-", "-", "-", sha[$1], 0, 0, 0 }' "$tsv.sha" "$tsv.native" | LC_ALL=C sort > "$tsv"
 }
@@ -472,12 +472,26 @@ roundtrip_one() {
   STAGES="$d/stages.txt"; : > "$STAGES"
   pyrec_list "$base" "${args[@]}" > "$d/list"
   only_filter "$d/list" "$id" || { echo "roundtrip $id: no file of --only-list"; return 0; }
-  timed helper-orig dump_parallel "$id" "$base" "$d/list" "$d/orig" "$d/helper-orig.tsv" \
-    || { echo "roundtrip $id: FAILED: no reference (the oracle's records, above)"; return 1; }
+  # the originals' dumps (queue 240): in records mode the native reader's (REPR_PYTHON_RT_ORIG=native, the default there: the
+  # round trip is each file's own verdict, level 1 the native reader's forms of the original against its forms of the print,
+  # level 4 the print's bytes against the original's; no record consumed, the reader's conformance being parse-check's), else
+  # the helper's (live: levels 2, 3 and 5 need CPython; =helper in records mode: the python-pydump packs' dumps, queue 213)
+  local origr=${REPR_PYTHON_RT_ORIG:-$(pyrec_live && echo helper || echo native)}
+  case $origr in native|helper) ;; *) die "REPR_PYTHON_RT_ORIG: native or helper (not $origr)" ;; esac
+  if [ "$origr" = native ]; then
+    timed native-orig native_dumps "$base" "$d/list" "$d/orig" "$d/helper-orig.tsv"
+  else
+    timed helper-orig dump_parallel "$id" "$base" "$d/list" "$d/orig" "$d/helper-orig.tsv" \
+      || { echo "roundtrip $id: FAILED: no reference (the oracle's records, above)"; return 1; }
+  fi
   if [ -n "$TEXT" ]; then
     # mode :full (PY3): the dumps in mode :full beside the :lines ones, converted, woven, printed from the tokens
-    FULL=1 timed helper-full dump_parallel "$id" "$base" "$d/list" "$d/full" "$d/helper-full.tsv" \
-      || { echo "roundtrip --text $id: FAILED: no reference (the oracle's records, above)"; return 1; }
+    if [ "$origr" = native ]; then
+      FULL=1 timed native-full native_dumps "$base" "$d/list" "$d/full" "$d/helper-full.tsv"
+    else
+      FULL=1 timed helper-full dump_parallel "$id" "$base" "$d/list" "$d/full" "$d/helper-full.tsv" \
+        || { echo "roundtrip --text $id: FAILED: no reference (the oracle's records, above)"; return 1; }
+    fi
     timed convert-print py_arbace convert-full --dumps "$d/full" --lines "$d/orig" --forms "$d/forms" --printed "$d/printed" \
       --tsv "$d/convert-print.tsv"
   else
