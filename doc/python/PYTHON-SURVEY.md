@@ -5166,9 +5166,11 @@ DECISION: 244-1, how _ctypes is built
 DECISION: 244-2, what CDLL loads
 - (a) one world, a fixed link (recommended): musl's libc and libm, _ctypes_test and the C API's C half, one committed node program
   (bin/pyi-clib, verified); CDLL(None), libc, libm and _ctypes_test's file name it, any other name OSError (dlopen's message);
-  data symbols (in_dll: an_integer, my_eggs, Py_OptimizeFlag) by a table the glue names: small, no ci change
+  data symbols (in_dll: an_integer, my_eggs, Py_OptimizeFlag) by the names the node program's static commands already carry
+  (their fifth field, which ci's loader ignores: read by pyctypes from the text, the statics' addresses from the Prog): small,
+  no ci change
 - (b) a loader in ci for a second node program into a running Prog (functions and statics renumbered, undefined names resolved
-  against the loaded ones), and data symbols' names kept by ci's loader: CDLL of any library ci builds (a user's C source); a ci
+  against the loaded ones): CDLL of any library ci builds (a user's C source); a ci
   change for the C crop (the main host's), days; can follow (a) without undoing it
 ```
 
@@ -5219,5 +5221,8 @@ options undoes (libffi's part is (a)'s callee and (b)'s natives; `_ctypes_test` 
 - bin/pyi's runtime verbs: `print` prints `clib/ctypes_test` and `pyctypes`, `read` and `check` read `pyctypes` back, `vet` vets
   and tests it. LICENSE.md: the world's node program (the PSF's `_ctypes_test.c`, musl's MIT), the headers and `pyctypes`
   (Arbace's own).
+- bin/pyi-clib hashes itself into every library's key, so its change moved the four committed keys: `Key` in
+  `go/arbace/clib/{bzip2,xz,zstd,sqlite}/nodes.ae` set to `bin/pyi-clib key LIB` (the node programs unchanged; bzip2's and
+  liblzma's `verify` byte for byte on the VM, zstd's and SQLite's the main host's).
 - The classes: unchanged (`:ctypes` 625 and `:testcapi` 1,117 methods in the sample; the brief's 13 and 10 rows), as expected
   of a slice with no module.
