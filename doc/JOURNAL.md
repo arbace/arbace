@@ -1271,3 +1271,13 @@ rustc's Cargo.lock pins, read from the host's Cargo registry copy). MIT OR Apach
 - Alternatives: computing core's StableCrateId from Cargo's metadata hash (rejected: Cargo's inputs are not ours); reading core's
   attributes and cross_crate_inlinable from the rmeta's tables (RFP39 (b), deferred: rustc's product); taking the record's type forms
   (dropped: no record DefIds in our bodies, the runs pass). Proposed RFP37-RFP41 in the survey's "As built: RFP23 (c)".
+
+## 2026-11-09 rust-front-essential extracts rust-src itself
+
+- `bin/rust-front essential` (mono-check, run-built) read rust-src's `library/` from the worktree's `.tmp/repr-rust/apks/rust-src`, which only
+  rust-read-essential's round trip extracted: with that step skipped at its key and this one rerun in a fresh worktree or the clean clone it
+  failed with "no libsrc". Fix: `bin/repr-rust src-take` (rust_src_take: the pinned apk from `REPR_RUST_APKS`, else the main checkout's
+  `.tmp/repr-rust/apks` by crop_take, checked against `tools/rsdump/apks.sha256`, extracted; never downloaded; a clear refusal when the apk is
+  absent) and `bin/rust-front`'s `rf_libsrc_take` calls it when `$libsrc` is missing (`RF_MONO_LIB` still names another tree). Declared inputs
+  need no change: `:rust` holds bin/repr-rust, take.bash and apks.sha256, the step pins apks.sha256, `bin/rust-front` is listed.
+  Alternative: extracting in the step's command (rejected: the other callers, run-built and mono-check by hand, would still fail).
