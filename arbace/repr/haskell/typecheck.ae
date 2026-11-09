@@ -883,6 +883,179 @@
         :else (list 'app f (vec args))))
 
 ;;; ------------------------------------------------------------------------------------------
+;;; Foreign imports (HF10-P5 (a)): GHC 9.14.1's GHC.HsToCore.Foreign.Decl (dsFImport, dsCImport, dsFCall, dsPrimCall,
+;;; dsFLabel) and GHC.HsToCore.Foreign.Call (unboxArg, boxResult, resultWrapper, mk_alt), ported rule for rule into the
+;;; elaborator's Core (BSD-3, The University of Glasgow; LICENSE.md). The call itself is a global of kind "ffi" (GHC's
+;;; FCallId, mkFCall), its spec in *fcalls*, its type the worker's (the unboxed arguments, the State# token, the unboxed
+;;; result tuple); tostg makes it StgOpApp's (ffi ...) or (primcall ...). The worker ($wccall) is not bound apart: its body is
+;;; the call, which GHC's -O0 Simplifier inlines into the wrapper, the wrapper an INLINE unfolding of its arity
+;;; (mkInlineUnfoldingWithArity) the Simplifier inlines at its call sites
+
+(declare ^:dynamic *module*)
+(def ^:dynamic *fcalls* nil) ; atom {FFI-NAME {:conv :ccall :safety :unsafe :target "sym" :unit U}}
+
+(def ^:private io-tc (ext-name "tc" "GHC.Internal.Types" "IO"))
+(def ^:private state-tc (ext-name "tc" "GHC.Internal.Prim" "State#"))
+(def ^:private rw-tc (ext-name "tc" "GHC.Internal.Prim" "RealWorld"))
+(def ^:private state-rw [:tc state-tc [[:tc rw-tc []]]])
+
+(defn- ffi-prim-type?
+  "isPrimitiveType: an unlifted primitive type constructor's application (GHC.Internal.Prim's), not an unboxed tuple"
+  [t]
+  (and (= :tc (first t)) (= "GHC.Internal.Prim" (nmod (second t)))))
+
+(defn- ffi-con-field
+  "The single data constructor of a product tycon with one field (tyConSingleAlgDataCon_maybe, dataConInstOrigArgTys):
+  [CON FIELD-TYPE], or nil; a newtype's: its representation (instNewTyCon_maybe)"
+  [t flavour]
+  (when (= :tc (first t))
+    (let [i (get @*tycons* (second t))]
+      (when (and (= flavour (:flavour i)) (= 1 (count (:cons i))))
+        (let [c (first (:cons i)) ct (get @*genv* c)
+              [tvs body] (if (and (vector? ct) (= :forall (first ct))) [(nth ct 1) (nth ct 3)] [[] ct])]
+          (when (and (vector? body) (= :tc (first body)) (= fun-tc (second body))
+                     (let [r (second (nth body 2))] (not (and (vector? r) (= :tc (first r)) (= fun-tc (second r))))))
+            [c (deep-expand (subst (zipmap tvs (nth t 2)) (first (nth body 2))))]))))))
+
+(defn- ffi-lv [o t] (let [x (fresh-lv o)] (note-type! x t) x))
+
+(defn- ffi-unbox-arg
+  "unboxArg: [the argument's unboxed atom, a function wrapping the body in its unboxing], or nil (an argument type the
+  foreign call cannot take)"
+  [x t]
+  (let [t (deep-expand t)]
+    (cond
+      (ffi-prim-type? t) [x identity]
+      ;; topNormaliseNewType_maybe: through the newtype (a match of its constructor, the cast the simple optimiser makes)
+      (ffi-con-field t 'newtype)
+      (let [[c rt] (ffi-con-field t 'newtype) y (ffi-lv "ds" rt)
+            [v w] (or (ffi-unbox-arg y rt) [nil nil])]
+        (when v [v (fn [body] (list 'case x (ffi-lv "ds" t) [(list 'alt c [y] (w body))]))]))
+      (= tc-bool (second t))
+      (let [p (ffi-lv "ds" [:tc (ext-name "tc" "GHC.Internal.Prim" "Int#") []])]
+        [p (fn [body] (list 'case (list 'case x (ffi-lv "ds" t)
+                                       [(list 'alt (ext-name "data" "GHC.Internal.Types" "False") [] (list 'lit "0#"))
+                                        (list 'alt (ext-name "data" "GHC.Internal.Types" "True") [] (list 'lit "1#"))])
+                            p [(list 'alt :default [] body)]))])
+      (ffi-con-field t 'data)
+      (let [[c ft] (ffi-con-field t 'data)]
+        (when (ffi-prim-type? ft)
+          (let [p (ffi-lv "ds" ft)]
+            [p (fn [body] (list 'case x (ffi-lv "ds" t) [(list 'alt c [p] body)]))])))
+      :else nil)))
+
+(defn- ffi-result-wrapper
+  "resultWrapper: [the call's unboxed result type or nil (()), a function boxing the result], or nil"
+  [t]
+  (let [t (deep-expand t)]
+    (cond
+      (and (= :tc (first t)) (= (tuple-tc 0) (second t))) [nil (fn [_] (list 'v (tuple-con 0)))]
+      (ffi-prim-type? t) [t identity]
+      (= tc-bool (second t))
+      [[:tc (ext-name "tc" "GHC.Internal.Prim" "Int#") []]
+       (fn [e] (list 'case e (ffi-lv "ds" [:tc (ext-name "tc" "GHC.Internal.Prim" "Int#") []])
+                     [(list 'alt :default [] (list 'v (ext-name "var" "GHC.Internal.Types" "True")))
+                      (list 'alt (list 'lit "0#") [] (list 'v (ext-name "var" "GHC.Internal.Types" "False")))]))]
+      (ffi-con-field t 'newtype)
+      (let [[c rt] (ffi-con-field t 'newtype)]
+        (when-let [[pt w] (ffi-result-wrapper rt)]
+          [pt (fn [e] (list 'app (list 'v (assoc c 1 "var")) [(w e)]))]))
+      (ffi-con-field t 'data)
+      (let [[c ft] (ffi-con-field t 'data)]
+        (when-let [[pt w] (ffi-result-wrapper ft)]
+          [pt (fn [e] (list 'app (list 'v (assoc c 1 "var")) [(w e)]))]))
+      :else nil)))
+
+(defn- ffi-split
+  "The type's quantified variables dropped, its argument types and result (tcSplitForAllTyVarBinders, tcSplitFunTys)"
+  [t]
+  (loop [t (deep-expand (if (= :forall (first t)) (nth t 3) t)) args []]
+    (let [t (deep-expand (if (= :forall (first t)) (nth t 3) t))]
+      (if (and (= :tc (first t)) (= fun-tc (second t)))
+        (recur (second (nth t 2)) (conj args (first (nth t 2))))
+        [args t]))))
+
+(defn- ffi-spec
+  "The CImport's calling convention, safety and target: {:conv :safety :target|:label|:dynamic|:wrapper}"
+  [ci]
+  (let [conv (lval (arg ci 2)) safety (lval (arg ci 3)) sp (arg ci 5)
+        conv ({'CCallConv :ccall 'CApiConv :capi 'StdCallConv :stdcall 'PrimCallConv :prim 'JavaScriptCallConv :javascript} conv)
+        safety ({'PlayRisky :unsafe 'PlaySafe :safe 'PlayInterruptible :interruptible} safety :safe)]
+    (merge {:conv conv :safety safety}
+           (case (con sp)
+             CFunction (let [tg (arg sp 1)]
+                         (if (= 'StaticTarget (con tg)) {:target (arg tg 2) :fun (not (false? (arg tg 4)))} {:dynamic true}))
+             CLabel {:label (arg sp 1)}
+             CWrapper {:wrapper true}
+             {:unknown true}))))
+
+(defn- zenc
+  "GHC.Utils.Encoding's zEncodeString"
+  [^String s]
+  (apply str (for [ch s]
+               (cond (= ch \z) "zz" (= ch \Z) "ZZ" (= ch \_) "zu" (= ch \:) "ZC" (= ch \-) "zm" (= ch \.) "zi"
+                     (= ch \() "ZL" (= ch \)) "ZR" (= ch \[) "ZM" (= ch \]) "ZN" (= ch \#) "zh" (= ch \') "zq"
+                     (or (Character/isLetterOrDigit ch)) (str ch)
+                     :else (str "z" (Integer/toHexString (int ch)) "U")))))
+
+(defn- capi-target
+  "dsFCall's CApiConv: the call goes through the C wrapper GHC writes, named by mkWrapperName \"ghc_wrapper\" (the
+  module's wrapper counter, the unit, the module, the C name), z-encoded"
+  [sym]
+  (let [n (count (filter #(= :capi (:conv %)) (vals @*fcalls*)))]
+    (zenc (str "ghc_wrapper:" n ":" *unit* ":" *module* ":" sym))))
+
+(defn ds-fimport
+  "dsFImport: the binding of foreign import n :: t with the CImport ci, as Core, or nil when it is not desugared (a
+  \"wrapper\" or dynamic import, an argument or result type unboxArg or resultWrapper refuses)"
+  [n t ci]
+  (let [sp (ffi-spec ci) [arg-tys res-ty] (ffi-split t)]
+    (cond
+      (or (:wrapper sp) (:dynamic sp) (:unknown sp) (nil? (:conv sp))) nil
+      ;; dsFLabel: the label's address in the result's constructor (FunPtr or Ptr), IsFunction when it is a FunPtr
+      (:label sp)
+      (let [[c ft] (ffi-con-field res-ty 'data)]
+        (when (and c (ffi-prim-type? ft))
+          (list 'app (list 'v (assoc c 1 "var"))
+                [(list 'lit (str "&label:" (:label sp) ":" (if (= "FunPtr" (occ (second res-ty))) "fun" "data")))])))
+      ;; dsPrimCall: the arguments and the result as they are, the call applied
+      (= :prim (:conv sp))
+      (let [xs (mapv #(ffi-lv "ds" %) arg-tys)
+            f (ext-name "ffi" *module* (str "prim:" (:target sp) ":" (occ n)))]
+        (swap! *genv* assoc f (reduce (fn [r a] (fn-ty a r)) res-ty (reverse arg-tys)))
+        (swap! *fcalls* assoc f (assoc sp :unit *unit*))
+        (if (empty? xs) (list 'app (list 'v f) []) (list 'lam xs (list 'app (list 'v f) xs))))
+      :else
+      (let [xs (mapv #(ffi-lv "ds" %) arg-tys)
+            unb (map ffi-unbox-arg xs arg-tys)]
+        (when (every? some? unb)
+          (let [io? (and (= :tc (first res-ty)) (= io-tc (second res-ty)))
+                inner (if io? (first (nth res-ty 2)) res-ty)
+                rw (ffi-result-wrapper inner)]
+            (when rw
+              (let [[pt wrap] rw
+                    ccall-res (if pt [:tc (utuple-tc 2) [state-rw pt]] [:tc (utuple-tc 1) [state-rw]])
+                    vals (mapv first unb)
+                    sp (if (= :capi (:conv sp)) (assoc sp :target (capi-target (:target sp)) :fun true) sp)
+                    f (ext-name "ffi" *module* (str (name (:conv sp)) ":" (:target sp) ":" (occ n)))
+                    _ (swap! *genv* assoc f (reduce (fn [r a] (fn-ty a r)) (fn-ty state-rw ccall-res)
+                                                    (reverse (map (fn [v] (get @*ltypes* v)) vals))))
+                    _ (swap! *fcalls* assoc f (assoc sp :unit *unit*))
+                    ;; mk_alt: the call's unboxed result matched, the result boxed; return_result: (# s, r #) for IO, r else
+                    s2 (ffi-lv "ds" state-rw)
+                    r (when pt (ffi-lv "ds" pt))
+                    ans (wrap r)
+                    rhs (if io? (list 'app (list 'v (assoc (unboxed-con 2) 1 "var")) [s2 ans]) ans)
+                    alt (list 'alt (unboxed-con (if pt 2 1)) (if pt [s2 r] [s2]) rhs)
+                    call (fn [st] (list 'case (list 'app (list 'v f) (conj vals st)) (ffi-lv "wild" ccall-res) [alt]))
+                    body (if io?
+                           (let [s (ffi-lv "s" state-rw)]
+                             (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "IO")) [(list 'lam [s] (call s))]))
+                           (call (list 'v (ext-name "var" "GHC.Internal.Prim" "realWorld#"))))
+                    body (reduce (fn [b [_ w]] (w b)) body (reverse unb))]
+                (if (empty? xs) body (list 'lam xs body))))))))))
+
+;;; ------------------------------------------------------------------------------------------
 ;;; Expressions
 
 (declare occurrences wrap-lets want! infer check-expr scope-givens assume-eqs! dict-param solve-with-givens! retry-implications! tc-local-binds infer-matches tc-pat infer-grhss rename-mono reduce-by-instance substitute)
@@ -2804,7 +2977,7 @@
   (let [{:keys [module decls binds sigs]} (second tree)
         m module]
     (binding [*metas* (atom {}) *counter* (atom 0) *errors* (atom []) *level* 0 *module* module
-              *genv* (atom {}) *classes* (atom {}) *insts* (atom []) *cons* (atom {}) *syns* (atom {})
+              *genv* (atom {}) *fcalls* (atom {}) *classes* (atom {}) *insts* (atom []) *cons* (atom {}) *syns* (atom {})
               *wanteds* (atom []) *evidence* (atom {}) *unfoldings* (atom {}) *tycons* (atom {})
               *derivs* (atom []) *fixities* (atom {}) *ddescs* (atom {}) *exts* (set (:exts (second tree)))
               *ltypes* (atom {}) *skolem-givens* (atom []) *kind-arity* (atom {}) *families* (atom {}) *deferred-eqs* (atom [])
@@ -2847,10 +3020,14 @@
                     (data-decl! m e {:tn (ext-name "tc" m (str "R:" (occ fname) (head-occs (pts {}))))
                                      :tvn tvn :res-of (fn [tvs] [:tc fname (pts tvs)]) :defn (arg e 6)}))))
             ;; foreign imports: their signature is their type
+            ;; HF10-P5 (a): desugared as GHC's dsFImport does (ds-fimport); one it does not take stays the placeholder tostg drops
             fimports (vec (for [d decls :let [v (lval d)] :when (and (= 'ForD (con v)) (= 'ForeignImport (con (arg v 2))))
                                 :let [fi (arg v 2) n (nm (arg fi 2))]]
-                            (do (swap! *genv* assoc n (sig-type (arg fi 3)))
-                                (list 'bind n (list 'lit (str "foreign import " (occ n)))))))
+                            (let [t (sig-type (arg fi 3))]
+                              (swap! *genv* assoc n t)
+                              (list 'bind n (or (when-not (= "0" (System/getenv "REPR_HASKELL_FFI"))
+                                                  (try (ds-fimport n t (arg fi 4)) (catch Throwable _ nil)))
+                                                (list 'lit (str "foreign import " (occ n))))))))
             insts (vec (for [d decls :let [v (lval d)] :when (and (= 'InstD (con v)) (= 'ClsInstD (con (arg v 2))))]
                          (inst-decl! m (arg (arg v 2) 2))))
             insts (into insts (phase :derive (derive-all! m decls)))
@@ -2930,6 +3107,9 @@
                                            :else nil))]
                      (w [decls sigs binds]) @acc)
          :genv @*genv*
+         :fcalls @*fcalls*
+         ;; the foreign imports desugared (an INLINE unfolding of their arity, mkInlineUnfoldingWithArity)
+         :fimports (set (for [[_ b e] fimports :when (not (and (seq? e) (= 'lit (first e))))] b))
          :kind-arity @*kind-arity*
          :errors @*errors*}))))
 

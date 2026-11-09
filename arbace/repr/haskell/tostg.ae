@@ -201,6 +201,8 @@
     (re-matches #"-?[0-9.eE+-]+##" t) [(list 'double (str "0x" (Long/toHexString (Double/doubleToRawLongBits (Double/parseDouble (subs t 0 (- (count t) 2))))))) :double]
     (re-matches #"-?[0-9.eE+-]+#" t) [(list 'float (str "0x" (Integer/toHexString (Float/floatToRawIntBits (Float/parseFloat (subs t 0 (dec (count t)))))))) :float]
     (re-matches #"(?s)\".*\"" t) [(list 'str (utf8-bytes (read-string t))) :addr]
+    ;; HF10-P5 (a): a foreign import's label (dsFLabel's MachLabel), "&label:SYMBOL:fun|data"
+    (str/starts-with? t "&label:") (let [[_ sym k] (re-matches #"(?s)&label:(.*):(fun|data)" t)] [(list 'label sym (keyword k)) :addr])
     :else (do (binding [*out* *err*] (println "tostg: literal not handled:" t)) [(list 'int 0) :int])))
 
 (defn- hexify
@@ -243,7 +245,7 @@
     (if (= :tc (first t))
       (let [[_ n args] t]
         (cond
-          (and (= "GHC.Internal.Types" (nth n 2)) (re-matches #"Tuple[0-9]+#" (nth n 3))) (vec (mapcat type-reps args))
+          (and (= "GHC.Internal.Types" (nth n 2)) (re-matches #"Tuple[0-9]+#|Solo#|Unit#" (nth n 3))) (vec (mapcat type-reps args))
           (and (= "GHC.Internal.Prim" (nth n 2)) (contains? prim-tycon-reps (nth n 3))) (get prim-tycon-reps (nth n 3))
           (and (= "GHC.Internal.Prim" (nth n 2)) (str/ends-with? (nth n 3) "#")) [:U]
           :else [:L]))
@@ -298,7 +300,7 @@
 (def ^:dynamic *multi* nil)   ; atom {(lv ...) [[name rep]...]}: an unboxed tuple's binder unarised into its components
 (def ^:dynamic *mcomps* nil)  ; atom {(lv ...) [reps...]}: its components' representations, the void ones too
 
-(defn- tuple-ty? [t] (let [t (strip-forall t)] (and (= :tc (first t)) (= "GHC.Internal.Types" (nth (second t) 2)) (re-matches #"Tuple[0-9]+#" (nth (second t) 3)))))
+(defn- tuple-ty? [t] (let [t (strip-forall t)] (and (= :tc (first t)) (= "GHC.Internal.Types" (nth (second t) 2)) (re-matches #"Tuple[0-9]+#|Solo#|Unit#" (nth (second t) 3)))))
 
 (defn expr-comps
   "An expression of an unboxed tuple type: each component's representations; nil for another type"
@@ -416,7 +418,8 @@
     (head? a 'co) (let [n (fresh "$d~")] [n [[n (list 'rcon (ext-str "GHC.Internal.Types" "Eq#") [])]]])
     (and (lv? a) (empty? (local-reps a))) [(void-atom) []]
     (lv? a) [(local-name a) []]
-    (and (head? a 'v) (void-global? (second a))) [(void-atom) []]
+    ;; Unarise's unariseFunArg: a global is no binder of rho, kept (realWorld#: dsFCall's and runRW#'s token); void# itself
+    (and (head? a 'v) (void-global? (second a))) [(if (= "realWorld#" (nth (second a) 3)) (gname (second a)) (void-atom)) []]
     (and (head? a 'v) (con-name? (second a)) (newtype-con? (as-data (second a)))) (let [n (fresh "sat")] [n [[n (rhs a)]]])
     ;; a data constructor of fields as an argument: CorePrep saturates it (maybeSaturate), a function closure
     (and (head? a 'v) (con-name? (second a)) (not (unboxed-con? (second a))) (not (class-of-dcon (second a)))
@@ -549,6 +552,25 @@
     ;; an unboxed tuple: its non-void components (Unarise)
     (let [keep (filterv #(seq (expr-reps %)) args)]
       (with-atoms keep (fn [as] (list 'con (unboxed-name (count as)) as))))
+    ;; HF10-P5 (a): a foreign call (the elaborator's dsFCall, an FCallId): StgOpApp's (ffi TARGET CONV SAFETY ATOMS REPS), a
+    ;; foreign import prim's (primcall LABEL UNIT ATOMS REPS); REPS the unboxed result tuple's but the State# token's
+    (and (head? f 'v) (vector? (second f)) (= "ffi" (nth (second f) 1)) (get (:fcalls *r*) (second f)))
+    (let [g (second f) sp (get (:fcalls *r*) g) t (global-type g) ar (count (arg-types t))
+          reps (type-reps (result-type t ar))
+          rep (case (count reps) 0 :v 1 (first reps) (vec reps))
+          mk (fn [as] (if (= :prim (:conv sp))
+                        (list 'primcall (:target sp) (:unit sp) as rep)
+                        (list 'ffi (list 'static (:target sp) (cond-> {:unit (:unit sp)} (false? (:fun sp)) (assoc :fun false)))
+                              (:conv sp) (:safety sp) as rep)))]
+      (if (>= (count args) ar)
+        (with-atoms (take ar args)
+          (fn [as] (if (= ar (count args)) (mk as)
+                       (let [n (fresh "sat")]
+                         (list 'case (mk as) [n :L] '(poly) [(list 'alt :default [] (with-atoms (drop ar args) (fn [bs] (list 'app n bs))))])))))
+        (let [xs (mapv (fn [i] (list 'lv "eta" (str "E" (inc i) ".pe" (swap! *n* inc)))) (range (- ar (count args))))
+              tys (drop (count args) (arg-types t))]
+          (doseq [[x ty] (map vector xs tys)] (swap! *lreps* assoc x (type-reps ty)))
+          (expr (list 'lam xs (list 'app f (into (vec args) xs)))))))
     (and (head? f 'v) (primop? (second f)))
     (let [g (second f) ar (count (arg-types (global-type g)))]
       (if (>= (count args) ar)
