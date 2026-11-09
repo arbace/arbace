@@ -146,10 +146,12 @@
         ;; dictbytype(FREE, DEF_FREE_CLASS): a class's or a class-visible annotation scope's own name free in a child
         frees (vec (sort (for [[nm f] symbols
                                :when (or (= 4 (sc/scope-of* f)) (sc/has-bit? f sc/DEF_FREE_CLASS))] nm)))
-        cells (if (= :class (:type b))
-                (vec (sort (distinct (concat cells (when (:needs-class-closure b) ["__class__"])
-                                             (when (:needs-classdict b) ["__classdict__"])
-                                             (when (:has-conditional-annotations b) ["__conditional_annotations__"])))))
+        ;; compiler_enter_scope's implicit cells after the sorted ones: __class__, __classdict__ (a class's) and
+        ;; __conditional_annotations__ (a class's or a module's; queue 248: the module's, MAKE_CELL with nothing to use it)
+        cells (if (#{:class :module} (:type b))
+                (vec (distinct (concat cells (when (:needs-class-closure b) ["__class__"])
+                                       (when (:needs-classdict b) ["__classdict__"])
+                                       (when (:has-conditional-annotations b) ["__conditional_annotations__"]))))
                 cells)
         optimized (contains? #{:function :annotation :type-variable :type-alias :type-parameters} (:type b))
         params (:varnames b)
@@ -378,6 +380,17 @@
   (when (and *disable-warning* (= :finally-end (:kind (peek (:fblocks @u))))) (swap! *disable-warning* dec))
   (swap! u update :fblocks pop))
 
+(defn- pop-block-nop!
+  "codegen_unwind_fblock's POP_BLOCK of a try statement's body (TRY_EXCEPT, FINALLY_TRY) at the unwinding statement's
+  location: label_exception_targets makes it a NOP no handler covers (its i_except never set), which stays when its line
+  is its own (queue 248: dis's exception table of a return in a try)"
+  [u fb]
+  (when (#{:try-except :finally-try} (:kind fb))
+    (let [hs (:hstack @u)]
+      (swap! u assoc :hstack [])
+      (emit! u :nop :line)
+      (swap! u assoc :hstack hs))))
+
 (defn- unwind-fblock!
   "The cleanup of one frame block on leaving it by break, continue or return (preserve: a return value is on the top)"
   [u fb preserve]
@@ -394,12 +407,12 @@
                    (do (emit! u :swap 2) (emit! u :pop nil) (emit! u :swap 2) (emit! u :pop-except nil)
                        (emit! u :swap 2) (emit! u :pop nil))
                    (do (emit! u :pop nil) (emit! u :pop-except nil) (emit! u :pop nil)))
-    :with (do (when (:line fb) (set-line! u (:line fb)))
+    :with (do (when (:line fb) (swap! u assoc :line (:line fb) :loc (:loc fb)))
               (when preserve (emit! u :swap 2))
               (load-const! u nil) (load-const! u nil) (load-const! u nil)
               (emit! u :call [3 nil]) (emit! u :pop nil)
               (set-line! u nil))
-    :async-with (do (when (:line fb) (set-line! u (:line fb)))
+    :async-with (do (when (:line fb) (swap! u assoc :line (:line fb) :loc (:loc fb)))
                     (when preserve (emit! u :swap 2))
                     (load-const! u nil) (load-const! u nil) (load-const! u nil)
                     (emit! u :call [3 nil]) (emit! u :get-awaitable 2) (load-const! u nil) (emit! u :yield-from nil)
@@ -426,6 +439,7 @@
             (#{:for :while :async-for} (:kind fb)) fb
             (:boundary fb) nil
             :else (do (swap! u assoc :hstack (:hs fb))
+                      (pop-block-nop! u fb)
                       (if (= :finally-try (:kind fb))
                         ;; the finally body runs with the frame blocks outside it
                         (let [saved (:fblocks @u)]
@@ -491,8 +505,16 @@
     (let [fbs (:fblocks @u)]
       (loop [i (dec (count fbs))]
         (when (>= i 0)
-          (let [fb (nth fbs i)]
+          (let [fb (nth fbs i)
+                hclean (and preserve (#{:handler :handler-named} (:kind fb)))]
+            ;; HANDLER_CLEANUP: the SWAP before its POP_BLOCK, under the handler's cleanup (not a named one's inner
+            ;; handler, popped first; queue 248)
+            (when hclean
+              (let [cur (:hstack @u)]
+                (swap! u assoc :hstack (if (and (= :handler-named (:kind fb)) (seq cur)) (pop cur) cur))
+                (emit! u :swap 2)))
             (swap! u assoc :hstack (:hs fb))
+            (pop-block-nop! u fb)
             (if (= :finally-try (:kind fb))
               ;; the finally body runs with the frame blocks outside it, the return value under a POP_VALUE block
               ;; (CPython's compiler_unwind_fblock): a break or continue in it drops the value
@@ -502,7 +524,7 @@
                 (stmts! u (:body fb))
                 (swap! u assoc :fblocks saved)
                 (set-line! u nil))
-              (unwind-fblock! u fb preserve))
+              (unwind-fblock! u fb (and preserve (not hclean))))
             (recur (dec i))))))
     (when-not preserve (if (some? value) (expr*! u value) (load-const! u nil))))
     (emit! u :return nil)
@@ -517,22 +539,30 @@
 (defn- starred? [x] (= 'starred (head x)))
 
 (defn- seq-elements!
-  "Builds a tuple, list or set of xs; a starred element unpacked"
-  [u xs kind]
-  (let [n (count xs)]
-    (if (not-any? starred? xs)
-      (do (if (and (#{:list :set} kind) (>= n 3) (every? return-constant? xs))
-            ;; optimize_lists_and_sets folds them: the elements' loads have no lines of their own (no line event at
-            ;; an element's line; the view's co_lines agrees with f_lineno, queue 229)
-            (doseq [x xs] (expr*! u x))
-            (doseq [x xs] (expr! u x)))
-          (emit! u (case kind :tuple :build-tuple :list :build-list :set :build-set) n))
-      (do (emit! u (if (= kind :set) :build-set :build-list) 0)
-          (doseq [x xs]
-            (if (starred? x)
-              (do (expr! u (second x)) (emit! u (if (= kind :set) :set-update :list-extend) 1))
-              (do (expr! u x) (emit! u (if (= kind :set) :set-add :list-append) 1))))
-          (when (= kind :tuple) (emit! u :list-to-tuple nil))))))
+  "starunpack_helper (Python/codegen.c): a tuple, list or set of xs over pushed values already on the stack (a class's
+  function and name); a starred element unpacked; more than _PY_STACK_USE_GUIDELINE (30) values built item by item, each
+  add at the display's location (queue 248: the line events of a large display alternate between an item's line and
+  the display's)"
+  ([u xs kind] (seq-elements! u xs kind 0))
+  ([u xs kind pushed]
+   (let [n (count xs)
+         big (> (+ n pushed) 30)
+         [build add extend] (if (= kind :set) [:build-set :set-add :set-update] [:build-list :list-append :list-extend])]
+     (if (and (not-any? starred? xs) (not big))
+       (do (if (and (#{:list :set} kind) (zero? pushed) (>= n 3) (every? return-constant? xs))
+             ;; optimize_lists_and_sets folds them: the elements' loads have no lines of their own (no line event at
+             ;; an element's line; the view's co_lines agrees with f_lineno, queue 229)
+             (doseq [x xs] (expr*! u x))
+             (doseq [x xs] (expr! u x)))
+           (emit! u (case kind :tuple :build-tuple :list :build-list :set :build-set) (+ n pushed)))
+       (let [built (volatile! big)]
+         (when big (emit! u build pushed))
+         (doseq [[i x] (map-indexed vector xs)]
+           (if (starred? x)
+             (do (when-not @built (emit! u build (+ i pushed)) (vreset! built true))
+                 (expr! u (second x)) (emit! u extend 1))
+             (do (expr! u x) (when @built (emit! u add 1)))))
+         (when (= kind :tuple) (emit! u :list-to-tuple nil)))))))
 
 (defn- top-block [u] (loop [u u] (if-let [p (:parent @u)] (recur p) (:block @u))))
 
@@ -563,36 +593,42 @@
         (let [n (ident (first (second (node k))))]
           (when (seen n) (binding [*pos* (or (pos-of k) *pos*)] (syntax-error (str "keyword argument repeated: " n))))
           (recur (conj seen n) more))))
-    (if-not star
+    ;; codegen_call_helper_impl: CALL unless a starred argument, a **, or more than _PY_STACK_USE_GUIDELINE (30) values
+    ;; (keywords count twice): then ex_call, the tuple by starunpack_helper and the dict by codegen_subkwargs (queue 248)
+    (if-not (or star (> (+ (count pos) (* 2 (count kws))) 30))
       (do (doseq [a pos] (expr! u a))
           (doseq [[_ v] kwns] (expr! u v))
           ;; a method call's CALL at the location moved to the method's name (codegen_call's maybe_optimize_method_call)
           (at-loc! u (when meth (attr-loc (:loc @u) meth))
                    (fn [] (emit! u :call [(+ pre (count pos) (count kws)) (when (seq kws) (const! u {:tuple (mapv #(ident (first %)) kwns)}))]))))
-      (do (if (zero? pre)
-            ;; a lone *x is the call's own argument (starunpack_helper): CALL_FUNCTION_EX makes the tuple, and says
-            ;; "f() argument after * must be an iterable" of what is not
-            (if (and (= 1 (count pos)) (starred? (first pos)))
-              (expr! u (second (first pos)))
-              (seq-elements! u pos :tuple))
-            (do (emit! u :build-list pre)
-                (doseq [x pos]
-                  (if (starred? x)
-                    (do (expr! u (second x)) (emit! u :list-extend 1))
-                    (do (expr! u x) (emit! u :list-append 1))))
-                (emit! u :list-to-tuple nil)))
-          (if (seq kws)
-            (do (emit! u :build-map 0)
-                ;; a keyword after a ** is merged (compiler_subkwargs' one-item map, DICT_MERGE): a repeat is a TypeError
-                (let [merged? (volatile! false)]
-                  (doseq [[k v] kwns]
-                    (if (nil? k)
-                      (do (expr! u v) (emit! u :dict-merge 1) (vreset! merged? true))
-                      (if @merged?
-                        (do (load-const! u (ident k)) (expr! u v) (emit! u :build-map 1) (emit! u :dict-merge 1))
-                        (do (load-const! u (ident k)) (expr! u v) (emit! u :map-add 1))))))
-                (emit! u :call-ex true))
-            (emit! u :call-ex false)))))))
+      (let [kv (vec kwns)
+            have (volatile! false)
+            seen (volatile! 0)
+            sub! (fn [b e]
+                   (let [m (- e b) big (> (* 2 m) 30)]
+                     (when big (emit-nl! u :build-map 0))
+                     (doseq [[k v] (subvec kv b e)]
+                       (load-const! u (ident k)) (expr! u v)
+                       (when big (emit-nl! u :map-add 1)))
+                     (when-not big (emit! u :build-map m))))]
+        ;; a lone *x is the call's own argument (starunpack_helper): CALL_FUNCTION_EX makes the tuple, and says
+        ;; "f() argument after * must be an iterable" of what is not (queue 243)
+        (if (and (zero? pre) (= 1 (count pos)) (starred? (first pos)))
+          (expr! u (second (first pos)))
+          (seq-elements! u pos :tuple pre))
+        (doseq [[i [k v]] (map-indexed vector kv)]
+          (if (nil? k)
+            (do (when (pos? @seen)
+                  (sub! (- i @seen) i)
+                  (when @have (emit! u :dict-merge 1))
+                  (vreset! have true) (vreset! seen 0))
+                (when-not @have (emit! u :build-map 0) (vreset! have true))
+                (expr! u v) (emit! u :dict-merge 1))
+            (vswap! seen inc)))
+        (when (pos? @seen)
+          (sub! (- (count kv) @seen) (count kv))
+          (when @have (emit! u :dict-merge 1)))
+        (emit! u :call-ex (boolean (seq kws))))))))
 
 (def ^:dynamic *fstring-raw*
   "The enclosing f-string's or t-string's rawness: a format spec's text decoded by it (the tokenizer mode's raw)"
@@ -607,28 +643,134 @@
            {:lit (let [v (decode-str (-> p (str/replace "{{" "{") (str/replace "}}" "}")) raw? false)] (if (string? v) v (join-strs v)))}
            p))))
 
-(defn- format-field! [u p]
+(defn- text-end
+  "The position after text starting at [line col]: columns in UTF-8 bytes, a newline starts the next line at column 0"
+  [[l c] ^String text]
+  (let [n (count text)]
+    (loop [i 0 l l c c]
+      (if (>= i n)
+        [l c]
+        (let [ch (int (.charAt text i))]
+          (cond (= ch 10) (recur (inc i) (inc l) 0)
+                (and (<= 0xD800 ch 0xDBFF) (< (inc i) n) (<= 0xDC00 (int (.charAt text (inc i))) 0xDFFF)) (recur (+ i 2) l (+ c 4))
+                (< ch 0x80) (recur (inc i) l (inc c))
+                (< ch 0x800) (recur (inc i) l (+ c 2))
+                :else (recur (inc i) l (+ c 3))))))))
+
+(defn- text-start
+  "The position text ending at [line col] starts at (nil when text holds a newline)"
+  [[l c] ^String text]
+  (when-not (str/includes? text "\n") (let [[_ w] (text-end [0 0] text)] [l (- c w)])))
+
+(declare fstring-units format-field!)
+
+(defn- fv-debug
+  "A replacement field's debug text (f'{x=}') as a literal unit, from after its { (the parser's Constant)"
+  [p]
+  (when-let [d (:debug (nth (node p) 2))]
+    (let [fp (pos-of p) s (when fp [(fp 0) (inc (fp 1))])]
+      {:lit d :span (when s [s (text-end s d)])})))
+
+(defn- fstring-units
+  "An f-string's parts as the parser's values (queue 248): each literal {:lit VALUE :span [START END]} (decoded by the
+  token's prefix, its doubled braces undone) over its source text, a replacement field {:fv FORM :raw RAW} after its
+  debug text; start the position after the prefix and quote, end the closing quote's (either nil: unknown). A literal
+  spans from the previous field's end (or start) over its text, else back from the next field's start (or end)"
+  [parts raw? start end]
+  (let [n (count parts)]
+    (loop [i 0 cur start acc []]
+      (if (>= i n)
+        acc
+        (let [p (nth parts i)]
+          (if (string? p)
+            (let [nx (when (< (inc i) n) (pos-of (nth parts (inc i))))
+                  e (cond cur (text-end cur p) nx [(nx 0) (nx 1)] (= i (dec n)) end)
+                  s (or cur (when e (text-start e p)))
+                  v (decode-str (-> p (str/replace "{{" "{") (str/replace "}}" "}")) raw? false)]
+              (recur (inc i) e (conj acc {:lit (if (string? v) v (join-strs v)) :span [s e]})))
+            (let [fp (pos-of p) d (fv-debug p)]
+              (recur (inc i) (when fp [(fp 2) (fp 3)]) (cond-> acc d (conj d) true (conj {:fv p :raw raw?}))))))))))
+
+(defn- spec-units
+  "A format spec's parts as units, their spans back from the field's end before its } (fp, the field's position); and the
+  spec's location, from the : before its first part (codegen's JoinedStr of the spec)"
+  [parts raw? fp]
+  (let [rev (loop [ps (reverse parts) cur (when fp [(fp 2) (dec (fp 3))]) acc ()]
+              (if-let [[p & more] (seq ps)]
+                (if (string? p)
+                  (let [s (when cur (text-start cur p))
+                        v (decode-str (-> p (str/replace "{{" "{") (str/replace "}}" "}")) raw? false)]
+                    (recur more s (cons {:lit (if (string? v) v (join-strs v)) :span [s cur]} acc)))
+                  (let [q (pos-of p) d (fv-debug p)]
+                    (recur more (when q [(q 0) (q 1)]) (cond->> (cons {:fv p :raw raw?} acc) d (cons d)))))
+                [acc cur]))
+        [units first-start] rev]
+    [units (when (and fp first-start) [(first first-start) (dec (second first-start)) (fp 2) (dec (fp 3))])]))
+
+(defn- span-pos [[s e]] (when (and s e) [(s 0) (s 1) (e 0) (e 1)]))
+
+(defn fstring-of-units!
+  "codegen_joined_str over the units: consecutive literals one constant (the parser's), each at its span; more than
+  _PY_STACK_USE_GUIDELINE (30) values ''.join of a list"
+  [u units]
+  (let [units (reduce (fn [acc it]
+                        (let [l (peek acc)]
+                          (if (and (:lit it) (:lit l))
+                            (conj (pop acc) {:lit (str (:lit l) (:lit it))
+                                             :span [(first (:span l)) (second (:span it))]})
+                            (conj acc it))))
+                      [] (remove #(= "" (:lit %)) units))
+        n (count units)
+        one! (fn [it] (if (contains? it :lit)
+                        (at-loc! u (span-pos (:span it)) #(load-const! u (:lit it)))
+                        (binding [*fstring-raw* (:raw it *fstring-raw*)] (format-field! u (:fv it)))))]
+    (if (> n 30)
+      (do (load-const! u "")
+          (emit! u :load-attr (name-index! u "join"))
+          (emit! u :build-list 0)
+          (doseq [it units] (one! it) (emit! u :list-append 1))
+          (emit! u :call [1 nil]))
+      (do (doseq [it units] (one! it))
+          (cond (zero? n) (load-const! u "")
+                (> n 1) (emit! u :build-string n))))))
+
+(defn- format-field!
+  "codegen_formatted_value: the value, then its conversion, spec and format at the field's location"
+  [u p]
   (let [[_ [v] fo _] (node p)
         conv (or (:conversion fo) (when (and (:debug fo) (not (:format-spec fo))) 'r))]
     (expr! u v)
-    (when-let [spec (:format-spec fo)] ((resolve 'arbace.python.compile/fstring-of-items!) u (fstring-items spec *fstring-raw*)))
-    (emit! u :format [(some-> conv str) (boolean (:format-spec fo))])))
+    (at-node! u p
+              #(do (when-let [spec (:format-spec fo)]
+                     (let [[units sloc] (spec-units spec *fstring-raw* (pos-of p))]
+                       (at-loc! u sloc (fn [] (fstring-of-units! u units)))))
+                   (emit! u :format [(some-> conv str) (boolean (:format-spec fo))])))))
 
-(defn fstring-of-items! [u items]
-  (let [n (atom 0)]
-    (doseq [it items]
-      (if (map? it)
-        (when-not (= "" (:lit it)) (load-const! u (:lit it)) (swap! n inc))
-        (do (when-let [d (:debug (nth (node it) 2))] (load-const! u d) (swap! n inc))
-            (format-field! u it)
-            (swap! n inc))))
-    (cond (zero? @n) (load-const! u "")
-          (> @n 1) (emit! u :build-string @n))))
+(defn fstring-of-items!
+  "An f-string's items (fstring-items': literals and replacement fields, no spans) as units"
+  [u items]
+  (fstring-of-units! u (vec (mapcat (fn [it] (if (map? it) [it] (let [d (fv-debug it)] (cond-> [] d (conj (dissoc d :span)) true (conj {:fv it})))))
+                                    items))))
+
+(defn- fstring-part-units
+  "The units of one part of an f-string or of an implicit concatenation (queue 248): a plain string one literal over
+  its whole token, an f-string's from after its prefix and quote to before its closing quote; cpos the concatenation's
+  position, for the first part's start and the last part's end"
+  [p first? last? cpos]
+  (let [pp (pos-of p)
+        s0 (cond first? (when cpos [(cpos 0) (cpos 1)]) pp [(pp 0) (pp 1)])
+        e0 (cond last? (when cpos [(cpos 2) (cpos 3)]) pp [(pp 2) (pp 3)])]
+    (if (= 'joined-str (head p))
+      (let [[_ [ps] o _] (node p)
+            pre (count (get o :prefix "f")) q (count (get o :quote "\""))
+            raw (str/includes? (str/lower-case (get o :prefix "f")) "r")]
+        (fstring-units ps raw (when s0 [(s0 0) (+ (s0 1) pre q)]) (when e0 [(e0 0) (- (e0 1) q)])))
+      [{:lit (let [v (if (string? p) p (string-token-value p))] (if (vector? v) (join-strs v) v)) :span [s0 e0]}])))
 
 (defn- fstring! [u x]
   (let [[_ [parts] o _] (node x)]
     (let [raw (str/includes? (str/lower-case (get o :prefix "f")) "r")]
-      (binding [*fstring-raw* raw] (fstring-of-items! u (fstring-items parts raw))))))
+      (binding [*fstring-raw* raw] (fstring-of-units! u (fstring-part-units x true true (pos-of x)))))))
 
 (defn- tstring-of-items! [u items]
   (let [n (atom 0)]
@@ -664,7 +806,8 @@
       (= kinds #{:bytes}) (load-const! u {:bytes (vec (mapcat #(:bytes (string-token-value %)) parts))})
       (= kinds #{:str}) (load-const! u (join-strs (map #(let [v (if (string? %) % (string-token-value %))] (if (vector? v) (join-strs v) v)) parts)))
       (contains? kinds :t) (tstring-of-items! u (items))
-      :else (fstring-of-items! u (items)))))
+      :else (let [n (count parts) cpos (pos-of x)]
+              (fstring-of-units! u (vec (mapcat #(fstring-part-units (nth parts %) (zero? %) (= % (dec n)) cpos) (range n))))))))
 
 (declare string-token-value pos-of)
 
@@ -931,15 +1074,38 @@
                      (doseq [j @js] (label! u j)) (set-depth! u d)
                      (expr! u e)
                      (label! u end))))
-        dict (let [[ks vs] p]
-               (if (some nil? ks)
-                 (do (emit! u :build-map 0)
-                     (doseq [[k v] (map vector ks vs)]
-                       (if (nil? k)
-                         (do (expr! u v) (emit! u :dict-update 1))
-                         (do (expr! u k) (expr! u v) (emit! u :map-add 1)))))
-                 (do (doseq [[k v] (map vector ks vs)] (expr! u k) (expr! u v))
-                     (emit! u :build-map (count ks)))))
+        ;; codegen_dict and codegen_subdict: runs of pairs a BUILD_MAP each (more than 15 pairs: BUILD_MAP 0 and a MAP_ADD
+        ;; each, at the display's location), merged by DICT_UPDATE; a ** unpacked into the dict built so far (queue 248)
+        dict (let [[ks vs] p
+                   kv (mapv vector ks vs)
+                   n (count kv)
+                   have (volatile! false)
+                   elements (volatile! 0)
+                   sub! (fn [b e]
+                          (let [m (- e b) big (> (* 2 m) 30)]
+                            (when big (emit! u :build-map 0))
+                            (doseq [[k v] (subvec kv b e)]
+                              (expr! u k) (expr! u v)
+                              (when big (emit! u :map-add 1)))
+                            (when-not big (emit! u :build-map m))))]
+               (doseq [[i [k v]] (map-indexed vector kv)]
+                 (if (nil? k)
+                   (do (when (pos? @elements)
+                         (sub! (- i @elements) i)
+                         (when @have (emit! u :dict-update 1))
+                         (vreset! have true) (vreset! elements 0))
+                       (when-not @have (emit! u :build-map 0) (vreset! have true))
+                       (expr! u v) (emit! u :dict-update 1))
+                   (if (> (* 2 @elements) 30)
+                     (do (sub! (- i @elements) (inc i))
+                         (when @have (emit! u :dict-update 1))
+                         (vreset! have true) (vreset! elements 0))
+                     (vswap! elements inc))))
+               (when (pos? @elements)
+                 (sub! (- n @elements) n)
+                 (when @have (emit! u :dict-update 1))
+                 (vreset! have true))
+               (when-not @have (emit! u :build-map 0)))
         set (seq-elements! u (first p) :set)
         list (seq-elements! u (first p) :list)
         tuple (seq-elements! u (first p) :tuple)
@@ -1003,11 +1169,14 @@
     (name-of t) (name-op! u (name-of t) :del)
     :else
     (let [[h p _ _] (node t)]
-      (case h
-        attribute (do (expr! u (first p)) (at-loc! u (attr-loc (:loc @u) t) #(emit! u :delete-attr (name-index! u (mangle u (ident (second p)))))))
-        subscript (do (expr! u (first p)) (expr! u (second p)) (emit! u :delete-subscr nil))
-        (tuple list) (doseq [e (first p)] (delete-target! u e))
-        (throw (ex-info (str "compile: cannot delete " h) {}))))))
+      ;; at the target's location (codegen_visit_expr in Del: DELETE_SUBSCR and DELETE_ATTR at LOC(e); queue 248: the
+      ;; statement's before)
+      (at-node! u t
+                #(case h
+                   attribute (do (expr! u (first p)) (at-loc! u (attr-loc (:loc @u) t) (fn [] (emit! u :delete-attr (name-index! u (mangle u (ident (second p))))))))
+                   subscript (do (expr! u (first p)) (expr! u (second p)) (emit! u :delete-subscr nil))
+                   (tuple list) (doseq [e (first p)] (delete-target! u e))
+                   (throw (ex-info (str "compile: cannot delete " h) {})))))))
 
 ;; ---- functions, lambdas, classes ----
 
@@ -1269,7 +1438,8 @@
                                                (when (and (:future-annotations *table*) (annotations-used? body))
                                                  (emit! cu :setup-annotations nil))
                                                (when-let [d (docstring body)]
-                                                 (at-line! cu (line-of (first body)) #(load-const! cu d))
+                                                 ;; codegen_body: at the docstring's location (queue 248: its line alone before)
+                                                 (at-node! cu (first body) #(load-const! cu d))
                                                  (no-loc! cu #(name-op! cu "__doc__" :store)))
                                                (stmts! cu (if (docstring body) (rest body) body))
                                                ((resolve 'arbace.python.compile/class-annotations!) cu)
@@ -1447,46 +1617,64 @@
             (when ph
               (let [moved (subvec (:code @u) start)]
                 (when (> (count moved) 2) (throw (ex-info "compile: the module's __annotate__ needs more than its placeholders" {})))
-                (swap! u (fn [m] (-> m
-                                     (update :code #(reduce (fn [c [k ins]] (assoc c (+ ph k) ins)) (subvec % 0 start) (map-indexed vector moved)))
-                                     (update :lines subvec 0 start)
-                                     (update :locs subvec 0 start)
-                                     (update :hs-of subvec 0 start))))))))))))
+                ;; the moved instructions keep their locations (_PyCfg_FromInstructionSequence's placeholder: the annotations
+                ;; code's own, start_location's)
+                (swap! u (fn [m] (let [put (fn [k] (fn [v] (reduce (fn [c i] (assoc c (+ ph i) (nth v (+ start i)))) (subvec v 0 start) (range (count moved)))))]
+                                   (-> m
+                                       (update :code (put :code))
+                                       (update :lines (put :lines))
+                                       (update :locs (put :locs))
+                                       (update :hs-of subvec 0 start)))))))))))))
 
 ;; ---- comprehensions ----
 
 (defn- comp-loops!
   "The loops of a comprehension from generator i: the iterator of generator i on the top (outer: true for the first,
-  already there), the element emitted by (elt! n) with n the iterators above the collection"
-  [u gens i elt! n]
+  already there), the element emitted by (elt! n) with n the iterators above the collection. codegen_sync_comprehension_
+  generator's shape (queue 248): a filter that fails jumps to if_cleanup, the loop's JUMP back at the element's location
+  eloc (flow! threads it as jump_thread does, the jump taking eloc), and a later generator over a one-element list or
+  tuple (for y in [f(x)]) binds it without a loop"
+  [u gens i elt! n eloc]
   (if (>= i (count gens))
     (elt! n)
     (let [[_ [t it] o _] (node (nth gens i))
-          async? (:async o)]
-      ;; codegen_sync_comprehension_generator: GET_ITER and FOR_ITER at the iterable's location (queue 223)
-      (when (pos? i) (expr! u it) (at-node! u it #(emit! u (if async? :get-aiter :get-iter) nil)))
-      (let [start (here u)
-            d (depth u)]
-        (if async?
-          (let [h (push-handler! u d false)]
-            (emit! u :get-anext nil) (load-const! u nil) (emit! u :yield-from nil)
-            (pop-handler! u)
+          async? (:async o)
+          single (when (and (pos? i) (not async?) (#{'list 'tuple} (head it)))
+                   (let [es (first (second (node it)))]
+                     (when (and (= 1 (count es)) (not (starred? (first es)))) (first es))))
+          cleanup (atom [])
+          ifs! (fn [] (doseq [c (:ifs o)] (jump-if! u c cleanup false)))]
+      (if single
+        (do (expr! u single)
             (store-target! u t)
-            (doseq [c (:ifs o)]
-              (let [js (atom [])] (jump-if! u c js false) (doseq [j @js] (patch! u j start))))
-            (comp-loops! u gens (inc i) elt! (inc n))
-            (emit! u :jump start)
-            (target! u h)
-            (set-depth! u (inc d))
-            (emit! u :end-async-for nil))
-          (let [exit (at-node! u it #(jump! u :for-iter))]
-            (store-target! u t)
-            (doseq [c (:ifs o)]
-              (let [js (atom [])] (jump-if! u c js false) (doseq [j @js] (patch! u j start))))
-            (comp-loops! u gens (inc i) elt! (inc n))
-            (emit! u :jump start)
-            (label! u exit)
-            (set-depth! u (dec d))))))))
+            (ifs!)
+            (comp-loops! u gens (inc i) elt! n eloc)
+            (doseq [j @cleanup] (label! u j)))
+        (do
+          ;; codegen_sync_comprehension_generator: GET_ITER and FOR_ITER at the iterable's location (queue 223)
+          (when (pos? i) (expr! u it) (at-node! u it #(emit! u (if async? :get-aiter :get-iter) nil)))
+          (let [start (here u)
+                d (depth u)]
+            (if async?
+              (let [h (push-handler! u d false)]
+                (emit! u :get-anext nil) (load-const! u nil) (emit! u :yield-from nil)
+                (pop-handler! u)
+                (store-target! u t)
+                (ifs!)
+                (comp-loops! u gens (inc i) elt! (inc n) eloc)
+                (doseq [j @cleanup] (label! u j))
+                (at-loc! u eloc #(emit! u :jump start))
+                (target! u h)
+                (set-depth! u (inc d))
+                (emit! u :end-async-for nil))
+              (let [exit (at-node! u it #(jump! u :for-iter))]
+                (store-target! u t)
+                (ifs!)
+                (comp-loops! u gens (inc i) elt! (inc n) eloc)
+                (doseq [j @cleanup] (label! u j))
+                (at-loc! u eloc #(emit! u :jump start))
+                (label! u exit)
+                (set-depth! u (dec d))))))))))
 
 (defn- comprehension!
   "A list, set or dict comprehension or a generator expression: inlined (PEP 709) when the scope analysis inlined it,
@@ -1501,17 +1689,22 @@
         ;; 3.15 (PEP 798, codegen_sync_comprehension_generator): a starred element unpacked into the result, and a
         ;; dict comprehension's **mapping (no value) merged into it
         star (when (starred? elt) (first (second (node elt))))
+        ;; the element's location: its adds, the yield and the loop's JUMP back (codegen's elt_loc; a dict's from the key's
+        ;; start to the value's end)
+        eloc (if (and (= kind :dict) (second p))
+               (let [a (pos-of elt) b (pos-of (second p))] (when (and a b) [(a 0) (a 1) (b 2) (b 3)]))
+               (pos-of elt))
         elt! (fn [cu n]
                (case kind
                  :list (if star
                          (do (expr! cu star) (at-node! cu elt #(emit! cu :list-extend (inc n))))
-                         (do (expr! cu elt) (emit! cu :list-append (inc n))))
+                         (do (expr! cu elt) (at-loc! cu eloc #(emit! cu :list-append (inc n)))))
                  :set (if star
                         (do (expr! cu star) (at-node! cu elt #(emit! cu :set-update (inc n))))
-                        (do (expr! cu elt) (emit! cu :set-add (inc n))))
+                        (do (expr! cu elt) (at-loc! cu eloc #(emit! cu :set-add (inc n)))))
                  :dict (if (nil? (second p))
-                         (do (expr! cu elt) (emit! cu :dict-update (inc n)))
-                         (do (expr! cu elt) (expr! cu (second p)) (emit! cu :map-add (inc n))))
+                         (do (expr! cu elt) (at-loc! cu eloc #(emit! cu :dict-update (inc n))))
+                         (do (expr! cu elt) (expr! cu (second p)) (at-loc! cu eloc #(emit! cu :map-add (inc n)))))
                  :generator
                  (if star
                    ;; each item of the iterable yielded in turn (GET_ITER, FOR_ITER, YIELD_VALUE, POP_TOP, JUMP, END_FOR)
@@ -1525,7 +1718,7 @@
                                     (emit-nl! cu :jump start)
                                     (label! cu exit)
                                     (set-depth! cu (dec d)))))
-                   (do (expr! cu elt) (emit! cu :yield-value nil) (emit! cu :pop nil)))))
+                   (do (expr! cu elt) (at-loc! cu eloc #(do (emit! cu :yield-value nil) (emit! cu :pop nil)))))))
         build! (fn [cu] (case kind :list (emit! cu :build-list 0) :set (emit! cu :build-set 0) :dict (emit! cu :build-map 0) nil))]
     (if (:comp-inlined @block)
       ;; inlined: its own names are hidden fast locals of this unit, their outer values saved and restored around it
@@ -1565,7 +1758,7 @@
           (emit! u :swap 2)
           (when (and (= :class (:type @(:block @u))) (nil? saved-syms))
             (swap! u assoc :comp-syms (:symbols @block)))
-          (comp-loops! u gens 0 #(elt! u %) 0)
+          (comp-loops! u gens 0 #(elt! u %) 0 eloc)
           (swap! u assoc :hidden saved :comp-syms saved-syms)
           (when (pos? k)
             (pop-handler! u)
@@ -1586,9 +1779,12 @@
                                    (swap! cu assoc :argcount 1)
                                    (build! cu)
                                    (emit! cu :load-fast 0)
-                                   (comp-loops! cu gens 0 #(elt! cu %) 0)
-                                   (when (= kind :generator) (load-const! cu nil))
-                                   (emit! cu :return nil))
+                                   (comp-loops! cu gens 0 #(elt! cu %) 0 eloc)
+                                   ;; a generator expression's None and return: NO_LOCATION (codegen_wrap_in_stopiteration_handler),
+                                   ;; the for-iter's location propagated to them (queue 248)
+                                   (if (= kind :generator)
+                                     (no-loc! cu #(do (load-const! cu nil) (emit! cu :return nil)))
+                                     (emit! cu :return nil)))
                                  {:comp? true})]
         (make-function! u code [])
         (expr! u it0)
@@ -1854,7 +2050,7 @@
         (emit! u :with-enter nil))
       ;; [exit result]: the body under a handler entered at [exit] with lasti
       (let [h (push-handler! u (inc d) true)]
-        (push-fblock! u {:kind (if async? :async-with :with) :hs outer :line wl})
+        (push-fblock! u {:kind (if async? :async-with :with) :hs outer :line wl :loc wp})
         (if (some? v) (store-target! u v) (emit! u :pop nil))
         (with! u (rest items) body async?)
         (pop-fblock! u)
@@ -2456,6 +2652,19 @@
 
 (defn- fl-const? [k] (or (nil? k) (boolean? k) (number? k) (string? k) (and (map? k) (contains? k :tuple) (= 1 (count k)))))
 
+(defn- fl-const-seq
+  "fold_constant_seq_into_load_const's walk (Python/flowgraph.c) back from the list-to-tuple at i: build-list 0, then
+  const and list-append 1 alternating (NOPs between); the indices of those instructions, nil when it is not that shape"
+  [v i]
+  (loop [j (dec i) expect-append true acc ()]
+    (when-not (neg? j)
+      (let [x (nth v j)]
+        (cond (= :nop (:op x)) (when (keyword? (:arg x)) (recur (dec j) expect-append acc))
+              (and (= :build-list (:op x)) (= 0 (:arg x))) (when (and expect-append (some #(= :const (:op (nth v %))) acc))
+                                                              (cons j acc))
+              expect-append (when (and (= :list-append (:op x)) (= 1 (:arg x))) (recur (dec j) false (cons j acc)))
+              :else (when (= :const (:op x)) (recur (dec j) true (cons j acc))))))))
+
 (defn- fl-tuples
   "A tuple of constants built (const ... build-tuple N, NOPs between): one constant, the loads NOPs without a line
   (fold_tuple_of_constants); the unit's constants extended"
@@ -2467,8 +2676,17 @@
                    (loop [v (:ins b) i 0]
                      (if (>= i (count v))
                        v
-                       (let [ins (nth v i) n (:arg ins)]
-                         (if (and (= :build-tuple (:op ins)) (integer? n) (< 0 n 31))
+                       (let [ins (nth v i) n (:arg ins)
+                             seq-ks (when (= :list-to-tuple (:op ins)) (fl-const-seq v i))]
+                         (cond
+                           seq-ks
+                           (let [vals (map #(get @consts-atom (:arg (nth v %)) ::none) (filter #(= :const (:op (nth v %))) seq-ks))]
+                             (if (every? fl-const? vals)
+                               (recur (assoc (reduce (fn [v j] (assoc v j (fl-nop nil (:h (nth v j))))) v seq-ks)
+                                             i (assoc ins :op :const :arg (const-ix {:tuple (vec vals)})))
+                                      (inc i))
+                               (recur v (inc i))))
+                           (and (= :build-tuple (:op ins)) (integer? n) (< 0 n 31))
                            (let [ks (loop [j (dec i) acc ()]
                                       (cond (= n (count acc)) acc
                                             (neg? j) nil
@@ -2481,7 +2699,7 @@
                                              i (assoc ins :op :const :arg (const-ix {:tuple (vec vals)})))
                                       (inc i))
                                (recur v (inc i))))
-                           (recur v (inc i))))))))
+                           :else (recur v (inc i))))))))
           bs)))
 
 (defn- fl-pairs
@@ -2497,16 +2715,31 @@
                                 (recur v (inc i))))))))
         bs))
 
+(defn- fl-for-exits
+  "Each block a for-iter's exit alone enters, by position, with the for-iter's line: CPython's END_FOR and POP_ITER begin
+  that block, at the FOR_ITER's line (propagate_line_numbers), so a NOP of that line after them is redundant"
+  [bs]
+  (let [pos (fl-pos bs) n (count bs)
+        jumps (for [p (range n) :let [l (fl-last (nth bs p))] :when (and l (fl-jumps (:op l)))]
+                [(fl-next bs (pos (:arg l))) l])
+        falls (for [p (range n) :when (and (seq (:ins (nth bs p))) (fl-falls? (nth bs p)))
+                    :let [q (fl-next bs (inc p))] :when q]
+                q)
+        cnt (frequencies (concat (map first jumps) falls))]
+    (into {} (for [[q l] jumps :when (and q (= :for-iter (:op l)) (= 1 (cnt q)))] [q (or (:line l) -1)]))))
+
 (defn- fl-nops
-  "basicblock_remove_redundant_nops over every block; the number removed"
+  "basicblock_remove_redundant_nops over every block; the number removed. A for-iter's exit block starts after CPython's
+  END_FOR and POP_ITER at the for-iter's line (queue 248: such a NOP made a line event CPython has not)"
   [bs]
   (let [n (count bs)
+        for-exits (fl-for-exits bs)
         out (reduce
               (fn [bs p]
                 (let [v (transient (into [] (:ins (nth bs p)))) m (count v)
                       next-line (fn [] (when-let [q (fl-next bs (inc p))]
                                          (some #(when-not (and (= :nop (:op %)) (nil? (:line %))) [(:line %)]) (:ins (nth bs q)))))]
-                  (loop [i 0 dest [] prev -1]
+                  (loop [i 0 dest [] prev (get for-exits p -1)]
                     (if (>= i m)
                       (assoc bs p (assoc (nth bs p) :ins dest))
                       (let [ins (nth v i) line (or (:line ins) -1)]
@@ -2551,7 +2784,8 @@
       (let [pos (fl-pos bs) b (nth bs p) l (fl-last b)]
         (if (and l (fl-reversed (:op l)) (<= (pos (:arg l)) p) (< (inc p) (count bs)))
           (let [id (swap! fresh inc)
-                nb {:id id :ins [{:op :jump :arg (:arg l) :line (:line l) :p (:p l) :h (:h l)}]}
+                ;; a threaded jump's handler is none (jump_thread's basicblock_add_jump), its reversal's jump's too (queue 248)
+                nb {:id id :ins [(cond-> {:op :jump :arg (:arg l) :line (:line l) :p (:p l) :h (:h l)} (:threaded l) (assoc :threaded true))]}
                 b (assoc b :ins (conj (pop (:ins b)) (assoc l :op (fl-reversed (:op l)) :arg (:id (nth bs (inc p))))))]
             (recur (vec (concat (subvec bs 0 p) [b nb] (subvec bs (inc p)))) (+ p 2)))
           (recur bs (inc p)))))))
@@ -2696,15 +2930,17 @@
             b @(:top t)
             ph (when (and (:annotation-block b) (not (:future-annotations *table*)))
                  (let [i (here u)] (emit! u :nop nil) (emit! u :nop nil) i))]
+        ;; _PyCodegen_Module: the set of conditional annotations first, then codegen_body, at start_location (the first
+        ;; statement's location); the deferred annotations' __annotate__ there too, into the placeholders (queue 248)
+        (when (:has-conditional-annotations b)
+          (at-node! u (first body) #(do (emit! u :build-set 0) (name-op! u "__conditional_annotations__" :store))))
         (when (and (:future-annotations *table*) (annotations-used? body)) (emit! u :setup-annotations nil))
         ;; Interactive (mode single) has no docstring: a lone string statement is displayed (compiler_mod)
         (when-let [d (and (not= *mode* :single) (docstring body))]
           (at-node! u (first body) #(load-const! u d))
           (no-loc! u #(name-op! u "__doc__" :store)))
-        (when (:has-conditional-annotations b)
-          (emit! u :build-set 0) (name-op! u "__conditional_annotations__" :store))
         (stmts! u (if (and (not= *mode* :single) (docstring body)) (rest body) body))
-        (class-annotations! u ph)
+        (if (first body) (at-node! u (first body) #(class-annotations! u ph)) (class-annotations! u ph))
         (no-loc! u #(do (load-const! u nil) (emit! u :return nil)))
         ;; top-level await: the module's code a coroutine's (CO_COROUTINE)
         (when (and sc/*top-level-await* (:coroutine @(:top t))) (swap! u update :flags conj :coroutine))
