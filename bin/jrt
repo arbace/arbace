@@ -4,16 +4,21 @@
 # §4.3), printed by the printer (arbace.repr.go.print, through bin/build-go --print-only) into a
 # module and built, vetted and tested by gc.
 #
-# Usage: bin/jrt build [--arch amd64|arm64|all] [--prog DIR]
+# Usage: bin/jrt build [--arch amd64|arm64|all] [--prog DIR] [--package P]...
 #            print the module into .tmp/jrt-go/mod (with the test files), then go build and
 #            go vet the package for linux/ARCH (default all: amd64 and arm64)
-#        bin/jrt test [--arch amd64|arm64|all] [--prog DIR] [GO-TEST-FLAGS...]
+#        bin/jrt test [--arch amd64|arm64|all] [--prog DIR] [--package P]... [GO-TEST-FLAGS...]
 #            print the module with its test files (the forms' _test files, SPEC §15 Q14),
 #            add the test data (made first if missing or older than test/jrt), and go test the
 #            package: amd64 natively, arm64
 #            under qemu-aarch64 (go test -exec); other flags go to go test (-run RE, -v,
 #            -bench RE, -count N ...). No -race: Go's race detector needs cgo, which Arbace
 #            does not use (--race removed on 2026-10-16, doc/go/BOX-NOTES.md)
+#        --package P (JCS285 (b), doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS285 (b)"): build,
+#            vet or test only the module's package P (its directory under the module, jrt for
+#            arbace/jrt; repeated or comma-separated for several), one package at a time (-p 1): the
+#            day's form, within 2 GiB (the whole module's ./... peaks at about 4.9 GB, go's compiles
+#            side by side)
 #        --prog DIR: build or test the program root DIR instead of go/: j2g's (bin/j2g --tests
 #            --out OUT writes OUT/prog: jrt with the stand-ins replaced by the translated JDK
 #            classes), printed into .tmp/jrt-go/prog/mod
@@ -85,7 +90,13 @@ print_module() {
   local out=$1 src=${2:-$root}
   mkdir -p "$out"
   # with the packages jrt imports from other forms roots: Mozilla's roots (x509roots/, tls.ae)
-  bin/build-go --print-only --tests --module arbace --root "$root/x509roots" --work "$out" "$src" >&2
+  # (under --package, JCS285 (b): the printer's heap held under 2 GiB, GOMEMLIMIT 1500MiB unless set: 1.7 GB and
+  # 32 s for go/, against 4.6 GB and 17 s unlimited)
+  if [ ${#pkgs[@]} -gt 0 ]; then
+    GOMEMLIMIT=${GOMEMLIMIT:-1500MiB} bin/build-go --print-only --tests --module arbace --root "$root/x509roots" --work "$out" "$src" >&2
+  else
+    bin/build-go --print-only --tests --module arbace --root "$root/x509roots" --work "$out" "$src" >&2
+  fi
   if [ ! -f "$work/testdata/.done" ] || [ -n "$(find test/jrt -name 'testdata*.ae' -newer "$work/testdata/.done")" ]; then
     echo "== test data from the JVM (test/jrt/testdata.ae)" >&2
     make_testdata "$work/testdata" && touch "$work/testdata/.done"
@@ -193,14 +204,29 @@ arches() {
   esac
 }
 
+# targets: the go command's packages and its parallelism: ./... (every package of the module), or under
+# --package's list (pkgs) -p 1 and each ./P (JCS285 (b))
+pkgs=()
+targets() {
+  local p
+  if [ ${#pkgs[@]} = 0 ]; then echo ./...; return 0; fi
+  echo -p 1
+  for p in "${pkgs[@]}"; do
+    case $p in ''|/*|*..*) echo "bin/jrt: --package $p: a package directory of the module (jrt, goi, ...)" >&2; exit 2 ;; esac
+    echo "./${p#./}"
+  done
+}
+add_pkgs() { local IFS=, p; for p in $1; do pkgs+=("$p"); done; }
+
 cmd=${1:-}
 [ $# -gt 0 ] && shift
 case $cmd in
   build)
     arch=all prog=
     while [ $# -gt 0 ]; do
-      case $1 in --arch) arch=$2; shift 2 ;; --prog) prog=$2; shift 2 ;; *) usage ;; esac
+      case $1 in --arch) arch=$2; shift 2 ;; --prog) prog=$2; shift 2 ;; --package) add_pkgs "$2"; shift 2 ;; *) usage ;; esac
     done
+    tg=$(targets) || exit 2
     mod=$work
     if [ -n "$prog" ]; then mod=$work/prog; print_module "$mod" "$(cd "$prog" && pwd)"; else print_module "$mod"; fi
     ovl=$(make_overlay)
@@ -208,8 +234,9 @@ case $cmd in
     for a in $(arches "$arch"); do
       echo "== linux/$a: go build, go vet" >&2
       # shellcheck disable=SC2046
-      (cd "$mod/mod" && env $(goenv "$a") "$go" build -trimpath -overlay "$ovl" ./... &&
-         env $(goenv "$a") "$go" vet -overlay "$ovl" ./...) || status=1
+      # shellcheck disable=SC2086
+      (cd "$mod/mod" && env $(goenv "$a") "$go" build -trimpath -overlay "$ovl" $tg &&
+         env $(goenv "$a") "$go" vet -overlay "$ovl" $tg) || status=1
     done
     exit $status ;;
   test)
@@ -219,9 +246,11 @@ case $cmd in
       case $1 in
         --arch) arch=$2; shift 2 ;;
         --prog) prog=$2; shift 2 ;;
+        --package) add_pkgs "$2"; shift 2 ;;
         *) flags+=("$1"); shift ;;
       esac
     done
+    tg=$(targets) || exit 2
     mod=$work
     if [ -n "$prog" ]; then mod=$work/prog; print_module "$mod" "$(cd "$prog" && pwd)"; else print_module "$mod"; fi
     ovl=$(make_overlay)
@@ -231,9 +260,9 @@ case $cmd in
       if [ "$a" = arm64 ]; then
         extra+=(-exec "$qemu")
       fi
-      echo "== linux/$a: go test ${extra[*]} ${flags[*]}" >&2
-      # shellcheck disable=SC2046
-      (cd "$mod/mod" && env $(goenv "$a") "$go" test -trimpath "${extra[@]}" "${flags[@]}" ./...) || status=1
+      echo "== linux/$a: go test ${extra[*]} ${flags[*]} "$tg >&2
+      # shellcheck disable=SC2046,SC2086
+      (cd "$mod/mod" && env $(goenv "$a") "$go" test -trimpath "${extra[@]}" ${flags[@]+"${flags[@]}"} $tg) || status=1
     done
     exit $status ;;
   testdata)

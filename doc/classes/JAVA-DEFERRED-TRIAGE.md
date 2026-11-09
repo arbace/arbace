@@ -6406,3 +6406,13 @@ its jar written under `test.classes`) passes where the record says fail; t05046 
 Java night's `bin/java-check --levels interp` and `--levels compiled` runs with `REPR_JAVA_EXE` set compile the 57 (a tool run
 each, 2 to 10 s). Expected: F26's 18 can pass at interp once the API is in the world (the night's build); the rows of t08142 and
 the launcher tests may move (recorded by the night, not by day).
+
+## As built: JCS285 (b): `bin/jrt test --package P`, the day's form (branch `java-props2`)
+
+`bin/jrt build` and `bin/jrt test` take `--package P` (repeated, or `P,Q`): the go command builds, vets or tests `./P` alone (the
+package's directory in the printed module: `jrt` for `arbace/jrt`), one package at a time (`-p 1`), in place of `./...`. The
+whole module's peak was not go's compiles alone: the print of `go/` (`bin/build-go --print-only` on stage 0) peaks at 4.6 GB
+in 17 s; under `--package` it runs with `GOMEMLIMIT=1500MiB` (unless set), 1.7 GB in 32 s. Measured on `java-props2` (busybox
+`time -v`, every process of the run): `bin/jrt test --arch amd64 --package jrt -count=1` 1.59 GB peak, 38 s (`ok arbace/jrt
+5.0s`); `bin/jrt build --arch amd64 --package jrt` (go build and go vet) 1.59 GB, 51 s; go's compile and test of `./jrt` alone
+from a cold cache 0.94 GB, 30 s. Without `--package` nothing changes (the night's `bin/jrt test`).
