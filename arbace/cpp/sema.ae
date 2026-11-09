@@ -1366,6 +1366,21 @@
 
 (declare ce-eval ce-wrap)
 
+(declare const-int)
+
+(defn- var-const-int
+  "A const integral variable's value, its initializer's constant (const-int in its definition's scope), kept on the variable
+  once found: a variable's initializer is the same expression at every use, and a class template's static member whose
+  initializer names its other specializations' (cpp0x/overflow1's Fib<i-1>::value + Fib<i-2>::value) is otherwise evaluated
+  again for each path, exponentially (the dg read's one file that never ended). A failure is not kept."
+  [id]
+  (let [v (var* id)]
+    (if (contains? v :cint)
+      (:cint v)
+      (let [c (const-int (or (:def-scope v) *root*) (:init v))]
+        (upd-var! id assoc :cint c)
+        c))))
+
 (defn const-int [scope n]
   (let [e (binding [*cutoff* Long/MAX_VALUE] (rv (analyze {:scope scope} n)))]
     (letfn [(ev [e]
@@ -1394,7 +1409,7 @@
                 :not (if (zero? (long (ev (:e e)))) 1 0)
                 :land (if (and (not= 0 (long (ev (:l e)))) (not= 0 (long (ev (:r e))))) 1 0)
                 :lor (if (or (not= 0 (long (ev (:l e)))) (not= 0 (long (ev (:r e))))) 1 0)
-                :load (let [v (var* (:id (:e e)))] (if (and (:c (:ty v)) (:init v)) (const-int (:def-scope v) (:init v)) (ce-eval e)))
+                :load (let [v (var* (:id (:e e)))] (if (and (:c (:ty v)) (:init v)) (var-const-int (:id (:e e))) (ce-eval e)))
                 (ce-eval e)))]
       (ev e))))
 
@@ -1645,8 +1660,7 @@
       ;; a function lvalue: its address; *p of a function pointer p: p itself
       (abi/fn? t) (if (= :deref (:op e)) (:e e) {:op :fnaddr :e e :fn (:fn e) :ty (abi/ptr t) :cat :pr})
       (and (= :var (:op e)) (:c t) (abi/integral? t) (:init (var* (:id e))) (not= :local (:storage (var* (:id e)))))
-      (let [v (var* (:id e))
-            c (try (const-int (or (:def-scope v) *root*) (:init v)) (catch arbace.lang.ExceptionInfo _ nil))]
+      (let [c (try (var-const-int (:id e)) (catch arbace.lang.ExceptionInfo _ nil))]
         (if c {:op :int :v c :ty (abi/unq t) :cat :pr} {:op :load :e e :ty (abi/unq t) :cat :pr}))
       ;; o.k of a constant static member: o evaluated, k folded (not an odr-use)
       (and (= :comma (:op e)) (= :var (:op (:r e))) (lv? e) (not (abi/class? t)))
@@ -4861,9 +4875,13 @@ protected:
                                  (when (and *on-refusal* (= :member-static (:storage v)) (:init v) (not (:defined v)) (not (:cx-sinit v))
                                             (cx-static-member-init? v))
                                    (upd-var! id assoc :cx-sinit true)
-                                   (try (global-init id)
-                                        (catch arbace.lang.ExceptionInfo e
-                                          (if (:codegen/refused (ex-data e)) (*on-refusal* e (some-> *at* deref)) (throw e)))))
+                                   ;; (the position of the analysis restored after: a later refusal without a node of its own,
+                                   ;; a default-initialized variable's, is not given this initializer's)
+                                   (let [at0 (some-> *at* deref)]
+                                     (try (global-init id)
+                                          (catch arbace.lang.ExceptionInfo e
+                                            (if (:codegen/refused (ex-data e)) (*on-refusal* e (some-> *at* deref)) (throw e)))
+                                          (finally (when *at* (reset! *at* at0))))))
                                  (when (and (:defined v) (not (:ginit v)))
                                    ;; (CX12: as a checker a refused initializer is reported and the analysis goes on)
                                    (if-let [h *on-refusal*]

@@ -2664,3 +2664,15 @@ The user accepted HF10-P1 to P10 as recommended (~06:15). Built by an agent in t
 - **Measured**: probe `.tmp/p/u1.cpp` (three errors where the rules have them, none on a protected function made public);
   the 19 dg-error files with a class's using-declaration and an access message (`.tmp/fusing.txt`): parse/access6 now passes
   (with CP323's and CP321's: 5 → 6, inh-ctor35 lost as CP323 says).
+
+## 2026-11-09: C++: the dg read's one endless file fixed, CP321's measure corrected (branch `cpp-props4`)
+
+- **Found**: cpp0x/overflow1.C never ended in the dg read (exponential constant folding of `Fib<95>::value` through the
+  specializations' static members; on next's tree too): tonight's whole-part record would have hung.
+- **Fixed**: `arbace.cpp.sema/var-const-int`, a const integral variable's value kept once found; overflow1 in 7 s. And CP321's
+  analysis restores the analysis position after a member's initializer (a stale line-1 error in
+  template/non-type-template-argument-1).
+- **Correction** of the CP321 entry above: its "158 files: no pass lost, no new extra" came from a run on the CP323 commit's tree,
+  a mistake in assembling the commits. Measured again on the right tree: no pass lost, five gained (class-deduction108,
+  using-enum-1, class-deduction-alias12, var-templ81, static4, each reviewed), one new extra found and fixed (the position)
+  (doc/cpp/CPP-SURVEY.md, "As built: the dg read's one endless file, and CP321's measure corrected").

@@ -5428,3 +5428,25 @@ such guide, so the standard is the reference here), on CP320's machinery:
   its own as before; a protected base function made public by `using` is no longer an error.
 - At the using-declaration: each function it names (not a constructor) accessible there (its own access, or a using-declaration's
   that named it), else the error at the using-declaration, in the analysis' order (`:cx-error`).
+
+## As built: the dg read's one endless file, and CP321's measure corrected (2026-11-09; branch `cpp-props4`)
+
+- **Found** while measuring CP321 (the 158 dg-error files with an in-class static member, `.tmp/fstatic.txt`): cpp0x/overflow1.C
+  (`Fib<95>::value`, each specialization's `static const long long value = Fib<i-1>::value + Fib<i-2>::value`) never ended
+  (one thread at 100% for 43 minutes, on next's tree as on this branch's): `rv` folded a const integral variable by `const-int` of
+  its initializer at every use, so the specializations' values were evaluated again along every path, 2^95 of them. Tonight's
+  record of the whole dg-error part would not have ended.
+- **Fixed**: `var-const-int`, the value kept on the variable once found (`:cint`; a failure not kept), used by `rv` and by
+  `const-int`'s loads: overflow1 reads in 7 s (accepted: the overflow is not modelled).
+- **CP321's position**: its analysis of a member's initializer left the analysis position (`*at*`) on that initializer, and a
+  later refusal without a node of its own (template/non-type-template-argument-1's default-initialized `D<B> d`) was reported
+  there, line 1: the position is restored after.
+- **CP321's measure, corrected**: the commit's journal entry says the 158 files lost nothing and gained no extra; that run
+  (`.tmp/ch-*`) was made on the CP323 commit's tree by mistake (the commits were assembled by copying each stage's files into the
+  worktree, which then held CP323's). Measured again on this tree (`.tmp/cf-*`, in chunks of 20 with a 900 s cap, against next's
+  `.tmp/chb-*`, overflow1 apart since next's never ends): no pass lost; gained class-deduction108, using-enum-1 (CP321),
+  class-deduction-alias12 (CP320), cpp1y/var-templ81 (CP321: `*var<T>` of a reference in `template struct B<int>;`'s members,
+  "indirection requires pointer operand", the program's error by the rule) and init/static4 (CP321: `static const A a = 0;` in A,
+  "no matching function": no conversion from 0 to the aggregate A, a real error of that line, though clang's is the incomplete
+  type); cpp0x/explicit15 two more of its lines found; the one new extra (non-type-template-argument-1, line 1) the position above,
+  gone after the fix (`.tmp/cg-fsplit-07`).
