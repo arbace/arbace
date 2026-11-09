@@ -1258,3 +1258,28 @@ G3.8's "class template argument deduction" and G3c's CTAD are built in `arbace.c
 guides from the constructors, `C()`, the copy deduction candidate, the user's deduction guides and C++20's aggregate candidate,
 deduced and chosen as clang's DeduceTemplateSpecializationFromInitializer does, for variables, `T(...)` and `T{...}`; where the
 slice is unsure the parser's own deduction stays the type. doc/cpp/CPP-SURVEY.md, "As built: CP311 (a) and the rest of CP313 (a)".
+
+## The vtables' order (2026-11-09, branch `cpp-codegen-fix`)
+
+The code generator kept the vtable groups, VTTs and deleting destructors a unit refers to in hash sets (`:groups`, `:vtts`,
+`:d0s` of `*top*`) and wrote them in the sets' order, which followed the class and function ids' allocation: cpp-props3, handing
+out more ids, moved rt-eh's four vtable globals, and every forms digest with them. They are now kept in the order first referred
+to, and each vtable group and VTT takes its place among the module's forms at its first reference (`want!` reserves the slot,
+`place!` fills it when the group is written), as clang creates a global where it is first referred to
+(`CodeGenVTables::GetAddrOfVTable`, `GetAddrOfVTT`, clang/lib/CodeGen/CGVTables.cpp, CGVTT.cpp at llvmorg-23.1.5) and defines it
+in place; a class's VTT follows its vtable (`GenerateClassData`: the vtable's definition, then `emitVirtualInheritanceTables`),
+its vtable wanted first. Against clang 23.1.5's `-O0` IR of the 15 samples with vtables (by hand, not recorded), the order of the
+`_ZTV`/`_ZTT` definitions is clang's in 4 (ctorvirtual, diamondless, virtual-construct, virtual-deep; none before); the string
+constants and `_ZTI` objects agree with clang in the same samples as before (6 and 7 of 17). The rest differs by the order the
+deferred functions are written: ours a round at a time, clang's depth first (`CodeGenModule::EmitDeferred` recursing after each
+definition). Tried, depth first gives 8 of 15 (rt-eh, rtti-cross, tmpl-virtual, virtual too) but moves dtors' strings off clang's
+order: P23 below. `bin/cppi codegen-gen --record` recorded again (149 samples, 149 generated: rtti, recorded refused in cpp-props2's
+record, is generated since G5c).
+
+### Proposed
+
+- P23: the deferred functions written depth first as clang's `EmitDeferred`, with `EmitDeferredVTables` at the start of each
+  round. (a) port it whole (the vtables' definitions deferring their functions as clang's do, then the order checked against
+  clang's IR of the samples: that IR recorded in a pack, a corpus `codegen` for `bin/cppi record-ir`, would make it a light check;
+  about a day); (b) leave the order as it is (deterministic, digests stable). Recommended: (a) when the records pack is made,
+  as the IR level's comparison with clang needs the same order.

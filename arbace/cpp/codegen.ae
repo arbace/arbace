@@ -34,6 +34,26 @@
     (list 'g s)))
 
 (defn- add-top! [f] (swap! *top* update :forms conj f))
+;; The vtable groups, VTTs and deleting destructors a unit refers to, in the order first referred to (a vector without
+;; repeats; a hash set's order followed the class and function ids' allocation: cpp-props3 moved rt-eh's four vtables
+;; by handing out more ids). A vtable group or a VTT takes its place among the module's forms at its first reference,
+;; as clang creates a global where it is first referred to (CodeGenVTables::GetAddrOfVTable, GetAddrOfVTT) and defines
+;; it in place: `want!` reserves the slot, `place!` fills it, and a class's vtable before its VTT (GenerateClassData).
+(defn- conj-new [v x] (if (some #(= x %) v) v (conj (or v []) x)))
+
+(defn- want!
+  "Refers to the vtable group or VTT `x` (`k` :groups or :vtts; `skey` its slot's key): wanted, and its slot reserved."
+  [k skey x]
+  (when-not (some #(= x %) (get @*top* k))
+    (when (= k :vtts) (want! :groups [:group [x x 0]] [x x 0]))
+    (swap! *top* update k conj-new x)
+    (when-not (contains? (:slots @*top*) skey)
+      (swap! *top* (fn [t] (-> t (assoc-in [:slots skey] (count (:forms t))) (update :forms conj [::slot skey])))))))
+
+(defn- place! "The form `f` of the global whose slot is `skey`: in its slot, else last." [skey f]
+  (if-let [i (get (:slots @*top*) skey)]
+    (swap! *top* update :forms assoc i f)
+    (add-top! f)))
 
 (defn- declare! [^String nm ret ps & {:keys [va nounwind pattrs]}]
   (when-not (contains? (:declared @*top*) nm)
@@ -1868,7 +1888,7 @@
   [grp sub]
   (let [g (apply group-of grp)
         i (or (get (:aps g) sub) (fail :codegen "no address point for " (pr-str sub)))]
-    (swap! *top* update :groups (fnil conj #{}) grp)
+    (want! :groups [:group grp] grp)
     (list 'getelementptr :inbounds (list 'array (count (:items g)) 'ptr) ['ptr (gsym (group-name grp))] ['i64 0] ['i64 i])))
 
 (defn vtt-layout
@@ -1915,7 +1935,7 @@
   [cid vtt i]
   (if vtt
     (if (zero? (long i)) vtt (val! (list 'getelementptr :inbounds 'ptr ['ptr vtt] ['i64 i])))
-    (do (swap! *top* update :vtts (fnil conj #{}) cid)
+    (do (want! :vtts [:vtt cid] cid)
         (list 'getelementptr :inbounds (list 'array (count (:entries (vtt-layout cid))) 'ptr) ['ptr (gsym (vtt-name cid))] ['i64 0] ['i64 i]))))
 
 (defn- vptr-list
@@ -1961,7 +1981,7 @@
                  (:fields (abi/cls cid))))))
 
 (defn- want-d0! "A virtual destructor's deleting variant, written once (as clang, when a vtable refers to it)." [fid]
-  (swap! *top* update :d0s (fnil conj #{}) fid))
+  (swap! *top* update :d0s conj-new fid))
 
 (defn- linkage-of [f]
   (cond
@@ -2256,12 +2276,14 @@
                                                            (if (= 'void ret) '(ret void) (list 'ret ret '%t2))]))])])))))
     (gsym nm)))
 
+(declare vtt!)
+
 (defn- group! [grp]
   (if (and (= (first grp) (second grp)) (external-class? (first grp)))
     ;; a class whose vtable is the runtime's (its key function not defined here): declared, external (G4)
     (let [g (apply group-of grp)]
       (typeinfo! (first grp))
-      (add-top! (list 'llvm/global (gsym (group-name grp)) (list 'array (count (:items g)) 'ptr) :linkage :external :constant true :align 8)))
+      (place! [:group grp] (list 'llvm/global (gsym (group-name grp)) (list 'array (count (:items g)) 'ptr) :linkage :external :constant true :align 8)))
   (let [[m lid moff] grp
         g (apply group-of grp)
         ti (typeinfo! m)
@@ -2276,11 +2298,16 @@
                                adj ['ptr (thunk! fid v adj)]
                                (= 0 v) (do (want-fn! fid 1) (want-d0! fid) ['ptr (gsym (abi/mangle-fn f 0))])
                                :else ['ptr (want-fn! fid 1)])))))]
-    (add-top! (apply list 'llvm/global (gsym (group-name grp)) (list 'array (count slots) 'ptr) (apply list 'array slots) (concat (vt-linkage lid) [:constant true :align 8]))))))
+    (place! [:group grp] (apply list 'llvm/global (gsym (group-name grp)) (list 'array (count slots) 'ptr) (apply list 'array slots) (concat (vt-linkage lid) [:constant true :align 8])))
+    ;; a class's VTT right after its vtable, as clang's CodeGenVTables::GenerateClassData writes them
+    ;; (EmitVTableDefinition, then emitVirtualInheritanceTables)
+    (when (and (= m lid) (abi/has-vbases? m) (not (contains? (:declared @*top*) [:vtt m])))
+      (swap! *top* update :declared conj [:vtt m])
+      (vtt! m)))))
 
 (defn- vtt! [cid]
   (let [{:keys [entries]} (vtt-layout cid)]
-    (add-top! (apply list 'llvm/global (gsym (vtt-name cid)) (list 'array (count entries) 'ptr)
+    (place! [:vtt cid] (apply list 'llvm/global (gsym (vtt-name cid)) (list 'array (count entries) 'ptr)
                     (apply list 'array (for [e entries] ['ptr (address-point (:grp e) (:sub e))]))
                     (concat (vt-linkage cid) [:constant true :align 8])))))
 
@@ -2554,11 +2581,11 @@
     ;; G5c: the vtables (with their VTTs and type_info) of the classes whose key function this unit defines, used or not
     ;; (clang's Sema::MarkVTableUsed at the key function's definition, CodeGenModule::EmitVTable)
     (doseq [cid (sort (keys @abi/*classes*)) :when (= :here (vtable-home cid))]
-      (swap! *top* update :groups (fnil conj #{}) [cid cid 0])
+      (want! :groups [:group [cid cid 0]] [cid cid 0])
       ;; (defined here: no external declaration of it, the type_info of a class derived from __si_class_type_info, in
       ;; si_class_type_info.cc, names __si_class_type_info's vtable)
       (swap! *top* update :declared conj (vtable-name cid))
-      (when (abi/has-vbases? cid) (swap! *top* update :vtts (fnil conj #{}) cid))
+      (when (abi/has-vbases? cid) (want! :vtts [:vtt cid] cid))
       (let [c (abi/cls cid)]
         (when (and (= "__fundamental_type_info" (:name c)) (= [[:ns "__cxxabiv1"]] (vec (:path c))))
           (fundamental-typeinfos!))))
@@ -2577,6 +2604,8 @@
               (swap! *top* update :declared conj key)
               (if (= k :group) (group! x) (vtt! x))))
           (recur))))
+    ;; (every slot filled: a wanted group or VTT is written)
+    (swap! *top* update :forms (fn [fs] (filterv #(not (and (vector? %) (= ::slot (first %)))) fs)))
     (doseq [[nm a] (sort-by key (:aliases @*top*))] (when (contains? (:c1 @*top*) nm) (add-top! a)))
     (when (:dso @*top*) (add-top! (list 'llvm/global (gsym "__dso_handle") 'i8 :linkage :external :visibility :hidden)))
     ;; G5c: the thread-local variables' globals (their definitions and declarations) thread_local, as clang's
