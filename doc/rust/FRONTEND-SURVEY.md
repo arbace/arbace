@@ -2295,3 +2295,11 @@ Branch `rust-props`, after the night's four, one commit a proposal.
 - Results: capture-check **174 of 174** closures over every program (173), the essential step's 34 of 34; mono-check's locations **34 of
   34** (33); `hir-check --ours` 90 of 91 and one but for whitespace, `typeck-check --ours` 11,142 of 11,173: unchanged.
   `essential-known.txt` re-recorded.
+
+### RFP35 (a): the packs' key holds the helper's whole digest (as built)
+
+Kept as built: an entry's key holds `tools/rsdump`'s whole source digest (`rfr_helper_hash`, as `bin/repr-rust`'s `helper_hash`). Today's
+two helper changes (RFP28/RFP37's, RFP32's) each made the four packs STALE, and each re-make took about 30 s by hand with rustc
+(`bin/rust-front records make`); the three kinds the helper's change did not touch came out byte for byte the same packs (their
+manifests' keys moved), which `records make` shows by the unchanged pack digests. A digest of the modes' sources alone (b) would trust a
+hand-kept list of which files a mode reads, as the proposal says.
