@@ -2,7 +2,8 @@
 
 Status: survey, plan, the first slice (G1, branch `cpp-codegen`) and the second (G2, branch `cpp-codegen2`, §4a,
 2026-11-05), templates (G3), the first slice of the headers (G4, branch `cpp-g4`, "G4. The headers"), P15, P16 and the
-streams (G5, branch `cpp-g5`, "G5. P15, P16 and the streams" at the end), for the user's acceptance. Words: **the native parser** is CX11's (`arbace.repr.cpp.parse`, [NATIVE.md](NATIVE.md)), whose tree is
+streams (G5, branch `cpp-g5`, "G5. P15, P16 and the streams"), and the runtime's libsupc++ by our route (G5c, branch
+`cpp-runtime-own`, "G5c. The runtime by our route" at the end), for the user's acceptance. Words: **the native parser** is CX11's (`arbace.repr.cpp.parse`, [NATIVE.md](NATIVE.md)), whose tree is
 clang's AST as data; **clang's route** is cppi as built (CX6-CX7, [LLVM.md](LLVM.md)): `clang++ -O0 -S -emit-llvm`, the IR
 read as LLVM forms by repr/llvm, lowered to C forms by `arbace.cpp.lower`, compiled by gcc `-O0` with the lowered runtime
 and run; **our route** replaces its first step: the native parser, a semantic analysis of our own (`arbace.cpp.sema`)
@@ -1040,3 +1041,169 @@ template corners; `hdr-vector` needs it for its last name.
   executable later.
 - **P18 (b):** the 206-test headers corpus list committed with recorded results, as a night check beside P11's template corpus.
 - **P19 (b):** a class template's pattern analyzed as a dependent class (the current instantiation), in G6.
+
+## G5c. The runtime by our route (branch `cpp-runtime-own`, 2026-11-08)
+
+Status: built on `next` bd33e27cc by the user's decision CP240 (c) (2026-11-07): libsupc++, the part of C++'s runtime the
+language itself calls (the Itanium ABI's exceptions, RTTI, guards, `new`/`delete`, the vector helpers, the terminate and
+unexpected handlers), compiled by Arbace's route -- the native parser, `arbace.cpp.sema` and `arbace.cpp.codegen` --
+from the pinned gcc 15.2.0 tarball's sources, so that clang's IR leaves the runtime's libsupc++ part. libstdc++-v3/src
+(134 units with libstdc++exp's: strings, streams, locales, `<chrono>`, `<filesystem>` ...) stays clang's IR, from the pack (G5c's next step).
+
+Contents: G5c.1 What the units asked · G5c.2 The proof · G5c.3 The build · G5c.4 The numbers · G5c.5 What is not done ·
+G5c.6 Sources · G5c.7 Proposed.
+
+### G5c.1 What the units asked
+
+cpp-90 measured 41 of 62 units generating (its 62 are units.edn's C++ libsupc++ units but `atomicity.cc`'s, which is
+63 with it; `eh_personality.cc` is excluded by design, CP86 (c): the pending-flag layer replaces the personality
+routine). "Generated" was not "correct": a names level (each unit's external names against the oracle's IR, both ways)
+found most of the generated units wrong -- whole units empty, vtables missing. Each item below in the rule's general
+form, with the unit that asked and a sample of `test/cpp/codegen` where one was written:
+
+| what | unit | as built |
+|---|---|---|
+| using-directives' nominated sets each namespace once ([namespace.udir]/2-3) | the type_info units (tinfo.h: an unnamed namespace inside `__cxxabiv1` nominating `abi` = `__cxxabiv1`): a stack overflow | `own-names` keeps the namespaces seen; sample `using-cycle` |
+| GNU's restrict-qualified references | `class_type_info.cc`'s `__upcast_result &__restrict` | the parser's ptr-operators and the type reader take `__restrict` after `&`/`&&` |
+| GNU's `__atomic` builtins (clang's AtomicExpr) | `guard.cc`, `new_handler.cc`, `atomicity.h` | the parser keeps the operands (`:_args`, its dump's children untouched); sema types each form (`_n` and generic, exchange, compare-exchange, fetch-op and op-fetch, test-and-set, clear); the code generator writes LLVM's atomic load, store, `atomicrmw`, `cmpxchg` at the order's LLVM ordering for a constant order (an order the operation does not take emits nothing, as clang's), a switch over the C ABI's values for a run-time one, the compare-exchange's failure set; also as a call in a template's pattern (std::atomic's members); sample `atomic-builtins` |
+| the bit builtins | `new_opa.cc` (`<bit>`'s `__has_single_bit` over `__builtin_popcountg`) | popcount, clz, ctz (the generic `g` forms and their fallback operand), bswap: llvm.ctpop/ctlz/cttz (zero undefined)/bswap; sample `bit-builtins` |
+| `__builtin_offsetof` | `dyncast.cc`, `eh_ptr.cc` | the type and the designator kept by the parser, folded from the layouts (a base member at its base's offset, an index times its element's size); sample `offsetof-builtin` |
+| constant casts and comparisons | `<bit>`'s `__bit_ceil` (`__int_traits<unsigned>::__digits` was 31: `(_Value)(-1) < 0` true) | `const-int` wraps a cast to its type and compares unsigned operands unsigned |
+| a preprocessor error is the compile's | every `eh_*.cc`: unwind-cxx.h's quoted `"unwind.h"` was not found and the rest of the unit silently parsed to nothing | `gen-file` fails on the preprocessor's first error (class `pp`); the runtime's units read gcc's unwind.h, the target tree's compiler include directory, by `-iquote` (P20) |
+| typedef names for linkage ([dcl.typedef]/9) | unwind.h's `typedef enum {...} _Unwind_Reason_Code` (every unwind-dependent declaration dropped) | the unnamed enumeration or class just declared takes the typedef's name |
+| GNU's `mode` attribute | cxxabi.h's `typedef int __guard __attribute__((mode (__DI__)))` (mangled `Pi`, clang's `Pl`) | the integer type of the mode's width and the base's signedness, the first of char, short, int, long (clang's getIntTypeForBitwidth) |
+| `thread_local`, `__thread` ([basic.stc.thread]) | `eh_globals.cc`'s per-thread globals | `:tls` on the variable, block scope implying static; the globals `thread_local`; a dynamic initialization or destructor refused (class `tls`) |
+| qualified definitions of extern variables ([basic.def]/2) | `new_handler.cc`'s `std::nothrow`, `eh_term_handler.cc`'s `__terminate_handler` | the definition no longer extern |
+| a qualified namespace member's body ([basic.lookup.unqual]/4) | `eh_terminate.cc`'s `std::terminate() { ... get_terminate() ... }` | looked up in its namespace, then the enclosing ones (a definition at namespace scope; a template's keeps its bindings) |
+| a qualified conversion function's type | `eh_ptr.cc`'s `exception_ptr::operator __safe_bool()` | the conversion-type-id looked up in the class first |
+| key functions (Itanium §5.2.3) | every class whose destructor or first virtual function the unit defines: `bad_alloc.cc`, the type_info units ... | `vtable-home`: the vtable, VTT and type_info strong where the key function is defined, emitted whether used or not; external where it is defined elsewhere; linkonce_odr without one (a class template's specialization too) |
+| the constructors' and destructors' variants | the same | a defined constructor's or destructor's C1/D1 (an alias of C2/D2 without virtual bases), a virtual destructor's D0, strong; no C1 for an abstract class; an out-of-line `= default` (`nested_exception::~nested_exception() = default`) a definition, its members' destructors used |
+| the fundamental types' type_info (Itanium §2.9.4) | `fundamental_type_info.cc` (`__fundamental_type_info`'s key function) | `_ZTI`/`_ZTS` of the 25 fundamental types, their pointers and pointers to const |
+| GNU's `used` | `eh_ptr.cc` (exception_ptr.h's `_GLIBCXX_EH_PTR_USED`) | a used inline function defined and emitted |
+| unnamed namespaces' classes ([basic.link]/4) | `vec.cc`'s `uncatch_exception`, `atexit_thread.cc`'s local `key_s` | internal, with their members |
+| clang's -O0 control flow | `guard.cc` (code after the futex path's `return` called `__set_and_release`, which clang never emits) | no statement after a terminator unless it holds a label (an if whose branches both end leaves no continuation); `unreachable` after a call of a `noreturn` function (`[[noreturn]]`, `__attribute__((noreturn))`, the C library's abort, exit, _Exit, quick_exit, which are nothrow too) |
+| `__cxa_end_catch` may throw | `new_op*nt.cc` (noexcept with `catch (...)`), `vec.cc` (`catch (...) { ...; throw; }`) | for a catch-all or a class type an invoke: on the normal path to the enclosing pad (a noexcept function's terminate), while unwinding to a terminate pad (`__clang_call_terminate`) |
+| a static member function template's call in a template argument | `eh_alloc.cc`'s `std::pair<string_view, int>` (C++17's pair: `enable_if<_PCCP::template _ConstructiblePair<_U1, _U2>() && ...>`) | evaluated (the specialization instantiated, constexpr-called), dependent in a pattern's signature and mangled `cl sr <levels> E <name> <args> E` (sample in `.tmp`, the mangling equal to clang's); **not enough for std::pair yet** (G5c.5) |
+| a throwing static local's initialization (Itanium §3.3.3) | (found by `rt-guard`) | `__cxa_guard_abort` on the EH path, so a later pass tries again |
+| `typeid(*p)` of a null pointer ([expr.typeid]/3) | (found by `rt-eh`) | `__cxa_bad_typeid` |
+
+### G5c.2 The proof
+
+"Generated" is the first of four levels, each checked on every unit:
+
+1. **names**: the external names the unit's IR defines are those the oracle's IR defines (clang's, from the pack), none
+   missing, none more (`arbace.cpp.check/defined-names`; `runtime-judge`'s level for a unit by our route, `names.txt`).
+2. **the runtime build's levels** (runtime-build): our IR read and printed by repr/llvm, lowered by `arbace.cpp.lower`,
+   the lowered C compiled by gcc (the oracle tier's judge of C, CPPI_GCC=1).
+3. **behaviour, unit by unit** (`bin/cppi runtime-swap`, new): the programs of a codegen-check's work directory (each
+   sample's lowered C by clang's IR and by ours) linked with the runtime built from clang's IR, the baseline; then, for each
+   unit by our route, with that unit alone replaced by ours (the exceptions', RTTI's, guards', allocations' and headers'
+   samples); then with all of them over every program: every status and stdout the baseline's.
+4. **the samples on the runtime by our route**: codegen-check with `--runtime` the runtime by our route, its three
+   levels (run against clang's route, native, names).
+
+Three samples were written for the runtime: `rt-eh` (throw and catch by type, base, pointer, catch-all, rethrow, unwinding
+through destructors with `uncaught_exceptions`, the current exception's type, `what()`, the bad_* the runtime throws),
+`rt-rtti` (dynamic_cast down, across, to void, through virtual bases; typeid's names and equality; catching through
+pointer conversions, qualification, to `void*`, enums, function pointers) and `rt-guard` (a static local whose initializer
+throws, then succeeds; every `new`/`delete` form, over-aligned, nothrow; the new-handler; exception_ptr; nested
+exceptions; `set_terminate`'s handler).
+
+### G5c.3 The build
+
+`bin/cppi runtime-build` takes `CPPI_RUNTIME_ROUTE` (`bin/cppi`'s `runtime_ours`): `clang` (the default, as before), `ours`
+or `auto`. With `ours` or `auto` the C++ units whose name begins with `CPPI_RUNTIME_OURS` (default `libsupc++/`) are
+generated by our route in one process (`arbace.cpp.codegen gen-batch`) from the tarball's sources (extracted by
+`runtime_ours` when missing; no clang), with rt_ir's preprocessor options (`-D`, `-I`; the `-f` flags are the compiler's)
+and `-iquote` of the tree's gcc include directory; each unit's IR is its `x.ll`, the oracle's kept beside as `clang.ll`
+(the names level's reference), `route` naming which made it. A unit our route refuses fails the build under `ours` and
+keeps the oracle's IR under `auto`. The rest of the build is unchanged (the round trip through LLVM forms, the lowering,
+gcc in the oracle tier or ci's checker from the records); the IR pin `test/cpp/runtime/ir.sha256` is checked for the
+oracle's IR alone (the IR of ours listed in `OUT/ir-ours.sha256`); the runtime's key holds the route, the prefix and the
+route's namespaces (sema, abi, codegen, template, inline, repr/cpp, the target tree's description), so the runtime-ci
+and lower-check that read it rebuild after a change of the code generator. `runtime-judge` adds the names level (§G5c.2).
+
+### G5c.4 The numbers (2026-11-08, light: one process, CPPI_THREADS=1, under 1.5 GiB)
+
+| check | result |
+|---|---|
+| libsupc++'s C++ units generated by our route (`gen-batch` over units.edn's 63) | cpp-90: 41 of 62; **62 of 63** (`eh_alloc.cc` refused: G5c.5) |
+| the names level (each unit's external names against the oracle's IR, both ways) | at the branch's start about 10 of the 46 generating units equal; **62 of 62** |
+| `CPPI_GCC=1 CPPI_RUNTIME_ROUTE=auto bin/cppi runtime-build` (the pack's IR for the 136 others: libstdc++-v3/src's 134, eh_alloc and libiberty's C demangler) | **198 of 198 pass, 62 by our route**; IR 152 s, read, print and lower 522 s, gcc 56 s (12 min) |
+| the same from the records (no gcc, ORS27), clang, clang++, clang-23, g++, gcc, cc, cpp, c++, cc1, cc1plus, ld, as, opt, llvm-as, lli, llc stubs exiting 99 first on PATH | **198 of 198, 62 by our route, the stubs' log empty** (11 min) |
+| `bin/cppi runtime-swap` over codegen-check's 149 samples' programs by both routes (298 programs, 280 exiting 0) | **each of the 62 units alone: no run of the 102 exceptions', RTTI's, guards', allocations' and headers' programs changes; all 62 at once: no run of the 298 changes** (9 min). Its first run found eh_ptr.cc alone crashing rt-guard (GNU's `aligned`, fixed) |
+| `bin/cppi codegen-check --runtime` the runtime by our route (run against clang's route, native, names) | **148 of 149 pass, 1 known** (hdr-vector, P19); at the branch's base 11 of the 145 samples failed on today's tree (G5c.1's last three sema items) |
+| `bin/repr-cpp native-check samples` and `native` after the parser's changes | 9 of 9, 68 of 68 items; 1 of 1, 30 of 30 (both controls fail as they must) |
+
+Independence (`bin/crops-score --crop cpp`): unchanged in the checkout's facts (54.3: read 0.148, eval 0.5, AOT 0.5, print 1,
+judge 0.568), since the gate's `cpp-runtime` still builds the runtime from the pack alone. With P21 (b) (`auto` the
+runtime's default), the runtime's cases are 62 units by our route (1) and 136 from the pack (0.5), 0.657; a program's eval
+and AOT the mean of its IR's (the pack, 0.5, until cpp-indep's CP240 (b) makes our route the programs' default) and the
+runtime's: **0.578 each, independence 57.5**; with CP240 (b) too, the programs our route generates at 1.
+
+### G5c.5 What is not done
+
+- **eh_alloc.cc** (the emergency pool, `__cxa_allocate_exception`'s): its tunables' `std::pair<std::string_view, int>
+  tunables[]{{"obj_size", 0}, ...}` finds no viable constructor at gnu++17. Every templated constructor of std::pair drops
+  out (its C++17 `enable_if<_PCCP::template _ConstructiblePair<_U1, _U2>() && ...>` conditions); the same constructors
+  copied into a class template of the main file or of a header of one's own are viable, and the condition alone
+  evaluates true. Not found by the day's end; under `auto` the unit keeps the oracle's IR.
+- **The terminate pad of a cleanup while unwinding** is written for `__cxa_end_catch` alone; a destructor that may
+  throw called while unwinding is still a call, not an invoke to a terminate pad (clang's EH cleanups' terminate scope).
+- **thread_local with dynamic initialization or a destructor** is refused (class `tls`): clang's TLS wrapper and init
+  functions (`_ZTW`, `_ZTH`, `__cxa_thread_atexit`) are not written. No libsupc++ unit has one.
+- **libstdc++-v3/src** (134 units with libstdc++exp's): P22.
+- **A pointer to member's type_info** (`__pointer_to_member_type_info` objects for `typeid(int S::*)` and a thrown member
+  pointer): refused in programs (class `rtti`); `pmem_type_info.cc` itself, the class's methods, is by our route.
+
+### G5c.6 Sources
+
+- The Itanium C++ ABI (§2.5 vtables, §2.9.4 the fundamental types' type_info, §2.9.5 the type_info classes, §3.3.2-§3.3.3
+  the guards, §5.1 mangling: `cl`, `sr`, template-param-decls, §5.2.3 key functions), the System V x86-64 psABI, ISO/IEC
+  14882:2024 ([namespace.udir], [basic.lookup.unqual], [basic.def], [basic.link], [dcl.typedef], [dcl.stc], [basic.stc.thread],
+  [expr.typeid], [except.terminate], [stmt.dcl], [class.abstract], [support.types.layout], [conv.integral], [expr.rel]),
+  GCC 15's manual (Common Type and Variable Attributes: `mode`, `aligned`, `used`, `noreturn`; Built-in Functions for
+  Memory Model Aware Atomic Operations; Other Built-in Functions: the bit builtins).
+- gcc 15.2.0's `libstdc++-v3/libsupc++` and `config/` (the pinned tarball): the program compiled, read as input (GPL with
+  the GCC Runtime Library Exception; nothing of it copied into Arbace's sources).
+- clang 23.1.4's IR of the units (the pack `cpp-runtime-ir`) as the oracle: its names and its -O0 shapes (the atomics'
+  orderings and switches, the end-catch invokes, the terminate pads, dead code after a return). No clang source ported.
+
+### G5c.7 Proposed
+
+**P20. Clang's resource headers in the target tree.** The tree (CP241 (b)) lists clang's resource directory
+(`/usr/lib/llvm23/lib/clang/23/include`) among the native parser's roots, but makes nothing there: a header only the
+compiler provides (`<unwind.h>`, also `<stddef.h>`'s and `<stdarg.h>`'s own when musl's are not reached first) is not
+found. The runtime's units read gcc's unwind.h through `-iquote` of the tree's gcc include directory (as g++ builds
+libsupc++), which is ABI-equal to clang's. (a) As built. (b) The tree makes clang's resource headers from the pinned
+llvm-project tarball (Apache-2.0 with the LLVM exception; the description's `:layout` as for gcc's, its oracle the
+installed directory byte for byte), so the native parser reads what clang reads; costs a day, on cpp-target's line (its
+files). **Recommended: (b)**, on cpp-target.
+
+**P21. The runtime's proof in the gate.** (a) As built: `bin/cppi runtime-swap` and the names level by hand (both need
+gcc, the oracle tier's, CPPI_GCC=1). (b) The names level in `cpp-runtime` (records mode, no gcc: it reads the pack's IR),
+`CPPI_RUNTIME_ROUTE=auto` the default of runtime-build, and `runtime-swap` an oracle-tier step (`test/gate/crops/cpp-oracle.edn`);
+costs the key's new lines (the route's namespaces: a change of sema or the code generator rebuilds the runtime, about 12
+minutes light) and one oracle-tier step of about 20 minutes. **Recommended: (b)** after the night's runs below hold.
+
+**P22. libstdc++-v3/src by our route.** The other 134 units (the strings', streams', locales' explicit instantiations,
+`<chrono>`, `<filesystem>`, `<format>`): each instantiates the library's templates at scale, which is G5b's (P19's current
+instantiation, the template corners of G5.6) and C++17's `std::pair` (G5c.5). (a) Unit by unit after G5b, measured by
+`CPPI_RUNTIME_OURS=c++11/` (then `c++98/`, `c++17/` ...) `bin/cppi runtime-build` (the same route, the names level and runtime-swap the proof). (b) As (a),
+first the c++98/ and c++11/ units that instantiate nothing (`functexcept.cc`, `functional.cc`, `hash_c++0x.cc`,
+`system_error.cc`, `random.cc` ...), measured tonight. **Recommended: (b)** then (a).
+
+### G5c.8 The night's commands (one process at a time, about 1.5 GiB each)
+
+```
+export ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace GOMEMLIMIT=1400MiB CPPI_THREADS=1 CPPI_JOBS=1
+CPPI_GCC=1 bin/cppi runtime-build .tmp/cppi/rt-clang                                   # the baseline from the pack (12 min)
+CPPI_GCC=1 CPPI_RUNTIME_ROUTE=auto bin/cppi runtime-build .tmp/cppi/rt-ours            # expect 198 of 198, 62 by our route (12 min)
+bin/cppi codegen-check .tmp/cppi/cg --runtime .tmp/cppi/rt-ours --jobs 2                # expect 148 of 149, hdr-vector known (6 min)
+bin/cppi runtime-swap .tmp/cppi/rt-clang .tmp/cppi/rt-ours .tmp/cppi/cg .tmp/cppi/swap   # expect every unit same (9 min)
+CPPI_RUNTIME_ROUTE=auto bin/cppi runtime-build .tmp/cppi/runtime                       # records mode, no gcc: the gate's runtime
+CPPI_RUNTIME_ROUTE=auto bin/cppi runtime-ci .tmp/cppi/runtime                          # ci's library from it (3 GB at 2 threads: 1 job, CP246)
+CPPI_RUNTIME_ROUTE=auto bin/cppi check --only test/cpp/essential-check.txt             # the essential run check on ci with it
+CPPI_RUNTIME_ROUTE=auto bin/cppi check && CPPI_RUNTIME_ROUTE=auto bin/cppi check --aot   # as test/cpp/check{,-aot}-linux-amd64.edn
+CPPI_RUNTIME_OURS=c++11/ CPPI_RUNTIME_ROUTE=auto CPPI_GCC=1 bin/cppi runtime-build .tmp/cppi/rt-src11   # P22 (b)'s measure
+```

@@ -326,7 +326,7 @@
         (glue-inner (if (= "" cv) b (str cv " " b)) inner))
       (:p :lr :rr :mp)
       (let [op (case (:t t) :p "*" :lr "&" :rr "&&" :mp (str (:cls t) "::*"))
-            core (str op (when (and (not= "" cv) (#{:p :mp} (:t t))) (str cv (when (and (seq inner) (not (.startsWith inner ")")) (not (.startsWith inner "["))) " "))) inner)
+            core (str op (when (and (not= "" cv) (or (#{:p :mp} (:t t)) (:rs t))) (str cv (when (and (seq inner) (not (.startsWith inner ")")) (not (.startsWith inner "["))) " "))) inner)
             of (:of t)]
         (if (#{:a :f} (:t of)) (qt* of (str "(" core ")")) (qt* of core)))
       :a (qt* (cond-> (:of t) (:c t) (assoc :c true) (:v t) (assoc :v true)) (str inner "[" (or (:n t) "") "]"))
@@ -458,7 +458,9 @@
                      part (if (and (is? p "<") (angle-close p (ix p)) (= mode :parse)) (let [ab (ix p) as (parse-template-args p)] (assoc part :args as :ab ab :ae (last-ix p))) part)]
                  {:g g :parts (conj parts part) :b b :e (last-ix p) :ent nil :q qe})))
            (t= t "operator")
-           (let [part (operator-part p mode)
+           ;; a qualified conversion-function-id's conversion-type-id is looked up in the qualifier's class first
+           ;; ([basic.lookup.unqual]/5, [class.conv.fct]; G5c: libsupc++'s `exception_ptr::operator __safe_bool()`)
+           (let [part (if (and qe (:scope qe) (:class qe)) (in-scope p (sc/new-scope :lookup (scope p) qe) (operator-part p mode)) (operator-part p mode))
                  part (if (and (:op part) (is? p "<") (angle-close p (ix p)) (or tkw (= mode :parse)))
                         (if (= mode :parse) (let [ab (ix p) as (parse-template-args p)] (assoc part :args as :ab ab :ae (last-ix p))) part)
                         part)]
@@ -1545,6 +1547,22 @@
                        (assoc (node p "BuiltinExpr" b (last-ix p) {}) :_vaarg x :_vatype (qt ty))))))
                (catch arbace.lang.ExceptionInfo _ nil))
           (do (seek! p b) (adv! p) (skip-balanced! p) (text-node p "BuiltinExpr" b)))
+      ;; G5c: __builtin_offsetof(T, designator) for the code generator (clang's OffsetOfExpr, Parser::ParseBuiltinPrimaryExpression:
+      ;; an identifier, then .identifier and [expression]s; libsupc++'s dyncast.cc and eh_ptr.cc), the type and the components kept
+      (and (= s "__builtin_offsetof") (is-at? p 1 "("))
+      (let [r (tentatively p (fn [p]
+                               (adv! p) (adv! p)
+                               (let [ty (parse-type-id p :paren)
+                                     _ (expect! p ",")
+                                     id1 (let [^T t (cur p)] (when (identical? :id (.-k t)) (adv! p) (.-s t)))
+                                     cs (when id1
+                                          (loop [cs [{:f id1}]]
+                                            (cond (accept! p ".") (let [^T t (cur p)] (if (identical? :id (.-k t)) (do (adv! p) (recur (conj cs {:f (.-s t)}))) nil))
+                                                  (accept! p "[") (let [x (with-gt p true (parse-expr p))] (when (accept! p "]") (recur (conj cs {:i x}))))
+                                                  :else cs)))]
+                                 (when (and cs (is? p ")")) {:type (qt ty) :path cs}))))]
+        (adv! p) (skip-balanced! p)
+        (cond-> (text-node p "BuiltinExpr" b) (map? r) (assoc :_offsetof r)))
       (and (identical? k :kw) (#{"__builtin_va_arg" "__builtin_offsetof" "__builtin_bit_cast" "__builtin_types_compatible_p" "__builtin_convertvector" "__builtin_choose_expr"} s))
       (do (adv! p) (when (is? p "(") (skip-balanced! p)) (text-node p "BuiltinExpr" b))
       (and (identical? k :id) (is-at? p 1 "(") (trait-name? s) (not (sc/lookup (scope p) s)))
@@ -1567,7 +1585,15 @@
       (and (identical? k :id) (is-at? p 1 "(") (re-matches #"__(c11_|opencl_|scoped_|hip_)?atomic_[a-z_]+" s)
            (not (#{"__atomic_thread_fence" "__atomic_signal_fence" "__atomic_always_lock_free" "__atomic_is_lock_free"} s))
            (not (in-template? p)))
-      (do (adv! p) (skip-balanced! p) (text-node p "AtomicExpr" b))
+      ;; G5c: the operands kept for the code generator (clang's AtomicExpr, Sema::BuildAtomicExpr; libsupc++'s guard.cc,
+      ;; new_handler.cc, atomicity.h), in the source's order under an underscored field (the dump's children are clang's
+      ;; own order, not compared)
+      (let [xs (tentatively p (fn [p]
+                                (adv! p) (expect! p "(")
+                                (let [xs (loop [xs []] (let [xs (conj xs (with-gt p true (parse-assign-expr p)))] (if (accept! p ",") (recur xs) xs)))]
+                                  (when (is? p ")") (adv! p) xs))))]
+        (adv! p) (skip-balanced! p)
+        (cond-> (text-node p "AtomicExpr" b) (and (vector? xs) (every? map? xs)) (assoc :_atomic s :_args xs)))
       (and (identical? k :id) (is-at? p 1 "(") (#{"__builtin_shufflevector" "__builtin_FILE" "__builtin_LINE" "__builtin_FUNCTION" "__builtin_FUNCSIG"
                                                    "__builtin_COLUMN" "__builtin_source_location" "__builtin_FILE_NAME" "__builtin_astype"
                                                    "__builtin_sycl_unique_stable_name" "__builtin_vectorelements"} s))
@@ -2251,8 +2277,13 @@
                                 (and (is? p "[") (is-at? p 1 "[")) (do (attr-nodes p) (recur c v r))
                                 :else [c v r]))]
             (recur (conj out (cond-> (with-cv {:t :p} c v) r (assoc :rs true))))))
-      (is? p "&") (do (adv! p) (attr-nodes p) (recur (conj out {:t :lr})))
-      (is? p "&&") (do (adv! p) (attr-nodes p) (recur (conj out {:t :rr})))
+      ;; GNU's restrict-qualified references (`T &__restrict r`: libsupc++'s __do_upcast, clang's Sema::BuildReferenceType keeps the
+      ;; qualifier, its type printed `T &__restrict`)
+      (or (is? p "&") (is? p "&&"))
+      (let [k (if (is? p "&") :lr :rr)]
+        (adv! p) (attr-nodes p)
+        (let [r (loop [r false] (if (or (is? p "__restrict") (is? p "__restrict__")) (do (adv! p) (recur true)) r))]
+          (recur (conj out (cond-> {:t k} r (assoc :rs true))))))
       (name-start? p)
       (let [save (ix p) qn (try (parse-name p :parse) (catch arbace.lang.ExceptionInfo _ nil))]
         (if (and qn (is? p "::") (is-at? p 1 "*"))

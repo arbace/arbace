@@ -1212,3 +1212,73 @@ brief's `GATE_LANE_MODE=free-strict` was not used: the runner tests the mode `= 
 fourth mode in gate-lane (rejected, the same reason); strictness from `GATE_LANE_RULE` (rejected, it is bin/gate's, not
 visible to the step). Checked: lanes-test 50 checks (4 new), 0 failed; `bin/gate --full --concurrent --plan` 6:41 at 53.8
 GiB free (non-strict 6:48 at 51.7: free memory moved), peak declared 53 (the java-interp steps, alone).
+
+## 2026-11-08: C++'s runtime by our route, libsupc++ (branch `cpp-runtime-own`, from next bd33e27cc; CP240 (c), CODEGEN.md G5c)
+
+By the user's decision CP240 (c) (2026-11-07): libsupc++'s 63 C++ units of `test/cpp/runtime/units.edn` (gcc 15.2.0's
+`libstdc++-v3/libsupc++` and `config/cpu/generic/atomicity_builtins/atomicity.h`, from the pinned tarball) compiled by
+Arbace's route (the native parser, `arbace.cpp.sema`, `arbace.cpp.codegen`) instead of clang's IR. cpp-90 had 41 of 62
+generating; a names level written first (each unit's external names against the oracle's IR from the pack
+`cpp-runtime-ir`, both ways) showed "generated" meant little: eleven `eh_*` units generated empty (a quoted `"unwind.h"`
+not found, the preprocessor's error ignored), no unit emitted its key function's vtable, type_info, D0 or C1/D1. The fixes,
+each a rule of the standard, the Itanium ABI or clang's -O0 code generation as its IR shows it (doc/cpp/CODEGEN.md G5c.1's
+table): using-directive cycles, restrict references, the `__atomic` builtins, the bit builtins, `__builtin_offsetof`,
+const-int's casts and unsigned compares, preprocessor errors fatal, typedef names for linkage, GNU's `mode`, `used`,
+`noreturn` and `aligned` (on a class), `thread_local`, qualified definitions of extern variables, a qualified member's body
+looked up in its namespace, key functions (vtable, VTT, type_info strong where defined), C1/D1 and D0 of defined
+constructors and destructors, out-of-line `= default`, the fundamental types' type_info, internal linkage of unnamed
+namespaces' classes, no code after a terminator, `__cxa_end_catch` an invoke when it may throw (terminate pads while
+unwinding), `__cxa_guard_abort`, `__cxa_bad_typeid`, a static member function template's call in a template argument and
+its mangling. Three sema gaps of the branch's base on today's tree were fixed on the way (the native parser's
+CXXDependentScopeMemberExpr, a reference dynamic_cast's value category, `:delegatingInit`: 11 codegen samples failed at
+bd33e27cc).
+
+`bin/cppi runtime-build` takes `CPPI_RUNTIME_ROUTE=ours|auto` (`CPPI_RUNTIME_OURS`, default `libsupc++/`), the oracle's IR
+kept as `clang.ll`, the names level in `runtime-judge`, the route in the runtime's key; `bin/cppi runtime-swap` (new) proves
+the runtime by our route unit by unit: codegen-check's programs (by clang's IR and by ours) linked with the runtime built
+from clang's IR, then with each unit by our route alone swapped in, then all of them; every status and stdout the
+baseline's. It found what the names level could not: `__cxa_refcounted_exception` 8 bytes short (GNU's `aligned` on
+`_Unwind_Exception` ignored), harmless while every unit agreed, a crash when eh_ptr.cc by ours met eh_throw.cc by clang's.
+Results (doc/cpp/CODEGEN.md G5c.4): 62 of 63 units by our route, names equal; runtime-build 198 of 198 with 62 by our route, also from the records with clang, gcc and the LLVM tools stubbed (their log empty); runtime-swap: no run of 102 programs changes with any one unit swapped, none of 298 with all; codegen-check on that runtime 148 of 149 (hdr-vector known); native-check samples 9 of 9, native 1 of 1.
+
+Not by our route: `eh_alloc.cc` (C++17's `std::pair<std::string_view, int>` constructors: their enable_if conditions still
+false; it keeps the oracle's IR under `auto`) and libstdc++-v3/src's 136 units (P22). Sources: the Itanium C++ ABI (§2.5,
+§2.9.4-§2.9.5, §3.3.2-§3.3.3, §5.1, §5.2.3), ISO/IEC 14882:2024, GCC's manual (the attributes), libsupc++'s sources read as
+the program compiled; clang's IR (the packs) as the oracle; no clang code ported. Alternatives considered: proving by the
+IR's text against clang's (rejected: the routes' IR differs in names of temporaries and in clang's attributes everywhere;
+the names level and the runs are the contract); the swap over every program for every unit (18,000 links; the per-unit
+runs take the 102 programs (51 samples by both routes) of exceptions, RTTI, guards, allocation and headers, and the whole swap every program).
+
+## 2026-11-08: C++'s completeness: the dg harness's DejaGnu rules and the own judge's failures (branch `cpp-compl`, from mac/cpp-runtime-own 9681152c4)
+
+The brief: C++'s `bin/crops-score` completeness 76.1 (96.5 without by design); fix the largest deferred classes' causes, review the
+by-design ones and propose. The gap's shape (test/reap/matrix.edn): read's deferred 77 were the dg harness's (prune-output 51,
+gxx-disagrees 19); print's 1,665 by design are the clang judge's own blind spots (oracle-rejects 1,584, gxx-objects-location 81),
+which the decided own judge (CP243 (a)) judges once its night records exist, so the print work was the own judge's failures.
+
+The dg check (arbace.repr.cpp.dg), against gcc 15.2.0's testsuite library as the source of the rules (gcc/testsuite/lib/gcc-dg.exp
+lines 398-403, gcc-dg-prune; lines 1226-1283, process-message; target-supports-dg.exp, dg-require-dll and -ifunc): dg-prune-output
+applied as gcc-dg-prune's regsub after the directives took their lines (cpp0x/initlist19.C, `dg-prune-output "error"` with a passing
+dg-error, decided the order; the first version pruned first and lost six passes); a line-numbered directive matching an error of any
+file (DejaGnu's pattern names no file: cpp0x/deleted16a.C); a message's later top-level branches matched on any diagnostic at the line
+(process-message splices the message as text: cpp0x/defaulted10.C's `previously|declared` on g++'s note); dg-require-dll and -ifunc
+false here (g++ 15.2 on musl: "'ifunc' is not supported on this target"); `--embed-dir` for `#embed __FILE__`; the class musl-libc
+(musl's NULL is nullptr, measured; musl's iconv writes `*` for an unencodable character, measured with a C program). g++'s
+reference re-recorded for the 167 files affected and their rows recorded (`bin/repr-cpp dg --only --record-ref`, `--judge --record`):
+10 more passes, prune-output 0, gxx-disagrees 2; the every-40th sample unchanged. Considered and not applied: dg.exp's directive grep
+(white space before the closing brace), which cpp1z/fold1.C supports and cpp1y/udlit-char-template-sfinae-neg.C contradicts; dg.exp
+itself is not in the tarball, so the rule stays as it was.
+
+The own judge's runs (`roundtrip-corpus KEY --judge own --only-list`: the known file's deferred files of each key, the gxx-dg
+gxx-objects-location files, every 5th oracle-rejected file of gxx-dg-every-10 and every 40th other, old-deja's alike): 13 failures,
+each fixed in the printer or the converter by the grammar's rule (a bare switch's items, a unary operand a cast-expression, a pack
+expansion's pattern an assignment-expression, `< ::` against C++98's digraph, a template's text from its outermost header, a
+typedef's leading standard attributes, a macro-written for-init, attributes before `auto`, a statement's `;` after a comment, an
+argumentless explicit specialization, a type-id's pack expansion); rtcheck lets a known file of a level the own judge does not run
+take its own levels' class; `bin/repr-cpp dg --rt-judge own` records the modules keys (cpp-90's night list named
+`roundtrip-corpus gxx-modules-all`, which has no corpus). After: 63 of 64 deferred files, 48 of 48 objects files, 176 of 176 and 24
+of 24 of the samples, the essential list 33 of 33 (recorded), the samples 9 of 9 with the control failing.
+
+Scores: completeness 76.1 to 76.2 on the records (read 80.6 to 80.7), about 88.5 expected after the night's own records (print to
+about 98). Proposals CP260-CP265 in doc/cpp/CPP-SURVEY.md, "As built: cpp-compl" (UNSUPPORTED as :na; the token check by clang's
+tokens where g++ -E is no reference; the dg check's clang-* classes; oracle-rejected under our route; threads; the macro extent).

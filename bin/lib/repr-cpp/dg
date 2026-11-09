@@ -12,7 +12,7 @@
 # with --record-ref (its errors by line recorded in test/cpp/ref-dg-gxx15.edn; the judge reads the record).
 #
 # Usage: bin/repr-cpp dg [--corpus dg-error,preprocess,modules] [--dirs D,...] [--only LIST] [--sample N]
-#                        [--record] [--record-ref] [--judge] [--own] [--reader native|clang]
+#                        [--record] [--record-ref] [--judge] [--own] [--reader native|clang] [--rt-judge own|clang]
 #   --corpus   the parts (default dg-error,preprocess)
 #   --dirs     only the files under these directories of g++.dg (`.` its top level)
 #   --only     only the files of LIST (names under g++.dg/ or gxx-dg/NAME, one a line)
@@ -27,6 +27,8 @@
 #              clang's acceptance and errors, is refused (the oracle tier's cpp-dg-oracle, CP242)
 #   --reader   clang (the default): an accepted unit's forms from the oracle's dump; native: by the native parser (CX11,
 #              doc/cpp/NATIVE.md), the oracle still judging acceptance and errors, and the modules part's round trip --reader native
+#   --rt-judge the modules part's round trip judge (cpp-compl): clang (the default) or own (roundtrip --judge own, cpp-90: no dump;
+#              with --record only --record-results, into test/repr/cpp/roundtrip-results/own/gxx-modules-*.edn)
 # Writes under .tmp/repr-cpp-dg/ (REPR_CPP_DG_WORK): PART/{dg.edn,run.tsv,clang/,forms/,read.edn,rows.edn,gxx/}.
 # The light tier: REPR_CPP_THREADS (default 4) jobs, GOMAXPROCS=4 and GOMEMLIMIT=1500MiB unless set.
 set -uo pipefail
@@ -34,7 +36,7 @@ root=$(cd "$(dirname "$0")/../../.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
 . "$root/bin/lib/tools.bash"
 cd "$root"
-parts=dg-error,preprocess dirs= only= sample= record= recref= judge= reader=clang own=
+parts=dg-error,preprocess dirs= only= sample= record= recref= judge= reader=clang own= rtjudge=clang
 while [ $# -gt 0 ]; do
   case $1 in
     --corpus) parts=$2; shift 2 ;;
@@ -46,10 +48,13 @@ while [ $# -gt 0 ]; do
     --judge) judge=1; shift ;;
     --own) own=1; shift ;;
     --reader) case $2 in native|clang) reader=$2 ;; *) echo "repr-cpp dg: --reader native|clang" >&2; exit 2 ;; esac; shift 2 ;;
-    *) sed -n '14,31p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+    --rt-judge) case $2 in own|clang) rtjudge=$2 ;; *) echo "repr-cpp dg: --rt-judge own|clang" >&2; exit 2 ;; esac; shift 2 ;;
+    *) sed -n '14,33p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
   esac
 done
 case ",$parts," in *,dg-error,*) [ -z "$own" ] || { echo "repr-cpp dg: --own: the dg-error part is clang's acceptance and errors (the oracle tier's)" >&2; exit 2; } ;; esac
+# --own: the modules part's round trip by its own judge too (cpp-target's --own and cpp-compl's --rt-judge own, one route)
+[ -z "$own" ] || rtjudge=own
 # the records are the clang reader's
 if [ "$reader" = native ] && [ -n "$record$recref" ]; then echo "repr-cpp dg: --record and --record-ref are the clang reader's" >&2; exit 2; fi
 export GOMAXPROCS=${GOMAXPROCS:-4} GOMEMLIMIT=${GOMEMLIMIT:-1500MiB} REPR_CPP_READER=$reader
@@ -87,7 +92,7 @@ clang1() { # NAME CLANG-ARGS: the oracle's dump of the file, its status, diagnos
   o=$wd/clang/${n//\//__}
   t0=$(date +%s%N)
   # shellcheck disable=SC2086
-  (cd "$gxxdg" && timeout 300 "$exe" -implicit=false -cache "$cache" -o "$o.edn" -- -x c++ -std=$3 $cargs -ferror-limit=0 -Wno-unknown-warning-option -iquote "$(dirname "$gxxdg/$n")" "$n") > "$o.err" 2>&1
+  (cd "$gxxdg" && timeout 300 "$exe" -implicit=false -cache "$cache" -o "$o.edn" -- -x c++ -std=$3 $cargs -ferror-limit=0 -Wno-unknown-warning-option -iquote "$(dirname "$gxxdg/$n")" --embed-dir="$gxxdg" "$n") > "$o.err" 2>&1
   echo $? > "$o.status"
   t1=$(date +%s%N)
   echo "$(( (t1 - t0) / 1000000 ))" | awk '{printf "%.3f\n", $1/1000}' > "$o.secs"
@@ -96,7 +101,7 @@ gxx1() { # NAME STD G++-ARGS ACTION: g++'s diagnostics of the file (-S, or -E), 
   local n=$1 std=$2 gargs=$3 act=$4 o
   o=$wd/gxx/${n//\//__}
   # shellcheck disable=SC2086
-  (cd "$gxxdg" && LC_ALL=C timeout 300 g++ -x c++ -std=$std $gargs -fdiagnostics-plain-output -iquote "$(dirname "$gxxdg/$n")" $([ "$act" = preprocess ] && printf %s -E || printf %s -S) -o "$o.out" "$n") 2>&1 \
+  (cd "$gxxdg" && LC_ALL=C timeout 300 g++ -x c++ -std=$std $gargs -fdiagnostics-plain-output -iquote "$(dirname "$gxxdg/$n")" --embed-dir="$gxxdg" $([ "$act" = preprocess ] && printf %s -E || printf %s -S) -o "$o.out" "$n") 2>&1 \
     | grep -a -E '^[^ ][^ ]*:[0-9]+:([0-9]+:)? (fatal error|error|warning|note): |^[^ :][^ :]*: (fatal error|error): ' | head -c 1000000 > "$o.txt"
   echo "${PIPESTATUS[0]}" > "$o.status"
   rm -f "$o.out"
@@ -111,8 +116,13 @@ for part in "${ps[@]}"; do
     if [ -z "$judge" ]; then
       arbace_tool -s arbace.c.dg -m arbace.repr.cpp.dg lists "$work" "$gxxdg" modules "${only:--}" "${sample:--}" 2>&1 | filt
     fi
-    rt=(--no-objects --reader "$reader"); [ -z "$own" ] || rt+=(--judge own)
-    [ -z "$record" ] || rt+=(--record-oracle --replace-oracle --record-known-rejected --record-results --replace-results)
+    if [ "$rtjudge" = own ]; then
+      rt=(--judge own)
+      [ -z "$record" ] || rt+=(--record-results --replace-results)
+    else
+      rt=(--no-objects --reader "$reader")
+      [ -z "$record" ] || rt+=(--record-oracle --replace-oracle --record-known-rejected --record-results --replace-results)
+    fi
     "$root/bin/lib/repr-cpp/roundtrip" "$wd/roundtrip.list" "$wd/rt" "${rt[@]}" --jobs "$jobs" 2>&1 | filt
     [ "${PIPESTATUS[0]}" -eq 0 ] || status=1
     continue

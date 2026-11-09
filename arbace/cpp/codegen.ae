@@ -323,8 +323,8 @@
 
 (defn- run-cleanup! [c]
   (cond
-    (or (:try c) (:terminate c) (:eh-only c) (:delete c)) nil
-    (:end-catch c) (do (declare! "__cxa_end_catch" 'void []) (call-insn! 'void 'void (gsym "__cxa_end_catch") [] true))
+    (or (:try c) (:terminate c) (:eh-only c) (:delete c) (:guard-abort c)) nil
+    (:end-catch c) (do (declare! "__cxa_end_catch" 'void []) (call-insn! 'void 'void (gsym "__cxa_end_catch") [] (not (:might-throw c))))
     :else
   (if-let [fl (:flag c)]
     (let [l1 (new-label "cleanup") l2 (new-label "cleanup.done")
@@ -392,6 +392,8 @@
 
 (defn- run-cleanup-eh! [c]
   (cond
+    (:guard-abort c) (do (declare! "__cxa_guard_abort" 'void '[ptr] :nounwind true)
+                         (emit! (list 'call 'void (gsym "__cxa_guard_abort") [['ptr (:guard-abort c)]] :attrs [:nounwind])))
     (:eh-only c) (call-dtor! (:cls c) (:addr c) (:vtt c))
     (:delete c) (if (:dealloc c)
                   (dealloc-call! (:dealloc c) (:delete c) (:size c) (:align c) (:places c))
@@ -433,6 +435,26 @@
       (:terminate c) (let [e (val! (list 'load 'ptr ['ptr es] :align 8))]
                        (emit! (list 'call 'void (clang-call-terminate!) [['ptr e]] :attrs [:noreturn :nounwind]))
                        (emit! '(unreachable)))
+      ;; G5c: __cxa_end_catch while unwinding may throw (a catch (...) or of a class: the exception's destructor), and a
+      ;; cleanup that throws during unwinding terminates ([except.terminate]/1; clang's CallEndCatch on the EH path: an
+      ;; invoke whose landing pad calls __clang_call_terminate; libsupc++'s vec.cc's catch (...) { ...; throw; })
+      (and (:end-catch c) (:might-throw c))
+      (let [tl (or (:term-pad @*f*)
+                   (let [l (new-label "terminate.lpad")] (swap! *f* assoc :term-pad l :term-pad-new true) l))
+            cont (new-label "invoke.cont")]
+        (declare! "__cxa_end_catch" 'void [])
+        (emit! (list 'invoke 'void (gsym "__cxa_end_catch") [] :to cont :unwind tl))
+        (close-block!)
+        (when (:term-pad-new @*f*)
+          (swap! *f* dissoc :term-pad-new)
+          (start! tl)
+          (let [lp (val! (list 'landingpad '(struct ptr i32) '(catch ptr null)))
+                e (val! (list 'extractvalue ['(struct ptr i32) lp] 0))]
+            (emit! (list 'call 'void (clang-call-terminate!) [['ptr e]] :attrs [:noreturn :nounwind]))
+            (emit! '(unreachable)))
+          (close-block!))
+        (start! cont)
+        (eh-walk! (rest cs) es ss))
       :else (do (run-cleanup-eh! c) (eh-walk! (rest cs) es ss)))
     (let [e (val! (list 'load 'ptr ['ptr es] :align 8))
           s (val! (list 'load 'i32 ['ptr ss] :align 4))
@@ -557,9 +579,12 @@
       (let [plan (nth (fn-sig f v) 3)
             ;; (a virtual destructor called explicitly: its complete-object slot, D1)
             callee (if virtual (vcall-target (:cls f) fid (when (= :dtor (:kind f)) 1) obj) (want-fn! fid (if ab 2 v)))]
-        (binding [*as-base* nil]
-          (emit-call! plan callee va (:ty f) inits (when (and (:cls f) (not (:static f))) obj) dest (nothrow-fn? f)
-                      (when (takes-vtt? f v) (:vtt ab))))))))
+        (let [r (binding [*as-base* nil]
+                  (emit-call! plan callee va (:ty f) inits (when (and (:cls f) (not (:static f))) obj) dest (nothrow-fn? f)
+                              (when (takes-vtt? f v) (:vtt ab))))]
+          ;; a function that does not return: the block ends (G5c; clang's EmitCall, the unreachable after the call)
+          (when (and (:noreturn f) (abi/void? (abi/unq (:ret (:ty f))))) (emit! '(unreachable)))
+          r)))))
 
 (defn call-dtor!
   "Calls the class's complete destructor on the object at `addr` (nothing for a trivial one); with `vtt`, a base
@@ -838,6 +863,134 @@
         (declare! nm 'void (mapv first args) :nounwind true)
         (emit! (list 'call 'void (gsym nm) args :attrs [:nounwind]))))))
 
+;; ---------------------------------------------------------------------------------------------
+;; GNU's __atomic builtins (G5c), as clang's CGAtomic.cpp writes them at -O0 for a lock-free size (EmitAtomicExpr,
+;; EmitAtomicOp, emitAtomicCmpXchgFailureSet): a constant order one instruction of its LLVM ordering (an order the
+;; operation does not take, a release load or an acquire store, emits nothing, as clang's "avoid crashing on code with
+;; undefined behavior"); a run-time order a switch over the C ABI's values (default monotonic); the result through a
+;; temporary
+
+(def ^:private cabi-orders {0 :monotonic 1 :acquire 2 :acquire 3 :release 4 :acq_rel 5 :seq_cst})
+
+(defn- atomic-ord
+  "The LLVM ordering of the C ABI order `o` for an operation (nil: clang emits nothing for it)."
+  [o load? store?]
+  (case (long o)
+    0 :monotonic
+    (1 2) (when-not store? :acquire)
+    3 (when-not load? :release)
+    4 (when-not (or load? store?) :acq_rel)
+    5 :seq_cst
+    :monotonic))
+
+(defn- by-order!
+  "(f ordering) at the order `oc` (a constant) or the run-time value of `oe`: clang's switch, its blocks joining after."
+  [oc oe load? store? f]
+  (if oc
+    (when-let [o (atomic-ord oc load? store?)] (f o))
+    (let [v (emit-rv oe)
+          lc (new-label "atomic.continue")
+          blocks (cond-> [[:monotonic (new-label "monotonic") []]]
+                   (not store?) (conj [:acquire (new-label "acquire") [1 2]])
+                   (not load?) (conj [:release (new-label "release") [3]])
+                   (not (or load? store?)) (conj [:acq_rel (new-label "acqrel") [4]])
+                   true (conj [:seq_cst (new-label "seqcst") [5]]))]
+      (emit! (list 'switch 'i32 v (second (first blocks)) (vec (for [[_ l ks] (rest blocks) k ks] ['i32 k l]))))
+      (close-block!)
+      (doseq [[o l] blocks] (start! l) (f o) (br! lc) (close-block!))
+      (start! lc))))
+
+(defn- cmpxchg-fail-ord [o]
+  (case (long o) (1 2) :acquire 5 :seq_cst :monotonic))
+
+(defn- mem-val
+  "A value of type `t` as memory holds it (bool an i8)."
+  [t v]
+  (if (= :bool (abi/bn (abi/underlying (abi/unq t)))) (if (boolean? v) (if v 1 0) (val! (list 'zext 'i1 v 'i8))) v))
+
+(defn- emit-atomic! [e]
+  (let [vt (:vt e) lt (abi/llvm-type vt) a (abi/size-of vt)
+        p (emit-rv (:p e))
+        which (:which e)
+        res (when-not (abi/void? (:ty e)) (slot! (:ty e)))
+        val-of (fn [] (if-let [v (:v e)] (mem-val vt (emit-rv v)) (val! (list 'load lt ['ptr (emit-rv (:vp e))] :align a))))
+        out! (fn [v] (cond (:rp e) (emit! (list 'store [lt v] ['ptr (emit-rv (:rp e))] :align a))
+                           res (emit! (list 'store [lt v] ['ptr res] :align a))))
+        signed (abi/signed? vt)]
+    (case which
+      :load (let [rp (when (:rp e) (emit-rv (:rp e)))]
+              (by-order! (:oc e) (:o e) true false
+                         (fn [o] (let [v (val! (list 'load lt ['ptr p] :atomic o :align a))]
+                                   (emit! (list 'store [lt v] ['ptr (or rp res)] :align a))))))
+      :store (let [v (val-of)] (by-order! (:oc e) (:o e) false true (fn [o] (emit! (list 'store [lt v] ['ptr p] :atomic o :align a)))))
+      :clear (by-order! (:oc e) (:o e) false true (fn [o] (emit! (list 'store ['i8 0] ['ptr p] :atomic o :align 1))))
+      :tas (by-order! (:oc e) (:o e) false false
+                      (fn [o] (let [r (val! (list 'atomicrmw :xchg ['ptr p] ['i8 1] o :align 1))
+                                    b (val! (list 'icmp :ne 'i8 r 0))]
+                                (store! abi/bool* b res))))
+      :xchg (let [v (val-of) rp (when (:rp e) (emit-rv (:rp e)))]
+              (by-order! (:oc e) (:o e) false false
+                         (fn [o] (let [r (val! (list 'atomicrmw :xchg ['ptr p] [lt v] o :align a))]
+                                   (emit! (list 'store [lt r] ['ptr (or rp res)] :align a))))))
+      :rmw (let [v (val-of)
+                 op (case (:rmw e) :min (if signed :min :umin) :max (if signed :max :umax) (:rmw e))]
+             (by-order! (:oc e) (:o e) false false
+                        (fn [o] (let [r (val! (list 'atomicrmw op ['ptr p] [lt v] o :align a))
+                                      r (if-not (:post e) r
+                                                (case (:rmw e)
+                                                  :add (val! (list 'add lt r v)) :sub (val! (list 'sub lt r v))
+                                                  :and (val! (list 'and lt r v)) :or (val! (list 'or lt r v)) :xor (val! (list 'xor lt r v))
+                                                  :nand (val! (list 'xor lt (val! (list 'and lt r v)) -1))
+                                                  (:min :max) (let [c (val! (list 'icmp (case (:rmw e) :min (if signed :slt :ult) (if signed :sgt :ugt)) lt r v))]
+                                                                (val! (list 'select ['i1 c] [lt r] [lt v])))))]
+                                  (emit! (list 'store [lt r] ['ptr res] :align a))))))
+      :cmpxchg (let [ep (emit-rv (:ep e))
+                     v (val-of)
+                     weak (if (some? (:wc e)) (not (zero? (long (:wc e)))) (fail :atomic "a run-time weak flag"))
+                     one (fn [s f]
+                           (let [c (val! (list 'load lt ['ptr ep] :align a))
+                                 pr (val! (apply list (cond-> ['cmpxchg ['ptr p] [lt c] [lt v] s f] weak (conj :weak true) true (conj :align a))))
+                                 old (val! (list 'extractvalue [(list 'struct lt 'i1) pr] 0))
+                                 ok (val! (list 'extractvalue [(list 'struct lt 'i1) pr] 1))
+                                 ls (new-label "cmpxchg.store_expected") lc (new-label "cmpxchg.continue")]
+                             (condbr! ok lc ls)
+                             (begin! ls)
+                             (emit! (list 'store [lt old] ['ptr ep] :align a))
+                             (begin! lc)
+                             (store! abi/bool* ok res)))
+                     fails (fn [s]
+                             (if (:foc e)
+                               (one s (cmpxchg-fail-ord (:foc e)))
+                               (let [fv (emit-rv (:fo e)) lc (new-label "atomic.continue")
+                                     bm (new-label "monotonic_fail") ba (new-label "acquire_fail") bs (new-label "seqcst_fail")]
+                                 (emit! (list 'switch 'i32 fv bm [['i32 1 ba] ['i32 2 ba] ['i32 5 bs]]))
+                                 (close-block!)
+                                 (doseq [[l f] [[bm :monotonic] [ba :acquire] [bs :seq_cst]]] (start! l) (one s f) (br! lc) (close-block!))
+                                 (start! lc))))]
+                 ;; clang's success order: a constant one as is (acq_rel and the rest), a run-time one switched
+                 (if (:oc e)
+                   (fails (or (cabi-orders (long (:oc e))) :monotonic))
+                   (by-order! nil (:o e) false false fails))))
+    (when res (load! (:ty e) res))))
+
+(defn- emit-bitop! [e]
+  (let [t (abi/unq (:ty (:e e))) lt (abi/llvm-type t) x (emit-rv (:e e))
+        w (subs (name lt) 1)]
+    (case (:which e)
+      :bswap (if (= lt 'i8) x
+                 (let [nm (str "llvm.bswap." lt)]
+                   (declare! nm lt [lt] :nounwind true)
+                   (val! (list 'call lt (gsym nm) [[lt x]]))))
+      (let [nm (str "llvm." (name (:which e)) "." lt)
+            zu (not= :ctpop (:which e))
+            _ (declare! nm lt (if zu [lt 'i1] [lt]) :nounwind true)
+            r (val! (list 'call lt (gsym nm) (if zu [[lt x] ['i1 true]] [[lt x]])))
+            r (int-cast! (abi/b :uint) abi/int* (int-cast! t (abi/b :uint) r))]
+        (if-let [fb (:fb e)]
+          (let [z (val! (list 'icmp :eq lt x 0))]
+            (val! (list 'select ['i1 z] ['i32 (emit-rv fb)] ['i32 r])))
+          r)))))
+
 (defn emit-rv
   "The operand of the scalar prvalue `e`."
   [e]
@@ -1000,6 +1153,8 @@
                  nil))
     :exn-ptr (:exn-adj @*f*)
     :alloca (val! (list 'alloca 'i8 :count ['i64 (emit-rv (:e e))] :align 16))
+    :atomic (emit-atomic! e)
+    :bitop (emit-bitop! e)
     ;; va_arg as clang's X86_64ABIInfo::EmitVAArg writes it for one INTEGER or SSE eightbyte: from the register save
     ;; area while gp_offset <= 40 (fp_offset <= 160), else from the overflow area
     :va-arg (let [t (:ty e)
@@ -1120,6 +1275,17 @@
     :mcall (if (= :pr (:cat e)) (materialize! e) (mcall! e nil))
     :typeid (if-let [x (:e e)]
               (let [a (emit-lv x)
+                    ;; G5c: typeid of *p, p null, throws std::bad_typeid ([expr.typeid]/3; Itanium §2.9.5's __cxa_bad_typeid,
+                    ;; as clang checks a glvalue that dereferences a pointer)
+                    _ (when (= :deref (:op x))
+                        (let [bad (new-label "typeid.bad_typeid") ok (new-label "typeid.end")
+                              z (val! (list 'icmp :eq 'ptr a 'null))]
+                          (condbr! z bad ok)
+                          (begin! bad)
+                          (declare! "__cxa_bad_typeid" 'void [])
+                          (call-insn! 'void 'void (gsym "__cxa_bad_typeid") [] false)
+                          (emit! '(unreachable))
+                          (begin! ok)))
                     vp (val! (list 'load 'ptr ['ptr a] :align 8))
                     tp (val! (list 'getelementptr :inbounds 'ptr ['ptr vp] ['i64 -1]))]
                 (val! (list 'load 'ptr ['ptr tp] :align 8)))
@@ -1297,6 +1463,7 @@
         cinit (when (#{:none :zero} (:i init)) (if (abi/scalar? (abi/unq t)) (zero-mem t) 'zeroinitializer))
         cexpr (when (and (= :expr (:i init)) (abi/scalar? (abi/unq t))) (let [e (:e init)] (when (#{:int :float :null} (:op e)) (emit-rv e))))
         ltype (if (abi/scalar? (abi/unq t)) (abi/llvm-type t) (list 'array s 'i8))]
+    (when (and (:tls v) (not (or cinit cexpr))) (fail :tls "a thread-local static with dynamic initialization (" (:name v) ")"))
     (add-top! (list 'llvm/global (gsym nm) ltype (or cinit cexpr (if (abi/scalar? (abi/unq t)) (zero-mem t) 'zeroinitializer)) :linkage :internal :align a))
     (when-not (or cinit cexpr)
       ;; the guard ([stmt.dcl]/3, Itanium §3.3.2)
@@ -1313,7 +1480,12 @@
                 c (val! (list 'icmp :ne 'i32 r 0))]
             (condbr! c l2 l3)
             (begin! l2)
-            (with-full (emit-init (gsym nm) t init))
+            ;; G5c: an initialization that throws aborts the guard (Itanium §3.3.3's __cxa_guard_abort), so a later pass
+            ;; tries again ([stmt.dcl]/3), as clang's CallGuardAbort cleanup does
+            (let [d (cleanup-depth)]
+              (swap! *f* update :cleanups conj {:guard-abort (gsym g)})
+              (with-full (emit-init (gsym nm) t init))
+              (swap! *f* update :cleanups #(subvec % 0 d)))
             (let [bt (abi/unq t)]
               (when (and (abi/class? bt) (nontrivial-dtor? (:id bt)))
                 (declare! "__cxa_atexit" 'i32 '[ptr ptr ptr])
@@ -1336,7 +1508,17 @@
     (unwind-to! 0)
     (br! (:ret-label @*f*))))
 
+(declare contains-label? emit-stmt*)
+
 (defn emit-stmt [s]
+  ;; G5c: a statement after a return, a break or a throw, holding no label, is not written (clang's CodeGenFunction::
+  ;; EmitStmt without an insertion point, ContainsLabel); a declaration still is (EmitSimpleStmt). libsupc++'s guard.cc:
+  ;; the code after the futex path's return used __set_and_release, which clang never emits
+  (if (and (:term @*f*) (not (#{:decl :static-local :null} (:s s))) (not (contains-label? s)))
+    nil
+    (emit-stmt* s)))
+
+(defn- emit-stmt* [s]
   (case (:s s)
     :null nil
     :block (if (:flat s)
@@ -1430,7 +1612,10 @@
             _ (declare! "__cxa_begin_catch" 'ptr '[ptr] :nounwind true)
             x (val! (list 'load 'ptr ['ptr es] :align 8))
             adj (val! (list 'call 'ptr (gsym "__cxa_begin_catch") [['ptr x]] :attrs [:nounwind]))]
-        (swap! *f* update :cleanups conj {:end-catch true})
+        ;; G5c: __cxa_end_catch may destroy the exception, whose destructor may throw (Itanium §2.5.5; clang's
+        ;; CallEndCatch with MightThrow): an invoke for a catch (...) or a handler of a class type, so that in a
+        ;; noexcept function it reaches the terminate pad (libsupc++'s nothrow operator new's catch (...))
+        (swap! *f* update :cleanups conj {:end-catch true :might-throw (boolean (or (nil? (:ty h)) (abi/class? (abi/unq (abi/non-ref (:ty h))))))})
         (when-let [vid (:var h)]
           (swap! *f* assoc :exn-adj adj)
           (local-decl! {:var vid :init (:init h)}))
@@ -1473,13 +1658,17 @@
     (condbr! c lt (if (:else s) le lend))
     (close-block!) (start! lt)
     (emit-stmt (:then s))
-    (when (:else s)
-      (when-not (:term @*f*) (br! lend))
-      (close-block!) (start! le)
-      (emit-stmt (:else s)))
-    (begin! lend)))
+    (if (:else s)
+      (let [then-reaches (not (:term @*f*))]
+        (when then-reaches (br! lend))
+        (close-block!) (start! le)
+        (emit-stmt (:else s))
+        ;; G5c: neither branch reaching the end, it has no predecessor and the code after the statement is unreachable
+        ;; (clang's EmitBlock(ContBlock, IsFinished) erases the unused block: no insertion point)
+        (when (or then-reaches (not (:term @*f*))) (begin! lend)))
+      (begin! lend))))
 
-(alter-var-root #'emit-stmt (fn [f] (fn [s] (if (= :if (:s s)) (emit-if! s) (f s)))))
+(alter-var-root #'emit-stmt (fn [f] (fn [s] (if (= :if (:s s)) (when-not (and (:term @*f*) (not (contains-label? s))) (emit-if! s)) (f s)))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Functions
@@ -1777,7 +1966,7 @@
 (defn- linkage-of [f]
   (cond
     (:internal f) [:linkage :internal]
-    (or (:inline f) (:implicit f) (:defaulted f)) [:linkage :linkonce_odr]
+    (or (:inline f) (:implicit f) (and (:defaulted f) (not (:out-of-line-default f)))) [:linkage :linkonce_odr]
     :else []))
 
 (defn- emit-fn!
@@ -1935,22 +2124,44 @@
       (binding [*no-eh* true] (dealloc-call! d '%a0 (abi/size-of t) (abi/align-of t) []))
       (emit! '(ret void))
       (close-block!))
-    (add-top! (list 'llvm/define (gsym nm) 'void [['ptr '%a0]] :linkage (if (:internal f) :internal :linkonce_odr)
-                    :body (vec (:blocks @state))))))
+    ;; (the destructor's linkage: strong for one defined out of line here, G5c; linkonce_odr for an inline one)
+    (add-top! (apply list 'llvm/define (gsym nm) 'void [['ptr '%a0]]
+                     (concat (let [l (linkage-of f)] (if (and (empty? l) (:body f) (not (:lazy f))) [] (if (:internal f) [:linkage :internal] [:linkage :linkonce_odr])))
+                             [:body (vec (:blocks @state))])))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Vtables and type_info (Itanium §2.5, §2.9.5)
 
-(defn- external-class?
-  "A header's dynamic class whose key function ([basic.def.odr]; Itanium §5.2.3: its first virtual function that is
-  not pure and not inline where it is declared) is not defined here: its vtable and type_info are the runtime's,
-  external (G4: std::exception, std::logic_error)."
+(defn- key-fn
+  "The key function of the dynamic class `cid` (Itanium §5.2.3, clang's ASTContext::getCurrentKeyFunction): its first
+  virtual function, in declaration order, that is not pure and not inline (defined in the class, declared or later
+  defined inline: clang's setNonKeyFunction), not implicit or defaulted; nil for a class template's specialization (its
+  vtable is the instantiation's, linkonce_odr) or a class without one."
   [cid]
   (let [c (abi/cls cid)]
-    (and (:header c) (abi/dynamic? cid)
-         (let [k (first (filter (fn [id] (let [f (sema/fnd id)] (and (:virtual f) (not (:pure f)) (not (:inline f)) (not (:implicit f)) (not (:defaulted f)))))
-                                (:methods c)))]
-           (and k (not (:body (sema/fnd k))))))))
+    (when (and (abi/dynamic? cid) (not (:targs c)) (not (:tinst c)))
+      (first (filter (fn [id] (let [f (sema/fnd id)] (and (:virtual f) (not (:pure f)) (not (:inline f)) (not (:implicit f)))))
+                     (:methods c))))))
+
+(defn- vtable-home
+  "Where the vtable and type_info of the dynamic class `cid` are defined (clang's CodeGenVTables::isVTableExternal,
+  getVTableLinkage): :here, strong, when its key function is defined in this unit (G5c: libsupc++'s bad_alloc.cc
+  defines std::bad_alloc's); :external when it has a key function defined elsewhere (G4: std::exception's); else
+  :linkonce, in each unit that uses it."
+  [cid]
+  (if-let [k (key-fn cid)]
+    (let [f (sema/fnd k)] (if (or (and (:body f) (not (:lazy f))) (:out-of-line-default f)) :here :external))
+    :linkonce))
+
+(defn- external-class?
+  "A dynamic class whose vtable and type_info are another unit's (its key function not defined here)."
+  [cid]
+  (= :external (vtable-home cid)))
+
+(defn- vt-linkage
+  "The linkage options of the vtable, VTT and type_info of class `cid`: strong where its key function is defined."
+  [cid]
+  (if (and (abi/dynamic? cid) (= :here (vtable-home cid))) [] [:linkage :linkonce_odr]))
 
 (defn- typeinfo! [cid]
   (let [t {:k :class :id cid}
@@ -1963,7 +2174,7 @@
         (add-top! (list 'llvm/global (gsym ti) 'ptr :linkage :external :constant true)))
     (when-not (contains? (:declared @*top*) ti)
       (swap! *top* update :declared conj ti ts)
-      (add-top! (list 'llvm/global (gsym ts) (list 'array (inc (count mn)) 'i8) (list 'c-string (str mn (char 0))) :linkage :linkonce_odr :constant true :align 1))
+      (add-top! (apply list 'llvm/global (gsym ts) (list 'array (inc (count mn)) 'i8) (list 'c-string (str mn (char 0))) (concat (vt-linkage cid) [:constant true :align 1])))
       (let [bases (:bases c)
             kind (cond (empty? bases) "_ZTVN10__cxxabiv117__class_type_infoE"
                        (and (= 1 (count bases)) (= :public (:access (first bases))) (not (:virtual (first bases)))
@@ -1976,22 +2187,22 @@
         (doseq [b bases] (typeinfo! (:cls b)))
         (case kind
           "_ZTVN10__cxxabiv117__class_type_infoE"
-          (add-top! (list 'llvm/global (gsym ti) '(struct ptr ptr) (list 'struct vt ['ptr (gsym ts)]) :linkage :linkonce_odr :constant true :align 8))
+          (add-top! (apply list 'llvm/global (gsym ti) '(struct ptr ptr) (list 'struct vt ['ptr (gsym ts)]) (concat (vt-linkage cid) [:constant true :align 8])))
           "_ZTVN10__cxxabiv120__si_class_type_infoE"
-          (add-top! (list 'llvm/global (gsym ti) '(struct ptr ptr ptr) (list 'struct vt ['ptr (gsym ts)] ['ptr (gsym (str "_ZTI" (abi/mangle-type-name {:k :class :id (:cls (first bases))})))])
-                          :linkage :linkonce_odr :constant true :align 8))
+          (add-top! (apply list 'llvm/global (gsym ti) '(struct ptr ptr ptr) (list 'struct vt ['ptr (gsym ts)] ['ptr (gsym (str "_ZTI" (abi/mangle-type-name {:k :class :id (:cls (first bases))})))])
+                                (concat (vt-linkage cid) [:constant true :align 8])))
           (let [bl (:bases (abi/layout cid))
                 ;; §2.9.5's flags: a class met twice on non-virtual ways (non-diamond repeat), a virtual base met twice (diamond)
                 counts (frequencies ((fn walk [x] (mapcat (fn [b] (cons [(:cls b) (boolean (:virtual b))] (walk (:cls b)))) (:bases (abi/cls x)))) cid))
                 flags (bit-or (if (some (fn [[[_ v] n]] (and (not v) (> (long n) 1))) counts) 1 0)
                               (if (some (fn [[[_ v] n]] (and v (> (long n) 1))) counts) 2 0))]
-            (add-top! (list 'llvm/global (gsym ti) (apply list 'struct 'ptr 'ptr 'i32 'i32 (mapcat (fn [_] ['ptr 'i64]) bases))
+            (add-top! (apply list 'llvm/global (gsym ti) (apply list 'struct 'ptr 'ptr 'i32 'i32 (mapcat (fn [_] ['ptr 'i64]) bases))
                             (apply list 'struct vt ['ptr (gsym ts)] ['i32 flags] ['i32 (count bases)]
                                    (mapcat (fn [i b] [['ptr (gsym (str "_ZTI" (abi/mangle-type-name {:k :class :id (:cls b)})))]
                                                       ['i64 (+ (bit-shift-left (long (if (:virtual b) (vbase-offset-offset cid (:cls b)) (nth bl i))) 8)
                                                                (if (= :public (:access b)) 2 0) (if (:virtual b) 1 0))]])
                                            (range) bases))
-                            :linkage :linkonce_odr :constant true :align 8)))))))
+                            (concat (vt-linkage cid) [:constant true :align 8]))))))))
     (gsym ti)))
 
 (defn- thunk!
@@ -2065,13 +2276,13 @@
                                adj ['ptr (thunk! fid v adj)]
                                (= 0 v) (do (want-fn! fid 1) (want-d0! fid) ['ptr (gsym (abi/mangle-fn f 0))])
                                :else ['ptr (want-fn! fid 1)])))))]
-    (add-top! (list 'llvm/global (gsym (group-name grp)) (list 'array (count slots) 'ptr) (apply list 'array slots) :linkage :linkonce_odr :constant true :align 8)))))
+    (add-top! (apply list 'llvm/global (gsym (group-name grp)) (list 'array (count slots) 'ptr) (apply list 'array slots) (concat (vt-linkage lid) [:constant true :align 8]))))))
 
 (defn- vtt! [cid]
   (let [{:keys [entries]} (vtt-layout cid)]
-    (add-top! (list 'llvm/global (gsym (vtt-name cid)) (list 'array (count entries) 'ptr)
+    (add-top! (apply list 'llvm/global (gsym (vtt-name cid)) (list 'array (count entries) 'ptr)
                     (apply list 'array (for [e entries] ['ptr (address-point (:grp e) (:sub e))]))
-                    :linkage :linkonce_odr :constant true :align 8))))
+                    (concat (vt-linkage cid) [:constant true :align 8])))))
 
 (defn- vtable! [cid] (group! [cid cid 0]))
 
@@ -2223,10 +2434,12 @@
                     bt (abi/unq t)]
                 ;; a constant object with a destructor: registered with __cxa_atexit by the global constructor
                 (if (and (abi/class? bt) (nontrivial-dtor? (:id bt)))
-                  (do (add-top! (apply list 'llvm/global (gsym nm) ct cv (concat link [:align a]))) (swap! dyn conj [:dtor id]))
+                  (do (when (:tls v) (fail :tls "a thread-local variable with a destructor (" (:name v) ")"))
+                      (add-top! (apply list 'llvm/global (gsym nm) ct cv (concat link [:align a]))) (swap! dyn conj [:dtor id]))
                   ((if (:internal v) #(swap! *top* assoc-in [:lazy nm] %) add-top!) (apply list 'llvm/global (gsym nm) ct cv (concat link [:align a])))))
               :else
-              (do (add-top! (apply list 'llvm/global (gsym nm) (if (abi/ref? t) 'ptr (list 'array s 'i8)) (if (abi/ref? t) 'null 'zeroinitializer) (concat link [:align a])))
+              (do (when (:tls v) (fail :tls "a thread-local variable with dynamic initialization (" (:name v) "): clang's TLS wrapper"))
+                  (add-top! (apply list 'llvm/global (gsym nm) (if (abi/ref? t) 'ptr (list 'array s 'i8)) (if (abi/ref? t) 'null 'zeroinitializer) (concat link [:align a])))
                   (swap! dyn conj [:init id])))))))
     ;; the dynamic initializations by priority (init_priority(N): a function _GLOBAL__I_00000N of its own, clang's), then
     ;; the functions __attribute__((constructor(N))) names, all in llvm.global_ctors
@@ -2281,6 +2494,34 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; The module
 
+;; G5c: the type_info objects of the fundamental types (Itanium §2.9.4: the runtime's, "in the same object file as the
+;; type_info of __fundamental_type_info"; libsupc++'s fundamental_type_info.cc defines its key function, the destructor):
+;; for each fundamental type T (its <builtin-type> code, §5.1.5), T, T* and const T*: void, std::nullptr_t, bool, wchar_t,
+;; char, unsigned char, signed char, short, unsigned short, int, unsigned, long, unsigned long, long long, unsigned long
+;; long, __int128, unsigned __int128, _Float16, float, double, long double, __float128, char8_t, char16_t, char32_t
+(def ^:private fundamental-codes ["v" "Dn" "b" "w" "c" "h" "a" "s" "t" "i" "j" "l" "m" "x" "y" "n" "o" "Dh" "f" "d" "e" "g" "Du" "Ds" "Di"])
+
+(defn- abstract-class?
+  "A class with a pure virtual function its final overriders leave pure ([class.abstract]/2): a [:pure] slot in its vtable group."
+  [cid]
+  (boolean (and (abi/dynamic? cid) (some #(= :pure (first %)) (:items (group-of cid cid 0))))))
+
+(defn- fundamental-typeinfos! []
+  (let [vt (fn [k] ['ptr (list 'getelementptr :inbounds 'ptr ['ptr (gsym k)] ['i64 2])])
+        fvt "_ZTVN10__cxxabiv123__fundamental_type_infoE" pvt "_ZTVN10__cxxabiv119__pointer_type_infoE"
+        name! (fn [mn] (add-top! (list 'llvm/global (gsym (str "_ZTS" mn)) (list 'array (inc (count mn)) 'i8) (list 'c-string (str mn (char 0))) :constant true :align 1)))]
+    (when-not (contains? (:declared @*top*) pvt)
+      (swap! *top* update :declared conj pvt)
+      (add-top! (list 'llvm/global (gsym pvt) '(array 0 ptr) :linkage :external)))
+    (doseq [c fundamental-codes]
+      (swap! *top* update :declared into [(str "_ZTI" c) (str "_ZTIP" c) (str "_ZTIPK" c)])
+      (add-top! (list 'llvm/global (gsym (str "_ZTI" c)) '(struct ptr ptr) (list 'struct (vt fvt) ['ptr (gsym (str "_ZTS" c))]) :constant true :align 8))
+      (name! c)
+      (doseq [[pre flags] [["P" 0] ["PK" 1]]]
+        (add-top! (list 'llvm/global (gsym (str "_ZTI" pre c)) '(struct ptr ptr i32 ptr)
+                        (list 'struct (vt pvt) ['ptr (gsym (str "_ZTS" pre c))] ['i32 flags] ['ptr (gsym (str "_ZTI" c))]) :constant true :align 8))
+        (name! (str pre c))))))
+
 (defn gen-module
   "The LLVM forms of the program `prog` (arbace.cpp.sema's analyze-program) of the file named `file`."
   [prog ^String file]
@@ -2299,8 +2540,28 @@
     (doseq [[k id] (:order prog) :when (= k :fn)]
       (let [f (sema/fnd id)]
         ;; internal functions are written when used, as clang defers them
-        (when (and (:tbody f) (not (:inline f)) (not (:implicit f)) (not (:internal f))) (want-fn! id))
-        (when (and (:tbody f) (= "main" (:name f))) (want-fn! id))))
+        (when (and (or (:tbody f) (:out-of-line-default f)) (not (:inline f)) (not (:implicit f)) (not (:internal f)))
+          (want-fn! id)
+          ;; G5c: a defined constructor's or destructor's complete-object variant too (clang's EmitCXXConstructors,
+          ;; EmitCXXDestructors: C1/D1, an alias of C2/D2 without virtual bases), a virtual destructor's deleting one (D0)
+          (when (#{:ctor :dtor} (:kind f))
+            ;; (an abstract class has no complete object: no C1, Itanium §5.1.4.3's complete-object constructor is
+            ;; never called; its destructors all are, through derived classes and D0's slot)
+            (when-not (and (= :ctor (:kind f)) (abstract-class? (:cls f))) (want-fn! id 1))
+            (when (and (= :dtor (:kind f)) (:virtual f)) (want-d0! id))))
+        (when (and (:tbody f) (= "main" (:name f))) (want-fn! id))
+        (when (and (:tbody f) (:used f) (not (:implicit f))) (want-fn! id))))
+    ;; G5c: the vtables (with their VTTs and type_info) of the classes whose key function this unit defines, used or not
+    ;; (clang's Sema::MarkVTableUsed at the key function's definition, CodeGenModule::EmitVTable)
+    (doseq [cid (sort (keys @abi/*classes*)) :when (= :here (vtable-home cid))]
+      (swap! *top* update :groups (fnil conj #{}) [cid cid 0])
+      ;; (defined here: no external declaration of it, the type_info of a class derived from __si_class_type_info, in
+      ;; si_class_type_info.cc, names __si_class_type_info's vtable)
+      (swap! *top* update :declared conj (vtable-name cid))
+      (when (abi/has-vbases? cid) (swap! *top* update :vtts (fnil conj #{}) cid))
+      (let [c (abi/cls cid)]
+        (when (and (= "__fundamental_type_info" (:name c)) (= [[:ns "__cxxabiv1"]] (vec (:path c))))
+          (fundamental-typeinfos!))))
     (loop []
       (let [q (:queue @*top*)
             d0s (for [fid (:d0s @*top*) :when (not (contains? (:declared @*top*) [:d0 fid]))] fid)
@@ -2318,6 +2579,12 @@
           (recur))))
     (doseq [[nm a] (sort-by key (:aliases @*top*))] (when (contains? (:c1 @*top*) nm) (add-top! a)))
     (when (:dso @*top*) (add-top! (list 'llvm/global (gsym "__dso_handle") 'i8 :linkage :external :visibility :hidden)))
+    ;; G5c: the thread-local variables' globals (their definitions and declarations) thread_local, as clang's
+    ;; CodeGenModule::setTLSMode writes them (the general-dynamic model's default)
+    (let [tls (set (for [[_ v] @sema/*vars* :when (:tls v) :when (or (not= :static-local (:storage v)) (:fn-of v))]
+                     (gsym (if (= :static-local (:storage v)) (abi/mangle-local-static (sema/fnd (:fn-of v)) (:name v) (long (:disc v 0))) (abi/mangle-var v)))))]
+      (when (seq tls)
+        (swap! *top* update :forms (fn [fs] (mapv #(if (and (seq? %) (= 'llvm/global (first %)) (tls (second %))) (apply list (concat % [:thread-local true])) %) fs)))))
     ;; clang's -O0 pipeline: the always-inline functions inlined and erased (LLVM's AlwaysInliner, P16 (a))
     (swap! *top* update :forms inl/always-inline)
     (vec (concat [(list 'llvm/source-filename file)
@@ -2332,6 +2599,10 @@
   (binding [sema/*main-name* (.getName (java.io.File. path)) sema/*main-dir* (.getParent (.getAbsoluteFile (java.io.File. path))) ps/*full-headers* (not= "0" (System/getenv "CPP_FULL_HEADERS"))]
     (let [u (native/parse-file path (.getName (java.io.File. path)) std (vec args))
           _ (when (pos? (long (:declines u 0))) (fail :parse "the native parser declined " (:declines u) " constructs"))
+          ;; G5c: a preprocessor error (an #error, an include not found) is the compile's failure, as clang's: a header
+          ;; that is not read left the declarations after it unparsed (libsupc++'s eh_*.cc through unwind-cxx.h's
+          ;; "unwind.h" emitted nothing)
+          _ (when-let [e (first (:pp-errors u))] (fail :pp "the preprocessor: " (str/replace (str (or (:message e) e)) #"\s+" " ")))
           src (llvm/latin1 path)
           prog (binding [sema/*decltypes* (:decltypes u)] (sema/analyze-program (:nodes u) (:root u) src))]
       (gen-module prog (.getName (java.io.File. path)))))))

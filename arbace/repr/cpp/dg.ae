@@ -73,6 +73,12 @@
 (def ^:private cxx-targets
   (delay (let [f (java.io.File. "test/cpp/dg-targets.edn")] (if (.exists f) (:effective (read-string (slurp f))) {}))))
 
+(def ^:private require-table
+  "cpp-compl: the dg-require-NAME procs of gcc's target-supports-dg.exp other than effective-target, as they decide on the
+  reference host (test/cpp/dg-targets.edn's :require): a false one makes the file UNSUPPORTED (its proc sets dg-do-what's
+  N); a name the table does not list is taken to hold, as before."
+  (delay (let [f (java.io.File. "test/cpp/dg-targets.edn")] (if (.exists f) (:require (read-string (slurp f)) {}) {}))))
+
 (def ^:dynamic *flags* "the run's flags, for the effective targets target-supports.exp decides by check-flags" [])
 
 (defn cxx-atom
@@ -202,6 +208,7 @@
         std (std-of all)
         y (host/std-year std)
         fc (host/file-config all std)
+        req (first (filter #(false? (get @require-table (subs (:name %) (count "require-")))) (filter #(str/starts-with? (:name %) "require-") ds)))
         [unmet skip] (binding [*flags* all]
                        [(first (remove #(:applies (holds? y (str "target " (first (:words %))))) (filter #(= (:name %) "require-effective-target") ds)))
                         (first (filter (fn [d] (and (= (:name d) "skip-if")
@@ -219,6 +226,7 @@
                     (#{:unmodelled} runner) (str "the driver " (:exp drv) " is not modelled")
                     (and (seq dos) (not ok)) (str "dg-do " (second (:words (first dos))) " at " (if stdlist? (str/join ", " (map #(str "c++" %) cands)) std))
                     unmet (str "dg-require-effective-target " (first (:words unmet)))
+                    req (str "dg-" (:name req))
                     skip (str "dg-skip-if " (pr-str (second (:words skip))))
                     :else nil)}))
 
@@ -226,7 +234,8 @@
   "A file's directives at year `y` with the run's flags: arbace.c.dg's analysis with the C++ selectors (the expected error
   lines by line, the xfail ones, a line 0's count, dg-excess-errors), the lines a dg-line names resolved (arbace.c.dg's
   resolve-line); :allow, the lines where an error is no extra (a dg-message's, which matches any diagnostic, gcc-dg.exp's
-  process-message; a dg-bogus's that is xfail: the message is expected), :prune the dg-prune-output count."
+  process-message; a dg-bogus's that is xfail: the message is expected), :prune the dg-prune-output patterns (gcc-dg.exp's
+  dg-prune-output takes exactly one, no selector: additional_prunes)."
   [^String text y flags]
   (let [ds (directives text)
         names (cdg/line-names ds)]
@@ -249,7 +258,7 @@
                :else (cond-> (update-in a [:expect k] (fnil conj []) l)
                        (= k :error) (update-in [:msgs l] (fnil conj []) (str (first words))))))
            (= name "excess-errors") (assoc a :excess true)
-           (= name "prune-output") (update a :prune (fnil inc 0))
+           (= name "prune-output") (update a :prune (fnil conj []) (str (first words)))
            :else a))
        {} ds))))
 
@@ -326,9 +335,40 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; read
 
+;; dg-prune-output (cpp-compl): gcc-dg.exp's gcc-dg-prune (gcc 15.2.0, gcc/testsuite/lib/gcc-dg.exp, lines 398-403) runs, for
+;; each pattern P of the file's dg-prune-output directives, `regsub -all "(^|\n)\[^\n\]*$P\[^\n\]*" $text "" text` over the
+;; compiler's output that DejaGnu's dg-test (dg.exp) has left after the dg-error, dg-message ... patterns took their lines, before it
+;; counts excess errors: g++.dg's cpp0x/initlist19.C prunes "error" ("Allow other errors, too") and its dg-error line still passes.
+;; So the prune decides only the lines no directive takes (prune-errors): the extra errors and those outside the main file. The
+;; pattern is spliced into the regexp as text, so a P with a top-level `|` (`not declared|no matching|depth`) removes, by its
+;; other branches, only the matched words, not their line: the same substitution is made here, on clang's or g++'s output alike
+;; (the patterns are g++'s words; what clang's words leave is clang's, the clang-* classes). Tcl's ARE in Java's syntax: `.`
+;; matches a newline (Tcl's default is not newline-sensitive), \m \M \y are \b, [[:alpha:]] and the like \p{Alpha}.
+
+(defn- tcl-are->java ^String [^String p]
+  (-> p
+      (str/replace #"\\[mMy]" "\\b")
+      (str/replace #"\[:(alpha|digit|alnum|space|upper|lower|punct|xdigit|blank|cntrl|graph|print):\]"
+                   (fn [[_ c]] (str "\\p{" (str/upper-case (subs c 0 1)) (subs c 1) "}")))))
+
+(defn prune-text
+  "`text` with every dg-prune-output pattern of `pats` substituted away as gcc-dg-prune does: [text unapplied], unapplied
+  the count of patterns Java's regexps cannot take (left, the row tagged [dg-prune-output N])."
+  [^String text pats]
+  (reduce (fn [[^String t bad] ^String p]
+            (if (zero? (count p))
+              [t bad]
+              (if-let [re (try (java.util.regex.Pattern/compile (str "(?s)(^|\n)[^\n]*" (tcl-are->java p) "[^\n]*"))
+                               (catch Throwable _ nil))]
+                [(.replaceAll (.matcher ^java.util.regex.Pattern re t) "") bad]
+                [t (inc (long bad))])))
+          [text 0] pats))
+
 (defn errors-of
   "A compiler's diagnostics (`FILE:LINE:COL: error: ...` lines, clang's or g++'s, or the port's `FILE:LINE:COL: msg`
-  when `port`) as {:status :lines {line n} :other n :fatal line-or-0 :message first-error}, the lines of `main` alone."
+  when `port`) as {:status :lines {line n} :other n :olines {line n} :fatal line-or-0 :message first-error}, the lines of
+  `main` alone in :lines; :olines the lines of the errors located in another file (an included one), which DejaGnu's
+  line-numbered patterns match too (fold-other)."
   [^String out ^String main port]
   (reduce
    (fn [a ^String l]
@@ -337,7 +377,8 @@
                               (re-find #"^(.*?):(\d+):(?:\d+:)? (fatal error|error): " l))]
        (let [mine (= f main)
              a (if (str/blank? (:message a)) (assoc a :message (one-line (subs l 0 (min 300 (count l))))) a)
-             a (if mine (update-in a [:lines (Long/parseLong ln)] (fnil inc 0)) (update a :other (fnil inc 0)))]
+             a (if mine (update-in a [:lines (Long/parseLong ln)] (fnil inc 0))
+                   (-> a (update :other (fnil inc 0)) (update-in [:olines (Long/parseLong ln)] (fnil inc 0))))]
          (if (and (= kind "fatal error") (zero? (long (:fatal a))))
            (assoc a :fatal (if mine (Long/parseLong ln) -1))
            a))
@@ -346,6 +387,82 @@
          a)))
    {:lines (sorted-map) :other 0 :fatal 0 :message ""}
    (str/split-lines out)))
+
+(defn fold-other
+  "DejaGnu's dg-test (dg.exp) matches a dg-error of line L by the pattern `[^\n]*:L:...` (the file's name is not part of it,
+  which is why g++.dg's deleted16a.C, `#include \"deleted16.C\"`, expects its errors at the included file's lines 21-23): an
+  error of another file at a line in `lines` (the expected, xfail and allowed lines) is counted at that line, no longer as one
+  outside the main file. `e` is errors-of's map (or the reference's, :error and :other-lines), `k` its lines' key."
+  [e k lines]
+  (let [ls (set lines)
+        hit (filter (fn [[l]] (ls l)) (:olines e))]
+    (if (empty? hit)
+      e
+      (reduce (fn [e [l n]]
+                (-> e (update-in [k l] (fnil + 0) n) (update :other #(- (long (or % 0)) (long n))) (update :olines dissoc l)))
+              e hit))))
+
+(defn- top-branches
+  "The top-level branches of a Tcl ARE (split at `|` outside parentheses, brackets and escapes)."
+  [^String re]
+  (let [n (count re)]
+    (loop [i 0 depth 0 br false start 0 out []]
+      (if (>= i n)
+        (conj out (subs re start))
+        (let [c (.charAt re i)]
+          (cond
+            (= c \\) (recur (+ i 2) depth br start out)
+            br (recur (inc i) depth (not (= c \])) start out)
+            (= c \[) (recur (+ i (if (and (< (inc i) n) (= \] (.charAt re (inc i)))) 2 1)) depth true start out)
+            (= c \() (recur (inc i) (inc depth) br start out)
+            (= c \)) (recur (inc i) (max 0 (dec depth)) br start out)
+            (and (= c \|) (zero? depth)) (recur (inc i) depth br (inc i) (conj out (subs re start i)))
+            :else (recur (inc i) depth br start out)))))))
+
+(defn alt-hits
+  "The expected error lines a dg-error's later top-level branch takes in `text` (a compiler's output). gcc-dg.exp's
+  process-message (gcc 15.2.0, gcc/testsuite/lib/gcc-dg.exp, lines 1226-1283) splices the message into
+  `COLUMN (fatal )?error:[^\n]*MESSAGE` as text, so in `previously|declared` (cpp0x/defaulted10.C) or
+  `has a previous declaration|previously declared here` (cpp0x/override2.C) the branches after the first lose the error
+  prefix: g++ passes both on a note at the line (`6:29: note: ... previously declared here`). Taken here as any diagnostic
+  located at the line (in any file, as fold-other) whose text a later branch finds; the first branch is the line model's."
+  [^String text dg]
+  (let [msgs (:msgs dg)
+        exp (set (get-in dg [:expect :error]))
+        diag-lines (when (seq msgs) (str/split-lines text))]
+    (set (for [[l ms] msgs
+               :when (exp l)
+               :let [res (keep (fn [^String m]
+                                 (let [m (str/replace m #"^(-|\d+):" "")
+                                       bs (rest (top-branches m))]
+                                   (seq (keep #(try (re-pattern (str "(?s)" (tcl-are->java %))) (catch Throwable _ nil)) (remove str/blank? bs)))))
+                               ms)
+                     res (apply concat res)]
+               :when (seq res)
+               :when (some (fn [^String ln]
+                             (and (re-find (re-pattern (str "^[^ :][^ :]*:" l ":(\\d+:)? ")) ln)
+                                  (some #(re-find % ln) res)))
+                           diag-lines)]
+           l))))
+
+(defn- allowed-lines [dg]
+  (concat (get-in dg [:expect :error]) (get-in dg [:xfail :error]) (:allow dg)))
+
+(defn prune-errors
+  "errors-of's map of the whole output `e` and of the pruned output `p` (prune-text) as DejaGnu counts them: the errors at
+  `allowed` lines (the directives', which dg-test matches before gcc-dg-prune runs) from `e`, the rest (extra lines, other
+  files' lines, errors with no line) from `p`."
+  [e p allowed]
+  (let [a (set allowed)
+        keep (fn [m] (into (sorted-map) (filter (fn [[l]] (a l)) m)))
+        drop (fn [m] (into (sorted-map) (remove (fn [[l]] (a l)) m)))
+        ol (merge (keep (:olines e)) (drop (:olines p)))
+        no-line (- (long (or (:other p) 0)) (long (reduce + 0 (vals (:olines p)))))]
+    (assoc e
+           :lines (merge (keep (:lines e)) (drop (:lines p)))
+           :olines ol
+           :other (+ no-line (long (reduce + 0 (vals ol))))
+           :message (if (str/blank? (:message p)) (:message e) (:message p)))))
 
 (defn- pool-map [f xs]
   (let [threads (Integer/parseInt (or (System/getenv "REPR_CPP_THREADS") "4"))
@@ -362,15 +479,20 @@
   (let [c (str d "/clang/" (esc nm))
         st (when (exists? (str c ".status")) (str/trim (slurp (str c ".status"))))
         err (if (exists? (str c ".err")) (slurp-latin1 (str c ".err")) "")
+        [pruned unpruned] (prune-text err (:prune r))
+        errs (fn [] (let [e (errors-of err nm false)
+                          e (if (seq (:prune r)) (prune-errors e (errors-of pruned nm false) (allowed-lines r)) e)
+                          alt (alt-hits err r)]
+                      (cond-> e (seq alt) (assoc :alt (vec (sort alt))))))
         secs (when (exists? (str c ".secs")) (Double/parseDouble (str/trim (slurp (str c ".secs")))))
         t0 (System/nanoTime)
         res (cond
               (nil? st) {:status :crash :lines {} :message "no clang run"}
               (= st "124") {:status :timeout :lines {} :message "clang's dump past its 300 s"}
-              (= st "1") (assoc (errors-of err nm false) :status :rejected)
+              (= st "1") (assoc (errs) :status :rejected)
               (not= st "0") {:status :crash :lines {} :message (str "cxxdump status " st ": " (one-line (last (remove str/blank? (str/split-lines err)))))}
               :else
-              (let [e (errors-of err nm false)]
+              (let [e (errs)]
                 (try
                   (let [src (str root "/" nm)
                         ;; CX11: --reader native (REPR_CPP_READER=native) reads the accepted unit with the native parser
@@ -384,7 +506,8 @@
                         (spit o (rc/unit-text rd))
                         (assoc e :status :accepted))))
                   (catch Throwable x (assoc e :status :crash :message (str "read: " (one-line x)))))))]
-    [nm (assoc res :secs (+ (double (or secs 0.0)) (/ (- (System/nanoTime) t0) 1e9)))]))
+    [nm (cond-> (assoc res :secs (+ (double (or secs 0.0)) (/ (- (System/nanoTime) t0) 1e9)))
+          (pos? (long unpruned)) (assoc :unpruned unpruned))]))
 
 (defn- read-pp
   "A preprocess file's read: the shared preprocessor's stream and errors (arbace.repr.c.pp in C++ mode, g++'s host data)."
@@ -426,10 +549,19 @@
                    (for [[nm r] dg :when (not (:unsupported r))
                          :let [g (str d "/gxx/" (esc nm))]
                          :when (exists? (str g ".status"))]
-                     (let [e (errors-of (slurp-latin1 (str g ".txt")) nm false)]
+                     (let [txt (slurp-latin1 (str g ".txt"))
+                           e (errors-of txt nm false)
+                           e (if (seq (:prune r)) (prune-errors e (errors-of (first (prune-text txt (:prune r))) nm false) (allowed-lines r)) e)
+                           alt (alt-hits txt r)]
                        [(str corpus "/" nm) (cond-> {:status (Long/parseLong (str/trim (slurp (str g ".status")))) :std (:std r) :args (:gxx r)
-                                                     :error (:lines e)}
+                                                     :error (into (sorted-map) (:lines e))}
+                                              ;; cpp-compl: recorded with the file's dg-prune-output patterns applied (gxx-agrees
+                                              ;; takes an entry of a pruning file without it as not recorded)
+                                              (seq (:prune r)) (assoc :pruned true)
+                                              ;; cpp-compl: the expected lines a later branch of the message takes (alt-hits)
+                                              (seq alt) (assoc :alt (vec (sort alt)))
                                               (pos? (long (:other e))) (assoc :other (:other e))
+                                              (seq (:olines e)) (assoc :other-lines (into (sorted-map) (:olines e)))
                                               (not (zero? (long (:fatal e)))) (assoc :fatal (:fatal e)))])))]
     (spit (str d "/gxx.edn") (pr-str rows))
     (println (str part ": g++'s outputs of " (count rows) " files read, " (count (filter #(pos? (long (:status (val %)))) rows)) " rejected"))
@@ -440,7 +572,7 @@
                             ";; doc/cpp/CPP-SURVEY.md, \"As built: CX9 (write-ahead)\"): ID -> {:status (g++'s exit status) :std (the\n"
                             ";; standard) :args (its options) :error {LINE COUNT} (its errors at the main file's lines) :other (errors elsewhere) :fatal (a fatal\n"
                             ";; error's line, -1 elsewhere)}. The reference of the directives (CP11 (a), CS14's runs as data). Clojure reader.\n{\n"
-                            (str/join "\n" (map (fn [[k v]] (str (pr-str k) " " (pr-str v))) all)) "\n}\n"))
+                            (str/join "\n" (map (fn [[k v]] (str (pr-str k) " " (pr-str (cond-> v (map? (:error v)) (update :error #(into (sorted-map) %)))))) all)) "\n}\n"))
         (println "recorded" ref-file (count all) "files")))))
 
 (defn gxx-agrees
@@ -448,10 +580,14 @@
   ...], or nil when not recorded."
   [d g]
   ;; a reference recorded at another standard or with other options than the run's is not this run's (the record is stale for the file)
-  (when (and g (= (:std g) (:std d)) (= (:args g) (:gxx d)))
+  (when (and g (= (:std g) (:std d)) (= (:args g) (:gxx d))
+             ;; an entry recorded before the prune was applied is not this run's (cpp-compl)
+             (or (empty? (:prune d)) (:pruned g)))
     ;; a dg-message's line takes any diagnostic, an error too (review 196, finding 5): as an xfail line for the reference
-    (cdg/gcc-agrees (update-in d [:xfail :error] (fnil into []) (:allow d)) {:error (:error g) :other (:other g 0)
-                       :fatal-other (if (= -1 (:fatal g)) 1 0)})))
+    (let [g (fold-other (assoc g :olines (:other-lines g)) :error (allowed-lines d))
+          g (reduce (fn [g l] (update-in g [:error l] (fnil identity 1))) g (:alt g))]
+      (cdg/gcc-agrees (update-in d [:xfail :error] (fnil into []) (:allow d)) {:error (:error g) :other (:other g 0)
+                         :fatal-other (if (= -1 (:fatal g)) 1 0)}))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; The verdict
@@ -462,7 +598,10 @@
   no line-0 directive or dg-excess-errors takes, or the expected lines after a fatal error). A dg-error file the oracle
   accepts (status :accepted) with expected errors says `accepted` in its detail."
   [dg r]
-  (let [st (:status r)
+  (let [r (when r (fold-other r :lines (allowed-lines dg)))
+        ;; cpp-compl: a line a later branch of its message takes (alt-hits)
+        r (when r (reduce (fn [r l] (update-in r [:lines l] (fnil identity 1))) r (:alt r)))
+        st (:status r)
         anyn (long (get-in dg [:any :error] 0))
         stray (long (or (:other r) 0))]
     (cond
@@ -496,9 +635,12 @@
           short0 [:fail :missed (str acc "line 0 expects " anyn " error" (when (> anyn 1) "s") ", got " n-extra " beyond the expected lines")]
           :else [:fail :missed (str acc "no error (dg-excess-errors)")])))))
 
-(defn- classify [classes row]
+(defn- classify
+  "A failing row's class: the first that names the row's id in :tests (bin/reap's classify, test/reap/main.ae) or one of whose
+  :match regexps finds \"RESULT REASON\"."
+  [classes row]
   (let [s (str (name (nth row 1)) " " (nth row 2))]
-    (some (fn [c] (when (some #(re-find (re-pattern (str %)) s) (:match c)) (:id c))) classes)))
+    (some (fn [c] (when (or (some #{(first row)} (:tests c)) (some #(re-find (re-pattern (str %)) s) (:match c))) (:id c))) classes)))
 
 (defn- row-of
   "A file's row [ID RESULT REASON CLASS?]: the verdict, g++'s disagreement with the directives on a failure."
@@ -516,7 +658,8 @@
               (let [lv (#{:missed :extra :both :stopped :pp-missed :pp-extra :pp-both :pp-stopped} (second v))]
                 [id :fail (str (name (second v)) ": " (nth v 2)
                                (when (and lv ga (not= ga :yes)) (str " [g++: " (pr-str (vec (rest ga))) "]"))
-                               (when (and lv (:prune d)) (str " [dg-prune-output " (:prune d) "]")))]))
+                               ;; cpp-compl: the patterns are applied (prune-text); a row says the ones Java's regexps refused
+                               (when (and lv (pos? (long (:unpruned r 0)))) (str " [dg-prune-output " (:unpruned r) "]")))]))
         cls (when (= :fail (second row)) (classify classes row))]
     (cond-> row cls (conj cls))))
 

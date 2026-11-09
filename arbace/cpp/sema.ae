@@ -60,10 +60,17 @@
 
 (declare class-lookup)
 
-(defn- own-names [scope ^String nm]
-  (let [es (.get ^java.util.HashMap (:names scope) nm)
-        es (if (= :ns (:kind scope)) (filterv #(< (long (or (:pos %) -1)) (long *cutoff*)) es) es)]
-    (concat es (mapcat #(own-names % nm) (:usings scope)))))
+(defn- own-names
+  "The entities `nm` names in `scope` and, transitively, in the namespaces its using-directives nominate, each namespace
+  once ([namespace.udir]/2-3, [basic.lookup.unqual]/2: the nominated sets' union; a cycle of directives -- libsupc++'s
+  tinfo.h nominating __cxxabiv1 from inside a namespace __cxxabiv1 nominates -- is the same set)."
+  ([scope ^String nm] (own-names scope nm (java.util.IdentityHashMap.)))
+  ([scope ^String nm ^java.util.IdentityHashMap seen]
+   (when-not (.containsKey seen (:names scope))
+     (.put seen (:names scope) true)
+     (let [es (.get ^java.util.HashMap (:names scope) nm)
+           es (if (= :ns (:kind scope)) (filterv #(< (long (or (:pos %) -1)) (long *cutoff*)) es) es)]
+       (concat es (doall (mapcat #(own-names % nm seen) (:usings scope))))))))
 
 (defn- find-here
   "The entities `nm` names in `scope` itself (a class: with its bases', [class.member.lookup])."
@@ -164,7 +171,9 @@
 (def ^:private nothrow-libc
   #{"memcpy" "memmove" "memset" "memcmp" "memchr" "strlen" "strcmp" "strncmp" "strcpy" "strncpy" "strcat" "strncat" "strchr"
     "strrchr" "strstr" "strspn" "strcspn" "strpbrk" "abs" "labs" "llabs" "fabs" "sqrt" "sin" "cos" "tan" "exp" "log" "pow" "floor"
-    "ceil" "fmod" "malloc" "calloc" "realloc" "free" "toupper" "tolower" "isalpha" "isdigit" "isspace" "isupper" "islower" "isalnum"})
+    "ceil" "fmod" "malloc" "calloc" "realloc" "free" "toupper" "tolower" "isalpha" "isdigit" "isspace" "isupper" "islower" "isalnum"
+    ;; (G5c: the ones that do not return, Builtins' NoThrow and NoReturn)
+    "abort" "exit" "_Exit" "quick_exit"})
 
 (defn header-entities
   "Our entities for the header declaration the parts name ([\"printf\"], [\"std\" \"printf\"]), or nil."
@@ -174,7 +183,7 @@
     (or (get @*header-cache* parts)
         (let [id (next-id)]
           (swap! *fns* assoc id {:id id :name "abort" :kind :fn :ty {:k :fn :ret abi/void :ps [] :va false} :linkage :c :path []
-                                 :scope *root* :param-names [] :defaults [] :pos -1 :header true})
+                                 :scope *root* :param-names [] :defaults [] :pos -1 :header true :noreturn true})
           (swap! *header-cache* assoc parts [{:e :fn :id id :pos -1}])
           [{:e :fn :id id :pos -1}]))
   (when *proot*
@@ -191,7 +200,9 @@
                                  f {:id id :name (:name pe) :kind :fn :ty (resolve-type *root* (:qt pe)) :linkage :c :path []
                                     :scope *root* :param-names [] :defaults [] :pos -1 :header true
                                     ;; the C library functions clang knows as nothrow builtins (nounwind at their calls)
-                                    :noexcept (boolean (nothrow-libc (:name pe)))}]
+                                    :noexcept (boolean (nothrow-libc (:name pe)))
+                                    ;; (and as not returning: Builtins.def's abort, exit, _Exit, quick_exit; G5c)
+                                    :noreturn (contains? #{"abort" "exit" "_Exit" "quick_exit"} (:name pe))}]
                              (swap! *fns* assoc id f)
                              [{:e :fn :id id :pos -1}]))
                      :var (when (and (:clink pe) (:ty pe) (not (:tmpl pe)))
@@ -241,7 +252,8 @@
         (let [id (next-id)
               es [{:e :fn :id id :pos -1}]]
           (swap! *fns* assoc id {:id id :name cn :kind :fn :ty (resolve-type *root* qt) :linkage :c :path [] :scope *root*
-                                 :param-names [] :defaults [] :pos -1 :header true :noexcept (not= cn "abort")})
+                                 :param-names [] :defaults [] :pos -1 :header true :noexcept (not= cn "abort")
+                                 :noreturn (contains? #{"abort" "exit"} cn)})
           (swap! *header-cache* assoc [:builtin nm] es)
           es))))
 
@@ -568,6 +580,28 @@
            (or (some-> (:_arg %) str/trim parse-long) true))
         (:inner n)))
 
+(def ^:private mode-bits
+  ;; GCC's machine modes as clang's Sema::AddModeAttr (parseModeAttrArg) reads them for x86-64: QI, HI, SI, DI, TI, byte,
+  ;; word (64), pointer (64), unwind_word (the target's: word), libgcc_cmp_return and libgcc_shift_count (word)
+  {"QI" 8 "HI" 16 "SI" 32 "DI" 64 "TI" 128 "byte" 8 "word" 64 "pointer" 64 "unwind_word" 64 "libgcc_cmp_return" 64 "libgcc_shift_count" 64})
+
+(defn- mode-type
+  "The type `t` of a declaration `n` under GNU's mode attribute (G5c: cxxabi.h's `typedef int __guard
+  __attribute__((mode (__DI__)))`, unwind.h's _Unwind_Word): an integer type of the mode's width and `t`'s signedness,
+  the first of char, short, int, long, long long, __int128 of that width (clang's ASTContext::getIntTypeForBitwidth);
+  `t` without one."
+  [n t]
+  (if-let [a (some #(when (and (= "NativeAttr" (:kind %)) (#{"mode" "__mode__"} (:_gnu %))) %) (:inner n))]
+    (let [m (str/replace (str/trim (str (:_arg a))) #"^__|__$" "")
+          w (or (mode-bits m) (fail :type "the mode " m))
+          u (abi/unq t)]
+      (when-not (and (abi/integral? u) (not= :enum (:k u))) (fail :type "the mode " m " of " (pr-str t)))
+      (let [signed (abi/signed? u)
+            n (case (long w) 8 (if signed :schar :uchar) 16 (if signed :short :ushort) 32 (if signed :int :uint) 64 (if signed :long :ulong)
+                    (fail :type "the mode " m " (no 128-bit integer type modelled)"))]
+        (merge (abi/b n) (select-keys t [:c :v]))))
+    t))
+
 (defn- init-kid
   "A variable declaration's initializer node: its first child that is not an attribute (__attribute__((init_priority(N)))
   comes first in the tree; G5)."
@@ -655,6 +689,14 @@
   [n]
   (boolean (some #(and (= "NativeAttr" (:kind %)) (#{"always_inline" "__always_inline__"} (:_gnu %))) (:inner n))))
 
+(defn- noreturn-node?
+  "Whether a function declaration says it does not return ([[noreturn]], __attribute__((noreturn)); [dcl.attr.noreturn])."
+  [n]
+  (boolean (some #(and (= "NativeAttr" (:kind %))
+                       (or (#{"noreturn" "__noreturn__"} (:_gnu %))
+                           (and (nil? (:_gnu %)) (re-find #"^\s*\[\[\s*(?:std\s*::\s*)?noreturn\b" (str (node-text %))))))
+                 (:inner n))))
+
 (defn- declare-fn!
   "A function, method, constructor or destructor declaration (or definition) in `scope`; out-of-line definitions join
   their declaration. One whose trailing requires-clause is not satisfied is not declared (nil; P14 (b), G4)."
@@ -703,9 +745,17 @@
            ;; GNU's always_inline (clang's AlwaysInlineAttr, `alwaysinline` in the IR: inlined at -O0 by LLVM's
            ;; AlwaysInliner, arbace.cpp.inline; P16 (a))
            :always-inline (always-inline-node? n)
+           ;; G5c: a call of it ends its block (clang's EmitCall: the call, then unreachable), so a catch (...) { abort(); }
+           ;; ends no catch on the normal path
+           :noreturn (noreturn-node? n)
+           ;; GNU's used (G5c: exception_ptr.h's _GLIBCXX_EH_PTR_USED members in eh_ptr.cc): emitted though inline and
+           ;; unused, as clang's UsedAttr keeps a definition (CodeGenModule::addUsedGlobal, MustBeEmitted)
+           :used (boolean (gnu-attr-arg n "used"))
            ;; __attribute__((constructor(N))): run before main, in llvm.global_ctors at its priority (65535 unwritten)
            :ctor-attr (when-let [x (gnu-attr-arg n "constructor")] (if (number? x) x 65535))
-           :noexcept (noexcept-of tscope qt)
+           ;; (the C library's functions that do not return, nothrow builtins for clang, G5c: musl's abort; not free, which
+           ;; clang invokes in del_op.cc's noexcept operator delete)
+           :noexcept (or (noexcept-of tscope qt) (and (linkage-c? home) (not cid) (contains? #{"abort" "exit" "_Exit" "quick_exit"} nm)))
            :noexcept-false (boolean (re-find #"\bnoexcept\s*\(\s*false" (or qt "")))
            :linkage (if (linkage-c? home) :c :cpp)
            :internal (boolean (or (and (not cid) (= "static" (:storageClass n))) (:internal home)))
@@ -725,13 +775,18 @@
       (upd-fn! id (fn [g] (cond-> (merge g (select-keys pinfo (if body [:param-names] [])))
                             (some some? (:defaults pinfo)) (assoc :defaults (:defaults pinfo))
                             (:always-inline f) (assoc :always-inline true)
+                            (:used f) (assoc :used true)
+                            (:noreturn f) (assoc :noreturn true)
+                            ;; an out-of-line `= default` definition (G5c: nested_exception::~nested_exception() noexcept = default
+                            ;; in nested_exception.cc): defined here, not inline, the class's key function
+                            (and (:defaulted f) (not (header-node? n))) (assoc :defaulted true :out-of-line-default true)
                             body (assoc :body body :node n :def-scope scope :inits (filter #(= "CXXCtorInitializer" (:kind %)) (kids n))
                                         :inline (or (:inline g) (boolean (:inline n))))
                             ;; a header's definition: analyzed when used (G4), as clang emits an inline function
-                            (and body (header-node? n)) (assoc :lazy true))))
+                            (and body (header-node? n) (not (or (:used f) (:used g)))) (assoc :lazy true))))
       (do (swap! *fns* assoc id (merge f pinfo {:id id :node n :def-scope scope}
                                       (when body {:body body :inits (filter #(= "CXXCtorInitializer" (:kind %)) (kids n))})
-                                      (when (and (or body (:explicitlyDefaulted n)) (header-node? n)) {:lazy true})))
+                                      (when (and (or body (:explicitlyDefaulted n)) (header-node? n) (not (:used f))) {:lazy true})))
           (enter! home (if (= k :ctor) " ctor" (if (= k :dtor) " dtor" nm)) {:e :fn :id id :pos (:pos f)})
           (when (= k :ctor) (abi/update-cls! cid update :ctors (fnil conj []) id))
           (when (= k :dtor) (abi/update-cls! cid assoc :dtor id))
@@ -757,7 +812,9 @@
         init (init-kid n)
         st (if (:cls home) :member-static storage)]
     (if (and old (seq q))
-      (do (upd-var! old assoc :init init :init-style (:init n) :defined true :def-scope scope)
+      ;; a qualified definition of a namespace member declared `extern` (libsupc++'s `const nothrow_t std::nothrow = ...`,
+      ;; `terminate_handler __cxxabiv1::__terminate_handler = ...`): the definition, no longer extern ([basic.def]/2)
+      (do (upd-var! old assoc :init init :init-style (:init n) :defined true :extern false :def-scope scope)
           (when (header-node? n) (upd-var! old #(cond-> (assoc % :defined false :pending-def true) (not (:internal %)) (assoc :linkonce true))))
           old)
       (let [id (next-id)
@@ -769,6 +826,8 @@
                :internal (boolean (or (:internal home) (= "static" (:storageClass n)) (and (= st :global) (:c ty) (not= "extern" (:storageClass n)))))
                :def-scope scope
                :init-priority (let [x (gnu-attr-arg n "init_priority")] (when (number? x) x))
+               ;; thread_local, _Thread_local, __thread ([basic.stc.thread]; G5c: libsupc++'s eh_globals.cc)
+               :tls (boolean (:tls n))
                :pos (long (or (:_b n) 0))}]
         ;; a header's definition: defined when odr-used (G4: clang emits an unused inline variable not at all)
         (swap! *vars* assoc id (if (and (header-node? n) (:defined v) (= st :global))
@@ -811,7 +870,10 @@
         ^java.util.HashMap m (:names scope)
         old (when nm (some #(when (and (= :type (:e %)) (abi/class? (:ty %))) (:id (:ty %))) (.get m nm)))
         id (or old (next-id))
-        cs (or (:scope (abi/cls id)) (new-scope :class scope :cls id :path (conj (:path scope) [:cls id])))
+        ;; (a class of an unnamed namespace, or local to an internal function, has internal linkage and so have its
+        ;; members, [basic.link]/4; G5c: libsupc++'s vec.cc's uncatch_exception, atexit_thread.cc's key_s)
+        internal (loop [s scope] (cond (nil? s) false (:internal s) true (= :ns (:kind s)) false :else (recur (:parent s))))
+        cs (or (:scope (abi/cls id)) (new-scope :class scope :cls id :path (conj (:path scope) [:cls id]) :internal internal))
         t {:k :class :id id}]
     (when-not old
       (swap! abi/*classes* assoc id {:id id :name nm :path (:path scope) :scope cs :fields [] :bases [] :outer scope
@@ -827,7 +889,12 @@
                                          ;; a base dependent in a template's pattern (CODEGEN.md G3: [temp.dep]/4)
                                          (contains? (:dep-bases (abi/cls id)) bi) (assoc :dependent true))))))
       ;; alignas on the class ([dcl.align]): its alignment at least the strictest one written (a type's or a constant's)
-      (when-let [as (seq (keep :_arg (filter #(= "AlignedAttr" (:kind %)) (:inner n))))]
+      ;; (and GNU's aligned, G5c: unwind.h's `struct _Unwind_Exception { ... } __attribute__((__aligned__))`, without an
+      ;; argument the target's largest alignment, 16 on x86-64, as GCC documents it and clang's TargetInfo's
+      ;; getDefaultAlignForAttributeAligned)
+      (when-let [as (seq (concat (keep :_arg (filter #(= "AlignedAttr" (:kind %)) (:inner n)))
+                                 (for [a (:inner n) :when (and (= "NativeAttr" (:kind a)) (#{"aligned" "__aligned__"} (:_gnu a)))]
+                                   (let [x (some-> (:_arg a) str/trim)] (if (seq x) x "16")))))]
         (abi/update-cls! id assoc :align-attr
                          (apply max (for [a as]
                                       (long (or (parse-long (str/trim a))
@@ -898,7 +965,19 @@
     "VarDecl" (declare-var! scope n :global)
     "CXXRecordDecl" (declare-class! scope n)
     "EnumDecl" (declare-enum! scope n)
-    ("TypedefDecl" "TypeAliasDecl") (enter! scope (:name n) {:e :type :ty (resolve-type scope (get-in n [:type :qualType])) :pos (long (or (:_b n) 0))})
+    ("TypedefDecl" "TypeAliasDecl")
+    (let [qt (get-in n [:type :qualType])
+          ;; `typedef enum { ... } E;` ([dcl.typedef]/9, the typedef name for linkage): the parser writes the type as
+          ;; `enum E`, the unnamed enumeration or class just declared (G5c: unwind.h's _Unwind_Reason_Code); it takes the
+          ;; name for its mangling
+          ;; (only when the written type names nothing else: `typedef struct X X;` of a named X resolves)
+          t0 (try (resolve-type scope qt) (catch arbace.lang.ExceptionInfo e (if (:codegen/refused (ex-data e)) nil (throw e))))
+          own (when-let [[_ nm] (when-not t0 (re-matches #"(?:enum|struct|union|class) (\S+)" (str qt)))]
+                (when (and (= nm (:name n)) *last-anon* @*last-anon*)
+                  (let [t @*last-anon*]
+                    (cond (= :enum (:k t)) (when-not (:name (get @abi/*enums* (:id t))) (swap! abi/*enums* assoc-in [(:id t) :name] nm) t)
+                          (abi/class? t) (when-not (:name (abi/cls (:id t))) (abi/update-cls! (:id t) assoc :name nm) t)))))]
+      (enter! scope (:name n) {:e :type :ty (mode-type n (or t0 own (resolve-type scope qt))) :pos (long (or (:_b n) 0))}))
     "NamespaceAliasDecl" (let [t (node-text n)
                                [_ target] (re-find #"=\s*([^;]+);?\s*$" (or t ""))
                                parts (vec (map str/trim (remove str/blank? (str/split (str/trim target) #"::"))))
@@ -1065,25 +1144,33 @@
 
 (declare analyze rv init-list-elem)
 
-(declare ce-eval)
+(declare ce-eval ce-wrap)
 
 (defn const-int [scope n]
   (let [e (binding [*cutoff* Long/MAX_VALUE] (rv (analyze {:scope scope} n)))]
     (letfn [(ev [e]
               (case (:op e)
                 :int (:v e)
-                :cast (let [v (ev (:e e))] (if (abi/integral? (:ty e)) v (fail :const "constant cast")))
+                ;; G5c: the value converted to the cast's type ([conv.integral]/3: modulo 2^N for an unsigned one), so that
+                ;; libstdc++'s __numeric_traits_integer<unsigned>::__is_signed, (_Value)(-1) < 0, is false
+                :cast (let [v (ev (:e e))] (if (abi/integral? (:ty e)) (ce-wrap (:ty e) v) (fail :const "constant cast")))
                 :unop (let [v (ev (:e e))] (case (:o e) "-" (- (long v)) "+" v "~" (bit-not (long v)) "!" (if (zero? (long v)) 1 0)))
-                :binop (let [a (long (ev (:l e))) b (long (ev (:r e)))]
-                         (case (:o e) "+" (+ a b) "-" (- a b) "*" (* a b) "/" (quot a b) "%" (rem a b) "<<" (bit-shift-left a b)
-                               ">>" (bit-shift-right a b) "&" (bit-and a b) "|" (bit-or a b) "^" (bit-xor a b)
-                               "<" (if (< a b) 1 0) ">" (if (> a b) 1 0) "<=" (if (<= a b) 1 0) ">=" (if (>= a b) 1 0)
-                               "==" (if (= a b) 1 0) "!=" (if (not= a b) 1 0) "&&" (if (and (not= a 0) (not= b 0)) 1 0)
-                               "||" (if (or (not= a 0) (not= b 0)) 1 0)))
+                :binop (let [a (long (ev (:l e))) b (long (ev (:r e)))
+                             u (and (abi/integral? (:ty e)) (not (abi/signed? (:ty e))))
+                             r (case (:o e) "+" (+ a b) "-" (- a b) "*" (* a b)
+                                     "/" (if u (Long/divideUnsigned a b) (quot a b)) "%" (if u (Long/remainderUnsigned a b) (rem a b))
+                                     "<<" (bit-shift-left a b) ">>" (if u (unsigned-bit-shift-right a b) (bit-shift-right a b))
+                                     "&" (bit-and a b) "|" (bit-or a b) "^" (bit-xor a b)
+                                     "<" (if (< a b) 1 0) ">" (if (> a b) 1 0) "<=" (if (<= a b) 1 0) ">=" (if (>= a b) 1 0)
+                                     "==" (if (= a b) 1 0) "!=" (if (not= a b) 1 0) "&&" (if (and (not= a 0) (not= b 0)) 1 0)
+                                     "||" (if (or (not= a 0) (not= b 0)) 1 0))]
+                         (if (abi/integral? (:ty e)) (ce-wrap (:ty e) r) r))
                 :cond (if (zero? (long (ev (:c e)))) (ev (:else e)) (ev (:then e)))
-                :cmp (let [a (long (ev (:l e))) b (long (ev (:r e)))]
-                       (case (:o e) "<" (if (< a b) 1 0) ">" (if (> a b) 1 0) "<=" (if (<= a b) 1 0) ">=" (if (>= a b) 1 0)
-                             "==" (if (= a b) 1 0) "!=" (if (not= a b) 1 0)))
+                ;; (compared in the operands' common type: unsigned ones as unsigned, [expr.rel]/5, [conv.arith])
+                :cmp (let [a (long (ev (:l e))) b (long (ev (:r e)))
+                           c (if (and (:ct e) (abi/integral? (:ct e)) (not (abi/signed? (:ct e)))) (Long/compareUnsigned a b) (compare a b))]
+                       (case (:o e) "<" (if (neg? c) 1 0) ">" (if (pos? c) 1 0) "<=" (if (<= c 0) 1 0) ">=" (if (>= c 0) 1 0)
+                             "==" (if (zero? c) 1 0) "!=" (if (zero? c) 0 1)))
                 :not (if (zero? (long (ev (:e e)))) 1 0)
                 :land (if (and (not= 0 (long (ev (:l e)))) (not= 0 (long (ev (:r e))))) 1 0)
                 :lor (if (or (not= 0 (long (ev (:l e)))) (not= 0 (long (ev (:r e))))) 1 0)
@@ -2089,13 +2176,65 @@
 
 (declare block-ctx)
 
+;; ---------------------------------------------------------------------------------------------
+;; GNU's __atomic builtins (G5c; clang's AtomicExpr: Sema::BuildAtomicExpr's operand forms for the GNU builtins, the
+;; operands' conversions of [atomics.types.operations] as GCC documents them, "Built-in Functions for Memory Model Aware
+;; Atomic Operations"): libsupc++'s guard.cc, new_handler.cc, atomicity.h, std::atomic's members
+
+(def ^:private atomic-forms
+  ;; name -> [which shape rmw-op post?]: shape the operands after the pointer, :v a value of T, :vp a pointer to T,
+  ;; :o an order, :w the weak flag
+  (merge
+   {"__atomic_load_n" [:load [:o]] "__atomic_load" [:load [:rp :o]]
+    "__atomic_store_n" [:store [:v :o]] "__atomic_store" [:store [:vp :o]]
+    "__atomic_exchange_n" [:xchg [:v :o]] "__atomic_exchange" [:xchg [:vp :rp :o]]
+    "__atomic_compare_exchange_n" [:cmpxchg [:ep :v :w :o :fo]] "__atomic_compare_exchange" [:cmpxchg [:ep :vp :w :o :fo]]
+    "__atomic_test_and_set" [:tas [:o]] "__atomic_clear" [:clear [:o]]}
+   (into {} (for [op ["add" "sub" "and" "or" "xor" "nand" "min" "max"]
+                  [nm post] [[(str "__atomic_fetch_" op) false] [(str "__atomic_" op "_fetch") true]]]
+              [nm [:rmw [:v :o] (keyword op) post]]))))
+
+(defn atomic-builtin? [^String nm] (contains? atomic-forms nm))
+
+(defn- atomic-expr
+  "The node of a GNU __atomic builtin `nm` applied to the argument nodes `args`."
+  [ctx ^String nm args]
+  (let [[which shape rmw post] (or (atomic-forms nm) (fail :expr "the atomic builtin " nm))
+        _ (when-not (= (count args) (inc (count shape))) (fail :expr nm " with " (count args) " arguments"))
+        p (rv (analyze ctx (first args)))
+        _ (when-not (abi/ptr? (abi/unq (:ty p))) (fail :expr nm " of a non-pointer"))
+        vt (let [t (abi/unq (:to (abi/unq (:ty p))))] (dissoc t :v))
+        vt (if (#{:tas :clear} which) abi/char* vt)
+        _ (when-not (or (abi/integral? vt) (abi/ptr? vt) (= :enum (:k vt)) (#{:tas :clear} which)) (fail :type nm " of " (pr-str vt)))
+        _ (when (and (= :rmw which) (not (abi/integral? vt))) (fail :type nm " of " (pr-str vt)))
+        _ (when-not (#{1 2 4 8} (abi/size-of vt)) (fail :type nm " of a " (abi/size-of vt) "-byte type"))
+        ops (into {} (map (fn [k a]
+                            (let [e (rv (analyze ctx a))]
+                              [k (case k
+                                   :v (convert-scalar e vt false)
+                                   (:o :fo) (convert-scalar e abi/int* false)
+                                   :w (convert-scalar e abi/bool* false)
+                                   (:vp :rp :ep) e)]))
+                          shape (rest args)))
+        const (fn [k] (when-let [e (ops k)] (:v (ce-try e))))]
+    (merge {:op :atomic :which which :rmw rmw :post post :p p :vt vt :oc (const :o) :foc (const :fo) :wc (const :w) :cat :pr
+            :ty (case which (:load :xchg) (if (or (:rp ops) (:vp ops)) abi/void vt) :rmw vt (:cmpxchg :tas) abi/bool* abi/void)}
+           ops)))
+
 (def ^:private value-builtins
   {"__builtin_expect" :expect "__builtin_expect_with_probability" :expect "__builtin_constant_p" :constant-p
    "__builtin_is_constant_evaluated" :is-constant-evaluated
    "__builtin_addressof" :addressof
    "__builtin_alloca" :alloca
    "__builtin_va_start" :va-start "__builtin_c23_va_start" :va-start "__builtin_va_end" :va-end "__builtin_va_copy" :va-copy
-   "__builtin_add_overflow" :add-overflow "__builtin_sub_overflow" :sub-overflow "__builtin_mul_overflow" :mul-overflow})
+   "__builtin_add_overflow" :add-overflow "__builtin_sub_overflow" :sub-overflow "__builtin_mul_overflow" :mul-overflow
+   ;; the bit counts and byte swaps (G5c: <bit>'s std::__popcount, __countl_zero, __countr_zero over __builtin_popcountg,
+   ;; __builtin_clzg, __builtin_ctzg; libsupc++'s new_opa.cc), clang's CGBuiltin: llvm.ctpop, llvm.ctlz and llvm.cttz with
+   ;; zero undefined (x86's isCLZForZeroUndef), a fallback operand selected for zero, the count an int; llvm.bswap
+   "__builtin_popcount" [:ctpop :uint] "__builtin_popcountl" [:ctpop :ulong] "__builtin_popcountll" [:ctpop :ullong] "__builtin_popcountg" [:ctpop nil]
+   "__builtin_clz" [:ctlz :uint] "__builtin_clzl" [:ctlz :ulong] "__builtin_clzll" [:ctlz :ullong] "__builtin_clzg" [:ctlz nil]
+   "__builtin_ctz" [:cttz :uint] "__builtin_ctzl" [:cttz :ulong] "__builtin_ctzll" [:cttz :ullong] "__builtin_ctzg" [:cttz nil]
+   "__builtin_bswap16" [:bswap :ushort] "__builtin_bswap32" [:bswap :uint] "__builtin_bswap64" [:bswap :ulong]})
 
 (def ^:private std-builtins
   {"move" :cast "forward" :cast "move_if_noexcept" :cast "as_const" :cast "forward_like" :cast "addressof" :addr "__addressof" :addr})
@@ -2559,11 +2698,32 @@
                    :float [{:kind "FloatingLiteral" :value (str (:value u)) :type {:qualType "long double"} :valueCategory "prvalue"}])]
         (analyze ctx {:kind "CallExpr" :inner (vec (cons callee args)) :range (:range n)}))
       (fail :expr "a user-defined literal"))
+    "AtomicExpr" (if (:_atomic n) (atomic-expr ctx (:_atomic n) (:_args n)) (fail :expr "AtomicExpr"))
     ;; __builtin_va_arg(ap, T) (clang's VAArgExpr; G5): the next argument of a va_list
-    "BuiltinExpr" (if-let [x (:_vaarg n)]
+    ;; __builtin_offsetof(T, m.n[i]) ([support.types.layout]/1; clang's OffsetOfExpr, folded by ExprConstant's
+    ;; VisitOffsetOfExpr): the fields' offsets in their classes' layouts, a member of a base class at its base's offset, an
+    ;; index times its element's size
+    "BuiltinExpr" (if-let [{:keys [type path]} (:_offsetof n)]
+                    (loop [t (resolve-type (:scope ctx) type) off 0 [c & cs] path]
+                      (if-not c
+                        {:op :int :v off :ty abi/ulong* :cat :pr}
+                        (if-let [nm (:f c)]
+                          (let [cid (or (class-id t) (fail :expr "offsetof in a non-class " (pr-str t)))
+                                [owner e] (first (class-lookup cid nm))
+                                bo (when owner (let [[_ o vb] (abi/base-path cid owner)] (when vb (fail :expr "offsetof through a virtual base")) o))
+                                chain (case (:e e) :field [[(:cls e) (:i e)]] :indirect (:chain e) (fail :expr "offsetof of a non-field " nm))
+                                fo (reduce (fn [a [k i]] (+ (long a) (long (get (:fields (abi/layout k)) i)))) 0 chain)
+                                [k i] (peek chain)]
+                            (when (:bits (nth (:fields (abi/cls k)) i)) (fail :expr "offsetof of a bit-field"))
+                            (recur (:ty (nth (:fields (abi/cls k)) i)) (+ off (long bo) (long fo)) cs))
+                          (let [at (abi/unq t)
+                                _ (when-not (abi/arr? at) (fail :expr "offsetof's [] of a non-array"))
+                                i (or (:v (ce-try (rv (analyze ctx (:i c))))) (fail :expr "offsetof's index not a constant"))]
+                            (recur (:of at) (+ off (* (long i) (long (abi/size-of (:of at))))) cs)))))
+                  (if-let [x (:_vaarg n)]
                     (let [t (resolve-type (:scope ctx) (:_vatype n))]
                       {:op :va-arg :e (rv (analyze ctx x)) :ty (abi/unq t) :cat :pr})
-                    (fail :expr "a builtin expression " (node-text n)))
+                    (fail :expr "a builtin expression " (node-text n))))
     "TypeTraitExpr" (let [t (or (:_text n) (node-text n))
                           v (if-let [h (:trait-text @hooks)] (h (:scope ctx) t) (fail :expr "a type trait"))]
                       (when (map? v) (fail :expr "a dependent type trait " t))
@@ -2675,9 +2835,19 @@
       ;; __builtin_operator_new/delete: the global operator new or delete called as by a new- or delete-expression
       ;; (clang's EmitBuiltinNewDeleteCall; G4: std::allocator's allocate and deallocate)
       (analyze ctx (assoc n :inner (vec (cons (assoc (first (kids n)) :referencedDecl {:name op} :_wn true :globalQualifier true) (rest (kids n))))))
+    (if (and (= "DeclRefExpr" (:kind (first (kids n)))) (atomic-builtin? (str (get-in (first (kids n)) [:referencedDecl :name]))))
+      ;; an __atomic builtin a template's pattern wrote as a call (the parser keeps AtomicExpr outside templates)
+      (atomic-expr ctx (get-in (first (kids n)) [:referencedDecl :name]) (rest (kids n)))
     (if-let [b (when (= "DeclRefExpr" (:kind (first (kids n)))) (value-builtins (get-in (first (kids n)) [:referencedDecl :name])))]
       ;; the builtins that are their operand's value (G4: the headers' __builtin_expect(e, v): e as a long;
       ;; __builtin_constant_p: 0 at run time, as clang folds it at -O0 when e is not a constant)
+      (if (vector? b)
+        (let [[which tn] b
+              x (rv (analyze ctx (second (kids n))))
+              t (if tn (abi/b tn) (abi/unq (:ty x)))
+              _ (when-not (and (abi/integral? t) (#{1 2 4 8} (abi/size-of t))) (fail :type (name which) " of " (pr-str t)))
+              fb (when-let [f (nth (kids n) 2 nil)] (convert-scalar (rv (analyze ctx f)) abi/int* false))]
+          {:op :bitop :which which :e (convert-scalar x t false) :fb fb :ty (if (= :bswap which) t abi/int*) :cat :pr})
       (case b
         :expect (convert-scalar (rv (analyze ctx (second (kids n)))) abi/long* false)
         :constant-p {:op :int :v (if (ce-try (rv (analyze ctx (second (kids n))))) 1 0) :ty abi/int* :cat :pr}
@@ -2697,7 +2867,7 @@
               dst (deref-node (rv r))
               o ({:add-overflow "+" :sub-overflow "-" :mul-overflow "*"} b)]
           {:op :comma :l (assign-node ctx dst (convert-scalar (arith-binop o x y) (abi/unq (:ty dst)) false)) :r {:op :int :v 0 :ty abi/bool* :cat :pr}
-           :ty abi/bool* :cat :pr}))
+           :ty abi/bool* :cat :pr})))
     (let [[cn & an] (kids n)
           ;; a pseudo-destructor call (p->~T() of a scalar T, [expr.prim.id.dtor]): its object evaluated, no effect (G4:
           ;; std::destroy_at<int>)
@@ -2712,8 +2882,12 @@
         (or (operator-call ctx "()" (into [callee] args)) (fail :call "no operator()"))
         (analyze-call ctx (if (and (= :fnset (:op callee)) (if (:_wn cn) (boolean (or (:globalQualifier cn) (seq (:qualifier cn)))) (str/includes? (or (node-text cn) "") "::"))) (assoc callee :qualified true) callee) args)))))
 )
-)
+))
     "MemberExpr" (member-expr ctx n)
+    ;; a member of a type-dependent object, as the parser names it since cpp-90's tree (clang's CXXDependentScopeMemberExpr):
+    ;; in a specialization the object's type is known, the member looked up as a MemberExpr's (G5c: the templates'
+    ;; samples, hdr-iostream, failed on it)
+    "CXXDependentScopeMemberExpr" (member-expr ctx (assoc n :kind "MemberExpr" :name (or (:member n) (:name n))))
     ;; a member named in a template's pattern whose lookup clang left to the instantiation (f<T>() in a member)
     "UnresolvedMemberExpr" (if (seq (kids n))
                              (member-expr ctx (assoc n :name (or (get-in n [:referencedDecl :name]) (:name n))))
@@ -2779,6 +2953,12 @@
              :r {:op :typeid :t (abi/unq (:ty e)) :ty ti :cat :lv} :ty ti :cat :lv}))))
     "CXXDynamicCastExpr"
     (let [t (resolve-type (:scope ctx) (get-in n [:type :qualType]))
+          ;; (a cast to a reference: the tree's type is the referred type, its value category the reference's, as clang's
+          ;; dump writes it and the other casts read it)
+          t (cond (abi/ref? t) t
+                  (#{:xvalue "xvalue"} (:valueCategory n)) (abi/rref t)
+                  (= "lvalue" (:valueCategory n)) (abi/lref t)
+                  :else t)
           e (analyze ctx (first (kids n)))
           ref (abi/ref? t)
           src (if ref e (rv e))
@@ -2806,8 +2986,9 @@
 (defn- local-var! [ctx n storage]
   (let [ty (resolve-type (:scope ctx) (get-in n [:type :qualType]))
         id (next-id)
-        st (if (= "static" (:storageClass n)) :static-local storage)
-        v {:id id :name (:name n) :ty ty :storage st :fn (:fn-id ctx) :init-node (init-kid n) :constexpr (boolean (:constexpr n))}
+        ;; (thread_local at block scope implies static, [dcl.stc]/4)
+        st (if (or (= "static" (:storageClass n)) (:tls n)) :static-local storage)
+        v {:id id :name (:name n) :ty ty :storage st :fn (:fn-id ctx) :init-node (init-kid n) :constexpr (boolean (:constexpr n)) :tls (boolean (:tls n))}
         ;; a constant local's initializer, for constant expressions (an array bound, a template argument)
         v (if (and (:c ty) (abi/integral? (abi/unq ty)) (init-kid n)) (assoc v :init (init-kid n) :def-scope (:scope ctx)) v)]
     (swap! *vars* assoc id v)
@@ -3063,9 +3244,10 @@
   (let [cid (:cls f)
         c (abi/cls cid)
         given (into {} (for [i (:inits f)]
-                         (let [k (if-let [b (:baseInit i)]
+                         (let [k (if-let [b (or (:baseInit i) (:delegatingInit i))]
                                    ;; (the class's own name: a delegating constructor, the injected-class-name of a
-                                   ;; template's specialization written without its arguments, G5: istreambuf_iterator)
+                                   ;; template's specialization written without its arguments, G5: istreambuf_iterator; the
+                                   ;; parser's :delegatingInit since cpp-90's tree, G5c)
                                    [:base (if (= (str/trim (str (:qualType b))) (:name c)) cid (:id (resolve-type (:scope ctx) (:qualType b))))]
                                    [:field (get-in i [:anyInit :name])])
                                [x] (kids i)]
@@ -3121,7 +3303,11 @@
   [fid]
   (let [f (fnd fid)
         cls (:cls f)
-        fs (new-scope :fn (or (:def-scope f) (:scope f)))
+        ;; a namespace member defined outside its namespace by a qualified name (`void std::terminate() { get_terminate(); }`,
+        ;; libsupc++'s eh_terminate.cc): its body's names are looked up in the namespace, then the enclosing ones
+        ;; ([basic.lookup.unqual]/4: the scopes of the declarations' target scope)
+        home-ns (let [h (:scope f)] (when (and (not cls) (not (:keep-def-scope f)) h (= :ns (:kind h)) (= :ns (:kind (:def-scope f))) (not (identical? h (:def-scope f)))) h))
+        fs (new-scope :fn (or home-ns (:def-scope f) (:scope f)) :internal (boolean (:internal f)))
         ;; a class or enumeration declared in the body is local to the function: its names mangle as Z <encoding> E ...
         ;; (abi's [:local f] path, as G2's closures have it)
         fs (assoc fs :path [[:local (select-keys f [:id :name :kind :cls :ty :cq :op :static :linkage :internal-l :internal :path :tinst :inline])]])
