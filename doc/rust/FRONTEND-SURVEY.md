@@ -2203,3 +2203,27 @@ differing (the run control a1 156 for 5; mono's 6 facts); **3 min 22 s** (`--rec
 build-check 56 s, the passes 41 s, capture-check 52 s, the runs 85 s (the batch 48 s, ci's session 37 s, the eight cirun runs a
 second). `gate.crops check`: 0 problems; `bin/gate --plan`: run rust-front-essential (its key moved). RFP36 (a) and RFP40 (a) (as built
 is now the batch, every program, mono-check in the step) hold.
+
+## As built: the rest of RFP28-RFP41 (2026-11-09)
+
+Branch `rust-props`, after the night's four, one commit a proposal.
+
+### RFP29 (b): "equal but for the crate hash"
+
+- The builder prints the two texts that name a local DefId as rustc's Debug does, `DefId(0:INDEX ~ CRATE[HASH]::PATH)`, with the index
+  and the crate's hash unknown (`DefId(0:? ~ structs[????]::TABLE)`; `build/static-def-id-text`, `closure-def-id-text`):
+  a reference to a byte array whose pointer is a static's (`pretty_print_const_scalar_ptr`'s `<static(DefId)>`, rustc_middle's
+  `ty/print/pretty.rs`; other statics' pointers stay `{allocN: &T}`), and a closure's fake reads (`ExprKind::Closure`'s `fake_reads`,
+  rustc_mir_build's `builder/expr/as_rvalue.rs`: each captured place's fake read pushed before the operands, its cause
+  `ForLet(Some(CLOSURE))` or `ForMatchedPlace(Some(CLOSURE))`; the THIR places converted as the captures are). The closure's fake reads
+  were refused before ("a closure's fake reads").
+- `build-check`'s class `:equal-crate-hash` ("N more but for the crate hash" on the lines): the texts equal once every local DefId's
+  index and crate hash are made one and the allocations renumbered canonically (by first appearance in the body, then in the listed
+  allocations they reach, then the rest by header and bytes) and listed in that order, a pointer's drawing to its width: rustc's ids
+  are the session's interning order (RFP25 (a)), and its static's allocations are interned before the body's.
+- The 88 programs (`bin/rust-front build-check`, 6 min 32 s): 420 of 510 equal (418 before), 27 but for the allocations' ids, 1 but for
+  the crate hash (`structs`' `main`), refused 11 (12: `drops`' `main` is built, and differs now only by `Rc`'s user type annotations,
+  the defaulted allocator parameter), 60 programs whole. `test/rust/front/essential-known.txt` re-recorded (the lines' new count, 0
+  everywhere: a1-a7 name no such DefId).
+- (a), the index from the def collector's order and the crate's StableCrateId, is `arbace.rust.front.mono`'s `def-id-text` (RFP23 (c)), for
+  the builder when the runs' crate identity (`std-crates.edn`'s cfg-version) is bound there: with RF11, as decided.

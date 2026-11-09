@@ -36,6 +36,34 @@
         m (into {} (map-indexed (fn [i x] [x (str "A" i)]) ids))]
     (str/replace t #"alloc(\d+)" (fn [[_ d]] (str "alloc" (get m d))))))
 
+(defn- crate-hash-normal
+  "RFP29 (b): a text with every local DefId's index and its crate's hash (StableCrateId's first 16 bits, `CRATE[c62a]`) made
+  one, and its allocations renumbered canonically and listed in that order (the ids are the session's interning order and the
+  listing is in the ids' order, RFP25 (a)): by their first appearance in the body, then in the listed allocations they
+  reach, then the rest (a static's, which the body names by its DefId) by their header and bytes"
+  [t]
+  (let [t (str/replace t #"DefId\(0:[0-9?]+ ~ ([A-Za-z0-9_]+)\[[0-9a-f?]{4}\]" (fn [[_ c]] (str "DefId(0:_ ~ " c "[_]")))
+        i (str/index-of t "\n}\n\nalloc")]
+    (if-not i
+      t
+      (let [body (subs t 0 (+ i 3))
+            blocks (map str/trim-newline (str/split (subs t (+ i 4)) #"\n\n(?=alloc)"))
+            by-id (into {} (for [b blocks] [(second (re-find #"^alloc(\d+)" b)) b]))
+            refs (fn [x] (distinct (map second (re-seq #"alloc(\d+)" x))))
+            order (loop [order (vec (refs body)) i 0]
+                    (if (< i (count order))
+                      (let [more (remove (set order) (some-> (get by-id (nth order i)) (str/replace #"^alloc\d+" "") refs))]
+                        (recur (into order more) (inc i)))
+                      (let [rest (sort-by #(str/replace (get by-id %) #"^alloc\d+" "") (remove (set order) (keys by-id)))]
+                        (if (seq rest) (recur (conj order (first rest)) i) order))))
+            m (into {} (map-indexed (fn [k x] [x (str "A" k)]) order))
+            ;; a pointer in a listed allocation is drawn to the pointer's width, its id's digits within the line
+            ren (fn [x] (-> x (str/replace #"alloc(\d+)" (fn [[_ d]] (str "alloc" (get m d d))))
+                            (str/replace #"╾─*(alloc[A0-9]+<[a-z]+>)─*╼" "╾$1╼")))]
+        (str (ren body) "\n"
+             (str/join "\n\n" (map ren (sort-by #(- (long (.indexOf ^java.util.List order (second (re-find #"^alloc(\d+)" %))))) blocks)))
+             "\n")))))
+
 (defn- strip-allocs [t]
   (let [i (str/index-of t "\n}\n\nalloc")] (if i (subs t 0 (+ i 3)) t)))
 
@@ -182,6 +210,7 @@
         ;; interning order (RFP25 (a))
         (= (alloc-ids-normal w) (alloc-ids-normal g)) [:equal-alloc-ids nm]
         (= (strip-allocs w) (strip-allocs g)) [:equal-allocs nm]
+        (= (crate-hash-normal w) (crate-hash-normal g)) [:equal-crate-hash nm]
         :else [:differ nm (first-diff w g)]))
 
 (defn- print-text [b]
@@ -238,13 +267,13 @@
         cnt (fn [r k] (count (filter #(= k (first %)) (:rows r))))
         of-pass (fn [r ps] (first (filter #(= ps (:pass %)) (:passes r))))]
     (doseq [r results :let [pr (of-pass r pass)]]
-      (println (format "%-12s %3d of %3d bodies equal to rustc's MIR after %s, %3d more but for the allocations' ids, %3d but for their text, %3d differ, %3d refused, %3d not built"
-                       (:name r) (cnt pr :equal) (:total pr) pass (cnt pr :equal-alloc-ids) (cnt pr :equal-allocs) (cnt pr :differ) (cnt pr :refused) (cnt pr :not-built))))
+      (println (format "%-12s %3d of %3d bodies equal to rustc's MIR after %s, %3d more but for the allocations' ids, %3d but for their text, %3d but for the crate hash, %3d differ, %3d refused, %3d not built"
+                       (:name r) (cnt pr :equal) (:total pr) pass (cnt pr :equal-alloc-ids) (cnt pr :equal-allocs) (cnt pr :equal-crate-hash) (cnt pr :differ) (cnt pr :refused) (cnt pr :not-built))))
     (doseq [ps judged]
       (let [prs (map #(of-pass % ps) results)
             sum (fn [k] (reduce + (map #(cnt % k) prs)))]
-        (println (format "build-check: %d of %d bodies equal to rustc's MIR after %s, %d more but for the allocations' ids, %d more but for their text (%d differ, %d refused, %d not built), %d programs whole of %d"
-                         (sum :equal) (reduce + (map :total prs)) ps (sum :equal-alloc-ids) (sum :equal-allocs) (sum :differ) (sum :refused) (sum :not-built)
+        (println (format "build-check: %d of %d bodies equal to rustc's MIR after %s, %d more but for the allocations' ids, %d more but for their text, %d more but for the crate hash (%d differ, %d refused, %d not built), %d programs whole of %d"
+                         (sum :equal) (reduce + (map :total prs)) ps (sum :equal-alloc-ids) (sum :equal-allocs) (sum :equal-crate-hash) (sum :differ) (sum :refused) (sum :not-built)
                          (count (filter #(= (cnt % :equal) (:total %)) prs)) (count prs)))))
     (println "refusals:" (pr-str (frequencies (for [r results [kk _ e] (:rows (of-pass r pass)) :when (= kk :refused)] e))))
     ;; the negative control: a body's text against another body's
