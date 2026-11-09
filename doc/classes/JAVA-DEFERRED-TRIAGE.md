@@ -6873,3 +6873,132 @@ jrt's `Class` lacks `describeConstable` (Class is hand-written), so MethodType's
 `describeConstable` is empty. (a) `Class.describeConstable` in jrt (jdk26u's: a ClassDesc of the descriptor string, F26's
 ClassDesc), with `MethodHandle.describeConstable` for direct handles (jdk26u's `DirectMethodHandleDesc.Kind` from the reference
 kind), half a day; (b) as built. **Recommended: (a)** when a test needs it (none of the 43 does).
+
+## Decided (the user, 2026-11-09, about 11:10): JCS350-JCS356
+
+As recommended: JCS350 (a), JCS351 (a) with F14's slice, JCS352 (b) (as built, until a test needs a non-virtual call of an
+overridden method), JCS353 (a) as F15's next slice, JCS354 (a) after the night proves F15, JCS355 (a) after the night's rerun,
+JCS356 (a) when a test needs it. Built on the branch `java-invoke2` (from `java-invoke` d0bf31ea8), one commit a proposal; the
+section below. JCS354, JCS355 and JCS356 wait for their conditions: nothing of them is built.
+
+## As built: JCS350, JCS351, JCS353 (2026-11-09; branch `java-invoke2`, write-ahead)
+
+By day under the light rules (no conversion, j2g run, build or compiled level). All three change what the night builds: the
+executable (JCS350's Go of the interpreter's classes, JCS351's `Compiler$CF` and the interpreter, its annotation data) and
+`jdk/forms` (JCS353's overlay, at the night's `bin/jrt-convert update`).
+
+**JCS350 (a), `1a1be6b58`.** The interpreter's classes publish their methods to jrt by `Compiler$CFGo.setMethod`, whose Go is
+`arbace.j2g.dyncf`'s native: a virtual method there took the Dyn's slot of its key, became the class's method by key (`ByKey`),
+and its member table entry called *the receiver's class's* method of that key. A private method is selected as itself (JVMS
+5.4.6: it overrides nothing and nothing overrides it; the interpreter's own calls already did so, `interp/private-method`), so
+the native now gives a private instance method no slot and no by-key entry, and its member table entry calls its own
+implementation. `Method.invoke` of a nestmate's private method on a subclass's object, and F15's `findVirtual` over it, no longer
+run the interpreted subclass's private method of the same name (t07686, `runtime/Nestmates/privateMethods/
+TestMethodHandlesHierarchy`). j2g-unit's `test-private-reflection` checks the native's form as data (the rule's two parts), with
+`dyn.ae`'s proxy `setMethod` (no private methods) as the control; the run needs the night's executable.
+
+**JCS351 (a), `83cf8b52f`.** An interpreted class with an outer instance (`this$0`) or captured values publishes its
+constructors with javac's descriptor (jdk26u's `Lower`: the enclosing instance's parameter first, the captured values' last;
+`interp/implicit-params!`), and the constructor's `Meth` carries the fields those arguments set (`implicit`, a new field);
+`Compiler$CF$Rt/construct` (the member table's `New`) sets them from the leading and trailing arguments, then runs the
+constructor on the rest, as the interpreter's `new` does (`implicit-fields`). So `getDeclaredConstructors` of an inner class lists
+`In(Outer, ...)`, `getDeclaredConstructor(Outer.class, ...)` finds it, and F15's `findConstructor(In.class, methodType(void.class,
+Outer.class))` too (t07677, `runtime/Nestmates/privateConstructors/TestMethodHandles`); before, the reflective path left `this$0`
+null. Not changed: an anonymous class whose superclass is inner keeps its superclass's outer instance out of the descriptor
+(javac's `(this$0, superOuter, ...)`; the interpreter sets it from the `new` site: JCS358). With it F14's slice: the annotation
+data (`arbace.classes.annot`) keyed a constructor's C and P records by the declared descriptor, while jrt's `Constructor` (the
+compiled classes' member tables already, now the interpreted ones too) has javac's, so an inner class's constructor annotations
+were not found at either level; they are now keyed by javac's descriptor (`safe-ctor-desc`, as the G and Y records were), and a
+parameter's index follows the leading implicit parameters, as the JDK's `Constructor.getParameterAnnotations` shifts the class
+file's (`handleParameterNumberMismatch`: a member class's one, an enum's two; a local or anonymous class's the JDK leaves
+unshifted, "can't do reliable parameter counting": JCS357). j2g-unit's `test-inner-ctor-annotations` over the fixture
+`test/j2g/unit/innerctor` (`Outer.java`, its forms by repr/java): the inner class's C and P lines name `(Lr.Outer;Ljava.lang.String;)V`,
+the parameter's at index 1; the control, a static nested class's, its own descriptor at index 0.
+
+**JCS353 (a), `cc7ba8f28`.** `overlay/jdk/java.base/java/lang/invoke/StringConcatFactory.java`, jrt's own in place of jdk26u's:
+jdk26u's text for `makeConcat` (the mocked recipe), `makeConcatWithConstants`' linkage checks in their order with their
+`StringConcatException` messages (the null checks, the caller's private access, `parseRecipe`'s argument and constant counts,
+the return type, the 200 argument slots, "Generator failed"), `parseRecipe`, and `makeSimpleConcat`'s shapes with their
+stringifiers (`String.valueOf` by type; `StringConcatHelper`'s `newStringOf` and `simpleConcat`, whose `stringOf` makes null and
+a null `toString` "null"). What jdk26u's hidden class did (`InlineHiddenClassStrategy`, spun by the class-file API) is an
+adapter (`MethodHandleImpl.adapter`) that stringifies the arguments left to right, then joins them between the recipe's
+constants: the hidden class's order (every argument's string before the result is assembled). The handles are adapters, not
+lookups: a JDK class's `MethodHandles.lookup()` is J2G-SPEC §8.5's nil. `print-sources` lists it as the overlay (`overlay`
+kind replaces the edge class at the night's conversion and edge). `test/jrt/scf-diff/run.bash` (the oracle tier's, by hand):
+the overlay compiled on the JDK as package `scf` (`Shim`: jdk26u's handles for the adapters, `parameterSlotCount` computed) and
+28 cases (every primitive and reference shape, constants, nulls, a null `toString`, a non-String return type, the five checks'
+exceptions and messages, 201 and 200 slots) against the JDK's `StringConcatFactory`: **0 differ**; `--control` (stringOf's
+"null" changed): 5 differ, as it must.
+
+**Light checks** (`ARBACE_HOST_EXE` main's stage 0; scratch `.tmp/`):
+
+- the joint javac check (`/root/arbace/.tmp/night7/all9-run.sh`): **3,341 files, 0 errors**, 6,974 classes (30 s, 1.0 GB);
+- `bin/jrt-convert derive --check`: 84 overlays, 0 not as derived;
+- `bin/j2g-unit`: all passed (the two new tests; `test-invokers` skipped on stage 0 as before);
+- `bin/jrt test --arch amd64 --package jrt`: ok (alone; nothing of jrt's Go changed);
+- `bin/reap`: 41 of 44 cells checked, 0 problems; `bin/crops-score --judge --strict`: 0 problems; `bin/gate --plan`: exit 0.
+
+**Expected yield.** t07686 and t07677 at interp (F15's 23 plus these two: about 25 of the 43 by day's measure, 32-35 with the
+twelve metafactory tests JCS170 carries), t04758 at interp and, if j2g's analysis of `BasicTest` no longer refuses it
+(StringConcatFactory now in the world), compiled. The `:invoke` class's 41 down by about three more. Beyond the corpus: any
+test whose interpreted inner classes are constructed reflectively (a framework's runner, a ServiceLoader-like factory) and any
+inner class's constructor annotations, at both levels.
+
+**The night's commands** (in the night's worktree with `java-invoke` and this branch merged; heavy ones under
+`bin/heavy-lock`; F15's own commands first, `doc` "As built: F15 (java.lang.invoke)"):
+
+```sh
+# 0. light: the joint javac check (+1 overlay), the derivations (84), the units
+/root/arbace/.tmp/night7/all9-run.sh $PWD && bin/jrt-convert derive --check && bin/j2g-unit
+# 1. jdk/ converted afresh (F15's update: + java/lang/invoke/StringConcatFactory as the overlay); j2g's edge
+#    (StringConcatFactory leaves it for the forms)
+REPR_JAVA_EXE=$(ls -td /root/arbace/.tmp/gate-exe/javac-*/ | head -1)arbace-javac REPR_JAVA_STALE_OK=1 \
+  ARBACE_HEAVY_CMD=$PWD/bin/heavy-lock bin/jrt-convert update && bin/jrt modules --check
+bin/heavy-lock bin/j2g-edge update && bin/heavy-lock bin/javac-vendor edge
+# 2. the executable; no :analysis-failures naming StringConcatFactory, Compiler$CF$Rt or dyncf's natives
+bin/heavy-lock bin/arbace-go --build && bin/arbace-go --smoke && bin/jrt test
+grep -A12 ':analysis-failures' target/arbace-go/amd64/j2g/report.edn | grep -E 'invoke|Invokers|StringConcat|Compiler' ; echo "(none above: ok)"
+# 3. the three measures, then F15's 43 (/root/arbace/.tmp/worktrees/java-invoke2/.tmp/inv/ids.txt, a copy of java-invoke's):
+#    expect t07686, t07677, t04758 pass at interp
+JAVA_CHECK_EXE=$PWD/target/arbace-go/amd64/arbace J2G_GO_EXE=$PWD/target/arbace-go/amd64/arbace \
+  JAVA_CHECK_HEAVY=$PWD/bin/heavy-lock bin/java-check --levels interp,compiled --jobs 8 \
+  --list /root/arbace/.tmp/worktrees/java-invoke2/.tmp/inv/ids.txt --save .tmp/f15b-night/check
+grep -E '^(t07686|t07677|t04758)' .tmp/f15b-night/check/results.tsv
+# 4. j2g's unit tests on the new executable (test-invokers runs there); the whole corpus with the night's others
+J2G_UNIT_EXE=$PWD/target/arbace-go/amd64/arbace bin/j2g-unit
+```
+
+**Revert hints** (merge2's style: the commit, the failure's pattern, what to revert):
+
+- `1a1be6b58` (JCS350): a reflective call of an interpreted class's private method failing with "abstract" or calling nothing
+  (`dynAbstract` naming a private method), or an interpreted class's private method no longer reached through a world
+  interface's slot (none should be: a private method implements nothing). Revert the commit alone (dyncf.ae and its unit test).
+- `83cf8b52f` (JCS351): an interpreted inner or local class constructed by reflection failing with an `ArrayIndexOutOfBounds`
+  or `IllegalArgumentException: wrong number of arguments` in `Compiler$CF$Rt.construct`, or a test that called
+  `getDeclaredConstructor(String.class)` on an inner class and relied on the old (wrong) shape; annotations of a constructor
+  missing where they were found before (`annot`'s C/P keys). Revert the commit (Compiler.ae's `implicit` and `construct`,
+  interp's `implicit-params!`, annot's keys, the fixture); the annot hunk can be reverted alone (its keys) if only the
+  annotations regress.
+- `cc7ba8f28` (JCS353): the build's j2g refusing `java/lang/invoke/StringConcatFactory` (a member of jrt's handles it names that
+  the world lacks), or an Arbace program's indy concatenation (J2G-SPEC §7.5 compiles it directly, so none expected) behaving
+  otherwise. Revert the commit; `bin/jrt-convert update` again (the overlay's forms out).
+
+### Proposed (JCS350-JCS353's follow-ups): JCS357-JCS358
+
+### JCS357 DECISION: a local or anonymous class's constructor parameter annotations
+
+The JDK's `Constructor.getParameterAnnotations` of a local or anonymous class returns the class file's array unshifted (its
+`handleParameterNumberMismatch` cannot count them: javac writes the declared parameters' annotations only), so index 0 holds the
+first declared parameter's annotations though parameter 0 is the outer instance; JCS351's records shift by the leading implicit
+parameters for every class (a member class's and an enum's exact). (a) jrt's `Constructor.getParameterAnnotations` returns the
+declared count for a local or anonymous class (the records unshifted for them, `annot`'s `ctor-lead` 0 when the class is local
+or anonymous), an hour and a fixture case; (b) as built until a test reads them. **Recommended: (b)**: no test of the corpus is
+known to, and (a) is small when one does.
+
+### JCS358 DECISION: an anonymous class's superclass's outer instance in reflection
+
+javac's constructor of an anonymous class whose superclass is an inner class takes the superclass's enclosing instance after
+its own (`(this$0, superOuter, args..., captured...)`); the interpreter sets the superclass's `this$0` from the `new` site
+(`super-outer-fields`), so JCS351 publishes such a constructor without it, and a reflective construction leaves it null. (a) The
+super-outer parameter published and set (`implicit` gains a third group: the superclass's field), half a day with a fixture;
+(b) as built. **Recommended: (b)**: an anonymous class is not constructed reflectively in the corpus.

@@ -3335,3 +3335,34 @@ The plan's F15 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F15 (java.lang.i
   ok; `bin/j2g-unit` all passed; `bin/gate --plan` exit 0.
 - Found: the interpreter's Dyn dispatches a private method's reflection by name (JCS350); an interpreted inner class's
   constructor lacks its outer parameter in reflection (JCS351). Proposed JCS350-JCS356.
+
+## 2026-11-09: JCS350 (a), JCS351 (a), JCS353 (a) built; JCS352, JCS354-JCS356 recorded (branch `java-invoke2`, write-ahead)
+
+The user accepted F15's proposals about 11:10 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "Decided (the user, 2026-11-09, about 11:10):
+JCS350-JCS356"); built by day under the light rules on `java-invoke2` from `mac/java-invoke` (d0bf31ea8), for the next Java
+night (not tonight's).
+
+- JCS350 (a), `1a1be6b58`: `arbace.j2g.dyncf`'s `setMethod` native (the Go of `Compiler$CFGo`): a private instance method takes
+  no Dyn slot and no method by key, and its member table entry calls its own implementation (JVMS 5.4.6), where it called the
+  receiver's class's method of its key (t07686). Alternative considered: dispatching by the declaring class at the call (the
+  entry still virtual): rejected, the rule is the method's, not the call's.
+- JCS351 (a), `83cf8b52f`: an interpreted inner or local class's constructors published with javac's descriptor (jdk26u's
+  `Lower`, studied at `baf63fb`, `src/jdk.compiler/share/classes/com/sun/tools/javac/comp/Lower.java`: the outer instance
+  prepended, the free variables appended) and `Compiler$CF$Meth.implicit`, set by `Rt/construct` before the constructor
+  (t07677); with F14's slice, the annotation records of a constructor keyed by javac's descriptor and the parameters shifted as
+  jdk26u's `Constructor.handleParameterNumberMismatch` does (`src/java.base/share/classes/java/lang/reflect/Constructor.java`).
+  Alternative considered: a second, synthetic Meth whose body sets the fields (no change to `Compiler.ae`): rejected, the
+  interpreter's nodes would be built by hand for one call.
+- JCS353 (a), `cc7ba8f28`: jrt's own `java.lang.invoke.StringConcatFactory` (overlay), jdk26u's checks, messages, recipe
+  parsing and simple shapes (`src/java.base/share/classes/java/lang/invoke/StringConcatFactory.java` and
+  `java/lang/StringConcatHelper.java`'s `stringOf`, `simpleConcat`, `newStringOf`, at `baf63fb`), the hidden class's result as
+  an adapter; `test/jrt/scf-diff/run.bash` against the JDK's: 28 cases, 0 differ, the control 5 (LICENSE.md). Alternative
+  considered: jdk26u's file derived (`derive.ae`) with the hidden class strategy cut: rejected, two thirds of the file is the
+  strategy and its class-file API, and the trivial shapes reach JavaLangAccess.
+- Recorded, nothing built: JCS352 (b), JCS354 (a) after the night proves F15, JCS355 (a) after the night's rerun, JCS356 (a) when
+  a test needs it. Proposed: JCS357 (local and anonymous classes' parameter annotations), JCS358 (an anonymous class's
+  superclass's outer instance in reflection).
+- Checked by day: the joint javac check 3,341 files, 0 errors; derive --check 84 overlays; `bin/j2g-unit` all passed (the new
+  `test-private-reflection`, `test-inner-ctor-annotations` with their controls); `bin/jrt test --package jrt` ok; `bin/reap` 0
+  problems; `bin/crops-score --judge --strict` 0 problems; `bin/gate --plan` exit 0. The runs of t07686, t07677 and t04758 need
+  the night's executable: the night's commands are in the triage's "As built: JCS350, JCS351, JCS353".
