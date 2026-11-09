@@ -66,8 +66,25 @@ suite_stage() {
     local ro f; ro=$(sed -n 's/.*readonly_files *= *"\([^"]*\)".*/\1/p' "$base/$id.ml" | head -1)
     for f in $ro; do case $f in *.ml) [ -f "$base/$(dirname "$id")/$f" ] && cp "$base/$(dirname "$id")/$f" "$d/" ;; esac; done ;; esac
   for u in $units; do
-    case $u in =*) cp "$root/test/ocaml/opam/${u#=}" "$d/" ;; *) cp "$base/$u" "$d/" ;; esac
+    case $u in =*) cp "$root/test/ocaml/opam/${u#=}" "$d/" ;; *) if [ -f "$base/$u" ]; then cp "$base/$u" "$d/"; else suite_gen "$base/$u" "$d"; fi ;; esac
   done
+}
+
+# suite_gen FILE DIR (OC194 (a), OC197 (a)): a unit the test's ocamlyacc grammar (FILE's stem .mly: its .mli and .ml) or ocamllex lexer
+# (.mll) generates, made in DIR by the native tools as ocamltest's actions run them (-q), the host's with OI_OCAMLYACC=host or
+# OI_OCAMLLEX=host; a failure leaves the unit missing (the dump's error)
+suite_gen() {
+  local stem=${1%.*} d=$2 n; n=$(basename "$stem")
+  if [ -f "$stem.mly" ]; then
+    [ -f "$d/$n.ml" ] && [ -f "$d/$n.mli" ] && return 0
+    cp "$stem.mly" "$d/"
+    if [ "${OI_OCAMLYACC:-native}" = host ]; then (cd "$d" && ocamlyacc -q "$n.mly") > "$d/ocamlyacc.log" 2>&1 || true
+    else (cd "$d" && "$root/bin/repr-ocaml" ocamlyacc -q "$n.mly") > "$d/ocamlyacc.log" 2>&1 || true; fi
+  elif [ -f "$stem.mll" ]; then
+    [ -f "$d/$n.ml" ] && return 0
+    cp "$stem.mll" "$d/"
+    mll_gen "$d" "$n" > "$d/ocamllex.why" || true
+  fi
 }
 
 suite_names() { # UNITS -> file basenames
@@ -102,7 +119,7 @@ suite_ref_one() {
 
 cmd_suite_record_ref() {
   opts "$@"; cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_suite_corpus > "$S/corpus.log"
-  export -f suite_ref_one suite_stage suite_names; export S OI_DIR TESTS TESTLIB TIMEOUT root
+  export -f suite_ref_one suite_stage suite_gen suite_names; export S OI_DIR TESTS TESTLIB TIMEOUT root
   local out=$S/ref.tsv
   suite_selected | awk -F'\t' '$2 == "run" { printf "%s%c%s%c%s%c%s%c%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0, $5, 0, $6, 0, $7, 0, $8, 0 }' | xargs -0 -r -n 7 -P "$JOBS" bash -c 'suite_ref_one "$@"' _ > "$out.new"
   LC_ALL=C sort "$out.new" > "$out"; rm -f "$out.new"
@@ -211,7 +228,7 @@ cmd_suite_check() {
   if [ "$AOT" = 1 ] && [ "$LEVEL" = compiled ]; then cmd_suite_check_compiled; return; fi
   if [ "$AOT" = 1 ]; then cmd_suite_check_aot; return; fi
   cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_build; cmd_suite_corpus > "$S/corpus.log"; suite_native_env
-  export -f limited_cpu oi_wall oi_status oi_cpu_secs suite_oi_one suite_dump suite_dump_native suite_stage suite_names; export S OI_DIR TESTS TESTLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
+  export -f limited_cpu oi_wall oi_status oi_cpu_secs suite_oi_one suite_dump suite_dump_native suite_stage suite_gen suite_names; export S OI_DIR TESTS TESTLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
   local out=$S/check.tsv
   suite_selected > "$S/selected.tsv"; export OI_SELECTED=$S/selected.tsv
   awk -F'\t' '$2 == "run" { printf "%s%c%s%c%s%c%s%c%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0, $5, 0, $6, 0, $7, 0, $8, 0 }' "$OI_SELECTED" | xargs -0 -r -n 7 -P "$JOBS" bash -c 'suite_oi_one "$@"' _ > "$out.new"
@@ -233,7 +250,7 @@ cmd_suite_check_compiled() {
   # the native path as the light level's (TY24 (a), OC202): suite_dump types the units by Arbace's typer, the record
   # check-suite-aot-compiled-native.edn (suite_results)
   cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_build; cmd_suite_corpus > "$S/corpus.log"; cmd_aot_clib; suite_native_env
-  export -f limited_cpu oi_wall oi_status oi_cpu_secs suite_oi_one suite_dump suite_dump_native suite_stage suite_names; export S OI_DIR TESTS TESTLIB UNIXLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
+  export -f limited_cpu oi_wall oi_status oi_cpu_secs suite_oi_one suite_dump suite_dump_native suite_stage suite_gen suite_names; export S OI_DIR TESTS TESTLIB UNIXLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
   suite_selected > "$S/selected.tsv"; export OI_SELECTED=$S/selected.tsv
   oi_rows_for "$S/check.tsv" "$S/oi.tsv" "$S/selected.tsv" suite_oi_one 6 "$S/corpus.tsv"
   C2=$S/compiled; rm -rf "$C2"; mkdir -p "$C2"
@@ -268,7 +285,7 @@ cmd_suite_check_aot() {
   [ -n "${OPT_JOBS:-}" ] && jobs=$OPT_JOBS
   mkdir -p "$O2J/tmp"
   # oi's rows for the same programs, from this oi build (review 008's finding 1)
-  export -f limited_cpu oi_wall oi_status oi_cpu_secs suite_oi_one suite_dump suite_dump_native suite_stage suite_names; export S OI_DIR TESTS TESTLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
+  export -f limited_cpu oi_wall oi_status oi_cpu_secs suite_oi_one suite_dump suite_dump_native suite_stage suite_gen suite_names; export S OI_DIR TESTS TESTLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
   suite_selected > "$S/selected.tsv"; export OI_SELECTED=$S/selected.tsv
   oi_rows_for "$S/check.tsv" "$S/oi.tsv" "$S/selected.tsv" suite_oi_one 6 "$S/corpus.tsv"
   local A=$S/aot; rm -rf "$A"; mkdir -p "$A"

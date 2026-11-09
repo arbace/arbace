@@ -245,6 +245,11 @@ code. Three kinds of things live here:
   (`arbace.repr.ocaml.ocamllex`) ports the same tarball's lex/ (lexer.mll, parser.mly, cset.ml, table.ml, lexgen.ml, compact.ml,
   common.ml, output.ml, main.ml; outputbis.ml's -ml mode not, Proposed OC191) with stdlib/set.ml's AVL trees, by hand, the file
   carrying OCaml's notice (LICENSE.md: the OCaml Core System); its `check` verb is Arbace's own.
+  ocamlyacc (2026-11-09, OC194 (a), "As built: OC194 (a)"): `repr/ocaml/ocamlyacc.ae` (`arbace.repr.ocaml.ocamlyacc`) ports the
+  same tarball's yacc/ (main.c, reader.c, symtab.c, error.c, lr0.c, closure.c, warshall.c, lalr.c, mkpar.c, output.c,
+  skeleton.c, verbose.c; wstr.c, Windows' wide strings, not), Berkeley yacc as OCaml adapted it, by hand, the file carrying
+  their notice (INRIA's, LGPL 2.1 with the linking exception, "Based on public-domain code from Berkeley Yacc"; LICENSE.md:
+  the OCaml Core System); its `check` verb is Arbace's own.
   Its native front end for oi (2026-11-05, doc/ocaml/TYPER.md), `repr/ocaml/typer.ae` and `repr/ocaml/typer/`
   (`arbace.repr.ocaml.typer.*`), ports from the same tarball typing/'s types.ml, btype.ml, ctype.ml, predef.ml,
   printtyp.ml, env.ml, typetexp.ml, typedecl.ml, datarepr.ml, patterns.ml, parmatch.ml, typecore.ml and typemod.ml's

@@ -283,6 +283,14 @@ covers what.
   the OCaml LGPL linking exception (below). Its `check` verb, `bin/repr-ocaml ocamllex-check`, `test/ocaml/oc185.ae` and the samples of
   `test/ocaml/ocamllex/` are Arbace's own (Eclipse Public License 1.0); `test/ocaml/ocamllex-expected.edn` records the host's ocamllex
   5.5.0's outputs' digests.
+- ocamlyacc ported (doc/ocaml/OCAML-SURVEY.md, "As built: OC194 (a)"): `arbace/repr/ocaml/ocamlyacc.ae` ports OCaml 5.5.0's yacc/
+  (main.c, reader.c, symtab.c, error.c, lr0.c, closure.c, warshall.c, lalr.c, mkpar.c, output.c, skeleton.c, verbose.c) from the same
+  release tarball (SHA-256 `fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba`), by hand on 2026-11-09, the file carrying
+  the notice. yacc/ is Berkeley yacc as OCaml adapted it: each file says "Based on public-domain code from Berkeley Yacc" (Berkeley
+  yacc itself is in the public domain), and each carries INRIA's notice (Copyright 1996 INRIA) placing OCaml's adaptation under the GNU
+  Lesser General Public License version 2.1 with the OCaml LGPL linking exception (below); the port is under those terms. Its `check`
+  verb, `bin/repr-ocaml ocamlyacc-check` and the samples of `test/ocaml/ocamlyacc/` are Arbace's own (Eclipse Public License 1.0);
+  `test/ocaml/ocamlyacc-expected.edn` records the host's ocamlyacc 5.5.0's outputs' and messages' digests.
 - oi's native front end (doc/ocaml/TYPER.md): `arbace/repr/ocaml/typer/types.ae` (typing/types.ml, btype.ml, ctype.ml's
   levels, unification, generalization and instances, predef.ml, printtyp.ml with out_type.ml and oprint.ml),
   `env.ae` (typing/env.ml, typetexp.ml, typedecl.ml, datarepr.ml), `parmatch.ae` (typing/patterns.ml, parmatch.ml),
