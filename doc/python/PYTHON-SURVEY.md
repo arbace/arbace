@@ -4655,3 +4655,92 @@ The user's decisions of 2026-11-09 on queue 238's and 239's DECISIONs (a): two f
   with's exit POP_JUMP_IF_TRUE has no exception handler in an async with (a gap in the table), pyi's has one.
 - test/python/divergences.edn: `:dis` no longer names the two `test_async_for_presentation` tests (the judge reports names of
   `:tests` that pass as stale).
+
+## Design: 241, the cycle collector over pyi's objects (2026-11-09, the Mac VM, queue 241)
+
+Read from CPython 3.14.10's Python/gc.c (`gc_collect_main`, `deduce_unreachable`, `move_legacy_finalizers`,
+`handle_weakrefs`, `finalize_garbage`, `handle_resurrected_objects`, `delete_garbage`, `invoke_gc_callback`), Modules/gcmodule.c,
+Objects/weakrefobject.c and Lib/test's test_gc, test_weakref, test_finalization and the modules `:finalization-collect` and
+`:ssl-finalization` name, against go/arbace/py at 4c6ebe2c6 (218's queue and 222's detector in `finalize.go`).
+
+**3.14.10's collector, as observable.** The pinned 3.14.10 is the generational collector again (gc.c: three generations,
+`gc_select_generation` by thresholds 2000/10/10 and the long-lived ratio; no incremental young/old scheme: `gc_free_threading.c` is
+the free-threaded build's, not this one's). `gc_collect_main`: callbacks' "start"; `deduce_unreachable` (`update_refs` copies each
+object's count, `subtract_refs` takes away the references from inside the generation by `tp_traverse`, `move_unreachable` keeps
+what a positive count reaches); legacy finalizers (`tp_del`, none in Python code since 3.4: only `gc.garbage` under DEBUG_SAVEALL
+is observable); `handle_weakrefs` (every weak reference to the trash cleared; callbacks only of weak references outside the trash;
+a weak reference inside it cleared without its callback); `finalize_garbage` (`tp_finalize`, `__del__`, once: PEP 442's flag);
+`handle_resurrected_objects` (`deduce_unreachable` again over the trash); `handle_weakrefs` again without callbacks; `delete_garbage`
+(`tp_clear`, or `gc.garbage` under DEBUG_SAVEALL); "stop" with collected and uncollectable; the count returned. Whatever is
+outside a cycle dies by reference counting at once.
+
+**How pyi knows its objects' references (`tp_traverse`'s role).** pyi has no counts, so `subtract_refs` has nothing to subtract
+from: the references from outside are Go's (stacks, the compiled loop's registers, goi's frames, the runtime's globals), and only
+Go's collector sees them all. 222's probe stays the oracle: every edge between two probed nodes hidden, a probe's Go finalizer on
+each node, `runtime.GC()` under the GIL; a node whose probe did not run is held from outside. What 241 changes is the traverse,
+`cyTraverse`, the table of each type's reference slots (CPython's `tp_traverse` per type), two kinds of slot: an `Object`
+interface slot and a typed pointer slot (`*Dict`, `*Tuple`, `*Cell`, `*Frame` ...), both hidden by address. Soundness is 222's:
+an edge is hidden only between two probed nodes, so a node whose probe runs has no reference but hidden ones; a slot the table does
+not list (a map's value, a closure's capture, a field of a non-object struct) stays visible, which only keeps more alive. The one
+new obligation: a slot listed must belong to its node alone (a shared backing array would hide an outside holder's reference); the
+table lists only owned slots.
+
+**What Go's collector already frees, and what must run at collect.** An unreachable object with no Go finalizer is Go's to free,
+cycles included: nothing to do but count (which pyi cannot: below). A tracked object (218: `__del__`, weak references, a
+generator's close, a socket's warning; 241: a built-in type's `tp_finalize`) has a Go finalizer, and Go never frees a cycle that
+reaches a finalized object from itself: those are the collector's, as in 222. At collect, in CPython's order: the weak references
+to the trash cleared and the outside ones' callbacks called, `__del__` once, resurrection rechecked, `gc.garbage` under
+DEBUG_SAVEALL, `gc.callbacks`' start and stop with the counts.
+
+**The runtime's own holders (CPython's caches hold no references).** A probe is defeated by any Go variable that holds a node: the
+runtime's registries and caches are such holders, where CPython keeps a borrowed pointer, a version tag or a weak reference:
+`identities` (id() of an untracked object), `funcAnnotations`, `localStates` (_thread._local's per-thread dicts), the attribute
+sites' inline caches (`Code.attrICs`: a class and the function found), a type's `attrCache` and `initFn`, `classInfos`,
+`subclasses`, `getsets`, `newWrappers`, abc's registries. 241 treats them as *weak registries*: before a probe each hook takes its
+entries for the probed nodes out (kept by address), after it puts back the survivors' and drops the trash's; a cache entry is
+simply dropped (it refills). A registry with no hook only keeps its objects alive (conservative). Classes are nodes only through
+these hooks: a class the registries pin never fires.
+
+**What the classes' tests need** (each test's own verdict at the base, its ids run alone by pyi's AOT, `.tmp/q241/t/runids.sh`):
+`:finalization-collect` 31, of which 15 already pass (asyncio's free_threading, futures, base_events, streams, one test_tasks,
+importlib's three locks, test_thread, test_subprocess, xml_etree's two: served by 218, 222 and 224 since the class was made); the
+16 others: six PyTask tests (a task's cycle through bound methods, coroutine frames and futures), test_module's
+test_clear_dict_in_ref_cycle (a cycle through a class, its functions and their globals), test_threading_local's two (`localStates`),
+test_weakref's two WeakMethod tests (a stale inline cache), test_os's scandir iterator and test_sqlite3's two cursors (a built-in
+type's `tp_finalize`), and two whose child process runs pyi on goi (faulthandler's "Garbage-collecting" frame, threading's
+`__del__` at shutdown). `:ssl-finalization` 12: test_dealloc_warn passes; the rest are cycles through an SSL context's callbacks,
+a socket's `owner` (a weak reference in CPython) and asyncio's transports, protocols and closures.
+A probe over the base (`.tmp/q241/p/tl.py`): cycles through a list, a tuple, a dict or an instance are found; through a function's
+defaults, a closure's cell, a bound method, an exception's traceback and its frames, an instance whose `__dict__` was handed out,
+`_thread._local` and `_threading_local.local` are not.
+
+**The plan.** (1) `cyTraverse` over instances (the dictionary its own node once handed out), lists, tuples, dicts, sets,
+functions, cells, bound methods, built-in methods' `Self`, class and static methods, properties, exceptions, tracebacks, frames
+(escaped and not running), generators (222's rule), modules not in `sys.modules`, the SSL context and socket; the dictionaries of
+`sys.modules`' modules and builtins are leaves (they are held: walking them would walk the whole program). (2) the weak registries'
+hooks: identities, funcAnnotations, localStates, the inline caches (a registry of the caches' arrays, swept of stale entries at each
+collection: WeakMethod's), a class's own caches; classes as nodes with classInfos, subclasses, getsets and newWrappers hooked, a
+class held by its module under its name a leaf. (3) `tp_finalize` for built-in types (`workFin`: a function in the record): the
+scandir iterator's ResourceWarning, a sqlite3 cursor's statement reset (`pysqlite3` registers its own through `py.TrackFinalizer`;
+a type of another package tracked only when it has no Go finalizer of its own). (4) faulthandler's "Garbage-collecting" frame line
+while a collection runs `__del__`.
+
+**DECISION 1** (queue 241, the user's): automatic collection.
+- (a) none, as built: `gc.collect()`, DELETE_FAST's moment and Go's own collections (218's queue) only (recommended): no cost; a
+  cycle through a finalizer lives until the program collects, as before 241 (GCTogglingTests and test_bug1055820c/d stay classed).
+- (b) CPython's trigger approximated: a collection when the tracked objects grew by 2,000 since the last one (checked at the eval
+  breaker's drain), `gc.disable()` honoured, `get_count` the tracked growth: `__del__` at CPython-like moments, a probe's
+  `runtime.GC()` every 2,000 tracked allocations (to measure with 210's method before adopting).
+
+**DECISION 2** (queue 241, the user's): finalization at exit.
+- (a) a follow-up task ports `finalize_modules` (Python/pylifecycle.c: `__main__`'s dict cleared in `_PyModule_ClearDict`'s order,
+  then the other modules', a collection between) (recommended): `__del__` and weak callbacks at exit as CPython runs them
+  (test_threading's test_main_thread_during_shutdown, test_gc's two at_shutdown tests); every program's exit changes, so the smoke
+  programs and the night's records judge it.
+- (b) keep exit as it is: those tests stay classed (`:gc-collector`'s "modules cleared at exit").
+
+**DECISION 3** (queue 241, the user's): `gc.get_objects`, `get_referrers` and the counts of untracked garbage.
+- (a) keep them CPython's shapes (empty lists; the count of a cycle with no finalizer and no weak reference not counted)
+  (recommended): exact answers need a registry of every container (a Go finalizer or an address list per list, dict, instance,
+  tuple ...), a cost on every allocation, for test_gc's ten classed counts and test_get_objects*.
+- (b) a registry of every heap container made since `gc.get_objects` was first called: exact from then on, 0 before.
