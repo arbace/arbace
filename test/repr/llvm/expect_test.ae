@@ -1,6 +1,7 @@
 (ns repr.llvm.expect-test
-  "The own verdicts' unit tests for LLS38 (the module flags, llvm.ident) and LLS39 (visitCallBase's immarg check and
-  visitIntrinsicCall's cases; AutoUpgrade's ctlz over a non-integer): each case a small module, the kind's context as
+  "The own verdicts' unit tests for LLS38 (the module flags, llvm.ident), LLS39 (visitCallBase's immarg check and
+  visitIntrinsicCall's cases; AutoUpgrade's ctlz over a non-integer), LLS40 (the debug info's scopes and fields) and LLS42
+  (AutoUpgrade's memory intrinsics with an alignment, the declaration visited before its calls): each case a small module, the kind's context as
   arbace.repr.llvm.mutate attaches it, the verdict and the message fragment arbace.repr.llvm.expect must give (the texts of
   llvm-project 23.1.5's Verifier.cpp, Module.cpp and AutoUpgrade.cpp). The negative controls cross one case's verdict with
   another's expectation by the same judge (verdict equal, the fragment in the message): each must fail.
@@ -25,6 +26,32 @@
 (def ^:private intr-decls
   (str "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1 immarg)\ndeclare void @llvm.lifetime.start.p0(ptr)\n"
        "declare i1 @llvm.is.fpclass.f32(float, i32 immarg)\ndeclare void @llvm.va_start.p0(ptr)\n"))
+
+(def ^:private di-module
+  "LLS40 (a): two subprograms, f's variable !10 (in f's retained nodes) and g's !11, a set type !8 over the enumeration !9."
+  (str "define void @f(ptr %p) !dbg !3 {\n    #dbg_value(ptr %p, !10, !DIExpression(), !5)\n  ret void, !dbg !5\n}\n"
+       "define void @g(ptr %q) !dbg !12 {\n    #dbg_value(ptr %q, !11, !DIExpression(), !13)\n  ret void, !dbg !13\n}\n"
+       "!llvm.dbg.cu = !{!0}\n!llvm.module.flags = !{!2}\n"
+       "!0 = distinct !DICompileUnit(language: DW_LANG_C99, file: !1, emissionKind: FullDebug)\n"
+       "!1 = !DIFile(filename: \"a.c\", directory: \"/\")\n!2 = !{i32 2, !\"Debug Info Version\", i32 3}\n"
+       "!3 = distinct !DISubprogram(name: \"f\", scope: !1, file: !1, type: !4, unit: !0, spFlags: DISPFlagDefinition, retainedNodes: !14)\n"
+       "!4 = !DISubroutineType(types: !{null})\n!5 = !DILocation(line: 1, scope: !3)\n"
+       "!6 = !DIBasicType(name: \"int\", size: 32, encoding: DW_ATE_signed)\n!7 = !DIDerivedType(tag: DW_TAG_pointer_type, baseType: !6, size: 64)\n"
+       "!8 = !DIDerivedType(tag: DW_TAG_set_type, baseType: !9, size: 32)\n"
+       "!9 = !DICompositeType(tag: DW_TAG_enumeration_type, name: \"e\", file: !1, size: 32, elements: !{})\n"
+       "!10 = !DILocalVariable(name: \"p\", arg: 1, scope: !3, file: !1, type: !7)\n"
+       "!11 = !DILocalVariable(name: \"q\", arg: 1, scope: !12, file: !1, type: !8)\n"
+       "!12 = distinct !DISubprogram(name: \"g\", scope: !1, file: !1, type: !4, unit: !0, spFlags: DISPFlagDefinition)\n"
+       "!13 = !DILocation(line: 2, scope: !12)\n!14 = !{!10}\n"))
+
+(defn- md-index [forms id] (first (keep-indexed (fn [i f] (when (and (= 'llvm/meta (first f)) (= (symbol id) (second f))) i)) forms)))
+
+(defn- with-field
+  "The forms with the field `k` of the node `id` sent to `to`, and the di-retarget context."
+  [forms id k to]
+  (let [i (md-index forms id) f (vec (nth forms i)) n (nth f 2)
+        n2 (apply list (first n) (mapcat (fn [[fk v]] [fk (if (= (name fk) k) (symbol to) v)]) (partition 2 (rest n))))]
+    [(assoc forms i (apply list (assoc f 2 n2))) {:i i :field (keyword k) :to (symbol to)}]))
 
 (defn- call-module [call-text]
   (str intr-decls "define void @f(ptr %p, float %x) {\n  %a = alloca i32\n  " call-text "\n  ret void\n}\n"))
@@ -63,12 +90,34 @@
       (fn [_] {:fi 0 :to (symbol "g" "llvm.ctlz.i32")}) :invalid "expected any integer or integer vector, but got ptr"]
      ["rename-fpclass-i1-mask" :intr-rename
       "declare i64 @llvm.is.fpclass.f32(i64, i1 immarg)\ndefine i64 @f(i64 %v) {\n  %r = call i64 @llvm.is.fpclass.f32(i64 %v, i1 true)\n  ret i64 %r\n}\n"
-      (fn [_] {:fi 0 :to (symbol "g" "llvm.is.fpclass.f32")}) :invalid "expected any fp or fp vector, but got i64"]]))
+      (fn [_] {:fi 0 :to (symbol "g" "llvm.is.fpclass.f32")}) :invalid "expected any fp or fp vector, but got i64"]
+     ;; LLS40 (a): the debug info's field rules (a :mutate case: the ctx-fn returns [forms ctx])
+     ["retarget-derived-base" :di-retarget di-module (fn [forms] (with-field forms "!7" "baseType" "!9")) :valid nil]
+     ["retarget-set-base" :di-retarget di-module (fn [forms] (with-field forms "!8" "baseType" "!7")) :debug "invalid set base type"]
+     ["retarget-var-scope-file" :di-retarget di-module (fn [forms] (with-field forms "!10" "scope" "!1")) :debug "invalid retained nodes, retained node is not local"]
+     ["retarget-var-scope-other" :di-retarget di-module (fn [forms] (with-field forms "!10" "scope" "!12")) :debug "invalid retained nodes, retained node does not belong to subprogram"]
+     ["retarget-sp-scope" :di-retarget di-module (fn [forms] (with-field forms "!12" "scope" "!9")) :valid nil]
+     ["retarget-loc-scope" :di-retarget di-module (fn [forms] (with-field forms "!5" "scope" "!12")) :debug "!dbg attachment points at wrong subprogram for function"]
+     ;; LLS42 (a): AutoUpgrade's memory intrinsics with an alignment and the declaration visited before its calls
+     ["decl-mem5" :intr-decl
+      "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1 immarg, i32)\ndefine void @f(ptr %p, ptr %q) {\n  call void @llvm.memcpy.p0.p0.i64(ptr %p, ptr %q, i64 4, i1 false)\n  ret void\n}\n"
+      (fn [forms] {:fi 0 :orig (nth forms 0)}) :valid nil]
+     ["decl-mem5-call-type" :intr-decl
+      "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1 immarg, i32)\ndefine void @f(ptr %p) {\n  call void @llvm.memset.p0.i64(ptr %p, i16 0, i64 4, i1 false)\n  ret void\n}\n"
+      (fn [forms] {:fi 0 :orig (nth forms 0)}) :invalid "Intrinsic called with incompatible signature"]
+     ["decl-before-calls-attr" :intr-decl
+      "declare void @llvm.lifetime.end.p0(double captures(none))\ndefine void @f() {\n  %a = alloca i32\n  call void @llvm.lifetime.end.p0(ptr %a)\n  ret void\n}\n"
+      (fn [forms] {:fi 0 :orig (list 'llvm/declare (second (nth forms 0)) 'void '[[ptr]])}) :invalid "applied to incompatible type!"]
+     ["decl-before-calls-sig" :intr-decl
+      "declare void @llvm.lifetime.end.p0()\ndefine void @f() {\n  %a = alloca i32\n  call void @llvm.lifetime.end.p0(ptr %a)\n  ret void\n}\n"
+      (fn [forms] {:fi 0 :orig (list 'llvm/declare (second (nth forms 0)) 'void '[[ptr]])}) :invalid "intrinsic has incorrect number of args. Expected 1, but got 0"]]))
 
 (def controls
   "[subject reference]: the subject's verdict judged against the reference's expectation, which must fail."
   [["flag-min-i1-true" "flag-max-string"] ["flag-pic-max-upgraded" "flag-min-i1-true"] ["flag-div-stripped" "flag-div-no-debug"]
-   ["arg-memset-size" "arg-memset-immarg"] ["arg-lifetime" "arg-va-start"] ["rename-ctlz-ptr" "rename-fpclass-i1-mask"]])
+   ["arg-memset-size" "arg-memset-immarg"] ["arg-lifetime" "arg-va-start"] ["rename-ctlz-ptr" "rename-fpclass-i1-mask"]
+   ["retarget-derived-base" "retarget-set-base"] ["retarget-var-scope-file" "retarget-var-scope-other"]
+   ["decl-mem5" "decl-mem5-call-type"] ["decl-before-calls-sig" "decl-before-calls-attr"]])
 
 (defn- judge [e verdict frag]
   (and (= (:verdict e) verdict) (or (nil? frag) (str/includes? (str (:msg e)) frag))))
@@ -80,7 +129,9 @@
     (doseq [[nm _ text] cases] (spit (str dir "/" nm ".ll") text)))
   (let [got (into {} (for [[nm kind text ctx-fn verdict frag] cases]
                        (let [forms (vec (rd/read-module text))
-                             e (ex/expect kind forms (ctx-fn forms) forms)]
+                             c (ctx-fn forms)
+                             [forms c] (if (vector? c) c [forms c])
+                             e (ex/expect kind forms c forms)]
                          [nm [e verdict frag]])))
         fails (atom 0)]
     (doseq [[nm _] cases :let [[e verdict frag] (got nm)]]

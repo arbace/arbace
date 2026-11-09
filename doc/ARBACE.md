@@ -378,7 +378,13 @@ code. Three kinds of things live here:
   visitIntrinsicCall's switch case by case (the cases of assume, ucmp/scmp, coro.begin, is.fpclass, init.trampoline,
   stackprotector, localescape, localrecover, eh.exceptioncode/pointer, get.active.lane.mask, get.vector.length, va_start,
   get.dynamic.area.offset, the fixed-point family, lrint/lround, bswap, invariant.start, stepvector, preserve.*.access.index,
-  ptrmask, thread.pointer, threadlocal.address, lifetime, sponentry; the rest named), of the same release; the unit tests
+  ptrmask, thread.pointer, threadlocal.address, lifetime, sponentry; the rest named), of the same release; since LLS40 and LLS42
+  (2026-11-09) also the Verifier's getSubprogram, visitFunction's walk of the locations (VisitDebugLoc) and its `!dbg` attachment
+  checks, visit(DbgVariableRecord)'s scope agreement and verifyFnArgs, visitDISubprogram's retained nodes, visitDILocalVariable,
+  visitDIDerivedType's set type, visitDICompileUnit's lists, visitGlobalVariable's `!dbg`, LLParser's DICompileUnit language rule and
+  instruction `!dbg` rule, and `AutoUpgrade.cpp`'s memory intrinsics with their alignment and lifetime of two parameters
+  (upgradeIntrinsicFunction1, UpgradeIntrinsicCall's cases and its default case), into expect.ae and, for the fixes, verify.ae, of the
+  same release; the unit tests
   `test/repr/llvm/expect_test.ae` are Arbace's own; LICENSE.md: Apache 2.0 with LLVM Exceptions; the rest of repr/llvm is Arbace's own.
 - Arbace's own namespaces of the program, not derived from Clojure: `box.ae` and `box/`
   (`arbace.box`, the store, over its host layer `arbace.box.host`; the box's build driver

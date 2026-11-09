@@ -1893,6 +1893,149 @@ Expected: 0 differ, 0 own verdicts failing against Arbace's verifier. A differen
   - (b) Leave them.
   - *Recommended: (a) after LLS40.*
 
+## Decided (the user, 2026-11-09, about 11:10): LLS40 (a), LLS41 (b), LLS42 (a)
+
+- **LLS40 (a):** the debug info's remaining field rules are ported (visitDI*, visitDbgVariableRecord's checks, the instructions' and
+  globals' `!dbg`).
+- **LLS41 (b):** is.fpclass over a non-ConstantInt mask stays on opt's record (0.5): six mutants in 900, the mutator unchanged.
+- **LLS42 (a), after LLS40:** AutoUpgrade's call rewrites of the memory intrinsics with their alignment and of lifetime of two
+  parameters, and the declaration visited before its calls with a changed parameter.
+
+## As built: LLS40 (a), LLS42 (a) (2026-11-09, branch `llvm-props3`)
+
+Built on next `4be141f28`. Ported from llvm-project 23.1.5 (the pinned tarball, read in place: `llvm/lib/IR/Verifier.cpp`,
+`AutoUpgrade.cpp`, `AsmParser/LLParser.cpp`; Apache-2.0 with LLVM exceptions, LICENSE.md, doc/ARBACE.md), into
+`arbace.repr.llvm.expect`; `arbace.repr.llvm.verify` (Arbace's verifier) fixed where the comparisons found it short. As LLS36 (a) and
+LLS38, this changes the verdict lines the night's `ir-make rt` writes; the mutants' bodies are unchanged byte for byte (the mutator draws
+no new random number: `m-di-attach`'s instruction and global cases now attach their context, `{:case :inst :at [fi bi ii]}` and
+`{:case :global :gi i}`, as metadata).
+
+**LLS40 (a): the debug info's scopes, variables, locations and attachments.** New in `expect.ae`, each with its Verifier line:
+- the walks, as the Verifier makes them: `scope-sp` (getSubprogram, V:7094, up the lexical blocks), `inlined-at-scope`
+  (getInlinedAtScope), visitFunction's VisitDebugLoc over every instruction's `!dbg` and its `llvm.loop` node's locations (V:3313-3357:
+  `DILocation's scope must be a DILocalScope`, `!dbg attachment points at wrong subprogram for function`, its Seen set), and
+  visit(DbgVariableRecord)'s scope agreement with verifyFnArgs (V:7212-7222, V:7467: `mismatched subprogram between #dbg record variable
+  and DILocation`, `conflicting debug info for argument`), function by function in the module's order (`scope-verdict`; a module with
+  an old debug intrinsic's call is left to opt);
+- `di-retarget`: a type's or a subprogram's scope sent to any DIScope, valid (visitDIType, visitDISubprogram: ODR uniquing is off in
+  opt); a local variable's scope: not local, `invalid retained nodes, retained node is not local` when a subprogram retains it (that
+  subprogram is reached first, from its function), else `local variable requires a valid scope` (V:1720); local, `... retained node does
+  not belong to subprogram` (V:1557) or the walks; a derived or composite type's base sent to another type: valid, but a set type's
+  (V:1278: an enumeration, a subrange or an integer basic type, else `invalid set base type`); a variable's type to another type: valid;
+  a compile unit's enums, retained types, globals, imports, macros sent to a node: `invalid enum list` ... (V:1162-1214); a DILocation's
+  scope sent to another local scope: the walks (a key instruction's location, `atomGroup`, and a subprogram declaration as the scope are
+  left); a DILocation used only by an `llvm.loop` node: the walk's message;
+- `di-record`: a variable sent to another variable, a location to another location: the record's scope agreement and verifyFnArgs;
+- `di-attach`: a function's `!dbg` sent to another subprogram: `function definition may only have a distinct !dbg attachment`,
+  `DISubprogram attached to more than one function` (V:3245-3253), else the walks; an instruction's `!dbg` sent to a node that is no
+  DILocation: LLParser's `invalid !dbg metadata` (P:354), else the walks; a global's `!dbg` not a DIGlobalVariableExpression: `!dbg
+  attachment of global variable must be a DIGlobalVariableExpression` (V:794), else valid;
+- `di-drop`: a compile unit's `language` without `sourceLanguageName`: LLParser's `missing one of 'language' or 'sourceLanguageName',
+  required for !DICompileUnit` (P:6255).
+Where a fragment expression is anywhere in the module, the rules that change a variable's type are left to opt (verifyFragmentExpression
+reads the variable's size through its type, not ported).
+
+A fix of the base found by h4: a DILocation used by an instruction with few operands (`ret void, !dbg !10`) was taken for unused (the
+attachment was looked for after the third operand); `inst-md` finds the `:md` key itself.
+
+**LLS42 (a): AutoUpgrade's rewrites.**
+- `mem5-upgraded`: memcpy./memmove. of five parameters declared again over (dest, src, len), memset. over (dest, len)
+  (AutoUpgrade.cpp:1612-1641, getOrInsertDeclaration: the intrinsic's type and attributes); each call by UpgradeIntrinsicCall's case
+  (AutoUpgrade.cpp:5759): five arguments rewritten from them (left to opt), any other the default case (AutoUpgrade.cpp:5240):
+  retargeted when its type is the new declaration's, else its callee cast, `Intrinsic called with incompatible signature` (V:3846); then
+  the new declaration's signature. `.inline` names and parameters of other types are left to opt.
+- `life2-upgraded`: lifetime.start/end of two parameters declared again over the second's type (AutoUpgrade.cpp:1589); a call of two
+  arguments (rebuilt on an alloca or erased, AutoUpgrade.cpp:5856) left, the others as above.
+- the declaration visited before its calls with a changed parameter: with an invalid signature AutoUpgrade keeps the written attributes
+  (AutoUpgrade.cpp:2001), so visitFunction's verifyFunctionAttrs over the parameters in order comes first (`param-attrs-check`: `Attribute
+  'captures(none)' applied to incompatible type!`), then isSignatureValid's message; a valid signature (the intrinsic's own attributes)
+  and a vector or aggregate parameter are left.
+
+**Arbace's verifier fixed (the comparisons found five):** a definition's `!dbg` subprogram distinct and attached to one function
+(V:3245-3253), visitFunction ending at a failed attachment check before its walk; the compile unit's enum, retained type, imported
+entity and macro lists (V:1162-1214); the retained local variables' and labels' scopes (V:1546-1566), and a variable a subprogram
+retains reported by the subprogram first; AutoUpgrade's new declaration for an old memcpy/memmove/memset or lifetime form
+(`upgraded-fty`): a call of another arity than the old form's whose type is not the new one's, `Intrinsic called with incompatible
+signature`.
+
+**Unit tests and controls.** `test/repr/llvm/expect_test.ae`: 36 cases (10 new: 6 of LLS40 on a two-function debug module, the
+retargets made in its forms; 4 of LLS42) and 10 negative controls (4 new), 0 failing. The four LLS42 cases' modules (`--dump`) by opt
+23.1.5 by hand: the same verdicts and messages (`Intrinsic called with incompatible signature`, `Attribute 'captures(none)' applied to
+incompatible type!`, `intrinsic has incorrect number of args. Expected 1, but got 0`, valid).
+
+**Measured (light; stage 0, `REPR_LLVM_THREADS=2`, the stubs first on PATH: no stub called; live opt 23.1.5 only for the oracle, by
+hand).** The day's 41 modules of LLS33 (b), 300 mutants each of the intrinsics, metadata and debug families. h2 (800000) and h3 (900000)
+were fitted: their opt answers (llvm-props' and llvm-props2's oracle records) were read while writing the rules. h4 (1000000, a seed never
+used before) was made only after the rules were done, read once, and showed the base's `!dbg` lookup fault above, which was fixed and
+measured again; its "before" is the base `4be141f28`'s mutator over the same mutants (the bodies: 900 compared, 0 differ).
+
+| set | own before | own after | unknown after | as Arbace's verifier (`verify-check`) | as opt (live `mutants-oracle`) |
+|---|---|---|---|---|---|
+| h2, 900 (800000), fitted | 864 (96.0%) | 895 (99.4%) | 5 | 895 of 895, 0 disagree | 895 of 895, 0 differ |
+| h3, 900 (900000), fitted | 865 (96.1%) | 891 (99.0%) | 9 | 891 of 891, 0 disagree | 891 of 891, 0 differ |
+| h4, 900 (1000000), held out | 856 (95.1%) | 889 (98.8%) | 11 | 889 of 889, 0 disagree | 889 of 889, 0 differ |
+
+h4 by kind, before and after: di-attach 53, 59 of 60; di-record 51, 60 of 60; di-retarget 48, 59 of 60; intr-decl 68, 75 of 75; the rest
+unchanged (di-drop 60, di-version 60, intr-arg 75, intr-rename 67, intrinsic 75, md-attach 149, md-edit 150). The unknowns left on h4 (11):
+is.fpclass renamed over a non-ConstantInt mask (6, LLS41 (b): by design on opt's record); ctlz/cttz rebuilt with a used result of another
+type (2); an instruction's `!dbg` in a module with an old debug intrinsic's call (1); a DILocation used only as another's inlinedAt (1); a
+wrapping range (1). h2's and h3's are of the same classes, with a declaration's `!dbg` sent to a node that is no subprogram (the
+Verifier's cast, undefined), a variable's type changed in a module with a fragment and a DISubrange's dropped `count`.
+
+The h3 `intrinsic` mutant `tx-O0.pr58277-1.intrinsic.900040` gives `Intrinsic called with incompatible signature`, opt's second message
+(its first is `Invalid user of intrinsic instruction!`): as before this branch, and the live oracle's whole-stderr comparison takes it.
+
+**The families the verifier's fixes touch** (`bin/repr-llvm check ... --essential`, the llvm-essential chain): roundtrip-llvmtest,
+verify-llvmtest, text-llvmtest 43 of 43, verify-probes 4 of 4 (and whole: 478 modules, 472 pass, 0 failing against the record), their
+controls failing. The whole llvmtest families and `bin/llvmi check --essential` need `llvm/test` of 23.1.5 extracted under the main
+checkout's `.tmp/llvm/src` (`bin/llvm-corpus extract`), absent here: the night's. `test/repr/llvm/controls-test.bash`: every line ok but
+llvmi's (the same absence).
+
+**Scores.** `bin/crops-score` before and after: LLVM IR 96.4% / 97.9% / 100.0% / 96.9% (completeness, without by design, maturity,
+independence), the same: the rt families are not recorded yet (LLS31 (a)'s pack is the night's), so the checkout's facts do not move.
+The projection on the night's records (`test/crops/independence.edn`'s comment), with verify-rt-heldout's ~1,202 mutants at h4's rate
+(98.8% rather than h3's 96.1%): about 1,188 own and 14 on opt's record; the judge's facts then (4447 + 0.5 x 1227) / 5674 = 0.892
+(from about 0.889) and independence about 97.8 to 97.9. The rt pack's mutants are mostly of the base and attrs families, which these
+rules leave; the night's counts replace both.
+
+`.tmp/night10/slots/llvm-cells.patch` still applies (`git apply --check`: clean): this branch touches no gate step or record.
+
+### The night's commands (LLS40, LLS42, after LLS38's)
+
+LLS36 (a)'s and LLS38's are unchanged: `bin/llvmi ir-make rt` (or `ir-make rt --mutants` if the pack was made before this merge) must
+run on a tree with this branch, so the verdict lines are this branch's and `record-opt`'s entries are made afresh. Then:
+
+    test/repr/llvm/expect-test.bash                                              # 36 cases, 10 controls, 0 failing (seconds)
+    bin/llvm-corpus extract                                                     # if .tmp/llvm/src lacks 23.1.5's llvm/test
+    bin/repr-llvm check verify-llvmtest; bin/repr-llvm check roundtrip-llvmtest; bin/repr-llvm check text-llvmtest   # whole, against the records
+    bin/repr-llvm records-verify --sample 25                                    # the oracle tier: "records-verify mutants verify-rt / verify-rt-heldout ... 0 differ"
+    REPR_LLVM_JUDGE=live bin/repr-llvm mutants-oracle .tmp/llvm/rt-lists/verify-rt-heldout.list .tmp/llvm/mo-live   # live opt (~3 min)
+    bin/repr-llvm check verify-rt --record; bin/repr-llvm check verify-rt-heldout --record                         # each mutant held to its line
+
+Expected: 0 differ, 0 own verdicts failing against Arbace's verifier, the whole llvmtest families as recorded (the verifier's five fixes
+add checks valid modules never meet). A difference is a rule to fix by day.
+
+### Proposed (llvm-props3)
+
+- **LLS43 verifyFragmentExpression's sizes (the variables' types in a module with a fragment).** The rules that change a variable's or a
+  type's type are left to opt wherever a `DW_OP_LLVM_fragment` is in the module, since the check reads the variable's size through its
+  type chain (DIVariable::getSizeInBits: derived types to their base, composite and basic sizes).
+  - (a) Port getSizeInBits and the two fragment checks (`fragment is larger than or outside of variable`, `fragment covers entire
+    variable`, V:7451) and drop the condition. Cost: an hour or two. One or two mutants in 900 of the debug family.
+  - (b) Leave them on opt's record. *Recommended: (a)*: it also lets Arbace's verifier check the fragment rule on the corpus's own modules.
+- **LLS44 The DILocation used only as an inlinedAt, and the old debug intrinsics' calls.** The location walks are ported for the
+  instructions' and loops' locations; a location reached only through another's `inlinedAt` (getInlinedAtScope over a non-local scope: a
+  `cast` the Verifier does not guard) and a module with an old `llvm.dbg.*` call (made a record by AutoUpgrade first) are left.
+  - (a) Port the inlinedAt chain's visit (visitDILocation over the chain, V:1074) and the old calls' conversion order
+    (upgradeDbgIntrinsicToDbgRecord) into the walks. Cost: half a day; two or three mutants in 900.
+  - (b) Leave them. *Recommended: (b)*: the cast is undefined for the first; the second is the old intrinsics' form, which the corpus
+    keeps only in a few modules.
+- **LLS45 A held-out set in the gate.** h2, h3 and h4 live only in the worktrees' `.tmp`; the night's rt pack holds the recorded mutants,
+  but a set made by the current mutator from a fixed seed is not checked anywhere.
+  - (a) A part of `llvm-full`: `bin/repr-llvm mutants` of a fixed seed (300 a family), `verify-check` in own mode (own verdicts against
+    Arbace's verifier, no opt), about 7 minutes, with the existing controls. Cost: an hour (a step's part, the fragment, its waiver).
+  - (b) Leave it to the rt pack. *Recommended: (a)*: a rule change that breaks an own verdict would then fail by night without opt.
+
 ## As built: LLS21 (a), ci's gaps (2026-11-05, branch `ci-lls21`)
 
 What the user decided (LLS21 (a)) is in ci, C's crop (`arbace/c/build.ae`, `arbace/c/check.ae`), no new native and no Go
