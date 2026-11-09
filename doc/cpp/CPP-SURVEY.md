@@ -4775,3 +4775,57 @@ read), the messages after the directives' texts.
   through a private base (lookup/scoped15), a constructor template's access in a member's context (template/access19) and the
   type-access checks' gate (`check-type-access!`, still "no class declares a friend"). Each is its own part of SemaAccess, none
   reached by the friend matching alone.
+
+### Not built in this pass: CP311 (a), CP310 (a), the rest of CP313 (a)
+
+- **CP311 (a), class template argument deduction with initializers**: the parser's `arbace.repr.cpp.sema/ctad` (the trees' types)
+  deduces from constructors and the copy candidate but bails on user deduction guides, packs, value parameters and several
+  guides; the code generator's Sema has CTAD only from defaults (the fifth slice). The port of SemaTemplateDeductionGuide.cpp
+  (clang's implicit guides per constructor, the copy deduction candidate, aggregate deduction candidates, user guides, overload
+  resolution among them by the existing deduction and [over.match.best]'s guide tie-breaks), with codegen-check for the
+  generated programs, is the second pass's first item (about two days by the proposal).
+- **CP310 (a)**: the errors inside called constexpr functions placed by kind, once the night's whole-part record gives their
+  counts (the decision's "then").
+- **CP313 (a)**'s remaining contexts: listed in its section above.
+
+### Checked (light; clang, clang++, clang-23, g++, gcc, cc, cpp, c++, cc1, cc1plus, ld and as stubs exiting 99 first on PATH, their log empty)
+
+| check | result |
+|---|---|
+| the every-10th sample by the own front end (`.tmp/t6/sample.sh`; runs `.tmp/t7/r314`, `rA`, `rF`, `rG`) | 108 → 109 own passes (cpp2a/consteval24, CP310 (b)); no earlier pass lost; the extras the same 92 lines; about 9-10 min a run at two threads |
+| `own .tmp/t7/rG --clang .tmp/s10/cl --record` (the committed record) | 454 rows, 109 passes |
+| the features' files of the whole part, each proposal's tree against its base (`.tmp/t5/subm.sh`, lists `.tmp/t7/f*.txt`) | CP314 +4, CP303 +3, CP305 extras -3, CP301 +3, CP300 +3 (extras -6), CP310 +2, CP313 0; no pass lost, no new extra |
+| the code generator: `bin/cppi codegen-gen` (this branch's step, `.tmp/t7/cgF`) and gen-list by each proposal's tree (`.tmp/t7/g305`, `g301`, `g300`, `g312`) | 142 of 142 as recorded each time: no sample's forms changed (the intended changes are the probes': CP301's invokers, CP300's specializations, CP312's const conversion, CP304's closures) |
+| the dg control (`bin/repr-cpp dg --corpus dg-error --front native --only` dr2082, dr1423) | `_control/dg/dr2082-vs-dr1423 fails as it must` |
+| `make check-makefile`; `gate.crops check . test/gate/steps.edn`; `bin/gate --full --plan` | pass; 0 problems; `cpp-codegen-gen` and `cpp-dg.dg-error-own` planned |
+| `bin/crops-score --crop cpp`; `--record`; `--judge --strict` | 76.1 / 100 / 67.8 (read 0.656: 109 own-judged dg cases); scores.edn unchanged (the fourth decimal); 0 refuted, 0 problems |
+
+### The numbers (bin/crops-score --crop cpp)
+
+| measure | before (f9b81f1e3) | after (the sample's record) | after the night (the whole part recorded) |
+|---|---|---|---|
+| completeness | 76.1 (96.5 without by design) | 76.1 (96.5) | 76.1 |
+| maturity | 100.0 | 100.0 (one more `--full` step with its control) | 100.0 |
+| independence | 67.82 (read 0.656) | 67.82 (read 0.656: 109 own-judged dg cases) | about 69.3 (read about 0.733: about 1,104 of the 4,597 own-judged, the sample's 24.0%) |
+
+### The night's commands (one process at a time; `export ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace GOMEMLIMIT=1400MiB REPR_CPP_THREADS=2`)
+
+```
+bin/cppi codegen-gen                                                           # cpp-codegen-gen's command, about 5 min: 142 of 142 as recorded, both controls fail as they must
+PATH=<stubs>:$PATH bin/repr-cpp dg --corpus dg-error --front native --record   # the 4,597 files by Arbace's front end, about 80 min at two threads; writes test/cpp/check-dg-own-linux-amd64.edn
+# then test/crops/independence.edn's C++ read fact: :cases {:dg-own [N 1] :dg-clang [M 0.5]} with N the record's passes, M = 4597 - N; bin/crops-score --record
+bin/repr-cpp dg --corpus dg-error --front native                               # cpp-dg.dg-error-own's command: the record held
+bin/cppi codegen-check .tmp/cppi/codegen-check                                 # clang and gcc live: 141 of 142 expected (no sample changed)
+bin/cppi codegen /root/arbace/.tmp/worktrees/cpp-cx12/.tmp/t7/g1.cpp .tmp/cppi/cg-g1  # CP301's probe built and run by gcc with the runtime: "4 5 3 5"
+bin/cppi codegen /root/arbace/.tmp/worktrees/cpp-cx12/.tmp/t7/c2.cpp .tmp/cppi/cg-c2   # CP300's probe: status (1 + 20 + 500 + 6000 + 7) & 255 = 128
+bin/repr-cpp native-check samples                                              # clang live: :_gattrs on functions and typedefs are :_ keys, the trees as they were
+```
+
+### Slips, scratch
+
+Three slips against the day's rules, all in throwaway reads of scratch, nothing written: a `grep ... 2>/dev/null` over the
+worktree's logs, a `ls ... 2>/dev/null` in a search for the parser's CTAD, and a leftover `diff <(echo) <(echo) >/dev/null` in an
+inspection command; none repeated after noticing. Scratch in the worktree's `.tmp/`: `t7/` (the probes `u1`, `g1`-`g6`, `c1`-`c3`,
+`c312`, `e1`, `e2`, `l19`, `a1`, `v314`; the lists `f*.txt`; the feature runs `f*b`/`f*n`; the sample runs `r314`, `rA`, `rF`, `rG`;
+the trees `tree300`, `tree301`, `tree305`, `tree310`, `treeH`; the code generator runs `cg1`, `cgA`, `cgF`, `g300`, `g301`, `g305`,
+`g312`; `cmp.sh`, `gencmp2.sh`, `onem.sh`, `gent.sh`, `hunks.py`, `hunks2.py`), `base2-tree/` (f9b81f1e3's tree), `p0/`, `cg1/`.

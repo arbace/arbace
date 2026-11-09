@@ -1236,3 +1236,13 @@ compiler stubs first on PATH (their log empty). doc/cpp/CPP-SURVEY.md, "Decided 
 - **Measured**: the sample unchanged (109, 92 extras); the 22 access-with-friends files unchanged; a probe correct.
 - **Left** for the second pass: member contexts, [class.protected]'s object rule, using-declarations', structured bindings' and the
   injected-class-name's access, constructor templates in members, the type-access gate.
+
+## 2026-11-09: C++'s proposals of the day, recorded (branch `cpp-props2`)
+
+- **Recorded**: test/cpp/check-dg-own-linux-amd64.edn from the sample's last run (454 rows, 109 passes: 108 and cpp2a/consteval24),
+  the C++ read fact (`:dg-own [109 1] :dg-clang [4488 0.5]`), test/crops/scores.edn (unchanged at its precision: C++ 76.1 / 100 /
+  67.8). `bin/cppi codegen-gen` on the branch's head: 142 of 142 as recorded, both controls failing as they must; the dg control
+  fails as it must; `make check-makefile`, `gate.crops check`, `bin/gate --full --plan`, `bin/crops-score --judge --strict` pass.
+- **Left** for the second pass (doc/cpp/CPP-SURVEY.md, "As built: CP300-CP314", "Not built in this pass"): CP311 (a), CP310 (a)
+  after the night's record, CP313 (a)'s member contexts and the other access forms.
+- **Slips**: three throwaway reads with `/dev/null` or a process substitution (the survey's "Slips"); nothing written there.
