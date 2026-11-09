@@ -68,14 +68,20 @@ core_records_make() {
   local o=$work/core/oracle d=$work/core/records/make key m p
   [ -f "$o/index.tsv" ] || { echo "core-records: no oracle (bin/rust-front core-oracle first)" >&2; return 1; }
   key=$(core_key) || return 1
-  rm -rf "$d"; mkdir -p "$d/rust-core-built/mir"
+  rm -rf "$d"; mkdir -p "$d/rust-core-built"
   : > "$d/prefixes"
   while read -r m; do
     p=${m%.rs}; p=${p%/mod}; p=${p//\//-}
     echo "core.$p-" >> "$d/prefixes"; echo "core.$p." >> "$d/prefixes"
   done < "$root/test/rust/front/core-modules.txt"
   awk -F'\t' 'NR==FNR {pre[NR]=$0; n=NR; next} {for (i=1; i<=n; i++) if (index($1, pre[i]) == 1) {print; break}}' "$d/prefixes" "$o/index.tsv" > "$d/rust-core-built/index.tsv"
-  cut -f1 "$d/rust-core-built/index.tsv" | while read -r f; do cp "$o/mir/$f" "$d/rust-core-built/mir/$f"; done
+  # one member a module (its bodies' dumps one after another, each after a line `//// FILE`): a short manifest
+  rm -rf "$d/rust-core-built/mir"; mkdir -p "$d/rust-core-built/bodies"
+  while read -r m; do
+    p=${m%.rs}; p=${p%/mod}; p=${p//\//-}
+    awk -F'\t' -v a="core.$p-" -v b="core.$p." 'index($1, a) == 1 || index($1, b) == 1 {print $1}' "$d/rust-core-built/index.tsv" |
+      while read -r f; do printf '//// %s\n' "$f"; cat "$o/mir/$f"; done > "$d/rust-core-built/bodies/$p.mir"
+  done < "$root/test/rust/front/core-modules.txt"
   (cd "$d/rust-core-built" && find . -type f -printf '%P\n' | LC_ALL=C sort | awk -v k="$key" '{print $0 "\t" k}') > "$d/ids"
   oracle_make "$core_pin" "$d" "$d/ids" "bin/rust-front core-records make" rustc
 }

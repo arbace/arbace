@@ -1784,7 +1784,10 @@
                        r (when (> (count segs) 1) (try (c/res-def (assoc path :segs (vec (butlast segs)) :res nil :span nil)) (catch Throwable _ nil)))
                        tr (when (#{:local :ext} (first r)) (second r))]
                    (or (when-let [[def k] (and tr (trait-item tr nm))]
-                         (let [targs (vec (cons bt (drop 1 (fresh-args tr))))]
+                         (let [fresh (vec (drop 1 (fresh-args tr)))
+                               ;; RF12: the trait's written arguments (`<T as AsRef<U>>`), else fresh variables
+                               written (vec (for [a (:args (:args (last (butlast segs)))) :when (:ty a)] (body-ty (:ty a))))
+                               targs (vec (cons bt (if (= (count written) (count fresh)) written fresh)))]
                            (when *obligations* (swap! *obligations* conj [:trait [tr targs]]))
                            (cond (= "AssocFn" (str k)) (let [t [:fndef def (into targs (drop (count targs) (fresh-args def)))]]
                                                          ;; RF12: the path's user type annotation (instantiate_value_path: TypeOf(def, args))
@@ -1792,6 +1795,15 @@
                                                          t)
                                  (and (str/starts-with? (str k) "AssocConst") (number? def)) (erase (c/subst (c/type-of def) targs))
                                  :else nil)))
+                       ;; RF12: `<dyn Any + Send>::is::<T>` (no trait): the type's associated function, as a type-relative
+                       ;; path's, its turbofish applied
+                       (when (and (nil? tr) (= 1 (count segs)) (not (#{:err :unknown} (first bt))))
+                         (when-let [t (probe-assoc-fn bt nm)]
+                           (let [t (apply-turbofish {:kind :path :path {:segs segs}} t)]
+                             (when (and *extra* (= :fndef (first t)))
+                               (let [ip (impl-item-of (second t))]
+                                 (when-let [u (canonical-user-ty (second t) (nth t 2) (when ip [ip bt]))] (note! e :user-ty u))))
+                             t)))
                        [:unknown]))
           :path (do (doseq [seg (:segs (:path e)) a (:args (:args seg)) :when (and (map? (:const a)) (not (:node a)))] (anon-const! (:const a) true))
                     (binding [*user-self* (atom nil) *assoc-const* (atom nil)]
