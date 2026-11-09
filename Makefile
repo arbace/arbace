@@ -447,7 +447,7 @@ rust-front-capture-check: ## RF10/RFP20: the closures' kinds and captures (the p
 	bin/rust-front capture-oracles && bin/rust-front capture-check
 rust-front-run-built: ## RF10, RFP23 (b): test/rust/front/a*.rs run from Arbace's MIR on ci, the records from the pack rust-front-mono, rustc, rustdoc, cargo and the C compilers stubbed (bin/rust-front run-built)
 	bin/rust-front run-built
-rust-front-essential: ## RFP24 (b), RFP27 (a): the essential step rust-front-essential: build-check, capture-check and run-built from the packs, no helper (bin/rust-front essential)
+rust-front-essential: ## RFP24 (b), RFP27 (a), RFP30 (a), RFP36 (c), RFP40 (c): the essential step rust-front-essential: build-check, the pass judge, capture-check, run-built as one session with mono-check, from the packs, no helper (bin/rust-front essential)
 	bin/rust-front essential
 rust-front-records-make: ## RFP23 (b): the front end's oracle packs rust-front-{std,built,captures,mono} made by the helper, by hand on the host with rustc (bin/rust-front records make)
 	bin/rust-front records make

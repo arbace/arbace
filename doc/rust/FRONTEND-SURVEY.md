@@ -2149,3 +2149,57 @@ user's decision of 2026-11-07). `bin/crops-score --judge --strict`: Rust unchang
 - **RFP41 The front end's runs in the eval cell.** The native runs score nothing while they are not the cell's cases. Options:
   (a) **as built: eval stays 0.5 until rsi's cases run from the front end's MIR (RF11)**; (b) count `run-built`'s programs as eval
   cases now (6 at 1, 1 at 0.5 beside rsi's thousands: the mean moves by under 0.001). *Recommended: (a)*.
+
+## Decided (2026-11-09, the user: RFP28-RFP41)
+
+All as recommended: **RFP28 (a)** with **RFP37 (a)** (the helper's `--std-iface` writes every ADT a written field's type names,
+transitively; `rust-front-std` made again; additions only), **RFP29 (b)** now ((a) with RF11's v0 symbols), **RFP30 (a)**, **RFP31 (a)**,
+**RFP32 (a)** now ((b) with RF12), **RFP33 (a)**, **RFP34 (a)** with **RFP38 (a)** (the expansion's spans: `Span::to`, the call site),
+**RFP35 (a)**, **RFP36 (c)** then (a), **RFP39 (a)** then (c), **RFP40 (c)** then (a), **RFP41 (a)**. Tonight's (the night of 2026-11-09)
+first: RFP30, RFP31, RFP36, RFP40; then the rest in the day, one commit a proposal (branch `rust-props`, from `rust-rf10b` at `c0f226f3b`).
+
+## As built: RFP30 (a), RFP31 (a), RFP36 (c), RFP40 (c) (2026-11-09)
+
+### RFP31 (a): the dumps the judge reads
+
+`bin/rust-front build-oracles` deletes every `.before.mir` after the helper's run (a pass's `.before.mir` is the previous pass's
+`.after.mir`; the judge never read one), the 88 programs' dumps about half their 193 MB. The pack `rust-front-built` already held the
+`.after.mir` files alone (RFP23 (b)); it now holds only those the judge reads (`bin/lib/repr-rust/front-records.bash`'s `rfr_judged`):
+each listed pass at the phase `-Zdump-mir` numbers its first run in (`passes/pass-phase`: 1-1 to SimplifyCfg-promote-consts, 2-1 to
+Derefer, 2-2 to StateTransform, 3-1 after), not a pass rustc runs again in a later phase (AddCallGuards and RemoveNoopLandingPads among
+the optimizations, `3-2-*`) nor a shim's own pipeline (`D.1-1-*`, drop glue): 1,050 members of 1,108, every kept member's digest the
+old pack's (the manifests compared), 22,396 bytes xz (`36526aa2...`). The filter is in the entry's key, so the old pack was STALE until
+remade (`bin/rust-front records make built`, 11 s); `records verify built`: 7 entries equal, the crossed pair differing.
+
+### RFP30 (a): the pass judge in the essential step
+
+`bin/rust-front essential` runs `BUILD_PASS=SimplifyCfg-pre-optimizations build-check --records` after the built judge: our bodies
+through the 21 passes to runtime MIR, each pass against rustc's `.after.mir` in the pack, its control (a1's add against fib after the
+last pass, `_control/pass/crossed` in `test/rust/front/controls.edn`) differing. Its 21 summary lines are held in
+`test/rust/front/essential-known.txt` (52 of 52 bodies equal after every pass but RemoveNoopLandingPads' 8 of 8, and the analysis
+lint's 0 of 0: no dump is listed for it). About 40 s.
+
+### RFP36 (c), RFP40 (c): the runs as one session, mono-check in it
+
+`bin/rust-front run-built` (the native facts on ci, the default; `RF_RUN_BATCH=0` the earlier process a stage a program) is three
+sessions instead of four processes a program and mono-check's two:
+
+- `arbace.rust.front.build-run`'s `batch`: every program's pipeline once in one process: its module (`native-run`, what `native-main`
+  did, now a function), RFP40 (c)'s mono-check of the same bodies and facts against the record (`mono-check/judge`; `mono.log` as
+  `bin/rust-front mono-check` prints it), codegen (`arbace.rust.back.check/emit-mono`) and rsi's lowering to C (as `bin/rsi lower`:
+  `arbace.cpp.lower/lower-file` over the read IR); std's data read once for all. `RF_BATCH_MONO_CONTROL="a1 a2"`: mono-check's crossed
+  control judged in the same runs (a1's facts against a2's record and back, `mono-control.log`); `RF_BATCH_CONTROL=a1`: the run's
+  control (every Add a Sub) built beside, as `_control/a1`.
+- `arbace.rust.front.ci-batch` (new): every lowered program with the driver read, checked, linked with musl's forms and built into
+  ci's node program as `bin/ci run --std gnu23 FILE...` does (`arbace.c.run`'s `read-unit` and `nodes`, musl's library prebuilt once),
+  under `bin/ci`'s own setup (the sysroot, ci evaluated from the checkout when the host's embedded copy differs, `musl prepare`,
+  `cirun-build --ensure`). Nothing of `arbace/c` or `bin/lib/ci` changed: no key of C's moves.
+- cirun runs each node program; the status and output against the record's, as before.
+
+`bin/rust-front essential` runs the batch once with both controls; mono-check's separate runs are gone. Results (main's stage 0,
+`GOMEMLIMIT=1500MiB`, the six tools stubbed, 0 stub calls): build-check 54 of 54, the passes 52 of 52 (21 lines), capture-check 30 of
+31, run-built 7 of 7, mono-check's line unchanged (callees 34 of 34 ... layouts 221 of 223, locs 33 of 34), the five controls
+differing (the run control a1 156 for 5; mono's 6 facts); **3 min 22 s** (`--record`) and 3 min 38 s (the check), from 8 min 36 s:
+build-check 56 s, the passes 41 s, capture-check 52 s, the runs 85 s (the batch 48 s, ci's session 37 s, the eight cirun runs a
+second). `gate.crops check`: 0 problems; `bin/gate --plan`: run rust-front-essential (its key moved). RFP36 (a) and RFP40 (a) (as built
+is now the batch, every program, mono-check in the step) hold.

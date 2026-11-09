@@ -1281,3 +1281,21 @@ rustc's Cargo.lock pins, read from the host's Cargo registry copy). MIT OR Apach
   absent) and `bin/rust-front`'s `rf_libsrc_take` calls it when `$libsrc` is missing (`RF_MONO_LIB` still names another tree). Declared inputs
   need no change: `:rust` holds bin/repr-rust, take.bash and apks.sha256, the step pins apks.sha256, `bin/rust-front` is listed.
   Alternative: extracting in the step's command (rejected: the other callers, run-built and mono-check by hand, would still fail).
+
+## 2026-11-09: RFP30 (a), RFP31 (a), RFP36 (c), RFP40 (c): the front end's essential step, 8.5 to 3.5 minutes (branch `rust-props`)
+
+The user's decisions of 2026-11-09 (~06:15, RFP28-RFP41 all as recommended; doc/rust/FRONTEND-SURVEY.md, "Decided (2026-11-09)"),
+the night-relevant four first, on `rust-props` from `rust-rf10b` at `c0f226f3b`.
+- RFP31 (a): `build-oracles` deletes the `.before.mir` dumps; the pack `rust-front-built` keeps the `.after.mir` files the judge reads
+  (each pass at its first phase, `rfr_judged`, in the key): 1,050 of 1,108 members, every kept member's digest unchanged, remade by
+  hand with rustc 1.99.1 (Alpine r0) and the helper at the pinned digest, pin `36526aa2...`; `records verify built` equal.
+- RFP36 (c), RFP40 (c): `run-built`'s batch (`arbace.rust.front.build-run`'s `batch`, `native-run`; the new `arbace.rust.front.ci-batch`
+  over `arbace.c.run`'s `read-unit` and `nodes`, nothing of C changed): one process for every program's pipeline, mono-check, codegen
+  and lowering, one for ci's node programs, cirun a program; the run control and mono-check's crossed control in the same runs.
+  Alternatives: ci's `nodes-list` (one file a program: the driver concatenated, rejected for changing the C read; extending it would
+  move C's keys), one process for both halves (rejected: ci must run evaluated from the checkout while the host's embedded copy differs,
+  `c_ci_fresh`, which would evaluate the rust half too).
+- RFP30 (a): the pass judge (`BUILD_PASS=SimplifyCfg-pre-optimizations build-check --records`) in the step, its 21 lines held in
+  `essential-known.txt` (recorded, `--record`), its crossed control `_control/pass/crossed`.
+- The step: 3 min 22 s (`--record`) and 3 min 38 s, from 8 min 36 s, the same summary lines but the 21 new ones, the five controls
+  differing, 0 stub calls; `steps.edn`'s summary 32 lines; `gate.crops check` 0 problems; `bin/gate --plan`: run rust-front-essential.
