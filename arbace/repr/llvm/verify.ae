@@ -1551,12 +1551,18 @@
   (arbace.repr.llvm.intr's port of matchIntrinsicType); a declaration in one of AutoUpgrade's old forms is upgraded, not
   checked."
   [^String nm fty]
+  (if-let [[_ f] (and (= 1 (count (remove #{'&} (nth fty 2)))) (re-find #"^llvm\.(ctlz|cttz)\." nm))]
+    ;; upgradeIntrinsicFunction1 (AutoUpgrade.cpp:1438): declared again as getOrInsertDeclaration(ctlz|cttz, T): (T, i1) -> T,
+    ;; checked as such (LLS39: over a non-integer T the new declaration's signature is wrong)
+    (let [t (first (nth fty 2))]
+      (when-let [m (intr/signature-error (intr/lookup (str "llvm." f)) (list 'fn t [t 'i1]) tstr resolve-type)]
+        (verr :verifier/intrinsic-signature m :decl)))
   (when-let [e (intr/lookup nm)]
     (when-not (or (old-form-decl? nm fty)
                   ;; AutoUpgrade rewrites many old x86 intrinsics' signatures (UpgradeX86IntrinsicCall): not judged here
                   (str/starts-with? nm "llvm.x86."))
       (when-let [m (intr/signature-error e fty tstr resolve-type)]
-        (verr :verifier/intrinsic-signature m :decl)))))
+        (verr :verifier/intrinsic-signature m :decl))))))
 
 (defn- callee-of [b] (let [[h ps] (split-inst b)] (when ('#{call invoke callbr} h) (second ps))))
 
@@ -2497,7 +2503,9 @@
             (verr :verifier/md-flags "'Linker Options' named metadata no longer supported" :none))
           (let [bv0 (.longValue ^java.math.BigInteger (md-int-val b))
                 ;; AutoUpgrade: an `error` flag of these names is a `min` (`max`) one
-                bv (cond (and (= bv0 1) (#{"PIC Level" "sign-return-address" "sign-return-address-all" "sign-return-address-with-bkey" "branch-target-enforcement"} (md-str id))) 8
+                ;; (AutoUpgrade.cpp:6519-6555: PIC Level's Error and Max, branch-target-enforcement's and sign-return-address*'s Error)
+                bv (cond (and (#{1 7} bv0) (= (md-str id) "PIC Level")) 8
+                         (and (= bv0 1) (some-> (md-str id) (as-> i (or (= i "branch-target-enforcement") (str/starts-with? i "sign-return-address"))))) 8
                          (and (= bv0 1) (= (md-str id) "PIE Level")) 7
                          :else bv0)]
             (when-not (<= 1 bv 8) (verr :verifier/md-flags "invalid behavior operand in module flag (unexpected constant)" [:mdv b]))
@@ -2508,20 +2516,23 @@
                   (when-not (md-str (first pr)) (verr :verifier/md-flags "invalid value for 'require' module flag (first value operand should be a string)" [:mdv v])))
               (5 6) (when-not (md-ops v) (verr :verifier/md-flags "invalid value for 'append'-type module flag (expected a metadata node)" [:mdv v]))
               7 (when-not (md-int-op? v) (verr :verifier/md-flags "invalid value for 'max' module flag (expected constant integer)" [:mdv v]))
-              8 (when-not (and (md-int-op? v) (not (neg? (.signum ^java.math.BigInteger (md-int-val v))))) (verr :verifier/md-flags "invalid value for 'min' module flag (expected constant non-negative integer)" [:mdv v]))
+              ;; APInt::isNonNegative: the sign bit of the value's own width (i1 true is negative)
+              8 (when-not (and (md-int-op? v) (let [x (md-int-val v) w (int-bits (norm-type (first v)))] (not (.testBit (bi-mod x w) (int (dec w)))))) (verr :verifier/md-flags "invalid value for 'min' module flag (expected constant non-negative integer)" [:mdv v]))
               nil)
             (when (and (#{"wchar_size" "SemanticInterposition"} (md-str id)) (not (md-int-op? v)))
               (verr :verifier/md-flags (str (md-str id) " metadata requires constant integer argument") :none))
             (when (and (not= bv 3) (.containsKey ids (md-str id)))
               (verr :verifier/md-flags "module flag identifiers must be unique (or of 'require' type)" [:mdv id]))
-            (when (not= bv 3) (.put ids (md-str id) true))))))
+            (when (not= bv 3) (.putIfAbsent ids (md-str id) v))))))
       (when (> (.size *errs*) n) (.add bad f))))
     (doseq [f flags :when (not (.contains bad f))]
      (visiting
       (let [[b _ v] (md-ops f)]
         (when (= 3 (.longValue ^java.math.BigInteger (md-int-val b)))
           (let [[rid rv] (md-ops v)]
-            (when-not (.containsKey ids (md-str rid)) (verr :verifier/md-flags "invalid requirement on flag, flag is not present in module" [:mdv rid])))))))))
+            ;; V:1888-1902: the flag present, then its value the required one (the same uniqued metadata)
+            (cond (not (.containsKey ids (md-str rid))) (verr :verifier/md-flags "invalid requirement on flag, flag is not present in module" [:mdv rid])
+                  (not= (.get ids (md-str rid)) rv) (verr :verifier/md-flags "invalid requirement on flag, flag does not have the required value" [:mdv rid])))))))))
 
 (defn- check-errno-tbaa [forms]
   (doseq [f forms :when (and (= (first f) 'llvm/named-meta) (= (second f) '!llvm.errno.tbaa))]
