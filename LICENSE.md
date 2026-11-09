@@ -867,7 +867,14 @@ covers what.
   the rest of those files Arbace's own; `java/lang/invoke/DirectMethodHandle.java`, `MethodHandleImpl.java`,
   `ProxyLambdaMetafactory.java` (jrt's own, in place of jdk26u's), `jdk/internal/jrt/Invokers.java`, the analyzer's
   rewrite in `arbace/classes/analyze.ae` and `go/arbace/jrt/natives.ae`'s two natives are Arbace's own, under the Eclipse
-  Public License 1.0.
+  Public License 1.0. StringConcatFactory (JCS353 (a), doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS350, JCS351,
+  JCS353"; recorded by the rule of B7): `overlay/jdk/java.base/java/lang/invoke/StringConcatFactory.java` holds jdk26u's text
+  (https://github.com/openjdk/jdk26u at `baf63fb`, `src/java.base/share/classes/java/lang/invoke/StringConcatFactory.java`) of
+  the members its header names (makeConcat, makeConcatWithConstants' checks and messages, parseRecipe, argumentMismatch,
+  constantMismatch, makeSimpleConcat, unaryConcat) and of `StringConcatHelper.stringOf`: Copyright (c) Oracle and/or its
+  affiliates, under the GNU General Public License version 2 with the Classpath Exception (text below); the adapters in
+  place of the hidden class and the rest of the file, and `test/jrt/scf-diff/`, are Arbace's own, under the Eclipse Public
+  License 1.0.
 - java.lang.reflect.Parameter and Runtime.Version.parse (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS280 (a)",
   "As built: JCS304 (b), JCS293"; recorded by the rule of B7): the derived overlay `overlay/jdk/java.base/java/lang/reflect/Parameter.java`
   is jdk26u's file of the same path (https://github.com/openjdk/jdk26u at `baf63fb`, `src/java.base/share/classes/`) with the
