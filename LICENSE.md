@@ -909,6 +909,13 @@ covers what.
   the MIT License or the Apache License 2.0 at the licensee's option, taken here under the MIT License ("Rust (rustc 1.99.1): MIT
   License or Apache License 2.0" below). The judge `mono_check.ae` and `test/rust/front/std-crates.edn` are Arbace's own, under the
   Eclipse Public License 1.0.
+- RF11's first slice (2026-11-09, doc/rust/FRONTEND-SURVEY.md, "As built: RF11 (first slice)"), from rustc 1.99.1, the same revision
+  and sources and under the same terms (MIT): `mono.ae`'s `layout_of_union` after `compiler/rustc_abi/src/layout.rs` (with
+  `BackendRepr::to_union`, `compiler/rustc_abi/src/lib.rs`), `arbace/rust/back/codegen.ae`'s Subslice places after
+  `compiler/rustc_codegen_ssa/src/mir/place.rs` (`project_subslice`) and its PointerExposeProvenance and PointerWithExposedProvenance
+  casts after `compiler/rustc_codegen_ssa/src/mir/rvalue.rs`; `build_run.ae`'s values of core's integer constants follow
+  `library/core/src/num/{int_macros,uint_macros}.rs`' definitions of MIN, MAX and BITS. `eval-promoted` and the rsi switch
+  (`bin/rust-front rsi-build`, `bin/lib/rsi/check`'s `--front own`) are Arbace's own, under the Eclipse Public License 1.0.
 - The proposals RFP28-RFP41 (2026-11-09, doc/rust/FRONTEND-SURVEY.md, "As built: the rest of RFP28-RFP41"), from rustc 1.99.1, the same
   revision and sources and under the same terms (MIT): `build.ae`'s byte-array static constants after `compiler/rustc_middle/src/ty/
   print/pretty.rs` (`pretty_print_const_scalar_ptr`) and a closure's fake reads after `compiler/rustc_mir_build/src/builder/expr/

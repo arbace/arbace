@@ -14,12 +14,16 @@
 # check-aot-linux-amd64.edn). Each program's seconds (IR, lowering, ci's build [+ translation], run) in WORK/CORPUS/times.tsv and,
 # with --record, test/rust/check{,-aot}-times-linux-amd64.edn (GT8's subsets, GTS205).
 #
-# Usage: bin/rsi check [--aot] [--corpus samples,ui] [--set SET] [--only LIST] [--sample N [--offset K]] [--record] [--judge]
+# Usage: bin/rsi check [--aot] [--front own] [--corpus samples,ui] [--set SET] [--only LIST] [--sample N [--offset K]] [--record] [--judge]
 #   --corpus   samples (test/rust/eval/), synthetic (test/rust/synthetic/, RE5), ui (the UI suite's run programs, bin/rsi list); default samples,synthetic,ui
 #   --set      the UI programs' set (bin/rsi list --set: all, run, threads, process, net; default all)
 #   --only     a file of ids (# comments) to check alone (GT8's lists)
 #   --sample   every Nth program of each corpus's list, from the Kth (--offset)
 #   --essential  the nightly's essential programs alone (test/rust/essential.txt: --only that file, --corpus samples,synthetic)
+#   --front own  RF11 (doc/rust/FRONTEND-SURVEY.md, "As built: RF11 (first slice)"): the samples' and the synthetic corpus's
+#              programs the front end builds (bin/rust-front rsi-build: every body of the program's own from Arbace's MIR, the
+#              module through codegen and the lowering) take Arbace's codegen unit in place of the pack's x.ll (the allocator
+#              shim and std's lowered library as before); the rest the pack's; WORK/CORPUS/front.tsv says which and why
 #   --record   the record and the times rewritten for the corpora run (not with --only or --sample)
 #   --judge    the last run judged again (nothing run)
 #   RSI_BATCH (default 0, all in one): the programs of one builder process (RES53 (a), the light tier's memory);
@@ -33,11 +37,12 @@ root=$(cd "$(dirname "$0")/../../.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
 . "$root/bin/lib/tools.bash"
 cd "$root"
-corpora=samples,synthetic,ui set=all only= sample=1 offset=0 record= judge= aot= make_pack=
+corpora=samples,synthetic,ui set=all only= sample=1 offset=0 record= judge= aot= make_pack= front=pack
 while [ $# -gt 0 ]; do
   case $1 in
     --make-pack) make_pack=1; shift ;;
     --aot) aot=1; shift ;;
+    --front) front=$2; shift 2; case $front in own|pack) ;; *) echo "bin/rsi check: --front own or pack, not $front" >&2; exit 2 ;; esac ;;
     --corpus) corpora=$2; shift 2 ;;
     --set) set=$2; shift 2 ;;
     --only) only=$(cd "$(dirname "$2")" && pwd)/$(basename "$2"); shift 2 ;;
@@ -46,10 +51,12 @@ while [ $# -gt 0 ]; do
     --record) record=1; shift ;;
     --judge) judge=1; shift ;;
     --essential) only=$root/test/rust/essential.txt; corpora=samples,synthetic; shift ;;
-    *) sed -n '17,32p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+    *) sed -n '17,36p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
   esac
 done
 level=eval; [ -n "$aot" ] && level=aot
+# RF11: the committed records are the packs' runs until the user decides the switch's default (FRONTEND-SURVEY, RFP42)
+[ "$front" = own ] && [ -n "$record" ] && { echo "bin/rsi check: --front own runs are judged against the record, not --record'ed (RFP42)" >&2; exit 2; }
 # the programs' IR (rust-90, rsi's independence): from the packs by default (RSI_IR=pack: test/rust/ir/CORPUS.tar.xz, or for the
 # UI corpus RSI_IR_PACKS/ui.tar.xz, each file pinned by test/rust/ir/CORPUS.sha256; made by hand by bin/rsi ir-pack, the oracle
 # tier), so that the check runs no rustc; RSI_IR=rustc: the oracle's IR made afresh by rustc, as before
@@ -91,6 +98,10 @@ ir1() { # N CORPUS: the plan's Nth program's IR (bin/lib/rsi/wrap-ir) in WORK/fi
   if [ "$irmode" = pack ]; then
     if [ -d "$work/packs/$2/$k" ]; then cp -p "$work/packs/$2/$k"/* "$d/"
     else printf 'pack\tno IR in the pack test/rust/ir/%s (bin/rsi ir-pack)\n' "$2" > "$d/x.refused"; echo 1 > "$d/ir.status"; fi
+    # RF11's switch (--front own): the program's codegen unit from Arbace's MIR where bin/rust-front rsi-build built it
+    if [ "$front" = own ] && [ -f "$work/front/$2/front.tsv" ] && [ "$(awk -F'\t' -v id="$id" '$1 == id {print $2; exit}' "$work/front/$2/front.tsv")" = own ]; then
+      cp "$work/front/$2/$(basename "$id" .rs)/$(basename "$id" .rs).ours.ll" "$d/x.ll" && echo own > "$d/front"
+    fi
   else
     RSI_LOW=$d RUN_PROGRAM_ID=$id plan_rustc "$src" "$sb/sysroot" "$d/b/t" "$root/bin/lib/rsi/wrap-ir" > "$d/ir.log" 2>&1; echo $? > "$d/ir.status"
   fi
@@ -125,7 +136,7 @@ gobuild() { # the shard's executable (RSI_HEAVY: the host's heavy-slot wrapper, 
   (cd "$mod" && ${RSI_HEAVY:-} env CGO_ENABLED=0 GOFLAGS=-mod=mod GOCACHE=${RSI_GOCACHE:-$root/.tmp/gocache} GOMAXPROCS=4 GOMEMLIMIT=4GiB \
      "$go" build -p "$gop" -trimpath -o "$@")
 }
-export -f budget ir1 run1 gobuild; export work root srcroot sb irmode
+export -f budget ir1 run1 gobuild; export work root srcroot sb irmode front
 # the prebuilt libraries' cache (RES34, RES40 (a): arbace.c.aotlib/cache-root's rule): CI_AOT_LIB, else the main checkout's
 # .tmp/ci-aot-lib (a linked worktree's root ends in /.tmp/worktrees/NAME), exported so that the builder's processes take the same
 export CI_AOT_LIB=${CI_AOT_LIB:-${root%%/.tmp/worktrees/*}/.tmp/ci-aot-lib}
@@ -201,6 +212,16 @@ if [ -z "$judge" ]; then
     echo "rsi check ($level): $id: $n programs" >&2
     # the oracle's IR: from the corpus's pack, or made by rustc (RSI_IR=rustc, --make-pack)
     if [ "$irmode" = pack ]; then pack_open "$id" || exit 1; fi
+    if [ "$front" = own ]; then
+      case $id in
+        samples|synthetic)
+          rm -rf "$work/front/$id"; mkdir -p "$work/front/$id"
+          RF11_WORK=$work/front/$id "$root/bin/rust-front" rsi-build $(xargs -n1 basename < "$d/ids.txt" | sed 's/\.rs$//') > "$work/front/$id/rsi-build.log" 2>&1
+          tail -1 "$work/front/$id/rsi-build.log" >&2
+          cp "$work/front/$id/front.tsv" "$d/front.tsv" 2>"$TMPDIR/rsi-front.err" || { echo "bin/rsi check: --front own: rsi-build wrote no front.tsv ($work/front/$id/rsi-build.log)" >&2; exit 1; } ;;
+        *) echo "rsi check: --front own: $id's programs from the packs (the front end's records cover the samples and the synthetic corpus)" >&2 ;;
+      esac
+    fi
     seq 1 "$n" | xargs -P "$jobs" -I{} nice bash -c 'ir1 "$1" "$2"' _ {} "$id"
     if [ -n "$make_pack" ]; then pack_make "$id"; continue; fi
     # the build list: ID DIR (DIR - when the IR is missing), and for AOT the package
@@ -288,4 +309,8 @@ if [ -z "$judge" ]; then
   done
 fi
 [ -n "$make_pack" ] && exit 0
+# RF11: the cases each corpus ran from Arbace's MIR (the eval cell's independence counts them, case by case)
+for id in "${ids[@]}"; do
+  [ -f "$work/$id/front.tsv" ] && echo "rsi check: front own: $id: $(awk -F'\t' '$2 == "own"' "$work/$id/front.tsv" | wc -l) of $(grep -c . "$work/$id/front.tsv") programs' codegen units from Arbace's MIR ($work/$id/front.tsv)" >&2
+done
 arbace_tool -m arbace.rust.check run-judge "$work" "$level" "${record:+--record}" "${ids[@]}"

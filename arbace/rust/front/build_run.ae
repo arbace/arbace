@@ -65,6 +65,66 @@
                b (remove str/blank? (str/split (str/trim hex) #"\s+"))]
            (if (re-matches #"[0-9a-f]{2}" b) (Integer/parseInt b 16) (throw (ex-info (str "allocation " id " holds a pointer") {})))))))
 
+(defn std-const-value
+  "RF11: a std constant our bodies name unevaluated, evaluated as rustc's codegen evaluates it (eval_mir_constant) when it is
+  one of core's integer types' associated constants whose value follows from the type alone (library/core/src/num/
+  int_macros.rs and uint_macros.rs: MIN = !MAX, MAX = (<uN>::MAX >> 1) as iN or !0, BITS = <uN>::BITS): (scalar BITS SIZE),
+  else nil (the constant is the CTFE's, RF10's slice 5)"
+  [text]
+  (when-let [[_ t nm] (re-matches #"const core::num::<impl ([iu](?:8|16|32|64|128|size))>::(MIN|MAX|BITS)" text)]
+    (let [n (if (str/ends-with? t "size") 64 (parse-long (subs t 1)))
+          signed? (str/starts-with? t "i")
+          m (fn [k] (reduce * 1N (repeat k 2N)))]
+      (case nm
+        "BITS" (list 'scalar n 4)
+        "MAX" (list 'scalar (bigint (dec (m (if signed? (dec n) n)))) (quot n 8))
+        "MIN" (list 'scalar (if signed? (m (dec n)) 0) (quot n 8))))))
+
+(defn- le-bytes [v n] (let [v (biginteger (bigint v))] (vec (for [i (range n)] (.intValue (.and (.shiftRight v (int (* 8 i))) (biginteger 255)))))))
+
+(defn- scalar-align [size] (cond (>= size 16) 16 (>= size 8) 8 :else size))
+
+(defn eval-promoted
+  "RF11 (RF10's slice 5's first part): a promoted constant's body evaluated as rustc's CTFE evaluates it into its allocation, for
+  the promoted bodies of straight-line assignments of scalar constants (std's integer constants by std-const-value), copies of
+  locals and arrays of them, whose _0 borrows a local: {:bytes [B...] :align A}; else an ex-info (the CTFE's: the rest of
+  slice 5)"
+  [pb]
+  (let [env (atom {}) result (atom nil)
+        no (fn [what x] (throw (ex-info (str "promoted: " what) {:x x})))
+        loc-of (fn [p] (if (and (seq? p) (= 'place (first p)) (= 2 (count p))) (second p) (no "a projected place" p)))
+        operand (fn [o]
+                  (case (first o)
+                    const (let [[_ text _ v] o
+                                v (if (and (seq? v) (= 'unevaluated (first v))) (or (std-const-value text) (no "an unevaluated constant" o)) v)]
+                            (if (and (seq? v) (= 'scalar (first v)))
+                              (let [[_ bits size] v] {:bytes (le-bytes bits size) :align (scalar-align size)})
+                              (no "a constant's value" o)))
+                    (copy move) (or (get @env (loc-of (second o))) (no "a local not assigned" o))
+                    (no "an operand" o)))]
+    (loop [bi 0 seen #{}]
+      (when (seen bi) (no "a loop" bi))
+      (let [blk (nth (:blocks pb) bi)]
+        (doseq [st (:stmts blk)]
+          (case (first st)
+            (storage-live storage-dead nop) nil
+            assign (let [[_ p rv] st l (loc-of p)]
+                     (case (first rv)
+                       use (swap! env assoc l (operand (second rv)))
+                       aggregate (let [[_ kind ops] rv]
+                                   (when-not (and (seq? kind) (= 'array (first kind))) (no "an aggregate but an array" kind))
+                                   (let [vs (map operand ops)]
+                                     (swap! env assoc l {:bytes (vec (mapcat :bytes vs)) :align (if (seq vs) (apply max (map :align vs)) 1)})))
+                       ref (if (= l 0) (reset! result (or (get @env (loc-of (nth rv 2))) (no "a borrow of a local not assigned" rv)))
+                               (no "a borrow but _0's" rv))
+                       (no "an rvalue" rv)))
+            (no "a statement" st)))
+        (let [t (:term blk)]
+          (case (first t)
+            return (or @result (no "no borrow in _0" pb))
+            goto (recur (second t) (conj seen bi))
+            (no "a terminator" t)))))))
+
 (defn- runtime-body
   "Our built body made the runtime body codegen takes, with the record's facts; a static's pointer (static-ptr ID) the record's
   static (its symbol, by the static's name) as rustc's optimized MIR gives it: (ptr allocS<ID> 0 8) with that allocation's data"
@@ -90,10 +150,27 @@
                            (swap! static-data conj [a {:kind :memory :align 1 :mutable false :bytes (apply str (map #(format "%02x" %) bs))
                                                        :init (apply str (repeat (count bs) "1")) :relocs []}])
                            (if (= 'raw-str (first x)) (list 'slice (symbol a) (count bs)) (list 'ptr (symbol a) 0 8)))
-                         x)))
+                         ;; RF11: our promoted constants (PromoteTemps' bodies) evaluated into their allocations (eval-promoted)
+                         (if (and (seq? x) (= 'const (first x)) (seq? (nth x 3 nil)) (= 'unevaluated (first (nth x 3))) (some? (nth (nth x 3) 3 nil)))
+                           (let [idx (nth (nth x 3) 3)
+                                 pb (or (get (:promoted-bodies ours) idx) (throw (ex-info (str "no promoted body " idx) {})))
+                                 {:keys [bytes align]} (try (eval-promoted pb)
+                                                            (catch Throwable e (when-let [f (:const! facts)] (f false)) (throw e)))
+                                 a (str "allocP" idx)]
+                             (when-let [f (:const! facts)] (f true))
+                             (swap! static-data conj [a {:kind :memory :align align :mutable false :bytes (apply str (map #(format "%02x" %) bytes))
+                                                         :init (apply str (repeat (count bytes) "1")) :relocs []}])
+                             (apply list (concat (take 3 x) [(list 'ptr (symbol a) 0 8)] (drop 4 x))))
+                           x))))
         unwind (fn [u] (if abort? '(unreachable) u))
         loc (list 'loc "?" 0 0)
         fix-ty (fn [x] (if (and (seq? x) (= 'ty (first x)) (:tys facts)) (get (:tys facts) (second x) x) x))
+        ;; RF11: std's integer constants (std-const-value); another unevaluated named constant is left (codegen refuses it)
+        fix-uneval (fn [x] (if (and (seq? x) (= 'const (first x)) (seq? (nth x 3 nil)) (= 'unevaluated (first (nth x 3))) (nil? (nth (nth x 3) 3 nil)))
+                             (if-let [v (std-const-value (second x))]
+                               (do (when-let [f (:const! facts)] (f true)) (apply list (concat (take 3 x) [v] (drop 4 x))))
+                               (do (when-let [f (:const! facts)] (f false)) x))
+                             x))
         fix-const (fn [x] (if (and (seq? x) (= 'const (first x)) (get (:fsym facts) (second x)) (not (some #{:fn-symbol} x)))
                             (concat x [:fn-symbol (get (:fsym facts) (second x))])
                             x))
@@ -107,12 +184,14 @@
                                       (or (get (:callee facts) (second f))
                                           (throw (ex-info (str "no callee in the record for " (second f)) {}))))]
                         (list 'call f args dest target (unwind u) cal l 0))
-                 assert (let [[_ c e m target u] t] (list 'assert c e m target (unwind u) loc 0))
+                 assert (let [[_ c e m target u] t
+                              t (if-let [sp (get (:assert-spans ours) [c e m])] (vary-meta t assoc :assert-span sp) t)]
+                          (list 'assert c e m target (unwind u) (if-let [al (:assert-loc facts)] (al t) loc) 0))
                  drop (let [[_ p target u r d] t] (list 'drop p target (unwind u) r d nil))
                  t))
         keep-stmt? (fn [s] (not (or (#{'fake-read 'place-mention} (first s))
                                     (and (= 'raw (first s)) (str/starts-with? (str (second s)) "AscribeUserType")))))]
-    (-> (walk (comp fix-static fix-const fix-ty)
+    (-> (walk (comp fix-uneval fix-static fix-const fix-ty)
           (merge (if (:header facts) ((:header facts) rec) (select-keys rec [:def :def-id :phase :instance :symbol :name :kind :track-caller :spread-arg]))
                  {:args (:args ours) :ret (:ret ours)
                   :locals (:locals ours)
@@ -147,6 +226,11 @@
             al (max (second a) (second b))]
         {:size (* al (quot (+ off (first b) (dec al)) al)) :align al :abi (list 'pair (nth a 2) (nth b 2) off) :fields [0 off] :variants '(single 0) :uninhabited false})
       :else nil)))
+
+(def ^:dynamic *loc-file*
+  "RF11: the file name a caller location carries (rustc's: the path the program was given by, rsi's plan's relative to the
+  checkout); nil, the root file's canonical path (run-built's samples, whose records name that path)"
+  nil)
 
 (declare native-main pack-main)
 
@@ -220,8 +304,22 @@
             (fn [bodies]
               (let [facts (mono/program-facts n bodies)
                     _ (reset! judged (vec (for [[rn rforms] judge] [rn (mc/judge n bodies facts (mc/record-entries rforms) rforms)])))
-                    root-file build/*root-file*
-                    ours (into {} (for [[nm b err] bodies] [nm [b err]]))
+                    root-file (or *loc-file* build/*root-file*)
+                    ;; RF11: with BUILD_PASS (the batch's SimplifyCfg-pre-optimizations), each body after the ported passes to
+                    ;; runtime MIR (arbace.rust.front.passes: PromoteTemps, ElaborateDrops, ElaborateBoxDerefs, ...), as codegen
+                    ;; reads rustc's; a pass's error is the body's
+                    ours (into {} (for [[nm b err] bodies]
+                                    [nm (if-let [st (:stages b)]
+                                          (let [last-pass (last (filter #(contains? st %) (map first @(requiring-resolve 'arbace.rust.front.passes/pipeline))))
+                                                r (get-in st [last-pass ((requiring-resolve 'arbace.rust.front.passes/body-key) b)])
+                                                pre (str ((requiring-resolve 'arbace.rust.front.passes/body-key) b) "::promoted[")
+                                                pbs (into {} (for [[k pb] (get st last-pass) :when (and (str/starts-with? k pre) (not (:error pb)))] [(:promoted pb) pb]))
+                                                ;; the Assert terminators' spans (build's :assert-span metadata) by their condition, expected value
+                                                ;; and message, which the passes keep (they renumber blocks, not these locals) but not the metadata
+                                                aspans (into {} (for [blk (:blocks b) :let [t (:term blk)] :when (and (seq? t) (= 'assert (first t)) (:assert-span (meta t)))]
+                                                                  [(vec (take 3 (rest t))) (:assert-span (meta t))]))]
+                                            (if (or (nil? r) (:error r)) [nil (str "the passes: " (or (:error r) "no body"))] [(assoc r :name (:name b) :promoted-bodies pbs :assert-spans aspans) err]))
+                                          [b err])]))
                     native-call (fn [f]
                                   (let [txt (second f) c (get (:callees facts) txt)
                                         sp (:call-span (meta f))
@@ -240,7 +338,12 @@
                                (if (and (map? o) (not (mono/error? o)))
                                  (do (fact! :symbols true) (assoc (dissoc o :name) :phase "optimized" :name (:name rec)))
                                  (do (fact! :symbols false) (select-keys rec [:def :def-id :phase :instance :symbol :name :kind :track-caller :spread-arg])))))
-                    nf {:fsym fsym :statics statics :native-call native-call :header header}
+                    ;; RF11: an Assert's location from its expression's span (build's :assert-span), as a call's
+                    assert-loc (fn [t] (let [sp (:assert-span (meta t))]
+                                         (if (vector? sp) (do (fact! :locs true) (list 'loc root-file (first sp) (second sp)))
+                                             (do (fact! :locs false) (list 'loc "?" 0 0)))))
+                    nf {:fsym fsym :statics statics :native-call native-call :header header :assert-loc assert-loc
+                        :const! (fn [native?] (fact! :consts native?))}
                     local? (fn [b] (str/starts-with? (str (:def-id b)) "DefId(0:"))
                     ext-syms (set (map :symbol (:ext-items facts)))
                     rec-by-name (into {} (for [r rec-bodies] [(:name r) r]))
@@ -316,10 +419,15 @@
         r (lower-file (read-ll ll) (.getName (File. out)))]
     (if (:refused r) (str "refused (" (name (:refused r)) "): " (:message r)) (do (spit-latin1 out (:c r)) nil))))
 
+(def ^:dynamic *std-linked*
+  "RF11: the module is linked with std's lowered library (rsi check's ci leg): the functions it calls but does not define are
+  declared, as rustc's codegen unit declares them, not stubbed to abort (run-built's no_std programs)"
+  false)
+
 (defn- emit-and-lower
   "The module at DIR/NAME.mono.edn through codegen and rsi's lowering: nil, or why not"
   [dir n]
-  (let [[st what] ((requiring-resolve 'arbace.rust.back.check/emit-mono) dir n false)]
+  (let [[st what] ((requiring-resolve 'arbace.rust.back.check/emit-mono) dir n *std-linked*)]
     (if (not= st :ok)
       (str "codegen refused (" (name st) " " what ")")
       (when-let [why (lower-c dir n)] (str "rsi's lowering refused (" why ")")))))
@@ -338,18 +446,22 @@
                        (case (first as)
                          "--control" (recur (nnext as) (assoc o :control (second as)))
                          "--mono-control" (recur (drop 3 as) (assoc o :mono-control [(second as) (nth as 2)]))
+                         "--std" (recur (next as) (assoc o :std true))
                          [o as]))
-        progs (for [s specs] (let [[n a] (str/split s #":")] [n (= a "abort")]))
+        ;; RF11: NAME[:abort][=REL], REL the path caller locations name (rsi's plan's, relative to the checkout)
+        progs (for [s specs] (let [[s rel] (str/split s #"=" 2) [n a] (str/split s #":")] [n (= a "abort") rel]))
         rec-file (fn [n] (str work "/" n "/" n ".record.edn"))
         [ca cb] (:mono-control opts)
         mono-lines (atom []) total (atom {}) ctl-lines (atom []) ctl-total (atom {}) all-ok (atom true)
         verbose (System/getenv "MONO_VERBOSE")]
-    (doseq [[n abort?] progs]
+    (doseq [[n abort? rel] progs]
+      (binding [*loc-file* rel *std-linked* (boolean (:std opts)) bc/*file-name* rel mono/*unknown-refused* (boolean (:std opts))]
       (let [dir (str work "/" n)
             own (read-forms (slurp (rec-file n)))
             other (cond (= n ca) cb (= n cb) ca)
             judge (cond-> [[n own]] other (conj [other (read-forms (slurp (rec-file other)))]))
-            r (try (native-run crates front-dir (rec-file n) n abort? judge) (catch Throwable e {:error (str e)}))]
+            r (try (native-run crates front-dir (rec-file n) n abort? judge)
+                   (catch Throwable e (when (System/getenv "RF11_TRACE") (.printStackTrace e)) {:error (str e)}))]
         (if (:error r)
           (println (str "run-built: " n ": the pipeline failed (" (:error r) ")"))
           (let [_ (spit (str dir "/" n ".mono.edn") (with-out-str (doseq [f (:forms r)] (prn f))))
@@ -371,7 +483,7 @@
                     _ (.mkdirs (File. cdir))
                     c (binding [*control* true] (native-run crates front-dir (rec-file n) n abort? nil))]
                 (spit (str cdir "/" n ".mono.edn") (with-out-str (doseq [f (:forms c)] (prn f))))
-                (println (str "run-built: _control/" n ": " (if-let [why (emit-and-lower cdir n)] why "ready")))))))))
+                (println (str "run-built: _control/" n ": " (if-let [why (emit-and-lower cdir n)] why "ready"))))))))))
     (spit (str work "/mono.log")
           (str (str/join "\n" (concat @mono-lines [(str "mono-check: " (count progs) " programs: " (tally-line @total " of "))])) "\n"))
     (when ca
