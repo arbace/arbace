@@ -106,6 +106,34 @@ core_check() {
   if [ "${1:-}" = --records ]; then shift; od=$(core_records_stage) || return 1; fi
   [ -f "$od/index.tsv" ] || { echo "core-check: no oracle (bin/rust-front core-oracle, by hand with rustc; or --records)" >&2; return 1; }
   if [ $# -eq 0 ]; then set -- $(sed "s|^|$lib/core/src/|" "$root/test/rust/front/core-modules.txt"); fi
-  cd "$root" && GOMEMLIMIT=${GOMEMLIMIT:-1800MiB} arbace_tool -m arbace.rust.front.core-check "$lib" --check "$fd" "$od" "$work/core" "$m" "$@" 2>&1 |
+  cd "$root" && GOMEMLIMIT=${GOMEMLIMIT:-1800MiB} arbace_tool -m arbace.rust.front.core-check "$lib" --check "$fd" "$od" "${CORE_CACHE_DIR:-$work/core}" "$m" "$@" 2>&1 |
     grep --line-buffered -v -E '^Reflection warning|recur arg|^Auto-boxing'
+}
+
+# RF12-P1 (a): the essential step rust-core-essential: core-check --records over test/rust/front/core-essential.txt (no helper, no
+# rustc: stubs first on PATH, their log empty), its per-module lines and total held to test/rust/front/core-essential-known.txt
+# (--record rewrites it, by hand), the crossed control (an equal body's text against another body's rustc text) differing
+core_essential() {
+  local rec=0 ess=$work/core-essential stubs st=0 lib known=$root/test/rust/front/core-essential-known.txt t calls
+  [ "${1:-}" = --record ] && rec=1
+  mkdir -p "$ess"; stubs=$ess/stubs; mkdir -p "$stubs"
+  for t in rustc rustdoc cargo gcc cc clang; do printf '#!/bin/sh\necho "stub $0 called" >> "%s/stubs.log"\nexit 99\n' "$stubs" > "$stubs/$t"; chmod +x "$stubs/$t"; done
+  : > "$stubs/stubs.log"
+  lib=$(core_lib) || return 1
+  # its own caches, made afresh (core's index from the sources, no native interface of another run)
+  rm -rf "$ess/cache"; mkdir -p "$ess/cache"
+  # shellcheck disable=SC2046
+  CORE_CACHE_DIR=$ess/cache PATH=$stubs:$PATH core_check --records $(sed "s|^|$lib/core/src/|" "$root/test/rust/front/core-essential.txt") > "$ess/check.log" 2>&1 ||
+    { echo "rust-core essential: FAIL: core-check exited ($ess/check.log)"; st=1; }
+  grep -E '^core-check: (core::|total)' "$ess/check.log" > "$ess/summary.txt"
+  cat "$ess/summary.txt"
+  if grep -q '^core-check: control .*differs, as it must' "$ess/check.log"; then echo "rust-core essential: control: differs, as it must"
+  else echo "rust-core essential: FAIL: the crossed control did not differ ($ess/check.log)"; st=1; fi
+  calls=$(wc -l < "$stubs/stubs.log")
+  [ "$calls" = 0 ] || { echo "rust-core essential: FAIL: $calls calls of a stubbed toolchain ($stubs/stubs.log)"; st=1; }
+  if [ $rec = 1 ]; then cp "$ess/summary.txt" "$known"; echo "rust-core essential: recorded $known"
+  elif ! diff "$known" "$ess/summary.txt" > "$ess/known.diff"; then
+    echo "rust-core essential: FAIL: the summary differs from $known:"; head -20 "$ess/known.diff"; st=1
+  else echo "rust-core essential: the summary is test/rust/front/core-essential-known.txt's"; fi
+  return $st
 }

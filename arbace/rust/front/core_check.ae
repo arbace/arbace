@@ -378,6 +378,8 @@
 (def ^:private const-kind? (fn [d] (let [k (str (:kind d))] (and (or (str/starts-with? k "Const") (str/starts-with? k "Static") (str/starts-with? k "AssocConst"))
                                                                   (:expr (:node d))))))
 
+(def ^:dynamic *collect-only* false)   ; RF12-P2: the interface pass: each module collected, no body built
+
 (defn run-module
   "A module file's bodies, each [[name key] body-or-nil error-or-nil detail] handed to ON-BODY as it is built (its value
   kept): {:stages {stage :ok|message} :bodies [value ...]}"
@@ -410,7 +412,7 @@
                         (swap! stages assoc :collect :ok)
                         (reset! native (try (native-iface path si) (catch Throwable e (when (System/getenv "CORE_TRACE") (.printStackTrace e)) nil)))
                         (binding [build/*allocs* (atom {:next 1 :ids {}}) passes/*opaque-cache* (atom {}) passes/*panic-abort* false]
-                          (doseq [d (collect/defs)
+                          (doseq [d (if *collect-only* [] (collect/defs))
                                   :when (or (and (#{"Fn" "AssocFn"} (:kind d)) (:body (:node d)))
                                             (= "Closure" (:kind d)) (const-kind? d))]
                             (let [nm (try (build/mir-name d) (catch Throwable e (when (System/getenv "CORE_TRACE") (.printStackTrace e)) (str "?" (:id d))))]
@@ -485,14 +487,28 @@
             names (with-core-names (resolve/load-std-names std-file) (:names index))
             verbose (System/getenv "CORE_VERBOSE")
             totals (atom {})
+            control (atom nil)
             ;; core's native interface so far (this run's modules, and the last run's: native-iface.edn)
             native-file (File. (str cache-dir "/native-iface.edn"))
-            native-all (atom (if (and (.exists native-file) (not (System/getenv "CORE_NO_NATIVE"))) (read-string (slurp native-file)) {:fns {} :adts {}}))]
+            ;; RF12-P2 (b): core's interface in one collection pass over the files (CORE_IFACE_FILES: a file listing others,
+            ;; one a line, as core-modules.txt names them) before any body; CORE_IFACE=cache: the last run's native-iface.edn instead
+            native-all (atom (if (and (= "cache" (System/getenv "CORE_IFACE")) (.exists native-file)) (read-string (slurp native-file)) {:fns {} :adts {}}))
+            iface-files (if-let [l (System/getenv "CORE_IFACE_FILES")]
+                          (for [x (str/split-lines (slurp l)) :when (seq (str/trim x))] (str lib-dir "/core/src/" (str/trim x)))
+                          files)
+            _ (when-not (= "cache" (System/getenv "CORE_IFACE"))
+                (let [t0 (System/nanoTime)]
+                  (doseq [f iface-files :let [m (get mods (.getCanonicalPath (File. ^String f)))] :when m]
+                    (let [{:keys [native]} (binding [*collect-only* true] (run-module m table names std-file std (with-native-iface si @native-all) lib-dir identity))]
+                      (when native (swap! native-all #(merge-with merge % native)))))
+                  (println (format "core-check: the interface pass over %d files: %d functions, %d ADTs (%d s)" (count iface-files)
+                                   (count (:fns @native-all)) (count (:adts @native-all)) (quot (- (System/nanoTime) t0) 1000000000)))))]
         (doseq [f files :let [m (get mods (.getCanonicalPath (File. ^String f)))
                               si (with-native-iface si @native-all)]]
           (let [dump (System/getenv "CORE_DUMP")
                 on-body (fn [[[nm k] b err detail]]
-                          (let [w (get oracle k) t (when b (print-text b))]
+                          (let [w (get oracle k) t (when b (print-text b))
+                                _ (when (and t w (nil? @control) (= t (oracle-text w))) (reset! control [k t]))]
                             (when (and dump t) (.mkdirs (File. ^String dump)) (spit (str dump "/" k ".mir") t))
                             (if (nil? w) [:no-oracle nm k] (judge nm (oracle-text w) t err detail))))
                 {:keys [stages bodies native]} (run-module m table names std-file std si lib-dir on-body)
@@ -504,6 +520,11 @@
             (flush)
             (when verbose (doseq [r rows :when (not= :equal (first r))] (println "  " (pr-str r))))
             (println "  refusals:" (pr-str (frequencies (for [r rows :when (= :refused (first r))] (nth r 2)))))))
+        ;; the negative control (GTS81 (a)): an equal body's text judged against another body's rustc text, which must differ
+        (when-let [[k t] @control]
+          (let [other (first (filter #(not= k %) (sort (keys oracle))))
+                r (judge "control" (oracle-text (get oracle other)) t nil nil)]
+            (println "core-check: control (" k "against" other "):" (if (#{:equal :equal-alloc-ids :equal-allocs :equal-crate-hash} (first r)) "PASSED (a bug)" "differs, as it must"))))
         (spit native-file (pr-str @native-all))
         (println "core-check: native interface" (count (:fns @native-all)) "functions," (count (:adts @native-all)) "ADTs")
         (println "core-check: total" (pr-str @totals))))
