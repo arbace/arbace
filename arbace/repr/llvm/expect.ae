@@ -11,6 +11,7 @@
   kind that moves or renames a value knows the parser's first error from the mutant's own text order. Nothing here calls
   arbace.repr.llvm.verify's checks: its structural helpers alone (an instruction's operands and result type)."
   (:require [arbace.repr.llvm.verify :as vf]
+            [arbace.repr.llvm.intr :as intr]
             [arbace.repr.llvm.print :as pr]
             [arbace.string :as str]))
 
@@ -935,17 +936,136 @@
 (defn- di-kind [n] (when (and (seq? n) (symbol? (first n))) (subs (name (first n)) 1)))
 (defn- fname [k] (if (keyword? k) (name k) (str k)))
 
+(defn- md-ids-in [x]
+  (let [out (java.util.ArrayList.)]
+    (letfn [(walk [y] (cond (and (symbol? y) (nil? (namespace y)) (re-matches #"![0-9]+" (name y))) (.add out y)
+                            (or (seq? y) (vector? y)) (doseq [z y] (walk z))))]
+      (walk x))
+    out))
+
+(defn- stripped-reachable
+  "StripDebugInfo's leftovers (DebugInfo.cpp: llvm.dbg.* and llvm.gcov named metadata, !dbg attachments, debug records and the
+  old debug intrinsics' calls removed): the metadata ids still reachable from the rest, which opt's second verifyModule checks with
+  debug info errors hard."
+  [m]
+  (let [seen (java.util.HashSet.) work (java.util.ArrayDeque.) push! (fn [r] (when (.add seen r) (.add work r)))
+        nodes (into {} (keep #(when (= (first %) 'llvm/meta) [(second %) (nth % 2)]) m))
+        no-dbg (fn [md] (mapcat identity (remove #(= '!dbg (first %)) (partition 2 md))))]
+    (doseq [f m]
+      (case (first f)
+        llvm/named-meta (when-not (or (str/starts-with? (name (second f)) "!llvm.dbg.") (= (second f) '!llvm.gcov))
+                          (doseq [r (md-ids-in (nth f 2))] (push! r)))
+        (llvm/define llvm/declare)
+        (let [o (opts-of (drop 4 f))]
+          (doseq [r (md-ids-in (no-dbg (:md o)))] (push! r))
+          (when (= 'llvm/define (first f))
+            (doseq [bl (blocks-of f) x (items-of bl) :let [b (body x)]
+                    :when (not (dbg-record? x))
+                    :when (not (and (= 'call (first b)) (old-dbg? (nth b 2 nil))))]
+              (doseq [r (md-ids-in (no-dbg (:md (opts-of (drop 2 b)))))] (push! r))
+              (when (and ('#{call invoke callbr} (first b)) (vector? (nth b 3 nil)))
+                (doseq [r (md-ids-in (filter #(and (vector? %) (= 'metadata (first %))) (nth b 3)))] (push! r))))))
+        llvm/global (doseq [r (md-ids-in (no-dbg (:md (opts-of (drop 3 f)))))] (push! r))
+        nil))
+    (loop [] (when-let [r (.poll work)] (doseq [s (md-ids-in (get nodes r))] (push! s)) (recur)))
+    seen))
+
+(defn- hard-if-kept
+  "A debug verdict on the node `id`, made invalid when StripDebugInfo leaves the node reachable (opt's second verification)."
+  [m id e]
+  (if (and (= :debug (:verdict e)) (.contains ^java.util.Set (stripped-reachable m) id)) (assoc e :verdict :invalid) e))
+
+(defn- di-fields
+  "A debug info node's fields as a map, field name (a string) -> value."
+  [n]
+  (into {} (map (fn [[k v]] [(fname k) v]) (partition 2 (rest n)))))
+
+(def ^:private di-types #{"DIBasicType" "DIDerivedType" "DICompositeType" "DISubroutineType" "DIStringType" "DISubrangeType"})
+(def ^:private di-scopes (into #{"DIFile" "DICompileUnit" "DINamespace" "DIModule" "DICommonBlock" "DISubprogram" "DILexicalBlock"
+                                 "DILexicalBlockFile"} di-types))
+
+(def ^:private di-drop-valid
+  "The optional fields (LLParser's OPTIONAL, P:5755) whose absence no visitDI* check takes (Verifier.cpp:1074-1723 of 23.1.5:
+  every check of these nodes on them accepts null or their default), by node."
+  {"DILocation" #{"line" "column" "inlinedAt" "isImplicitCode" "atomGroup" "atomRank"}
+   "DIBasicType" #{"tag" "name" "size" "align" "encoding" "flags" "num_extra_inhabitants"}
+   "DILocalVariable" #{"name" "arg" "file" "line" "type" "flags" "align" "annotations"}
+   "DICompileUnit" #{"producer" "isOptimized" "flags" "runtimeVersion" "splitDebugFilename" "emissionKind" "enums" "retainedTypes"
+                     "globals" "imports" "macros" "dwoId" "splitDebugInlining" "debugInfoForProfiling" "nameTableKind"
+                     "rangesBaseAddress" "sysroot" "sdk"}
+   "DISubprogram" #{"name" "linkageName" "scope" "scopeLine" "flags" "retainedNodes" "templateParams" "declaration" "thrownTypes"
+                    "annotations" "targetFuncName" "containingType" "virtuality" "virtualIndex" "thisAdjustment" "keyInstructions"}
+   "DIDerivedType" #{"name" "scope" "size" "align" "offset" "flags" "annotations"}
+   "DICompositeType" #{"name" "scope" "size" "align" "offset" "flags" "elements" "identifier" "vtableHolder" "templateParams"
+                       "runtimeLang" "baseType" "annotations"}
+   "DISubroutineType" #{"flags" "cc"}
+   "DIFile" #{"source"}
+   "DILexicalBlock" #{"file" "line" "column"}})
+
+(declare ex-di-drop*)
+
 (defn ex-di-drop
-  "A field of a debug info node dropped: LLParser wants its REQUIRED fields; an optional one is left to opt."
+  "A field of a debug info node dropped: LLParser wants its REQUIRED fields (P:5755); of the optional ones (LLS36 (a)): a file
+  dropped where the node has a line, `line specified with no file` (V:1095 visitDIType, V:1514 visitDISubprogram); a definition's
+  unit, `subprogram definitions must have a compile unit` (V:1577); a defined global's type, `missing global variable type`
+  (V:1706); the fields `di-drop-valid` names, valid; the rest left to opt."
+  [m {:keys [i field] :as c} x]
+  (hard-if-kept m (second (nth m i)) (ex-di-drop* m c x)))
+
+(defn- ex-di-drop*
   [m {:keys [i field]} _]
-  (let [kind (di-kind (nth (nth m i) 2))]
-    (if (contains? (get di-required kind) (fname field))
-      (llparser (str "missing required field '" (fname field) "'"))
-      (unknown (str "an optional field of " kind)))))
+  (let [n (nth (nth m i) 2) kind (di-kind n) f (fname field) o (di-fields (nth (nth (vec m) i) 2))
+        orig-line (fn [] (let [fs (vec (partition 2 (rest n)))] (some (fn [[k v]] (when (= (fname k) "line") v)) fs)))]
+    (cond
+      (contains? (get di-required kind) f) (llparser (str "missing required field '" f "'"))
+      (and (= f "file") (or (contains? di-types kind) (= kind "DISubprogram")))
+      (let [l (orig-line)] (if (and (integer? l) (not (zero? (long l)))) (debugv "line specified with no file") valid))
+      (and (= f "line") (or (contains? di-types kind) (= kind "DISubprogram"))) valid
+      (and (= kind "DISubprogram") (= f "unit"))
+      (if (str/includes? (str (get o "spFlags")) "DISPFlagDefinition") (debugv "subprogram definitions must have a compile unit") valid)
+      ;; visitDICompositeType (V:1394)
+      (and (= kind "DICompositeType") (= f "baseType") (str/includes? (str (get o "tag")) "DW_TAG_array_type"))
+      (debugv "array types must have a base type")
+      (contains? (get di-drop-valid kind) f) valid
+      :else (unknown (str "the optional field " f " of " kind)))))
 
 (defn- md-node [m id] (some #(when (and (= (first %) 'llvm/meta) (= (second %) id)) (nth % 2)) m))
 
 (def ^:private local-scopes #{"DISubprogram" "DILexicalBlock" "DILexicalBlockFile"})
+
+(defn- di-field-rule
+  "LLS36 (a): the visitDI* check (Verifier.cpp of 23.1.5) of the field `f` of a `kind` node sent to a node of the kind `tk`, the
+  rest of the node as before: debug info's (the Verifier's CheckDI, which opt strips with a warning), valid, or left to opt."
+  [kind f tk o]
+  (let [type? (contains? di-types tk) scope? (contains? di-scopes tk)
+        type-node? (contains? di-types kind)]
+    (cond
+      ;; visitDIType (V:1093) and visitDIScope (V:1089) for the types; visitDISubprogram (V:1510-1519), visitDIVariable (V:1693)
+      (and (= f "scope") (or type-node? (= kind "DISubprogram") (#{"DILocalVariable" "DIGlobalVariable"} kind)) (not scope?))
+      (debugv "invalid scope")
+      (and (= f "file") (or type-node? (#{"DISubprogram" "DICompileUnit" "DILocalVariable" "DIGlobalVariable"} kind)) (not= tk "DIFile"))
+      (debugv "invalid file")
+      (and (= f "scope") (#{"DISubprogram" "DIDerivedType" "DIBasicType" "DISubroutineType"} kind) (#{"DIFile" "DICompileUnit" "DINamespace" "DIModule"} tk))
+      valid
+      (and (= kind "DISubprogram") (= f "type")) (if (= tk "DISubroutineType") (unknown "another subroutine type") (debugv "invalid subroutine type"))
+      (and (= kind "DISubprogram") (= f "containingType") (not type?)) (debugv "invalid containing type")
+      (and (= kind "DISubprogram") (= f "declaration")) (debugv "invalid subprogram declaration")
+      (and (= kind "DISubprogram") (= f "retainedNodes")) (debugv "invalid retained nodes list")
+      (and (= kind "DISubprogram") (= f "unit"))
+      (cond (not (str/includes? (str (get o "spFlags")) "DISPFlagDefinition")) (debugv "subprogram declarations must not have a compile unit")
+            (= tk "DICompileUnit") (unknown "another compile unit")
+            :else (debugv "invalid unit type"))
+      ;; visitDILocalVariable (V:1717-1722), visitDIGlobalVariable (V:1703)
+      (and (#{"DILocalVariable" "DIGlobalVariable"} kind) (= f "type"))
+      (cond (not type?) (debugv "invalid type ref")
+            (and (= kind "DILocalVariable") (= tk "DISubroutineType")) (debugv "invalid type")
+            :else (unknown "a variable's type sent to another type"))
+      ;; visitDISubroutineType (V:1407), visitDICompositeType (V:1343-1348), visitDIDerivedType (V:1295)
+      (and (= kind "DISubroutineType") (= f "types")) (debugv "invalid composite elements")
+      (and (= kind "DICompositeType") (= f "elements")) (debugv "invalid composite elements")
+      (and (#{"DICompositeType" "DIDerivedType"} kind) (= f "baseType") (not type?)) (debugv "invalid base type")
+      (and (= kind "DICompositeType") (= f "vtableHolder") (not type?)) (debugv "invalid vtable holder")
+      :else (unknown (str "the field " f " of " kind)))))
 
 (defn ex-di-retarget
   "A debug info node's reference sent to a node of another kind: a DILocation's scope must be a local scope (V:3335, the
@@ -966,7 +1086,7 @@
           (some #(or (and (dbg-record? %) (= id (peek (vec (body %))))) (and (old-dbg? (nth (body %) 2 nil)) (= id (md-dbg %)))) items)
           (debugv "location requires a valid scope")
           :else (unknown "a DILocation no instruction or record uses")))
-      (unknown (str "the field " (fname field) " of " kind)))))
+      (di-field-rule kind (fname field) tk (di-fields (nth (nth m i) 2))))))
 
 (defn ex-di-record
   "A debug record's variable, expression or location replaced by another node: the variable must be a DILocalVariable
@@ -986,9 +1106,322 @@
   [m {:keys [case fi]} _]
   (if (= case :fn)
     (let [f (nth m fi) to (second (drop-while #(not= % '!dbg) (:md (opts-of (drop 4 f)))))
-          tk (di-kind (md-node m to))]
-      (if (= tk "DISubprogram") (unknown "a subprogram attached to another function") (debugv "function !dbg attachment must be a subprogram")))
+          tk (di-kind (md-node m to))
+          distinct? (some #(and (= (first %) 'llvm/meta) (= (second %) to) (= true (:distinct (opts-of (drop 3 %))))) m)]
+      (cond
+        ;; LLS36 (a): a declaration's !dbg (V:3202): a call site's, which must be unique; the node is not checked as a subprogram
+        (= 'llvm/declare (first f)) (cond distinct? (debugv "function declaration may only have a unique !dbg attachment")
+                                          (= tk "DISubprogram") valid
+                                          :else (unknown "a declaration's !dbg sent to a node that is no subprogram (the Verifier's cast)"))
+        (= tk "DISubprogram") (unknown "a subprogram attached to another function")
+        :else (debugv "function !dbg attachment must be a subprogram")))
     (unknown "an instruction's or a global's !dbg")))
+
+;; ---------------------------------------------------------------------------------------------
+;; Intrinsic declarations (LLS36 (a)): LLParser's validateEndOfModule upgrades every function first (UpgradeCallsToIntrinsic,
+;; AutoUpgrade.cpp:1995 UpgradeIntrinsicFunction: upgradeIntrinsicFunction1's name rules, the struct return, then
+;; Intrinsic::remangleIntrinsicFunction, Intrinsics.cpp:1418), then the Verifier visits the functions in the module's order
+;; (Verifier.cpp:7671): a define's calls (visitCallBase, V:3846 the callee's type against the call's; visitIntrinsicCall,
+;; V:5952) before a later declaration's visitFunction (V:3297, isSignatureValid's message, Intrinsics.cpp:1338).
+
+(defn- fn-type-of
+  "A declaration's or definition's function type, (fn R [P...]) with `&` for varargs, its types normalized."
+  [d]
+  (list 'fn (vf/norm-type (nth d 2)) (mapv #(if (vector? %) (vf/norm-type (first %)) %) (nth d 3))))
+
+(defn- call-fn-type
+  "A call's function type: its written (fn R [P...]), else R with its arguments' types (as LLParser takes it, P:7967)."
+  [b]
+  (let [t (vf/norm-type (nth b 1))]
+    (if (and (seq? t) (= 'fn (first t))) t (list 'fn t (mapv #(vf/norm-type (first %)) (nth b 3))))))
+
+(defn- itstr ^String [t] (pr/type-str t))
+(defn- iresolve [t] (if (or (and (symbol? t) (str/starts-with? (name t) "%")) (and (seq? t) (= (first t) '%))) (get vf/*types* t t) t))
+
+(defn- sig-error
+  "Intrinsic::isSignatureValid's message for the intrinsic `nm` declared with `fty` (nil: valid), arbace.repr.llvm.intr's port of
+  matchIntrinsicType; nil `entry` when `nm` is no intrinsic of the pin."
+  [nm fty]
+  (when-let [e (intr/lookup nm)] (intr/signature-error e fty itstr iresolve)))
+
+(def ^:private call-upgrade-ids
+  "The generic intrinsics UpgradeIntrinsicCall (AutoUpgrade.cpp:5177) rewrites by a case of its own when their declaration is
+  upgraded (the rest take the default case: the callee replaced, the call's type kept)."
+  #{"llvm.coro.end" "llvm.vector.extract" "llvm.vector.insert" "llvm.bitreverse" "llvm.ctlz" "llvm.cttz" "llvm.objectsize" "llvm.ctpop"
+    "llvm.dbg.value" "llvm.ptr.annotation" "llvm.var.annotation" "llvm.thread.pointer" "llvm.memcpy" "llvm.memmove" "llvm.memset"
+    "llvm.masked.load" "llvm.masked.gather" "llvm.masked.store" "llvm.masked.scatter"})
+
+(defn- upgrade-name-rule
+  "upgradeIntrinsicFunction1's rules (AutoUpgrade.cpp:1341-1950) that a declaration named `nm` with `n` parameters meets, by the
+  name's first letter as the source's switch: nil (none), :ctlz (llvm.ctlz.*/llvm.cttz.* of one parameter: renamed, declared again
+  of the first parameter's type, every call rebuilt as (x, false), AutoUpgrade.cpp:1438 and the call's case), or a string naming
+  the rule (the calls rewritten from their own arguments: not judged here). The targets' rules (arm, aarch64, amdgcn, nvvm, riscv,
+  wasm, x86) are named by their prefix."
+  [^String nm n]
+  (let [s (subs nm 5) p #(str/starts-with? s %)]
+    (cond
+      (some p ["arm." "aarch64." "amdgcn." "nvvm." "riscv." "wasm." "x86."]) "a target's intrinsic (its own upgrade rules)"
+      (and (= n 1) (p "convert.")) "convert.to.fp16/from.fp16 (AutoUpgrade.cpp:1431)"
+      (and (= n 1) (or (p "ctlz.") (p "cttz."))) :ctlz
+      (and (= n 2) (= s "coro.end")) "coro.end of two parameters (AutoUpgrade.cpp:1450)"
+      (p "dbg.") "a debug intrinsic (a record)"
+      (p "experimental.vector.") "experimental.vector.* (AutoUpgrade.cpp:1483)"
+      (p "experimental.stepvector.") "experimental.stepvector (AutoUpgrade.cpp:1559)"
+      (p "flt.rounds") "flt.rounds (AutoUpgrade.cpp:1567)"
+      (p "invariant.group.barrier") "invariant.group.barrier (AutoUpgrade.cpp:1575)"
+      (and (or (p "lifetime.start") (p "lifetime.end")) (= n 2)) "lifetime of two parameters (AutoUpgrade.cpp:1589)"
+      (and (or (= s "lifetime.start.i64") (= s "lifetime.end.i64")) (= n 1)) "lifetime.*.i64 (AutoUpgrade.cpp:1598)"
+      (and (or (p "memcpy.") (p "memmove.") (p "memset.")) (= n 5)) "a memory intrinsic with its alignment parameter (AutoUpgrade.cpp:1621)"
+      (and (some p ["masked.load" "masked.gather" "masked.store" "masked.scatter"]) (= n 4)) "a masked intrinsic with its alignment (AutoUpgrade.cpp:1651)"
+      (and (p "objectsize.") (#{2 3} n)) "objectsize of two or three parameters (AutoUpgrade.cpp:1806)"
+      (and (p "ptr.annotation.") (= n 4)) "ptr.annotation of four parameters (AutoUpgrade.cpp:1818)"
+      (= s "stackprotectorcheck") "stackprotectorcheck (AutoUpgrade.cpp:1888)"
+      (= s "thread.pointer") "thread.pointer (AutoUpgrade.cpp:1895)"
+      (and (= s "var.annotation") (= n 4)) "var.annotation of four parameters (AutoUpgrade.cpp:1904)"
+      (and (p "vector.splice") (not (or (p "vector.splice.left") (p "vector.splice.right")))) "vector.splice (AutoUpgrade.cpp:1911)"
+      :else nil)))
+
+(defn- upgrade
+  "UpgradeIntrinsicFunction (AutoUpgrade.cpp:1995) of the intrinsic `nm` declared with `fty`: nil (not upgraded), :rebuilt
+  (upgraded, every call rebuilt valid), :remangled (the signature valid, the name not its mangling: a new declaration under the
+  mangled name, AutoUpgrade.cpp:1980), or an unknown."
+  [^String nm fty]
+  (let [ps (vec (remove #{'&} (nth fty 2))) r (upgrade-name-rule nm (count ps))]
+    (cond
+      (= r :ctlz) (let [t (first ps) e (if (and (seq? t) (#{'vector 'vscale} (first t))) (nth t 2) t)]
+                    (if (and (symbol? e) (re-matches #"i[0-9]+" (name e))) :rebuilt (unknown "ctlz/cttz upgraded over a non-integer")))
+      (string? r) (unknown (str "AutoUpgrade rewrites the declaration and its calls: " r))
+      ;; a literal non-packed struct return wanted (AutoUpgrade.cpp:1955): mutate's types are never named structs
+      :else (when-let [e (intr/lookup nm)]
+              (when (and (nil? (sig-error nm fty)) (not= nm (intr/mangled-name e fty itstr iresolve)))
+                :remangled)))))
+
+(defn- calls-in
+  "The calls of the global `g` in the definition `f`, their bodies in the Verifier's order (blocks, then items)."
+  [f g]
+  (for [b (blocks-of f) x (items-of b) :let [c (body x)]
+        :when (and ('#{call invoke callbr} (first c)) (= g (nth c 2 nil)))] c))
+
+(defn- first-caller
+  "The calls of the global `g` in the first definition of the module (its order) that calls it before the declaration's form
+  `di`, or nil when the declaration comes first."
+  [m g di]
+  (first (for [i (range di) :let [f (nth m i)] :when (= 'llvm/define (first f)) :let [cs (calls-in f g)] :when (seq cs)] cs)))
+
+(defn- int-const [a] (let [v (peek a)] (when (integer? v) v)))
+
+(defn- intr-call-check
+  "visitIntrinsicCall's case (V:5952) for a call `c` of the intrinsic `nm`: nil when its case checks nothing or passes, a
+  verdict, or an unknown for a case not ported. The intrinsics the mutator renames to (mutate's m-intr-rename) are taken:
+  ptrmask's four checks (V:6978), is.fpclass's test mask (V:6098: its operand a constant, else the cast is undefined), memset's
+  none (V:6237); smax, ctlz, sqrt, fshl, expect, vector.reduce.add and sadd.with.overflow have no case."
+  [^String nm c]
+  (let [s (subs nm 5) args (nth c 3) ta (fn [i] (vf/norm-type (first (nth args i nil))))
+        ptr? (fn [t] (or (= t 'ptr) (and (seq? t) (= 'ptr (first t)))))
+        vec? (fn [t] (and (seq? t) (#{'vector 'vscale} (first t))))]
+    (cond
+      (str/starts-with? s "ptrmask")
+      (let [t0 (ta 0) t1 (ta 1)]
+        (cond (not (or (ptr? t0) (and (vec? t0) (ptr? (nth t0 2))))) (verifier "llvm.ptrmask intrinsic first argument must be pointer or vector of pointers")
+              (not= (boolean (vec? t0)) (boolean (vec? t1))) (verifier "llvm.ptrmask intrinsic arguments must be both scalars or both vectors")
+              (vec? t0) (unknown "ptrmask over vectors")
+              (and (symbol? t1) (re-matches #"i[0-9]+" (name t1)) (not= t1 'i64)) (verifier "llvm.ptrmask intrinsic second argument bitwidth must match pointer index type size of first argument")
+              :else nil))
+      (str/starts-with? s "is.fpclass")
+      (if-let [v (and (>= (count args) 2) (int-const (nth args 1)))]
+        (when-not (zero? (bit-and (long v) (bit-not 1023))) (verifier "unsupported bits for llvm.is.fpclass test mask"))
+        (unknown "is.fpclass's test mask not a constant (the Verifier's cast is undefined)"))
+      (str/starts-with? s "memset") nil
+      (some #(str/starts-with? s %) intrinsic-cases) (unknown "an intrinsic visitIntrinsicCall checks")
+      :else nil)))
+
+(defn ex-intr-decl
+  "An intrinsic's declaration with a parameter or the return type changed (its calls unchanged): AutoUpgrade first (a ctlz or
+  cttz of one parameter is declared again and its calls rebuilt: valid); a signature that is valid under another mangling is
+  declared again under it, its calls keeping their type; then the Verifier: the first caller before the declaration says
+  `Intrinsic called with incompatible signature` (V:3846), else the declaration's own signature (V:3297)."
+  [m {:keys [fi orig]} _]
+  (let [d (nth m fi) g (second d) nm (name g) fty (fn-type-of d) up (upgrade nm fty)]
+    (cond
+      (= up :rebuilt) valid
+      (map? up) up
+      (and (= up :remangled) (contains? call-upgrade-ids (:name (intr/lookup nm)))) (unknown "a remangled intrinsic whose calls UpgradeIntrinsicCall rewrites by its case")
+      :else
+      (let [cs (first-caller m g fi)]
+        (cond
+          (some #(not= (call-fn-type %) fty) cs) (invalid :intr-sig)
+          (seq cs) (unknown "the calls' type is the declaration's")
+          (not= (nth d 3) (nth orig 3)) (unknown "the declaration visited before its calls, a parameter's attributes then checked")
+          (= up :remangled) (if (some #(seq (calls-in % g)) (filter #(= 'llvm/define (first %)) m)) (invalid :intr-sig) valid)
+          :else (if-let [e (sig-error nm fty)] (verifier e) (unknown "the declaration's signature is valid")))))))
+
+(defn ex-intr-rename
+  "An intrinsic's name (declaration and calls) replaced by another intrinsic's: AutoUpgrade first (a valid signature under another
+  mangling: declared again, the calls retargeted, valid; a ctlz or cttz of one parameter rebuilt); then the Verifier in the
+  module's order: visitIntrinsicCall's case for the first caller's calls (V:5952), then the declaration's signature (V:3297)."
+  [m {:keys [fi to]} _]
+  (let [d (nth m fi) nm (name to) fty (fn-type-of d) up (upgrade nm fty)]
+    (cond
+      (= up :rebuilt) valid
+      (map? up) up
+      ;; remangled: the calls retargeted to the new declaration (appended at the module's end), then visited as its calls
+      (= up :remangled) (if (contains? call-upgrade-ids (:name (intr/lookup nm)))
+                          (unknown "a remangled intrinsic whose calls UpgradeIntrinsicCall rewrites by its case")
+                          (or (some #(intr-call-check nm %) (first-caller m to (count m))) valid))
+      :else
+      (or (some #(intr-call-check nm %) (first-caller m to fi))
+          (if-let [e (sig-error nm fty)] (verifier e) (unknown "the renamed declaration's signature is valid"))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Metadata attachments (LLS36 (a)): visitInstruction's checks of an instruction's attachments, in its order (V:5779-5913), the
+;; only broken attachment the new one (the base valid), each with its helper: verifyRangeLikeMetadata (V:4469),
+;; visitDereferenceableMetadata (V:5214), visitProfMetadata (V:5241), visitAliasScopeListMetadata (V:5518) and
+;; visitAliasScopeMetadata (V:5494), TBAAVerifier::visitTBAAMetadata's first check.
+
+(defn- md-str [x] (when (and (seq? x) (= '! (first x)) (string? (second x))) (second x)))
+(defn- md-node? [x] (and (seq? x) (= '! (first x)) (vector? (second x))))
+(defn- md-int [x] (when (and (vector? x) (= 2 (count x)) (symbol? (first x)) (re-matches #"i[0-9]+" (name (first x))) (integer? (second x))) x))
+(defn- iwidth ^long [t] (Long/parseLong (subs (name t) 1)))
+
+(defn- range-like
+  "verifyRangeLikeMetadata (V:4469) over the pairs `ops`, against the scalar type `sty` (`:addrspace`: noalias.addrspace's
+  i32 instead); the ranges taken without wrapping (a wrapping or overflowing one is left)."
+  [ops sty kind]
+  (let [n (count ops)]
+    (cond
+      (odd? n) (verifier "Unfinished range!")
+      (< n 2) (verifier "It should have at least one range!")
+      :else
+      (loop [ps (partition 2 ops) last nil first* nil k 0]
+        (if (empty? ps)
+          (if (and (> k 2) first* last)
+            (let [[fl fh] first* [ll lh] last]
+              (cond (not (or (<= fh ll) (<= lh fl))) (verifier "Intervals are overlapping")
+                    (or (= fh ll) (= fl lh)) (verifier "Intervals are contiguous")
+                    :else nil))
+            nil)
+          (let [[lo hi] (first ps) l (md-int lo) h (md-int hi)]
+            (cond
+              (nil? l) (verifier "The lower limit must be an integer!")
+              (nil? h) (verifier "The upper limit must be an integer!")
+              (not= (first l) (first h)) (verifier "Range pair types must match!")
+              (and (= kind :addrspace) (not= (first h) 'i32)) (verifier "noalias.addrspace type must be i32!")
+              (and (not= kind :addrspace) (not= (first h) sty)) (verifier "Range types must match instruction type!")
+              :else
+              (let [w (iwidth (first l)) lv (second l) hv (second h)]
+                (if (or (< w 8) (neg? lv) (neg? hv) (> lv hv) (>= hv (bit-shift-left 1 (min w 62))))
+                  (unknown "a range that wraps or does not fit its width")
+                  (cond
+                    (= lv hv) (verifier (if (or (zero? lv) (= lv (dec (bit-shift-left 1 w)))) "Range must not be empty!" "The upper and lower limits cannot be the same value"))
+                    (and last (not (or (<= (second last) lv) (<= hv (first last))))) (verifier "Intervals are overlapping")
+                    (and last (not (> lv (first last)))) (verifier "Intervals are not in order")
+                    (and last (or (= (second last) lv) (= (first last) hv))) (verifier "Intervals are contiguous")
+                    :else (recur (rest ps) [lv hv] (or first* [lv hv]) (inc k))))))))))))
+
+(defn- prof-expected
+  "GetBranchingTerminatorNumOperands (V:5242): the branch weights an instruction `b` takes (0: none)."
+  [b]
+  (let [h (first b) labels (count (filter #(= 'label (second %)) (vf/uses b)))]
+    (case h
+      br (if (= labels 2) 2 0)
+      (switch indirectbr callbr) labels
+      call 1
+      select 2
+      0)))
+
+(defn- prof-check
+  "visitProfMetadata (V:5241) of the node `ops` on the instruction `b`."
+  [b ops]
+  (let [n (count ops) nm (md-str (first ops))]
+    (cond
+      (zero? n) (verifier "!prof annotations should have at least 1 operand")
+      (nil? nm) (verifier "expected string with name of the !prof annotation")
+      (= nm "unknown") (unknown "an unknown !prof")
+      (< n 2) (verifier "!prof annotations should have no less than 2 operands")
+      (= nm "branch_weights")
+      (let [off (if (= "expected" (md-str (nth ops 1))) 2 1) nw (- n off)]
+        (or (if (= 'invoke (first b))
+              (when-not (#{1 2} nw) (verifier "Wrong number of InvokeInst branch_weights operands"))
+              (let [e (prof-expected b)]
+                (cond (zero? e) (verifier "!prof branch_weights are not allowed for this instruction")
+                      (not= nw e) (verifier "Wrong number of operands"))))
+            (when-not (every? md-int (drop off ops)) (verifier "!prof brunch_weights operand is not a const int"))))
+      (= nm "VP") (unknown "value profile metadata")
+      :else (verifier "expected either branch_weights or VP profile name"))))
+
+(defn- scope-list-check
+  "visitAliasScopeListMetadata (V:5518) and visitAliasScopeMetadata (V:5494) over the list `ops`."
+  [ops]
+  (some (fn [op]
+          (cond (not (md-node? op)) (verifier "scope list must consist of MDNodes")
+                (not (<= 2 (count (second op)) 3)) (verifier "scope must have two or three operands")
+                :else (unknown "a scope node's operands")))
+        ops))
+
+(defn- fp-scalar? [t] (fp-t? t))
+(defn- fp-result? [t]
+  (let [t (vf/norm-type t)]
+    (cond (fp-t? t) true
+          (and (seq? t) (#{'vector 'vscale} (first t))) (fp-t? (nth t 2))
+          (or (= t 'void) (ptr-t? t) (int-t? t)) false
+          :else nil)))
+
+(defn ex-md-attach
+  "An attachment added to an instruction, its node breaking the kind's rules or on an instruction of the wrong kind or type:
+  visitInstruction's checks of that kind (V:5779-5913); a kind the Verifier does not check is valid."
+  [m {:keys [at k ops]} _]
+  (let [x (inst-at m at) b (body x) h (first b) t (vf/norm-type (vf/result-type b))
+        sty (if (and (seq? t) (#{'vector 'vscale} (first t))) (nth t 2) t)
+        load? (= h 'load) ptr? (ptr-t? t) n (count ops)]
+    (if (and (= h 'call) (symbol? (nth b 2 nil)) (= "g" (namespace (nth b 2)))
+             (re-matches #"llvm\.dbg\.(declare|value|assign|label)" (name (nth b 2))))
+      ;; the call becomes a debug record (AutoUpgrade's upgradeDbgIntrinsicToDbgRecord): its attachments but !dbg are dropped
+      valid
+    (case k
+      !fpmath (let [fr (fp-result? t)]
+                (cond (nil? fr) (unknown "fpmath on an aggregate result")
+                      (not fr) (verifier "fpmath requires a floating point result!")
+                      (not= n 1) (verifier "fpmath takes one operand!")
+                      :else (let [[ft v] (first ops)]
+                              (cond (not (and (fp-scalar? ft) (seq? v) (= 'fp (first v)))) (verifier "invalid fpmath accuracy!")
+                                    (not= ft 'float) (verifier "fpmath accuracy must have float type")
+                                    :else (let [d (Double/parseDouble (second v))]
+                                            (if (and (pos? d) (Double/isFinite d)) valid (verifier "fpmath accuracy not a positive number!")))))))
+      !range (if-not ('#{load call invoke} h)
+               (verifier "Ranges are only for loads, calls and invokes!")
+               (or (range-like ops sty :range) valid))
+      !noalias.addrspace (if-not ('#{load store atomicrmw cmpxchg call} h)
+                           (verifier "noalias.addrspace are only for memory operations!")
+                           (or (range-like ops sty :addrspace) valid))
+      !invariant.group (if ('#{load store} h) valid (verifier "invariant.group metadata is only for loads and stores"))
+      !invariant.load (cond load? valid
+                            (and (= h 'call) (intrinsic-name? (nth b 2 nil))) (unknown "invariant.load on an intrinsic's call (onlyReadsMemory)")
+                            :else (verifier "invariant.load metadata is only for loads and readonly intrinsic calls"))
+      !nonnull (cond (not ptr?) (verifier "nonnull applies only to pointer types")
+                     (not load?) (verifier "nonnull applies only to load instructions, use attributes for calls or invokes")
+                     (pos? n) (verifier "nonnull metadata must be empty")
+                     :else valid)
+      !noundef (cond (not load?) (verifier "noundef applies only to load instructions")
+                     (pos? n) (verifier "noundef metadata must be empty")
+                     :else valid)
+      (!dereferenceable !dereferenceable_or_null)
+      (cond (not ptr?) (verifier "dereferenceable, dereferenceable_or_null apply only to pointer types")
+            (not ('#{load inttoptr} h)) (verifier "dereferenceable, dereferenceable_or_null apply only to load and inttoptr instructions, use attributes for calls or invokes")
+            (not= n 1) (verifier "dereferenceable, dereferenceable_or_null take one operand!")
+            (not= 'i64 (first (md-int (first ops)))) (verifier "dereferenceable, dereferenceable_or_null metadata value must be an i64!")
+            :else valid)
+      !tbaa (if (zero? n) (verifier "TBAA metadata cannot have 0 operands") (unknown "a TBAA node's operands"))
+      (!noalias !alias.scope) (or (scope-list-check ops) valid)
+      !align (cond (not ptr?) (verifier "align applies only to pointer types")
+                   (not load?) (verifier "align applies only to load instructions, use attributes for calls or invokes")
+                   (not= n 1) (verifier "align takes one operand!")
+                   (not= 'i64 (first (md-int (first ops)))) (verifier "align metadata value must be an i64!")
+                   :else (let [v (long (second (first ops)))]
+                           (cond (not (and (pos? v) (zero? (bit-and v (dec v))))) (verifier "align metadata value must be a power of 2!")
+                                 (> v 4294967296) (verifier "alignment is larger that implementation defined limit")
+                                 :else valid)))
+      !prof (or (prof-check b ops) valid)
+      (unknown (str "the attachment " k))))))
 
 ;; ---------------------------------------------------------------------------------------------
 
@@ -999,11 +1432,9 @@
    :attr-type ex-attr :attr-pair ex-attr :attr-place ex-attr :attr-dup ex-attr :attr-returned ex-attr :attr-value ex-attr :attr-immarg ex-attr
    :cc-def ex-cc-def :cc-call ex-cc-call :musttail ex-musttail :bundle ex-bundle*
    :intr-arg ex-intr-arg :personality ex-personality :funclet ex-personality :unwind-dest ex-unwind-dest
-   :md-edit ex-md-edit :di-version ex-di-version :di-drop ex-di-drop :di-retarget ex-di-retarget :di-record ex-di-record
+   :md-edit ex-md-edit :di-version ex-di-version :di-drop ex-di-drop :di-retarget (fn [m c x] (hard-if-kept m (second (nth m (:i c))) (ex-di-retarget m c x))) :di-record ex-di-record
    :di-attach ex-di-attach
-   :intr-decl (fn [_ _ _] (unknown "AutoUpgrade may rewrite an intrinsic declaration whose signature it does not take (AutoUpgrade.cpp:1341 upgradeIntrinsicFunction1)"))
-   :intr-rename (fn [_ _ _] (unknown "AutoUpgrade may rewrite an intrinsic declaration whose signature it does not take (AutoUpgrade.cpp:1341 upgradeIntrinsicFunction1)"))
-   :md-attach (fn [_ _ _] (unknown "the attachment rules of visitInstruction and visitMDNode, not ported"))})
+   :intr-decl ex-intr-decl :intr-rename ex-intr-rename :md-attach ex-md-attach})
 
 (defn expect
   "The mutant `m`'s (forms) own verdict, from its kind and what the kind's change was (`ctx`, the forms' metadata), the

@@ -1138,3 +1138,26 @@ Alternatives considered:
 
 Proposed: LLS35 (mutants-oracle as a part of the oracle tier's llvm-records-verify), LLS36 (port the unknown kinds' rules), LLS37 (a
 mutant of an invalid base).
+
+## 2026-11-09: LLS35 (a), LLS36 (a), LLS37 (b): the mutants' oracle in the oracle tier, the unknown kinds' rules (branch `llvm-props`, from `mac/llvm-lls33` 60026c61b)
+
+The user decided LLVM IR's three proposals as recommended (2026-11-09 morning). LLS35 (a): `bin/repr-llvm records-verify` (the oracle
+tier's `llvm-records-verify`) ends with `mutants-oracle` over the pack rt's two mutant lists against opt's record, when the pack exists;
+the step's command line is unchanged (only a comment and its waiver), so the night's slot patch `llvm-cells.patch` still applies.
+LLS36 (a): `arbace.repr.llvm.expect` ports, from llvm-project 23.1.5 (`llvm-project-23.1.5.src.tar.xz`, the pin; Apache-2.0 with LLVM
+exceptions): AutoUpgrade.cpp's upgradeIntrinsicFunction1 name rules, UpgradeIntrinsicFunction and UpgradeIntrinsicCall's cases with
+Intrinsics.cpp's remangleIntrinsicFunction, then the Verifier's order for intrinsic declarations (V:3846 at the first caller, V:5952's
+ptrmask and is.fpclass cases, V:3297's isSignatureValid message through intr.ae's matcher); visitInstruction's attachment checks
+(V:5779-5913 with verifyRangeLikeMetadata, visitProfMetadata, the alias scopes, align, dereferenceable, TBAA's first); the visitDI*
+field rules (V:1074-1723), a declaration's `!dbg` (V:3202) and StripDebugInfo's reachability (a debug fault in a node kept after the
+strip is a hard error). The mutator attaches the three kinds' changes as metadata (no random number drawn: the mutants' bodies are
+llvm-lls33's byte for byte, 900 compared). The comparisons found four rules Arbace's verifier lacked (a local variable's non-DIScope
+scope, an old debug intrinsic's call's metadata arguments as a record's, that call's attachments dropped, a declaration's distinct
+`!dbg`), fixed. Measured light (stage 0, the stubs first; live opt by hand as the oracle): the day's 1,872 mutants 1,694 to 1,818 own
+verdicts (97.1%), every one as Arbace's verifier and opt; a held-out set never looked at (h2, 900 of the intrinsics, metadata and
+debug families at 800000) 458 to 815 own (90.6%), all 815 as both; a first held-out set (h1, at 700000) read once, which showed 10 own
+verdicts of the first rules wrong against opt (fixed). The families the verifier's fixes touch as recorded (verify-llvmtest 792 of 806,
+verify-probes 472 of 478, roundtrip- and text-llvmtest 304 of 304), `bin/llvmi check --essential` 10 of 10, controls-test all ok.
+LLS37 (b): nothing. Alternatives considered: a new gate part for the mutants (a `:parts` line on llvm-records-verify; rejected, it
+would change the slot patch's context), porting module flags' and visitIntrinsicCall's other cases now (proposed as LLS38, LLS39).
+Details: doc/llvm/LLVM-CROP-SURVEY.md, "As built: LLS35 (a), LLS36 (a)".
