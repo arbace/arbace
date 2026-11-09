@@ -65,6 +65,14 @@
 
 (defn report-exceptions [root] (read-string (slurp (str root "/test/scheme/report-chez.edn"))))
 
+(defn chez-past-classes
+  "SCS18 (b) (the user 2026-11-09): test/scheme/choices.edn's classes that name probes (:ids) where Chez reads past R6RS's grammar and
+  both readers refuse as the report does, as rules of report-chez.edn's shape ({:id CLASS :ids [...] :match RE :why TITLE}), for
+  bin/repr-scheme report-check (the probes they name must differ from Chez's dump); the check judges them by the report."
+  [root]
+  (vec (for [[k c] (:classes (read-string (slurp (str root "/test/scheme/choices.edn")))) :when (:ids c)]
+         {:id k :ids (:ids c) :match (:match c) :why (:title c)})))
+
 (defn report-exception
   "The rule of test/scheme/report-chez.edn that names the probe id (Chez's R6RS mode reads past the report there), or nil."
   [rules ^String id]
@@ -160,9 +168,9 @@
 
 (def report-scans
   "SCS9 (c) (the user 2026-11-08): the three reading scans, judged by the report's character classes over the Unicode Character
-  Database 16.0.0 (report-scan-classes), no dump read; the four printing scans stay judged by Chez's dumps (`write`'s choices are
-  the implementation's)."
-  #{:whitespace :ident-initial :ident-subsequent})
+  Database 16.0.0 (report-scan-classes), no dump read; since SCS17 (c) (the user 2026-11-09) the four printing scans too, by si's
+  printer's rules (doc/scheme/SPEC.md 7, stated in arbace.repr.scheme.report: `write`'s choices are the implementation's, stated)."
+  #{:whitespace :ident-initial :ident-subsequent :string-escaped :char-hex :symbol-escaped-first :symbol-escaped-rest})
 
 (defn scan-diffs
   "For a scan {:scan KIND :ranges ...} (Chez's dump) or {:scan KIND :judge :report} (SCS9 (c): one of report-scans, judged by the
@@ -200,7 +208,10 @@
   "The same scans as the report's character classes: <c> between a and b reads as two identifiers exactly when it is <whitespace>
   (any other delimiter opens a datum or a comment, a constituent joins the identifier); <c>a is one identifier exactly when <c> is an
   <initial> (the peculiar identifiers +, -, ... and ->... are no <c>a); a<c> exactly when <c> is a <subsequent>."
-  {:whitespace (fn [n] (rep/whitespace? n)) :ident-initial (fn [n] (rep/initial? n)) :ident-subsequent (fn [n] (rep/subsequent? n))}) 
+  {:whitespace (fn [n] (rep/whitespace? n)) :ident-initial (fn [n] (rep/initial? n)) :ident-subsequent (fn [n] (rep/subsequent? n))
+   ;; SCS17 (c): the printing scans by SPEC 7's rules
+   :string-escaped (fn [n] (rep/written-escaped-in-string? n)) :char-hex (fn [n] (rep/written-hex-char? n))
+   :symbol-escaped-first (fn [n] (rep/written-escaped-symbol-first? n)) :symbol-escaped-rest (fn [n] (rep/written-escaped-symbol-rest? n))})
 
 (defn- cp-class [^long n]
   [(uc/category n)
@@ -224,6 +235,34 @@
      :confirmed-by-reading (count sample) :unconfirmed unconfirmed
      :only-report (group only-r) :only-chez (group only-c)
      :ranges-only-report (count (ranges-of (set only-r))) :ranges-only-chez (count (ranges-of (set only-c)))}))
+
+(def print-scan-writes
+  "SCS17 (c): the texts the printing scans write (dump.ss's), by repr/scheme's printer, with the datum each must read back as."
+  {:string-escaped (fn [n] [(pr/write-string (cp-string n)) (cp-string n)])
+   :char-hex (fn [n] [(pr/write-char n) (fm/char-form n)])
+   :symbol-escaped-first (fn [n] [(pr/write-symbol (cp-string n)) (fm/sym (cp-string n))])
+   :symbol-escaped-rest (fn [n] [(pr/write-symbol (str "a" (cp-string n))) (fm/sym (str "a" (cp-string n)))])})
+
+(defn report-print-scan-diffs
+  "SCS17 (c) (by hand, the oracle tier's): a printing scan's dump {:scan KIND :ranges ...} (Chez's `write`) against SPEC 7's rule
+  (report-scan-classes): {:scan K :chez N :report M :n-only-report :n-only-chez :examples-...}, and each sampled text as repr/scheme's
+  printer writes it read back by the report's grammar to the same datum (every differing scalar value, every escaped one when they
+  are fewer than 1,000, the strings' and the characters', and every 97th of all; :unconfirmed, at most 20 that do not)."
+  [{:keys [scan ranges]}]
+  (let [rule (report-scan-classes scan)
+        mine (ranges-of rule)
+        set-of (fn [rs] (into #{} (mapcat (fn [[lo hi]] (range lo (inc hi))) rs)))
+        a (set-of mine) b (set-of (map vec ranges))
+        only-r (sort (remove b a)) only-c (sort (remove a b))
+        wr (print-scan-writes scan)
+        sample (distinct (concat only-r only-c (when (< (count a) 1000) (sort a))
+                                 (filter #(and (zero? (mod % 97)) (not (<= 0xD800 % 0xDFFF))) (range 0 0x110000))))
+        back (fn [n] (let [[text want] (wr n) r (rep/read-all text)]
+                       (and (nil? (:undecided r)) (nil? (:error r)) (== 1 (count (:data r))) (fm/tree= want (:form (first (:data r)))))))
+        unconfirmed (vec (take 20 (remove back sample)))]
+    {:scan scan :chez (count b) :report (count a) :n-only-report (count only-r) :n-only-chez (count only-c)
+     :examples-only-report (vec (take 20 only-r)) :examples-only-chez (vec (take 20 only-c))
+     :read-back (count sample) :unconfirmed unconfirmed}))
 
 ;; ---- the check
 

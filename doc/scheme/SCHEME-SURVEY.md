@@ -4046,3 +4046,143 @@ check` 50, `--aot` 52, r7rs 1,232, srfi 1,231, chibi-tests 268, ecraven 58, all 
   does (si's stated choice: the report, not Chez), each a difference against Chez classed in choices.edn's way, report-chez.edn emptied; the
   read judge then reads no dump but the printing scans (judge about 0.9996, 1.0 with SCS17). *Recommended: (b)*: R6RS 4.1 forbids the extensions,
   no corpus file needs them, and si's runtime reader would be the report's too.
+
+## Decided (the user, 2026-11-09, about 06:15): SCS15 (a), SCS16 (b), SCS17 (c), SCS18 (b)
+
+As recommended. SCS15 (a): `#!chezscheme`'s extensions stay classed (`:chezscheme-extensions`). SCS16 (b): si's `(rnrs unicode)` generated from
+the pinned UCD 16.0.0, three more files fetched by pin (https://www.unicode.org/Public/16.0.0/ucd/ `SpecialCasing.txt`,
+`DerivedCoreProperties.txt`, `PropList.txt` into the main checkout's `.tmp/scheme/ucd-16.0.0`, pinned in test/scheme/ucd.edn, no code run
+from them), then a scan against Chez. SCS17 (c): si's printer's escaping rules stated in doc/scheme/SPEC.md 7, the printers' tables
+generated from them, the four printing scans judged by them. SCS18 (b): both readers refuse the 37 probes where Chez reads past R6RS's
+grammar, the differences from Chez classed, report-chez.edn emptied.
+
+## As built: SCS15-SCS18, si's Unicode and printer from the pin, the read judge without Chez's dumps (2026-11-09, branch scheme-props2)
+
+From `mac/scheme-props` 1f64429fa.
+
+### SCS15 (a): nothing to build
+
+`test/scheme/choices.edn`'s class `:chezscheme-extensions` keeps its case (`#!chezscheme |a| b`) and now says `:decided` in place of
+`:proposed`. No corpus file has `#!chezscheme`.
+
+### SCS16 (b): si's (rnrs unicode) from UCD 16.0.0
+
+The pins: fetched once (2026-11-09, the user's allowance) from https://www.unicode.org/Public/16.0.0/ucd/ beside SCS9's and SCS12's files
+(data only: nothing in them is run): `SpecialCasing.txt` (16,809 bytes, SHA-256
+`8d5de354eef79f2395a54c9c7dcebbaf3d30fc962d0f85611ea97aa973a0c451`, `# SpecialCasing-16.0.0.txt`, 2024-05-10),
+`DerivedCoreProperties.txt` (1,115,959, `39d35161f2954497f69e08bdb9e701493f476a3d30222de20028feda36c1dabd`, 2024-05-31) and `PropList.txt`
+(144,253, `53d614508e2a0b2305a8aa21cd60d993de9326cdf65993660dfcce4503548583`, 2024-05-31), in `test/scheme/ucd.edn`'s `:files`;
+`bin/repr-scheme ucd fetch`, `pins check` and `ucd gen|check` take them with the others (pins check: held).
+
+The rules (`arbace.repr.scheme.ucd`, stated once in its comment): R6RS 1.1's `(rnrs unicode)` names its answers by Unicode's properties:
+`char-upcase`, `char-downcase`, `char-titlecase` the simple mappings (UnicodeData.txt's fields 12, 13 and 14, an empty titlecase field the
+uppercase one, UAX #44); `string-upcase`, `string-downcase`, `string-titlecase` the full ones (SpecialCasing.txt's unconditional lines, then
+the simple; the Final_Sigma condition of U+03A3 stated in si's `string-downcase`, R6RS 1.2; the language-sensitive lines left out);
+`char-alphabetic?` Alphabetic, `char-numeric?` Numeric (a numeric value in UnicodeData.txt's field 8: so the CJK compatibility ideographs
+with one, U+F96B and six more, and U+2F890, are numeric, as Chez says, where Go's `unicode.IsNumber`, the N categories, said no),
+`char-whitespace?` White_Space (PropList.txt), `char-upper-case?` Uppercase, `char-lower-case?` Lowercase (DerivedCoreProperties.txt),
+`char-title-case?` the category Lt, `char-general-category` the category; the final sigma's context and `string-titlecase`'s words take
+Cased and Case_Ignorable (DerivedCoreProperties.txt) in place of a hand-written list.
+
+`go/arbace/scm/unicode.ae` (generated) gains `Category`, `IsAlphabetic`, `IsNumeric`, `IsWhiteSpaceProp`, `IsUpperCase`, `IsLowerCase`,
+`IsCased`, `IsCaseIgnorable` (flat ranges, 757, 152, 10, 656, 675, 159, 452), `UpcaseRune`, `DowncaseRune`, `TitlecaseRune` (1,477, 1,460,
+1,431 simple mappings), `SpecialUpcase`, `SpecialDowncase`, `SpecialTitlecase` (102, 28, 75 unconditional full ones) over the 3,368
+category runs. `prim_char.ae` takes them: its `unicode` import, `dcCats` (Go's `unicode.Categories`), `dcUpperData`, `dcDownData` and
+`dcTitleData` (Chez 10.3.0's answers) and the hand list of Case_Ignorable's word-break characters are gone; `dcWB` (UAX #29's classes as
+far as titlecasing needs them) takes the generated categories and Alphabetic. si's runtime now imports no Unicode table of Go's (`unicode/utf8`
+alone, for UTF-8).
+
+The scan: `test/scheme/unicode/scan.sps`, a portable R6RS program run by Chez (`chez --program`) and by si (`bin/si run`): for every Unicode
+scalar value whose category is not Cn or which an answer singles out, one line of its category, its four character mappings, its six
+predicates and the four string mappings of its one-character string, then 26 contextual strings (the final sigma before and after
+ignorables, words with apostrophes, digits, `ǆǅǄ`, `ßtraße`, `ﬁne ﬂow`, `İstanbul`, ...). Chez 10.3.0: 292,557 lines (3.0 s, 48 MB). si
+before this branch (Go's 17.0 tables): 297,360 lines, 4,825 differing (4,814 lines of si's alone, 17.0's new code points and the changed
+categories, U+0295 Ll to Lo, U+A7D3 and U+A7D5; 11 of Chez's alone, the 8 numeric compatibility ideographs and those three); the 26 contextual
+cases already agreed. After: equal, byte for byte (26 s, 0.51 GB). `bin/si unicode-scan [--record]` (new, by hand): si's output against
+`test/scheme/unicode-scan.edn` (Chez's recorded answers: 292,557 lines, SHA-256 `e3a3749a...7e5ad`, `:differences []`); `--record` runs
+Chez and lists the lines where si differs. The scan before the change is its negative control (4,825 lines differ).
+
+### SCS17 (c): si's printer by stated rules
+
+doc/scheme/SPEC.md 7 states three rules with ids: `:print-string` (`"` and `\` escaped, U+0007 to U+000D by their mnemonics, every other
+control of the ASCII range, a character of Cc below U+0080, or first character of an R6RS 4.2.1 `<line ending>`, U+0085 and U+2028, as
+`\xHEX;`, the rest as itself), `:print-char` (the eleven names, else `#\xHEX` under the same condition, else itself) and `:print-symbol`
+(each character that is no `<subsequent>`, the first no `<initial>`, as `\xHEX;` by the reader's generated classes; the peculiar
+identifiers as they are; `||`). The generator states them a second time and writes their tables: `string-hex-ranges`, `char-hex-ranges`,
+`string-hex?`, `char-hex?` in `arbace/repr/scheme/unicode.ae` (repr/scheme's printer, `arbace.repr.scheme.print`, takes them in place of
+its literal code points) and `IsStringHex`, `IsCharHex` in si's `unicode.ae` (si's `writeChar` and `writeString` likewise; the symbols
+already took `IsIdentInitial` and `IsIdentSubsequent`).
+
+The judge: `arbace.repr.scheme.report` states the four scans' predicates from the rules over the report's own classes
+(`written-escaped-in-string?`, `written-hex-char?`, `written-escaped-symbol-first?`, `written-escaped-symbol-rest?`), and
+`arbace.repr.scheme.check/report-scans` holds all seven scans now: `bin/repr-scheme check` writes `{:judge :report}` for every scan unit
+and reads no dump (the pack keeps them for the oracle tier). On the way the check failed once on its own: the report's `char-names` (the
+names `write` gives) took the name of the reader's later definition of the same symbol, so the char-hex scan's rule differed from the
+printer at the ten named controls; renamed `written-char-names`, equal. `bin/repr-scheme report-scans` (by hand) adds the printing
+scans: each rule's set against Chez's recorded scan (string-escaped 37, char-hex 25, symbol-escaped-first 821,216, symbol-escaped-rest
+819,973 code points: all equal) and the texts repr/scheme's printer writes read back by the report's grammar to the same datum (every
+differing and, under 1,000, every escaped scalar value and every 97th of all: 11,465 to 11,501 texts a scan, none unconfirmed; 1 min, 1.29 GB),
+`test/scheme/report-scans.edn` re-recorded with them.
+
+### SCS18 (b): the 37 probes by the report
+
+Both readers refuse the three extensions in R6RS's syntax: a `<naninf>` not in lower case (`+INF.0`; repr/scheme's `number.ae` `naninf`
+compares exactly; si's reader `r6rsRefused`), a `<mantissa width>` after a radix other than 10 (`#x1|53`; `parse-ureal` takes `|` in radix 10
+alone; si's `r6rsRefused`), and a prefixed number's token ends at `#` (`#e1#t` reads `1` and `#t`; repr/scheme's prefixed token without
+`hash-ok`, si's `token` with `hashOK` only in R7RS's syntax or with `ChezLex`). si's `string->number` is unchanged (it still takes
+Chez's; SCS19). SPEC 12 states it (the report, not Chez); `test/scheme/report-chez.edn` is empty (`[]`, its header says why), and its three
+rules are classes of `test/scheme/choices.edn` (`:chez-naninf-case`, `:chez-radix-mantissa-width`, `:chez-hash-after-prefixed-number`, each
+with the probes' `:ids` and `:match`), with eight cases recorded by hand (Chez 10.3.0 on `#!r6rs` string ports, si's runtime by `bin/si
+run`): `+INF.0`, `#i-NaN.0`, `#x1|53`, `#b1|53`, `1|53` (agrees), `#e1#t`, `#x1#(2)`, `#e1#;x`; a case's `:rule :grammar` means no choice
+applies (choices-test checks that none does). `bin/repr-scheme report-check` takes the classes' ids: 1,249 probes, 1,140 agree, 72 by the
+choices, 37 `:chez-past-report` (as named), none stale; 115 files, 112 and 3.
+
+### The numbers
+
+`bin/repr-scheme check` on the essential corpora (scheme-read-essential's command, 51 s, 0.49 GB, with the round trip 1,358 files, spec-check
+and `bin/si corpora files`): 1,358 equal to their judge, probes 1,249 by the report (72 by the choices), 0 by a dump; files 109 by the report;
+report-test ok; choices-test ok (41 cases, 10 classed against Chez or si's runtime, 3 against the reader). `--corpus scans`: 7 of 7 by the
+report (1 min 49 s, 1.14 GB). `ucd check` 4 of 4. `report-check` (2 min 29 s, 1.14 GB) and `report-scans` as above. `bin/si unit`, `test --si`
+(61 of 64, 3 known), `check --only test/scheme/essential-check.txt` (44 of 49, 0 failing), `r7rs` (1,230 of 1,232), `srfi` (1,231): as before,
+the controls differ; `check --aot --only test/scheme/essential-aot.txt`: 11 of 13, 12 of 13 the same as interpreted; `bin/si unicode-scan`:
+equal. `bin/repr-scheme c2j-check`: 22 of 22 (33 s, 1.58 GB). `bin/gate --full --plan`: the steps parse, Scheme's run. `bin/reap --record`
+(unchanged, 0 problems), `bin/crops-score --record`, `--judge --strict` (0 problems).
+
+| `bin/crops-score --crop scheme` | before (1f64429fa) | after |
+|---|---|---|
+| completeness | 97.41 (98.88 without by design) | 97.41 (98.88): unchanged, no reading of a corpus moved |
+| maturity | 100.0 | 100.0 |
+| independence | 99.92 (judge 0.996) | 100.0 (judge 1.0) |
+
+The judge's cases: read 1,371 at 1 (1,249 probes, 115 files, 7 scans; none by a dump), print 1,364, `bin/si check` 50, `--aot` 52, r7rs
+1,232, srfi 1,231, chibi-tests 268, ecraven 58: 5,626 of 5,626.
+
+### Night commands
+
+- `bin/repr-scheme check --record` (every corpus, the probes, the scans; about 3 min, 1.4 GB): the read level's record afresh (no row change
+  expected: the probes pass by the report, the scans by the rules).
+- `bin/si check --record`, `bin/si check --aot --record` (50 and 52 programs): no change expected (only the 4,825 code points Unicode 17.0 added
+  or changed answer otherwise; no program reads one).
+- `bin/si chibi-tests`, `bin/si corpora` as the gate's `si-corpora` (Chibi's own tests and R7RS's take char and string procedures).
+- By hand: `bin/repr-scheme ucd check`, `report-check`, `report-scans`, `bin/si unicode-scan`, `bin/si own --list`, `bin/si own --aot --list`.
+- The gate's `scheme-read-essential`, `scheme-read`, `scheme-roundtrip`, `si-essential`, `si-aot-essential`, `si-check`, `si-aot`, `si-corpora`,
+  `scheme-c2j`, `reap`, `crops-score`.
+
+### Proposed
+
+- **SCS19 si's `string->number` and the three extensions.** SCS18 (b) made both readers refuse `+INF.0`, `#x1|53` and Chez's `#` placeholder
+  after a prefix; si's `string->number` still takes them as Chez's does (R6RS 11.7.4.3: `string->number` follows the same syntax, so the
+  report would say `#f`). (a) leave (string->number as Chez, the reader as the report); (b) `string->number` refuses them too in R6RS
+  programs (the reader's `r6rsRefused` called from `dcStringToNumber`; R7RS programs and ChezLex as now), measured on the R6RS suites, r7rs
+  and the SRFIs first (an hour); (c) (b) and the report judges `string->number`'s answers on the probes' texts too (a small check beside
+  choices-test, half a day). *Recommended: (b)*: si's one number syntax, the report's; (c) when a corpus calls `string->number` on such text.
+- **SCS20 The Unicode scan in the gate.** `bin/si unicode-scan` is by hand. (a) leave (the record holds Chez's answers; a change to si's
+  tables shows at `ucd check` only as a byte difference, not as an answer); (b) a part of `si-check` (`--full`, light: 26 s, 0.51 GB, no
+  Chez, si's output against the recorded digest), its negative control the scan with one generated table replaced (`IsNumeric` by the
+  N categories: 8 lines differ); (c) (b) in the essential `si-essential` too. *Recommended: (b)*: si's `(rnrs unicode)` then has a check
+  that names every answer, at night's cost of half a minute.
+- **SCS21 `string-titlecase`'s word breaks.** si's `dcWB` states UAX #29's word-break classes by hand (the MidLetter, MidNum, MidNumLet and
+  ExtendNumLet characters listed, the rest by category and Alphabetic), equal to Chez on the 26 contextual strings only.
+  (a) leave; (b) fetch `auxiliary/WordBreakProperty.txt` of UCD 16.0.0 by pin (a fourth file), generate the classes, and scan
+  `string-titlecase` over every pair `a<c>b` with c a scalar value against Chez (about a day); (c) (b) without the scan.
+  *Recommended: (b)*: titlecasing then follows the pin as the rest of `(rnrs unicode)` does, and the scan finds what the hand list misses.
