@@ -31,6 +31,14 @@
 #                  pack's bindings of names the own STG does not define kept): LIB_STG_REPLACE=equal (the default) the
 #                  own exported bindings judged equal to GHC's -O0 alone, with their internal closures; all: every own
 #                  binding; a pass lost is a failure
+#   --ifaces own   HF10-P3 (doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P3 (first slice)"): each module compiled against
+#                  the front end's own interfaces, bottom-up (the closures of lib-check --ifaces own, run first: its plan and
+#                  pool), in .tmp/repr-haskell/lib-stg-own/; --run then runs the programs, compiled against the pack's
+#                  interfaces with ghc-internal's replaced by the own ones (REPR_HASKELL_RUN_IFACES_OVER), on two coherent -O0
+#                  sets without a merge: ghc0, GHC's -O0 STG of ghc-internal, base, ghc-prim and ghc-bignum (the -O0 pack),
+#                  the other packages the -O2 pack's; own, the same with every ghc-internal module the front end made STG of
+#                  replaced by its own STG whole (a module it did not make keeps GHC's -O0; LIB_STG_REPLACE=equal: only the
+#                  modules whose every binding equals GHC's). A pass of ghc0 lost on own fails
 #
 # Environment: LIB_STG_REUSE=1 (the last run's STG and results kept, --run alone), LIB_STG_REF (GHC's -O0 STG, a directory of
 # PKG/M.stg.ae; default the pack haskell-stg-libs-O0-ghc-9.14.1; LIB_STG_LIVE=1: .tmp/hsi/dumps-O0/stg, made when missing by
@@ -41,7 +49,7 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
 . "$root/bin/lib/tools.bash"
-only=$root/test/haskell/lib-stg.txt every="" jobs=1 record="" judge="" run="" ids=() whole=whole
+only=$root/test/haskell/lib-stg.txt every="" jobs=1 record="" judge="" run="" ids=() whole=whole ifaces=ghc
 while [ $# -gt 0 ]; do
   case $1 in
     --only) only=$2; whole=partial; shift 2 ;;
@@ -49,12 +57,18 @@ while [ $# -gt 0 ]; do
     --jobs) jobs=$2; shift 2 ;;
     --record) record=$2; shift 2 ;;
     --judge) judge=$2; shift 2 ;;
+    --ifaces) ifaces=$2; shift 2 ;;
     --run) run=1; shift; while [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; do ids+=("$1"); shift; done ;;
     *) echo "lib-stg: unknown argument $1" >&2; exit 2 ;;
   esac
 done
 w=$root/.tmp/repr-haskell/lib-stg
 lc=$root/.tmp/repr-haskell/lib-check/iface2/ghc-internal
+own=$root/.tmp/repr-haskell/lib-check/own/ghc-internal
+if [ "$ifaces" = own ]; then
+  w=$root/.tmp/repr-haskell/lib-stg-own
+  [ -s "$own/plan.txt" ] || { echo "lib-stg --ifaces own: no own closures ($own/plan.txt): bin/repr-haskell lib-check --ifaces own first" >&2; exit 1; }
+fi
 mkdir -p "$w"
 # the other packages' STG: HSI_LIBS, else the pack haskell-stg-libs (GHC's -O2 STG, the installed libraries' ABI), its keys checked
 if [ -n "${HSI_LIBS:-}" ]; then libs=$HSI_LIBS
@@ -71,14 +85,15 @@ if [ -n "${LIB_STG_LIVE:-}" ] && { [ ! -d "$ref/ghc-internal" ] || [ ! -d "$ref/
 fi
 # lib-check's plan (its closures: the interfaces of the pack haskell-lib-ifaces-ghc-9.14.1, HF9-P1 (a); no GHC), made afresh
 # unless LIB_STG_REUSE keeps the last
-if [ -z "${LIB_STG_REUSE:-}" ] || [ ! -s "$lc/plan.txt" ]; then
+if [ "$ifaces" != own ] && { [ -z "${LIB_STG_REUSE:-}" ] || [ ! -s "$lc/plan.txt" ]; }; then
   LIB_CHECK_PLAN_ONLY=1 "$root/bin/lib/repr-haskell/lib-check" > "$w/plan.log" 2>&1 || { tail -5 "$w/plan.log" >&2; exit 1; }
 fi
 plan=$w/plan.txt
-if [ -n "$every" ]; then awk -v n="$every" 'NR % n == 1 || n == 1' "$lc/plan.txt" > "$plan"
+src_plan=$lc/plan.txt; [ "$ifaces" != own ] || src_plan=$own/plan.txt
+if [ -n "$every" ]; then awk -v n="$every" 'NR % n == 1 || n == 1' "$src_plan" > "$plan"
 else
   grep -v '^#' "$only" | awk 'NF {print $1}' > "$w/only.txt"
-  awk -F'\t' 'NR == FNR {w[$1] = 1; next} ($1 in w)' "$w/only.txt" "$lc/plan.txt" > "$plan"
+  awk -F'\t' 'NR == FNR {w[$1] = 1; next} ($1 in w)' "$w/only.txt" "$src_plan" > "$plan"
 fi
 echo "== lib-stg: $(wc -l < "$plan") modules" >&2
 out=$w/out
@@ -151,6 +166,48 @@ mkset() { # DIR OWN?
   [ ${#args[@]} = 0 ] || arbace_tool -m arbace.repr.haskell.libcheck merge "$mode" "$w/results.edn" "${args[@]}" > "$w/replaced.txt"
   awk '{o+=$2; k+=$3} END{print "lib-stg --run: " NR " modules replaced: " o " exported bindings Arbace'"'"'s own, " k " of the pack'"'"'s kept for its ABI"}' "$w/replaced.txt"
 }
+if [ "$ifaces" = own ]; then
+  # HF10-P3: the two coherent -O0 sets, no merge
+  o0=$("$root/bin/hsi" libs-pack -O0 2> "$w/ref0.err") || { cat "$w/ref0.err" >&2; exit 1; }
+  mk0() { # DIR OWN?
+    local d=$1 o=$2 p f m n=0 k=0
+    rm -rf "$d"; mkdir -p "$d"
+    IFS=: read -r -a dirs <<< "$libs"
+    local ps=("$o0"/*/) l
+    for l in "${dirs[@]}"; do ps+=("$l"/*/); done
+    for p in "${ps[@]}"; do
+      p=${p%/}; [ -d "$p" ] && [ ! -e "$d/$(basename "$p")" ] || continue
+      mkdir -p "$d/$(basename "$p")"
+      for f in "$p"/*; do ln -s "$f" "$d/$(basename "$p")/$(basename "$f")"; done
+    done
+    rm -rf "$w/image-$(basename "$d" | sed 's/^libs-//')"
+    [ "$o" = 1 ] || return 0
+    # LIB_STG_REPLACE=all (the default here): every module the front end made STG of; equal: the modules whose every binding
+    # equals GHC's -O0 (the same names and code: the set stays coherent with GHC's other modules)
+    arbace_tool -m arbace.repr.haskell.libcheck replaceable "$w/results.edn" "${LIB_STG_REPLACE:-all}" > "$w/replaceable.txt"
+    for f in "$out"/stg/ghc-internal/*.stg.ae; do
+      [ -f "$f" ] || continue
+      m=$(basename "$f" .stg.ae)
+      grep -q -x -F "$m" "$w/replaceable.txt" || continue
+      if [ -e "$d/ghc-internal/$m.stg.ae" ]; then rm -f "$d/ghc-internal/$m.stg.ae"; ln -s "$f" "$d/ghc-internal/$m.stg.ae"; n=$((n + 1)); else k=$((k + 1)); fi
+    done
+    echo "lib-stg --run --ifaces own: $n modules of ghc-internal Arbace's own STG, $(($(ls "$d/ghc-internal" | wc -l) - n)) GHC's -O0 ($k own without a module of GHC's)"
+  }
+  ga=(); [ ${#ids[@]} = 0 ] || ga=("${ids[@]}")
+  for side in ghc0 own; do
+    mk0 "$w/libs-$side" "$([ $side = own ] && echo 1 || echo 0)"
+    echo "== lib-stg --run --ifaces own: run-check on the $side set" >&2
+    HSI_LIBS=$w/libs-$side HSI_IMAGE=$w/image-$side REPR_HASKELL_FRONT_SHARDS=${REPR_HASKELL_FRONT_SHARDS:-1} \
+      REPR_HASKELL_RUN_IFACES=pack REPR_HASKELL_RUN_IFACES_OVER=$own/pool \
+      "$root/bin/repr-haskell" run-check "${ga[@]}" > "$w/run-$side.log" 2>&1 || true
+    rm -rf "$w/run-$side"; mkdir -p "$w/run-$side"
+    cp "$root/.tmp/repr-haskell/run-check/results.edn" "$w/run-$side/results.edn"
+    cp "$root/.tmp/repr-haskell/run-check/front.txt" "$w/run-$side/front.txt" 2> "$w/front-cp.err" || true
+    grep '^run-check:' "$w/run-$side.log" | sed "s/^/  $side: /"
+  done
+  arbace_tool -m arbace.repr.haskell.libcheck compare-runs "$w/run-ghc0/results.edn" "$w/run-own/results.edn" | tee "$w/runs.txt" || st=1
+  exit $st
+fi
 mode=${LIB_STG_REPLACE:-equal}
 ga=(); [ ${#ids[@]} = 0 ] || ga=("${ids[@]}")
 for side in ghc own; do

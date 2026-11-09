@@ -1079,6 +1079,16 @@ covers what.
   second slice's checking mode, implications, pattern synonyms, DataToTag, WithDict, the implicit parameters' bindings and
   defaulting) are Arbace's own, GHC's `compiler/GHC/Tc/` read as their specification; `deriv.ae`'s second-slice tables
   (primOrdOps' ordOpTbl, boxConTbl, postfixModTbl of `compiler/GHC/Tc/Deriv/Generate.hs`) are under the file's GHC notice.
+- `arbace/repr/haskell/ownface.ae` (the front end's own interfaces, HF10-P3, doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P3
+  (first slice)"): written after GHC 9.14.1, https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz (SHA-256
+  `2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77`, the corpus's pin): what `mkIface_` of
+  `compiler/GHC/Iface/Make.hs` writes and `addExternal`/`trimId` of `compiler/GHC/Iface/Tidy.hs` expose at -O0 (with
+  `compiler/GHC/Driver/Config/Tidy.hs`'s ExposeNone and `compiler/GHC/IfaceToCore.hs`'s tcIdInfo), `dataConSrcToImplBang` of
+  `compiler/GHC/Types/Id/Make.hs`, the wired-in definitions of `compiler/GHC/Builtin/Types.hs` (multiplicityTyCon's constructors,
+  heqClass's, eqClass's and coercibleClass's superclasses, the kinds' invisible binders of unboxedSoloTyCon, coercibleTyCon,
+  eqTyCon, heqTyCon, anyTyCon) and the built-in families of `compiler/GHC/Builtin/Types/Literals.hs`, by hand on 2026-11-09, the
+  file carrying GHC's notice (the Glasgow Haskell Compiler License, "GHC: the Glasgow Haskell Compiler License" below); the
+  judge (`compare-ifaces`) and `libcheck.ae`'s HF10-P3 verbs (`own-order`, `own`, `rank-own`) are Arbace's own.
 - `arbace/repr/haskell/rename.ae` (repr/haskell's renamer, HF2, doc/haskell/FRONTEND-SURVEY.md, "As built: HF1-HF2"):
   ports of GHC 9.14.1, https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz (SHA-256
   `2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77`, the corpus's pin): `mkOpAppRn`,

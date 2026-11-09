@@ -24,6 +24,17 @@
 #                   one fails under the identity the pack records, is reported when GHC moved), then the crossed pair (one
 #                   module's fresh interface against another's packed, which must differ); needs GHC
 #   --verb iface    with --live: the helper's first verb, as HF9's slices measured (no hidden module, exported things only)
+#   --ifaces own    HF10-P3 (doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P3 (first slice)"): the package compiled
+#                   bottom-up on the front end's own interfaces: the plan's modules and the package's hs-boot files in
+#                   dependency order (libcheck own-order), each renamed and elaborated against the own interfaces of the
+#                   modules its closure names (the same module names as GHC's closure; a module not compiled yet its boot
+#                   file's, GHC.Internal.Prim the wired-in interface, GHC's), then its own interface written into
+#                   .tmp/repr-haskell/lib-check/own/PKG/pool (arbace.repr.haskell.ownface) and judged: its binders' types
+#                   against GHC's interface of the module as without it, and the interface against GHC's fact by fact
+#                   (libcheck rank-own). --record and --judge take the own run's record (test/haskell/lib-check-own-PKG.edn).
+#                   GHC's interfaces are only the judge's: the pack's closures name the modules, its interfaces are compared
+#                   with. One process (the order is sequential); a module over the limit is :timeout, the rest goes on.
+#                   The whole package (no --only, --every); LIB_CHECK_OWN_ONLY=N stops after the first N units (a sample)
 #   --package PKG   ghc-internal (default) or base (each base module with Prelude among its imports)
 #   --every N       every Nth module of the package (a sample), in file order
 #   --only FILE     the modules FILE names (GHC/Internal/X paths, one a line)
@@ -43,7 +54,7 @@ root=$(cd "$(dirname "$0")/../../.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
 . "$root/bin/lib/tools.bash"
 . "$root/bin/lib/repr-haskell/records.bash"
-pkg=ghc-internal every=1 only="" jobs=1 record="" judge="" live="" record_pack="" verb=iface2 verify="" sample=8
+pkg=ghc-internal every=1 only="" jobs=1 record="" judge="" live="" record_pack="" verb=iface2 verify="" sample=8 ifaces=ghc
 while [ $# -gt 0 ]; do
   case $1 in
     --package) pkg=$2; shift 2 ;;
@@ -57,6 +68,7 @@ while [ $# -gt 0 ]; do
     --verb) verb=$2; shift 2 ;;
     --verify-pack) verify=1; live=1; shift ;;
     --sample) sample=$2; shift 2 ;;
+    --ifaces) ifaces=$2; shift 2 ;;
     *) echo "lib-check: unknown argument $1" >&2; exit 2 ;;
   esac
 done
@@ -215,6 +227,45 @@ while read -r f; do
 done < "$w/files.txt"
 echo "== lib-check: $(wc -l < "$plan") judged, $hidden without GHC's interface" >&2
 [ -z "${LIB_CHECK_PLAN_ONLY:-}" ] || exit 0
+if [ "$ifaces" = own ]; then
+  # HF10-P3: bottom-up on the own interfaces (the whole plan's order, cut to the run's modules for --only/--every)
+  ow=${LIB_CHECK_OWN_OUT:-$root/.tmp/repr-haskell/lib-check/own/$pkg}
+  mkdir -p "$ow"
+  [ -z "$partial" ] || { echo "lib-check: --ifaces own compiles the whole package in dependency order (no --only, --every)" >&2; exit 2; }
+  arbace_tool -m arbace.repr.haskell.libcheck own-order "$plan" > "$ow/order.txt"
+  [ -z "${LIB_CHECK_OWN_ONLY:-}" ] || { head -n "$LIB_CHECK_OWN_ONLY" "$ow/order.txt" > "$ow/order.cut"; mv "$ow/order.cut" "$ow/order.txt"; }
+  rm -rf "$ow/pool" "$ow/boot" "$ow/ln" "$ow/work"
+  echo "== lib-check --ifaces own: $(wc -l < "$ow/order.txt") units in dependency order ($(grep -c '^boot' "$ow/order.txt") boot files)" >&2
+  : > "$ow/results.edn"
+  while :; do
+    done=$(wc -l < "$ow/results.edn")
+    tail -n +$((done + 1)) "$ow/order.txt" > "$ow/order.rest"
+    [ -s "$ow/order.rest" ] || break
+    GOMEMLIMIT=${GOMEMLIMIT:-1500MiB} arbace_tool -m arbace.repr.haskell.libcheck own --order "$ow/order.rest" --units "$ow/order.txt" -o "$ow" \
+      --wired "$pool" --ghc-pool "$pool" --timeout "${LIB_CHECK_TIMEOUT:-900}" >> "$ow/results.edn" 2>> "$ow/err" && break
+    [ "$(wc -l < "$ow/results.edn")" -gt "$done" ] || break
+  done
+  # the modules' rows (the boot files' apart) in lib-check's format, and the plan for lib-stg --ifaces own (the closures
+  # as lists of the own interfaces: @FILE)
+  grep -a ':kind :full' "$ow/results.edn" > "$ow/modules.edn" || true
+  awk -F'\t' '$1 == "full" {print $2 "\t" $3 "\t@'"$ow"'/ln/" $2 ".txt\t" $4}' "$ow/order.txt" > "$ow/plan.txt"
+  arbace_tool -m arbace.repr.haskell.libcheck rank "$ow/modules.edn" | tee "$ow/rank.txt"
+  arbace_tool -m arbace.repr.haskell.libcheck rank-own "$ow/results.edn" | tee -a "$ow/rank.txt"
+  if [ -n "$record" ]; then
+    arbace_tool -m arbace.repr.haskell.libcheck record "$ow/modules.edn" "$record" "$([ -n "$partial" ] && echo partial || echo whole)" \
+      "the front end's own, bottom-up (--ifaces own; the judge's: the pack $(oracle_pin_name "$pin") at $(oracle_pin_sha "$pin"))"
+  fi
+  st=0
+  if [ -n "$judge" ]; then
+    arbace_tool -m arbace.repr.haskell.libcheck judge "$judge" "$ow/modules.edn" "$([ -n "$partial" ] && echo partial || echo whole)" || st=1
+  fi
+  # the interface judge's negative control (GTS81 (a)): an own interface against another module's GHC interface, renamed
+  while IFS=$'\t' read -r subj other; do
+    case $subj in ''|'#'*) continue ;; esac
+    arbace_tool -m arbace.repr.haskell.libcheck own-control "$ow/pool" "$pool" "$subj" "$other" || st=1
+  done < "$controls"
+  exit $st
+fi
 rm -f "$out"/shard.*
 split -n "l/$jobs" -d "$plan" "$out/shard."
 pids=()
