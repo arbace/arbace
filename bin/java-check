@@ -176,7 +176,17 @@
 #                      test/java/ref-jdk26.edn (--only REGEX: the plans it finds, by a plan's text or its
 #                      test's id, "ID " (JCV12 (b): none planned fails), the other tests' lines kept
 #                      byte for byte and checked to be, JCS68 (a); kind.diagnostics, the golden tests).
-#                      JDK names the jdk26u checkout (default /root/jdk26u), its commit the platform's
+#                      JDK names the jdk26u checkout (default /root/jdk26u), its commit the platform's.
+#                      JCS330-JCS333 ("As built: JCS330-JCS333"): a corpus admitting :run-lib or :framework
+#                      (test/java/corpora.edn's :base) takes the tests that name an @library or run under TestNG
+#                      or JUnit; their source sets have the libraries as jtreg resolves them (java.check/
+#                      library-dirs, TEST.properties' modules and lib.dirs) and, for a framework test, the check's
+#                      own runner (test/java/runner, ROOT: in the reference's :files) on javac's source path
+#                      (record_sources' srcroot lines), the library files in their packages, named relative to
+#                      the test's directory (../ paths); a framework action runs org.arbace.jtreg.Runner KIND
+#                      CLASS on both sides, judged by its status (the runner's verdict, verdicts.edn). A change
+#                      to test/java/runner changes every framework test's source set: record them again
+#                      (--only $'category\tframework'); test/java/runner-test.bash is the runner's own check
 #   bin/java-check --forms verify|update
 #                      the essential tests' forms (test/java/forms/ID, test/java/forms/provenance.edn):
 #                      read on javac's tool executable through the read level's cache (JAVA_CHECK_FORMS:
@@ -261,25 +271,50 @@ mask_dirs() { LC_ALL=C sed -e "s|$1|W|g" -e "s|$2|TMP|g" -e "s|$work|WORK|g" -e 
 # ---------------------------------------------------------------------------------------------
 # the reference
 
-# record_sources ID: the test's source set, javac -verbose -sourcepath DIR's parsed files
+# src_of DIR REL: a source set's file REL of a test in DIR (java.check/src-file): DIR/REL (a library's file
+# too, a ../ path), or with ROOT: the checkout's (JCS331 (a): the framework runner's, test/java/runner)
+src_of() { case $2 in ROOT:*) printf '%s\n' "$root/${2#ROOT:}" ;; *) printf '%s\n' "$1/$2" ;; esac; }
+
+# src_rel DIR ABS: the source set's name of the file ABS (src_of's inverse): ROOT:REL under the checkout's
+# test/java/runner, else ABS relative to DIR (a library's file under jdk26u's test/ a ../ path)
+src_rel() {
+  case $2 in
+    "$root"/test/java/runner/*) printf 'ROOT:%s\n' "${2#"$root"/}" ;;
+    *) realpath -m --relative-to="$1" "$2" ;;
+  esac
+}
+
+# record_sources ID: the test's source set, javac -verbose -sourcepath DIR's parsed files; JCS330 (a), JCS331
+# (a): with the plan's source roots (srcroot ABS: the test's @library directories, the framework runner's) on
+# the source path after DIR, as jtreg compiles a test with its libraries, an @build class looked up in DIR and
+# then in each root, and the parsed files of the roots named by src_rel
 record_sources() {
-  local id=$1 d=$work/record/$1 dir opts=() files=() k a b
+  local id=$1 d=$work/record/$1 dir opts=() files=() k a b roots=() sp=. r
   dir=$(awk -F'\t' '$1=="dir"{print $2}' "$d/plan.tsv")
   grep -q '^skip' "$d/plan.tsv" && return 0
   grep -q '^kind	diagnostics' "$d/plan.tsv" && return 0 # record_diag's
   while IFS=$'\t' read -r k a b; do
     case $k in
       javac) [ "$a" = -Werror ] || opts+=("$a") ;;
+      srcroot) roots+=("$a"); sp+=":$a" ;;
       compile) files+=("$a") ;;
       build|run) [ "$k" = run ] && a=$b
-                 [ -f "$dir/${a//.//}.java" ] && files+=("${a//.//}.java") ;;
+                 if [ -f "$dir/${a//.//}.java" ]; then files+=("${a//.//}.java")
+                 else for r in ${roots[@]+"${roots[@]}"}; do [ -f "$r/${a//.//}.java" ] && { files+=("$r/${a//.//}.java"); break; }; done; fi ;;
     esac
   done < "$d/plan.tsv"
   rm -rf "$d/s1"; mkdir -p "$d/s1"
-  if (cd "$dir" && javac -J-Xmx1g -verbose -implicit:class -sourcepath . -d "$d/s1" -nowarn ${opts[@]+"${opts[@]}"} "${files[@]}") > "$d/s1.log" 2>&1; then
+  if (cd "$dir" && javac -J-Xmx1g -verbose -implicit:class -sourcepath "$sp" -d "$d/s1" -nowarn ${opts[@]+"${opts[@]}"} "${files[@]}") > "$d/s1.log" 2>&1; then
+    if [ ${#roots[@]} = 0 ]; then
     # explicit files as SimpleFileObject[PATH], the source path's as DirectoryFileObject[.:REL]
     sed -n -e 's|^\[parsing started SimpleFileObject\[\(.*\)\]\]$|\1|p' -e 's|^\[parsing started DirectoryFileObject\[\.:\(.*\)\]\]$|\1|p' "$d/s1.log" \
       | sed -e "s|^$dir/||" -e 's|^\./||' | { grep -v '^/' || true; } | LC_ALL=C sort -u > "$d/sources.txt"
+    else
+    # with source roots: each parsed file made absolute (DirectoryFileObject[ROOT:REL], a SimpleFileObject's
+    # path relative to DIR or absolute), then named by src_rel
+    sed -n -e 's|^\[parsing started SimpleFileObject\[\(.*\)\]\]$|\1|p' -e 's|^\[parsing started DirectoryFileObject\[\(.*\):\([^:]*\)\]\]$|\1/\2|p' "$d/s1.log" \
+      | while IFS= read -r a; do case $a in /*) ;; *) a=$dir/$a ;; esac; src_rel "$dir" "$a"; done | LC_ALL=C sort -u > "$d/sources.txt"
+    fi
   else
     : > "$d/sources.txt"; grep -m1 'error' "$d/s1.log" | cut -c1-300 > "$d/sources.err" || true
   fi
@@ -299,7 +334,7 @@ record_runs() {
   rm -rf "$d/src" "$cls_dir" "$d/classes-g0"; mkdir -p "$d/src" "$cls_dir" "$d/classes-g0"
   while IFS=$'\t' read -r rel dst pre; do
     mkdir -p "$(dirname "$d/src/$dst")"
-    { [ "$pre" = 1 ] && printf 'package %s; ' "$id"; cat "$dir/$rel"; } > "$d/src/$dst"
+    { [ "$pre" = 1 ] && printf 'package %s; ' "$id"; cat "$(src_of "$dir" "$rel")"; } > "$d/src/$dst"
     files+=("$dst")
   done < "$d/rename.tsv"
   st=0; (cd "$d/src" && javac -J-Xmx1g -nowarn -XDsuppressNotes -implicit:none -d "$cls_dir" ${opts[@]+"${opts[@]}"} "${files[@]}") > "$d/javac.log" 2>&1 || st=$?
@@ -316,10 +351,13 @@ record_runs() {
   read -r w tmp <<< "$(run_dirs "$id")"
   while IFS=$'\t' read -r -a x; do
     i=${x[0]}; cls=${x[2]}
+    # JCS335 (a): the run's system properties (props.tsv: I, then each -Dk=v), before the class as jtreg gives them
+    local jprops=() pl
+    if [ -s "$d/props.tsv" ]; then pl=$(awk -F'\t' -v i="$i" '$1 == i' "$d/props.tsv"); [ -z "$pl" ] || { IFS=$'\t' read -r -a jprops <<< "$pl"; jprops=("${jprops[@]:1}"); }; fi
     for k in "" 2; do
       rm -rf "$w" "$tmp"; mkdir -p "$w" "$tmp"
       st=0; (cd "$w" && TMPDIR=$tmp timeout -k 5 "$(jdk_run_limit "${x[1]}")" java -Xmx2g ${jexp[@]+"${jexp[@]}"} -cp "$cls_dir" -Dtest.src="$dir" -Dtest.classes="$cls_dir" \
-               -Djava.io.tmpdir="$tmp" "$cls" "${x[@]:3}" < "$work/empty" > "$d/out" 2> "$d/err") || st=$?
+               -Djava.io.tmpdir="$tmp" ${jprops[@]+"${jprops[@]}"} "$cls" "${x[@]:3}" < "$work/empty" > "$d/out" 2> "$d/err") || st=$?
       echo $st > "$d/run$i.exit$k"
       # the run's directories masked (JCS70 (a)); a mark when they were in stdout
       mask_dirs "$w" "$tmp" < "$d/out" > "$d/out.m"
@@ -362,7 +400,7 @@ record_ref() {
     [ -s "$list" ] || { echo "java-check --record-ref: --only '$only' plans no test (it is matched against each plan's text and each test's id)" >&2; return 1; }
   fi
   echo "== java-check: the source sets of $(wc -l < "$list") tests (javac -verbose -sourcepath), $jobs at a time" >&2
-  export -f record_sources record_runs jdk_run_limit classes_sha first_line mask_hashes mask_dirs run_dirs
+  export -f src_of src_rel record_sources record_runs jdk_run_limit classes_sha first_line mask_hashes mask_dirs run_dirs
   export root work classes_opts_s="${classes_opts[*]}"
   xargs -a "$list" -P "$jobs" -I{} bash -c 'record_sources "$1"' _ {}
   jc rename "$work" > "$work/rename.txt"
@@ -568,7 +606,7 @@ tool_test() {
   local k rel dst pre
   while IFS=$'\t' read -r k rel dst pre; do
     [ "$k" = file ] || continue
-    grep -vE '^[[:space:]]*(\*|//|/\*)' "$dir/$rel" 2>/dev/null | grep -qE "$tool_re" && return 0
+    grep -vE '^[[:space:]]*(\*|//|/\*)' "$(src_of "$dir" "$rel")" 2>/dev/null | grep -qE "$tool_re" && return 0
   done < "$p/plan.tsv"
   return 1
 }
@@ -587,7 +625,7 @@ classes_test() {
   local k rel dst pre
   while IFS=$'\t' read -r k rel dst pre; do
     [ "$k" = file ] || continue
-    grep -vE '^[[:space:]]*(\*|//|/\*)' "$dir/$rel" 2>&1 | grep -qE "$cf_re" && return 0
+    grep -vE '^[[:space:]]*(\*|//|/\*)' "$(src_of "$dir" "$rel")" 2>&1 | grep -qE "$cf_re" && return 0
   done < "$p/plan.tsv"
   return 1
 }
@@ -723,11 +761,11 @@ test_limit() {
 # prints ID<TAB>LEVEL<TAB>RESULT<TAB>REASON, the first action not passing its result; each action
 # under the test's limit (test_limit: its line in test/java/timeouts.txt, GTS102)
 run_actions() {
-  local level=$1 exe=$2 mode=$3 fdir=$4 res="" i st w tmp lim st0="" res0="" cres n tmo vk gold ores="" ojr jst
-  local -a x c props=()
+  local level=$1 exe=$2 mode=$3 fdir=$4 res="" i st w tmp lim st0="" res0="" cres n tmo vk gold ores="" ojr jst pl
+  local -a x c props=() props0=() pa=()
   # F6: a tool test interpreted on javac's tool, its system compiler against the platform
   if [ "$level" = interp ] && [ -n "${texe:-}" ] && tool_test; then
-    exe=$texe props=(-Djdk.internal.jrt.javac.platform="$tplatform")
+    exe=$texe props0=(-Djdk.internal.jrt.javac.platform="$tplatform")
   fi
   # JCV1: whose verdict judges the test (java.check/plan's verdict line, test/java/verdicts.edn): status, the
   # test's own (judge_own; the JDK's record judged too, the oracle tier's row LEVEL.jdk when it says otherwise),
@@ -743,6 +781,10 @@ run_actions() {
   while [ -z "$res" ] && IFS=$'\t' read -r -a x; do
     [ "${x[0]}" = run ] || continue
     i=${x[1]}
+    # JCS335 (a): the action's system properties (the plan's props line of run I), given to run.ae as -Dk=v
+    props=(${props0[@]+"${props0[@]}"})
+    pl=$(awk -F'\t' -v i="$i" '$1 == "props" && $2 == i' "$p/plan.tsv")
+    [ -z "$pl" ] || { IFS=$'\t' read -r -a pa <<< "$pl"; props+=("${pa[@]:2}"); }
     # a timeout is run again once at twice the limit before it counts (JCS47 (a): the host's load
     # moved the tests near the limit between runs)
     n=0
@@ -1091,7 +1133,7 @@ check_one() {
     while IFS=$'\t' read -r k rel dst pre; do
       [ "$k" = file ] || continue
       mkdir -p "$(dirname "$p/src/$dst")"
-      { printf '%s' "$pre"; cat "$dir/$rel"; } > "$p/src/$dst"
+      { printf '%s' "$pre"; cat "$(src_of "$dir" "$rel")"; } > "$p/src/$dst"
       files+=("$dst")
     done < "$p/plan.tsv"
   fi
@@ -1344,7 +1386,7 @@ check() {
   jc plan "$ref" "$work" ${pargs[@]+"${pargs[@]}"} >&2
   jc plan-diag "$ref" "$work" "$levels" >&2
   echo "== java-check: $(wc -l < "$work/run.list") tests at the levels $levels, $jobs at a time (the executable $rexe${texe:+; the tests naming the javac API on $texe})" >&2
-  export -f tool_test classes_test test_classes cover_env cover_settle limited limited_cpu attempt_limits timeout_kind note_attempt program_tmo test_limit check_one nread_one read_opts read_finished first_line root_cause classes_sha classes_verdict judge run_actions run_dirs mask_hashes mask_dirs test_dir check_diag diag_actions diag_root diag_norm diag_first_diff diag_golden diag_judge judge_own judge_golden
+  export -f src_of tool_test classes_test test_classes cover_env cover_settle limited limited_cpu attempt_limits timeout_kind note_attempt program_tmo test_limit check_one nread_one read_opts read_finished first_line root_cause classes_sha classes_verdict judge run_actions run_dirs mask_hashes mask_dirs test_dir check_diag diag_actions diag_root diag_norm diag_first_diff diag_golden diag_judge judge_own judge_golden
   reset_timeout_log "$work/timeout-attempts.tsv"
   export root work formsc forms_only save jdktest levels timeout from_committed load rexe texe tplatform tool_re cf_re reader_key="${reader_key:-}" classes_opts_s="${classes_opts[*]}"
   xargs -a "$work/run.list" -P "$jobs" -I{} bash -c 'classes_opts=($classes_opts_s); check_one "$1"' _ {} | LC_ALL=C sort > "$work/results.tsv"

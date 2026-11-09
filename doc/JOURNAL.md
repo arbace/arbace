@@ -3536,3 +3536,64 @@ Recorded in doc/rust/FRONTEND-SURVEY.md, "As built: RF11 (first slice)".
   unchanged (Rust 75.0 / 75.0 / 95.8 / 80.0): an own case still consumes rustc's records, so the eval stage stays 0.5 (RES54 (a);
   `independence.edn` counts the own cases). Proposed: RFP42-RFP47.
 
+## 2026-11-09 JCS330-JCS333 built: jtreg's libraries and the TestNG/JUnit runs in Java's check (branch `java-testlib`, from `java-night` 9e6160bbb)
+
+The user accepted JCS330 (a), JCS331 (a), JCS332 (a), JCS333 (a) as java-props2's survey recommends (~09:30). Built by an agent
+in the light tier; the JDK of jdk26u's build (at the platform's pin) ran by hand as the oracle (`--record-ref --only`). Sources:
+jtreg's tag specification as the survey reads it (`@library`, `external.lib.roots`, `TEST.properties`' `modules` and `lib.dirs`),
+TestNG's documentation, the JUnit 5 user guide and API documentation, JUnit 4's API documentation; jdk26u's `test/lib`
+(jdk.test.lib) and the tests read in place at `baf63fbe42b8`. No framework source was fetched or vendored (none is in the main
+checkout, nor needed): the runner and the API subsets are Arbace's own, clean-room (doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As
+built: JCS330-JCS333").
+
+- `java.check`: `categorize`'s `:base` (the category without the libraries and the framework), `corpus-of`'s `:base` filter,
+  `library-dirs` (jtreg's resolution), `with-dir-defaults` (TEST.properties), `run-plan`'s `srcroot` lines and the runner's main
+  action, `rename`'s runner argument, `src-file` (the `ROOT:` names), the framework tests' `:status` verdict.
+- `bin/java-check`: `src_of`/`src_rel`, `record_sources` with the source roots (the old path byte for byte when a test has none).
+- `test/java/runner/` (66 files) and its self-test `test/java/runner-test.bash` (10 fixtures; 10 of 10 on the JDK).
+- `test/java/corpora.edn`: `:java-util-lib` (51) and `:java-util-framework` (204), its own commit. java.net.http's corpora, the
+  survey's first, were tried and dropped: its TEST.properties makes all 373 of its tests `:run-modules` (JCS334 proposed).
+  Alternatives: a corpus for all of `:run-lib` (JCS332 (b), declined by the decision); vendoring TestNG and JUnit (JCS331 (b),
+  declined; and nothing to vendor from without the network).
+- Measured on a sample of 30 (the survey's table): JDK 29 pass; read 29, classes 29 (29 the JDK's class files), interp 1 (the other
+  28 load-failed on F14's and F9's members, which the day's executable predates). No reference line committed: `bin/reap` requires
+  every level's record for each reference test and the compiled level is the night's. The sample's lines and verdicts are in the
+  worktree's `.tmp/sample-ref-verdicts.patch`.
+
+The night's commands (on java-night's build, which has F9 and F14; JAVA_CHECK_EXE its executable, REPR_JAVA_EXE its javac tool):
+
+    test/java/runner-test.bash                                                     # 10 of 10 expected
+    bin/java-check --record-ref --jobs 8 --only $'corpus\tjava-util-(lib|framework)$'
+    bin/java-check verdicts
+    bin/java-check --levels read,interp,classes,print --corpus java-util-lib,java-util-framework --record
+    bin/heavy-lock bin/java-check --levels compiled --corpus java-util-lib,java-util-framework --record
+    bin/reap; bin/crops-score --judge --strict                                     # then class the new failures
+
+Proposed JCS334-JCS339 (the survey).
+
+## 2026-11-09 JCS334-JCS339 built: java.net.http's tests, -D properties, plain modules, the next areas by night (branch `java-testlib2`, from `java-testlib` e3362e4ed)
+
+The user accepted JCS334 (a), JCS335 (a), JCS336 (a), JCS337 (a), JCS338 (a), JCS339 (b) (~11:10). Built by an agent in the light
+tier; the JDK of jdk26u's build (at the platform's pin, `baf63fbe42b8`) ran by hand as the oracle. Sources: jtreg's tag
+specification (`@modules` MOD/PKG and plain module names, `TEST.properties`), jdk26u's `src/*/share/classes/module-info.java`
+(the exports and provides `java.check/module-in-world?` reads), the JUnit 5 user guide's factory-method arguments (the runner's
+fix). Nothing vendored. doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JCS334-JCS339".
+
+- The library and framework corpora's `:base` in a wide mode (the plain corpora's categories unchanged: the scan at `:night 1`
+  gives every plain test the same category and corpus): `jdk/repl-exports.txt`'s `MOD/PKG` lines (java.net.http's 15, java.base's
+  5; j2g's `repl-visible?` takes them), `-D` options as data through plan, rename, the reference's `:props` and run.ae, plain
+  module names when the world has some of the module's API.
+- `test/java/corpora.edn`'s `:night` (1) and twelve corpora by night: java-net-http 2, java-lang 3, java-nio 4, java-net 5,
+  java-text 6, java-io 7 (java-util 1, java-testlib's). Alternative considered: all at once (JCS337 (b), declined).
+- `test/java/night-corpora.bash N`: the night's switch (`:night`, the Java level steps' parts, the essential step java-runner-test
+  the first time); `test/java/runner-test.bash` from committed forms (`test/java/runner-test/forms/`, `--forms update|verify`),
+  so that the essential step needs no javac's tool. Alternative considered: the step reading the fixtures afresh (needs the tool:
+  not an essential host).
+- The JDK on 31 new tests (`JAVA_CHECK_NIGHT=7 bin/java-check --record-ref --only`): 20 pass, 7 fail, 4 skips; two faults found
+  and fixed (a `-D` value naming a test class renamed with it; JUnit's `Object[]` factory rows spread). No reference line
+  committed (bin/reap's rule, as java-testlib); the lines in the worktree's `.tmp/sample-ref-lines.edn`.
+- Checks: corpora-test 10 of 10, timeouts-test pass, runner-test --jdk 10 of 10, all9-run 3,317 files 0 errors, derive --check
+  80 overlays 0 not as derived, j2g-unit all passed, bin/reap 0 problems, crops-score --judge --strict 0 problems, bin/gate --plan
+  and (after night-corpora.bash 1, reverted) --full --plan exit 0.
+
+The night's commands are the survey's. Proposed JCS340-JCS343 (the survey).
