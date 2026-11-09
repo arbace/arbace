@@ -3,8 +3,7 @@
     [os "os"]
     [filepath "path/filepath"]
     [syscall "syscall"]
-    [time "time"]
-    [unsafe "unsafe"]])
+    [time "time"]])
 
 ;; The Unix library's descriptors and files (doc/ocaml/DEFERRED-TRIAGE.md, §4 item 4, "As built: OT9's next three fixes"):
 ;; otherlibs/unix's caml_unix_* primitives of file descriptors (open, close, read, write, lseek, dup, pipe, the channels of a
@@ -15,7 +14,7 @@
 ;; outside the interpreter's lock (sysCall, Blocking), so that the other threads and domains run meanwhile. Unix.fork stays
 ;; out (OT1 (a)), select and lockf too (not yet ported: :unix-unported).
 
-(go/const ^{:doc "unixBufferSize is UNIX_BUFFER_SIZE of unixsupport.h: the most a read or write moves at once.\n"} unixBufferSize 65536)
+(go/const ^{:val 65536 :doc "unixBufferSize is UNIX_BUFFER_SIZE of unixsupport.h: the most a read or write moves at once.\n"} unixBufferSize 65536)
 
 (go/func optBool "optBool is a bool option's value (?cloexec, ?follow, ?to_dir), def when None.\n" ^bool [^Value v ^bool def]
   (when [(values b ok) (assert (* Block) v)] ok
@@ -36,7 +35,7 @@
 (go/func setCloexec "setCloexec sets or clears fd's FD_CLOEXEC.\n" [^int fd ^bool on]
   (let [f 0]
     (when on
-      (set! f syscall/FD_CLOEXEC))
+      (set! f fdCloexec))
     (syscall/Syscall syscall/SYS_FCNTL (conv uintptr fd) syscall/F_SETFD (conv uintptr f))))
 
 (go/func unixPath "unixPath is a path argument, Unix_error (ENOENT, fn, path) when it holds a NUL byte (caml_unix_check_path).\n"
@@ -164,15 +163,15 @@
             (case [0] (set! fl (bit-or fl syscall/O_RDONLY)))
             (case [1] (set! fl (bit-or fl syscall/O_WRONLY)))
             (case [2] (set! fl (bit-or fl syscall/O_RDWR)))
-            (case [3] (set! fl (bit-or fl syscall/O_NONBLOCK)))
+            (case [3] (set! fl (bit-or fl oNonblock)))
             (case [4] (set! fl (bit-or fl syscall/O_APPEND)))
             (case [5] (set! fl (bit-or fl syscall/O_CREAT)))
             (case [6] (set! fl (bit-or fl syscall/O_TRUNC)))
             (case [7] (set! fl (bit-or fl syscall/O_EXCL)))
-            (case [8] (set! fl (bit-or fl syscall/O_NOCTTY)))
-            (case [9] (set! fl (bit-or fl syscall/O_DSYNC)))
+            (case [8] (set! fl (bit-or fl oNoctty)))
+            (case [9] (set! fl (bit-or fl oDsync)))
             (case [10] (set! fl (bit-or fl syscall/O_SYNC)))
-            (case [11] (set! fl (bit-or fl syscall/O_RSYNC)))
+            (case [11] (set! fl (bit-or fl oRsync)))
             ;; O_CLOEXEC; O_KEEPEXEC (14) none: open_unix.c's rule, O_CLOEXEC wins over it, without either the default
             ;; (caml_unix_cloexec_default, false)
             (case [13] (set! cloexec true))))
@@ -270,9 +269,7 @@
           (RaiseUnixError e "lstat" p))
         (unixStat64 (addr st)))))
     (r "caml_unix_isatty" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
-      (let [^syscall/Termios t (zero syscall/Termios)
-            (values _ _ e) (syscall/Syscall syscall/SYS_IOCTL (conv uintptr (AsInt (aget a 0))) syscall/TCGETS (conv uintptr (unsafe/Pointer (addr t))))]
-        (Bool (== e 0)))))
+      (Bool (isatty (AsInt (aget a 0))))))
     (r "caml_unix_unlink" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
       (let [p (unixPath (aget a 0) "unlink")]
         (when [e (sysCall (fn ^error [] (syscall/Unlink p)))] (!= e 0)
@@ -320,7 +317,7 @@
             (case [0] (set! m (bit-or m 4)))
             (case [1] (set! m (bit-or m 2)))
             (case [2] (set! m (bit-or m 1)))))
-        (when [e (sysCall (fn ^error [] (syscall/Access p m)))] (!= e 0)
+        (when [e (sysCall (fn ^error [] (sysAccess p m)))] (!= e 0)
           (RaiseUnixError e "access" p))
         Unit)))
     (r "caml_unix_dup" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
@@ -336,7 +333,7 @@
           (let [(values _ _ e) (syscall/Syscall syscall/SYS_FCNTL (conv uintptr src) syscall/F_GETFD 0)]
             (when (!= e 0)
               (RaiseUnixError e "dup2" "")))
-          (when [err (syscall/Dup3 src dst 0)] (!= err nil)
+          (when [err (sysDup3 src dst 0)] (!= err nil)
             (RaiseUnixError (errnoOf err) "dup2" "")))
         (setCloexec dst (optBool (aget a 0) false))
         Unit)))
@@ -364,7 +361,7 @@
     (r "caml_unix_mkfifo" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
       (let [p (unixPath (aget a 0) "mkfifo")
             m (conv uint32 (AsInt (aget a 1)))]
-        (when [e (sysCall (fn ^error [] (syscall/Mkfifo p m)))] (!= e 0)
+        (when [e (sysCall (fn ^error [] (sysMkfifo p m)))] (!= e 0)
           (RaiseUnixError e "mkfifo" p))
         Unit)))
     (r "caml_unix_readlink" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
@@ -400,7 +397,7 @@
             fl 0]
         (when (optBool (aget a 0) false)
           (set! fl syscall/O_CLOEXEC))
-        (when [err (syscall/Pipe2 p fl)] (!= err nil)
+        (when [err (sysPipe2 p fl)] (!= err nil)
           (RaiseUnixError (errnoOf err) "pipe" ""))
         (Tuple (aget p 0) (aget p 1)))))
     (r "caml_unix_opendir" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]

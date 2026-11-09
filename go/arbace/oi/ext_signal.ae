@@ -6,8 +6,7 @@
     [sync "sync"]
     [atomic "sync/atomic"]
     [syscall "syscall"]
-    [time "time"]
-    [unsafe "unsafe"]])
+    [time "time"]])
 
 ;; Signals and processes (doc/ocaml/DEFERRED-TRIAGE.md, §3 fix 7, OT18 (a), "As built: OT9's fixes 6-8"): the signals of
 ;; runtime/signals.c and otherlibs/unix's signals.c, kill.c, spawn.c, wait.c, itimer.c and select.c (OCaml 5.5.0, LGPL-2.1
@@ -27,12 +26,12 @@
     ^int16 revents))
 
 (go/const
-  [pollIn 0x1]
-  [pollPri 0x2]
-  [pollOut 0x4]
-  [pollErr 0x8]
-  [pollHup 0x10]
-  [pollNval 0x20])
+  [^{:val 1} pollIn 0x1]
+  [^{:val 2} pollPri 0x2]
+  [^{:val 4} pollOut 0x4]
+  [^{:val 8} pollErr 0x8]
+  [^{:val 16} pollHup 0x10]
+  [^{:val 32} pollNval 0x20])
 
 (go/var
   [^atomic/Uint64 sigPending]
@@ -45,7 +44,7 @@
 (go/func sigBit ^uint64 [^int n] (<< (conv uint64 1) (conv uint n)))
 
 (go/func sigWatch "sigWatch has os/signal catch signal n (a handler is installed, or a thread blocks it).\n" [^int n]
-  (when (or (<= n 0) (>= n 64) (== n (conv int syscall/SIGKILL)) (== n (conv int syscall/SIGSTOP)))
+  (when (or (<= n 0) (>= n 64) (== n (conv int syscall/SIGKILL)) (== n sigStop))
     (return))
   (.Lock sigMu)
   (defer (.Unlock sigMu))
@@ -90,9 +89,9 @@
 
 (go/func sigDefault "sigDefault raises signal n again with its default action (a pending signal no handler takes).\n" [^int n]
   (when (== n (conv int syscall/SIGCHLD)) (return))
-  (when (== n (conv int syscall/SIGWINCH)) (return))
-  (when (== n (conv int syscall/SIGURG)) (return))
-  (when (== n (conv int syscall/SIGCONT)) (return))
+  (when (== n sigWinch) (return))
+  (when (== n sigUrg) (return))
+  (when (== n sigCont) (return))
   (flushStdQuiet)
   (.Lock sigMu)
   (signal/Reset (conv syscall/Signal n))
@@ -129,21 +128,9 @@
   (when (> (.-wakeW th) 0)
     (return))
   (let [p (make (slice int) 2)]
-    (when [err (syscall/Pipe2 p (bit-or syscall/O_NONBLOCK syscall/O_CLOEXEC))] (== err nil)
+    (when [err (sysPipe2 p (bit-or oNonblock syscall/O_CLOEXEC))] (== err nil)
       (set! (.-wakeR th) (aget p 0))
       (set! (.-wakeW th) (aget p 1)))))
-
-(go/func ppoll "ppoll is ppoll(2) over fds, a timeout in seconds (negative: none); its count or errno.\n" [^{:tag (slice pollFd)} fds ^float64 timeout] :results [int syscall/Errno]
-  (let [^syscall/Timespec ts (zero syscall/Timespec)
-        tp (conv uintptr 0)
-        fp (conv uintptr 0)]
-    (when (>= timeout 0)
-      (set! ts (syscall/NsecToTimespec (conv int64 (* timeout 1e9))))
-      (set! tp (conv uintptr (unsafe/Pointer (addr ts)))))
-    (when (> (len fds) 0)
-      (set! fp (conv uintptr (unsafe/Pointer (addr (aget fds 0))))))
-    (let [(values r _ e) (syscall/Syscall6 syscall/SYS_PPOLL fp (conv uintptr (len fds)) tp 0 0 0)]
-      (return (conv int r) e))))
 
 (go/func ppollRetry "ppollRetry is ppoll restarted after the interruptions of Go's own signals (its preemption), the timeout kept.\n" [^{:tag (slice pollFd)} fds ^float64 timeout] :results [int syscall/Errno]
   (let [deadline (.Add (time/Now) (conv time/Duration (* timeout 1e9)))]
@@ -265,7 +252,7 @@
       (let [p (filepath/Join dir cmd)
             ^syscall/Stat_t st (zero syscall/Stat_t)]
         (when (and (== (syscall/Stat p (addr st)) nil) (== (bit-and (.-Mode st) syscall/S_IFMT) syscall/S_IFREG)
-                   (== (syscall/Access p 1) nil))
+                   (== (sysAccess p 1) nil))
           (return p))))
     cmd))
 
@@ -289,8 +276,8 @@
         ^itimerval ov (zero itimerval)]
     (when (== which 0)
       (when (or (> value 0) (> interval 0))
-        (sigWatchIfHandled (conv int syscall/SIGALRM))))
-    (let [(values _ _ e) (syscall/Syscall syscall/SYS_SETITIMER (conv uintptr which) (conv uintptr (unsafe/Pointer (addr nv))) (conv uintptr (unsafe/Pointer (addr ov))))]
+        (sigWatchIfHandled sigAlrm)))
+    (let [e (sysItimer true which (addr nv) (addr ov))]
       (when (!= e 0)
         (RaiseUnixError e "setitimer" "")))
     (return (tvSeconds (.-interval ov)) (tvSeconds (.-value ov)))))
@@ -363,7 +350,7 @@
         (addr (lit FloatArray :F (lit (slice float64) i v))))))
     (r "caml_unix_getitimer" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
       (let [^itimerval ov (zero itimerval)
-            (values _ _ e) (syscall/Syscall syscall/SYS_GETITIMER (conv uintptr (AsInt (aget a 0))) (conv uintptr (unsafe/Pointer (addr ov))) 0)]
+            e (sysItimer false (AsInt (aget a 0)) nil (addr ov))]
         (when (!= e 0)
           (RaiseUnixError e "getitimer" ""))
         (addr (lit FloatArray :F (lit (slice float64) (tvSeconds (.-interval ov)) (tvSeconds (.-value ov))))))))
@@ -381,7 +368,7 @@
           (let [attr (addr (lit syscall/ProcAttr :Env env
                                 :Files (lit (slice uintptr) (conv uintptr (AsInt (aget red 0))) (conv uintptr (AsInt (aget red 1))) (conv uintptr (AsInt (aget red 2))))))
                 pid 0 ^error err nil]
-            (Blocking (fn [] (set! (values pid err) (syscall/ForkExec path args attr))))
+            (Blocking (fn [] (set! (values pid err) (sysForkExec path args attr))))
             (when (!= err nil)
               (RaiseUnixError (errnoOf err) "create_process" cmd))
             pid)))))
@@ -390,8 +377,8 @@
             pid (AsInt (aget a 1))]
         (range [_ f (listInts (aget a 0))]
           (if (== f 0)
-            (set! fl (bit-or fl syscall/WNOHANG))
-            (set! fl (bit-or fl syscall/WUNTRACED))))
+            (set! fl (bit-or fl wNohang))
+            (set! fl (bit-or fl wUntraced))))
         (let [^syscall/WaitStatus ws (zero syscall/WaitStatus)
               r 0 ^error err nil]
           (Blocking (fn [] (set! (values r err) (syscall/Wait4 pid (addr ws) fl nil))))
@@ -411,38 +398,38 @@
     (r "caml_unix_execv" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
       (let [p (GoString (aget a 0))]
         (flushStdQuiet)
-        (RaiseUnixError (errnoOf (syscall/Exec p (strArray (aget a 1)) (os/Environ))) "execv" p)
+        (RaiseUnixError (errnoOf (sysExec p (strArray (aget a 1)) (os/Environ))) "execv" p)
         Unit)))
     (r "caml_unix_execve" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
       (let [p (GoString (aget a 0))]
         (flushStdQuiet)
-        (RaiseUnixError (errnoOf (syscall/Exec p (strArray (aget a 1)) (strArray (aget a 2)))) "execve" p)
+        (RaiseUnixError (errnoOf (sysExec p (strArray (aget a 1)) (strArray (aget a 2)))) "execve" p)
         Unit)))
     (r "caml_unix_execvp" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
       (let [p (GoString (aget a 0))
             env (os/Environ)]
         (flushStdQuiet)
-        (RaiseUnixError (errnoOf (syscall/Exec (lookPath p env) (strArray (aget a 1)) env)) "execvp" p)
+        (RaiseUnixError (errnoOf (sysExec (lookPath p env) (strArray (aget a 1)) env)) "execvp" p)
         Unit)))
     (r "caml_unix_execvpe" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
       (let [p (GoString (aget a 0))
             env (strArray (aget a 2))]
         (flushStdQuiet)
-        (RaiseUnixError (errnoOf (syscall/Exec (lookPath p env) (strArray (aget a 1)) env)) "execvp" p)
+        (RaiseUnixError (errnoOf (sysExec (lookPath p env) (strArray (aget a 1)) env)) "execvp" p)
         Unit)))
     (r "caml_unix_setsid" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
-      (let [(values pid err) (syscall/Setsid)]
+      (let [(values pid err) (sysSetsid)]
         (when (!= err nil)
           (RaiseUnixError (errnoOf err) "setsid" ""))
         pid)))
     (r "caml_unix_nice" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
       (let [inc (AsInt (aget a 0))
-            (values cur err) (syscall/Getpriority syscall/PRIO_PROCESS 0)]
+            (values cur err) (sysGetpriority)]
         (when (!= err nil)
           (RaiseUnixError (errnoOf err) "nice" ""))
         ;; the raw getpriority returns 20 - nice
         (let [n (+ (- 20 cur) inc)]
           (when (!= inc 0)
-            (when [err (syscall/Setpriority syscall/PRIO_PROCESS 0 n)] (!= err nil)
+            (when [err (sysSetpriority n)] (!= err nil)
               (RaiseUnixError (errnoOf err) "nice" "")))
           n))))))
