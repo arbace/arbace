@@ -12,7 +12,8 @@
             [arbace.j2g.main :as jm]
             [arbace.j2g.model :as m]
             [arbace.j2g.out :as out]
-            [arbace.j2g.world :as w]))
+            [arbace.j2g.world :as w]
+            [j2g.typeann :as ta]))
 
 (def ^:private failures (atom 0))
 
@@ -135,12 +136,47 @@
              (= 2 (count (filter #(str/starts-with? % "E ") ls))))
            (pr-str (data "q/Impl" :members true :throws true)))))
 
+(def ^:private typeann-known
+  "JCS282 (b): javac's rows the encoder writes otherwise, each with why (the check holds both sides to these)."
+  {["p/TA" ["T"] ["0x10" [65535] [[3 0]] ["Lp/B;" [["e" ["e" "Ljava/lang/annotation/ElementType;" "METHOD"]]]]]]
+   "an element value of java.lang.annotation.ElementType encodes as a string where the world does not know the enum (the
+   edge alone: no JDK forms in the unit tests' world, JCS271 (b)'s day finding); the sample's own enum (Color) encodes as
+   javac's e"})
+
+(defn test-type-annotations
+  "JCS282 (b) (doc/classes/JAVA-DEFERRED-TRIAGE.md, \"As built: JCS282 (b)\"): the encoder's RuntimeVisibleTypeAnnotations
+  records (arbace.classes.annot's Y and N lines) of the sample test/j2g/unit/typeann/p/TA.java (its committed forms), decoded
+  and resolved through their pool (j2g.typeann), equal javac's as recorded by hand with the JDK (test/j2g/unit/typeann.edn),
+  but the known rows; and the check's negative control, one value changed, differs."
+  []
+  (let [ours (ta/sorted-set-of (ta/encoder "test/j2g/unit/typeann/p/TA.ae"))
+        javac (with-open [r (java.io.PushbackReader. (io/reader "test/j2g/unit/typeann.edn"))] (read r))
+        known (set (keys typeann-known))
+        missing (remove (set ours) (remove known javac))
+        extra (remove (set javac) ours)
+        ;; a known row's place: its class, owner, target, path and annotation type (the value is what differs)
+        place (fn [[c o [tt info path [ty]]]] [c o tt info path ty])
+        extra (remove (fn [row] (some #(= (place %) (place row)) known)) extra)]
+    (check (str "type annotations: the encoder's " (count ours) " equal javac's " (count javac) " but " (count known) " known")
+           (and (= 29 (count javac)) (empty? missing) (empty? extra))
+           (str "javac's not written: " (pr-str (vec missing)) " written, not javac's: " (pr-str (vec extra))))
+    (check "type annotations: the known rows are javac's and still differ"
+           (and (every? (set javac) known) (not-any? (set ours) known)))
+    ;; the negative control: a row with its first int constant changed is not javac's
+    (let [bump (fn bump [x] (cond (and (vector? x) (= "I" (first x)) (integer? (second x))) ["I" (inc (second x))]
+                                  (vector? x) (mapv bump x)
+                                  :else x))
+          changed (bump (first ours))]
+      (check "type annotations: control: a changed value differs"
+             (and (not= changed (first ours)) (not (some #{changed} javac)))))))
+
 (defn -main [& _]
   (test-support-tables)
   (test-unresolved-cause)
   (test-unresolved-world)
   (test-analyze-only)
   (test-throws)
+  (test-type-annotations)
   (println (str "j2g.unit: " (if (zero? @failures) "all passed" (str @failures " failed"))))
   (shutdown-agents)
   (System/exit (if (zero? @failures) 0 1)))

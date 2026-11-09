@@ -6550,3 +6550,22 @@ bin/j2g-unit passes (the namespaces load); the code is the night build's. Expect
 (GenerifyStackTraces) gets past `No accessible static method getAllStackTraces` at interp (its own verdict then needs the
 waiting threads' stacks, which F13 records once `trackLocks0` ran); t05256 (RuntimeThreadInheritanceLeak) no longer stubs it,
 its other gaps RMI's (`:rmi`).
+
+## As built: JCS282 (b): the type annotation records checked against javac's, light (branch `java-props2`)
+
+JCS271 (b)'s day comparison (`.tmp/ta`, a scratch Python normalizer) is now committed and runs on stage 0 with no javac:
+
+- **The sample** `test/j2g/unit/typeann/p/TA.java` (JCS271 (b)'s: every declaration target, path step and element value kind)
+  and its forms `p.ae`, `p/TA.ae` (repr/java's read on javac's tool, the same forms byte for byte as JCS271's day read).
+- **javac's side**, recorded by hand with the JDK: `javac -d DIR p/TA.java`, then `arbace_tool -p test -m j2g.typeann record DIR
+  test/j2g/unit/typeann.edn` (test/j2g/typeann.ae: the class files' constant pools and the fields', methods' and classes'
+  RuntimeVisibleTypeAnnotations decoded, JVMS 4.7.20 and 4.7.16, the indices resolved): 29 annotations of 7 class files.
+- **The check**, bin/j2g-unit's `test-type-annotations` (5.6 s, 0.6 GB with the rest): the forms declared and analyzed in a unit of
+  their own on the tools' host (`j2g.typeann/encoder`, as JCS271's `enc.ae` did), each class's `annot/class-data` Y and N records
+  decoded the same way, the two sets compared: **29 of 29 equal but 1 known**, `@B(e = ElementType.METHOD)` (the encoder writes a
+  string where the world does not know `java.lang.annotation.ElementType` as an enum: JCS271 (b)'s day finding; the row is held to
+  differ, so the night's world that knows the enum shows it as a stale known row); the negative control, the first row with an int
+  constant changed, is not javac's.
+
+Not a gate step yet: bin/j2g-unit is in none (a proposal for the essential gate would key it by `test/j2g/` and `arbace/classes/`
+and `arbace/j2g/`, seconds).
