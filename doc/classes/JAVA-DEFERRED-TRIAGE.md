@@ -6605,3 +6605,23 @@ member table entries; `Field.getAnnotation` is F14's (its first slice, merged); 
 is in jrt's tables since F25 (its order JCS272). What stays: t04833's `ModuleDescriptor` (java.lang.module is not in the closed
 world: `:reflection`'s) and the accessFlags of an Executable-typed receiver (jrt's Executable_I declares none). Nothing more to
 build for (b); the night's records say which of the four pass.
+
+## The decisions of 2026-11-09 that build nothing by day (branch `java-props2`, recorded)
+
+- **JCS213**: the lookup by name as built (java-older's; no start-up hook: every public member of the world is a root).
+- **JCS281 (b)**, after JMX-1's night record: the platform logging bean (jdk26u's ManagementFactoryHelper.PlatformLoggingImpl over
+  F5's LogManager) and getPlatformMXBean(s) over an MBeanServerConnection; the record says first which of t04792 and t04793 pass.
+- **JCS290 (b)**: AbstractQueuedSynchronizer$ConditionObject's serial form stays jrt's until a test asks.
+- **JCS291 (a)** if a test asks: an annotation's serial form (none of the corpus known); until then as now.
+- **JCS292 (b)**: twins of translated classes per use until a second user.
+- **JCS303 (b)**, by the main session with the night's records: `:classfile` re-sorted into JCS300's (the test's own class files,
+  now compiled), `:invoke`, the javac tool's, `jrt:/` by design and `:define-bytes` (JCS302 (a), committed today by name).
+- **JCS305 (b)**, the morning after the night's build: the stream variants `overlay/jdk/variants/ReferencePipeline.ae` (`toList`)
+  and `Collectors.ae` (`toUnmodifiableList`) removed once F26's smoke proves SharedSecrets' JavaUtilCollectionAccess; the commit is
+  the variants' deletion and `bin/jrt-convert vet`.
+- **JCS312 (b)**: Security's `loadMaster` variant kept (the embedded resource; a build without java.home keeps its properties).
+- **JCS321 (a)**, when java/lang/ref's tests are next measured: jrt's PhantomReference beside Weak and Soft, DGCClient's
+  derivation dropped.
+- **JCS322 (b)**: no thread groups until a second test asks (t07952 alone today).
+- **JCS323 (a)**, after the night's build shows JCS240's throws records: ProxyFn's leniency kept for jrt's hand-written interfaces
+  alone, the rest wrapped as the JDK wraps (UndeclaredThrowableException).
