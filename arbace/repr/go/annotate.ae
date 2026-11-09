@@ -706,11 +706,28 @@
 
 (defn- keep! [id m] (when (contains? @control-ids id) (swap! kept update id merge m)))
 
+(defn known-difference?
+  "Whether the known differences (test/repr/go/native-known.edn: a map of a package's import path, a dump's key or a
+  file's key to the reason) excuse the difference of the result r ({:key :package :keys}): check-corpus's judge, and the
+  :known level of the controls."
+  [known r]
+  (boolean (or (contains? known (:package r)) (contains? known (:key r)) (some #(contains? known %) (:keys r)))))
+
+(defn- reference-entries
+  "The known entries a known difference of the reference's dump r would be (its key, its files' keys, its package unless
+  it is the subject's s: a package's entry excuses every dump of the package by design), each with the control's reason."
+  [s r]
+  (into {} (for [k (concat [(:key r)] (:keys r) (when (not= (:package r) (:package s)) [(:package r)])) :when k]
+             [k "a negative control's crossed entry"])))
+
 (defn control-verdicts
-  "The controls [{:id :subject :reference :levels [:tree :ann :forms]}] judged over kept (id NAME/KEY -> the parts the run
-  kept of that job: :n :d :ad :actx :nc :fc :dctx, and :own-tree :own-ann :own-forms when the job's own comparison with the
-  helper passed). Per control {:id :held [levels differing] :passed [levels equal: the control fails] :left [levels not
-  judged: a part missing, the subject's own comparison not passed]}."
+  "The controls [{:id :subject :reference :levels [:tree :ann :forms :known]}] judged over kept (id NAME/KEY -> the parts
+  the run kept of that job: :rec, :n :d :ad :actx :nc :fc :dctx, and :own-tree :own-ann :own-forms when the job's own
+  comparison with the helper passed). The level :known (native-check's known differences) judges the subject's crossed
+  difference (one of the other levels held) by known-difference? against the reference's own entries (reference-entries),
+  which must not excuse it; it is judged only when a control lists it. Per control {:id :held [levels differing, or not
+  excused] :passed [levels equal, or excused: the control fails] :left [levels not judged: a part missing, the subject's
+  own comparison not passed, no crossed difference]}."
   [controls kept]
   (for [c controls
         :let [s (get kept (:subject c)) r (get kept (:reference c))
@@ -721,8 +738,15 @@
                         :ann (when (and (:own-ann s) (:nc s) (:fc r))
                                [(some? (same-package (:nc s) (:fc r)))])
                         :forms (when (and (:own-forms s) (:ad s) (:nc s) (:fc r) (:d r) (:dctx r))
-                                 [(some? (forms-diff (:ad s) (:actx s) (:d r) (:dctx r) (:nc s) (:fc r)))])))
-              res (for [lv (:levels c [:tree :ann :forms])] [lv (judge lv)])]]
+                                 [(some? (forms-diff (:ad s) (:actx s) (:d r) (:dctx r) (:nc s) (:fc r)))])
+                        :known nil))
+              levels (:levels c [:tree :ann :forms])
+              res0 (for [lv levels :when (not= :known lv)] [lv (judge lv)])
+              crossed? (some #(= [true] (second %)) res0)
+              res (concat res0
+                          (when (some #{:known} levels)
+                            [[:known (when (and crossed? (:rec s) (:rec r))
+                                       [(not (known-difference? (reference-entries (:rec s) (:rec r)) (:rec s)))])]]))]]
     {:id (:id c)
      :held (vec (for [[lv v] res :when (= v [true])] lv))
      :passed (vec (for [[lv v] res :when (= v [false])] lv))
@@ -734,7 +758,8 @@
   [nm load sess-of j ^String path]
   (let [cid (str nm "/" (:key j))
         base {:key (:key j) :path path :package (get-in j [:header :package]) :files (count (:files j))
-              :keys (vec (for [f (:files j)] (str (get-in j [:header :dir]) "/" f)))}]
+              :keys (vec (for [f (:files j)] (str (get-in j [:header :dir]) "/" f)))}
+        _ (keep! cid {:rec (select-keys base [:key :package :keys])})]
     (try
       (let [t0 (System/nanoTime)
             d (when path (rd/read-dump path))
@@ -859,7 +884,7 @@
                                                   (str "the loader: " (:status r) " " (:msg r))
                                                   "no such dump from the loader")}))
         helper-failed? (fn [r] (= "fail" (first (get hres (or (:tsv-key (some #(when (= (:key r) (:key %)) %) js)) (:key r))))))
-        known? (fn [r] (or (contains? known (:package r)) (contains? known (:key r)) (some #(contains? known %) (:keys r))))
+        known? (fn [r] (known-difference? known r))
         by (fn [k] (filter k rs))
         extra (by :extra)
         bad-extra (remove helper-failed? extra)

@@ -1979,3 +1979,35 @@ Alternatives considered:
 
 Proposed: LLS35 (mutants-oracle as a part of the oracle tier's llvm-records-verify), LLS36 (port the unknown kinds' rules), LLS37 (a
 mutant of an invalid base).
+
+## 2026-11-08: GTS81 (a)'s controls for Clojure's and Go's last four families (branch `controls-cg`, from next 5ec43f7b)
+
+`bin/crops-score` on `mac/next` gave Clojure's maturity item `:controls` 0.7778 (7 of 9 families) and Go's 0.7500 (6 of 8):
+no negative control for "repr/clojure's one-way rules" (the read cell's source of `test/reap/cells.edn`, the rules' claims),
+"repr/clojure's round trip" (print), "native-check's known differences" (Go's read, `:within` native-check) and "bin/repr-go
+roundtrip --dirs linux/amd64" (Go's print). Each now has one, a crossed pair judged by the family's own judge (GTS81 (a)), a
+control that passes failing the check; doc/GATE-SURVEY.md, "As built: GTS81 (a), Clojure's and Go's last families":
+- the rules: `arbace.repr.clojure.rules/round-trip` (the samples' judge, read by the rules and printed back byte for byte) and
+  `control-verdict` over `test/repr/clojure/rules-controls.edn`, one pair a rule, run by print_test's `deftest controls` in
+  `bin/repr-clojure check`; a vacuous control (the rule does not rewrite its subject) fails too;
+- the round trip: `arbace.repr.clojure/control-verdict` (the subject's text that comes back, `roundtrip`'s new `:texts` for
+  `:keep`, against the reference's original, then `known-matches?`, run-roundtrip's known-entry judge factored out) over
+  `test/repr/clojure/roundtrip-controls.edn`, one pair for each of the eight corpora, `--controls` from `bin/lib/repr-clojure/check`;
+  `test/repr/clojure/judge-test.bash`'s case `controls`;
+- native-check's known differences: the control level `:known` of `arbace.repr.go.annotate/control-verdicts`, the subject's crossed
+  difference judged by `known-difference?` (check-corpus's `known?`, factored out) against the reference's own entries, listed
+  by the four controls of `test/repr/go/native-controls.edn`;
+- the directory tests' round trip: the kind `dirtest` of `bin/lib/repr-go/check --controls` (the subject's printed FILE.dir staged
+  under the reference's `.go` names, gocmp -dirtest at the tree level), `test/repr/go/roundtrip-controls.txt`'s closure5.go and
+  ddd2.go both ways; `test/repr/go/controls-test.bash` covers both Go controls.
+Alternatives considered: pointing the two "within" families' `crops.edn` rules at the existing files (native-check's pairs,
+the round trip's package lines), rejected as vacuous: those controls never reach the known-entry judge or gocmp -dirtest;
+a control of a one-way rule's loss alone (a sample that must not come back), rejected as not a crossed pair.
+Checked light (stage 0, a few files each, the suite and jars copied from the main checkout's `.tmp/`): every real control holds,
+every fabricated one (a file against itself, a judge broken on purpose: `known-difference?` excusing anything) fails its check;
+`bin/repr-clojure check --roundtrip` whole (61 s) passes. Found and fixed: that round trip failed on `mac/next` (arbace/'s
+`:outside` 152, recorded 151: `genclass.ae`'s comment naming upstream's `clojure/genclass.clj`, from CDR3, a4258506f);
+`roundtrip-known.edn` records 152. `crops.edn` names the four by `:match`; `bin/crops-score --record` (Clojure and Go maturity
+96.3 and 95.8 to 100), `--judge --strict` 0 problems, `bin/reap` 0 problems. The gate's key moves (87234529dd27 to 8d0f7834608c,
+three embedded namespaces) and javac's (34e3a3200c4e to e556b7de7898), not the runtime's. Night: the `repr-clojure`, `repr-go`
+and `repr-go-native` steps of `bin/gate --full` run the controls over the whole corpora.
