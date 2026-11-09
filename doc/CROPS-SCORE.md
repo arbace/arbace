@@ -362,3 +362,13 @@ first LLVM records' 282 modules and their mutants, before LLS28 (a)'s pack) stay
   2,276 cases of the 282-module lists and mutants, in no checkout, 0.5, until the night pack of LLS28 (a)); print 1; judge
   0.711 (opt's and lli's records, 0.5). LLVM IR's independence (0.706 + 1 + 1 + 1 + 0.711) / 5 = 88.3% (68.3% on `llvm-90`);
   94.2% once LLS28 (a)'s pack and regenerated mutants are the read stage's inputs.
+
+## Decided (the user, 2026-11-09): the independence audit's corrections
+
+The independence audit of 2026-11-09 (`.tmp/indep-audit/` in the main checkout: `independence.edn` corrected with
+`indep-audit` comments, its diff, crops-score before and after) found facts that overstate. The user's rulings:
+
+- **Java's platform is a toolchain's product.** javac on Arbace attributes against the platform, the class files of jdk26u's
+  build tree pinned by `jdk/javac/platform.sha256`; the interpreter, j2g and the printer take the forms made against it. Java's
+  read, eval, AOT and print score **0.5** (the header's rule, as Haskell's front end over GHC's interfaces) until the platform is
+  Arbace's own (its modules compiled from jdk26u's sources by javac on Arbace).
