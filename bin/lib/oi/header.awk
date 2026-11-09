@@ -36,11 +36,11 @@ END {
   # program of C (a C program, or an OCaml program with C stubs: readonly_files naming a .c file) before the test's own program
   # (setup-ocamlc.byte-build-env, program = NAME, all_modules = FILES, ocamlc.byte), then runs the test's program once or more
   # (arguments = ARGS, run, check-program-output). The run's environment names each helper (@helper=NAME:FILE,...; bin/oi's oi_one
-  # builds it: a C program by ci, test/ocaml/capi/cnodes.ae --program, run by oi cmain on ci; an OCaml program by oi with its stubs on
-  # ci), the runs beyond the first (@runs=ARGS,...) and the test's run hook (@hook=run: ocamltest runs TEST.run, the source
-  # directory's, in place of the run action, its main.ml's install_hook). The first alternative is the run: the second
-  # (setup-ocamlopt.byte-build-env) ends it. The AOT levels (aot=1) keep the class (their runtime has no C); a helper of OCaml
-  # alone (OC195, undecided) stays its class too. Anything else in the alternative: the class it had (cls's roclass)
+  # builds it: a C program by ci, test/ocaml/capi/cnodes.ae --program, run by oi cmain on ci; an OCaml program by oi, with its stubs on
+  # ci when it has C files) and the runs beyond the first (@runs=ARGS,...). The first alternative is the run: the second
+  # (setup-ocamlopt.byte-build-env) ends it. The AOT levels (aot=1) keep the class (their runtime has no C, and a helper is oi's).
+  # OC204 (a) (OC195 (a), the user 2026-11-09): a helper of OCaml alone (myecho.ml, reflector.ml, cmdline_prog.ml) is one too.
+  # Anything else in the alternative: the class it had (cls's roclass)
   helper = 0; roclass = ""; roseen = 0
   if (aot != 1) {
     hasbuild = 0; rofiles = ""
@@ -49,7 +49,7 @@ END {
       if (s == "setup-ocamlc.byte-build-env") hasbuild = 1
       if (s ~ /^readonly_files *= *"/) { rofiles = s; sub(/^[^"]*"/, "", rofiles); sub(/"[^"]*$/, "", rofiles); rofiles = trim(rofiles) }
     }
-    if (hasbuild && rofiles ~ /^[A-Za-z0-9_]+\.(c|ml)( +[A-Za-z0-9_]+\.(c|ml))*$/ && rofiles ~ /\.c( |$)/) { helper = 1; roclass = "readonly_files = " rofiles }
+    if (hasbuild && rofiles ~ /^[A-Za-z0-9_]+\.(c|ml)( +[A-Za-z0-9_]+\.(c|ml))*$/) { helper = 1; roclass = "readonly_files = " rofiles }
   }
   hprog = ""; hmods = ""; hsetup = 0; hmain = 0; hargs = ""; nruns = 0; runs = ""; hbase = FILENAME; sub(/^.*\//, "", hbase); sub(/\.ml$/, "", hbase)
   for (j = 1; j <= m; j++) {
@@ -76,9 +76,9 @@ END {
           if (cfiles != "") env = env " @cstubs=" cfiles
           hmain = 1
         } else {
-          # a helper: C files and at most one .ml (an OCaml helper needs a C stub here: OC201's, not OC195's)
-          if (hprog !~ /^[A-Za-z0-9_.]+$/ || cfiles == "" || mls ~ / /) cls("")
-          env = env " @helper=" hprog ":" cfiles (mls == "" ? "" : "," mls)
+          # a helper: C files and at most one .ml, or one .ml alone (OC204 (a))
+          if (hprog !~ /^[A-Za-z0-9_.]+$/ || (cfiles == "" && mls == "") || mls ~ / /) cls("")
+          env = env " @helper=" hprog ":" cfiles (mls == "" ? "" : (cfiles == "" ? "" : ",") mls)
         }
         continue
       }
@@ -157,9 +157,15 @@ END {
   if (helper) {
     if (!hmain || nruns == 0) cls("")
     if (runs != "") env = env " @runs=" runs
-    hook = FILENAME; sub(/\.ml$/, ".run", hook)
-    if ((getline hl < hook) >= 0) { close(hook); env = env " @hook=run" }
   }
+  # ocamltest's hooks (its main.ml's install_hook; OC203 (a), the user 2026-11-09): for each action the test uses, the source
+  # directory's TEST.ACTION, when it exists, runs in place of the action's body (actions.ml's run). A run test uses run and
+  # check-program-output, so TEST.run (@hook=run: swapchan's and tls's sort, delayintr's SIGINT) and TEST.check-program-output
+  # (@check=check-program-output: signal's grep) are its hooks; bin/oi's runners run them as actions_helpers.ml's run_hook does
+  hook = FILENAME; sub(/\.ml$/, ".run", hook)
+  if ((getline hl < hook) >= 0) { close(hook); env = env " @hook=run" }
+  hook = FILENAME; sub(/\.ml$/, ".check-program-output", hook)
+  if ((getline hl < hook) >= 0) { close(hook); env = env " @check=check-program-output" }
   if (args ~ /\$VAR/) { cls("arguments = " args) }
   # a test of C stubs that runs only native (int64-unboxing: its externals' bytecode names are "", the unboxed native ones the C's)
   # stays its class: oi calls an external by its bytecode name

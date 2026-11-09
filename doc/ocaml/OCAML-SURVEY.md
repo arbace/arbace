@@ -2884,3 +2884,125 @@ passes and no failure outside a class). The cell switch is ready, not applied: `
   driver (`oi cmain`, oicapi's host natives: getpid, kill, raise, fstat, close). (a) keep it (the crop's paths alone, no key moves);
   (b) crt gives a host mode (`cirun --host`: the process's descriptors and pids the host's) shared by C's own checks: C's embedded
   runtime and every key move, a day. *Recommended: (a)*.
+
+## Decided (the user, 2026-11-09, about 06:15): OC203-OC205
+
+Relayed by the main session (as recommended): **OC203 (a)** (ocamltest's `TEST.run` and `TEST.check-program-output` hooks for every
+run test, swapchan's waiver dropped, `lib-threads/signal` into the corpus), **OC204 (a)**, that is **OC195 (a)** (the four OCaml-only
+second programs run in helper mode, judged by their own verdict), **OC205 (a)** (a test's C helper stays on oi's driver, `oi cmain` on
+oicapi's host natives: getpid, kill, raise, fstat, close; crt gets no host mode, no key moves).
+
+## As built: OC203-OC205 (2026-11-09, branch `ocaml-props`, from `ocaml-compl`'s `fb8a73f19`)
+
+**OC203 (a): ocamltest's hooks, the rule ported.** ocamltest 5.5.0's `main.ml` (`test_file`'s `install_hook`): for every action name the
+test uses, the source directory's `TEST.ACTION` (`Filename.make_filename hookname_prefix name`), when it exists, is the action's hook;
+`actions.ml`'s `run` runs the hook in place of the action's body; `actions_helpers.ml`'s `run_hook` runs it as `sh HOOK` in the test's
+build directory with the environment as system variables (`ocamltest_response` added), exit status 0 a pass (the response's modifiers
+applied), 125 a skip, else a failure. A run test uses `run` and `check-program-output`, so those two hooks are its hooks. Of the
+testsuite's 26 hook files, the run corpus's tests with one are delayintr (`.run`, helper mode since OC201), `lib-threads/swapchan` and
+`tls` (`.run`: the output piped through `${SORT}`, `LC_ALL=C` for tls) and `lib-threads/signal` (`.run` sends SIGINT by `./sigint $pid`,
+`.check-program-output` greps the first line); the rest (backtrace's four, exec, win-stat, tool-dumpobj, tsan's ten, asmgen,
+func_sections, afl's two) are classed by their headers as before.
+
+- `bin/lib/oi/header.awk`: every run test's environment names its hooks, `@hook=run` and `@check=check-program-output` (before, only
+  helper mode's `@hook=run`).
+- `bin/oi`: `hook_vars` (main.ml's initial environment: `reference`, `test_source_directory`, `test_build_directory`, `test_file`; the
+  action's `output`; `ocamltest_response`; builtin_actions.ml's `TEST_PASS=0`, `TEST_FAIL=1`, `TEST_SKIP=125`; testsuite/Makefile's
+  `SORT=sort`), `prog_script` (the hook's `${program}`, a script that execs the runner, so `$!` is the program's pid), `hook_run` (the run
+  hook under the runner's limits, its status the run's) and `hook_check` (the check hook on the output; the row's output becomes its verdict,
+  `check-program-output: pass`, `skip` or `fail (exit N)`, the program's output kept beside as `OUT.program`); every runner takes them:
+  oi's (`oi_one`, each run of a test with several), the references' (`ref_one`), the AOT light level's (`o2j_alone`, the programs with an
+  environment) and the compiled level's (`c2_programs`). A response file a hook writes is a note of the row, its modifiers not applied (no
+  corpus test's hook writes one: pr2195 and exec, which do, are outside the corpus).
+- The corpus (`cmd_corpus`): the tests with a `.reference` and those whose check is their `.check-program-output` hook (signal), 541 to
+  **542** programs, 409 to **414** run (with OC204's four). `own_verdicts`: such a test's own verdict is the hook's pass, its header's exit
+  status.
+- `test/ocaml/own-verdict.edn`: swapchan's `[:oi :aot]` and tls's `[:aot]` entries left (the sorted runs equal the `.reference`);
+  `ref-ocaml55.edn`'s swapchan and tls rows re-recorded through their hooks by `bin/oi record-ref --only-list` (ocamlc and ocamlopt on
+  the host, by hand: both now the `.reference`'s sha); `record-ref` leaves out the tests that build a helper (`ref_one` builds the test's
+  program alone; their own verdict judges them: delayintr, cloexec, signal, the four below), so signal has no reference row.
+- AOT: tls's light row goes from `fail` (known schedule, ocamlopt's interleaving) to **pass** (sorted, as ocamltest compares it), its
+  `aot-known.edn` line left; signal's AOT row is `:c-api` (its sigint.c helper; the AOT levels keep the helper mode's classes). The
+  compiled level's runner (`c2_programs`) takes the hooks too, but its record `check-aot-compiled.edn` is not run here (the shards'
+  j2g runs are the night's): tls's compiled row stays `fail` (known schedule) with its `aot-compiled-known.edn` line until the next
+  compiled run, which should print it STALE (then the line goes).
+
+**OC204 (a) (OC195 (a)).** header.awk's helper mode drops its one condition beyond OC201's, a `.c` among the readonly files: a helper of
+one `.ml` alone is an OCaml program, dumped as the test's own (the native typer, or ocdump on the oracle path) and run by oi, with no C
+stubs (`oi_helper`: `cstubs_nodes` and `OI_CSTUBS` only when the helper has C files), written as the executable the test names
+(`myecho.exe`, `reflector.exe`, `cmdline_prog.exe`). The 1,745 headers read before and after (both `aot=0` and `aot=1`): only the four,
+signal and the two sorted tests change. The four leave `:ocamltest-tools` in `divergences.edn` (eval); the AOT levels keep them there
+(their runtime runs no oi helper: Proposed OC206).
+
+**OC205 (a).** Recorded, nothing built: C helpers stay on `oi cmain` (go/arbace/oicapi's host natives), crt unchanged.
+
+**Results** (`bin/oi check --only-list` of the nine: swapchan, tls, signal, delayintr, cloexec, quotecommand, redirections, wait_nohang,
+test_unix_cmdline; main's stage 0, `OI_JOBS=1`, `OI_TYPER_GOMEMLIMIT=1200MiB`, no host toolchain at check time):
+
+| program | before (eval) | native path | oracle path (`--ocdump`) | AOT light (`--ocdump`) |
+|---|---|---|---|---|
+| lib-threads/swapchan | pass (waiver: ocamlc's record) | pass (own verdict) | pass | pass (own verdict) |
+| lib-threads/tls | pass | pass | pass | **pass** (was fail, known schedule) |
+| lib-threads/signal | not in the corpus | **pass** | **pass** | `:c-api` |
+| lib-filename/quotecommand, lib-unix/common/redirections, wait_nohang, test_unix_cmdline | `:ocamltest-tools` | **pass** | **pass** | `:ocamltest-tools` |
+| delayintr, cloexec | pass | pass | pass | `:c-api` |
+
+All nine are judged by their own verdict (oi_check.ae: 9 of 9). signal's run: `baabaGot ctrl-C, exiting`, the hook's grep passes.
+
+Checks (2026-11-09, light, `OI_JOBS=1`): `bin/oi check --only-list` of the nine, native path and `--ocdump`, 9 of 9 pass on both;
+`check --aot --only-list` (both paths) 2 pass, 7 classed; the essential list (`test/ocaml/essential-check.txt`, 58 programs) 58 pass,
+its control `_control/compare-vs-evaluation-order` differs as it must; `own-verdicts --check` 0 differ (run corpus 398 of 414 by their own
+verdict at oi's level, 409 of 414 at AOT's); the five judgments (`divergences`, `--aot`, `--compiled`, `suite divergences`, `--aot`) 0
+failing; `bin/oi test` ok; `bin/reap` 0 problems, `bin/crops-score --judge --strict` 0 problems. OCaml's scores: completeness 81.6 to
+**81.75**, meant 96.62 to 96.58, maturity 100, independence 87.4; eval 460 / 211 / 0 to **465 / 207 / 0**, AOT 405 / 203
+/ 63 to 406 / 202 / 64 (tls a pass, signal one more `:c-api`).
+
+## Proposed (OC206; options with costs, a recommendation, not decided)
+
+- **OC206 The OCaml helpers at the AOT levels.** OC204 (a) runs quotecommand, redirections, wait_nohang and test_unix_cmdline at oi's
+  level; the light and compiled levels keep them in `:ocamltest-tools` (4 of the AOT cell's design rows), because their runners run the
+  test's program alone and build no helper. (a) both AOT levels build an OCaml helper as they build the test's program (the light level:
+  `o2j_alone`'s program script over the helper's translated units; the compiled level: the helper a program of its shard, `O2J_PROG`
+  naming it in the executable the test calls), the four judged by their own verdict: about half a day; (b) the light level only: two
+  hours, the compiled level (OC202's cell) keeps the class; (c) as now, by design. *Recommended: (a)* (the AOT cell moves to the compiled
+  level with OC202, so (b) would not move it).
+
+**The suite rollup.** `bin/oi suite rollup` judged 27 files "run without a level's result" on `ocaml-compl`'s records already
+(OC201's C API tests: oi runs them, the AOT levels class them by header, and the rollup's AOT column took only rows that are no class);
+`test/ocaml/testsuite_check.ae` gives such a program its AOT class (`:c-api`, `:ocamltest-tools`), `testsuite-results.edn`
+re-recorded (0 files without a result or a class). The fix is a commit of its own (`86d8b6c47`): `oi-check`'s rollup fails on
+`ocaml-compl` without it.
+
+**Checks** (light, by list; nothing whole): the nine on both paths (native 9 of 9, `--ocdump` 9 of 9, `--record` into
+`check-oi-native.edn` and `check-oi.edn`); `check --aot --ocdump` (2 pass, 7 classed, recorded into `check-aot.edn`) and `check --aot`
+native (the same); `bin/oi record-ref --only-list` swapchan and tls; the essential list 58 of 58 on both paths, the negative control
+differing; the check hook's control by hand (signal's hook on swapchan's output: exit 1, a failure); `bin/oi own-verdicts --check`
+(run corpus 398 of 414 by their own verdict at oi's level, 409 of 414 at the AOT level; 0 differ, none stale); the five judgments
+(`divergences`, `--aot`, `suite divergences`, `--aot`, `divergences --compiled`: 0 failing); `bin/oi suite rollup` (0 failing);
+`bin/oi test`; `test/gate/gate-key-crops-test.bash` PASS; `bin/gate --plan` and `--full --plan`. The compiled level's hook path
+(`c2_programs`) is built and not yet run (its shards are heavy): the night's compiled record runs it.
+
+**Scores** (`bin/reap --record`: 0 problems; `bin/crops-score --record`, `--judge --strict`: 0 problems): OCaml completeness 81.58% to
+**81.75%**, without by design 96.62% to 96.58% (the AOT cell's new deferred `:c-api` row, signal), maturity 100%, independence 87.4%; eval
+460 / 211 / 0 to **465 / 207 / 0** (pass / design / deferred: the four and signal), AOT 405 / 203 / 63 to **406 / 202 / 64** (tls passes,
+signal `:c-api`).
+
+**The night's commands for this branch** (after its merge; the light tier's limits, `OI_TYPER_GOMEMLIMIT=1200MiB`, `O2J_JOBS=1`,
+`OI_LIB_JOBS=1` or 2): bin/oi changed, so the native library's key moved again: `bin/oi stdlib` (about 8.5 minutes) first; then the
+records the night already runs from `ocaml-compl` (`bin/oi check --record`, `check --aot --record`, `suite check --record`, `suite check
+--aot --record`), whose rows now include signal, the four and the hooked runs of swapchan and tls; the compiled level's records (OC202's
+slot) run the hooks too (tls's compiled row should become a pass; its `aot-compiled-known.edn` line is gone). `bin/oi suite rollup
+--record`, `bin/reap --record`, `bin/crops-score --record`. Tonight's commands from `ocaml-compl` do not change, but `oi-check`'s rollup
+fails there unless `86d8b6c47` is picked onto `next` first (`git cherry-pick 86d8b6c47`, one file, no key moves beyond the crop's).
+
+## Proposed (OC206-OC207; options with costs, a recommendation each, none decided)
+
+- **OC206 The AOT levels' helper programs.** The four OCaml second programs and signal's, delayintr's and cloexec's helpers run at oi's
+  level only; the AOT levels keep the tests' header classes (4 `:ocamltest-tools`, 3 `:c-api`). (a) at the AOT levels an OCaml helper is
+  the AOT build of its `.ml` (a light program run by `o2j_run`, a compiled one a package of the shard), C helpers on `oi cmain` as at
+  eval (the C runtime stays oi's): half a day, +4 AOT passes (the four), the C ones after OC198's mirror; (b) keep the classes.
+  *Recommended: (a)*, the OCaml helpers first.
+- **OC207 A negative control for the hooks.** The check hook's discrimination is shown by hand (signal's hook fails swapchan's output);
+  no control of `test/ocaml/controls.txt` runs a hook. (a) a `judge` control whose subject is signal and whose reference is another
+  program's run, so the hook's verdict must part (ten minutes; `controls.txt` and the essential list gain signal, about 2 s); (b) none.
+  *Recommended: (a)*.

@@ -266,6 +266,42 @@ cstubs_nodes() {
 }
 export -f inc_I inc_units inc_dirs lib_missing inc_ref dump_required complib_need run_redirected env_vars cstubs_nodes
 
+# ocamltest's hooks (OC203 (a), doc/ocaml/OCAML-SURVEY.md "As built: OC203-OC205"): a test's TEST.run and TEST.check-program-output in
+# the source directory run in place of the actions run and check-program-output (ocamltest's main.ml install_hook, actions.ml's run),
+# as actions_helpers.ml's run_hook runs them: `sh HOOK`, in the test's build directory, with ocamltest's environment, its exit status 0
+# a pass, 125 a skip, else a failure. header.awk names them in the run's environment (@hook=run, @check=check-program-output); every
+# runner (oi's, the references', the AOT levels') runs them through these functions.
+# hook_vars ID D OUT: that environment, NAME=VALUE words for run_redirected: main.ml's initial environment (reference,
+# test_source_directory, test_build_directory, test_file), the action's output OUT, the response file run_hook names
+# (ocamltest_response: its modifiers are not applied, a non-empty response is a note of the row), builtin_actions.ml's exit status
+# variables and testsuite/Makefile's SORT (the host's sort)
+hook_vars() {
+  local id=$1 d=$2 out=$3
+  printf 'reference=%s test_source_directory=%s test_build_directory=%s test_file=%s output=%s ocamltest_response=%s TEST_PASS=0 TEST_FAIL=1 TEST_SKIP=125 SORT=sort' \
+    "$TESTS/$id.reference" "$(dirname "$TESTS/$id")" "$d" "$(basename "$id").ml" "$out" "$d/ocamltest.response"
+}
+# prog_script FILE CMD...: FILE, the hook's ${program}: a script that execs CMD... with its own arguments after (exec'd, so a hook's $!
+# is the program's pid)
+prog_script() { local f=$1 a; shift; { printf '#!/bin/sh\nexec'; for a in "$@"; do printf ' %q' "$a"; done; printf ' "$@"\n'; } > "$f"; chmod +x "$f"; }
+# hook_run ID D OUT ENV CMD...: the run hook in D (its program D/program, prog_script's), OUT its ${output}, its own standard output and
+# error into OUT.hook, CMD... the runner's limits before `sh HOOK` (limited_cpu CPU WALL); its exit status the run's
+hook_run() {
+  local id=$1 d=$2 out=$3 env=$4; shift 4
+  : > "$out"; : > "$d/ocamltest.response"
+  (cd "$d" && run_redirected "$env $(hook_vars "$id" "$d" "$out") program=$d/program" "$out.hook" "$@" sh "$TESTS/$id.run")
+}
+# hook_check ID D OUT ENV: the check hook on OUT (the run's output); OUT then holds the check's verdict, "check-program-output: pass"
+# (own_verdicts' verdict of such a test), "skip" or "fail (exit N)", the program's output kept as OUT.program
+hook_check() {
+  local id=$1 d=$2 out=$3 env=$4 st=0 v
+  (cd "$d" && run_redirected "$env $(hook_vars "$id" "$d" "$out")" "$out.check" sh "$TESTS/$id.check-program-output") || st=$?
+  case $st in 0) v=pass ;; 125) v=skip ;; *) v="fail (exit $st)" ;; esac
+  mv "$out" "$out.program"; printf 'check-program-output: %s\n' "$v" > "$out"
+}
+# hook_note D OUT: the response a hook wrote (not applied), for the row's note
+hook_note() { [ -s "$1/ocamltest.response" ] && printf 'hook response not applied: %s' "$(head -c 100 "$1/ocamltest.response" | tr '\n\t' '  ')"; return 0; }
+export -f hook_vars prog_script hook_run hook_check hook_note
+
 # oi's own level runs a program under limited_cpu: TIMEOUT seconds of CPU and a wall cap of four times that, as o2j_cpu (re-review 042's finding 1:
 # twice was a load band: a program needing more than half the cap in CPU timed out on a host slowed twofold)
 oi_wall() { echo $((TIMEOUT * 4)); }
@@ -694,8 +730,10 @@ cmd_corpus() {
   mkdir -p "$OI_DIR"; need_source
   local out=$OI_DIR/corpus.tsv r b h
   : > "$out"
-  for r in $(cd "$TESTS" && find . -name '*.reference' | LC_ALL=C sort); do
-    b=${r#./}; b=${b%.reference}
+  # the tests with a .reference, and (OC203 (a)) those whose check is their check-program-output hook (ocamltest's check of the
+  # output then the hook's, not the reference's: lib-threads/signal)
+  for r in $(cd "$TESTS" && find . \( -name '*.reference' -o -name '*.check-program-output' \) | sed 's/\.[a-z-]*$//' | LC_ALL=C sort -u); do
+    b=${r#./}
     [ -f "$TESTS/$b.ml" ] || continue
     # (the AOT levels read a test with C stubs as its class: the C API is oi's alone, the light and compiled levels' runtime has none)
     h=$(awk -v aot="${AOT:-0}" -f "$root/bin/lib/oi/header.awk" "$TESTS/$b.ml")
@@ -704,7 +742,7 @@ cmd_corpus() {
     case $h in class*) case $(awk -f "$root/bin/lib/oi/actions.awk" "$TESTS/$b.ml") in run*) continue ;; esac ;; esac
     printf '%s\t%s\n' "$b" "$h" >> "$out"
   done
-  echo "oi: corpus: $(wc -l < "$out") programs with a .reference, $(cut -f2 "$out" | grep -c '^run$' || true) run, $(cut -f2 "$out" | grep -c '^class$' || true) classed by their header ($out)"
+  echo "oi: corpus: $(wc -l < "$out") programs with a .reference or a check hook, $(cut -f2 "$out" | grep -c '^run$' || true) run, $(cut -f2 "$out" | grep -c '^class$' || true) classed by their header ($out)"
 }
 
 opts() {
@@ -755,11 +793,15 @@ ref_one() {
     extra=$(inc_ref $c "$incs" "$r")
     (cd "$r" && $c -w -a $flags $extra "$base.ml" -o "$base.$ext") > "$d/$c.log" 2>&1 || cst=$?
     if [ $cst != 0 ]; then line="$line	compile-error	-	0"; continue; fi
-    (cd "$r" && run_redirected "$env" "$d/$ext.out" timeout "$TIMEOUT" "./$base.$ext" $args) || st=$?
+    case " $env " in
+      *" @hook=run "*) prog_script "$r/program" "$r/$base.$ext" $args; hook_run "$id" "$r" "$d/$ext.out" "$env" timeout "$TIMEOUT" || st=$? ;;
+      *) (cd "$r" && run_redirected "$env" "$d/$ext.out" timeout "$TIMEOUT" "./$base.$ext" $args) || st=$? ;;
+    esac
+    case " $env " in *" @check=check-program-output "*) hook_check "$id" "$r" "$d/$ext.out" "$env" ;; esac
     line="$line	$st	$(sha256sum < "$d/$ext.out" | cut -d' ' -f1)	$(wc -c < "$d/$ext.out")"
   done
   local same=false
-  cmp -s "$d/byte.out" "$TESTS/$id.reference" && same=true
+  [ -f "$TESTS/$id.reference" ] && cmp -s "$d/byte.out" "$TESTS/$id.reference" && same=true
   printf '%s%s\t%s\n' "$id" "$line" "$same"
 }
 
@@ -767,7 +809,9 @@ cmd_record_ref() {
   opts "$@"; cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_corpus > "$OI_DIR/corpus.log"; need_tree
   export -f ref_one; export OI_DIR TESTS TESTLIB UNIXLIB TIMEOUT
   local out=$OI_DIR/ref.tsv
-  selected | awk -F'\t' '$2 == "run" { printf "%s%c%s%c%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0, $5, 0, $6, 0 }' | xargs -0 -r -n 5 -P "$JOBS" bash -c 'ref_one "$@"' _ > "$out.new"
+  # (a test that builds a helper program, header.awk's helper mode, has no reference run: ref_one builds the test's program alone, and
+  # its own verdict judges it)
+  selected | awk -F'\t' '$2 == "run" && $6 !~ /@helper=/ { printf "%s%c%s%c%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0, $5, 0, $6, 0 }' | xargs -0 -r -n 5 -P "$JOBS" bash -c 'ref_one "$@"' _ > "$out.new"
   LC_ALL=C sort "$out.new" > "$out"; rm -f "$out.new"
   "$(arbace_exe)" "$root/test/ocaml/oi_check.ae" "record-ref${ONLY:+-only}" "$out" "$OI_DIR/corpus.tsv" "$REFS"
 }
@@ -828,10 +872,14 @@ oi_helper() {
     local units; units=$(inc_units "$incs" "$d/$u.ae" | tr '\n' ' ')
     local miss; miss=$(lib_missing $units)
     [ -z "$miss" ] || { echo "helper: $name: dump: typer: $miss"; return 1; }
-    nodes=$(cstubs_nodes "$src" "$cs" 2> "$d/helper-$name.err") \
-      || { echo "helper: $name: cstubs: $(grep -v '^Reflection\|^Auto-boxing\|recur arg' "$d/helper-$name.err" | tail -1 | head -c 200 | tr '\t' ' ')"; return 1; }
+    # (an OCaml helper of no C file, OC204 (a): no stubs)
+    nodes=""
+    if [ -n "$cs" ]; then
+      nodes=$(cstubs_nodes "$src" "$cs" 2> "$d/helper-$name.err") \
+        || { echo "helper: $name: cstubs: $(grep -v '^Reflection\|^Auto-boxing\|recur arg' "$d/helper-$name.err" | tail -1 | head -c 200 | tr '\t' ' ')"; return 1; }
+    fi
     local lib=$LIB; [ "${NATIVE:-0}" = 1 ] && lib=${LIB_NATIVE:-$LIB}
-    { printf '#!/bin/sh\nOI_CSTUBS=%q; export OI_CSTUBS\nexec %q run %q' "$nodes" "$EXE" "$lib"
+    { printf '#!/bin/sh\n'; [ -z "$nodes" ] || printf 'OI_CSTUBS=%q; export OI_CSTUBS\n' "$nodes"; printf 'exec %q run %q' "$EXE" "$lib"
       for f in $units; do printf ' %q' "$f"; done
       printf ' %q -- "$@"\n' "$d/$u.ae"; } > "$d/$name"
   fi
@@ -853,8 +901,8 @@ oi_one() {
   if [ -n "$miss" ]; then printf '%s\t-\t-\t0\t0\tdump: typer: %s\n' "$id" "$miss"; return; fi
   # the program's own C stubs: their node program built by ci (cached by the sources' key), loaded by oi beside the program; the helper
   # programs its header builds (OC201 (a)), the runs beyond the first, the run hook (header.awk's helper mode)
-  local cs="" kv hk="" runs="" hs=()
-  for kv in $env; do case $kv in @cstubs=*) cs=${kv#@cstubs=} ;; @helper=*) hs+=("${kv#@helper=}") ;; @runs=*) runs=${kv#@runs=} ;; @hook=*) hk=${kv#@hook=} ;; esac; done
+  local cs="" kv hk="" ck="" runs="" hs=()
+  for kv in $env; do case $kv in @cstubs=*) cs=${kv#@cstubs=} ;; @helper=*) hs+=("${kv#@helper=}") ;; @runs=*) runs=${kv#@runs=} ;; @hook=*) hk=${kv#@hook=} ;; @check=*) ck=${kv#@check=} ;; esac; done
   if [ -n "$cs" ]; then
     local nodes
     if ! nodes=$(cstubs_nodes "$(dirname "$TESTS/$id")" "$cs" 2> "$d/cnodes.err"); then
@@ -870,12 +918,9 @@ oi_one() {
   t0=$(date +%s.%N); times > "$d/cpu0"
   local lib=$LIB; [ "${NATIVE:-0}" = 1 ] && lib=${LIB_NATIVE:-$LIB}
   if [ -n "$hk" ]; then
-    # ocamltest's hook TEST.run in place of the run action (its main.ml's install_hook, actions_helpers.ml's run_hook): sh runs it in the
-    # run's directory with the variables program (the test's program: oi on its dump, exec'd so the hook's $! is oi's pid) and output
-    { printf '#!/bin/sh\nexec %q run %q' "$EXE" "$lib"; for h in $units; do printf ' %q' "$h"; done; printf ' %q --' "$d/$u.ae"
-      for h in $args; do printf ' %q' "$h"; done; printf '\n'; } > "$d/program"; chmod +x "$d/program"
-    : > "$d/oi.out"
-    (cd "$d" && run_redirected "$env program=$d/program output=$d/oi.out" "$d/hook.out" limited_cpu "$TIMEOUT" "$(oi_wall)" sh "$TESTS/$id.$hk") || st=$?
+    # ocamltest's hook TEST.run in place of the run action (hook_run; OC203 (a)): its program oi on the dump
+    prog_script "$d/program" "$EXE" run "$lib" $units "$d/$u.ae" -- $args
+    hook_run "$id" "$d" "$d/oi.out" "$env" limited_cpu "$TIMEOUT" "$(oi_wall)" || st=$?
   else
     (cd "$d" && run_redirected "$env" "$d/oi.out" limited_cpu "$TIMEOUT" "$(oi_wall)" "$EXE" run "$lib" $units "$u.ae" -- $args) || st=$?
   fi
@@ -884,14 +929,22 @@ oi_one() {
   local r i=1 rst
   for r in $(echo "$runs" | tr ',' ' '); do
     i=$((i + 1)); rst=0
-    (cd "$d" && run_redirected "$env" "$d/oi.out.$i" limited_cpu "$TIMEOUT" "$(oi_wall)" "$EXE" run "$lib" $units "$u.ae" -- $r) || rst=$?
+    if [ -n "$hk" ]; then
+      prog_script "$d/program" "$EXE" run "$lib" $units "$d/$u.ae" -- $r
+      hook_run "$id" "$d" "$d/oi.out.$i" "$env" limited_cpu "$TIMEOUT" "$(oi_wall)" || rst=$?
+    else
+      (cd "$d" && run_redirected "$env" "$d/oi.out.$i" limited_cpu "$TIMEOUT" "$(oi_wall)" "$EXE" run "$lib" $units "$u.ae" -- $r) || rst=$?
+    fi
     if [ "$rst" != "$st" ] || ! cmp -s "$d/oi.out" "$d/oi.out.$i"; then
       mv "$d/oi.out" "$d/oi.out.1"; cp "$d/oi.out.$i" "$d/oi.out"; st=$rst; break
     fi
   done
   t1=$(date +%s.%N); times > "$d/cpu1"
   local note=""
-  note=$(cat "$d/oi.out" ${hk:+"$d/hook.out"} | grep -a -m1 -o 'oi: .*' | head -c 300 | tr '\t' ' ' || true)
+  note=$(cat "$d/oi.out" ${hk:+"$d/oi.out.hook"} | grep -a -m1 -o 'oi: .*' | head -c 300 | tr '\t' ' ' || true)
+  [ -n "$note" ] || note=$(hook_note "$d")
+  # the check hook in place of the comparison with the reference (OC203 (a)): the row's output its verdict
+  [ -z "$ck" ] || hook_check "$id" "$d" "$d/oi.out" "$env"
   st=$(oi_status "$st" "$(oi_cpu_secs "$d/cpu0" "$d/cpu1")")
   [ "$st" = 124 ] && note="timeout ${TIMEOUT}s"
   [ "$i" -gt 1 ] && [ -f "$d/oi.out.1" ] && note="run $i (arguments $r) differs from run 1${note:+; $note}"
@@ -967,7 +1020,10 @@ own_verdicts() {
     if [ "$lv" = oi ] && printf '%s\n' "$hdr" | grep -qE '^[[:space:]]*native[[:space:]]*;' && ! printf '%s\n' "$hdr" | grep -q bytecode; then continue; fi
     st=$(printf '%s\n' "$hdr" | awk '/exit_status *= *"[0-9]+"/ { match($0, /"[0-9]+"/); print substr($0, RSTART + 1, RLENGTH - 2); exit }')
     ref=$TESTS/$id.reference
-    if [ -f "$ref" ]; then printf '%s\t%s\t%s\t%s\n' "$id" "${st:-0}" "$(sha256sum < "$ref" | cut -d' ' -f1)" "$(wc -c < "$ref")" >> "$out.new"
+    # a test whose check is its hook (OC203 (a)): the hook's pass, as hook_check writes it
+    if [ -f "$TESTS/$id.check-program-output" ]; then
+      printf '%s\t%s\t%s\t%s\n' "$id" "${st:-0}" "$(printf 'check-program-output: pass\n' | sha256sum | cut -d' ' -f1)" "$(printf 'check-program-output: pass\n' | wc -c)" >> "$out.new"
+    elif [ -f "$ref" ]; then printf '%s\t%s\t%s\t%s\n' "$id" "${st:-0}" "$(sha256sum < "$ref" | cut -d' ' -f1)" "$(wc -c < "$ref")" >> "$out.new"
     else printf '%s\t%s\t%s\t0\n' "$id" "${st:-0}" "$empty" >> "$out.new"; fi
   done < "$corpus"
   mv "$out.new" "$out"; rm -f "$out.except"
@@ -1079,7 +1135,16 @@ o2j_cpu() { local c=$((TIMEOUT + ${O2J_LOAD_ALLOWANCE:-20})); echo "$c $((c * 4)
 o2j_alone() {
   local id=$1 out=$2 files=$3 argv0=$4 st=0 t0 t1; shift 4
   t0=$(date +%s.%N)
-  (cd "$(dirname "$out")" && O2J_ARGV0=$argv0 run_redirected "${OI_REDIR:-}" "$out" o2j_run_cpu $(o2j_cpu) $(cat "$files") -- "$@") || st=$?
+  case " ${OI_REDIR:-} " in
+    *" @hook=run "*)
+      # the run hook (OC203 (a)): its program o2j's run of the program, under the limits o2j_run_cpu sets (the hook under the CPU cap)
+      local d; d=$(dirname "$out")
+      prog_script "$d/program" env ARBACE_PATH="$root/jdk/ocaml" TMPDIR="$O2J/tmp" GOMEMLIMIT="${O2J_GOMEMLIMIT:-900MiB}" GOMAXPROCS=1 \
+        O2J_ARGV0="$argv0" "$(arbace_exe)" "$root/test/ocaml/o2j/run.ae" $(cat "$files") -- "$@"
+      hook_run "$id" "$d" "$out" "$OI_REDIR" limited_cpu $(o2j_cpu) || st=$? ;;
+    *) (cd "$(dirname "$out")" && O2J_ARGV0=$argv0 run_redirected "${OI_REDIR:-}" "$out" o2j_run_cpu $(o2j_cpu) $(cat "$files") -- "$@") || st=$? ;;
+  esac
+  case " ${OI_REDIR:-} " in *" @check=check-program-output "*) hook_check "$id" "$(dirname "$out")" "$out" "$OI_REDIR" ;; esac
   t1=$(date +%s.%N)
   case $st in 124|137|152) st=timeout ;; esac
   printf '%s\t%s\t%s\n' "$id" "$st" "$(echo "$t1 - $t0" | bc)"
@@ -1362,8 +1427,15 @@ c2_programs() {
     if [ -n "$r" ]; then printf '%s\t-\t-\t0\t0\trefused: %s\n' "$id" "$r" >> "$outnew"; continue; fi
     prog=$(awk -F'\t' -v p="$p" '{ n = split($2, a, " "); for (i = 1; i <= n; i++) if (a[i] == p) print $1 }' "$C2/built.tsv" | head -1)
     st=0; t0=$(date +%s.%N); times > "$d/cpu0"
-    (cd "$d" && O2J_PROG=$p O2J_ARGV0=$a0 GOMAXPROCS=1 GOMEMLIMIT=${O2J_GOMEMLIMIT:-900MiB} \
-       run_redirected "$env" "$d/o2j.out" limited_cpu "$TIMEOUT" "$(oi_wall)" "$prog" $args) || st=$?
+    case " $env " in
+      *" @hook=run "*)
+        # the run hook (OC203 (a)): its program the shard's, O2J_PROG naming the program
+        prog_script "$d/program" env O2J_PROG="$p" O2J_ARGV0="$a0" GOMAXPROCS=1 GOMEMLIMIT="${O2J_GOMEMLIMIT:-900MiB}" "$prog" $args
+        hook_run "$id" "$d" "$d/o2j.out" "$env" limited_cpu "$TIMEOUT" "$(oi_wall)" || st=$? ;;
+      *) (cd "$d" && O2J_PROG=$p O2J_ARGV0=$a0 GOMAXPROCS=1 GOMEMLIMIT=${O2J_GOMEMLIMIT:-900MiB} \
+           run_redirected "$env" "$d/o2j.out" limited_cpu "$TIMEOUT" "$(oi_wall)" "$prog" $args) || st=$? ;;
+    esac
+    case " $env " in *" @check=check-program-output "*) hook_check "$id" "$d" "$d/o2j.out" "$env" ;; esac
     t1=$(date +%s.%N); times > "$d/cpu1"
     st=$(oi_status "$st" "$(oi_cpu_secs "$d/cpu0" "$d/cpu1")")
     note=$(grep -a -m1 -o 'o2j: .*' "$d/o2j.out" | head -c 300 | tr '\t' ' ' || true)

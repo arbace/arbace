@@ -3213,3 +3213,64 @@ key completed it (the night re-reads). C: completeness 95.92% to 95.96% (99.59% 
 36 to 33, eval and AOT 1 to 0, print 41 to 39. Alternatives considered: naming each re-entry `MAIN#again#N` (CS290 (b), rejected by
 the decision), the parser's messages in gcc's words (CS292 (b): the parse check compares them with cc's). Details: doc/C23-SURVEY.md,
 "As built: CS290 (a), CS291, CS292 (a)".
+
+## 2026-11-09: SCS15 (a), SCS16 (b), SCS17 (c), SCS18 (b), si's Unicode and printer from the pinned UCD, the read judge without Chez's dumps (branch `scheme-props2`, from `mac/scheme-props` 1f64429fa)
+
+The user accepted the four as recommended (about 06:15). doc/scheme/SCHEME-SURVEY.md, "As built: SCS15-SCS18", has the detail.
+
+- SCS15 (a): `#!chezscheme`'s extensions stay classed (`:chezscheme-extensions`, choices.edn); nothing built.
+- SCS16 (b): fetched once by the user's allowance from https://www.unicode.org/Public/16.0.0/ucd/ into the main checkout's
+  `.tmp/scheme/ucd-16.0.0`: `SpecialCasing.txt` (16,809 bytes, SHA-256 8d5de354eef79f2395a54c9c7dcebbaf3d30fc962d0f85611ea97aa973a0c451),
+  `DerivedCoreProperties.txt` (1,115,959, 39d35161f2954497f69e08bdb9e701493f476a3d30222de20028feda36c1dabd), `PropList.txt` (144,253,
+  53d614508e2a0b2305a8aa21cd60d993de9326cdf65993660dfcce4503548583), pinned in test/scheme/ucd.edn; data only, nothing run. The generator
+  `arbace.repr.scheme.ucd` writes si's categories, the properties R6RS's `(rnrs unicode)` names (Alphabetic, Numeric as UnicodeData.txt's
+  numeric value, White_Space, Uppercase, Lowercase, Cased, Case_Ignorable), the simple mappings and SpecialCasing.txt's unconditional full
+  ones into `go/arbace/scm/unicode.ae`; `prim_char.ae` takes them, dropping Go's `unicode` tables (17.0) and Chez's recorded mappings.
+  Checked by a new portable R6RS program over every scalar value, `test/scheme/unicode/scan.sps`, run on Chez 10.3.0 and on si: 4,825 lines
+  differed before, none after; `bin/si unicode-scan [--record]` holds si to Chez's recorded digest (test/scheme/unicode-scan.edn).
+  Alternative not taken: leaving Go's tables (the 4,803 code points of 17.0 and Numeric's 8 ideographs would stay Chez differences).
+- SCS17 (c): doc/scheme/SPEC.md 7 states `:print-string`, `:print-char`, `:print-symbol`; the generator writes the escape tables for both
+  printers (repr/scheme's `print.ae`, si's `write.ae`); the report states the rules a second time and judges the four printing scans, so
+  `bin/repr-scheme check` reads no scan dump. `report-scans` holds the rules to Chez's scans (equal) and reads the written texts back.
+- SCS18 (b): both readers refuse `+INF.0`, `#x1|53` and end a prefixed number at `#` in R6RS's syntax; report-chez.edn is empty, its three
+  rules are classes of choices.edn with their 37 probes, which report-check holds to differ from Chez. si's `string->number` is unchanged
+  (SCS19 proposes it).
+- Numbers: Scheme's independence 99.92 to 100.0 (judge 0.996 to 1.0: the read check reads no Chez dump), completeness 97.41 (98.88) and
+  maturity 100 unchanged. Proposed: SCS19 (`string->number`'s syntax), SCS20 (the Unicode scan in `si-check`), SCS21 (titlecasing's word breaks
+  from WordBreakProperty.txt).
+
+## 2026-11-09: OC203 (a), OC204 (a) (= OC195 (a)), OC205 (a) built: ocamltest's hooks ported, the four second programs and signal run (branch `ocaml-props`, from `ocaml-compl`'s fb8a73f19)
+
+The user's decisions of the morning (about 06:15, as recommended), relayed by the main session. Source studied: OCaml 5.5.0's
+ocamltest (the pinned tarball's `ocamltest/main.ml` `test_file`'s `install_hook`, `actions.ml`'s `run`, `actions_helpers.ml`'s
+`run_hook` and `check_output`, `builtin_actions.ml`'s `initialize_test_exit_status_variables`, `testsuite/Makefile`'s `SORT`), ported
+as a rule into bin/oi's runners (doc/ocaml/OCAML-SURVEY.md, "As built: OC203-OC205"):
+
+- OC203 (a): every run test's `TEST.run` and `TEST.check-program-output` hooks run as ocamltest runs them, `sh HOOK` in the build
+  directory with ocamltest's variables, in oi's runner, the references', and the AOT light and compiled levels' (`hook_vars`,
+  `prog_script`, `hook_run`, `hook_check`). The corpus takes the tests whose check is their hook (lib-threads/signal); swapchan's and tls's
+  own-verdict exceptions left, their reference rows re-recorded through the hooks (`bin/oi record-ref --only-list` of swapchan, tls and
+  signal with the host's OCaml 5.5.0, ocamlc and ocamlopt, by hand: each sorted output's sha256 is now its `.reference`'s, 2aba5ace for
+  swapchan, d73f64ff for tls, where before swapchan's both runs and tls's ocamlopt run were unsorted interleavings; signal's row dropped,
+  a helper test); tls passes at the AOT light level (was a known schedule failure); the compiled level's runner takes the hooks, its
+  record not rerun here (tls's `aot-compiled-known.edn` line kept until the night's compiled run). `record-ref` skips the tests that
+  build a helper.
+- OC204 (a): header.awk's helper mode takes a helper of OCaml alone; quotecommand, redirections, wait_nohang and test_unix_cmdline
+  run and pass by their own verdict at oi's level (both paths), the AOT levels keep `:ocamltest-tools`.
+- OC205 (a): recorded; C helpers stay on `oi cmain`.
+
+Alternatives considered: keeping bin/oi byte-identical (the native library's key hashes it) by overriding its functions from a file of
+bin/lib/oi/: rejected as duplicated definitions; the library is rebuilt once (about 8.5 minutes, `OI_LIB_JOBS=1`) and the night's
+`bin/oi stdlib` rebuilds it after the merge in any case. Applying a hook's response file's modifiers: not ported (no corpus test's hook
+writes one), a non-empty response is a note of the row.
+
+Checks: the nine by `--only-list` on both paths (9 of 9), `--aot` (2 pass, 7 classed), the essential list (58 of 58, control differs),
+`own-verdicts --check`, the five judgments, `bin/oi test`, `bin/reap` and `crops-score --judge --strict` (0 problems), `bin/gate --plan`.
+Scores: OCaml completeness 81.6 to **81.75** (eval 460 / 211 / 0 to 465 / 207 / 0; AOT 405 / 203 / 63 to 406 / 202 / 64). Proposed OC206
+(the OCaml helpers at the AOT levels).
+
+Also: `bin/oi suite rollup` failed on `ocaml-compl`'s records (27 files "run without a level's result": programs oi runs that the AOT
+levels class by header); `test/ocaml/testsuite_check.ae` gives them their AOT class, a commit of its own (86d8b6c47) to pick onto `next`
+before the night's `oi-check`. Checks by list on both paths, the essential list with its control, own-verdicts --check, the five judgments
+and the rollup: 0 failing. Scores: OCaml completeness 81.58% to 81.75% (eval 460/211/0 to 465/207/0, AOT 405/203/63 to 406/202/64),
+maturity 100%, independence 87.4%. Proposed OC206 (the AOT levels' helpers), OC207 (a control that runs a hook).
