@@ -2483,16 +2483,29 @@
       (upd-fn! fid dissoc :analyzing))
     fid))
 
+(declare cx-immediate-call!)
+
 (defn- method-call
   "A call of the method `fid` on the object glvalue `obj` with the typed arguments."
   [ctx fid obj args virtual-ok]
   (let [f (fnd (deduced! fid))
+        _ (cx-immediate-call! ctx f)
         o (when-not (:static f) (to-base-lv obj (:cls f)))]
     {:op :call :fn fid :obj o :args (call-args f args ctx) :virtual (and virtual-ok (:virtual f) (not (:static f)))
      :ty (abi/non-ref (:ret (:ty f))) :cat (let [r (:ret (:ty f))] (case (:k r) :ref :lv :rref :xv :pr))}))
 
+(defn- cx-immediate-call!
+  "CP310 (b), the checker: an immediate invocation ([expr.const]/16: a call of an immediate function outside one) is a
+  constant expression, so one of a function whose own body the checker found not constant (a constexpr error in it) is
+  not, at the call."
+  [ctx f]
+  (when (and (checking?) (:consteval f) (:cx-imm-error f)
+             (not (some-> (:fn-id ctx) fnd :consteval)))
+    (fail :constexpr "call to consteval function '" (:name f) "' is not a constant expression")))
+
 (defn- fn-call [ctx fid args]
-  (let [f (fnd (deduced! fid))]
+  (let [f (fnd (deduced! fid))
+        _ (cx-immediate-call! ctx f)]
     {:op :call :fn fid :args (call-args f args ctx)
      :ty (abi/non-ref (:ret (:ty f))) :cat (let [r (:ret (:ty f))] (case (:k r) :ref :lv :rref :xv :pr))}))
 
@@ -3708,7 +3721,13 @@
                          st (if-let [h *on-refusal*]
                               (fn [x] (try (stmt c x)
                                            (catch arbace.lang.ExceptionInfo e
-                                             (if (:codegen/refused (ex-data e)) (do (h e (some-> *at* deref)) {:s :null}) (throw e)))))
+                                             (if (:codegen/refused (ex-data e))
+                                               (do ;; (CP310 (b): an immediate function whose body is not constant, its
+                                                   ;; invocations not either)
+                                                   (when (and (= :constexpr (:codegen/refused (ex-data e))) (:fn-id ctx) (:consteval (fnd (:fn-id ctx))))
+                                                     (upd-fn! (:fn-id ctx) assoc :cx-imm-error true))
+                                                   (h e (some-> *at* deref)) {:s :null})
+                                               (throw e)))))
                               #(stmt c %))]
                      {:s :block :items (vec (mapcat #(let [x (st %)] (if (vector? x) x [x])) (kids n)))})
     "DeclStmt" {:s :block :flat true :items (decl-stmt ctx n)}
@@ -4053,11 +4072,40 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; The program
 
+(defn- immediate-address
+  "CP310 (b): the immediate function whose address the typed expression `e` is (a pointer to it, a pointer to member
+  function of it, through no-op conversions), or nil."
+  [e]
+  (case (:op e)
+    (:fnaddr :mptr-fn) (when-let [f (some-> (:fn e) fnd)] (when (:consteval f) f))
+    :cast (when (= :noop (:ck e)) (immediate-address (:e e)))
+    nil))
+
+(defn- returned-immediate
+  "CP310 (b): an immediate function the function `fid`'s return statements return the address of, or nil (its body as
+  analyzed)."
+  [fid]
+  (let [f (fnd fid)]
+    (some (fn [x] (when (and (map? x) (= :return (:s x)) (= :expr (get-in x [:init :i]))) (immediate-address (get-in x [:init :e]))))
+          (tree-seq #(or (map? %) (vector? %)) #(if (map? %) (vals (select-keys % [:items :then :else :body :init :s])) (seq %)) (:tbody f)))))
+
 (defn cx-check-constant!
   "CX12 (the checker): a constexpr variable's scalar initializer `i` evaluated ([dcl.constexpr]/10: a constant
   expression); an evaluation the program's own operation makes not constant (ub!) diagnosed at that operation, clang's
-  err_constexpr_var_requires_const_init. An evaluation the slice cannot do judges nothing."
+  err_constexpr_var_requires_const_init. An evaluation the slice cannot do judges nothing.
+  CP310 (b), [expr.const]/16-18: the result of a manifestly constant-evaluated initializer is no pointer to an immediate
+  function (a permitted result's constituent values do not refer to one): the initializer the address itself (g++'s
+  \"constant evaluation returns address of immediate function\") or an immediate invocation that returns one (\"immediate
+  evaluation returns ...\", its callee's return statement the address), at the variable."
   [v i]
+  (when (and (checking?) (:cx-constexpr v) (= :expr (:i i)))
+    (let [e (:e i)
+          imm (immediate-address e)
+          inv (when (and (nil? imm) (= :call (:op e)) (:consteval (fnd (:fn e)))) (returned-immediate (:fn e)))]
+      (when (or imm inv)
+        (throw (ex-info (str "codegen: constexpr variable '" (:name v) "' must be initialized by a constant expression ("
+                             (if imm "constant" "immediate") " evaluation returns address of immediate function '" (:name (or imm inv)) "')")
+                        {:codegen/refused :constexpr :cx/node {:range (:cx-range v)}})))))
   (when (and (checking?) (:cx-constexpr v) (= :expr (:i i)) (abi/scalar? (abi/unq (:ty v))))
     (try (ce-eval (:e i))
          (catch arbace.lang.ExceptionInfo x

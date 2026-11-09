@@ -4723,3 +4723,23 @@ read), the messages after the directives' texts.
   (`.tmp/t7/g300`): 141 forms byte for byte the record's, rtti refused.
 - Not built: [over.match.best]/2.6's more constrained non-template functions (a class template's members with trailing
   requires-clauses of the same signature); a parameter pack's atoms (`C<Ts>...`, a fold-expanded constraint) stay opaque atoms.
+
+### CP310 (b): immediate functions' addresses and invocations
+
+- `arbace.cpp.sema` ([expr.const]/16-18; the checker only): a constexpr variable's initializer (manifestly constant-evaluated)
+  whose result is the address of an immediate function -- the initializer the address itself, `foo`, `&foo`, `&S::foo` (a
+  virtual one too), through no-op conversions (`immediate-address`), "constant evaluation returns address of immediate function",
+  or an immediate invocation whose callee's return statement returns one (`returned-immediate`, the callee's body as analyzed),
+  "immediate evaluation returns ..." -- is diagnosed at the variable (both under the constexpr variable rule, the dg lines'
+  texts in the message); and an immediate invocation (a call of a consteval function outside one, `cx-immediate-call!`, function
+  and member calls) of a function whose own body the checker found not constant (a constexpr error in it: `:cx-imm-error`, set
+  when a statement of a consteval function is refused by a constexpr rule) is "call to consteval function 'f' is not a constant
+  expression" at the call (the diag rule `:constexpr`).
+- Measure: the 84 dg-error files of cpp2a/consteval*, cpp2a/constexpr-* and cpp23's consteval files (`.tmp/t7/f310.txt`; CP300's tree
+  against this commit's): own passes 5 → 7, gained cpp2a/consteval24 (20-26: the seven escapes, four direct and three through
+  `baz`, `qux`, `corge`; 30: `auto a = bar ();` of the function whose body holds them) and consteval22 (33, 34: `foo ()` and
+  `bar ()` returning `&S::foo`, `&S::bar`; 31's `static_assert (baz () == 3)` inside an immediate function clean); none lost; the
+  extras the same 31. The rules are the checker's alone (`checking?`): the code generator's output is unchanged by construction.
+- Not built (CP310 (a), after the night's whole-part record): the errors inside called constexpr functions, each kind placed as
+  g++ places it (the inner operation's line for undefined operations and non-constant reads, the call for a function that can
+  never be constant); an immediate function's address escaping through an aggregate or a non-constexpr variable's initializer.

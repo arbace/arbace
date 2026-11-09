@@ -1212,3 +1212,12 @@ compiler stubs first on PATH (their log empty). doc/cpp/CPP-SURVEY.md, "Decided 
 - **Alternatives considered**: the redeclaration's identity by normal forms (rejected: two declarations' own atoms are never
   identical, so a declaration and its definition would be two templates); clang's caching of normal forms (left: the slice's
   candidate sets are small).
+
+## 2026-11-09: C++'s CP310 (b), immediate functions' addresses and invocations (branch `cpp-props2`)
+
+- **Built** (the checker): a constexpr variable initialized by an immediate function's address, directly or returned by an
+  immediate invocation, is an error at the variable ([expr.const]/16-18); an immediate invocation of a consteval function whose body
+  the checker found not constant is an error at the call.
+- **Measured**: the 84 consteval and constexpr dg-error files of cpp2a and cpp23: 5 → 7 own passes (consteval24, consteval22),
+  none lost, no new extra; the code generator unaffected (checker-only rules).
+- **Left**: CP310 (a), the in-call errors by kind, until the night's whole-part record gives their counts (the decision's order).
