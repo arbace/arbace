@@ -1090,3 +1090,32 @@ Checked: scheme-read-essential's command (1,358 files and probes, 1,140 by the r
 --record` and `--judge --strict` (0 problems). Scheme's scores: completeness 96.8 to 97.3, maturity 100, independence 97.5 to 99.6 (judge
 0.876 to 0.979). Night: `bin/repr-scheme check --record`, `bin/si check --record`, `bin/si check --aot --record`. Proposed: SCS7 (the
 corpora's files by the report), SCS8 (Larceny's earley and nboyer run as their authors meant, their own result checks).
+
+## 2026-11-08: repr/go's printer groups names only of one type, the type metadata included (branch `go-tests`, from 1f397fd0e)
+
+Found today by `bin/jrt test` (go test ./... over go/ printed in the gofmt layout): `go/arbace/expat` did not build. The printer
+regroups consecutive names (N3: the converter keeps one entry a name) when `groupable?` (arbace/repr/go/print_code.ae) finds their
+types equal, and it compared them with `=`, which ignores metadata; a func type's parameter types are the names' `:tag`, so
+`(func [enc fromP fromLim toP toLim] ...)` with `toP *Ptr` and with `toP *Ptr16` were equal and `ENCODING`'s `utf8Convert` and
+`utf16Convert` printed as one field `utf8Convert, utf16Convert func(... *Ptr, ... Ptr)`. Mode `:full` was never affected (a group
+there also needs the types' one recorded position). Fix: `arbace.repr.go.types/same-type?`, the forms `=` and, at every level,
+their type metadata equal (`:tag` compared again by same-type?, `:go/tag`, `:go/grouped`; positions, lines and comments not),
+used by the printer's `groupable?` (struct fields, parameters, results, type parameters: every list `group-entries` groups) and by
+the converter's `mark-ungrouped` (A1's `:go/grouped false` in generic declarations, which compared the tags with `=` too: there it
+only added a redundant marker). `go/var` and `go/const` specs need none: a spec keeps the names its source spec declared. As
+go/printer prints the source's own field groups, a regrouping may only join what the source could have written as one field.
+Alternatives considered: comparing the printed text of the two types (exact but a print per pair), comparing all metadata but a
+list of position keys (any new layout key would silently split groups); the whitelist names what is part of a type (SPEC §5).
+Tests: case `test/repr/go/cases/s05_type_identity` (expat's two fields, named results, struct tags, parameters and results of a
+function; each with its negative, equal types grouped) and test `type-identity` in `test/repr/go/print_test.ae` (same-type? on
+the exact forms and the negatives; the gofmt layout equal to the original byte for byte); with the old printer the case fails
+gocmp's tree, export and code levels. `bin/repr-go test print`: 281 assertions, 0 failures; `test read`: 174, 0 failures.
+expat and pyexpat printed in the gofmt layout: go vet clean, go test passes (expat's tests; pyexpat has none), and oi's with its
+testdata copied in; so `bin/jrt test`'s exclusion of 1f397fd0e is undone (`./...` again), print_module copying
+`test/ocaml/oi/testdata` as `bin/oi test` does. Printed output: a scan of every pair of consecutive tagged names whose tags are
+`=` but not same-type? (the only pairs whose grouping can change) over go/, overlay/go, box/, x509roots/, tamago/goroot, goos and
+cmd, and the program's j2g forms (the main checkout's `target/arbace-go/j2g`, 4,157 files): 5 pairs, all in go/arbace/expat and
+pyexpat (crops' paths); none in the runtime or the program. Ten std packages (strings, sort, bufio, encoding/json, go/ast,
+text/template/parse, net/textproto, image/png, net/http/httptest, flag) printed in the full, gofmt and lines layouts by the old and
+the new printer: identical, and the full layout equal to the originals byte for byte; slices, maps, sync/atomic and iter converted
+by the old and new converter: identical forms. The whole runs are the night's (the report lists them).
