@@ -814,8 +814,8 @@ covers what.
   successors, `fmt_assert_args`) and `compiler/rustc_codegen_ssa/src/mir/{mod,analyze,block,operand,place,rvalue,statement}.rs`
   (the SSA analysis of locals, the order and merging of blocks, operands, places, rvalues, terminators), `compiler/rustc_mir_transform/src/
   remove_noop_landing_pads.rs`, `compiler/rustc_middle/src/mir/{traversal,mod}.rs` (mono reachability, `get_caller_location`'s walk),
-  `compiler/rustc_monomorphize/src/collector.rs` (the collector's roots and uses) and `compiler/rustc_codegen_llvm/src/intrinsic.rs`
-  (the intrinsics' lowering): copyright the Rust
+  `compiler/rustc_monomorphize/src/collector.rs` (the collector's roots and uses) and `compiler/rustc_codegen_llvm/src/{intrinsic,consts}.rs`
+  (the intrinsics' lowering, volatile loads and stores among them since 2026-11-08; `codegen_static`): copyright the Rust
   project's contributors, dual-licensed under the MIT License or the Apache License 2.0 at the licensee's option, taken here
   under the MIT License ("Rust (rustc 1.99.1): MIT License or Apache License 2.0" below). The rest (the forms' shapes,
   `doc/rust/MIR.md`, the judges, `bin/rust-front`) is Arbace's own, under the Eclipse Public License 1.0.
@@ -875,6 +875,40 @@ covers what.
   scalar pairs after `compiler/rustc_abi/src/layout.rs`: copyright the Rust project's contributors, dual-licensed under the MIT License or
   the Apache License 2.0 at the licensee's option, taken here under the MIT License ("Rust (rustc 1.99.1): MIT License or Apache License
   2.0" below). The rest (the judge `build_check.ae`, the rest of `build_run.ae`) is Arbace's own, under the Eclipse Public License 1.0.
+  RF10's second slice (doc/rust/FRONTEND-SURVEY.md, "As built: RF10 (second slice)") adds to `build.ae`, from the same sources and
+  under the same terms, the closures' capture analysis after `compiler/rustc_hir_typeck/src/{upvar,expr_use_visitor}.rs` and
+  `compiler/rustc_passes/src/upvars.rs`, the canonical user type annotations after `compiler/rustc_hir_typeck/src/fn_ctxt/_impl.rs`,
+  `method/confirm.rs` and `compiler/rustc_middle/src/ty/{typeck_results,print/pretty}.rs` (with `typeck.ae`'s part), lint scopes
+  after `builder/scope.rs`' `maybe_new_source_scope`, allocations after `compiler/rustc_middle/src/mir/pretty.rs`' `write_allocations`;
+  the judge `arbace/rust/front/capture_check.ae` and the helper's `--captures` are Arbace's own (the helper's terms are its own, above).
+  RF10's third slice (doc/rust/FRONTEND-SURVEY.md, "As built: RF10 (third slice)") adds to `build.ae`, from the same sources and under
+  the same terms, the rest of `compiler/rustc_mir_build/src/builder/matches/{mod,match_pair,buckets,test,util}.rs` and `builder/block.rs`'
+  let-else, `thir/pattern/{mod,const_to_pat}.rs`' ranges, slices and string constants, `builder/mod.rs`' `construct_const` and
+  `builder/expr/into.rs`' `write_box_via_move` and functional update; and `arbace/rust/front/passes.ae`, Arbace forms written after
+  `compiler/rustc_mir_transform/src/{lib,lint_and_remove_uninhabited,simplify}.rs` and `compiler/rustc_middle/src/mir/{terminator,traversal}.rs`,
+  the same terms.
+  RF10's fourth slice ("As built: RF10 (fourth slice)") adds to `passes.ae`, from the same sources and under the same terms,
+  `compiler/rustc_mir_transform/src/{promote_consts,cleanup_post_borrowck,remove_noop_landing_pads,deref_separator,add_call_guards,
+  post_analysis_normalize,elaborate_drops,elaborate_drop,abort_unwinding_calls,erase_deref_temps,elaborate_box_derefs,lower_intrinsics,
+  remove_place_mention,patch}.rs`, `compiler/rustc_const_eval/src/check_consts/qualifs.rs`, `compiler/rustc_mir_dataflow/src/{move_paths/
+  {mod,builder}.rs,un_derefer.rs,drop_flag_effects.rs,impls/initialized.rs,framework/direction.rs}` and `compiler/rustc_middle/src/ty/
+  layout.rs`' `fn_can_unwind`; and to `build.ae` a port of rustc_apfloat 0.2.3's (`rustc_apfloat-0.2.3+llvm-462a31f5a5ab`,
+  `src/ieee.rs`, `impl Display for IeeeFloat`) float formatting, a port of LLVM's APFloat::toString, under the Apache License 2.0
+  with LLVM Exceptions (the text of section "LLVM (clang): Apache License 2.0 with LLVM Exceptions" below).
+- `arbace/rust/front/mono.ae` (RFP23 (c), doc/rust/FRONTEND-SURVEY.md, "As built: RFP23 (c)"): Arbace forms porting, function by
+  function, rustc 1.99.1 (https://github.com/rust-lang/rust at 58cf8f9c3, the sources of Alpine's rust-src-1.99.1-r0):
+  `compiler/rustc_symbol_mangling/src/{lib.rs,v0.rs}` (symbol_name_from_attrs, compute_symbol_name, the v0 mangler, punycode
+  identifiers, mangle_internal_symbol), `compiler/rustc_span/src/def_id.rs` (StableCrateId::new), `compiler/rustc_middle/src/{mono.rs,
+  ty/print/mod.rs,ty/instance.rs,ty/layout.rs}` (instantiation_mode, default_print_def_path, requires_inline, requires_caller_location,
+  discr_range_of_repr), `compiler/rustc_mir_transform/src/cross_crate_inline.rs`, `compiler/rustc_metadata/src/rmeta/{mod.rs,
+  encoder.rs}` (the rmeta header and CrateRoot's first fields, should_encode_mir), `compiler/rustc_attr_ir/src/weak_lang_items.rs`,
+  `compiler/rustc_monomorphize/src/collector.rs` (roots, the uses of calls and drops), `compiler/rustc_abi/src/{layout.rs,
+  layout/simple.rs,lib.rs,wrapping_range.rs}` and `compiler/rustc_ty_utils/src/layout.rs` (layout_of for x86_64); and
+  rustc-stable-hash 0.1.2 (https://github.com/rust-lang/rustc-stable-hash, the version rustc's Cargo.lock pins: `src/sip128.rs`,
+  `src/stable_hasher.rs`, SipHasher128 and StableHasher's writes): copyright the Rust project's contributors, dual-licensed under
+  the MIT License or the Apache License 2.0 at the licensee's option, taken here under the MIT License ("Rust (rustc 1.99.1): MIT
+  License or Apache License 2.0" below). The judge `mono_check.ae` and `test/rust/front/std-crates.edn` are Arbace's own, under the
+  Eclipse Public License 1.0.
 - The own-verdict judge of `arbace/rust/check.ae` (`own-verdict`, `run-class`, `verdict-met?`, `directives`; rust-90,
   doc/rust/EVAL.md §13): Arbace forms written after rustc 1.99.1's compiletest, the same revision and sources (the pinned
   `rustc-1.99.1-src.tar.xz`'s `src/tools/compiletest/src/runtest/ui.rs`: `run_ui_test`'s RunResult of the run and the

@@ -274,7 +274,9 @@ code. Three kinds of things live here:
   (the collector's traversal, after `rustc_monomorphize/src/collector.rs`) and `tools/rsdump/mirdata.rs` (the helper's `mir`, `census` and
   `iface` modes, walking rustc_middle's `Body` as `pretty.rs` does) port rustc 1.99.1, the same revision and sources as above, by
   hand on 2026-11-05 (RF1-RF3, doc/rust/FRONTEND-SURVEY.md, "As built: RF1-RF3 (trial)"; LICENSE.md names the files; MIT OR
-  Apache-2.0); evaluated from the checkout, not embedded, out of `gate_key` (RFS13).
+  Apache-2.0); evaluated from the checkout, not embedded, out of `gate_key` (RFS13). On 2026-11-08 (RFP23 (b)) `codegen.ae` gained
+  `intrinsic.rs`' `volatile_load`/`volatile_store` (and the unaligned ones) and `rustc_codegen_llvm/src/consts.rs`' `codegen_static` for a
+  static whose bytes the allocation carries, the same revision.
   `arbace/rust/front/expand.ae` with `expand_format.ae` and `expand_derive.ae` (macro expansion: macro_rules! after
   `rustc_expand/src/mbe/`, the builtins after `rustc_builtin_macros/src/{format,assert,edition_panic,source_util,concat,cfg}.rs` and
   `rustc_parse_format`, the derives after `rustc_builtin_macros/src/deriving/`, cfg after `rustc_expand/src/config.rs`),
@@ -301,11 +303,36 @@ code. Three kinds of things live here:
   RF9a"; RF9b's second slice, the same day: ambiguity and where-clause candidates, normalization through the parameter environment and
   item bounds, CoerceMany, closure kinds, writeback's fix-ups, "As built: RF9b"; LICENSE.md names the files; MIT OR Apache-2.0);
   evaluated from the checkout, out of `gate_key` (RFS13).
+  `arbace/rust/front/mono.ae` (RFP23 (c), 2026-11-09, doc/rust/FRONTEND-SURVEY.md, "As built: RFP23 (c)": the run's facts natively)
+  ports rustc 1.99.1, the same revision and sources: `rustc_symbol_mangling/src/{lib,v0}.rs`, `rustc_span/src/def_id.rs`'s
+  StableCrateId, `rustc_middle/src/{mono.rs,ty/print/mod.rs,ty/instance.rs,ty/layout.rs}`, `rustc_mir_transform/src/cross_crate_inline.rs`,
+  `rustc_metadata/src/rmeta/{mod,encoder}.rs` (the rmeta's header and CrateRoot's first fields), `rustc_monomorphize/src/collector.rs`,
+  `rustc_abi/src/{layout.rs,layout/simple.rs,lib.rs,wrapping_range.rs}` and `rustc_ty_utils/src/layout.rs`; with rustc-stable-hash
+  0.1.2's `src/{sip128,stable_hasher}.rs` (https://github.com/rust-lang/rustc-stable-hash, as rustc's Cargo.lock pins it); LICENSE.md
+  names the files (MIT OR Apache-2.0); `mono_check.ae` is Arbace's own; evaluated from the checkout, out of `gate_key` (RFS13).
   `arbace/rust/front/build.ae` (THIR and MIR building after `rustc_mir_build/src/{thir,builder}/`, the region scope tree after
   `rustc_hir_analysis/src/check/region.rs`) and `build_run.ae` (CleanupPostBorrowck's changes, the layouts of scalars and scalar pairs
   after `rustc_abi`) port rustc 1.99.1, the same revision and sources, by hand on 2026-11-08 (RF10's first slice,
   doc/rust/FRONTEND-SURVEY.md, "As built: RF10 (first slice)"; LICENSE.md names the files; MIT OR Apache-2.0); evaluated from the
-  checkout, out of `gate_key` (RFS13).
+  checkout, out of `gate_key` (RFS13). RF10's second slice (2026-11-08, "As built: RF10 (second slice)") adds to `build.ae` the capture
+  analysis after `rustc_hir_typeck/src/{upvar,expr_use_visitor}.rs` and `rustc_passes/src/upvars.rs`, closure bodies, overloaded
+  operators, derefs and indexing, constants and allocations, canonical user type annotations (with `typeck.ae`'s part, after
+  `fn_ctxt/_impl.rs` and `method/confirm.rs`) and lint scopes, the same revision and sources; `capture_check.ae` is Arbace's own.
+  RF10's third slice (2026-11-08, "As built: RF10 (third slice)") ports into `build.ae` the rest of the match lowering after
+  `rustc_mir_build/src/builder/matches/{mod,match_pair,buckets,test,util}.rs` (or-patterns' subcandidates, guards and their fake
+  borrows, range, slice, string and scalar tests, let-else and `if let` after `builder/block.rs` and `lower_let_expr`), the
+  patterns of `thir/pattern/{mod,const_to_pat}.rs` (ranges, slices, `enumerate_and_adjust`), `construct_const` and statics'
+  references after `builder/mod.rs` and `thir/cx/expr.rs`, functional update and `write_box_via_move` after `builder/expr/into.rs`;
+  and `arbace/rust/front/passes.ae`, mir_built's passes after `rustc_mir_transform/src/{lib,lint_and_remove_uninhabited,simplify}.rs`,
+  the same revision and sources (LICENSE.md; MIT OR Apache-2.0).
+  RF10's fourth slice (2026-11-08, "As built: RF10 (fourth slice)") ports into `passes.ae` the passes from mir_promoted to runtime
+  MIR's cleanup after `rustc_mir_transform/src/{promote_consts,cleanup_post_borrowck,remove_noop_landing_pads,deref_separator,
+  add_call_guards,post_analysis_normalize,elaborate_drops,elaborate_drop,abort_unwinding_calls,erase_deref_temps,
+  elaborate_box_derefs,lower_intrinsics,remove_place_mention,patch}.rs`, `rustc_const_eval/src/check_consts/qualifs.rs`,
+  `rustc_mir_dataflow/src/{move_paths/{mod,builder}.rs,un_derefer.rs,drop_flag_effects.rs,impls/initialized.rs,framework/direction.rs}`
+  and `rustc_middle/src/ty/layout.rs`' `fn_can_unwind`, the same revision and sources; and into `build.ae` the float printing of
+  `rustc_apfloat` 0.2.3 (`src/ieee.rs`, `impl Display for IeeeFloat`; Apache-2.0 WITH LLVM-exception, from the cargo registry's
+  `rustc_apfloat-0.2.3+llvm-462a31f5a5ab`) (LICENSE.md).
   `arbace/rust/check.ae`'s own-verdict judge (`own-verdict`, `run-class`, `verdict-met?`) ports rustc 1.99.1's compiletest
   (`src/tools/compiletest/src/runtest/ui.rs`'s run checks, `directives.rs`'s directive lines; the pinned `rustc-1.99.1-src.tar.xz`),
   by hand on 2026-11-07 (rust-90, doc/rust/EVAL.md §13; LICENSE.md; MIT OR Apache-2.0); evaluated from the checkout.

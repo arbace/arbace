@@ -643,7 +643,8 @@
   (vec (concat
         (for [[[ty value align] n] (sort-by (comp name val) (:consts @gl))]
           (list 'llvm/global n ty value :linkage :private :unnamed-addr :unnamed_addr :constant true :align align))
-        (vals (:decls @gl))
+        (vals (sort-by key (:statics @gl)))
+        (vals (apply dissoc (:decls @gl) (keys (:statics @gl))))
         (vals (:types @gl)))))
 
 (defn declare!
@@ -673,7 +674,17 @@
                                ;; a function a constant points at that the unit may not define: declared (the module's definitions win)
                                (when-not (get-in @gl [:decls sy]) (declare! gl sy 'void []))
                                sy)
-                         :static (symbol "g" (:symbol a))
+                         :static (let [sy (symbol "g" (:symbol a))]
+                                   ;; a static whose initializer the allocation carries (bin/rust-front run-built's, from Arbace's
+                                   ;; own evaluation of it): defined in the module, as rustc's codegen_static defines it (its bytes,
+                                   ;; internal, writable when the static is mutable); else the module's other unit defines it
+                                   (when-let [bs (:bytes a)]
+                                     (let [n (quot (count bs) 2)
+                                           v (if (every? #{\0} bs) 'zeroinitializer
+                                                 (list 'c-string (apply str (map #(char (Integer/parseInt (subs bs (* 2 %) (+ 2 (* 2 %))) 16)) (range n)))))]
+                                       (vswap! gl assoc-in [:statics sy]
+                                               (list 'llvm/global sy (list 'array n 'i8) v :linkage :internal :constant (not (:mutable a)) :align (:align a)))))
+                                   sy)
                          :memory
                          (do
                            (when (:mutable a) (unsupported "mutable allocation"))
@@ -1662,6 +1673,25 @@
                                            bytes (if (number? (:v c)) (* (:size el) (:v c)) (let [r (fresh!)] (emit! bb (list '= r (list 'mul :nuw :nsw 'i64 (:size el) (:v c)))) r))]
                                        (declare! gl nm 'void [['ptr] ['ptr] ['i64] ['i1]])
                                        (emit! bb (list 'call 'void nm [['ptr (list :align (:align el)) (:v d)] ['ptr (list :align (:align el)) (:v s)] ['i64 bytes] ['i1 'false]]))
+                                       (when target (br-or-merge bb t target)))
+                                     ;; rustc_codegen_llvm's intrinsic.rs: volatile_store a `store volatile` of the immediate, its
+                                     ;; alignment the pointee's (1 unaligned); volatile_load a `load volatile` (scalars, as the corpus has)
+                                     ("volatile_store" "unaligned_volatile_store")
+                                     (let [d (operand! bb (first args)) v (operand! bb (second args))
+                                           el (layout lt (second (ty-struct (ty-of (first args)))))
+                                           sc (:scalar el)]
+                                       (when-not (and sc (string? (:ty v)) (not (:bool sc))) (unsupported (str "intrinsic " intrinsic " of a non-integer scalar")))
+                                       (emit! bb (list 'store [(symbol (:ty v)) (:v v)] ['ptr (:v d)] :volatile true
+                                                       :align (if (= intrinsic "unaligned_volatile_store") 1 (:align el))))
+                                       (when target (br-or-merge bb t target)))
+                                     ("volatile_load" "unaligned_volatile_load")
+                                     (let [s (operand! bb (first args))
+                                           el (layout lt (second (ty-struct (ty-of (first args)))))
+                                           sc (:scalar el) r (fresh!)]
+                                       (when-not (and sc (not (:bool sc))) (unsupported (str "intrinsic " intrinsic " of a non-integer scalar")))
+                                       (emit! bb (list '= r (list 'load (symbol (:mem sc)) ['ptr (:v s)] :volatile true
+                                                                  :align (if (= intrinsic "unaligned_volatile_load") 1 (:align el)))))
+                                       (assign! bb dest {:ty (:imm sc) :v r})
                                        (when target (br-or-merge bb t target)))
                                      "write_bytes"
                                      (let [d (operand! bb (first args)) v (operand! bb (second args)) c (operand! bb (nth args 2))

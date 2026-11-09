@@ -2032,3 +2032,194 @@ CFile, so a pragma needs stream-order stamping, proposed as CS290), turning the 
 92 of 92, the essential eval and AOT lists 0 failing, `bin/repr-c check --c23` 59 / 3 / 0, `bin/ci judge-test`, `bin/reap --record`
 0 problems, `bin/crops-score --record` and `--judge --strict`. C: 95.1% to 95.9% (98.7% to 99.6%), maturity 100, independence 99.7.
 Details: doc/C23-SURVEY.md, "As built: C's completeness, the deferred classes measured on the checkout's ci".
+
+## 2026-11-08: RF10's second slice, closures with their captures (RFP20 (a)), operators, constants and the format machinery's MIR (branch `rust-rf10b`, from next `5ec43f7b7`)
+
+The brief: RF10's next items in their stated order (doc/rust/FRONTEND-SURVEY.md, "As built: RF10 (first slice)", slices 1 then 2),
+measured as the first slice measured (`bin/rust-front build-check`: our built MIR against rustc 1.99.1's `-Zdump-mir=built`, byte for
+byte), the biggest group of failing bodies first; RFP22-RFP24 not built (they await the user). Measured on the first slice's corpus (88
+programs, 510 bodies, 92 equal): closures were the biggest group (212 bodies), then format_args!'s lowering (75 refused), so slice 4's
+built-MIR half was taken after slice 1 (it needs no PromoteTemps at the `built` phase), then slice 2's operators and constants, then
+the tail. RFP20 (a) first, as decided: the helper's `--captures` (`tools/rsdump/front.rs`) and a port of `rustc_hir_typeck`'s
+`upvar.rs` and `expr_use_visitor.rs` with `rustc_passes`' `upvars.rs` into `arbace/rust/front/build.ae`, judged by `bin/rust-front
+capture-check` (`capture_check.ae`): 173 of 174 closures equal (kind, captures, fake reads; the one left inside a user macro's
+expansion). Then closure bodies and expressions (`capture_upvar`, `UpvarRef`'s resolution, `insert_upvar_arg`, `limit_capture_mutability`),
+calls through the Fn traits, overloaded operators, derefs and indexing (`overloaded_operator`, `overloaded_place`), slices' bounds
+checks (`PtrMetadata`, fake borrows), drop-and-replace, repeats, floats, chars, byte strings, named constants, allocations
+(`allocate_bytes_dedup`, `write_allocations`), canonical user type annotations (`write_user_type_annotation_from_args`,
+`instantiate_method_args`, `TypeOf(.. at <impl ..>)`, `Ty(..)` lets with their locals' projections and ascriptions), std macro tokens'
+places kept through expansion for those annotations' spans, lint scopes (`maybe_new_source_scope`), `super let` and lifetime extension
+(`resolve_local`). The helper's `--std-iface` gained the lang item ADTs no public module reaches (`core::fmt::rt::Argument`) and
+enums' repr and discriminants: `test/rust/front/std-iface.sha256` re-pinned (only additions). The judge counts a body equal but for its
+allocations' ids apart (the ids are the session's interning order, which follows the order rustc builds bodies in, not the source's).
+
+Results: build-check 92 → 361 of 510 bodies equal, 25 more but for the allocations' ids (4 before but for their text), 5 → 51
+programs whole; the samples a1-a7 51 of 54 and 1 (47 and 1 before). Regressions checked: `typeck-check` 11,140 → 11,144 (`--ours`
+11,138 → 11,142), `hir-check --ours` 90 and 1 but for whitespace (unchanged, after regenerating expand2's oracle, whose path length
+changed with the worktree), `expand-check` 92 of 92 crates (unchanged), `run-built` 6 of 6 no_std samples from Arbace's MIR, stubs'
+log empty (unchanged); `bin/crops-score` Rust 75.0 / 95.8 / 80.0 (RES54 (a): unchanged until RF12). Alternatives considered: slice 2
+before format_args! (rejected: the format machinery blocked most of the remaining bodies, and the brief asks for the biggest group
+first); capture analysis inside typeck replacing its closure-kind estimate (deferred: typeck-check depends on it and the port runs on
+the resolved results, as rustc's runs after the main typeck); allocations judged by content only (kept as a class apart, RFP25).
+Proposed: RFP25 (the allocations' ids), RFP26 (the helper's std interface facts), RFP27 (a gate step for the judges).
+
+## 2026-11-08: the user's decisions on RFP22-RFP24, recorded (branch `rust-rf10b`)
+
+RFP22 (a): RFP20's captures judged first, then RF10's slices 1-2 on the corpus, then slice 3; RFP23 (b) then (c): the run's symbols,
+instances and layouts as packs first, then ported; RFP24 (a): no Rust front-end gate step until RF11, (b) at RFP23 (b). The second
+slice (entry above) already followed RFP22 (a)'s order; recorded in doc/rust/FRONTEND-SURVEY.md, "Decided (2026-11-08, the user:
+RFP22-RFP24)"; RFP27 rewritten to ride with RFP24 (b). Next by that order: slice 3.
+
+## 2026-11-08: RF10's third slice: the rest of slice 2 and slice 3's first passes (branch `rust-rf10b`)
+
+In the user's order (RFP22 (a)), continuing `rust-rf10b` from `d9a0245e2`. Sources: rustc 1.99.1 (`58cf8f9c3`, Alpine's
+rust-src-1.99.1-r0 pinned by `tools/rsdump/apks.sha256`), MIT OR Apache-2.0, taken under MIT (LICENSE.md, doc/ARBACE.md).
+
+Slice 2's rest, in `arbace/rust/front/build.ae`: the match lowering replaced by a port of `compiler/rustc_mir_build/src/builder/
+matches/{mod,match_pair,buckets,test,util}.rs` rule for rule (FlatPat and squash_inter_pat, candidates with subcandidates for
+or-patterns, expand_and_match_or_candidates, merge_trivial_subcandidates, test_remaining_match_pairs_after_or,
+partition_candidates_into_buckets with choose_bucket_for_candidate's whole matrix, perform_test for switches, ranges, slice
+lengths, string and scalar equality, lower_match_tree's false edges, bind_pattern, bind_and_guard_matched_candidate with
+collect_fake_borrows, the guards' RefForGuard locals and guard_context, fixed_temps); patterns of `thir/pattern/{mod,const_to_pat}.rs`
+(ranges, slices and arrays, `..` with enumerate_and_adjust, box, `&str` constants); let-else (`builder/block.rs`) and `if let`/`while
+let` (`lower_let_expr`); construct_const for constants and statics, StaticRef with the statics' allocations (literal, array and
+`&str` initializers, provenance printed as write_allocation_bytes prints it), anonymous constants of array lengths and repeat counts
+(numbered per owner, those in macro calls after the rest as def collection meets them during expansion); functional update, union
+aggregates, write_box_via_move, unit-variant casts (discriminant_def_for_variant), byte and unescaped string literals, the
+coercions' kinds; in typeck the builtin DiscriminantKind projection, range endpoints typed, references peeled for range and slice
+patterns, written arguments' elided regions canonical; std ADTs' needs_drop by their Drop impls; an inherent impl's own regions
+printed in value paths. Slice 3's start: `arbace/rust/front/passes.ae` ports mir_built's passes after the `built` dump
+(`compiler/rustc_mir_transform/src/{lib,lint_and_remove_uninhabited,simplify}.rs`: LintAndRemoveUninhabited, SimplifyCfg-initial with
+remove_dead_blocks); `bin/rust-front build-oracles` dumps `-Zdump-mir=built|SimplifyCfg-initial` (`RF_DUMP_MIR`; the built dumps
+regenerated byte for byte equal), and `BUILD_PASS=SimplifyCfg-initial bin/rust-front build-check` judges after the pass
+(`make rust-front-pass-check`).
+
+Results: build-check 361 → 415 of 510 bodies equal, 25 → 29 but for the allocations' ids, 51 → 58 programs whole, refused 26 → 13;
+a1-a7 54 of 54; after SimplifyCfg-initial 379 of 475 and 29 but for the ids. typeck-check 11,144 (`--ours` 11,142), hir-check
+--ours 90 + 1, expand-check 92/92 and 857/857, capture-check 173/174, run-built 6/6: unchanged. Alternatives considered: extending
+the old match lowering case by case (rejected: or-patterns and guards change the candidate structure, so the port is the shorter
+road and keeps the block numbering rustc's); PromoteTemps before SimplifyCfg-initial (rejected: rustc runs SimplifyCfg-initial in
+mir_built, before mir_promoted); a structural needs_drop guess for private std ADTs from their arguments (tried, rejected: it
+dropped JoinInner's Arc; kept "needs drop" and proposed RFP28). The user's decisions RFP25 (a), RFP26 (a), RFP27 (a) recorded in
+doc/rust/FRONTEND-SURVEY.md, "Decided (2026-11-08, the user: RFP25-RFP27)". Proposed: RFP28 (the private std ADTs' fields in
+`--std-iface`), RFP29 (the crate hash in MIR text).
+
+## 2026-11-08: RF10's fourth slice: slice 3's passes from mir_promoted to runtime MIR's cleanup (branch `rust-rf10b`)
+
+Continued `rust-rf10b` from `8052a77c0` (doc/rust/FRONTEND-SURVEY.md, "As built: RF10 (fourth slice)"). Sources: rustc 1.99.1
+(`58cf8f9c3`, Alpine's rust-src-1.99.1-r0 pinned by `tools/rsdump/apks.sha256`, which carries `compiler/`), MIT OR Apache-2.0,
+taken under MIT; rustc_apfloat 0.2.3 (`rustc_apfloat-0.2.3+llvm-462a31f5a5ab`, the host's cargo registry, `src/ieee.rs`),
+Apache-2.0 WITH LLVM-exception (LICENSE.md, doc/ARBACE.md).
+
+`arbace/rust/front/passes.ae` gained the pipeline of `rustc_mir_transform/src/lib.rs` from PromoteTemps to
+SimplifyCfg-pre-optimizations (`passes/pipeline`, 21 passes): PromoteTemps (`promote_consts.rs`' collector, Validator and Promoter over
+`rustc_const_eval`'s qualifs; promoted bodies join at ImpossibleClauses), CleanupPostBorrowck, RemoveNoopLandingPads, the SimplifyCfg
+variants with strip_nops and the runtime phases' simplify_branch, Derefer and ElaborateBoxDerefs over MirPatch's statement insertion,
+AddCallGuards, PostAnalysisNormalize's opaque types, ElaborateDrops (`rustc_mir_dataflow`'s move paths, MaybeInitializedPlaces and
+MaybeUninitializedPlaces to their fixpoint, drop_flag_effects, and `elaborate_drop.rs`' DropCtxt: static, conditional, open drops with
+their ladders, enums' switch blocks, destructors, Box's contents), AbortUnwindingCalls over fn_can_unwind, EraseDerefTemps,
+LowerIntrinsics, RemovePlaceMention. `build.ae`'s statements carry their source scope, type forms their typeck type, locals whether
+they are user variables, constants their allocations' ids (a body's allocations recomputed after promotion). `bin/rust-front
+build-oracles` dumps all 21 passes (oracles regenerated for the 88 programs; constructs, edition2015 and lowered_table still fail in
+rustc after dumping, as before); `BUILD_PASS=NAME bin/rust-front build-check` judges each pass to NAME against its own dump, by its
+first phase (`passes/pass-phase`), `BUILD_FIRST=1` names each body's first unequal pass. Slice 2's tail: rustc_apfloat's float Display,
+coercion casts (a cast to its operand's type a Use), a derive's tuple-struct path its constructor.
+
+Results: after SimplifyCfg-pre-optimizations 499 of 616 bodies equal and 46 but for the allocations' ids, 60 programs whole; no pass
+loses a body (every unequal body is unequal at built, but two promoted bodies with typeck's `Option<_>` gap); built MIR 415 → 418 of
+510, refused 13 → 12; a1-a7 whole at built and after every pass. expand-check 92/92 and 857/857, hir-check --ours 90 + 1,
+typeck-check --ours 11,142 of 11,173, capture-check 173/174: unchanged. RFP28 holds back 2 bodies (float-f32's and float-f64's
+main), RFP29 1 (drops' main); neither built. Alternatives considered: judging each pass on rustc's input to it (the `.before.mir`
+dump) instead of our own previous pass's output (rejected: it needs a MIR text reader and would hide a pass's error in the next);
+ElaborateDrops by a structural guess of drop flags (rejected: the flags and their block numbering follow the dataflow's states,
+so only the dataflow gives rustc's text); a structural hash for opaque types (taken for now, RFP33 proposes typeck's def id).
+Found on the way: a `swap!` whose update function swapped the same atom looped forever (Derefer, ElaborateBoxDerefs: now one
+`swap!` after the walk). Proposed: RFP30 (the pass judge in RFP24 (b)'s essential step), RFP31 (the oracles' size), RFP32 (std's
+function attributes), RFP33 (opaque types' identity).
+
+## 2026-11-08: RFP23 (b) and RFP24 (b) with RFP27 (a): the front end's oracle facts as packs, its essential step (branch `rust-rf10b`)
+
+The user's decision (2026-11-08): RFP23 (b) first, the run's symbols, instances and layouts recorded as packs so that `run-built`
+needs no helper at check time, then RFP24 (b), `build-check` over `test/rust/front/a*.rs` an essential gate step with its oracle texts
+pinned, and RFP27 (a), `capture-check` in it. doc/rust/FRONTEND-SURVEY.md, "As built: RFP23 (b), RFP24 (b)".
+
+What was done. `bin/lib/repr-rust/front-records.bash` (sourced by `bin/rust-front`, out of every key): four packs in the
+oracle-records format (doc/ORACLE-RECORDS-SURVEY.md §3.2, `test/oracle-records/oracle.bash`'s `oracle_make`, `oracle_unpack`), made
+by hand with the helper as rustc (`bin/rust-front records make`, 31 s; `:rustc b789fd432132e37d`, rustc 1.99.1 Alpine r0; helper
+`6378914b5a9b`): `rust-front-std` (std-names.edn and std-iface.edn, their digests `test/rust/front/std-*.sha256`'s; 514,512 bytes xz),
+`rust-front-built` (rustc's `.after.mir` dumps of a1-a7 after mir_built and each of the 21 passes, 1,108 members, 24,580 bytes),
+`rust-front-captures` (the closures program's and the seven test/rust/front programs' `--captures`, 840 bytes) and `rust-front-mono`
+(a1-a7's `--mono-mir` record with rustc's executable's status and output, the checkout's path written `@ROOT@`, 11,108 bytes); pins
+and manifests in `test/rust/records/`, the packs in the main checkout's `.tmp/oracle-packs/`. Keys: the kind, the program's path and
+bytes, the helper's source digest, the flags (and the passes); UNRECORDED and STALE fail (checked). `records verify` reruns every
+entry and each kind's crossed pair (all equal, the four controls differing); kinds `rust front-*` in `test/oracle-records/kinds.edn`.
+`build-check --records`, `capture-check --records` and `run-built [--records]` read the packs; `run-built` runs the lowered C on ci
+(`bin/ci run`) instead of gcc (`RF10_CC=gcc` by hand), so the run needs no C compiler either. a6 (the unwinding no_std sample) runs
+now: codegen ports `rustc_codegen_llvm`'s `volatile_store`/`volatile_load` and `codegen_static` (an internal global of a static's bytes),
+and `build-run` carries our bodies' static, string and byte-string allocations into the run (the static's symbol from the record by its
+name, its bytes our own evaluation). `bin/rust-front essential` (with rustc, rustdoc, cargo, gcc, cc and clang stubbed exiting 99):
+build-check 54 of 54 bodies, capture-check 30 of 31 closures, run-built 7 of 7 programs (statuses 5, 212, 41, 17, 45, 6, 21), the three
+controls differing, the stubs' log empty, held to `test/rust/front/essential-known.txt`; 6 min 21 s, 1.39 GB. The gate step
+`rust-front-essential` (essential, chain rust-essential, `:mem-gib 2`, `:hosts [:stage0 :go]`, the packs' pins, control
+`test/rust/front/controls.edn`) and the oracle tier's `rust-front-records-verify`; `gate.crops check` 0 problems, `bin/gate --plan` and
+`--oracle --plan` show them; `bin/crops-score --judge --strict` Rust unchanged (75.0 / 75.0 / 95.8 / 80.0: the eval stage stays 0.5,
+each run still consuming the mono record; `test/crops/independence.edn`'s Rust eval and judge facts name the step).
+
+Alternatives considered: the facts committed in the tree as plain text (`test/rust/records/essential/`, as Scheme's) instead of
+packs (rejected: std's interface is 18 MB raw; the brief asks the pack format); one pack for the four kinds (rejected: the kinds change
+at different times, std's with RFP26's regeneration, the dumps with the programs); keeping gcc for the run (rejected: ci removes the
+last host tool of the run, at about 45 s a program); taking a static's initializer from the helper (would need a helper change and a
+re-record of every pack: our own evaluation is used, as the run judges it). Found on the way: `bin/ci musl ensure` with
+`CI_MUSL_FORMS` pointing at the main checkout's forms cache deleted that cache when its key differed (this branch's repr/c is not
+main's) and began rereading it; stopped at once and reread in the worktree instead. The main checkout's `.tmp/ci-musl/forms` is left
+partial without its key: its next `bin/ci musl ensure` rereads it (`bin/ci check`, `bin/rsi check` and now `bin/rust-front essential` run ensure before
+reading the forms; `bin/ci run` alone does not). Proposed: RFP34 (closures
+in macro_rules! bodies: Span::to across contexts), RFP35 (the packs' key and the helper), RFP36 (the essential step's runs batched in one
+ci session).
+
+## 2026-11-09: RFP23 (c): the run's facts ported, the runs off rustc's mono record (branch `rust-rf10b`)
+
+The user's decision of 2026-11-08 (RFP23 (b) then (c)): after the packs, port the run's facts. Built on `rust-rf10b` from `88ad9637d`.
+Sources: rustc 1.99.1 (https://github.com/rust-lang/rust at 58cf8f9c3, Alpine's rust-src-1.99.1-r0 pinned by tools/rsdump/apks.sha256):
+`compiler/rustc_symbol_mangling/src/{lib,v0}.rs`, `rustc_span/src/def_id.rs` (StableCrateId::new), `rustc_middle/src/{mono.rs,
+ty/print/mod.rs,ty/instance.rs,ty/layout.rs}`, `rustc_mir_transform/src/cross_crate_inline.rs`, `rustc_metadata/src/rmeta/{mod,encoder}.rs`,
+`rustc_attr_ir/src/weak_lang_items.rs`, `rustc_monomorphize/src/collector.rs`, `rustc_abi/src/{layout.rs,layout/simple.rs,lib.rs,
+wrapping_range.rs}`, `rustc_ty_utils/src/layout.rs`; rustc-stable-hash 0.1.2 (`src/sip128.rs`, `src/stable_hasher.rs`, the version
+rustc's Cargo.lock pins, read from the host's Cargo registry copy). MIT OR Apache-2.0, taken under MIT (LICENSE.md).
+
+- `arbace/rust/front/mono.ae`: SipHasher128 and StableCrateId (a1's `0x799ecbb0b009f827` and `__rustc`'s disambiguator as rustc's on
+  the first try: the stream is the name, 0xFF, "metadata", "exe", cfg_version `1.99.1 (58cf8f9c3 2026-10-13) (Alpine Linux Rust
+  1.99.1-r0)`); an rmeta reader of the header and CrateRoot's first fields for core's, alloc's and std's ids (Cargo's -C metadata makes
+  them uncomputable), written to `test/rust/front/std-crates.edn` by `bin/rust-front std-crates` (`--check`: equal); the v0 mangler
+  with backrefs, impl paths, punycode, internal symbols and ReifyShims; codegen attributes (local from the HIR's parsed attributes,
+  core's from rust-src's library/core through the module tree, parsed by repr/rust's native parser, cfg_attr evaluated for core's
+  build); instantiation_mode and cross_crate_inlinable's attribute rules; the collector's roots, calls and drops (drop_glue::<T> and the
+  local Drop::drop); callees as the helper writes them; the DefIndex order (injected items, derive items deferred, discriminant
+  constants); rustc_abi's layouts (univariant with repr(Rust)'s reordering and the end-biased retry, niches, enum niche-filling and
+  tagged layouts, pattern types, fat pointers) over the type checker's types and the record's type forms.
+- The builder keeps each call's span on its callee operand's metadata (`build.ae`), for the caller locations; `build-check`'s
+  `build-program` takes a continuation called within the program's bindings.
+- `arbace/rust/front/mono_check.ae`, `bin/rust-front mono-check [--control]`: every native fact against the record. a1-a7: symbols 47/47,
+  items 188/188, callees 34/34, locs 33/34 (panic!'s expansion), fn-symbols 33/33, statics 1/1, langsyms 113/113, layouts 221/223
+  (ArgumentType, Argument: not in std's interface), core's items reached directly 1/1 (3 more through core's bodies); the control 66 of
+  160 entries differing. Layouts matched rustc's on the first run of the port for every type of the seven programs' own locals.
+- `arbace.rust.front.build-run`'s native path (the default; `RF_MONO=pack` RFP23 (b)'s): the module from the collector's items, native
+  facts, the record read for core's bodies (a6's four) and the refused facts only, our own type forms. `run-built --records`: 7 of 7;
+  a1-a5 and a7 take no fact from the record (its status and output only, the judge's reference). The control: a1 156 for 5.
+- `bin/rust-front essential` adds mono-check's summary line (held in `test/rust/front/essential-known.txt`, recorded) and its control
+  (`test/rust/front/controls.edn`); `steps.edn` pins `tools/rsdump/apks.sha256` for rust-src. The step: 8 min 14 s, peak 1.44 GB,
+  stub calls 0; `bin/gate --plan`: run rust-front-essential (never passed at the new key); `bin/crops-score --judge --strict`: 0
+  problems, Rust 75.0 / 95.8 / 80.0 unchanged: the runs are not the eval cell's cases, so the eval fact keeps 0.5 (its why updated).
+- Alternatives: computing core's StableCrateId from Cargo's metadata hash (rejected: Cargo's inputs are not ours); reading core's
+  attributes and cross_crate_inlinable from the rmeta's tables (RFP39 (b), deferred: rustc's product); taking the record's type forms
+  (dropped: no record DefIds in our bodies, the runs pass). Proposed RFP37-RFP41 in the survey's "As built: RFP23 (c)".
+
+## 2026-11-09 rust-front-essential extracts rust-src itself
+
+- `bin/rust-front essential` (mono-check, run-built) read rust-src's `library/` from the worktree's `.tmp/repr-rust/apks/rust-src`, which only
+  rust-read-essential's round trip extracted: with that step skipped at its key and this one rerun in a fresh worktree or the clean clone it
+  failed with "no libsrc". Fix: `bin/repr-rust src-take` (rust_src_take: the pinned apk from `REPR_RUST_APKS`, else the main checkout's
+  `.tmp/repr-rust/apks` by crop_take, checked against `tools/rsdump/apks.sha256`, extracted; never downloaded; a clear refusal when the apk is
+  absent) and `bin/rust-front`'s `rf_libsrc_take` calls it when `$libsrc` is missing (`RF_MONO_LIB` still names another tree). Declared inputs
+  need no change: `:rust` holds bin/repr-rust, take.bash and apks.sha256, the step pins apks.sha256, `bin/rust-front` is listed.
+  Alternative: extracting in the step's command (rejected: the other callers, run-built and mono-check by hand, would still fail).

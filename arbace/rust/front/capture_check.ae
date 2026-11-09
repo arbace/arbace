@@ -1,0 +1,74 @@
+(ns arbace.rust.front.capture-check
+  "RFP20 (a)'s judge (doc/rust/FRONTEND-SURVEY.md, \"As built: RF10 (second slice)\"): each closure's kind, minimal captures
+  (place, capture kind, mutability, in the upvars' order) and fake reads, from arbace.rust.front.build's port of upvar.rs and
+  expr_use_visitor.rs over the pipeline's HIR and typeck results, printed as the helper's --captures prints them
+  (bin/rust-front capture-oracles), against it closure by closure; a negative control (one closure's line against another's)
+  must differ.
+
+    bin/rust-front capture-check [NAME...]   (CAPTURE_VERBOSE=1: each difference)"
+  (:require [arbace.rust.front.collect :as collect] [arbace.rust.front.build :as build] [arbace.rust.front.build-check :as bc]
+            [arbace.string :as str]))
+
+(defn- q [s] (pr-str (str s)))
+
+(defn- proj-text [[k _]]
+  (case (first k) :deref "\"Deref\"" :field (q (str "Field(" (second k) ", " (nth k 2) ")")) (q (str k))))
+
+(defn- cap-text [{:keys [cap]}]
+  (case cap :by-value "ByValue" [:by-ref :imm] "ByRef(Immutable)" [:by-ref :mut] "ByRef(Mutable)" [:by-ref :unique] "ByRef(UniqueImmutable)" (str cap)))
+
+(defn- kind-text [k] (case k :fn "Fn" :fn-mut "FnMut" :fn-once "FnOnce" (str k)))
+
+(defn closure-lines
+  "Our lines for one program: {[owner span] line}"
+  [front-dir n]
+  (bc/with-program front-dir n
+    (fn [_ ed]
+      (into {}
+            (for [d (collect/defs) :when (or (and (#{"Fn" "AssocFn"} (:kind d)) (:body (:node d)))
+                                             (and (re-find #"^(Const|Static|AssocConst)" (str (:kind d))) (:expr (:node d))))
+                  :let [owner (binding [collect/*in-value* true] (collect/print-def-path (:id d) []))
+                        r (try (build/root-analysis d ed) (catch Throwable e {:error (str (or (:what (ex-data e)) e))}))]
+                  cl (filter #(= "Closure" (:kind %)) (collect/defs))
+                  :when (= (:id d) (:id (build/typeck-root cl)))
+                  :let [node (:node cl) sp (:span node)]
+                  :when (vector? sp)]
+              [[owner sp]
+               (if-let [e (:error r)]
+                 (str "error: " e)
+                 (let [info (get (:closures r) (:hir-id node))]
+                   (if-not info
+                     "error: no analysis"
+                     (str "(tc/closure " (q owner) " " (pr-str sp) " " (q (kind-text (:kind info))) " ["
+                          (str/join " " (for [c (:captures info)]
+                                          (str "(cap " (q (:name c)) " " (pr-str (:var-span c)) " "
+                                               (q (build/place-capture-string (:name c) (:base-ty c) (:proj c))) " ["
+                                               (str/join " " (map proj-text (:proj c))) "] " (q (cap-text c)) " " (q (if (:mut c) "Mut" "Not")) ")")))
+                          "] ["
+                          (str/join " " (for [[pl cause] (:fake-reads info)]
+                                          (str "(fake-read " (q (get-in (first (filter #(= (second (:base pl)) (:var %)) (:captures info))) [:name] "?")) " ["
+                                               (str/join " " (map proj-text (:proj pl))) "] " (q cause) ")")))
+                          "])"))))])))))
+
+(defn- oracle-lines [front-dir n]
+  (into {} (for [l (str/split-lines (slurp (str front-dir "/" n ".cap.edn"))) :when (str/starts-with? l "(tc/closure")]
+             (let [f (read-string l)] [[(second f) (nth f 2)] l]))))
+
+(defn -main [front-dir & names]
+  (let [verbose (System/getenv "CAPTURE_VERBOSE")
+        tot (atom 0) ok (atom 0) firsts (atom [])]
+    (doseq [n names]
+      (let [want (oracle-lines front-dir n)
+            got (try (closure-lines front-dir n) (catch Throwable e (println n "ERROR" e) {}))
+            eq (count (filter (fn [[k w]] (= w (get got k))) want))]
+        (swap! tot + (count want)) (swap! ok + eq)
+        (when (seq want) (swap! firsts conj [n (first want)]))
+        (println (format "%-14s %3d of %3d closures equal to the helper's captures" n eq (count want)))
+        (when verbose
+          (doseq [[k w] (sort-by key want) :let [g (get got k)] :when (not= w g)]
+            (println "   want" w) (println "   got " (or g "(none)"))))))
+    (println (format "capture-check: %d of %d closures equal (kind, captures, fake reads)" @ok @tot))
+    (let [[[n1 [k1 l1]] [n2 [k2 l2]]] (take 2 (filter #(not= (second (second %)) (second (second (first @firsts)))) @firsts))]
+      (when (and l1 l2)
+        (println "control (" n1 "against" n2 "):" (if (= l1 l2) "PASSED (a bug)" "differs, as it must"))))
+    (System/exit 0)))
