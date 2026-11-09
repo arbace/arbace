@@ -6537,3 +6537,16 @@ table); `TestRuntimeVersion` unchanged; `bin/jrt test --arch amd64 --package jrt
 `bin/j2g-unit` passes (the changed j2g namespaces load). The support methods are compiled by the night's build only (no day
 build): expected, RuntimeTests' Version/Basic (t04598) passes at interp and compiled, and `ClassFileFormatVersion.runtimeVersion()`
 (F26) is no longer a stub.
+
+## As built: JCS320 (a): `Thread.getAllStackTraces` (branch `java-props2`)
+
+j2g writes `Thread_GetAllStackTraces__Map` into the program's support code when HashMap is translated (arbace/j2g/out.ae;
+`m/j2g-static?` names it, so that translated calls reach it and reachability counts it; its HashMap constructor and `put` rooted
+in main.ae): jdk26u's map of the live threads to their stacks, over F13's facts, `liveThreads` (HostManagement's `threads0`)
+and `stackOf` (its `stackTrace0`): the current thread's own frames, a waiting thread's as it began to wait (F13 slice 4's records),
+an empty array for a running thread (its goroutine's stack cannot be read from another: jdk26u leaves out only terminated threads,
+so every live thread is a key). The interpreter finds it in Thread's member table (the support table's init). Checked by day:
+bin/j2g-unit passes (the namespaces load); the code is the night build's. Expected after the night: t04684
+(GenerifyStackTraces) gets past `No accessible static method getAllStackTraces` at interp (its own verdict then needs the
+waiting threads' stacks, which F13 records once `trackLocks0` ran); t05256 (RuntimeThreadInheritanceLeak) no longer stubs it,
+its other gaps RMI's (`:rmi`).
