@@ -3597,3 +3597,65 @@ fix). Nothing vendored. doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JCS33
   and (after night-corpora.bash 1, reverted) --full --plan exit 0.
 
 The night's commands are the survey's. Proposed JCS340-JCS343 (the survey).
+## 2026-11-09: F15, java.lang.invoke in the Go build (branch `java-invoke`, write-ahead)
+
+The plan's F15 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F15 (java.lang.invoke)"), by day under the light rules, from
+`mac/java-night` (9e6160bbb), for the next Java night.
+
+- Measured: 43 tests the JDK passes use java.lang.invoke (`.tmp/inv/scripts/scan.py` over `test/java/ref-jdk26.edn`'s source
+  sets); all 43 load-failed at interp, 41 not passing compiled. By missing piece: 28 direct handles and their calls, 12
+  LambdaMetafactory, 1 StringConcatFactory, 2 other areas.
+- Studied: jdk26u at `baf63fb`, `src/java.base/share/classes/java/lang/invoke/` (MethodHandle, MethodHandles, MethodType,
+  MethodTypeForm, MethodHandleNatives, MethodHandleStatics, DirectMethodHandle, CallSite and its three subclasses,
+  LambdaMetafactory, AbstractValidatingLambdaMetafactory, InnerClassLambdaMetafactory, MethodHandleInfo), `sun/invoke/util/`
+  (VerifyAccess, VerifyType, BytecodeDescriptor, ValueConversions, Wrapper).
+- Decided (the slice's design; jdk26u's LambdaForms cannot run in the closed world): jrt's own MethodHandle, MethodHandles and
+  Lookup, DirectMethodHandle, MethodHandleImpl, the call sites, ProxyLambdaMetafactory over java.lang.reflect and JCS170's
+  Proxy; jdk26u's Java where it runs: MethodType, MethodTypeForm, LambdaMetafactory and VerifyAccess derived
+  (`test/jrt/derive.ae`'s `invoke-derivations`), MethodHandleInfo, AbstractValidatingLambdaMetafactory, the exceptions,
+  BytecodeDescriptor and VerifyType unpatched (`invoke-sources`); the polymorphic calls and `MethodHandles.lookup()` rewritten by
+  the Java forms' analyzer into calls of `jdk.internal.jrt.Invokers` (one place for the interpreter and j2g, the caller's class
+  known at the site); j2g keeps a JDK class's lookup the nil of J2G-SPEC §8.5, so the JDK's static initializers do not move.
+  Alternatives considered: (1) a new node kind for polymorphic calls in both back ends (two implementations of one rule, rejected);
+  (2) the rewrite in repr/java's converter (the forms would no longer say what the Java says, rejected); (3) the caller's class
+  by a stack walk (jrt has no caller frames); (4) VarHandle at run time with them (no test needs it; §8.5 stays).
+- Commits: 30dcc3ee8 (group 1: handles, lookup, call sites, Invokers, the analyzer, j2g, natives, J2G-SPEC §12, SPEC §5.6),
+  118f3956e (group 2: LambdaMetafactory), 83a98a659 (the void call site's kind, j2g-unit's tests, LICENSE.md).
+- Checked by day: the joint javac check 3,340 files, 0 errors; derive --check 84 overlays; `bin/jrt-convert predict` of the slice
+  with `--list` of the 43: no j2g analysis failure in the slice, 39 of the 43 analyze at compiled (4 refused for other areas);
+  interpreted on the gate executable over the forms (the day loader `.tmp/inv/day`, renaming the package around today's world
+  stubs): 23 of the 43 pass, the twelve metafactory tests stop at today's Proxy (JCS170 tonight); `bin/jrt test --package jrt`
+  ok; `bin/j2g-unit` all passed; `bin/gate --plan` exit 0.
+- Found: the interpreter's Dyn dispatches a private method's reflection by name (JCS350); an interpreted inner class's
+  constructor lacks its outer parameter in reflection (JCS351). Proposed JCS350-JCS356.
+
+## 2026-11-09: JCS350 (a), JCS351 (a), JCS353 (a) built; JCS352, JCS354-JCS356 recorded (branch `java-invoke2`, write-ahead)
+
+The user accepted F15's proposals about 11:10 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "Decided (the user, 2026-11-09, about 11:10):
+JCS350-JCS356"); built by day under the light rules on `java-invoke2` from `mac/java-invoke` (d0bf31ea8), for the next Java
+night (not tonight's).
+
+- JCS350 (a), `1a1be6b58`: `arbace.j2g.dyncf`'s `setMethod` native (the Go of `Compiler$CFGo`): a private instance method takes
+  no Dyn slot and no method by key, and its member table entry calls its own implementation (JVMS 5.4.6), where it called the
+  receiver's class's method of its key (t07686). Alternative considered: dispatching by the declaring class at the call (the
+  entry still virtual): rejected, the rule is the method's, not the call's.
+- JCS351 (a), `83cf8b52f`: an interpreted inner or local class's constructors published with javac's descriptor (jdk26u's
+  `Lower`, studied at `baf63fb`, `src/jdk.compiler/share/classes/com/sun/tools/javac/comp/Lower.java`: the outer instance
+  prepended, the free variables appended) and `Compiler$CF$Meth.implicit`, set by `Rt/construct` before the constructor
+  (t07677); with F14's slice, the annotation records of a constructor keyed by javac's descriptor and the parameters shifted as
+  jdk26u's `Constructor.handleParameterNumberMismatch` does (`src/java.base/share/classes/java/lang/reflect/Constructor.java`).
+  Alternative considered: a second, synthetic Meth whose body sets the fields (no change to `Compiler.ae`): rejected, the
+  interpreter's nodes would be built by hand for one call.
+- JCS353 (a), `cc7ba8f28`: jrt's own `java.lang.invoke.StringConcatFactory` (overlay), jdk26u's checks, messages, recipe
+  parsing and simple shapes (`src/java.base/share/classes/java/lang/invoke/StringConcatFactory.java` and
+  `java/lang/StringConcatHelper.java`'s `stringOf`, `simpleConcat`, `newStringOf`, at `baf63fb`), the hidden class's result as
+  an adapter; `test/jrt/scf-diff/run.bash` against the JDK's: 28 cases, 0 differ, the control 5 (LICENSE.md). Alternative
+  considered: jdk26u's file derived (`derive.ae`) with the hidden class strategy cut: rejected, two thirds of the file is the
+  strategy and its class-file API, and the trivial shapes reach JavaLangAccess.
+- Recorded, nothing built: JCS352 (b), JCS354 (a) after the night proves F15, JCS355 (a) after the night's rerun, JCS356 (a) when
+  a test needs it. Proposed: JCS357 (local and anonymous classes' parameter annotations), JCS358 (an anonymous class's
+  superclass's outer instance in reflection).
+- Checked by day: the joint javac check 3,341 files, 0 errors; derive --check 84 overlays; `bin/j2g-unit` all passed (the new
+  `test-private-reflection`, `test-inner-ctor-annotations` with their controls); `bin/jrt test --package jrt` ok; `bin/reap` 0
+  problems; `bin/crops-score --judge --strict` 0 problems; `bin/gate --plan` exit 0. The runs of t07686, t07677 and t04758 need
+  the night's executable: the night's commands are in the triage's "As built: JCS350, JCS351, JCS353".
