@@ -112,7 +112,12 @@ code. Three kinds of things live here:
   dsFLabel, unboxArg, boxResult, resultWrapper, mk_alt), `tostg.ae` `compiler/GHC/Types/RepType.hs`'s unboxed sums' slots and
   `Stg/Unarise.hs`'s mkUbxSum, unariseSumAlts and mapSumIdBinders, `simplify.ae` `Core/Opt/Simplify/Env.hs`'s lazy getSubst and
   `Core/Opt/Simplify.hs`'s shortOutIndirections for top-level binders, `constfold.ae` ConstantFold's binary rules' two literals, from
-  the same tarball; `libcheck.ae`'s HF10 verbs (`stg`, `merge`, `judge-stg`, `record-stg`) are Arbace's own; `simpleopt.ae` (2026-11-06) ports
+  the same tarball; `libcheck.ae`'s HF10 verbs (`stg`, `merge`, `judge-stg`, `record-stg`) are Arbace's own; since HF10-P3
+  (2026-11-09) `ownface.ae` writes the front end's own interfaces after `compiler/GHC/Iface/Make.hs`'s mkIface_ and
+  `Iface/Tidy.hs`'s addExternal and trimId at -O0, `Types/Id/Make.hs`'s dataConSrcToImplBang, `Builtin/Types.hs`'s wired-in
+  definitions and `Builtin/Types/Literals.hs`'s built-in families, from the same tarball, carrying GHC's notice (its judge and
+  `libcheck.ae`'s `own-order`, `own`, `rank-own` Arbace's own), and `rename.ae` and `typecheck.ae` take an hs-boot file's
+  signatures as its values (`Rename/Module.hs`'s rnSrcDecls, `Tc/Module.hs`'s tcHsBootSigs); `simpleopt.ae` (2026-11-06) ports
   `compiler/GHC/Core/SimpleOpt.hs` with the occurrence information of `Core/Opt/OccurAnal.hs` and the compulsory
   unfoldings of `Types/Id/Make.hs`, `constfold.ae` (2026-11-06) the `Float#`/`Double#` rules of
   `compiler/GHC/Core/Opt/ConstantFold.hs` with `Types/Literal.hs`'s conversions, both from the same tarball and carrying

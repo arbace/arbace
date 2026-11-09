@@ -178,14 +178,24 @@
         deps (into {} (for [[k n :as node] nodes]
                         [node (set (remove #(or (nil? %) (= % node))
                                            (map dep (imports-of (if (= k :boot) (get boots n) (second (get by n)))))))]))
-        prio (fn [[k n]] [(idx n) (if (= k :boot) 0 1)])]
+        prio (fn [[k n]] [(idx n) (if (= k :boot) 0 1)])
+        ;; the package's modules a module depends on, transitively (its imports, theirs...): GHC loads the interface of
+        ;; each on demand; with GHC's closure (the oracle's installed build, whose bignum backend may be another) the
+        ;; members of the own closure
+        imps (into {} (for [[n d] rows] [n (set (keep (fn [[m b]] (when (and (contains? by m) (not b)) m)) (imports-of d)))]))
+        bimps (into {} (for [[n d] rows] [n (set (keep (fn [[m b]] (when (and (contains? by m) b) m)) (imports-of d)))]))
+        trans (let [memo (atom {})]
+                (fn tr [n seen]
+                  (or (get @memo n)
+                      (let [r (reduce (fn [acc i] (if (contains? seen i) (conj acc i) (into (conj acc i) (tr i (conj seen n))))) #{} (get imps n))]
+                        (swap! memo assoc n r) r))))]
     (loop [done #{} out [] left (set nodes)]
       (if (empty? left)
         (doseq [[k n] out]
           (let [[_ d _ gi] (get by n)
                 cl (if (= k :boot)
                      (vec (sort (distinct (mapcat (fn [[m _]] (when (contains? by m) (cons m (get closure m)))) (imports-of (get boots n))))))
-                     (get closure n))]
+                     (vec (sort (distinct (concat (get closure n) (disj (into (trans n #{n}) (get bimps n)) n))))))]
             (println (str (name k) "\t" n "\t" (if (= k :boot) (get boots n) d) "\t" gi "\t" (str/join "," cl)))))
         (let [ready (sort-by prio (filter #(every? done (get deps %)) left))
               ;; a cycle the boot files do not break: its first node by the plan's order goes first
@@ -224,7 +234,7 @@
     (if (:fail rr)
       (merge base {:stage :rename :msg (:fail rr)})
       (let [r (try (binding [tc/*ifdirs* [local] tc/*iface-files* files tc/*srcfile* nm tc/*unit* unit] (tc/typecheck-module (:tree rr)))
-                   (catch Throwable e {:fail (msg e)}))]
+                   (catch Throwable e (when (System/getenv "LIB_CHECK_TRACE") (.printStackTrace e)) {:fail (msg e)}))]
         (if (:fail r)
           (merge base {:stage :typecheck :msg (:fail r)})
           (let [text (try (ownface/own-iface-text rr r unit) (catch Throwable e {:fail (msg e)}))

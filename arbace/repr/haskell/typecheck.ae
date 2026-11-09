@@ -317,8 +317,15 @@
 
 (def wired-kind-arities
   "The primitive equalities no interface lists (GHC.Builtin.Types.Prim's eqPrimTyCon and eqReprPrimTyCon: forall k0
-  k1. k0 -> k1 -> ...)"
-  {(ext-name "tc" "GHC.Internal.Prim" "~#") 2 (ext-name "tc" "GHC.Internal.Prim" "~R#") 2})
+  k1. k0 -> k1 -> ...), and GHC.Builtin.Types' wired-in things of GHC.Internal.Types whose kinds have invisible binders
+  the source does not write (HF10-P3: an own interface of GHC.Internal.Types, made from the source, carries no kind;
+  GHC's wired-in interface GHC.Internal.Prim names them with their kind arguments): unboxedSoloTyCon (forall (k ::
+  RuntimeRep). TYPE k -> ...), its constructor, coercibleTyCon (forall k. k -> k -> Constraint), eqTyCon (the same),
+  heqTyCon (forall k0 k1. k0 -> k1 -> Constraint), anyTyCon (forall k. k)"
+  {(ext-name "tc" "GHC.Internal.Prim" "~#") 2 (ext-name "tc" "GHC.Internal.Prim" "~R#") 2
+   (ext-name "tc" "GHC.Internal.Types" "Solo#") 1 (ext-name "data" "GHC.Internal.Types" "MkSolo#") 2
+   (ext-name "tc" "GHC.Internal.Types" "Coercible") 1 (ext-name "tc" "GHC.Internal.Types" "~") 1
+   (ext-name "tc" "GHC.Internal.Types" "~~") 2 (ext-name "tc" "GHC.Internal.Types" "Any") 1})
 
 (defn- kind-position-tvs
   "The type variables of a typeF form that occur in kinds: a forall binder's kind, a type constructor's invisible
@@ -1451,7 +1458,7 @@
 ;; equalities (cmpSymbol's `case unsafeCoerce Refl :: (a :~: b) of Refl -> EQI` against OrderingI a b), where the
 ;; inferred type, unified only after the alternative, would meet the outer type without them. Every other expression
 ;; is inferred and its type unified with the expected one (tcWrapResult)
-(declare check-poly)
+(declare check-poly lit-core)
 
 (defn check-expr
   "An expression checked against type t: core"
@@ -1462,6 +1469,25 @@
     (case (con v)
       HsPar (check-expr env (arg v 2) t)
       HsPragE (check-expr env (arg v 3) t)
+      ;; GHC.Tc.Utils.TcMType's tcShortCutLit (Note [Short cut for overloaded literals]): checked against Int, Word or
+      ;; Integer (an integral literal), Float or Double (either), not under RebindableSyntax, the literal is built at its
+      ;; type with no Num or Fractional wanted (GHC.Internal.Bignum.Integer's literals need no Num Integer, which
+      ;; GHC.Internal.Num defines above it)
+      HsOverLit (let [ol (arg v 2) val (arg ol 2)
+                      tn (let [x (expand (zonk tp))] (when (= :tc (first x)) (second x)))
+                      rebindable? (some (fn [x] (and (seq? x) (= 'rn/implicit (first x)))) ol)
+                      int? (= 'HsIntegral (con val))
+                      tc-word (ext-name "tc" "GHC.Internal.Types" "Word")]
+                  (cond
+                    (or rebindable? (nil? tn)) (let [[t1 c] (overlit v)] (unify t1 t) c)
+                    (and int? (= tn tc-word))
+                    (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "W#")) [(list 'lit (str (nth (arg val 1) 3) "##"))])
+                    (and int? (contains? #{tc-int tc-integer tc-float tc-double} tn))
+                    (lit-core :int (nth (arg val 1) 3) tp nil nil)
+                    (and (not int?) (contains? #{tc-float tc-double} tn) (= 'HsFractional (con val))
+                         (let [e (nth (arg val 1) 4 0)] (and (number? e) (<= -100 e 100))))
+                    (lit-core :frac (arg val 1) tp nil nil)
+                    :else (let [[t1 c] (overlit v)] (unify t1 t) c)))
       HsApp (let [[h args] (app-spine v)] (second (tc-app env h args t)))
       OpApp (second (tc-app env (arg v 3) [(arg v 2) (arg v 4)] t))
       HsCase (let [[ts cs] (infer env (arg v 2))]
@@ -2522,8 +2548,10 @@
           vanilla? (fn [[_ [vs _ res]]] (and res (= :tc (first res)) (= tn (second res))
                                             (every? #(= :tv (first %)) (nth res 2))
                                             (= (set vs) (set (map second (nth res 2))))))]
-      (when (and (seq parts) (every? vanilla? parts))
-        (let [names (mapv second (nth (nth (second (first parts)) 2) 2))
+      ;; an empty data type (data Void: deriving instance Show Void in GHC.Internal.Show) derives too, with its
+      ;; parameters (none when the interface does not say)
+      (when (and (or (seq parts) (= 'data (:flavour ti))) (every? vanilla? parts))
+        (let [names (if (seq parts) (mapv second (nth (nth (second (first parts)) 2) 2)) (vec (:tvs ti [])))
               descs (vec (for [[cn [_ as res]] parts
                                :let [m (zipmap (map second (nth res 2)) (map (fn [x] [:tv x]) names))]]
                            {:name cn :arity (count as) :labels (vec (:fields (get @*cons* cn)))
@@ -3084,6 +3112,10 @@
             _ (phase :default (default! @*wanteds*))
             types (into {} (for [[n e] env :when (and (vector? n) (ext? n) (= m (nmod n)))]
                              [n (zonk (:poly e))]))
+            ;; an hs-boot file's values are its signatures (GHC.Tc.Module's tcHsBootSigs: each signature's type the
+            ;; value's, no binding); elsewhere a signature without a binding is GHC's error, never written
+            types (merge (into {} (for [[n t] top-sigs :when (and (vector? n) (ext? n) (= m (nmod n)) (not (contains? types n)))] [n t]))
+                         types)
             ;; the module's constructors (and their workers, the same names in the value namespace) and methods
             cons-types (into {} (for [[n t] @*genv* :when (= m (nmod n))
                                       k (if (= "data" (nth n 1)) [n (ext-name "var" m (occ n))] [n])]
