@@ -4635,3 +4635,23 @@ Light: samples on the VM; the records it made were scratch (a detached worktree)
   `bin/crops-score --crop python` in a scratch overlay (main's stale facts at the ref 80.0% with judge 0; 234's patch 69.2%).
   Left at 0.5: read's other 3,115 files against CPython's recorded tokens and trees (DECISION 3 (a)), the 151 programs' 453 cases,
   eval and AOT's five recorded tables (DECISION 2 (a)).
+
+## As built: 239f, two fixes of 3.15's work for 3.14 too (2026-11-09, the Mac VM, queue 239f)
+
+The user's decisions of 2026-11-09 on queue 238's and 239's DECISIONs (a): two fixes first made behind
+`REPR_PYTHON_VERSION=3.15` apply to 3.14 as well. Light: samples on the VM, no record written.
+
+- **`async for`'s bytecode view** (go/arbace/py/bytecode.ae, bcEmit): END_ASYNC_FOR's jump target (the SEND of the `__anext__`
+  it ends) and codegen_async_for's NOT_TAKEN are no longer 3.15's alone; before, END_ASYNC_FOR had no target under 3.14,
+  `removeUnreachable` dereferenced nil and the code object had no view (`bin/pyi bytecode-check` printed `NO VIEW`).
+- **An inlined comprehension's saved names** (arbace/python/compile.ae, comprehension!): DEF_NONLOCAL names are not saved,
+  and a saved name that is not the comprehension's own local (an assignment expression's target in a tuple element at module
+  level, GLOBAL_EXPLICIT in the comprehension) is resolved by its scope as compiler_nameop does, not kept a hidden fast local
+  (its value was lost). 3.14.10 has the same codegen rule (the starred element is 3.15 syntax).
+- 3.14.10's own tests, base 97f2307e0 to head, method for method: test_dis 107 to 109 of 145 ok (the two
+  `test_async_for_presentation`), test_named_expressions 59 to 74 of 74, test_listcomps 64 to 65 of 66
+  (`test_assignment_expression`); no method that passed fails, in those and in test_compile's first 65 methods, test_grammar and
+  test_patma. `test_disassemble_asyncwith` (twice) still fails under 3.14, for another cause: CPython's NOT_TAKEN after the
+  with's exit POP_JUMP_IF_TRUE has no exception handler in an async with (a gap in the table), pyi's has one.
+- test/python/divergences.edn: `:dis` no longer names the two `test_async_for_presentation` tests (the judge reports names of
+  `:tests` that pass as stale).
