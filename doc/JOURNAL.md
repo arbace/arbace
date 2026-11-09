@@ -1221,3 +1221,9 @@ compiler stubs first on PATH (their log empty). doc/cpp/CPP-SURVEY.md, "Decided 
 - **Measured**: the 84 consteval and constexpr dg-error files of cpp2a and cpp23: 5 → 7 own passes (consteval24, consteval22),
   none lost, no new extra; the code generator unaffected (checker-only rules).
 - **Left**: CP310 (a), the in-call errors by kind, until the night's whole-part record gives their counts (the decision's order).
+
+## 2026-11-09: C++'s CP312 (a), the conversion rules for the code generator (branch `cpp-props2`)
+
+- **Built**: `conv-for`'s const-object and explicit-conversion rules (CX12's fifth slice, the checker's) for the code generator too.
+- **Measured**: a probe's const object now converts by the const conversion function, as clang's IR does; the code generator's 142
+  samples as recorded; the checker unchanged.

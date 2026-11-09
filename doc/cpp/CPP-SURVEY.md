@@ -4743,3 +4743,14 @@ read), the messages after the directives' texts.
 - Not built (CP310 (a), after the night's whole-part record): the errors inside called constexpr functions, each kind placed as
   g++ places it (the inner operation's line for undefined operations and non-constant reads, the call for a function that can
   never be constant); an immediate function's address escaping through an aggregate or a non-constexpr variable's initializer.
+
+### CP312 (a): the fifth slice's conversion rules for the code generator
+
+- `arbace.cpp.sema/conv-for`: a const object's conversion functions are its const ones ([over.match.funcs]/4-5) and, in
+  direct-initialization, an explicit conversion function is a candidate only when it yields the type ([over.match.conv]/1.1), for
+  the code generator too (the fifth slice's rules were the checker's alone); a function is const by its `:cq` or its type's.
+- Measure: the probe `.tmp/t7/c312.cpp` (a const and a non-const `operator int` on a const and a non-const object; an explicit
+  `operator int` beside `operator long` for `long z(b)`): CP310's tree called the non-const `_ZN1AcviEv` on the const object, this
+  commit's the const `_ZNK1AcviEv` as clang does, the non-const object's and `operator long`'s calls unchanged; gen-list over the
+  142 samples (`.tmp/t7/g312`): 141 forms byte for byte the record's, rtti refused (no sample converts a const object with both);
+  the checker's verdicts unchanged by construction (its rules as before). codegen-check (clang and gcc live) is the night's.
