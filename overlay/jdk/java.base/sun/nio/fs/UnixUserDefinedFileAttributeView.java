@@ -2,7 +2,7 @@
  * Arbace (overlay/jdk, doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F9 (write-ahead)"): jdk26u's
  * sun.nio.fs.UnixUserDefinedFileAttributeView (https://github.com/openjdk/jdk26u at baf63fb,
  * src/java.base/unix/classes/sun/nio/fs/UnixUserDefinedFileAttributeView.java), derived mechanically
- * (.tmp/f9/derive.py, each replacement asserted once): no JavaNioAccess (SharedSecrets'): jrt's direct buffers are
+ * (test/jrt/derive.ae, each replacement asserted once): no JavaNioAccess (SharedSecrets'): jrt's direct buffers are
  * heap buffers (isDirect() false, F7), so the direct-buffer branches are never taken. The changes Copyright (c) the
  * Arbace authors; Eclipse Public License 1.0. jdk26u's notice follows.
  */

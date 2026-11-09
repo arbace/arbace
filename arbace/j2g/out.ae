@@ -474,6 +474,15 @@
   []
   (and (m/translated? "java/lang/reflect/AccessFlag") (m/translated? "jdk/internal/jrt/AccessFlagSupport")))
 
+(defn parameters?
+  "Whether j2g writes Method and Constructor's getParameters (JCS280 (a)): java.lang.reflect.Parameter translated."
+  []
+  (m/translated? "java/lang/reflect/Parameter"))
+
+(def parameters-roots
+  "What the getParameters methods j2g writes call (JCS280 (a)): Parameter's constructor, a root of the program."
+  [["java/lang/reflect/Parameter" "<init>" "(Ljava/lang/String;ILjava/lang/reflect/Executable;I)V"]])
+
 (def access-flags-roots
   "What the accessFlags methods j2g writes call (JCS273): AccessFlagSupport's three methods, roots of the program."
   [["jdk/internal/jrt/AccessFlagSupport" "classAccessFlags" "(Ljava/lang/Class;)Ljava/util/Set;"]
@@ -588,6 +597,33 @@
        ['(go/method DescribeConstable__Optional "DescribeConstable__Optional is String.describeConstable: Optional.of(this).\n"
           ^{:tag (* Optional)} [^{:tag (* String)} t]
           (Optional_Of_O__Optional t))])
+     ;; Runtime.Version's parts of translated types (JCS304 (b) with JCS293, doc/classes/JAVA-DEFERRED-TRIAGE.md,
+     ;; "As built: JCS304 (b), JCS293"): pre, build and optional as Optionals, version as List.of the numbers; jrt's
+     ;; Runtime$Version (system.go) holds the parts (main.ae's world-scan names these methods, its roots their calls)
+     (when (and (m/translated? "java/util/Optional") (m/hand-written? "java/lang/Runtime$Version"))
+       ['(go/method Pre__Optional "Pre__Optional is Version.pre: the pre-release, or Optional.empty().\n"
+          ^{:tag (* Optional)} [^{:tag (* Runtime_Version)} v]
+          (when (not (.-hasPre v))
+            (return (Optional_Empty__Optional)))
+          (Optional_Of_O__Optional (Str (.-pre v))))
+        '(go/method Build__Optional "Build__Optional is Version.build: the build number as an Integer, or Optional.empty().\n"
+          ^{:tag (* Optional)} [^{:tag (* Runtime_Version)} v]
+          (when (not (.-hasBuild v))
+            (return (Optional_Empty__Optional)))
+          (Optional_Of_O__Optional (Integer_ValueOf_I__Integer (.-build v))))
+        '(go/method Optional__Optional "Optional__Optional is Version.optional: the optional part, or Optional.empty().\n"
+          ^{:tag (* Optional)} [^{:tag (* Runtime_Version)} v]
+          (when (not (.-hasOpt v))
+            (return (Optional_Empty__Optional)))
+          (Optional_Of_O__Optional (Str (.-opt v))))])
+     (when (and (m/translated? "java/util/List") (m/hand-written? "java/lang/Runtime$Version"))
+       ['(go/method Version__List "Version__List is Version.version: List.of the numbers, as Integers.\n"
+          ^List [^{:tag (* Runtime_Version)} v]
+          (let [ns (.numbers v)
+                a (NewRefArray Integer_class (conv int32 (len ns)))]
+            (range [i x ns]
+              (.Store a (conv int32 i) (Integer_ValueOf_I__Integer x)))
+            (List_Of_O1__List a)))])
      (when (and (m/translated? "java/util/stream/Stream") (m/translated? "java/util/ArrayList"))
        ['(go/method Lines__Stream "Lines__Stream is String.lines: the lines (split at \\n, \\r, \\r\\n) as a
 sequential stream (over an ArrayList: not jdk26u's lazy spliterator).\n"
@@ -703,6 +739,20 @@ module is this one, and the packages of module_table.ae for a named module, as a
                 "AccessFlags__Set is Field.accessFlags: AccessFlagSupport.fieldAccessFlags of the modifiers.\n"
                 (with-meta [(tag 'f '(* Field))] {:tag set-t})
                 '(AccessFlagSupport_FieldAccessFlags_I_Class__Set (.GetModifiers__I f) (.GetDeclaringClass__Class f)))]))
+     ;; Method and Constructor's getParameters (JCS280 (a), doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS280
+     ;; (a)"): jdk26u's Executable.synthesizeAllParams, the Go build recording no MethodParameters: arg0, arg1, ...,
+     ;; modifiers 0, a new array of new Parameters each call (jdk26u's copies its cached array)
+     (when (parameters?)
+       (for [t ['Method 'Constructor]]
+         (list 'go/method 'GetParameters__Parameter1
+               (str "GetParameters__Parameter1 is " t ".getParameters (Executable's): the synthesized parameters, arg0 ... with
+modifiers 0 (jdk26u's synthesizeAllParams: no MethodParameters records in the Go build).\n")
+               (with-meta [(tag 'e (list '* t))] {:tag '(* RefArray)})
+               '(let [n (.GetParameterCount__I e)
+                      a (NewRefArray Parameter_class n)]
+                  (for [i (conv int32 0)] (< i n) (inc! i)
+                    (.Store a i (Parameter_New_String_I_Executable_I (Str (+ "arg" (.String (StrOfInt i)))) 0 e i)))
+                  (return a)))))
      ;; Class, Method, Constructor and Field's getAnnotated* (JCS271 (b), doc/classes/JAVA-DEFERRED-TRIAGE.md, "As
      ;; built: JCS271 (b) (write-ahead)"): jdk26u's bodies in jrt's own Java jdk.internal.jrt.TypeAnnotationSupport
      (when (type-annotations?)
@@ -854,6 +904,18 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
 (m/j2g-static?).\n"
              (with-meta [] {:tag (m/go-type :jrt "Ljava/util/Properties;")})
              '(J2g_SystemGetProperties)))
+     ;; Thread.getAllStackTraces() (JCS320 (a), doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS320 (a)";
+     ;; m/j2g-static?): jdk26u's map of the live threads (HostManagement's threads0) to their stacks (its stackTrace0:
+     ;; the current thread's, a waiting thread's as it began to wait, else none, F13's records)
+     (when (and (m/translated? "java/util/HashMap") (m/hand-written? "java/lang/Thread"))
+       (list 'go/func 'Thread_GetAllStackTraces__Map
+             "Thread_GetAllStackTraces__Map is Thread.getAllStackTraces(): a HashMap of each live thread to its stack
+(stackOf: the current thread's own, a waiting thread's as it began to wait, an empty array otherwise).\n"
+             (with-meta [] {:tag (m/go-type :jrt "Ljava/util/Map;")})
+             '(let [m (HashMap_New)]
+                (range [_ t (liveThreads)]
+                  (.Put_O_O__O m (.-self t) (stackOf t)))
+                (return m))))
      ;; jrt's statics whose values are translated objects (J2G-NOTES.md, phase 2C)
      (when (m/translated? "jdk/internal/jrt/StandardStreams")
        (let [is (m/go-type :jrt "Ljava/io/InputStream;")
@@ -1303,8 +1365,14 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
         ;; getAnnotated* (JCS271 (b))
         tann? (type-annotations?)
         ;; System.inheritedChannel (JCS201 (a))
-        inherited? (m/translated? "java/nio/channels/spi/SelectorProvider")]
-    (when (or (seq str-ms) streams? loaders? ci? pst-w? pst-s? getenv? instant? props? exec? flags? tann? inherited?)
+        inherited? (m/translated? "java/nio/channels/spi/SelectorProvider")
+        ;; Runtime.Version's pre, build, optional and version (JCS304 (b), JCS293: support-forms' methods)
+        ver-opt? (and (m/translated? "java/util/Optional") (m/hand-written? "java/lang/Runtime$Version"))
+        ver-list? (and (m/translated? "java/util/List") (m/hand-written? "java/lang/Runtime$Version"))
+        ;; Thread.getAllStackTraces (JCS320 (a))
+        stacks? (and (m/translated? "java/util/HashMap") (m/hand-written? "java/lang/Thread"))]
+    (when (or (seq str-ms) streams? loaders? ci? pst-w? pst-s? getenv? instant? props? exec? flags? tann? inherited? ver-opt? ver-list? stacks?
+              (parameters?))
       [(apply list 'go/func 'init []
               (concat
                 (when tann?
@@ -1333,11 +1401,31 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                                       [(sig "printStackTrace" '[PrintWriter_class] 'Prim_void 0x1
                                             '(do (J2g_PrintStackTraceWriter (assert Throwable_I this) (PrintWriter_Cast (aget args 0)))
                                                  (return nil)))])))])])
+                (when (or ver-opt? ver-list?)
+                  [(apply list 'set! '(.-Methods (.Info Runtime_Version_class))
+                          [(apply list 'append '(.-Methods (.Info Runtime_Version_class))
+                                  (concat
+                                    (when ver-opt?
+                                      (for [[jm gm] [["pre" '.Pre__Optional] ["build" '.Build__Optional] ["optional" '.Optional__Optional]]]
+                                        (sig jm [] 'Optional_class 0x1 (list gm '(assert (* Runtime_Version) this)))))
+                                    (when ver-list?
+                                      [(sig "version" [] 'List_class 0x1 '(.Version__List (assert (* Runtime_Version) this)))])))])])
                 (when inherited?
                   ['(set! (.-Methods (.Info System_class))
                           (append (.-Methods (.Info System_class))
                                   (lit MethodInfo :Name "inheritedChannel" :Return Channel_class :Modifiers 0x9
                                        :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (J2g_SystemInheritedChannel)))))])
+                (when (parameters?)
+                  (for [[c t] '[[Method_class (* Method)] [Constructor_class (* Constructor)]]]
+                    (list 'set! (list '.-Methods (list '.Info c))
+                          (list 'append (list '.-Methods (list '.Info c))
+                                (sig "getParameters" [] '(.ArrayClass Parameter_class) 0x1
+                                     (list '.GetParameters__Parameter1 (list 'assert t 'this)))))))
+                (when stacks?
+                  ['(set! (.-Methods (.Info Thread_class))
+                          (append (.-Methods (.Info Thread_class))
+                                  (lit MethodInfo :Name "getAllStackTraces" :Return Map_class :Modifiers 0x9
+                                       :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Thread_GetAllStackTraces__Map)))))])
                 (when getenv?
                   ['(set! (.-Methods (.Info System_class))
                           (append (.-Methods (.Info System_class))

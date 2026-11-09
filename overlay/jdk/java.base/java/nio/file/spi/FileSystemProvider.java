@@ -1,7 +1,7 @@
 /*
  * Arbace (overlay/jdk, doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F9 (write-ahead)"): jdk26u's
  * java.nio.file.spi.FileSystemProvider (https://github.com/openjdk/jdk26u at baf63fb,
- * src/java.base/share/classes/java/nio/file/spi/FileSystemProvider.java), derived mechanically (.tmp/f9/derive.py,
+ * src/java.base/share/classes/java/nio/file/spi/FileSystemProvider.java), derived mechanically (test/jrt/derive.ae,
  * each replacement asserted once): no installed providers beyond the default (no ServiceLoader in the Go build;
  * jdk.zipfs and jrtfs are not in it). The changes Copyright (c) the Arbace authors; Eclipse Public License 1.0.
  * jdk26u's notice follows.

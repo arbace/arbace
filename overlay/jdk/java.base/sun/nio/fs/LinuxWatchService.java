@@ -1,7 +1,7 @@
 /*
  * Arbace (overlay/jdk, doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F9 (write-ahead)"): jdk26u's
  * sun.nio.fs.LinuxWatchService (https://github.com/openjdk/jdk26u at baf63fb,
- * src/java.base/linux/classes/sun/nio/fs/LinuxWatchService.java), derived mechanically (.tmp/f9/derive.py, each
+ * src/java.base/linux/classes/sun/nio/fs/LinuxWatchService.java), derived mechanically (test/jrt/derive.ae, each
  * replacement asserted once): the static initializer loads no library; it initializes UnixNativeDispatcher, whose
  * initializer registers the UnixException the natives throw. The changes Copyright (c) the Arbace authors; Eclipse
  * Public License 1.0. jdk26u's notice follows.

@@ -1,7 +1,7 @@
 /*
  * Arbace (overlay/jdk, doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F9 (write-ahead)"): jdk26u's
  * sun.nio.fs.UnixFileSystem (https://github.com/openjdk/jdk26u at baf63fb,
- * src/java.base/unix/classes/sun/nio/fs/UnixFileSystem.java), derived mechanically (.tmp/f9/derive.py, each
+ * src/java.base/unix/classes/sun/nio/fs/UnixFileSystem.java), derived mechanically (test/jrt/derive.ae, each
  * replacement asserted once): copyFile's buffered copy reads and writes through a NativeBuffer (native memory,
  * go/arbace/jrt/nativemem.ae) where jdk26u takes a temporary direct buffer's address: jrt's direct buffers are heap
  * buffers (F7). The changes Copyright (c) the Arbace authors; Eclipse Public License 1.0. jdk26u's notice follows.

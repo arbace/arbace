@@ -6376,3 +6376,297 @@ JCS254's day check analyzed a new slice's classes (385) on the committed world p
   committed ones (the day's `read-jdk --check` output); an hour, documented in the triage's checklist for new slices.
 - (b) Left as the scratch script.
 - *Recommended: (a)*.
+
+## Decided (the user, 2026-11-09, about 06:15: the Java proposals of 2026-11-08's branches)
+
+All as recommended: JCS280 (a), JCS281 (b), JCS282 (b), JCS283 (b), JCS284 (the remote connectors deferred with RMI, HotSpot's
+beans by design), JCS285 (b), JCS290 (b), JCS291 (a) if a test asks, JCS292 (b), JCS293 and JCS304 as one port (JCS304 (b)),
+JCS300 (c), JCS301 (b), JCS302 (a), JCS303 (b), JCS305 (b), JCS311 (a), JCS312 (b), JCS313 (a), JCS320 (a), JCS321 (a) when
+measured, JCS322 (b), JCS323 (a) after the night, JCS324 (a) folded into JCS283's verb, JCS325 (a), JCS326 (a); JCS256 (a) from
+the morning after the conversion is committed, JCS257 (a) with it; JCS213: the lookup as built (the hook not needed). Built on the
+branch `java-props2` (from `java-night`), one commit a proposal; the sections below.
+
+## As built: JCS300 (c): the test's own class files at interp and compiled (branch `java-props2`, write-ahead)
+
+`bin/java-check`'s `classes_test` chooses the tests as F6's `tool_test` chooses the tool tests: a source line of the test's that is
+no comment line names `java.lang.classfile` or `test.classes` (`cf_re`). At the platform's pin that is 57 tests of the corpora
+(36 name the API, 18 `test.classes`, 3 both): the 18 of F26's table that read their class files, the tests that write into
+`test.classes` (t05046's and t08142's jars), the launcher tests that start `java -cp ${test.classes}`, and the API's tests.
+`check_one` compiles such a test's renamed sources, once the read passed and when the levels hold interp or compiled, by javac on
+Arbace (`bin/repr-java javac`, the tool of `REPR_JAVA_EXE`) with the options `record_runs` gives the JDK's javac for the
+reference (`-nowarn -XDsuppressNotes -implicit:none` and the test's own) into `WORK/classes/ID`, the directory both sides pass
+as `test.classes`. `run_actions` puts that directory on `ARBACE_PATH` after the forms, so `ClassPathResources` and the support
+methods' `ResourceOrPath` (`Class.getResource`, `getResourceAsStream`) find `X.class` as the JDK's class path does. A javac
+failure is said on stderr (the log `RUN/ID/test-classes.log`) and leaves the directory empty: the test runs as before. A
+committed-forms run (`--essential`) has no sources and compiles nothing (none of the 57 is essential).
+
+By day, on the gate's executable (F26's port is not in it yet): t07651 passes as before with its classes; t08142 (`B6449504`,
+its jar written under `test.classes`) passes where the record says fail; t05046 gets past its missing directory to
+`ClassNotFoundException: Foo` (a URLClassLoader over a jar). The night's whole-corpus rerun takes it with no new command: the
+Java night's `bin/java-check --levels interp` and `--levels compiled` runs with `REPR_JAVA_EXE` set compile the 57 (a tool run
+each, 2 to 10 s). Expected: F26's 18 can pass at interp once the API is in the world (the night's build); the rows of t08142 and
+the launcher tests may move (recorded by the night, not by day).
+
+## As built: JCS285 (b): `bin/jrt test --package P`, the day's form (branch `java-props2`)
+
+`bin/jrt build` and `bin/jrt test` take `--package P` (repeated, or `P,Q`): the go command builds, vets or tests `./P` alone (the
+package's directory in the printed module: `jrt` for `arbace/jrt`), one package at a time (`-p 1`), in place of `./...`. The
+whole module's peak was not go's compiles alone: the print of `go/` (`bin/build-go --print-only` on stage 0) peaks at 4.6 GB
+in 17 s; under `--package` it runs with `GOMEMLIMIT=1500MiB` (unless set), 1.7 GB in 32 s. Measured on `java-props2` (busybox
+`time -v`, every process of the run): `bin/jrt test --arch amd64 --package jrt -count=1` 1.59 GB peak, 38 s (`ok arbace/jrt
+5.0s`); `bin/jrt build --arch amd64 --package jrt` (go build and go vet) 1.59 GB, 51 s; go's compile and test of `./jrt` alone
+from a cold cache 0.94 GB, 30 s. Without `--package` nothing changes (the night's `bin/jrt test`).
+
+## As built: JCS313 (a): `bin/jrt-convert vet --classes RE [--forms-add DIR]...` (branch `java-props2`)
+
+`jrt.vet` (test/jrt/vet.ae) takes the day's check of a new slice that JCS254 ran as a scratch copy (`hvet.ae`):
+
+- `--classes RE`: the classes whose top-level internal name RE finds (`java/net/http/HttpClient`) are analyzed beside the variants'
+  (j2g's `analyze-class!`, bodies and all, as the variants' are). Without a variant FILE named, no variant file is: the slice alone.
+  Their failures are listed as `REFUSED  --classes: CLASS: MESSAGE`; a known row `["--classes" CLASS PREFIX WHY]` of
+  `test/jrt/vet-known.edn` holds one. The summary counts them (`N classes of --classes`).
+- `--forms-add DIR` (repeated): DIR's forms laid over the world's (`--forms`, default `jdk/forms`) by their path below the root: a
+  file of DIR replaces the world's at the same path, the rest are added. DIR is the day's read of the slice's new and changed
+  files (bin/repr-java read of them, or `read-jdk --check`'s output), not a whole conversion.
+
+Proved on `java-props2` against JCS254's day result: the 15 entries in which java-http's day forms
+(`.tmp/http/forms`) differ from `jdk/forms` (java.net.http, jdk.internal.net.http, the JCE's and Kerberos's files,
+`SystemLoggers`), 173 files, as DIR: `bin/jrt-convert vet --classes '^(java/net/http|jdk/internal/net/http)/' --forms-add DIR
+--others` declares 4,918 classes (hvet's own count), analyzes the 373 classes of the two packages and refuses none, in 20 s at
+1.45 GB. With only the two packages as DIR it refuses 113 (`Unknown type: SystemLoggers$Logger`): the slice's other files are
+part of what DIR must hold. `bin/jrt-convert vet` alone is unchanged (the same files in the same order).
+
+**The checklist for a slice that adds sources** (each step light): (1) the closure's files added (test/jrt/jrt_sources.ae) and the
+joint javac check (`all9-run.sh`); (2) the new and changed files read by day into DIR (their forms at their paths below a forms
+root); (3) `bin/jrt-convert vet --classes RE --forms-add DIR --others`, RE the slice's packages: no refusal, or each one in the
+slice's own triage with its fix; (4) the night's conversion and build as usual.
+
+## As built: JCS257 (a): the derived overlays' headers name `test/jrt/derive.ae` (branch `java-props2`)
+
+The 18 derived overlays whose headers still named their first scratch scripts (`.tmp/f9/derive.py` for F9's thirteen,
+`.tmp/unix/derive.py` for UnixDomainSockets, `.tmp/f10/gennet.py`, `genpoll.py`, `genopts.py` for Net, PollSelectorImpl and
+SocketOptionRegistry) name `test/jrt/derive.ae` instead, in derive.ae's header texts and in the committed overlays alike (the
+comments of derive.ae's table keep the scripts' names, as the derivations' first record). Code unchanged; `bin/jrt-convert derive
+--check`: 79 overlays, 0 not as derived, the control failing as it must. The overlays' text moves `jdk/provenance.edn`'s digests:
+the night's `bin/jrt-convert update` takes it with the rest (JCS257 (a)'s "at the next conversion"). The F1 services
+(`JceServices`, `RsaServices`, "the F1 scratch script gensvc.py/genjava.py") are not derive.ae's: hand-kept, unchanged.
+
+## JCS256 (a): `jrt-vet`, tomorrow's switch (branch `java-props2`, write-ahead)
+
+Decided (a), from the morning after the Java night's conversion is committed: until `jdk/forms` is the night's, `bin/jrt-convert
+vet` refuses what the variants already expect of the new world (on `java-props2` today, over the committed `jdk/forms` of
+2026-11-07: 145 variant files, 4,530 classes, 10 refused, among them `File`, `DatagramSocket`, `AbstractInterruptibleChannel` and
+`ProviderConfig`, and 2 variants whose classes are not yet in it), so the step is not in `test/gate/steps.edn` tonight. Tonight it
+is the Java night's (JCS256 (b)): `bin/jrt-convert vet --forms .tmp/jrt/conv --strict` after `bin/jrt-convert update`'s
+conversion, before the build. The switch, for the morning after (one commit, after `jrt-derive` in `test/gate/steps.edn`):
+
+```clojure
+  ;; JCS256 (a) (the user, 2026-11-09): jrt's Go-build variants vetted on j2g's world (bin/jrt-convert vet, test/jrt/vet.ae,
+  ;; JCS253): every variant file's classes entered from jdk/forms with their variants applied and analyzed as j2g's analysis
+  ;; does, a refusal not in test/jrt/vet-known.edn failing, a stale known row too (--strict); about 20 s at 1.5 GiB, stage 0
+  {:name jrt-vet :phase :essential :mem-gib 2 :cmd "bin/jrt-convert vet --strict"
+   :hosts [:stage0]
+   :inputs [:lib-tools "bin/lib/heavy.bash" "bin/lib/repr-java/host.bash" "bin/lib/javac-key.bash" "bin/jrt-convert"
+            "test/jrt/vet.ae" "test/jrt/vet-known.edn" "overlay/jdk/variants/" "jdk/forms/" "jdk/edge.edn" :tools]
+   :summary ["^jrt.vet:|^REFUSED|^MISSING|^stale" 6]}
+```
+
+Then `bin/gate --plan` (the table's names and inputs) and `bin/gate --audit jrt-vet` once, whose inputs the audit settles. It
+needs no executable (stage 0's j2g namespaces, the checkout's loaded where they differ: `:tools`).
+
+## As built: JCS283 (b), JCS324 (a): `bin/jrt-convert predict`, the night's world by day (branch `java-props2`)
+
+`bin/jrt-convert predict [--since REV] [--list FILE] [--missing RE] [--out DIR] [PATH...]` makes the scratch procedure of JMX-1's,
+F27's and JCS265 (b)'s days one light verb (into `$JRT_WORK/predict`, or `--out DIR`):
+
+1. **The closure's sources**, as the sources step makes them (`make_sources`: `DIR/src`, `DIR/sources.txt`).
+2. **What changed** against the committed conversion (`DIR/changed.txt`): the lines of the new `sources.txt` that `jdk/sources.txt`
+   lacks (a new file, or one whose kind moved), and the overlays of the closure changed since REV (default: the commit that last
+   wrote `jdk/forms`; derived overlays among them); with PATHs (below java.base's root), those files alone, the rest of the world
+   `jdk/forms`'. The closure's dropped files (`DIR/removed.txt`) leave the world. Generated sources (gensrc, jrtgen, the locales)
+   are the night's, not predicted.
+3. **The read**, as the convert step reads (`bin/repr-java read-jdk --check`, `--no-javac` by default, `REPR_JAVA_PATCH_ALL`, the
+   origins), of the changed files with their context: every overlay of the closure, and the closure's files of the changed files'
+   packages and of their other modules (`share:MODULE`); `GOMEMLIMIT=1500MiB`, two threads (`REPR_JAVA_THREADS`). A context file
+   that fails for its own context's absence is not the prediction's; a changed file not read is listed (`DIR/unread.txt`, status 1).
+4. **The world** (`DIR/world`): a copy of `jdk/forms`, each changed file's forms over it, its package file's loads merged (the
+   committed order, then the new ones), the dropped files' forms and loads removed.
+5. **On it**: `bin/jrt-convert vet --forms WORLD --classes CHANGED --others` with every variant file (JCS253, JCS313 (a)); j2g's
+   analysis of the whole world, `bin/j2g --analyze-only --jdk WORLD` with **`J2G_MISSING`** (JCS324 (a): the changed classes, or
+   `--missing RE`'s: what their translation would stub at the operation level; `DIR/j2g-findings.txt`, `DIR/j2g/report.edn`); and
+   with `--list FILE` those tests analyzed on the world (`bin/java-check --levels read,compiled --analyze-only`, `JRT_CONV=WORLD`,
+   shards of 30, two jobs; `DIR/check/results.tsv`; the executable `JAVA_CHECK_EXE`, else `J2G_GO_EXE`'s).
+
+Measured on `java-props2` (main's stage 0, the gate's executable of 2026-11-08 as `J2G_GO_EXE`, javac's tool of `javac-5ad35733`
+with `REPR_JAVA_STALE_OK=1`): `predict java/lang/reflect/AccessFlag.java jdk/internal/jrt/AccessFlagSupport.java` reads 203 files
+(201 converted: the locale overlays' two fail for their data, as in java-more's day), and vet refuses AccessFlag's five classes
+for `ClassFileFormatVersion` and `ClassFileAccess`, which the slice also holds: with them as PATHs (four files) the slice's 7
+classes analyze; j2g's analysis of the world 15 failures, all of today's committed `jdk/forms` (File, DatagramSocket, the variants
+of classes the conversion has not yet brought: the night's), no stub in the slice; `--list` t04830, t04835: both analyze, as
+java-more's prediction found. 191 s and 2.07 GB peak (j2g's `GOMEMLIMIT` 1800MiB), the java-check part 112 s at 2.05 GB.
+Without PATHs on today's branch the change is the night's whole conversion (1,058 files since `b6a6093af`): that read is the
+night's (`bin/jrt-convert update`), not the day's; `predict` by day is for a slice's files after a conversion is committed.
+
+### java-props2: tonight's part, the light checks
+
+On `java-props2` (`java-night` at `33d04049c` with JCS300 (c), JCS285 (b), JCS313 (a), JCS257 (a), JCS325 (a), JCS283 (b) with
+JCS324 (a), JCS256 (a)'s switch written): the joint javac check (`.tmp/night7/all9-run.sh`) 3,315 files, 0 errors, 6,937
+classes (20 s, 1.0 GB); `bin/jrt-convert derive --check` 79 overlays, 0 not as derived; `bin/jrt test --arch amd64 --package jrt`
+ok (1.6 GB) and `bin/jrt build --arch amd64 --package jrt` (go vet) clean; `bin/gate --plan` 50 essential steps, no table error.
+`bin/reap`: after `java-night`'s own re-record (187a55e8b, merged) and the day's classes, `bin/reap --record` on the branch
+(the classes' rows alone move), then 0 problems; `bin/crops-score --judge --strict` 0 problems, the scores unchanged.
+
+## As built: JCS304 (b), JCS293: `Runtime.Version.parse` and its parts, one port (branch `java-props2`)
+
+jrt's hand-written `Runtime$Version` (go/arbace/jrt/system.ae) gains jdk26u's `Version.parse` ported rule for rule
+(`Runtime_Version_Parse_String__Runtime_Version`): null a NullPointerException; `isSimpleNumber`'s shortcut (digits, the first not
+0; the empty string too, whose `Integer.parseInt` throws); `VersionPattern.VSTR_PATTERN` as a Go regexp, anchored as
+`Matcher.matches`; each number by `Integer.parseInt` (`NumberFormatException` "For input string: \"S\"" above `MAX_VALUE`); the
+build; the three `IllegalArgumentException`s of `+`. The struct keeps the numbers of any count (`nums`, beside the four), the build
+(`compareTo`'s `compareBuild`, `equals`, `hashCode`'s `Optional<Integer>`, `toString`'s `+BUILD`), the deprecated `major`,
+`minor`, `security`, and `compareToIgnoreOptional`/`equalsIgnoreOptional` (Basic.java's other two; jdk26u's `compare(obj, true)`). `bin/jrt manifest` (the frozen JVM's reflection) adds `parse`, `major`, `minor`, `security` and the two `IgnoreOptional`s to the manifest and
+the member tables, nothing else moving. `version()`, `pre()`, `build()` and `optional()` return translated `List` and `Optional`:
+j2g's support methods on `*Runtime_Version` (arbace/j2g/out.ae's support forms, `Optional.of`/`empty`, `Integer.valueOf`,
+`List.of`), named in `world-scan` so that j2g translates their calls, their callees rooted in main.ae, and entered into
+`Runtime$Version`'s member table for the interpreter (the support table's init), as `String.describeConstable` is.
+
+Checked by day: `TestRuntimeVersionParse` (jrt) holds 11 valid strings (toString, the four numbers, the count, pre, build,
+optional, hashCode) and 12 invalid ones (each message), the exceptions' classes and compareTo/equals with builds, against the
+platform's jdk26u build's `java` (a probe of 2026-11-09, `.tmp/verref/V.java` on the branch's worktree: its output is the test's
+table); `TestRuntimeVersion` unchanged; `bin/jrt test --arch amd64 --package jrt` and `build --package jrt` (vet) clean;
+`bin/j2g-unit` passes (the changed j2g namespaces load). The support methods are compiled by the night's build only (no day
+build): expected, RuntimeTests' Version/Basic (t04598) passes at interp and compiled, and `ClassFileFormatVersion.runtimeVersion()`
+(F26) is no longer a stub.
+
+## As built: JCS320 (a): `Thread.getAllStackTraces` (branch `java-props2`)
+
+j2g writes `Thread_GetAllStackTraces__Map` into the program's support code when HashMap is translated (arbace/j2g/out.ae;
+`m/j2g-static?` names it, so that translated calls reach it and reachability counts it; its HashMap constructor and `put` rooted
+in main.ae): jdk26u's map of the live threads to their stacks, over F13's facts, `liveThreads` (HostManagement's `threads0`)
+and `stackOf` (its `stackTrace0`): the current thread's own frames, a waiting thread's as it began to wait (F13 slice 4's records),
+an empty array for a running thread (its goroutine's stack cannot be read from another: jdk26u leaves out only terminated threads,
+so every live thread is a key). The interpreter finds it in Thread's member table (the support table's init). Checked by day:
+bin/j2g-unit passes (the namespaces load); the code is the night build's. Expected after the night: t04684
+(GenerifyStackTraces) gets past `No accessible static method getAllStackTraces` at interp (its own verdict then needs the
+waiting threads' stacks, which F13 records once `trackLocks0` ran); t05256 (RuntimeThreadInheritanceLeak) no longer stubs it,
+its other gaps RMI's (`:rmi`).
+
+## As built: JCS282 (b): the type annotation records checked against javac's, light (branch `java-props2`)
+
+JCS271 (b)'s day comparison (`.tmp/ta`, a scratch Python normalizer) is now committed and runs on stage 0 with no javac:
+
+- **The sample** `test/j2g/unit/typeann/p/TA.java` (JCS271 (b)'s: every declaration target, path step and element value kind)
+  and its forms `p.ae`, `p/TA.ae` (repr/java's read on javac's tool, the same forms byte for byte as JCS271's day read).
+- **javac's side**, recorded by hand with the JDK: `javac -d DIR p/TA.java`, then `arbace_tool -p test -m j2g.typeann record DIR
+  test/j2g/unit/typeann.edn` (test/j2g/typeann.ae: the class files' constant pools and the fields', methods' and classes'
+  RuntimeVisibleTypeAnnotations decoded, JVMS 4.7.20 and 4.7.16, the indices resolved): 29 annotations of 7 class files.
+- **The check**, bin/j2g-unit's `test-type-annotations` (5.6 s, 0.6 GB with the rest): the forms declared and analyzed in a unit of
+  their own on the tools' host (`j2g.typeann/encoder`, as JCS271's `enc.ae` did), each class's `annot/class-data` Y and N records
+  decoded the same way, the two sets compared: **29 of 29 equal but 1 known**, `@B(e = ElementType.METHOD)` (the encoder writes a
+  string where the world does not know `java.lang.annotation.ElementType` as an enum: JCS271 (b)'s day finding; the row is held to
+  differ, so the night's world that knows the enum shows it as a stale known row); the negative control, the first row with an int
+  constant changed, is not javac's.
+
+Not a gate step yet: bin/j2g-unit is in none (a proposal for the essential gate would key it by `test/j2g/` and `arbace/classes/`
+and `arbace/j2g/`, seconds).
+
+## As built: JCS280 (a): `java.lang.reflect.Parameter`, synthesized parameters (branch `java-props2`, write-ahead)
+
+- **Parameter in the world**: jdk26u's `java/lang/reflect/Parameter.java` as a derived overlay (test/jrt/derive.ae's
+  `parameter-derivation`, five replacements): what it asks of its executable beyond jrt's hand-written Executable goes through
+  jrt's own Java: `getAllGenericParameterTypes()[i]` (package-private in jdk26u's Executable) is
+  `jdk.internal.jrt.ParameterSupport.genericParameterType` (jdk26u's branch without real parameter data: the generic types when
+  as many as the parameter types, else the parameter types), `getSharedParameterTypes()[i]` is `getParameterTypes()[i]`,
+  `getAnnotatedParameterTypes()` is `TypeAnnotationSupport.annotatedParameterTypes` (JCS271 (b)'s), `getParameterAnnotations()[i]`
+  is `ParameterSupport.parameterAnnotations` (Method's or Constructor's, which jrt's Executable_I does not declare), and
+  `accessFlags` is `AccessFlagSupport.parameterAccessFlags` (Location.METHOD_PARAMETER, in place of AccessibleObject's
+  ReflectionFactory). Every overlay is in the closure (print-sources), so the night's conversion takes both new files.
+- **getParameters**: j2g writes `GetParameters__Parameter1` on jrt's Method and Constructor once Parameter is translated
+  (arbace/j2g/out.ae's support forms; main.ae's scan names them, its roots Parameter's constructor), jdk26u's
+  `synthesizeAllParams`: `arg0` ... with modifiers 0, a new array each call; the interpreter finds them in the member tables (the
+  support table's init). A call through a receiver of static type Executable stays a stub (jrt's Executable_I has no
+  getParameters, as it has no accessFlags: JCS273's rule).
+- **Not here** (JCS280 (b), with JCS273's decision's second half): MethodParameters records for `@compile -parameters` (names,
+  FINAL, SYNTHETIC, MANDATED): MethodAccessFlagTest (t04832) checks a constructor's mandated parameter, so it analyzes but its own
+  verdict needs (b).
+
+Checked by day: `bin/jrt-convert derive --check` 80 overlays, 0 not as derived; the joint javac check 3,317 files, 0 errors;
+bin/j2g-unit passes; `bin/jrt-convert predict` of the reflection slices with Parameter (78 files and their context; 5 min,
+2.07 GB): Parameter is refused only for its context (AnnotatedElement's generics in the edge, tonight's `bin/j2g-edge update`;
+AnnotationSupport for F14's AnnotationFormatError, tonight's conversion), ParameterSupport analyzes, and of t04830, t04832,
+t04869 and t04870 all four analyze. Expected after the night: t04869 (GetAnnotatedTypeTest) and t04870 (NoName) can pass;
+t04723 is no longer refused for Parameter.
+
+## JCS301 (b): built by JCS273, the rest named (branch `java-props2`)
+
+F26's JCS301 listed Class/Method/Constructor/Field `accessFlags`, `Parameter`, `getDeclaredClasses` and `Field.getAnnotation` for
+t04830-t04833. JCS273 (java-more, merged on java-night) already writes the four accessFlags as j2g support methods with their
+member table entries; `Field.getAnnotation` is F14's (its first slice, merged); Parameter is JCS280 (a) above; getDeclaredClasses
+is in jrt's tables since F25 (its order JCS272). What stays: t04833's `ModuleDescriptor` (java.lang.module is not in the closed
+world: `:reflection`'s) and the accessFlags of an Executable-typed receiver (jrt's Executable_I declares none). Nothing more to
+build for (b); the night's records say which of the four pass.
+
+## The decisions of 2026-11-09 that build nothing by day (branch `java-props2`, recorded)
+
+- **JCS213**: the lookup by name as built (java-older's; no start-up hook: every public member of the world is a root).
+- **JCS281 (b)**, after JMX-1's night record: the platform logging bean (jdk26u's ManagementFactoryHelper.PlatformLoggingImpl over
+  F5's LogManager) and getPlatformMXBean(s) over an MBeanServerConnection; the record says first which of t04792 and t04793 pass.
+- **JCS290 (b)**: AbstractQueuedSynchronizer$ConditionObject's serial form stays jrt's until a test asks.
+- **JCS291 (a)** if a test asks: an annotation's serial form (none of the corpus known); until then as now.
+- **JCS292 (b)**: twins of translated classes per use until a second user.
+- **JCS303 (b)**, by the main session with the night's records: `:classfile` re-sorted into JCS300's (the test's own class files,
+  now compiled), `:invoke`, the javac tool's, `jrt:/` by design and `:define-bytes` (JCS302 (a), committed today by name).
+- **JCS305 (b)**, the morning after the night's build: the stream variants `overlay/jdk/variants/ReferencePipeline.ae` (`toList`)
+  and `Collectors.ae` (`toUnmodifiableList`) removed once F26's smoke proves SharedSecrets' JavaUtilCollectionAccess; the commit is
+  the variants' deletion and `bin/jrt-convert vet`.
+- **JCS312 (b)**: Security's `loadMaster` variant kept (the embedded resource; a build without java.home keeps its properties).
+- **JCS321 (a)**, when java/lang/ref's tests are next measured: jrt's PhantomReference beside Weak and Soft, DGCClient's
+  derivation dropped.
+- **JCS322 (b)**: no thread groups until a second test asks (t07952 alone today).
+- **JCS323 (a)**, after the night's build shows JCS240's throws records: ProxyFn's leniency kept for jrt's hand-written interfaces
+  alone, the rest wrapped as the JDK wraps (UndeclaredThrowableException).
+
+## java-props2: the night's commands (for the Java night's script, after the other branches' steps)
+
+In the night's worktree with `java-props2` merged (it holds `java-night` at `33d04049c`), heavy ones under `bin/heavy-lock`:
+
+```sh
+# 0. light, first: the joint javac check (3,317 files, 0 errors), the derivations (80, 0 not as derived), j2g's unit tests
+#    (all pass, test-type-annotations 29 of 29 but 1 known), jrt's package (TestRuntimeVersionParse)
+/root/arbace/.tmp/night7/all9-run.sh $PWD && bin/jrt-convert derive --check && bin/j2g-unit \
+  && bin/jrt test --arch amd64 --package jrt -run 'TestRuntimeVersion' -count=1
+# 1. the conversion takes Parameter.java (derived), ParameterSupport.java (new), AccessFlagSupport.java (parameterAccessFlags) and
+#    the 18 overlays whose headers JCS257 (a) rewrote (their forms' text unchanged but the comment; jdk/provenance.edn's digests)
+REPR_JAVA_EXE=$(ls -td /root/arbace/.tmp/gate-exe/javac-*/ | head -1)arbace-javac REPR_JAVA_STALE_OK=1 \
+  ARBACE_HEAVY_CMD=$PWD/bin/heavy-lock bin/jrt-convert update
+# 2. JCS256 (b) tonight (JCS256 (a)'s step from the morning after: the block in "JCS256 (a): jrt-vet, tomorrow's switch"):
+#    no refusal but the known rows
+bin/jrt-convert vet --strict
+# 3. the edges as the other slices need them (AnnotatedElement's generics: Parameter's bridges), then the build
+bin/heavy-lock bin/j2g-edge update && bin/heavy-lock bin/javac-vendor edge
+bin/heavy-lock bin/arbace-go --build && bin/arbace-go --smoke
+grep -A40 ':analysis-failures' target/arbace-go/amd64/j2g/report.edn | grep -E 'reflect/Parameter|ParameterSupport|Runtime' || echo none
+# 4. the smoke of the day's support code: expect "9-ea+20-foo Optional[ea] [26, 0, 2, 1] true (java.lang.String arg0 int arg1)"
+target/arbace-go/amd64/arbace -e '(println (str (java.lang.Runtime$Version/parse "9-ea+20-foo"))
+  (str (.pre (java.lang.Runtime$Version/parse "9-ea"))) (str (.version (Runtime/version)))
+  (contains? (Thread/getAllStackTraces) (Thread/currentThread))
+  (map str (.getParameters (.getMethod String "indexOf" (into-array Class [String Integer/TYPE])))))'
+# 5. javac's tool, then the levels on the day's tests, saved, not recorded: expect t04598 (Version/Basic) to pass at interp
+#    and compiled, t04869 and t04870 (Parameter) to pass or move to their next gap, t04684 past getAllStackTraces, and of
+#    JCS300 (c)'s 57 tests the 18 class-file tests to read their own class files (their next gaps the API's, F26's)
+bin/heavy-lock bin/javac-vendor tool
+JAVA_CHECK_EXE=$PWD/target/arbace-go/amd64/arbace J2G_GO_EXE=$PWD/target/arbace-go/amd64/arbace \
+  REPR_JAVA_EXE=$(ls -td /root/arbace/.tmp/gate-exe/javac-*/ | head -1)arbace-javac \
+  JAVA_CHECK_HEAVY=$PWD/bin/heavy-lock bin/java-check --levels read,interp,compiled --jobs 8 \
+  --only '^(t04598|t04684|t04723|t04830|t04832|t04869|t04870|t05256|t04253|t05046|t07651|t08142|t05995|t05996|t06042|t06326) ' \
+  --save .tmp/props2-night/check
+# 6. the whole-corpus rerun (night 11's, unchanged commands) compiles JCS300 (c)'s 57 by itself (REPR_JAVA_EXE set); then
+#    bin/reap --record and bin/crops-score --record with the night's records (the day's classes :rmi, :rmi-connectors,
+#    :hotspot-diagnostic, :hotspot-beans, :define-bytes are in the branch's matrix already)
+```
+
+**Risks and fallbacks.** (1) Parameter refused tonight (its bridges need AnnotatedElement's generics in the edge, its
+annotations AnnotationSupport, F14's): getParameters is then not written (`parameters?` is false) and nothing else moves; revert
+is the JCS280 commit. (2) The support methods are compiled only by the build: a Go compile error names `j2g_support.go`; each is
+one commit to revert (JCS304/JCS293, JCS320, JCS280). (3) JCS300 (c)'s compile fails for a test: said on stderr, the test runs as
+before.

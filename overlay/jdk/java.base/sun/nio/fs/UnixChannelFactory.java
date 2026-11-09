@@ -1,7 +1,7 @@
 /*
  * Arbace (overlay/jdk, doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F9 (write-ahead)"): jdk26u's
  * sun.nio.fs.UnixChannelFactory (https://github.com/openjdk/jdk26u at baf63fb,
- * src/java.base/unix/classes/sun/nio/fs/UnixChannelFactory.java), derived mechanically (.tmp/f9/derive.py, each
+ * src/java.base/unix/classes/sun/nio/fs/UnixChannelFactory.java), derived mechanically (test/jrt/derive.ae, each
  * replacement asserted once): the descriptor UnixNativeDispatcher.open gives enters jrt's file table
  * (jdk.internal.jrt.HostFiles.adopt), whose handle the FileDescriptor names, as jrt's FileChannelImpl reads it; the
  * append mode goes to FileChannelImpl's open (jrt's FileDescriptor has no append flag); no SharedSecrets'
