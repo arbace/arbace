@@ -5450,3 +5450,59 @@ such guide, so the standard is the reference here), on CP320's machinery:
   "no matching function": no conversion from 0 to the aggregate A, a real error of that line, though clang's is the incomplete
   type); cpp0x/explicit15 two more of its lines found; the one new extra (non-type-template-argument-1, line 1) the position above,
   gone after the fix (`.tmp/cg-fsplit-07`).
+
+### Checked (cpp-props4; light, the stubs first on PATH, their log empty; `REPR_CPP_THREADS=2`)
+
+| check | result |
+|---|---|
+| the every-10th sample (`.tmp/sample.sh`: `sA` before, `sD` with CP320-CP324, `sE` with the memo, `sF` the head) | 117 → 120 own passes (class-deduction108, class-deduction-inherited1, using-enum-1); none lost; no failing row's reason changed |
+| the 75 CTAD files (`.tmp/fctad.txt`, `fc-b` against `fc-n`) | 21 → 29, none lost |
+| the 90 access files (`fa-b`, `fa-n`) | 19 → 20 (using-enum-1), none lost |
+| the 19 using-declaration files (`.tmp/fusing.txt`) | 5 → 6 (access6, using-enum-1 in, inh-ctor35 out: false credit before), pr97268's extra gone |
+| the 158 static-member files (`.tmp/fstatic.txt`, chunks `cf-*` against `chb-*`) | five gained (reviewed above), none lost; overflow1's endless read fixed |
+| `bin/cppi codegen-gen` (`.tmp/cg-after` with CP320-CP324, `.tmp/cg-memo` with the memo) | 149 of 149 as recorded both times, both controls failing as they must: no sample's forms changed (no intended change: no sample uses alias or inherited CTAD, the rest is the checker's) |
+| probes (`.tmp/p/`: al1-al3b, in1-in5, u1) | the deduced types right and their controls refused; the errors where the rules have them, none on the valid forms |
+
+### The night's commands (one process at a time; `export ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace GOMEMLIMIT=1400MiB REPR_CPP_THREADS=2`)
+
+```
+PATH=<stubs>:$PATH bin/repr-cpp dg --corpus dg-error --front native --record   # the 4,597 files, names' order (CP322), about 80 min; overflow1 no longer endless
+bin/repr-cpp dg --corpus dg-error --front native                               # the record held
+REPR_CPP_DG_SHUFFLE=20261109 bin/repr-cpp dg --corpus dg-error --front native  # CP322's proof on the whole part: the record held in a shuffled order
+# then test/crops/independence.edn's C++ read fact (:dg-own [N 1] :dg-clang [4597-N 0.5]) and bin/crops-score --record
+bin/cppi codegen-gen                                                           # 149 of 149 as recorded
+```
+
+### Proposed (CP325-CP329; none decided)
+
+- **CP325: a Sema crash read as acceptance.** `arbace.repr.cpp.diag/sema-errors` catches every Throwable and leaves the unit with no
+  Sema error, so a crash inside the code generator's Sema is an "accepted" verdict (CP322's race showed how). (a) A crash a status of
+  its own (`:crash`, failing, its message in the row), about an hour, then the whole part recorded again; (b) as now.
+  **Recommended: (a).**
+- **CP326: inherited constructors in the code generator.** The checker now chooses among inherited constructors and checks their
+  access (CP323), the code generator still refuses the construction. (a) Build them ([class.inhctor.init]: the base subobject by
+  the chosen constructor, the rest default-initialized, the arguments forwarded), about half a day; (b) as now. **Recommended:
+  (a)** when the code generator's corpus needs it.
+- **CP327: a member alias template named through its class** (`T<double>::AFoo s{1, 2}`, class-deduction-alias20): the
+  placeholder's qualified template name is a type the slice does not resolve (the unit refused). (a) Resolve a qualified
+  template-name placeholder (the class's member template found by lookup), small; (b) as now. **Recommended: (a).**
+- **CP328: GCC-only expectations as a class.** cpp1z/inh-ctor35 (`-fno-new-inheriting-ctors`, the rules before P0136) and
+  cpp1z/class-deduction-alias1's C++17-only error (GCC's equivalence rule, clang accepts) expect what the standard does not ask.
+  (a) A by-design class for them in `test/cpp/divergences-dg.edn`, small; (b) leave them failing. **Recommended: (a).**
+- **CP329: a time cap for each file of the dg read.** overflow1 showed one file can hold a night's record forever. (a)
+  `REPR_CPP_DG_TIMEOUT` (default 300 s, as clang's dumps had), a file over it `:timeout`, failing, about an hour; (b) as now.
+  **Recommended: (a).**
+
+### Slips, scratch
+
+Slips against the day's rules, all in throwaway commands (no output of the work written there): a `diff <(echo) <(echo)` left in a
+check command, three wait loops with `2>/dev/null` (two stopped before they ran it out), one `> /dev/null` in a wait loop (stopped
+before it ran), a `/proc` scan with `2>/dev/null` to find this worktree's processes after a `timeout` (none were left), and a
+read-only `git stash list`. Scratch in the worktree's `.tmp/`: `p/` (probes), `split/` (the commits' stages, `strip.py`), `docs/`,
+the lists `facc.txt`, `fctad.txt`, `fusing.txt`, `fstatic.txt` and its chunks `fsplit-*`, the runs `a1`-`a5`, `o1`, `s1`, `o2`, `s2`,
+`sA`-`sF`, `fc-*`, `fa-*`, `fu-*`, `ch-*` (the wrong tree's), `chb-*`, `cf-*`, `cg-*`, the code generator's `cg-after`, `cg-memo`, the
+base tree `base` (a56fa6a0b), `llvm-src/` (copied from cpp-props3's).
+
+Recorded at the head: `test/cpp/check-dg-own-linux-amd64.edn` from `.tmp/sF` (454 rows, 120 passes), the C++ read fact
+`:dg-own [120 1] :dg-clang [4477 0.5]`; `bin/crops-score`: C++ 76.3 / 100 / 67.84 (unchanged at four places: read 0.6573 → 0.6578),
+`--record` and `--judge --strict` 0 problems; `make check-makefile`, `gate.crops check`, `bin/gate --full --plan` pass.
