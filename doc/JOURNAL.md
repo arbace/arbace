@@ -1626,3 +1626,59 @@ alone (rejected: (a) was decided whole, and the records are of the order of 400 
 recommendation tied them to RMI, so they come with it); RMIConnector's PRef defined by a class of jrt's own (rejected: it exists
 to defeat stack-based class loading, which the Go build has not). Proposed: JCS320-JCS326 (getAllStackTraces, PhantomReference,
 thread groups, ProxyFn's exceptions, the prediction's check, RMI's own class, the DiagnosticCommandMBean tests).
+
+## 2026-11-08: Java's older proposals built, JCS191-JCS213 (branch `java-older`, from mac/java-props a9aebc62f)
+
+**What and why.** The user accepted, about 22:00, the older proposals: JCS191 (a), JCS192 (a), JCS193 (b), JCS200 (a), JCS201
+(a), JCS210 (a) and JCS213 (b) to build, and JCS190 (a), JCS211 (c) and JCS212 (a) to record. They are built here by day under
+the light rules; the conversion, the build and the real streams are the night's. The record is in
+doc/classes/JAVA-DEFERRED-TRIAGE.md, "Decided (the user, 2026-11-08, about 22:00 ...)" and "As built: Java's older proposals
+(JCS191-JCS213)". Sources: jdk26u (https://github.com/openjdk/jdk26u at `baf63fb`).
+
+**JCS191.** `go/arbace/jrt/serial_locks.ae` holds the serial forms of `java/util/concurrent/locks/{ReentrantLock,
+ReentrantReadWriteLock,AbstractQueuedSynchronizer,AbstractQueuedLongSynchronizer,AbstractOwnableSynchronizer}.java`,
+`Semaphore.java` and `ForkJoinTask.java`.
+- **The Sync object.** A jrt lock's Sync is a descriptor object made from jrt's state when written, and read back into the
+  lock: the fairness, and the permits.
+- **The synchronizers.** They are translated in the world, so their descriptors are unregistered twins of the same names.
+  ObjectInputStream's `getClassDataLayout0` matches the stream's descriptors by name.
+- **A finding.** The read-write lock's shared count is `<< 32` over AQLS, not `<< 16`; the recorded stream showed it.
+- **Alternatives considered.**
+  - Registering the twins: `Define` refuses two classes of one name.
+  - Extending the translated AQS: its accessors cannot read jrt's object.
+  - A jrt Java class named `ReentrantLock$Sync` with `$` in its identifier, translated: rejected as a name trick that leaves
+    jrt's lock state apart.
+- **The oracle.** `test/jrt/serialization/SerialRecordLocks.java` was run once on jdk26u's JDK and gave 14 cases. The test
+  stream learned readSerialData's rule: custom data only after SC_WRITE_METHOD.
+
+**JCS192.** `Runtime.version()` is the platform build's 26.0.2.1-internal-adhoc.root.jdk26u, with jdk26u's Version rules (hash
+-526613477, as the JDK's). The java.version properties come from it, and java.base frames' module version is
+26.0.2.1-internal.
+
+**JCS193.** `serialCall` hands a call on a test stream to that stream, so the test stream runs over j2g's tables in `bin/jrt
+test --prog`. The stand-ins are made at init: the world's classes when present. The reader matches descriptors by name.
+`TestSerialProg` covers ten hookless translated classes against `SerialRecordProg.java`'s bytes.
+
+**JCS200.** jdk.net joins the world. ExtendedSocketOptions and LinuxSocketOptions are derived by `test/jrt/derive.ae`;
+LinuxSocketOptions.c is ported over four HostChannels natives.
+
+**JCS201.** jdk26u's InheritedChannel is derived over nine HostChannels natives, ports of InheritedChannel.c. The Poll and
+EPoll SelectorProvider variants are removed. `System.inheritedChannel` is a j2g support function.
+
+**JCS210.** Annotation classes are proxy classes, and `Proxy.getInvocationHandler` gives an AnnotationInvocationHandler whose
+invoke is jdk26u's.
+
+**JCS213.** The world's IncompleteAnnotationException is reached by name and its public constructor. The user chose a hook
+set at start; the lookup by name was taken instead, because it gives the same reach with no start-up code: every public
+member of the world is a program root.
+
+**Checks.**
+- The joint javac check: 2,512 files, 0 errors.
+- `bin/jrt-convert derive --check`: 27 overlays, 0 not as derived.
+- `go test ./jrt` passes on amd64, the new tests among them.
+- `go vet ./jrt` is clean on amd64 and arm64.
+- j2g's namespaces load on stage 0.
+- `bin/gate --plan` (below).
+
+**New proposals.** JCS290 (ConditionObject), JCS291 (an annotation's serial form), JCS292 (twins as a mechanism) and JCS293
+(Runtime.Version's Optional parts and parse). The night's commands are the triage section's.

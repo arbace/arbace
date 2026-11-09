@@ -5588,3 +5588,271 @@ After the night, the RMI tests that still fail are held by `:net`'s `java\.rmi` 
 t07841-t07843 need HotSpot's diagnostic commands (`com.sun.management.DiagnosticCommandMBean`, the VM's `jcmd` set) over JMX's
 connectors, which F27 brings. (a) by design, a `:hotspot-diagnostic` class (JCS284's recommendation for HotSpot's beans); (b) the
 commands the tests list ported over jrt (VM.version, Thread.print, GC.run, ...). Recommended: (a).
+
+## Decided (the user, 2026-11-08, about 22:00: the older proposals JCS190-JCS213)
+
+**JCS190 (a)**: j2g's default serialVersionUID on by default, once the night's comparison of the 118 values of
+`default-suids-jdk26.txt` finds them equal (the flip is a night step, below; not applied by day). **JCS191 (a)**, **JCS192
+(a)**, **JCS193 (b)**, **JCS200 (a)**, **JCS201 (a)**, **JCS210 (a)**, **JCS213 (b)**: built below. **JCS211 (c)** if a
+test asks (the java.lang and java.lang.annotation annotation types' members' annotations only; no test asks today: not
+built). **JCS212 (a)**: as built (the encoder's reversal; the class file's order for repr/java's forms).
+
+## As built: Java's older proposals (JCS191-JCS213) (2026-11-08; branch `java-older`, write-ahead)
+
+Branch `java-older` from `mac/java-props` `a9aebc62f`, by day under the light rules (agent-rules-1108): jrt's Go, the
+derived overlays, jrt's own Java, j2g's support function, light checks only; nothing converted, translated as a program or
+built into an executable. Shared files were extended, not rewritten (jrt.ae's lists, `jrt_sources.ae`'s `sources`,
+`derive.ae`'s `derivations`, this section), so the branch merges onto `java-more` after it.
+
+### JCS191 (a): the locks', Semaphore's and ForkJoinTask's serial forms
+
+`go/arbace/jrt/serial_locks.ae`. jdk26u's ReentrantLock, ReentrantReadWriteLock and Semaphore keep their state in a hidden
+Sync object, which their serial forms hold; jrt keeps the state in Go. So the Sync is a descriptor object, `lockSync`. Its
+class is the JDK's NonfairSync or FairSync. Its state is the JDK's AQS state: the hold count, the permits, or, for a read-write
+lock, the read holds << 32 | the write holds (SHARED_SHIFT is 32 over AbstractQueuedLongSynchronizer's long state; the
+recorded stream showed it). The lock's `sync` setter reads it back into jrt's lock: the fairness, and the permits. A lock read
+from a stream is unlocked, as Sync.readObject's `setState(0)` makes it.
+
+| class | serial form |
+|---|---|
+| `ReentrantLock` (7373984872572414699) | `sync` (its Sync) |
+| `ReentrantLock$Sync` (-5179523762034025860), `$NonfairSync` (7316153563782823691), `$FairSync` (-3000897897090466540) | Sync's `readObject`: defaultReadObject, state 0 |
+| `ReentrantReadWriteLock` (-6992448646407690164) | `readerLock`, `sync`, `writerLock`; one Sync shared with its `$ReadLock` (-5992448646407690164) and `$WriteLock` (-4992448646407690164), so the stream holds it once |
+| `ReentrantReadWriteLock$Sync` (6317671515068378041), `$NonfairSync` (-8159625535654395037), `$FairSync` (-2274990926593161451) | Sync's `readObject`: state 0 |
+| `Semaphore` (-3222578661600680210), `$Sync` (1192457210091910933), `$NonfairSync` (-2694183684443567898), `$FairSync` (2014338818796000944) | `sync`; no readObject, so the permits are read |
+| `AbstractOwnableSynchronizer` (3737899427754241961), `AbstractQueuedSynchronizer` (7373984972572414691), `AbstractQueuedLongSynchronizer` (7373984972572414692) | twins: the owner (transient), `state` int, `state` long |
+| `ForkJoinTask` (-7721805057305804111) | `status` (DONE, ABNORMAL, THROWN, the tag's 16 bits, packed as jdk26u packs them); `writeObject` writes the exception the task completed with, `readObject` reads it |
+| `ForkJoinTask$AdaptedRunnable`, `$AdaptedRunnableAction` (5232453952276885070), `$AdaptedCallable` (2838392045355241008) | `runnable` or `callable`, `result` |
+
+**The synchronizers are in the world** (AQS, AQLS and AOS are translated from jdk26u; AQS has a variant), so the descriptor
+classes' superclasses are **twins**. A twin is a class of the same name, serialVersionUID and serial fields over `lockSync`. It
+is not registered, so `Class.forName` still gives the translated class. Reading still works, because ObjectInputStream's
+`getClassDataLayout0` matches a stream's class descriptors to the local class's hierarchy by name: the twin's slot reads the
+state into the `lockSync`. The Sync classes themselves are registered: they are nested classes of jrt's own locks, which no
+translated class names.
+
+**Divergence**: the Sync classes' `getSuperclass` is the twin, not the world's AQS (`AbstractQueuedSynchronizer.class
+.isAssignableFrom` is false for them). **Left**: AQS's `ConditionObject` (jrt's condition is `ReentrantLock$ConditionObject`;
+the JDK's serial form is AQS's inner class, with `this$0`), proposed as JCS290.
+
+**The oracle**: `test/jrt/serialization/SerialRecordLocks.java`, recorded by hand once on jdk26u's JDK. It gives 14 cases:
+locks plain, fair and held; read-write locks plain, fair, held (write, then read) and a read lock alone; semaphores; the
+adapters fresh, done, cancelled, thrown and tagged. Their bytes are in `serial_locks_test.ae`'s `jdkLockStreams` and in
+`jdk-locks.txt`. The test stream `serial_test.ae` gained jdk26u's `readSerialData` rule: custom data is skipped only after a
+class that wrote some (SC_WRITE_METHOD), since the Sync classes have a readObject but no writeObject.
+
+### JCS192 (a): Runtime.version the JDK build's
+
+`system.ae`. `Runtime.version()` is now the platform build's `26.0.2.1-internal-adhoc.root.jdk26u`: numbers 26.0.2.1,
+pre-release `internal`, no build, optional part `adhoc.root.jdk26u`. jdk26u's toString, equals, compareTo and hashCode are
+ported over these parts; the hash is -526613477, the JDK's. The properties are made from it as VersionProps makes them:
+`java.version` `26.0.2.1-internal`, `java.runtime.version` and `java.vm.version` the full string, and `java.version.date`
+`2026-08-18`. A java.base frame's module version (`frameElement`) is the short form, as java.base's descriptor's.
+`SerialRecordLocks.java` printed the JDK's values. This supersedes F16's choice of "26" for the runtime and VM versions.
+**Left**: `pre()`, `build()`, `optional()`, `parse` and `major()` (Version.parse's types are translated), so
+RuntimeTests/Version/Basic (t04598) still fails.
+
+### JCS193 (b): the test stream over j2g's tables
+
+**In jrt.** `serialCall` hands a call on one of the tests' streams to that stream (`serialTestStream`). So `serial_test.ae`'s
+`serOut` and `serIn` (and their PutField and GetField) stand in for the translated streams in a program root of j2g's as well.
+
+**In the test stream.**
+- The stand-ins are made at init: they are the world's classes when it has them (`serProg`).
+- The reader matches a stream's descriptor to the object's hierarchy by name, as jdk26u's layout does.
+- `serialPersistentFields` is read from the translated ObjectStreamField by reflection.
+
+**The new test.** `serial_prog_test.ae`'s `TestSerialProg` takes ten hookless translated classes: Integer, Long, Boolean,
+Character, Double, UUID, SimpleEntry, SimpleImmutableEntry, singletonList and Arrays.asList. Each is made by reflection and
+checked against jdk26u's bytes (`SerialRecordProg.java`, `jdk-prog.txt`): written, read, written again, with a control. In
+jrt alone it is skipped.
+
+**Left out under `--prog`.** `TestSerialForms`' `throwable-cause-suppressed`, because the translated ArrayList's hooks call
+the translated stream's own methods. That case is the real streams' check.
+
+### JCS200 (a): jdk.net's extended socket options
+
+**What came into the world.** jdk26u's jdk.net, as `jdk-net-sources` (KIND `share:jdk.net`): NetworkPermission, Sockets and
+UnixDomainPrincipal.
+
+**The derived overlays** (`test/jrt/derive.ae`):
+- `jdk/net/ExtendedSocketOptions.java`: a descriptor's number comes from `HostFiles.handle`, and Linux's platform options are
+  made directly, since `jdk.internal.util.OperatingSystem` is not in the world.
+- `jdk/net/LinuxSocketOptions.java`: LinuxSocketOptions.c's 15 natives are given bodies over four new HostChannels natives.
+  These are int getsockopt and setsockopt, socketOptionSupported and SO_PEERCRED. handleError's exceptions are kept:
+  UnsupportedOperationException for ENOPROTOOPT, else SocketException with the error's text. No library is loaded.
+
+`sun.net.ext.ExtendedSocketOptions.getInstance` finds the class by name and registers it. TCP_QUICKACK, TCP_KEEP*,
+IP_DONTFRAGMENT, SO_INCOMING_NAPI_ID and SO_PEERCRED then join the sockets' supported options, as on the JDK.
+
+### JCS201 (a): the inherited channel
+
+**The overlay.** `sun/nio/ch/InheritedChannel.java` is derived from jdk26u's unix file. InheritedChannel.c's natives get bodies
+over nine new HostChannels natives in `channels_linux.ae`: dup, dup2, open, SO_TYPE, the family, connectedness, the inet peer,
+the UNIX peer name, and adopt. The FileDescriptor is made by `IOUtil.newFD`, since `sun.nio.ch.Reflect` is not in the world.
+
+**Adoption.** The dup of standard input enters HostChannels' table only once it is known to be a socket. Entering the table
+makes a descriptor non-blocking in the kernel, which would change standard input's open file description.
+
+**Variants and support.**
+- The Poll and EPoll SelectorProvider variants that answered null were removed; `inheritedChannel` is jdk26u's again.
+- `System.inheritedChannel` is a j2g support function, `J2g_SystemInheritedChannel` (`m/support-call-helpers`), which calls
+  `SelectorProvider.provider().inheritedChannel()`. It is rooted, and has a reflection entry for the interpreter.
+
+**Divergences.**
+- An inherited socket's non-blocking mode is shared with fd 0, so a program reading `System.in` on such a socket may see no
+  data.
+- On the box (no host descriptors) `System.inheritedChannel` throws "Channels not available" instead of returning null.
+
+### JCS210 (a), JCS213 (b): annotations as proxies; the real IncompleteAnnotationException
+
+`annotation.ae`.
+- **The proxy class.** Each annotation type's class is registered as a proxy class, so `Proxy.isProxyClass` is true for it.
+- **The handler.** `Proxy.getInvocationHandler` of an annotation gives its `sun.reflect.annotation.AnnotationInvocationHandler`,
+  one per annotation. Its invoke is jdk26u's: equals is equalsImpl, then toString, hashCode and annotationType; an element
+  gives its cloned value; a member with parameters is an AssertionError.
+- **The missing member.** It throws the world's `IncompleteAnnotationException(type, member)`. That class is in F14's
+  `annotation-sources`; jrt reaches it by name and its public constructor, as the serial hooks reach the streams.
+- **Why no hook set at start.** JCS213 (b)'s hook served to reach a translated class from jrt. The lookup by name does that
+  without start-up code: every public member of the world is a program root. Without the class (jrt alone) the exception is the
+  UnsupportedOperationException, as before.
+
+**Left**: an annotation's serial form. The JDK writes a proxy with AnnotationInvocationHandler's `type` and `memberValues`.
+It is proposed as JCS291.
+
+### Light checks done
+
+(main's stage 0 as `ARBACE_HOST_EXE`, `GOMEMLIMIT=1400MiB`; scratch `.tmp/older/`)
+- **The joint javac check** (`.tmp/night7/all9-run.sh`): 2,512 files, 0 errors, 5,337 classes (15 s, 0.95 GB). The three
+  new overlays and jdk.net's five classes are among them.
+- **`bin/jrt-convert derive --check`**: 27 overlays, 0 not as derived, the control passing (3 new: InheritedChannel,
+  ExtendedSocketOptions, LinuxSocketOptions).
+- **`go test ./jrt`** (printed by repr/go, as `bin/jrt test` runs it, amd64): every test passes. The new ones:
+  - TestSerialLocks: 14 of 14 written, read and written again byte for byte.
+  - TestSerialLocksRead and TestSerialLocksControl pass.
+  - TestRuntimeVersion.
+  - TestAnnotationProxy.
+  - TestChannelInherited: on loopback and a socket pair.
+  - TestChannelExtOptions: on loopback.
+  - TestSerialProg is skipped in jrt alone.
+
+  The control by hand: one byte of the semaphore's recorded stream changed fails TestSerialLocks.
+- **`go vet ./jrt`** on linux/amd64 and arm64: clean. `channels_other.go` is syntax-checked by gofmt; no build of tamago here.
+- **j2g's namespaces** (model, out, main) load on stage 0 from the checkout (arbace.classes.analyze loaded from the checkout
+  first: stage 0 embeds an older one).
+
+Not checked by day (no conversion, no build): j2g's output for the support function, the derived overlays through repr/java
+and j2g, the real streams over the new tables, `TestSerialProg` under `--prog`.
+
+### Expected tests
+
+Each needs its prerequisites' nights (slice 1's streams, F14's annotations, F9's and F11's classes):
+- JCS201: `inheritedChannel/ClosedStreams` (t05202) and `NullTest` (t05203), at interp and compiled.
+- JCS200: `unixdomain/SocketOptions` (t05205).
+- JCS210: `annotation/EqualityTest` (t04718).
+- JCS213: `TestIncompleteAnnotationExceptionNPE` (t04722).
+- JCS191: `ConcurrentHashMap/MapCheck` (t05680: CHM's Segments are ReentrantLocks).
+- About **5-6 at each of interp and compiled**. JCS192 and JCS193 free none directly: JCS193 is a check.
+
+### The night's commands
+
+In the night's worktree with `java-more` and then this branch merged; the heavy steps under the heavy lock:
+
+```sh
+# 0. the joint javac check (0 errors) and the derived overlays as committed
+.tmp/night7/all9-run.sh /root/arbace/.tmp/worktrees/next
+bin/jrt-convert derive --check
+# 1. jdk/ converted afresh: the overlays InheritedChannel, jdk/net/{ExtendedSocketOptions,LinuxSocketOptions} new,
+#    HostChannels changed, jdk-net-sources' 3 files new, the variants Poll/EPollSelectorProvider gone
+REPR_JAVA_EXE=$(ls -td /root/arbace/.tmp/gate-exe/javac-*/ | head -1)arbace-javac REPR_JAVA_STALE_OK=1 \
+  ARBACE_HEAVY_CMD=$PWD/bin/heavy-lock bin/jrt-convert update
+bin/heavy-lock bin/j2g-edge update && bin/heavy-lock bin/javac-vendor edge
+# 2. JCS190 (a)'s comparison then its flip (the slice 2-3 night's steps 2-3, J2G_DEFAULT_SUID=1); only when it reports
+#    "N compared, 0 differ" (N about 118):
+mkdir -p .tmp/jcs168 && rm -f .tmp/jcs168/suids.txt
+J2G_DEFAULT_SUID=1 J2G_DEFAULT_SUID_OUT=$PWD/.tmp/jcs168/suids.txt bin/heavy-lock bin/arbace-go --build
+r=$(awk 'NR==FNR{j[$1]=$2;next} ($1 in j){n++; if(j[$1]!=$2){b++}} END{print n+0" compared, "b+0" differ"}' \
+      .tmp/jcs168/suids.txt test/jrt/serialization/default-suids-jdk26.txt); echo "$r"
+case $r in *" compared, 0 differ") sed -i 's/(= "1" (System\/getenv "J2G_DEFAULT_SUID"))/(not= "0" (System\/getenv "J2G_DEFAULT_SUID"))/' arbace/j2g/model.ae
+  git commit -qam "JCS190 (a): j2g's default serialVersionUID on by default ($r)" ;; esac
+# 3. the executable (the flip moves gate_key: build again when step 2 committed), the smoke, jrt's tests
+bin/heavy-lock bin/arbace-go --build && bin/arbace-go --smoke && bin/jrt test
+# 4. the real streams: expect "locks-check: 24 of 24" (and slice 2's "streams-check: 16 of 16")
+target/arbace-go/amd64/arbace -e '(load-file "test/jrt/serialization/locks_check.ae")'
+target/arbace-go/amd64/arbace -e '(load-file "test/jrt/serialization/streams_check.ae")'
+# 5. smokes: no inherited channel over a pipe ("nil"); the extended options listed and read; an annotation a proxy
+echo | target/arbace-go/amd64/arbace -e '(println (System/inheritedChannel))'
+target/arbace-go/amd64/arbace -e '(let [s (java.nio.channels.SocketChannel/open)] (println (sort (map str (.supportedOptions s)))) (println (.getOption s jdk.net.ExtendedSocketOptions/TCP_KEEPIDLE)))'
+target/arbace-go/amd64/arbace -e '(let [a (.getAnnotation java.lang.Deprecated java.lang.annotation.Retention)] (println (java.lang.reflect.Proxy/isProxyClass (class a)) (class (java.lang.reflect.Proxy/getInvocationHandler a))))'
+# 6. JCS193 (b): the test stream over j2g's tables (a program root with jrt's tests; expect TestSerialProg to pass)
+bin/heavy-lock bin/j2g --tests --out .tmp/jcs193/j2g --root java/lang/Integer --root java/lang/Long --root java/lang/Boolean \
+  --root java/lang/Character --root java/lang/Double --root java/util/UUID --root 'java/util/AbstractMap$*' \
+  --root java/util/Collections --root java/util/Arrays --root java/io/ObjectStreamField
+bin/jrt test --arch amd64 --prog .tmp/jcs193/j2g/prog -run 'TestSerial'
+# 7. Java's levels on the tests: saved, not recorded; expect t05202, t05203, t05205, t04718, t04722, t05680 to pass, no
+#    passing test lost
+JAVA_CHECK_EXE=$PWD/target/arbace-go/amd64/arbace J2G_GO_EXE=$PWD/target/arbace-go/amd64/arbace \
+  JAVA_CHECK_HEAVY=$PWD/bin/heavy-lock bin/java-check --levels interp,compiled --jobs 8 \
+  --only 'jdk/java/nio/channels/(spi/SelectorProvider/inheritedChannel|unixdomain|SocketChannel|ServerSocketChannel)|jdk/java/lang/annotation/|jdk/java/util/concurrent/(ConcurrentHashMap|locks|forkjoin)|jdk/java/lang/RuntimeTests/Version|jdk/java/net/Socket' \
+  --save .tmp/older-night/check
+```
+
+**Risks and fallbacks.**
+1. j2g refuses a member of the derived overlays. The fallback per feature is `git revert` of its commit: JCS200 (60487528e)
+   and JCS201 (ce0e156f9) are independent.
+2. `ExtendedSocketOptions`' extra supported options change a passing test's printed option set. That is now the JDK's set; a
+   difference is the test's case to read.
+3. The new java.version strings change a passing test's stdout. Again the JDK's; read it.
+4. `locks_check.ae` fails on the twins (the real ObjectInputStream's layout). The fallback is to register the twins only when
+   the world lacks the classes, as the test does, and record the failure as JCS292's.
+
+## Proposed (java-older)
+
+Numbered from JCS290.
+
+### JCS290 AbstractQueuedSynchronizer$ConditionObject's serial form
+
+jrt's condition is `ReentrantLock$ConditionObject`, a Serializable leaf with no serial members. The JDK's is AQS's inner
+`ConditionObject`: serialVersionUID 1173984872572414699, its waiters transient, `this$0` the lock's Sync. Writing one gives
+other bytes; reading one names a class jrt has not.
+- (a) Rename jrt's class to the JDK's name with a twin AQS descriptor and `this$0` the lock's lockSync. Half a day, and the
+  class name changes (`getClass().getName()`).
+- (b) As now.
+
+**Recommended: (b)** until a test asks; none of the corpora does.
+
+### JCS291 An annotation's serial form
+
+Since JCS210 an annotation is a proxy class, so ObjectOutputStream writes it as a proxy whose handler field `h` is
+`proxyHandlerField`'s. That is a Dyn proxy's field, so writing an annotation fails ("not a proxy instance"); before JCS210 it
+wrote a class descriptor of `$ProxyN`.
+- (a) Proxy's `h` getter answers `annotationHandlerOf` for an annotation, and the handler gets jdk26u's serial form (`type`,
+  `memberValues` as a LinkedHashMap made by reflection; `readObject`'s validation). Reading a stream's annotation proxy then
+  makes the annotation (`AnnotationParser.annotationForMap`'s place: newAnnotation). 1 day.
+- (b) As now.
+
+**Recommended: (a)** with JCS210's tests' night, if a test serializes an annotation (`annotation/AnnotationTypeDeadlock`
+does not; `java/io/Serializable/...` tests may).
+
+### JCS292 Twins of translated classes as a mechanism
+
+JCS191 made unregistered twins of three translated classes so that jrt's descriptor classes extend them. The same need comes
+again wherever a jrt class's serial form names a translated superclass: Number for jrt's atomics already, StackTraceElement's
+none.
+- (a) A small registry of twins in jrt (`TwinOf(name)`): the twin made once per name, its serial table given, and
+  documented in J2G-SPEC §5.11.
+- (b) Per use, as now.
+
+**Recommended: (b)** until a second user appears.
+
+### JCS293 Runtime.Version's Optional parts and parse
+
+`pre()`, `build()`, `optional()`, `version()`, `parse(String)` and the deprecated `major()`, `minor()`, `security()`: Runtime.Version is jrt's leaf class,
+and Optional and List are translated.
+- (a) jrt's Runtime$Version keeps its class and gains `pre`, `build`, `optional`, `version` and `parse` as j2g support
+  functions over the translated Optional and List (`m/support-call-helpers`, as System.inheritedChannel's). `parse` would be
+  a port of jdk26u's VersionPattern rules into the Go, and `major()`, `minor()` and `security()` jdk26u's deprecated ones.
+  RuntimeTests/Version/Basic (t04598) is the measure. 1 day.
+- (b) As built.
+
+**Recommended: (a)** when the Java triage's next slice takes small reflection gaps.

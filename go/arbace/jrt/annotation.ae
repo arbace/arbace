@@ -13,7 +13,9 @@
 ;; the type's Go interface (ClassInfo.AnnNew, arbace.j2g.decls/annotation-impl-forms); an interpreted
 ;; one has plain AnnotationObj values, which its class's instance check accepts (AnnotationTypeOf).
 ;; No Proxy is made: the object's class is a per-type class made by jrt, named as the JDK's proxy
-;; classes are, whose member table has the elements (Class.getMethods, Method.invoke on it).
+;; classes are, whose member table has the elements (Class.getMethods, Method.invoke on it). Since JCS210 (a)
+;; it answers as the JDK's: Proxy.isProxyClass is true of it, and Proxy.getInvocationHandler gives the
+;; annotation's AnnotationInvocationHandler, an object over the AnnotationObj whose invoke is jdk26u's.
 ;;
 ;; The data, one record a line, tokens separated by one space:
 ;;   T ANN                    an annotation of the class
@@ -106,7 +108,8 @@ LinkedHashMap's order AnnotationParser gives them: the type's defaults in HashMa
 the explicit members not among them, in the class file's order), each in the invocation
 handler's form (primitives boxed, arrays as arrays). self is the Java object (the type's own Go
 type embedding it, or the AnnotationObj).\n"
-  (struct Object ^{:tag (* Class)} typ ^{:tag (slice string)} names ^{:tag (slice any)} vals ^any self))
+  (struct Object ^{:tag (* Class)} typ ^{:tag (slice string)} names ^{:tag (slice any)} vals ^any self
+          ^{:tag (atomic/Pointer annotationHandler) :doc "its invocation handler, made by Proxy.getInvocationHandler's first call (JCS210)\n"} handler))
 
 (go/type annotationBased
   "annotationBased is an annotation object: AnnotationObj, or a Go type embedding it.\n"
@@ -139,9 +142,24 @@ array cloned. j2g's annotation types call it (unboxing a primitive).\n"
   ^any [^{:tag (* AnnotationObj)} a ^string name]
   (let [i (.index a name)]
     (when (< i 0)
-      (panic (Thrown (UnsupportedOperationException_New_String
-                       (Str (+ "IncompleteAnnotationException: " (.-Name (.-info (.-typ a))) " missing element " name))))))
+      (panic (incompleteAnnotation (.-typ a) name)))
     (cloneMember (aget (.-vals a) i))))
+
+(go/var ^{:doc "the exception of a member without a value (JCS213 (b): the world's, translated from jdk26u)\n"}
+  incompleteAnnotationName "java.lang.annotation.IncompleteAnnotationException")
+
+(go/func incompleteAnnotation
+  "incompleteAnnotation is AnnotationInvocationHandler.invoke's new IncompleteAnnotationException(type, member)
+(JCS213 (b), the user's decision of 2026-11-08; doc/classes/JAVA-DEFERRED-TRIAGE.md, \"As built: JCS213\"): the
+world's class (annotation-sources; translated, so jrt reaches it by name and its public constructor, as
+serial_classes.ae's hooks reach the streams: every public member of the world is a root of the program); in a
+world without it (jrt alone) an UnsupportedOperationException naming it, as before.\n"
+  ^Throwable_I [^{:tag (* Class)} typ ^string name]
+  (when (!= (ForName incompleteAnnotationName) nil)
+    (return (Throwable_Cast (serialNewObject incompleteAnnotationName (lit (slice (* Class)) Class_class String_class)
+                                             (lit (slice any) typ (Str name))))))
+  (Thrown (UnsupportedOperationException_New_String
+            (Str (+ "IncompleteAnnotationException: " (.-Name (.-info typ)) " missing element " name)))))
 
 (go/method Member
   "Member is Element in the member tables' convention (a primitive as its Go value): what the
@@ -475,6 +493,9 @@ implementing typ, its member table the elements and Annotation's methods.\n"
                               :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (return (.ToString__String (.annBase (assert annotationBased this))))))))
         (set! (.-Methods info) ms)
         (let [c (Define info)]
+          ;; JCS210 (a): a proxy class as the JDK's annotations' are (Proxy.isProxyClass; getInvocationHandler's
+          ;; handler, annotationHandlerOf)
+          (RegisterProxyClass c)
           (set! (.-IsInstance info)
                 (fn ^bool [^any x]
                   (let [(values b ok) (assert annotationBased x)]
@@ -964,3 +985,60 @@ declared ones, else for an @Inherited type the nearest superclass's.\n"
   (let [(values v ok) (aget (.-vals (annotationDefaults (.-clazz m))) (.-Name (.-info m)))]
     (when (not ok) (return nil))
     (cloneMember v)))
+
+;; ---------------------------------------------------------------------------------------
+;; the invocation handler (JCS210 (a), the user's decision of 2026-11-08; doc/classes/JAVA-DEFERRED-TRIAGE.md,
+;; "As built: JCS210"): sun.reflect.annotation.AnnotationInvocationHandler over the annotation object, its invoke
+;; jdk26u's (AnnotationInvocationHandler.java at baf63fb): equals(Object) the annotation's equalsImpl, toString,
+;; hashCode and annotationType, an element its value (a non-empty array cloned; IncompleteAnnotationException
+;; without one), more parameters AssertionError. The handler is one object per annotation; its own equals,
+;; hashCode and toString are Object's.
+
+(go/type annotationHandler
+  "annotationHandler is an annotation's AnnotationInvocationHandler.\n"
+  (struct Object ^{:tag (* AnnotationObj)} a))
+
+(go/var annotationHandler_class
+  (Define (addr (lit ClassInfo :Name "sun.reflect.annotation.AnnotationInvocationHandler" :Kind KindClass
+                     :Modifiers AccFinal :Super Object_class
+                     :Interfaces (lit (slice (* Class)) InvocationHandler_class Serializable_class)
+                     :Go "arbace/jrt.annotationHandler"))))
+
+(go/method Is_InvocationHandler [^{:tag (* annotationHandler)} h])
+(go/method Is_Serializable [^{:tag (* annotationHandler)} h])
+(go/method Ref ^any [^{:tag (* annotationHandler)} h] (when (== h nil) (return nil)) h)
+(go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* annotationHandler)} h] annotationHandler_class)
+(go/method Clone__O ^any [^{:tag (* annotationHandler)} h] (panic (CloneNotSupported h)))
+(go/method ToString__String ^{:tag (* String)} [^{:tag (* annotationHandler)} h] (Object_toString h))
+
+(go/method Invoke_O_Method_O1__O
+  "Invoke_O_Method_O1__O is AnnotationInvocationHandler.invoke: by the method's name and parameters.\n"
+  ^any [^{:tag (* annotationHandler)} h ^any proxy ^{:tag (* Method)} m ^{:tag (* RefArray)} args]
+  (when (== m nil) (panic (NPE)))
+  (let [member (.-Name (.-info m))
+        ps (.-Params (.-info m))]
+    (when (and (== (len ps) 1) (== member "equals") (== (aget ps 0) Object_class))
+      (when (or (== args nil) (!= (len (.-A args)) 1))
+        (panic (IllegalArgumentException_New_String (Str "wrong number of arguments"))))
+      (return (.Equals_O__Z (.-a h) (aget (.-A args) 0))))
+    (when (!= (len ps) 0)
+      (panic (AssertionError_New_O (Str "Too many parameters for an annotation method"))))
+    (switch member
+      (case ["toString"] (return (.ToString__String (.-a h))))
+      (case ["hashCode"] (return (.HashCode__I (.-a h))))
+      (case ["annotationType"] (return (.-typ (.-a h)))))
+    (return (.Element (.-a h) member))))
+
+(go/func annotationHandlerOf
+  "annotationHandlerOf is the handler of x when x is an annotation object jrt made (one per annotation), else
+nil.\n"
+  ^InvocationHandler [^any x]
+  (let [(values b ok) (assert annotationBased x)]
+    (when (not ok)
+      (return nil))
+    (let [a (.annBase b)
+          h (.Load (.-handler a))]
+      (when (!= h nil)
+        (return h))
+      (.CompareAndSwap (.-handler a) nil (addr (lit annotationHandler :a a)))
+      (return (.Load (.-handler a))))))

@@ -836,6 +836,25 @@ covers what.
   `GC.c`, written anew over Go's runtime/debug) and its test, `overlay/jdk/java.base/jdk/internal/jrt/JmxProviders.java` (the
   providers java.management.rmi's module-info names), jrt's Thread context class loader (`go/arbace/jrt/thread.ae`)
   and the throws records (`arbace/classes/annot.ae`) are Arbace's own, under the Eclipse Public License 1.0.
+- Java's older proposals (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: Java's older proposals (JCS191-JCS213)";
+  recorded by the rule of B7): `go/arbace/jrt/serial_locks.ae` holds the serial forms and serialization hooks of jdk26u's
+  `java/util/concurrent/locks/{ReentrantLock,ReentrantReadWriteLock,AbstractQueuedSynchronizer,AbstractQueuedLongSynchronizer,AbstractOwnableSynchronizer}.java`,
+  `java/util/concurrent/Semaphore.java` and `ForkJoinTask.java` (https://github.com/openjdk/jdk26u at `baf63fb`,
+  `src/java.base/share/classes`; written by Doug Lea with members of JCP JSR-166 and released to the public domain, as their
+  headers say, in files under Oracle's notice): their serialVersionUIDs, fields and hooks' bodies over jrt's state, under the
+  GNU General Public License version 2 with the Classpath Exception (text below) as far as Oracle's notice covers them, the
+  rest Arbace's own. `overlay/jdk/java.base/sun/nio/ch/InheritedChannel.java`, `overlay/jdk/java.base/jdk/net/ExtendedSocketOptions.java`
+  and `LinuxSocketOptions.java` are jdk26u's files (`src/java.base/unix/classes/sun/nio/ch/InheritedChannel.java`,
+  `src/jdk.net/share/classes/jdk/net/ExtendedSocketOptions.java`, `src/jdk.net/linux/classes/jdk/net/LinuxSocketOptions.java`)
+  with the exact replacements `test/jrt/derive.ae` makes (their headers say so), and `go/arbace/jrt/channels_linux.ae`'s
+  inherited-channel and extended-options sections port jdk26u's `src/java.base/unix/native/libnio/ch/InheritedChannel.c` and
+  `src/jdk.net/linux/native/libextnet/LinuxSocketOptions.c` (their system calls, options and results): Copyright (c) Oracle
+  and/or its affiliates, under the GNU General Public License version 2 with the Classpath Exception (text below); the
+  derivations' tables are covered as above; the rest of those files, `HostChannels.java`'s inherited and extended-option
+  natives, `channels_other.ae`'s and the tests' parts, `annotation.ae`'s invocation handler (jdk26u's
+  `sun/reflect/annotation/AnnotationInvocationHandler.java`'s invoke, as F14's port) and `system.ae`'s Runtime.Version rules
+  (jdk26u's `java/lang/Runtime.java`'s Version) are as F14 and the rest of jrt are covered. Their jdk26u sources join
+  `jdk/forms/` once `bin/jrt-convert update` has run: jdk-net-sources (`src/jdk.net/share/classes/jdk/net/{NetworkPermission,Sockets,UnixDomainPrincipal}.java`).
 - java.lang.management without JMX (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F13 (write-ahead)";
   recorded by the rule of B7): `overlay/jdk/java.base/java/lang/management/{ManagementFactory,ThreadInfo,LockInfo,MonitorInfo,MemoryUsage}.java`
   `overlay/jdk/java.base/sun/management/{ManagementFactoryHelper,VMManagementImpl}.java` and

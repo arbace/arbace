@@ -47,6 +47,8 @@ public final class HostChannels {
     public static final int ECONNREFUSED = 111;
     public static final int EHOSTUNREACH = 113;
     public static final int EINPROGRESS = 115;
+    /** ENOPROTOOPT (JCS200: LinuxSocketOptions.c's handleError). */
+    public static final int ENOPROTOOPT = 92;
     /** jrt's own: the host has no descriptors (a host without channels, the box's). */
     public static final int ENOHOST = -1;
 
@@ -309,4 +311,69 @@ public final class HostChannels {
 
     /** UnixDomainSockets.localAddress0: 0 with getsockname's name in path[0] (null: not AF_UNIX), or THROWN. */
     public static native int unixLocalAddress0(int fd, byte[][] path, int[] err);
+
+    // -- InheritedChannel.c's natives (JCS201 (a); doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS201"):
+    //    jdk26u's sun.nio.ch.InheritedChannel, derived over these (test/jrt/derive.ae) --
+
+    /** InheritedChannel.dup: dup(2) of fd, not entered into the table: the new descriptor or THROWN. */
+    public static native int inheritedDup0(int fd, int[] err);
+
+    /** InheritedChannel.dup2: dup2(2) of fd onto fd2: 0 or THROWN. */
+    public static native int inheritedDup20(int fd, int fd2, int[] err);
+
+    /** InheritedChannel.open0: open(2) of path's bytes with oflag (0 O_RDONLY, 1 O_WRONLY, 2 O_RDWR): the descriptor or THROWN. */
+    public static native int inheritedOpen0(byte[] path, int oflag, int[] err);
+
+    /** InheritedChannel.soType0: SO_TYPE: 1 SOCK_STREAM, 2 SOCK_DGRAM, -1 another type or not a socket. */
+    public static native int inheritedSoType0(int fd);
+
+    /** InheritedChannel.addressFamily: getsockname(2)'s family: 1 AF_INET, 2 AF_INET6, 3 AF_UNIX, -1 another or none. */
+    public static native int inheritedFamily0(int fd);
+
+    /** InheritedChannel.isConnected: whether getpeername(2) succeeds. */
+    public static native boolean inheritedConnected0(int fd);
+
+    /**
+     * InheritedChannel.inetPeerAddress0 and peerPort0: 1 with getpeername(2)'s address in addr[0] (4 or 16 bytes, a
+     * v4-mapped address its 4) and its port and scope in port[0], port[1] (an AF_INET or AF_INET6 peer), else 0.
+     */
+    public static native int inheritedPeer0(int fd, byte[][] addr, int[] port);
+
+    /** InheritedChannel.unixPeerAddress0: getpeername(2)'s AF_UNIX name in path[0] (left null for another family or none). */
+    public static native void inheritedUnixPeer0(int fd, byte[][] path);
+
+    /** The inherited descriptor entered into the table as a blocking channel's (non-blocking in the kernel): 0 or THROWN. */
+    public static native int inheritedAdopt0(int fd, int[] err);
+
+    // -- jdk.net's LinuxSocketOptions.c natives (JCS200 (a); doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS200"):
+    //    jdk.net.LinuxSocketOptions, derived over these (test/jrt/derive.ae) --
+
+    /**
+     * LinuxSocketOptions.c's handleError: ENOPROTOOPT an UnsupportedOperationException "unsupported socket
+     * option", else JNU_ThrowByNameWithLastError's SocketException (the error's text, else detail).
+     */
+    public static RuntimeException extUnsupported(int errno) {
+        return errno == ENOPROTOOPT ? new UnsupportedOperationException("unsupported socket option") : null;
+    }
+
+    /** The SocketException of handleError (when extUnsupported is null). */
+    public static SocketException extException(int errno, String detail) {
+        String text = text(errno);
+        return new SocketException(text == null || text.isEmpty() ? detail : text);
+    }
+
+    /** getsockopt(2) of an int at level, opt: 0 with the value in value[0], or THROWN. */
+    public static native int extGetInt0(int fd, int level, int opt, int[] value, int[] err);
+
+    /** setsockopt(2) of the int value at level, opt: 0 or THROWN. */
+    public static native int extSetInt0(int fd, int level, int opt, int value, int[] err);
+
+    /**
+     * socketOptionSupported: whether a TCP socket (IPv6, else IPv4) answers getsockopt(2) of level, opt
+     * with anything but ENOPROTOOPT (false when no socket can be made).
+     */
+    public static native boolean extSupported0(int level, int opt);
+
+    /** SO_PEERCRED: 0 with the peer's uid and gid in ids[0], ids[1], or THROWN. */
+    public static native int extPeerCred0(int fd, int[] ids, int[] err);
 }
