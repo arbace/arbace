@@ -1438,9 +1438,11 @@ covers what.
   (https://www.unicode.org/Public/16.0.0/ucd/ `UnicodeData.txt`, `extracted/DerivedGeneralCategory.txt` and `CaseFolding.txt`,
   pinned by SHA-256 in `test/scheme/ucd.edn`, fetched 2026-11-08; since SCS16 (b) and SCS17 (c), "As built: SCS15-SCS18", also
   `SpecialCasing.txt`, `DerivedCoreProperties.txt` and `PropList.txt`, fetched 2026-11-09; since SCS21 (b) also
-  `auxiliary/WordBreakProperty.txt`, fetched 2026-11-09): the general categories, the identifier,
+  `auxiliary/WordBreakProperty.txt`, fetched 2026-11-09; since SCS23 (b) also `emoji/emoji-data.txt`'s Extended_Pictographic, fetched
+  2026-11-09, and since SCS24 (b) `auxiliary/WordBreakTest.txt`, the cases si's unit test `go/arbace/scm/wordbreak_test.ae` reads, not
+  copied into the tree): the general categories, the identifier,
   whitespace and printer escape ranges derived from them, the case foldings, si's properties (Alphabetic, Numeric, White_Space,
-  Uppercase, Lowercase, Cased, Case_Ignorable), its simple and full case mappings and its Word_Break classes are Unicode's data, under the Unicode License V3 below ("The
+  Uppercase, Lowercase, Cased, Case_Ignorable, Extended_Pictographic), its simple and full case mappings and its Word_Break classes are Unicode's data, under the Unicode License V3 below ("The
   Unicode Character Database 16.0.0 (repr/scheme's Unicode data)"); the generator and the files' code are Arbace's own,
   under the Eclipse Public License 1.0.
 - `seed/arbace-seed-go.tar.xz` (since S4, 2026-10-13; doc/STANDALONE-NOTES.md, "S4: the
@@ -2924,7 +2926,8 @@ Entire Agreement. This Agreement constitutes the entire agreement between the pa
 Covers the data of `arbace/repr/scheme/category.ae`, `arbace/repr/scheme/unicode.ae`, `arbace/repr/scheme/casefold.ae` and
 `go/arbace/scm/unicode.ae`, generated from the Unicode Character Database 16.0.0 (`UnicodeData.txt`,
 `extracted/DerivedGeneralCategory.txt`, `CaseFolding.txt`, and since SCS16 (b) `SpecialCasing.txt`, `DerivedCoreProperties.txt`,
-`PropList.txt`, and since SCS21 (b) `auxiliary/WordBreakProperty.txt`; https://www.unicode.org/Public/16.0.0/ucd/, pinned by `test/scheme/ucd.edn`). The license, the text of
+`PropList.txt`, since SCS21 (b) `auxiliary/WordBreakProperty.txt`, and since SCS23 (b) and SCS24 (b) `emoji/emoji-data.txt` and
+`auxiliary/WordBreakTest.txt` (the latter read by si's unit test, not copied); https://www.unicode.org/Public/16.0.0/ucd/, pinned by `test/scheme/ucd.edn`). The license, the text of
 https://www.unicode.org/license.txt as fetched on 2026-11-08 (SHA-256
 `e7a93b009565cfce55919a381437ac4db883e9da2126fa28b91d12732bc53d96`, pinned in `test/scheme/ucd.edn`):
 
