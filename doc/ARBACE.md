@@ -213,6 +213,10 @@ code. Three kinds of things live here:
   which ports LLVM's AlwaysInliner (`llvm/lib/Transforms/IPO/AlwaysInliner.cpp`, the parts of
   `llvm/lib/Transforms/Utils/InlineFunction.cpp` and `llvm/lib/Analysis/InlineCost.cpp` it uses) at the same commit,
   by hand on 2026-11-06.
+  Since CP311 (a) (doc/cpp/CPP-SURVEY.md, "As built: CP311 (a) and the rest of CP313 (a)", 2026-11-09) `cpp/template.ae`'s class template
+  argument deduction ports `clang/lib/Sema/SemaTemplateDeductionGuide.cpp` (DeclareImplicitDeductionGuides, transformConstructor,
+  buildSimpleDeductionGuide, DeclareAggregateDeductionGuideFromInitList) and `clang/lib/Sema/SemaInit.cpp`'s
+  DeduceTemplateSpecializationFromInitializer at `llvmorg-23.1.5` (the pinned tarball).
 - `repr/ocaml.ae` and `repr/ocaml/` (repr/ocaml, OCaml's bridge, `arbace.repr.ocaml` and `arbace.repr.ocaml.*`;
   doc/ocaml/SPEC.md, doc/ocaml/OCAML-SURVEY.md; evaluated from the checkout, not embedded, OC30 (a)): its native
   reader (2026-11-04, "As built: the native reader") ports OCaml 5.5.0's parsing/lexer.mll (`repr/ocaml/lex.ae`, with

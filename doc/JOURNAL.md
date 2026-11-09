@@ -2557,3 +2557,46 @@ The user accepted HF10-P1 to P10 as recommended (~06:15). Built by an agent in t
 - P4 (a), P7 (a), P9 (b) recorded as orders; P3 (a) not started (its first step's gap written down in the survey).
 - Measures: lib-stg over 265 modules 5,372 of 7,593 bindings equal to GHC's -O0 (the old list 2,473 → 2,560 of 3,421, none
   worse); runs 59 of 63 on both sets, 0 lost; typecheck-check 24 of 24; run-check 59 of 63 as before.
+
+## 2026-11-09: C++'s CP311 (a), class template argument deduction with initializers (branch `cpp-props3`)
+
+- **Built** (the checker and the code generator, `arbace/cpp/template.ae`'s `ctad`, `arbace/cpp/sema.ae`): clang's
+  SemaTemplateDeductionGuide.cpp and SemaInit.cpp's DeduceTemplateSpecializationFromInitializer at llvmorg-23.1.5 (the pinned
+  tarball), ported rule for rule: implicit guides from the declared constructors (the class's then the constructor template's
+  parameters, the pattern's member typedefs substituted), `C()`, the copy deduction candidate, the user's deduction guides
+  (recorded on their class template as declared), C++20's aggregate deduction candidate; deduced by `deduce-call`, chosen by
+  `resolve-overload` with [over.match.best]/2.9-2.11's guide tie-breaks; copy-initialization's converting guides, list-initialization's
+  two phases, the explicit guide in copy-list-initialization, no viable or ambiguous guides, a placeholder in a compound type, the
+  name without arguments before C++17 and the alias template's C++20 extension under `-pedantic-errors` as the program's errors; for
+  variables (the parser marks its own deduction's placeholder, `:_ctad`), `T(...)` and `T{...}`. Unsure drops (types the slice cannot
+  build or substitute) keep the parser's deduction, so the code generator is never worse than before. Also two partial
+  specializations differing only in their constraints kept as two (found once CTAD let concepts-class be analyzed).
+- **Why (a)**: the proposal's recommendation, the user's decision of 2026-11-09; (b) the checker alone would leave the code generator's
+  CTAD to the parser's approximation (no user guides, no packs, one guide), (c) the 11 sample lines unjudged.
+- **Measured**: see the survey's "As built: CP311 (a) and the rest of CP313 (a)" (the sample's own passes, the 75 CTAD files of the
+  whole part 6 → 18, the code generator's 142 samples as recorded, a probe whose deduced types' mangled names are clang's).
+- **Left**: alias templates' guides in C++20 (BuildDeductionGuideForTypeAlias), C++23's inherited constructors' guides, `new T(...)`,
+  class templates' static members' initializers in specializations.
+
+## 2026-11-09: C++'s CP313 (a), the rest: access in every context the checker models (branch `cpp-props3`)
+
+- **Built** (the checker, `arbace/cpp/sema.ae`; after clang's SemaAccess.cpp at llvmorg-23.1.5: EffectiveContext, GetFriendKind,
+  HasAccess, IsAccessible's path walk): the context's classes (nested ones' enclosing classes) and function; friends matched by
+  name (functions, now also classes by their recorded names); [class.protected]'s object rule; a member's access through the
+  naming class's bases ([class.access.base]/5, an accessible base's members); applied to `o.m`, `o.f()`, members named in member
+  functions, the constructor an initialization chooses (a constructor template's specialization with its template's access), the
+  injected-class-name through a private base (`o.B::m`), class-scope using-declarations of enumerators and types (their own
+  access), structured bindings' rules ([dcl.struct.bind]/4: one class holding the members, no anonymous member, no closure type,
+  accessible members, the names' count); the member types' check gated per class instead of per unit.
+- **Why**: the user's decision CP313 (a) of 2026-11-09, its second pass ("As built: CP300-CP314", "Not built in this pass").
+- **Measured**: the every-10th sample 114 → 117 (access19, scoped15, decomp4), none lost, the extras the same 92 lines; the 90
+  access files of the whole part 12 → 19, none lost; the code generator's 142 samples as recorded (checker-only rules).
+- **Recorded**: test/cpp/check-dg-own-linux-amd64.edn from the final run (454 rows, 117 passes), the C++ read fact
+  (`:dg-own [117 1] :dg-clang [4480 0.5]`), test/crops/scores.edn (C++ 76.1 / 100 / 67.84, read 0.657); `make check-makefile`,
+  `gate.crops check`, `bin/gate --full --plan`, the dg control and `bin/crops-score --judge --strict` pass.
+- **Found**: the dg read's order-dependence (lookup/scoped15 read once accepted in a 90-file list, otherwise rejected), not
+  explained in this pass.
+- **Proposed** (doc/cpp/CPP-SURVEY.md, "Proposed (CP320-CP324)"): alias templates' guides, static members' in-class initializers in
+  the checker, the read's order-dependence, C++23's inherited constructors' guides, using-declarations' access for functions.
+- **Slips**: three throwaway commands against the day's rules (a mistyped `sed -i` naming the null device, a wait loop with `pgrep`
+  and a discarded output, a process substitution in an inspection command); listed in the survey's "Slips, scratch".

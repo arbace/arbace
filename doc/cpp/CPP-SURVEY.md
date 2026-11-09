@@ -5124,3 +5124,196 @@ inspection command; none repeated after noticing. Scratch in the worktree's `.tm
 `c312`, `e1`, `e2`, `l19`, `a1`, `v314`; the lists `f*.txt`; the feature runs `f*b`/`f*n`; the sample runs `r314`, `rA`, `rF`, `rG`;
 the trees `tree300`, `tree301`, `tree305`, `tree310`, `treeH`; the code generator runs `cg1`, `cgA`, `cgF`, `g300`, `g301`, `g305`,
 `g312`; `cmp.sh`, `gencmp2.sh`, `onem.sh`, `gent.sh`, `hunks.py`, `hunks2.py`), `base2-tree/` (f9b81f1e3's tree), `p0/`, `cg1/`.
+
+## As built: CP311 (a) and the rest of CP313 (a) (2026-11-09; branch `cpp-props3` from `cpp-props2`'s 37f9bd980)
+
+The user's decisions of 2026-11-09 ("As built: CP300-CP314"): CP311 (a) and CP313 (a), the two left by `cpp-props2`; CP310 (a)
+waits for the night's whole-part record. One commit each, CP311 first. The measure is the CX12 slices': the every-10th dg-error
+sample's own passes (454 supported files, `.tmp/sample.sh`), each new pass read against its source and clang's recorded output
+(the no-false-credit review), and the features' files of the whole part (`.tmp/t/subm.sh` over a list), each tree against its base;
+clang, clang++, clang-23, g++, gcc, cc, cpp, c++, cc1, cc1plus, ld and as stubs exiting 99 first on PATH for every own run (their
+log empty).
+
+### CP311 (a): class template argument deduction with initializers
+
+Ported from clang at llvmorg-23.1.5 (the pinned tarball's `clang/lib/Sema/SemaTemplateDeductionGuide.cpp`: DeclareImplicitDeductionGuides,
+ConvertConstructorToDeductionGuideTransform's transformConstructor and buildSimpleDeductionGuide, DeclareAggregateDeductionGuideFromInitList;
+`clang/lib/Sema/SemaInit.cpp`: DeduceTemplateSpecializationFromInitializer; read as the model, rule for rule), in the code generator's
+Sema, so for the checker and the code generator alike:
+
+- `arbace.cpp.template/ctad` (the `:ctad` hook): the guides of a class template, function templates of their own (`:tk :guide`):
+  each declared constructor's (the class template's parameters then the constructor template's own, its parameter types resolved
+  in a scope binding them, the pattern's member typedefs entered as the transform substitutes them, its default arguments and
+  explicit-specifier kept), `C()` when the class declares no constructor, the copy deduction candidate `C(C<P...>)`, the user's
+  deduction guides (`CXXDeductionGuideDecl`, plain or in a `FunctionTemplateDecl`, recorded on their class template by
+  `declare-template`; those declared before the use, [over.match.class.deduct]/1), and C++20's aggregate deduction candidate when
+  the template declares no guide and the pattern is an aggregate (bases then fields; an array's rvalue reference for a braced item,
+  a const lvalue reference for a string literal; a list longer than the elements makes none; brace elision possible, a pack, an
+  anonymous member: unsure). Each guide is deduced by `deduce-call` (an initializer-list guide's E from the list's elements,
+  [temp.deduct.call]/1), its associated constraints (the class template's requires-clause, the constructor template's, the trailing
+  one) checked, its specialization registered as a function for `resolve-overload` and removed after.
+- DeduceTemplateSpecializationFromInitializer's flow: copy-initialization from an expression takes the converting guides only (not
+  explicit, callable with one argument); a braced list first tries the initializer-list guides (not for an empty list when a guide
+  takes no argument, nor for one expression of a specialization of the template or of a class derived from one, DR1467), then all
+  guides with the list's elements; no viable guide, ambiguity, an explicit guide chosen in copy-list-initialization are the
+  program's errors (clang's err_deduced_class_template_ctor_no_viable, _ambiguous, _explicit, _incomplete); before C++17 the name
+  needs its arguments; an alias template in C++17 under `-pedantic-errors` is clang's C++20 extension's error (`*pedantic-errors*`,
+  bound from the file's options by `arbace.repr.cpp.diag`).
+- [over.match.best]/2.9-2.11 in `tiebreak`: a guide from a deduction-guide over an implicit one, the copy deduction candidate over
+  the others, a non-template constructor's guide over a constructor template's, after the templates' partial ordering.
+- A drop is sure when the deduction fails by the algorithm (no `*unsure*` set, as `call-candidates`' drops are), unsure when the
+  slice could not build the guide's types, substitute them or decide a constraint: "no viable guide" is the program's error only
+  when every drop was sure; an unsure deduction falls back on the parser's own (`arbace.repr.cpp.sema/ctad`, the tree's type).
+- Where: variables (`local-var!`, `declare-var!`: the placeholder written, `:_ctad` from the parser, a `:_` key, when the parser
+  deduced the type itself; the initializer analyzed once and kept for the initialization, `:ctad-init`), `T(...)` and `T{...}`
+  (`ctad-expr`: the functional casts and temporary objects), and `[dcl.type.class.deduct]/2`'s compound types (`A (*fp)()`,
+  `ctad-compound!`, clang's err_deduced_class_template_compound_type). The checker's failed deduction declares the variable with a
+  dependent placeholder type and raises the error at its initialization (`:ctad-error`, the declaration's node), so its uses report
+  nothing more, as clang marks the declaration invalid.
+- Not built: an alias template's guides from C++20 on (BuildDeductionGuideForTypeAlias with its is_deducible constraint: unsure, the
+  parser's deduction kept), C++23's inherited constructors' guides (P2582; clang does not build them either: a class inheriting
+  constructors is not judged at C++23), `new T(...)` with a placeholder, a class template's static members' initializers in its
+  specializations (class-deduction108's `static inline TT x1 = 0`), template template parameters' placeholders in a specialization's
+  members.
+- Found by the measure and fixed: two partial specializations with the same arguments and different constraints were taken for one
+  redeclared (`declare-template`'s ClassTemplatePartialSpecializationDecl, [temp.over.link]/7; concepts-class's `S3<T>`), which the
+  checker showed once CTAD let the unit be analyzed.
+- Measure: the every-10th sample 109 → 114 own passes (`.tmp/r311b`, against `cpp-props2`'s recorded run), none lost, the extras the
+  same 92 lines; the 75 CTAD files of the whole part (`.tmp/fctad.txt`: the class-deduction and ctad names and the files with a
+  deduction guide) 6 → 18 (`.tmp/fctad-b`, `fctad-n2`), none lost, no new extra once the partial specializations' fix was in.
+  The no-false-credit review of the five new passes, each against its source and clang's recorded output: class-deduction28
+  (`A a2 = 42` with `explicit A(T)`, `B b2 = 0` with `explicit B(T) -> B<T*>`: copy-initialization's converting guides alone, none
+  viable, clang's err_deduced_class_template_ctor_no_viable on both lines), class-deduction66 (`A (*fp)() = 0`, clang's "cannot form
+  function returning deduced class template specialization type"), class-deduction84 and class-deduction-alias5 (an alias template's
+  placeholder at C++17 under `-pedantic-errors`, clang's -Wc++20-extensions as an error, lines 6-9 and 16), template/error8 (C++14:
+  `throw S ()` with S a class template, clang's "use of class template 'S' requires template arguments"). Probes (`.tmp/p/a7.cpp`,
+  `a7b.cpp`, c++20): `std::pair p(1, 2.0)`, `std::vector vec{1, 2}` (libstdc++'s own guides), an initializer-list constructor, a pack,
+  a constructor template, a user guide over the implicit one, the copy deduction candidate, `X(2L)`, the aggregate candidate: each
+  variable's type is the one an overload taking a pointer to it accepts (the wrong types of `a7b.cpp` fail as they must).
+- The code generator: `bin/cppi codegen-gen` (`.tmp/cg311b`): 142 of 142 as recorded (no sample uses CTAD: no intended change among
+  them); the probe `.tmp/p/cg1.cpp` (c++20: the copy deduction candidate, a user guide, a pack, a constructor template, a
+  functional cast, the aggregate candidate) generated, its functions and constructors clang's mangled names (`_ZN1WIlEC2El`,
+  `_ZN3TupIJicdEEC2Eicd`, `_ZN1YIiEC2IdEET_i`); its run (status 120) is the night's, by gcc with the runtime.
+
+### The rest of CP313 (a): access in every context the checker models
+
+After clang's `clang/lib/Sema/SemaAccess.cpp` at llvmorg-23.1.5 (EffectiveContext, GetFriendKind, HasAccess with
+[class.protected]'s object rule, IsAccessible's walk of the naming class's path to the member's class), in `arbace.cpp.sema`
+(Arbace's own, written after these functions and the standard's rules; the checker alone):
+
+- `cx-context`, EffectiveContext: the classes a use is a member of (the function's class, or the class whose scope a member's
+  initializer is analyzed in, with the classes it is nested in, [class.access.nest]) and the function; a template's
+  specialization, a closure's member and a local class's member are not judged (nil).
+- `cx-friend-of?`, GetFriendKind by name: a friend function of the context function's name, a friend class among the context's
+  classes (recorded now by name, `:friend-class-names`, a class template's friend template by its name), or an unclassified friend
+  grants; a miss is never a wrong error.
+- `cx-member-ok?`, HasAccess: public; the context a member or friend of the naming class; for a protected member a class derived
+  from it that the context is a member or friend of, the object expression of that class or one derived from it ([class.protected]),
+  no object (a static member, a constructor) needing none.
+- `cx-access-ok?`, [class.access.base]/5: a member named through a derived class, its access there through the bases' access
+  specifiers (a private member of a base inaccessible), or through an accessible base (an invented public member of it accessible),
+  recursively; two paths to the member's class not judged.
+- Where it is applied: `o.m` and `o.f()` with the naming class (the qualifier's, else the object's) and the object's class, in every
+  context (not only non-member functions); `m` and `f()` named in a member function (the naming class the function's); the
+  constructor an initialization calls in every context (before, a namespace-scope initializer's alone), a constructor template's
+  specialization with its template's access (`declare-template` keeps a member template's `*member-access*`, `instantiate-fn`
+  gives it to the specialization: template/access19); `o.B::m` where B is the injected-class-name found through o's class, an
+  inaccessible base there (lookup/scoped15; `o.::B::m` not); a class's using-declaration of an enumerator or a type, its access
+  the using-declaration's ([namespace.udecl]/19), judged where the enumerator is named and at a namespace-scope using-declaration
+  naming it (cpp2a/using-enum-1, an error found while declaring reported in order, `:cx-error`); the member types' check
+  (`check-type-access!`) gated per class (the class, or for a protected one a class derived from it, declaring a friend) instead of
+  "no class of the unit declares a friend".
+- Structured bindings ([dcl.struct.bind]/4, clang's checkMemberDecomposition and findDecomposableBaseClass): a class that is not
+  tuple-like (no std::tuple_size in the unit), its non-static data members all in it or in one base (else "both it and its base
+  class" or "its base classes ... have non-static data members"), no anonymous struct or union member, each accessible as a
+  member of the class, as many as the names; an array's bound the names' count. The declaration itself is still not modelled
+  (refused after the checks, as before).
+- Not built: a static data member's in-class initializer in a class (`static inline const auto bad1 = e;`, using-enum-1's lines 37
+  and 38: such initializers are not analyzed, `:defined` false), the access of a using-declaration of member functions (their own
+  access kept), friends of a closure's or a local class's members, the access of names in a template's definition context.
+- Measure: the every-10th sample 114 → 117 own passes (`.tmp/r313`, against CP311's `.tmp/r311b`): template/access19 (a private
+  constructor template chosen to convert `'c'` for `foo`'s parameter in `main`), lookup/scoped15 (`D{}.A::a`, A's
+  injected-class-name a member of D through its private base), cpp1z/decomp4 (all six lines: the anonymous struct and union
+  members, `C::b` private and `E::a` protected in a non-member function, G's members beside its base F's, I's two bases with
+  members); none lost; the extras the same 92 lines. The 90 access files of the whole part (`.tmp/facc.txt`: the dg-error files
+  whose expected messages name private, protected, inaccessible, decompose or "within this context"; CP311's tree `.tmp/base3`
+  against this one, `.tmp/facc-b`, `facc-n2`): 12 → 19, none lost, no new extra: cpp0x/elision_neg (the private copy
+  constructor `return x` chooses for a static local and, to C++17, for an rvalue reference parameter), cpp1z/decomp4,
+  decomp24 and decomp62 (a closure type decomposed, the second through CTAD's `hack { f }`: clang's err_decomp_decl_lambda),
+  lookup/duperr1 (`A::i` private in B's constructor), lookup/scoped15, tc1/dr52 (`this->B::foo()` private, `this->C::foo()`
+  through the private base D). The no-false-credit review read each against its source and clang's recorded output: each error
+  is the program's on its line by the rule named; valid forms (`.tmp/p/x2.cpp`: friend classes, friend functions, a friend class
+  template, a derived class's protected access through its own objects and statically, protected inheritance's members in a
+  further derived class, a nested class's access to its enclosing class, a private base's members in the class itself) give none,
+  and `.tmp/p/x1.cpp`'s five errors are the standard's (and none on its granted uses).
+- An order-dependence of the dg read found by the measure: one run of the 90 files read scoped15 as accepted (`.tmp/facc-n`), two
+  others and the file alone (three times) as rejected; same tree, same list, two threads. Not found in this pass (CP322 below).
+
+### Checked (light; the stubs first on PATH for every own run, their log empty)
+
+| check | result |
+|---|---|
+| the every-10th sample by the own front end (`.tmp/sample.sh`; runs `.tmp/r311`, `r311b`, `r313`, `rF`) | 109 → 114 (CP311) → 117 (CP313) own passes; no earlier pass lost; the extras the same 92 lines; about 10-12 min a run at two threads |
+| `own .tmp/rF --clang .tmp/s10/cl --record` (the committed record) | 454 rows, 117 passes |
+| the features' files of the whole part (`.tmp/t/subm.sh`, its base tree by `TREE`) | CTAD's 75: 6 → 18; access's 90: 12 → 19; none lost, no new extra |
+| the code generator: `bin/cppi codegen-gen` after each commit's change (`.tmp/cg311b`, `cg313`) | 142 of 142 as recorded, both controls failing as they must: no sample's forms changed (none uses CTAD; the access rules are the checker's) |
+| probes (`.tmp/p/`: a4-a7b, cg1 for CP311; x1, x2 for CP313) | the errors where the standard has them, none on the valid forms; cg1's mangled names clang's |
+| the dg control (`bin/repr-cpp dg --corpus dg-error --front native --only` dr2082, dr1423) | `_control/dg/dr2082-vs-dr1423 fails as it must` |
+| `make check-makefile`; `gate.crops check . test/gate/steps.edn`; `bin/gate --full --plan` | pass; 0 problems; planned |
+| `bin/crops-score --crop cpp`; `--record`; `--judge --strict` | 76.1 / 100 / 67.84 (read 0.656 → 0.657: 117 own-judged dg cases); scores.edn's C++ line alone changed; 0 refuted, 0 problems |
+
+### The night's commands (one process at a time; `export ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace GOMEMLIMIT=1400MiB REPR_CPP_THREADS=2`)
+
+```
+bin/cppi codegen-gen                                                           # cpp-codegen-gen's command, about 5 min: 142 of 142 as recorded, both controls fail as they must
+PATH=<stubs>:$PATH bin/repr-cpp dg --corpus dg-error --front native --record   # the 4,597 files by Arbace's front end, about 80 min at two threads; writes test/cpp/check-dg-own-linux-amd64.edn
+# then test/crops/independence.edn's C++ read fact: :cases {:dg-own [N 1] :dg-clang [M 0.5]} with N the record's passes, M = 4597 - N; bin/crops-score --record
+bin/repr-cpp dg --corpus dg-error --front native                               # cpp-dg.dg-error-own's command: the record held
+bin/cppi codegen-check .tmp/cppi/codegen-check                                 # clang and gcc live: 141 of 142 expected (no sample changed)
+bin/cppi codegen /root/arbace/.tmp/worktrees/cpp-props3/.tmp/p/cg1.cpp .tmp/cppi/cg-ctad   # CP311's probe (c++20) built and run by gcc with the runtime: status 120
+bin/repr-cpp native-check samples                                              # clang live: :_ctad is a :_ key, the trees as they were
+```
+
+### The numbers (bin/crops-score --crop cpp)
+
+| measure | before (37f9bd980) | after (the sample's record) | after the night (the whole part recorded) |
+|---|---|---|---|
+| completeness | 76.1 (96.5 without by design) | 76.1 (96.5): the cell reads clang's record (CP271 (a)) | 76.1 |
+| maturity | 100.0 | 100.0 | 100.0 |
+| independence | 67.82 (read 0.656: 109 own-judged dg cases) | 67.84 (read 0.657: 117) | about 69.4 (read about 0.739: about 1,185 of the 4,597 own-judged, the sample's 25.8%) |
+
+### Proposed (CP320-CP324; none decided)
+
+- **CP320: an alias template's guides from C++20 on.** `B b(1)` with `template <class T> using B = A<T>` keeps the parser's deduction
+  (the checker unsure). (a) Port BuildDeductionGuideForTypeAlias (each of the target's guides rewritten in the alias's parameters
+  by deducing the target's arguments from the alias's pattern, the non-deduced ones kept, the `__is_deducible` constraint) and
+  DeclareAggregateDeductionGuideForTypeAlias, about a day; (b) as now. **Recommended: (a)** (class-deduction-alias* and the C++20
+  files with alias CTAD).
+- **CP321: static data members' in-class initializers in the checker.** `static inline const auto bad1 = e;` (using-enum-1's lines
+  37-38) and a specialization's `static inline TT x1 = 0;` (class-deduction108's four lines) are never analyzed (`:defined` false
+  for a member static). (a) Analyze a class's inline static members' initializers in the class's scope (and a specialization's on
+  its instantiation, [temp.inst]/4's "when used" set aside for the checker), the checker only, half a day; (b) as now.
+  **Recommended: (a).**
+- **CP322: the dg read's order-dependence.** The same tree and list read lookup/scoped15 once accepted, twice rejected (the file
+  alone always rejected): some state carried between files in a reading thread (the parser's or Sema's). (a) Find it (each file's
+  state cleared, or the shared table keyed by file), half a day, then the whole part's record twice to show it stable; (b) run each
+  file in a fresh process for the record (slower, about twice the 80 minutes); (c) as now. **Recommended: (a).**
+- **CP323: C++23's inherited constructors' guides** ([over.match.class.deduct]/1.10, P2582). clang 23 does not build them, g++ does
+  (class-deduction-inherited1, -inherited2..). (a) Build them from the standard's text (the base's guides with the derived class's
+  return type, the deducibility constraint), the standard being the reference where clang lags, about half a day; (b) follow clang:
+  a class inheriting constructors not judged at C++23 (as now). **Recommended: (a)** after CP320, which shares the alias rewriting.
+- **CP324: a using-declaration's access for member functions.** A class's `using B::f;` in a private section makes `f` private
+  as its member ([namespace.udecl]/19); the slice keeps each function's own access. (a) Record the using-declaration's access on
+  the overload set it enters and judge calls through it, small; (b) as now. **Recommended: (a).**
+
+### Slips, scratch
+
+Slips against the day's rules, all in throwaway commands (none wrote the work's output there): a mistyped `sed -i` naming the null
+device (sed refused to edit it), a wait loop holding `pgrep -f` and `>/dev/null` (stopped at once), and a `diff <(echo) <(echo)` left in
+an inspection command. Scratch in the worktree's `.tmp/`: `p/` (the probes), `t/` (the scripts: `subm.sh` now honouring `TREE`,
+`probe.ae`, `dump.ae`, `one.ae`), `sample.sh`, `probe.sh`, `dump.sh`, `onem.sh`, `cmp.sh`, the lists `fctad.txt`, `facc.txt`, the runs
+`r311`, `r311b`, `r313`, `rF`, `fctad-*`, `facc-*`, `one-*`, the code generator's `cg311`, `cg311b`, `cg313`, the trees `base-tree`
+(37f9bd980's) and `base3` (CP311's commit), `llvm-src/` (SemaTemplateDeductionGuide.cpp, SemaAccess.cpp, SemaOverload.cpp,
+SemaTemplateDeduction.cpp added), the apply scripts `apply*.py`. `.tmp/t/subm.sh` (copied from `cpp-cx12`'s scratch) did not pass `TREE`
+on to its reads at first: `fctad-b` ran before any edit of the tree, so it is the base it is named for; the access list's base
+(`facc-b`) was run again once the script passed it, and `facc-n`, its first run, is the one whose scoped15 row CP322 names.
