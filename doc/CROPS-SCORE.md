@@ -389,3 +389,18 @@ The independence audit of 2026-11-09 (`.tmp/indep-audit/` in the main checkout: 
   Arbace's own C headers; 6 programs with C checked by `--only` (T2594, T4038, T5402, ffi001, ffi003, ffi022: 6 of 6) and
   hsi-essential's command (123 programs, the controls failing as they must). The 89 programs' C counts 0.5 again, as the STG pack it
   runs over: Haskell 74.9 to 76.0 (its judge stays the audit's, with the interface and layout levels).
+- **The cross-check's blind spots closed** (`crops.score`, `test/crops/crops.edn`). Beside a step on a toolchain host, on the
+  checkout: (a) a claim above 0 is refuted when a step of the stage runs a script that reads a toolchain's files by path
+  (`:toolchain-reads`: a script or namespace of bin/ or test/ the step's command reaches by the root, to depth 4, naming
+  `test/c/host` with no C sysroot in it or the script that named it; libstdc++'s or gcc's installed include directory with no
+  C++ sysroot); (b) a claim above 0.5 is refuted when a sentence of a cell's record's header names a helper's path (`tools/ocdump`,
+  `tools/hsdump`, ...: `:helper-records`) other than as a comparison or a pin; (c) a claim above 0 that no step of the tree runs
+  (no `:steps`, or none outside the oracle tier) is printed "unverified" (its score kept, not a failure: Python's read, AOT and
+  print until its fragment's steps are planned). The hosts `:jdk` and `:frozen` are toolchain hosts now, with the exempt uses as
+  data (`:host-uses`): `:frozen` (the jar), `:jdk` where it is `bin/lib/java26.bash`'s `java -version` alone (suite-go,
+  suite-aot-essential, suite-aot, gate-tests) or the JVM of a step that runs the frozen jar (but javac's, repr/java's and Java's
+  checks). Each refutes what it should: with `bin/hsi` and `cnodes.ae` as they were, (a) refutes Haskell's five stages (the
+  closure follows a script's every verb, so the read and print stages too: an over-approximation, harmless once the file is
+  fixed); with OCaml's read claimed 1, (b) refutes it on `read-results.edn`'s "the oracle's parser, tools/ocdump"; a Java stage
+  naming javac-classes is refuted on `:jdk`. On the corrected facts none is refuted. Facts that had no `:steps` and whose steps
+  exist were given them (Clojure's read and print, Go's read and print, C's and C++'s print, Scheme's read, Rust's AOT).

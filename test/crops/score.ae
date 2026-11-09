@@ -17,8 +17,12 @@
   path.
   Independence: per stage (read, eval, AOT, print, judge) the reviewed facts of
   test/crops/independence.edn (1, 0.5, 0), cross-checked with the tree's gate steps: a stage whose
-  named steps run on a toolchain host (:hosts, outside the oracle tier) scores 0 whatever the
-  claim, and the disagreement is flagged.
+  named steps run on a toolchain host (:hosts, outside the oracle tier; crops.edn's :host-uses the
+  exempt uses) scores 0 whatever the claim, and the disagreement is flagged; on the checkout also
+  (the independence audit, 2026-11-09) (a) a claim above 0 whose steps run a script that reads a
+  toolchain's files by path (crops.edn's :toolchain-reads) and (b) a claim above 0.5 whose cell's
+  record says in its header that a live helper wrote it (:helper-records) score 0, refuted; (c) a
+  claim above 0 that no step of the tree runs is flagged unverified (its score kept).
 
   -main [--ref REF | --newest] [--crop C] [--tsv] [--input FILE]... [--judge] [--strict]"
   (:require [arbace.string :as str]
@@ -235,39 +239,120 @@
         (let [o (get-in f [:mixed :own]) j (get-in f [:mixed :jdk-record]) n (+ o j)]
           (when (pos? n) [(double (/ (+ o (* 0.5 j)) n)) n]))))
 
+;; ---- the cross-checks beyond the steps' hosts (the independence audit, 2026-11-09; the user's ruling (5))
+
+;; (a) the files a step runs: the scripts its command names, and every file of bin/ or test/ those name by the root
+;; ($root/..., (str root "/...")), to a depth of 4, each with the file that named it (its referrer)
+(def ^:private cmd-file-re #"(?:^|[\s\"'(=])((?:bin|test)/[A-Za-z0-9_.+-]+(?:/[A-Za-z0-9_.+-]+)*)")
+(def ^:private ref-file-re #"(?:\$\{?root\}?\"?|\(str root \")/((?:bin|test)/[A-Za-z0-9_.+-]+(?:/[A-Za-z0-9_.+-]+)*)")
+
+(defn- code-file?
+  "A file the step runs that the rules read: a script of bin/, a .bash, .sh or .ae file of bin/ or test/ (not data: .edn, .txt,
+  .tsv, .sha256; not the helpers' sources under tools/)."
+  [f]
+  (and (re-find #"^(bin|test)/" f)
+       (or (re-find #"\.(bash|sh|ae)$" f) (and (re-find #"^bin/" f) (not (re-find #"\.[a-z0-9]+$" f))))))
+
+(defn- step-files
+  "The files step S runs (its :cmd's scripts and what they name by the root, to depth 4) as [file referrer] pairs."
+  [t s]
+  (loop [todo (for [[_ f] (re-seq cmd-file-re (str (:cmd s))) :when (has? t f)] [f nil]) seen {} depth 0]
+    (if (or (empty? todo) (> depth 4))
+      (vec seen)
+      (let [new (remove #(contains? seen (first %)) todo)
+            seen (into seen new)
+            next (distinct (for [[f _] new :let [x (when (code-file? f) (text t f))] :when x
+                                 [_ g] (re-seq ref-file-re x)
+                                 :let [g (str/replace g #"[.]+$" "")]
+                                 :when (and (not (contains? seen g)) (has? t g))]
+                             [g f]))]
+        (recur next seen (inc depth))))))
+
+(defn- toolchain-reads
+  "(a): the steps' files that read a toolchain's files by path (crops.edn's :toolchain-reads: a rule's :reads in the file's
+  text), unless the file or its referrer matches the rule's :unless (the sysroot that replaces them); [step rule file]."
+  [t config live]
+  (for [s live [f by] (step-files t s) :when (code-file? f) rule (:toolchain-reads config)
+        :let [x (text t f)]
+        :when (and x (re-find (:reads rule) x)
+                   (not (re-find (:unless rule) x))
+                   (not (and by (some->> (text t by) (re-find (:unless rule))))))]
+    [(:name s) rule f]))
+
+;; (b) a cell's record written by a live helper: a sentence of its header (its leading comment lines) naming a helper's path
+;; (crops.edn's :helper-records :names) that is not a comparison with the helper or a pin (:ok)
+(defn- record-header [t f]
+  (when-let [x (text t f)]
+    (->> (str/split-lines x) (take 60) (take-while #(or (re-find #"^\s*(;;|#)" %) (str/blank? %) (re-find #"^\s*[\[{]\s*$" %)))
+         (filter #(re-find #"^\s*(;;|#)" %))
+         (map #(str/replace % #"^\s*(;;+|#+)\s?" ""))
+         (str/join " "))))
+
+(defn- helper-records
+  "(b): the records of the cell [CROP STAGE] whose header says a live helper wrote them; [file sentence]."
+  [t config crop st]
+  (let [spec (cells-spec t)
+        {:keys [names ok]} (:helper-records config)
+        files (record-files t (get-in spec [:cells [crop st] :sources]))]
+    (for [f files :let [h (record-header t f)] :when h
+          sentence (str/split h #"(?<=[.;])\s+")
+          :when (and (re-find names sentence) (not (re-find ok sentence)))]
+      [f (str/trim sentence)])))
+
 (defn- independence [t cfg config ind steps]
   (let [crop (:id cfg)
         facts (get ind crop)
         at (get-in facts [:at (or (:ref t) "checkout")])
         tool-hosts (set (:toolchain-hosts config))
+        ;; a host use that is not the toolchain's (crops.edn's :host-uses: a step's java -version alone, the frozen jar's JVM)
+        exempt? (fn [s h] (some (fn [u] (and (= h (:host u))
+                                             (or (and (:steps u) (re-find (:steps u) (str (:name s))))
+                                                 (and (:with-host u) (some #{(:with-host u)} (:hosts s))
+                                                      (not (and (:unless-steps u) (re-find (:unless-steps u) (str (:name s)))))))))
+                                (:host-uses config)))
         by-name (group-by #(str (:name %)) steps)
         rows (for [st stages
                    :let [f (merge (get-in facts [:stages st]) (get at st))
                          named (mapcat #(by-name (str %)) (:steps f))
                          live (remove #(= :oracle (:phase %)) named)
-                         hosted (for [s live h (:hosts s) :when (tool-hosts h)] [(:name s) h])
+                         hosted (for [s live h (:hosts s) :when (and (tool-hosts h) (not (exempt? s h)))] [(:name s) h])
+                         reads (when (nil? (:ref t)) (toolchain-reads t config live))
+                         helped (when (and (nil? (:ref t)) (some #{st} levels)) (helper-records t config crop st))
                          [mixed nmixed] (mixed-score f)
                          stated (:score f)
                          claim (if mixed (/ (Math/round (* 1000.0 mixed)) 1000.0) stated)
+                         refuted-reads (and (seq reads) claim (pos? claim))
+                         refuted-helper (and (seq helped) claim (> claim 0.5))
+                         unverified (and claim (pos? claim) (empty? live))
                          score (cond (nil? claim) 0.0
                                      (and (seq hosted) (pos? claim)) 0.0
+                                     refuted-reads 0.0
+                                     refuted-helper 0.0
                                      :else (double claim))
                          check (cond (nil? claim) "no fact (test/crops/independence.edn)"
                                      (seq hosted) (str (if (pos? claim) "CLAIM REFUTED: " "steps agree: ")
                                                        (str/join ", " (for [[n h] hosted] (str n " on " h))))
+                                     refuted-reads (str "CLAIM REFUTED: "
+                                                        (str/join ", " (distinct (for [[n rule fl] reads] (str n " runs " fl ", which reads " (:what rule)
+                                                                                                                " (no " (:instead rule) ")")))))
+                                     refuted-helper (str "CLAIM REFUTED: the cell's record written by a live helper: "
+                                                         (str/join "; " (distinct (for [[fl sn] helped] (str fl " (\"" sn "\")")))))
                                      (seq live) (if (zero? claim)
                                                   (str "claim 0 though " (str/join ", " (map :name live)) " name no toolchain host")
                                                   (str "steps agree: " (str/join ", " (map :name live)) " on no toolchain host"))
+                                     (seq (:steps f)) (str "UNVERIFIED: its :steps (" (str/join ", " (:steps f)) ") are not the tree's steps outside the oracle tier")
+                                     (pos? claim) "UNVERIFIED: no :steps (no step of the tree runs it)"
                                      :else "claimed (no step of the tree runs it)")
                          check (if mixed
                                  (str check "; the case-weighted mean of " nmixed " cases"
                                       (when (and (number? stated) (> (Math/abs (- (double stated) mixed)) 0.005))
                                         (str " (the fact states " stated ")")))
                                  check)]]
-               {:stage st :score score :fact f :check check})]
+               {:stage st :score score :fact f :check check :unverified (boolean (and unverified (not (str/starts-with? check "CLAIM REFUTED"))))})]
     {:stages rows :score (/ (reduce + (map :score rows)) (count rows))
      :facts-of (cond (nil? (:ref t)) "the checkout" at (:ref t) :else (str "the checkout (no :at for " (:ref t) ")"))
-     :refuted (filter #(str/starts-with? (:check %) "CLAIM REFUTED") rows)}))
+     :refuted (filter #(str/starts-with? (:check %) "CLAIM REFUTED") rows)
+     :unverified (filter :unverified rows)}))
 
 ;; ---- the newest held branch
 
@@ -426,6 +511,8 @@
                           (score-crop c config ind (if (:newest o) (or (newest-ref c) (:ref o)) (:ref o)) inputs)))
           refuted (for [s scores r (get-in s [:independence :refuted])]
                     (str (get-in s [:crop :name]) " " (level-names (:stage r)) " (" (:ref s) "): " (:check r)))
+          unverified (for [s scores r (get-in s [:independence :unverified])]
+                       (str (get-in s [:crop :name]) " " (level-names (:stage r)) " (" (:ref s) "): " (:check r)))
           own? (and (nil? (:ref o)) (not (:newest o)) (empty? (:inputs o)))
           _ (when (and (:record o) (not (and own? (nil? (:crop o)))))
               (throw (ex-info "crops-score: --record records the checkout's scores of every crop (no --ref, --newest, --input, --crop)" {})))
@@ -445,7 +532,10 @@
             (doseq [s scores] (print-details s))
             (println (str "crops-score: " (count scores) " crops; " (count refuted) " facts refuted by the gate's steps"
                           (when (seq refuted) " (scored 0)") "; " (count problems) " problems"))
-            (doseq [x refuted] (println (str "   refuted: " x)))))
+            (doseq [x refuted] (println (str "   refuted: " x)))
+            ;; (c): a stage scored above 0 that no step of the tree runs: flagged, its score kept (not a problem)
+            (println (str "crops-score: " (count unverified) " facts above 0 unverified (no step of the tree outside the oracle tier runs them)"))
+            (doseq [x unverified] (println (str "   unverified: " x)))))
       (doseq [p problems] (binding [*out* *err*] (println (str "   " p))))
       (shutdown-agents)
       (System/exit (if (empty? problems) 0 1)))))
