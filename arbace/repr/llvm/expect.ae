@@ -842,31 +842,19 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Intrinsics' arguments, exception handling, metadata and debug info
 
-(def ^:private intrinsic-cases
-  "The intrinsics visitIntrinsicCall's switch checks one by one (V:5952-7088), as name prefixes (`_` for `.`), and the
-  families it checks by macro or by target."
-  ["aarch64" "arm" "assume" "bswap" "call.preallocated" "callbr.landingpad" "convert.from.arbitrary.fp" "convert.to.arbitrary.fp" "coro"
-   "dbg" "eh.exceptioncode" "eh.exceptionpointer" "experimental" "fptrunc.round" "gcread" "gcroot" "gcwrite" "get.active.lane.mask"
-   "get.dynamic.area.offset" "init.trampoline" "invariant.start" "is.fpclass" "lifetime" "llrint" "llround" "localescape" "localrecover"
-   "lrint" "lround" "matrix" "memcpy" "memmove" "memset" "nvvm" "preserve" "ptrauth" "ptrmask" "reloc.none" "scmp" "sdiv.fix" "smul.fix"
-   "sponentry" "stackprotector" "stepvector" "structured" "thread.pointer" "threadlocal.address" "ucmp" "udiv.fix" "umul.fix" "vastart"
-   "vector.extract" "vector.insert" "vector.partial.reduce" "write.volatile.register" "vp." "masked" "amdgcn" "x86" "riscv" "wasm" "objc"])
+(declare call-site-intrinsic)
 
 (defn ex-intr-arg
-  "An intrinsic call's argument replaced by `undef`: a metadata argument reads `undef` as no metadata (P:6797); a parameter
-  the declaration marks immarg must be an immediate (V:3936); lifetime's pointer must be an alloca or poison; an intrinsic
-  visitIntrinsicCall checks by itself is left to opt; any other intrinsic takes the value."
-  [m {:keys [at k]} _]
+  "An intrinsic call's argument replaced by `undef`: a metadata argument reads `undef` as no metadata (P:6797); then
+  visitCallBase's immarg check (V:3932, the declaration's attributes the intrinsic's own: UpgradeIntrinsicFunction,
+  AutoUpgrade.cpp:2001) and visitIntrinsicCall's case for the intrinsic (V:5952, LLS39: `call-site-intrinsic`)."
+  [m {:keys [at k fi]} _]
   (let [b (body (inst-at m at)) c (nth b 2) a (nth (nth b 3) k)
-        d (callee-decl m c) dp (when d (get (vec (filter vector? (nth d 3))) k))
-        n (subs (name c) 5)]
+        d (callee-decl m c)]
     (cond
       (= 'metadata (first a)) (invalid :md-operand)
       (nil? d) (unknown "an undeclared intrinsic")
-      (some #{:immarg} dp) (verifier "immarg operand has non-immediate parameter")
-      (str/starts-with? n "lifetime.") (verifier "llvm.lifetime.start/end can only be used on alloca or poison")
-      (some #(str/starts-with? n %) intrinsic-cases) (unknown "an intrinsic visitIntrinsicCall checks")
-      :else valid)))
+      :else (or (call-site-intrinsic m (nth m fi) b (name c) d false) valid))))
 
 (defn- eh-first
   "The first exception handling instruction of a function, in the Verifier's order (blocks, then items)."
@@ -907,13 +895,191 @@
             (and (< d bi) (phis? d)) (unknown "a block before the invoke with phis")
             :else (invalid :unwind-dest))))))
 
+;; Module flags and llvm.ident (LLS38, the user 2026-11-09): Verifier::visitModuleFlags and visitModuleFlag (V:1831-2017),
+;; Module::isValidModFlagBehavior (llvm/lib/IR/Module.cpp:329, ModFlagBehavior Error=1 .. Min=8, include/llvm/IR/Module.h:120),
+;; visitModuleIdents (V:1784), in LLParser::validateEndOfModule's order (P:475-481): UpgradeDebugInfo first (AutoUpgrade.cpp:6052:
+;; the Debug Info Version read as getModuleFlagNameSafely reads it; version 3: verifyModule over the flags as written, a broken
+;; module fatal; else StripDebugInfo, DebugInfo.cpp:709, and the version warning when it changed the module), then
+;; UpgradeModuleFlags (AutoUpgrade.cpp:6489: PIC Level's Error and Max to Min, PIE Level's Error to Max, branch-target-enforcement's
+;; and sign-return-address*'s Error to Min), then opt's verifyModule over the upgraded flags.
+
+(declare md-node md-node? md-str iwidth)
+
+(defn- mf-node-ops
+  "An operand's MDNode tuple operands (a reference or an inline node), :node for a specialized node (an MDNode whose operands
+  are not written as a tuple), nil for no node."
+  [m x]
+  (cond (and (symbol? x) (nil? (namespace x)) (re-matches #"![0-9]+" (name x))) (let [n (md-node m x)] (cond (md-node? n) (second n) (seq? n) :node :else nil))
+        (md-node? x) (second x)
+        (and (seq? x) (symbol? (first x)) (str/starts-with? (name (first x)) "!DI")) :node
+        :else nil))
+
+(defn- mf-ci
+  "mdconst::dyn_extract_or_null<ConstantInt>: {:w width :v the value as unsigned (getZExtValue)} of a ConstantAsMetadata of an
+  integer constant, nil for any other operand; a literal written as (int ...) is left to opt."
+  [x]
+  (when (and (vector? x) (= 2 (count x)))
+    (let [t (vf/norm-type (first x)) v (second x)]
+      (when (and (symbol? t) (nil? (namespace t)) (re-matches #"i[0-9]+" (name t)))
+        (let [w (iwidth t)
+              bv (cond (integer? v) (biginteger v) (true? v) java.math.BigInteger/ONE (false? v) java.math.BigInteger/ZERO
+                       :else (throw (ex-info "a wide integer literal in a module flag" {})))]
+          {:w w :v (.mod ^java.math.BigInteger bv (.shiftLeft java.math.BigInteger/ONE (int w)))})))))
+
+(defn- mf-negative? [{:keys [w v]}] (.testBit ^java.math.BigInteger v (int (dec (long w)))))
+(defn- mf-limited ^long [{:keys [v]}] (if (< (.bitLength ^java.math.BigInteger v) 64) (.longValue ^java.math.BigInteger v) Long/MAX_VALUE))
+
+(defn- module-flags [m]
+  (vec (mapcat #(when (and (= (first %) 'llvm/named-meta) (= (second %) '!llvm.module.flags)) (nth % 2)) m)))
+
+(defn- mf-ops [m f] (let [o (mf-node-ops m f)] (when (vector? o) o)))
+
+(defn- mf-name
+  "getModuleFlagNameSafely (AutoUpgrade.cpp:6042): a flag's name when it has three operands or more and its second is a string."
+  [ops]
+  (when (>= (count ops) 3) (md-str (nth ops 1))))
+
+(defn- di-version
+  "UpgradeDebugInfo's version (AutoUpgrade.cpp:6060): the first flag named Debug Info Version, its value's getZExtValue, else 0."
+  [m]
+  (or (some (fn [f] (let [ops (mf-ops m f)]
+                      (when (= "Debug Info Version" (mf-name ops))
+                        (if-let [c (mf-ci (nth ops 2))] (.longValue ^java.math.BigInteger (:v c)) 0))))
+            (module-flags m))
+      0))
+
+(defn- strip-modifies?
+  "StripDebugInfo (DebugInfo.cpp:709) changes the module: llvm.dbg.* or llvm.gcov named metadata, a function's or a global's
+  !dbg, an instruction's !dbg, a debug record or a call of an old debug intrinsic (stripDebugInfo(F))."
+  [m]
+  (let [dbg? (fn [md] (some #(= '!dbg %) (take-nth 2 md)))]
+    (boolean
+     (some (fn [f]
+             (case (first f)
+               llvm/named-meta (let [n (name (second f))] (or (str/starts-with? n "!llvm.dbg.") (= n "!llvm.gcov")))
+               (llvm/define llvm/declare)
+               (let [o (opts-of (drop 4 f))]
+                 (or (dbg? (:md o))
+                     (and (= 'llvm/define (first f))
+                          (some (fn [bl] (some (fn [x] (let [b (body x)]
+                                                         (or (dbg-record? x) (and (= 'call (first b)) (old-dbg? (nth b 2 nil)))
+                                                             (dbg? (:md (opts-of (drop 2 b)))))))
+                                               (items-of bl)))
+                                (blocks-of f)))))
+               llvm/global (dbg? (:md (opts-of (drop 3 f))))
+               false))
+           m))))
+
+(defn- mf-upgrade
+  "UpgradeModuleFlags' behaviour rewrites (AutoUpgrade.cpp:6519-6555) of a flag's operands; the Objective-C, Swift and AMDGPU
+  rewrites are left to opt."
+  [ops]
+  (let [id (when (= 3 (count ops)) (md-str (nth ops 1))) b (mf-ci (first ops)) bv (when b (mf-limited b))
+        to (fn [k] (assoc ops 0 ['i32 k]))]
+    (cond
+      (nil? id) ops
+      (or (str/starts-with? id "Objective-C") (= id "amdgpu_code_object_version"))
+      (throw (ex-info "an Objective-C or AMDGPU module flag (UpgradeModuleFlags rewrites it)" {}))
+      (and (= id "PIC Level") (#{1 7} bv)) (to 8)
+      (and (= id "PIE Level") (= bv 1)) (to 7)
+      (and (or (= id "branch-target-enforcement") (str/starts-with? id "sign-return-address")) (= bv 1)) (to 8)
+      :else ops)))
+
+(def ^:private pauth-names #{"aarch64-elf-pauthabi-platform" "aarch64-elf-pauthabi-version" "ptrauth-init-fini"
+                             "ptrauth-init-fini-address-discrimination"})
+
+(defn- visit-module-flag
+  "visitModuleFlag (V:1913) of a flag's operands: the first failed check's message, or nil; `seen` (a set of ids, the
+  DenseMap SeenIDs) and `reqs` (the Requirements) are updated as the source does."
+  [m ops ^java.util.Set seen ^java.util.List reqs]
+  (let [n (count ops)]
+    (if (not= 3 n)
+      "incorrect number of operands in module flag"
+      (let [[b idop v] ops bc (mf-ci b) bv (when bc (mf-limited bc))
+            mfb (when (and bv (<= 1 bv 8)) bv)
+            id (md-str idop)]
+        (cond
+          (and (nil? mfb) (nil? bc)) "invalid behavior operand in module flag (expected constant integer)"
+          (nil? mfb) "invalid behavior operand in module flag (unexpected constant)"
+          (nil? id) "invalid ID operand in module flag (expected metadata string)"
+          :else
+          (or (case (long mfb)
+                (1 2 4) nil
+                8 (let [c (mf-ci v)] (when-not (and c (not (mf-negative? c))) "invalid value for 'min' module flag (expected constant non-negative integer)"))
+                7 (when-not (mf-ci v) "invalid value for 'max' module flag (expected constant integer)")
+                3 (let [vo (mf-node-ops m v)]
+                    (cond (= vo :node) (throw (ex-info "a require flag's value a specialized node" {}))
+                          (not (and vo (= 2 (count vo)))) "invalid value for 'require' module flag (expected metadata pair)"
+                          (not (md-str (first vo))) "invalid value for 'require' module flag (first value operand should be a string)"
+                          :else (do (.add reqs vo) nil)))
+                (5 6) (when-not (mf-node-ops m v) "invalid value for 'append'-type module flag (expected a metadata node)"))
+              (when (not= mfb 3)
+                (when-not (.add seen id) "module flag identifiers must be unique (or of 'require' type)"))
+              (when (and (= id "wchar_size") (nil? (mf-ci v))) "wchar_size metadata requires constant integer argument")
+              (when (and (= id "Linker Options") (not (some #(and (= (first %) 'llvm/named-meta) (= (second %) '!llvm.linker.options)) m)))
+                "'Linker Options' named metadata no longer supported")
+              (when (and (= id "SemanticInterposition") (nil? (mf-ci v))) "SemanticInterposition metadata requires constant integer argument")
+              (when (= id "CG Profile") (throw (ex-info "CG Profile's entries (visitModuleFlagCGProfileEntry)" {})))
+              (when (or (str/starts-with? id "amdgpu") (str/starts-with? id "amdhsa")) (throw (ex-info "an AMDGPU module flag (verifyAMDGPUModuleFlag)" {})))))))))
+
+(defn- visit-module-flags
+  "visitModuleFlags (V:1831) over the flags' operand lists `flags`: the first message, or nil."
+  [m flags]
+  (let [seen (java.util.HashSet.) reqs (java.util.ArrayList.) vals (java.util.HashMap.) byid (java.util.HashMap.)]
+    (or (some (fn [ops]
+                (or (visit-module-flag m ops seen reqs)
+                    (when (= 3 (count ops))
+                      (when-let [id (md-str (nth ops 1))]
+                        (when (and (pauth-names id) (not (.containsKey vals id)))
+                          (if-let [c (mf-ci (nth ops 2))]
+                            (do (.put vals id (mf-limited c)) nil)
+                            (str id ": module flag expects integer value")))))
+                    (do (when (= 3 (count ops))
+                          (when-let [id (md-str (nth ops 1))]
+                            (when-not (= 3 (some-> (mf-ci (first ops)) mf-limited)) (.putIfAbsent byid id (nth ops 2)))))
+                        nil)))
+              flags)
+        (let [f (get vals "ptrauth-init-fini" 0) a (get vals "ptrauth-init-fini-address-discrimination" 0)]
+          (cond (not (#{0 1} f)) "ptrauth-init-fini must be 0 or 1"
+                (not (#{0 1} a)) "ptrauth-init-fini-address-discrimination must be 0 or 1, if set"
+                (and (pos? (long a)) (zero? (long f))) "ptrauth-init-fini-address-discrimination module flag requires ptrauth-init-fini"
+                (not= (contains? vals "aarch64-elf-pauthabi-platform") (contains? vals "aarch64-elf-pauthabi-version"))
+                "either both or no 'aarch64-elf-pauthabi-platform' and 'aarch64-elf-pauthabi-version' module flags must be present"))
+        (some (fn [[rid rv]]
+                (let [id (md-str rid)]
+                  (cond (not (.containsKey byid id)) "invalid requirement on flag, flag is not present in module"
+                        (not= (.get byid id) rv) "invalid requirement on flag, flag does not have the required value")))
+              reqs))))
+
+(defn- visit-module-idents
+  "visitModuleIdents (V:1784): each llvm.ident node one operand, a string."
+  [m]
+  (some (fn [n]
+          (let [ops (mf-ops m n)]
+            (cond (not= 1 (count ops)) "incorrect number of operands in llvm.ident metadata"
+                  (not (md-str (first ops))) "invalid value for llvm.ident metadata entry operand(the operand should be a string)")))
+        (mapcat #(when (and (= (first %) 'llvm/named-meta) (= (second %) '!llvm.ident)) (nth % 2)) m)))
+
+(defn- module-md-verdict
+  "The module's flags and llvm.ident through LLParser's end and opt's verifyModule (the order above): the verdict."
+  [m]
+  (let [flags (mapv #(or (mf-ops m %) []) (module-flags m))
+        v (di-version m)
+        pre (when (= v 3) (or (visit-module-flags m flags) (visit-module-idents m)))]
+    (if pre
+      (verifier pre)
+      (let [warn (when (and (not= v 3) (strip-modifies? m)) (str "ignoring debug info with an invalid version (" v ")"))
+            post (or (visit-module-flags m (mapv mf-upgrade flags)) (visit-module-idents m))]
+        (cond post (verifier post)
+              warn {:verdict :debug :by "AutoUpgrade" :msg warn}
+              :else valid)))))
+
 (defn ex-md-edit
-  "A node a module flag or llvm.ident uses edited: a flag has three operands (V:1915), an ident one (V:1793); the other
-  nodes' rules are left to opt."
-  [_ {:keys [ref ops2]} _]
+  "A node a module flag or llvm.ident uses edited: the module's flags and idents as LLParser's end and opt's verifier take them
+  (module-md-verdict, LLS38); a node of an attachment edited is left to opt."
+  [m {:keys [ref]} _]
   (case ref
-    :flag (if (not= 3 (count ops2)) (verifier "incorrect number of operands in module flag") (unknown "a module flag's operand replaced"))
-    :ident (if (not= 1 (count ops2)) (verifier "incorrect number of operands in llvm.ident metadata") (unknown "llvm.ident's operand replaced"))
+    (:flag :ident) (module-md-verdict m)
     (unknown "a node of an attachment edited")))
 
 (defn- debugv [text] {:verdict :debug :by "Verifier" :msg text})
@@ -1189,7 +1355,7 @@
   (let [ps (vec (remove #{'&} (nth fty 2))) r (upgrade-name-rule nm (count ps))]
     (cond
       (= r :ctlz) (let [t (first ps) e (if (and (seq? t) (#{'vector 'vscale} (first t))) (nth t 2) t)]
-                    (if (and (symbol? e) (re-matches #"i[0-9]+" (name e))) :rebuilt (unknown "ctlz/cttz upgraded over a non-integer")))
+                    (if (and (symbol? e) (re-matches #"i[0-9]+" (name e))) :rebuilt [:ctlz-bad t]))
       (string? r) (unknown (str "AutoUpgrade rewrites the declaration and its calls: " r))
       ;; a literal non-packed struct return wanted (AutoUpgrade.cpp:1955): mutate's types are never named structs
       :else (when-let [e (intr/lookup nm)]
@@ -1208,32 +1374,191 @@
   [m g di]
   (first (for [i (range di) :let [f (nth m i)] :when (= 'llvm/define (first f)) :let [cs (calls-in f g)] :when (seq cs)] cs)))
 
-(defn- int-const [a] (let [v (peek a)] (when (integer? v) v)))
+;; visitIntrinsicCall (LLS39, the user 2026-11-09): visitCallBase's immarg checks (V:3924-3950) with the callee's attributes
+;; as UpgradeIntrinsicFunction leaves them (AutoUpgrade.cpp:2001: the intrinsic's own, Intrinsic::getAttributes, when its
+;; signature is valid; else the declaration's as written), then the switch of visitIntrinsicCall (V:5952-7055), case by case,
+;; then its funclet check (V:7041) and verifyAMDGPUIntrinsicCall. A case whose checks read only the operands' types passes for an
+;; intr-arg mutant (its base valid, the types unchanged); for a renamed callee (`renamed?`) the types are new, so such a case is
+;; checked when ported, else left to opt. The cases that read operands the mutants never reach (GC, coroutines, preallocated
+;; calls, matrices, VP and constrained intrinsics, targets' intrinsics) are named and left to opt.
+
+(defn- result-used?
+  "The item `x`'s result used by another item of `f`."
+  [f x]
+  (when-let [r (result x)]
+    (some (fn [y] (and (not (identical? y x)) (some #(= r %) (tree-seq coll? seq (body y)))))
+          (for [bl (blocks-of f) y (items-of bl)] y))))
+
+(defn- ctlz-rebuilt
+  "upgradeIntrinsicFunction1's ctlz/cttz of one parameter over a non-integer `t` (AutoUpgrade.cpp:1438): declared again as
+  Intrinsic::getOrInsertDeclaration makes it, (T, i1) -> T at the module's end, each call rebuilt as (x, false) and its uses
+  replaced (a used result of another type is left to opt); the old declaration erased: the Verifier reaches the new
+  declaration last, isSignatureValid's message (V:3297)."
+  [m g ^String nm t]
+  (let [defs (filter #(= 'llvm/define (first %)) m)
+        bad (for [f defs bl (blocks-of f) x (items-of bl) :let [c (body x)]
+                  :when (and ('#{call invoke callbr} (first c)) (= g (nth c 2 nil)))
+                  :when (and (result-used? f x) (not= (vf/norm-type (nth c 1)) (vf/norm-type t)))] x)]
+    (if (seq bad)
+      (unknown "ctlz/cttz rebuilt over a non-integer, a call's result of another type used")
+      (if-let [e (sig-error (if (str/starts-with? (subs nm 5) "ctlz") "llvm.ctlz" "llvm.cttz") (list 'fn (vf/norm-type t) [(vf/norm-type t) 'i1]))]
+        (verifier e)
+        valid))))
+
+(defn- first-caller-fn
+  "first-caller's calls, each as [f call]."
+  [m g di]
+  (first (for [i (range di) :let [f (nth m i)] :when (= 'llvm/define (first f)) :let [cs (calls-in f g)] :when (seq cs)] (mapv #(vector f %) cs))))
+
+(defn- int-const
+  "A ConstantInt argument's value (signed as written; i1 true 1, false 0), nil for any other argument."
+  [a]
+  (let [t (vf/norm-type (first a)) v (peek a)]
+    (when (and (symbol? t) (re-matches #"i[0-9]+" (name t)))
+      (cond (integer? v) v (true? v) 1 (false? v) 0 :else nil))))
+
+(defn- fp-const? [a] (let [v (peek a)] (and (fp-t? (vf/norm-type (first a))) (seq? v) (= 'fp (first v)))))
+(defn- scalar-bits [t] (let [t (vf/norm-type t) e (if (vec-t? t) (nth t 2) t)] (cond (int-t? e) (iwidth e) :else (get '{half 16 bfloat 16 float 32 double 64 x86_fp80 80 fp128 128 ppc_fp128 128} e))))
+(defn- ptr-as [t] (let [t (vf/norm-type t)] (cond (= t 'ptr) 0 (and (seq? t) (= 'ptr (first t))) (second t) :else nil)))
+(defn- vcount [t] (let [t (vf/norm-type t)] (when (vec-t? t) [(nth t 1) (= 'vscale (first t))])))
+
+(defn- local-def
+  "The body of the instruction of `f` that defines the local `v`, nil for none (an argument, a constant)."
+  [f v]
+  (when (local? v)
+    (first (for [bl (blocks-of f) x (items-of bl) :when (= (result x) v)] (body x)))))
+
+(defn- global-form [m g] (first (filter #(and (#{'llvm/define 'llvm/declare 'llvm/global 'llvm/alias 'llvm/ifunc} (first %)) (= (second %) g)) m)))
+(defn- global-sym? [v] (and (symbol? v) (= "g" (namespace v))))
+
+(defn- immarg-check
+  "visitCallBase's immarg check (V:3932) of the call `c` of the declaration `d` (the intrinsic `nm`): each immarg parameter's
+  argument a ConstantInt or ConstantFP of no vector type, then within the parameter's range attribute."
+  [d nm c]
+  (let [fty (fn-type-of d) e (intr/lookup nm) own? (and e (nil? (sig-error nm fty)))
+        ps (vec (filter vector? (nth d 3)))
+        imm? (fn [i] (if own? (contains? (:imm e) i) (boolean (some #{:immarg} (get ps i)))))
+        args (nth c 3)]
+    (some (fn [i]
+            (when (imm? i)
+              (let [a (nth args i)]
+                (cond
+                  (not (and (or (int-const a) (fp-const? a)) (not (vec-t? (vf/norm-type (first a))))))
+                  (verifier "immarg operand has non-immediate parameter")
+                  (and own? (get (:ranges e) i) (int-const a))
+                  (let [[lo hi] (get (:ranges e) i) v (bigint (int-const a))]
+                    (cond (not (and (<= 0 lo) (< lo hi) (<= 0 v))) (unknown "an immarg range that wraps or a negative value")
+                          (not (and (<= lo v) (< v hi))) (verifier "immarg value ")
+                          :else nil))
+                  :else nil))))
+          (range (min (count args) (count ps))))))
+
+(def ^:private scoped-eh-personalities
+  "isScopedEHPersonality (EHPersonalities.h:81) by classifyEHPersonality's names: MSVC_X86SEH, MSVC_TableSEH, MSVC_CXX, CoreCLR,
+  Wasm_CXX."
+  #{"_except_handler3" "_except_handler4" "__C_specific_handler" "__CxxFrameHandler3" "ProcessCLRException" "__gxx_wasm_personality_v0"})
+
+(defn- visit-intrinsic-call
+  "visitIntrinsicCall's case (V:5952) for the call `c` in the function `f` of the intrinsic `nm`: nil when its case checks
+  nothing or passes, a verdict, or an unknown for a case not ported."
+  [m f c ^String nm renamed?]
+  (let [base (or (:name (intr/lookup nm)) nm) s (subs base 5)
+        args (nth c 3) ta (fn [i] (vf/norm-type (first (nth args i nil)))) av (fn [i] (peek (nth args i)))
+        rt0 (vf/norm-type (nth c 1)) rt (if (and (seq? rt0) (= 'fn (first rt0))) (vf/norm-type (second rt0)) rt0)
+        o (opts-of (drop 4 c))
+        types-only (fn [why] (when renamed? (unknown (str why ": its types checks not ported for a renamed callee"))))
+        p #(str/starts-with? s %)
+        v (cond
+            (p "dbg.") nil
+            (#{"memcpy" "memcpy.inline" "memmove" "memset" "memset.inline"} s) nil
+            (= s "assume") (cond (and (:bundles o) (not= 1 (int-const (nth args 0)))) (verifier "assume with operand bundles must have i1 true condition")
+                                 (and (:bundles o) renamed?) (unknown "assume's bundles")
+                                 :else nil)
+            (#{"ucmp" "scmp"} s) (cond (< (long (or (scalar-bits rt) 0)) 2) (verifier "result type must be at least 2 bits wide")
+                                       (not= (boolean (vcount (ta 0))) (boolean (vcount rt))) (verifier "ucmp/scmp argument and result types must both be either vector or scalar types")
+                                       (and (vcount rt) (not= (vcount (ta 0)) (vcount rt))) (verifier "return type and arguments must have the same number of elements"))
+            (#{"coro.begin" "coro.begin.custom.abi"} s)
+            (let [dd (local-def f (av 0)) cal (when (and dd ('#{call invoke} (first dd)) (global-sym? (nth dd 2))) (name (nth dd 2)))]
+              (when-not (and cal (re-matches #"llvm\.coro\.id(\.retcon|\.retcon\.once|\.async)?" cal)) (verifier "id argument of llvm.coro.begin must refer to coro.id")))
+            (= s "coro.id") (unknown "coro.id's operands (V:6066)")
+            (= s "is.fpclass") (if-let [mv (and (>= (count args) 2) (int-const (nth args 1)))]
+                                 (when-not (zero? (bit-and (long mv) (bit-not 1023))) (verifier "unsupported bits for llvm.is.fpclass test mask"))
+                                 (unknown "is.fpclass's test mask not a ConstantInt (the Verifier's cast<ConstantInt> is undefined)"))
+            (or (= s "fptrunc.round") (p "convert.to.arbitrary.fp") (p "convert.from.arbitrary.fp")) (unknown "a rounding mode or format string (V:6104-6211)")
+            (or (p "vp.") (p "experimental.constrained.")) (unknown "visitVPIntrinsic, visitConstrainedFPIntrinsic")
+            (= s "experimental.memset.pattern") (types-only "memset.pattern")
+            (str/includes? s "element.unordered.atomic") (unknown "an element-wise atomic memory intrinsic (V:6250)")
+            (p "call.preallocated.") (unknown "the preallocated intrinsics (V:6274-6340)")
+            (#{"gcroot" "gcwrite" "gcread"} s) (unknown "the GC intrinsics (V:6341, the function's gc)")
+            (= s "init.trampoline") (let [g (av 1) gf (when (global-sym? g) (global-form m g))]
+                                      (when-not (and gf (#{'llvm/define 'llvm/declare} (first gf))) (verifier "llvm.init_trampoline parameter #2 must resolve to a function.")))
+            (= s "reloc.none") (unknown "reloc.none's metadata")
+            (= s "stackprotector") (when-not (= 'alloca (first (local-def f (av 1)))) (verifier "llvm.stackprotector parameter #2 must resolve to an alloca."))
+            (= s "localescape") (if renamed? (unknown "localescape's block")
+                                    (when (some #(let [x (av %)] (and (not= 'null x) (not= 'alloca (first (local-def f x))))) (range (count args)))
+                                      (verifier "llvm.localescape only accepts static allocas")))
+            (= s "localrecover") (let [g (av 0) gf (when (global-sym? g) (global-form m g))]
+                                   (when-not (and gf (= 'llvm/define (first gf))) (verifier "llvm.localrecover first argument must be function defined in this module")))
+            (or (p "experimental.gc.") (= s "experimental.patchpoint") (= s "experimental.guard") (= s "experimental.deoptimize"))
+            (unknown "statepoints, patchpoints, guards and deoptimize (their bundles and GC strategy)")
+            (#{"eh.exceptioncode" "eh.exceptionpointer"} s) (when-not (= 'catchpad (first (local-def f (av 0)))) (verifier "eh.exceptionpointer argument must be a catchpad"))
+            (= s "get.active.lane.mask") (let [e (if (vcount rt) (nth rt 2) rt)] (when-not (= e 'i1) (verifier "get_active_lane_mask: element type is not i1")))
+            (= s "experimental.get.vector.length") (if-let [vf' (int-const (nth args 1))] (when-not (pos? vf') (verifier "get_vector_length: VF must be positive")) (unknown "VF not a constant"))
+            (= s "va_start") (when-not (some #{'&} (nth (fn-type-of f) 2)) (verifier "va_start called in a non-varargs function"))
+            (= s "get.dynamic.area.offset") (when-not (and (int-t? rt) (= 64 (iwidth rt))) (verifier "get_dynamic_area_offset result type must be scalar integer matching alloca address space width"))
+            (#{"smul.fix" "smul.fix.sat" "umul.fix" "umul.fix.sat" "sdiv.fix" "sdiv.fix.sat" "udiv.fix" "udiv.fix.sat"} s)
+            (if-let [sc (int-const (nth args 2))]
+              (let [w (long (or (scalar-bits (ta 0)) 0))]
+                (if (= \s (first s))
+                  (when-not (< sc w) (verifier "the scale of s[mul|div]_fix[_sat] must be less than the width of the operands"))
+                  (when-not (<= sc w) (verifier "the scale of u[mul|div]_fix[_sat] must be less than or equal to the width of the operands"))))
+              (unknown "the scale not a constant"))
+            (#{"lrint" "llrint" "lround" "llround"} s)
+            (cond (not= (boolean (vcount (ta 0))) (boolean (vcount rt))) (verifier (str nm ": argument and result disagree on vector use"))
+                  (and (vcount rt) (not= (vcount (ta 0)) (vcount rt))) (verifier (str nm ": argument must be same length as result")))
+            (= s "bswap") (when-not (zero? (mod (long (or (scalar-bits rt) 1)) 16)) (verifier "bswap must be an even number of bytes"))
+            (= s "invariant.start") (let [n (int-const (nth args 0))]
+                                      (when-not (and n (or (>= n 0) (= n -1))) (verifier "invariant_start parameter must be -1, 0 or a positive number")))
+            (p "matrix.") (unknown "the matrix intrinsics (V:6660)")
+            (= s "stepvector") (when-not (and (vcount rt) (int-t? (nth rt 2)) (>= (iwidth (nth rt 2)) 8))
+                                 (verifier "stepvector only supported for vectors of integers with a bitwidth of at least 8."))
+            (#{"experimental.vector.match" "vector.insert" "vector.extract" "vector.partial.reduce.add" "vector.partial.reduce.fadd"} s) (types-only s)
+            (= s "experimental.noalias.scope.decl") nil
+            (#{"preserve.array.access.index" "preserve.struct.access.index"} s)
+            (when-not (some #(and (seq? %) (= :elementtype (first %))) (nth args 0)) (verifier "Intrinsic requires elementtype attribute on first argument."))
+            (some p ["aarch64." "arm." "nvvm." "amdgcn." "ptrauth." "structured." "experimental.convergence." "callbr.landingpad" "write_volatile_register"])
+            (unknown "a target's or a structured intrinsic's case")
+            (= s "ptrmask")
+            (let [t0 (ta 0) t1 (ta 1)]
+              (cond (not (or (ptr-as t0) (and (vcount t0) (ptr-as (nth t0 2))))) (verifier "llvm.ptrmask intrinsic first argument must be pointer or vector of pointers")
+                    (not= (boolean (vcount t0)) (boolean (vcount t1))) (verifier "llvm.ptrmask intrinsic arguments must be both scalars or both vectors")
+                    (and (vcount t0) (not= (vcount t0) (vcount t1))) (verifier "llvm.ptrmask intrinsic arguments must have the same number of elements")
+                    (not= 64 (scalar-bits t1)) (verifier "llvm.ptrmask intrinsic second argument bitwidth must match pointer index type size of first argument")
+                    :else nil))
+            (= s "thread.pointer") (when-not (= 0 (ptr-as rt)) (verifier "llvm.thread.pointer intrinsic return type must be for the globals address space"))
+            (= s "threadlocal.address") (let [g (av 0)]
+                                          (cond (not (global-sym? g)) (verifier "llvm.threadlocal.address first argument must be a GlobalValue")
+                                                :else (unknown "the global's thread_local")))
+            (#{"lifetime.start" "lifetime.end"} s)
+            (let [x (av 0) dd (local-def f x)]
+              (when-not (or (= 'poison x) (= 'alloca (first dd))
+                            (and dd ('#{call} (first dd)) (global-sym? (nth dd 2)) (str/starts-with? (name (nth dd 2)) "llvm.structured.alloca")))
+                (verifier "llvm.lifetime.start/end can only be used on alloca or poison")))
+            (= s "sponentry") (when-not (= 0 (ptr-as rt)) (verifier "llvm.sponentry must return a pointer to the stack"))
+            :else nil)]
+    (or v
+        (when (and renamed? (contains? scoped-eh-personalities (some-> (:personality (opts-of (drop 4 f))) second name)))
+          (unknown "a scoped EH personality's funclet check (V:7041)")))))
+
+(defn- call-site-intrinsic
+  "visitCallBase's immarg check, then visitIntrinsicCall, of the call `c` (in `f`) of the declaration `d`, the intrinsic `nm`."
+  [m f c nm d renamed?]
+  (or (immarg-check d nm c) (visit-intrinsic-call m f c nm renamed?)))
 
 (defn- intr-call-check
-  "visitIntrinsicCall's case (V:5952) for a call `c` of the intrinsic `nm`: nil when its case checks nothing or passes, a
-  verdict, or an unknown for a case not ported. The intrinsics the mutator renames to (mutate's m-intr-rename) are taken:
-  ptrmask's four checks (V:6978), is.fpclass's test mask (V:6098: its operand a constant, else the cast is undefined), memset's
-  none (V:6237); smax, ctlz, sqrt, fshl, expect, vector.reduce.add and sadd.with.overflow have no case."
-  [^String nm c]
-  (let [s (subs nm 5) args (nth c 3) ta (fn [i] (vf/norm-type (first (nth args i nil))))
-        ptr? (fn [t] (or (= t 'ptr) (and (seq? t) (= 'ptr (first t)))))
-        vec? (fn [t] (and (seq? t) (#{'vector 'vscale} (first t))))]
-    (cond
-      (str/starts-with? s "ptrmask")
-      (let [t0 (ta 0) t1 (ta 1)]
-        (cond (not (or (ptr? t0) (and (vec? t0) (ptr? (nth t0 2))))) (verifier "llvm.ptrmask intrinsic first argument must be pointer or vector of pointers")
-              (not= (boolean (vec? t0)) (boolean (vec? t1))) (verifier "llvm.ptrmask intrinsic arguments must be both scalars or both vectors")
-              (vec? t0) (unknown "ptrmask over vectors")
-              (and (symbol? t1) (re-matches #"i[0-9]+" (name t1)) (not= t1 'i64)) (verifier "llvm.ptrmask intrinsic second argument bitwidth must match pointer index type size of first argument")
-              :else nil))
-      (str/starts-with? s "is.fpclass")
-      (if-let [v (and (>= (count args) 2) (int-const (nth args 1)))]
-        (when-not (zero? (bit-and (long v) (bit-not 1023))) (verifier "unsupported bits for llvm.is.fpclass test mask"))
-        (unknown "is.fpclass's test mask not a constant (the Verifier's cast is undefined)"))
-      (str/starts-with? s "memset") nil
-      (some #(str/starts-with? s %) intrinsic-cases) (unknown "an intrinsic visitIntrinsicCall checks")
-      :else nil)))
+  "The renamed calls' checks (kept for ex-intr-decl's and ex-intr-rename's callers): call-site-intrinsic over `fc`, [f call]."
+  [m d nm [f c]]
+  (call-site-intrinsic m f c nm d true))
 
 (defn ex-intr-decl
   "An intrinsic's declaration with a parameter or the return type changed (its calls unchanged): AutoUpgrade first (a ctlz or
@@ -1245,6 +1570,7 @@
     (cond
       (= up :rebuilt) valid
       (map? up) up
+      (vector? up) (unknown "ctlz/cttz upgraded over a non-integer, its calls rebuilt over their own arguments' types")
       (and (= up :remangled) (contains? call-upgrade-ids (:name (intr/lookup nm)))) (unknown "a remangled intrinsic whose calls UpgradeIntrinsicCall rewrites by its case")
       :else
       (let [cs (first-caller m g fi)]
@@ -1264,12 +1590,13 @@
     (cond
       (= up :rebuilt) valid
       (map? up) up
+      (vector? up) (ctlz-rebuilt m to nm (second up))
       ;; remangled: the calls retargeted to the new declaration (appended at the module's end), then visited as its calls
       (= up :remangled) (if (contains? call-upgrade-ids (:name (intr/lookup nm)))
                           (unknown "a remangled intrinsic whose calls UpgradeIntrinsicCall rewrites by its case")
-                          (or (some #(intr-call-check nm %) (first-caller m to (count m))) valid))
+                          (or (some #(intr-call-check m d nm %) (first-caller-fn m to (count m))) valid))
       :else
-      (or (some #(intr-call-check nm %) (first-caller m to fi))
+      (or (some #(intr-call-check m d nm %) (first-caller-fn m to fi))
           (if-let [e (sig-error nm fty)] (verifier e) (unknown "the renamed declaration's signature is valid"))))))
 
 ;; ---------------------------------------------------------------------------------------------

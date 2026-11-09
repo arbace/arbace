@@ -1,0 +1,95 @@
+(ns repr.llvm.expect-test
+  "The own verdicts' unit tests for LLS38 (the module flags, llvm.ident) and LLS39 (visitCallBase's immarg check and
+  visitIntrinsicCall's cases; AutoUpgrade's ctlz over a non-integer): each case a small module, the kind's context as
+  arbace.repr.llvm.mutate attaches it, the verdict and the message fragment arbace.repr.llvm.expect must give (the texts of
+  llvm-project 23.1.5's Verifier.cpp, Module.cpp and AutoUpgrade.cpp). The negative controls cross one case's verdict with
+  another's expectation by the same judge (verdict equal, the fragment in the message): each must fail.
+  Run: test/repr/llvm/expect-test.bash (doc/llvm/LLVM-CROP-SURVEY.md, \"As built: LLS38, LLS39\")."
+  (:require [arbace.repr.llvm.read :as rd]
+            [arbace.repr.llvm.expect :as ex]
+            [arbace.repr.llvm.verify :as vf]
+            [arbace.string :as str]))
+
+(defn- flags-module [& nodes]
+  (str "define void @f() {\n  ret void\n}\n!llvm.module.flags = !{"
+       (str/join ", " (map #(str "!" %) (range (count nodes)))) "}\n"
+       (str/join "" (map-indexed (fn [i n] (str "!" i " = !{" n "}\n")) nodes))))
+
+(def ^:private dbg-module
+  (str "define void @f() !dbg !3 {\n  ret void, !dbg !5\n}\n!llvm.dbg.cu = !{!0}\n!llvm.module.flags = !{!2}\n"
+       "!0 = distinct !DICompileUnit(language: DW_LANG_C99, file: !1, emissionKind: FullDebug)\n"
+       "!1 = !DIFile(filename: \"a.c\", directory: \"/\")\n!2 = !{i32 2, !\"Debug Info Version\", !\"x\"}\n"
+       "!3 = distinct !DISubprogram(name: \"f\", scope: !1, file: !1, type: !4, unit: !0, spFlags: DISPFlagDefinition)\n"
+       "!4 = !DISubroutineType(types: !{null})\n!5 = !DILocation(line: 1, scope: !3)\n"))
+
+(def ^:private intr-decls
+  (str "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1 immarg)\ndeclare void @llvm.lifetime.start.p0(ptr)\n"
+       "declare i1 @llvm.is.fpclass.f32(float, i32 immarg)\ndeclare void @llvm.va_start.p0(ptr)\n"))
+
+(defn- call-module [call-text]
+  (str intr-decls "define void @f(ptr %p, float %x) {\n  %a = alloca i32\n  " call-text "\n  ret void\n}\n"))
+
+(def cases
+  "[name kind module-text ctx-fn verdict fragment]; ctx-fn gets the forms."
+  (let [defn-i (fn [forms] (first (keep-indexed (fn [i f] (when (= 'llvm/define (first f)) i)) forms)))
+        at (fn [ii k] (fn [forms] (let [fi (defn-i forms)] {:at [fi 0 ii] :fi fi :k k})))
+        flag (fn [_] {:ref :flag})]
+    [["flag-behaviour-unexpected" :md-edit (flags-module "i32 99, !\"x\", i32 1") flag :invalid "invalid behavior operand in module flag (unexpected constant)"]
+     ["flag-behaviour-not-int" :md-edit (flags-module "!\"b\", !\"x\", i32 1") flag :invalid "invalid behavior operand in module flag (expected constant integer)"]
+     ["flag-behaviour-float" :md-edit (flags-module "float 1.0, !\"x\", i32 1") flag :invalid "(expected constant integer)"]
+     ["flag-id-not-string" :md-edit (flags-module "i32 1, i32 5, i32 1") flag :invalid "invalid ID operand in module flag (expected metadata string)"]
+     ["flag-count" :md-edit (flags-module "i32 1, !\"x\"") flag :invalid "incorrect number of operands in module flag"]
+     ["flag-min-i1-true" :md-edit (flags-module "i32 8, !\"PIC Level\", i1 true") flag :invalid "invalid value for 'min' module flag"]
+     ["flag-min-negative" :md-edit (flags-module "i32 8, !\"x\", i32 -1") flag :invalid "invalid value for 'min' module flag"]
+     ["flag-pic-max-upgraded" :md-edit (flags-module "i32 7, !\"PIC Level\", i32 2") flag :valid nil]
+     ["flag-error-any-value" :md-edit (flags-module "i1 true, !\"x\", !\"s\"") flag :valid nil]
+     ["flag-max-string" :md-edit (flags-module "i32 7, !\"Dwarf Version\", !\"x\"") flag :invalid "invalid value for 'max' module flag (expected constant integer)"]
+     ["flag-require-not-pair" :md-edit (flags-module "i64 3, !\"x\", i32 2") flag :invalid "invalid value for 'require' module flag (expected metadata pair)"]
+     ["flag-require-absent" :md-edit (flags-module "i32 3, !\"x\", !{!\"y\", i32 1}") flag :invalid "invalid requirement on flag, flag is not present in module"]
+     ["flag-require-value" :md-edit (flags-module "i32 3, !\"x\", !{!\"y\", i32 1}" "i32 1, !\"y\", i32 2") flag :invalid "flag does not have the required value"]
+     ["flag-append-not-node" :md-edit (flags-module "i32 5, !\"x\", i32 2") flag :invalid "invalid value for 'append'-type module flag"]
+     ["flag-unique" :md-edit (flags-module "i32 1, !\"x\", i32 2" "i32 2, !\"x\", i32 3") flag :invalid "module flag identifiers must be unique"]
+     ["flag-wchar" :md-edit (flags-module "i32 1, !\"wchar_size\", !\"x\"") flag :invalid "wchar_size metadata requires constant integer argument"]
+     ["flag-div-stripped" :md-edit dbg-module flag :debug "ignoring debug info with an invalid version (0)"]
+     ["flag-div-no-debug" :md-edit (flags-module "i32 2, !\"Debug Info Version\", !\"x\"") flag :valid nil]
+     ["ident-not-string" :md-edit (str "!llvm.ident = !{!0}\n!0 = !{i32 1}\n") (fn [_] {:ref :ident}) :invalid "invalid value for llvm.ident metadata entry operand"]
+     ["arg-memset-size" :intr-arg (call-module "call void @llvm.memset.p0.i64(ptr %p, i8 0, i64 undef, i1 false)") (at 1 2) :valid nil]
+     ["arg-memset-immarg" :intr-arg (call-module "call void @llvm.memset.p0.i64(ptr %p, i8 0, i64 4, i1 undef)") (at 1 3) :invalid "immarg operand has non-immediate parameter"]
+     ["arg-lifetime" :intr-arg (call-module "call void @llvm.lifetime.start.p0(ptr undef)") (at 1 0) :invalid "llvm.lifetime.start/end can only be used on alloca or poison"]
+     ["arg-fpclass-mask" :intr-arg (call-module "%c = call i1 @llvm.is.fpclass.f32(float %x, i32 undef)") (at 1 1) :invalid "immarg operand has non-immediate parameter"]
+     ["arg-va-start" :intr-arg (call-module "call void @llvm.va_start.p0(ptr undef)") (at 1 0) :invalid "va_start called in a non-varargs function"]
+     ["rename-ctlz-ptr" :intr-rename
+      "declare void @llvm.ctlz.i32(ptr)\ndefine void @f(ptr %p) {\n  call void @llvm.ctlz.i32(ptr %p)\n  ret void\n}\n"
+      (fn [_] {:fi 0 :to (symbol "g" "llvm.ctlz.i32")}) :invalid "expected any integer or integer vector, but got ptr"]
+     ["rename-fpclass-i1-mask" :intr-rename
+      "declare i64 @llvm.is.fpclass.f32(i64, i1 immarg)\ndefine i64 @f(i64 %v) {\n  %r = call i64 @llvm.is.fpclass.f32(i64 %v, i1 true)\n  ret i64 %r\n}\n"
+      (fn [_] {:fi 0 :to (symbol "g" "llvm.is.fpclass.f32")}) :invalid "expected any fp or fp vector, but got i64"]]))
+
+(def controls
+  "[subject reference]: the subject's verdict judged against the reference's expectation, which must fail."
+  [["flag-min-i1-true" "flag-max-string"] ["flag-pic-max-upgraded" "flag-min-i1-true"] ["flag-div-stripped" "flag-div-no-debug"]
+   ["arg-memset-size" "arg-memset-immarg"] ["arg-lifetime" "arg-va-start"] ["rename-ctlz-ptr" "rename-fpclass-i1-mask"]])
+
+(defn- judge [e verdict frag]
+  (and (= (:verdict e) verdict) (or (nil? frag) (str/includes? (str (:msg e)) frag))))
+
+(defn -main
+  "[--dump DIR]: also each case's module as DIR/NAME.ll (for Arbace's verifier and, by hand, opt)."
+  [& [flag dir]]
+  (when (= flag "--dump")
+    (doseq [[nm _ text] cases] (spit (str dir "/" nm ".ll") text)))
+  (let [got (into {} (for [[nm kind text ctx-fn verdict frag] cases]
+                       (let [forms (vec (rd/read-module text))
+                             e (ex/expect kind forms (ctx-fn forms) forms)]
+                         [nm [e verdict frag]])))
+        fails (atom 0)]
+    (doseq [[nm _] cases :let [[e verdict frag] (got nm)]]
+      (if (judge e verdict frag)
+        (println "ok  " nm (ex/header :case e))
+        (do (swap! fails inc) (println "FAIL" nm "want" verdict frag "got" (ex/header :case e)))))
+    (doseq [[s r] controls :let [[e] (got s) [_ v f] (got r)]]
+      (if (judge e v f)
+        (do (swap! fails inc) (println "FAIL control passes:" s "vs" r))
+        (println "control" s "vs" r "fails as it must")))
+    (println (str "expect-test: " (count cases) " cases, " (count controls) " controls, " @fails " failing"))
+    (when (pos? @fails) (System/exit 1))))
