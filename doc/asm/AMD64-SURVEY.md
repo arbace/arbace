@@ -587,6 +587,58 @@ The worktree's `.tmp/asm/` (about 42 MB, kept): `musl-1.2.6/` (its `src`, `arch/
 `hello-intel.s`, `h`, `h.o`, `hi.o` (P3, P4), `go1.o` (P5), `llvm-list.txt` (the 23.1.5 tarball's listing). The commands are in this
 file's §3; each ran in seconds under 200 MB.
 
+## As built: AX1 (first slice, 2026-11-09/10; branch `asm-ax1`)
+
+The user's decisions of 2026-11-09 (~14:2x): two crops `:asm-amd64` and `:asm-arm64` in one directory (AXS1 (a), ARS1/SH1, AXS16 (a),
+ARS15), the forms at the machine level, GNU syntax first, byte for byte and a canonical print (AXS2 (a)), Plan 9 later through Go's
+`cmd/asm` (AXS15 (a)), the table from LLVM's `.td` (AXS4 (a)), one encoder mode per reference (AXS5 (a)), the CPU's run and the lockstep
+as own judges (AXS9 (a)), AOT native (AXS7 (a)); readers first, then encoders and ELF.
+
+Built: doc/asm/SPEC.md (the draft); `arbace.repr.asm` (`arbace/repr/asm.ae`) with `lex` (the lexer), `gnu` (the directive language,
+expressions, statements, the canonical print of items), `amd64/att` (AT&T operands and instructions), `full` (mode `:full`'s layer);
+`bin/repr-asm read|print|corpus extract|corpus lists|roundtrip [--record]|divergences`, the Makefile's `repr-asm-*`; `test/asm/`:
+`corpora.edn` (the pins restated: musl 1.2.6's tarball, llvm-project 23.1.5's), `roundtrip-results-amd64.edn` (810 rows),
+`divergences-read.edn` (six classes), `controls.txt` (three negative controls), `judge.ae`. The namespaces are a crop's
+(`arbace_crop_paths`, `embed.ae`'s exclusions, the audit's `crop-rules`): evaluated from the checkout, in no key after this commit.
+The run: all three corpora in about 50 s on stage 0 (four threads, under 1.5 GiB), no assembler.
+
+| corpus | files | pass (read, `:full` byte for byte, `.ae` back equal, canonical re-read equal with no layer) | classed |
+|---|---:|---:|---|
+| musl 1.2.6 x86-64 `.s` | 32 (711 lines) | **32** | none |
+| `MC/AsmParser` (split-file tests as parts; AArch64/ apart) | 157 | **139** (3,855 lines) | 15 `:error-test`, 1 `:error-input`, 1 `:intel`, 1 `:lexer-option` |
+| `MC/X86` (620 files, one split into two) | 621 | **464** (345,290 lines, 88,344 items) | 152 `:intel` (AX3), 4 `:error-test`, 1 `:not-input` |
+
+So every AT&T file of `MC/X86` passes at AX1's levels (the plan's 459; 464 by the RUN lines' own syntax option), and every file not
+passing is in a class named from its test's own RUN lines. What differs from the plan: the forms are the syntax level in the
+machine's operand order until AX2's table resolves the mnemonics (AXS17); `split-file` tests are read as their parts (AXS20). The
+canonical layout is llvm-mc's (a tab after the mnemonic, `, ` between operands, decimal integers), so AX2 can hold the canonical print
+to `MC/X86`'s CHECK lines.
+
+Not built in this slice: the gate step and the REAP row (AX10; AXS21), the CHECK-text judge (AX2), Intel (AX3).
+
 ## Proposed
 
-AXS1-AXS16 (§14) and AS1-AS8 (§13), none decided.
+AXS1-AXS16 (§14) and AS1-AS8 (§13): the user decided AXS1, AXS2, AXS4, AXS5, AXS7, AXS9, AXS15, AXS16 as recommended (2026-11-09).
+New with AX1 (each with options, the recommended named):
+
+- **AXS17 The mnemonic until AX2.** (a) AX1's forms keep the mnemonic as written (lower case: `movl`, `cmovl`, `vmovaps.s`) and
+  the operands reversed; AX2's table makes the machine level (`(mov {:w 32} ...)`), the spelling moving into the layer, and the
+  recorded forms are rewritten then; (b) a hand-written table of the suffixes now (`movl` → `mov` 32), which cannot tell `cmovl`'s
+  condition from a suffix without the table; (c) keep the written mnemonic for good, the machine level a separate pass.
+  *Recommended: (a)*: the decision was the machine level (AXS2 (a)), and only the table (AXS4 (a)) can make it.
+- **AXS18 The header form.** (a) `(asm/unit {:arch :syntax})`, the items after it as top-level forms; (b) the survey's `(asm/file
+  {...} items...)`, which clashes with the `.file` directive's item `(asm/file ...)`. *Recommended: (a)*.
+- **AXS19 Macro and repetition bodies.** (a) as text, `(asm/macro HEAD BODY END)`, `(asm/rept ...)`, `(asm/irp ...)`, and a macro's
+  invocation `(asm/invoke NAME ARGS)` with its arguments as text: gas's own model (substitution is textual); AX2's assembler expands
+  them; (b) parsed into items, with the substitutions as forms (`\arg`, `\()`): more structure, but altmacro and `\()` make bodies
+  that are not statements until expanded. *Recommended: (a)*.
+- **AXS20 split-file tests.** (a) read as their parts (`NAME.PART`), the files llvm-mc reads (6 files of the two MC corpora);
+  (b) read whole, the `#--- name` lines comments. *Recommended: (a)*: (b) mixes a test's good and bad inputs in one file.
+- **AXS21 The gate and the row.** (a) at AX10 as planned: `test/gate/crops/asm-amd64.edn` (`asm-read-essential`: musl and
+  `MC/AsmParser`, about 10 s, under 1.5 GiB; `--full` `asm-roundtrip` with `MC/X86`, about 50 s), the row's cells, `crops.edn` and
+  `independence.edn` together; (b) the essential step now, before the row. *Recommended: (a)*: the row's cells need AX2's
+  judges to mean what the other rows' do; the round trip runs by hand meanwhile (`make repr-asm-roundtrip`).
+- **AXS22 The corpus's source tree.** (a) extracted from the pinned tarballs by `bin/repr-asm corpus extract` into the main checkout's
+  `.tmp/asm/src` (the clean clone's too, as `bin/llvm-corpus`), nothing of llvm/test committed; (b) the corpora committed under
+  `test/asm/`. *Recommended: (a)*: 17 MB of tests, all of it behind one pin already on the host.
+

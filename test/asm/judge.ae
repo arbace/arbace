@@ -1,0 +1,57 @@
+(ns asm.judge
+  "bin/repr-asm roundtrip's judgment (doc/asm/SPEC.md §8): a run's rows [ID RESULT REASON] (ID CORPUS/NAME) against the
+  record test/asm/roundtrip-results-amd64.edn (every recorded :pass of the run's corpora passes; every file of the run is
+  recorded and every recorded file was run) and every non-pass against the classes (test/asm/divergences-read.edn: a row
+  is in the first class whose :match finds its REASON); with RECORD the corpora's rows are rewritten from the run."
+  (:require [arbace.string :as str]))
+
+(defn- read-rows [path]
+  (let [r (java.io.PushbackReader. (java.io.StringReader. (slurp path)))
+        eof (Object.)
+        xs (loop [out []] (let [x (read r false eof)] (if (identical? x eof) out (recur (conj out x)))))]
+    (if (and (= 1 (count xs)) (vector? (first (first xs)))) (first xs) xs)))
+
+(defn classify [classes [id result reason]]
+  (when-not (= result :pass)
+    (some (fn [c] (when (or (some #(re-find % (str reason)) (:match c)) (some #{id} (:ids c))) (:id c))) classes)))
+
+(def header
+  (str ";; repr/asm's round trip (bin/repr-asm roundtrip; doc/asm/SPEC.md §8): each file of test/asm/corpora.edn's corpora read in mode\n"
+       ";; :full, its .ae text read back to the same forms and layer, printed back byte for byte, the canonical print read again to the\n"
+       ";; same forms with no layer: :pass, else :fail with the first level that failed (refused: the reader's rejection, with its\n"
+       ";; class). Written by `bin/repr-asm roundtrip --record`; read by bin/repr-asm's judgment. Read with the Clojure reader.\n"))
+
+(defn- q [s] (pr-str (str s)))
+
+(defn main [results run-path classes-path record ids]
+  (let [ids (set (remove empty? (str/split (str ids) #" ")))
+        run (read-rows run-path)
+        old (if (.exists (java.io.File. ^String results)) (read-rows results) [])
+        classes (read-string (slurp classes-path))
+        in-run? (fn [[id]] (contains? ids (first (str/split id #"/"))))
+        old-run (filter in-run? old)
+        oldm (into {} (map (fn [[i r]] [i r]) old-run))
+        runm (into {} (map (fn [[i r]] [i r]) run))
+        per (group-by #(first (str/split (first %) #"/")) run)
+        problems (atom [])]
+    (doseq [[c rs] (sort per)]
+      (let [by (frequencies (map #(or (classify classes %) (when (= :pass (second %)) :pass) :unclassed) rs))]
+        (println (str "repr-asm " c ": " (count rs) " files, " (get by :pass 0) " pass"
+                      (apply str (for [[k n] (sort-by str (dissoc by :pass))] (str ", " n " " (name k))))))))
+    (doseq [r run :when (and (not= :pass (second r)) (not (classify classes r)))]
+      (swap! problems conj (str "unclassed: " (first r) " " (nth r 2))))
+    (if (seq record)
+      (let [kept (remove in-run? old)
+            rows (sort-by first (concat kept run))]
+        (spit results (str header "[\n" (apply str (map (fn [[i r why]] (str "[" (q i) " " r " " (q why) "]\n")) rows)) "]\n"))
+        (println (str "repr-asm: recorded " (count run) " rows of " (str/join " " (sort ids)) " into " results)))
+      (do
+        (doseq [[i r] oldm :when (and (= r :pass) (not= (runm i) :pass))]
+          (swap! problems conj (str "was :pass, now " (runm i) ": " i)))
+        (doseq [[i] run :when (not (contains? oldm i))] (swap! problems conj (str "not recorded: " i)))
+        (doseq [[i] old-run :when (not (contains? runm i))] (swap! problems conj (str "recorded, not run: " i)))))
+    (doseq [p (take 40 @problems)] (println (str "FAIL: " p)))
+    (when (> (count @problems) 40) (println (str "FAIL: ... " (- (count @problems) 40) " more")))
+    (if (empty? @problems)
+      (println "repr-asm roundtrip: ok")
+      (do (println (str "repr-asm roundtrip: " (count @problems) " problems")) (System/exit 1)))))

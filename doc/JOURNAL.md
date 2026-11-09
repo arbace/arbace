@@ -2834,3 +2834,37 @@ Mac VM, QEMU's as labelled emulations at the oracle tier. Plan AR0-AR10, 40 to 6
 417 base MC files, musl's and the box's) 3 to 5; decisions ARS1-ARS16. Alternatives considered: one shared `:asm` row (SH1 (b)),
 an A64-to-Go translator as AOT (kept as optional AR13), LLVM's `.td` via llvm-tblgen as the tables (a host record), qemu-aarch64
 as the main oracle (an emulation, not hardware).
+
+## 2026-11-10 x86-64 assembly: AX1's first slice, repr/asm's reader and :full print (branch `asm-ax1`, from `mac/next` `6c3c87c02`)
+
+The user's decisions of 2026-11-09 (~14:2x) on the two assembly surveys (two crops `:asm-amd64` and `:asm-arm64` in one directory, the
+forms at the machine level, GNU syntax first, byte for byte and canonical, readers first) start the amd64 crop with AX1
+(doc/asm/AMD64-SURVEY.md §12). The branch merges `mac/asm-amd64-survey` and `mac/asm-arm64-survey` (their JOURNAL entries kept in
+order). Built, on the light lane (stage 0, under 1.5 GiB, no lock, no assembler run, nothing fetched): doc/asm/SPEC.md, the forms'
+draft for both crops; `arbace.repr.asm` with `lex` (LLVM 23.1.5's AsmLexer token rules for x86 ELF: `#`, `//`, `/* */`, `;`, the
+integer and float spellings, `1f`/`2b`), `gnu` (GNU's directive language: labels, assignments, directives with comma and space
+separated arguments, `.macro`/`.rept`/`.irp`/`.irpc` bodies and macro invocations as text, `.intel_syntax` refused for AX3, LLVM's
+GNU operator precedence, the canonical print), `amd64/att` (AT&T operands after X86AsmParser: registers, `%st(N)`, `$imm`, memory
+with segment, symbolic segments and equated registers, `*` indirection, `{vex3}` pseudo prefixes, prefixes, AVX-512's `{%k}`,
+`{z}`, `{1toN}`, `{rn-sae}`), `full` (mode :full's layer: per item the gap and the text when not canonical, with the canonical
+text's hash, after repr/llvm's LLS18 (a)); `bin/repr-asm read|print|corpus extract|lists|roundtrip [--record]|divergences` and the
+Makefile's `repr-asm-*`; `test/asm/corpora.edn` (musl 1.2.6's and llvm-project 23.1.5's tarballs, the pins of test/c and test/cpp
+restated), `roundtrip-results-amd64.edn`, `divergences-read.edn`, `controls.txt`, `judge.ae`. The namespaces are a crop's: added to
+`bin/lib/version.bash`'s `arbace_crop_paths`, `arbace/j2g/embed.ae`'s exclusions and `test/gate/audit.ae`'s `crop-rules`
+(`test/gate/gate-key-crops-test.bash` passes); this commit moves the gate's key once (embed.ae and version.bash are hashed, as every
+crop's first commit did), later commits under `arbace/repr/asm` none.
+
+Results (bin/repr-asm roundtrip, about 50 s): musl's 32 files all pass (read; the `.ae` text read back to the same forms and layer;
+printed back byte for byte; the canonical print read again to the same forms with an empty layer); `MC/AsmParser` 139 of 157 (its
+split-file tests as their parts; 15 error tests rejected as their RUN lines say, one input of an error test, one Intel, one
+`-motorola-integers`); `MC/X86` 464 of 621 (every AT&T file; 152 Intel for AX3, 4 error tests, one file that is not an input).
+Negative controls: three, each a file's `.ae` printed back against another's original, fail as they must.
+
+Decisions taken within the slice, as proposals for the user (doc/asm/AMD64-SURVEY.md, "Proposed"): AXS17 (the mnemonic as written,
+operands reversed, until AX2's table makes the machine level; the alternative, a hand table of suffixes now, cannot tell `cmovl`'s
+condition from a suffix), AXS18 (the header `asm/unit`, since `asm/file` is the `.file` directive's item), AXS19 (macro bodies as
+text, gas's model; parsing them was considered, but altmacro and `\()` make bodies that are not statements before expansion),
+AXS20 (split-file tests as parts), AXS21 (the gate step and the row at AX10), AXS22 (the corpora extracted, not committed).
+Sources studied: llvm-project-23.1.5.src.tar.xz's `llvm/lib/MC/MCParser/{AsmLexer,AsmParser,ELFAsmParser}.cpp`,
+`llvm/lib/Target/X86/AsmParser/X86AsmParser.cpp`, `llvm/lib/Target/X86/MCTargetDesc/X86MCAsmInfo.cpp` (Apache-2.0 WITH
+LLVM-exception; rules followed by hand, no code copied; LICENSE.md and doc/ARBACE.md name them).

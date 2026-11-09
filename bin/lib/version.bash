@@ -32,12 +32,14 @@
 # A crop that is embedded (its re-seed window) leaves the list. Not here, as they are C's (embedded since C9) or the four's:
 # bin/lib/ci, bin/lib/repr-c (gate_key's own), repr/java (javac's tool embeds it), go/arbace/{ci,cinterp,crt}.
 arbace_crop_paths=(
-  # the crops' Arbace namespaces (embed.ae's excluded): repr/haskell, rust, ocaml, scheme, python, cpp, llvm; si's, pyi's, the
+  # the crops' Arbace namespaces (embed.ae's excluded): repr/haskell, rust, ocaml, scheme, python, cpp, llvm, asm; si's, pyi's, the
   # lowering's, rsi's and llvmi's tools
   arbace/repr/haskell.ae 'arbace/repr/haskell/*' arbace/repr/rust.ae 'arbace/repr/rust/*' arbace/repr/ocaml.ae 'arbace/repr/ocaml/*'
   arbace/repr/scheme.ae 'arbace/repr/scheme/*' 'arbace/scheme/*' arbace/repr/python.ae 'arbace/repr/python/*'
   arbace/python.ae 'arbace/python/*' arbace/repr/cpp.ae 'arbace/repr/cpp/*' arbace/repr/llvm.ae 'arbace/repr/llvm/*'
   'arbace/cpp/*' arbace/rust.ae 'arbace/rust/*' 'arbace/llvm/*'
+  # repr/asm, the assembly crops' bridge (doc/asm/SPEC.md; AX1)
+  arbace/repr/asm.ae 'arbace/repr/asm/*'
   # their Go forms: oi's (with its C API, oicapi), si's (scm, scminterp), pyi's (py, expat, pyexpat), hsi's (hs) and the libm port hsi and pyi import
   go/arbace/oi.ae 'go/arbace/oi/*' go/arbace/oicapi.ae 'go/arbace/oicapi/*' go/arbace/scm.ae 'go/arbace/scm/*' go/arbace/scminterp.ae 'go/arbace/scminterp/*'
   go/arbace/py.ae 'go/arbace/py/*' go/arbace/expat.ae 'go/arbace/expat/*' go/arbace/pyexpat.ae 'go/arbace/pyexpat/*'

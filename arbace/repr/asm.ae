@@ -1,0 +1,124 @@
+(ns arbace.repr.asm
+  "repr/asm, assembly's bridge (doc/asm/SPEC.md; doc/asm/AMD64-SURVEY.md §4-§5, AX1): GNU as's text, AT&T syntax for
+  amd64, as assembly forms and back. `read-text` reads a text into its items (arbace.repr.asm.gnu with
+  arbace.repr.asm.amd64.att's instructions), `ae-text` writes them as `.ae` text (a header form, then an item a line),
+  `print-text` prints them canonically; mode :full (arbace.repr.asm.full) keeps the layer that prints the original back
+  byte for byte. `-main` is bin/repr-asm's read, print and the Arbace half of its round trip."
+  (:require [arbace.repr.asm.gnu :as gnu]
+            [arbace.repr.asm.amd64.att :as att]
+            [arbace.repr.asm.full :as full]
+            [arbace.repr.c.layout :as layout]
+            [arbace.string :as str])
+  (:import [java.util.concurrent Executors Callable Future]))
+
+(set! *warn-on-reflection* true)
+
+(def header '(asm/unit {:arch :amd64 :syntax :att}))
+
+(defn latin1 ^String [^String path]
+  (String. (java.nio.file.Files/readAllBytes (.toPath (java.io.File. path))) "ISO-8859-1"))
+
+(defn spit-latin1 [^String path ^String s]
+  (when-let [p (.getParentFile (java.io.File. path))] (.mkdirs p))
+  (java.nio.file.Files/write (.toPath (java.io.File. path)) (.getBytes s "ISO-8859-1")
+                             ^"[Ljava.nio.file.OpenOption;" (make-array java.nio.file.OpenOption 0)))
+
+(defn read-items [^String src] (gnu/read-items src (fn [ts i] (att/read-insn src ts i))))
+(defn read-text [^String src] (mapv first (read-items src)))
+(defn print-text ^String [forms] (gnu/print-items forms att/insn-text))
+(defn read-full [^String src] (full/read-full src (read-items src) att/insn-text))
+(defn print-full ^String [forms layer] (full/print-full forms layer att/insn-text))
+
+(defn ae-text
+  "The `.ae` text of `forms`: the header, then an item a line; with `layer`, its line last."
+  ^String [forms layer]
+  (str (layout/form-str header) "\n"
+       (apply str (map #(str (layout/form-str %) "\n") forms))
+       (when layer (full/layer-text layer))))
+
+(defn- strip-line [x]
+  (cond (seq? x) (apply list (map strip-line x)) (vector? x) (mapv strip-line x) (map? x) (into {} (map (fn [[k v]] [k (strip-line v)]) x)) :else x))
+
+(defn read-ae
+  "The items of an `.ae` text (its header checked and left out)."
+  [^String text]
+  (let [r (arbace.lang.LineNumberingPushbackReader. (java.io.StringReader. text))
+        eof (Object.)
+        xs (loop [out []] (let [x (read r false eof)] (if (identical? x eof) out (recur (conj out (strip-line x))))))]
+    (when-not (= (first xs) header) (throw (ex-info "not an assembly .ae text: no (asm/unit ...) header" {})))
+    (vec (rest xs))))
+
+(defn- reason ^String [^Throwable e]
+  (str (if-let [c (:asm/refused (ex-data e))] (str (name c) ": ") "crash: ")
+       (-> (str (.getMessage e)) (str/replace #"[\t\n\r]" " ") (str/replace "\"" "'") (str/replace "\\" "(backslash)") (str/replace #"[^ -~]" "?"))))
+
+(defn check-one
+  "One file's round trip: read in :full; the `.ae` text read back (forms and layer equal); printed back with the layer
+  (the original byte for byte); the canonical print read again (the same forms, no layer). Writes the `.ae` text at
+  `ae-path`; [status detail items gaps texts], status ok, refused, crash, ae-differs, layer-differs, text-differs,
+  forms-differ or canon-layer."
+  [^String path ^String ae-path]
+  (try
+    (let [src (latin1 path)
+          {:keys [forms layer]} (read-full src)
+          ae (ae-text forms layer)
+          _ (spit-latin1 ae-path ae)
+          back (read-ae ae)
+          canon (print-text forms)
+          again (read-full canon)
+          st (full/layer-stats layer)
+          status (cond
+                   (not= back forms) "ae-differs"
+                   (not= (full/layer-of-ae ae) layer) "layer-differs"
+                   (not= (print-full forms layer) src) "text-differs"
+                   (not= (:forms again) forms) "forms-differ"
+                   (or (seq (:at (:layer again))) (:end (:layer again))) "canon-layer"
+                   :else "ok")]
+      [status "" (count forms) (:gaps st) (:texts st)])
+    (catch Throwable e
+      [(if (:asm/refused (ex-data e)) "refused" "crash") (reason e) 0 0 0])))
+
+(defn control
+  "A negative control: the subject's `.ae` (written in :full) printed back with its layer, against the reference's
+  original text: `differs` (as it must) or `same`."
+  [^String subject-ae ^String ref-path]
+  (let [ae (latin1 subject-ae)]
+    (if (= (print-full (read-ae ae) (full/layer-of-ae ae)) (latin1 ref-path)) "same" "differs")))
+
+(defn- pool-map [f rows]
+  (let [threads (Integer/parseInt (or (System/getenv "REPR_ASM_THREADS") "4"))
+        pool (Executors/newFixedThreadPool threads)
+        futs (mapv (fn [r] (.submit pool ^Callable (fn [] (f r)))) rows)
+        res (mapv #(.get ^Future %) futs)]
+    (.shutdown pool)
+    res))
+
+(defn -main
+  "bin/repr-asm read [--full] FILE [-o OUT.ae]; print [--full] FILE.ae [-o OUT]; check LIST WORK (each NAME<tab>PATH:
+  WORK/check.tsv, NAME STATUS ITEMS GAPS TEXTS DETAIL, the .ae texts in WORK/ae/); control SUBJECT.ae REFERENCE."
+  [& args]
+  (let [[verb & r] args
+        full? (some #{"--full"} r)
+        r (remove #{"--full"} r)
+        out (second (drop-while #(not= "-o" %) r))
+        r (take-while #(not= "-o" %) r)
+        emit (fn [^String s] (if out (spit-latin1 out s) (do (print s) (flush))))]
+    (case verb
+      "read" (let [src (latin1 (first r))]
+               (emit (if full?
+                       (let [{:keys [forms layer]} (read-full src)] (ae-text forms layer))
+                       (ae-text (read-text src) nil))))
+      "print" (let [ae (latin1 (first r))
+                    forms (read-ae ae)
+                    layer (when full? (full/layer-of-ae ae))]
+                (emit (if layer (print-full forms layer) (print-text forms))))
+      "check" (let [[lst work] r
+                    rows (for [l (str/split-lines (slurp lst)) :when (seq l)] (str/split l #"\t"))
+                    res (pool-map (fn [[n p]] (into [n] (check-one p (str work "/ae/" n ".ae")))) rows)]
+                (spit-latin1 (str work "/check.tsv")
+                             (apply str (map (fn [[n s d i g t]] (str n "\t" s "\t" i "\t" g "\t" t "\t" d "\n")) res)))
+                (let [ok (count (filter #(= "ok" (second %)) res))]
+                  (println (str "repr-asm check: " ok " of " (count res) " ok"))))
+      "control" (println (control (first r) (second r)))
+      (do (binding [*out* *err*] (println "repr-asm: read|print|check|control")) (System/exit 2)))
+    (shutdown-agents)))

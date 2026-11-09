@@ -365,6 +365,16 @@ code. Three kinds of things live here:
   `arbace/rust/check.ae`'s own-verdict judge (`own-verdict`, `run-class`, `verdict-met?`) ports rustc 1.99.1's compiletest
   (`src/tools/compiletest/src/runtest/ui.rs`'s run checks, `directives.rs`'s directive lines; the pinned `rustc-1.99.1-src.tar.xz`),
   by hand on 2026-11-07 (rust-90, doc/rust/EVAL.md §13; LICENSE.md; MIT OR Apache-2.0); evaluated from the checkout.
+- `repr/asm.ae` and `repr/asm/` (repr/asm, GNU as's text, AT&T syntax for amd64, as assembly forms and back; `arbace.repr.asm`
+  and `arbace.repr.asm.*`; doc/asm/SPEC.md, doc/asm/AMD64-SURVEY.md, AX1): written by hand on 2026-11-09/10 after
+  llvm-project at `llvmorg-23.1.5` (the release tarball `llvm-project-23.1.5.src.tar.xz`, SHA-256
+  `fb50b1eac93ddeb3aa8dab4cfe324dff74f4a9c2bdee6160c9e36188f8d06a6e`, pinned in `test/cpp/corpora.edn`): `lex.ae` takes
+  `llvm/lib/MC/MCParser/AsmLexer.cpp`'s token rules for an x86 ELF target (`LexToken`, `LexDigit`, `LexIdentifier`,
+  `LexSlash`, `isAtStartOfComment`; `X86MCAsmInfo.cpp`'s comment and separator strings), `gnu.ae` `AsmParser.cpp`'s
+  `getGNUBinOpPrecedence` and the shapes of `parseStatement` (labels, assignments, directives, macro instantiation) and
+  `parseMacroLikeBody` (a block's body as text, nested blocks counted), `amd64/att.ae` `X86AsmParser.cpp`'s AT&T operand
+  grammar (`ParseOperand`, `ParseMemOperand`, the AVX-512 decorations); no code is copied (LICENSE.md); evaluated from
+  the checkout.
 - `repr/llvm.ae` and `repr/llvm/` (repr/llvm, LLVM IR to LLVM forms and back and its verifier, `arbace.repr.llvm` and
   `arbace.repr.llvm.*`; doc/llvm/SPEC.md, doc/llvm/LLVM-CROP-SURVEY.md): the verifier `repr/llvm/verify.ae` and the
   reader's LLParser errors in `repr/llvm/read.ae` reimplement checks of llvm-project at `llvmorg-23.1.4` (the release

@@ -1355,6 +1355,14 @@ covers what.
   `abi` and the launcher's own package (the Eclipse Public License 1.0) and Go's runtime and
   standard library (Go's BSD 3-Clause License). A distribution of the box carries this file, as
   for the executables above.
+- `arbace/repr/asm.ae` and `arbace/repr/asm/` (`arbace.repr.asm.*`, repr/asm, the assembly crops' bridge, doc/asm/SPEC.md, AX1):
+  the lexer's token rules (`lex.ae`), the GNU expression precedence and statement shapes (`gnu.ae`) and the AT&T operand
+  grammar (`amd64/att.ae`) follow LLVM's `llvm/lib/MC/MCParser/AsmLexer.cpp`, `AsmParser.cpp` (`getGNUBinOpPrecedence`,
+  `parseStatement`, `parseMacroLikeBody`) and `llvm/lib/Target/X86/AsmParser/X86AsmParser.cpp` (`ParseMemOperand`,
+  `ParseOperand`) from `llvm-project-23.1.5.src.tar.xz` (the pin of `test/cpp/corpora.edn` and `test/asm/corpora.edn`), rule
+  for rule, under the Apache License 2.0 with the LLVM Exceptions (section "LLVM (clang)" below). Its test corpora
+  (`llvm/test/MC/{X86,AsmParser}`, extracted into `.tmp/`, never committed) are under the same licence; musl 1.2.6's
+  `.s` files, read as a corpus, under musl's MIT licence (section "musl: MIT License").
 - `test/cpp/clang.ae` (`cpp.clang`, the clang half of Arbace's C++ target, doc/cpp/CPP-SURVEY.md, "As built: CP248 (a)"):
   a port of parts of clang, the LLVM Project, from `llvm-project-23.1.5.src.tar.xz` (the pin of `test/cpp/corpora.edn`,
   SHA-256 `fb50b1eac93ddeb3aa8dab4cfe324dff74f4a9c2bdee6160c9e36188f8d06a6e`): `clang/lib/Frontend/InitPreprocessor.cpp`'s
