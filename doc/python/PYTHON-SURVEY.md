@@ -4792,3 +4792,51 @@ On goi (`bin/pyi run cyc241.py`, the runtime interpreted): no crash; defaults, m
 still held by goi's registers (218's REQUEST), as 222 found: hence `:finalization-goi`. `bin/pyi runtime check` with
 `PYI_SMOKE_ONLY` (f-struct, g-weak, d-ssl, f-intbytes, c-locale, g-builtin-module, e-gen, g-gc, f-del): the packages printed
 and read again the same, the tables and runtime-ops equal, 8 programs equal, the REPL session equal, the controls fail as they must.
+
+## As built: 242, sys's attributes and sigwaitinfo (2026-11-09, the Mac VM, queue 242)
+
+The two deferred classes `:sys-module` (23 tests) and `:siginfo` (named by its skip message), grouped by the missing piece and
+ported from CPython 3.14.10's Python/sysmodule.c and Modules/signalmodule.c (the pinned tarball). Light: `bin/pyi lib-test-all
+--fresh test_sys test_signal` on the VM before (base 2b5c0c075) and after, each test's own verdict; no record written.
+
+- **The pieces of `:sys-module`** (23 tests): (1) struct sequences, sys.flags, float_info, int_info, hash_info, thread_info were
+  namespaces (`len()` failed; flags' bool fields, no instantiation, the repr): test_attributes, test_thread_info, test_sys_flags,
+  test_sys_flags_no_instantiation; (2) functions missing: call_tracing, _current_frames, _current_exceptions,
+  _getframemodulename, setdlopenflags/getdlopenflags, getallocatedblocks; (3) argument and status rules: getdefaultencoding's
+  arguments, setswitchinterval's type, displayhook without sys.stdout (RuntimeError), sys.exit's tuple status and
+  handle_system_exit's exit status, implementation.supports_isolated_interpreters; (4) the process: PYTHONIOENCODING and the C
+  locale's surrogateescape on stdin and stdout, the exit message through stderr's errors handler, sys.orig_argv, `exit()` in
+  the REPL; (5) the end of life: is_finalizing and sys.flags read from a `__del__` at exit; (6) the C API's test modules
+  (test_jit_is_active, test_getallocatedblocks' with_pymalloc).
+- **Built**: go/arbace/py/builtins_sys_info.ae (new): the struct sequence types as `newStructSeqType("sys", ...)` with
+  CPython's fields and counts (flags: 18 in the sequence, gil, thread_inherit_context and context_aware_warnings by name only;
+  the 3.15 type adds lazy_imports; flags refuses instantiation), `sysStruct`/`set`, `call_tracing` (the thread's monitoring
+  re-entry guard cleared around the call, as _PyEval_CallTracing clears tracing), `_current_frames`/`_current_exceptions` over
+  the thread registry, `_getframemodulename` (the frame's globals' `__name__`), the dlopen flags (RTLD_NOW at start),
+  getallocatedblocks (Go's live heap objects after a collection), the standard streams' encoding (`stdioConfig`: PYTHONIOENCODING
+  `ENC[:ERRORS]` unless -E/-I, stderr's errors always backslashreplace; strict, or surrogateescape without a forced encoding
+  when LC_ALL/LC_CTYPE/LANG says C or POSIX; `textFile.writeStr` encodes by the codec, `print` writes its pieces through it),
+  `exit`/`quit` (site's Quitter) and `sys.orig_argv` (bin/pyi python passes the executable and its command line in
+  PYI_ORIG_ARGV). sys.go: sys.exit(tuple) raises SystemExit with the tuple's items (PyErr_SetObject), is_finalizing reads
+  `pyFinalizing`. interp.go: systemExitStatus is handle_system_exit's (several arguments a tuple, an int as C's int, beyond long
+  -1 i.e. 255, no trimming of the message's newline, written through stderr's errors handler). Small hunks outside sys:
+  builtins.go (print's write path), registry.go (exit/quit among the builtins), thread_gil.go (setswitchinterval's argument),
+  bin/pyi (PYI_ORIG_ARGV).
+- **`:siginfo`**: go/arbace/py/builtins_signal_info.ae (new): `signal.sigwaitinfo`, `sigtimedwait` (the timeout's rounding and
+  "timeout must be non-negative" as signalmodule.c) and `signal.struct_siginfo` (seven fields, tp_name "signal.struct_siginfo"), over
+  one wait that `sigwait` shares (`sigWaitSet`). Go's handlers give no siginfo_t, so the record is kept where pyi sends the signal:
+  kill/os.kill/raise_signal of the own process (SI_USER, own pid and uid), pthread_kill (SI_TKILL), the interval timers
+  (SI_KERNEL, 0x80); a signal from another process arrives as SI_USER from pid 0 uid 0 (CPython: the sender's pid and uid; no
+  test checks it). The first arrival of a held signal keeps its record.
+- **Counts** (own verdict, the tests of each class): `:sys-module` 23 not ok before, 4 after (19 ok): test_is_finalizing and
+  test_issue20602 (a `__del__` at exit: queue 241's finalization at exit, which sets `pyFinalizing`), test_jit_is_active and
+  test_getallocatedblocks (they import _testcapi, CPython's C API test module; getallocatedblocks, tried by hand, drifts by about
+  130 blocks a call under goi where the test allows 50). `:siginfo`: the five named tests of test_signal (test_sigwaitinfo,
+  test_sigtimedwait, _poll, _timeout, _negative_timeout) skipped before, ok after; the entry is removed; test_eintr's two (they
+  need the walltime resource, skipped in both) were checked as scripts. test_sys alone: 31 ok / 21 not ok / 51 skipped to 50 ok /
+  3 not ok / 50 skipped; test_signal: 38 to 43 ok, 18 to 13 skipped; the one failure (test__thread_interrupt_main) is
+  `:signal-timing`'s.
+- Not done, with the cause: audit hooks (`sys.audit`/`addaudithook` stay no-ops: pyi's runtime raises none of CPython's events;
+  test_audit is in no class of this task), getrefcount (a constant; test_refcount is cpython_only), the JIT, `-X utf8=0`/-I's
+  effect on the standard streams (the stream config reads the environment; -E and -I are honoured for PYTHONIOENCODING
+  through PYI_IGNORE_ENV), stdin's decoding by PYTHONIOENCODING (only the encoding of writes).
