@@ -20,10 +20,11 @@
     with patSynSig's parts and their builders' types;
   - instances (mi_insts): each dictionary function with its type; family instances (mi_fam_insts) with their
     equations, a data instance's with its representation tycon;
-  - unfoldings: none. At -O0 GHC.Iface.Tidy's addExternal exposes no unfolding but a compulsory one
+  - unfoldings: the compulsory ones alone. At -O0 GHC.Iface.Tidy's addExternal exposes no unfolding but a compulsory one
     (opt_expose_unfoldings = ExposeNone with -fomit-interface-pragmas, which -O0 implies), and an importer at -O0 reads
-    none but a compulsory one (tcIdInfo with -fignore-interface-pragmas): the default methods' INLINE unfoldings the
-    helper's interfaces carry are -O2's.
+    none but a compulsory one (tcIdInfo with -fignore-interface-pragmas); every default method has one
+    (GHC.HsToCore.Binds' makeCorePair, IsDefaultMethod: Note [INLINE and default methods]), written as the
+    elaborator's Core of the $dm (dm-unfolding, the helper's form).
 
   A type is written so that the elaborator's reader (typecheck/conv-type) gives back the type the writer held: the
   invisible kind arguments the reader drops (a type constructor's kind arity, the unboxed tuples' and sums'
@@ -232,6 +233,18 @@
                             " :builder " (if-let [b (get genv n)] (tf b) "nil") "})"))
         insts (for [{:keys [dfun tvs ctx head]} (:own-insts r)]
                 (str "(instance " (ns-str dfun) " " (tf [:forall tvs ctx [:tc (first head) (second head)]]) ")"))
+        ;; the default methods' compulsory unfoldings (GHC.HsToCore.Binds' makeCorePair with is_default_method: every
+        ;; $dm, IsDefaultMethod's export, Note [INLINE and default methods]), the only unfoldings an -O0 interface carries
+        ;; (addExternal's Note [Always expose compulsory unfoldings]); the elaborator's Core of the $dm, its local binders
+        ;; made unique to the module (an importer's own binders are numbered alike)
+        dms (set (for [[_ info] classes [_ d] (:defaults info)] d))
+        uniq (fn uniq [x] (cond (and (seq? x) (= 'lv (first x)) (= 3 (count x))) (list 'lv (second x) (str (nth x 2) "@" m))
+                                (seq? x) (apply list (map uniq x))
+                                (vector? x) (mapv uniq x)
+                                :else x))
+        dm-unfs (binding [*print-length* nil *print-level* nil *print-meta* false]
+                  (vec (sort (for [b (:core r) :when (and (seq? b) (= 'bind (first b)) (contains? dms (second b)))]
+                               (str "(dm-unfolding " (ns-str (second b)) " " (pr-str (uniq (nth b 2))) ")")))))
         head-occ (fn [t] (case (first t) :tc (occ (second t)) :tv (first (str/split (second t) #"_")) :app (recur (second t)) ""))
         fis (for [[fam e] (:fam-insts r)]
               (let [ax (if (:data e) (str "D:" (occ (second (:rhs e))) "0") (str "D:R:" (occ fam) (apply str (map head-occ (:lhs e)))))]
@@ -242,7 +255,7 @@
                                                   (str "(fixity " (nth n 1) " " (pr-str (nth n 3)) " " p " " d ")"))) "])\n"
          "(hsiface/things [" (str/join "\n  " (sort (concat ids datacons tycon-forms syn-forms fam-forms class-forms patsyn-forms))) "])\n"
          "(hsiface/instances [" (str/join "\n  " (sort insts)) "])\n"
-         "(hsiface/unfoldings [])\n"
+         "(hsiface/unfoldings [" (str/join "\n  " dm-unfs) "])\n"
          "(hsiface/fam-instances [" (str/join "\n  " (sort fis)) "])\n")))
 
 ;;; ------------------------------------------------------------------------------------------
