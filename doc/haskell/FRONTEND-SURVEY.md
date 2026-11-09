@@ -14,7 +14,7 @@ art, licenses, papers) is marked "(memory, verify)".
 
 Contents: Summary · 1 What the front end must produce · 2 Measurements · 3 The pieces · 4 Judging · 5 Prior art ·
 6 Routes and tiers · 7 Milestones HF1-HF12 · 8 Risks · Proposed (HFS1-HFS9) · Decided · As built: HF1-HF2 · As built: HF3 (start)
-· ... · As built: HF9 (first slice) · As built: HF9 (second slice) · As built: HF10 (first slice) · As built: HF10 (second slice).
+· ... · As built: HF9 (first slice) · As built: HF9 (second slice) · As built: HF10 (first slice) · As built: HF10 (second slice) · As built: HF10-P1, P2, P5, P6, P8, P10 · As built: HF10-P3 (first slice).
 
 ## Summary
 
@@ -2448,3 +2448,169 @@ closure (`(rcon / (closure`, 191), a case GHC keeps where ours let-binds (`(case
 3. `REPR_HASKELL_RUN_IFACES=pack bin/repr-haskell run-check` and `bin/hsi check --front native` (the interfaces pack re-keyed).
 4. The oracle tier, by hand: `bin/oracle-records verify haskell stg-libs-O0 --sample 2` (GHC: the reference's two smallest packages
    dumped again and compared).
+
+## As built: HF10-P3 (first slice) (2026-11-09, branch `hs-p3`, from `mac/next` e6214cd13)
+
+By an agent on the main host by day (the light tier: no gate but `--plan`, no build of Arbace, every process under about 1.5 GiB, at
+most two at once; stage 0 `/root/arbace/target/seed/amd64/arbace`, the checkout's sources evaluated; no GHC: GHC's interfaces and
+`-O0` STG only as the judges' data, from the packs). The brief: HF10-P3 (a), the user's decision of 2026-11-09: the front end's
+own interfaces, written as it compiles ghc-internal bottom-up, so the boot libraries' `-O0` set is coherent without GHC's
+interfaces or the pack merge; hs-props2's "What is left" named the gap: our interfaces lacked exports, fixities, type constructors,
+families and the default methods' unfoldings. GHC 9.14.1's sources the spec (`compiler/GHC/Iface/{Make,Tidy}.hs`,
+`Driver/Config/Tidy.hs`, `IfaceToCore.hs`, `HsToCore/Binds.hs`, `Types/Id/Make.hs`, `Builtin/Types.hs`, `Builtin/Types/Literals.hs`,
+`Tc/Utils/TcMType.hs`, `Tc/TyCl/{Class,Instance}.hs`, of the pinned tarball), ported with GHC's notice (LICENSE.md, doc/ARBACE.md).
+
+### Design (HF10-P3-D1 to D6)
+
+- **D1 The format is the helper's iface2 forms.** An own interface is `M.iface.edn` in the forms the renamer's (`load-iface`:
+  exports, fixities, the constructors' fields) and the elaborator's (`load-ifaces!`: things, instances, family instances,
+  unfoldings) readers already take from GHC's interfaces, so nothing that reads an interface changes and the judge reads both the
+  same way. Written by `arbace.repr.haskell.ownface/own-iface-text` from the renamer's result (the avails, the fixities, the source
+  bangs) and the elaborator's (its things; the result now also carries its families, its open family instances, its pattern
+  synonyms, its values' types and its instances zonked).
+- **D2 What a module's interface holds is -O0's** (mkIface_ with GHC.Iface.Tidy at -O0: `opt_expose_unfoldings = ExposeNone`,
+  `trimId`): its exports and fixities; every exported thing it defines and every type constructor and class it defines (Tidy keeps
+  every TyCon: a boot file's exported Integral names a Real it does not export); ids with their types and no IdInfo (trimmed);
+  constructors with dataConSourceArity, field labels, wrapper types, source bangs, -O0's implementation bangs (dataConSrcToImplBang
+  with bang_opt_unbox_disable: UNPACK not honoured) and tags; synonyms, families (flavour, a closed family's equations), classes
+  (variables, superclasses, methods, functional dependencies by position, default methods), pattern synonyms (patSynSig's parts,
+  the builder, a record synonym's field selectors as mkPatSynRecSelBinds types them); instances; family instances (a data
+  instance's with its representation tycon); and the only unfoldings -O0 exposes, the compulsory ones: every default method's
+  (makeCorePair's is_default_method for IsDefaultMethod, Note [INLINE and default methods]), the elaborator's Core of the `$dm`.
+- **D3 Kinds stay erased** (HF9-P4 (a)): an own type constructor is written with a kind of its arity and no invisible binder, so its
+  kind arity reads 0 and the types that mention it are written without kind arguments, as the elaborator holds them. A type
+  constructor whose reader drops arguments (a kind arity from another interface, an unboxed tuple's or sum's representations,
+  FUN's multiplicity and representations) gets placeholders back (`type-form`), so a type round-trips. The one interface that is
+  GHC's is GHC.Internal.Prim, the wired-in interface GHC itself makes from `primops.txt.pp` (GHC.Builtin.Utils' ghcPrimIface: no
+  source, not compiled), taken from the pack; it names GHC.Internal.Types' wired-in things with their kind arguments, so
+  `typecheck/wired-kind-arities` adds GHC.Builtin.Types' (Solo#, MkSolo#, Coercible, ~, ~~, Any).
+- **D4 Wired-in definitions win over the source** (GHC.Iface.Tidy's Note [Drop wired-in things]): Multiplicity's constructors in
+  multiplicityTyCon's order (One, Many; the source says Many | One), the superclasses of ~~, ~ (~#) and Coercible (~R#) the source
+  does not write, GHC.Builtin.Types.Literals' built-in families (+, *, ^, -, Div, Mod, Log2, CmpNat, CmpSymbol, CmpChar,
+  AppendSymbol, ConsSymbol, UnconsSymbol, CharToNat, NatToChar) as built in.
+- **D5 Bottom-up as --make.** `libcheck own-order`: the plan's modules and the package's 24 hs-boot files in dependency order
+  (Kahn's, a SOURCE import an edge to the boot file); each unit's closure the module names of its lib-check closure (GHC's) with its
+  transitive imports (the oracle's installed closures name the GMP backend), each member's own interface, a boot file's when the
+  module is not compiled yet, Prim the wired one; `libcheck own` compiles them in one process (resumable after a timeout), writing
+  `pool/M.iface.edn` (`boot/` for a boot file) and a closure list `ln/M.txt` (no links: the readers take `*iface-files*`, a map of
+  module to file, beside their directories, since jrt has no symbolic links). An hs-boot file's signatures are its values
+  (`Rename/Module.hs`'s boot binders, `Tc/Module.hs`'s tcHsBootSigs).
+- **D6 Two judges, both against GHC's data.** lib-check's own types judge unchanged (each binder against GHC's interface of the
+  module), and `ownface/compare-ifaces`: the own interface against GHC's (the iface2 pack, the installed `-O2` build: its
+  exports, fixities, things and instances do not depend on the level), both read by the elaborator's readers
+  (`typecheck/iface-facts`) and compared fact by fact in the canonical form, instances by their heads (the dictionary functions'
+  names apart: GHC's getDFunTyKey spells the invisible kind arguments, `$fCategoryTYPEFUN`), with a negative control (Data.Either's
+  own interface against Data.Maybe's GHC interface, renamed: 0 of 19 equal). lib-stg's judge is GHC's `-O0` STG as before.
+
+The front end's rules met on the way (each GHC's): tcShortCutLit (an overloaded literal checked against Int, Word, Integer, Float or
+Double is built at its type with no Num wanted: Bignum.Integer's literals need no Num Integer, which GHC.Internal.Num defines above
+it); a standalone deriving on an empty data type (`deriving instance Show Void`); a class's functional dependencies kept by
+position for its own interface.
+
+### Built
+
+| piece | files | what |
+|---|---|---|
+| the writer and the judge | `arbace/repr/haskell/ownface.ae` | D1-D4, D6 |
+| the readers | `typecheck.ae` (`*iface-files*`, `iface-facts`, `canon`, the result's `:families :fam-insts :patsyns :own-genv :own-insts`, `wired-kind-arities`), `rename.ae` (`*iface-files*`, `*boot*`) | D1, D3, D5 |
+| the driver | `libcheck.ae` (`own-order`, `own`, `rank-own`, `own-control`, `closure-files`: a plan's closure `@FILE`) | D5 |
+| the checks | `bin/repr-haskell lib-check --ifaces own` (`.tmp/repr-haskell/lib-check/own/PKG/`), `lib-stg --ifaces own [--run]` (`.tmp/repr-haskell/lib-stg-own/`), run-check's `REPR_HASKELL_RUN_IFACES_OVER=DIR` | |
+| the records | `test/haskell/lib-check-own-ghc-internal.edn`, `test/haskell/lib-stg-own-results.edn` | `--judge` holds them |
+
+### The measure (ghc-internal, 265 modules and 24 boot files, one process, about 9 minutes)
+
+| | GHC's interfaces (the pack) | own interfaces, bottom-up |
+|---|---:|---:|
+| lib-check: modules elaborated without an error, every binder's type equal to GHC's | 260 of 265 | **258 of 265** (the first own run of the slice: 237) |
+| binders equal | 5,002 of 5,003 | 5,002 of 5,003 |
+| interfaces: facts equal to GHC's (D6) | - | **20,681 of 20,891**; 248 of 265 modules every fact; classes 136/136, datacons 3,310/3,310, tycons 647/647, fixities 114/114, patsyns 17/17, types 5,022/5,026, exports 8,541/8,679, instances 2,688/2,747, synonyms 180/182, families 26/33 |
+| closures | GHC's | 22,606 own interfaces, 400 boot, 289 Prim (wired), 9 missing (GMP's backend 7, base's GHC.ST, GHC.Stack: the oracle's closures) |
+| lib-stg: bindings equal to GHC's `-O0` STG (265 modules) | 5,372 of 7,593 (hs-props2's record) | **5,280 of 7,627** (5,140 before the default methods' unfoldings) |
+
+The 7 modules that do not pass on their own interfaces: the 5 that do not on GHC's (Data.Typeable.Internal, Exception.Context,
+Generics, Data.Dynamic, TH.Lift: lib-check's classes), Data.Data (`deriving instance (a ~ b, Data a) => Data (a :~: b)`: Typeable
+(a :~: b) from the given equality, not solved on the own interfaces) and none else. The interfaces' differences: the backend's
+exports (GHC's installed build is the GMP backend's, 138: an oracle class, HF10-P6), the derived instances on data family instances
+(URec's Eq, Ord, Show, Foldable, Traversable, Functor, Generic: the elaborator's deriving does not take a data instance) and
+Generic's Rep and Rep1 equations (not derived), the constraint tuples (CTuple0 is CUnit, HF10-P9 (b)), 4 types of
+unsafeWithSNatCo's family (an inner constraint).
+
+lib-stg's 92 bindings fewer than on GHC's interfaces, by class: the default methods' unfoldings are the elaborator's Core of the
+`$dm`, where GHC's is the `$dm`'s stable unfolding after its own module's `-O0` Simplifier (simplStableUnfolding: `not (x == y)`
+with `not` inlined in GHC.Internal.Classes, so GHC's `$fEqProxy`'s `/=` is `False` where ours calls `not True`; `:r / :u` 182 and
+`(case / (let` 250 at the head); the dictionary functions' names with kinds (`$fCategoryTYPEFUN`). Both are the next slice's.
+
+### Programs on the coherent own set
+
+`bin/repr-haskell lib-stg --ifaces own --run ID...` (a sample of ten of run-check's programs by day: samples/Arrays, Exc, LibMisc,
+Stm, Classes, synthetic/class-bits, class-integral, class-realfrac, primops-int, runtime-integer; the 63 at night), the programs
+compiled against the pack's interfaces with ghc-internal's replaced by the own ones (`REPR_HASKELL_RUN_IFACES_OVER`), no merge:
+
+| set | pass |
+|---|---:|
+| the pack (the `-O2` libraries, GHC's `-O2` interfaces), run-check's record | 10 of 10 |
+| ghc0: GHC's `-O0` STG of ghc-internal, base, ghc-prim and ghc-bignum, the programs against the own interfaces | **8 of 10** |
+| own, LIB_STG_REPLACE=equal: ghc0 with the 70 ghc-internal modules whose every binding equals GHC's `-O0` replaced whole by Arbace's own STG | **8 of 10, 0 lost** |
+| own, all: every one of the 258 modules the front end made STG of (no merge) | 0 of 10 |
+
+HF10-D5's coherent `-O0` set ran 35 of 63 programs because the programs were compiled against `-O2` interfaces (their unfoldings
+name `-O2` workers); against the own interfaces the `-O0` set is coherent: the two that fail stop outside them (Exc: SrcLoc's
+fields, the programs' constructor layout read from the libraries' STG; LibMisc: `ioException3`, an `-O2` name of a package still the
+`-O2` pack's). The whole own set stops at what lib-stg's judge already counts: Typeable's kind representations GHC.Internal.Types
+does not define (`krep$*`, GHC's mkKindRepBindings of the wired-in kinds) and a local left unbound by an unequal binding (`w_188`,
+the second slice's `LIB_STG_REPLACE=all` class).
+
+### What remains to switch hsi's eval and AOT to own libraries
+
+1. The default methods' unfoldings after the defining module's Simplifier (lib-check then runs the pipeline to the Simplifier, as
+   lib-stg does, and writes the stable unfolding of each `$dm`); the dictionary functions' names with their kind arguments
+   (getDFunTyKey over every argument: needs the kinds HF9-P4 (a) erased, or a kind arity per class kept from the declaration).
+2. base, ghc-prim and ghc-bignum bottom-up on ghc-internal's own interfaces (`lib-check --package base --ifaces own`: the driver
+   takes a second package once its closures name the first's pool), then the run corpora's packages (containers, bytestring, text,
+   stm, unix, directory, filepath, deepseq, array, time).
+3. GHC.Internal.Prim's interface made from `primops.txt.pp` (the pinned tarball's; `primops.ae`'s generator already reads it) instead
+   of the pack's: the last GHC interface of the path.
+4. Their STG (lib-stg's own set) for every package, then `bin/hsi check --front native --libs own`: the programs' interfaces the
+   own ones, the libraries the own STG; the cases 1 and the packs out of the eval and AOT keys.
+
+### Checks
+
+| check | result |
+|---|---|
+| `bin/repr-haskell lib-check --ifaces own` (265 + 24, one process) | 258 of 265, 20,681 of 20,891 facts; the control differs (0 of 19); `--judge test/haskell/lib-check-own-ghc-internal.edn`: 0 worse |
+| `bin/repr-haskell lib-check --judge test/haskell/lib-check-ghc-internal.edn` (GHC's interfaces, after the slice's elaborator rules) | 260 pass, 5 in a class, 0 worse, the control differs |
+| `bin/repr-haskell lib-stg --ifaces own` (265 modules) | 5,280 of 7,627 equal; the control 0 of 171 |
+| `bin/repr-haskell typecheck-check` | 24 of 24, the control 13 of 24 |
+| `bin/repr-haskell lib-stg --judge test/haskell/lib-stg-results.edn` (GHC's interfaces, 265 modules) | 5,373 of 7,600 (recorded 5,372); 0 worse, 1 better (Read); the control 0 of 171. The judge had read no row of its record (record-stg writes sorted maps, `{:compared ...`, and `read-results` took only lines starting `{:name`: every module "not in the record", the step failing); fixed, it reads any map line with a `:name` |
+| `bin/repr-haskell lib-stg --ifaces own --judge test/haskell/lib-stg-own-results.edn` | 0 worse |
+| `REPR_HASKELL_RUN_IFACES=pack bin/repr-haskell run-check` (HSI_LIBS the `-O2` pack, one front shard) | **60 of 63** (59 before), 63 of 63 as recorded, the 3 non-passes in their classes; the control fails as it must |
+| `bin/repr-haskell lib-check --ifaces own`'s interface control | Data.Either's own against Data.Maybe's: 0 of 19 equal (and against its own GHC interface every fact equal) |
+| `make check-makefile`, `bin/gate --full --plan` | 0; the plan exits 0 (no step added: HF10-P11) |
+
+### Night commands (one process at a time, at most 1.5 GiB a process; `. .tmp/env.sh`)
+
+1. `bin/repr-haskell lib-check --ifaces own --judge test/haskell/lib-check-own-ghc-internal.edn` (about 9 minutes; the pool for 2).
+2. `bin/repr-haskell lib-stg --ifaces own --judge test/haskell/lib-stg-own-results.edn --run` (the 265 modules and run-check's 63
+   programs on the two coherent sets: about 50 minutes).
+3. `bin/repr-haskell lib-stg --judge test/haskell/lib-stg-results.edn --run` (the step `haskell-lib-stg` after the slice's elaborator
+   rules: about 47 minutes) and `REPR_HASKELL_RUN_IFACES=pack bin/repr-haskell run-check`.
+
+### Proposed (HF10-P11 to HF10-P14; options with costs, a recommendation each, none decided)
+
+- **HF10-P11 The own interfaces as a recorded `--full` step.** (a) **`haskell-lib-check-own`: `lib-check --ifaces own --judge
+  test/haskell/lib-check-own-ghc-internal.edn` beside `haskell-lib-check` (light, about 9 minutes, 1.5 GiB, the iface2 pack's pin, no
+  GHC), its control the interface judge's**; half a day; (b) by hand until base joins. *Recommended: (a)*: the interfaces are what
+  every later step stands on.
+- **HF10-P12 The default methods' unfoldings.** (a) **after the defining module's `-O0` Simplifier (lib-check `--ifaces own` runs the
+  pipeline to the Simplifier and writes each `$dm`'s stable unfolding, its Core in the helper's spelling), lib-stg then on par
+  with GHC's interfaces or better**; 1 to 2 days, lib-check's run about twice as long; (b) the elaborator's Core as built (92
+  bindings fewer). *Recommended: (a)*.
+- **HF10-P13 Kinds for the dictionary functions' names.** GHC's getDFunTyKey spells the invisible kind arguments (198 of 2,709 names
+  differ; an importer of an own interface is coherent with it, GHC's STG is not). (a) **a class's and a type constructor's kind
+  arity kept from its declaration (the binders' kind annotations: `(a :: k)`), its instances' kind arguments inferred as far as
+  the heads' type constructors give them**; 1 to 2 days, part of HF9-P4's kinds; (b) leave the names (the judge keys by heads).
+  *Recommended: (b)* until the eval switch needs the pack's names, then (a).
+- **HF10-P14 The next package.** (a) **base on ghc-internal's own pool (the driver takes a package's pool as the next package's
+  wired-in set), then ghc-prim and ghc-bignum, then the run corpora's packages, each with its own lib-check and lib-stg records**;
+  2 to 4 days for base; (b) GHC.Internal.Prim from primops.txt.pp first. *Recommended: (a)*, (b) after: Prim is the compiler's own
+  wired-in interface, as GHC's.

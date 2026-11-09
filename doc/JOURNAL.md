@@ -2617,3 +2617,30 @@ The user accepted HF10-P1 to P10 as recommended (~06:15). Built by an agent in t
 - **Alternatives**: (b) a fresh process a file for the record (about twice the 80 minutes), not needed once the load is
   serialized; keying the shared tables by file was the other half of (a).
 
+
+## 2026-11-09 HF10-P3 (a), first slice: the front end's own interfaces, ghc-internal bottom-up (branch `hs-p3`, from `mac/next` e6214cd13)
+
+- Decided by the user 2026-11-09 (HF10-P3 (a)): the front end writes its own interfaces as it compiles the boot libraries
+  bottom-up, so the `-O0` set is coherent without GHC's interfaces or the pack merge. Built in the light tier by day; no GHC run.
+- `arbace/repr/haskell/ownface.ae`: the writer after GHC 9.14.1's `compiler/GHC/Iface/Make.hs` (mkIface_) and `Iface/Tidy.hs`
+  (addExternal, trimId) at -O0 (`Driver/Config/Tidy.hs`'s ExposeNone, `IfaceToCore.hs`'s tcIdInfo ignoring all but compulsory
+  unfoldings), `Types/Id/Make.hs`'s dataConSrcToImplBang, `HsToCore/Binds.hs`'s makeCorePair (every default method's compulsory
+  unfolding, Note [INLINE and default methods] of `Tc/TyCl/Instance.hs`), the wired-in definitions of `Builtin/Types.hs` and the
+  built-in families of `Builtin/Types/Literals.hs`, from the pinned tarball (SHA-256 2a83779c...), with GHC's notice (LICENSE.md,
+  doc/ARBACE.md). The format is the helper's iface2 forms, so the readers did not change; kinds stay erased (HF9-P4 (a)), the readers'
+  dropped kind arguments written back as placeholders. GHC.Internal.Prim stays GHC's wired-in interface (from the pack).
+- Considered: a new format of our own (rejected: two readers to keep; the forms are already Arbace's data), judging against GHC's
+  `-O0` `.hi` dumped afresh (rejected for this slice: GHC by hand; the iface2 pack's exports, fixities, things and instances do not
+  depend on the level, so the judge reads the pack), writing no unfoldings at all (tried first: lib-stg 5,140; GHC's -O0 does expose
+  the default methods' compulsory unfoldings, found reading makeCorePair; with them 5,280).
+- `libcheck own-order`/`own`: the 265 modules and 24 hs-boot files in dependency order, closures as file lists (`*iface-files*` in the
+  renamer and the elaborator: jrt has no symbolic links), resumable; `bin/repr-haskell lib-check --ifaces own`, `lib-stg --ifaces own
+  [--run]`, run-check's `REPR_HASKELL_RUN_IFACES_OVER`; the interface judge (`compare-ifaces`, by heads) with its negative control.
+- Rules met (GHC's): an hs-boot file's signatures as its values (renamer and elaborator), tcShortCutLit (`Tc/Utils/TcMType.hs`),
+  standalone deriving on an empty data type, class fundeps by position, every own class written (Tidy keeps every TyCon), the closures
+  with the transitive imports (the oracle's closures name the GMP backend).
+- Measures: lib-check on own interfaces 258 of 265 (GHC's 260; the first own run 237), 20,681 of 20,891 interface facts equal to
+  GHC's; lib-stg 5,280 of 7,627 (GHC's interfaces 5,372); ten programs: 8 on GHC's `-O0` libraries with the own interfaces (HF10-D5's
+  coherent set was 35 of 63 on `-O2` interfaces), 8 with 70 modules Arbace's own STG whole, 0 lost; the whole own set 0 (krep$*, an
+  unbound local). Records `test/haskell/lib-check-own-ghc-internal.edn`, `test/haskell/lib-stg-own-results.edn`. Proposals HF10-P11
+  to P14 in the survey.

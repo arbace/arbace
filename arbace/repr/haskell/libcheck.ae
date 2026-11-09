@@ -12,7 +12,8 @@
             [arbace.repr.haskell.rename :as rn]
             [arbace.repr.haskell.typecheck :as tc]
             [arbace.repr.haskell.tostg :as tostg]
-            [arbace.repr.haskell.stgcmp :as stgcmp])
+            [arbace.repr.haskell.stgcmp :as stgcmp]
+            [arbace.repr.haskell.ownface :as ownface])
   (:import [java.io File]))
 
 (defn- msg [^Throwable e] (str/replace (str (.getName (class e)) ": " (ex-message e)) #"\s+" " "))
@@ -55,20 +56,29 @@
 (defn feature-of [e]
   (or (some (fn [[re f]] (when-let [m (re-find re e)] (f (if (string? m) [m] m)))) feature-rules) "other"))
 
+(defn closure-files
+  "A plan's closure column: IFDIR,... directories, or @FILE, a list of interfaces (one path a line, HF10-P3's own closures):
+  [dirs {MODULE path}]"
+  [ifdir]
+  (if (str/starts-with? ifdir "@")
+    [[] (into {} (for [l (str/split-lines (slurp (subs ifdir 1))) :when (not (str/blank? l))]
+                   [(str/replace (.getName (File. ^String l)) #"\.iface\.edn$" "") l]))]
+    [(vec (remove empty? (str/split ifdir #","))) nil]))
+
 (defn- one [[nm dump ifdir giface] out]
   (let [w (str out "/" nm)
         local (str w "/ifl")
-        dirs (vec (remove empty? (str/split ifdir #",")))]
+        [dirs files] (closure-files ifdir)]
     (.mkdirs (File. ^String w))
     ;; the renamed tree taken as it is (HF9's second slice: no file written and read back, no projection on the facts,
     ;; the renamer's own diagnostics: a seventh of a large module's time)
-    (let [rr (try (binding [rn/*ifdirs* (vec (cons local dirs)) rn/*projection?* false]
+    (let [rr (try (binding [rn/*ifdirs* (vec (cons local dirs)) rn/*iface-files* files rn/*projection?* false]
                     (rn/rename-file dump nil local))
                   (catch Throwable e {:fail (msg e)}))]
       (if (:fail rr)
         {:name nm :stage :rename :msg (:fail rr)}
         (let [tree (:tree rr)
-              r (try (binding [tc/*ifdirs* (conj dirs local) tc/*srcfile* nm] (tc/typecheck-module tree))
+              r (try (binding [tc/*ifdirs* (conj dirs local) tc/*iface-files* files tc/*srcfile* nm] (tc/typecheck-module tree))
                      (catch Throwable e {:fail (msg e)}))]
           (if (:fail r)
             {:name nm :stage :typecheck :msg (:fail r)}
@@ -92,9 +102,9 @@
   [[nm dump ifdir _] out units unit ref]
   (let [w (str out "/work/" nm)
         local (str w "/ifl")
-        dirs (vec (remove empty? (str/split ifdir #",")))]
+        [dirs files] (closure-files ifdir)]
     (.mkdirs (File. ^String w))
-    (let [rr (try (binding [rn/*ifdirs* (vec (cons local dirs)) rn/*projection?* false]
+    (let [rr (try (binding [rn/*ifdirs* (vec (cons local dirs)) rn/*iface-files* files rn/*projection?* false]
                     (rn/rename-file dump nil local))
                   (catch Throwable e {:fail (msg e)}))]
       (if (:fail rr)
@@ -105,7 +115,7 @@
                             (with-open [rd (java.io.BufferedReader. (java.io.FileReader. ^String gref))]
                               (second (re-find #":file \"([^\"]*)\"" (or (.readLine rd) "")))))
                           (str "libraries/" unit "/src/" (str/replace nm "." "/") ".hs"))
-              r (try (binding [tc/*ifdirs* (conj dirs local) tc/*srcfile* srcfile tc/*unit* unit] (tc/typecheck-module (:tree rr)))
+              r (try (binding [tc/*ifdirs* (conj dirs local) tc/*iface-files* files tc/*srcfile* srcfile tc/*unit* unit] (tc/typecheck-module (:tree rr)))
                      (catch Throwable e {:fail (msg e)}))]
           (if (:fail r)
             {:name nm :stage :typecheck :msg (:fail r)}
@@ -135,8 +145,149 @@
                                   :ours-only (vec (:ours-only c)) :n-ours-only (count (:ours-only c))
                                   :diff (vec (:diff c)) :why (:why c)})))))))))
 
+;;; ------------------------------------------------------------------------------------------
+;;; HF10-P3: the package bottom-up on its own interfaces (doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P3 (first
+;;; slice)"). Each module (and each hs-boot file, before the modules that import it {-# SOURCE #-}) renamed and elaborated
+;;; against the own interfaces of the modules its closure names, then its own interface written
+;;; (arbace.repr.haskell.ownface) for the modules above it, as GHC's --make compiles a package in dependency order.
+
+(def ^:private import-re #"\(mod \"([A-Za-z0-9_.']+)\"\)\) NoRawPkgQual (IsBoot|NotBoot)")
+
+(defn- imports-of [f]
+  (if (.isFile (File. ^String f))
+    (vec (distinct (map (fn [[_ m b]] [m (= b "IsBoot")]) (re-seq import-re (slurp f)))))
+    []))
+
+(defn- boot-dump [dump] (str/replace dump #"\.hsc?\.edn$" ".hs-boot.edn"))
+
+(defn own-order
+  "The plan's modules and the package's hs-boot files in an order that compiles each after its imports (Kahn's, the
+  plan's order among the ready): lines KIND TAB NAME TAB DUMP TAB GHC-IFACE TAB CLOSURE (comma-separated module names: a
+  module's lib-check closure, GHC's; a boot file's the closures of its imports with them)"
+  [plan-file]
+  (let [rows (vec (for [l (str/split-lines (slurp plan-file)) :when (not (str/blank? l))] (str/split l #"\t")))
+        idx (into {} (map-indexed (fn [i [n]] [n i]) rows))
+        by (into {} (map (juxt first identity) rows))
+        closure (into {} (for [[n _ ln] rows]
+                           [n (vec (sort (for [^File f (or (.listFiles (File. ^String ln)) [])
+                                               :let [b (.getName f)] :when (str/ends-with? b ".iface.edn")]
+                                           (subs b 0 (- (count b) 10)))))]))
+        boots (into {} (for [[n d] rows :let [b (boot-dump d)] :when (.isFile (File. ^String b))] [n b]))
+        dep (fn [[m boot?]] (when (contains? by m) (if (and boot? (contains? boots m)) [:boot m] [:full m])))
+        nodes (vec (concat (for [[n] rows :when (contains? boots n)] [:boot n]) (for [[n] rows] [:full n])))
+        deps (into {} (for [[k n :as node] nodes]
+                        [node (set (remove #(or (nil? %) (= % node))
+                                           (map dep (imports-of (if (= k :boot) (get boots n) (second (get by n)))))))]))
+        prio (fn [[k n]] [(idx n) (if (= k :boot) 0 1)])
+        ;; the package's modules a module depends on, transitively (its imports, theirs...): GHC loads the interface of
+        ;; each on demand; with GHC's closure (the oracle's installed build, whose bignum backend may be another) the
+        ;; members of the own closure
+        imps (into {} (for [[n d] rows] [n (set (keep (fn [[m b]] (when (and (contains? by m) (not b)) m)) (imports-of d)))]))
+        bimps (into {} (for [[n d] rows] [n (set (keep (fn [[m b]] (when (and (contains? by m) b) m)) (imports-of d)))]))
+        trans (let [memo (atom {})]
+                (fn tr [n seen]
+                  (or (get @memo n)
+                      (let [r (reduce (fn [acc i] (if (contains? seen i) (conj acc i) (into (conj acc i) (tr i (conj seen n))))) #{} (get imps n))]
+                        (swap! memo assoc n r) r))))]
+    (loop [done #{} out [] left (set nodes)]
+      (if (empty? left)
+        (doseq [[k n] out]
+          (let [[_ d _ gi] (get by n)
+                cl (if (= k :boot)
+                     (vec (sort (distinct (mapcat (fn [[m _]] (when (contains? by m) (cons m (get closure m)))) (imports-of (get boots n))))))
+                     (vec (sort (distinct (concat (get closure n) (disj (into (trans n #{n}) (get bimps n)) n))))))]
+            (println (str (name k) "\t" n "\t" (if (= k :boot) (get boots n) d) "\t" gi "\t" (str/join "," cl)))))
+        (let [ready (sort-by prio (filter #(every? done (get deps %)) left))
+              ;; a cycle the boot files do not break: its first node by the plan's order goes first
+              nxt (or (first ready) (first (sort-by prio left)))]
+          (recur (conj done nxt) (conj out nxt) (disj left nxt)))))))
+
+(defn- own-one
+  "One line of own-order's: the closure's own interfaces linked (the full module's, else its boot file's; GHC.Internal.Prim
+  the wired-in interface, GHC's own: GHC.Builtin.Utils' ghcPrimIface, made from primops.txt.pp, not compiled), renamed,
+  elaborated, its own interface written into OUT/pool (a boot file's into OUT/boot), judged: its binders' types against
+  GHC's interface of the module, its interface against GHC's fact by fact"
+  [[kind nm dump giface cl] out wired gka unit units]
+  (let [boot? (= kind "boot")
+        lnfile (str out "/ln/" nm (when boot? ".boot") ".txt")
+        w (str out "/work/" nm (when boot? ".boot"))
+        local (str w "/ifl")
+        _ (do (.mkdirs (File. ^String local)) (.mkdirs (File. (str out "/ln"))))
+        members (remove str/blank? (str/split (or cl "") #","))
+        src (fn [x] (let [p (str out "/pool/" x ".iface.edn") b (str out "/boot/" x ".iface.edn")]
+                      (cond (.isFile (File. p)) [:own p]
+                            (.isFile (File. b)) [:boot b]
+                            (= x "GHC.Internal.Prim") [:wired (str wired "/" x ".iface.edn")]
+                            :else [:missing nil])))
+        got (for [x members :when (not= x nm)] [x (src x)])
+        files (into {} (for [[x [_ p]] got :when p] [x (.getCanonicalPath (File. ^String p))]))
+        _ (spit lnfile (apply str (map #(str % "\n") (vals (sort-by key files)))))
+        closure {:own (count (filter #(= :own (first (second %))) got)) :boot (count (filter #(= :boot (first (second %))) got))
+                 :wired (count (filter #(= :wired (first (second %))) got))
+                 ;; a member the package compiles later (not a dependency: lib-check's closures add MonadFail's interface and
+                 ;; the modules its interface names to every module's) and one it never compiles (another package's)
+                 :later (count (filter (fn [[x [k]]] (and (= k :missing) (contains? units x))) got))
+                 :missing (vec (sort (keep (fn [[x [k]]] (when (and (= k :missing) (not (contains? units x))) x)) got)))}
+        base {:name nm :kind (keyword kind) :closure closure}
+        rr (try (binding [rn/*ifdirs* [local] rn/*iface-files* files rn/*projection?* false] (rn/rename-file dump nil local))
+                (catch Throwable e {:fail (msg e)}))]
+    (if (:fail rr)
+      (merge base {:stage :rename :msg (:fail rr)})
+      (let [r (try (binding [tc/*ifdirs* [local] tc/*iface-files* files tc/*srcfile* nm tc/*unit* unit] (tc/typecheck-module (:tree rr)))
+                   (catch Throwable e (when (System/getenv "LIB_CHECK_TRACE") (.printStackTrace e)) {:fail (msg e)}))]
+        (if (:fail r)
+          (merge base {:stage :typecheck :msg (:fail r)})
+          (let [text (try (ownface/own-iface-text rr r unit) (catch Throwable e {:fail (msg e)}))
+                _ (when (string? text)
+                    (let [d (File. (str out (if boot? "/boot" "/pool")))]
+                      (.mkdirs d)
+                      (spit (str d "/" nm ".iface.edn.part") text)
+                      (.renameTo (File. (str d "/" nm ".iface.edn.part")) (File. (str d "/" nm ".iface.edn")))))
+                errs (:errors r)
+                c (when-not boot? (try (tc/compare-with-iface (assoc r :kind-arity gka) giface) (catch Throwable e {:fail (msg e)})))
+                ic (when (and (string? text) (not boot?))
+                     (try (ownface/compare-ifaces text (slurp giface) (:syns r) (:kind-arity r) gka) (catch Throwable e {:fail (msg e)})))]
+            (merge base
+                   {:stage (if (seq errs) :errors :ok)
+                    :errors (vec (take 12 (distinct (map #(subs % 0 (min 300 (count %))) errs))))
+                    :n-errors (count errs)
+                    :features (frequencies (map feature-of errs))}
+                   (when (map? text) {:write (:fail text)})
+                   (cond (nil? c) nil
+                         (:fail c) {:judge (:fail c)}
+                         :else {:types {:compared (:compared c) :equal (- (:compared c) (count (:diff c))) :missing (count (:missing c))}
+                                :diff (vec (take 6 (:diff c))) :missing (vec (take 12 (:missing c)))})
+                   (cond (nil? ic) nil
+                         (:fail ic) {:iface-judge (:fail ic)}
+                         :else {:iface (select-keys ic [:facts :equal :missing :extra :by])
+                                :iface-diff (vec (take 6 (:diff ic)))}))))))))
+
+(defn rank-own
+  "HF10-P3's measure of an own run: the closures (own, boot, wired, missing), the interfaces' facts equal to GHC's by
+  section, the modules whose interface is GHC's fact for fact"
+  [rs]
+  (let [full (filter #(= :full (:kind %)) rs)
+        sum (fn [k] (reduce + (map #(get-in % [:iface k] 0) full)))
+        by (apply merge-with (fn [[a b] [c d]] [(+ a c) (+ b d)]) (map #(get-in % [:iface :by] {}) full))
+        cls (fn [k] (reduce + (map #(get-in % [:closure k] 0) rs)))]
+    (println (str "lib-check --ifaces own: " (count full) " modules and " (- (count rs) (count full)) " boot files; closures: "
+                  (cls :own) " own interfaces, " (cls :boot) " boot, " (cls :wired) " wired-in (GHC.Internal.Prim), " (cls :later) " compiled later (not dependencies), "
+                  (reduce + (map #(count (get-in % [:closure :missing] [])) rs)) " missing"
+                  " (" (pr-str (into (sorted-map) (frequencies (mapcat #(get-in % [:closure :missing]) rs)))) ")"))
+    (println (str "  interfaces: " (sum :equal) " of " (sum :facts) " facts equal to GHC's; " (sum :missing) " GHC's only, "
+                  (sum :extra) " ours only; modules with every fact equal "
+                  (count (filter #(and (:iface %) (= (get-in % [:iface :facts]) (get-in % [:iface :equal]))) full))
+                  " of " (count (filter :iface full))))
+    (doseq [[k [e n]] (sort-by key by)] (println (format "    %-12s %6d of %6d" (name k) e n)))
+    (doseq [r rs :when (#{:rename :typecheck} (:stage r))]
+      (println "  stopped" (name (:kind r)) (name (:stage r)) (:name r) (subs (str (:msg r)) 0 (min 120 (count (str (:msg r)))))))
+    (println "  first differences by section:" (pr-str (frequencies (map :section (mapcat :iface-diff full)))))))
+
 (defn- read-results [files]
-  (vec (for [f files line (str/split-lines (slurp f)) :when (str/starts-with? line "{:name")] (read-string line))))
+  ;; a result line (pr-str of a map whose first key is :name) or a record row (a sorted map: record-stg's rows start with
+  ;; :compared): every map line with a :name
+  (vec (for [f files line (str/split-lines (slurp f)) :when (str/starts-with? line "{")
+             :let [m (read-string line)] :when (and (map? m) (:name m))] m)))
 
 (defn rank
   "The measure of a run (its results files): the modules by stage, those that elaborate without an error and with
@@ -437,6 +588,38 @@
                   (flush)
                   (when-not r0 (System/exit 3))))
               (shutdown-agents))
+      ;; HF10-P3: own-order PLAN; own --order FILE -o OUT --wired DIR --ghc-pool DIR [--unit U] [--timeout S]
+      "own-order" (own-order (first more))
+      "own" (let [limit (* 1000 (Long/parseLong (get opts "--timeout" "900")))
+                  gka (ownface/ka-of-pool (get opts "--ghc-pool"))
+                  unit (get opts "--unit" "ghc-internal")
+                  units (set (for [l (str/split-lines (slurp (get opts "--units" (get opts "--order")))) :when (not (str/blank? l))]
+                               (second (str/split l #"\t"))))]
+              (doseq [line (str/split-lines (slurp (get opts "--order")))
+                      :when (not (str/blank? line))]
+                (let [t0 (System/currentTimeMillis)
+                      cols (str/split line #"\t")
+                      task (future (own-one cols out (get opts "--wired") gka unit units))
+                      r0 (deref task limit nil)
+                      r (assoc (or r0 {:name (second cols) :kind (keyword (first cols)) :stage :timeout})
+                               :ms (- (System/currentTimeMillis) t0))]
+                  (binding [*print-length* nil *print-level* nil] (println (pr-str r)))
+                  (flush)
+                  (when-not r0 (System/exit 3))))
+              (shutdown-agents))
+      "rank-own" (rank-own (read-results more))
+      ;; own-control POOL GHC-POOL SUBJECT OTHER: the interface judge's negative control (GTS81 (a)): SUBJECT's own
+      ;; interface against OTHER's GHC interface, OTHER's module name put in SUBJECT's place, must not be equal
+      "own-control" (let [[pool gpool subj other] more
+                          own (slurp (str pool "/" subj ".iface.edn"))
+                          g (str/replace (slurp (str gpool "/" other ".iface.edn")) (str "\"" other "\"") (str "\"" subj "\""))
+                          gka (ownface/ka-of-pool gpool)
+                          c (ownface/compare-ifaces own g {} gka gka)]
+                      (if (= (:facts c) (:equal c))
+                        (do (println (str "lib-check --ifaces own: control (" subj "'s interface against " other "'s): judged equal: the judge is blind"))
+                            (System/exit 1))
+                        (println (str "lib-check --ifaces own: control (" subj "'s interface against " other "'s): differs, as it must ("
+                                      (:equal c) " of " (:facts c) " facts equal)"))))
       "rank" (rank (read-results more))
       "judge" (let [[rec res w cls] more] (judge rec res (= w "whole") cls))
       "record" (let [[res rec w src] more] (record res rec (not= w "whole") src))
