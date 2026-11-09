@@ -232,39 +232,50 @@
                     nf {:fsym fsym :statics statics :native-call native-call :header header}
                     local? (fn [b] (str/starts-with? (str (:def-id b)) "DefId(0:"))
                     ext-syms (set (map :symbol (:ext-items facts)))
+                    rec-by-name (into {} (for [r rec-bodies] [(:name r) r]))
+                    body-form (fn [nm]
+                                (let [[b err] (get ours nm) rec (or (get rec-by-name nm) {:name nm})]
+                                  (if b
+                                    (try (let [r (runtime-body b rec nf abort?)
+                                               r (if (System/getenv "RF10_CONTROL") (walk #(if (= "Add" %) "Sub" (if (= "AddWithOverflow" %) "SubWithOverflow" %)) r) r)
+                                               r (assoc r :phase "arbace-built+cleanup")]
+                                           (swap! lines conj (str "ours   " nm))
+                                           (list 'mir/body r))
+                                         (catch Throwable e
+                                           (swap! lines conj (str "record " nm " (" (.getMessage e) ")"))
+                                           (fact! :bodies false)
+                                           (if-let [r (get rec-by-name nm)] (list 'mir/body r) (throw e))))
+                                    (do (swap! lines conj (str "record " nm " (" err ")")) (fact! :bodies false)
+                                        (list 'mir/body (or (get rec-by-name nm) (throw (ex-info (str "no body for " nm) {}))))))))
+                    ;; the module from the collector's items: our bodies, then core's bodies (the record's: RF12), the statics,
+                    ;; the lang items' symbols, the layouts; the record's entry wrapper for a std program
                     new-forms
                     (doall
-                     (for [f forms]
-                       (case (first f)
-                         mir/body (let [rec (second f) [b err] (get ours (:name rec))]
-                                    (cond
-                                      (and b (local? rec))
-                                      (try (let [r (runtime-body b rec nf abort?)
-                                                 r (if (System/getenv "RF10_CONTROL") (walk #(if (= "Add" %) "Sub" (if (= "AddWithOverflow" %) "SubWithOverflow" %)) r) r)
-                                                 r (assoc r :phase "arbace-built+cleanup")]
-                                             (swap! lines conj (str "ours   " (:name rec)))
-                                             (list 'mir/body r))
-                                           (catch Throwable e (swap! lines conj (str "record " (:name rec) " (" (.getMessage e) ")")) f))
-                                      :else (do (swap! lines conj (str "record " (:name rec) " (" (cond err err (ext-syms (:symbol rec)) "core's body, reached by the collector"
-                                                                                                     :else "core's body, reached through core's bodies") ")"))
-                                                (fact! :core-bodies false)
-                                                f)))
-                         mir/static (let [m (second f) nm (str/replace (last (str/split (str (:def m)) #"::")) #"\)$" "")]
-                                      (list 'mir/static (merge m (select-keys (get statics nm) [:symbol :def]))))
-                         mir/langsyms (list 'mir/langsyms (into {} (for [[ln s] rec-langs]
-                                                                     [ln (let [o (get (:langsyms facts) ln)] (if (and o (not (mono/error? o))) (do (fact! :langsyms true) o) (do (fact! :langsyms false) s)))])))
-                         f)))
+                     (concat
+                      (for [nm (:order facts)] (body-form nm))
+                      (for [rec rec-bodies :when (not (local? rec))]
+                        (do (swap! lines conj (str "record " (:name rec) " (" (if (ext-syms (:symbol rec)) "core's body, reached by the collector" "core's body, reached through core's bodies") ")"))
+                            (fact! :core-bodies false)
+                            (list 'mir/body rec)))
+                      (for [[nm m] (:statics facts) :when (map? m)] (list 'mir/static m))
+                      [(list 'mir/layouts [])]
+                      [(list 'mir/langsyms (into {} (for [ln (distinct (concat (keys (:langsyms facts)) (keys rec-langs)))]
+                                                      [ln (let [o (get (:langsyms facts) ln)] (if (and o (not (mono/error? o))) (do (fact! :langsyms true) o) (do (fact! :langsyms false) (get rec-langs ln))))])))]
+                      (for [f forms :when (= 'mir/entry (first f))] (do (fact! :entry false) f))))
                     our-forms (mono/ty-forms (keep first (vals ours)))
                     core-forms (mono/ty-forms (for [f new-forms :when (= 'mir/body (first f)) :let [b (second f)] :when (not= "arbace-built+cleanup" (:phase b))] (dissoc b :alloc-data)))
+                    ;; a layout mono refuses: the record's, when it has that type
                     lt ((:layouts-of facts) (concat our-forms core-forms))
                     table (into (sorted-map)
                                 (concat (for [[t l] lt :when (not (mono/error? l))] [t l])
-                                        (for [[t l] rec-layouts :when (let [o (get lt t)] (or (nil? o) (mono/error? o)))] [t l])))]
-                (doseq [t (keys rec-layouts)] (fact! :layouts (let [o (get lt t)] (and o (not (mono/error? o))))))
+                                        (for [[t o] lt :when (mono/error? o) :let [l (get rec-layouts t)] :when l] [t l])))]
+                ;; a layout mono refuses is the record's when the record has its type (counted), else no body needs it
+                (doseq [[t o] lt] (if (mono/error? o) (when (contains? rec-layouts t) (fact! :layouts false)) (fact! :layouts true)))
                 (for [f new-forms] (if (= 'mir/layouts (first f)) (list 'mir/layouts (vec table)) f))))))]
     (spit out (with-out-str (doseq [f result] (prn f))))
     (doseq [l @lines] (println l))
-    (println (str "build-run: " n ": facts native " (str/join ", " (for [[k [a b]] (sort @tally) :when (not= k :core-bodies)] (str (name k) " " a "/" b)))
-                  "; core's bodies from the pack " (second (get @tally :core-bodies [0 0]))))
+    (println (str "build-run: " n ": facts native " (str/join ", " (for [[k [a b]] (sort @tally) :when (not (#{:core-bodies :bodies} k))] (str (name k) " " a "/" b)))
+                  "; core's bodies from the pack " (second (get @tally :core-bodies [0 0]))
+                  (when-let [[_ b] (get @tally :bodies)] (str "; our bodies from the pack " b))))
     (println (format "build-run: %s: %d of %d bodies ours" n (count (filter #(str/starts-with? % "ours") @lines)) (count @lines)))
     (System/exit 0)))
