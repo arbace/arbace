@@ -652,8 +652,15 @@
       (= p t) m
       :else nil)))
 
+(declare ^:dynamic *ltypes*)
+(defn- wrap-ev-binds [binds c] (reduce (fn [acc [x t]] (list 'let [(list 'bind x t)] acc)) c (reverse binds)))
+(def ^:dynamic *ev-binds* nil) ; atom [[lv term]...]: a binding's superclass evidence, bound once after its dictionary
+                               ; lambdas (GHC's evidence bindings, dsEvBinds: $dApplicative = $p1Alternative $dAlternative)
+(def ev-binders (atom #{}))    ; the evidence binders made, for the unused ones' removal (resolve-ev-lets)
+
 (defn- super-closure
-  "Givens [[pred term]...] closed under superclasses: (app (v $pNCls) [d])"
+  "Givens [[pred term]...] closed under superclasses: (app (v $pNCls) [d]); with *ev-binds* each selection let-bound
+  once to an evidence variable, the variable the term"
   [givens]
   (loop [todo givens out []]
     (if (empty? todo)
@@ -661,12 +668,20 @@
       (let [[[c ts] term :as g] (first todo)
             info (get @*classes* c)
             subs (map-indexed (fn [i [sc sts]]
-                                [[sc (mapv #(subst (zipmap (:tvs info) ts) %) sts)]
-                                 (list 'app (list 'v (ext-name "var" (nmod c) (str "$p" (inc i) (occ c)))) [term])])
+                                (let [p [sc (mapv #(subst (zipmap (:tvs info) ts) %) sts)]
+                                      sel (list 'app (list 'v (ext-name "var" (nmod c) (str "$p" (inc i) (occ c)))) [term])]
+                                  (if (and *ev-binds* term)
+                                    (let [x (list 'lv (str "$d" (occ sc)) (str "ev" (swap! *counter* inc)))]
+                                      (swap! *ev-binds* conj [x sel])
+                                      (swap! ev-binders conj x)
+                                      (when *ltypes* (swap! *ltypes* assoc x [:tc sc (second p)]))
+                                      [p x])
+                                    [p sel])))
                               (:supers info))]
         (recur (concat (rest todo) (remove (fn [[p _]] (some #(= p (first %)) out)) subs)) (conj out g))))))
 
 (def ^:dynamic *srcfile* nil)  ; the source file's path as the compiler was given it (HasCallStack's SrcLoc)
+(def ^:dynamic *unit* "main")  ; the unit the module is compiled in (SrcLoc's package, Typeable's $trModule; HF10: ghc-internal)
 (def ^:dynamic *skolem-givens* nil) ; atom [[pred term]...]: the dictionaries existential patterns bind
 
 (def cls-typeable (ext-name "tc" "GHC.Internal.Data.Typeable.Internal" "Typeable"))
@@ -893,9 +908,11 @@
                [(list 'app (list 'v (ext-name "var" "GHC.Internal.Tuple" "(,)"))
                       [(cs (or label (occ n)))
                        (list 'app (list 'v (ext-name "var" "GHC.Internal.Stack.Types" "$WSrcLoc"))
-                             [(cs "main") (cs *module*) (cs (or *srcfile* (str (str/replace *module* "." "/") ".hs"))) (i l1) (i c1) (i l2) (i c2)])])
+                             [(cs *unit*) (cs *module*) (cs (or *srcfile* (str (str/replace *module* "." "/") ".hs"))) (i l1) (i c1) (i l2) (i c2)])])
+                ;; the stack it pushes onto: ?callStack itself, a new wanted (EvCsPushCall's), solved from the enclosing
+                ;; HasCallStack given, else defaulted to the empty stack
                 (list 'app (list 'v (ext-name "var" "GHC.Internal.Classes" "ip"))
-                      [(cip (list 'v (ext-name "var" "GHC.Internal.Stack.Types" "emptyCallStack")))])]))))
+                      [(want! [cls-callstack []])])]))))
 
 (defn- want-at!
   "The evidence of a predicate of an occurrence: HasCallStack solved at once, the others wanted"
@@ -910,7 +927,8 @@
       (do (when-not (:core e) (note-type! (lv n) (:mono e)))
           [(:mono e) (or (:core e) (lv n))])
       (let [[t preds] (instantiate (:poly e))]
-        [t (app* (:core e) (mapv want! preds))]))
+        ;; a binding of the module itself (or a local one) with HasCallStack pushes its call site too (EvCsPushCall)
+        [t (app* (:core e) (mapv #(want-at! % n sp label) preds))]))
     (if-let [t (get @*genv* (if (= "data" (nth n 1)) n n))]
       (let [[t preds] (instantiate t)
             core (list 'v (if (= "data" (nth n 1)) (ext-name "var" (nmod n) (occ n)) n))]
@@ -1216,9 +1234,13 @@
       ;; deriving's nodes (arbace.repr.haskell.deriv): a constructor's tag as an Int, the constructor of a tag, a primop on Ints
       ;; the tag: GHC's dataToTag# (the primop dataToTagLarge#, which evaluates its argument), boxed as the Int the
       ;; generated code compares; the constructor of a tag: a case on the tag's literals (GHC's tagToEnum#)
-      DerivTag (let [[_ c] (infer env (arg v 1))]
-                 [(con-ty tc-int) (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "I#"))
-                                        [(list 'app (list 'v (ext-name "var" "GHC.Internal.Prim" "dataToTagLarge#")) [c])])])
+      ;; untag_Expr's dataToTag# x, an Int#: the DataToTag dictionary at x's type (matchDataToTag: dataToTagSmall# for a
+      ;; family of at most 7 constructors, else dataToTagLarge#)
+      DerivTag (let [[t c] (infer env (arg v 1))
+                     t (expand (zonk t))
+                     ti (when (= :tc (first t)) (some-> *tycons* deref (get (second t))))
+                     op (if (and ti (<= (count (:cons ti)) 7)) "dataToTagSmall#" "dataToTagLarge#")]
+                 [(prim-ty "Int#") (list 'app (list 'v (ext-name "var" "GHC.Internal.Prim" op)) [c])])
       DerivTag2Con (let [[t c] (infer env (arg v 2))
                          cs (arg v 1)
                          [_ res] (con-arg-types (first cs))
@@ -1234,9 +1256,10 @@
                      (unify tx ty)
                      [(con-ty tc-bool) (list 'app (list 'v (ext-name "var" "GHC.Internal.Prim" "tagToEnum#"))
                                              [(list 'app (list 'v (ext-name "var" "GHC.Internal.Prim" (arg v 1))) [cx cy])])])
+      ;; a primop on the untagged Int#s (eq_expr_with_tag_check's /=#, enum_index's -#)
       DerivPrim (let [rs (mapv #(infer env %) (arg v 2))]
-                  (doseq [[t _] rs] (unify t (con-ty tc-int)))
-                  [(con-ty tc-int) (list 'app (list 'v (ext-name "var" "GHC.Internal.Prim" (arg v 1))) (mapv second rs))])
+                  (doseq [[t _] rs] (unify t (prim-ty "Int#")))
+                  [(prim-ty "Int#") (list 'app (list 'v (ext-name "var" "GHC.Internal.Prim" (arg v 1))) (mapv second rs))])
       ;; e :: sig (GHC.Tc.Gen.Expr's tcExprSig): e checked against the signature (its quantifiers skolems, its
       ;; context given), then the signature instantiated at the use
       ExprWithTySig (let [sig (arg (arg v 3) 2)
@@ -1523,7 +1546,9 @@
     (case (con v)
       VarPat (let [n (nm (arg v 2))] (note-type! (lv n) t) [(assoc env n {:mono t}) (lv n)])
       WildPat [env (list 'pwild)]
-      (ParPat BangPat) (tc-pat env (arg v 2) t)
+      ParPat (tc-pat env (arg v 2) t)
+      ;; a bang pattern: kept for the match compiler (HF10; GHC.HsToCore.Match's tidy1 and matchBangs)
+      BangPat (let [[env1 pc] (tc-pat env (arg v 2) t)] [env1 (list 'pbang pc)])
       ;; a lazy pattern: kept for the match compiler (HF5), its variables bound by selectors
       LazyPat (let [[env1 pc] (tc-pat env (arg v 2) t)] [env1 (list 'plazy pc)])
       AsPat (let [n (nm (arg v 2)) _ (note-type! (lv n) t) [env1 pc] (tc-pat (assoc env n {:mono t}) (arg v 3) t)] [env1 (list 'pas (lv n) pc)])
@@ -1886,10 +1911,19 @@
           (swap! *genv* assoc n (builder-type info)))))
     nil))
 
+(defn- strict-var-bind?
+  "A strict variable binding `!x = e` (FunRhs's SrcStrict: GHC's strict binding, dsStrictBind)"
+  [b]
+  (boolean (some (fn [x] (and (seq? x) (= 'FunRhs (first x)) (some #{'SrcStrict} x))) (take 400 (tree-seq coll? seq b)))))
+
 (defn tc-group
   "A binding group: [env' [(bind B core)...]]; sigs {NAME type}"
   [env [rec binds] sigs top?]
   (let [_ (doseq [b binds :when (patsyn-bind? b)] (tc-patsyn-bind! env b))
+        ;; a let's strict variable bindings: the body forces each (dsStrictBind: let x = e in x `seq` body)
+        _ (when (and *strict-binds* (= (inc *level*) (:level *strict-binds*)))
+            (doseq [b binds :when (and (bind-name b) (strict-var-bind? b))]
+              (swap! (:atom *strict-binds*) conj [(bind-name b) (list 'pbang (list 'pwild))])))
         binds (vec (remove patsyn-bind? binds))
         names (mapv bind-name binds)
         signed (filter #(get sigs (bind-name %)) binds)
@@ -1968,14 +2002,15 @@
                           [body inner-preds] (if (= :forall (first body)) [(nth body 3) (nth body 2)] [body []])
                           preds (into (mapv (fn [[c ts]] [c (mapv #(subst skol %) ts)]) (nth s 2)) inner-preds)
                           params (mapv dict-param preds)
-                          givens (super-closure (mapv vector preds params))
+                          evb (atom [])
+                          givens (binding [*ev-binds* evb] (super-closure (mapv vector preds params)))
                           ws (atom [])
                           c (binding [*level* (inc *level*) *wanteds* ws *scoped-tvs* (merge *scoped-tvs* skol)
                                       *given-eqs* (scope-givens)]
                               (assume-eqs! preds)
                               (let [[t c] (bind-rhs env b body)] (unify t body) (retry-implications! false) c))]
                       (solve-with-givens! @ws givens)
-                      (list 'bind (bind-core top? n) (if (empty? params) c (list 'lam params c))))))]
+                      (list 'bind (bind-core top? n) (if (empty? params) c (list 'lam params (wrap-ev-binds @evb c)))))))]
     [env (into out1 out2)]))
 
 (defn- rename-mono
@@ -2426,13 +2461,18 @@
                                :binds (arg d 8)})))
 
 (defn- head-occs
-  "The type constructors' occurrence names of an instance head, as GHC's dictionary functions spell them"
-  [ts]
+  "The type constructors' occurrence names of an instance head, as GHC's dictionary functions spell them
+  (GHC.Tc.Utils.Instantiate's getDFunTyKey: a type constructor's name, a type variable's own, an application's head's)"
+  ([ts] (head-occs ts {}))
+  ([ts tv-occ]
   ;; each argument's outermost type constructor, synonyms expanded (State Env: StateT)
-  (apply str (map (fn [t] (let [t (deep-expand (zonk t))]
+  (apply str (map (fn [t] (loop [t (deep-expand (zonk t))]
                             (case (first t)
                               :tc (occ (second t))
-                              ""))) ts)))
+                              :tv (get tv-occ (second t) "")
+                              :app (recur (second t))
+                              :forall (recur (nth t 3))
+                              ""))) ts))))
 
 (defn- inst-decl!
   "An instance: its dictionary function's entry in the instance table; the declaration kept for the methods"
@@ -2443,7 +2483,7 @@
         t (hs-type (zipmap tvn (map (fn [x] [:tv x]) names)) body)
         [ctx head] (if (= :forall (first t)) [(nth t 2) (nth t 3)] [[] t])
         cls (second head) ts (nth head 2)
-        dfun (ext-name "var" m (str "$f" (occ cls) (head-occs ts)))]
+        dfun (ext-name "var" m (str "$f" (occ cls) (head-occs ts (zipmap names (map occ tvn)))))]
     (swap! *insts* conj {:dfun dfun :tvs names :ctx ctx :head [cls (mapv deep-expand ts)]})
     {:dfun dfun :tvs names :ctx ctx :cls cls :ts ts :binds (arg d 3)}))
 
@@ -2464,7 +2504,13 @@
                             [t []]))
         [body inner] (skol-body ty)
         iparams (mapv dict-param inner)
-        givens (into givens (super-closure (mapv vector inner iparams)))
+        ;; the method's superclass evidence bound once after its dictionaries (GHC's evidence bindings of the method's
+        ;; implication): the givens' superclasses again from the dictionary parameters, each selection a variable
+        evb (atom [])
+        givens (if (seq params)
+                 (binding [*ev-binds* evb] (super-closure (vec (filter (fn [[_ t]] (some #(= t %) params)) givens))))
+                 givens)
+        givens (into givens (binding [*ev-binds* evb] (super-closure (mapv vector inner iparams))))
         ws (atom [])
         own (when (= :forall (first ty)) (into {} (map (fn [x] [x [:tv (str "sk_" x)]]) (nth ty 1))))
         c (binding [*level* (inc *level*) *wanteds* ws *scoped-tvs* (merge *scoped-tvs* own) *given-eqs* (scope-givens)]
@@ -2472,7 +2518,7 @@
             (assume-eqs! (concat (map first givens) inner))
             (let [[t c] (bind-rhs env b (when-not (= :forall (first body)) body))] (unify t body) (retry-implications! false) c))]
     (solve-with-givens! @ws givens)
-    (let [ps (into params iparams)] (if (empty? ps) c (list 'lam ps c)))))
+    (let [ps (into params iparams)] (if (empty? ps) c (list 'lam ps (wrap-ev-binds @evb c))))))
 
 (defn- default-methods
   "A class's default methods: (bind $dmop (lam [$dCls] core))"
@@ -2671,6 +2717,19 @@
                 ;; another type: fromRational of the literal as a Rational, n :% d reduced (dsFractionalLitToRational)
                 (list 'app (list 'v f) [ev (fl-ratio val)]))))))
 
+(defn- drop-unused-ev
+  "The evidence bindings nothing uses removed (the desugarer binds only the evidence the solver needed), after the
+  placeholders' resolution"
+  [c]
+  (cond
+    (and (seq? c) (= 'let (first c)) (= 1 (count (second c))) (contains? @ev-binders (second (first (second c)))))
+    (let [[_ [[_ x t]] body] c body2 (drop-unused-ev body)
+          occ? (fn occ? [y] (cond (= y x) true (coll? y) (boolean (some occ? y)) :else false))]
+      (if (occ? body2) (list 'let [(list 'bind x (drop-unused-ev t))] body2) body2))
+    (seq? c) (with-meta (apply list (map drop-unused-ev c)) (meta c))
+    (vector? c) (mapv drop-unused-ev c)
+    :else c))
+
 (defn resolve-core
   "The core with every evidence placeholder replaced by its term and the literals resolved"
   [c]
@@ -2718,9 +2777,9 @@
         trname (fn [s] (list 'app (v "GHC.Internal.Types" "TrNameS") [(list 'lit (str (pr-str s) "#"))]))
         modv (ext-name "var" m "$trModule")]
     (when (seq @*tycons*)
-      (cons (list 'bind modv (list 'app (v "GHC.Internal.Types" "Module") [(trname "main") (trname m)]))
+      (cons (list 'bind modv (list 'app (v "GHC.Internal.Types" "Module") [(trname *unit*) (trname m)]))
             (for [[tn info] @*tycons* :when (= m (nmod tn))]
-              (let [[hi lo] (tycon-fingerprint "main" m (occ tn))
+              (let [[hi lo] (tycon-fingerprint *unit* m (occ tn))
                     arity (count (:tvs info []))
                     star (v "GHC.Internal.Types" "krep$*")
                     krep (reduce (fn [acc _] (list 'app (v "GHC.Internal.Types" "KindRepFun") [star acc])) star (range arity))]
@@ -2846,11 +2905,30 @@
          :cons (into {} (filter (fn [[n _]] (= m (nmod n))) @*cons*))
          :classes (into {} (for [[n info] @*classes* :when (= m (nmod n))] [n (dissoc info :binds)]))
          :insts (vec (filter (fn [i] (= m (nmod (:dfun i)))) @*insts*))
-         :core (phase :resolve-core (mapv resolve-core (concat fimports core dms ibs sels (typeable-binds m))))
+         :core (phase :resolve-core (mapv (comp drop-unused-ev resolve-core) (concat fimports core dms ibs sels (typeable-binds m))))
          ;; the tables HF5-HF6 need (the match compiler's constructor families, STG's data and dictionaries)
          :all-cons @*cons* :tycons @*tycons*
          :all-classes (into {} (for [[n info] @*classes*] [n (dissoc info :binds)]))
          :ltypes (into {} (for [[x t] @*ltypes*] [x (deep-expand (zonk t))]))
+         ;; the module's own values its RULES mention: the occurrence analyser keeps them alive (a rule's free
+         ;; variables are occurrences: never inlined unconditionally, never dropped)
+         :rule-names (let [acc (atom #{})
+                           w (fn w [x in?] (cond (and in? (vector? x) (= 4 (count x)) (= "ext" (nth x 0)) (= "var" (nth x 1)) (= m (nth x 2)))
+                                                 (swap! acc conj x)
+                                                 (coll? x) (let [in2 (or in? (and (seq? x) (= 'HsRule (first x))))] (doseq [y x] (w y in2)))
+                                                 :else nil))]
+                       (w decls false) @acc)
+         ;; the module's NOINLINE (and OPAQUE) pragmas' binders: never inlined, never inlined unconditionally (their
+         ;; inline activation never active)
+         :noinline (let [acc (atom #{})
+                         w (fn w [x] (cond (and (seq? x) (= 'InlineSig (first x)))
+                                           (let [n (nm (arg x 2))
+                                                 txt (let [t (atom nil)] ((fn f [y] (cond (and (string? y) (re-find #"^\{-# *(NOINLINE|NOTINLINE|OPAQUE)" y)) (reset! t y)
+                                                                                          (coll? y) (doseq [z y] (f z)) :else nil)) (arg x 3)) @t)]
+                                             (when (and n txt) (swap! acc conj n)))
+                                           (coll? x) (doseq [y x] (w y))
+                                           :else nil))]
+                     (w [decls sigs binds]) @acc)
          :genv @*genv*
          :kind-arity @*kind-arity*
          :errors @*errors*}))))

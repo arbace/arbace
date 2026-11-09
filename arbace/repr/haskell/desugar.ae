@@ -59,13 +59,16 @@
   it is a let-bound thunk, inlined when used once and dropped when unused (a normaliser class, recorded)."
   (:require [arbace.string :as str]
             [arbace.repr.haskell.simpleopt :as so]
-            [arbace.repr.haskell.constfold :as cf]))
+            [arbace.repr.haskell.constfold :as cf]
+            [arbace.repr.haskell.primops :as primops]))
 
 (def ^:dynamic *cons* nil)    ; {NAME {:arity n :tycon NAME :tag n}}
 (def ^:dynamic *tycons* nil)  ; {TYCON {:flavour data|newtype :cons [NAME...]}}
 (def ^:dynamic *n* nil)       ; atom: fresh names
 (def ^:dynamic *casts* false) ; the -O0 Simplifier's input (arbace.repr.haskell.simplify): the newtypes' casts kept, the
                               ; failure handlers functions of the void (##) as GHC's mkFailurePair makes them
+(def ^:dynamic *unboxed-tuple?* (constantly false)) ; an expression of an unboxed tuple type (tostg's: its binder unarised
+                                                    ; as a let's, *multi*)
 (def ^:dynamic *where* "")    ; the binding being compiled, for patError's text
 
 (defn- ext [ns m o] ["ext" ns m o])
@@ -121,6 +124,8 @@
         (list 'plist (mapv (fn [ch] (list 'pcon (ext "data" "GHC.Internal.Types" "C#") [(list 'plitp (str "'(char " (int ch) ")'#"))])) s)))
       (and fname (head? a 'lit))
       (list 'pcon (ext "data" (nth fname 2) (nth fname 3)) [(list 'plitp (second a))])
+      ;; a primitive literal (MagicHash's 1#, 'c'#): matched as it is (tidyLitPat leaves it, matchLiterals)
+      (head? lc 'lit) (list 'plitp (second lc))
       :else (list 'pwild))))
 
 (defn- newtype-con? [c]
@@ -132,6 +137,7 @@
         (head? p 'pcon) (mapcat pat-vars (nth p 2))
         (head? p 'plist) (mapcat pat-vars (second p))
         (head? p 'plazy) (pat-vars (second p))
+        (head? p 'pbang) (pat-vars (second p))
         :else []))
 
 (declare match)
@@ -154,10 +160,19 @@
     ;; a lazy pattern (tidy1's LazyPat, mkSelectorBinds): each variable a thunk selecting it from v
     plazy (let [xs (pat-vars (second p))]
             [(list 'pwild) (into {} (for [x xs] [x (match [v] [{:pats [(second p)] :sub {} :rhs (fn [_] x)}] (pat-error))]))])
+    ;; a bang pattern (tidy1's tidy_bang_pat): dropped around a pattern that is strict already (a constructor's but a
+    ;; newtype's, a literal, a list), kept around a variable, a wildcard or a lazy pattern (matchBangs evaluates)
+    pbang (let [q (second p)]
+            (cond (head? q 'pbang) (tidy q v)
+                  (or (head? q 'plist) (head? q 'plitp) (and (head? q 'plit) (not= 2 (count q)))
+                      (and (head? q 'pcon) (not (newtype-con? (second q)))))
+                  (tidy q v)
+                  (and (head? q 'plit) (= 2 (count q))) (tidy q v)
+                  :else [p {}]))
     [p {}]))
 
 (defn- pkind [p]
-  (case (first p) pwild :any pcon :con plitp :lit plit :npat :any))
+  (case (first p) pwild :any pcon :con plitp :lit plit :npat pbang :bang :any))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Matching: an equation is {:pats [PAT...] :sub {lv term} :rhs (fn [fail] core)}
@@ -221,9 +236,17 @@
                     (list 'case test (fresh "wild") [(list 'alt false-c [] f2) (list 'alt true-c [] (match vars eqs f2))])))))
             f (reverse ks))))
 
+(defn- match-bangs
+  "matchBangs: the bangs taken off and the match done again on v, evaluated first (mkEvalMatchResult: a case on v
+  with one DEFAULT alternative)"
+  [v vars g f]
+  (let [body (match (into [v] vars) (map (fn [e] (assoc e :pats (cons (second (first (:pats e))) (rest (:pats e))))) g) f)]
+    (list 'case v (if (lv? v) v (fresh "ds")) [(list 'alt :default [] body)])))
+
 (defn- match-group [v vars g f]
   (case (pkind (first (:pats (first g))))
     :any (match vars (map drop-first g) f)
+    :bang (match-bangs v vars g f)
     :con (match-cons v vars g f)
     :lit (match-lits v vars g f)
     :npat (match-npats v vars g f)))
@@ -301,6 +324,23 @@
 ;;; ------------------------------------------------------------------------------------------
 ;;; Expressions
 
+(defn- ok-for-speculation?
+  "exprOkForSpeculation on the desugarer's forms: an atom, a literal, or a primop without effects (primOpEffect
+  NoEffect, not out of line) applied to atoms"
+  [e]
+  (or (trivial? e) (head? e 'lit)
+      (and (head? e 'app) (head? (second e) 'v) (= "GHC.Internal.Prim" (nth (second (second e)) 2))
+           (let [i (get primops/table (nth (second (second e)) 3))] (and i (= :NoEffect (:effect i)) (not (:out-of-line i))))
+           (every? #(or (trivial? %) (head? % 'lit)) (nth e 2)))))
+
+(defn- bind-non-rec
+  "GHC.Core.Make's bindNonRec: a case when the binder's type is unlifted and the right-hand side not ok for speculation
+  (needsCaseBinding: the effect must happen, and happen first), else a let"
+  [v s body]
+  (if (and (so/*unlifted?* s) (not (*unboxed-tuple?* s)) (not (ok-for-speculation? s)))
+    (list 'case s v [(list 'alt :default [] body)])
+    (list 'let [(list 'bind v s)] body)))
+
 (defn ds
   "An elaborated expression without matches: core"
   [x]
@@ -319,8 +359,11 @@
       case (list 'case (ds (nth x 1)) (nth x 2) (mapv (fn [[_ c bs e]] (list 'alt c bs (ds e))) (nth x 3)))
       match (let [ss (mapv ds (second x))
                   vs (mapv (fn [s] (if (lv? s) s (fresh "ds"))) ss)
-                  body (match vs (mapv (fn [cl] {:pats (second cl) :sub {} :rhs (fn [f] (ds-rhs (nth cl 2) f))}) (nth x 2)) (pat-error))]
-              (reduce (fn [b [s v]] (if (= s v) b (list 'let [(list 'bind v s)] b))) body (reverse (map vector ss vs))))
+                  ;; no equation (EmptyCase): matchEmpty's case without alternatives, not a pattern-match failure
+                  body (if (and (empty? (nth x 2)) (= 1 (count vs)))
+                         (list 'case (first vs) (fresh "wild") [])
+                         (match vs (mapv (fn [cl] {:pats (second cl) :sub {} :rhs (fn [f] (ds-rhs (nth cl 2) f))}) (nth x 2)) (pat-error)))]
+              (reduce (fn [b [s v]] (if (= s v) b (bind-non-rec v s b))) body (reverse (map vector ss vs))))
       (guards guarded) (ds-rhs x (pat-error))
       listcomp (ds-listcomp (second x) (nth x 2) (worker nil-c))
       (apply list (map ds x)))))
@@ -404,6 +447,9 @@
           cons (into {} (for [[c i] (:all-cons r)] [c {:arity (:arity i) :flavour (:flavour (get (:tycons r) (:tycon i))) :strict (:strict i)}]))
           ;; a class of one method and no superclass, or one superclass and no method, is a newtype (GHC's mkClass):
           ;; its dictionary constructor is a newtype constructor, the identity
-          cons (into cons (for [[cls i] (:all-classes r) :when (= 1 (+ (count (:methods i)) (or (:nsupers i) (count (:supers i)))))]
+          ;; (but IP's: an implicit parameter's evidence keeps C:IP and ip applied until CorePrep, as GHC's desugared
+          ;; HasCallStack evidence does: C:IP (pushCallStack site (ip d)))
+          cons (into cons (for [[cls i] (:all-classes r) :when (and (= 1 (+ (count (:methods i)) (or (:nsupers i) (count (:supers i)))))
+                                                                    (not= cls ["ext" "tc" "GHC.Internal.Classes" "IP"]))]
                             [["ext" "data" (nth cls 2) (str "C:" (nth cls 3))] {:arity 1 :flavour 'newtype}]))]
       (cf/fold-program (so/simple-opt-pgm prog exported cons)))))

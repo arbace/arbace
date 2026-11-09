@@ -14,7 +14,7 @@ art, licenses, papers) is marked "(memory, verify)".
 
 Contents: Summary · 1 What the front end must produce · 2 Measurements · 3 The pieces · 4 Judging · 5 Prior art ·
 6 Routes and tiers · 7 Milestones HF1-HF12 · 8 Risks · Proposed (HFS1-HFS9) · Decided · As built: HF1-HF2 · As built: HF3 (start)
-· ... · As built: HF9 (first slice) · As built: HF9 (second slice).
+· ... · As built: HF9 (first slice) · As built: HF9 (second slice) · As built: HF10 (first slice) · As built: HF10 (second slice).
 
 ## Summary
 
@@ -1891,6 +1891,121 @@ hidden modules (Event.Arr, Array, EPoll, IntVar, KQueue, PSQ, Poll; IO.Handle.Lo
 StaticPtr.Internal; Unicode.Bits, Char.DerivedCoreProperties and the five UnicodeData tables), out of the measure before, all pass
 (76 of 76 binders). ghc-internal as recorded: **266 modules, 261 without an error and every type equal** (was 248 judged, 227 and
 226), binders 5,067 of 5,068 equal; the five left in their classes (`:kinds` 3, `:default-signatures` 1, `:th-quotes` 1).
+## As built: HF10 (first slice) (2026-11-08, branch `hs-hf10`, from `mac/hs-hf9` 7ed40299a)
+
+By an agent on the main host by day (the light tier: no gate, no build of Arbace, every process under about 1.6 GB, at most two
+at once; stage 0 `/root/arbace/target/seed/amd64/arbace`, the checkout's sources evaluated; GHC only as the oracle, below). The
+brief: the native front end's desugaring to Core and STG for the boot libraries, so that hsi can run Arbace's own STG of
+ghc-internal instead of the pack's; a design first, then a first slice on the leaves of ghc-internal's import graph, compared
+with GHC's STG binding by binding, and programs run on hsi with those modules' own STG.
+
+### Design (HF10-D1 to HF10-D6)
+
+- **HF10-D1 Through Core, the programs' pipeline.** The libraries go through the pipeline the programs already take (HF5-HF7,
+  the Simplifier): the elaborator's Core desugared by the match compiler (`desugar.ae`), GHC's simple optimiser (`simpleopt.ae`),
+  the `-O0` Simplifier (`simplify.ae`), then CorePrep, CoreToStg and Unarise (`tostg.ae`). Not a direct translation to STG: GHC's
+  reference passes through Core, and the Core passes are where most of the differences are decided (the simplifier's inlining,
+  case of case, eta expansion); one pipeline for programs and libraries keeps every fix good for both, and the programs' checks
+  (`stg-check`, `run-check`) watch the libraries' changes. What a library adds is its unit (`tostg/*unit*`, `typecheck/*unit*`:
+  its names are `ghc-internal:M/x`, its `SrcLoc`s and `$trModule` name the package) and its source path as GHC was given it
+  (patError's and `HasCallStack`'s text: the reference's `:file`, `libraries/ghc-internal/src/...`).
+- **HF10-D2 The reference is GHC's `-O0` STG of the libraries, a new oracle datum.** The pack `haskell-stg-libs` holds the installed
+  libraries' STG at `-O2` (HES6 (a)): workers and wrappers, specialisations, cross-module inlining; no binding of a `-O0` front end
+  can equal it. So the reference is GHC compiling the same packages from the pinned tarball exactly as `bin/hsi dumps` does (HES6's
+  recipe: one-shot in dependency order, the installed unit ids, hadrian's paths), at `-O0` (`HSI_DUMP_OPT=-O0 bin/hsi dumps
+  --packages ghc-internal,base,ghc-prim,ghc-bignum`): 267 + 241 + 2 modules, 28 MB of forms, about 80 seconds at two jobs, read
+  back by `arbace.repr.haskell.stg check` with 0 errors. Made by hand, the oracle tier's; a pack of its own is HF10-P1.
+- **HF10-D3 The judge: each exported binding with its internal closure.** At `-O0` GHC keeps an instance's methods, a floated
+  literal, a local helper as internal top-level bindings (`$c==_7`, `lvl_0`); comparing the exported bindings alone (HF6's
+  `stgcmp`, built for programs) would call two dictionaries equal whose methods differ. `stgcmp` now compares each exported
+  top-level binding together with the internal top-level bindings it reaches, in the order of their first occurrence, all renamed
+  together by place (`closure-of`); the Typeable bindings apart; a primop's or a foreign call's name is not renamed. Each differing
+  binding records its first difference (`first-diff`, the subterm pair), and `rank-stg` counts them by the heads of the two
+  subterms: the classes below are the work list.
+- **HF10-D4 Which modules first: the bottom of the import graph.** The modules ordered by their level in ghc-internal's import
+  graph (0: importing nothing of the package but `GHC.Internal.Prim`, then one more than the highest import), the first slice the
+  levels 0 to 12: 55 modules, all of which HF9's `lib-check` elaborates without an error (`test/haskell/lib-stg.txt`: Types,
+  CString, Classes, Tuple, Magic, Maybe, Base, Err, List, Num, Real's prerequisites, the bignum backend, BigNat, Natural,
+  Integer...). The rest follow level by level, the same check over `--every 1`.
+- **HF10-D5 Running on the installed libraries' ABI.** The programs' front end compiles against the installed interfaces (the
+  helper's, `-O2`: their unfoldings name `-O2`'s workers, `sameTypeRep` behind `eqTypeRep`), and every other module of the pack
+  calls the replaced module's `-O2` names (`$wfoo`, `$fOrdMaybe_$c<`, floated `lvl`s). Two sets were tried:
+  - **a coherent `-O0` set** (GHC's `-O0` STG of the four packages, the others the pack's): 35 of 63 of run-check's programs pass
+    on GHC's own `-O0` STG, the others stop at a name only `-O2` defines (`sameTypeRep`), because the programs' STG was compiled
+    against `-O2` interfaces. Rejected for this slice: it needs `-O0` interfaces (HF10-D6).
+  - **the pack's set, each replaced module merged over its ABI** (`libcheck merge`, `merge-abi`): the module's own STG, and beside
+    it the pack's bindings of the names the own STG does not define, with the internal bindings they reach, renamed apart
+    (`ghc$lvl_0`), each form as the pack wrote it. The own bindings take every name both define (every source-level binding:
+    an importer calling `$fEqMaybe` gets Arbace's); the kept ones are GHC's `-O2` extras, which call the own ones. The measure of
+    independence is the count of own bindings against kept (`replaced.txt`); the baseline is the pack's set, run-check's own.
+- **HF10-D6 The independence path.** Eval's and AOT's cases are 0.5 while any STG a run executes is GHC's. In order: (1) the
+  modules level by level until ghc-internal's 227 that elaborate compile; (2) the front end's own interfaces, written as it compiles
+  each module bottom-up (`typecheck/iface-text`, which `tostg compile --local` already writes for programs), so the library set
+  and the interfaces are both `-O0`'s and coherent: the programs compiled against them, the libraries' STG all Arbace's, no kept
+  bindings, no pack; (3) base and the other packages the run corpora import (containers, bytestring, text, stm, unix, directory,
+  filepath, deepseq, array, time); (4) the switch: `bin/hsi check`'s libraries from the front end (HFS-I1's `--front native` for
+  the programs), the cases 1. The interfaces pack and `haskell-stg-libs` then leave every key.
+
+### Built
+
+| piece | files | what |
+|---|---|---|
+| the check | `bin/repr-haskell lib-stg` (`bin/lib/repr-haskell/lib-stg`), `make repr-haskell-lib-stg` | lib-check's plan and closures (the helper's interfaces), each module of `test/haskell/lib-stg.txt` (`--only FILE`, `--every N`) through the front end into `.tmp/repr-haskell/lib-stg/out/stg/ghc-internal/M.stg.ae`, one EDN map a module (stage, errors, the judge's counts, the differing bindings and their first differences), `summary.txt` by `rank-stg`; `--record FILE`; `LIB_STG_REUSE=1` keeps the last STG for `--run` alone; GHC's `-O0` reference made when missing |
+| the module driver | `arbace/repr/haskell/libcheck.ae` (`stg`, `rank-stg`, `replaceable`, `merge`, `compare-runs`) | `stg-one`: lib-check's rename and elaboration, then `tostg/module-stg` in the unit, the reference's `:file` as the source path; `LIB_STG_CORE=1` writes the elaborated and simplified Core beside |
+| the judge | `arbace/repr/haskell/stgcmp.ae` | HF10-D3: closures, `first-diff`, `:ours-only`, a binding's two closures shown (`stgcmp GHC OURS NAME`) |
+| the reference | `bin/hsi` (`HSI_DUMP_OPT`) | HF10-D2 |
+| the runs | `lib-stg --run [ID...]` | HF10-D5: run-check twice (`REPR_HASKELL_FRONT_SHARDS=1`, hsi at 2 GiB and 120 s), on the pack and on the merged set, `compare-runs` failing on a pass lost |
+
+The front end's fixes, each GHC's rule, in the measure's order (bindings equal on the 55 modules: 435 of 1,004 at the start of
+the day's runs, the judge's closures already in):
+
+| rule (GHC 9.14.1) | files | equal after |
+|---|---|---:|
+| the judge's renaming leaves primop names alone | `stgcmp.ae` | 501 of 1,085 |
+| `typePrimRep` through type synonyms (`BigNat#` = `WordArray#` = `ByteArray#`: `:U`) | `tostg.ae` (`expand-syn`) | |
+| CorePrep's speculative evaluation (Note [Speculative evaluation]; `mkNonRecFloat`, `decideFloatInfo`, `exprOkForSpecEval`'s `app_ok` with `-fspec-eval` and `-fspec-eval-dictfun`): a superclass selection from a dictionary (a `ClassOpId` with a terminating result) or a saturated application of a dictionary function of a class that is not unary is case-bound, not a thunk, with the class's `alg` alternative type; never a call of the binding's own group (`cpe_rec_ids`) | `tostg.ae` (`spec-eval`) | |
+| GHC.Core.Make's `bindNonRec` (`needsCaseBinding`): a match's unlifted scrutinee that is not ok for speculation (`noDuplicate# s`) is case-bound, not a let the simplifier may drop; a void scrutinee's alternative is Unarise's `(##)` with `(multi 0)` | `desugar.ae`, `tostg.ae` | 525 |
+| bang patterns (GHC.HsToCore.Match's `tidy1`/`tidy_bang_pat`: dropped around a strict pattern, kept around a variable, a wildcard, a lazy pattern; `matchBangs`: a case on the variable with one DEFAULT) and strict variable bindings (`let !x = e`, FunRhs's `SrcStrict`, dsStrictBind: the body forces `x`); the elaborator had dropped every bang | `typecheck.ae` (`BangPat`, `strict-var-bind?`), `desugar.ae` (`pbang`, `match-bangs`) | |
+| CorePrep's case floats taken out of a case's scrutinee and of an unlifted let's right-hand side (a strict context: StrictContextFloatable), as its lets were | `tostg.ae` (`float-scrut`) | 545 |
+| CorePrep's `cpeArgArity` at `-O0` (`exprArity`, `cpeEtaExpand`): a partial application of one of the module's functions in argument position is eta-expanded to the function's arity | `tostg.ae` (`pap-eta`) | |
+| CoreToStg's `mkStgAltType` for a case without constructor alternatives: `(alg T)` from the scrutinee's type (a data type, a dictionary); the module's own binders' types for representations (`global-type` falls back on the elaborator's `:types`: `bigNatNe#`'s `Int#`) | `tostg.ae` (`scrut-alg`, `expr-type`) | 575 of 1,085 |
+| `getDFunTyKey`: a dictionary function's name takes a type variable's own name (`$fCTuple2c1c2`) | `typecheck.ae` (`head-occs`) | 575 of 1,149 (64 more compared) |
+| a strict field of an unlifted type is not evaluated (`IS !Int#`: `$WIS` is `IS`); `case e of x { DEFAULT -> x }` is `e`; `tagToEnum#`'s result type constructor (StgOpApp's tycon: the binding's result for `isTrue#`, else `Bool`); an unboxed tuple's scrutinee stays let-bound for Unarise (`bindNonRec`'s case on `quotRemInt8# a b` lost its components: the programs' `primops-*` regressed until this) | `tostg.ae`, `desugar.ae` | **595 of 1,149** |
+
+Two of the 55 stop in the STG stage (`Bignum.Primitives`, `Bignum.Backend.Native`: a `NullPointerException` in tostg, their
+foreign imports' literals, below); `Bignum.Backend.GMP` has no reference (the pack and the reference are the native backend's,
+HES7 (a)). Of the 36 modules with exported bindings, 9 have every binding equal (Tuple 66 of 66, Data.Function, Data.Functor,
+Data.Tuple, Control.Monad.IO.Class, Data.Bool, TypeError, Integer.Logarithms, Unicode.Version); the large ones Base 117 of 171,
+Classes 58 of 173, Types 66 of 80, Integer 41 of 42, Natural 26 of 28, Num 15 of 16, Stack.Types 16 of 17, List 30 of 55, BigNat
+34 of 140, Bignum.Integer 24 of 105, Bignum.Natural 26 of 85.
+
+### What is left: the largest classes of first differences (554 bindings of the 55 modules differ)
+
+| class (GHC's / ours) | bindings | the rule | |
+|---|---:|---|---|
+| a dictionary's or a derived instance's text (the judge's `"" / ""`: a method taken from another binding, the derived code's shape) | 172 | deriving's Eq, Ord, Enum, Ix on tags: GHC generates `dataToTag#` (Small below 8 constructors), `/=#`, `<#` on `Int#` and `case ... of 1# ->` (`Generate.hs`'s `untag_Expr`, `genPrimOpApp`, `eq_expr_with_tag_check`), `deriv.ae` compares boxed tags with `eqInt`/`neInt`; Classes' constraint tuples' instances; the methods GHC keeps as their own bindings (`$cpure = \\x -> Just x`) | HF10-P4 |
+| `:r / :u`: a dictionary's method fields are thunks, GHC's functions | 55 | the `-O0` Simplifier's eta expansion of a method through a newtype's cast (IO's `State#`: GHC's `$cstimes` takes the token as a fifth argument), then cpeArgArity at the dictionary | |
+| `(alg / (poly)`, `:U`, `:word`, `:int`, `:v` `/ :L` | 130 | binders' representations and alternative types where the elaborator's type of a binder is not in `:ltypes` (the simplifier's clones and eta binders: `bigNatShiftR`'s `BigNat#` arguments, `bindIO`'s `State#` token) | |
+| `(primop / (case`, `(app / (case`, `(case / (app`, `(case / (let` | 95 | the `-O0` Simplifier's inlining of `isTrue#` and its case of `tagToEnum#` (ConstantFold's caseRules), a case identity on a call, an unlifted call let-bound where GHC's is case-bound | |
+| `(letne / (case`, `(letne / (let` | 25 | join points: GHC's Simplifier makes a join point of a case's shared continuation (mkDupableCont) where ours duplicates or nests | |
+| foreign imports | 49 of ghc-internal's 266 modules | `foreign import ccall`, `prim`, `capi` (dsFCall: the arguments unboxed, the call `(ffi ...)` or `(primcall ...)`, the result boxed in IO): not desugared yet, tostg drops the binding (`literal not handled: foreign import ...`) | HF10-P5 |
+
+With every own binding in place (`LIB_STG_REPLACE=all`), not only the equal ones, the run shows what the differences cost:
+`samples/Exc` and `synthetic/class-show` stop at an unboxed tuple of the wrong size (Base's `bindIO` matches the `(# s, a #)` of an
+IO action with both components where Unarise drops the `State#`: the representations' class above), `samples/Classes` raises a
+`divide by zero` GHC's run does not. The default replaces only the bindings the judge found equal, which are GHC's own `-O0`
+code by construction.
+
+### Programs on the own STG
+
+`bin/repr-haskell lib-stg --run` (run-check's 63 programs, samples and synthetic, the front end in one shard, hsi at 2 GiB and
+120 s): on the pack, **59 of 63 pass** (62 of 63 as `test/haskell/run-check.edn` records, the differing one the known
+`synthetic/primops-word`, `:no-stg`); with the 52 compiled modules of ghc-internal replaced (the two STG stops and GMP aside), their
+**595 exported bindings equal to GHC's `-O0` Arbace's own STG** and 6,108 of the pack's kept for its ABI: **59 of 63 pass, none lost,
+none gained**; run-check's negative control fails on both sets as it must. Every program runs through the replaced modules (Base's
+`$`, `.`, `++`, `map`, `foldr`, the Functor, Applicative and Monad instances of lists, Maybe and tuples; Classes' Eq and Ord
+methods, Num's instances, Integer's and Natural's arithmetic, Types and Tuple's workers). The coherent `-O0` set of HF10-D5: 35 of
+63 (the rest stop at `-O2`-only names the programs' interfaces put in their STG).
 
 ### Checks
 
@@ -1914,3 +2029,192 @@ StaticPtr.Internal; Unicode.Bits, Char.DerivedCoreProperties and the five Unicod
    commit of its own naming :ghc's identity; `bin/oracle-records mirror --push`.
 2. `bin/repr-haskell lib-check --judge test/haskell/lib-check-ghc-internal.edn` (the step's command, no GHC): 0 worse, the control
    differs; a module that moved with the whole run's interfaces (the 227 rows recorded with the first verb) is then the record's.
+| `bin/repr-haskell lib-stg` (the 55 modules, one process, about 3 minutes) | 53 compiled, 2 STG stops; **595 of 1,149** exported bindings equal to GHC's `-O0` (435 of 1,004 at the slice's first measure); 9 of 36 modules with bindings all equal; the negative control (Base against its rotated reference) 0 of 171 equal |
+| `bin/repr-haskell lib-stg --run` | 59 of 63 on the pack, 59 of 63 with the own bindings, 0 lost |
+| `bin/repr-haskell typecheck-check` | 24 of 24 modules equal, the control 13 of 24 (after the bang patterns and the dictionary names) |
+| `bin/repr-haskell run-check` (lib-stg's GHC side, the same command at the same caps) | 59 of 63, 62 of 63 as recorded (the known `primops-word`); an intermediate state lost nine `primops-*` programs to `bindNonRec`'s case on an unboxed tuple, found by this check and fixed |
+| `HSI_DUMP_OPT=-O0 bin/hsi dumps --packages ghc-internal,base,ghc-prim,ghc-bignum` (the reference, GHC, by hand) | 510 dumps read back, 0 errors; 80 s at two jobs |
+
+The record `test/haskell/lib-stg-results.edn` keeps each module's stage and counts (no step reads it yet: HF10-P2).
+
+### The score and the independence path
+
+The score does not move: `bin/hsi check`, eval's and AOT's tool, still runs every program over the pack's STG, and lib-stg's run is
+a check beside it. What moves it is HF10-D6: the 227 modules of ghc-internal lib-check elaborates compiled (about 4,950 binders;
+today 595 bindings of 52 modules equal), then the front end's own interfaces so that the library set is coherent at `-O0` without
+the pack, then base and the other boot packages the corpora import, then `bin/hsi check --front native --libs native`: Haskell's
+eval and AOT cases 1, independence from 74.9 (eval 0.452, AOT 0.493) towards 90. The two judges stay the oracle's: lib-stg's
+reference is GHC's `-O0` STG (HF10-P1), the runs' references GHC's recorded runs or the tests' own verdicts.
+
+### Night commands (one process at a time, at most 1.5 GiB a process; `. .tmp/env.sh`)
+
+1. `HSI_DUMP_OPT=-O0 HSI_JOBS=2 bin/hsi dumps --packages ghc-internal,base,ghc-prim,ghc-bignum --out .tmp/hsi/dumps-O0` (GHC, the
+   oracle: the reference, about 80 s), until HF10-P1's pack.
+2. `bin/repr-haskell lib-stg --every 1 --record .tmp/lib-stg-all.edn` (all 248 judged modules of ghc-internal; about 15 minutes
+   by the slice's rate; the measure of the next slice).
+3. `bin/repr-haskell lib-stg --run` (the slice; about 35 minutes: two run-checks) and `LIB_STG_REPLACE=all bin/repr-haskell lib-stg
+   --run` (every own binding: the bugs list).
+4. HFS-I6 (a): `make repr-haskell-run-check` and `bin/repr-haskell stg-check` (the programs' Core and STG against GHC's after this
+   slice's rules: bang patterns, speculative evaluation, case floats, dictionary names).
+
+### Proposed (HF10-P1 to HF10-P5; options with costs, a recommendation each, none decided)
+
+- **HF10-P1 The `-O0` reference as a pack.** (a) **`haskell-stg-libs-O0-ghc-9.14.1` through `bin/oracle-records` (the four packages
+  now, all 41 when HF10 reaches them; about 4 MB of xz, keyed by the helper's identity as `haskell-stg-libs`), `lib-stg` reading it
+  by default**; half a day; (b) by hand at each run (80 s of GHC); (c) no reference once the own interfaces come, the runs alone
+  (loses the localisation the binding judge gives). *Recommended: (a)*.
+- **HF10-P2 lib-stg as a recorded check.** (a) **`test/haskell/lib-stg-results.edn` as the record, a `--full` step (light, about 40
+  minutes with `--run`) on the packs of HF10-P1 and HF9-P1 (the interfaces), failing on a module whose equal count drops, a stage
+  that gets worse, a pass lost, or the control**; half a day after P1; (b) the oracle tier only. *Recommended: (a)*.
+- **HF10-P3 The front end's own interfaces next (HF10-D6 step 2).** (a) **compile ghc-internal bottom-up writing each module's
+  interface (`typecheck/iface-text`) and elaborate the next against the own ones, judged against GHC's `-O0` `.hi` (the helper's
+  `iface` on the reference build's interfaces); the run on a coherent own `-O0` set without the merge**; 3 to 5 days; it removes the
+  helper's interfaces from the libraries' path; (b) keep GHC's `-O2` interfaces and the merge until every module compiles. *Recommended: (a)*,
+  after the modules' foreign imports (P5).
+- **HF10-P4 The order of the STG equality work.** The classes above: deriving's tags (172 with the dictionaries' text), the methods'
+  eta expansion through casts (55), representations of clone binders (130), the `-O0` Simplifier's `isTrue#`/`tagToEnum#` case rules
+  (95), join points (25). Options: (a) **the behaviour first: the representations' class (what `LIB_STG_REPLACE=all` shows failing)
+  and foreign imports, then by count**; (b) by count alone. *Recommended: (a)*.
+- **HF10-P5 Foreign imports.** 49 of ghc-internal's 266 modules declare them; without them those modules' STG lacks bindings and two
+  stop. (a) **port GHC.HsToCore.Foreign.Call's dsCCall/dsFCall (argument unboxing, the result boxed, IO's state threading) and
+  `foreign import prim` as `primcall`, the `(ffi ...)` form hsi runs**; 2 to 3 days; (b) take those modules' foreign bindings from
+  the pack (a kept-bindings class of its own). *Recommended: (a)*.
+
+## As built: HF10 (second slice) (2026-11-08/09, branch `hs-hf10`, from its first slice bd09e1192)
+
+By an agent on the main host at night but in the light tier (no gate, no build of Arbace, every process under about 1.5 GiB, at
+most two at once; stage 0 `/root/arbace/target/seed/amd64/arbace`, the checkout's sources evaluated; GHC only as the oracle: the
+`-O0` reference of the first slice, and two-line probes by hand, `ghc -O0 -ddump-ds -ddump-simpl -ddump-verbose-inlinings` on
+scratch modules in `.tmp/gt/`, to see which GHC rule makes a shape). The brief: the largest classes of the first slice's
+differing bindings, the behaviour-changing ones first (HF10-P4 (a), the order the first slice recommended), then the module set
+past level 12 of ghc-internal's import graph as far as it holds. No HF10-P1 to P5 built (they wait for the user); foreign imports
+as they were.
+
+### Rules ported (GHC 9.14.1, written from the source, `.tmp/ghc-src/` of the pinned tarball)
+
+| rule | files | what it fixed |
+|---|---|---|
+| exprType and dataConInstArgTys: every binder the desugarer and the Simplifier make (the match compiler's variables, case binders, the eta binders of `strip`) given its type from its binding site (a let's right-hand side, a case's scrutinee, a constructor's fields at the scrutinee's type arguments, a lambda's expected type: the binding's own, a cast's source, a known function's parameter), before and after the Simplifier (`c/infer-binder-types!`, `REPR_HASKELL_INFER_TYPES=0` off) | `core.ae`, `simplify.ae` | the representations class: Base's `bindIO` (the `State#` token `:v`, `(# s, a #)` unarised to `MkSolo#`), `bigNatShiftR`'s `BigNat#`, every alternative type of a clone; the Simplifier's own unlifted tests (doCaseToLet: `case sz of i -> ...` on an `Int#` variable) |
+| mkEtaWW at the binder's type in CorePrep's eta expansion (`strip`'s `eta`), its binders by position (mkBuiltinUnique n: one name a position, `eta_E1`...) | `simplify.ae`, `core.ae`, `tostg.ae` | `bindIO`'s third argument, the dictionaries' eta-expanded fields compared across closures |
+| Unarise's unariseFunArgBinder: every void function argument is voidArgId (one name a module); a void variable returned is `(##)` | `tostg.ae` (`void-binders`) | the `State#` arguments of IO's closures; a `State#` returned by name (`mwaFill#`), which hsi ran as a call of an unbound variable |
+| makeCorePair's is_default_method: a class's default methods get compulsory unfoldings (Note [INLINE and default methods]) | `simplify.ae` | `$csconcat = $dmsconcat d` inlined as GHC does: the instances' default methods |
+| dfunInlinePragma: dictionary functions CONLIKE (isConLikeId); the classop rule then sees a let-bound `$fSemigroupMaybe d` | `simplify.ae` | the instances' method selections on their own dictionaries |
+| simplStableUnfolding's eta expansion to the binder's arity (Note [Eta-expand stable unfoldings]) | `simplify.ae` | `$cmconcat`'s `\d eta -> let z = ...` |
+| prepareRhs's makeTrivial at the binding's level (an unlifted argument of a top-level constructor is not let-bound at the top) | `simplify.ae` | an unlifted top-level thunk (`bigNatZero`'s `BigNat#`), invalid STG |
+| combineIdenticalAlts (prepareAlts), the alternatives with dead binders and cheapEqExpr right-hand sides merged into a DEFAULT | `simplify.ae` | the derived Ord's `case b of _ -> False` |
+| is_more_evald / isBetterUnfoldingThan for join points' inlining (Note [Inlining join points]) | `simplify.ae` | (counted with the join points' class) |
+| ConstantFold's litEq: `x ==# lit` as `case x of {DEFAULT -> 0#; lit -> 1#}` | `constfold.ae`, `simplify.ae` | `bigNatIsZero#`, the equalities on literals |
+| the unboxed tuples' constructors as constructors (their arity: case of a known `(# a, b #)`) | `simplify.ae` | `bigNatGcd`'s `case (# size a, size b #) of` |
+| deriving's untagged code (Generate.hs's untag_Expr `case dataToTag# a of a# ->`, dataToTagSmall#/Large# by the family's size, genPrimOpApp `tagToEnum# (a# ==# b#)`, eq_expr_with_tag_check `case a# /=# b# of 1# -> False`, mkTagCmp's unliftedCompare, the Enum and Ix methods' `I# a#`); the derived binders apart per instance (their keys were all zero spans: two instances' `a` shared one type) | `deriv.ae`, `typecheck.ae` | the derived Eq and Ord of the enumerations (Bool, Ordering), the derived instances' case types |
+| primitive literal patterns (`1#`) matched as literals (they had become wildcards) | `desugar.ae` | eq_expr_with_tag_check's `1#`; a latent bug of any `case x# of 0# ->` in the libraries |
+| the solver's EvCsPushCall: a call of a HasCallStack binding of the module itself pushes its call site onto `?callStack`, a new wanted solved from the enclosing given (it was the empty stack) | `typecheck.ae` | `cycle`, `head`, `tail`: `pushCallStack site d` |
+| IP's evidence kept to CorePrep (`C:IP (pushCallStack ...)`, `ip d`), there the identity and an atom (the newtype class's constructor and selector have no binding) | `desugar.ae`, `tostg.ae` | the HasCallStack evidence's thunks, as GHC's |
+| a data constructor wrapper's unfolding (mkDataConRep: strict lifted fields evaluated, a field the libraries' constructor holds unpacked unboxed by `case x of I# x#`) | `simplify.ae` | `$WSrcLoc` inlined; against the pack's `-O2` SrcLoc (unpacked `Int` fields) hsi had stopped on `not an integer: I#` |
+| Tidy's tidyTopName at `-O0`: a top-level binder the module does not export is internal | `tostg.ae` (`*internal-tops*`) | `lenAcc`, `badHead` and the like: their callers' closures |
+| OccurAnal's rule occurrences: the module's values its RULES mention are kept alive (never inlined unconditionally) | `typecheck.ae` (`:rule-names`), `tostg.ae` | `head`'s `badHead` |
+| CorePrep's top-level string floats: a CAF `unpackCString# "..."#` has its literal a top-level string | `tostg.ae` | `prel_list_str` |
+| CoreToStg's mkStgAltType: PolyAlt for an unlifted pointer (`ByteArray#`), PrimAlt only for a non-pointer | `tostg.ae` (`prim-alt`) | `(poly) / (prim :U)` |
+| a nullary join point's binder at its body's representation; recursive join points (OccurAnal's tagRecBinders) let-no-escape | `tostg.ae` | the loops of `WordArray`, `reverse`, `until` |
+| CorePrep's cpeArg floats: a case float's own floats float out with it | `tostg.ae` (`wrap-binds`) | `bigNatSize`'s `case (case ...)` |
+| dsEvBinds: a binding's superclass evidence bound once after its dictionary lambdas (`$dApplicative = $p1Alternative d`), the unused removed | `typecheck.ae` (`*ev-binds*`) | `$dmsome`, `$dmstimes`, the methods' repeated superclass selections |
+| maybeSaturate for data constructors: a constructor of fields as an argument a function closure (`liftA2 d (\\a b -> a : b)`), a dictionary's constructor fields floated at the top level | `tostg.ae` | `$fApplicativeMaybe`'s `pure = Just` |
+| a constructor whose strict fields are all unlifted is a constructor right-hand side | `tostg.ae` (`lifted-strict?`) | `integerZero = IS 0#` |
+| NOINLINE and OPAQUE pragmas (their inline activation never active: no call-site inlining, no pre- or post-inlining unconditionally) | `typecheck.ae` (`:noinline`), `simplify.ae` | the bignum functions (`integerToNatural`, `integerFromWord#`, `naturalFromBigNat#`...) inlined where GHC calls them |
+| an empty case (EmptyCase: matchEmpty's case without alternatives, CorePrep's Note [Empty case alternatives]) | `desugar.ae`, `tostg.ae` | `absurd`: a pattern-match failure where GHC evaluates the scrutinee |
+| (the runs) the merge keeps the pack's binding of any own one that names a constructor the pack lays out otherwise (`-O2`'s unpacked fields: Arr's `Array`, its `Int` an `Int#`) | `libcheck.ae` | `samples/Arrays`, lost in an intermediate run on the 112 modules (Arr's equal bindings constructing `Array` boxed) |
+
+### The measure
+
+`bin/repr-haskell lib-stg` (one process, the reference the first slice's `.tmp/hsi/dumps-O0`):
+
+| set | first slice | second slice |
+|---|---:|---:|
+| the 55 modules of levels 0 to 12 | 595 of 1,149 | **857 of 1,149** (no binding lost against the first slice; modules all equal 9 → 10) |
+| levels 13 to 18 (20 modules: Show, Real, Enum, Arr, Ix, Word, Bits, ST, Char...) | - | 409 of 650 |
+| levels 19 to 30 (37 modules: Float, Read, ReadP, Lexeme, Numeric, Int, Ptr, Data.Either...) | - | 1,207 of 1,511 |
+| **`test/haskell/lib-stg.txt`, 112 modules** | | **2,473 of 3,310**; 109 ok, 1 with elaborator errors (Unicode), the 2 STG stops of the first slice (foreign imports) |
+| levels 31 to 45, measured, not listed | - | 40 modules made (10 with elaborator errors) before `GHC.Internal.IO.Encoding.UTF8`, 594 of 1,063; UTF8's `utf8_decode` takes the Simplifier minutes an iteration (126 s, growing), past the 900 s limit |
+
+The first slice's classes on the same 55 modules (the judge's first difference, by binding):
+
+| class | first slice | second slice | |
+|---|---:|---:|---|
+| binders' representations and alternative types (`(alg / (poly)`, `:U`, `:word`, `:v`, `:int`, `:addr / :L`, `(poly) / (prim`) | 148 | 24 | the rest: unboxed sums (below), a few clones the inference cannot type (a type variable's representation) |
+| a dictionary's method field a thunk where GHC's is a function (`:r / :u`) | 55 | 7 | |
+| a closure set of another size (`"" / ""`: a method from another binding, the derived code, the dictionaries) | 181 | 146 | of which about 65 the constraint tuples (below) |
+| the Simplifier's case shapes (`(primop / (case`, `(case / (app`, `(app / (case`, `(case / (let`) | 88 | 33 | NOINLINE's mostly: `(app / (case` 20 → 3 |
+| join points GHC makes and ours not (`(letne / (case`, `(letne / (let`) | 25 | 8 | |
+| join points ours makes and GHC not (`(case / (letne`) | (in other classes) | 25 | new at the head: the case-of-case of ours where GHC's simplifier does not duplicate |
+
+### What is left (the classes of the 112 modules' differing bindings)
+
+- **Constraint tuples** (Classes, about 130 bindings with their data): `class (c1, c2) => CTuple2 c1 c2`, superclasses that are
+  type variables; the elaborator keeps only class superclasses, GHC names the selectors `$p0CTuple2` (0-based) and the
+  constructor `CTuple2`. Nothing runs them (HF10-P9).
+- **Unboxed sums** (`(# (# #) | Word# #)`, the `IsPowerOf2#` functions): Unarise's sum layout (ubxSumRepType, the tag and slots,
+  the rubbish literals) not ported (HF10-P8).
+- **The bignum backend**: lib-check's dumps are read with the corpus's `-DBIGNUM_GMP`, the reference is native's (HES7 (a)):
+  `bignat_compare` and the other backend calls resolve to `Backend.GMP` (HF10-P6).
+- **The `-O2` ABI against the `-O0` reference**: the pack's SrcLoc holds its `Int` fields unpacked, so every HasCallStack site
+  constructs it unboxed where GHC's `-O0` code boxes them (the first slice's HF10-D5; HF10-P7, HF10-P3).
+- **The Simplifier's shapes**: case-of-case into a join point where GHC keeps the case (27), the `isTrue#`/`tagToEnum#` shapes
+  (33), the Simplifier's time on `utf8_decode` (an iteration of minutes: the cost of case-of-case and the join points, to profile).
+- **Foreign imports** (HF10-P5) and the elaborator's errors of 11 modules past level 13 (HF9's classes).
+
+### Programs on the own STG
+
+`bin/repr-haskell lib-stg --run` over the 112 modules (run-check's 63 programs, samples and synthetic, the front end in one shard,
+hsi at 2 GiB and 120 s): on the pack, **59 of 63 pass** (62 of 63 as `test/haskell/run-check.edn` records, the known
+`synthetic/primops-word`); with the 109 compiled modules replaced, their **2,451 exported bindings equal to GHC's `-O0` Arbace's
+own STG** (595 of 52 modules in the first slice) and 11,509 of the pack's kept for its ABI: **59 of 63 pass, none lost, none
+gained**. An intermediate run of the 112 lost `samples/Arrays`: Arr's equal bindings construct `Array` with its `Int` boxed, the
+pack's `-O2` layout unpacks it; the merge now keeps the pack's binding of any own one naming such a constructor (HF10-P7).
+
+With every own binding (`LIB_STG_REPLACE=all`): 5,944 own bindings of the 109 modules (10,241 of the
+pack's kept): **28 of 63 pass, 31 lost** (the first slice's three failures, Base's `bindIO` among them, are gone; the set is now
+twice as large). The bugs list, by hsi's first error: `applying int64(0) to 1 arguments` (13 programs: an own binding called
+at another arity than the pack's callers assume, the `-O2` ABI's workers), `not an integer: <thunk ... bigNatCompare ...>` (5: an
+unlifted value let-bound lazily in an unequal binding), the bignum backend's `Backend.GMP` (5: HF10-P6), `no binding of raise#`
+(3: an unsaturated primop as a value), `unbound name` (3: a local lost by an unequal binding's STG), `unboxed tuple of the wrong
+size` (2), a segmentation fault (1). The default (`equal`) replaces only GHC's own `-O0` code by construction, and loses none.
+
+### Checks
+
+| check | result |
+|---|---|
+| `bin/repr-haskell lib-stg` (112 modules, one process, about 8 minutes) | 2,473 of 3,310 bindings equal; the 55 of the first slice 857 of 1,149, none lost against it; the negative control 0 of 171 |
+| `bin/repr-haskell typecheck-check` | 24 of 24 modules equal, the control 13 of 24 (after the deriving, HasCallStack and evidence changes) |
+| `bin/repr-haskell lib-stg --run` (run-check twice, the front end in one shard, hsi at 2 GiB and 120 s) | on the pack 59 of 63 (62 of 63 as recorded); with 2,451 own bindings of 109 modules 59 of 63, 0 lost |
+| `LIB_STG_REPLACE=all` (every own binding of the 109 compiled modules) | 5,944 own bindings: 28 of 63, 31 lost (the bugs list above) |
+
+The record `test/haskell/lib-stg-results.edn` keeps each module's stage and counts (`--record`; no step reads it yet: HF10-P2).
+
+### Night commands (one process at a time, at most 1.5 GiB a process; `. .tmp/env.sh`)
+
+1. `bin/repr-haskell lib-stg --every 1 --record .tmp/lib-stg-all.edn` (every judged module of ghc-internal: the measure past
+   level 30, UTF8's timeout recorded as such; about 40 minutes).
+2. `bin/repr-haskell lib-stg --run` and `LIB_STG_REUSE=1 LIB_STG_REPLACE=all bin/repr-haskell lib-stg --run` (the 112 modules:
+   about 40 minutes each).
+3. HFS-I6 (a): `make repr-haskell-run-check` and `bin/repr-haskell stg-check` (the programs' Core and STG against GHC's after this
+   slice's rules: the binders' types, voidArgId, the default methods, the evidence bindings, the wrappers).
+
+### Proposed (HF10-P6 to HF10-P10; options with costs, a recommendation each, none decided)
+
+- **HF10-P6 The bignum backend of lib-check's dumps.** (a) **ghc-internal's native dumps read with `-DBIGNUM_NATIVE` and
+  without `Backend.GMP`, as `bin/hsi dumps` builds the reference (`test/haskell/eval/dump_plan.ae`'s rule), lib-check's closures
+  then Native's interfaces**; half a day, a re-read of the package (light, about 10 minutes); (b) leave it: about a dozen bindings
+  call the other backend's names. *Recommended: (a)*, the judge and the runs then name the backend the pack has.
+- **HF10-P7 The ABI the runs compile against.** The programs and the replaced modules are compiled against the pack's `-O2`
+  data (unpacked strict fields), the judge's reference is `-O0` (boxed): the two disagree on SrcLoc and any `{-# UNPACK #-}`
+  field. (a) **keep the pack's data for both (as built: behaviour first) until HF10-P3's own `-O0` interfaces and libraries make
+  the set coherent**; (b) two compilations, the judge's against the reference's `-O0` data and the runs' against the pack's (twice
+  the time, and an equal binding is then not the one that runs). *Recommended: (a)*.
+- **HF10-P8 Unboxed sums in Unarise.** (a) **port ubxSumRepType's slots and layout, the tag, the rubbish literals and the
+  alternatives' unpacking (Stg/Unarise.hs, RepType.hs) with an STG form for rubbish (`(rubbish REP)`, hsi's)**; 1 to 2 days with
+  hsi's part; (b) the few `IsPowerOf2#` bindings from the pack. *Recommended: (a)*, programs with UnboxedSums need it too.
+- **HF10-P9 Constraint tuples.** (a) **the elaborator's variable superclasses (a class context of constraint variables), GHC's
+  names for the CTuple classes (`$p<i>CTuple<n>` from 0, the constructor `CTuple<n>`)**; a day; (b) leave them: no program builds
+  a constraint tuple's dictionary at `-O0`. *Recommended: (b)* until a corpus needs them.
+- **HF10-P10 The list past level 30.** (a) **first the Simplifier's time on `utf8_decode` (profile the iteration, the
+  case-of-case and join point duplication against GHC's dump), then the levels 31 to 60 into `test/haskell/lib-stg.txt` as they
+  hold**; 1 to 2 days; (b) the levels as they are, UTF8 recorded `:timeout`. *Recommended: (a)*: the same cost would hit a program.

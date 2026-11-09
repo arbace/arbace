@@ -1051,6 +1051,9 @@ covers what.
   `compiler/GHC/CoreToStg/Prep.hs`, `CoreToStg.hs`, `compiler/GHC/Stg/Unarise.hs`, `Stg/FVs.hs`,
   `compiler/GHC/Types/Id/Make.hs`'s dictionary selectors), the files carrying GHC's notice (the Glasgow Haskell
   Compiler License, "GHC: the Glasgow Haskell Compiler License" below); `stgcmp.ae`, the STG judge, is Arbace's own.
+  Since HF10's first slice (2026-11-08) they also follow `compiler/GHC/CoreToStg/Prep.hs`'s speculative evaluation and
+  cpeArgArity, `compiler/GHC/Core/Utils.hs`'s exprOkForSpecEval, `compiler/GHC/CoreToStg.hs`'s mkStgAltType,
+  `compiler/GHC/HsToCore/Match.hs`'s tidy_bang_pat and matchBangs and `compiler/GHC/Core/Make.hs`'s bindNonRec, under the same notice.
 - `arbace/repr/haskell/simpleopt.ae` and `arbace/repr/haskell/constfold.ae` (the front end's simple optimiser and the
   floating-point primops' built-in rules, HF5-HF6's decision 2 (a); doc/haskell/FRONTEND-SURVEY.md, "As built: HF7 (first
   light)"): ports of GHC 9.14.1 (the same tarball and pin) by hand on 2026-11-06: `compiler/GHC/Core/SimpleOpt.hs`

@@ -30,7 +30,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   repr-ocaml-native-check repr-ocaml-menhir repr-ocaml-ocamllex-check oi-reap-switch \
   oi-typer-check oi-stdlib-check oi-check-native oi-typer-probe oi-repl-check-native repr-ocaml-types oi-judges-fixtures \
   oi-check-ocdump oi-own-verdicts \
-  repr-haskell-native-check repr-haskell-tables-check repr-haskell-rename-check repr-haskell-typecheck-check repr-haskell-lib-check repr-haskell-lib-check-record repr-haskell-stg-check repr-haskell-run-check repr-haskell-run-check-nofib hsi-pins hsi-spec-check hsi-tests hsi-dumps hsi-generate hsi-record-ref hsi-build hsi-stubs-build hsi-repl-session hsi-check hsi-check-core hsi-check-essential hsi-check-aot hsi-check-aot-o1 hsi-record-ref-o1 hsi-primops hsi-libm-check hsi-runtime-check repr-haskell-test-oracle repr-haskell-record-corpus hsi-record-libs hsi-record-progs oracle-records-list oracle-records-check oracle-records-verify oracle-records-record oracle-records-mirror
+  repr-haskell-native-check repr-haskell-tables-check repr-haskell-rename-check repr-haskell-typecheck-check repr-haskell-lib-check repr-haskell-lib-check-record repr-haskell-lib-stg repr-haskell-stg-check repr-haskell-run-check repr-haskell-run-check-nofib hsi-pins hsi-spec-check hsi-tests hsi-dumps hsi-generate hsi-record-ref hsi-build hsi-stubs-build hsi-repl-session hsi-check hsi-check-core hsi-check-essential hsi-check-aot hsi-check-aot-o1 hsi-record-ref-o1 hsi-primops hsi-libm-check hsi-runtime-check repr-haskell-test-oracle repr-haskell-record-corpus hsi-record-libs hsi-record-progs oracle-records-list oracle-records-check oracle-records-verify oracle-records-record oracle-records-mirror
 
 help: ## list the targets
 	@awk 'BEGIN {FS = ":.*## "} /^## / {printf "\n%s\n", substr($$0, 4)} \
@@ -266,6 +266,9 @@ repr-haskell-rename-check: ## the front end's renamer (HF2) against GHC's: the r
 	bin/repr-haskell rename-check
 repr-haskell-typecheck-check: ## the front end's elaborator (HF3) against GHC's types and desugared Core's evidence over test/haskell/typecheck's samples, with its negative control (bin/repr-haskell typecheck-check)
 	bin/repr-haskell typecheck-check
+repr-haskell-lib-stg: ## HF10's check: ghc-internal's modules desugared and made STG natively, judged against GHC's -O0 STG binding by binding, and programs run on their own STG (bin/repr-haskell lib-stg --run)
+	bin/repr-haskell lib-stg --run
+
 repr-haskell-lib-check: ## HF9's measure as a recorded check: ghc-internal's modules through the front end against GHC's interfaces from the pack haskell-lib-ifaces-ghc-9.14.1, judged against test/haskell/lib-check-ghc-internal.edn (bin/repr-haskell lib-check --judge)
 	bin/repr-haskell lib-check --judge test/haskell/lib-check-ghc-internal.edn
 repr-haskell-lib-check-record: ## by hand at the oracle tier (GHC): the helper's iface2 verb's interfaces packed, then the measure recorded (bin/repr-haskell lib-check --live --record-pack --record)

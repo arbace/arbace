@@ -344,6 +344,7 @@
   [env top? b rhs rhs-env]
   (let [occ (c/id-occ b) unf (c/id-unf b)]
     (cond (not (:pre-inline (:mode env))) nil
+          (:noinline (c/info b)) nil
           (and top? (c/dead-end-id? b)) nil
           (and (c/join? b) (= :one (:k occ)) (:in-lam occ)) nil
           (contains? *exported* (c/vkey b)) nil
@@ -356,6 +357,7 @@
   [env ctx old b rhs]
   (let [occ (c/id-occ old) unf (c/id-unf b)]
     (cond (= :lb (:k occ)) false
+          (:noinline (c/info old)) false
           (c/stable-unf? unf) false
           (= :top (:level ctx)) false
           (contains? *exported* (c/vkey old)) false
@@ -375,6 +377,19 @@
               res-disc
               (case cont-info :boring 0 :case res-disc :val-app res-disc (min 40 res-disc)))]
     (+ 10 (* 10 (count actual)) (reduce + 0 actual) res)))
+
+(defn- better-unf?
+  "isBetterUnfoldingThan (Note [Inlining join points], is_more_evald): a value's unfolding is better than any that is
+  not a value's; an OtherCon of more constructors than another, or than none"
+  [u1 u2]
+  (let [value? (fn [u] (and (= :core (:k u)) (:value u)))]
+    (cond (nil? u1) false
+          (value? u1) (not (value? u2))
+          (= :other (:k u1)) (cond (nil? u2) true
+                                   (= :other (:k u2)) (let [a (set (:cons u1)) b (set (:cons u2))]
+                                                        (and (> (count a) (count b)) (every? a b)))
+                                   :else false)
+          :else false)))
 
 (defn- try-unfolding [env v lone arg-infos cont-info u]
   (let [g (c/guide u) n (count arg-infos)
@@ -399,11 +414,13 @@
       :if-good (let [size (:size g) depth (:case-depth env)
                      penalty (if (<= depth c/uf-case-threshold) 0 (quot (* size (- depth c/uf-case-threshold)) c/uf-case-scaling))
                      disc (compute-discount (:args g) (:res g) arg-infos cont-info)
-                     small (<= (- (+ size penalty) disc) c/uf-use-threshold)]
+                     small (<= (- (+ size penalty) disc) c/uf-use-threshold)
+                     _ (when (and *trace* (System/getenv "SIMPL_TRACE_V") (re-find (re-pattern (System/getenv "SIMPL_TRACE_V")) (pr-str (c/vkey v))))
+                         (binding [*out* *err*] (println "try" (pr-str (c/vkey v)) "size" size "disc" disc "args" (pr-str (:args g)) (pr-str arg-infos) cont-info "wf" (:work-free u))))]
                  (cond (and (c/join? v) small)
                        (when (or (some true? (map (fn [d a] (and (= a :value) (pos? d))) (:args g) arg-infos))
                                  (some (fn [x] (let [b (get (:in-scope env) (c/vkey x))]
-                                                 (and b (c/evald-unf? (c/id-unf b)) (not (c/evald-unf? (c/id-unf x))))))
+                                                 (and b (better-unf? (c/id-unf b) (c/id-unf x)))))
                                        (c/free-locals (c/tmpl u))))
                          (c/tmpl u))
                        (and (:work-free u) (some-benefit (count (:args g)) false) small) (c/tmpl u)
@@ -412,7 +429,7 @@
 
 (defn- call-site-inline [env v lone arg-infos cont-info]
   (let [u (c/id-unf v)]
-    (when (= :core (:k u))
+    (when (and (= :core (:k u)) (not (:noinline (c/info v))))
       (when (or (c/compulsory-unf? u) (:inline (:mode env)))
         (try-unfolding env v lone arg-infos cont-info u)))))
 
@@ -435,11 +452,15 @@
   (when (seq rules)
     (case (first rules)
       :classop (when (seq args)
+                 (when (and *trace* (System/getenv "SIMPL_TRACE_V") (re-find (re-pattern (System/getenv "SIMPL_TRACE_V")) (pr-str (c/vkey f))))
+                   (binding [*out* *err* *print-meta* true *print-level* 6] (println "classop" (pr-str (c/vkey f)) (binding [*print-meta* false] (pr-str (first args))) "->" (binding [*print-meta* false] (pr-str (some? (expr-is-con-app env (first args)))) "inscope" (pr-str (some-> (get (:in-scope env) (c/vkey (first args))) meta (dissoc :type) (update :unf #(when % (select-keys % [:k :src :expandable])))))))))
                  (when-let [[floats con cargs] (expr-is-con-app env (first args))]
                    (let [i (:index (c/details f))]
                      (when (< i (count cargs))
                        [1 (c/wrap-binds floats (nth cargs i))]))))
-      :primop (when-let [r (cf/primop-rule (c/primop-of f) args)] [(count args) r])
+      :primop (when-let [r (or (cf/primop-rule (c/primop-of f) args)
+                               (cf/lit-eq (c/primop-of f) args #(c/fresh-local "wild" {:occ {:k :dead}})))]
+                [(count args) r])
       ;; ConstantFold's dataToTagRule: the tag of a known constructor (0-based)
       :data-to-tag (when (= 1 (count args))
                      (when-let [[floats con _] (expr-is-con-app env (first args))]
@@ -534,7 +555,7 @@
 (defn- mk-let-unfolding [env top? b join? rhs]
   (c/mk-unfolding :vanilla top? (c/dead-end-id? b) join? rhs oa/occur-analyse-expr))
 
-(defn- simpl-stable-unfolding [env ctx b u]
+(defn- simpl-stable-unfolding [env ctx b u & [at]]
   (case (:k u)
     :dfun (let [[env2 bs] (simpl-binders env (:bndrs u))
                 u2 (assoc u :bndrs bs :args (mapv #(simpl-expr env2 %) (:args u)))]
@@ -543,7 +564,12 @@
     :core (if (c/stable-unf? u)
             (let [e2 (if (= :join (:k ctx))
                        (simpl-join-rhs env b (c/tmpl u) (:cont ctx))
-                       (simpl-expr-c env (c/tmpl u) (rhs-stop (= :rec (:rec ctx)))))]
+                       (let [e1 (simpl-expr-c env (c/tmpl u) (rhs-stop (= :rec (:rec ctx))))]
+                         ;; Note [Eta-expand stable unfoldings]: eta-expanded to the binder's arity (the RHS's
+                         ;; ArityType), so that inlining it keeps a caller's arity
+                         (if (and at (:eta-expand (:mode env)) (< (c/expr-arity e1) (c/at-arity at)) (want-eta-expansion? e1))
+                           (c/eta-expand-at at e1 (c/id-type b))
+                           e1)))]
               (if (= :when (:k (c/guide u)))
                 (assoc (c/mk-unfolding (:src u) (bc-level ctx) false false e2 oa/occur-analyse-expr) :guide (c/guide u) :src (:src u))
                 (assoc (mk-let-unfolding env (bc-level ctx) b false e2) :src (:src u))))
@@ -551,7 +577,7 @@
     u))
 
 (defn- simpl-let-unfolding [env ctx b rhs at old-unf]
-  (cond (c/stable-unf? old-unf) (simpl-stable-unfolding env ctx b old-unf)
+  (cond (c/stable-unf? old-unf) (simpl-stable-unfolding env ctx b old-unf at)
         (= :dfun (:k old-unf)) (simpl-stable-unfolding env ctx b old-unf)
         (and (c/join? b) (= :many (:k (c/id-occ b)))) nil
         :else (mk-let-unfolding env (bc-level ctx) b (c/join? b) rhs)))
@@ -615,7 +641,7 @@
                   app (let [[f0 args] [(second e) (nth e 2)]
                             [fl f2] (anf f0)
                             [fl2 as2] (reduce (fn [[fl out] a]
-                                                (let [[f3 a2] (make-trivial env false :top occ a)]
+                                                (let [[f3 a2] (make-trivial env top? :top occ a)]
                                                   [(add-let-floats fl f3) (conj out a2)]))
                                               [fl []] args)]
                         [fl2 (c/mk-apps f2 as2)])
@@ -973,6 +999,8 @@
   "rebuildCase"
   [env scrut b alts k]
   (let [con-app (when-not (and (c/head? scrut 'lit) (not (c/lit-string? scrut))) (expr-is-con-app env scrut))
+        _ (when (and *trace* (System/getenv "SIMPL_TRACE_CASE") (c/head? scrut 'app) (c/gv? (second scrut)) (re-find #"#" (pr-str (second (second scrut)))))
+            (binding [*out* *err*] (println "case-on" (pr-str (second (second scrut))) (pr-str (c/info (second scrut))) (some? con-app))))
         simple-rhs (fn [env wfloats cb-rhs rhs]
                      (let [[fl1 env2] (simpl-aux-bind env b cb-rhs)
                            [fl2 e2] (simpl-expr-f env2 rhs k)]
@@ -1002,7 +1030,32 @@
               :else (really-rebuild-case env scrut b alts k)))
       :else (really-rebuild-case env scrut b alts k))))
 
+(defn- combine-identical-alts
+  "GHC.Core.Utils' combineIdenticalAlts: the alternatives identical to the first (their binders dead, the right-hand
+  sides cheapEqExpr) merged with it into a DEFAULT, which comes first; [impossible-defaults alts]"
+  [idcs alts]
+  (let [dead? (fn [b] (= :dead (:k (c/id-occ b))))
+        [_ con1 bs1 rhs1] (first alts)]
+    (if (and (seq alts) (every? dead? bs1))
+      (let [same? (fn [[_ _ bs r]] (and (every? dead? bs) (c/cheap-eq? r rhs1)))
+            elim (filter same? (rest alts))
+            kept (remove same? (rest alts))]
+        (if (seq elim)
+          (do (tick!)
+              [(vec (remove (set (concat (when (con-name? con1) [con1]) (map second elim))) idcs))
+               (vec (cons (list 'alt :default [] rhs1) kept))])
+          [idcs alts]))
+      [idcs alts])))
+
+(declare prepare-alts0)
+
 (defn- prepare-alts
+  "prepareAlts: filterAlts, refineDefaultAlt, then combineIdenticalAlts"
+  [env scrut b alts]
+  (let [[idcs alts2] (prepare-alts0 env scrut b alts)]
+    (combine-identical-alts idcs alts2)))
+
+(defn- prepare-alts0
   "prepareAlts: filterAlts (the constructors the scrutinee cannot be) and refineDefaultAlt: [impossible-defaults alts]"
   [env scrut b alts]
   (let [imposs (when (c/vref? scrut) (let [u (c/id-unf (refine env scrut))] (when (= :other (:k u)) (:cons u))))
@@ -1226,7 +1279,7 @@
   "The IdDetails of the global names: GHC's implicit Ids (constructor workers, class-op and superclass selectors,
   primops, dictionary functions) and the wired-in error Ids; nothing else of an imported Id (-O0 ignores the
   interfaces' pragmas)"
-  [r con-strict]
+  [r con-strict & [con-reps]]
   (let [classes (:all-classes r)
         ops (into {} (for [[cls i] classes
                            :let [ns (or (:nsupers i) (count (:supers i))) fields (+ ns (count (:methods i))) unary (= 1 fields)]
@@ -1243,19 +1296,58 @@
         (let [v (when (and (vector? n) (= 4 (count n)))
                   (let [[_ k m o] n dn ["ext" "data" m o]]
                     (cond
+                      ;; the unboxed tuples' constructors (wired in: :all-cons has them without an arity)
+                      (and (= "GHC.Internal.Types" m) (re-matches #"\(#,*#\)" o))
+                      (let [k (if (= "(##)" o) 0 (inc (count (filter #{\,} o))))]
+                        {:details {:k :con :strict (vec (repeat k false)) :unary false} :arity k})
                       (contains? (:all-cons r) dn)
                       (let [ci (get (:all-cons r) dn)]
                         {:details {:k :con :strict (vec (con-strict dn)) :unary false} :arity (or (:arity ci) 0)})
+                      ;; a data constructor's wrapper ($WCon, mkDataConRep): its strict lifted fields evaluated, then
+                      ;; the constructor; an INLINE unfolding of its arity (alwaysInlinePragma)
+                      ;; A field the libraries' constructor holds unpacked (an -O2 library's {-# UNPACK #-} strict field,
+                      ;; its rep the boxed type's field's) is unboxed by the wrapper: case x of I# x# (dataConRep's
+                      ;; unboxers)
+                      (and (str/starts-with? o "$W") (contains? (:all-cons r) ["ext" "data" m (subs o 2)]))
+                      (let [cn ["ext" "data" m (subs o 2)] ci (get (:all-cons r) cn) ar (or (:arity ci) 0)
+                            strict (concat (con-strict cn) (repeat false))
+                            reps (concat ((or con-reps (constantly [])) cn) (repeat :L))
+                            ts (loop [t (get (:genv r) cn) out []]
+                                 (cond (and (vector? t) (= :forall (first t))) (recur (nth t 3) out)
+                                       (c/fun-ty? t) (recur (second (nth t 2)) (conj out (first (nth t 2))))
+                                       :else out))
+                            boxer (fn [t] (let [t (c/strip-forall t)]
+                                            (when (and (vector? t) (= :tc (first t)))
+                                              (let [cs (:cons (get (:tycons r) (second t)))]
+                                                (when (and (= 1 (count cs)) (= 1 (:arity (get (:all-cons r) (first cs))))) (first cs))))))
+                            xs (mapv #(list 'lv "x" (str "w" o %)) (range ar))
+                            ;; [arg-of-the-constructor wrap-fn] per field
+                            fields (mapv (fn [x s t rp i]
+                                           (cond (and (not= :L rp) t (boxer t))
+                                                 (let [y (list 'lv "x'" (str "w" o i "'")) z (list 'lv "x#" (str "w" o i "#"))]
+                                                   [z (fn [acc] (list 'case x y [(list 'alt (boxer t) [z] acc)]))])
+                                                 (and s (not (c/*unlifted-type?* t)))
+                                                 (let [y (list 'lv "x'" (str "w" o i "'"))]
+                                                   [y (fn [acc] (list 'case x y [(list 'alt :default [] acc)]))])
+                                                 :else [x identity]))
+                                         xs strict (concat ts (repeat nil)) reps (range))
+                            body (reduce (fn [acc [_ wrap]] (wrap acc))
+                                         (c/mk-apps (list 'v ["ext" "var" m (subs o 2)]) (mapv first fields)) (reverse fields))
+                            tm (c/mk-lams xs body)]
+                        {:arity ar
+                         :unf (assoc (c/mk-unfolding :inline true false false tm oa/occur-analyse-expr)
+                                     :guide {:k :when :arity ar :unsat-ok false :boring-ok true})})
                       (contains? dcons n) (get dcons n)
                       (contains? ops n) (get ops n)
                       (contains? error-ids n) (let [a (get error-ids n)] {:arity a :bot a})
                       (and (= "GHC.Internal.Prim" m) (c/primop-info o))
                       {:details {:k :primop :op o} :arity (or (c/type-arity (get (:genv r) n)) 0)
                        :bot (when (:bot (c/primop-info o)) (or (c/type-arity (get (:genv r) n)) 0))}
-                      (str/starts-with? o "$f") {:details {:k :dfun}}
+                      (str/starts-with? o "$f") {:details {:k :dfun} :conlike true} ; dfunInlinePragma: CONLIKE (isConLikeId)
                       (= "fld" k) {:details {:k :recsel}})))]
-          (swap! cache assoc n v)
-          v)))))
+          (let [v (if (contains? (:noinline r) n) (assoc v :noinline true) v)]
+            (swap! cache assoc n v)
+            v))))))
 
 (defn- dfun-unfolding
   "A dictionary function's DFunUnfolding (the typechecker's mkDFunUnfolding): \\ds -> C:Cls args"
@@ -1314,7 +1406,8 @@
           (eta [b r]
             (let [ar (c/id-arity b)]
               (if (and (not (c/join? b)) (> ar (c/manifest-arity r)))
-                (c/eta-expand-at {:lams (vec (repeat ar [true false])) :div :top} r)
+                ;; the binder's type gives the eta binders theirs (mkEtaWW through the newtypes: IO's State#)
+                (st (binding [c/*eta-tag* true] (c/eta-expand-at {:lams (vec (repeat ar [true false])) :div :top} r (c/id-type b))))
                 r)))]
     ;; CorePrep clones every local binder (cpCloneBndr): each binding site a name of its own
     (vec (for [bd binds [_ b r] (c/bind-pairs bd)] (list 'bind b (uniquify (eta b (st r))))))))
@@ -1334,7 +1427,7 @@
                                  (fn ue2 [e] (cond (c/lv? e) (if-let [t (c/id-type e)] (ut t) (ue e))
                                                    (c/head? e 'cast) (ue2 (second e))
                                                    :else (ue e))))
-            c/*globals* (globals-of r (:con-strict hooks))
+            c/*globals* (globals-of r (:con-strict hooks) (:con-reps hooks))
             c/*con-family* (fn [con] (some-> (get (:all-cons r) con) :tycon (->> (get (:tycons r))) :cons count))
             *family-cons* (fn [con] (some-> (get (:all-cons r) con) :tycon (->> (get (:tycons r))) :cons))
             *con-arity* (fn [con] (:arity (get (:all-cons r) con)))
@@ -1343,10 +1436,22 @@
             *trace* (= "1" (System/getenv "REPR_HASKELL_SIMPL_TRACE"))]
     (let [binds (mapv (fn [[_ b e]]
                         (let [e2 (let-to-case e)
-                              b2 (if-let [u (and (vector? b) (str/starts-with? (nth b 3) "$f") (dfun-unfolding e2))] (c/update-info b assoc :unf u) b)]
+                              b2 (cond
+                                   (and (vector? b) (str/starts-with? (nth b 3) "$f") (dfun-unfolding e2))
+                                   (c/update-info b assoc :unf (dfun-unfolding e2))
+                                   ;; a class's default method: always inlined (GHC.HsToCore.Binds' makeCorePair,
+                                   ;; is_default_method: mkCompulsoryUnfolding'; Note [INLINE and default methods])
+                                   (and (vector? b) (str/starts-with? (nth b 3) "$dm"))
+                                   (c/update-info b assoc :unf (c/mk-compulsory-unfolding e2))
+                                   :else b)
+                              b2 (if (contains? (:noinline r) b) (c/update-info b2 assoc :noinline true) b2)]
                           (list 'bind b2 e2)))
                       prog)
           _ (when-let [f (System/getenv "REPR_HASKELL_SIMPL_DUMP")]
               (spit f (binding [*print-length* nil *print-level* nil] (str (str/join "\n" (map pr-str binds)) "\n"))))
-          out (simplify-pgm binds 4)]
+          ;; the desugarer's binders typed before the Simplifier too (its unlifted tests: doCaseToLet, needsCaseBinding)
+          _ (when-not (= "0" (System/getenv "REPR_HASKELL_INFER_TYPES")) (c/infer-binder-types! binds))
+          out (simplify-pgm binds 4)
+          ;; HF10: the binders the desugarer and the Simplifier made without a type given theirs (exprType)
+          _ (when-not (= "0" (System/getenv "REPR_HASKELL_INFER_TYPES")) (c/infer-binder-types! out))]
       [(strip out) @c/*new-types* out])))
