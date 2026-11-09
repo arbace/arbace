@@ -192,7 +192,9 @@
                         differs (or (and (some? chez) (not (same judged chez))) (and (some? si) (not (same judged si))))
                         off-bit (fn [k x] (and (:last-bit (classes k)) (not (last-bit? x judged))))
                         why (cond (:undecided r) (str "undecided: " (:undecided r))
-                                  (not (contains? (:choices r) rule)) (str "the choice " rule " not applied: " (pr-str (:choices r)))
+                                  ;; SCS18 (b): :rule :grammar, the report's grammar alone decides the text (no choice applies)
+                                  (and (= rule :grammar) (seq (:choices r))) (str "a choice applied where the grammar alone should decide: " (pr-str (:choices r)))
+                                  (and (not= rule :grammar) (not (contains? (:choices r) rule))) (str "the choice " rule " not applied: " (pr-str (:choices r)))
                                   (and d (not (contains? classes reader-class))) (str "the report with the choices differs from the reader in no class: " (pr-str d))
                                   (and reader-class (not d)) (str "a stale reader class " reader-class ": the reader and the report agree")
                                   (and d (off-bit reader-class ours)) (str "the reader differs from the report beyond the last bit: " (pr-str ours))
@@ -218,7 +220,7 @@
   stale). 0 when they do."
   [[dir]]
   (let [dumps (into {} (for [d (ck/read-dumps (str dir "/dump-probes.edn"))] [(.getName (java.io.File. ^String (:file d))) d]))
-        rules (ck/report-exceptions (root))
+        rules (into (ck/report-exceptions (root)) (ck/chez-past-classes (root)))
         same (fn [a b] (and (= (count (:data a)) (count (:data b)))
                             (every? true? (map (fn [x y] (and (fm/tree= (:form x) (:form y)) (= (:off x) (:off y)))) (:data a) (:data b)))
                             (= (boolean (:error a)) (boolean (:error b)))))
@@ -289,7 +291,24 @@
                      (pr-str rows) "\n")))
     (println (str "report-scans: " (count (filter #(and (zero? (:n-only-report %)) (zero? (:n-only-chez %))) rows)) " of " (count rows)
                   " reading scans equal to Chez's (the report's classes over UCD 16.0.0)"))
-    (if (some #(or (seq (:unconfirmed %)) (pos? (:n-only-report %)) (pos? (:n-only-chez %))) rows) 1 0)))
+    ;; SCS17 (c): the four printing scans against SPEC 7's rules, each written text read back by the report
+    (let [prows (vec (for [k ["string-escaped" "char-hex" "symbol-escaped-first" "symbol-escaped-rest"]
+                           :let [f (str dir "/scan-" k ".edn")]
+                           :when (.exists (java.io.File. f))]
+                       (ck/report-print-scan-diffs (read-string (slurp f)))))]
+      (doseq [r prows]
+        (println (str "scan " (name (:scan r)) ": Chez " (:chez r) ", the rules (SPEC 7) " (:report r) " code points; only the rules' "
+                      (:n-only-report r) " " (pr-str (:examples-only-report r)) ", only Chez's " (:n-only-chez r) " " (pr-str (:examples-only-chez r))
+                      "; read back by the report " (:read-back r) " texts" (when (seq (:unconfirmed r)) (str ", UNCONFIRMED " (pr-str (:unconfirmed r)))))))
+      (when out
+        (spit out (str (slurp out)
+                       ";; SCS17 (c) (doc/scheme/SCHEME-SURVEY.md, \"As built: SCS15-SCS18\"): the four printing scans by si's printer's rules\n"
+                       ";; (doc/scheme/SPEC.md 7, arbace.repr.scheme.report) against Chez Scheme 10.3.0's `write` (its recorded dumps), each written\n"
+                       ";; text read back by the report's grammar. The check judges these scans by the rules (no dump read).\n"
+                       (pr-str prows) "\n")))
+      (println (str "report-scans: " (count (filter #(and (zero? (:n-only-report %)) (zero? (:n-only-chez %))) prows)) " of " (count prows)
+                    " printing scans equal to Chez's (SPEC 7's rules)"))
+      (if (some #(or (seq (:unconfirmed %)) (pos? (:n-only-report %)) (pos? (:n-only-chez %))) (concat rows prows)) 1 0))))
 
 (defn roundtrip-found [{:keys [subject reference]}]
   (if-let [r (roundtrip-file subject (or reference subject))] [(pr-str r)] []))
@@ -376,7 +395,7 @@
     (let [fr (frequencies (for [[k j] judges :when (.startsWith ^String k "probe/")] j))]
       (println (str "probes (SCS5 (b), SCS10 (b)): " (+ (get fr :report 0) (get fr :choice 0)) " judged by the report's grammar (arbace.repr.scheme.report, no dump read; "
                     (get fr :choice 0) " of them by si's stated choices, doc/scheme/SPEC.md 12), "
-                    (get fr :dump 0) " by Chez's dump (test/scheme/report-chez.edn names them; since SCS14 (b) no polar number)")))
+                    (get fr :dump 0) " by Chez's dump (test/scheme/report-chez.edn names them: since SCS18 (b) none, Chez's readings past the grammar classed in test/scheme/choices.edn)")))
     (let [fr (frequencies (for [[k j] judges :when (not (.startsWith ^String k "probe/"))] j))]
       (println (str "files (SCS7 (c), SCS10 (b)): " (+ (get fr :report 0) (get fr :choice 0)) " judged by the report's grammar (no dump read; "
                     (get fr :choice 0) " of them by si's stated choices), "
@@ -386,8 +405,8 @@
       (when (seq (:bad r)) (reset! rule-bad true)))
     (when (seq scans)
       (let [fr (frequencies (map :judge scans))]
-        (println (str "scans (SCS9 (c)): " (get fr :report 0) " judged by the report's classes over the Unicode Character Database 16.0.0 (no dump read), "
-                      (get fr :dump 0) " by Chez's dump (the printing scans: write's choices are the implementation's)"))))
+        (println (str "scans (SCS9 (c), SCS17 (c)): " (get fr :report 0) " judged by the report's classes over the Unicode Character Database 16.0.0 (no dump read), "
+                      (get fr :dump 0) " by Chez's dump (since SCS17 (c) none: the printing scans by si's printer's rules, doc/scheme/SPEC.md 7)"))))
     (doseq [s scans] (println (str "scan " (name (:scan s)) ": " (:ranges s) " ranges, only mine " (:n-only-mine s) ", only "
                                    (if (= :report (:judge s)) "the report's " "Chez's ") (:n-only-judge s))))
     (doseq [[k d] unlisted] (println (str "UNLISTED " (ck/diff-line k d))))

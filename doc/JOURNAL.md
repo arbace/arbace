@@ -2467,3 +2467,28 @@ key completed it (the night re-reads). C: completeness 95.92% to 95.96% (99.59% 
 36 to 33, eval and AOT 1 to 0, print 41 to 39. Alternatives considered: naming each re-entry `MAIN#again#N` (CS290 (b), rejected by
 the decision), the parser's messages in gcc's words (CS292 (b): the parse check compares them with cc's). Details: doc/C23-SURVEY.md,
 "As built: CS290 (a), CS291, CS292 (a)".
+
+## 2026-11-09: SCS15 (a), SCS16 (b), SCS17 (c), SCS18 (b), si's Unicode and printer from the pinned UCD, the read judge without Chez's dumps (branch `scheme-props2`, from `mac/scheme-props` 1f64429fa)
+
+The user accepted the four as recommended (about 06:15). doc/scheme/SCHEME-SURVEY.md, "As built: SCS15-SCS18", has the detail.
+
+- SCS15 (a): `#!chezscheme`'s extensions stay classed (`:chezscheme-extensions`, choices.edn); nothing built.
+- SCS16 (b): fetched once by the user's allowance from https://www.unicode.org/Public/16.0.0/ucd/ into the main checkout's
+  `.tmp/scheme/ucd-16.0.0`: `SpecialCasing.txt` (16,809 bytes, SHA-256 8d5de354eef79f2395a54c9c7dcebbaf3d30fc962d0f85611ea97aa973a0c451),
+  `DerivedCoreProperties.txt` (1,115,959, 39d35161f2954497f69e08bdb9e701493f476a3d30222de20028feda36c1dabd), `PropList.txt` (144,253,
+  53d614508e2a0b2305a8aa21cd60d993de9326cdf65993660dfcce4503548583), pinned in test/scheme/ucd.edn; data only, nothing run. The generator
+  `arbace.repr.scheme.ucd` writes si's categories, the properties R6RS's `(rnrs unicode)` names (Alphabetic, Numeric as UnicodeData.txt's
+  numeric value, White_Space, Uppercase, Lowercase, Cased, Case_Ignorable), the simple mappings and SpecialCasing.txt's unconditional full
+  ones into `go/arbace/scm/unicode.ae`; `prim_char.ae` takes them, dropping Go's `unicode` tables (17.0) and Chez's recorded mappings.
+  Checked by a new portable R6RS program over every scalar value, `test/scheme/unicode/scan.sps`, run on Chez 10.3.0 and on si: 4,825 lines
+  differed before, none after; `bin/si unicode-scan [--record]` holds si to Chez's recorded digest (test/scheme/unicode-scan.edn).
+  Alternative not taken: leaving Go's tables (the 4,803 code points of 17.0 and Numeric's 8 ideographs would stay Chez differences).
+- SCS17 (c): doc/scheme/SPEC.md 7 states `:print-string`, `:print-char`, `:print-symbol`; the generator writes the escape tables for both
+  printers (repr/scheme's `print.ae`, si's `write.ae`); the report states the rules a second time and judges the four printing scans, so
+  `bin/repr-scheme check` reads no scan dump. `report-scans` holds the rules to Chez's scans (equal) and reads the written texts back.
+- SCS18 (b): both readers refuse `+INF.0`, `#x1|53` and end a prefixed number at `#` in R6RS's syntax; report-chez.edn is empty, its three
+  rules are classes of choices.edn with their 37 probes, which report-check holds to differ from Chez. si's `string->number` is unchanged
+  (SCS19 proposes it).
+- Numbers: Scheme's independence 99.92 to 100.0 (judge 0.996 to 1.0: the read check reads no Chez dump), completeness 97.41 (98.88) and
+  maturity 100 unchanged. Proposed: SCS19 (`string->number`'s syntax), SCS20 (the Unicode scan in `si-check`), SCS21 (titlecasing's word breaks
+  from WordBreakProperty.txt).

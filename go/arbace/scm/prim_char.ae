@@ -1,77 +1,39 @@
 ;; si's runtime: characters and strings (R6RS (rnrs base), (rnrs unicode), (rnrs bytevectors)'s string
 ;; conversions), with Chez Scheme 10.3.0's values, conditions and messages (probed on Chez).
 ;;
-;; Unicode: the simple mappings and the classes (alphabetic, numeric, general category ...) are Go's
-;; tables (Unicode 17); the full (multi-character) case mappings are data generated from Chez 10.3.0 itself,
-;; at the end of this file; the case folding (char-foldcase, string-foldcase) is CaseFolding.txt's of the
-;; Unicode Character Database 16.0.0, generated into unicode.ae (SCS12 (c), FoldRune and FoldRunes; before,
-;; Chez's answers, equal to it entry for entry). Differences from Chez are those of the Unicode versions.
+;; Unicode (SCS16 (b), the user 2026-11-09; doc/scheme/SCHEME-SURVEY.md, "As built: SCS15-SCS18"): every table is the
+;; Unicode Character Database 16.0.0's, pinned by test/scheme/ucd.edn and generated into unicode.ae by `bin/repr-scheme
+;; ucd gen` (arbace.repr.scheme.ucd states the rules): the general categories, the properties (Alphabetic, Numeric,
+;; White_Space, Uppercase, Lowercase, Cased, Case_Ignorable), the simple case mappings of UnicodeData.txt, the
+;; unconditional full ones of SpecialCasing.txt and the foldings of CaseFolding.txt (SCS12 (c)). Before, the classes and
+;; the simple mappings were Go's unicode tables (Unicode 17.0) and the full mappings data recorded from Chez 10.3.0;
+;; checked against Chez's answers for every scalar value by test/scheme/unicode/scan.sps (test/scheme/unicode-scan.edn).
 ;; string-normalize-nfd/nfc/nfkd/nfkc are normalize.ae's (SM6).
 (in-ns 'go.arbace.scm)
 
 (go/file "prim_char.go"
-  :imports [[unicode "unicode"] [strconv "strconv"] [strings "strings"]])
-
-(go/type dcCat "dcCat is a general category: its two-letter name and its table.\n"
-  (struct ^string Name ^{:tag (* unicode/RangeTable)} T))
+  :imports [])
 
 (go/const [wbOther 0] [wbAL 1] [wbNum 2] [wbENL 3] [wbExt 4] [wbMidL 5] [wbMidN 6] [wbMidNL 7])
 
-(go/func dcParse "dcParse reads \"CP:CP.CP.;...\" into a map.\n" ^{:tag (map rune (slice rune))} [^string data]
-  (let [m (make (map rune (slice rune)))]
-    (range [_ ent (strings/Split data ";")]
-      (when (!= ent "")
-        (let [kv (strings/Split ent ":")
-              (values k _) (strconv/ParseUint (aget kv 0) 16 32)
-              ^{:tag (slice rune)} vs nil]
-          (range [_ h (strings/Split (aget kv 1) ".")]
-            (when (!= h "")
-              (let [(values v _) (strconv/ParseUint h 16 32)]
-                (set! vs (append vs (conv rune v))))))
-          (aset m (conv rune k) vs))))
-    m))
-
-(go/var ^{:tag (map rune (slice rune))} dcUp (dcParse dcUpperData))
-(go/var ^{:tag (map rune (slice rune))} dcDown (dcParse dcDownData))
-(go/var ^{:tag (map rune (slice rune))} dcTitleSp (dcParse dcTitleData))
-
-(go/func dcMakeCats ^{:tag (slice dcCat)} []
-  (let [^{:tag (slice dcCat)} out nil]
-    (range [k t unicode/Categories]
-      (when (and (== (len k) 2) (!= k "Cs") (!= k "LC"))
-        (set! out (append out (lit dcCat k t)))))
-    out))
-
-(go/var ^{:tag (slice dcCat)} dcCats (dcMakeCats))
-
 (go/func dcCategory "dcCategory is the general category name of r (Cn when it has none).\n" ^string [^rune r]
-  (range [_ c dcCats]
-    (when (unicode/Is (.-T c) r)
-      (return (.-Name c))))
-  "Cn")
+  (Category r))
 
 ;; ---------------------------------------------------------------------------------------
 ;; Classes
 
-(go/func dcAlphabetic ^bool [^rune r]
-  (or (unicode/IsLetter r) (unicode/Is unicode/Nl r) (unicode/Is unicode/Other_Alphabetic r)))
+(go/func dcAlphabetic ^bool [^rune r] (IsAlphabetic r))
 
-(go/func dcUpperCase ^bool [^rune r]
-  (or (unicode/IsUpper r) (unicode/Is unicode/Other_Uppercase r)))
+(go/func dcUpperCase ^bool [^rune r] (IsUpperCase r))
 
-(go/func dcLowerCase ^bool [^rune r]
-  (or (unicode/IsLower r) (unicode/Is unicode/Other_Lowercase r)))
+(go/func dcLowerCase ^bool [^rune r] (IsLowerCase r))
 
-(go/func dcCased ^bool [^rune r]
-  (or (dcUpperCase r) (dcLowerCase r) (unicode/IsTitle r)))
+(go/func dcTitleCase ^bool [^rune r] (== (Category r) "Lt"))
 
-;; dcIgnorable is Unicode's Case_Ignorable (categories Mn Me Cf Lm Sk and the word-break mid characters).
-(go/func dcIgnorable ^bool [^rune r]
-  (switch r
-    (case [0x27 0x2E 0x3A 0xB7 0x387 0x55F 0x5F4 0x2018 0x2019 0x2024 0x2027 0xFE13 0xFE52 0xFE55 0xFF07 0xFF0E 0xFF1A]
-      (return true)))
-  (or (unicode/Is unicode/Mn r) (unicode/Is unicode/Me r) (unicode/Is unicode/Cf r) (unicode/Is unicode/Lm r)
-      (unicode/Is unicode/Sk r)))
+;; dcCased is Unicode's Cased, dcIgnorable its Case_Ignorable (DerivedCoreProperties.txt): the final sigma's context.
+(go/func dcCased ^bool [^rune r] (IsCased r))
+
+(go/func dcIgnorable ^bool [^rune r] (IsCaseIgnorable r))
 
 ;; dcWB is the word-break class of r (UAX #29, as far as titlecasing needs it).
 (go/func dcWB ^int [^rune r]
@@ -80,16 +42,16 @@
     (case [0x2E 0x27 0x2018 0x2019 0x2024 0xFE52 0xFF07 0xFF0E] (return wbMidNL))
     (case [0x2C 0x3B 0x37E 0x589 0x60C 0x60D 0x66C 0x7F8 0x2044 0xFE10 0xFE14 0xFE50 0xFE54 0xFF0C 0xFF1B] (return wbMidN))
     (case [0x202F] (return wbENL)))
-  (when (or (unicode/Is unicode/Mn r) (unicode/Is unicode/Me r) (unicode/Is unicode/Mc r) (unicode/Is unicode/Cf r))
-    (return wbExt))
-  (when (unicode/IsLetter r)
-    (return wbAL))
-  (when (unicode/Is unicode/Nd r)
-    (return wbNum))
-  (when (unicode/Is unicode/Pc r)
-    (return wbENL))
-  (when (or (unicode/Is unicode/Nl r) (unicode/Is unicode/Other_Alphabetic r))
-    (return wbAL))
+  (let [c (Category r)]
+    (when (or (== c "Mn") (== c "Me") (== c "Mc") (== c "Cf"))
+      (return wbExt))
+    ;; a letter, Nl or Other_Alphabetic: Alphabetic (none of them Nd or Pc)
+    (when (IsAlphabetic r)
+      (return wbAL))
+    (when (== c "Nd")
+      (return wbNum))
+    (when (== c "Pc")
+      (return wbENL)))
   wbOther)
 
 ;; ---------------------------------------------------------------------------------------
@@ -120,10 +82,10 @@
       (if (dcFinalSigma rs i)
         (return (append out 0x3C2))
         (return (append out 0x3C3))))
-    (let [(values s ok) (aget dcDown r)]
+    (let [(values s ok) (SpecialDowncase r)]
       (when ok
         (return (append out (spread s)))))
-    (append out (unicode/ToLower r))))
+    (append out (DowncaseRune r))))
 
 (go/func dcLower ^{:tag (slice rune)} [^{:tag (slice rune)} rs]
   (let [out (make (slice rune) 0 (len rs))]
@@ -134,10 +96,10 @@
 (go/func dcUpper ^{:tag (slice rune)} [^{:tag (slice rune)} rs]
   (let [out (make (slice rune) 0 (len rs))]
     (range [_ r rs]
-      (let [(values s ok) (aget dcUp r)]
+      (let [(values s ok) (SpecialUpcase r)]
         (if ok
           (set! out (append out (spread s)))
-          (set! out (append out (unicode/ToUpper r))))))
+          (set! out (append out (UpcaseRune r))))))
     out))
 
 (go/func dcFoldRunes ^{:tag (slice rune)} [^{:tag (slice rune)} rs] (FoldRunes rs))
@@ -189,11 +151,11 @@
                 (if (not (dcCased r))
                   (set! out (append out r))
                   (if first
-                    (let [(values s ok) (aget dcTitleSp r)]
+                    (let [(values s ok) (SpecialTitlecase r)]
                       (set! first false)
                       (if ok
                         (set! out (append out (spread s)))
-                        (set! out (append out (unicode/ToTitle r)))))
+                        (set! out (append out (TitlecaseRune r)))))
                     (set! out (dcLowerAt out rs k))))))
             (set! i j)))))
     out))
@@ -514,16 +476,16 @@
   (Def1 "char?" (inst dlIs Char))
   (Def1 "char->integer" dcCharToInteger)
   (Def1 "integer->char" dcIntegerToChar)
-  (Def1 "char-upcase" (dcMap "char-upcase" unicode/ToUpper))
-  (Def1 "char-downcase" (dcMap "char-downcase" unicode/ToLower))
-  (Def1 "char-titlecase" (dcMap "char-titlecase" unicode/ToTitle))
+  (Def1 "char-upcase" (dcMap "char-upcase" UpcaseRune))
+  (Def1 "char-downcase" (dcMap "char-downcase" DowncaseRune))
+  (Def1 "char-titlecase" (dcMap "char-titlecase" TitlecaseRune))
   (Def1 "char-foldcase" (dcMap "char-foldcase" dcFoldChar))
   (Def1 "char-alphabetic?" (dcPred "char-alphabetic?" dcAlphabetic))
-  (Def1 "char-numeric?" (dcPred "char-numeric?" unicode/IsNumber))
-  (Def1 "char-whitespace?" (dcPred "char-whitespace?" unicode/IsSpace))
+  (Def1 "char-numeric?" (dcPred "char-numeric?" IsNumeric))
+  (Def1 "char-whitespace?" (dcPred "char-whitespace?" IsWhiteSpaceProp))
   (Def1 "char-upper-case?" (dcPred "char-upper-case?" dcUpperCase))
   (Def1 "char-lower-case?" (dcPred "char-lower-case?" dcLowerCase))
-  (Def1 "char-title-case?" (dcPred "char-title-case?" unicode/IsTitle))
+  (Def1 "char-title-case?" (dcPred "char-title-case?" dcTitleCase))
   (Def1 "char-general-category" dcCharCategory)
   (range [op name (lit (slice string) "=?" "<?" ">?" "<=?" ">=?")]
     (Def (+ "char" name) 2 -1 (dcCharCmp (+ "char" name) false op))
@@ -556,15 +518,3 @@
   (Def "string->utf32" 1 2 dcStringToUtf32)
   (Def "utf16->string" 2 3 (dcMkDecode "utf16->string" false))
   (Def "utf32->string" 2 3 (dcMkDecode "utf32->string" true)))
-
-;; ---------------------------------------------------------------------------------------
-;; Data generated from Chez Scheme 10.3.0 (chez --script over every scalar value): the full case mappings
-;; that differ from the simple ones, as "CP:CP[.CP...];" (the folding's are unicode.ae's since SCS12 (c)).
-
-
-(go/var dcUpperData "DF:53.53.;149:2BC.4E.;1F0:4A.30C.;390:399.308.301.;3B0:3A5.308.301.;587:535.552.;1E96:48.331.;1E97:54.308.;1E98:57.30A.;1E99:59.30A.;1E9A:41.2BE.;1F50:3A5.313.;1F52:3A5.313.300.;1F54:3A5.313.301.;1F56:3A5.313.342.;1F80:1F08.399.;1F81:1F09.399.;1F82:1F0A.399.;1F83:1F0B.399.;1F84:1F0C.399.;1F85:1F0D.399.;1F86:1F0E.399.;1F87:1F0F.399.;1F88:1F08.399.;1F89:1F09.399.;1F8A:1F0A.399.;1F8B:1F0B.399.;1F8C:1F0C.399.;1F8D:1F0D.399.;1F8E:1F0E.399.;1F8F:1F0F.399.;1F90:1F28.399.;1F91:1F29.399.;1F92:1F2A.399.;1F93:1F2B.399.;1F94:1F2C.399.;1F95:1F2D.399.;1F96:1F2E.399.;1F97:1F2F.399.;1F98:1F28.399.;1F99:1F29.399.;1F9A:1F2A.399.;1F9B:1F2B.399.;1F9C:1F2C.399.;1F9D:1F2D.399.;1F9E:1F2E.399.;1F9F:1F2F.399.;1FA0:1F68.399.;1FA1:1F69.399.;1FA2:1F6A.399.;1FA3:1F6B.399.;1FA4:1F6C.399.;1FA5:1F6D.399.;1FA6:1F6E.399.;1FA7:1F6F.399.;1FA8:1F68.399.;1FA9:1F69.399.;1FAA:1F6A.399.;1FAB:1F6B.399.;1FAC:1F6C.399.;1FAD:1F6D.399.;1FAE:1F6E.399.;1FAF:1F6F.399.;1FB2:1FBA.399.;1FB3:391.399.;1FB4:386.399.;1FB6:391.342.;1FB7:391.342.399.;1FBC:391.399.;1FC2:1FCA.399.;1FC3:397.399.;1FC4:389.399.;1FC6:397.342.;1FC7:397.342.399.;1FCC:397.399.;1FD2:399.308.300.;1FD3:399.308.301.;1FD6:399.342.;1FD7:399.308.342.;1FE2:3A5.308.300.;1FE3:3A5.308.301.;1FE4:3A1.313.;1FE6:3A5.342.;1FE7:3A5.308.342.;1FF2:1FFA.399.;1FF3:3A9.399.;1FF4:38F.399.;1FF6:3A9.342.;1FF7:3A9.342.399.;1FFC:3A9.399.;FB00:46.46.;FB01:46.49.;FB02:46.4C.;FB03:46.46.49.;FB04:46.46.4C.;FB05:53.54.;FB06:53.54.;FB13:544.546.;FB14:544.535.;FB15:544.53B.;FB16:54E.546.;FB17:544.53D.;")
-
-(go/var dcDownData "130:69.307.;")
-
-(go/var dcTitleData "DF:53.73.;149:2BC.4E.;1F0:4A.30C.;345:345.;390:399.308.301.;3B0:3A5.308.301.;587:535.582.;1E96:48.331.;1E97:54.308.;1E98:57.30A.;1E99:59.30A.;1E9A:41.2BE.;1F50:3A5.313.;1F52:3A5.313.300.;1F54:3A5.313.301.;1F56:3A5.313.342.;1FB2:1FBA.345.;1FB4:386.345.;1FB6:391.342.;1FB7:391.342.345.;1FC2:1FCA.345.;1FC4:389.345.;1FC6:397.342.;1FC7:397.342.345.;1FD2:399.308.300.;1FD3:399.308.301.;1FD6:399.342.;1FD7:399.308.342.;1FE2:3A5.308.300.;1FE3:3A5.308.301.;1FE4:3A1.313.;1FE6:3A5.342.;1FE7:3A5.308.342.;1FF2:1FFA.345.;1FF4:38F.345.;1FF6:3A9.342.;1FF7:3A9.342.345.;FB00:46.66.;FB01:46.69.;FB02:46.6C.;FB03:46.66.69.;FB04:46.66.6C.;FB05:53.74.;FB06:53.74.;FB13:544.576.;FB14:544.565.;FB15:544.56B.;FB16:54E.576.;FB17:544.56D.;")
-

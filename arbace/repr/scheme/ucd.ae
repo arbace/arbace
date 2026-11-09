@@ -115,6 +115,109 @@
 (defn whitespace-ranges [a] (ranges-of a #(contains? whitespace-cats %)))
 (defn zs-ranges [a] (ranges-of a #(== (long %) (long (code "Zs")))))
 
+;; SCS17 (c) (the user 2026-11-09; doc/scheme/SPEC.md 7): si's printer's escaping rules, stated here apart from the report's
+;; (arbace.repr.scheme.report's written-hex-in-string?, written-hex-char?, the judge of the printing scans): a character of a string
+;; is written \xHEX; when it is a control of the ASCII range (Cc below U+0080) or starts an R6RS 4.2.1 <line ending> (U+000A,
+;; U+000D, U+0085, U+2028) and has no mnemonic escape (U+0007 to U+000D); a character is written #\xHEX under the same condition
+;; when it has no name (nul alarm backspace tab newline vtab page return esc space delete).
+(def ^:private line-ending-starts #{0x0A 0x0D 0x85 0x2028})
+(def ^:private char-names #{0 7 8 9 10 11 12 13 27 32 127})
+
+(defn- all-ranges
+  "The ranges [lo hi] of the scalar values from U+0000 on that satisfy (pred cp category), flat."
+  [^bytes a pred]
+  (loop [i 0 start -1 acc []]
+    (let [in (and (< i 0x110000) (not (<= 0xD800 i 0xDFFF)) (pred i (long (aget a i))))]
+      (cond (and in (neg? start)) (recur (inc i) i acc)
+            in (recur (inc i) start acc)
+            (>= i 0x110000) (if (neg? start) acc (conj acc start (dec i)))
+            (neg? start) (recur (inc i) -1 acc)
+            :else (recur (inc i) -1 (conj acc start (dec i)))))))
+
+(defn- hex-written? [^long cp ^long c]
+  (or (and (< cp 0x80) (== c (long (code "Cc")))) (contains? line-ending-starts cp)))
+(defn string-hex-ranges [a] (all-ranges a (fn [cp c] (and (hex-written? cp c) (not (<= 7 cp 13))))))
+(defn char-hex-ranges [a] (all-ranges a (fn [cp c] (and (hex-written? cp c) (not (contains? char-names cp))))))
+
+;; ---- SCS16 (b) (the user 2026-11-09): si's (rnrs unicode) from the same pin, in place of Go's unicode tables (17.0) and Chez's answers.
+;; R6RS 1.1 (rnrs unicode): char-upcase, char-downcase, char-titlecase are the simple mappings (UnicodeData.txt's fields 12, 13 and
+;; 14, a titlecase field left empty meaning the uppercase one, UAX #44); string-upcase, string-downcase, string-titlecase the full
+;; ones (SpecialCasing.txt's unconditional lines, then the simple; the Final_Sigma condition of U+03A3 in string-downcase, R6RS
+;; 1.2; the language-sensitive lines left out); char-alphabetic? the Alphabetic property, char-numeric? Numeric (a Numeric_Type
+;; other than None: UnicodeData.txt's field 8, numeric value, present), char-whitespace? White_Space (PropList.txt),
+;; char-upper-case? Uppercase, char-lower-case? Lowercase (DerivedCoreProperties.txt), char-title-case? the category Lt,
+;; char-general-category the category (UnicodeData.txt's field 2); string-titlecase's words and the final sigma take Cased and
+;; Case_Ignorable (DerivedCoreProperties.txt).
+
+(defn- range-lines
+  "The `XXXX..YYYY ; Name # ...` lines of a property file as {name (sorted [lo hi] ...)}."
+  [^String path]
+  (reduce (fn [m l]
+            (let [l (str/trim (first (str/split l #"#" 2)))]
+              (if (empty? l) m
+                  (let [[r nm] (map str/trim (str/split l #";"))
+                        [lo hi] (str/split r #"\.\.")
+                        lo (hex lo) hi (if hi (hex hi) lo)]
+                    (update m nm (fnil conj []) [lo hi])))))
+          {} (str/split-lines (slurp path))))
+
+(defn- merged
+  "The ranges [lo hi] merged where adjacent or overlapping, ascending, flat."
+  [rs]
+  (vec (mapcat identity
+               (reduce (fn [acc [lo hi]]
+                         (let [[plo phi] (peek acc)]
+                           (if (and phi (<= lo (inc phi))) (conj (pop acc) [plo (max phi hi)]) (conj acc [lo hi]))))
+                       [] (sort rs)))))
+
+(defn properties
+  "{:alphabetic :upper :lower :cased :case-ignorable :white-space :numeric}: each the flat ranges of the scalar values that have the
+  property (DerivedCoreProperties.txt's Alphabetic, Uppercase, Lowercase, Cased, Case_Ignorable; PropList.txt's White_Space;
+  UnicodeData.txt's numeric value present: Numeric)."
+  [^String dir]
+  (let [d (range-lines (str dir "/DerivedCoreProperties.txt"))
+        p (range-lines (str dir "/PropList.txt"))
+        numeric (for [l (str/split-lines (slurp (str dir "/UnicodeData.txt")))
+                      :when (not (str/blank? l))
+                      :let [fs (str/split l #";" -1)]
+                      :when (seq (str/trim (nth fs 8)))]
+                  (let [c (hex (nth fs 0))] [c c]))]
+    (doseq [[m k] [[d "Alphabetic"] [d "Uppercase"] [d "Lowercase"] [d "Cased"] [d "Case_Ignorable"] [p "White_Space"]]]
+      (when (empty? (m k)) (throw (ex-info (str "no " k " lines") {}))))
+    {:alphabetic (merged (d "Alphabetic")) :upper (merged (d "Uppercase")) :lower (merged (d "Lowercase"))
+     :cased (merged (d "Cased")) :case-ignorable (merged (d "Case_Ignorable")) :white-space (merged (p "White_Space"))
+     :numeric (merged numeric)}))
+
+(defn simple-mappings
+  "UnicodeData.txt's simple case mappings: {:upper [[cp to] ...] :lower ... :title ...}, the code points whose mapping is another
+  (fields 12, 13, 14; an empty titlecase field the uppercase one)."
+  [^String path]
+  (let [rows (for [l (str/split-lines (slurp path))
+                   :when (not (str/blank? l))
+                   :let [fs (str/split l #";" -1) cp (hex (nth fs 0))
+                         m (fn [i] (let [v (str/trim (nth fs i))] (when (seq v) (hex v))))
+                         up (m 12) lo (m 13) ti (or (m 14) up)]]
+               [cp up lo ti])]
+    {:upper (vec (for [[c u] rows :when (and u (not= u c))] [c u]))
+     :lower (vec (for [[c _ l] rows :when (and l (not= l c))] [c l]))
+     :title (vec (for [[c _ _ t] rows :when (and t (not= t c))] [c t]))}))
+
+(defn special-casing
+  "SpecialCasing.txt's unconditional lines (`code; lower; title; upper; # name`, no condition field): {:lower [[cp [cp ...]] ...]
+  :title ... :upper ...}, each where the full mapping is not the one code point itself. The conditional lines (Final_Sigma, the
+  languages') are left out: Final_Sigma is stated in si's string-downcase, the languages' have no place in R6RS."
+  [^String path]
+  (let [rows (for [l (str/split-lines (slurp path))
+                   :let [l (str/trim (first (str/split l #"#" 2)))]
+                   :when (seq l)
+                   :let [fs (mapv str/trim (str/split l #";" -1))]
+                   ;; `c; l; t; u;` splits into five fields, the last empty; a condition makes it six
+                   :when (or (== 5 (count fs)) (and (== 6 (count fs)) (empty? (nth fs 4)) (empty? (nth fs 5))))]
+               (let [cps (fn [^String v] (if (empty? v) [] (mapv hex (str/split v #" +"))))]
+                 [(hex (nth fs 0)) (cps (nth fs 1)) (cps (nth fs 2)) (cps (nth fs 3))]))
+        keep (fn [i] (vec (for [r rows :let [c (first r) m (nth r i)] :when (not= m [c])] [c m])))]
+    {:lower (keep 1) :title (keep 2) :upper (keep 3)}))
+
 (defn case-folding
   "CaseFolding.txt's mappings (lines `code; status; mapping; # name`): {:full (sorted [cp [cp ...]]) :simple (sorted [cp cp])}:
   full case folding is the C and F lines (UCD's CaseFolding.txt: \"use C + F\"; T, the Turkic, left out: R6RS's string-foldcase
@@ -192,7 +295,16 @@
        "  line, or a character of Zs, Zl or Zp)?\"\n  [^long cp]\n"
        "  (if (< cp 128)\n    (or (== cp 32) (and (>= cp 9) (<= cp 13)))\n    (or (== cp 0x85) (in-ranges? whitespace-ranges cp))))\n\n"
        "(defn intraline?\n  \"Is the code point `cp` an <intraline whitespace> (R6RS 4.2.1: tab, or a character of Zs)?\"\n  [^long cp]\n"
-       "  (or (== cp 9) (== cp 32) (and (> cp 127) (in-ranges? zs-ranges cp))))\n")))
+       "  (or (== cp 9) (== cp 32) (and (> cp 127) (in-ranges? zs-ranges cp))))\n\n"
+       "(def string-hex-ranges\n  \"SCS17 (c), doc/scheme/SPEC.md 7 :print-string: the characters a string is written with as \\\\xHEX; (a control of the ASCII\n"
+       "  range or a <line ending>'s first character, without a mnemonic escape), ranges [lo hi], flat.\"\n  (long-array ["
+       (str/join " " (string-hex-ranges a)) "]))\n\n"
+       "(def char-hex-ranges\n  \"SCS17 (c), SPEC 7 :print-char: the characters written #\\\\xHEX (the same, without a name), ranges [lo hi], flat.\"\n  (long-array ["
+       (str/join " " (char-hex-ranges a)) "]))\n\n"
+       "(defn string-hex?\n  \"Is the character `cp` of a string written as \\\\xHEX; (SPEC 7 :print-string)?\"\n  [^long cp]\n"
+       "  (in-ranges? string-hex-ranges cp))\n\n"
+       "(defn char-hex?\n  \"Is the character `cp` written as #\\\\xHEX (SPEC 7 :print-char)?\"\n  [^long cp]\n"
+       "  (in-ranges? char-hex-ranges cp))\n")))
 
 (defn casefold-file ^String [{:keys [fold]}]
   (let [full (:full fold)
@@ -227,7 +339,61 @@
          "          (recur (+ i (Character/charCount (int cp)))))\n"
          "        (.toString sb)))))\n")))
 
-(defn go-unicode-file ^String [{:keys [^bytes cats fold]}]
+(defn- go-props
+  "SCS16 (b): si's (rnrs unicode) tables and their functions, for go/arbace/scm/unicode.ae (prim_char.ae's)."
+  ^String [{:keys [^bytes cats props simple special]}]
+  (let [rs (runs cats)
+        flat-map (fn [pairs] (wrap (mapcat identity pairs) 24 "    "))
+        flat-full (fn [rows] (wrap (mapcat (fn [[c m]] (list* c (count m) m)) rows) 24 "    "))
+        prop (fn [nm k doc] (let [f (str "Is" (Character/toUpperCase (.charAt ^String nm 0)) (subs nm 1 (- (count nm) 6)))]
+                              (str "(go/var ^{:tag (slice int32)} " nm "\n  (lit (slice int32)\n" (wrap (props k) 24 "    ") "))\n\n"
+                                   "(go/func " f " " (pr-str (str f " is whether r " doc " (UCD 16.0.0).\n"))
+                                   " ^bool [^rune r]\n  (inRanges " nm " r))\n\n")))]
+    (str ";; SCS16 (b): (rnrs unicode)'s data (arbace.repr.scheme.ucd states the rules): the general categories, the properties, the simple\n"
+         ";; case mappings of UnicodeData.txt and the unconditional full ones of SpecialCasing.txt\n"
+         "(go/var ^{:tag (slice string)} catNames (lit (slice string) " (str/join " " (map pr-str names)) "))\n\n"
+         "(go/var ^{:tag (slice int32)} catRuns\n  (lit (slice int32)\n" (wrap (mapcat identity rs) 30 "    ") "))\n\n"
+         "(go/func Category \"Category is the general category of r, a two-letter name (Cn when it is unassigned; UnicodeData.txt's field 2).\\n\" ^string [^rune r]\n"
+         "  (let [lo 0 hi (/ (len catRuns) 3)]\n"
+         "    (while (< lo hi)\n"
+         "      (let [m (/ (+ lo hi) 2) b (* 3 m)]\n"
+         "        (cond (< r (aget catRuns b)) (set! hi m)\n"
+         "              (> r (aget catRuns (+ b 1))) (set! lo (+ m 1))\n"
+         "              :else (return (aget catNames (aget catRuns (+ b 2)))))))\n"
+         "    \"Cn\"))\n\n"
+         (prop "alphabeticRanges" :alphabetic "is Alphabetic (DerivedCoreProperties.txt): char-alphabetic?")
+         (prop "numericRanges" :numeric "is Numeric (a numeric value in UnicodeData.txt's field 8): char-numeric?")
+         (prop "whiteSpacePropRanges" :white-space "is White_Space (PropList.txt): char-whitespace?")
+         (prop "upperCaseRanges" :upper "is Uppercase (DerivedCoreProperties.txt): char-upper-case?")
+         (prop "lowerCaseRanges" :lower "is Lowercase (DerivedCoreProperties.txt): char-lower-case?")
+         (prop "casedRanges" :cased "is Cased (DerivedCoreProperties.txt)")
+         (prop "caseIgnorableRanges" :case-ignorable "is Case_Ignorable (DerivedCoreProperties.txt)")
+         ";; the simple mappings: code point, code point, ...; the full ones: code point, count, the code points, ...\n"
+         "(go/var ^{:tag (slice int32)} simpleUpperData\n  (lit (slice int32)\n" (flat-map (:upper simple)) "))\n\n"
+         "(go/var ^{:tag (slice int32)} simpleLowerData\n  (lit (slice int32)\n" (flat-map (:lower simple)) "))\n\n"
+         "(go/var ^{:tag (slice int32)} simpleTitleData\n  (lit (slice int32)\n" (flat-map (:title simple)) "))\n\n"
+         "(go/var ^{:tag (slice int32)} specialUpperData\n  (lit (slice int32)\n" (flat-full (:upper special)) "))\n\n"
+         "(go/var ^{:tag (slice int32)} specialLowerData\n  (lit (slice int32)\n" (flat-full (:lower special)) "))\n\n"
+         "(go/var ^{:tag (slice int32)} specialTitleData\n  (lit (slice int32)\n" (flat-full (:title special)) "))\n\n"
+         "(go/var ^{:tag (map rune rune)} simpleUpper (foldSimpleMap simpleUpperData))\n\n"
+         "(go/var ^{:tag (map rune rune)} simpleLower (foldSimpleMap simpleLowerData))\n\n"
+         "(go/var ^{:tag (map rune rune)} simpleTitle (foldSimpleMap simpleTitleData))\n\n"
+         "(go/var ^{:tag (map rune (slice rune))} specialUpper (foldFullMap specialUpperData))\n\n"
+         "(go/var ^{:tag (map rune (slice rune))} specialLower (foldFullMap specialLowerData))\n\n"
+         "(go/var ^{:tag (map rune (slice rune))} specialTitle (foldFullMap specialTitleData))\n\n"
+         "(go/func simpleOf ^rune [^{:tag (map rune rune)} m ^rune r]\n"
+         "  (let [(values f ok) (aget m r)]\n    (when ok\n      (return f))\n    r))\n\n"
+         "(go/func UpcaseRune \"UpcaseRune is r's simple uppercase mapping (UnicodeData.txt's field 12): char-upcase.\\n\" ^rune [^rune r] (simpleOf simpleUpper r))\n\n"
+         "(go/func DowncaseRune \"DowncaseRune is r's simple lowercase mapping (field 13): char-downcase.\\n\" ^rune [^rune r] (simpleOf simpleLower r))\n\n"
+         "(go/func TitlecaseRune \"TitlecaseRune is r's simple titlecase mapping (field 14, else 12): char-titlecase.\\n\" ^rune [^rune r] (simpleOf simpleTitle r))\n\n"
+         "(go/func SpecialUpcase \"SpecialUpcase is r's unconditional full uppercase mapping of SpecialCasing.txt, ok false where it has none.\\n\" [^rune r] :results [(slice rune) bool]\n"
+         "  (let [(values f ok) (aget specialUpper r)]\n    (return f ok)))\n\n"
+         "(go/func SpecialDowncase \"SpecialDowncase is r's unconditional full lowercase mapping of SpecialCasing.txt, ok false where it has none.\\n\" [^rune r] :results [(slice rune) bool]\n"
+         "  (let [(values f ok) (aget specialLower r)]\n    (return f ok)))\n\n"
+         "(go/func SpecialTitlecase \"SpecialTitlecase is r's unconditional full titlecase mapping of SpecialCasing.txt, ok false where it has none.\\n\" [^rune r] :results [(slice rune) bool]\n"
+         "  (let [(values f ok) (aget specialTitle r)]\n    (return f ok)))\n")))
+
+(defn go-unicode-file ^String [{:keys [^bytes cats fold] :as data}]
   (let [a cats]
   (str ";; si's runtime: the reader's identifier tables (as arbace.repr.scheme.unicode): the scalar values from U+0080 on that may\n"
        ";; start (initial) and continue (subsequent) an identifier, by R6RS 4.2.1's rule over the general categories of the Unicode\n"
@@ -266,6 +432,14 @@
        "  (or (== r 0x85) (inRanges whitespaceRanges r)))\n\n"
        "(go/func IsIntralineSpace \"IsIntralineSpace is whether r is an <intraline whitespace> (R6RS 4.2.1: tab, Zs over UCD 16.0.0).\\n\" ^bool [^rune r]\n"
        "  (or (== r 9) (== r 32) (and (> r 127) (inRanges zsRanges r))))\n\n"
+       ";; the printer's escapes (SCS17 (c), doc/scheme/SPEC.md 7): a control of the ASCII range or a <line ending>'s first character,\n"
+       ";; in a string without a mnemonic escape (stringHexRanges), as a character without a name (charHexRanges)\n"
+       "(go/var ^{:tag (slice int32)} stringHexRanges\n  (lit (slice int32)\n" (wrap (string-hex-ranges a) 24 "    ") "))\n\n"
+       "(go/var ^{:tag (slice int32)} charHexRanges\n  (lit (slice int32)\n" (wrap (char-hex-ranges a) 24 "    ") "))\n\n"
+       "(go/func IsStringHex \"IsStringHex is whether write gives the character r of a string as \\\\xHEX; (SPEC 7 :print-string).\\n\" ^bool [^rune r]\n"
+       "  (inRanges stringHexRanges r))\n\n"
+       "(go/func IsCharHex \"IsCharHex is whether write gives the character r as #\\\\xHEX (SPEC 7 :print-char).\\n\" ^bool [^rune r]\n"
+       "  (inRanges charHexRanges r))\n\n"
        ";; the foldings: foldFullData is code point, count, the code points it folds to, ...; foldSimpleData code point, code point, ...\n"
        "(go/var ^{:tag (slice int32)} foldFullData\n  (lit (slice int32)\n"
        (wrap (mapcat (fn [[c m]] (list* c (count m) m)) (:full fold)) 24 "    ") "))\n\n"
@@ -300,7 +474,8 @@
        "          (set! out (append out r)))))\n"
        "    out))\n\n"
        "(go/func FoldCase \"FoldCase is s by full case folding (#!fold-case's identifiers and character names).\\n\" ^string [^string s]\n"
-       "  (conv string (FoldRunes (conv (slice rune) s))))\n")))
+       "  (conv string (FoldRunes (conv (slice rune) s))))\n\n"
+       (go-props data))))
 
 (def outputs
   "The generated files, relative to the checkout, and their makers."
@@ -318,11 +493,17 @@
   (let [a (unicode-data (str dir "/UnicodeData.txt"))
         d (derived-general-category (str dir "/extracted/DerivedGeneralCategory.txt"))
         bad (cross-check a d)
-        f (case-folding (str dir "/CaseFolding.txt"))]
+        f (case-folding (str dir "/CaseFolding.txt"))
+        props (properties dir)
+        simple (simple-mappings (str dir "/UnicodeData.txt"))
+        special (special-casing (str dir "/SpecialCasing.txt"))]
     (println (str "ucd: UnicodeData.txt " (count (runs a)) " runs of an assigned category; DerivedGeneralCategory.txt "
                   (if (empty? bad) "agrees code point for code point" (str "DIFFERS at " (pr-str bad)))
-                  "; CaseFolding.txt " (count (:full f)) " full foldings (C, F), " (count (:simple f)) " simple (C, S)"))
-    [{:cats a :fold f} (empty? bad)]))
+                  "; CaseFolding.txt " (count (:full f)) " full foldings (C, F), " (count (:simple f)) " simple (C, S)"
+                  "; the simple mappings " (pr-str (into {} (map (fn [[k v]] [k (count v)]) simple)))
+                  ", SpecialCasing.txt's unconditional " (pr-str (into {} (map (fn [[k v]] [k (count v)]) special)))
+                  ", the properties' ranges " (pr-str (into (sorted-map) (map (fn [[k v]] [k (quot (count v) 2)]) props)))))
+    [{:cats a :fold f :props props :simple simple :special special} (empty? bad)]))
 
 (defn -main [& [verb dir root out]]
   (let [status

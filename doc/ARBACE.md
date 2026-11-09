@@ -419,7 +419,10 @@ Generated from data (SCS9 (c), 2026-11-08): `repr/scheme/category.ae` (the gener
 (full case folding), and beside them si's `go/arbace/scm/unicode.ae` (all of these for si's runtime, the simple folding too), are
 made by `arbace.repr.scheme.ucd` (`bin/repr-scheme ucd gen`, `check`) from the Unicode Character Database 16.0.0
 (https://www.unicode.org/Public/16.0.0/ucd/ `UnicodeData.txt`, `extracted/DerivedGeneralCategory.txt`, `CaseFolding.txt`,
-pinned by SHA-256 in `test/scheme/ucd.edn`); each file says so in its docstring or header.
+and since SCS16 (b), 2026-11-09, `SpecialCasing.txt`, `DerivedCoreProperties.txt` and `PropList.txt`: si's `(rnrs unicode)`, its
+categories, properties and simple and full case mappings, in place of Go's `unicode` tables and Chez's answers; since SCS17 (c) the
+printers' escape ranges by doc/scheme/SPEC.md 7's rules; pinned by SHA-256 in `test/scheme/ucd.edn`); each file says so in its
+docstring or header.
 
 The converted files keep their Java file's notice as a comment; which license covers which file
 is stated only in [LICENSE.md](../LICENSE.md). Details, the renaming rules and how to build and
