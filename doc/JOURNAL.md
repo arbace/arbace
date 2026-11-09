@@ -1254,3 +1254,375 @@ conflicts differ with each dropped slice); taken: `git revert -m 1` with a resol
 (`.tmp/javanight/revert-slice.sh`), tried on a scratch worktree for each slice and four combinations: all resolved, the joint
 check 0 errors, `go vet ./jrt` clean. The night's script `.tmp/javanight/run.sh` waits for night 9 and is launched by the
 main session.
+
+## 2026-11-08: JCV7 (b) and JCV8 (a), InitOrder's array line and the JDK's lines kept (branch `java-jcv7`, from java-jcv2 79f4658d5)
+
+By the user's decision of 2026-11-08 (doc/classes/JAVA-CONFORMANCE-SURVEY.md, "Decided (the user, 2026-11-08): JCV7 (b),
+JCV8 (a); JCV9 nothing now"). JCV7 (b): `test/java/jls/InitOrder.java`'s last line tested nothing (Lazy, its array's component
+type, was initialized two lines before); a class `Unused` of its own, used by nothing before, replaces it: `new Unused[2]` and
+`new Unused[2][3]` print no initialization (12.4.1, 15.10.2), `Unused.class` neither (15.8.2; the array's component type is
+that class, `Class.getComponentType`), then `Unused.touch()` initializes it (12.4.1), the line that shows the two before it
+could fail. Each line worked out from 12.4.1's list first, then the JDK's run made by hand as JCV2's (jdk26u's image, the
+program in package t03212, `javac -d`, `java -cp`, 257 bytes) and written as `InitOrder.out`; t03212's line of
+`test/java/ref-jdk26.edn` recorded again (`bin/java-check --record-ref --jobs 1 --only 'jls/InitOrder\.java'`; `--only
+t03212` plans nothing, the regexp is over the plan's path: proposal JCV12), the other 4,852 lines byte for byte; the review
+`test/java/jls/golden.edn` 196 lines to 198 (two `:jls`, one `:jls :api`); the essential test's committed forms
+`test/java/forms/t03212/` written again (`--forms update` on javac's tool `javac-c91cd0f6`, the provenance's, unchanged; the
+verify before it differed in that file alone). jrt's run equals the JDK's byte for byte. Proved light on the gate's
+executable of main ad3066cf: t03212 at read, interp (by the new golden file), classes, print and nread pass, judged as
+recorded with no regression; `bin/java-check golden`, `golden --oracle`, `verdicts --verify`, `bin/crops-score --judge
+--strict` pass. The compiled level is the night's (a whole-program j2g). JCV8 (a): no change; the 21 `:jdk` lines stay
+(JCV7's lines rest on the JLS and the API). Java's scores unchanged (completeness 72.9%, maturity 100%, independence 99.7%):
+the test passed before and after. Alternatives considered: keeping `new Lazy[2]` beside the new lines (rejected: a line that
+holds either way is no test), a class literal left out (rejected: 12.4.1's list is the whole rule, and jrt holds it), a
+separate program (rejected: InitOrder is 12.4's program, its review in place). Proposals JCV10-JCV12 in the survey: the
+deferred classes that hold completeness's gap (JCV10), the print cell's `:print-classes` by design (JCV11), `--record-ref
+--only` by id (JCV12).
+
+## 2026-11-08: F23, Java's `:security` class sorted by what is missing, the JCA's tail and SASL (branch `java-security`, write-ahead)
+
+The brief: raise Java's completeness (72.9) through its largest deferred class, `:security` (359 interpreted, 234 compiled in
+`test/java/check-{interp,compiled}.edn`). Those records predate night 7's conversion of F1-F4 (b6a6093af), so the class's 361
+tests were first run again, read and interp only, on night 8's gate executable (`.tmp/gate-exe/ad3066cf41ea6faf1566`), two at
+a time, saved, not recorded: 261 pass already (the night's rerun records them); the other 100 sorted by the cause their stderr
+names (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F23 (write-ahead)", its table). The two largest were defects of F1 as
+converted, not missing classes: (1) j2g's analysis refused `com.sun.crypto.provider.GaloisCounterMode` (the executable's
+`report.edn`: "Unable to resolve symbol: NIO_ACCESS"): F1's variant cut the `JavaNioAccess` field but not its two users, so every
+AES/GCM cipher was outside the closed world (30 tests); (2) `ChaCha20Cipher.asLongView`, a byte-array view handle in
+`ByteOrder.nativeOrder()`, was not one of j2g's constant handles (J2G-SPEC §8.5 took only BIG_ENDIAN and LITTLE_ENDIAN), so
+ChaCha20's xor threw; with both, SunJSSE's TLS 1.3 suites fail (17 tests). Fixed: the variant replaces
+`GCMEngine.overlapDetection(ByteBuffer, ByteBuffer)` and `GCMDecrypt.doFinal(ByteBuffer, ByteBuffer)` with jdk26u's methods
+(jdk26u `baf63fb`, `src/java.base/share/classes/com/sun/crypto/provider/GaloisCounterMode.java`, as repr/java converts it) but
+their direct-buffer branches (copied; zeroed through put), and `arbace.j2g.vh/byte-order-arg` reads `nativeOrder()` as "LE" (both
+Go targets are little-endian). Added to the closure (`test/jrt/jrt_sources.ae`): `jca-tail-sources`, three classes the
+providers name by string (`sun.security.util.GCMParameters`, SunJCE's AlgorithmParameters.GCM, constructed by jrt's
+JceServices; `sun.security.provider.CtrDrbg`, DRBG's CTR mechanism; `MD4`, its own provider's service in JrtServices), and
+`sasl-sources` (JCS133 (a)'s SASL, after F1 and F4): jdk26u's `src/java.security.sasl/share/classes` (javax.security.sasl and
+com.sun.security.sasl's CRAM-MD5, DIGEST-MD5, EXTERNAL, PLAIN, NTLM: 28 files), `src/java.base/share/classes/com/sun/security/ntlm`
+(5) and `src/jdk.security.auth/share/classes/com/sun/security/auth/LdapPrincipal.java`, SunSASL named by a third ProviderConfig
+variant file (`ProviderConfigSasl.ae`), j2g's renames `Sasl_Provider`, `Digest_FactoryImpl`, `Ntlm_FactoryImpl` (the only Go name
+collisions of the 43 new classes against the executable's 23,035). Light checks: the joint javac check 2,314 files, 0 errors;
+`bin/repr-java read-jdk --check` of the new files, 0 errors, `--no-javac` identical; `bin/jrt test --arch amd64`'s `arbace/jrt` passes
+(jrt's Go unchanged); a smoke on today's executable reproduces the failures. Expected at the night's run: about 45-55 of the 60
+touched tests at interp, 35-45 compiled; `:security` from 359 to about 50 interpreted with the rerun. Alternatives considered:
+restoring `NIO_ACCESS` (JavaNioAccess and the direct buffers' addresses are outside the world by JCS151-JCS152: rejected), a
+ChaCha20Cipher variant with LITTLE_ENDIAN (it changes jdk26u's source where j2g's rule is the general fix: rejected), porting
+JNDI's LDAP provider and Kerberos in this slice (3 and 10 tests for 3 days each: proposed instead). Proposed: JCS230 (Kerberos's
+permissions, the rest by design), JCS231 (jar verification after F9's night), JCS232 (ProviderConfig's variants folded),
+JCS233 (`java.home` for the security files, with JCS140 (a)'s cacerts), JCS234 (JNDI's LDAP deferred), JCS235 (HashSet and the
+key specs extendable).
+
+## 2026-11-08: F24, Java's `:net` sorted on today's world; jdk.httpserver; four variants the night's j2g refused (branch `java-net`, from java-night 639d42ab9)
+
+By the brief (raise Java's completeness through the deferred class `:net`, 227 interpreted and 150 compiled tests; async channels
+wait), by day under the light rules (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F24 (write-ahead)"; F23 was taken the same
+day by `java-security`). The committed records predate the night that converted F7, F8, F10a, F11, F12 and F13
+(`b6a6093af`), so the class was measured rather than scanned: its 230 tests run interpreted on the newest gate executable
+(`.tmp/gate-exe/ad3066cf41ea6faf1566`), their forms copied from the read's cache, two at a time under a 2 GiB watchdog: 121 of
+the 227 pass already; the 108 others stop at datagrams (42, F10b tonight), asynchronous channels (11, waiting), RMI (11),
+java.net.http's client (8), jdk.httpserver (8), UNIX domain sockets (2, JCS164 tonight), a tail of 15 singles, and 11 at
+classes cut from the world because their variants failed j2g's analysis on 2026-11-07 (the gate executable's
+`j2g/report.edn` `:analysis-failures`: F12's HttpClient, F5's SimpleFormatter, F13's ThreadImpl; and F5's LogManager reaching
+jdk.internal.logger's DefaultLoggerFinder.isSystem on every PlatformLogger's first use).
+
+Built: jdk.httpserver from jdk26u `baf63fb` (`src/jdk.httpserver/share/classes`: com.sun.net.httpserver's API and spi,
+sun.net.httpserver's server; 43 files, 8,297 lines; `test/jrt/jrt_sources.ae`'s `httpserver-sources`) over F10a's channels,
+F16's Timer and F3's SSLEngine; System.Logger as `jdk.internal.jrt.SystemLoggers` (overlay: jdk26u's `System.Logger` interface
+from `src/java.base/share/classes/java/lang/System.java` and the System.Logger half of `LoggingProviderImpl.JULWrapper` from
+`src/java.logging/share/classes/sun/util/logging/internal/LoggingProviderImpl.java`, over F5's LogManager access); five of the
+server's files derived for that import and ServerImpl's thread-group constructor by `test/jrt/derive.ae` with `bin/jrt-convert
+derive [--check]` (JCS166 (a)'s mechanism, its first entries); the variant `HttpServerProvider.ae` (no ServiceLoader); j2g's
+renames Hs_Authenticator, Hs_Filter, Hs_ChunkedInputStream, Hs_ChunkedOutputStream, Hs_Event, Hs_Request, and `class-supers` +
+BasicAuthenticator, HttpURLConnection. Fixed: HttpClient.ae's `jrtServerSocket` reads the inherited field as `(.-serverSocket
+this)`; SimpleFormatter.ae and ThreadImpl.ae cast `Function.apply`'s and `Arrays.copyOf`'s results; LogManager.ae's new
+`LoggingProviderAccess` variant keeps demandLoggerFor with isSystem's body (`VM.isSystemDomainLoader`). LICENSE.md extended.
+
+Checked by day: the joint javac check 2,464 files, 0 errors (its control: 64 errors); `derive --check` 5 of 5 (its control
+DIFFERS); repr/java's read of the 44 with java.util.logging, 0 failed, 0 javac errors, `--no-javac` the same forms; the variants
+applied and parsed; the three fixes analyzed on the gate executable's REPL, each failing without the fix with the night's own
+message; `bin/jrt test` (arbace/jrt ok), `go vet ./jrt` amd64 and arm64. Expected: 19 of `:net` touched, about 15 interpreted
+and 14 compiled to pass, beyond the 121 the night's record shows. Alternatives considered: System.Logger in jrt itself now
+(JCS155 (a); no j2g run by day to try a hand-written interface with defaults that translated classes implement: JCS250); the
+logging through variants of every member that names Level (whole methods copied: rejected for the derivation's two lines a
+file); java.net.http's client first (101,314 lines with QUIC and HTTP/3 for 8 tests: JCS254); RMI by JCS132 (a) (JCS255:
+serialization is being ported). Proposed: JCS250-JCS255.
+
+## 2026-11-08: serialization's slice 4, JCS169 (a) and JCS170 (a) (branch `java-serial4`, from mac/java-night 639d42ab9)
+
+By the user's decisions of 2026-11-08 (JCS168 (a) the night's J2G_DEFAULT_SUID run, JCS169 (a) after slices 2-4, JCS170 (a),
+JCS171 (a); doc/classes/JAVA-DEFERRED-TRIAGE.md, "Decided (the user, 2026-11-08: JCS168-JCS171)"), by day and write-ahead
+(nothing converted, translated or built; the night's commands in the triage, "The night's commands (slice 4, JCS169,
+JCS170)").
+
+Slice 4 (the JDK variants' cut serialization members): a scan of every world file's serialization members against the
+world (`.tmp/s4/hookscan.py`) found four outside classes; `readObject` restored in the variants of DESKey, DESedeKey, PBEKey
+and PasswordCallback without the Cleaner (jdk26u baf63fb's code as repr/java converts it, the variants' rule), LogRecord's
+and URL's `serialPersistentFields` no longer cut, SealedObject's variant removed (its SharedSecrets access one of j2g's
+serialization accessors, JCEKS's secret keys working), java.time's and java.time.chrono's Ser classes into `time-sources`.
+Checked: j2g's `apply-variant` on the committed forms (stage 0); the joint javac check.
+
+JCS170 (a): java.lang.reflect.Proxy over Dyn. jrt's Proxy (newProxyInstance, getProxyClass, isProxyClass,
+getInvocationHandler) over a hook arbace/lang's j2g_dyn.go sets to `Compiler$ProxySupport.proxyClass`, which follows jdk26u's
+ProxyBuilder (validation, `jdk.proxy1.$ProxyN`, a class per list) and ProxyGenerator (Object's three methods first, a method
+per signature and return type, collectCompatibleTypes, checkReturnTypes), each method a `Compiler$ProxyFn` calling the
+handler; `Compiler$Dyn.defineJavaProxy` (j2g's native) makes the class with superclass Proxy, registered and allocatable for
+deserialization; Proxy's serial form (`h`) in serial_classes.ae; `InvocationHandler_Cast` so Dyn implements the interface
+(found by the day's check: an interpreted handler would not cast); UndeclaredThrowableException into the world; Dyn over a
+program's own non-public interfaces. Alternatives considered: Proxy in jrt's Go entirely (would need a Go IFn type of all
+arities: rejected), jdk26u's Proxy.java translated (needs ProxyGenerator's class files and a class loader: J2G-SPEC §12),
+proxies at the REPL only (JCS170 (b), not decided). Divergence: no throws clauses in jrt's tables, so undeclared checked
+exceptions pass unwrapped (JCS240). Checked: `go test ./jrt` (TestProxy), `go vet ./jrt` amd64 and arm64, the rules
+interpreted on stage 0 over `defineProxyClass` (a copy in `.tmp/s4/forms`).
+
+JCS169 (a): serializable lambdas. jrt's own `jdk.internal.jrt.SerialLambdas` holds the sites (what javac's altMetafactory
+call and `$deserializeLambda$` know) and the lambdas' serial state; jdk26u's SerializedLambda into the world with a variant
+(readResolve by SerialLambdas, toString without MethodHandleInfo). j2g: a serializable site's value made by a factory closure
+of its captured values, the site's adapter code with the captured Go names shadowed (one translation of the body, no
+re-translation), the site registering itself; the adapter's `Ser` and `writeReplace`. The interpreter: the lambda's class
+registered when built, its factory allocating the class's object with the captured values, `writeReplace` through the host;
+and a bug fixed, an intersection-cast lambda's class (`(IntSupplier & Serializable) ...`) did not implement Serializable at
+the interpreted level. Alternatives considered: javac's desugaring (a `lambda$` method per site and a `$deserializeLambda$`
+per class) in j2g, a second translation of each body into a package-level function (left for JCS242's registration at class
+initialization); identity of lambdas within one process (not the algorithm: rejected). Checked: the interpreter's sites on
+stage 0 over a stand-in (javac's names `lambda$st$97ab7abf$1`, signatures `(I)I`, kinds 6 and 7, the factories' lambdas
+answering 6 and 103). Night checks committed: `test/jrt/serialization/proxy_check.ae`, `test/jrt/serialization/lambda/check.ae`.
+
+JCS171 (a): accepted; the night's build measures the size. Proposed: JCS240 (throws clauses in the member tables), JCS241
+(InvocationHandler.invokeDefault), JCS242 (serializable lambdas' sites registered at class initialization), JCS243
+(Clojure's types' serialization, slice 8, next). JCS191-JCS193 stay the user's.
+
+## 2026-11-08: Java's accepted proposals built; the day's Java branches merged as the night's input (branch `java-props`)
+
+The user accepted these proposals on 2026-11-08, at about 19:45.
+
+**The branch and its merges.** `java-props` started from `mac/java-night` (`639d42ab9`). Four branches were merged into it, in
+this order: `mac/java-jcv7` (`be3af4bed`), `mac/java-security` (`848eb64a8`), `mac/java-net` (`1fe7fbe72`) and
+`mac/java-serial4` (`e1e193fcd`). This branch is the Java night's input.
+
+- **The append-only conflicts.** `doc/JOURNAL.md` conflicted in all four merges, and `doc/classes/JAVA-DEFERRED-TRIAGE.md` in
+  the last three. In each case both sides had only appended. The resolution kept ours, then appended the other side's new text
+  after the merge base's end, after checking that this text was a pure append. serial4's insertion near the triage's "Proposed"
+  index merged by itself.
+- **`test/jrt/jrt_sources.ae`.** java-security's `jca-tail-sources` and `sasl-sources` sat beside java-night's `nio-file-sources`
+  and `unix-socket-sources`. Both were kept.
+- **`LICENSE.md`.** java-security's and java-serial4's rewordings of the JCA variants' line were combined: `SealedObject.ae`
+  "until serialization's slice 4", `GaloisCounterMode.ae` "until F23".
+- **The joint javac check after the merges.** `.tmp/night7/all9-run.sh` reported 2,506 files, 0 errors and 5,323 classes, in
+  14.5 s and 0.96 GB.
+
+**JCV11 (b), which reopens RPS9 (a).** Java's print cell now passes on the round trip's own checks, and the class files are a
+sub-level beside it.
+
+- **The rule.** `test/java/print.ae` gains `classes-note?`: a test whose only failing step is classes passes when every
+  difference is one of the named kinds, and the row keeps the reason as its note.
+- **The record.** `java.print rejudge` re-judged `test/java/check-print.edn` from the committed record alone: 582 rows now pass.
+  581 of them were `:print-classes`. The other, t06357, leaves `:print-erasure`'s `:tests`.
+- **The matrix.** REAP's `:java-check` reader reports the sub-level in the source's detail (`:sub-level :classes`).
+- **Proved, light.** Four tests were run at read and print (38 s, 1.5 GiB) and judged: 4 of 4 as recorded.
+- **The numbers.** Java print went from 2,600 / 616 / 109 to 3,182 / 34 / 109, which is 78.2% to 95.7%. Java's completeness went
+  from 72.85% to 77.23%, and from 78.93% to 79.11% without by design. `bin/reap --record` and `bin/crops-score --record` were
+  run.
+- **Where it is recorded.** doc/FULL-SUPPORT-SURVEY.md has "Decided (the user, 2026-11-08): RPS9 (a) reopened by JCV11 (b)" and
+  "As built: JCV11 (b)". doc/classes/JAVA-CONFORMANCE-SURVEY.md has the decision and its As built.
+- **Alternative considered.** A result keyword of its own, such as `:pass-classes`. It was rejected: every reader would have
+  needed it, while a `:pass` row with a reason is already read as a pass everywhere.
+
+**JCV12 (b).** `bin/java-check --record-ref --only` now matches a test's id as well as its path ("ID "), and fails with status 1
+when `--only` plans no test.
+
+- `--only t03212` recorded t03212's line byte for byte as it was. The 4,852 other lines were kept.
+- `--only no-such-test` exits 1.
+
+**JCS232 (a).** ProviderConfig's three variant files are now one, `ProviderConfig.ae`, holding F23's `getProvider`.
+
+**JCS235 (a).** `HashSet`, `X509EncodedKeySpec` and `PKCS8EncodedKeySpec` were added to `arbace.j2g.model/class-supers`, which
+now holds 130 classes. The night's build and tests t08045, t08202 and t05275 will prove it.
+
+**JCS251 (a).** The scratch derivations now live in `test/jrt/derive.ae`, as tables taken from the scripts' own data:
+
+- F7's `gendirect.py`;
+- F10a's `gennet.py` (with F10b's hand-edited multicast bodies), `genpoll.py` and `genopts.py`;
+- F9's `.tmp/f9/derive.py`;
+- JCS164's `.tmp/unix/derive.py`.
+
+The scripts were found in `.tmp/keep/java-jc9b/jc9b/F7/`, `.tmp/keep/wt/java-complete/f10/` and the java-f9 and java-unix
+worktrees' `.tmp/`.
+
+- **The engine.** It gains ordered `:ops`: exact replacements, a regex replacement, or a function of the text. It also gains
+  `:verify`, a function of the overlay.
+- **The result.** `bin/jrt-convert derive --check` finds 24 overlays, 0 not as derived, so each is byte for byte the committed
+  file. The headers are unchanged; JCS257 proposes renaming them.
+- **The controls.** A miscounted replacement must throw, and an overlay one character off must differ.
+- **The gate step.** The essential step `jrt-derive` was added to `test/gate/steps.edn`.
+
+**JCS253.** `bin/jrt-convert vet` (`test/jrt/vet.ae`) checks the variants with j2g's own analyzer.
+
+- **How it works.** The world is entered, declared and resolved with j2g's own steps, from `jdk/forms` or from `--forms DIR`,
+  with every variant applied and the edge as in j2g's run. Only the variants' classes are then analyzed. It runs in about 20 s,
+  at a peak of 1.48 GiB.
+- **The negative control.** The three variants F24 fixed, restored to their text from before the fix, are refused with the
+  night's messages. The fixed texts pass.
+- **On the committed forms.** 9 refusals, all from `jdk/forms` being older than the day's sources: five classes not converted
+  yet (SerializedLambda, HttpServerProvider, DatagramSocketAdaptor's two, DatagramChannelImpl), and File, DatagramSocket,
+  AbstractInterruptibleChannel and ProviderConfig, whose new dependencies are not converted. So vet runs on the night's
+  conversion output.
+- **Alternatives considered.**
+  - A per-class world, with the class's packages from source and the rest resolved from the host. It was measured and rejected:
+    the host world's gaps cascade into false refusals.
+  - A full j2g world load with every class analyzed. It was rejected as heavy.
+
+**The texts decided, nothing built.** JCS230 (b), JCS231 after F9's night, JCS233 (a), JCS234 (a), JCS240-JCS243 (a), JCS250
+(recorded without an option, read as recommended: (a) after F24's night), JCS252 (b), JCS254 (b) and JCS255 (b). They are in the
+triage's "Decided (the user, 2026-11-08, about 19:45: ...)". New proposals: JCS256 (vet as a gate step) and JCS257 (the derived
+headers).
+
+**Checks.**
+
+- `go vet ./jrt` is clean on linux/amd64 and arm64, and `go test ./jrt` reports ok. The crops' expat, pyexpat, hs and oi packages
+  fail by themselves, as they do on `next`.
+- `bin/reap` and `bin/crops-score --judge --strict` report 0 problems.
+- `bin/gate --plan` plans `jrt-derive` with every step keyed.
+
+## 2026-11-08: JCS69 (b), j2g's refusals at the unresolved class; `:j2g-unresolved` measured again (branch `java-j2g`, from mac/java-night 639d42ab9)
+
+The brief: raise the compiled level by attacking `:j2g-unresolved` (236 tests in JCV10's count; 302 rows of night 7's
+test/java/check-compiled.edn match its patterns). Measured first, light: the 302 tests read again (`bin/java-check --levels
+read --jobs 2`, javac's tool `.tmp/gate-exe/javac-5ad357331dbcd7cfb0fd` with `REPR_JAVA_STALE_OK=1`, into the worktree's own
+forms cache: 302 pass), then j2g's world loaded alone over jdk/forms and 30 tests at a time (a scratch namespace calling
+`arbace.j2g.world/load-world` with the edge bound as `arbace.j2g.main/run` binds it, on main's stage 0 in an archive of main
+2aafa3a35's bin, arbace, jdk, overlay and go: java-night's j2g needs the checkout's analysis, `a/*lenient*`, which no
+executable built today has; jdk/forms are the same on both). Each process peaked at 2.04-2.09 GB; a translation of even one
+test went over 2.1 GB and was stopped, so the translation is the night's.
+
+Findings: every empty conversion (`Cannot convert initializer of field  of type "J" to `, `value of method  of type :null`)
+was the analysis of a class whose members (or header) had failed to resolve, a symptom sorted before the cause, which the
+check took as the refusal; `No accessible constructor of tNNNNN.X` and `No static field f in tNNNNN/X` were the missing
+members of such a class. On today's world 182 of the 302 analyze cleanly (the world's additions since night 7); 120 still name
+a class the world lacks (java.lang.classfile 24, java.nio.channels 13, javax.management's family 19, ToolProvider 9,
+javax.security.sasl 8, ...: doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JCS69 (b)").
+
+Built JCS69 (b), decided 2026-10-25 (J2G-SPEC §4.1, "Refusals at the unresolved class"): `load-world` skips the analysis of a
+class whose header or members failed (marked analyzed with that failure, so reachability makes it unavailable and an outer
+class skips it in place), and `world/unresolved-cause` appends the cause to another class's analysis failure naming it.
+`:j2g-unresolved`'s third pattern leaves a refusal with a named cause to the world's classes by area. j2g had no unit tests:
+`bin/j2g-unit` (test/j2g/unit.ae; `make j2g-unit`) runs fixture-sized checks with the edge and no JDK forms, 0.5 GB, seconds;
+10 checks pass (on stage 0 with `J2G_UNIT_SOURCES=arbace.classes.analyze`), and with the skip removed 3 fail with the old
+message. The runtime's and javac's builds have no header or members failure in their report.edn, so their translations do
+not change; the tests' refusal reasons do. Alternatives considered: method-level stubs for the unresolved class (JCS264,
+recommended against: the interp level fails these tests at load too and few would pass) and the analyzer resolving an
+unknown import to an opaque class (the same, deeper). Proposals JCS260-JCS265 in the survey.
+
+## 2026-11-08: F25, `:reflection` and `:nio` sorted; generic signatures and the nesting attributes (branch `java-refl`, from java-night 639d42ab9)
+
+The brief: raise Java's completeness through the deferred classes `:reflection` and `:nio`. Measured first, interpreted on
+the newest gate executable (`.tmp/gate-exe/ad3066cf41ea6faf1566`, next after night 8; java-night's slices not in it), the
+forms the main read cache's newest passing reads (java-net's method: `linkforms.py`, two jobs, a 2 GiB watchdog; 190 tests in
+334 s): `:nio` 69 of 109 pass already (F7, F8), 28 are F9's tonight, the rest singles; `:reflection` 5 pass, 17 are F14's
+tonight, 7 Proxy's (JCS170), and the biggest groups nobody's: type annotations 13, InnerClasses/EnclosingMethod 9, generic
+signatures 8. Built the last two (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F25 (write-ahead)"): the class file
+attributes jdk26u's reflection reads through the VM (Signature, InnerClasses, EnclosingMethod, Exceptions) recorded as more
+lines of F14's annotation data by the one encoder (`arbace/classes/annot.ae`'s `attribute-lines`, from the analysis'
+`:signature`, `:sig`, `:inner-flags`, `:nesting`, `:enclosing-method`, `:throws`), decoded by jrt (`go/arbace/jrt/classdata.ae`,
+new), Class's nesting members ported from jdk26u's `Class.java` at `baf63fb` (isLocalOrAnonymousClass, getSimpleBinaryName,
+getSimpleName0, getCanonicalName0, getEnclosingClass, getEnclosingMethod/Constructor, getClasses; getDeclaredClasses as
+JVM_GetDeclaredClasses; getModifiers as JVM_GetClassModifiers), getExceptionTypes and the throws clause of toString, and the
+generic members through jdk26u's `sun/reflect/generics` (50 files) and java.lang.reflect's eight generic types translated
+unchanged (`test/jrt/jrt_sources.ae`'s `generics-sources`) behind jrt's own `jdk.internal.jrt.ReflectSupport` (overlay; the
+bodies of jdk26u's getGenericInfo, getFactory, generic getters and toGenericString, transcribed, GPL-2.0 with the Classpath
+Exception, LICENSE.md), its stand-in with TypeVariable's and GenericDeclaration's in `standin_reflectsupport.ae`; the variant
+`TypeVariableImpl.ae` (no type annotations recorded yet, no ReflectionFactory copies). Alternatives considered: a Go port of
+the Signature parser and the reflective objects (rejected: jdk26u's Java runs unchanged on jrt, as F9's and F10a's channels
+do; a port would have to keep equals, hashCode, toString and the lazy reification rule for rule by hand); calling the Java
+reflectively from Go by name (serialization's `serialCall`; rejected: j2g would not root the classes, the stand-in's names
+make them roots and the calls direct); recording the members' Signatures of the JDK too (left: JCS270). Checks by day: the
+joint javac check 2,479 files, 0 errors; `bin/repr-java read-jdk --check` of the 59, 0 failed; the variant vetted (5
+replaced, 1 cut); the closure scan; the encoder on the frozen JVM over six tests' forms; `bin/jrt manifest`, `testdata`;
+`bin/jrt test` (arbace/jrt ok, classdata_test's three new tests); `go vet ./jrt` amd64 and arm64. Expected tonight: about 13
+of F25's 17 interpreted, 11 compiled. Proposed: JCS270-JCS274 (the JDK's members' Signatures, type annotations as recorded
+bytes with a ConstantPool, getDeclaredClasses' order, AccessFlag and Parameter, `:nio`'s remainder).
+
+## 2026-11-08: Java's accepted proposals built, JCS265 (b), JCS263 (JMX-1), JCS273 (AccessFlag), JCS271 (b) (branch `java-more`)
+
+The user accepted these on 2026-11-08 at about 21:00 (doc/classes/JAVA-CONFORMANCE-SURVEY.md, "Decided (the user,
+2026-11-08, about 21:00): JCS260-JCS265"; doc/classes/JAVA-DEFERRED-TRIAGE.md, "Decided ...: JCS270-JCS274, and JCS263").
+
+**The branch and its merges.** `java-more` started from `mac/java-props` (`a9aebc62f`, the Java night's input until now);
+`mac/java-j2g` (`2dfcbe268`, JCS69 (b)) and `mac/java-refl` (`6d51db05b`, F25) merged into it, neither containing
+java-props (both from java-night `639d42ab9`). Conflicts: doc/JOURNAL.md and JAVA-CONFORMANCE-SURVEY.md (java-j2g), doc/JOURNAL.md
+and JAVA-DEFERRED-TRIAGE.md (java-refl), each an append at the file's end on both sides, resolved by keeping java-props' text
+first and the other's after it; `go/arbace/jrt.ae`'s `:test-files`, the union (proxy_test.go, classdata_test.go). jrt's
+manifest, manifest_test, reflect_tables and test/jrt/manifest.ae auto-merged (Proxy's getInvocationHandler beside F25's
+generic members, disjoint lines). java-more is the Java night's input in place of java-props.
+
+**JCS265 (b)**: `bin/j2g --analyze-only` (the load and its failures, no translation; GOMEMLIMIT 1800MiB, no heavy lock;
+`J2G_SOURCES`), `bin/java-check --analyze-only` (a shard's analysis attributed as the compiled level's refusals), unit
+tests; java.check's refusals now take a class's root failure first. The 120 tests java-j2g left refused, measured again:
+120 of 120 refused by the class the world lacks (2.04 GB peak, 15 minutes), 16 of them now reported by their root cause.
+Then the verb over a predicted world (the slices converted by day laid over jdk/forms): 19 of the 27 JMX and SASL tests and 11
+of the 13 AccessFlag and type annotation tests analyze; the prediction found MethodUtil, JavaBeansAccess and
+newPlatformMXBeanProxy, fixed before the night.
+
+**JCS263**: javax.management's core (JMX-1: 166 files of java.management, 21 derived overlays: System.Logger, EnvHelp,
+MethodUtil, JavaBeansAccessor, ThreadInfo; F13's skeletons removed; ManagementFactory's platform server and
+newPlatformMXBeanProxy); SASL needs nothing beyond F23's slice. **JCS273**: AccessFlag (derived without java.lang.classfile,
+ClassFileFormatVersion, jrt's AccessFlagSupport, j2g's accessFlags methods). **JCS271 (b)**: the RuntimeVisibleTypeAnnotations
+bytes and their pool entries recorded (`Y`, `N` records; 28 of 29 of a sample's annotations equal javac's, the 29th
+stage 0's world), jdk26u's sun.reflect.annotation over jrt's own ConstantPool and TypeAnnotationData natives, j2g's 11
+getAnnotated* methods, TypeVariableImpl's annotation members jdk26u's again. All write-ahead: checked by the joint javac
+check (2,749 files, 0 errors), `read-jdk --check` (306 files, 0 failed, `--no-javac` identical), `bin/jrt-convert derive
+--check` (50), `bin/jrt test` (arbace/jrt ok), `go vet ./jrt` (amd64, arm64), bin/j2g-unit (20); the conversion, the edge, the
+build and the levels are the night's (the triage's "The night's commands (java-more)").
+
+Alternatives considered: re-measuring the 120 with a scratch loader again (JCS265 (a): rejected, the verb is the decision);
+JMX's connectors with it (RMI is JCS132's and JCS255's; rejected); MethodUtil translated (its trampoline defines a class from
+bytes, which the closed world cannot; Method.invoke is the call it makes); AccessFlag over java.lang.classfile whole (JCS260
+waits); type annotations as text records with a TypeAnnotationParser variant (JCS271 (a), not chosen by the user); the
+type annotations' Proxy objects replaced by F14's `C_ann` (it would change AnnotationParser; jdk26u's Proxy path runs since
+JCS170). Proposals JCS280-JCS285 in the triage: Parameter (JCS280), the platform server's other beans (JCS281), a committed check
+of the type annotation records (JCS282), a prediction verb (JCS283), JMX's connectors and HotSpot's beans (JCS284), `bin/jrt
+test` within the day's budget (JCS285).
+
+
+## 2026-11-08: F27, java.rmi ported, and JMX's remote connectors with it (JCS255 (b), JCS284; branch `java-rmi`, from mac/java-more 3e876ad36)
+
+The user's JCS255 (b): RMI ported now that serialization is (JCS167), not JCS132's by-design class. Write-ahead, by day under the
+light rules; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F27 (write-ahead)" has the detail, the night's commands and the
+proposals.
+
+**Measured first**: the corpus's RMI users that pass on the JDK are 18 of `jdk/java/rmi` (t05236, t05237, t05241-t05256), t08020
+(`javax/rmi/ssl`) and JMX's connector tests t07952-t07954, t07956, with the three DiagnosticCommandMBean tests t07841-t07843. A
+joint javac check of java.rmi's 94 files with the closure compiled at once (0 errors); jdk/forms lacks 568 of the closure's
+files tonight (the serialization slices among them), so the prediction converted them with the slice and laid them over a copy
+of jdk/forms. The analysis alone accepts calls j2g then stubs, so `bin/j2g --analyze-only` got `J2G_MISSING`
+(code/missing-reason over the analyzed bodies, with the translation's scan of jrt's classes factored out as `world-scan`): it
+named jrt's missing Thread context class loader, ThreadGroup, StackWalker, ServiceLoader, `System.loadLibrary`, and the
+analysis DGCClient's PhantomReference.
+
+**Built**: `rmi-sources`, 89 of jdk26u's java.rmi files (`baf63fb`, `src/java.rmi/share/classes`: java.rmi, .server, .registry,
+.dgc, javax.rmi.ssl, sun.rmi's server, transport, tcp and registry; not sun.rmi.log, activation's, nor RMISecurityManager) and
+java.lang.NoSuchMethodError; five derived overlays (RMIClassLoader without ServiceLoader, GC without loadLibrary, DGCClient's
+entries weak references, Log's caller frame from a Throwable, RuntimeUtil without thread groups); GC.maxObjectInspectionAge as
+jrt's native over Go's last collection (`go/arbace/jrt/rmi.ae`, written anew after librmi's GC.c); jrt's Thread
+getContextClassLoader and setContextClassLoader (`bin/jrt manifest` regenerated the manifest and tables); JCS240 (a)'s j2g half,
+every translated class's throws clauses as F25's E records (Util.checkMethod needs the JDK's remote interfaces' RemoteException),
+with bin/j2g-unit checks; j2g renames for RMI's eight colliding simple names and for JMX-1's com.sun.jmx.mbeanserver.Util, which
+collides with sun.management.Util. JMX-2: `jmx-remote-sources`, 41 files of java.management's javax.management.remote and
+com.sun.jmx.remote and of java.management.rmi, six derived (the two factories over jrt's new `JmxProviders`, the providers
+java.management.rmi's module-info names, behind ServiceLoader.Provider's interface; three thread makers without groups;
+RMIConnector without the PRef class it defines from bytes, jdk26u's own failure branch). And java-more's 24 duplicate source
+lines (derived files whose jdk26u sources their lists also name: the night's origins map would hold duplicate keys, which the
+Clojure reader refuses) are printed once.
+
+**Checked by day**: joint javac check 2,892 files, 0 errors (control: 12 errors); `derive --check` 61, 0 not as derived;
+`read-jdk --check` of the slices with their context 533 of 541 converted (the 8 failures context files of other slices), the 159
+RMI and JMX-2 forms identical with `--no-javac`; the prediction: 23 of the 24 tests analyze (t07956 waits for the edge), no class
+of the slices fails or is stubbed, two tests' own calls would be (Thread.getAllStackTraces, ThreadGroup); bin/j2g-unit 23 of 23;
+`bin/jrt test --arch amd64 -p 1` arbace/jrt ok; `go vet ./jrt` amd64 and arm64; `bin/gate --plan` clean. Expected about 15-20 of
+the 23 at each level after the night.
+
+Alternatives considered: JCS132 (a), RMI by design (the user chose (b)); RMI's PhantomReference, thread groups and StackWalker
+added to jrt now (JCS321, JCS322; derivations kept the diff to RMI and are each one table entry); JCS240 for remote interfaces
+alone (rejected: (a) was decided whole, and the records are of the order of 400 KB); JMX's connectors deferred again (JCS284's
+recommendation tied them to RMI, so they come with it); RMIConnector's PRef defined by a class of jrt's own (rejected: it exists
+to defeat stack-based class loading, which the Go build has not). Proposed: JCS320-JCS326 (getAllStackTraces, PhantomReference,
+thread groups, ProxyFn's exceptions, the prediction's check, RMI's own class, the DiagnosticCommandMBean tests).

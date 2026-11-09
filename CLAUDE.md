@@ -507,7 +507,7 @@ Prior art:
   them, the output against the golden file line by line (`test/java/check-diagnostics.edn`); `print` (REAP5,
   doc/FULL-SUPPORT-SURVEY.md, "As built: REAP5"): each test's forms printed back to Java by repr/java's
   printer (`test/java/print.ae`), javac on Arbace accepting it, read again to the same forms, mode `:full`
-  printed back byte for byte, its class files against the original's (`test/java/check-print.edn`).
+  printed back byte for byte, its class files against the original's (`test/java/check-print.edn`; since JCV11 (b), 2026-11-08, a sub-level reported beside the pass, not counted: a test whose class files differ only by what the forms do not record passes, the difference its row's note).
 - `doc/ALPINE.md`: the host's Alpine packages as one minimal `apk add` line (`bin/alpine-env
   world`, `check`, `simulate`), the subset Arbace uses, and what apk does not provide (jdk26u,
   TamaGo's Go, Go's module cache: only `bin/gate --full`'s vendoring checks need it). No build

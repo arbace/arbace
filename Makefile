@@ -12,9 +12,9 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
 
 .PHONY: help seed-check stage0 seed-verify reseed build build-tests build-java smoke repl fixpoint goi-table goi-table-size \
   box box-smoke box-oracle box-suite box-goi box-tools box-rebuild box-convert mac-bundle mac-bundle-convert arm64-vm-check arm64-vm-goi \
-  program programs-check programs-essential gate gate-full gate-full-parallel gate-plan gate-costs gate-why gate-audit gate-prune gate-queue corpus-dedup cover-build gate-clean gate-full-clean gate-full-clean-only gate-clean-plan gate-pins gate-full-concurrent gate-full-clean-lanes gate-lanes-plan gate-mem-check gate-demos java-check-judge provenance-check reap crops-score suite oracle diffcheck generated-check gate-tests verify jdk-verify edge-verify javac-verify javac-classes fixtures-verify tamago-verify \
+  program programs-check programs-essential gate gate-full gate-full-parallel gate-plan gate-costs gate-why gate-audit gate-prune gate-queue corpus-dedup cover-build gate-clean gate-full-clean gate-full-clean-only gate-clean-plan gate-pins gate-full-concurrent gate-full-clean-lanes gate-lanes-plan gate-mem-check gate-demos java-check-judge provenance-check reap crops-score suite oracle diffcheck generated-check gate-tests verify jdk-verify jrt-derive-check edge-verify javac-verify javac-classes fixtures-verify tamago-verify \
   toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-go-native-check \
-  repr-java-check repr-java-roundtrip repr-java-text repr-java-jdk repr-java-parse-check repr-java-front-check repr-java-attr-check repr-java-nojavac-check repr-java-closure-check repr-java-platform-pack repr-java-platform-check repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test repr-cpp-host-record repr-cpp-host-check repr-cpp-pins-check repr-cpp-cxxdump-build repr-cpp-cxxdump-test repr-cpp-spec-check repr-cpp-c2j-check repr-scheme-c2j-check repr-ocaml-c2j-check repr-cpp-pp-check repr-cpp-pp-record repr-cpp-cxxdump-check repr-cpp-roundtrip repr-cpp-roundtrip-corpus repr-cpp-pp-essential repr-cpp-roundtrip-essential repr-cpp-pp-record-results repr-llvm-roundtrip cppi-lower-check cppi-lower-corpus cppi-lower-essential cpp-essential cppi-runtime-build cppi-testsuite cppi-selftest cppi-run cppi-runtime-ci cppi-record-ref cppi-check cppi-check-aot cppi-divergences cppi-divergences-aot repr-c-host-record repr-c-host-check repr-c-ccdump repr-c-check repr-c-record repr-c-parse-check repr-c-read repr-c-print repr-c-roundtrip repr-c-corpus-dedup repr-c-record-gcc repr-c-c23 ci-diagnose ci-run ci-check ci-check-aot ci-dg ci-dg-essential ci-judge-test ci-c2j-check ci-cinterp-check ci-aot-translate ci-repl-session ci-divergences ci-musl ci-runtime ci-cirun-build ci-annot ci-annotations ci-annotations-record ci-record-ref ci-synth ci-synth-check goi-annotations goi-test goi-check goi-check-aot goi-check-aot-essential goi-check-nethttp goi-check-nethttp-arbace goi-divergences goi-divergences-aot java-check java-check-compiled java-check-compiled-essential java-check-print java-check-nread java-check-diagnostics java-check-essential java-check-ref alpine-check alpine-test clean \
+  repr-java-check repr-java-roundtrip repr-java-text repr-java-jdk repr-java-parse-check repr-java-front-check repr-java-attr-check repr-java-nojavac-check repr-java-closure-check repr-java-platform-pack repr-java-platform-check repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test repr-cpp-host-record repr-cpp-host-check repr-cpp-pins-check repr-cpp-cxxdump-build repr-cpp-cxxdump-test repr-cpp-spec-check repr-cpp-c2j-check repr-scheme-c2j-check repr-ocaml-c2j-check repr-cpp-pp-check repr-cpp-pp-record repr-cpp-cxxdump-check repr-cpp-roundtrip repr-cpp-roundtrip-corpus repr-cpp-pp-essential repr-cpp-roundtrip-essential repr-cpp-pp-record-results repr-llvm-roundtrip cppi-lower-check cppi-lower-corpus cppi-lower-essential cpp-essential cppi-runtime-build cppi-testsuite cppi-selftest cppi-run cppi-runtime-ci cppi-record-ref cppi-check cppi-check-aot cppi-divergences cppi-divergences-aot repr-c-host-record repr-c-host-check repr-c-ccdump repr-c-check repr-c-record repr-c-parse-check repr-c-read repr-c-print repr-c-roundtrip repr-c-corpus-dedup repr-c-record-gcc repr-c-c23 ci-diagnose ci-run ci-check ci-check-aot ci-dg ci-dg-essential ci-judge-test ci-c2j-check ci-cinterp-check ci-aot-translate ci-repl-session ci-divergences ci-musl ci-runtime ci-cirun-build ci-annot ci-annotations ci-annotations-record ci-record-ref ci-synth ci-synth-check goi-annotations goi-test goi-check goi-check-aot goi-check-aot-essential goi-check-nethttp goi-check-nethttp-arbace goi-divergences goi-divergences-aot java-check java-check-compiled java-check-analyze java-check-compiled-essential java-check-print java-check-nread java-check-diagnostics java-check-essential java-check-ref alpine-check alpine-test clean \
   java-check-oracle java-check-rejudge java-verdicts java-golden \
   rsi-samples rsi-lower-check rsi-lower-check-all rsi-lower-check-native-all rsi-std-build rsi-runtime-build rsi-runtime-ci rsi-aot-lib ci-aot-lib rsi-record-ref rsi-check rsi-check-aot rsi-check-all rsi-divergences rsi-synthetic rsi-synthetic-check rsi-judge-test rsi-check-essential \
   repr-llvm-record-opt repr-llvm-record-rt llvmi-ir-make llvmi-ir-make-rt repr-llvm-records-verify llvmi-run llvmi-check llvmi-check-aot llvmi-record-ref llvmi-divergences cppi-codegen-check \
@@ -181,14 +181,18 @@ gate-tests: ## the gate's own scripts' tests, test/gate/*-test.bash (bin/gate-te
 	bin/gate-tests
 
 ## Vendored trees and recorded data, converted or recorded afresh and compared byte for byte
-VERIFY := jdk-verify edge-verify javac-verify javac-classes repr-java-check repr-java-parse-check repr-java-front-check repr-java-attr-check repr-java-nojavac-check fixtures-verify java-forms-verify tamago-verify toolchain-verify \
+VERIFY := jdk-verify jrt-derive-check edge-verify javac-verify javac-classes repr-java-check repr-java-parse-check repr-java-front-check repr-java-attr-check repr-java-nojavac-check fixtures-verify java-forms-verify tamago-verify toolchain-verify \
   box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-java-roundtrip repr-java-text \
   repr-clojure-roundtrip
 verify: $(VERIFY) ## all of the below, one after another
 jdk-verify: ## jdk/'s forms by repr/java and the JDK build's generators, on javac's tool executable; the edge step on the tools' host (bin/jrt-convert verify)
 	bin/jrt-convert verify
+jrt-derive-check: ## jrt's derived overlays made again from jdk26u and compared byte for byte (bin/jrt-convert derive --check; JCS166 (a))
+	bin/jrt-convert derive --check
 edge-verify: ## j2g's edge, on the frozen JVM (bin/j2g-edge verify)
 	bin/j2g-edge verify
+j2g-unit: ## j2g's unit tests, each over a small fixture of test/j2g/unit/ with the edge and no JDK forms: seconds (bin/j2g-unit)
+	bin/j2g-unit
 javac-verify: ## jdk/javac, javac's forms (and the JDK build's tools, java.xml's SAX parser) read by javac on Arbace (the fixpoint), all of jdk.compiler's generated sources generated on the tool by the build's langtools tools (FlagsEnum through javac on Arbace's javax.tools API), its edge on the frozen JVM; j2g translates javac's world (bin/javac-vendor verify, check)
 	bin/javac-vendor verify
 	bin/javac-vendor check
@@ -601,6 +605,8 @@ java-check: ## Java's conformance check: jdk26u's jtreg run tests read by repr/j
 	bin/java-check
 java-check-compiled: ## its compiled level: the tests translated by j2g in shards of programs and run (bin/java-check --levels compiled; after `make build`, which leaves the compiled namespaces)
 	bin/java-check --levels compiled
+java-check-analyze: ## JCS265 (b): the compiled level's j2g analysis alone, light (2 GiB, no translation): each test refused (j2g's reason) or analyzed, saved in .tmp/java-check-analyze, never judged; LIST=FILE of test ids (bin/java-check --levels read,compiled --analyze-only --shard-size 30)
+	bin/java-check --levels read,compiled --analyze-only --shard-size 30 --jobs 2 --save .tmp/java-check-analyze $(if $(LIST),--list $(LIST))
 java-check-compiled-essential: ## its essential subset, as bin/gate runs it: the essential tests that pass compiled, in one program cached by key (bin/java-check --essential-compiled)
 	bin/java-check --essential-compiled
 java-check-print: ## its print level: every read test's forms printed back to Java by repr/java's printer, javac on Arbace accepting it, read again to the same forms, its class files against the original's, mode :full printed back byte for byte (bin/java-check --levels print; after `make build-java`)
@@ -852,6 +858,7 @@ repr-ocaml-check: ## O2's check: the round trip over the default corpora and ove
 	bin/repr-ocaml check
 
 ## OCaml's row of the REAP matrix and its gate steps (O8, doc/ocaml/OCAML-SURVEY.md, "As built: O8 (write-ahead)")
+.PHONY: j2g-unit
 .PHONY: repr-ocaml-record-results ocaml-read-essential oi-essential oi-divergences-all ocaml-essential ocaml-judges
 repr-ocaml-record-results: ## the round trip over every corpus at every level, recording the read and print levels' test/ocaml/{read,print}-results.edn (bin/repr-ocaml roundtrip --cmi --record-results all)
 	bin/repr-ocaml roundtrip --cmi --record-results all

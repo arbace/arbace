@@ -229,7 +229,7 @@ declaring class, the parameter classes and the modifiers of a member table entry
 (go/var Executable_class
   (Define (addr (lit ClassInfo :Name "java.lang.reflect.Executable" :Kind KindClass
                      :Modifiers (bit-or AccPublic AccAbstract) :Super AccessibleObject_class
-                     :Interfaces (lit (slice (* Class)) Member_class)
+                     :Interfaces (lit (slice (* Class)) Member_class GenericDeclaration_class)
                      :Go "arbace/jrt.Executable"))))
 
 (go/method Self_Executable ^{:tag (* Executable)} [^{:tag (* Executable)} e] e)
@@ -298,7 +298,8 @@ bridge, varargs and synthetic bits among them (toString masks them out).\n"
 
 (go/func executableString
   "executableString is Executable.sharedToString: the modifiers (default for an interface's
-default method), then the rest; the throws clause is not kept.\n"
+default method), then the rest (its throws clause the recorded Exceptions attribute's: F25,
+throwsClause).\n"
   ^string [^int32 mods ^bool isDefault ^string rest]
   (let [s ""]
     (if (and (!= mods 0) (not isDefault))
@@ -358,9 +359,9 @@ java.lang.String.valueOf(java.lang.Object).\n"
   ^{:tag (* String)} [^{:tag (* Method)} m]
   (Str (executableString (bit-and (.GetModifiers__I m) 0xD3F) (.IsDefault__Z m)
                          (+ (typeName (.-Return (.-info m))) " " (typeName (.-clazz m)) "."
-                            (.-Name (.-info m)) (paramList (.-params m))))))
+                            (.-Name (.-info m)) (paramList (.-params m))
+                            (throwsClause (.GetExceptionTypes__Class1 m))))))
 
-(go/method ToGenericString__String ^{:tag (* String)} [^{:tag (* Method)} m] (.ToString__String m))
 
 (go/method Equals_O__Z
   "Equals_O__Z is Method.equals: same declaring class, name, return type and parameters.\n"
@@ -425,8 +426,8 @@ boxed, void giving null.\n"
 (go/method ToString__String
   "ToString__String is Constructor.toString: public java.lang.String(java.lang.String).\n"
   ^{:tag (* String)} [^{:tag (* Constructor)} k]
-  (Str (executableString (bit-and (.GetModifiers__I k) (bit-or AccPublic AccProtected AccPrivate)) false (+ (typeName (.-clazz k)) (paramList (.-params k))))))
-(go/method ToGenericString__String ^{:tag (* String)} [^{:tag (* Constructor)} k] (.ToString__String k))
+  (Str (executableString (bit-and (.GetModifiers__I k) (bit-or AccPublic AccProtected AccPrivate)) false (+ (typeName (.-clazz k)) (paramList (.-params k))
+                                                                                                     (throwsClause (.GetExceptionTypes__Class1 k))))))
 (go/method Equals_O__Z ^bool [^{:tag (* Constructor)} k ^any o]
   (let [(values x ok) (assert (* Constructor) o)]
     (and ok (== (.-clazz k) (.-clazz x)) (sameParams (.-params k) (.-params x)))))
@@ -683,18 +684,97 @@ data type conversion to U\".\n"
   (Define (addr (lit ClassInfo :Name "java.lang.reflect.InvocationHandler" :Kind KindInterface
                      :Modifiers (bit-or AccPublic AccInterface AccAbstract) :Go "arbace/jrt.InvocationHandler"))))
 (go/func InvocationHandler_InstanceOf ^bool [^any x] (let [(values _ ok) (assert InvocationHandler x)] (dynNominal x InvocationHandler_class ok)))
+(go/func InvocationHandler_Cast
+  "InvocationHandler_Cast is the checkcast of InvocationHandler (JCS170: with it j2g's Dyn has the interface's
+method, so that a class made at run time, an interpreted handler among them, is one; the nominal check
+dynNominal's).\n"
+  ^InvocationHandler [^any x]
+  (when (== x nil) (return nil))
+  (let [(values v ok) (assert InvocationHandler x)]
+    (when (not (dynNominal x InvocationHandler_class ok))
+      (panic (ClassCast x InvocationHandler_class)))
+    v))
+(go/func init
+  "init sets InvocationHandler's IsInstance (Class.isInstance of a class made at run time: the nominal check).\n"
+  []
+  (set! (.-IsInstance (.Info InvocationHandler_class)) InvocationHandler_InstanceOf))
 
 (go/var Proxy_class
   (Define (addr (lit ClassInfo :Name "java.lang.reflect.Proxy" :Kind KindClass
-                     :Modifiers AccPublic :Super Object_class :Go "arbace/jrt.Proxy"))))
+                     :Modifiers AccPublic :Super Object_class :Go "arbace/jrt.Proxy"
+                     ;; jdk26u's Proxy is Serializable (its field h, serial_classes.ae: a stream's proxy)
+                     :Interfaces (lit (slice (* Class)) Serializable_class)))))
+
+;; java.lang.reflect.Proxy's classes (JCS170 (a), the user's decision of 2026-11-08; doc/classes/
+;; JAVA-DEFERRED-TRIAGE.md, "As built: JCS170 (write-ahead)"): a proxy class is a class made at run time
+;; over j2g's Dyn (J2G-SPEC §5.12), its superclass Proxy, its methods' fns calling the handler.
+;; arbace/lang makes it (Compiler$ProxySupport.proxyClass, with jdk26u's ProxyBuilder's and
+;; ProxyGenerator's rules), through ProxyClassFor, which j2g_dyn.go sets; without the evaluator's Dyn
+;; (a world without arbace/lang) Proxy throws UnsupportedOperationException as before.
+
+(go/var ^{:tag (func [(* RefArray)] [(* Class)])
+          :doc "ProxyClassFor is the proxy class of the interfaces (Proxy.getProxyClass's cache): set by
+arbace/lang's j2g_dyn.go (Compiler$ProxySupport.proxyClass), nil in a world without the evaluator.\n"}
+  ProxyClassFor)
+
+(go/var ^{:tag sync/Map :doc "proxyClasses are the classes ProxyClassFor made (RegisterProxyClass).\n"} proxyClasses)
+
+(go/func RegisterProxyClass
+  "RegisterProxyClass records c as a class of java.lang.reflect.Proxy (Proxy.isProxyClass): called by
+j2g_dyn.go's Compiler$Dyn.defineJavaProxy.\n"
+  [^{:tag (* Class)} c]
+  (.Store proxyClasses c true))
+
+(go/func IsProxyClass
+  "IsProxyClass says whether c is a proxy class (RegisterProxyClass).\n"
+  ^bool [^{:tag (* Class)} c]
+  (let [(values _ ok) (.Load proxyClasses c)] ok))
+
+(go/type proxyFields
+  "proxyFields is a proxy's object as jrt sees it: a Dyn of arbace/lang, its fields (the handler the
+first) through dynCore's DynFields.\n"
+  (interface (DynFields ^{:tag (* (slice any))} [])))
+
+(go/func proxyHandlerField
+  "proxyHandlerField is the place of proxy p's handler (Proxy's field h): its first field.\n"
+  ^{:tag (* any)} [^any p]
+  (let [(values d ok) (assert proxyFields p)]
+    (when (or (not ok) (not (IsProxyClass (GetClass p))))
+      (panic (IllegalArgumentException_New_String (Str "not a proxy instance"))))
+    (let [f (.DynFields d)]
+      (when (== (len (deref f)) 0)
+        (set! (deref f) (make (slice any) 1)))
+      (return (addr (aget (deref f) 0))))))
+
+(go/func proxyNeeded
+  "proxyNeeded is ProxyClassFor, or UnsupportedOperationException in a world without the evaluator.\n"
+  ^{:tag (func [(* RefArray)] [(* Class)])} []
+  (when (== ProxyClassFor nil)
+    (panic (UnsupportedOperationException_New_String (Str "java.lang.reflect.Proxy"))))
+  ProxyClassFor)
 
 (go/func Proxy_NewProxyInstance_ClassLoader_Class1_InvocationHandler__O
-  "Proxy_NewProxyInstance_ClassLoader_Class1_InvocationHandler__O is Proxy.newProxyInstance:
-classes cannot be made at run time, so it throws UnsupportedOperationException.
-Reflector.boxArg's adaptation of an IFn to a functional interface goes through the
-interface's ClassInfo.FromFn instead (JRT-NOTES.md, proposed amendment A13).\n"
+  "Proxy_NewProxyInstance_ClassLoader_Class1_InvocationHandler__O is Proxy.newProxyInstance: h
+required (NullPointerException), the proxy class of the interfaces (ProxyClassFor: jdk26u's checks,
+IllegalArgumentException), its object with h, made by its constructor (InvocationHandler).
+Reflector.boxArg's adaptation of an IFn to a functional interface goes through the interface's
+ClassInfo.FromFn instead (JRT-NOTES.md, proposed amendment A13).\n"
   ^any [^ClassLoader_I loader ^{:tag (* RefArray)} interfaces ^InvocationHandler h]
-  (panic (UnsupportedOperationException_New_String (Str "java.lang.reflect.Proxy"))))
+  (let [f (proxyNeeded)]
+    (when (== h nil) (panic (NPE)))
+    (when (== interfaces nil) (panic (NPE)))
+    (let [c (f interfaces)]
+      (EnsureMembers (.-info c))
+      (return ((.-New (aget (.-Ctors (.-info c)) 0)) (lit (slice any) h))))))
+
+(go/func Proxy_GetInvocationHandler_O__InvocationHandler
+  "Proxy_GetInvocationHandler_O__InvocationHandler is Proxy.getInvocationHandler: the handler of a
+proxy's object, IllegalArgumentException \"not a proxy instance\" for another object.\n"
+  ^InvocationHandler [^any p]
+  (when (== p nil) (panic (NPE)))
+  (let [h (deref (proxyHandlerField p))]
+    (when (== h nil) (return nil))
+    (return (assert InvocationHandler h))))
 
 (go/func AdaptFn
   "AdaptFn adapts f, an IFn, to the functional interface c through c's ClassInfo.FromFn
@@ -993,9 +1073,7 @@ C.<init>(T1,T2) when no public constructor takes those classes.\n"
   ^{:tag (* Class)} [^{:tag (* Class)} c]
   (.-Declaring (.-info c)))
 
-(go/method GetEnclosingClass__Class ^{:tag (* Class)} [^{:tag (* Class)} c] (.-Declaring (.-info c)))
 
-(go/method IsMemberClass__Z ^bool [^{:tag (* Class)} c] (!= (.-Declaring (.-info c)) nil))
 
 ;; ---- step 5 phase 2B: more of Class's members for the REPL (jdk26u's Class.java)
 
@@ -1037,14 +1115,8 @@ UnsupportedOperationException for void.\n"
   ^{:tag (* String)} [^{:tag (* Class)} c]
   (Str (descriptorOf c)))
 
-(go/method IsAnonymousClass__Z "IsAnonymousClass__Z: false; the closed world's classes are named
-(an anonymous class's ClassInfo says nothing of it).\n"
-  ^bool [^{:tag (* Class)} c] false)
-(go/method IsLocalClass__Z ^bool [^{:tag (* Class)} c] false)
 (go/method IsHidden__Z ^bool [^{:tag (* Class)} c] false)
 (go/method IsSealed__Z ^bool [^{:tag (* Class)} c] false)
-(go/method GetEnclosingMethod__Method ^{:tag (* Method)} [^{:tag (* Class)} c] nil)
-(go/method GetEnclosingConstructor__Constructor ^{:tag (* Constructor)} [^{:tag (* Class)} c] nil)
 
 (go/method GetNestHost__Class "GetNestHost__Class is Class.getNestHost: the outermost enclosing
 class (arrays and primitives: themselves).\n"
@@ -1092,40 +1164,10 @@ Object.\n"
       (return (Intern "")))
     (Str (subslice n _ i))))
 
-(go/method GetCanonicalName__String
-  "GetCanonicalName__String is Class.getCanonicalName for top-level, member and array
-classes ($ of member classes as .).\n"
-  ^{:tag (* String)} [^{:tag (* Class)} c]
-  (when (.IsArray__Z c)
-    (let [e (.GetCanonicalName__String (.-comp c))]
-      (when (== e nil)
-        (return nil))
-      (return (Concat e (Str "[]")))))
-  (when (!= (.-Declaring (.-info c)) nil)
-    (let [o (.GetCanonicalName__String (.-Declaring (.-info c)))]
-      (when (== o nil)
-        (return nil))
-      (return (Concat o (Str ".") (.GetSimpleName__String c)))))
-  (.GetName__String c))
 
 (go/method IsSynthetic__Z ^bool [^{:tag (* Class)} c] (!= (bit-and (.-Modifiers (.-info c)) AccSynthetic) 0))
 
-(go/method GetGenericInterfaces__Type1
-  "GetGenericInterfaces__Type1 is Class.getGenericInterfaces without generics: the
-interfaces as Class objects (generic types are cut, so HashMap.comparableClassFor finds no
-ParameterizedType).\n"
-  ^{:tag (* RefArray)} [^{:tag (* Class)} c]
-  (let [is (.-Interfaces (.-info c))
-        a (NewRefArray Type_class (conv int32 (len is)))]
-    (range [i x is]
-      (aset (.-A a) i x))
-    a))
 
-(go/method GetGenericSuperclass__Type ^Type [^{:tag (* Class)} c]
-  (let [s (.-Super (.-info c))]
-    (when (== s nil)
-      (return nil))
-    s))
 
 (go/method GetEnumConstants__O1
   "GetEnumConstants__O1 is Class.getEnumConstants: a copy of ClassInfo.Enum's array, null for

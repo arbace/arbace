@@ -1,0 +1,146 @@
+(ns j2g.unit
+  "j2g's unit tests (doc/go/J2G-SPEC.md), each over a fixture of test/j2g/unit/ or a function alone,
+  with the edge (jdk/edge.edn) as j2g binds it and no JDK forms: light (seconds, well under a GiB).
+  Run: bin/j2g-unit (arbace_tool -p test -m j2g.unit); prints each test's name and pass or FAIL,
+  exits 1 on a failure."
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io]
+            [arbace.classes.env :as env]
+            [arbace.classes.analyze :as a]
+            [arbace.classes.annot :as annot]
+            [arbace.j2g.edge :as edge]
+            [arbace.j2g.main :as jm]
+            [arbace.j2g.model :as m]
+            [arbace.j2g.out :as out]
+            [arbace.j2g.world :as w]))
+
+(def ^:private failures (atom 0))
+
+(defn- check [what ok & [detail]]
+  (println (str (if ok "pass  " "FAIL  ") what (when (and (not ok) detail) (str "\n      " detail))))
+  (when-not ok (swap! failures inc)))
+
+(defn- load-fixture
+  "j2g's world over the fixture tree dir alone (load-world as bin/j2g binds it: the edge, no
+  source lookup)."
+  [dir]
+  (#'jm/advance-ids!)
+  (let [e (edge/read-edge "jdk/edge.edn")]
+    (binding [m/*run* true env/*declared* (:classes e) edge/*edge* e a/*source-lookup* false]
+      (w/load-world [{:root dir :tree true}] :variant-files []))))
+
+;; JCS69 (b): the analysis fails at the unresolved class itself, not at the conversion after it
+
+(defn test-unresolved-cause []
+  (let [causes {"p/C$D" "members: Unknown type: X (the import q.X)"}]
+    (check "unresolved-cause: a constructor of the class named"
+           (= (w/unresolved-cause causes "analysis: No accessible constructor of p.C$D (line 4) / No accessible constructor of p.C$D")
+              "analysis: No accessible constructor of p.C$D (line 4) / No accessible constructor of p.C$D (because p/C$D: members: Unknown type: X (the import q.X))"))
+    (check "unresolved-cause: a static field, by the internal name"
+           (= (w/unresolved-cause causes "analysis: No static field f in p/C$D (line 2)")
+              "analysis: No static field f in p/C$D (line 2) (because p/C$D: members: Unknown type: X (the import q.X))"))
+    (check "unresolved-cause: a longer name is not the class (p.C$DE)"
+           (= (w/unresolved-cause causes "analysis: No accessible constructor of p.C$DE")
+              "analysis: No accessible constructor of p.C$DE"))
+    (check "unresolved-cause: not an analysis failure"
+           (= (w/unresolved-cause causes "members: No accessible constructor of p.C$D")
+              "members: No accessible constructor of p.C$D"))
+    (check "unresolved-cause: no causes"
+           (= (w/unresolved-cause {} "analysis: x") "analysis: x"))))
+
+(defn test-unresolved-world []
+  (let [world (load-fixture "test/j2g/unit/unresolved")
+        failed (:failed world)
+        of (fn [n] (vec (for [[c msg] failed :when (= c n)] msg)))
+        st (fn [n] (w/with-world world @(:state (a/decl n))))]
+    (check "unresolved: Holder's failure is its members', the class named with its import"
+           (= (of "p/Holder") ["members: Unknown type: Gadget (the import javax.nonesuch.Gadget)"])
+           (pr-str (of "p/Holder")))
+    (check "unresolved: Holder not analyzed, marked failed with that cause"
+           (let [s (st "p/Holder")] (and (:analyzed s) (= (:analysis-failed s) "members: Unknown type: Gadget")))
+           (pr-str (select-keys (st "p/Holder") [:analyzed :analysis-failed])))
+    (check "unresolved: User's failure names Holder's cause"
+           (let [[m & more] (of "p/User")]
+             (and (nil? more) (str/starts-with? m "analysis: No accessible constructor of p.Holder")
+                  (str/ends-with? m "(because p/Holder: members: Unknown type: Gadget (the import javax.nonesuch.Gadget))")))
+           (pr-str (of "p/User")))
+    (check "unresolved: Clean analyzed, no failure"
+           (and (empty? (of "p/Clean")) (:analyzed (st "p/Clean")) (nil? (:analysis-failed (st "p/Clean"))))
+           (pr-str (of "p/Clean")))
+    (check "unresolved: no empty conversion message (\"Cannot convert ... to \")"
+           (not-any? (fn [[_ msg]] (re-find #"Cannot convert .* to\s*$" (str msg))) failed)
+           (pr-str failed))))
+
+(defn test-analyze-only
+  "JCS265 (b): bin/j2g --analyze-only over the fixture, its report.edn the load's failures alone."
+  []
+  (let [out (str (or (System/getenv "TMPDIR") ".tmp/tmp") "/j2g-unit-analyze-only")
+        f (io/file out "report.edn")
+        _ (io/delete-file f true)
+        e (edge/read-edge "jdk/edge.edn")
+        ret (binding [m/*run* true env/*declared* (:classes e) edge/*edge* e a/*source-lookup* false]
+              (jm/run* {:analyze-only true :jdk "test/j2g/unit/unresolved" :variant-files [] :inputs []
+                        :slice [] :roots [] :out out}))
+        r (when (.isFile f) (read-string (slurp f)))
+        failed (into {} (map vec (:analysis-failures r)))]
+    (check "analyze-only: report.edn written, marked :analyze-only" (true? (:analyze-only r)) (pr-str (keys r)))
+    (check "analyze-only: no :errors (the status is 0)" (empty? (:errors ret)) (pr-str (:errors ret)))
+    (check "analyze-only: Holder's members failure and User's named cause"
+           (and (= (get failed "p/Holder") "members: Unknown type: Gadget (the import javax.nonesuch.Gadget)")
+                (str/ends-with? (str (get failed "p/User")) "(because p/Holder: members: Unknown type: Gadget (the import javax.nonesuch.Gadget))"))
+           (pr-str (:analysis-failures r)))
+    (check "analyze-only: nothing translated (no gen/ nor prog/)"
+           (not (or (.exists (io/file out "gen")) (.exists (io/file out "prog")))))
+    (check "analyze-only: the classes analyzed counted (Clean, Holder, User)" (= 3 (:classes r)) (pr-str (:classes r)))))
+
+(defn test-support-tables
+  "JCS271 (b), JCS273: the jrt methods j2g writes and the roots they need, by J2G-SPEC §4.4's names."
+  []
+  (check "type annotations: 11 methods (Class 2, Field 1, Method and Constructor 4 each)"
+         (= 11 (count out/type-annotation-methods)) (pr-str out/type-annotation-methods))
+  (check "type annotations: Go names as J2G-SPEC §4.4 gives them"
+         (every? (set out/type-annotation-methods)
+                 [["Class" "GetAnnotatedSuperclass__AnnotatedType"] ["Class" "GetAnnotatedInterfaces__AnnotatedType1"]
+                  ["Field" "GetAnnotatedType__AnnotatedType"] ["Method" "GetAnnotatedParameterTypes__AnnotatedType1"]
+                  ["Constructor" "GetAnnotatedReceiverType__AnnotatedType"]])
+         (pr-str out/type-annotation-methods))
+  (check "type annotations: 7 roots, TypeAnnotationSupport's"
+         (and (= 7 (count out/type-annotation-roots))
+              (every? #(= "jdk/internal/jrt/TypeAnnotationSupport" (first %)) out/type-annotation-roots)
+              (some #{["jdk/internal/jrt/TypeAnnotationSupport" "annotatedParameterTypes"
+                       "(Ljava/lang/reflect/Executable;)[Ljava/lang/reflect/AnnotatedType;"]} out/type-annotation-roots))
+         (pr-str out/type-annotation-roots))
+  (check "accessFlags: AccessFlagSupport's three roots"
+         (= 3 (count out/access-flags-roots)) (pr-str out/access-flags-roots)))
+
+(defn test-throws
+  "JCS240 (a) (F27): a class's throws clauses are its data's E records with :throws alone, a JDK class's too (j2g's
+  class-data call), and none without; with :members they are written once."
+  []
+  (let [e (edge/read-edge "jdk/edge.edn")
+        ;; load-fixture's binding without its advance-ids! (the counter advances once a run: test-unresolved-world's)
+        world (binding [m/*run* true env/*declared* (:classes e) edge/*edge* e a/*source-lookup* false]
+                (w/load-world [{:root "test/j2g/unit/throws" :tree true}] :variant-files []))
+        data (fn [n & opts] (w/with-world world (some-> (apply annot/class-data n opts) str/split-lines set)))
+        es (fn [ls] (set (filter #(str/starts-with? % "E ") ls)))]
+    (check "throws: an interface's method, :throws alone"
+           (= #{"E M ping ()V java.lang.Exception"} (es (data "q/Pinger" :throws true))) (pr-str (data "q/Pinger" :throws true)))
+    (check "throws: a constructor's and a method's, none for a method without"
+           (= #{"E C ()V java.lang.InterruptedException" "E M ping ()V java.lang.Exception"} (es (data "q/Impl" :throws true)))
+           (pr-str (data "q/Impl" :throws true)))
+    (check "throws: none without :throws or :members"
+           (empty? (es (data "q/Impl"))) (pr-str (data "q/Impl")))
+    (check "throws: with :members and :throws, each record once"
+           (let [ls (w/with-world world (str/split-lines (annot/class-data "q/Impl" :members true :throws true)))]
+             (= 2 (count (filter #(str/starts-with? % "E ") ls))))
+           (pr-str (data "q/Impl" :members true :throws true)))))
+
+(defn -main [& _]
+  (test-support-tables)
+  (test-unresolved-cause)
+  (test-unresolved-world)
+  (test-analyze-only)
+  (test-throws)
+  (println (str "j2g.unit: " (if (zero? @failures) "all passed" (str @failures " failed"))))
+  (shutdown-agents)
+  (System/exit (if (zero? @failures) 0 1)))

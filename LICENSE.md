@@ -500,12 +500,29 @@ covers what.
   `Inet6AddressImpl.java`, `Inet6Address.java`, `sun/net/util/IPAddressUtil.java`, `jdk/internal/util/Exceptions.java`) where they keep it: Copyright (c)
   Oracle and/or its affiliates, under the GNU General Public License version 2 with the Classpath
   Exception (text below); the rest of those files is Arbace's own.
+- Generic reflection (F25, doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F25 (write-ahead)"):
+  `overlay/jdk/java.base/jdk/internal/jrt/ReflectSupport.java` holds the bodies of the generic members of
+  https://github.com/openjdk/jdk26u at `baf63fb` (`src/java.base/share/classes/java/lang/Class.java`,
+  `java/lang/reflect/Executable.java`, `Method.java`, `Constructor.java`, `Field.java`; the file's header names them),
+  their receiver a parameter: Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2
+  with the Classpath Exception (text below); the rest of that file, the variant `overlay/jdk/variants/TypeVariableImpl.ae`
+  and `go/arbace/jrt/classdata.ae` (whose Class members follow the same `Class.java`'s rules) are Arbace's own, under
+  the Eclipse Public License 1.0.
 - Serialization (JCS167, doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS167 (write-ahead)"; doc/go/JRT-NOTES.md,
   "Serialization"): `overlay/jdk/java.base/java/io/ObjectStreamClass.java` and `ObjectInputStream.java` are jdk26u's
   files of the same names (https://github.com/openjdk/jdk26u at `baf63fb`, `src/java.base/share/classes/java/io/`) edited
   by `test/jrt/serialization/variants.py` (each file's header says so): Copyright (c) Oracle and/or its affiliates, under
   the GNU General Public License version 2 with the Classpath Exception (text below), the edits Arbace's own;
-  `overlay/jdk/java.base/java/io/ClassCache.java` and `jdk/internal/jrt/SerialAlloc.java` are Arbace's own.
+  `overlay/jdk/java.base/java/io/ClassCache.java` and `jdk/internal/jrt/SerialAlloc.java` are Arbace's own. Since
+  serialization's slice 4, JCS169 and JCS170 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: serialization slice 4",
+  "As built: JCS169 (write-ahead)", "As built: JCS170 (write-ahead)"): `overlay/jdk/variants/SerializedLambda.ae` keeps
+  the code of jdk26u's `src/java.base/share/classes/java/lang/invoke/SerializedLambda.java` where it keeps it (its
+  `toString`'s format; the kinds' names of `MethodHandleInfo.java`), and the `readObject`s the variants `DESKey.ae`,
+  `DESedeKey.ae`, `PBEKey.ae` and `PasswordCallback.ae` restore are jdk26u's as repr/java converts them, less the
+  Cleaner's registration: Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2
+  with the Classpath Exception (text below), the rest Arbace's own; `overlay/jdk/java.base/jdk/internal/jrt/SerialLambdas.java`
+  is Arbace's own; `arbace/lang/Compiler.ae`'s `Compiler$ProxySupport` and `Compiler$ProxyFn` are Arbace's own code
+  following the rules of jdk26u's `java/lang/reflect/Proxy.java` and `ProxyGenerator.java` (their messages quoted).
 - Security (doc/go/JRT-NOTES.md, "Security"): `overlay/jdk/java.base/javax/crypto/JceSecurity.java`
   holds the `getInstance` methods of https://github.com/openjdk/jdk26u at `baf63fb`
   (`src/java.base/share/classes/javax/crypto/JceSecurity.java.template`),
@@ -526,8 +543,8 @@ covers what.
   `javax/crypto/JceSecurityManager.java`: Copyright (c) Oracle and/or its affiliates, under the GNU
   General Public License version 2 with the Classpath Exception (text below); the rest of those
   files, the digests' variants (`MD5.ae`, `SHA.ae`, `SHA2.ae`, `SHA5.ae`, `SHA3.ae`), the JCA's
-  variants that only cut or set (`SecretKeySpec.ae`, `EncodedKeySpec.ae`, `SealedObject.ae`,
-  `Signature.ae`, `GaloisCounterMode.ae`), `jdk/internal/jrt/HostRandom.java`,
+  variants that only cut or set (`SecretKeySpec.ae`, `EncodedKeySpec.ae`, `SealedObject.ae` until serialization's slice 4,
+  `Signature.ae`; `GaloisCounterMode.ae` until F23, below), `jdk/internal/jrt/HostRandom.java`,
   `jdk/internal/jrt/CryptoAccess.java`, `sun/security/provider/JrtServices.java`,
   `com/sun/crypto/provider/JceServices.java` and `sun/security/rsa/RsaServices.java` (their service
   class names are jdk26u's providers') are Arbace's own.
@@ -620,6 +637,17 @@ covers what.
   `src/jdk.security.auth/share/classes`, 1 of `src/java.logging/share/classes`) and the 2 security
   message bundles the build's `CompileProperties` generates, and 219 of pki-sources (218 of
   `src/java.base/share/classes`, 1 of `src/jdk.security.auth/share/classes`).
+- The JCA's tail and SASL (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F23 (write-ahead)"; recorded by the rule
+  of B7): the variants `overlay/jdk/variants/GaloisCounterMode.ae` (since F23 its `overlapDetection` and `GCMDecrypt.doFinal`)
+  and `ProviderConfig.ae`'s SunSASL case (`ProviderConfigSasl.ae` until JCS232 (a) folded it in) keep the jdk26u members they replace (https://github.com/openjdk/jdk26u at `baf63fb`,
+  `src/java.base/share/classes/com/sun/crypto/provider/GaloisCounterMode.java`, `sun/security/jca/ProviderConfig.java`) as
+  repr/java converts them, with the changes they name: Copyright (c) Oracle and/or its affiliates, under the GNU General
+  Public License version 2 with the Classpath Exception (text below); the rest of those files and the cases F23 adds to
+  `overlay/jdk/java.base/com/sun/crypto/provider/JceServices.java` and `sun/security/provider/JrtServices.java` are Arbace's
+  own. Their jdk26u sources join `jdk/forms/` once `bin/jrt-convert update` has run: jca-tail-sources' 3 files of
+  `src/java.base/share/classes` (`CtrDrbg`, `MD4`, `GCMParameters`) and sasl-sources' 34 (28 of
+  `src/java.security.sasl/share/classes`, 5 of `src/java.base/share/classes/com/sun/security/ntlm`, 1 of
+  `src/jdk.security.auth/share/classes`), under the same license.
 - JC9b's small members, charsets, file channels and datagrams (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built:
   F16 (write-ahead)", "As built: F8 (write-ahead)", "As built: F7 (write-ahead)", "As built: F11 (write-ahead)";
   recorded by the rule of B7): jdk26u's files (https://github.com/openjdk/jdk26u at `baf63fb`) transcribed with
@@ -722,7 +750,7 @@ covers what.
   Arbace's own.
 - TLS (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F3 (write-ahead)"; recorded by the rule of B7): the
   variants `overlay/jdk/variants/SSLContext.ae`, `SNIHostName.ae`, `SSLSocketImpl.ae`,
-  `InetAddressAccess.ae` and `ProviderConfigJsse.ae` keep the jdk26u members they replace or add
+  `InetAddressAccess.ae` and `ProviderConfig.ae`'s SunJSSE case (`ProviderConfigJsse.ae` until JCS232 (a)) keep the jdk26u members they replace or add
   (https://github.com/openjdk/jdk26u at `baf63fb`, the classes' files of `src/java.base/share/classes`)
   as repr/java converts them, with the changes they name, and `overlay/jdk/java.base/sun/security/ssl/SSLLogger.java`
   is jdk26u's `SSLLogger.java` transcribed with the changes its header names: Copyright (c) Oracle and/or
@@ -753,6 +781,61 @@ covers what.
   they name: Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2 with the
   Classpath Exception (text below); the rest of the variants is Arbace's own. Their jdk26u sources join `jdk/forms/`
   (the converted closure, under the same license): 63 of naming-script-sources.
+- jdk.httpserver (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F24 (write-ahead)"; recorded by the rule of B7):
+  `overlay/jdk/java.base/sun/net/httpserver/{ServerImpl,ExchangeImpl,HttpConnection,HttpContextImpl,ServerConfig}.java`
+  are jdk26u's files of the same names (https://github.com/openjdk/jdk26u at `baf63fb`,
+  `src/jdk.httpserver/share/classes/sun/net/httpserver/`) with the exact replacements `test/jrt/derive.ae` makes (each
+  file's header says so): Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2
+  with the Classpath Exception (text below), the derivation Arbace's own; `overlay/jdk/java.base/jdk/internal/jrt/SystemLoggers.java`
+  holds jdk26u's `java.lang.System.Logger` interface (`src/java.base/share/classes/java/lang/System.java`) and the
+  System.Logger half of `LoggingProviderImpl.JULWrapper` (`src/java.logging/share/classes/sun/util/logging/internal/`)
+  under the same license, the rest Arbace's own; the variants `overlay/jdk/variants/HttpServerProvider.ae` and
+  `LogManager.ae`'s `LoggingProviderAccess` keep the jdk26u members they replace as repr/java converts them (the same
+  license), with the changes they name. Their jdk26u sources join `jdk/forms/` (the converted closure, under the same
+  license): 38 of httpserver-sources (`src/jdk.httpserver/share/classes`).
+- jrt's derivations as data (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS251 (a), JCS253"; recorded by the rule
+  of B7): `test/jrt/derive.ae`'s tables hold, as the OLD and NEW strings of its replacements, text of jdk26u's files
+  (https://github.com/openjdk/jdk26u at `baf63fb`: `src/java.base/share/classes/sun/nio/ch/Net.java`,
+  `SocketOptionRegistry.java.template`, `UnixDomainSockets.java`, `src/java.base/unix/classes/sun/nio/ch/PollSelectorImpl.java`,
+  the thirteen files of F9's table under `src/java.base/{share,unix,linux}/classes/`, and the JDK build's generated
+  `java/nio/HeapByteBuffer.java` and `HeapByteBufferR.java`): Copyright (c) Oracle and/or its affiliates, under the GNU
+  General Public License version 2 with the Classpath Exception (text below); the rest of `test/jrt/derive.ae`, the
+  bodies and helpers it writes and `test/jrt/vet.ae` are Arbace's own. The overlays it makes are covered above with
+  their features (F7, F9, F10a, F10b, JCS164, F24).
+- JMX's core, AccessFlag and type annotations (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JMX-1 (write-ahead)", "As built:
+  JCS273 (write-ahead)", "As built: JCS271 (b) (write-ahead)"; recorded by the rule of B7): the derived overlays
+  `overlay/jdk/java.base/{com/sun/jmx,javax/management}/...` (21 files), `java/lang/management/ThreadInfo.java`,
+  `java/lang/reflect/AccessFlag.java` and `sun/reflect/annotation/{TypeAnnotationParser,AnnotationType,AnnotationSupport}.java`
+  are jdk26u's files of the same paths (https://github.com/openjdk/jdk26u at `baf63fb`, `src/java.management/share/classes/`,
+  `src/java.base/share/classes/`) with the exact replacements `test/jrt/derive.ae` makes, whose tables hold their replaced
+  text (each file's header says so); `overlay/jdk/java.base/jdk/internal/jrt/{AccessFlagSupport,TypeAnnotationSupport}.java`
+  hold jdk26u's bodies of `Class.java`'s, `java/lang/reflect/Executable.java`'s, `Method.java`'s, `Constructor.java`'s,
+  `Field.java`'s and `jdk/internal/reflect/ReflectionFactory.java`'s members their headers name, and
+  `jdk/internal/jrt/ClassFileAccess.java` the names and values of `java/lang/classfile/ClassFile.java`'s access flags; and
+  the jdk26u sources the closure adds (`test/jrt/jrt_sources.ae`'s `jmx-sources`, `accessflag-sources`,
+  `type-annotation-sources`) join `jdk/forms/` (the converted closure): Copyright (c) Oracle and/or its affiliates, under the
+  GNU General Public License version 2 with the Classpath Exception (text below), the derivations and the rest of those
+  files Arbace's own; `jdk/internal/jrt/TypeAnnotationData.java`, `jdk/internal/reflect/ConstantPool.java` (jrt's own, in
+  place of jdk26u's), the variant `overlay/jdk/variants/TypeVariableImpl.ae`, `arbace/classes/annot.ae`'s type annotation
+  records and `go/arbace/jrt/classdata.ae`'s natives are Arbace's own, under the Eclipse Public License 1.0. F13's
+  overlays `LockInfo.java`, `MonitorInfo.java`, `MemoryUsage.java`, `javax/management/ObjectName.java` and
+  `openmbean/CompositeData.java` are removed (jdk26u's in their place).
+- Java RMI (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F27 (write-ahead)"; recorded by the rule of B7): the derived
+  overlays `overlay/jdk/java.base/java/rmi/server/RMIClassLoader.java` and
+  `overlay/jdk/java.base/sun/rmi/{transport/GC,transport/DGCClient,runtime/Log,runtime/RuntimeUtil}.java` are jdk26u's files
+  of the same paths (https://github.com/openjdk/jdk26u at `baf63fb`, `src/java.rmi/share/classes/`) with the exact
+  replacements `test/jrt/derive.ae` makes, whose tables hold their replaced text (each file's header says so); and the
+  jdk26u sources the closure adds (`test/jrt/jrt_sources.ae`'s `rmi-sources`: 89 files of `src/java.rmi/share/classes`
+  and `src/java.base/share/classes/java/lang/NoSuchMethodError.java`) join `jdk/forms/` (the converted closure); likewise
+  JMX-2's, its connectors: the derived overlays `overlay/jdk/java.base/javax/management/remote/{JMXConnectorFactory,
+  JMXConnectorServerFactory}.java`, `com/sun/jmx/remote/internal/{ClientCommunicatorAdmin,ServerCommunicatorAdmin,
+  ClientNotifForwarder}.java` (`src/java.management/share/classes/`) and `javax/management/remote/rmi/RMIConnector.java`
+  (`src/java.management.rmi/share/classes/`), and `jmx-remote-sources`' 41 files of those two trees: Copyright
+  (c) Oracle and/or its affiliates, under the GNU General Public License version 2 with the Classpath Exception (text
+  below), the derivations Arbace's own; `go/arbace/jrt/rmi.ae` (GC.maxObjectInspectionAge's native, after librmi's
+  `GC.c`, written anew over Go's runtime/debug) and its test, `overlay/jdk/java.base/jdk/internal/jrt/JmxProviders.java` (the
+  providers java.management.rmi's module-info names), jrt's Thread context class loader (`go/arbace/jrt/thread.ae`)
+  and the throws records (`arbace/classes/annot.ae`) are Arbace's own, under the Eclipse Public License 1.0.
 - java.lang.management without JMX (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F13 (write-ahead)";
   recorded by the rule of B7): `overlay/jdk/java.base/java/lang/management/{ManagementFactory,ThreadInfo,LockInfo,MonitorInfo,MemoryUsage}.java`
   `overlay/jdk/java.base/sun/management/{ManagementFactoryHelper,VMManagementImpl}.java` and

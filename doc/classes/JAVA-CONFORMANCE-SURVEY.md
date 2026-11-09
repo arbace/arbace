@@ -4010,3 +4010,235 @@ their golden files and writing c00004's rows; `--record` after it as for JCV1.
 3. **JCV9, the 207 other `:stdout` tests** (JCV2's (c) again, now with a tool): `bin/java-check golden` takes any test's
    review, so a jtreg test's JDK output could be committed and reviewed as these were; or a crops-score formula of the
    stage's own share (JCV4). Recommended: neither now; the user's decision of 2026-11-07 keeps them at 0.5.
+
+## Decided (the user, 2026-11-08): JCV7 (b), JCV8 (a); JCV9 nothing now
+
+JCV7 (b): InitOrder's array line gets a class of its own, so 12.4.1's rule for array creation is tested; t03212's JDK
+record, golden file and review written again. JCV8 (a): the 21 lines resting on the JDK stay; the review names them
+(`:jdk`), jrt follows the JDK. JCV9: neither a review of the 207 other `:stdout` tests nor a new formula, now.
+
+## As built: JCV7, JCV8 (2026-11-08; branch `java-jcv7`, from `java-jcv2` 79f4658d5)
+
+**JCV7, the program.** `test/java/jls/InitOrder.java` gains `static class Unused { static { p("Unused.static"); } static
+void touch() { } }`, used by nothing before its last three lines, which replace the line of `new Lazy[2]` (Lazy had been
+initialized two lines above it, so the line held either way):
+
+    arrays of Unused: 2 3 []          new Unused[2] and new Unused[2][3]: no initialization (12.4.1, 15.10.2)
+    Unused.class: true []             a class literal, and the array's class's component type that class: none (12.4.1, 15.8.2, 10.8)
+    Unused.touch: Unused.static       a static method's invocation initializes it: the two lines above test something (12.4.1)
+
+The `@summary` cites 15.10.2 and 15.8.2. Each line was worked out from 12.4.1's list (an instance created, a static method
+invoked, a static field assigned, a non-constant static field used; nothing else but reflection) before the run. The last
+line is the line's own negative control: an implementation that never initialized Unused would print `Unused.touch: ` and
+fail, one that initialized at array creation or at the class literal would print `Unused.static` in a bracket.
+
+**The record, the golden file, the review.** The JDK's run made by hand as JCV2's were (jdk26u's image: `package t03212; `
+before the first line, `javac -d`, `java -cp`): 257 bytes, written as `test/java/jls/InitOrder.out`. The reference's line
+recorded again by `bin/java-check --record-ref --jobs 1 --only 'jls/InitOrder\.java'` (28 s, 0.67 GiB; `--only` is a regexp
+over the scan's `plan.tsv`, which holds the test's path, not its id: `--only t03212` plans none): t03212's `:classes`
+7f41d74e089861f8 to 9fab04ddde42ae2d, `:out` 448894f8f4b4f39a to 20acdaebdd121236, `:out-len` 201 to 257, the other 4,852
+lines byte for byte (`ref-unchanged`). `test/java/jls/golden.edn`: InitOrder's line 7 rewritten, lines 8 and 9 added
+(`:jls`, `:jls :api` for `Class.getComponentType`, `:jls`): 198 lines, 120 `:jls`, 34 `:jls :api`, 23 `:api`, 18 `:jls
+:jdk`, 3 `:api :jdk`. t03212 is essential: its committed forms `test/java/forms/t03212/` written again by `bin/java-check
+--forms update` on javac's tool `javac-c91cd0f6` (the provenance's host; `REPR_JAVA_STALE_OK=1`): `--forms verify` first
+differed in t03212's file alone (427 tests byte for byte, c00001 as it must), the provenance unchanged.
+
+**Proved** (light; the gate's executable of main `ad3066cf`, `ARBACE_HOST_EXE` main's stage 0): `bin/java-check --only
+'t03212 ' --levels read,interp,classes,print --jobs 1 --save` (27 s, peak 1.4 GiB): read, interp (judged by the new golden
+file), classes and print pass; jrt's output equals the JDK's byte for byte (`cmp`), so no `interp.jdk` row; `--levels nread`
+passes; `bin/java-check --judge --partial` of both: as recorded at every level, no regression, the own verdict and the JDK's
+record agree. Before the golden file was written the same run's interp row differed from the old one at line 7, as it must.
+`bin/java-check golden` and `golden --oracle` (the 15 golden files' digests equal the JDK's recorded stdout, InitOrder's the
+new record's), `bin/java-check verdicts --verify` (as recorded: t03212 stays `:golden`), `bin/crops-score --judge --strict`
+(0 problems) pass. Not run by day: the compiled level (a whole-program j2g, the night's).
+
+**JCV8 (a).** Nothing changes: the 21 `:jdk` lines (18 `:jls :jdk`, 3 `:api :jdk`) are the table of "As built: JCV2", kept
+by decision; JCV7's three new lines rest on the JLS and the API alone, so the count stays 21. A new `:jdk` line in a later
+program is a review entry like these, named in its `why`.
+
+**The score.** No change, as expected: t03212 passed at every level before and after, the judge counted it `:golden` before
+and after. Java: completeness 72.9% (80.4% without by design), maturity 100%, independence 99.7% (judge 0.986).
+
+**The night** (after the Java night; light but the compiled level): `bin/java-check golden`, `bin/java-check verdicts
+--verify`, `bin/java-check --forms verify` (seconds to a minute); the gate's Java steps at their new keys (`test/java/` in
+`:java-run`): the essential `java-check` (t03212 interpreted from its new forms against its golden file), `java-check-judge`,
+`java-essential-compiled` (`bin/java-check --essential-compiled`: one program, t03212's new forms translated by j2g, heavy);
+`--full`'s `java-interp`, `java-compiled-full`, `java-classes`, `java-print`, `java-judge`; then `bin/java-check --judge
+--record` as for JCV1 if a row moved (none is expected).
+
+### Proposed (JCV10-JCV12)
+
+1. **JCV10, where completeness's 90% is.** Java's eval cell is 1,866 of 3,325 run tests (56.1%) and AOT 1,939 (58.3%); 90%
+   needs about 1,130 more passing at each, while the jls corpus has 15 and the verdict work moves no pass. The deferred
+   classes that hold that many: `:security` 359 (234 compiled), `:net` 227 (150), `:serialization` 168 (117, java-serial's
+   slices), `:nio` 93 (87, java-unix's), `:reflection` 75 (72), `:j2g-unresolved` 236 compiled. (a) Leave the ranking to
+   JC6's triage as now; (b) a ranking by tests freed per jrt class (doc/classes/JAVA-DEFERRED-TRIAGE.md's table re-sorted
+   after the Java night's merge, each class's members by the first missing JDK class or member), the next slices taken from
+   its top: java.security's providers (`:security`, about a fifth of the gap) first. Cost: (b) an hour of triage from the
+   records; the ports are weeks. Recommended: (b), after the Java night's records.
+2. **JCV11, the print cell's by-design share.** Print is 78.2% with 616 by design and 96.0% without; 581 of the 616 are
+   `:print-classes` (test/java/divergences.edn): the printed Java's class files differ from the original's only by what the
+   forms do not record (?: against if, an increment's place, a local's default initializer, fall-through repeated, the
+   constant pool's order), every other sub-check passing (javac on Arbace accepts the printed Java, it reads back to the
+   same forms, mode `:full` prints the original byte for byte). (a) Keep it: byte-identical class files are the print
+   level's pass (RPS9 (a)); (b) the print cell's pass is the round trip's own levels (accepted, the same forms, `:full`
+   byte for byte), the class files a sub-level reported beside it (as `bin/repr-java roundtrip`'s classes level),
+   `:print-classes` then a note, not a non-pass; `:print-classes-unnamed` (72) stays deferred. Cost: (b) the judgment's
+   rule in test/java/print.ae and the REAP reader, a re-judge from the saved results, light; it reopens RPS9 (a), the
+   user's. Print would read about 95.7%, Java's completeness about 77%. Recommended: (b), since the forms by design do not
+   carry what the class files differ by.
+3. **JCV12, `--record-ref --only` by id.** `--only` matches `plan.tsv`'s text (the path), so `--only tNNNNN` silently
+   records nothing (0 tests planned, exit 0). (a) Leave it, documented here; (b) match the id too, and fail when `--only`
+   plans no test. Cost: (b) minutes. Recommended: (b).
+
+## Decided (the user, 2026-11-08, about 19:45): JCV11 (b), JCV12 (b)
+
+- **JCV11 (b):** Java's print cell passes on the round trip's own checks: printed, accepted by javac on Arbace, read back to the
+  same forms, and mode `:full` byte for byte. The class files' equality is a sub-level reported beside the pass.
+  `:print-classes` becomes a note, not a non-pass. `:print-classes-unnamed` stays deferred. This reopens RPS9 (a): see
+  doc/FULL-SUPPORT-SURVEY.md, "Decided (the user, 2026-11-08): RPS9 (a) reopened by JCV11 (b)".
+- **JCV12 (b):** `bin/java-check --record-ref --only` matches test ids too, and fails when `--only` plans no test.
+- **JCV10:** not decided.
+
+## As built: JCV11 (b), JCV12 (b) (2026-11-08; branch `java-props`, from `java-night` 639d42ab9 with the day's Java branches merged)
+
+**JCV11 (b).** The details are in doc/FULL-SUPPORT-SURVEY.md, "As built: JCV11 (b)".
+
+- **The judgment.** `test/java/print.ae`'s `classes-note?` applies the rule. A row that passes this way keeps the classes
+  step's reason as its note (`:pass "classes: ..."`).
+- **The record.** `java.print rejudge` re-judged `test/java/check-print.edn` from the committed record: 582 rows now pass. 581
+  were `:print-classes`. The other is t06357, which leaves `:print-erasure`'s `:tests`: its row differed only by the named
+  kinds.
+- **The matrix.** REAP's reader reports the sub-level in the print source's detail (`:sub-level :classes`).
+- **The numbers.** Print went from 78.2% to 95.7%. Java's completeness went from 72.85% to 77.23%, and from 78.93% to 79.11%
+  without by design.
+- **Proved.** A light run of four tests at read and print matched the re-judged record: 4 of 4 as recorded.
+
+**JCV12 (b).** The change is in `bin/java-check`'s plan for `--record-ref` (`--only REGEX`):
+
+- it matches a test's id as well as its path, so `--only t03212` plans t03212;
+- a run whose `--only` plans no test stops with status 1 and writes nothing.
+
+**Proved (JCV12).**
+
+- `bin/java-check --record-ref --jobs 1 --only t03212` planned t03212 (26 s, 0.65 GiB). Before this change, the same
+  selection planned none. The run kept the reference byte for byte: t03212's line came out as JCV7 recorded it, and the
+  4,852 other lines were kept (`ref-unchanged`).
+- `--only 'no-such-test'` exits 1 after the scan, with "plans no test". Before this change, such a selection exited 0 and
+  recorded nothing.
+
+## As built: JCS69 (b), the refusals at the unresolved class (2026-11-08, branch `java-j2g`, write-ahead)
+
+`:j2g-unresolved` (test/java/divergences.edn) held the compiled level's tests whose j2g refusal was an empty conversion
+(`Cannot convert value of method  of type :null to `, `initializer of field  of type "J" to `) or a missing member of a test's
+own class (`No accessible constructor of tNNNNN.X`, `No static field f in tNNNNN/X`): 302 rows of check-compiled.edn
+(night 7's record) match its patterns. Measured by day on the analysis alone (j2g's `load-world` over jdk/forms and the
+tests' forms, the edge bound as bin/j2g binds it, 30 tests a process, each under 2.1 GB; a translation does not fit in
+2 GiB): the conversion was always the symptom of a class whose **members** (or header) had failed to resolve, the
+failure sorted after it (`members: Unknown type: X (the import q.X)`), and the missing members of other classes followed
+from it.
+
+Built (J2G-SPEC §4.1, "Refusals at the unresolved class"): `arbace.j2g.world/load-world` does not analyze a class whose
+header or members failed (marked analyzed with that failure), and `world/unresolved-cause` appends the cause to an analysis
+failure naming such a class (`(because p/C$D: members: ...)`). `:j2g-unresolved`'s third pattern no longer takes a refusal
+with a named cause, so these tests fall in the world's classes by area. The runtime's and javac's builds have no header
+or members failure (their report.edn), so no translation of theirs changes. Unit tests: `bin/j2g-unit` (test/j2g/unit.ae,
+fixture test/j2g/unit/unresolved: 10 checks; its negative control, the skip removed, fails 3 of them with the old message).
+
+The re-measure on the world of the night's branch (jdk/forms as on main 2aafa3a35, which java-night does not change
+before its conversion):
+
+- **182 of the 302 analyze without a failure now** (the world's additions since night 7: java.security, javax.crypto,
+  java.lang.management, java.util.logging, java.net's datagrams...): they leave `:j2g-unresolved` at the night's compiled
+  level whatever this branch does, to a run or to a later refusal (translation, Go, a class extending one outside the
+  world: not measurable by day): t03861 t04307 t04309 t04378 t04385 t04394 t04439 t04613 t04791 t04799 t04800 t04812 t04813 t04925 t04930 t04933 t04942 t04944 t04945 t04947 t04972 t04989 t05132 t05141 t05160 t05164 t05168 t05172 t05174 t05186 t05209 t05211 t05218 t05257 t05272 t05275 t05283 t05285 t05287 t05292 t05321 t05329 t05330 t05331 t05334 t05335 t05349 t05357 t05358 t05361 t05362 t05623 t05654 t05656 t05751 t05752 t05753 t05754 t05755 t05756 t05759 t05762 t05763 t05764 t05765 t05766 t05767 t05768 t05773 t05779 t05781 t07744 t07747 t07748 t07753 t07755 t07774 t07775 t07777 t07780 t07781 t07784 t07787 t07788 t07794 t07795 t07796 t07801 t07804 t07805 t07809 t07812 t07813 t07814 t07815 t07817 t07830 t07831 t07885 t07886 t07899 t07911 t07919 t07920 t07921 t07928 t07929 t07958 t07961 t07976 t07978 t07980 t07981 t07982 t07983 t07984 t07985 t07987 t07997 t07999 t08000 t08001 t08002 t08003 t08006 t08008 t08009 t08010 t08019 t08021 t08023 t08024 t08025 t08026 t08027 t08028 t08029 t08030 t08031 t08032 t08039 t08121 t08138 t08182 t08189 t08190 t08192 t08193 t08202 t08210 t08215 t08217 t08220 t08222 t08228 t08238 t08239 t08240 t08241 t08243 t08245 t08248 t08249 t08250 t08255 t08261 t08265 t08268 t08271 t08276 t08280 t08282 t08283 t08287 t08288 t08292 t08293 t08294 t08295 t08296 t08297 t08303.
+- **120 are still refused**, now by the class the world lacks; by package: java.lang.classfile 21 (and its attribute
+  package 3), java.nio.channels 13 (MulticastChannel 9: DatagramChannel's superinterface the edge does not record;
+  AsynchronousChannelGroup, CompletionHandler), javax.management 12 (with openmbean 2, remote.rmi 1, com.sun.management 3,
+  java.lang.management 1), java.util.spi.ToolProvider 9, javax.security.sasl 8, java.net.http 4, java.nio.file 4
+  (WatchService), java.rmi 5, javax.tools 4, java.lang.reflect.AccessFlag 3, javax.security.auth.kerberos 3, com.sun.jdi
+  3, com.sun.net.httpserver 3, java.lang.ref.PhantomReference 2, the edge's missing generics 3 (ObjectOutputStream's 2,
+  CountDownLatch's 1), and one each in sun.misc, java.lang.invoke, jdk.net, java.util, javax.lang.model, javax.naming (2),
+  com.sun.nio.sctp, javax.xml (4) and jdk.dynalink. Their refusal text changes (the tests' output: their reasons); none
+  passes by it.
+
+### Proposed (JCS260-JCS265)
+
+1. **JCS260, java.lang.classfile in the world** (24 tests). (a) Leave them in `:classfile`; (b) jdk26u's
+   java.lang.classfile and jdk.internal.classfile.impl into the closure (a large library, all Java, no natives). Cost: (b)
+   days (the conversion, the closure, jrt's tables), it would also serve the reflection tests. Recommended: (b) after the
+   Java night's slices, since it is the largest single group.
+2. **JCS261, java.util.spi.ToolProvider on the compiled level** (9). The interp level runs these on javac's tool executable
+   (F6); the compiled level builds them on the gate's. (a) As now; (b) the compiled level's programs for these tests built
+   with javac's world (its compiled forms on javac's tool build). Cost: (b) a shard kind of its own, hours. Recommended:
+   (a) until the javac-tool shard is measured by night.
+3. **JCS262, the edge's gaps for the tests** (MulticastChannel's 9, ObjectOutputStream's and CountDownLatch's generics 3):
+   the edge (jdk/edge.edn) records what the builds ask, not what the tests' classes ask. (a) As now; (b) `bin/j2g-edge
+   update` with a recording run over the compiled level's test forms as one more build (frozen JVM, by night). Cost: (b)
+   an hour, a heavy run. Recommended: (b), with java-net's DatagramChannel slice.
+4. **JCS263, javax.management and javax.security.sasl** (19 with openmbean, remote, com.sun.management and ManagementFactory's cut; and 8): world slices of their own (JC6's triage). Recommended:
+   ranked with JCV10 (b)'s table.
+5. **JCS264, method-level stubs for an unresolved class** (J2G-SPEC's operation-level stubs one level up): a member naming
+   a class no world has dropped, a method whose body fails at it translated as a throwing stub, so the test runs and fails
+   only if it reaches it. (a) No: the interp level fails these tests at load too, and few would pass (the class is the
+   test's subject); (b) yes. Cost: (b) days, in the analyzer and j2g. Recommended: (a).
+6. **JCS265, a day-light analysis verb**: `bin/j2g --analyze-only` (the load and its failures, no translation), which this
+   measurement wrote as a scratch script (2.1 GB for jdk/forms and 30 tests; j2g's translation needs more than 2 GiB even
+   for one test). (a) Scratch, as now; (b) the verb, documented. Cost: (b) an hour. Recommended: (b).
+
+## Decided (the user, 2026-11-08, about 21:00): JCS260-JCS265
+
+- **JCS260 (b)**: java.lang.classfile into the closure, after the open slices (the Java night's F9, F10b, F14, JCS164,
+  JCS167, F23, F24, F25, JMX-1, JCS271 (b), JCS273): not now.
+- **JCS261 (a)**: ToolProvider's compiled tests wait until the javac-tool shard is measured by night.
+- **JCS262 (b)**: the edge's gaps for the tests' classes (MulticastChannel, ObjectOutputStream's and CountDownLatch's
+  generics, and since JCS265's re-measure Thread.UncaughtExceptionHandler's) recorded by a frozen-JVM night command, with
+  java-net's DatagramChannel work (not this branch).
+- **JCS263**: world slices for javax.management (JMX-1, built: doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JMX-1
+  (write-ahead)") and javax.security.sasl (F23's `sasl-sources` already cover all 8 tests' classes: checked, nothing to
+  add).
+- **JCS264 (a)**: no method-level stubs for an unresolved class.
+- **JCS265 (b)**: the verb, built below.
+
+## As built: JCS265 (b), `bin/j2g --analyze-only`, and the 120 refused tests measured again (2026-11-08, branch `java-more`)
+
+**The verb.** `bin/j2g --analyze-only` (J2G-SPEC §4.1, "The analysis alone") runs `w/load-world` and stops: no
+reachability, no translation, no Go; `OUT/report.edn` holds `:analyze-only true`, `:files`, `:classes`,
+`:analysis-failures` (a translation's format, `[class message]` pairs), `:variants` and `:times {:load s}`, each failure
+also printed (`j2g: analysis failure CLASS: MSG`); the status is 0, `--program` embeds nothing, `GOMEMLIMIT` defaults to
+1800MiB and no heavy lock is taken. `J2G_SOURCES` loads namespaces from the checkout before j2g's (`arbace.classes.analyze`
+on stage 0, whose analysis predates `*lenient*`: as bin/j2g-unit's `J2G_UNIT_SOURCES`). `bin/java-check --levels
+read,compiled --analyze-only --save DIR [--shard-size 30]` runs it a shard at a time (`analyze_shard`: jdk/forms, or
+`JRT_CONV`, and the shard's test forms; no runtime forms and no compiled namespaces, which no jtreg test names), attributes
+the failures as the compiled level's refusals (`java.check/refusals`) and saves each test `refused` (j2g's reason) or
+`analyzed`; never judged or recorded (`--analyze-only` without `--save` or the compiled level is refused). The
+attribution takes a class's own `header`/`members`/`bridges` failure before the analysis failures (`root-first`): an outer
+class whose method meets a member class's unresolved members fails with "Cannot convert value of method  of type :null",
+which names no class for `world/unresolved-cause`; 16 of the 120 were reported by that symptom before. Unit tests:
+`bin/j2g-unit`'s `analyze-only` checks (5: the report written and marked, status 0, Holder's members failure and User's
+named cause, nothing translated, 3 classes counted) and the support tables' (4), 20 checks in all, all pass.
+
+**The re-measure.** The 120 tests java-j2g left refused (`still.txt`), on this branch (java-props + java-j2g + java-refl)
+with its committed jdk/forms, on main's stage 0 with `J2G_SOURCES=arbace.classes.analyze`, their forms from java-j2g's read
+cache (the read 120 of 120 pass): `bin/java-check --levels read,compiled --analyze-only --list still.txt --shard-size 30
+--jobs 2 --save .tmp/an/save120`, 4 shards, 14 min 56 s, peak 2.04 GB (2,061,096 kB summed over the process group; one
+process). **120 of 120 still refused**, each by the class the world lacks, the same cause as java-j2g's for 104 and the root
+cause of the other 16 now (java.lang.classfile 21 + 3, javax.management 12 + openmbean 2 + remote.rmi 1, com.sun.management
+3, java.lang.management's getPlatformMBeanServer 1, MulticastChannel 9, ToolProvider 9, javax.security.sasl 8, java.net.http
+4, java.nio.channels 4, java.rmi 5, javax.tools 4, java.lang.reflect 3, java.nio.file 3 + Files.list 1, kerberos 3,
+com.sun.jdi 3, com.sun.net.httpserver 3, the edge's generics 3, java.lang.ref 2, one each in sun.misc, java.lang.invoke,
+jdk.net, java.util, javax.lang.model, javax.naming (2), com.sun.nio.sctp, javax.xml (4: xpath, parsers, transform, dom) and
+jdk.dynalink): jdk/forms is the same world java-j2g measured (the night converts).
+
+**The night's world predicted by day.** The verb's use beyond the measure: the slices' files converted by day
+(`bin/repr-java read-jdk --check`, a few hundred files with their context, as the convert step reads them) and laid over a
+copy of jdk/forms (`JRT_CONV`), the refused tests analyzed on it. JMX-1, AccessFlag (JCS273) and type annotations (JCS271
+(b)) with F23's SASL (doc/classes/JAVA-DEFERRED-TRIAGE.md's "As built" sections): of the 27 javax.management, com.sun.management
+and javax.security.sasl tests, **19 analyze** (the 8 SASL, 11 JMX: t04783, t04793, t07933, t07935-t07939, t07943, t07950,
+t07957); 8 stay refused (the remote connectors t07843, t07954; HotSpot's beans t07844, t07845, t07848, t07854;
+newPlatformMXBeanProxy's MBeanServerConnection overloads of getPlatformMXBean, t04792; the edge's generics of
+Thread.UncaughtExceptionHandler, t07956: JCS262). The prediction also found what j2g would have refused tonight, fixed before
+the night: `sun.reflect.misc.MethodUtil` (5 files), `JavaBeansAccess`, `newPlatformMXBeanProxy`. Of the 13 AccessFlag and type
+annotation tests, **11 analyze** (t04830, t04831, t04835; t04731, t04733, t04734, t04738-t04742); t04723 and t04832 name
+java.lang.reflect.Parameter (JCS280). Analyzing is not passing: translation, Go and the run are the night's.
+
