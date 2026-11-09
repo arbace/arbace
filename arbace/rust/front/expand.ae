@@ -235,7 +235,7 @@
                    (cond
                      (:frag it) (let [nm (str "__rf_g" (count @*frags*))]
                                   (swap! *frags* assoc nm it)
-                                  (.add out (place nm :Ident nm false nil 0 :Alone 0 nil)))
+                                  (.add out (place nm :Ident nm false nil 0 :Alone (long (or (:mv-mark it) 0)) (:mv-orig it) (:mv-fspan it))))
                      :else (let [^Tok t (:t it)]
                              (if (and (>= (.-lo t) 0) (zero? (long (:mark it))))
                                (.add out t)
@@ -443,7 +443,7 @@
             (ident-item? nx)
             (if (and (not transcriber?) (punct-item? (nth xs 2 nil) :Colon) (ident-item? (nth xs 3 nil)))
               (recur (drop 4 xs) (conj out {:var (tsym nx) :kind (keyword (tsym (nth xs 3)))}))
-              (recur (drop 2 xs) (conj out {:var (tsym nx)})))
+              (recur (drop 2 xs) (conj out (cond-> {:var (tsym nx)} transcriber? (assoc :dollar (first xs) :ident nx)))))
             :else (recur (rest xs) (conj out {:tok it}))))
         (:g it) (recur (rest xs) (conj out {:group it :sub (parse-matcher (:kids it) transcriber?)}))
         :else (recur (rest xs) (conj out {:tok it})))
@@ -544,6 +544,20 @@
     [[i env]]
     (mapcat (fn [[j env']] (m-seq pats (inc k) elems j env')) (m-one (nth pats k) elems i env))))
 
+(defn- item-orig ^Tok [it] (when-let [^Tok t (:t it)] (if (>= (.-lo t) 0) t (:orig it))))
+
+(defn- metavar-frag
+  "RFP34 (a): transcribe.rs' mk_delimited: a fragment substituted for `$var` is an invisible group whose open and close
+  delimiters' span is the `$var` of the definition, marked with the expansion's mark (its metavariable span); the fragment's
+  placeholder carries it (:mv-orig, the root file's `$` to `var`; :mv-fspan, a std macro's) so that a span the parser
+  joins from a definition's token to the fragment is the definition's, as Span::to's same context gives"
+  [b p mark]
+  (let [^Tok a (some-> (:dollar p) item-orig) ^Tok z (some-> (:ident p) item-orig)
+        fa (:fspan (:dollar p)) fz (:fspan (:ident p))]
+    (cond-> (assoc b :mv-mark mark)
+      (and a z) (assoc :mv-orig (lx/tok :Ident (.-lo a) (.-hi z) (.-sym z) false nil 0 :Alone))
+      (and fa fz (= (first fa) (first fz))) (assoc :mv-fspan [(fa 0) (fa 1) (fa 2) (fz 3) (fz 4)]))))
+
 (defn- transcribe [pats env mark]
   (vec (mapcat
         (fn [p]
@@ -556,7 +570,7 @@
                            :kids (transcribe (:sub p) env mark)}])
             (:var p) (let [b (get env (:var p) ::none)]
                        (cond (= b ::none) [(titem (ftok :Dollar nil nil nil 0 :Alone) mark) (titem (ftok :Ident (:var p) false nil 0 :Alone) mark)]
-                             (map? b) (if (:frag b) [b] (throw (ex-info (str "expand: $" (:var p) " still repeating") {:expand true})))
+                             (map? b) (if (:frag b) [(metavar-frag b p mark)] (throw (ex-info (str "expand: $" (:var p) " still repeating") {:expand true})))
                              :else b))
             (:rep p) (let [vs (filter #(map? (get env %)) (rep-vars (:rep p)))
                            n (reduce max 0 (map #(count (:seq (get env %))) (filter #(:seq (get env %)) vs)))]
@@ -869,7 +883,8 @@
               *std* std-macros
               *macros* (atom {})
               *frags* (atom {})
-              *sites* (atom {})]
+              ;; RFP38 (a): a caller's atom when bound (the builder's caller locations: each mark's root call site)
+              *sites* (or *sites* (atom {}))]
       (reset! mark-counter 1)
       (reset! *macros* (collect-user-macros crate))
       (let [items (fget crate :items)

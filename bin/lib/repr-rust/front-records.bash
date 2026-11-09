@@ -9,7 +9,7 @@
 #   std       the helper's std-names.edn and std-iface.edn (--std-names, --std-iface: RFS4, RFP26 (a)), their digests also
 #             test/rust/front/std-{names,iface}.sha256's
 #   built     rustc's MIR after mir_built and after each pass to runtime MIR (-Zdump-mir, the .after.mir files only: the judge
-#             reads no .before.mir) of test/rust/front/a*.rs, members NAME/FILE
+#             reads no .before.mir) of test/rust/front/a*.rs and opaque1.rs (RFP33 (a)), members NAME/FILE
 #   captures  each closure's kind, captures and fake reads (--captures, RFP20 (a)) of test/rust/synthetic/closures.rs and the
 #             test/rust/front/ programs with a closure, members NAME.cap.edn
 #   mono      run-built's record (RFP23 (b)): the helper's --mono-mir dump (the symbols, instances and layouts, std's
@@ -24,6 +24,11 @@
 
 rfr_passes='built|SimplifyCfg-initial|PromoteTemps|SimplifyCfg-promote-consts|ImpossibleClauses|CleanupPostBorrowck|RemoveNoopLandingPads|SimplifyCfg-post-analysis|Derefer|AddCallGuards|PostAnalysisNormalize|Subtyper|ElaborateDrops|AbortUnwindingCalls|AddMovesForPackedDrops|EraseDerefTemps|ElaborateBoxDerefs|StateTransform|LowerIntrinsics|RemovePlaceMention|SimplifyCfg-pre-optimizations'
 
+# RFP31 (a): the dumps of the pack rust-front-built, each pass of rfr_passes at the phase -Zdump-mir numbers its first run in
+# (arbace.rust.front.passes/pass-phase: 1-1 to SimplifyCfg-promote-consts, 2-1 to Derefer, 2-2 to StateTransform, 3-1 after),
+# (a shim's dumps, `NAME.D.1-1-...` for drop glue, are numbered by the shim's own pipeline: AddCallGuards at 1-1-007, not read)
+rfr_judged='\.(1-1-[0-9]+\.(built|SimplifyCfg-initial|PromoteTemps|SimplifyCfg-promote-consts)|2-1-[0-9]+\.(ImpossibleClauses|CleanupPostBorrowck|RemoveNoopLandingPads|SimplifyCfg-post-analysis|Derefer)|2-2-[0-9]+\.(AddCallGuards|PostAnalysisNormalize|Subtyper|ElaborateDrops|AbortUnwindingCalls|AddMovesForPackedDrops|EraseDerefTemps|ElaborateBoxDerefs|StateTransform)|3-1-[0-9]+\.(LowerIntrinsics|RemovePlaceMention|SimplifyCfg-pre-optimizations))\.after\.mir$'
+
 rfr_pin() { echo "$root/test/rust/records/rust-front-$1.sha256"; }
 rfr_helper_hash() {
   cat "$root"/tools/rsdump/*.rs "$root/tools/rsdump/RUSTC_VERSION" "$root/tools/rsdump/apks.sha256" | sha256sum | cut -c1-64
@@ -33,7 +38,9 @@ rfr_programs() {
   local f
   case $1 in
     std) echo std ;;
-    built|mono) (cd "$root" && ls test/rust/front/a*.rs) ;;
+    # RFP33 (a): opaque1.rs, the pass judge's opaque types, built (not run: its closures behind opaque types are RF11's)
+    built) (cd "$root" && ls test/rust/front/a*.rs test/rust/front/opaque1.rs) ;;
+    mono) (cd "$root" && ls test/rust/front/a*.rs) ;;
     captures) (cd "$root" && { echo test/rust/synthetic/closures.rs; for f in test/rust/front/*.rs; do grep -q '|' "$f" && echo "$f"; done; }) ;;
   esac
 }
@@ -62,7 +69,7 @@ rfr_key() {  # KIND REL
     if [ "$k" = std ]; then echo "fn main() {}"; else sha256sum < "$root/$rel" | cut -c1-64; fi
     rfr_helper_hash
     rfr_flags "$k" "$rel"
-    [ "$k" = built ] && echo "$rfr_passes"; true; } | sha256sum | cut -c1-64
+    [ "$k" = built ] && { echo "$rfr_passes"; echo "$rfr_judged"; }; true; } | sha256sum | cut -c1-64
 }
 
 # rfr_live KIND REL OUT: the helper (as rustc) makes the program's members under OUT (OUT/ID for each member ID); 1 on a failure
@@ -78,7 +85,9 @@ rfr_live() {
       cp "$s/std-names.edn" "$s/std-iface.edn" "$out/" ;;
     built)
       (ulimit -v 4000000; cd "$s" && "$helper" rustc -- $(rfr_flags built "$rel") -Zdump-mir="$rfr_passes" -Zdump-mir-dir="$n" -o "$n.bin" "$f" > "$n.log" 2>&1) || { cat "$s/$n.log" >&2; return 1; }
-      mkdir -p "$out/$n"; cp "$s/$n/"*.after.mir "$out/$n/" ;;
+      # RFP31 (a): only the .after.mir dumps the judge reads (rfr_judged: each pass at its first phase; no .before.mir, no later
+      # phase's rerun of a pass, no shim's pipeline)
+      mkdir -p "$out/$n"; (cd "$s/$n" && ls) | grep -E "$rfr_judged" | while read -r m; do cp "$s/$n/$m" "$out/$n/"; done ;;
     captures)
       (ulimit -v 2000000; cd "$s" && "$helper" rustc --captures "$n.cap.edn" -- $(rfr_flags captures "$rel") -o "$n.cap.bin" "$f" > "$n.cap.log" 2>&1) || { cat "$s/$n.cap.log" >&2; return 1; }
       cp "$s/$n.cap.edn" "$out/" ;;

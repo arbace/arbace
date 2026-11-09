@@ -12,11 +12,17 @@
     -main FRONT-DIR RECORD OUT NAME [--panic-abort]   RECORD the helper's mono dump; OUT the dump with our bodies; prints
                                                        one line per body (ours, or the record's and why)"
   (:require [arbace.rust.front.build-check :as bc] [arbace.rust.front.mir :as mir] [arbace.rust.front.mono :as mono]
+            [arbace.rust.front.mono-check :as mc]
             [arbace.rust.front.build :as build] [arbace.string :as str])
   (:import [java.io File]))
 
 (defn- read-forms [s] (let [r (java.io.PushbackReader. (java.io.StringReader. s))]
                         (loop [acc []] (let [x (read {:eof ::eof} r)] (if (= x ::eof) acc (recur (conj acc x)))))))
+
+(def ^:dynamic *control*
+  "The run's negative control (RF10_CONTROL=1, or bound by the batch): every Add of our bodies a Sub, so the run must differ"
+  nil)
+(defn- control? [] (or *control* (System/getenv "RF10_CONTROL")))
 
 (defn- walk [f x]
   (let [x (f x)]
@@ -144,10 +150,12 @@
 
 (declare native-main pack-main)
 
+(declare batch-main)
 (defn -main [front-dir record out n & flags]
+  (if (= "batch" front-dir) (apply batch-main record out n flags)
   (if-let [crates (System/getenv "RF_MONO_CRATES")]
     (apply native-main crates front-dir record out n flags)
-    (apply pack-main front-dir record out n flags)))
+    (apply pack-main front-dir record out n flags))))
 
 (defn pack-main [front-dir record out n & flags]
   (let [abort? (some #{"--panic-abort"} flags)
@@ -164,7 +172,7 @@
                         (if b
                           (try (let [r (runtime-body b rec facts abort?)
                                      ;; the negative control (RF10_CONTROL=1): every Add of our bodies a Sub, so the run must differ
-                                     r (if (System/getenv "RF10_CONTROL") (walk #(if (= "Add" %) "Sub" (if (= "AddWithOverflow" %) "SubWithOverflow" %)) r) r)
+                                     r (if (control?) (walk #(if (= "Add" %) "Sub" (if (= "AddWithOverflow" %) "SubWithOverflow" %)) r) r)
                                      r (assoc r :phase "arbace-built+cleanup")]
                                  (swap! lines conj (str "ours   " (:name rec)))
                                  (list 'mir/body r))
@@ -186,13 +194,14 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; RFP23 (c): the run's facts from arbace.rust.front.mono (no record but core's bodies and, per fact, what mono refuses)
 
-(defn native-main
+(defn native-run
   "The run's module from Arbace's own facts: the mono items, symbols, callees and caller locations, the function constants',
   statics' and lang items' symbols, the layouts; a fact mono refuses taken from the record (counted); core's bodies the
-  record's (RF12); our bodies' own type forms (no record's DefIds)"
-  [crates front-dir record out n & flags]
-  (let [abort? (some #{"--panic-abort"} flags)
-        forms (read-forms (slurp record))
+  record's (RF12); our bodies' own type forms (no record's DefIds). {:forms :lines :tally :judged}: with JUDGE, a seq of
+  [NAME RECORD-FORMS], RFP40 (c)'s mono-check of the same pipeline run, each [tally differences] of
+  arbace.rust.front.mono-check/judge (the program's facts against each record) in :judged"
+  [crates front-dir record n abort? judge]
+  (let [forms (read-forms (slurp record))
         rec-bodies (for [f forms :when (= 'mir/body (first f))] (second f))
         rfacts (record-facts rec-bodies)
         rec-callees (atom {})
@@ -204,11 +213,13 @@
         tally (atom {})
         fact! (fn [k native?] (swap! tally update k (fnil (fn [[a b]] [(if native? (inc a) a) (inc b)]) [0 0])))
         lines (atom [])
+        judged (atom [])
         result
         (binding [mono/*crates* (mono/load-crates crates) mono/*lib-dir* (System/getenv "RF_MONO_LIB")]
           (bc/build-program front-dir n
             (fn [bodies]
               (let [facts (mono/program-facts n bodies)
+                    _ (reset! judged (vec (for [[rn rforms] judge] [rn (mc/judge n bodies facts (mc/record-entries rforms) rforms)])))
                     root-file build/*root-file*
                     ours (into {} (for [[nm b err] bodies] [nm [b err]]))
                     native-call (fn [f]
@@ -237,7 +248,7 @@
                                 (let [[b err] (get ours nm) rec (or (get rec-by-name nm) {:name nm})]
                                   (if b
                                     (try (let [r (runtime-body b rec nf abort?)
-                                               r (if (System/getenv "RF10_CONTROL") (walk #(if (= "Add" %) "Sub" (if (= "AddWithOverflow" %) "SubWithOverflow" %)) r) r)
+                                               r (if (control?) (walk #(if (= "Add" %) "Sub" (if (= "AddWithOverflow" %) "SubWithOverflow" %)) r) r)
                                                r (assoc r :phase "arbace-built+cleanup")]
                                            (swap! lines conj (str "ours   " nm))
                                            (list 'mir/body r))
@@ -271,11 +282,100 @@
                                         (for [[t o] lt :when (mono/error? o) :let [l (get rec-layouts t)] :when l] [t l])))]
                 ;; a layout mono refuses is the record's when the record has its type (counted), else no body needs it
                 (doseq [[t o] lt] (if (mono/error? o) (when (contains? rec-layouts t) (fact! :layouts false)) (fact! :layouts true)))
-                (for [f new-forms] (if (= 'mir/layouts (first f)) (list 'mir/layouts (vec table)) f))))))]
-    (spit out (with-out-str (doseq [f result] (prn f))))
-    (doseq [l @lines] (println l))
-    (println (str "build-run: " n ": facts native " (str/join ", " (for [[k [a b]] (sort @tally) :when (not (#{:core-bodies :bodies} k))] (str (name k) " " a "/" b)))
-                  "; core's bodies from the pack " (second (get @tally :core-bodies [0 0]))
-                  (when-let [[_ b] (get @tally :bodies)] (str "; our bodies from the pack " b))))
-    (println (format "build-run: %s: %d of %d bodies ours" n (count (filter #(str/starts-with? % "ours") @lines)) (count @lines)))
+                (doall (for [f new-forms] (if (= 'mir/layouts (first f)) (list 'mir/layouts (vec table)) f)))))))]
+    {:forms result :lines @lines :tally @tally :judged @judged}))
+
+(defn- run-lines
+  "The run's lines of a module: each body's (ours, or the record's and why), the facts' tally, the bodies' count"
+  [n {:keys [lines tally]}]
+  (concat lines
+          [(str "build-run: " n ": facts native " (str/join ", " (for [[k [a b]] (sort tally) :when (not (#{:core-bodies :bodies} k))] (str (name k) " " a "/" b)))
+                "; core's bodies from the pack " (second (get tally :core-bodies [0 0]))
+                (when-let [[_ b] (get tally :bodies)] (str "; our bodies from the pack " b)))
+           (format "build-run: %s: %d of %d bodies ours" n (count (filter #(str/starts-with? % "ours") lines)) (count lines))]))
+
+(defn native-main [crates front-dir record out n & flags]
+  (let [r (native-run crates front-dir record n (some #{"--panic-abort"} flags) nil)]
+    (spit out (with-out-str (doseq [f (:forms r)] (prn f))))
+    (doseq [l (run-lines n r)] (println l))
+    (System/exit 0)))
+
+;; ---------------------------------------------------------------------------------------------
+;; RFP36 (c), RFP40 (c): the essential step's runs as one session. Each program's pipeline runs once: its module (native-run),
+;; RFP40 (c)'s mono-check of the same facts against the record, codegen (arbace.rust.back.check/emit-mono) and rsi's lowering to
+;; C, in this one process; the lowered programs are then read and built by ci in one session (arbace.rust.front.ci-batch, musl's
+;; forms read once) and run by cirun (bin/rust-front run-built).
+
+(defn- lower-c
+  "DIR/NAME.ours.ll lowered to DIR/NAME.ours.c as `bin/rsi lower` does: nil, or the refusal's text"
+  [dir n]
+  (let [ll (str dir "/" n ".ours.ll") out (str dir "/" n ".ours.c")
+        read-ll (requiring-resolve 'arbace.repr.llvm/read-ll)
+        lower-file (requiring-resolve 'arbace.cpp.lower/lower-file)
+        spit-latin1 (requiring-resolve 'arbace.repr.llvm/spit-latin1)
+        r (lower-file (read-ll ll) (.getName (File. out)))]
+    (if (:refused r) (str "refused (" (name (:refused r)) "): " (:message r)) (do (spit-latin1 out (:c r)) nil))))
+
+(defn- emit-and-lower
+  "The module at DIR/NAME.mono.edn through codegen and rsi's lowering: nil, or why not"
+  [dir n]
+  (let [[st what] ((requiring-resolve 'arbace.rust.back.check/emit-mono) dir n false)]
+    (if (not= st :ok)
+      (str "codegen refused (" (name st) " " what ")")
+      (when-let [why (lower-c dir n)] (str "rsi's lowering refused (" why ")")))))
+
+(defn- tally-line [tally sep]
+  (str/join ", " (for [[k [e t]] (sort tally)] (str (name k) " " e sep t))))
+
+(defn batch-main
+  "batch CRATES FRONT-DIR WORK [--control NAME] [--mono-control A B] SPEC...: each SPEC NAME or NAME:abort (panic=abort), its
+  record WORK/NAME/NAME.record.edn; writes WORK/NAME/NAME.{mono.edn,ours.ll,ours.c} and, for the run's control (--control:
+  every Add a Sub), WORK/_control/NAME/; WORK/mono.log as `bin/rust-front mono-check` prints it, WORK/mono-control.log as
+  `mono-check --control A B` prints it; on the standard output each program's run lines and `run-built: NAME: ready` or
+  why not"
+  [crates front-dir work & args]
+  (let [[opts specs] (loop [as args o {}]
+                       (case (first as)
+                         "--control" (recur (nnext as) (assoc o :control (second as)))
+                         "--mono-control" (recur (drop 3 as) (assoc o :mono-control [(second as) (nth as 2)]))
+                         [o as]))
+        progs (for [s specs] (let [[n a] (str/split s #":")] [n (= a "abort")]))
+        rec-file (fn [n] (str work "/" n "/" n ".record.edn"))
+        [ca cb] (:mono-control opts)
+        mono-lines (atom []) total (atom {}) ctl-lines (atom []) ctl-total (atom {}) all-ok (atom true)
+        verbose (System/getenv "MONO_VERBOSE")]
+    (doseq [[n abort?] progs]
+      (let [dir (str work "/" n)
+            own (read-forms (slurp (rec-file n)))
+            other (cond (= n ca) cb (= n cb) ca)
+            judge (cond-> [[n own]] other (conj [other (read-forms (slurp (rec-file other)))]))
+            r (try (native-run crates front-dir (rec-file n) n abort? judge) (catch Throwable e {:error (str e)}))]
+        (if (:error r)
+          (println (str "run-built: " n ": the pipeline failed (" (:error r) ")"))
+          (let [_ (spit (str dir "/" n ".mono.edn") (with-out-str (doseq [f (:forms r)] (prn f))))
+                rl (run-lines n r)
+                _ (println (str/join "\n" (filter #(str/starts-with? % "build-run: ") rl)))
+                _ (spit (str dir "/build-run.log") (str (str/join "\n" rl) "\n"))
+                [[_ [tally diffs]] [_ [ctally cdiffs]]] (:judged r)]
+            (swap! mono-lines conj (str "mono-check: " n ": " (tally-line tally "/")))
+            (when verbose (doseq [d (take 400 diffs)] (swap! mono-lines conj (str "   " (pr-str d)))))
+            (when (seq diffs) (reset! all-ok false))
+            (doseq [[k [e t]] tally] (swap! total update k (fnil (fn [[a b]] [(+ a e) (+ b t)]) [0 0])))
+            (when other
+              (swap! ctl-lines conj [n (cons (str "mono-check: " n " against " other "'s record: " (tally-line ctally "/"))
+                                             (for [d (take 3 cdiffs)] (str "   " (pr-str d))))])
+              (doseq [[k [e t]] ctally] (swap! ctl-total update k (fnil (fn [[a b]] [(+ a e) (+ b t)]) [0 0]))))
+            (println (str "run-built: " n ": " (if-let [why (emit-and-lower dir n)] why "ready")))
+            (when (= n (:control opts))
+              (let [cdir (str work "/_control/" n)
+                    _ (.mkdirs (File. cdir))
+                    c (binding [*control* true] (native-run crates front-dir (rec-file n) n abort? nil))]
+                (spit (str cdir "/" n ".mono.edn") (with-out-str (doseq [f (:forms c)] (prn f))))
+                (println (str "run-built: _control/" n ": " (if-let [why (emit-and-lower cdir n)] why "ready")))))))))
+    (spit (str work "/mono.log")
+          (str (str/join "\n" (concat @mono-lines [(str "mono-check: " (count progs) " programs: " (tally-line @total " of "))])) "\n"))
+    (when ca
+      (spit (str work "/mono-control.log")
+            (str (str/join "\n" (concat (mapcat second (sort-by #(if (= (first %) ca) 0 1) @ctl-lines))
+                                        [(str "mono-check: 2 programs (control): " (tally-line @ctl-total " of "))])) "\n")))
     (System/exit 0)))

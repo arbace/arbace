@@ -35,6 +35,15 @@
 (set! *warn-on-reflection* true)
 
 (def ^:dynamic *root-file* nil)
+(def ^:dynamic *expn-sites* nil)   ; RFP38 (a): the expansion's marks -> their root call sites (arbace.rust.front.expand's *sites*)
+(declare closure-def-id-text)
+
+(defn caller-span
+  "RFP38 (a): the span a call's caller location is read from, span_as_caller_location's `topmost`: the call of an expansion
+  (its expression's mark, lower's :expn-mark) at its outermost macro call's site (ExpnId::expansion_cause, the call sites
+  walked to the root's: arbace.rust.front.expand records each mark's root call site), else its own span"
+  [x]
+  (or (when-let [m (:expn-mark x)] (some-> (get *expn-sites* m) vec)) (:span x)))
 (def ^:dynamic *fixed-temps-scope* nil)   ; a guard's scope, whose temporaries the sub-branches of an or-pattern share
 (def ^:dynamic *let-vis* nil)   ; the source scope an `if`'s let bindings are visible in (its variable source info's)
 (declare char-text lit-const int-const finish*)
@@ -390,7 +399,7 @@
   (let [t (if-let [l (:label e)] (some #(when (= l (:label %)) %) *loops*) (some #(when-not (:block? %) %) *loops*))]
     (if t [(:id t) :node] (unsupported "a break target"))))
 
-(defn- mk [e k ty & kvs] (merge {:k k :ty ty :span (:span e) :tsi (:hir-id e)} (apply hash-map kvs)))
+(defn- mk [e k ty & kvs] (merge (cond-> {:k k :ty ty :span (:span e) :tsi (:hir-id e)} (:expn-mark e) (assoc :expn-mark (:expn-mark e))) (apply hash-map kvs)))
 
 (defn- field-index [vid nm]
   (let [fs (tc/all-fields-of-variant vid)]
@@ -649,8 +658,12 @@
                                       :scope [(:hir-id a) :node] :span (:span a) :hir-id (:hir-id a)})))
                              (:arms e)))
       :closure (let [info (or (get *closure-info* (:hir-id e)) (unsupported "a closure without its captures"))]
-                 (when (seq (:fake-reads info)) (unsupported "a closure's fake reads"))
-                 (mk e :closure ty :info info :upvars (mapv #(capture-upvar e %) (:captures info))))
+                 ;; ExprKind::Closure's fake_reads (closure_fake_reads, converted as the captures are): each the captured
+                 ;; variable's place in this body, its cause with the closure's DefId (RFP29 (b))
+                 (mk e :closure ty :info info :upvars (mapv #(capture-upvar e %) (:captures info))
+                     :fake-reads (vec (for [[pl cause] (:fake-reads info)]
+                                        [(capture-upvar e {:var (second (:base pl)) :base-ty (:base-ty pl) :proj (:proj pl) :cap :by-value})
+                                         (str cause "(Some(" (closure-def-id-text (:hir-id e)) "))")]))))
       (unsupported "an expression" (:kind e)))))
 
 (defn- pointer-cast-kind [k]
@@ -1063,6 +1076,22 @@
 
 (declare static-bytes)
 
+(defn- crate-name [] (str/replace (str/replace (.getName (java.io.File. (str *root-file*))) #"\.rs$" "") "-" "_"))
+
+(defn static-def-id-text
+  "A local static's DefId as rustc's Debug prints it, `DefId(0:INDEX ~ CRATE[HASH]::PATH)`, with the index and the crate's
+  StableCrateId's first 16 bits unknown here (`?`, `????`: RFP29 (b), the judge's class \"equal but for the crate hash\"; (a), the
+  def collector's index and the crate's hash, is arbace.rust.front.mono's def-id-text)"
+  [def]
+  (str "DefId(0:? ~ " (crate-name) "[????]::" (binding [c/*in-value* true] (c/print-def-path def [])) ")"))
+
+(declare mir-name)
+(defn closure-def-id-text
+  "A closure's DefId as rustc's Debug prints it (the index and the crate's hash unknown here: RFP29 (b), as static-def-id-text)"
+  [hir-id]
+  (let [d (some #(when (and (= "Closure" (:kind %)) (= hir-id (:hir-id (:node %)))) %) (c/defs))]
+    (str "DefId(0:? ~ " (crate-name) "[????]::" (if d (mir-name d) "?") ")")))
+
 (defn- intern-static-alloc!
   "reserve_and_set_static_alloc: a static's allocation (its evaluated bytes, its name), one per static; its id"
   [def]
@@ -1155,8 +1184,13 @@
       [:const (str "const b\"" (apply str (map escape-ascii bs)) "\"") t (list 'raw-bytes (intern-alloc! bs))])
     (unsupported "a literal" (:lit-kind lit))))
 
+(defn fn-const-text
+  "A function item constant's text (its value path with erased regions), as MIR building prints it"
+  [t]
+  (binding [c/*in-value* true c/*erased-regions* true] (c/print-def-path (second t) (mapv #(if (c/region? %) [:re-erased] %) (nth t 2)))))
+
 (defn- fn-const [t]
-  [:const (binding [c/*in-value* true c/*erased-regions* true] (c/print-def-path (second t) (mapv #(if (c/region? %) [:re-erased] %) (nth t 2)))) t '(zst)])
+  [:const (fn-const-text t) t '(zst)])
 
 (declare push-user-type!)
 
@@ -1165,8 +1199,14 @@
   (case (:k x)
     :literal (lit-const (:lit x) (:neg x) (:ty x))
     :zst-literal (if (= :fndef (first (:ty x))) (fn-const (:ty x)) unit-const)
-    :static-ref (let [id (intern-static-alloc! (:def x))]
-                  [:const (str "const {alloc" id ": " (ty-text (:ty x)) "}") (:ty x) (list 'static-ptr id)])
+    :static-ref (let [id (intern-static-alloc! (:def x))
+                      pointee (when (= :ref (first (:ty x))) (nth (:ty x) 3))]
+                  ;; pretty_print_const_scalar_ptr: a reference to a byte array whose pointer is a static's prints the static's
+                  ;; DefId (RFP29 (b): its index and the crate's hash left to the judge's class)
+                  [:const (if (and (= :array (first pointee)) (= [:uint "u8"] (second pointee)))
+                            (str "const <static(" (static-def-id-text (:def x)) ")>")
+                            (str "const {alloc" id ": " (ty-text (:ty x)) "}"))
+                   (:ty x) (list 'static-ptr id)])
     :named-const [:const (str "const " (or (:text x) (binding [c/*in-value* true c/*erased-regions* true] (c/print-def-path (:def x) (:args x))))) (:ty x)
                   (list 'unevaluated (str (or (:def x) (:text x))) [] nil)]
     :const-op (:c x)
@@ -1616,6 +1656,9 @@
     :tuple (let [[bb os] (reduce (fn [[bb os] f] (let [[bb o] (as-operand bb scope f :maybe)] [bb (conj os o)])) [bb []] (:fields x))]
              [bb (list 'aggregate '(tuple) (mapv op-form os))])
     :closure (let [info (:info x)
+                   ;; as_rvalue: the closure's fake reads pushed before its operands are made
+                   bb (reduce (fn [bb [px cause]] (let [[bb p] (as-place bb px)] (push! bb (list 'fake-read cause (place-form p))) bb))
+                              bb (:fake-reads x))
                    [bb os] (reduce (fn [[bb os] u]
                                      (cond (= :place (category u)) (let [[bb p] (as-place bb u)] [bb (conj os (consume p))])
                                            (and (= :borrow (:k u)) (= :mut (:bk u))) (let [[bb o] (limit-capture-mutability! bb u scope)] [bb (conj os o)])
@@ -1726,7 +1769,7 @@
                         [bb args] (reduce (fn [[bb as] a] (let [[bb o] (as-local-call-operand bb a)] [bb (conj as o)])) [bb []] (:args x))
                         ok (start-new-block!)]
                     (record-operands-moved! args)
-                    (terminate! bb (list 'call (vary-meta (op-form f) assoc :call-span (:span x)) (mapv op-form args) (place-form dest) ok '(continue)))
+                    (terminate! bb (list 'call (vary-meta (op-form f) assoc :call-span (caller-span x)) (mapv op-form args) (place-form dest) ok '(continue)))
                     (diverge-from! bb)
                     ok))
             :use (expr-into-dest dest bb (:source x))

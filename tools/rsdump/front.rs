@@ -553,6 +553,34 @@ pub fn std_iface<'tcx>(tcx: TyCtxt<'tcx>) -> String {
             items.push((tcx.def_kind(d), d));
         }
     }
+    // RFP28 (a), RFP37 (a): every std ADT a written ADT's field's type names, transitively, though no public module reaches it
+    // (FlattenCompat, FloatErrorKind, core::fmt::rt::ArgumentType): its variants and fields, for needs_drop and the layouts; not
+    // its inherent impls (no path names it)
+    let mut have: std::collections::HashSet<DefId> = items.iter().map(|(_, d)| *d).collect();
+    let mut by_field: std::collections::HashSet<DefId> = std::collections::HashSet::new();
+    let mut i = 0;
+    while i < items.len() {
+        let (k, d) = items[i];
+        i += 1;
+        if !matches!(k, DefKind::Struct | DefKind::Enum | DefKind::Union) {
+            continue;
+        }
+        for v in tcx.adt_def(d).variants() {
+            for f in &v.fields {
+                for a in tcx.type_of(f.did).skip_binder().walk() {
+                    if let ty::GenericArgKind::Type(t) = a.kind()
+                        && let ty::Adt(ad, _) = t.kind()
+                    {
+                        let dd = ad.did();
+                        if std_crate(dd) && !skip(&def_path(tcx, dd)) && have.insert(dd) {
+                            by_field.insert(dd);
+                            items.push((tcx.def_kind(dd), dd));
+                        }
+                    }
+                }
+            }
+        }
+    }
     items.sort_by_key(|(_, d)| def_path(tcx, *d));
     items.dedup_by_key(|(_, d)| *d);
     for (k, d) in &items {
@@ -582,7 +610,9 @@ pub fn std_iface<'tcx>(tcx: TyCtxt<'tcx>) -> String {
                     String::new()
                 };
                 let _ = writeln!(out, "(si/adt {} {{:kind {} {} :variants [{}]{}}})", q(&p), kind(*k), generics(*d), vs.join(" "), extra);
-                impls.extend(tcx.inherent_impls(*d).iter().copied().filter(|i| std_crate(*i)));
+                if !by_field.contains(d) {
+                    impls.extend(tcx.inherent_impls(*d).iter().copied().filter(|i| std_crate(*i)));
+                }
             }
             DefKind::Trait => {
                 let its: Vec<String> = tcx
@@ -686,9 +716,13 @@ pub fn std_iface<'tcx>(tcx: TyCtxt<'tcx>) -> String {
         }
         let sig = tcx.fn_sig(f).skip_binder().skip_binder();
         let ins: Vec<String> = sig.inputs().iter().map(|t| sty(tcx, *t)).collect();
+        // RFP32 (a): the attributes MIR's passes ask of a std function: const fn (is_const_fn: promotion in an initializer),
+        // #[rustc_promotable] (is_promotable_const_fn: PromoteTemps elsewhere), NEVER_UNWIND (#[rustc_nounwind] and the
+        // intrinsics: fn_can_unwind, AbortUnwindingCalls)
+        let never = tcx.codegen_fn_attrs(f).flags.contains(rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags::NEVER_UNWIND);
         let _ = writeln!(
             out,
-            "(si/fn {} {{{} {} :inputs [{}] :output {} :variadic {} :safety {} :abi {}}})",
+            "(si/fn {} {{{} {} :inputs [{}] :output {} :variadic {} :safety {} :abi {} :const {} :promotable {} :nounwind {}}})",
             q(&p),
             generics(f),
             preds(f),
@@ -696,7 +730,10 @@ pub fn std_iface<'tcx>(tcx: TyCtxt<'tcx>) -> String {
             sty(tcx, sig.output()),
             sig.c_variadic(),
             q(&format!("{:?}", sig.safety())),
-            q(&format!("{}", sig.abi()))
+            q(&format!("{}", sig.abi())),
+            tcx.is_const_fn(f),
+            tcx.is_promotable_const_fn(f),
+            never
         );
     }
     out
