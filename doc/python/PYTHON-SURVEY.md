@@ -5077,3 +5077,147 @@ DECISION 2 (3.14's default start method forkserver, which forks): (a) keep it, t
 calls `set_start_method('spawn')` (as built; recommended: the user's no-fork decision); (b) a pyi overlay of
 `multiprocessing/context.py` choosing spawn when `os` has no `fork` (the first patch of the pinned Lib, an overlay
 mechanism to build).
+## As built: 244, ctypes over Arbace's own C: the design, and libffi's part on ci (2026-11-09, the Mac VM, queue 244)
+
+The brief: `:ctypes` and `:testcapi` (CPython's `_test*` modules), after OCaml's C API on ci (the main host's `ocaml-compl`,
+doc/ocaml/OCAML-SURVEY.md "As built: the C API on ci", read only: stubs run by ci against clean-room `caml/*.h`, values copied at
+the boundary, `cnodes.ae --program`). This section is the design (asked first) with its DECISIONs, then the slice that holds under
+every option: libffi's part over ci, CPython's own `_ctypes_test.c` built by ci against a clean-room `Python.h`, both run.
+
+### What the two classes hold (sampled on the base 2b5c0c075, each test's own verdict)
+
+`bin/pyi lib-test-all test_ctypes test_capi test_audit test_sysconfig` (the compiled runner, 2 jobs):
+
+| module | methods | `:ctypes` | `:testcapi` | other |
+|---|---:|---:|---:|---|
+| test_ctypes | 620 | 620 (the package does not import: `No module named '_ctypes'`) | | |
+| test_capi | 1,195 | 4 | 1,116 (each submodule skipped: `No module named '_testcapi'`, `_testlimitedcapi`) | extension-modules 71, cpython-only 3, skipped-by-test 1 |
+| test_audit | 30 | 1 | 1 | 21 failing at the base (audit-tests.py's subprocess runs; not this task's), 1 pass |
+| test_sysconfig | 39 | | | 39 failing at the base (`No module named '_sysconfig'`; not this task's) |
+
+The brief's 13 and 10 are the main host's record's rows; the sample's methods are 625 and 1,117. The 10 named `:testcapi` tests
+outside test_capi need `_testcapi.raise_SIGINT_then_send_None` (test_generators), `_testcapi`'s limits (test_pyexpat) and
+`_testinternalcapi`'s interpreter functions (test_interpreters' 8).
+
+### The pieces, and what exists
+
+- **ci** (`go/arbace/ci`, `go/arbace/crt`, on this branch): a C program over one emulated address space. Its calls are libffi's
+  missing half already: `Prog.Call(t, f, []Arg)` takes typed values (an integer, a floating value, a wide integer, an aggregate's
+  address and size, copied into the callee's frame), a variadic call writes the rest into the va area, an aggregate result goes
+  through a hidden first argument (`RetM`), and a `Func` may be a Go native, whose address C calls like any function pointer.
+  So no register classification (libffi's x86-64 `examine_argument`) is needed: ci's convention is its own.
+- **arbace/clib** (208): one ci program per library per process, musl initialized, faults ending the process as CPython's would.
+- **bin/pyi-clib** (208): a C library built by ci's builder (repr/c, `arbace.c.check`, `arbace.c.build`, musl 1.2.6's forms) into
+  one node program, committed as Go forms and verified byte for byte (208's DECISION 2 (a)).
+- Not on this branch: the main host's C target `c/` (Arbace's own sysroot, `ocaml-compl`'s `cnodes.ae` reads with it) and
+  `arbace.c.runtime` (musl prebuilt for linking). Nothing of them is needed: bin/pyi-clib links musl's forms as 208 does.
+  Nothing of `ocaml-compl` is vendored; its model is followed in two points: clean-room headers from the documentation, and a
+  C half of the runtime calling natives in Go.
+
+### The design
+
+1. **The C world.** One ci program per process, over one address space: musl's libc and libm, `_ctypes_test`, and (with
+   DECISION 3) the C API's C half, linked as one node program, `go/arbace/clib/ctypes_test` (bin/pyi-clib's). Every ctypes buffer
+   lives in that address space, so `addressof`, `from_address`, `cast`, `string_at`, `memmove` are addresses C dereferences as
+   is, and a pointer stored by C into a ctypes structure is a pointer ctypes reads back. A static link keeps only what is
+   reached: the glue `tools/pyi/clib/ctypes_test/pyctypes_test.c` names the libc functions a ctypes program may look up
+   (`pyctypes_libc`; the ones Lib/test/test_ctypes and Lib/ctypes call). `CDLL(None)`, `CDLL("libc.so.6")`, `find_library("c")`
+   and `find_library("m")` are this world, `CDLL(_ctypes_test.__file__)` too; dlsym is the program's names (DECISION 2).
+2. **libffi's part** (`go/arbace/pyctypes/ffi.go`, built here): `ffi_type` (`Type`: the kinds, sizes and alignments of ci's
+   target, x86-64 LP64; an aggregate laid out by libffi's `initialize_aggregate`, which is the System V rule ci's builder
+   uses), `ffi_prep_cif`/`ffi_prep_cif_var` (FFI_BAD_TYPEDEF, FFI_BAD_ARGTYPE for a float or a narrow integer among the
+   variable arguments), `ffi_call` (`World.Call`: the arguments' bytes as `avalue`, the result into `rvalue` with ffi_arg's
+   widening; an aggregate copied below the C thread's stack pointer, as a caller's frame holds it) and closures
+   (`ffi_prep_closure_loc`: a native `ci.Func` whose address C calls; freed ones reused). The interface is libffi's, bytes in
+   and out, so a port of `callproc.c` and `callbacks.c` calls it as CPython calls libffi.
+   `long double` is `double` in ci (doc/c/SPEC.md §12.5, CS35): `c_longdouble` is 8 bytes, as on a target whose long double
+   is double; tests that assume x87's 80 bits go to a class citing CS35.
+3. **`_ctypes`** (DECISION 1): a lazy package `arbace/pyctypes` (`lazyModules["_ctypes"]`, as `_bz2`), CPython 3.14.10's
+   `Modules/_ctypes/` ported statement for statement over pyi's objects: `_ctypes.c` (the simple types, `Structure`, `Union`,
+   arrays, pointers, function pointers, the metatypes `PyCSimpleType`, `PyCStructType`, `PyCPointerType`, `PyCArrayType`,
+   `PyCFuncPtrType` and their `StgInfo`), `cfield.c` (the fields' getters and setters, bitfields, byte orders), `stgdict.c`,
+   `callproc.c` (ConvParam, the call, `errno`'s swap, `addressof`, `byref`, `alignment`, `sizeof`, `resize`, `memmove`/`memset`'s
+   addresses as closures), `callbacks.c` (CFUNCTYPE). Lib/ctypes is the tarball's (3.14 lays structures out in Python,
+   `_layout.py`). Memory: ctypes's own allocator over a region of the world's address space (no C call per object, freed by the
+   finalizer queue, 218's), small objects as CPython's inline `b_value`.
+4. **The C API** (DECISION 3): extension modules built by ci against Arbace's clean-room `Python.h`
+   (`tools/pyi/capi/include`, built here for `_ctypes_test`'s part: the stable ABI's shape, written from docs.python.org/3.14/c-api,
+   no CPython header code). A `PyObject *` is the address of a proxy in the world's memory with the documented head (`ob_refcnt`,
+   `ob_type`), one proxy per live object (identity kept), the functions natives in Go over pyi's objects. This gives
+   `_ctypes_test`'s module functions, `ctypes.pythonapi`, `py_object` arguments (`_testfunc_pylist_append` appends to the
+   caller's list), and the `_test*` modules (DECISION 4).
+5. **The back ends.** On goi, ci is interpreted by goi (208's DECISION 1 (a): `arbace/ci` and `arbace/crt` in goi's table at the
+   re-seed after Python's tag); compiled, pyi's AOT links cf2g's Go of the world (`bin/pyi-clib aot ctypes_test`, as bzip2's).
+   The world's node program is 1.44 MB: its cf2g Go about the size of liblzma's, which builds.
+
+### DECISIONs
+
+```
+DECISION: 244-1, how _ctypes is built
+- (a) Modules/_ctypes ported to Go over pyi's objects (arbace/pyctypes), libffi's part this slice's ffi.go over ci (recommended): as
+  _bz2/_lzma/_sqlite3's glue; about 11,800 lines of C, 5-8 tasks (types and memory 2; calls and callbacks 1-2; pythonapi with 244-3;
+  the rest); no dependence on the C API for ctypes itself
+- (b) CPython's _ctypes C itself on ci over the C API (244-3 at the full API: 416 distinct Py*/_Py* names, its pycore_* headers,
+  metatypes in C deriving from type with StgInfo in the type object, PyType_FromMetaclass): ffi.go as libffi's natives; the C API
+  layer becomes a cpyext, weeks before the first test passes, every ctypes operation crossing the boundary
+```
+
+```
+DECISION: 244-2, what CDLL loads
+- (a) one world, a fixed link (recommended): musl's libc and libm, _ctypes_test and the C API's C half, one committed node program
+  (bin/pyi-clib, verified); CDLL(None), libc, libm and _ctypes_test's file name it, any other name OSError (dlopen's message);
+  data symbols (in_dll: an_integer, my_eggs, Py_OptimizeFlag) by a table the glue names: small, no ci change
+- (b) a loader in ci for a second node program into a running Prog (functions and statics renumbered, undefined names resolved
+  against the loaded ones), and data symbols' names kept by ci's loader: CDLL of any library ci builds (a user's C source); a ci
+  change for the C crop (the main host's), days; can follow (a) without undoing it
+```
+
+```
+DECISION: 244-3, PyObject * at the boundary
+- (a) handles (recommended): the proxy's documented head in the world's memory, one per live object, a Go table both ways, the API's
+  functions Go natives; Py_IncRef/Py_DecRef keep ob_refcnt, the table holds the object strongly while it is above 0; the limited API
+  first (_ctypes_test, pythonapi, _testlimitedcapi), the full API's struct macros (PyTuple_GET_ITEM, PyBytes_AS_STRING, ...) by
+  materialized bodies later; about 2 tasks for the limited core
+- (b) values copied at the boundary (OCaml's oicapi): breaks identity and mutation (PyList_Append on the caller's list,
+  _testfunc_pylist_append), fit only for immutable values
+- (c) no C API: _ctypes_test's four module functions in Go, pythonapi absent (its tests a class by design), the _test* modules by design
+```
+
+```
+DECISION: 244-4, the _test* modules
+- (a) _testinternalcapi by design (a class :testinternalcapi, :design: CPython's internals, inline values, hamt, code var counts,
+  interpreter ids, not an API); _testlimitedcapi (31 files written to the limited API), _testcapi, _testmultiphase, _testsinglephase,
+  _testbuffer, _testimportmultiple built from their C sources by ci over 244-3 (a), file by file as the layer grows, a file whose
+  functions the layer lacks left out and its tests kept in :testcapi (recommended)
+- (b) all by design: the C API is CPython's interface, pyi is not CPython (one class :testcapi, :design)
+- (c) Go stand-ins for the few functions the named tests use (raise_SIGINT_then_send_None, the limits): quick, not CPython's code
+```
+
+DECISION 1 is costly to reverse and changes everything after it, so the brief's rule held: the design, and the slice none of the
+options undoes (libffi's part is (a)'s callee and (b)'s natives; `_ctypes_test` and the header are needed by every option).
+
+### As built: the slice
+
+- `go/arbace/pyctypes` (package `arbace/pyctypes`, not yet a module: `_ctypes` is not registered, so nothing a program imports
+  changes): `ffi.go` as above; `ffi_test.go`, 21 calls of `_ctypes_test`'s functions and musl's through ci, each case's want
+  the function body's arithmetic by hand: `_testfunc_{i,f,d}_bhilfd`, `_testfunc_q_bhilfdq`, narrow results widened by their
+  signedness (`tf_b`, `tf_B`, `tf_h`, `tf_I`, `tf_Q`, `tf_bf`), aggregates in (`_testfunc_byval`), out through the hidden
+  pointer (`ret_2h_func`, `ret_8i_func`) and by value unchanged for the caller (`_testfunc_large_struct_update_value`),
+  musl's variadic `sprintf`, closures C calls back (`_testfunc_callback_i_if`, `_testfunc_callback_with_pointer`, an aggregate
+  argument `_testfunc_cbk_large_struct`, qsort's comparator `my_qsort`, two through a struct of pointers
+  `_testfunc_callfuncp`), `get_an_integer`; `TestPrepCIF` (the refusals, a layout); the negative control
+  `TestFFINegativeControl` (each case judged against the next case's want must fail).
+- `go/arbace/clib/ctypes_test` (generated, committed: 1,440,296 bytes of node program, 1.5 MB of forms): `bin/pyi-clib build
+  ctypes_test` from `tools/pyi/clib/ctypes_test/` (lib.conf: the CPython tarball test/python/corpora.edn pins, read from
+  `REPR_PYTHON_SRC`'s cache; `pyctypes_test.c`, the libc table and the main naming `__init_libc`). bin/pyi-clib: lib.conf's
+  `cache_var` (a tarball another pin fetches), `members` (the members extracted; `tar -xf`, any compression) and
+  `root_includes` (directories of the checkout on the include path and in the key); the other libraries' keys do not move.
+- `tools/pyi/capi/include/Python.h`, `pyconfig.h`: the clean-room header's first slice (the object head, `PyMethodDef`, the
+  module definition and slots, the reference counts as `Py_IncRef`/`Py_DecRef`, the twelve functions `_ctypes_test.c` calls).
+  The functions are declared, not yet given: the world links (a call would fault: "undefined function"), the module's Python
+  part waits on 244-3.
+- bin/pyi's runtime verbs: `print` prints `clib/ctypes_test` and `pyctypes`, `read` and `check` read `pyctypes` back, `vet` vets
+  and tests it. LICENSE.md: the world's node program (the PSF's `_ctypes_test.c`, musl's MIT), the headers and `pyctypes`
+  (Arbace's own).
+- The classes: unchanged (`:ctypes` 625 and `:testcapi` 1,117 methods in the sample; the brief's 13 and 10 rows), as expected
+  of a slice with no module.
