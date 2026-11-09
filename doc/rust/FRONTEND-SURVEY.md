@@ -2227,3 +2227,18 @@ Branch `rust-props`, after the night's four, one commit a proposal.
   everywhere: a1-a7 name no such DefId).
 - (a), the index from the def collector's order and the crate's StableCrateId, is `arbace.rust.front.mono`'s `def-id-text` (RFP23 (c)), for
   the builder when the runs' crate identity (`std-crates.edn`'s cfg-version) is bound there: with RF11, as decided.
+
+### RFP28 (a), RFP37 (a): std's ADTs reached by fields
+
+- The helper's `--std-iface` (`tools/rsdump/front.rs`'s `std_iface`) adds, after the public items and the lang items, every std ADT a
+  written ADT's field's type names (the type's walk), transitively, with its variants and fields (not its inherent impls: no path
+  names it): 182 new `si/adt` lines (35,823 → 36,005), none changed or removed; among them `core::num::float_parse::FloatErrorKind`,
+  `core::iter::adapters::flatten::FlattenCompat`, `core::fmt::rt::ArgumentType`, `alloc::rc::RcInner`, `alloc::raw_vec::RawVec`.
+  `test/rust/front/std-iface.sha256` re-pinned (`f8d35318...`); the helper rebuilt by hand (`bin/repr-rust helper`, 12 s).
+- Its digest is in the packs' keys (RFP35 (a)), so the four packs were made again (`bin/rust-front records make`, 29 s): `rust-front-std`
+  `fe79f73b...` (519,636 bytes xz), the other three byte for byte the same packs (their manifests' keys moved); `records verify std`
+  equal, the control differing.
+- Results: the 88 programs' `float-f32` and `float-f64` (`Result<f32, ParseFloatError>`'s needs_drop: `FloatErrorKind` has fields now)
+  equal at built and after every pass (10 of 10 after ElaborateDrops and after SimplifyCfg-pre-optimizations, 2 bodies more);
+  mono-check's layouts **223 of 223** (221: `ArgumentType`, `Argument`), a6's run with every layout native (47 of 47).
+  `essential-known.txt` re-recorded (the mono line).
