@@ -4422,3 +4422,35 @@ differ), WB3c, and `dcWordBreak` proved on UAX #29's 1,826 conformance strings.
   `unicode-scan --control` does: the runtime copied to `.tmp/si-control`, WB3c's line dropped, the test run and required to report exactly 9
   differing positions (another count fails), a part of `si-check.unicode` (about a minute: one more build of the copy). *Recommended: (b)*:
   the conformance test then has a control in the gate, as every check family does (GTS81 (a)).
+
+## Decided (the user, 2026-11-09, about 14:20): SCS25 (a), SCS26 (b)
+
+- **SCS25 (a):** U+1E9E's exception in the final sigma stays stated, as built by scheme-props4.
+- **SCS26 (b):** `bin/si unit --control`, TestWordBreakUAX29's negative control, a part of `si-check.unicode`.
+
+## As built: SCS25 (a), SCS26 (b) (2026-11-09, branch `scheme-props5`)
+
+On `scheme-props5` from `mac/next` 6c3c87c02, main's stage 0.
+
+- **SCS25 (a):** nothing changes: the exception (`go/arbace/scm/prim_char.ae`, U+1E9E not counted as cased beside a sigma) stays as
+  measured over every scalar value (the scan's frames 7 and 8, `test/scheme/wordbreak-scan.edn`, 0 lines differ).
+- **SCS26 (b):** `bin/si unit --control` copies the runtime's forms (`go/arbace/scm/*.ae`) into `.tmp/si-control/scm`, drops WB3c's rule
+  (`(when (and (== a wbZWJ) (IsExtPict (aget rs i))) (return false))`, two lines of `prim_char.ae`; the copy must differ, else it fails),
+  prints and runs `go test -run '^TestWordBreakUAX29$'` on the copy (`SI_SCM_DIR`, as `unicode-scan --control` builds its copy) and reads
+  the test's own count (`WordBreakTest.txt: N strings, M inner positions, K differ`): exactly 9 positions must differ; another count, or no
+  count, fails. It is the third command of `si-check`'s part `unicode` (`test/gate/crops/scheme.edn` and `test/gate/steps.edn`, the same
+  text), its summary line `^unit --control`, and `si-check`'s waiver names it. About 16 s warm (one print and test build of the copy).
+
+| command | result |
+|---|---|
+| `bin/si unit --control` | `TestWordBreakUAX29 without WB3c differs in 9 positions, as a control must (GTS81 (a))` |
+| `bin/si unicode-scan`, `--control` | both scans equal Chez's records (292,557 and 292,531 lines); the controls differ in 8 and 1 lines |
+| si-essential's command (`bin/si unit`, `test --si`, `check --only test/scheme/essential-check.txt`, `r7rs`, `srfi`, `corpora controls-test`) | exit 0: unit ok, 61 of 64 (3 known), 0 failing; r7rs and srfi as before, their controls failing |
+| `test/gate/crops-test.bash` | ok (steps.edn passes GT9's rules) |
+| `bin/gate --full --plan` | exit 0 |
+| `bin/reap`, `bin/crops-score --judge --strict` | 0 problems; 11 crops, 0 problems |
+
+`bin/crops-score --crop scheme` before (mac/next) and after: 97.4% (98.9% without by design), maturity 100.0, independence 100.0, the
+same: a control adds no cell (the maturity checklist's 8 of 8 check families already had theirs).
+
+Night: the gate's `si-check` (its part `unicode` now runs the third command); nothing else moves.
