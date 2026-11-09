@@ -477,15 +477,44 @@
       :cast (recur (:cont k) out)
       out)))
 
+(defn- occ-keys
+  "The keys of every variable occurrence in e (a superset of its free variables' keys: subst-expr replaces only the free ones)"
+  [e]
+  (let [acc (java.util.HashSet.)]
+    (letfn [(walk [e]
+              (cond (seq? e) (case (first e)
+                               lv (.add acc e)
+                               v (.add acc (second e))
+                               (doseq [x (rest e)] (walk x)))
+                    (vector? e) (doseq [x e] (walk x))
+                    :else nil))]
+      (walk e))
+    acc))
+
 (defn subst-expr-env
-  "GHC.Core.Subst.substExpr of the env's substitution"
+  "GHC.Core.Subst.substExpr of the env's substitution (getSubst, GHC.Core.Opt.Simplify.Env): a ContEx entry is substituted by
+  its own saved substitution when the expression names it, once per call (GHC's to_expr is a lazy thunk of mapVarEnv: an entry
+  no occurrence looks up is never computed, one looked up twice is computed once); computing every entry of every saved
+  substitution, transitively, was exponential in the depth of nested continuations (utf8_decode's guards)"
   [env e]
-  (let [m (into {} (for [[k sr] (:subst env)]
-                     [k (case (first sr)
-                          :done-id (second sr)
-                          :done-ex (second sr)
-                          :cont (subst-expr-env (assoc env :subst (second sr)) (nth sr 2)))]))]
-    (if (empty? m) e (c/subst-expr m e))))
+  (let [memo (java.util.IdentityHashMap.)]
+    (letfn [(conv [subst e]
+              (if (empty? subst)
+                e
+                (let [occ (occ-keys e)
+                      m (persistent!
+                         (reduce (fn [m k]
+                                   (if-let [sr (get subst k)]
+                                     (assoc! m k (case (first sr)
+                                                   :done-id (second sr)
+                                                   :done-ex (second sr)
+                                                   :cont (if (.containsKey memo sr)
+                                                           (.get memo sr)
+                                                           (let [r (conv (second sr) (nth sr 2))] (.put memo sr r) r))))
+                                     m))
+                                 (transient {}) occ))]
+                  (if (empty? m) e (c/subst-expr m e)))))]
+      (conv (:subst env) e))))
 
 ;;; exprIsConApp_maybe (GHC.Core.SimpleOpt), with the in-scope unfoldings
 
@@ -1221,8 +1250,11 @@
 (defn- short-out-indirections
   "shortOutIndirections: exported = local (the local not exported) becomes the exported binding"
   [binds]
-  (let [ind (into {} (for [bd binds [_ b r] (c/bind-pairs bd)
-                           :when (and (contains? *exported* (c/vkey b)) (c/lv? r)
+  (let [;; GHC's isLocalId: a binder of the module, a top-level one too (its global name here): _free of free = _free
+        tops (set (for [bd binds :when bd [_ b _] (c/bind-pairs bd)] (c/vkey b)))
+        ind (into {} (for [bd binds :when bd [_ b r] (c/bind-pairs bd)
+                           :when (and (contains? *exported* (c/vkey b))
+                                      (or (c/lv? r) (and (c/gv? r) (contains? tops (c/vkey r)) (not= (c/vkey r) (c/vkey b))))
                                       (not (contains? *exported* (c/vkey r))))]
                        [(c/vkey r) b]))
         ind (into {} (filter (fn [[l _]] (= 1 (count (filter #(= l %) (keys ind))))) ind))
@@ -1343,6 +1375,8 @@
                       (and (= "GHC.Internal.Prim" m) (c/primop-info o))
                       {:details {:k :primop :op o} :arity (or (c/type-arity (get (:genv r) n)) 0)
                        :bot (when (:bot (c/primop-info o)) (or (c/type-arity (get (:genv r) n)) 0))}
+                      ;; HF10-P5 (a): a foreign call (GHC's FCallId): its worker type's arity, never inlined
+                      (= "ffi" k) {:details {:k :fcall} :arity (or (c/type-arity (get (:genv r) n)) 0)}
                       (str/starts-with? o "$f") {:details {:k :dfun} :conlike true} ; dfunInlinePragma: CONLIKE (isConLikeId)
                       (= "fld" k) {:details {:k :recsel}})))]
           (let [v (if (contains? (:noinline r) n) (assoc v :noinline true) v)]
@@ -1444,6 +1478,12 @@
                                    (and (vector? b) (str/starts-with? (nth b 3) "$dm"))
                                    (c/update-info b assoc :unf (c/mk-compulsory-unfolding e2))
                                    :else b)
+                              ;; HF10-P5 (a): a foreign import's wrapper, dsFCall's mkInlineUnfoldingWithArity (its lambdas' arity)
+                              b2 (if (contains? (:fimports r) b)
+                                   (let [ar (if (c/head? e2 'lam) (count (second e2)) 0)]
+                                     (c/update-info b2 assoc :unf (assoc (c/mk-unfolding :inline true false false e2 oa/occur-analyse-expr)
+                                                                         :guide {:k :when :arity ar :unsat-ok false :boring-ok true})))
+                                   b2)
                               b2 (if (contains? (:noinline r) b) (c/update-info b2 assoc :noinline true) b2)]
                           (list 'bind b2 e2)))
                       prog)

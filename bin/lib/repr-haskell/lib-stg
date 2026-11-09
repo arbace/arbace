@@ -1,5 +1,5 @@
 #!/bin/bash
-# bin/repr-haskell lib-stg [--only FILE] [--every N] [--jobs N] [--record FILE] [--run [ID...]]
+# bin/repr-haskell lib-stg [--only FILE] [--every N] [--jobs N] [--record FILE] [--judge FILE] [--run [ID...]]
 #
 # HF10's check (doc/haskell/FRONTEND-SURVEY.md, "As built: HF10 (first slice)"): the boot libraries' modules through
 # the whole of Arbace's front end, each module's native dump renamed and elaborated against its imports' interfaces
@@ -12,12 +12,19 @@
 # GHC's part is the oracle tier's and only data: the reference, GHC's -O0 STG of ghc-internal, base, ghc-prim and
 # ghc-bignum compiled from the pinned tarball as bin/hsi dumps compiles the installed libraries (HES6 (a): one-shot, the
 # installed unit ids, hadrian's paths), at -O0 (HSI_DUMP_OPT=-O0) instead of -O2: the level Arbace's front end
-# produces (HFS6 (a)); the interfaces of lib-check's closures (the helper's iface verb). Everything else is Arbace's.
+# produces (HFS6 (a)), recorded by hand as the oracle pack haskell-stg-libs-O0-ghc-9.14.1 (HF10-P1 (a): HSI_DUMP_OPT=-O0
+# bin/hsi dumps --record --packages ghc-internal,base,ghc-prim,ghc-bignum) and read from it, its keys checked (bin/hsi
+# libs-pack -O0): no GHC at check time; the interfaces of lib-check's closures (the helper's iface verb). Everything else
+# is Arbace's.
 #
 #   --only FILE    the modules FILE names (one a line, module names; # comments), default test/haskell/lib-stg.txt
 #   --every N      every Nth module of lib-check's plan instead (a sample; 1: all of ghc-internal's judged modules)
 #   --jobs N       the front end's processes (default 1, each under about 1.5 GiB)
-#   --record FILE  the results (one EDN map a module) copied to FILE
+#   --record FILE  the results into the record FILE (test/haskell/lib-stg-results.edn: one map a module, :stage :compared
+#                  :equal :data-equal; a run of --only or --every replaces its modules' rows, a run of the list the whole)
+#   --judge FILE   HF10-P2 (a): the results against the record FILE (libcheck judge-stg): a module whose stage drops or whose
+#                  bindings equal to GHC's -O0 drop fails, so does (a run of the list) a module of one not in the other; with
+#                  the negative control below and --run's pass lost, the gate's --full step haskell-lib-stg
 #   --run [ID...]  run-check's programs (default all of samples and synthetic) run twice on hsi: on the pack's libraries
 #                  (HSI_LIBS, GHC's -O2 STG: the ABI of the interfaces the programs are compiled against), then on the same
 #                  set with every module this run compiled replaced by its own STG merged over the pack's ABI (the
@@ -25,38 +32,48 @@
 #                  own exported bindings judged equal to GHC's -O0 alone, with their internal closures; all: every own
 #                  binding; a pass lost is a failure
 #
-# Environment: LIB_STG_REUSE=1 (the last run's STG and results kept, --run alone), LIB_STG_REF (GHC's -O0 STG, a directory of PKG/M.stg.ae; default .tmp/hsi/dumps-O0/stg, made when
-# missing by HSI_DUMP_OPT=-O0 bin/hsi dumps), HSI_LIBS (the pack's STG for the other packages), LIB_CHECK_TIMEOUT.
+# Environment: LIB_STG_REUSE=1 (the last run's STG and results kept, --run alone), LIB_STG_REF (GHC's -O0 STG, a directory of
+# PKG/M.stg.ae; default the pack haskell-stg-libs-O0-ghc-9.14.1; LIB_STG_LIVE=1: .tmp/hsi/dumps-O0/stg, made when missing by
+# HSI_DUMP_OPT=-O0 bin/hsi dumps, GHC live), HSI_LIBS (the other packages' STG; default the pack haskell-stg-libs, bin/hsi libs-pack -O2), LIB_CHECK_TIMEOUT.
 # Work in .tmp/repr-haskell/lib-stg/ (stg/: the modules' own STG; results.edn, summary.txt; libs-ghc/, libs-own/: the
 # run's library sets; replaced.txt: each replaced module's own and kept bindings; run-ghc/, run-own/: run-check's results).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
 . "$root/bin/lib/tools.bash"
-only=$root/test/haskell/lib-stg.txt every="" jobs=1 record="" run="" ids=()
+only=$root/test/haskell/lib-stg.txt every="" jobs=1 record="" judge="" run="" ids=() whole=whole
 while [ $# -gt 0 ]; do
   case $1 in
-    --only) only=$2; shift 2 ;;
-    --every) every=$2; only=""; shift 2 ;;
+    --only) only=$2; whole=partial; shift 2 ;;
+    --every) every=$2; only=""; whole=partial; shift 2 ;;
     --jobs) jobs=$2; shift 2 ;;
     --record) record=$2; shift 2 ;;
+    --judge) judge=$2; shift 2 ;;
     --run) run=1; shift; while [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; do ids+=("$1"); shift; done ;;
     *) echo "lib-stg: unknown argument $1" >&2; exit 2 ;;
   esac
 done
 w=$root/.tmp/repr-haskell/lib-stg
-lc=$root/.tmp/repr-haskell/lib-check/ghc-internal
-ref=${LIB_STG_REF:-$root/.tmp/hsi/dumps-O0/stg}
-libs=${HSI_LIBS:-$root/.tmp/hsi/dumps/stg}
+lc=$root/.tmp/repr-haskell/lib-check/iface2/ghc-internal
 mkdir -p "$w"
-# the reference: GHC's -O0 STG of the four packages (the oracle's, by hand)
-if [ ! -d "$ref/ghc-internal" ] || [ ! -d "$ref/base" ]; then
+# the other packages' STG: HSI_LIBS, else the pack haskell-stg-libs (GHC's -O2 STG, the installed libraries' ABI), its keys checked
+if [ -n "${HSI_LIBS:-}" ]; then libs=$HSI_LIBS
+else libs=$("$root/bin/hsi" libs-pack -O2 2> "$w/libs.err") || { cat "$w/libs.err" >&2; exit 1; }; fi
+# the reference: GHC's -O0 STG of the four packages (the oracle's, recorded by hand): the pack, else (LIB_STG_LIVE=1) GHC live
+if [ -n "${LIB_STG_REF:-}" ]; then ref=$LIB_STG_REF
+elif [ -z "${LIB_STG_LIVE:-}" ]; then
+  ref=$("$root/bin/hsi" libs-pack -O0 2> "$w/ref.err") || { cat "$w/ref.err" >&2; echo "lib-stg: no -O0 reference (the pack haskell-stg-libs-O0-ghc-9.14.1; LIB_STG_LIVE=1: GHC live)" >&2; exit 1; }
+else ref=$root/.tmp/hsi/dumps-O0/stg; fi
+if [ -n "${LIB_STG_LIVE:-}" ] && { [ ! -d "$ref/ghc-internal" ] || [ ! -d "$ref/base" ]; }; then
   echo "== lib-stg: GHC's -O0 STG (HSI_DUMP_OPT=-O0 bin/hsi dumps, the oracle tier)" >&2
   HSI_DUMP_OPT=-O0 HSI_JOBS=${HSI_JOBS:-2} "$root/bin/hsi" dumps --packages ghc-internal,base,ghc-prim,ghc-bignum \
     --out "$(dirname "$ref")" > "$w/dumps.log" 2>&1 || { tail -5 "$w/dumps.log" >&2; exit 1; }
 fi
-# lib-check's plan (its closures: the helper's interfaces)
-[ -s "$lc/plan.txt" ] || LIB_CHECK_PLAN_ONLY=1 "$root/bin/lib/repr-haskell/lib-check" > "$w/plan.log" 2>&1 || { tail -5 "$w/plan.log" >&2; exit 1; }
+# lib-check's plan (its closures: the interfaces of the pack haskell-lib-ifaces-ghc-9.14.1, HF9-P1 (a); no GHC), made afresh
+# unless LIB_STG_REUSE keeps the last
+if [ -z "${LIB_STG_REUSE:-}" ] || [ ! -s "$lc/plan.txt" ]; then
+  LIB_CHECK_PLAN_ONLY=1 "$root/bin/lib/repr-haskell/lib-check" > "$w/plan.log" 2>&1 || { tail -5 "$w/plan.log" >&2; exit 1; }
+fi
 plan=$w/plan.txt
 if [ -n "$every" ]; then awk -v n="$every" 'NR % n == 1 || n == 1' "$lc/plan.txt" > "$plan"
 else
@@ -88,17 +105,21 @@ done
 for p in "${pids[@]}"; do wait "$p" || true; done
 cat "$out"/shard.??.edn > "$w/results.edn"
 fi
-[ -z "$record" ] || cp "$w/results.edn" "$record"
+[ -z "$record" ] || arbace_tool -m arbace.repr.haskell.libcheck record-stg "$w/results.edn" "$record" "$whole" \
+  "the pack haskell-stg-libs-O0-ghc-9.14.1 at $(awk 'NF {print $1; exit}' "$root/test/haskell/records/haskell-stg-libs-O0-ghc-9.14.1.sha256" | cut -c1-12)"
 arbace_tool -m arbace.repr.haskell.libcheck rank-stg "$w/results.edn" | tee "$w/summary.txt"
+st=0
+[ -z "$judge" ] || arbace_tool -m arbace.repr.haskell.libcheck judge-stg "$judge" "$w/results.edn" "$whole" | tee "$w/judge.txt" || st=1
 # the negative control (GTS81 (a)): the largest module's own STG judged against its reference with the exported bindings'
 # closures rotated must find none equal where the true judgment finds some
-ctl=GHC.Internal.Base
+ctl=$(grep -v '^#' "$root/test/haskell/lib-stg-controls.txt" | awk 'NF {print $1; exit}')
 if [ -f "$out/stg/ghc-internal/$ctl.stg.ae" ] && [ -f "$ref/ghc-internal/$ctl.stg.ae" ]; then
   c=$(arbace_tool -m arbace.repr.haskell.stgcmp "$ref/ghc-internal/$ctl.stg.ae" "$out/stg/ghc-internal/$ctl.stg.ae" --control)
   echo "lib-stg: the negative control ($ctl, its reference rotated): $c" | tee -a "$w/summary.txt"
   case $c in "control 0 of "*) ;; *) echo "lib-stg: the negative control found equal bindings: the judge does not tell bindings apart" >&2; exit 1 ;; esac
+elif [ -n "$judge" ]; then echo "lib-stg: the negative control ($ctl) not run: no STG or reference" >&2; exit 1
 fi
-[ -n "$run" ] || exit 0
+[ -n "$run" ] || exit $st
 
 # --run: the two library sets as directories of links, PKG/M.stg.ae: GHC's (the pack, HSI_LIBS, the installed libraries'
 # -O2 STG the programs' interfaces describe) and the own set, the same with each compiled module's own STG in place of the
@@ -132,11 +153,11 @@ mkset() { # DIR OWN?
 }
 mode=${LIB_STG_REPLACE:-equal}
 ga=(); [ ${#ids[@]} = 0 ] || ga=("${ids[@]}")
-st=0
 for side in ghc own; do
   mkset "$w/libs-$side" "$([ $side = own ] && echo 1 || echo 0)"
   echo "== lib-stg --run: run-check on the $side set" >&2
   HSI_LIBS=$w/libs-$side HSI_IMAGE=$w/image-$side REPR_HASKELL_FRONT_SHARDS=${REPR_HASKELL_FRONT_SHARDS:-1} \
+    REPR_HASKELL_RUN_IFACES=${REPR_HASKELL_RUN_IFACES-$([ -n "${LIB_STG_LIVE:-}" ] || echo pack)} \
     "$root/bin/repr-haskell" run-check "${ga[@]}" > "$w/run-$side.log" 2>&1 || true
   rm -rf "$w/run-$side"; mkdir -p "$w/run-$side"
   cp "$root/.tmp/repr-haskell/run-check/results.edn" "$w/run-$side/results.edn"
@@ -144,4 +165,21 @@ for side in ghc own; do
 done
 # the judge: a program that passes on GHC's -O0 libraries and not on the own set is a pass lost
 arbace_tool -m arbace.repr.haskell.libcheck compare-runs "$w/run-ghc/results.edn" "$w/run-own/results.edn" | tee "$w/runs.txt" || st=1
+# the passes on the own set as recorded (RECORD's sibling lib-stg-runs.txt, one id a line; a run of every program only): a
+# pass lost against the record fails too, so that both sets failing alike cannot pass
+passes() { sed -n 's/^{:id "\([^"]*\)" :result :pass.*/\1/p' "$1" | LC_ALL=C sort; }
+if [ ${#ids[@]} = 0 ]; then
+  if [ -n "$record" ]; then
+    { echo "# lib-stg --run: the programs that pass on the own set (bin/repr-haskell lib-stg --record; HF10-P2 (a))"; passes "$w/run-own/results.edn"; } > "$(dirname "$record")/lib-stg-runs.txt"
+  fi
+  if [ -n "$judge" ]; then
+    rr=$(dirname "$judge")/lib-stg-runs.txt
+    if [ -f "$rr" ]; then
+      passes "$w/run-own/results.edn" > "$w/own-passes.txt"
+      grep -v '^#' "$rr" | LC_ALL=C sort | LC_ALL=C comm -23 - "$w/own-passes.txt" > "$w/lost.txt"
+      if [ -s "$w/lost.txt" ]; then echo "lib-stg --run: $(wc -l < "$w/lost.txt") recorded passes lost on the own set: $(tr '\n' ' ' < "$w/lost.txt")"; st=1
+      else echo "lib-stg --run: the $(grep -vc '^#' "$rr") recorded passes on the own set kept ($(wc -l < "$w/own-passes.txt") pass)"; fi
+    else echo "lib-stg --run: UNRECORDED: no $rr (bin/repr-haskell lib-stg --run --record ...)"; st=1; fi
+  fi
+fi
 exit $st
