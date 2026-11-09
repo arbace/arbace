@@ -160,6 +160,19 @@ code. Three kinds of things live here:
   Expat's notice (LICENSE.md: Expat's MIT License; the binding under the PSF License Agreement).
 - `llvm/` (`arbace.llvm.*`: llvmi, LLVM IR's evaluator, `arbace.llvm.run` and its judge `arbace.llvm.check`, and the C forms of the
   personality-free layer `llvm/rt/none.c.ae`; doc/llvm/LLVM-CROP-SURVEY.md, "As built: llvmi") is Arbace's own.
+- `repr/cpp/diag.ae` (`arbace.repr.cpp.diag`, CX12: the C++ front end's diagnostics over the native parser's tree, doc/cpp/CPP-SURVEY.md,
+  "As built: CX12 (first slice)") is Arbace's own code whose diagnostics' texts are clang's (`clang/include/clang/Basic/DiagnosticSemaKinds.td`)
+  and whose rules follow clang's Sema (`SemaExpr.cpp`'s `DiagnoseEmptyLookup`, `SemaDecl.cpp`'s redeclaration checks), the LLVM Project
+  from `llvm-project-23.1.5.src.tar.xz` (the pin of `test/cpp/corpora.edn`), written by hand on 2026-11-08; the file carries clang's notice.
+  Its second slice (doc/cpp/CPP-SURVEY.md, "As built: CX12 (second slice)") reads `cpp/target/clang-builtins.edn`, clang's identifier
+  table made by `test/cpp/builtins.ae` from the same tarball's `Builtins*.td` and `TokenKinds.def` (CP270 (a); the reader carries clang's
+  notice), and its checker's rules in `cpp/sema.ae` (Arbace's own, after the standard's rules) and `cpp/template.ae` (the port of
+  SemaTemplateDeduction's MemberPointer case and method qualifiers), on only as a checker (`arbace.cpp.sema/checking?`), 2026-11-08.
+  Since CP290-CP294 (doc/cpp/CPP-SURVEY.md, "As built: CP290-CP294") also the rules of GNU attributes clang does not know, from the
+  native parser's `:_gattrs` data (strict_flex_array first), Arbace's own, clean-room from the GCC 15.2 manual's descriptions.
+  Since its fifth slice (doc/cpp/CPP-SURVEY.md, "As built: CX12 (fifth slice)") the constexpr checks `constexpr-bodies` and
+  `constexpr-redecls` after `SemaDeclCXX.cpp`'s CheckConstexprFunctionBody, CheckConstexprDeclStmt, CheckConstexprMissingReturn and
+  MergeCXXFunctionDecl (llvm-project-23.1.5), 2026-11-08.
 - `cpp/` (`arbace.cpp.*`, the C++ crop's eval: the lowering of LLVM forms to C forms, the code generator and its
   semantic analysis; doc/llvm/LOWER.md, doc/cpp/CODEGEN.md) is Arbace's own but for `cpp/template.ae`
   (`arbace.cpp.template`, templates, CODEGEN.md §G3), whose deduction ports parts of clang's

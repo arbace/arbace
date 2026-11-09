@@ -1254,6 +1254,31 @@ covers what.
   `abi` and the launcher's own package (the Eclipse Public License 1.0) and Go's runtime and
   standard library (Go's BSD 3-Clause License). A distribution of the box carries this file, as
   for the executables above.
+- `test/cpp/clang.ae` (`cpp.clang`, the clang half of Arbace's C++ target, doc/cpp/CPP-SURVEY.md, "As built: CP248 (a)"):
+  a port of parts of clang, the LLVM Project, from `llvm-project-23.1.5.src.tar.xz` (the pin of `test/cpp/corpora.edn`,
+  SHA-256 `fb50b1eac93ddeb3aa8dab4cfe324dff74f4a9c2bdee6160c9e36188f8d06a6e`): `clang/lib/Frontend/InitPreprocessor.cpp`'s
+  predefined macros and their helpers, `clang/lib/Basic/Targets/X86.cpp`'s `getTargetDefines` (the baseline CPU's part),
+  `Targets/OSTargets.h`'s `LinuxTargetInfo::getOSDefines` and `Targets.cpp`'s `DefineStd` and `defineCPUMacros`, under
+  the Apache License 2.0 with the LLVM Exceptions (section "LLVM (clang)" below), the file carrying clang's notice;
+  `cpp/target/clang.edn`, the facts it reads (PickFP's float strings among them, from the same file), likewise.
+- `arbace/repr/cpp/diag.ae` (`arbace.repr.cpp.diag`, Arbace's own C++ front end's diagnostics, doc/cpp/CPP-SURVEY.md, "As built:
+  CX12 (first slice)"): its diagnostics' texts are clang's (`clang/include/clang/Basic/DiagnosticSemaKinds.td`) and its rules follow
+  clang's Sema (`clang/lib/Sema/SemaExpr.cpp`'s `DiagnoseEmptyLookup`, `SemaDecl.cpp`'s `MergeVarDecl`, `MergeFunctionDecl`,
+  `ActOnTag`, `CheckRedeclaration`, `ActOnParamDeclarator`, `ActOnField`), the LLVM Project from `llvm-project-23.1.5.src.tar.xz` (the
+  pin of `test/cpp/corpora.edn`), under the Apache License 2.0 with the LLVM Exceptions (section "LLVM (clang)" below), the file
+  carrying clang's notice. Its second slice (doc/cpp/CPP-SURVEY.md, "As built: CX12 (second slice)") adds the checker's rules to the
+  code generator's Sema, `arbace/cpp/sema.ae` (Arbace's own, written after the standard's rules), and to `arbace/cpp/template.ae`'s
+  port of `SemaTemplateDeduction.cpp` (its MemberPointer case and the method qualifiers' mismatch, under that file's LLVM notice).
+  Its rules for GNU attributes clang does not know (`gnu-attrs`, `gattr-rules`; CP294 (a), doc/cpp/CPP-SURVEY.md, "As built:
+  CP290-CP294") are Arbace's own, written clean-room from the GCC 15.2 manual's description of each attribute (no GCC code read or
+  ported; the messages Arbace's own). Its fifth slice (doc/cpp/CPP-SURVEY.md, "As built: CX12 (fifth slice)") follows
+  `clang/lib/Sema/SemaDeclCXX.cpp`'s `CheckConstexprFunctionBody`, `CheckConstexprDeclStmt`, `CheckConstexprMissingReturn` and
+  `MergeCXXFunctionDecl` of the same release (`constexpr-bodies`, `constexpr-redecls`), its texts clang's.
+- `test/cpp/builtins.ae` (`cpp.builtins`) and `cpp/target/clang-builtins.edn` (CX12, CP270 (a)): the table is computed from the same
+  tarball's `clang/include/clang/Basic/Builtins.td`, `BuiltinsBase.td`, `BuiltinsX86.td`, `BuiltinsX86Base.td`, `BuiltinsX86_64.td`
+  (read as data, the names as `clang/utils/TableGen/ClangBuiltinsEmitter.cpp` makes them) and `TokenKinds.def`,
+  `TransformTypeTraits.def` (the keywords), under the Apache License 2.0 with the LLVM Exceptions (section "LLVM (clang)" below);
+  the reader carries clang's notice, the table names its sources.
 - `test/java/` (bin/java-check, Java's conformance check, doc/classes/JAVA-CONFORMANCE-SURVEY.md,
   "As built: JC1"): its tools, data and the hand-curated programs of `test/java/jls/` are Arbace's
   own, under the Eclipse Public License 1.0. jdk26u's jtreg tests are read in place from the

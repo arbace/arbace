@@ -1282,3 +1282,206 @@ of 24 of the samples, the essential list 33 of 33 (recorded), the samples 9 of 9
 Scores: completeness 76.1 to 76.2 on the records (read 80.6 to 80.7), about 88.5 expected after the night's own records (print to
 about 98). Proposals CP260-CP265 in doc/cpp/CPP-SURVEY.md, "As built: cpp-compl" (UNSUPPORTED as :na; the token check by clang's
 tokens where g++ -E is no reference; the dg check's clang-* classes; oracle-rejected under our route; threads; the macro extent).
+
+## 2026-11-08: C++'s CP247 (a), CP248 (a), CP249 (a) built (branch `cpp-cp247`, from next 5af7d0058; write-ahead)
+
+By the user's decisions of 2026-11-08 (~17:00), under the day's light rules (doc/cpp/CPP-SURVEY.md, "As built: cpp-cp247").
+
+- **CP248 (a)**, the clang half of Arbace's C++ target: `test/cpp/clang.ae` ports clang 23.1.5's InitPreprocessor.cpp (the standard,
+  feature-test and predefined macros with their helpers), X86.cpp's getTargetDefines (the baseline CPU) and OSTargets.h's Linux defines from
+  the pinned llvm-project-23.1.5.src.tar.xz (SHA-256 fb50b1ea...6a6e, test/cpp/corpora.edn; Apache 2.0 with LLVM Exceptions, LICENSE.md),
+  over C's c/target/abi.edn and the new cpp/target/clang.edn (TargetInfo's facts, Alpine's driver defaults, PickFP's tables, the __has_
+  tables, the search list). `bin/repr-cpp target gen` writes predefined/clang/, search-clang.txt and has.tsv's clang column; host-oracle 37
+  of 37 files equal to test/cpp/host (clang's 16 byte for byte; a mutated clang.edn fails). The native parser, ppcheck --clang and the
+  sysroot read the target in place of clang's record (REPR_CPP_TARGET=gxx: the record). native-check samples 68 of 68 items as before.
+  Alternative considered: CP248 (b), the native parser on g++'s answers (rejected by the decision: clang's AST was made with clang's macros).
+  The proposal's estimate of "about 60 lines of differences per standard" was low: about 250; the port computes all of them.
+- **CP247 (a)**, the dg-error part back in `--full`: tools/cxxdump's records mode (mac/oracle-records-cpp2's 4ec2da932 and e63d37180: in
+  next's history, but their tools/cxxdump, bin/repr-cpp record-dumps and the roundtrip's records mode were lost from the files by a later
+  merge; only test/oracle-records/cpp.bash's cpr_dump_dirs remained) restored, with the g++.dg tree keyed as @TREE@; `bin/repr-cpp
+  record-dumps dg-error`, `verify-dumps`, `cxxdump-ensure`; the dg script reads the pack unless REPR_CPP_LIVE=1; cpp-dg gains the part
+  dg-error (no pack yet: "no record yet", skipped), cpp-dg-oracle runs live. Proved on a 23-file sample pack (not committed): equal to a live
+  run, tree-independent, a missing entry fails. The round trips' records mode was not restored: their clang levels are the oracle tier's since
+  ORS31 (a), read live there.
+- **CP249 (a)**: as now, nothing built.
+- Scores unchanged (76.1 / 100 / 67.7; the dg cases a record either way, the native parser's record in no counted case); independence.edn's
+  C++ read fact rewritten to say so. Proposed CP250 (clang's option deltas), CP251 (the dg pack's dependencies on the host's headers).
+
+## 2026-11-08: C++'s CX12, first slice: Arbace's own front end's diagnostics for the dg-error part (branch `cpp-cx12`, from mac/cpp-cp247 4ddab9d59)
+
+By the brief of 2026-11-08 (Sema's diagnostics natively, so that the dg-error cases are judged by Arbace's front end), under the day's light
+rules: samples only (every 10th file of the part, 454 supported), no clang or gcc in the own runs (stubs exiting 99 first on PATH, their log
+empty). doc/cpp/CPP-SURVEY.md, "As built: CX12 (first slice)".
+
+- **Measured first**: the native parser on the sample with its declines as syntax errors, judged by the dg verdict: 38 of 454 pass (clang's
+  record: 3,359 of 4,566 corpus-wide). The expected error lines grouped by the dg-error's message and, from clang -fsyntax-only's outputs on
+  the same runs made by hand for the measure (the oracle tier's comparison), by clang's diagnostic on the line: "no matching function"
+  109, "call to implicitly-deleted copy constructor" 86, "use of undeclared identifier" 51, ... 209 lines with no clang error at all
+  (g++'s own). 400 of the 416 failures were missed errors, not extra ones: the front end accepted too much.
+- **Built**: `arbace.repr.cpp.diag` (the diagnostics: the preprocessor's, the parser's syntax errors at the failing token through a new
+  parser slot DIAGS, Sema's `undeclared` and `redefinitions` over the final tree, and the code generator's Sema, arbace.cpp.sema, as a
+  checker through two hooks, `*at*` and `*on-refusal*`, a refused function or statement reported and the analysis going on, its refusals
+  that are Sema's own errors mapped by `sema-rules`); `bin/repr-cpp dg --front native` and the dg verb `own` (each file by its own dg-error
+  lines, the record test/cpp/check-dg-own-linux-amd64.edn, regressions and the dg control judged); the gate part `cpp-dg.dg-error-own`.
+  The messages are clang's texts (DiagnosticSemaKinds.td) and the rules follow SemaExpr's DiagnoseEmptyLookup and SemaDecl's redeclaration
+  checks, from the pinned llvm-project-23.1.5 tarball (LICENSE.md, doc/ARBACE.md; the file carries clang's notice).
+- **Alternatives considered**: checks run during the parse (rejected: the tentative parses roll back, a check must see the committed tree);
+  a checker of its own beside the code generator's Sema (rejected for now, CP272: the code generator's analysis already decides overloads,
+  initialization and members, and a gap it shows is one the code generator has too); the declines alone as errors (CP242 (b): kept, as
+  one source of four).
+- **Checked**: the redeclaration rules against clang on two probe files (19 of 19 errors at clang's lines and columns); the sample by
+  `bin/repr-cpp dg --corpus dg-error --front native --sample 10 --record` with the compiler stubs first on PATH: 64 of 454 own passes (38
+  before), 6 of them passes clang's record fails (read: genuine), the dg control failing as it must on dr2082 and dr1423; `make
+  check-makefile`, `gate.crops check`, `bin/gate --full --plan` (`cpp-dg.dg-error-own` planned).
+- **The measure's commands** (by hand, the oracle tier's comparison): `arbace_tool -s arbace.c.dg -m arbace.repr.cpp.dg lists WORK
+  $GXXDG dg-error - 10`; then in the g++.dg tree, for each `run.tsv` line (NAME STD G++ARGS CLANGARGS), `clang++ -fsyntax-only -x c++
+  -std=STD CLANGARGS -ferror-limit=0 -fno-color-diagnostics -fno-caret-diagnostics -Wno-unknown-warning-option -iquote DIR NAME >
+  CL/NAME.err` (NAME's / as __); `REPR_CPP_FRONT=native arbace_tool ... read WORK dg-error`; `arbace_tool ... own WORK --clang CL`.
+- Scores (bin/crops-score --crop cpp): 76.1 / 100 / 67.7 before, 76.1 / 100 / 67.8 after (read 0.648 to 0.653: the sample record's 64 own-judged dg cases at 1; about 68.7 once the night records the whole part, about 650 own passes at the sample's rate); test/crops/scores.edn recorded. Proposed CP270 (clang's builtin table for the undeclared check), CP271 (the REAP read cell and the own record), CP272
+  (the code generator's Sema as the checker, its gaps), CP273 (the next diagnostics by the measure), CP274 (the part's cost).
+
+## 2026-11-08: C++'s CX12, second slice: the measured order's diagnostics and clang's identifier table (branch `cpp-cx12`, from 64e7b9758)
+
+By the brief of 2026-11-08 (continue CX12 in CP273 (a)'s order) and the user's decisions of the same evening (CP270-CP274 as
+recommended, relayed by the coordinator: CP270 (a) to be built in this slice), under the day's light rules: the every-10th sample only, the
+compiler stubs first on PATH (their log empty). doc/cpp/CPP-SURVEY.md, "Decided (CP270-CP274)", "As built: CX12 (second slice)".
+
+- **Built**, every rule on the checker's side of the code generator's Sema (`arbace.cpp.sema/checking?`, true only while the diag's
+  `*on-refusal*` is bound): deleted functions as candidates, the call whose only viable function is deleted an error, the implicit copy
+  members deleted by a declared move ([class.copy.ctor]/6) and the implicit moves declared ([class.copy.ctor]/8); reference binding with
+  volatile and the cv inclusion order ([dcl.init.ref], [over.ics.rank]/3.2.6); member pointers in deduction (template.ae's port of
+  SemaTemplateDeduction's MemberPointer case, the method qualifiers, [temp.deduct.call]/6.2) and in conversion and `.*`
+  ([conv.mem], [expr.mptr.oper]/6); "no matching function" for templates only when each deduction failed surely; access control for a
+  non-member function in a unit without friends; constexpr variables' initializers evaluated, an undefined operation the error at its
+  line; a namespace-scope initializer's refusal reported and the analysis going on; init/ptrfn2's crash (the InitListChecker port's
+  empty class). CP270 (a): `test/cpp/builtins.ae` reads the pinned llvm-project-23.1.5 tarball's `clang/include/clang/Basic/Builtins.td`,
+  `BuiltinsBase.td`, `BuiltinsX86.td`, `BuiltinsX86Base.td`, `BuiltinsX86_64.td` (a TableGen subset: class, def, let ... in, foreach,
+  # pasting, NAME) and names the builtins as `clang/utils/TableGen/ClangBuiltinsEmitter.cpp`'s collectBuiltins does, with `TokenKinds.def`
+  and `TransformTypeTraits.def`'s keywords, into `cpp/target/clang-builtins.edn` (3,775 builtins, 395 keywords; `bin/repr-cpp target
+  builtins gen|verify`); the undeclared check judges a `__` name by it (LookupBuiltin: no library builtin in C++).
+- **Measured** on the sample, the same clang table as the first slice: own passes 64 → 68 (deleted, volatile, member pointers in
+  deduction) → 75 (access, member function pointer qualifiers, constexpr, implicit moves, global recovery) → 75 (sure deductions only)
+  → 76 (the identifier table). Expected lines with an own error: "call to implicitly-deleted copy constructor" 0 → 85 of 86, "no matching
+  function" 38 → 81 of 109, "assigning ... incompatible type" 0 → 12 of 12, "is a private member" 0 → 7 of 17, constexpr 0 → 5 of 25,
+  g++'s own 6 → 18 of 209.
+- **No false credit**: the 12 new passes read one by one against their sources and clang's outputs, each a real error on every expected
+  line (three with another reason than clang's); no first-slice pass lost. A measured run showed sure-looking template drops that were
+  the slice's (pack-indexing11, bit-cast4): the drop rule was narrowed to the named sure reasons before recording.
+- **The code generator unchanged**: `arbace.cpp.codegen gen-list` over test/cpp/codegen's 142 samples by 64e7b9758's tree and this
+  branch's, 404 of 404 files byte for byte (no clang; codegen-check with clang live is the night's).
+- **Alternatives considered**: the rules on for the code generator too (rejected for now: the brief keeps code generation unchanged;
+  they are correct and CP280 proposes taking them where the samples show gaps); a deleted best function always an error (rejected:
+  cpp1z/noexcept-type3's two overloads the slice merges); every template drop a sure one (rejected after the measure, above); `__`
+  names judged by a hand list (rejected: CP270 (a)'s table from the pin).
+- **Recorded**: test/cpp/check-dg-own-linux-amd64.edn (454 rows, 76 passes), the C++ read fact's cases (`:dg-own [76 1]
+  :dg-clang [4521 0.5]`), test/crops/scores.edn (C++ 76.1 / 100 / 67.78, read 0.654; about 68.9 when the night records the part).
+  `make check-makefile`, `gate.crops check`, `bin/gate --full --plan` pass; the dg control fails as it must. Proposed CP280 (the gaps the
+  global initializers show), CP281 (constraints' satisfaction as a sure failure), CP282 (g++'s own lines: attributes, then OpenMP), CP283
+  (the table's verify in the gate). Slips: one `<(...)` and one `2>/dev/null` in throwaway commands (the survey's "Slips").
+
+## 2026-11-08: C++'s CX12, third slice: lookup, constraints, static_assert, access, constexpr, conversions; CP280-CP283 (branch `cpp-cx12`, from dd3f526dc)
+
+- **Decided** (the user, 2026-11-08): CP280-CP283 (a) (doc/cpp/CPP-SURVEY.md, "Decided (the user, 2026-11-08: CP280-CP283)").
+- **Built** (doc/cpp/CPP-SURVEY.md, "As built: CX12 (third slice)"), each rule the checker's (`arbace.cpp.sema/checking?`) unless
+  said: an operator expression on classes no operator and no conversion function serves, with two-phase lookup's definition-point
+  cutoff in function templates' specializations, and a call there nothing finds though a later declaration names it, both where the
+  associated namespaces are sure ([over.match.oper]/3, [over.built], [temp.dep.candidate]); CP281 (a): satisfaction with a doubt flag
+  (a refusal read as not satisfied), a false with no doubt a sure drop; a compound requirement's return-type-requirement evaluated
+  ([expr.prim.req.compound]/1.3; the parser keeps `-> C<...>` as `:_ret`); `__is_same_as`; static_assert's conditions; access
+  through private member typedefs; constexpr initializers' calls of non-constexpr functions, pointer-integer conversions and loads of
+  unusable variables ([expr.const]/5.2, /5.9, /5.15); callees declared nowhere and sure-ADL undeclared calls; the explicit-specifier
+  evaluated and direct-initialization's explicit conversions (CP280 (a)), "no viable conversion" from a class with only explicit
+  conversion functions; C++20's returned-local lvalue retry; `typedef struct { ... } T` (the unnamed class named for linkage: every
+  `T t;` was refused before, pr56961's real gap); C++20's parenthesized aggregates (CP280 (a), under the file's standard); CP282 (a)'s
+  first rule, a standard attribute with no arguments and `...` ([dcl.attr.grammar]/4), a syntax error that declines nothing; CP283
+  (a): the `--full` step `cpp-builtins`.
+- **Measured** on the every-10th sample (454 files, clang's table from the first slice's outputs): own passes 76 → 77 → 82 → 87 → 86.
+  Expected lines with an own error: "no matching function" 81 → 90 of 109, "use of undeclared identifier" 30 → 39 of 51, "is a
+  private member" 7 → 10 of 17, "no viable conversion" 5 → 8 of 14, "cannot be used as an attribute pack" 0 → 7 of 7.
+- **No false credit**: the eleven new passes read against their sources and clang's outputs; template/access19 passed by a wrong
+  reason (the explicit-specifier's pattern without a word boundary made `explicit_t(...)` explicit) and was withdrawn by the fix;
+  the ten others genuine. No earlier pass lost; extras 98 → 92 lines, none new.
+- **The code generator unchanged**: `gen-list` over test/cpp/codegen's 142 samples by dd3f526dc's tree and this branch's, 404 of 404
+  files byte for byte, before and after the fix (no clang; codegen-check live is the night's).
+- **Alternatives considered**: generic lambdas for lookup/operator-3a's 37 lines (left: a code generator feature, CP290); unknown GNU
+  attributes as tree nodes as CP282 (a) words it (not built: the tree is compared with clang's AST, CP294); every constraint false a
+  sure failure (rejected: the requires-expression's refusals read as false); constexpr's sure rules inside called functions
+  (rejected: gcc and clang place those errors at the inner call, lines the dg directives differ on).
+- **Recorded**: test/cpp/check-dg-own-linux-amd64.edn (454 rows, 86 passes), the C++ read fact (`:dg-own [86 1] :dg-clang
+  [4511 0.5]`), test/crops/scores.edn (C++ 76.1 / 100 / 67.80, read 0.655). `make check-makefile`, `gate.crops check`, `bin/gate
+  --full --plan`, `bin/repr-cpp target builtins verify` pass; the dg control fails as it must. Proposed CP290 (generic lambdas), CP291
+  (fold expressions), CP292 (the return-type-requirement for the code generator), CP293 (the file's standard in the code generator),
+  CP294 (gcc's unknown attributes as data, not nodes).
+
+## 2026-11-08: C++'s CP290-CP294 built: generic lambdas, fold expressions, the return-type-requirement and the standard in the code generator, gcc's unknown attributes as data (branch `cpp-cx12`, from 013681c7e)
+
+- **Decided** (the user, 2026-11-08 evening): CP290-CP294 (a) (doc/cpp/CPP-SURVEY.md, "Decided (the user, 2026-11-08: CP290-CP294)").
+- **Built** (doc/cpp/CPP-SURVEY.md, "As built: CP290-CP294"): CP290, a generic lambda's closure with its `operator()` a member
+  function template (invented type parameters for each `auto`, a pack for `auto...`, after the explicit ones; declared through the
+  templates' `:declare` hook, deduced and instantiated by arbace.cpp.template; the specialization's body analyzed in the lambda's
+  context with the definition-point cutoff, [temp.res]; captures found at the lambda by a scan of the body for a capture-default, a
+  later need refused); the native parser keeps the parts as `:_glam` data, its tree unchanged. Found with it and fixed: the code
+  generator's Sema refused `CXXDependentScopeMemberExpr` (the native tree has it since a14d52531, 2026-11-04), so 10 of
+  test/cpp/codegen's 142 samples were refused since; `template <class...>` (unnamed parameters) was not seen as a template by the
+  parser's `in-template?`, so its deduced return type was taken from the body; the implicit copy constructor's and copy assignment's
+  parameter is `X&` when a subobject has no const copy ([class.copy.ctor]/7, [class.copy.assign]/2). CP291, fold expressions: the
+  comma among the fold-operators, the four forms parsed into `:_fold` data in the code generator's mode, expanded at instantiation
+  ([temp.variadic]/11-12), each step the written operator's analysis. CP292, the return-type-requirement for the code generator (a
+  false met with a doubt stays true there). CP293, `*cxx-year*` bound by `gen-file` (cxx-year moved to arbace.cpp.sema). CP294, GNU
+  attributes clang drops kept in the parser's slot `GATTRS` and as `:_gattrs` on fields and variables, checked by
+  arbace.repr.cpp.diag's `gattr-rules`: strict_flex_array's, written clean-room from the GCC 15.2 manual's "Common Variable
+  Attributes" (gcc/doc/extend.texi of the pinned gcc-15.2.0.tar.xz, read; no GCC code), the messages Arbace's own.
+- **Measured**: the every-10th sample's own passes 86 → 88 → 89 → 89 (lookup/operator-3a, diagnostic/pr79304, strict-flex-array-1),
+  the extras' 92 lines the same; the whole part's 99 files with a generic lambda, a fold or strict_flex_array, base against branch:
+  12 → 16 (operator-3a, operator-4, -4a, -5a, strict-flex-array-1; concepts-lambda19 lost).
+- **No false credit**: every new pass read. Withdrawn: diagnostic/param-type-mismatch-3 (passed by "no matching function", which the
+  slice would also say of a valid conversion of a generic closure to a pointer to function: such a call is now unsure in the
+  checker); concepts-lambda19's earlier pass was the parser's decline of the comma fold on a valid line; parsed now, its real error (at
+  an explicit instantiation the checker does not instantiate) is not judged.
+- **The code generator**: `gen-list` over test/cpp/codegen's 142 samples, base 013681c7e and branch: 131 byte for byte; the 10
+  refused since a14d52531 generated, their defined names equal clang's IR's of the same samples (cpp-runtime-own's codegen-check
+  of today, `x.ll`) but hdr-vector's known one; rtti refused as before. Probes of every capture form, folds and constrained
+  overloads generate the IR clang names. The live codegen-check (clang, gcc) is the night's.
+- **Alternatives considered**: a generic lambda's specialization analyzed inside the lambda's expression (rejected: specializations
+  are made by later calls; the closure object is built first, hence the capture scan and the sealed refusal); fold operands as
+  tree nodes (rejected: the tree is compared with clang's, `:_fold` data as `:_ret` before); gcc's messages for the attribute
+  rules (rejected: the dg verdict compares lines, the messages written anew); the generic-closure rule removed and the pass kept
+  (rejected: false credit).
+- **Recorded**: test/cpp/check-dg-own-linux-amd64.edn (454 rows, 89 passes), the C++ read fact (`:dg-own [89 1] :dg-clang
+  [4508 0.5]`), test/crops/scores.edn unchanged (C++ 76.1 / 100 / 67.80, read 0.655). `make check-makefile`, `gate.crops check`,
+  `bin/gate --full --plan`, `bin/crops-score --judge --strict` pass; the dg control fails as it must. One slip: a throwaway
+  `diff <(...) <(...)` (process substitution, against the day's rules), redone with files. Proposed CP300 (templates differing by
+  constraints), CP301 (a generic lambda's conversion to a pointer to function), CP302 (the code generator's light half in `--full`),
+  CP303 (the next unknown GNU attributes), CP304 (implicit captures in unevaluated operands), CP305 (explicit instantiation
+  definitions in the checker).
+
+## 2026-11-08: C++'s CX12, fifth slice: "no matching function"'s rest, constexpr, access, conversions (branch `cpp-cx12`, from 1443ba1c5)
+
+- **Built** (doc/cpp/CPP-SURVEY.md, "As built: CX12 (fifth slice)"), in CP273 (a)'s order, each rule the checker's unless said:
+  non-deduced contexts ([temp.deduct.call]/1, /6: a braced list or an overload set of two or more functions for a bare template
+  parameter, undeduced and named by no other parameter: a sure drop) with the checker's position kept at the call while deducing;
+  C++11's null pointer constants (`false` none, CWG 903); a reinterpret_cast as a template argument ([temp.arg.nontype]/2) a sure
+  drop; a requirement surely false (a member type of a scalar, `*` of a non-pointer); `constexpr-bodies` and `constexpr-redecls`
+  in arbace.repr.cpp.diag after SemaDeclCXX.cpp's CheckConstexprFunctionBody, CheckConstexprDeclStmt, CheckConstexprMissingReturn
+  and MergeCXXFunctionDecl (llvm-project-23.1.5, read from the pinned tarball; the texts clang's), the parser's `:_cexpr` on a
+  constexpr lambda; if constexpr's condition by the evaluator's sure rules; a namespace-scope initializer's private constructors,
+  template-ids' member types and `T()`'s, ambiguous bases (a qualified member through its naming class); a const object's conversion
+  functions, explicit ones only yielding the type in direct-initialization ([over.match.conv]/1.1), enumerations' initialization;
+  CTAD from no initializer by the defaults; for the code generator too, an implicit default constructor deleted by a member with
+  none ([class.default.ctor]/2.5). None of CP300-CP305 built or needed.
+- **Measured** on the every-10th sample (454 files, clang's table from the first slice's outputs): own passes 89 → 99 → 108; the
+  extras' 92 lines the same. Lines with an own error: "no matching function" 90 → 95 of 109, "is a private member" 10 → 12 of 17,
+  "no viable conversion" 8 → 12 of 14.
+- **No false credit**: the 19 new passes read against their sources and clang's outputs, each the program's error on every expected
+  line; probes of the valid forms give no diagnostic; no earlier pass lost.
+- **The code generator**: `gen-list` over test/cpp/codegen's 142 samples by 1443ba1c5's tree and this branch's: 141 of 141 forms
+  byte for byte (rtti refused as before).
+- **Alternatives considered**: the conversion rules for the code generator too (left to CP312: a change of generated programs
+  wants codegen-check live); access in units with friends by a friend-aware context (CP313); the in-call constexpr errors at the
+  variable as clang places them (rejected: the dg lines are gcc's, which place them by kind, CP310); `auto x{e}` in C++11 (left).
+- **Recorded**: test/cpp/check-dg-own-linux-amd64.edn (454 rows, 108 passes), the C++ read fact (`:dg-own [108 1] :dg-clang
+  [4489 0.5]`), test/crops/scores.edn (C++ 76.1 / 100 / 67.82, read 0.656). `make check-makefile`, `gate.crops check`, `bin/gate
+  --full --plan`, `bin/crops-score --judge --strict` pass; the dg control fails as it must. Two slips: a read of `/dev/null` as an
+  empty grep argument and a `2>/dev/null` in a wait loop (the survey's "Slips"). Proposed CP310 (constexpr errors inside calls and
+  immediate functions' addresses), CP311 (CTAD with initializers), CP312 (the conversion rules for the code generator), CP313
+  (access in units with friends), CP314 (C++11's constexpr function body).

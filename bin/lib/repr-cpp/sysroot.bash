@@ -46,9 +46,9 @@ cpp_target_tree() {
     (cd "$gi" && find . -type f | LC_ALL=C sort | xargs sha256sum) > "$st/compiler-tree.sha256"
     rm -rf "$st/src"
     # the roots: the libstdc++ directories of the target's search list (cpp/target/host/search-gxx.txt, CP244 (b)) and clang's
-    # (test/cpp/host/search-clang.txt, the native parser's host), their dot-dots resolved
+    # (cpp/target/host/search-clang.txt, the native parser's, CP248 (a)), their dot-dots resolved
     # lexically as the preprocessor names an opened file (/usr/include/c++/15.2.0, its target and backward directories)
-    cat "$root"/cpp/target/host/search-gxx.txt "$root"/test/cpp/host/search-clang.txt | grep '/include/c++/' | while read -r r; do realpath -m -s "$r"; done \
+    cat "$root"/cpp/target/host/search-gxx.txt "$root"/cpp/target/host/search-clang.txt | grep '/include/c++/' | while read -r r; do realpath -m -s "$r"; done \
       | awk '!s[$0]++' > "$st/roots.txt"
     (cd "$st/usr/include/c++/15.2.0" && find . -type f | LC_ALL=C sort | xargs sha256sum) > "$st/tree.sha256"
     echo "$cs" > "$st/c-sysroot"
@@ -75,7 +75,7 @@ cpp_full_sysroot() {
       if [ -f "$id" ] && [ "$(sha256sum < "$id" | cut -c1-64)" = "$want" ]; then mkdir -p "$f.$$$(dirname "$id")"; cp "$id" "$f.$$$id"
       else echo "C++: $id is not the host's at cpp/target/libraries.sha256's digest: left out of the sysroot" >&2; fi
     done
-    cat "$root"/cpp/target/host/search-gxx.txt "$root"/test/cpp/host/search-clang.txt | while read -r r; do realpath -m -s "$r"; done | awk 'NF && !s[$0]++' > "$f.$$/roots.txt"
+    cat "$root"/cpp/target/host/search-gxx.txt "$root"/cpp/target/host/search-clang.txt | while read -r r; do realpath -m -s "$r"; done | awk 'NF && !s[$0]++' > "$f.$$/roots.txt"
     cp "$d/tree.sha256" "$f.$$/tree.sha256"
     rm -rf "$f"; mv "$f.$$" "$f"; : > "$f.ok"
   fi

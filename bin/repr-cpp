@@ -16,6 +16,10 @@
 #                               directory (.tmp/cpp-target/KEY, made from the pinned gcc tarball and musl's headers when missing), configure's
 #                               answers and how each was found, or the tree against the installed one (default /usr/include/c++/15.2.0),
 #                               file for file, byte for byte (the oracle, by hand). The reading verbs read the tree (REPR_CPP_HEADERS=host: the host's)
+#   bin/repr-cpp target builtins gen|verify
+#                               clang's identifier table, cpp/target/clang-builtins.edn (CX12, CP270 (a); test/cpp/builtins.ae): the
+#                               builtins of the pinned llvm-project tarball's Builtins*.td as ClangBuiltinsEmitter names them and
+#                               TokenKinds.def's keywords; the undeclared check of arbace.repr.cpp.diag judges a __ name by it
 #   bin/repr-cpp target gen|verify|host-oracle [REF]|option-lists
 #                               Arbace's own C++ target (CP244 (b); test/cpp/predef.ae, cpp/target/dialect.edn over C's c/target/abi.edn):
 #                               gen writes cpp/target/host/ (the predefined macros of the 16 standards and of the corpora's option lists,
@@ -71,12 +75,21 @@
 #                               rejection and the errors' lines, the dg-do preprocess tests on the shared preprocessor's, modules/
 #                               read and printed as single translation units; g++ 15.2's errors recorded as data (test/cpp/ref-dg-gxx15.edn)
 #                               --reader native: an accepted unit read by the native parser, the oracle judging acceptance and errors (CX11)
+#   bin/repr-cpp record-dumps dg-error [--jobs N] [--sample N]
+#                               CP247 (a), by hand on a host with clang: the dg-error part's dumps made live by cxxdump and packed as
+#                               test/repr/cpp/records/cxxdump-dg-error (the oracle-records layout), which `dg --corpus dg-error` reads
+#                               (cxxdump -records) with no clang
+#   bin/repr-cpp verify-dumps dg-error [--sample N]
+#                               the pack's entries against a live run (a moved toolchain reported, not failed: ORS6 (a))
+#   bin/repr-cpp cxxdump-ensure the filter rebuilt when tools/cxxdump's sources are not its build's
 #   bin/repr-cpp roundtrip-corpus KEY [WORK] [roundtrip's options]
 #                               the round trip over a recorded list made by its key (CX10; bin/lib/repr-cpp/roundtrip-corpus, its header):
 #                               CORPUS-every-N, CORPUS-all, CORPUS-essential (test/cpp/essential-print.txt), samples; the gate's steps
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
+. "$root/test/oracle-records/oracle.bash"
+. "$root/test/oracle-records/cpp.bash"
 
 EPOCH=1793145600 # 2026-10-28 00:00:00 UTC, as test/c/host (CS43 (a))
 host_dir=$root/test/cpp/host
@@ -248,10 +261,60 @@ spec_check() { # the spec's forms blocks must read with Arbace's reader (the spe
     (when (pos? @bad) (System/exit 1)))"
 }
 
+cxxdump_src() { (cd "$root/tools/cxxdump" && cat go.mod *.go | sha256sum | cut -c1-64); }
 cxxdump_build() {
   mkdir -p "$root/.tmp/repr-cpp"
-  ( cd "$root/tools/cxxdump" && PATH=$goroot/bin:$PATH CGO_ENABLED=0 GOFLAGS= GOCACHE=${GOCACHE:-$root/.tmp/gocache} go build -o "$root/.tmp/repr-cpp/cxxdump" . )
+  ( cd "$root/tools/cxxdump" && PATH=$goroot/bin:$PATH CGO_ENABLED=0 GOFLAGS= GOCACHE=${GOCACHE:-$root/.tmp/gocache} go build -o "$root/.tmp/repr-cpp/cxxdump" . ) || return 1
+  cxxdump_src > "$root/.tmp/repr-cpp/cxxdump.src"
   echo "built $root/.tmp/repr-cpp/cxxdump"
+}
+# the filter built from the checkout's tools/cxxdump: rebuilt when its sources' digest is not the build's (CP247 (a): an older build
+# lacks -records)
+cxxdump_ensure() {
+  [ -x "$root/.tmp/repr-cpp/cxxdump" ] && [ "$(cat "$root/.tmp/repr-cpp/cxxdump.src" 2>"$TMPDIR/repr-cpp-src.err")" = "$(cxxdump_src)" ] || cxxdump_build >&2
+}
+
+# CP247 (a): the dg check's dg-error part on clang's recorded dumps. record-dumps KEY (by hand on a host with clang: the oracle's
+# dumps made live into a fresh cache and packed as cxxdump-KEY, test/repr/cpp/records/; class B: each cache entry, the dump, the
+# clang status and errors, the dependencies' digests, its key the arguments, the file's bytes and the recorded clang line, the checkout
+# @ROOT@ and the g++.dg tree @TREE@) / verify-dumps KEY [--sample N] (the pack's entries against a live run, a moved toolchain
+# reported, not failed: ORS6 (a)). KEY: dg-error (bin/repr-cpp dg --corpus dg-error, the part's every file).
+record_dumps() { # record-dumps KEY [--jobs N] [--sample N] / verify-dumps KEY [--sample N] (verify=1)
+  local verify=$1 key=${2:?KEY: dg-error}; shift 2
+  local jobs=${REPR_CPP_THREADS:-4} sample= st=$root/.tmp/repr-cpp/record-dumps/$key pack=cxxdump-$key f id k n=0 bad=0 all want
+  while [ $# -gt 0 ]; do case $1 in --jobs) jobs=$2; shift 2 ;; --sample) sample=$2; shift 2 ;; *) echo "record-dumps: unknown option $1" >&2; exit 2 ;; esac; done
+  case $key in dg-error) ;; *) echo "record-dumps: KEY is dg-error (the round trips' clang levels read live, the oracle tier's)" >&2; exit 2 ;; esac
+  command -v clang++ > "$TMPDIR/repr-cpp-rec.err" || { echo "record-dumps: needs clang++ (the host :cxx)" >&2; exit 2; }
+  cxxdump_ensure
+  rm -rf "$st"; mkdir -p "$st/cache"
+  REPR_CPP_LIVE=1 REPR_CPP_CXXDUMP_CACHE=$st/cache REPR_CPP_DG_WORK=$st/work REPR_CPP_THREADS=$jobs \
+    "$root/bin/lib/repr-cpp/dg" --corpus dg-error --dumps-only ${sample:+--sample "$sample"} > "$st/run.log" 2>&1 \
+    || { tail -5 "$st/run.log" >&2; exit 1; }
+  mkdir -p "$st/stage/$pack"; : > "$st/ids.tsv"
+  # the entries of the run: every file of the cache, but the stats (seconds and memory: they differ from run to run)
+  ( cd "$st/cache" && find . -type f ! -name '*.tmp' ! -name '*.d' ! -name '*.stats' -printf '%P\n' ) | LC_ALL=C sort > "$st/files.txt"
+  while IFS= read -r f; do
+    mkdir -p "$st/stage/$pack/$(dirname "$f")"; cp "$st/cache/$f" "$st/stage/$pack/$f"
+    k=$(basename "$f"); k=${k%%.*}
+    printf '%s\t%s\n' "$f" "$k" >> "$st/ids.tsv"
+  done < "$st/files.txt"
+  local pin=$root/test/repr/cpp/records/$pack.sha256
+  if [ "$verify" = 1 ]; then
+    all=$(cut -f1 "$st/ids.tsv" | sed 's/\.[a-z]*$//' | LC_ALL=C sort -u)
+    for id in $all; do
+      n=$((n+1)); k=0
+      for f in out status err deps; do
+        [ -f "$st/stage/$pack/$id.$f" ] || continue
+        want=$(oracle_get "$pin" "$id.$f" 2>"$TMPDIR/repr-cpp-ver.err") || { k=1; continue; }
+        cmp -s "$st/stage/$pack/$id.$f" "$want" || k=1
+      done
+      bad=$((bad+k))
+    done
+    oracle_verdict cxx "$(oracle_manifest "$pin")" "$bad" "$n"; return
+  fi
+  # a pack holds the whole part; --sample N makes one of every Nth file (a proof by day, not committed)
+  mkdir -p "$(dirname "$pin")"
+  oracle_make "$pin" "$st/stage" "$st/ids.tsv" "bin/repr-cpp record-dumps $key${sample:+ --sample $sample}" cxx
 }
 
 has_add() { # has-add OP:NAME...: the answers of both compilers appended to has-extra.tsv (once a name)
@@ -285,6 +348,15 @@ case ${1:-} in
                     arbace_tool -p "$root/test" -m cpp.target oracle "$d$g" "${4:-$g}"; b=$?
                     [ $a = 0 ] && [ $b = 0 ] ;;
             gen|verify) arbace_tool -p "$root/test" -m cpp.predef "$2" "$root/cpp/target" ;;
+            builtins) # CX12, CP270 (a): clang's identifier table (its builtins and keywords) from the pinned tarball's files
+                      case ${3:-} in gen|verify) ;; *) echo "repr-cpp target builtins: gen or verify" >&2; exit 2 ;; esac
+                      tb=${REPR_CPP_LLVM_TARBALL:-$main_checkout/.tmp/llvm/llvm-project-23.1.5.src.tar.xz}
+                      [ -f "$tb" ] || { echo "repr-cpp target builtins: no $tb (REPR_CPP_LLVM_TARBALL)" >&2; exit 2; }
+                      bd=$root/.tmp/repr-cpp-builtins; rm -rf "$bd"; mkdir -p "$bd"
+                      b=llvm-project-23.1.5.src/clang/include/clang/Basic
+                      tar -xJf "$tb" -C "$bd" $b/Builtins.td $b/BuiltinsBase.td $b/BuiltinsX86.td $b/BuiltinsX86Base.td $b/BuiltinsX86_64.td \
+                          $b/TokenKinds.def $b/TransformTypeTraits.def || exit 1
+                      arbace_tool -p "$root/test" -m cpp.builtins "$3" "$bd/$b" "$root/cpp/target/clang-builtins.edn" ;;
             host-oracle) arbace_tool -p "$root/test" -m cpp.predef oracle "$root/cpp/target" "${3:-$host_dir}" ;;
             option-lists) # the token check's recorded samplings' lists (pp-check --lists-only), their option lists
                           w=${REPR_CPP_CHECK_WORK:-$root/.tmp/repr-cpp-check}/option-lists
@@ -297,7 +369,7 @@ case ${1:-} in
                             arbace_tool -p "$root/test" -m cpp.predef option-lists "$w" cpp-lexical gxx-dg libstdcxx-headers; } > "$w.txt" || exit 1
                           mv "$w.txt" "$root/cpp/target/option-lists.txt"
                           echo "option-lists: $(grep -vc '^#' "$root/cpp/target/option-lists.txt") option lists (bin/repr-cpp target gen next)" ;;
-            *) echo "repr-cpp target: tree, answers, oracle [INSTALLED], gen, verify, host-oracle [REF] or option-lists" >&2; exit 2 ;;
+            *) echo "repr-cpp target: tree, answers, oracle [INSTALLED], gen, verify, builtins gen|verify, host-oracle [REF] or option-lists" >&2; exit 2 ;;
           esac ;;
   host) case ${2:-} in
           record) host_record ;;
@@ -316,12 +388,15 @@ case ${1:-} in
   roundtrip) shift; exec "$root/bin/lib/repr-cpp/roundtrip" "$@" ;;
   dg) shift; exec "$root/bin/lib/repr-cpp/dg" "$@" ;;
   roundtrip-corpus) shift; exec "$root/bin/lib/repr-cpp/roundtrip-corpus" "$@" ;;
-  read|print) . "$root/bin/lib/tools.bash"; export REPR_CPP_HOST=${REPR_CPP_HOST:-$root/test/cpp/host}; arbace_tool -m arbace.repr.cpp "$@" ;;
+  read|print) . "$root/bin/lib/tools.bash"; arbace_tool -m arbace.repr.cpp "$@" ;;
   native-check) shift; exec "$root/bin/lib/repr-cpp/native-check" "$@" ;;
   has-add) shift; has_add "$@" ;;
   cxxdump-build) cxxdump_build ;;
+  cxxdump-ensure) cxxdump_ensure ;;
+  record-dumps) shift; record_dumps 0 "$@" ;;
+  verify-dumps) shift; record_dumps 1 "$@" ;;
   cxxdump-check) shift; exec "$root/bin/lib/repr-cpp/cxxdump-check" "$@" ;;
   cxxdump-test) ( cd "$root/tools/cxxdump" && PATH=$goroot/bin:$PATH CGO_ENABLED=0 GOFLAGS= GOCACHE=${GOCACHE:-$root/.tmp/gocache} go test ./... ) ;;
-  cxxdump) shift; [ -x "$root/.tmp/repr-cpp/cxxdump" ] || cxxdump_build >&2; exec "$root/.tmp/repr-cpp/cxxdump" "$@" ;;
+  cxxdump) shift; cxxdump_ensure; exec "$root/.tmp/repr-cpp/cxxdump" "$@" ;;
   *) sed -n '2,/^set -e/p' "$0" | sed '$d;s/^# \{0,1\}//' >&2; exit 2 ;;
 esac
