@@ -105,7 +105,17 @@
   string; CrateHeader: triple, hash, name, is_proc_macro_crate, is_stub; extra_filename; stable_crate_id)"
   [file]
   (let [b (java.nio.file.Files/readAllBytes (.toPath (File. ^String file)))
-        hdr [0x72 0x75 0x73 0x74 0 0 0 10]]
+        hdr [0x72 0x75 0x73 0x74 0 0 0 10]
+        ;; RF11: an rlib (rsi's std build, bin/rsi std-build, holds no .rmeta files): its lib.rmeta member wraps the metadata
+        ;; in an object file's .rmeta section (rustc_codegen_ssa's create_wrapper_file); the blob begins at the header's magic
+        ;; and its positions are the blob's own
+        b (if (= "!<arch>\n" (String. b 0 (int (min 8 (alength b))) "ISO-8859-1"))
+            (let [n (alength b)
+                  at (loop [i 8] (cond (> (+ i 8) n) (throw (ex-info (str "rmeta: no metadata header in the rlib " file) {}))
+                                       (= hdr (map #(bit-and (long (aget b (+ i %))) 0xff) (range 8))) i
+                                       :else (recur (inc i))))]
+              (java.util.Arrays/copyOfRange b (int at) (int n)))
+            b)]
     (when-not (= hdr (map #(bit-and (long (aget b %)) 0xff) (range 8))) (throw (ex-info (str "rmeta: not METADATA_VERSION 10's header: " file) {})))
     (let [root (word-le (map #(aget b %) (range 8 16)) 0 8)
           [version _] (read-str b 16)
@@ -128,7 +138,10 @@
 
 (def ^:dynamic *local* nil)   ; {:name "a1" :id LONG}: the crate being compiled
 
-(defn local-crate [n] (let [v (:cfg-version *crates*)] {:name n :id (stable-crate-id n true [] v)}))
+(defn local-crate
+  "The crate being compiled: rustc's crate name of the file (its stem, `-` made `_`: rustc_session's validated file stem, RF11's
+  synthetic programs `exit-code`, ...) and its StableCrateId"
+  [n] (let [n (str/replace n "-" "_") v (:cfg-version *crates*)] {:name n :id (stable-crate-id n true [] v)}))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; v0's encodings (v0.rs)
@@ -281,8 +294,22 @@
             pc (long (:parent-count g 0))
             parent-args (if (seq args) (vec (take (min pc (count args)) args)) [])]
         (if (and (seq args) (seq (:params g)) (>= (count args) (+ pc (count (:params g)))) (not= :closure (first data)) (not= :anon (first data)))
-          ;; own_args_no_defaults: a trait's own arguments without its Self
-          (print-generic-args! m #(print-def-path! m d parent-args) (if (and (:has-self g) (zero? pc)) (drop (inc pc) args) (drop pc args)))
+          ;; own_args_no_defaults: a trait's own arguments without its Self, and (RF11) without the trailing arguments equal to
+          ;; their parameters' defaults (Generics::own_args_no_defaults: `Box<T, Global>` printed `Box<T>`), std's defaults its
+          ;; interface's substituted by the arguments before them
+          (let [own (vec (if (and (:has-self g) (zero? pc)) (drop (inc pc) args) (drop pc args)))
+                ps (vec (if (and (:has-self g) (zero? pc)) (rest (:params g)) (:params g)))
+                dflt (fn [i] (when-let [p (get ps i)]
+                               (cond (:ext-default p) (try (c/subst (c/sty->ty (:ext-default p)) (vec args)) (catch Throwable _ ::none))
+                                     :else ::none)))
+                own (loop [own own]
+                      (let [i (dec (count own))]
+                        (if (and (>= i 0) (let [dv (dflt i)] (and (not= ::none dv) (some? dv) (= (erase-regions dv) (erase-regions (nth own i))))))
+                          (recur (pop own))
+                          own)))]
+            (if (seq own)
+              (print-generic-args! m #(print-def-path! m d parent-args) own)
+              (print-def-path! m d parent-args)))
           (let [ns (case (first data) :type "t" :value "v" :closure "C" :ctor "c" :anon "K" :opaque "i")]
             (path-append-ns! m #(print-def-path! m parent parent-args) ns dis (if (#{:type :value} (first data)) (second data) ""))))))))
 
@@ -678,6 +705,37 @@
 
 (declare layout-of)
 
+(defn- union-adt? [adt]
+  (if (string? adt) (= "Union" (:kind (get (:adts c/*si*) adt))) (and (number? adt) (= "Union" (:kind (c/def-of adt))))))
+
+(defn- layout-of-union
+  "rustc_abi's layout_of_union (rustc_abi/src/layout.rs, 1.99.1) over the one variant's FIELDS: the alignment the largest
+  field's, the size the largest field's rounded to it; the ABI the common one of the non-ZST fields with their valid ranges
+  discarded (BackendRepr::to_union: Scalar::Union, which may be uninitialized), unless they differ, repr(C) inhibits it, or
+  the common scalar's alignment is not the union's; FieldsShape::Union, no niche, never uninhabited"
+  [repr fields]
+  (let [aggregate-align 1
+        align (reduce max (if (:packed repr) 1 aggregate-align) (map :align fields))
+        to-union (fn [abi] (case (first abi)
+                             :scalar [:scalar {:prim (:prim (second abi)) :union true}]
+                             :pair (let [[_ a b off] abi] [:pair {:prim (:prim a) :union true} {:prim (:prim b) :union true} off])
+                             [:memory true]))
+        common (reduce (fn [acc f]
+                         (cond (zst? f) acc
+                               (= acc :mismatch) acc
+                               :else (let [fa (to-union (:abi f))]
+                                       (if (nil? acc) [fa (:align f)] (if (= (first acc) fa) acc :mismatch)))))
+                       (if (:c repr) :mismatch nil) fields)
+        size (reduce max 0 (map :size fields))
+        scalar-align (fn [abi] (case (first abi)
+                                 :scalar (prim-align (:prim (second abi)))
+                                 :pair (max (prim-align (:prim (nth abi 1))) (prim-align (:prim (nth abi 2))))
+                                 nil))
+        abi (if (or (nil? common) (= :mismatch common))
+              [:memory true]
+              (let [a (first common)] (if (and (scalar-align a) (not= (scalar-align a) align)) [:memory true] a)))]
+    {:size (align-to size align) :align align :abi abi :fields [:union (count fields)] :variants [:single 0] :niche nil :uninhabited false}))
+
 (defn- layout-of* [t]
   (let [sc (fn [p] (scalar-l (init p)))]
     (case (first t)
@@ -711,14 +769,16 @@
                              (throw (ex-info "mono: !null over a non-scalar" {:fact :layout})))
                          s (second (:abi l))]
                      (assoc l :niche {:offset 0 :prim (:prim s) :range (:range s)} :fields {:offsets [0] :order [0]}))
-      :adt (let [[_ adt args] t
+      :adt (if (union-adt? (second t))
+             (let [[_ adt args] t] (layout-of-union (adt-repr adt) (mapv layout-of (first (variant-fields adt args)))))
+             (let [[_ adt args] t
                  repr (adt-repr adt)
                  vs (mapv #(mapv layout-of %) (variant-fields adt args))
                  enum? (tc/enum? adt)
                  cell? (contains? #{(c/lang "unsafe_cell") (c/lang "unsafe_pinned")} adt)
                  maybe-unsized (and (not enum?) (seq (first (variant-fields adt args))) (not (sized-ty? (peek (first (variant-fields adt args))))))
                  l (layout-of-struct-or-enum repr vs enum? cell? (when enum? (tc/discriminant-values adt)) (not maybe-unsized))]
-             (cond-> l enum? (assoc :discrs (vec (tc/discriminant-values adt)))))
+             (cond-> l enum? (assoc :discrs (vec (tc/discriminant-values adt))))))
       (throw (ex-info (str "mono: no layout for " (pr-str t) (when (= :err (first t)) " (not in std's interface)")) {:fact :layout})))))
 
 (defn layout-of [t]
@@ -735,6 +795,7 @@
   (let [abi (:abi l)
         fields (fn [f] (cond (= :primitive f) '(primitive)
                              (and (vector? f) (= :array (first f))) (list 'array (nth f 1) (nth f 2))
+                             (and (vector? f) (= :union (first f))) (list 'union (nth f 1))
                              :else (vec (:offsets f))))
         vs (:variants l)]
     (cond-> {:size (:size l) :align (:align l)
@@ -1011,9 +1072,17 @@
   (if (number? d) (or (:abi (c/fn-sig d)) "Rust")
       (str/replace (str (:abi (get (:fns c/*si*) d))) "\"" "")))
 
+(def ^:dynamic *unknown-refused*
+  "RF11: an external item whose codegen attributes core's sources did not show (a macro-made item: the integer types' methods of
+  int_macros.rs) is a refused callee fact (the record's), not the default rules' (an #[inline] item's symbol names the local
+  crate); bound by rsi-build's runs, where std's macro-made methods are most of the calls; mono-check's samples keep the rules"
+  false)
+
 (defn callee-fact
   "Instance::try_resolve's callee as the helper writes it: {:kind :symbol :def :can-unwind :track-caller [:intrinsic] [:external]}"
   [[_ d args]]
+  (when (and *unknown-refused* (string? d) (str/starts-with? d "core::") (not (intrinsic? d)) (not (:known (attrs-of d))))
+    (throw (ex-info (str "mono: " d "'s attributes are not in core's sources (a macro-made item)") {:fact :callee})))
   (when (and (number? d) (= "Trait" (:kind (c/def-of (:parent (c/def-of d))))))
     (throw (ex-info "mono: a trait method's resolution" {:fact :callee})))
   (when (and (string? d) (= "Trait" (get (:kinds c/*std*) (c/path-parent d))))
@@ -1132,7 +1201,11 @@
         (c/defs)))
 
 (defn- drop-glues "drop_glue::<T>'s instances the collector reaches from dropping T: T's, and its fields' that need drop" [t]
-  (distinct (cons t (when (= :adt (first t)) (for [vs (variant-fields (second t) (nth t 2)) f vs :when (build/needs-drop? f) g (drop-glues (erase-regions f))] g)))))
+  ;; RF11: a std ADT std's interface does not hold (hashbrown's) stops the walk: its fields' glue is reached through std's
+  ;; bodies, which are the pack's (RF12's), and holds no local Drop::drop the collector must root
+  (distinct (cons t (when (= :adt (first t))
+                      (let [vss (try (variant-fields (second t) (nth t 2)) (catch Throwable e (if (= :layout (:fact (ex-data e))) [] (throw e))))]
+                        (for [vs vss f vs :when (build/needs-drop? f) g (drop-glues (erase-regions f))] g))))))
 
 (defn- drop-fns "The local Drop::drop functions drop glue of T calls" [t]
   (keep (fn [g] (when (= :adt (first g)) (local-drop-impl g))) (drop-glues t)))

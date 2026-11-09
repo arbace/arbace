@@ -88,9 +88,11 @@
 (defn- def-path
   "The path of a DefId's text (`DefId(2:39279 ~ core[ef30]::mem::MaybeDangling)`): the hash dropped, the local crate's name too."
   [^String d]
-  (let [m (re-find #"~ (.*)\)$" d)
-        p (str/replace (second m) #"\[[0-9a-f]+\]" "")]
-    (if (.startsWith d "DefId(0:") (let [i (.indexOf p "::")] (if (neg? i) p (subs p (+ i 2)))) p)))
+  (if-let [m (re-find #"~ (.*)\)$" d)]
+    (let [p (str/replace (second m) #"\[[0-9a-f]+\]" "")]
+      (if (.startsWith d "DefId(0:") (let [i (.indexOf p "::")] (if (neg? i) p (subs p (+ i 2)))) p))
+    ;; the front end's own type forms (RFP23 (c)) name the definition by its path already
+    d))
 
 (defn llvm-type-name
   "The name rustc gives a type's LLVM struct (the type's text with every ADT's path its definition's, no trimming)."
@@ -107,7 +109,8 @@
                               (.startsWith ^String (first es) "'") (recur (rest es) as (conj out (first es)))
                               :else (recur (rest es) (next as) (conj out (llvm-type-name (first as)))))))))]
     (case kind
-      "adt" (let [[_ _ d args] st] (generic (def-path d) args text))
+      ;; a local ADT of the front end's own forms is named by its collect id: its path (the local crate's, as def-path drops it)
+      "adt" (let [[_ p d args] st] (generic (if (re-matches #"\d+" (str d)) p (def-path d)) args text))
       "tuple" (str "(" (str/join ", " (map llvm-type-name (rest st))) (when (= 2 (count st)) ",") ")")
       "array" (str "[" (llvm-type-name (second st)) "; " (nth st 2) "]")
       "slice" (str "[" (llvm-type-name (second st)) "]")
@@ -286,6 +289,15 @@
               "field" (nth e 2)
               ("index" "cindex") (second (ty-struct t))
               "downcast" t
+              ;; ProjectionElem::Subslice's type (PlaceTy::projection_ty): a slice's own, an array's [T; to - from]
+              "subslice" (let [[_ from to from-end] e]
+                           (if from-end
+                             (if (= "array" (ty-kind t))
+                               (let [el (second (ty-struct t)) n (- (parse-long (str (nth (ty-struct t) 2))) from to)]
+                                 (list 'ty (str "[" (second el) "; " n "]") (list 'array el (str n))))
+                               t)
+                             (let [el (second (ty-struct t)) n (- to from)]
+                               (list 'ty (str "[" (second el) "; " n "]") (list 'array el (str n))))))
               (unsupported (str "projection " (first e)))))
           (:ty (nth (:locals body) (place-local p)))
           (place-projs p)))
@@ -402,7 +414,7 @@
     (let [bits (:ibits sc)
           two (java.math.BigInteger/valueOf 2)
           M (.pow two bits)
-          big (fn [x] (java.math.BigInteger/valueOf (long x)))
+          big (fn [x] (biginteger x))   ; an i128 constant does not fit a long
           u (fn [x] (.mod (big x) M))
           sg (fn [x] (let [x (u x)] (if (>= (.compareTo x (.pow two (dec bits))) 0) (.subtract x M) x)))
           wrap (fn [x] (as-num (if (:signed sc) (sg x) (u x))))
@@ -888,6 +900,15 @@
                                                  r (fresh!)]
                                              (emit! bb (list '= r (list 'getelementptr :inbounds :nuw (backend-type lt gl (second (ty-struct (:ty pl)))) ['ptr (:ptr pl)] ['i64 idx])))
                                              {:ptr r :align (restrict-align (:align pl) (* idx (:size el))) :ly el :ty (second (ty-struct (:ty pl)))})
+                                  ;; place.rs's project_subslice: project_index by `from` (a constant gep, folded when 0); the
+                                  ;; metadata of a slice's subslice is the reference's (rvalue ref below)
+                                  "subslice" (let [[_ from to from-end] e
+                                                   elt (second (ty-struct (:ty pl)))
+                                                   el (layout lt elt)
+                                                   nt (place-type {:locals [{:ty (:ty pl)}]} (list* 'place 0 [e]))
+                                                   r (if (zero? from) (:ptr pl)
+                                                         (let [r (fresh!)] (emit! bb (list '= r (list 'getelementptr :inbounds :nuw (backend-type lt gl elt) ['ptr (:ptr pl)] ['i64 from]))) r))]
+                                               {:ptr r :align (restrict-align (:align pl) (* from (:size el))) :ly (layout lt nt) :ty nt :subslice [from to from-end]})
                                   (unsupported (str "place projection " (first e)))))
                               base (:rest base))))
         ;; field of an SSA pair/scalar value
@@ -1024,7 +1045,13 @@
                   (cond
                     (= fb tb) {:ty (:imm to-sc) :v (:v v)}
                     (< fb tb) (if (number? (:v v))
-                                {:ty (:imm to-sc) :v (:v v)}
+                                ;; a constant widened as LLVM folds zext/sext: its bits in the source width, then extended by the
+                                ;; source's signedness (an unsigned 255_u8, held as i8 -1, is 255 in i16: RF11's int_sqrt::u16)
+                                (let [two (java.math.BigInteger/valueOf 2)
+                                      m (.mod (java.math.BigInteger. (str (:v v))) (.pow two fb))
+                                      x (if (and (:signed from-sc) (not (:bool from-sc))) (sext-const fb m) m)
+                                      x (.mod (biginteger x) (.pow two tb))]
+                                  {:ty (:imm to-sc) :v (as-num (if (and (:signed to-sc) (not (:bool to-sc))) (sext-const tb x) x))})
                                 (let [r (fresh!)]
                                   (emit! bb (list '= r (list (if (and (:signed from-sc) (not (:bool from-sc))) 'sext 'zext) (symbol (:imm from-sc)) (:v v) (symbol (:imm to-sc)))))
                                   {:ty (:imm to-sc) :v r}))
@@ -1199,8 +1226,9 @@
                                                   (emit! bb (list '= x (list 'call (symbol (:imm to)) iname [[(symbol (:imm from)) (:v v)]])))
                                                   {:ty (:imm to) :v x})))
                                ;; a pointer cast between thin pointers changes nothing in LLVM's opaque pointers
-                               (.startsWith ^String kind "PointerCoercion(ReifyFnPointer")
-                               (if-let [sym (second (drop-while #(not= :fn-symbol %) o))]
+                               ;; a closure's or a function's reified pointer: the shim's or the instance's symbol the cast carries
+                               (or (.startsWith ^String kind "PointerCoercion(ReifyFnPointer") (.startsWith ^String kind "PointerCoercion(ClosureFnPointer"))
+                               (if-let [sym (or (second (drop-while #(not= :fn-symbol %) o)) (second (drop-while #(not= :fn-symbol %) r)))]
                                  (let [sy (symbol "g" sym)]
                                    (when-not (get-in @gl [:decls sy]) (declare! gl sy 'void []))
                                    {:ty "ptr" :v sy})
@@ -1237,6 +1265,17 @@
                                          (unsupported "transmute of a constant between int and float")
                                          (let [r (fresh!)] (emit! bb (list '= r (list 'bitcast (symbol (:imm (:scalar fl))) (:v v) (symbol (:imm (:scalar tl)))))) {:ty (:imm (:scalar tl)) :v r}))
                                        :else (unsupported "Transmute between these layouts")))
+                               ;; rustc_codegen_ssa's codegen_rvalue_operand: PointerExposeProvenance is ptrtoint of the (thin) address,
+                               ;; PointerWithExposedProvenance inttoptr (a constant folded as LLVM's builder folds it)
+                               (= kind "PointerExposeProvenance")
+                               (let [tl (layout lt t) v (operand! bb o) a (if (:pair v) (first (:pair v)) v) r (fresh!)]
+                                 (emit! bb (list '= r (list 'ptrtoint 'ptr (:v a) (symbol (:imm (:scalar tl))))))
+                                 {:ty (:imm (:scalar tl)) :v r})
+                               (= kind "PointerWithExposedProvenance")
+                               (let [fl (layout lt (ty-of o)) v (operand! bb o)]
+                                 (if (number? (:v v))
+                                   {:ty "ptr" :v (list 'inttoptr (symbol (:imm (:scalar fl))) (:v v) 'ptr)}
+                                   (let [r (fresh!)] (emit! bb (list '= r (list 'inttoptr (symbol (:imm (:scalar fl))) (:v v) 'ptr))) {:ty "ptr" :v r})))
                                :else (unsupported (str "cast " kind))))
                     "rawptr" (let [p (nth r 2) projs (place-projs p)]
                                (if (and (= 1 (count projs)) (= "deref" (proj-kind (first projs))))
@@ -1249,7 +1288,14 @@
                               (if (#{"slice" "str"} (ty-kind (place-type body p)))
                                 ;; a reference to the unsized tail field of a struct behind a fat pointer: the field's address, the same metadata
                                 (let [meta (second (:pair (operand! bb (list 'copy (list 'place (place-local p))))))
-                                      pl (place-of! bb p)]
+                                      pl (place-of! bb p)
+                                      ;; a slice's subslice: its length the base's less from + to (bx.sub, folded for constants and 0)
+                                      meta (if-let [[from to from-end] (:subslice pl)]
+                                             (cond (not from-end) meta
+                                                   (zero? (+ from to)) meta
+                                                   (number? (:v meta)) (assoc meta :v (- (:v meta) from to))
+                                                   :else (let [r (fresh!)] (emit! bb (list '= r (list 'sub 'i64 (:v meta) (+ from to)))) {:ty "i64" :v r}))
+                                             meta)]
                                   {:pair [{:ty "ptr" :v (:ptr pl)} meta]})
                                 (let [pl (place-of! bb p)] {:ty "ptr" :v (:ptr pl)}))))
                     (unsupported (str "rvalue " (first r)))))
@@ -1306,14 +1352,16 @@
                        nil))
         statement! (fn [bb s]
                      (try (statement-inner! bb s)
-                          (catch Throwable e (throw (ex-info (str (.getMessage e) " in " (subs (pr-str (stmt-of s)) 0 (min 300 (count (pr-str (stmt-of s)))))) (ex-data e))))))
+                          (catch Throwable e (throw (ex-info (str (.getMessage e) " in " (subs (pr-str (stmt-of s)) 0 (min 300 (count (pr-str (stmt-of s)))))) (ex-data e) e)))))
         ret-value! (fn [bb]
                      (let [ly (first lay)
                            v (if (indirect? ly) nil (if (contains? mem 0) (load-place! bb {:ptr (get-in @st [:allocas 0]) :align (:align ly) :ly ly}) (get-in @st [:vals 0])))]
                        (case (if (indirect? ly) :indirect (:kind ly))
                          :indirect (emit! bb '(ret void))
                          :zst (emit! bb '(ret void))
-                         :scalar (emit! bb (list 'ret (symbol (:ty v)) (:v v)))
+                         ;; a return place never assigned a value (a union built from its zero-sized field: MaybeUninit::uninit):
+                         ;; undefined bits of the scalar
+                         :scalar (if (:ty v) (emit! bb (list 'ret (symbol (:ty v)) (:v v))) (emit! bb (list 'ret (symbol (:imm (:scalar ly))) 'undef)))
                          :pair (let [ty (llvm-type ly)
                                      [a b] (:pair v)
                                      r0 (fresh!) r1 (fresh!)]
@@ -1701,14 +1749,27 @@
                                        (declare! gl nm 'void [['ptr] ['i8] ['i64] ['i1]])
                                        (emit! bb (list 'call 'void nm [['ptr (list :align (:align el)) (:v d)] ['i8 (:v v)] ['i64 bytes] ['i1 'false]]))
                                        (when target (br-or-merge bb t target)))
-                                     (if-let [[_ fname w] (re-matches #"(fabs|sqrt|sin|cos|exp|exp2|log|log2|log10|floor|ceil|trunc|round|rint|nearbyint|roundeven)f(32|64)" intrinsic)]
+                                     ;; the float math intrinsics: suffixed (sqrtf64) or, since they were made generic, by the argument's type
+                                     ;; (fabs::<f64>); minimum_number_nsz / maximum_number_nsz are LLVM's minnum / maxnum
+                                     (if-let [[_ fname w] (or (re-matches #"(fabs|sqrt|sin|cos|exp|exp2|log|log2|log10|floor|ceil|trunc|round|rint|nearbyint|roundeven)f(32|64)" intrinsic)
+                                                              (when-let [[_ f] (re-matches #"(fabs|sqrt|floor|ceil|trunc|round|rint|nearbyint|roundeven)" intrinsic)]
+                                                                (when-let [[_ w] (re-matches #"f(32|64)" (str (second (ty-of (first args)))))] [nil f w])))]
                                        (let [ft (if (= w "32") 'float 'double) iname (symbol "g" (str "llvm." fname ".f" w))
                                              x (operand! bb (first args)) r (fresh!)]
                                          (declare! gl iname ft [[ft]])
                                          (emit! bb (list '= r (list 'call ft iname [[ft (:v x)]])))
                                          (assign! bb dest {:ty (name ft) :v r})
                                          (when target (br-or-merge bb t target)))
-                                       (unsupported (str "intrinsic " intrinsic))))
+                                       (if-let [[_ mm w] (or (re-matches #"(minimum|maximum)_number_nsz_f(32|64)" intrinsic)
+                                                             (re-matches #"(pow|copysign|minnum|maxnum)f(32|64)" intrinsic))]
+                                         (let [ft (if (= w "32") 'float 'double)
+                                               iname (symbol "g" (str "llvm." (case mm "minimum" "minnum" "maximum" "maxnum" mm) ".f" w))
+                                               x (operand! bb (first args)) y (operand! bb (second args)) r (fresh!)]
+                                           (declare! gl iname ft [[ft] [ft]])
+                                           (emit! bb (list '= r (list 'call ft iname [[ft (:v x)] [ft (:v y)]])))
+                                           (assign! bb dest {:ty (name ft) :v r})
+                                           (when target (br-or-merge bb t target)))
+                                         (unsupported (str "intrinsic " intrinsic)))))
                                  (let [callee (if (and (not= "const" (name (first f))) (not (and ci (= "item" (:kind ci)))))
                                                 (let [v (operand! bb f)] (:v v))
                                                 (call-symbol f callee-info))
