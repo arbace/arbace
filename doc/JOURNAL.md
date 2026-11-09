@@ -2557,3 +2557,32 @@ The user accepted HF10-P1 to P10 as recommended (~06:15). Built by an agent in t
 - P4 (a), P7 (a), P9 (b) recorded as orders; P3 (a) not started (its first step's gap written down in the survey).
 - Measures: lib-stg over 265 modules 5,372 of 7,593 bindings equal to GHC's -O0 (the old list 2,473 → 2,560 of 3,421, none
   worse); runs 59 of 63 on both sets, 0 lost; typecheck-check 24 of 24; run-check 59 of 63 as before.
+
+## 2026-11-09: RF11 (first slice): rsi's cases from the front end's own MIR (branch `rust-rf11`, from next `e6214cd13`)
+
+The user's order (RES54 (a): RF11 after RF10; RFP41 (a): the eval cell moves only when rsi's own cases run from the front end's MIR).
+Recorded in doc/rust/FRONTEND-SURVEY.md, "As built: RF11 (first slice)".
+
+- Design: the switch is per case and replaces the program's codegen unit only (the pack's `x.ll`); the shim and std's lowered
+  library stay rustc's, and std's instances' bodies (our module is a `-Zshare-generics=no` one) and the facts the native mono refuses
+  come from a new record, `rust-front-rsi` (the helper's `--mono-mir` at rsi's plan's flags against rsi's std build's sysroot, whose
+  StableCrateIds are recorded in `test/rust/front/std-crates-rsi.edn`; 73 programs, 2.5 MB xz, made by hand with rustc). The judge
+  is rsi's own (status and outputs against `ref-rustc-1.99.1.edn`). Alternatives considered: merging our functions into the pack's
+  share-generics `x.ll` (it references std's shared instances by symbols our native mono does not compute, and would mix two codegens
+  in one unit); running the whole module with core's bodies from the host sysroot (the ci leg links rsi's std, whose crate ids differ).
+- Built: `bin/rust-front rsi-build` (batches of 6, the ported passes to runtime MIR, the plan's edition and overflow checks, the
+  program's crate and file names as rustc's), `bin/rsi check --front own` (`--record` refused with it until RFP42), `bin/rust-front
+  rsi-native` (by hand: the native leg, since std's lowered library has never been built on this host), the Makefile's
+  `rust-front-rsi-build`, `rust-front-rsi-native`, `rsi-check-front-own`. Ports from rustc 1.99.1 (`58cf8f9c3`, rust-src-1.99.1-r0):
+  rustc_abi's `layout_of_union`, rustc_codegen_ssa's `project_subslice` and exposed-provenance casts, `Generics::own_args_no_defaults`
+  in the v0 paths; core's integer constants and scalar promoted constants evaluated; Assert, method-call and overloaded-index caller
+  locations as rustc's `fn_span`; codegen fixes found by the runs (i128 folding, widened unsigned constants, generic float
+  intrinsics, ClosureFnPointer, a never-assigned scalar return, the front end's ADT names). The pack `rust-front-built`'s dumps now hold
+  `@ROOT@` (they named `rust-rf10b`'s worktree, so the essential step's built judge gave 51 of 62 in any other checkout), made again.
+- Results: 47 of the 67 synthetic programs own (0 of the six samples, measured once), 43 of the 47 give rustc's recorded run on the
+  native leg; the four left: std's source paths of rsi's std build (3, RFP47) and a fault (`panic-vec-remove`). The 20 not own: vtables
+  (virtual calls 5, unsizing to `dyn` 3), the repeat loop 2, float `pow` 2 (fixed after the run), CTFE, a transmute, an allocation kind,
+  `tlsref`, `typed_swap_nonoverlapping`, three `main`s not ours. `bin/rust-front essential` passes against its known file; crops-score
+  unchanged (Rust 75.0 / 75.0 / 95.8 / 80.0): an own case still consumes rustc's records, so the eval stage stays 0.5 (RES54 (a);
+  `independence.edn` counts the own cases). Proposed: RFP42-RFP47.
+
