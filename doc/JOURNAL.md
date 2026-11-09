@@ -1176,3 +1176,15 @@ compiler stubs first on PATH (their log empty). doc/cpp/CPP-SURVEY.md, "Decided 
   generator's 142 samples as recorded.
 - **Alternatives considered**: typeid's operand unevaluated too (left: a polymorphic glvalue's is evaluated, and the slice's
   analysis does not decide it before the scan).
+
+## 2026-11-09: C++'s CP305 (a), explicit instantiation definitions in the checker, and C++23's P2266 (branch `cpp-props2`)
+
+- **Built**: the checker instantiates a function template's explicit instantiation definition (its written arguments, then
+  deduction from the declared type) and analyzes the definition there ([temp.explicit]/10); the code generator unchanged. Found
+  with it, C++23's P2266: a returned implicitly movable entity is an xvalue whatever the return type (cpp23/elision7's
+  instantiation reported a copy that P2266 makes a move; `int& f(int&& n) { return n; }` now the expected error).
+- **Measured**: the 69 files with explicit instantiations of functions: passes 2 → 2, extras 9 → 6 (elision7's three); the 34 elision
+  and implicit-move files: extras 5 → 2, none new; the code generator's 142 samples as recorded.
+- **Alternatives considered**: (b) both, the code generator emitting explicit instantiations eagerly (left by the decision: clang's
+  weak_odr definitions are a names-check matter); P2266's throw operand (left: the try-block scope rule needs the enclosing try
+  blocks, which the slice does not track).

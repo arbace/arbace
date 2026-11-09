@@ -4642,3 +4642,27 @@ read), the messages after the directives' texts.
   for the same program (its capture of x alone, the empty closure); the every-10th sample 108 → 108, the extras the same 92
   (`.tmp/t7/rA`); `bin/cppi codegen-gen .tmp/t7/cgA` (this tree with CP303 and CP305): 142 of 142 as recorded, no sample's forms
   changed (none names a variable only in an unevaluated operand of a lambda).
+
+### CP305 (a): explicit instantiation definitions in the checker
+
+- `arbace.cpp.template/explicit-fn-instantiation!` (the checker only, `sema/checking?`): an explicit instantiation definition of a
+  function template (`template R f<A...>(P...);`, [temp.explicit]/10) finds its specialization as an explicit specialization's is
+  ([temp.deduct.decl]: the written arguments after the name, `explicit-args`, then deduction from the declared type) and, when one
+  template gives one, instantiates it and makes its definition eager (entered in the order, as a used lazy definition is), so its
+  body is analyzed and its errors judged. A declaration the slice cannot resolve is left; the code generator's explicit
+  instantiations stay emitted when used (clang emits them weak_odr: the names check). `CPP_EXPLICIT_TRACE` traces a refusal.
+- Found with it, **C++23's P2266** ([expr.prim.id.unqual]/3, [basic.lval]/4; `arbace.cpp.sema/p2266-xvalue`): in a return statement
+  an id-expression naming an implicitly movable entity (an automatic variable or a parameter of object type, or of rvalue
+  reference to object type, not volatile) is an xvalue at C++23, whatever the return type, deduced ones (`-> auto`, `auto&&`)
+  too. cpp23/elision7's `template X&& f2<X>(X&&)` instantiated `return x;` and reported a copy (an extra); P2266 binds it, and
+  makes `int& f6(int&& n) { return n; }` the error the test expects. Not built: P2266's throw operand (its try-block scope
+  condition: the slice does not track the enclosing try blocks).
+- Measure: the 69 dg-error files of the whole part with an explicit instantiation of a function (`.tmp/t7/f305.txt`; f9b81f1e3's tree
+  against this commit's, `.tmp/t7/tree305`): own passes 2 → 2, the extras 9 → 6 (elision7's 15, 30 and 43 gone, none new); the 34
+  files of C++23's elision and the implicit-move warnings (`.tmp/t7/f2266.txt`): 0 → 0 passes, extras 5 → 2, none new; the
+  every-10th sample with CP305's first half 108 → 108 (`.tmp/t7/rA`); concepts-lambda19 (CP290's withdrawn pass) is still not
+  judged: its error, a call of a lambda whose requires-clause fails, is not one the checker makes. The code generator: gen-list
+  over the 142 samples by this commit's tree (`.tmp/t7/g305`): 141 forms byte for byte the record's, rtti refused (P2266 changes no
+  sample: none returns a reference to a local or an rvalue reference parameter).
+- Probes: `.tmp/t7/e1.cpp` (`template int g<int>(int)` of a body reading `t.x`: the error at the member access; `ok<long>`, `ok(double)`
+  clean), `.tmp/t7/e2.cpp` (a pack's explicit arguments).

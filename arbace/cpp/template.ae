@@ -1709,6 +1709,46 @@
         (doseq [[_ cid] (:insts (tmpl tid))] (when (:from-primary (abi/cls cid)) (attach-member-template! cid o (:params (tmpl tid)))))))
     :template))
 
+(defn- explicit-fn-instantiation!
+  "CP305 (a), the checker: an explicit instantiation definition of a function template ([temp.explicit]/10: `template R
+  f<args>(params);` instantiates the definition there), its specialization found as an explicit specialization's is
+  ([temp.deduct.decl]: the written arguments, then deduction from its type) and its definition analyzed as a used one's
+  (made eager, entered in the order), so its errors are judged. A declaration whose template or arguments the slice
+  cannot resolve is left (the code generator's explicit instantiations stay as they were: emitted when used)."
+  [scope n]
+  (let [fname (:_fname n)
+        text (str (:_text n))
+        ;; the written template arguments after the name: `f<int, int, char>`
+        targs (let [m (re-matcher (re-pattern (str "(?<![A-Za-z0-9_])" (java.util.regex.Pattern/quote fname) "\\s*<")) text)]
+                (when (.find m)
+                  (let [i (.start m) b (dec (.end m))]
+                    (loop [j (inc b) d 1]
+                      (when (< j (count text))
+                        (let [c (.charAt text j)]
+                          (cond (= c (char 60)) (recur (inc j) (inc d))
+                                (= c (char 62)) (if (= d 1) (subs text i (inc j)) (recur (inc j) (dec d)))
+                                (= c (char 40)) nil
+                                :else (recur (inc j) d))))))))
+        ft (try (dissoc (abi/unq (sema/resolve-type scope (:_ftype n))) :cq) (catch arbace.lang.ExceptionInfo _ nil))
+        es (try (sema/lookup scope fname) (catch arbace.lang.ExceptionInfo _ nil))
+        found (when (and ft (abi/fn? ft))
+                (keep (fn [e]
+                        (when (and (= :tmpl (:e e)) (= :fn (:tk e)))
+                          (let [t (tmpl (:id e))]
+                            (try (let [ex (if targs (explicit-args t targs scope) [])
+                                       b (atom (into {} (map-indexed vector ex)))]
+                                   (when (deduce-type b (:id t) (sym-sig t) ft)
+                                     (when-let [args (finish-deduction t @b)] [t args])))
+                                 (catch arbace.lang.ExceptionInfo x (when (System/getenv "CPP_EXPLICIT_TRACE") (binding [*out* *err*] (println "explicit instantiation" fname targs (.getMessage x)))) nil)))))
+                      es))]
+    (when (= 1 (count found))
+      (let [[t args] (first found)
+            fid (try (instantiate-fn (:id t) args) (catch arbace.lang.ExceptionInfo _ nil))
+            f (when fid (sema/fnd fid))]
+        (when (:lazy f)
+          (upd-fn! fid dissoc :lazy)
+          (swap! sema/*order* conj [:fn fid]))))))
+
 (defn declare-template
   "The :declare hook: a template's declaration node entered (nil when the node is not one of a template's)."
   [scope n]
@@ -1791,7 +1831,9 @@
     ;; its members are the library's, clang emitting none of them at -O0 but the always-inline ones,
     ;; CodeGenModule::shouldEmitFunction with TSK_ExplicitInstantiationDeclaration)
     "ExplicitInstantiationDecl"
-    (do (when-let [[_ t] (and (:_extern n) (re-matches #"(?s)\s*(?:class|struct)\s+(.*?)\s*" (str (:_text n))))]
+    (do (when (and (not (:_extern n)) (:_fname n) (:_ftype n) (sema/checking?))
+          (explicit-fn-instantiation! scope n))
+        (when-let [[_ t] (and (:_extern n) (re-matches #"(?s)\s*(?:class|struct)\s+(.*?)\s*" (str (:_text n))))]
           (when-let [ty (sema/resolve-type scope t)]
             (when (abi/class? ty) (abi/update-cls! (:id ty) assoc :extern-inst true))))
         ;; extern template R f(params): the function template's specialization of that type (deduced from it,
