@@ -1,6 +1,7 @@
-;; Ported from CPython 3.14.10, Python/symtable.c and Python/future.c (https://www.python.org/ftp/python/3.14.10/Python-3.14.10.tar.xz):
+;; Ported from CPython 3.14.10, Python/symtable.c and Python/future.c (https://www.python.org/ftp/python/3.14.10/Python-3.14.10.tar.xz),
+;; and 3.15.2's symtable.c deltas (https://www.python.org/ftp/python/3.15.2/Python-3.15.2.tar.xz; queue 239):
 ;; Copyright (c) 2001 Python Software Foundation; All Rights Reserved. Licensed under the PSF License Agreement for
-;; Python 3.14 (LICENSE.md).
+;; Python 3.14 and 3.15 (LICENSE.md).
 (ns arbace.python.scope
   "pyi's scope analysis (doc/python/PYI-SPEC.md §2; doc/python/PYTHON-SURVEY.md §6.2 (1); PY5a): the symbol table of a
   module of Python forms, as CPython 3.14.10's Python/symtable.c builds it, so that it can be checked against
@@ -15,8 +16,14 @@
 
   table: the module's forms -> (block TYPE \"NAME\" {\"SYMBOL\" FLAGS ...} [CHILD ...]), the form of
   tools/pydump/pydump.py scopes."
-  (:require [arbace.repr.python.print :as pp]
+  (:require [arbace.repr.python.lex :as lex]
+            [arbace.repr.python.print :as pp]
             [arbace.string :as str]))
+
+(defn- py315?
+  "The reader's Python is 3.15 (arbace.repr.python.lex/*minor*, REPR_PYTHON_VERSION=3.15; queue 239): 3.15.2's symtable.c"
+  []
+  (>= (long lex/*minor*) 15))
 
 ;; ---- the flags (Include/internal/pycore_symtable.h) ----
 
@@ -62,7 +69,7 @@
            :nested (boolean (and c (or (:nested c) (function-like (:type c)))))
            :comprehension nil :generator false :coroutine false :comp-inlined false :comp-iter-target false
            :comp-iter-expr 0 :can-see-class false :needs-class-closure false :needs-classdict false
-           :has-conditional-annotations false :in-conditional false :in-unevaluated false :annotation-block nil
+           :has-conditional-annotations false :in-conditional false :in-try false :in-unevaluated false :annotation-block nil
            :mangled-names nil :scope-info nil})))
 
 (defn- function-like? [b] (boolean (function-like (:type @b))))
@@ -126,7 +133,7 @@
         old (get (:symbols @b) mangled)
         val (if old
               (do (when (and (has? flag DEF_PARAM) (has? old DEF_PARAM))
-                    (syntax-error (str "duplicate argument '" name "' in function definition")))
+                    (syntax-error (str (if (py315?) "duplicate parameter '" "duplicate argument '") name "' in function definition")))
                   (when (and (has? flag DEF_TYPE_PARAM) (has? old DEF_TYPE_PARAM))
                     (syntax-error (str "duplicate type parameter '" name "'")))
                   (bit-or old flag))
@@ -223,11 +230,13 @@
     (when unevaluated (swap! (:cur @st) assoc :in-unevaluated false))
     (exit! st)))
 
-(defn- visit-annotations! [st a returns]
+(defn- visit-annotations! [st a returns fb]
   (let [cur (:cur @st)
         is-in-class (:can-see-class @cur)
         current-type (:type @cur)]
     (keyed! st a (enter! st "__annotate__" :annotation))
+    ;; 3.15: ste_function_name, the function's name in its __annotate__'s qualname (compiler_set_qualname)
+    (when (py315?) (swap! (:cur @st) assoc :function-name (:name @fb)))
     (when (or is-in-class (= :class current-type))
       (swap! (:cur @st) assoc :can-see-class true)
       (add-def! st "__classdict__" USE))
@@ -294,7 +303,7 @@
       (enter-type-param-block! st nm true (boolean (some some? (:kw-defaults ao))) false tps)
       (doseq [tp tps] (visit-type-param! st tp)))
     (let [fb (keyed! st x (new-block st nm :function))]
-      (visit-annotations! st args (:returns o))
+      (visit-annotations! st args (:returns o) fb)
       (enter-existing! st fb true)
       (when async? (swap! fb assoc :coroutine true))
       (visit-arguments! st args)
@@ -336,6 +345,14 @@
       (add-def! st store DEF_IMPORT)
       (when (not= :module (:type @(:cur @st)))
         (syntax-error "import * only allowed at module level"))))))
+
+(defn- check-lazy-import-context!
+  "3.15's check_lazy_import_context: a lazy import only outside a try statement, a function and a class"
+  [st import-type]
+  (let [c @(:cur @st)]
+    (cond (:in-try c) (syntax-error (str "lazy " import-type " not allowed inside try/except blocks"))
+          (= :function (:type c)) (syntax-error (str "lazy " import-type " not allowed inside functions"))
+          (= :class (:type c)) (syntax-error (str "lazy " import-type " not allowed inside classes")))))
 
 (defn- directive-check! [st nm global?]
   (let [cur (lookup st (:cur @st) nm)]
@@ -415,16 +432,25 @@
                                       (body! b)))))
       raise (when (some? (first p)) (e! (first p)) (e! (:from o)))
       (try try-star)
-      (conditional! st #(do (body! (first p))
-                            (doseq [hd (second p)]
-                              (let [[_ [b] ho _] (pp/node hd)]
-                                (e! (:type ho))
-                                (when-let [n (:name ho)] (at hd (add-def! st (ident n) DEF_LOCAL)))
-                                (body! b)))
-                            (body! (:else o)) (body! (:finally o))))
+      (conditional! st #(let [blk (:cur @st) was (:in-try @blk)]
+                          ;; 3.15's ENTER_TRY_BLOCK: the try statement's every part (a lazy import there is refused)
+                          (swap! blk assoc :in-try true)
+                          (body! (first p))
+                          (doseq [hd (second p)]
+                            (let [[_ [b] ho _] (pp/node hd)]
+                              (e! (:type ho))
+                              (when-let [n (:name ho)] (at hd (add-def! st (ident n) DEF_LOCAL)))
+                              (body! b)))
+                          (body! (:else o)) (body! (:finally o))
+                          (swap! blk assoc :in-try was)))
       assert (do (e! (first p)) (e! (second p)))
-      import (doseq [a (first p)] (visit-alias! st a))
-      import-from (do (doseq [a (second p)] (visit-alias! st a))
+      import (do (when (:lazy o) (check-lazy-import-context! st "import"))
+                 (doseq [a (first p)] (visit-alias! st a)))
+      import-from (do (when (:lazy o)
+                        (check-lazy-import-context! st "from ... import")
+                        (when (some #(= "*" (if (seq? %) (ident (second %)) (ident %))) (second p))
+                          (syntax-error "lazy from ... import * is not allowed")))
+                      (doseq [a (second p)] (visit-alias! st a))
                       (when (and (= "__future__" (some-> (first p) ident)) (not (:level o))
                                  (not (contains? (:future-stmts @st) x)))
                         (syntax-error "from __future__ imports must occur at the beginning of the file")))
@@ -519,6 +545,11 @@
           (syntax-error "asynchronous comprehension outside of an asynchronous function"))
         (when async? (swap! (:cur @st) assoc :coroutine true))))))
 
+(defn- anon-name
+  "A lambda's or comprehension's block name: 3.14's _Py_ID(lambda), 3.15's _Py_STR(anon_lambda) (<lambda>)"
+  [nm]
+  (if (py315?) (str "<" nm ">") nm))
+
 (defn- visit-expr*! [st x ctx]
   (cond
     (symbol? x) (when-not (constant-symbols x) (visit-expr! st (list 'name x) ctx))
@@ -545,17 +576,17 @@
         unary-op (e! (second p))
         lambda (let [ao (args-of (first p))]
                  (es! (:defaults ao)) (es! (:kw-defaults ao))
-                 (keyed! st x (enter! st "lambda" :function))
+                 (keyed! st x (enter! st (anon-name "lambda") :function))
                  (visit-arguments! st (first p))
                  (e! (second p))
                  (exit! st))
         if-exp (es! p)
         dict (do (es! (first p)) (es! (second p)))
         (set list tuple) (doseq [v (first p)] (visit-expr! st v ctx))
-        list-comp (handle-comprehension! st x :list "listcomp" (second p) (first p) nil)
-        set-comp (handle-comprehension! st x :set "setcomp" (second p) (first p) nil)
-        dict-comp (handle-comprehension! st x :dict "dictcomp" (nth p 2) (first p) (second p))
-        generator-exp (handle-comprehension! st x :generator "genexpr" (second p) (first p) nil)
+        list-comp (handle-comprehension! st x :list (anon-name "listcomp") (second p) (first p) nil)
+        set-comp (handle-comprehension! st x :set (anon-name "setcomp") (second p) (first p) nil)
+        dict-comp (handle-comprehension! st x :dict (anon-name "dictcomp") (nth p 2) (first p) (second p))
+        generator-exp (handle-comprehension! st x :generator (anon-name "genexpr") (second p) (first p) nil)
         (yield yield-from)
         (do (raise-if-annotation-block! st "yield expression")
             (e! (first p))

@@ -8,8 +8,15 @@
   :msg ...}. Arbace's own, written from the language reference and CPython's observable behaviour."
   (:require [arbace.python.scope :as sc]
             [arbace.python.ir :as ir]
+            [arbace.repr.python.lex :as lex]
             [arbace.repr.python.print :as pp]
             [arbace.string :as str]))
+
+(defn- py315?
+  "The reader's Python is 3.15 (arbace.repr.python.lex/*minor*, REPR_PYTHON_VERSION=3.15; queue 239): 3.15.2's codegen.c
+  and compile.c where they differ from 3.14.10's"
+  []
+  (>= (long lex/*minor*) 15))
 
 (def ^:dynamic *pos*
   "The :pos of the innermost statement or expression being compiled (mode :full's forms), for a SyntaxError's location"
@@ -817,20 +824,24 @@
 (defn- qualname-of
   "compiler_set_qualname: name under the enclosing unit u, an annotation scope's parent looked through, a name declared
   global in it (a def or class) unqualified"
-  [u kind name comp?]
+  [u kind name comp? fname]
   (let [annotation? (fn [v] (#{:annotation :type-params :type-alias :type-variable} (:kind @v)))
         size (loop [v u n 0] (if v (recur (:parent @v) (inc n)) n))]
-    (if (or (<= size 1) (and (= size 2) (annotation? u)))
+    (if (and (= size 2) (annotation? u))
       name
-      (let [parent (if (annotation? u) (:parent @u) u)
-            scope (when (and (#{:function :class} kind) (not comp?))
-                    (sc/scope-of* (get (:symbols @(:block @parent)) (sc/mangle (:private @parent) name) 0)))]
-        (cond (= scope 2) name
-              (and (#{:function :lambda} (:kind @parent)) (not (:comp? @parent))) (str (:qualname @parent) ".<locals>." name)
-              :else (str (:qualname @parent) "." name))))))
+      (let [base (when (> size 1)
+                   (let [parent (if (annotation? u) (:parent @u) u)
+                         scope (when (and (#{:function :class} kind) (not comp?))
+                                 (sc/scope-of* (get (:symbols @(:block @parent)) (sc/mangle (:private @parent) name) 0)))]
+                     (cond (= scope 2) nil
+                           (and (#{:function :lambda} (:kind @parent)) (not (:comp? @parent))) (str (:qualname @parent) ".<locals>")
+                           :else (:qualname @parent))))
+            ;; 3.15: a function's __annotate__ under the function's name (ste_function_name)
+            base (if fname (if base (str base "." fname) fname) base)]
+        (if base (str base "." name) name)))))
 
 (defn- function-code! [u block kind name args body-thunk opts]
-  (let [qual (qualname-of u kind name (:comp? opts))
+  (let [qual (qualname-of u kind name (:comp? opts) (:function-name @block))
         cu (doto (new-unit block kind name qual u)
              (swap! (fn [m] (cond-> (assoc m :comp? (:comp? opts)) (:private opts) (assoc :private (:private opts))))))
         ao (when args (nth (node args) 2))]
@@ -1114,7 +1125,9 @@
   "Pushes the __annotate__ function of a function's annotations when it has any; true then"
   [u args returns]
   (let [ao (nth (node args) 2)
-        anns (concat (for [a (concat (:args ao) (:posonly ao)) :let [an (arg-ann a)] :when an] [(arg-name a) an])
+        ;; 3.15's codegen_annotations_in_scope: the positional-only parameters' first (3.14: after the others')
+        anns (concat (for [a (if (py315?) (concat (:posonly ao) (:args ao)) (concat (:args ao) (:posonly ao)))
+                           :let [an (arg-ann a)] :when an] [(arg-name a) an])
                      (when-let [v (:vararg ao)] (when-let [an (arg-ann v)] [[(arg-name v) an]]))
                      (for [a (:kwonly ao) :let [an (arg-ann a)] :when an] [(arg-name a) an])
                      (when-let [k (:kwarg ao)] (when-let [an (arg-ann k)] [[(arg-name k) an]]))
@@ -1476,12 +1489,35 @@
         gens (if (= h 'dict-comp) (nth p 2) (second p))
         [_ [_ it0] o0 _] (node (first gens))
         kind ({'list-comp :list 'set-comp :set 'dict-comp :dict 'generator-exp :generator} h)
+        elt (first p)
+        ;; 3.15 (PEP 798, codegen_sync_comprehension_generator): a starred element unpacked into the result, and a
+        ;; dict comprehension's **mapping (no value) merged into it
+        star (when (starred? elt) (first (second (node elt))))
         elt! (fn [cu n]
                (case kind
-                 :list (do (expr! cu (first p)) (emit! cu :list-append (inc n)))
-                 :set (do (expr! cu (first p)) (emit! cu :set-add (inc n)))
-                 :dict (do (expr! cu (first p)) (expr! cu (second p)) (emit! cu :map-add (inc n)))
-                 :generator (do (expr! cu (first p)) (emit! cu :yield-value nil) (emit! cu :pop nil))))
+                 :list (if star
+                         (do (expr! cu star) (at-node! cu elt #(emit! cu :list-extend (inc n))))
+                         (do (expr! cu elt) (emit! cu :list-append (inc n))))
+                 :set (if star
+                        (do (expr! cu star) (at-node! cu elt #(emit! cu :set-update (inc n))))
+                        (do (expr! cu elt) (emit! cu :set-add (inc n))))
+                 :dict (if (nil? (second p))
+                         (do (expr! cu elt) (emit! cu :dict-update (inc n)))
+                         (do (expr! cu elt) (expr! cu (second p)) (emit! cu :map-add (inc n))))
+                 :generator
+                 (if star
+                   ;; each item of the iterable yielded in turn (GET_ITER, FOR_ITER, YIELD_VALUE, POP_TOP, JUMP, END_FOR)
+                   (do (expr! cu star)
+                       (at-node! cu elt
+                                 #(let [_ (emit! cu :get-iter nil)
+                                        start (here cu)
+                                        d (depth cu)
+                                        exit (jump! cu :for-iter)]
+                                    (emit! cu :yield-value nil) (emit! cu :pop nil)
+                                    (emit-nl! cu :jump start)
+                                    (label! cu exit)
+                                    (set-depth! cu (dec d)))))
+                   (do (expr! cu elt) (emit! cu :yield-value nil) (emit! cu :pop nil)))))
         build! (fn [cu] (case kind :list (emit! cu :build-list 0) :set (emit! cu :build-set 0) :dict (emit! cu :build-map 0) nil))]
     (if (:comp-inlined @block)
       ;; inlined: its own names are hidden fast locals of this unit, their outer values saved and restored around it
@@ -1839,11 +1875,29 @@
                 (swap! u assoc :line wl :loc wp)
                 (set-depth! u d)))))))))
 
-(defn- import! [u names]
+(defn- in-exception-handler?
+  "_PyCompile_InExceptionHandler: a try statement's body or handler, a finally body's exceptional copy (a with is not one)"
+  [u]
+  (boolean (some #(#{:try-except :finally-try :finally-end :handler :handler-named :handler-star} (:kind %)) (:fblocks @u))))
+
+(defn- import-name!
+  "IMPORT_NAME of name nm; under 3.15 its ARG [NAME-INDEX FLAG] (codegen_import, codegen_from_import): FLAG 1 a lazy
+  import (only in the module's scope), 2 an import forced eager (inside a try statement or handler, outside the module's
+  scope, import *), 0 one the lazy-import mode may make lazy; under 3.14 the name's index alone"
+  [u nm lazy? star?]
+  (if (py315?)
+    (let [module? (= :module (:kind @u))]
+      (when (and lazy? star?) (syntax-error "cannot lazy import *"))
+      (when (and lazy? (not module?)) (syntax-error "lazy imports only allowed in module scope"))
+      (emit! u :import-name [(name-index! u nm)
+                             (cond lazy? 1 (or (in-exception-handler? u) (not module?) star?) 2 :else 0)]))
+    (emit! u :import-name (name-index! u nm))))
+
+(defn- import! [u names lazy?]
   (doseq [a names]
     (let [[nm as] (if (seq? a) (let [[_ [n] o _] (node a)] [(ident n) (some-> (:as o) ident)]) [(ident a) nil])]
       (load-const! u 0) (load-const! u nil)
-      (emit! u :import-name (name-index! u nm))
+      (import-name! u nm lazy? false)
       (if as
         (do (doseq [part (rest (str/split nm #"\."))] (emit! u :import-from (name-index! u part)) (emit! u :swap 2) (emit! u :pop nil))
             (name-op! u as :store))
@@ -1856,7 +1910,7 @@
         pairs (when-not star (for [a names] (if (seq? a) (let [[_ [n] ao _] (node a)] [(ident n) (some-> (:as ao) ident)]) [(ident a) nil])))]
     (load-const! u level)
     (load-const! u {:tuple (if star ["*"] (mapv first pairs))})
-    (emit! u :import-name (name-index! u (if md (ident md) "")))
+    (import-name! u (if md (ident md) "") (:lazy o) star)
     (if star
       (emit! u :import-star nil)
       (do (doseq [[n as] pairs]
@@ -1939,7 +1993,7 @@
                  (at-node! u t #(emit! u :raise 1))
                  (set-depth! u d)
                  (doseq [j @js] (label! u j))))
-      import (import! u (first p))
+      import (import! u (first p) (:lazy o))
       import-from (import-from! u x)
       (global nonlocal) nil
       function-def (function-def! u x false)
@@ -2080,6 +2134,9 @@
           (and (= 'unary-op h) (= '- (second k)))
           (let [[v r] (key-value (nth k 2 nil))]
             (if (integer? v) [(- v) (str (- v))] [[:form k] (pp/expr k 0)]))
+          ;; 3.15: +NUMBER (fold_const_match_patterns' PyNumber_Positive): the number's own key
+          (and (= 'unary-op h) (= '+ (second k)))
+          (key-value (nth k 2 nil))
           (= 'attribute h) nil
           (= 'str h) (let [v (string-token-value k)] [[:str v] (py-repr-str v)])
           (= 'bytes h) (let [v (string-token-value k)] [[:str v] (pp/expr k 0)])
