@@ -2492,3 +2492,39 @@ The user accepted the four as recommended (about 06:15). doc/scheme/SCHEME-SURVE
 - Numbers: Scheme's independence 99.92 to 100.0 (judge 0.996 to 1.0: the read check reads no Chez dump), completeness 97.41 (98.88) and
   maturity 100 unchanged. Proposed: SCS19 (`string->number`'s syntax), SCS20 (the Unicode scan in `si-check`), SCS21 (titlecasing's word breaks
   from WordBreakProperty.txt).
+
+## 2026-11-09: OC203 (a), OC204 (a) (= OC195 (a)), OC205 (a) built: ocamltest's hooks ported, the four second programs and signal run (branch `ocaml-props`, from `ocaml-compl`'s fb8a73f19)
+
+The user's decisions of the morning (about 06:15, as recommended), relayed by the main session. Source studied: OCaml 5.5.0's
+ocamltest (the pinned tarball's `ocamltest/main.ml` `test_file`'s `install_hook`, `actions.ml`'s `run`, `actions_helpers.ml`'s
+`run_hook` and `check_output`, `builtin_actions.ml`'s `initialize_test_exit_status_variables`, `testsuite/Makefile`'s `SORT`), ported
+as a rule into bin/oi's runners (doc/ocaml/OCAML-SURVEY.md, "As built: OC203-OC205"):
+
+- OC203 (a): every run test's `TEST.run` and `TEST.check-program-output` hooks run as ocamltest runs them, `sh HOOK` in the build
+  directory with ocamltest's variables, in oi's runner, the references', and the AOT light and compiled levels' (`hook_vars`,
+  `prog_script`, `hook_run`, `hook_check`). The corpus takes the tests whose check is their hook (lib-threads/signal); swapchan's and tls's
+  own-verdict exceptions left, their reference rows re-recorded through the hooks (`bin/oi record-ref --only-list` of swapchan, tls and
+  signal with the host's OCaml 5.5.0, ocamlc and ocamlopt, by hand: each sorted output's sha256 is now its `.reference`'s, 2aba5ace for
+  swapchan, d73f64ff for tls, where before swapchan's both runs and tls's ocamlopt run were unsorted interleavings; signal's row dropped,
+  a helper test); tls passes at the AOT light level (was a known schedule failure); the compiled level's runner takes the hooks, its
+  record not rerun here (tls's `aot-compiled-known.edn` line kept until the night's compiled run). `record-ref` skips the tests that
+  build a helper.
+- OC204 (a): header.awk's helper mode takes a helper of OCaml alone; quotecommand, redirections, wait_nohang and test_unix_cmdline
+  run and pass by their own verdict at oi's level (both paths), the AOT levels keep `:ocamltest-tools`.
+- OC205 (a): recorded; C helpers stay on `oi cmain`.
+
+Alternatives considered: keeping bin/oi byte-identical (the native library's key hashes it) by overriding its functions from a file of
+bin/lib/oi/: rejected as duplicated definitions; the library is rebuilt once (about 8.5 minutes, `OI_LIB_JOBS=1`) and the night's
+`bin/oi stdlib` rebuilds it after the merge in any case. Applying a hook's response file's modifiers: not ported (no corpus test's hook
+writes one), a non-empty response is a note of the row.
+
+Checks: the nine by `--only-list` on both paths (9 of 9), `--aot` (2 pass, 7 classed), the essential list (58 of 58, control differs),
+`own-verdicts --check`, the five judgments, `bin/oi test`, `bin/reap` and `crops-score --judge --strict` (0 problems), `bin/gate --plan`.
+Scores: OCaml completeness 81.6 to **81.75** (eval 460 / 211 / 0 to 465 / 207 / 0; AOT 405 / 203 / 63 to 406 / 202 / 64). Proposed OC206
+(the OCaml helpers at the AOT levels).
+
+Also: `bin/oi suite rollup` failed on `ocaml-compl`'s records (27 files "run without a level's result": programs oi runs that the AOT
+levels class by header); `test/ocaml/testsuite_check.ae` gives them their AOT class, a commit of its own (86d8b6c47) to pick onto `next`
+before the night's `oi-check`. Checks by list on both paths, the essential list with its control, own-verdicts --check, the five judgments
+and the rollup: 0 failing. Scores: OCaml completeness 81.58% to 81.75% (eval 460/211/0 to 465/207/0, AOT 405/203/63 to 406/202/64),
+maturity 100%, independence 87.4%. Proposed OC206 (the AOT levels' helpers), OC207 (a control that runs a hook).
