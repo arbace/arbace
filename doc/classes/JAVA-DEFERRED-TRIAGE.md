@@ -6513,8 +6513,8 @@ On `java-props2` (`java-night` at `33d04049c` with JCS300 (c), JCS285 (b), JCS31
 JCS324 (a), JCS256 (a)'s switch written): the joint javac check (`.tmp/night7/all9-run.sh`) 3,315 files, 0 errors, 6,937
 classes (20 s, 1.0 GB); `bin/jrt-convert derive --check` 79 overlays, 0 not as derived; `bin/jrt test --arch amd64 --package jrt`
 ok (1.6 GB) and `bin/jrt build --arch amd64 --package jrt` (go vet) clean; `bin/gate --plan` 50 essential steps, no table error.
-`bin/reap` judges 15 problems where `java-night` has 11 before the night's records: the four are `:rmi`'s class counts (10 interp,
-8 compiled from `:net`, the cells' sums unchanged), recorded by the night's `bin/reap --record` with the rest.
+`bin/reap`: after `java-night`'s own re-record (187a55e8b, merged) and the day's classes, `bin/reap --record` on the branch
+(the classes' rows alone move), then 0 problems; `bin/crops-score --judge --strict` 0 problems, the scores unchanged.
 
 ## As built: JCS304 (b), JCS293: `Runtime.Version.parse` and its parts, one port (branch `java-props2`)
 
@@ -6661,8 +6661,8 @@ JAVA_CHECK_EXE=$PWD/target/arbace-go/amd64/arbace J2G_GO_EXE=$PWD/target/arbace-
   --only '^(t04598|t04684|t04723|t04830|t04832|t04869|t04870|t05256|t04253|t05046|t07651|t08142|t05995|t05996|t06042|t06326) ' \
   --save .tmp/props2-night/check
 # 6. the whole-corpus rerun (night 11's, unchanged commands) compiles JCS300 (c)'s 57 by itself (REPR_JAVA_EXE set); then
-#    bin/reap --record and bin/crops-score --record with the night's records: :rmi, :rmi-connectors, :hotspot-diagnostic,
-#    :hotspot-beans and :define-bytes move 18 interp and 17 compiled rows' classes (9 a level from deferred to by design)
+#    bin/reap --record and bin/crops-score --record with the night's records (the day's classes :rmi, :rmi-connectors,
+#    :hotspot-diagnostic, :hotspot-beans, :define-bytes are in the branch's matrix already)
 ```
 
 **Risks and fallbacks.** (1) Parameter refused tonight (its bridges need AnnotatedElement's generics in the edge, its
