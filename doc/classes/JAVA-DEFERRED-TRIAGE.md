@@ -6523,8 +6523,8 @@ jrt's hand-written `Runtime$Version` (go/arbace/jrt/system.ae) gains jdk26u's `V
 0; the empty string too, whose `Integer.parseInt` throws); `VersionPattern.VSTR_PATTERN` as a Go regexp, anchored as
 `Matcher.matches`; each number by `Integer.parseInt` (`NumberFormatException` "For input string: \"S\"" above `MAX_VALUE`); the
 build; the three `IllegalArgumentException`s of `+`. The struct keeps the numbers of any count (`nums`, beside the four), the build
-(`compareTo`'s `compareBuild`, `equals`, `hashCode`'s `Optional<Integer>`, `toString`'s `+BUILD`), and the deprecated `major`,
-`minor`, `security`. `bin/jrt manifest` (the frozen JVM's reflection) adds `parse`, `major`, `minor`, `security` to the manifest and
+(`compareTo`'s `compareBuild`, `equals`, `hashCode`'s `Optional<Integer>`, `toString`'s `+BUILD`), the deprecated `major`,
+`minor`, `security`, and `compareToIgnoreOptional`/`equalsIgnoreOptional` (Basic.java's other two; jdk26u's `compare(obj, true)`). `bin/jrt manifest` (the frozen JVM's reflection) adds `parse`, `major`, `minor`, `security` and the two `IgnoreOptional`s to the manifest and
 the member tables, nothing else moving. `version()`, `pre()`, `build()` and `optional()` return translated `List` and `Optional`:
 j2g's support methods on `*Runtime_Version` (arbace/j2g/out.ae's support forms, `Optional.of`/`empty`, `Integer.valueOf`,
 `List.of`), named in `world-scan` so that j2g translates their calls, their callees rooted in main.ae, and entered into
