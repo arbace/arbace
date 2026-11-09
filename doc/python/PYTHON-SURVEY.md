@@ -4880,3 +4880,8 @@ on pyi's modules; each failing case was one example, and the examples' causes we
   and test_ctypes skips: unmeasured here.
 - **Check.** The probe `probe243.py` run by pyi's AOT equals `python3 -I -B`'s output line by line; its control compares a
   changed reference and must differ (the report's appendix).
+- **Found by the lib-test run, classed:** test_doctest's `test_DocTestFinder.non_Python_modules` is defined only `if
+  int.__doc__:`; pyi's built-in types carry no docstrings, so the case is not run (before and after 243): class
+  `:builtin-docstrings` (deferred). `bin/pyi lib-test --aot` of test_genexps, test_extcall, test_unpack, test_unpack_ex,
+  test_doctest, test_weakref at the head: 217 methods, 192 pass, 24 classed, 0 failing once that class exists (the run
+  before it: 1 failing, this one).
