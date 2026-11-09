@@ -1958,7 +1958,13 @@ own STG** (595 of 52 modules in the first slice) and 11,509 of the pack's kept f
 gained**. An intermediate run of the 112 lost `samples/Arrays`: Arr's equal bindings construct `Array` with its `Int` boxed, the
 pack's `-O2` layout unpacks it; the merge now keeps the pack's binding of any own one naming such a constructor (HF10-P7).
 
-With every own binding (`LIB_STG_REPLACE=all`): @@ALLTXT@@
+With every own binding (`LIB_STG_REPLACE=all`): 5,944 own bindings of the 109 modules (10,241 of the
+pack's kept): **28 of 63 pass, 31 lost** (the first slice's three failures, Base's `bindIO` among them, are gone; the set is now
+twice as large). The bugs list, by hsi's first error: `applying int64(0) to 1 arguments` (13 programs: an own binding called
+at another arity than the pack's callers assume, the `-O2` ABI's workers), `not an integer: <thunk ... bigNatCompare ...>` (5: an
+unlifted value let-bound lazily in an unequal binding), the bignum backend's `Backend.GMP` (5: HF10-P6), `no binding of raise#`
+(3: an unsaturated primop as a value), `unbound name` (3: a local lost by an unequal binding's STG), `unboxed tuple of the wrong
+size` (2), a segmentation fault (1). The default (`equal`) replaces only GHC's own `-O0` code by construction, and loses none.
 
 ### Checks
 
@@ -1967,7 +1973,7 @@ With every own binding (`LIB_STG_REPLACE=all`): @@ALLTXT@@
 | `bin/repr-haskell lib-stg` (112 modules, one process, about 8 minutes) | 2,473 of 3,310 bindings equal; the 55 of the first slice 857 of 1,149, none lost against it; the negative control 0 of 171 |
 | `bin/repr-haskell typecheck-check` | 24 of 24 modules equal, the control 13 of 24 (after the deriving, HasCallStack and evidence changes) |
 | `bin/repr-haskell lib-stg --run` (run-check twice, the front end in one shard, hsi at 2 GiB and 120 s) | on the pack 59 of 63 (62 of 63 as recorded); with 2,451 own bindings of 109 modules 59 of 63, 0 lost |
-| `LIB_STG_REPLACE=all` (every own binding of the 110 compiled modules) | @@ALL@@ |
+| `LIB_STG_REPLACE=all` (every own binding of the 109 compiled modules) | 5,944 own bindings: 28 of 63, 31 lost (the bugs list above) |
 
 The record `test/haskell/lib-stg-results.edn` keeps each module's stage and counts (`--record`; no step reads it yet: HF10-P2).
 

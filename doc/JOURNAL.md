@@ -956,7 +956,9 @@ eta expansion of stable unfoldings, IP's evidence kept to CorePrep, all three fo
   past level 12 to level 30 (`test/haskell/lib-stg.txt`, 112 modules, all made STG but the first slice's two foreign-import stops):
   2,473 of 3,310. Level 31's `GHC.Internal.IO.Encoding.UTF8` takes the Simplifier minutes an iteration (`utf8_decode`), past the
   900 s limit: the list stops before it (40 modules of levels 31 to 45 measured: 594 of 1,063).
-- **Checks**: typecheck-check 24 of 24 (control 13); @@JRUNS@@
+- **Checks**: typecheck-check 24 of 24 (control 13); `lib-stg --run` over the 112 modules: 59 of 63 on the pack (62 of 63 as recorded), 59 of 63 with 2,451 own
+  bindings of 109 modules, none lost; `LIB_STG_REPLACE=all` (5,944 own bindings) 28 of 63, 31 lost: the bugs list (the `-O2`
+  ABI's arities, a lazily bound unlifted value, the GMP backend, an unsaturated primop, a lost local, an unboxed tuple's size).
 - **Left**: constraint tuples' variable superclasses, unboxed sums in Unarise, the bignum backend of lib-check's dumps, the `-O2`
   ABI against the `-O0` reference (SrcLoc), the Simplifier's case-of-case into join points where GHC keeps the case, foreign
   imports. Proposed: HF10-P6 (the dumps with `-DBIGNUM_NATIVE`), P7 (the pack's data until P3), P8 (unboxed sums), P9
