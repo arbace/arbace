@@ -771,7 +771,9 @@ public final class Runner {
                             throw new RuntimeException(x);
                         }
                     }
-            if (e instanceof Object[] && params != 1) return (Object[]) e;
+            // JUnit 5's MethodArgumentsProvider (the user guide's "Factory method arguments"): a one-dimensional
+            // reference array is the arguments, whatever the parameters' count; a multidimensional array is one argument
+            if (e instanceof Object[] && !e.getClass().getComponentType().isArray()) return (Object[]) e;
         }
         return new Object[] {e};
     }
