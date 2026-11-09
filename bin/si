@@ -24,11 +24,12 @@
 #                                        built into .tmp/si/si-light, psyntax.pp printed as Scheme text beside it
 #   bin/si run [--lib DIR]... FILE [ARG]...  a top-level program run on si (the light driver): psyntax on si
 #                                        expands it, si evaluates it; the status and output are the program's
-#   bin/si unicode-scan [--record]       SCS16 (b): (rnrs unicode)'s answers for every scalar value (test/scheme/unicode/scan.sps,
+#   bin/si unicode-scan [--record]       SCS16 (b), SCS21 (b): (rnrs unicode)'s answers for every scalar value (test/scheme/unicode/scan.sps,
 #                                        categories, properties, simple and full case mappings, the final sigma) on si against
 #                                        Chez 10.3.0's recorded ones (test/scheme/unicode-scan.edn: its lines' count and digest),
 #                                        byte for byte; --record (by hand): Chez runs it and the record is rewritten, with the
-#                                        lines where si differs (none at SCS16) as :differences
+#                                        lines where si differs (none at SCS16) as :differences; and string-titlecase's word breaks
+#                                        (wordbreak-scan.sps, every a<c>b, test/scheme/wordbreak-scan.edn)
 #   bin/si check [--ref-test] [--record-ref] [--record] [--only ID|FILE]...   (FILE: ids one a line, # comments; SM9's
 #                                        essential subsets test/scheme/essential-check.txt, essential-aot.txt)
 #                                        si's check: test/scheme/si/programs.edn's programs run on si, each by one judge
@@ -135,7 +136,7 @@ si_print_build() {
   local what=$1; shift
   local out=$light_dir/print src=$light_dir/print-root
   rm -rf "$out" "$src"; mkdir -p "$src/go/arbace"
-  ln -s "$root/go/arbace/scm.ae" "$root/go/arbace/scm" "$root/test/scheme/si-driver/go/arbace/sidriver.ae" \
+  ln -s "$root/go/arbace/scm.ae" "${SI_SCM_DIR:-$root/go/arbace/scm}" "$root/test/scheme/si-driver/go/arbace/sidriver.ae" \
     "$root/test/scheme/si-driver/go/arbace/sidriver" "$src/go/arbace/"
   "$root/bin/build-go" --print-only --tests --module arbace --work "$out" "$src" >&2
   local goroot=${ARBACE_GOROOT:-/root/tamago-go}
@@ -401,32 +402,67 @@ case $cmd in
     rm -rf "$aot_dir/bin/p_run" "$aot_mod/scmaot/p_run"; exit $rc ;;
   run) [ -x "$si_light" ] || light; si_exec "$@" ;;
   unicode-scan)
-    # SCS16 (b): si's (rnrs unicode) against Chez's recorded answers, byte for byte (the digest of Chez's output)
-    out=$light_dir/unicode-scan rec=$root/test/scheme/unicode-scan.edn; rm -rf "$out"; mkdir -p "$out"
+    # SCS16 (b), SCS21 (b): si's (rnrs unicode) against Chez's recorded answers, byte for byte (the digest of Chez's output): the scan of every
+    # scalar value (scan.sps, test/scheme/unicode-scan.edn) and the word-break scan of string-titlecase (wordbreak-scan.sps, wordbreak-scan.edn)
+    out=$light_dir/unicode-scan; rm -rf "$out"; mkdir -p "$out"
     [ -x "$si_light" ] || light
-    si_exec "$root/test/scheme/unicode/scan.sps" > "$out/si.txt" || { echo "unicode-scan: si's run failed" >&2; exit 1; }
-    if [ "${1:-}" = --record ]; then
-      "$CHEZ" --program "$root/test/scheme/unicode/scan.sps" > "$out/chez.txt" || { echo "unicode-scan: Chez's run failed" >&2; exit 1; }
-      ver=$("$CHEZ" --version 2>&1 | head -1)
-      diff "$out/chez.txt" "$out/si.txt" > "$out/diff.txt" || true
-      { echo ";; SCS16 (b) (the user 2026-11-09; doc/scheme/SCHEME-SURVEY.md, \"As built: SCS15-SCS18\"): Chez Scheme's answers to"
-        echo ";; test/scheme/unicode/scan.sps (every Unicode scalar value's (rnrs unicode) answers, one line a scalar value the program prints,"
-        echo ";; then the contextual cases), recorded by hand with \`bin/si unicode-scan --record\`: the lines' count and SHA-256; bin/si unicode-scan"
-        echo ";; holds si's output to them byte for byte. :differences, the lines where si's differ (\`diff CHEZ SI\`'s), each to be classed."
-        echo ";; Read with the Clojure reader."
-        printf '{:program "test/scheme/unicode/scan.sps" :chez "%s" :recorded "%s" :ucd "16.0.0"\n :lines %s :sha256 "%s"\n :differences [' \
-          "$ver" "$(date -u +%Y-%m-%d)" "$(wc -l < "$out/chez.txt")" "$(sha256sum < "$out/chez.txt" | cut -c1-64)"
-        { grep '^[<>]' "$out/diff.txt" || true; } | sed 's/\\/\\\\/g; s/"/\\"/g; s/^/"/; s/$/"/' | tr '\n' ' '
-        echo ']}'; } > "$rec"
-      echo "unicode-scan: recorded Chez $ver's answers ($(wc -l < "$out/chez.txt") lines) into test/scheme/unicode-scan.edn"
+    if [ "${1:-}" = --control ]; then
+      # SCS20 (b): the scans' negative controls, no Chez: a copy of the runtime whose generated tables are changed (IsNumeric by the N
+      # categories, as Go's unicode.IsNumber answered before SCS16: 8 lines of the scan must differ; the hyphenation point's Word_Break
+      # class MidLetter made Other: 1 line of the word-break scan, none of the first), built apart (.tmp/si-control), run on both scans and held to the
+      # lines of the unchanged si's output (which the check above holds to Chez's record); a control that passes (no line differs) or
+      # differs by another count fails
+      for scan in scan wordbreak-scan; do
+        [ -f "$out/$scan.si.txt" ] || si_exec "$root/test/scheme/unicode/$scan.sps" > "$out/$scan.si.txt" || { echo "unicode-scan: si's run of $scan failed" >&2; exit 1; }
+      done
+      cdir=$root/.tmp/si-control; rm -rf "$cdir"; mkdir -p "$cdir/scm"
+      cp "$root"/go/arbace/scm/*.ae "$cdir/scm/"
+      awk '/^\(go\/func IsNumeric /{n=1} n==1 && /^  \(inRanges numericRanges r\)\)/{print "  (let [c (Category r)] (or (== c \"Nd\") (== c \"Nl\") (== c \"No\"))))"; n=0; next}
+           /^\(go\/func WordBreak /{w=1} w==1 && /^  \(let \[lo 0 hi/{print "  (when (== r 0x2027) (return wbOther))"; w=0} {print}' "$root/go/arbace/scm/unicode.ae" > "$cdir/scm/unicode.ae"
+      cmp -s "$cdir/scm/unicode.ae" "$root/go/arbace/scm/unicode.ae" && { echo "unicode-scan --control: the generated tables were not changed" >&2; exit 1; }
+      (light_dir=$cdir si_light=$cdir/si-control; SI_SCM_DIR=$cdir/scm SI_GOCACHE=${SI_GOCACHE:-$root/.tmp/si/gocache}; export SI_SCM_DIR SI_GOCACHE
+       si_print_build build) || { echo "unicode-scan --control: the changed runtime does not build" >&2; exit 1; }
+      cp "$light_dir/psyntax.pp.ss" "$cdir/psyntax.pp.ss"
+      for spec in scan:8 wordbreak-scan:1; do
+        scan=${spec%%:*} want=${spec##*:}
+        GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-4} "$cdir/si-control" --pp "$cdir/psyntax.pp.ss" --lib "$root/scheme/lib" \
+          "$root/test/scheme/unicode/$scan.sps" > "$out/$scan.control.txt" || { echo "unicode-scan --control: the changed runtime's run of $scan failed" >&2; exit 1; }
+        got=$(diff "$out/$scan.si.txt" "$out/$scan.control.txt" | grep -c '^>' || true)
+        if [ "$got" = "$want" ]; then echo "unicode-scan --control: $scan differs in $got lines, as a control must (GTS81 (a))"
+        else echo "unicode-scan --control: $scan control: $got lines differ, $want expected (a control that passes fails the step)"; rc=1; fi
+      done
+      rm -rf "$cdir"
+      exit ${rc:-0}
     fi
-    want=$(sed -n 's/.*:sha256 "\([0-9a-f]*\)".*/\1/p' "$rec") n=$(sed -n 's/.*:lines \([0-9]*\).*/\1/p' "$rec")
-    have=$(sha256sum < "$out/si.txt" | cut -c1-64)
-    if [ "$have" = "$want" ]; then
-      echo "unicode-scan: si's (rnrs unicode) equal to Chez's recorded answers byte for byte ($n lines, UCD 16.0.0)"
-    else
-      echo "unicode-scan: si's answers DIFFER from Chez's recorded ones ($(wc -l < "$out/si.txt") lines against $n; --record runs Chez and lists the lines)"; exit 1
-    fi ;;
+    rc=0
+    for scan in scan wordbreak-scan; do
+      case $scan in scan) rec=$root/test/scheme/unicode-scan.edn what="every scalar value's (rnrs unicode) answers" ;;
+        *) rec=$root/test/scheme/wordbreak-scan.edn what="string-titlecase's word breaks, every a<c>b" ;; esac
+      prog=$root/test/scheme/unicode/$scan.sps
+      si_exec "$prog" > "$out/$scan.si.txt" || { echo "unicode-scan: si's run of $scan failed" >&2; exit 1; }
+      if [ "${1:-}" = --record ]; then
+        "$CHEZ" --program "$prog" > "$out/$scan.chez.txt" || { echo "unicode-scan: Chez's run of $scan failed" >&2; exit 1; }
+        ver=$("$CHEZ" --version 2>&1 | head -1)
+        diff "$out/$scan.chez.txt" "$out/$scan.si.txt" > "$out/$scan.diff.txt" || true
+        { echo ";; SCS16 (b), SCS21 (b) (the user 2026-11-09; doc/scheme/SCHEME-SURVEY.md, \"As built: SCS15-SCS18\", \"As built: SCS19-SCS21\"): Chez Scheme's answers to"
+          echo ";; test/scheme/unicode/$scan.sps ($what), recorded by hand with \`bin/si unicode-scan --record\`:"
+          echo ";; the lines' count and SHA-256; bin/si unicode-scan holds si's output to them byte for byte. :differences, the lines where"
+          echo ";; si's differ (\`diff CHEZ SI\`'s), each to be classed. Read with the Clojure reader."
+          printf '{:program "test/scheme/unicode/%s.sps" :chez "%s" :recorded "%s" :ucd "16.0.0"\n :lines %s :sha256 "%s"\n :differences [' \
+            "$scan" "$ver" "$(date -u +%Y-%m-%d)" "$(wc -l < "$out/$scan.chez.txt")" "$(sha256sum < "$out/$scan.chez.txt" | cut -c1-64)"
+          { grep '^[<>]' "$out/$scan.diff.txt" || true; } | sed 's/\\/\\\\/g; s/"/\\"/g; s/^/"/; s/$/"/' | tr '\n' ' '
+          echo ']}'; } > "$rec"
+        echo "unicode-scan: recorded Chez $ver's answers to $scan ($(wc -l < "$out/$scan.chez.txt") lines) into ${rec#$root/}"
+      fi
+      want=$(sed -n 's/.*:sha256 "\([0-9a-f]*\)".*/\1/p' "$rec") n=$(sed -n 's/.*:lines \([0-9]*\).*/\1/p' "$rec")
+      have=$(sha256sum < "$out/$scan.si.txt" | cut -c1-64)
+      if [ "$have" = "$want" ]; then
+        echo "unicode-scan: si's $scan equal to Chez's recorded answers byte for byte ($n lines, UCD 16.0.0)"
+      else
+        echo "unicode-scan: si's $scan answers DIFFER from Chez's recorded ones ($(wc -l < "$out/$scan.si.txt") lines against $n; --record runs Chez and lists the lines)"; rc=1
+      fi
+    done
+    exit $rc ;;
   check)
     rec_ref=0 rec=() only=() aot=0
     while [ $# -gt 0 ]; do

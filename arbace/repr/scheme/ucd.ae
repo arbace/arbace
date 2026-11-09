@@ -22,6 +22,12 @@
                                      categories, in unicode.ae (whitespace?, intraline?) and si's file (IsWhitespace,
                                      IsIntralineSpace), in place of Java's Character/getType and Go's unicode tables
 
+  Since SCS21 (b) (the user 2026-11-09) also auxiliary/WordBreakProperty.txt, for si's string-titlecase:
+
+    go/arbace/scm/unicode.ae         the word-break classes of UAX #29 (wb-names: Other, CR, LF, ... WSegSpace; a run is lo hi
+                                     class, WordBreak the lookup) in place of prim_char.ae's hand list; the rules WB1 to WB16
+                                     are prim_char.ae's (dcWordBreak), the classes' data the pin's
+
   The rule is stated here once more, apart from the report's (a second statement: the read check compares the reader's tables
   with the report's classes over every scalar value, SPEC 9): above U+007F an <initial> is a <constituent>, a character of Lu,
   Ll, Lt, Lm, Lo, Mn, Nl, No, Pd, Pc, Po, Sc, Sm, Sk, So or Co; a <subsequent> is that or Nd, Mc or Me.
@@ -233,6 +239,43 @@
       (when (and (#{"C" "S" "T"} st) (not= 1 (count m))) (throw (ex-info (str "CaseFolding.txt: a simple mapping of " (count m) " code points at " c) {}))))
     {:full (vec (sort-by first (for [[c st m] rows :when (#{"C" "F"} st)] [c m])))
      :simple (vec (sort-by first (for [[c st m] rows :when (#{"C" "S"} st)] [c (first m)])))}))
+
+;; ---- SCS21 (b) (the user 2026-11-09): UAX #29's word-break classes (auxiliary/WordBreakProperty.txt), for si's string-titlecase.
+;; Unicode's Default Case Conversion (3.13, toTitlecase) finds the word boundaries by UAX #29 (WB1 to WB16) and titlecases the first
+;; cased character after each; the classes are the property file's, Other (index 0) every code point it does not list.
+(def wb-names
+  "UAX #29's Word_Break values as WordBreakProperty.txt names them, in the order of the generated constants (index 0, Other, is the
+  default; the Go constants are wb + the name without underscores)."
+  ["Other" "CR" "LF" "Newline" "Extend" "ZWJ" "Regional_Indicator" "Format" "Katakana" "Hebrew_Letter" "ALetter" "Single_Quote"
+   "Double_Quote" "MidNumLet" "MidLetter" "MidNum" "Numeric" "ExtendNumLet" "WSegSpace"])
+
+(def ^:private wb-code (into {} (map-indexed (fn [i n] [n i]) wb-names)))
+
+(defn word-break
+  "WordBreakProperty.txt's classes (lines `XXXX..YYYY ; Name # ...`), a byte a code point, Other (0) where no line names it; a name
+  outside `wb-names` or a code point named twice is an error."
+  ^bytes [^String path]
+  (let [a (byte-array 0x110000)
+        seen (boolean-array 0x110000)]
+    (doseq [l (str/split-lines (slurp path))
+            :let [l (str/trim (first (str/split l #"#" 2)))]
+            :when (seq l)]
+      (let [[r nm] (map str/trim (str/split l #";"))
+            [lo hi] (str/split r #"\.\.")
+            lo (hex lo) hi (if hi (hex hi) lo)
+            c (or (wb-code nm) (throw (ex-info (str "WordBreakProperty.txt: unknown Word_Break value " nm) {})))]
+        (loop [i lo]
+          (when (<= i hi)
+            (when (aget seen i) (throw (ex-info (str "WordBreakProperty.txt: U+" (format "%04X" i) " listed twice") {})))
+            (aset seen i true)
+            (aset a i (byte c))
+            (recur (inc i))))))
+    a))
+
+(defn wb-runs
+  "The runs [lo hi class] of equal Word_Break class from the classes a, the Other runs left out."
+  [^bytes a]
+  (runs a))
 
 ;; ---- the generated files
 
@@ -475,6 +518,18 @@
        "    out))\n\n"
        "(go/func FoldCase \"FoldCase is s by full case folding (#!fold-case's identifiers and character names).\\n\" ^string [^string s]\n"
        "  (conv string (FoldRunes (conv (slice rune) s))))\n\n"
+       ";; UAX #29's Word_Break classes (SCS21 (b), WordBreakProperty.txt): the constants are the classes' indexes in wb-names, wbRuns the runs\n"
+       ";; lo hi class of the code points that are not Other\n"
+       "(go/const " (str/join " " (map-indexed (fn [i n] (str "[wb" (str/replace n "_" "") " " i "]")) wb-names)) ")\n\n"
+       "(go/var ^{:tag (slice int32)} wbRuns\n  (lit (slice int32)\n" (wrap (mapcat identity (wb-runs (:wb data))) 30 "    ") "))\n\n"
+       "(go/func WordBreak \"WordBreak is the Word_Break class of r (UAX #29, WordBreakProperty.txt of UCD 16.0.0), wbOther when it has none.\\n\" ^int [^rune r]\n"
+       "  (let [lo 0 hi (/ (len wbRuns) 3)]\n"
+       "    (while (< lo hi)\n"
+       "      (let [m (/ (+ lo hi) 2) b (* 3 m)]\n"
+       "        (cond (< r (aget wbRuns b)) (set! hi m)\n"
+       "              (> r (aget wbRuns (+ b 1))) (set! lo (+ m 1))\n"
+       "              :else (return (conv int (aget wbRuns (+ b 2)))))))\n"
+       "    wbOther))\n\n"
        (go-props data))))
 
 (def outputs
@@ -496,14 +551,15 @@
         f (case-folding (str dir "/CaseFolding.txt"))
         props (properties dir)
         simple (simple-mappings (str dir "/UnicodeData.txt"))
-        special (special-casing (str dir "/SpecialCasing.txt"))]
+        special (special-casing (str dir "/SpecialCasing.txt"))
+        wb (word-break (str dir "/auxiliary/WordBreakProperty.txt"))]
     (println (str "ucd: UnicodeData.txt " (count (runs a)) " runs of an assigned category; DerivedGeneralCategory.txt "
                   (if (empty? bad) "agrees code point for code point" (str "DIFFERS at " (pr-str bad)))
                   "; CaseFolding.txt " (count (:full f)) " full foldings (C, F), " (count (:simple f)) " simple (C, S)"
-                  "; the simple mappings " (pr-str (into {} (map (fn [[k v]] [k (count v)]) simple)))
+                  "; WordBreakProperty.txt " (count (wb-runs wb)) " runs of a class but Other; the simple mappings " (pr-str (into {} (map (fn [[k v]] [k (count v)]) simple)))
                   ", SpecialCasing.txt's unconditional " (pr-str (into {} (map (fn [[k v]] [k (count v)]) special)))
                   ", the properties' ranges " (pr-str (into (sorted-map) (map (fn [[k v]] [k (quot (count v) 2)]) props)))))
-    [{:cats a :fold f :props props :simple simple :special special} (empty? bad)]))
+    [{:cats a :fold f :props props :simple simple :special special :wb wb} (empty? bad)]))
 
 (defn -main [& [verb dir root out]]
   (let [status

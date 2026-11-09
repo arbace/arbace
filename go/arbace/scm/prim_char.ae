@@ -14,8 +14,6 @@
 (go/file "prim_char.go"
   :imports [])
 
-(go/const [wbOther 0] [wbAL 1] [wbNum 2] [wbENL 3] [wbExt 4] [wbMidL 5] [wbMidN 6] [wbMidNL 7])
-
 (go/func dcCategory "dcCategory is the general category name of r (Cn when it has none).\n" ^string [^rune r]
   (Category r))
 
@@ -34,25 +32,6 @@
 (go/func dcCased ^bool [^rune r] (IsCased r))
 
 (go/func dcIgnorable ^bool [^rune r] (IsCaseIgnorable r))
-
-;; dcWB is the word-break class of r (UAX #29, as far as titlecasing needs it).
-(go/func dcWB ^int [^rune r]
-  (switch r
-    (case [0x3A 0xB7 0x387 0x55F 0x5F4 0x2027 0xFE13 0xFE55 0xFF1A] (return wbMidL))
-    (case [0x2E 0x27 0x2018 0x2019 0x2024 0xFE52 0xFF07 0xFF0E] (return wbMidNL))
-    (case [0x2C 0x3B 0x37E 0x589 0x60C 0x60D 0x66C 0x7F8 0x2044 0xFE10 0xFE14 0xFE50 0xFE54 0xFF0C 0xFF1B] (return wbMidN))
-    (case [0x202F] (return wbENL)))
-  (let [c (Category r)]
-    (when (or (== c "Mn") (== c "Me") (== c "Mc") (== c "Cf"))
-      (return wbExt))
-    ;; a letter, Nl or Other_Alphabetic: Alphabetic (none of them Nd or Pc)
-    (when (IsAlphabetic r)
-      (return wbAL))
-    (when (== c "Nd")
-      (return wbNum))
-    (when (== c "Pc")
-      (return wbENL)))
-  wbOther)
 
 ;; ---------------------------------------------------------------------------------------
 ;; Case mappings
@@ -104,60 +83,145 @@
 
 (go/func dcFoldRunes ^{:tag (slice rune)} [^{:tag (slice rune)} rs] (FoldRunes rs))
 
-;; dcWordEnd is the end of the word of rs that starts at i (UAX #29's rules, without the scripts' exceptions).
-(go/func dcWordEnd ^int [^{:tag (slice rune)} rs ^int i]
-  (let [n (len rs)
-        j (+ i 1)]
-    (while (< j n)
-      (watchdogTick)
-      (let [c (dcWB (aget rs j))]
-        (if (or (== c wbAL) (== c wbNum) (== c wbENL) (== c wbExt))
-          (inc! j)
-          (if (or (== c wbMidL) (== c wbMidN) (== c wbMidNL))
-            (let [pc wbOther
-                  nc wbOther]
-              (for [p (- j 1)] (>= p i) (dec! p)
-                (watchdogTick)
-                (when (!= (dcWB (aget rs p)) wbExt)
-                  (set! pc (dcWB (aget rs p)))
-                  (break)))
-              (for [q (+ j 1)] (< q n) (inc! q)
-                (watchdogTick)
-                (when (!= (dcWB (aget rs q)) wbExt)
-                  (set! nc (dcWB (aget rs q)))
-                  (break)))
-              (if (or (and (or (== c wbMidL) (== c wbMidNL)) (== pc wbAL) (== nc wbAL))
-                      (and (or (== c wbMidN) (== c wbMidNL)) (== pc wbNum) (== nc wbNum)))
-                (inc! j)
-                (break)))
-            (break)))))
-    j))
+;; ---------------------------------------------------------------------------------------
+;; string-titlecase: Unicode's Default Case Conversion (3.13, toTitlecase): the word boundaries by UAX #29 (revision 45, Unicode
+;; 16.0.0; the classes are WordBreakProperty.txt's, unicode.ae's WordBreak), then in each word the first cased character mapped to
+;; titlecase and the characters after it to lowercase (SCS21 (b), the user 2026-11-09; doc/scheme/SCHEME-SURVEY.md, "As built:
+;; SCS19-SCS21"). Cased here is Chez Scheme 10.3.0's, found by test/scheme/unicode/wordbreak-scan.sps: a character that has a case
+;; mapping (UnicodeData.txt's simple uppercase, lowercase or titlecase one, or SpecialCasing.txt's), not Unicode's Cased property
+;; (U+00AA, U+0138 and the modifier letters, Cased by Other_Lowercase or without a mapping, do not start a word's titlecasing).
+;; WB3c (ZWJ x Extended_Pictographic) is left out: emoji-data.txt is not pinned (SCS23 proposes it), and the one Extended_Pictographic
+;; character with a case mapping that is not an ALetter would be needed for a titlecase to see it (U+24C2, the circled M, which has
+;; one, is an ALetter; recorded as believed, not proved, until the file is pinned).
+
+(go/func wbIgnorable "wbIgnorable is whether the class c is Extend, Format or ZWJ (WB4: they belong to the character before).\n" ^bool [^int c]
+  (or (== c wbExtend) (== c wbFormat) (== c wbZWJ)))
+
+(go/func wbHard "wbHard is whether the class c is CR, LF or Newline (WB3a, WB3b).\n" ^bool [^int c]
+  (or (== c wbCR) (== c wbLF) (== c wbNewline)))
+
+(go/func wbAHLetter ^bool [^int c] (or (== c wbALetter) (== c wbHebrewLetter)))
+
+(go/func wbMidNumLetQ ^bool [^int c] (or (== c wbMidNumLet) (== c wbSingleQuote)))
+
+(go/func wbBack "wbBack is the index of the character that stands for the unit ending before j (WB4: X (Extend | Format | ZWJ)* is X, but not after the start or CR, LF, Newline: such an ignorable stands for itself), -1 when j is 0.\n"
+  ^int [^{:tag (slice int)} wb ^int j]
+  (let [k (- j 1)]
+    (while (and (>= k 0) (wbIgnorable (aget wb k)))
+      (when (or (== k 0) (wbHard (aget wb (- k 1))))
+        (return k))
+      (dec! k))
+    k))
+
+(go/func wbForward "wbForward is the index of the unit after the one at i (the ignorables after it are its), len(wb) when there is none.\n"
+  ^int [^{:tag (slice int)} wb ^int i]
+  (let [k (+ i 1)]
+    (while (and (< k (len wb)) (wbIgnorable (aget wb k)))
+      (inc! k))
+    k))
+
+(go/func wbAt ^int [^{:tag (slice int)} wb ^int k]
+  (when (or (< k 0) (>= k (len wb)))
+    (return -1))
+  (aget wb k))
+
+(go/func dcWordBreak "dcWordBreak is whether UAX #29 puts a word boundary between the characters i-1 and i (0 < i < len(wb)) of the text whose Word_Break classes are wb: WB3 to WB16 in their order (WB1 and WB2 are the text's ends, WB3c is left out), the first that holds deciding.\n"
+  ^bool [^{:tag (slice int)} wb ^int i]
+  (let [a (aget wb (- i 1))
+        b (aget wb i)]
+    (when (and (== a wbCR) (== b wbLF))                          ; WB3
+      (return false))
+    (when (wbHard a)                                              ; WB3a
+      (return true))
+    (when (wbHard b)                                              ; WB3b
+      (return true))
+    (when (and (== a wbWSegSpace) (== b wbWSegSpace))             ; WB3d
+      (return false))
+    (when (wbIgnorable b)                                         ; WB4
+      (return false))
+    (let [l (wbBack wb i)
+          cl (wbAt wb l)
+          cb (wbAt wb (wbForward wb i))
+          cp (wbAt wb (wbBack wb l))]
+      (when (and (wbAHLetter cl) (wbAHLetter b))                                                       ; WB5
+        (return false))
+      (when (and (wbAHLetter cl) (or (== b wbMidLetter) (wbMidNumLetQ b)) (wbAHLetter cb))              ; WB6
+        (return false))
+      (when (and (or (== cl wbMidLetter) (wbMidNumLetQ cl)) (wbAHLetter b) (wbAHLetter cp))            ; WB7
+        (return false))
+      (when (and (== cl wbHebrewLetter) (== b wbSingleQuote))                                          ; WB7a
+        (return false))
+      (when (and (== cl wbHebrewLetter) (== b wbDoubleQuote) (== cb wbHebrewLetter))                   ; WB7b
+        (return false))
+      (when (and (== cl wbDoubleQuote) (== b wbHebrewLetter) (== cp wbHebrewLetter))                   ; WB7c
+        (return false))
+      (when (and (== cl wbNumeric) (== b wbNumeric))                                                   ; WB8
+        (return false))
+      (when (and (wbAHLetter cl) (== b wbNumeric))                                                     ; WB9
+        (return false))
+      (when (and (== cl wbNumeric) (wbAHLetter b))                                                     ; WB10
+        (return false))
+      (when (and (or (== cl wbMidNum) (wbMidNumLetQ cl)) (== b wbNumeric) (== cp wbNumeric))           ; WB11
+        (return false))
+      (when (and (== cl wbNumeric) (or (== b wbMidNum) (wbMidNumLetQ b)) (== cb wbNumeric))            ; WB12
+        (return false))
+      (when (and (== cl wbKatakana) (== b wbKatakana))                                                 ; WB13
+        (return false))
+      (when (and (or (wbAHLetter cl) (== cl wbNumeric) (== cl wbKatakana) (== cl wbExtendNumLet)) (== b wbExtendNumLet)) ; WB13a
+        (return false))
+      (when (and (== cl wbExtendNumLet) (or (wbAHLetter b) (== b wbNumeric) (== b wbKatakana)))        ; WB13b
+        (return false))
+      (when (and (== cl wbRegionalIndicator) (== b wbRegionalIndicator))                              ; WB15, WB16
+        (let [cnt 0
+              k l]
+          (while (and (>= k 0) (== (aget wb k) wbRegionalIndicator))
+            (watchdogTick)
+            (inc! cnt)
+            (set! k (wbBack wb k)))
+          (when (== (% cnt 2) 1)
+            (return false))))
+      true)))                                                                                          ; WB999
+
+;; dcTitleCased is Chez's cased test for titlecasing: r has a case mapping.
+(go/func dcTitleCased ^bool [^rune r]
+  (when (or (!= (UpcaseRune r) r) (!= (DowncaseRune r) r) (!= (TitlecaseRune r) r))
+    (return true))
+  (let [(values _ u) (SpecialUpcase r)
+        (values _ d) (SpecialDowncase r)
+        (values _ t) (SpecialTitlecase r)]
+    (or u d t)))
 
 (go/func dcTitle ^{:tag (slice rune)} [^{:tag (slice rune)} rs]
   (let [out (make (slice rune) 0 (len rs))
         n (len rs)
-        i 0]
-    (while (< i n)
-      (watchdogTick)
-      (let [c (dcWB (aget rs i))]
-        (if (not (or (== c wbAL) (== c wbNum) (== c wbENL)))
-          (do (set! out (append out (aget rs i)))
-              (inc! i))
-          (let [j (dcWordEnd rs i)
-                first true]
-            (for [k i] (< k j) (inc! k)
-              (watchdogTick)
-              (let [r (aget rs k)]
-                (if (not (dcCased r))
-                  (set! out (append out r))
-                  (if first
+        wb (make (slice int) n)]
+    (range [i r rs]
+      (aset wb i (WordBreak r)))
+    (let [i 0]
+      (while (< i n)
+        (watchdogTick)
+        (let [j (+ i 1)
+              ;; Chez does not titlecase a word that starts with an Extend, Format or ZWJ (one at the start or after CR, LF, Newline,
+              ;; WB4's exception: U+0345 alone is not mapped to U+0399; after another character it is part of that one's word)
+              plain (wbIgnorable (aget wb i))
+              first true]
+          (while (and (< j n) (not (dcWordBreak wb j)))
+            (watchdogTick)
+            (inc! j))
+          (for [k i] (< k j) (inc! k)
+            (let [r (aget rs k)]
+              (if plain
+                (set! out (append out r))
+                (if (not first)
+                  (set! out (dcLowerAt out rs k))
+                  (if (not (dcTitleCased r))
+                    (set! out (append out r))
                     (let [(values s ok) (SpecialTitlecase r)]
                       (set! first false)
                       (if ok
                         (set! out (append out (spread s)))
-                        (set! out (append out (TitlecaseRune r)))))
-                    (set! out (dcLowerAt out rs k))))))
-            (set! i j)))))
+                        (set! out (append out (TitlecaseRune r))))))))))
+          (set! i j))))
     out))
 
 ;; ---------------------------------------------------------------------------------------
