@@ -669,3 +669,46 @@ As round 1's: `bin/gate` (the per-form differential check above all: protocol ca
 against compiled), and the fixpoint `bin/arbace-go --fixpoint --g1 "$(. bin/lib/gate-cache.bash;
 arbace_gate_cache "$PWD")"`; by hand, test/bench/eval-traces.ae on the gate's executable against
 the v4 jar.
+
+## D-W1: rebased onto next, java-night merged, for W1 (2026-11-09, branch `eval-speed-w1`)
+
+The re-seed window's day step D-W1 (doc/W-WINDOW.md on `window-w2b`; W-D2 (a): W1 is eval-speed alone, on its own
+night). Light, nothing built.
+
+- **The rebase.** `window-w-eval-speed` (d996a695f, on next 88b71ffa4; the same ten commits as `eval-speed` 840eb78cb,
+  `git range-diff` all `=`) rebased onto next 4be141f28: all ten applied without a conflict. The runtime commit
+  4bdf8cedf is now 94914b900, patch-identical (`git cherry`), so W1's `p_eval_core` (EVAL_CORE=4bdf8cedf) holds unchanged.
+- **java-night merged on top** (a7160b35e, itself next 4be141f28 merged into java-night, which lands on next by day): one
+  conflict, `go/arbace/jrt/thread.ae`, where both sides added fields to the `Thread` struct after `Interp`. Both kept:
+  eval-speed's `EvalState`, then java-night's `interruptMu`, `nioBlocker` (JCS162), `ccl`, `cclSet` (F27); `Thread` is
+  made only as `(lit Thread)`, no positional literal, so the order is free. `arbace/lang/Compiler.ae` (java-night: F14's
+  `receiverMethod`, CallV's fallback, JCS167's serialization in `arbace.classes.interp`'s Rt and Host; eval-speed: the
+  evaluator's call path), `arbace/j2g/dyn.ae` and `go/arbace/jrt/throwable.ae` auto-merged; every line either side added
+  is in the result (checked file by file).
+- **`arbace/lang/go/CompilerNodes.ae` regenerated, not taken as text:** `ARBACE_PATH=. stage0 test/c2j/gen_nodes.ae`
+  (bin/generated-check's own call, on main's stage 0, 0.5 GB, 6 s) writes the merged text byte for byte;
+  `CompilerAOTFn.ae` (test/c2j/gen_fns.ae) likewise. The generator lists static methods by the executable's reflection, so
+  stage 0 was checked first: it reproduces next's committed file and eval-speed's own byte for byte (the listed classes'
+  methods are the same on stage 0 as in the checkout). The rest of `bin/generated-check` (goi's nodes, jrt's module
+  table, repr/go's dumper and syntax) is untouched by eval-speed and runs in W1's step 00 on the gate's build.
+- Dry merges for W2: `eval-speed-w1` with `window-w2b` conflicts only where java-night does (the journal, `go/arbace/crt.ae`,
+  `go/arbace/oi.ae`: `window-w2`'s refresh onto next resolves them); with `w-retire` (R) it merges clean.
+
+**W1's night commands** (night 13, PLAN.md §4; start conditions there: night 12's `--full` passed, `eval-speed-w1` merged
+into next by day after java-night, `df` at most 70%, no other holder of the big lock):
+
+```
+# by day (11-11), the main session: next has java-night (a7160b35e); then
+git -C .tmp/worktrees/next merge --no-ff eval-speed-w1
+cp -a .tmp/worktrees/window-w/.tmp/window-w/{lib.sh,w1.sh,w2.sh} .tmp/window-w/
+EVAL_REF=eval-speed-w1 EMBED_REF=window-w2b .tmp/window-w/w1.sh --check    # EMBED_REF=window-w2 once refreshed onto next
+# the night (waits for 19:00 UTC)
+EVAL_REF=eval-speed-w1 EMBED_REF=window-w2b .tmp/window-w/w1.sh --detach
+```
+
+which runs: 00 `.tmp/heavy bin/gate` on next (every key moved; `generated` regenerates CompilerNodes.ae equal;
+`j2g-edge` after dynConvert's form), 01 main fast-forwarded and pushed, 02 `.tmp/worktrees/window-w1` at main,
+03 `.tmp/heavy bin/arbace-go --fixpoint --g1 "$GATE_CACHE"` (`fixpoint: holds (G2 = G3)`), 04
+`EVAL_MICRO_MS=300 ... test/bench/eval-micro.ae :calls :arrays :dispatch` on the old stage 0 and on the gate's build,
+05-06 the W2 candidate's light checks and `bin/j2g-edge verify` on it, 07 `.tmp/heavy bin/gate --full --concurrent`
+(keyed) to 12:00, 08 `bin/gate --full --costs`.
