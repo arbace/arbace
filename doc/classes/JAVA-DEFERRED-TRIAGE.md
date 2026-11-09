@@ -6625,3 +6625,48 @@ build for (b); the night's records say which of the four pass.
 - **JCS322 (b)**: no thread groups until a second test asks (t07952 alone today).
 - **JCS323 (a)**, after the night's build shows JCS240's throws records: ProxyFn's leniency kept for jrt's hand-written interfaces
   alone, the rest wrapped as the JDK wraps (UndeclaredThrowableException).
+
+## java-props2: the night's commands (for the Java night's script, after the other branches' steps)
+
+In the night's worktree with `java-props2` merged (it holds `java-night` at `33d04049c`), heavy ones under `bin/heavy-lock`:
+
+```sh
+# 0. light, first: the joint javac check (3,317 files, 0 errors), the derivations (80, 0 not as derived), j2g's unit tests
+#    (all pass, test-type-annotations 29 of 29 but 1 known), jrt's package (TestRuntimeVersionParse)
+/root/arbace/.tmp/night7/all9-run.sh $PWD && bin/jrt-convert derive --check && bin/j2g-unit \
+  && bin/jrt test --arch amd64 --package jrt -run 'TestRuntimeVersion' -count=1
+# 1. the conversion takes Parameter.java (derived), ParameterSupport.java (new), AccessFlagSupport.java (parameterAccessFlags) and
+#    the 18 overlays whose headers JCS257 (a) rewrote (their forms' text unchanged but the comment; jdk/provenance.edn's digests)
+REPR_JAVA_EXE=$(ls -td /root/arbace/.tmp/gate-exe/javac-*/ | head -1)arbace-javac REPR_JAVA_STALE_OK=1 \
+  ARBACE_HEAVY_CMD=$PWD/bin/heavy-lock bin/jrt-convert update
+# 2. JCS256 (b) tonight (JCS256 (a)'s step from the morning after: the block in "JCS256 (a): jrt-vet, tomorrow's switch"):
+#    no refusal but the known rows
+bin/jrt-convert vet --strict
+# 3. the edges as the other slices need them (AnnotatedElement's generics: Parameter's bridges), then the build
+bin/heavy-lock bin/j2g-edge update && bin/heavy-lock bin/javac-vendor edge
+bin/heavy-lock bin/arbace-go --build && bin/arbace-go --smoke
+grep -A40 ':analysis-failures' target/arbace-go/amd64/j2g/report.edn | grep -E 'reflect/Parameter|ParameterSupport|Runtime' || echo none
+# 4. the smoke of the day's support code: expect "9-ea+20-foo Optional[ea] [26, 0, 2, 1] true (java.lang.String arg0 int arg1)"
+target/arbace-go/amd64/arbace -e '(println (str (java.lang.Runtime$Version/parse "9-ea+20-foo"))
+  (str (.pre (java.lang.Runtime$Version/parse "9-ea"))) (str (.version (Runtime/version)))
+  (contains? (Thread/getAllStackTraces) (Thread/currentThread))
+  (map str (.getParameters (.getMethod String "indexOf" (into-array Class [String Integer/TYPE])))))'
+# 5. javac's tool, then the levels on the day's tests, saved, not recorded: expect t04598 (Version/Basic) to pass at interp
+#    and compiled, t04869 and t04870 (Parameter) to pass or move to their next gap, t04684 past getAllStackTraces, and of
+#    JCS300 (c)'s 57 tests the 18 class-file tests to read their own class files (their next gaps the API's, F26's)
+bin/heavy-lock bin/javac-vendor tool
+JAVA_CHECK_EXE=$PWD/target/arbace-go/amd64/arbace J2G_GO_EXE=$PWD/target/arbace-go/amd64/arbace \
+  REPR_JAVA_EXE=$(ls -td /root/arbace/.tmp/gate-exe/javac-*/ | head -1)arbace-javac \
+  JAVA_CHECK_HEAVY=$PWD/bin/heavy-lock bin/java-check --levels read,interp,compiled --jobs 8 \
+  --only '^(t04598|t04684|t04723|t04830|t04832|t04869|t04870|t05256|t04253|t05046|t07651|t08142|t05995|t05996|t06042|t06326) ' \
+  --save .tmp/props2-night/check
+# 6. the whole-corpus rerun (night 11's, unchanged commands) compiles JCS300 (c)'s 57 by itself (REPR_JAVA_EXE set); then
+#    bin/reap --record and bin/crops-score --record with the night's records: :rmi, :rmi-connectors, :hotspot-diagnostic,
+#    :hotspot-beans and :define-bytes move 18 interp and 17 compiled rows' classes (9 a level from deferred to by design)
+```
+
+**Risks and fallbacks.** (1) Parameter refused tonight (its bridges need AnnotatedElement's generics in the edge, its
+annotations AnnotationSupport, F14's): getParameters is then not written (`parameters?` is false) and nothing else moves; revert
+is the JCS280 commit. (2) The support methods are compiled only by the build: a Go compile error names `j2g_support.go`; each is
+one commit to revert (JCS304/JCS293, JCS320, JCS280). (3) JCS300 (c)'s compile fails for a test: said on stderr, the test runs as
+before.
