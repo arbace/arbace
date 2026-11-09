@@ -5404,3 +5404,17 @@ such guide, so the standard is the reference here), on CP320's machinery:
   parameters, [over.match.funcs]/8-9) to the candidates; one chosen is checked for its access as B's member ([namespace.udecl]/19,
   cpp0x/inh-ctor9's protected `A(int)` now for that reason) and the initialization otherwise left unanalyzed (the object declared
   all the same); none viable: not judged (`{:i :none}`). The code generator is unchanged (it still refuses such a construction).
+
+## As built: CP321 (a), static data members' in-class initializers in the checker (2026-11-09; branch `cpp-props4`)
+
+- In the analysis' order, a static data member with an in-class initializer and no definition (`:member-static`, `:defined`
+  false) has its initializer analyzed by `global-init` in its class's scope (the access context its class's, cx-context), its
+  refusals reported as a namespace-scope variable's are, once (`:cx-sinit`); the code generator's definitions are unchanged (an
+  inline member is still defined when used).
+- Which (`cx-static-member-init?`): a member of a class of the main file that is no closure and no local class, and no class
+  template's specialization unless an explicit instantiation definition names it (`template struct B<A>;` marks it
+  `:explicit-inst-def`, [temp.explicit]/10); an implicit instantiation's initializer is instantiated only when used
+  ([temp.inst]/4), so analyzing it could report what no compiler does.
+- using-enum-1's lines 37-38 (an enumerator a private using-declaration of the base names, [namespace.udecl]/19) and
+  class-deduction108's eight lines of `B<A>`, `C<int>`, `E<A>`, `F<int>` (CTAD's errors in explicitly instantiated members) are
+  now the checker's.

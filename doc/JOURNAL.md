@@ -2644,3 +2644,13 @@ The user accepted HF10-P1 to P10 as recommended (~06:15). Built by an agent in t
   117 → 120 with CP320, CP321 (cpp23/class-deduction-inherited1 among them); the using-declaration files (`.tmp/fusing.txt`):
   inh-ctor9 kept for the right reason now (A's protected constructor), inh-ctor35 lost (its expected error is
   `-fno-new-inheriting-ctors`'s, before P0136: the earlier pass was the false "no viable" error), pr97268's extra line gone.
+
+## 2026-11-09: C++'s CP321 (a), static data members' in-class initializers in the checker (branch `cpp-props4`)
+
+- **Built** (`arbace/cpp/sema.ae`, `template.ae`): a static data member's in-class initializer analyzed in its class's scope in the
+  analysis' order (refusals reported), for a class of the main file, a class template's specialization only when an explicit
+  instantiation definition names it (`:explicit-inst-def`; [temp.inst]/4 for the implicit ones); the code generator unchanged.
+- **Why**: the user's decision CP321 (a) of 2026-11-09.
+- **Measured**: using-enum-1 (lines 37-38) and class-deduction108 (eight lines) now own passes (the every-10th sample's two of the
+  three gained); the 158 dg-error files with an in-class static member and a class (`.tmp/fstatic.txt`, in chunks of 20,
+  `.tmp/ch-*` against the base `.tmp/chb-*`): no pass lost, no new extra line.

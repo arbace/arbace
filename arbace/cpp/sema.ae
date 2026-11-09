@@ -4694,6 +4694,17 @@
           (when (and (number? v) (zero? (long v)) (not @d))
             (throw (ex-info "codegen: static assertion failed" {:codegen/refused :sassert :cx/node n}))))))))
 
+(defn- cx-static-member-init?
+  "CP321 (a): whether the checker analyzes the static data member `v`'s in-class initializer: a member of a class of the
+  main file that is no closure, no local class, and no class template's specialization but one an explicit instantiation
+  definition names."
+  [v]
+  (when-let [cid (:cls (:def-scope v))]
+    (let [c (abi/cls cid)]
+      (and c (not (:header c)) (not (:lambda c))
+           (or (nil? (:tmpl c)) (:explicit-inst-def c))
+           (some? (cx-enclosing-classes cid))))))
+
 (defn global-init
   "A namespace-scope variable's initializer."
   [vid]
@@ -4811,6 +4822,17 @@ protected:
                                             (if (:codegen/refused (ex-data e)) (h e (some-> *at* deref)) (throw e))))
                                      nil)
                           :var (let [v (var* id)]
+                                 ;; (CP321 (a), the checker: a static data member's in-class initializer, analyzed in its class's
+                                 ;; scope as the definition's would be ([class.static.data]/3-4, [dcl.init]); a class template's
+                                 ;; specialization's only when an explicit instantiation definition names it ([temp.explicit]/10,
+                                 ;; [temp.inst]/4: an implicit instantiation's initializer is instantiated when used); the
+                                 ;; code generator's definitions unchanged)
+                                 (when (and *on-refusal* (= :member-static (:storage v)) (:init v) (not (:defined v)) (not (:cx-sinit v))
+                                            (cx-static-member-init? v))
+                                   (upd-var! id assoc :cx-sinit true)
+                                   (try (global-init id)
+                                        (catch arbace.lang.ExceptionInfo e
+                                          (if (:codegen/refused (ex-data e)) (*on-refusal* e (some-> *at* deref)) (throw e)))))
                                  (when (and (:defined v) (not (:ginit v)))
                                    ;; (CX12: as a checker a refused initializer is reported and the analysis goes on)
                                    (if-let [h *on-refusal*]
