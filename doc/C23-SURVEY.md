@@ -5408,4 +5408,83 @@ pass (`:read-refused` 4 to 2, `:wrong-reason` 5 to 4); the round trip of the two
   - *Recommended: (a).*
 
 Scores (`bin/crops-score --record`, `--judge --strict` 0 problems): C's completeness 95.92% to 95.96% (99.59% to 99.64% without by
+
+## As built: CS293 (2026-11-09, branch `c-props2`)
+
+On `c-props2` from `mac/next` e6214cd13, main's stage 0, the checkout's ci, the stubs first on PATH.
+
+### CS293: the cause
+
+Not the preprocessor and not the parser's recovery: the paste was right and the parser did report the syntax error. The loss was
+`dedupe-errors` (`arbace.repr.c.parse`), cc's `errors.err` rule "an error is dropped when the one before it is on the same line",
+applied to the preprocessor's errors too. The preprocessor's and the parser's messages share one list (`pp/stream`'s `:errors`,
+the parser's `errs`); the failed paste of `JOIN2(:,:)` is `48:39: pasting ":" and ":" ...`, and the parser's
+`48:33: unexpected ':', expected ']'` that follows on the same line was dropped as its repeat. Checked first: the paste's tokens
+(`glue` leaves `:`, a space token, `:`, the two the parser reads separately, as on lines 51 and 62: `sp-sep` of CS150 gives the
+second `:` its space, so `std-attribute` does not take `::`); the dg read's messages for line 48 held the paste error and two
+`'gnu' attribute ignored`, and with the dedupe rule off for the parser's message the syntax error was there at `48:33`.
+
+gcc has no such rule between its preprocessor and its parser (libcpp's diagnostic and c_parser_error are separate streams; the
+only suppression is the parser's own, one syntax error until a token is consumed), and the test's line 49/85 expects both.
+
+### The fix
+
+`dedupe-errors` takes the set of the parser's own messages (`PERRS`, an identity set made by `parse-sources` and filled by `eh`
+and `eh-soft!`; slot 16 of the parser's state, now 17 slots), and under `*recover*` (the dg check's mode) drops an error only
+when the one before it is the parser's own and on the same line. Outside `*recover*` (the round trips, the token and tree checks,
+cc's comparisons) the rule is cc's as before, so nothing those checks compare moves. `test/c/dg-wording.edn` loses c23-attr-syntax-6's
+`:wrong-reason` entry (lines 48 and 84); `test/c/judge_test.ae`'s count of that table 4 to 3.
+
+### How it was checked (light, stubs first on PATH)
+
+| command | result |
+|---|---|
+| `bin/ci dg --only` c23-attr-syntax-6 | passes (was `:wrong-reason`); lines 48 and 84 now give the paste error, the syntax error and `'gnu' attribute ignored` |
+| `bin/ci dg --only` attr-syntax-6, -7, gnu23-attr-syntax-3, cpp/c23-scope-1, c23-attr-syntax-3, bitint-75 | 5 of 6 pass; gnu23-attr-syntax-3 stays `:wrong-reason` (CP.3: `type of 'y' defaults to 'int'`); the control differs as it must |
+| paste tests in the corpora (grep `does not give a valid` over gcc.dg) | attr-syntax-6 and cpp/{c90,c94,c99,c11,c17,c23,gnu89,gnu99,gnu11}-scope-1 (the latter are the `::` scope tests of C23's lexer, `-E`/preprocess-only, c23-scope-1 alone in the C23 corpus: passes) |
+| `bin/ci dg --essential` | 92 of 92 |
+| `bin/repr-c check --c23` | 59 pass, 3 expected, 0 failing |
+| `bin/ci judge-test` | see below |
+| the stubs' log | empty |
+
+Results of the remaining commands are in "Checks, continued" below.
+
+### Checks, continued
+
+| command | result |
+|---|---|
+| `bin/ci judge-test` | 106 tests, 489 assertions, 0 failures (the first run failed only `message-as-verdict`'s wording count 4 to 3, changed here) |
+| `bin/ci check --only test/c/essential-check.txt` | 0 failing, the controls differ as they must |
+| `bin/ci check --aot --only test/c/essential-aot.txt` | 0 failing, the controls differ |
+| `bin/reap --record`, `bin/crops-score --record` | no record changes (the dg record is the night's): C's scores as before |
+| `bin/crops-score --judge --strict` | 11 crops, 0 problems |
+| `bin/gate --full --plan` | parses (exit 0) |
+| the stubs' log | empty |
+
+Crops-score before and after: unchanged (completeness 95.96%, maturity 100, independence 99.7), since the dg record still holds
+c23-attr-syntax-6 as `:wrong-reason`; the night's `bin/ci dg --record` then `bin/reap --record` moves C's read cell by the file's two lines
+(the file leaves `:wrong-reason`).
+
+### Rekeys
+
+Embedded (gate_key): `arbace/repr/c/parse.ae`. Outside: `test/c/dg-wording.edn`, `test/c/judge_test.ae`, the docs. The parser change moves
+the musl forms' key (`bin/ci musl read`, read here whole by judge-test's ensure: about 25 minutes at the light thread count).
+
+### The night's commands
+
+CC.4's list covers it: `bin/ci musl read`, `bin/ci dg --record` (expected: c23-attr-syntax-6 passes, `:wrong-reason` 4 to 3), then
+`bin/reap --record`, `bin/crops-score --record`. No other record changes (the parse and token checks run without `*recover*`).
+
+### Proposed (CS293 follow-ups)
+
+- **CS294 gnu23-attr-syntax-3's line 12 (`type of 'y' defaults to 'int'` against `conflicting types for 'f'`).** The last
+  `:wrong-reason` of the attribute family; a declaration diagnostic of the checker, not the parser.
+  - (a) Give the checker gcc's implicit-int diagnostic for a parameter without a type after an attribute and drop the entry. Cost: about
+    an hour; it touches `arbace/c/check.ae` (embedded).
+  - (b) Keep it. *Recommended: (a), with the next checker change.*
+- **CS295 Keep the musl forms' key off dg-only parser changes.** Every parser change moves the key and costs a full read (about 25 minutes light,
+  more than the change). A change under `*recover*` alone does not alter the forms.
+  - (a) Key the musl cache by the parser's output on a small fixed sample plus the files' hashes instead of repr/c's sources. Cost: half a day, and a
+    risk of a stale cache if the sample misses a change.
+  - (b) Keep the key. *Recommended: (b).*
 design), maturity 100, independence 99.7.

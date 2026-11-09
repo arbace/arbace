@@ -329,7 +329,7 @@ void __atomic_store();
 
 (def ^:const SCOPE 0) (def ^:const FNSCOPE 1) (def ^:const GOTOS 2) (def ^:const SWITCH 3)
 (def ^:const SEQ 4) (def ^:const LDOK 5) (def ^:const COMPLIT 6) (def ^:const ORDER 7) (def ^:const EOFERRS 8)
-(def ^:const SOFT 9) (def ^:const HARD 10)
+(def ^:const SOFT 9) (def ^:const HARD 10) (def ^:const PERRS 16)
 ;; queue 157 (review 130's finding 4): the preprocessor's entry function (arbace.repr.c.pp/stream's :entry) and the entries' first
 ;; tokens, an ArrayList of [seq entry] in seq order, one each time the entry changes (the converter's :entries)
 (def ^:const ENTRY 11) (def ^:const ENTRIES 12)
@@ -385,9 +385,11 @@ void __atomic_store();
   "An error of the recovery (*recover*): counted apart, the parse goes on."
   [^Parser p ^String msg]
   (.add ^ArrayList (.-errs p) msg)
+  (.add ^java.util.Set (aget ^objects (.-st p) PERRS) msg)
   (aset ^objects (.-st p) SOFT (inc (long (or (aget ^objects (.-st p) SOFT) 0)))))
 
 (defn- eh [^Parser p ^String msg]
+  (.add ^java.util.Set (aget ^objects (.-st p) PERRS) msg)
   (aset ^objects (.-st p) HARD (inc (long (or (aget ^objects (.-st p) HARD) 0))))
   (.add ^ArrayList (.-errs p) msg)
   (let [^ArrayList ts (.-toks p)]
@@ -2527,11 +2529,14 @@ void __atomic_store();
            (catch Exception _ nil)))))
 
 (defn- dedupe-errors
-  "errors.err: an error dropped when the one before it is on the same line."
-  [errs]
+  "errors.err: an error dropped when the one before it is on the same line. Arbace (CS293, *recover*): only when the one
+  before it is the parser's own (`perrs`, the messages the parser made, by identity): gcc has no such rule, and a preprocessor's
+  error (a failed paste, whose two tokens the parser then reads) does not hide the line's syntax error."
+  [errs perrs]
   (let [v (vec errs)]
     (vec (keep-indexed (fn [i e]
                          (when-not (and (pos? i)
+                                        (or (not *recover*) (.contains ^java.util.Set perrs (nth v (dec i))))
                                         (let [a (extract-pos (nth v (dec i))) b (extract-pos e)] (and a b (= a b))))
                            e))
                        v))))
@@ -2542,9 +2547,10 @@ void __atomic_store();
   or {:panic msg} where cc would panic."
   [cfg sources ^String main]
   (let [{:keys [errors next layer entry pragmas]} (pp/stream cfg sources main)
-        st (object-array 16)
+        st (object-array 17)
         _ (do (aset st SCOPE (new-scope* nil)) (aset st SEQ (Long/valueOf 0)) (aset st LDOK false) (aset st ENTRY entry) (aset st ENTRIES (ArrayList.))
-              (aset st PRAGFN pragmas) (aset st PRAGMAS (ArrayList.)))
+              (aset st PRAGFN pragmas) (aset st PRAGMAS (ArrayList.))
+              (aset st PERRS (java.util.Collections/newSetFromMap (java.util.IdentityHashMap.))))
         p (Parser. next errors (ArrayList.) (keywords (:predefined cfg)) st)]
     (try
       (rn p)
@@ -2552,13 +2558,13 @@ void __atomic_store();
         (if (= (rn p) :eof)
           (let [pd (when-let [^ArrayList a (.get ^HashMap (.-nodes ^Scope (slot p SCOPE)) "__predefined_declarator")]
                      (let [x (first a)] (when (= (.get ^HashMap x :node) "Declarator") x)))
-                errs (dedupe-errors errors)
+                errs (dedupe-errors errors (aget st PERRS))
                 errs (if pd errs (conj errs "<bultin>: missing definition of '__predefined_declarator'"))]
             (cond-> {:tree tu :errors errs :layer layer :entries (vec (aget st ENTRIES)) :pragmas (vec (aget st PRAGMAS))}
               (and (pos? (long (or (aget st SOFT) 0))) (zero? (long (or (aget st HARD) 0)))) (assoc :recovered true)))
           (let [t (sh p)]
             (eh p (str (tpos t) ": unexpected " (rname (ch t)) ", expected EOF"))
-            {:tree tu :errors (dedupe-errors errors) :notree true :layer layer :entries (vec (aget st ENTRIES)) :pragmas (vec (aget st PRAGMAS))})))
+            {:tree tu :errors (dedupe-errors errors (aget st PERRS)) :notree true :layer layer :entries (vec (aget st ENTRIES)) :pragmas (vec (aget st PRAGMAS))})))
       (catch StackOverflowError _ {:panic "stack overflow"})
       (catch Exception e
         (if (:panic (ex-data e)) {:panic (ex-message e)} (throw e))))))
