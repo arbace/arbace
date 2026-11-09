@@ -6569,3 +6569,39 @@ JCS271 (b)'s day comparison (`.tmp/ta`, a scratch Python normalizer) is now comm
 
 Not a gate step yet: bin/j2g-unit is in none (a proposal for the essential gate would key it by `test/j2g/` and `arbace/classes/`
 and `arbace/j2g/`, seconds).
+
+## As built: JCS280 (a): `java.lang.reflect.Parameter`, synthesized parameters (branch `java-props2`, write-ahead)
+
+- **Parameter in the world**: jdk26u's `java/lang/reflect/Parameter.java` as a derived overlay (test/jrt/derive.ae's
+  `parameter-derivation`, five replacements): what it asks of its executable beyond jrt's hand-written Executable goes through
+  jrt's own Java: `getAllGenericParameterTypes()[i]` (package-private in jdk26u's Executable) is
+  `jdk.internal.jrt.ParameterSupport.genericParameterType` (jdk26u's branch without real parameter data: the generic types when
+  as many as the parameter types, else the parameter types), `getSharedParameterTypes()[i]` is `getParameterTypes()[i]`,
+  `getAnnotatedParameterTypes()` is `TypeAnnotationSupport.annotatedParameterTypes` (JCS271 (b)'s), `getParameterAnnotations()[i]`
+  is `ParameterSupport.parameterAnnotations` (Method's or Constructor's, which jrt's Executable_I does not declare), and
+  `accessFlags` is `AccessFlagSupport.parameterAccessFlags` (Location.METHOD_PARAMETER, in place of AccessibleObject's
+  ReflectionFactory). Every overlay is in the closure (print-sources), so the night's conversion takes both new files.
+- **getParameters**: j2g writes `GetParameters__Parameter1` on jrt's Method and Constructor once Parameter is translated
+  (arbace/j2g/out.ae's support forms; main.ae's scan names them, its roots Parameter's constructor), jdk26u's
+  `synthesizeAllParams`: `arg0` ... with modifiers 0, a new array each call; the interpreter finds them in the member tables (the
+  support table's init). A call through a receiver of static type Executable stays a stub (jrt's Executable_I has no
+  getParameters, as it has no accessFlags: JCS273's rule).
+- **Not here** (JCS280 (b), with JCS273's decision's second half): MethodParameters records for `@compile -parameters` (names,
+  FINAL, SYNTHETIC, MANDATED): MethodAccessFlagTest (t04832) checks a constructor's mandated parameter, so it analyzes but its own
+  verdict needs (b).
+
+Checked by day: `bin/jrt-convert derive --check` 80 overlays, 0 not as derived; the joint javac check 3,317 files, 0 errors;
+bin/j2g-unit passes; `bin/jrt-convert predict` of the reflection slices with Parameter (78 files and their context; 5 min,
+2.07 GB): Parameter is refused only for its context (AnnotatedElement's generics in the edge, tonight's `bin/j2g-edge update`;
+AnnotationSupport for F14's AnnotationFormatError, tonight's conversion), ParameterSupport analyzes, and of t04830, t04832,
+t04869 and t04870 all four analyze. Expected after the night: t04869 (GetAnnotatedTypeTest) and t04870 (NoName) can pass;
+t04723 is no longer refused for Parameter.
+
+## JCS301 (b): built by JCS273, the rest named (branch `java-props2`)
+
+F26's JCS301 listed Class/Method/Constructor/Field `accessFlags`, `Parameter`, `getDeclaredClasses` and `Field.getAnnotation` for
+t04830-t04833. JCS273 (java-more, merged on java-night) already writes the four accessFlags as j2g support methods with their
+member table entries; `Field.getAnnotation` is F14's (its first slice, merged); Parameter is JCS280 (a) above; getDeclaredClasses
+is in jrt's tables since F25 (its order JCS272). What stays: t04833's `ModuleDescriptor` (java.lang.module is not in the closed
+world: `:reflection`'s) and the accessFlags of an Executable-typed receiver (jrt's Executable_I declares none). Nothing more to
+build for (b); the night's records say which of the four pass.

@@ -853,6 +853,16 @@ covers what.
   records and `go/arbace/jrt/classdata.ae`'s natives are Arbace's own, under the Eclipse Public License 1.0. F13's
   overlays `LockInfo.java`, `MonitorInfo.java`, `MemoryUsage.java`, `javax/management/ObjectName.java` and
   `openmbean/CompositeData.java` are removed (jdk26u's in their place).
+- java.lang.reflect.Parameter and Runtime.Version.parse (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS280 (a)",
+  "As built: JCS304 (b), JCS293"; recorded by the rule of B7): the derived overlay `overlay/jdk/java.base/java/lang/reflect/Parameter.java`
+  is jdk26u's file of the same path (https://github.com/openjdk/jdk26u at `baf63fb`, `src/java.base/share/classes/`) with the
+  exact replacements `test/jrt/derive.ae` makes; `overlay/jdk/java.base/jdk/internal/jrt/ParameterSupport.java` transcribes
+  jdk26u's `Executable.getAllGenericParameterTypes` (its branch without real parameter data), and
+  `AccessFlagSupport.parameterAccessFlags` `Parameter.accessFlags`; `go/arbace/jrt/system.ae`'s `Version.parse` ports
+  jdk26u's `Runtime.java` (`Version.parse`, `isSimpleNumber`, `VersionPattern`, `toString`, `compareTo`, `equalsIgnoreOptional`,
+  `compareToIgnoreOptional`): Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2 with
+  the Classpath Exception (text below); the rest of those files, the sample `test/j2g/unit/typeann/` and `test/j2g/typeann.ae`
+  are Arbace's own, under the Eclipse Public License 1.0.
 - Java RMI (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F27 (write-ahead)"; recorded by the rule of B7): the derived
   overlays `overlay/jdk/java.base/java/rmi/server/RMIClassLoader.java` and
   `overlay/jdk/java.base/sun/rmi/{transport/GC,transport/DGCClient,runtime/Log,runtime/RuntimeUtil}.java` are jdk26u's files

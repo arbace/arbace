@@ -1,6 +1,6 @@
 /*
  * Arbace (overlay/jdk, doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS273 (write-ahead)"): the Java half of
- * Class.accessFlags, Executable.accessFlags and Field.accessFlags in the Go build. jrt's Class, Method, Constructor
+ * Class.accessFlags, Executable.accessFlags and Field.accessFlags in the Go build (since JCS280 (a) Parameter.accessFlags too). jrt's Class, Method, Constructor
  * and Field are hand-written Go (go/arbace/jrt/reflect.ae); j2g writes their accessFlags methods, which call these
  * (arbace.j2g.out/support-forms), once java.lang.reflect.AccessFlag is translated. The bodies are transcribed from
  * https://github.com/openjdk/jdk26u at baf63fb: src/java.base/share/classes/java/lang/Class.java (accessFlags),
@@ -41,6 +41,14 @@ public final class AccessFlagSupport {
     /** Executable.accessFlags of a method or constructor of class c whose modifiers are modifiers. */
     public static Set<AccessFlag> executableAccessFlags(int modifiers, Class<?> c) {
         return parseAccessFlags(modifiers, AccessFlag.Location.METHOD, c);
+    }
+
+    /**
+     * Parameter.accessFlags of a parameter (its modifiers: 0 for the synthesized parameters, JCS280 (a)) of an
+     * executable of class c.
+     */
+    public static Set<AccessFlag> parameterAccessFlags(int modifiers, Class<?> c) {
+        return parseAccessFlags(modifiers, AccessFlag.Location.METHOD_PARAMETER, c);
     }
 
     /** Field.accessFlags of a field of class c whose modifiers are modifiers. */
