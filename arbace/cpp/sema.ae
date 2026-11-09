@@ -1064,7 +1064,7 @@
       (when-not nm (reset! *last-anon* t)))
     t))
 
-(declare declare-node*! cx-access!)
+(declare declare-node*! cx-access! cx-using-map)
 
 (def ^:dynamic *retry* nil) ; atom [[scope node] ...]: header declarations to declare again after the headers (G4)
 (def ^:dynamic *header-drops* nil) ; atom [[kind name message] ...]: the header declarations not declared (G4)
@@ -1158,7 +1158,22 @@
                     (doseq [e es :when (and (:ucls e) (#{:enumerator :type} (:e e)))]
                       (try (cx-access! {:scope scope} (:ucls e) (last parts) (:uaccess e) nil nil)
                            (catch arbace.lang.ExceptionInfo x
-                             (swap! *order* conj [:cx-error (ex-info (.getMessage x) (assoc (ex-data x) :cx/node n))])))))
+                             (swap! *order* conj [:cx-error (ex-info (.getMessage x) (assoc (ex-data x) :cx/node n))]))))
+                    ;; (CP324 (a): a class's using-declaration of member functions, [namespace.udecl]/19: each function it
+                    ;; names accessible where it is (its own access, or a using-declaration's that named it), not a
+                    ;; constructor's)
+                    (when (:cls scope)
+                      (when-let [x (first (keep (fn [e]
+                                                  (when (= :fn (:e e))
+                                                    (let [f (fnd (:id e))]
+                                                      (when (and (:cls f) (not= :ctor (:kind f)))
+                                                        (try (if (:ucls e)
+                                                               (cx-access! {:scope scope} (:ucls e) (last parts) (:uaccess e) nil nil)
+                                                               (cx-access! {:scope scope} (:cls f) (last parts) (:access f) nil nil))
+                                                             nil
+                                                             (catch arbace.lang.ExceptionInfo x x))))))
+                                                es))]
+                        (swap! *order* conj [:cx-error (ex-info (.getMessage x) (assoc (ex-data x) :cx/node n))]))))
                   ;; (CP323 (a): `using B::B;` inherits B's constructors, [namespace.udecl]/3 and [class.inhctor.init]: the
                   ;; class marked with the bases' names, their constructors candidates of its initializations, ctor-init)
                   (when (and (:cls scope) (>= (count parts) 2)
@@ -1166,6 +1181,10 @@
                     (abi/update-cls! (:cls scope) update :inherits-ctors (fnil conj #{}) (last parts)))
                   (doseq [e es] (enter! scope (last parts) (cond-> (assoc e :pos (long (or (:_b n) 0)))
                                                              (and (checking?) (:cls scope) (#{:enumerator :type} (:e e)))
+                                                             (assoc :ucls (:cls scope) :uaccess (or *member-access* :public))
+                                                             ;; (CP324 (a): a member function's synonym has the using-declaration's
+                                                             ;; access as a member of its class, [namespace.udecl]/19)
+                                                             (and (checking?) (:cls scope) (= :fn (:e e)) (:cls (fnd (:id e))))
                                                              (assoc :ucls (:cls scope) :uaccess (or *member-access* :public))))))
     ;; (CX12, the checker: a namespace-scope static_assert of the main file checked in the analysis' order)
     "StaticAssertDecl" (when (and (checking?) (= :ns (:kind scope)) (not (header-node? n)))
@@ -2558,7 +2577,8 @@
                       (cx-naming-class ctx n) (assoc :cx-qcls (cx-naming-class ctx n))
                       ;; (the rest of CP313 (a): a member function named in a member function, judged at the call)
                       (and (checking?) (some-> (:fn-id ctx) fnd :cls) (not (:lambda ctx)))
-                      (assoc :member-access true :cx-nc (or (cx-naming-class ctx n) (some-> (:fn-id ctx) fnd :cls)) :cx-obj (some-> (:fn-id ctx) fnd :cls)))))
+                      (assoc :member-access true :cx-nc (or (cx-naming-class ctx n) (some-> (:fn-id ctx) fnd :cls)) :cx-obj (some-> (:fn-id ctx) fnd :cls)
+                             :cx-using (cx-using-map es)))))
       (fail :name "name " (:name (:referencedDecl n)) " of kind " (:e e)))))
 
 (defn- name-expr [ctx n]
@@ -2691,6 +2711,11 @@
     (abi/class? (abi/unq t)) {:op :temp-obj :init (init-for t [e] ctx :direct) :ty (abi/unq t) :cat :pr}
     :else (convert-scalar (rv e) t true)))
 
+(defn- cx-using-map
+  "CP324 (a): {fn-id [class access]} for the functions among the entities `es` that a class's using-declaration named."
+  [es]
+  (not-empty (into {} (for [e es :when (and (= :fn (:e e)) (:ucls e))] [(:id e) [(:ucls e) (:uaccess e)]]))))
+
 (defn- method-set-of
   "[class-id fn-ids] of the members named `nm` of the class of object `obj`."
   [cid nm]
@@ -2805,7 +2830,8 @@
         (let [tm (vec (keep (fn [[_ x]] (when (= :tmpl (:e x)) (:id x))) (class-lookup (or qcid cid) nm)))
               t (or (node-text n) "")]
           (cond-> {:op :fnset :fns fids :tmpls tm :name nm :obj (cx-via (if (= :pr (:cat obj)) (materialize obj) obj) qcid) :ty {:k :overload} :cat :lv :qualified (boolean qcid)}
-            (checking?) (assoc :member-access true :cx-nc (or qcid cid) :cx-obj cid)
+            (checking?) (assoc :member-access true :cx-nc (or qcid cid) :cx-obj cid
+                               :cx-using (cx-using-map (map second (class-lookup (or qcid cid) nm))))
             (and (seq tm) (:_wn n) (:explicitTemplateArgs n)) (assoc :targs-text (written-targs n nm) :targs-scope (:scope ctx))
             (and (seq tm) (not (:_wn n)) (re-find #"<[^<>]*(?:<[^<>]*>[^<>]*)*>\s*$" t)) (assoc :targs-text (second (re-find #"(?:\.|->)\s*(?:template\s+)?(.*)$" t)) :targs-scope (:scope ctx))))
         (= :enumerator (:e e)) {:op :int :v (:val e) :ty (:ty e) :cat :pr}
@@ -3031,7 +3057,12 @@
                  ;; (a function found twice, through a using-declaration and its class: one candidate; G4)
                  fid (binding [*drops* (meta tcands)] (resolve-overload (distinct cands) args obj))
                  f (fnd fid)
-                 _ (when (:member-access callee) (check-access! ctx (:cls f) (:name f) (:access f) (:cx-nc callee) (when-not (:static f) (:cx-obj callee))))
+                 ;; (CP324 (a): a function found through a class's using-declaration has that declaration's access as a
+                 ;; member of its class)
+                 _ (when (:member-access callee)
+                     (if-let [[uc ua] (get (:cx-using callee) fid)]
+                       (check-access! ctx uc (:name f) ua (:cx-nc callee) (when-not (:static f) (:cx-obj callee)))
+                       (check-access! ctx (:cls f) (:name f) (:access f) (:cx-nc callee) (when-not (:static f) (:cx-obj callee)))))
                  std-builtin (when (and (= 1 (count args)) (= [[:ns "std"]] (:path f)) (not (:cls f)))
                                (std-builtins (:name f)))]
              (cond

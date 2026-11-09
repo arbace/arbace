@@ -5418,3 +5418,13 @@ such guide, so the standard is the reference here), on CP320's machinery:
 - using-enum-1's lines 37-38 (an enumerator a private using-declaration of the base names, [namespace.udecl]/19) and
   class-deduction108's eight lines of `B<A>`, `C<int>`, `E<A>`, `F<int>` (CTAD's errors in explicitly instantiated members) are
   now the checker's.
+
+## As built: CP324 (a), a using-declaration's access for member functions (2026-11-09; branch `cpp-props4`)
+
+- [namespace.udecl]/19: a class's using-declaration of member functions enters them with its own access as members of its class
+  (`:ucls`, `:uaccess` on the entries, as CP313 (a) did for enumerators and types); the calls `o.f()` and `f()` in a member
+  function find which candidates came through one (`cx-using-map` over the lookup's entries) and judge the chosen function by the
+  using-declaration's access in its class (parse/access6: `using A::foo;` in B's private section, `b.foo()` in `main`), else by
+  its own as before; a protected base function made public by `using` is no longer an error.
+- At the using-declaration: each function it names (not a constructor) accessible there (its own access, or a using-declaration's
+  that named it), else the error at the using-declaration, in the analysis' order (`:cx-error`).

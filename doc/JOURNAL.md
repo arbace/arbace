@@ -2654,3 +2654,13 @@ The user accepted HF10-P1 to P10 as recommended (~06:15). Built by an agent in t
 - **Measured**: using-enum-1 (lines 37-38) and class-deduction108 (eight lines) now own passes (the every-10th sample's two of the
   three gained); the 158 dg-error files with an in-class static member and a class (`.tmp/fstatic.txt`, in chunks of 20,
   `.tmp/ch-*` against the base `.tmp/chb-*`): no pass lost, no new extra line.
+
+## 2026-11-09: C++'s CP324 (a), a using-declaration's access for member functions (branch `cpp-props4`)
+
+- **Built** (`arbace/cpp/sema.ae`): a class's using-declaration of member functions gives its synonyms its own access in its class
+  ([namespace.udecl]/19), judged at the call through the naming class (`cx-using-map`), and each function it names checked
+  accessible at the using-declaration.
+- **Why**: the user's decision CP324 (a) of 2026-11-09.
+- **Measured**: probe `.tmp/p/u1.cpp` (three errors where the rules have them, none on a protected function made public);
+  the 19 dg-error files with a class's using-declaration and an access message (`.tmp/fusing.txt`): parse/access6 now passes
+  (with CP323's and CP321's: 5 → 6, inh-ctor35 lost as CP323 says).
