@@ -4433,3 +4433,145 @@ byte for byte, `test/java/corpora-test.bash` 10 of 10, `test/java/timeouts-test.
   of the new corpora's read time; (b) keep the source sets as built. *Recommended: (b)*, (a) on that measurement. Beside it,
   `TEST.properties`' `TestNG.dirs` (java/util/stream's test and boottest trees, whose tests have no `@run`: TestNG classes run by
   the directory's rule) is not read: their tests are `:run-plain` with a main that does not exist, the JDK's record a failure.
+
+## Decided (the user, 2026-11-09, about 11:10): JCS334 (a), JCS335 (a), JCS336 (a), JCS337 (a), JCS338 (a), JCS339 (b)
+
+As the proposals recommend: java.net.http's library and framework tests with their `@modules` exports; `-D` system properties in
+the library and framework corpora; plain module names satisfied when the world has the module, in the new corpora only; the next
+areas as new corpora, one a night (all defined now, ordered by `:night`); the new corpora as parts of the Java level steps and
+`test/java/runner-test.bash` as an essential step, switched on the night that records them; the libraries' forms read with each
+test's source set, as built.
+
+## As built: JCS334-JCS339 (2026-11-09; branch `java-testlib2`, from `java-testlib` e3362e4ed)
+
+**The new corpora's own rules ("wide").** `java.check/categorize`'s `:base` (what the library and framework corpora judge a test
+by, JCS330 (a)) is computed in a wide mode; the category itself, and so every plain corpus, is computed as before. `bin/java-check
+scan` at the file's `:night 1` assigns every test of the plain corpora the same category and corpus as java-testlib's (the only
+differences are java.util's own library and framework tests, and the ids of tests not yet recorded, which are given in key order
+at the recording).
+
+**JCS334 (a).** `jdk/repl-exports.txt` takes lines `MOD/PKG`: java.net.http's fifteen internal packages that httpclient's
+`TEST.properties` names (`jdk.internal.net.http` and `.common`, `.frame`, `.hpack`, `.websocket`, and the HTTP/3, QUIC and QPACK
+ones, which JCS254 (b) left out of the world: a test using them fails at its load) and java.base's five that the same file names
+(`jdk.internal.util`, `sun.net.www.http`, `sun.net.www`, `sun.net`, `jdk.internal.net.quic`). The plain corpora read the unprefixed
+lines only (JCS136's, JCS142's); the wide mode admits a prefixed line's entry, and the plan gives it as
+`--add-exports=MOD/PKG=ALL-UNNAMED` to javac (the JDK's and Arbace's) and to java (`record_runs`). j2g's `repl-visible?` takes the
+package of a prefixed line, so the REPL's world makes those packages' public members visible (the executable's member tables grow
+by them: the night's build). The corpora `:java-net-http-lib` and `:java-net-http-framework` (test/jdk/java/net/httpclient) are
+night 2's. jtreg's `:open` and `:+open` entries (`java.net.http/jdk.internal.net.http.qpack:+open`, 9 tests) stay `:run-modules`.
+
+**JCS337 (a), the nights.** `test/java/corpora.edn` has a top-level `:night` (1: java.util's two, java-testlib's) and each new
+corpus a `:night N`; `java.check/active-corpora` gives the scan the corpora whose night has come (`JAVA_CHECK_NIGHT` overrides the
+file by hand, for a sample whose reference lines are not committed). Until its night a corpus's tests take no id. The order:
+
+| night | corpora | tests (day's world) | with the night's conversion |
+|---:|---|---:|---:|
+| 1 | java-util-lib, java-util-framework | 67 + 226 | 67 + 226 |
+| 2 | java-net-http-lib, java-net-http-framework | 5 + 50 | 41 + 295 |
+| 3 | java-lang-lib, java-lang-framework | 64 + 252 | 64 + 252 |
+| 4 | java-nio-lib, java-nio-framework | 77 + 75 | 77 + 75 |
+| 5 | java-net-lib, java-net-framework (httpclient excluded) | 104 + 79 | 111 + 80 |
+| 6 | java-text-lib, java-text-framework | 5 + 80 | 5 + 80 |
+| 7 | java-io-lib, java-io-framework | 20 + 64 | 20 + 64 |
+
+("with the night's conversion": java.net.http, jdk.httpserver and java.security.jgss in jdk/forms, which the night's `bin/jrt-convert
+update` of JCS254 (b), F24 and JCS230 writes; java.util's 255 of java-testlib became 293 with JCS334-JCS336: +5 by java.base's
+`jdk.internal.util`, +17 by `-D`, +16 by plain module names.)
+
+**JCS335 (a).** In the wide mode a main action's `-D` options (`-Dk=v`, `-Dk`) count with the dropped JIT ones (the test is
+`:run-jitopts` at its base). They travel as data: the plan's `props I -Dk=v...` lines (`run-props`: `-Dk` written `-Dk=`, the same
+empty value java gives it; a property naming jtreg's `${...}` is a skip, as an argument is), `rename`'s `props.tsv`, `record_runs`
+(java's options before the class), the reference's run `:props` (only when there are some: every existing line byte for byte),
+the check's plan and `run_actions` (to `test/java/run.ae` as `-D` before `--`, at interp and compiled). Runs differing only by
+their properties stay two (the dedup key has them).
+
+**JCS336 (a).** `java.check/module-in-world?`: a module is in the world when some of its API is, one of the packages its
+`module-info.java` (jdk26u's `src/`, beside the tests at the platform's pin) exports unqualified, or, for a module exporting none,
+one of the service classes it provides (jdk.zipfs, jdk.charsets, jdk.localedata), having forms in `jdk/forms`; java.base always. A
+plain entry of such a module is satisfied with no option in the wide mode. "Some of" and not "all of" (JCS340 proposes the
+alternative): java.management, java.naming and java.xml are in the world in part, and a test that touches a missing part fails at
+its load in that part's class. Today in: java.logging, java.sql, java.naming, java.management, java.scripting, java.xml,
+jdk.security.auth; out: java.prefs, jdk.localedata (21 java.util tests), jdk.zipfs, jdk.charsets, jdk.unsupported, jdk.compiler,
+jdk.jartool.
+
+**JCS338 (a), written as the night's step.** `test/java/night-corpora.bash N [--dry]`: raises corpora.edn's `:night` to N and
+appends night N's corpora as `{:part ID}` to java-read, java-interp, java-classes, java-compiled-full and java-print (a part
+without a `:subset-interp` is not rotated: run whole); the first time, the essential step `java-runner-test` (`env
+JAVA_CHECK_EXE=$GATE_EXE test/java/runner-test.bash`, chain java-essential, `:hosts [:prog]`, 1 GiB) after java-check-judge, and
+`test/java/runner-test.bash --forms verify` in java-forms-verify. Idempotent; `bin/gate --full --plan` after the switch of night 1:
+exit 0, `java-runner-test` and the ten parts planned. The essential step needs no javac's tool: `runner-test.bash` runs from
+committed forms (`test/java/runner-test/forms/`, the ten fixtures and the runner, 86 files, read by repr/java on javac's tool
+`5ad357331dbc`; `--forms update|verify`, verify byte for byte with the provenance's host apart, a changed file failing it; `--read`
+the fresh read as before; `--jdk` the JDK's). On the day's gate executable (`ad3066cf41ea`, before F14) the ten load-fail on
+`Method.getDeclaredAnnotations`, as java-testlib measured: the step passes on the night's build.
+
+**JCS339 (b)**: the libraries' files stay part of each test's source set (as built); JCS339 (a) on the night's measurement.
+
+**Measured by day** (the JDK of jdk26u's build as the oracle, `JAVA_CHECK_NIGHT=7 bin/java-check --record-ref --only` on 31 new
+tests, one job: 740 s, then 86 s for the four the fixes touched):
+
+| corpus | sample | the JDK |
+|---|---:|---|
+| java-util-lib, -framework | 6 | 4 pass; DateFormatSymbolsProviderTests a skip (a module-qualified `@build`); CalendarDataProviderTest fails (a locale provider SPI on the class path: `firstDayOfWeek: got='1', expected='4'`) |
+| java-net-http-lib, -framework | 6 | 4 pass (CertificateTest, WebSocketEndiannessTest, the two qpack tests, among them the `-D` ones); AltSvcFrameTest and AltSvcRegistryTest skips (module-qualified `@build`, a patch of java.net.http) |
+| java-lang-lib, -framework | 5 | 3 pass (GetModuleTest, VarHandleTestAccessByte, VirtualThreadDeadlocks#default); TestEmojiProperties fails (an ExceptionInInitializerError reading its data); AllowSecurityManager fails (`test.jdk` not set: JCS341) |
+| java-nio-lib, -framework | 4 | 4 pass (EqualsCompareTest, AdaptorMulticasting, Disconnect, SendPortZero) |
+| java-net-lib, -framework | 3 | 2 pass (ConnectPortZero, SetGetSendBufferSize); B4921848 times out on both runs (two runs differing only by their `-D` properties, kept two: `http.auth.preference=basic`, then with `java.net.preferIPv6Addresses=true`) |
+| java-text-lib, -framework | 3 | 2 pass; StrictParseTest a skip (JUnit's `org.junit.jupiter.api.condition`, not in the runner's subset) |
+| java-io-lib, -framework | 4 | 1 pass (Write); RedirectTest fails (`test.jdk`: JCS341); SetAccess fails (`jtreg.SkippedException`: run as root, JCS342); SerialFactoryExample fails (its string literals name its classes unrenamed, `"SerialFactoryExample$Point"`: the renaming's, JCS343) |
+| all | 31 | **20 pass, 7 fail, 4 skips**; 14 of the 31 have `-D` properties, 4 were chosen for their plain module names (java.logging, java.sql) |
+
+The sample found two faults of the day's code, fixed in their own commit: a `-D` value naming a class of the test's unnamed-package
+files is renamed with them (t08466's `jdk.serialFilterFactory=SerialFactoryExample$FilterInThread` becomes `ID.SerialFactoryExample$FilterInThread`,
+as a main class is); and the runner took a factory's `Object[]` row as one argument when the method has one parameter, where JUnit 5
+spreads every one-dimensional reference array (and passes a multidimensional one whole): IntegerReaderMaxValuesTest went from 14
+failures to a pass (JuPass gains both cases; the old runner fails it). The levels are not measured by day: the day's gate executable
+predates F14, on which every framework test and the runner's self-test load-fail (java-testlib's measurement).
+
+No reference line is committed (as java-testlib: `bin/reap` holds every level's record to the reference's tests, and the levels
+are the night's); the sample's lines are kept in the worktree as `.tmp/sample-ref-lines.edn`, and the committed
+`test/java/ref-jdk26.edn` is java-testlib's byte for byte.
+
+**The night's commands** (after java-testlib's night 1 and the night's build of java-night: JCS254's client, F9, F14, F24's
+httpserver, JCS230's Kerberos permissions converted; JAVA_CHECK_EXE its executable, REPR_JAVA_EXE its javac tool; heavy ones under
+`bin/heavy-lock`). For night N (2 to 7, one a night):
+
+    test/java/night-corpora.bash N                                                 # :night N, the parts (and at the first, java-runner-test)
+    test/java/runner-test.bash --forms verify || test/java/runner-test.bash --forms update   # the night's tool may read them anew
+    test/java/runner-test.bash                                                     # 10 of 10 expected
+    bin/java-check --record-ref --jobs 8 --only $'corpus\tCORPUS-(lib|framework)$'  # CORPUS java-net-http, java-lang, ...
+    bin/java-check verdicts
+    bin/java-check --levels read,interp,classes,print --corpus CORPUS-lib,CORPUS-framework --record
+    bin/heavy-lock bin/java-check --levels compiled --corpus CORPUS-lib,CORPUS-framework --record
+    bin/reap; bin/crops-score --judge --strict                                     # then class the new failures
+    bin/gate --full --plan                                                         # the parts planned; commit corpora.edn, steps.edn, the records
+
+If night 1 (java.util) runs from this branch rather than java-testlib, its first line is `test/java/night-corpora.bash 1` (the
+corpora's `:night` is already 1: it adds the parts and java-runner-test).
+
+**Risks and reverts.** (1) j2g's member tables with java.base's five and java.net.http's packages visible: a larger executable,
+or a j2g refusal naming one of them: revert `jdk/repl-exports.txt`'s prefixed lines and main.ae's hunk (JCS334's commit);
+java.net.http's corpora then take only what needs none of them. (2) A plain corpus's test changing category or corpus in the
+night's scan: none by day; if one does, the wide mode leaked: revert JCS334-JCS336's check.ae. (3) A `-D` test that differs
+between the JDK and Arbace only by its property: the property is set on both sides; look at run.ae's `-D` handling first. (4)
+`java-runner-test` failing on the night's build: the runner's own (F14); take the step out (`steps.edn`), keep the corpora.
+
+### Proposed (JCS340-JCS342)
+
+- **JCS340** The world's modules (JCS336 (a) as built: a module is in when *some* of its API has forms). (a) as built; (b) only
+  when *every* unqualified exported package has forms: java.management, java.naming and java.xml (in part in the world) out, and
+  java.security.jgss out (2 of its classes), which takes all 336 java.net.http tests out with it (their TEST.properties names it).
+  *Recommended: (a)*: a test touching a missing part fails at its load, in that part's class.
+- **JCS341** jtreg's standard system properties: jtreg gives every run `test.jdk`, `test.root`, `test.name`, `test.file`,
+  `test.vm.opts`, `test.java.opts`, `test.class.path` beside `test.src`/`test.classes`; jdk.test.lib reads them (the sample's two
+  `test.jdk` failures: ProcessTools and JDKToolFinder). (a) set them on both sides (`test.jdk` the JDK's home on the reference, on
+  Arbace a path that is no JDK: a test that launches a JVM fails into the by-design class it would anyway), an hour; (b) leave the
+  JDK's failures as recorded. *Recommended: (a)*.
+- **JCS342** `jtreg.SkippedException` (jdk.test.lib's, thrown by a test that cannot run here: SetAccess as root): jtreg reports such a
+  test as skipped, the check's JDK record as failed. (a) `record_runs`/`gather`: a run whose stderr's first line is an uncaught
+  `jtreg.SkippedException` records the test `:skip` with its message (on Arbace the same exception judged alike, the verdict's
+  `:status`); (b) as is. *Recommended: (a)*, with JCS341.
+- **JCS343** String literals naming a test's own classes (`"SerialFactoryExample$Point"` for a serialization filter): the renaming
+  into `package ID` breaks them on both sides. (a) a by-design class of the renaming (`:renamed-names`), the JDK's failures
+  recorded as they are; (b) rename such literals in the source set (a lexical pass over string literals equal to a class's
+  binary name), risky for literals that only look like names. *Recommended: (a)*.

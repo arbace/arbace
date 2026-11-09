@@ -3338,3 +3338,30 @@ The night's commands (on java-night's build, which has F9 and F14; JAVA_CHECK_EX
     bin/reap; bin/crops-score --judge --strict                                     # then class the new failures
 
 Proposed JCS334-JCS339 (the survey).
+
+## 2026-11-09 JCS334-JCS339 built: java.net.http's tests, -D properties, plain modules, the next areas by night (branch `java-testlib2`, from `java-testlib` e3362e4ed)
+
+The user accepted JCS334 (a), JCS335 (a), JCS336 (a), JCS337 (a), JCS338 (a), JCS339 (b) (~11:10). Built by an agent in the light
+tier; the JDK of jdk26u's build (at the platform's pin, `baf63fbe42b8`) ran by hand as the oracle. Sources: jtreg's tag
+specification (`@modules` MOD/PKG and plain module names, `TEST.properties`), jdk26u's `src/*/share/classes/module-info.java`
+(the exports and provides `java.check/module-in-world?` reads), the JUnit 5 user guide's factory-method arguments (the runner's
+fix). Nothing vendored. doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JCS334-JCS339".
+
+- The library and framework corpora's `:base` in a wide mode (the plain corpora's categories unchanged: the scan at `:night 1`
+  gives every plain test the same category and corpus): `jdk/repl-exports.txt`'s `MOD/PKG` lines (java.net.http's 15, java.base's
+  5; j2g's `repl-visible?` takes them), `-D` options as data through plan, rename, the reference's `:props` and run.ae, plain
+  module names when the world has some of the module's API.
+- `test/java/corpora.edn`'s `:night` (1) and twelve corpora by night: java-net-http 2, java-lang 3, java-nio 4, java-net 5,
+  java-text 6, java-io 7 (java-util 1, java-testlib's). Alternative considered: all at once (JCS337 (b), declined).
+- `test/java/night-corpora.bash N`: the night's switch (`:night`, the Java level steps' parts, the essential step java-runner-test
+  the first time); `test/java/runner-test.bash` from committed forms (`test/java/runner-test/forms/`, `--forms update|verify`),
+  so that the essential step needs no javac's tool. Alternative considered: the step reading the fixtures afresh (needs the tool:
+  not an essential host).
+- The JDK on 31 new tests (`JAVA_CHECK_NIGHT=7 bin/java-check --record-ref --only`): 20 pass, 7 fail, 4 skips; two faults found
+  and fixed (a `-D` value naming a test class renamed with it; JUnit's `Object[]` factory rows spread). No reference line
+  committed (bin/reap's rule, as java-testlib); the lines in the worktree's `.tmp/sample-ref-lines.edn`.
+- Checks: corpora-test 10 of 10, timeouts-test pass, runner-test --jdk 10 of 10, all9-run 3,317 files 0 errors, derive --check
+  80 overlays 0 not as derived, j2g-unit all passed, bin/reap 0 problems, crops-score --judge --strict 0 problems, bin/gate --plan
+  and (after night-corpora.bash 1, reverted) --full --plan exit 0.
+
+The night's commands are the survey's. Proposed JCS340-JCS343 (the survey).
