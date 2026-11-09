@@ -973,7 +973,7 @@
         (zero? d) (if (neg? (Math/copySign 1.0 d)) "-0" "0")
         :else
         (let [neg (neg? d)
-              precision (if (= bits 32) 9 17)
+              precision (case (long bits) 16 5 32 9 128 36 17)
               raw (Double/doubleToRawLongBits (Math/abs d))
               be (bit-and (bit-shift-right raw 52) 0x7ff)
               frac (bit-and raw 0xfffffffffffff)
@@ -1024,10 +1024,37 @@
 (defn float-const [^String txt neg t]
   (let [n (second t)
         txt (str/replace txt "_" "")
-        txt (str/replace txt #"f(32|64)$" "")]
-    (if (= n "f32")
+        txt (str/replace txt #"f(16|32|64|128)$" "")]
+    (cond
+      ;; RF12: f16 and f128 (core's `0.0f16`): the value as a double (exact for the literals core writes) in the format's
+      ;; IEEE encoding, rounded to nearest even
+      (#{"f16" "f128"} n)
+      (let [d (Double/parseDouble txt) d (if neg (- d) d)
+            [eb mb] (if (= n "f16") [5 10] [15 112])
+            bias (dec (bit-shift-left 1 (dec eb)))
+            sign (if (neg? (Math/copySign 1.0 d)) 1 0)
+            ad (Math/abs d)
+            bits (cond
+                   (zero? ad) 0
+                   (Double/isInfinite ad) (* (bigint (dec (bit-shift-left 1 eb))) (.pow (biginteger 2) (int mb)))
+                   :else
+                   (let [raw (Double/doubleToRawLongBits ad)
+                         e (- (bit-and (bit-shift-right raw 52) 0x7ff) 1023)
+                         m (bit-or (bit-and raw 0xfffffffffffff) (bit-shift-left 1 52))   ; 53 significant bits
+                         ;; the significand to MB fraction bits: shift by 52 - MB (rounded half to even when narrowing)
+                         sh (- 52 mb)
+                         frac (if (neg? sh)
+                                (.shiftLeft (biginteger m) (int (- sh)))
+                                (let [q (bit-shift-right m sh) r (bit-and m (dec (bit-shift-left 1 sh))) half (bit-shift-left 1 (dec sh))]
+                                  (biginteger (if (or (> r half) (and (= r half) (odd? q))) (inc q) q))))
+                         be (+ e bias)]
+                     (+ (* (bigint be) (.pow (biginteger 2) (int mb))) (- (bigint frac) (.pow (biginteger 2) (int mb))))))
+            bits (+ (bigint bits) (if (= 1 sign) (.pow (biginteger 2) (int (+ eb mb))) 0))]
+        [:const (str "const " (float-text d (if (= n "f16") 16 128)) n) t (list 'scalar bits (if (= n "f16") 2 16))])
+      (= n "f32")
       (let [f (float (Double/parseDouble txt)) f (if neg (- f) f)]
         [:const (str "const " (float-text (double f) 32) "f32") t (list 'scalar (bit-and (long (Float/floatToRawIntBits f)) 0xffffffff) 4)])
+      :else
       (let [d (Double/parseDouble txt) d (if neg (- d) d)]
         [:const (str "const " (float-text d 64) "f64") t (list 'scalar (let [b (Double/doubleToRawLongBits d)] (if (neg? b) (+ (bigint b) (pow2 64)) b)) 8)]))))
 
@@ -3087,7 +3114,11 @@
   "A body's name as write_mir_pretty prints it: its def path, an impl as `<impl at FILE:L:C: L:C>`"
   [d]
   (let [p (c/def-of (:parent d))]
-    (if (and p (str/starts-with? (str (:kind p)) "Impl") (sequential? (:span (:node p))))
+    (cond
+      ;; RF12: a closure: its body's owner's name (an impl's method `<impl at ..>::cmp`), then `{closure#N}`
+      (and p (= "Closure" (:kind d)) (#{"Fn" "AssocFn" "Closure"} (:kind p)))
+      (str (mir-name p) "::{closure#" (:disamb d) "}")
+      (and p (str/starts-with? (str (:kind p)) "Impl") (sequential? (:span (:node p))))
       (let [[l1 c1 l2 c2] (:span (:node p))
             ;; def_span: an impl's header, to its self type (its where clause) when the item's text is the root file's
             [l2 c2] (let [st (or (:mv-span (:self-ty (:node p))) (:span (:self-ty (:node p))))
@@ -3099,7 +3130,7 @@
         ;; the impl's parent's path first (an impl in a module or a body: `hint::<impl at ..>::f`; the crate root's prints nothing)
         (let [pre (binding [c/*in-value* true] (c/print-def-path (:parent p) []))]
           (str pre (when (seq pre) "::") "<impl at " (span-text [l1 c1 l2 c2]) ">::" (second (:data d)))))
-      (binding [c/*in-value* true] (c/print-def-path (:id d) [])))))
+      :else (binding [c/*in-value* true] (c/print-def-path (:id d) [])))))
 
 (defn build-discriminant
   "construct_const for an explicit discriminant (`A = 1`): the anonymous constant `Variant::{constant#0}`"
@@ -3127,7 +3158,7 @@
 
 (defn- scalar-size [t]
   (case (first t)
-    (:int :uint) (quot (int-bits (second t)) 8) :bool 1 :char 4 :float (if (= "f32" (second t)) 4 8)
+    (:int :uint) (quot (int-bits (second t)) 8) :bool 1 :char 4 :float (case (second t) "f16" 2 "f32" 4 "f128" 16 8)
     nil))
 
 (defn- const-eval-bytes

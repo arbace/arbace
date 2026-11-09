@@ -211,6 +211,27 @@
                                     nil))))
                     Mod (do (add! m "Mod" {:ns :type :name nm :kind "Mod" :path p})
                             (let [mk (nth k 3)] (when (= 'Loaded (head mk)) (walk (second mk) p))))
+                    ;; a re-export (`pub(crate) use self::index_range::IndexRange;`): its target by the written path, whose
+                    ;; definitions with-core-names copies under the name (imports.rs' single imports, textually)
+                    Use (letfn [(abs [segs]
+                                  (let [[f & r] segs]
+                                    (case f
+                                      ("crate" "$crate") (into ["core"] r)
+                                      "self" (into (vec (str/split m #"::")) r)
+                                      "super" (let [ps (str/split m #"::")] (abs (into (if (> (count ps) 1) ["crate"] ["crate"]) (concat (drop 1 (butlast ps)) r))))
+                                      ("core") (vec segs)
+                                      nil)))
+                                (tree [t prefix]
+                                  (let [segs (into prefix (map #(second (fget % :ident)) (fget (fget t :prefix) :segments)))
+                                        kk (fget t :kind)]
+                                    (case (head kk)
+                                      Simple (let [rn (let [o (second kk)] (when (and (seq? o) (= 'Some (first o))) (second (second o))))
+                                                   target (abs segs) nm (or rn (last segs))]
+                                               (when (and target (not= "self" (last segs)) (> (count target) 1))
+                                                 (swap! acc update m (fn [e] (update (or e {:kind "Mod" :children []}) :reexports (fnil conj []) [nm (str/join "::" target)])))))
+                                      Nested (doseq [x (fget kk :items)] (tree (if (= 'tuple (head x)) (second x) x) segs))
+                                      nil)))]
+                          (tree (second k) []))
                     nil))))]
       (walk items path))
     @acc))
@@ -222,17 +243,29 @@
             (let [items (fget (parse-file file) :items)]
               (-> acc
                   (update :macros (fn [m] (reduce (fn [m [nm d]] (update m nm (fnil conj []) d)) m (file-macros items file path))))
-                  (update :names (fn [n] (merge-with (fn [a b] (update a :children into (:children b))) n (file-names items path)))))))
+                  (update :names (fn [n] (merge-with (fn [a b] (-> a (update :children into (:children b)) (update :reexports (fnil into []) (:reexports b)))) n (file-names items path)))))))
           {:macros {} :names {}} files))
 
 (defn with-core-names
-  "std's names with core's own definitions added where the interface lacks them (its private items)"
+  "std's names with core's own definitions added where the interface lacks them (its private items), then its re-exports'
+  targets under their names"
   [std-names names]
-  (reduce (fn [m [p {:keys [kind children]}]]
-            (let [e (get m p {:kind kind :children []})
-                  have (set (map (juxt :ns :name) (:children e)))]
-              (assoc m p (update e :children into (remove #(have [(:ns %) (:name %)]) children)))))
-          std-names names))
+  (let [add (fn [m p kind children]
+              (let [e (get m p {:kind kind :children []})
+                    have (set (map (juxt :ns :name) (:children e)))]
+                (assoc m p (update e :children into (remove #(have [(:ns %) (:name %)]) children)))))
+        m (reduce (fn [m [p {:keys [kind children]}]] (add m p kind children)) std-names names)]
+    ;; two rounds: a re-export of a re-export
+    (reduce (fn [m _]
+              (reduce (fn [m [p {:keys [reexports]}]]
+                        (reduce (fn [m [nm target]]
+                                  (let [i (.lastIndexOf ^String target "::")
+                                        parent (subs target 0 i) tn (subs target (+ i 2))
+                                        defs (filter #(= tn (:name %)) (:children (get m parent)))]
+                                    (if (seq defs) (add m p "Mod" (mapv #(assoc % :name nm) defs)) m)))
+                                m reexports))
+                      m names))
+            m [1 2])))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; core's interface from its own sources: each module's functions and ADTs that std's interface lacks (its private items:
