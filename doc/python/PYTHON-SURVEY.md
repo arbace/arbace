@@ -4954,6 +4954,11 @@ titlecase letter, the tie of `%05.1f` on 2.25, the limit of `1e400`'s literal, `
 argument counts, OrderedDict's and os.path's reprs in `samples/control.py`, and the spelling of an interpolation's expression
 (`samples/literals.py`: `' n + 1 '` keeps its spaces).
 
-**Samples of pyi** (`bin/pyi run` on goi of each program, beside the judge; the VM, 1 process): see the report.
+**Samples of pyi** (the VM, `bin/pyi run` on goi, one process): 101 of the 127 golden programs (builtins, constructs, datamodel and 21 of
+the ops tables; paths and samples not run) give the golden text and status: 100 equal, 1 not: `datamodel/del.py`, where goi calls
+no `__del__` at all (`:finalization-goi`'s, 222/241). The compiled run of the same program (`bin/pyi check --aot --only
+synth/datamodel/del.py`, the AOT cache warm) lacks `del 1`, the finalization of a temporary list's element: classed `:as-pyi`
+against the golden text as against the record (queue 241's ground). Nothing else the golden texts catch that the record did not.
 
-DECISION 1 (the ops tables): see the report.
+DECISION 1 (the other 24 ops tables): (a) leave them at 0.5, 72 cases (recommended: the gain is 0.2% of the judge); (b) a model
+in Chez Scheme for exact integers, flonums and complexes, run at review time only (days).
