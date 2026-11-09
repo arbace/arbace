@@ -3303,3 +3303,35 @@ The user accepted HF10-P1 to P10 as recommended (~06:15). Built by an agent in t
 - P4 (a), P7 (a), P9 (b) recorded as orders; P3 (a) not started (its first step's gap written down in the survey).
 - Measures: lib-stg over 265 modules 5,372 of 7,593 bindings equal to GHC's -O0 (the old list 2,473 → 2,560 of 3,421, none
   worse); runs 59 of 63 on both sets, 0 lost; typecheck-check 24 of 24; run-check 59 of 63 as before.
+
+## 2026-11-09: F15, java.lang.invoke in the Go build (branch `java-invoke`, write-ahead)
+
+The plan's F15 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F15 (java.lang.invoke)"), by day under the light rules, from
+`mac/java-night` (9e6160bbb), for the next Java night.
+
+- Measured: 43 tests the JDK passes use java.lang.invoke (`.tmp/inv/scripts/scan.py` over `test/java/ref-jdk26.edn`'s source
+  sets); all 43 load-failed at interp, 41 not passing compiled. By missing piece: 28 direct handles and their calls, 12
+  LambdaMetafactory, 1 StringConcatFactory, 2 other areas.
+- Studied: jdk26u at `baf63fb`, `src/java.base/share/classes/java/lang/invoke/` (MethodHandle, MethodHandles, MethodType,
+  MethodTypeForm, MethodHandleNatives, MethodHandleStatics, DirectMethodHandle, CallSite and its three subclasses,
+  LambdaMetafactory, AbstractValidatingLambdaMetafactory, InnerClassLambdaMetafactory, MethodHandleInfo), `sun/invoke/util/`
+  (VerifyAccess, VerifyType, BytecodeDescriptor, ValueConversions, Wrapper).
+- Decided (the slice's design; jdk26u's LambdaForms cannot run in the closed world): jrt's own MethodHandle, MethodHandles and
+  Lookup, DirectMethodHandle, MethodHandleImpl, the call sites, ProxyLambdaMetafactory over java.lang.reflect and JCS170's
+  Proxy; jdk26u's Java where it runs: MethodType, MethodTypeForm, LambdaMetafactory and VerifyAccess derived
+  (`test/jrt/derive.ae`'s `invoke-derivations`), MethodHandleInfo, AbstractValidatingLambdaMetafactory, the exceptions,
+  BytecodeDescriptor and VerifyType unpatched (`invoke-sources`); the polymorphic calls and `MethodHandles.lookup()` rewritten by
+  the Java forms' analyzer into calls of `jdk.internal.jrt.Invokers` (one place for the interpreter and j2g, the caller's class
+  known at the site); j2g keeps a JDK class's lookup the nil of J2G-SPEC §8.5, so the JDK's static initializers do not move.
+  Alternatives considered: (1) a new node kind for polymorphic calls in both back ends (two implementations of one rule, rejected);
+  (2) the rewrite in repr/java's converter (the forms would no longer say what the Java says, rejected); (3) the caller's class
+  by a stack walk (jrt has no caller frames); (4) VarHandle at run time with them (no test needs it; §8.5 stays).
+- Commits: 30dcc3ee8 (group 1: handles, lookup, call sites, Invokers, the analyzer, j2g, natives, J2G-SPEC §12, SPEC §5.6),
+  118f3956e (group 2: LambdaMetafactory), 83a98a659 (the void call site's kind, j2g-unit's tests, LICENSE.md).
+- Checked by day: the joint javac check 3,340 files, 0 errors; derive --check 84 overlays; `bin/jrt-convert predict` of the slice
+  with `--list` of the 43: no j2g analysis failure in the slice, 39 of the 43 analyze at compiled (4 refused for other areas);
+  interpreted on the gate executable over the forms (the day loader `.tmp/inv/day`, renaming the package around today's world
+  stubs): 23 of the 43 pass, the twelve metafactory tests stop at today's Proxy (JCS170 tonight); `bin/jrt test --package jrt`
+  ok; `bin/j2g-unit` all passed; `bin/gate --plan` exit 0.
+- Found: the interpreter's Dyn dispatches a private method's reflection by name (JCS350); an interpreted inner class's
+  constructor lacks its outer parameter in reflection (JCS351). Proposed JCS350-JCS356.

@@ -6670,3 +6670,206 @@ annotations AnnotationSupport, F14's): getParameters is then not written (`param
 is the JCS280 commit. (2) The support methods are compiled only by the build: a Go compile error names `j2g_support.go`; each is
 one commit to revert (JCS304/JCS293, JCS320, JCS280). (3) JCS300 (c)'s compile fails for a test: said on stderr, the test runs as
 before.
+
+## As built: F15 (java.lang.invoke), write-ahead
+
+Branch `java-invoke` from `mac/java-night` (`9e6160bbb`), 2026-11-09, by day under the light rules (no conversion, j2g run,
+build or compiled level; each process about 2 GiB, two at once). The brief: the plan's F15, java.lang.invoke, with the
+`:invoke` class's tests and those the other slices left on it (F26's ByteCodeTest, JCS222's private lookups, JCS170's Proxy).
+Nothing is converted, translated or built here; the night's commands are below.
+
+### The tests measured
+
+`test/java/ref-jdk26.edn`'s source sets were scanned for java.lang.invoke's API (`.tmp/inv/scripts/scan.py`): **43 tests**
+the JDK passes use it, the `:invoke` class's 41 among them. At the committed records all 43 are `:load-failed` at interp
+(`ClassNotFoundException: java.lang.invoke.MethodHandle`: the class is not in the world), and at compiled 2 pass (their
+handles unused at run time), 22 fail ("class java.lang.invoke.MethodHandle is not in the closed world") and 19 are refused.
+By the missing piece:
+
+| tests | the missing piece | ids |
+|---:|---|---|
+| 28 | **direct handles and their calls**: `Lookup.find*`, `unreflect*`, `revealDirect`, `MethodType`, `invokeExact`/`invoke`/`invokeWithArguments`, `bindTo`, `asType`, the combinators (`catchException`, `tryFinally`, `spreadInvoker`), `MutableCallSite`, `WrongMethodTypeException` | t03287 t03306 t03574 t03593 t03630-t03635 t03862 t03895 t03899 t04612 t04675 t04745-t04748 t04751 t04756 t06213 t07677 t07679 t07685 t07686 t07689 t07693 |
+| 12 | **`LambdaMetafactory`** called as a method (`metafactory`, `altMetafactory`, `LambdaConversionException`'s rules) | t04761 t04766 t04767 t04768 t04770-t04774 t04776 t04777 t04778 |
+| 1 | `StringConcatFactory` | t04758 |
+| 2 | another area first: javac's tool and the class-file API (t06156), jdk.dynalink (t08097) | |
+
+### What comes in, and how (jdk26u at `baf63fb`)
+
+jdk26u's java.lang.invoke is LambdaForms, interpreted or spun into hidden classes' bytecode by the VM, and the VM's linkage of
+signature polymorphic calls and of `MethodHandles.lookup()`'s caller: none of it can run in the closed world. So the
+run-time classes are **jrt's own Java over java.lang.reflect**, with jdk26u's Java wherever it runs as written:
+
+| part | how |
+|---|---|
+| `MethodHandle` (jrt's own) | a handle's `invokeImpl(Object[])`: the arguments boxed as its type's parameters box them, the result boxed (null for void). `invokeExact` and `invoke` stay `final native` varargs of `Object[]` (JVMS 2.9.3), so that the analyzer recognizes their calls; their natives (`go/arbace/jrt/natives.ae`) throw as reflection's do. `asType` (jdk26u's `isConvertibleTo`, then a pairwise converting adapter), `asSpreader`, `asCollector`, `asVarargsCollector`, `withVarargs`, `bindTo`, `invokeWithArguments`, `toString` ("MethodHandle"+type): jdk26u's checks and messages |
+| `DirectMethodHandle` (jrt's own) | a field, method or constructor over reflection, its reference kind and member for `revealDirect`: getters and setters `Field.get`/`set`, statics `Method.invoke(null, ...)`, virtual and interface calls `Method.invoke` on the receiver (reflection's dispatch, the JVM's), constructors `newInstance`; an `InvocationTargetException`'s cause thrown as itself. `invokeSpecial`: a private method directly, Object's three by identity, an inherited method called non-virtually only when the receiver's class does not override it (else UnsupportedOperationException: JCS352) |
+| `MethodHandleImpl` (jrt's own) | the adapters (a handle of the new type computing its target's arguments) and the value conversions of asType and `explicitCastArguments`, as jdk26u's ValueConversions do them on boxed values (a reference cast, a primitive widened or cast, boxing then a cast, a dynamic unboxing then widening, "Cannot cast X to Y") |
+| `MethodHandles` and `Lookup` (jrt's own) | the lookup modes, `in`, `dropLookupMode`, `toString`, `privateLookupIn`: jdk26u's text (no module boundary); `find*` and `unreflect*` resolve as JVMS 5.4.3 does over the declared members (the class, its superclasses, its superinterfaces, an interface's Object methods; the descriptor exact), check access by `VerifyAccess` (derived below), narrow a protected member's receiver (`restrictProtectedReceiver`), and `findSpecial` requires the special caller as jdk26u does; `findVirtual(MethodHandle.class, "invoke"/"invokeExact")` the invokers; `bind`; `revealDirect` (jdk26u's `InfoFromMemberName`); the combinators `explicitCastArguments`, `permuteArguments`, `constant`, `identity`, `zero`, `empty`, `insertArguments`, `dropArguments`, `dropReturn`, `filterArguments`, `collectArguments`, `filterReturnValue`, `foldArguments`, `guardWithTest`, `catchException`, `throwException`, `tryFinally`, the invokers and the array handles. VarHandle stays outside the world (J2G-SPEC §8.5 compiles its constant handles): `findVarHandle` and its kin are declared, for the JDK code j2g's §8.5 reads, and throw. Not built: the loops, `tableSwitch`, `defineClass`/`defineHiddenClass`, `classData` |
+| the call sites (jrt's own) | `CallSite`, `ConstantCallSite`, `MutableCallSite`, `VolatileCallSite`: the target a volatile field, `dynamicInvoker` a handle that reads it; jdk26u's checks |
+| `MethodHandleStatics`, `MethodHandleNatives` (jrt's own) | the parts of jdk26u's without the VM: the exceptions' factories, Unsafe; the reference kinds and their predicates (`refKindName` ...) |
+| derived (`test/jrt/derive.ae`'s `invoke-derivations`) | `MethodType` (Invokers' cache out: 2 replacements), `MethodTypeForm` (the LambdaForm and interpreter-entry caches out), `LambdaMetafactory` (ProxyLambdaMetafactory in place of InnerClassLambdaMetafactory), `sun.invoke.util.VerifyAccess` (Reflection's two answers from Class, packages compared by equality, no module boundary) |
+| unpatched (`invoke-sources`) | `MethodHandleInfo`, `AbstractValidatingLambdaMetafactory` (every check of the metafactory, LambdaConversionException's messages), `WrongMethodTypeException`, `LambdaConversionException`, `StringConcatException`, `sun.invoke.util.BytecodeDescriptor` and `VerifyType`; `Wrapper` and `TypeDescriptor` are F26's |
+| `ProxyLambdaMetafactory` (jrt's own) | the lambda's instances are JCS170's proxies over Dyn implementing the interface and the markers; a call of the interface's method (or a bridge's signature) is the implementation's, adapted by asType to the captured types and `dynamicMethodType`; nothing captured, one instance for every call (jdk26u's); Object's methods by identity; another default method `invokeDefault`'s (JCS241: not built) |
+| **the call site: `jdk.internal.jrt.Invokers`** | the Java forms' analyzer (`arbace/classes/analyze.ae`, SPEC §5.6 amended) writes a polymorphic call of `MethodHandle.invokeExact` or `invoke` as `Invokers.invokeExactR`/`invokeR` (R the call's return kind, V Z B C S I J F D or L, L's result cast to the call's type as javac's checkcast), the call site's type as class literals and the arguments boxed into an `Object[]`; and `MethodHandles.lookup()` as `Invokers.lookup(C.class)`, C the class of the code: the caller-sensitive lookup resolved where it is called. Only when the class environment has `Invokers` (a world before the conversion keeps the old nodes). The interpreter and j2g then translate ordinary static calls. java.lang.invoke registers its side (`Invokers.Access`) in MethodHandles' static initializer |
+| j2g | `code.ae`'s `lookup-call?`: `Invokers.lookup(C.class)` of a JDK class (`pkg-of :jrt`) is still §8.5's nil, so the JDK's static initializers (the VarHandle idiom's lookups) stay exactly as they were; in a program's own class and Arbace's a real lookup (`reach.ae` likewise). J2G-SPEC §12 amended |
+
+**Which analyzer.** The interpreter's is the executable's own (the checkout's, after the night's build), and so is j2g's at
+Java's compiled level (hosted on the built executable). The build's own j2g run is on stage 0, whose analysis is the seed's: the
+JDK's and Arbace's classes keep the old nodes (lookup() the nil, a polymorphic call an operation-level stub), as today, until a
+re-seed. No class of the world calls a MethodHandle polymorphically but arbace/lang's KeywordInvokeSite and ReflectorCallSite
+(reworked and unused in the Go build).
+
+### Light checks done
+
+(main's stage 0 as `ARBACE_HOST_EXE`; javac's tool `javac-5ad357331dbcd7cfb0fd` with `REPR_JAVA_STALE_OK=1`; the gate executable
+`ad3066cf41ea6faf1566`; scratch `.tmp/inv/`)
+
+- **The joint javac check** (`.tmp/night7/all9-run.sh`): **3,340 files, 0 errors**, 6,973 classes (32 s, 1.0 GB).
+- `bin/jrt-convert derive --check`: 84 overlays, 0 not as derived (the control as before).
+- **The prediction** (`bin/jrt-convert predict` with the slice's 43 files, F26's java.lang.constant, jdk.internal.constant,
+  Wrapper and TypeDescriptor as PATHs, `--list` of the 43 tests; 708 s, 2.09 GB): the read 233 files, 231 converted (the two
+  locale overlays' known failures), no javac: 0 fallbacks of the slice's; vet: the slice's classes declared and analyzed, refused
+  only F26's known `DynamicConstantDesc` (its `Enum$EnumDesc`, the night's edge); **j2g's analysis of the world: no failure in
+  java.lang.invoke, sun.invoke.util or Invokers** (the other 15 the PATH-only world's, the night's conversion); the stubs in the
+  slice's classes: MethodType's serialization (the streams are in the night's world) and `Class.describeConstable` (jrt lacks
+  it: `MethodType.describeConstable` is a stub); **the 43 tests at compiled, analyzed on the world: 39 analyze, 4 refused**
+  (t04675 Thread.Builder.OfPlatform, t04758 StringConcatFactory, t06156 the class-file API's ClassModel, t08097 jdk.dynalink).
+- **The 43 interpreted, by day** (`.tmp/inv/day/`): the forms of the read, interpreted on the gate executable with the checkout's
+  analyzer evaluated over the executable's (`load.ae`). Today's executable has world stubs of `java.lang.invoke.MethodType` and
+  `MethodHandles$Lookup` (edge classes) that a class of the same name cannot replace, and no java.lang.constant (F26 is tonight's),
+  no Proxy over Dyn (JCS170 is tonight's), no ObjectStreamField: so the day's runtime is renamed into one package `jinv`
+  (`prep.sh`: java.lang.invoke, sun.invoke.util's four and Invokers, F26's day loader's flattening), the members naming
+  java.lang.constant or the object streams cut (`strip.py`), the intern table bypassed (ReferencedKeySet.get is not translated in
+  today's world), the tests' forms renamed alike. None of this is in the build. Judged by `test/java/verdicts.edn` (status, or
+  stdout's digest against the JDK's): **23 of the 43 pass**: t03287 t03306 t03574 t03593 t03630 t03631 t03632 t03633 t03634 t03635
+  t03862 t03895 t03899 t04745 t04746 t04747 t04748 t04751 t06213 t07679 t07685 t07689 t07693 (the five stdout-judged ones byte for
+  byte the JDK's). The rest:
+  - the twelve metafactory tests validate (the validation tests' expected LambdaConversionExceptions among them) and stop at
+    today's `Proxy` ("jrt.As: ProxyLambdaMetafactory$Handler": the interpreted handler is no InvocationHandler there, JCS170's
+    `InvocationHandler_Cast` fixes it tonight);
+  - t07686: a private method's `Method.invoke` on an interpreted subclass's object runs the subclass's private method of the same
+    name (the interpreter's Dyn dispatches it by name): **JCS350**;
+  - t07677: an interpreted inner class's constructor lacks its outer instance's parameter in reflection
+    (`getDeclaredConstructors` of `O$In` gives `[]`): **JCS351**;
+  - t04612 (StackWalker's `RETAIN_CLASS_REFERENCE`), t04675 (`System.Logger`, `Thread.Builder.OfPlatform`), t04756 (its p2.T3 not
+    loaded by the day's loader), t04758 (StringConcatFactory: **JCS353**), t06156, t08097: other areas.
+- `bin/jrt test --arch amd64 --package jrt`: ok (the natives compile; 301 s, 2.55 GB peak in the printing step, over the day's 2
+  GiB by 0.5 GB).
+- `bin/j2g-unit`: all passed, with the new `test-lookup-call` (a JDK class's `Invokers.lookup(C.class)` the nil, a test's and
+  Arbace's real, the control) and `test-invokers` over the fixture `test/j2g/unit/invoke` (the analyzer's four rewrites and the
+  control; skipped on a host whose analysis predates F15: stage 0 needs `J2G_UNIT_SOURCES=arbace.classes.analyze`, the gate's
+  build at the checkout's key has it).
+- `bin/gate --plan`: exit 0, no table error.
+
+### Expected yield
+
+Interpreted, of the 43: the 23, and of the twelve metafactory tests those JCS170's proxies carry (about 10: their checks
+passed by day), **about 30-33**; the `:invoke` class's 41 then down to about 10, the rest in JCS350, JCS351, JCS353 and other
+classes (StackWalker, Thread.Builder, javac's tool, dynalink). Compiled: of the 39 that analyze, those whose translation j2g
+writes and whose run matches: the same ~33 less what the compiled level stubs (about 28-30). F26's ByteCodeTest (t06156) stays
+F6's (javac's tool). Java eval and AOT each about +0.7 point.
+
+### The night's commands
+
+In the night's worktree with this branch merged (after the night's conversion of F26, which the slice builds on), heavy ones
+under `bin/heavy-lock`:
+
+```sh
+# 0. light: the joint javac check (the sources +7 share +16 overlays), the derivations (84 overlays)
+/root/arbace/.tmp/night7/all9-run.sh $PWD && bin/jrt-convert derive --check
+# 1. jdk/ converted afresh: + java/lang/invoke (jrt's 11, the 3 derived, MethodHandleInfo, AbstractValidatingLambdaMetafactory,
+#    the 3 exceptions), sun/invoke/util/{BytecodeDescriptor,VerifyType,VerifyAccess}, jdk/internal/jrt/Invokers; 0 failed,
+#    no javac: 0 fallbacks
+REPR_JAVA_EXE=$(ls -td /root/arbace/.tmp/gate-exe/javac-*/ | head -1)arbace-javac REPR_JAVA_STALE_OK=1 \
+  ARBACE_HEAVY_CMD=$PWD/bin/heavy-lock bin/jrt-convert update && bin/jrt modules --check
+# 2. j2g's edge (java.lang.invoke's classes leave it for the forms; VarHandle, ConstantBootstraps, StringConcatFactory stay),
+#    javac's world's edge
+bin/heavy-lock bin/j2g-edge update && bin/heavy-lock bin/javac-vendor edge
+# 3. the executable; j2g's report: no :analysis-failures under java/lang/invoke, sun/invoke/util, jdk/internal/jrt/Invokers;
+#    the natives MethodHandle_InvokeExact_O1__O_native and MethodHandle_Invoke_O1__O_native found; then jrt's tests
+bin/heavy-lock bin/arbace-go --build && bin/arbace-go --smoke && bin/jrt test
+grep -A12 ':analysis-failures' target/arbace-go/amd64/j2g/report.edn | grep -E 'invoke|Invokers' ; echo "(none above: ok)"
+# 4. a smoke at the REPL (the reflective path): expect 4, then "MethodHandle(int,int)int"
+target/arbace-go/amd64/arbace -e '(let [mh (.findStatic (java.lang.invoke.MethodHandles/publicLookup) Math "max"
+    (java.lang.invoke.MethodType/methodType Integer/TYPE Integer/TYPE (into-array Class [Integer/TYPE])))]
+  (println (.invokeWithArguments mh (object-array [(int 3) (int 4)]))) (println (str mh)))'
+# 5. Java's levels interp and compiled on the 43 (their ids: /root/arbace/.tmp/worktrees/java-invoke/.tmp/inv/ids.txt), then the
+#    whole corpus with the night's others: saved, not recorded; expect about 30-33 interp, 28-30 compiled
+JAVA_CHECK_EXE=$PWD/target/arbace-go/amd64/arbace J2G_GO_EXE=$PWD/target/arbace-go/amd64/arbace \
+  JAVA_CHECK_HEAVY=$PWD/bin/heavy-lock bin/java-check --levels interp,compiled --jobs 8 \
+  --list /root/arbace/.tmp/worktrees/java-invoke/.tmp/inv/ids.txt --save .tmp/f15-night/check
+# 6. j2g's unit tests on the new executable (test-invokers runs on it: its analysis is the checkout's)
+J2G_UNIT_EXE=$PWD/target/arbace-go/amd64/arbace bin/j2g-unit
+```
+
+**Risks and fallbacks.**
+- (1) The build: a JDK class that called `MethodHandles.lookup()` and then a real Lookup method beyond §8.5's VarHandle factories
+  (none in today's `jdk/forms` but CDS's strings; F26's classfile code takes a Lookup as a parameter) now gets a nil receiver: a
+  NullPointerException where an operation-level stub threw UnsupportedOperationException. Pattern: an NPE in a static initializer
+  naming `MethodHandles$Lookup`. Fallback: that class's lookup by JCS222's variant.
+- (2) `jrt.As`/ClassCastException naming `ProxyLambdaMetafactory$Handler`, or `UnsupportedOperationException` from
+  `Proxy.newProxyInstance`: JCS170 not in the build; revert group 2 alone (`118f3956e`).
+- (3) A world class's analysis failure naming `MethodHandles$Lookup`, `MethodType` or `VarHandle` members (`No accessible method
+  find...`): the old edge stubs had members jrt's own lack; the member to add is the message's. Revert: groups 1-3 (`30dcc3ee8`,
+  `118f3956e`, `83a98a659`); jdk/ converted again without `invoke-sources` and the overlays.
+- (4) An interpreted test that ran before and now fails at a polymorphic call ("No method invokeExact..." / "...in
+  jdk.internal.jrt.Invokers"): the analyzer's rewrite (`invokers-call`); revert `30dcc3ee8`'s analyzer hunk and `83a98a659`.
+- Areas to look at in the night's whole-corpus diff: `jdk/java/lang/invoke`, `hotspot/jtreg/compiler/jsr292`,
+  `compiler/runtime`, `compiler/c1`, `compiler/inlining`, `compiler/exceptions`, `runtime/Nestmates`, and any test whose
+  sources name `MethodHandles` (StackWalker's, StringBuilder's StressSBTest).
+
+## Proposed (F15)
+
+### JCS350 DECISION: a private method's reflection on an interpreted class
+
+`Method.invoke` of an interpreted class's private method, on an object of an interpreted subclass declaring a private method of
+the same name, runs the subclass's: the Dyn's member table dispatches it by name, where a private method is not virtual (JVMS
+5.4.6). F15's direct handles call through reflection, so `findVirtual` of a nestmate's private method dispatches wrongly at the
+interp level (t07686; compiled j2g calls a private method's `Impl_` directly). (a) The Dyn's invoker of a private method calls the
+declaring class's Meth directly (`arbace.j2g.dyncf`, the Go of the interpreter's classes), half a day with the interpreter's
+tests; (b) a divergence class. **Recommended: (a).**
+
+### JCS351 DECISION: an interpreted inner class's constructor in reflection
+
+`getDeclaredConstructors` of an interpreted inner class lists its constructor without the enclosing instance's parameter (and a
+local class's without its captured values), where javac's class has them first (and last); so `findConstructor(Inner.class,
+methodType(void.class, Outer.class))` finds nothing (t07677), as `getDeclaredConstructor(Outer.class)` does not. (a) Publish the
+constructor with javac's descriptor and have its invoker take the implicit arguments first (F14's reflection metadata, the
+`:reflection` class's InnerClasses line), 1 day; (b) a divergence class. **Recommended: (a) with F14's next slice.**
+
+### JCS352 DECISION: invokeSpecial of an overridden method
+
+`findSpecial` (`super::m` in a lambda, a handle's non-virtual call) of a method its receiver's class overrides needs a
+non-virtual call, which jrt's reflection has not (the member tables' invokers dispatch virtually): it throws
+UnsupportedOperationException naming it. No test of the corpus needs it. (a) j2g writes a second invoker per overridable method
+(`MethodInfo.InvokeSpecial`, the declaring class's own Go method) and the Dyn its Meth, 1 day, the executable a little larger;
+(b) as built, until a test needs it. **Recommended: (b).**
+
+### JCS353 DECISION: StringConcatFactory
+
+t04758 calls `makeConcat` and `makeConcatWithConstants` as methods (javac's string concatenation is compiled directly, J2G-SPEC
+§7.5). (a) jrt's own StringConcatFactory over jrt's handles, its recipe parsing and checks jdk26u's (the StringConcatException
+messages), half a day; (b) leave it to the `:invoke` class. **Recommended: (a)**, the next slice of F15.
+
+### JCS354 DECISION: real lookups in the JDK's classes (JCS222 again)
+
+F15 keeps `MethodHandles.lookup()` in a JDK class §8.5's nil, so nothing in the world's static initializers moves tonight.
+With java.lang.invoke in the world, JCS222's idiom (a private lookup's method handles made once in a static initializer:
+DatagramSocketAdaptor's, Thread's, ClassValue's, the HTTP client's) could run as jdk26u wrote it, retiring F10b's variants per use.
+(a) After the night proves F15: the lookup real in every class whose initializer uses it for more than VarHandles (the lookup's
+uses read as §8.5 reads the stores), each such class checked by the area's tests, 1 day; (b) a variant per use, as F10b did.
+**Recommended: (a)**, after the night's records; it is also JCS222 (a) without j2g's constant method handles.
+
+### JCS355 DECISION: the `:invoke` class after the night
+
+The class's matcher is `java.lang.invoke` in a failure's message; after the night most of its tests pass and the rest fail on
+other pieces. (a) The night's rerun sorts them: JCS350's, JCS351's, JCS353's tests into classes of their own (`:interp-private`,
+`:interp-inner-ctor`, `:invoke` kept for StringConcatFactory and what names java.lang.invoke still), the class's `:why` rewritten
+(F15 built); (b) as is. **Recommended: (a)**, with the night's records.
+
+### JCS356 DECISION: MethodType.describeConstable
+
+jrt's `Class` lacks `describeConstable` (Class is hand-written), so MethodType's is an operation-level stub, and every handle's
+`describeConstable` is empty. (a) `Class.describeConstable` in jrt (jdk26u's: a ClassDesc of the descriptor string, F26's
+ClassDesc), with `MethodHandle.describeConstable` for direct handles (jdk26u's `DirectMethodHandleDesc.Kind` from the reference
+kind), half a day; (b) as built. **Recommended: (a)** when a test needs it (none of the 43 does).
