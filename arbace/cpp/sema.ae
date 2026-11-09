@@ -2156,11 +2156,17 @@
       {:op :deref :e {:op :load :e {:op :var :id id :ty t :cat :lv :raw true} :ty (abi/ptr (:to t)) :cat :pr} :ty (:to t) :cat :lv}
       {:op :var :id id :ty t :cat :lv})))
 
+(def ^:dynamic *unevaluated*
+  "CP304 (a): true while an unevaluated operand is analyzed (sizeof's, alignof's, noexcept's): an enclosing function's
+  variable named there is not odr-used, so a lambda does not capture it ([expr.prim.lambda.capture]/7-8); only its type is
+  read."
+  false)
+
 (defn- entity-expr [ctx es n]
   (let [e (first es)]
     (case (if (empty? es) :fn (:e e))
       :var (let [v (var* (:id e))]
-             (if (and (:lambda ctx) (#{:local :param} (:storage v)) (not= (:fn v) (:fn-id ctx)))
+             (if (and (:lambda ctx) (#{:local :param} (:storage v)) (not= (:fn v) (:fn-id ctx)) (not *unevaluated*))
                (capture-field ctx (:id e))
                (var-node (:id e))))
       :capfield (field-node (deref-node {:op :this :ty (:this-type ctx) :cat :pr}) (:cls (:lambda ctx)) (:i e))
@@ -3003,6 +3009,10 @@
   (let [out (java.util.ArrayList.) seen (java.util.HashSet.)]
     (letfn [(walk [x]
               (cond
+                ;; CP304 (a): an unevaluated operand names no capture ([expr.prim.lambda.capture]/7-8: only a potentially
+                ;; evaluated expression odr-uses; [expr.context]/1: sizeof's, alignof's, noexcept's operands and a
+                ;; requires-expression are unevaluated; clang's tryCaptureVariable is not reached for them)
+                (and (map? x) (#{"UnaryExprOrTypeTraitExpr" "CXXNoexceptExpr" "RequiresExpr" "SizeOfPackExpr"} (:kind x))) nil
                 (map? x) (do (cond
                                (and (= "DeclRefExpr" (:kind x)) (not (:qualifier x)) (not (:globalQualifier x)))
                                (let [nm (get-in x [:referencedDecl :name])]
@@ -3218,7 +3228,7 @@
                        {:op :int :v (if (every? ok? (:inner n)) 1 0) :ty abi/bool* :cat :pr}))
     ;; noexcept(e) ([expr.unary.noexcept]): e unevaluated, true when no function it calls may throw (an implicit or
     ;; defaulted special member counted as not throwing; G4)
-    "CXXNoexceptExpr" (let [x (analyze ctx (first (kids n)))
+    "CXXNoexceptExpr" (let [x (binding [*unevaluated* true] (analyze ctx (first (kids n))))
                             fns (atom #{})
                             walk (fn walk [x] (cond (map? x) (when-not (:kind x)
                                                                 (when (integer? (:fn x)) (swap! fns conj (:fn x)))
@@ -3416,7 +3426,7 @@
                        (when-not (#{:pack :varpack} (:e e)) (fail :pack "sizeof... of a non-pack " (:name n)))
                        {:op :int :v (count (or (:elems e) (:ids e))) :ty abi/ulong* :cat :pr})
     "UnaryExprOrTypeTraitExpr"
-    (let [t (if-let [at (get-in n [:argType :qualType])] (resolve-type (:scope ctx) at) (:ty (analyze ctx (first (kids n)))))
+    (let [t (if-let [at (get-in n [:argType :qualType])] (resolve-type (:scope ctx) at) (:ty (binding [*unevaluated* true] (analyze ctx (first (kids n))))))
           t (abi/non-ref t)]
       (case (:name n)
         "sizeof" {:op :int :v (abi/size-of t) :ty abi/ulong* :cat :pr}

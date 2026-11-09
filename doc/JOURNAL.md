@@ -1166,3 +1166,13 @@ compiler stubs first on PATH (their log empty). doc/cpp/CPP-SURVEY.md, "Decided 
 - **Alternatives considered**: (b) alone (the failing files' attributes only: the same two built, musttail and TM left for the
   same reasons); placing warn_if_not_aligned's errors at the attribute as CP294's (rejected: the directives' columns are the
   declarator's).
+
+## 2026-11-09: C++'s CP304 (a), no captures from unevaluated operands (branch `cpp-props2`)
+
+- **Built**: the generic lambda's capture scan skips sizeof's, alignof's, noexcept's operands, requires-expressions and `sizeof...`;
+  their analysis (`*unevaluated*`) reads an enclosing variable without capturing it, for generic and non-generic lambdas
+  ([expr.prim.lambda.capture]/7-8).
+- **Measured**: the probe's closures 24 → 4 and 8 → 1 bytes, as clang lays them out; the sample unchanged (108, 92 extras); the code
+  generator's 142 samples as recorded.
+- **Alternatives considered**: typeid's operand unevaluated too (left: a polymorphic glvalue's is evaluated, and the slice's
+  analysis does not decide it before the scan).

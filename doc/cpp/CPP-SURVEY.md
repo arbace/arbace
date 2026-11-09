@@ -4628,3 +4628,17 @@ read), the messages after the directives' texts.
   three argument rules, and none on its ignored uses (`[[no_dangling]]` without `gnu::`, a variable, a typedef, an enumeration, an
   empty declaration, a label). The probe `.tmp/t7/v314.cpp` (a field and a type with warn_if_not_aligned, no_dangling on a class and
   on functions with no and a `true` argument) gives no diagnostic.
+
+### CP304 (a): no captures from unevaluated operands
+
+- `arbace.cpp.sema`: the generic lambda's capture scan (`glam-names`) does not descend into sizeof's, alignof's and noexcept's
+  operands, a requires-expression or `sizeof...` ([expr.prim.lambda.capture]/7-8: only a potentially evaluated expression
+  odr-uses; [expr.context]/1); and the analysis of those operands (`*unevaluated*`, bound around them) reads an enclosing
+  function's variable without capturing it (`entity-expr`: its type is all an unevaluated operand needs), so a specialization
+  naming one there is no longer refused (`:sealed`) and a non-generic lambda's `[=]` no longer captures it either (clang's
+  tryCaptureVariable is not reached for them). typeid's operand stays evaluated (a polymorphic glvalue's is).
+- Measure: the probe `.tmp/t7/u1.cpp` (`[=](auto a) { return sizeof(d) + a + x + noexcept(q) + alignof(decltype(q)); }` and `[&](auto a)
+  { return sizeof(d) + a; }`): the closures 24 and 8 bytes before (x, d, q captured; d by reference), 4 and 1 after, clang's sizes
+  for the same program (its capture of x alone, the empty closure); the every-10th sample 108 → 108, the extras the same 92
+  (`.tmp/t7/rA`); `bin/cppi codegen-gen .tmp/t7/cgA` (this tree with CP303 and CP305): 142 of 142 as recorded, no sample's forms
+  changed (none names a variable only in an unevaluated operand of a lambda).
