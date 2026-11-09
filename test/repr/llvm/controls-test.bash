@@ -2,7 +2,7 @@
 # The LLVM row's negative controls are wired (GTS81 (a); doc/llvm/LLVM-CROP-SURVEY.md, "As built: LL9a"): each check family's
 # verb, given a control that crosses a module with itself (which its judge must pass), fails and says so; with the committed
 # controls it passes. Families: bin/repr-llvm roundtrip, roundtrip --text, verify-check, bin/repr-llvm check (the gate's verb),
-# bin/llvmi check (eval). Light: four modules of test/llvm/essential*.txt and llvmi's essential subset (about 40 s).
+# bin/llvmi check (eval), and the own verdicts' unit tests (test/repr/llvm/expect-test.bash, LLS38, LLS39). Light: four modules of test/llvm/essential*.txt and llvmi's essential subset (about 40 s).
 # needs: stage 0 (ARBACE_HOST_EXE), llvm/test's tarball extracted for nothing (the essential copies are the checkout's)
 set -uo pipefail
 src=$(cd "$(dirname "$0")/../../.." && pwd)
@@ -33,5 +33,7 @@ REPR_LLVM_VERIFY_CONTROLS=$w/self-v.txt "$src/bin/repr-llvm" check verify-llvmte
 printf '[{:subject "tx-O0.20000121-1" :reference "tx-O0.20000121-1"}]\n' > "$w/self-llvmi.edn"
 LLVMI_WORK=$w/li "$src/bin/llvmi" check --essential > "$w/li1.log" 2>&1; expect "llvmi check: the committed controls fail, the check passes" 0 $? "$w/li1.log" 'negative controls: 4 judged, 0 pass'
 LLVMI_WORK=$w/li LLVMI_CONTROLS=$w/self-llvmi.edn "$src/bin/llvmi" check --essential --judge > "$w/li2.log" 2>&1; expect "llvmi check: a passing control fails the check" 1 $? "$w/li2.log" '^FAIL the negative control passes: tx-O0.20000121-1'
+# the own verdicts' rules (LLS38, LLS39): their unit tests, each crossed control failing
+"$src/test/repr/llvm/expect-test.bash" > "$w/et.log" 2>&1; expect "expect-test: the rules' cases pass, their controls fail" 0 $? "$w/et.log" ' controls, 0 failing$'
 [ "$fail" = 0 ] && echo "controls-test: all ok"
 exit $fail

@@ -1770,6 +1770,129 @@ Expected: 0 differ; the unknowns are those of the classes above, about 10% of th
   - (b) Leave them.
   - *Recommended: (a) after LLS38*, as the pack's records name the intrinsics.
 
+## Decided (the user, 2026-11-09): LLS38 (a), LLS39 (a)
+
+- **LLS38 (a):** visitModuleFlag's checks of a flag's behaviour, key and value are ported (md-edit).
+- **LLS39 (a):** the rest of visitIntrinsicCall's cases are ported, each rule for rule (intr-arg, intr-rename on is.fpclass, the
+  other checked intrinsics of the switch).
+
+## As built: LLS38, LLS39 (2026-11-09, branch `llvm-props2`)
+
+Built on next `e6214cd13`. As LLS36 (a), this changes the verdict lines the night's `ir-make rt` writes (the mutants' bodies are
+unchanged byte for byte: h3's 900 against the base's mutator, 0 differ), not what is recorded now. Ported from llvm-project 23.1.5
+(the pinned tarball; Apache-2.0 with LLVM exceptions, LICENSE.md, doc/ARBACE.md), into `arbace.repr.llvm.expect`.
+
+**LLS38: the module flags and llvm.ident** (`module-md-verdict`, used by `ex-md-edit` for a flag's or an ident's node):
+- `Verifier::visitModuleFlags` (V:1831) and `visitModuleFlag` (V:1913), check for check: the three operands; the behaviour by
+  `Module::isValidModFlagBehavior` (Module.cpp:329: a ConstantInt whose `getLimitedValue` is 1 to 8, Module.h:120), `expected
+  constant integer` before `unexpected constant`; the ID a string; the behaviours' values (Min: a non-negative ConstantInt by the
+  sign bit of its own width, so `i1 true` is negative; Max; Require: a pair whose first is a string; Append and AppendUnique: a
+  node); the IDs unique but Require's; `wchar_size`, `SemanticInterposition`, `Linker Options`; then the loop's pauth names'
+  integer values, `ptrauth-init-fini`'s rules, the pauthabi pair, and the requirements (`flag is not present`, `flag does not have
+  the required value`). `CG Profile`'s entries and the AMDGPU flags are left to opt.
+- `visitModuleIdents` (V:1784): one operand, a string.
+- LLParser's end (P:475-481) in its order: `UpgradeDebugInfo` (AutoUpgrade.cpp:6052) reads the version as
+  `getModuleFlagNameSafely` does; version 3: the flags verified as written, a failure final; else `StripDebugInfo`
+  (DebugInfo.cpp:709; `strip-modifies?` ports whether it changes the module) and the version warning (`debug`); then
+  `UpgradeModuleFlags` (AutoUpgrade.cpp:6489: PIC Level's Error and Max to Min, PIE Level's Error to Max,
+  branch-target-enforcement's and `sign-return-address*`'s Error to Min; the Objective-C and AMDGPU rewrites left to opt); then
+  opt's verifier over the upgraded flags.
+
+**LLS39: visitCallBase's immarg check and visitIntrinsicCall's switch** (`call-site-intrinsic`, used by `ex-intr-arg` and, for the
+renamed calls, `ex-intr-rename`):
+- the immarg check (V:3932): a ConstantInt or ConstantFP of no vector type, then the range attribute; the callee's attributes as
+  `UpgradeIntrinsicFunction` leaves them (AutoUpgrade.cpp:2001: `Intrinsic::getAttributes` when the signature is valid, from the
+  table's immarg indices and ranges; else the declaration as written);
+- visitIntrinsicCall's switch (V:5952-7055), every case named: ported are assume (its i1 true with bundles), ucmp/scmp, coro.begin,
+  is.fpclass (its mask, `i1 true` a ConstantInt; a non-ConstantInt mask is undefined behaviour, left), init.trampoline,
+  stackprotector, localescape, localrecover, eh.exceptioncode/pointer, get.active.lane.mask, experimental.get.vector.length,
+  va_start, get.dynamic.area.offset, the fixed-point family, lrint/llrint/lround/llround, bswap, invariant.start, stepvector,
+  preserve.array/struct.access.index, ptrmask (now with the vectors' element counts), thread.pointer, threadlocal.address (not a
+  global), lifetime (alloca, poison or structured.alloca), sponentry; memcpy/memmove/memset and their inline forms, the debug
+  intrinsics and noalias.scope.decl check nothing. The cases that read only types (vector.insert/extract, the partial reductions,
+  vector.match, memset.pattern) pass for an intr-arg mutant (the base valid, the types unchanged) and are left for a renamed callee.
+  Left to opt, by name: coro.id, fptrunc.round and the arbitrary-fp conversions' strings, VP and constrained intrinsics, the
+  element-wise atomics, preallocated calls, the GC intrinsics, statepoints, patchpoints, guard, deoptimize, the matrices, reloc.none,
+  the targets' (aarch64, arm, nvvm, amdgcn), ptrauth, structured and convergence intrinsics, callbr.landingpad,
+  write_volatile_register, and (for a renamed callee) the funclet check under a scoped EH personality (V:7041);
+- the default: no check.
+- AutoUpgrade's ctlz/cttz of one parameter over a non-integer (AutoUpgrade.cpp:1438, `ctlz-rebuilt`): declared again as
+  `getOrInsertDeclaration` makes it, (T, i1) -> T at the module's end, the calls rebuilt, so the new declaration's
+  `isSignatureValid` message is the verdict (a used result of another type left to opt).
+
+**Arbace's verifier fixed (the comparisons found four):**
+- AutoUpgrade's ctlz/cttz over a non-integer: the upgraded declaration (T, i1) -> T is now checked (it was skipped as an old form);
+  `tx-O2.va-arg-20.intr-rename.800207` was valid for Arbace, invalid for opt;
+- a Min flag's value negative by its own width's sign bit (`i1 true`, `i32 -1`);
+- PIC Level's Max upgraded to Min as its Error was, and `sign-return-address*` by prefix;
+- `invalid requirement on flag, flag does not have the required value` (the value compared; only the flag's presence was).
+
+**Unit tests and controls.** `test/repr/llvm/expect_test.ae` (`test/repr/llvm/expect-test.bash`, seconds): 26 cases, a small
+module each with the kind's context (19 of LLS38, 7 of LLS39), the verdict and message each must give, and 6 negative controls
+crossing one case's verdict with another's expectation by the same judge, each failing. `controls-test.bash` runs it (the step
+`llvm-controls-test`, no change to the steps). `--dump DIR` writes the cases' modules: Arbace's verifier gives all 26 the same
+verdict and message, and opt 23.1.5 by hand too (the oracle, to confirm).
+
+**Measured (light; stage 0, `REPR_LLVM_THREADS=2`, the stubs first on PATH; live opt only for the oracle, by hand).** The day's 41
+modules of LLS33 (b). h2 (800000, 300 each of intrinsics, metadata and debug) was fitted: its opt answers (llvm-props' oracle
+record) were read while writing these rules. h3 (900000, the same families and size, a seed never used before) was made only after
+the rules were done; its "before" is the base `e6214cd13`'s mutator over the same mutants.
+
+| set | own before | own after | unknown after | as Arbace's verifier (`verify-check`) | as opt (live) |
+|---|---|---|---|---|---|
+| h2, 900 (800000), fitted | 815 (90.6%) | 864 (96.0%) | 36 | 864 of 864, 0 disagree | 864 of 864 (llvm-props' record of h2) |
+| h3, 900 (900000), held out | 817 (90.8%) | 865 (96.1%) | 35 | 865 of 865, 0 disagree | 865 of 865, 0 differ (`REPR_LLVM_JUDGE=live mutants-oracle`, opt 23.1.5) |
+
+By kind (h3 before, after): md-edit 116, 150 of 150; intr-arg 66, 75 of 75; intr-rename 64, 69 of 75; the rest unchanged
+(intr-decl 67, intrinsic 75, md-attach 149, di-attach 55, di-drop 59, di-record 55, di-retarget 51, di-version 60). The unknowns
+left on h3 (35): is.fpclass renamed over a non-ConstantInt mask (6: undefined behaviour in the Verifier's cast, opt's answer
+garbage); intr-decl's declaration visited before its calls with a changed parameter's attributes (4) and AutoUpgrade's rewrites
+of memory intrinsics with their alignment (4); the debug info's (19: retargeted fields, variables and locations sent to others,
+instructions' and globals' `!dbg`); a wrapping range (1).
+
+**The families the verifier's fixes touch**, against their records (`bin/repr-llvm check ... --essential`, the llvm-essential
+chain): roundtrip-llvmtest, verify-llvmtest, text-llvmtest 43 of 43 and verify-probes 4 of 4, 0 failing against the records, their controls failing; `bin/llvmi check --essential` could not run here (no extracted `llvm/test` of 23.1.5 under the main checkout's `.tmp/llvm/src`: `bin/llvm-corpus extract`, left to the night); `test/repr/llvm/controls-test.bash` with the new expect-test line run at the night. The stubs' log of the measuring runs is empty but the host identities `bin/crops-score` and `bin/gate --plan`
+read (`gcc`, `g++`, `clang++`, `rustc --version`), which are not checks.
+
+**Scores.** `bin/crops-score` before and after: LLVM IR 96.4% / 97.9% / 100.0% / 96.9% (completeness, completeness without by
+design, maturity, independence), the same: the rt families are not recorded yet, so the checkout's facts do not move. The projection
+on the night's records (`test/crops/independence.edn`'s comment), with verify-rt-heldout's ~1,202 mutants at h3's rate (96.1%
+rather than LLS36 (a)'s 90.6%): about 1,155 own and 47 on opt's record, judge about 0.889 to (4414 + 0.5 x 1260) / 5674 = 0.889,
+and independence about 97.8, unchanged in the first decimal: the rt pack's mutants are mostly of the base and attrs families,
+which these rules leave. The night's counts replace both.
+
+### The night's commands (LLS38, LLS39, after LLS36 (a)'s)
+
+LLS36 (a)'s are unchanged: `bin/llvmi ir-make rt` (or `ir-make rt --mutants` if the pack was made before this merge) must run on a
+tree with this branch, so the verdict lines are this branch's and `record-opt`'s entries are made afresh. Then:
+
+    test/repr/llvm/expect-test.bash                                              # 26 cases, 6 controls, 0 failing (seconds)
+    bin/repr-llvm records-verify --sample 25                                    # the oracle tier: "records-verify mutants verify-rt / verify-rt-heldout ... 0 differ"
+    REPR_LLVM_JUDGE=live bin/repr-llvm mutants-oracle .tmp/llvm/rt-lists/verify-rt-heldout.list .tmp/llvm/mo-live   # live opt (~3 min)
+    bin/repr-llvm check verify-rt --record; bin/repr-llvm check verify-rt-heldout --record                         # each mutant held to its line
+
+Expected: 0 differ, 0 own verdicts failing against Arbace's verifier. A difference is a rule to fix by day.
+
+### Proposed (llvm-props2)
+
+- **LLS40 The debug info's remaining field rules (19 of h3's 35 unknowns).** visitDISubprogram's and visitDILocalVariable's scope
+  rules for a scope sent to another scope, visitDIDerivedType's baseType by tag, the variables and locations a record names sent to
+  others (visitDbgVariableRecord's checks, V:7130-7200), an instruction's and a global's `!dbg` (V:3313-3335, visitDIGlobalVariable).
+  - (a) Port them. Cost: about half a day. h3 to about 98%.
+  - (b) Leave them on opt's record.
+  - *Recommended: (a)*, the next largest group and all of one source (Verifier.cpp's visitDI*).
+- **LLS41 The undefined cases (is.fpclass over a non-ConstantInt mask, 6).** The Verifier's `cast<ConstantInt>` reads a callee or an
+  instruction as a ConstantInt; opt's answer depends on memory layout.
+  - (a) A verdict line `unknown` kept by design, and the mutator made to skip is.fpclass as a rename target when the mask is not
+    a ConstantInt (the mutants change, the pack's digests with them). Cost: an hour.
+  - (b) Nothing: they stay on opt's record (0.5).
+  - *Recommended: (b)*: six mutants in 900, and the mutator's bodies stay as recorded.
+- **LLS42 AutoUpgrade's call rewrites (intr-decl, 8 of h3).** `UpgradeIntrinsicCall`'s cases for memcpy/memmove/memset with their
+  alignment and lifetime of two parameters, and the declaration visited before its calls with a changed parameter.
+  - (a) Port UpgradeIntrinsicCall's memory-intrinsic and lifetime cases (AutoUpgrade.cpp:5177-...). Cost: half a day.
+  - (b) Leave them.
+  - *Recommended: (a) after LLS40.*
+
 ## As built: LLS21 (a), ci's gaps (2026-11-05, branch `ci-lls21`)
 
 What the user decided (LLS21 (a)) is in ci, C's crop (`arbace/c/build.ae`, `arbace/c/check.ae`), no new native and no Go
