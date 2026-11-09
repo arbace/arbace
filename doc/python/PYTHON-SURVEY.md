@@ -5264,3 +5264,36 @@ sources on ci over the handles, file by file.
   metatype with its own tp_new wins).
 - pyi's AOT links pyctypes and the world compiled by cf2g (`bin/pyi-clib aot ctypestest`); bin/pyi's runtime verbs
   and keys cover them. The world's library is `ctypestest` (goi maps a package path's `_` to a namespace's `-`).
+
+### 244-3's first slice and the port's smaller causes (2026-11-10, the Mac VM, queue 244)
+
+- **The C API over the handles** (`go/arbace/pyctypes/capi.go`):
+  - The limited API's functions are Go natives of the world, a function the node program declares and does not define being the native of its name: references, ints, floats, str, bytes, lists, `PyArg_ParseTuple`'s format units, the error indicator (`PyErr_SetString`, `PyErr_Format`, `PyErr_Occurred`), `PyOS_snprintf`, `PySys_Write*`/`Format*`, `Py_GetVersion`.
+  - A proxy carries `ob_type` (its type's handle), so `PyUnicode_Check` works as a macro over `PyType_GetFlags`.
+  - The singletons and the `PyExc_*` pointers are defined in the world's C half, `tools/pyi/clib/ctypestest/pycapi.c`. An undefined extern datum links at address 0, and compiled code copies the static addresses at its setup, so they cannot be bound later.
+  - `_ctypes_test` is made from its own `PyInit__ctypes_test` by multi-phase initialization, its `m_methods` called as METH_NOARGS, METH_O or METH_VARARGS.
+  - A `pythonapi` call (FUNCFLAG_PYTHONAPI) raises the indicator.
+- **The port's smaller causes**, as `_ctypes.c` has them:
+  - function pointers made from memory get their state;
+  - `(name, dll)` is accepted from a tuple subclass;
+  - from_param in full; CArgObject's repr;
+  - the musl library names are names of the world;
+  - a c_char_p's kept object is the bytes itself;
+  - callbacks' unraisable messages and the leak warning;
+  - the 1024 argument limits;
+  - `_abstract_`; a structure that contains itself is refused; a type is final once it is a field's type;
+  - `__pointer_type__` as the metatypes' getset;
+  - paramflags (`_validate_paramflags`, `_build_callargs`, `_build_result`);
+  - pickling's instance `__dict__`;
+  - the metatypes' tp_new is type.__new__ alone and their tp_init makes the StgInfo.
+- **Found (a REQUEST for the C crop):** ci's builder ignores `#pragma pack(push, n)` inside a function body (16 bytes where gcc gives 9), and the `ms_struct` attribute.
+  - `_ctypes_test_generated.c.h` declares its Packed structs inside a function, so test_generated_structs' Packed1-3 and test_bitfields' msvc mode differ there.
+  - Probes: `.tmp/q244/cprobe/p1.c` and `p2.c`. At file scope ci gives 9 bytes, as gcc does.
+- **By design** (no fix in this branch):
+  - `from_address` of a Python buffer's address: array's memory is Go memory, not the world's.
+  - The issue18060 tests rely on an ABI coincidence (a struct of two doubles where atan2 takes two doubles); ci's convention is its own.
+- **Left:**
+  - the buffer export of ctypes objects (PEP 3118; queue 249 owns memoryview's export protocol, so it comes last);
+  - the C crop's layouts above;
+  - the swapped and aligned structure cases;
+  - a few messages.
