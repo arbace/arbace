@@ -171,6 +171,51 @@
       (check "type annotations: control: a changed value differs"
              (and (not= changed (first ours)) (not (some #{changed} javac)))))))
 
+(defn- nodes-of
+  "Every node (a map with :op) under x."
+  [x]
+  (filter #(and (map? %) (:op %)) (tree-seq coll? seq x)))
+
+(defn test-invokers
+  "F15: in a world with jdk.internal.jrt.Invokers (the fixture test/j2g/unit/invoke, beside the edge's
+  java.lang.invoke), the analyzer writes (int) mh.invokeExact(1, \"a\") as Invokers.invokeExactI(mh, int.class,
+  {int.class, String.class}, {1, \"a\"}), (String) mh.invoke(x) as invokeL cast to String, a statement's call
+  as invokeExactV, MethodHandles.lookup() as Invokers.lookup(U.class); the control: MethodHandle.type() stays a
+  virtual call of MethodHandle."
+  []
+  (if-not (resolve 'arbace.classes.analyze/invokers-call)
+    ;; a host whose analysis predates F15 (stage 0 until a re-seed): the gate's build at the checkout's key has it, or
+    ;; J2G_UNIT_SOURCES=arbace.classes.analyze
+    (println "skip  invokers: the host's arbace.classes.analyze predates F15 (J2G_UNIT_SOURCES=arbace.classes.analyze)")
+  (let [e (edge/read-edge "jdk/edge.edn")
+        ;; load-fixture's binding without its advance-ids! (as test-throws)
+        world (binding [m/*run* true env/*declared* (:classes e) edge/*edge* e a/*source-lookup* false]
+                (w/load-world [{:root "test/j2g/unit/invoke" :tree true}] :variant-files []))
+        bodies (w/with-world world (:bodies @(:state (a/decl "p/U"))))
+        body (fn [nm] (some (fn [[[n _] b]] (when (= n nm) b)) bodies))
+        calls (fn [nm] (filter #(= :invoke (:op %)) (nodes-of (body nm))))
+        inv (fn [nm] (first (filter #(= "jdk/internal/jrt/Invokers" (:owner %)) (calls nm))))]
+    (check "invokers: the fixture analyzes" (and (seq bodies) (not (contains? (into {} (:failed world)) "p/U")))
+           (pr-str (:failed world)))
+    (let [n (inv "poly")
+          [_ r cs os] (:args n)]
+      (check "invokers: (int) mh.invokeExact(1, \"a\") is Invokers.invokeExactI, the site's classes and the boxed arguments"
+             (and (= "invokeExactI" (:name n)) (= :static (:kind n))
+                  (= "(Ljava/lang/invoke/MethodHandle;Ljava/lang/Class;[Ljava/lang/Class;[Ljava/lang/Object;)I" (:desc n))
+                  (= "I" (:class r)) (= ["I" "Ljava/lang/String;"] (mapv :class (:elems cs)))
+                  (= 2 (count (:elems os))))
+             (pr-str (select-keys n [:name :desc]))))
+    (check "invokers: (String) mh.invoke(x) is invokeL, cast to String"
+           (and (= "invokeL" (:name (inv "gen")))
+                (some #(and (= :cast (:op %)) (= "Ljava/lang/String;" (:class %))) (nodes-of (body "gen")))))
+    (check "invokers: a statement's mh.invokeExact() is invokeExactV" (= "invokeExactV" (:name (inv "stmt"))))
+    (let [n (inv "lk")]
+      (check "invokers: MethodHandles.lookup() is Invokers.lookup(U.class)"
+             (and (= "lookup" (:name n)) (= "Lp/U;" (:class (first (:args n)))))
+             (pr-str (select-keys n [:name :args]))))
+    (check "invokers: control: MethodHandle.type() is MethodHandle's own call"
+           (and (nil? (inv "plain")) (some #(and (= "java/lang/invoke/MethodHandle" (:owner %)) (= "type" (:name %))) (calls "plain")))))))
+
 (defn test-lookup-call
   "F15 (doc/classes/JAVA-DEFERRED-TRIAGE.md, \"As built: F15 (java.lang.invoke)\"): the analyzer writes
   MethodHandles.lookup() as jdk.internal.jrt.Invokers.lookup(C.class); in a JDK class (C of the JDK's packages,
@@ -199,6 +244,7 @@
   (test-throws)
   (test-type-annotations)
   (test-lookup-call)
+  (test-invokers)
   (println (str "j2g.unit: " (if (zero? @failures) "all passed" (str @failures " failed"))))
   (shutdown-agents)
   (System/exit (if (zero? @failures) 0 1)))

@@ -853,6 +853,21 @@ covers what.
   records and `go/arbace/jrt/classdata.ae`'s natives are Arbace's own, under the Eclipse Public License 1.0. F13's
   overlays `LockInfo.java`, `MonitorInfo.java`, `MemoryUsage.java`, `javax/management/ObjectName.java` and
   `openmbean/CompositeData.java` are removed (jdk26u's in their place).
+- java.lang.invoke (F15, doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F15 (java.lang.invoke)"; recorded by the rule of
+  B7): the derived overlays `overlay/jdk/java.base/java/lang/invoke/{MethodType,MethodTypeForm,LambdaMetafactory}.java` and
+  `sun/invoke/util/VerifyAccess.java` are jdk26u's files of the same paths (https://github.com/openjdk/jdk26u at `baf63fb`,
+  `src/java.base/share/classes/`) with the exact replacements and cuts `test/jrt/derive.ae` makes (`invoke-derivations`,
+  whose tables hold their replaced text; each file's header says so); `java/lang/invoke/MethodHandleStatics.java` and
+  `MethodHandleNatives.java` hold jdk26u's bodies of the members of the files of the same names their headers name, and
+  `MethodHandle.java`, `MethodHandles.java` and `CallSite.java`, `ConstantCallSite.java`, `MutableCallSite.java`,
+  `VolatileCallSite.java` jdk26u's text of the members their headers name (the argument checks and their messages, the
+  lookup modes, `in`, `dropLookupMode`, `toString`, the varargs collector's `asTypeUncached`); and the jdk26u sources the
+  closure adds (`test/jrt/jrt_sources.ae`'s `invoke-sources`) join `jdk/forms/`: Copyright (c) Oracle and/or its
+  affiliates, under the GNU General Public License version 2 with the Classpath Exception (text below), the derivations and
+  the rest of those files Arbace's own; `java/lang/invoke/DirectMethodHandle.java`, `MethodHandleImpl.java`,
+  `ProxyLambdaMetafactory.java` (jrt's own, in place of jdk26u's), `jdk/internal/jrt/Invokers.java`, the analyzer's
+  rewrite in `arbace/classes/analyze.ae` and `go/arbace/jrt/natives.ae`'s two natives are Arbace's own, under the Eclipse
+  Public License 1.0.
 - java.lang.reflect.Parameter and Runtime.Version.parse (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS280 (a)",
   "As built: JCS304 (b), JCS293"; recorded by the rule of B7): the derived overlay `overlay/jdk/java.base/java/lang/reflect/Parameter.java`
   is jdk26u's file of the same path (https://github.com/openjdk/jdk26u at `baf63fb`, `src/java.base/share/classes/`) with the
