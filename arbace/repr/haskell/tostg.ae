@@ -238,6 +238,48 @@
           t))
       t)))
 
+;;; HF10-P8 (a): unboxed sums (GHC 9.14.1's GHC.Types.RepType: SlotTy, primRepSlot, slotPrimRep, fitsIn, ubxSumRepType,
+;;; layoutUbxSum; GHC.Stg.Unarise: mkUbxSum, ubxSumRubbishArg, unariseSumAlts, mapSumIdBinders), ported rule for rule (BSD-3,
+;;; The University of Glasgow; LICENSE.md). A sum is unarised into an unboxed tuple: its tag (WordSlot, an Int# literal) and its
+;;; slots, each alternative's fields laid out in the slots that fit them, the others the slot's rubbish.
+
+(def ^:private slot-order {:lifted 0 :unlifted 1 :word 2 :word64 3 :float 4 :double 5}) ; SlotTy's constructors' order
+(defn- prim-rep-slot [r]
+  (case r :L :lifted :U :unlifted (:int64 :word64) :word64 (:int :int8 :int16 :int32 :word :word8 :word16 :word32 :addr) :word
+        :float :float :double :double nil))
+(defn- slot-prim-rep [sl] (case sl :lifted :L :unlifted :U :word :word :word64 :word64 :float :float :double :double))
+(defn- fits-in [a b]
+  (cond (= a b) a
+        (and (#{:word :word64} a) (#{:word :word64} b)) (max-key slot-order a b)
+        (and (#{:float :double} a) (#{:float :double} b)) (max-key slot-order a b)
+        :else nil))
+(defn- merge-slots [es ss]
+  (cond (empty? ss) (vec es) (empty? es) (vec ss)
+        :else (let [[e & ess] es [x & xs] ss]
+                (if-let [f (fits-in x e)] (into [f] (merge-slots ess xs))
+                    (if (< (slot-order x) (slot-order e)) (into [x] (merge-slots es xs)) (into [e] (merge-slots ess ss)))))))
+(defn sum-slots
+  "ubxSumRepType's slots after the tag: the alternatives' representations (each a vector of PrimReps) combined"
+  [alt-reps]
+  (when (every? (fn [rs] (every? prim-rep-slot rs)) alt-reps)
+    (reduce merge-slots [] (map (fn [rs] (vec (sort-by slot-order (map prim-rep-slot rs)))) alt-reps))))
+(defn- layout-sum
+  "layoutUbxSum: each field's slot index in the sum's slots"
+  [slots fields]
+  (loop [fs fields used #{} out []]
+    (if (empty? fs) out
+        (let [f (first fs)
+              i (first (keep-indexed (fn [i sl] (when (and (not (used i)) (= sl (fits-in f sl))) i)) slots))]
+          (when i (recur (rest fs) (conj used i) (conj out i)))))))
+(defn- sum-tc? [n] (and (vector? n) (= "GHC.Internal.Types" (nth n 2)) (re-matches #"Sum[0-9]+#" (nth n 3))))
+(defn- usum-con
+  "An unboxed sum's data constructor (#_|#), (#|_#)...: [alternative arity], 1-based, or nil"
+  [g]
+  (when (and (vector? g) (= "GHC.Internal.Types" (nth g 2)))
+    (when-let [[_ o] (re-matches #"\(#([_|]+)#\)" (nth g 3))]
+      (when (and (re-find #"\|" o) (= 1 (count (filter #{\_} o))))
+        [(inc (.indexOf ^String o "_")) (count o)]))))
+
 (defn type-reps
   "A type's PrimReps after unarisation: a vector, empty for a void type"
   [t]
@@ -245,6 +287,8 @@
     (if (= :tc (first t))
       (let [[_ n args] t]
         (cond
+          ;; an unboxed sum: its tag and its slots (ubxSumRepType)
+          (sum-tc? n) (if-let [sl (sum-slots (map type-reps args))] (into [:word] (map slot-prim-rep sl)) [:L])
           (and (= "GHC.Internal.Types" (nth n 2)) (re-matches #"Tuple[0-9]+#|Solo#|Unit#" (nth n 3))) (vec (mapcat type-reps args))
           (and (= "GHC.Internal.Prim" (nth n 2)) (contains? prim-tycon-reps (nth n 3))) (get prim-tycon-reps (nth n 3))
           (and (= "GHC.Internal.Prim" (nth n 2)) (str/ends-with? (nth n 3) "#")) [:U]
@@ -281,6 +325,8 @@
 
 (declare unboxed-con?)
 
+(def ^:dynamic *body-type* nil)  ; HF10-P8: the top-level binding's result type after its lambdas (an unboxed sum's construction in it)
+
 (defn expr-reps
   "A Core expression's representations"
   [e]
@@ -290,6 +336,10 @@
     v (if-let [t (global-type (second e))] (if (seq (nth (if (= :forall (first t)) t [:forall [] [] t]) 2)) [:L] (type-reps t)) [:L])
     app (let [[_ f args] e]
           (cond (and (head? f 'v) (unboxed-con? (second f))) (vec (mapcat expr-reps args))
+                ;; HF10-P8: an unboxed sum's construction, at the binding's result type (sum-rewrite's)
+                (and (head? f 'v) (usum-con (second f)) *body-type*
+                     (let [t (expand-syn (strip-forall *body-type*))] (and (= :tc (first t)) (sum-tc? (second t)))))
+                (type-reps *body-type*)
                 (head? f 'v) (if-let [t (some-> (global-type (second f)) (result-type (count args)))] (type-reps t) [:L])
                 (lv? f) (if-let [t (some-> (get (:ltypes *r*) f) (result-type (count args)))] (type-reps t) [:L])
                 :else [:L]))
@@ -312,7 +362,9 @@
                       (head? f 'v) (some-> (global-type (second f)) (result-type (count args)))
                       (lv? f) (some-> (get (:ltypes *r*) f) (result-type (count args))))]
           (cond (= :con t) (mapv expr-reps args)
-                (and t (tuple-ty? t)) (mapv type-reps (nth (strip-forall t) 2))))
+                (and t (tuple-ty? t)) (mapv type-reps (nth (strip-forall t) 2))
+                (and t (let [t (strip-forall t)] (and (= :tc (first t)) (sum-tc? (second t)))))
+                (let [rs (type-reps t)] (when (not= [:L] rs) (mapv vector rs)))))
     case (let [alts (nth e 3)] (when (seq alts) (expr-comps (nth (first alts) 3))))
     (let letrec) (expr-comps (nth e 2))
     nil))
@@ -688,11 +740,80 @@
                   (let [[ex b at] w] (with-meta (list 'case ex b at [(list 'alt :default [] body)]) {:float true}))))
               (mk se) (reverse wraps)))))
 
+(defn- sum-type [t]
+  (let [t (when t (expand-syn (strip-forall t)))]
+    (when (and (vector? t) (= :tc (first t)) (sum-tc? (second t))) t)))
+
+(defn- utuple-core [k] ["ext" "var" "GHC.Internal.Types" (if (= 1 k) "MkSolo#" (str "(#" (apply str (repeat (dec k) ",")) "#)"))])
+
+(defn- sum-rubbish
+  "ubxSumRubbishArg: an unused slot's argument (a pointer's absentSumFieldError, a number's 0), nil for an unlifted pointer's"
+  [sl]
+  (case sl :lifted (list 'v ["ext" "var" "GHC.Internal.Prim.Panic" "absentSumFieldError"]) :word (list 'lit "0##")
+        :word64 (list 'lit "0#w64") :float (list 'lit "0.0#") :double (list 'lit "0.0##") nil))
+
+(defn- sum-construct
+  "mkUbxSum: alternative k (of n) applied to its field as the unboxed tuple of the tag (an Int# literal) and the slots, the
+  field in the slot layoutUbxSum gives it, the others rubbish; nil when the sum's type is not known here or a field needs a
+  cast (castArg)"
+  [k n args st]
+  (let [targs (nth st 2) alt-reps (vec (map type-reps targs)) slots (sum-slots alt-reps)]
+    (when (and slots (= n (count targs)) (<= (count args) 1))
+      (let [frs (nth alt-reps (dec k)) lay (layout-sum slots (map prim-rep-slot frs))]
+        (when (and lay (<= (count frs) 1) (or (empty? frs) (= (first frs) (slot-prim-rep (nth slots (first lay))))))
+          (let [vals (map-indexed (fn [i sl] (if (and (seq frs) (= i (first lay))) (first args) (sum-rubbish sl))) slots)]
+            (when (every? some? vals)
+              (list 'app (list 'v (utuple-core (inc (count slots)))) (into [(list 'lit (str k "#"))] vals)))))))))
+
+(defn- replace-var
+  "The occurrences of the local x in e replaced by r (x a unique binder: no capture), every form's metadata kept"
+  [x r e]
+  (cond (= e x) r
+        (seq? e) (with-meta (apply list (map #(replace-var x r %) e)) (meta e))
+        (vector? e) (with-meta (mapv #(replace-var x r %) e) (meta e))
+        :else e))
+
+(defn- sum-case
+  "unariseSumAlts: a case on an unboxed sum as a case on its unboxed tuple (the tag and the slots), then on the tag (a
+  literal alternative an alternative of the sum, its binder the slot layoutUbxSum gives it: mapSumIdBinders; the DEFAULT
+  first, mkDefaultLitAlt); nil when the sum's type is not known or a field needs a cast"
+  [s b alts st]
+  (let [targs (nth st 2) alt-reps (vec (map type-reps targs)) slots (sum-slots alt-reps)]
+    (when slots
+      (let [vars (vec (for [_ (range (inc (count slots)))] (list 'lv "us" (str "sum" (swap! *n* inc)))))
+            _ (doseq [[v r] (map vector vars (cons :word (map slot-prim-rep slots)))] (swap! *lreps* assoc v [r]))
+            ialts (for [[_ c xs rhs :as a] alts]
+                    (if (= :default c) a
+                        (when-let [[k n] (usum-con c)]
+                          (let [frs (nth alt-reps (dec k) nil) lay (when frs (layout-sum slots (map prim-rep-slot frs)))
+                                x (first xs)]
+                            (when (and lay (= n (count targs)) (<= (count frs) 1)
+                                       (or (empty? frs) (= (first frs) (slot-prim-rep (nth slots (first lay))))))
+                              (list 'alt (list 'lit (str k "#")) []
+                                    (cond (nil? x) rhs
+                                          (empty? frs) (replace-var x (list 'v (utuple-core 0)) rhs)
+                                          :else (replace-var x (nth vars (inc (first lay))) rhs))))))))]
+        (when (every? some? ialts)
+          (list 'case s b [(list 'alt (assoc (utuple-core (count vars)) 1 "data") vars
+                                 (list 'case (first vars) (list 'lv "tag" (str "sum" (swap! *n* inc)))
+                                       (vec (sort-by (fn [[_ c]] (if (= :default c) 0 1)) ialts))))]))))))
+
+(defn- sum-rewrite
+  "HF10-P8 (a): an unboxed sum's construction or case rewritten into its unboxed tuple's, or nil"
+  [e]
+  (cond
+    (and (head? e 'app) (head? (second e) 'v) (usum-con (second (second e))))
+    (let [[k n] (usum-con (second (second e)))] (when-let [st (sum-type *body-type*)] (sum-construct k n (nth e 2) st)))
+    (and (head? e 'case) (some (fn [[_ c]] (usum-con c)) (nth e 3)))
+    (when-let [st (sum-type (or (get (:ltypes *r*) (nth e 2)) (expr-type (second e))))] (sum-case (second e) (nth e 2) (nth e 3) st))
+    :else nil))
+
 (defn expr
   "A Core expression as an STG expression"
   [e]
   ;; a case without alternatives is its scrutinee (CorePrep's Note [Empty case alternatives]: e |> unsafe co)
-  (let [e (loop [e (flatten-app e)] (if (and (head? e 'case) (empty? (nth e 3 nil))) (recur (flatten-app (second e))) e))]
+  (let [e (loop [e (flatten-app e)] (if (and (head? e 'case) (empty? (nth e 3 nil))) (recur (flatten-app (second e))) e))
+        e (or (sum-rewrite e) e)]
     (case (first e)
       lv (cond (contains? @*joins* (local-name e)) (list 'app (local-name e) [(void-atom)])
                ;; a variable of a void type returned: Unarise's (##)
@@ -1040,7 +1161,8 @@
                                          [(list 'string [sn :addr] (second (first (lit-form (second (first (nth e2 2)))))))
                                           (list 'bind [n :L] (list 'closure :u [] [] (list 'app (gname (second (second e2))) [sn])))])
                                        :else
-                                     (let [r (binding [*body-tycon*
+                                     (let [r (binding [*body-type* (some-> (if (lv? b) (get (:ltypes *r*) b) (global-type b)) (result-type (get arities b 0)))
+                                                       *body-tycon*
                                                        (let [t (some-> (if (lv? b) (get (:ltypes *r*) b) (global-type b)) (result-type (get arities b 0)))
                                                              t (when t (expand-syn (strip-forall t)))]
                                                          ;; only a binding whose body is the call itself (isTrue# x = tagToEnum# x)
