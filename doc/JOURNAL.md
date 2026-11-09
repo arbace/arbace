@@ -1266,3 +1266,26 @@ compiler stubs first on PATH (their log empty). doc/cpp/CPP-SURVEY.md, "Decided 
   whole part 6 → 18, the code generator's 142 samples as recorded, a probe whose deduced types' mangled names are clang's).
 - **Left**: alias templates' guides in C++20 (BuildDeductionGuideForTypeAlias), C++23's inherited constructors' guides, `new T(...)`,
   class templates' static members' initializers in specializations.
+
+## 2026-11-09: C++'s CP313 (a), the rest: access in every context the checker models (branch `cpp-props3`)
+
+- **Built** (the checker, `arbace/cpp/sema.ae`; after clang's SemaAccess.cpp at llvmorg-23.1.5: EffectiveContext, GetFriendKind,
+  HasAccess, IsAccessible's path walk): the context's classes (nested ones' enclosing classes) and function; friends matched by
+  name (functions, now also classes by their recorded names); [class.protected]'s object rule; a member's access through the
+  naming class's bases ([class.access.base]/5, an accessible base's members); applied to `o.m`, `o.f()`, members named in member
+  functions, the constructor an initialization chooses (a constructor template's specialization with its template's access), the
+  injected-class-name through a private base (`o.B::m`), class-scope using-declarations of enumerators and types (their own
+  access), structured bindings' rules ([dcl.struct.bind]/4: one class holding the members, no anonymous member, no closure type,
+  accessible members, the names' count); the member types' check gated per class instead of per unit.
+- **Why**: the user's decision CP313 (a) of 2026-11-09, its second pass ("As built: CP300-CP314", "Not built in this pass").
+- **Measured**: the every-10th sample 114 → 117 (access19, scoped15, decomp4), none lost, the extras the same 92 lines; the 90
+  access files of the whole part 12 → 19, none lost; the code generator's 142 samples as recorded (checker-only rules).
+- **Recorded**: test/cpp/check-dg-own-linux-amd64.edn from the final run (454 rows, 117 passes), the C++ read fact
+  (`:dg-own [117 1] :dg-clang [4480 0.5]`), test/crops/scores.edn (C++ 76.1 / 100 / 67.84, read 0.657); `make check-makefile`,
+  `gate.crops check`, `bin/gate --full --plan`, the dg control and `bin/crops-score --judge --strict` pass.
+- **Found**: the dg read's order-dependence (lookup/scoped15 read once accepted in a 90-file list, otherwise rejected), not
+  explained in this pass.
+- **Proposed** (doc/cpp/CPP-SURVEY.md, "Proposed (CP320-CP324)"): alias templates' guides, static members' in-class initializers in
+  the checker, the read's order-dependence, C++23's inherited constructors' guides, using-declarations' access for functions.
+- **Slips**: three throwaway commands against the day's rules (a mistyped `sed -i` naming the null device, a wait loop with `pgrep`
+  and a discarded output, a process substitution in an inspection command); listed in the survey's "Slips, scratch".
