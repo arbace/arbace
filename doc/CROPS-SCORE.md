@@ -383,3 +383,9 @@ The independence audit of 2026-11-09 (`.tmp/indep-audit/` in the main checkout: 
   eval 0 (`bin/pyi check`'s driver is python3), AOT 1 (`check --aot` runs no python3; not recorded yet), print 1, judge 0:
   Python 20.0 to 60.0. Java's judge: t08351, t08362 and t08376, added to `ref-jdk26.edn` after JCV1, had no line in
   `test/java/verdicts.edn`; `bin/java-check verdicts` wrote it again (the three `:status`): 0.985.
+- **Haskell's C headers** (the user's item (4)). `bin/hsi` sources `bin/lib/repr-c/sysroot.bash` as `bin/llvmi` and `bin/cppi` do:
+  `bin/hsi cnodes` assembles C's sysroot under its musl lock and exports `ARBACE_C_HOST` (Arbace's `c/target`) and
+  `ARBACE_C_SYSROOT`, and `test/haskell/eval/cnodes.ae` falls back on `c/target`, never `test/c/host`. The programs' C reads
+  Arbace's own C headers; 6 programs with C checked by `--only` (T2594, T4038, T5402, ffi001, ffi003, ffi022: 6 of 6) and
+  hsi-essential's command (123 programs, the controls failing as they must). The 89 programs' C counts 0.5 again, as the STG pack it
+  runs over: Haskell 74.9 to 76.0 (its judge stays the audit's, with the interface and layout levels).
