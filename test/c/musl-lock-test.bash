@@ -17,7 +17,7 @@ export CI_MUSL_FORMS=$w/forms
 # (GD4: the main checkout's shared copies by key are section 4's, in a store of its own; sections 1-3 read here alone)
 export CI_MUSL_NO_SHARED=1 CI_MUSL_SHARED=$w/shared
 cp -R "$seed" "$CI_MUSL_FORMS"
-# through bin/ci: it evaluates the checkout's arbace/c when the host embeds another (bin/lib/ci/fresh.bash)
+# through bin/ci: it evaluates the checkout's arbace/c when the host embeds another (RT.toolSource, CS281 (a))
 musl() { "$root/bin/ci" musl "$@"; }
 musl prepare
 musl key > "$CI_MUSL_FORMS/key"
