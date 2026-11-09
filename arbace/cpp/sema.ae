@@ -1159,6 +1159,11 @@
                       (try (cx-access! {:scope scope} (:ucls e) (last parts) (:uaccess e) nil nil)
                            (catch arbace.lang.ExceptionInfo x
                              (swap! *order* conj [:cx-error (ex-info (.getMessage x) (assoc (ex-data x) :cx/node n))])))))
+                  ;; (CP323 (a): `using B::B;` inherits B's constructors, [namespace.udecl]/3 and [class.inhctor.init]: the
+                  ;; class marked with the bases' names, their constructors candidates of its initializations, ctor-init)
+                  (when (and (:cls scope) (>= (count parts) 2)
+                             (= (last parts) (str/trim (str/replace (nth parts (- (count parts) 2)) #"<.*$" ""))))
+                    (abi/update-cls! (:cls scope) update :inherits-ctors (fnil conj #{}) (last parts)))
                   (doseq [e es] (enter! scope (last parts) (cond-> (assoc e :pos (long (or (:_b n) 0)))
                                                              (and (checking?) (:cls scope) (#{:enumerator :type} (:e e)))
                                                              (assoc :ucls (:cls scope) :uaccess (or *member-access* :public))))))
@@ -2216,14 +2221,36 @@
   ([id args ctx] (ctor-init id args ctx false))
   ([id args ctx nested]
   (let [cands (concat (ctor-candidates id) (when-let [h (:ctor-candidates @hooks)] (h id args)))
+        ;; (CP323 (a), the checker: the constructors a class inherits by `using B::B;` ([namespace.udecl]/3,
+        ;; [over.match.funcs]/8-9: B's constructors but its copy and move constructors and a default constructor), its
+        ;; own declared beside them; one chosen is checked for its access as B's member ([namespace.udecl]/19) and the
+        ;; initialization left unanalyzed, the object declared all the same)
+        inh (when (and (checking?) (seq (:inherits-ctors (abi/cls id))))
+              (let [nms (:inherits-ctors (abi/cls id))]
+                (vec (for [b (:bases (abi/cls id))
+                           :let [bc (:cls b)]
+                           :when (contains? nms (:name (abi/cls bc)))
+                           fid (concat (ctor-candidates bc) (when-let [h (:ctor-candidates @hooks)] (h bc args)))
+                           :let [f (fnd fid)]
+                           :when (and (seq (:ps (:ty f))) (not (copy-ctor? f bc)) (not (move-ctor? f bc)))]
+                       fid))))
+        cands (concat cands inh)
         cands (if nested (remove #(= id (class-id (abi/non-ref (or (first (:ps (:ty (fnd %)))) abi/void)))) cands) cands)
         fid (try (resolve-overload cands args nil)
                      (catch arbace.lang.ExceptionInfo e
-                       (if (and (System/getenv "CPP_HDR_TRACE") (:codegen/refused (ex-data e)))
+                       (cond
+                         ;; (CP323 (a): a class inheriting constructors, which the slice does not declare: for the checker
+                         ;; an initialization no declared constructor accepts is not judged, the object declared all the same;
+                         ;; the code generator refuses it, as before)
+                         (and (checking?) (:inherits-ctors (abi/cls id)) (re-find #"no viable|ambiguous" (str (.getMessage e))))
+                         ::inherited
+                         (and (System/getenv "CPP_HDR_TRACE") (:codegen/refused (ex-data e)))
                          (fail (:codegen/refused (ex-data e)) (.getMessage e) " (constructing " (:name (abi/cls id)) ")")
-                         (throw e))))
-            f (fnd fid)]
+                         :else (throw e))))
+            f (when-not (= ::inherited fid) (fnd fid))]
         (cond
+          (= ::inherited fid) {:i :none}
+          (some #{fid} inh) (do (cx-ctor-access! ctx {:i :ctor :fn fid}) {:i :none})
           (and (:trivial f) (= 1 (count args))) {:i :copy :e (first args) :cls id}
           ;; an immediate function's constructor of an empty class: evaluated, nothing at run time ([expr.const]/16;
           ;; G5: <compare>'s __cmp_cat::__unspec)

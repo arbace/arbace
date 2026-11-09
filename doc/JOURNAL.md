@@ -2630,3 +2630,17 @@ The user accepted HF10-P1 to P10 as recommended (~06:15). Built by an agent in t
   files (`.tmp/fctad.txt`) with CP323: 21 → 28 (class-deduction-alias1, -alias2, -alias3, -alias8, -alias12, -alias16, -alias19).
 - **Left**: a member alias template named through its class (`T<double>::AFoo`), cpp1z/class-deduction-alias1's C++17-only
   GCC error (clang accepts).
+
+## 2026-11-09: C++'s CP323 (a), C++23's inherited constructors' guides (branch `cpp-props4`)
+
+- **Built** (from the standard's text, [over.match.class.deduct]/1.10 and [over.match.best.general]/2 per P2582R1; clang 23 has
+  none): `inherited-guides`, the guides of the alias with C's parameters and the base as defining-type-id (CP320's), each returning
+  C with the arguments deduced back; the tie-break for a guide not from inherited constructors; the dependent base's
+  `UnresolvedUsingValueDecl` recognized. In the checker: a class's inherited constructors among its initializations' candidates
+  (B's but copy, move and no-parameter ones), the chosen one's access as B's member, the initialization otherwise not analyzed.
+- **Why**: the user's decision CP323 (a) of 2026-11-09; the checker's half because a class inheriting constructors gave a false
+  "no viable function" at its construction (any standard).
+- **Measured**: probe `.tmp/p/in1.cpp` (C<int>, C<char>, G<char, bool>; D and E errors), `in3`-`in5`; the every-10th sample
+  117 → 120 with CP320, CP321 (cpp23/class-deduction-inherited1 among them); the using-declaration files (`.tmp/fusing.txt`):
+  inh-ctor9 kept for the right reason now (A's protected constructor), inh-ctor35 lost (its expected error is
+  `-fno-new-inheriting-ctors`'s, before P0136: the earlier pass was the false "no viable" error), pr97268's extra line gone.

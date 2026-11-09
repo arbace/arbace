@@ -1252,9 +1252,15 @@
         ;; CP311 (a), [over.match.best]/2.9-2.11 for two guides of class template argument deduction: one from a
         ;; deduction-guide over one not, the copy deduction candidate over another, one from a non-template constructor
         ;; over one from a constructor template
-        guide-better (fn [] (let [ka (:guide a) kb (:guide b)]
+        guide-better (fn [] (let [ka (:guide a) kb (:guide b)
+                                  n (or nargs (count (:ps (:ty a))))
+                                  same-ps (= (map abi/unq (take n (:ps (:ty a)))) (map abi/unq (take n (:ps (:ty b)))))]
                               (boolean (and ka kb
-                                            (cond (and (= :user ka) (not= :user kb)) true
+                                            (cond ;; (CP323 (a), C++23's [over.match.best.general]/2.10 (P2582R1): one not from
+                                                  ;; inherited constructors over one that is, the parameters the same)
+                                                  (and (not (:inherited a)) (:inherited b) same-ps) true
+                                                  (and (:inherited a) (not (:inherited b)) same-ps) false
+                                                  (and (= :user ka) (not= :user kb)) true
                                                   (or (= :user kb) (= :user ka)) false
                                                   (and (= :copy ka) (not= :copy kb)) true
                                                   (= :copy kb) false
@@ -2411,15 +2417,15 @@
                                     (abi/unq (:ret ft))
                                     (let [ct (tmpl (:ctid g))]
                                       (instantiate-class (:ctid g) (or (complete-args ct (subvec (vec fargs) 0 (count (:params ct)))) (fail :template "ctad: missing arguments")))))
-                              ;; (CP320 (a): the deducibility constraint and the alias's own constraints, the class the guide
-                              ;; returns for the alias; false a sure drop)
+                              ;; (CP320 (a), CP323 (a): the deducibility constraint and the alias's own constraints, the class the
+                              ;; guide returns for the alias or the derived class; false a sure drop)
                               cls (if-let [res (:result g)] (res cls) cls)
                               _ (when (= :unsure cls) (reset! u true))
                               fid (when (map? cls) (next-id))]
                           (when fid
                             (swap! sema/*fns* assoc fid {:id fid :name (:name g) :kind :guide :ty {:k :fn :ps (vec (:ps ft)) :ret cls :va (:va ft)}
                                                          :defaults (:defaults g) :tinst {:tid (:id g) :args a} :guide (:kind g)
-                                                         :explicit (:explicit g) :deleted-sure false}))
+                                                         :inherited (:inherited g) :explicit (:explicit g) :deleted-sure false}))
                           fid))))
                   (catch arbace.lang.ExceptionInfo e
                     (when (System/getenv "CPP_TMPL_TRACE") (binding [*out* *err*] (println "guide" (:name g) (:kind g) "drops out:" (.getMessage e))))
@@ -2609,6 +2615,47 @@
       (upd-tmpl! (:id at) assoc :ctad-guides ags :ctad-src gs)
       ags)))
 
+(defn- inherited-guides
+  "CP323 (a), C++23's [over.match.class.deduct]/1.10 (P2582R1), from the standard's text (clang 23 builds none; the
+  standard is the reference where clang lags): for each direct base B of the class template `ctid`'s pattern whose
+  constructors it inherits (`using B::B;`), A the alias template with C's template parameters whose defining-type-id is
+  B: A's guides (alias-guide over B's class template's guides), each returning C with the arguments A's deduce from the
+  class the guide returns (the partial specialization CC<A<P...>> of the text: no such deduction, no guide), marked
+  :inherited for [over.match.best]/2.10's tie-break."
+  [ctid]
+  (let [ct (tmpl ctid)
+        pat (:pattern ct)
+        inh (set (keep #(when (#{"UsingDecl" "UnresolvedUsingValueDecl"} (:kind %))
+                          (let [[_ a b] (re-find #"(\w+)\s*(?:<[^;]*>)?\s*::\s*(\w+)\s*;?\s*$" (or (node-text %) ""))] (when (and a (= a b)) a)))
+                       (kids pat)))]
+    (vec
+      (for [bs (:bases pat)
+            :let [qt (get-in bs [:type :qualType])
+                  bname (second (re-find #"^\s*(?:::)?(?:\w+::)*(\w+)\s*(?:<|$)" (str qt)))]
+            :when (and bname (inh bname))
+            :let [aid (or (get (:ctad-inh-ids ct) qt)
+                          (let [aid (next-id)]
+                            (swap! *tmpls* assoc aid {:id aid :tk :alias :name (str (:name ct) "'s base " qt) :scope (:scope ct) :path (:path ct)
+                                                      :params (:params ct) :pattern {:kind "TypeAliasDecl" :type {:qualType qt}} :insts {}
+                                                      :constraint (:class-constraint ct)})
+                            (upd-tmpl! ctid assoc-in [:ctad-inh-ids qt] aid)
+                            aid))
+                  at (tmpl aid)
+                  rhs (alias-rhs at)]
+            :when rhs
+            :let [x (second rhs)
+                  res (fn [cls] (let [r (alias-deducible at x cls)]
+                                  (cond (false? r) false (= :unsure r) :unsure
+                                        :else (instantiate-class ctid (or (complete-args ct r) (fail :template "ctad: missing arguments"))))))
+                  gs (class-guides (first rhs))]
+            g (if (and (:ctad-src at) (identical? gs (:ctad-src at)))
+                (:ctad-guides at)
+                (let [ags (vec (keep #(some-> (alias-guide at x % res) (assoc :inherited true)) gs))]
+                  (doseq [g ags] (swap! *tmpls* assoc (:id g) g))
+                  (upd-tmpl! aid assoc :ctad-guides ags :ctad-src gs)
+                  ags))]
+        g))))
+
 (defn ctad
   "The :ctad hook: the class a placeholder for the class template or alias template `tid` deduces from an initializer
   of `kind` (:direct, :copy, :list-direct, :list-copy) with `init` (the arguments' vector, an expression, an
@@ -2632,12 +2679,14 @@
         ;; (copy-initialization not from a list: the converting guides alone, [over.match.copy]/1, [over.match.ctor]/1)
         allow-explicit (not= :copy kind)
         gs (if alias? (alias-guides t rhs (class-guides ctid)) (class-guides tid))
+        ;; (CP323 (a): C++23's guides from inherited constructors, a class template's own deduction alone)
+        gs (if (and (not alias?) (>= (long sema/*cxx-year*) 23) (:pattern ct)) (into gs (inherited-guides ctid)) gs)
         has-user (some #(= :user (:kind %)) gs)
         _ (when (and (nil? (:pattern ct)) (not has-user))
             (fail :ctad "template '" cname "' has no definition and no deduction guides"))
-        ;; (C++23's inherited constructors' guides, [over.match.class.deduct]/1.10 (P2582), are not built: a class that
-        ;; inherits constructors is not judged)
-        inherits (some #(and (= "UsingDecl" (:kind %))
+        ;; (C++23's inherited constructors' guides, [over.match.class.deduct]/1.10 (P2582): CP323 (a)'s inherited-guides;
+        ;; for an alias template of a class that inherits constructors not built, not judged)
+        inherits (some #(and (#{"UsingDecl" "UnresolvedUsingValueDecl"} (:kind %))
                              (let [[_ a b] (re-find #"(\w+)\s*(?:<[^;]*>)?\s*::\s*(\w+)\s*;?\s*$" (or (node-text %) ""))] (and a (= a b))))
                        (kids (:pattern ct)))
         cands (fn [only-list args]
@@ -2699,7 +2748,7 @@
             r (if (or (nil? r1) (= ::none r1)) (resolve (cands false inits) inits) r1)]
         (cond
           (= ::unsure r) (unsure-fail "a guide not deduced by the slice")
-          (and inherits (>= (long sema/*cxx-year*) 23) (keyword? r)) (unsure-fail "inherited constructors' guides")
+          (and inherits alias? (>= (long sema/*cxx-year*) 23) (keyword? r)) (unsure-fail "inherited constructors' guides")
           (= ::none r) (fail :ctad "no viable constructor or deduction guide for deduction of template arguments of '" cname "'")
           (= ::ambiguous r) (fail :ctad "ambiguous deduction for template arguments of '" cname "'")
           :else

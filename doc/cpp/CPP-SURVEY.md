@@ -5385,3 +5385,22 @@ generator alike):
   renamed parameter's default argument, an alias whose defining-type-id is no class template's specialization, a member alias
   template named through its class (`T<double>::AFoo`, a type the slice does not resolve), and an alias template of a class
   inheriting constructors at C++23.
+
+## As built: CP323 (a), C++23's inherited constructors' guides (2026-11-09; branch `cpp-props4`)
+
+From the standard's text ([over.match.class.deduct]/1.10 and [over.match.best.general]/2 as P2582R1 words them; clang 23 builds no
+such guide, so the standard is the reference here), on CP320's machinery:
+
+- `inherited-guides`: for each direct base B of the class template C whose constructors C inherits (`using B::B;`, a
+  `UsingDecl` or, for a dependent base, an `UnresolvedUsingValueDecl`: the existing detection had missed the latter), the alias
+  template A with C's parameters whose defining-type-id is B (a synthetic alias, kept by the base's spelling); A's guides as for
+  CP320, each returning C with the arguments A's deduce from the class it returns (the partial specialization CC<A<P...>> of the
+  text; no deduction, no guide); C's requires-clause A's. Marked `:inherited`.
+- The tie-break before the others: of two guides with the same parameter types, one not from inherited constructors over one that
+  is.
+- The checker's half that the guides needed: a class inheriting constructors was constructed as if it had only its own
+  (`no viable function among 3` for `G<char, bool> g(true, 'a', 1)`), a false error at any standard. Now `using B::B;` marks the
+  class with B's name (`:inherits-ctors`) and `ctor-init` adds B's constructors (but its copy and move constructors and one without
+  parameters, [over.match.funcs]/8-9) to the candidates; one chosen is checked for its access as B's member ([namespace.udecl]/19,
+  cpp0x/inh-ctor9's protected `A(int)` now for that reason) and the initialization otherwise left unanalyzed (the object declared
+  all the same); none viable: not judged (`{:i :none}`). The code generator is unchanged (it still refuses such a construction).
