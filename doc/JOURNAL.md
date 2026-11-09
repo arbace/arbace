@@ -2701,3 +2701,25 @@ pinned by `test/ocaml/corpora.edn` (`runtime/finalise.c`, `runtime/startup_aux.c
   AOT 406/202/64 to 419/191/66, maturity 100%, independence 87.4%. Not run: the compiled level (the night's; OC206's compiled path built,
   not proved). Proposed OC208 (`Unix.execv` at the AOT levels). Process note: the harness made the subagent's worktree inside
   `/root/arbace/.tmp/mac-queue/.claude/worktrees/` (an isolation flag of the call); its commit was fetched from there.
+
+## 2026-11-09 x86-64 assembly as a crop: the survey (branch `asm-amd64-survey`, from `mac/next` `7da5badcf`)
+
+At the user's request, a survey and plan for x86-64 (amd64) assembly as an intermediate crop, the way LLVM IR became one
+(doc/llvm/LLVM-CROP-SURVEY.md the model), written beside the arm64 survey (doc/asm/ARM64-SURVEY.md, branch `asm-arm64-survey`):
+doc/asm/AMD64-SURVEY.md. Doc only: nothing built, no lock, nothing fetched or installed. Read: doc/llvm/LLVM-CROP-SURVEY.md,
+doc/CROPS-SCORE.md, test/crops/crops.edn, test/reap/cells.edn, doc/ORACLE-RECORDS-SURVEY.md §3, `go/arbace/crt/{mem,syscall}.ae`,
+`tamago/cmd/go/cmd/{asm,internal/obj/x86}`, TamaGo go1.27.1's `src/cmd/asm/internal/asm/testdata` and
+`src/cmd/vendor/golang.org/x/arch/x86/x86asm` (BSD-3, a decoder with GNU, Intel and Plan 9 printers, AVX-512 from XED's data).
+Counted offline: llvm-project 23.1.4's `llvm/test/MC/X86` (632 files, 106,075 stated encodings, 96 error tests), `MC/AsmParser` (162),
+`MC/ELF` (265), `MC/Disassembler/X86` (13,545 stated decodings); gcc 15.2.0's `gcc.target/i386` (9,288 files, 3,504 run tests) and
+`gcc.target/x86_64` (153), extracted into the worktree's scratch from the pinned tarball; musl 1.2.6's 32 x86-64 `.s`/`.S`; Go's 67
+amd64 `.s` in `tamago/goroot` and its encoding tests (amd64 12,252 lines, AVX-512 14,302). Probes (seconds): GNU as 2.45.1 and
+llvm-mc 23.1.5 give the same `.text` on 31 of musl's 32 files (the other: a jump to a global symbol, short in gas, rel32 with a
+relocation in llvm-mc); Intel syntax's `mov edx, len` is a memory operand where AT&T's `mov $len, %edx` is an immediate; a static
+program assembled, linked and run by the CPU. Proposed: two intermediate rows `:asm-amd64` and `:asm-arm64`; forms at the machine
+level in the SDM's operand order; judges all own verdicts (the tests' stated encodings and text, exit status), the CPU's run and a
+ptrace lockstep tracer of Arbace's own; gas and llvm-mc only at the oracle tier; binutils never read for porting (GPL), its
+testsuite as data only; QEMU, unicorn and Bochs not used. Plan AX1-AX10, 53 to 92 days, AX1 the measurable first step (musl's
+32 files and MC/AsmParser read, printed `:full` byte for byte, read again equal). Proposals AXS1-AXS16 and the shared AS1-AS8, none
+decided. Alternatives considered: one `:asm` crop for both architectures (AXS1 (b)); per-syntax forms (AXS2 (b)); Go's optab or
+XED as the encoder's table (AXS4 (b), (c)); binary translation to Go as AOT (AXS7 (b), kept as optional AX11).
