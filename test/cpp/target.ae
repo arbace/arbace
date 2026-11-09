@@ -16,7 +16,10 @@
   derive-compiler SRC OUT  its 3 made files (limits.h, omp.h, mm_malloc.h) under OUT
   derive SRC SYSROOT OUT  the 7 products under OUT (SYSROOT: C's sysroot, ARBACE_C_SYSROOT; its usr/include is musl's), and
                         OUT/answers.tsv: each configure answer, its value and how it was found (probe or fact)
-  oracle OUT REF        OUT's files against REF's (the installed tree): missing, extra, differing (exit 1 on one)"
+  oracle OUT REF        OUT's files against REF's (the installed tree): missing, extra, differing (exit 1 on one)
+  plan-resource SRC OUT OUT/copy-resource.tsv: clang's resource directory (P20 (b)) from the extracted llvm-project-23.1.5 (SRC)
+                        as its clang/lib/Headers/CMakeLists.txt installs it (cpp/target/clang.edn's :resource-include)
+  oracle-resource OUT REF  the same comparison for it, the description's :not-made (the build's TableGen products) exempt"
   (:require [arbace.string :as str])
   (:import (java.io File)))
 
@@ -76,6 +79,70 @@
                              (when-not (str/includes? t a) (throw (ex-info (str "cpp.target: mm_malloc.h's substitution has nothing to replace: " a) {})))
                              (str/replace t a b))
                            (rd (:from mm-malloc)) (:replace mm-malloc))}))
+
+;; ---------------------------------------------------------------------------------------------
+;; clang's resource headers (P20 (b), the user 2026-11-08; doc/cpp/CODEGEN.md G5c.7): the directory clang's driver puts last on its
+;; search list (cpp/target/clang.edn's :search), as clang/lib/Headers/CMakeLists.txt of the pinned llvm-project-23.1.5 tarball
+;; installs it: the file lists its set() commands name, laid out by its install(FILES ... DESTINATION ${header_install_dir}[/SUB]
+;; ... COMPONENT C) commands of the description's component. The build's TableGen products (clang_generate_header's generated_files:
+;; arm_neon.h, riscv_vector.h, hlsl's .inc ...) are not made: no reader of an x86-64 program reaches them, the description's
+;; :not-made names each, and the oracle holds them to it.
+
+(defn- clang-desc [] (:resource-include (read-string (slurp "cpp/target/clang.edn"))))
+
+(defn- cmake-words
+  "A CMake command's arguments: whitespace-separated words, `#` comments to the line's end dropped (no quoted arguments occur
+  in the commands read)."
+  [^String body]
+  (remove str/blank? (str/split (str/replace body #"#[^\n]*" " ") #"\s+")))
+
+(defn cmake-sets
+  "{NAME [word ...]} of every `set(NAME word ...)`, a later set of a name replacing an earlier one, each `${VAR}` expanded by
+  the sets before it (a variable no set( defines, a function's product, expands to nothing)."
+  [^String text]
+  ;; the sets at the file's scope: a function's body (copy_header_to_output_dir's, clang_generate_header's) sets its products
+  ;; PARENT_SCOPE when called, which the build alone does
+  (let [text (str/replace text #"(?s)(?m)^\s*function\(.*?^\s*endfunction\([^)]*\)" "")
+        m (re-matcher #"(?s)(?m)^\s*set\(\s*([A-Za-z_][A-Za-z_0-9]*)\b(.*?)\)" text)]
+    (loop [env {}]
+      (if (.find m)
+        (let [nm (.group m 1)
+              ws (mapcat (fn [w] (if-let [[_ v] (re-matches #"\$\{([A-Za-z_0-9]+)\}" w)] (get env v []) [w])) (cmake-words (.group m 2)))]
+          (recur (assoc env nm (vec ws))))
+        env))))
+
+(defn cmake-installs
+  "[[SUBDIR [word ...]] ...]: the install(FILES ... DESTINATION ${header_install_dir}[/SUBDIR] ... COMPONENT component) commands,
+  their FILES expanded by `sets`."
+  [^String text sets component]
+  (let [m (re-matcher #"(?s)install\((.*?)\)" text)]
+    (loop [out []]
+      (if (.find m)
+        (let [ws (vec (cmake-words (.group m 1)))
+              at (fn [k] (let [i (.indexOf ^java.util.List ws k)] (when (>= i 0) i)))
+              fi (at "FILES") di (at "DESTINATION") ci (at "COMPONENT")]
+          (recur (if (and fi di ci (= component (get ws (inc ci))))
+                   (let [dest (get ws (inc di))
+                         sub (cond (= dest "${header_install_dir}") ""
+                                   (str/starts-with? dest "${header_install_dir}/") (subs dest (count "${header_install_dir}/"))
+                                   :else (throw (ex-info (str "cpp.target: an install destination outside the resource directory: " dest) {})))
+                         fs (mapcat (fn [w] (if-let [[_ v] (re-matches #"\$\{([A-Za-z_0-9]+)\}" w)] (get sets v []) [w]))
+                                    (subvec ws (inc fi) di))]
+                     (conj out [sub (vec fs)]))
+                   out)))
+        out))))
+
+(defn resource-plan
+  "[installed source] of clang's resource directory: each file the component's install commands name, at DESTINATION's
+  subdirectory under its own base name (CMake's install(FILES) drops the source's directories), its source under :from."
+  [^String src]
+  (let [{:keys [from cmake component]} (clang-desc)
+        text (slurp (str src "/" cmake))
+        sets (cmake-sets text)]
+    (sort (distinct
+            (for [[sub fs] (cmake-installs text sets component) f fs
+                  :let [base (last (str/split f #"/"))]]
+              [(if (= sub "") base (str sub "/" base)) (str from "/" f)])))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; the probes of the target's C library (configure's checks, answered from the headers' text)
@@ -261,6 +328,31 @@
                (println (str "cpp.target: " (count files) " products derived; configure's " (count answers) " answers: "
                              (count (filter #(str/starts-with? (nth % 2) "probe") answers)) " by probes of the C library's headers, "
                              (count (filter #(str/starts-with? (nth % 2) "fact") answers)) " by the description's facts")))
+    "plan-resource" (let [[src out] args
+                          rows (resource-plan src)]
+                      (doseq [[_ f] rows :when (not (.isFile (File. (str src "/" f))))]
+                        (throw (ex-info (str "cpp.target: CMakeLists.txt installs " f ", which the tarball does not hold") {})))
+                      (spit (str out "/copy-resource.tsv") (apply str (for [[i s] rows] (str i "\t" s "\n"))))
+                      (println (str "cpp.target: " (count rows) " files of clang's resource directory laid out ("
+                                    (count (:not-made (clang-desc))) " TableGen products not made)")))
+    "oracle-resource" (let [[out ref] args
+                            ours (set (files-under out)) theirs (set (files-under ref))
+                            not-made (set (keys (:not-made (clang-desc))))
+                            missing (sort (remove #(or (ours %) (not-made %)) theirs))
+                            unexpected (sort (filter ours not-made))
+                            absent (sort (remove theirs not-made))
+                            extra (sort (remove theirs ours))
+                            differ (sort (for [f ours :when (and (theirs f)
+                                                                 (not (java.util.Arrays/equals (java.nio.file.Files/readAllBytes (.toPath (File. (str out "/" f))))
+                                                                                               (java.nio.file.Files/readAllBytes (.toPath (File. (str ref "/" f)))))))] f))]
+                        (println (str "cpp.target oracle (clang's resource directory): " (count ours) " files made, " (count theirs) " installed; "
+                                      (- (count ours) (count extra) (count differ)) " equal byte for byte, " (count differ) " differ, "
+                                      (count missing) " missing, " (count extra) " extra; " (count (filter theirs not-made)) " TableGen products not made, as described"))
+                        (doseq [f differ] (println "  differs:" f))
+                        (doseq [f missing] (println "  missing:" f))
+                        (doseq [f extra] (println "  extra:" f))
+                        (doseq [f absent] (println "  described as not made but not installed:" f))
+                        (System/exit (if (or (seq differ) (seq missing) (seq extra) (seq absent) (seq unexpected)) 1 0)))
     "oracle" (let [[out ref] args
                    ours (set (files-under out)) theirs (set (files-under ref))
                    missing (sort (remove ours theirs)) extra (sort (remove theirs ours))

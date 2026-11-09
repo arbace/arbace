@@ -1051,7 +1051,7 @@ from the pinned gcc 15.2.0 tarball's sources, so that clang's IR leaves the runt
 (134 units with libstdc++exp's: strings, streams, locales, `<chrono>`, `<filesystem>` ...) stays clang's IR, from the pack (G5c's next step).
 
 Contents: G5c.1 What the units asked · G5c.2 The proof · G5c.3 The build · G5c.4 The numbers · G5c.5 What is not done ·
-G5c.6 Sources · G5c.7 Proposed.
+G5c.6 Sources · G5c.7 Proposed · G5c.8 The night's commands · G5c.9 As built: P20 (b), P21 (b), P22 (b) (cpp-props).
 
 ### G5c.1 What the units asked
 
@@ -1171,7 +1171,7 @@ runtime's: **0.578 each, independence 57.5**; with CP240 (b) too, the programs o
 
 ### G5c.7 Proposed
 
-**P20. Clang's resource headers in the target tree.** The tree (CP241 (b)) lists clang's resource directory
+**P20. Clang's resource headers in the target tree.** (Decided (b), the user 2026-11-08; built, G5c.9.) The tree (CP241 (b)) lists clang's resource directory
 (`/usr/lib/llvm23/lib/clang/23/include`) among the native parser's roots, but makes nothing there: a header only the
 compiler provides (`<unwind.h>`, also `<stddef.h>`'s and `<stdarg.h>`'s own when musl's are not reached first) is not
 found. The runtime's units read gcc's unwind.h through `-iquote` of the tree's gcc include directory (as g++ builds
@@ -1180,13 +1180,13 @@ llvm-project tarball (Apache-2.0 with the LLVM exception; the description's `:la
 installed directory byte for byte), so the native parser reads what clang reads; costs a day, on cpp-target's line (its
 files). **Recommended: (b)**, on cpp-target.
 
-**P21. The runtime's proof in the gate.** (a) As built: `bin/cppi runtime-swap` and the names level by hand (both need
+**P21. The runtime's proof in the gate.** (Decided (b), the user 2026-11-08; built write-ahead, G5c.9.) (a) As built: `bin/cppi runtime-swap` and the names level by hand (both need
 gcc, the oracle tier's, CPPI_GCC=1). (b) The names level in `cpp-runtime` (records mode, no gcc: it reads the pack's IR),
 `CPPI_RUNTIME_ROUTE=auto` the default of runtime-build, and `runtime-swap` an oracle-tier step (`test/gate/crops/cpp-oracle.edn`);
 costs the key's new lines (the route's namespaces: a change of sema or the code generator rebuilds the runtime, about 12
 minutes light) and one oracle-tier step of about 20 minutes. **Recommended: (b)** after the night's runs below hold.
 
-**P22. libstdc++-v3/src by our route.** The other 134 units (the strings', streams', locales' explicit instantiations,
+**P22. libstdc++-v3/src by our route.** (Decided (b), the user 2026-11-08; the first measure in G5c.9.) The other 134 units (the strings', streams', locales' explicit instantiations,
 `<chrono>`, `<filesystem>`, `<format>`): each instantiates the library's templates at scale, which is G5b's (P19's current
 instantiation, the template corners of G5.6) and C++17's `std::pair` (G5c.5). (a) Unit by unit after G5b, measured by
 `CPPI_RUNTIME_OURS=c++11/` (then `c++98/`, `c++17/` ...) `bin/cppi runtime-build` (the same route, the names level and runtime-swap the proof). (b) As (a),
@@ -1207,3 +1207,47 @@ CPPI_RUNTIME_ROUTE=auto bin/cppi check --only test/cpp/essential-check.txt      
 CPPI_RUNTIME_ROUTE=auto bin/cppi check && CPPI_RUNTIME_ROUTE=auto bin/cppi check --aot   # as test/cpp/check{,-aot}-linux-amd64.edn
 CPPI_RUNTIME_OURS=c++11/ CPPI_RUNTIME_ROUTE=auto CPPI_GCC=1 bin/cppi runtime-build .tmp/cppi/rt-src11   # P22 (b)'s measure
 ```
+
+### G5c.9 As built: P20 (b), P21 (b), P22 (b)'s first measure (branch `cpp-props`, 2026-11-08)
+
+The user's decisions of 2026-11-08 on G5c.7; doc/cpp/CPP-SURVEY.md, "As built: cpp-props", has the rest of the branch.
+
+**P20 (b): clang's resource headers in the target tree.** `test/cpp/target.ae`'s `resource-plan` reads
+`clang/lib/Headers/CMakeLists.txt` of the pinned llvm-project-23.1.5 tarball (test/cpp/corpora.edn's `llvmorg-23.1.5`) as data: its
+`set(NAME ...)` lists at the file's scope (a function's body, `copy_header_to_output_dir`'s and `clang_generate_header`'s, sets its
+products only when the build calls it), `${VAR}` expanded, and its `install(FILES ... DESTINATION ${header_install_dir}[/SUB] ...
+COMPONENT clang-resource-headers)` commands, each file at its destination under its base name; `cpp/target/clang.edn`'s
+`:resource-include` names the directory, the source, the CMake file, the component and `:not-made`, the 11 TableGen products the build
+makes (arm_neon.h, arm_fp16.h, arm_bf16.h, arm_vector_types.h, arm_sve.h, arm_sme.h, arm_mve.h, arm_cde.h, riscv_vector.h and HLSL's two
+`.inc`: ARM's, AArch64's, RISC-V's and HLSL's, which no read of an x86-64 program reaches). `bin/lib/repr-cpp/sysroot.bash`'s
+`cpp_target_tree` extracts `clang/lib/Headers`, lays it out under `usr/lib/llvm23/lib/clang/23/include` (resource-tree.sha256 beside),
+the tree's key holding `cpp/target/clang.edn` and the llvm pin; the full sysroot (every search directory a root) then holds what clang
+reads. `bin/repr-cpp target oracle` compares it too (`oracle-resource`, the :not-made exempt and held to the installed directory):
+**285 of the 296 installed files made, all 285 equal byte for byte, the 11 TableGen products not made, as described** (libstdc++'s 834
+and gcc's 151 equal as before). The runtime's units by our route no longer take `-iquote` of gcc's include directory: unwind-cxx.h's
+`"unwind.h"` is clang's, as the pack's IR read it (`cpp/target/clang.edn` in the runtime's key). Checked on the new tree (stubs first on
+PATH, their log empty, but native-check's oracle): `CPPI_RUNTIME_OURS=libsupc++/eh_ CPPI_RUNTIME_ROUTE=ours bin/cppi runtime-build`
+(records mode, no gcc): 198 units, 197 pass, **13 eh_* units by our route with clang's unwind.h, the names level equal for all 13**,
+eh_alloc.cc refused as before (G5c.5: std::pair's constructors; IR 103 s, read, print and lower 488 s); `pp-check --essential`,
+`roundtrip-corpus gxx-dg-essential --judge own` (33 of 33) and `samples --judge own` (9 of 9) as before; `native-check samples` 9 same, 68
+of 68 items, `native` 1, 30 of 30, the controls failing as they must.
+
+**P21 (b), write-ahead.** `bin/cppi`'s `cppi_runtime_route_default` (`rt_route`, read wherever the route was `${CPPI_RUNTIME_ROUTE:-clang}`:
+runtime-build, runtime_key, the IR pin's check) stays `clang` until the night's runs (G5c.8) hold; then that one word becomes `auto`, and
+the gate's `cpp-runtime` (`bin/cppi runtime-build && bin/cppi runtime-ci`, records mode) builds libsupc++'s units by our route with the
+names level (runtime-judge). `runtime-swap` is the oracle tier's new step `cpp-runtime-swap-oracle` (test/gate/crops/cpp-oracle.edn and
+test/gate/steps.edn: both runtimes with gcc, CPPI_GCC=1, codegen-check on the runtime by our route, then runtime-swap; one job, about 45
+minutes; its control waived: each unit's runs against the baseline's). `gate.crops check`: 0 problems; `bin/gate --oracle --plan`
+plans it.
+
+**P22 (b), the first measure.** `arbace.cpp.codegen gen-batch` over the 103 units of `c++98/` and `c++11/` (runtime-build's own lists,
+`-D_GNU_SOURCE`, the build's include options, no `-f` flags), each generated unit's external names against the pack's IR of the unit
+(`arbace.cpp.check/defined-names`): **52 of the 103 generate, 13 of them with the oracle's names exactly** (cxx11-stdexcept.cc 29 names, functexcept.cc 21, globals_io.cc
+20, functional.cc 10, regex.cc 9, mutex.cc 3, snprintf_lite.cc 3, parallel_settings.cc 3, and five that define nothing external:
+concept-inst.cc, list-aux-2.cc, list_associated-2.cc, math_stubs_float.cc, math_stubs_long_double.cc); four more have every oracle name
+and one or two extra: list.cc, list-aux.cc and tree.cc a `__clang_call_terminate` clang does not emit there (a terminate pad our route
+writes where clang's cleanup needs none), futex.cc two `std::chrono::duration` C2 constructors clang inlines away; the other 35 that
+generate lack the explicit instantiations their unit exists for (limits.cc 506 names, misc-inst.cc 102, cow-istream-string.cc 92: the
+template work of G5b). The 51 refused by class: parse 11, name 10, type 7, string 6, template 3, init 3, expr 3, overload 2, crash 2, virtual,
+stmt, pp, conversion 1 each. 27 min in one process at GOMEMLIMIT 1400 MiB. Next (P22 (a)): the 13 under `CPPI_RUNTIME_OURS` by name
+(runtime_ours takes a prefix; a list of units would let `auto` take exactly these), then the terminate pad and the chrono constructors.

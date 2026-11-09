@@ -33,11 +33,20 @@ cppi_ir_route() {
         mkdir -p "$d"; echo 98 > "$d/ir.status"; echo ours > "$d/route"
         { printf 'our route refused: '; cat "$d/gen.refused" 2>"$TMPDIR/cppi-route.err" || echo "not generated"; } > "$d/ir.log"
       else
+        # CP263 (a): our refusal kept apart (ir1 makes the directory afresh) and put back beside clang's IR or rejection
+        if [ -f "$d/gen.refused" ]; then mkdir -p "$(dirname "$work/ours-refused/$i")"; cp "$d/gen.refused" "$work/ours-refused/$i"; fi
         printf '%s\t%s\t%s\t%s\n' "$i" "$s" "$a" "$p" >> "$rest"
       fi
     done < "$todo.us"
   fi
   # shellcheck disable=SC2016
   tr '\t\n' '\037\0' < "$rest" | xargs -0 -r -P "$jobs" -I{} nice bash -c 'IFS=$'"'"'\037'"'"' read -r i s a p <<< "$1"; ir1 "$i" "$s" "$a" "$p"; echo clang > "$work/files/$i/route"' _ {}
+  # CP263 (a): a program our route refused, its IR then clang's or clang's rejection: arbace.cpp.check's ir-row reads gen.refused
+  if [ -d "$work/ours-refused" ]; then
+    (cd "$work/ours-refused" && find . -type f) | sed 's|^\./||' | while IFS= read -r i; do
+      [ -d "$work/files/$i" ] && cp "$work/ours-refused/$i" "$work/files/$i/gen.refused"
+    done
+    rm -rf "$work/ours-refused"
+  fi
   echo "cppi: the IR of $(wc -l < "$todo") programs by route: $(find "$work/files" -name route -newer "$todo" -exec cat {} + | sort | uniq -c | awk '{printf "%s%s %s", (n++ ? ", " : ""), $2, $1}') (CPPI_ROUTE=$route)" >&2
 }

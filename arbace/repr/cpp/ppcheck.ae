@@ -256,13 +256,34 @@
 ;; The check
 
 (defn- judge
-  "The reference's judgment: agree, both-reject, known, unrecorded, differ."
-  [rec mine known? errors?]
-  (cond (nil? rec) "unrecorded"
-        (= rec mine) "agree"
-        (and (= rec :rejected) errors?) "both-reject"
-        known? "known"
-        :else "differ"))
+  "The reference's judgment: agree, both-reject, clang-tokens (CP261 (a): g++ -E is no reference for the file and clang's raw
+  tokens are the port's, `by-clang`), known, unrecorded, differ."
+  ([rec mine known? errors?] (judge rec mine known? errors? false))
+  ([rec mine known? errors? by-clang]
+   (cond (nil? rec) "unrecorded"
+         (= rec mine) "agree"
+         (and (= rec :rejected) errors?) "both-reject"
+         by-clang "clang-tokens"
+         known? "known"
+         :else "differ")))
+
+(defn- other-target?
+  "A file whose options name another target than the host's (-march=, -mcpu= ...): g++'s rejection is the option's (the class
+  :target-option, not applicable, CP260 (a)), not the file's."
+  [^String text] (boolean (re-find #"-march=|-mcpu=|-mtune=|-m(32|x32|avx|sse)" text)))
+
+(defn gxx-no-reference?
+  "CP261 (a) (the user, 2026-11-08): g++ -E is no reference for the file's stream when it refuses a file the port reads without
+  an error (a pedantic error, an option or a character set it refuses, a header unit: the class gxx-rejects; not an option for
+  another target) or when the file is read under -fmodules-ts, where g++ -E looks the imported modules up and rewrites the
+  import directives (modules-ts). Such a file's stream is judged by clang's recorded raw tokens alone."
+  [rec errors? modules? ^String text]
+  (boolean (and (not errors?)
+                (or modules? (and (= rec :rejected) (not (other-target? text)))))))
+
+(defn clang-tokens?
+  "CP261 (a): the port's raw tokens' digest `lex-dg` is clang's recorded one `crec` (a digest, not a rejection)."
+  [crec lex-dg] (boolean (and (string? crec) lex-dg (= crec lex-dg))))
 
 (defn check-file
   "One file: [name lex-status pp-status port-digest detail]."
@@ -279,12 +300,19 @@
         (when (levels "pp")
           (let [r (try (pp/preprocess cfg (:read e)) (catch Throwable x {:tokens [] :errors [(str x)] :panic true :crash (str x)}))
                 dg (tokens-digest (unplaced (port-texts r) base))
+                rec (get gxx-db key)
+                ;; CP261 (a): where g++ -E is no reference, clang's raw tokens (the lex level's digest, computed for this
+                ;; even when the lex level is not run)
+                by-clang (and (gxx-no-reference? rec (seq (:errors r)) (:modules (:fc e)) (slurp-latin1 (str base "/" nm)))
+                              (clang-tokens? (get clang-db key)
+                                             (or lex-dg (lines-digest (try (raw-lines (lex/read-bytes (str base "/" nm)) mask)
+                                                                           (catch Throwable x [(str "#panic " x)]))))))
                 _ (let [^java.io.File o (java.io.File. (str d "/port/" nm ".txt"))]
                     (.mkdirs (.getParentFile o))
                     (spit o (str (str/join "\n" (port-texts r)) "\n" (str/join "\n" (map #(str "#error " %) (:errors r))) "\n")))
                 st (if (:crash r)
                      "crash"
-                     (judge (get gxx-db key) dg (contains? known-pp nm) (seq (:errors r))))]
+                     (judge rec dg (contains? known-pp nm) (seq (:errors r)) by-clang))]
             [st dg (boolean (seq (:errors r)))]))]
     ;; the fifth and sixth: the lex digest and whether the port gave errors, for the negative controls (not in files.tsv)
     [nm (or lex-st "-") (or pp-st "-") (or dg "-") (or lex-dg "-") pp-err]))
@@ -297,17 +325,19 @@
   at :lex), must not agree. A control whose subject is not a file of this run of the corpus `id`, or whose reference has no recorded
   answer, is left (said); one that agrees is printed and returned (the check fails). The names are CORPUS/NAME."
   [^String id rs gxx-db clang-db levels]
-  (let [cs (filter #(contains? #{:pp :lex} (:level %)) (if (.exists (java.io.File. ^String controls-file)) (read-string (slurp controls-file)) []))
+  (let [cs (filter #(contains? #{:pp :lex :pp-clang} (:level %)) (if (.exists (java.io.File. ^String controls-file)) (read-string (slurp controls-file)) []))
         by (into {} (map (juxt first identity) rs))
         pre (str id "/")]
     (vec (for [{cid :id :keys [level subject reference]} cs
                :when (str/starts-with? subject pre)
                :let [row (get by (subs subject (count pre)))
-                     lv (name level)
+                     lv (if (= level :pp-clang) "lex" (name level))
                      rec (get (if (= level :pp) gxx-db clang-db) reference)
                      v (when (and row (levels lv) rec)
-                         (if (= level :pp)
-                           (judge rec (nth row 3) false (nth row 5))
+                         (case level
+                           :pp (judge rec (nth row 3) false (nth row 5))
+                           ;; CP261 (a)'s rule: the subject's stream judged by clang's tokens, the reference's raw tokens in its place
+                           :pp-clang (judge (get gxx-db subject) (nth row 3) false (nth row 5) (clang-tokens? rec (nth row 4)))
                            (judge rec (nth row 4) false false)))]
                :when (cond (nil? row) false
                            (nil? v) (do (println (str "control " cid " left: " (if rec "the level not run" (str "no recorded answer for " reference)))) false)
@@ -430,7 +460,7 @@
     (cond
       (re-find #"fmodules" s) :modules-ts
       (re-find #"#\s*embed|__has_embed" s) :embed
-      (re-find #"-march=|-mcpu=|-mtune=|-m(32|x32|avx|sse)" s) :target-option
+      (other-target? s) :target-option
       (and (= what "pp") (not= (status-of d (str "gxx/" nm)) "0")) :gxx-rejects
       (re-find #"(?m)^\s*(export\s+)?(import|module)\b" s) :modules
       (re-find #"__has_cpp_attribute|__has_attribute|__has_builtin|__has_include" s) :has-answer
@@ -541,27 +571,30 @@
   "CX10 (CS240 (a)'s analogue): the results of the corpora `ids` from WORK/ID/files.tsv into FILE, one row a file
   [\"CORPUS/NAME\" RESULT REASON] (bin/reap's :c-known with :id-sep \"/\"; the rotation's universe, GT8.4): :pass when every level
   checked agrees or both reject, :known when one is known, else the run's status (no record is written from a run with one);
-  the other corpora's rows kept. A subset's run (--only) is refused: the record is of whole corpora at their recorded sampling."
+  the other corpora's rows kept. The record is of whole corpora at their recorded sampling: a subset's run (--only) replaces the
+  rows of its own files alone (cpp-props, CP261 (a): a judgment's change recorded on the files it changes), each of which the
+  record must hold already (a file outside the recorded sampling refused)."
   [^String work ^String file ids]
-  (doseq [id ids]
-    (when (.exists (java.io.File. (str work "/" id "/subset.txt")))
-      (throw (ex-info (str "record-results: " id "'s run is a subset (--only): not recorded") {}))))
-  (let [ok #{"agree" "both-reject" "-"}
+  (let [subset? (fn [id] (.exists (java.io.File. (str work "/" id "/subset.txt"))))
+        ok #{"agree" "both-reject" "clang-tokens" "-"}
         rows (vec (for [id ids
                         l (str/split-lines (slurp (str work "/" id "/files.tsv"))) :when (seq l)
                         :let [[nm lx pp] (str/split l #"\t")]]
                     [(str id "/" nm)
                      (cond (and (ok lx) (ok pp)) :pass
-                           (and (#{"known" "agree" "both-reject" "-"} lx) (#{"known" "agree" "both-reject" "-"} pp)) :known
+                           (and (#{"known" "agree" "both-reject" "-"} lx) (#{"known" "agree" "both-reject" "clang-tokens" "-"} pp)) :known
                            :else :fail)
                      (str "lex " lx ", pp " pp)]))
         bad (filter #(= :fail (second %)) rows)
         _ (when (seq bad) (throw (ex-info (str "record-results: " (count bad) " failing files, not recorded: " (str/join " " (map first (take 5 bad)))) {})))
-        pre (set (map #(str % "/") ids))
-        old (let [f (java.io.File. file)]
-              (if (.exists f)
-                (remove (fn [[i]] (some #(str/starts-with? i %) pre)) (read-string (slurp f)))
-                []))
+        pre (set (map #(str % "/") (remove subset? ids)))
+        old0 (let [f (java.io.File. file)] (if (.exists f) (read-string (slurp f)) []))
+        sub-ids (set (for [r rows :when (subset? (subs (first r) 0 (.indexOf ^String (first r) "/")))] (first r)))
+        outside (remove (set (map first old0)) sub-ids)
+        _ (when (seq outside)
+            (throw (ex-info (str "record-results: " (count outside) " files of a subset's run are not in " file
+                                 " (outside the recorded sampling), not recorded: " (str/join " " (take 5 outside))) {})))
+        old (remove (fn [[i]] (or (some #(str/starts-with? i %) pre) (sub-ids i))) old0)
         all (sort-by first (concat old rows))]
     (spit file (str ";; bin/repr-cpp pp-check's results (doc/cpp/CPP-SURVEY.md, \"As built: CX10 (write-ahead)\"): every file of the corpora's\n"
                     ";; recorded runs (cpp-lexical whole, gxx-dg every 10th, libstdcxx-headers every 8th), [\"CORPUS/NAME\" RESULT REASON], RESULT\n"
