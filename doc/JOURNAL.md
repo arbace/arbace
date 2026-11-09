@@ -2443,3 +2443,27 @@ verify-probes 472 of 478, roundtrip- and text-llvmtest 304 of 304), `bin/llvmi c
 LLS37 (b): nothing. Alternatives considered: a new gate part for the mutants (a `:parts` line on llvm-records-verify; rejected, it
 would change the slot patch's context), porting module flags' and visitIntrinsicCall's other cases now (proposed as LLS38, LLS39).
 Details: doc/llvm/LLVM-CROP-SURVEY.md, "As built: LLS35 (a), LLS36 (a)".
+
+## 2026-11-09: CS290 (a), CS291 (a)/(b), CS292 (a): pragmas in stream order, the lexer's rejections as diagnostics, a dg-wording family (branch `c-props`, from `mac/c-compl` 35744df5e)
+
+The user decided C's three proposals as recommended (2026-11-09 morning). CS290 (a): under `*reentry*` the preprocessor keeps a
+re-entered main file's `#pragma` texts and hands them to the parser with the next token (`stream`'s `:pragmas`), the parser records
+them by token seq (moved with the tokens when `__func__`'s are injected), and ci's read (`*include-inside*`) writes `c/pragma` before
+the body item that token starts; the checker runs a statement-level `c/pragma` (so a main-file `#pragma pack` in a body counts too)
+and lays a record out by the pack state at its definition. 95_bitfields' packed and aligned tests then showed three layout rules
+under `#pragma pack`, taken after gcc 15.2's stor-layout place_field and layout_decl (no code copied): no type-size window for
+bit-fields when a maximum field alignment is set, a zero-width bit-field aligning to its type's full alignment, an aligned
+attribute capped by the pack; and ci's back end (IBitLoad/IBitStore, aot's BitLoad/BitStore) reads and writes a packed bit-field's
+bits past its 64-bit unit in the next byte. 95_bitfields passes at eval and AOT. CS291 (a): `(c/bad-lit T spelling message)` for
+the constants gcc's lexer rejects (a binary prefix after libcpp's cpp_classify_number; a u8 character constant after
+cpp_interpret_charconst), reported by the checker, printed back as written: c23-utf8char-3 and c23-binary-constants-3 pass dg and
+the round trip's levels 1 and 2; (b): c23-auto-3 and c23-constexpr-3 keep their refusals. CS292 (a): the family
+`:syntax-expected-before` in `test/c/dg-wording.edn`: c23-attr-syntax-7 passes; -6 keeps two lines in `:wrong-reason` (no syntax
+error after a failed paste: proposed as CS293) and gnu23-attr-syntax-3 stays (a declaration diagnostic, not wording). Checked light
+(stubs first, no gcc): the affected cases `--only`, dg `--essential` 92 of 92, the essential eval and AOT lists 0 failing, `bin/repr-c
+check --c23` 59 / 3 / 0, `bin/ci judge-test` 0 failures; the `--only` rows merged into the records. The musl forms cache re-read for
+the new key was cut by a timeout at 1,300 of 1,331 files; its 3,165 files equal c-compl's byte for byte, whose index and the new
+key completed it (the night re-reads). C: completeness 95.92% to 95.96% (99.59% to 99.64% without by design), the read cell's deferred
+36 to 33, eval and AOT 1 to 0, print 41 to 39. Alternatives considered: naming each re-entry `MAIN#again#N` (CS290 (b), rejected by
+the decision), the parser's messages in gcc's words (CS292 (b): the parse check compares them with cc's). Details: doc/C23-SURVEY.md,
+"As built: CS290 (a), CS291, CS292 (a)".
