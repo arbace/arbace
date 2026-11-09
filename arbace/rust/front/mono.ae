@@ -1,0 +1,1191 @@
+;; Ported from rustc 1.99.1 (https://github.com/rust-lang/rust at 58cf8f9c3, the sources of Alpine's rust-src-1.99.1-r0, pinned
+;; by tools/rsdump/apks.sha256): compiler/rustc_symbol_mangling/src/{lib.rs (symbol_name_from_attrs, compute_symbol_name,
+;; is_generic), v0.rs (the v0 mangler: paths, impl paths, types, constants, backrefs, identifiers with punycode,
+;; mangle_internal_symbol)}, compiler/rustc_span/src/def_id.rs (StableCrateId::new), compiler/rustc_middle/src/{mono.rs
+;; (MonoItem::instantiation_mode), ty/print/mod.rs (default_print_def_path), ty/instance.rs (requires_inline,
+;; requires_caller_location)}, compiler/rustc_mir_transform/src/cross_crate_inline.rs (cross_crate_inlinable's attribute
+;; rules), compiler/rustc_metadata/src/rmeta/{mod.rs (METADATA_HEADER, CrateHeader, CrateRoot's first fields), encoder.rs
+;; (should_encode_mir)}, compiler/rustc_attr_ir/src/weak_lang_items.rs (the weak lang items' link names),
+;; compiler/rustc_monomorphize/src/collector.rs (the roots and the uses a body's terminators make), compiler/rustc_abi/src/
+;; {layout.rs (univariant, univariant_biased, layout_of_struct_or_enum, layout_of_struct, layout_of_enum: niche filling and
+;; the tagged layout), layout/simple.rs (unit, never_type, scalar, scalar_pair), lib.rs (Niche::available, Niche::reserve,
+;; Integer::fit_signed, fit_unsigned, for_align), wrapping_range.rs (smallest_range_containing)},
+;; compiler/rustc_ty_utils/src/layout.rs (layout_of_uncached) and compiler/rustc_middle/src/ty/layout.rs (discr_range_of_repr),
+;; for x86_64's data layout; and rustc-stable-hash 0.1.2 (https://github.com/rust-lang/rustc-stable-hash, src/sip128.rs,
+;; src/stable_hasher.rs: SipHasher128, StableHasher's writes) as its Cargo.lock pins it. rustc and rustc-stable-hash are
+;; dual-licensed MIT OR Apache-2.0 (LICENSE.md, "Rust (rustc 1.99.1)").
+
+(ns arbace.rust.front.mono
+  "RFP23 (c) (doc/rust/FRONTEND-SURVEY.md, \"As built: RFP23 (c)\"): the run's facts computed natively, which RFP23 (b)
+  took from the pack rust-front-mono (the helper's --mono-mir record): the program's mono items (rustc's collector from its
+  roots over Arbace's own bodies), each instance's symbol (v0 mangling, the crate's StableCrateId), each call's callee
+  (Instance::resolve's kind, symbol, can-unwind, track-caller, external), the statics' and the lang items' symbols, and the
+  layouts of every type the bodies use (rustc_abi's layout_of for x86_64). std's facts: its interface (the pack
+  rust-front-std, as the front end's other stages), core's crate identity (test/rust/front/std-crates.edn, read from the
+  sysroot's rmeta by `bin/rust-front std-crates`), core's codegen attributes from core's own sources (rust-src).
+
+    (program-facts BODIES OPTS)     within build-check/build-program's bindings: {:items :callees :statics :langsyms :layout-of ...}
+    (layout-form T)                 a type's layout as the record writes it, or nil (refused)"
+  (:require [arbace.rust.front.collect :as c] [arbace.rust.front.typeck :as tc] [arbace.rust.front.build :as build] [arbace.string :as str])
+  (:import [java.io File]))
+
+;; ---------------------------------------------------------------------------------------------
+;; SipHasher128 (rustc-stable-hash's sip128.rs) over a byte stream: SipHash-1-3 with 128-bit output, keys 0, 0. The
+;; buffering of the original is an implementation detail: the state sees the stream's 8-byte little-endian words, then the
+;; partial word with the length's low byte in its top byte.
+
+(defn- rotl ^long [^long x ^long b] (bit-or (bit-shift-left x b) (unsigned-bit-shift-right x (- 64 b))))
+
+(defn- sip-round [^longs v]
+  (let [v0 (aget v 0) v1 (aget v 1) v2 (aget v 2) v3 (aget v 3)
+        v0 (unchecked-add v0 v1) v2 (unchecked-add v2 v3)
+        v1 (bit-xor (rotl v1 13) v0) v3 (bit-xor (rotl v3 16) v2)
+        v0 (rotl v0 32)
+        v2 (unchecked-add v2 v1) v0 (unchecked-add v0 v3)
+        v1 (bit-xor (rotl v1 17) v2) v3 (bit-xor (rotl v3 21) v0)
+        v2 (rotl v2 32)]
+    (aset v 0 v0) (aset v 1 v1) (aset v 2 v2) (aset v 3 v3) v))
+
+(defn- word-le ^long [bs ^long off ^long k]
+  (loop [i (dec k) acc 0]
+    (if (neg? i) acc (recur (dec i) (bit-or (bit-shift-left acc 8) (long (bit-and (long (nth bs (+ off i))) 0xff)))))))
+
+(defn sip128
+  "SipHasher128's finish over the bytes BS (a seq of ints 0-255): [l h] as longs (u64 bits)"
+  [bs]
+  (let [bs (vec bs) n (count bs) full (quot n 8)
+        v (long-array [0x736f6d6570736575 (bit-xor 0x646f72616e646f6d 0xee) 0x6c7967656e657261 0x7465646279746573])
+        absorb (fn [^long m] (aset v 3 (bit-xor (aget v 3) m)) (sip-round v) (aset v 0 (bit-xor (aget v 0) m)))]
+    (dotimes [i full] (absorb (word-le bs (* 8 i) 8)))
+    (absorb (bit-or (word-le bs (* 8 full) (- n (* 8 full))) (bit-shift-left (bit-and n 0xff) 56)))
+    (aset v 2 (bit-xor (aget v 2) 0xee))
+    (dotimes [_ 3] (sip-round v))
+    (let [l (bit-xor (aget v 0) (aget v 1) (aget v 2) (aget v 3))]
+      (aset v 1 (bit-xor (aget v 1) 0xdd))
+      (dotimes [_ 3] (sip-round v))
+      [l (bit-xor (aget v 0) (aget v 1) (aget v 2) (aget v 3))])))
+
+(defn- utf8 [^String s] (map #(bit-and (long %) 0xff) (.getBytes s "UTF-8")))
+(defn- le64 [^long x] (for [i (range 8)] (bit-and (unsigned-bit-shift-right x (* 8 i)) 0xff)))
+
+(defn u64 "A long's bits as the unsigned integer" [^long x] (if (neg? x) (+ (bigint x) 18446744073709551616N) (bigint x)))
+(defn hex16 [^long x] (let [s (str/lower-case (.toString (biginteger (u64 x)) 16))] (str (apply str (repeat (- 16 (count s)) "0")) s)))
+
+(defn stable-crate-id
+  "StableCrateId::new: the crate's name (Hash for str: its bytes then 0xFF), \"metadata\", each distinct -C metadata value
+  sorted with its length, \"exe\" or \"lib\", the compiler's version (cfg_version); Hash64 is the first half"
+  [^String crate-name exe? metadata ^String cfg-version]
+  (first (sip128 (concat (utf8 crate-name) [0xff] (utf8 "metadata")
+                         (mapcat (fn [^String s] (concat (le64 (count (.getBytes s "UTF-8"))) (utf8 s))) (sort (distinct metadata)))
+                         (utf8 (if exe? "exe" "lib")) (utf8 cfg-version)))))
+
+(defn crate-short "The crate's hash as DefId's Debug writes it (a1[799e]): the StableCrateId's top 16 bits" [^long id]
+  (subs (hex16 id) 0 4))
+
+;; ---------------------------------------------------------------------------------------------
+;; std's crates (test/rust/front/std-crates.edn): each one's name and StableCrateId as its rmeta's CrateRoot records them,
+;; the compiler's version from the rmeta's header (rustc_version: "rustc " and cfg_version)
+
+(def ^:dynamic *crates* nil)   ; {:cfg-version S :crates {"core" {:stable-crate-id "hex"} ...}}
+
+(defn load-crates [file] (read-string (slurp file)))
+
+(defn- leb128 [^bytes b ^long pos]
+  (loop [p pos shift 0 acc 0]
+    (let [x (bit-and (long (aget b p)) 0xff) acc (bit-or acc (bit-shift-left (bit-and x 0x7f) shift))]
+      (if (zero? (bit-and x 0x80)) [acc (inc p)] (recur (inc p) (+ shift 7) acc)))))
+
+(defn- read-str [^bytes b ^long pos]
+  (let [[n p] (leb128 b pos)]
+    (when-not (= 0xc1 (bit-and (long (aget b (+ p n))) 0xff)) (throw (ex-info "rmeta: no string sentinel" {:pos p})))
+    [(String. b (int p) (int n) "UTF-8") (+ p n 1)]))
+
+(defn read-rmeta-root
+  "An .rmeta's header and CrateRoot's first fields (rustc_metadata's METADATA_HEADER, the root's position, the version
+  string; CrateHeader: triple, hash, name, is_proc_macro_crate, is_stub; extra_filename; stable_crate_id)"
+  [file]
+  (let [b (java.nio.file.Files/readAllBytes (.toPath (File. ^String file)))
+        hdr [0x72 0x75 0x73 0x74 0 0 0 10]]
+    (when-not (= hdr (map #(bit-and (long (aget b %)) 0xff) (range 8))) (throw (ex-info (str "rmeta: not METADATA_VERSION 10's header: " file) {})))
+    (let [root (word-le (map #(aget b %) (range 8 16)) 0 8)
+          [version _] (read-str b 16)
+          [tag p] (leb128 b root)
+          _ (when-not (zero? tag) (throw (ex-info "rmeta: a target JSON, not a tuple" {})))
+          [triple p] (read-str b p)
+          svh (apply str (for [i (range 16)] (format "%02x" (bit-and (long (aget b (+ p i))) 0xff))))
+          p (+ p 16)
+          stag (bit-and (long (aget b p)) 0xff)
+          [name p] (case stag 0 (read-str b (inc p)) 1 (let [[_ p] (leb128 b (inc p))] [nil p]) 2 (let [[i p] (leb128 b (inc p))] [(list :predefined i) p]))
+          p (+ p 2)   ; is_proc_macro_crate, is_stub
+          [extra p] (read-str b p)
+          id (word-le (map #(aget b %) (range p (+ p 8))) 0 8)]
+      {:version version :triple triple :svh svh :name name :extra-filename extra :stable-crate-id (hex16 id)})))
+
+(defn- crate-id ^long [nm]
+  (if-let [h (get-in *crates* [:crates nm :stable-crate-id])]
+    (.longValue (biginteger (bigint (BigInteger. ^String h 16))))
+    (throw (ex-info (str "mono: no crate identity for " nm " (test/rust/front/std-crates.edn)") {:fact :crate}))))
+
+(def ^:dynamic *local* nil)   ; {:name "a1" :id LONG}: the crate being compiled
+
+(defn local-crate [n] (let [v (:cfg-version *crates*)] {:name n :id (stable-crate-id n true [] v)}))
+
+;; ---------------------------------------------------------------------------------------------
+;; v0's encodings (v0.rs)
+
+(def ^:private b62 "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+(defn- to-base62 [x]
+  (let [x (bigint x)]
+    (if (zero? x) "0"
+        (loop [x x acc ()] (if (zero? x) (apply str acc) (recur (quot x 62) (cons (.charAt ^String b62 (int (rem x 62))) acc)))))))
+
+(defn integer-62 "push_integer_62: 0 as `_`, else x - 1 in base 62 then `_`" [x]
+  (let [x (bigint x)] (if (zero? x) "_" (str (to-base62 (dec x)) "_"))))
+(defn- opt-integer-62 [tag x] (let [x (bigint x)] (if (zero? x) "" (str tag (integer-62 (dec x))))))
+(defn disambiguator [x] (opt-integer-62 "s" x))
+
+;; RFC 3492's encoder, as the punycode crate rustc links writes it (base 36, tmin 1, tmax 26, skew 38, damp 700,
+;; initial bias 72, initial n 128, the delimiter `-`)
+(defn- punycode [^String s]
+  (let [cps (vec (.toArray (.codePoints s)))
+        basic (filter #(< (long %) 128) cps)
+        digit (fn [d] (char (if (< d 26) (+ 97 d) (+ 22 d))))
+        adapt (fn [delta numpoints first?]
+                (let [delta (if first? (quot delta 700) (quot delta 2)) delta (+ delta (quot delta numpoints))]
+                  (loop [delta delta k 0] (if (> delta (quot (* 35 26) 2)) (recur (quot delta 35) (+ k 36)) (+ k (quot (* 36 delta) (+ delta 38)))))))
+        out (StringBuilder. ^String (apply str (map #(char (long %)) basic)))
+        b (count basic)]
+    (when (pos? b) (.append out "-"))
+    (loop [n 128 delta 0 bias 72 h b]
+      (if (>= h (count cps))
+        (str out)
+        (let [m (apply min (filter #(>= (long %) n) cps))
+              delta (+ delta (* (- m n) (inc h)))
+              [delta bias h] (reduce (fn [[delta bias h] c]
+                                       (let [c (long c)]
+                                         (cond (< c m) [(inc delta) bias h]
+                                               (= c m) (let [q (loop [q delta k 36]
+                                                                  (let [t (cond (<= k bias) 1 (>= k (+ bias 26)) 26 :else (- k bias))]
+                                                                    (if (< q t) q
+                                                                        (do (.append out (digit (+ t (rem (- q t) (- 36 t)))))
+                                                                            (recur (quot (- q t) (- 36 t)) (+ k 36))))))]
+                                                         (.append out (digit q))
+                                                         [0 (adapt delta (inc h) (= h b)) (inc h)])
+                                               :else [delta bias h])))
+                                     [delta bias h] cps)]
+          (recur (inc m) (inc delta) bias h))))))
+
+(defn ident "push_ident: the identifier's length then the identifier (punycode with `u` for non-ASCII; `_` before a digit or `_`)"
+  [^String id]
+  (let [puny? (some #(>= (long %) 128) (.toArray (.codePoints id)))
+        id (if puny? (let [p (punycode id) i (str/last-index-of p "-")] (if i (str (subs p 0 i) "_" (subs p (inc i))) p)) id)]
+    (str (when puny? "u") (count id) (when (re-find #"^[_0-9]" id) "_") id)))
+
+;; ---------------------------------------------------------------------------------------------
+;; definitions as the mangler and the printer see them: a local definition (a number), another crate's path (a string),
+;; or a crate root ([:crate NAME])
+
+(defn- ext-crate [^String p] (first (str/split p #"::")))
+
+(def ^:dynamic *instance-def* nil)   ; the definition being mangled as an instance: its own segment is a value
+
+(defn- ext-value-ns? [^String p]
+  (or (= p *instance-def*) (contains? (:fns c/*si*) p) (contains? (:consts c/*si*) p)
+      (some? (re-find #"^(Fn|AssocFn|Static|Const)" (str (get (:kinds c/*std*) p))))))
+
+(defn def-key
+  "def_key: {:parent DEF :data [:type N]|[:value N]|[:impl]|[:closure]|[:ctor]|[:anon]|[:crate] :dis K}"
+  [d]
+  (cond
+    (vector? d) {:data [:crate] :parent nil :dis 0}
+    (number? d) (let [x (c/def-of d)]
+                  {:data (let [[k n] (:data x)] (if (= k :crate) [:crate] [k (some-> n str)]))
+                   :parent (let [p (:parent x)] (if (= 0 p) [:crate (:name *local*)] p)) :dis (or (:disamb x) 0)})
+    :else (let [segs (str/split d #"::") last-seg (peek segs)
+                parent (if (= 2 (count segs)) [:crate (first segs)] (str/join "::" (pop segs)))]
+            (if (= 1 (count segs))
+              {:data [:crate] :parent nil :dis 0}
+              (if-let [[_ k i] (re-matches #"\{(impl|closure|constant|constructor)#(\d+)\}" last-seg)]
+                {:data (case k "impl" [:impl] "closure" [:closure] "constant" [:anon] "constructor" [:ctor]) :parent parent :dis (parse-long i)}
+                {:data [(if (ext-value-ns? d) :value :type) last-seg] :parent parent :dis 0})))))
+
+(defn- def-local? [d] (or (number? d) (and (vector? d) (= (second d) (:name *local*)))))
+
+(defn- generics [d] (when-not (vector? d) (c/generics-any d)))
+
+(defn- impl-of
+  "An impl's self type and trait reference (tc types over its parameters): [self [trait-def args]-or-nil]"
+  [d]
+  (if (number? d)
+    (let [[s t] (c/impl-header d)] [s t])
+    (let [m (get (:impls c/*si*) d)]
+      [(c/sty->ty (:self m)) (when-let [t (:trait m)] [(nth t 1) (mapv c/sty->ty (nth t 2))])])))
+
+;; ---------------------------------------------------------------------------------------------
+;; the v0 mangler (V0SymbolMangler): out, the start offset, the backrefs of paths, types and constants
+
+(defn- erase-regions [x]
+  (cond (c/region? x) [:re-erased]
+        (vector? x) (mapv erase-regions x)
+        :else x))
+
+(defn- type-arg? [a] (not (c/region? a)))
+
+(defn- m-new [] {:sb (StringBuilder. "_R") :paths (atom {}) :types (atom {}) :consts (atom {})})
+(defn- push! [m s] (.append ^StringBuilder (:sb m) (str s)) nil)
+(defn- pos-of [m] (.length ^StringBuilder (:sb m)))
+(defn- backref! [m i] (push! m (str "B" (integer-62 (- i 2)))))
+
+(declare print-def-path! print-type! print-const!)
+
+(defn- path-append-ns! [m prefix! ns dis nm]
+  (push! m (str "N" ns)) (prefix!) (push! m (disambiguator dis)) (push! m (ident nm)))
+
+(defn- print-crate-name! [m nm]
+  (push! m "C")
+  (push! m (disambiguator (u64 (if (= nm (:name *local*)) (:id *local*) (crate-id nm)))))
+  (push! m (ident nm)))
+
+(defn- print-generic-args! [m prefix! args]
+  (let [args (filter type-arg? args)]   ; mono: every region is erased, so none is printed
+    (if (empty? args)
+      (prefix!)
+      (do (push! m "I") (prefix!)
+          (doseq [a args] (if (and (vector? a) (#{:cval :cparam} (first a))) (do (push! m "K") (print-const! m a)) (print-type! m a)))
+          (push! m "E")))))
+
+(defn- print-impl-path! [m d args]
+  (let [{:keys [parent dis]} (def-key d)
+        g (generics d)
+        n (+ (long (:parent-count g 0)) (count (:params g)))
+        [self tref] (impl-of d)
+        ;; instantiate the header at ARGS (a partial or the identity's arguments keep the identity's header)
+        [self tref] (if (or (> n (count args)) (every? (fn [[i a]] (and (vector? a) (#{:param :re-early :cparam} (first a)) (= i (second a)))) (map-indexed vector (take n args))))
+                      [self tref]
+                      [(c/subst self (vec args)) (when tref [(first tref) (mapv #(c/subst % (vec args)) (second tref))])])
+        self (erase-regions self) tref (when tref [(first tref) (erase-regions (second tref))])]
+    (push! m (if tref "X" "M"))
+    (if (and tref (some #(and (type-arg? %) (not (and (vector? %) (#{:re-erased} (first %))))) (filter #(and (vector? %) (#{:param :cparam} (first %))) (tree-seq vector? seq args))))
+      (print-generic-args! m #(path-append-ns! m (fn [] (print-def-path! m parent [])) "I" dis "") args)
+      (do (push! m (disambiguator dis))   ; exported_impl_order: empty for a crate exporting none
+          (print-def-path! m parent [])))
+    (print-type! m self)
+    (when tref (print-def-path! m (first tref) (second tref)))))
+
+(defn- default-print-def-path! [m d args]
+  (let [{:keys [data parent dis]} (def-key d)]
+    (case (first data)
+      :crate (print-crate-name! m (if (vector? d) (second d) (ext-crate (str d))))
+      :impl (print-impl-path! m d args)
+      (let [g (when (seq args) (generics d))
+            pc (long (:parent-count g 0))
+            parent-args (if (seq args) (vec (take (min pc (count args)) args)) [])]
+        (if (and (seq args) (seq (:params g)) (>= (count args) (+ pc (count (:params g)))) (not= :closure (first data)) (not= :anon (first data)))
+          ;; own_args_no_defaults: a trait's own arguments without its Self
+          (print-generic-args! m #(print-def-path! m d parent-args) (if (and (:has-self g) (zero? pc)) (drop (inc pc) args) (drop pc args)))
+          (let [ns (case (first data) :type "t" :value "v" :closure "C" :ctor "c" :anon "K" :opaque "i")]
+            (path-append-ns! m #(print-def-path! m parent parent-args) ns dis (if (#{:type :value} (first data)) (second data) ""))))))))
+
+(defn- print-def-path! [m d args]
+  (let [k [d (vec args)]]
+    (if-let [i (get @(:paths m) k)]
+      (backref! m i)
+      (let [start (pos-of m)]
+        (default-print-def-path! m d args)
+        (swap! (:paths m) assoc k start)))))
+
+(def ^:private basic-types
+  {"i8" "a" "i16" "s" "i32" "l" "i64" "x" "i128" "n" "isize" "i"
+   "u8" "h" "u16" "t" "u32" "m" "u64" "y" "u128" "o" "usize" "j" "f16" "C3f16" "f32" "f" "f64" "d" "f128" "C4f128"})
+
+(defn- print-type! [m t]
+  (let [basic (case (first t)
+                :bool "b" :char "c" :str "e" :never "z" :param "p"
+                (:int :uint :float) (get basic-types (second t))
+                :tuple (when (empty? (second t)) "u")
+                nil)]
+    (if basic
+      (push! m basic)
+      (if-let [i (get @(:types m) t)]
+        (backref! m i)
+        (let [start (pos-of m)]
+          (case (first t)
+            :ref (do (push! m (if (nth t 2) "Q" "R")) (print-type! m (nth t 3)))
+            :ptr (do (push! m (if (second t) "O" "P")) (print-type! m (nth t 2)))
+            :array (do (push! m "A") (print-type! m (second t)) (print-const! m (nth t 2)))
+            :slice (do (push! m "S") (print-type! m (second t)))
+            :tuple (do (push! m "T") (doseq [x (second t)] (print-type! m x)) (push! m "E"))
+            (:adt :fndef) (print-def-path! m (second t) (nth t 2))
+            (throw (ex-info (str "mono: v0 of the type " (pr-str t)) {:fact :symbol})))
+          (swap! (:types m) assoc t start))))))
+
+(defn- print-const! [m ct]
+  (if (= :cparam (first ct))
+    (push! m "p")
+    (if-let [i (get @(:consts m) ct)]
+      (backref! m i)
+      (let [start (pos-of m) v (bigint (parse-long (str/replace (str (second ct)) #"_usize$|_" "")))]
+        ;; an array's length: usize's tag, the value in hex
+        (push! m "j") (push! m (str (str/lower-case (.toString (biginteger v) 16)) "_"))
+        (swap! (:consts m) assoc ct start)))))
+
+(defn mangle-internal "mangle_internal_symbol" [^String nm]
+  (if (#{"rust_eh_personality" "__isPlatformVersionAtLeast" "__isOSVersionAtLeast"} nm)
+    nm
+    (let [m (m-new)]
+      (path-append-ns! m (fn [] (push! m "C") (push! m (disambiguator (u64 (first (sip128 (utf8 (:cfg-version *crates*))))))) (push! m (ident "__rustc")))
+                       "v" 0 nm)
+      (str (:sb m)))))
+
+(declare v0-mangle)
+(defn reify-mangle
+  "A ReifyShim's symbol (a #[track_caller] function as a pointer, Instance::resolve_for_fn_ptr): `::{shim:reify#0}`, then the
+  instantiating crate (a shim requires inlining, so it is globally shared with conflicts at opt-level 0)"
+  [d args]
+  (let [m (m-new)]
+    (binding [*instance-def* d]
+      (path-append-ns! m #(print-def-path! m d (erase-regions args)) "S" 0 "reify"))
+    (print-def-path! m [:crate (:name *local*)] [])
+    (str (:sb m))))
+
+(defn v0-mangle
+  "v0::mangle: the instance's path at its arguments (a shim's kind for those that coexist with the item: none here), then the
+  instantiating crate's root when the symbol must avoid cross-crate conflicts"
+  [d args instantiating?]
+  (let [m (m-new)]
+    (binding [*instance-def* d] (print-def-path! m d (erase-regions args)))
+    (when instantiating? (print-def-path! m [:crate (:name *local*)] []))
+    (str (:sb m))))
+
+;; ---------------------------------------------------------------------------------------------
+;; layouts (rustc_abi's LayoutCalculator and rustc_ty_utils' layout_of_uncached) for x86_64's data layout: i8 to i64 and
+;; pointers aligned to their size, i128 to 16, the aggregate alignment 1, the object size bound 2^61 ... the bound unchecked
+
+(defn- pmax [bits] (dec (reduce * 1N (repeat bits 2N))))
+(defn- prim-size ^long [p] (case (first p) :int (quot (long (second p)) 8) :float (quot (long (second p)) 8) :ptr 8))
+(defn- prim-align ^long [p] (min 16 (prim-size p)))
+(defn- prim-bits [p] (* 8 (prim-size p)))
+(defn- full-range [p] [0N (pmax (prim-bits p))])
+(defn- init [p] {:prim p :range (full-range p)})
+(defn- wrap [x bits] (mod (bigint x) (inc (pmax bits))))
+
+(declare niche-available)
+(defn- niche-of [offset s] (when (and s (not (:union s)))
+                             (let [n {:offset offset :prim (:prim s) :range (:range s)}]
+                               (when (pos? (niche-available n)) n))))
+(defn niche-available [{:keys [prim range]}]
+  (let [b (prim-bits prim) [s e] range] (wrap (- s (inc e)) b)))
+
+(defn- niche-reserve
+  "Niche::reserve: [niche-start scalar] for COUNT more values, or nil"
+  [{:keys [prim range]} count]
+  (let [b (prim-bits prim) mx (pmax b) [vs ve] range
+        available (wrap (- vs ve 1) b)]
+    (when (<= count available)
+      (let [move-start (fn [] (let [st (wrap (- vs count) b)] [st {:prim prim :range [st ve]}]))
+            move-end (fn [] (let [st (wrap (inc ve) b) en (wrap (+ ve count) b)] [st {:prim prim :range [vs en]}]))
+            sx (fn [x] (let [x (bigint x)] (if (and (= :int (first prim)) (>= x (/ (inc mx) 2))) (- x (inc mx)) (if (>= x (/ (inc mx) 2)) (- x (inc mx)) x))))
+            distance-end-zero (- mx ve)]
+        (cond
+          (and (= count 1) (not= [vs ve] [0N 1N]))
+          (let [next-up (abs (sx (wrap (inc ve) b))) next-down (abs (sx (wrap (dec vs) b)))]
+            (if (<= next-down next-up) (move-start) (move-end)))
+          (> vs ve) (move-end)
+          (<= vs distance-end-zero) (if (<= count vs) (move-start) (move-end))
+          :else (let [en (wrap (+ ve count) b)] (if (and (<= 1 en) (<= en ve)) (move-start) (move-end))))))))
+
+(defn- scalar-l [s]
+  {:size (prim-size (:prim s)) :align (prim-align (:prim s)) :abi [:scalar s] :fields :primitive :variants [:single 0]
+   :niche (niche-of 0 s) :uninhabited false})
+
+(defn- scalar-pair [a b]
+  (let [ba (prim-align (:prim b)) al (max (prim-align (:prim a)) ba)
+        boff (* ba (quot (+ (prim-size (:prim a)) (dec ba)) ba))
+        size (* al (quot (+ boff (prim-size (:prim b)) (dec al)) al))
+        ns (remove nil? [(niche-of boff b) (niche-of 0 a)])]
+    {:size size :align al :abi [:pair a b boff] :fields {:offsets [0 boff] :order [0 1]} :variants [:single 0]
+     :niche (when (seq ns) (reduce (fn [x y] (if (>= (niche-available y) (niche-available x)) y x)) ns)) :uninhabited false}))
+
+(def ^:private unit-l {:size 0 :align 1 :abi [:memory true] :fields {:offsets [] :order []} :variants [:single 0] :niche nil :uninhabited false})
+(def ^:private never-l {:size 0 :align 1 :abi [:memory true] :fields :primitive :variants [:empty] :niche nil :uninhabited true})
+
+(defn- zst? [l] (and (= :memory (first (:abi l))) (second (:abi l)) (zero? (long (:size l)))))
+(defn- one-zst? [l] (and (zst? l) (= 1 (:align l))))
+(defn- unsized? [l] (and (= :memory (first (:abi l))) (not (second (:abi l)))))
+(defn- align-to ^long [^long x ^long a] (* a (quot (+ x (dec a)) a)))
+(defn- tz ^long [^long x] (Long/numberOfTrailingZeros x))
+
+(defn- univariant-biased
+  "univariant_biased: the fields' order (repr(Rust): by alignment group, niche size and inner niche offset), offsets, the
+  largest niche, the newtype and scalar pair ABIs"
+  [fields repr kind bias]
+  (let [n (count fields)
+        end (if (= kind :maybe-unsized) (dec n) n)
+        excl (take end fields)
+        optimize? (not (or (:c repr) (:int repr)))
+        order (if (and optimize? (> n 1))
+                (let [max-align (reduce max 1 (map :align excl))
+                      largest (reduce max 0N (map #(if (:niche %) (niche-available (:niche %)) 0N) excl))
+                      group (fn [f] (let [al (long (:align f)) sz (long (:size f))
+                                          ns (if (:niche f) (niche-available (:niche f)) 0N)
+                                          saa (tz (max al sz))]
+                                      (if (pos? largest)
+                                        (case bias :start (min (tz max-align) saa) :end (if (= ns largest) (tz al) saa))
+                                        saa)))
+                      nsz (fn [f] (if (:niche f) (niche-available (:niche f)) 0N))
+                      key (if (vector? kind)
+                            (fn [i] (let [f (nth fields i)] [(group f) (nsz f) 0]))
+                            (fn [i] (let [f (nth fields i)]
+                                      [(- (group f)) (case bias :start (- (nsz f)) :end (nsz f))
+                                       (case bias :start (if-let [x (:niche f)] (:offset x) 0)
+                                             :end (if-let [x (:niche f)] (- (- (:size f) (prim-size (:prim x)) (:offset x))) 0))])))]
+                  (vec (concat (sort-by key (range end)) (range end n))))
+                (vec (range n)))
+        [align offset] (if (vector? kind) (let [[ps pa] kind] [(max 1 pa) (align-to ps pa)]) [1 0])
+        st (reduce (fn [{:keys [align offset offsets niche avail] :as st} i]
+                     (let [f (nth fields i) fa (long (:align f)) off (align-to offset fa)
+                           st (assoc st :align (max align fa) :offsets (assoc offsets i off))
+                           st (if-let [nc (:niche f)]
+                                (let [a (niche-available nc)]
+                                  (if (case bias :start (> a avail) :end (>= a avail))
+                                    (assoc st :avail a :niche (update nc :offset + off))
+                                    st))
+                                st)]
+                       (assoc st :offset (+ off (long (:size f))))))
+                   {:align align :offset offset :offsets (vec (repeat n 0)) :niche nil :avail 0N}
+                   order)
+        {:keys [align offset offsets niche]} st
+        size (align-to offset align)
+        sized (not (and (= kind :maybe-unsized) (pos? n) (unsized? (peek fields))))
+        nz (vec (keep-indexed (fn [i f] (when-not (zst? f) [i f])) fields))
+        abi (or (when (and sized (pos? size))
+                  (case (count nz)
+                    1 (let [[i f] (first nz)]
+                        (when (and (zero? (long (nth offsets i))) (= align (:align f)) (= size (:size f)))
+                          (case (first (:abi f)) :scalar (when-not (:c repr) (:abi f)) :pair (:abi f) nil)))
+                    2 (let [[[i a] [j b]] nz]
+                        (when (and (= :scalar (first (:abi a))) (= :scalar (first (:abi b))))
+                          (let [[[i a] [j b]] (if (< (long (nth offsets i)) (long (nth offsets j))) [[i a] [j b]] [[j b] [i a]])
+                                p (scalar-pair (second (:abi a)) (second (:abi b)))]
+                            (when (and (= (nth offsets i) 0) (= (nth offsets j) (second (:offsets (:fields p)))) (= align (:align p)) (= size (:size p)))
+                              (:abi p)))))
+                    nil))
+                [:memory sized])]
+    {:size size :align align :abi abi :fields {:offsets offsets :order order} :variants [:single 0] :niche niche
+     :uninhabited (boolean (some :uninhabited fields))}))
+
+(defn- univariant [fields repr kind]
+  (let [l (univariant-biased fields repr kind :start)]
+    (if-let [nc (and (not= kind :maybe-unsized) (:niche l))]
+      (let [head (long (:offset nc)) len (prim-size (:prim nc)) tail (- (long (:size l)) head len)]
+        (if (and (> (count fields) 1) (not= head 0) (pos? tail))
+          (let [alt (univariant-biased fields repr kind :end) an (:niche alt)
+                ah (long (:offset an)) at (- (long (:size alt)) ah (prim-size (:prim an)))]
+            (if (and (> ah head) (> ah tail)) alt l))
+          l))
+      l)))
+
+(defn- vlayout [l] {:size (:size l) :abi (:abi l) :niche (:niche l) :uninhabited (:uninhabited l)
+                    :offsets (:offsets (:fields l)) :order (:order (:fields l))})
+
+(defn- absent? [fields] (and (some :uninhabited fields) (every? one-zst? fields)))
+
+(defn- fit-signed [x] (let [x (bigint x)] (cond (<= -128 x 127) 1 (<= -32768 x 32767) 2 (<= -2147483648 x 2147483647) 4 (<= -9223372036854775808 x 9223372036854775807) 8 :else 16)))
+(defn- fit-unsigned [x] (let [x (bigint x)] (cond (<= x 255) 1 (<= x 65535) 2 (<= x 4294967295) 4 (<= x 18446744073709551615N) 8 :else 16)))
+(def ^:private int-sizes {"8" 1 "16" 2 "32" 4 "64" 8 "128" 16 "size" 8})
+
+(defn- smallest-range [vals bits]
+  (let [vals (map bigint vals) mn (reduce min vals) mx (reduce max vals) m (inc (pmax bits))]
+    (if (<= (- mx mn) (/ m 2))
+      [mn mx]
+      (let [sv (vec (sort vals))
+            cands (cons [mn mx] (for [[e s] (map vector sv (rest sv)) :when (not= s e)] [s e]))
+            width (fn [[s e]] (mod (- e s) m))]
+        (reduce (fn [a b] (if (< (width b) (width a)) b a)) cands)))))
+
+(defn- layout-of-enum [repr variants discrs]
+  (let [niche-l
+        (when (and (not (or (:c repr) (:int repr))) (>= (count variants) 2))
+          (let [sts (map #(univariant % repr :always) variants)
+                align (reduce max 1 (map :align sts))
+                vls (mapv vlayout sts)
+                largest (reduce (fn [bi i] (if (>= (long (:size (nth vls i))) (long (:size (nth vls bi)))) i bi)) 0 (range (count vls)))
+                needs (fn [i] (and (not= i largest) (not (absent? (nth variants i)))))
+                idxs (filter needs (range (count variants)))]
+            (when (seq idxs)
+              (let [nstart (first idxs) nlast (last idxs) cnt (inc (- nlast nstart))]
+                (when-let [nc (:niche (nth vls largest))]
+                  (when-let [[niche-start ns] (niche-reserve nc cnt)]
+                    (let [noff (long (:offset nc)) nsize (prim-size (:prim nc))
+                          size (align-to (:size (nth vls largest)) align)
+                          fitted (map-indexed
+                                  (fn [i l]
+                                    (if (= i largest) l
+                                        (let [l (assoc l :niche nil)]
+                                          (if (<= (long (:size l)) noff) l
+                                              (let [ta (:align (nth sts i)) toff (align-to (+ noff nsize) ta)]
+                                                (when (<= (+ toff (long (:size l))) size)
+                                                  (-> l (update :offsets (fn [os] (mapv #(+ (long %) toff) os)))
+                                                      (cond-> (not (:uninhabited l)) (assoc :abi [:memory true]))
+                                                      (update :size + toff))))))))
+                                  vls)]
+                      (when (every? some? fitted)
+                        (let [fitted (vec fitted)
+                              others-zst (every? (fn [i] (or (= i largest) (zero? (long (:size (nth fitted i)))))) (range (count fitted)))
+                              same (and (= size (:size (nth vls largest))) (= align (:align (nth sts largest))))
+                              la (:abi (nth vls largest))
+                              abi (if (and same others-zst)
+                                    (case (first la)
+                                      :scalar [:scalar ns]
+                                      :pair (let [[_ a b bo] la] (if (zero? noff) [:pair ns (assoc b :union true) bo] [:pair (assoc a :union true) ns bo]))
+                                      [:memory true])
+                                    [:memory true])]
+                          {:size size :align align :abi abi :fields {:offsets [noff] :order [0]}
+                           :variants [:multiple {:tag ns :enc [:niche largest nstart nlast niche-start] :variants fitted}]
+                           :niche (niche-of noff ns) :uninhabited (every? :uninhabited fitted)})))))))))
+        int (:int repr)
+        dsigned (if int (= \i (first int)) true)
+        dsize (if int (get int-sizes (subs int 1)) 8)
+        nec (keep-indexed (fn [i d] (when (or (:c repr) (not-any? :uninhabited (nth variants i))) (bigint d))) discrs)
+        [mn mx] (if dsigned [(reduce min 0N (filter neg? nec)) (reduce max 0N (filter #(>= % 0) nec))] [0N (reduce max 0N nec)])
+        uf (fit-unsigned (max (if (neg? mn) 0N mn) mx)) sf (max (fit-signed mn) (fit-signed mx))
+        [min-ity signed] (if int [dsize dsigned] (if (<= uf sf) [(max uf (if (:c repr) 4 1)) false] [(max sf (if (:c repr) 4 1)) true]))
+        prefix-align (if (:c repr) (reduce max min-ity (map :align (apply concat variants))) min-ity)
+        sts (mapv #(univariant % repr [min-ity prefix-align]) variants)
+        start-align (reduce min 256 (keep (fn [[st fs]] (some (fn [i] (let [f (nth fs i)] (when-not (one-zst? f) (:align f)))) (sort-by #(nth (:offsets (:fields st)) %) (range (count fs)))))
+                                         (map vector sts variants)))
+        size0 (reduce max 0 (map :size sts)) align (reduce max 1 (map :align sts))
+        size (align-to size0 align)
+        ity (if (or (:c repr) int) min-ity (or (#{1 2 4 8 16} start-align) min-ity))
+        ity (max ity min-ity)
+        vls (mapv (fn [st] (let [v (vlayout st)]
+                             (if (> ity min-ity)
+                               (-> v (update :offsets (fn [os] (mapv #(if (<= (long %) min-ity) ity %) os)))
+                                   (update :size #(if (<= (long %) min-ity) ity %)))
+                               v)))
+                  sts)
+        tbits (* 8 ity)
+        tr (if (seq nec) (smallest-range (map #(wrap % tbits) nec) tbits) [0N 0N])
+        tag {:prim [:int tbits signed] :range tr}
+        abi (if (= ity size)
+              [:scalar tag]
+              (let [cp (reduce (fn [acc [fs vl]]
+                                 (if (= acc :none) :none
+                                     (let [pairs (remove (fn [[f _]] (zst? f)) (map vector fs (:offsets vl)))]
+                                       (case (count pairs)
+                                         0 (assoc acc :all-init false)
+                                         1 (let [[f off] (first pairs)]
+                                             (if (= :scalar (first (:abi f)))
+                                               (let [s (second (:abi f)) p (:prim s) acc (update acc :all-init #(and % (not (:union s))))]
+                                                 (if-let [[op oo] (:prim acc)]
+                                                   (cond (not= off oo) :none
+                                                         (= op p) acc
+                                                         (and (= :int (first op)) (= :int (first p)) (= (second op) (second p))) acc
+                                                         (and (#{:ptr :int} (first op)) (#{:ptr :int} (first p)) (= (prim-size op) (prim-size p)))
+                                                         (assoc acc :prim [(if (= :ptr (first op)) op p) oo])
+                                                         :else :none)
+                                                   (assoc acc :prim [p off])))
+                                               :none))
+                                         :none))))
+                               {:prim nil :all-init true} (map vector variants vls))]
+                (or (when (and (map? cp) (:prim cp))
+                      (let [[p off] (:prim cp) ps (if (:all-init cp) (init p) {:prim p :union true})
+                            pr (scalar-pair tag ps)]
+                        (when (and (= off (second (:offsets (:fields pr)))) (= align (:align pr)) (= size (:size pr)))
+                          (:abi pr))))
+                    [:memory true])))
+        vls (if (#{:scalar :pair} (first abi))
+              (mapv (fn [v] (if (and (= :memory (first (:abi v))) (seq (:offsets v))) (assoc v :abi abi :size (max (long (:size v)) size)) v)) vls)
+              vls)
+        tagged {:size size :align align :abi abi :fields {:offsets [0] :order [0]}
+                :variants [:multiple {:tag tag :enc [:direct] :variants vls}]
+                :niche (niche-of 0 tag) :uninhabited (every? :uninhabited vls)}]
+    (if niche-l
+      (let [na (fn [l] (if (:niche l) (niche-available (:niche l)) 0N))]
+        (cond (> (long (:size tagged)) (long (:size niche-l))) niche-l
+              (and (= (:size tagged) (:size niche-l)) (< (na tagged) (na niche-l))) niche-l
+              :else tagged))
+      tagged)))
+
+(defn- layout-of-struct-or-enum [repr variants enum? no-niche? discrs always-sized?]
+  (let [present (filter #(not (and (not (or (:c repr) (:int repr))) (absent? (nth variants %)))) (range (count variants)))]
+    (cond
+      (and enum? (empty? present)) never-l
+      (or (not enum?) (and (<= (count present) 1) (not (or (:c repr) (:int repr)))))
+      (let [v (if (seq present) (first present) 0)
+            kind (if (or enum? (empty? (nth variants v)) always-sized?) :always :maybe-unsized)
+            st (assoc (univariant (nth variants v) repr kind) :variants [:single v])]
+        (if no-niche?
+          (let [hide (fn [s] (if (:union s) s (assoc s :range (full-range (:prim s)))))]
+            (-> st (assoc :niche nil)
+                (update :abi (fn [a] (case (first a) :scalar [:scalar (hide (second a))] :pair (let [[_ x y o] a] [:pair (hide x) (hide y) o]) a)))))
+          st))
+      :else (layout-of-enum repr variants discrs))))
+
+;; the types' layouts (layout_of_uncached) over the type checker's types, regions erased
+
+(defn- adt-repr
+  "ReprOptions of an ADT: :c, :transparent, :int (\"u8\" ...), :packed, :align (the samples' and std's interfaces carry
+  repr(C), repr(transparent) and repr(int); std's structs' reprs are not in its interface: repr(Rust))"
+  [adt]
+  (if (number? adt)
+    (let [ws (set (mapcat (fn [a] (filter string? (:toks a))) (:attrs (:node (c/def-of adt)))))]
+      (cond-> {}
+        (ws "ReprC") (assoc :c true)
+        (ws "ReprTransparent") (assoc :transparent true)
+        (ws "ReprPacked") (assoc :packed true)
+        (some #(re-matches #"[iu](8|16|32|64|128|size)" %) ws) (assoc :int (some #(re-matches #"[iu](8|16|32|64|128|size)" %) ws))))
+    (let [r (:repr (get (:adts c/*si*) adt))]
+      (cond-> {} (and (string? r) (re-matches #"[iu](8|16|32|64|128|size)" r)) (assoc :int r)
+                 (= "C" r) (assoc :c true)))))
+
+(defn- pattern-field
+  "A std field written as text (the interface's pattern types, `(*const T) is !null`): its type, or [:err ...]"
+  [t adt]
+  (if-let [[_ inner] (and (= :err (first t)) (re-find #"^\(text \"\((.*)\) is !null\"\)$" (str (second t))))]
+    (let [ps (vec (keep-indexed (fn [i [k nm]] (when (= 'type k) [nm i])) (:generics (get (:adts c/*si*) adt))))
+          pidx (fn [nm] (some (fn [[n i]] (when (= n nm) i)) ps))
+          base (if-let [[_ m nm] (re-matches #"\*(const|mut) (\w+)" inner)]
+                 (when (pidx nm) [:ptr (= m "mut") [:param (pidx nm) nm]])
+                 (when (pidx inner) [:param (pidx inner) inner]))]
+      (if base [:pat-notnull base] t))
+    t))
+
+(defn- variant-fields [adt args]
+  (when (and (string? adt) (not (tc/std-adt-known? adt)))
+    (throw (ex-info (str "mono: " adt " is not in std's interface") {:fact :layout})))
+  (vec (for [v (tc/variants-any adt)]
+         (vec (for [[_ t] (tc/all-fields-of-variant (if (map? v) (or (:path v) (:id v)) v))]
+                (c/subst (erase-regions (if (string? adt) (pattern-field t adt) t)) (vec args)))))))
+
+(defn- sized-ty? [t]
+  (case (first t)
+    (:str :slice :dyn) false
+    :adt (let [fs (if (and (string? (second t)) (not (tc/std-adt-known? (second t))))
+                    [[]]   ; a std ADT its interface lacks (a private one a field names): taken as sized
+                    (variant-fields (second t) (nth t 2)))]
+           (or (tc/enum? (second t)) (empty? (first fs)) (sized-ty? (peek (first fs)))))
+    :tuple (or (empty? (second t)) (sized-ty? (peek (second t))))
+    true))
+
+(defn- struct-tail [t]
+  (case (first t)
+    :adt (if (tc/enum? (second t)) t (let [fs (first (variant-fields (second t) (nth t 2)))] (if (seq fs) (struct-tail (peek fs)) t)))
+    :tuple (if (seq (second t)) (struct-tail (peek (second t))) t)
+    t))
+
+(def ^:dynamic *layouts* nil)   ; atom: type -> layout
+
+(declare layout-of)
+
+(defn- layout-of* [t]
+  (let [sc (fn [p] (scalar-l (init p)))]
+    (case (first t)
+      :bool (scalar-l {:prim [:int 8 false] :range [0N 1N]})
+      :char (scalar-l {:prim [:int 32 false] :range [0N 1114111N]})
+      :int (sc [:int (* 8 (get int-sizes (subs (second t) 1))) true])
+      :uint (sc [:int (* 8 (get int-sizes (subs (second t) 1))) false])
+      :float (sc [:float (parse-long (subs (second t) 1))])
+      :never never-l
+      :fnptr (scalar-l {:prim [:ptr] :range [1N (pmax 64)]})
+      (:ref :ptr) (let [pointee (if (= :ref (first t)) (nth t 3) (nth t 2))
+                        dp {:prim [:ptr] :range [(if (= :ref (first t)) 1N 0N) (pmax 64)]}]
+                    (if (sized-ty? pointee)
+                      (scalar-l dp)
+                      (scalar-pair dp (case (first (struct-tail pointee))
+                                        (:str :slice) (init [:int 64 false])
+                                        :dyn {:prim [:ptr] :range [1N (pmax 64)]}
+                                        (throw (ex-info (str "mono: the metadata of " (pr-str pointee)) {:fact :layout}))))))
+      :array (let [el (layout-of (second t)) n (parse-long (re-find #"\d+" (str (second (nth t 2)))))]
+               {:size (* n (long (:size el))) :align (:align el) :abi [:memory true] :fields [:array (:size el) n] :variants [:single 0]
+                :niche (when (pos? n) (:niche el)) :uninhabited (and (:uninhabited el) (pos? n))})
+      :slice (let [el (layout-of (second t))]
+               {:size 0 :align (:align el) :abi [:memory false] :fields [:array (:size el) 0] :variants [:single 0] :niche nil :uninhabited false})
+      :str {:size 0 :align 1 :abi [:memory false] :fields [:array 1 0] :variants [:single 0] :niche nil :uninhabited false}
+      (:fndef :dyn) (assoc unit-l :abi [:memory (= :fndef (first t))])
+      :tuple (let [ts (second t)] (univariant (mapv layout-of ts) {} (if (empty? ts) :always :maybe-unsized)))
+      :pat-notnull (let [l (layout-of (second t))
+                         l (case (first (:abi l))
+                             :scalar (assoc l :abi [:scalar (assoc-in (second (:abi l)) [:range 0] 1N)])
+                             :pair (assoc-in l [:abi 1 :range 0] 1N)
+                             (throw (ex-info "mono: !null over a non-scalar" {:fact :layout})))
+                         s (second (:abi l))]
+                     (assoc l :niche {:offset 0 :prim (:prim s) :range (:range s)} :fields {:offsets [0] :order [0]}))
+      :adt (let [[_ adt args] t
+                 repr (adt-repr adt)
+                 vs (mapv #(mapv layout-of %) (variant-fields adt args))
+                 enum? (tc/enum? adt)
+                 cell? (contains? #{(c/lang "unsafe_cell") (c/lang "unsafe_pinned")} adt)
+                 maybe-unsized (and (not enum?) (seq (first (variant-fields adt args))) (not (sized-ty? (peek (first (variant-fields adt args))))))
+                 l (layout-of-struct-or-enum repr vs enum? cell? (when enum? (tc/discriminant-values adt)) (not maybe-unsized))]
+             (cond-> l enum? (assoc :discrs (vec (tc/discriminant-values adt)))))
+      (throw (ex-info (str "mono: no layout for " (pr-str t) (when (= :err (first t)) " (not in std's interface)")) {:fact :layout})))))
+
+(defn layout-of [t]
+  (let [t (erase-regions t)]
+    (if-let [l (get @*layouts* t)] l (let [l (layout-of* t)] (swap! *layouts* assoc t l) l))))
+
+(defn- scalar-form [s]
+  (let [[k bits signed] (:prim s) r (when-not (:union s) (vec (:range s)))]
+    (case k :int (list 'int bits signed r) :float (list 'float bits r) :ptr (list 'ptr r))))
+
+(defn layout-form
+  "A layout as the helper's mir/layouts entry writes it: {:size :align :abi :fields :variants [:discrs] :uninhabited}"
+  [l]
+  (let [abi (:abi l)
+        fields (fn [f] (cond (= :primitive f) '(primitive)
+                             (and (vector? f) (= :array (first f))) (list 'array (nth f 1) (nth f 2))
+                             :else (vec (:offsets f))))
+        vs (:variants l)]
+    (cond-> {:size (:size l) :align (:align l)
+             :abi (case (first abi) :scalar (list 'scalar (scalar-form (second abi))) :pair (list 'pair (scalar-form (nth abi 1)) (scalar-form (nth abi 2)) (nth abi 3)) :memory (list 'memory (second abi)))
+             :fields (fields (:fields l))
+             :variants (case (first vs)
+                         :empty '(empty) :single (list 'single (second vs))
+                         :multiple (let [m (second vs) e (:enc m)]
+                                     (list 'multiple {:tag (scalar-form (:tag m)) :tag-field 0
+                                                      :encoding (if (= :direct (first e)) '(direct) (apply list 'niche (rest e)))
+                                                      :variants (mapv (fn [v] {:offsets (vec (:offsets v)) :uninhabited (boolean (:uninhabited v))}) (:variants m))})))}
+      (:discrs l) (assoc :discrs (:discrs l))
+      true (assoc :uninhabited (boolean (:uninhabited l))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; core's codegen attributes from core's own sources (library/core in rust-src): the item found by its def path through
+;; the module tree (lib.rs's `mod` items, `#[path]`, inline modules; an impl by its index among the module's impls), its
+;; outer attributes with cfg_attr evaluated against core's build (x86_64-unknown-linux-musl, panic=unwind, no features).
+;; An item a macro generates is not found: its facts are by the default rules (no attribute), and judged.
+
+(def ^:dynamic *lib-dir* nil)   ; library/ of rust-src
+(def ^:private parsed-files (atom {}))
+
+(defn- fget [x k] (when (seq? x) (get (apply hash-map (rest x)) k)))
+
+(defn- parse-rs [^String f]
+  (or (get @parsed-files f)
+      (let [lx (requiring-resolve 'arbace.repr.rust.lex/source) ps (requiring-resolve 'arbace.repr.rust.parse/parse-file)
+            out (requiring-resolve 'arbace.repr.rust.native/out) errs (requiring-resolve 'arbace.repr.rust.parse/*errs*)
+            src (lx (slurp f))
+            {:keys [tree toks mt]} (with-bindings {errs (java.util.ArrayList.)} (ps src 2021))
+            items (fget (out tree src toks mt 2021) :items)]
+        (swap! parsed-files assoc f items)
+        items)))
+
+(defn- tok-kind [t] (when (= 'Token (first t)) (fget (second t) :kind)))
+
+(defn- meta-items
+  "A token stream as meta items: [name value-or-nil children-or-nil] split at commas"
+  [ts]
+  (let [ts (vec (if (and (seq? ts) (= 'TokenStream (first ts))) (second ts) ts))]
+    (loop [i 0 cur [] acc []]
+      (if (>= i (count ts))
+        (let [acc (if (seq cur) (conj acc cur) acc)]
+          (vec (for [c acc :let [nm (some #(let [k (tok-kind %)] (when (and (seq? k) (= 'Ident (first k))) (second k))) c)
+                                 lit (some #(let [k (tok-kind %)] (when (and (seq? k) (= 'Literal (first k))) (str (fget (second k) :symbol)))) c)
+                                 del (some #(when (= 'Delimited (first %)) (nth % 4)) c)]]
+                 [nm lit (when del (meta-items del))])))
+        (let [t (nth ts i)]
+          (if (= 'Comma (tok-kind t)) (recur (inc i) [] (conj acc cur)) (recur (inc i) (conj cur t) acc)))))))
+
+(def ^:private core-cfg {"panic" #{"unwind"} "target_os" #{"linux"} "target_arch" #{"x86_64"} "target_pointer_width" #{"64"}
+                         "target_family" #{"unix"} "target_env" #{"musl"} "target_endian" #{"little"} "target_vendor" #{"unknown"}
+                         "target_has_atomic" #{"8" "16" "32" "64" "ptr"} "unix" true})
+
+(defn- cfg? [[nm v kids]]
+  (case nm
+    "not" (not (cfg? (first kids)))
+    "all" (every? cfg? kids)
+    "any" (boolean (some cfg? kids))
+    (let [x (get core-cfg nm)] (if v (boolean (and (set? x) (x v))) (true? x)))))
+
+(defn- attr-strings
+  "An item's outer attributes as names (inline, inline(never), track_caller, rustc_nounwind, rustc_intrinsic, ...)"
+  [attrs]
+  (vec (mapcat (fn [a]
+                 (let [k (fget a :kind)]
+                   (when (and (seq? k) (= 'Normal (first k)))
+                     (let [item (fget (second k) :item)
+                           nm (second (fget (last (fget (fget item :path) :segments)) :ident))
+                           args (fget item :args)
+                           kids (when (and (seq? args) (= 'Delimited (first args))) (meta-items (fget (second args) :tokens)))
+                           one (fn [[n _ ks]] (if (and (= n "inline") (seq ks)) (str "inline(" (ffirst ks) ")") n))]
+                       (if (= nm "cfg_attr")
+                         (when (cfg? (first kids)) (map one (rest kids)))
+                         [(one [nm nil kids])])))))
+               attrs)))
+
+(defn- item-name [it] (let [k (fget it :kind)] (when (seq? k) (some #(when (and (seq? %) (= 'id (first %))) (second %)) (if (seq? (second k)) (concat (rest k) (rest (second k))) (rest k))))))
+(defn- item-kind [it] (let [k (fget it :kind)] (when (seq? k) (first k))))
+
+(defn- fn-item-name [it] (when (= 'Fn (item-kind it)) (second (fget (second (fget it :kind)) :ident))))
+
+(defn- child-mod-items [items dir file nm]
+  (when-let [m (some #(when (and (= 'Mod (item-kind %)) (= nm (second (nth (fget % :kind) 2)))) %) items)]
+    (let [k (fget m :kind) mk (nth k 3)
+          path-attr (some (fn [a] (let [item (fget (second (fget a :kind)) :item)]
+                                    (when (= "path" (second (fget (last (fget (fget item :path) :segments)) :ident)))
+                                      (let [args (fget item :args)] (when (= 'Eq (first args)) (str (fget (second (fget (fget args :expr) :kind)) :symbol)))))))
+                          (fget m :attrs))
+          own-dir (if (re-find #"/(lib|mod)\.rs$" file) dir (str dir "/" (str/replace (.getName (File. ^String file)) #"\.rs$" "")))]
+      (if (and (seq? mk) (= 'Loaded (first mk)) (= 'Yes (nth mk 2)))
+        [(second mk) (str own-dir "/" nm) file true]
+        (let [f (cond path-attr (str dir "/" path-attr)
+                      (.exists (File. (str own-dir "/" nm ".rs"))) (str own-dir "/" nm ".rs")
+                      :else (str own-dir "/" nm "/mod.rs"))]
+          (when (.exists (File. ^String f)) [(parse-rs f) (.getParent (File. ^String f)) f false]))))))
+
+(def ^:private attr-cache (atom {}))
+
+(defn ext-attrs
+  "core's (or alloc's) item at the def path P: its attribute names, or nil when the sources do not hold it as an item"
+  [^String p]
+  (if (contains? @attr-cache p)
+    (get @attr-cache p)
+    (let [r (try
+              (let [[crate & segs] (str/split p #"::")
+                    root (str *lib-dir* "/" crate "/src")
+                    lib (str root "/lib.rs")]
+                (when (and *lib-dir* (.exists (File. lib)))
+                  (loop [items (parse-rs lib) dir root file lib segs segs]
+                    (let [s (first segs)]
+                      (cond
+                        (nil? (next segs)) (some #(when (= s (fn-item-name %)) (attr-strings (fget % :attrs))) items)
+                        (re-matches #"\{impl#\d+\}" s)
+                        (let [i (parse-long (re-find #"\d+" s))
+                              impl (nth (filter #(= 'Impl (item-kind %)) items) i nil)
+                              its (fget (second (fget impl :kind)) :items)]
+                          (when (= 1 (count (rest segs)))
+                            (some #(when (= (second segs) (fn-item-name %)) (attr-strings (fget % :attrs))) its)))
+                        :else (when-let [[its d f _] (child-mod-items items dir file s)] (recur its d f (rest segs))))))))
+              (catch Throwable _ nil))]
+      (swap! attr-cache assoc p r)
+      r)))
+
+;; ---------------------------------------------------------------------------------------------
+;; codegen_fn_attrs, as far as symbols and calls need them
+
+(def ^:private weak-lang {"PanicImpl" "rust_begin_unwind" "EhPersonality" "rust_eh_personality" "EhCatchTypeinfo" "rust_eh_catch_typeinfo"})
+
+(defn- local-attrs [id]
+  (vec (keep (fn [a]
+               (let [p (:parsed a) u (:unparsed a)]
+                 (cond (= p "Inline(Never)") "inline(never)" (= p "Inline(Always)") "inline(always)" (= p "Inline(Hint)") "inline"
+                       (= p "NoMangle") "no_mangle" (= p "Cold") "cold"
+                       (and p (str/starts-with? p "Lang(")) (str "lang:" (subs p 5 (dec (count p))))
+                       u (first (str/split u #"[ (=]"))
+                       :else nil)))
+             (:attrs (:node (c/def-of id))))))
+
+(defn attrs-of
+  "{:names #{...} :known BOOL}: a definition's codegen attributes (known false: an item core's sources did not show)"
+  [d]
+  (if (number? d)
+    {:names (set (local-attrs d)) :known true}
+    (let [a (ext-attrs d)] {:names (set a) :known (some? a)})))
+
+(defn- weak-link [names] (some #(when (str/starts-with? % "lang:") (get weak-lang (subs % 5))) names))
+(defn- extern-indicator? [names] (boolean (or (names "no_mangle") (some #(str/starts-with? % "export_name") names) (names "rustc_std_internal_symbol") (weak-link names))))
+
+(defn- def-kind [d]
+  (if (number? d) (str (:kind (c/def-of d)))
+      (cond (contains? (:fns c/*si*) d) (if (re-find #"\{impl#\d+\}::[^:]+$|::[A-Z][^:]*::[^:]+$" d) "AssocFn" "Fn")
+            :else (str (get (:kinds c/*std*) d)))))
+
+(defn- generic-def? [d]
+  (let [g (c/generics-any d)]
+    (boolean (some #(not= :lifetime (:kind %)) (concat (when (number? d) (c/all-params g)) (:params g)
+                                                         (when (and (string? d) (pos? (long (:parent-count g 0))))
+                                                           (:params (c/generics-any (c/path-parent d)))))))))
+
+(defn- non-erasable? [args] (boolean (some type-arg? args)))
+
+(defn cross-crate-inlinable?
+  "cross_crate_inlinable at the defining crate's compile: a local crate at opt-level 0 without the inliner inlines nothing
+  it is not asked to; core's crate (opt-level 3) by the attributes (its MIR cost rule for an item without one is not
+  ported: no)"
+  [d]
+  (let [{:keys [names]} (attrs-of d) dk (def-kind d)]
+    (cond (extern-indicator? names) false
+          (str/starts-with? dk "Ctor") true
+          (= dk "Closure") true
+          (not (#{"Fn" "AssocFn"} dk)) false
+          (names "rustc_intrinsic") true
+          (names "inline(never)") false
+          (or (names "inline") (names "inline(always)")) true
+          :else false)))
+
+(defn mir-available? [d]
+  (or (number? d) (and (#{"Fn" "AssocFn"} (def-kind d)) (or (generic-def? d) (cross-crate-inlinable? d)))))
+
+(defn- may-conflict?
+  "instantiation_mode is GloballyShared { may_conflict: true } (at opt-level 0)"
+  [{:keys [def args shim]}]
+  (let [{:keys [names]} (attrs-of def)]
+    (cond shim false
+          (extern-indicator? names) false
+          (and (not (cross-crate-inlinable? def)) (not (#{"Ctor" "Closure"} (re-find #"^\w+" (def-kind def))))) false
+          (names "inline(always)") false
+          (and (names "inline(never)") (non-erasable? args)) true
+          :else true)))
+
+(defn- item-name-of [d] (if (number? d) (str (second (:data (c/def-of d)))) (c/path-name d)))
+
+(defn instance-symbol
+  "symbol_name: the attributes' names (a weak lang item's link name, rustc_std_internal_symbol's, export_name, no_mangle),
+  else v0 at the instance's arguments, with the instantiating crate when generic or globally shared with conflicts"
+  [{:keys [def args] :as inst}]
+  (let [{:keys [names]} (attrs-of def)]
+    (cond (weak-link names) (mangle-internal (weak-link names))
+          (names "rustc_std_internal_symbol") (mangle-internal (item-name-of def))
+          (names "no_mangle") (item-name-of def)
+          :else (v0-mangle def args (or (non-erasable? args) (and (#{"Fn" "AssocFn" "Closure"} (def-kind def)) (may-conflict? inst)))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; instances, the def-path texts of the record, callees
+
+(defn print-path "A definition's path as rustc's def_path_str prints it (the helper's :def)" [d]
+  (binding [c/*in-value* true] (c/print-def-path d [])))
+
+(defn- disamb-seg [d]
+  (let [{:keys [data dis]} (def-key d)]
+    (case (first data)
+      :impl (str "{impl#" dis "}") :closure (str "{closure#" dis "}") :anon (str "{constant#" dis "}") :ctor "{constructor#0}"
+      (second data))))
+
+(defn- def-path-text [d]
+  (if (number? d)
+    (loop [d d acc ()] (let [{:keys [parent]} (def-key d)] (if (vector? parent) (str/join "::" (cons (str (:name *local*) "[" (crate-short (:id *local*)) "]") (cons (disamb-seg d) acc))) (recur parent (cons (disamb-seg d) acc)))))
+    nil))
+
+(defn- derive-item? [d]
+  (when (and (= 0 (:parent d)) (#{"Struct" "Enum" "Union"} (:kind d)) (vector? (:span (:node d))))
+    (let [lines (vec (str/split-lines (slurp build/*root-file*)))
+          l (dec (long (first (:span (:node d)))))]
+      (loop [i l]
+        (when (>= i 0)
+          (let [t (str/trim (nth lines i ""))]
+            (cond (and (= i l) (re-find #"#\[derive\(" (nth lines i))) true
+                  (= i l) (recur (dec i))
+                  (str/starts-with? t "#[") (if (str/includes? t "derive(") true (recur (dec i)))
+                  :else false)))))))
+
+(defn- subtree? [ds root id] (loop [x id] (cond (nil? x) false (= x root) true :else (recur (:parent (nth ds x))))))
+
+(def ^:dynamic *def-order* nil)   ; atom: {id rustc-index}
+
+(defn rustc-def-index
+  "The DefIndex rustc gives a local definition: the def collector's order with what our collection does not keep (the
+  injected `extern crate` and prelude import, a variant's explicit discriminant's anonymous constant after its children),
+  an item with `#[derive]` (and the impls its derives make, which follow it) collected after the crate's other items"
+  [id]
+  (when-not @*def-order*
+    (let [ds (vec (c/defs))
+          derived (set (for [d ds :when (derive-item? d)
+                             :let [end-line (nth (:span (:node d)) 2)
+                                   ;; the impls its derives make follow it, their spans within the item's lines
+                                   derived-impl? (fn [x] (and (str/starts-with? (str (:kind x)) "Impl")
+                                                              (let [sp (:span (:node x))] (or (not (vector? sp)) (<= (long (first sp)) (long end-line))))))
+                                   nxt (some #(when (and (> (:id %) (:id d)) (= 0 (:parent %)) (not (derived-impl? %))) (:id %)) ds)]
+                             x ds :when (and (>= (:id x) (:id d)) (or (nil? nxt) (< (:id x) nxt)))]
+                         (:id x)))
+          order (concat (remove #(derived (:id %)) (rest ds)) (filter #(derived (:id %)) (rest ds)))
+          idx (loop [ds order i 3 acc {}]
+                (if-let [d (first ds)]
+                  (let [acc (assoc acc (:id d) i)
+                        ;; a discriminant's anonymous constant follows the variant's children
+                        extra (if (and (= "Variant" (:kind d)) (:disr (:node d))) 1 0)
+                        kids (count (filter #(= (:id d) (:parent %)) (c/defs)))]
+                    (if (pos? extra)
+                      (let [[k r] (split-at kids (rest ds))
+                            acc (reduce (fn [[a j] x] [(assoc a (:id x) j) (inc j)]) [acc (inc i)] k)]
+                        (recur r (+ (second acc) extra) (first acc)))
+                      (recur (rest ds) (inc i) acc)))
+                  acc))]
+      (reset! *def-order* idx)))
+  (get @*def-order* id))
+
+(defn def-id-text [d] (when (number? d) (str "DefId(0:" (rustc-def-index d) " ~ " (def-path-text d) ")")))
+
+(defn intrinsic? [d] (and (string? d) (contains? (:names (attrs-of d)) "rustc_intrinsic")))
+
+(defn- fn-abi [d]
+  (if (number? d) (or (:abi (c/fn-sig d)) "Rust")
+      (str/replace (str (:abi (get (:fns c/*si*) d))) "\"" "")))
+
+(defn callee-fact
+  "Instance::try_resolve's callee as the helper writes it: {:kind :symbol :def :can-unwind :track-caller [:intrinsic] [:external]}"
+  [[_ d args]]
+  (when (and (number? d) (= "Trait" (:kind (c/def-of (:parent (c/def-of d))))))
+    (throw (ex-info "mono: a trait method's resolution" {:fact :callee})))
+  (when (and (string? d) (= "Trait" (get (:kinds c/*std*) (c/path-parent d))))
+    (throw (ex-info "mono: a trait method's resolution" {:fact :callee})))
+  (let [args (erase-regions args)
+        {:keys [names]} (attrs-of d)]
+    (if (intrinsic? d)
+      {:kind "intrinsic" :symbol "" :def (print-path d) :can-unwind false :track-caller false :intrinsic (item-name-of d)}
+      (let [abi (fn-abi d)]
+        (cond-> {:kind "item" :symbol (instance-symbol {:def d :args args}) :def (print-path d)
+                 :can-unwind (and (not (names "rustc_nounwind")) (boolean (or (#{"Rust" "rust-call" "rust-cold" ""} abi) (re-find #"unwind" abi))))
+                 :track-caller (boolean (names "track_caller"))}
+          (not (mir-available? d)) (assoc :external true))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; the record's type forms as types (for the layouts of the types core's bodies use), and the types' texts
+
+(defn- local-adt-by-path [^String p]
+  (some #(when (and (#{"Struct" "Enum" "Union"} (:kind %)) (= p (binding [c/*in-value* false] (c/print-def-path (:id %) [])))) (:id %)) (c/defs)))
+
+(defn form->ty
+  "A MIR type form (ty TEXT STRUCT) as a type: a local ADT by its path, another crate's by its DefId's path"
+  [f]
+  (let [[_ _ st] f st (if (symbol? st) (list st) st)
+        arg (fn [a] (if (and (seq? a) (= 'lt (first a))) [:re-erased] (form->ty a)))]
+    (case (first st)
+      bool [:bool] char [:char] str [:str] never [:never]
+      int [:int (second st)] uint [:uint (second st)] float [:float (second st)]
+      tuple [:tuple (mapv form->ty (rest st))]
+      array [:array (form->ty (second st)) [:cval (str (nth st 2))]]
+      slice [:slice (form->ty (second st))]
+      ref [:ref [:re-erased] (boolean (nth st 2)) (form->ty (second st))]
+      ptr [:ptr (boolean (nth st 2)) (form->ty (second st))]
+      adt (let [[_ _ did args] st
+                [_ krate path] (re-find #"^DefId\((\d+):\d+ ~ [^\[]+\[[0-9a-f]+\]::(.*)\)$" did)]
+            [:adt (if (= "0" krate) (or (local-adt-by-path path) (throw (ex-info (str "mono: no local ADT " path) {:fact :layout})))
+                      (str (second (re-find #"~ ([^\[]+)\[" did)) "::" path))
+             (mapv arg args)])
+      fndef [:fndef nil (mapv arg (nth st 2))]
+      fnptr [:fnptr {}]
+      (throw (ex-info (str "mono: the type form " (pr-str st)) {:fact :layout})))))
+
+(defn- text-of [t]
+  (if (= :pat-notnull (first t)) (str "(" (text-of (second t)) ") is !null") (build/ty-text t)))
+
+(defn- components
+  "collect_ty's closure: a pointee, an element, a tuple's fields, a struct's fields (not an enum's)"
+  [t]
+  (case (first t)
+    (:ref) [(nth t 3)] (:ptr) [(nth t 2)] (:slice :array :pat-notnull) [(second t)]
+    :tuple (second t)
+    :adt (when-not (tc/enum? (second t)) (apply concat (variant-fields (second t) (nth t 2))))
+    nil))
+
+(defn layout-table
+  "{TEXT layout-form-or-error} over the type forms FORMS (their types: the builder's when it left them, else form->ty) and
+  their components"
+  [forms]
+  (let [acc (atom {}) seen (atom #{})]
+    (letfn [(add [txt t]
+              (when-not (contains? @seen txt)
+                (swap! seen conj txt)
+                (try (let [t (if (fn? t) (t) t)]
+                       (try (swap! acc assoc txt (layout-form (layout-of t)))
+                            (catch Throwable e (swap! acc assoc txt [:error (.getMessage e)])))
+                       (doseq [x (try (components (erase-regions t)) (catch Throwable _ nil))]
+                         (let [x (erase-regions x)] (when-let [tx (try (text-of x) (catch Throwable _ nil))] (add tx x)))))
+                     (catch Throwable e (swap! acc assoc txt [:error (.getMessage e)])))))]
+      (doseq [f forms] (add (second f) (or (:tc (meta f)) (fn [] (form->ty f)))))
+      @acc)))
+
+(defn ty-forms "Every (ty TEXT STRUCT) form in X, outermost first" [x]
+  (let [acc (java.util.ArrayList.)]
+    (letfn [(walk [x] (cond (and (seq? x) (= 'ty (first x)) (string? (second x))) (do (.add acc x) (doseq [y (drop 2 x)] (walk y)))
+                            (seq? x) (doseq [y x] (walk y))
+                            (vector? x) (doseq [y x] (walk y))
+                            (map? x) (doseq [y (vals x)] (walk y))
+                            :else nil))]
+      (walk x))
+    (vec acc)))
+
+;; ---------------------------------------------------------------------------------------------
+;; the program's facts
+
+(def lang-names
+  ["panic_const_add_overflow" "panic_const_sub_overflow" "panic_const_mul_overflow" "panic_const_div_overflow"
+   "panic_const_rem_overflow" "panic_const_neg_overflow" "panic_const_shr_overflow" "panic_const_shl_overflow"
+   "panic_const_div_by_zero" "panic_const_rem_by_zero" "panic_bounds_check" "panic_cannot_unwind" "panic_in_cleanup"
+   "panic_null_pointer_dereference" "panic_null_reference_constructed" "panic_misaligned_pointer_dereference" "eh_personality"])
+
+(defn- try-fact [f] (try (f) (catch Throwable e [:error (or (.getMessage e) (str e))])))
+(defn error? [x] (and (vector? x) (= :error (first x))))
+
+(defn- call-fndef [t]
+  (when (and (seq? t) (= 'call (first t)))
+    (let [f (second t)] (when (and (seq? f) (= 'const (first f))) (let [ty (nth f 2 nil)] (:tc (meta ty)))))))
+
+(defn- solver-def [] (or (some #(when (= "Fn" (:kind %)) %) (c/defs)) (c/def-of 0)))
+
+(defn- drop-tys
+  "The types a body's drop terminators drop (a local's whole value)"
+  [b]
+  (distinct (for [blk (:blocks b) :let [t (:term blk)]
+                  :when (and (seq? t) (= 'drop (first t)))
+                  :let [p (second t)] :when (and (seq? p) (= 2 (count p)))
+                  :let [ty (:tc (meta (:ty (nth (:locals b) (second p)))))] :when (and ty (build/needs-drop? ty))]
+              (erase-regions ty))))
+
+(defn- local-drop-impl
+  "The `drop` of a local `impl Drop for T`"
+  [t]
+  (some (fn [d] (when (str/starts-with? (str (:kind d)) "Impl")
+                  (let [[self tr] (try (c/impl-header (:id d)) (catch Throwable _ nil))]
+                    (when (and tr (= (first tr) (c/lang "drop")) (= (erase-regions self) t))
+                      (some #(when (and (= (:id d) (:parent %)) (= "drop" (str (second (:data %))))) (:id %)) (c/defs))))))
+        (c/defs)))
+
+(defn- drop-glues "drop_glue::<T>'s instances the collector reaches from dropping T: T's, and its fields' that need drop" [t]
+  (distinct (cons t (when (= :adt (first t)) (for [vs (variant-fields (second t) (nth t 2)) f vs :when (build/needs-drop? f) g (drop-glues (erase-regions f))] g)))))
+
+(defn- drop-fns "The local Drop::drop functions drop glue of T calls" [t]
+  (keep (fn [g] (when (= :adt (first g)) (local-drop-impl g))) (drop-glues t)))
+
+(defn program-facts
+  "Within build-program's bindings: the program's native facts over its built BODIES ([[name body err] ...])"
+  [n bodies]
+  (binding [*local* (local-crate n) *layouts* (atom {}) *def-order* (atom nil)]
+   (tc/with-solver (solver-def) (fn []
+    (let [ours (into {} (for [[nm b] bodies :when b] [nm b]))
+          src (slurp build/*root-file*)
+          no-std? (boolean (re-find #"(?m)^#!\[no_std\]" src))
+          fn-defs (filter #(and (#{"Fn" "AssocFn"} (:kind %)) (:body (:node %))) (c/defs))
+          name-of (fn [d] (try (build/mir-name d) (catch Throwable _ nil)))
+          roots (for [d fn-defs :let [nm (:names (attrs-of (:id d)))]
+                      :when (and (not (generic-def? (:id d))) (or (extern-indicator? nm) (and (not (re-find #"(?m)^#!\[no_main\]" src))
+                                                                                               (= "main" (str (second (:data d)))) (= 0 (:parent d)))))]
+                  (:id d))
+          by-def (into {} (for [d fn-defs] [(:id d) (name-of d)]))
+          ;; the collector: from the roots through the calls of our bodies (core's bodies' own uses are the pack's)
+          items (loop [todo (vec roots) seen #{} acc []]
+                  (if-let [d (first todo)]
+                    (if (contains? seen d)
+                      (recur (subvec todo 1) seen acc)
+                      (let [b (get ours (by-def d))
+                            calls (when b (keep #(call-fndef (:term %)) (:blocks b)))
+                            next-local (concat (for [[_ cd args] calls :when (and (number? cd) (empty? (filter type-arg? args)))] cd)
+                                               (for [t (drop-tys b) x (drop-fns t)] x))]
+                        (recur (into (subvec todo 1) next-local) (conj seen d) (conj acc d))))
+                    acc))
+          ext-items (distinct (for [d items :let [b (get ours (by-def d))] :when b t (map :term (:blocks b)) :let [[_ cd args] (call-fndef t)]
+                                    :when (and (string? cd) (not (intrinsic? cd)) (mir-available? cd))]
+                                {:def cd :args (erase-regions args)}))
+          glue (distinct (for [d items :let [b (get ours (by-def d))] :when b t (drop-tys b) g (drop-glues t)] g))
+          ext-items (concat ext-items (for [t glue] {:def (c/lang "drop_glue") :args [t] :shim :drop-glue}))
+          item-fact (fn [d] (let [nm (:names (attrs-of d))]
+                              (try-fact #(cond-> {:def (print-path d) :def-id (def-id-text d) :instance (str "Item(" (def-id-text d) ")")
+                                                  :symbol (instance-symbol {:def d :args []}) :name (by-def d) :kind :fn}
+                                           (nm "track_caller") (assoc :track-caller true)))))
+          callees (into {} (for [d items :let [b (get ours (by-def d))] :when b blk (:blocks b) :let [t (:term blk) ft (call-fndef t)] :when ft]
+                             [(second (second t)) (try-fact #(callee-fact ft))]))
+          fsyms (into {} (for [d items :let [b (get ours (by-def d))] :when b blk (:blocks b) :let [t (:term blk) ft (call-fndef t)] :when ft
+                               :let [[_ cd args] ft] :when (not (intrinsic? cd))]
+                           [(second (second t)) (try-fact #(if ((:names (attrs-of cd)) "track_caller") (reify-mangle cd args) (instance-symbol {:def cd :args (erase-regions args)})))]))
+          statics (into {} (for [d (c/defs) :when (str/starts-with? (str (:kind d)) "Static")]
+                             [(str (second (:data d))) (try-fact #(hash-map :symbol (instance-symbol {:def (:id d) :args []})
+                                                                            :def (str "DefId(0:" (rustc-def-index (:id d)) " ~ " (def-path-text (:id d)) ")")))]))
+          eh (some #(when ((:names (attrs-of (:id %))) "lang:EhPersonality") (:id %)) fn-defs)
+          langsyms (into {} (for [ln lang-names
+                                  :let [d (if (= ln "eh_personality") (or eh (when-not no-std? (c/lang ln))) (c/lang ln))]
+                                  :when d]
+                              [ln (try-fact #(instance-symbol {:def d :args []}))]))]
+      {:crate *local* :items (into {} (for [d items] [(by-def d) (item-fact d)])) :order (mapv by-def items)
+       :ext-items (vec (for [x ext-items] (assoc x :symbol (try-fact #(instance-symbol x)))))
+       :callees callees :fsyms fsyms :statics statics :langsyms langsyms
+       :layouts-of (fn [forms] (binding [*local* *local* *layouts* (atom {})] (tc/with-solver (solver-def) #(layout-table forms))))})))))

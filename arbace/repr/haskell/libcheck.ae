@@ -1,0 +1,405 @@
+(ns arbace.repr.haskell.libcheck
+  "The boot libraries' modules through Arbace's front end (doc/haskell/FRONTEND-SURVEY.md, \"As built: HF9 (first
+  slice)\"): each module's native dump renamed (arbace.repr.haskell.rename) and elaborated
+  (arbace.repr.haskell.typecheck) against the interfaces of its imports, and its binders' types judged against GHC's
+  interface of the module itself (the helper's iface verb: the types GHC recorded when it compiled the library). The
+  measure of HF9: the stage that stops a module, the elaborator's errors by the feature they need, the types equal.
+
+  A plan's line: NAME TAB DUMP TAB IFDIR TAB GHC-IFACE (IFDIR the module's closure, its own interface not in it). One
+  EDN map a module on stdout: {:name :stage :msg :errors [...] :features {FEATURE n} :types {:compared :equal :missing}
+  :diff [...]}."
+  (:require [arbace.string :as str]
+            [arbace.repr.haskell.rename :as rn]
+            [arbace.repr.haskell.typecheck :as tc]
+            [arbace.repr.haskell.tostg :as tostg]
+            [arbace.repr.haskell.stgcmp :as stgcmp])
+  (:import [java.io File]))
+
+(defn- msg [^Throwable e] (str/replace (str (.getName (class e)) ": " (ex-message e)) #"\s+" " "))
+
+(def feature-rules
+  "An error's text to the feature it needs, the first rule that matches (the measure's ranking)"
+  [[#"^type not handled: (\S+)" (fn [[_ c]] (str "type:" c))]
+   [#"^expression not handled: (\S+)" (fn [[_ c]] (str "expr:" c))]
+   [#"^pattern not handled: (\S+)" (fn [[_ c]] (str "pat:" c))]
+   [#"^statement not handled: (\S+)" (fn [[_ c]] (str "stmt:" c))]
+   [#"^binding not handled: (\S+)" (fn [[_ c]] (str "bind:" c))]
+   [#"^guard not handled: (\S+)" (fn [[_ c]] (str "guard:" c))]
+   [#"^qualifier not handled: (\S+)" (fn [[_ c]] (str "qual:" c))]
+   [#"^do flavour not handled" (fn [_] "do-flavour")]
+   [#"^no constructor type" (fn [_] "no-con-type")]
+   [#"^no type for .*\"(\$[a-z]+)" (fn [[_ p]] (str "no-type:" p))]
+   [#"^no type for \(ext" (fn [_] "no-type:global")]
+   [#"^no type for " (fn [_] "no-type:local")]
+   [#"^unrenamed variable: \((\S+)" (fn [[_ c]] (str "unrenamed:" c))]
+   [#"^type literal not handled" (fn [_] "type:literal")]
+   [#"^no representation dictionary" (fn [_] "deriving:rep-dict")]
+   [#"^no superclass dictionary" (fn [_] "superclass")]
+   [#"^unsolved: \[\[\"ext\" \"tc\" \"[^\"]*\" \"([^\"]*)\"" (fn [[_ c]] (str "unsolved:" c))]
+   [#"^unsolved" (fn [_] "unsolved")]
+   [#"^cannot unify .*\"Tuple[0-9]*\"\].* with .*\"Tuple[0-9]*#\"|^cannot unify .*\"Tuple[0-9]*#\".* with .*\"Tuple[0-9]*\"\]" (fn [_] "unify:unboxed-tuple-type")]
+   [#"^cannot unify .* with nil$|^cannot unify .*\[:tc nil" (fn [_] "unify:unboxed-tuple-type")]
+   [#"^cannot unify .*\"->\"" (fn [_] "unify:(->)-as-tycon")]
+   [#"^cannot unify \[:tc \[\"ext\" \"tc\" \"([^\"]*)\" \"([^\"]*)\"\].* with \[:tc \[\"ext\" \"tc\" \"\1\" \"\2\"\]"
+    (fn [_] "unify:kind-arguments")]
+   [#"\[:tv \"[a-z][A-Za-z0-9]*#[0-9]+\"\]" (fn [_] "unify:kind-arguments")]
+   [#"^cannot unify .*\"(DemoteRep|Rep|Rep1|Item|Sing|CmpNat|Compare|OrdCond|If|==)\"" (fn [_] "unify:type-family")]
+   [#"^cannot unify .*\[:tv \"[a-z][A-Za-z0-9']*\"\]" (fn [_] "unify:scoped-type-variables")]
+   [#"^cannot unify .*\"RealWorld\".*sk_|^cannot unify .*sk_.*\"RealWorld\"" (fn [_] "unify:rank-n")]
+   [#"^cannot unify .*sk.*sk" (fn [_] "unify:gadt-or-local-equality")]
+   [#"^cannot unify .*\"TYPE\"" (fn [_] "unify:levity")]
+   [#"^cannot unify .*:forall" (fn [_] "unify:higher-rank")]
+   [#"^cannot unify .*\[:lit" (fn [_] "unify:type-literal")]
+   [#"^cannot unify" (fn [_] "unify")]])
+
+(defn feature-of [e]
+  (or (some (fn [[re f]] (when-let [m (re-find re e)] (f (if (string? m) [m] m)))) feature-rules) "other"))
+
+(defn- one [[nm dump ifdir giface] out]
+  (let [w (str out "/" nm)
+        local (str w "/ifl")
+        dirs (vec (remove empty? (str/split ifdir #",")))]
+    (.mkdirs (File. ^String w))
+    ;; the renamed tree taken as it is (HF9's second slice: no file written and read back, no projection on the facts,
+    ;; the renamer's own diagnostics: a seventh of a large module's time)
+    (let [rr (try (binding [rn/*ifdirs* (vec (cons local dirs)) rn/*projection?* false]
+                    (rn/rename-file dump nil local))
+                  (catch Throwable e {:fail (msg e)}))]
+      (if (:fail rr)
+        {:name nm :stage :rename :msg (:fail rr)}
+        (let [tree (:tree rr)
+              r (try (binding [tc/*ifdirs* (conj dirs local) tc/*srcfile* nm] (tc/typecheck-module tree))
+                     (catch Throwable e {:fail (msg e)}))]
+          (if (:fail r)
+            {:name nm :stage :typecheck :msg (:fail r)}
+            (let [c (try (tc/compare-with-iface r giface) (catch Throwable e {:fail (msg e)}))
+                  errs (:errors r)]
+              (merge {:name nm :stage (if (seq errs) :errors :ok)
+                      :errors (vec (take 12 (distinct (map #(subs % 0 (min 300 (count %))) errs))))
+                      :n-errors (count errs)
+                      :features (frequencies (map feature-of errs))}
+                     (if (:fail c)
+                       {:judge (:fail c)}
+                       {:types {:compared (:compared c) :equal (- (:compared c) (count (:diff c)))
+                                :missing (count (:missing c))}
+                        :diff (vec (take 6 (:diff c)))
+                        :missing (vec (take 12 (:missing c)))})))))))))
+
+(defn- stg-one
+  "HF10: a module of the plan through the whole front end, desugared (arbace.repr.haskell.desugar, the -O0 Simplifier)
+  and made STG (arbace.repr.haskell.tostg) in its own unit, into OUT/stg/UNIT/MODULE.stg.ae; with REF (a directory of
+  GHC's -O0 STG of the package, the oracle's) its bindings judged against GHC's by arbace.repr.haskell.stgcmp"
+  [[nm dump ifdir _] out units unit ref]
+  (let [w (str out "/work/" nm)
+        local (str w "/ifl")
+        dirs (vec (remove empty? (str/split ifdir #",")))]
+    (.mkdirs (File. ^String w))
+    (let [rr (try (binding [rn/*ifdirs* (vec (cons local dirs)) rn/*projection?* false]
+                    (rn/rename-file dump nil local))
+                  (catch Throwable e {:fail (msg e)}))]
+      (if (:fail rr)
+        {:name nm :stage :rename :msg (:fail rr)}
+        (let [gref (when ref (str ref "/" nm ".stg.ae"))
+              ;; the source path GHC was given (patError's and SrcLoc's text): the reference's header's, else the package's
+              srcfile (or (when (and gref (.exists (File. ^String gref)))
+                            (with-open [rd (java.io.BufferedReader. (java.io.FileReader. ^String gref))]
+                              (second (re-find #":file \"([^\"]*)\"" (or (.readLine rd) "")))))
+                          (str "libraries/" unit "/src/" (str/replace nm "." "/") ".hs"))
+              r (try (binding [tc/*ifdirs* (conj dirs local) tc/*srcfile* srcfile tc/*unit* unit] (tc/typecheck-module (:tree rr)))
+                     (catch Throwable e {:fail (msg e)}))]
+          (if (:fail r)
+            {:name nm :stage :typecheck :msg (:fail r)}
+            (let [errs (:errors r)
+                  sdir (str out "/stg/" unit)
+                  f (try (let [forms (binding [tostg/*unit* unit tc/*unit* unit] (tostg/module-stg r units srcfile))]
+                           (tostg/write-stg forms sdir (:module r))
+                           (when (System/getenv "LIB_STG_CORE")
+                             (binding [*print-length* nil *print-level* nil *print-meta* false]
+                               (spit (str w "/" (:module r) ".core.edn") (str/join "\n" (map pr-str (:core r))))
+                               (spit (str w "/" (:module r) ".simpl.edn") (str/join "\n" (map pr-str @tostg/last-prog)))))
+                           nil)
+                         (catch Throwable e
+                           (when (System/getenv "LIB_CHECK_TRACE") (.printStackTrace e))
+                           (msg e)))
+                  ours (str sdir "/" (:module r) ".stg.ae")
+                  c (when (and (nil? f) gref (.exists (File. ^String gref)))
+                      (try (stgcmp/compare-files gref ours) (catch Throwable e {:fail (msg e)})))]
+              (merge {:name nm :stage (cond f :stg (seq errs) :errors :else :ok)
+                      :n-errors (count errs)}
+                     (when f {:msg f})
+                     (when (seq errs) {:errors (vec (take 6 (map #(subs % 0 (min 300 (count %))) errs)))})
+                     (cond (nil? c) (when (and (nil? f) gref) {:judge :no-reference})
+                           (:fail c) {:judge (:fail c)}
+                           :else {:stg (select-keys c [:compared :equal :data-equal])
+                                  :ghc-only (vec (take 12 (:ghc-only c))) :n-ghc-only (count (:ghc-only c))
+                                  :ours-only (vec (:ours-only c)) :n-ours-only (count (:ours-only c))
+                                  :diff (vec (:diff c)) :why (:why c)})))))))))
+
+(defn- read-results [files]
+  (vec (for [f files line (str/split-lines (slurp f)) :when (str/starts-with? line "{:name")] (read-string line))))
+
+(defn rank
+  "The measure of a run (its results files): the modules by stage, those that elaborate without an error and with
+  every binder's type equal to GHC's, and the features by the modules whose errors need them (a module counts once
+  per feature; sole: the feature is the module's only one)"
+  [rs]
+  (let [n (count rs)
+        by-stage (frequencies (map :stage rs))
+        clean (filter #(= :ok (:stage %)) rs)
+        equal (filter #(and (= :ok (:stage %)) (:types %) (= (:compared (:types %)) (:equal (:types %))) (zero? (:missing (:types %) 0))) rs)
+        tot (fn [k] (reduce + (map #(get-in % [:types k] 0) rs)))
+        feats (frequencies (mapcat (comp keys :features) rs))
+        errs (apply merge-with + (map :features rs))
+        sole (frequencies (keep #(when (= 1 (count (:features %))) (first (keys (:features %)))) rs))]
+    (println (str "lib-check: " n " modules; " (count clean) " elaborate without an error, " (count equal)
+                  " of them with every type equal to GHC's; binders " (tot :equal) " of " (tot :compared) " equal, "
+                  (tot :missing) " GHC's only; stages " (pr-str (into (sorted-map) by-stage))))
+    (println "feature                                  modules  errors  sole")
+    (doseq [[k c] (sort-by (fn [[k c]] [(- c) k]) feats)]
+      (println (format "%-40s %7d %7d %5d" k c (get errs k 0) (get sole k 0))))
+    (doseq [r rs :when (#{:rename :typecheck} (:stage r))]
+      (println "stopped" (name (:stage r)) (:name r) (subs (str (:msg r)) 0 (min 120 (count (str (:msg r)))))))))
+
+;; HF9-P1 (a), HF9-P8: the measure as a recorded check (test/haskell/lib-check-ghc-internal.edn, one map a module as check
+;; prints it, :ms dropped). A module is worse than its row when its stage ranks lower, or at the same stage fewer of its
+;; binders are equal to GHC's or more are GHC's only, or (both :errors) it has more errors; better the other way (reported:
+;; the record may be re-recorded, never a failure).
+
+(def stage-rank {:ok 4 :errors 3 :typecheck 2 :rename 1 :timeout 0})
+
+(defn- row-key [r] (dissoc r :ms))
+
+(defn compare-row
+  "nil when r is as its record row was; :worse or :better with why"
+  [rec r]
+  (let [rs (stage-rank (:stage rec) -1) ns (stage-rank (:stage r) -1)
+        eq (fn [x] (get-in x [:types :equal] 0)) miss (fn [x] (get-in x [:types :missing] 0))
+        ne (fn [x] (:n-errors x 0))]
+    (cond
+      (< ns rs) [:worse (str "stage " (name (:stage rec)) " -> " (name (:stage r)))]
+      (> ns rs) [:better (str "stage " (name (:stage rec)) " -> " (name (:stage r)))]
+      (< (eq r) (eq rec)) [:worse (str "binders equal " (eq rec) " -> " (eq r))]
+      (> (miss r) (miss rec)) [:worse (str "GHC's only " (miss rec) " -> " (miss r))]
+      (and (= :errors (:stage r)) (> (ne r) (ne rec))) [:worse (str "errors " (ne rec) " -> " (ne r))]
+      (> (eq r) (eq rec)) [:better (str "binders equal " (eq rec) " -> " (eq r))]
+      (< (miss r) (miss rec)) [:better (str "GHC's only " (miss rec) " -> " (miss r))]
+      (and (= :errors (:stage r)) (< (ne r) (ne rec))) [:better (str "errors " (ne rec) " -> " (ne r))]
+      :else nil)))
+
+(defn judge
+  "The results against the record: exit status 1 when a module is worse, or, for a whole run, a module of one is not in
+  the other"
+  [record-file results-file whole? & [classes-file]]
+  (let [rec (into {} (map (juxt :name identity) (read-results [record-file])))
+        rs (read-results [results-file])
+        seen (set (map :name rs))
+        bad (atom 0) better (atom 0)]
+    (doseq [r rs]
+      (if-let [x (get rec (:name r))]
+        (when-let [[k why] (compare-row x r)]
+          (println (str "lib-check judge: " (:name r) " " (name k) ": " why))
+          (if (= k :worse) (swap! bad inc) (swap! better inc)))
+        (when whole? (println (str "lib-check judge: " (:name r) " is not in the record")) (swap! bad inc))))
+    (when whole?
+      (doseq [n (sort (keys rec)) :when (not (seen n))]
+        (println (str "lib-check judge: " n " is recorded but was not judged")) (swap! bad inc)))
+    ;; HF9-P6 (a): every module that does not pass (elaborated without an error, every binder equal, none GHC's only) in a
+    ;; class of the classes file (goi's format: :id :kind :ids), as the matrix's cells are judged
+    (when classes-file
+      (let [classes (read-string (slurp classes-file))
+            owner (into {} (for [c classes i (:ids c)] [i c]))
+            pass? (fn [r] (and (= :ok (:stage r)) (= (get-in r [:types :compared]) (get-in r [:types :equal])) (zero? (get-in r [:types :missing] 0))))
+            np (remove pass? rs)]
+        (doseq [r np :when (not (owner (:name r)))]
+          (println (str "lib-check judge: " (:name r) " does not pass (" (name (:stage r)) ") and is in no class of " classes-file))
+          (swap! bad inc))
+        (println (str "lib-check judge: " (- (count rs) (count np)) " pass, " (count np) " in a class: "
+                      (pr-str (into (sorted-map) (frequencies (keep #(some-> (owner (:name %)) :id) np))))))))
+    (println (str "lib-check judge: " (count rs) " modules against " (count rec) " recorded; " @bad " worse, missing or unclassed, "
+                  @better " better" (when (pos? @better) " (bin/repr-haskell lib-check --record re-records them)")))
+    (System/exit (if (zero? @bad) 0 1))))
+
+(defn record
+  "The results into the record file: a whole run replaces it, a partial one its modules' rows"
+  [results-file record-file partial? source]
+  (let [f (File. ^String record-file)
+        old (if (and partial? (.isFile f)) (read-results [record-file]) [])
+        new (read-results [results-file])
+        by (merge (into (sorted-map) (map (juxt :name row-key) old)) (into {} (map (juxt :name row-key) new)))]
+    (spit record-file
+          (str ";; HF9's measure as a recorded check (bin/repr-haskell lib-check --record; doc/haskell/FRONTEND-SURVEY.md, \"As built:\n"
+               ";; HF9-P1, P2, P5, P6, P7, P8\"): each module of the package natively read, renamed and elaborated against its imports'\n"
+               ";; interfaces, its binders' types against GHC's interface of the module. One map a module: :stage (:ok, :errors,\n"
+               ";; :typecheck, :rename, :timeout), the errors' features, :types {:compared :equal :missing}. --judge FILE fails on a\n"
+               ";; module that gets worse. Interfaces: " source ". Classes of the modules that do not pass:\n"
+               ";; test/haskell/divergences-lib-check.edn. Read with the Clojure reader.\n"
+               (apply str (for [[_ r] by] (str (binding [*print-length* nil *print-level* nil] (pr-str r)) "\n")))))
+    (println (str "lib-check: " (count new) " modules recorded into " record-file " (" (count by) " rows)"))))
+
+(defn control
+  "The negative control's verdict: its one result must not be a module elaborated with every binder equal"
+  [results-file what]
+  (let [[r] (read-results [results-file])
+        equal? (and r (= :ok (:stage r)) (:types r) (pos? (:compared (:types r) 0))
+                    (= (:compared (:types r)) (:equal (:types r))) (zero? (:missing (:types r) 0)))]
+    (if (and r (not equal?))
+      (println (str "lib-check: control (" what "): differs, as it must ("
+                    (name (:stage r)) ", " (get-in r [:types :equal] 0) " of " (get-in r [:types :compared] 0) " equal, "
+                    (get-in r [:types :missing] 0) " GHC's only)"))
+      (do (println (str "lib-check: control (" what "): " (if r "judged equal: the judge is blind" "no result"))) (System/exit 1)))))
+
+(defn rank-stg
+  "HF10's measure of a run: modules by stage, bindings equal to GHC's -O0 STG, the first differences by class"
+  [rs]
+  (let [tot (fn [k] (reduce + (map #(get-in % [:stg k] 0) rs)))
+        full (filter #(and (:stg %) (pos? (:compared (:stg %))) (= (:compared (:stg %)) (:equal (:stg %)))) rs)
+        cls (fn [[g o]] (str (re-find #"^\(?[^ \[\]\"]*" g) " / " (re-find #"^\(?[^ \[\]\"]*" o)))
+        whys (frequencies (map cls (mapcat (comp vals :why) rs)))]
+    (println (str "lib-stg: " (count rs) " modules, stages " (pr-str (into (sorted-map) (frequencies (map :stage rs))))
+                  "; bindings equal to GHC's -O0 STG " (tot :equal) " of " (tot :compared)
+                  "; modules with every binding equal " (count full) " (of " (count (filter #(pos? (get-in % [:stg :compared] 0)) rs))
+                  " with bindings); GHC's only " (reduce + (map #(:n-ghc-only % 0) rs))
+                  ", ours only " (reduce + (map #(:n-ours-only % 0) rs))))
+    (doseq [r (sort-by :name rs)]
+      (println (format "  %-46s %-8s %s" (:name r) (name (:stage r))
+                       (if-let [c (:stg r)] (str (:equal c) "/" (:compared c) (if (:data-equal c) "" " data differs")) (subs (str (:msg r "")) 0 (min 70 (count (str (:msg r "")))))))))
+    (println "first differences (GHC's / ours), by binding:")
+    (doseq [[k n] (take 30 (sort-by (comp - val) whys))] (println (format "  %5d  %s" n k)))))
+
+(defn replaceable
+  "The modules whose own STG may replace GHC's in a run: all those made (mode all), or those whose every binding
+  equals GHC's (mode equal)"
+  [rs mode]
+  (doseq [r rs :when (and (#{:ok :errors} (:stage r))
+                          (or (= mode "all")
+                              (and (:stg r) (= (:compared (:stg r)) (:equal (:stg r))) (zero? (:n-ghc-only r 0)))))]
+    (println (:name r))))
+
+(defn- top-lines
+  "A dump's top-level forms, one a line: [[form line]...]"
+  [f]
+  (vec (for [l (str/split-lines (slurp f)) :when (str/starts-with? l "(")] [(read-string l) l])))
+
+(defn merge-abi
+  "HF10's run on the installed libraries' ABI: a module's own STG (OURS) in place of the pack's (PACK, GHC's -O2), the
+  pack's bindings of the names ours does not define kept beside it (workers, specialisations, floated bindings the
+  other -O2 modules and the interfaces' unfoldings name: GHC's ABI at -O2), with the internal top-level bindings they
+  reach, renamed apart (ghc$...), each form as the dump wrote it. Written to OUT; [own kept] counts of top-level
+  bindings"
+  ([ours pack out] (merge-abi ours pack out nil))
+  ([ours pack out only]
+  (let [nm (fn [f] (case (first f) (bind string) (first (second f)) nil))
+        ext? (fn [n] (and (string? n) (re-find #"^[^/]*:" n)))
+        ;; ONLY (a set): the own exported bindings judged equal to GHC's -O0 alone (their internal closures with them), the
+        ;; module's data declarations the pack's
+        g (top-lines pack)
+        ;; the module's constructors the pack lays out otherwise (an -O2 library's unpacked strict fields: Arr's
+        ;; Array, its Int field an Int#): an own binding that names one is not GHC's code at the pack's ABI, the pack's kept
+        reps (fn [ls] (into {} (for [[f] ls :when (= 'stg/data (first f)) [_ c r] (map (juxt first second #(nth % 3)) (nth f 2))] [c r])))
+        greps (reps g)
+        odiff (set (for [[c r] (reps (top-lines ours)) :when (and (contains? greps c) (not= r (get greps c)))] c))
+        mentions? (fn [l] (some #(str/includes? l (str "\"" % "\"")) odiff))
+        o (cond->> (top-lines ours)
+            only (remove (fn [[f l]] (or (= 'stg/data (first f)) (and (ext? (nm f)) (not (contains? only (nm f))))
+                                         (and (seq odiff) (ext? (nm f)) (mentions? l))))))
+        members (fn [f] (if (= 'rec (first f)) (rest f) [f]))
+        own-names (set (keep nm (mapcat (comp members first) o)))
+        gforms (filter #(contains? '#{bind string rec} (first (first %))) g)
+        by-name (into {} (for [[f :as fl] gforms m (members f) :let [n (nm m)] :when n] [n fl]))
+        need0 (for [[f] gforms m (members f) :let [n (nm m)] :when (and (ext? n) (not (own-names n)))] n)
+        refs (fn [f] (let [acc (atom [])]
+                       ((fn w [y] (cond (and (string? y) (not (ext? y)) (contains? by-name y)) (swap! acc conj y)
+                                        (coll? y) (doseq [z y] (w z)) :else nil)) f)
+                       @acc))
+        kept (loop [todo (vec need0) seen #{} out []]
+               (if (empty? todo) out
+                   (let [n (first todo) fl (get by-name n)]
+                     (if (or (nil? fl) (contains? seen fl)) (recur (subvec todo 1) seen out)
+                         (recur (into (subvec todo 1) (concat (keep nm (members (first fl))) (refs (first fl))))
+                                (conj seen fl) (conj out fl))))))
+        kept-names (set (keep nm (mapcat (comp members first) kept)))
+        ren (into {} (for [n kept-names :when (not (ext? n))] [n (str "ghc$" n)]))
+        rn-line (fn [l] (str/replace l #"\"((?:[^\"\\]|\\.)*)\"" (fn [[m x]] (if-let [r (get ren x)] (str "\"" r "\"") m))))
+        o2 (remove (fn [[f]] (and (nm f) (contains? kept-names (nm f)))) o)
+        odata (set (keep (fn [[f]] (when (= 'stg/data (first f)) (second f))) o2))
+        gdata (filter (fn [[f]] (and (= 'stg/data (first f)) (not (contains? odata (second f))))) g)]
+    (spit out (str (str/join "\n" (concat (map second o2) (map second gdata) (map (comp rn-line second) kept))) "\n"))
+    ;; the exported bindings each side gives (the internal ones follow them)
+    [(count (filter (fn [[f]] (ext? (nm f))) o2)) (count (filter #(ext? (nm %)) (mapcat (comp members first) kept)))])))
+
+(defn compare-runs
+  "Two run-check results files (GHC's -O0 libraries, the own set): the passes lost and gained"
+  [a b]
+  (let [rd (fn [f] (into {} (for [l (str/split-lines (slurp f)) :when (str/starts-with? l "{")] (let [m (read-string l)] [(:id m) m]))))
+        ra (rd a) rb (rd b)
+        pass? (fn [m] (= :pass (:result m)))
+        lost (sort (filter #(and (pass? (ra %)) (not (pass? (rb %)))) (keys ra)))
+        gained (sort (filter #(and (pass? (rb %)) (not (pass? (ra %)))) (keys rb)))]
+    (println (str "lib-stg --run: " (count (filter pass? (vals ra))) " of " (count ra) " pass on the pack's libraries, "
+                  (count (filter pass? (vals rb))) " of " (count rb) " with Arbace's own STG in the replaced modules; "
+                  (count lost) " lost, " (count gained) " gained"))
+    (doseq [i lost] (println "  lost" i (pr-str (rb i))))
+    (doseq [i gained] (println "  gained" i))
+    (when (seq lost) (System/exit 1))))
+
+(defn -main
+  "check --plan FILE -o OUT: each module of the plan through the front end, one EDN map a line; rank FILE...: the
+  measure of results files"
+  [& args]
+  (let [[verb & more] args
+        opts (when (even? (count more)) (apply hash-map more))
+        out (get opts "-o" ".tmp/repr-haskell/lib-check")]
+    (case verb
+      ;; a module over the time limit (--timeout SECONDS, default 900) is recorded :timeout and the process exits 3,
+      ;; its runaway thread with it: the driver goes on with the plan's next module in a fresh process
+      "check" (let [limit (* 1000 (Long/parseLong (get opts "--timeout" "900")))]
+                (doseq [line (str/split-lines (slurp (get opts "--plan")))
+                        :when (not (str/blank? line))]
+                  (let [t0 (System/currentTimeMillis)
+                        task (future (one (str/split line #"\t") out))
+                        r0 (deref task limit nil)
+                        r (assoc (or r0 {:name (first (str/split line #"\t")) :stage :timeout})
+                                 :ms (- (System/currentTimeMillis) t0))]
+                    (binding [*print-length* nil *print-level* nil] (println (pr-str r)))
+                    (flush)
+                    (when-not r0 (System/exit 3))))
+                (shutdown-agents))
+      ;; HF10: stg --plan FILE -o OUT --libs DIR,... [--unit U] [--ref DIR]
+      "stg" (let [limit (* 1000 (Long/parseLong (get opts "--timeout" "900")))
+                  units (tostg/units-of (remove empty? (str/split (or (get opts "--libs") "") #",")))
+                  unit (get opts "--unit" "ghc-internal")
+                  ref (get opts "--ref")]
+              (doseq [line (str/split-lines (slurp (get opts "--plan")))
+                      :when (not (str/blank? line))]
+                (let [t0 (System/currentTimeMillis)
+                      task (future (stg-one (str/split line #"\t") out units unit ref))
+                      r0 (deref task limit nil)
+                      r (assoc (or r0 {:name (first (str/split line #"\t")) :stage :timeout})
+                               :ms (- (System/currentTimeMillis) t0))]
+                  (binding [*print-length* nil *print-level* nil] (println (pr-str r)))
+                  (flush)
+                  (when-not r0 (System/exit 3))))
+              (shutdown-agents))
+      "rank" (rank (read-results more))
+      "judge" (let [[rec res w cls] more] (judge rec res (= w "whole") cls))
+      "record" (let [[res rec w src] more] (record res rec (not= w "whole") src))
+      "control" (let [[res what] more] (control res what))
+      "rank-stg" (rank-stg (read-results more))
+      "replaceable" (replaceable (read-results [(first more)]) (or (second more) "all"))
+      "compare-runs" (compare-runs (first more) (second more))
+      ;; merge MODE RESULTS OURS PACK OUT...: triples; one line a module, NAME OWN KEPT; MODE all (every own binding) or
+      ;; equal (only the exported bindings equal to GHC's -O0, RESULTS' judge)
+      "merge" (let [[mode res & trip] more
+                    rs (into {} (map (juxt :name identity) (read-results [res])))]
+                (doseq [[a b c] (partition 3 trip)]
+                  (let [m (str/replace (.getName (File. ^String a)) #"\.stg\.ae$" "")
+                        r (get rs m)
+                        only (when (= mode "equal")
+                               (let [f (str (.getParent (File. ^String a)) "/" m ".stg.ae")
+                                     ext (for [l (str/split-lines (slurp f)) :when (str/starts-with? l "(bind")
+                                               :let [n (first (second (read-string l)))]
+                                               :when (re-find #"^[^/]*:" n)] n)]
+                                 (set (remove (set (concat (:diff r) (:ours-only r))) (remove #(re-find #"/\$(tr|tc|krep)" %) ext)))))
+                        [k1 k2] (merge-abi a b c only)]
+                    (println m k1 k2))))
+      (do (println "usage: -m arbace.repr.haskell.libcheck check --plan FILE -o OUT | rank FILE...") (System/exit 2)))))

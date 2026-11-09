@@ -171,7 +171,14 @@
     never [:never]
     adt [:adt (nth s 1) (mapv sty->ty (nth s 2))]
     tuple [:tuple (mapv sty->ty (second s))]
-    ref [:ref (sty->ty (list 'lt (nth s 1))) (nth s 2) (sty->ty (nth s 3))]
+    ref (let [r (sty->ty (list 'lt (nth s 1)))
+              inner (nth s 3)
+              ;; RF10: a trait object's elided lifetime behind a reference is the reference's (the object lifetime
+              ;; default), which the helper's interface writes '_
+              inner (if (and (seq? inner) (= 'dyn (first inner)) (= "'_" (nth inner 4 nil)))
+                      (let [t (sty->ty inner)] (assoc t 2 r))
+                      (sty->ty inner))]
+          [:ref r (nth s 2) inner])
     ptr [:ptr (nth s 1) (sty->ty (nth s 2))]
     slice [:slice (sty->ty (second s))]
     array [:array (sty->ty (nth s 1)) (let [n (nth s 2)] (if (seq? n) [:cparam (nth n 1) (nth n 2)] [:cval n]))]
@@ -543,7 +550,9 @@
                                (:generics m)))}
   (if (and (#{"AssocTy" "AssocFn" "AssocConst { is_type_const: false }"} (ext-kind p)) (= "Trait" (ext-kind (path-parent p))))
     {:parent-count (count (get (:generics *std*) (path-parent p))) :params [] :has-parent true}
-  (let [ps (get (:generics *std*) p)]
+  (let [ps (or (get (:generics *std*) p)
+               ;; RF10: a lang item ADT no public module reaches (std's names lack it): its interface's generics
+               (:generics (get (:adts *si*) p)))]
     {:parent-count 0 :has-self (= "Trait" (ext-kind p))
      :params (vec (map-indexed (fn [i [k nm dflt]] (cond-> {:name nm :kind (keyword (name k)) :index i :ext-default dflt}
                                                        (and (zero? i) (= "Self" nm) (= "Trait" (ext-kind p))) (assoc :self true)))
@@ -1016,19 +1025,25 @@
 
 (declare print-ty print-def-path print-arg name-binder fn-sig ctor-sig fndef-sig)
 
+(def ^:dynamic *erased-regions* false)   ; RF10: MIR's constants print every free region erased ('_)
+
 (defn print-region [r]
+  (if (and *erased-regions* (not (and (= :re-bound (first r)) (#{:inner :late} (nth r 2 nil)))))
+    "'_"
   (case (first r)
     :re-early (nth r 2)
     :re-bound (or (second r) "'_")
     :re-static "'static"
-    "'_"))
+    "'_")))
 
 (defn- print-optional-region? [r]
+  (if (and *erased-regions* (not (and (= :re-bound (first r)) (#{:inner :late} (nth r 2 nil)))))
+    false
   (case (first r)
     :re-early (not= "'_" (nth r 2))
     :re-bound (and (some? (second r)) (not= "'_" (second r)))
     :re-static true
-    false))
+    false)))
 
 (defn print-const [c] (case (first c) :cval (second c) :cparam (nth c 2) :cpath (print-def-path (second c) []) (str (second c))))
 
@@ -1125,16 +1140,24 @@
   `module::<impl Trait for Self>`"
   [p args]
   (let [m (get (:impls *si*) p)
-        self-ty (subst (sty->ty (:self m)) (vec args))
+        ;; (the impl's named lifetimes, which std's interface writes by name, at their arguments)
+        lts (into {} (keep-indexed (fn [i q] (when (and (= :lifetime (:kind q)) (< i (count args))) [(:name q) (nth args i)])) (all-params (generics-any p))))
+        by-name (fn by-name [t] (cond (and (vector? t) (= :re-bound (first t)) (= 2 (count t)) (contains? lts (second t))) (get lts (second t))
+                                      (and (vector? t) (keyword? (first t))) (into [(first t)] (map by-name (rest t)))
+                                      (vector? t) (mapv by-name t)
+                                      :else t))
+        self-ty (by-name (subst (sty->ty (:self m)) (vec args)))
         tr (when-let [t (:trait m)] [(nth t 1) (subst (mapv sty->ty (nth t 2)) (vec args))])
         parent (path-parent p)
         in-self (when-let [c (characteristic-def self-ty)] (= (if (number? c) nil (path-parent c)) parent))
         in-trait (when tr (= (path-parent (first tr)) parent))]
+    ;; an inherent impl's own regions (a trait object's `'static` default) are not arguments: printed unerased
+    (binding [*erased-regions* (if tr *erased-regions* false)]
     (if (or in-self in-trait)
       (print-path-with-qualified self-ty tr)
       (let [pre (print-def-path parent [])]
         (str pre (when (seq pre) "::")
-             (generic-delimiters (fn [] (str "impl " (when tr (str (print-def-path (first tr) (second tr)) " for ")) (print-ty self-ty)))))))))
+             (generic-delimiters (fn [] (str "impl " (when tr (str (print-def-path (first tr) (second tr)) " for ")) (print-ty self-ty))))))))))
 
 (defn- data-sym [d]
   (let [[k n] (:data d)]
@@ -1325,7 +1348,7 @@
       (let [used (atom (region-names x))
             fresh (fn [] (let [n (first (remove @used (map #(str "'" (char (+ 97 %))) (range 26))))] (swap! used conj n) n))
             names (into {} (for [v vars] [v (or (second v) (fresh))]))
-            ren (fn ren [y] (cond (and (vector? y) (contains? names y)) [:re-bound (names y)]
+            ren (fn ren [y] (cond (and (vector? y) (contains? names y)) [:re-bound (names y) :late]
                                   (and (vector? y) (keyword? (first y))) (into [(first y)] (map ren (rest y)))
                                   (vector? y) (mapv ren y)
                                   (map? y) (into {} (for [[k v] y] [k (ren v)]))

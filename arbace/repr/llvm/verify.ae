@@ -894,7 +894,11 @@
   (cond
     (local? v) (if st (use-local st v t) (verr :parser/local-outside "invalid use of function-local name" {:at [:use (pr/value-str v)]}))
     (global? v) (use-global st v t)
-    (= t 'metadata) (note-md! v)
+    ;; parseMetadataAsValue (LLParser.cpp:3352, 6750 parseValueAsMetadata): a local wrapped in metadata (`metadata i32 %x`, a
+    ;; DIArgList's operands) is resolved as any operand, a forward reference until defined (LLS33 (b): the mutants' own verdicts)
+    (= t 'metadata) (cond (and (vector? v) (= 2 (count v)) (not= 'metadata (first v))) (use-value st (second v) (norm-type (first v)))
+                          (and (seq? v) (= (first v) '!DIArgList)) (doseq [a (rest v) :when (vector? a)] (use-value st (second a) (norm-type (first a))))
+                          :else (note-md! v))
     (md-ref? v) (.add *mrefs* v)
     (and (seq? v) (symbol? (first v)) (str/starts-with? (name (first v)) "!")) (note-md! v)
     :else (do (use-const st v t) (check-constexpr-type v t))))
@@ -1049,7 +1053,9 @@
     (when (and n (< k n)) (verr :parser/dbg-record "Expected ',' here" {:at [:find-last ")"]}))
     (when (and n (> k n)) (verr :parser/dbg-record "Expected ')' here" {:at [:comma (dec n)]}))
     (doseq [x (rest b)]
-      (if (vector? x) (use-value st (second x) (norm-type (first x))) (note-md! x)))))
+      (cond (vector? x) (use-value st (second x) (norm-type (first x)))
+            (and (seq? x) (= (first x) '!DIArgList)) (use-value st x 'metadata)
+            :else (note-md! x)))))
 
 (def ^:dynamic *caller-varargs* false)
 
@@ -2943,8 +2949,14 @@
             (throw (ex-info "stripped" {::stripped true})))
           (do
             (binding [*inst-locs* (reduce (fn [m [l lf lx]] (if (contains? m l) m (assoc m l [lf lx])))
-                                          {} (for [f defs [_ _ & items] (:body (apply hash-map (drop 4 f))) x items
+                                          ;; visitFunction's walk (Verifier.cpp:3313-3335): a function with a subprogram, its
+                                          ;; instructions' locations; a call of an old debug intrinsic is a debug record by then
+                                          ;; (LLS33 (b): its location is visitDILocation's, `location requires a valid scope`)
+                                          {} (for [f defs :when (some #{'!dbg} (:md (apply hash-map (drop 4 f))))
+                                                   [_ _ & items] (:body (apply hash-map (drop 4 f))) x items
                                                    :let [b (body x)] :when (not (dbg-record? b))
+                                                   :when (not (and (= 'call (first b)) (global? (nth b 2 nil))
+                                                                   (re-matches #"llvm\.dbg\.(declare|value|assign)" (global-key (nth b 2)))))
                                                    :let [l (get (apply hash-map (:md (nth (split-inst b) 2))) '!dbg)] :when l] [l f x]))]
               (doseq [[id n] nodes]
                 ;; visitDIGlobalVariableExpression checks its variable, which is then visited on its own too

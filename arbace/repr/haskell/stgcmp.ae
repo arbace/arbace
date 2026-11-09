@@ -25,15 +25,52 @@
                      (and (seq? y) (= 'closure (first y)))
                      (let [[_ u fvs args body] y args2 (w args) body2 (w body)]
                        (list 'closure u (vec (sort (map w fvs))) args2 body2))
+                     ;; a primop's, a foreign call's name is not a variable
+                     (and (seq? y) (contains? '#{primop foreign primcall} (first y)))
+                     (apply list (first y) (second y) (map w (drop 2 y)))
                      (seq? y) (if (= 'str (first y)) y (apply list (map w y)))
                      (vector? y) (mapv w y)
                      :else y))]
       (w x))))
 
-(defn- bindings-of [forms]
+(defn- tops-of
+  "The module's top-level bindings, NAME -> its right-hand side (a string literal's text as (str TEXT))"
+  [forms]
   (let [flat (mapcat (fn [f] (if (= 'rec (first f)) (rest f) [f])) forms)]
-    (into {} (for [f flat :let [n (top-name f)] :when (and n (ext? n) (not (typeable? n)))]
-               [n (rename (nth f 2))]))))
+    (into {} (for [f flat :let [n (top-name f)] :when n]
+               [n (if (= 'string (first f)) (list 'str (nth f 2)) (nth f 2))]))))
+
+(defn- closure-of
+  "HF10: an external binding with the internal top-level bindings it reaches (GHC's floated method bindings, $c...,
+  lvl..., string literals), in the order of their first occurrence, renamed together: internal top-level names are
+  compared as locals are, by place, so a binding is equal when it and everything internal it uses are"
+  [tops n]
+  (loop [todo [n] seen #{n} out []]
+    (if (empty? todo)
+      (rename out)
+      (let [x (first todo)
+            rhs (get tops x)
+            refs (atom [])
+            _ ((fn w [y] (cond (and (string? y) (not (ext? y)) (contains? tops y) (not (contains? seen y))) (swap! refs conj y)
+                               (or (seq? y) (vector? y)) (doseq [z y] (w z))
+                               :else nil)) rhs)
+            new (distinct (remove seen @refs))]
+        (recur (into (vec (rest todo)) new) (into seen new) (conj out rhs))))))
+
+(defn- bindings-of [forms]
+  (let [tops (tops-of forms)]
+    (into {} (for [[n _] tops :when (and (ext? n) (not (typeable? n)))]
+               [n (closure-of tops n)]))))
+
+(defn first-diff
+  "The first place two renamed closures differ: [GHC's subterm OURS'] (HF10's classes of differences)"
+  [a b]
+  (cond
+    (= a b) nil
+    (and (sequential? a) (sequential? b) (= (count a) (count b)) (= (seq? a) (seq? b))
+         (or (vector? a) (= (first a) (first b))))
+    (some (fn [[x y]] (first-diff x y)) (map vector a b))
+    :else [a b]))
 
 (defn compare-files [ghc ours]
   (let [g (read-file ghc) o (read-file ours)
@@ -42,10 +79,36 @@
         eq (filter #(= (get gb %) (get ob %)) ks)
         gd (set (filter #(= 'stg/data (first %)) g)) od (set (filter #(= 'stg/data (first %)) o))]
     {:compared (count ks) :equal (count eq) :ghc-only (vec (sort (remove (set (keys ob)) (keys gb))))
-     :diff (vec (remove (set eq) ks)) :data-equal (= gd od)}))
+     :ours-only (vec (sort (remove (set (keys gb)) (keys ob))))
+     :diff (vec (remove (set eq) ks)) :data-equal (= gd od)
+     :why (into {} (for [k ks :when (not= (get gb k) (get ob k))]
+                     [k (let [[x y] (first-diff (get gb k) (get ob k))
+                              t (fn [z] (let [q (binding [*print-length* 6 *print-level* 3] (pr-str z))] (subs q 0 (min 160 (count q)))))]
+                          [(t x) (t y)])]))}))
 
-(defn -main [ghc ours]
+(defn control
+  "The judge's negative control (GTS81 (a)): OURS against GHC's file with its exported bindings' closures rotated (each
+  binding's name given the next one's closure): [equal compared], equal must be 0 where the true judgment finds some"
+  [ghc ours]
+  (let [gb (bindings-of (read-file ghc)) ob (bindings-of (read-file ours))
+        ks (sort (filter #(contains? ob %) (keys gb)))
+        rot (zipmap ks (map gb (concat (rest ks) (take 1 ks))))]
+    [(count (filter #(= (get rot %) (get ob %)) ks)) (count ks)]))
+
+(defn show
+  "One binding's closure in both files, renamed, as compare-files compares them"
+  [ghc ours n]
+  (let [gb (bindings-of (read-file ghc)) ob (bindings-of (read-file ours))]
+    (binding [*print-length* nil *print-level* nil]
+      (println "== ghc") (doseq [x (get gb n)] (prn x))
+      (println "== ours") (doseq [x (get ob n)] (prn x)))))
+
+(defn -main [ghc ours & [n]]
+  (cond
+    (= n "--control") (let [[e c] (control ghc ours)] (println (str "control " e " of " c " bindings equal")))
+    n (show ghc ours n)
+    :else
   (let [c (compare-files ghc ours)]
     (println (str "stg " (:equal c) " of " (:compared c) " bindings equal, data " (if (:data-equal c) "equal" "differs")))
     (println "ghc only:" (pr-str (:ghc-only c)))
-    (println "differ:" (pr-str (:diff c)))))
+    (println "differ:" (pr-str (:diff c))))))

@@ -1458,6 +1458,193 @@ from 96.9 to about 93.6. That is LLS33 below.
   - (b) Keep the first records' set.
   - *Recommended: (b)*.
 
+## Decided (the user, 2026-11-08): LLS33 (b), LLS34 (b)
+
+- **LLS33 (b):** each rt-family mutant gets its own verdict from the mutator's rule. The mutator knows the rule it broke, so each of
+  its 41 kinds writes the expected verdict and the message family of LLParser or the Verifier. The texts are ported from the pinned
+  llvm-project-23.1.5 tarball. The verdict is then Arbace's own (1); opt's record only checks the message, at the oracle tier.
+- **LLS34 (b):** the pack keeps the first records' set: no `win` build for the four C++ samples without MSVC headers.
+
+## As built: LLS33 (b), the mutants' own verdicts (2026-11-08, branch `llvm-lls33`)
+
+Built on next `5ec43f7b7` (llvm-rt-pack merged). The pack itself is still the night's (LLS31 (a)): this changes what the night records,
+not what is recorded now.
+
+**The verdict line.** `bin/repr-llvm mutants` (`arbace.repr.llvm.mutate`) now writes each mutant's own verdict as its first line:
+
+    ; MUTANT: KIND VERDICT LAYER: MESSAGE      (VERDICT invalid or debug)
+    ; MUTANT: KIND valid
+    ; MUTANT: KIND unknown: WHY
+
+`debug` is a module whose only fault is its debug info, which opt strips with a warning (exit 0). `valid` is a change LLVM's rules
+accept, such as an attribute on an intrinsic's declaration, which AutoUpgrade replaces. `unknown` means the kind cannot tell; such a
+mutant is judged by opt's record, as before. The rest of the mutant is unchanged, byte for byte: the expectation draws no random number.
+MESSAGE is a fragment of the first message, as llvm/test's CHECK lines declare one. Where LLVM names the mutant's own values (an LLParser
+naming error), the message is whole.
+
+**Who computes it.** Each kind attaches what it changed to the mutant's forms as metadata (the function, block and item, the attribute
+and its site, the bundle set, the field). `arbace.repr.llvm.expect` then derives the expectation from the rule:
+- LLParser's naming is ported as `parse-sim`: `PerFunctionState`'s `getVal`, `setInstName`, `defineBB`, `checkValueID`,
+  `checkValidVariableType` and `finishFunction` over the mutant's text order. So the kinds that move or rename a value know the
+  parser's first error from the mutant's own text, including the renumbering kinds' own slips (an `entrybr` that leaves a stale
+  `%0` gets `'%0' is not a basic block`).
+- The Verifier's checks are taken in its visiting order: `visitFunction` before the blocks, `visitBasicBlock`'s phi checks before the
+  instructions, each instruction's own visit before `visitInstruction`. Also its dominance rules: no dominance in an unreachable block,
+  none of a value wrapped in metadata.
+- For attributes, `verifyParameterAttrs` and `verifyFunctionAttrs` are ported check by check: the exclusive groups, the nine pairs,
+  `typeIncompatible` (Attributes.cpp:2483), nest, returned, sret, the swift attributes and inalloca. So are the function attributes'
+  pairs and values (allocsize, allockind, vscale_range, frame-pointer, the unsigned ones, sign-return-address,
+  branch-target-enforcement), and LLParser's placement and value checks (Attributes.td's `FnAttr`, `ParamAttr` and `RetAttr`). Two
+  more rules come from LLParser: a function's attribute groups replace a written attribute of the same kind, and a call of an old
+  debug intrinsic becomes a debug record.
+
+The module calls none of `arbace.repr.llvm.verify`'s checks, only its structural helpers (an instruction's operands and result type).
+Each message has its source line (`msgs`, P: LLParser.cpp, V: Verifier.cpp of 23.1.5).
+
+**The judge.** `own_verdicts` reads the line. `verify-check` then holds the mutant to it:
+- `valid` is met by Arbace's valid alone. An llvm/test file's `valid` still accepts `debug`.
+- `invalid` and `debug` are met by the same verdict, with MESSAGE found in verify's output.
+
+The negative control `rt-noterm-vs-undef` now crosses two own verdicts: the `:undef` mutant's message, `use of undefined value
+'%nosuch.value'`, is not in the `:noterm` mutant's output. `bin/repr-llvm mutants-oracle LIST WORK` is the oracle tier's check of the
+lines. Against opt's record (`:first`) or live opt's whole stderr (`REPR_LLVM_JUDGE=live`), it compares the verdict and the message per
+mutant and sums the results by kind.
+
+**A verifier bug found.** The first comparison found `arbace.repr.llvm.verify` taking `metadata i32 %nosuch.value` (an `:undef` mutant
+of a `llvm.dbg.value` call) as valid. LLParser resolves a local wrapped in metadata as any operand (parseValueAsMetadata,
+LLParser.cpp:3352, 6750): a forward reference, so the mutant gets `use of undefined value`. `use-value` now resolves locals wrapped in
+metadata, in calls' metadata arguments, debug records and DIArgList. verify-llvmtest (792 of 806), verify-probes (472 of 478),
+roundtrip-llvmtest and text-llvmtest (304 of 304) are as recorded, as is `bin/llvmi check --essential` (10 of 10, 4 controls fail);
+`test/repr/llvm/controls-test.bash` all ok.
+
+**Proved (light; stage 0, `REPR_LLVM_THREADS=2`, the stubs first on PATH, no LLVM tool called).** The day's inputs are 41 modules:
+- 21 of the tx pack's (O0 and O2);
+- the four `hw-*`;
+- 16 llvm/test files with landing pads, funclets or debug info.
+
+An llvm/test file whose own verdict is `debug` was left out: the kinds assume a valid base, as the pack's modules are. The mutants were
+made at the pack's set indices: a (340 from 0) and b (340 from 1000) of the base family, and 600 from 500000 and 600 from 600000 of
+every kind; `bin/repr-llvm mutants LIST OUT N FIRST [base]`. Each set took about 1 min and 0.56 GB.
+
+| check | result |
+|---|---|
+| own verdicts | base family 676 of 680 (99.4%), every kind 1,020 of 1,192 (85.6%) |
+| `verify-check` in own mode (1,872 mutants; 2 min, 1.1 GB) | all 1,696 own verdicts met by Arbace's verifier, 1,567 of 1,567 rejections with the declared message |
+| `REPR_LLVM_JUDGE=live mutants-oracle` (the oracle tier, by hand: opt 23.1.5) | 1,696 of 1,696 own verdicts as opt's, verdict and message (opt's whole stderr); 176 unknown, judged by opt as before (about 6 min, 0.5 GB) |
+| the families unchanged by the verifier's fix | verify-llvmtest 792 of 806, verify-probes 472 of 478, roundtrip-llvmtest and text-llvmtest 304 of 304, 0 failing against the records; `bin/llvmi check --essential` 10 of 10 (4 controls fail); `test/repr/llvm/controls-test.bash` all ok |
+
+Two earlier passes found what the kinds now say. First, the `:undef` metadata case above: Arbace's verifier was wrong. Second, a
+DILocation that only an old `llvm.dbg.declare` call uses. That call is a debug record by the time the Verifier runs, so opt says
+`location requires a valid scope` (V:1076), not V:3335's message. Arbace's verifier had the same slip: its `*inst-locs*` now skips those
+calls and functions without a subprogram (V:3313).
+
+**The 41 kinds.** Each kind's verdict, as written, with its day numbers (1,872 mutants; "as opt" is the oracle run's):
+
+| kind | family | the verdict the kind writes | day's mutants | own | as Arbace's verifier | as opt (live) |
+|---|---|---|---|---|---|---|
+| `type` | base | LLParser's naming over the new type (`'%x' defined with type 'A' but expected 'B'`, a forward reference's type), then the instruction's own: ret's result type (P:7927), select's operands, a cast's opcode (P:8572), a call's signature against an intrinsic's (V:3850); a load, store or binop no use sees: valid | 68 | 68 | 68 | 68 |
+| `hoist` | base | parse-sim (numbering, P:3598); a real operand defined among the items jumped over: `Instruction does not dominate all uses!` (V:5211); only metadata uses, or an unreachable block: valid | 68 | 68 | 68 | 68 |
+| `noterm` | base | `expected instruction opcode` (P:7626) before a label or `}`; an unlabelled next block read as the same block, the text parse-simmed again; a function's only block emptied: `function body requires at least one basic block` (P:7373) | 68 | 67 | 67 | 67 |
+| `phiblock` | base | `use of undefined value '%nosuch.bb'` (P:3969); another block: `PHI node entries do not match predecessors!` (V:3409), `PHI node ` when that block has another entry (V:3402 or V:3409 by the sorted order) | 68 | 68 | 68 | 68 |
+| `phimove` | base | parse-sim; the item now above the phi uses it: dominance, else `PHI nodes not grouped at top of basic block!` (V:3804) | 68 | 68 | 68 | 68 |
+| `align` | base | `alignment is not a power of two` (P:2525) | 69 | 69 | 69 | 69 |
+| `linkage` | base | `invalid linkage for function declaration` (P:7099); a global: `symbol with local linkage must have default visibility` (P:1432), the printer's last :linkage and :visibility the ones read | 70 | 70 | 70 | 70 |
+| `undef` | base | `use of undefined value '%nosuch.value'` (P:3969), also inside metadata | 70 | 70 | 70 | 70 |
+| `dupdef` | base | parse-sim: `multiple definition of local value named 'x'` (P:4113) or the numbering (P:3598) | 70 | 70 | 70 | 70 |
+| `lpad` | base | parse-sim; an invoke of an earlier block unwinding there: `The unwind destination does not have an exception handling instruction!` (V:4253); else dominance or `LandingPadInst not the first non-PHI instruction in the block.` (V:4885) | 70 | 70 | 70 | 70 |
+| `intrinsic` | base | `Intrinsic called with incompatible signature` (V:3850); undeclared or variadic: unknown | 70 | 70 | 70 | 70 |
+| `hoistr` | base | as hoist, renumbered: dominance | 70 | 69 | 69 | 69 |
+| `phimover` | base | as phimove, renumbered | 70 | 70 | 70 | 70 |
+| `lpadr` | base | as lpad, renumbered | 70 | 70 | 70 | 70 |
+| `entrybr` | base | parse-sim (a stale number: `'%0' is not a basic block`, P:1859), else `Entry block to function must not have predecessors!` (V:3222) | 70 | 70 | 70 | 70 |
+| `phicount` | base | `PHINode should have one entry for each predecessor of its parent basic block!` (V:3383) | 70 | 70 | 70 | 70 |
+| `selfref` | base | parse-sim (`instruction forward referenced with type 'T'`, P:4100), else `Only PHI nodes may reference their own value!` (V:5670) in a reachable block; a block with EH pads: unknown | 70 | 68 | 68 | 68 |
+| `attr-type` | attrs | LLParser's placement; then verifyParameterAttrs (V:2064): the groups, the pairs, `' applied to incompatible type!` (typeIncompatible); a metadata argument: `expected metadata operand` (P:6797); an intrinsic's declaration: valid (AutoUpgrade.cpp:2001) | 30 | 30 | 30 | 30 |
+| `attr-pair` | attrs | the pair's check in V:2064 or V:2241 order (`Attributes 'zeroext and signext' are incompatible!`, `Attribute 'optnone' requires 'noinline'!`, ...); P:7193 for sret on a first parameter | 30 | 29 | 29 | 29 |
+| `attr-place` | attrs | `this attribute does not apply to return values|parameters|functions` (P:2116, P:2118, P:1832) | 30 | 30 | 30 | 30 |
+| `attr-dup` | attrs | V:2241's per-parameter order: `More than one parameter has attribute nest!`, returned's compatibility, `Cannot have multiple 'sret'|'swiftself'|'swifterror'|'swiftasync' parameters!`; swifterror's uses: unknown | 30 | 30 | 30 | 30 |
+| `attr-returned` | attrs | `Incompatible argument and return types for 'returned' attribute` (V:2241, also a varargs call's extra arguments V:3985) | 30 | 30 | 30 | 30 |
+| `attr-value` | attrs | LLParser's values (P:2616, P:2659, P:2929, initializes' range list); V:2241's (vscale_range, allocsize, allockind, frame-pointer, the unsigned ones, sign-return-address, branch-target-enforcement); a group's attribute of the same key wins (P:240) | 30 | 28 | 28 | 28 |
+| `attr-immarg` | attrs | `immarg attribute only applies to intrinsics` (V:2241); a call of an intrinsic: `immarg may not apply only to call sites` (V:3929) | 30 | 19 | 19 | 19 |
+| `cc-def` | cc | visitFunction's switch (V:3076-3135): void return, sret, byval, preallocated, inalloca, varargs, x86_intrcc's byval; fastcc without varargs: valid; an old debug intrinsic's declaration: valid | 30 | 30 | 30 | 30 |
+| `cc-call` | cc | `calling convention does not permit calls` (V:3854, CallingConv.h:308) | 30 | 30 | 30 | 30 |
+| `musttail` | musttail | P:3364 in a varargs caller; verifyMustTailCall's order (V:4165-4236); ABI attributes to compare: unknown | 30 | 30 | 30 | 30 |
+| `bundle` | bundles | visitCallBase's bundle loop (V:4030-4103), `Direct call cannot have a ptrauth bundle`, the convergencectrl token; an unknown tag: valid | 30 | 30 | 30 | 30 |
+| `intr-decl` | intrinsics | unknown: AutoUpgrade (upgradeIntrinsicFunction1) may rewrite the declaration | 30 | 0 | 0 | 0 |
+| `intr-arg` | intrinsics | `immarg operand has non-immediate parameter` (V:3936), lifetime's pointer, `expected metadata operand`; an intrinsic visitIntrinsicCall checks: unknown; else valid | 30 | 30 | 30 | 30 |
+| `intr-rename` | intrinsics | unknown, as intr-decl | 30 | 0 | 0 | 0 |
+| `funclet` | funclets | the personality dropped: as personality; the other changes: unknown | 21 | 9 | 9 | 9 |
+| `personality` | funclets | the first EH instruction's `... needs to be in a function with a personality.` (V:4880, 4904, 4922, 4957, 5137) | 28 | 28 | 28 | 28 |
+| `unwind-dest` | funclets | `The unwind destination does not have an exception handling instruction!` (V:4253) | 28 | 28 | 28 | 28 |
+| `md-attach` | metadata | unknown: the attachment rules not ported | 28 | 0 | 0 | 0 |
+| `md-edit` | metadata | `incorrect number of operands in module flag` (V:1915), `... in llvm.ident metadata` (V:1793); other nodes: unknown | 28 | 18 | 18 | 18 |
+| `di-drop` | debug | `missing required field 'F'` (P:5755, the REQUIRED fields); an optional field: unknown | 28 | 11 | 11 | 11 |
+| `di-retarget` | debug | a DILocation's scope: debug `DILocation's scope must be a DILocalScope` (V:3335) for an instruction's, `location requires a valid scope` (V:1076) for a record's; other fields: unknown | 28 | 8 | 8 | 8 |
+| `di-record` | debug | debug `invalid #dbg record variable` (V:7168), `invalid #dbg record expression` (V:7172); `invalid debug location` (P:347) | 28 | 22 | 22 | 22 |
+| `di-attach` | debug | a function's: debug `function !dbg attachment must be a subprogram` (V:3244); an instruction's, a global's: unknown | 28 | 23 | 23 | 23 |
+| `di-version` | debug | debug `ignoring debug info with an invalid version (N)` (AutoUpgrade.cpp:6052, DiagnosticInfo.cpp:121) | 28 | 28 | 28 | 28 |
+| all | | | 1872 | 1696 | 1696 | 1696 |
+
+The unknowns, 176 of 1,872, are the kinds or cases whose rule is not ported:
+- `md-attach` (28): visitInstruction's and visitMDNode's metadata rules;
+- `intr-decl` and `intr-rename` (30 each): AutoUpgrade's `upgradeIntrinsicFunction1` may rewrite a declaration whose signature it does
+  not take, as for `llvm.ctlz.i32` with one argument;
+- `di-drop` and `di-retarget`: an optional field, or a field other than a DILocation's scope;
+- funclet operand changes (12), md-edit of an attachment's node (10), `attr-immarg` on an immediate or an aggregate (11), a few
+  debug record and attachment cases, two self references in EH blocks.
+
+They stay on opt's record (0.5).
+
+**Independence.** The checkout's facts are unchanged: the rt families are not recorded, and `bin/crops-score --crop llvm` before and
+after gives LLVM IR independence 96.9 (judge 0.843). The projection on the night's records (`test/crops/independence.edn`'s comment):
+
+| | judge | independence |
+|---|---|---|
+| without LLS33 | (2582 + 0.5 x 3092) / 5674 = 0.728 | 94.6 |
+| with it | (4288 + 0.5 x 1386) / 5674 = 0.878 | 97.6 |
+
+The night's counts replace both.
+
+### The night's commands (LLS33 (b), lane LA after LLS31 (a)'s)
+
+LLS31 (a)'s commands are unchanged, but `ir-make rt` must run on a tree with this branch (next after its merge): its mutator writes the
+verdict lines into the pack. If LLS31 (a)'s night runs first, `bin/llvmi ir-make rt --mutants` makes the mutants again without a
+compiler (light, about 10 min), and `record-opt` then records them afresh (the lines change their digests). After the records:
+
+    bin/repr-llvm rt-lists .tmp/llvm/rt-lists
+    REPR_LLVM_JUDGE=record bin/repr-llvm mutants-oracle .tmp/llvm/rt-lists/verify-rt.list .tmp/llvm/mo-rt                  # the oracle tier: each own verdict against opt's :first
+    REPR_LLVM_JUDGE=record bin/repr-llvm mutants-oracle .tmp/llvm/rt-lists/verify-rt-heldout.list .tmp/llvm/mo-rt-heldout
+    REPR_LLVM_JUDGE=live bin/repr-llvm mutants-oracle .tmp/llvm/rt-lists/verify-rt-heldout.list .tmp/llvm/mo-live        # opt's whole stderr (light, ~3 min)
+
+A difference in `mutants-oracle` is a rule to fix in `arbace.repr.llvm.expect` (by day), not a record to take. The two `check verify-rt*
+--record` runs then hold each mutant to its own verdict. A row that fails there is Arbace's verifier disagreeing with the rule: a
+verifier bug to fix, or a class. Then by day: the judge recount for `test/crops/independence.edn`: the mutants whose line is not
+`unknown` (`grep -L 'unknown:'` over the pack's `mut/`) count 1, the rest 0.5.
+
+### Proposed (llvm-lls33)
+
+- **LLS35 `mutants-oracle` in the oracle tier.**
+  - (a) A part of `llvm-records-verify` (`test/gate/crops/llvm-oracle.edn`) over the pack's two mutant lists against the record, once
+    the pack is recorded. Cost: a fragment edit, seconds a run.
+  - (b) By hand at tags.
+  - *Recommended: (a).*
+- **LLS36 The unknown kinds.**
+  - (a) Port what they need:
+    - for `intr-decl` and `intr-rename`, `upgradeIntrinsicFunction1`'s name rules and `isSignatureValid`'s messages (`intr.ae` has
+      the matcher);
+    - for `md-attach`, visitInstruction's attachment checks (!range, !prof, !nonnull, !align, !dereferenceable, !noundef,
+      !invariant.load, !fpmath, !tbaa);
+    - for `di-drop` and `di-retarget`, the visitDI* field rules.
+
+    Cost: about a day. It would take the held-out sets from 85.6% to about 97%, and the judge to about 0.90.
+  - (b) Leave them on opt's record (0.5).
+  - *Recommended: (a)*, `md-attach` and `intr-*` first (88 of the 176).
+- **LLS37 A mutant of an invalid base.**
+  - (a) At check time, a mutant whose base module does not pass its own row is judged by opt's record, its verdict line ignored.
+    Cost: an awk join in `verify-check`.
+  - (b) Nothing: the pack's bases are clang's output, and verify-rt's module rows show them valid.
+  - *Recommended: (b)* while only the pack is mutated; (a) if another corpus is.
+
 ## As built: LLS21 (a), ci's gaps (2026-11-05, branch `ci-lls21`)
 
 What the user decided (LLS21 (a)) is in ci, C's crop (`arbace/c/build.ae`, `arbace/c/check.ae`), no new native and no Go

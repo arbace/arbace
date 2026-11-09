@@ -272,6 +272,8 @@
 
 (def ^:private value-traits
   {"__is_same" (fn [_ [a b]] (= a b))
+   ;; (clang's alias of __is_same, TokenKinds.def's ALIAS("__is_same_as", __is_same, KEYCXX))
+   "__is_same_as" (fn [_ [a b]] (= a b))
    "__is_void" (fn [_ [a]] (abi/void? (abi/unq a)))
    "__is_integral" (fn [_ [a]] (contains? abi/int-ranks (abi/bn (abi/unq a))))
    "__is_floating_point" (fn [_ [a]] (boolean (abi/floating? (abi/unq a))))
@@ -406,6 +408,8 @@
   (let [es (sema/lookup scope nm)]
     (some #(or (= :tmpl (:e %)) (and (= :type (:e %)) (abi/class? (:ty %)) (:tmpl (abi/cls (:id (:ty %)))))) es)))
 
+(declare static-call-value)
+
 (defn eval-text
   "The value of a constant expression's text in `scope` (integers, the operators, parentheses, the conditional
   operator, names of constants and of non-type parameters, members of classes (X<T>::value), sizeof(type), true and
@@ -472,18 +476,26 @@
                     (sema/ce-call-fn (:id (first cands)) args))
                   (= k :id)
                   ;; a name, qualified, its parts maybe template-ids: Name<...>::member
-                  (let [parts (loop [ps [t]]
+                  (let [tkw (atom false)
+                        parts (loop [ps [t]]
                                 (cond
-                                  (and (= "<" (peek)) (template-name? scope (last ps)))
+                                  (and (= "<" (peek)) (or (template-name? scope (last ps)) (and @tkw (> (count ps) 1))))
                                   (do (next!) (recur (conj (pop ps) (str (last ps) "<" (run "<" ">") ">"))))
-                                  (= "::" (peek)) (do (next!) (recur (conj ps (second (next!)))))
+                                  ;; (`X::template f<...>`: a member template named after a dependent qualifier)
+                                  (= "::" (peek)) (do (next!) (when (= "template" (peek)) (next!) (reset! tkw true)) (recur (conj ps (second (next!)))))
                                   :else ps))]
-                    (if (some #(str/includes? % "<") parts)
+                    (cond
+                      ;; a call without arguments of a static member (function template's specialization), G5c:
+                      ;; `_PCCP::template _ConstructiblePair<_U1, _U2>() && ...` (libstdc++'s C++17 std::pair)
+                      (and (> (count parts) 1) (= "(" (peek)) (= ")" (nth (get ts (inc @pos)) 1 nil)))
+                      (do (next!) (next!) (static-call-value scope (ct/parse-name (str/join "::" parts))))
+                      (some #(str/includes? % "<") parts)
                       (let [r (member-constant (sema/resolve-type scope (str/join "::" (butlast parts))) (last parts))
                             tp (last (butlast parts))
                             i (str/index-of tp "<")]
                         ;; (an unresolved name's spelling for its mangling: its arguments as written, its namespaces)
                         r)
+                      :else
                       (let [es (when (> (count parts) 1) (sema/lookup scope (first parts)))
                             e (first (filter #(= :type (:e %)) es))]
                         (if (and e (dependent? (:ty e)))
@@ -501,6 +513,37 @@
         (when (< (long @pos) (count ts)) (fail :template "constant expression " s))
         v))))
 
+(declare resolve-args complete-args instantiate-fn)
+
+(defn- static-call-value
+  "The value of a call without arguments of a constexpr static member function, or of a specialization of a static
+  member function template given its template arguments (`_PCCP::template _ConstructiblePair<_U1, _U2>()`, libstdc++'s
+  C++17 std::pair constructors' enable_if conditions; G5c: libsupc++'s eh_alloc.cc); dependent in a pattern's signature
+  ({:k :texpr :o :mcall})."
+  [scope callee]
+  (let [[cls tf] (if (and (seq? callee) (= 'cpp/scope (first callee))) [(second callee) (last callee)] [nil callee])
+        tf (if (and (seq? tf) (= 'template (first tf))) (second tf) tf)
+        [nsym targs] (if (and (seq? tf) (= '<> (first tf))) [(second tf) (vec (nnext tf))] [tf nil])
+        ;; (a qualified name read as one symbol, P/f: its qualifier the class)
+        [cls nm] (if (and (nil? cls) (symbol? nsym) (namespace nsym)) [(symbol (namespace nsym)) (name nsym)] [cls (str nsym)])
+        ct (when cls (sema/resolve-type-form scope cls))]
+    (if (and ct (dependent? ct))
+      {:k :texpr :o :mcall :base ct :name nm}
+      (try
+      (let [_ (when (and ct (not (abi/class? (abi/unq ct)))) (fail :template "a member call of a non-class: " nm))
+            es (if ct (map second (sema/class-lookup (:id (abi/unq ct)) nm false)) (sema/lookup scope nm))
+            fid (if targs
+                  (let [e (or (first (filter #(and (= :tmpl (:e %)) (= :fn (:tk %))) es)) (fail :template "no member function template " nm))
+                        t (tmpl (:id e))
+                        args (or (complete-args t (resolve-args scope t targs false)) (fail :template "the template arguments of " nm))
+                        ;; (the template's own parameters in a pattern's signature: dependent, evaluated once substituted)
+                        _ (when (some dependent? args) (throw (ex-info "dependent" {::dependent true ::targs args})))]
+                    (instantiate-fn (:id e) args))
+                  (:id (or (first (filter #(and (= :fn (:e %)) (empty? (:ps (:ty (sema/fnd (:id %)))))) es)) (fail :template "no function " nm))))]
+        (sema/ce-call-fn fid []))
+      (catch arbace.lang.ExceptionInfo x
+        (if (::dependent (ex-data x)) {:k :texpr :o :mcall :base ct :name nm :targs (::targs (ex-data x))} (throw x)))))))
+
 (defn- const-form
   "A constant of a template argument's or array bound's form: a number, a name, X<T>::member, (cpp/text s)."
   [scope f]
@@ -517,6 +560,9 @@
     ;; a type trait's value (G4: __is_same(T, U))
     (and (seq? f) (= 'fn (first f)) (vector? (second f)) (symbol? (nth f 2 nil)) (contains? value-traits (str (nth f 2))))
     (trait-value scope (str (nth f 2)) (second f))
+    ;; a call without arguments of a static member (function template's specialization), G5c
+    (and (seq? f) (= 'fn (first f)) (= [] (second f)) (let [c (nth f 2 nil)] (and (seq? c) (#{'cpp/scope '<>} (first c)))))
+    (static-call-value scope (nth f 2))
     ;; a functional cast T(e) of a constant (G4: the headers' bool(_Bn::value))
     (and (seq? f) (= 'fn (first f)) (vector? (second f)) (= 1 (count (second f))))
     (let [v (const-form scope (first (second f)))
@@ -579,7 +625,19 @@
                      m (abi/mangle-var v)]
                  {:decl [:var (:id e)] :ty pt :ref (boolean (abi/ref? pt))
                   :mangled (if (str/starts-with? m "_Z") m (str "_Z" (abi/source-name m)))})
-          (fail :template "a pointer argument " text))))))
+          (do
+            ;; (CX12, the checker: `(T)f`, a function cast to a pointer to function of another type, is a reinterpret_cast
+            ;; ([expr.cast]/4), never a converted constant expression ([temp.arg.nontype]/2, [expr.const]/5.15): the
+            ;; explicit argument is invalid, the template surely no candidate)
+            (when (sema/checking?)
+              (when-let [[_ ty fname] (re-matches #"\(\s*([^()]+?)\s*\)\s*&?\s*([A-Za-z_]\w*)" text)]
+                (let [ct (try (abi/unq (sema/resolve-type scope ty)) (catch arbace.lang.ExceptionInfo _ nil))
+                      fs (sema/lookup scope fname)]
+                  (when (and ct (abi/ptr? ct) (abi/fn? (:to ct)) (seq fs) (every? #(= :fn (:e %)) fs)
+                             (not-any? #(= (abi/unq (:ty (sema/fnd (:id %)))) (abi/unq (:to ct))) fs))
+                    (throw (ex-info (str "codegen: a reinterpret_cast as a template argument: " text)
+                                    {:codegen/refused :template :cx/sure-drop true}))))))
+            (fail :template "a pointer argument " text)))))))
 
 (defn resolve-arg
   "A template argument's form for the parameter `p` in `scope`."
@@ -724,6 +782,17 @@
 (declare deduce-by-type-match)
 (def ^:dynamic *satisfaction* nil)
 
+;; CX12 (second slice, the checker: sema/checking?): a template's deduction that gives no candidate is the program's
+;; error only for the reasons below, each sure ([temp.deduct.type]'s mismatches of a member function's qualifiers or a
+;; member pointer's class, a call with fewer arguments than the parameters without defaults); `*unsure*` is set where the
+;; slice, not the program, may be the cause (a type the port does not match, an argument it does not adjust), `*sure*`
+;; where one of those reasons decided; a call no template gave a candidate for is diagnosed only when every template
+;; failed surely
+(def ^:dynamic *unsure* nil)
+(def ^:dynamic *sure* nil)
+(defn- unsure! [] (when-let [u *unsure*] (reset! u true)) false)
+(defn- sure! [] (when-let [u *sure*] (reset! u true)) false)
+
 (defn- bind-arg!
   "checkDeducedTemplateArguments: the parameter i deduced as `a`, consistent with an earlier deduction."
   [b i a]
@@ -850,7 +919,11 @@
         (cond
           (not qual-ok) false
           (not (dependent? P)) (or (boolean (tdf :skip-non-dependent))
-                                   (if (tdf :ignore-qualifiers) (= (unq-array P) (unq-array A)) (= P A)))
+                                   (if (tdf :ignore-qualifiers) (= (unq-array P) (unq-array A)) (= P A))
+                                   ;; (CX12, the checker: two function types that differ in a member function's qualifiers
+                                   ;; alone, a sure mismatch)
+                                   (and (sema/checking?) (abi/fn? P) (abi/fn? A)
+                                        (= (dissoc P :cq :vq :refq) (dissoc A :cq :vq :refq)) (sure!)))
           :else
           (let [down (if (= pok :call) :none pok)]
             (case (:k P)
@@ -864,7 +937,19 @@
                           (if (and (map? n) (= :tparam-v (:k n)) (= tid (:tid n)))
                             (bind-arg! b (:i n) {:val (:n A) :bound true})
                             (= n (:n A)))))
+              ;; (CX12, the checker) MemberPointer: the pointee, then the class ([temp.deduct.type]/8, T::*)
+              :mptr (if (sema/checking?)
+                      (and (abi/mptr? A)
+                           (deduce-by-type-match b tid (:to P) (:to A) (set (filter #{:ignore-qualifiers} tdf)) down)
+                           (let [c (:cls P)]
+                             (cond (and (map? c) (= :tparam (:k c)) (= tid (:tid c))) (bind-arg! b (:i c) {:k :class :id (:cls A)})
+                                   (map? c) (unsure!)
+                                   (= c (:cls A)) true
+                                   :else (sure!))))
+                      false)
               :fn (and (abi/fn? A) (= (boolean (:va P)) (boolean (:va A)))
+                       ;; (CX12, the checker: a member function's qualifiers match exactly, FunctionProto's getMethodQuals)
+                       (or (not (sema/checking?)) (and (= (boolean (:cq P)) (boolean (:cq A))) (= (boolean (:vq P)) (boolean (:vq A)))) (sure!))
                        (deduce-by-type-match b tid (:ret P) (:ret A) #{} down)
                        (if (= :pack-exp (:k (peek (vec (:ps P)))))
                          (match-args b tid (:ps P) (:ps A)) ; R(Args...): the trailing pack takes the rest
@@ -877,7 +962,7 @@
               ;; a pack expansion's pattern against the type (partial ordering, [temp.deduct.partial]/8)
               :pack-exp (deduce-by-type-match b tid (:of P) (if (= :pack-exp (:k A)) (:of A) A) tdf down)
               :tparam true ; another template's parameter at another depth: skipped
-              false)))))))
+              (unsure!))))))))
 
 (defn- deduce-type "TDF_None outside partial ordering." [b tid P A] (deduce-by-type-match b tid P A #{} :none))
 
@@ -964,7 +1049,14 @@
         ps (if pk (vec (butlast all)) all)
         tid (:id t)
         explicit-b (into {} (map-indexed vector explicit))
-        b (atom explicit-b)]
+        b (atom explicit-b)
+        ;; (CX12, the checker) the template parameters of parameters that are non-deduced contexts by the program's own
+        ;; argument ([temp.deduct.call]/1: a braced list for a P that is no initializer_list nor array; /6: an overload
+        ;; set of two or more functions for a P that any of them would deduce): left undeduced, a sure failure
+        ;; when no other parameter names them (bare-tparam: P a template parameter of tid alone, cv and references
+        ;; removed)
+        nondeduced (atom #{})
+        bare-tparam (fn [P] (let [q (abi/unq (abi/non-ref (abi/unq P)))] (when (and (= :tparam (:k q)) (= tid (:tid q)) (not (:pack q))) (:i q))))]
     (when (or (<= (count args) (count ps)) (:va sig) pk)
       (when (every? true?
                     (for [[P e] (map vector ps args)
@@ -974,9 +1066,25 @@
                           ;; an overload set holding a function template: a non-deduced context ([temp.deduct.call]/6;
                           ;; G5: std::endl given to a stream's operator<< templates)
                           :when (not (and (= :fnset (:op e)) (seq (:tmpls e))))]
-                      (if-let [[P A tdf] (adjust-for-deduction P e tid)]
+                      (if-let [[P A tdf] (when-not (and (sema/checking?) (= :mptr-fnset (:op e))) (adjust-for-deduction P e tid))]
                         (deduce-by-type-match b tid P A tdf :none)
-                        false)))
+                        (cond
+                          ;; (CX12, the checker) [temp.deduct.call]/6.2: an overload set of member functions tried
+                          ;; member by member, the one that deduces used, none or several a non-deduced context
+                          (and (sema/checking?) (= :mptr-fnset (:op e)))
+                          (let [snap @b
+                                oks (keep (fn [fid] (reset! b snap)
+                                            (when-let [[P A tdf] (adjust-for-deduction P (sema/mptr-fn-node fid) tid)]
+                                              (when (deduce-by-type-match b tid P A tdf :none) @b)))
+                                          (:fns e))]
+                            (reset! b (if (= 1 (count oks)) (first oks) snap))
+                            true)
+                          ;; (CX12, the checker: the non-deduced contexts above)
+                          (and (sema/checking?) (bare-tparam P)
+                               (or (= :init-list (:op e))
+                                   (and (= :fnset (:op e)) (empty? (:tmpls e)) (not (:obj e)) (>= (count (distinct (map #(:ty (sema/fnd %)) (:fns e)))) 2))))
+                          (do (swap! nondeduced conj (bare-tparam P)) true)
+                          :else (unsure!)))))
         ;; a trailing function parameter pack: its pattern deduced from each remaining argument, each pack the
         ;; elements so deduced ([temp.deduct.call]/1)
         (when (or (nil? pk)
@@ -989,7 +1097,17 @@
                     (when (every? some? elems)
                       (doseq [i packs :when (not (contains? @b i))] (swap! b assoc i {:pack (mapv #(get % i) elems)}))
                       true)))
-          (finish-deduction t @b))))))
+          (let [r (finish-deduction t @b)]
+            (when (and (nil? r) (seq @nondeduced))
+              (let [named-elsewhere (fn [i] (some (fn [P] (and (not= i (bare-tparam P)) (some #{i} (tparams-in P tid)))) all))
+                    ps-t (:params t)]
+                (when (some (fn [i] (and (not (contains? @b i)) (< (long i) (count ps-t))
+                                         (not (:default (nth ps-t i))) (not (:pack (nth ps-t i)))
+                                         (not (named-elsewhere i))
+                                         (= 1 (count (filter #(= i (bare-tparam %)) all)))))
+                            @nondeduced)
+                  (sure!))))
+            r))))))
 
 (declare instantiate-fn)
 
@@ -1306,15 +1424,20 @@
 
 
 (defn- concept-satisfied?
-  "The satisfaction of the concept `c` (its template entry) for the arguments `args`, memoized."
+  "The satisfaction of the concept `c` (its template entry) for the arguments `args`, memoized (with whether it was
+  doubtful, CP281 (a): sema/*constraint-doubt*)."
   [c args]
-  (let [k [(:id c) (canonical args)]]
-    (if-let [m *satisfaction*]
-      (let [v (get @m k ::none)]
-        (if (= ::none v)
-          (let [r (sema/constraint-satisfied? (bind-scope (:scope c) (:params c) args nil) (:expr c))] (swap! m assoc k r) r)
-          v))
-      (sema/constraint-satisfied? (bind-scope (:scope c) (:params c) args nil) (:expr c)))))
+  (let [k [(:id c) (canonical args)]
+        eval1 (fn [] (let [d (atom false)
+                           r (binding [sema/*constraint-doubt* d]
+                               (sema/constraint-satisfied? (bind-scope (:scope c) (:params c) args nil) (:expr c)))]
+                       [r @d]))
+        [r d] (if-let [m *satisfaction*]
+                (let [v (get @m k ::none)]
+                  (if (= ::none v) (let [x (eval1)] (swap! m assoc k x) x) v))
+                (eval1))]
+    (when d (sema/doubt!))
+    r))
 
 (defn- type-constraints-satisfied?
   "Each constrained type parameter's concept satisfied by its argument ([temp.param]/4: the immediately-declared
@@ -1360,11 +1483,16 @@
             ps (bind-scope (:scope t) (:params t) args nil)
             ;; the template's associated constraints ([temp.constr.decl]/3: its requires-clause, then the trailing one;
             ;; P14 (b)): not satisfied, no specialization ([temp.deduct]/5, [over.match.viable]/3)
+            ;; (CX12, CP281 (a), the checker: a constraint that evaluated to false with no doubt is a sure failure)
+            d (atom false)
+            unsat (fn [what]
+                    (throw (ex-info (str "codegen: " what " not satisfied for " (:name t))
+                                    {:codegen/refused :template :cx/constraint-false (and (sema/checking?) (not @d))})))
             _ (when-let [rc (:constraint t)]
-                (when-not (sema/constraint-satisfied? ps rc) (fail :template "constraints not satisfied for " (:name t))))
-            _ (when-not (type-constraints-satisfied? t args) (fail :template "type-constraints not satisfied for " (:name t)))
-            fid (binding [sema/*cutoff* Long/MAX_VALUE] (#'sema/declare-fn! ps (:pattern t)))
-            _ (when-not fid (fail :template "constraints not satisfied for " (:name t)))
+                (when-not (binding [sema/*constraint-doubt* d] (sema/constraint-satisfied? ps rc)) (unsat "constraints")))
+            _ (when-not (binding [sema/*constraint-doubt* d] (type-constraints-satisfied? t args)) (unsat "type-constraints"))
+            fid (binding [sema/*cutoff* Long/MAX_VALUE sema/*constraint-doubt* d] (#'sema/declare-fn! ps (:pattern t)))
+            _ (when-not fid (unsat "constraints"))
             ;; the specialization is found through its template, not by its name in the parameters' scope
             _ (.remove ^java.util.HashMap (:names ps) (:name (:pattern t)))]
         (upd-fn! fid assoc :lazy true :inline true :keep-def-scope true
@@ -1393,20 +1521,44 @@
          e (binding [sema/*cutoff* Long/MAX_VALUE] (#'sema/own-names outer nm)) :when (and (= :tmpl (:e e)) (= :fn (:tk e)))]
      (:id e))))
 
+(defn- too-few-args?
+  "CX12 (the checker): the call's arguments fewer than the function template's parameters that are no pack and have no
+  default argument ([over.match.viable]/2, the deduction's TooFewArguments)."
+  [t args]
+  (let [pn (filter #(= "ParmVarDecl" (:kind %)) (:inner (:pattern t)))
+        req (count (take-while (fn [p] (and (not (re-find #"\.\.\." (str (get-in p [:type :qualType]))))
+                                            (not-any? #(re-find #"Expr$|Literal$" (str (:kind %))) (:inner p))))
+                               pn))]
+    (< (count args) req)))
+
 (defn call-candidates
   "The specializations the function templates of a call's overload set deduce from its arguments (a template whose
   deduction or substitution fails is not a candidate: [temp.deduct]/8, SFINAE)."
   [ctx callee args]
   (let [tids (distinct (concat (:tmpls callee) (when (and (not (:obj callee)) (not (:qualified callee)) (:name callee)) (adl-templates args (:name callee)))))]
-    (vec (for [tid tids
-               :let [t (tmpl tid)
-                     fid (try (let [ex (explicit-args t (:targs-text callee) (or (:targs-scope callee) (:scope ctx)))]
-                                (when-let [a (deduce-call t ex args)] (instantiate-fn tid a)))
-                              (catch arbace.lang.ExceptionInfo e
-                                (when (System/getenv "CPP_TMPL_TRACE") (binding [*out* *err*] (println "template" (:name t) "drops out:" (.getMessage e))))
-                                (if (#{:template-pack :template-template} (:codegen/refused (ex-data e))) (throw e) nil)))]
-               :when fid]
-           fid))))
+    (let [sure (atom 0) doubt (atom 0)
+          fids (vec (for [tid tids
+                          :let [t (tmpl tid)
+                                u (atom false)
+                                sr (atom false)
+                                ;; (the checker's position stays the call's: the template's signature and pattern are
+                                ;; analyzed while deducing, CX12)
+                                at sema/*at* at-saved (some-> at deref)
+                                fid (binding [*unsure* u *sure* sr]
+                                      (try (let [ex (explicit-args t (:targs-text callee) (or (:targs-scope callee) (:scope ctx)))]
+                                             (when-let [a (deduce-call t ex args)] (instantiate-fn tid a)))
+                                           (catch arbace.lang.ExceptionInfo e
+                                             (when (System/getenv "CPP_TMPL_TRACE") (binding [*out* *err*] (println "template" (:name t) "drops out:" (.getMessage e))))
+                                             ;; (CP281 (a): a constraint surely false is the program's, a sure drop)
+                                             (if (or (:cx/constraint-false (ex-data e)) (:cx/sure-drop (ex-data e))) (reset! sr true) (reset! u true))
+                                             (if (#{:template-pack :template-template} (:codegen/refused (ex-data e))) (throw e) nil))
+                                           (finally (when at (reset! at at-saved)))))
+                                ;; (CX12, the checker: a template whose deduction failed by the algorithm alone)
+                                _ (when-not fid (swap! (if (and (not @u) (or @sr (too-few-args? t args))) sure doubt) inc))]
+                          :when fid]
+                      fid))]
+      ;; the drops' counts for the checker's diagnostic (sema's resolve-overload*)
+      (with-meta fids {:sure-drops @sure :unsure-drops @doubt}))))
 
 (defn- explicit-fn-spec!
   "An explicit specialization of a function template (template <> R f<args>(...) {...}): its template found by name
@@ -1830,6 +1982,9 @@
       (swap! *scanned* conj [:fn id])
       (walk-refs acc [(:tbody f) (:tinits f) (:tassign f)])
       (doseq [v (:statics f)] (walk-refs acc (:sinit (sema/var* v)))))
+    ;; (a destructor or constructor defaulted out of line, G5c's nested_exception::~nested_exception() = default: its class's
+    ;; members' and bases' destructors used, as its definition destroys them)
+    (doseq [[_ f] @sema/*fns* :when (and (:out-of-line-default f) (:cls f))] (swap! acc update :classes conj (:cls f)))
     (doseq [[id v] @sema/*vars*]
       (when (and (:ginit v) (not (contains? @*scanned* [:var id]))) (swap! *scanned* conj [:var id]) (walk-refs acc (:ginit v)))
       ;; (a variable not defined, a header's not used among them, uses no class's members: G4)
@@ -1898,6 +2053,22 @@
                                [{:e :type :ty {:k :tdep :base (:ty e) :names (vec (rest parts))} :pos -1}])))
          :trait-type (fn [scope nm forms] (if (contains? type-traits nm) (trait-type scope nm forms) (fail :type "unknown type " nm)))
          :trait-text (fn [scope t] (binding [sema/*cutoff* Long/MAX_VALUE] (eval-text scope t)))
+         ;; (CX12, CP281 (a): a type-constraint `C<A...>` (or `C`) applied to the type `T`, C<T, A...>: true, false, or
+         ;; nil when the slice cannot tell)
+         :type-constraint (fn [scope ^String text T]
+                            (try
+                              (let [[_ nm rest] (re-matches #"(?s)\s*((?:[A-Za-z_][A-Za-z_0-9]*::)*[A-Za-z_][A-Za-z_0-9]*)\s*(?:<(.*)>)?\s*" text)
+                                    parts (when nm (str/split nm #"::"))
+                                    e (when parts (first (filter #(and (= :tmpl (:e %)) (= :concept (:tk %)))
+                                                                 (if (next parts) (sema/lookup-qualified scope parts) (sema/lookup scope nm)))))]
+                                (when e
+                                  (let [t (tmpl (:id e))
+                                        bs (new-scope :block scope)
+                                        _ (enter! bs "__cx_ret_t" {:e :type :ty T :pos -1})
+                                        args (complete-args t (explicit-args t (str (last parts) "<__cx_ret_t" (when (and rest (not (str/blank? rest))) (str ", " rest)) ">") bs))]
+                                    (when (and args (not (dependent? args)))
+                                      (concept-satisfied? t args)))))
+                              (catch arbace.lang.ExceptionInfo x (when (System/getenv "CPP_TMPL_TRACE") (binding [*out* *err*] (println "type-constraint" text (.getMessage x)))) nil)))
          :concept-id (fn [ctx e n]
                        (let [t (tmpl (:id e))
                              args (or (complete-args t (or (explicit-args t (sema/written-targs n (:name t)) (:scope ctx)) []))

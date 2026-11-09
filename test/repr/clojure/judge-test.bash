@@ -1,6 +1,6 @@
 #!/bin/bash
 # Tests of repr/clojure's judge (bin/repr-clojure check, GTS160, audit 076), over fabricated trees
-# and stubbed tools; run: test/repr/clojure/judge-test.bash [frozen|counts|notread|x509|libs|known|only]...
+# and stubbed tools; run: test/repr/clojure/judge-test.bash [frozen|counts|notread|x509|libs|known|only|controls]...
 # (default: all). Exit status 0 when every case holds. TOOLS_BASH names another bin/lib/tools.bash
 # (the tests of a fix are run with the file from before it to show they fail). The checks that
 # need Arbace run on stage 0 (ARBACE_HOST_EXE) with arbace/repr/clojure.ae from the checkout.
@@ -181,7 +181,31 @@ t_only() {
   "$here/bin/repr-clojure" check --suite --only "$l" > "$scratch/o.out" 2>&1; expect "only: check --suite refuses --only" 2 $?
 }
 
-tests=("$@"); [ ${#tests[@]} = 0 ] && tests=(frozen counts notread x509 libs known only)
+# GTS81 (a): the round trip's negative controls (--controls FILE): a crossed pair holds (the subject's text is not the
+# reference's original); a control that passes (a file against itself) fails the run; a known entry of the reference
+# that excuses the crossed difference fails it too; a control of another corpus, or whose subject is missing, is left
+t_controls() {
+  local d=$scratch/ctl/tree k=$scratch/ctl/known.edn c=$scratch/ctl/controls.edn out
+  mkdir -p "$d"
+  printf '(ns a.one)\n(def x 1)\n' > "$d/one.clj"; printf '(ns a.two)\n(def y 2)\n' > "$d/two.clj"
+  echo '{:c {} :counts {:c {:files 2 :one-way 0 :outside 0}}}' > "$k"
+  echo '[{:id "c/one-vs-two" :corpus :c :subject "one.clj" :reference "two.clj"}]' > "$c"
+  out=$(rt --known "$k" --controls "$c" --corpus c "$d"); expect "controls: a crossed pair holds" 0 $?
+  echo "$out" | grep -q '^  CONTROL ok c/one-vs-two - line 1: ' && ok "controls: the ok line" || bad "controls: ok line: $out"
+  echo '[{:id "c/one-vs-one" :corpus :c :subject "one.clj" :reference "one.clj"}]' > "$c"
+  out=$(rt --known "$k" --controls "$c" --corpus c "$d"); expect "controls: a control that passes fails the run" 1 $?
+  echo "$out" | grep -q '^  CONTROL FAILED c/one-vs-one - the comparison passes what differs' && ok "controls: the FAILED line" || bad "controls: FAILED line: $out"
+  echo '[{:id "c/one-vs-two" :corpus :c :subject "one.clj" :reference "two.clj"}]' > "$c"
+  echo '{:c {"two.clj" {:why :text :at "line 1: \"(ns a.two)\" / \"(ns a.one)\""}} :counts {:c {:files 2 :one-way 0 :outside 0}}}' > "$scratch/ctl/known2.edn"
+  out=$(rt --known "$scratch/ctl/known2.edn" --controls "$c" --corpus c "$d"); expect "controls: an excused crossed difference fails the run" 1 $?
+  echo "$out" | grep -q '^  CONTROL FAILED c/one-vs-two - the known entry of two.clj excuses it' && ok "controls: the excused line" || bad "controls: excused line: $out"
+  echo '[{:id "c/x" :corpus :c :subject "no.clj" :reference "two.clj"} {:id "o/y" :corpus :other :subject "one.clj" :reference "one.clj"}]' > "$c"
+  out=$(rt --known "$k" --controls "$c" --corpus c "$d"); expect "controls: a missing subject is left, another corpus's not judged" 0 $?
+  echo "$out" | grep -q '^  CONTROL left c/x' && ok "controls: the left line" || bad "controls: left line: $out"
+  echo "$out" | grep -q 'o/y' && bad "controls: another corpus's control judged: $out" || ok "controls: another corpus's control not judged"
+}
+
+tests=("$@"); [ ${#tests[@]} = 0 ] && tests=(frozen counts notread x509 libs known only controls)
 for t in "${tests[@]}"; do "t_$t"; done
 [ $fails = 0 ] && echo "judge-test: all hold" || echo "judge-test: $fails FAILED"
 [ $fails = 0 ]

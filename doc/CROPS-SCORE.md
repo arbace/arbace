@@ -137,9 +137,9 @@ The cells' sources are each tree's `test/reap/cells.edn`. The baseline's refs:
 
 | crop | REAP row at | cells' checks (sources) | controls (`crops.edn` rules) | gate steps |
 |---|---|---|---|---|
-| Clojure | main | the suite (`test/arbace-go-results.edn`, `-aot-`), the oracle, repr/clojure's rules and round trip | `test/clojure/controls.edn`, `test/oracle/controls.edn` | main's `:clojure` |
+| Clojure | main | the suite (`test/arbace-go-results.edn`, `-aot-`), the oracle, repr/clojure's rules and round trip | `test/clojure/controls.edn`, `test/oracle/controls.edn`; since `controls-cg` (2026-11-08) `test/repr/clojure/rules-controls.edn`, `roundtrip-controls.edn` | main's `:clojure` |
 | Java | main | `bin/java-check` read, classes, diagnostics, interp, compiled, print (`test/java/check-*.edn`) | `test/java/controls.edn` (c00001, control-diag, control-print) | main's `:java` |
-| Go | main | `bin/repr-go native-check`, `bin/goi check`, `--aot`, `bin/repr-go roundtrip` (4) | `test/goi/controls.txt` (interp, aot) | main's `:go` |
+| Go | main | `bin/repr-go native-check`, `bin/goi check`, `--aot`, `bin/repr-go roundtrip` (4) | `test/goi/controls.txt` (interp, aot); since GTS88 (b) `test/repr/go/native-controls.edn`, `roundtrip-controls.txt`, since `controls-cg` (2026-11-08) with the level `:known` and the kind `dirtest` | main's `:go` |
 | C | main | `bin/ci dg`, `bin/repr-c check --tokens`, `parse-check`, `bin/ci check`, `--aot`, `bin/repr-c roundtrip` | `test/c/controls.edn` (:dg :pp :tree :run :roundtrip) | main's `:c` |
 | C++ | `mac/cppi-deferred` | `bin/repr-cpp pp-check`, `dg`, `bin/cppi check`, `--sample 25`, `--aot`, `bin/repr-cpp roundtrip` | `test/cpp/controls.edn` | steps.edn's `cpp-*` |
 | OCaml | `mac/ocaml-libs4` | `bin/repr-ocaml roundtrip` read and print, `bin/oi check`, `suite check`, both `--aot` | `test/ocaml/controls.txt` (judge lines) | steps.edn's `oi-*`, `ocaml-*` |

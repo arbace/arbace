@@ -34,8 +34,12 @@ hsi_ae() { ARBACE_PATH=$root "$("$root/bin/hsi" exe)" "$@"; }
 hsi_lib_keys() {
   local tb dt plan bn=${HSI_BIGNUM:-native} line name
   tb=$(hsi_ae -e "(println (:sha256 (:tarball (read-string (slurp \"$hsi_corpora_edn\")))))")
-  # what the dumps' flags depend on besides the plan: bin/hsi's functions that build them, the generated files the plan copies
-  dt=$(sed -n '/^unit_of() {/,/^}/p;/^prefix_rel() {/,/^}/p;/^strip_srcdir() {/,/^}/p;/^dump_package() {/,/^}/p' "$root/bin/hsi" | sha256sum | cut -c1-64)
+  # what the dumps' flags depend on besides the plan: bin/hsi's functions that build them, the generated files the plan copies.
+  # HF10's HSI_DUMP_OPT (dump_package's "${HSI_DUMP_OPT:--O2}", -O2 by default) read as the -O2 it was, so the default level's
+  # keys stay those of the record; another level (HF10's -O0 reference) keys apart, its level in the key
+  dt=$(sed -n '/^unit_of() {/,/^}/p;/^prefix_rel() {/,/^}/p;/^strip_srcdir() {/,/^}/p;/^dump_package() {/,/^}/p' "$root/bin/hsi" \
+    | sed 's/"\${HSI_DUMP_OPT:--O2}"/-O2/' | sha256sum | cut -c1-64)
+  [ "${HSI_DUMP_OPT:--O2}" = -O2 ] || dt="$dt opt ${HSI_DUMP_OPT}"
   plan=$TMPDIR/hsi-libplan.$$
   hsi_ae "$root/test/haskell/eval/dump_plan.ae" "$hsi_corpora_edn" "$bn" > "$plan"
   while IFS= read -r line; do
@@ -109,4 +113,20 @@ hsi_record_ifaces() { # DIR CMD: DIR/*.iface.edn and DIR/reexports.edn packed, e
   (cd "$stage/$name" && ls) | LC_ALL=C sort | while IFS= read -r m; do printf '%s\t%s\n' "$m" "$h"; done > "$stage/ids"
   oracle_make "$hsi_ifaces_pin" "$stage" "$stage/ids" "$how" ghc || return 1
   rm -rf "$stage"
+}
+
+# nofib_c_srcs DIR (HES85 (a), HES86 (a); record-ref and bin/hsi check): the C sources nofib's mk/ghc-paths.mk links into DIR's program (C_SRCS), one a line
+nofib_c_srcs() {
+  local d=$1 mk=$1/Makefile set srcs excl f
+  # the Makefile's own SRCS and EXCLUDED_SRCS (their continuation lines joined; += appends)
+  set=$(grep -c '^SRCS *[+:]\{0,1\}=' "$mk" || true)
+  srcs=$(awk '/^SRCS *[+:]?=/ {v = 1; sub(/^SRCS *[+:]?= */, "")} v {c = sub(/\\$/, ""); printf "%s ", $0; v = c}' "$mk")
+  excl=$(awk '/^EXCLUDED_SRCS *[+:]?=/ {v = 1; sub(/^EXCLUDED_SRCS *[+:]?= */, "")} v {c = sub(/\\$/, ""); printf "%s ", $0; v = c}' "$mk")
+  if [ "$set" = 0 ]; then srcs=$(cd "$d" && ls -1 -- *.c *.S 2> "$TMPDIR/hsi-nofib-ls.log" | tr '\n' ' '); fi
+  for f in $srcs; do
+    case $f in *_stub.c) continue ;; *.c|*.S) ;; *) continue ;; esac
+    [[ " $excl " == *" $f "* ]] && continue
+    [ -f "$d/$f" ] && echo "$f"
+  done
+  return 0
 }

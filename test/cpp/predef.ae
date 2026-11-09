@@ -12,7 +12,8 @@
   oracle DIR REF   DIR/host/'s answers against REF's (test/cpp/host: g++'s), file by file, the differences listed (exit 1 on one)
   option-lists WORK ID...  the option lists of pp-check's lists (WORK/ID/gxx.list: STD and the options g++ is given), one a line"
   (:require [arbace.string :as str]
-            [c.target :as ct]))
+            [c.target :as ct]
+            [cpp.clang :as clang]))
 
 (set! *warn-on-reflection* true)
 
@@ -236,8 +237,10 @@
   (distinct (for [l (str/split-lines (slurp f)) :when (and (not (str/blank? l)) (not (str/starts-with? l "#")))]
               (vec (take 2 (str/split l #"\t"))))))
 
-(defn has-tsv [dl ^String f]
-  (str (str/join "\n" (sort (for [[op nm] (probes f)] (str op "\t" nm "\t" (answer dl op nm))))) "\n"))
+(defn has-tsv
+  "has.tsv: operator, name, g++'s answer (dialect.edn) and clang's (clang.edn, CP248 (a)), as test/cpp/host/has.tsv's columns."
+  [dl cl ^String f]
+  (str (str/join "\n" (sort (for [[op nm] (probes f)] (str op "\t" nm "\t" (answer dl op nm) "\t" (clang/answer cl op nm))))) "\n"))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; commands
@@ -261,18 +264,22 @@
        ";; by test/cpp/predef.ae (bin/repr-cpp target gen) from c/target/abi.edn, cpp/target/dialect.edn, probes.tsv and\n"
        ";; option-lists.txt. Read with the Clojure reader.\n"
        "{:gxx \"Arbace's C++ (x86_64-linux-musl; the GNU dialect of g++ 15.2, CP244 (b))\"\n"
+       " :clang \"Arbace's C++ as clang 23.1.5 reads it (x86_64-linux-musl; CP248 (a): cpp/target/clang.edn, test/cpp/clang.ae)\"\n"
        " :epoch " (:epoch abi) "\n"
        " :source-date \"2026-10-28 00:00:00 UTC\"\n"
        " :stds " (pr-str (:stds dl)) "\n"
        " :has-std " (pr-str (:has-std dl)) "}\n"))
 
 (defn- outputs [dir]
-  (let [abi (rd abi-file) dl (rd (str dir "/dialect.edn"))]
-    (into (sorted-map "host.edn" (host-edn abi dl)
-                      "search-gxx.txt" (str (str/join "\n" (:search dl)) "\n")
-                      "has.tsv" (has-tsv dl (str dir "/probes.tsv"))
-                      "opt-deltas-gxx.edn" (deltas-edn abi dl (str dir "/option-lists.txt")))
-          (for [s (:stds dl)] [(str "predefined/gxx/" s ".h") (predefined abi dl s)]))))
+  (let [abi (rd abi-file) dl (rd (str dir "/dialect.edn")) cl (rd (str dir "/clang.edn"))
+        dates (take 2 (#'ct/date-macros (:epoch abi)))]
+    (-> (sorted-map "host.edn" (host-edn abi dl)
+                    "search-gxx.txt" (str (str/join "\n" (:search dl)) "\n")
+                    "search-clang.txt" (str (str/join "\n" (:search cl)) "\n")
+                    "has.tsv" (has-tsv dl cl (str dir "/probes.tsv"))
+                    "opt-deltas-gxx.edn" (deltas-edn abi dl (str dir "/option-lists.txt")))
+        (into (for [s (:stds dl)] [(str "predefined/gxx/" s ".h") (predefined abi dl s)]))
+        (into (for [s (:stds dl)] [(str "predefined/clang/" s ".h") (clang/predefined abi cl s dates)])))))
 
 (defn- diff-lines [a b]
   (let [as (set (str/split-lines a)) bs (set (str/split-lines b))]
@@ -283,16 +290,22 @@
   has.tsv and has-extra.tsv, g++'s column); opt-deltas by key, the deltas as text. host.edn is no answer."
   [dir ref]
   (let [outs (outputs dir)
-        refhas (into {} (for [f ["has.tsv" "has-extra.tsv"] :let [g (java.io.File. (str ref "/" f))] :when (.exists g)
-                              l (str/split-lines (slurp g)) :let [c (str/split l #"\t")] :when (>= (count c) 3)]
-                          [[(c 0) (c 1)] (str/replace (c 2) "L" "")]))]
+        refcol (fn [i] (into {} (for [f ["has.tsv" "has-extra.tsv"] :let [g (java.io.File. (str ref "/" f))] :when (.exists g)
+                                      l (str/split-lines (slurp g)) :let [c (str/split l #"\t")] :when (> (count c) i)]
+                                  [[(c 0) (c 1)] (str/replace (c i) "L" "")])))
+        refhas (refcol 2)
+        refclang (refcol 3)]
     (concat
       (for [[f t] outs :when (str/starts-with? f "predefined/")
             :let [g (java.io.File. (str ref "/" f))] :when (.exists g)]
         (let [[a b] (diff-lines t (slurp g))] [f a b]))
       [(let [rows (for [l (str/split-lines (get outs "has.tsv")) :let [[op nm v] (str/split l #"\t")]] [[op nm] v])
              bad (for [[k v] rows :when (not= v (get refhas k))] k)]
-         ["has.tsv" (map #(str (str/join " " %) " " (get (into {} rows) %)) bad) (map #(str (str/join " " %) " " (get refhas %)) bad)])]
+         ["has.tsv" (map #(str (str/join " " %) " " (get (into {} rows) %)) bad) (map #(str (str/join " " %) " " (get refhas %)) bad)])
+       ;; clang's column (CP248 (a)), the answers compared as numbers (clang -E writes the standard attributes' values with L)
+       (let [rows (for [l (str/split-lines (get outs "has.tsv")) :let [[op nm _ v] (str/split l #"\t")]] [[op nm] (str/replace v "L" "")])
+             bad (for [[k v] rows :when (not= v (get refclang k))] k)]
+         ["has.tsv (clang)" (map #(str (str/join " " %) " " (get (into {} rows) %)) bad) (map #(str (str/join " " %) " " (get refclang %)) bad)])]
       (let [ours (read-string (get outs "opt-deltas-gxx.edn"))
             theirs (rd (str ref "/opt-deltas-gxx.edn"))
             ;; an option list g++ refused (-march=pentium4, an AArch64 option...) has no recorded delta: not an answer to compare
@@ -301,11 +314,12 @@
                             (count (remove #(contains? theirs %) (keys ours))) " without g++'s answer (g++ refused them), "
                             (count (remove #(contains? ours %) (keys theirs))) " recorded beyond option-lists.txt"))]
         [["opt-deltas-gxx.edn" (map #(str % " => " (pr-str (get ours %))) bad) (map #(str % " => " (pr-str (get theirs %))) bad)]])
-      [(let [[a b] (diff-lines (get outs "search-gxx.txt") (slurp (str ref "/search-gxx.txt")))] ["search-gxx.txt" a b])])))
+      (for [f ["search-gxx.txt" "search-clang.txt"]]
+        (let [[a b] (diff-lines (get outs f) (slurp (str ref "/" f)))] [f a b])))))
 
 (defn -main [cmd dir & more]
   (case cmd
-    "gen" (do (.mkdirs (java.io.File. (str dir "/host/predefined/gxx")))
+    "gen" (do (.mkdirs (java.io.File. (str dir "/host/predefined/gxx"))) (.mkdirs (java.io.File. (str dir "/host/predefined/clang")))
               (let [os (outputs dir)]
                 (doseq [[f t] os] (spit (str dir "/host/" f) t))
                 (println "cpp target: wrote" (count os) "files under" (str dir "/host"))))
@@ -314,7 +328,7 @@
                              :when (not (and (.exists g) (= t (slurp g))))] f)]
                (if (seq bad)
                  (do (println "cpp target: stale (bin/repr-cpp target gen):" (str/join " " bad)) (System/exit 1))
-                 (println "cpp target:" (count os) "files as abi.edn and dialect.edn make them")))
+                 (println "cpp target:" (count os) "files as abi.edn, dialect.edn and clang.edn make them")))
     "oracle" (let [ref (first more)
                    rows (doall (oracle-rows dir ref))
                    n (count (filter (fn [[_ a b]] (or (seq a) (seq b))) rows))]

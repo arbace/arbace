@@ -10,11 +10,27 @@
 #     test/gate/steps.edn and the committed clean records (test/gate/clean-*.edn): every step declares one and holds them
 #  5. the planner: a step of 16 GiB or more without :heavy refused
 #  6. the view: a made-up plan simulated (the lanes, the wall), and bin/gate's options (--concurrent with --only refused)
+#  7. the essential memory lane (bin/gate without --concurrent, GATE_LANES=free; "As built: the essential memory lane"):
+#     its rule in both implementations (free memory, the running steps' RSS, two big steps when they fit, the head big
+#     one never starved, a small one beside a big one); four big steps whose sum exceeds the free memory admitted in turn,
+#     at most two at once, a small one beside them; the runner's step through the lane then the heavy lock, the lane's
+#     wait apart; report's flag of a peak over its declaration; the view against the big steps one at a time
+#  8. GTS248 (a), GTS249 ("As built: GTS248, GTS249"): the host's one lane state: entries prefixed by their gate's id
+#     (start and PID) decided earlier gate first in both modes; two gates on one GATE_LANE_HOST_DIR (a temporary one, never
+#     the main checkout's .tmp/gate-lanes) hold each other's declarations back, each run's own events beside the host's,
+#     against two gates on their own states that overlap; the waiter names another gate's steps; the runner's GTS227 (a)
+#     branch on the free rule (GATE_LANE_MODE=free, --concurrent's); bin/gate's switches (GATE_LANE_SHARED off by default,
+#     the state beside the store, GATE_LANE_RULE's default free for --concurrent and budget for the clean run, refused
+#     when neither)
 # Seconds, no build, no gate run. Usage: test/gate/lanes-test.bash
 # needs: exe (gate.lanes and the planner on stage 0)
 set -u
 # the gate's own run (bin/gate --clean's audit_step, GATE_CLEAN_INNER, audit_all) is not the fabricated runner's
 unset audit_step audit_all GATE_CLEAN_INNER
+# nor its lanes': run as a step of a gate in the lane, this test inherits the lane's variables (bin/gate-lane execs the
+# step: GATE_LANE_MODE=free, GATE_LANE_DIR, GATE_LANE_STEP, ...; bin/gate's GATE_LANES, GATE_LANE_HOST_DIR,
+# GATE_LANE_GATE), which would turn its budget cases into the free rule and its states into the gate's own
+for v in $(compgen -e); do case $v in GATE_LANES|GATE_LANES_*|GATE_LANE_*|GATE_MEM_BUDGET_GIB|GATE_MEM_RESERVE_GIB|GATE_MEM_LANE) unset "$v" ;; esac; done
 here=$(cd "$(dirname "$0")/../.." && pwd)
 : "${ARBACE_HOST_EXE:?set ARBACE_HOST_EXE to stage 0 (a tool must not build one here)}"
 mkdir -p "${TMPDIR:-$here/.tmp/tmp}"
@@ -190,6 +206,244 @@ else no "the view: status $st: $(cat "$t/view.txt")"; fi
 (cd "$here" && GATE_LANES=0 bin/gate --full --clean --concurrent --plan) > "$t/opt2.txt" 2>&1; st2=$?
 if [ $st1 = 2 ] && [ $st2 = 2 ]; then ok "bin/gate: --concurrent --only and --clean with GATE_LANES=0 refused"
 else no "bin/gate's options: $st1 $st2: $(head -2 "$t/opt1.txt" "$t/opt2.txt")"; fi
+
+# ---- 7. the essential memory lane
+# 7a. the rule, both implementations: CASE AVAIL BIG "R:GIB[:USED]..." "W:NAME:GIB..." EXPECTED (AVAIL: MemAvailable
+# less the margin, in GiB; USED: the running step's tree now, GiB)
+rule_free() {
+  local name=$1 a=$2 g=$3 rs=$4 ws=$5 want=$6 strict=${7:-0} d=$t/free-$1 i=0 x gb u got1 got2
+  mkdir -p "$d/run" "$d/wait"
+  for x in $rs; do i=$((i + 1)); x=${x#R:}; gb=${x%%:*}; u=0; case $x in *:*) u=${x#*:} ;; esac
+    echo "$gb $mst $(awk -v u="$u" 'BEGIN {printf "%d", u * 1048576}')" > "$d/run/00000-r$i.$me"; done
+  i=0
+  for x in $ws; do i=$((i + 1)); x=${x#W:}; echo "${x#*:} $mst" > "$d/wait/$(printf '%05d' "$i")-${x%%:*}.$me"; done
+  got1=$(GATE_LANE_STRICT=$strict GATE_LANE_MODE=free GATE_LANE_MARGIN_GIB=0 GATE_LANE_MEMAVAIL_KIB=$(awk -v a="$a" 'BEGIN {printf "%d", a * 1048576}') \
+         GATE_LANE_BIG_GIB=$g "$here/bin/gate-lane" --decide "$d" | sed 's/^[0-9]*-//; s/\.[0-9]*$//' | tr '\n' ' ')
+  # shellcheck disable=SC2086
+  got2=$(GATE_LANE_STRICT=$strict lanes decide-free "$a" "$g" $rs $ws 2>"$d.err" | tr '\n' ' ')
+  if [ "$got1" = "$want" ] && [ "$got2" = "$want" ]; then ok "free rule $name: admitted [$want]"
+  else no "free rule $name: bin/gate-lane [$got1], gate.lanes [$got2], want [$want]"; fi
+}
+rule_free four-bigs     56 16 ""          "W:dc:31 W:jc:22 W:sa:20 W:pg:21"  "dc jc "
+rule_free two-fit       56 16 "R:31"      "W:jc:22 W:sa:20 W:s:2"            "jc s "
+rule_free small-beside  56 16 "R:31"      "W:jc:30 W:s:2"                    "s "
+rule_free rss-counts    30 16 "R:20:15"   "W:b:22"                           "b "
+rule_free rss-unknown   30 16 "R:20"      "W:b:22"                           ""
+rule_free head-big      30 16 "R:10 R:10" "W:b:25 W:s:1"                     "b "
+rule_free head-reserved 30 16 "R:3"       "W:b:40 W:s:2"                     ""
+rule_free alone-over    10 16 ""          "W:b:40 W:s:1"                     "b "
+rule_free greedy-small  40 16 "R:31"      "W:b:22 W:s:3 W:t:9"               "s "
+# GTS255 (b): --concurrent's strict rule. 50 GiB declared at 48.7 free: the free rule admits the big one beside the
+# small steps (44 <= 48.7), the strict one refuses it (ROOM 42.7) and holds its place; a fit is admitted in both
+rule_free big-beside-small    48.7 16 "R:3 R:3"   "W:b:44 W:s:1"  "b "
+rule_free big-beside-small-st 48.7 16 "R:3 R:3"   "W:b:44 W:s:1"  ""  1
+rule_free big-fits-st         48.7 16 "R:3 R:3"   "W:b:40 W:s:1"  "b s "  1
+rule_free big-alone-st        10 16 ""            "W:b:40 W:s:1"  "b "  1
+
+# 7b. the admission: a blocker of the whole free memory (13 GiB) first, then four big steps (6 GiB each, big from 5: 24
+# GiB, over the 13 free) and a small one (1 GiB) waiting; then b1 and b2 at once (12), s1 beside them (13), b3 and b4 in
+# turn as room comes back; never two big steps beyond what fits, never over the free memory
+F=$t/free; mkdir -p "$F"
+free_step() {  # free_step NAME GIB ORDER SECS
+  GATE_LANE_MODE=free GATE_LANE_MARGIN_GIB=0 GATE_LANE_MEMAVAIL_KIB=$((13 * 1048576)) GATE_LANE_DIR=$F GATE_LANE_STEP=$1 \
+    GATE_LANE_GIB=$2 GATE_LANE_ORDER=$3 GATE_LANE_BIG_GIB=5 GATE_LANE_POLL=0.1 GATE_LANE_WAITS=$t/free-$1.wait \
+    "$here/bin/gate-lane" bash -c 'echo "$(date +%s%N) start $0 $1" >> "$2"; sleep "$3"; echo "$(date +%s%N) end $0 $1" >> "$2"' \
+    "$1" "$2" "$t/free.log" "$4" 2>>"$t/free-waits.log"
+}
+free_step blocker 13 0 1.2 &
+pids=($!)
+for i in $(seq 1 50); do [ -s "$t/free.log" ] && break; sleep 0.1; done
+free_step s1 1 5 2.0 & pids+=($!)
+free_step b4 6 4 0.6 & pids+=($!)
+free_step b3 6 3 0.6 & pids+=($!)
+free_step b2 6 2 2.0 & pids+=($!)
+free_step b1 6 1 2.0 & pids+=($!)
+wait "${pids[@]}"
+admits=$(awk -F'\t' '$2 == "admit" {print $3}' "$F/events.tsv" | tr '\n' ' ')
+sort -n "$t/free.log" > "$t/free.sorted"
+awk '{ if ($2 == "start") { run[$3] = $4; s = 0; b = 0; for (k in run) { s += run[k]; if (run[k] >= 5) b++ }
+                           if (s > maxs) maxs = s; if (b > maxb) maxb = b
+                           if ("s1" in run) for (k in run) if (run[k] >= 5 && k != "blocker") beside = 1 }
+       else delete run[$3] } END { print maxs, maxb, beside + 0 }' "$t/free.sorted" > "$t/free-overlap.txt" 2>&1
+read -r maxs maxb beside < "$t/free-overlap.txt"
+# the admissions of one decision land in the order their waiters look (the same second): the rounds compared as sets
+read -r -a ad <<< "$admits"
+mid=$(printf '%s\n' "${ad[@]:1:3}" | LC_ALL=C sort | tr '\n' ' ')
+admits="${ad[0]:-} {${mid% }} ${ad[*]:4}"
+case "$admits " in
+  "blocker {b1 b2 s1} b3 b4 "|"blocker {b1 b2 s1} b4 b3 ") ok "free lane: four big steps over the free memory admitted in turn ($admits)" ;;
+  *) no "free lane: admission order $admits; want blocker {b1 b2 s1} b3 b4" ;;
+esac
+if [ "${maxs:-99}" -le 13 ] && [ "${maxb:-9}" -eq 2 ] && [ "${beside:-0}" = 1 ]; then
+  ok "free lane: never over the free memory ($maxs of 13 GiB), two big steps at once when they fit, the small one beside them"
+else no "free lane: at most $maxs GiB, $maxb big steps at once, small beside a big one: ${beside:-?}"; fi
+if [ "$(awk -F'\t' '$2 == "admit" && NF == 6 && $6 == 13631488' "$F/events.tsv" | wc -l)" = 6 ] && [ -s "$t/free-b3.wait" ] \
+   && grep -q 'gate-lane: b3 (6 GiB) waits for room in the lanes (MemAvailable 13.0 GiB' "$t/free-waits.log"; then
+  ok "free lane: the events with MemAvailable, the wait in GATE_LANE_WAITS, said on stderr"
+else no "free lane's events and waits: $(cat "$F/events.tsv" "$t/free-waits.log" | head -12 | tr '\n' ' ')"; fi
+# the real process trees: a running entry whose process holds memory holds back only the rest of its declaration
+(
+  d=$t/free-real; mkdir -p "$d/run" "$d/wait"
+  # a process of up to about 200 MiB (awk's array), declared 1 GiB; once it holds U (at least 50 MiB; under strace it
+  # grows slowly), MemAvailable set so that ROOM fits a waiter of U/2 only when the U it holds counts: A = 1 GiB - U/2 + U/8
+  awk 'BEGIN { s = "x"; while (length(s) < 1048576) s = s s; for (i = 0; i < 200; i++) a[i] = s i; system("sleep 30") }' &
+  p=$!
+  for i in $(seq 1 300); do [ "$(awk '/^VmRSS:/ {print $2}' "/proc/$p/status" 2>"$d/rss.err" || echo 0)" -ge 51200 ] 2>"$d/rss.err" && break; sleep 0.1; done
+  u=$(awk '/^VmRSS:/ {print $2}' "/proc/$p/status" 2>"$d/rss.err")
+  w=$(awk -v u="$u" 'BEGIN {printf "%.6f", u / 2 / 1048576}')
+  av=$(awk -v u="$u" 'BEGIN {printf "%d", 1048576 - u / 2 + u / 8}')
+  echo "1 $(starttime $p)" > "$d/run/00000-hog.$p"; echo "$w $mst" > "$d/wait/00001-w.$me"
+  r=$(GATE_LANE_MODE=free GATE_LANE_MARGIN_GIB=0 GATE_LANE_MEMAVAIL_KIB=$av "$here/bin/gate-lane" --decide "$d" | sed 's/^[0-9]*-//; s/\.[0-9]*$//')
+  echo "1 $(starttime $p) 0" > "$d/run/00000-hog.$p"
+  r0=$(GATE_LANE_MODE=free GATE_LANE_MARGIN_GIB=0 GATE_LANE_MEMAVAIL_KIB=$av "$here/bin/gate-lane" --decide "$d" | sed 's/^[0-9]*-//; s/\.[0-9]*$//')
+  # stopped by PID: its sleep's shell and the sleep (its children), then awk
+  kids=$(cat "/proc/$p/task/$p/children" 2>"$d/kids.err"); gk=
+  for k in $kids; do gk="$gk $(cat "/proc/$k/task/$k/children" 2>"$d/kids.err")"; done
+  # shellcheck disable=SC2086
+  kill $gk $kids "$p" 2>"$d/kill.err"; wait "$p" 2>"$d/kill.err"; echo "$r|$r0" > "$t/free-real.txt"; echo "$u" > "$t/free-real.kib"
+)
+if [ "$(cat "$t/free-real.txt")" = "w|" ]; then ok "free lane: a running step's process tree RSS read from /proc ($(( $(cat "$t/free-real.kib") / 1024 )) MiB held: only its declaration's rest held back)"
+else no "free lane on a real process: [$(cat "$t/free-real.txt")], want [w|]"; fi
+
+# 7c. the runner's step under GATE_LANES=free: through bin/gate-lane's free mode first, then GATE_HEAVY_CMD for a heavy
+# step (a fake lock that notes itself), not for a light one; the tools inside hold the lock only under it; the lane's
+# wait in NAME.lane-wait
+printf '#!/bin/bash\necho "$(date +%%s%%N) lock" >> "%s"\nexec "$@"\n' "$t/lock.log" > "$t/fakelock"; chmod +x "$t/fakelock"
+(
+  logs=$t/runner3; mkdir -p "$logs"; : > "$logs/mem.tsv"
+  GATE_HEAVY_CMD=$t/fakelock; . "$here/bin/lib/gate-run.bash"
+  declare -A ordix=([hv]=3 [lt]=4)
+  export GATE_LANES=free GATE_LANE_POLL=0.1
+  step_lane=4 step hv yes bash -c 'echo "held=${ARBACE_HEAVY_HELD:-} mode=${GATE_LANE_MODE:-}"'; echo "status $?" > "$logs/hv.rc"
+  step_lane=2 step lt "" bash -c 'echo "held=${ARBACE_HEAVY_HELD:-}"'
+)
+if grep -qx 'held=1 mode=free' "$t/runner3/hv.log" && grep -qx 'held=' "$t/runner3/lt.log" && grep -qx 'status 0' "$t/runner3/hv.rc" \
+   && [ "$(wc -l < "$t/lock.log")" = 1 ] && grep -q "admit	hv	4" "$t/runner3/lanes/events.tsv" && grep -q "admit	lt	2" "$t/runner3/lanes/events.tsv" \
+   && [ -f "$t/runner3/hv.lane-wait" ]; then
+  ok "the runner's step in the free lane: admitted, then the heavy lock for the heavy step alone (ARBACE_HEAVY_HELD=1 inside it only)"
+else no "the runner in the free lane: $(cat "$t/runner3/hv.log" "$t/runner3/lt.log" "$t/lock.log" "$t/runner3/lanes/events.tsv" 2>&1 | tr '\n' ' ')"; fi
+# report's flag: a peak over the declaration by the margin (3 GiB of 1 declared), not one within (1.5 of 1: 1.6)
+(
+  logs=$t/runner4; mkdir -p "$logs"
+  . "$here/bin/lib/gate-run.bash"
+  for x in "over 3145728" "within 1572864"; do
+    set -- $x
+    memgib[$1]=1 budget[$1]=- sum_re[$1]=- sum_n[$1]=0 why[$1]=
+    echo 0 > "$logs/$1.status"; echo 10 > "$logs/$1.secs"; echo 0 > "$logs/$1.wait"
+    printf '{:step "%s" :wall-s 10 :cpu-s 1.0 :maxrss-kib %s :tree-peak-kib 0 :wait-s 0 :inner-wait-s 0}\n' "$1" "$2" > "$logs/$1.mem"
+    report "$1"
+  done > "$logs/report.txt" 2>&1
+)
+if grep -q '^   ok  over (.*OVER ITS DECLARED :mem-gib 1' "$t/runner4/report.txt" && grep -q '^   ok  within' "$t/runner4/report.txt" \
+   && ! grep -q 'within.*OVER' "$t/runner4/report.txt"; then ok "report flags a peak over its :mem-gib (a warning, the step still ok)"
+else no "report's flag: $(cat "$t/runner4/report.txt")"; fi
+
+# 7d. the view in the free mode, the made-up plan of 6 with 76 GiB free: j1, c1 and g1 at once (two big ones: 76), c2 at
+# 1060, j2 at 1460 (room 67), the end at 2460 (0:41); the big steps one at a time 0:49, every step at once 0:41
+GATE_LANE_MODE=free lanes view "$v" - 76 16 "$v/rec.edn" > "$t/view-free.txt" 2>&1; st=$?
+if [ $st = 0 ] && grep -q 'the essential memory lane: 76 GiB free' "$t/view-free.txt" && grep -q 'simulated wall 0:41' "$t/view-free.txt" \
+   && grep -qE '^ +0:07 +0:16 +1 +20 +g1 ' "$t/view-free.txt" && grep -qE '^ +0:24 +0:41 +1 +50 +j2 ' "$t/view-free.txt" \
+   && grep -q 'against the big steps one at a time 0:49 (not longer), every step at once 0:41' "$t/view-free.txt" \
+   && grep -q 'at most 76 GiB at once' "$t/view-free.txt"; then
+  ok "the view in the free lane (g1 beside j1, wall 0:41; the big steps one at a time 0:49)"
+else no "the free view: status $st: $(cat "$t/view-free.txt")"; fi
+# bin/gate: the essential lane is the ordinary gate's (GATE_LANES=free), GATE_MEM_LANE=0 none, --concurrent GTS227 (a)'s
+if grep -q 'mem_lane=1; export GATE_LANES=free' "$here/bin/gate" && grep -q '"${GATE_MEM_LANE:-1}" != 0' "$here/bin/gate"; then
+  ok "bin/gate: the essential memory lane on by default without --concurrent (GATE_MEM_LANE=0 off)"
+else no "bin/gate does not set the essential lane"; fi
+
+# ---- 8. GTS248 (a), GTS249
+# 8a. the plan's order across gates: gate A (started first) waits a (order 5, 15 GiB), gate B b (order 1, 15 GiB), 10 GiB
+# running, 30 free: room for one, A's; without the gates' ids B's lower order would win
+ga=00000000010000001 gb=00000000020000002
+for m in shared plain; do
+  d=$t/order-$m; mkdir -p "$d/run" "$d/wait"
+  pa=; pb=; [ $m = shared ] && pa=$ga- pb=$gb-
+  echo "10 $mst 0" > "$d/run/${pa}00000-r.$me"
+  echo "15 $mst" > "$d/wait/${pa}00005-a.$me"; echo "15 $mst" > "$d/wait/${pb}00001-b.$me"
+  GATE_LANE_MODE=free GATE_LANE_MARGIN_GIB=0 GATE_LANE_MEMAVAIL_KIB=$((30 * 1048576)) "$here/bin/gate-lane" --decide "$d" \
+    | sed -E 's/^[0-9]{17}-//; s/^[0-9]*-//; s/\.[0-9]*$//' | tr '\n' ' ' > "$t/order-$m.free"
+  rm -f "$d/run/"*
+  GATE_MEM_BUDGET_GIB=15 "$here/bin/gate-lane" --decide "$d" 2>"$t/order-$m.err" | sed -E 's/^[0-9]{17}-//; s/^[0-9]*-//; s/\.[0-9]*$//' | tr '\n' ' ' > "$t/order-$m.budget"
+done
+if [ "$(cat "$t/order-shared.free")" = "a " ] && [ "$(cat "$t/order-plain.free")" = "b " ] \
+   && [ "$(cat "$t/order-shared.budget")" = "a " ] && [ "$(cat "$t/order-plain.budget")" = "b " ]; then
+  ok "the host's state: the earlier gate's waiter first in both modes (without the gates' ids the plan's order alone)"
+else no "the gates' order: free [$(cat "$t/order-shared.free")|$(cat "$t/order-plain.free")], budget [$(cat "$t/order-shared.budget")|$(cat "$t/order-plain.budget")]; want [a |b ] both"; fi
+
+# 8b. two gates at once, 13 GiB free (given), small steps only (big from 16): A's blocker (10 GiB, 1.5 s) runs; then B's
+# b1 (order 1, 8 GiB) and A's a2 (order 9, 8 GiB) wait; on the host's state b1 waits for the blocker (A's declaration held,
+# not its RSS: a sleep's), then a2 goes first (A earlier), b1 after it; on their own states (the control) b1 starts at
+# once beside the blocker, nothing of its own run running
+two_gates() {  # two_gates TAG SHARED
+  local H=$t/host-$1 sh=$2 tag=$1 p=()
+  mkdir -p "$H" "$t/gA-$tag" "$t/gB-$tag"
+  gstep() {  # gstep GATE OWN NAME GIB ORDER SECS
+    env GATE_LANE_MODE=free GATE_LANE_MARGIN_GIB=0 GATE_LANE_MEMAVAIL_KIB=$((13 * 1048576)) GATE_LANE_POLL=0.1 \
+      ${sh:+GATE_LANE_HOST_DIR=$H} GATE_LANE_GATE=$1 GATE_LANE_DIR=$2 GATE_LANE_STEP=$3 GATE_LANE_GIB=$4 GATE_LANE_ORDER=$5 \
+      "$here/bin/gate-lane" bash -c 'echo "$(date +%s%N) start $0" >> "$1"; sleep "$2"; echo "$(date +%s%N) end $0" >> "$1"' \
+      "$3" "$t/two-$tag.log" "$6" 2>>"$t/two-$tag.waits"
+  }
+  gstep $ga "$t/gA-$tag" blocker 10 0 1.5 & p+=($!)
+  for i in $(seq 1 50); do [ -s "$t/two-$tag.log" ] && break; sleep 0.1; done
+  gstep $gb "$t/gB-$tag" b1 8 1 0.6 & p+=($!)
+  sleep 0.3
+  gstep $ga "$t/gA-$tag" a2 8 9 0.6 & p+=($!)
+  wait "${p[@]}"
+  sort -n "$t/two-$tag.log" | awk '{print $3 "." $2}' | tr '\n' ' ' > "$t/two-$tag.seq"
+}
+two_gates host 1
+two_gates own ""
+seq_host=$(cat "$t/two-host.seq") seq_own=$(cat "$t/two-own.seq")
+if [ "$seq_host" = "blocker.start blocker.end a2.start a2.end b1.start b1.end " ]; then
+  ok "two gates on the host's state: B's step waits for A's declaration, then A's (earlier) goes first ($seq_host)"
+else no "two gates on the host's state: $seq_host; want blocker, a2, b1 one after another"; fi
+case "$seq_own" in
+  "blocker.start b1.start "*) ok "the control: two gates on their own states overlap over the free memory ($seq_own)" ;;
+  *) no "the control: two gates on their own states: $seq_own; want b1 beside the blocker" ;;
+esac
+# the host's events carry the gate's id (seven columns), each run's own events its own steps alone (six)
+H=$t/host-host
+if [ "$(awk -F'\t' 'NF == 7 && $2 == "admit"' "$H/events.tsv" | wc -l)" = 3 ] \
+   && [ "$(awk -F'\t' '$2 == "admit" && $3 == "b1" {print $7}' "$H/events.tsv")" = $gb ] \
+   && [ "$(awk -F'\t' '$2 == "admit" {print $3 ":" NF}' "$t/gA-host/events.tsv" | tr '\n' ' ')" = "blocker:6 a2:6 " ] \
+   && [ "$(awk -F'\t' '$2 == "admit" {print $3 ":" NF}' "$t/gB-host/events.tsv" | tr '\n' ' ')" = "b1:6 " ] \
+   && [ ! -e "$t/gA-host/run" ] && [ ! -e "$t/gB-host/wait" ]; then
+  ok "the host's events with the gates' ids, each run's own events of its own steps, no state in the runs' directories"
+else no "the events: $(cat "$H/events.tsv" "$t/gA-host/events.tsv" "$t/gB-host/events.tsv" 2>&1 | tr '\n' '|')"; fi
+if grep -q 'gate-lane: b1 (8 GiB) waits for room in the lanes (MemAvailable 13.0 GiB; running: blocker(another gate) )' "$t/two-host.waits"; then
+  ok "the waiter names another gate's running step as such"
+else no "the waiter's line: $(cat "$t/two-host.waits")"; fi
+GATE_LANE_MODE=free GATE_LANE_HOST_DIR=$H GATE_LANE_MEMAVAIL_KIB=$((13 * 1048576)) "$here/bin/gate-lane" --state "$H" > "$t/host-state.txt" 2>&1
+# the host's state is not handed to the step (a test of the gate's own that runs the runner keeps out of it)
+GATE_LANE_MODE=free GATE_LANE_MARGIN_GIB=0 GATE_LANE_MEMAVAIL_KIB=$((13 * 1048576)) GATE_LANE_HOST_DIR=$H GATE_LANE_GATE=$ga \
+  GATE_LANE_DIR=$t/gA-env GATE_LANE_STEP=envs "$here/bin/gate-lane" bash -c 'echo "${GATE_LANE_HOST_DIR:-none} ${GATE_LANE_GATE:-none} ${GATE_LANE_MODE:-}"' > "$t/host-env.txt" 2>&1
+if grep -q "^the host's state (GTS248 (a)): $H" "$t/host-state.txt" && ! grep -q '^running\|^waiting' "$t/host-state.txt" \
+   && [ "$(cat "$t/host-env.txt")" = "none none free" ]; then
+  ok "--state on the host's state: its directory, the ended entries pruned; the step not handed the host's state"
+else no "--state: $(cat "$t/host-state.txt" "$t/host-env.txt")"; fi
+
+# 8c. GTS249 (a): the runner's lanes branch (GATE_LANES=1, --concurrent's) on the free rule when bin/gate exports
+# GATE_LANE_MODE=free: admitted by the free mode (MemAvailable in its events), ARBACE_HEAVY_HELD=1 inside as before
+(
+  logs=$t/runner5; mkdir -p "$logs"; : > "$logs/mem.tsv"
+  GATE_HEAVY_CMD=env; . "$here/bin/lib/gate-run.bash"
+  declare -A ordix=([cc]=2)
+  export GATE_LANES=1 GATE_LANE_MODE=free GATE_LANE_POLL=0.1 GATE_LANE_MEMAVAIL_KIB=$((20 * 1048576))
+  step_lane=4 step cc "" bash -c 'echo "held=${ARBACE_HEAVY_HELD:-} mode=${GATE_LANE_MODE:-}"'
+)
+if grep -qx 'held=1 mode=free' "$t/runner5/cc.log" && [ "$(awk -F'\t' '$2 == "admit" && $3 == "cc" && NF == 6 {print $6}' "$t/runner5/lanes/events.tsv")" = $((20 * 1048576)) ]; then
+  ok "--concurrent's lanes on the free rule (GATE_LANE_MODE=free): admitted by MemAvailable, ARBACE_HEAVY_HELD=1 inside"
+else no "the runner's lanes on the free rule: $(cat "$t/runner5/cc.log" "$t/runner5/lanes/events.tsv" 2>&1 | tr '\n' ' ')"; fi
+
+# 8d. bin/gate's switches: GATE_LANE_SHARED off by default and the state beside the store (a store of the tests' own: its
+# own, never the main checkout's); GATE_LANE_RULE free for --concurrent, budget for the clean run, refused otherwise
+(cd "$here" && GATE_LANE_RULE=other bin/gate --full --concurrent --plan) > "$t/rule-bad.txt" 2>&1; st=$?
+if [ $st = 2 ] && grep -q 'GATE_LANE_RULE is free or budget, not other' "$t/rule-bad.txt" \
+   && grep -q '"${GATE_LANE_SHARED:-0}" = 1' "$here/bin/gate" && grep -q 'GATE_LANE_HOST_DIR=$(dirname "$store")/gate-lanes' "$here/bin/gate" \
+   && grep -q 'lane_rule=${GATE_LANE_RULE:-budget}; else lane_rule=${GATE_LANE_RULE:-free}' "$here/bin/gate"; then
+  ok "bin/gate: GATE_LANE_SHARED off by default, the host's state beside the store; GATE_LANE_RULE free for --concurrent, budget for --clean, a third refused"
+else no "bin/gate's switches: status $st: $(head -3 "$t/rule-bad.txt")"; fi
 
 echo "lanes-test: $n checks, $bad failed"
 [ "$bad" = 0 ]

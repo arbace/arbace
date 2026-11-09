@@ -254,6 +254,12 @@ covers what.
   library's `otherlibs/str/str.ml{,i}` into `.tmp/oi/strlib/`. The test
   data `test/ocaml/oi/testdata/` and the tables in `go/arbace/oi/lexdata*_test.ae` and `parsedata_test.ae`
   are outputs of the host's OCaml 5.5.0 (ocaml, ocamllex, ocamlyacc) over Arbace's own test programs.
+- oi's C API on ci (doc/ocaml/OCAML-SURVEY.md, "As built: the C API on ci"): `go/arbace/oicapi.ae`, `go/arbace/oicapi/`,
+  `go/arbace/oi/ext_capi.ae` and `test/ocaml/capi/` (the headers `include/caml/*.h`, the C runtime `runtime.c`, `main.c`,
+  `cnodes.ae`) are Arbace's own, under the Eclipse Public License 1.0: clean-room, written from OCaml's manual (chapter 22,
+  "Interfacing C with OCaml": the value layout, the macros' and functions' names and meanings) without OCaml's runtime headers
+  or sources; `runtime.c`'s BLAKE2b is written from RFC 7693's specification (the initialization vector and the message schedule
+  are the RFC's constants).
 - repr/ocaml's native reader (doc/ocaml/OCAML-SURVEY.md, "As built: the native reader"): `arbace/repr/ocaml/lex.ae`
   (parsing/lexer.mll, the parts of stdlib/lexing.ml that update the positions, utils/misc.ml's Utf8_lexeme),
   `docstrings.ae` (parsing/docstrings.ml), `ast.ae`'s constructors and docstring attributes (parsing/ast_helper.ml,
@@ -1004,8 +1010,8 @@ covers what.
   successors, `fmt_assert_args`) and `compiler/rustc_codegen_ssa/src/mir/{mod,analyze,block,operand,place,rvalue,statement}.rs`
   (the SSA analysis of locals, the order and merging of blocks, operands, places, rvalues, terminators), `compiler/rustc_mir_transform/src/
   remove_noop_landing_pads.rs`, `compiler/rustc_middle/src/mir/{traversal,mod}.rs` (mono reachability, `get_caller_location`'s walk),
-  `compiler/rustc_monomorphize/src/collector.rs` (the collector's roots and uses) and `compiler/rustc_codegen_llvm/src/intrinsic.rs`
-  (the intrinsics' lowering): copyright the Rust
+  `compiler/rustc_monomorphize/src/collector.rs` (the collector's roots and uses) and `compiler/rustc_codegen_llvm/src/{intrinsic,consts}.rs`
+  (the intrinsics' lowering, volatile loads and stores among them since 2026-11-08; `codegen_static`): copyright the Rust
   project's contributors, dual-licensed under the MIT License or the Apache License 2.0 at the licensee's option, taken here
   under the MIT License ("Rust (rustc 1.99.1): MIT License or Apache License 2.0" below). The rest (the forms' shapes,
   `doc/rust/MIR.md`, the judges, `bin/rust-front`) is Arbace's own, under the Eclipse Public License 1.0.
@@ -1065,6 +1071,40 @@ covers what.
   scalar pairs after `compiler/rustc_abi/src/layout.rs`: copyright the Rust project's contributors, dual-licensed under the MIT License or
   the Apache License 2.0 at the licensee's option, taken here under the MIT License ("Rust (rustc 1.99.1): MIT License or Apache License
   2.0" below). The rest (the judge `build_check.ae`, the rest of `build_run.ae`) is Arbace's own, under the Eclipse Public License 1.0.
+  RF10's second slice (doc/rust/FRONTEND-SURVEY.md, "As built: RF10 (second slice)") adds to `build.ae`, from the same sources and
+  under the same terms, the closures' capture analysis after `compiler/rustc_hir_typeck/src/{upvar,expr_use_visitor}.rs` and
+  `compiler/rustc_passes/src/upvars.rs`, the canonical user type annotations after `compiler/rustc_hir_typeck/src/fn_ctxt/_impl.rs`,
+  `method/confirm.rs` and `compiler/rustc_middle/src/ty/{typeck_results,print/pretty}.rs` (with `typeck.ae`'s part), lint scopes
+  after `builder/scope.rs`' `maybe_new_source_scope`, allocations after `compiler/rustc_middle/src/mir/pretty.rs`' `write_allocations`;
+  the judge `arbace/rust/front/capture_check.ae` and the helper's `--captures` are Arbace's own (the helper's terms are its own, above).
+  RF10's third slice (doc/rust/FRONTEND-SURVEY.md, "As built: RF10 (third slice)") adds to `build.ae`, from the same sources and under
+  the same terms, the rest of `compiler/rustc_mir_build/src/builder/matches/{mod,match_pair,buckets,test,util}.rs` and `builder/block.rs`'
+  let-else, `thir/pattern/{mod,const_to_pat}.rs`' ranges, slices and string constants, `builder/mod.rs`' `construct_const` and
+  `builder/expr/into.rs`' `write_box_via_move` and functional update; and `arbace/rust/front/passes.ae`, Arbace forms written after
+  `compiler/rustc_mir_transform/src/{lib,lint_and_remove_uninhabited,simplify}.rs` and `compiler/rustc_middle/src/mir/{terminator,traversal}.rs`,
+  the same terms.
+  RF10's fourth slice ("As built: RF10 (fourth slice)") adds to `passes.ae`, from the same sources and under the same terms,
+  `compiler/rustc_mir_transform/src/{promote_consts,cleanup_post_borrowck,remove_noop_landing_pads,deref_separator,add_call_guards,
+  post_analysis_normalize,elaborate_drops,elaborate_drop,abort_unwinding_calls,erase_deref_temps,elaborate_box_derefs,lower_intrinsics,
+  remove_place_mention,patch}.rs`, `compiler/rustc_const_eval/src/check_consts/qualifs.rs`, `compiler/rustc_mir_dataflow/src/{move_paths/
+  {mod,builder}.rs,un_derefer.rs,drop_flag_effects.rs,impls/initialized.rs,framework/direction.rs}` and `compiler/rustc_middle/src/ty/
+  layout.rs`' `fn_can_unwind`; and to `build.ae` a port of rustc_apfloat 0.2.3's (`rustc_apfloat-0.2.3+llvm-462a31f5a5ab`,
+  `src/ieee.rs`, `impl Display for IeeeFloat`) float formatting, a port of LLVM's APFloat::toString, under the Apache License 2.0
+  with LLVM Exceptions (the text of section "LLVM (clang): Apache License 2.0 with LLVM Exceptions" below).
+- `arbace/rust/front/mono.ae` (RFP23 (c), doc/rust/FRONTEND-SURVEY.md, "As built: RFP23 (c)"): Arbace forms porting, function by
+  function, rustc 1.99.1 (https://github.com/rust-lang/rust at 58cf8f9c3, the sources of Alpine's rust-src-1.99.1-r0):
+  `compiler/rustc_symbol_mangling/src/{lib.rs,v0.rs}` (symbol_name_from_attrs, compute_symbol_name, the v0 mangler, punycode
+  identifiers, mangle_internal_symbol), `compiler/rustc_span/src/def_id.rs` (StableCrateId::new), `compiler/rustc_middle/src/{mono.rs,
+  ty/print/mod.rs,ty/instance.rs,ty/layout.rs}` (instantiation_mode, default_print_def_path, requires_inline, requires_caller_location,
+  discr_range_of_repr), `compiler/rustc_mir_transform/src/cross_crate_inline.rs`, `compiler/rustc_metadata/src/rmeta/{mod.rs,
+  encoder.rs}` (the rmeta header and CrateRoot's first fields, should_encode_mir), `compiler/rustc_attr_ir/src/weak_lang_items.rs`,
+  `compiler/rustc_monomorphize/src/collector.rs` (roots, the uses of calls and drops), `compiler/rustc_abi/src/{layout.rs,
+  layout/simple.rs,lib.rs,wrapping_range.rs}` and `compiler/rustc_ty_utils/src/layout.rs` (layout_of for x86_64); and
+  rustc-stable-hash 0.1.2 (https://github.com/rust-lang/rustc-stable-hash, the version rustc's Cargo.lock pins: `src/sip128.rs`,
+  `src/stable_hasher.rs`, SipHasher128 and StableHasher's writes): copyright the Rust project's contributors, dual-licensed under
+  the MIT License or the Apache License 2.0 at the licensee's option, taken here under the MIT License ("Rust (rustc 1.99.1): MIT
+  License or Apache License 2.0" below). The judge `mono_check.ae` and `test/rust/front/std-crates.edn` are Arbace's own, under the
+  Eclipse Public License 1.0.
 - The own-verdict judge of `arbace/rust/check.ae` (`own-verdict`, `run-class`, `verdict-met?`, `directives`; rust-90,
   doc/rust/EVAL.md §13): Arbace forms written after rustc 1.99.1's compiletest, the same revision and sources (the pinned
   `rustc-1.99.1-src.tar.xz`'s `src/tools/compiletest/src/runtest/ui.rs`: `run_ui_test`'s RunResult of the run and the
@@ -1214,6 +1254,17 @@ covers what.
   `GHC/Driver/Pipeline/Execute.hs` (getFileArgs) with GHC's notice; `arbace/repr/haskell/flags.ae` is generated
   by the helper's `flags` verb from the names of `flagsDynamic` and `supportedLanguagePragmas` of the same
   tarball's GHC (the Glasgow license).
+- `arbace/repr/haskell/famenv.ae` (the elaborator's type families, HF9's first slice, doc/haskell/FRONTEND-SURVEY.md, "As built:
+  HF9 (first slice)"): a port of GHC 9.14.1, https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz (SHA-256
+  `2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77`, the corpus's pin): `reduceTyFamApp_maybe`,
+  `lookupFamInstEnv`'s matching, `chooseBranch`, `findBranch`, `apartnessCheck`, `compatibleBranches` and `computeAxiomIncomps` of
+  `compiler/GHC/Core/FamInstEnv.hs` with `tcMatchTys` and `tcUnifyTysFG` of `compiler/GHC/Core/Unify.hs`, by hand on 2026-11-08,
+  the file carrying GHC's notice (the Glasgow Haskell Compiler License, "GHC: the Glasgow Haskell Compiler License" below).
+  `arbace/repr/haskell/libcheck.ae` and `bin/lib/repr-haskell/lib-check` are Arbace's own; `typecheck.ae`'s HF9 additions (kinds
+  erased, GADTs' givens, ScopedTypeVariables, the implicit parameters, the type applications, the data family instances; the
+  second slice's checking mode, implications, pattern synonyms, DataToTag, WithDict, the implicit parameters' bindings and
+  defaulting) are Arbace's own, GHC's `compiler/GHC/Tc/` read as their specification; `deriv.ae`'s second-slice tables
+  (primOrdOps' ordOpTbl, boxConTbl, postfixModTbl of `compiler/GHC/Tc/Deriv/Generate.hs`) are under the file's GHC notice.
 - `arbace/repr/haskell/rename.ae` (repr/haskell's renamer, HF2, doc/haskell/FRONTEND-SURVEY.md, "As built: HF1-HF2"):
   ports of GHC 9.14.1, https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz (SHA-256
   `2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77`, the corpus's pin): `mkOpAppRn`,
@@ -1230,6 +1281,9 @@ covers what.
   `compiler/GHC/CoreToStg/Prep.hs`, `CoreToStg.hs`, `compiler/GHC/Stg/Unarise.hs`, `Stg/FVs.hs`,
   `compiler/GHC/Types/Id/Make.hs`'s dictionary selectors), the files carrying GHC's notice (the Glasgow Haskell
   Compiler License, "GHC: the Glasgow Haskell Compiler License" below); `stgcmp.ae`, the STG judge, is Arbace's own.
+  Since HF10's first slice (2026-11-08) they also follow `compiler/GHC/CoreToStg/Prep.hs`'s speculative evaluation and
+  cpeArgArity, `compiler/GHC/Core/Utils.hs`'s exprOkForSpecEval, `compiler/GHC/CoreToStg.hs`'s mkStgAltType,
+  `compiler/GHC/HsToCore/Match.hs`'s tidy_bang_pat and matchBangs and `compiler/GHC/Core/Make.hs`'s bindNonRec, under the same notice.
 - `arbace/repr/haskell/simpleopt.ae` and `arbace/repr/haskell/constfold.ae` (the front end's simple optimiser and the
   floating-point primops' built-in rules, HF5-HF6's decision 2 (a); doc/haskell/FRONTEND-SURVEY.md, "As built: HF7 (first
   light)"): ports of GHC 9.14.1 (the same tarball and pin) by hand on 2026-11-06: `compiler/GHC/Core/SimpleOpt.hs`
@@ -1272,6 +1326,13 @@ covers what.
   `Distribution/FieldGrammar/{Parsec,Pretty}.hs`'s free text, `Distribution/Types/InstalledPackageInfo/FieldGrammar.hs`'s
   ipiFieldGrammar, `Distribution/Types/Condition.hs`), under Cabal's BSD 3-Clause License ("Cabal: BSD 3-Clause License"
   below).
+- `arbace/repr/haskell/target.ae`'s `libffi-vars` and `libffi-headers` (the system libffi's two headers GHCi/FFI.hsc's hsc2hs run
+  includes, HFS-I11 (a), 2026-11-08): the substitution rules of libffi 3.8.0's `configure.ac` (AC_INIT's version, FFI_VERSION_NUMBER,
+  HAVE_LONG_DOUBLE, FFI_EXEC_TRAMPOLINE_TABLE, the ffitarget.h copy) and `configure.host` (x86_64's TARGET and TARGETDIR), ported by
+  hand from https://github.com/libffi/libffi/releases/download/v3.8.0/libffi-3.8.0.tar.gz (SHA-256
+  `7da3e2d9a171eb0a038f592ecad3ff2bb2550f3496d87b3b29ad0cf4430c0db4`, `test/haskell/target/libffi.edn`'s pin); the headers they make,
+  `include/ffi.h.in` substituted and `src/x86/ffitarget.h`, are libffi's text, made in `.tmp/` and not committed: libffi, Copyright (c)
+  1996-2026 Anthony Green, Red Hat, Inc and others, under the MIT License ("libffi: MIT License" below).
 - `arbace/repr/haskell/unlit.ae` (repr/haskell's native unlit, doc/haskell/NATIVE.md): a port of the
   same tarball's `utils/unlit/unlit.c`, under the Glasgow Haskell Compiler License (below), on
   2026-11-04; `arbace/repr/haskell/driver.ae` (GHC's driver's preprocessing: `GHC/SysTools/Cpp.hs`'s
@@ -1450,6 +1511,31 @@ covers what.
   `abi` and the launcher's own package (the Eclipse Public License 1.0) and Go's runtime and
   standard library (Go's BSD 3-Clause License). A distribution of the box carries this file, as
   for the executables above.
+- `test/cpp/clang.ae` (`cpp.clang`, the clang half of Arbace's C++ target, doc/cpp/CPP-SURVEY.md, "As built: CP248 (a)"):
+  a port of parts of clang, the LLVM Project, from `llvm-project-23.1.5.src.tar.xz` (the pin of `test/cpp/corpora.edn`,
+  SHA-256 `fb50b1eac93ddeb3aa8dab4cfe324dff74f4a9c2bdee6160c9e36188f8d06a6e`): `clang/lib/Frontend/InitPreprocessor.cpp`'s
+  predefined macros and their helpers, `clang/lib/Basic/Targets/X86.cpp`'s `getTargetDefines` (the baseline CPU's part),
+  `Targets/OSTargets.h`'s `LinuxTargetInfo::getOSDefines` and `Targets.cpp`'s `DefineStd` and `defineCPUMacros`, under
+  the Apache License 2.0 with the LLVM Exceptions (section "LLVM (clang)" below), the file carrying clang's notice;
+  `cpp/target/clang.edn`, the facts it reads (PickFP's float strings among them, from the same file), likewise.
+- `arbace/repr/cpp/diag.ae` (`arbace.repr.cpp.diag`, Arbace's own C++ front end's diagnostics, doc/cpp/CPP-SURVEY.md, "As built:
+  CX12 (first slice)"): its diagnostics' texts are clang's (`clang/include/clang/Basic/DiagnosticSemaKinds.td`) and its rules follow
+  clang's Sema (`clang/lib/Sema/SemaExpr.cpp`'s `DiagnoseEmptyLookup`, `SemaDecl.cpp`'s `MergeVarDecl`, `MergeFunctionDecl`,
+  `ActOnTag`, `CheckRedeclaration`, `ActOnParamDeclarator`, `ActOnField`), the LLVM Project from `llvm-project-23.1.5.src.tar.xz` (the
+  pin of `test/cpp/corpora.edn`), under the Apache License 2.0 with the LLVM Exceptions (section "LLVM (clang)" below), the file
+  carrying clang's notice. Its second slice (doc/cpp/CPP-SURVEY.md, "As built: CX12 (second slice)") adds the checker's rules to the
+  code generator's Sema, `arbace/cpp/sema.ae` (Arbace's own, written after the standard's rules), and to `arbace/cpp/template.ae`'s
+  port of `SemaTemplateDeduction.cpp` (its MemberPointer case and the method qualifiers' mismatch, under that file's LLVM notice).
+  Its rules for GNU attributes clang does not know (`gnu-attrs`, `gattr-rules`; CP294 (a), doc/cpp/CPP-SURVEY.md, "As built:
+  CP290-CP294") are Arbace's own, written clean-room from the GCC 15.2 manual's description of each attribute (no GCC code read or
+  ported; the messages Arbace's own). Its fifth slice (doc/cpp/CPP-SURVEY.md, "As built: CX12 (fifth slice)") follows
+  `clang/lib/Sema/SemaDeclCXX.cpp`'s `CheckConstexprFunctionBody`, `CheckConstexprDeclStmt`, `CheckConstexprMissingReturn` and
+  `MergeCXXFunctionDecl` of the same release (`constexpr-bodies`, `constexpr-redecls`), its texts clang's.
+- `test/cpp/builtins.ae` (`cpp.builtins`) and `cpp/target/clang-builtins.edn` (CX12, CP270 (a)): the table is computed from the same
+  tarball's `clang/include/clang/Basic/Builtins.td`, `BuiltinsBase.td`, `BuiltinsX86.td`, `BuiltinsX86Base.td`, `BuiltinsX86_64.td`
+  (read as data, the names as `clang/utils/TableGen/ClangBuiltinsEmitter.cpp` makes them) and `TokenKinds.def`,
+  `TransformTypeTraits.def` (the keywords), under the Apache License 2.0 with the LLVM Exceptions (section "LLVM (clang)" below);
+  the reader carries clang's notice, the table names its sources.
 - `test/java/` (bin/java-check, Java's conformance check, doc/classes/JAVA-CONFORMANCE-SURVEY.md,
   "As built: JC1"): its tools, data and the hand-curated programs of `test/java/jls/` are Arbace's
   own, under the Eclipse Public License 1.0. jdk26u's jtreg tests are read in place from the
@@ -1522,6 +1608,14 @@ covers what.
 - `scheme/vendor/chibi/` (Chibi Scheme 0.12's `(chibi test)` and the libraries it imports, with three of
   their tests; `scheme/vendor/chibi/provenance.edn`) and `scheme/lib/chibi/optional.sls`, derived from
   it: under the BSD 3-Clause License below ("Chibi Scheme").
+- `arbace/repr/scheme/category.ae`, `arbace/repr/scheme/unicode.ae`, `arbace/repr/scheme/casefold.ae` and
+  `go/arbace/scm/unicode.ae` (SCS9 (c), SCS12 (c), SCS13 (b), doc/scheme/SCHEME-SURVEY.md, "As built: SCS9 (c), SCS10 (b),
+  SCS11 (b)", "As built: SCS12-SCS14"): generated by `arbace.repr.scheme.ucd` from the Unicode Character Database 16.0.0
+  (https://www.unicode.org/Public/16.0.0/ucd/ `UnicodeData.txt`, `extracted/DerivedGeneralCategory.txt` and `CaseFolding.txt`,
+  pinned by SHA-256 in `test/scheme/ucd.edn`, fetched 2026-11-08): the general categories, the identifier and whitespace
+  ranges derived from them and the case foldings are Unicode's data, under the Unicode License V3 below ("The
+  Unicode Character Database 16.0.0 (repr/scheme's Unicode data)"); the generator and the files' code are Arbace's own,
+  under the Eclipse Public License 1.0.
 - `seed/arbace-seed-go.tar.xz` (since S4, 2026-10-13; doc/STANDALONE-NOTES.md, "S4: the
   Go-source seed"): the seed of the bootstrap, Arbace's Go program as the Go-hosted fixpoint
   printed it, the source of the Go build's executables (above): the main package with its
@@ -2998,6 +3092,57 @@ Severability.  If any provision of this Agreement is declared invalid or unenfor
 Entire Agreement. This Agreement constitutes the entire agreement between the parties.
 ```
 
+## The Unicode Character Database 16.0.0 (repr/scheme's Unicode data): Unicode License V3
+
+Covers the data of `arbace/repr/scheme/category.ae`, `arbace/repr/scheme/unicode.ae`, `arbace/repr/scheme/casefold.ae` and
+`go/arbace/scm/unicode.ae`, generated from the Unicode Character Database 16.0.0 (`UnicodeData.txt`,
+`extracted/DerivedGeneralCategory.txt`, `CaseFolding.txt`;
+https://www.unicode.org/Public/16.0.0/ucd/, pinned by `test/scheme/ucd.edn`). The license, the text of
+https://www.unicode.org/license.txt as fetched on 2026-11-08 (SHA-256
+`e7a93b009565cfce55919a381437ac4db883e9da2126fa28b91d12732bc53d96`, pinned in `test/scheme/ucd.edn`):
+
+```
+UNICODE LICENSE V3
+
+COPYRIGHT AND PERMISSION NOTICE
+
+Copyright © 1991-2026 Unicode, Inc.
+
+NOTICE TO USER: Carefully read the following legal agreement. BY
+DOWNLOADING, INSTALLING, COPYING OR OTHERWISE USING DATA FILES, AND/OR
+SOFTWARE, YOU UNEQUIVOCALLY ACCEPT, AND AGREE TO BE BOUND BY, ALL OF THE
+TERMS AND CONDITIONS OF THIS AGREEMENT. IF YOU DO NOT AGREE, DO NOT
+DOWNLOAD, INSTALL, COPY, DISTRIBUTE OR USE THE DATA FILES OR SOFTWARE.
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of data files and any associated documentation (the "Data Files") or
+software and any associated documentation (the "Software") to deal in the
+Data Files or Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, and/or sell
+copies of the Data Files or Software, and to permit persons to whom the
+Data Files or Software are furnished to do so, provided that either (a)
+this copyright and permission notice appear with all copies of the Data
+Files or Software, or (b) this copyright and permission notice appear in
+associated Documentation.
+
+THE DATA FILES AND SOFTWARE ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
+KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF
+THIRD PARTY RIGHTS.
+
+IN NO EVENT SHALL THE COPYRIGHT HOLDER OR HOLDERS INCLUDED IN THIS NOTICE
+BE LIABLE FOR ANY CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES,
+OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS,
+WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
+ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THE DATA
+FILES OR SOFTWARE.
+
+Except as contained in this notice, the name of a copyright holder shall
+not be used in advertising or otherwise to promote the sale, use or other
+dealings in these Data Files or Software without prior written
+authorization of the copyright holder.
+```
+
 ## zlib: zlib License
 
 Covers `overlay/jdk/java.base/java/util/zip/Deflater.java` and `Inflater.java` (ports of zlib's
@@ -3998,6 +4143,36 @@ to be subject to copyright, resulting in confusion over whether it
 negated the permissions granted in the license. In the spirit of
 permissive licensing, and of not having licensing issues being an
 obstacle to adoption, that text has been removed.
+## libffi: MIT License
+
+The `LICENSE` of libffi 3.8.0 (https://github.com/libffi/libffi/releases/download/v3.8.0/libffi-3.8.0.tar.gz,
+`test/haskell/target/libffi.edn`'s pin), whole; it covers what `arbace/repr/haskell/target.ae` ports of its configure and the
+two headers it makes from the tarball (above):
+
+```
+libffi - Copyright (c) 1996-2026  Anthony Green, Red Hat, Inc and others.
+See source files for details.
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+``Software''), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED ``AS IS'', WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
 ## GHC: the Glasgow Haskell Compiler License
 
 The `LICENSE` of GHC 9.14.1's source tarball (above), covering what repr/haskell's native reader
@@ -4366,7 +4541,7 @@ PERFORMANCE OF THIS SOFTWARE.
 
 ## LLVM (llvm/test files in test/llvm/essential/, repr/llvm's verifier and tables): Apache License 2.0 with LLVM Exceptions
 
-The modules of `test/llvm/essential/` are files of `llvm/test` of llvm-project at `llvmorg-23.1.4` (commit 7a941dfb2877a0b8cf30323fefa85ad019e0b0f5, `llvm-project-23.1.4.src.tar.xz`, pinned in `test/cpp/corpora.edn`), copied unchanged as test data; the rest of `llvm/test`, read in place from the pinned tarball, is not stored. The same release's `llvm/lib/IR/Verifier.cpp`, `Intrinsics.cpp`, `AutoUpgrade.cpp`, `Type.cpp`, `Attributes.cpp`, `AsmWriter.cpp`, `DebugInfoMetadata.cpp` and `llvm/lib/AsmParser/LLParser.cpp`, `LLLexer.cpp` are reimplemented in part by `arbace/repr/llvm/verify.ae`, `read.ae`, `intr.ae` and `diag.ae` (doc/ARBACE.md), and `arbace/repr/llvm/intr_table.ae` and `di_table.ae` are generated from its `llvm/include/llvm/IR/Intrinsics*.td`, `DebugInfoFlags.def`, `llvm/include/llvm/BinaryFormat/Dwarf.def`, `Dwarf.h`, `LLParser.cpp` and `AsmWriter.cpp` (`bin/llvm-corpus intrinsics`, `di-table`). The text of `llvm/LICENSE.TXT` of that release follows.
+The modules of `test/llvm/essential/` are files of `llvm/test` of llvm-project at `llvmorg-23.1.4` (commit 7a941dfb2877a0b8cf30323fefa85ad019e0b0f5, `llvm-project-23.1.4.src.tar.xz`, pinned in `test/cpp/corpora.edn`), copied unchanged as test data; the rest of `llvm/test`, read in place from the pinned tarball, is not stored. The same release's `llvm/lib/IR/Verifier.cpp`, `Intrinsics.cpp`, `AutoUpgrade.cpp`, `Type.cpp`, `Attributes.cpp`, `AsmWriter.cpp`, `DebugInfoMetadata.cpp` and `llvm/lib/AsmParser/LLParser.cpp`, `LLLexer.cpp` are reimplemented in part by `arbace/repr/llvm/verify.ae`, `read.ae`, `intr.ae` and `diag.ae` (doc/ARBACE.md), and those of release 23.1.5 (`llvm-project-23.1.5.src.tar.xz`, the same `llvm/LICENSE.TXT`) with `Attributes.td`, `CallingConv.h` and `DiagnosticInfo.cpp` by `arbace/repr/llvm/expect.ae` (LLS33 (b)), and `arbace/repr/llvm/intr_table.ae` and `di_table.ae` are generated from its `llvm/include/llvm/IR/Intrinsics*.td`, `DebugInfoFlags.def`, `llvm/include/llvm/BinaryFormat/Dwarf.def`, `Dwarf.h`, `LLParser.cpp` and `AsmWriter.cpp` (`bin/llvm-corpus intrinsics`, `di-table`). The text of `llvm/LICENSE.TXT` of that release follows.
 
 The LLVM Project is under the Apache License v2.0 with LLVM Exceptions:
 ==============================================================================

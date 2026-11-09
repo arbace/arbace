@@ -123,10 +123,19 @@
   [occ m]
   (with-meta (list 'lv occ (fresh-uniq)) m))
 
-(defn clone
-  "A binder's copy with a new unique (uniqAway), its IdInfo and type kept"
+(def ^:dynamic *eta-tag* false) ; CorePrep's eta expansion (cpeEtaExpand): the binders' builtin uniques (mkEtaWW's
+                                ; mkBuiltinUnique n), one name a position: (lv "eta" "E<n>.<uniq>")
+
+(defn eta-tag
+  "The position of a CorePrep eta binder (its builtin unique), or nil"
   [b]
-  (let [b2 (with-meta (list 'lv (second b) (fresh-uniq)) (meta b))]
+  (when (and (seq? b) (= "eta" (second b)) (string? (nth b 2 nil)))
+    (second (re-find #"^E([0-9]+)\." (nth b 2)))))
+
+(defn clone
+  "A binder's copy with a new unique (uniqAway), its IdInfo and type kept (a CorePrep eta binder its position)"
+  [b]
+  (let [b2 (with-meta (list 'lv (second b) (if-let [t (eta-tag b)] (str "E" t "." (fresh-uniq)) (fresh-uniq))) (meta b))]
     (when-let [t (id-type b)] (when *new-types* (swap! *new-types* assoc b2 t)))
     b2))
 
@@ -220,6 +229,119 @@
               c1 {:l a2 :r a1} c2 {:l r1 :r r2}]
           [(when-not (co-refl? c1) c1) (when-not (co-refl? c2) c2)])
         :else nil))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The binders' types (HF10): every Id of GHC's Core carries its type (idType); the elaborator's binders have theirs
+;;; (*ltypes*), the desugarer's (the match compiler's fresh variables, case binders, failure handlers) and the
+;;; Simplifier's (eta binders without a known type) do not. GHC.Core.Utils' exprType and GHC.Core.DataCon's
+;;; dataConInstArgTys give them theirs from the binding site: a let's binder its right-hand side's type, a case's binder
+;;; its scrutinee's, an alternative's binders the constructor's fields at the scrutinee's type arguments, a lambda's
+;;; binders the arguments of the type expected there (the binding's own type, a cast's source, a known function's
+;;; parameter). The representations tostg derives from them (typePrimRep) are Unarise's.
+
+(declare collect-args collect-binders bind-pairs)
+
+(def ^:private prim-tc (fn [o] [:tc ["ext" "tc" "GHC.Internal.Prim" o] []]))
+
+(defn lit-type
+  "A Core literal's type (literalType), or nil"
+  [t]
+  (cond
+    (re-matches #"-?[0-9]+#w64" t) (prim-tc "Word64#")
+    (re-matches #"-?[0-9]+#i64" t) (prim-tc "Int64#")
+    (re-matches #"-?[0-9]+##" t) (prim-tc "Word#")
+    (re-matches #"-?[0-9]+#" t) (prim-tc "Int#")
+    (re-matches #"(?s)'.*'#" t) (prim-tc "Char#")
+    (re-matches #"(?s)\".*\"#" t) (prim-tc "Addr#")
+    (re-matches #"-?(Infinity|[0-9.eE+-]+)##" t) (prim-tc "Double#")
+    (re-matches #"-?(Infinity|[0-9.eE+-]+)#" t) (prim-tc "Float#")
+    :else nil))
+
+(defn- ty-match
+  "One-way matching of a pattern type (a constructor's or a function's, its quantified variables free) against an
+  instance: the variables' bindings added to m (tcMatchTy, the part the representations need)"
+  [m p t]
+  (cond (or (not (vector? p)) (not (vector? t))) m
+        (= :tv (first p)) (if (contains? m (second p)) m (assoc m (second p) t))
+        (and (= :tc (first p)) (= :tc (first t)) (= (second p) (second t)) (nth p 2) (nth t 2)
+             (= (count (nth p 2)) (count (nth t 2))))
+        (reduce (fn [m [a b]] (ty-match m a b)) m (map vector (nth p 2) (nth t 2)))
+        :else m))
+
+(defn- peel-param
+  "A function type's first value parameter (a dictionary's predicate too) and the rest, through newtypes: [arg res]"
+  [t]
+  (loop [t t seen #{}]
+    (cond (not (vector? t)) nil
+          (and (= :forall (first t)) (seq (nth t 2)))
+          [(vec (first (nth t 2))) (if (next (nth t 2)) [:forall [] (vec (rest (nth t 2))) (nth t 3)] (nth t 3))]
+          (= :forall (first t)) (recur (nth t 3) seen)
+          (fun-ty? t) (vec (nth t 2))
+          (and (= :tc (first t)) (not (contains? seen (second t))) (newtype-rep t)) (recur (newtype-rep t) (conj seen (second t)))
+          :else nil)))
+
+(defn- note-type! [b t]
+  (when (and t *new-types* (head? b 'lv) (nil? (id-type b)))
+    (swap! *new-types* assoc b t)))
+
+(defn- con-field-types
+  "dataConInstArgTys: a constructor's fields' types (its dictionaries' too) at the scrutinee's type, or nil"
+  [c n st]
+  (when-let [ct (get *genv* c)]
+    (let [ps (loop [t ct k n out []]
+               (if (zero? k) [out t]
+                   (when-let [[a r] (peel-param t)] (recur r (dec k) (conj out a)))))]
+      (when ps
+        (let [[args res] ps m (if st (ty-match {} (strip-forall (if (= :forall (first res)) (nth res 3) res)) st) {})]
+          (mapv #(tsubst m %) args))))))
+
+(defn infer-type!
+  "exprType of a Core expression, the binders inside it that have no type given theirs (expected: the type the context
+  gives the expression, for its lambdas' binders)"
+  [e expected]
+  (if-not (seq? e)
+    nil
+    (case (first e)
+      (lv v) (id-type e)
+      lit (lit-type (second e))
+      cast (do (infer-type! (second e) (:l (nth e 2))) (:r (nth e 2)))
+      app (let [[f args] (collect-args e)
+                ft (infer-type! f nil)]
+            (loop [t ft as args m {}]
+              (if (empty? as)
+                (when t (tsubst m t))
+                (let [[p r] (when t (peel-param t))
+                      at (infer-type! (first as) (when p (tsubst m p)))]
+                  (recur r (rest as) (if (and p at) (ty-match m p at) m))))))
+      lam (let [[bs body] (collect-binders e)
+                rest-t (reduce (fn [t b] (let [[a r] (when t (peel-param t))] (note-type! b a) r)) expected bs)
+                bt (infer-type! body rest-t)]
+            (when bt (reduce (fn [acc b] (fun-ty (id-type b) acc)) bt (reverse bs))))
+      let (do (doseq [[_ b r] (second e)] (note-type! b (infer-type! r (id-type b))))
+              (infer-type! (nth e 2) expected))
+      letrec (do (doseq [[_ b r] (second e)] (note-type! b (infer-type! r (id-type b))))
+                 (infer-type! (nth e 2) expected))
+      case (let [[_ s b alts] e
+                 st (infer-type! s nil)
+                 _ (note-type! b st)
+                 st (or st (id-type b))
+                 st0 (when st (loop [t (strip-forall st) seen #{}]
+                                ;; the scrutinee's data type (a newtype's representation when the case is on a cast's source)
+                                (if (and (vector? t) (= :tc (first t)) (not (contains? seen (second t))) (newtype-rep t)
+                                         (not (contains? *tycons* (second t))))
+                                  (recur (newtype-rep t) (conj seen (second t))) t)))]
+             (reduce (fn [acc [_ c xs r]]
+                       (when (and (vector? c) (seq xs))
+                         (doseq [[x t] (map vector xs (or (con-field-types c (count xs) st0) (repeat nil)))] (note-type! x t)))
+                       (let [t (infer-type! r expected)] (or acc t)))
+                     nil alts))
+      nil)))
+
+(defn infer-binder-types!
+  "The top-level bindings' binders without a type given theirs (infer-type!), into *new-types*"
+  [binds]
+  (doseq [bd binds [_ b r] (bind-pairs bd)]
+    (infer-type! r (id-type b))))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Expressions: building and taking apart
@@ -679,7 +801,8 @@
   (loop [shots shots t ty bs [] tys [] newtype? false seen #{}]
     (if (empty? shots)
       [bs (when (and newtype? t) {:l ty :r (reduce (fn [r a] (fun-ty a r)) t (reverse tys))})]
-      (let [mk (fn [at] (let [b (fresh-local "eta" (if (first shots) {:oneshot true} {}))]
+      (let [mk (fn [at] (let [m (if (first shots) {:oneshot true} {})
+                              b (if *eta-tag* (with-meta (list 'lv "eta" (str "E" (inc (count bs)) "." (fresh-uniq))) m) (fresh-local "eta" m))]
                           (when (and at *new-types*) (swap! *new-types* assoc b at))
                           b))]
         (if-let [[a r] (when t (peel-arg t))]

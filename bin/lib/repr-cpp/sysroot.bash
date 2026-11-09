@@ -5,7 +5,8 @@
 # musl's tarball, no header of the host; REPR_CPP_HEADERS=libstdcxx the tree with the host's C library headers in place;
 # REPR_CPP_HEADERS=host the host's installed trees in place, as before (the oracle tier's: `bin/repr-cpp target oracle`).
 #   cpp_target_tree       the tree's directory .tmp/cpp-target/KEY (made when missing; KEY: the description, cpp.target, the
-#                         tarball's pin and musl's prepared headers): usr/include/c++/15.2.0 and roots.txt
+#                         tarball's pin, llvm-project's for clang's resource directory (P20 (b)) and musl's prepared headers): usr/include/c++/15.2.0,
+#                         gcc's and clang's include directories, and roots.txt
 #   cpp_sysroot           exports ARBACE_C_SYSROOT, the tree, which repr/c's preprocessor (C++'s too) reads a name under
 #                         roots.txt from (the search lists' three libstdc++ directories), every other name from the host
 cpp_target_tree() {
@@ -17,7 +18,11 @@ cpp_target_tree() {
   cs=$( (unset ARBACE_C_SYSROOT ARBACE_C_HOST ARBACE_C_TARGET; . "$root/bin/lib/repr-c/sysroot.bash"; c_sysroot > "$TMPDIR/cpp-target-c.log" 2>&1 && echo "$ARBACE_C_SYSROOT") ) \
     || { cat "$TMPDIR/cpp-target-c.log" >&2; echo "cpp-target: C's sysroot failed" >&2; return 1; }
   [ -n "$cs" ] || { cat "$TMPDIR/cpp-target-c.log" >&2; return 1; }
-  k=$( { (cd "$root" && sha256sum cpp/target/libstdcxx.edn test/cpp/target.ae bin/lib/repr-cpp/sysroot.bash); echo "$want"; basename "$cs"; } | sha256sum | cut -c1-16)
+  # P20 (b): clang's resource directory from the pinned llvm-project tarball (test/cpp/corpora.edn's llvmorg-23.1.5)
+  local lt lwant
+  lt=${REPR_CPP_LLVM_TARBALL:-$main/.tmp/llvm/llvm-project-23.1.5.src.tar.xz}
+  lwant=$(sed -n '/:tag "llvmorg-23.1.5"/,/:sha256/s/^ *:sha256 "\([0-9a-f]*\)".*/\1/p' "$root/test/cpp/corpora.edn" | head -1)
+  k=$( { (cd "$root" && sha256sum cpp/target/libstdcxx.edn cpp/target/clang.edn test/cpp/target.ae bin/lib/repr-cpp/sysroot.bash); echo "$want $lwant"; basename "$cs"; } | sha256sum | cut -c1-16)
   d=$root/.tmp/cpp-target/$k
   if [ ! -f "$d.ok" ]; then
     [ "$(sha256sum < "$t" | cut -c1-64)" = "$want" ] || { echo "cpp-target: $t is not the pinned gcc-15.2.0 tarball (test/cpp/corpora.edn)" >&2; return 1; }
@@ -45,10 +50,20 @@ cpp_target_tree() {
     while IFS=$'\t' read -r i s; do mkdir -p "$gi/$(dirname "$i")"; cp "$st/src/gcc-15.2.0/$s" "$gi/$i"; done < "$st/copy-compiler.tsv"
     (cd "$gi" && find . -type f | LC_ALL=C sort | xargs sha256sum) > "$st/compiler-tree.sha256"
     rm -rf "$st/src"
+    # clang's resource directory (P20 (b); cpp/target/clang.edn's :resource-include): clang/lib/Headers as its CMakeLists.txt installs it
+    [ "$(sha256sum < "$lt" | cut -c1-64)" = "$lwant" ] || { echo "cpp-target: $lt is not the pinned llvm-project-23.1.5 tarball (test/cpp/corpora.edn)" >&2; rm -rf "$st"; return 1; }
+    local ri=$st/usr/lib/llvm23/lib/clang/23/include
+    mkdir -p "$st/src" "$ri"
+    tar -xJf "$lt" -C "$st/src" llvm-project-23.1.5.src/clang/lib/Headers || { rm -rf "$st"; return 1; }
+    GOMEMLIMIT=1GiB arbace_tool -p "$root/test" -m cpp.target plan-resource "$st/src/llvm-project-23.1.5.src" "$st" >> "$st/plan.log" 2>&1 \
+      || { cat "$st/plan.log" >&2; rm -rf "$st"; return 1; }
+    while IFS=$'\t' read -r i s; do mkdir -p "$ri/$(dirname "$i")"; cp "$st/src/llvm-project-23.1.5.src/$s" "$ri/$i"; done < "$st/copy-resource.tsv"
+    (cd "$ri" && find . -type f | LC_ALL=C sort | xargs sha256sum) > "$st/resource-tree.sha256"
+    rm -rf "$st/src"
     # the roots: the libstdc++ directories of the target's search list (cpp/target/host/search-gxx.txt, CP244 (b)) and clang's
-    # (test/cpp/host/search-clang.txt, the native parser's host), their dot-dots resolved
+    # (cpp/target/host/search-clang.txt, the native parser's, CP248 (a)), their dot-dots resolved
     # lexically as the preprocessor names an opened file (/usr/include/c++/15.2.0, its target and backward directories)
-    cat "$root"/cpp/target/host/search-gxx.txt "$root"/test/cpp/host/search-clang.txt | grep '/include/c++/' | while read -r r; do realpath -m -s "$r"; done \
+    cat "$root"/cpp/target/host/search-gxx.txt "$root"/cpp/target/host/search-clang.txt | grep '/include/c++/' | while read -r r; do realpath -m -s "$r"; done \
       | awk '!s[$0]++' > "$st/roots.txt"
     (cd "$st/usr/include/c++/15.2.0" && find . -type f | LC_ALL=C sort | xargs sha256sum) > "$st/tree.sha256"
     echo "$cs" > "$st/c-sysroot"
@@ -75,7 +90,7 @@ cpp_full_sysroot() {
       if [ -f "$id" ] && [ "$(sha256sum < "$id" | cut -c1-64)" = "$want" ]; then mkdir -p "$f.$$$(dirname "$id")"; cp "$id" "$f.$$$id"
       else echo "C++: $id is not the host's at cpp/target/libraries.sha256's digest: left out of the sysroot" >&2; fi
     done
-    cat "$root"/cpp/target/host/search-gxx.txt "$root"/test/cpp/host/search-clang.txt | while read -r r; do realpath -m -s "$r"; done | awk 'NF && !s[$0]++' > "$f.$$/roots.txt"
+    cat "$root"/cpp/target/host/search-gxx.txt "$root"/cpp/target/host/search-clang.txt | while read -r r; do realpath -m -s "$r"; done | awk 'NF && !s[$0]++' > "$f.$$/roots.txt"
     cp "$d/tree.sha256" "$f.$$/tree.sha256"
     rm -rf "$f"; mv "$f.$$" "$f"; : > "$f.ok"
   fi

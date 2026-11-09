@@ -575,9 +575,12 @@ func runOpts(in io.Reader, out io.Writer, o options) (kept, dropped int64, err e
 	} else {
 		fmt.Fprintf(bw, "{\"cxxdump\":1,\"main\":%q}\n", main)
 	}
+	ids := map[string]string{}
 	emit := func(c *obj) {
 		if o.norm {
 			normalize(c)
+		} else {
+			renumber(c, ids)
 		}
 		if edn {
 			writeEdn(bw, c)
@@ -592,6 +595,33 @@ func runOpts(in io.Reader, out io.Writer, o options) (kept, dropped int64, err e
 	return f.kept, f.dropped, bw.Flush()
 }
 
+// renumber replaces clang's per-run ids (the nodes' addresses, which ASLR moves from run to run) by their order of first
+// appearance in the dump, 0x1, 0x2, ...: every string value of the form 0x[0-9a-f]+ (the same values normalize drops), under any
+// key and in arrays, so that a reference and the node it names keep one number and the same input gives the same output byte
+// for byte (the records of ORS12 (a): a dump pack verified entry by entry). ids is the dump's map, shared by its top-level forms.
+func renumber(v any, ids map[string]string) any {
+	switch x := v.(type) {
+	case *obj:
+		for i := range x.vals {
+			x.vals[i] = renumber(x.vals[i], ids)
+		}
+	case []any:
+		for i := range x {
+			x[i] = renumber(x[i], ids)
+		}
+	case string:
+		if reID.MatchString(x) {
+			n, ok := ids[x]
+			if !ok {
+				n = fmt.Sprintf("0x%x", len(ids)+1)
+				ids[x] = n
+			}
+			return n
+		}
+	}
+	return v
+}
+
 func main() {
 	mainFile := flag.String("main", "", "the main file as clang prints it (default: the last argument)")
 	implicit := flag.Bool("implicit", true, "keep implicit declarations of the main file")
@@ -604,7 +634,13 @@ func main() {
 	layouts := flag.Bool("layouts", false, "also run a CodeGen pass with -fdump-record-layouts and write the main file's record layouts")
 	statsName := flag.String("stats", "", "write the run's numbers (bytes, declarations, seconds, peak memory) as one Clojure-reader map to FILE")
 	cacheDir := flag.String("cache", "", "keep the output in DIR by key (the arguments, the main file, clang's version), checked against the digests of every file the unit read")
+	records := flag.String("records", "", "serve the unit from recorded entries (a cache's layout, the unpacked packs: DIR[:DIR...]) with no clang: a miss is an error (ORS12 (a))")
+	clangIDFlag := flag.String("clang-id", "", "the clang line the key names, in place of clang --version's first line (with -records: the recorded one)")
 	flag.Parse()
+	clangID = *clangIDFlag
+	if clangID == "" {
+		clangID = os.Getenv("CXXDUMP_CLANG_ID")
+	}
 	args := flag.Args()
 	if *mainFile == "" && len(args) > 0 {
 		*mainFile = args[len(args)-1]
@@ -628,6 +664,21 @@ func main() {
 		os.Exit(2)
 	}
 	j := job{clang: *clang, args: args, opts: o, layouts: *layouts}
+	if *records != "" {
+		recordsOnly = true
+		k, err := j.key()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "cxxdump:", err)
+			os.Exit(exitOwn)
+		}
+		*cacheDir = strings.Split(*records, ":")[0]
+		for _, d := range strings.Split(*records, ":") {
+			if _, err := os.Stat(filepath.Join(d, k[:2], k+".status")); err == nil {
+				*cacheDir = d
+				break
+			}
+		}
+	}
 	if *cacheDir != "" {
 		st, hit, err := cached(*cacheDir, j, *outName)
 		if err != nil {

@@ -538,7 +538,8 @@
                                        (let [mods (set (map #(first (str/split (str %) #"/" 2)) ids))]
                                          (set (filter #(mods (first (str/split % #"/" 2))) all)))
                                        all))
-                     (:same-cases src) (set (map #(if (map? %) (:id %) (first %)) (read-edn (:same-cases src))))
+                     (:same-cases src) (into (set (map #(if (map? %) (:id %) (first %)) (read-edn (:same-cases src))))
+                                             (:same-cases-extra src))
                      (:ref-runs src) (ref-run-ids (:ref-runs src)))
           ;; :ref-corpora (C++'s run checks, cppi-check 2026-11-05): the cases wanted are those of these corpora only (a case
           ;; CORPUS/NAME); test/cpp/ref-gxx15.edn holds the whole corpora samples and runtime and every 25th program of
@@ -619,14 +620,15 @@
     (if (#{:design :deferred :na :budget} k) k (get (:kind-map cell) k))))
 
 (defn- per-file
-  "Entries of one id merged into one: an entry in no class kept as it is (a problem), else the first deferred one, else the first;
+  "Entries of one id merged into one: an entry in no class kept as it is (a problem), else the first deferred one, else the first
+  counted one (not :na: a file not applicable at one level but judged at another is judged, CP260 (a)), else the first;
   its reason names the other levels' classes."
   [es]
   (let [groups (group-by :id es)]
     (vec (for [id (distinct (map :id es))
                :let [g (get groups id)
                      classed (filter :class g)
-                     pick (or (first (filter #(= :deferred (:kind %)) classed)) (first classed))]
+                     pick (or (first (filter #(= :deferred (:kind %)) classed)) (first (remove #(= :na (:kind %)) classed)) (first classed))]
                e (if (or (nil? pick) (some #(nil? (:class %)) g))
                    g
                    [(cond-> pick
@@ -642,7 +644,36 @@
           (for [f (let [x (:py-ref src)] (if (vector? x) x (when x [x]))) :when (not (exists? f))] f)
           (for [{:keys [corpus known]} (:parts src) f [corpus known] :when (not (exists? f))] f)
           (when-let [d (:expected src)] (when-not (dir? d) [d]))
-          (when-let [d (:results-dir src)] (when-not (dir? d) [d]))))
+          (when-let [d (:results-dir src)] (when-not (dir? d) [d]))
+          ;; CP262 (b): an :own-for's list (its record may wait for its check)
+          (when-let [l (get-in src [:own-for :list])] (when-not (exists? l) [l]))))
+
+(defn- own-for
+  "CP262 (b) (doc/cpp/CPP-SURVEY.md, \"As built: cpp-props\"): a source's :own-for {:file RECORD :list LIST :judge NAME}: the
+  cases LIST names (one id a line, `#` comments) are judged by RECORD's rows ([ID RESULT REASON], another judge's record of the same
+  cases: C++'s files expecting only syntax errors by the native front end's own errors) in place of the source's, each such row's
+  non-pass reason headed \"own: \"; a case RECORD has no row for keeps the source's verdict, and with RECORD not there yet (its
+  check not recorded) every case does (said in the detail). Only a :results source's rows (:ids) are replaced."
+  [src r]
+  (if-let [{:keys [file list judge]} (:own-for src)]
+    (let [names (set (for [l (str/split-lines (slurp (path list))) :let [l (str/trim l)]
+                           :when (and (seq l) (not (str/starts-with? l "#")))] l))]
+      (if-not (exists? file)
+        (update r :detail #(str % (when % "; ") "the " (count names) " cases of " list " by " (or judge file) " once " file " is recorded"))
+        (let [own (into {} (for [[id res why] (read-edn file) :when (names id)] [id [res why]]))
+              ids (set (:ids r))
+              taken (filter #(and (own %) (ids %)) names)
+              taken-set (set taken)
+              base-np (set (map :id (:entries r)))
+              keep-es (remove #(taken-set (:id %)) (:entries r))
+              own-es (for [id (sort taken) :let [[res why] (own id)] :when (not= :pass res)] (entry id res (str "own: " why)))
+              d-pass (- (count (filter #(= :pass (first (own %))) taken))
+                        (count (remove base-np taken)))]
+          (-> r
+              (assoc :entries (vec (concat keep-es own-es)))
+              (update :pass + d-pass)
+              (update :detail #(str % (when % "; ") (count taken) " of the " (count names) " cases of " list " by " (or judge file)))))))
+    r))
 
 (defn- judge-source
   "A source read and judged: its entries with their classes. Every file it names must be there,
@@ -661,7 +692,7 @@
     (if-not present
       (assoc src :present false
                  :problems (when-not not-yet (vec (for [f miss] (str (:name src) ": no " f)))))
-      (let [r (read-source src)
+      (let [r (own-for src (read-source src))
             classes (classes-of cf)
             es (for [e (:entries r)] (let [c (classify-entry classes e)] (assoc e :class c :kind (when c (kind-of cell c)))))
             ;; :per-file (the token check's three sections, queue 122 finding 4): a file the known file lists at several levels
