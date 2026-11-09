@@ -4840,3 +4840,43 @@ ported from CPython 3.14.10's Python/sysmodule.c and Modules/signalmodule.c (the
   test_audit is in no class of this task), getrefcount (a constant; test_refcount is cpython_only), the JIT, `-X utf8=0`/-I's
   effect on the standard streams (the stream config reads the environment; -E and -I are honoured for PYTHONIOENCODING
   through PYI_IGNORE_ENV), stdin's decoding by PYTHONIOENCODING (only the encoding of writes).
+
+## As built: 243, a module's doctests (2026-11-09, the Mac VM, queue 243)
+
+`:doctests` (69 tests in the main host's records, one case each) was no single cause: doctest itself (CPython's pure-Python
+Lib/doctest.py: parser, runner, finder, `__file__`/linecache, traceback matching, `__test__`, DocFileSuite) ran correctly
+on pyi's modules; each failing case was one example, and the examples' causes were pyi's own.
+
+- **How they were found.** A driver (`dt.py`, in the report's appendix) loads a Lib/test module through unittest's loader and
+  runs every `DocTestCase` alone, printing doctest's own report of the failing examples. Run by pyi's AOT (`bin/pyi aot`,
+  where finalization works; on goi, `bin/pyi run`, two more cases fail only for goi's registers). 249 doctest cases of
+  test_extcall, test_unpack, test_unpack_ex, test_genexps, test_setcomps, test_listcomps, test_generators, test_weakref,
+  test_syntax, test_descrtut, test_deque, test_heapq, test_metaclass, test_difflib, test_collections, test_enum, test_math,
+  test_pep646_syntax, test_http_cookies, test_pickle, test_typing, test_decimal (67), test_statistics (29) and test_doctest
+  (68): at the base 11 failed (test_extcall, test_unpack, test_unpack_ex, test_genexps, test_generators' email,
+  test_weakref's libreftest, and test_doctest's test_CLI, test_DocFileSuite, test_look_in_unwrapped, test_testfile, wrapped);
+  decimal's and statistics' doctests, in the main host's older record, already pass at the base.
+- **Causes fixed** (each with its CPython source):
+  1. `compile(src, name, 'single')` took a first string statement for a docstring and displayed nothing: `>>> "a"` printed
+     no `'a'`. Interactive has no docstring (compiler_mod); `compile-module*` leaves the docstring to mode exec. The cause of
+     six of the 11 (test_doctest's five and every file doctest whose example is a lone string).
+  2. unpack: "too many values to unpack (expected 2, got 3)" for an exact tuple, list or dict (unpack_iterable); an iterator's
+     message stays "(expected 2)".
+  3. A call's `**` (DICT_MERGE): a keyword after a `**` is a one-item map merged (compiler_subkwargs), so a repeat is
+     found; a mapping that is no dict is merged key by key through keys() and [], so its own repeated keys are found; the
+     repeat is reported before a non-string key ("keywords must be strings" is the call's, later).
+  4. A lone `*x` argument is the call's own tuple argument (starunpack_helper): CALL_FUNCTION_EX makes the tuple and says
+     "f() argument after * must be an iterable, not X" (only for a type with no iteration; `f(1, *x)` keeps LIST_EXTEND's
+     "Value after * ...").
+  5. Slot wrappers' `__doc__` (typeobject.c's slotdefs: `go/arbace/py/slotdocs.ae`, generated from 3.14.10's own wrapper
+     descriptors) and the doc of a built-in method named like a slot (`gen.__next__.__doc__` is "Implement next(self).").
+  6. `weakref.ref` subclass with keywords (`ExtendedRef(ob, foo=1)`): __new__ counted the keyword values as positional.
+- **Left: one case, by design.** test_genexps' "Verify re-use of tuples" needs a freed tuple's address handed to the next
+  tuple (reference counting): class `:tuple-id-reuse`.
+- **After.** The same 249 cases: 1 fails (the class above), measured with `bin/pyi aot` at the head. `bin/pyi lib-test --aot`
+  on test_genexps, test_extcall, test_unpack, test_unpack_ex, test_doctest, test_weakref: see the report.
+- **Not a cause:** `__file__`, `__loader__`, linecache, doctest's finder over pyi's modules, `sys.displayhook`, traceback
+  matching, reporting flags: all as CPython. test_json's doctests do not load in the driver (a `import_fresh_module` artifact)
+  and test_ctypes skips: unmeasured here.
+- **Check.** The probe `probe243.py` run by pyi's AOT equals `python3 -I -B`'s output line by line; its control compares a
+  changed reference and must differ (the report's appendix).
