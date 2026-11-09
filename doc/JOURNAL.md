@@ -3346,3 +3346,20 @@ The user accepted HF10-P1 to P10 as recommended (~06:15). Built by an agent in t
   the checker, the read's order-dependence, C++23's inherited constructors' guides, using-declarations' access for functions.
 - **Slips**: three throwaway commands against the day's rules (a mistyped `sed -i` naming the null device, a wait loop with `pgrep`
   and a discarded output, a process substitution in an inspection command); listed in the survey's "Slips, scratch".
+
+## 2026-11-09: C++'s CP322 (a), the dg read's order-dependence (branch `cpp-props4`, from `mac/next` 4be141f28)
+
+- **Found**: the dg read's pool threads loaded the code generator's Sema concurrently: `arbace.repr.cpp.diag/sema-errors` used
+  `requiring-resolve` (an unlocked resolve first) and a plain `require` of `arbace.cpp.template`, so a second thread could load
+  the template namespace again while the first one's unit ran on it; a failure in Sema is caught by `sema-errors` and leaves the
+  unit accepted. That fits the one flip (lookup/scoped15, the fourth file of the 90, accepted once); it was not reproduced in eleven
+  runs. Also `arbace.cpp.sema/text-of`'s header-text cache keyed by an unresolved relative header name (another directory's
+  header of the same name got the first one's text).
+- **Fixed**: `diag/load-sema!` (one `delay`, the requires under `RT/REQUIRE_LOCK`), called by `sema-errors`, `cxx-year` and by
+  `read-cmd` before its pool; the header texts keyed by the resolved path; `read-cmd` reads in the names' order, or shuffled by
+  `REPR_CPP_DG_SHUFFLE=SEED`.
+- **Proved**: the 90 access files in the names' order and shuffled, twice (seeds 7 and 3, the second on the commit's tree),
+  and the every-10th sample's 454 in both orders: identical verdicts each time (doc/cpp/CPP-SURVEY.md, "As built: CP322 (a)").
+- **Alternatives**: (b) a fresh process a file for the record (about twice the 80 minutes), not needed once the load is
+  serialized; keying the shared tables by file was the other half of (a).
+

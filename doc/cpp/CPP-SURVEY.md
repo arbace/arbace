@@ -5317,3 +5317,45 @@ an inspection command. Scratch in the worktree's `.tmp/`: `p/` (the probes), `t/
 SemaTemplateDeduction.cpp added), the apply scripts `apply*.py`. `.tmp/t/subm.sh` (copied from `cpp-cx12`'s scratch) did not pass `TREE`
 on to its reads at first: `fctad-b` ran before any edit of the tree, so it is the base it is named for; the access list's base
 (`facc-b`) was run again once the script passed it, and `facc-n`, its first run, is the one whose scoped15 row CP322 names.
+
+## Decided (the user, 2026-11-09 ~11:10: CP320 (a), CP321 (a), CP322 (a), CP323 (a), CP324 (a))
+
+## As built: CP322 (a), the dg read's order-dependence (2026-11-09; branch `cpp-props4` from `mac/next` 4be141f28)
+
+The state the dg read's threads shared, found by reading every namespace-level mutable of the read's path (`arbace.repr.cpp.*`,
+`arbace.cpp.sema`, `template`, `abi`: atoms, memo tables, dynamic vars with a mutable root, the parser's slots, the skim cache)
+and the loading of the code generator's Sema:
+
+- **The cause (a race, not an order):** `arbace.repr.cpp.diag/sema-errors`, which every file's read calls from the pool's threads,
+  reached Sema by `requiring-resolve` of `arbace.cpp.sema`'s vars and then a plain `(require 'arbace.cpp.template)`. Clojure's
+  `requiring-resolve` resolves first, unlocked, and takes the loader's lock only on a miss, and `require` takes no lock at all: while
+  one thread loads `arbace.cpp.template` (seconds: evaluated from the checkout), the other finds Sema resolved and loads the same
+  namespace again beside it, its vars (and `sema/hooks`, which it resets) redefined while the first thread's unit already runs on
+  them. A failure inside Sema is caught by `sema-errors`' `catch Throwable` and leaves the unit with no Sema error: "accepted". Only
+  the first files of each thread are exposed (lookup/scoped15 was the fourth of the 90 in the map's order, two threads), and only
+  when their parses end while the other thread is still loading: the one flip of `.tmp/facc-n`, not reproduced in eleven runs here,
+  before or after the fix (all its verdicts as the file alone gives them).
+- **Fixed:** `diag/load-sema!`, one `delay` that requires `arbace.cpp.sema` and `arbace.cpp.template` under
+  `arbace.lang.RT/REQUIRE_LOCK` (a `delay` derefs under its own lock: the other threads wait for the whole load); `sema-errors` and
+  `cxx-year` call it before resolving; and `read-cmd` loads it before the pool starts when the own front end reads.
+- **A second shared state, fixed:** `arbace.cpp.sema/text-of`'s cache of header texts (one atom a process, for a header's node text
+  in the analysis) was keyed by the file name as the locations write it, which for a header found beside the main file by a quoted
+  `#include` is relative to the main file's directory: a later file of another directory with a header of the same name got the
+  first one's text. Now keyed by the resolved path.
+- **The order made deterministic and testable:** `read-cmd` reads the files in their names' order (before: the hash map's order of
+  `dg.edn`), or shuffled by `REPR_CPP_DG_SHUFFLE=SEED` (`java.util.Random`), the written `read.edn` sorted as before.
+- Found and left (no state): `sema.ae`'s `CPP_LOOKUP_TRACE` test `(= (:name n) (System/getenv ...))` is true for an unnamed
+  declaration when the variable is unset, so a stray `declare nil [[:cls 2]] ...` line reaches stderr (noise only).
+
+Proof (light; the stubs first on PATH, `REPR_CPP_THREADS=2`; `.tmp/verd.ae` prints each file's status, lines and first message):
+
+| run | list, order | result |
+|---|---|---|
+| `.tmp/a1`-`a5` (before the fix) | the 90 access files (`.tmp/facc.txt`), the map's order | five times the same verdicts; scoped15 rejected each time |
+| `.tmp/o1`, `s1` | the 90, names' order; shuffled (seed 7) | identical verdicts (19 own passes) |
+| `.tmp/sA`, `sB` (at once, two processes) | the every-10th sample's 454, names' order; shuffled (seed 11) | identical verdicts (117 own passes, 293 accepted) |
+| `.tmp/o2`, `s2` (the commit's tree) | the 90, names' order; shuffled (seed 3) | identical verdicts, and identical to `o1`: the second time |
+| `.tmp/race1`-`4` | scoped15 twice in two threads at once, a fresh process each (Sema loaded by both) | rejected four times of four |
+
+The whole part's record, recorded tonight, is read in the names' order; the night's second command (the record held) reads it again,
+and a third, shuffled, is the order's proof on the 4,597 (the night's commands below).
