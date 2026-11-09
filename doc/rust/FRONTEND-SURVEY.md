@@ -2319,6 +2319,161 @@ Then (c): the attributes from our own collection of core at RF12, when core's bo
 tables, only if RF12 slips. Note: since RFP32 (a), MIR's passes read std's `#[rustc_nounwind]` and `#[rustc_promotable]` from the
 helper's interface (pinned data), the runs' callees from core's sources: two routes to one fact until RF12 collects core.
 
+## As built: RF11 (first slice), rsi's cases from the front end's own MIR (2026-11-09)
+
+Branch `rust-rf11` (from next `e6214cd13`), the user's order (RES54 (a): RF11 after RF10's slices; RFP41 (a): the eval cell's
+independence moves only when rsi's own cases run from the front end's MIR). The slice: which of rsi's cases the front end builds end
+to end now, how such a case is judged, the switch per case, and the gaps that block whole programs.
+
+### Design
+
+- **The cases.** rsi's eval cell is `bin/rsi check` over the samples (`test/rust/eval/`, 6 programs), the synthetic corpus
+  (`test/rust/synthetic/`, 67) and the UI corpus's run programs (3,718, the night's). A case runs today from rustc's `-O0` IR of the
+  program's codegen unit (`test/rust/ir/CORPUS.tar.xz`'s `x.ll`), rustc's allocator shim (`shim.ll`) and std's lowered library
+  (`bin/rsi runtime-ci`, std's IR made by Cargo and rustc: `bin/rsi std-build`), lowered to C, read and run by ci. The slice replaces
+  the first of the three, the program's codegen unit, with Arbace's: the program's own bodies built by the front end and run through
+  the passes to runtime MIR (no rustc MIR), arbace.rust.front.mono's native facts, codegen, the same lowering and run. The shim and
+  std stay rustc's (RF12's part), and so do the bodies of std's generic and inline instances the program instantiates: rsi's `x.ll`
+  is a share-generics build, ours a `-Zshare-generics=no` one, so the module holds every instance it uses, their bodies (core's,
+  alloc's, std's: RF12) from a record.
+- **The record, `rust-front-rsi`** (new kind of `bin/lib/repr-rust/front-records.bash`, `test/oracle-records/kinds.edn`'s
+  `front-rsi`): per program the helper's `--mono-mir` dump at rsi's plan's flags (bin/lib/rsi/plan.bash's `plan_rustc`: the edition,
+  rustc's debug defaults, the path relative to the checkout, `--remap-path-prefix`) with `-Zshare-generics=no`, against **rsi's std
+  build's sysroot** (`.tmp/rsi/std/sysroot`, whose crates' StableCrateIds are not the host sysroot's: `bin/rust-front std-crates
+  --rsi` writes `test/rust/front/std-crates-rsi.edn` from its rlibs, `read-rmeta-root` now reading an rlib's `lib.rmeta` member).
+  The key holds `std-crates-rsi.edn` (a rebuilt std moves every entry). 73 members, 183 MB raw, 2.5 MB xz (`da1b73e6...`), made by
+  hand in 2 min 47 s (`bin/rust-front records make rsi`, the oracle tier). What a run takes from it: std's instances' bodies (RF12)
+  and, per fact, what mono refuses (counted on each program's `build-run:` line, as RFP23 (c)'s runs).
+- **The judge** is rsi's, unchanged: the run's status and outputs' digests against rustc's recorded run
+  (`test/rust/ref-rustc-1.99.1.edn`, a case's own verdict where it has one, EVAL.md §13), every non-pass in a class, against the
+  committed record (a recorded pass that fails is a regression). Nothing of the front end's oracles is read at check time.
+- **The switch, per case.** `bin/rust-front rsi-build [NAME...]` builds the cases (one process each `RF11_BATCH` programs, default
+  6, `GOMEMLIMIT` 1800MiB, `GOMAXPROCS` 4; rustc, rustdoc, cargo, gcc, cc and clang stubs exiting 99 first on PATH, their log empty)
+  and writes `front.tsv`: `own` when every one of the program's own bodies is ours and the module goes through codegen and rsi's
+  lowering, else `pack` and why. `bin/rsi check --front own` (`make rsi-check-front-own`) runs it for the samples and the synthetic
+  corpus and, in `ir1`, puts an own case's `NAME.ours.ll` in place of the pack's `x.ll` (`WORK/CORPUS/front.tsv`, a line
+  `rsi check: front own: CORPUS: N of M` per corpus); the UI corpus stays on its pack (no records yet, RFP45). `--record` is refused
+  with `--front own` until the user decides the default (RFP42).
+- **The day's run** (no lowered std on this host: `.tmp/rsi/runtime` has never been built, about four hours and 6 GiB by hand,
+  RES60 (a)): `bin/rust-front rsi-native` (by hand, the oracle tier's tools) links each own program's codegen unit through
+  bin/lib/rsi/link's `RSI_FRONT_IR` (rsi's lowering with `--native-std`, gcc) with rsi's std build's rlibs by rustc as the linker
+  driver, runs it as `bin/rsi check` runs a program and judges it against the same recorded run. It is evidence for the module,
+  not a check: the ci leg is the night's `bin/rsi check --front own`.
+
+### What was built
+
+- `arbace.rust.front.build-run`'s batch (`--std`, `NAME=REL` specs): the bodies after the ported passes to runtime MIR
+  (`BUILD_PASS=SimplifyCfg-pre-optimizations`: ElaborateDrops' drop flags, ElaborateBoxDerefs, PromoteTemps, ... in place of the first
+  slice's built MIR with CleanupPostBorrowck's changes), the program's crate name rustc's (`exit-code` → `exit_code`), its file name as
+  rustc was given it (`build-check/*file-name*`: closures' type texts and caller locations), std's functions declared rather than
+  stubbed (`*std-linked*`), core's integer constants (`<impl iN>::MIN`, `MAX`, `BITS`) evaluated from their definitions
+  (`std-const-value`, int_macros.rs and uint_macros.rs), promoted constants of scalars and arrays of them evaluated into their
+  allocations (`eval-promoted`, RF10's slice 5's first part), Assert terminators' caller locations from their expression's span
+  (`build/*assert-x*`, kept by the terminator's metadata through the builder and looked up by condition and message after the passes),
+  a `#[track_caller]` method call's location at the method's name and an overloaded index's at its brackets (rustc's `fn_span`).
+- `arbace.rust.front.mono`: `layout_of_union` (rustc_abi's: the common non-ZST field's ABI with its valid range discarded,
+  `Scalar::Union`, `FieldsShape::Union`, no niche), a std ADT std's interface lacks (hashbrown's) no longer stopping the drop glue's walk,
+  and, for rsi's runs (`*unknown-refused*`), an external item whose attributes core's sources do not show (the integer types' macro-made
+  methods) a refused callee fact, the record's: by the default rules its `#[inline]` symbol named no instantiating crate.
+- `arbace.rust.back.codegen`: Subslice places (place.rs' `project_subslice`, the subslice's length in the reference's metadata), the
+  PointerExposeProvenance and PointerWithExposedProvenance casts, ClosureFnPointer casts by their shim's symbol, the float math intrinsics
+  by the argument's type (`fabs::<f64>`) and `minimum_number_nsz`/`maximum_number_nsz`, `pow`, `copysign`; an `i128` constant's folding (a
+  BigInteger, not a long); a widened constant extended by its source's signedness (`255_u8 as u16` had folded to `-1`); a scalar return never assigned (`MaybeUninit::uninit`) as `undef`; the front end's own ADT forms named by
+  their path in LLVM's struct names.
+- The pack `rust-front-built`'s dumps hold the checkout's path as `@ROOT@`, put back at the stage (as `rust-front-mono`'s): its members
+  named the worktree that made them (`rust-rf10b`), so `build-check --records` over `opaque1` (closures' spans) and `a7` (derived impls'
+  `<impl at FILE>` names) failed in any other checkout, the essential step's 62 bodies at built 51. Made again (`ab3d8d34...`); the essential
+  step's lines back to 62 of 62 and 60 of 60.
+
+### Results
+
+- `bin/rust-front rsi-build` over the synthetic corpus (67 programs, main's stage 0, the six tools stubbed, 0 stub calls; 25 min 48 s
+  at `RF11_BATCH=6`, `GOMAXPROCS=4`, peak 2.37 GB): **47 of 67 programs own** (every body of the program's own from Arbace's MIR, the
+  module through codegen and rsi's lowering), 20 on the pack. The samples (6 larger programs: `intrinsics`, `panics`, `std`, `threads`,
+  `unwind`, `vectors`) were measured once in the first whole run (one process, 37 min, 2.0 GB): 0 of 6 (an unevaluated named constant,
+  virtual calls twice, hashbrown's layout, since fixed, a transmute, the vector ABI); their larger records put a process above 2 GiB, so
+  the day's lists left them to the night (RFP46).
+- The own programs on the native leg (`bin/rust-front rsi-native`, by hand: rustc as the linker driver with rsi's std build's rlibs, gcc
+  for the lowered C, clang for the shim's IR): **43 of 47 give rustc's recorded run** (status, standard output's and standard
+  error's digests, `test/rust/ref-rustc-1.99.1.edn`): `abort` (134), `trap` (132), `exit-code` (37), the twelve `int-ops-*` (every
+  integer width's arithmetic, checked, wrapping, saturating and overflowing operations, bit counts, rotations, parsing, `isqrt`,
+  formatting), the fourteen `overflow-*` but two (the panic messages with their caller locations), `i128`, the `panic-*` programs
+  (unwrap, expect, index, slice range, str boundary, RefCell, char conversion, todo, unreachable). The day's fixes that the runs found:
+  Assert terminators' locations (`?:0:0` before), a method call's location at its name (`o.unwrap()`: rustc's column 37, ours 35
+  before), an overloaded index's at its brackets, the defaulted allocator in v0 paths (`Box<T, Global>` mangled `Box<T>`:
+  `Box::new_uninit` unresolved at the link before), widened unsigned constants (`255_u8 as u16` folded to `-1`: `isqrt` gave 15 for
+  every width), the macro-made integer methods' symbols (the record's).
+- What the four left show: `overflow-abs-i64`, `overflow-pow-i32` and `panic-alloc` panic inside std's bodies, whose locations name
+  std's sources as rsi's std build compiled them (`library/core/src/num/mod.rs` in the helper's record, `core/src/num/mod.rs` in the IR
+  pack's `x.ll`) where the judge's recorded run (the host's rustc with Alpine's std) names `/rustc/58cf8f9c.../library/...`: the pack
+  leg differs from the recorded run the same way, a property of rsi's std build, not of the front end (RFP47); `panic-vec-remove`
+  faults (status 139) before its panic message: to triage (std's `Vec::remove`'s `assert_failed` path, a body of the record's).
+- The 20 not own, by cause (the module's first refusal): virtual calls 5 (`collections`, `errors`, `generics`, `rc-refcell`, `traits`:
+  the record's callee names no vtable slot, RFP13/RFP44), unsizing to `dyn` 3 (`closures`, `drops`, `patterns`: our bodies' casts
+  carry no vtable, RFP44), the `[x; N]` repeat loop 2 (`algorithms`, `structs`), `powf32`/`powf64` 2 (fixed after the run: `pow`,
+  `copysign`, `minnum`, `maxnum`), an unevaluated named constant (`casts`: CTFE, RF10's slice 5), a transmute between layouts
+  (`iterators`), a constant allocation of another kind (`main-err`), `tlsref` (`panic-hashmap-index`: no symbol for std's
+  thread-local), `typed_swap_nonoverlapping` (`strings`: its fallback instance), and three programs whose `main` is not ours: typeck's
+  `Option<_>` (`fmt`), a path (`panic-assert-eq`), a promoted constant of a `&str` (`panic-explicit`: `eval-promoted` takes scalars
+  and arrays of them).
+- The earlier stages unchanged, the pack fixed: `bin/rust-front essential` passes, its summary equal to
+  `test/rust/front/essential-known.txt` (build-check 62 of 62, the passes 60 of 60, capture-check 34 of 34, run-built 7 of 7, mono-check's
+  line, the five controls differing; the stubs' log empty), in this checkout too (51 of 62 before the `@ROOT@` fix). `bin/rust-front
+  records make rsi` 73 entries; `records make built` remade (`ab3d8d34...`). `bin/gate --plan`: `run rust-front-essential` (its key
+  moved). `bin/crops-score --judge --strict`: Rust 75.0 / 75.0 / 95.8 / 80.0, unchanged, exit 0.
+
+### What eval and AOT can move under the decided scoring
+
+Nothing in the number, by the decided rule: an own case's run still consumes rustc's records (std's instances' bodies and the refused
+facts from `rust-front-rsi`, the shim, std's lowered IR), so it scores 0.5 as any case does (RES54 (a), RFP43 (a) proposed to confirm
+it); the eval stage stays 0.5, `test/crops/independence.edn`'s Rust eval fact names the switch and counts the own cases
+(`:own-cases`: 47 of the 73 samples and synthetic programs; the UI corpus's 3,718 none). What moved is what RF12 needs: the
+program's own share of the module is Arbace's for those 47, so when RF12 builds std's bodies from source the record's remaining part
+is the shim and std's lowered library.
+
+### What remains
+
+- The night: `bin/rsi runtime-ci` (std's lowered library, once, by hand: RES60 (a)), then `bin/rsi check --front own --corpus
+  samples,synthetic`, the ci leg's verdicts of the 47 against the record, every non-pass classed (RFP42).
+- RFP44's vtables (8 programs), the repeat loop, CTFE's named constants and `&str` promoted constants (RF10's slice 5), the samples'
+  memory (RFP46), the UI corpus's records (RFP45), `panic-vec-remove`'s fault, std's source paths (RFP47).
+- Then RF12: std's bodies from source, which the rule rewards.
+
+### Proposed (RF11's first slice)
+
+- **RFP42 The switch's default.** `bin/rsi check --front own` judges the own cases against the committed record of the packs' runs;
+  `--record` is refused with it. Options: (a) **the night runs `bin/rsi check --front own --corpus samples,synthetic` (after `bin/rsi
+  runtime-ci` exists, RES60 (a)); when every own case passes or is classed, `--front own` becomes the default of `rsi-check` and
+  `rsi-essential` for those corpora (the pack the fallback per case, as built), and the record is re-recorded under it**; (b) keep the
+  packs the default and add a `--full` step `rsi-check-front` beside `rsi-check`; (c) own the default now, before a ci run.
+  *Recommended: (a)*: the switch is per case already, and (b) doubles the night's cost of the same programs.
+- **RFP43 The own cases' score.** An own case still consumes rustc's records: std's instances' bodies and the facts mono refuses
+  (`rust-front-rsi`), the allocator shim (the IR pack's `shim.ll`) and std's lowered library (std's rustc-made IR). Options: (a) **0.5,
+  as RES54 (a) scores any case that consumes std's records: eval stays 0.5 until RF12, the own count recorded beside
+  (`test/crops/independence.edn`'s `:own-cases`)**; (b) a case's score the share of its mono items that are Arbace's (the program's own
+  bodies a few of hundreds: under 0.51 either way); (c) 1 for an own case (against RES54 (a)). *Recommended: (a)*.
+- **RFP44 Virtual calls, vtables and thread locals.** The biggest refusal class after RF11's fixes: `callee of kind virtual` (the
+  helper's dump names the trait method, not its vtable slot: RFP13), `PointerCoercion(Unsize)` to `dyn` in our bodies (the vtable
+  allocation, which mono does not make), `tlsref` (no symbol for a thread-local static). Options: (a) **port `vtable_entries`
+  (rustc_trait_selection's `vtable.rs`: the segments of the trait and its supertraits, the vtable-safe methods, with
+  `rustc_codegen_ssa/src/meth.rs`'s `get_vtable`) into mono, the slot and the vtable's allocation native, and the virtual call in
+  codegen (`VirtualIndex::get_fn`), 1-2 days; the thread local's symbol by v0 of the static**; (b) the helper dumps the slot and the
+  vtable (RFP13 (a), a rebuild and the packs again); (c) leave them classed. *Recommended: (a)*: the slot is a function of the
+  trait's items, which collect and std's interface hold, and it removes a fact the record would otherwise carry.
+- **RFP45 The UI corpus.** The records cover the samples and the synthetic corpus (73 programs, 2.5 MB xz). Options: (a) **the UI
+  corpus's every 40th (about 93 run programs, the night's sample; about 3 MB xz more) recorded into `rust-front-rsi`, rsi-build run
+  over it at night**; (b) the whole UI run set (3,718 programs, about 120 MB xz: in the main checkout's store only, as the UI IR pack);
+  (c) not until RF12. *Recommended: (a)*, (b) with RF12.
+- **RFP46 rsi-build's cost.** About 30 minutes for the 67 synthetic programs at four threads, each process near 2 GB (2.39 GB peak:
+  std's interface and the pipeline's caches; `GOMEMLIMIT` 1800MiB), the samples' larger programs above it. Options: (a) **the night's
+  step at `RF11_BATCH=6`; by day only lists; the interface read once into a compact form (RF14's lazy std data) next**; (b) one
+  program a process (more starts, a lower peak by about 0.3 GB); (c) as built. *Recommended: (a)*.
+- **RFP47 std's source paths in panics.** rsi's std build (`bin/rsi std-build`) names its sources `library/...` (the helper's view) and
+  `core/src/...` (its codegen's), Alpine's std, which the judge's recorded runs used, `/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/
+  library/...`: a panic inside std's bodies prints another location on both legs (3 of the 47 here). Options: (a) **std-build with
+  Alpine's remapping (`--remap-path-prefix` of the library to `/rustc/<commit>/library`, as the distribution's build passes it), std
+  rebuilt and lowered again once (the night's: about four hours with runtime-ci) and the packs made again**; (b) a class `std-paths` in
+  `test/rust/divergences.edn` for those programs; (c) normalize std's paths in the judge. *Recommended: (a)*, (b) until it is done.
 ## As built: RF12 (first slice), core's modules through the front end (2026-11-09)
 
 Branch `rust-rf12` (from `mac/next` `3ef7b3f78`), beside RF11 (`rust-rf11`, rsi's cases from the front end's MIR), whose files it

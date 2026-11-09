@@ -5359,3 +5359,150 @@ Proof (light; the stubs first on PATH, `REPR_CPP_THREADS=2`; `.tmp/verd.ae` prin
 
 The whole part's record, recorded tonight, is read in the names' order; the night's second command (the record held) reads it again,
 and a third, shuffled, is the order's proof on the 4,597 (the night's commands below).
+
+## As built: CP320 (a), an alias template's guides (2026-11-09; branch `cpp-props4`)
+
+After clang's `clang/lib/Sema/SemaTemplateDeductionGuide.cpp` at llvmorg-23.1.5 (the pinned tarball's: getRHSTemplateDeclAndArgs,
+BuildDeductionGuideForTypeAlias, DeclareImplicitDeductionGuidesForTypeAlias, DeclareAggregateDeductionGuideForTypeAlias,
+buildIsDeducibleConstraint) and [over.match.class.deduct]/3, in `arbace.cpp.template` (Arbace's own, the checker and the code
+generator alike):
+
+- `alias-rhs`: the alias's defining-type-id resolved with its own parameters, aliases substituted (B = A<W> with A = C<V*, V*>
+  is C<W*, W*>): the class template and the type, else the deduction is the slice's unsure one (as before).
+- `alias-guide`, f' from each guide f of that class template (its constructors', C() when none, the copy deduction candidate,
+  the user's guides, the aggregate one for the initializer): f's return type's arguments deduced from C<X...> argument by argument
+  (`deduce-from-rhs`, an argument that does not deduce left, as clang's DeduceTemplateArguments with NumberOfArgumentsMustMatch
+  false; another class template: no guide); f''s template parameters the alias's that the deductions name, then f's left
+  undeduced (their names kept, so default arguments resolve as written; one sharing a name with the alias's renamed); its
+  signature f's with the deduced parameters substituted, built lazily (`:mk` resolves C<X...> in the scope binding f''s
+  parameters, deduces f's again, resolves f's signature there; `:fscope`, where f's constraints are judged).
+- `alias-deducible`, the is_deducible constraint and the alias's own: the alias's arguments deduced from the class the guide
+  returns (finish-deduction, defaults completed), C<X...> with them that same class, the alias parameters' type-constraints and
+  its requires-clause (recorded now on the alias template, `:constraint`) satisfied: else a sure drop.
+- `ctad` takes the alias's guides from the class template's (kept by the identity of the class's guide list), the aggregate
+  candidate rewritten as well; from C++17 on (C++17 with `-pedantic-errors` clang's C++20 extension error, as before).
+- Unsure (the parser's deduction kept when no other guide decides): a guide the slice cannot build, a deduced array bound, a
+  renamed parameter's default argument, an alias whose defining-type-id is no class template's specialization, a member alias
+  template named through its class (`T<double>::AFoo`, a type the slice does not resolve), and an alias template of a class
+  inheriting constructors at C++23.
+
+## As built: CP323 (a), C++23's inherited constructors' guides (2026-11-09; branch `cpp-props4`)
+
+From the standard's text ([over.match.class.deduct]/1.10 and [over.match.best.general]/2 as P2582R1 words them; clang 23 builds no
+such guide, so the standard is the reference here), on CP320's machinery:
+
+- `inherited-guides`: for each direct base B of the class template C whose constructors C inherits (`using B::B;`, a
+  `UsingDecl` or, for a dependent base, an `UnresolvedUsingValueDecl`: the existing detection had missed the latter), the alias
+  template A with C's parameters whose defining-type-id is B (a synthetic alias, kept by the base's spelling); A's guides as for
+  CP320, each returning C with the arguments A's deduce from the class it returns (the partial specialization CC<A<P...>> of the
+  text; no deduction, no guide); C's requires-clause A's. Marked `:inherited`.
+- The tie-break before the others: of two guides with the same parameter types, one not from inherited constructors over one that
+  is.
+- The checker's half that the guides needed: a class inheriting constructors was constructed as if it had only its own
+  (`no viable function among 3` for `G<char, bool> g(true, 'a', 1)`), a false error at any standard. Now `using B::B;` marks the
+  class with B's name (`:inherits-ctors`) and `ctor-init` adds B's constructors (but its copy and move constructors and one without
+  parameters, [over.match.funcs]/8-9) to the candidates; one chosen is checked for its access as B's member ([namespace.udecl]/19,
+  cpp0x/inh-ctor9's protected `A(int)` now for that reason) and the initialization otherwise left unanalyzed (the object declared
+  all the same); none viable: not judged (`{:i :none}`). The code generator is unchanged (it still refuses such a construction).
+
+## As built: CP321 (a), static data members' in-class initializers in the checker (2026-11-09; branch `cpp-props4`)
+
+- In the analysis' order, a static data member with an in-class initializer and no definition (`:member-static`, `:defined`
+  false) has its initializer analyzed by `global-init` in its class's scope (the access context its class's, cx-context), its
+  refusals reported as a namespace-scope variable's are, once (`:cx-sinit`); the code generator's definitions are unchanged (an
+  inline member is still defined when used).
+- Which (`cx-static-member-init?`): a member of a class of the main file that is no closure and no local class, and no class
+  template's specialization unless an explicit instantiation definition names it (`template struct B<A>;` marks it
+  `:explicit-inst-def`, [temp.explicit]/10); an implicit instantiation's initializer is instantiated only when used
+  ([temp.inst]/4), so analyzing it could report what no compiler does.
+- using-enum-1's lines 37-38 (an enumerator a private using-declaration of the base names, [namespace.udecl]/19) and
+  class-deduction108's eight lines of `B<A>`, `C<int>`, `E<A>`, `F<int>` (CTAD's errors in explicitly instantiated members) are
+  now the checker's.
+
+## As built: CP324 (a), a using-declaration's access for member functions (2026-11-09; branch `cpp-props4`)
+
+- [namespace.udecl]/19: a class's using-declaration of member functions enters them with its own access as members of its class
+  (`:ucls`, `:uaccess` on the entries, as CP313 (a) did for enumerators and types); the calls `o.f()` and `f()` in a member
+  function find which candidates came through one (`cx-using-map` over the lookup's entries) and judge the chosen function by the
+  using-declaration's access in its class (parse/access6: `using A::foo;` in B's private section, `b.foo()` in `main`), else by
+  its own as before; a protected base function made public by `using` is no longer an error.
+- At the using-declaration: each function it names (not a constructor) accessible there (its own access, or a using-declaration's
+  that named it), else the error at the using-declaration, in the analysis' order (`:cx-error`).
+
+## As built: the dg read's one endless file, and CP321's measure corrected (2026-11-09; branch `cpp-props4`)
+
+- **Found** while measuring CP321 (the 158 dg-error files with an in-class static member, `.tmp/fstatic.txt`): cpp0x/overflow1.C
+  (`Fib<95>::value`, each specialization's `static const long long value = Fib<i-1>::value + Fib<i-2>::value`) never ended
+  (one thread at 100% for 43 minutes, on next's tree as on this branch's): `rv` folded a const integral variable by `const-int` of
+  its initializer at every use, so the specializations' values were evaluated again along every path, 2^95 of them. Tonight's
+  record of the whole dg-error part would not have ended.
+- **Fixed**: `var-const-int`, the value kept on the variable once found (`:cint`; a failure not kept), used by `rv` and by
+  `const-int`'s loads: overflow1 reads in 7 s (accepted: the overflow is not modelled).
+- **CP321's position**: its analysis of a member's initializer left the analysis position (`*at*`) on that initializer, and a
+  later refusal without a node of its own (template/non-type-template-argument-1's default-initialized `D<B> d`) was reported
+  there, line 1: the position is restored after.
+- **CP321's measure, corrected**: the commit's journal entry says the 158 files lost nothing and gained no extra; that run
+  (`.tmp/ch-*`) was made on the CP323 commit's tree by mistake (the commits were assembled by copying each stage's files into the
+  worktree, which then held CP323's). Measured again on this tree (`.tmp/cf-*`, in chunks of 20 with a 900 s cap, against next's
+  `.tmp/chb-*`, overflow1 apart since next's never ends): no pass lost; gained class-deduction108, using-enum-1 (CP321),
+  class-deduction-alias12 (CP320), cpp1y/var-templ81 (CP321: `*var<T>` of a reference in `template struct B<int>;`'s members,
+  "indirection requires pointer operand", the program's error by the rule) and init/static4 (CP321: `static const A a = 0;` in A,
+  "no matching function": no conversion from 0 to the aggregate A, a real error of that line, though clang's is the incomplete
+  type); cpp0x/explicit15 two more of its lines found; the one new extra (non-type-template-argument-1, line 1) the position above,
+  gone after the fix (`.tmp/cg-fsplit-07`).
+
+### Checked (cpp-props4; light, the stubs first on PATH, their log empty; `REPR_CPP_THREADS=2`)
+
+| check | result |
+|---|---|
+| the every-10th sample (`.tmp/sample.sh`: `sA` before, `sD` with CP320-CP324, `sE` with the memo, `sF` the head) | 117 → 120 own passes (class-deduction108, class-deduction-inherited1, using-enum-1); none lost; no failing row's reason changed |
+| the 75 CTAD files (`.tmp/fctad.txt`, `fc-b` against `fc-n`) | 21 → 29, none lost |
+| the 90 access files (`fa-b`, `fa-n`) | 19 → 20 (using-enum-1), none lost |
+| the 19 using-declaration files (`.tmp/fusing.txt`) | 5 → 6 (access6, using-enum-1 in, inh-ctor35 out: false credit before), pr97268's extra gone |
+| the 158 static-member files (`.tmp/fstatic.txt`, chunks `cf-*` against `chb-*`) | five gained (reviewed above), none lost; overflow1's endless read fixed |
+| `bin/cppi codegen-gen` (`.tmp/cg-after` with CP320-CP324, `.tmp/cg-memo` with the memo) | 149 of 149 as recorded both times, both controls failing as they must: no sample's forms changed (no intended change: no sample uses alias or inherited CTAD, the rest is the checker's) |
+| probes (`.tmp/p/`: al1-al3b, in1-in5, u1) | the deduced types right and their controls refused; the errors where the rules have them, none on the valid forms |
+
+### The night's commands (one process at a time; `export ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace GOMEMLIMIT=1400MiB REPR_CPP_THREADS=2`)
+
+```
+PATH=<stubs>:$PATH bin/repr-cpp dg --corpus dg-error --front native --record   # the 4,597 files, names' order (CP322), about 80 min; overflow1 no longer endless
+bin/repr-cpp dg --corpus dg-error --front native                               # the record held
+REPR_CPP_DG_SHUFFLE=20261109 bin/repr-cpp dg --corpus dg-error --front native  # CP322's proof on the whole part: the record held in a shuffled order
+# then test/crops/independence.edn's C++ read fact (:dg-own [N 1] :dg-clang [4597-N 0.5]) and bin/crops-score --record
+bin/cppi codegen-gen                                                           # 149 of 149 as recorded
+```
+
+### Proposed (CP325-CP329; none decided)
+
+- **CP325: a Sema crash read as acceptance.** `arbace.repr.cpp.diag/sema-errors` catches every Throwable and leaves the unit with no
+  Sema error, so a crash inside the code generator's Sema is an "accepted" verdict (CP322's race showed how). (a) A crash a status of
+  its own (`:crash`, failing, its message in the row), about an hour, then the whole part recorded again; (b) as now.
+  **Recommended: (a).**
+- **CP326: inherited constructors in the code generator.** The checker now chooses among inherited constructors and checks their
+  access (CP323), the code generator still refuses the construction. (a) Build them ([class.inhctor.init]: the base subobject by
+  the chosen constructor, the rest default-initialized, the arguments forwarded), about half a day; (b) as now. **Recommended:
+  (a)** when the code generator's corpus needs it.
+- **CP327: a member alias template named through its class** (`T<double>::AFoo s{1, 2}`, class-deduction-alias20): the
+  placeholder's qualified template name is a type the slice does not resolve (the unit refused). (a) Resolve a qualified
+  template-name placeholder (the class's member template found by lookup), small; (b) as now. **Recommended: (a).**
+- **CP328: GCC-only expectations as a class.** cpp1z/inh-ctor35 (`-fno-new-inheriting-ctors`, the rules before P0136) and
+  cpp1z/class-deduction-alias1's C++17-only error (GCC's equivalence rule, clang accepts) expect what the standard does not ask.
+  (a) A by-design class for them in `test/cpp/divergences-dg.edn`, small; (b) leave them failing. **Recommended: (a).**
+- **CP329: a time cap for each file of the dg read.** overflow1 showed one file can hold a night's record forever. (a)
+  `REPR_CPP_DG_TIMEOUT` (default 300 s, as clang's dumps had), a file over it `:timeout`, failing, about an hour; (b) as now.
+  **Recommended: (a).**
+
+### Slips, scratch
+
+Slips against the day's rules, all in throwaway commands (no output of the work written there): a `diff <(echo) <(echo)` left in a
+check command, three wait loops with `2>/dev/null` (two stopped before they ran it out), one `> /dev/null` in a wait loop (stopped
+before it ran), a `/proc` scan with `2>/dev/null` to find this worktree's processes after a `timeout` (none were left), and a
+read-only `git stash list`. Scratch in the worktree's `.tmp/`: `p/` (probes), `split/` (the commits' stages, `strip.py`), `docs/`,
+the lists `facc.txt`, `fctad.txt`, `fusing.txt`, `fstatic.txt` and its chunks `fsplit-*`, the runs `a1`-`a5`, `o1`, `s1`, `o2`, `s2`,
+`sA`-`sF`, `fc-*`, `fa-*`, `fu-*`, `ch-*` (the wrong tree's), `chb-*`, `cf-*`, `cg-*`, the code generator's `cg-after`, `cg-memo`, the
+base tree `base` (a56fa6a0b), `llvm-src/` (copied from cpp-props3's).
+
+Recorded at the head: `test/cpp/check-dg-own-linux-amd64.edn` from `.tmp/sF` (454 rows, 120 passes), the C++ read fact
+`:dg-own [120 1] :dg-clang [4477 0.5]`; `bin/crops-score`: C++ 76.3 / 100 / 67.84 (unchanged at four places: read 0.6573 → 0.6578),
+`--record` and `--judge --strict` 0 problems; `make check-makefile`, `gate.crops check`, `bin/gate --full --plan` pass.

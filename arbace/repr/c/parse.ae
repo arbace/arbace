@@ -757,16 +757,34 @@ void __atomic_store();
     (slot! p FNSCOPE nil)
     r))
 
+(defn- skip-to-end-of-block-or-statement!
+  "CS294 (*recover*): gcc's recovery after a declaration it cannot start (c_parser_skip_to_end_of_block_or_statement's
+  rule, from its behaviour: gnu23-attr-syntax-3): the tokens up to and including the `;` outside braces, or up to and
+  including the `}` that closes the braces opened here (or a `}` at depth 0); the end of the file stops it."
+  [^Parser p]
+  (loop [depth 0]
+    (let [c (rn p)]
+      (cond
+        (= c :eof) nil
+        (= c \;) (do (sh p) (when (pos? depth) (recur depth)))
+        (= c \{) (do (sh p) (recur (inc depth)))
+        (= c \}) (do (sh p) (when (> depth 1) (recur (dec depth))))
+        :else (do (sh p) (recur depth))))))
+
 (defn- declaration-list-opt [^Parser p]
   (loop [r nil prev nil]
     (if (in? (rn p) \{ :eof)
       r
-      (let [_ (when (and *recover* (std-attr-at? p 0)) ; CS160: gcc refuses attributes in a declaration list and goes on
-                (eh-soft! p (str (tpos (tok0 p)) ": unexpected '[', expected declaration specifiers"))
-                (attribute-specifier-list-opt p))
-            dl (node "DeclarationList" :Declaration (declaration p nil nil false))]
-        (link! prev dl :DeclarationList)
-        (recur (or r dl) dl)))))
+      (if (and *recover* (std-attr-at? p 0))
+        ;; CS160: gcc refuses attributes in a declaration list (they cannot begin an old-style parameter's declaration
+        ;; specifiers); CS294: and, its declaration specifiers missing, skips the declaration: its names stay undeclared
+        ;; (an identifier list's parameter then defaults to int, the checker's "type of 'y' defaults to 'int'")
+        (do (eh-soft! p (str (tpos (tok0 p)) ": unexpected '[', expected declaration specifiers"))
+            (skip-to-end-of-block-or-statement! p)
+            (recur r prev))
+        (let [dl (node "DeclarationList" :Declaration (declaration p nil nil false))]
+          (link! prev dl :DeclarationList)
+          (recur (or r dl) dl))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; 6.8 Statements

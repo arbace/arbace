@@ -3006,3 +3006,216 @@ fails there unless `86d8b6c47` is picked onto `next` first (`git cherry-pick 86d
   no control of `test/ocaml/controls.txt` runs a hook. (a) a `judge` control whose subject is signal and whose reference is another
   program's run, so the hook's verdict must part (ten minutes; `controls.txt` and the essential list gain signal, about 2 s); (b) none.
   *Recommended: (a)*.
+
+## As built: OC194 (a): ocamlyacc ported (2026-11-09, branch `ocaml-yacc`, from next `e6214cd13`)
+
+Under the day's light rules (one process at a time, under 2 GiB; no gate, no build of Arbace). OC194 was recommended (a) and accepted
+by the user (2026-11-09).
+
+**The port.** `arbace/repr/ocaml/ocamlyacc.ae` (`arbace.repr.ocaml.ocamlyacc`, evaluated on stage 0 like `ocamllex.ae`) ports OCaml
+5.5.0's `yacc/` (the release tarball, SHA-256 `fcc6ae66...f015ba`): Berkeley yacc as OCaml adapted it, each file "Based on
+public-domain code from Berkeley Yacc" and under INRIA's LGPL 2.1 notice with the linking exception (LICENSE.md, doc/ARBACE.md).
+File by file, rule for rule:
+- `main.c`: `getargs` (`-v`, `-q`, `-b PREFIX` and `-bPREFIX`, `--strict`, `--` and any other `--word` ending the options, `-`
+  for stdin, `-version`, `-vnum`, grouped `-vq`, the usage on anything else), the prefix (the input's name up to its last `.`),
+  `open_files`' order (the `.output`, `.ml`, `.mli` created in turn, a missing directory `f - cannot open` with status 2) and `done`'s
+  statuses: on an error the `.ml` and `.mli` are removed and the `.output` stays (empty, or whole after `--strict`'s refusal).
+  The three temporary files are buffers.
+- `reader.c` whole: `get_line` (CRLF to LF, a last line without its newline) with its line buffer modelled, so that `print_pos`
+  under a position from an earlier line (`add_symbol`'s `ecptr`) prints what the reused buffer holds past the new line's end, tabs
+  included; `#` line directives (`parse_line_directive`); `nextc` with `/* */`, `//`, OCaml's `(* *)` and `\` as `%`; `keyword`
+  (`%token`/`%term`, `%type`, `%left`, `%right`, `%nonassoc`/`%binary`, `%start`, `%{`, `%%`, `%<`, `%>`, `%0`, `%2`); `copy_text`
+  (its `need_newline`), the quoted strings, character literals (`process_apostrophe`'s four shapes), nested comments, `{id|...|id}`
+  and `{%ext|...|}` quoted strings; `get_tag` (`->` and brackets), `declare_tokens` (values, `EOF`'s 0, the warnings), `declare_types`,
+  `declare_start` (the entry counter), `output_token_type` (the constructors' line directives and columns in the `.ml` and `.mli`),
+  the grammar (`advance_to_start`, `start_rule`, `end_rule`, `add_symbol`, `mark_symbol`'s `%prec` and `%=`, `copy_action` with `$n`,
+  the bracket stack and its "Mismatched parentheses or braces"), `make_goal` (`%entry%`, the `'\NNN'` entry tokens, the entry
+  functions, the interface's `val`s, `is_polymorphic`), `check_symbols`, `pack_symbols` (the token values, those above 256 avoided),
+  `pack_grammar`, `print_grammar`. A C `char` is signed: a byte 0xFF reads as `EOF` where reader.c compares a `char` with it.
+- `symtab.c` (the symbols in their first appearance's order), `error.c` (every message, `print_pos`).
+- `lr0.c`, `closure.c`, `warshall.c`: derives, nullable, the first-derives sets, the closure as a merge, the states numbered as
+  `get_state` finds or makes them; `lalr.c`: DeRemer and Pennello's LALR(1) as written (`set_goto_map`, `map_goto`'s search,
+  `initialize_F`'s reads, `build_relations`' includes and lookback, `transpose`, `digraph`'s traversal, `compute_lookaheads`). The bit
+  sets are 64-bit words (byacc's 32): the relations are the same. `menhir.ae`'s machinery was consulted, not reused: lalr.c ported as
+  it is keeps the gotos' numbering the tables are built from.
+- `mkpar.c`: the actions' lists in byacc's order (`add_reduce`), `find_final_state`, `remove_conflicts` (precedence and associativity,
+  suppressed 1 and 2), "N rules never reduced", the conflicts' line, `sole_reduction`'s default reductions.
+- `output.c` and `skeleton.c`: `yytransl_const`/`yytransl_block`, `yylhs`, `yylen`, `yydefred`, `yydgoto` (`default_goto`,
+  `save_column`), `token_actions`, `sort_actions`, `pack_table` with `matching_vector` and `pack_vector` (the `lowzero` and `pos`
+  rules; `MAXTABLE`'s fatal), `yysindex`, `yyrindex`, `yygindex`, `yytablesize`, `yytable`, `yycheck`, `yynames_*`, `yyact` from the
+  actions with `copy_file`'s `# 0` rewritten to the next line's directive, the entry points, the trailer (`output_trailing_text`, the
+  raw bytes after `%%`), the line counter `outline`.
+- `verbose.c`: `-v`'s `.output` (the grammar, each state's conflicts, core, null rules, actions and gotos, the unused rules, the
+  conflicts by state, the totals).
+
+Not ported: `wstr.c` (Windows' wide strings); the `-r`, `-l`, `-t` and `-s` modes, whose flags OCaml's `main.c` never sets; the
+signals and the temporary files' names (in memory); `done`'s "I/O error"; after a line longer than 100 characters the reallocated
+buffer's uninitialised bytes are modelled as zeros (they matter only to a caret under a stale position).
+
+**The command and the check.** `bin/repr-ocaml ocamlyacc [-v] [-q] [--strict] [-b PREFIX] FILE.mly` is the native ocamlyacc (its
+files, messages and status). `bin/repr-ocaml ocamlyacc-check` runs, in one process, the tarball's eight ocamlyacc grammars
+(`lex/parser.mly`, `ocamldoc/odoc_parser.mly`, `odoc_text_parser.mly`, `debugger/debugger_parser.mly`, `ocamltest/tsl_parser.mly`,
+`testsuite/tools/parsecmm.mly`, `tool-lexyacc/parsecheck.mly`, `calc_parser.mly`; `parsing/parser.mly` is Menhir's) and the 20 samples
+of `test/ocaml/ocamlyacc/` (precedences and `%nonassoc`, an unresolved shift/reduce and reduce/reduce conflict, several `%start`, the
+error token, token values, quoted strings and character literals, rules never reduced, line directives and the old keywords, CRLF, a
+trailer without its newline, and 13 error cases), each plain and with `-v`, and `cases.txt`'s 20 command lines (`--strict`, `-q`,
+`-b`, `-vq`, `-version`, `-vnum`, the usages, a missing input, a missing output directory): 76 runs, each in a directory of its own,
+the files it leaves (`.ml`, `.mli`, `.output`) and its messages (status, stdout, stderr) by SHA-256 against
+`test/ocaml/ocamlyacc-expected.edn` (recorded by `--host --record` from the host's `/usr/bin/ocamlyacc` 5.5.0; the plain check runs no
+host tool), with a negative control (lex/parser.mly's `.ml` against odoc_parser.mly's record must differ).
+`make repr-ocaml-ocamlyacc-check`. Not a gate step yet (the main session wires it).
+
+**Results.** `--host`: 76 of 76 runs equal to the host's ocamlyacc byte for byte (the outputs and the messages). The plain check: 76
+of 76 against the record, the control failing as it must, about 16 s wall (10 s for the runs), 440 MB peak. Mutants (scratch, not
+committed; a byte deleted, a token inserted, a span cut, every other one with `-v`): 800 of eight grammars (calc_parser, lex/parser,
+tsl_parser, parsecmm, odoc_text_parser and the samples prec, entries, conflicts; two seeds) and 204 of six more (debugger_parser,
+odoc_parser, parsecheck, the samples directives, unused, crlf): 1,004 of 1,004 equal to the host's (507 that generate, 497 errors),
+none needing a fix.
+
+`tool-lexyacc/calc`'s parser natively: in the test's directory, `bin/repr-ocaml ocamlyacc -q calc_parser.mly` writes `calc_parser.ml`
+and `calc_parser.mli` beside it, the bytes of `ocamlyacc -q calc_parser.mly` (the line directives name the file as it is given).
+
+## Decided (the user, 2026-11-09, about 09:30): OC191-OC197, OC206, OC207
+
+Relayed by the main session (as recommended): **OC191 (b)** (ocamllex's `-ml` mode left refused until a file of the corpora needs it:
+recorded, nothing built), **OC192 (a)** (finalisers run by the collector, at oi's level and in the AOT runtime), **OC193 (a)**
+(`OCAMLRUNPARAM`'s `d`), **OC194 (a)** (ocamlyacc ported clean, checked against the host's by hand: "As built: OC194 (a)" above),
+**OC195 (a)** (decided before, OC204 (a)), **OC196 (a)** (`speed` deferred, not by design), **OC197 (a)** (the tests whose main file is
+a `.mll`), **OC206 (a)** (the OCaml helpers at both AOT levels; the C helpers stay on `oi cmain`, OC205 (a)), **OC207 (a)** (a negative
+control that runs a hook).
+
+## As built: OC192, OC193, OC196, OC197, OC206, OC207; OC194's wiring (2026-11-09, branch `ocaml-props2`, from next `e6214cd13`)
+
+Light, by list (`OI_JOBS=1`, `O2J_JOBS=1`, `OI_TYPER_GOMEMLIMIT=1200MiB`, main's stage 0); no whole-corpus run, no gate but `--plan`.
+
+**OC192 (a): finalisers.** finalise.c 5.5.0 read: `Gc.finalise` puts its function and value in the `first` table, `Gc.finalise_last`
+in the `last` one; at a major cycle's end `caml_final_update_first` moves the entries of unmarked values to a todo batch and darkens
+the values (the function gets them), then `caml_final_update_last` moves the `last` entries of the values unmarked after that (the
+function gets unit); `caml_final_do_calls` runs a batch from its end (the entries in the reverse of their registration), the batches
+in order, never re-entered (`running_finalisation_function`, cleared by `Gc.finalise_release`), at the pending-action points.
+- oi (`go/arbace/oi/ext_final.ae`, new): a value with finalisers has one Go finaliser (`runtime.SetFinalizer`, which keeps the object
+  for its function as the collector darkens it), its registrations in `finObjs` by the value's address (Go's heap does not move; the
+  table holds no pointer to the value). The Go finaliser (on Go's finaliser goroutine) moves the entries to the fired batch under a
+  mutex: the `first` ones with the value, and when there are any the `last` ones wait for the resurrected value to be unreachable
+  again (a new Go finaliser: finalise.c updates `last` after the `first` values were darkened); else the `last` ones with unit.
+  `Gc.full_major`, `Gc.major`, `Gc.compact` and `Gc.minor` collect (`runtime.GC`, then a sentinel's finaliser on a second cycle tells
+  that the first cycle's finalisers were called: Go's finaliser goroutine calls them in queue order) and run the fired entries; a
+  thread's tick runs them when `finPending` is set (apply.go's tick, beside the signals: a pending action). A collection's entries run
+  as finalise.c's batches: `first` before `last`, each in the reverse of the registration order. Values without an allocation of
+  their own (floats, boxed integers in Go's interface) are accepted and never finalised, as OCaml's static data; an immediate raises
+  `Invalid_argument "Gc.finalise"` as before. Nothing runs `runtime.GC` while no value has a finaliser.
+- the AOT runtime (`jdk/ocaml/ocaml/rt/ExtGc.ae`; `Rt/tick`): Java has no resurrection, so a value is held by a `WeakReference` on a
+  `ReferenceQueue` (jrt's weak pointers) beside its record; a block's `Gc.finalise` function gets a block of the same tag over the
+  same field array, kept strongly (the fields it reads and writes are the dead value's own, and no reference to the old block is
+  left: its identity cannot be observed); the other values (strings, float arrays, closures, custom blocks, int64s) take
+  `Gc.finalise_last` (unit), their `Gc.finalise` accepted and never run, and an int32 or a float (a `java.lang.Integer` or `Double`
+  the Java world may share) neither. `Gc.full_major`, `major`, `compact` and `minor` run `System.gc` and scan the records; `Rt/tick`
+  polls the queue every 1,024 turns while a value has a finaliser. The calls of a collection sorted as oi's (`Collections.sort`, a
+  stable sort by the table, then the registration's order reversed).
+- Divergences left (OC11 (a): finalisation's order): which values are young is OCaml's alone (a `Gc.full_major` first finalises the
+  young `last` values its minor collection finds, then the major cycle's `first` and `last` batches; here one collection's batches,
+  `first` before `last`); a value reachable only from another finalisable value is found one Go cycle later; a dead value an
+  interpreter's frame still holds (a slot of the module's initialisation, a toplevel `let () = let r = ... in ...` followed by
+  another phrase) is not finalised before the frame ends.
+- Results: the five programs (`callback/test_finaliser_gc`, `basic-more/simplif_under_lambda`, `weak-ephe-final/finaliser2`,
+  `finaliser_handover`, `pr12001`) pass at oi's level on both paths (native and `--ocdump`), judged by their own verdict, and
+  `weak-ephe-final/finaliser` still passes; at the light AOT level four pass and `finaliser_handover` exceeds the 120 s of CPU (its
+  2,761 finalisers each walk a tree of 1,023 nodes: 8 s at oi, beyond the limit at the light level's tenfold cost), listed in
+  `aot-slow.edn` (`:light-speed`, deferred); the compiled level is the night's (its `aot-compiled-known.edn` entries of the five left:
+  the next compiled run should print them STALE). `oi-known.edn` and `aot-known.edn` lose the five's entries, `pins-attested.tsv` the
+  four pinned rows. The other programs that register finalisers (`weak-ephe-final/ephetest`, `weaktest`; the statmemprof ones are
+  Gc.Memprof's) keep their classes. `gc-and-memory`'s why says so.
+
+**OC193 (a): `OCAMLRUNPARAM`'s `d`.** startup_aux.c's `caml_parse_ocamlrunparam` and `scanmult` (`=N`, `=0xN`, the `k`, `M`, `G`
+multipliers; `CAMLRUNPARAM` when `OCAMLRUNPARAM` is unset), `Max_domains_def` 128 (64 bits), at least 1 and at most
+`Max_domains_max` 4096 (else caml_fatal_error's message, status 2), read once at the first spawn; `caml_domain_spawn` fails beyond it
+as domain_create's does, `Failure "failed to allocate domain: domain_create"`, the main domain and the running ones filling the slots
+(a slot is free again when its domain ends, before its join): oi's `ext_domain.ae` (`maxDomains`, `scanMult`) and the AOT runtime's
+`ExtCore.ae` (`caml_domain_spawn`). header.awk passes a header's `ocamlrunparam` that sets `d` alone (`,d=1`, `,d=129`) as
+`OCAMLRUNPARAM` in the run's environment (ocamltest's variable); the other parameters (`b=`, `l=`) keep their class. Results:
+`parallel/max_domains1` and `max_domains2` pass at oi's level (both paths; `max_domains2` is native-only in its header, judged by its
+own verdict as the others).
+
+**OC196 (a).** `:speed` in `divergences.edn` and `divergences-suite.edn` is `:kind :deferred` (owned by the AOT level and oi's speed
+work); its programs and `oi-slow.edn` unchanged.
+
+**OC197 (a): the tests whose main file is a `.mll`.** `bin/oi corpus` takes, beside the tests with a `.reference` or a check hook, the
+`.mll` files of `testsuite/tests` with a `(* TEST` header (four: `tool-lexyacc/csets`, `mpr7760`, `chars`, `warnings/mnemonics`;
+chars has no `.reference`: its own verdict is no output). header.awk reads their header (`ocamllex_flags = "-q"` the ocamllex action's
+flags); `bin/oi`'s `test_src` and `mll_gen` copy the `.mll` and run ocamltest's ocamllex action before the program's, the native
+ocamllex (`bin/repr-ocaml ocamllex -q NAME.mll` in the run's directory; `OI_OCAMLLEX=host` the host's), in every runner (oi's,
+the references', both AOT levels'), so the `.ml` names `NAME.mll` in its line directives as ocamltest's does. `bin/repr-ocaml`'s
+`ocamllex` and `ocamlyacc` verbs now read and write in the caller's directory (the script's other verbs still run at the root).
+Results at oi's level, both paths: csets, mpr7760 and chars pass (their own verdict); mnemonics needs `${ocamlrun}
+${ocamlsrcdir}/ocamlc -warn-help`, the source tree's built compiler, and stops at `Sys.getenv "ocamlsrcdir"` (`Not_found`): a class of
+its own, `:compiler-of-the-tree` (`:design`, OT3 (a): the compiler is the test's tool), in `divergences.edn`, `-aot` and
+`-aot-compiled`.
+
+**OC194 (a)'s wiring: `tool-lexyacc/calc`.** actions.awk (the suite corpus's reading) takes `modules` naming a `.mly` (its `.mli` and
+`.ml`) or a `.mll` (its `.ml`), the generators' `-q`, and `stdin` naming a data file of the test (`@stdin=FILE`, run_redirected's);
+suite.bash's `suite_stage` generates a unit the test's grammar or lexer makes (`suite_gen`: `bin/repr-ocaml ocamlyacc -q` and the
+native ocamllex in the staged directory; `OI_OCAMLYACC=host`, `OI_OCAMLLEX=host` the host's). calc leaves the run corpus (its row
+`class`) for the suite corpus (units `calc_parser.mli calc_parser.ml calc_lexer.ml calc.ml`), and leaves `:ocamltest-tools`' list in
+every divergences file. The 1,745 headers read before and after by header.awk (both `aot=0` and `aot=1`) and actions.awk: only the
+intended rows change (max_domains, the four `.mll`, OC206's four at `aot=1`, calc). `bin/repr-ocaml ocamlyacc-check` joins
+`ocaml-read-essential` (`test/gate/crops/ocaml.edn`, `steps.edn`). Results: calc passes at oi's level (both paths) and at the light AOT level (its own verdict: the `.reference`), its parser and lexer generated by Arbace's ocamlyacc and ocamllex; so does `callback/test_gc_alarm` (OC192's finalisers: its alarm, a finaliser that re-arms itself, now runs), out of `oi-slow.edn` and `aot-slow.edn`.
+
+**OC206 (a): the OCaml helpers at the AOT levels.** header.awk's helper mode at `aot=1` when the readonly files are OCaml alone
+(quotecommand's `myecho.ml`, redirections' and wait_nohang's `reflector.ml`, test_unix_cmdline's `cmdline_prog.ml`); the C helpers
+(signal's and delayintr's `sigint.c`, cloexec's `fdstatus`) keep their class. The light level (`cmd_check_aot`): `o2j_helpers` dumps
+each helper beside its test (`o2j_dump_file`, the dump `o2j_dump` made of its body: native or ocdump), the translation takes it with
+the programs (`o2j progs`), and the test's directory gets the executable the test calls, a script that runs the helper's translated
+program at the light level (`test/ocaml/o2j/run.ae`, `O2J_ARGV0` the path it was called by); a helper refused by the dump or by o2j
+is the test's row. The compiled level (`cmd_check_compiled`, `c2_programs`): each helper a package of its own (`ocaml.pN`) in the
+test's shard (progs.tsv's eighth field `pN:NAME`), its executable a script that runs the shard's program with `O2J_PROG` naming the
+helper's package. Results (the light level, both paths): redirections and wait_nohang pass; quotecommand runs its helper a dozen times, each a light-level process that loads the library (about 10 s of CPU), beyond the 120 s of CPU: `aot-slow.edn` (`:light-speed`, deferred; the compiled level's helper is the shard's Go program); test_unix_cmdline's program stops at `Unix.execv`, which the AOT runtime does not implement (`:unix-unported`, deferred). Two gaps of the AOT runtime the helpers showed, fixed: `caml_sys_open` gives a file it creates the permissions asked less the umask (ExtIo; quotecommand copies its helper with 0o777 and runs the copy), and `Unix.create_process` with the error output on the output's descriptor (`2>&1`, `>file 2>&1`) merges the two streams (ExtProc's `redirectErrorStream`; two `Redirect.to` of one file each truncated it). The AOT runtime's changes rerun on the light level's programs that open, create or spawn (`lib-unix/common/bigarrays`, `channel_of`, `dup2`, `pipe_eof`, `process_pid`, `lib-bigarray-file/mapfile`, `parallel/recommended_domain_count_unix`): 7 of 7 pass as before. The compiled level's path is built, not run here (its shards are the night's).
+
+**OC207 (a).** `test/ocaml/controls.txt`: `judge check-oi.edn _control/signal-hook-vs-compare lib-threads/signal asmcomp/compare`
+(the native record's derived from it); `lib-threads/signal` joins `essential-check.txt`. signal's run goes through its `TEST.run` (the
+SIGINT) and its row's output is its `TEST.check-program-output` hook's verdict (`check-program-output: pass`); judged against
+asmcomp/compare's run it differs, as a control must. At the AOT levels signal is `:c-api` and the control is not listed.
+
+**Checks.** Light, by list, each on both paths unless said: `bin/oi check --only-list` of the 13 run-corpus programs (the five finalisers,
+`weak-ephe-final/finaliser`, the two max_domains, the four `.mll`, signal): 12 of 13 pass on the native path and on `--ocdump`, mnemonics
+classed (`--record` into `check-oi-native.edn` and `check-oi.edn`); the essential list (`test/ocaml/essential-check.txt`, 59 programs
+with signal): 59 of 59 on both paths, both controls differing as they must; `bin/oi suite check --only-list` calc and test_gc_alarm: 2 of 2
+(native; `--ocdump --record` into `check-suite-oi.edn`); `bin/oi check --aot --only-list` of those 13 and OC206's four: 12 pass, 2 slow, 3
+classed, on both paths (`--ocdump --record` into `check-aot.edn`; the native AOT record is the night's); `suite check --aot`: 2 of 2
+(`--ocdump --record` into `check-suite-aot.edn`); the AOT runtime's regression sample (7 programs that open, create or spawn): 7 of 7;
+the other programs that register finalisers (`weak-ephe-final/ephetest`, `weaktest`): their classes as before; `bin/oi own-verdicts
+--check` (0 differ, none stale); the five judgments (`divergences`, `--aot`, `--compiled`, `suite divergences`, `--aot`: 0 failing, 38
+pins attested); `bin/oi suite rollup --record` (0 files without a result or a class); `bin/oi test` (go vet and the package's tests:
+ok); `bin/oi repl-check --native` (24 of 24); `bin/repr-ocaml ocamlyacc-check` (76 of 76) and `ocamllex-check` (29 of 29) after the
+generators' working-directory change; `test/gate/gate-key-crops-test.bash` PASS, `test/gate/crops-test.bash` ok (GT9's rules);
+`bin/gate --plan` and `--full --plan` clean. Not run here: the compiled level (its shards' j2g runs are the night's), so OC206's
+compiled path and the compiled runtime's finalisers are built and unproved, and the five finalisers' `aot-compiled-known.edn` lines stay
+until that run prints them STALE.
+
+**Scores.** `bin/reap --record` (0 problems), `bin/crops-score --record` and `--judge --strict` (0 problems): OCaml completeness 81.75% to
+**82.49%**, without by design 96.58% to 96.37% (OC196 moves the speed class from by design to deferred: by design falls, deferred
+rises), maturity 100%, independence 87.4% (unchanged: the cells read the oracle path's records until OC185's switch); eval 465 / 207 / 0
+to **477 / 195 / 4** (pass / design / deferred), AOT 406 / 202 / 64 to **419 / 191 / 66**.
+
+**The night's commands for this branch** (after its merge; the light tier's limits, `OI_TYPER_GOMEMLIMIT=1200MiB`, `O2J_JOBS=1`):
+1. `bin/oi stdlib` (bin/oi changed: the native library's key moved; about 8.5 minutes at `OI_LIB_JOBS=2`).
+2. `bin/oi check --record` (the native record over the run corpus: the four `.mll` and the two max_domains among its rows, calc gone)
+   and `bin/oi check --ocdump --record` when the night records the oracle path too.
+3. `bin/oi check --aot --record` (the native AOT record; OC206's four, quotecommand and finaliser_handover `slow` at the light level).
+4. `bin/oi suite check --record` and `suite check --aot --record` (calc and test_gc_alarm among them).
+5. OC202's slot, the compiled level: `bin/oi check --aot --level compiled --record` and `bin/oi suite check --aot --level compiled
+   --record`: they run OC206's compiled helpers (a helper package beside its test in a shard) and the compiled runtime's finalisers for
+   the first time; the five finalisers' `aot-compiled-known.edn` lines should print STALE (then they go), callback/test_gc_alarm's too.
+6. `bin/oi suite rollup --record`, `bin/reap --record`, `bin/crops-score --record`.
+7. The oracle tier's: `bin/repr-ocaml ocamlyacc-check --host` (the host's ocamlyacc beside, byte for byte; about 20 s).
+
+## Proposed (OC208; options with costs, a recommendation, not decided)
+
+- **OC208 `Unix.execv` and its kin at the AOT levels.** `lib-unix/common/test_unix_cmdline` (an OCaml helper since OC206 (a)) stops at
+  `Unix.execv`: the AOT runtime has no exec (the Java world cannot replace its process), `:unix-unported` (deferred); oi's `ext_signal`
+  execs (Go's `syscall.Exec`). (a) the AOT runtime's `execv`, `execve`, `execvp`, `execvpe` as a spawn of the program with the
+  process's descriptors (ProcessBuilder's inherit), a wait, and an exit with its status, at both levels (the pid the program sees changes,
+  a divergence the test does not observe; `lib-unix/common/cloexec`'s `execv` run likewise once OC198's mirror gives the AOT levels C):
+  half a day; (b) at the compiled level only, `syscall.Exec` from the shard's Go program through jrt (the light level, a Java forms
+  interpreter in stage 0, keeps the class): two hours, then the AOT cell's row moves with OC202's switch; (c) as now. *Recommended: (b)*
+  (exact, as oi's, and the AOT cell is the compiled level's).
+

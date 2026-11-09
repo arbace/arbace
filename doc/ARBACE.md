@@ -237,6 +237,11 @@ code. Three kinds of things live here:
   (`arbace.repr.ocaml.ocamllex`) ports the same tarball's lex/ (lexer.mll, parser.mly, cset.ml, table.ml, lexgen.ml, compact.ml,
   common.ml, output.ml, main.ml; outputbis.ml's -ml mode not, Proposed OC191) with stdlib/set.ml's AVL trees, by hand, the file
   carrying OCaml's notice (LICENSE.md: the OCaml Core System); its `check` verb is Arbace's own.
+  ocamlyacc (2026-11-09, OC194 (a), "As built: OC194 (a)"): `repr/ocaml/ocamlyacc.ae` (`arbace.repr.ocaml.ocamlyacc`) ports the
+  same tarball's yacc/ (main.c, reader.c, symtab.c, error.c, lr0.c, closure.c, warshall.c, lalr.c, mkpar.c, output.c,
+  skeleton.c, verbose.c; wstr.c, Windows' wide strings, not), Berkeley yacc as OCaml adapted it, by hand, the file carrying
+  their notice (INRIA's, LGPL 2.1 with the linking exception, "Based on public-domain code from Berkeley Yacc"; LICENSE.md:
+  the OCaml Core System); its `check` verb is Arbace's own.
   Its native front end for oi (2026-11-05, doc/ocaml/TYPER.md), `repr/ocaml/typer.ae` and `repr/ocaml/typer/`
   (`arbace.repr.ocaml.typer.*`), ports from the same tarball typing/'s types.ml, btype.ml, ctype.ml, predef.ml,
   printtyp.ml, env.ml, typetexp.ml, typedecl.ml, datarepr.ml, patterns.ml, parmatch.ml, typecore.ml and typemod.ml's
@@ -338,6 +343,10 @@ code. Three kinds of things live here:
   `span_as_caller_location` with `rustc_span/src/hygiene.rs`' `expansion_cause`, `rustc_mir_transform/src/post_analysis_normalize.rs`
   (opaque types by their definition), `rustc_expand/src/mbe/transcribe.rs`' `mk_delimited` with `rustc_span/src/lib.rs`' `Span::to`;
   LICENSE.md names them (MIT OR Apache-2.0); `ci_batch.ae` (RFP36 (c): the essential step's ci session) is Arbace's own.
+  RF11's first slice (2026-11-09, doc/rust/FRONTEND-SURVEY.md, "As built: RF11 (first slice)") ports into `mono.ae`
+  `rustc_abi/src/layout.rs`' `layout_of_union` and into `arbace/rust/back/codegen.ae` `rustc_codegen_ssa/src/mir/place.rs`'
+  `project_subslice` and `rvalue.rs`' exposed-provenance casts, rustc 1.99.1, the same revision and sources; LICENSE.md names them
+  (MIT OR Apache-2.0); `build_run.ae`'s promoted constants' evaluation and std's integer constants are Arbace's own.
   `arbace/rust/front/build.ae` (THIR and MIR building after `rustc_mir_build/src/{thir,builder}/`, the region scope tree after
   `rustc_hir_analysis/src/check/region.rs`) and `build_run.ae` (CleanupPostBorrowck's changes, the layouts of scalars and scalar pairs
   after `rustc_abi`) port rustc 1.99.1, the same revision and sources, by hand on 2026-11-08 (RF10's first slice,
@@ -391,7 +400,13 @@ code. Three kinds of things live here:
   visitIntrinsicCall's switch case by case (the cases of assume, ucmp/scmp, coro.begin, is.fpclass, init.trampoline,
   stackprotector, localescape, localrecover, eh.exceptioncode/pointer, get.active.lane.mask, get.vector.length, va_start,
   get.dynamic.area.offset, the fixed-point family, lrint/lround, bswap, invariant.start, stepvector, preserve.*.access.index,
-  ptrmask, thread.pointer, threadlocal.address, lifetime, sponentry; the rest named), of the same release; the unit tests
+  ptrmask, thread.pointer, threadlocal.address, lifetime, sponentry; the rest named), of the same release; since LLS40 and LLS42
+  (2026-11-09) also the Verifier's getSubprogram, visitFunction's walk of the locations (VisitDebugLoc) and its `!dbg` attachment
+  checks, visit(DbgVariableRecord)'s scope agreement and verifyFnArgs, visitDISubprogram's retained nodes, visitDILocalVariable,
+  visitDIDerivedType's set type, visitDICompileUnit's lists, visitGlobalVariable's `!dbg`, LLParser's DICompileUnit language rule and
+  instruction `!dbg` rule, and `AutoUpgrade.cpp`'s memory intrinsics with their alignment and lifetime of two parameters
+  (upgradeIntrinsicFunction1, UpgradeIntrinsicCall's cases and its default case), into expect.ae and, for the fixes, verify.ae, of the
+  same release; the unit tests
   `test/repr/llvm/expect_test.ae` are Arbace's own; LICENSE.md: Apache 2.0 with LLVM Exceptions; the rest of repr/llvm is Arbace's own.
 - Arbace's own namespaces of the program, not derived from Clojure: `box.ae` and `box/`
   (`arbace.box`, the store, over its host layer `arbace.box.host`; the box's build driver
@@ -452,8 +467,11 @@ and since SCS16 (b), 2026-11-09, `SpecialCasing.txt`, `DerivedCoreProperties.txt
 categories, properties and simple and full case mappings, in place of Go's `unicode` tables and Chez's answers; since SCS17 (c) the
 printers' escape ranges by doc/scheme/SPEC.md 7's rules; and since SCS21 (b), 2026-11-09, `auxiliary/WordBreakProperty.txt` (112,730 bytes,
 SHA-256 `476464e7...03779`, header `# WordBreakProperty-16.0.0.txt`, `# Date: 2024-07-29, 16:27:36 GMT`): UAX #29's Word_Break classes for
-si's `string-titlecase`, in place of a hand-written list; pinned by SHA-256 in `test/scheme/ucd.edn`); each file says so in its
-docstring or header.
+si's `string-titlecase`, in place of a hand-written list; since SCS23 (b) and SCS24 (b), 2026-11-09, `emoji/emoji-data.txt` (113,024 bytes,
+SHA-256 `f1365a51...2696a`, header `# emoji-data.txt`, `# Date: 2024-05-01, 21:25:24 GMT`): its Extended_Pictographic property for UAX #29's
+WB3c, and `auxiliary/WordBreakTest.txt` (298,862 bytes, SHA-256 `ad985d57...38e8`, header `# WordBreakTest-16.0.0.txt`, `# Date: 2024-04-30,
+21:48:43 GMT`): UAX #29's conformance cases, read (not copied) by si's unit test `go/arbace/scm/wordbreak_test.ae`; pinned by SHA-256 in
+`test/scheme/ucd.edn`); each file says so in its docstring or header.
 
 The converted files keep their Java file's notice as a comment; which license covers which file
 is stated only in [LICENSE.md](../LICENSE.md). Details, the renaming rules and how to build and

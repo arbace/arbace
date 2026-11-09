@@ -101,6 +101,16 @@ rf_libsrc_take() {
   [ -d "$libsrc" ] || "$root/bin/repr-rust" src-take >&2 || true
   [ -d "$libsrc" ]
 }
+# RF11: rsi's std build's sysroot (bin/rsi check's $sb/sysroot: RSI_STD_DIR, else this checkout's .tmp/rsi/std, else the main
+# checkout's, read in place); prints it, 1 with the message when absent
+rf11_rsi_sysroot() {
+  local d=${RSI_STD_DIR:-$root/.tmp/rsi/std} m
+  if [ -z "${RSI_STD_DIR:-}" ] && [ ! -d "$d/sysroot" ]; then
+    m=$(cd "$(git -C "$root" rev-parse --path-format=absolute --git-common-dir)/.." && pwd); d=$m/.tmp/rsi/std
+  fi
+  [ -d "$d/sysroot" ] || { echo "rust-front: no rsi std build's sysroot in $d (bin/rsi std-build, by hand)" >&2; return 1; }
+  echo "$d/sysroot"
+}
 # the judges' oracle data from the packs (RFP23 (b), bin/lib/repr-rust/front-records.bash): a front directory holding std's
 # names and interface and the programs' captures, linked from the staged packs; prints it
 records_front() {
@@ -428,20 +438,26 @@ case ${1:-} in
     cd "$root" && arbace_tool -m arbace.rust.front.mono-check "$fd" "$root/test/rust/front/std-crates.edn" "$libsrc" "$md" $ctl "${names[@]}" 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing' ;;
   std-crates)
     # RFP23 (c): std's crates' identities (each rmeta's CrateRoot: StableCrateId, svh; the compiler's version) read from the sysroot
-    # (the oracle tier's, by hand where rustc's sysroot is) into test/rust/front/std-crates.edn; --check compares
+    # (the oracle tier's, by hand where rustc's sysroot is) into test/rust/front/std-crates.edn; --check compares. RF11: --rsi, rsi's
+    # std build's sysroot (bin/rsi std-build, RSI_STD_DIR/sysroot: rlibs, no .rmeta files; the main checkout's when this checkout
+    # has none) into test/rust/front/std-crates-rsi.edn, what rsi check --front own's runs name std's crates by
     shift
     sl=${RUST_SYSROOT_LIB:-$work/../repr-rust/sysroot/lib/rustlib/x86_64-alpine-linux-musl/lib}
-    out=$root/test/rust/front/std-crates.edn; [ "${1:-}" = --check ] && out=$work/std-crates.edn
+    base=std-crates
+    if [ "${1:-}" = --rsi ]; then
+      shift; base=std-crates-rsi; sl=$(rf11_rsi_sysroot)/lib/rustlib/x86_64-alpine-linux-musl/lib || exit 1
+    fi
+    mkdir -p "$work"; out=$root/test/rust/front/$base.edn; [ "${1:-}" = --check ] && out=$work/$base.edn
     cd "$root" && arbace_tool -e "(require '[arbace.rust.front.mono :as m])
-      (let [lib \"$sl\" fs (sort (filter #(re-matches #\"lib(core|alloc|std)-[0-9a-f]+\\.rmeta\" %) (seq (.list (java.io.File. lib)))))
+      (let [lib \"$sl\" fs (sort (let [all (seq (.list (java.io.File. lib))) m (filter #(re-matches #\"lib(core|alloc|std)-[0-9a-f]+\\.rmeta\" %) all)] (if (seq m) m (filter #(re-matches #\"lib(core|alloc|std)-[0-9a-f]+\\.rlib\" %) all))))
             rs (for [f fs] [(second (re-find #\"^lib([a-z]+)-\" f)) f (m/read-rmeta-root (str lib \"/\" f))])]
         (spit \"$out\" (str \";; std's crates as the front end's runs name them (RFP23 (c), doc/rust/FRONTEND-SURVEY.md, \\\"As built: RFP23 (c)\\\"): each crate's\\n;; StableCrateId as its .rmeta's CrateRoot records it and the compiler's version (cfg_version) from the rmeta's header, read by\\n;; arbace.rust.front.mono/read-rmeta-root from the sysroot of rustc 1.99.1 (Alpine's rust 1.99.1-r0); \`bin/rust-front std-crates\`\\n;; writes it, \`std-crates --check\` compares it with the sysroot's (by hand, where the sysroot is)\\n\"
           \"{:cfg-version \" (pr-str (subs (:version (nth (first rs) 2)) 6)) \"\\n :triple \" (pr-str (:triple (nth (first rs) 2)))
           \"\\n :crates {\" (apply str (interpose \"\\n          \" (for [[n f r] (sort-by #(case (first %) \"core\" 0 \"alloc\" 1 2) rs)] (str (pr-str n) \" {:stable-crate-id \" (pr-str (:stable-crate-id r)) \" :svh \" (pr-str (:svh r)) \" :file \" (pr-str f) \"}\")))) \"}}\\n\")))" 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing' || true
     [ -s "$out" ] || exit 1
     if [ "${1:-}" = --check ]; then
-      if cmp -s "$out" "$root/test/rust/front/std-crates.edn"; then echo "std-crates: the sysroot's crates as test/rust/front/std-crates.edn records them"
-      else diff "$root/test/rust/front/std-crates.edn" "$out"; echo "std-crates: FAIL: the sysroot's crates differ"; exit 1; fi
+      if cmp -s "$out" "$root/test/rust/front/$base.edn"; then echo "std-crates: the sysroot's crates as test/rust/front/$base.edn records them"
+      else diff "$root/test/rust/front/$base.edn" "$out"; echo "std-crates: FAIL: the sysroot's crates differ"; exit 1; fi
     else echo "std-crates: wrote $out"; fi ;;
   essential)
     # RFP24 (b), RFP27 (a), RFP30 (a) (the pass judge), RFP36 (c), RFP40 (c) (the runs one session, mono-check in it): the
@@ -556,6 +572,99 @@ case ${1:-} in
     gcc -std=gnu23 -O0 -w -fno-builtin -fno-strict-aliasing -ffp-contract=off "$out/$n.ours.c" "$out/driver.c" -o "$out/$n.exe" 2>&1 | head -5 >&2
     [ -x "$out/$n.exe" ] || { echo "rust-front run: gcc refused the lowered C" >&2; exit 125; }
     "$out/$n.exe" "$@"; exit $? ;;
+  rsi-build)
+    # RF11 (doc/rust/FRONTEND-SURVEY.md, "As built: RF11 (first slice)"): rsi's cases (bin/rsi list's samples and synthetic corpus,
+    # default all; NAME... their stems) from the front end's own MIR, for bin/rsi check --front own: each program through the
+    # pipeline (the native reader, expansion, resolution, lowering, collection, typeck, MIR building and the ported passes to
+    # runtime MIR, BUILD_PASS=SimplifyCfg-pre-optimizations) at rsi's plan's edition and rustc's debug defaults (overflow checks
+    # on, panic=unwind), arbace.rust.front.mono's facts (std's crates: test/rust/front/std-crates-rsi.edn, rsi's std build's),
+    # the module (std's instances' bodies and the facts mono refuses from the pack rust-front-rsi: RF12's part), codegen with
+    # std's functions declared (linked from std's lowered library, as rustc's codegen unit declares them) and rsi's lowering as
+    # a check; one process (the batch), with rustc, rustdoc, cargo, gcc, cc and clang stubs exiting 99 first on PATH. Writes
+    # .tmp/rust-front/rsi/NAME/NAME.ours.ll (the program's codegen unit) and .tmp/rust-front/rsi/front.tsv: ID<TAB>own|pack<TAB>why
+    # (own: every body of the program's own from our MIR and the module through codegen and the lowering)
+    shift
+    rw=${RF11_WORK:-$work/rsi}; mkdir -p "$rw"; rm -f "$rw/front.tsv"
+    stubs=$work/stubs; mkdir -p "$stubs"
+    for t in rustc rustdoc cargo gcc cc clang; do printf '#!/bin/sh\necho "stub $0 called" >> "%s/stubs.log"\nexit 99\n' "$stubs" > "$stubs/$t"; chmod +x "$stubs/$t"; done
+    : > "$stubs/stubs.log"
+    plan=$(rfr_rsi_list) || exit 1
+    rs=$(rfr_stage rsi) || { echo "rsi-build: the pack rust-front-rsi is not current (bin/rust-front records make rsi, on the host with rustc)"; exit 1; }
+    fd=$(records_front) || exit 1
+    libsrc=${RF_MONO_LIB:-$root/.tmp/repr-rust/apks/rust-src/usr/src/rust/library}
+    rf_libsrc_take || { echo "rsi-build: no $libsrc (bin/repr-rust src-take)"; exit 1; }
+    specs=() ids=() eds=()
+    while IFS=$'\x1f' read -r id file ed _; do
+      n=$(basename "$id" .rs)
+      if [ $# -gt 0 ]; then printf ' %s ' "$*" | grep -q " $n " || continue; fi
+      rm -rf "${rw:?}/$n"; mkdir -p "$rw/$n"; ln -s "$rs/$n/$n.record.edn" "$rw/$n/$n.record.edn"
+      specs+=("$n=$file"); ids+=("$id"); eds+=("$ed")
+    done <<< "$plan"
+    [ ${#specs[@]} -gt 0 ] || { echo "rsi-build: no program of rsi's plan named"; exit 1; }
+    ed=$(printf '%s\n' "${eds[@]}" | sort -u)
+    [ "$(printf '%s\n' "$ed" | wc -l)" = 1 ] || { echo "rsi-build: the programs' editions differ ($ed): one batch an edition"; exit 1; }
+    # RF11_BATCH programs a process (default 6): the pipeline's caches grow with the programs it builds, and a process near its
+    # GOMEMLIMIT spends its cores collecting (the first whole run: 2.0 GB and every core at the end in one process)
+    : > "$rw/batch.log"; bsz=${RF11_BATCH:-6}
+    for ((i = 0; i < ${#specs[@]}; i += bsz)); do
+      (cd "$root" && PATH=$stubs:$PATH BUILD_PASS=SimplifyCfg-pre-optimizations RF_EDITION=$ed RF_OVERFLOW_CHECKS=1 RF_MONO_LIB=$libsrc GOMEMLIMIT=${RF11_GOMEMLIMIT:-1800MiB} GOMAXPROCS=${RF11_PROCS:-4} \
+         arbace_tool -m arbace.rust.front.build-run batch "$root/test/rust/front/std-crates-rsi.edn" "$fd" "$rw" --std "${specs[@]:$i:$bsz}" 2>&1 |
+         grep -v -E '^Reflection warning|recur arg|^Auto-boxing' >> "$rw/batch.log")
+    done
+    own=0
+    for i in "${!ids[@]}"; do
+      id=${ids[$i]} n=$(basename "$id" .rs)
+      why=$(grep -m1 "^run-built: $n: " "$rw/batch.log" | sed "s/^run-built: $n: //")
+      [ -n "$why" ] || why="the pipeline did not report ($rw/batch.log)"
+      if [ "$why" = ready ]; then
+        nrec=$(grep '^record ' "$rw/$n/build-run.log" | grep -v "core's body" | wc -l)
+        if [ "$nrec" = 0 ]; then echo "$id	own	$(grep -m1 "^build-run: $n: facts" "$rw/$n/build-run.log" | sed "s/^build-run: $n: //")"; own=$((own+1))
+        else echo "$id	pack	$nrec of the program's bodies not ours: $(grep '^record ' "$rw/$n/build-run.log" | grep -v "core's body" | head -1 | cut -c1-200)"; fi
+      else echo "$id	pack	$why" | cut -c1-400; fi
+      # the module's forms are the record's size: kept with RF11_KEEP=1
+      [ "${RF11_KEEP:-0}" = 1 ] || rm -f "$rw/$n/$n.mono.edn" "$rw/$n/$n.ours.c"
+    done > "$rw/front.tsv"
+    cut -f2,3 "$rw/front.tsv" | sed -E 's/ \(.*//; s/^own\t.*/own/' | sort | uniq -c | sort -rn
+    echo "rsi-build: $own of ${#ids[@]} programs from Arbace's MIR (the rest from rustc's IR packs); stub calls: $(wc -l < "$stubs/stubs.log")" ;;
+  rsi-native)
+    # RF11, by hand (the oracle tier's way: rustc as the linker driver, clang for the shim, gcc): the day's run of rsi-build's
+    # modules where std's lowered library (bin/rsi runtime-ci, the ci leg's: about four hours to make) is not at hand: each own
+    # program's codegen unit (.tmp/rust-front/rsi/NAME/NAME.ours.ll) in place of rustc's (bin/lib/rsi/link's RSI_FRONT_IR, rsi's
+    # lowering with --native-std, gcc -O0), linked by rustc with rsi's std build's rlibs, run as bin/rsi check runs a program
+    # (env -i, an empty standard input, its outputs normalized as run-program's), its status and outputs' digests against the
+    # judge's recorded run (test/rust/ref-rustc-1.99.1.edn). Not a check of the gate's: bin/rsi check --front own is (the ci leg)
+    shift
+    rw=${RF11_WORK:-$work/rsi}; sys=$(rf11_rsi_sysroot) || exit 1
+    rt=$work/rt
+    if [ ! -f "$rt/native.o" ] || [ ! -f "$rt/try.o" ]; then
+      mkdir -p "$rt"
+      (cd "$root" && arbace_tool -m arbace.cpp.lower lower-rt "$root/arbace/rust/rt/native.c.ae" "$rt/native.c" 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing' >&2)
+      gcc -std=gnu23 -O0 -w -fno-builtin -fno-strict-aliasing -ffp-contract=off -c "$rt/native.c" -o "$rt/native.o" || exit 1
+      rustc --sysroot "$sys" --edition 2024 --crate-type=lib --emit=obj -Copt-level=0 -Cdebuginfo=0 "$root/test/rust/runtime/native/try.rs" -o "$rt/try.o" 2> "$rt/try.log" || { cat "$rt/try.log"; exit 1; }
+    fi
+    . "$root/bin/lib/rsi/plan.bash"
+    : > "$rw/empty"; ran=0 ok=0
+    while IFS=$'\t' read -r id mode _; do
+      [ "$mode" = own ] || continue
+      n=$(basename "$id" .rs)
+      if [ $# -gt 0 ]; then printf ' %s ' "$*" | grep -q " $n " || continue; fi
+      d=$rw/$n/native; rm -rf "$d"; mkdir -p "$d/low" "$d/run"
+      ed=$(rfr_rsi_list | awk -F'\x1f' -v id="$id" '$1 == id {print $3; exit}')
+      (cd "$root" && RSI_LOW="$d/low" RSI_RT="$rt" RSI_FRONT_IR="$rw/$n/$n.ours.ll" RSI_KEEP=1 rustc --sysroot "$sys" --edition "$ed" -A unused -A internal_features -Cdebuginfo=0 \
+         -Zshare-generics=no -C codegen-units=1 -C save-temps --emit=llvm-ir,link -C linker="$root/bin/lib/rsi/link" -C linker-flavor=gcc "$id" -o "$d/prog" > "$d/link.log" 2>&1) ||
+        { echo "rsi-native: $n: the link failed ($(grep -v '^ *$' "$d/link.log" | tail -1 | cut -c1-200))"; ran=$((ran+1)); continue; }
+      { (cd "$d/run" && env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$d/run" timeout 60 "$d/prog" < "$rw/empty" > "$d/out" 2> "$d/err"); } 2> "$d/signal.log"; st=$?
+      plan_norm "$d/out" "$d/err"
+      ref=$(grep -F "{:id \"$id\" " "$root/test/rust/ref-rustc-1.99.1.edn" | head -1)
+      want_st=$(printf '%s' "$ref" | sed -n 's/.* :status \([0-9a-z]*\) .*/\1/p')
+      want_out=$(printf '%s' "$ref" | sed -n 's/.* :stdout "\([0-9a-f]*\)".*/\1/p')
+      want_err=$(printf '%s' "$ref" | sed -n 's/.* :stderr "\([0-9a-f]*\)".*/\1/p')
+      got_out=$(sha256sum < "$d/out" | cut -c1-64) got_err=$(sha256sum < "$d/err" | cut -c1-64)
+      ran=$((ran+1))
+      if [ "$st" = "$want_st" ] && [ "$got_out" = "$want_out" ] && [ "$got_err" = "$want_err" ]; then ok=$((ok+1)); echo "rsi-native: $n: status $st, stdout and stderr as rustc's recorded run"
+      else echo "rsi-native: $n: rustc's recorded status $want_st, ours $st$([ "$got_out" = "$want_out" ] || echo ", stdout differs")$([ "$got_err" = "$want_err" ] || echo ", stderr differs") ($d)"; fi
+    done < "$rw/front.tsv"
+    echo "rsi-native: $ok of $ran own programs give rustc's recorded run (the native leg, by hand)" ;;
   run-native)
     # RF3: a program whose own unit is the front's IR, linked with the host's native std as rsi's native-std leg links the
     # oracle's (bin/lib/rsi/link, RSI_FRONT_IR): the unit lowered by rsi's lowering, gcc -O0; status and stdout against the

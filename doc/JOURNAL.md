@@ -2645,6 +2645,151 @@ The user accepted HF10-P1 to P10 as recommended (~06:15). Built by an agent in t
   unbound local). Records `test/haskell/lib-check-own-ghc-internal.edn`, `test/haskell/lib-stg-own-results.edn`. Proposals HF10-P11
   to P14 in the survey.
 
+## 2026-11-09 OC194 (a): ocamlyacc ported (branch `ocaml-yacc`, from next e6214cd13)
+
+The user accepted OC194 (a) (2026-11-09). Built by an agent in the light tier (one process at a time, no gate, no build).
+Source: OCaml 5.5.0's release tarball (https://caml.inria.fr/pub/distrib/ocaml-5.5/ocaml-5.5.0.tar.xz, SHA-256
+`fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba`, the copy in `.tmp/repr-ocaml/ocaml-5.5.0`), its `yacc/`:
+main.c, reader.c, symtab.c, error.c, lr0.c, closure.c, warshall.c, lalr.c, mkpar.c, output.c, skeleton.c, verbose.c (wstr.c, Windows'
+wide strings, not), Berkeley yacc as OCaml adapted it ("Based on public-domain code from Berkeley Yacc", INRIA's LGPL 2.1 notice with
+the linking exception). The reference: the host's `/usr/bin/ocamlyacc` 5.5.0.
+
+- `arbace/repr/ocaml/ocamlyacc.ae` (`arbace.repr.ocaml.ocamlyacc`), a port by hand, rule for rule, evaluated on stage 0 as
+  `ocamllex.ae` is: the reader with its C details kept (a signed `char`, so a 0xFF byte is `EOF`; the reused line buffer that
+  `print_pos` reads under a stale position, modelled), LR(0), DeRemer and Pennello's LALR(1) as lalr.c writes it (`menhir.ae`'s
+  sets consulted, not reused, to keep the gotos' numbering), mkpar.c's conflicts and default reductions, output.c's packing
+  (`pack_vector`, `matching_vector`) and text, verbose.c's `.output`, main.c's command line and statuses (the `.output` left on an
+  error, the `.ml` and `.mli` removed). Alternatives: a fresh LALR(1) generator emitting the same tables (rejected: the packing
+  depends on byacc's state and goto numbering, so equality byte for byte needs its order anyway); Menhir's `--table` (another format).
+- `bin/repr-ocaml ocamlyacc` (the native tool) and `ocamlyacc-check [--host [--record]]`: the tarball's eight ocamlyacc grammars and
+  20 samples of Arbace's own (`test/ocaml/ocamlyacc/`, 13 of them error cases), plain and `-v`, and `cases.txt`'s 20 command lines:
+  76 runs, the files and messages by SHA-256 against `test/ocaml/ocamlyacc-expected.edn` (recorded from the host), a negative
+  control. `--host`: 76 of 76 equal byte for byte; the plain check 76 of 76, about 16 s, 440 MB. `make repr-ocaml-ocamlyacc-check`.
+- Mutants in scratch (a byte deleted, a token inserted, a span cut; 14 grammars; every other one with `-v`): 1,004 of 1,004 equal to
+  the host's (507 generate), with no fix needed.
+- Docs: doc/ocaml/OCAML-SURVEY.md "As built: OC194 (a)", doc/ARBACE.md, LICENSE.md. Not a gate step (left to the main session);
+  `tool-lexyacc/calc` can take `bin/repr-ocaml ocamlyacc -q calc_parser.mly` in place of the host's ocamlyacc.
+
+## 2026-11-09 OCaml's accepted proposals built: OC192, OC193, OC194's wiring, OC196, OC197, OC206, OC207; OC191 (b) recorded (branch `ocaml-props2`, from next `e6214cd13`)
+
+The user accepted OC191-OC197, OC206 and OC207 as recommended (~09:30; OC191 (b), the rest (a)). Built in the light tier (one
+check process at a time, `OI_JOBS=1`, `O2J_JOBS=1`, `OI_TYPER_GOMEMLIMIT=1200MiB`, main's stage 0); the host's OCaml 5.5.0 ran only
+the oracle path's ocdump dumps and the oracle-tier recording of ocamlyacc's record. Sources read: the OCaml 5.5.0 release tarball as
+pinned by `test/ocaml/corpora.edn` (`runtime/finalise.c`, `runtime/startup_aux.c`'s `caml_parse_ocamlrunparam` and `scanmult`,
+`runtime/domain.c`'s `caml_domain_spawn` and `domain_create`'s failure, `runtime/caml/domain.h`'s `Max_domains_def` and
+`Max_domains_max`, `yacc/`, `testsuite/tests`' headers), ocamltest's actions as earlier entries cite them.
+
+- OC194 (a) by a subagent (branch `ocaml-yacc`, `b59f68e79`, cherry-picked as `a0369db49`): `arbace/repr/ocaml/ocamlyacc.ae`, a
+  port of `yacc/` (Berkeley yacc, public domain, under INRIA's LGPL 2.1 notice with the linking exception), `bin/repr-ocaml
+  ocamlyacc` and `ocamlyacc-check` (76 of 76 runs equal to the host's ocamlyacc byte for byte, 1,004 of 1,004 mutants). Wired here:
+  the gate step `ocaml-read-essential` runs `ocamlyacc-check`; the suite corpus generates a test's `.mly`/`.mll` modules natively
+  (`tool-lexyacc/calc` runs and passes); `bin/repr-ocaml`'s generators read and write in the caller's directory.
+- OC192 (a): finalisers at oi's level by Go finalisers (`go/arbace/oi/ext_final.ae`, resurrection as the collector's darkening) and
+  in the AOT runtime by weak references with a block's field array kept (`jdk/ocaml/ocaml/rt/ExtGc.ae`); finalise.c's batch order;
+  run at the forced collections and at the ticks. Alternatives considered: a mark of our own from the roots (impossible: the roots
+  are Go's and the Java forms interpreter's), keeping values strongly and never running (the old behaviour), Go's `weak` package for
+  the `first` table (no resurrection: the function needs the value).
+- OC193 (a): `OCAMLRUNPARAM`'s `d` in oi and the AOT runtime; header.awk passes a `d`-only `ocamlrunparam`.
+- OC196 (a): `:speed` deferred. OC197 (a): the four main `.mll` tests in the run corpus, ocamllex natively at check time;
+  `warnings/mnemonics` a class of its own (`:compiler-of-the-tree`, OT3 (a)).
+- OC206 (a): the OCaml helpers at the light level (translated and run with their test) and at the compiled level (a package of the
+  test's shard; built, not run here). OC207 (a): the hook control and signal in the essential list.
+- Measures (light, by list, both paths): run corpus 13 programs 12 pass at oi's level (mnemonics classed), essential list 59 of 59 with
+  both controls, suite pair 2 of 2, AOT light 17 programs 12 pass, 2 slow, 3 classed (quotecommand and finaliser_handover beyond the
+  light level's 120 s of CPU), AOT runtime regression sample 7 of 7; the AOT runtime fixed on the way: a created file's permissions
+  (`caml_sys_open`) and `2>&1` merged in `create_process`. Scores: OCaml completeness 81.75% to 82.49%, eval 465/207/0 to 477/195/4,
+  AOT 406/202/64 to 419/191/66, maturity 100%, independence 87.4%. Not run: the compiled level (the night's; OC206's compiled path built,
+  not proved). Proposed OC208 (`Unix.execv` at the AOT levels). Process note: the harness made the subagent's worktree inside
+  `/root/arbace/.tmp/mac-queue/.claude/worktrees/` (an isolation flag of the call); its commit was fetched from there.
+
+## 2026-11-09: C++'s CP320 (a), an alias template's guides (branch `cpp-props4`)
+
+- **Built** (`arbace/cpp/template.ae`; after clang's SemaTemplateDeductionGuide.cpp at llvmorg-23.1.5, the pinned tarball:
+  getRHSTemplateDeclAndArgs, BuildDeductionGuideForTypeAlias, DeclareImplicitDeductionGuidesForTypeAlias,
+  DeclareAggregateDeductionGuideForTypeAlias, buildIsDeducibleConstraint): an alias template's guides f' from its
+  defining-type-id's class template's guides f (implicit, copy, user, aggregate), f's return type's arguments deduced from the
+  defining-type-id, f''s parameters the alias's it names and f's undeduced, its signature built lazily; the is_deducible
+  constraint and the alias's own constraints on the class a guide returns; from C++17 on.
+- **Why**: the user's decision CP320 (a) of 2026-11-09 (doc/cpp/CPP-SURVEY.md, "Proposed (CP320-CP324)").
+- **Measured**: probes `.tmp/p/al1-al3b.cpp` (seven deduced types right, the control's seven wrong ones refused); the 75 CTAD
+  files (`.tmp/fctad.txt`) with CP323: 21 → 28 (class-deduction-alias1, -alias2, -alias3, -alias8, -alias12, -alias16, -alias19).
+- **Left**: a member alias template named through its class (`T<double>::AFoo`), cpp1z/class-deduction-alias1's C++17-only
+  GCC error (clang accepts).
+
+## 2026-11-09: C++'s CP323 (a), C++23's inherited constructors' guides (branch `cpp-props4`)
+
+- **Built** (from the standard's text, [over.match.class.deduct]/1.10 and [over.match.best.general]/2 per P2582R1; clang 23 has
+  none): `inherited-guides`, the guides of the alias with C's parameters and the base as defining-type-id (CP320's), each returning
+  C with the arguments deduced back; the tie-break for a guide not from inherited constructors; the dependent base's
+  `UnresolvedUsingValueDecl` recognized. In the checker: a class's inherited constructors among its initializations' candidates
+  (B's but copy, move and no-parameter ones), the chosen one's access as B's member, the initialization otherwise not analyzed.
+- **Why**: the user's decision CP323 (a) of 2026-11-09; the checker's half because a class inheriting constructors gave a false
+  "no viable function" at its construction (any standard).
+- **Measured**: probe `.tmp/p/in1.cpp` (C<int>, C<char>, G<char, bool>; D and E errors), `in3`-`in5`; the every-10th sample
+  117 → 120 with CP320, CP321 (cpp23/class-deduction-inherited1 among them); the using-declaration files (`.tmp/fusing.txt`):
+  inh-ctor9 kept for the right reason now (A's protected constructor), inh-ctor35 lost (its expected error is
+  `-fno-new-inheriting-ctors`'s, before P0136: the earlier pass was the false "no viable" error), pr97268's extra line gone.
+
+## 2026-11-09: C++'s CP321 (a), static data members' in-class initializers in the checker (branch `cpp-props4`)
+
+- **Built** (`arbace/cpp/sema.ae`, `template.ae`): a static data member's in-class initializer analyzed in its class's scope in the
+  analysis' order (refusals reported), for a class of the main file, a class template's specialization only when an explicit
+  instantiation definition names it (`:explicit-inst-def`; [temp.inst]/4 for the implicit ones); the code generator unchanged.
+- **Why**: the user's decision CP321 (a) of 2026-11-09.
+- **Measured**: using-enum-1 (lines 37-38) and class-deduction108 (eight lines) now own passes (the every-10th sample's two of the
+  three gained); the 158 dg-error files with an in-class static member and a class (`.tmp/fstatic.txt`, in chunks of 20,
+  `.tmp/ch-*` against the base `.tmp/chb-*`): no pass lost, no new extra line.
+
+## 2026-11-09: C++'s CP324 (a), a using-declaration's access for member functions (branch `cpp-props4`)
+
+- **Built** (`arbace/cpp/sema.ae`): a class's using-declaration of member functions gives its synonyms its own access in its class
+  ([namespace.udecl]/19), judged at the call through the naming class (`cx-using-map`), and each function it names checked
+  accessible at the using-declaration.
+- **Why**: the user's decision CP324 (a) of 2026-11-09.
+- **Measured**: probe `.tmp/p/u1.cpp` (three errors where the rules have them, none on a protected function made public);
+  the 19 dg-error files with a class's using-declaration and an access message (`.tmp/fusing.txt`): parse/access6 now passes
+  (with CP323's and CP321's: 5 → 6, inh-ctor35 lost as CP323 says).
+
+## 2026-11-09: C++: the dg read's one endless file fixed, CP321's measure corrected (branch `cpp-props4`)
+
+- **Found**: cpp0x/overflow1.C never ended in the dg read (exponential constant folding of `Fib<95>::value` through the
+  specializations' static members; on next's tree too): tonight's whole-part record would have hung.
+- **Fixed**: `arbace.cpp.sema/var-const-int`, a const integral variable's value kept once found; overflow1 in 7 s. And CP321's
+  analysis restores the analysis position after a member's initializer (a stale line-1 error in
+  template/non-type-template-argument-1).
+- **Correction** of the CP321 entry above: its "158 files: no pass lost, no new extra" came from a run on the CP323 commit's tree,
+  a mistake in assembling the commits. Measured again on the right tree: no pass lost, five gained (class-deduction108,
+  using-enum-1, class-deduction-alias12, var-templ81, static4, each reviewed), one new extra found and fixed (the position)
+  (doc/cpp/CPP-SURVEY.md, "As built: the dg read's one endless file, and CP321's measure corrected").
+
+## 2026-11-09: RF11 (first slice): rsi's cases from the front end's own MIR (branch `rust-rf11`, from next `e6214cd13`)
+
+The user's order (RES54 (a): RF11 after RF10; RFP41 (a): the eval cell moves only when rsi's own cases run from the front end's MIR).
+Recorded in doc/rust/FRONTEND-SURVEY.md, "As built: RF11 (first slice)".
+
+- Design: the switch is per case and replaces the program's codegen unit only (the pack's `x.ll`); the shim and std's lowered
+  library stay rustc's, and std's instances' bodies (our module is a `-Zshare-generics=no` one) and the facts the native mono refuses
+  come from a new record, `rust-front-rsi` (the helper's `--mono-mir` at rsi's plan's flags against rsi's std build's sysroot, whose
+  StableCrateIds are recorded in `test/rust/front/std-crates-rsi.edn`; 73 programs, 2.5 MB xz, made by hand with rustc). The judge
+  is rsi's own (status and outputs against `ref-rustc-1.99.1.edn`). Alternatives considered: merging our functions into the pack's
+  share-generics `x.ll` (it references std's shared instances by symbols our native mono does not compute, and would mix two codegens
+  in one unit); running the whole module with core's bodies from the host sysroot (the ci leg links rsi's std, whose crate ids differ).
+- Built: `bin/rust-front rsi-build` (batches of 6, the ported passes to runtime MIR, the plan's edition and overflow checks, the
+  program's crate and file names as rustc's), `bin/rsi check --front own` (`--record` refused with it until RFP42), `bin/rust-front
+  rsi-native` (by hand: the native leg, since std's lowered library has never been built on this host), the Makefile's
+  `rust-front-rsi-build`, `rust-front-rsi-native`, `rsi-check-front-own`. Ports from rustc 1.99.1 (`58cf8f9c3`, rust-src-1.99.1-r0):
+  rustc_abi's `layout_of_union`, rustc_codegen_ssa's `project_subslice` and exposed-provenance casts, `Generics::own_args_no_defaults`
+  in the v0 paths; core's integer constants and scalar promoted constants evaluated; Assert, method-call and overloaded-index caller
+  locations as rustc's `fn_span`; codegen fixes found by the runs (i128 folding, widened unsigned constants, generic float
+  intrinsics, ClosureFnPointer, a never-assigned scalar return, the front end's ADT names). The pack `rust-front-built`'s dumps now hold
+  `@ROOT@` (they named `rust-rf10b`'s worktree, so the essential step's built judge gave 51 of 62 in any other checkout), made again.
+- Results: 47 of the 67 synthetic programs own (0 of the six samples, measured once), 43 of the 47 give rustc's recorded run on the
+  native leg; the four left: std's source paths of rsi's std build (3, RFP47) and a fault (`panic-vec-remove`). The 20 not own: vtables
+  (virtual calls 5, unsizing to `dyn` 3), the repeat loop 2, float `pow` 2 (fixed after the run), CTFE, a transmute, an allocation kind,
+  `tlsref`, `typed_swap_nonoverlapping`, three `main`s not ours. `bin/rust-front essential` passes against its known file; crops-score
+  unchanged (Rust 75.0 / 75.0 / 95.8 / 80.0): an own case still consumes rustc's records, so the eval stage stays 0.5 (RES54 (a);
+  `independence.edn` counts the own cases). Proposed: RFP42-RFP47.
+
 ## 2026-11-09: RF12's first slice, core's module files through the front end (branch `rust-rf12`, from `mac/next` 3ef7b3f78)
 
 - The brief (RF12, doc/rust/FRONTEND-SURVEY.md §7): the front end builds core from the pinned rust-src (Alpine's

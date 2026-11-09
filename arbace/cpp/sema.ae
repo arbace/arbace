@@ -1064,7 +1064,7 @@
       (when-not nm (reset! *last-anon* t)))
     t))
 
-(declare declare-node*! cx-access!)
+(declare declare-node*! cx-access! cx-using-map)
 
 (def ^:dynamic *retry* nil) ; atom [[scope node] ...]: header declarations to declare again after the headers (G4)
 (def ^:dynamic *header-drops* nil) ; atom [[kind name message] ...]: the header declarations not declared (G4)
@@ -1158,9 +1158,33 @@
                     (doseq [e es :when (and (:ucls e) (#{:enumerator :type} (:e e)))]
                       (try (cx-access! {:scope scope} (:ucls e) (last parts) (:uaccess e) nil nil)
                            (catch arbace.lang.ExceptionInfo x
-                             (swap! *order* conj [:cx-error (ex-info (.getMessage x) (assoc (ex-data x) :cx/node n))])))))
+                             (swap! *order* conj [:cx-error (ex-info (.getMessage x) (assoc (ex-data x) :cx/node n))]))))
+                    ;; (CP324 (a): a class's using-declaration of member functions, [namespace.udecl]/19: each function it
+                    ;; names accessible where it is (its own access, or a using-declaration's that named it), not a
+                    ;; constructor's)
+                    (when (:cls scope)
+                      (when-let [x (first (keep (fn [e]
+                                                  (when (= :fn (:e e))
+                                                    (let [f (fnd (:id e))]
+                                                      (when (and (:cls f) (not= :ctor (:kind f)))
+                                                        (try (if (:ucls e)
+                                                               (cx-access! {:scope scope} (:ucls e) (last parts) (:uaccess e) nil nil)
+                                                               (cx-access! {:scope scope} (:cls f) (last parts) (:access f) nil nil))
+                                                             nil
+                                                             (catch arbace.lang.ExceptionInfo x x))))))
+                                                es))]
+                        (swap! *order* conj [:cx-error (ex-info (.getMessage x) (assoc (ex-data x) :cx/node n))]))))
+                  ;; (CP323 (a): `using B::B;` inherits B's constructors, [namespace.udecl]/3 and [class.inhctor.init]: the
+                  ;; class marked with the bases' names, their constructors candidates of its initializations, ctor-init)
+                  (when (and (:cls scope) (>= (count parts) 2)
+                             (= (last parts) (str/trim (str/replace (nth parts (- (count parts) 2)) #"<.*$" ""))))
+                    (abi/update-cls! (:cls scope) update :inherits-ctors (fnil conj #{}) (last parts)))
                   (doseq [e es] (enter! scope (last parts) (cond-> (assoc e :pos (long (or (:_b n) 0)))
                                                              (and (checking?) (:cls scope) (#{:enumerator :type} (:e e)))
+                                                             (assoc :ucls (:cls scope) :uaccess (or *member-access* :public))
+                                                             ;; (CP324 (a): a member function's synonym has the using-declaration's
+                                                             ;; access as a member of its class, [namespace.udecl]/19)
+                                                             (and (checking?) (:cls scope) (= :fn (:e e)) (:cls (fnd (:id e))))
                                                              (assoc :ucls (:cls scope) :uaccess (or *member-access* :public))))))
     ;; (CX12, the checker: a namespace-scope static_assert of the main file checked in the analysis' order)
     "StaticAssertDecl" (when (and (checking?) (= :ns (:kind scope)) (not (header-node? n)))
@@ -1342,6 +1366,21 @@
 
 (declare ce-eval ce-wrap)
 
+(declare const-int)
+
+(defn- var-const-int
+  "A const integral variable's value, its initializer's constant (const-int in its definition's scope), kept on the variable
+  once found: a variable's initializer is the same expression at every use, and a class template's static member whose
+  initializer names its other specializations' (cpp0x/overflow1's Fib<i-1>::value + Fib<i-2>::value) is otherwise evaluated
+  again for each path, exponentially (the dg read's one file that never ended). A failure is not kept."
+  [id]
+  (let [v (var* id)]
+    (if (contains? v :cint)
+      (:cint v)
+      (let [c (const-int (or (:def-scope v) *root*) (:init v))]
+        (upd-var! id assoc :cint c)
+        c))))
+
 (defn const-int [scope n]
   (let [e (binding [*cutoff* Long/MAX_VALUE] (rv (analyze {:scope scope} n)))]
     (letfn [(ev [e]
@@ -1370,7 +1409,7 @@
                 :not (if (zero? (long (ev (:e e)))) 1 0)
                 :land (if (and (not= 0 (long (ev (:l e)))) (not= 0 (long (ev (:r e))))) 1 0)
                 :lor (if (or (not= 0 (long (ev (:l e)))) (not= 0 (long (ev (:r e))))) 1 0)
-                :load (let [v (var* (:id (:e e)))] (if (and (:c (:ty v)) (:init v)) (const-int (:def-scope v) (:init v)) (ce-eval e)))
+                :load (let [v (var* (:id (:e e)))] (if (and (:c (:ty v)) (:init v)) (var-const-int (:id (:e e))) (ce-eval e)))
                 (ce-eval e)))]
       (ev e))))
 
@@ -1621,8 +1660,7 @@
       ;; a function lvalue: its address; *p of a function pointer p: p itself
       (abi/fn? t) (if (= :deref (:op e)) (:e e) {:op :fnaddr :e e :fn (:fn e) :ty (abi/ptr t) :cat :pr})
       (and (= :var (:op e)) (:c t) (abi/integral? t) (:init (var* (:id e))) (not= :local (:storage (var* (:id e)))))
-      (let [v (var* (:id e))
-            c (try (const-int (or (:def-scope v) *root*) (:init v)) (catch arbace.lang.ExceptionInfo _ nil))]
+      (let [c (try (var-const-int (:id e)) (catch arbace.lang.ExceptionInfo _ nil))]
         (if c {:op :int :v c :ty (abi/unq t) :cat :pr} {:op :load :e e :ty (abi/unq t) :cat :pr}))
       ;; o.k of a constant static member: o evaluated, k folded (not an odr-use)
       (and (= :comma (:op e)) (= :var (:op (:r e))) (lv? e) (not (abi/class? t)))
@@ -2216,14 +2254,36 @@
   ([id args ctx] (ctor-init id args ctx false))
   ([id args ctx nested]
   (let [cands (concat (ctor-candidates id) (when-let [h (:ctor-candidates @hooks)] (h id args)))
+        ;; (CP323 (a), the checker: the constructors a class inherits by `using B::B;` ([namespace.udecl]/3,
+        ;; [over.match.funcs]/8-9: B's constructors but its copy and move constructors and a default constructor), its
+        ;; own declared beside them; one chosen is checked for its access as B's member ([namespace.udecl]/19) and the
+        ;; initialization left unanalyzed, the object declared all the same)
+        inh (when (and (checking?) (seq (:inherits-ctors (abi/cls id))))
+              (let [nms (:inherits-ctors (abi/cls id))]
+                (vec (for [b (:bases (abi/cls id))
+                           :let [bc (:cls b)]
+                           :when (contains? nms (:name (abi/cls bc)))
+                           fid (concat (ctor-candidates bc) (when-let [h (:ctor-candidates @hooks)] (h bc args)))
+                           :let [f (fnd fid)]
+                           :when (and (seq (:ps (:ty f))) (not (copy-ctor? f bc)) (not (move-ctor? f bc)))]
+                       fid))))
+        cands (concat cands inh)
         cands (if nested (remove #(= id (class-id (abi/non-ref (or (first (:ps (:ty (fnd %)))) abi/void)))) cands) cands)
         fid (try (resolve-overload cands args nil)
                      (catch arbace.lang.ExceptionInfo e
-                       (if (and (System/getenv "CPP_HDR_TRACE") (:codegen/refused (ex-data e)))
+                       (cond
+                         ;; (CP323 (a): a class inheriting constructors, which the slice does not declare: for the checker
+                         ;; an initialization no declared constructor accepts is not judged, the object declared all the same;
+                         ;; the code generator refuses it, as before)
+                         (and (checking?) (:inherits-ctors (abi/cls id)) (re-find #"no viable|ambiguous" (str (.getMessage e))))
+                         ::inherited
+                         (and (System/getenv "CPP_HDR_TRACE") (:codegen/refused (ex-data e)))
                          (fail (:codegen/refused (ex-data e)) (.getMessage e) " (constructing " (:name (abi/cls id)) ")")
-                         (throw e))))
-            f (fnd fid)]
+                         :else (throw e))))
+            f (when-not (= ::inherited fid) (fnd fid))]
         (cond
+          (= ::inherited fid) {:i :none}
+          (some #{fid} inh) (do (cx-ctor-access! ctx {:i :ctor :fn fid}) {:i :none})
           (and (:trivial f) (= 1 (count args))) {:i :copy :e (first args) :cls id}
           ;; an immediate function's constructor of an empty class: evaluated, nothing at run time ([expr.const]/16;
           ;; G5: <compare>'s __cmp_cat::__unspec)
@@ -2531,7 +2591,8 @@
                       (cx-naming-class ctx n) (assoc :cx-qcls (cx-naming-class ctx n))
                       ;; (the rest of CP313 (a): a member function named in a member function, judged at the call)
                       (and (checking?) (some-> (:fn-id ctx) fnd :cls) (not (:lambda ctx)))
-                      (assoc :member-access true :cx-nc (or (cx-naming-class ctx n) (some-> (:fn-id ctx) fnd :cls)) :cx-obj (some-> (:fn-id ctx) fnd :cls)))))
+                      (assoc :member-access true :cx-nc (or (cx-naming-class ctx n) (some-> (:fn-id ctx) fnd :cls)) :cx-obj (some-> (:fn-id ctx) fnd :cls)
+                             :cx-using (cx-using-map es)))))
       (fail :name "name " (:name (:referencedDecl n)) " of kind " (:e e)))))
 
 (defn- name-expr [ctx n]
@@ -2664,6 +2725,11 @@
     (abi/class? (abi/unq t)) {:op :temp-obj :init (init-for t [e] ctx :direct) :ty (abi/unq t) :cat :pr}
     :else (convert-scalar (rv e) t true)))
 
+(defn- cx-using-map
+  "CP324 (a): {fn-id [class access]} for the functions among the entities `es` that a class's using-declaration named."
+  [es]
+  (not-empty (into {} (for [e es :when (and (= :fn (:e e)) (:ucls e))] [(:id e) [(:ucls e) (:uaccess e)]]))))
+
 (defn- method-set-of
   "[class-id fn-ids] of the members named `nm` of the class of object `obj`."
   [cid nm]
@@ -2778,7 +2844,8 @@
         (let [tm (vec (keep (fn [[_ x]] (when (= :tmpl (:e x)) (:id x))) (class-lookup (or qcid cid) nm)))
               t (or (node-text n) "")]
           (cond-> {:op :fnset :fns fids :tmpls tm :name nm :obj (cx-via (if (= :pr (:cat obj)) (materialize obj) obj) qcid) :ty {:k :overload} :cat :lv :qualified (boolean qcid)}
-            (checking?) (assoc :member-access true :cx-nc (or qcid cid) :cx-obj cid)
+            (checking?) (assoc :member-access true :cx-nc (or qcid cid) :cx-obj cid
+                               :cx-using (cx-using-map (map second (class-lookup (or qcid cid) nm))))
             (and (seq tm) (:_wn n) (:explicitTemplateArgs n)) (assoc :targs-text (written-targs n nm) :targs-scope (:scope ctx))
             (and (seq tm) (not (:_wn n)) (re-find #"<[^<>]*(?:<[^<>]*>[^<>]*)*>\s*$" t)) (assoc :targs-text (second (re-find #"(?:\.|->)\s*(?:template\s+)?(.*)$" t)) :targs-scope (:scope ctx))))
         (= :enumerator (:e e)) {:op :int :v (:val e) :ty (:ty e) :cat :pr}
@@ -3004,7 +3071,12 @@
                  ;; (a function found twice, through a using-declaration and its class: one candidate; G4)
                  fid (binding [*drops* (meta tcands)] (resolve-overload (distinct cands) args obj))
                  f (fnd fid)
-                 _ (when (:member-access callee) (check-access! ctx (:cls f) (:name f) (:access f) (:cx-nc callee) (when-not (:static f) (:cx-obj callee))))
+                 ;; (CP324 (a): a function found through a class's using-declaration has that declaration's access as a
+                 ;; member of its class)
+                 _ (when (:member-access callee)
+                     (if-let [[uc ua] (get (:cx-using callee) fid)]
+                       (check-access! ctx uc (:name f) ua (:cx-nc callee) (when-not (:static f) (:cx-obj callee)))
+                       (check-access! ctx (:cls f) (:name f) (:access f) (:cx-nc callee) (when-not (:static f) (:cx-obj callee)))))
                  std-builtin (when (and (= 1 (count args)) (= [[:ns "std"]] (:path f)) (not (:cls f)))
                                (std-builtins (:name f)))]
              (cond
@@ -4667,6 +4739,17 @@
           (when (and (number? v) (zero? (long v)) (not @d))
             (throw (ex-info "codegen: static assertion failed" {:codegen/refused :sassert :cx/node n}))))))))
 
+(defn- cx-static-member-init?
+  "CP321 (a): whether the checker analyzes the static data member `v`'s in-class initializer: a member of a class of the
+  main file that is no closure, no local class, and no class template's specialization but one an explicit instantiation
+  definition names."
+  [v]
+  (when-let [cid (:cls (:def-scope v))]
+    (let [c (abi/cls cid)]
+      (and c (not (:header c)) (not (:lambda c))
+           (or (nil? (:tmpl c)) (:explicit-inst-def c))
+           (some? (cx-enclosing-classes cid))))))
+
 (defn global-init
   "A namespace-scope variable's initializer."
   [vid]
@@ -4784,6 +4867,21 @@ protected:
                                             (if (:codegen/refused (ex-data e)) (h e (some-> *at* deref)) (throw e))))
                                      nil)
                           :var (let [v (var* id)]
+                                 ;; (CP321 (a), the checker: a static data member's in-class initializer, analyzed in its class's
+                                 ;; scope as the definition's would be ([class.static.data]/3-4, [dcl.init]); a class template's
+                                 ;; specialization's only when an explicit instantiation definition names it ([temp.explicit]/10,
+                                 ;; [temp.inst]/4: an implicit instantiation's initializer is instantiated when used); the
+                                 ;; code generator's definitions unchanged)
+                                 (when (and *on-refusal* (= :member-static (:storage v)) (:init v) (not (:defined v)) (not (:cx-sinit v))
+                                            (cx-static-member-init? v))
+                                   (upd-var! id assoc :cx-sinit true)
+                                   ;; (the position of the analysis restored after: a later refusal without a node of its own,
+                                   ;; a default-initialized variable's, is not given this initializer's)
+                                   (let [at0 (some-> *at* deref)]
+                                     (try (global-init id)
+                                          (catch arbace.lang.ExceptionInfo e
+                                            (if (:codegen/refused (ex-data e)) (*on-refusal* e (some-> *at* deref)) (throw e)))
+                                          (finally (when *at* (reset! *at* at0))))))
                                  (when (and (:defined v) (not (:ginit v)))
                                    ;; (CX12: as a checker a refused initializer is reported and the analysis goes on)
                                    (if-let [h *on-refusal*]

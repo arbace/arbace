@@ -283,6 +283,14 @@ covers what.
   the OCaml LGPL linking exception (below). Its `check` verb, `bin/repr-ocaml ocamllex-check`, `test/ocaml/oc185.ae` and the samples of
   `test/ocaml/ocamllex/` are Arbace's own (Eclipse Public License 1.0); `test/ocaml/ocamllex-expected.edn` records the host's ocamllex
   5.5.0's outputs' digests.
+- ocamlyacc ported (doc/ocaml/OCAML-SURVEY.md, "As built: OC194 (a)"): `arbace/repr/ocaml/ocamlyacc.ae` ports OCaml 5.5.0's yacc/
+  (main.c, reader.c, symtab.c, error.c, lr0.c, closure.c, warshall.c, lalr.c, mkpar.c, output.c, skeleton.c, verbose.c) from the same
+  release tarball (SHA-256 `fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba`), by hand on 2026-11-09, the file carrying
+  the notice. yacc/ is Berkeley yacc as OCaml adapted it: each file says "Based on public-domain code from Berkeley Yacc" (Berkeley
+  yacc itself is in the public domain), and each carries INRIA's notice (Copyright 1996 INRIA) placing OCaml's adaptation under the GNU
+  Lesser General Public License version 2.1 with the OCaml LGPL linking exception (below); the port is under those terms. Its `check`
+  verb, `bin/repr-ocaml ocamlyacc-check` and the samples of `test/ocaml/ocamlyacc/` are Arbace's own (Eclipse Public License 1.0);
+  `test/ocaml/ocamlyacc-expected.edn` records the host's ocamlyacc 5.5.0's outputs' and messages' digests.
 - oi's native front end (doc/ocaml/TYPER.md): `arbace/repr/ocaml/typer/types.ae` (typing/types.ml, btype.ml, ctype.ml's
   levels, unification, generalization and instances, predef.ml, printtyp.ml with out_type.ml and oprint.ml),
   `env.ae` (typing/env.ml, typetexp.ml, typedecl.ml, datarepr.ml), `parmatch.ae` (typing/patterns.ml, parmatch.ml),
@@ -909,6 +917,13 @@ covers what.
   the MIT License or the Apache License 2.0 at the licensee's option, taken here under the MIT License ("Rust (rustc 1.99.1): MIT
   License or Apache License 2.0" below). The judge `mono_check.ae` and `test/rust/front/std-crates.edn` are Arbace's own, under the
   Eclipse Public License 1.0.
+- RF11's first slice (2026-11-09, doc/rust/FRONTEND-SURVEY.md, "As built: RF11 (first slice)"), from rustc 1.99.1, the same revision
+  and sources and under the same terms (MIT): `mono.ae`'s `layout_of_union` after `compiler/rustc_abi/src/layout.rs` (with
+  `BackendRepr::to_union`, `compiler/rustc_abi/src/lib.rs`), `arbace/rust/back/codegen.ae`'s Subslice places after
+  `compiler/rustc_codegen_ssa/src/mir/place.rs` (`project_subslice`) and its PointerExposeProvenance and PointerWithExposedProvenance
+  casts after `compiler/rustc_codegen_ssa/src/mir/rvalue.rs`; `build_run.ae`'s values of core's integer constants follow
+  `library/core/src/num/{int_macros,uint_macros}.rs`' definitions of MIN, MAX and BITS. `eval-promoted` and the rsi switch
+  (`bin/rust-front rsi-build`, `bin/lib/rsi/check`'s `--front own`) are Arbace's own, under the Eclipse Public License 1.0.
 - `arbace/rust/front/core_check.ae` and RF12's first slice's edits (2026-11-09, doc/rust/FRONTEND-SURVEY.md, "As built: RF12 (first
   slice)"), from rustc 1.99.1, the same revision and sources and under the same terms (MIT): `compiler/rustc_expand/src/module.rs` (the
   module tree), `compiler/rustc_expand/src/mbe/{metavar_expr,transcribe,macro_rules}.rs` and `compiler/rustc_expand/src/expand.rs`
@@ -1456,9 +1471,11 @@ covers what.
   (https://www.unicode.org/Public/16.0.0/ucd/ `UnicodeData.txt`, `extracted/DerivedGeneralCategory.txt` and `CaseFolding.txt`,
   pinned by SHA-256 in `test/scheme/ucd.edn`, fetched 2026-11-08; since SCS16 (b) and SCS17 (c), "As built: SCS15-SCS18", also
   `SpecialCasing.txt`, `DerivedCoreProperties.txt` and `PropList.txt`, fetched 2026-11-09; since SCS21 (b) also
-  `auxiliary/WordBreakProperty.txt`, fetched 2026-11-09): the general categories, the identifier,
+  `auxiliary/WordBreakProperty.txt`, fetched 2026-11-09; since SCS23 (b) also `emoji/emoji-data.txt`'s Extended_Pictographic, fetched
+  2026-11-09, and since SCS24 (b) `auxiliary/WordBreakTest.txt`, the cases si's unit test `go/arbace/scm/wordbreak_test.ae` reads, not
+  copied into the tree): the general categories, the identifier,
   whitespace and printer escape ranges derived from them, the case foldings, si's properties (Alphabetic, Numeric, White_Space,
-  Uppercase, Lowercase, Cased, Case_Ignorable), its simple and full case mappings and its Word_Break classes are Unicode's data, under the Unicode License V3 below ("The
+  Uppercase, Lowercase, Cased, Case_Ignorable, Extended_Pictographic), its simple and full case mappings and its Word_Break classes are Unicode's data, under the Unicode License V3 below ("The
   Unicode Character Database 16.0.0 (repr/scheme's Unicode data)"); the generator and the files' code are Arbace's own,
   under the Eclipse Public License 1.0.
 - `seed/arbace-seed-go.tar.xz` (since S4, 2026-10-13; doc/STANDALONE-NOTES.md, "S4: the
@@ -2942,7 +2959,8 @@ Entire Agreement. This Agreement constitutes the entire agreement between the pa
 Covers the data of `arbace/repr/scheme/category.ae`, `arbace/repr/scheme/unicode.ae`, `arbace/repr/scheme/casefold.ae` and
 `go/arbace/scm/unicode.ae`, generated from the Unicode Character Database 16.0.0 (`UnicodeData.txt`,
 `extracted/DerivedGeneralCategory.txt`, `CaseFolding.txt`, and since SCS16 (b) `SpecialCasing.txt`, `DerivedCoreProperties.txt`,
-`PropList.txt`, and since SCS21 (b) `auxiliary/WordBreakProperty.txt`; https://www.unicode.org/Public/16.0.0/ucd/, pinned by `test/scheme/ucd.edn`). The license, the text of
+`PropList.txt`, since SCS21 (b) `auxiliary/WordBreakProperty.txt`, and since SCS23 (b) and SCS24 (b) `emoji/emoji-data.txt` and
+`auxiliary/WordBreakTest.txt` (the latter read by si's unit test, not copied); https://www.unicode.org/Public/16.0.0/ucd/, pinned by `test/scheme/ucd.edn`). The license, the text of
 https://www.unicode.org/license.txt as fetched on 2026-11-08 (SHA-256
 `e7a93b009565cfce55919a381437ac4db883e9da2126fa28b91d12732bc53d96`, pinned in `test/scheme/ucd.edn`):
 
