@@ -1325,3 +1325,9 @@ doc/ARBACE.md name them.
 - The essential step re-recorded after each change that moved a line (`essential-known.txt`): 8 programs built (62 of 62, the passes
   60 of 60), capture-check 34 of 34, run-built 7 of 7, mono-check every fact but core's closure (0 of 3, RF12's); about 3.5 minutes.
   `bin/crops-score --judge --strict`: Rust unchanged.
+
+## 2026-11-09: correction (the packs' digests of the entry above)
+
+The entry "the rest of RFP28-RFP41 built" names `rust-front-built` `3f84e0a6` and `rust-front-captures` `e41dfc4e`: those were made while
+the sample was `a8.rs`; renamed `opaque1.rs` (kept out of the mono kind) the packs were made again, `c7005a5a` and `19e9947c`, the pins
+committed with RFP33 (a). `bin/oracle-records pins`: the four Rust front packs in the store as their manifests say.

@@ -2272,7 +2272,7 @@ Branch `rust-props`, after the night's four, one commit a proposal.
   -> i32>` printed again from the revealed type, `build/fn-const-text`), as rustc's pass normalizes every type of the body. An opaque
   type without a definition (none here) takes the old structural match.
 - The sample `test/rust/front/opaque1.rs` (two functions returning `impl Fn(i32) -> i32`, alike but for their DefIds, and a generic
-  definer `twice<F>`), in the pack `rust-front-built` (1,210 members, `3f84e0a6...`) and `rust-front-captures` (9, `e41dfc4e...`), not
+  definer `twice<F>`), in the pack `rust-front-built` (1,210 members, `c7005a5a...`) and `rust-front-captures` (9, `19e9947c...`), not
   `rust-front-mono` (its run needs the closures behind opaque types collected: RF11's): through every pass 8 of 8 bodies equal (4 of 8
   before: the alike pair and the generic definer left unrevealed). `closures`' `compose` (a generic definer): `differ` → `but for the
   allocations' ids`. `typeck-check --ours closures collect1`: 493 of 497 facts, unchanged. The essential step's lines move to 8
