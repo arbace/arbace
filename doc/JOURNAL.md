@@ -1931,3 +1931,51 @@ which the probe runs first; a flipped answer fails it in about 20 seconds. Wired
 `:inputs`). Checked by flipping each planted answer once by hand (REPR_HASKELL_CONTROLS): the probe's control fails each time
 with the flipped test named. Alternatives: planting beside the 308 in the one diagnose run (rejected: a flip shows after 36
 minutes); keeping the waiver. HFS-I13 (a): nothing to build. the controls passed first, then the 308 compile tests, types and values: "the answers as committed", 33 min wall (40 min CPU), one process.
+
+## 2026-11-08: LLS33 (b), the pack rt's mutants judged by their own verdicts; LLS34 (b) (branch `llvm-lls33`, from next 5ec43f7b7)
+
+The user's decisions of 2026-11-08 (about 22:00) on llvm-rt-pack's proposals. LLS33 (b): each rt-family mutant carries its own verdict,
+written from the rule its kind breaks. LLS34 (b): the pack keeps the first records' set, with no `win` build for the four C++ samples.
+
+What was built:
+- **The verdict line.** `arbace.repr.llvm.mutate`'s 41 kinds attach what they changed to the mutant's forms (metadata). The new
+  namespace `arbace.repr.llvm.expect` derives the verdict and message from LLParser's and the Verifier's rules, and `bin/repr-llvm
+  mutants` writes them as the mutant's first line, `; MUTANT: KIND VERDICT LAYER: MESSAGE` (or `valid`, or `unknown: WHY`). The rules
+  are ported from llvm-project 23.1.5 (the pinned `.tmp/llvm/llvm-project-23.1.5.src.tar.xz`: llvm/lib/AsmParser/LLParser.cpp,
+  llvm/lib/IR/{Verifier,AutoUpgrade,Attributes,DiagnosticInfo}.cpp, llvm/include/llvm/IR/{Attributes.td,CallingConv.h}; Apache-2.0
+  with LLVM exceptions; LICENSE.md, doc/ARBACE.md), each with its line:
+  - LLParser's naming, as `parse-sim` (PerFunctionState's getVal, setInstName, defineBB, checkValueID, checkValidVariableType,
+    finishFunction);
+  - the Verifier's visiting order, and its dominance (none in unreachable blocks, none of a value wrapped in metadata);
+  - verifyParameterAttrs, verifyFunctionAttrs and typeIncompatible, check by check;
+  - visitFunction's convention switch, verifyMustTailCall, visitCallBase's bundle loop;
+  - the personality and unwind checks, module flags, the DI REQUIRED fields, the debug records' checks;
+  - AutoUpgrade's replacement of an intrinsic declaration's attributes, and the Debug Info Version message.
+- **The judge.** `bin/repr-llvm`'s own_verdicts reads the line. verify-check holds the mutant to it; opt's record no longer judges it.
+  `bin/repr-llvm mutants-oracle` checks the lines against opt, record or live: the oracle tier.
+- **Two verifier bugs, found by the own verdicts.** `arbace.repr.llvm.verify` took a local wrapped in metadata as no use; LLParser
+  resolves it (parseValueAsMetadata, LLParser.cpp:3352, 6750). Its walk of instruction locations counted old `llvm.dbg.*` calls, which
+  are records by then, and functions without a subprogram (Verifier.cpp:3313-3335). Both fixed.
+- **Not built.** No gate step changed. The pack, its records and the cells' switch stay LLS31 (a)'s night.
+
+Proved by day on 41 modules:
+- the sets: 1,872 mutants at the pack's set indices (680 of the base family, 1,192 of every kind);
+- own verdicts: 1,696 (base family 99.4%, every kind 85.6%);
+- against Arbace's verifier (verify-check in own mode, the stubs first on PATH, no LLVM tool called): all 1,696 met;
+- against live opt 23.1.5 (mutants-oracle, by hand, the oracle tier's): 1,696 of 1,696, verdict and message;
+- unchanged: verify-llvmtest 792 of 806, verify-probes 472 of 478, roundtrip-llvmtest and text-llvmtest 304 of 304,
+  `bin/llvmi check --essential` 10 of 10, controls-test all ok.
+
+The 176 unknowns (intr-decl and intr-rename 30 each, md-attach 28, di-retarget 20, di-drop 17, ...) stay on opt's record. LLVM IR's
+scores are unchanged now (independence 96.9, judge 0.843: the rt families are not recorded). Projected on the night's records:
+without LLS33, judge 0.728 and independence 94.6; with it, 0.878 and 97.6 (test/crops/independence.edn's comment).
+
+Alternatives considered:
+- the verdict in a sidecar table of the pack's manifest, rejected: the line keeps the verdict with the test, as llvm/test's RUN and
+  CHECK lines do;
+- the kind alone deciding the message, rejected: a kind's message depends on where it acts (hoist above a definition only used in
+  metadata is valid, an `entrybr` in an unlabelled entry renumbers);
+- `valid` claims left out, rejected: they are rules too (AutoUpgrade, the debug-intrinsic upgrade), and opt agrees on all.
+
+Proposed: LLS35 (mutants-oracle as a part of the oracle tier's llvm-records-verify), LLS36 (port the unknown kinds' rules), LLS37 (a
+mutant of an invalid base).
