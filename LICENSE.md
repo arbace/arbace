@@ -1088,6 +1088,11 @@ covers what.
   Since HF10's first slice (2026-11-08) they also follow `compiler/GHC/CoreToStg/Prep.hs`'s speculative evaluation and
   cpeArgArity, `compiler/GHC/Core/Utils.hs`'s exprOkForSpecEval, `compiler/GHC/CoreToStg.hs`'s mkStgAltType,
   `compiler/GHC/HsToCore/Match.hs`'s tidy_bang_pat and matchBangs and `compiler/GHC/Core/Make.hs`'s bindNonRec, under the same notice.
+  Since HF10-P5 and HF10-P8 (2026-11-09) `typecheck.ae` also follows `compiler/GHC/HsToCore/Foreign/Decl.hs`, `Foreign/C.hs`,
+  `Foreign/Prim.hs` and `Foreign/Call.hs` (dsFImport, dsCImport, dsFCall, dsPrimCall, dsFLabel, unboxArg, boxResult, resultWrapper,
+  mk_alt) and `tostg.ae` `compiler/GHC/Types/RepType.hs`'s unboxed sums' slots (SlotTy, primRepSlot, slotPrimRep, fitsIn,
+  ubxSumRepType, layoutUbxSum) with `compiler/GHC/Stg/Unarise.hs`'s mkUbxSum, ubxSumRubbishArg, unariseSumAlts and
+  mapSumIdBinders, and `simplify.ae` (HF10-P10) `Core/Opt/Simplify/Env.hs`'s getSubst laziness, under the same notice.
 - `arbace/repr/haskell/simpleopt.ae` and `arbace/repr/haskell/constfold.ae` (the front end's simple optimiser and the
   floating-point primops' built-in rules, HF5-HF6's decision 2 (a); doc/haskell/FRONTEND-SURVEY.md, "As built: HF7 (first
   light)"): ports of GHC 9.14.1 (the same tarball and pin) by hand on 2026-11-06: `compiler/GHC/Core/SimpleOpt.hs`
