@@ -342,3 +342,66 @@ the block table; 8 methods of test_unicodedata), frozendict's place in 3.14's Li
 `copy`, `json`, `pprint`, `marshal`: 3.15's Lib does them, with the move), `memoryview`'s `Zf`/`Zd`, `bytes.replace(count=)`
 as a keyword, the removed names (P4b/P7 with the Lib), the UTF-8 mode's stdio error handlers (test_utf8_mode's
 test_stdio and test_cmd_line, a pyi gap of 3.14 too).
+
+## As built: 238, the bytecode view and its tables (proposal P5, 2026-11-09, the Mac VM)
+
+`dis` of Python 3.15 behind the switch of 236 and 237 (`REPR_PYTHON_VERSION=3.15`); under 3.14 the view, its tables and
+its answers are as before (run, below). The view still names an instruction by 3.14's constants (`bytecode_table.go`);
+the version decides the numbers it writes, the caches, the names and the stack effects (`bytecode315.go`: `bcPop`,
+`bcPush`, `bcCacheN`, `bcOpName`, `bcOut`, `bcIn`).
+
+- **The tables**, by the existing generators with a 3.15 variant (as 237's Unicode table): `tools/pyi/bytecode_table.py
+  TOP315 OUT --suffix 315 --base TOP314` (`bytecode_table315.go`: `bcNum315`, `bcCaches315`, `bcNames315`,
+  `bcPopped315`/`bcPushed315` from 3.15.2's `opcode_ids.h` and `pycore_opcode_metadata.h`; an opcode 3.14 has not,
+  `TRACE_RECORD`, gets 1000 plus its number; `GET_YIELD_FROM_ITER` has none) and `tools/pyi/opcode_table.py OUT
+  --suffix 315` run by the 3.15.2 oracle (`builtins_opcode_table315.go`); both 3.14 files regenerate byte for byte.
+  `_opcode` under 3.15 answers from them (no `ENABLE_SPECIALIZATION_FT`; `stack_effect` takes 3.15's numbers).
+- **flowgraph.c's changed lines** (3.15.2's own): `loads_const` with `LOAD_COMMON_CONSTANT`,
+  `maybe_instr_make_load_common_const` at the end of `basicblock_optimize_load_const` and in `instr_make_load_const` (the
+  folds), the common constants as values (`get_const_value`), `remove_redundant_nops_and_pairs` over them,
+  `propagate_line_numbers` through an empty target of one predecessor, `optimize_load_fast`'s `GET_ITER` among the
+  opcodes that consume no inputs, `END_SEND` popping 3, the fixed `PUSH_REF(i, ...)`, the fall-through of an empty
+  block, no generator prefix in `insert_prefix_instructions`; assemble.c's `END_SEND_OFFSET` 6. The rest of the 224
+  lines (the `except` argument threaded through `basicblock_addop`, the dump's depth, memsets, a message) change no
+  output of the view.
+- **codegen.c's emission deltas, recovered in `irPlan`/`bcEmit`**: `RETURN_GENERATOR; POP_TOP` before `RESUME`, outside
+  every handler (`codegen_enter_scope`); a generator expression's `RESUME 4` (`RESUME_AT_GEN_EXPR_START`), `LOAD_FAST 0`,
+  `GET_ITER 0` before them and its call without `GET_ITER` (`ITERATOR_ON_STACK`), the wrapper's depth over them; an
+  inlined comprehension's `GET_ITER` after its hidden locals and container (`ITERABLE_ON_STACK`, in the cleanup's
+  region); the NULL index over each loop's iterator (an IR slot marked `iter`): `SWAP`, `COPY` and the appends' depths
+  one more per iterator they reach across, a pop of an iterator two `POP_TOP`s (`COMPILE_FBLOCK_FOR_LOOP`'s unwinding:
+  `SWAP 3`); `GET_ITER 0` with an oparg, `GET_ITER 3` (2 in a coroutine) for `yield from` as `_PyCode_Quicken`'s
+  `fixup_getiter` leaves co_code; `PUSH_NULL` before the `None` of an awaitable's `SEND`; `RESUME`'s depth bit 8;
+  `IMPORT_NAME`'s name shifted by 2 and the eager bit 2 outside the module's scope, in a try or handler region
+  (`_PyCompile_InExceptionHandler`) and for `import *`; `async for`'s `NOT_TAKEN` after the `__anext__`'s `END_SEND` and
+  `END_ASYNC_FOR`'s target, the `SEND` it ends (both also 3.14's, where the view had no `async for`: it failed to build,
+  left for 3.14, a low).
+- **The magic number**: under 3.15 the IR digest takes the version, so the `.pyc` magic (`'a'` and a digest byte) and
+  the code blob's header differ from 3.14's (run: `importlib.util.MAGIC_NUMBER` 61fb0d0a under 3.14, 61610d0a under
+  3.15; `TestPycMagic315`), and a 3.14 `.pyc` or marshalled code does not load under 3.15. 3.14's is unchanged.
+- **Checks**: `bin/pyi bytecode-check` under the switch compares with the 3.15.2 oracle (`REPR_PYTHON_ORACLE_315`);
+  `bin/pyi runtime tables` (and `runtime check`) judge `bytecode_table.go`, `bytecode_table315.go` and
+  `builtins_opcode_table315.go` against their generators, each 3.15 table with its negative control (3.14.10's headers,
+  python3's `_opcode`, made into it must differ: run, both fail as they must). `PYI_BC_DEBUG=1` prints a view's panic.
+
+**Counts** (run on the VM; the specializing names out by design, `:specializing`):
+
+| sample | base 4f3be635e | head |
+|---|---:|---:|
+| 3.15.2's test_dis (3.15's `dis.py`, `opcode.py`, `_opcode_metadata.py` and test file over 3.14.10's Lib; the oracle 145 of 145) | 34 ok | 111 ok |
+| 3.15.2's test_peepholer (the oracle 142 of 143) | 12 ok | 48 ok |
+| bytecode-check, 40 stdlib files, 2,935 code objects, 3.15 against the 3.15.2 oracle: co_code / all five | 0 / 0 | 2,534 (86.3%) / 1,840 (62.7%) |
+| the same, 3.14 against 3.14.10 | 2,469 / 1,799 | 2,469 / 1,799 |
+
+test_dis's 34 left: 26 skips of the existing classes (`cpython_only`, `_testinternalcapi`, the specializing tests) and
+4 tests twice (the file and string variants) that fail under 3.14 too: `test_disassemble_recursive` (3.15 inlines
+`list(<genexpr>)` and `set(<genexpr>)` as 3.14 inlines `tuple`, `all` and `any`, which the view does not: 229's tail),
+`test_disassemble_str`, `test_disassemble_try_finally`, `test_intrinsic_2`. 3.14 unchanged (run, base and head): 3.14.10's
+test_dis 107, test_peepholer 47, test_compile 20 of the 65 that run before `test_big_dict_literal`'s 1,800 s cap, equal
+method for method; the bytecode-check counts above equal; `make python-essential` as on the base.
+
+Not done: the lazy `IMPORT_NAME` bit (1) waits for P3's `lazy` in the compiler; `list()`/`set()` of a generator
+expression inlined (with 3.14's `tuple`/`all`/`any`, 229's tail); the exit blocks CPython 3.15 no longer inlines
+because the iterator's NULL makes them 5 instructions (pyi's compiler's flow! inlines at the IR's 4: compile.ae, the
+`return` inside a `for` after a chained comparison); a non-inlined comprehension's own `GET_ITER` (none in the samples);
+the annotations' order (P3).
