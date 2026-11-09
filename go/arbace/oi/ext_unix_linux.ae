@@ -1,0 +1,98 @@
+;; oi's Unix library where Linux's syscall has it (goi's table lists arbace/oi in its tamago configurations too, whose syscall has
+;; none of these: ext_unix_other.ae there; as ext_sys_linux.ae for ext_sys.ae): mmap(2) for Unix.map_file (ext_bigarray.ae),
+;; ppoll(2), pipe2(2), access(2), the itimers, fork and exec, setsid(2) and the priorities (ext_signal.ae), umask(2), getrusage(2)
+;; and stat(2)'s times (ext_unix.ae), dup3(2) and mkfifo(2) (ext_unix_fd.ae), accept4(2) and getsockopt(2) (ext_unix_sock.ae),
+;; and the flags and options their callers name. The same numbers on linux/amd64 and linux/arm64.
+(in-ns 'go.arbace.oi)
+
+(go/file "ext_unix_linux.go"
+  :build ["//go:build linux"]
+  :imports [[syscall "syscall"] [unsafe "unsafe"]])
+
+;; signals no handler takes or whose default is to ignore them (ext_signal.ae's sigDefault), SIGALRM (the itimer)
+(go/const [^{:val 28} sigWinch (conv int syscall/SIGWINCH)] [^{:val 23} sigUrg (conv int syscall/SIGURG)]
+  [^{:val 18} sigCont (conv int syscall/SIGCONT)] [^{:val 14} sigAlrm (conv int syscall/SIGALRM)])
+
+;; wait4(2)'s options, fcntl(2)'s FD_CLOEXEC, open(2)'s flags beyond ext_sys_linux.ae's oNonblock
+(go/const [^{:val 1} wNohang syscall/WNOHANG] [^{:val 2} wUntraced syscall/WUNTRACED] [^{:val 1} fdCloexec syscall/FD_CLOEXEC]
+  [^{:val 256} oNoctty syscall/O_NOCTTY] [^{:val 4096} oDsync syscall/O_DSYNC] [^{:val 1052672} oRsync syscall/O_RSYNC])
+
+;; send(2)'s flags, the socket options sockopt.c names, socket(2)'s and accept4(2)'s SOCK_CLOEXEC
+(go/const [^{:val 1} msgOob syscall/MSG_OOB] [^{:val 4} msgDontroute syscall/MSG_DONTROUTE] [^{:val 2} msgPeek syscall/MSG_PEEK]
+  [^{:val 1} soDebug syscall/SO_DEBUG] [^{:val 5} soDontroute syscall/SO_DONTROUTE] [^{:val 10} soOobinline syscall/SO_OOBINLINE]
+  [^{:val 30} soAcceptconn syscall/SO_ACCEPTCONN] [^{:val 18} soRcvlowat syscall/SO_RCVLOWAT] [^{:val 19} soSndlowat syscall/SO_SNDLOWAT]
+  [^{:val 20} soRcvtimeo syscall/SO_RCVTIMEO] [^{:val 21} soSndtimeo syscall/SO_SNDTIMEO] [^{:val 524288} sockCloexec syscall/SOCK_CLOEXEC])
+
+(go/func sysMmap "sysMmap is mmap(2) of n bytes of fd at off, read and write, shared or private.\n" [^int fd ^int64 off ^int n ^bool shared] :results [(slice byte) error]
+  (let [flags syscall/MAP_PRIVATE]
+    (when shared (set! flags syscall/MAP_SHARED))
+    (syscall/Mmap fd off n (bit-or syscall/PROT_READ syscall/PROT_WRITE) flags)))
+
+(go/func ppoll "ppoll is ppoll(2) over fds, a timeout in seconds (negative: none); its count or errno.\n" [^{:tag (slice pollFd)} fds ^float64 timeout] :results [int syscall/Errno]
+  (let [^syscall/Timespec ts (zero syscall/Timespec)
+        tp (conv uintptr 0)
+        fp (conv uintptr 0)]
+    (when (>= timeout 0)
+      (set! ts (syscall/NsecToTimespec (conv int64 (* timeout 1e9))))
+      (set! tp (conv uintptr (conv unsafe/Pointer (addr ts)))))
+    (when (> (len fds) 0)
+      (set! fp (conv uintptr (conv unsafe/Pointer (addr (aget fds 0))))))
+    (let [(values r _ e) (syscall/Syscall6 syscall/SYS_PPOLL fp (conv uintptr (len fds)) tp 0 0 0)]
+      (return (conv int r) e))))
+
+(go/func sysPipe2 ^error [^{:tag (slice int)} p ^int flags]
+  (syscall/Pipe2 p flags))
+
+(go/func sysAccess ^error [^string p ^uint32 mode]
+  (syscall/Access p mode))
+
+(go/func sysItimer "sysItimer is setitimer(2) of which (nv, the old value into ov) when set, else getitimer(2) into ov.\n" ^syscall/Errno [^bool set ^int which ^{:tag (* itimerval)} nv ^{:tag (* itimerval)} ov]
+  (when set
+    (let [(values _ _ e) (syscall/Syscall syscall/SYS_SETITIMER (conv uintptr which) (conv uintptr (conv unsafe/Pointer nv)) (conv uintptr (conv unsafe/Pointer ov)))]
+      (return e)))
+  (let [(values _ _ e) (syscall/Syscall syscall/SYS_GETITIMER (conv uintptr which) (conv uintptr (conv unsafe/Pointer ov)) 0)]
+    e))
+
+(go/func sysForkExec [^string path ^{:tag (slice string)} args ^{:tag (* syscall/ProcAttr)} attr] :results [int error]
+  (syscall/ForkExec path args attr))
+
+(go/func sysExec ^error [^string path ^{:tag (slice string)} args ^{:tag (slice string)} env]
+  (syscall/Exec path args env))
+
+(go/func sysSetsid [] :results [int error]
+  (syscall/Setsid))
+
+(go/func sysGetpriority "sysGetpriority is the raw getpriority(2) of the process (20 - nice).\n" [] :results [int error]
+  (syscall/Getpriority syscall/PRIO_PROCESS 0))
+
+(go/func sysSetpriority ^error [^int n]
+  (syscall/Setpriority syscall/PRIO_PROCESS 0 n))
+
+(go/func sysUmask ^int [^int mask]
+  (syscall/Umask mask))
+
+(go/func rusageTimes "rusageTimes is getrusage(2)'s user and system time of who in seconds (0 when it fails).\n" [^int who] :results [float64 float64]
+  (let [^syscall/Rusage ru (zero syscall/Rusage)
+        tv (fn ^float64 [^syscall/Timeval t] (+ (conv float64 (.-Sec t)) (/ (conv float64 (.-Usec t)) 1e6)))]
+    (syscall/Getrusage who (addr ru))
+    (return (tv (.-Utime ru)) (tv (.-Stime ru)))))
+
+(go/func statTime "statTime is st's access (0), modification (1) or change (2) time in seconds since the epoch.\n" ^float64 [^{:tag (* syscall/Stat_t)} st ^int i]
+  (switch i
+    (case [0] (return (unixFloatTime (.-Atim st))))
+    (case [1] (return (unixFloatTime (.-Mtim st)))))
+  (unixFloatTime (.-Ctim st)))
+
+(go/func sysDup3 ^error [^int src ^int dst ^int flags]
+  (syscall/Dup3 src dst flags))
+
+(go/func sysMkfifo ^error [^string p ^uint32 mode]
+  (syscall/Mkfifo p mode))
+
+(go/func sysAccept4 [^int fd ^int flags] :results [int syscall/Sockaddr error]
+  (syscall/Accept4 fd flags))
+
+(go/func getsockoptRaw "getsockoptRaw is getsockopt(2) into the size bytes at p.\n" ^syscall/Errno [^int fd ^int lvl ^int opt ^unsafe/Pointer p ^uintptr size]
+  (let [n (conv uint32 size)
+        (values _ _ e) (syscall/Syscall6 syscall/SYS_GETSOCKOPT (conv uintptr fd) (conv uintptr lvl) (conv uintptr opt) (conv uintptr p) (conv uintptr (conv unsafe/Pointer (addr n))) 0)]
+    e))
