@@ -236,6 +236,49 @@
     (check "lookup-call: control: Invokers.invokeExactI is not the lookup"
            (not (code/lookup-call? (call "jdk/internal/jrt/Invokers" "invokeExactI" [(lit "java/lang/String")]))))))
 
+;; JCS350 (a): a private method of an interpreted class in reflection (arbace.j2g.dyncf's setMethod native, the Go
+;; the executable's interpreter runs): JVMS 5.4.6, a private method is selected as itself, so it takes no Dyn slot
+;; and no method by key (where a subclass's private method of the same key would replace it), and its member table
+;; entry calls its own implementation, not the receiver's class's of that key. The natives are Go forms in j2g's
+;; source, checked as data (their run needs the executable, the night's: t07686)
+
+(defn- source-forms [path]
+  (with-open [r (java.io.PushbackReader. (io/reader path))]
+    (binding [*read-eval* false]
+      (doall (take-while #(not= % ::eof) (repeatedly #(read r false ::eof)))))))
+
+(defn- native-form
+  "The (list 'go/func (native-name NAME ...) ...) form of NAME in the forms of PATH (the name also as
+  (symbol (native-name NAME ...)), dyn.ae's)."
+  [path name]
+  (let [named? (fn [n] (and (seq? n) (= 'native-name (first n)) (= name (second n))))]
+    (some (fn [f] (when (and (seq? f) (= 'list (first f)) (= ''go/func (second f))
+                             (let [n (nth f 2 nil)]
+                               (or (named? n) (and (seq? n) (= 'symbol (first n)) (named? (second n))))))
+                    f))
+          (tree-seq coll? seq (source-forms path)))))
+
+(defn- private-rule?
+  "Whether a setMethod native's form selects a private method as itself: the slot and by-key stores guarded by
+  the private flag, and the member entry's (set! f impl) under it."
+  [form]
+  (let [subs (tree-seq coll? seq form)
+        priv? (fn [x] (some #(= 'jrt/AccPrivate %) (tree-seq coll? seq x)))]
+    (boolean
+      (and (some #(and (seq? %) (= 'when (first %)) (priv? (second %))
+                       (some (fn [y] (= y '(aset (.-ByKey dc) key impl))) (tree-seq coll? seq %)))
+                 subs)
+           (some #(= % '(when (!= (bit-and flags jrt/AccPrivate) 0) (set! f impl))) subs)))))
+
+(defn test-private-reflection []
+  (let [cf (native-form "arbace/j2g/dyncf.ae" "setMethod")
+        px (native-form "arbace/j2g/dyn.ae" "setMethod")]
+    (check "private reflection: dyncf's setMethod native found" (some? cf))
+    (check "private reflection: a private method is selected as itself (no slot, no by-key method, its own impl)"
+           (private-rule? cf))
+    (check "private reflection: control: a proxy's setMethod (dyn.ae, every method public) has no such rule"
+           (and (some? px) (not (private-rule? px))))))
+
 (defn -main [& _]
   (test-support-tables)
   (test-unresolved-cause)
@@ -245,6 +288,7 @@
   (test-type-annotations)
   (test-lookup-call)
   (test-invokers)
+  (test-private-reflection)
   (println (str "j2g.unit: " (if (zero? @failures) "all passed" (str @failures " failed"))))
   (shutdown-agents)
   (System/exit (if (zero? @failures) 0 1)))
