@@ -794,7 +794,95 @@
 (defn- outcome [[rc sha err]] {:status (if (re-matches #"[0-9]+" rc) (Long/parseLong rc) (keyword rc)) :stdout sha :stderr-last err})
 
 (defn- equal-ref? [o ref]
-  (and (= (:status o) (:status ref)) (= (:stdout o) (:stdout ref)) (= (:stderr-last o) (or (:stderr-last ref) ""))))
+  (let [e (:stderr-last ref)]
+    (and (= (:status o) (:status ref)) (= (:stdout o) (:stdout ref)) (or (= e :any) (= (:stderr-last o) (or e ""))))))
+
+;;; ---------------------------------------------------------------------------------------
+;;; The programs' own verdict (queue 247, doc/python/PYTHON-SURVEY.md, "As built: 247"): test/python/golden/ID.out is a
+;;; program's expected standard output, reviewed line by line against the Language Reference and the library documentation
+;;; (test/python/golden/review-*.edn: per program its status, the digest of the reviewed text and the entries [LINES SECTIONS
+;;; BASIS WHY]). A run is judged against it as against CPython's reference: status, stdout's SHA-256 and, where the review
+;;; states one, stderr's last line (:any otherwise). `golden` checks the review (every line of the text in one entry, the
+;;; digest) and the agreement with CPython's recorded run
+
+(defn- file-bytes ^bytes [^String path] (java.nio.file.Files/readAllBytes (.toPath (File. path))))
+
+(defn- sha256-bytes [^bytes bs] (hex (.digest (MessageDigest/getInstance "SHA-256") bs)))
+
+(defn golden-review
+  "DIR's review files (review*.edn, in name order) as one map {ID {:status N, :stderr-last S, :sha DIGEST, :lines [ENTRY...]}}"
+  [dir]
+  (into (sorted-map)
+        (mapcat (fn [^File f] (read-string (slurp f)))
+                (sort-by #(.getName ^File %) (filter #(re-matches #"review.*\.edn" (.getName ^File %)) (.listFiles (File. dir)))))))
+
+(defn golden-file "The path of ID's golden text under DIR" [dir id] (str dir "/" (str/replace id #"\.py$" "") ".out"))
+
+(defn golden-refs
+  "The reviewed programs as references: {ID {:id :status :stdout SHA-256 :stderr-last (the review's, else :any) :golden true}}"
+  [dir]
+  (into {} (for [[id m] (golden-review dir)
+                 :let [f (golden-file dir id)] :when (.exists (File. f))]
+             [id {:id id :status (get m :status 0) :stdout (sha256-bytes (file-bytes f))
+                  :stderr-last (get m :stderr-last :any) :golden true}])))
+
+(defn- golden-n "The number of lines of a text" [^bytes bs]
+  (count (filter #(= \newline %) (String. bs "UTF-8"))))
+
+(defn- span [ls] (if (vector? ls) ls [ls ls]))
+
+(defn golden-problems
+  "The problems of one program's review M against the golden text BS (a list of strings, empty when the review holds): the
+  digest of the reviewed text, the entries' form, every line of the text in exactly one entry"
+  [m ^bytes bs]
+  (let [n (golden-n bs)
+        well-formed? (fn [[ls sec basis why]]
+                       (and (or (integer? ls) (and (vector? ls) (= 2 (count ls)) (every? integer? ls) (<= (first ls) (second ls))))
+                            (string? sec) (seq sec) (set? basis) (seq basis) (every? #{:ref :lib :impl} basis) (string? why) (seq why)))
+        cover (frequencies (mapcat (fn [e] (let [[a b] (span (first e))] (range a (inc b)))) (filter well-formed? (:lines m))))]
+    (concat
+     (when (not= (:sha m) (sha256-bytes bs)) ["the text is not the one reviewed (:sha)"])
+     (for [e (:lines m) :when (not (well-formed? e))] (str "malformed entry " (pr-str (first e))))
+     (for [i (range 1 (inc n)) :when (not= 1 (get cover i 0))]
+       (str "line " i (if (zero? (get cover i 0)) " is in no entry" " is in several entries")))
+     (for [[i _] (sort cover) :when (or (< i 1) (> i n))] (str "an entry names line " i " of a text of " n " lines")))))
+
+(defn- cmd-golden [args]
+  (let [opts (apply hash-map args)
+        dir (get opts "--dir") root (get opts "--root")
+        refs (into {} (for [m (read-lines-edn (get opts "--ref"))] [(:id m) m]))
+        rev (golden-review dir)
+        outs (->> (file-seq (File. dir)) (filter #(and (.isFile ^File %) (str/ends-with? (.getName ^File %) ".out")))
+                  (map #(str/replace (subs (.getPath ^File %) (inc (count dir))) #"\.out$" ".py")))
+        bad (atom 0)
+        say (fn [& xs] (swap! bad inc) (println (apply str "  FAIL " xs)))
+        weigh (fn [k] (reduce + (for [[_ m] rev, [ls _ basis] (:lines m) :when (basis k)] (let [[a b] (span ls)] (inc (- b a))))))]
+    (doseq [id (sort (remove rev outs))] (say id ": golden text without a review"))
+    (doseq [[id m] rev]
+      (let [f (golden-file dir id) ref (get refs id)]
+        (cond
+          (not (.exists (File. f))) (say id ": no golden text " f)
+          (not (.exists (File. (str root "/" id)))) (say id ": no such program under " root)
+          :else
+          (let [bs (file-bytes f)]
+            (doseq [p (golden-problems m bs)] (say id ": " p))
+            (cond (nil? ref) (say id ": no CPython record to compare with")
+                  (:excluded ref) nil
+                  :else
+                  (do (when (not= (sha256-bytes bs) (:stdout ref)) (say id ": the golden text differs from CPython's recorded stdout"))
+                      (when (not= (get m :status 0) (:status ref)) (say id ": status " (get m :status 0) " but CPython's record has " (:status ref)))
+                      (when (and (contains? m :stderr-last) (not= (:stderr-last m) (or (:stderr-last ref) "")))
+                        (say id ": stderr's last line differs from CPython's record"))))))))
+    ;; the negative control: one program's review judged against another program's text must find problems
+    (let [[a b] (take 2 (filter (fn [[id _]] (.exists (File. (golden-file dir id)))) rev))
+          ctl (when (and a b) (seq (golden-problems (val a) (file-bytes (golden-file dir (key b))))))]
+      (cond (not (and a b)) (println "  the negative control: left (fewer than two reviews)")
+            ctl (println (str "  the negative control: " (key a) "'s review judged against " (key b) "'s text finds " (count ctl) " problems, as it must"))
+            :else (say "control passed: " (key a) "'s review holds for " (key b) "'s text")))
+    (println (str "golden: " (count rev) " programs, " (reduce + (for [[_ m] rev, [ls] (:lines m)] (let [[a b] (span ls)] (inc (- b a)))))
+                  " lines reviewed (resting on the Reference " (weigh :ref) ", the library documentation " (weigh :lib) ", implementation-defined behaviour "
+                  (weigh :impl) "; a line may rest on several); " @bad " problems"))
+    (if (pos? @bad) 1 0)))
 
 (defn- host-free
   "TEXT without the machine's paths, for the record (queue 235; as arbace.repr.python.results/host-free): the checkout's
@@ -864,7 +952,7 @@
         (cond
           (nil? ref) (assoc base :result :failed :class :no-reference)
           (:excluded ref) (assoc base :result :classed :class :reference-excluded :reason (:excluded ref))
-          (and (equal-ref? aot ref) as-loop) (cond-> (assoc base :result :pass) (not as-pyi) (assoc :pyi-differs true :pyi-outcome pyi))
+          (and (equal-ref? aot ref) as-loop) (cond-> (assoc base :result :pass :verdict (if (:golden ref) :golden :ref)) (not as-pyi) (assoc :pyi-differs true :pyi-outcome pyi))
           (and as-loop as-pyi) (assoc base :result :classed :class :as-pyi
                                       :reason (if (seq (:stderr-last aot)) (:stderr-last aot)
                                                   (str "stdout not CPython's (status " (name-or (:status aot)) ")")))
@@ -875,7 +963,9 @@
 
 (defn- cmd-judge [args]
   (let [opts (apply hash-map args)
-        refs (into {} (for [m (read-lines-edn (get opts "--ref"))] [(:id m) m]))
+        recorded (into {} (for [m (read-lines-edn (get opts "--ref"))] [(:id m) m]))
+        ;; queue 247: a program with a reviewed golden text is judged by it (its own verdict), the others by CPython's record
+        refs (cond-> recorded (get opts "--golden") (merge (golden-refs (get opts "--golden"))))
         classes (:classes (read-string (slurp (get opts "--classes"))))
         res (sort-by :id (judge (tsv-rows (get opts "--runs")) refs classes))
         by (frequencies (map :result res))
@@ -888,6 +978,10 @@
       (println (str "  class " (name c) ": " n)))
     (println (str "check --aot: " (count res) " programs: " (get by :pass 0) " pass, " (get by :classed 0) " classed, "
                   (get by :failed 0) " failing"))
+    (when (get opts "--golden")
+      (let [g (count (filter :golden (map #(get refs (:id %)) res)))]
+        (println (str "  verdicts: " g " programs by their own golden text (" (* 3 g) " cases: compiled, loop and pyi), "
+                      (- (count res) g) " by CPython's recorded run"))))
     (println (str "  the passing programs' run: compiled " (sum :aot-ms) " ms, the loop " (sum :loop-ms) " ms, pyi on goi "
                   (sum :pyi-ms) " ms; compiling " (sum :compile-ms) " ms"))
     (when-let [f (get opts "--results")] (spit f (str (lines) "\n")))
@@ -909,6 +1003,7 @@
              "program" (cmd-program args)
              "compile-server" (cmd-compile-server args)
              "judge" (cmd-judge args)
-             (do (println "usage: -m arbace.python.aot program FILE SRC PKG LIB [CACHE] | compile-server") 2))]
+             "golden" (cmd-golden args)
+             (do (println "usage: -m arbace.python.aot program FILE SRC PKG LIB [CACHE] | compile-server | judge ... [--golden DIR] | golden --dir DIR --root DIR --ref FILE") 2))]
     (shutdown-agents)
     (System/exit rc)))
