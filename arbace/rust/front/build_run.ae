@@ -297,17 +297,35 @@
 (def ^:private native-core-cache (atom {}))
 
 (defn- native-core-map
-  "The exported native core bodies: {def-path entry}, from RF_CORE_NATIVE (default .tmp/rust-front/core/native-core.edn); {}
-  without one"
+  "The exported native core bodies: {def-path entry}, from RF_CORE_NATIVE (bin/rust-front core-export's file); {} without it
+  (the record's core bodies, as before)"
   []
-  (let [f (or (System/getenv "RF_CORE_NATIVE") ".tmp/rust-front/core/native-core.edn")]
+  (if-let [f (System/getenv "RF_CORE_NATIVE")]
     (or (get @native-core-cache f)
         (let [m (if (.exists (File. ^String f))
                   (into {} (for [x (read-forms (slurp f)) :when (and (seq? x) (= 'core/body (first x))) :let [e (second x)] :when (:body e)]
                              [(:def e) e]))
                   {})]
           (swap! native-core-cache assoc f m)
-          m))))
+          m))
+    {}))
+
+(defn- builtin-normalize
+  "The builtin projections an instance's types name once their parameters are known: <T as Pointee>::Metadata (the
+  ptr_metadata_ty rule: () for a sized type, usize for a slice or str, DynMetadata<dyn ..> for a trait object), and
+  <T as DiscriminantKind>::Discriminant left to codegen"
+  [t]
+  (cond
+    (not (vector? t)) t
+    (and (= :proj (first t)) (= "core::ptr::metadata::Pointee::Metadata" (second t)))
+    (let [self (builtin-normalize (first (nth t 2)))]
+      (case (first self)
+        (:slice :str) [:uint "usize"]
+        :dyn [:adt "core::ptr::metadata::DynMetadata" [self]]
+        (:param :proj :infer) (into [:proj (second t)] [(into [self] (rest (nth t 2)))])
+        [:tuple []]))
+    (keyword? (first t)) (into [(first t)] (map #(cond (vector? %) (builtin-normalize %) (map? %) (into {} (for [[k v] %] [k (builtin-normalize v)])) :else %) (rest t)))
+    :else (mapv builtin-normalize t)))
 
 (defn- reprint
   "Native core forms printed in the program's crate at ARGS: each type form from its :tc, a function constant's text from its
@@ -318,7 +336,7 @@
     (let [m (meta x)
           y (apply list (map #(reprint % args) x))]
       (cond
-        (and (= 'ty (first y)) (:tc m)) (build/ty-form (c/subst (:tc m) args))
+        (and (= 'ty (first y)) (:tc m)) (build/ty-form (builtin-normalize (c/subst (:tc m) args)))
         (and (= 'unevaluated (first y)) (:nc m)) (with-meta y (update m :nc (fn [[d as]] [d (mapv #(c/subst % args) as)])))
         (= 'const (first y))
         (let [tyf (nth y 2 nil) t (:tc (meta tyf)) v (nth y 3 nil) nc (:nc (meta v))
@@ -328,7 +346,7 @@
           (with-meta (apply list 'const text (drop 2 y)) m))
         :else (if m (with-meta y m) y)))
     (vector? x) (let [y (mapv #(reprint % args) x)] (if (meta x) (with-meta y (meta x)) y))
-    (map? x) (into {} (for [[k v] x] [k (if (= k :local-tys) (mapv #(c/subst % args) v) (reprint v args))]))
+    (map? x) (into {} (for [[k v] x] [k (if (= k :local-tys) (mapv #(builtin-normalize (c/subst % args)) v) (reprint v args))]))
     :else x))
 
 (defn- remap-const-eval-select
@@ -361,7 +379,24 @@
   "A native core body at the instance's ARGS, printed in the program's crate: {:def :args :body :promoted} or nil"
   [entry args]
   (let [b (reprint (:body entry) args)]
-    {:def (:def entry) :args args :body (remap-const-eval-select (assoc b :promoted-bodies (into {} (for [[i pb] (:promoted entry)] [i (reprint pb args)]))))}))
+    ;; LowerIntrinsics again at the instance (its own port may have grown since the export)
+    {:def (:def entry) :args args :body ((requiring-resolve 'arbace.rust.front.passes/lower-intrinsics)
+                                         (remap-const-eval-select (assoc b :promoted-bodies (into {} (for [[i pb] (:promoted entry)] [i (reprint pb args)])))))}))
+
+(defn- drop-shim-body
+  "RF12-P6: drop_glue::<T>'s shim body (shim.rs' build_drop_shim, the drop elaborated: `_2 = copy _1; <T as Drop>::drop(move
+  _2)`; rustc's optimized shim takes the reference, as the record's), for a type whose glue is its own Drop::drop alone"
+  [t drop-fn]
+  (let [rt [:ref [:re-erased] true t]
+        unit (build/ty-form [:tuple []])
+        f [:fndef drop-fn []]
+        callee (with-meta (list 'const (str "<" (binding [c/*in-value* false] (c/print-ty t)) " as core::ops::Drop>::drop") (build/ty-form f) '(zst)) {})]
+    {:args 1 :ret unit
+     :locals [{:mut true :scope 0 :ty unit} {:mut false :scope 0 :ty (build/ty-form rt)} {:mut true :scope 0 :ty (build/ty-form rt)} {:mut true :scope 0 :ty unit}]
+     :scopes [[nil nil nil nil false]] :debug []
+     :blocks [{:cleanup false :stmts [(list 'assign '(place 2) '(use (copy (place 1))))]
+               :term (list 'call callee '[(move (place 2))] '(place 3) 1 '(continue))}
+              {:cleanup false :stmts [] :term '(return)}]}))
 
 (defn- call-of [t] (when (and (seq? t) (= 'call (first t))) (:tc (meta (nth (second t) 2 nil)))))
 
@@ -432,7 +467,8 @@
         lines (atom [])
         judged (atom [])
         result
-        (binding [mono/*crates* (mono/load-crates crates) mono/*lib-dir* (System/getenv "RF_MONO_LIB")]
+        (binding [mono/*crates* (mono/load-crates crates) mono/*lib-dir* (System/getenv "RF_MONO_LIB")
+                  mono/*native-attrs* (if (System/getenv "RF_CORE_PACK") {} (into {} (for [[d e] (native-core-map) :when (:attrs e)] [d (:attrs e)])))]
           (bc/build-program front-dir n
             (fn [bodies]
               (let [facts (mono/program-facts n bodies)
@@ -444,11 +480,28 @@
                                                   (set (for [b rec-bodies :when (not (str/starts-with? (str (:def-id b)) "DefId(0:"))] (:def b)))))
                     core-insts (when core-plan
                                  (vals (into {} (for [i (concat (vals (:taken core-plan)) (:extra core-plan))] [[(:def i) (:args i)] i]))))
-                    core-f (when (seq core-insts)
-                             (mono/core-facts n (for [i core-insts] {:def (:def i) :args (:args i) :name (str "native " (:def i) (pr-str (:args i))) :body (:body i)})))
+                    ;; RF12-P6: drop glue's shims the program's types need, built natively when the glue is the type's Drop::drop alone
+                    glue-shims (when (and core-plan (not (System/getenv "RF_CORE_SHIM_PACK")))
+                                 (for [x (:ext-items facts) :when (= :drop-glue (:shim x))
+                                       :let [t (first (:args x))
+                                             ;; the record's shim by its instance (`Shim(DropGlue(.., Some(D)))`)
+                                             tt (binding [c/*in-value* false] (c/print-ty t))
+                                             rec (some #(when (and (str/starts-with? (str (:instance %)) "Shim(DropGlue(")
+                                                                   (str/ends-with? (str (:instance %)) (str "Some(" tt ")))")))
+                                                          %)
+                                                       rec-bodies)
+                                             dfn (when rec (try (mono/drop-shim-plan n t) (catch Throwable _ nil)))]
+                                       :when dfn]
+                                   {:rec rec :def "core::ptr::drop_glue" :args [t] :body (drop-shim-body t dfn) :shim true}))
+                    core-f (when (or (seq core-insts) (seq glue-shims))
+                             (mono/core-facts n (for [i (concat core-insts glue-shims)] {:def (:def i) :args (:args i) :name (str "native " (:def i) (pr-str (:args i))) :body (:body i)})))
                     core-items (for [i core-insts :let [h (get (:items core-f) (str "native " (:def i) (pr-str (:args i))))] :when (and (map? h) (not (mono/error? h)))]
                                  [h i])
-                    native-syms (set (map (comp :symbol first) core-items))
+                    native-syms (into (set (map (comp :symbol first) core-items)) (map (comp :symbol :rec) glue-shims))
+                    _ (when (System/getenv "RF_CORE_DEBUG")
+                        (doseq [[h i] core-items] (swap! lines conj (str "debug native " (:def i) " " (:symbol h))))
+                        (doseq [x (:ext-items facts)] (swap! lines conj (str "debug ext " (pr-str (dissoc x :args)) " " (pr-str (:args x)))))
+                        (doseq [r rec-bodies] (swap! lines conj (str "debug record " (:name r) " " (:symbol r)))))
                     _ (doseq [l (:lines core-plan)] (swap! lines conj l))
                     facts (cond-> facts core-f (-> (update :callees merge (:callees core-f)) (update :fsyms merge (:fsyms core-f))
                                                    (assoc :native-core-syms native-syms)))
@@ -514,10 +567,16 @@
                                     (do (swap! lines conj (str "record " nm " (" err ")")) (fact! :bodies false)
                                         (list 'mir/body (or (get rec-by-name nm) (throw (ex-info (str "no body for " nm) {}))))))))
                     ;; RF12-P6: the native core bodies made runtime bodies, all or none (a failure keeps the record's bodies)
-                    native-forms (when (seq core-items)
-                                   (try (doall (for [[h i] core-items]
-                                                 (let [r (runtime-body (assoc (:body i) :name (:name h)) h nf abort?)]
-                                                   (list 'mir/body (assoc r :phase "arbace-native-core")))))
+                    native-forms (when (or (seq core-items) (seq glue-shims))
+                                   (try (doall (concat
+                                                (for [[h i] core-items]
+                                                  (let [r (runtime-body (assoc (:body i) :name (:name h)) h nf abort?)]
+                                                    (list 'mir/body (assoc r :phase "arbace-native-core"))))
+                                                (for [g glue-shims]
+                                                  (let [r (runtime-body (assoc (:body g) :name (:name (:rec g))) (:rec g) nf abort?)]
+                                                    (swap! lines conj (str "native " (:name (:rec g)) " (drop glue's shim, built natively)"))
+                                                    (fact! :core-bodies true)
+                                                    (list 'mir/body (assoc r :phase "arbace-native-core"))))))
                                         (catch Throwable e
                                           (swap! lines conj (str "record core's bodies (a native one failed at run time: " (.getMessage e) ")"))
                                           nil)))
@@ -557,7 +616,7 @@
   [n {:keys [lines tally]}]
   (concat lines
           [(str "build-run: " n ": facts native " (str/join ", " (for [[k [a b]] (sort tally) :when (not (#{:core-bodies :bodies} k))] (str (name k) " " a "/" b)))
-                "; core's bodies from the pack " (second (get tally :core-bodies [0 0]))
+                (let [[a b] (get tally :core-bodies [0 0])] (str "; core's bodies from the pack " (- b a) (when (pos? a) (str ", built natively " a))))
                 (when-let [[_ b] (get tally :bodies)] (str "; our bodies from the pack " b)))
            (format "build-run: %s: %d of %d bodies ours" n (count (filter #(str/starts-with? % "ours") lines)) (count lines))]))
 

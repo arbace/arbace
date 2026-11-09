@@ -926,7 +926,7 @@
 
 (def ^:private weak-lang {"PanicImpl" "rust_begin_unwind" "EhPersonality" "rust_eh_personality" "EhCatchTypeinfo" "rust_eh_catch_typeinfo"})
 
-(defn- local-attrs [id]
+(defn local-attrs [id]
   (vec (keep (fn [a]
                (let [p (:parsed a) u (:unparsed a)]
                  (cond (= p "Inline(Never)") "inline(never)" (= p "Inline(Always)") "inline(always)" (= p "Inline(Hint)") "inline"
@@ -936,12 +936,15 @@
                        :else nil)))
              (:attrs (:node (c/def-of id))))))
 
+(def ^:dynamic *native-attrs* {})   ; RF12-P6: core's definitions' attributes from core-check's export (a nested fn's too)
+
 (defn attrs-of
   "{:names #{...} :known BOOL}: a definition's codegen attributes (known false: an item core's sources did not show)"
   [d]
-  (if (number? d)
-    {:names (set (local-attrs d)) :known true}
-    (let [a (ext-attrs d)] {:names (set a) :known (some? a)})))
+  (cond
+    (number? d) {:names (set (local-attrs d)) :known true}
+    (contains? *native-attrs* d) {:names (set (get *native-attrs* d)) :known true}
+    :else (let [a (ext-attrs d)] {:names (set a) :known (some? a)})))
 
 (defn- weak-link [names] (some #(when (str/starts-with? % "lang:") (get weak-lang (subs % 5))) names))
 (defn- extern-indicator? [names] (boolean (or (names "no_mangle") (some #(str/starts-with? % "export_name") names) (names "rustc_std_internal_symbol") (weak-link names))))
@@ -949,6 +952,8 @@
 (defn- def-kind [d]
   (if (number? d) (str (:kind (c/def-of d)))
       (cond (contains? (:fns c/*si*) d) (if (re-find #"\{impl#\d+\}::[^:]+$|::[A-Z][^:]*::[^:]+$" d) "AssocFn" "Fn")
+            ;; RF12-P6: a function of core built natively (a nested one's too: `write_volatile::precondition_check`)
+            (contains? *native-attrs* d) (if (re-find #"\{impl#\d+\}::[^:]+$" d) "AssocFn" "Fn")
             :else (str (get (:kinds c/*std*) d)))))
 
 (defn- generic-def? [d]
@@ -1282,3 +1287,12 @@
          :callees (into {} (for [[txt ft] calls] [txt (try-fact #(callee-fact ft))]))
          :fsyms (into {} (for [[txt [_ cd args]] calls :when (not (intrinsic? cd))]
                            [txt (try-fact #(if ((:names (attrs-of cd)) "track_caller") (reify-mangle cd args) (instance-symbol {:def cd :args (erase-regions args)})))]))})))))
+
+(defn drop-shim-plan
+  "RF12-P6: drop_glue::<T>'s shim when it is a call of T's own Drop::drop and nothing else (shim.rs' build_drop_shim with
+  elaborated drops: a local ADT with a Drop impl whose fields need no drop): the local Drop::drop function's id, else nil"
+  [n t]
+  (binding [*local* (local-crate n) *layouts* (atom {}) *def-order* (atom nil)]
+    (tc/with-solver (solver-def)
+      (fn [] (when (and (= :adt (first t)) (number? (second t)) (= [t] (vec (drop-glues t))))
+               (local-drop-impl t))))))

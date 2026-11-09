@@ -137,3 +137,18 @@ core_essential() {
   else echo "rust-core essential: the summary is test/rust/front/core-essential-known.txt's"; fi
   return $st
 }
+
+# RF12-P6: bin/rust-front core-export: the core bodies of test/rust/front/core-native.txt (a regex of names, then module files)
+# built by core-check through the 21 passes and written with their equality to rustc's built MIR (the pack rust-core-built)
+# into .tmp/rust-front/core/native-core.edn, which `run-built --native-core` takes (RF_CORE_NATIVE) in place of the record's
+# core bodies where equal; about 40 minutes (num/mod.rs), 2.3 GB at GOMEMLIMIT=2000MiB
+core_export() {
+  local lib spec=$root/test/rust/front/core-native.txt re files out=$work/core/native-core.edn
+  lib=$(core_lib) || return 1
+  re=$(grep -v '^#' "$spec" | head -n 1)
+  files=$(grep -v '^#' "$spec" | tail -n +2 | sed "s|^|$lib/core/src/|")
+  rm -f "$out"
+  # shellcheck disable=SC2086
+  CORE_ONLY="$re" CORE_EXPORT_NAMES="$re" CORE_EXPORT=$out core_check --records $files
+  [ -s "$out" ] && echo "core-export: $(grep -c '^(core/body' "$out") bodies in $out"
+}
