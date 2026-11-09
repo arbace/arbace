@@ -45,6 +45,11 @@ EXC_HDR = re.compile(r"^Traceback \((?:most recent call last|innermost last)\):\
 def doctest_expect(src, expect):
     """The expectation of a doctest example (doctest's _EXCEPTION_RE: the header, then the stack, then the message from
     the first line that starts with a word character), or None"""
+    # the docstring's end is not the example's output (the file's lines, not the docstring's text, are read here)
+    for i, e in enumerate(expect):
+        if '"""' in e:
+            expect = expect[:i] + ([e[:e.index('"""')].rstrip()] if e[:e.index('"""')].strip() else [])
+            break
     if not expect or not EXC_HDR.match(expect[0]):
         return None
     msg = None
