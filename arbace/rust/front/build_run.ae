@@ -13,7 +13,7 @@
                                                        one line per body (ours, or the record's and why)"
   (:require [arbace.rust.front.build-check :as bc] [arbace.rust.front.mir :as mir] [arbace.rust.front.mono :as mono]
             [arbace.rust.front.mono-check :as mc]
-            [arbace.rust.front.build :as build] [arbace.string :as str])
+            [arbace.rust.front.build :as build] [arbace.rust.front.collect :as c] [arbace.string :as str])
   (:import [java.io File]))
 
 (defn- read-forms [s] (let [r (java.io.PushbackReader. (java.io.StringReader. s))]
@@ -71,6 +71,15 @@
   int_macros.rs and uint_macros.rs: MIN = !MAX, MAX = (<uN>::MAX >> 1) as iN or !0, BITS = <uN>::BITS): (scalar BITS SIZE),
   else nil (the constant is the CTFE's, RF10's slice 5)"
   [text]
+  (or
+  ;; RF12-P6: core::mem::SizedTypeProperties' SIZE, ALIGN and IS_ZST of a scalar, unit or thin pointer type (intrinsics::size_of
+  ;; and align_of, as CTFE evaluates them: the type's layout)
+  (when-let [[_ t nm] (re-matches #"const <(.+) as core::mem::SizedTypeProperties>::(SIZE|ALIGN|IS_ZST)" text)]
+    (let [[sz al] (cond (= t "()") [0 1] (#{"bool" "u8" "i8"} t) [1 1] (#{"u16" "i16"} t) [2 2] (#{"u32" "i32" "f32" "char"} t) [4 4]
+                        (#{"u64" "i64" "f64" "usize" "isize"} t) [8 8] (#{"u128" "i128"} t) [16 16]
+                        (and (re-matches #"(\*(const|mut) |&(mut )?)[A-Za-z0-9_:<>]+" t) (not (re-find #"\[|dyn |str" t))) [8 8]
+                        :else nil)]
+      (when sz (case nm "SIZE" (list 'scalar sz 8) "ALIGN" (list 'scalar al 8) "IS_ZST" (list 'scalar (if (zero? sz) 1 0) 1)))))
   (when-let [[_ t nm] (re-matches #"const core::num::<impl ([iu](?:8|16|32|64|128|size))>::(MIN|MAX|BITS)" text)]
     (let [n (if (str/ends-with? t "size") 64 (parse-long (subs t 1)))
           signed? (str/starts-with? t "i")
@@ -78,7 +87,7 @@
       (case nm
         "BITS" (list 'scalar n 4)
         "MAX" (list 'scalar (bigint (dec (m (if signed? (dec n) n)))) (quot n 8))
-        "MIN" (list 'scalar (if signed? (m (dec n)) 0) (quot n 8))))))
+        "MIN" (list 'scalar (if signed? (m (dec n)) 0) (quot n 8)))))))
 
 (defn- le-bytes [v n] (let [v (biginteger (bigint v))] (vec (for [i (range n)] (.intValue (.and (.shiftRight v (int (* 8 i))) (biginteger 255)))))))
 
@@ -276,6 +285,130 @@
     (System/exit 0)))
 
 ;; ---------------------------------------------------------------------------------------------
+;; ---------------------------------------------------------------------------------------------
+;; RF12-P6: core's bodies built by Arbace (bin/rust-front core-check's export, CORE_EXPORT: each body's runtime MIR after the
+;; 21 passes, its types in core's paths) taken in place of the record's core bodies: each printed again in the program's crate
+;; (its types' texts, its function constants' and named constants' texts), instantiated by the mono item's arguments,
+;; const_eval_select's calls remapped to the runtime function (rustc_mir_transform's remap_mir_for_const_eval_select, as
+;; optimized MIR has it), and the functions it reaches that the record has no body of built natively too; a body is taken only
+;; when its built MIR equals rustc's (the export's :equal, judged by core-check against the pack rust-core-built) and every
+;; function its closure needs is, else the record's body stays (the fallback)
+
+(def ^:private native-core-cache (atom {}))
+
+(defn- native-core-map
+  "The exported native core bodies: {def-path entry}, from RF_CORE_NATIVE (default .tmp/rust-front/core/native-core.edn); {}
+  without one"
+  []
+  (let [f (or (System/getenv "RF_CORE_NATIVE") ".tmp/rust-front/core/native-core.edn")]
+    (or (get @native-core-cache f)
+        (let [m (if (.exists (File. ^String f))
+                  (into {} (for [x (read-forms (slurp f)) :when (and (seq? x) (= 'core/body (first x))) :let [e (second x)] :when (:body e)]
+                             [(:def e) e]))
+                  {})]
+          (swap! native-core-cache assoc f m)
+          m))))
+
+(defn- reprint
+  "Native core forms printed in the program's crate at ARGS: each type form from its :tc, a function constant's text from its
+  type, a named constant's from its :nc"
+  [x args]
+  (cond
+    (seq? x)
+    (let [m (meta x)
+          y (apply list (map #(reprint % args) x))]
+      (cond
+        (and (= 'ty (first y)) (:tc m)) (build/ty-form (c/subst (:tc m) args))
+        (and (= 'unevaluated (first y)) (:nc m)) (with-meta y (update m :nc (fn [[d as]] [d (mapv #(c/subst % args) as)])))
+        (= 'const (first y))
+        (let [tyf (nth y 2 nil) t (:tc (meta tyf)) v (nth y 3 nil) nc (:nc (meta v))
+              text (cond (and t (= :fndef (first t))) (build/fn-const-text t)
+                         nc (str "const " (binding [c/*in-value* true c/*erased-regions* true] (c/print-def-path (first nc) (second nc))))
+                         :else (second y))]
+          (with-meta (apply list 'const text (drop 2 y)) m))
+        :else (if m (with-meta y m) y)))
+    (vector? x) (let [y (mapv #(reprint % args) x)] (if (meta x) (with-meta y (meta x)) y))
+    (map? x) (into {} (for [[k v] x] [k (if (= k :local-tys) (mapv #(c/subst % args) v) (reprint v args))]))
+    :else x))
+
+(defn- remap-const-eval-select
+  "remap_mir_for_const_eval_select (lib.rs), at run time: `const_eval_select(ARGS, F, G)` a call of G with the tuple's fields"
+  [body]
+  (update body :blocks
+          (fn [bs]
+            (mapv (fn [b]
+                    (let [t (:term b)]
+                      (if-not (and (seq? t) (= 'call (first t)))
+                        b
+                        (let [[_ f args & more] t
+                              ft (:tc (meta (nth f 2 nil)))]
+                          (if-not (and ft (= :fndef (first ft)) (= "core::intrinsics::const_eval_select" (second ft)))
+                            b
+                            (let [[arg-ty _ rt _] (nth ft 2)
+                                  g (list 'const (build/fn-const-text rt) (build/ty-form rt) '(zst))
+                                  g (with-meta g (meta f))
+                                  tupled (first args)
+                                  fields (when (= :tuple (first arg-ty)) (second arg-ty))
+                                  new-args (if (and (seq? tupled) (#{'move 'copy} (first tupled)))
+                                             (let [[op pl] tupled]
+                                               (vec (for [[i ft] (map-indexed vector fields)]
+                                                      (list op (apply list (concat pl [(list 'field i (build/ty-form ft))]))))))
+                                             (if (empty? fields) [] (throw (ex-info "const_eval_select with a constant tuple" {}))))]
+                              (assoc b :term (apply list 'call g new-args more))))))))
+                  bs))))
+
+(defn- core-instance
+  "A native core body at the instance's ARGS, printed in the program's crate: {:def :args :body :promoted} or nil"
+  [entry args]
+  (let [b (reprint (:body entry) args)]
+    {:def (:def entry) :args args :body (remap-const-eval-select (assoc b :promoted-bodies (into {} (for [[i pb] (:promoted entry)] [i (reprint pb args)]))))}))
+
+(defn- call-of [t] (when (and (seq? t) (= 'call (first t))) (:tc (meta (nth (second t) 2 nil)))))
+
+(defn native-core-plan
+  "Within the run's bindings: for the record's core bodies ROOTS ([[record-body def args]]), each taken natively with the
+  closure of the functions it reaches that the record has no body of: {:taken {record-name instance} :extra [instance]
+  :lines [..]}"
+  [roots rec-defs]
+  (let [nc (native-core-map) lines (atom [])
+        close (fn close [def args seen]
+                ;; [instances] of DEF at ARGS and what it reaches natively, or throws why it cannot be taken
+                (let [e (get nc def)]
+                  (cond
+                    (nil? e) (throw (ex-info (str "no native body of " def) {}))
+                    (not (:equal e)) (throw (ex-info (str def "'s built MIR differs from rustc's") {}))
+                    (contains? seen [def args]) []
+                    :else
+                    (let [inst (core-instance e args)
+                          rec-has? (fn [cd] (contains? rec-defs (mono/print-path cd)))
+                          seen (conj seen [def args])
+                          more (for [blk (:blocks (:body inst)) :let [ft (call-of (:term blk))] :when ft
+                                     :let [[_ cd cargs] ft]
+                                     ;; an intrinsic is codegen's; a function core's export has is built; one that is MIR-available
+                                     ;; without a native body stops the root; any other is an external symbol (core's own object)
+                                     :when (and (string? cd) (not (mono/intrinsic? cd))
+                                                (or (get nc cd) (mono/mir-available? cd)))]
+                                 [cd (vec cargs)])]
+                      ;; a callee without an equal native body that the record has a body of: the record's (the pack's fallback)
+                      (into [inst] (mapcat (fn [[cd cargs]]
+                                             (if (and (rec-has? cd) (not (:equal (get nc cd)))) [] (try (close cd cargs seen)
+                                                                                                         (catch Throwable e
+                                                                                                           (if (rec-has? cd)
+                                                                                                             (do (swap! lines conj (str "record-kept " cd " (" (.getMessage e) ")")) [])
+                                                                                                             (throw e))))))
+                                           (distinct more)))))))]
+    (assoc
+    (reduce (fn [acc [rec def args]]
+              (try (let [[root & extra] (close def (vec args) #{})]
+                     (swap! lines conj (str "native " (:name rec) " (core's body built by Arbace, equal to rustc's built MIR"
+                                            (when (seq extra) (str "; with " (count extra) " more: " (str/join ", " (map :def extra)))) ")"))
+                     (-> acc (assoc-in [:taken (:name rec)] root) (update :extra into extra)))
+                   (catch Throwable e
+                     (swap! lines conj (str "record " (:name rec) " (core's body: " (.getMessage e) ")"))
+                     acc)))
+            {:taken {} :extra [] :lines []} roots)
+    :lines @lines)))
+
 ;; RFP23 (c): the run's facts from arbace.rust.front.mono (no record but core's bodies and, per fact, what mono refuses)
 
 (defn native-run
@@ -303,6 +436,22 @@
           (bc/build-program front-dir n
             (fn [bodies]
               (let [facts (mono/program-facts n bodies)
+                    ;; RF12-P6: the record's core bodies the program reaches, built natively where they and their closure can be
+                    core-plan (when (and (seq (native-core-map)) (not (System/getenv "RF_CORE_PACK")))
+                                (native-core-plan (for [x (:ext-items facts) :let [rec (some #(when (= (:symbol x) (:symbol %)) %) rec-bodies)] :when rec]
+                                                    [rec (:def x) (:args x)])
+                                                  ;; a function the record has a body of stays the record's when no native one is equal
+                                                  (set (for [b rec-bodies :when (not (str/starts-with? (str (:def-id b)) "DefId(0:"))] (:def b)))))
+                    core-insts (when core-plan
+                                 (vals (into {} (for [i (concat (vals (:taken core-plan)) (:extra core-plan))] [[(:def i) (:args i)] i]))))
+                    core-f (when (seq core-insts)
+                             (mono/core-facts n (for [i core-insts] {:def (:def i) :args (:args i) :name (str "native " (:def i) (pr-str (:args i))) :body (:body i)})))
+                    core-items (for [i core-insts :let [h (get (:items core-f) (str "native " (:def i) (pr-str (:args i))))] :when (and (map? h) (not (mono/error? h)))]
+                                 [h i])
+                    native-syms (set (map (comp :symbol first) core-items))
+                    _ (doseq [l (:lines core-plan)] (swap! lines conj l))
+                    facts (cond-> facts core-f (-> (update :callees merge (:callees core-f)) (update :fsyms merge (:fsyms core-f))
+                                                   (assoc :native-core-syms native-syms)))
                     _ (reset! judged (vec (for [[rn rforms] judge] [rn (mc/judge n bodies facts (mc/record-entries rforms) rforms)])))
                     root-file (or *loc-file* build/*root-file*)
                     ;; RF11: with BUILD_PASS (the batch's SimplifyCfg-pre-optimizations), each body after the ported passes to
@@ -326,15 +475,18 @@
                                         recs (get @rec-callees txt)
                                         cal (if (and c (not (mono/error? c))) (do (fact! :callees true) (list 'callee c))
                                                 (do (fact! :callees false) (or (ffirst recs) (throw (ex-info (str "no callee for " txt) {})))))
-                                        l (if (vector? sp) (do (fact! :locs true) (list 'loc root-file (first sp) (second sp)))
-                                              (do (fact! :locs false) (or (second (first recs)) (list 'loc "?" 0 0))))]
+                                        cl (:call-loc (meta f))
+                                        l (cond (vector? sp) (do (fact! :locs true) (list 'loc root-file (first sp) (second sp)))
+                                                ;; RF12-P6: a native core body's call: its place in core's sources
+                                                cl (do (fact! :locs true) (list 'loc (first cl) (second cl) (nth cl 2)))
+                                                :else (do (fact! :locs false) (or (second (first recs)) (list 'loc "?" 0 0))))]
                                     [cal l]))
                     fsym (into {} (for [[txt s] (:fsyms facts)]
                                     [txt (if (mono/error? s) (do (fact! :fn-symbols false) (get (:fsym rfacts) txt)) (do (fact! :fn-symbols true) s))]))
                     statics (into {} (for [[nm m] rec-statics]
                                        [nm (let [o (get (:statics facts) nm)] (if (map? o) (do (fact! :statics true) o) (do (fact! :statics false) m)))]))
                     header (fn [rec]
-                             (let [o (get (:items facts) (:name rec))]
+                             (let [o (or (get (:items facts) (:name rec)) (get (:items core-f) (:name rec)))]
                                (if (and (map? o) (not (mono/error? o)))
                                  (do (fact! :symbols true) (assoc (dissoc o :name) :phase "optimized" :name (:name rec)))
                                  (do (fact! :symbols false) (select-keys rec [:def :def-id :phase :instance :symbol :name :kind :track-caller :spread-arg])))))
@@ -361,16 +513,28 @@
                                            (if-let [r (get rec-by-name nm)] (list 'mir/body r) (throw e))))
                                     (do (swap! lines conj (str "record " nm " (" err ")")) (fact! :bodies false)
                                         (list 'mir/body (or (get rec-by-name nm) (throw (ex-info (str "no body for " nm) {}))))))))
+                    ;; RF12-P6: the native core bodies made runtime bodies, all or none (a failure keeps the record's bodies)
+                    native-forms (when (seq core-items)
+                                   (try (doall (for [[h i] core-items]
+                                                 (let [r (runtime-body (assoc (:body i) :name (:name h)) h nf abort?)]
+                                                   (list 'mir/body (assoc r :phase "arbace-native-core")))))
+                                        (catch Throwable e
+                                          (swap! lines conj (str "record core's bodies (a native one failed at run time: " (.getMessage e) ")"))
+                                          nil)))
+                    native-taken (if native-forms native-syms #{})
+                    _ (doseq [[h _] core-items :when native-forms] (swap! lines conj (str "native " (:name h))) (fact! :core-bodies true))
                     ;; the module from the collector's items: our bodies, then core's bodies (the record's: RF12), the statics,
                     ;; the lang items' symbols, the layouts; the record's entry wrapper for a std program
                     new-forms
                     (doall
                      (concat
                       (for [nm (:order facts)] (body-form nm))
-                      (for [rec rec-bodies :when (not (local? rec))]
+                      (for [rec rec-bodies :when (and (not (local? rec)) (not (native-taken (:symbol rec))))]
                         (do (swap! lines conj (str "record " (:name rec) " (" (if (ext-syms (:symbol rec)) "core's body, reached by the collector" "core's body, reached through core's bodies") ")"))
                             (fact! :core-bodies false)
                             (list 'mir/body rec)))
+                      ;; RF12-P6: core's bodies built natively (each instance of the closure once)
+                      (or native-forms [])
                       (for [[nm m] (:statics facts) :when (map? m)] (list 'mir/static m))
                       [(list 'mir/layouts [])]
                       [(list 'mir/langsyms (into {} (for [ln (distinct (concat (keys (:langsyms facts)) (keys rec-langs)))]

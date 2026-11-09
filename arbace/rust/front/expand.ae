@@ -766,10 +766,29 @@
             :else (throw (ex-info "expand: transcriber element" {:p p}))))
         pats)))
 
+(defn- desugar-doc-comments
+  "RF12: a macro's input's doc comments as the attributes they stand for (`#[doc = r\"..\"]`, `#![doc = ..]` inner), as
+  rustc's matcher sees them (mbe::macro_parser's desugar_doc_comments)"
+  [items]
+  (vec (mapcat (fn [it]
+                 (cond
+                   (:g it) [(assoc it :kids (desugar-doc-comments (:kids it)))]
+                   (= :DocComment (tkind it))
+                   (let [^Tok t (:t it) m (:mark it) text (str (.-sym t))
+                         hashes (if (str/includes? text "\"") (inc (reduce max 0 (map count (re-seq #"#+" text)))) 0)
+                         tk (fn [k] (cond-> (titem (ftok k nil nil nil 0 :Alone) m) (:fspan it) (assoc :fspan (:fspan it))))
+                         lit (cond-> (titem (ftok :Literal text :StrRaw nil hashes :Alone) m) (:fspan it) (assoc :fspan (:fspan it)))
+                         ident (cond-> (titem (ftok :Ident "doc" false nil 0 :Alone) m) (:fspan it) (assoc :fspan (:fspan it)))]
+                     (concat [(tk :Pound)] (when (= :Inner (.-y t)) [(tk :Bang)])
+                             [{:g :OpenBracket :open (tk :OpenBracket) :close (tk :CloseBracket) :kids [ident (tk :Eq) lit]}]))
+                   :else [it]))
+               items)))
+
 (defn expand-rules
   "A macro_rules! call: the first arm whose matcher matches all of the input, transcribed with a fresh mark"
   [mac input]
-  (let [mark (fresh-mark)]
+  (let [mark (fresh-mark)
+        input (if (some #(or (= :DocComment (tkind %)) (:g %)) input) (desugar-doc-comments input) input)]
     (when *mark-crates*
       (swap! *mark-crates* assoc mark (let [n (str (:name mac))] (if (str/includes? n "::") (first (str/split n #"::")) "crate")))
       ;; RF12: a macro 2.0's tokens resolve at its definition (def-site hygiene)
@@ -1008,7 +1027,15 @@
                     (vec r))
             stmts (if (= style 'Semicolon) (semi-last stmts) stmts)]
         (vec (mapcat expand-stmt stmts)))
-      [(apply list (map expand-form st))])))
+      (do
+        ;; RF12: a macro_rules! a statement defines (inside a block of a macro's output: num's `run_unchecked_loop!`) is in
+        ;; scope from there on, as an item's is
+        (when (and (seq? k) (= 'Item (first k)))
+          (let [ik (fget (second k) :kind)]
+            (when (and (seq? ik) (= 'MacroDef (first ik)))
+              (let [[_ idf md] ik]
+                (swap! *macros* assoc (second idf) {:name (second idf) :arms (macro-arms (dump-tts->items (second (fget (fget md :body) :tokens)) nil))})))))
+        [(apply list (map expand-form st))]))))
 
 (defn- item-kind-mac? [it] (let [k (fget it :kind)] (and (seq? k) (= 'MacCall (first k)))))
 

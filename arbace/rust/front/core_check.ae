@@ -347,6 +347,13 @@
                  (assoc-in acc [:adts p] (cond-> {:kind (:kind d) :generics (generics-sty g) :parent-count 0 :has-self false :variants variants :native true}
                                            (= "Enum" (:kind d)) (assoc :repr nil :discrs (vec (range (count variants))))))
                  acc))
+             ;; a trait's associated constants' types (std's interface writes none: `SizedTypeProperties::ALIGN`)
+             (and (= "Trait" (:kind d)) (get (:traits si) p))
+             (update acc :consts merge
+                     (into {} (for [k (collect/defs) :when (and (= (:id d) (:parent k)) (str/starts-with? (str (:kind k)) "AssocConst"))
+                                    :let [cp (str p "::" (second (:data k))) t (ty->sty (collect/type-of (:id k)) path-of)]
+                                    :when (and t (not (get (:consts si) cp)))]
+                                [cp {:kind (:kind k) :ty t :native true}])))
              ;; a trait the interface lacks (`clone::uninit::CopySpec`): its items, and its functions' signatures
              (and (= "Trait" (:kind d)) (not (get (:traits si) p)))
              (let [g (collect/generics-of (:id d))
@@ -367,10 +374,14 @@
                    (assoc-in [:traits p] {:generics (generics-sty g) :parent-count 0 :has-self true
                                           :predicates (vec (keep #(clause->sty % path-of) (collect/explicit-clauses (:id d))))
                                           :items items :native true})
-                   (update :fns merge fns)))
+                   (update :fns merge fns)
+                   (update :consts merge
+                           (into {} (for [k kids :when (str/starts-with? (str (:kind k)) "AssocConst")
+                                          :let [t (ty->sty (collect/type-of (:id k)) path-of)] :when t]
+                                      [(str p "::" (second (:data k))) {:kind (:kind k) :ty t :native true}])))))
              :else acc)
            (catch Throwable _ acc))))
-     {:fns {} :adts {} :traits {}} (collect/defs))))
+     {:fns {} :adts {} :traits {} :consts {}} (collect/defs))))
 
 (defn with-native-iface
   "std's interface with core's native additions (a path the interface has keeps the interface's)"
@@ -378,7 +389,8 @@
   (-> si
       (update :fns #(merge (:fns native) %))
       (update :adts #(merge (:adts native) %))
-      (update :traits #(merge (:traits native) %))))
+      (update :traits #(merge (:traits native) %))
+      (update :consts #(merge (:consts native) %))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; One module file through the pipeline
@@ -433,7 +445,12 @@
                       (fn []
                         (swap! stages assoc :collect :ok)
                         (reset! native (try (native-iface path si) (catch Throwable e (when (System/getenv "CORE_TRACE") (.printStackTrace e)) nil)))
-                        (binding [build/*allocs* (atom {:next 1 :ids {}}) passes/*opaque-cache* (atom {}) passes/*panic-abort* false]
+                        (binding [build/*allocs* (atom {:next 1 :ids {}}) passes/*opaque-cache* (atom {}) passes/*panic-abort* false
+                                  ;; RF12-P6: the exported bodies through the 21 passes to runtime MIR
+                                  build/*after-finish* (when-let [re (some-> (System/getenv "CORE_EXPORT_NAMES") re-pattern)]
+                                                         (fn [b] (if (re-find re (str (:name b)))
+                                                                   (assoc b :stages (into {} (passes/stages b "SimplifyCfg-pre-optimizations")))
+                                                                   b)))]
                           (doseq [d (if *collect-only* [] (collect/defs))
                                   :when (or (and (#{"Fn" "AssocFn"} (:kind d)) (:body (:node d)))
                                             (= "Closure" (:kind d)) (const-kind? d))]
@@ -462,6 +479,80 @@
                    :closure (recur (collect/def-of (:parent d)) (cons (str "{closure#" (:disamb d) "}") acc))
                    (recur (collect/def-of (:parent d)) acc))))]
     (str/join "-" (concat (when (not= path "core") (rest (str/split path #"::"))) segs))))
+
+;; ---------------------------------------------------------------------------------------------
+;; RF12-P6: a native core body for a program's run (CORE_EXPORT): its runtime MIR (the 21 passes) with every local definition
+;; by its path in core (`core::ptr::write_volatile::precondition_check`, an impl `core::ptr::const_ptr::{impl#0}`), the forms'
+;; texts left to the program's context (bin/rust-front run-built prints them again from their types), a call's place in core's
+;; sources as rustc's paths write it (`/rustc/HASH/library/...`)
+
+(def rustc-src-prefix "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/")
+
+(defn def-path-string
+  "A local definition's path in core, with rustc's disambiguators"
+  [id]
+  (let [segs (loop [d (collect/def-of id) acc ()]
+               (let [[k n] (:data d)]
+                 (case k
+                   :crate acc
+                   (:type :value) (recur (collect/def-of (:parent d)) (cons n acc))
+                   :impl (recur (collect/def-of (:parent d)) (cons (str "{impl#" (:disamb d) "}") acc))
+                   :closure (recur (collect/def-of (:parent d)) (cons (str "{closure#" (:disamb d) "}") acc))
+                   :ctor (recur (collect/def-of (:parent d)) (cons "{constructor#0}" acc))
+                   (recur (collect/def-of (:parent d)) acc))))]
+    (str/join "::" (concat (str/split resolve/*crate-path* #"::") segs))))
+
+(defn- ext-ty
+  "A type with each local definition its path in core; nil for a closure's or an opaque type's (not carried)"
+  [t]
+  (cond
+    (not (vector? t)) t
+    (and (keyword? (first t)) (#{:closure :opaque :coroutine} (first t))) (throw (ex-info "a closure or opaque type" {:carry false}))
+    (and (keyword? (first t)) (#{:adt :fndef :proj} (first t)) (number? (second t)))
+    (into [(first t) (def-path-string (second t))] (map ext-ty (drop 2 t)))
+    (= :dyn (first t))
+    (let [[_ m r] t]
+      [:dyn (cond-> m
+              (:principal m) (update :principal (fn [[d as]] [(if (number? d) (def-path-string d) d) (mapv ext-ty as)]))
+              (:projections m) (update :projections (fn [ps] (vec (for [[d as tm] ps] [(if (number? d) (def-path-string d) d) (mapv ext-ty as) (ext-ty tm)]))))
+              (:autos m) (update :autos (fn [as] (mapv #(if (number? %) (def-path-string %) %) as))))
+       r])
+    :else (mapv ext-ty t)))
+
+(defn externalize
+  "A body's forms with their types (the :tc metadata) in core's paths and a call's :call-span its place (:call-loc)"
+  [x]
+  (cond
+    (seq? x) (let [y (apply list (map externalize x))
+                   m (meta x)
+                   y (if (and (= 'unevaluated (first y)) (number? (second y))) (apply list 'unevaluated (def-path-string (second y)) (drop 2 y)) y)
+                   m (cond-> m
+                       (:tc m) (update :tc ext-ty)
+                       (:nc m) (update :nc (fn [[d as]] [(if (number? d) (def-path-string d) d) (mapv ext-ty as)]))
+                       (:call-span m) (#(let [o (ex/virtual-origin (:call-span %))]
+                                          (cond-> (dissoc % :call-span)
+                                            (= 5 (count o)) (assoc :call-loc [(str rustc-src-prefix (str/replace (o 0) #"^library/" "library/")) (o 1) (o 2)])))))]
+               (if m (with-meta y m) y))
+    (vector? x) (let [y (mapv externalize x)] (if (meta x) (with-meta y (cond-> (meta x) (:tc (meta x)) (update :tc ext-ty))) y))
+    (map? x) (into {} (for [[k v] x :when (not (#{:def :stages :alloc-data} k))]
+                        [k (if (#{:local-tys} k) (mapv ext-ty v) (externalize v))]))
+    :else x))
+
+(defn export-entry
+  "The exported body of a built body B (its last stage after the passes, its promoted bodies)"
+  [b k equal?]
+  (let [st (:stages b)
+        last-pass (last (filter #(contains? st %) passes/pass-names))
+        key (passes/body-key b)
+        r (get-in st [last-pass key])
+        pre (str key "::promoted[")
+        pbs (into {} (for [[kk pb] (get st last-pass) :when (and (str/starts-with? kk pre) (not (:error pb)))] [(:promoted pb) pb]))]
+    (if (or (nil? r) (:error r))
+      {:key k :refused (str "the passes: " (or (:error r) (str "no body after " last-pass)))}
+      (try {:key k :def (def-path-string (:id (:def b))) :equal equal? :pass last-pass
+            :body (externalize (dissoc r :stages)) :promoted (into {} (for [[i pb] pbs] [i (externalize pb)]))
+            :generics (count (:params (collect/generics-of (:id (:def b)))))}
+           (catch Throwable e {:key k :refused (str (or (.getMessage e) e))})))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; rustc's built MIR of core (core-oracle's index: FILE TAB NAME)
@@ -510,6 +601,8 @@
             verbose (System/getenv "CORE_VERBOSE")
             totals (atom {})
             control (atom nil)
+            export-re (some-> (System/getenv "CORE_EXPORT_NAMES") re-pattern)
+            exported (atom [])
             ;; core's native interface so far (this run's modules, and the last run's: native-iface.edn)
             native-file (File. (str cache-dir "/native-iface.edn"))
             ;; RF12-P2 (b): core's interface in one collection pass over the files (CORE_IFACE_FILES: a file listing others,
@@ -536,7 +629,12 @@
                           (let [w (get oracle k) t (when b (print-text b))
                                 _ (when (and t w (nil? @control) (= t (oracle-text w))) (reset! control [k t]))]
                             (when (and dump t) (.mkdirs (File. ^String dump)) (spit (str dump "/" k ".mir") t))
-                            (if (nil? w) [:no-oracle nm k] (judge nm (oracle-text w) t err detail))))
+                            (when-let [rd (System/getenv "CORE_RAW")] (when b (.mkdirs (File. ^String rd)) (spit (str rd "/" k ".edn") (binding [*print-meta* true] (pr-str b)))))
+                            (let [row (if (nil? w) [:no-oracle nm k] (judge nm (oracle-text w) t err detail))]
+                              (when (and b export-re (re-find export-re (str nm)))
+                                (when-let [e (export-entry b k (contains? #{:equal :equal-alloc-ids :equal-allocs} (first row)))]
+                                  (swap! exported conj e)))
+                              row)))
                 {:keys [stages bodies native]} (run-module m table names std-file std si lib-dir on-body)
                 _ (when native (swap! native-all #(merge-with merge % native)))
                 rows bodies
@@ -551,6 +649,15 @@
           (let [other (first (filter #(not= k %) (sort (keys oracle))))
                 r (judge "control" (oracle-text (get oracle other)) t nil nil)]
             (println "core-check: control (" k "against" other "):" (if (#{:equal :equal-alloc-ids :equal-allocs :equal-crate-hash} (first r)) "PASSED (a bug)" "differs, as it must"))))
+        (when-let [ef (System/getenv "CORE_EXPORT")]
+          ;; the file's earlier entries kept but where this run exported the same body (by its key)
+          (let [old (when (.exists (File. ^String ef))
+                      (let [r (java.io.PushbackReader. (java.io.StringReader. (slurp ef)))]
+                        (loop [acc []] (let [x (read {:eof ::eof} r)] (if (= x ::eof) acc (recur (conj acc (second x))))))))
+                new-keys (set (map :key @exported))
+                all (concat (remove #(new-keys (:key %)) old) @exported)]
+            (spit ef (binding [*print-meta* true] (with-out-str (doseq [e all] (prn (list 'core/body e)))))))
+          (println "core-check: exported" (count @exported) "bodies," (count (filter :equal @exported)) "equal to rustc's built MIR, to" ef))
         (spit native-file (pr-str @native-all))
         (println "core-check: native interface" (count (:fns @native-all)) "functions," (count (:adts @native-all)) "ADTs")
         (println "core-check: total" (pr-str @totals))))

@@ -541,7 +541,10 @@
       :path (mirror-path e ty)
       :type-relative (if (= :fndef (first ty)) (mk e :zst-literal ty :user-ty (:user-ty (r-of e)) :fspan (:fspan e)) (unsupported "a type-relative path" (first ty)))
       ;; RF12: a qualified path to a trait's function (`<T as Clone>::clone`): its function item, as a type-relative one's
-      :qpath (if (= :fndef (first ty)) (mk e :zst-literal ty :user-ty (:user-ty (r-of e)) :fspan (:fspan e)) (unsupported "a qualified path" (first ty)))
+      :qpath (cond (= :fndef (first ty)) (mk e :zst-literal ty :user-ty (:user-ty (r-of e)) :fspan (:fspan e))
+                   ;; RF12: a trait's associated constant (`<T as SizedTypeProperties>::ALIGN`): NamedConst
+                   (:named-const (r-of e)) (let [[d args] (:named-const (r-of e))] (mk e :named-const ty :def d :args args :user-ty (:user-ty (r-of e)) :fspan (:fspan e)))
+                   :else (unsupported "a qualified path" (first ty)))
       :unary (case (:op e)
                "-" (cond (not (#{:int :uint :float} (first (ty-of (:expr e)))))
                          (overloaded-operator e ty ["core::ops::arith::Neg" "neg"] [(ty-of (:expr e))] [(mirror-expr (:expr e))])
@@ -574,7 +577,10 @@
               (cond (or (:coercion-cast (r-of src))
                         ;; check_cast's try_coercion_cast of a cast to the type the expression already has (CoercionCast:
                         ;; `7.5 as F`, the literal typed F by ExpectCastableToType), raw pointers apart (PointerCast)
-                        (let [st (adjusted-ty src)] (and (= (tc/erase-ty st) (tc/erase-ty ty)) (not= :ptr (first st)))))
+                        (let [st (adjusted-ty src)] (and (= (tc/erase-ty st) (tc/erase-ty ty))
+                                                         ;; RF12: a reference made a raw pointer by the coercion (`self as *const str`) is
+                                                         ;; one too (set_coercion_cast); a raw pointer's own cast is a PtrToPtr cast
+                                                         (or (not= :ptr (first st)) (= :ref (first (ty-of src)))))))
                     (mk e :use ty :source (mirror-expr src))
                     ;; a unit variant cast to an integer: its discriminant as the last explicit one's constant plus the
                     ;; offset from it (discriminant_def_for_variant), in the enum's repr type
@@ -593,7 +599,11 @@
                                     :rhs lit}
                                    lit)]
                       (mk e :cast ty :source source))
-                    :else (mk e :cast ty :source (mirror-expr src))))
+                    :else (let [c (mk e :cast ty :source (mirror-expr src))]
+                            ;; RF12: a cast's user-provided type (ValueTypeAscription over the cast)
+                            (if-let [u (:cast-user-ty (r-of e))]
+                              (mk e :value-type-ascription ty :source c :user-ty u :uspan (:span (:ty e)))
+                              c))))
       :drop-temps (mk e :use ty :source (mirror-expr (:expr e)))
       :field (let [bt (let [x (r-of (:expr e)) t (:ty x)] (reduce (fn [_ [_ tt]] tt) t (:adj x)))
                    [vid vi] (if (= :adt (first bt))
@@ -1244,7 +1254,8 @@
                             (str "const {alloc" id ": " (ty-text (:ty x)) "}"))
                    (:ty x) (list 'static-ptr id)])
     :named-const [:const (str "const " (or (:text x) (binding [c/*in-value* true c/*erased-regions* true] (c/print-def-path (:def x) (:args x))))) (:ty x)
-                  (list 'unevaluated (str (or (:def x) (:text x))) [] nil)]
+                  ;; RF12-P6: the constant's definition and arguments kept (a native core body instantiated in a program's run)
+                  (with-meta (list 'unevaluated (str (or (:def x) (:text x))) [] nil) {:nc [(:def x) (vec (:args x))]})]
     :const-op (:c x)
     (unsupported "a constant" (:k x))))
 
@@ -1517,7 +1528,7 @@
 (defn- category [x]
   (case (:k x)
     :scope nil
-    (:field :deref :index :var-ref :upvar-ref) :place
+    (:field :deref :index :var-ref :upvar-ref :value-type-ascription) :place
     (:logical :match :if :let :never-to-any :use :adt :borrow :raw-borrow :call :loop :block :break :continue :return) :into
     (:array :tuple :closure :unary :binary :cast :pointer-coercion :repeat :assign :assign-op) :rvalue
     (:literal :zst-literal :named-const :static-ref :const-op) :constant))
@@ -1544,6 +1555,8 @@
 
 (defn- var-local [id] (or (get (:var-indices (st)) id) (unsupported "a variable" id)))
 (defn- guard-local [id] (or (get (:guard-indices (st)) id) (unsupported "a guard's variable" id)))
+
+(declare span-text)
 
 (defn- expr-as-place [bb x mutability]
   (case (:k x)
@@ -1580,6 +1593,13 @@
                      (add-fake-borrows-of-base! bb base))
                    [bb (project base [:index idx])]))))
     :var-ref [bb (if (contains? *guard-vars* (:id x)) (place (guard-local (:id x)) [:deref]) (place (var-local (:id x))))]
+    ;; RF12: as_place's ValueTypeAscription: the source in a temporary, ascribed its user type (AscribeUserType, invariant)
+    :value-type-ascription
+    (let [[bb t] (as-temp bb (temporary-scope (:tsi x)) (:source x) mutability)
+          i (count (:user-types (st)))]
+      (upd! update :user-types (fnil conj []) {:text (str "user_ty: " (:user-ty x) ", span: " (span-text (:uspan x)) ", inferred_ty: " (binding [c/*in-value* false] (c/print-ty (:ty x))))})
+      (push! bb (list 'raw (str "AscribeUserType(" (mir/place (place-form (place t))) ", o, UserTypeProjection { base: UserType(" i "), projs: [] })")))
+      [bb (place t)])
     (let [[bb t] (as-temp bb (temporary-scope (:tsi x)) x mutability)] [bb (place t)])))
 
 (defn as-place [bb x] (binding [*fake-borrow-temps* nil] (expr-as-place bb x :mut)))
@@ -1835,7 +1855,7 @@
                    (assign! bb dest (list 'aggregate (adt-agg x os) (mapv op-form os))) bb)
             (:assign :assign-op) (let [bb (blk (stmt-expr bb x nil))] (assign! bb dest (use-rv unit-const)) bb)
             (:continue :break :return) (blk (stmt-expr bb x nil))
-            (:var-ref :upvar-ref :field :deref :index)
+            (:var-ref :upvar-ref :field :deref :index :value-type-ascription)
             (let [[bb p] (as-place bb x)] (assign! bb dest (use-rv (consume p))) bb)
             ;; rvalues and constants
             (let [[bb rv] (as-local-rvalue bb x)] (assign! bb dest rv) bb))]
