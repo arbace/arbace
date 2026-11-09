@@ -2624,7 +2624,9 @@ The user accepted HF10-P1 to P10 as recommended (~06:15). Built by an agent in t
   clang's recorded IR.
 - **Checked**: codegen-gen: 148 of 149 forms a0c6ad347's byte for byte, the 149th (recursion's bool conditional, now clang's `phi i1`)
   intended; the record, stale on next since G5c's merges (120 of 149), recorded again: 154 of 154. The dg check's own front end on the
-  every-10th sample: 117 own passes as recorded after cpp0x/variadic170.C's diagnosis (it had passed by a parser decline).
+  every-10th sample: 117 own passes as recorded after cpp0x/variadic170.C's diagnosis (it had passed by a parser decline), 118 at
+  the head (cpp2a/desig29.C). The sampling's AOT level by our route alone (`--aot`, cf2g and TamaGo's go): 44 of the 45 generated
+  pass, as the interpreted level.
 - **Not done** (proposed CP330-CP337 in the survey): inheriting constructors (std::unique_ptr), std::tuple's constructors, coroutines,
   GNU vector types, the checker's structured bindings, the eval and AOT facts' weighting after the switch, the generation's time.
 - **Alternatives considered**: running the day's samples and runtime by gcc on the lowered C (the oracle tier's judge, not allowed for

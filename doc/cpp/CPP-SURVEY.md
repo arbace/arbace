@@ -5376,7 +5376,9 @@ also rejects (abi/vbase8-10.C, cpp/embed-26.C, init/vector1.C, torture/vshuf-v16
 pretty1 as recorded: **62 pass (clang's record: 60), no recorded pass lost**, 4 deferred, 1 oracle-text.
 
 `CPPI_ROUTE=ours bin/cppi check --aot --corpus gxx-dg-run --sample 25` (cf2g's Go built by TamaGo's go, `CPPI_GO_P=1 CPPI_SHARD=2`):
-AOT_RESULT
+**the same: 45 generated, built by cf2g and TamaGo's go and run, 44 pass, 1 oracle-text (pretty1)**, the two improvements the same;
+against the interpreted record per program, 42 pass both ways and the 2 improvements pass compiled only (the 18 "interpreted only"
+are the refused programs, build failures under `ours`); 1.7 GB, about 100 minutes at one job (shards of 2).
 
 The samples' and the runtime corpus's runs are the night's: their programs link the runtime's iostream, locale and string units,
 whose checked forms ci's builder holds (`nodes-list` passed 2.3 GB on the samples before its first program ran), and the lowered
@@ -5407,8 +5409,9 @@ forms.sha256's 154 digests), so the `--full` step cpp-codegen-gen passes again.
 `bin/repr-cpp dg --corpus dg-error --front native --sample 10` (the checker is sema's, which these rules touch): 454 files, own pass 117
 as recorded, one regression found and fixed: cpp0x/variadic170.C had passed its dg-error line only by the parser's decline of
 `template <typename A<T::value>::type>` as a type parameter; with the parameter read as clang reads it, the parser now diagnoses the
-unexpanded pack as clang does (`--only` it: own pass 1). The checker's structured bindings stay cpp-props3's (the rules checked, the
-declaration refused: CP331).
+unexpanded pack as clang does (`--only` it: own pass 1). At the branch's head the sample is 118 own passes, none lost: cpp2a/desig29.C's
+`foo({.a=0})` is now diagnosed on its dg-error line (a braced list binds no non-const lvalue reference, [over.ics.list]); the night's
+whole-part record takes it. The checker's structured bindings stay cpp-props3's (the rules checked, the declaration refused: CP331).
 
 ### The switch, prepared (CP240 (b))
 
@@ -5493,11 +5496,12 @@ bin/cppi codegen-check .tmp/cppi/codegen-check --jobs 2           # the oracle t
 | gen-batch over the 82 programs at e6214cd13 and at the branch | 45 and 53 generated, 55 with range-for14 and ucnid-1 after (tables above); 909 s and 1,272 s at one thread, 1.5 GB |
 | `CPPI_ROUTE=ours bin/cppi check --corpus gxx-dg-run --only` range-for14, then ucnid-1 | 1 of 1 pass each |
 | `CPPI_ROUTE=ours bin/cppi check --corpus gxx-dg-run --sample 25` | 45 generated, 44 pass, 1 oracle-text; 22 refused; 1.6 GB |
+| `CPPI_ROUTE=ours bin/cppi check --aot --corpus gxx-dg-run --sample 25` (`CPPI_GO_P=1 CPPI_SHARD=2`) | 45 generated, 44 pass, 1 oracle-text; 1.7 GB |
 | `CPPI_ROUTE=ours bin/cppi check --corpus samples,runtime` | not run: nodes-list passed 2.3 GB (the night's) |
 | `bin/cppi runtime-build` (records mode) | 198 of 198, 1.1 GB, 11 min |
 | `CPPI_CI_CHUNK=5 bin/cppi runtime-ci` | 186 of 199 units read under 1.4 GB; the 13 heaviest past 2.3 GB alone (above) |
 | `bin/cppi codegen-gen`, `--record` | 148 of 149 a0c6ad347's forms, recursion intended; 154 of 154 recorded (the fifth sample's run: its forms only added) |
-| `bin/repr-cpp dg --corpus dg-error --front native --sample 10`; `--only` variadic170 | 117 own passes as recorded, 1 regression; fixed: 1 of 1 |
+| `bin/repr-cpp dg --corpus dg-error --front native --sample 10`; `--only` variadic170; the sample again at the branch's head | 117 own passes as recorded, 1 regression; fixed: 1 of 1; then 118, none lost (cpp2a/desig29.C's `foo({.a=0})` diagnosed on its dg-error line: a list binds no non-const lvalue reference), exit 0 |
 | probes (`.tmp/micro/`): std::pair's default and (const T1&, const T2&) constructors at C++17, the trait chain of `__is_implicitly_default_constructible`, structured bindings over arrays, structs, pairs, std::sort at C++23, std::string from a literal | generate |
 
 ### Slips, scratch
