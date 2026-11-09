@@ -135,6 +135,18 @@
 #                                   simulated by the same rule (test/gate/lanes.ae's view; durations: the main
 #                                   store's passes, else the clean records', GATE_LANES_RECORDS more of them,
 #                                   GATE_LANES_PREFER=clean the records first)
+#        (without --concurrent, since 2026-11-08) the essential memory lane: every step of the plan admitted by its
+#                                   declared :mem-gib against the host's MemAvailable less GATE_LANE_MARGIN_GIB (2),
+#                                   the running steps' declarations not yet taken held back (bin/gate-lane's free mode),
+#                                   then the heavy lock as before; --plan prints its simulated schedule; GATE_MEM_LANE=0
+#                                   none (doc/GATE-SURVEY.md, "As built: the essential memory lane")
+#                                   GTS249 (a): --full --concurrent's lanes take the same free rule (GATE_LANE_RULE=budget:
+#                                   GTS227 (a)'s fixed budget); (b) the clean run keeps the budget until its first run
+#                                   in the lanes (GATE_LANE_RULE=free: the free rule). GTS248 (a), write-ahead: with
+#                                   GATE_LANE_SHARED=1 the free lane's state is the host's, the main checkout's
+#                                   .tmp/gate-lanes (beside the store of passes), shared by concurrent gates, the earlier
+#                                   gate's steps first; off by default until a night has proved the lane
+#                                   (doc/GATE-SURVEY.md, "As built: GTS248, GTS249")
 #        bin/gate [--full] --mem-check  (GTS227 (a)) every step's :mem-gib against the store's passes' and the
 #                                   committed clean records' peaks: exit 1 on one over its declaration by 10%
 #                                   and 0.5 GiB, or a step without one (test/gate/lanes.ae's mem-check)
@@ -432,6 +444,8 @@ fi
 [ -n "$clean" ] && { [ -n "$audit$why$prune" ] && usage; }
 # GTS227 (a): --concurrent with --clean (the clean run in the memory lanes), with --plan (the plan and its lanes); not --only
 [ -n "$concurrent" ] && [ -n "$only" ] && usage
+# GTS249: the lanes' rule is free or budget (checked before the environment: a refusal reads nothing of the checkout)
+case ${GATE_LANE_RULE:-free} in free|budget) ;; *) echo "gate: GATE_LANE_RULE is free or budget, not $GATE_LANE_RULE" >&2; exit 2 ;; esac
 [ -n "$only" ] && { [ -n "$clean" ] && [ -z "$plan_only" ] || usage; }
 [ -z "$costs" ] && { [ "$costs_last" != 5 ] || [ "$costs_fmt" != text ]; } && usage
 [ -n "$costs" ] && { [ -n "$plan_only$why$rerun$audit$prune$clean$pins$concurrent$builds$outside$mem_check" ] && usage; }
@@ -487,6 +501,13 @@ gate_keep_env() {
     GATE_CONCURRENT_HELD|GATE_CONCURRENT_LOCK|GATE_CPU_LOG|GATE_AUDIT_*) return 0 ;;
     # GTS227 (a): the memory lanes' scheduling (never what passes)
     GATE_LANES|GATE_MEM_BUDGET_GIB|GATE_MEM_RESERVE_GIB|GATE_LANE_BIG_GIB|GATE_LANE_POLL) return 0 ;;
+    # (and the essential memory lane's: off with GATE_MEM_LANE=0, its margin below MemAvailable)
+    GATE_MEM_LANE|GATE_LANE_MARGIN_GIB) return 0 ;;
+    # (GTS248 (a): the host's one lane state, on with GATE_LANE_SHARED=1 until a night proves it; GTS249: the lanes'
+    # rule, free or budget, for --concurrent and the clean run)
+    GATE_LANE_SHARED|GATE_LANE_RULE) return 0 ;;
+    # (MemAvailable given: the gate's own tests, with a store of their own, as GATE_NOW)
+    GATE_LANE_MEMAVAIL_KIB) [ -n "${ARBACE_GATE_STORE:-}" ] ;;
     # (and the --plan view's durations: another store, more records of walls, the records first)
     GATE_LANES_STORE|GATE_LANES_RECORDS|GATE_LANES_PREFER) return 0 ;;
     GATE_STEPS|GATE_PROG_UNITS|GATE_JAVAC_PROG_UNITS) [ -n "${ARBACE_GATE_STORE:-}" ] ;;
@@ -868,7 +889,8 @@ clean_launch() {
   # lock held by this run (above) for its whole length
   local lanes_env=()
   [ -n "$lanes" ] && lanes_env=(GATE_LANES=1 GATE_HEAVY_CMD=env GATE_MEM_BUDGET_GIB="$GATE_MEM_BUDGET_GIB"
-                                ${GATE_LANE_BIG_GIB:+GATE_LANE_BIG_GIB="$GATE_LANE_BIG_GIB"} ${GATE_LANE_POLL:+GATE_LANE_POLL="$GATE_LANE_POLL"})
+                                ${GATE_LANE_BIG_GIB:+GATE_LANE_BIG_GIB="$GATE_LANE_BIG_GIB"} ${GATE_LANE_POLL:+GATE_LANE_POLL="$GATE_LANE_POLL"}
+                                ${GATE_LANE_RULE:+GATE_LANE_RULE="$GATE_LANE_RULE"} ${GATE_LANE_MARGIN_GIB:+GATE_LANE_MARGIN_GIB="$GATE_LANE_MARGIN_GIB"})
   # the frozen jar: the main checkout's (pinned: the clone's pins step checks it), else the clone builds it
   frozen=${FROZEN_JAR:-$main/.tmp/oracle-frozen/arbace-for-java-26-v4.jar}
   [ -f "$frozen" ] || frozen=
@@ -950,7 +972,11 @@ clean_record() {
   printf ' :host {:cpus %s :mem-kib %s :kernel "%s"}\n' "$(nproc)" "$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)" "$(uname -r)"
   printf ' :env {:all-parts true :forms-only true :heavy-cmd "%s"}\n' "$GATE_HEAVY_CMD"
   # GTS227 (a): the memory lanes' budget and big step, when the run used them (else serial)
-  [ -n "${GATE_LANES:-}" ] && printf ' :lanes {:budget-gib %s :big-gib %s}\n' "$GATE_MEM_BUDGET_GIB" "${GATE_LANE_BIG_GIB:-16}"
+  # (GTS249: the rule; the free one's margin below MemAvailable in place of the budget)
+  if [ -n "${GATE_LANES:-}" ]; then
+    if [ "$lane_rule" = free ]; then printf ' :lanes {:rule :free :margin-gib %s :big-gib %s}\n' "${GATE_LANE_MARGIN_GIB:-2}" "${GATE_LANE_BIG_GIB:-16}"
+    else printf ' :lanes {:rule :budget :budget-gib %s :big-gib %s}\n' "$GATE_MEM_BUDGET_GIB" "${GATE_LANE_BIG_GIB:-16}"; fi
+  fi
   # GT8.4: the rotated parts (review 181, finding 5): :status :complete (the record checked first, its evidence:
   # rotation-status's period, each slice's covering run, from this commit's clean ancestors), :unchecked
   # (GATE_CLEAN_ROTATION=0, the evidence as found), :none (no part rotates: every part ran whole), :whole (GATE_CLEAN_WHOLE=1)
@@ -1052,6 +1078,15 @@ if [ -n "$concurrent" ] && [ -z "$plan_only" ]; then
 fi
 # (the lanes are --concurrent's alone: a GATE_LANES of the caller's environment does not make an ordinary gate use them)
 [ -n "$lanes" ] || [ -n "${GATE_CLEAN_INNER:-}" ] || unset GATE_LANES
+# the essential memory lane (the user's decision of 2026-11-08; doc/GATE-SURVEY.md, "As built: the essential memory
+# lane"): without --concurrent every step of the plan (the essential chains, the builds, --full's serial steps and the
+# crops' chains beside them) admitted by its declared :mem-gib against the host's MemAvailable less GATE_LANE_MARGIN_GIB
+# (2), the running steps' declarations not yet taken held back (bin/gate-lane's free mode), then the heavy lock as
+# before; GATE_MEM_LANE=0: none (as before 2026-11-08). Not in the clean run (serial, or GTS227 (a)'s lanes)
+mem_lane=
+if [ -z "$lanes" ] && [ -z "${GATE_CLEAN_INNER:-}" ] && [ -z "$clean" ] && [ "${GATE_MEM_LANE:-1}" != 0 ]; then
+  mem_lane=1; export GATE_LANES=free
+fi
 gate_env || { echo "gate: the environment failed" >&2; exit 1; }
 # the clean run itself (GATE_CLEAN_INNER=1, in the clone clean_launch made): passes not read (an empty
 # store, every check run: --rerun), serial, every step under the audit, every part (GTS19 (a)), Java's
@@ -1068,6 +1103,30 @@ if [ -n "${GATE_CLEAN_INNER:-}" ]; then
   else
     unset GATE_LANES
   fi
+fi
+# GTS249 (doc/GATE-SURVEY.md, "As built: GTS248, GTS249"): the lanes' rule. The essential memory lane's is the free one
+# (bin/gate-lane's free mode). --concurrent's too since GTS249 (a) (--full --concurrent: two big steps at once when
+# their declarations fit MemAvailable less GATE_LANE_MARGIN_GIB; GATE_LANE_RULE=budget: GTS227 (a)'s fixed budget, one
+# big step at a time); the clean run's (--clean --concurrent) the budget until its first run in the lanes, GTS249 (b)
+# (GATE_LANE_RULE=free: the free one, its record's :lanes {:rule :free ...})
+lane_rule=
+if [ -n "$mem_lane" ]; then lane_rule=free
+elif [ -n "$lanes" ] || [ "${GATE_LANES:-}" = 1 ]; then
+  if [ -n "$clean" ] || [ -n "${GATE_CLEAN_INNER:-}" ]; then lane_rule=${GATE_LANE_RULE:-budget}; else lane_rule=${GATE_LANE_RULE:-free}; fi
+  [ "$lane_rule" = free ] && export GATE_LANE_MODE=free
+fi
+# GTS248 (a), write-ahead: one lane state for the host, the main checkout's .tmp/gate-lanes beside the store of passes
+# (a store of the tests' own: its own), shared by every gate's free lane (the essential memory lane, --concurrent's),
+# each entry prefixed by its gate's start and PID (GATE_LANE_GATE) so that the earlier gate's steps go first; on with
+# GATE_LANE_SHARED=1, off by default until a night has run the lane (then the default turns to 1 here, and
+# GATE_LANE_SHARED=0 keeps each run's own state, .tmp/gate/lanes, as before). Not the clean run's (a clone of its own)
+unset GATE_LANE_HOST_DIR GATE_LANE_GATE
+lane_state="this run's (.tmp/gate/lanes)"
+if [ "$lane_rule" = free ] && [ "${GATE_LANE_SHARED:-0}" = 1 ] && [ -z "$clean" ] && [ -z "${GATE_CLEAN_INNER:-}" ]; then
+  GATE_LANE_HOST_DIR=$(dirname "$store")/gate-lanes
+  GATE_LANE_GATE=$(printf '%010d%07d' "$(date +%s)" $$)
+  export GATE_LANE_HOST_DIR GATE_LANE_GATE
+  lane_state="the host's ($GATE_LANE_HOST_DIR, GTS248 (a)), as gate $GATE_LANE_GATE"
 fi
 
 # GTS83 (a), review 001's fixes: the stage0 step in a linked worktree (git's common dir another checkout's .git).
@@ -1133,7 +1192,19 @@ if [ -n "$plan_only$why" ]; then
     # GTS227 (a): the lanes the run would use, each step's lane and a simulated schedule (durations: the main store's
     # passes, GATE_LANES_STORE's, else the newest clean record's, the committed ones and GATE_LANES_RECORDS' files, a
     # record of estimates among them; GATE_LANES_PREFER=clean: the records first)
-    if [ -n "$lanes" ]; then
+    # GTS248 (a): where the lane's state is kept
+    [ -n "$lane_rule" ] && echo "   the memory lane's rule: $lane_rule; its state: $lane_state"
+    if [ "$lane_rule" = free ]; then
+      # the essential memory lane (and since GTS249 (a) --concurrent's lanes): the schedule its rule would make with the host's free memory as it is now (each
+      # running step's declaration held whole: the simulation knows no RSS), the same durations
+      read -r -a extra <<< "${GATE_LANES_RECORDS:-}"
+      # (--full without GATE_FULL_PARALLEL: its steps one after another, the crops' chains beside them, as run)
+      fs=; [ -n "$full" ] && [ -n "$mem_lane" ] && [ -z "${GATE_FULL_PARALLEL:-}" ] && fs="serial $(gate_crop_chains | tr '\n' ' ')"
+      ttl=; [ -n "$mem_lane" ] || ttl="the free memory lanes (GTS249 (a), --concurrent)"
+      GATE_LANE_MODE=free GATE_LANES_FULL_SERIAL="$fs" GATE_LANES_TITLE="$ttl" arbace_tool -p "$root/test" -m gate.lanes view "$d" "${GATE_LANES_STORE:-$(main_checkout)/.tmp/gate-pass}" \
+        "$(awk -v k="${GATE_LANE_MEMAVAIL_KIB:-$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)}" -v m="${GATE_LANE_MARGIN_GIB:-2}" 'BEGIN {printf "%.1f", k / 1048576 - m}')" \
+        "${GATE_LANE_BIG_GIB:-16}" "$root"/test/gate/clean-*.edn ${extra[@]+"${extra[@]}"}
+    elif [ -n "$lanes" ]; then
       read -r -a extra <<< "${GATE_LANES_RECORDS:-}"
       arbace_tool -p "$root/test" -m gate.lanes view "$d" "${GATE_LANES_STORE:-$(main_checkout)/.tmp/gate-pass}" \
         "$GATE_MEM_BUDGET_GIB" "${GATE_LANE_BIG_GIB:-16}" "$root"/test/gate/clean-*.edn ${extra[@]+"${extra[@]}"}

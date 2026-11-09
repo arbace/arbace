@@ -1119,3 +1119,96 @@ pyexpat (crops' paths); none in the runtime or the program. Ten std packages (st
 text/template/parse, net/textproto, image/png, net/http/httptest, flag) printed in the full, gofmt and lines layouts by the old and
 the new printer: identical, and the full layout equal to the originals byte for byte; slices, maps, sync/atomic and iter converted
 by the old and new converter: identical forms. The whole runs are the night's (the report lists them).
+
+## 2026-11-08: the essential memory lane (branch `gate-lane`, from next bd33e27cc)
+
+By the user's decision of 2026-11-08, the essential gate's big steps are admitted by a memory lane rather than serialized.
+On both of the nights 2026-11-07 and 11-08, diffcheck's j2g was OOM-killed when diffcheck, java-compiled, suite-aot-essential and
+programs ran at once: peaks 21, 17, 14 and 10 GiB on the 62 GiB host. They are `:heavy :inner`, and the night's gate holds
+the big lock with `GATE_HEAVY_CMD=env`.
+
+Built (doc/GATE-SURVEY.md, "As built: the essential memory lane"):
+- `bin/gate-lane`'s free mode. Each step's `:mem-gib` is set against MemAvailable less 2 GiB. The running steps hold back
+  their declarations less their process trees' RSS. A step is admitted when it fits, or alone. A big step (16 GiB or more)
+  is also admitted when no big step runs. The head big step holds room back when even the free memory cannot hold it. A
+  small step that does not fit holds nothing back.
+- `bin/gate`'s default without `--concurrent` and outside the clean run (`GATE_LANES=free`; `GATE_MEM_LANE=0` off).
+- The runner's `step`: the lane first, then the heavy lock as before. The lane's wait is reported apart, and the summary
+  flags a peak over its declaration.
+- `test/gate/lanes.ae`: `decide-free`, and the free view in `bin/gate --plan`, with a serial `--full` simulated as run,
+  printed against the big steps one at a time and against every step at once.
+
+Alternatives considered:
+- Serializing the big steps (the heavy lock around them whole): the essential checks take about 31 minutes against the
+  lane's 24.
+- GTS227 (a)'s fixed budget with one big step at a time: it cannot run diffcheck and java-compiled together (53 GiB), and
+  it does not see other processes.
+- Holding back the blocked small steps too, as GTS227 (a)'s conservative backfill does: in the simulation it stalls every
+  light chain behind a waiting big step.
+
+Fixed on the way: the runner's sampler. busybox awk stops at a `/proc/PID/stat` that vanished between the glob and its
+read, which lost 611 of 3,848 samples' step trees in main's last gate. It now reads through `cat`, and so does the lane's
+RSS. Proved on samples: `test/gate/lanes-test.bash`, 38 checks (17 new), passing plain and under strace; `bin/gate-tests`; and
+`bin/gate --plan` and `--full --plan`. The essential plan simulates to 0:46 at 54 GiB free, against 0:53 with the big steps
+one at a time and 0:42 at once; `--full` serially to 9:54, against 10:01 and 9:51. The runner's change rekeys every check:
+each runs once on the next night. Proposed: GTS248-GTS251.
+
+## 2026-11-08: GTS248 (a) and GTS249 built, GTS250 (a) and GTS251 (a) recorded (branch `gate-lane2`, from `gate-lane` 9da94ac0e)
+
+Late on 2026-11-08 the user accepted "As built: the essential memory lane"'s four proposals: GTS248 (a), GTS249 (a) for
+`--full --concurrent` and (b) for the clean run, GTS250 (a) and GTS251 (a). The last two need no code. Built as
+write-ahead (doc/GATE-SURVEY.md, "Decided (2026-11-08, the user): GTS248-GTS251" and "As built: GTS248, GTS249"):
+
+- **GTS248 (a)**, `bin/gate-lane`'s free mode with `GATE_LANE_HOST_DIR`. The state is kept for the host, in the main
+  checkout's `.tmp/gate-lanes` beside the store of passes; a store of the tests' own gets its own directory. Each entry is
+  named `GATE-ORDER-NAME.PID`, GATE being `%010d%07d` of the gate's start and its PID (`GATE_LANE_GATE`), so the earlier
+  gate's steps sort first. The host's `events.tsv` carries the gate in a seventh column, and each run keeps its own
+  six-column events. The step is not handed the host's state.
+- **GTS248's switch.** `bin/gate` turns it on with `GATE_LANE_SHARED=1`. It is off by default, by the user's condition,
+  until a night has proved the lane. Turning it on is one line, `${GATE_LANE_SHARED:-0}` becoming `:-1`, plus
+  lanes-test's grep.
+- **GTS249.** `bin/gate`'s `lane_rule`: `--concurrent` is free by default and exports `GATE_LANE_MODE=free` to the
+  runner's unchanged GTS227 (a) branch; `GATE_LANE_RULE=budget` brings back the fixed budget. The clean run stays on the
+  budget by default, and `GATE_LANE_RULE=free` (passed into the clone) switches it. Its record's `:lanes` names
+  `:rule`. `--plan` prints the rule and the state.
+
+Found and fixed on the way, in `gate-lane` itself: a step admitted by the lane inherits `GATE_LANE_MODE=free`,
+`GATE_LANE_DIR` and the other lane variables, because `bin/gate-lane` execs the step. Run as `gate-tests`' step under
+tonight's essential lane, `lanes-test` would have taken its budget cases for the free rule. Reproduced by hand with a
+step's environment: 9 of 38 checks failed. `lanes-test` now unsets the lane variables first.
+
+Also caught by `gate-reads-test` (the whole of `bin/gate-tests` under strace): lanes-test's check that `bin/gate` refuses a
+third `GATE_LANE_RULE` first ran `gate_env`, which hashes the checkout for the gate's key. That read about 6,100
+undeclared files. The refusal now comes before the environment, in 0.01 s, and reads nothing.
+
+Alternatives considered:
+- For the state's place, a variable naming the main checkout directly. Rejected for the store's own directory, which
+  keeps the gate's tests out of the real state by construction.
+- For the order, the gate's start alone. Its PID was added so that two gates started in the same second still sort
+  apart.
+- Changing the runner to pass the host's directory. Rejected: the runner is in every check's key, and the environment
+  needed no runner change, so nothing is rekeyed beyond what `gate-lane` rekeys already.
+
+Checked (light, no gate):
+- `test/gate/lanes-test.bash`: 46 checks, 8 new, passing plain and with a lane step's inherited environment.
+- `bin/gate --plan`: 0:46, unchanged, with either state.
+- `bin/gate --full --plan`: 9:54.
+- `bin/gate --full --concurrent --plan`: 6:22 on the free rule against 6:58 on the budget, at 48.7 GiB free.
+- `--full --clean --concurrent --plan`: 7:02 on the budget, and 6:11 with `GATE_LANE_RULE=free`. That plan declares up
+  to 73 GiB at 52 GiB free, which is GTS255.
+- `bin/gate-tests`: 35 of 36 before the refusal's fix, gate-reads-test failing. After it, `gate-reads-test`, which runs
+  the whole of `bin/gate-tests` under strace, passes in 6 minutes: the canary is seen and every read is declared.
+
+Proposed: GTS252 to GTS255.
+
+## 2026-11-08: GTS252-GTS255 decided, GTS255 (b) built (branch `gate-lane2`, from 2acb2463d)
+
+The user accepted GTS252 (b) now and (a) with the next runner change, GTS253 (a), GTS254 (a) and GTS255 (b), as recommended
+(doc/GATE-SURVEY.md, "Decided (2026-11-08, the user, later): GTS252-GTS255"). GTS252 (a), GTS253 (a) and GTS254 (a) wait (the
+next runner change; the first clean run in the lanes). GTS255 (b) is built ("As built: GTS255 (b)"): `bin/gate-lane` and
+`test/gate/lanes.ae` only, so no key moves. Under `--concurrent` (`GATE_LANES=1`, in the plan the view's title) a big waiter
+must fit ROOM like every other step; the essential lane is unchanged. `GATE_LANE_STRICT=1|0` overrides, for the tests. The
+brief's `GATE_LANE_MODE=free-strict` was not used: the runner tests the mode `= free` and is in every key. Alternatives: a
+fourth mode in gate-lane (rejected, the same reason); strictness from `GATE_LANE_RULE` (rejected, it is bin/gate's, not
+visible to the step). Checked: lanes-test 50 checks (4 new), 0 failed; `bin/gate --full --concurrent --plan` 6:41 at 53.8
+GiB free (non-strict 6:48 at 51.7: free memory moved), peak declared 53 (the java-interp steps, alone).
