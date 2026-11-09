@@ -1,0 +1,592 @@
+# x86-64 assembly as a crop: survey and plan
+
+Status: survey and plan, 2026-11-09, at the user's request (x86-64 assembly a crop of its own, read, eval, AOT and print, the way
+LLVM IR became one: doc/llvm/LLVM-CROP-SURVEY.md is the model). Nothing here is adopted: only this file and a journal entry were
+written; no code under `arbace/`, `go/`, `bin/`, `tools/` or `test/` changed. The decisions are the user's, as proposals AXS1-AXS16
+(§14) and the shared ones AS1-AS8 (§13); the milestones are AX1-AX10 (§12), with two optional ones. A survey of arm64 assembly is
+written at the same time (doc/asm/ARM64-SURVEY.md, branch `asm-arm64-survey`); §13 proposes what the two crops share, so the two
+plans can be merged into one.
+
+Base: branch `asm-amd64-survey` from `mac/next` `7da5badcf`. The work is reading (doc/llvm/LLVM-CROP-SURVEY.md whole, doc/CROPS-SCORE.md,
+test/crops/crops.edn, test/reap/cells.edn, doc/ORACLE-RECORDS-SURVEY.md §3, doc/C23-SURVEY.md's crt and ci, doc/go/GOI-SPEC.md's
+assembly class, `go/arbace/crt/{mem,syscall}.ae`, `tamago/cmd/`'s `cmd/asm` and `cmd/internal/obj/x86`, TamaGo's Go tree's
+`cmd/vendor/golang.org/x/arch/x86/x86asm`) and light probes of seconds each (§3), in the worktree's `.tmp/asm/` (Appendix A): the
+host's GNU as 2.45.1 and llvm-mc 23.1.5 on musl's x86-64 assembly, Intel syntax against AT&T, TamaGo's `go tool asm` on Go's encoding
+tests, a static program assembled, linked and run. No Arbace executable was built, no lock taken, nothing installed, nothing
+downloaded. Sizes of what the host does not hold are marked **to verify**.
+
+Words used throughout:
+
+- **Assembly forms**: assembly text as Arbace forms (§4.2): a file's items (directives, labels, instructions), each instruction an
+  opcode and operands in one vocabulary whatever the syntax it was read from.
+- **The machine level**: an instruction as the machine sees it, opcode and operands resolved (LLVM's `MCInst`, x86asm's `Inst`): what
+  the encoder takes, the decoder gives and the emulator runs. The assembly forms' instructions are this level plus their spelling.
+- **repr/asm**: the bridge between assembly text and assembly forms (`bin/repr-asm read|print|roundtrip`), as repr/c and repr/llvm.
+- **The three syntaxes**: GNU as's AT&T syntax (the default of gas, gcc `-S`, clang `-S`, musl, the Linux kernel), Intel syntax as gas
+  and LLVM accept it (`.intel_syntax noprefix`, gcc `-masm=intel`), and Go's Plan 9 assembler syntax (`cmd/asm`).
+- **x86i**: the evaluator, a user-mode emulator of x86-64 Linux programs over crt's memory and syscall layer (the name is AXS12's).
+- **The CPU**: the host's processor running an executable natively. It is not a toolchain (§9, AXS9).
+- **Own verdict**: a test's verdict that no toolchain made (the user's ruling of 2026-11-07 for LLVM IR, every crop since): an exit
+  status, an expected output written in the test, an encoding or a printed instruction written in the test by its authors.
+
+Contents: Summary · 1 What parity means · 2 The host and prior art · 3 What the probes showed · 4 Read · 5 Print · 6 eval: x86i ·
+7 AOT: Arbace's assembler and linker · 8 The judges · 9 Independence and the oracle tier · 10 The corpora · 11 Layout, row and budget ·
+12 Plan (AX1-AX10) · 13 Shared with arm64 (AS1-AS8) · 14 Proposals (AXS1-AXS16) · 15 What to decide first · 16 Risks · 17 Sources ·
+Appendix A: the scratch.
+
+## Summary
+
+- **Assembly is the bottom of the hub.** Every crop that reaches machine code passes through it (Go's compiler emits Plan 9 listings,
+  clang and gcc emit AT&T, LLVM IR's own build is `llc` to assembly), and the long-term goal (CLAUDE.md: Arbace all the way down to the
+  bare metal ISA, in the way of Go plus TamaGo) needs Arbace to read, run and write machine code itself. Like LLVM IR it is an
+  **intermediate crop**, its own REAP row, counted beside the ten languages.
+- **Much exists as prior art Arbace already holds under BSD**: Go's assembler (`cmd/asm`: lexer, parser, the x86 back end
+  `cmd/internal/obj/x86` with its optab through AVX-512) as Go forms in `tamago/cmd/`; Go's x86 decoder and its three printers (GNU,
+  Intel, Plan 9: `x86asm`, 22,979 lines, AVX-512 from Intel's XED data) in TamaGo's Go tree, a `repr/go` conversion away; Go's ELF reader
+  (`debug/elf`) and ELF writer (`cmd/link/internal/ld/elf.go`). And crt (C's run time) is already a flat 64-bit little-endian address
+  space with the Linux x86-64 syscalls musl makes: x86i's memory and kernel.
+- **Every judge can be an own verdict** (§8). llvm/test's `MC/X86` states the expected encoding of 106,075 instructions and the
+  canonical text of each (`# CHECK: ... encoding: [...]`); Go's `amd64enc.s` states 10,709 (`// 4815674523f1`); 96 error tests state their
+  messages; run programs state their exit status. What has no own verdict (the stdout of a program with no expected output) is judged
+  by the CPU running the executable natively, and per instruction by a **lockstep tracer** (`ptrace` single-step of the native run against
+  x86i's, a Go program of Arbace's own, no toolchain).
+- **The host's assemblers only at the oracle tier**: GNU as 2.45.1 (GPL: run, never read for porting), llvm-mc 23.1.5 (Apache-2.0 with
+  LLVM exception; the same pin as LLVM IR's clang). They already disagree on real code (§3, P2: a jump to a global symbol), so the
+  reference must be named per corpus.
+- **Corpora on the host, offline** (§10): llvm/test's `MC/X86` (632 files, 17 MB, 427,555 lines) with `MC/AsmParser` (162),
+  `MC/ELF` (265), `MC/Disassembler/X86` (187: 13,545 byte strings with their instruction); Go's `cmd/asm` testdata (amd64: 12,252
+  lines, AVX-512: 14,302) and the 67 hand-written amd64 `.s` files in `tamago/goroot` (33,780 lines); musl 1.2.6's 32 x86-64 `.s`/`.S`
+  (711 lines); gcc 15.2.0's `gcc.target/i386` (9,288 files, 3,504 run tests, 470 with inline assembly) and `gcc.target/x86_64` (153,
+  16 `.s`/`.S` ABI tests). To fetch, with the user's OK: binutils 2.45.1's `gas/testsuite` (GPL test data), Go's `x/arch` (`x86.csv`,
+  x86asm's `decode.txt`), Intel XED (Apache-2.0), musl's `libc-test` (MIT).
+- **Plan (§12): AX1-AX10, about 53 to 92 working days**, of which about 11 to 15 are shared with arm64 if §13 is taken (the forms'
+  frame, GNU's directive language, the ELF writer and linker, the emulator's frame, the judges, the row). The first milestone (AX1) is
+  small and measurable: musl's 32 files and `MC/AsmParser`'s x86 subset read, printed back byte for byte (`:full`) and read again to the
+  same forms.
+- **To decide first (§15):** AXS1 (the row, two crops), AS1 (one tool family for both architectures), AXS4 (the instruction table's
+  source), AXS9 (the CPU and the lockstep tracer as judges), AXS7 (AOT's meaning), AXS14 (the fetches).
+
+## 1. What parity means
+
+The crops' rule for an intermediate language (doc/llvm/LLVM-CROP-SURVEY.md §1): the subject is the text itself, any producer's; the
+reference is the machine's own reading and execution of it.
+
+| cell | in Arbace (proposed) | corpus | own verdict | oracle tier (by hand, at a tag) |
+|---|---|---|---|---|
+| **read** | repr/asm `read`: AT&T, Intel, Plan 9 → assembly forms; the assembler's semantic checks (operand kinds, sizes, ranges) as the reader's acceptance | `MC/X86`, `MC/AsmParser`, musl, Go's `.s`, gcc's `-S` packs, binutils' gas tests (fetched) | the forms read again equal; the canonical print equal to the test's stated text (`# CHECK: vaddps ...`); a rejection's message fragment as the error test states it | gas and llvm-mc accept or reject the same files |
+| **eval** | x86i: decode, run user-mode over crt's memory and syscalls; undefined symbols bound to ci's musl (§6.4) | programs with an entry: synthetic programs per instruction family, musl's `.s` under harnesses, gcc's run tests and C's run corpora through gcc `-S` and clang `-S` (packs), Go's leaf `.s` functions (AX9) | exit status (torture's `abort`), expected output in the test; else the CPU's run of the same executable, and the lockstep trace | the executable assembled by gas and linked by ld, run |
+| **AOT** | Arbace's encoder, ELF writer and static linker: an executable, run by the CPU | every run corpus; every encoding test | the stated encodings byte for byte; the run's own verdict | gas's and llvm-mc's objects compared section by section |
+| **print** | repr/asm `print`: canonical in each syntax; `:full` (comments, layout, spellings) | every read corpus | `:full` byte for byte; the print read again equal; AT&T → forms → Intel → forms equal | the printed file assembled by gas to the original's bytes |
+
+linux/amd64 alone for eval and AOT (x86i is user-mode Linux; the box's bare-metal mode later, §16). Read and print take 32-bit and
+16-bit code too (MC's `-32`/`-16` files, `.code32`), the encoder those modes in AX2's second half; x86i runs 64-bit mode only.
+
+**What differs from LLVM IR.** There is no lowering into C: the instructions are the semantics, the machine (the CPU) is present on the
+host, and so an own reference exists for every program the CPU can run. The difficult parts move: the encoder's **choices** (an
+instruction has several encodings; the judge's bytes fix one) and the emulator's **breadth** (about 1,500 mnemonics with AVX-512, each
+with flags, exceptions and corner cases).
+
+## 2. The host and prior art
+
+### 2.1 The host
+
+- GNU Binutils 2.45.1 (`as`, `ld`, `objdump`, `objcopy`; Alpine's `binutils`), GPL-3.0-or-later.
+- LLVM 23.1.5's tools in `/usr/lib/llvm23/bin`: `llvm-mc`, `llvm-objdump`, `llvm-readobj`, `llvm-mca`, `llvm-exegesis`, `llvm-tblgen`,
+  `FileCheck`, `not`, `split-file`; no `ld.lld` (lld is not installed); clang 23.1.5 (LLVM IR's pin, `test/cpp/corpora.edn`).
+- gcc 15.2.0 (emits AT&T, assembled by gas), musl 1.2.6, gdb, `qemu-aarch64` (user mode, arm64's; no `qemu-x86_64`).
+- TamaGo's go1.27.1 (`/root/tamago-go`): `go tool asm`, `compile -S`, `link`; not counted as a host toolchain (doc/CROPS-SCORE.md).
+- The CPU: a Zen 3 server part with SSE4.2, AVX, AVX2, BMI2, FMA, SHA, VAES, **no AVX-512, no AMX, no APX** (`/proc/cpuinfo`). What
+  the CPU lacks, only x86i can run (§8.3).
+
+### 2.2 Prior art (licences checked where on the host; else to verify)
+
+| project | what | relevance | licence | use |
+|---|---|---|---|---|
+| **Go's assembler** `cmd/asm` (`internal/lex`, `asm/parse.go`, `arch`) and `cmd/internal/obj/x86` (`asm6.go`, `avx_optabs.go`, `evex.go`, `obj6.go`) | Plan 9 syntax's reader and the x86 encoder through AVX-512; `obj6.go` inserts prologues and stack checks | the Plan 9 reader as is; the encoder's tables and choices a second view; already Go forms in `tamago/cmd/` (21,562 lines of forms for these two) | BSD-3 (Go's, in LICENSE.md) | reuse (AX9), reference |
+| **x86asm** (`golang.org/x/arch/x86/x86asm`, vendored in TamaGo's `src/cmd/vendor`) | a decoder (tables from `x86.csv`; AVX/AVX2/AVX-512 from XED's data, 2026) with GNU, Intel and Plan 9 printers | x86i's decoder; the disassembler that reads an object back (AOT's own verdict); the three printers as a reference for the canonical prints | BSD-3 | port by conversion (repr/go), AX5 |
+| **`debug/elf`**, `cmd/link/internal/ld/elf.go` | ELF reading; ELF writing for Go's linker | the ELF writer's and reader's shape (relocatable objects are not cmd/link's output: the writer is new) | BSD-3 | reference, reader reused |
+| **LLVM MC** (`lib/MC/MCParser` 608 KB, `lib/MC` 1.9 MB, `Target/X86/AsmParser` 218 KB, `MCTargetDesc` 490 KB, `Disassembler` 129 KB, the `.td` instruction definitions 2.6 MB) | GNU-compatible directive parser, x86 AT&T and Intel parsers, the encoder, ELF writer | the read and encode levels' semantics, rule for rule; the tables via `llvm-tblgen` (AXS4) | Apache-2.0 WITH LLVM-exception (in LICENSE.md) | port where needed, reference |
+| **Intel XED** (`intelxed/xed`) | Intel's encoder/decoder, its datafiles the most complete instruction description | an instruction table's source (AXS4) | Apache-2.0 (to verify) | data, fetch |
+| **Intel SDM**, **AMD APM** | the ISA's specification | the emulator's semantics | proprietary documents | reference only, never copied |
+| **Blink** (`jart/blink`) | a user-mode x86-64 Linux emulator in C, a small JIT, lazy flags | x86i's shape: the closest prior art, permissive | ISC (to verify) | reference, porting allowed |
+| **box64**, **FEX** | x86-64 user-mode on arm64 (dynarec) | binary translation (AX11), syscall layers | MIT (to verify) | reference |
+| **iced**, **Zydis**, **fadec** | encoder/decoder libraries | decode tables, encoder choices | MIT, MIT, BSD-3 (to verify) | reference |
+| **Remill**, **ACL2 x86isa**, **K's x86-64 semantics** | formal or lifted instruction semantics | a second statement of the semantics for flags and corners | Apache-2.0, BSD-3, UIUC/NCSA (to verify) | reference |
+| **GNU binutils** (`gas/config/tc-i386.c`, `opcodes/i386-*`) | the reference assembler | **never read for porting**: GPL, as the Haskell crop's rule (the GPL port `haskell-pp` never entered history); its testsuite as test data only (LLS26 (a)'s rule) | GPL-3.0-or-later | run at the oracle tier; tests as data |
+| **QEMU**, **unicorn**, **Bochs** | emulators | not ported, not read for porting, not a dependency | GPL-2.0, GPL-2.0, LGPL-2.1 | none (qemu-aarch64 is arm64's oracle question) |
+
+### 2.3 What Arbace already has
+
+- **crt** (`go/arbace/crt`, C5): one flat 64-bit little-endian address space of slabs (`Mem`: Text, Rodata, Data, Heap, mmap, a stack
+  at `StackTop`), faults as `SIGSEGV`/`SIGFPE` panics, and `Sys.Syscall`, the Linux x86-64 system calls musl 1.2.6 makes (1,211 lines:
+  read, write, mmap, brk, rt_sigaction, futex for one thread, arch_prctl, exit_group, ... `-ENOSYS` for the rest). Its function
+  addresses are synthetic (`Text + 16 * index`): x86i needs a Text slab holding real bytes and a call gate for C functions (§6.4).
+- **ci and cf2g** (C5, C6): musl as C forms, interpreted and compiled; C's own target (`c/`, x86_64-linux-musl, SysV ABI's layouts in
+  `c/target/abi.edn`): the ABI x86i's bridge needs.
+- **repr/c's preprocessor**: `.S` files are C-preprocessed assembly (musl's, gcc's); the preprocessor is repr/c's, so no `gcc -E`.
+- **Go's toolchain as forms** (`tamago/cmd/`, S9): the 105 packages `compile`, `link` and `asm` build from, byte-identical tools when
+  printed; `cmd/asm` and `cmd/internal/obj/x86` among them.
+- **The classes where assembly stops the other crops**: C's `by-design` (inline assembly, CS3 (a)), the LLVM lowering's `:inline-asm`,
+  goi's "assembly, cgo, go:linkname" (9 programs) and every std package goi runs on its pure-Go fallback. x86i would be the place where
+  each of these runs (§6.5), a cross-crop dividend.
+
+## 3. What the probes showed
+
+All in `.tmp/asm/` (Appendix A), seconds each.
+
+- **P1, gas against llvm-mc on musl** (`musl-1.2.6/src/*/x86_64/*.s`, `.S` preprocessed): 32 files; the `.text` bytes (objcopy) equal on
+  **31 of 32**.
+- **P2, where they differ**: `thread/x86_64/syscall_cp.s`: `jne __cp_cancel` to a global symbol in the same section. gas resolves it
+  as a short jump (`75 24`); llvm-mc emits `jne rel32` with a relocation (a global symbol may be preempted). The two reference assemblers
+  disagree on ordinary code, so the encoder's reference is per corpus (MC's tests: llvm-mc's choices; gcc `-S` output: gas's) and the
+  choice a mode of Arbace's encoder (AXS5).
+- **P3, Intel against AT&T**: the same program in both syntaxes; gas's bytes differ: `mov edx, len` with `len` an equate is a **memory
+  operand** in Intel syntax (`8b 14 25 06 00 00 00`, a load from address 6), where AT&T's `mov $len, %edx` is an immediate. Intel
+  syntax's operand kind depends on the symbol's definition (MASM's rule, `offset` makes it an immediate), so its reader must resolve
+  symbols before it decides; the forms must be the machine level, not the text.
+- **P4, a static program**: AT&T, `as` + `ld -static`, 8,944 bytes, run by the CPU: exit 42, `hello` on stdout. The freestanding run
+  corpus needs no libc.
+- **P5, Go's encoding tests**: `go tool asm` (TamaGo's) assembles `amd64enc.s` (10,709 lines, each with its encoding in a comment,
+  generated by Go's `x86test` against GNU's objdump) in 0.06 s. `amd64enc_extra.s` adds 1,065 lines, `avx512enc/` 17 files, 14,302 lines;
+  `amd64error.s` and `amd64dynlinkerror.s` state errors (`// ERROR "..."`).
+- **P6, `MC/X86`'s shape**: 632 files (620 `.s`); 465 run `llvm-mc -show-encoding`; 462 hold `encoding:` lines, **106,075 of them**;
+  96 are `not llvm-mc` error tests, 380 `error:` lines; 161 select Intel syntax (`-x86-asm-syntax=intel`, `-output-asm-variant=1`,
+  `.intel_syntax`); 110 write objects (`-filetype=obj`, checked by `llvm-readobj` or `llvm-objdump`: oracle-tier tools); 221 are 32-bit.
+  RUN lines: 701 `llvm-mc`, 106 `not`, 34 `FileCheck`, 27 `llvm-objdump`, 11 `llc`, 10 `llvm-readobj`.
+- **P7, `MC/Disassembler/X86`**: 187 files, 327 RUN lines of `--disassemble`, 13,545 byte strings each followed by the instruction it
+  decodes to (`# CHECK:`): the decoder's own verdicts.
+
+## 4. Read
+
+### 4.1 The three syntaxes and what each brings
+
+| syntax | where | grammar | corpus | reuse |
+|---|---|---|---|---|
+| **AT&T** (GNU as) | gas's default; gcc `-S`, clang `-S`, musl, the kernel, glibc | `op src, dst`, size suffixes, `%reg`, `$imm`, `disp(base,index,scale)`; GNU's directive language (sections, symbols, data, `.macro`, `.rept`, `.irp`, `.if`, expressions, `.cfi_*`, `.loc`, `.file`, local labels `1f`/`2b`, `.set`/`=`) | `MC/X86` (459 AT&T), `MC/AsmParser`, `MC/ELF`, musl, gcc's `.s`/`.S` and `-S` packs, binutils' gas tests | LLVM's `AsmParser.cpp` (the directive language) and `X86AsmParser.cpp` (operands), Apache: port rule for rule |
+| **Intel** | `.intel_syntax noprefix`, gcc `-masm=intel` (37 of gcc's i386 tests), LLVM's `-output-asm-variant=1`; MASM's operand rules | `op dst, src`, `dword ptr [base + index*scale + disp]`, symbols as memory unless `offset` (P3) | `MC/X86`'s 161, gcc's 37, the same programs printed in Intel by Arbace (a corpus by translation, AT&T → Intel, §5) | `X86AsmParser.cpp`'s Intel half (`ParseIntelOperand`, its expression state machine) |
+| **Plan 9** (Go) | Go's `.s` files: runtime, crypto, math, `internal/bytealg`, `syscall` | `MOVQ src, dst`, `TEXT ·f(SB), NOSPLIT, $framesize-argsize`, pseudo-registers `SB`, `FP`, `SP`, `PC`, `DATA`/`GLOBL`, `#include "textflag.h"`, the C preprocessor's macros; the assembler rewrites (prologue and stack split by `obj6.go`, `MOVQ $sym` → `LEAQ`, jump sizing) | `tamago/goroot`'s 67 amd64 files (33,780 lines), Go's `cmd/asm` testdata (amd64 12,252 lines, AVX-512 14,302), the error tests | `cmd/asm` and `obj/x86` themselves, already Go forms |
+
+AT&T and Intel are two spellings of one machine language with one directive language: one reader with two operand grammars. Plan 9
+is a different language over the same machine: its text is not one machine instruction per line (the assembler adds instructions and
+chooses forms), its symbols are Go's (`·`, `<>`, ABI0 and ABIInternal), and its object files are Go's (`goobj`), not ELF. Its read is
+its own forms, and its machine level is what `obj/x86` produces (AX9).
+
+### 4.2 The forms (to settle in doc/asm/SPEC.md, AX1)
+
+Proposed (AXS2 (a)), as repr/llvm's are LangRef's items:
+
+```clojure
+(asm/file {:arch :amd64 :syntax :att}
+  (asm/globl memcpy)
+  (asm/type memcpy :function)
+  (asm/label memcpy)
+  (mov {:w 64} (reg rax) (reg rdi))                      ; dst first (the SDM's order), whatever the syntax
+  (cmp {:w 64} (reg rdx) (imm 8))
+  (jc (local 1 :f))
+  (rep-movs {:w 64})
+  (mov {:w 32} (reg edx) (mem {:base rip :disp (sym msg)})) ; Intel's `mov edx, len` when len is data (P3)
+  (asm/section ".rodata")
+  (asm/label msg) (asm/ascii "hello\n")
+  (asm/set len (- . msg)))
+```
+
+- Instructions in the **SDM's operand order** with an explicit width where the mnemonic does not fix it: the forms are the machine
+  level, the same for AT&T and Intel, so a print in the other syntax is free and is a judge (§8.1).
+- The **spelling** (AT&T's suffix or none, `movabs`, Intel's `ptr` sizes, `0x` against decimal, aliases such as `jc`/`jb`/`jnae`, `sal`
+  /`shl`) kept in `:full`'s metadata, not in the forms, as repr/llvm's `:full` (LLS18 (a)) and repr/c's.
+- An explicit **encoding request** where the text makes one (`{disp32}`, `{vex3}`, `{evex}`, `.byte` sequences, `rex64`) kept as a key
+  of the instruction (`{:enc :vex3}`): it changes the bytes.
+- Directives as `asm/` forms one for one with GNU's, macros kept unexpanded in the forms (`asm/macro`, `asm/rept`), expanded by the
+  assembler (AX1 reads them; AX2's assembler expands them as LLVM's `AsmParser` does).
+- Plan 9 forms under `p9/` (`p9/TEXT`, `p9/DATA`, `p9/GLOBL`, instructions by Go's opcode names, `AMOVQ` as `MOVQ`), with a mapping
+  to the machine level only through `obj/x86` (AX9).
+
+### 4.3 The reader's acceptance
+
+LLVM's parser checks operands (an immediate's range, a register's class, the instruction's existence in the mode) while it matches
+(`X86AsmParser::MatchAndEmitInstruction`): acceptance is matching against the instruction table, so read's rejections need AX2's
+table. AX1 reads syntax alone; AX2 adds the match, and with it the 96 error tests' messages (`invalid operand for instruction`,
+`instruction requires: AVX512BW`, ...), each the fragment the test states.
+
+## 5. Print
+
+- **Canonical** in each syntax: AT&T as llvm-mc prints it (`-show-encoding`'s text is the `CHECK` line, so a canonical print of the
+  forms equal to the test's line is the read level's own verdict, §8.1); Intel as llvm-mc's variant 1; Plan 9 as `go tool asm`'s
+  listing.
+- **`:full`**: comments (`#`, `//`, `/* */`, `;` in Intel and Plan 9), blank lines, tabs, the spellings of §4.2, CRLF, printed back
+  byte for byte (LLS18 (a)'s shape). Every read corpus's `:full` is a print check.
+- **Cross-syntax**: AT&T → forms → Intel text → forms equal; both assembled to the same bytes. Cheap and strict (P3 is exactly the bug
+  it catches).
+
+## 6. eval: x86i
+
+### 6.1 The candidates (AXS6)
+
+- (a) **An interpreter of decoded instructions** in Go forms (`go/arbace/x86i`), built by TamaGo's go as a light driver (as `go/arbace/oi`
+  and `go/arbace/scm`), out of every key (`arbace_crop_paths`): decode once per address into the machine level, cache by page with
+  invalidation on writes to code (self-modifying code, JIT tests), run with lazy flags (the result and operands of the last flag-setting
+  instruction, flags computed when read: Blink's and QEMU's technique, here from the SDM).
+- (b) The same with a translation of hot blocks to Go closures (a threaded interpreter): later, behind the same frame, if speed asks.
+- (c) Binary translation of a whole program to Go forms (AX11): AOT's other meaning (AXS7 (b)).
+
+Recommended: (a), (b) only with a measured need.
+
+### 6.2 The machine
+
+- Registers: 16 GPRs, RIP, RFLAGS, segment bases FS and GS (`arch_prctl`), the SSE/AVX file (16 × 256 bits; 32 × 512 and the k masks when
+  AVX-512 is in), MXCSR, x87 (8 × 80 bits, its control and status words, tags), CPUID's answers as data (the feature level, AXS8).
+- Memory: crt's `Mem`, a Text slab with real bytes added (ELF's `PT_LOAD` segments mapped at their addresses), page protections
+  enforced (a store to code faults unless writable), a fault a `SIGSEGV` with its address (crt's `Fault`), alignment faults where the SDM
+  gives them (`movaps`), `#DE` as `SIGFPE`, `ud2` and undefined encodings as `SIGILL`, `int3` as `SIGTRAP`.
+- Floating point: SSE arithmetic as Go's IEEE `float32`/`float64` in round-to-nearest; MXCSR's other rounding modes, DAZ and FTZ by a
+  software path (crt's limbs or a small softfloat); x87's 80-bit arithmetic in software (exact for `+ - * / sqrt`, the conversions, the
+  compares); x87's transcendental instructions (`fsin`, `fyl2x`, `f2xm1`, `fpatan`) are implemented to Intel's documented accuracy, not
+  bit for bit: their results differ between Intel and AMD parts, a class (`x87-transcendental`, judged by the test's own tolerance where
+  it has one, AXS10).
+- Kernel: crt's `Sys.Syscall` for the `syscall` instruction (rax and the six argument registers), extended where programs need it
+  (`clone` for threads later, `rt_sigreturn` and signal frames as the kernel builds them, `vdso` absent: musl falls back to the syscall).
+- Start: the kernel's process start (an ELF loader: `PT_LOAD`, `PT_INTERP` refused (static only, AXS11), `PT_TLS`, the stack with argc,
+  argv, envp and auxv: `AT_PHDR`, `AT_ENTRY`, `AT_PAGESZ`, `AT_RANDOM`, `AT_HWCAP`).
+
+### 6.3 Breadth, in order
+
+1. The integer ISA of x86-64-v1 (about 300 mnemonics with their flags), `syscall`, the string instructions with `rep`, `cmpxchg`, `xadd`,
+   `lock` (one thread), `cpuid`, `rdtsc` (a counter), `rdrand` (crt's `getrandom`).
+2. SSE and SSE2 (the baseline every x86-64 program may use: gcc's `-O2` float code), x87 (musl's `long double` math is x87 `.s`).
+3. SSE3 to SSE4.2, AVX, AVX2, BMI1/2, FMA, F16C, AES-NI, SHA, VAES, PCLMUL (x86-64-v3 and the CPU's extras: everything the CPU can also
+   run, so everything the lockstep judge covers).
+4. AVX-512 (F, BW, DQ, VL, ...), AVX10, AMX, APX: only x86i can run them on this host (§8.3); read, print and encode come first.
+
+### 6.4 The bridge to C (AXS13)
+
+A run corpus program calls libc. Two ways, both proposed, in order:
+
+- **Bound to ci's musl** (eval): an undefined symbol of the program (`printf`, `malloc`) is bound to the C forms' function of ci's musl;
+  a call from x86i to such an address is a call gate: the SysV ABI's arguments read from the registers and the stack (`c/target/abi.edn`'s
+  classification), ci's function run on the same `Mem`, its result put back in rax/xmm0. A C function pointer called back into assembly
+  (`qsort`'s comparator) goes the other way. Both share crt's address space, so pointers need no translation. This is the cheap way to
+  run gcc's `-S` output of the run corpora, and the way C's `by-design` inline assembly and goi's assembly class can run (§6.5).
+- **Assembled musl** (AOT, and eval's second level): musl's C compiled to assembly by clang `-S` at the oracle tier (a pack, §9), its 32
+  `.s` files as written, all assembled by Arbace into a `libc.a` of Arbace's making; the program linked statically against it; then x86i
+  and the CPU run the same executable, bit for bit.
+
+### 6.5 What the other crops gain
+
+- C and C++: inline assembly (`asm volatile`, gcc's extended asm with its constraints) run by x86i on ci's memory: the operands bound by the
+  constraint letters (`r`, `m`, `a`, `=&r`, ...), the template read by repr/asm. C's `by-design` class for inline assembly shrinks (470 of
+  gcc's i386 tests hold inline assembly; 5 programs of C's check fail on `known asm`).
+- LLVM IR: the lowering's `:inline-asm` refusals, by the same bridge.
+- Go: goi's assembly class (9 programs) and the leaf functions of std's `.s` (`crypto/*`, `math/big`, `internal/bytealg`): called from goi
+  by ABI0 (arguments on the stack at `FP`) or ABIInternal (registers), x86i running the machine code `obj/x86` makes from the Plan 9
+  source. Leaf `NOSPLIT` functions with no call into Go first; the runtime's own assembly (`g`, stack switching) never (AX9).
+
+## 7. AOT: Arbace's assembler and linker
+
+### 7.1 What AOT means here (AXS7)
+
+- (a) **Native**: the forms encoded to machine code by Arbace's encoder, written as an ELF64 relocatable object by Arbace's ELF writer,
+  linked statically by Arbace's linker into an executable, run by the CPU. The level the brief names, and the one no other crop has: the
+  bytes are Arbace's.
+- (b) **Translated to Go**: the program's instructions translated to Go forms over x86i's machine state (binary translation), built by
+  TamaGo's go with cf2g's musl: the other crops' meaning of AOT, and the one that runs on an arm64 host and in the box.
+
+Recommended: (a) for v1, (b) as the optional AX11.
+
+### 7.2 The encoder
+
+- The table of instruction forms (opcode, operand kinds, encoding: legacy prefix, REX, VEX, EVEX, map, ModRM, immediate sizes) from one
+  source (AXS4), and the **choices** where several encodings exist: the shortest displacement and immediate, the register-register
+  direction (`89` against `8b`), VEX2 against VEX3, `mov $imm` as `c7` or `b8` (movabs), jumps by relaxation to a fixed point (short
+  where the target is in range, long for an undefined or preemptible symbol: P2's case decides the reference per corpus, AXS5).
+- 16- and 32-bit modes (`.code16`, `.code32`, MC's `-32`/`-16` files, 221 files) for encoding only.
+- Fixups and relocations: `R_X86_64_64`, `PC32`, `PLT32`, `GOTPCREL`, `GOTPCRELX`/`REX_GOTPCRELX` (with the linker's relaxation), `32`,
+  `32S`, `TPOFF32`, `GOTTPOFF`, `TLSGD`/`TLSLD` (later), `SIZE32/64`.
+
+### 7.3 The ELF writer and the linker
+
+- **Writer**: ELF64 relocatable objects: sections and their flags (`.text`, `.data`, `.bss`, `.rodata`, comdat groups, `.note.GNU-stack`),
+  symbols (binding, visibility, type, size), `.rela` sections, `.eh_frame` from the `.cfi_*` directives (CIE/FDE as GNU writes them),
+  `.debug_line` from `.loc`/`.file` (later). Shared with arm64 (§13).
+- **Linker**: static executables (`ET_EXEC`, then static PIE), the sections merged by a fixed script (ld's default for the static case),
+  relocations applied, `_start` from musl's `crt1` (assembled by Arbace), `PT_TLS`, archives pulled member by member as ld does.
+  Dynamic linking is out of v1 (AXS11).
+- **Reader**: `debug/elf` (Go's, in `tamago/goroot` as forms) to read objects back; x86asm to disassemble them.
+
+## 8. The judges
+
+Every judge is an own verdict but the oracle tier's (§9).
+
+### 8.1 read and print
+
+- The forms read, printed (canonical and `:full`), read again: equal; `:full` byte for byte.
+- `MC/X86`'s `CHECK` lines: the canonical print of an instruction equal to the text the test states (`-show-encoding`'s text),
+  normalized as FileCheck does (blanks collapsed; `{{.*}}` patterns honoured or the line not used: LL9a's rule for lli's tests).
+- Error tests (`not llvm-mc`, Go's `// ERROR`): rejected, with the stated fragment.
+- Cross-syntax (§5): AT&T and Intel to the same forms.
+- Disassembler tests (P7): the byte string decoded by x86i's decoder, printed, equal to the stated instruction (a read-level check of the
+  decoder, beside: it judges the machine level, not text → forms).
+
+### 8.2 AOT
+
+- The encodings: each instruction's bytes equal the test's `encoding: [...]` (MC) or the comment's hex (Go's `amd64enc.s`, through the
+  Plan 9 → machine-level map). 106,075 + 10,709 + the AVX-512 files' own verdicts with no tool run.
+- The object read back: Arbace's ELF reader and x86asm's decoder give back the forms' machine level (a round trip through bytes).
+- The executable run by the CPU: its own verdict (exit status, stated output).
+
+### 8.3 eval
+
+- The program's own verdict (exit 0 and no `abort`, the stated output: gcc's `dg-output`, musl's libc-test's `t_status`).
+- Where none: **the CPU's run** of the same executable (Arbace-assembled, AOT's): stdout, stderr and status equal (AXS9).
+- **Lockstep** (AXS9): a tracer of Arbace's own (Go, `CGO_ENABLED=0`, `syscall.PtraceSingleStep` and `PtraceGetRegs`; a `tools/` program
+  built by TamaGo's go) runs the executable natively one instruction at a time and compares the registers (and the flags, masking those
+  the SDM leaves undefined per instruction) with x86i's after each instruction; the first divergence names the instruction. The strictest
+  judge the row can have, and no toolchain in it. Syscalls are stepped over and their results fed to x86i (a recorded kernel), so the two
+  runs see the same world.
+- What the CPU cannot run (AVX-512, AMX, APX on this host): the own verdicts alone, and the encodings; the lockstep at the oracle tier on
+  a host that has them, or Intel's SDE (proprietary, by hand) never.
+
+## 9. Independence and the oracle tier
+
+| stage | pipeline (check time) | judge (check time) | score (proposed) |
+|---|---|---|---|
+| read | repr/asm, Arbace's alone; inputs hand-written (MC, Go, musl, gas tests: 1) or made by gcc/clang `-S` and committed as packs (0.5 for those cases) | own verdicts | case-weighted, about 0.85 to 0.95 |
+| eval | x86i, crt, ci's musl | own verdicts; the CPU and the lockstep (AXS9 (a): 1) | 1 for hand-written inputs, 0.5 for packed `-S` inputs |
+| AOT | Arbace's encoder, ELF writer, linker; musl's asm from a pack (0.5) or freestanding programs (1) | own verdicts, the CPU | as eval |
+| print | repr/asm | `:full` bytes, the forms | 1 |
+
+**The oracle tier** (`:phase :oracle`, `bin/gate --oracle`; doc/ORACLE-RECORDS-SURVEY.md's design): the host `:binutils` (gas, ld,
+objdump; a new host id beside `:gcc`) and `:llvm` (llvm-mc, llvm-objdump, llvm-readobj), by hand at a tag:
+- packs (`test/asm/records/KIND-CORPUS.tsv`, the bodies in `.tmp/oracle-packs/`): `asm-amd64-gcc-S` (gcc `-O0`/`-O2 -S` of the C run
+  corpora and of `gcc.target/i386`'s run tests: inputs, GPL test data), `asm-amd64-clang-S` (clang `-S` of the same and of LLVM IR's
+  pack rt: inputs), `asm-amd64-musl-S` (clang `-S` of musl's C: AOT's libc), `asm-amd64-gas-obj` and `asm-amd64-mc-obj` (the objects
+  and disassembly of every read corpus by each reference: compared at the oracle tier only);
+- steps `asm-amd64-live` (gas and llvm-mc on the corpora against Arbace's objects, section by section, relocations by symbol) and
+  `asm-amd64-records-verify` (the packs remade every 25th entry, ORS7 (a)'s crossed pair).
+
+No check-time step runs `as`, `ld`, `objdump`, `llvm-mc` or `gcc`. TamaGo's `go tool asm` is not a host toolchain (doc/CROPS-SCORE.md), so
+Plan 9's encodings may also be compared with it live, as Go's judge is gc (CSP2); proposed only beside the own verdicts (AXS15).
+
+## 10. The corpora
+
+| corpus | where (offline) | size | levels | own verdict | licence (as data) |
+|---|---|---:|---|---|---|
+| **llvm/test `MC/X86`** | the pinned llvm-project 23.1.5 tarball (`.tmp/llvm/`, 179 MB; 23.1.4's extracted `llvm/test`) | 632 files, 17 MB, 427,555 lines; 106,075 encodings; 96 error tests; 161 Intel; 221 32-bit | read, print, AOT (encodings) | encodings, CHECK text, errors | Apache-2.0 WITH LLVM-exception |
+| `MC/AsmParser` (x86-gated) | same | 162 files, 215 KB, 4,421 lines | read, print (the directive language) | CHECK text | same |
+| `MC/ELF` | same | 265 files, 547 KB | AOT (objects: CHECK lines of llvm-readobj's output, a judge only where the test states fields) | partial | same |
+| `MC/Disassembler/X86` | same | 187 files, 1.8 MB, 13,545 byte strings | the decoder (§8.1) | stated instruction | same |
+| `tools/llvm-objdump/X86` | same | 90 files, 278 KB | the decoder, ELF reading | partial | same |
+| **Go's `cmd/asm` testdata** | `/root/tamago-go/src/cmd/asm/internal/asm/testdata` | amd64: 5 files, 12,252 lines; `avx512enc/`: 17 files, 14,302 lines; 386: 2 files | read, print, AOT (Plan 9) | encodings, `// ERROR` | BSD-3 |
+| **Go's amd64 `.s`** | `tamago/goroot` (in the checkout), TamaGo's `src` | 67 files, 33,780 lines (TamaGo's tree: 109 amd64 `.s` with cmd's) | read, print; eval of leaf functions (AX9) | their packages' Go tests | BSD-3 |
+| **musl 1.2.6's x86-64 assembly** | `.tmp/c1/musl/musl-1.2.6.tar.gz` | 32 `.s`/`.S`, 711 lines; 18 `.c` with inline assembly | read, print, eval, AOT | libc-test (fetch) or harnesses | MIT |
+| **gcc 15.2.0 `gcc.target/i386`** | `.tmp/c1/gcc/gcc-15.2.0.tar.xz` (101 MB) | 9,288 files, 14 MB; 3,504 `dg-do run` (1,633 without AVX-512/AMX/APX/AVX10/`-m32`); 470 with inline assembly; 4,234 `scan-assembler`; 114 `dg-do assemble`; 37 `-masm=intel` | eval, AOT via the `-S` pack; inline assembly via ci (§6.5) | exit status (`abort`) | GPL-3.0-or-later (test data, LLS26 (a)'s rule) |
+| `gcc.target/x86_64` | same | 153 files; 16 `.s`/`.S` (the ABI tests' callers in assembly) | eval (ABI bridge) | exit status | same |
+| **C's run corpora through gcc/clang `-S`** | packs (§9) from C's pinned lists | 1,532 torture execute programs × levels, C's other run corpora | eval, AOT | exit status | GPL (gcc's tests) |
+| **LLVM IR's pack rt through `llc`/clang `-S`** | pack from `test/llvm/rt-builds.tsv` | 257 modules | read, eval where a `main` | as LLVM's | as LLVM's |
+| **synthetic programs** by instruction family | generated (a generator committed, as LLVM's GT8.6) | about 300 to 600 programs (each family's instructions over edge values, results printed by `write`) | all four | the CPU and lockstep | Arbace's |
+
+**To fetch** (the user's OK, by pin; none needed before AX2):
+- **binutils 2.45.1** (`binutils-2.45.1.tar.xz`, about 28 MB, to verify): `gas/testsuite/gas/i386` (about 3,000 files with `.d` expected
+  dumps: own verdicts as objdump's text, to verify). GPL test data; **tc-i386.c and opcodes/ never read**.
+- **Go's `x/arch`** at the revision TamaGo's vendor names (`x86/x86.csv`, x86asm's `testdata/decode.txt`: about 50,000 decodings, to verify;
+  `x86/x86spec`): BSD-3.
+- **Intel XED** (if AXS4 (c)): its `datafiles/`, Apache-2.0.
+- **musl's libc-test** (MIT): eval's harness for musl's `.s` functions (`string`, `math` long double, `setjmp`, `fenv`).
+
+## 11. Layout, row and budget
+
+### 11.1 Layout (AXS3, with §13's sharing)
+
+| piece | proposed |
+|---|---|
+| reader, printer | `arbace.repr.asm` (`arbace/repr/asm{.ae,/}`): `lex`, `gnu` (the directive language, shared), `expr`, `full`, `print`; `amd64/{att,intel,plan9}`; arm64's beside |
+| table, encoder, assembler | `arbace.asm.amd64.{table,encode,match,relax}`; `arbace.asm.assemble` (sections, fixups, shared) |
+| ELF writer, reader, linker | `arbace.asm.elf`, `arbace.asm.link` (shared; the per-architecture relocations in `arbace.asm.amd64.reloc`) |
+| emulator | `go/arbace/x86i` (Go forms, hand-written, a light driver built alone by TamaGo's go), the frame `go/arbace/emu` (shared: loader, memory over crt, syscalls, the call gate, the trace) |
+| decoder | `go/arbace/x86i/x86asm` (x86asm converted by repr/go, BSD-3, its origin in doc/ARBACE.md, LICENSE.md's Go section) |
+| the tracer | `tools/asmtrace` (Go, ptrace, shared) |
+| check, judges | `arbace.asm.check` (shared), `test/asm/` (`corpora.edn`, `check-*-linux-amd64.edn`, `divergences{,-read,-aot,-print}.edn`, `controls.edn`, `records/`) |
+| commands | `bin/repr-asm read|print|roundtrip|check`, `bin/x86i run|check|check --aot|trace|divergences`, `bin/asm-ld` (or `bin/repr-asm link`); Makefile `asm-*` |
+| spec | `doc/asm/SPEC.md` (the forms, both architectures), `doc/asm/AMD64.md` (the machine, the encoder, x86i) |
+
+All of it in `arbace_crop_paths` (evaluated from the checkout, out of every key) until an embedding is decided (as LLS16).
+
+### 11.2 The row
+
+`test/reap/cells.edn` gains `:asm-amd64` (AXS1) with four cells as §1, an **intermediate row** printed after LLVM's; `test/crops/crops.edn`
+its crop (`:steps #"^(asm-amd64|x86i)-"`, controls by family); `test/crops/independence.edn` its five stages. The gate's fragment
+`test/gate/crops/asm-amd64.edn` (GT9's way), `:mem-gib` declared, essential at most 3 GiB.
+
+### 11.3 The budget (AXS16)
+
+GT8's crop share is about 35 minutes nightly and 2.4 hours clean. Proposed: **half a share** (as LLS17 for LLVM IR), the encodings and
+read checks being fast (P5: Go's 10,709 lines in 0.06 s by gc's assembler; Arbace's to measure, expect 10 to 50 times slower), the runs
+the cost: essential about 30 s (AX1's files, a few hundred encodings, three synthetic programs on x86i, one lockstep); nightly the whole
+`MC/X86` and Go's tests (estimate a few minutes), the run corpora by rotation; clean the rest.
+
+## 12. Plan (AX1-AX10)
+
+Working days, as the other surveys give them; each milestone ends with its check green and its records. Days in **[S]** are shared
+with arm64 if §13 is adopted (counted once across the two plans; here in full).
+
+| milestone | content | exit criteria (measurable) | days |
+|---|---|---|---:|
+| **AX1** read and print, AT&T | `doc/asm/SPEC.md` [S]; `test/asm/corpora.edn`; the lexer and GNU's directive language [S]; AT&T operands; `:full`; `bin/repr-asm read|print|roundtrip` | **musl's 32 files and `MC/AsmParser`'s 162 read, printed `:full` byte for byte, read again equal**; then `MC/X86`'s AT&T files (459) at the same levels, the rest classed | 4-7 [S 2] |
+| **AX2** the table and the encoder | the instruction table (AXS4); matching (acceptance, the error messages); encoding with LLVM's choices and gas's (AXS5); relaxation; 16/32-bit modes | **`MC/X86`'s 106,075 stated encodings and 96 error tests** equal or classed; the CHECK text printed equal | 8-14 |
+| **AX3** Intel syntax | Intel's operand grammar and MASM's symbol rule (P3); the Intel print | `MC/X86`'s 161 Intel files at AX1's and AX2's levels; the cross-syntax judge over every AT&T file | 3-5 |
+| **AX4** objects and the linker | ELF64 writer (symbols, relocations, `.eh_frame` from CFI) [S]; static linker [S]; Arbace's reader back (debug/elf); x86asm converted (the decoder) | musl's 32 objects read back to their forms; P4's program and the first synthetic programs assembled, linked, **run by the CPU** with their own verdicts; `MC/Disassembler/X86`'s 13,545 decodings | 6-10 [S 4] |
+| **AX5** x86i, the integer machine | the frame (loader, Mem with real Text, syscalls, signals) [S]; x86-64-v1's integer ISA, SSE2, lazy flags; the tracer [S] | the synthetic integer and SSE2 programs pass at x86i, **lockstep-equal to the CPU**; freestanding programs from AX4 | 8-14 [S 4] |
+| **AX6** the bridge and the run corpora | the call gate to ci's musl (SysV); the packs `asm-amd64-gcc-S`, `-clang-S` (oracle tier, by hand); x87 | C's torture execute programs at `-O0` and `-O2` through gcc's `-S`, run by x86i with ci's musl: none failing, each non-pass classed; gcc's 16 x86_64 ABI tests | 5-8 |
+| **AX7** AOT whole | musl assembled by Arbace from `asm-amd64-musl-S` plus its `.s` (`libc.a`); the run corpora linked statically and run by the CPU; x86i on the same executables | the run corpora at AOT: own verdicts; x86i's run equal to the CPU's on every one | 4-7 |
+| **AX8** the vector ISA | SSE3-SSE4.2, AVX, AVX2, BMI, FMA, F16C, AES, SHA, PCLMUL in x86i; MXCSR's modes; x87 complete | `gcc.target/i386`'s run tests within the CPU's features (1,633 candidates; through the `-S` pack) at eval and AOT; lockstep on the synthetic vector programs | 8-15 |
+| **AX9** Plan 9 | Go's syntax read into `p9/` forms and printed (`:full`); `obj/x86` from `tamago/cmd/` as the machine level; leaf functions of std's `.s` run by x86i from goi (ABI0) | Go's amd64 testdata's encodings equal; the 67 `.s` files round-trip; `math`, `internal/bytealg` and one `crypto` package's tests in goi on their assembly | 5-9 |
+| **AX10** the row | `cells.edn`, classes, controls (GTS81 (a): a case judged against another's reference must fail, per family), steps (`:parts`), Makefile, `crops.edn`, `independence.edn`, the budget measured (`bin/gate --costs`) [S 1] | `bin/reap`: the four cells checked, none failing; `bin/crops-score --crop asm-amd64` printed | 2-3 |
+| *AX11* (optional) translation to Go | x86-64 → Go forms (blocks, x86i's state), cf2g's musl: AOT on any host, the box, arm64 | AX7's corpora equal | 10-20 |
+| *AX12* (optional) AVX-512 and beyond | EVEX in x86i, masks, AVX10, APX, AMX: judged by own verdicts alone on this host | gcc's AVX-512 run tests' own verdicts | 8-14 |
+
+**Total without AX11 and AX12: about 53 to 92 working days, of which about 11 to 15 [S]** (and the shared work's other half lands in
+arm64's plan). For scale: LLVM IR's LL1-LL9 31 to 52, with its reader and lowering in hand; the surveys have run under their estimates.
+The least known are AX2's table (its source decides a week either way) and AX8's breadth. Re-estimate at AX2's end.
+
+**Sonnet and Opus** (the user's split): Sonnet for AX1's grammar and `:full`, AX3, AX4's writer, AX6's packs and classes, AX9's
+conversion, AX10. Opus for the table and the encoder's choices (AX2), the lazy flags and the x87 (AX5, AX6), the call gate (AX6), the
+vector semantics (AX8), the lockstep's undefined-flags masks.
+
+**Re-seed needs**: none until an embedding (§11.1).
+
+## 13. Shared with arm64 (AS1-AS8)
+
+The two instruction sets share nothing at the machine level, and nearly everything around it. Proposed for both surveys to adopt, so
+the two plans merge into one with a common trunk (call it AS0, about 15 to 25 days, built once) and two branches:
+
+| shared piece | what | where |
+|---|---|---|
+| **AS1 one tool family** | `bin/repr-asm --arch amd64|arm64`, one namespace tree `arbace.repr.asm.*` with per-architecture parts, one spec `doc/asm/SPEC.md`; the evaluators `bin/x86i` and `bin/a64i` (or one `bin/asmi --arch`) over one frame | §11.1 |
+| **AS2 the forms' frame** | `asm/file` with `{:arch :syntax}`; directives as `asm/` forms (the same GNU directive set both architectures use: sections, symbols, data, macros, `.cfi_*`, expressions, local labels); instructions as `(OPCODE {attrs} OPERANDS...)` in each architecture's vendor manual's operand order (the SDM's dst-first, Arm's ARM dst-first); operand forms `reg`, `imm`, `mem`, `sym`, `local` with architecture-specific keys; `:full`'s metadata layout | §4.2 |
+| **AS3 GNU's directive language and expressions** | one reader for both (gas's language is the same on every target, with a few per-target directives: `.code32`, `.intel_syntax` for x86; `.inst`, `.arch_extension`, `.xword` for arm64); the expression evaluator and relocation specifiers (`@PLT`, `@GOTPCREL` for x86; `:lo12:`, `:got:` for arm64) | §4.1 |
+| **AS4 the assembler's driver** | sections, the symbol table, fixups, relaxation to a fixed point, CFI → `.eh_frame` (the CIE/FDE writer; only the register numbering and the initial instructions differ), `.loc` → `.debug_line` | §7.2 |
+| **AS5 ELF writer, reader and static linker** | ELF64 for `EM_X86_64` and `EM_AARCH64`: the writer, `debug/elf` as the reader, the linker with per-architecture relocation application (x86's `R_X86_64_*`, arm64's `R_AARCH64_*` with veneers) | §7.3 |
+| **AS6 the emulator's frame** | `go/arbace/emu`: the ELF loader and the process start (stack, auxv), memory over crt's `Mem` with real Text and protections, the decoded-instruction cache with invalidation, the syscall layer (crt's `Sys`, with the per-architecture numbering: arm64 Linux's generic table, `svc #0`, x8 and x0-x5), signals and their frames, the call gate to ci's musl (ABI per architecture: SysV x86-64, AAPCS64), the trace format | §6 |
+| **AS7 the judges** | the own verdicts' readers (llvm/test's `CHECK`/`encoding:` lines and FileCheck's blank rule; Go's `// hex` and `// ERROR`; gas's `.d` files if fetched), the cross-check by the CPU, the lockstep tracer (`tools/asmtrace`: `PTRACE_SINGLESTEP` and the regsets, amd64 here, arm64 on the Mac VM's Linux or by KVM), the controls, `arbace.asm.check`; the oracle tier's packs by one recipe (`asm-ARCH-KIND-CORPUS`) | §8, §9 |
+| **AS8 the row's shape** | two intermediate rows `:asm-amd64` and `:asm-arm64` (AXS1 (a)), one GT9 fragment each, one budget split between them | §11 |
+
+What is **not** shared: the instruction tables, the encoders, the decoders (x86asm for amd64; Go's `x/arch/arm64/arm64asm` or LLVM's for
+arm64), Intel syntax and Plan 9's x86 half (`obj/x86` against `obj/arm64`), the machines' semantics, the floating-point corners (x87 is
+amd64's alone). Plan 9 is shared as a reader (one `p9/` grammar, `cmd/asm`'s lexer and parser are architecture-generic) and split at
+`obj/x86` and `obj/arm64`.
+
+The order across the two plans: AS0's trunk first (AX1's `[S]` part, AX4's, AX5's frame, AX10's), each architecture's AX2 (encoder)
+right after; the amd64 branch can run eval natively from day one (the CPU on this host), the arm64 branch on the Mac VM or under
+`qemu-aarch64` at the oracle tier (arm64's survey decides).
+
+## 14. Proposals (AXS1-AXS16)
+
+Each with options, the recommended one named.
+
+- **AXS1 The row.** (a) two intermediate crops `:asm-amd64` and `:asm-arm64`, each its own REAP row, scored apart (their ISAs share no
+  cases), printed after LLVM's; (b) one crop `:asm` with both architectures' cases in one row; (c) a part of C's row. *Recommended:
+  (a)*: completeness and independence differ by architecture (the CPU judges amd64 here, not arm64).
+- **AXS2 The forms.** (a) the machine level in the SDM's operand order with the spelling in `:full`'s metadata, one vocabulary for AT&T
+  and Intel (§4.2); (b) each syntax its own forms (AT&T's order and suffixes as written). *Recommended: (a)*: P3 shows the text is not the
+  instruction; (b) makes Intel and AT&T two crops' worth of forms.
+- **AXS3 The layout.** (a) §11.1 (`arbace.repr.asm`, `arbace.asm.*`, `go/arbace/x86i` on `go/arbace/emu`, `test/asm/`, `doc/asm/`);
+  (b) everything under one `arbace/asm/` namespace including the reader. *Recommended: (a)*, the crops' pattern (repr/ the bridge).
+- **AXS4 The instruction table's source.** (a) LLVM's X86 `.td` files through the host's `llvm-tblgen --dump-json`, filtered and
+  committed as data once at the oracle tier (Apache-2.0 WITH LLVM-exception), so the matcher's acceptance and the encoder's choices are
+  MC's, the judge's; (b) Go's `obj/x86` optab (BSD, already forms; its choices are Go's, its coverage misses system instructions and
+  some legacy forms); (c) Intel XED's datafiles (fetch, Apache-2.0; the most complete, its choices XED's); (d) Arbace's own from the SDM
+  by hand. *Recommended: (a)*, (c) as the semantics' cross-check if fetched; (b) for Plan 9 only (AX9).
+- **AXS5 The encoder's choices.** (a) a mode per reference (`:llvm`, `:gnu`), MC's corpora judged in `:llvm`, gcc `-S`'s in `:gnu`,
+  every difference listed by rule (P2's jump to a global, ...); (b) LLVM's alone, gas's differences classed. *Recommended: (a)*, the GNU
+  rules written from gas's observed output only (never its source).
+- **AXS6 eval's route.** (a) an interpreter of decoded instructions with lazy flags (§6.1); (b) a threaded interpreter at once; (c) binary
+  translation as eval. *Recommended: (a)*.
+- **AXS7 AOT's meaning.** (a) native: Arbace's encoder, ELF and linker, run by the CPU; (b) translated to Go forms (AX11). *Recommended:
+  (a)* for v1, (b) optional: it is what runs amd64 code on arm64 and in the box.
+- **AXS8 x86i's feature level (CPUID).** (a) x86-64-v3 plus the CPU's extras (AES, SHA, VAES, PCLMUL), so the lockstep covers every
+  instruction x86i claims; AVX-512 off until AX12; (b) v1 only (SSE2), the rest refused; (c) everything at once. *Recommended: (a)*,
+  reached through (b) in AX5.
+- **AXS9 The CPU and the lockstep as judges.** (a) the CPU running Arbace's executable is not a toolchain: its run and the lockstep trace
+  count as own judges (1), recorded in doc/CROPS-SCORE.md as a ruling beside TamaGo's go; (b) they count 0.5 (a machine Arbace did not
+  make); (c) not judges, own verdicts only. *Recommended: (a)*: every crop runs on the CPU; it is the subject's machine, not a tool.
+- **AXS10 Floating-point corners.** (a) SSE bit-exact (IEEE), x87 arithmetic bit-exact in software, x87 transcendentals to the documented
+  accuracy with a class `x87-transcendental` where the CPU's bits differ; (b) x87 refused. *Recommended: (a)*: musl's `long double`
+  math is x87.
+- **AXS11 Linking.** (a) static only in v1 (`ET_EXEC`, then static PIE), dynamic (`PT_INTERP`, PLT/GOT at load) later; (b) dynamic in v1.
+  *Recommended: (a)*: musl's static link is the crops' (C, C++).
+- **AXS12 The evaluator's name.** (a) `x86i` (the crops' pattern: goi, ci, llvmi); (b) `asmi --arch amd64`; (c) `amd64i`.
+  *Recommended: (a)* with AS1's shared driver, unless arm64's survey prefers one `asmi`.
+- **AXS13 The bridge to C.** (a) both, in order: undefined symbols bound to ci's musl (eval), then musl assembled by Arbace from clang
+  `-S` (AOT); (b) only the assembled musl; (c) only freestanding programs. *Recommended: (a)*.
+- **AXS14 The fetches.** (a) binutils 2.45.1's source tarball for `gas/testsuite` only (test data; tc-i386.c and opcodes/ never
+  opened), Go's `x/arch` at TamaGo's vendored revision, musl's libc-test; XED only with AXS4 (c); (b) none: the host's corpora (§10)
+  alone. *Recommended: (a)*, after AX2 (nothing before needs them).
+- **AXS15 Go's assembler as a live judge for Plan 9.** (a) TamaGo's `go tool asm` beside the own verdicts (it is the seed's toolchain,
+  not a host one, CSP2's ruling); (b) own verdicts only. *Recommended: (a)*: Plan 9 has no other reference and gc's is pinned.
+- **AXS16 The budget.** (a) half a crop's share, as LLVM IR's (LLS17); (b) a full share; (c) a quarter, sharing arm64's half.
+  *Recommended: (a)*, both architectures together a full share.
+
+## 15. What to decide first
+
+1. **AXS1, AS1, AS8**: two intermediate crops, one tool family; the merge of the two surveys into one plan.
+2. **AXS2**: the forms as the machine level (the spec waits on it).
+3. **AXS4, AXS5**: the table's source and the encoder's references (AX2's week either way).
+4. **AXS9**: the CPU and the lockstep as own judges (the independence score depends on it).
+5. **AXS7**: AOT native, translation optional.
+6. **AXS14**: the fetches (only from AX2 on).
+
+## 16. Risks
+
+- **Breadth.** x86's mnemonics with AVX-512 are over 1,500; each with flags and faults. The table makes the encoder mechanical; the
+  emulator's semantics are not. Mitigation: the order of §6.3 and the lockstep, which finds the first wrong instruction itself.
+- **The two references disagree** (P2) and so would Arbace with one of them; AXS5's modes and a rule list per difference keep that
+  visible rather than classed in bulk.
+- **Intel syntax's semantic ambiguity** (P3): a reader that decides operand kinds before the symbols are known reads a different
+  program. Mitigation: AXS2 (a), the forms the machine level, judged by encodings.
+- **x87 transcendentals and undefined flags**: results that differ between CPU vendors; a lockstep run on AMD would teach x86i AMD's
+  bits. Mitigation: the SDM's undefined flags masked by instruction, `x87-transcendental` a class with the documented accuracy.
+- **What the CPU cannot run** (AVX-512, AMX, APX here): own verdicts only; a host change (a CPU with AVX-512) would add a judge, not move one.
+- **ptrace on the host**: the lockstep needs `PTRACE_SINGLESTEP` (allowed for a child process; to verify under the host's settings,
+  `kernel.yama.ptrace_scope`); in the box, KVM's single-step instead (parked).
+- **Speed**: an interpreter in Go of about 50 to 200 host instructions per guest instruction (Blink's order without its JIT, to verify):
+  gcc's `-O2` torture programs in seconds, larger programs need AX6's rotation or (b) of AXS6.
+- **Licences**: binutils and GCC's sources never read for porting; gcc's tests are test data (LLS26 (a)); the SDM is a reference, its
+  tables not copied; LLVM's tables committed as generated data under Apache-2.0 WITH LLVM-exception (in LICENSE.md already); x86asm and
+  obj/x86 under Go's BSD-3 (in LICENSE.md already); Blink's ISC added to LICENSE.md only if code is ported.
+- **The box**: x86i is user-mode Linux; Arbace's bare-metal goal (TamaGo, the box) needs a system-mode machine (paging, interrupts, the
+  doorbell): later, on the same decoder and semantics, KVM the judge (parked by the user, 2026-10-26).
+
+## 17. Sources
+
+- The host: Alpine `binutils` 2.45.1 (`as --version`), LLVM 23.1.5's tools (`/usr/lib/llvm23/bin`), clang 23.1.5, gcc 15.2.0, musl
+  1.2.6, `qemu-aarch64`, gdb; `/proc/cpuinfo`'s flags; TamaGo's go1.27.1 (`/root/tamago-go`, `pkg/tool/linux_amd64/asm`).
+- Pins and tarballs: `llvm-project-23.1.5.src.tar.xz` (`.tmp/llvm/`, `test/cpp/corpora.edn`'s `:llvmorg-23.1.5`; 197,239 entries,
+  `llvm/lib/Target/X86` 230 files, 11.2 MB); `gcc-15.2.0.tar.xz` (`.tmp/c1/gcc/`, `test/c/corpora.edn`'s `:gcc-15.2.0`); `musl-1.2.6.tar.gz`
+  (`.tmp/c1/musl/`).
+- In llvm-project 23.1.4/23.1.5: `llvm/test/MC/{X86,AsmParser,ELF,Disassembler/X86}`, `llvm/test/tools/llvm-objdump/X86`,
+  `llvm/lib/MC/MCParser/AsmParser.cpp`, `llvm/lib/Target/X86/AsmParser/X86AsmParser.cpp`, `llvm/lib/Target/X86/MCTargetDesc/`,
+  `llvm/lib/Target/X86/X86Instr*.td` (read by name and size; the code to be read at AX2).
+- In TamaGo's Go tree (go1.27.1): `src/cmd/asm/internal/{lex,asm,arch}`, `src/cmd/asm/internal/asm/testdata/{amd64,amd64enc,amd64enc_extra,
+  amd64error,amd64dynlinkerror}.s`, `testdata/avx512enc/`, `src/cmd/internal/obj/x86/{asm6,avx_optabs,evex,obj6,ytab}.go`,
+  `src/cmd/vendor/golang.org/x/arch/x86/x86asm/{decode,avx,avx_tables,tables,gnu,intel,plan9x,inst}.go`, `src/debug/elf/`,
+  `src/cmd/link/internal/ld/elf.go`; in the checkout `tamago/cmd/go/cmd/{asm,internal/obj/x86}` (forms), `tamago/goroot` (the `.s` files).
+- Arbace: CLAUDE.md; doc/llvm/LLVM-CROP-SURVEY.md (the model: §1, §9-§14, LL9a's own verdicts, ORS30 (a)); doc/CROPS-SCORE.md;
+  doc/ORACLE-RECORDS-SURVEY.md §3; doc/C23-SURVEY.md (crt, ci's natives of musl's assembly, CS3 (a)); doc/go/GOI-SPEC.md (§1.1's
+  assembly); `go/arbace/crt/{mem,syscall}.ae`; `test/crops/crops.edn`, `test/reap/cells.edn`, `test/c/divergences.edn`'s `by-design`,
+  `test/cpp/divergences-lower.edn`'s `inline-asm`.
+- Prior art (not fetched; licences to verify): Blink `https://github.com/jart/blink`; Intel XED `https://github.com/intelxed/xed`;
+  box64 `https://github.com/ptitSeb/box64`; FEX `https://github.com/FEX-Emu/FEX`; iced `https://github.com/icedland/iced`; Zydis
+  `https://github.com/zyantific/zydis`; fadec `https://github.com/aengelke/fadec`; Remill `https://github.com/lifting-bits/remill`;
+  ACL2 x86isa `https://github.com/acl2/acl2` (`books/projects/x86isa`); K x86-64 `https://github.com/kframework/X86-64-semantics`;
+  Go's `x/arch` `https://go.googlesource.com/arch`; musl libc-test `https://repo.or.cz/libc-test.git`; binutils
+  `https://sourceware.org/pub/binutils/releases/binutils-2.45.1.tar.xz`.
+
+## Appendix A: the scratch
+
+The worktree's `.tmp/asm/` (about 42 MB, kept): `musl-1.2.6/` (its `src`, `arch/x86_64`, `crt`), `gcc-15.2.0/gcc/testsuite/gcc.target/
+{i386,x86_64}` (extracted for the counts), `p2/` (P1-P2: each musl file's gas and llvm-mc objects and `.text` bytes), `hello.s`,
+`hello-intel.s`, `h`, `h.o`, `hi.o` (P3, P4), `go1.o` (P5), `llvm-list.txt` (the 23.1.5 tarball's listing). The commands are in this
+file's §3; each ran in seconds under 200 MB.
+
+## Proposed
+
+AXS1-AXS16 (§14) and AS1-AS8 (§13), none decided.
