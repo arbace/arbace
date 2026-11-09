@@ -40,18 +40,20 @@ END {
   # ci when it has C files) and the runs beyond the first (@runs=ARGS,...). The first alternative is the run: the second
   # (setup-ocamlopt.byte-build-env) ends it. The AOT levels (aot=1) keep the class (their runtime has no C, and a helper is oi's).
   # OC204 (a) (OC195 (a), the user 2026-11-09): a helper of OCaml alone (myecho.ml, reflector.ml, cmdline_prog.ml) is one too.
+  # OC206 (a) (the user 2026-11-09): at the AOT levels (aot=1) too when the helpers are OCaml alone (readonly .ml files, no C): bin/oi's
+  # light level translates the helper as the test's program and runs it at that level, the compiled level builds it into the test's shard;
+  # a C helper stays oi's (its runtime is oi cmain's), the class it had.
   # Anything else in the alternative: the class it had (cls's roclass)
   helper = 0; roclass = ""; roseen = 0
-  if (aot != 1) {
-    hasbuild = 0; rofiles = ""
-    for (j = 1; j <= m; j++) {
-      s = trim(st[j])
-      if (s == "setup-ocamlc.byte-build-env") hasbuild = 1
-      if (s ~ /^readonly_files *= *"/) { rofiles = s; sub(/^[^"]*"/, "", rofiles); sub(/"[^"]*$/, "", rofiles); rofiles = trim(rofiles) }
-    }
-    if (hasbuild && rofiles ~ /^[A-Za-z0-9_]+\.(c|ml)( +[A-Za-z0-9_]+\.(c|ml))*$/) { helper = 1; roclass = "readonly_files = " rofiles }
+  hasbuild = 0; rofiles = ""
+  for (j = 1; j <= m; j++) {
+    s = trim(st[j])
+    if (s == "setup-ocamlc.byte-build-env") hasbuild = 1
+    if (s ~ /^readonly_files *= *"/) { rofiles = s; sub(/^[^"]*"/, "", rofiles); sub(/"[^"]*$/, "", rofiles); rofiles = trim(rofiles) }
   }
-  hprog = ""; hmods = ""; hsetup = 0; hmain = 0; hargs = ""; nruns = 0; runs = ""; hbase = FILENAME; sub(/^.*\//, "", hbase); sub(/\.ml$/, "", hbase)
+  if (aot != 1 && hasbuild && rofiles ~ /^[A-Za-z0-9_]+\.(c|ml)( +[A-Za-z0-9_]+\.(c|ml))*$/) { helper = 1; roclass = "readonly_files = " rofiles }
+  if (aot == 1 && hasbuild && rofiles ~ /^[A-Za-z0-9_]+\.ml( +[A-Za-z0-9_]+\.ml)*$/) { helper = 1; roclass = "readonly_files = " rofiles }
+  hprog = ""; hmods = ""; hsetup = 0; hmain = 0; hargs = ""; nruns = 0; runs = ""; hbase = FILENAME; sub(/^.*\//, "", hbase); sub(/\.mll?$/, "", hbase)
   for (j = 1; j <= m; j++) {
     s = trim(st[j]); if (s == "") continue
     if (helper) {

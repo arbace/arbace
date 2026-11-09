@@ -1182,6 +1182,20 @@ o2j_env_runs() {
   done
 }
 
+# o2j_helpers ID D FLAGS INCS ENV (OC206 (a), the user 2026-11-09): the OCaml helper programs of the test's header (ENV's @helper=NAME:FILE.ml,
+# header.awk's helper mode at aot=1: OCaml alone) dumped as the test's program is, each into D/helper/NAME; their names printed, one a line
+o2j_helpers() {
+  local id=$1 d=$2 flags=$3 incs=$4 env=$5 kv name ml
+  for kv in $env; do
+    case $kv in @helper=*) ;; *) continue ;; esac
+    kv=${kv#@helper=}; name=${kv%%:*}; ml=${kv#*:}; ml=${ml%.ml}
+    rm -rf "$d/helper/$name"; mkdir -p "$d/helper/$name"
+    cp "$(dirname "$TESTS/$id")/$ml.ml" "$d/helper/$name/"
+    o2j_dump_file "$d/helper/$name" "$ml" "$flags" "$incs"
+    echo "$name $ml"
+  done
+}
+
 cmd_aot_run() {
   [ $# -ge 1 ] || die "usage: bin/oi aot-run FILE.ml [ARG...]"
   local file=$1; shift
@@ -1205,8 +1219,16 @@ o2j_dump() {
   rm -rf "$d"; mkdir -p "$d"
   local base; base=$(basename "$id")
   local u; u=$(echo "${base:0:1}" | tr a-z A-Z)${base:1}
-  local I; I=$(inc_I "$incs")
   cp "$src" "$d/"
+  local why; why=$(mll_gen "$d" "$base") || { printf '(ocaml/error "%s")\n' "${why#dump: }" > "$d/$u.ae"; return 0; }
+  o2j_dump_file "$d" "$base" "$flags" "$incs"
+}
+
+# o2j_dump_file D BASE FLAGS INCS: D/BASE.ml's Lambda into D/U.ae (U its module), natively or by ocdump; a refusal is the dump's error form
+o2j_dump_file() {
+  local d=$1 base=$2 flags=$3 incs=$4
+  local u; u=$(echo "${base:0:1}" | tr a-z A-Z)${base:1}
+  local I; I=$(inc_I "$incs")
   if [ "${NATIVE:-0}" = 1 ]; then
     # TY24 (a): typed and translated by Arbace's typer, as oi_one's native path (no ocamlc, no ocdump); a refusal is the dump's error form
     local nf="" f bad=""
@@ -1274,8 +1296,11 @@ cmd_check_aot() {
   local jobs=${O2J_JOBS:-2}
   [ -n "${OPT_JOBS:-}" ] && jobs=$OPT_JOBS
   mkdir -p "$O2J/tmp" "$O2J/run"; : > "$O2J/crash.log"
-  export -f o2j_dump; export O2J TESTS TESTLIB UNIXLIB OCD
+  export -f o2j_dump o2j_dump_file o2j_helpers; export O2J TESTS TESTLIB UNIXLIB OCD
   selected | awk -F'\t' '$2 == "run" { printf "%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0 }' | xargs -0 -r -n 3 -P 4 bash -c 'o2j_dump "$@"' _
+  # the OCaml helper programs (OC206 (a)): dumped beside their tests, translated with them, run at this level
+  selected | awk -F'\t' '$2 == "run" && $6 ~ /@helper=/ { printf "%s%c%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0, $6, 0 }' |
+    xargs -0 -r -n 4 bash -c 'o2j_helpers "$1" "$O2J/run/$1" "$2" "$3" "$4" > "$O2J/run/$1/helpers.txt"' _
   # translate: one stage 0 process for all
   local tl=$O2J/translate.list bl=$O2J/batch.list
   : > "$tl"; : > "$bl"
@@ -1284,9 +1309,29 @@ cmd_check_aot() {
     local base u d; base=$(basename "$id"); u=$(echo "${base:0:1}" | tr a-z A-Z)${base:1}; d=$O2J/run/$id
     if grep -q '^(ocaml/error' "$d/$u.ae"; then continue; fi
     printf '%s\t%s%s\n' "$d/out" "$(inc_units "$incs" "$d/$u.ae" | sed 's/$/\t/' | tr -d '\n')" "$d/$u.ae" >> "$tl"
+    local hn hm hu
+    if [ -s "$d/helpers.txt" ]; then
+      while read -r hn hm; do
+        hu=$(echo "${hm:0:1}" | tr a-z A-Z)${hm:1}
+        grep -q '^(ocaml/error' "$d/helper/$hn/$hu.ae" && continue
+        printf '%s\t%s%s\n' "$d/helper/$hn/out" "$(inc_units "$incs" "$d/helper/$hn/$hu.ae" | sed 's/$/\t/' | tr -d '\n')" "$d/helper/$hn/$hu.ae" >> "$tl"
+      done < "$d/helpers.txt"
+    fi
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$d/o2j.out" "$d/out/files.txt" "$d/$u.ae" "$(echo "$args" | tr ' ' '\t')" "$env" >> "$bl"
   done
   o2j progs "$O2J_LIB" "$tl" > "$O2J/translate.log" 2>&1 || { tail -5 "$O2J/translate.log"; die "translate"; }
+  # each helper an executable of the test's directory, its program's run at this level (argv.(0) the path it was called by)
+  selected | awk -F'\t' '$2 == "run" && $6 ~ /@helper=/ {print $1}' | while read -r id; do
+    local d=$O2J/run/$id hn hm
+    [ -s "$d/helpers.txt" ] || continue
+    while read -r hn hm; do
+      [ -f "$d/helper/$hn/out/files.txt" ] || continue
+      { printf '#!/bin/sh\nO2J_ARGV0=$0; export O2J_ARGV0\nexec env ARBACE_PATH=%q TMPDIR=%q GOMEMLIMIT=%q GOMAXPROCS=1 %q %q' "$root/jdk/ocaml" "$O2J/tmp" "${O2J_GOMEMLIMIT:-900MiB}" "$(arbace_exe)" "$root/test/ocaml/o2j/run.ae"
+        for f in $(cat "$d/helper/$hn/out/files.txt"); do printf ' %q' "$f"; done
+        printf ' -- "$@"\n'; } > "$d/$hn"
+      chmod +x "$d/$hn"
+    done < "$d/helpers.txt"
+  done
   # the programs with an environment run alone; the rest in shards
   local i
   awk -F'\t' '$NF == ""' "$bl" | sed 's/\t$//' > "$bl.batch"
@@ -1306,6 +1351,17 @@ cmd_check_aot() {
     fi
     r=$(grep -m1 -F "refused	$d/out	" "$O2J/translate.log" | cut -f3 || true)
     if [ -n "$r" ]; then printf '%s\t-\t-\t0\t0\trefused: %s\n' "$id" "$r" >> "$out.new"; continue; fi
+    # a helper the typer or o2j refused (OC206 (a)): the test's row
+    local hn hm hu hw=""
+    if [ -s "$d/helpers.txt" ]; then
+      while read -r hn hm; do
+        hu=$(echo "${hm:0:1}" | tr a-z A-Z)${hm:1}
+        if grep -q '^(ocaml/error' "$d/helper/$hn/$hu.ae"; then hw="dump: helper: $hn: $(head -c 160 "$d/helper/$hn/$hu.ae" | tr '\n\t' '  ')"; break; fi
+        r=$(grep -m1 -F "refused	$d/helper/$hn/out	" "$O2J/translate.log" | cut -f3 || true)
+        if [ -n "$r" ]; then hw="refused: helper $hn: $r"; break; fi
+      done < "$d/helpers.txt"
+    fi
+    if [ -n "$hw" ]; then printf '%s\t-\t-\t0\t0\t%s\n' "$id" "$hw" >> "$out.new"; continue; fi
     st=$(awk -F'\t' -v id="$id" '$1 == id {print $2}' "$O2J/results.tsv" | head -1)
     secs=$(awk -F'\t' -v id="$id" '$1 == id {print $3}' "$O2J/results.tsv" | head -1)
     [ -f "$d/o2j.out" ] || : > "$d/o2j.out"
@@ -1429,24 +1485,40 @@ c2_programs() {
   # ProcessBuilder's JDK classes, 6.1 GB for five such programs)
   local size=${O2J_SHARD:-8} cap=${O2J_SHARD_BYTES:-0} ucap=${O2J_SHARD_UNIX:-3} k=0 pkgs=() bytes=0 b nu=0 hasu
   : > "$C2/shards.tsv"
-  while IFS=$'\037' read -r id p d args env a0 hasu; do
+  local hps hp
+  while IFS=$'\037' read -r id p d args env a0 hasu hps; do
     grep -q -F "refused	$d/out	" "$C2/translate.log" && continue
+    [ -s "$d/helper.why" ] && continue
     b=$(c2_bytes "$p" "$d")
     if [ ${#pkgs[@]} -gt 0 ] && { { [ "$cap" -gt 0 ] && [ $((bytes + b)) -gt "$cap" ]; } || { [ "$hasu" = 1 ] && [ "$nu" -ge "$ucap" ]; }; }; then
       k=$((k + 1)); c2_shard "$C2/s$k" "${pkgs[@]}"; c2_measure "$C2/s$k" "$bytes"; pkgs=(); bytes=0; nu=0
     fi
     pkgs+=("$p"); bytes=$((bytes + b)); [ "$hasu" = 1 ] && nu=$((nu + 1))
+    # its helpers' packages beside it (OC206 (a)): the same shard, one program
+    for hp in $hps; do pkgs+=("${hp%%:*}"); done
     if [ ${#pkgs[@]} = "$size" ]; then k=$((k + 1)); c2_shard "$C2/s$k" "${pkgs[@]}"; c2_measure "$C2/s$k" "$bytes"; pkgs=(); bytes=0; nu=0; fi
   done < "$C2/progs.tsv"
   if [ ${#pkgs[@]} -gt 0 ]; then k=$((k + 1)); c2_shard "$C2/s$k" "${pkgs[@]}"; c2_measure "$C2/s$k" "$bytes"; fi
   if [ "${O2J_PLAN_ONLY:-}" = 1 ]; then echo "oi: compiled: $k shards planned (O2J_PLAN_ONLY): $C2/plan.tsv, $C2/shards.tsv" >&2; return 0; fi
   # the runs: each program alone, in its directory (C2/run/ID), argv.(0) its dump as the light level's
   local prog st t0 t1 note r kv
-  while IFS=$'\037' read -r id p d args env a0 hasu; do
+  while IFS=$'\037' read -r id p d args env a0 hasu hps; do
+    if [ -s "$d/helper.why" ]; then printf '%s\t-\t-\t0\t0\t%s\n' "$id" "$(cat "$d/helper.why")" >> "$outnew"; continue; fi
     r=$(grep -m1 -F "refused	$d/out	" "$C2/translate.log" | cut -f3 || true)
     [ -n "$r" ] || r=$(awk -F'\t' -v p="$p" '$1 == p {print $2}' "$C2/refused.tsv" | head -1)
+    for hp in $hps; do
+      [ -n "$r" ] && break
+      r=$(grep -m1 -F "refused	$d/helper/${hp#*:}/out	" "$C2/translate.log" | cut -f3 || true)
+      [ -n "$r" ] || r=$(awk -F'\t' -v p="${hp%%:*}" '$1 == p {print $2}' "$C2/refused.tsv" | head -1)
+      [ -n "$r" ] && r="helper ${hp#*:}: $r"
+    done
     if [ -n "$r" ]; then printf '%s\t-\t-\t0\t0\trefused: %s\n' "$id" "$r" >> "$outnew"; continue; fi
     prog=$(awk -F'\t' -v p="$p" '{ n = split($2, a, " "); for (i = 1; i <= n; i++) if (a[i] == p) print $1 }' "$C2/built.tsv" | head -1)
+    # each helper the test's directory's executable: the shard's program, O2J_PROG naming the helper's package (OC206 (a))
+    for hp in $hps; do
+      printf '#!/bin/sh\nO2J_ARGV0=$0; export O2J_ARGV0\nexec env O2J_PROG=%q GOMAXPROCS=1 GOMEMLIMIT=%q %q "$@"\n' "${hp%%:*}" "${O2J_GOMEMLIMIT:-900MiB}" "$prog" > "$d/${hp#*:}"
+      chmod +x "$d/${hp#*:}"
+    done
     st=0; t0=$(date +%s.%N); times > "$d/cpu0"
     case " $env " in
       *" @hook=run "*)
@@ -1471,9 +1543,9 @@ cmd_check_compiled() {
   if [ "$NATIVE" = 1 ]; then
     LIB_NATIVE=$LIB; TESTLIB_NATIVE=$TESTLIB; RUN_DIR=$OI_DIR/run-native
     export OI_TYPER_THREADS=${OI_TYPER_THREADS:-1} OI_TYPER_GOMEMLIMIT=${OI_TYPER_GOMEMLIMIT:-1200MiB}
-    export -f typer_ns arbace_exe die native_dir o2j_dump; export NATIVE LIB_NATIVE TESTLIB_NATIVE RUN_DIR OI_STDLIB root TOP
+    export -f typer_ns arbace_exe die native_dir o2j_dump o2j_dump_file; export NATIVE LIB_NATIVE TESTLIB_NATIVE RUN_DIR OI_STDLIB root TOP
   fi
-  export -f oi_one limited_cpu arbace_exe; export OI_DIR TESTS TESTLIB UNIXLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
+  export -f oi_one limited_cpu arbace_exe o2j_dump_file o2j_helpers; export OI_DIR TESTS TESTLIB UNIXLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
   mkdir -p "$O2J"; rm -rf "$C2"; mkdir -p "$C2/run"
   selected > "$C2/selected.tsv"; export OI_SELECTED=$C2/selected.tsv
   local oirows=$OI_DIR/check.tsv; [ "$NATIVE" = 1 ] && oirows=$OI_DIR/check-native.tsv
@@ -1494,10 +1566,25 @@ cmd_check_compiled() {
     fi
     grep -q '^(ocaml/error' "$d/$u.ae" && continue
     n=$((n + 1))
+    local pn=$n
     # the library units of its includes from ocaml.u (@UNIT: clib translated them once, OT26 (a)), not translated into its package
     printf 'ocaml.p%s\t%s\t%s%s\n' "$n" "$d/out" "$(inc_units "$incs" "$d/$u.ae" | sed -e 's|.*/|@|' -e 's/\.ae$/\t/' | tr -d '\n')" "$d/$u.ae" >> "$C2/cprogs.list"
+    # the OCaml helpers of its header (OC206 (a)): a package each, in the test's shard, named by the helper's executable (pN:NAME, the eighth
+    # field); a helper refused by the dump makes the test's row (C2/run/ID/helper.why)
+    local hps="" hn hm hu
+    rm -f "$d/helper.why"
+    case $env in *@helper=*)
+      (O2J=$C2 NATIVE=${NATIVE:-0} o2j_helpers "$id" "$d" "$flags" "$incs" "$env") > "$d/helpers.txt"
+      while read -r hn hm; do
+        hu=$(echo "${hm:0:1}" | tr a-z A-Z)${hm:1}
+        if grep -q '^(ocaml/error' "$d/helper/$hn/$hu.ae"; then echo "dump: helper: $hn: $(head -c 160 "$d/helper/$hn/$hu.ae" | tr '\n\t' '  ')" > "$d/helper.why"; break; fi
+        n=$((n + 1))
+        printf 'ocaml.p%s\t%s\t%s%s\n' "$n" "$d/helper/$hn/out" "$(inc_units "$incs" "$d/helper/$hn/$hu.ae" | sed -e 's|.*/|@|' -e 's/\.ae$/\t/' | tr -d '\n')" "$d/helper/$hn/$hu.ae" >> "$C2/cprogs.list"
+        hps="$hps${hps:+ }p$n:$hn"
+      done < "$d/helpers.txt" ;;
+    esac
     # the seventh field: 1 for a program that includes unix (OT25 (a): at most O2J_SHARD_UNIX of them a shard)
-    printf '%s\037p%s\037%s\037%s\037%s\037%s\037%s\n' "$id" "$n" "$d" "$args" "$env" "$d/$u.ae" "$(case " $incs " in *" unix "*) echo 1 ;; *) echo 0 ;; esac)" >> "$C2/progs.tsv"
+    printf '%s\037p%s\037%s\037%s\037%s\037%s\037%s\037%s\n' "$id" "$pn" "$d" "$args" "$env" "$d/$u.ae" "$(case " $incs " in *" unix "*) echo 1 ;; *) echo 0 ;; esac)" "$hps" >> "$C2/progs.tsv"
   done < <(awk -F'\t' '$2 == "run"' "$C2/selected.tsv" | tr '\t' '\037')
   local out=$C2/check.tsv
   : > "$out.new"
