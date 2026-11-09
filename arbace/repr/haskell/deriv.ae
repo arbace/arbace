@@ -62,6 +62,32 @@
 (defn- tag* [e] (L* (list 'DerivTag e)))
 (defn- tag2con* [cons e] (L* (list 'DerivTag2Con cons e)))
 (defn- prim* [op & xs] (L* (list 'DerivPrim op (vec xs))))
+;; a primop comparison of two unlifted values as a Bool (GHC's genPrimOpApp: tagToEnum# (x `op` y))
+(defn- primcmp* [op x y] (L* (list 'DerivPrimCmp op x y)))
+
+;; GHC.Tc.Deriv.Generate's primOrdOps (ordOpTbl): an unlifted field type's comparisons (lt le eq ge gt), by its
+;; GHC.Internal.Prim type constructor
+(def ^:private prim-ord-ops
+  {"Char#" ["ltChar#" "leChar#" "eqChar#" "geChar#" "gtChar#"]
+   "Int#" ["<#" "<=#" "==#" ">=#" ">#"]
+   "Int8#" ["ltInt8#" "leInt8#" "eqInt8#" "geInt8#" "gtInt8#"]
+   "Int16#" ["ltInt16#" "leInt16#" "eqInt16#" "geInt16#" "gtInt16#"]
+   "Int32#" ["ltInt32#" "leInt32#" "eqInt32#" "geInt32#" "gtInt32#"]
+   "Int64#" ["ltInt64#" "leInt64#" "eqInt64#" "geInt64#" "gtInt64#"]
+   "Word#" ["ltWord#" "leWord#" "eqWord#" "geWord#" "gtWord#"]
+   "Word8#" ["ltWord8#" "leWord8#" "eqWord8#" "geWord8#" "gtWord8#"]
+   "Word16#" ["ltWord16#" "leWord16#" "eqWord16#" "geWord16#" "gtWord16#"]
+   "Word32#" ["ltWord32#" "leWord32#" "eqWord32#" "geWord32#" "gtWord32#"]
+   "Word64#" ["ltWord64#" "leWord64#" "eqWord64#" "geWord64#" "gtWord64#"]
+   "Addr#" ["ltAddr#" "leAddr#" "eqAddr#" "geAddr#" "gtAddr#"]
+   "Float#" ["ltFloat#" "leFloat#" "eqFloat#" "geFloat#" "gtFloat#"]
+   "Double#" ["<##" "<=##" "==##" ">=##" ">##"]})
+
+(defn- prim-ops
+  "The comparisons of an unlifted field type (primOrdOps), nil for a lifted one"
+  [t]
+  (when (and (vector? t) (= :tc (first t)) (= "GHC.Internal.Prim" (nth (second t) 2)))
+    (get prim-ord-ops (nth (second t) 3))))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; GHC's names (GHC.Builtin.Names, PrelNames)
@@ -113,13 +139,13 @@
 (defn gen-eq [{:keys [cons]}]
   (let [a (lname "a") b (lname "b") ah (lname "a#") bh (lname "b#")
         untag2 (fn [e] (hcase (tag* (v* a)) [[(vp "a#") (hcase (tag* (v* b)) [[(vp "b#") e]])]]))
+        ;; eq_Expr: (==) on a lifted field, the primop's comparison on an unlifted one
+        eq-expr (fn [t x y] (if-let [ops (prim-ops t)] (primcmp* (nth ops 2) (v* x) (v* y)) (op* (v* x) eq-rdr (v* y))))
         nested (fn [c as bs]
                  (if (zero? (count as))
                    true-e
-                   (reduce (fn [acc x] (op* x and-rdr acc))
-                           (let [xs (map (fn [x y] (op* (v* x) eq-rdr (v* y))) as bs)]
-                             (last xs))
-                           (reverse (butlast (map (fn [x y] (op* (v* x) eq-rdr (v* y))) as bs))))))
+                   (let [xs (map (fn [x y t] (eq-expr t x y)) as bs (concat (:tys c) (repeat nil)))]
+                     (reduce (fn [acc x] (op* x and-rdr acc)) (last xs) (reverse (butlast xs))))))
         pats-etc (fn [c] (let [as (as-names "a" (:arity c)) bs (as-names "b" (:arity c))]
                            [(con-pat c as) (hcase (v* b) [[(con-pat c bs) (nested c as bs)]])]))
         non-nullary (remove nullary? cons)
@@ -154,17 +180,26 @@
           eq-result (fn [op] (case op :compare (v* eq-c) :lt false-e))
           gt-result (fn [op] (case op :compare (v* gt-c) :lt false-e))
           op-rdr (fn [op] (case op :compare compare-rdr :lt lt-rdr))
+          ;; unliftedCompare: if a < b then lt else if a == b then eq else gt, by the field type's primops
+          unlifted-compare (fn [ops x y lt eq gt]
+                             (if* (primcmp* (nth ops 0) (v* x) (v* y)) lt (if* (primcmp* (nth ops 2) (v* x) (v* y)) eq gt)))
           compare-fields
           (fn [op c]
             (let [k (:arity c) as (as-names "a" k) bs (as-names "b" k)]
-              (letfn [(go [as bs]
-                        (cond (empty? as) (eq-result op)
-                              (empty? (rest as)) (op* (v* (first as)) (op-rdr op) (v* (first bs)))
-                              :else (hcase (ap* (v* compare-rdr) (v* (first as)) (v* (first bs)))
-                                           [[(cp lt-c []) (lt-result op)]
-                                            [(cp eq-c []) (go (rest as) (rest bs))]
-                                            [(cp gt-c []) (gt-result op)]])))]
-                (go as bs))))
+              (letfn [(go [as bs ts]
+                        (let [ops (prim-ops (first ts))]
+                          (cond (empty? as) (eq-result op)
+                                (empty? (rest as))
+                                (cond (nil? ops) (op* (v* (first as)) (op-rdr op) (v* (first bs)))
+                                      ;; unliftedOrdOp
+                                      (= op :lt) (primcmp* (nth ops 0) (v* (first as)) (v* (first bs)))
+                                      :else (unlifted-compare ops (first as) (first bs) (v* lt-c) (v* eq-c) (v* gt-c)))
+                                ops (unlifted-compare ops (first as) (first bs) (lt-result op) (go (rest as) (rest bs) (rest ts)) (gt-result op))
+                                :else (hcase (ap* (v* compare-rdr) (v* (first as)) (v* (first bs)))
+                                             [[(cp lt-c []) (lt-result op)]
+                                              [(cp eq-c []) (go (rest as) (rest bs) (rest ts))]
+                                              [(cp gt-c []) (gt-result op)]]))))]
+                (go as bs (concat (:tys c) (repeat nil))))))
           inner-eq-alt (fn [op c] [(con-pat c (as-names "b" (:arity c))) (compare-fields op c)])
           wild-con-pat (fn [c] (cp (:name c) (repeat (:arity c) wp)))
           inner-rhs
@@ -208,6 +243,11 @@
 
 ;;; Show --------------------------------------------------------------------------------------
 
+;; GHC.Tc.Deriv.Generate's boxConTbl and postfixModTbl: an unlifted field shown boxed, its literal's suffix after it
+(def ^:private show-box
+  {"Char#" [(dc types "C#") "#"] "Int#" [(dc types "I#") "#"] "Word#" [(dc types "W#") "##"]
+   "Float#" [(dc types "F#") "#"] "Double#" [(dc types "D#") "##"]})
+
 (defn gen-show [{:keys [cons fix]}]
   (let [showsprec (gv show-m "showsPrec") show-string (gv show-m "showString") show-paren (gv show-m "showParen")
         show-space (gv show-m "showSpace") comma-space (gv show-m "showCommaSpace") compose (gv base ".")
@@ -221,8 +261,13 @@
                 prec (if infix? (first (get fix (:name c) [9 'InfixL])) 10)
                 prec1 (inc prec)
                 arg-prec (if record? 0 prec1)
-                show-arg (fn [b] (ap* (v* showsprec) (int* arg-prec) (v* b)))
-                show-args (map show-arg bs)
+                show-arg (fn [b t]
+                           (if-let [[box sfx] (when (and (vector? t) (= :tc (first t)) (= "GHC.Internal.Prim" (nth (second t) 2)))
+                                                (get show-box (nth (second t) 3)))]
+                             ;; show_arg of an unlifted type: showsPrec of the boxed value . showString the suffix
+                             (ap* (v* compose) (ap* (v* showsprec) (int* arg-prec) (ap* (v* box) (v* b))) (mk-showstring sfx))
+                             (ap* (v* showsprec) (int* arg-prec) (v* b))))
+                show-args (map show-arg bs (concat (:tys c) (repeat nil)))
                 thingies (cond
                            infix? [(first show-args) (mk-showstring (str " " (wrap-backquotes con-str) " ")) (second show-args)]
                            record? (concat [(mk-showstring (str op-con-str " {"))]

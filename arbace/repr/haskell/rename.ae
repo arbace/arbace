@@ -199,11 +199,14 @@
 (defn load-iface
   "The interface of module m ((hsiface/exports ...), (hsiface/fixities ...)), nil when there is none"
   [m]
-  (let [c @iface-cache k [*ifdirs* m]]
+  ;; keyed by the file's canonical path when the directories have it (HF9's second slice: a lib-check run's closure
+  ;; directories are links into one pool, so a key of the directories themselves parsed every interface again for
+  ;; each module and kept every copy: the process grew until its later modules ran 5 to 8 times slower)
+  (let [f (first (filter #(.isFile ^File %) (map #(File. (str % "/" m ".iface.edn")) *ifdirs*)))
+        c @iface-cache k (if f [(.getCanonicalPath ^File f) (.lastModified ^File f)] [*ifdirs* m])]
     (if (contains? c k)
       (get c k)
-      (let [f (first (filter #(.isFile ^File %) (map #(File. (str % "/" m ".iface.edn")) *ifdirs*)))
-            ;; a reexported module (a package's "M from unit:N", GHC.Prim's): its target's interface, by the
+      (let [;; a reexported module (a package's "M from unit:N", GHC.Prim's): its target's interface, by the
             ;; directories' reexports.edn ({"M" "N"}, ghc-pkg's exposed-modules)
             alias (when-not f
                     (some (fn [d] (let [af (File. (str d "/reexports.edn"))]
@@ -958,10 +961,29 @@
 
 (defn- rn-class [env v]
   ;; (ClassDecl ext ctx lname qtvs fix fundeps sigs binds ats atdefs docs)
-  (let [env1 (rn-qtvs env (arg v 4))]
+  (let [env1 (rn-qtvs env (arg v 4))
+        ;; a method signature's explicit forall scopes over its default method (ScopedTypeVariables; GHC.Rename.Bind's
+        ;; rnMethodBinds with the class's signatures, tcDefMeth: gmapQl's `forall r r'.` over its where's `k :: ...
+        ;; Const r ...`), as a top-level signature's over its binding
+        scoped (atom {})]
     (rn env1 (arg v 2)) (rn-tc-name env (arg v 3)) (rn env1 (arg v 6))
-    (doseq [s (arg v 7)] (rn env1 s))
-    (doseq [b (arg v 8)] (let [bv (lval b)] (if (= 'FunBind (con bv)) (rn-funbind (assoc env1 :sp (lsp b)) bv) (rn env1 b))))
+    (doseq [s (arg v 7)]
+      (let [sv (lval s)]
+        (if (= 'ClassOpSig (con sv))
+          (let [sig (arg sv 4)
+                _ (doseq [nl (arg sv 3)] (rn env1 nl))
+                r (rn-sig (assoc env1 :sp (lsp sig)) (lsp sig) (lval sig))]
+            (doseq [nl (arg sv 3)]
+              (let [o (rdr-occ (lval nl))]
+                ;; the method's own signature (the elaborator checks a default method at the method's type)
+                (when-not (true? (arg sv 2))
+                  (swap! scoped assoc o (:scoped r))))))
+          (rn env1 s))))
+    (doseq [b (arg v 8)]
+      (let [bv (lval b)]
+        (if (= 'FunBind (con bv))
+          (rn-funbind (assoc env1 :sp (lsp b)) bv :scoped (get @scoped (rdr-occ (lval (arg bv 2)))))
+          (rn env1 b))))
     (rn (assoc env1 :assoc-tvs true) (arg v 9)) (rn env (arg v 10))))
 
 (defn- children-of [n]
@@ -1448,6 +1470,16 @@
       (walk t))
     @out))
 
+(def ^:private phase-times? (some? (System/getenv "REPR_HASKELL_TC_TIMES")))
+(defmacro ^:private phase
+  "e's value; with REPR_HASKELL_TC_TIMES set its milliseconds on stderr, named k (the renamer's phases)"
+  [k e]
+  `(if phase-times?
+     (let [t0# (System/currentTimeMillis) v# ~e]
+       (binding [*out* *err*] (println "rn-phase" ~k (- (System/currentTimeMillis) t0#)))
+       v#)
+     ~e))
+
 (defn rename-module
   "Rename a module's parse tree (the dump's forms): the output as a map of strings"
   [forms]
@@ -1467,7 +1499,7 @@
               *genv* (atom {}) *fixities* (atom {}) *children* (atom {}) *fields* (atom {})
               *occs* (atom #{}) *ops* (atom #{}) *groups* (atom []) *errors* (atom [])
               *uses* nil *rnames* (java.util.IdentityHashMap.) *rnodes* (java.util.IdentityHashMap.)]
-      (let [{:keys [tops cons-fields]} (collect-tops m decls)
+      (let [{:keys [tops cons-fields]} (phase :collect-tops (collect-tops m decls))
             _ (reset! *fields* cons-fields)
             _ (doseq [{:keys [name parent]} tops] (add-gre! name #{m} true parent))
             _ (doseq [{:keys [name parent]} tops] (when parent (note-children! parent [name])))
@@ -1481,7 +1513,7 @@
                                       (list 'ImportDecl (list 'XImportDeclPass nil nil true)
                                             (list 'L nil (list 'mod "Prelude")) 'NoRawPkgQual 'NotBoot 'NotLevelled false
                                             'NotQualified 'Nothing 'Nothing)))])
-                            (map process-import! imports)))
+                            (phase :imports (doall (map process-import! imports)))))
             env {:l {}}
             top-sigs (vec (for [d decls :when (= 'SigD (con (lval d)))]
                             (list 'L (lsp d) (arg (lval d) 2))))
@@ -1492,7 +1524,7 @@
             val-binds (vec (for [d decls :when (= 'ValD (con (lval d)))]
                              (list 'L (lsp d) (arg (lval d) 2))))
             tycl (atom [])
-            _ (doseq [d decls]
+            _ (phase :decls (doseq [d decls]
                 (let [v (lval d)]
                   (case (con v)
                     TyClD (let [uses (atom #{})]
@@ -1500,8 +1532,8 @@
                             (swap! tycl conj {:name (name-of-tycl m d) :uses @uses}))
                     InstD (do (rn env d) (swap! *groups* conj "(tycl [] 1)"))
                     (ValD SigD) nil
-                    (rn env d))))
-            _ (rn-binds env val-binds top-sigs :top)
+                    (rn env d)))))
+            _ (phase :binds (rn-binds env val-binds top-sigs :top))
             ;; type and class declarations: SCC over their uses, data constructors mapped to their parents
             tnames (mapv :name @tycl)
             idx (into {} (map-indexed (fn [i n] [n i]) tnames))
@@ -1521,7 +1553,7 @@
         {:module m
          :tree (list 'rn/module
                      {:module m
-                      :decls (vec (for [d decls :when (not (contains? '#{ValD SigD} (con (lval d))))] (rtree d)))
+                      :decls (phase :rtree-decls (vec (for [d decls :when (not (contains? '#{ValD SigD} (con (lval d))))] (rtree d))))
                       :binds (mapv (fn [[r bs]] (list 'rn/group r (mapv rtree bs))) (:groups (.get ^java.util.IdentityHashMap *rnodes* val-binds)))
                       :sigs (mapv rtree top-sigs)
                       :export-list (when export-l (rtree export-l))
@@ -1536,7 +1568,7 @@
          :exports (sorted (map (fn [[n k]] (avail-text n k)) avails))
          :avails avails
          :fixities (into {} (for [[n f] @*fixities* :when (= (name-mod n) m)] [n f]))
-         :things (local-things m decls)
+         :things (phase :local-things (local-things m decls))
          :errors @*errors*}))))
 
 (defn- with-projection
@@ -1630,22 +1662,27 @@
 
 (defn- base-name [^String f] (.getName (File. f)))
 
+(def ^:dynamic *projection?* true) ; rename-file's projection of the tree on the facts (rename-check's), off for lib-check
+
 (defn rename-file
   "Rename a dump file; writes the output beside the named directories; the result map. The output is named
   by the dump's path below root (default: its file name)"
   [f out local & [root]]
-  (let [r (with-projection (rename-module (read-dump f)))
+  (let [r (phase :rename (rename-module (phase :read (read-dump f))))
+        r (if *projection?* (phase :project (with-projection r)) r)
         b (if (and root (str/starts-with? f (str root "/"))) (subs f (inc (count root))) (base-name f))
         nm (if (str/ends-with? b ".edn") (subs b 0 (- (count b) 4)) b)]
     (when out
       (let [o (File. (str out "/" nm ".rn.edn"))]
         (.mkdirs (.getParentFile o))
-        (spit o (output-text r))
-        (spit (File. (str out "/" nm ".rn-tree.edn")) (binding [*print-length* nil *print-level* nil] (pr-str (:tree r))))))
+        (phase :output (spit o (output-text r)))
+        (phase :tree (spit (File. (str out "/" nm ".rn-tree.edn")) (binding [*print-length* nil *print-level* nil] (pr-str (:tree r)))))))
     (when local
       (.mkdirs (File. ^String local))
       (spit (str local "/" (:module r) ".iface.edn") (iface-text r))
-      (swap! iface-cache (fn [c] (into {} (remove (fn [[[_ m] _]] (= m (:module r))) c)))))
+      ;; the module's own interface read again when next asked (its key is its file's, or the directories')
+      (let [mf (str "/" (:module r) ".iface.edn")]
+        (swap! iface-cache (fn [c] (into {} (remove (fn [[[k m] _]] (or (= m (:module r)) (and (string? k) (str/ends-with? k mf)))) c))))))
     (assoc r :name nm)))
 
 (defn- section [forms k]

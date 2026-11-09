@@ -1511,3 +1511,86 @@ GHC 9.14.1's testsuite (`test/haskell/eval/testsuite-run.edn`, the tests whose `
   and `bin/crops-score --judge --strict` 0 problems.
 - Proposed: HES86 (bin/hsi check's nofib C by the same rule, at the next haskell-stg-progs recording), HES87 (the four threaded-only
   passes on a refusal into a deferred class).
+
+## 2026-11-08: HF9's first slice, chosen by measure (branch `hs-hf9`, from next 835891150)
+
+The brief: Haskell's independence stays under 75% while hsi runs the boot libraries' STG GHC made; HF9 (the type-level tier) is
+the first of the two milestones that remove it. Measured first, then built in the order of the measure. Detail in
+doc/haskell/FRONTEND-SURVEY.md, "As built: HF9 (first slice)".
+
+- **The measure** (`bin/repr-haskell lib-check`, `arbace.repr.haskell.libcheck`): ghc-internal's 266 modules natively read, renamed
+  and elaborated, each against the interfaces of its imports (the helper's `iface` verb, GHC 9.14.1's installed interfaces: the
+  oracle tier's), and its binders' types judged against GHC's own interface of the module. ghc-prim 9.14.1 has no Haskell but
+  `Dummy.hs` (its modules moved into ghc-internal at GHC 9.10); base's modules re-export ghc-internal's.
+- **Before → after** (the same closures and dumps; the branch's start with the judge's additions alone): ghc-internal's 248 judged
+  modules (18 hidden: GHC-87110, the helper cannot load them) elaborate without an error 122 → 200, with every binder's type equal
+  to GHC's interface 113 → 198; binders equal 4,164 of 4,473 → 4,937 of 4,992; stopped 5 → 0. base's sample (every 9th, 26
+  judged): 23 → 26. The ranking (modules blocked, before): unboxed tuples in types 30, kind arguments of poly-kinded tycons 29,
+  `HsDocTy` 28, untyped variables 19, Coercible 14, GADTs 13, derived superclasses 13, unknown constructors 12, type applications
+  10, unboxed sums 8, ScopedTypeVariables 4 (with the metas they leave unsolved), type families 4, `(->)` as a tycon 4, implicit
+  parameters 4, MultiWayIf 4, rank-n 2, type literals 4. After: GADT local equalities 12, pattern synonyms 7, unknown constructors
+  7 (pattern synonyms' uses), names of hidden modules 8, derived Show/Eq contexts 6-7.
+- **Built**: `arbace/repr/haskell/famenv.ae`, a port of GHC 9.14.1's `compiler/GHC/Core/FamInstEnv.hs` (reduceTyFamApp_maybe,
+  lookupFamInstEnv's matching, chooseBranch, findBranch, apartnessCheck, compatibleBranches, computeAxiomIncomps) with
+  `compiler/GHC/Core/Unify.hs`'s tcMatchTys and tcUnifyTysFG (the pinned tarball, SHA-256 `2a83779c...101e77`, BSD-3 Glasgow
+  license, the notice in the file, LICENSE.md and doc/ARBACE.md updated); in `typecheck.ae`, after GHC's functions as the
+  specification: kinds erased from interface types (each tycon's, promoted constructor's and class's invisible arity), the
+  families read and reduced in `expand`, stuck equalities deferred, GADT constructors with rejigConRes's split and given
+  equalities per alternative (imported constructors' split from their types), signatures checked (tcPolyCheck's order), data family
+  instances as representation tycons, unboxed tuples and sums, ScopedTypeVariables and pattern-bound type variables, rank-n
+  foralls, type applications, implicit parameters, view patterns, MultiWayIf, Coercible erased, Typeable of applications,
+  KnownNat/KnownSymbol/KnownChar on literals, `(->)`/FUN as tycons; three bugs of the existing code the measure found (a documented
+  deriving clause's classes dropped, standalone deriving's variables lost, simplify-pred's `first` of a keyword).
+  `arbace/repr/haskell/libcheck.ae` and `bin/lib/repr-haskell/lib-check` (`bin/repr-haskell lib-check`, `make
+  repr-haskell-lib-check`): the measure. `bin/repr-haskell`'s native reads in typecheck-check, rename-check, run-check's
+  typecheck lists take `--libdir` (typecheck-check failed at `/settings` on next before this branch).
+- **Checks**: typecheck-check 24 of 24, its control differing; run-check 59 of 63 pass, 62 of 63 as recorded, the one differing
+  (`synthetic/primops-word`'s STG-stage StackOverflowError) the same at the branch's start.
+- **Proposed**: HF9-P1 (the measure as a pack-backed `--full` step), HF9-P2 (a second helper verb for hidden modules and
+  pattern synonyms' types), HF9-P3 (speed, then GADT implications, pattern synonyms, deriving), HF9-P4 (kinds erased for now).
+- **Findings beside the slice**: the native dumps of the read stage hold control bytes (a `"..."#` literal's bytes), so the host's
+  grep (ugrep) takes them for binary and prints nothing with `-o`: every tool that greps a dump needs `-a` (lib-check's closures
+  were empty for 20 modules until then); the helper's `iface` verb cannot load ghc-internal's 18 hidden modules (GHC-87110) and
+  writes a pattern synonym without its type; two modules (TH.Syntax, System.Posix.Types) take 5 to 10 minutes in the elaborator.
+- Alternatives considered: judging against `tc` dumps (GHC compiling each module: GHC at check time for every module, and
+  ghc-internal's modules compile only as the package itself); a clean reimplementation of type family reduction (rejected: the
+  brief's rule for rule port, and the apartness check is subtle); kind inference instead of kind erasure (the elaborator needs no
+  kinds to place evidence; Typeable's kind representations are the one consumer, left for a later slice).
+
+## 2026-11-08: HF9's second slice: speed, implications, pattern synonyms, deriving (branch hs-hf9)
+
+repr/haskell's type-level tier, the remaining items in HF9-P3 (a)'s order, measured with `bin/repr-haskell lib-check` on each
+item's modules by day and on the whole of ghc-internal at the end; doc/haskell/FRONTEND-SURVEY.md, "As built: HF9 (second slice)".
+
+- **Measure, first slice's end → this slice's end** (the same closures, dumps and judge): ghc-internal's 248 judged modules
+  without an error 200 → 227, every binder's type equal to GHC's interface 198 → 226, binders 4,937 → 4,955 of 4,992; the whole
+  run in one process 2,782 s → 592 s; base's sample 26 of 26. No module lost (none went from passing to failing).
+- **Speed**: the renamer's interface cache was keyed by the list of interface directories, and lib-check gives each module its own
+  directory of links into one pool, so every module parsed its closure's interfaces again and kept the copies: the process grew
+  and its later modules ran 5 to 9 times slower (the corpus's last 53 modules 2,124 s → 221 s once keyed by the file). Then the
+  instance table indexed by class, derived contexts by a simultaneous fixpoint until none changes (GHC's inferInstanceContexts:
+  each round from the previous one's), the renamed tree kept in memory by lib-check: TH.Syntax 108 s → 32 s alone.
+- **GADTs and implications** (written anew after GHC.Tc's rules): checking mode (case, if, let, lambda, multi-way if, list
+  comprehensions; tcApp's result unified before the arguments are checked; tcSkolemise of an expected polytype), sub-patterns
+  checked at the pushed type, equality givens of contexts, a pattern's givens over the statements after it, wanteds and failed
+  equalities kept with their implication's givens and solved later, givens on still unknown types pending until their binding
+  ends. Data.Data, Data.String, Data.Type.Equality, Err, TypeLits, TypeNats, Unsafe.Coerce pass.
+- **Pattern synonyms**: signatures split as tcPatSynSig, declarations checked (tcCheckPatSynDecl) or inferred, uses as
+  patterns (tcPatSynPat) and builders; Tuple, Natural, TypeLits, TypeNats, Exception, IO.Encoding.Types pass.
+- **Deriving**: standalone deriving of imported types, derived Eq/Ord/Show on unlifted fields (`deriv.ae` takes GHC.Tc.Deriv.
+  Generate's primOrdOps, boxConTbl and postfixModTbl, under its GHC notice), the newtype strategy only when eta-reducible, Generic's
+  contexts empty, data instances' derived heads at the family, existential and GADT record patterns, RecordWildCards in
+  expressions. Beside them: DataToTag, WithDict, implicit-parameter bindings and simplifyTop's defaulting of ?callStack and
+  ?exceptionContext, variable constraints, data families generative, over-applied families, `e :: sig` checked, promoted lists,
+  non-leading invisible kind binders, naughty selectors, default signatures apart from method types.
+- **Left** (21 modules): 18 wait for the helper (hidden modules' names, a non-exported synonym `CodeBuffer#` the `iface` verb omits,
+  the imported pattern synonym `Fun`), 2 for kinds (Generics' SingKind, Data.Typeable.Internal), 1 for Template Haskell quotes.
+  The methods of derived Data, Generic and Lift are not generated (their heads and contexts are): HF10's STG needs them.
+- **Checks**: typecheck-check 24 of 24 (control 13 of 24); run-check 59 of 63, 62 of 63 as recorded, the differing one the first
+  slice's (`synthetic/primops-word`); base's sample 26 of 26.
+- **Proposed**: HF9-P5 (the helper's second verb also writes non-exported tycons), HF9-P6 (kinds: keep erasure, 2 modules in a
+  class), HF9-P7 (Data/Generic/Lift's code with slice 7), HF9-P8 (the measure as a recorded check, now 12 minutes).
+- Alternatives considered: rebuilding the interface cache per module (rejected: the pool's files are shared, keying by the file is
+  the cache's intent); a fresh process per module (15 s of start-up each); eager unification of a GADT given's unknown sides (the
+  first slice's: wrong when a later argument fixes the scrutinee's type); generating Data/Generic/Lift's methods now (unmeasured by
+  lib-check; with the desugaring slice instead).
