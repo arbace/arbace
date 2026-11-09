@@ -6506,3 +6506,12 @@ of classes the conversion has not yet brought: the night's), no stub in the slic
 java-more's prediction found. 191 s and 2.07 GB peak (j2g's `GOMEMLIMIT` 1800MiB), the java-check part 112 s at 2.05 GB.
 Without PATHs on today's branch the change is the night's whole conversion (1,058 files since `b6a6093af`): that read is the
 night's (`bin/jrt-convert update`), not the day's; `predict` by day is for a slice's files after a conversion is committed.
+
+### java-props2: tonight's part, the light checks
+
+On `java-props2` (`java-night` at `33d04049c` with JCS300 (c), JCS285 (b), JCS313 (a), JCS257 (a), JCS325 (a), JCS283 (b) with
+JCS324 (a), JCS256 (a)'s switch written): the joint javac check (`.tmp/night7/all9-run.sh`) 3,315 files, 0 errors, 6,937
+classes (20 s, 1.0 GB); `bin/jrt-convert derive --check` 79 overlays, 0 not as derived; `bin/jrt test --arch amd64 --package jrt`
+ok (1.6 GB) and `bin/jrt build --arch amd64 --package jrt` (go vet) clean; `bin/gate --plan` 50 essential steps, no table error.
+`bin/reap` judges 15 problems where `java-night` has 11 before the night's records: the four are `:rmi`'s class counts (10 interp,
+8 compiled from `:net`, the cells' sums unchanged), recorded by the night's `bin/reap --record` with the rest.
