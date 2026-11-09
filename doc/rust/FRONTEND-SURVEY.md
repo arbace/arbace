@@ -2734,3 +2734,27 @@ The user's decisions (2026-11-09): RF12-P6 (a), RF12-P7 (a) in night 11.
   equal** to rustc's built MIR, 71 more but for the allocations, 381 differ, 217 refused, 74 without a body of rustc's by their key;
   `ptr::const_ptr` 39 of 78, `ptr::mut_ptr` 46 of 87. `bin/rust-front core-essential` and `bin/rust-front essential` still equal their
   known files.
+
+## As built: RF12-P6, core's bodies in the program's run (2026-11-09, night)
+
+- **`bin/rust-front core-export`**: core-check over `test/rust/front/core-native.txt` (a regex of core's names, then the module files:
+  the closure the run-built samples reach, a6's), each body run through the 21 passes and written with its equality to rustc's built
+  MIR into `.tmp/rust-front/core/native-core.edn`: its forms externalized (local ids as core's def paths, each type form's typeck type
+  as `:tc`, named constants as `:nc`, caller locations as `:call-loc`), its promoted bodies, generics and codegen attributes. 48
+  bodies, 43 equal; about 40 minutes (`num/mod.rs`), 2.27 GB at GOMEMLIMIT=2000MiB.
+- **`bin/rust-front run-built --native-core`** (`RF_CORE_NATIVE`; without it the run is as before): for each core item the program's
+  mono items reach, the export's body is printed again in the program's crate at the instance's arguments (types from `:tc`
+  substituted, `<T as Pointee>::Metadata` normalized at the instance), LowerIntrinsics run again (since the export: `transmute`,
+  `ptr_metadata`, `ub_checks` and its siblings as `RuntimeChecks`), `const_eval_select` remapped to its runtime function, its callees
+  collected through mono's `core-facts` and built likewise. A root is taken only when every body of its closure is in the export and
+  equal to rustc's; else the record's body stays (`record-kept ... (REASON)` in the log). Drop glue's shim is built natively when the
+  glue is the type's own `Drop::drop` alone (shim.rs' elaborated shim; `mono/drop-shim-plan`), else the record's.
+- **Results**: a6's core closure, 18 bodies (`write_volatile::<i32>`, `precondition_check`, `is_aligned_to`, `check_language_ub`,
+  `maybe_is_aligned`, `align_of`, `str::as_ptr`, `slice::len`, `ptr::metadata` and the rest) and its drop glue's shim, all native;
+  **mono-check's core-closure 3 of 3**; the 7 samples' status as rustc's executables (`7 of 7`), no core body from the pack
+  (`core's bodies from the pack 0, built natively 18`). Fixes on the way: coercion casts of references to raw pointers
+  (`self as *const str`), casts' user types (`ValueTypeAscription`), qualified paths to trait constants, `SizedTypeProperties`'
+  constants at the instance, doc comments in macro input, `macro_rules!` in statement position, nested core functions' attributes.
+- Left: `mut_ptr::cast_const` (a `*mut T` local for rustc's `*const T`), `slice::as_ptr`/`as_mut_ptr` (the user type's annotation),
+  `ptr::metadata::from_raw_parts` (`move` for `copy`) and `<DynMetadata>::size_of` (`VTable` unresolved); none on a6's path. The
+  export is not committed (it is the run's input, made by `core-export`); the night or the gate would run `core-export` first.

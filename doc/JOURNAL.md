@@ -2855,3 +2855,13 @@ Recorded in doc/rust/FRONTEND-SURVEY.md, "As built: RF11 (first slice)".
   pack remade), `format_args!`'s place inside core's own macros read through the virtual file. Carrying the bodies into the run
   (printing for the program's crate, instantiation, native callees) is not built: the next slice, on RF11's `build_run.ae`.
 - The 37 modules: 5,108 of 5,767 bodies equal (+71 but for the allocations); both essential checks equal their known files.
+
+## 2026-11-09 (night): RF12-P6, core's bodies built natively in a program's run
+
+- `bin/rust-front core-export` writes core's bodies (core-check through the 21 passes, externalized to core's paths, with their
+  equality to rustc's built MIR from the pack `rust-core-built`); `bin/rust-front run-built --native-core` prints them again in the
+  program's crate, instantiates them per mono item, builds their callees natively and takes a closure only when every body is equal,
+  the record's body the fallback; drop glue's simple shim built natively (shim.rs' elaborated drop of a type whose glue is its own
+  `Drop::drop`). a6's 18 core bodies and its shim native; mono-check's core-closure 3 of 3; the 7 samples as rustc's. Alternatives
+  considered: building the closure from rustc's optimized record (it inlines the callees: not independent) and copying the shim from
+  the record (kept as the fallback). doc/rust/FRONTEND-SURVEY.md, "As built: RF12-P6, core's bodies in the program's run".
