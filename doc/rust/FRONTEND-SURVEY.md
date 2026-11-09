@@ -2259,3 +2259,21 @@ Branch `rust-props`, after the night's four, one commit a proposal.
   for their text, 1 but for the crate hash, 19 differ, 11 refused, 32 not built; **63 programs whole** (60). The essential step's summary
   unchanged (a1-a7 call none of them).
 - (b), the attributes read from rust-src's library natively, comes with RF12's std from source, as decided.
+
+### RFP33 (a): opaque types' identity
+
+- collect's lowering of `impl Trait` (`lower-ty` `:impl`, and `item-bounds`' self type) gives the opaque type its OpaqueTy definition
+  (collect-opaques!' def, found by its node's span) and its args, the definer's generics at their identity: `[:opaque CLAUSES ID ARGS]`,
+  rustc's `Alias(Opaque, AliasTy { def_id, args })`. The use's substitution (`collect/subst`) gives the args the use's arguments, as
+  rustc's opaque type captures its parent's generics; printing is unchanged (`impl Fn(i32) -> i32`).
+- PostAnalysisNormalize (`passes/hidden-type`) reveals an opaque type by its definition: its parent is its defining function, whose
+  body's type is the hidden type (`concrete_opaque_types`' entry for a return-position opaque type), the definer's parameters replaced by
+  the use's args (`param-args`, `subst-map`). It now reveals the function constants' types too (`reveal-consts`: `twice::<impl Fn(i32)
+  -> i32>` printed again from the revealed type, `build/fn-const-text`), as rustc's pass normalizes every type of the body. An opaque
+  type without a definition (none here) takes the old structural match.
+- The sample `test/rust/front/opaque1.rs` (two functions returning `impl Fn(i32) -> i32`, alike but for their DefIds, and a generic
+  definer `twice<F>`), in the pack `rust-front-built` (1,210 members, `3f84e0a6...`) and `rust-front-captures` (9, `e41dfc4e...`), not
+  `rust-front-mono` (its run needs the closures behind opaque types collected: RF11's): through every pass 8 of 8 bodies equal (4 of 8
+  before: the alike pair and the generic definer left unrevealed). `closures`' `compose` (a generic definer): `differ` → `but for the
+  allocations' ids`. `typeck-check --ours closures collect1`: 493 of 497 facts, unchanged. The essential step's lines move to 8
+  programs (built 62 of 62, the passes 60 of 60, capture-check 33 of 34), recorded.

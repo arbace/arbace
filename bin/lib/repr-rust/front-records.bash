@@ -9,7 +9,7 @@
 #   std       the helper's std-names.edn and std-iface.edn (--std-names, --std-iface: RFS4, RFP26 (a)), their digests also
 #             test/rust/front/std-{names,iface}.sha256's
 #   built     rustc's MIR after mir_built and after each pass to runtime MIR (-Zdump-mir, the .after.mir files only: the judge
-#             reads no .before.mir) of test/rust/front/a*.rs, members NAME/FILE
+#             reads no .before.mir) of test/rust/front/a*.rs and opaque1.rs (RFP33 (a)), members NAME/FILE
 #   captures  each closure's kind, captures and fake reads (--captures, RFP20 (a)) of test/rust/synthetic/closures.rs and the
 #             test/rust/front/ programs with a closure, members NAME.cap.edn
 #   mono      run-built's record (RFP23 (b)): the helper's --mono-mir dump (the symbols, instances and layouts, std's
@@ -38,7 +38,9 @@ rfr_programs() {
   local f
   case $1 in
     std) echo std ;;
-    built|mono) (cd "$root" && ls test/rust/front/a*.rs) ;;
+    # RFP33 (a): opaque1.rs, the pass judge's opaque types, built (not run: its closures behind opaque types are RF11's)
+    built) (cd "$root" && ls test/rust/front/a*.rs test/rust/front/opaque1.rs) ;;
+    mono) (cd "$root" && ls test/rust/front/a*.rs) ;;
     captures) (cd "$root" && { echo test/rust/synthetic/closures.rs; for f in test/rust/front/*.rs; do grep -q '|' "$f" && echo "$f"; done; }) ;;
   esac
 }

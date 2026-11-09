@@ -1009,14 +1009,41 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; PostAnalysisNormalize (post_analysis_normalize.rs): opaque types revealed (TypingMode::PostAnalysis), each by its
 ;; defining function's hidden type, the type of that function's body (the corpus's opaque types are return-position
-;; `impl Trait` of the crate's functions; an opaque type two functions define alike is left as it is)
+;; `impl Trait` of the crate's functions). Since RFP33 (a) an opaque type carries its OpaqueTy definition, whose parent is
+;; its definer (two functions' alike opaque types are two types, a generic definer's hidden type takes the use's arguments);
+;; one without (an expansion's, no root-file span) by the signatures equal to it, as before: one alike definer or none
 
 (def ^:dynamic *opaque-cache* nil)   ; atom: an opaque type -> its hidden type, or ::none
+
+(defn- param-args
+  "RFP33 (a): the arguments an opaque type's use gives its definer's parameters: the definition's args (the identity) against
+  the use's, {index arg}"
+  [def-args use-args]
+  (into {} (for [[t x] (map vector def-args use-args) :when (and (vector? t) (number? (second t)))] [(second t) x])))
+
+(defn- subst-map [t m]
+  (cond (and (vector? t) (#{:param :re-early} (first t)) (contains? m (second t))) (get m (second t))
+        (vector? t) (mapv #(subst-map % m) t)
+        (map? t) (into {} (for [[a b] t] [a (subst-map b m)]))
+        (seq? t) (apply list (map #(subst-map % m) t))
+        :else t))
 
 (defn- hidden-type [op]
   (let [cache (or *opaque-cache* (atom {}))]
     (if (contains? @cache op)
       (get @cache op)
+      (if-let [od (when-let [id (nth op 2 nil)] (c/def-of id))]
+        ;; RFP33 (a): the opaque type's definition names its defining function (its parent); the hidden type that body's
+        ;; typeck gives it (its return-position opaque type: the body's type), the definer's parameters taken from the use's
+        ;; clauses (the opaque type's args)
+        (let [d (c/def-of (:parent od))
+              out (when (and d (#{"Fn" "AssocFn"} (str (:kind d))) (map? (:node d)) (:body (:node d)))
+                    (:output (try (tc/erased-sig (:id d)) (catch Throwable _ nil))))
+              h (when (and (vector? out) (= :opaque (first out)) (= (nth out 2 nil) (nth op 2 nil)))
+                  (let [res (tc/body-results d)]
+                    (some-> (:ty (get res [(first (:hir-id (:node d))) :body])) tc/erase-ty (subst-map (param-args (nth out 3 nil) (nth op 3 nil))))))]
+          (swap! cache assoc op h)
+          h)
       (let [ds (filter (fn [d] (and (#{"Fn" "AssocFn"} (str (:kind d))) (map? (:node d)) (:body (:node d))
                                     (= op (:output (try (tc/erased-sig (:id d)) (catch Throwable _ nil))))))
                        (c/defs))
@@ -1025,7 +1052,7 @@
                       res (tc/body-results d)]
                   (some-> (:ty (get res [(first (:hir-id (:node d))) :body])) tc/erase-ty)))]
         (swap! cache assoc op h)
-        h))))
+        h)))))
 
 (defn- reveal [t]
   (cond (and (vector? t) (= :opaque (first t))) (if-let [h (hidden-type t)] (reveal h) t)
@@ -1036,17 +1063,37 @@
 
 (defn- has-opaque? [t] (boolean (some #(and (vector? %) (= :opaque (first %))) (tree-seq coll? seq t))))
 
+(defn- reveal-consts
+  "RFP33 (a): the blocks' function item constants whose type names an opaque type (`twice::<impl Fn(i32) -> i32>`) revealed,
+  their text printed again from the revealed type as MIR building prints a function constant"
+  [blocks]
+  (letfn [(walk [x]
+            (cond (and (seq? x) (= 'const (first x)) (seq? (nth x 2 nil)) (:tc (meta (nth x 2))))
+                  (let [t (:tc (meta (nth x 2)))]
+                    (if (and (= :fndef (first t)) (has-opaque? t))
+                      (let [t2 (reveal t)]
+                        (apply list 'const (build/fn-const-text t2) (build/ty-form t2) (drop 3 x)))
+                      x))
+                  (seq? x) (with-meta (apply list (map walk x)) (meta x))
+                  (vector? x) (with-meta (mapv walk x) (meta x))
+                  (map? x) (with-meta (into {} (for [[a b] x] [a (walk b)])) (meta x))
+                  :else x))]
+    (walk blocks)))
+
 (defn post-analysis-normalize
-  "PostAnalysisNormalize: the locals' and the return type's opaque types revealed"
+  "PostAnalysisNormalize: the locals', the return type's and (RFP33 (a)) the function constants' opaque types revealed"
   [body]
-  (if-not (some has-opaque? (:local-tys body))
+  (if-not (or (some has-opaque? (:local-tys body))
+              (some #(and (seq? %) (= 'const (first %)) (has-opaque? (:tc (meta (nth % 2 nil)))))
+                    (tree-seq coll? seq (:blocks body))))
     body
     (let [lts (mapv #(if (has-opaque? %) (reveal %) %) (:local-tys body))
           changed (set (keep-indexed (fn [i t] (when (not= t (nth (:local-tys body) i)) i)) lts))]
       (-> body
           (assoc :local-tys lts)
           (update :locals (fn [ls] (vec (map-indexed (fn [i l] (if (changed i) (assoc l :ty (build/ty-form (nth lts i))) l)) ls))))
-          (cond-> (changed 0) (assoc :ret (build/ty-form (nth lts 0))))))))
+          (cond-> (changed 0) (assoc :ret (build/ty-form (nth lts 0))))
+          (update :blocks reveal-consts)))))
 
 (def pipeline
   "Each pass's -Zdump-mir name and its function; a promoted body starts at ImpossibleClauses. Passes that change nothing
