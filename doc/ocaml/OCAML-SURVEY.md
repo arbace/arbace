@@ -3267,7 +3267,7 @@ demonstrations, not tests) keep the recorded run. A negative control for the sta
 status 0: it must differ). `bin/oi own-verdicts --check`: run corpus 404 of 420 at oi's level, 415 at the AOT level (unchanged); suite
 corpus 88 to **100** of 121 at oi's level, 98 to **110** at the AOT level; own = recorded on every program both judges see, 0 differ.
 
-**The native path over the opam set: five of the typer's gaps, ported.** Running the opam set's own verdicts on the native path (the
+**The native path over the opam set: eight of the typer's gaps, ported.** Running the opam set's own verdicts on the native path (the
 default since TY24 (a)) showed that the oracle path's record (`check-suite-oi.edn`) hides what the native typer refused: astring's and
 cmdliner's units did not type, so their programs were `dump` rows natively, and the suite's native record (OC185's twin) would have had
 fewer passes than the oracle's. Each gap ported from OCaml 5.5.0's typing/ (the pinned tarball), with a reproduction of a few lines:
@@ -3286,12 +3286,24 @@ fewer passes than the oracle's. Each gap ported from OCaml 5.5.0's typing/ (the 
    typed as `match e with K x -> body` (cmdliner_completion's `let (Conv conv) = ...`, `Conv` not in scope but by the expression's type).
 6. `Includemod.signatures`' `Env.add_signature sig1`: the implementation's type declarations registered as the compared signature has
    them (an alias's target comes substituted by its path), so `'a Arg_conv.t` and `'a conv` meet (cmdliner_arg's `Conv`).
+7. `Load_path.find_normalized`: a unit's file is its uncapitalised name, else its name as written (pprint's `PPrintEngine.mli`).
+8. A unit's interface read leniently (find-unit) types its class types (`class type custom`, which its values name; one the typer
+   refuses is still left out), and Includemod compares them by name and maps the specification's class type identifiers (its
+   abbreviation and `#`-type) to the implementation's.
+The opam sample on the native path after them (`bin/oi suite check --only-list`, 18 programs in two lists): astring's four, cmdliner's
+three (`load`, `example_cp`, `example_chorus`, the control differing as it must), pprint's two, re's, fmt's, base64's and uutf's `load`
+pass, judged by their own verdicts where they have one; `opam/sexplib0/load` still stops in `sexp_conv_record.ml` (`let (Field {...}) =
+fields in match kind, ... with`: a GADT equation on the outer existential refused at `Sexp_list` under or-patterns of the same match;
+small reproductions of the shape pass, so the case is left for the next slice: it was a `dump` row natively before too, `Field`
+unbound).
 And `Printtyp`'s cycles: `type-text` prints a recursive node as an `as 'r` alias instead of recurring without end (a message built for an
 error that the typer then catches overflowed the stack: cmdliner_manpage). Checked: `bin/oi typer-check` 79 of 79 (types, raw and
 simplified Lambda, runs), `bin/oi repl-check --native` 24 of 24, the native library rebuilt (`bin/oi stdlib`: 71 units and the 49 of the
-other libraries, none refused) and compared with its build before the five: seven units' Lambda differ only in identifiers' stamps and
-static exits' numbers (the same tokens once both are renumbered in order of appearance), the essential list (below), the suite sample
-(below).
+other libraries, none refused) and compared with its build before them: seven units' Lambda differ only in identifiers' stamps and
+static exits' numbers (the same tokens once both are renumbered in order of appearance); the essential list (`bin/oi check
+--only-list test/ocaml/essential-check.txt`, native): 58 of 59 pass by their own verdict, both controls differ, the 59th
+(`lib-threads/signal`) not run to its end: its C helper needs musl's forms, whose first read in this worktree (`bin/ci musl ensure`)
+had not ended after 45 minutes under the night's load and was stopped by hand; the suite sample (below).
 
 **What keeps eval, AOT and judge below 1** (no gate step of OCaml runs ocamlc or ocamlopt: `test/gate/crops/ocaml.edn`'s steps are on
 `:stage0` and `:go`; ocdump and the host's compilers are the oracle tier's): (1) eval and AOT, the cells' records: `check-oi.edn`,
@@ -3307,6 +3319,10 @@ own processing (`own-verdict.edn`'s 7: OC210), the opam demonstrations (11 a lev
 cases at 1) and the switch (eval, AOT 1): about 99.9% (judge 0.996); with OC209 (a) and OC210 (a) about 99.97%.
 
 **The night's commands** (after the merge; `OI_TYPER_GOMEMLIMIT=1200MiB`, `O2J_JOBS=1`):
+0. `bin/oi stdlib` (the typer changed: the native library's key moved; about 7 minutes at `OI_LIB_JOBS=2`), then the native records
+   night 10 wrote are judged again on this branch's typer: `bin/oi suite check` and `suite check --aot` gain the opam set's units the
+   typer refused before (astring's, cmdliner's, pprint's programs: `dump` rows on next's typer), so record them (`--record`) before
+   `bin/oi reap-switch`; `bin/oi check` likewise for the run corpus (its rows should not move but by stamps).
 1. `printf 'lib-unix/common/test_unix_cmdline\n' > .tmp/oc208.txt; bin/oi check --aot --level compiled --only-list .tmp/oc208.txt`
    (OC208 (b): its row passes, judged by its own verdict; then the class's program list in `divergences-aot-compiled.edn` loses it).
 2. `bin/oi suite check --record` and `bin/oi suite check --aot --record` (the opam set's twelve judged by their own verdicts; both

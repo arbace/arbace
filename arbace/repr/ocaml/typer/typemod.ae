@@ -368,11 +368,14 @@
                             (if env'
                               (recur more env' (into items its) substs)
                               (recur more env (into items (repeat (count (d 1)) [:hole])) substs)))
-          :Psig_class_type (if env/*lenient*
-                             (recur more env items substs)
-                             (let [[infos env'] (*class-type-declarations* env (d 1))
-                                   its (vec (map-indexed (fn [i c] [:class-type (:name c) (:ty-id c) (:decl c) (:obj-id c) nil (if (pos? i) :next :first)]) infos))]
-                               (recur more env' (into items its) substs)))
+          ;; a unit's interface read leniently (find-unit) types its class types too, as the program's own signature does (pprint's
+          ;; PPrintEngine.mli: `class type custom`, named by its values); one the typer refuses is left out, as before
+          :Psig_class_type (if-let [[infos env'] (try (*class-type-declarations* env (d 1))
+                                                      (catch arbace.lang.ExceptionInfo e
+                                                        (if (and env/*lenient* (:ocaml-type-error (ex-data e))) nil (throw e))))]
+                             (let [its (vec (map-indexed (fn [i c] [:class-type (:name c) (:ty-id c) (:decl c) (:obj-id c) nil (if (pos? i) :next :first)]) infos))]
+                               (recur more env' (into items its) substs))
+                             (recur more env items substs))
           :Psig_modtype (let [mtd (d 1) n (:txt (:pmtd_name mtd))
                               mty (try (some->> (:pmtd_type mtd) (transl-modtype env))
                                        (catch arbace.lang.ExceptionInfo e
@@ -421,7 +424,7 @@
     (if (empty? its)
       [m byk]
       (let [item (first its)
-            k (case (item 0) (:val :exn :module :modtype :class) [(item 0) (item 1)] nil)
+            k (case (item 0) (:val :exn :module :modtype :class :class-type) [(item 0) (item 1)] nil)
             rt (env/runtime-item? item)]
         (recur (rest its) (if rt (inc pos) pos)
                (if (and k rt) (assoc m k pos) m)
@@ -452,6 +455,13 @@
                                  :type [id (second x)]
                                  (:module :modtype) [id [:Pident (x 2)]]))))
                          (env/bound-type-ids sig2)))
+        ;; and the specification's class types' type identifiers (the class type's abbreviation and its #-type) by the
+        ;; implementation's of the same name
+        s (into s (mapcat (fn [item]
+                            (when (= :class-type (item 0))
+                              (when-let [x (get by1 [:class-type (item 1)])]
+                                (for [i [2 4] :when (and (get item i) (get x i))] [(item i) [:Pident (x i)]]))))
+                          sig2))
         sig2 (env/subst-items s sig2)
         pairs (vec
                (mapcat
@@ -478,6 +488,9 @@
                                 (when-not (get by1 [:type n]) (type-error (str "The type " n " is required but not provided"))))
                               [])
                     :modtype []
+                    ;; a class type: no runtime component (Includemod's class type declarations, by name)
+                    :class-type (do (or (get by1 [:class-type (item 1)]) (type-error (str "The class type " (item 1) " is required but not provided")))
+                                    [])
                     :class (do (or (get by1 [:class (item 1)]) (type-error (str "The class " (item 1) " is required but not provided")))
                                [[(get pos1 [:class (item 1)]) nil]])
                     :hole (type-error "a part of the interface is outside the slice")))

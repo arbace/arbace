@@ -2814,6 +2814,13 @@ set's own verdicts", with the proposals OC209-OC211.
   recorded run (OC211). A negative control at both suite levels. `bin/oi own-verdicts --check`: suite 100 of 121 at oi's level, 110 at
   the AOT level, 0 differ. Alternatives: a report-line verdict for astring's and uutf's logs (the runner would rewrite their output, as
   the hooks do; the packages' runners judge by status alone); expected outputs for the demonstrations (ocamlc's output copied: rejected).
+- The native path over the opam set (TY24 (a)'s default) refused astring's and cmdliner's units, hidden by the oracle path's record:
+  eight gaps of the typer ported from OCaml 5.5.0's typing/ (the pinned tarball: env.ml's .cmi reading, typemod.ml's
+  `Signature_names.simplify` and `Psig_typesubst`, load_path.ml's order and `find_normalized`, class types in a unit's interface, typecore.ml's `turn_let_into_match`, includemod.ml's
+  `Env.add_signature`) and printtyp.ml's cyclic types as `as 'a` aliases; each from a reproduction of a few lines (doc/ocaml/OCAML-SURVEY.md,
+  "The native path over the opam set"). Without them OC185's switch would have taken a suite record with fewer passes. Checked by
+  typer-check (79 of 79), repl-check (24 of 24), the native library rebuilt (no unit refused; seven units' Lambda differ only by stamps
+  and static exits' numbers) and the essential list.
 - Found: no OCaml gate step runs ocamlc or ocamlopt; eval and AOT are 0.5 by their cells' records (ocdump's path) until night 10's
   native records and `bin/oi reap-switch --apply`; OC202's switch must take the compiled level's native record. The judge's recorded
   cases left: 37 at oi's level, 16 at the AOT level (OC209-OC211).
