@@ -3989,6 +3989,18 @@
     "InitListExpr" {:op :init-list :items (analyze-args ctx (kids n)) :ty {:k :init-list}}
     ;; a default member initializer's place in a semantic list (the native parser's fill, [dcl.init.aggr]/5.1): the
     ;; aggregate's initialization takes the member's initializer there
+    ;; GNU's statement expression ({ s...; e; }) (GCC's manual, "Statements and Declarations in Expressions"): the statements in
+    ;; a block of their own, the last expression statement's value the value (a scalar's or void; a class's refused); cpp-route
+    "StmtExpr"
+    (let [c (block-ctx ctx)
+          xs (vec (kids (first (kids n))))
+          lst (peek xs)
+          val? (and lst (not (str/ends-with? (str (:kind lst)) "Stmt")))
+          items (mapv #(stmt c %) (if val? (pop xs) xs))
+          e (when val? (analyze c lst))
+          _ (when (and e (abi/class? (abi/unq (:ty e)))) (fail :expr "a statement expression of class type"))
+          e (when e (rv e))]
+      {:op :stmt-expr :items items :e e :ty (if e (:ty e) abi/void) :cat :pr})
     "CXXDefaultInitExpr" {:op :default-init :ty {:k :default-init} :cat :pr}
     "ImplicitValueInitExpr" {:op :value-init :ty {:k :value-init} :cat :pr}
     ;; sizeof...(pack): the number of a pack's elements (CODEGEN.md G3)
@@ -4528,7 +4540,11 @@
     "CXXForRangeStmt"
     (let [c (block-ctx ctx)
           ks (vec (:inner n))
-          rangen (some #(when (= "DeclStmt" (:kind %)) %) ks)
+          ;; (the native parser's node is clang's: init-statement (or none), the range's DeclStmt, begin, end, cond, inc, the
+          ;; loop variable's DeclStmt, the body; C++20's init-statement, [stmt.ranged]/1, analyzed first in the loop's scope:
+          ;; it was taken for the range; g++.dg's cpp2a/range-for14.C; cpp-route)
+          init-s (when (and (= 8 (count ks)) (:kind (first ks))) (stmt c (first ks)))
+          rangen (if (= 8 (count ks)) (nth ks 1) (some #(when (= "DeclStmt" (:kind %)) %) ks))
           range-e (analyze c (first (kids (first (kids rangen)))))
           loopd (first (kids (last (filter #(= "DeclStmt" (:kind %)) ks))))
           body (last ks)
@@ -4542,6 +4558,7 @@
                       (materialize (or (std-init-list t range-e c) (fail :range-for "a braced range"))))
                     range-e)
           at (:ty range-e)]
+      ((fn [r] (if init-s {:s :block :items [init-s r]} r))
       (if (and (not (abi/arr? (abi/unq at))) (class-id at))
         (range-for-class c range-e loopd body)
       (do
@@ -4568,7 +4585,7 @@
                            {:s :decl :var eid :init {:i :expr :e {:op :ptradd :o "+" :p (rv range-e) :n {:op :int :v (:n at) :ty abi/long* :cat :pr} :ty pt :cat :pr}}}
                            {:s :for :cond {:op :cmp :o "!=" :l (rv bvar) :r (rv evar) :ct pt :ty abi/bool* :cat :pr}
                             :inc {:op :incdec :o "++" :post false :e bvar :ty pt :cat :lv}
-                            :body {:s :block :items (conj (vec decls) (stmt ic body))}}]}))))
+                            :body {:s :block :items (conj (vec decls) (stmt ic body))}}]})))))
     "BreakStmt" {:s :break}
     "ContinueStmt" {:s :continue}
     "SwitchStmt" (let [c (block-ctx ctx) ks (vec (:inner n))
