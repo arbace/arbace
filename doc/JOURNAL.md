@@ -1151,3 +1151,18 @@ compiler stubs first on PATH (their log empty). doc/cpp/CPP-SURVEY.md, "Decided 
   (cpp0x/constexpr-type-def1, -diag5, -ctor19, -compound), none lost, no new extra. Each line read; valid probes clean.
 - **Alternatives considered**: judging function templates' bodies at their definition (left: the corpus shows g++ doing it only for
   a class template's constructor, cpp0x/constexpr-ctor19); clang's placement at the statement (rejected: the dg lines are g++'s).
+
+## 2026-11-09: C++'s CP303 (a), the next unknown GNU attributes (branch `cpp-props2`)
+
+- **Built** (doc/cpp/CPP-SURVEY.md, "As built: CP300-CP314", CP303 (a)): the parser keeps a function's and a typedef's unknown GNU
+  attributes as `:_gattrs` (a variable's and a field's since CP294 (a)), those of a leading attribute-specifier-seq too, and marks
+  `[[gnu::x(...)]]` as a standard attribute's syntax; `gattr-rules` gain warn_if_not_aligned (not on a variable, a function or a
+  bit-field; no bit-field of a type declared with it) and no_dangling (its argument rules), written from the GCC 15.2 manual
+  (gcc/doc/extend.texi of the pinned tarball) and the corpus's directives, clean-room.
+- **Not built**, with reasons: musttail (the middle end's tail-call errors), transaction_safe/_unsafe/_wrap (the TM TS under
+  -fgnu-tm, its keywords not parsed); no_dangling's template-dependent argument rules.
+- **Measured**: the every-10th sample unchanged (108, 92 extras); the attributes' 38 dg-error files of the whole part: three gained
+  (pr53037-4, other/bitfield7, ext/attr-no-dangling2), none lost, no new extra; each line read, valid probes clean.
+- **Alternatives considered**: (b) alone (the failing files' attributes only: the same two built, musttail and TM left for the
+  same reasons); placing warn_if_not_aligned's errors at the attribute as CP294's (rejected: the directives' columns are the
+  declarator's).

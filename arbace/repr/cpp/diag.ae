@@ -409,7 +409,30 @@
                 (and (= "VarDecl" (:kind d)) (not (:constexpr d)) (not (re-find #"\bconst\b" (str (get-in d [:type :qualType])))))))
          "the strict_flex_array attribute's level is not an integer constant"
          (and v (not (<= 0 (long v) 3))) (str "the strict_flex_array attribute's level " v " is not between 0 and 3")
-         :else nil)))})
+         :else nil)))
+   ;; CP303 (a), the manual's "Common Variable Attributes" and "Common Type Attributes": a threshold for a structure's field, or
+   ;; a type's; so not for a variable or a function, nor a bit-field (a field whose alignment is its own); at the declarator's name
+   "warn_if_not_aligned"
+   (fn [_ n _]
+     (let [what (fn [] (if (#{"FunctionDecl" "CXXMethodDecl"} (:kind n))
+                         (let [qt (str (get-in n [:type :qualType]))
+                               [_ r ps] (re-find #"^(.*?)\s*\((.*)\)" qt)]
+                           (str r " " (:name n) "(" (if (= "void" (str/trim (str ps))) "" ps) ")"))
+                         (:name n)))]
+       (when (or (#{"VarDecl" "FunctionDecl" "CXXMethodDecl"} (:kind n)) (and (= "FieldDecl" (:kind n)) (:isBitfield n)))
+         {:at-decl true :msg (str "'warn_if_not_aligned' may not be specified for '" (what) "'")})))
+   ;; CP303 (a), the manual's "C++-Specific Variable, Function, and Type Attributes": an optional argument, an expression that
+   ;; evaluates to true or false, on a class type, a function or a member function (else ignored, a warning); [[gnu::no_dangling()]]
+   ;; an empty argument list written, which a standard attribute's syntax forbids
+   "no_dangling"
+   (fn [{:keys [args std]} n _]
+     (cond
+       (and std (= [] args)) "parentheses must be omitted if 'no_dangling' attribute argument list is empty"
+       (not (#{"FunctionDecl" "CXXMethodDecl"} (:kind n))) nil
+       (> (count args) 1) "wrong number of arguments specified for 'no_dangling' attribute"
+       (and (= 1 (count args)) (re-matches #"(?s)(?:u8|u|U|L)?\".*\"" (str/trim (first args))))
+       "'no_dangling' argument must be an expression that evaluates to true or false"
+       :else nil))})
 
 (defn gnu-attrs
   "CP294 (a): the unknown GNU attributes' rules (gattr-rules) over the declarations that carry them, each error at the
@@ -421,9 +444,22 @@
                   (doseq [a (:_gattrs n)]
                     (when-let [r (get gattr-rules (:name a))]
                       (when-let [m (r a n vars)]
-                        (let [[l c] (line-col starts (long (:off a)))]
-                          (.add out {:line l :col c :kind :error :rule :gnu-attr :msg m}))))))
+                        ;; (a rule's {:at-decl true :msg m}: at the declarator's name, else at the attribute's)
+                        (let [o (if (and (map? m) (:at-decl m)) (or (get-in n [:loc :offset]) (:off a)) (:off a))
+                              [l c] (line-col starts (long o))]
+                          (.add out {:line l :col c :kind :error :rule :gnu-attr :msg (if (map? m) (:msg m) m)}))))))
                 (:nodes u) nil)
+    ;; CP303 (a): a bit-field of a type declared warn_if_not_aligned (a typedef of the main file's), at its name
+    (let [wtypes (set (for [n (:nodes u) :when (and (= "TypedefDecl" (:kind n)) (some #(= "warn_if_not_aligned" (:name %)) (:_gattrs n)))] (:name n)))]
+      (when (seq wtypes)
+        (walk-nodes (fn [n _]
+                      (when (and (= "FieldDecl" (:kind n)) (:isBitfield n)
+                                 (contains? wtypes (str/trim (str/replace (str (get-in n [:type :qualType])) #"\b(?:const|volatile)\b" ""))))
+                        (let [o (or (get-in n [:loc :offset]) (get-in n [:range :begin :offset]))
+                              [l c] (line-col starts (long o))]
+                          (.add out {:line l :col c :kind :error :rule :gnu-attr
+                                     :msg (str "cannot declare bit-field " (when (seq (:name n)) (str "'" (:name n) "' ")) "with 'warn_if_not_aligned' type")}))))
+                    (:nodes u) nil)))
     (vec out)))
 
 ;; A constexpr function's definition (clang/lib/Sema/SemaDeclCXX.cpp at llvmorg-23.1.5: CheckConstexprFunctionBody,

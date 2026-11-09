@@ -4592,3 +4592,39 @@ the rest, one commit each (the sections below in the order built). The measure i
   declaration beside one return, a constructor with a typedef and a null statement, a conditional return, a function template)
   gives no diagnostic. Not built: g++'s other C++11 body errors (the try blocks of cpp2a/constexpr-try1-5, which also want C++20's
   try rules; constexpr-function2's side effects and argument rules).
+
+### CP303 (a): the next unknown GNU attributes
+
+(b)'s order, the attributes whose dg-error lines are in the whole part's failing files, then the rest; written from the GCC 15.2
+manual (gcc/doc/extend.texi of the pinned gcc-15.2.0.tar.xz: "Common Variable Attributes", "Common Type Attributes",
+"C++-Specific Variable, Function, and Type Attributes", "Statement Attributes") and the corpus's directives, clean-room (no GCC code
+read), the messages after the directives' texts.
+
+- The parser (`arbace.repr.cpp.parse`): a function declaration and a typedef now take their unknown GNU attributes as `:_gattrs`
+  as a variable and a field do (CP294 (a)), and every one of them those of the leading attribute-specifier-seq too (`[[gnu::x]] int
+  &f();`: the decl-specifiers' `:gb`, the seq's first token; their range began after it, so a leading `[[gnu::...]]` was missed); an
+  attribute written `[[gnu::x(...)]]` is marked `:std` (a standard attribute's syntax).
+- `gattr-rules`: **warn_if_not_aligned** (a threshold for a structure's field or a type): on a variable, a function or a bit-field
+  "'warn_if_not_aligned' may not be specified for 'NAME'" (a function as `R NAME(PARAMS)`, `(void)` printed `()`) at the
+  declarator's name (a rule's `{:at-decl true}`), and a bit-field of a typedef of the main file declared with it "cannot declare
+  bit-field 'NAME' with 'warn_if_not_aligned' type" at its name; **no_dangling** (an optional argument, an expression that
+  evaluates to true or false, on a class type, a function or a member function; elsewhere ignored, a warning): `[[gnu::no_dangling()]]`
+  "parentheses must be omitted if 'no_dangling' attribute argument list is empty", on a function two arguments "wrong number of
+  arguments specified for 'no_dangling' attribute", a string literal "'no_dangling' argument must be an expression that evaluates
+  to true or false".
+- Not built: **musttail** (its errors, "cannot tail-call: ...", are the middle end's tail-call pass at -O0, by the return types, the
+  callee's exceptions and the target's sibling calls: the code generator's level, not a declaration's text; the attribute is
+  clang's too, so the trees keep it); **transaction_safe, transaction_unsafe, transaction_wrap** (`-fgnu-tm`, the Transactional
+  Memory TS: its keywords `transaction_safe` as a virt-specifier-like suffix, `atomic_commit` blocks and `__transaction_atomic`,
+  none of which the native parser reads (tm/inherit2's syntax error), and their errors a call graph's safety analysis): a TS of its
+  own, left (26 dg-error files of tm/). no_dangling's argument rules that need the template's instantiation
+  (ext/attr-no-dangling7: an unexpanded pack, `T::x`, a non-constexpr call, a narrowing 20 to bool) are left.
+- Measure: the every-10th sample 108 → 108, the extras the same 92 (`.tmp/t7/rA`, with CP304 and CP305; no file of the sample
+  names these attributes); the 38 dg-error files of the whole part naming the four attributes
+  (with CP314's, `.tmp/t7/fA.txt`, f9b81f1e3's tree against this branch): gained pr53037-4 (4 lines), other/bitfield7 (2),
+  ext/attr-no-dangling2 (3); none lost, the extras the same 25 lines.
+- No false credit: pr53037-4's four lines are a variable's, a function's and a bit-field's attribute and a bit-field of the
+  attributed typedef `__u32`, each at its column; bitfield7's the unnamed and the named bit-field of `intwna`; no-dangling2's the
+  three argument rules, and none on its ignored uses (`[[no_dangling]]` without `gnu::`, a variable, a typedef, an enumeration, an
+  empty declaration, a label). The probe `.tmp/t7/v314.cpp` (a field and a type with warn_if_not_aligned, no_dangling on a class and
+  on functions with no and a `true` argument) gives no diagnostic.
