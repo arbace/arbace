@@ -1122,3 +1122,20 @@ compiler stubs first on PATH (their log empty). doc/cpp/CPP-SURVEY.md, "Decided 
   empty grep argument and a `2>/dev/null` in a wait loop (the survey's "Slips"). Proposed CP310 (constexpr errors inside calls and
   immediate functions' addresses), CP311 (CTAD with initializers), CP312 (the conversion rules for the code generator), CP313
   (access in units with friends), CP314 (C++11's constexpr function body).
+
+## 2026-11-09: C++'s CP302 (a), the code generator's light half in the gate (branch `cpp-props2`, from f9b81f1e3)
+
+- **Decided** by the user (2026-11-09, about 06:15 UTC): CP300-CP305 and CP310-CP314 as recommended (doc/cpp/CPP-SURVEY.md, "As
+  built: CP290-CP294" and "As built: CX12 (fifth slice)", their "Proposed"); CP302 first, for the night.
+- **Built** (doc/cpp/CPP-SURVEY.md, "As built: CP300-CP314", CP302 (a)): `bin/cppi codegen-gen` (gen-list over test/cpp/codegen's 142
+  samples, no clang or gcc; `arbace.cpp.codegen/gen-judge`), the records `test/cpp/codegen/refusals.edn` (rtti) and
+  `test/cpp/codegen/forms.sha256` (141 digests of forms.ae), two `:level :gen` negative controls in test/cpp/controls.edn, the
+  `--full` step `cpp-codegen-gen` (`:mem-gib 2`, chain cpp-full) in test/gate/crops/cpp.edn and test/gate/steps.edn, `make
+  cppi-codegen-gen`. Why: the ten samples refused from a14d52531 (2026-11-04) went unnoticed four days, since only codegen-check
+  (clang and gcc live) generated them.
+- **Alternatives considered**: (b) the step in the essential gate (5 minutes a gate, rejected by the decision); digests of gen.c too
+  (left: the lowering has its own steps, and a lowering change would re-record every sample); comparing the refusal's message (left:
+  the class is the decision, the message may name generated symbols).
+- **Checked**: the recorded run and a second gen-list run byte for byte; the judge passes the record, fails a changed digest and an
+  unrecorded refusal; both controls fail as they must; `make check-makefile`, `gate.crops check`, `bin/gate --full --plan`,
+  `bin/crops-score --crop cpp` (unchanged). One slip: a throwaway `grep ... 2>/dev/null` over scratch logs (only read).

@@ -2405,6 +2405,73 @@
                      (count (filter #(contains? known (:name %)) res)) (count bad) (if (seq stale) (str ", known but passing: " (str/join " " stale)) "")))
     (when (or (seq bad) (seq stale)) (System/exit 1))))
 
+;; ---------------------------------------------------------------------------------------------
+;; bin/cppi codegen-gen: the code generator's light half (CP302 (a), doc/cpp/CPP-SURVEY.md, "As built: CP300-CP314")
+
+(defn- file-sha256 ^String [^String p]
+  (let [d (.digest (java.security.MessageDigest/getInstance "SHA-256") (.getBytes ^String (slurp p) "UTF-8"))]
+    (apply str (map #(format "%02x" (bit-and (int %) 0xff)) d))))
+
+(defn- gen-outcome
+  "A sample's outcome in DIR after gen-one: [:refused CLASS] (gen.refused's class), [:forms SHA-256 of forms.ae], or [:none]."
+  [^String dir]
+  (cond (.exists (java.io.File. (str dir "/gen.refused"))) [:refused (first (str/split (str/trim (slurp (str dir "/gen.refused"))) #"\t"))]
+        (.exists (java.io.File. (str dir "/forms.ae"))) [:forms (file-sha256 (str dir "/forms.ae"))]
+        :else [:none]))
+
+(defn- read-forms-record [^String p]
+  (if (.exists (java.io.File. p))
+    (into {} (for [l (str/split-lines (slurp p)) :when (and (seq l) (not (str/starts-with? l "#")))
+                   :let [[h n] (str/split l #"\s+")]]
+               [n h]))
+    {}))
+
+(defn gen-judge
+  "WORK/list.tsv's samples (NAME<tab>PATH), each generated into WORK/files/NAME by gen-list: a refused sample against REFUSALS
+  ({NAME CLASS}: its class the same), a generated one's forms.ae against FORMS (sha256sum's lines, DIGEST  NAME), a sample in
+  neither record failing. CONTROLS' :level :gen entries ({:id :subject NAME :reference NAME}) cross two samples: the subject's
+  outcome judged against the reference's record must fail. --record rewrites both records from the run (a whole run only).
+  Writes WORK/results.tsv; exit 1 on a failure."
+  [^String work ^String refusals-path ^String forms-path ^String controls-path record?]
+  (let [names (vec (for [l (str/split-lines (slurp (str work "/list.tsv"))) :when (seq l)] (first (str/split l #"\t"))))
+        out (into {} (for [n names] [n (gen-outcome (str work "/files/" n))]))
+        refusals (if (.exists (java.io.File. refusals-path)) (read-string (slurp refusals-path)) {})
+        forms (read-forms-record forms-path)
+        expect (fn [n] (cond (contains? refusals n) [:refused (get refusals n)]
+                             (contains? forms n) [:forms (get forms n)]
+                             :else nil))
+        verdict (fn [o e] (cond (nil? e) "not-recorded"
+                                (= o e) "pass"
+                                (and (= :forms (first o)) (= :forms (first e))) "forms-differ"
+                                (= :refused (first o)) (if (= :refused (first e)) "refusal-differs" "refused")
+                                :else "generated"))
+        res (vec (for [n names] [n (verdict (out n) (expect n)) (out n)]))
+        bad (filterv #(not= "pass" (second %)) res)]
+    (spit (str work "/results.tsv")
+          (apply str (for [[n v [k x]] res] (str n "\t" v "\t" (name k) "\t" (or x "") "\n"))))
+    (if record?
+      (let [rf (into (sorted-map) (for [n names :let [[k x] (out n)] :when (= :refused k)] [n x]))
+            ff (for [n (sort names) :let [[k x] (out n)] :when (= :forms k)] (str x "  " n "\n"))]
+        (spit refusals-path (str ";; CP302 (a): test/cpp/codegen's samples the code generator refuses, NAME -> the refusal's class (gen.refused's\n"
+                                 ";; first field); bin/cppi codegen-gen --record writes it, with forms.sha256 (the others' forms.ae). Read with the Clojure reader.\n"
+                                 (pr-str rf) "\n"))
+        (spit forms-path (str "# CP302 (a): the SHA-256 of each generated sample's forms.ae (bin/cppi codegen-gen --record)\n" (apply str ff)))
+        (println (format "codegen-gen: recorded %d samples, %d generated, %d refused" (count names) (count ff) (count rf))))
+      (let [cs (filter #(= :gen (:level %)) (if (.exists (java.io.File. controls-path)) (read-string (slurp controls-path)) []))
+            cbad (vec (for [{:keys [id subject reference]} cs
+                            :let [o (get out subject) e (expect reference)]
+                            :when (cond (or (nil? o) (nil? e)) (do (println (str "control " id " left: the run lacks " (if o reference subject))) false)
+                                        (= "pass" (verdict o e)) (do (println (str "control " id " passed: the judge takes another sample's record")) true)
+                                        :else (do (println (str "control " id " fails as it must (" (verdict o e) ": " subject " against " reference "'s record)")) false))]
+                        id))]
+        (doseq [[n v [k x]] bad] (println (str "FAIL " n " " v " (" (name k) (when x (str " " x)) ", recorded " (pr-str (expect n)) ")")))
+        (println (format "codegen-gen: %d samples, %d pass (%d generated, %d refused as recorded), %d failing%s"
+                         (count res) (- (count res) (count bad))
+                         (count (filter #(and (= "pass" (second %)) (= :forms (first (nth % 2)))) res))
+                         (count (filter #(and (= "pass" (second %)) (= :refused (first (nth % 2)))) res))
+                         (count bad) (if (seq cbad) (str ", controls passing: " (str/join " " cbad)) "")))
+        (when (or (seq bad) (seq cbad)) (System/exit 1))))))
+
 (defn -main
   "bin/cppi codegen FILE OUTDIR [--std S]: the file's LLVM forms by the code generator, their IR and their lowering;
   bin/cppi codegen-list LIST (NAME<tab>PATH<tab>OUTDIR lines)."
@@ -2434,4 +2501,5 @@
                       (flush)))
                   (shutdown-agents) (System/exit 0))
     "judge" (let [[work known] args] (judge work known))
+    "gen-judge" (let [[work refusals forms controls rec] args] (gen-judge work refusals forms controls (= rec "--record")))
     (do (println "codegen: gen FILE OUT [--std S], gen-list LIST") (System/exit 2))))

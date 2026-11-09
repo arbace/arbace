@@ -4537,3 +4537,34 @@ in a wait loop's test; both only read, nothing written there, the commands not r
 c1-c6, v1, `one.sh`, `one.ae`, `dumpr.ae`, `sample.sh`, the runs `r1/` and `r2/` (the recorded one), `w1/` (the first step's files),
 `ctl/` (the control), `gen-base/` and `gen-new/` (the code generator's comparison), `*.log`), `base-tree/` (now 1443ba1c5's `arbace/`
 and `cpp/`), `llvm-src/` (SemaDeclCXX.cpp, SemaInit.cpp, SemaOverload.cpp, SemaTemplateDeduction.cpp added).
+
+## As built: CP300-CP314 (2026-11-09; branch `cpp-props2` from f9b81f1e3)
+
+The user's decisions of 2026-11-09 (about 06:15 UTC), all as recommended: CP300 (a), CP301 (a), CP302 (a), CP303 (a) with (b)'s
+order, CP304 (a), CP305 (a), CP310 (b) then (a), CP311 (a), CP312 (a), CP313 (a), CP314 (a). Built in that order but CP302 first
+(the night's), one commit each. The measure is the CX12 slices': the every-10th dg-error sample's own passes (454 supported files,
+`.tmp/t6/sample.sh`), each new pass read against its source (the no-false-credit review), and `gen-list` over test/cpp/codegen's
+142 samples before and after, the intended changes listed; every own run with the compilers' stubs first on PATH.
+
+### CP302 (a): the code generator's light half in the gate
+
+- `bin/cppi codegen-gen [WORK] [--record] [--only-list FILE]` (WORK default `.tmp/cppi/codegen-gen`; `make cppi-codegen-gen`):
+  `gen-list` over test/cpp/codegen's samples (the native parser, arbace.cpp.sema, arbace.cpp.codegen and the lowering, no clang, no
+  gcc, no run; libstdc++'s tree from the pinned gcc tarball as `bin/repr-cpp target` makes it), then `arbace.cpp.codegen/gen-judge`:
+  a refused sample's class (gen.refused's first field) against `test/cpp/codegen/refusals.edn` (`{NAME CLASS}`), a generated one's
+  `forms.ae` against its SHA-256 in `test/cpp/codegen/forms.sha256` (sha256sum's lines), a sample in neither record failing; each
+  verdict in WORK/results.tsv (`pass`, `forms-differ`, `refused`, `refusal-differs`, `generated`, `not-recorded`). `--record`
+  rewrites both records from a whole run (a change of the generated forms is a re-record, its samples named in the commit).
+- Its negative controls, `test/cpp/controls.edn`'s `:level :gen` entries (the other judges filter by level): arith's forms judged
+  against bank's recorded digest (`forms-differ`), rtti's refusal against arith's recorded forms (`refused`); one that passes fails
+  the step.
+- The `--full` step `cpp-codegen-gen` (`:mem-gib 2`, the chain cpp-full, on stage 0, inputs `:lib-tools :tools :cpp :c`, pins
+  test/cpp/corpora.edn and test/c/corpora.edn; its control test/cpp/controls.edn), in test/gate/crops/cpp.edn and
+  test/gate/steps.edn. The ten samples refused from a14d52531 to CP290 would have failed it the first night (`refused`, each
+  recorded generated).
+- Checked: `codegen-gen .tmp/cg1 --record` (4 min 38 s at one thread, about 1.4 GiB under GOMEMLIMIT=1400MiB): 142 samples, 141
+  generated, rtti refused (`codegen`, the `:dyncast` prvalue), the forms byte for byte those of a separate gen-list run of the same
+  tree (`.tmp/p0`); the judge on that run: 142 pass, both controls fail as they must; on a record with one digest changed and no
+  refusal recorded: `FAIL arith forms-differ`, `FAIL rtti not-recorded`, exit 1. `make check-makefile`, `gate.crops check .
+  test/gate/steps.edn` (0 problems), `bin/gate --full --plan` (`cpp-codegen-gen` planned, never passed), `bin/crops-score --crop cpp`
+  (76.1 / 100 / 67.8, unchanged: the step is one more `--full` step of an already full checklist).
