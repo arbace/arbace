@@ -43,7 +43,7 @@
   (its expression's mark, lower's :expn-mark) at its outermost macro call's site (ExpnId::expansion_cause, the call sites
   walked to the root's: arbace.rust.front.expand records each mark's root call site), else its own span"
   [x]
-  (or (when-let [m (:expn-mark x)] (some-> (get *expn-sites* m) vec)) (:span x)))
+  (or (when-let [m (:expn-mark x)] (some-> (get *expn-sites* m) vec)) (:fn-span x) (:span x)))
 (def ^:dynamic *fixed-temps-scope* nil)   ; a guard's scope, whose temporaries the sub-branches of an or-pattern share
 (def ^:dynamic *let-vis* nil)   ; the source scope an `if`'s let bindings are visible in (its variable source info's)
 (declare char-text lit-const int-const finish*)
@@ -608,7 +608,10 @@
                      [tr m] (if mutbl ["core::ops::index::IndexMut" "index_mut"] ["core::ops::index::Index" "index"])
                      call {:k :call :ty [:ref [:re-erased] mutbl ty] :span (:span e) :tsi (:hir-id e)
                            :fun {:k :zst-literal :ty [:fndef (str tr "::" m) [st (adjusted-ty (:index e))]] :span (:span e) :tsi (:hir-id e)}
-                           :args [ax ix] :from-hir false :fn-span (:span e)}]
+                           :args [ax ix] :from-hir false
+                           ;; RF11: ExprKind::Index's brackets span, the overloaded call's fn_span: from the base's end to the index's
+                           :fn-span (let [bs (:span (:expr e)) sp (:span e)]
+                                      (if (and (vector? bs) (vector? sp)) [(bs 2) (bs 3) (sp 2) (sp 3)] sp))}]
                  (mk e :deref ty :arg call)))
       :tup (mk e :tuple ty :fields (mapv mirror-expr (:exprs e)))
       :repeat (if (= :array (first ty)) (mk e :repeat ty :value (mirror-expr (:expr e)) :count (nth ty 2)) (unsupported "a repeat of" ty))
@@ -633,7 +636,11 @@
       :method (let [[def args] (or (:callee (r-of e)) (unsupported "a method call without its callee"))
                     fty [:fndef def args]]
                 (mk e :call ty :fun {:k :zst-literal :ty fty :span (or (method-ident-span e) (:span e)) :tsi (:hir-id e) :user-ty (:user-ty (r-of e))}
-                    :args (into [(mirror-expr (:receiver e))] (map mirror-expr (:args e))) :from-hir true :fn-span (:span e)))
+                    :args (into [(mirror-expr (:receiver e))] (map mirror-expr (:args e))) :from-hir true
+                    ;; RF11: hir::ExprKind::MethodCall's span, the method's name to the call's end (rustc_hir_typeck's fn_span):
+                    ;; the caller location of a #[track_caller] method
+                    :fn-span (let [is (method-ident-span e) sp (:span e)]
+                               (if (and (vector? is) (vector? sp)) [(is 0) (is 1) (sp 2) (sp 3)] sp))))
       :struct (let [[adt vi vid] (or (ctor-info (:path e)) (unsupported "a struct expression" (:path e)))]
                 (mk e :adt ty :adt adt :variant vi :vid vid :base (some-> (:base e) mirror-expr)
                     :fields (mapv (fn [f] [(field-index vid (:ident f)) (mirror-expr (:expr f))]) (:fields e))))
@@ -1243,7 +1250,7 @@
                  (let [t (term-of from)]
                    (case (first t)
                      (call assert false-unwind)
-                     (terminate! from (concat (butlast t) [(list 'cleanup to)]))
+                     (terminate! from (with-meta (apply list (concat (butlast t) [(list 'cleanup to)])) (meta t)))
                      drop (if (= 'cleanup (first (nth t 3)))
                             (goto! (second (nth t 3)) to)
                             (terminate! from (apply list (assoc (vec t) 3 (list 'cleanup to)))))
@@ -1459,9 +1466,16 @@
 (defn- new-source-scope! []
   (let [n (count (:source-scopes (st)))] (upd! update :source-scopes conj [(:source-scope (st)) nil]) n))
 
+(def ^:dynamic *assert-x*
+  "RF11: the THIR expression an Assert terminator is built for (build_binary_op's, the unary negation's and the index's span:
+  its source info), whose caller location the panic reports (span_as_caller_location, as a call's); nil, none kept"
+  nil)
+
 (defn- assert! [bb cond expected msg]
-  (let [ok (start-new-block!)]
-    (terminate! bb (list 'assert (op-form cond) expected msg ok '(continue)))
+  (let [ok (start-new-block!)
+        t (list 'assert (op-form cond) expected msg ok '(continue))
+        t (if-let [x *assert-x*] (vary-meta t assoc :assert-span (caller-span x)) t)]
+    (terminate! bb t)
     (diverge-from! bb)
     ok))
 
@@ -1531,7 +1545,7 @@
                            (unsupported "an index of" bt))
                      lt (temp! bool-ty)]
                  (assign! bb lt (list 'binop "Lt" (op-form [:copy (place idx)]) (op-form (to-copy len))))
-                 (let [bb (assert! bb [:move lt] true (list 'bounds-check (op-form len) (op-form [:copy (place idx)])))]
+                 (let [bb (binding [*assert-x* x] (assert! bb [:move lt] true (list 'bounds-check (op-form len) (op-form [:copy (place idx)]))))]
                    (if outer?
                      (doseq [t @*fake-borrow-temps*] (push! bb (list 'fake-read "ForIndex" (place-form (place t)))))
                      (add-fake-borrows-of-base! bb base))
@@ -1627,12 +1641,12 @@
     :scope (in-scope-x x (as-rvalue bb scope (:value x)))
     :binary (let [[bb l] (as-operand bb scope (:lhs x) :maybe)
                   [bb r] (as-operand bb scope (:rhs x) :no)]
-              (build-binary-op bb (:op x) (:ty x) l r))
+              (binding [*assert-x* x] (build-binary-op bb (:op x) (:ty x) l r)))
     :unary (let [[bb a] (as-operand bb scope (:arg x) :no)
                  bb (if (and (:check-overflow (st)) (= "Neg" (:op x)) (signed? (:ty x)))
                       (let [m (temp! bool-ty)]
                         (assign! bb m (list 'binop "Eq" (op-form (to-copy a)) (op-form (min-const (:ty x)))))
-                        (assert! bb [:move m] false (list 'overflow-neg (op-form (to-copy a)))))
+                        (binding [*assert-x* x] (assert! bb [:move m] false (list 'overflow-neg (op-form (to-copy a))))))
                       bb)]
              [bb (list 'unop (:op x) (op-form a))])
     :cast (let [src (:source x) st* (:ty src)]
@@ -1819,7 +1833,7 @@
     :assign-op (do (upd! update :block-context conj :sub-expr)
                    (let [[bb r] (as-local-operand bb (:rhs x))
                          [bb p] (as-place bb (:lhs x))
-                         [bb rv] (build-binary-op bb (:op x) (:ty (:lhs x)) [:copy p] r)]
+                         [bb rv] (binding [*assert-x* x] (build-binary-op bb (:op x) (:ty (:lhs x)) [:copy p] r))]
                      (assign! bb p rv)
                      (upd! update :block-context pop)
                      bb))

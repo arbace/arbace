@@ -12,6 +12,13 @@
 #             reads no .before.mir) of test/rust/front/a*.rs and opaque1.rs (RFP33 (a)), members NAME/FILE
 #   captures  each closure's kind, captures and fake reads (--captures, RFP20 (a)) of test/rust/synthetic/closures.rs and the
 #             test/rust/front/ programs with a closure, members NAME.cap.edn
+#   rsi       RF11 (doc/rust/FRONTEND-SURVEY.md, "As built: RF11 (first slice)"): bin/rsi check --front own's record of each
+#             program of rsi's samples and synthetic corpus (bin/rsi list --set samples, synthetic): the helper's --mono-mir dump
+#             with rsi's plan's flags (bin/lib/rsi/plan.bash's plan_rustc: the program's edition, rustc's debug defaults, the
+#             path relative to the checkout as rsi's build names it) and -Zshare-generics=no, against rsi's std build's sysroot
+#             (bin/rsi std-build; its crates' identities test/rust/front/std-crates-rsi.edn, in the key), members
+#             NAME/NAME.record.edn: the bodies std's instances take (RF12's part), the facts the native mono refuses; no status
+#             or output (the judge is rsi's: test/rust/ref-rustc-1.99.1.edn)
 #   mono      run-built's record (RFP23 (b)): the helper's --mono-mir dump (the symbols, instances and layouts, std's
 #             resolved callees, the bodies the program's own replace) and rustc's executable's exit status and output, of
 #             test/rust/front/a*.rs, members NAME/NAME.record.edn, NAME/status, NAME/stdout; the checkout's absolute path in
@@ -41,10 +48,28 @@ rfr_programs() {
     # RFP33 (a): opaque1.rs, the pass judge's opaque types, built (not run: its closures behind opaque types are RF11's)
     built) (cd "$root" && ls test/rust/front/a*.rs test/rust/front/opaque1.rs) ;;
     mono) (cd "$root" && ls test/rust/front/a*.rs) ;;
+    rsi) rfr_rsi_list | cut -d$'\x1f' -f1 ;;
     captures) (cd "$root" && { echo test/rust/synthetic/closures.rs; for f in test/rust/front/*.rs; do grep -q '|' "$f" && echo "$f"; done; }) ;;
   esac
 }
 rfr_name() { basename "$1" .rs; }
+# RF11: rsi's plan of its samples and synthetic corpus (bin/rsi list's lines: id, file, edition, flags, ...; 0x1f-separated)
+rfr_rsi_list() {
+  [ -f "$work/records/rsi-plan.tsv" ] && [ "$work/records/rsi-plan.tsv" -nt "$root/bin/rsi" ] || {
+    mkdir -p "$work/records"
+    "$root/bin/rsi" list --set samples -o "$work/records/rsi-plan.s" && "$root/bin/rsi" list --set synthetic -o "$work/records/rsi-plan.y" &&
+      cat "$work/records/rsi-plan.s" "$work/records/rsi-plan.y" > "$work/records/rsi-plan.tsv"; } || return 1
+  cat "$work/records/rsi-plan.tsv"
+}
+# the rsi kind's rustc command line of a program (plan_rustc's, as bin/lib/rsi/check's ir1 builds it): rfr_rsi_flags REL
+rfr_rsi_flags() {
+  local line ed fl
+  line=$(rfr_rsi_list | awk -F'\x1f' -v id="$1" '$1 == id {print; exit}')
+  [ -n "$line" ] || { echo "rust-front records: $1 is not in rsi's plan" >&2; return 1; }
+  ed=$(printf '%s' "$line" | cut -d$'\x1f' -f3); fl=$(printf '%s' "$line" | cut -d$'\x1f' -f4)
+  [ -z "$fl" ] || { echo "rust-front records: $1: rsi's plan gives flags ($fl), which the rsi kind does not take yet" >&2; return 1; }
+  echo "--edition $ed -A unused -A internal_features -Cdebuginfo=0 -Zshare-generics=no"
+}
 # the helper's flags for a program of a kind (bin/rust-front's build_oracles, run-built and capture_oracles, as they were)
 rfr_flags() {  # KIND REL
   local k=$1 f=$root/$2 pf="" oc=-Coverflow-checks=off ct=bin ed=2024
@@ -56,6 +81,7 @@ rfr_flags() {  # KIND REL
       grep -q "fn main" "$f" || ct=lib
       if [ "$k" = built ]; then echo "--edition 2024 --crate-type $ct -A warnings -C opt-level=0 -C debuginfo=0 $pf $oc"
       else echo "--edition 2024 --crate-type bin -A warnings -C opt-level=0 -C debuginfo=0 $pf $oc -Zshare-generics=no"; fi ;;
+    rsi) rfr_rsi_flags "$2" ;;
     captures)
       grep -q "fn main" "$f" || ct=lib
       [ "$(rfr_name "$2")" = edition2015 ] && ed=2015
@@ -69,7 +95,9 @@ rfr_key() {  # KIND REL
     if [ "$k" = std ]; then echo "fn main() {}"; else sha256sum < "$root/$rel" | cut -c1-64; fi
     rfr_helper_hash
     rfr_flags "$k" "$rel"
-    [ "$k" = built ] && { echo "$rfr_passes"; echo "$rfr_judged"; }; true; } | sha256sum | cut -c1-64
+    [ "$k" = built ] && { echo "$rfr_passes"; echo "$rfr_judged"; }
+    # rsi's std build's identity: its crates' StableCrateIds and SVHs (a rebuilt std moves every entry)
+    [ "$k" = rsi ] && cat "$root/test/rust/front/std-crates-rsi.edn"; true; } | sha256sum | cut -c1-64
 }
 
 # rfr_live KIND REL OUT: the helper (as rustc) makes the program's members under OUT (OUT/ID for each member ID); 1 on a failure
@@ -87,10 +115,17 @@ rfr_live() {
       (ulimit -v 4000000; cd "$s" && "$helper" rustc -- $(rfr_flags built "$rel") -Zdump-mir="$rfr_passes" -Zdump-mir-dir="$n" -o "$n.bin" "$f" > "$n.log" 2>&1) || { cat "$s/$n.log" >&2; return 1; }
       # RFP31 (a): only the .after.mir dumps the judge reads (rfr_judged: each pass at its first phase; no .before.mir, no later
       # phase's rerun of a pass, no shim's pipeline)
-      mkdir -p "$out/$n"; (cd "$s/$n" && ls) | grep -E "$rfr_judged" | while read -r m; do cp "$s/$n/$m" "$out/$n/"; done ;;
+      # RF11: the checkout's absolute path in the dumps (closures' spans, impl paths) written @ROOT@ and put back at the read, as
+      # the mono kind's (the pack made in one checkout judged in another)
+      mkdir -p "$out/$n"; (cd "$s/$n" && ls) | grep -E "$rfr_judged" | while read -r m; do sed "s|$root/|@ROOT@/|g" "$s/$n/$m" > "$out/$n/$m"; done ;;
     captures)
       (ulimit -v 2000000; cd "$s" && "$helper" rustc --captures "$n.cap.edn" -- $(rfr_flags captures "$rel") -o "$n.cap.bin" "$f" > "$n.cap.log" 2>&1) || { cat "$s/$n.cap.log" >&2; return 1; }
       cp "$s/$n.cap.edn" "$out/" ;;
+    rsi)
+      # as rsi's build: in the checkout, the file by its path relative to it, the checkout remapped to /src
+      local sys fl; sys=$(rf11_rsi_sysroot) || return 1; fl=$(rfr_rsi_flags "$rel") || return 1
+      (ulimit -v 4000000; cd "$root" && "$helper" rustc --mono-mir "$s/$n.record.edn" -- $fl --sysroot "$sys" --remap-path-prefix "$(pwd -P)=/src" -o "$s/$n.rustc.bin" "$rel" > "$s/$n.log" 2>&1) || { cat "$s/$n.log" >&2; return 1; }
+      mkdir -p "$out/$n"; cp "$s/$n.record.edn" "$out/$n/$n.record.edn" ;;
     mono)
       (ulimit -v 4000000; cd "$s" && "$helper" rustc --mono-mir "$n.record.edn" -- $(rfr_flags mono "$rel") -o "$n.rustc.bin" "$f" > "$n.log" 2>&1) || { cat "$s/$n.log" >&2; return 1; }
       mkdir -p "$out/$n"
@@ -106,7 +141,7 @@ rfr_ids() {  # KIND REL DIR
   case $k in
     std) printf 'std-names.edn\t%s\nstd-iface.edn\t%s\n' "$key" "$key" ;;
     captures) printf '%s.cap.edn\t%s\n' "$n" "$key" ;;
-    built|mono) (cd "$d" && find "$n" -type f | LC_ALL=C sort) | while read -r id; do printf '%s\t%s\n' "$id" "$key"; done ;;
+    built|mono|rsi) (cd "$d" && find "$n" -type f | LC_ALL=C sort) | while read -r id; do printf '%s\t%s\n' "$id" "$key"; done ;;
   esac
 }
 # the program's prefix of member ids in a manifest (a program's key is the one of its members)
@@ -117,7 +152,7 @@ rfr_prefix() {  # KIND REL
 # bin/rust-front records make [KIND...]: the packs made afresh (by hand, on the host with rustc: ORS5 (a))
 rfr_make() {
   local kinds=("$@") k rel d ids
-  [ ${#kinds[@]} -gt 0 ] || kinds=(std built captures mono)
+  [ ${#kinds[@]} -gt 0 ] || kinds=(std built captures mono rsi)
   [ "$(oracle_host_id rustc)" != none ] || { echo "rust-front records make: no rustc here (the oracle tier's host)" >&2; return 1; }
   for k in "${kinds[@]}"; do
     d=$work/records/make; rm -rf "$d/rust-front-$k"; mkdir -p "$d/rust-front-$k"; ids=$d/rust-front-$k.ids; : > "$ids"
@@ -148,11 +183,11 @@ rfr_stage() {
   done
   [ $bad = 0 ] || return 1
   u=$(oracle_unpack "$pin") || return 1
-  if [ "$k" = mono ]; then
-    local s=$work/records/stage/mono-$(oracle_pin_sha "$pin")
+  if [ "$k" = mono ] || [ "$k" = built ]; then
+    local s=$work/records/stage/$k-$(oracle_pin_sha "$pin")
     if [ ! -f "$s.done" ]; then
-      rm -rf "$s"; mkdir -p "$s"; cp -r "$u/rust-front-mono/." "$s/"
-      find "$s" -name '*.record.edn' -exec sed -i "s|@ROOT@/|$root/|g" {} +
+      rm -rf "$s"; mkdir -p "$s"; cp -r "$u/rust-front-$k/." "$s/"
+      find "$s" -type f \( -name '*.record.edn' -o -name '*.mir' \) -exec sed -i "s|@ROOT@/|$root/|g" {} +
       : > "$s.done"
     fi
     echo "$s"
@@ -167,7 +202,7 @@ rfr_stage() {
 rfr_verify() {
   local kinds=() sample=0 k rel d u n ndiff total st=0 fa
   while [ $# -gt 0 ]; do case $1 in --sample) sample=$2; shift 2 ;; *) kinds+=("$1"); shift ;; esac; done
-  [ ${#kinds[@]} -gt 0 ] || kinds=(std built captures mono)
+  [ ${#kinds[@]} -gt 0 ] || kinds=(std built captures mono rsi)
   if [ "$(oracle_host_id rustc)" = none ] || [ ! -x "$helper" ]; then echo "verify: rust-front: absent (no rustc or no helper here)"; return 0; fi
   for k in "${kinds[@]}"; do
     u=$(oracle_unpack "$(rfr_pin "$k")") || { st=1; continue; }
@@ -192,7 +227,7 @@ rfr_verify() {
     if [ "$k" = std ]; then pa=$d/std-names.edn pb=$u/std-iface.edn
     elif [ ${#progs[@]} -ge 2 ]; then
       a=$(rfr_name "${progs[0]}") b=$(rfr_name "${progs[1]}")
-      case $k in captures) pa=$d/$a.cap.edn pb=$u/$b.cap.edn ;; built) pa=$d/$a pb=$u/$b ;; mono) pa=$d/$a/$a.record.edn pb=$u/$b/$b.record.edn ;; esac
+      case $k in captures) pa=$d/$a.cap.edn pb=$u/$b.cap.edn ;; built) pa=$d/$a pb=$u/$b ;; mono|rsi) pa=$d/$a/$a.record.edn pb=$u/$b/$b.record.edn ;; esac
     fi
     if [ -n "$pa" ]; then
       if diff -r "$pa" "$pb" > "$d/control.diff" 2>&1; then echo "verify: $k: control ($pa against $pb) PASSED (a bug)"; st=1

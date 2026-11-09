@@ -343,6 +343,10 @@ code. Three kinds of things live here:
   `span_as_caller_location` with `rustc_span/src/hygiene.rs`' `expansion_cause`, `rustc_mir_transform/src/post_analysis_normalize.rs`
   (opaque types by their definition), `rustc_expand/src/mbe/transcribe.rs`' `mk_delimited` with `rustc_span/src/lib.rs`' `Span::to`;
   LICENSE.md names them (MIT OR Apache-2.0); `ci_batch.ae` (RFP36 (c): the essential step's ci session) is Arbace's own.
+  RF11's first slice (2026-11-09, doc/rust/FRONTEND-SURVEY.md, "As built: RF11 (first slice)") ports into `mono.ae`
+  `rustc_abi/src/layout.rs`' `layout_of_union` and into `arbace/rust/back/codegen.ae` `rustc_codegen_ssa/src/mir/place.rs`'
+  `project_subslice` and `rvalue.rs`' exposed-provenance casts, rustc 1.99.1, the same revision and sources; LICENSE.md names them
+  (MIT OR Apache-2.0); `build_run.ae`'s promoted constants' evaluation and std's integer constants are Arbace's own.
   `arbace/rust/front/build.ae` (THIR and MIR building after `rustc_mir_build/src/{thir,builder}/`, the region scope tree after
   `rustc_hir_analysis/src/check/region.rs`) and `build_run.ae` (CleanupPostBorrowck's changes, the layouts of scalars and scalar pairs
   after `rustc_abi`) port rustc 1.99.1, the same revision and sources, by hand on 2026-11-08 (RF10's first slice,
