@@ -5988,6 +5988,40 @@ Records: the dg own sample recorded again (120 → 125 own passes of 454) and in
 (unchanged), independence 71.28 → 71.30 (read 0.657 → 0.658; eval and AOT still 0.5 until the records say which programs our route runs,
 CP356); the route's gains count at the night's records. doc/cpp/CPP-SURVEY.md, "As built: cpp-s2", has the measures and the night's commands.
 
+## 2026-11-09: the re-seed window's day step D-W2a: `window-w2b`, W2's candidate redone on next c2536d182
+
+The user decided the plan `.tmp/window-w/PLAN.md` (2026-11-09) §9: W-D1 (a) pyi embedded in W2 and ci's `arbace/ci`, `arbace/crt`
+listed (amending PYS18 (a)'s and queue 208's "after Python's tag"), W-D2 (a) W1 on its own night, W-D3 (a) `arbace/classes/` in
+`RT.toolSource`, W-D4 (a) llvmi out, W-D5 (a) oi alone, W-D6 (a) R in W2's night after the verify, W-D7 (a) no clean run right
+after W, W-D8 (a) an arm64 check by the Mac VM; W-D9 (the disk pruned to 70% before W1) not accepted. Recorded in doc/W-WINDOW.md
+("Decided (2026-11-09, the user)"), brought onto this branch from `window-w` (1ffe9e73d).
+
+Done (branch `window-w2b` from mac/next c2536d182, by day, light; doc/W-WINDOW.md, "As built: D-W2a"): the old embedding branches
+(embed-crops 0c711daa6, ad0165745; embed-gaps 16fac1462, 012dc86a1; 2026-11-04) conflict with today's next in 15 files, mostly
+where the keys commit (PYS30 (a)) replaced each key's own exclusions by `arbace_crop_paths`; their code was redone rather than
+merged: 16fac1462 cherry-picked with six conflicts resolved on next's side (f6a7d67e9: si's shipped path, oi listed, `bin/oi
+table-check`, `bin/si interp-check`); goi's REQUEST 656dfcdc3 (2ef68c884); c9047d524 skipped, next has it (8ea59b57a); crt's
+3db255c5f (79bcbc869); 214's a420fa0d5 as unions (e7e9d9b95: the table lists arbace/{ci,crt,libm,oi,py}); then one commit by hand
+(8803e5b2e) for the embedding (embed.ae: repr/scheme, scheme, repr/python, python, repr/cpp, repr/llvm, cpp in; ncheck, tcheck,
+mutate out, W-P4 (a)), the keys (arbace_crop_paths and crop-rules less the embedded, `arbace_runtime_not`, the audit's :gate and
+:javac, gate-key-crops-test in its W2 form, after the trial e923f4731) and `RT.toolSource` (arbace/c, cpp, scheme, python, classes;
+0525fa896's and 0c711daa6's lines); and 293936f4c, a hint in `arbace/repr/llvm/expect.ae` (the C++ set's one reflection warning).
+The surveys' texts of the old branches were not taken (doc/W-WINDOW.md says why).
+
+Checked on main's stage 0: the c2j checks of the newly embedded namespaces, `bin/repr-cpp c2j-check` ok (34 of 34, after the hint;
+8 min, 2.2 GB), `bin/repr-scheme c2j-check` ok (23), `bin/pyi c2j-check` ok (20, the control refused), `bin/ci c2j-check` ok (27);
+gate-key-crops-test PASS (309), audited-test 19 of 19, `gate.crops check` 0 problems, `make check-makefile` ok; crops-test fails
+one check on next too (its expected concurrent chains). The keys: gate_key 1c6836bc492e to fb37dc317a32, the runtime key 6baefbe7230d
+to 42b40f043fff, the javac key f0cd740e7eaa to 8ffad8259f1a, the aot key moved too; `bin/gate --full --plan`: 310 of 316 steps
+rekeyed, a rekey-all as planned. Found: goi's checker over the listed packages in the tamago configurations (test/python/table_check.ae,
+oi added) fails, oi 101 errors (Linux-only calls in its new ext_* files, missing :val, conv and :init-order annotations), crt 5
+(spawn.go), py 2 (cIntArg in a Linux-only file): W2's build would stop on the table. `bin/oi table-check`'s linux configurations were
+stopped (they convert linux's std, 3.5 GB: the night's). Proposed in doc/W-WINDOW.md: W-D10 (the crops stay out of :tools),
+W-D11 (cpp-c2j's :mem-gib 3), W-D12 (types under toolSource), W-D13 (the table-readiness fixes before W2, oi left out as the
+fallback). Alternatives considered: merging embed-gaps (rejected: 15 conflicting files on a superseded keys scheme); putting the
+crops into :tools as the old commits did (W-D10 (b), every crop commit would rerun every stage-0 step); fixing oi's 101 errors here
+(rejected: OCaml's files move daily, and the fix is its owner's).
+
 ## 2026-11-11: ghidra-gh4iii, GH4 (iii)'s names-only `java.class.path` (branch `ghidra-gh4iii`, from `mac/java-night` adba65cea)
 
 The user approved GH4 (iii)'s names-only listing (2026-11-11). Sources: the demo's plan/G1.md and .tmp/plans/GHIDRA-CASE-STUDY.md (GH4 (iii)),
