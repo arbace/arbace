@@ -120,6 +120,8 @@ END {
       # the standard input empty and the standard error discarded (bin/oi's @stdin=null, @stderr=null in the run's environment field)
       if (key == "stdin" && val == "/dev/null") { env = env " @stdin=null"; continue }
       if (key == "stderr" && val == "/dev/null") { env = env " @stderr=null"; continue }
+      # a main .mll's ocamllex action (OC197 (a)): bin/oi's mll_gen runs the native ocamllex with -q, the flags every such test sets
+      if (key == "ocamllex_flags" && FILENAME ~ /\.mll$/ && trim(val) == "-q") continue
       if (key == "ocamlopt_flags" || key == "reason" || key == "exit_status" || key == "binary_modules") continue
       if (key == "arguments") { args = val; continue }
       # the program's own C stubs (the C API on ci, doc/ocaml/OCAML-SURVEY.md "As built: the C API on ci"): modules that are all C
@@ -166,9 +168,9 @@ END {
   # directory's TEST.ACTION, when it exists, runs in place of the action's body (actions.ml's run). A run test uses run and
   # check-program-output, so TEST.run (@hook=run: swapchan's and tls's sort, delayintr's SIGINT) and TEST.check-program-output
   # (@check=check-program-output: signal's grep) are its hooks; bin/oi's runners run them as actions_helpers.ml's run_hook does
-  hook = FILENAME; sub(/\.ml$/, ".run", hook)
+  hook = FILENAME; sub(/\.mll?$/, ".run", hook)
   if ((getline hl < hook) >= 0) { close(hook); env = env " @hook=run" }
-  hook = FILENAME; sub(/\.ml$/, ".check-program-output", hook)
+  hook = FILENAME; sub(/\.mll?$/, ".check-program-output", hook)
   if ((getline hl < hook) >= 0) { close(hook); env = env " @check=check-program-output" }
   if (args ~ /\$VAR/) { cls("arguments = " args) }
   # a test of C stubs that runs only native (int64-unboxing: its externals' bytecode names are "", the unboxed native ones the C's)

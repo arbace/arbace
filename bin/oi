@@ -302,6 +302,21 @@ hook_check() {
 hook_note() { [ -s "$1/ocamltest.response" ] && printf 'hook response not applied: %s' "$(head -c 100 "$1/ocamltest.response" | tr '\n\t' '  ')"; return 0; }
 export -f hook_vars prog_script hook_run hook_check hook_note
 
+# OC197 (a) (the user 2026-11-09): a test whose main file is a .mll (tool-lexyacc/csets, mpr7760, chars, warnings/mnemonics): ocamltest's
+# ocamllex action before the program's (its ocamllex_flags: -q), the native ocamllex's (OC186 (a); OI_OCAMLLEX=host the host's), the .ml then
+# typed and run as the others'. test_src ID: the test's main file; mll_gen D BASE: D/BASE.ml from D/BASE.mll when there is one (status 0,
+# else 1 with the row's reason on the standard output)
+test_src() { if [ -f "$TESTS/$1.ml" ] || [ ! -f "$TESTS/$1.mll" ]; then echo "$TESTS/$1.ml"; else echo "$TESTS/$1.mll"; fi; }
+mll_gen() {
+  local d=$1 base=$2
+  [ -f "$d/$base.mll" ] || return 0
+  if [ "${OI_OCAMLLEX:-native}" = host ]; then (cd "$d" && ocamllex -q "$base.mll") > "$d/ocamllex.log" 2>&1
+  else (cd "$d" && "$root/bin/repr-ocaml" ocamllex -q "$base.mll") > "$d/ocamllex.log" 2>&1; fi \
+    || { echo "dump: ocamllex: $(tail -1 "$d/ocamllex.log" | head -c 200 | tr '\t' ' ')"; return 1; }
+  [ -f "$d/$base.ml" ] || { echo "dump: ocamllex: no $base.ml"; return 1; }
+}
+export -f test_src mll_gen
+
 # oi's own level runs a program under limited_cpu: TIMEOUT seconds of CPU and a wall cap of four times that, as o2j_cpu (re-review 042's finding 1:
 # twice was a load band: a program needing more than half the cap in CPU timed out on a host slowed twofold)
 oi_wall() { echo $((TIMEOUT * 4)); }
@@ -732,17 +747,18 @@ cmd_corpus() {
   : > "$out"
   # the tests with a .reference, and (OC203 (a)) those whose check is their check-program-output hook (ocamltest's check of the
   # output then the hook's, not the reference's: lib-threads/signal)
-  for r in $(cd "$TESTS" && find . \( -name '*.reference' -o -name '*.check-program-output' \) | sed 's/\.[a-z-]*$//' | LC_ALL=C sort -u); do
+  # and (OC197 (a)) the tests whose main file is a .mll (a TEST header in it), with or without a .reference (none: an empty output)
+  for r in $({ cd "$TESTS" && find . \( -name '*.reference' -o -name '*.check-program-output' \) | sed 's/\.[a-z-]*$//'; grep -l '^(\* TEST' $(find . -name '*.mll') | sed 's/\.mll$//'; } | LC_ALL=C sort -u); do
     b=${r#./}
-    [ -f "$TESTS/$b.ml" ] || continue
+    [ -f "$TESTS/$b.ml" ] || [ -f "$TESTS/$b.mll" ] || continue
     # (the AOT levels read a test with C stubs as its class: the C API is oi's alone, the light and compiled levels' runtime has none)
-    h=$(awk -v aot="${AOT:-0}" -f "$root/bin/lib/oi/header.awk" "$TESTS/$b.ml")
+    h=$(awk -v aot="${AOT:-0}" -f "$root/bin/lib/oi/header.awk" "$(test_src "$b")")
     # a program header.awk classes that the suite's reading runs (modules, readonly data files) is the suite corpus's alone (OT9's third
     # fix): one row a program across the two corpora, the REAP cell counting it once
-    case $h in class*) case $(awk -f "$root/bin/lib/oi/actions.awk" "$TESTS/$b.ml") in run*) continue ;; esac ;; esac
+    case $h in class*) case $(awk -f "$root/bin/lib/oi/actions.awk" "$(test_src "$b")") in run*) continue ;; esac ;; esac
     printf '%s\t%s\n' "$b" "$h" >> "$out"
   done
-  echo "oi: corpus: $(wc -l < "$out") programs with a .reference or a check hook, $(cut -f2 "$out" | grep -c '^run$' || true) run, $(cut -f2 "$out" | grep -c '^class$' || true) classed by their header ($out)"
+  echo "oi: corpus: $(wc -l < "$out") programs with a .reference, a check hook or a main .mll, $(cut -f2 "$out" | grep -c '^run$' || true) run, $(cut -f2 "$out" | grep -c '^class$' || true) classed by their header ($out)"
 }
 
 opts() {
@@ -779,7 +795,7 @@ selected() { select_from "$OI_DIR/corpus.tsv"; }
 # ref_one ID FLAGS INCS ARGS ENV: compile and run the original with ocamlc and ocamlopt
 ref_one() {
   local id=$1 flags=$2 incs=$3 args=$4 env=$5
-  local d=$OI_DIR/ref/$id src=$TESTS/$id.ml
+  local d=$OI_DIR/ref/$id src; src=$(test_src "$id")
   rm -rf "$d"; mkdir -p "$d"
   cp "$src" "$d/"
   local base; base=$(basename "$id")
@@ -790,6 +806,7 @@ ref_one() {
     # each compiler's program built and run in a directory of its own: a test's files (realpath's test_dir, append's file) left by one
     # run are not the other's (OT9's fixes)
     local r=$d/$ext; mkdir -p "$r"; cp "$src" "$r/"
+    mll_gen "$r" "$base" > "$d/$c.log" || { line="$line	compile-error	-	0"; continue; }
     extra=$(inc_ref $c "$incs" "$r")
     (cd "$r" && $c -w -a $flags $extra "$base.ml" -o "$base.$ext") > "$d/$c.log" 2>&1 || cst=$?
     if [ $cst != 0 ]; then line="$line	compile-error	-	0"; continue; fi
@@ -889,13 +906,14 @@ export -f oi_dump oi_helper
 
 oi_one() {
   local id=$1 flags=$2 incs=$3 args=$4 env=$5
-  local d=${RUN_DIR:-$OI_DIR/run}/$id src=$TESTS/$id.ml
+  local d=${RUN_DIR:-$OI_DIR/run}/$id src; src=$(test_src "$id")
   rm -rf "$d"; mkdir -p "$d"
   local base; base=$(basename "$id")
   local u; u=$(echo "${base:0:1}" | tr a-z A-Z)${base:1}
   local units=""
   cp "$src" "$d/"
-  local why; why=$(oi_dump "$d" "$base" "$flags" "$incs") || { printf '%s\t-\t-\t0\t0\t%s\n' "$id" "$why"; return; }
+  local why; why=$(mll_gen "$d" "$base") || { printf '%s\t-\t-\t0\t0\t%s\n' "$id" "$why"; return; }
+  why=$(oi_dump "$d" "$base" "$flags" "$incs") || { printf '%s\t-\t-\t0\t0\t%s\n' "$id" "$why"; return; }
   units=$(inc_units "$incs" "$d/$u.ae" | tr '\n' ' ')
   local miss; miss=$(lib_missing $units)
   if [ -n "$miss" ]; then printf '%s\t-\t-\t0\t0\tdump: typer: %s\n' "$id" "$miss"; return; fi
@@ -1013,10 +1031,10 @@ own_verdicts() {
   else awk -v lv=":$lv" '/^ \[/ { split($0, q, "\""); if (index($0, lv)) print q[2] }' "$root/test/ocaml/own-verdict.edn" > "$out.except"; fi
   : > "$out.new"
   while IFS=$'\t' read -r id kind rest; do
-    [ "$kind" = run ] && [ -f "$TESTS/$id.ml" ] || continue
+    [ "$kind" = run ] && { [ -f "$TESTS/$id.ml" ] || [ -f "$TESTS/$id.mll" ]; } || continue
     grep -qxF "$id" "$out.except" && continue
     # the test's block, `(* TEST ... *)` (at the top, or at the end after a TEST_BELOW); native-only: `native;` and no `bytecode`
-    hdr=$(awk '!t && /^\(\* TEST([ \t]|$)/ { t = 1 } t { print } t && /\*\)/ { exit }' "$TESTS/$id.ml")
+    hdr=$(awk '!t && /^\(\* TEST([ \t]|$)/ { t = 1 } t { print } t && /\*\)/ { exit }' "$(test_src "$id")")
     if [ "$lv" = oi ] && printf '%s\n' "$hdr" | grep -qE '^[[:space:]]*native[[:space:]]*;' && ! printf '%s\n' "$hdr" | grep -q bytecode; then continue; fi
     st=$(printf '%s\n' "$hdr" | awk '/exit_status *= *"[0-9]+"/ { match($0, /"[0-9]+"/); print substr($0, RSTART + 1, RLENGTH - 2); exit }')
     ref=$TESTS/$id.reference
@@ -1180,7 +1198,7 @@ cmd_aot_run() {
 # o2j_dump ID FLAGS INCS: the program's Lambda (as oi_one dumps it) into .tmp/o6/run/ID/
 o2j_dump() {
   local id=$1 flags=$2 incs=$3
-  local d=$O2J/run/$id src=$TESTS/$id.ml
+  local d=$O2J/run/$id src; src=$(test_src "$id")
   rm -rf "$d"; mkdir -p "$d"
   local base; base=$(basename "$id")
   local u; u=$(echo "${base:0:1}" | tr a-z A-Z)${base:1}
@@ -1466,8 +1484,9 @@ cmd_check_compiled() {
     if [ "$NATIVE" = 1 ]; then
       (O2J=$C2 o2j_dump "$id" "$flags" "$incs")
     else
-      rm -rf "$d"; mkdir -p "$d"; cp "$TESTS/$id.ml" "$d/"
-      (cd "$d" && "$OCD" --mode lambda --simplify $flags $(inc_I "$incs") --prefix "$base" --file "$base.ml" "$base.ml" > "$u.ae" 2> dump.log) || true
+      rm -rf "$d"; mkdir -p "$d"; cp "$(test_src "$id")" "$d/"
+      mll_gen "$d" "$base" > "$d/ocamllex.why" || printf '(ocaml/error "%s")\n' "$(sed 's/^dump: //' "$d/ocamllex.why")" > "$d/$u.ae"
+      [ -f "$d/$u.ae" ] || (cd "$d" && "$OCD" --mode lambda --simplify $flags $(inc_I "$incs") --prefix "$base" --file "$base.ml" "$base.ml" > "$u.ae" 2> dump.log) || true
       rm -f "$d/$base.cmi" "$d/$base.cmo"
     fi
     grep -q '^(ocaml/error' "$d/$u.ae" && continue
