@@ -2318,3 +2318,143 @@ native parser; `inline`, `track_caller`, `rustc_nounwind`, `rustc_intrinsic`), a
 Then (c): the attributes from our own collection of core at RF12, when core's bodies come from source too; (b), decoding core's rmeta
 tables, only if RF12 slips. Note: since RFP32 (a), MIR's passes read std's `#[rustc_nounwind]` and `#[rustc_promotable]` from the
 helper's interface (pinned data), the runs' callees from core's sources: two routes to one fact until RF12 collects core.
+
+## As built: RF12 (first slice), core's modules through the front end (2026-11-09)
+
+Branch `rust-rf12` (from `mac/next` `3ef7b3f78`), beside RF11 (`rust-rf11`, rsi's cases from the front end's MIR), whose files it
+leaves to it but for small edits in `build.ae` (named below). The brief: run the front end over core's own sources module by
+module, judge the bodies against rustc's own built MIR of core, group the failures, fix the groups that block whole modules.
+
+### The oracle (`bin/rust-front core-oracle`, the pack `rust-core-built`)
+
+rustc's built MIR of core, made by hand with the helper as rustc (its driver leaves `trimmed_def_paths` off, so the dumps print
+full crate-relative paths as the programs' oracles do; rustc's own driver turns trimming on): `--crate-type lib --crate-name core
+--edition 2024 -C opt-level=0 -C debuginfo=0 -C overflow-checks=off --emit=metadata -Zdump-mir=built`, the paths remapped to
+`library/`, over a copy of rust-src's `library/core` (stdarch and portable-simd linked) in `.tmp/rust-front/core/lib`. The copy patches
+`task/wake.rs`' two `from_fn_ptr` statics, whose closures name the static itself: rustc's MIR dump evaluates the static while
+printing the closure's body and stops on a cycle (E0391; the build without `-Zdump-mir` passes); `|this| RawWaker::new(this,
+&VTABLE)` becomes `loop {}` in the closure, those four bodies out of the judged set. 31,334 bodies (68 MB, 35 s, 1.2 GB), indexed by
+their dump file's name (`hint-{impl#0}-to_llvm`: the def path with its disambiguators, unique where 860 printed names are not).
+`bin/rust-front core-records make` packs the first slice's modules' bodies (every file whose key starts with a listed module's
+path, one member a module: the dumps one after another, 7,547 bodies, 304 KB xz, `418ebb7b...`) and the index as `rust-core-built`
+(test/rust/records/, the oracle-records format, kind `rust core-built` in `test/oracle-records/kinds.edn`; an entry's key: the copy's
+sources, the helper's digest and the flags); `core-check --records` reads it, no helper and no rustc.
+
+### The driver (`arbace.rust.front.core-check`, `bin/rust-front core-check`)
+
+- core's module tree after `rustc_expand/src/module.rs` (`#[path]`, mod.rs directories, inline modules), cfg evaluated for core's
+  build (rustc 1.99.1's `--print cfg` at these flags: target_has_atomic's values, target_feature sse2, ub_checks, debug_assertions,
+  target_vendor alpine...; the expansion's cfg now takes a name's set of values, `*cfg-names*`): 378 module files, 105 of stdarch and
+  portable-simd.
+- core's index from its sources, cached (`.tmp/rust-front/core/index.edn`): every file read by the native reader once; its
+  `macro_rules!` and macros 2.0 (231), the nearest file's definition taken for a name (textual scope approximated crate-wide);
+  each module's definitions (628 modules: functions, ADTs, variants and constructors, traits and their items, constants, statics,
+  modules), added to std's names where they lack them (core's private items: `ub_checks::check_language_ub`).
+- One process over the listed files, one module file at a time as the crate's root (GOMEMLIMIT=1800MiB): expansion, resolution,
+  lowering, collection, type checking and MIR building, each body judged and dropped as it is built; the rest of core from std's
+  interface and names (the pack `rust-front-std`), plus core's own interface so far (below).
+
+### What was built (the groups that blocked whole modules, biggest first)
+
+- **Spans of macro output (the virtual file).** The front end keys resolution, definitions and locals by span; core's macros expand
+  one definition's tokens hundreds of times (`uint_impl!`, `forward_ref_binop!`), so their nodes shared spans and resolved to one
+  another. In core mode (`expand/*virtual*`) every expansion's tokens are laid after the root file's text as a virtual file, each
+  expansion on lines of its own (root tokens inside an expansion too: rustc's NodeIds make `$arg` used twice two nodes), and every
+  span is a place there; `expand/virtual-origin` maps a place back to where its tokens came from (a macro's definition in another
+  file, a fragment's metavariable, the root file's own tokens, or a builtin's call site), which MIR's printed spans use
+  (`build/*span-origin*`: impls' `<impl at FILE:L:C>`, user type annotations).
+- **core's macros.** Macros 2.0 (`pub(crate) macro const_eval_select { .. }`, one-arm `macro m($x) { .. }`) with def-site hygiene for
+  their identifiers (`resolve/*def-sites*`: the definition's module); metavariable expressions (`${ignore($x)}`, `${index()}`,
+  `${len()}`, `${count($x)}`: mbe/metavar_expr.rs, transcribe.rs); the `meta` fragment; a fragment passed on whole to a matcher of its
+  kind (`$compiletime:block` again); an `item` fragment after the transcriber's attributes; `cfg_select!`; `concat!` of a literal
+  fragment.
+- **Resolution in core.** `crate::`, `$crate::`, `::core::` and a root `super::` name core (std's names), a def under the root file's
+  module is the file's own definition (`localize`), an out-of-line `mod` is std's module, a name the file does not define is std's
+  (a macro's item not expanded); `Self` in a trait's generics (`Add<Rhs = Self>`, late.rs' self rib); `Self::Variant` in an enum's
+  impl's patterns.
+- **Identity.** The interface's paths of the file's own definitions are the local definitions (`collect/loc`, `*local-paths*`); impls'
+  disambiguators in rustc's DefIndex order (a fragment's own items first, its macro calls' and derives' items after, one invocation
+  at a time: `expand/*def-order*`, `:rf-order`); bodies' names relative to the crate (`hint::<impl at ..>::fmt`).
+- **Bodies.** `#[rustc_inherit_overflow_checks]` builds with overflow checks (Builder::new); the signature normalized
+  (`-> <usize as Add>::Output` is `usize`, typeck's liberated signature); a qualified path to a trait's function as a function item
+  with its user type annotation; an impl's clauses on a parameter proven by the parameter environment for Copy
+  (`impl<T: Copy> Copy for MaybeUninit<T>` is not `MaybeUninit<T>`'s for a T without Copy: `move`, not `copy`).
+- **core's interface from its sources** (`core-check/native-iface`): after each module's collection, its functions and ADTs that
+  std's interface lacks are written in the helper's `--std-iface` forms from our own generics, signatures, clauses and fields, read
+  by the modules after it and by the next run (`.tmp/rust-front/core/native-iface.edn`): the first of std's interface replaced by
+  core's own.
+- **Speed.** The crate's impl headers indexed once and prefiltered by trait and self type's head (selection instantiated every impl
+  of the crate for every goal): arith's 500 bodies in about a minute.
+
+### Results
+
+`bin/rust-front core-check` over the 35 module files of `test/rust/front/core-modules.txt` (main's stage 0, one process, GOMAXPROCS=4,
+GOMEMLIMIT=2500MiB: 17 min, peak 2.50 GB RSS; the second pass of a run, reading the first's native interface: 33 functions and 7 ADTs):
+
+| | first run (the slice's start) | as built |
+|---|---|---|
+| modules through every stage | 20 of 35 (15 stopped at expansion) | 33 of 35 (`marker`, `ptr::non_null`: `pattern_type!`) |
+| bodies built (not refused) | 588 of 652 | 5,393 of 5,601 |
+| equal to rustc's built MIR | 247 | 4,578 |
+| more but for the allocations' ids / text | 16 / 0 | 37 / 4 |
+| differ | 207 | 716 |
+| no oracle body by its key | 118 | 58 |
+
+Whole modules equal: `ops::arith` 500 of 500, `ops::bit` 1,989 of 1,989, `default` 20 of 20, `bool`, `ops::drop`, `ub_checks` (11 of 11
+with one but for the ids); `num::wrapping` 1,158 of 1,201, `clone` 27 of 29, `cmp` 276 of 374, `cell` 75 of 109, `time` 71 of 96;
+after the run, the where clauses' span and qualified paths' fixes: `ops::function` 5 of 5, `convert` 14 of 21 (`--records`, from
+the pack). The biggest remaining groups (`.tmp/rf12`'s grouping by the first differing line): impl spans through nested macro calls
+(tuple 168, `iter::range` 88: the metavariable span of an `ident` substitution, `maybe_use_metavar_location`, not ported), the
+interface's missing private fields (55 refusals, "a std field") and paths (42, "a path"), qualified paths to associated constants
+(41), user type annotations' texts of std paths (about 100 over five forms), method calls without a callee (28), `!` locals of empty
+matches (9), patterns' types left inferred (`let _N: _`, 23).
+
+`bin/rust-front essential` after the slice: run-built 7 of 7, mono-check unchanged (`core-closure 0 of 3`), capture-check 34 of 34,
+the five controls differing; build-check's lines differ from `essential-known.txt` in this checkout (51 of 62) as they do before the
+slice: RF12-P4. Rust's scores: no REAP cell reads the core check, so `bin/crops-score` is unchanged; the eval and AOT stages stay at 0.5
+(every run still reads the mono record's core bodies and std's interface), RES54's ceiling holds.
+
+### What remains
+
+- **core's interface natively, whole.** The rest of core still comes from std's interface (the helper's `--std-iface`, rustc's data):
+  its private items' fields, signatures and impls are what most refusals and differences of the measured modules lack
+  (`slice::index`'s `IndexRange` fields, `ptr`'s `ub_checks::maybe_is_aligned`). The native interface covers the processed modules'
+  functions and ADTs; impls, traits, constants and the vendored modules are not written yet, and a module reads only those processed
+  before it (two passes a run, or the whole crate's collection first: RF12-P2).
+- **Groups seen, not built:** pattern types (`pattern_type!`, which `marker` and `ptr::non_null` need: TyKind::Pat through lowering,
+  collection, typeck and the printer); const generic arguments evaluated (`{ Locality::L3.to_llvm() }`: CTFE, slice 5); the reborrow
+  of a coercion to a reference in a tail (`fn deref(&self) -> &T { *self }`: `&(*(*_1))`, ours `copy _1`); an empty match's `!`
+  local; a trait object's default lifetime in printed paths (`<(dyn any::Any + 'static)>::is`); impl spans across nested macro calls
+  (tuple's 168: `maybe_tuple_doc!`'s `$item` inside `tuple_impls!`, whose tokens lose their origin when the inner call's token
+  stream is re-read; the bodies themselves match by key); `#[derive]` on core's own items in the 860 ambiguous names (keyed now).
+- **The modules not yet run** (243 files of 273 non-vendored, and stdarch's 105): a night command below; the expansion of the
+  largest (`num/uint_macros.rs` through `num/mod.rs`) is the memory risk, measured by `CORE_TIME`.
+- **a6's core bodies and mono-check's core-closure** from the native core: not built here (RF11 is changing `build_run.ae`, `mono.ae`
+  and the packs on its branch): `ptr::write_volatile` and its `precondition_check` build natively; their differences from rustc's
+  built MIR are the user type annotation of `align_of::<T>()` and `maybe_is_aligned`'s signature (the native interface), and the run
+  needs them through the 21 passes and the optimized MIR the pack holds (RF12-P3).
+- alloc and std (RF12's next slices), after core's whole interface.
+
+### Proposed (RF12's first slice)
+
+- **RF12-P1 The core check in the gate.** Options: (a) **an essential step `rust-core-essential`: `bin/rust-front core-check --records`
+  over a short list (`ub_checks`, `bool`, `default`, `ops/drop`, `clone`, `ops/arith`: about 6 minutes, 2.5 GB), its summary held to a
+  known file with a crossed control (a body's text against another's)**; (b) only the oracle tier and by hand until the slice's
+  equal share is higher. *Recommended: (a)*: it holds what is built (arith's 500, bit's 1,989) against regressions in the shared files.
+- **RF12-P2 core's interface.** Options: (a) **as built, module by module with two passes (each module reads the native interface of
+  those before it and of the last run)**; (b) a collection pass over all of core first (every module expanded, resolved, lowered and
+  collected, no bodies; the interface written whole), then the bodies: one more pass of about the check's cost without the bodies,
+  the order-dependence gone; (c) keep std's interface for core and build only bodies natively. *Recommended: (b)* for the next slice,
+  (a) meanwhile: (c) keeps rustc's data in every run, which RF12 is to remove.
+- **RF12-P3 a6's core bodies from the native core.** Options: (a) **after RF11 merges: `build-run` takes a core body from
+  `core-check`'s native build when its built MIR equals rustc's (the four of a6), through the 21 passes, the pack's optimized body the
+  fallback; mono-check's core-closure from the native callees**; (b) wait for core's whole interface (RF12-P2 (b)). *Recommended:
+  (a)*, one slice after RF11's merge, on its files.
+- **RF12-P4 The rust-front-built pack's paths.** The pin on next is the pack made in `rust-rf10b`, whose texts name that worktree's
+  absolute paths, so `bin/rust-front essential`'s build-check lines fail in any other checkout (62 → 51 here, before and after this
+  slice); the store also holds a pack with `@ROOT@` in their place. Options: (a) **re-pin the `@ROOT@` pack (or remake it with
+  `@ROOT@`, as the mono pack does) and have build-check put the checkout's root back**; (b) leave it to RF11's packs.
+  *Recommended: (a)*, by whoever merges RF11 (its pack tooling).
+- **RF12-P5 The scope of the first slice's record.** Options: (a) **the 35 modules of `test/rust/front/core-modules.txt` recorded in the
+  pack `rust-core-built`, the whole of core's 31,334 bodies judged by a night run against the unpacked oracle by hand**; (b) pack all
+  31,334 (68 MB raw, a few MB xz). *Recommended: (a)* until more of core builds.

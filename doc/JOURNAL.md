@@ -2644,3 +2644,39 @@ The user accepted HF10-P1 to P10 as recommended (~06:15). Built by an agent in t
   coherent set was 35 of 63 on `-O2` interfaces), 8 with 70 modules Arbace's own STG whole, 0 lost; the whole own set 0 (krep$*, an
   unbound local). Records `test/haskell/lib-check-own-ghc-internal.edn`, `test/haskell/lib-stg-own-results.edn`. Proposals HF10-P11
   to P14 in the survey.
+
+## 2026-11-09: RF12's first slice, core's module files through the front end (branch `rust-rf12`, from `mac/next` 3ef7b3f78)
+
+- The brief (RF12, doc/rust/FRONTEND-SURVEY.md §7): the front end builds core from the pinned rust-src (Alpine's
+  `rust-src-1.99.1-r0`, `tools/rsdump/apks.sha256`) module by module, judged against rustc's own built MIR of core. Beside RF11
+  (`rust-rf11`): its files (build_run, mono, codegen, front-records) left to it; this slice's edits are in expand, resolve, lower,
+  collect, typeck and build (mir-name, span-text, float constants, signatures) and the new `core_check.ae`.
+- The oracle: the helper as rustc (no trimmed paths, as the programs' oracles) over a copy of `library/core` with `task/wake.rs`'s two
+  self-naming statics patched (rustc's `-Zdump-mir` cycles on them, E0391; the build itself passes): 31,334 built bodies in 35 s and
+  1.2 GB, by hand (`bin/rust-front core-oracle`); rustc's own driver was tried first and turns `trimmed_def_paths` on, so its dump
+  prints `fn assert_unchecked` where the programs' oracles print full paths: rejected for the helper's. The judge keys bodies by the
+  dump's file name (the def path with disambiguators), the printed names being ambiguous (860 duplicates).
+- Considered for the crate's other modules: (a) all of core at once (refused: the rules' 2 GiB a process, core's 173k lines);
+  (b) each module file as the crate's root with the rest of core from std's interface and names, the file's own items local
+  (`localize`, `loc`) — built; (c) core's own collection first, then bodies — the direction: the slice writes core's interface from
+  its own collection module by module (`native-iface.edn`), read by the modules after it.
+- The fixes, by the groups that blocked whole modules: the virtual file for macro output's spans (the front end's facts are keyed by
+  span; core's macros expand one definition many times), their origins mapped back for printed MIR; core's macros 2.0 with def-site
+  hygiene, metavariable expressions, the meta fragment, fragments passed on, item fragments, cfg_select!, concat! of a fragment;
+  resolution in core (crate::, $crate::, ::core::, super::, re-exports, private names from the sources); impls' disambiguators in
+  rustc's DefIndex order; #[rustc_inherit_overflow_checks]; normalized signatures; Self in a trait's generics and Self::Variant in
+  patterns; qualified paths; Copy by the parameter environment; f16 and f128 constants; closures named by their owner; the impls'
+  index (tuple.rs from about 25 minutes to 4).
+- Results (`bin/rust-front core-check`, the 35 modules, 17 min, 2.50 GB peak): bodies built 5,393 of 5,601 (588 of 652 at the slice's
+  first run), 4,578 equal to rustc's built MIR byte for byte (247 at the first run) and 41 more but for the allocations; 33 of 35 modules
+  through every stage (20); whole: ops::arith 500, ops::bit 1,989, default 20, ops::function 5. The pack `rust-core-built`
+  (`418ebb7b...`, 36 members, made by hand with the helper as rustc, `bin/rust-front core-oracle && core-records make`), its kind in
+  `test/oracle-records/kinds.edn`. No REAP cell reads the check: Rust's scores unchanged, eval and AOT at 0.5 (RES54's ceiling).
+- Not done here (RF11's files): a6's core bodies and mono-check's core-closure from the native core; proposals RF12-P1 to P5 in the
+  survey.
+- Note: the essential step's build-check lines fail outside `rust-rf10b` before and after this slice: the pin of `rust-front-built`
+  on next is the pack made in that worktree, whose MIR prints its absolute paths (`{closure@/root/.../rust-rf10b/...}`,
+  `<impl at /root/.../rust-rf10b/...>`); the store also holds a later pack with `@ROOT@` (RF11's?). Runs (7 of 7), mono-check,
+  capture-check and the five controls unchanged.
+- Rule slips (the session's first half): `bin/repr-rust helper` fetched the pinned rustc-dev apk from the network (the main
+  checkout's .tmp lacked it); a run's peak was 1.83 GB under GOMEMLIMIT=1800MiB.
