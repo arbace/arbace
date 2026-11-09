@@ -4962,3 +4962,43 @@ against the golden text as against the record (queue 241's ground). Nothing else
 
 DECISION 1 (the other 24 ops tables): (a) leave them at 0.5, 72 cases (recommended: the gain is 0.2% of the judge); (b) a model
 in Chez Scheme for exact integers, flonums and complexes, run at review time only (days).
+
+## As built: 248, the compiler's view: codegen.c's shapes and locations, the line table, line events (2026-11-09/10, the Mac VM, queue 248)
+
+Route (a)'s tail (229's DECISION), ported from 3.14.10's Python/codegen.c, flowgraph.c and instrumentation.c where pyi's
+compiler or the view were not CPython's shape; light samples only. 3.14 the default, 3.15 behind the switch as 238/239 left it.
+
+- **compile.ae, the shapes** (the IR changes, the runtime runs them): starunpack_helper (a display or a call's positional
+  part over `_PY_STACK_USE_GUIDELINE`, 30 values, is `BUILD_* 0` and an add per item at the display's location: the line
+  events alternate between an item's line and the display's, `:tracing`); codegen_call_helper's ex_call with
+  codegen_subkwargs (a `**` merged by DICT_MERGE: `f(**{'a': 1}, a=2)` now raises as CPython; it did not); codegen_dict's
+  runs; a big constant tuple folded (fold_constant_seq_into_load_const, its loads without a line); comprehensions as
+  codegen_sync_comprehension_generator (a filter jumps to if_cleanup, the loop's JUMP at the element's location, a later
+  `for y in [f(x)]` bound without a loop); the parser's merged f-string constants (literals and debug texts one constant),
+  ''.join over 30 values, a raw spec decoded per part of a concatenation; the module's conditional annotations
+  (`__conditional_annotations__` a module cell, the set and `__annotate__` at start_location); a try body's POP_BLOCK on
+  unwinding an uncovered NOP; the handler cleanup's SWAP under its handler; END_FOR's line in fl-nops (no line event
+  after a loop CPython has not).
+- **compile.ae, the locations**: a class docstring, the f-string constants' spans (from the replacement fields' and the
+  quotes' positions), formatted values' CONVERT/FORMAT, a format spec, comprehension adds and yields, a generator
+  expression's NO_LOCATION tail, `with`'s unwinding, DELETE_SUBSCR and DELETE_ATTR at the target.
+- **go/arbace/py, the view**: fold_constant_seq_into_load_const (3.14.10), BINARY_SLICE at the subscript's location,
+  CONVERT_VALUE at the field's, a method call's keyword names at the method's, `list(x for x in y)` not a decorator
+  chain, a handler whose region lost every instruction reached and sized as SETUP_* does (`try: pass`), NOT_TAKEN's handler
+  as 3.14's basicblock_addop leaves the slot (a removed instruction's handler, else none; 3.15 passes the jump's: gated),
+  a threaded jump's handler none in 3.14 only. **code.go/tbobj.go**: a replaced `co_linetable` answers `f_lineno` and
+  `tb_lineno` (None for no line), `co_lines`/`co_positions` end where the table does. **trace.go**: a FOR_ITER's target
+  never starts a line (instrumentation.c: it is the POP_ITER after END_FOR).
+
+**Measured** (bytecode-check, the 10-file sample of 238, 868 code objects; co_code / co_linetable / co_exceptiontable / all
+five): 3.14 base 721 / 545 / 774 / 511, head 747 / 771 / 801 / 720; 3.15 base 736 / 545 / 798 / 519, head 767 / 771 / 813 / 737.
+
+**The classes** (each test's own verdict, 3.14.10's tests by pyi's AOT, base 778a6333e against the head, method for method,
+no method lost): `:dis` 10 to 0 (test_dis 109 to 119 of 145); `:tracing` 1 to 0 (test_sys_settrace 364 to 365);
+`:code-positions` 1 to 0 (test_exceptions 97 to 98; test_code 7 to 8, test_empty_linetable too); `:fstring-text` 2 to 0, its
+two tests passing at the base already (stale since 228). `:tracing` and `:fstring-text` dropped (no pattern, no test);
+`:dis` and `:code-positions` keep their patterns for the methods the VM did not sample.
+
+**Left**: f-string constants of an implicit concatenation whose middle parts carry no position keep the concatenation's
+location (the tokens would tell); 3.14's NOT_TAKEN handler is a model of CPython's stale slot (exception tables differ in
+67 of the 868); a coroutine's origin (`:code-positions`).
