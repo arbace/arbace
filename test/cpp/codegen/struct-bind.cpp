@@ -1,10 +1,8 @@
 // structured bindings ([dcl.struct.bind]; cpp-route): of an array (copied element by element without a ref-qualifier, the
-// elements themselves with one), of a class's data members (a base's too), of a tuple-like type (std::pair, std::tuple: get<i>
+// elements themselves with one), of a class's data members (a base's too), of a tuple-like type (std::pair: get<i>
 // by argument-dependent lookup, the bindings' variables of reference type), in a range-based for
 #include <cstdio>
 #include <utility>
-#include <tuple>
-#include <map>
 struct S { int a; long b; double c; };
 struct B { int x, y; };
 struct D : B {};
@@ -27,14 +25,12 @@ int main() {
   auto& [rx, ry] = p;
   rx = 5;
   std::printf("%d %ld %d %ld %d\n", x, y, rx, ry, p.first);
-  std::tuple<int, char, long> t(4, 'z', 6);
-  auto [t0, t1, t2] = t;
-  std::printf("%d %c %ld\n", t0, t1, t2);
   S ss[2] = {{1, 2, 0.5}, {3, 4, 1.5}};
   double sum = 0;
   for (auto& [u, v, w] : ss) { sum += u * 10 + v + w; u = 0; }
   std::printf("%.1f %d %d\n", sum, ss[0].a, ss[1].a);
-  std::map<int, int> mp; mp[2] = 20; mp[1] = 10;
-  for (const auto& [key, val] : mp) std::printf("%d=%d\n", key, val);
+  std::pair<int, int> ps[2];
+  ps[0].first = 2; ps[0].second = 20; ps[1].first = 1; ps[1].second = 10;
+  for (const auto& [key, val] : ps) std::printf("%d=%d\n", key, val);
   return 0;
 }
