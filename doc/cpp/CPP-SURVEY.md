@@ -5337,8 +5337,8 @@ gen-batch` as `cppi_ir_route` runs it, no clang. "Generated": our IR made; "refu
 |---|---|---|---|
 | samples (7) | 5 | 6 (io.cpp: std::sort's `__decltype`) | 1: coroutine.cpp (CoyieldExpr) |
 | runtime (8) | 2 | 2 | 6: hello (inheriting constructors: std::unique_ptr's `using __uniq_ptr_impl::__uniq_ptr_impl`, CP330), deferred (GNU's `__complex__`: std::complex<long double>'s `_M_value`), library (the parser: a parameter's type), atomics (`__atomic_thread_fence`), threads, thread-throw (std::thread's pack expansions) |
-| gxx-dg-run every 25th (67) | 38 | 45 | 22 |
-| all (82) | 45 | 53 | 29 |
+| gxx-dg-run every 25th (67) | 38 | 46 | 21 |
+| all (82) | 45 | 54 | 28 |
 
 The refusals by cause (each program by its first refusal):
 
@@ -5355,7 +5355,8 @@ The refusals by cause (each program by its first refusal):
 | classes through an ellipsis | 1 | 0 | (deferred.cpp passes it; refused later by `__complex__`) |
 | the implicit global operator new | 1 | 0 | (defaulted19a generates) |
 | std::sort's statement decline, std::string from a literal, std::pair's C++17 constructors | (io, hello) | 0 | (io generates; hello refused later: CP330) |
-| singles | 8 | 8 | ucnid-1 (UCN identifiers), builtin-clear-padding-4, range-for14 (a range-for's ADL begin/end over a non-array, non-member class), null-8 (GCCAsmStmt), thread_local12e (a thread-local's dynamic initialization: clang's TLS wrapper), spaceship-synth4 (a class operand with two conversion functions), hello, deferred |
+| a range-for's init-statement, GNU's statement expressions | 1 | 0 | (range-for14 generates) |
+| singles | 7 | 7 | ucnid-1 (UCN identifiers: `\u00C1` and `\u00c1` one name, CP337), builtin-clear-padding-4, null-8 (GCCAsmStmt), thread_local12e (a thread-local's dynamic initialization: clang's TLS wrapper), spaceship-synth4 (a defaulted secondary comparison's `(x <=> y) < 0`: a class operand with two conversion functions), hello, deferred |
 
 ### Run equal: the sampling by our route alone
 
@@ -5363,12 +5364,13 @@ The refusals by cause (each program by its first refusal):
 on ci with the lowered runtime, judged by each program's own verdict (test/cpp/selfref.ae: 205 of 225 reference cases) against the
 recorded sampling: **45 generated, 45 built and run: 44 pass by their own verdict, 1 fails** (template/pretty1.C, the class
 oracle-text by either route: `__PRETTY_FUNCTION__`'s text is the compiler's); the 22 refused are build failures there (the
-regressions the run lists are those, by design of `ours`). Two of the 44 are improvements on clang's record: special/initp1.C and
+regressions the run lists are those, by design of `ours`). The 46th, cpp2a/range-for14.C (its init-statement and statement
+expressions, built after the run), passes by our route alone too (`--only` it). Two of the 44 are improvements on clang's record: special/initp1.C and
 cpp0x/defaulted19a.C, both oracle-rejected by clang (clang refuses `init_priority (10)` and `new A[5]` of a class whose destructor is
 deleted, [expr.new]/27, which g++ accepts and runs; the test's verdict is g++'s run's). No program our route generates runs wrong.
 
-Under `auto` the sampling is then: 42 programs by our route passing (the 44 less opt/unroll1.C and torture/pr50189.C, whose
-dg-options auto gives clang), the 2 option programs and 18 refused programs by clang's pack as recorded (pass), 4 refused that clang
+Under `auto` the sampling is then: 43 programs by our route passing (the 45 less opt/unroll1.C and torture/pr50189.C, whose
+dg-options auto gives clang), the 2 option programs and 17 refused programs by clang's pack as recorded (pass), 4 refused that clang
 also rejects (abi/vbase8-10.C, cpp/embed-26.C, init/vector1.C, torture/vshuf-v16hi.C: `ours-refused`, deferred, CP263 (a)), and
 pretty1 as recorded: **62 pass (clang's record: 60), no recorded pass lost**, 4 deferred, 1 oracle-text.
 
@@ -5396,8 +5398,8 @@ repr/c's changes since are the re-entry pragmas, #embed and the converter's C23 
 test/cpp/codegen/forms.sha256 predates G5c's merges, which changed 21 samples' forms and added 8 unrecorded samples, and rtti, recorded
 refused, now generates). This branch against a0c6ad347's run, sample by sample: **148 of the 149 forms byte for byte a0c6ad347's**; the
 one difference is intended: recursion's `b ? true : f()` is a `phi i1` and its bool's store, clang's (before a `phi i32` of the bools
-promoted, [expr.cond]/7.1); the 4 new samples generate. `codegen-gen --record`: 153 of 153 generated, none refused (refusals.edn `{}`,
-forms.sha256's 153 digests), so the `--full` step cpp-codegen-gen passes again.
+promoted, [expr.cond]/7.1); the 4 new samples generate (and stmt-expr, the fifth, added after). `codegen-gen --record`: 154 of 154 generated, none refused (refusals.edn `{}`,
+forms.sha256's 154 digests), so the `--full` step cpp-codegen-gen passes again.
 
 ### The dg check's own front end (CX12's record)
 
@@ -5414,15 +5416,15 @@ declaration refused: CP331).
   class is in test/cpp/divergences.edn).
 - independence.edn's C++ eval and AOT facts after the night's records (written when it holds; the checked-in facts stay 0.5 until then,
   since the gate's runs are clang's until the flip): `:cases {:own-route [N 1] :pack [M 0.5]}`, N the recorded passes whose route
-  file says ours (`WORK/files/ID/route`), M = 82 - N. Measured today: N = 42 of the sampling's 67 (the samples' 6 and the runtime's 2
-  that generate are the night's runs); projected N = 42 to 50, so eval and AOT 0.756 to 0.805 each by the brief's split (CP333 (a)),
+  file says ours (`WORK/files/ID/route`), M = 82 - N. Measured today: N = 43 of the sampling's 67 (the samples' 6 and the runtime's 2
+  that generate are the night's runs); projected N = 43 to 51, so eval and AOT 0.762 to 0.811 each by the brief's split (CP333 (a)),
   or the mean with the runtime's (G5c's model: 0.5 now, 0.657 with P21 (b)) by CP333 (b).
 
 | measure | next a0c6ad347 | cpp-route (facts unchanged) | after the night's switch, CP333 (a) | after it, CP333 (b) with P21 (b) |
 |---|---|---|---|---|
 | completeness | 76.1 | 76.1 | about 76.4 (the sampling's eval and AOT 60 to 62 passes, 6 oracle-rejected to 4 deferred) | the same |
 | maturity | 100.0 | 100.0 | 100.0 | 100.0 |
-| independence | 67.84 (read 0.657, eval 0.5, AOT 0.5, print 1, judge 0.735) | 67.84 | 78.1 to 80.0 (eval and AOT 0.756 to 0.805) | 75.4 to 77.1 (eval and AOT 0.707 to 0.731) |
+| independence | 67.84 (read 0.657, eval 0.5, AOT 0.5, print 1, judge 0.735) | 67.84 | 78.3 to 80.3 (eval and AOT 0.762 to 0.811) | 76.2 to 77.2 (eval and AOT 0.710 to 0.734) |
 
 ### The night's commands (one process at a time, at most about 1.5 GiB unless named; stubs first on PATH but where named)
 
@@ -5439,12 +5441,12 @@ bin/cppi check --corpus gxx-dg-run --sample 25 --record && bin/cppi check --aot 
 # (equivalently before the flip: CPPI_ROUTE=auto bin/cppi check --record, CPPI_ROUTE=auto bin/cppi check --aot --record, and the samplings')
 # then independence.edn's eval and AOT :cases {:own-route [N 1] :pack [M 0.5]} (N: the records' passes routed ours), bin/reap --record,
 # bin/crops-score --record; P21 (b): bin/cppi's cppi_runtime_route_default=auto after G5c.8's runs (CODEGEN.md) hold
-bin/cppi codegen-gen                                              # cpp-codegen-gen: 153 of 153 as recorded
+bin/cppi codegen-gen                                              # cpp-codegen-gen: 154 of 154 as recorded
 bin/repr-cpp dg --corpus dg-error --front native                  # cpp-dg.dg-error-own: the record held (variadic170 by its diagnosis)
 bin/cppi codegen-check .tmp/cppi/codegen-check --jobs 2           # the oracle tier (clang and gcc live): the 4 new samples' runs against clang's route's
 ```
 
-### Proposed (CP330-CP336)
+### Proposed (CP330-CP337)
 
 - **CP330: inheriting constructors (`using B::B`, [namespace.udecl]/3, [class.inhctor.init]).** std::unique_ptr's storage,
   `__uniq_ptr_data`, inherits `__uniq_ptr_impl`'s constructors, so every unique_ptr at C++17 and later is refused (runtime/hello.cpp's
@@ -5461,8 +5463,8 @@ bin/cppi codegen-check .tmp/cppi/codegen-check --jobs 2           # the oracle t
   `_TCC<...>::template _ConstructibleTuple<...>()`); the next group of the library's programs after CP330. (a) Trace and fix them as
   std::pair's were (this branch); (b) as now. **Recommended: (a).**
 - **CP333: the eval and AOT facts after the switch.** (a) The brief's split: a program our route runs to its verdict 1, one from clang's
-  pack 0.5 (projected 78.1 to 80.0); (b) G5c's model: the mean of the programs' split and the runtime's (0.5, 0.657 with P21 (b)),
-  since a program by our route still links a runtime of clang's IR (projected 75.4 to 77.1). **Recommended: (b)**: the runtime is
+  pack 0.5 (projected 78.3 to 80.3); (b) G5c's model: the mean of the programs' split and the runtime's (0.5, 0.657 with P21 (b)),
+  since a program by our route still links a runtime of clang's IR (projected 76.2 to 77.2 with P21 (b)). **Recommended: (b)**: the runtime is
   half of what runs, and (b) moves with P21 (b) and P22.
 - **CP334: coroutines by our route** (7 of the 29 refusals, the largest group): clang's coroutine lowering at -O0 (CoroSplit's frame,
   resume and destroy, the `llvm.coro.*` intrinsics, which the lowering refuses: `:coroutine`). (a) Our code generator emits the split
@@ -5475,16 +5477,23 @@ bin/cppi codegen-check .tmp/cppi/codegen-check --jobs 2           # the oracle t
   minutes to cpp-check's and cpp-aot's runs under auto. (a) P15's full parse cache (`CPP_FULL_CACHE=1`, G5.2) on for the run checks'
   gen-batch, keyed as the skim cache; (b) accept. **Recommended: (a)**, measured at night.
 
+- **CP337: universal character names in identifiers** ([lex.name], [lex.charset]): `\u00C1` and `\u00c1` (and `\U000000C1`) name one
+  identifier; the native parser keeps each spelling, so other/ucnid-1.C's calls find no function. (a) Identifiers normalized to their
+  characters (UTF-8, as clang's IdentifierInfo and its mangling) in the lexer's identifier tokens, the round trip's forms then naming the
+  characters (its records of the files with UCNs recorded again); (b) normalized in sema's names alone (declarations, lookups, mangling),
+  the forms untouched. **Recommended: (b)**: no record moves.
+
 ### Checked (light; the stubs first on PATH, their log empty)
 
 | check | result |
 |---|---|
-| gen-batch over the 82 programs at e6214cd13 and at the branch | 45 and 53 generated (tables above); 909 s and 1,272 s at one thread, 1.5 GB |
+| gen-batch over the 82 programs at e6214cd13 and at the branch | 45 and 53 generated, 54 with range-for14 after (tables above); 909 s and 1,272 s at one thread, 1.5 GB |
+| `CPPI_ROUTE=ours bin/cppi check --corpus gxx-dg-run --only` range-for14 | 1 of 1 pass |
 | `CPPI_ROUTE=ours bin/cppi check --corpus gxx-dg-run --sample 25` | 45 generated, 44 pass, 1 oracle-text; 22 refused; 1.6 GB |
 | `CPPI_ROUTE=ours bin/cppi check --corpus samples,runtime` | not run: nodes-list passed 2.3 GB (the night's) |
 | `bin/cppi runtime-build` (records mode) | 198 of 198, 1.1 GB, 11 min |
 | `CPPI_CI_CHUNK=5 bin/cppi runtime-ci` | 186 of 199 units read under 1.4 GB; the 13 heaviest past 2.3 GB alone (above) |
-| `bin/cppi codegen-gen`, `--record` | 148 of 149 a0c6ad347's forms, recursion intended; 153 of 153 recorded |
+| `bin/cppi codegen-gen`, `--record` | 148 of 149 a0c6ad347's forms, recursion intended; 154 of 154 recorded (the fifth sample's run: its forms only added) |
 | `bin/repr-cpp dg --corpus dg-error --front native --sample 10`; `--only` variadic170 | 117 own passes as recorded, 1 regression; fixed: 1 of 1 |
 | probes (`.tmp/micro/`): std::pair's default and (const T1&, const T2&) constructors at C++17, the trait chain of `__is_implicitly_default_constructible`, structured bindings over arrays, structs, pairs, std::sort at C++23, std::string from a literal | generate |
 

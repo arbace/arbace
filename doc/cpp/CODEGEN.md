@@ -1282,6 +1282,8 @@ the switch and the proposals are in doc/cpp/CPP-SURVEY.md, "As built: cpp-route"
 | explicit template arguments for argument-dependent lookup ([temp.names]/3, P0846) | `get<i>(e)` of a tuple-like binding | an unqualified name that finds nothing keeps its written template arguments for the templates the lookup of the call's arguments finds |
 | classes through an ellipsis ([expr.call]/12) and va_arg of them | runtime/deferred.cpp's `mix(2, ..., P{1, 2}, Big{{0, 0, 9}}, ...)` | a trivially copyable and destructible class passed as a parameter of its type is (the psABI's classes, the six INTEGER and eight SSE registers counted on from the declared parameters; a MEMORY one byval), the call's type the prototype's (clang's X86_64ABIInfo::computeInfo); va_arg of a class (`va-arg-class!`, the psABI's §3.5.7 as clang's EmitVAArg writes it): from the register save area when gp_offset <= 48 - 8n and fp_offset <= 176 - 16m, the eightbytes copied into a temporary when mixed or two SSE (16 bytes apart in the save area), else from the overflow area advanced by the size rounded to eight; a non-trivial class refused (clang's error) |
 | the implicit global allocation functions ([basic.stc.dynamic.general]/2) | cpp0x/defaulted19a.C's `::operator new (t)` without <new> | declared in the global scope the first time a name expression names one no declaration has: new(size_t), new[](size_t), delete(void*), delete[](void*) and the sized deletes |
+| GNU's statement expressions, `({ s...; e; })` | cpp2a/range-for14.C | `:stmt-expr`: the statements in a scope of their own, the last expression's value (a scalar's, or void) kept in a temporary while the scope's cleanups run; a class's refused |
+| a range-based for's init-statement ([stmt.ranged]/1, C++20) | the same | the native node is clang's (init, range, begin, end, cond, inc, loop variable, body): the init-statement analyzed first in the loop's scope (it was taken for the range) |
 | GNU's `__decltype` at a declaration's start | std::sort (libstdc++'s heap and algorithm bodies: `__decltype(...) __cmp(...);`) | the parser's declaration-specifier test takes it as decltype (the statement was read as an expression and declined, so every std::sort specialization was refused) |
 
 Two checks of the parser came with them: a non-type template parameter's type naming an enclosing template's parameter pack with no
@@ -1289,5 +1291,5 @@ Two checks of the parser came with them: a non-type template parameter's type na
 [temp.variadic]/7; g++.dg's cpp0x/variadic170.C had passed its own dg-error line by the decline the type-parameter test removed), and a
 parse refusal names the parser's reasons (`declined 2 constructs: declaration: a parameter's type x2`).
 
-Samples of test/cpp/codegen written for them: `struct-bind`, `gnu-cond`, `va-class`, `agg-dmi` (each `codegen-check`'s three levels at the
+Samples of test/cpp/codegen written for them: `struct-bind`, `gnu-cond`, `va-class`, `agg-dmi`, `stmt-expr` (each `codegen-check`'s three levels at the
 oracle tier; the light half's digests recorded).
