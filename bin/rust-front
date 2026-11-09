@@ -349,6 +349,40 @@ case ${1:-} in
     names=("$@")
     if [ ${#names[@]} -eq 0 ]; then names=($(cd "$fd" && ls *.cap.edn | sed 's/\.cap\.edn$//')); fi
     cd "$root" && arbace_tool -m arbace.rust.front.capture-check "$fd" "${names[@]}" 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing' ;;
+  mono-check)
+    # RFP23 (c): arbace.rust.front.mono's native facts (items, symbols, callees and their locations, function constants', statics'
+    # and lang items' symbols, layouts) against the pack rust-front-mono's record, entry by entry (MONO_VERBOSE=1: each
+    # difference); --control: each program's facts against the next one's record, which must differ
+    shift
+    ctl=""; [ "${1:-}" = --control ] && { ctl=--control; shift; }
+    [ $# -gt 0 ] || set -- "$root"/test/rust/front/a*.rs
+    fd=$(records_front) || exit 1
+    md=$work/mono-check; mkdir -p "$md"; names=()
+    libsrc=${RF_MONO_LIB:-$root/.tmp/repr-rust/apks/rust-src/usr/src/rust/library}
+    [ -d "$libsrc" ] || { echo "mono-check: no $libsrc (bin/repr-rust corpus fetch)"; exit 1; }
+    for f in "$@"; do
+      f=$(realpath "$f"); n=$(basename "$f" .rs); rel=${f#"$root"/}
+      rs=$(rfr_stage mono "$rel") || { echo "mono-check: $n: no record in the pack rust-front-mono"; exit 1; }
+      mkdir -p "$md/$n"; cp "$rs/$n/$n.record.edn" "$md/$n/$n.record.edn"; names+=("$n")
+    done
+    cd "$root" && arbace_tool -m arbace.rust.front.mono-check "$fd" "$root/test/rust/front/std-crates.edn" "$libsrc" "$md" $ctl "${names[@]}" 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing' ;;
+  std-crates)
+    # RFP23 (c): std's crates' identities (each rmeta's CrateRoot: StableCrateId, svh; the compiler's version) read from the sysroot
+    # (the oracle tier's, by hand where rustc's sysroot is) into test/rust/front/std-crates.edn; --check compares
+    shift
+    sl=${RUST_SYSROOT_LIB:-$work/../repr-rust/sysroot/lib/rustlib/x86_64-alpine-linux-musl/lib}
+    out=$root/test/rust/front/std-crates.edn; [ "${1:-}" = --check ] && out=$work/std-crates.edn
+    cd "$root" && arbace_tool -e "(require '[arbace.rust.front.mono :as m])
+      (let [lib \"$sl\" fs (sort (filter #(re-matches #\"lib(core|alloc|std)-[0-9a-f]+\\.rmeta\" %) (seq (.list (java.io.File. lib)))))
+            rs (for [f fs] [(second (re-find #\"^lib([a-z]+)-\" f)) f (m/read-rmeta-root (str lib \"/\" f))])]
+        (spit \"$out\" (str \";; std's crates as the front end's runs name them (RFP23 (c), doc/rust/FRONTEND-SURVEY.md, \\\"As built: RFP23 (c)\\\"): each crate's\\n;; StableCrateId as its .rmeta's CrateRoot records it and the compiler's version (cfg_version) from the rmeta's header, read by\\n;; arbace.rust.front.mono/read-rmeta-root from the sysroot of rustc 1.99.1 (Alpine's rust 1.99.1-r0); \`bin/rust-front std-crates\`\\n;; writes it, \`std-crates --check\` compares it with the sysroot's (by hand, where the sysroot is)\\n\"
+          \"{:cfg-version \" (pr-str (subs (:version (nth (first rs) 2)) 6)) \"\\n :triple \" (pr-str (:triple (nth (first rs) 2)))
+          \"\\n :crates {\" (apply str (interpose \"\\n          \" (for [[n f r] (sort-by #(case (first %) \"core\" 0 \"alloc\" 1 2) rs)] (str (pr-str n) \" {:stable-crate-id \" (pr-str (:stable-crate-id r)) \" :svh \" (pr-str (:svh r)) \" :file \" (pr-str f) \"}\")))) \"}}\\n\")))" 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing' || true
+    [ -s "$out" ] || exit 1
+    if [ "${1:-}" = --check ]; then
+      if cmp -s "$out" "$root/test/rust/front/std-crates.edn"; then echo "std-crates: the sysroot's crates as test/rust/front/std-crates.edn records them"
+      else diff "$root/test/rust/front/std-crates.edn" "$out"; echo "std-crates: FAIL: the sysroot's crates differ"; exit 1; fi
+    else echo "std-crates: wrote $out"; fi ;;
   essential)
     # RFP24 (b), RFP27 (a): the essential step's check, no helper, no rustc, no C compiler (stubs exiting 99 first on PATH, their
     # log empty): build-check over test/rust/front/a*.rs, capture-check over the closures program and test/rust/front/, run-built
@@ -368,8 +402,11 @@ case ${1:-} in
     "$root/bin/ci" musl ensure > "$ess/musl.log" 2>&1 || { echo "rust-front essential: FAIL: bin/ci musl ensure ($ess/musl.log)"; st=1; }
     RF10_STUBS=1 "$0" run-built --records > "$ess/run.log" 2>&1 || { echo "rust-front essential: FAIL: run-built exited $? ($ess/run.log)"; st=1; }
     RF10_CONTROL=1 RF10_STUBS=1 "$0" run-built --records "$root/test/rust/front/a1.rs" > "$ess/control.log" 2>&1
+    # RFP23 (c): the run's native facts judged against the record, and its control (each program against another's record)
+    "$0" mono-check > "$ess/mono.log" 2>&1 || { echo "rust-front essential: note: mono-check found differences ($ess/mono.log)"; }
+    "$0" mono-check --control "$root/test/rust/front/a1.rs" "$root/test/rust/front/a2.rs" > "$ess/mono-control.log" 2>&1
     calls=$(wc -l < "$stubs/stubs.log")
-    { grep -h -E '^(build-check: .* after built,|capture-check: |run-built: [0-9]+ of )' "$ess/build.log" "$ess/capture.log" "$ess/run.log" | sed 's/; stub calls: [0-9]*$//'; } > "$ess/summary.txt"
+    { grep -h -E '^(build-check: .* after built,|capture-check: |run-built: [0-9]+ of |mono-check: [0-9]+ programs: )' "$ess/build.log" "$ess/capture.log" "$ess/run.log" "$ess/mono.log" | sed 's/; stub calls: [0-9]*$//'; } > "$ess/summary.txt"
     cat "$ess/summary.txt"
     for l in build capture; do
       if grep -q 'differs, as it must' "$ess/$l.log"; then echo "rust-front essential: $l control: differs, as it must"
@@ -378,6 +415,9 @@ case ${1:-} in
     if grep -q '^run-built: a1: status' "$ess/control.log" || ! grep -q "^run-built: a1: rustc's status" "$ess/control.log"; then
       echo "rust-front essential: FAIL: run-built's control (RF10_CONTROL=1, a1) did not differ ($ess/control.log)"; st=1
     else echo "rust-front essential: run control: $(grep "^run-built: a1:" "$ess/control.log"), differs, as it must"; fi
+    if grep -q '^mono-check: 2 programs (control): .* 0 of\|^mono-check: 2 programs (control)' "$ess/mono-control.log" && [ "$(grep -c '^   ' "$ess/mono-control.log")" -gt 0 ]; then
+      echo "rust-front essential: mono control: $(grep -c '^   ' "$ess/mono-control.log") facts of a1 and a2 against each other's records differ, as they must"
+    else echo "rust-front essential: FAIL: mono-check's control did not differ ($ess/mono-control.log)"; st=1; fi
     [ "$calls" = 0 ] || { echo "rust-front essential: FAIL: $calls calls of a stubbed toolchain ($stubs/stubs.log)"; st=1; }
     known=$root/test/rust/front/essential-known.txt
     if [ $rec = 1 ]; then

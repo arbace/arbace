@@ -889,6 +889,20 @@ covers what.
   layout.rs`' `fn_can_unwind`; and to `build.ae` a port of rustc_apfloat 0.2.3's (`rustc_apfloat-0.2.3+llvm-462a31f5a5ab`,
   `src/ieee.rs`, `impl Display for IeeeFloat`) float formatting, a port of LLVM's APFloat::toString, under the Apache License 2.0
   with LLVM Exceptions (the text of section "LLVM (clang): Apache License 2.0 with LLVM Exceptions" below).
+- `arbace/rust/front/mono.ae` (RFP23 (c), doc/rust/FRONTEND-SURVEY.md, "As built: RFP23 (c)"): Arbace forms porting, function by
+  function, rustc 1.99.1 (https://github.com/rust-lang/rust at 58cf8f9c3, the sources of Alpine's rust-src-1.99.1-r0):
+  `compiler/rustc_symbol_mangling/src/{lib.rs,v0.rs}` (symbol_name_from_attrs, compute_symbol_name, the v0 mangler, punycode
+  identifiers, mangle_internal_symbol), `compiler/rustc_span/src/def_id.rs` (StableCrateId::new), `compiler/rustc_middle/src/{mono.rs,
+  ty/print/mod.rs,ty/instance.rs,ty/layout.rs}` (instantiation_mode, default_print_def_path, requires_inline, requires_caller_location,
+  discr_range_of_repr), `compiler/rustc_mir_transform/src/cross_crate_inline.rs`, `compiler/rustc_metadata/src/rmeta/{mod.rs,
+  encoder.rs}` (the rmeta header and CrateRoot's first fields, should_encode_mir), `compiler/rustc_attr_ir/src/weak_lang_items.rs`,
+  `compiler/rustc_monomorphize/src/collector.rs` (roots, the uses of calls and drops), `compiler/rustc_abi/src/{layout.rs,
+  layout/simple.rs,lib.rs,wrapping_range.rs}` and `compiler/rustc_ty_utils/src/layout.rs` (layout_of for x86_64); and
+  rustc-stable-hash 0.1.2 (https://github.com/rust-lang/rustc-stable-hash, the version rustc's Cargo.lock pins: `src/sip128.rs`,
+  `src/stable_hasher.rs`, SipHasher128 and StableHasher's writes): copyright the Rust project's contributors, dual-licensed under
+  the MIT License or the Apache License 2.0 at the licensee's option, taken here under the MIT License ("Rust (rustc 1.99.1): MIT
+  License or Apache License 2.0" below). The judge `mono_check.ae` and `test/rust/front/std-crates.edn` are Arbace's own, under the
+  Eclipse Public License 1.0.
 - The own-verdict judge of `arbace/rust/check.ae` (`own-verdict`, `run-class`, `verdict-met?`, `directives`; rust-90,
   doc/rust/EVAL.md §13): Arbace forms written after rustc 1.99.1's compiletest, the same revision and sources (the pinned
   `rustc-1.99.1-src.tar.xz`'s `src/tools/compiletest/src/runtest/ui.rs`: `run_ui_test`'s RunResult of the run and the

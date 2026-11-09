@@ -265,6 +265,13 @@ code. Three kinds of things live here:
   RF9a"; RF9b's second slice, the same day: ambiguity and where-clause candidates, normalization through the parameter environment and
   item bounds, CoerceMany, closure kinds, writeback's fix-ups, "As built: RF9b"; LICENSE.md names the files; MIT OR Apache-2.0);
   evaluated from the checkout, out of `gate_key` (RFS13).
+  `arbace/rust/front/mono.ae` (RFP23 (c), 2026-11-09, doc/rust/FRONTEND-SURVEY.md, "As built: RFP23 (c)": the run's facts natively)
+  ports rustc 1.99.1, the same revision and sources: `rustc_symbol_mangling/src/{lib,v0}.rs`, `rustc_span/src/def_id.rs`'s
+  StableCrateId, `rustc_middle/src/{mono.rs,ty/print/mod.rs,ty/instance.rs,ty/layout.rs}`, `rustc_mir_transform/src/cross_crate_inline.rs`,
+  `rustc_metadata/src/rmeta/{mod,encoder}.rs` (the rmeta's header and CrateRoot's first fields), `rustc_monomorphize/src/collector.rs`,
+  `rustc_abi/src/{layout.rs,layout/simple.rs,lib.rs,wrapping_range.rs}` and `rustc_ty_utils/src/layout.rs`; with rustc-stable-hash
+  0.1.2's `src/{sip128,stable_hasher}.rs` (https://github.com/rust-lang/rustc-stable-hash, as rustc's Cargo.lock pins it); LICENSE.md
+  names the files (MIT OR Apache-2.0); `mono_check.ae` is Arbace's own; evaluated from the checkout, out of `gate_key` (RFS13).
   `arbace/rust/front/build.ae` (THIR and MIR building after `rustc_mir_build/src/{thir,builder}/`, the region scope tree after
   `rustc_hir_analysis/src/check/region.rs`) and `build_run.ae` (CleanupPostBorrowck's changes, the layouts of scalars and scalar pairs
   after `rustc_abi`) port rustc 1.99.1, the same revision and sources, by hand on 2026-11-08 (RF10's first slice,

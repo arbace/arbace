@@ -2032,3 +2032,120 @@ RFP30 (a) is the command's `BUILD_PASS=SimplifyCfg-pre-optimizations` and a line
   forms). Options: (a) **as built: all seven in the essential step**; (b) a1 and a6 (the scalar and the unwinding programs) in the
   essential step, the seven in `--full`; (c) the runs batched into one ci session (`arbace.c.run nodes` over seven programs: one read of
   musl's forms), about 2 minutes. *Recommended: (c) then (a)*: the same coverage at a third of the time; (b) if (c) waits.
+
+## As built: RFP23 (c) (2026-11-09)
+
+Branch `rust-rf10b` (continued from `88ad9637d`), the user's decision of 2026-11-08: after RFP23 (b)'s packs, port the run's facts so
+the runs stop reading rustc's mono record. RFP28-RFP36 await the user and were not built.
+
+### What was ported (`arbace/rust/front/mono.ae`)
+
+From rustc 1.99.1's sources (rust-src's `compiler/`, the same revision as every other port; LICENSE.md, doc/ARBACE.md):
+
+- **The crate's identity.** `StableCrateId::new` (`rustc_span/src/def_id.rs`) over rustc-stable-hash 0.1.2's SipHasher128 (SipHash-1-3,
+  128-bit; the stream of `str::hash`'s bytes and 0xFF, `"metadata"`, no `-C metadata`, `"exe"`, the compiler's `cfg_version`). For a1
+  it gives `0x799ecbb0b009f827`: `a1[799e]` in the DefIds and `Csarn Gkp3JIMJ_` in the symbols, as rustc's. `__rustc`'s disambiguator
+  (`mangle_internal_symbol`) is the same hash of `cfg_version` alone. Std's crates (core, alloc, std) are built with Cargo's
+  `-C metadata`, so their ids are read, not computed: `read-rmeta-root` decodes an `.rmeta`'s header (`METADATA_HEADER` v10, the
+  root's position, the version string) and `CrateRoot`'s first fields (the triple, the SVH, the name, `extra_filename`,
+  `stable_crate_id`) natively; `bin/rust-front std-crates` writes `test/rust/front/std-crates.edn` from the sysroot (by hand, where
+  rustc's sysroot is; `--check` compares: equal here), and the runs read that file, std's build identity as `rust-front-std` is its
+  interface.
+- **v0 symbols** (`rustc_symbol_mangling/src/{lib,v0}.rs`): `symbol_name_from_attrs` (a weak lang item's link name, `rust_begin_unwind`
+  through `mangle_internal_symbol`, `rust_eh_personality` kept, `no_mangle`), `compute_symbol_name`'s instantiating crate (generic
+  arguments, or `instantiation_mode` GloballyShared with conflicts: `rustc_middle/src/mono.rs` with `cross_crate_inlinable`'s attribute
+  rules and `requires_inline`), and the mangler itself: `default_print_def_path` (own generic arguments, a trait's without Self), impl
+  paths (`X`/`M`, the impl's disambiguator, self type and trait), types with their backrefs (`B`), array lengths, the base-62
+  integers, identifiers with punycode (RFC 3492's encoder, as the punycode crate). ReifyShims (`::{shim:reify#0}`) for a
+  `#[track_caller]` function as a constant.
+- **Mono items and callees** (`rustc_monomorphize/src/collector.rs`'s roots and uses, `Instance::try_resolve` for the calls the samples
+  make): the roots (non-generic local functions with an extern indicator, the entry), the calls of Arbace's own bodies (local items;
+  core's generic or inlinable functions as items whose bodies are core's), drops (`drop_glue::<T>` and the local `Drop::drop` it
+  calls); each callee's kind (item, intrinsic: `#[rustc_intrinsic]`), symbol, path, can-unwind (`#[rustc_nounwind]`, the ABI),
+  track-caller and `:external` (`should_encode_mir`: generic or cross-crate-inlinable), each call's caller location from the call
+  expression's span (the builder now keeps it on the callee operand's metadata). Core's attributes come from core's own sources
+  (rust-src's `library/core`, pinned by `tools/rsdump/apks.sha256`): the item found through the module tree (`mod` items, `#[path]`,
+  inline modules, an impl by its index) and read by repr/rust's native parser, `cfg_attr` evaluated for core's build; an item a macro
+  generates is not found and takes the default rules (judged).
+- **Layouts** (`rustc_abi/src/layout.rs`, `layout/simple.rs`, `lib.rs`'s Niche, `wrapping_range.rs`; `rustc_ty_utils/src/layout.rs`):
+  scalars with their valid ranges, thin and fat pointers (the struct tail's metadata), arrays, slices, `str`, fn items, tuples,
+  pattern types (`!null`), `univariant` with repr(Rust)'s field order (the alignment groups, niche sizes, the end-biased second try),
+  the newtype and scalar-pair ABIs, `layout_of_enum`'s niche-filling and tagged layouts (the discriminant's range, the tag's width by
+  the variants' first field's alignment, the common primitive's pair) and the choice between them, every type of the bodies with
+  collect_ty's closure (pointees, elements, struct fields), the helper's `mir/layouts` form.
+- **Def paths**: the instances' `DefId(0:N ~ a1[799e]::path)` and `Item(...)`, rustc's DefIndex by the def collector's order (the
+  injected extern crate and prelude import, a `#[derive]` item and its derived impls collected after the crate's other items, an
+  explicit discriminant's anonymous constant).
+
+### The judge (`bin/rust-front mono-check`, `arbace/rust/front/mono_check.ae`)
+
+Each native fact against the pack's record of the program, entry by entry; `--control`: one program's facts against another's record,
+which must differ. Over a1-a7 (main's stage 0, no helper, rustc or C compiler):
+
+| Fact | Equal | Note |
+|---|---|---|
+| local items' symbols | 47 of 47 | |
+| local items' def, DefId, instance, track-caller | 188 of 188 | |
+| callees (kind, symbol, def, can-unwind, track-caller, external, intrinsic) | 34 of 34 | |
+| caller locations | 33 of 34 | `panic!()`'s call inside its expansion: our span is the expansion's, rustc's the call site |
+| function constants' symbols (ReifyShims among them) | 33 of 33 | |
+| statics' symbols and DefIds | 1 of 1 | |
+| lang items' symbols | 113 of 113 | |
+| layouts of the record's tables | 221 of 223 | `core::fmt::rt::ArgumentType` and `Argument` (std's interface lacks the private enum) |
+| core's items the collector reaches from our bodies | 1 of 1 | a6's `write_volatile::<i32>`; 3 more (`precondition_check`, `is_aligned_to`, `drop_glue::<D>` through `write_volatile`'s body) are reached through core's bodies: the pack's, RF12's |
+
+The control (a1's facts against a2's record and back): 66 of 160 entries differ (symbols, callees, locations, DefIds; the lang items and core's layouts, the same in both, equal).
+
+### What the run takes now (`bin/rust-front run-built`, `arbace.rust.front.build-run`'s native path)
+
+The module is made from the collector's items: Arbace's bodies in its order with their native headers, callees, locations, function
+constants' and statics' symbols; the lang items' symbols, the layout table (native, a refused type's layout the record's when it has
+it); our own type forms (the record's DefIds no longer substituted). From the record: core's bodies (a6's four: RF12's part) and,
+per fact, what mono refuses, counted on the run's line (`build-run: a6: facts native callees 5/5, fn-symbols 5/5, langsyms 17/17,
+layouts 45/47, locs 4/5, statics 1/1, symbols 7/7; core's bodies from the pack 4`). a1-a5 and a7 take **no fact from the record**:
+it is read for rustc's status and output alone, the judge's reference. `RF_MONO=pack` runs RFP23 (b)'s path (every fact the record's).
+Results: `run-built --records` 7 of 7 programs give rustc's status and output with the native facts; the control (RF10_CONTROL=1) a1
+156 for 5.
+
+### The essential step
+
+`bin/rust-front essential` runs `mono-check` over a1-a7 after the runs (its summary line held to `essential-known.txt` with the other
+three: a regression in any native fact moves it) and its control (a1 and a2 crossed, `test/rust/front/controls.edn`'s
+`_control/mono/crossed`); `test/gate/steps.edn`'s step takes `tools/rsdump/apks.sha256` among its pins (rust-src's `library/` is read)
+and the `mono-check` line in its summary. The step's timing and peak are in the journal's entry.
+
+### Scores
+
+`test/crops/independence.edn`'s Rust eval fact names the native facts, its score unchanged at 0.5: the seven runs are not the eval
+cell's cases (rsi check's, on the IR packs), and the rule is the case-weighted mean over the REAP cells' cases (CROPS-SCORE.md, the
+user's decision of 2026-11-07). `bin/crops-score --judge --strict`: Rust unchanged.
+
+### What remains
+
+- RF12: core's bodies from source (a6's four), then a run takes nothing of the record.
+- The three facts mono refuses (RFP37, RFP38 below); core's attributes of macro-made items and core's MIR cost rule (RFP39).
+- RF11: rsi's cases from the front end's MIR, which moves the eval stage.
+
+### Proposed (RFP23 (c))
+
+- **RFP37 std's private ADTs.** `core::fmt::rt::ArgumentType` is not in std's interface (the helper's `--std-iface` writes the public
+  items and what they name by path, not a private enum a field names), so `Argument`'s and `ArgumentType`'s layouts are the record's
+  (2 of 223). Options: (a) **the helper writes every ADT a written field's type names, transitively, the pack `rust-front-std` made
+  again (30 s by hand, the oracle tier's verify)**; (b) collect core's ADTs from rust-src with the native front end (RF12's
+  collection of core, days); (c) keep the record's two. *Recommended: (a)*, (b) with RF12.
+- **RFP38 Caller locations inside macro expansions.** `panic!()`'s call to `core::panicking::panic` carries rustc's span of the macro's
+  call site (17:44); our expansion gives the inner call a foreign span (1 of 34). Options: (a) **port `Span::source_callsite`/
+  `ExpnData::call_site` in RF4's expansion: each expansion records its call site and a foreign span's caller location walks to it**
+  (with RFP34, the same machinery; half a day); (b) take the record's location for an expansion's call. *Recommended: (a)*.
+- **RFP39 core's codegen attributes.** As built they come from core's sources (inline, track_caller, rustc_nounwind, rustc_intrinsic),
+  a macro-made item (the `panic_const_*` lang items, `precondition_check`) taking the default rules and `cross_crate_inlinable`'s MIR
+  cost rule for an item without `#[inline]` not ported (no item of a1-a7 needs it). Options: (a) **as built, judged by mono-check**;
+  (b) decode core's rmeta tables (`codegen_fn_attrs`, `cross_crate_inlinable`, `optimized_mir`'s presence: rustc_metadata's
+  LazyTables) natively, the platform's facts as Java's crop reads class files; (c) core's attributes from our own collection of core
+  at RF12. *Recommended: (a) then (c)*; (b) only if RF12 slips, as it reads rustc's product.
+- **RFP40 mono-check's place.** As built it is in the essential step (about 1.5 minutes more). Options: (a) **as built**; (b) in
+  `--full` only, the essential step running the native runs alone; (c) folded into run-built (one pipeline run a program, the
+  check and the run sharing it: the step back to its earlier time). *Recommended: (c)* then (a): the same judge at no cost.
+- **RFP41 The front end's runs in the eval cell.** The native runs score nothing while they are not the cell's cases. Options:
+  (a) **as built: eval stays 0.5 until rsi's cases run from the front end's MIR (RF11)**; (b) count `run-built`'s programs as eval
+  cases now (6 at 1, 1 at 0.5 beside rsi's thousands: the mean moves by under 0.001). *Recommended: (a)*.

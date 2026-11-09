@@ -1234,3 +1234,40 @@ partial without its key: its next `bin/ci musl ensure` rereads it (`bin/ci check
 reading the forms; `bin/ci run` alone does not). Proposed: RFP34 (closures
 in macro_rules! bodies: Span::to across contexts), RFP35 (the packs' key and the helper), RFP36 (the essential step's runs batched in one
 ci session).
+
+## 2026-11-09: RFP23 (c): the run's facts ported, the runs off rustc's mono record (branch `rust-rf10b`)
+
+The user's decision of 2026-11-08 (RFP23 (b) then (c)): after the packs, port the run's facts. Built on `rust-rf10b` from `88ad9637d`.
+Sources: rustc 1.99.1 (https://github.com/rust-lang/rust at 58cf8f9c3, Alpine's rust-src-1.99.1-r0 pinned by tools/rsdump/apks.sha256):
+`compiler/rustc_symbol_mangling/src/{lib,v0}.rs`, `rustc_span/src/def_id.rs` (StableCrateId::new), `rustc_middle/src/{mono.rs,
+ty/print/mod.rs,ty/instance.rs,ty/layout.rs}`, `rustc_mir_transform/src/cross_crate_inline.rs`, `rustc_metadata/src/rmeta/{mod,encoder}.rs`,
+`rustc_attr_ir/src/weak_lang_items.rs`, `rustc_monomorphize/src/collector.rs`, `rustc_abi/src/{layout.rs,layout/simple.rs,lib.rs,
+wrapping_range.rs}`, `rustc_ty_utils/src/layout.rs`; rustc-stable-hash 0.1.2 (`src/sip128.rs`, `src/stable_hasher.rs`, the version
+rustc's Cargo.lock pins, read from the host's Cargo registry copy). MIT OR Apache-2.0, taken under MIT (LICENSE.md).
+
+- `arbace/rust/front/mono.ae`: SipHasher128 and StableCrateId (a1's `0x799ecbb0b009f827` and `__rustc`'s disambiguator as rustc's on
+  the first try: the stream is the name, 0xFF, "metadata", "exe", cfg_version `1.99.1 (58cf8f9c3 2026-10-13) (Alpine Linux Rust
+  1.99.1-r0)`); an rmeta reader of the header and CrateRoot's first fields for core's, alloc's and std's ids (Cargo's -C metadata makes
+  them uncomputable), written to `test/rust/front/std-crates.edn` by `bin/rust-front std-crates` (`--check`: equal); the v0 mangler
+  with backrefs, impl paths, punycode, internal symbols and ReifyShims; codegen attributes (local from the HIR's parsed attributes,
+  core's from rust-src's library/core through the module tree, parsed by repr/rust's native parser, cfg_attr evaluated for core's
+  build); instantiation_mode and cross_crate_inlinable's attribute rules; the collector's roots, calls and drops (drop_glue::<T> and the
+  local Drop::drop); callees as the helper writes them; the DefIndex order (injected items, derive items deferred, discriminant
+  constants); rustc_abi's layouts (univariant with repr(Rust)'s reordering and the end-biased retry, niches, enum niche-filling and
+  tagged layouts, pattern types, fat pointers) over the type checker's types and the record's type forms.
+- The builder keeps each call's span on its callee operand's metadata (`build.ae`), for the caller locations; `build-check`'s
+  `build-program` takes a continuation called within the program's bindings.
+- `arbace/rust/front/mono_check.ae`, `bin/rust-front mono-check [--control]`: every native fact against the record. a1-a7: symbols 47/47,
+  items 188/188, callees 34/34, locs 33/34 (panic!'s expansion), fn-symbols 33/33, statics 1/1, langsyms 113/113, layouts 221/223
+  (ArgumentType, Argument: not in std's interface), core's items reached directly 1/1 (3 more through core's bodies); the control 66 of
+  160 entries differing. Layouts matched rustc's on the first run of the port for every type of the seven programs' own locals.
+- `arbace.rust.front.build-run`'s native path (the default; `RF_MONO=pack` RFP23 (b)'s): the module from the collector's items, native
+  facts, the record read for core's bodies (a6's four) and the refused facts only, our own type forms. `run-built --records`: 7 of 7;
+  a1-a5 and a7 take no fact from the record (its status and output only, the judge's reference). The control: a1 156 for 5.
+- `bin/rust-front essential` adds mono-check's summary line (held in `test/rust/front/essential-known.txt`, recorded) and its control
+  (`test/rust/front/controls.edn`); `steps.edn` pins `tools/rsdump/apks.sha256` for rust-src. The step: 8 min 14 s, peak 1.44 GB,
+  stub calls 0; `bin/gate --plan`: run rust-front-essential (never passed at the new key); `bin/crops-score --judge --strict`: 0
+  problems, Rust 75.0 / 95.8 / 80.0 unchanged: the runs are not the eval cell's cases, so the eval fact keeps 0.5 (its why updated).
+- Alternatives: computing core's StableCrateId from Cargo's metadata hash (rejected: Cargo's inputs are not ours); reading core's
+  attributes and cross_crate_inlinable from the rmeta's tables (RFP39 (b), deferred: rustc's product); taking the record's type forms
+  (dropped: no record DefIds in our bodies, the runs pass). Proposed RFP37-RFP41 in the survey's "As built: RFP23 (c)".
