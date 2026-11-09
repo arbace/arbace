@@ -1521,7 +1521,11 @@
         build! (fn [cu] (case kind :list (emit! cu :build-list 0) :set (emit! cu :build-set 0) :dict (emit! cu :build-map 0) nil))]
     (if (:comp-inlined @block)
       ;; inlined: its own names are hidden fast locals of this unit, their outer values saved and restored around it
-      (let [own (vec (sort (for [[nm f] (:symbols @block) :when (and (not= nm ".0") (sc/has-bit? f sc/DEF_LOCAL))] nm)))
+      (let [own (vec (sort (for [[nm f] (:symbols @block)
+                                 ;; codegen_push_inlined_comprehension_locals: DEF_LOCAL and not DEF_NONLOCAL (3.15, queue 239;
+                                 ;; 3.14 as before)
+                                 :when (and (not= nm ".0") (sc/has-bit? f sc/DEF_LOCAL)
+                                            (or (not (py315?)) (not (sc/has-bit? f sc/DEF_NONLOCAL))))] nm)))
             saved (:hidden @u)
             saved-syms (:comp-syms @u)
             k (count own)]
@@ -1534,7 +1538,13 @@
               (emit! u :load-cell-and-clear (deref-index u nm))
               (emit! u :load-fast-and-clear (add-local! u nm))))
           (when (pos? k) (emit! u :swap (inc k)))
-          (swap! u update :hidden into (for [nm own] [nm (if (cell? nm) [:cell (deref-index u nm)] (local-index u nm))])))
+          ;; 3.15 (queue 239): a name the comprehension binds that is not its local (an assignment expression's target
+          ;; at module level is GLOBAL_EXPLICIT there) is saved and restored but resolved by its scope, as
+          ;; compiler_nameop does; 3.14 kept every saved name a hidden local (the target's value lost: a DECISION)
+          (swap! u update :hidden into (for [nm own
+                                             :when (or (not (py315?))
+                                                       (#{1 5} (sc/scope-of* (get (:symbols @block) nm 0))))]
+                                         [nm (if (cell? nm) [:cell (deref-index u nm)] (local-index u nm))])))
         ;; codegen_push_inlined_comprehension_locals: a cleanup handler restores the names on an exception
         (let [d (depth u)
               h (when (pos? k) (push-handler! u d false))
