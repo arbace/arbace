@@ -1093,6 +1093,94 @@
   (let [b (atom {})]
     (every? true? (map (fn [p2 p1] (deduce-by-type-match b tid2 p2 p1 #{} :call)) p2s p1s))))
 
+(declare concept-of)
+
+;; ---------------------------------------------------------------------------------------------
+;; CP300 (a): constraints' normal forms and their partial ordering ([temp.constr.normal], [temp.constr.order]; clang's
+;; SemaConcept.cpp at llvmorg-23.1.5: NormalizedConstraint, IsAtLeastAsConstrained, subsumes over the DNF and CNF)
+
+(defn- concept-ref
+  "The concept a constraint's node names (a concept-id, `C<A...>`) with its arguments resolved in `scope`: [concept args],
+  or nil (not a concept-id, or arguments the slice cannot resolve)."
+  [scope n]
+  (when (= "DeclRefExpr" (:kind n))
+    (let [nm (get-in n [:referencedDecl :name])
+          es (when (string? nm) (try (sema/lookup scope nm) (catch arbace.lang.ExceptionInfo _ nil)))
+          e (first (filter #(and (= :tmpl (:e %)) (= :concept (:tk %))) es))]
+      (when e
+        (let [c (tmpl (:id e))
+              args (try (complete-args c (or (explicit-args c (sema/written-targs n (:name c)) scope) []))
+                        (catch arbace.lang.ExceptionInfo _ nil))]
+          (when (and args (not-any? #(and (map? %) (contains? % :pack)) args)) [c args]))))))
+
+(defn- normal-form
+  "The normal form of the constraint expression `n` in `scope` ([temp.constr.normal]/1): [:and P Q], [:or P Q], or an atomic
+  constraint [:atom KEY], a concept-id replaced by its concept's constraint-expression normalized with the parameter mapping
+  of its arguments; KEY the atom's expression (its position: the same expression of the same concept's definition) and
+  its mapping (the arguments, each template's own parameters by their index, canonical), so that two declarations' atoms
+  are identical only through a concept ([temp.constr.atomic]/2)."
+  [scope n mapping depth]
+  (let [k (:kind n)]
+    (cond
+      (> (long depth) 16) [:atom [:deep (System/identityHashCode n)]]
+      (#{"ParenExpr" "ExprWithCleanups"} k) (normal-form scope (first (kids n)) mapping depth)
+      (and (= "BinaryOperator" k) (#{"&&" "||"} (:opcode n)))
+      [(if (= "&&" (:opcode n)) :and :or) (normal-form scope (first (kids n)) mapping depth) (normal-form scope (second (kids n)) mapping depth)]
+      :else
+      (if-let [[c args] (concept-ref scope n)]
+        (normal-form (bind-scope (:scope c) (:params c) args nil) (:expr c) (canonical args) (inc (long depth)))
+        [:atom [(get-in n [:range :begin :file]) (get-in n [:range :begin :offset]) (:_b n) mapping]]))))
+
+(defn- associated-constraints
+  "A function template's associated constraints ([temp.constr.decl]/3) as one normal form or nil: its type-constraints'
+  immediately-declared constraints in order, its requires-clause, its trailing requires-clause, conjoined."
+  [t]
+  (let [ss (sym-scope t)
+        tcs (for [[i p] (map-indexed vector (:params t))
+                  :when (and (:tc p) (not (:tc-args p)) (not (:pack p)))
+                  :let [c (concept-of t p)]
+                  :when c]
+              (normal-form (bind-scope (:scope c) (:params c) [(:ty (first (sema/lookup ss (:name p))))] nil) (:expr c)
+                           (canonical [(:ty (first (sema/lookup ss (:name p))))]) 1))
+        rc (when-let [x (:constraint t)] (normal-form ss x nil 0))
+        trc (when-let [x (:trailingRequiresClause (:pattern t))] (normal-form ss x nil 0))
+        parts (remove nil? (concat tcs [rc trc]))]
+    (when (seq parts) (reduce (fn [a b] [:and a b]) parts))))
+
+(defn- dnf [f]
+  (case (first f)
+    :atom [#{(second f)}]
+    :or (into (dnf (nth f 1)) (dnf (nth f 2)))
+    :and (vec (for [a (dnf (nth f 1)) b (dnf (nth f 2))] (into a b)))))
+
+(defn- cnf [f]
+  (case (first f)
+    :atom [#{(second f)}]
+    :and (into (cnf (nth f 1)) (cnf (nth f 2)))
+    :or (vec (for [a (cnf (nth f 1)) b (cnf (nth f 2))] (into a b)))))
+
+(defn- subsumes?
+  "[temp.constr.order]/1: P subsumes Q when every disjunctive clause of P's disjunctive normal form subsumes every
+  conjunctive clause of Q's conjunctive normal form, a clause subsuming another when an atom of the one is identical to
+  one of the other (clang's subsumes; a form of more than 64 clauses is not ordered)."
+  [P Q]
+  (let [dp (dnf P) cq (cnf Q)]
+    (and (<= (count dp) 64) (<= (count cq) 64)
+         (every? (fn [pi] (every? (fn [qj] (some #(contains? qj %) pi)) cq)) dp))))
+
+(defn more-constrained-fn?
+  "[temp.func.order]/6.2.2, [temp.constr.order]/2: the function template tid1's associated constraints subsume tid2's
+  and not the reverse (no constraints are subsumed by any)."
+  [tid1 tid2]
+  (let [p (try (associated-constraints (tmpl tid1)) (catch arbace.lang.ExceptionInfo _ ::unknown))
+        q (try (associated-constraints (tmpl tid2)) (catch arbace.lang.ExceptionInfo _ ::unknown))]
+    (when (System/getenv "CPP_CONSTRAINT_TRACE") (binding [*out* *err*] (println "more-constrained" tid1 tid2 (pr-str p) (pr-str q))))
+    (cond
+      (or (= ::unknown p) (= ::unknown q)) false
+      (nil? p) false
+      (nil? q) true
+      :else (and (subsumes? p q) (not (subsumes? q p))))))
+
 (defn more-specialized-fn?
   "getMoreSpecialized for a call with `n` arguments: tid1 at least as specialized as tid2 and not the reverse."
   [tid1 tid2 n]
@@ -1101,7 +1189,12 @@
           variadic? (fn [tid] (some #(= :pack-exp (:k %)) (:ps (sym-sig (tmpl tid)))))]
       (or (and a (not b))
           ;; [temp.func.order]/5 (after [temp.deduct.partial]/11): of two otherwise equal, the one without a trailing pack
-          (and a b (variadic? tid2) (not (variadic? tid1)))))))
+          (and a b (variadic? tid2) (not (variadic? tid1)))
+          ;; CP300 (a), [temp.func.order]/6: of two otherwise equal with equivalent template parameter lists, the more
+          ;; constrained
+          (and a b (= (boolean (variadic? tid1)) (boolean (variadic? tid2)))
+               (= (map (juxt :kind :pack) (:params (tmpl tid1))) (map (juxt :kind :pack) (:params (tmpl tid2))))
+               (more-constrained-fn? tid1 tid2))))))
 
 (defn tiebreak
   "[over.match.best]/2.4-2.5 for two candidates no argument ranks apart: a non-template function over a template's
@@ -1749,6 +1842,19 @@
           (upd-fn! fid dissoc :lazy)
           (swap! sema/*order* conj [:fn fid]))))))
 
+(defn- constraint-spelling
+  "CP300 (a), [temp.over.link]/7: a function template's constraints as written (its type-constraints, its requires-clause,
+  its trailing requires-clause), the template parameters' names replaced by their positions: two declarations of the same
+  template spell them alike (equivalent), else they declare two templates."
+  [params rc trc]
+  (let [txt (str (pr-str (map (juxt :tc :tc-args) params)) " | " (some-> rc node-text) " | " (some-> trc node-text))]
+    (reduce (fn [^String s [i p]]
+              (if (string? (:name p))
+                (str/replace s (re-pattern (str "(?<![A-Za-z0-9_])" (java.util.regex.Pattern/quote (:name p)) "(?![A-Za-z0-9_])")) (str "\\$" i))
+                s))
+            (str/replace txt #"\s+" " ")
+            (map-indexed vector params))))
+
 (defn declare-template
   "The :declare hook: a template's declaration node entered (nil when the node is not one of a template's)."
   [scope n]
@@ -1789,8 +1895,12 @@
           body? (sema/body-of pattern)
           qt (get-in pattern [:type :qualType])
           ;; a redeclaration (a declaration, then the definition) is the same template
+          ;; (CP300 (a): the constraints too, [temp.over.link]/7: templates that differ only by them are two)
+          cspell (constraint-spelling (tparams n) (:requiresClause n) (:trailingRequiresClause pattern))
+          same-cons? (fn [tid] (let [t (tmpl tid)] (= cspell (constraint-spelling (:params t) (:constraint t) (:trailingRequiresClause (:pattern t))))))
           old (some #(when (and (= :tmpl (:e %)) (= :fn (:tk %)) (= qt (get-in (:pattern (tmpl (:id %))) [:type :qualType]))
-                                (= (map (juxt :kind :qt :pack) (tparams n)) (map (juxt :kind :qt :pack) (:params (tmpl (:id %))))))
+                                (= (map (juxt :kind :qt :pack) (tparams n)) (map (juxt :kind :qt :pack) (:params (tmpl (:id %)))))
+                                (same-cons? (:id %)))
                        (:id %))
                     (.get ^java.util.HashMap (:names scope) (:name n)))
           ;; a functionally equivalent redeclaration spelled otherwise ([temp.over.link]/5; G4: <type_traits>'s
@@ -1799,7 +1909,8 @@
           old (or old
                   (let [ps (tparams n)
                         cands (filter #(and (= :tmpl (:e %)) (= :fn (:tk %))
-                                            (= (map (juxt :kind :pack) ps) (map (juxt :kind :pack) (:params (tmpl (:id %))))))
+                                            (= (map (juxt :kind :pack) ps) (map (juxt :kind :pack) (:params (tmpl (:id %)))))
+                                            (same-cons? (:id %)))
                                       (.get ^java.util.HashMap (:names scope) (:name n)))]
                     (when (seq cands)
                       (when-let [sig (try (dissoc (sema/resolve-type (bind-scope scope ps nil -1) qt) :cq) (catch arbace.lang.ExceptionInfo x (when (System/getenv "CPP_EQ_TRACE") (binding [*out* *err*] (println "equiv" (:name n) (.getMessage x)))) nil))]

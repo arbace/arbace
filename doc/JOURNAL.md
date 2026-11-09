@@ -1201,3 +1201,14 @@ compiler stubs first on PATH (their log empty). doc/cpp/CPP-SURVEY.md, "Decided 
 - **Alternatives considered**: deducing from the target's return type too ([temp.deduct.conv] on the conversion's `auto (*)(T)`:
   the specialization's deduced return type is compared instead, the same verdicts); `auto...` (left unsure, the closure's pack
   against a function type's parameters).
+
+## 2026-11-09: C++'s CP300 (a), constraint subsumption (branch `cpp-props2`)
+
+- **Built**: constraints' normal forms (concept-ids expanded with their parameter mappings, atoms by expression and mapping),
+  clang's subsumption over DNF and CNF (SemaConcept.cpp at llvmorg-23.1.5, from the pinned tarball), the more constrained template
+  as [temp.func.order]/6's tie-break, and the constraints in a redeclaration's identity ([temp.over.link]/7, by their spelling).
+- **Measured**: the 263 concepts dg-error files: 47 → 50 own passes (concepts-ca107, -pr67427, concepts1), none lost, extras 145 →
+  139, none new; the code generator's 142 samples as recorded; a probe's calls take the more constrained specializations.
+- **Alternatives considered**: the redeclaration's identity by normal forms (rejected: two declarations' own atoms are never
+  identical, so a declaration and its definition would be two templates); clang's caching of normal forms (left: the slice's
+  candidate sets are small).

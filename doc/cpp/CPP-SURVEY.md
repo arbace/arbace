@@ -4694,3 +4694,32 @@ read), the messages after the directives' texts.
   `.tmp/t7/g1.cpp` (initializations, a call's argument, two parameters, a void one) generates the invokers and conversions
   above; its run is the night's (codegen-check's clang and gcc). gen-list over the 142 samples by this commit's tree
   (`.tmp/t7/g301`): 141 forms byte for byte the record's, rtti refused.
+
+### CP300 (a): function templates that differ only by their constraints
+
+- `arbace.cpp.template` (clang's SemaConcept.cpp at llvmorg-23.1.5: NormalizedConstraint, IsAtLeastAsConstrained and `subsumes`
+  over the disjunctive and conjunctive normal forms, read from the pinned tarball; [temp.constr.normal], [temp.constr.order]):
+  `normal-form` normalizes a constraint expression (`&&`, `||`, parentheses; a concept-id replaced by its concept's
+  constraint-expression with the parameter mapping of its arguments, resolved in the binding scope so a nested concept's
+  arguments are the outer template's parameters; any other expression an atomic constraint keyed by its expression's position --
+  the same expression of the same concept's definition -- and its mapping, canonical: each template's parameters by their index);
+  `associated-constraints` conjoins a function template's type-constraints' immediately-declared constraints, its requires-clause
+  and its trailing requires-clause; `subsumes?` is clang's (every disjunctive clause of P against every conjunctive clause of Q,
+  an atom in common; a form of more than 64 clauses not ordered); `more-constrained-fn?`. **The tie-break** ([temp.func.order]/6):
+  `more-specialized-fn?` of two templates at least as specialized as each other, alike in their packs and parameter kinds,
+  takes the more constrained. **The redeclaration's identity** ([temp.over.link]/7): `declare-template` takes a declaration for an
+  earlier template only when their constraints are spelled alike (`constraint-spelling`: the type-constraints, the
+  requires-clause's and the trailing one's text, the parameters' names by position), so `template <class T> requires A<T> int
+  f(T)` and `... requires B<T> int f(T)` are two templates (the later one replaced the earlier before). `CPP_CONSTRAINT_TRACE` prints
+  the forms compared.
+- Measure: the 263 dg-error files of concepts/ and cpp2a/concepts* (`.tmp/t7/f300.txt`; CP301's tree against this commit's):
+  own passes 47 → 50, gained cpp2a/concepts-ca107 (13: `f<0>()` ordered through concept C's atom reached by Add1 and AddOne with
+  the same mapping; 30: `f2<0>()` ambiguous, `2 * N` and `N * 2` two mappings), concepts-pr67427 (`distance` ambiguous: the two
+  templates' Sentinel atoms map their parameters in other positions) and concepts1 (`decl1` declared by a type-constraint and by
+  a requires-clause: two templates, the same atom, ambiguous); none lost; extras 145 → 139 (gone: concepts-ca107:13,
+  concepts-complete1:18, -complete2:23, -complete3:16, concepts-fn1:79-80, calls that subsumption now orders), none new. The
+  probe `.tmp/t7/c2.cpp` (A and B = A && requires, a type-constraint against none, a trailing requires-clause redeclared) generates
+  the calls of the more constrained specializations (`_Z1fIiQ1BIT_EEiS0_`, `_Z1kITk1AlEiT_`). gen-list over the 142 samples
+  (`.tmp/t7/g300`): 141 forms byte for byte the record's, rtti refused.
+- Not built: [over.match.best]/2.6's more constrained non-template functions (a class template's members with trailing
+  requires-clauses of the same signature); a parameter pack's atoms (`C<Ts>...`, a fold-expanded constraint) stay opaque atoms.
