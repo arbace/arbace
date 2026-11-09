@@ -1246,3 +1246,23 @@ compiler stubs first on PATH (their log empty). doc/cpp/CPP-SURVEY.md, "Decided 
 - **Left** for the second pass (doc/cpp/CPP-SURVEY.md, "As built: CP300-CP314", "Not built in this pass"): CP311 (a), CP310 (a)
   after the night's record, CP313 (a)'s member contexts and the other access forms.
 - **Slips**: three throwaway reads with `/dev/null` or a process substitution (the survey's "Slips"); nothing written there.
+
+## 2026-11-09: C++'s CP311 (a), class template argument deduction with initializers (branch `cpp-props3`)
+
+- **Built** (the checker and the code generator, `arbace/cpp/template.ae`'s `ctad`, `arbace/cpp/sema.ae`): clang's
+  SemaTemplateDeductionGuide.cpp and SemaInit.cpp's DeduceTemplateSpecializationFromInitializer at llvmorg-23.1.5 (the pinned
+  tarball), ported rule for rule: implicit guides from the declared constructors (the class's then the constructor template's
+  parameters, the pattern's member typedefs substituted), `C()`, the copy deduction candidate, the user's deduction guides
+  (recorded on their class template as declared), C++20's aggregate deduction candidate; deduced by `deduce-call`, chosen by
+  `resolve-overload` with [over.match.best]/2.9-2.11's guide tie-breaks; copy-initialization's converting guides, list-initialization's
+  two phases, the explicit guide in copy-list-initialization, no viable or ambiguous guides, a placeholder in a compound type, the
+  name without arguments before C++17 and the alias template's C++20 extension under `-pedantic-errors` as the program's errors; for
+  variables (the parser marks its own deduction's placeholder, `:_ctad`), `T(...)` and `T{...}`. Unsure drops (types the slice cannot
+  build or substitute) keep the parser's deduction, so the code generator is never worse than before. Also two partial
+  specializations differing only in their constraints kept as two (found once CTAD let concepts-class be analyzed).
+- **Why (a)**: the proposal's recommendation, the user's decision of 2026-11-09; (b) the checker alone would leave the code generator's
+  CTAD to the parser's approximation (no user guides, no packs, one guide), (c) the 11 sample lines unjudged.
+- **Measured**: see the survey's "As built: CP311 (a) and the rest of CP313 (a)" (the sample's own passes, the 75 CTAD files of the
+  whole part 6 → 18, the code generator's 142 samples as recorded, a probe whose deduced types' mangled names are clang's).
+- **Left**: alias templates' guides in C++20 (BuildDeductionGuideForTypeAlias), C++23's inherited constructors' guides, `new T(...)`,
+  class templates' static members' initializers in specializations.

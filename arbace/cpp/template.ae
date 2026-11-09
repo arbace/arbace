@@ -2,7 +2,11 @@
 ;; commit 7a941dfb2877a0b8cf30323fefa85ad019e0b0f5): clang/lib/Sema/SemaTemplateDeduction.cpp's
 ;; DeduceTemplateArgumentsByTypeMatch, AdjustFunctionParmAndArgTypesForDeduction, DeduceTemplateSpecArguments with
 ;; DeduceTemplateBases, checkDeducedTemplateArguments, isForwardingReference, hasInconsistentOrSupersetQualifiersOf and
-;; isAtLeastAsSpecializedAs (a call's partial ordering), ported by hand on 2026-11-05 (doc/cpp/CODEGEN.md §G3). Their notice:
+;; isAtLeastAsSpecializedAs (a call's partial ordering), ported by hand on 2026-11-05 (doc/cpp/CODEGEN.md §G3); and at llvmorg-23.1.5
+;; (llvm-project-23.1.5.src.tar.xz, the pin of test/cpp/corpora.edn) clang/lib/Sema/SemaTemplateDeductionGuide.cpp's
+;; DeclareImplicitDeductionGuides, transformConstructor, buildSimpleDeductionGuide and DeclareAggregateDeductionGuideFromInitList
+;; and clang/lib/Sema/SemaInit.cpp's DeduceTemplateSpecializationFromInitializer (class template argument deduction, `ctad`),
+;; ported by hand on 2026-11-09 (doc/cpp/CPP-SURVEY.md, "As built: CP311 (a) and the rest of CP313 (a)"). Their notice:
 ;;
 ;;   Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 ;;   See https://llvm.org/LICENSE.txt for license information.
@@ -1200,12 +1204,25 @@
   "[over.match.best]/2.4-2.5 for two candidates no argument ranks apart: a non-template function over a template's
   specialization; of two specializations, the more specialized template's."
   [fa fb & [nargs]]
-  (let [a (sema/fnd fa) b (sema/fnd fb) ta (:tinst a) tb (:tinst b)]
+  (let [a (sema/fnd fa) b (sema/fnd fb) ta (:tinst a) tb (:tinst b)
+        ;; CP311 (a), [over.match.best]/2.9-2.11 for two guides of class template argument deduction: one from a
+        ;; deduction-guide over one not, the copy deduction candidate over another, one from a non-template constructor
+        ;; over one from a constructor template
+        guide-better (fn [] (let [ka (:guide a) kb (:guide b)]
+                              (boolean (and ka kb
+                                            (cond (and (= :user ka) (not= :user kb)) true
+                                                  (or (= :user kb) (= :user ka)) false
+                                                  (and (= :copy ka) (not= :copy kb)) true
+                                                  (= :copy kb) false
+                                                  :else (and (= :ctor ka) (= :ctor-tmpl kb)))))))]
     (cond
       (and (not ta) tb) true
       ;; the parameters compared are those the call has arguments for ([temp.deduct.partial]/3)
-      (and ta tb (not= (:tid ta) (:tid tb))) (more-specialized-fn? (:tid ta) (:tid tb) (or nargs (count (:ps (:ty a)))))
-      :else false)))
+      (and ta tb (not= (:tid ta) (:tid tb))) (let [n (or nargs (count (:ps (:ty a))))]
+                                               (or (more-specialized-fn? (:tid ta) (:tid tb) n)
+                                                   (and (:guide a) (:guide b) (not (more-specialized-fn? (:tid tb) (:tid ta) n)) (guide-better))))
+      (and ta (not tb)) false
+      :else (guide-better))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Class templates: instantiation, explicit and partial specializations
@@ -1675,7 +1692,7 @@
 (defn- find-template [scope nm tk]
   (some #(when (and (= :tmpl (:e %)) (= tk (:tk %))) (:id %)) (.get ^java.util.HashMap (:names scope) nm)))
 
-(declare declare-template)
+(declare declare-template user-guide!)
 
 
 (defn- friend!
@@ -1883,10 +1900,14 @@
           (let [news (tparams n)]
             (upd-tmpl! tid update :params (fn [ps] (vec (map-indexed (fn [i p] (if (and (nil? (:default p)) (:default (get news i))) (assoc p :default (:default (get news i))) p)) ps))))))
         (do (swap! *tmpls* assoc tid {:id tid :tk :class :name (:name n) :scope scope :path (:path scope) :params (tparams n)
+                                      :class-constraint (:requiresClause n)
                                       :pattern (when (:completeDefinition pattern) pattern) :pos (:_b n) :insts {} :specs {} :partials [] :ool []})
             (enter! scope (:name n) {:e :tmpl :tk :class :id tid :pos (long (or (:_b n) 0))})))
       :template))
     "FunctionTemplateDecl"
+    (if-let [gd (first (filter #(= "CXXDeductionGuideDecl" (:kind %)) (kids n)))]
+      ;; CP311 (a): a deduction guide template, recorded on its class template
+      (or (user-guide! scope n (tparams n) gd) :template)
     (if-let [q (ool-qualifier (first (filter #(#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXConversionDecl"} (:kind %)) (kids n))))]
       (ool-member-template! scope n q)
     (let [pattern (first (filter #(#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXConversionDecl"} (:kind %)) (kids n)))
@@ -1926,7 +1947,8 @@
           (if ctor?
             (abi/update-cls! (:cls scope) update :ctor-tmpls (fnil conj []) tid)
             (enter! scope (:name n) {:e :tmpl :tk :fn :id tid :pos (long (or (:_b n) 0))}))))
-      :template))
+      :template)))
+    "CXXDeductionGuideDecl" (or (user-guide! scope n [] n) :template)
     ;; a concept ([temp.concept]): its parameters and constraint expression; a concept-id is its satisfaction (G4)
     "ConceptDecl"
     (if-let [cx (:constraintExpr n)]
@@ -1978,7 +2000,10 @@
           args (resolve-args ss t (template-text-args n) true)]
       ;; a redeclaration of a partial specialization (its declaration, then its definition: <iterator_concepts.h>'s
       ;; iterator_traits<_Tp*>) is the same one, its definition kept (G4); its requires-clause its constraint (P14 (b))
-      (let [same (first (filter #(= (canonical (:args %)) (canonical args)) (:partials t)))
+      ;; (CP311 (a)'s measure: two partial specializations of the same arguments that differ in their constraints are two,
+      ;; [temp.spec.partial.general]/1 with [temp.over.link]/7; concepts-class's S3<T> requires Class<T>, requires Union<T>)
+      (let [cspell (fn [rc] (some-> rc node-text str/trim))
+            same (first (filter #(and (= (canonical (:args %)) (canonical args)) (= (cspell (:constraint %)) (cspell (:requiresClause n)))) (:partials t)))
             pt {:id pid :params params :args args :node n :constraint (:requiresClause n) :scope (:scope t)
                 :forms (template-text-args n) :tmpl t}]
         (if same
@@ -2127,6 +2152,328 @@
       @out)))
 
 ;; ---------------------------------------------------------------------------------------------
+;; CP311 (a): class template argument deduction ([over.match.class.deduct], [dcl.type.class.deduct]), after clang's
+;; SemaTemplateDeductionGuide.cpp (DeclareImplicitDeductionGuides, ConvertConstructorToDeductionGuideTransform's
+;; transformConstructor and buildSimpleDeductionGuide, DeclareAggregateDeductionGuideFromInitList) and SemaInit.cpp's
+;; DeduceTemplateSpecializationFromInitializer at llvmorg-23.1.5 (read as the model, the pinned tarball). The guides
+;; are function templates of this namespace's own (:tk :guide): a constructor's, the class template's parameters then
+;; the constructor's own, its parameter types in a scope binding them (the pattern's member typedefs entered as the
+;; transform substitutes them); the hypothetical C() when the class declares no constructor; the copy deduction
+;; candidate C(C<P...>); the user's deduction guides; C++20's aggregate deduction candidate. Each is deduced by
+;; deduce-call, its specialization a function of the slice (name "<deduction guide for C>", removed after) among which
+;; resolve-overload chooses, with [over.match.best]/2.9-2.11's tie-breaks in `tiebreak`; the chosen one's return type is
+;; the deduced class. A deduction that fails by the algorithm (no *unsure*) is a sure drop; a guide the slice cannot
+;; build or substitute, an unsure one: no viable guide is the program's error only when every drop was sure.
+
+(defn- guide-class-name [n] (second (re-find #"^<deduction guide for (.*)>$" (str (:name n)))))
+
+(defn- explicit-guide?
+  "A deduction guide's or constructor's explicit-specifier, read from its text before the name's ( (`explicit(false)`
+  not explicit; another explicit(...) explicit, as sema's explicit-spec counts it)."
+  [n cname]
+  (let [t (or (node-text n) "")
+        m (re-matcher (re-pattern (str "(?<![A-Za-z0-9_$])" (java.util.regex.Pattern/quote cname) "\\s*\\(")) t)
+        head (if (.find m) (subs t 0 (.start m)) t)]
+    (boolean (and (re-find #"(?<![A-Za-z0-9_$])explicit(?![A-Za-z0-9_$])" head)
+                  (not (re-find #"explicit\s*\(\s*false\s*\)" head))))))
+
+(defn- user-guide!
+  "A deduction guide declared (a CXXDeductionGuideDecl, `n` its FunctionTemplateDecl or itself): recorded on its class
+  template, nil when none is found by its name."
+  [scope n params gd]
+  (when-let [cn (guide-class-name gd)]
+    (when-let [tid (some #(when (and (= :tmpl (:e %)) (#{:class :alias} (:tk %))) (:id %)) (sema/lookup scope cn))]
+      (upd-tmpl! tid update :guides (fnil conj [])
+                 {:node gd :params params :scope scope :explicit (explicit-guide? gd cn) :constraint (:requiresClause n)})
+      :template)))
+
+(def ^:dynamic *ctad-unsure* nil) ; an atom: a guide the slice could not build, deduce or substitute
+
+(defn- guide-scope
+  "The scope of a guide's parameters over `parent`: symbolic (`gid`, no args) or bound to `args`; the pattern's member
+  typedefs and alias declarations entered, resolved in it (a member typedef in a constructor's parameter stands for its
+  type, TransformTypedefType of the transform)."
+  [parent params args gid pattern]
+  (let [s (bind-scope parent params args (when-not args gid))]
+    (doseq [k (when pattern (kids pattern)) :when (#{"TypedefDecl" "TypeAliasDecl"} (:kind k))]
+      (when-let [ty (try (binding [sema/*cutoff* Long/MAX_VALUE] (sema/resolve-type s (get-in k [:type :qualType])))
+                         (catch arbace.lang.ExceptionInfo _ nil))]
+        (enter! s (:name k) {:e :type :ty ty :pos -1})))
+    s))
+
+(defn- ctor-nodes
+  "The pattern's declared constructors: [node ctor-template-node-or-nil] each."
+  [pattern]
+  (for [k (kids pattern)
+        :let [ft (when (= "FunctionTemplateDecl" (:kind k)) k)
+              c (if ft (first (filter #(= "CXXConstructorDecl" (:kind %)) (kids ft))) k)]
+        :when (= "CXXConstructorDecl" (:kind c))]
+    [c ft]))
+
+(defn- param-defaults [n]
+  (mapv (fn [p] (first (remove #(str/ends-with? (str (:kind %)) "Attr") (kids p)))) (filter #(= "ParmVarDecl" (:kind %)) (kids n))))
+
+(defn- self-text
+  "The class template's own template-id written with its parameters' names (C<T, Ts...>)."
+  [t]
+  (str (:name t) "<" (str/join ", " (map #(str (:name %) (when (:pack %) "...")) (:params t))) ">"))
+
+(defn- aggregate-pattern?
+  "[dcl.init.aggr]/1 for the primary template's pattern ([over.match.class.deduct]/1.4, a dependent base assumed to have
+  no virtual functions or bases): no user-declared constructor, no private or protected direct non-static data member,
+  no virtual function, no virtual, private or protected base."
+  [pattern]
+  (let [default (if (= "class" (:tagUsed pattern)) "private" "public")]
+    (and (empty? (ctor-nodes pattern))
+         (not (some #(and (= "CXXMethodDecl" (:kind %)) (:virtual %)) (kids pattern)))
+         (every? #(and (not (:isVirtual %)) (= "public" (let [a (:writtenAccess %)] (if (or (nil? a) (= "none" a)) default a)))) (:bases pattern))
+         (loop [ks (kids pattern) acc default]
+           (if-let [k (first ks)]
+             (cond (= "AccessSpecDecl" (:kind k)) (recur (rest ks) (:access k))
+                   (and (= "FieldDecl" (:kind k)) (not= "public" acc)) false
+                   :else (recur (rest ks) acc))
+             true)))))
+
+(defn- class-guides
+  "The class template `tid`'s guides: its constructors' implicit ones, C() when it declares none, the copy deduction
+  candidate, its user deduction guides (DeclareImplicitDeductionGuides), registered as templates and kept."
+  [tid]
+  (let [t (tmpl tid)
+        n-user (count (:guides t))]
+  (if-let [gs (when (= n-user (:ctad-n-user t)) (:ctad-guides t))]
+    gs
+      (let [;; (the implicit guides once; the user's guides those declared so far, [over.match.class.deduct]/1's
+            ;; deduction-guides found by lookup at the point of the initialization)
+            old (:ctad-guides t)
+            pat (:pattern t)
+            gname (str "<deduction guide for " (:name t) ">")
+            reg! (fn [g] (let [gid (next-id)
+                               g (assoc g :id gid :tk :guide :name gname :insts {} :ctid tid)
+                               sig (try (let [s (guide-scope (:scope g) (:params g) nil gid (:pattern-of g))]
+                                          (binding [sema/*cutoff* Long/MAX_VALUE] (dissoc ((:mk g) s) :cq)))
+                                        (catch arbace.lang.ExceptionInfo e
+                                          (when (System/getenv "CPP_TMPL_TRACE") (binding [*out* *err*] (println "guide" gname (:kind g) "not built:" (.getMessage e))))
+                                          nil))
+                               g (assoc g :sig sig)]
+                           (swap! *tmpls* assoc gid g)
+                           g))
+            implicit (when pat
+                       (let [cs (ctor-nodes pat)
+                             ctor (for [[c ft] cs]
+                                    (let [qt (get-in c [:type :qualType])]
+                                      {:kind (if ft :ctor-tmpl :ctor) :scope (:scope t) :pattern-of pat
+                                       :params (into (vec (:params t)) (when ft (tparams ft)))
+                                       :mk (fn [s] (sema/resolve-type s qt))
+                                       :defaults (param-defaults c) :explicit (explicit-guide? c (:name t))
+                                       :constraint (:requiresClause ft) :trailing (:trailingRequiresClause c)}))
+                             self (self-text t)]
+                         (concat ctor
+                                 (when (empty? cs)
+                                   [{:kind :ctor :scope (:scope t) :pattern-of pat :params (vec (:params t)) :defaults []
+                                     :mk (fn [_] {:k :fn :ps [] :ret abi/void})}])
+                                 [{:kind :copy :scope (:scope t) :pattern-of pat :params (vec (:params t)) :defaults [nil]
+                                   :mk (fn [s] {:k :fn :ps [(sema/resolve-type s self)] :ret abi/void})}])))
+            user (for [u (:guides t)]
+                   (let [qt (get-in (:node u) [:type :qualType])]
+                     {:kind :user :scope (:scope u) :params (vec (:params u)) :defaults (param-defaults (:node u))
+                      :mk (fn [s] (sema/resolve-type s qt)) :explicit (:explicit u) :constraint (:constraint u)
+                      :user-node (:node u)}))
+            gs (if old
+                 (into old (map reg! (drop (count (filter #(= :user (:kind %)) old)) user)))
+                 (mapv reg! (concat implicit user)))]
+        (upd-tmpl! tid assoc :ctad-guides gs :ctad-n-user n-user)
+        gs))))
+
+(defn- aggregate-guide
+  "C++20's aggregate deduction candidate for the braced or parenthesized initializer's `items` ([over.match.class.deduct]
+  /1.4-1.10; DeclareAggregateDeductionGuideFromInitList with the InitListChecker's element types): the parameters T_i of
+  the elements x_i initializes, bases first, an array's an rvalue reference to it for a braced item, a const lvalue one
+  for a string literal; nil when the list has more items than elements (no guide), :unsure when brace elision might
+  apply or an element is a pack."
+  [tid items]
+  (let [t (tmpl tid)
+        pat (:pattern t)
+        elems (concat (map (fn [b] [(get-in b [:type :qualType]) :base]) (:bases pat))
+                      (keep (fn [k] (when (and (= "FieldDecl" (:kind k)) (not (and (:isBitfield k) (nil? (:name k))))) [(get-in k [:type :qualType]) (:name k)]))
+                            (kids pat)))
+        n (count items)]
+    (cond
+      (some (fn [[qt nm]] (or (nil? qt) (nil? nm) (re-find #"\.\.\.|\(anonymous|\(unnamed" qt))) (take n elems)) :unsure
+      (> n (count elems)) nil
+      :else
+      (let [ss (guide-scope (:scope t) (vec (:params t)) nil -2 pat)
+            kinds (for [[[qt _] it] (map vector elems items)]
+                    (let [ty (try (binding [sema/*cutoff* Long/MAX_VALUE] (sema/resolve-type ss qt)) (catch arbace.lang.ExceptionInfo _ nil))
+                          braced (= :init-list (:op it))
+                          str? (= :str (:op it))]
+                      (cond
+                        (nil? ty) :unsure
+                        (abi/arr? ty) (cond braced :rref
+                                            str? :clref
+                                            (or (dependent? (:n ty)) (map? (:n ty))) :plain
+                                            :else :unsure)
+                        braced :plain
+                        (dependent? ty) :plain
+                        ;; a non-dependent aggregate element: its braces may be elided
+                        (and (abi/class? ty) (sema/aggregate? ty)) :unsure
+                        :else :plain)))]
+        (if (some #{:unsure} kinds)
+          :unsure
+          (let [qts (mapv first (take n elems)) ks (vec kinds)]
+            {:kind :aggr :scope (:scope t) :pattern-of pat :params (vec (:params t)) :defaults []
+             :mk (fn [s] {:k :fn :ret abi/void
+                          :ps (mapv (fn [qt k] (let [ty (sema/resolve-type s qt)]
+                                                 (case k :rref (abi/rref ty) :clref (abi/lref (assoc ty :of (assoc (:of ty) :c true))) ty)))
+                                    qts ks)})}))))))
+
+(defn- class-and-bases [c] (cons c (mapcat #(class-and-bases (:cls %)) (:bases (abi/cls c)))))
+
+(defn- guide-min-args [g]
+  (let [ps (:ps (:sig g)) np (count (remove #(= :pack-exp (:k %)) ps))]
+    (- np (count (filter some? (take-last np (:defaults g)))))))
+
+(defn- guide-candidate!
+  "The guide `g` deduced from the arguments `args` (`il`: its first parameter an initializer_list<E> deduced from the
+  list's elements, [temp.deduct.call]/1), its specialization registered as a function, or nil (a drop, counted in `drops`)."
+  [g args il drops]
+  (let [u (atom false) sr (atom false)
+        cnt (fn [] (swap! drops update (if @u :unsure-drops :sure-drops) (fnil inc 0)) nil)]
+    (if (nil? (:sig g))
+      (do (reset! u true) (cnt))
+      (let [dg (if il (assoc g :sig (assoc (:sig g) :ps (vec (concat (repeat (count (:items (first args))) il) (rest (:ps (:sig g))))))) g)
+            dargs (if il (vec (concat (:items (first args)) (rest args))) args)
+            at sema/*at* at-saved (some-> at deref)
+            r (binding [*unsure* u *sure* sr]
+                (try
+                  (when-let [a (deduce-call dg [] dargs)]
+                    (let [cs (guide-scope (:scope g) (:params g) a nil (:pattern-of g))
+                          ok (fn [rc] (or (nil? rc)
+                                          (let [d (atom false)
+                                                v (binding [sema/*cutoff* Long/MAX_VALUE sema/*constraint-doubt* d] (sema/constraint-satisfied? cs rc))]
+                                            (cond v true @d (do (reset! u true) false) :else false))))]
+                      (when (and (ok (:class-constraint (tmpl (:ctid g)))) (ok (:constraint g)) (ok (:trailing g)))
+                        (let [ft (binding [sema/*cutoff* Long/MAX_VALUE] ((:mk g) cs))
+                              cls (if (= :user (:kind g))
+                                    (abi/unq (:ret ft))
+                                    (let [ct (tmpl (:ctid g))]
+                                      (instantiate-class (:ctid g) (or (complete-args ct (subvec (vec a) 0 (count (:params ct)))) (fail :template "ctad: missing arguments")))))
+                              fid (next-id)]
+                          (swap! sema/*fns* assoc fid {:id fid :name (:name g) :kind :guide :ty {:k :fn :ps (vec (:ps ft)) :ret cls :va (:va ft)}
+                                                       :defaults (:defaults g) :tinst {:tid (:id g) :args a} :guide (:kind g)
+                                                       :explicit (:explicit g) :deleted-sure false})
+                          fid))))
+                  (catch arbace.lang.ExceptionInfo e
+                    (when (System/getenv "CPP_TMPL_TRACE") (binding [*out* *err*] (println "guide" (:name g) (:kind g) "drops out:" (.getMessage e))))
+                    (when-not (or (:cx/constraint-false (ex-data e)) (:cx/sure-drop (ex-data e))) (reset! u true))
+                    nil)
+                  (finally (when at (reset! at at-saved)))))]
+      (or r (cnt))))))
+
+(defn- init-list-guide-elem
+  "E when the guide's first parameter is std::initializer_list<E> or a reference to one and the rest have default
+  arguments (isInitListConstructor), else nil."
+  [g]
+  (let [ps (:ps (:sig g)) p (first ps)]
+    (when (and p (<= (dec (count ps)) (count (filter some? (rest (:defaults g))))))
+      (let [q (abi/unq (abi/non-ref (abi/unq p)))]
+        (when (and (= :tspec (:k q)) (= "initializer_list" (:name q)) (= [[:ns "std"]] (:path q)))
+          (first (:args q)))))))
+
+(defn ctad
+  "The :ctad hook: the class a placeholder for the class template or alias template `tid` deduces from an initializer
+  of `kind` (:direct, :copy, :list-direct, :list-copy) with `init` (the arguments' vector, an expression, an
+  init-list), as DeduceTemplateSpecializationFromInitializer does; a refusal :ctad when the program is ill-formed."
+  [ctx tid kind init]
+  (let [t (tmpl tid)
+        cname (:name t)
+        ;; (before C++17 a template-name is no placeholder: its template arguments are missing, [temp.names]/1)
+        _ (when (< (long sema/*cxx-year*) 17)
+            (fail :ctad "use of class template '" cname "' requires template arguments"))
+        _ (when (= :alias (:tk t))
+            (when (and (< (long sema/*cxx-year*) 20) sema/*pedantic-errors*)
+              (fail :ctad "class template argument deduction for alias templates is a C++20 extension ('" cname "')"))
+            (fail :template "ctad: an alias template's guides (" cname ")"))
+        list? (#{:list-direct :list-copy} kind)
+        inits (cond list? (:items init) (vector? init) init :else [init])
+        ;; (copy-initialization not from a list: the converting guides alone, [over.match.copy]/1, [over.match.ctor]/1)
+        allow-explicit (not= :copy kind)
+        gs (class-guides tid)
+        has-user (some #(= :user (:kind %)) gs)
+        _ (when (and (nil? (:pattern t)) (not has-user))
+            (fail :ctad "template '" cname "' has no definition and no deduction guides"))
+        ;; (C++23's inherited constructors' guides, [over.match.class.deduct]/1.10 (P2582), are not built: a class that
+        ;; inherits constructors is not judged)
+        inherits (some #(and (= "UsingDecl" (:kind %))
+                             (let [[_ a b] (re-find #"(\w+)\s*(?:<[^;]*>)?\s*::\s*(\w+)\s*;?\s*$" (or (node-text %) ""))] (and a (= a b))))
+                       (kids (:pattern t)))
+        cands (fn [only-list args]
+                (let [drops (atom {:sure-drops 0 :unsure-drops 0})
+                      fids (vec (concat
+                                 (for [g gs
+                                       :when (or allow-explicit (not (:explicit g)))
+                                       :when (or allow-explicit (nil? (:sig g))
+                                                 (let [m (guide-min-args g) ps (:ps (:sig g))]
+                                                   (not (or (> m 1) (and (empty? ps) (not (:va (:sig g))))))))
+                                       :let [il (when only-list (init-list-guide-elem g))]
+                                       :when (or (not only-list) il)
+                                       :let [fid (guide-candidate! g args il drops)]
+                                       :when fid]
+                                   fid)
+                                 ;; [over.match.class.deduct]/1.4: the aggregate deduction candidate
+                                 (when (and (>= (long sema/*cxx-year*) 20) (not has-user) (not only-list) (seq inits)
+                                            (:pattern t) (aggregate-pattern? (:pattern t))
+                                            (or list? (= :direct kind)))
+                                   (let [ag (aggregate-guide tid inits)]
+                                     (cond
+                                       (= :unsure ag) (do (swap! drops update :unsure-drops inc) nil)
+                                       (nil? ag) nil
+                                       :else (let [g (let [gid (next-id)
+                                                           g (assoc ag :id gid :tk :guide :name (str "<deduction guide for " cname ">") :insts {} :ctid tid)
+                                                           sig (try (dissoc ((:mk g) (guide-scope (:scope g) (:params g) nil gid (:pattern-of g))) :cq)
+                                                                    (catch arbace.lang.ExceptionInfo _ nil))]
+                                                       (swap! *tmpls* assoc gid (assoc g :sig sig))
+                                                       (assoc g :sig sig))]
+                                               (when-let [fid (guide-candidate! g args nil drops)] [fid])))))))]
+                  [fids @drops]))
+        unsure-fail (fn [why] (fail :template "ctad: " why " (" cname ")"))
+        resolve (fn [[fids drops] args]
+                  (cond
+                    (empty? fids) (if (pos? (long (:unsure-drops drops))) ::unsure ::none)
+                    :else (try (binding [sema/*drops* drops] (sema/resolve-overload fids args nil))
+                               (catch arbace.lang.ExceptionInfo e
+                                 (let [m (.getMessage e)]
+                                   (cond
+                                     (re-find #"^codegen: no viable function among" m) ::none
+                                     (re-find #"^codegen: ambiguous call" m) ::ambiguous
+                                     (re-find #"^codegen: no viable function" m) ::unsure
+                                     :else (throw e)))))))
+        fns-before (set (keys @sema/*fns*))
+        cleanup! (fn [] (swap! sema/*fns* (fn [m] (into {} (remove (fn [[k f]] (and (= :guide (:kind f)) (not (fns-before k)))) m)))))]
+    (try
+      (let [;; [over.match.list]/1, DR1467: a braced list tries the initializer-list guides first, unless it is empty and a guide
+            ;; takes no argument, or it holds one expression of a specialization of the template or a class derived from one
+            try-list (and list?
+                          (if (empty? inits)
+                            (not (some #(and (:sig %) (zero? (long (guide-min-args %)))) gs))
+                            (not (and (= 1 (count inits)) (not= :init-list (:op (first inits)))
+                                      (when-let [c (let [u (abi/unq (:ty (first inits)))] (when (abi/class? u) (:id u)))]
+                                        (some #(= tid (:tmpl (abi/cls %))) (class-and-bases c)))))))
+            r1 (when try-list (resolve (cands true [init]) [init]))
+            r (if (or (nil? r1) (= ::none r1)) (resolve (cands false inits) inits) r1)]
+        (cond
+          (= ::unsure r) (unsure-fail "a guide not deduced by the slice")
+          (and inherits (>= (long sema/*cxx-year*) 23) (keyword? r)) (unsure-fail "inherited constructors' guides")
+          (= ::none r) (fail :ctad "no viable constructor or deduction guide for deduction of template arguments of '" cname "'")
+          (= ::ambiguous r) (fail :ctad "ambiguous deduction for template arguments of '" cname "'")
+          :else
+          (let [f (sema/fnd r)]
+            (when (and (= :list-copy kind) (:explicit f))
+              (fail :ctad "class template argument deduction for '" cname "' selected an explicit "
+                    (if (= :user (:guide f)) "deduction guide" "constructor") " for copy-list-initialization"))
+            (:ret (:ty f)))))
+      (finally (cleanup!)))))
+
+;; ---------------------------------------------------------------------------------------------
 ;; The hooks
 
 (reset! sema/hooks
@@ -2135,6 +2482,7 @@
          :const-bound (fn [scope f] (let [v (const-form scope f)] (if (map? v) v (long v))))
          :call-candidates (fn [ctx callee args] (when (or (seq (:tmpls callee)) (and (not (:obj callee)) (:name callee))) (call-candidates ctx callee args)))
          :tiebreak tiebreak
+         :ctad ctad
          :ctor-candidates (fn [cid args]
                             (vec (for [tid (:ctor-tmpls (abi/cls cid))
                                        :let [fid (try (let [a (deduce-call (tmpl tid) [] args)]

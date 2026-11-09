@@ -1040,3 +1040,10 @@ template corners; `hdr-vector` needs it for its last name.
   executable later.
 - **P18 (b):** the 206-test headers corpus list committed with recorded results, as a night check beside P11's template corpus.
 - **P19 (b):** a class template's pattern analyzed as a dependent class (the current instantiation), in G6.
+
+## CP311 (a): G3c's class template argument deduction (2026-11-09, branch `cpp-props3`)
+
+G3.8's "class template argument deduction" and G3c's CTAD are built in `arbace.cpp.template/ctad` (the `:ctad` hook): the implicit
+guides from the constructors, `C()`, the copy deduction candidate, the user's deduction guides and C++20's aggregate candidate,
+deduced and chosen as clang's DeduceTemplateSpecializationFromInitializer does, for variables, `T(...)` and `T{...}`; where the
+slice is unsure the parser's own deduction stays the type. doc/cpp/CPP-SURVEY.md, "As built: CP311 (a) and the rest of CP313 (a)".

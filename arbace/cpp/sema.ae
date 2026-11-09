@@ -35,6 +35,7 @@
 ;; ((fn [ex node]) called with the refusal and that node, the analysis going on with the next entry); nil: off
 (def ^:dynamic *at* nil)
 (def ^:dynamic *on-refusal* nil)
+(def ^:dynamic *pedantic-errors* false) ; CP311 (a): -pedantic-errors given, an extension's diagnostic an error (the checker)
 ;; CX12 (second slice): the checker's rules that the code generator does not apply (on with *on-refusal*: a program the
 ;; checker reads may be ill-formed; the code generator's programs are not, and its analysis stays as it was)
 (defn checking? [] (some? *on-refusal*))
@@ -426,6 +427,50 @@
   (try (resolve-type-form scope (ct/parse-type s))
        (catch arbace.lang.ExceptionInfo e (if (:codegen/refused (ex-data e)) (throw e) (fail :type "type " s ": " (.getMessage e))))))))
 
+;; CP311 (a): class template argument deduction ([dcl.type.class.deduct]): a placeholder for a deduced class type, a
+;; template-name with no argument list, deduced from the initializer by arbace.cpp.template/ctad (the :ctad hook)
+(defn ctad-template
+  "The class or alias template the placeholder `s` (a type's spelling: a template-name, maybe qualified and
+  cv-qualified, no argument list) names in `scope` where no type of that name is found (the injected-class-name is a
+  type), as [tid #{cv}], or nil."
+  [scope s]
+  (when (and (string? s) (:ctad @hooks))
+    (let [f (try (ct/parse-type (strip-type-attrs s)) (catch Exception _ nil))
+          [f cv] (loop [f f cv #{}] (if (and (seq? f) (#{'const 'volatile} (first f))) (recur (second f) (conj cv (first f))) [f cv]))]
+      (when (and (symbol? f) (not (builtin-syms f)) (not= 'auto f))
+        (let [parts (name-parts f)
+              es (try (if (= 1 (count parts)) (lookup scope (first parts)) (lookup-qualified scope parts))
+                      (catch arbace.lang.ExceptionInfo _ nil))]
+          (when (and (seq es) (nil? (type-entity es)))
+            (when-let [e (first (filter #(and (= :tmpl (:e %)) (#{:class :alias} (:tk %))) es))]
+              [(:id e) cv])))))))
+
+(defn ctad-compound!
+  "CP311 (a), the checker: a variable's type `s` that does not resolve and holds a placeholder for a deduced class type
+  inside a compound type (a pointer, a reference, an array, a function's parameter or return: [dcl.type.class.deduct]/2
+  allows the placeholder only as the whole declared type; clang's err_deduced_class_template_compound_type)."
+  [scope s]
+  (when (and (checking?) (string? s) (:ctad @hooks))
+    (let [f (try (ct/parse-type (strip-type-attrs s)) (catch Exception _ nil))
+          syms (fn syms [x] (cond (symbol? x) [x]
+                                  (and (seq? x) (= '<> (first x))) (mapcat syms (nnext x))
+                                  (sequential? x) (mapcat syms x)
+                                  :else []))]
+      (when (and (seq? f) (not (#{'const 'volatile '<>} (first f))))
+        (when (some #(ctad-template scope (str %)) (syms f))
+          (fail :ctad "cannot form a compound type of a deduced class template specialization type (" s ")"))))))
+
+(defn ctad-compound-var
+  "CP311 (a), the checker: {:ty :ctad-error} for a variable whose type `qt` is ctad-compound!'s error (the variable
+  declared with a dependent placeholder type, the error raised at its initialization), else nil."
+  [scope n qt]
+  (when (checking?)
+    (when-not (try (resolve-type scope qt) (catch arbace.lang.ExceptionInfo _ nil))
+      (try (ctad-compound! scope qt) nil
+           (catch arbace.lang.ExceptionInfo e
+             (when (= :ctad (:codegen/refused (ex-data e)))
+               {:ty {:k :dep :name "<deduction failed>"} :ctad-error (ex-info (.getMessage e) (assoc (ex-data e) :cx/node n))}))))))
+
 (defn- method-const? [^String qt] (boolean (re-find #"\)\s*const(\s|$|&)" qt)))
 (defn- method-volatile? [^String qt] (boolean (re-find #"\)\s*(?:const\s*)?volatile(\s|$|&)" qt)))
 
@@ -806,10 +851,18 @@
             (declare-fn! scope (assoc n :name "operator==" :type {:qualType (str/replace (str qt) #"^\s*auto\b" "bool")})))))
     id)))
 
+(declare ctad-var)
+
 (defn- declare-var!
   [scope n storage]
-  (let [ty (resolve-type scope (get-in n [:type :qualType]))
+  (let [qt (get-in n [:type :qualType])
         q (qualifier-before n)
+        ;; (CP311 (a): a deduced class type, deduced from the initializer analyzed as global-init would)
+        ct (when (empty? q) (ctad-template scope (or (:_ctad n) qt)))
+        cv (when ct (binding [*cutoff* Long/MAX_VALUE]
+                      (ctad-var (cond-> {:scope scope :statics (atom [])} (and (checking?) (= :ns (:kind scope))) (assoc :cx-global true)) n ct qt)))
+        cv (or cv (when (empty? q) (ctad-compound-var scope n qt)))
+        ty (if cv (:ty cv) (resolve-type scope qt))
         home (if (seq q)
                (let [e (first (filter #(#{:ns :type} (:e %)) (lookup-qualified scope q)))]
                  (cond (= :ns (:e e)) (:scope e) (abi/class? (:ty e)) (:scope (abi/cls-of (:ty e))) :else (fail :lookup "qualifier " q)))
@@ -830,6 +883,7 @@
                :internal-l (boolean (and (= st :global) (not (:cls home)) (or (= "static" (:storageClass n)) (and (:c ty) (not (:extern n)) (not= "extern" (:storageClass n)))) (not (:internal home))))
                :internal (boolean (or (:internal home) (= "static" (:storageClass n)) (and (= st :global) (:c ty) (not= "extern" (:storageClass n)))))
                :def-scope scope
+               :ctad-init (:ctad-init cv) :ctad-error (:ctad-error cv)
                :init-priority (let [x (gnu-attr-arg n "init_priority")] (when (number? x) x))
                :pos (long (or (:_b n) 0))}
             ;; (CX12, the checker: a constexpr variable, its initializer checked as a constant expression)
@@ -3228,6 +3282,17 @@
 
 (declare analyze-node)
 
+(defn- ctad-expr
+  "CP311 (a): T(args) or T{...} with T the placeholder `ct` ([tid #{cv}]) for a deduced class type ([expr.type.conv]/1:
+  the type deduced as for a variable direct-initialized by the initializer), a temporary of it."
+  [ctx n ct]
+  (let [ks (kids n)
+        [kind a] (if (and (= "CXXFunctionalCastExpr" (:kind n)) (= "InitListExpr" (:kind (first ks))))
+                   [:list-direct (analyze ctx (first ks))]
+                   [:direct (analyze-args ctx ks)])
+        t ((:ctad @hooks) ctx (first ct) kind a)]
+    {:op :temp-obj :init (init-for t a ctx (cond (map? a) :list (empty? a) :value :else :direct)) :ty t :cat :pr}))
+
 (defn analyze
   "The typed expression of the tree node `n` in the context `ctx` ({:scope :fn :this-type ...})."
   [ctx n]
@@ -3459,14 +3524,18 @@
           (let [[p ix] (if (abi/ptr? (:ty (rv a))) [(rv a) (rv i)] [(rv i) (rv a)])]
             {:op :deref :e {:op :ptradd :o "+" :p p :n (convert-scalar ix abi/long* false) :ty (:ty p) :cat :pr} :ty (:to (:ty p)) :cat :lv}))))
     ("CStyleCastExpr" "CXXStaticCastExpr" "CXXReinterpretCastExpr" "CXXConstCastExpr" "CXXFunctionalCastExpr")
+    (if-let [ct (when (= "CXXFunctionalCastExpr" (:kind n)) (ctad-template (:scope ctx) (get-in n [:type :qualType])))]
+      (ctad-expr ctx n ct)
     (let [t (resolve-type (:scope ctx) (get-in n [:type :qualType]))
           [k] (kids n)
           t (if (and (#{:xvalue "xvalue"} (:valueCategory n)) (not (abi/ref? t))) (abi/rref t) t)
           t (if (and (= "lvalue" (:valueCategory n)) (not (abi/ref? t))) (abi/lref t) t)]
       (if (and (= "CXXFunctionalCastExpr" (:kind n)) (abi/class? (abi/unq t)))
         {:op :temp-obj :init (init-for t (if (= "InitListExpr" (:kind k)) (analyze ctx k) [(analyze ctx k)]) ctx :direct) :ty (abi/unq t) :cat :pr}
-        (cast-expr ctx t (analyze ctx k) true)))
+        (cast-expr ctx t (analyze ctx k) true))))
     ("CXXTemporaryObjectExpr" "CXXUnresolvedConstructExpr" "CXXConstructExpr")
+    (if-let [ct (when-not (= "CXXConstructExpr" (:kind n)) (ctad-template (:scope ctx) (get-in n [:type :qualType])))]
+      (ctad-expr ctx n ct)
     (let [t (resolve-type (:scope ctx) (get-in n [:type :qualType]))
           ;; (CX12, fifth slice: T(...) naming a member type, its access as a declaration's, check-type-access!)
           _ (when (checking?)
@@ -3475,7 +3544,7 @@
           args (analyze-args ctx (kids n))]
       (if (abi/class? (abi/unq t))
         {:op :temp-obj :init (init-for t args ctx (if (empty? args) :value :direct)) :ty (abi/unq t) :cat :pr}
-        (if (empty? args) {:op :zero-val :ty t :cat :pr} (cast-expr ctx t (first args) true))))
+        (if (empty? args) {:op :zero-val :ty t :cat :pr} (cast-expr ctx t (first args) true)))))
     "CXXScalarValueInitExpr" (let [qt (get-in n [:type :qualType])
                                    t (resolve-type (:scope ctx) qt)]
                                ;; (CX12, fifth slice: T() naming a member type, its access as a declaration's, check-type-access!)
@@ -3601,19 +3670,58 @@
 
 (declare stmt)
 
+(declare analyze-args)
+
+(defn- ctad-init
+  "CP311 (a): a variable's initializer analyzed for class template argument deduction, [kind init]: kind :direct,
+  :copy, :list-direct or :list-copy ([dcl.init.general]/15-16, [dcl.init.list]/1), init the arguments' vector, the
+  expression or the init-list."
+  [ctx n]
+  (let [init (init-kid n)]
+    (case (when init (:init n))
+      ;; (no initializer: deduced as from an empty parenthesized list, default-initialized)
+      nil [:direct []]
+      "call" [:direct (if (= "ParenListExpr" (:kind init)) (analyze-args ctx (kids init)) [(analyze ctx init)])]
+      "list" [:list-direct (analyze ctx init)]
+      (let [a (analyze ctx init)] [(if (= :init-list (:op a)) :list-copy :copy) a]))))
+
+(defn- ctad-var
+  "CP311 (a): {:ty :ctad-init} for a variable declared with the placeholder `ct` ([tid #{cv}]) for a deduced class type
+  ([dcl.type.class.deduct]/1): the type the :ctad hook deduces from the analyzed initializer (kept for the variable's
+  initialization, analyzed once), else -- the slice not sure, or for the code generator also a program it finds
+  ill-formed -- the parser's own deduction when it made one (`qt` spelled with the arguments, the tree's type)."
+  [ctx n ct qt]
+  (let [[kind a] (ctad-init ctx n)
+        r (try {:ty ((:ctad @hooks) ctx (first ct) kind a)} (catch arbace.lang.ExceptionInfo e {:err e}))
+        fallback (fn [] (cond
+                          (and (:_ctad n) (not= qt (:_ctad n))) (try (resolve-type (:scope ctx) qt) (catch arbace.lang.ExceptionInfo _ nil))
+                          ;; (no initializer: the template's default arguments alone, T<>, as the checker tried before)
+                          (and (nil? (init-kid n)) (checking?) (re-matches #"[A-Za-z_]\w*" (str qt)))
+                          (try (resolve-type (:scope ctx) (str qt "<>")) (catch arbace.lang.ExceptionInfo _ nil))))]
+    (cond
+      (:ty r) {:ty (cond-> (:ty r) ((second ct) 'const) (assoc :c true) ((second ct) 'volatile) (assoc :v true)) :ctad-init a}
+      ;; (the checker: the program's error, raised where the variable is initialized, the variable declared with a
+      ;; dependent placeholder type so that its uses report nothing more, as clang marks the declaration invalid)
+      (and (checking?) (= :ctad (:codegen/refused (ex-data (:err r)))))
+      {:ty {:k :dep :name "<deduction failed>"} :ctad-error (ex-info (.getMessage ^Throwable (:err r)) (assoc (ex-data (:err r)) :cx/node n))}
+      :else (if-let [t (fallback)] {:ty t :ctad-init a} (throw (:err r))))))
+
 (defn- local-var! [ctx n storage]
   (let [qt (get-in n [:type :qualType])
-        ty (try (resolve-type (:scope ctx) qt)
+        ct (ctad-template (:scope ctx) (or (:_ctad n) qt))
+        cv (if ct (ctad-var ctx n ct qt) (ctad-compound-var (:scope ctx) n qt))
+        ty (if cv (:ty cv) (try (resolve-type (:scope ctx) qt)
                 (catch arbace.lang.ExceptionInfo x
                   ;; (CX12, the checker: a class template's name as the type of a variable with no initializer,
                   ;; [dcl.type.class.deduct]: class template argument deduction from no argument, [over.match.class.deduct],
                   ;; succeeds with the template's default arguments alone -- the slice tries T<>, every parameter defaulted)
                   (if (and (checking?) (nil? (init-kid n)) (re-matches #"[A-Za-z_]\w*" (str qt)))
                     (try (resolve-type (:scope ctx) (str qt "<>")) (catch arbace.lang.ExceptionInfo _ (throw x)))
-                    (throw x))))
+                    (throw x)))))
         id (next-id)
         st (if (= "static" (:storageClass n)) :static-local storage)
         v (cond-> {:id id :name (:name n) :ty ty :storage st :fn (:fn-id ctx) :init-node (init-kid n) :constexpr (boolean (:constexpr n))}
+            cv (assoc :ctad-init (:ctad-init cv) :ctad-error (:ctad-error cv))
             (and (checking?) (:constexpr n)) (assoc :cx-constexpr true :cx-range (:range n)))
         ;; a constant local's initializer, for constant expressions (an array bound, a template argument)
         v (if (and (:c ty) (abi/integral? (abi/unq ty)) (init-kid n)) (assoc v :init (init-kid n) :def-scope (:scope ctx)) v)]
@@ -3636,6 +3744,10 @@
 (defn- decl-init
   "A local declaration's initializer from its node (`:init` c, call or list)."
   [ctx id n]
+  ;; (CP311 (a): a deduction that failed, the program's error, the local variable declared all the same)
+  (when-let [e (:ctad-error (var* id))]
+    (when (#{:local :static-local} (:storage (var* id))) (enter! (:scope ctx) (or (:name n) "") {:e :var :id id}))
+    (throw e))
   (let [t (:ty (var* id))
         init (init-kid n)
         t (if (and (abi/arr? t) (nil? (:n t)) init)
@@ -3646,8 +3758,15 @@
             t)
         pre (when (and init (has-auto? t) (not (#{"call" "list"} (:init n)))) (analyze ctx init))
         t (if pre (deduce-auto t pre) t)
-        _ (upd-var! id assoc :ty t)]
+        _ (upd-var! id assoc :ty t)
+        ;; (CP311 (a): the initializer a deduced class type was deduced from, analyzed once)
+        ci (:ctad-init (var* id))]
+    (when (and ci *at* (:range (init-kid n))) (reset! *at* (init-kid n)))
     (cond
+      ci (case (:init n)
+           "call" (init-for t ci ctx :direct)
+           "list" (init-for t ci ctx :list)
+           (init-for t ci ctx (if (= :init-list (:op ci)) :list :copy)))
       pre (init-for t pre ctx (if (= :init-list (:op pre)) :list :copy))
       (nil? init) (init-for t nil ctx :default)
       (= "call" (:init n)) (init-for t (if (= "ParenListExpr" (:kind init)) (analyze-args ctx (kids init)) [(analyze ctx init)]) ctx :direct)

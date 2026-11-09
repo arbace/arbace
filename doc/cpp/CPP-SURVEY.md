@@ -4829,3 +4829,73 @@ inspection command; none repeated after noticing. Scratch in the worktree's `.tm
 `c312`, `e1`, `e2`, `l19`, `a1`, `v314`; the lists `f*.txt`; the feature runs `f*b`/`f*n`; the sample runs `r314`, `rA`, `rF`, `rG`;
 the trees `tree300`, `tree301`, `tree305`, `tree310`, `treeH`; the code generator runs `cg1`, `cgA`, `cgF`, `g300`, `g301`, `g305`,
 `g312`; `cmp.sh`, `gencmp2.sh`, `onem.sh`, `gent.sh`, `hunks.py`, `hunks2.py`), `base2-tree/` (f9b81f1e3's tree), `p0/`, `cg1/`.
+
+## As built: CP311 (a) and the rest of CP313 (a) (2026-11-09; branch `cpp-props3` from `cpp-props2`'s 37f9bd980)
+
+The user's decisions of 2026-11-09 ("As built: CP300-CP314"): CP311 (a) and CP313 (a), the two left by `cpp-props2`; CP310 (a)
+waits for the night's whole-part record. One commit each, CP311 first. The measure is the CX12 slices': the every-10th dg-error
+sample's own passes (454 supported files, `.tmp/sample.sh`), each new pass read against its source and clang's recorded output
+(the no-false-credit review), and the features' files of the whole part (`.tmp/t/subm.sh` over a list), each tree against its base;
+clang, clang++, clang-23, g++, gcc, cc, cpp, c++, cc1, cc1plus, ld and as stubs exiting 99 first on PATH for every own run (their
+log empty).
+
+### CP311 (a): class template argument deduction with initializers
+
+Ported from clang at llvmorg-23.1.5 (the pinned tarball's `clang/lib/Sema/SemaTemplateDeductionGuide.cpp`: DeclareImplicitDeductionGuides,
+ConvertConstructorToDeductionGuideTransform's transformConstructor and buildSimpleDeductionGuide, DeclareAggregateDeductionGuideFromInitList;
+`clang/lib/Sema/SemaInit.cpp`: DeduceTemplateSpecializationFromInitializer; read as the model, rule for rule), in the code generator's
+Sema, so for the checker and the code generator alike:
+
+- `arbace.cpp.template/ctad` (the `:ctad` hook): the guides of a class template, function templates of their own (`:tk :guide`):
+  each declared constructor's (the class template's parameters then the constructor template's own, its parameter types resolved
+  in a scope binding them, the pattern's member typedefs entered as the transform substitutes them, its default arguments and
+  explicit-specifier kept), `C()` when the class declares no constructor, the copy deduction candidate `C(C<P...>)`, the user's
+  deduction guides (`CXXDeductionGuideDecl`, plain or in a `FunctionTemplateDecl`, recorded on their class template by
+  `declare-template`; those declared before the use, [over.match.class.deduct]/1), and C++20's aggregate deduction candidate when
+  the template declares no guide and the pattern is an aggregate (bases then fields; an array's rvalue reference for a braced item,
+  a const lvalue reference for a string literal; a list longer than the elements makes none; brace elision possible, a pack, an
+  anonymous member: unsure). Each guide is deduced by `deduce-call` (an initializer-list guide's E from the list's elements,
+  [temp.deduct.call]/1), its associated constraints (the class template's requires-clause, the constructor template's, the trailing
+  one) checked, its specialization registered as a function for `resolve-overload` and removed after.
+- DeduceTemplateSpecializationFromInitializer's flow: copy-initialization from an expression takes the converting guides only (not
+  explicit, callable with one argument); a braced list first tries the initializer-list guides (not for an empty list when a guide
+  takes no argument, nor for one expression of a specialization of the template or of a class derived from one, DR1467), then all
+  guides with the list's elements; no viable guide, ambiguity, an explicit guide chosen in copy-list-initialization are the
+  program's errors (clang's err_deduced_class_template_ctor_no_viable, _ambiguous, _explicit, _incomplete); before C++17 the name
+  needs its arguments; an alias template in C++17 under `-pedantic-errors` is clang's C++20 extension's error (`*pedantic-errors*`,
+  bound from the file's options by `arbace.repr.cpp.diag`).
+- [over.match.best]/2.9-2.11 in `tiebreak`: a guide from a deduction-guide over an implicit one, the copy deduction candidate over
+  the others, a non-template constructor's guide over a constructor template's, after the templates' partial ordering.
+- A drop is sure when the deduction fails by the algorithm (no `*unsure*` set, as `call-candidates`' drops are), unsure when the
+  slice could not build the guide's types, substitute them or decide a constraint: "no viable guide" is the program's error only
+  when every drop was sure; an unsure deduction falls back on the parser's own (`arbace.repr.cpp.sema/ctad`, the tree's type).
+- Where: variables (`local-var!`, `declare-var!`: the placeholder written, `:_ctad` from the parser, a `:_` key, when the parser
+  deduced the type itself; the initializer analyzed once and kept for the initialization, `:ctad-init`), `T(...)` and `T{...}`
+  (`ctad-expr`: the functional casts and temporary objects), and `[dcl.type.class.deduct]/2`'s compound types (`A (*fp)()`,
+  `ctad-compound!`, clang's err_deduced_class_template_compound_type). The checker's failed deduction declares the variable with a
+  dependent placeholder type and raises the error at its initialization (`:ctad-error`, the declaration's node), so its uses report
+  nothing more, as clang marks the declaration invalid.
+- Not built: an alias template's guides from C++20 on (BuildDeductionGuideForTypeAlias with its is_deducible constraint: unsure, the
+  parser's deduction kept), C++23's inherited constructors' guides (P2582; clang does not build them either: a class inheriting
+  constructors is not judged at C++23), `new T(...)` with a placeholder, a class template's static members' initializers in its
+  specializations (class-deduction108's `static inline TT x1 = 0`), template template parameters' placeholders in a specialization's
+  members.
+- Found by the measure and fixed: two partial specializations with the same arguments and different constraints were taken for one
+  redeclared (`declare-template`'s ClassTemplatePartialSpecializationDecl, [temp.over.link]/7; concepts-class's `S3<T>`), which the
+  checker showed once CTAD let the unit be analyzed.
+- Measure: the every-10th sample 109 → 114 own passes (`.tmp/r311b`, against `cpp-props2`'s recorded run), none lost, the extras the
+  same 92 lines; the 75 CTAD files of the whole part (`.tmp/fctad.txt`: the class-deduction and ctad names and the files with a
+  deduction guide) 6 → 18 (`.tmp/fctad-b`, `fctad-n2`), none lost, no new extra once the partial specializations' fix was in.
+  The no-false-credit review of the five new passes, each against its source and clang's recorded output: class-deduction28
+  (`A a2 = 42` with `explicit A(T)`, `B b2 = 0` with `explicit B(T) -> B<T*>`: copy-initialization's converting guides alone, none
+  viable, clang's err_deduced_class_template_ctor_no_viable on both lines), class-deduction66 (`A (*fp)() = 0`, clang's "cannot form
+  function returning deduced class template specialization type"), class-deduction84 and class-deduction-alias5 (an alias template's
+  placeholder at C++17 under `-pedantic-errors`, clang's -Wc++20-extensions as an error, lines 6-9 and 16), template/error8 (C++14:
+  `throw S ()` with S a class template, clang's "use of class template 'S' requires template arguments"). Probes (`.tmp/p/a7.cpp`,
+  `a7b.cpp`, c++20): `std::pair p(1, 2.0)`, `std::vector vec{1, 2}` (libstdc++'s own guides), an initializer-list constructor, a pack,
+  a constructor template, a user guide over the implicit one, the copy deduction candidate, `X(2L)`, the aggregate candidate: each
+  variable's type is the one an overload taking a pointer to it accepts (the wrong types of `a7b.cpp` fail as they must).
+- The code generator: `bin/cppi codegen-gen` (`.tmp/cg311b`): 142 of 142 as recorded (no sample uses CTAD: no intended change among
+  them); the probe `.tmp/p/cg1.cpp` (c++20: the copy deduction candidate, a user guide, a pack, a constructor template, a
+  functional cast, the aggregate candidate) generated, its functions and constructors clang's mangled names (`_ZN1WIlEC2El`,
+  `_ZN3TupIJicdEEC2Eicd`, `_ZN1YIiEC2IdEET_i`); its run (status 120) is the night's, by gcc with the runtime.
