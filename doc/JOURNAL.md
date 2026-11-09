@@ -2825,3 +2825,22 @@ Recorded in doc/rust/FRONTEND-SURVEY.md, "As built: RF11 (first slice)".
   capture-check and the five controls unchanged.
 - Rule slips (the session's first half): `bin/repr-rust helper` fetched the pinned rustc-dev apk from the network (the main
   checkout's .tmp lacked it); a run's peak was 1.83 GB under GOMEMLIMIT=1800MiB.
+
+## 2026-11-09: RF12's first slice, second part: RF12-P1, P2, RF11 merged, more groups (branch `rust-rf12`)
+
+- The user's decisions (2026-11-09): RF12-P1 (a), P2 (b), P3 (a), P5 (a); P4 moot (RF11's pack carries `@ROOT@`). `mac/next`
+  `6c3c87c02` merged in (the records' conflicts, both sides kept); `bin/rust-front essential` then equals its known file in this
+  worktree (62 of 62), which confirms P4's diagnosis.
+- P1: the essential step `rust-core-essential` (`bin/rust-front core-essential`: six modules from the pack `rust-core-built`, its own caches,
+  the toolchains stubbed, `test/rust/front/core-essential-known.txt`, the crossed control `_control/core/crossed`): 564 of 567 bodies
+  equal, 3 min 29 s, 1.97 GB; `gate.crops check` 0 problems, `bin/gate --plan` names it, no table error. Considered: all 35 modules
+  (27 min: over the essential tier's time), the oracle tier only (rejected by the decision).
+- P2: one collection pass over the listed files before the bodies (no order between modules), traits now written too.
+- Groups: impl spans through nested macros (tokens read back with their origin, metavariable spans: tuple 168 and `iter::range` +113),
+  pattern types and include_str! (`marker`, `ptr::non_null` through every stage), *mut to *const, bound turbofish variables'
+  annotations, array lengths' integer expressions; the 35 modules now 5,030 of 5,601 bodies equal (4,578 at the first part's end),
+  35 of 35 modules through every stage.
+- P3 not built: a6's `ptr::write_volatile` and its `precondition_check` now build equal to rustc's built MIR, but the run would need a
+  core body translated from core's crate context into the program's, instantiated (`::<i32>`) and its callees collected natively;
+  proposed as RF12-P6 with the night's whole-core interface pass (RF12-P7).
+- Every run under 2.5 GB (GOMEMLIMIT 2400MiB), one core-check at a time, no network.

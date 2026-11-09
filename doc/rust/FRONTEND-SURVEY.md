@@ -2613,3 +2613,97 @@ slice: RF12-P4. Rust's scores: no REAP cell reads the core check, so `bin/crops-
 - **RF12-P5 The scope of the first slice's record.** Options: (a) **the 35 modules of `test/rust/front/core-modules.txt` recorded in the
   pack `rust-core-built`, the whole of core's 31,334 bodies judged by a night run against the unpacked oracle by hand**; (b) pack all
   31,334 (68 MB raw, a few MB xz). *Recommended: (a)* until more of core builds.
+
+## Decided (2026-11-09, the user: RF12-P1 to P5)
+
+RF12-P1 (a), RF12-P2 (b) for this slice, RF12-P3 (a) (RF11 merged into next), RF12-P5 (a); RF12-P4 moot: RF11's pack `rust-front-built`
+names no checkout's path (`@ROOT@`).
+
+## As built: RF12 (first slice, second part): RF12-P1, P2, the merge of RF11, more groups (2026-11-09)
+
+Branch `rust-rf12`, `mac/next` `6c3c87c02` (RF11) merged in (conflicts only in the records: both sides kept).
+
+### The merge and the essential step
+
+`bin/rust-front essential` after the merge, with this slice's changes: the summary equals `test/rust/front/essential-known.txt`
+(build-check 62 of 62, the passes, capture-check 34 of 34, run-built 7 of 7, mono-check, the five controls differing): RF12-P4's
+diagnosis holds (RF11's pack made the 11 differences of the first part, every one a closure or impl named by `rust-rf10b`'s path).
+After every change below, `bin/rust-front essential` again: the summary equals the known file (3 min 50 s), and
+`bin/rust-front core-essential` equals its own.
+
+### RF12-P1 (a): the essential step `rust-core-essential`
+
+`bin/rust-front core-essential` (`--record` rewrites the known file, by hand): `core-check --records` over
+`test/rust/front/core-essential.txt` (`ub_checks`, `bool`, `default`, `ops/drop`, `clone`, `ops/arith`) with caches of its own made
+afresh (core's index from the sources, the interface pass), rustc, rustdoc, cargo, gcc, cc and clang stubbed first on PATH (their log
+empty); its lines held to `test/rust/front/core-essential-known.txt` (564 of 567 bodies equal, one but for the allocations' ids, two
+refused), the crossed control (the first equal body's text against another body's rustc text, `_control/core/crossed` in
+`test/rust/front/controls.edn`) differing. 3 min 29 s, 1.97 GB peak. The step in `test/gate/steps.edn` beside `rust-front-essential`
+(chain `rust-essential`, `:mem-gib 3`, its pins the packs `rust-front-std` and `rust-core-built` and `tools/rsdump/apks.sha256`; its
+control in `:controls`): `gate.crops check` 0 problems, `bin/gate --plan` `run rust-core-essential ... never passed`, no table error.
+
+### RF12-P2 (b): core's interface in one pass before the bodies
+
+`core-check` first runs every listed module through expansion, resolution, lowering and collection without building a body and
+writes their functions, ADTs and now traits (with their associated functions' signatures: `clone::uninit::CopySpec`) that std's
+interface lacks; then the bodies, every module reading the whole pass's interface (no order between modules). `CORE_IFACE_FILES=LIST`
+takes the pass over other files (all of core at night), `CORE_IFACE=cache` the last run's `native-iface.edn` instead. The pass over
+the 35 modules: 11 min, 33 functions and 7 ADTs (before the traits); the run 27 min, 2.40 GB peak.
+
+### More groups
+
+- **Integer constant expressions in array lengths** evaluated (`[T; $n - 1]` is `[T; 31]`: collect's lower-const-arg).
+- **Impl spans through nested macro calls**: a macro call inside a macro's output reads its tokens back from the output's token stream;
+  each token now keeps the place it came from (`with-vorigin`: the definition's place or the root token), and a substituted
+  identifier carries its metavariable's span (transcribe.rs' `maybe_use_metavar_location`, its place in the definition), which an
+  impl's def_span ends at (`Span::to` of different contexts): tuple 0 → 168 of 180, `iter::range` 89 → 202 of 257 (the metavariable span at a span's start too).
+- **Pattern types**: `pattern_type!(T is PAT)` (rustc_builtin_macros/src/pattern_type.rs) as TyKind::Pat through lowering and
+  collection, printed `(T) is PAT`; `include_str!`: `marker` and `ptr::non_null` through every stage (10 and 58 bodies equal).
+- **`*mut T` to `*const T`** (coerce_raw_ptr's MutToConstPointer), **a turbofish's bound variables in user type annotations**
+  (`TypeOf(mem::align_of<T>)`), **the where clause in an impl's span**, **qualified paths' written trait arguments and `<T>::f`**,
+  **f16 and f128 constants**, **closures named by their owner**.
+
+### Results
+
+`bin/rust-front core-check` over the 35 module files (one process, GOMAXPROCS=4, GOMEMLIMIT=2400MiB: 33 min with the interface pass,
+2.41 GB peak; the interface pass over the 35 files 13 min: 45 functions, 7 ADTs, 10 traits):
+
+| | first part's end | the interface pass (RF12-P2) | as built |
+|---|---|---|---|
+| modules through every stage | 33 of 35 | 33 of 35 | **35 of 35** |
+| bodies built (not refused) | 5,393 of 5,601 | 5,393 of 5,601 | 5,388 of 5,601 |
+| equal to rustc's built MIR | 4,578 | 4,624 | **5,030** |
+| more but for the allocations' ids / text | 37 / 4 | 37 / 4 | 44 / 4 |
+| differ | 716 | 670 | 337 |
+
+Whole modules: `ops::arith` 500, `ops::bit` 1,989, `default` 20, `ops::function` 5, `bool`, `ops::drop`, `ub_checks`; `num::wrapping`
+1,158 of 1,201, `cmp` 302 of 374, `iter::range` 204 of 257 (with the two but for the ids), `tuple` 168 of 180, `ptr::non_null` 58 of 70,
+`ptr` 38 of 57. The remaining groups (the run's first differing lines and refusals): the interface's missing private fields (55, "a std
+field": `ops::IndexRange`'s, its module outside the 35: RF12-P7), paths through a parameter or `Self` to an associated constant (45,
+"a path": `T::IS_ZST`, `Self::SIZE`; std's trait constants have no type in std's interface), qualified paths to private traits (41),
+user type annotations of `format_args!`'s calls (`fmt::rt::Argument`, `fmt::Arguments`: 59), method calls without a callee (29),
+`num::nonzero` paths' annotations (24), `!` locals of empty matches (9). No REAP cell reads the check: Rust's scores are unchanged,
+eval and AOT at 0.5.
+
+### RF12-P3 (a): a6's core bodies
+
+Not built in this part. Of a6's four core bodies, `ptr::write_volatile` and its `precondition_check` now build equal to rustc's built
+MIR (the latter but for the allocations' ids); `const_ptr::<impl *const T>::is_aligned_to` is in a module outside the slice's list
+and `drop_glue` is a shim (no source body: rustc builds it from the type). Taking them into the run needs what the run does not have
+yet: a core body built in its own crate's context (core's module as the root, its definitions local) carried into the program's (each
+local definition by its interface path), monomorphized (`write_volatile::<i32>`: the run takes rustc's optimized instances, our bodies
+are generic built MIR through the 21 passes), and the callees it reaches collected natively (`check_language_ub`, `align_of`: the
+record's optimized bodies have them inlined). Proposed as RF12-P6.
+
+### Proposed (RF12's first slice, second part)
+
+- **RF12-P6 A core body in the program's run.** Options: (a) **the run builds the reached core function's module through core-check's
+  pipeline once per session (its body, its callees' bodies), each body translated into the program's crate (every local definition its
+  interface path, `externalize`), instantiated by the mono item's arguments (`subst` over the body's types), through the 21 passes and
+  codegen as ours; taken only when its built MIR equals rustc's (the pack `rust-core-built` extended to the reached modules), the record's
+  body the fallback; mono-check's core-closure from the native callees**; (b) wait for RF12's alloc and std slices and do it for every
+  library body at once. *Recommended: (a)*, a slice of its own (two to three days): the translation and the instantiation are the
+  parts std will need too.
+- **RF12-P7 The interface pass at night over all of core.** Options: (a) **the night's core-check over the 35 modules with
+  `CORE_IFACE_FILES` naming every non-vendored module (about an hour more), the essential step keeping its six**; (b) only the listed
+  modules. *Recommended: (a)*: the bodies then see every private item of core, not the slice's.
