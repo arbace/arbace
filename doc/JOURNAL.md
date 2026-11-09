@@ -1299,3 +1299,29 @@ the night-relevant four first, on `rust-props` from `rust-rf10b` at `c0f226f3b`.
   `essential-known.txt` (recorded, `--record`), its crossed control `_control/pass/crossed`.
 - The step: 3 min 22 s (`--record`) and 3 min 38 s, from 8 min 36 s, the same summary lines but the 21 new ones, the five controls
   differing, 0 stub calls; `steps.edn`'s summary 32 lines; `gate.crops check` 0 problems; `bin/gate --plan`: run rust-front-essential.
+
+## 2026-11-09: the rest of RFP28-RFP41 built (branch `rust-props`)
+
+The user's decisions of 2026-11-09 (all as recommended), after the night's four; doc/rust/FRONTEND-SURVEY.md, "As built: the rest of
+RFP28-RFP41". Sources: rustc 1.99.1 (rust-lang/rust 58cf8f9c3, Alpine's rust-src-1.99.1-r0, `compiler/`), as LICENSE.md and
+doc/ARBACE.md name them.
+- RFP29 (b): `build-check`'s class "but for the crate hash" (local DefIds' index and hash made one, allocations renumbered canonically);
+  the builder prints a byte-array static's `<static(DefId(0:? ~ CRATE[????]::PATH))>` (`pretty_print_const_scalar_ptr`) and builds a
+  closure's fake reads (`as_rvalue.rs`; refused before). The 88 programs at built: 418 → 420 of 510, `structs`' main in the class.
+  Alternative (a), the exact index and hash from `arbace.rust.front.mono`, waits for RF11 as decided.
+- RFP28 (a), RFP37 (a): the helper's `--std-iface` adds the std ADTs a written field names, transitively (182 lines, additions only);
+  `std-iface.sha256` and the four packs re-made by hand with rustc (std `fe79f73b`; the other three the same bytes). float-f32/f64's
+  `main` equal through every pass; mono-check's layouts 223 of 223.
+- RFP32 (a): `si/fn`'s `:const`, `:promotable`, `:nounwind` (is_const_fn, is_promotable_const_fn, NEVER_UNWIND) read by PromoteTemps,
+  const-fn promotion in initializers and fn_can_unwind; the hand table (whose `<impl i8>` paths never met std's `{impl#N}`) removed.
+  The packs re-made (std `5116eb09`). The 88 programs after every pass: 506 of 616 (499), 63 whole (60).
+- RFP33 (a): `[:opaque CLAUSES ID ARGS]`, revealed by the definer's body with the use's args, function constants' types revealed too;
+  `test/rust/front/opaque1.rs` in the packs built (`3f84e0a6`) and captures (`e41dfc4e`), not mono (its run is RF11's): 8 of 8 through
+  every pass (4 before). Alternative: keeping the structural match with a tie-break by signature position (rejected: not rustc's).
+- RFP34 (a), RFP38 (a): fragments' metavariable spans (`mk_delimited`) and caller locations at `expansion_cause`; capture-check 174 of
+  174 over every program, mono-check's locations 34 of 34; hir-check and typeck-check unchanged. Not ported: `tt` metavariable spans and
+  the different-context fallback of `prepare_to_combine` (no sample meets them).
+- RFP35 (a), RFP41 (a), RFP39 (a) then (c): as built, recorded in the survey.
+- The essential step re-recorded after each change that moved a line (`essential-known.txt`): 8 programs built (62 of 62, the passes
+  60 of 60), capture-check 34 of 34, run-built 7 of 7, mono-check every fact but core's closure (0 of 3, RF12's); about 3.5 minutes.
+  `bin/crops-score --judge --strict`: Rust unchanged.
