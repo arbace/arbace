@@ -82,7 +82,10 @@
 #   subject's output judged by the check's own judge against the reference's expected result, which must fail;
 #   "control passed:" or "control not judged:" fails the run, a pair --only-list left out is printed as left).
 #   parse-check's corpora also syntax-errors (PY9:
-#   tools/pydump/syntax_cases.py, CPython's own syntax-error cases from the tarball's Lib/test)
+#   tools/pydump/syntax_cases.py, CPython's own syntax-error cases from the tarball's Lib/test; queue 240: each case its
+#   test states the error of judged by that error, its own verdict, when the native reader rejects it, the rest by the
+#   record; the cases made by pyi in records mode, bin/pyi script; --judge record: every case by the record, the oracle
+#   tier's and verify mode's default, REPR_PYTHON_PARSE_JUDGE; --agreement: both judged, the disagreements printed)
 #   bin/repr-python check          spec-check, samples, then the round trips (:lines, then --text) over the default corpora
 #   bin/repr-python records record|verify [--sample N] [CORPUS...|outcomes]
 #                                  queue 213: the oracle's records (test/python/records/) made by the checks in mode record
@@ -652,12 +655,16 @@ cmd_pegen() {
   ARBACE_PATH="$root" "$(arbace_exe)" -m arbace.repr.python.pegen $verb $(GRAMMAR_ARGS) "$root/arbace/repr/python/parser${PYSFX/-/}.ae"
 }
 
-# syntax_cases DIR: CPython's syntax-error cases written into DIR, their list on stdout: tools/pydump/syntax_cases.py live, or
-# the records' (the corpus's inputs are in its pack, keyed by the script and the tarball's pin: queue 213)
+# syntax_cases DIR: CPython's syntax-error cases written into DIR, their own verdicts (the errors their tests expect) into
+# DIR.expect, their list on stdout: tools/pydump/syntax_cases.py by python3 live; in records mode by pyi (queue 240: bin/pyi
+# script, the script compiled by pyi's AOT, no python3; its cases are python3's byte for byte, and a case pyi made otherwise
+# finds no record), the pack's inputs (queue 213: keyed by the script and the tarball's pin) the verify's;
+# REPR_PYTHON_SYNTAX_CASES=pack the pack's inputs in records mode, without their own verdicts (every case judged by its record)
 syntax_cases() {
   local key; key="src:$(pyrec_sha16 "$root/tools/pydump/syntax_cases.py"):$(pin "$CPIN" sha256 | cut -c1-16)"
+  rm -f "$1.expect"
   if pyrec_live; then
-    py syntax_cases.py --src "$(TOP)" --out "$1" > "$1.list"
+    py syntax_cases.py --src "$(TOP)" --out "$1" --expect "$1.expect" > "$1.list"
     pyrec_stage_src syntax-errors "$1" "$1.list" "$key"
     if [ "$PYREC_MODE" = verify ]; then
       # the generated corpus against its record, as a whole
@@ -667,7 +674,12 @@ syntax_cases() {
       echo "syntax-errors src 1 $d" >> "$PYREC_VSTATE/tally"
     fi
     cat "$1.list"
-  else pyrec_src syntax-errors "$1" "$key"; fi
+  elif [ "${REPR_PYTHON_SYNTAX_CASES:-pyi}" = pack ]; then pyrec_src syntax-errors "$1" "$key"
+  else
+    "$root/bin/pyi" script "$root/tools/pydump/syntax_cases.py" --src "$(TOP)" --out "$1" --expect "$1.expect" > "$1.list" \
+      || { echo "syntax-errors: tools/pydump/syntax_cases.py did not run on pyi (bin/pyi script; REPR_PYTHON_SYNTAX_CASES=pack the pack's inputs)" >&2; return 1; }
+    cat "$1.list"
+  fi
 }
 
 parse_one() { # ID BASE LIST
@@ -676,18 +688,25 @@ parse_one() { # ID BASE LIST
   if [ -n "$ONLY" ]; then cp "$list" "$d/list.only"; list="$d/list.only"; only_filter "$list" "$id" || { echo "parse-check $id: no file of --only-list"; return 0; }; fi
   FULL=$PFULL dump_parallel "$(rec_corpus "$id" parse)" "$base" "$list" "$d/ref" "$d/ref.tsv" \
     || { echo "parse-check $id: FAILED: no reference (the oracle's records, above)"; return 1; }
+  # the cases' own verdicts (queue 240: syntax-errors, the errors their tests expect), unless --judge record
+  local ex=""; [ "$PJUDGE" = record ] || [ ! -s "$base.expect" ] || ex=$base.expect
   parsecheck check --corpus "$id" --base "$base" --list "$list" --ref "$d/ref" --out "$d/out" --known "$PARSE_KNOWN" --controls "$CONTROLS_READ" \
-    --jobs "$JOBS" ${record:+--record} ${PFULL:+--full} ${ONLY:+--partial} \
+    --jobs "$JOBS" ${record:+--record} ${PFULL:+--full} ${ONLY:+--partial} ${ex:+--expect "$ex"} ${PAGREE:+--agreement} \
     ${record:+--results-file "$root/test/python/parse-check-results$PYSFX.edn"} || rc=$?
   return $rc
 }
 
 cmd_parse_check() {
   local record="" ids=() nmut=2000 worst=0 rc id
-  JOBS=3; PFULL=
+  JOBS=3; PFULL=; PAGREE=
+  # queue 240: a case with its own verdict judged by it (own), or every case by the record (record: the oracle tier's,
+  # the default in verify mode); --agreement: both, the disagreements printed (the pass rule own)
+  PJUDGE=${REPR_PYTHON_PARSE_JUDGE:-$([ "$PYREC_MODE" = verify ] && echo record || echo own)}
   while [ $# -gt 0 ]; do
     case $1 in
       --record) record=1; shift ;;
+      --judge) PJUDGE=$2; shift 2 ;;
+      --agreement) PAGREE=1; shift ;;
       --full) PFULL=1; PARSE="$WORK/parse-full$PYSFX"; shift ;;
       --only-list) ONLY=$(cd "$(dirname "$2")" && pwd)/$(basename "$2"); shift 2 ;;
       --jobs) JOBS=$2; shift 2 ;;
@@ -696,6 +715,7 @@ cmd_parse_check() {
       *) ids+=("$1"); shift ;;
     esac
   done
+  case $PJUDGE in own|record) ;; *) die "parse-check --judge own|record (not $PJUDGE)" ;; esac
   [ ${#ids[@]} -gt 0 ] || ids=(samples stdlib site-packages lib-test lex-errors syntax-errors)
   fetch_tarball >/dev/null; fetch_apks >/dev/null
   local pools=()
@@ -809,6 +829,7 @@ cmd_records() {
   [ ${#ids[@]} -gt 0 ] || ids=(samples synthetic errors lex-errors syntax-errors stdlib site-packages lib-test mutants outcomes)
   need_python "records $mode"
   [ -f "$PYREC_LIB" ] || die "records $mode: no $PYREC_LIB (the shared tooling, oracle-records-c)"
+  mkdir -p "$WORK"  # a fresh clone has no .tmp/repr-python yet (each verb's log is written there)
   local rp="$root/bin/repr-python" pyi="$root/bin/pyi" o=() t0=$SECONDS
   # record: every verb stages into one directory, packed once at the end (a corpus's pack made once, not once a verb)
   if [ "$mode" = record ]; then export PYREC_STAGE="$WORK/records-stage.$$" PYREC_DEFER_FLUSH=1; rm -rf "$PYREC_STAGE"; fi
