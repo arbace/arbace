@@ -4885,3 +4885,75 @@ on pyi's modules; each failing case was one example, and the examples' causes we
   `:builtin-docstrings` (deferred). `bin/pyi lib-test --aot` of test_genexps, test_extcall, test_unpack, test_unpack_ex,
   test_doctest, test_weakref at the head: 217 methods, 192 pass, 24 classed, 0 failing once that class exists (the run
   before it: 1 failing, this one).
+
+## As built: 247, the programs' own verdicts: golden outputs reviewed against the Reference (2026-11-09, the Mac VM, queue 247)
+
+Light: the review is reading and awk, the checks run on stage 0 in seconds; pyi's own runs of the programs (`bin/pyi run`, goi)
+were sampled beside (below). Nothing of the runtime (go/arbace/py) changed. Models: Java's JCV2 (the jls programs' `NAME.out`
+and `golden.edn`, `main/java-jcv2` 79f4658d5: a `:golden` verdict, the review line by line, the judge counting it as own) and
+Scheme's SCS6 (Larceny's 13 programs: golden outputs, reviewed line by line, the judge `golden-items`, the `_control` case judged
+against another program's golden output).
+
+**What is a program's own verdict.** `test/python/golden/ID.out` (ID the program's id without `.py`: `synth/datamodel/del.out`,
+`samples/control.out`; a tree of its own, so the synthetic corpus's directories, `gen --check`'s `diff -r` and the records' source
+keys are untouched) is the program's expected standard output, with `test/python/golden/review-*.edn`: per program `:sha` (the
+SHA-256 of the reviewed text: editing a golden text needs a new review), `:status` (default 0) and `:stderr-last` (only where the
+review states the program's last stderr line: `synth/paths/uncaught-exception.py`'s `ValueError: uncaught`; otherwise stderr is
+not part of the verdict, as the DeprecationWarnings of `~True` in `builtins/bool.py` and `ops/unary.py` are not), and the entries
+`[LINES SECTIONS BASIS WHY]`: each line of the text in exactly one entry, SECTIONS the Python 3.14 Language Reference's or the
+library documentation's (`reference/FILE: heading`), BASIS `#{:ref :lib :impl}` (`:impl` where neither document fixes the line and
+the reason says what CPython's behaviour is: 17 entries, 18 lines), WHY the reading (what the Reference says, the arithmetic
+checked by hand: `12345 ** 3`, `divmod(12345, -7)`, `pow(12345, -1, 97)`, `2.5 % -0.7`, the precedence of `control.py`'s
+`r`, the C3 order, the comprehension scopes). The golden texts were made once from `python3 -s -P -B` 3.14.10 (the interpreter
+the references were recorded with) after the reading, and equal CPython's recorded runs (`ref-cpython314.edn`: status, stdout's
+SHA-256, stderr's last line) in all 127 programs; `bin/pyi golden` checks this agreement on every run, so a golden text that
+parts from the record is a failure to explain, not a class.
+
+**The judge.** `arbace.python.aot` `golden-refs` turns a reviewed program into a reference of the same shape as a CPython record
+(`:stderr-last :any` where the review states none); `check --aot --golden DIR` (`bin/pyi check --aot` passes it) judges a run
+against it for the compiled run, the loop run and pyi's run alike (the three cases of a program: the 453 cases of the 151
+programs, 381 of them now golden, 72 left on the record); a run that is not the golden text is classed `:as-pyi` (the rule: all
+three executions agree, the divergence is the interpreter's) or `:differs`/`:failed` as before, its reason naming "the golden
+text". The judge's negative control crosses golden references (the first two passing programs' runs, each judged against the
+other's golden text: `samples/classes.py` and `samples/control.py`). It prints `verdicts: 127 programs by their own golden text
+(381 cases: compiled, loop and pyi), 24 by CPython's recorded run`.
+
+**`bin/pyi golden`** (`make pyi-golden`; in `make python-essential`): the reviews against the texts (a malformed entry, a line in
+no entry or in two, an entry past the end, the digest), the agreement with the record, a text without a review or a review
+without a text, the negative control (one program's review judged against another's text finds 8 problems), and then the awk
+models.
+
+**The models** (`test/python/golden/models/`, `models.tsv`: program, script, arguments): 13 of the programs are also *computed*
+by an awk script written from the Reference alone, and `bin/pyi golden` requires its output to equal the golden text (and
+the first model against another program's text to differ): `boolean.awk` (`and`/`or`: the deciding operand, the calls made;
+49 rows), `identity.awk` (`is`, `is not`, `==`, `!=`: the 15 operands are 15 distinct objects of 15 distinct values, so the cell
+(i, j) is true exactly on the diagonal; 4 programs), `matmul.awk` (`@` and `@=`: no built-in type implements them; 2),
+`ordering.awk` (`<`, `<=`, `>`, `>=`: reals by value with bool, complex and dict and None and mixed kinds TypeError, a container
+against itself; 4), `membership.awk` (`in`, `not in`: str substring, bytes with ints in range(256) and ValueError outside it, the
+list's and tuple's elements by `==` so `True in [1, 2]`, a set searched by hash with a set operand taken as a frozenset,
+unhashable list, set or dict operands TypeError for sets and dicts; 2). All 1,350 cells of the six comparison tables and 450 of
+membership came out equal at the first run of the models, written before they were compared.
+
+**The counts** (`bin/pyi golden`: 127 programs, 3,623 lines reviewed; the Reference 3,191, the library documentation 1,686,
+implementation-defined 18, a line may rest on several): constructs 32 of 32, datamodel 45 of 45, builtins 17 of 17, paths 13 of
+13, samples 6 of 6, ops 14 of 38 (boolean, cmp-is, cmp-is-not, cmp-eq, cmp-ne, cmp-lt, cmp-le, cmp-gt, cmp-ge, cmp-in,
+cmp-not-in, matmul, aug-matmul, unary): 113 + 14 = 127 of 151, 381 of the 453 cases.
+
+**Not reviewed: the other 24 ops tables** (add, sub, mul, truediv, floordiv, mod, pow, lshift, rshift, and, or, xor and the
+twelve `aug-` forms except `aug-matmul`: 5,400 cells, 1,000 of them values). Their cells need exact arithmetic on 10**20 beside
+doubles and complex numbers, Python's float `//` and `%`, two's-complement bit operations on negative and big ints, and the
+printing of floats and complexes; awk's doubles are not enough (a model in Chez Scheme, whose exact integers and flonums would
+do, makes the check depend on a Scheme host; gawk -M is not busybox awk). They stay on CPython's recorded runs at 0.5 (72
+cases); DECISION 1 below.
+
+**Implementation-defined lines**, none masked (the programs print `repr()`s and exception names only, GT8.6) and each named in
+its review by `:impl`: set display order of small ints (`comprehensions.py`), `__del__` at once under reference counting
+(`del.py`, two lines), `__builtins__`'s kind (`builtins-scope.py`), the side of the odd padding of `center` (`str.py`,
+`bytes.py`, `bytearray-shared.py`), `bool.from_bytes`' construction through the subclass, `-0j`'s repr, `str.swapcase` of a
+titlecase letter, the tie of `%05.1f` on 2.25, the limit of `1e400`'s literal, `RecursionError`'s depth, the code object's
+argument counts, OrderedDict's and os.path's reprs in `samples/control.py`, and the spelling of an interpolation's expression
+(`samples/literals.py`: `' n + 1 '` keeps its spaces).
+
+**Samples of pyi** (`bin/pyi run` on goi of each program, beside the judge; the VM, 1 process): see the report.
+
+DECISION 1 (the ops tables): see the report.
