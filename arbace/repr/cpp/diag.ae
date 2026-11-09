@@ -315,6 +315,8 @@
    [:mptr #"^codegen: pointer-to-member function type requires an" "pointer-to-member function type requires an lvalue/rvalue"]
    [:constexpr #"^codegen: constexpr variable '.*' must be initialized by a constant expression" "constexpr variable must be initialized by a constant expression"]
    [:constexpr #"^codegen: constexpr if condition is not a constant expression" "constexpr if condition is not a constant expression"]
+   ;; (CP310 (b): an immediate invocation of a function whose body is not constant)
+   [:constexpr #"^codegen: call to consteval function '.*' is not a constant expression" "call to consteval function is not a constant expression"]
    [:overload #"^codegen: ambiguous call" "call is ambiguous"]
    [:sassert #"^codegen: static assertion failed" "static assertion failed"]
    [:noconv #"^codegen: no viable conversion from" "no viable conversion"]
@@ -409,7 +411,30 @@
                 (and (= "VarDecl" (:kind d)) (not (:constexpr d)) (not (re-find #"\bconst\b" (str (get-in d [:type :qualType])))))))
          "the strict_flex_array attribute's level is not an integer constant"
          (and v (not (<= 0 (long v) 3))) (str "the strict_flex_array attribute's level " v " is not between 0 and 3")
-         :else nil)))})
+         :else nil)))
+   ;; CP303 (a), the manual's "Common Variable Attributes" and "Common Type Attributes": a threshold for a structure's field, or
+   ;; a type's; so not for a variable or a function, nor a bit-field (a field whose alignment is its own); at the declarator's name
+   "warn_if_not_aligned"
+   (fn [_ n _]
+     (let [what (fn [] (if (#{"FunctionDecl" "CXXMethodDecl"} (:kind n))
+                         (let [qt (str (get-in n [:type :qualType]))
+                               [_ r ps] (re-find #"^(.*?)\s*\((.*)\)" qt)]
+                           (str r " " (:name n) "(" (if (= "void" (str/trim (str ps))) "" ps) ")"))
+                         (:name n)))]
+       (when (or (#{"VarDecl" "FunctionDecl" "CXXMethodDecl"} (:kind n)) (and (= "FieldDecl" (:kind n)) (:isBitfield n)))
+         {:at-decl true :msg (str "'warn_if_not_aligned' may not be specified for '" (what) "'")})))
+   ;; CP303 (a), the manual's "C++-Specific Variable, Function, and Type Attributes": an optional argument, an expression that
+   ;; evaluates to true or false, on a class type, a function or a member function (else ignored, a warning); [[gnu::no_dangling()]]
+   ;; an empty argument list written, which a standard attribute's syntax forbids
+   "no_dangling"
+   (fn [{:keys [args std]} n _]
+     (cond
+       (and std (= [] args)) "parentheses must be omitted if 'no_dangling' attribute argument list is empty"
+       (not (#{"FunctionDecl" "CXXMethodDecl"} (:kind n))) nil
+       (> (count args) 1) "wrong number of arguments specified for 'no_dangling' attribute"
+       (and (= 1 (count args)) (re-matches #"(?s)(?:u8|u|U|L)?\".*\"" (str/trim (first args))))
+       "'no_dangling' argument must be an expression that evaluates to true or false"
+       :else nil))})
 
 (defn gnu-attrs
   "CP294 (a): the unknown GNU attributes' rules (gattr-rules) over the declarations that carry them, each error at the
@@ -421,9 +446,22 @@
                   (doseq [a (:_gattrs n)]
                     (when-let [r (get gattr-rules (:name a))]
                       (when-let [m (r a n vars)]
-                        (let [[l c] (line-col starts (long (:off a)))]
-                          (.add out {:line l :col c :kind :error :rule :gnu-attr :msg m}))))))
+                        ;; (a rule's {:at-decl true :msg m}: at the declarator's name, else at the attribute's)
+                        (let [o (if (and (map? m) (:at-decl m)) (or (get-in n [:loc :offset]) (:off a)) (:off a))
+                              [l c] (line-col starts (long o))]
+                          (.add out {:line l :col c :kind :error :rule :gnu-attr :msg (if (map? m) (:msg m) m)}))))))
                 (:nodes u) nil)
+    ;; CP303 (a): a bit-field of a type declared warn_if_not_aligned (a typedef of the main file's), at its name
+    (let [wtypes (set (for [n (:nodes u) :when (and (= "TypedefDecl" (:kind n)) (some #(= "warn_if_not_aligned" (:name %)) (:_gattrs n)))] (:name n)))]
+      (when (seq wtypes)
+        (walk-nodes (fn [n _]
+                      (when (and (= "FieldDecl" (:kind n)) (:isBitfield n)
+                                 (contains? wtypes (str/trim (str/replace (str (get-in n [:type :qualType])) #"\b(?:const|volatile)\b" ""))))
+                        (let [o (or (get-in n [:loc :offset]) (get-in n [:range :begin :offset]))
+                              [l c] (line-col starts (long o))]
+                          (.add out {:line l :col c :kind :error :rule :gnu-attr
+                                     :msg (str "cannot declare bit-field " (when (seq (:name n)) (str "'" (:name n) "' ")) "with 'warn_if_not_aligned' type")}))))
+                    (:nodes u) nil)))
     (vec out)))
 
 ;; A constexpr function's definition (clang/lib/Sema/SemaDeclCXX.cpp at llvmorg-23.1.5: CheckConstexprFunctionBody,
@@ -439,10 +477,17 @@
 ;;   function, constructor or a lambda declared constexpr (the parser's :_cexpr), at the variable's name;
 ;; - before C++20 a destructor declared constexpr ("destructor cannot be declared constexpr", [dcl.constexpr]/1 of C++17), at
 ;;   the declaration.
-;; Everything else of the body (C++11's single return statement, the literal types) is not judged.
+;; - in C++11 (CP314 (a), CheckConstexprFunctionStmt's C++11 cases, which g++ makes errors) a function's body beside null
+;;   statements and declarations of static_assert, typedefs, aliases, using-declarations and using-directives is one return
+;;   statement ("body of constexpr function ... not a return-statement"), a constructor's nothing ("constexpr constructor does
+;;   not have empty body", a class template's too), at the body's closing brace; a void function's body not judged (its
+;;   return type is the error).
+;; Everything else of the body (the literal types) is not judged.
 
 (def ^:private scalar-type-re
   #"(?:(?:const|volatile)\s+)*(?:(?:unsigned|signed|short|long|int|char|bool|float|double|wchar_t|char8_t|char16_t|char32_t)\s*)+|.*\*\s*(?:const\s*)?")
+
+(def ^:dynamic *ctor-only* "CP314 (a): only the C++11 constructor rule (a class template's constructor)" false)
 
 (defn constexpr-bodies
   [u starts _ main]
@@ -486,13 +531,42 @@
                                body nil))
         fn! (fn [n]
               (let [body (last (filter #(= "CompoundStmt" (:kind %)) (:inner n)))]
-                (when body (lambdas! body))
-                (when (and (= "CXXDestructorDecl" (:kind n)) (:constexpr n) (< year 20))
+                (when (and body (not *ctor-only*)) (lambdas! body))
+                (when (and (= "CXXDestructorDecl" (:kind n)) (:constexpr n) (< year 20) (not *ctor-only*))
                   (let [o (get-in n [:range :begin :offset])]
                     (when (= main (get-in n [:range :begin :file]))
                       (let [[l c] (line-col starts (long o))]
                         (.add out {:line l :col c :kind :error :rule :constexpr :msg "destructor cannot be declared constexpr"})))))
-                (when (and body (or (:constexpr n) (:_consteval n)))
+                ;; CP314 (a): C++11's constexpr body (SemaDeclCXX's CheckConstexprFunctionBody and CheckConstexprFunctionStmt
+                ;; before C++14, which g++ makes errors): beside null statements, static_assert-declarations, typedefs, alias
+                ;; declarations, using-declarations and using-directives, a function's body is one return statement and a
+                ;; constructor's nothing; the error at the body's closing brace, as g++ places it
+                (when (and body (:constexpr n) (not (:_consteval n)) (= 11 (long year)) (not (declined? body))
+                           (#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl"} (:kind n)))
+                  (let [;; (a nested compound statement is g++'s error of its own, "compound-statement in constexpr function", at
+                        ;; its brace; its statements are the body's: cpp0x/constexpr-compound)
+                        flat (fn flat [xs] (mapcat #(if (= "CompoundStmt" (:kind %))
+                                                      (do (at! % "compound-statement in constexpr function" :constexpr) (flat (:inner %)))
+                                                      [%])
+                                                   xs))
+                        ctor? (= "CXXConstructorDecl" (:kind n))
+                        judged? (and (= main (get-in n [:range :begin :file]))
+                                     ;; (a void function is an error of its own in C++11, its body not judged, as g++)
+                                     (or ctor? (not (re-find #"^void\s*\(" (str (get-in n [:type :qualType]))))))
+                        ss (when judged? (doall (flat (:inner body))))
+                        decl-ok #{"StaticAssertDecl" "TypedefDecl" "TypeAliasDecl" "UsingDecl" "UsingDirectiveDecl" "UsingShadowDecl"}
+                        ok? (fn [s] (or (= "NullStmt" (:kind s))
+                                        (and (= "DeclStmt" (:kind s)) (seq (:inner s)) (every? #(decl-ok (:kind %)) (:inner s)))))
+                        rets (count (filter #(= "ReturnStmt" (:kind %)) ss))
+                        others (remove #(or (ok? %) (= "ReturnStmt" (:kind %))) ss)
+                        o (get-in body [:range :end :offset])]
+                    (when (and o judged?
+                               (if ctor? (or (seq others) (pos? rets)) (or (seq others) (not= 1 rets))))
+                      (let [[l c] (line-col starts (long o))]
+                        (.add out {:line l :col c :kind :error :rule :constexpr
+                                   :msg (if ctor? "constexpr constructor does not have empty body"
+                                            (str "body of constexpr function '" (:name n) "' not a return-statement"))})))))
+                (when (and body (or (:constexpr n) (:_consteval n)) (not *ctor-only*))
                   (uninit! body)
                   (when (#{"FunctionDecl" "CXXMethodDecl"} (:kind n))
                     (let [qt (str (get-in n [:type :qualType]))
@@ -508,6 +582,10 @@
                   ("NamespaceDecl" "LinkageSpecDecl" "ExportDecl") (decls! (:inner n))
                   "CXXRecordDecl" (decls! (:inner n))
                   ("FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl") (fn! n)
+                  ;; CP314 (a): a class template's constexpr constructors are judged at their definition (cpp0x/constexpr-ctor19)
+                  "ClassTemplateDecl" (doseq [r (:inner n) :when (= "CXXRecordDecl" (:kind r)) m (:inner r)
+                                              :when (and (= "CXXConstructorDecl" (:kind m)) (= 11 (long year)))]
+                                        (binding [*ctor-only* true] (fn! m)))
                   nil)))]
       (decls! (remove :_hdr (:nodes u))))
     (vec out)))
