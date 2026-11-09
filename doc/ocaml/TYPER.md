@@ -777,3 +777,11 @@ Each fix is the typer's own rule, from OCaml 5.5.0's typing/:
   sequences), so a use before the definition with labels (`binding ~is_method:true ctxt f` above `and binding ?(is_method=false)`) is
   typed against them (Pprintast).
 - **Ppat_open**: `M.(p)` typed with M's components opened (Ast_mapper).
+
+## 26. As built: Ptyp_open (2026-11-08, branch `ocaml-compl`)
+
+- **Typetexp's Ptyp_open**: `M.(t)`, the type expression translated with M's components opened, as Ppat_open's pattern
+  (`env.ae`'s `transl-type*`). lib-bigarray/subarraystub's external (`Bigarray.(('a, 'b, c_layout) Array2.t)`) stopped the
+  typer at it ("type expression :Ptyp_open outside the slice"); the program types now (it runs on the C API on ci, doc/ocaml/
+  OCAML-SURVEY.md, "As built: the C API on ci"; its run is the speed class, below). The native library rebuilt with it, all 49
+  units of the other libraries as before; `bin/oi check --only-list test/ocaml/essential-check.txt` 58 of 58.

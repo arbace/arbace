@@ -38,8 +38,8 @@ arbace_crop_paths=(
   arbace/repr/scheme.ae 'arbace/repr/scheme/*' 'arbace/scheme/*' arbace/repr/python.ae 'arbace/repr/python/*'
   arbace/python.ae 'arbace/python/*' arbace/repr/cpp.ae 'arbace/repr/cpp/*' arbace/repr/llvm.ae 'arbace/repr/llvm/*'
   'arbace/cpp/*' arbace/rust.ae 'arbace/rust/*' 'arbace/llvm/*'
-  # their Go forms: oi's, si's (scm, scminterp), pyi's (py, expat, pyexpat), hsi's (hs) and the libm port hsi and pyi import
-  go/arbace/oi.ae 'go/arbace/oi/*' go/arbace/scm.ae 'go/arbace/scm/*' go/arbace/scminterp.ae 'go/arbace/scminterp/*'
+  # their Go forms: oi's (with its C API, oicapi), si's (scm, scminterp), pyi's (py, expat, pyexpat), hsi's (hs) and the libm port hsi and pyi import
+  go/arbace/oi.ae 'go/arbace/oi/*' go/arbace/oicapi.ae 'go/arbace/oicapi/*' go/arbace/scm.ae 'go/arbace/scm/*' go/arbace/scminterp.ae 'go/arbace/scminterp/*'
   go/arbace/py.ae 'go/arbace/py/*' go/arbace/expat.ae 'go/arbace/expat/*' go/arbace/pyexpat.ae 'go/arbace/pyexpat/*'
   go/arbace/hs.ae 'go/arbace/hs/*' go/arbace/libm.ae 'go/arbace/libm/*'
   # pyi's lazy modules (queue 208, 209, 215: the C library host, _bz2's, _lzma's, _zstd's, _ssl's and _sqlite3's glue; W-P6 (a))

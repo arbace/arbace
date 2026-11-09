@@ -811,3 +811,15 @@ the run corpus has 377 run programs (541 with a `.reference`), the suite 120:
   oi is embedded in the shipped program (about 10 days at eval and 4 at AOT, after the embedding); the 25 stay deferred until then.
 - **OT28 (a):** writes through a `sub`/`slice` view of a mapped bigarray stay as built (no checked program does it).
 - **OT29 (a):** `ast-invariants` and `parsetree` stay in the speed classes; the compiled level is their AOT judgment.
+
+## As built: item 9, the C API on ci (2026-11-08, branch `ocaml-compl`)
+
+OT27 (a)'s route (ci interprets the stubs against a clean-room `caml/*.h`), built at eval without waiting for oi's embedding: oi's
+light driver links ci's back end (`go/arbace/ci`, `go/arbace/crt`, printed from the same forms the shipped program embeds) beside
+oi, which is the one executable OT27 (a) needed. The design, the checks and the numbers are doc/ocaml/OCAML-SURVEY.md's "As built: the
+C API on ci"; the route's confirmation is its Proposed OC198. Of the 25 `:c-api` programs: 17 pass at eval (the callbacks 12 of 12,
+manyargs, BLAKE2's self test, the C exceptions, recommended_domain_count, the bigarray from C), 3 fall in by-design classes their
+runs now reach (`lib-marshal/intext` and `intext_par`: Marshal's Closures flag, OT7 (a); `lib-bigarray/subarraystub`: speed, the
+boundary's copy of a 131,072-element bigarray at each of its 41,000 calls), 5 stay `:c-api` (int64-unboxing and
+unboxed-primitive-args run only native, their bytecode names "" or a generated script; bigarrfml's Fortran; delayintr's and
+cloexec's helper programs, built and run by the test). The AOT levels keep all 25 in `:c-api` (their runtime has no C: OC198).

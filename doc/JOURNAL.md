@@ -1594,3 +1594,55 @@ item's modules by day and on the whole of ghc-internal at the end; doc/haskell/F
   the cache's intent); a fresh process per module (15 s of start-up each); eager unification of a GADT given's unknown sides (the
   first slice's: wrong when a later argument fixes the scrutinee's type); generating Data/Generic/Lift's methods now (unmeasured by
   lib-check; with the desugaring slice instead).
+
+## 2026-11-08: the C API on ci, OCaml's eval `c-api` from 25 deferred to 5 (branch `ocaml-compl`, from next 7744e70b4)
+
+- **Why.** OCaml's completeness was 80.9%; its cells' deferred cases were eval's `c-api` 25, AOT's `c-api` 25, `:light-speed` 35 and
+  `:light-depth` 4, print's `:string-bytes` 2, none pending. `c-api` (DEFERRED-TRIAGE's item 9, OT27 (a)) was the biggest cause; the
+  light level's 39 wait for the compiled level's whole record (OT8 (a)).
+- **Built.** A test's C stubs run on ci beside oi: Arbace's own clean-room `caml/*.h` and C runtime (`test/ocaml/capi/`, from OCaml's
+  manual chapter 22 and, for BLAKE2b, RFC 7693's specification; no OCaml runtime source read for them), linked with the stubs and musl
+  by `test/ocaml/capi/cnodes.ae` (repr/c, ci's checker, the prebuilt musl, Arbace's own C target) into a node program that
+  `go/arbace/oicapi` loads into ci inside oi's light driver (`OI_CSTUBS`): OCaml's value layout in ci's memory, oi's values copied at
+  the boundary (once a pass, identity kept, read back on return, raise and callback, written again after a callback), callbacks on a
+  stack of no effect handlers, exceptions, named values, bigarrays, C custom blocks marshalled by their operations, getpid, kill and
+  raise as the host's. oi's hooks in `go/arbace/oi/ext_capi.ae`; header.awk runs `modules = "X.c"` tests at eval (the AOT levels and
+  native-only tests keep the class); two rules of OCaml's on the way (an allocation is a poll point; a stub's signal to the process
+  is pending when it returns); the typer's Ptyp_open (doc/ocaml/TYPER.md §26). The compiled AOT level and its suite now take the native
+  path too (for OC202), unrun: its builds exceed the day's memory.
+- **Route.** OT27 (a) chose ci over a clean-room `caml/*.h` after oi's embedding in the shipped program, the one executable thought
+  to hold both; the light driver links ci's back end itself, so it is built now (Proposed OC198 asks to confirm). Alternatives
+  considered: handles for blocks (OT27's sketch; rejected: `Field(v, i)` and `&Field(args, 0)` are memory in the stubs, so the copies
+  keep OCaml's layout), a subprocess to the tools' host (OT27 (b): a round trip a callback), the stubs ported to Go (OT27 (c): no C
+  checked).
+- **Checked** (light, by list, main's stage 0): the 25 programs on the native path and on the oracle path (`--ocdump`), each 17 pass,
+  2 Marshal's Closures flag (`:marshal-closures`, OT7 (a), now in the run corpus's classes), 1 `:speed` (subarraystub), 5 still
+  `:c-api`; both recorded by list (check-oi-native.edn, check-oi.edn; the known file's two pins attested); the essential list 58 of 58,
+  six signal programs, `bin/oi test`, `repl-check --native` 24 of 24, `own-verdicts --check`, the four divergences judgments,
+  gate-key-crops-test, `bin/gate --plan` and `--full --plan`.
+- **Scores**: OCaml 80.9 / 95.2 / 100 / 87.4 to **81.5** / 96.3 / 100 / 87.4 (eval 441 / 205 / 25 to 458 / 208 / 5); `bin/reap` and
+  `crops-score --judge --strict` 0 problems. Proposed OC198-OC202 (the route and the AOT mirror, native-only stubs, a Fortran stub, a
+  test's C helper program, the AOT cell at the compiled level); the night's commands in the survey's section.
+
+## 2026-11-08: OC199 (b), OC200 (a), OC201 (a) built, OC198 (a) and OC202 (a) recorded; OCaml's eval `c-api` empty (branch `ocaml-compl`, from 265bb7911)
+
+- **Decided** (the user, about 20:30, relayed): OC198 (a), OC199 (b), OC200 (a), OC201 (a), OC202 (a) (doc/ocaml/OCAML-SURVEY.md,
+  "Decided (the user, 2026-11-08, about 20:30)"). OC195 is undecided, so OC201 is built for C helpers alone.
+- **Built.** OC199 (b), OC200 (a): the classes `:native-only` (int64-unboxing, unboxed-primitive-args; eval) and `:fortran`
+  (bigarrfml; eval and both AOT levels), `:design`. OC201 (a): header.awk's helper mode reads ocamltest's first alternative (the
+  helper's and the test's `ocamlc.byte` builds, each `run`, the source directory's `TEST.run` hook, as ocamltest's main.ml and
+  actions_helpers.ml run them, ocamltest/ of the pinned OCaml 5.5.0 tarball read); bin/oi's `oi_helper` builds a C helper by
+  `test/ocaml/capi/cnodes.ae --program` on Arbace's own C target and runs it by oi's driver (`oi cmain`, oicapi's `RunMain`), an
+  OCaml helper with C stubs dumped and run by oi with its stubs on ci; `oi_one` runs the hook and the further runs. oicapi's host
+  natives add `fstat` and `close` (a stub's descriptor is the process's); oi's driver opens Go's poller while descriptors 3 to 63 are
+  held (found by strace: the poller's eventfd took the descriptor cloexec's `O_CLOEXEC` file had freed); Arbace's own
+  `caml/unixsupport.h`; `Unix.openfile`'s `O_CLOEXEC` wins over `O_KEEPEXEC` (open_unix.c's rule).
+- **Alternatives.** tools/cirun for the C helper (rejected: crt refuses a kill of another pid, by design for C's checks; changing it
+  moves C's keys: Proposed OC205); a hook mode for every test (OC203, proposed: swapchan's sort); the OCaml-only second programs of
+  OC195 (one condition away: OC204).
+- **Checked** (light, by list): the 25 C API programs and six signal programs native (24 of 24 run pass) and `--ocdump` (19 pass, 6
+  by design), both recorded by list; the essential list 58 of 58 with its control; 14 lib-unix programs; own-verdicts --check; the
+  five divergences judgments; `bin/oi test`; gate-key-crops-test; `bin/gate --plan`, `--full --plan`.
+- **Scores**: OCaml 81.5 / 96.3 / 100 / 87.4 to **81.6** / 96.6 / 100 / 87.4 (eval 460 / 211 / 0). The AOT light level's 39
+  deferred: 29 pass compiled in the partial records, 2 by design, 3 deferred, 5 unrecorded; OC202's cell switch prepared as a patch in
+  the worktree's `.tmp/oc202-cells.patch`, not applied. Proposed OC203-OC205.

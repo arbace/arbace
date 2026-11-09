@@ -254,6 +254,12 @@ covers what.
   library's `otherlibs/str/str.ml{,i}` into `.tmp/oi/strlib/`. The test
   data `test/ocaml/oi/testdata/` and the tables in `go/arbace/oi/lexdata*_test.ae` and `parsedata_test.ae`
   are outputs of the host's OCaml 5.5.0 (ocaml, ocamllex, ocamlyacc) over Arbace's own test programs.
+- oi's C API on ci (doc/ocaml/OCAML-SURVEY.md, "As built: the C API on ci"): `go/arbace/oicapi.ae`, `go/arbace/oicapi/`,
+  `go/arbace/oi/ext_capi.ae` and `test/ocaml/capi/` (the headers `include/caml/*.h`, the C runtime `runtime.c`, `main.c`,
+  `cnodes.ae`) are Arbace's own, under the Eclipse Public License 1.0: clean-room, written from OCaml's manual (chapter 22,
+  "Interfacing C with OCaml": the value layout, the macros' and functions' names and meanings) without OCaml's runtime headers
+  or sources; `runtime.c`'s BLAKE2b is written from RFC 7693's specification (the initialization vector and the message schedule
+  are the RFC's constants).
 - repr/ocaml's native reader (doc/ocaml/OCAML-SURVEY.md, "As built: the native reader"): `arbace/repr/ocaml/lex.ae`
   (parsing/lexer.mll, the parts of stdlib/lexing.ml that update the positions, utils/misc.ml's Utf8_lexeme),
   `docstrings.ae` (parsing/docstrings.ml), `ast.ae`'s constructors and docstring attributes (parsing/ast_helper.ml,
