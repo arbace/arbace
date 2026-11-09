@@ -1,5 +1,5 @@
 /* The C side of pyi's ctypes world (queue 244; doc/python/PYTHON-SURVEY.md, "As built: 244"): built by ci's builder
-   with CPython's Modules/_ctypes/_ctypes_test.c into one node program, go/arbace/clib/ctypes_test's Nodes, linked with
+   with CPython's Modules/_ctypes/_ctypes_test.c into one node program, go/arbace/clib/ctypestest's Nodes, linked with
    musl 1.2.6. A static link keeps only what is reached, so this file names what a ctypes program may look up in the C
    library by name (CDLL(None), find_library("c"), find_library("m")): the functions Lib/test/test_ctypes and
    Lib/ctypes call there, kept by the table pyctypes_libc. The world's set is the survey's PYS-CT2. */

@@ -5117,10 +5117,10 @@ outside test_capi need `_testcapi.raise_SIGINT_then_send_None` (test_generators)
 ### The design
 
 1. **The C world.** One ci program per process, over one address space: musl's libc and libm, `_ctypes_test`, and (with
-   DECISION 3) the C API's C half, linked as one node program, `go/arbace/clib/ctypes_test` (bin/pyi-clib's). Every ctypes buffer
+   DECISION 3) the C API's C half, linked as one node program, `go/arbace/clib/ctypestest` (bin/pyi-clib's). Every ctypes buffer
    lives in that address space, so `addressof`, `from_address`, `cast`, `string_at`, `memmove` are addresses C dereferences as
    is, and a pointer stored by C into a ctypes structure is a pointer ctypes reads back. A static link keeps only what is
-   reached: the glue `tools/pyi/clib/ctypes_test/pyctypes_test.c` names the libc functions a ctypes program may look up
+   reached: the glue `tools/pyi/clib/ctypestest/pyctypes_test.c` names the libc functions a ctypes program may look up
    (`pyctypes_libc`; the ones Lib/test/test_ctypes and Lib/ctypes call). `CDLL(None)`, `CDLL("libc.so.6")`, `find_library("c")`
    and `find_library("m")` are this world, `CDLL(_ctypes_test.__file__)` too; dlsym is the program's names (DECISION 2).
 2. **libffi's part** (`go/arbace/pyctypes/ffi.go`, built here): `ffi_type` (`Type`: the kinds, sizes and alignments of ci's
@@ -5147,7 +5147,7 @@ outside test_capi need `_testcapi.raise_SIGINT_then_send_None` (test_generators)
    `_ctypes_test`'s module functions, `ctypes.pythonapi`, `py_object` arguments (`_testfunc_pylist_append` appends to the
    caller's list), and the `_test*` modules (DECISION 4).
 5. **The back ends.** On goi, ci is interpreted by goi (208's DECISION 1 (a): `arbace/ci` and `arbace/crt` in goi's table at the
-   re-seed after Python's tag); compiled, pyi's AOT links cf2g's Go of the world (`bin/pyi-clib aot ctypes_test`, as bzip2's).
+   re-seed after Python's tag); compiled, pyi's AOT links cf2g's Go of the world (`bin/pyi-clib aot ctypestest`, as bzip2's).
    The world's node program is 1.44 MB: its cf2g Go about the size of liblzma's, which builds.
 
 ### DECISIONs
@@ -5209,8 +5209,8 @@ options undoes (libffi's part is (a)'s callee and (b)'s natives; `_ctypes_test` 
   argument `_testfunc_cbk_large_struct`, qsort's comparator `my_qsort`, two through a struct of pointers
   `_testfunc_callfuncp`), `get_an_integer`; `TestPrepCIF` (the refusals, a layout); the negative control
   `TestFFINegativeControl` (each case judged against the next case's want must fail).
-- `go/arbace/clib/ctypes_test` (generated, committed: 1,440,296 bytes of node program, 1.5 MB of forms): `bin/pyi-clib build
-  ctypes_test` from `tools/pyi/clib/ctypes_test/` (lib.conf: the CPython tarball test/python/corpora.edn pins, read from
+- `go/arbace/clib/ctypestest` (generated, committed: 1,440,296 bytes of node program, 1.5 MB of forms): `bin/pyi-clib build
+  ctypes_test` from `tools/pyi/clib/ctypestest/` (lib.conf: the CPython tarball test/python/corpora.edn pins, read from
   `REPR_PYTHON_SRC`'s cache; `pyctypes_test.c`, the libc table and the main naming `__init_libc`). bin/pyi-clib: lib.conf's
   `cache_var` (a tarball another pin fetches), `members` (the members extracted; `tar -xf`, any compression) and
   `root_includes` (directories of the checkout on the include path and in the key); the other libraries' keys do not move.
@@ -5218,7 +5218,7 @@ options undoes (libffi's part is (a)'s callee and (b)'s natives; `_ctypes_test` 
   module definition and slots, the reference counts as `Py_IncRef`/`Py_DecRef`, the twelve functions `_ctypes_test.c` calls).
   The functions are declared, not yet given: the world links (a call would fault: "undefined function"), the module's Python
   part waits on 244-3.
-- bin/pyi's runtime verbs: `print` prints `clib/ctypes_test` and `pyctypes`, `read` and `check` read `pyctypes` back, `vet` vets
+- bin/pyi's runtime verbs: `print` prints `clib/ctypestest` and `pyctypes`, `read` and `check` read `pyctypes` back, `vet` vets
   and tests it. LICENSE.md: the world's node program (the PSF's `_ctypes_test.c`, musl's MIT), the headers and `pyctypes`
   (Arbace's own).
 - bin/pyi-clib hashes itself into every library's key, so its change moved the four committed keys: `Key` in
