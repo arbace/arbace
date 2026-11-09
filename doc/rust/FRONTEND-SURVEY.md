@@ -2303,3 +2303,9 @@ two helper changes (RFP28/RFP37's, RFP32's) each made the four packs STALE, and 
 (`bin/rust-front records make`); the three kinds the helper's change did not touch came out byte for byte the same packs (their
 manifests' keys moved), which `records make` shows by the unchanged pack digests. A digest of the modes' sources alone (b) would trust a
 hand-kept list of which files a mode reads, as the proposal says.
+
+### RFP41 (a): the front end's runs out of the eval cell (as built)
+
+Kept as built: `test/crops/independence.edn`'s Rust eval fact stays 0.5 until rsi's cases run from the front end's MIR (RF11); the
+seven `run-built` programs are the essential step's, not the eval cell's cases. `bin/crops-score --judge --strict` after today's
+commits: Rust 75.0 / 75.0 / 95.8 / 80.0, unchanged, exit 0.
