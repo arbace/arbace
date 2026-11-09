@@ -108,6 +108,94 @@
     (doseq [r rs :when (#{:rename :typecheck} (:stage r))]
       (println "stopped" (name (:stage r)) (:name r) (subs (str (:msg r)) 0 (min 120 (count (str (:msg r)))))))))
 
+;; HF9-P1 (a), HF9-P8: the measure as a recorded check (test/haskell/lib-check-ghc-internal.edn, one map a module as check
+;; prints it, :ms dropped). A module is worse than its row when its stage ranks lower, or at the same stage fewer of its
+;; binders are equal to GHC's or more are GHC's only, or (both :errors) it has more errors; better the other way (reported:
+;; the record may be re-recorded, never a failure).
+
+(def stage-rank {:ok 4 :errors 3 :typecheck 2 :rename 1 :timeout 0})
+
+(defn- row-key [r] (dissoc r :ms))
+
+(defn compare-row
+  "nil when r is as its record row was; :worse or :better with why"
+  [rec r]
+  (let [rs (stage-rank (:stage rec) -1) ns (stage-rank (:stage r) -1)
+        eq (fn [x] (get-in x [:types :equal] 0)) miss (fn [x] (get-in x [:types :missing] 0))
+        ne (fn [x] (:n-errors x 0))]
+    (cond
+      (< ns rs) [:worse (str "stage " (name (:stage rec)) " -> " (name (:stage r)))]
+      (> ns rs) [:better (str "stage " (name (:stage rec)) " -> " (name (:stage r)))]
+      (< (eq r) (eq rec)) [:worse (str "binders equal " (eq rec) " -> " (eq r))]
+      (> (miss r) (miss rec)) [:worse (str "GHC's only " (miss rec) " -> " (miss r))]
+      (and (= :errors (:stage r)) (> (ne r) (ne rec))) [:worse (str "errors " (ne rec) " -> " (ne r))]
+      (> (eq r) (eq rec)) [:better (str "binders equal " (eq rec) " -> " (eq r))]
+      (< (miss r) (miss rec)) [:better (str "GHC's only " (miss rec) " -> " (miss r))]
+      (and (= :errors (:stage r)) (< (ne r) (ne rec))) [:better (str "errors " (ne rec) " -> " (ne r))]
+      :else nil)))
+
+(defn judge
+  "The results against the record: exit status 1 when a module is worse, or, for a whole run, a module of one is not in
+  the other"
+  [record-file results-file whole? & [classes-file]]
+  (let [rec (into {} (map (juxt :name identity) (read-results [record-file])))
+        rs (read-results [results-file])
+        seen (set (map :name rs))
+        bad (atom 0) better (atom 0)]
+    (doseq [r rs]
+      (if-let [x (get rec (:name r))]
+        (when-let [[k why] (compare-row x r)]
+          (println (str "lib-check judge: " (:name r) " " (name k) ": " why))
+          (if (= k :worse) (swap! bad inc) (swap! better inc)))
+        (when whole? (println (str "lib-check judge: " (:name r) " is not in the record")) (swap! bad inc))))
+    (when whole?
+      (doseq [n (sort (keys rec)) :when (not (seen n))]
+        (println (str "lib-check judge: " n " is recorded but was not judged")) (swap! bad inc)))
+    ;; HF9-P6 (a): every module that does not pass (elaborated without an error, every binder equal, none GHC's only) in a
+    ;; class of the classes file (goi's format: :id :kind :ids), as the matrix's cells are judged
+    (when classes-file
+      (let [classes (read-string (slurp classes-file))
+            owner (into {} (for [c classes i (:ids c)] [i c]))
+            pass? (fn [r] (and (= :ok (:stage r)) (= (get-in r [:types :compared]) (get-in r [:types :equal])) (zero? (get-in r [:types :missing] 0))))
+            np (remove pass? rs)]
+        (doseq [r np :when (not (owner (:name r)))]
+          (println (str "lib-check judge: " (:name r) " does not pass (" (name (:stage r)) ") and is in no class of " classes-file))
+          (swap! bad inc))
+        (println (str "lib-check judge: " (- (count rs) (count np)) " pass, " (count np) " in a class: "
+                      (pr-str (into (sorted-map) (frequencies (keep #(some-> (owner (:name %)) :id) np))))))))
+    (println (str "lib-check judge: " (count rs) " modules against " (count rec) " recorded; " @bad " worse, missing or unclassed, "
+                  @better " better" (when (pos? @better) " (bin/repr-haskell lib-check --record re-records them)")))
+    (System/exit (if (zero? @bad) 0 1))))
+
+(defn record
+  "The results into the record file: a whole run replaces it, a partial one its modules' rows"
+  [results-file record-file partial? source]
+  (let [f (File. ^String record-file)
+        old (if (and partial? (.isFile f)) (read-results [record-file]) [])
+        new (read-results [results-file])
+        by (merge (into (sorted-map) (map (juxt :name row-key) old)) (into {} (map (juxt :name row-key) new)))]
+    (spit record-file
+          (str ";; HF9's measure as a recorded check (bin/repr-haskell lib-check --record; doc/haskell/FRONTEND-SURVEY.md, \"As built:\n"
+               ";; HF9-P1, P2, P5, P6, P7, P8\"): each module of the package natively read, renamed and elaborated against its imports'\n"
+               ";; interfaces, its binders' types against GHC's interface of the module. One map a module: :stage (:ok, :errors,\n"
+               ";; :typecheck, :rename, :timeout), the errors' features, :types {:compared :equal :missing}. --judge FILE fails on a\n"
+               ";; module that gets worse. Interfaces: " source ". Classes of the modules that do not pass:\n"
+               ";; test/haskell/divergences-lib-check.edn. Read with the Clojure reader.\n"
+               (apply str (for [[_ r] by] (str (binding [*print-length* nil *print-level* nil] (pr-str r)) "\n")))))
+    (println (str "lib-check: " (count new) " modules recorded into " record-file " (" (count by) " rows)"))))
+
+(defn control
+  "The negative control's verdict: its one result must not be a module elaborated with every binder equal"
+  [results-file what]
+  (let [[r] (read-results [results-file])
+        equal? (and r (= :ok (:stage r)) (:types r) (pos? (:compared (:types r) 0))
+                    (= (:compared (:types r)) (:equal (:types r))) (zero? (:missing (:types r) 0)))]
+    (if (and r (not equal?))
+      (println (str "lib-check: control (" what "): differs, as it must ("
+                    (name (:stage r)) ", " (get-in r [:types :equal] 0) " of " (get-in r [:types :compared] 0) " equal, "
+                    (get-in r [:types :missing] 0) " GHC's only)"))
+      (do (println (str "lib-check: control (" what "): " (if r "judged equal: the judge is blind" "no result"))) (System/exit 1)))))
+
 (defn -main
   "check --plan FILE -o OUT: each module of the plan through the front end, one EDN map a line; rank FILE...: the
   measure of results files"
@@ -131,4 +219,7 @@
                     (when-not r0 (System/exit 3))))
                 (shutdown-agents))
       "rank" (rank (read-results more))
+      "judge" (let [[rec res w cls] more] (judge rec res (= w "whole") cls))
+      "record" (let [[res rec w src] more] (record res rec (not= w "whole") src))
+      "control" (let [[res what] more] (control res what))
       (do (println "usage: -m arbace.repr.haskell.libcheck check --plan FILE -o OUT | rank FILE...") (System/exit 2)))))

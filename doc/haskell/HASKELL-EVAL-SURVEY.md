@@ -2262,3 +2262,46 @@ Built 2026-11-08 on branch `hs-hes84` from next `5af7d0058` (HES83 merged).
   matches the non-threaded RTS's refusal, not the test. (a) a class `:threaded-way` (deferred) taking them out of the passes
   until HES84 (a) (the eval cell 801 to 797); (b) keep them as passes, the survey recording why (as built). *Recommended: (a)*:
   a refusal to run is no evidence of the test's behaviour, and HES84 (a) will judge them in their own way.
+
+## Decided (the user, 2026-11-08, about 19:45: HES86, HES87)
+
+HES86: (a), bin/hsi check's nofib plan takes record-ref's `nofib_c_srcs`, write-ahead: the five programs' keys change and their
+entries of haskell-stg-progs are re-recorded at the next recording of that pack. HES87: (a), the class `:threaded-way` (deferred)
+until HES84 (a).
+
+## As built: HES86 (a), HES87 (a)
+
+Built 2026-11-08 on branch `hs-props` from `mac/hs-hf9` (7ed40299a) with `mac/hs-hes84` merged (6cd0e5356).
+
+- **HES87 (a).** The rule rather than a list of four: `bin/hsi own-verdicts` (`--record`, `--check`) also computes
+  `test/haskell/threaded-way.tsv` (ID, all.T's only_ways): the testsuite's tests whose `only_ways` are all threaded ways
+  (threaded1, threaded2, nonmoving_thr, profthreaded) and whose recorded normal-way run (`test/haskell/ref-ghc914.edn`) is not
+  their own verdict (its status not all.T's `exit_code`, default 0, or its stdout or stderr not the shipped file, a missing one
+  empty, as the testsuite driver takes it). Ten tests: T21651, T4262, conc038, conc059, hs_try_putmvar001, hs_try_putmvar003,
+  numsparks001, setnumcapabilities001, IncallAffinity, ffi014. `bin/lib/hsi/check` records a run of one of them that matches the
+  reference `:result :threaded-way :would :pass` instead of `:pass` (not under `HSI_JUDGE=ref`, the oracle's comparison of
+  judges); a run that does not match keeps its result and its class (conc059 in `:threaded-only`, HES84 (b); conc038 and
+  setnumcapabilities001 in `:rts`; the C classes), so of the ten exactly the four the proposal names move: T21651, ffi014,
+  hs_try_putmvar003, numsparks001. T10414, T14346 and T21969, threaded-only too, keep their passes: GHC's normal-way run is their
+  own verdict (status 0, the shipped or an empty stdout). The class `:threaded-way` (`:kind :deferred`, `:results
+  [:threaded-way]`) in `test/haskell/divergences.edn` takes the four, and in `test/haskell/divergences-aot.edn` ffi014, the one of
+  them the AOT level runs (the same rule, the same check script: its compiled run matched the same refusal). The committed
+  records' four rows (`check-hsi.edn`; ffi014's in `check-hsi-aot.edn` and `check-hsi-aot-O1.edn`) were rewritten as the check now
+  writes them; the night's whole runs write them so.
+- **HES86 (a).** `nofib_c_srcs` moved from `bin/lib/hsi/record-ref` to `bin/lib/hsi/records.bash` (record-ref sources it now) and
+  `bin/lib/hsi/check`'s nofib plan takes it in place of every `.c` of the directory (HES64 (a)'s reading): the plans of the
+  reference and of the check are equal again. Over the pinned nofib, six programs' C changes, all to none: imaginary/paraffins
+  (paraffins.c), imaginary/primes (csieve.c), real/compress (lzw.c; it does not build, GHC-87110), shootout/fasta (fasta-c.c),
+  shootout/reverse-complement (revcomp-c.c), spectral/simple (simple.c). Their flags, so their keys (`prog_key`), change: their
+  entries of haskell-stg-progs are STALE until the pack is recorded again, and until then `bin/hsi check --corpus nofib` records
+  them `:unrecorded` and fails (write-ahead, as decided). After the recording the five that pass run without ci or musl (the eval
+  fact's C cases 87 to 82 in `test/crops/independence.edn`, both weighed 0.5: the score does not move).
+- **Checks** (light): `bin/hsi own-verdicts --check`: 587 of 908 by their own verdict, the list current; 10 threaded-only tests
+  without their own verdict, `threaded-way.tsv` current. `bin/hsi divergences`: 908 programs, 797 pass, 111 in a class, 0 not
+  (`:threaded-way` 4); `--results test/haskell/check-hsi-aot.edn`: 139 programs, 137 pass, 2 in a class, 0 not.
+- **Night** (the main session's, by hand at the oracle tier, GHC): `bin/hsi check --live --dump-only --record-progs --corpus nofib
+  --only nofib/imaginary/paraffins,nofib/imaginary/primes,nofib/real/compress,nofib/shootout/fasta,nofib/shootout/reverse-complement,nofib/spectral/simple`
+  (the six entries re-recorded under their new keys, a commit of its own naming :ghc's identity), then `bin/hsi check --corpus
+  nofib --only` the same `--record`, or the night's whole `bin/hsi check --corpus nofib,samples,synthetic,testsuite-core --jobs 4
+  --record` (which also writes the four `:threaded-way` rows), `bin/hsi divergences`, `bin/reap --record`, `bin/crops-score --record`;
+  the eval fact's `:c` count 87 to 82 when the record shows it.
