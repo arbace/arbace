@@ -1,7 +1,7 @@
 /*
  * Arbace (overlay/jdk, F10 of doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F10a"): jdk26u's
  * sun.nio.ch.Net (baf63fb) with its natives given bodies over jdk.internal.jrt.HostChannels
- * (go/arbace/jrt/channels.ae, ports of Net.c's), derived by .tmp/f10/gennet.py (the triage's
+ * (go/arbace/jrt/channels.ae, ports of Net.c's), derived by test/jrt/derive.ae (the triage's
  * derivation); since F10b ("As built: F10b") multicast's natives (joinOrDrop4/6, blockOrUnblock4/6,
  * setInterface4/6, getInterface4/6) too, by hand, over HostChannels' ports of Net.c's. The changes:
  * Copyright (c) the Arbace authors; Eclipse Public License 1.0.

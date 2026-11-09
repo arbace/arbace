@@ -1,7 +1,7 @@
 /*
  * Arbace (overlay/jdk, F10 of doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F10a"): jdk26u's
  * sun.nio.ch.PollSelectorImpl (unix, baf63fb) with its pollfd array as three int arrays polled by
- * jdk.internal.jrt.HostChannels.poll1 (PollSelectorImpl.c's poll), derived by .tmp/f10/genpoll.py
+ * jdk.internal.jrt.HostChannels.poll1 (PollSelectorImpl.c's poll), derived by test/jrt/derive.ae
  * (the triage's derivation). The derivation's changes: Copyright (c) the Arbace authors; Eclipse
  * Public License 1.0.
  */

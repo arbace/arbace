@@ -1,7 +1,7 @@
 /*
  * Arbace (overlay/jdk, doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F9 (write-ahead)"): jdk26u's
  * sun.nio.fs.NativeBuffer (https://github.com/openjdk/jdk26u at baf63fb,
- * src/java.base/share/classes/sun/nio/fs/NativeBuffer.java), derived mechanically (.tmp/f9/derive.py, each
+ * src/java.base/share/classes/sun/nio/fs/NativeBuffer.java), derived mechanically (test/jrt/derive.ae, each
  * replacement asserted once): no Cleaner (java.lang.ref.Cleaner is not in the Go build, F17): free() frees the
  * memory itself, once; a buffer dropped without free (a dead thread's cache) is not freed. The changes Copyright
  * (c) the Arbace authors; Eclipse Public License 1.0. jdk26u's notice follows.

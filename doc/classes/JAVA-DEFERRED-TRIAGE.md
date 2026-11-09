@@ -6440,3 +6440,13 @@ part of what DIR must hold. `bin/jrt-convert vet` alone is unchanged (the same f
 joint javac check (`all9-run.sh`); (2) the new and changed files read by day into DIR (their forms at their paths below a forms
 root); (3) `bin/jrt-convert vet --classes RE --forms-add DIR --others`, RE the slice's packages: no refusal, or each one in the
 slice's own triage with its fix; (4) the night's conversion and build as usual.
+
+## As built: JCS257 (a): the derived overlays' headers name `test/jrt/derive.ae` (branch `java-props2`)
+
+The 18 derived overlays whose headers still named their first scratch scripts (`.tmp/f9/derive.py` for F9's thirteen,
+`.tmp/unix/derive.py` for UnixDomainSockets, `.tmp/f10/gennet.py`, `genpoll.py`, `genopts.py` for Net, PollSelectorImpl and
+SocketOptionRegistry) name `test/jrt/derive.ae` instead, in derive.ae's header texts and in the committed overlays alike (the
+comments of derive.ae's table keep the scripts' names, as the derivations' first record). Code unchanged; `bin/jrt-convert derive
+--check`: 79 overlays, 0 not as derived, the control failing as it must. The overlays' text moves `jdk/provenance.edn`'s digests:
+the night's `bin/jrt-convert update` takes it with the rest (JCS257 (a)'s "at the next conversion"). The F1 services
+(`JceServices`, `RsaServices`, "the F1 scratch script gensvc.py/genjava.py") are not derive.ae's: hand-kept, unchanged.

@@ -1,7 +1,7 @@
 /*
  * Arbace (overlay/jdk, doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F9 (write-ahead)"): jdk26u's
  * sun.nio.fs.NativeBuffers (https://github.com/openjdk/jdk26u at baf63fb,
- * src/java.base/share/classes/sun/nio/fs/NativeBuffers.java), derived mechanically (.tmp/f9/derive.py, each
+ * src/java.base/share/classes/sun/nio/fs/NativeBuffers.java), derived mechanically (test/jrt/derive.ae, each
  * replacement asserted once): the per-thread cache is a plain ThreadLocal (jdk.internal.misc.TerminatingThreadLocal
  * is not in the Go build): a terminating thread's cached buffers are not freed. The changes Copyright (c) the
  * Arbace authors; Eclipse Public License 1.0. jdk26u's notice follows.

@@ -1,7 +1,7 @@
 /*
  * Arbace (overlay/jdk, doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F9 (write-ahead)"): jdk26u's
  * java.nio.file.FileSystems (https://github.com/openjdk/jdk26u at baf63fb,
- * src/java.base/share/classes/java/nio/file/FileSystems.java), derived mechanically (.tmp/f9/derive.py, each
+ * src/java.base/share/classes/java/nio/file/FileSystems.java), derived mechanically (test/jrt/derive.ae, each
  * replacement asserted once): getDefault without jdk.internal.misc.VM (jrt's world has no boot phases: the module
  * system is always initialized); a default provider named by java.nio.file.spi.DefaultFileSystemProvider loaded by
  * Class.forName (jdk.internal.loader.ClassLoaders is not in the Go build); the newFileSystem lookups through

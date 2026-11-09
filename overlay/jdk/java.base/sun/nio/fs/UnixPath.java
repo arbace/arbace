@@ -1,7 +1,7 @@
 /*
  * Arbace (overlay/jdk, doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F9 (write-ahead)"): jdk26u's
  * sun.nio.fs.UnixPath (https://github.com/openjdk/jdk26u at baf63fb,
- * src/java.base/unix/classes/sun/nio/fs/UnixPath.java), derived mechanically (.tmp/f9/derive.py, each replacement
+ * src/java.base/unix/classes/sun/nio/fs/UnixPath.java), derived mechanically (test/jrt/derive.ae, each replacement
  * asserted once): encode reports malformed input through the charset's encoder (jdk.internal.jrt.NioStrings) where
  * jdk26u asks JavaLangAccess.uncheckedGetBytesOrThrow, which jrt's JavaLangAccess has not. The changes Copyright
  * (c) the Arbace authors; Eclipse Public License 1.0. jdk26u's notice follows.

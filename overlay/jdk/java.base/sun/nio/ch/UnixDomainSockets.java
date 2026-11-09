@@ -1,7 +1,7 @@
 /*
  * Arbace (overlay/jdk, doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS164 (write-ahead)"): jdk26u's
  * sun.nio.ch.UnixDomainSockets (https://github.com/openjdk/jdk26u at baf63fb,
- * src/java.base/share/classes/sun/nio/ch/UnixDomainSockets.java), derived mechanically (.tmp/unix/derive.py, each
+ * src/java.base/share/classes/sun/nio/ch/UnixDomainSockets.java), derived mechanically (test/jrt/derive.ae, each
  * replacement asserted once): its natives (UnixDomainSockets.c's init, socket0, bind0, connect0, accept0 and
  * localAddress0) given bodies over jdk.internal.jrt.HostChannels, as F10a's Net; the rest is jdk26u's. The changes
  * Copyright (c) the Arbace authors; Eclipse Public License 1.0. jdk26u's notice follows.

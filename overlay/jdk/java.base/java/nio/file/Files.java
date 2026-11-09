@@ -1,7 +1,7 @@
 /*
  * Arbace (overlay/jdk, doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F9 (write-ahead)"): jdk26u's
  * java.nio.file.Files (https://github.com/openjdk/jdk26u at baf63fb,
- * src/java.base/share/classes/java/nio/file/Files.java), derived mechanically (.tmp/f9/derive.py, each replacement
+ * src/java.base/share/classes/java/nio/file/Files.java), derived mechanically (test/jrt/derive.ae, each replacement
  * asserted once): readString and writeString report malformed input through the charset's coders
  * (jdk.internal.jrt.NioStrings) where jdk26u asks JavaLangAccess, which jrt's has not those members; no installed
  * file type detectors (no ServiceLoader in the Go build), the platform's default detector only. The changes
