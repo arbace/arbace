@@ -73,6 +73,9 @@ code. Three kinds of things live here:
   `aclocal.m4`'s FPTOOLS_CHECK_HTYPE and FP_CHECK_CONST, and `utils/hsc2hs/src/{HSCParser,C,DirectCodegen,UtilsCodegen}.hs`
   from the same tarball; `cabal.ae` ports Cabal-syntax 3.16.0.0's field parser, conditions, free text and
   showInstalledPackageInfo (`libraries/Cabal/Cabal-syntax`, Cabal's BSD 3-Clause License);
+  `target.ae`'s `libffi-vars` and `libffi-headers` (HFS-I11 (a), 2026-11-08) port libffi 3.8.0's `configure.ac` and
+  `configure.host` substitution rules for ffi.h.in and the ffitarget.h copy (https://github.com/libffi/libffi/releases/download/v3.8.0/libffi-3.8.0.tar.gz,
+  SHA-256 `7da3e2d9...0c0db4`, `test/haskell/target/libffi.edn`'s pin; libffi's MIT License);
   `rename.ae`, the renamer of the front end (doc/haskell/FRONTEND-SURVEY.md, HF2), ports `mkOpAppRn`, `mkNegAppRn`,
   `mkConOpPatRn`, `mkHsOpTyRn` of `compiler/GHC/Rename/HsType.hs` and `compareFixity` of `compiler/GHC/Types/Fixity.hs`
   from the same tarball on 2026-11-05, reading the rest of `compiler/GHC/Rename/` as the specification, the file

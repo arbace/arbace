@@ -1887,3 +1887,47 @@ regression), `r7rs`, `srfi`, `bin/si own`, `bin/repr-scheme c2j-check` (22 of 22
 0.994 to 0.996). Night: `bin/repr-scheme check --record`, `bin/si check --record`, `bin/si check --aot --record`. Proposed: SCS15 (`#!chezscheme`'s
 extensions: leave), SCS16 (si's `(rnrs unicode)` from the pin), SCS17 (the printing scans by stated rules), SCS18 (the 37 probes where Chez reads
 past the grammar refused as R6RS does).
+
+## 2026-11-08: HFS-I11 (a), the system libffi derived; HFS-I9 (b), the probe as a --full step; HFS-I8 (a), HFS-I10 (a) decided (branch `hs-hfsi9`, from next 5ec43f7b7)
+
+The user's decisions on hs-inputs' proposals (doc/haskell/FRONTEND-SURVEY.md, "Decided (the user, 2026-11-08: HFS-I8 to HFS-I11)"),
+built as "As built: HFS-I9 (b), HFS-I11 (a)".
+
+- **HFS-I11 (a)**. GHCi/FFI.hsc's C includes `<ffi.h>`, the system libffi's (rts.cabal's +use-system-libffi), so its hsc2hs output was the
+  last BORROWED member of the derived installation. Fetched once (the user's one network allowance) the latest 3.x release, libffi
+  3.8.0 from https://github.com/libffi/libffi/releases/download/v3.8.0/libffi-3.8.0.tar.gz into a new directory of the main checkout,
+  `.tmp/repr-haskell/libffi/`; SHA-256 `7da3e2d9a171eb0a038f592ecad3ff2bb2550f3496d87b3b29ad0cf4430c0db4` (GitHub's release API lists the
+  same digest), pinned in `test/haskell/target/libffi.edn` (with SHA-512, size, `:host x86_64-alpine-linux-musl`). The tarball is data:
+  `arbace.repr.haskell.target`'s `libffi-vars` ports configure.ac's and configure.host's rules for ffi.h.in's six `@VAR@`s (3.8.0, X86_64,
+  HAVE_LONG_DOUBLE 1, 30800, FFI_EXEC_TRAMPOLINE_TABLE 0; sizes from `c/target/abi.edn`) and `libffi-headers` writes ffi.h and copies
+  src/x86/ffitarget.h, into the derived tree's `sysroot/usr/include`, listed in a new `SYSTEM` file that `target compare` leaves out.
+  Both equal the host's libffi-dev 3.8.0-r0 headers byte for byte. `target hsc` puts that directory last on every module's ci run, and
+  runs `bin/ci musl ensure` first (a fresh tree failed its ghci modules for want of the forms cache). Results:
+  `REPR_HASKELL_ONLY_PACKAGES=ghci bin/repr-haskell target hsc` 3 of 3 on ci (1 GiB), GHCi/FFI.hs byte for byte the pack's (3abe5950...);
+  the tree with the 90 modules made on ci against the pack: `target compare` 337 of 337 equal, nothing borrowed. libffi's MIT License
+  in LICENSE.md, its origin in doc/ARBACE.md. Alternative (b), an `ffi.h` of Arbace's own written from the ABI, was not taken: the user
+  chose the faithful one.
+- **HFS-I9 (b)**. The probe and the tarball's extraction moved to `bin/repr-haskell-target` (`src`, `probe [--verify]`), so that its key is
+  not bin/repr-haskell's (a `bin/` script: the planner's `:cmd` check reads `bin/NAME`); `bin/repr-haskell target probe` and `target_src`
+  run it; `make repr-haskell-target-probe`. The new `--full` step `haskell-target-probe` (steps.edn, 2 GiB, `:stage0 :go`) is keyed on the
+  script, configure.ae, answers.edn, the GHC tarball's and musl's pins and C's tools and target (186 files); its control waived (the
+  fresh answers against the committed file); the oracle fragment's `haskell-target-oracle` keeps `target hsc && target compare`.
+  `bin/repr-haskell target probe --verify` by day through the moved script: the answers as committed, 36 min, 0.9 GiB.
+  `gate.crops check` 0 problems; `bin/gate --full --plan` runs it ("never passed"), among the chains beside the serial run;
+  `bin/gate-tests`: crops-test's expected chains gained it, then 36 of 36 (gate-reads-test rerun alone).
+- **HFS-I8 (a)** and **HFS-I10 (a)**: recorded as decided, nothing to change (both as built by HFS-I2 (a)).
+- **Scores**: Haskell's read fact `:cases {:self 1345 :recorded 0}` (read 0.9996 to 1.000); `bin/crops-score --crop haskell` 96.6 / 100 /
+  78.8 (0.78840 to 0.78847, `test/crops/scores.edn` unchanged at four places), `--judge --strict` 0 problems.
+- Night: `bin/repr-haskell target hsc` whole (the key moved with libffi.edn: about an hour of ci), then `bin/repr-haskell target compare`
+  (337 of 337 expected) and `bin/gate --full` (haskell-target-probe's first pass, haskell-roundtrip). Proposed: HFS-I12 (the probe's
+  negative control), HFS-I13 (the clean run's two hours of ci).
+
+## 2026-11-08: HFS-I12 (a) built, HFS-I13 (a) recorded (branch `hs-hfsi9`, from 88af58be2)
+
+The user accepted HFS-I12 (a) and HFS-I13 (a) (doc/haskell/FRONTEND-SURVEY.md, "Decided (the user, 2026-11-08, later: HFS-I12,
+HFS-I13)"; "As built: HFS-I12 (a)"). `haskell-target-probe`'s waiver is replaced by a control: two planted compile tests,
+`test/haskell/target/controls/control-{no,yes}.c`, which `bin/repr-haskell-target controls` runs through `bin/ci diagnose` and
+which the probe runs first; a flipped answer fails it in about 20 seconds. Wired in steps.edn (`:controls`, the directory in
+`:inputs`). Checked by flipping each planted answer once by hand (REPR_HASKELL_CONTROLS): the probe's control fails each time
+with the flipped test named. Alternatives: planting beside the 308 in the one diagnose run (rejected: a flip shows after 36
+minutes); keeping the waiver. HFS-I13 (a): nothing to build. the controls passed first, then the 308 compile tests, types and values: "the answers as committed", 33 min wall (40 min CPU), one process.

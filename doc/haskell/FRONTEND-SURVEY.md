@@ -2218,3 +2218,92 @@ The record `test/haskell/lib-stg-results.edn` keeps each module's stage and coun
 - **HF10-P10 The list past level 30.** (a) **first the Simplifier's time on `utf8_decode` (profile the iteration, the
   case-of-case and join point duplication against GHC's dump), then the levels 31 to 60 into `test/haskell/lib-stg.txt` as they
   hold**; 1 to 2 days; (b) the levels as they are, UTF8 recorded `:timeout`. *Recommended: (a)*: the same cost would hit a program.
+
+## Decided (the user, 2026-11-08: HFS-I8 to HFS-I11)
+
+- **HFS-I8 (a)**: the hsc2hs outputs made by `haskell-roundtrip` (`target hsc` first), kept by key in the checkout's `.tmp/`; the clean
+  run pays the hour (light). As built with HFS-I2 (a); nothing to change.
+- **HFS-I9 (b)**: `target probe --verify` a `--full` step keyed on what it reads, out of the oracle tier (below).
+- **HFS-I10 (a)**: the units' ids, the ABI directory and the 44 ABI fingerprints stay facts of `installation.edn` (names of the
+  installation, as the corpus's -I paths are); Hadrian's hash ported when the front end compiles the boot libraries (HF9, HF10).
+- **HFS-I11 (a)**: libffi 3.x's release tarball pinned, `ffi.h` and `ffitarget.h` derived for x86_64 as its configure makes them,
+  GHCi/FFI.hsc made on ci (below). The fetch: the user allowed it for this one tarball.
+
+## As built: HFS-I9 (b), HFS-I11 (a) (2026-11-08, branch `hs-hfsi9`, from `next` 5ec43f7b7)
+
+### HFS-I11 (a): the system's libffi
+
+- **The pin**: `test/haskell/target/libffi.edn`: libffi 3.8.0, the latest 3.x release on 2026-11-08 (GitHub's release v3.8.0, published
+  2026-08-08), https://github.com/libffi/libffi/releases/download/v3.8.0/libffi-3.8.0.tar.gz, 1,581,626 bytes, SHA-256
+  `7da3e2d9a171eb0a038f592ecad3ff2bb2550f3496d87b3b29ad0cf4430c0db4` (equal to the digest GitHub's release API lists for the asset),
+  SHA-512 recorded beside; fetched once into the main checkout's `.tmp/repr-haskell/libffi/` (a new, empty directory), the path a
+  worktree and the clean clone take it from (`haskell_take`). 3.8.0 is also the host's Alpine package (libffi-dev 3.8.0-r0), the one the
+  pack's hsc2hs run read. MIT: LICENSE.md ("libffi: MIT License"), doc/ARBACE.md.
+- **The derivation** (`arbace.repr.haskell.target`'s `libffi-vars` and `libffi-headers`): the tarball is data (only `configure.ac`,
+  `include/ffi.h.in`, `src/x86/ffitarget.h` and `LICENSE` are extracted, into `.tmp/repr-haskell/target/libffi`; no configure, no make,
+  no code of it runs). config.status's AC_CONFIG_FILES substitutions of `ffi.h.in`, each value by its rule: `VERSION` and
+  `FFI_VERSION_STRING` AC_INIT's version (3.8.0), `FFI_VERSION_NUMBER` X*10000 + Y*100 + Z (30800), `TARGET` configure.host's
+  `x86_64-*-*` rule (X86_64, sizeof(size_t) 8 from `c/target/abi.edn`; TARGETDIR x86), `HAVE_LONG_DOUBLE` 1 (configure.host sets none for
+  x86; sizeof(long double) 16 differs from double's 8), `FFI_EXEC_TRAMPOLINE_TABLE` 0 (only `*arm*-apple-*`, `aarch64-apple-*`); an
+  `@VAR@` left unsubstituted is an error. `ffitarget.h` is `src/x86/ffitarget.h`, as configure's config command copies it. The host
+  `x86_64-alpine-linux-musl` is the pin's `:host`. Both headers are byte for byte the host's `/usr/include/ffi.h` and `ffitarget.h`
+  (checked by hand, 2026-11-08: Alpine's configure of the same release).
+- **Where they go**: `sysroot/usr/include/ffi.h` and `ffitarget.h` of the derived tree, where libffi-dev installs them; named in the
+  tree's new `SYSTEM` file, which `target compare` leaves out (the host system's headers: the pack, GHC's installation, holds none of
+  them). `target hsc` gives every module's C program the derived tree's `sysroot/usr/include` last, as gcc's `/usr/include` was for
+  hsc2hs on the host; and it now runs `bin/ci musl ensure` first (a fresh tree had no forms cache: its three ghci modules failed with
+  "no index.edn", found here).
+- **Results** (light, one process, about 1 GiB): `REPR_HASKELL_ONLY_PACKAGES=ghci bin/repr-haskell target hsc`: 3 of 3 modules made on
+  ci, 2 min 11 s; GHCi/FFI.hs byte for byte the pack's (SHA-256 `3abe5950...`, the record's `:hsc2hs :output`). The derived tree with
+  the 90 modules made on ci (89 from the hs-inputs run, the ghci three from this one) against the pack: `target compare` **337 of 337
+  equal, 0 differ, 0 missing, 0 extra, 0 borrowed**, libffi's 2 the system's. Nothing of the read stage is borrowed any more.
+- **Score** (`bin/crops-score --crop haskell`): read 0.9996 to 1.000 (`:cases {:self 1345 :recorded 0}`); Haskell 96.6 / 100 / 78.8
+  (independence 0.78840 to 0.78847: unchanged at the record's four places, `test/crops/scores.edn` as it was; `--judge --strict` 0
+  problems).
+
+### HFS-I9 (b): the probe as a `--full` step
+
+- **`bin/repr-haskell-target`** (new; `src`, `probe [--verify]`): the probe and the tarball's extraction moved out of `bin/repr-haskell`
+  so that the step's key is its own (a script in `bin/`, as the planner's `:cmd` check reads `bin/NAME`); `bin/repr-haskell target probe`
+  and its `target_src` run it. Make: `make repr-haskell-target-probe`.
+- **`haskell-target-probe`** (`test/gate/steps.edn`, `:phase :full`, 2 GiB, hosts `:stage0 :go`): `bin/repr-haskell-target probe
+  --verify`, keyed on the script, `inputs.bash`, `arbace/repr/haskell/configure.ae`, `test/haskell/target/answers.edn`, the pins of the
+  GHC tarball (`corpus-ghc-9.14.1.edn`) and musl (`test/c/corpora.edn`), C's tools and target (`bin/ci`, `bin/lib/ci/`, `bin/lib/repr-c/`,
+  `arbace/c{.ae,/}`, `arbace/repr/c{.ae,/}`, `c/`, `test/c/host/`, `test/c/records/`, `:c-run`, `:c2j-runtime`; 186 files): no Haskell
+  change but those reruns it. Its control is waived (the fresh answers against the committed file: a differing answer is its finding).
+  `bin/gate --full --plan`: `run haskell-target-probe key 8549e6f01260, 186 files; never passed`, among the light chains beside the
+  serial run. `gate.crops check`: 0 problems.
+- **The oracle tier**: `haskell-target-oracle` (`test/gate/crops/haskell.edn`, not spliced yet) keeps `target hsc && target compare`.
+- **The probe's run** (the moved script, whole, by day: one process, 0.9 GiB peak): `bin/repr-haskell target probe --verify` (through
+  `bin/repr-haskell-target probe --verify`), 308 compile tests, "the answers as committed", 36 min (65 on hs-inputs' first run).
+
+## Decided (the user, 2026-11-08, later: HFS-I12, HFS-I13)
+
+- **HFS-I12 (a)**: the probe gets a negative control of two planted compile tests. Built ("As built: HFS-I12 (a)").
+- **HFS-I13 (a)**: keep the clean run's two hours of ci (light, beside the serial run) until GT8's budget for the clean run objects.
+  Nothing to build.
+
+## As built: HFS-I12 (a) (2026-11-08, branch `hs-hfsi9`, from 88af58be2)
+
+- **The control**: `test/haskell/target/controls/control-no.c` (`#include <stdlib.h>` and `void unsetenv(const char *);`, a
+  conflicting declaration, the shape of the probe's own `compiles` checks) must be answered "no", and `control-yes.c` (stdlib.h
+  and a function using `abs`) "yes". `bin/repr-haskell-target controls` runs the two through `bin/ci diagnose` as the probe runs
+  the 308 and reads the result as `arbace.repr.haskell.configure/compile-errors` does (a `FILE.c:LINE:` line on the file means
+  no); either answer flipped, exit 1 naming it. `probe` runs it first, so a flip fails in about 20 seconds instead of after the
+  36 minutes. `REPR_HASKELL_CONTROLS=DIR` names another directory (the flips below).
+- **The step**: `haskell-target-probe`'s waiver in `:controls` is replaced by `"test/haskell/target/controls/control-no.c"`, and
+  the directory joins its `:inputs` (so the control is in its key: `bin/gate --full --plan` shows 188 files, never passed).
+  `gate.crops check`: 0 problems; `test/gate/crops-test.bash`: ok.
+- **Checked, light**: the real controls: "control-no.c answered no, control-yes.c answered yes", exit 0. The no-test replaced by the
+  yes-test: "control-no.c was answered yes (it must be no)", exit 1. The yes-test replaced by the no-test: "control-yes.c was
+  answered no (it must be yes)", exit 1.
+- **The whole probe** (by day, `bin/repr-haskell-target probe --verify`): the controls passed first, then the 308 compile tests, types and values: "the answers as committed", 33 min wall (40 min CPU), one process.
+- **Why not planted among the 308**: the answers file reads only the 308 by name, so a planted pair would be harmless there too,
+  but a failure would show only after the long diagnose run; a separate early run costs one more 20-second ci start.
+
+- **HFS-I12 The probe's negative control.** The step is waived. (a) **A control check in the plan**: one compile test the probe must
+  answer "no" (a header that does not exist, a function musl lacks) and one it must answer "yes", planted beside the 308, the probe
+  failing when either flips; a few minutes; (b) keep the waiver. *Recommended: (a)*, cheap, and it tests ci's checker as the probe uses it.
+- **HFS-I13 The clean run's hour of `target hsc`.** With HFS-I8 (a) and the probe's hour, a clean run of Haskell's steps pays two hours of
+  ci (light, beside the serial run). (a) Keep; (b) HFS-I8 (b) (Arbace's own outputs as a pack, verified by a rerun in the oracle tier).
+  *Recommended: (a)* until GT8's budget for the clean run objects.
