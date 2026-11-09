@@ -5226,3 +5226,41 @@ options undoes (libffi's part is (a)'s callee and (b)'s natives; `_ctypes_test` 
   liblzma's `verify` byte for byte on the VM, zstd's and SQLite's the main host's).
 - The classes: unchanged (`:ctypes` 625 and `:testcapi` 1,117 methods in the sample; the brief's 13 and 10 rows), as expected
   of a slice with no module.
+
+## As built: 244, after the decisions: `_ctypes` (2026-11-09, the Mac VM, queue 244)
+
+**Decided (the user, 2026-11-09, relayed by the coordinator):** 244-1 (a) Modules/_ctypes ported to Go over ffi.go;
+244-2 (a) one fixed linked world (libc, libm, `_ctypes_test`, the C API's C half); 244-3 (a) handles, a proxy per
+live object, the limited API first; 244-4 (a) `_testinternalcapi` by design, the other `_test*` modules from their C
+sources on ci over the handles, file by file.
+
+**Built:**
+
+- `go/arbace/pyctypes`, the module `_ctypes` (lazy, `lazyModules["_ctypes"]`, as `_bz2`), CPython 3.14.10's
+  `Modules/_ctypes` over pyi's objects:
+  - the metatypes `PyCSimpleType` (with `__ctype_be__`/`__ctype_le__`, create_other_endian_type), `PyCStructType`
+    and `UnionType` (their `_fields_` laid out by Lib/ctypes/_layout.py, the CField objects its; MakeAnonFields;
+    `_fields_ is final`), `PyCArrayType` (and `TYPE * N`, cached), `PyCPointerType` (`set_type`,
+    `__pointer_type__`), `PyCFuncPtrType` (`_argtypes_`, `_restype_`, `_flags_`): built-in subclasses of `type`
+    whose `__new__` makes the class by `type.__new__` and then its StgInfo (a table by class);
+  - `_SimpleCData`, `Structure`, `Union`, `Array`, `_Pointer`, `CFuncPtr` over `CData` (CDataObject: b_ptr an
+    address of the world, b_objects/KeepRef/unique_key, b_base, b_index, b_length), cfield.c's field descriptors
+    (the integers native and swapped with bit fields, `?`, `v`, `d`, `g`, `f`, `c`, `u`, `U`, `s`, `z`, `Z`, `P`,
+    `O`), PyCData_get/PyCData_set, the from_param family as _ctypes.c has it, `from_address`, `from_buffer`,
+    `from_buffer_copy`, `in_dll` (data symbols by the node program's static names), pickling (`__reduce__`,
+    `__setstate__`, `_unpickle`);
+  - calls (PyCFuncPtr_call, ConvParam, GetResult, `errcheck`, `use_errno`'s swap) through ffi.go's `World.Call`;
+    callbacks (CFUNCTYPE of a callable) as closures, exceptions reported unraisable;
+  - `dlopen`/`dlsym` of the world (244-2 (a): `None`, `libc.so.6`, `libm.so.6`, `_ctypes_test.__file__`; any other
+    name OSError), `sizeof`, `alignment`, `byref`, `addressof`, `resize`, `get_errno`/`set_errno`, `buffer_info`,
+    `PyObj_FromPtr`; memmove and memset as libc's own addresses, `string_at`, `wstring_at`, `cast`, `memoryview_at`
+    as natives of the world taking and giving PyObject * handles;
+  - `py_object` and PyObject * arguments as handles (244-3 (a)'s first part): a proxy (ob_refcnt, ob_type) per
+    object in the world's memory, kept for the process (refcounts are the next part's).
+- `_ctypes_test`, its module part: `__file__` (the world), `get_last_tf_arg_s/u` (the C statics), `func`, `func_si`;
+  `get_generated_test_data` waits on the C API (244-3's next slice: it is C over Python.h).
+- py: `builtins_ctypes_api.go` (the lazy modules, `ExtTypeNew`, `ExtWrapInstance`, `ExtRegisterMetaNew`); a REQUEST
+  in class.go (`type(name, (Structure,), ns)` calls PyCStructType's new, as CPython's type_new does when a built-in
+  metatype with its own tp_new wins).
+- pyi's AOT links pyctypes and the world compiled by cf2g (`bin/pyi-clib aot ctypestest`); bin/pyi's runtime verbs
+  and keys cover them. The world's library is `ctypestest` (goi maps a package path's `_` to a namespace's `-`).
