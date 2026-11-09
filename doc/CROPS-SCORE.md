@@ -93,7 +93,7 @@ the crop's checks compare with at check time. Each stage scores:
 The crop's independence is the mean of the five. The host toolchains are GT9's hosts `:gcc :cxx :llvm :ocaml :chez
 :chibi :ghc :rustc :python`, and the JDK beyond the frozen jar. Not counted: Arbace's executables, TamaGo's go (the seed's
 toolchain, pinned by `seed/goroot.sha256`, its sources as Go forms in `tamago/cmd/`), and the frozen v4 jar (pinned by
-`test/oracle/frozen-jar.sha256`).
+`test/oracle/frozen-jar.sha256`) with the JVM that runs it (Java 26 by `bin/lib/java26.bash`, the user's ruling of 2026-11-09).
 
 The facts are reviewed data in `test/crops/independence.edn`. Each stage has its tool, the host toolchains it needs, the
 reason, its evidence (file:line, REF:file:line on a held ref), the gate steps that run it, and where it was run with stubs.
@@ -372,3 +372,4 @@ The independence audit of 2026-11-09 (`.tmp/indep-audit/` in the main checkout: 
   build tree pinned by `jdk/javac/platform.sha256`; the interpreter, j2g and the printer take the forms made against it. Java's
   read, eval, AOT and print score **0.5** (the header's rule, as Haskell's front end over GHC's interfaces) until the platform is
   Arbace's own (its modules compiled from jdk26u's sources by javac on Arbace).
+- **The JVM running the frozen jar is exempt, like the jar** (`independence.edn`'s header). The JDK beyond that use counts.
