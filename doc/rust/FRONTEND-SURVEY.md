@@ -2309,3 +2309,12 @@ hand-kept list of which files a mode reads, as the proposal says.
 Kept as built: `test/crops/independence.edn`'s Rust eval fact stays 0.5 until rsi's cases run from the front end's MIR (RF11); the
 seven `run-built` programs are the essential step's, not the eval cell's cases. `bin/crops-score --judge --strict` after today's
 commits: Rust 75.0 / 75.0 / 95.8 / 80.0, unchanged, exit 0.
+
+### RFP39 (a) then (c): core's codegen attributes (as built, then RF12)
+
+Kept as built: core's attributes for the runs' callees come from core's own sources (rust-src's `library/core`, read by repr/rust's
+native parser; `inline`, `track_caller`, `rustc_nounwind`, `rustc_intrinsic`), a macro-made item taking the default rules, the
+`cross_crate_inlinable` MIR cost rule not ported, all judged by mono-check (callees 34 of 34, symbols 47 of 47 after today's commits).
+Then (c): the attributes from our own collection of core at RF12, when core's bodies come from source too; (b), decoding core's rmeta
+tables, only if RF12 slips. Note: since RFP32 (a), MIR's passes read std's `#[rustc_nounwind]` and `#[rustc_promotable]` from the
+helper's interface (pinned data), the runs' callees from core's sources: two routes to one fact until RF12 collects core.
