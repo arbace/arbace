@@ -2701,3 +2701,63 @@ pinned by `test/ocaml/corpora.edn` (`runtime/finalise.c`, `runtime/startup_aux.c
   AOT 406/202/64 to 419/191/66, maturity 100%, independence 87.4%. Not run: the compiled level (the night's; OC206's compiled path built,
   not proved). Proposed OC208 (`Unix.execv` at the AOT levels). Process note: the harness made the subagent's worktree inside
   `/root/arbace/.tmp/mac-queue/.claude/worktrees/` (an isolation flag of the call); its commit was fetched from there.
+
+## 2026-11-09: C++'s CP320 (a), an alias template's guides (branch `cpp-props4`)
+
+- **Built** (`arbace/cpp/template.ae`; after clang's SemaTemplateDeductionGuide.cpp at llvmorg-23.1.5, the pinned tarball:
+  getRHSTemplateDeclAndArgs, BuildDeductionGuideForTypeAlias, DeclareImplicitDeductionGuidesForTypeAlias,
+  DeclareAggregateDeductionGuideForTypeAlias, buildIsDeducibleConstraint): an alias template's guides f' from its
+  defining-type-id's class template's guides f (implicit, copy, user, aggregate), f's return type's arguments deduced from the
+  defining-type-id, f''s parameters the alias's it names and f's undeduced, its signature built lazily; the is_deducible
+  constraint and the alias's own constraints on the class a guide returns; from C++17 on.
+- **Why**: the user's decision CP320 (a) of 2026-11-09 (doc/cpp/CPP-SURVEY.md, "Proposed (CP320-CP324)").
+- **Measured**: probes `.tmp/p/al1-al3b.cpp` (seven deduced types right, the control's seven wrong ones refused); the 75 CTAD
+  files (`.tmp/fctad.txt`) with CP323: 21 → 28 (class-deduction-alias1, -alias2, -alias3, -alias8, -alias12, -alias16, -alias19).
+- **Left**: a member alias template named through its class (`T<double>::AFoo`), cpp1z/class-deduction-alias1's C++17-only
+  GCC error (clang accepts).
+
+## 2026-11-09: C++'s CP323 (a), C++23's inherited constructors' guides (branch `cpp-props4`)
+
+- **Built** (from the standard's text, [over.match.class.deduct]/1.10 and [over.match.best.general]/2 per P2582R1; clang 23 has
+  none): `inherited-guides`, the guides of the alias with C's parameters and the base as defining-type-id (CP320's), each returning
+  C with the arguments deduced back; the tie-break for a guide not from inherited constructors; the dependent base's
+  `UnresolvedUsingValueDecl` recognized. In the checker: a class's inherited constructors among its initializations' candidates
+  (B's but copy, move and no-parameter ones), the chosen one's access as B's member, the initialization otherwise not analyzed.
+- **Why**: the user's decision CP323 (a) of 2026-11-09; the checker's half because a class inheriting constructors gave a false
+  "no viable function" at its construction (any standard).
+- **Measured**: probe `.tmp/p/in1.cpp` (C<int>, C<char>, G<char, bool>; D and E errors), `in3`-`in5`; the every-10th sample
+  117 → 120 with CP320, CP321 (cpp23/class-deduction-inherited1 among them); the using-declaration files (`.tmp/fusing.txt`):
+  inh-ctor9 kept for the right reason now (A's protected constructor), inh-ctor35 lost (its expected error is
+  `-fno-new-inheriting-ctors`'s, before P0136: the earlier pass was the false "no viable" error), pr97268's extra line gone.
+
+## 2026-11-09: C++'s CP321 (a), static data members' in-class initializers in the checker (branch `cpp-props4`)
+
+- **Built** (`arbace/cpp/sema.ae`, `template.ae`): a static data member's in-class initializer analyzed in its class's scope in the
+  analysis' order (refusals reported), for a class of the main file, a class template's specialization only when an explicit
+  instantiation definition names it (`:explicit-inst-def`; [temp.inst]/4 for the implicit ones); the code generator unchanged.
+- **Why**: the user's decision CP321 (a) of 2026-11-09.
+- **Measured**: using-enum-1 (lines 37-38) and class-deduction108 (eight lines) now own passes (the every-10th sample's two of the
+  three gained); the 158 dg-error files with an in-class static member and a class (`.tmp/fstatic.txt`, in chunks of 20,
+  `.tmp/ch-*` against the base `.tmp/chb-*`): no pass lost, no new extra line.
+
+## 2026-11-09: C++'s CP324 (a), a using-declaration's access for member functions (branch `cpp-props4`)
+
+- **Built** (`arbace/cpp/sema.ae`): a class's using-declaration of member functions gives its synonyms its own access in its class
+  ([namespace.udecl]/19), judged at the call through the naming class (`cx-using-map`), and each function it names checked
+  accessible at the using-declaration.
+- **Why**: the user's decision CP324 (a) of 2026-11-09.
+- **Measured**: probe `.tmp/p/u1.cpp` (three errors where the rules have them, none on a protected function made public);
+  the 19 dg-error files with a class's using-declaration and an access message (`.tmp/fusing.txt`): parse/access6 now passes
+  (with CP323's and CP321's: 5 → 6, inh-ctor35 lost as CP323 says).
+
+## 2026-11-09: C++: the dg read's one endless file fixed, CP321's measure corrected (branch `cpp-props4`)
+
+- **Found**: cpp0x/overflow1.C never ended in the dg read (exponential constant folding of `Fib<95>::value` through the
+  specializations' static members; on next's tree too): tonight's whole-part record would have hung.
+- **Fixed**: `arbace.cpp.sema/var-const-int`, a const integral variable's value kept once found; overflow1 in 7 s. And CP321's
+  analysis restores the analysis position after a member's initializer (a stale line-1 error in
+  template/non-type-template-argument-1).
+- **Correction** of the CP321 entry above: its "158 files: no pass lost, no new extra" came from a run on the CP323 commit's tree,
+  a mistake in assembling the commits. Measured again on the right tree: no pass lost, five gained (class-deduction108,
+  using-enum-1, class-deduction-alias12, var-templ81, static4, each reviewed), one new extra found and fixed (the position)
+  (doc/cpp/CPP-SURVEY.md, "As built: the dg read's one endless file, and CP321's measure corrected").
