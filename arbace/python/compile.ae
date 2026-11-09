@@ -2357,9 +2357,31 @@
 
 (declare pattern!)
 
+;; queue 250: codegen's pattern_context (Python/codegen.c): a capture is not stored as its sub-pattern matches but kept
+;; on the stack, rotated beneath what the pattern still needs (codegen_pattern_helper_store_name), and the case stores
+;; the names only once the whole pattern has matched (codegen_match_inner), so a failed alternative or case binds
+;; nothing; on a failure the fail ladder pops the kept captures with the rest. *stores*: the names kept so far, in
+;; codegen's pc->stores order (the first on the top of the stack); *store-base*: the depth above which they lie (the
+;; case's subject's, or an alternative's subject's): pc->on_top + len(pc->stores) + 1 is the depth above it
+(def ^:private ^:dynamic *stores* nil)
+(def ^:private ^:dynamic *store-base* 0)
+
+(defn- rotate!
+  "codegen_pattern_helper_rotate: the top moved count items down (3.10's ROT_N by SWAPs)"
+  [u count]
+  (doseq [k (range count 1 -1)] (emit! u :swap k)))
+
+(defn- store-capture!
+  "codegen_pattern_helper_store_name: the top kept beneath the items above *store-base* (a wildcard's popped)"
+  [u nm]
+  (if (nil? nm)
+    (emit! u :pop nil)
+    (do (rotate! u (- (depth u) *store-base*))
+        (swap! *stores* conj nm))))
+
 (defn- pattern*!
-  "Matches the subject on the top: on success the subject is popped and the names bound; on failure the jumps in
-  fails (each with the depth it leaves) lead to the case's end (subject popped)"
+  "Matches the subject on the top: on success the subject is popped and its captures kept on the stack (*stores*); on
+  failure the jumps in fails (each with the depth it leaves) lead to the case's end (subject popped)"
   [u x fails]
   (let [[h p o _] (node x)
         fail! (fn [] (let [j (jump! u :jump-if-false)] (swap! fails conj [j (depth u)])))
@@ -2371,10 +2393,10 @@
     (case h
       match-as (let [[q nm] p]
                  (cond (and (nil? q) (nil? nm)) (emit! u :pop nil)
-                       (nil? q) (name-op! u (ident nm) :store)
+                       (nil? q) (store-capture! u (ident nm))
                        :else (do (when (some? nm) (emit! u :copy 1))
                                  (pattern! u q fails)
-                                 (when (some? nm) (name-op! u (ident nm) :store)))))
+                                 (when (some? nm) (store-capture! u (ident nm))))))
       match-value (do (when (= 'joined-str (head (strip-meta (first p))))
                         (syntax-error "patterns may only match literals and attribute lookups"))
                       (emit! u :copy 1) (expr! u (first p)) (emit! u :compare '==) (emit! u :to-bool nil)
@@ -2411,7 +2433,7 @@
                            :else (do (if star (emit! u :unpack-ex [star (- n star 1)]) (emit! u :unpack-sequence n))
                                      (doseq [q ps]
                                        (if (= 'match-star (head q))
-                                         (let [[_ [nm] _ _] (node q)] (if (some? nm) (name-op! u (ident nm) :store) (emit! u :pop nil)))
+                                         (let [[_ [nm] _ _] (node q)] (store-capture! u (some-> nm ident)))
                                          (sub! q)))))))
       match-mapping (let [[ks ps] p rest-name (some-> (:rest o) ident)]
                       (reduce (fn [seen k]
@@ -2430,7 +2452,9 @@
                       (emit! u :unpack-sequence (count ps))
                       (doseq [q ps] (sub! q))
                       (if rest-name
-                        (do (emit! u :copy-dict-without-keys nil) (name-op! u rest-name :store) (emit! u :pop nil))
+                        ;; subject keys -> subject rest -> rest, kept as a capture
+                        (do (emit! u :copy-dict-without-keys nil) (emit! u :swap 2) (emit! u :pop nil)
+                            (store-capture! u rest-name))
                         (do (emit! u :pop nil) (emit! u :pop nil))))
       match-class (let [[cls ps] p]
                     (reduce (fn [seen [a q]]
@@ -2445,24 +2469,47 @@
                     (emit! u :copy 1) (load-const! u nil) (emit! u :is true) (fail!)
                     (emit! u :unpack-sequence (+ (count ps) (count (:kwd-patterns o))))
                     (doseq [q (concat ps (:kwd-patterns o))] (sub! q)))
+      ;; codegen_pattern_or: each alternative on a copy of the subject with stores of its own, above the subject;
+      ;; one that matched has its captures reordered as the first's (control), then at the end they are rotated
+      ;; beneath the outer pattern's items and appended to its stores, and the subject popped
       match-or (let [alts (first p)
                      done (atom [])
-                     d (depth u)]
+                     d (depth u)
+                     control (atom nil)]
                  (doseq [[i q] (map-indexed vector alts)]
                    (set-depth! u d)
                    (emit! u :copy 1)
-                   (let [sub (atom [])]
-                     (binding [*allow-irrefutable* (and *allow-irrefutable* (= i (dec (count alts))))]
+                   (let [sub (atom []) mine (atom [])]
+                     (binding [*allow-irrefutable* (and *allow-irrefutable* (= i (dec (count alts))))
+                               *stores* mine *store-base* d]
                        (pattern! u q sub))
-                     ;; matched: drop the subject kept below
-                     (emit! u :pop nil)
+                     (if (zero? i)
+                       (reset! control @mine)
+                       ;; names that differ are check-stores!' SyntaxError: nothing reordered then
+                       (when (and (= (count @mine) (count @control)) (= (set @mine) (set @control))
+                                  (apply distinct? nil @mine))
+                         (loop [ic (dec (count @control))]
+                           (when (>= ic 0)
+                             (let [is (first (keep-indexed (fn [k nm] (when (= nm (nth @control ic)) k)) @mine))]
+                               (when (not= ic is)
+                                 (let [r (inc is) v @mine
+                                       tail (subvec v r)]
+                                   (reset! mine (vec (concat (subvec tail 0 (- ic is)) (subvec v 0 r) (subvec tail (- ic is)))))
+                                   (dotimes [_ r] (rotate! u (inc ic))))))
+                             (recur (dec ic))))))
                      (swap! done conj (jump! u :jump))
                      ;; this alternative failed: pop to the subject, try the next
                      (when (seq @sub) (fail-ladder! u @sub d))))
-                 ;; every alternative failed
-                 (set-depth! u d) (load-const! u false) (fail!) (emit! u :pop nil)
+                 ;; every alternative failed: pop the subject and fail
+                 (set-depth! u d) (emit! u :pop nil)
+                 (let [j (jump! u :jump)] (swap! fails conj [j (depth u)]))
                  (doseq [j @done] (patch! u j (here u)))
-                 (set-depth! u (dec d)))
+                 (let [n (count @control)]
+                   (set-depth! u (+ d n))
+                   (doseq [nm @control]
+                     (rotate! u (- (depth u) *store-base*))
+                     (swap! *stores* conj nm))
+                   (emit! u :pop nil)))
       (throw (ex-info (str "compile: unknown pattern " h) {})))))
 
 
@@ -2481,10 +2528,14 @@
         ;; a case's instructions at its pattern's line (codegen_match_inner's LOC(m->pattern))
         (when pl (set-line! u pl))
         (emit! u :copy 1)
-        (let [fails (atom [])]
-          (binding [*allow-irrefutable* (or (some? (:guard co)) (= i (dec (count cases))))]
+        (let [fails (atom []) stores (atom [])]
+          (binding [*allow-irrefutable* (or (some? (:guard co)) (= i (dec (count cases))))
+                    *stores* stores *store-base* d]
             (pattern! u pt fails))
           (check-pattern-names! pt)
+          ;; it's a match: the captured names stored (codegen_match_inner, at the pattern's location)
+          (binding [*pos* (or (pos-of pt) *pos*)]
+            (doseq [nm @stores] (name-op! u nm :store)))
           (when-let [g (:guard co)]
             (expr! u g) (emit! u :to-bool nil)
             (let [j (jump! u :jump-if-false)] (swap! fails conj [j (depth u)])))
