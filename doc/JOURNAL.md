@@ -2790,7 +2790,6 @@ Recorded in doc/rust/FRONTEND-SURVEY.md, "As built: RF11 (first slice)".
   unchanged (Rust 75.0 / 75.0 / 95.8 / 80.0): an own case still consumes rustc's records, so the eval stage stays 0.5 (RES54 (a);
   `independence.edn` counts the own cases). Proposed: RFP42-RFP47.
 
-
 ## 2026-11-09 x86-64 assembly as a crop: the survey (branch `asm-amd64-survey`, from `mac/next` `7da5badcf`)
 
 At the user's request, a survey and plan for x86-64 (amd64) assembly as an intermediate crop, the way LLVM IR became one
@@ -2812,3 +2811,26 @@ testsuite as data only; QEMU, unicorn and Bochs not used. Plan AX1-AX10, 53 to 9
 32 files and MC/AsmParser read, printed `:full` byte for byte, read again equal). Proposals AXS1-AXS16 and the shared AS1-AS8, none
 decided. Alternatives considered: one `:asm` crop for both architectures (AXS1 (b)); per-syntax forms (AXS2 (b)); Go's optab or
 XED as the encoder's table (AXS4 (b), (c)); binary translation to Go as AOT (AXS7 (b), kept as optional AX11).
+
+## 2026-11-09 AArch64 assembly as a crop: the survey (branch `asm-arm64-survey`, from `mac/next` 7da5badcf)
+
+At the user's request, a survey only (doc/asm/ARM64-SURVEY.md; nothing built, nothing fetched, no lock), modelled on
+doc/llvm/LLVM-CROP-SURVEY.md, written beside the amd64 survey (doc/asm/AMD64-SURVEY.md, branch `asm-amd64-survey`) with a
+section "Shared with amd64" (SH1-SH10) for the merged plan. Sources read: llvm-project 23.1.5's tarball (the main checkout's
+`.tmp/llvm/llvm-project-23.1.5.src.tar.xz`: `llvm/test/MC/AArch64` 2,360 files, 417 base with 12,298 stated encodings,
+`MC/Disassembler/AArch64` 96 files, `lib/Target/AArch64`'s sizes), gcc 15.2.0's (`gcc/testsuite/gcc.target/aarch64` 8,545 files,
+854 run tests, 4,488 check-function-bodies; `libgcc/config/aarch64`), musl 1.2.6's aarch64 sources (15 `.s`), TamaGo's go tree
+go1.27.1 (`src/cmd/asm/internal/asm/testdata/arm64*.s`, `src/cmd/internal/obj/arm64/` with Go 1.27's instgen-generated
+`inst_gen.go`, `src/cmd/vendor/golang.org/x/arch/arm64/arm64asm` at x/arch v0.27.1-0.20260521044007-9c1a596a2c97), `tamago/cmd/`'s
+forms of cmd/asm and obj/arm64, the box's arm64 `.s`, `bin/box-arm64-vm`, `go/arbace/crt`. Probes (seconds, light): LLVM 23.1.5's
+llvm-mc, llvm-objdump and FileCheck are installed (no arm64 linker on the host); TamaGo's go cross-builds a linux/arm64 static
+program in 4.3 s (353 MB) and qemu-aarch64 11.1.2 runs it (681 system calls of 21 kinds, threads and signals at once);
+`go tool objdump -gnu` pairs Plan 9 and GNU spellings. Recommended: GNU syntax first, Go's own assembler reused for Plan 9,
+Apple's spelling and Mach-O objects last; read and `:full` print in Arbace; the encoder/decoder from Go's and arm64asm's tables
+offline (Arm's machine-readable specification only after its licence is read, a fetch); AOT the assembler and a static linker
+to ELF; eval a64i, an A64 user-level interpreter in Go forms over a frame shared with amd64 and Linux's calls by name on
+crt; the tests' own verdicts (stated encodings, rejection messages, Go's `.out`) as the judge; native arm64 runs only from the
+Mac VM, QEMU's as labelled emulations at the oracle tier. Plan AR0-AR10, 40 to 66 days, AR1 (read and `:full` print over the
+417 base MC files, musl's and the box's) 3 to 5; decisions ARS1-ARS16. Alternatives considered: one shared `:asm` row (SH1 (b)),
+an A64-to-Go translator as AOT (kept as optional AR13), LLVM's `.td` via llvm-tblgen as the tables (a host record), qemu-aarch64
+as the main oracle (an emulation, not hardware).
