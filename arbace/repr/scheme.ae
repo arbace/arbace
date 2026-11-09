@@ -136,8 +136,29 @@
                ["#i1/3" 0x3FD5555555555555]])
         [["#x-1.0" :none nil] ["#e1.2" :exact 6/5] ["#e1e3" :exact 1000] ["1/2+3/4i" :exact [:complex 1/2 3/4]]]))
 
+;; SCS14 (b): the report's correctly rounded cosine and sine (arbace.repr.scheme.report's cr-cos, cr-sin, SPEC 12 :polar) against
+;; references computed apart: bc -l at 80 digits beyond the point (and beyond the integer part's), its decimal rounded to the nearest
+;; binary64 by Python's float (correctly rounded), by hand 2026-11-08 (doc/scheme/SCHEME-SURVEY.md, "As built: SCS12-SCS14"); for
+;; a tiny x, sin x is x and cos x 1.0 (|x| < 2^-27: x - x^3/6 is within a quarter of x's last place). [x cos-bits sin-bits]; the
+;; first five are angles where jrt's StrictMath (fdlibm) or Chez 10.3.0's libm give a value one ulp off.
+(def trig-tests
+  [[2.0 -4622203781984849403 4606365442650518598] [2.2 -4619896070484742800 4605457507751221000]
+   [-0.7908624416397423 4604509374036105264 -4618793058624092873] [5.881877911969697 4606466806576691720 -4622663592961503661]
+   [0.6641849478023065 4605267663510420025 4603727415238504877] [355.0 -4616189618058850740 -4683853768973017629]
+   [1.5707963267948966 4364452196894661639 4607182418800017408] [3.141592653589793 -4616189618054758400 4368955796522032135]
+   [6.283185307179586 4607182418800017408 -4849912640705373177] [1e22 4602887919370356980 -4617520874450586729]
+   [1e300 -4620014199950687039 -4617829991960222843] [1.7976931348623157e308 -4616189728938546315 4572370766535020183]
+   [9.313225746154785e-10 4607182418800017408 4472074429978902528]
+   [-1e-310 4607182418800017408 (Double/doubleToRawLongBits -1e-310)] [5e-324 4607182418800017408 1]
+   [-0.0 4607182418800017408 (unchecked-long 0x8000000000000000)]])
+
 (defn- report-test-code []
-  (let [bad (for [[text kind want] report-tests
+  (let [tbad (for [[x c s] trig-tests
+                   :let [gc (Double/doubleToRawLongBits (rep/cr-cos x)) gs (Double/doubleToRawLongBits (rep/cr-sin x))]
+                   :when (not (and (== gc (long c)) (== gs (long s))))]
+               [x [c s] [gc gs]])
+        _ (doseq [b tbad] (println "FAILING report-test (cr-cos, cr-sin)" (pr-str b)))
+        bad (for [[text kind want] report-tests
                   :let [v (try (rep/number-value (vec (.toArray (.codePoints ^String text)))) (catch Throwable e e))
                         ok (case kind
                              :none (nil? v)
@@ -146,11 +167,53 @@
                   :when (not ok)]
               [text want v])]
     (doseq [b bad] (println "FAILING report-test" (pr-str b)))
-    (if (seq bad) 1 (do (println (str "report-test: ok (" (count report-tests) " numbers of known binary64 or exact value, by the report's conversion)")) 0))))
+    (if (or (seq bad) (seq tbad)) 1
+        (do (println (str "report-test: ok (" (count report-tests) " numbers of known binary64 or exact value, by the report's conversion; "
+                          (count trig-tests) " correctly rounded cosines and sines)")) 0))))
+
+;; SCS10 (b): si's stated choices (doc/scheme/SPEC.md 12) on cases of their own (test/scheme/choices.edn): the report with the choices
+;; reads each as repr/scheme's reader does, and a case where Chez's or si's runtime's recorded reading differs names its class
+(defn- choices-test-code []
+  (let [{:keys [classes cases]} (read-string (slurp (str (root) "/test/scheme/choices.edn")))
+        reading (fn [r] (if (:error r) :error (mapv :form (:data r))))
+        same (fn [a b] (if (or (= a :error) (= b :error)) (= a b) (and (= (count a) (count b)) (every? true? (map fm/tree= a b)))))
+        ;; SCS14 (b): a class with :last-bit true holds readings that differ from the report's only by one unit in the last
+        ;; place of a binary64 (a complex number's parts each equal or adjacent), which the test verifies
+        nums (fn [f] (cond (and (seq? f) (= 'scm/complex (first f))) (vec (rest f)) (instance? Double f) [f] :else nil))
+        adjacent? (fn [^double a ^double b] (or (== a b) (== a (Math/nextUp b)) (== a (Math/nextDown b))))
+        last-bit? (fn [a b] (and (vector? a) (vector? b) (= (count a) (count b))
+                                 (every? true? (map (fn [x y] (let [p (nums x) q (nums y)]
+                                                                (or (= x y) (and p q (= (count p) (count q)) (every? true? (map adjacent? p q))))))
+                                                    a b))))
+        bad (for [{:keys [text rule chez si class reader-class] :as c} cases
+                  :let [r (rep/read-all text) mine (rd/read-all text {})
+                        d (when-not (:undecided r) (ck/report-diff mine r))
+                        ours (reading mine) judged (reading r)
+                        differs (or (and (some? chez) (not (same judged chez))) (and (some? si) (not (same judged si))))
+                        off-bit (fn [k x] (and (:last-bit (classes k)) (not (last-bit? x judged))))
+                        why (cond (:undecided r) (str "undecided: " (:undecided r))
+                                  (not (contains? (:choices r) rule)) (str "the choice " rule " not applied: " (pr-str (:choices r)))
+                                  (and d (not (contains? classes reader-class))) (str "the report with the choices differs from the reader in no class: " (pr-str d))
+                                  (and reader-class (not d)) (str "a stale reader class " reader-class ": the reader and the report agree")
+                                  (and d (off-bit reader-class ours)) (str "the reader differs from the report beyond the last bit: " (pr-str ours))
+                                  (and differs (not (contains? classes class))) (str "differs from Chez or si's runtime (" (pr-str chez) ", " (pr-str si) ") in no class")
+                                  (and class (not differs)) (str "a stale class " class ": the readings agree")
+                                  (and class (some #(and (some? %) (not (same % judged)) (off-bit class %)) [chez si]))
+                                  (str "Chez or si's runtime differs from the report beyond the last bit")
+                                  :else nil)]
+                  :when why]
+              [text why])]
+    (doseq [[t why] bad] (println "FAILING choices-test" (pr-str t) why))
+    (if (seq bad) 1
+        (do (println (str "choices-test: ok (" (count cases) " cases of si's stated choices, doc/scheme/SPEC.md 12: the report with the choices reads each as the reader does; "
+                          (count (filter :class cases)) " differ from Chez or si's runtime, classed: " (str/join ", " (map name (sort (distinct (keep :class cases)))))
+                          "; " (count (filter :reader-class cases)) " differ between the reader and the report, classed: "
+                          (str/join ", " (map name (sort (distinct (keep :reader-class cases))))) ")"))
+            0))))
 
 (defn- cmd-report-check
-  "report-check DIR (the oracle tier's, by hand): every probe of DIR/probes read by the report's grammar, by Arbace's reader and
-  against Chez's dump (DIR/dump-probes.edn): where the report decides, the three must agree (data, offsets, an error's
+  "report-check DIR (the oracle tier's, by hand): every probe of DIR/probes and (SCS7 (c)) every corpus file of DIR/dump-ID.edn read
+  by the report's grammar, by Arbace's reader and against Chez's dump (DIR/dump-probes.edn, DIR/dump-ID.edn): where the report decides, the three must agree (data, offsets, an error's
   presence), but where test/scheme/report-chez.edn names the probe (there the report and Chez must differ, or the rule is
   stale). 0 when they do."
   [[dir]]
@@ -159,17 +222,74 @@
         same (fn [a b] (and (= (count (:data a)) (count (:data b)))
                             (every? true? (map (fn [x y] (and (fm/tree= (:form x) (:form y)) (= (:off x) (:off y)))) (:data a) (:data b)))
                             (= (boolean (:error a)) (boolean (:error b)))))
+        bare (fn [text] (:undecided (binding [rep/*choices* false] (rep/read-all text))))
         rows (for [f (sort (.list (java.io.File. (str dir "/probes"))))
                    :let [p (str dir "/probes/" f) text (slurp p) r (rep/read-all text) rule (ck/report-exception rules (subs f 0 (- (count f) 3)))]]
                (cond (:undecided r) [:undecided f (:undecided r)]
+                     (and (:choices r) (not (same r (dumps f)))) [:choice-differs-from-chez f (:choices r)]
+                     (and (:choices r) (not (same r (rd/read-all text {})))) [:report-differs-from-arbace f (:choices r)]
+                     (:choices r) [:agree-by-choice f (:choices r)]
                      rule (if (same r (dumps f)) [:stale-rule f (:id rule)] [:chez-past-report f (:id rule)])
                      (not (same r (dumps f))) [:report-differs-from-chez f]
                      (not (same r (rd/read-all text {}))) [:report-differs-from-arbace f]
                      :else [:agree f]))
-        fr (frequencies (map first rows))]
-    (doseq [r rows :when (#{:stale-rule :report-differs-from-chez :report-differs-from-arbace} (first r))] (println (pr-str r)))
-    (println (str "report-check: " (count rows) " probes: " (pr-str (into (sorted-map) fr))))
-    (if (some #{:stale-rule :report-differs-from-chez :report-differs-from-arbace} (map first rows)) 1 0)))
+        ;; SCS7 (c): the corpora's files the same way, from DIR/dump-ID.edn (the files the dumps name, keyed as the check keys them)
+        corpora (remove #(false? (:check %)) (:corpora (read-string (slurp (str (root) "/test/scheme/corpora.edn")))))
+        keyed (into {} (mapcat (fn [c] (map (fn [[k p]] [p k]) (ck/corpus-files (root) c))) corpora))
+        frows (for [c corpora
+                    :let [f (str dir "/dump-" (name (:id c)) ".edn")]
+                    :when (.exists (java.io.File. f))
+                    d (ck/read-dumps f)
+                    :let [k (keyed (:file d) (:file d)) text (slurp (:file d)) r (rep/read-all text) rule (ck/report-exception rules k)]]
+                (cond (:undecided r) [:undecided k (:undecided r)]
+                      (and (:choices r) (not (same r d))) [:choice-differs-from-chez k (:choices r)]
+                      (and (:choices r) (not (same r (rd/read-all text {})))) [:report-differs-from-arbace k (:choices r)]
+                      (:choices r) [:agree-by-choice k (:choices r)]
+                      rule (if (same r d) [:stale-rule k (:id rule)] [:chez-past-report k (:id rule)])
+                      (not (same r d)) [:report-differs-from-chez k]
+                      (not (same r (rd/read-all text {}))) [:report-differs-from-arbace k]
+                      :else [:agree k]))
+        ;; SCS10 (b): a choice where si (Arbace's reader) and Chez differ is a difference to class (test/scheme/report-chez.edn's way):
+        ;; none at SCS10, so it fails
+        bad #{:stale-rule :report-differs-from-chez :report-differs-from-arbace :choice-differs-from-chez}
+        undecided-bare (count (filter #(bare (slurp (str dir "/probes/" %))) (.list (java.io.File. (str dir "/probes")))))]
+    (doseq [r (concat rows frows) :when (bad (first r))] (println (pr-str r)))
+    (doseq [r (concat rows frows) :when (= :undecided (first r))] (println (pr-str r)))
+    (println (str "report-check: by the choice (SCS10 (b), doc/scheme/SPEC.md 12): "
+                  (pr-str (into (sorted-map) (frequencies (mapcat #(nth % 2) (filter #(= :agree-by-choice (first %)) (concat rows frows))))))
+                  "; the report alone leaves " undecided-bare " probes undecided"))
+    (println (str "report-check: " (count rows) " probes: " (pr-str (into (sorted-map) (frequencies (map first rows))))))
+    (println (str "report-check: " (count frows) " corpus files: " (pr-str (into (sorted-map) (frequencies (map first frows))))))
+    (if (some bad (map first (concat rows frows))) 1 0)))
+
+(defn- cmd-report-scans
+  "report-scans DIR [OUT] (by hand, the oracle tier's comparison; SCS7 (c)'s measurement, since SCS9 (c) a check): the three reading
+  scans of DIR (scan-whitespace.edn, scan-ident-initial.edn, scan-ident-subsequent.edn, Chez's recorded dumps) against the report's
+  grammar reading the same texts over every scalar value, its categories the Unicode Character Database 16.0.0's (arbace.repr.scheme.category);
+  the differing code points counted by category and (Java's) block; OUT, the result as data (test/scheme/report-scans.edn). 1 when the
+  report's classes and its reading of a text disagree (an unconfirmed scalar value) or when the report differs from Chez's dump (SCS9 (c):
+  Chez 10.3.0's Unicode data are 16.0.0's, so they must agree; a Chez of another Unicode version differs here), else 0."
+  [[dir out]]
+  (let [rows (vec (for [k ["whitespace" "ident-initial" "ident-subsequent"]
+                        :let [f (str dir "/scan-" k ".edn")]
+                        :when (.exists (java.io.File. f))]
+                    (ck/report-scan-diffs (read-string (slurp f)))))]
+    (doseq [r rows]
+      (println (str "scan " (name (:scan r)) ": Chez " (:chez r) ", the report " (:report r) " code points; only the report's "
+                    (:n-only-report r) " (" (:ranges-only-report r) " ranges), only Chez's " (:n-only-chez r) " (" (:ranges-only-chez r) " ranges); the classes confirmed by the report's reading of "
+                    (:confirmed-by-reading r) " texts" (when (seq (:unconfirmed r)) (str ", UNCONFIRMED " (pr-str (:unconfirmed r))))))
+      (doseq [[[c b] n] (:only-report r)] (println (str "  only-report " c " " b " " n)))
+      (doseq [[[c b] n] (:only-chez r)] (println (str "  only-chez " c " " b " " n))))
+    (when out
+      (spit out (str ";; SCS9 (c) (doc/scheme/SCHEME-SURVEY.md, \"As built: SCS9 (c), SCS10 (b), SCS11 (b)\"): the three reading scans by the\n"
+                     ";; report's grammar over the Unicode Character Database 16.0.0 (arbace.repr.scheme.category) against Chez Scheme 10.3.0's\n"
+                     ";; reader (its recorded dumps), the differences by category and block; written by bin/repr-scheme report-scans --record.\n"
+                     ";; SCS7 (c)'s measurement over Java's tables (Unicode 17.0) found 4,790 and 4,803 more code points, 17.0's new ones;\n"
+                     ";; over 16.0.0 there are none. The check judges these scans by the report's classes (no dump read). Read with the Clojure reader.\n"
+                     (pr-str rows) "\n")))
+    (println (str "report-scans: " (count (filter #(and (zero? (:n-only-report %)) (zero? (:n-only-chez %))) rows)) " of " (count rows)
+                  " reading scans equal to Chez's (the report's classes over UCD 16.0.0)"))
+    (if (some #(or (seq (:unconfirmed %)) (pos? (:n-only-report %)) (pos? (:n-only-chez %))) rows) 1 0)))
 
 (defn roundtrip-found [{:keys [subject reference]}]
   (if-let [r (roundtrip-file subject (or reference subject))] [(pr-str r)] []))
@@ -250,16 +370,26 @@
         diffs (filter (comp some? val) results)
         ;; a partial run (--partial): a known entry is judged only when its key was read
         {:keys [unlisted gone]} (ck/judge results (if partial (select-keys known (keys results)) known))
-        scan-bad (filter #(or (pos? (:n-only-mine %)) (pos? (:n-only-chez %))) scans)]
+        scan-bad (filter #(or (pos? (:n-only-mine %)) (pos? (:n-only-judge %))) scans)]
     (println (str "files and probes: " n ", equal to their judge (Chez's dump; a probe the report decides, the report's grammar): " (- n (count diffs))
                   ", differing: " (count diffs) " (listed " (- (count diffs) (count unlisted)) ")"))
     (let [fr (frequencies (for [[k j] judges :when (.startsWith ^String k "probe/")] j))]
-      (println (str "probes (SCS5 (b)): " (get fr :report 0) " judged by the report's grammar (arbace.repr.scheme.report, no dump read), "
-                    (get fr :dump 0) " by Chez's dump (the report leaves them to the implementation, or test/scheme/report-chez.edn names them)")))
+      (println (str "probes (SCS5 (b), SCS10 (b)): " (+ (get fr :report 0) (get fr :choice 0)) " judged by the report's grammar (arbace.repr.scheme.report, no dump read; "
+                    (get fr :choice 0) " of them by si's stated choices, doc/scheme/SPEC.md 12), "
+                    (get fr :dump 0) " by Chez's dump (test/scheme/report-chez.edn names them; since SCS14 (b) no polar number)")))
+    (let [fr (frequencies (for [[k j] judges :when (not (.startsWith ^String k "probe/"))] j))]
+      (println (str "files (SCS7 (c), SCS10 (b)): " (+ (get fr :report 0) (get fr :choice 0)) " judged by the report's grammar (no dump read; "
+                    (get fr :choice 0) " of them by si's stated choices), "
+                    (get fr :dump 0) " by Chez's dump (a datum the report and the choices leave open, or test/scheme/report-chez.edn names them)")))
     (let [r (ck/symbol-rule)]
       (println (str "symbol rule: " (:names r) " names, " (:bare r) " bare, bad " (pr-str (:bad r))))
       (when (seq (:bad r)) (reset! rule-bad true)))
-    (doseq [s scans] (println (str "scan " (name (:scan s)) ": " (:ranges s) " ranges, only mine " (:n-only-mine s) ", only Chez " (:n-only-chez s))))
+    (when (seq scans)
+      (let [fr (frequencies (map :judge scans))]
+        (println (str "scans (SCS9 (c)): " (get fr :report 0) " judged by the report's classes over the Unicode Character Database 16.0.0 (no dump read), "
+                      (get fr :dump 0) " by Chez's dump (the printing scans: write's choices are the implementation's)"))))
+    (doseq [s scans] (println (str "scan " (name (:scan s)) ": " (:ranges s) " ranges, only mine " (:n-only-mine s) ", only "
+                                   (if (= :report (:judge s)) "the report's " "Chez's ") (:n-only-judge s))))
     (doseq [[k d] unlisted] (println (str "UNLISTED " (ck/diff-line k d))))
     (doseq [[k kn] gone] (println (str "GONE " k " " (pr-str kn))))
     (doseq [s scan-bad] (println (str "SCAN " (pr-str s))))
@@ -271,14 +401,14 @@
                      "repr/scheme's check against Chez 10.3.0 (bin/repr-scheme check --record): each corpus file and probe\n;; read and written as Chez reads and writes it, each scan's ranges"
                      (concat (for [[k d] results] (if d [k :known (ck/diff-line k d)] [k :pass ""]))
                              (for [s scans] [(str "scan/" (name (:scan s)))
-                                             (if (or (pos? (:n-only-mine s)) (pos? (:n-only-chez s))) :fail :pass)
-                                             (if (or (pos? (:n-only-mine s)) (pos? (:n-only-chez s))) (pr-str (dissoc s :scan)) "")])))
+                                             (if (or (pos? (:n-only-mine s)) (pos? (:n-only-judge s))) :fail :pass)
+                                             (if (or (pos? (:n-only-mine s)) (pos? (:n-only-judge s))) (pr-str (dissoc s :scan)) "")])))
       (spit (str (root) "/test/scheme/check-known.edn")
             (str ";; Known differences between repr/scheme and Chez (bin/repr-scheme check --record): key -> {:kind ...}\n"
                  (pr-str (into (sorted-map) (map (fn [[k d]] [k (select-keys d [:kind :chez :mine])]) diffs)))
                  "\n")))
     (max (if (or (and (not record) (or (seq unlisted) (seq gone))) (seq scan-bad) @rule-bad) 1 0) (ctl/run :read read-found)
-         (ctl/run :read-report report-found) (report-test-code))))
+         (ctl/run :read-report report-found) (report-test-code) (choices-test-code))))
 
 (defn- spec-blocks
   "The fenced blocks of a markdown file: [[lang text] ...]."
@@ -323,6 +453,7 @@
                  "prepare" (cmd-prepare more)
                  "controls" (cmd-controls more)
                  "report-check" (cmd-report-check more)
+                 "report-scans" (cmd-report-scans more)
                  "check-dumps" (cmd-check-dumps more)
                  "spec-check" (cmd-spec-check more)
                  (do (println "usage: -m arbace.repr.scheme read|print|prepare|check-dumps ...") 2))]

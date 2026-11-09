@@ -13,6 +13,12 @@
 #                                         tree hash
 #   bin/repr-scheme pins check            (GT9, SC234; bin/gate --pins) the pins hold, no fetch: every corpus file and license at its SHA-256, whimsical's
 #                                         tree, Chez's version and boot files, Chibi's version (test/scheme/corpora.edn's :reference)
+#   bin/repr-scheme ucd fetch|gen|check   SCS9 (c): the Unicode Character Database 16.0.0's files of test/scheme/ucd.edn fetched by pin
+#                                         into .tmp/scheme/ucd-16.0.0 (the main checkout's; fetch: by hand, the network), the files
+#                                         generated from them (arbace.repr.scheme.ucd: arbace/repr/scheme/category.ae, the report's
+#                                         categories; arbace/repr/scheme/unicode.ae and go/arbace/scm/unicode.ae, the readers' tables)
+#                                         written (gen) or regenerated and compared byte for byte (check), UnicodeData.txt checked
+#                                         against DerivedGeneralCategory.txt code point for code point
 #   bin/repr-scheme corpus list           the corpora, their files and bytes
 #   bin/repr-scheme dump [--mode M] FILE...   Chez's reading of the files (tools/schemedump/dump.ss)
 #   bin/repr-scheme read [--full] [-o DIR] FILE...   the files as Scheme forms, one datum a line; --full: with the
@@ -29,9 +35,13 @@
 #   bin/repr-scheme controls [read|roundtrip]   SCS1 (GTS81 (a)): the negative controls of check and roundtrip
 #                                         (test/scheme/controls.edn, also run by both); judge: a text against another's stand-in dump
 #   bin/repr-scheme report-check          SCS5 (b), by hand (the oracle tier's comparison, from the recorded dumps, no Chez run): every
-#                                         probe read by the report's grammar (arbace.repr.scheme.report), by Arbace's reader and as
+#                                         probe and (SCS7 (c)) every corpus file read by the report's grammar (arbace.repr.scheme.report), by Arbace's reader and as
 #                                         Chez's dump has it; the three agree wherever the report decides, but on the probes
 #                                         test/scheme/report-chez.edn names (there the report and Chez must differ)
+#   bin/repr-scheme report-scans [--record]   SCS7 (c), by hand (a measurement, from the recorded dumps, no Chez run): the three
+#                                         reading scans (whitespace, ident-initial, ident-subsequent) by the report's grammar over Java's
+#                                         Unicode tables against Chez's, the differences by general category and block; --record writes
+#                                         them to test/scheme/report-scans.edn
 #   bin/repr-scheme spec-check            doc/scheme/SPEC.md's examples: each Scheme block read by the reader equal to the forms block after it
 #   bin/repr-scheme c2j-check             repr/scheme's and si's tools' namespaces (arbace/repr/scheme, arbace/scheme) compiled by c2j
 #                                         alone on the tools' host, as the re-seed after arbace-reaps-4-crops-v1 compiles them with the
@@ -60,6 +70,9 @@ corpora=${ARBACE_SCHEME_CORPORA:-$root/.tmp/scheme/corpora}
 # at every fetch, so sharing them is safe; no fetch per worktree or clean run), as go-whim's checkout below
 case $root in */.tmp/worktrees/*|*/.tmp/gate-clean/*) [ -n "${ARBACE_SCHEME_CORPORA:-}" ] || corpora=${root%%/.tmp/*}/.tmp/scheme/corpora ;; esac
 export ARBACE_SCHEME_CORPORA=$corpora
+# SCS9 (c): the pinned Unicode Character Database (test/scheme/ucd.edn), the main checkout's as the corpora are
+ucd=${ARBACE_SCHEME_UCD:-$root/.tmp/scheme/ucd-16.0.0}
+case $root in */.tmp/worktrees/*|*/.tmp/gate-clean/*) [ -n "${ARBACE_SCHEME_UCD:-}" ] || ucd=${root%%/.tmp/*}/.tmp/scheme/ucd-16.0.0 ;; esac
 gowhim=${GOWHIM:-$(cd "$root/.." && pwd)/go-whim}
 case $root in */.tmp/worktrees/*) [ -n "${GOWHIM:-}" ] || gowhim=$(cd "${root%%/.tmp/worktrees/*}/.." && pwd)/go-whim ;; esac
 export GOWHIM=$gowhim
@@ -108,6 +121,43 @@ corpus_fetch() {
   done
 }
 
+# ucd_pins: "PREFIX<TAB>url-prefix<TAB>license-url<TAB>license-path<TAB>license-sha256", then "path<TAB>sha256" (test/scheme/ucd.edn)
+ucd_pins() {
+  arbace_tool -e "(let [u (read-string (slurp \"$root/test/scheme/ucd.edn\"))]
+    (println (str \"PREFIX\t\" (:url-prefix u) \"\t\" (get-in u [:license-file :url]) \"\t\" (get-in u [:license-file :path]) \"\t\" (get-in u [:license-file :sha256])))
+    (doseq [[p h] (sort (:files u))] (println (str p \"\t\" h))))"
+}
+# ucd_fetch (SCS9 (c), by hand: the network): the pinned files into $ucd, each checked against its SHA-256 (a present one that holds
+# its pin is not fetched again)
+ucd_fetch() {
+  local prefix lurl lpath lsha p h
+  { read -r _ prefix lurl lpath lsha
+    while IFS=$'\t' read -r p h; do fetch_one "$prefix/$p" "$ucd/$p" "$h"; done
+    fetch_one "$lurl" "$ucd/$lpath" "$lsha"
+  } < "$TMPDIR/repr-scheme-ucd.pins"
+  echo "ucd: fetched and checked into $ucd"
+}
+# ucd_sums: the pinned files as sha256sum -c lines
+ucd_sums() {
+  local prefix lurl lpath lsha p h
+  { read -r _ prefix lurl lpath lsha
+    while IFS=$'\t' read -r p h; do printf '%s  %s\n' "$h" "$ucd/$p"; done
+    printf '%s  %s\n' "$lsha" "$ucd/$lpath"
+  } < "$TMPDIR/repr-scheme-ucd.pins"
+}
+ucd_cmd() {
+  ucd_pins > "$TMPDIR/repr-scheme-ucd.pins"
+  case ${1:-} in
+    fetch) ucd_fetch ;;
+    gen|check)
+      ucd_sums > "$TMPDIR/repr-scheme-ucd.sums"
+      sha256sum -c --quiet "$TMPDIR/repr-scheme-ucd.sums" > "$TMPDIR/repr-scheme-ucd.sumcheck" 2>&1 || { sed 's/^/  PIN /' "$TMPDIR/repr-scheme-ucd.sumcheck"; echo "ucd: the pinned files are missing or changed (bin/repr-scheme ucd fetch)" >&2; return 1; }
+      if [ "$1" = gen ]; then arbace_tool -m arbace.repr.scheme.ucd gen "$ucd" "$root"
+      else local o=$root/.tmp/repr-scheme/ucd; rm -rf "$o"; mkdir -p "$o"; arbace_tool -m arbace.repr.scheme.ucd check "$ucd" "$root" "$o"; fi ;;
+    *) echo "usage: bin/repr-scheme ucd fetch|gen|check" >&2; return 2 ;;
+  esac
+}
+
 # pins_check (GT9, SC234; the gate's `bin/gate --pins`): the pins hold, no fetch, no network: every corpus file and license at its SHA-256 under
 # the corpora's directory (a missing or changed one is named), whimsical's tree at go-whim's checkout, Chez's version and boot files, Chibi's version
 pins_check() {
@@ -120,6 +170,7 @@ pins_check() {
       if [ -n "$lic" ] && [ -n "$licsha" ]; then printf '%s  %s\n' "$licsha" "$corpora/$id.license" >> "$list"; n=$((n + 1)); fi
     } < <(corpus_pins "$id")
   done
+  ucd_pins > "$TMPDIR/repr-scheme-ucd.pins"; ucd_sums >> "$list"; n=$((n + $(ucd_sums | wc -l)))
   if [ -s "$list" ]; then
     out=$(sha256sum -c --quiet "$list" 2>&1 | head -20 || true)
     [ -z "$out" ] || { echo "$out" | sed 's/^/  PIN /'; bad=1; }
@@ -135,7 +186,7 @@ pins_check() {
     have=$(sha256sum < "$bd/$f" 2>/dev/null | cut -c1-64)
     [ "$have" = "$want" ] || { echo "  PIN Chez's $bd/$f is $have, the pin is $want"; bad=1; }
   done < <(arbace_tool -e "(doseq [[k v] (:boot (:reference (read-string (slurp \"$root/test/scheme/corpora.edn\"))))] (println k v))")
-  if [ $bad = 0 ]; then echo "scheme pins: $n corpus files and licenses at their SHA-256, whimsical's tree, Chez $(pin_ref :chez) and its boot files, Chibi $(pin_ref :chibi)"; else echo "scheme pins: NOT held" >&2; return 1; fi
+  if [ $bad = 0 ]; then echo "scheme pins: $n corpus files, Unicode 16.0.0's database files and licenses at their SHA-256, whimsical's tree, Chez $(pin_ref :chez) and its boot files, Chibi $(pin_ref :chibi)"; else echo "scheme pins: NOT held" >&2; return 1; fi
 }
 
 dump_cmd() { "$CHEZ" --script "$root/tools/schemedump/dump.ss" "$@"; }
@@ -199,7 +250,7 @@ record_unit() {
 }
 
 check() {
-  local out=$root/.tmp/repr-scheme/check n quick=0 live=0 rec=0 ver=0 sample= args=() bad=0
+  local out=$root/.tmp/repr-scheme/check n k quick=0 live=0 rec=0 ver=0 sample= args=() bad=0
   while [ $# -gt 0 ]; do
     case $1 in --quick) quick=1; shift ;; --corpus) sel+=("$2"); shift 2 ;; --live) live=1; shift ;;
       --record-dumps) rec=1; shift ;; --verify-dumps) ver=1; shift ;; --sample) sample=$2; shift 2 ;; *) args+=("$1"); shift ;; esac
@@ -212,6 +263,10 @@ check() {
   if [ $ver = 1 ]; then verify_dumps "$out" "$sample"; return $?; fi
   for n in $(unit_names "$out"); do
     if [ $live = 1 ]; then live_unit "$n" "$out" "$out/$n"
+    # SCS9 (c): the three reading scans are judged by the report's classes over UCD 16.0.0, no dump read (the record keeps them for
+    # the oracle tier's verify and report-scans)
+    elif case $n in scan-whitespace.edn|scan-ident-initial.edn|scan-ident-subsequent.edn) true ;; *) false ;; esac; then
+      k=${n#scan-}; echo "{:scan :${k%.edn} :judge :report}" > "$out/$n"
     elif ! record_unit "$n" "$out" "$out/$n"; then bad=1; rm -f "$out/$n"; fi
   done
   [ $bad = 0 ] || { echo "bin/repr-scheme check: dumps missing from the record (--live runs Chez)"; return 1; }
@@ -293,6 +348,7 @@ case $cmd in
       list) arbace_tool -e "(doseq [c (:corpora (read-string (slurp \"$root/test/scheme/corpora.edn\")))] (println (name (:id c)) (:count c) \"files\" (:bytes c) \"bytes\" (:license c)))" ;;
       *) echo "usage: bin/repr-scheme corpus fetch|list" >&2; exit 2 ;;
     esac ;;
+  ucd) ucd_cmd "$@" ;;
   pins) case ${1:-} in check) pins_check ;; *) echo "usage: bin/repr-scheme pins check" >&2; exit 2 ;; esac ;;
   dump) dump_cmd "$@" ;;
   spec-check) arbace_tool -m arbace.repr.scheme spec-check "$root/doc/scheme/SPEC.md" ;;
@@ -301,7 +357,10 @@ case $cmd in
   c2j-check) exec "$root/bin/lib/crops/c2j-check" scheme ;;
   roundtrip) roundtrip "$@" ;;
   controls) arbace_tool -m arbace.repr.scheme controls "$@" ;;
-  report-check) sel=(probes); check > "$TMPDIR/repr-scheme-report-check.log" 2>&1 || { cat "$TMPDIR/repr-scheme-report-check.log"; exit 1; }
+  report-scans) out=$root/.tmp/repr-scheme/report-scans; rm -rf "$out"; mkdir -p "$out"
+                for k in whitespace ident-initial ident-subsequent; do record_unit "scan-$k.edn" "$out" "$out/scan-$k.edn" || exit 1; done
+                arbace_tool -m arbace.repr.scheme report-scans "$out" ${1:+"$root/test/scheme/report-scans.edn"} ;;
+  report-check) quick=1; check --quick > "$TMPDIR/repr-scheme-report-check.log" 2>&1 || { cat "$TMPDIR/repr-scheme-report-check.log"; exit 1; }
                 arbace_tool -m arbace.repr.scheme report-check "$root/.tmp/repr-scheme/check" ;;
   *) sed -n '2,/^set -e/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
 esac

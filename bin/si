@@ -173,23 +173,44 @@ run_key() {
 }
 stamp() { printf 'key=%s timeout=%s%s\n' "$run_key_v" "$2" "${3:+ count=$3}" > "$1.stamp"; }
 
+# program_list: programs.edn's programs, one a line: ID, c (a corpus file) or r (the checkout's), FILE, the input's path (:input
+# the corpus's, :own-input the checkout's, SCS8 (b); -: none, as read's IFS of tabs collapses an empty column), 1 when :libraries-first (SCS8 (b)) else 0,
+# 1 when :aot-only (SCS11 (b): run compiled alone, and by Chez for its reference; si interpreted would take hours) else 0
+program_list() {
+  arbace_tool -e '(doseq [p (:programs (read-string (slurp "'"$root"'/test/scheme/si/programs.edn")))] (println (str (:id p) "\t" (if (:corpus p) "c" "r") "\t" (:file p) "\t" (cond (:own-input p) (str "'"$root"'/" (:own-input p)) (:input p) (str "@corpora/" (:input p)) :else "-") "\t" (if (:libraries-first p) 1 0) "\t" (if (:aot-only p) 1 0))))'
+}
+# program_input INPUT: the run's stdin (program_list's input column): the corpus's or the checkout's file, else DIR/empty.in
+program_input() { case $1 in ""|-) echo "$dir/empty.in" ;; @corpora/*) echo "$corpora/${1#@corpora/}" ;; *) echo "$1" ;; esac; }
+# split_program ID FILE: SCS8 (b), Larceny's layout: FILE's leading library forms onto a library path of the run's own,
+# .tmp/si/split/ID/lib, the program after them .tmp/si/split/ID/NAME (arbace.scheme.check split-libraries); prints the program's path
+split_program() {
+  local s=$root/.tmp/si/split/${1//\//__}
+  rm -rf "$s"; mkdir -p "$s"
+  arbace_tool -m arbace.scheme.check split-libraries "$2" "$s" >&2 || return 1
+  echo "$s/$(basename "$2")"
+}
+
 # check_runs IMPL DIR [IDS...]: each program of programs.edn run by IMPL (si or chez) in its file's directory,
-# its stdin the :input file, into DIR/ID.out, .err, .rc
+# its stdin the :input file, into DIR/ID.out, .err, .rc; a :libraries-first program split first (split_program), run in its
+# split's directory with the split's libraries first on the library path
 check_runs() {
   local impl=$1 dir=$2; shift 2
   local corpora=${ARBACE_SCHEME_CORPORA:-$root/.tmp/scheme/corpora}
   mkdir -p "$dir" "$root/.tmp/si/suite-lib"; ln -sfn "$corpora/racket-r6rs" "$root/.tmp/si/suite-lib/tests"
-  arbace_tool -e '(doseq [p (:programs (read-string (slurp "'"$root"'/test/scheme/si/programs.edn")))] (println (str (:id p) "\t" (if (:corpus p) "c" "r") "\t" (:file p) "\t" (or (:input p) ""))))' > "$dir/list.tsv"
-  local id kind file input base d f
-  while IFS=$'\t' read -r id kind file input; do
+  program_list > "$dir/list.tsv"
+  local id kind file input split aotonly base d f
+  while IFS=$'\t' read -r id kind file input split aotonly; do
     if [ $# -gt 0 ]; then case " $* " in *" $id "*) ;; *) continue ;; esac; fi
+    [ "$impl" = si ] && [ "$aotonly" = 1 ] && continue
     base=$root; [ "$kind" = c ] && base=$corpora
     f=$base/$file; d=$(dirname "$f")
-    local o=$dir/${id//\//__} in=$dir/empty.in
-    : > "$in"; [ -n "$input" ] && in=$corpora/$input
+    local o=$dir/${id//\//__} in libs=() cl=
+    : > "$dir/empty.in"; in=$(program_input "$input")
+    if [ "$split" = 1 ]; then f=$(split_program "$id" "$f") || { echo 1 > "$o.rc"; : > "$o.out"; echo "split-libraries failed" > "$o.err"; continue; }
+      d=$(dirname "$f"); libs=(--lib "$d/lib"); cl=$d/lib:; fi
     case $impl in
-      chez) (cd "$d" && timeout "${SI_TIMEOUT:-600}" "$CHEZ" --libdirs "$root/.tmp/si/suite-lib" --program "$(basename "$f")" < "$in" > "$o.out" 2> "$o.err"; echo $? > "$o.rc") || true ;;
-      si) (cd "$d" && timeout "${SI_TIMEOUT:-600}" env GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-4} "$si_light" --pp "$light_dir/psyntax.pp.ss" --lib "$root/.tmp/si/suite-lib" --lib "$root/scheme/lib" "$(basename "$f")" < "$in" > "$o.out" 2> "$o.err"; echo $? > "$o.rc") || true ;;
+      chez) (cd "$d" && timeout "${SI_TIMEOUT:-600}" "$CHEZ" --libdirs "$cl$root/.tmp/si/suite-lib" --program "$(basename "$f")" < "$in" > "$o.out" 2> "$o.err"; echo $? > "$o.rc") || true ;;
+      si) (cd "$d" && timeout "${SI_TIMEOUT:-600}" env GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-4} "$si_light" --pp "$light_dir/psyntax.pp.ss" ${libs[@]+"${libs[@]}"} --lib "$root/.tmp/si/suite-lib" --lib "$root/scheme/lib" "$(basename "$f")" < "$in" > "$o.out" 2> "$o.err"; echo $? > "$o.rc") || true ;;
     esac
     echo "$impl $id: status $(cat "$o.rc")" >&2
   done < "$dir/list.tsv"
@@ -268,17 +289,19 @@ check_runs_aot() {
   local corpora=${ARBACE_SCHEME_CORPORA:-$root/.tmp/scheme/corpora}
   mkdir -p "$dir" "$root/.tmp/si/suite-lib"; ln -sfn "$corpora/racket-r6rs" "$root/.tmp/si/suite-lib/tests"
   aot_module
-  arbace_tool -e '(doseq [p (:programs (read-string (slurp "'"$root"'/test/scheme/si/programs.edn")))] (println (str (:id p) "\t" (if (:corpus p) "c" "r") "\t" (:file p) "\t" (or (:input p) ""))))' > "$dir/list.tsv"
-  local id kind file input base d f n=0
-  while IFS=$'\t' read -r id kind file input; do
+  program_list > "$dir/list.tsv"
+  local id kind file input split aotonly base d f n=0
+  while IFS=$'\t' read -r id kind file input split aotonly; do
     if [ $# -gt 0 ]; then case " $* " in *" $id "*) ;; *) continue ;; esac; fi
     base=$root; [ "$kind" = c ] && base=$corpora
     f=$base/$file; d=$(dirname "$f")
-    local o=$dir/${id//\//__} in=$dir/empty.in pkg=p_$(echo "$id" | tr -c 'A-Za-z0-9\n' '_')
-    : > "$in"; [ -n "$input" ] && in=$corpora/$input
+    local o=$dir/${id//\//__} in pkg=p_$(echo "$id" | tr -c 'A-Za-z0-9\n' '_') libs=()
+    : > "$dir/empty.in"; in=$(program_input "$input")
     rm -f "$o.out" "$o.err" "$o.rc" "$o.refused" "$o.time" "$o.compile-error"
+    if [ "$split" = 1 ]; then f=$(split_program "$id" "$f") || { echo "split-libraries failed" > "$o.refused"; continue; }
+      d=$(dirname "$f"); libs=("$d/lib"); fi
     local t0 t1 t2; t0=$(date +%s.%N)
-    aot_compile "$pkg" "$d" "$(basename "$f")" "$aot_dir/bin/$pkg" "$root/.tmp/si/suite-lib" "$root/scheme/lib"
+    aot_compile "$pkg" "$d" "$(basename "$f")" "$aot_dir/bin/$pkg" ${libs[@]+"${libs[@]}"} "$root/.tmp/si/suite-lib" "$root/scheme/lib"
     t1=$(date +%s.%N)
     if [ -f "$aot_dir/bin/$pkg.refused" ]; then
       mv "$aot_dir/bin/$pkg.refused" "$o.refused"; echo "aot $id: refused: $(cat "$o.refused")" >&2
@@ -627,7 +650,8 @@ case $cmd in
   divergences) arbace_tool -m arbace.scheme.check divergences "$@" ;;
   own) # SCS1: the last check's runs (.tmp/si/runs; --aot: .tmp/si/aot/runs) judged by their own verdicts and by Chez's recorded runs
     d=$root/.tmp/si/runs; [ "${1:-}" != --aot ] || { d=$root/.tmp/si/aot/runs; shift; }
-    arbace_tool -m arbace.scheme.check own "$d" "$@" ;;
+    a=(); [ "$d" = "$root/.tmp/si/runs" ] || a=(--aot)
+    arbace_tool -m arbace.scheme.check own "$d" ${a[@]+"${a[@]}"} "$@" ;;
   expand|fixpoint) arbace_tool -m arbace.scheme.expand "$cmd" "$@" ;;
   *) sed -n '2,/^set -e/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
 esac
