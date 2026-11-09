@@ -4590,3 +4590,48 @@ Light: samples on the VM, nothing recorded committed as the record; the main hos
   `gate.crops check`: 0 problems on main with this branch merged and the fragment spliced. crops-score's Python maturity:
   83.3% on main, 91.7% with this branch and the fragment spliced (the gate item 0.5 to 1), 100% once the night's records
   check the eval and AOT cells; the controls item counts 7 of 7 families with the rules matched in their files.
+
+## As built: 240, the judge stage without python3 (2026-11-09, the Mac VM, queue 240)
+
+Light: samples on the VM; the records it made were scratch (a detached worktree), none committed; the main host records them.
+
+- **Records mode is the default on Python's line.** 213's `tools/pydump/records.bash` chose records only where main's shared
+  tooling `test/oracle-records/oracle.bash` is; Python's branch lacked it, so every read check (lex-check, parse-check, the round
+  trips, spec-check, samples, the front end) ran python3 live at check time, and 234's judge 0.962 rested on a mode the branch
+  did not run. The file is vendored byte for byte from main (2a72c94aa): a missing record is UNRECORDED and fails; day work
+  sets `REPR_PYTHON_ORACLE=live`; the main host records with `bin/repr-python records record` (which now makes
+  `.tmp/repr-python` in a fresh clone).
+- **The round trips' originals read natively** in records mode (`REPR_PYTHON_RT_ORIG=native`, the default there; 234's probe):
+  level 1 the native reader's forms of the original against its forms of the print, level 4 (`--text`: `parsecheck dump --full`)
+  the print's bytes against the original's: each file's own verdict, no record consumed; a file the reader refuses (a charset
+  the runtime lacks) left out and printed. Levels 2, 3 and 5 and the helper's originals stay live's and the oracle tier's.
+- **syntax-errors by each case's own verdict.** `tools/pydump/syntax_cases.py --expect` writes what each case's test in the pinned
+  Lib/test states of its error: a test_syntax doctest's exception line (format_exception_only's, ELLIPSIS and
+  IGNORE_EXCEPTION_DETAIL honoured), `_check_error`'s pattern searched in `str(err)` with its subclass and positions,
+  test_exceptions' `check` positions, `assertAllRaise(SyntaxError, ...)`'s pattern: 746 of the 874 cases. `parsecheck check
+  --expect` judges a case the native reader rejects by them alone (`:own-pass`, `:own-fail`; the record not read); a case it
+  accepts (a compiler's error, which ast.parse accepts too) or with no expectation by its record. `--judge record` (the oracle
+  tier's, verify mode's default) and `--agreement` (both, the disagreements printed). 621 cases judged so: 592 pass, 29 classed
+  in parse-check-known.edn (`:own-traceback` 24: the doctest expects traceback's keyword suggestion, "invalid syntax. Did you mean
+  'for'?", added by format_exception_only, not the parser; `:own-mode` 5: test_fstring evaluates its cases, mode eval, where the
+  parser's error differs from exec's); the agreement with the record: every own pass is equal to the record, the 29 are the only
+  disagreements. The control (controls-read.edn's syntax-errors pair) is now judged by the reference's own verdict, and fails as
+  it must.
+- **The cases made by pyi**: in records mode `syntax_cases.py` runs on pyi (`bin/pyi script SCRIPT ...`: a script of tools/pyi or
+  tools/pydump compiled by pyi's AOT, kept by the runtime's key, the generator's and the script's digests; 2.5 minutes cold, 0.5 s
+  warm), its cases and expectations byte for byte python3's (874 files, 746 lines); the pack's inputs are the verify's
+  (`REPR_PYTHON_SYNTAX_CASES=pack` the old route).
+- **bin/pyi check's universe by regrtest's findtests on pyi**: `tools/pyi/libtest_all.py find` (findtests and SPLITTESTDIRS copied
+  from the pinned Lib/test/libregrtest/findtests.py) over the tarball's Lib/test on the compiled runner; the families' modules by
+  corpora.edn's paths, lib-test-all's the others less the owners'; the references' `:module` lines (CPython's recorded
+  `--list-tests`) no longer read: 529 modules, none more or less than they name. The inventory of methods stays the references'
+  ids (a record of which tests exist: it can add a non-pass, "not run", never a pass).
+- **Proved with python3 removed** (python3, python, python3.14 stubs exiting 99 first on PATH, their log empty), records made
+  beforehand in a scratch checkout: `make python-essential` (every control fails as it must; check --aot 20 pass, 1 classed);
+  lex-check and parse-check (both modes) on samples, lex-errors, syntax-errors; the round trips on samples and a 57-file sample;
+  `bin/pyi check --fresh test_bool test_getopt` (41 pass, the three controls fail as they must).
+- **The judge stage**: 0 before (main's fact at the ref, and true on the base: python3 live); after 0.968, `:cases {:self 51967
+  :recorded 3568}` (+621 syntax-errors cases by their own verdict); print 0.5 to 1; Python's independence 79.4% by main's
+  `bin/crops-score --crop python` in a scratch overlay (main's stale facts at the ref 80.0% with judge 0; 234's patch 69.2%).
+  Left at 0.5: read's other 3,115 files against CPython's recorded tokens and trees (DECISION 3 (a)), the 151 programs' 453 cases,
+  eval and AOT's five recorded tables (DECISION 2 (a)).
