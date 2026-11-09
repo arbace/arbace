@@ -931,3 +931,37 @@ Haskell's eval and AOT cases count 0.5 because every hsi run executes the boot l
   in the pack (the `-O2` importers name workers and floated bindings the `-O0` module lacks); the `-O0` set (needs `-O0`
   interfaces: P3); replacing every own binding by default (three programs fail: the equal ones only, GHC's `-O0` code by
   construction).
+
+## 2026-11-09 HF10 (second slice): the first slice's classes, behaviour first; lib-stg's list to level 30
+
+Branch `hs-hf10` (from its first slice bd09e1192), an agent in the light tier. doc/haskell/FRONTEND-SURVEY.md, "As built: HF10
+(second slice)", has the rules, the measures and HF10-P6 to P10. GHC 9.14.1's sources (the pinned tarball's `compiler/`) are the
+spec; GHC itself only as the oracle (the first slice's `-O0` reference, and small probes by hand, `ghc -O0 -ddump-ds -ddump-simpl
+-ddump-verbose-inlinings` on scratch modules, to find which rule makes a shape: the default methods' compulsory unfoldings, the
+eta expansion of stable unfoldings, IP's evidence kept to CorePrep, all three found so).
+
+- **Behaviour first** (HF10-P4 (a)): the binders the desugarer and the Simplifier make now carry types (GHC's exprType and
+  dataConInstArgTys at the binding sites, `core.ae`'s `infer-binder-types!`, before and after the Simplifier), which fixed the
+  representations class (148 → 20 first differences on the 55 modules) and with it Base's `bindIO` that broke programs under
+  `LIB_STG_REPLACE=all`; Unarise's voidArgId; a `State#` returned by name as `(##)`; an unlifted top-level thunk (prepareRhs at the
+  top level); the constructor wrappers (`$WSrcLoc`) unboxing the pack's unpacked fields, found by `synthetic/runtime-exceptions`
+  failing on `not an integer: I#` in an intermediate state; primitive literal patterns, which had become wildcards.
+- **Then by count**: deriving's untagged tag code as GHC's Generate.hs writes it (dataToTag#, ==#, /=#, tagToEnum#), the
+  default methods' compulsory unfoldings (makeCorePair), dfuns CONLIKE, stable unfoldings eta-expanded, combineIdenticalAlts,
+  litEq, the unboxed tuples' known constructors, join points (recursive ones let-no-escape, nullary ones' representations,
+  is_more_evald), HasCallStack's push onto the given (EvCsPushCall), the superclass evidence bound once (dsEvBinds), non-exported
+  top-level binders internal (Tidy), RULES' free variables kept alive, data constructors saturated as arguments (maybeSaturate),
+  top-level string literals, PolyAlt for unlifted pointers, NOINLINE and OPAQUE pragmas, EmptyCase.
+- **Measure**: the first slice's 55 modules 595 → 857 of 1,149 bindings equal to GHC's `-O0` STG, none lost; the list extended
+  past level 12 to level 30 (`test/haskell/lib-stg.txt`, 112 modules, all made STG but the first slice's two foreign-import stops):
+  2,473 of 3,310. Level 31's `GHC.Internal.IO.Encoding.UTF8` takes the Simplifier minutes an iteration (`utf8_decode`), past the
+  900 s limit: the list stops before it (40 modules of levels 31 to 45 measured: 594 of 1,063).
+- **Checks**: typecheck-check 24 of 24 (control 13); @@JRUNS@@
+- **Left**: constraint tuples' variable superclasses, unboxed sums in Unarise, the bignum backend of lib-check's dumps, the `-O2`
+  ABI against the `-O0` reference (SrcLoc), the Simplifier's case-of-case into join points where GHC keeps the case, foreign
+  imports. Proposed: HF10-P6 (the dumps with `-DBIGNUM_NATIVE`), P7 (the pack's data until P3), P8 (unboxed sums), P9
+  (constraint tuples, recommended later), P10 (UTF8's Simplifier time, then levels 31 to 60).
+- Alternatives considered: the judge against the reference's `-O0` data while the runs use the pack's (rejected for now, P7: an
+  equal binding would not be the one that runs); renaming the constraint tuples' constructors at the output only (tried: it
+  collided with the class's own worker, reverted); `ip` inlined by an unfolding (tried: GHC's `-O0` keeps `ip d` and `C:IP` to
+  CorePrep, the dump shows it, reverted to that).
