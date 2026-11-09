@@ -147,17 +147,52 @@
   "JCS334 (a): every line as MOD/PKG (an unprefixed line java.base's), the library and framework corpora's."
   (delay (set (for [l @repl-export-lines] (if (str/includes? l "/") l (str "java.base/" l))))))
 
+;; JCS336 (a): a plain module name in @modules (`java.logging`: the test needs the module, no export) is satisfied in
+;; the library and framework corpora when the world has the module: some of its API is in the Go build's world, one
+;; of the packages its module-info.java exports unqualified (or, for a module exporting none, one of the classes it
+;; provides as a service: jdk.zipfs, jdk.charsets) having forms in jdk/forms. java.base always. A test touching a part
+;; of the module the world lacks fails at its load, in that part's class
+
+(def ^:private jdk-src
+  "jdk26u's src/ (the platform's sources, beside the tests' test/), set by scan from its JDKTEST."
+  (atom nil))
+
+(defn- forms-of-package? [^String pkg]
+  (let [d (io/file "jdk/forms" (str/replace pkg "." "/"))]
+    (boolean (and (.isDirectory d) (some #(str/ends-with? (.getName ^File %) ".ae") (.listFiles d))))))
+
+(defn module-api
+  "The API of module M in jdk26u's sources SRC: [unqualified exported packages, provided service classes], or nil
+  when SRC has no module-info.java of M."
+  [src ^String m]
+  (let [f (io/file src m "share/classes/module-info.java")]
+    (when (.isFile f)
+      (let [t (-> (slurp f) (str/replace #"(?s)/\*.*?\*/" " ") (str/replace #"//[^\n]*" " "))]
+        [(vec (map second (re-seq #"\bexports\s+([\w.]+)\s*;" t)))
+         (vec (for [[_ cs] (re-seq #"\bprovides\s+[\w.$]+\s+with\s+([^;]+);" t) c (str/split (str/trim cs) #"[\s,]+") :when (seq c)] c))]))))
+
+(def ^:private module-in-world*
+  (memoize (fn [src m]
+             (or (= m "java.base")
+                 (boolean (when-let [[pkgs provs] (and src (module-api src m))]
+                            (or (some forms-of-package? pkgs)
+                                (some #(.isFile (io/file "jdk/forms" (str (str/replace % "." "/") ".ae"))) provs))))))))
+
+(defn module-in-world? [m] (module-in-world* @jdk-src m))
+
 (defn- module-exports
   "The package exports of a description's @modules entries, [[MOD PKG] ...], when every entry is java.base/PKG of the
   REPL's list (JCS136 (a)), else nil (an entry of another module or package: the test stays :run-modules). WIDE (the
-  library and framework corpora's, JCS334 (a)): also MOD/PKG of the file's prefixed lines."
+  library and framework corpora's, JCS334 (a), JCS336 (a)): also MOD/PKG of the file's prefixed lines, and a plain
+  module name the world has (module-in-world?, no option)."
   [desc wide]
   (let [es (vec (for [[t v] desc :when (= t "modules") m (str/split (str/trim v) #"\s+") :when (seq m)] m))
         one (fn [m]
               (if-let [[_ mod pk] (re-matches #"([\w.]+)/([\w.]+)" m)]
                 (when (or (and (= mod "java.base") (@repl-exports pk)) (and wide (@repl-exports-wide m)))
                   [[mod pk]])
-                nil))
+                (when (and wide (re-matches #"[\w.]+" m) (module-in-world? m))
+                  [])))
         rs (map one es)]
     (when (and (seq es) (every? some? rs))
       (vec (distinct (apply concat rs))))))
@@ -177,7 +212,7 @@
 
 (defn- categorize1
   "A description's category (the survey's §3.1, the first that fits) and its actions. WIDE (the library and
-  framework corpora's :base, JCS334 (a), JCS335 (a)): module-exports' wide entries, and -D options beside the dropped
+  framework corpora's :base, JCS334 (a)-JCS336 (a)): module-exports' wide entries, and -D options beside the dropped
   JIT ones (not :run-vmopts)."
   [desc wide]
   (let [has (fn [t] (some #(= t (first %)) desc))
@@ -410,6 +445,7 @@
     (filter #(<= (:night % 0) n) corpora)))
 
 (defn scan [jdktest corpora-file ref work]
+  (reset! jdk-src (.getCanonicalFile (io/file jdktest "../src")))
   (let [corpora (active-corpora (read-edn corpora-file))
         rts (roots corpora jdktest)
         old (into {} (for [t (ref-tests ref)] [(:test t) (:id t)]))
