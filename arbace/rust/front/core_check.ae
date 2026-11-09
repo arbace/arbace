@@ -347,16 +347,38 @@
                  (assoc-in acc [:adts p] (cond-> {:kind (:kind d) :generics (generics-sty g) :parent-count 0 :has-self false :variants variants :native true}
                                            (= "Enum" (:kind d)) (assoc :repr nil :discrs (vec (range (count variants))))))
                  acc))
+             ;; a trait the interface lacks (`clone::uninit::CopySpec`): its items, and its functions' signatures
+             (and (= "Trait" (:kind d)) (not (get (:traits si) p)))
+             (let [g (collect/generics-of (:id d))
+                   kids (filter #(and (= (:id d) (:parent %)) (#{"AssocFn" "AssocTy"} (:kind %)) ) (collect/defs))
+                   kids (concat kids (filter #(and (= (:id d) (:parent %)) (str/starts-with? (str (:kind %)) "AssocConst")) (collect/defs)))
+                   items (vec (for [k kids] (let [n (second (:data k)) kp (str p "::" n)]
+                                              (if (= "AssocTy" (:kind k)) [n "AssocTy" kp []] [n (:kind k) kp]))))
+                   fns (into {} (for [k kids :when (= "AssocFn" (:kind k))
+                                      :let [kg (collect/generics-of (:id k)) sig (collect/fn-sig (:id k))
+                                            ins (mapv #(ty->sty % path-of) (:inputs sig)) out (ty->sty (:output sig) path-of)]
+                                      :when (and (every? some? ins) out)]
+                                  [(str p "::" (second (:data k)))
+                                   {:generics (generics-sty kg) :parent-count (count (:params g)) :has-self false
+                                    :predicates (vec (keep #(clause->sty % path-of) (collect/explicit-clauses (:id k))))
+                                    :inputs ins :output out :variadic false :safety (if (= :unsafe (:safety sig)) "Unsafe" "Safe")
+                                    :abi "\"Rust\"" :const false :promotable false :nounwind false :native true}]))]
+               (-> acc
+                   (assoc-in [:traits p] {:generics (generics-sty g) :parent-count 0 :has-self true
+                                          :predicates (vec (keep #(clause->sty % path-of) (collect/explicit-clauses (:id d))))
+                                          :items items :native true})
+                   (update :fns merge fns)))
              :else acc)
            (catch Throwable _ acc))))
-     {:fns {} :adts {}} (collect/defs))))
+     {:fns {} :adts {} :traits {}} (collect/defs))))
 
 (defn with-native-iface
   "std's interface with core's native additions (a path the interface has keeps the interface's)"
   [si native]
   (-> si
       (update :fns #(merge (:fns native) %))
-      (update :adts #(merge (:adts native) %))))
+      (update :adts #(merge (:adts native) %))
+      (update :traits #(merge (:traits native) %))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; One module file through the pipeline
@@ -501,8 +523,8 @@
                   (doseq [f iface-files :let [m (get mods (.getCanonicalPath (File. ^String f)))] :when m]
                     (let [{:keys [native]} (binding [*collect-only* true] (run-module m table names std-file std (with-native-iface si @native-all) lib-dir identity))]
                       (when native (swap! native-all #(merge-with merge % native)))))
-                  (println (format "core-check: the interface pass over %d files: %d functions, %d ADTs (%d s)" (count iface-files)
-                                   (count (:fns @native-all)) (count (:adts @native-all)) (quot (- (System/nanoTime) t0) 1000000000)))))]
+                  (println (format "core-check: the interface pass over %d files: %d functions, %d ADTs, %d traits (%d s)" (count iface-files)
+                                   (count (:fns @native-all)) (count (:adts @native-all)) (count (:traits @native-all)) (quot (- (System/nanoTime) t0) 1000000000)))))]
         (doseq [f files :let [m (get mods (.getCanonicalPath (File. ^String f)))
                               si (with-native-iface si @native-all)]]
           (let [dump (System/getenv "CORE_DUMP")
