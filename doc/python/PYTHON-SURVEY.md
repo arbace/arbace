@@ -4744,3 +4744,51 @@ while a collection runs `__del__`.
   (recommended): exact answers need a registry of every container (a Go finalizer or an address list per list, dict, instance,
   tuple ...), a cost on every allocation, for test_gc's ten classed counts and test_get_objects*.
 - (b) a registry of every heap container made since `gc.get_objects` was first called: exact from then on, 0 before.
+
+## As built: 241, the cycle collector over pyi's objects (2026-11-09, the Mac VM, queue 241)
+
+What "Design: 241" proposed, built in `go/arbace/py/finalize.go` and its call sites (attr.go, builtins_posix_ext.go,
+builtins_ssl_conn.go, builtins_faulthandler.go, go/arbace/pysqlite3/cursor.go); light samples only.
+
+- **`cyTraverse`** (tp_traverse's role) replaces 222's `cySlots`: instances (a handed-out `__dict__` a node of its own, the
+  builtin base's value), lists, tuples, dicts, sets, functions (globals, defaults, kwdefaults, closure cells, annotate,
+  type params, dict, doc, module), cells, bound methods, built-in methods' `Self`, class and static methods, properties,
+  exceptions (args, context, cause, traceback, notes, dict), tracebacks, escaped frames not running and not a generator's,
+  generators (222's rule), modules not in `sys.modules`, the SSL context's callbacks and its Python object, the SSL socket's
+  context, socket and hostname. Typed pointer slots are hidden by address beside the Object slots. The leaves of a
+  collection (`cyLeaves`): every interpreter's builtins, `sys.modules` and its modules' dicts, the frames on a thread's stack.
+- **The weak registries** (`cyHideRegistries`): id()'s `identities` and `funcAnnotations` entries of the probed nodes taken out
+  for the probe, the reachable ones put back, a tracked trash node's identity into its record. Classes are not nodes yet:
+  their registries (classInfos, subclasses, getsets, newWrappers, the inline caches' types, abc's) hold them.
+- **The inline caches** (`attrSites`, `sweepAttrSites`): every code's attribute caches registered at their allocation; each
+  gc.collect() whose type epoch moved clears the stale entries (WeakMethod's method deleted from its class).
+- **`tp_finalize` for built-in types** (`TrackFinalizer`, `workFin`, the record's `fin`): the scandir iterator (ResourceWarning
+  "unclosed scandir iterator %R", then closed), a sqlite3 cursor (its statement reset, cursor_dealloc's), pysqlite3 a package
+  of its own; DELETE_FAST's moment now checks a tracked object of any package.
+- **_ssl's owner** a weak reference as CPython's (gh-146080: a dead owner fails the SNI callback with SSL_AD_INTERNAL_ERROR,
+  the callback not called). **faulthandler** prints "  Garbage-collecting" for the current thread while gc.collect() runs.
+- **`PYI_GC_DEBUG=1`**: each probe prints the probed nodes held from outside that no other probed node holds.
+- The printed `.ae` diffs are large because mode `:full` keeps every form's line position: a line inserted shifts the
+  `:go/pos` of every later form; the printed Go's diff is small (attr.go 26 lines, faulthandler 3, posix_ext 14,
+  ssl_conn 50, finalize 422, pysqlite3/cursor 15).
+
+**The classes** (each test's own verdict; the ids run alone by pyi's AOT, `.tmp/q241/t/runids.sh`): `:finalization-collect`
+31 to 8 (15 passed at the base already, the class's names stale since 222 and 224; 6 served by 241: test_os's scandir,
+test_sqlite3's two cursors, test_weakref's two WeakMethod, test_threading_local's pure-Python local, these six and test_ssl's three moved to `:finalization-goi`: they pass compiled; test_faulthandler's
+test_gc to `:finalization-goi`, test_threading's test_main_thread_during_shutdown to `:gc-collector`); left: test_module's
+class cycle, `_thread._local` (localStates), the six pure-Python Task and Future tests. `:ssl-finalization` 12 to 8 (test_ssl's
+three SNI tests served, test_dealloc_warn passed at the base); left: asyncio's TLS tests.
+
+**Found, not fixed**: in the six PyTask_PyFuture tests the future is held after the collection though no cycle holds it:
+`PYI_GC_DEBUG=1` shows no probed root, so its holder is Go-side and acyclic (a shield of two `_PyFuture`s whose loop's
+`create_future` makes `_PyFuture`s reproduces it, `.tmp/q241/p/m241.py` T.test_a; the same with the C Future passes).
+
+**The samples** (the VM): `.tmp/q241/t/check241.sh ROOT` (10 cases against CPython, its control flipped): PASS on the head,
+FAIL at 4c6ebe2c6 (9 cases differ). `bin/pyi lib-test --aot test_finalization test_gc test_weakref`: 216 methods, 146 pass,
+70 classed, 0 failing. `make python-essential`: check --aot 21 programs, 20 pass, 1 classed, 0 failing, every control fails as
+it must. `bin/pyi runtime vet`: ok. Compiled, the children of test_faulthandler's test_gc and test_threading's shutdown test
+print CPython's lines (the Garbage-collecting frame; the first "GC: True True True").
+On goi (`bin/pyi run cyc241.py`, the runtime interpreted): no crash; defaults, method, list and scandir as CPython, the rest
+still held by goi's registers (218's REQUEST), as 222 found: hence `:finalization-goi`. `bin/pyi runtime check` with
+`PYI_SMOKE_ONLY` (f-struct, g-weak, d-ssl, f-intbytes, c-locale, g-builtin-module, e-gen, g-gc, f-del): the packages printed
+and read again the same, the tables and runtime-ops equal, 8 programs equal, the REPL session equal, the controls fail as they must.
