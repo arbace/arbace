@@ -5002,3 +5002,78 @@ two tests passing at the base already (stale since 228). `:tracing` and `:fstrin
 **Left**: f-string constants of an implicit concatenation whose middle parts carry no position keep the concatenation's
 location (the tokens would tell); 3.14's NOT_TAKEN handler is a model of CPython's stale slot (exception tables differ in
 67 of the 868); a coroutine's origin (`:code-positions`).
+
+## As built: 249, buffer exports, sockets' and multiprocessing's rest (2026-11-09, the Mac VM, queue 249)
+
+The deferred classes `:buffer-exports` (3), `:socket-gaps` (9) and `:multiprocessing` (2), ported from CPython 3.14.10's
+Objects/memoryobject.c, Modules/arraymodule.c, Objects/bytearrayobject.c and Modules/socketmodule.c (the pinned
+tarball); light samples only, each test by its own verdict.
+
+- **The export count** (`go/arbace/py/buffer_export.go`): `BufferExports`, any exporter's `ob_exports` (`Exports()`,
+  `Refuse`, `Acquire`/`Release` for a native holding a buffer over a call; reusable by another package's exporter, queue
+  244's ctypes objects); memoryview's managed buffer (`_PyManagedBufferObject`): one export shared by a view's slices,
+  casts, `memoryview(view)` and `toreadonly`, given back when the last of them is released, by `release()`, the
+  context manager's exit or the view's death (241's `TrackFinalizer`, memory_dealloc's release). pyi has no reference
+  counts, so a view dropped unreleased still counts until Go's collector finds it dead: a resize that finds a count
+  first asks the collector (a collection, then the finalizers' drain as soon as one is queued; about 2 ms with pyi's
+  heap at start) and refuses only for a view still held; a count found held is confirmed until it moves, so a view held
+  over many refusals costs one collection. The collections have their own budget (a tenth of the elapsed wall time,
+  and 200 ms, the moment at del's rule of 222); past it the resize is allowed (memoryview reads its exporter's bytes at
+  each access, so a view never reads past them).
+- **array** counts (arraymodule.c's refusals, issue #4509's early checks before anything moves, `frombytes` holding its
+  argument's buffer, so `a.frombytes(a)` is refused as CPython's). **bytearray** has the same hooks (`_canresize` at
+  every resize) but counts only under `PYI_BYTEARRAY_EXPORTS=1`: `_pyio`, pyi's io, makes temporary views of its own
+  bytearrays and resizes them (`FileIO.readall`'s `memoryview(result)[n:]` then `result.resize`), so counting made every
+  file read ask the collector, and under goi a view its registers still held failed an import's `get_data` with
+  BufferError (found by test_cprofile's spawn child). bytearray's own fixes stay: `b *= n` in place (it rebound `b`),
+  an extended slice assigned `b''` deleted. **PEP 688**: `__release_buffer__` when the last view of the export goes
+  (also at the views' death, "Exception ignored in __release_buffer__ of %s"); **PickleBuffer** holds its export until
+  `release()`. **memoryview**: its hash (memory_hash: the bytes' hash, the exporter hashed first with the view exported,
+  gh-142664's re-entrant release refused with "memoryview has 1 exported buffer"; pyi hashed views by identity), an
+  array's view writable (`readonly` False).
+- **_socket**: `sendmsg` takes its data and ancillary data as tuples first (`PySequence_Tuple`: a part's `__buffer__`
+  that clears the list changes nothing sent), with CPython's "must be an iterable" messages. **posix**: the functions of
+  `int fd` pass a negative descriptor to the system call (OSError EBADF; `fsync`, `fdatasync`, `fchdir`, `fpathconf` keep
+  fildes_converter's ValueError): asyncio's sendfile fallback reads `os.fstat(-1)`'s OSError as "not a regular file".
+- **multiprocessing**: a script's `__main__` has `__spec__`, `__package__` and `__cached__` None and a `SourceFileLoader`
+  (pymain_run_file's), so spawn's children find the parent's main script again (`init_main_from_path`; pyi's
+  `__spec__` named `__main__` made spawn skip it: "module '__main__' has no attribute 'worker'"); `sys.stdin.close()`
+  (the standard streams are closefd=False: flushed and marked closed). `test/python/libtest.py` runs its module only as
+  `__main__`, as `libtest_run.py` already did. The start method forkserver forks its children in its server (`os.fork`:
+  none in pyi, the user's decision of 2026-11-04); 3.14's default start method on Linux is forkserver (249's DECISION).
+
+**The classes** (each test's own verdict; the classes' ids run alone by pyi's AOT, `.tmp/q249/t/runids.sh`, base 9aab26afd
+against the head): `:buffer-exports` 3 to 0 (two already equal at the base, `test_sendmsg_reentrant_data_mutation`
+served); the class keeps its `:match` for bytearray's uncounted exports (test_memoryio's nine, test_buffer's
+`test_release_saves_reference_no_subclassing`). `:socket-gaps` 9 to 1 (test_asyncio.test_streams' seven already equal at
+the base, `test_sock_sendfile_not_regular_file` served; left `test_socket_type`, `gc.is_tracked` of a type).
+`:multiprocessing` 2 to 1 (spawn served; forkserver left).
+
+**The samples** (`bin/pyi lib-test --aot`, base against head):
+
+| module | base | head |
+|---|---|---|
+| test_array (893) | 819 equal, 74 classed (28 `:buffer-exports`) | 847 equal, 46 classed |
+| test_memoryview (171) | 89 equal, 26 classed, 56 failing | 104 equal, 20 classed, 47 failing |
+| test_buffer (95) | 5 equal, 81 classed, 9 failing | the same |
+| test_memoryio (188) | 166 equal, 16 classed, 6 failing | the same |
+| test_picklebuffer (9) | 5 equal, 3 classed, 1 failing | the same |
+| test_socket (749) | 616 equal, 129 classed, 4 failing | 617 equal, 128 classed, 4 failing |
+
+No method went from equal to not; the failing are the base's (test_memoryview's formats and shapes: memoryobject.c's
+struct formats, multi-dimensional views and `cast` are not ported, PY6's minimum still; test_socket's four as 231 found).
+`.tmp/q249/t/check249.sh ROOT` (67 lines against python3, `PYI_BYTEARRAY_EXPORTS=1`; its control a mutated reference):
+PASS on the head, FAIL at the base. On goi (`bin/pyi lib-test test_array`, the runtime interpreted): 819 equal at the base,
+847 at the head, as compiled. But a temporary view of an array that goi's registers keep is not found dead: `bytes(memoryview(a));
+a.append(x)` in a loop is refused on goi (`.tmp/q249/t/tmp249.py`, a 380 ms collection that finds the view held), allowed
+compiled (2 ms each). test_cprofile's spawn test passes, its child on goi. test_multiprocessing_spawn's 231 sample (13
+methods): 8 equal, 3 skipped (sharedctypes), 2 errors (`__objclass__`), base and head alike. `bin/pyi runtime vet` ok;
+`bin/pyi table-check --configs tamago/amd64,tamago/arm64` ok.
+
+DECISION 1 (a bytearray's exports): (a) uncounted by default, `PYI_BYTEARRAY_EXPORTS=1` counts (as built; recommended: _pyio's
+own temporary views of its bytearrays would cost a collection per file read and fail imports on goi); (b) counted by default
+once pyi's io is a native `_io` (FileIO, BufferedReader and BytesIO in Go, taking no Python views), a task of its own.
+DECISION 2 (3.14's default start method forkserver, which forks): (a) keep it, the tests classed (`:multiprocessing`), a program
+calls `set_start_method('spawn')` (as built; recommended: the user's no-fork decision); (b) a pyi overlay of
+`multiprocessing/context.py` choosing spawn when `os` has no `fork` (the first patch of the pinned Lib, an overlay
+mechanism to build).
