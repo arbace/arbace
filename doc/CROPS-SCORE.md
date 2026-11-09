@@ -93,7 +93,7 @@ the crop's checks compare with at check time. Each stage scores:
 The crop's independence is the mean of the five. The host toolchains are GT9's hosts `:gcc :cxx :llvm :ocaml :chez
 :chibi :ghc :rustc :python`, and the JDK beyond the frozen jar. Not counted: Arbace's executables, TamaGo's go (the seed's
 toolchain, pinned by `seed/goroot.sha256`, its sources as Go forms in `tamago/cmd/`), and the frozen v4 jar (pinned by
-`test/oracle/frozen-jar.sha256`).
+`test/oracle/frozen-jar.sha256`) with the JVM that runs it (Java 26 by `bin/lib/java26.bash`, the user's ruling of 2026-11-09).
 
 The facts are reviewed data in `test/crops/independence.edn`. Each stage has its tool, the host toolchains it needs, the
 reason, its evidence (file:line, REF:file:line on a held ref), the gate steps that run it, and where it was run with stubs.
@@ -362,3 +362,45 @@ first LLVM records' 282 modules and their mutants, before LLS28 (a)'s pack) stay
   2,276 cases of the 282-module lists and mutants, in no checkout, 0.5, until the night pack of LLS28 (a)); print 1; judge
   0.711 (opt's and lli's records, 0.5). LLVM IR's independence (0.706 + 1 + 1 + 1 + 0.711) / 5 = 88.3% (68.3% on `llvm-90`);
   94.2% once LLS28 (a)'s pack and regenerated mutants are the read stage's inputs.
+
+## Decided (the user, 2026-11-09): the independence audit's corrections
+
+The independence audit of 2026-11-09 (`.tmp/indep-audit/` in the main checkout: `independence.edn` corrected with
+`indep-audit` comments, its diff, crops-score before and after) found facts that overstate. The user's rulings:
+
+- **Java's platform is a toolchain's product.** javac on Arbace attributes against the platform, the class files of jdk26u's
+  build tree pinned by `jdk/javac/platform.sha256`; the interpreter, j2g and the printer take the forms made against it. Java's
+  read, eval, AOT and print score **0.5** (the header's rule, as Haskell's front end over GHC's interfaces) until the platform is
+  Arbace's own (its modules compiled from jdk26u's sources by javac on Arbace).
+- **The JVM running the frozen jar is exempt, like the jar** (`independence.edn`'s header). The JDK beyond that use counts.
+- **The audit's other corrections, applied on next.** OCaml's read, eval, print and judge: every record the cells read was made on
+  ocdump's path (`test/ocaml/read-results.edn` and `print-results.edn` of 1000db42c, "the oracle's parser, tools/ocdump",
+  `check-oi.edn`, `check-suite-oi.edn`), so read, eval and print 0.5 and the judge the case-weighted 0.563 until the night's
+  native `--record-results` and OC185's switch of the cells (then 1); OCaml 81.4 to 51.3. Haskell's 87 eval and 2 AOT programs with
+  C read the host's installed headers (`bin/hsi cnodes`, `test/haskell/eval/cnodes.ae` over `test/c/host`, no sysroot): 0, and
+  its judge counts the cells' interface level (recorded, 0.5) and layout level (own): Haskell 78.9 to 74.9. C++'s recorded
+  samples and runtime are 15, not 14. Python's facts were older than its scripts: read 1 (the native reader the default),
+  eval 0 (`bin/pyi check`'s driver is python3), AOT 1 (`check --aot` runs no python3; not recorded yet), print 1, judge 0:
+  Python 20.0 to 60.0. Java's judge: t08351, t08362 and t08376, added to `ref-jdk26.edn` after JCV1, had no line in
+  `test/java/verdicts.edn`; `bin/java-check verdicts` wrote it again (the three `:status`): 0.985.
+- **Haskell's C headers** (the user's item (4)). `bin/hsi` sources `bin/lib/repr-c/sysroot.bash` as `bin/llvmi` and `bin/cppi` do:
+  `bin/hsi cnodes` assembles C's sysroot under its musl lock and exports `ARBACE_C_HOST` (Arbace's `c/target`) and
+  `ARBACE_C_SYSROOT`, and `test/haskell/eval/cnodes.ae` falls back on `c/target`, never `test/c/host`. The programs' C reads
+  Arbace's own C headers; 6 programs with C checked by `--only` (T2594, T4038, T5402, ffi001, ffi003, ffi022: 6 of 6) and
+  hsi-essential's command (123 programs, the controls failing as they must). The 89 programs' C counts 0.5 again, as the STG pack it
+  runs over: Haskell 74.9 to 76.0 (its judge stays the audit's, with the interface and layout levels).
+- **The cross-check's blind spots closed** (`crops.score`, `test/crops/crops.edn`). Beside a step on a toolchain host, on the
+  checkout: (a) a claim above 0 is refuted when a step of the stage runs a script that reads a toolchain's files by path
+  (`:toolchain-reads`: a script or namespace of bin/ or test/ the step's command reaches by the root, to depth 4, naming
+  `test/c/host` with no C sysroot in it or the script that named it; libstdc++'s or gcc's installed include directory with no
+  C++ sysroot); (b) a claim above 0.5 is refuted when a sentence of a cell's record's header names a helper's path (`tools/ocdump`,
+  `tools/hsdump`, ...: `:helper-records`) other than as a comparison or a pin; (c) a claim above 0 that no step of the tree runs
+  (no `:steps`, or none outside the oracle tier) is printed "unverified" (its score kept, not a failure: Python's read, AOT and
+  print until its fragment's steps are planned). The hosts `:jdk` and `:frozen` are toolchain hosts now, with the exempt uses as
+  data (`:host-uses`): `:frozen` (the jar), `:jdk` where it is `bin/lib/java26.bash`'s `java -version` alone (suite-go,
+  suite-aot-essential, suite-aot, gate-tests) or the JVM of a step that runs the frozen jar (but javac's, repr/java's and Java's
+  checks). Each refutes what it should: with `bin/hsi` and `cnodes.ae` as they were, (a) refutes Haskell's five stages (the
+  closure follows a script's every verb, so the read and print stages too: an over-approximation, harmless once the file is
+  fixed); with OCaml's read claimed 1, (b) refutes it on `read-results.edn`'s "the oracle's parser, tools/ocdump"; a Java stage
+  naming javac-classes is refuted on `:jdk`. On the corrected facts none is refuted. Facts that had no `:steps` and whose steps
+  exist were given them (Clojure's read and print, Go's read and print, C's and C++'s print, Scheme's read, Rust's AOT).
